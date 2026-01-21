@@ -10,6 +10,7 @@ const (
 	RequestTypeKeyEvent    RequestType = "key_event"
 	RequestTypeCaretUpdate RequestType = "caret_update"
 	RequestTypeFocusLost   RequestType = "focus_lost"
+	RequestTypeToggleMode  RequestType = "toggle_mode"
 )
 
 // Request from C++ TSF Bridge
@@ -37,10 +38,11 @@ type CaretData struct {
 type ResponseType string
 
 const (
-	ResponseTypeInsertText       ResponseType = "insert_text"
+	ResponseTypeInsertText        ResponseType = "insert_text"
 	ResponseTypeUpdateComposition ResponseType = "update_composition"
-	ResponseTypeClearComposition ResponseType = "clear_composition"
-	ResponseTypeAck              ResponseType = "ack"
+	ResponseTypeClearComposition  ResponseType = "clear_composition"
+	ResponseTypeAck               ResponseType = "ack"
+	ResponseTypeModeChanged       ResponseType = "mode_changed"
 )
 
 // Response to C++ TSF Bridge
@@ -59,4 +61,9 @@ type InsertTextData struct {
 type CompositionData struct {
 	Text     string `json:"text"`
 	CaretPos int    `json:"caret_pos"`
+}
+
+// ModeChangedData for mode toggle response
+type ModeChangedData struct {
+	ChineseMode bool `json:"chinese_mode"`
 }

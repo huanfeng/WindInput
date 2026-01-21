@@ -6,6 +6,7 @@
 // Forward declarations
 class CKeyEventSink;
 class CIPCClient;
+class CLangBarItemButton;
 
 class CTextService : public ITfTextInputProcessor,
                      public ITfThreadMgrEventSink
@@ -46,6 +47,11 @@ public:
     BOOL GetCaretPosition(LONG* px, LONG* py, LONG* pHeight);
     void SendCaretPositionUpdate();
 
+    // Input mode control
+    void ToggleInputMode();
+    void SetInputMode(BOOL bChineseMode);  // Set mode from service response (no IPC)
+    BOOL IsChineseMode() { return _bChineseMode; }
+
 private:
     LONG _refCount;
     ITfThreadMgr* _pThreadMgr;
@@ -55,6 +61,10 @@ private:
     // Components
     CKeyEventSink* _pKeyEventSink;
     CIPCClient* _pIPCClient;
+    CLangBarItemButton* _pLangBarItemButton;
+
+    // Input mode state
+    BOOL _bChineseMode;
 
     BOOL _InitThreadMgrEventSink();
     void _UninitThreadMgrEventSink();
@@ -64,4 +74,7 @@ private:
 
     BOOL _InitIPCClient();
     void _UninitIPCClient();
+
+    BOOL _InitLangBarButton();
+    void _UninitLangBarButton();
 };

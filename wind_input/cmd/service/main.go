@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/config"
 	"github.com/huanfeng/wind_input/internal/coordinator"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
@@ -107,10 +108,37 @@ func main() {
 	// Set DPI awareness BEFORE any UI operations
 	setDPIAwareness()
 
-	// Parse command line arguments
-	dictPath := flag.String("dict", "dict/pinyin/base.txt", "Dictionary file path")
-	logLevel := flag.String("log", "info", "Log level (debug, info, warn, error)")
+	// Parse command line arguments (these override config file settings)
+	dictPath := flag.String("dict", "", "Dictionary file path (overrides config)")
+	logLevel := flag.String("log", "", "Log level: debug, info, warn, error (overrides config)")
+	saveDefaultConfig := flag.Bool("save-config", false, "Save default configuration and exit")
 	flag.Parse()
+
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		// Can't log yet, just print to stderr
+		os.Stderr.WriteString("Warning: failed to load config: " + err.Error() + "\n")
+	}
+
+	// Handle --save-config flag
+	if *saveDefaultConfig {
+		if err := config.SaveDefault(); err != nil {
+			os.Stderr.WriteString("Failed to save config: " + err.Error() + "\n")
+			os.Exit(1)
+		}
+		configPath, _ := config.GetConfigPath()
+		os.Stdout.WriteString("Default configuration saved to: " + configPath + "\n")
+		os.Exit(0)
+	}
+
+	// Command line overrides config
+	if *logLevel != "" {
+		cfg.General.LogLevel = *logLevel
+	}
+	if *dictPath != "" {
+		cfg.Dictionary.SystemDict = *dictPath
+	}
 
 	// Check if another instance is already running
 	if isPipeAlreadyExists() {
@@ -130,9 +158,9 @@ func main() {
 	}
 	defer windows.CloseHandle(mutexHandle)
 
-	// Setup logging
+	// Setup logging based on config
 	var level slog.Level
-	switch *logLevel {
+	switch cfg.General.LogLevel {
 	case "debug":
 		level = slog.LevelDebug
 	case "info":
@@ -152,6 +180,11 @@ func main() {
 
 	logger.Info("WindInput IME Service starting...")
 
+	// Log config location
+	if configPath, err := config.GetConfigPath(); err == nil {
+		logger.Info("Configuration", "path", configPath)
+	}
+
 	// Get executable directory
 	exePath, err := os.Executable()
 	if err != nil {
@@ -162,7 +195,7 @@ func main() {
 
 	// Load dictionary
 	d := dict.NewSimpleDict()
-	fullDictPath := filepath.Join(exeDir, *dictPath)
+	fullDictPath := filepath.Join(exeDir, cfg.Dictionary.SystemDict)
 	logger.Info("Loading dictionary", "path", fullDictPath)
 
 	if err := d.Load(fullDictPath); err != nil {
@@ -215,8 +248,8 @@ func main() {
 	uiManager.WaitReady()
 	logger.Info("UI Manager is ready")
 
-	// Create coordinator with UI Manager
-	coord := coordinator.NewCoordinator(eng, uiManager, logger)
+	// Create coordinator with UI Manager and config
+	coord := coordinator.NewCoordinator(eng, uiManager, cfg, logger)
 
 	// Create Bridge IPC server (connects to C++)
 	bridgeServer := bridge.NewServer(coord, logger)

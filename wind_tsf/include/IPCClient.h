@@ -11,6 +11,7 @@ enum class ResponseType
     InsertText,
     UpdateComposition,
     ClearComposition,
+    ModeChanged,
     Unknown
 };
 
@@ -21,6 +22,7 @@ struct ServiceResponse
     std::wstring text;      // For InsertText
     std::wstring composition; // For UpdateComposition
     int caretPos;           // For UpdateComposition
+    BOOL chineseMode;       // For ModeChanged
     std::wstring error;
 };
 
@@ -47,6 +49,9 @@ public:
 
     // Send focus lost notification
     BOOL SendFocusLost();
+
+    // Send toggle mode request
+    BOOL SendToggleMode();
 
     // Check if connected
     BOOL IsConnected() const { return _hPipe != INVALID_HANDLE_VALUE; }

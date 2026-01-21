@@ -18,16 +18,18 @@ const (
 
 // KeyEventResult represents the result of handling a key event
 type KeyEventResult struct {
-	Type     ResponseType
-	Text     string // For InsertText
-	CaretPos int    // For UpdateComposition
+	Type        ResponseType
+	Text        string // For InsertText
+	CaretPos    int    // For UpdateComposition
+	ChineseMode bool   // For ModeChanged
 }
 
 // MessageHandler handles messages from C++ Bridge
 type MessageHandler interface {
 	HandleKeyEvent(data KeyEventData) *KeyEventResult
 	HandleCaretUpdate(data CaretData) error
-	HandleFocusLost() // Called when focus is lost
+	HandleFocusLost()        // Called when focus is lost
+	HandleToggleMode() bool  // Called when mode toggle requested, returns new chineseMode state
 }
 
 // Server handles IPC communication with C++ TSF Bridge
@@ -261,6 +263,12 @@ func (s *Server) processRequest(request *Request, clientID int) *Response {
 			}
 		case ResponseTypeClearComposition:
 			return &Response{Type: ResponseTypeClearComposition}
+		case ResponseTypeModeChanged:
+			s.logger.Info("Returning ModeChanged response", "clientID", clientID, "chineseMode", result.ChineseMode)
+			return &Response{
+				Type: ResponseTypeModeChanged,
+				Data: ModeChangedData{ChineseMode: result.ChineseMode},
+			}
 		default:
 			return &Response{Type: ResponseTypeAck}
 		}
@@ -284,6 +292,15 @@ func (s *Server) processRequest(request *Request, clientID int) *Response {
 			s.logger.Error("Failed to handle caret update", "clientID", clientID, "error", err)
 		}
 		return &Response{Type: ResponseTypeAck}
+
+	case RequestTypeToggleMode:
+		// Toggle input mode and return new state
+		chineseMode := s.handler.HandleToggleMode()
+		s.logger.Info("Mode toggled", "clientID", clientID, "chineseMode", chineseMode)
+		return &Response{
+			Type: ResponseTypeModeChanged,
+			Data: ModeChangedData{ChineseMode: chineseMode},
+		}
 
 	default:
 		s.logger.Error("Unknown request type from Bridge", "clientID", clientID, "type", request.Type)

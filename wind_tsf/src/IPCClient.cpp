@@ -222,6 +222,20 @@ BOOL CIPCClient::SendFocusLost()
     return _SendMessage(json);
 }
 
+BOOL CIPCClient::SendToggleMode()
+{
+    if (!IsConnected())
+    {
+        if (!Connect())
+            return FALSE;
+    }
+
+    OutputDebugStringW(L"[WindInput] Sending toggle_mode\n");
+
+    std::wstring json = L"{\"type\":\"toggle_mode\",\"data\":{}}";
+    return _SendMessage(json);
+}
+
 BOOL CIPCClient::ReceiveResponse(ServiceResponse& response)
 {
     std::wstring json;
@@ -327,6 +341,7 @@ BOOL CIPCClient::_ParseResponse(const std::wstring& json, ServiceResponse& respo
     response.text.clear();
     response.composition.clear();
     response.caretPos = 0;
+    response.chineseMode = FALSE;
     response.error.clear();
 
     OutputDebugStringW(L"[WindInput] Parsing response JSON...\n");
@@ -394,6 +409,26 @@ BOOL CIPCClient::_ParseResponse(const std::wstring& json, ServiceResponse& respo
     else if (json.find(L"\"type\":\"clear_composition\"") != std::wstring::npos)
     {
         response.type = ResponseType::ClearComposition;
+    }
+    else if (json.find(L"\"type\":\"mode_changed\"") != std::wstring::npos)
+    {
+        response.type = ResponseType::ModeChanged;
+        OutputDebugStringW(L"[WindInput] Response type: ModeChanged\n");
+
+        // Extract chinese_mode from data
+        if (json.find(L"\"chinese_mode\":true") != std::wstring::npos)
+        {
+            response.chineseMode = TRUE;
+        }
+        else
+        {
+            response.chineseMode = FALSE;
+        }
+
+        WCHAR debug[128];
+        wsprintfW(debug, L"[WindInput] ModeChanged: chineseMode=%s\n",
+                  response.chineseMode ? L"true" : L"false");
+        OutputDebugStringW(debug);
     }
 
     // Check for error field

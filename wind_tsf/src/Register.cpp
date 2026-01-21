@@ -1,8 +1,22 @@
 #include "Register.h"
 #include <shlwapi.h>
 #include <strsafe.h>
+#include <inputscope.h>
 
 #pragma comment(lib, "shlwapi.lib")
+
+// Windows 8+ 需要的 GUID
+// {85F9F8EF-1B5E-4EC4-4CFE-56E86E4B6F05}
+DEFINE_GUID(GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+    0x13A016DF, 0x560B, 0x46CD, 0x94, 0x7A, 0x4C, 0x3A, 0xF1, 0xE0, 0xE3, 0x5D);
+
+// {25504FB4-7BAB-4BC1-9C69-CF81890F0EF5}
+DEFINE_GUID(GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+    0x25504FB4, 0x7BAB, 0x4BC1, 0x9C, 0x69, 0xCF, 0x81, 0x89, 0x0F, 0x0E, 0xF5);
+
+// {6D60FCCF-58D7-4B67-B13E-96BE706C3B6A}
+DEFINE_GUID(GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+    0x6D60FCCF, 0x58D7, 0x4B67, 0xB1, 0x3E, 0x96, 0xBE, 0x70, 0x6C, 0x3B, 0x6A);
 
 // COM 服务器注册
 static HRESULT RegisterCOMServer()
@@ -65,27 +79,69 @@ static HRESULT UnregisterCOMServer()
 
 HRESULT RegisterProfile()
 {
-    ITfInputProcessorProfiles* pProfiles = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr, CLSCTX_INPROC_SERVER,
-                                   IID_ITfInputProcessorProfiles, (void**)&pProfiles);
+    HRESULT hr = E_FAIL;
+    WCHAR szModule[MAX_PATH];
 
-    if (SUCCEEDED(hr))
+    if (GetModuleFileNameW(g_hInstance, szModule, ARRAYSIZE(szModule)) == 0)
+        return E_FAIL;
+
+    // 首先尝试使用 Windows 8+ 的 ITfInputProcessorProfileMgr 接口
+    ITfInputProcessorProfileMgr* pProfileMgr = nullptr;
+    hr = CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr, CLSCTX_INPROC_SERVER,
+                          IID_ITfInputProcessorProfileMgr, (void**)&pProfileMgr);
+
+    if (SUCCEEDED(hr) && pProfileMgr != nullptr)
     {
-        hr = pProfiles->Register(c_clsidTextService);
+        // Windows 8+ 注册方式
+        hr = pProfileMgr->RegisterProfile(
+            c_clsidTextService,
+            TEXTSERVICE_LANGID,
+            c_guidProfile,
+            TEXTSERVICE_NAME,
+            (ULONG)wcslen(TEXTSERVICE_NAME),
+            szModule,
+            (ULONG)wcslen(szModule),
+            TEXTSERVICE_ICON_INDEX,
+            NULL,                   // hklSubstitute
+            0,                      // dwPreferredLayout
+            TRUE,                   // bEnabledByDefault
+            0);                     // dwFlags
+
+        WCHAR debug[256];
+        wsprintfW(debug, L"[WindInput] RegisterProfile (ProfileMgr) hr=0x%08X\n", hr);
+        OutputDebugStringW(debug);
+
+        pProfileMgr->Release();
+    }
+    else
+    {
+        // 回退到旧的 ITfInputProcessorProfiles 接口
+        ITfInputProcessorProfiles* pProfiles = nullptr;
+        hr = CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr, CLSCTX_INPROC_SERVER,
+                              IID_ITfInputProcessorProfiles, (void**)&pProfiles);
 
         if (SUCCEEDED(hr))
         {
-            hr = pProfiles->AddLanguageProfile(c_clsidTextService,
-                                                TEXTSERVICE_LANGID,
-                                                c_guidProfile,
-                                                TEXTSERVICE_NAME,
-                                                lstrlenW(TEXTSERVICE_NAME),
-                                                nullptr, // 图标文件路径
-                                                0,       // 图标文件路径长度
-                                                0);      // 图标索引
-        }
+            hr = pProfiles->Register(c_clsidTextService);
 
-        pProfiles->Release();
+            if (SUCCEEDED(hr))
+            {
+                hr = pProfiles->AddLanguageProfile(c_clsidTextService,
+                                                   TEXTSERVICE_LANGID,
+                                                   c_guidProfile,
+                                                   TEXTSERVICE_NAME,
+                                                   (ULONG)wcslen(TEXTSERVICE_NAME),
+                                                   szModule,
+                                                   (ULONG)wcslen(szModule),
+                                                   TEXTSERVICE_ICON_INDEX);
+            }
+
+            WCHAR debug[256];
+            wsprintfW(debug, L"[WindInput] RegisterProfile (legacy) hr=0x%08X\n", hr);
+            OutputDebugStringW(debug);
+
+            pProfiles->Release();
+        }
     }
 
     return hr;
@@ -119,6 +175,37 @@ HRESULT RegisterCategories()
                                              GUID_TFCAT_TIP_KEYBOARD,
                                              c_clsidTextService);
 
+        OutputDebugStringW(SUCCEEDED(hr) ?
+            L"[WindInput] Registered GUID_TFCAT_TIP_KEYBOARD\n" :
+            L"[WindInput] Failed to register GUID_TFCAT_TIP_KEYBOARD\n");
+
+        // 注册 Windows 8+ 现代应用支持 (Immersive/Metro apps)
+        HRESULT hr2 = pCategoryMgr->RegisterCategory(c_clsidTextService,
+                                                      GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+                                                      c_clsidTextService);
+
+        OutputDebugStringW(SUCCEEDED(hr2) ?
+            L"[WindInput] Registered GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT\n" :
+            L"[WindInput] Failed to register GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT\n");
+
+        // 注册系统托盘支持 (用于在输入指示器显示图标)
+        hr2 = pCategoryMgr->RegisterCategory(c_clsidTextService,
+                                              GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+                                              c_clsidTextService);
+
+        OutputDebugStringW(SUCCEEDED(hr2) ?
+            L"[WindInput] Registered GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT\n" :
+            L"[WindInput] Failed to register GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT\n");
+
+        // 注册 UI 元素支持 (候选窗口等)
+        hr2 = pCategoryMgr->RegisterCategory(c_clsidTextService,
+                                              GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+                                              c_clsidTextService);
+
+        OutputDebugStringW(SUCCEEDED(hr2) ?
+            L"[WindInput] Registered GUID_TFCAT_TIPCAP_UIELEMENTENABLED\n" :
+            L"[WindInput] Failed to register GUID_TFCAT_TIPCAP_UIELEMENTENABLED\n");
+
         pCategoryMgr->Release();
     }
 
@@ -133,9 +220,22 @@ HRESULT UnregisterCategories()
 
     if (SUCCEEDED(hr))
     {
-        hr = pCategoryMgr->UnregisterCategory(c_clsidTextService,
-                                               GUID_TFCAT_TIP_KEYBOARD,
-                                               c_clsidTextService);
+        // 卸载所有注册的分类
+        pCategoryMgr->UnregisterCategory(c_clsidTextService,
+                                          GUID_TFCAT_TIP_KEYBOARD,
+                                          c_clsidTextService);
+
+        pCategoryMgr->UnregisterCategory(c_clsidTextService,
+                                          GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+                                          c_clsidTextService);
+
+        pCategoryMgr->UnregisterCategory(c_clsidTextService,
+                                          GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+                                          c_clsidTextService);
+
+        pCategoryMgr->UnregisterCategory(c_clsidTextService,
+                                          GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+                                          c_clsidTextService);
 
         pCategoryMgr->Release();
     }

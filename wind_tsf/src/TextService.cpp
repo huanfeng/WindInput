@@ -1,6 +1,7 @@
 #include "TextService.h"
 #include "KeyEventSink.h"
 #include "IPCClient.h"
+#include "LangBarItemButton.h"
 
 CTextService::CTextService()
     : _refCount(1)
@@ -9,6 +10,8 @@ CTextService::CTextService()
     , _dwThreadMgrEventSinkCookie(TF_INVALID_COOKIE)
     , _pKeyEventSink(nullptr)
     , _pIPCClient(nullptr)
+    , _pLangBarItemButton(nullptr)
+    , _bChineseMode(TRUE)
 {
     DllAddRef();
 }
@@ -96,6 +99,17 @@ STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
     }
     OutputDebugStringW(L"[WindInput] KeyEventSink initialized\n");
 
+    // Initialize language bar button
+    if (!_InitLangBarButton())
+    {
+        OutputDebugStringW(L"[WindInput] _InitLangBarButton failed (non-fatal)\n");
+        // Not fatal, continue without language bar button
+    }
+    else
+    {
+        OutputDebugStringW(L"[WindInput] LangBarButton initialized\n");
+    }
+
     OutputDebugStringW(L"[WindInput] TextService::Activate completed successfully\n");
     return S_OK;
 }
@@ -103,6 +117,9 @@ STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
 STDAPI CTextService::Deactivate()
 {
     OutputDebugStringW(L"[WindInput] TextService::Deactivate called\n");
+
+    // Release language bar button
+    _UninitLangBarButton();
 
     // Release key event sink
     _UninitKeyEventSink();
@@ -381,5 +398,105 @@ void CTextService::SendCaretPositionUpdate()
             ServiceResponse response;
             _pIPCClient->ReceiveResponse(response);
         }
+    }
+}
+
+BOOL CTextService::_InitLangBarButton()
+{
+    _pLangBarItemButton = new CLangBarItemButton(this);
+    if (_pLangBarItemButton == nullptr)
+        return FALSE;
+
+    if (!_pLangBarItemButton->Initialize())
+    {
+        _pLangBarItemButton->Release();
+        _pLangBarItemButton = nullptr;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+void CTextService::_UninitLangBarButton()
+{
+    if (_pLangBarItemButton != nullptr)
+    {
+        _pLangBarItemButton->Uninitialize();
+        _pLangBarItemButton->Release();
+        _pLangBarItemButton = nullptr;
+    }
+}
+
+void CTextService::ToggleInputMode()
+{
+    OutputDebugStringW(L"[WindInput] ToggleInputMode called\n");
+
+    // Send toggle_mode request to Go service and get new state
+    if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
+    {
+        if (_pIPCClient->SendToggleMode())
+        {
+            ServiceResponse response;
+            if (_pIPCClient->ReceiveResponse(response))
+            {
+                if (response.type == ResponseType::ModeChanged)
+                {
+                    _bChineseMode = response.chineseMode;
+                    OutputDebugStringW(_bChineseMode ?
+                        L"[WindInput] Mode synced from service: Chinese\n" :
+                        L"[WindInput] Mode synced from service: English\n");
+                }
+                else
+                {
+                    // Fallback: toggle locally if unexpected response
+                    _bChineseMode = !_bChineseMode;
+                    OutputDebugStringW(L"[WindInput] Unexpected response, toggling locally\n");
+                }
+            }
+            else
+            {
+                // Fallback: toggle locally if receive failed
+                _bChineseMode = !_bChineseMode;
+                OutputDebugStringW(L"[WindInput] Failed to receive response, toggling locally\n");
+            }
+        }
+        else
+        {
+            // Fallback: toggle locally if send failed
+            _bChineseMode = !_bChineseMode;
+            OutputDebugStringW(L"[WindInput] Failed to send toggle_mode, toggling locally\n");
+        }
+    }
+    else
+    {
+        // No IPC connection, toggle locally
+        _bChineseMode = !_bChineseMode;
+        OutputDebugStringW(L"[WindInput] No IPC connection, toggling locally\n");
+    }
+
+    OutputDebugStringW(_bChineseMode ?
+        L"[WindInput] Switched to Chinese mode\n" :
+        L"[WindInput] Switched to English mode\n");
+
+    // Update language bar button
+    if (_pLangBarItemButton != nullptr)
+    {
+        _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
+    }
+}
+
+void CTextService::SetInputMode(BOOL bChineseMode)
+{
+    // Set mode directly from service response (no IPC call)
+    _bChineseMode = bChineseMode;
+
+    OutputDebugStringW(_bChineseMode ?
+        L"[WindInput] Mode set to Chinese (from service)\n" :
+        L"[WindInput] Mode set to English (from service)\n");
+
+    // Update language bar button
+    if (_pLangBarItemButton != nullptr)
+    {
+        _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
     }
 }

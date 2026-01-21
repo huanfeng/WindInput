@@ -340,6 +340,12 @@ void CKeyEventSink::_HandleServiceResponse()
         _isComposing = FALSE;
         break;
 
+    case ResponseType::ModeChanged:
+        OutputDebugStringW(L"[WindInput] Received ModeChanged from service\n");
+        // Update local mode state and language bar icon
+        _pTextService->SetInputMode(response.chineseMode);
+        break;
+
     default:
         OutputDebugStringW(L"[WindInput] Unknown response type from service\n");
         break;

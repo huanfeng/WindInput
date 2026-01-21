@@ -28,6 +28,7 @@ set(SOURCES
     src/TextService.cpp
     src/KeyEventSink.cpp
     src/IPCClient.cpp
+    src/LangBarItemButton.cpp
 )
 
 # 创建 DLL

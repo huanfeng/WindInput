@@ -7,14 +7,13 @@ import (
 	"sync"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/config"
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/ui"
 )
 
+// Modifier key flags (must match C++ side)
 const (
-	MaxCandidatesPerPage = 9
-
-	// Modifier key flags (must match C++ side)
 	ModShift = 0x01
 	ModCtrl  = 0x02
 	ModAlt   = 0x04
@@ -25,6 +24,7 @@ type Coordinator struct {
 	engine    engine.Engine
 	uiManager *ui.Manager
 	logger    *slog.Logger
+	config    *config.Config
 
 	mu sync.Mutex
 
@@ -32,10 +32,11 @@ type Coordinator struct {
 	chineseMode bool // true = Chinese, false = English
 
 	// Input state
-	inputBuffer string
-	candidates  []ui.Candidate
-	currentPage int
-	totalPages  int
+	inputBuffer        string
+	candidates         []ui.Candidate
+	currentPage        int
+	totalPages         int
+	candidatesPerPage  int
 
 	// Caret position (from C++)
 	caretX      int
@@ -44,19 +45,31 @@ type Coordinator struct {
 }
 
 // NewCoordinator creates a new Coordinator
-func NewCoordinator(eng engine.Engine, uiManager *ui.Manager, logger *slog.Logger) *Coordinator {
+func NewCoordinator(eng engine.Engine, uiManager *ui.Manager, cfg *config.Config, logger *slog.Logger) *Coordinator {
+	candidatesPerPage := 9
+	if cfg != nil && cfg.UI.CandidatesPerPage > 0 {
+		candidatesPerPage = cfg.UI.CandidatesPerPage
+	}
+
+	startInChineseMode := true
+	if cfg != nil {
+		startInChineseMode = cfg.General.StartInChineseMode
+	}
+
 	return &Coordinator{
-		engine:      eng,
-		uiManager:   uiManager,
-		logger:      logger,
-		chineseMode: true, // Default to Chinese mode
-		inputBuffer: "",
-		candidates:  nil,
-		currentPage: 1,
-		totalPages:  1,
-		caretX:      100,
-		caretY:      100,
-		caretHeight: 20,
+		engine:            eng,
+		uiManager:         uiManager,
+		logger:            logger,
+		config:            cfg,
+		chineseMode:       startInChineseMode,
+		inputBuffer:       "",
+		candidates:        nil,
+		currentPage:       1,
+		totalPages:        1,
+		candidatesPerPage: candidatesPerPage,
+		caretX:            100,
+		caretY:            100,
+		caretHeight:       20,
 	}
 }
 
@@ -83,7 +96,7 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	// Handle Shift key for mode toggle
 	if data.KeyCode == 16 { // VK_SHIFT
 		c.chineseMode = !c.chineseMode
-		c.logger.Info("Mode toggled", "chineseMode", c.chineseMode)
+		c.logger.Info("Mode toggled by Shift", "chineseMode", c.chineseMode)
 
 		// Clear any pending input when switching modes
 		if len(c.inputBuffer) > 0 {
@@ -93,7 +106,12 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 
 		// Show mode indicator
 		c.showModeIndicator()
-		return nil
+
+		// Return mode_changed so C++ can update language bar icon
+		return &bridge.KeyEventResult{
+			Type:        bridge.ResponseTypeModeChanged,
+			ChineseMode: c.chineseMode,
+		}
 	}
 
 	// English mode: pass through all keys
@@ -203,7 +221,7 @@ func (c *Coordinator) handleSpace() *bridge.KeyEventResult {
 
 func (c *Coordinator) handleNumberKey(num int) *bridge.KeyEventResult {
 	// num is 1-9, convert to 0-based index within current page
-	index := (c.currentPage-1)*MaxCandidatesPerPage + (num - 1)
+	index := (c.currentPage-1)*c.candidatesPerPage + (num - 1)
 	if index < len(c.candidates) {
 		return c.selectCandidate(index)
 	}
@@ -254,7 +272,7 @@ func (c *Coordinator) updateCandidates() {
 	c.logger.Info("Got candidates", "count", len(c.candidates))
 
 	// Calculate pagination
-	c.totalPages = (len(c.candidates) + MaxCandidatesPerPage - 1) / MaxCandidatesPerPage
+	c.totalPages = (len(c.candidates) + c.candidatesPerPage - 1) / c.candidatesPerPage
 	if c.totalPages == 0 {
 		c.totalPages = 1
 	}
@@ -268,8 +286,8 @@ func (c *Coordinator) showUI() {
 	}
 
 	// Get current page candidates
-	startIdx := (c.currentPage - 1) * MaxCandidatesPerPage
-	endIdx := startIdx + MaxCandidatesPerPage
+	startIdx := (c.currentPage - 1) * c.candidatesPerPage
+	endIdx := startIdx + c.candidatesPerPage
 	if endIdx > len(c.candidates) {
 		endIdx = len(c.candidates)
 	}
@@ -352,4 +370,24 @@ func (c *Coordinator) HandleFocusLost() {
 	c.logger.Info("Focus lost, clearing state")
 	c.clearState()
 	c.hideUI()
+}
+
+// HandleToggleMode toggles the input mode and returns the new state
+func (c *Coordinator) HandleToggleMode() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.chineseMode = !c.chineseMode
+	c.logger.Info("Mode toggled via IPC", "chineseMode", c.chineseMode)
+
+	// Clear any pending input when switching modes
+	if len(c.inputBuffer) > 0 {
+		c.clearState()
+		c.hideUI()
+	}
+
+	// Show mode indicator
+	c.showModeIndicator()
+
+	return c.chineseMode
 }
