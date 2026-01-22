@@ -176,20 +176,50 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, x, y, p
 
 // Hide hides the candidate window (async, non-blocking)
 func (m *Manager) Hide() {
-	m.logger.Debug("Queuing Hide")
+	// Skip if window is already hidden (avoid flooding channel with hide commands)
+	if !m.window.IsVisible() {
+		return
+	}
 
 	// Send command to UI thread (non-blocking)
 	select {
 	case m.cmdCh <- UICommand{Type: "hide"}:
 	default:
-		m.logger.Warn("UI command channel full, dropping hide command")
+		// Channel full - try to drain old hide commands and retry
+		m.drainHideCommands()
+		select {
+		case m.cmdCh <- UICommand{Type: "hide"}:
+		default:
+			m.logger.Warn("UI command channel full, dropping hide command")
+		}
 	}
 }
 
 // doHide actually hides the window (called from UI thread)
 func (m *Manager) doHide() {
-	m.logger.Debug("Hide called")
 	m.window.Hide()
+}
+
+// drainHideCommands removes redundant hide commands from channel to make room
+func (m *Manager) drainHideCommands() {
+	for {
+		select {
+		case cmd := <-m.cmdCh:
+			// Put back non-hide commands
+			if cmd.Type != "hide" {
+				select {
+				case m.cmdCh <- cmd:
+				default:
+					// Channel still full, give up
+					return
+				}
+			}
+			// Hide commands are discarded (we'll add a new one)
+		default:
+			// Channel empty or no more commands to drain
+			return
+		}
+	}
 }
 
 // UpdatePosition updates the window position
@@ -238,8 +268,6 @@ func (m *Manager) ShowModeIndicator(mode string, x, y int) {
 
 // doShowModeIndicator actually shows the mode indicator (called from UI thread)
 func (m *Manager) doShowModeIndicator(mode string, x, y int) {
-	m.logger.Debug("ShowModeIndicator", "mode", mode)
-
 	// Render mode indicator
 	img := m.renderer.RenderModeIndicator(mode)
 
@@ -252,9 +280,9 @@ func (m *Manager) doShowModeIndicator(mode string, x, y int) {
 	// Show window briefly
 	m.window.Show()
 
-	// Hide after a short delay (in a goroutine)
+	// Hide after a short delay (send through channel for thread safety)
 	go func() {
 		time.Sleep(800 * time.Millisecond)
-		m.doHide()
+		m.Hide() // Use public method which goes through channel
 	}()
 }

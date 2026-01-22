@@ -42,6 +42,10 @@ type Coordinator struct {
 	caretX      int
 	caretY      int
 	caretHeight int
+
+	// Last known valid window position (for fallback)
+	lastValidX int
+	lastValidY int
 }
 
 // NewCoordinator creates a new Coordinator
@@ -117,8 +121,8 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 
 	// English mode: pass through all keys
 	if !c.chineseMode {
-		// In English mode, letters should be passed through directly
-		if len(key) == 1 && key[0] >= 'a' && key[0] <= 'z' {
+		// In English mode, letters should be passed through directly (both upper and lower case)
+		if len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')) {
 			return &bridge.KeyEventResult{
 				Type: bridge.ResponseTypeInsertText,
 				Text: key,
@@ -310,8 +314,27 @@ func (c *Coordinator) showUI() {
 	}
 
 	// Calculate window position (below caret)
+	// Use reasonable defaults if caret position seems invalid
 	windowX := c.caretX
 	windowY := c.caretY + c.caretHeight + 5
+
+	// Sanity check: if position is unreasonable, use a fallback
+	// This handles cases where caret info hasn't been received yet
+	if windowX <= 0 || windowY <= 0 || windowX > 10000 || windowY > 10000 {
+		// Use last known good position or a reasonable default
+		if c.lastValidX > 0 && c.lastValidY > 0 {
+			windowX = c.lastValidX
+			windowY = c.lastValidY
+		} else {
+			// Fallback to screen center area
+			windowX = 400
+			windowY = 300
+		}
+	} else {
+		// Save valid position for future fallback
+		c.lastValidX = windowX
+		c.lastValidY = windowY
+	}
 
 	c.uiManager.ShowCandidates(
 		displayCandidates,
@@ -334,7 +357,20 @@ func (c *Coordinator) showModeIndicator() {
 		modeText = "En"
 	}
 
-	c.uiManager.ShowModeIndicator(modeText, c.caretX, c.caretY+c.caretHeight+5)
+	// Use valid position or fallback
+	x := c.caretX
+	y := c.caretY + c.caretHeight + 5
+	if x <= 0 || y <= 0 || x > 10000 || y > 10000 {
+		if c.lastValidX > 0 && c.lastValidY > 0 {
+			x = c.lastValidX
+			y = c.lastValidY
+		} else {
+			x = 400
+			y = 300
+		}
+	}
+
+	c.uiManager.ShowModeIndicator(modeText, x, y)
 }
 
 func (c *Coordinator) hideUI() {

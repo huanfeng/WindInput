@@ -249,18 +249,35 @@ BOOL CKeyEventSink::_SendKeyToService(WPARAM wParam)
 
     if (wParam >= 'A' && wParam <= 'Z')
     {
-        // Letter key - convert to lowercase
-        key = (wchar_t)towlower((wint_t)wParam);
+        // Letter key - determine case based on Caps Lock and Shift state
+        BOOL capsLock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+        BOOL shiftPressed = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+        // XOR logic: Caps Lock and Shift cancel each other
+        BOOL shouldBeUppercase = capsLock ^ shiftPressed;
+
+        if (_pTextService->IsChineseMode())
+        {
+            // Chinese mode: always use lowercase for pinyin
+            key = (wchar_t)towlower((wint_t)wParam);
+            _isComposing = TRUE;
+        }
+        else
+        {
+            // English mode: respect Caps Lock and Shift
+            if (shouldBeUppercase)
+            {
+                key = (wchar_t)wParam;  // Already uppercase
+            }
+            else
+            {
+                key = (wchar_t)towlower((wint_t)wParam);
+            }
+        }
 
         // Always include caret with letter keys (both Chinese and English mode need it)
         // This replaces the separate caret_update call
         needCaret = TRUE;
-
-        // Track composition state only in Chinese mode
-        if (_pTextService->IsChineseMode())
-        {
-            _isComposing = TRUE;
-        }
     }
     else if (wParam >= '1' && wParam <= '9')
     {
