@@ -531,6 +531,26 @@ BOOL CIPCClient::SendToggleMode()
     return _SendMessage(json);
 }
 
+BOOL CIPCClient::SendCapsLockState(BOOL capsLockOn)
+{
+    if (!_ShouldAttemptOperation())
+    {
+        return FALSE;
+    }
+
+    if (!IsConnected() && !Connect())
+    {
+        return FALSE;
+    }
+
+    std::wostringstream oss;
+    oss << L"{\"type\":\"caps_lock_state\",\"data\":{\"caps_lock_on\":";
+    oss << (capsLockOn ? L"true" : L"false");
+    oss << L"}}";
+
+    return _SendMessage(oss.str());
+}
+
 BOOL CIPCClient::_SendMessage(const std::wstring& message)
 {
     // Convert to UTF-8

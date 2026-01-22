@@ -33,8 +33,9 @@ type KeyEventResult struct {
 type MessageHandler interface {
 	HandleKeyEvent(data KeyEventData) *KeyEventResult
 	HandleCaretUpdate(data CaretData) error
-	HandleFocusLost()        // Called when focus is lost
-	HandleToggleMode() bool  // Called when mode toggle requested, returns new chineseMode state
+	HandleFocusLost()            // Called when focus is lost
+	HandleToggleMode() bool      // Called when mode toggle requested, returns new chineseMode state
+	HandleCapsLockState(on bool) // Called when Caps Lock state changes, shows A/a indicator
 }
 
 // Server handles IPC communication with C++ TSF Bridge
@@ -341,6 +342,18 @@ func (s *Server) processRequest(request *Request, clientID int) *Response {
 			Type: ResponseTypeModeChanged,
 			Data: ModeChangedData{ChineseMode: chineseMode},
 		}
+
+	case RequestTypeCapsLockState:
+		// Parse caps lock data
+		var capsData CapsLockData
+		if err := json.Unmarshal(request.Data, &capsData); err != nil {
+			s.logger.Error("Failed to parse caps lock data", "clientID", clientID, "error", err)
+			return &Response{Type: ResponseTypeAck, Error: "invalid caps lock data"}
+		}
+
+		s.logger.Debug("Caps Lock state", "clientID", clientID, "on", capsData.CapsLockOn)
+		s.handler.HandleCapsLockState(capsData.CapsLockOn)
+		return &Response{Type: ResponseTypeAck}
 
 	default:
 		s.logger.Error("Unknown request type from Bridge", "clientID", clientID, "type", request.Type)

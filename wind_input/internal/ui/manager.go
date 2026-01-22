@@ -2,8 +2,11 @@ package ui
 
 import (
 	"log/slog"
+	"runtime"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 // UICommand represents a command to the UI thread
@@ -36,22 +39,36 @@ type Manager struct {
 
 	// Command channel for async UI updates
 	cmdCh chan UICommand
+
+	// Event to wake up the message loop when commands are available
+	cmdEvent windows.Handle
 }
 
 // NewManager creates a new UI manager
 func NewManager(logger *slog.Logger) *Manager {
+	// Create event for waking up message loop
+	event, err := CreateEvent()
+	if err != nil {
+		logger.Error("Failed to create event", "error", err)
+	}
+
 	return &Manager{
 		window:   NewCandidateWindow(logger),
 		renderer: NewRenderer(DefaultRenderConfig()),
 		logger:   logger,
 		readyCh:  make(chan struct{}),
 		cmdCh:    make(chan UICommand, 100), // Buffered channel to avoid blocking IPC
+		cmdEvent: event,
 	}
 }
 
 // Start starts the UI manager (creates window and runs message loop)
 // This should be called from a dedicated goroutine
 func (m *Manager) Start() error {
+	// Lock this goroutine to its OS thread for Windows GUI operations
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	m.logger.Info("Starting UI Manager...")
 
 	// Create window
@@ -66,43 +83,80 @@ func (m *Manager) Start() error {
 
 	m.logger.Info("UI Manager ready")
 
-	// Start command processor in a separate goroutine
-	go m.processCommands()
-
-	// Run message loop (blocking)
-	m.window.Run()
+	// Run combined message loop that handles both Windows messages and UI commands
+	// This ensures all UI operations happen on the same thread that created the window
+	m.runCombinedLoop()
 
 	return nil
 }
 
-// processCommands processes UI commands from the channel
-func (m *Manager) processCommands() {
-	m.logger.Debug("UI command processor started")
+// runCombinedLoop runs a combined message loop that handles both Windows messages and UI commands
+func (m *Manager) runCombinedLoop() {
+	m.logger.Info("Starting combined message loop...")
 
-	for cmd := range m.cmdCh {
-		m.logger.Debug("Processing UI command", "type", cmd.Type)
+	var msg MSG
+	for {
+		// Wait for either a Windows message or the command event
+		ret := MsgWaitForMultipleObjects(m.cmdEvent, 50) // 50ms timeout for responsiveness
 
-		// Recover from any panics to keep the goroutine alive
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					m.logger.Error("Panic in UI command processing", "panic", r, "type", cmd.Type)
+		switch {
+		case ret == WAIT_OBJECT_0:
+			// Command event signaled - process pending commands
+			ResetEvent(m.cmdEvent)
+			m.processPendingCommands()
+
+		case ret == WAIT_OBJECT_0+1:
+			// Windows message available - process all pending messages
+			for PeekMessage(&msg) {
+				if msg.Message == 0x0012 { // WM_QUIT
+					m.logger.Info("Received WM_QUIT, exiting loop")
+					return
 				}
-			}()
-
-			switch cmd.Type {
-			case "show":
-				m.doShowCandidates(cmd.Candidates, cmd.Input, cmd.X, cmd.Y, cmd.Page, cmd.TotalPages)
-			case "hide":
-				m.doHide()
-			case "mode":
-				m.doShowModeIndicator(cmd.ModeText, cmd.X, cmd.Y)
+				ProcessMessage(&msg)
 			}
-		}()
-	}
 
-	m.logger.Info("UI command processor stopped")
+		case ret == WAIT_TIMEOUT:
+			// Timeout - check for any pending commands (in case event was missed)
+			m.processPendingCommands()
+
+		default:
+			// Error or other return value
+			m.logger.Debug("MsgWaitForMultipleObjects returned", "ret", ret)
+		}
+	}
 }
+
+// processPendingCommands processes all pending commands from the channel
+func (m *Manager) processPendingCommands() {
+	for {
+		select {
+		case cmd := <-m.cmdCh:
+			m.processOneCommand(cmd)
+		default:
+			return // No more commands
+		}
+	}
+}
+
+// processOneCommand processes a single UI command
+func (m *Manager) processOneCommand(cmd UICommand) {
+	// Recover from any panics to keep the loop alive
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("Panic in UI command processing", "panic", r, "type", cmd.Type)
+		}
+	}()
+
+	switch cmd.Type {
+	case "show":
+		m.doShowCandidates(cmd.Candidates, cmd.Input, cmd.X, cmd.Y, cmd.Page, cmd.TotalPages)
+	case "hide":
+		m.doHide()
+	case "mode":
+		m.doShowModeIndicator(cmd.ModeText, cmd.X, cmd.Y)
+	}
+}
+
 
 // WaitReady waits until the UI manager is ready
 func (m *Manager) WaitReady() {
@@ -144,6 +198,10 @@ func (m *Manager) ShowCandidates(candidates []Candidate, input string, x, y, pag
 		Page:       page,
 		TotalPages: totalPages,
 	}:
+		// Signal the event to wake up the message loop
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
 	default:
 		m.logger.Warn("UI command channel full, dropping show command")
 	}
@@ -184,42 +242,19 @@ func (m *Manager) Hide() {
 	// Send command to UI thread (non-blocking)
 	select {
 	case m.cmdCh <- UICommand{Type: "hide"}:
-	default:
-		// Channel full - try to drain old hide commands and retry
-		m.drainHideCommands()
-		select {
-		case m.cmdCh <- UICommand{Type: "hide"}:
-		default:
-			m.logger.Warn("UI command channel full, dropping hide command")
+		// Signal the event to wake up the message loop
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
 		}
+	default:
+		// Channel full, but hide is not critical - window will be hidden eventually
+		m.logger.Debug("UI command channel full, skipping redundant hide")
 	}
 }
 
 // doHide actually hides the window (called from UI thread)
 func (m *Manager) doHide() {
 	m.window.Hide()
-}
-
-// drainHideCommands removes redundant hide commands from channel to make room
-func (m *Manager) drainHideCommands() {
-	for {
-		select {
-		case cmd := <-m.cmdCh:
-			// Put back non-hide commands
-			if cmd.Type != "hide" {
-				select {
-				case m.cmdCh <- cmd:
-				default:
-					// Channel still full, give up
-					return
-				}
-			}
-			// Hide commands are discarded (we'll add a new one)
-		default:
-			// Channel empty or no more commands to drain
-			return
-		}
-	}
 }
 
 // UpdatePosition updates the window position
@@ -235,6 +270,10 @@ func (m *Manager) UpdatePosition(x, y int) {
 // Destroy destroys the UI manager
 func (m *Manager) Destroy() {
 	m.window.Destroy()
+	if m.cmdEvent != 0 {
+		CloseEvent(m.cmdEvent)
+		m.cmdEvent = 0
+	}
 }
 
 // IsVisible returns whether the window is visible
@@ -261,6 +300,10 @@ func (m *Manager) ShowModeIndicator(mode string, x, y int) {
 		X:        x,
 		Y:        y,
 	}:
+		// Signal the event to wake up the message loop
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
 	default:
 		m.logger.Warn("UI command channel full, dropping mode command")
 	}

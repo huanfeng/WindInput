@@ -16,23 +16,31 @@ var (
 	user32   = windows.NewLazySystemDLL("user32.dll")
 	gdi32    = windows.NewLazySystemDLL("gdi32.dll")
 	msimg32  = windows.NewLazySystemDLL("msimg32.dll")
+	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
-	procRegisterClassExW     = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW      = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW       = user32.NewProc("DefWindowProcW")
-	procShowWindow           = user32.NewProc("ShowWindow")
-	procUpdateWindow         = user32.NewProc("UpdateWindow")
-	procDestroyWindow        = user32.NewProc("DestroyWindow")
-	procGetDC                = user32.NewProc("GetDC")
-	procReleaseDC            = user32.NewProc("ReleaseDC")
-	procSetWindowPos         = user32.NewProc("SetWindowPos")
-	procUpdateLayeredWindow  = user32.NewProc("UpdateLayeredWindow")
-	procGetMessageW          = user32.NewProc("GetMessageW")
-	procTranslateMessage     = user32.NewProc("TranslateMessage")
-	procDispatchMessageW     = user32.NewProc("DispatchMessageW")
-	procPostQuitMessage      = user32.NewProc("PostQuitMessage")
-	procPostMessageW         = user32.NewProc("PostMessageW")
-	procGetDpiForSystem      = user32.NewProc("GetDpiForSystem")
+	procRegisterClassExW         = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW          = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW           = user32.NewProc("DefWindowProcW")
+	procShowWindow               = user32.NewProc("ShowWindow")
+	procUpdateWindow             = user32.NewProc("UpdateWindow")
+	procDestroyWindow            = user32.NewProc("DestroyWindow")
+	procGetDC                    = user32.NewProc("GetDC")
+	procReleaseDC                = user32.NewProc("ReleaseDC")
+	procSetWindowPos             = user32.NewProc("SetWindowPos")
+	procUpdateLayeredWindow      = user32.NewProc("UpdateLayeredWindow")
+	procGetMessageW              = user32.NewProc("GetMessageW")
+	procPeekMessageW             = user32.NewProc("PeekMessageW")
+	procTranslateMessage         = user32.NewProc("TranslateMessage")
+	procDispatchMessageW         = user32.NewProc("DispatchMessageW")
+	procPostQuitMessage          = user32.NewProc("PostQuitMessage")
+	procPostMessageW             = user32.NewProc("PostMessageW")
+	procGetDpiForSystem          = user32.NewProc("GetDpiForSystem")
+	procMsgWaitForMultipleObjects = user32.NewProc("MsgWaitForMultipleObjects")
+
+	procCreateEventW  = kernel32.NewProc("CreateEventW")
+	procSetEvent      = kernel32.NewProc("SetEvent")
+	procResetEvent    = kernel32.NewProc("ResetEvent")
+	procCloseHandle   = kernel32.NewProc("CloseHandle")
 
 	procCreateCompatibleDC   = gdi32.NewProc("CreateCompatibleDC")
 	procDeleteDC             = gdi32.NewProc("DeleteDC")
@@ -125,6 +133,16 @@ const (
 	BI_RGB = 0
 
 	DIB_RGB_COLORS = 0
+
+	// PeekMessage options
+	PM_REMOVE = 0x0001
+
+	// MsgWaitForMultipleObjects flags
+	QS_ALLINPUT = 0x04FF
+
+	WAIT_OBJECT_0  = 0x00000000
+	WAIT_TIMEOUT   = 0x00000102
+	INFINITE       = 0xFFFFFFFF
 )
 
 type WNDCLASSEXW struct {
@@ -470,4 +488,58 @@ func (w *CandidateWindow) Destroy() {
 // Handle returns the window handle
 func (w *CandidateWindow) Handle() windows.HWND {
 	return w.hwnd
+}
+
+// CreateEvent creates a Windows event object
+func CreateEvent() (windows.Handle, error) {
+	ret, _, err := procCreateEventW.Call(0, 1, 0, 0) // Manual reset, initial state = not signaled
+	if ret == 0 {
+		return 0, err
+	}
+	return windows.Handle(ret), nil
+}
+
+// SetEvent sets the event to signaled state
+func SetEvent(event windows.Handle) {
+	procSetEvent.Call(uintptr(event))
+}
+
+// ResetEvent resets the event to non-signaled state
+func ResetEvent(event windows.Handle) {
+	procResetEvent.Call(uintptr(event))
+}
+
+// CloseEvent closes the event handle
+func CloseEvent(event windows.Handle) {
+	procCloseHandle.Call(uintptr(event))
+}
+
+// MsgWaitForMultipleObjects waits for messages or events
+// Returns: 0 = event signaled, 1 = message available, WAIT_TIMEOUT = timeout
+func MsgWaitForMultipleObjects(event windows.Handle, timeoutMs uint32) uint32 {
+	handles := [1]uintptr{uintptr(event)}
+	ret, _, _ := procMsgWaitForMultipleObjects.Call(
+		1,                               // nCount
+		uintptr(unsafe.Pointer(&handles[0])), // pHandles
+		0,                               // bWaitAll = FALSE
+		uintptr(timeoutMs),              // dwMilliseconds
+		QS_ALLINPUT,                     // dwWakeMask
+	)
+	return uint32(ret)
+}
+
+// PeekMessage checks for a message without blocking
+func PeekMessage(msg *MSG) bool {
+	ret, _, _ := procPeekMessageW.Call(
+		uintptr(unsafe.Pointer(msg)),
+		0, 0, 0,
+		PM_REMOVE,
+	)
+	return ret != 0
+}
+
+// ProcessMessage translates and dispatches a message
+func ProcessMessage(msg *MSG) {
+	procTranslateMessage.Call(uintptr(unsafe.Pointer(msg)))
+	procDispatchMessageW.Call(uintptr(unsafe.Pointer(msg)))
 }

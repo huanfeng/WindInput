@@ -486,3 +486,11 @@ void CTextService::SetInputMode(BOOL bChineseMode)
         _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
     }
 }
+
+void CTextService::UpdateCapsLockState(BOOL bCapsLock)
+{
+    if (_pLangBarItemButton != nullptr)
+    {
+        _pLangBarItemButton->UpdateCapsLockState(bCapsLock);
+    }
+}

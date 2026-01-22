@@ -7,10 +7,11 @@ import "encoding/json"
 type RequestType string
 
 const (
-	RequestTypeKeyEvent    RequestType = "key_event"
-	RequestTypeCaretUpdate RequestType = "caret_update"
-	RequestTypeFocusLost   RequestType = "focus_lost"
-	RequestTypeToggleMode  RequestType = "toggle_mode"
+	RequestTypeKeyEvent       RequestType = "key_event"
+	RequestTypeCaretUpdate    RequestType = "caret_update"
+	RequestTypeFocusLost      RequestType = "focus_lost"
+	RequestTypeToggleMode     RequestType = "toggle_mode"
+	RequestTypeCapsLockState  RequestType = "caps_lock_state"
 )
 
 // Request from C++ TSF Bridge
@@ -34,6 +35,11 @@ type CaretData struct {
 	X      int `json:"x"`
 	Y      int `json:"y"`
 	Height int `json:"height"`
+}
+
+// CapsLockData contains Caps Lock state
+type CapsLockData struct {
+	CapsLockOn bool `json:"caps_lock_on"`
 }
 
 // ResponseType defines the type of response to C++

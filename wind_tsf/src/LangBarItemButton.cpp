@@ -17,7 +17,10 @@ CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     , _pLangBarItemSink(nullptr)
     , _dwCookie(0)
     , _bChineseMode(TRUE)
+    , _bCapsLock(FALSE)
 {
+    // Initialize Caps Lock state
+    _bCapsLock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
     DllAddRef();
 }
 
@@ -116,7 +119,14 @@ STDAPI CLangBarItemButton::GetTooltipString(BSTR* pbstrToolTip)
     }
     else
     {
-        *pbstrToolTip = SysAllocString(L"WindInput - English Mode");
+        if (_bCapsLock)
+        {
+            *pbstrToolTip = SysAllocString(L"WindInput - English Mode (Caps Lock ON)");
+        }
+        else
+        {
+            *pbstrToolTip = SysAllocString(L"WindInput - English Mode (Caps Lock OFF)");
+        }
     }
 
     return (*pbstrToolTip != nullptr) ? S_OK : E_OUTOFMEMORY;
@@ -221,7 +231,19 @@ STDAPI CLangBarItemButton::GetIcon(HICON* phIcon)
 
     HFONT hOldFont = (HFONT)SelectObject(hdcMem, hFont);
 
-    const wchar_t* text = _bChineseMode ? L"中" : L"A";
+    // Display text based on mode and Caps Lock state:
+    // Chinese mode: "中"
+    // English mode + Caps Lock ON: "A"
+    // English mode + Caps Lock OFF: "a"
+    const wchar_t* text;
+    if (_bChineseMode)
+    {
+        text = L"中";
+    }
+    else
+    {
+        text = _bCapsLock ? L"A" : L"a";
+    }
     DrawTextW(hdcMem, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(hdcMem, hOldFont);
@@ -281,7 +303,8 @@ STDAPI CLangBarItemButton::GetText(BSTR* pbstrText)
     }
     else
     {
-        *pbstrText = SysAllocString(L"En");
+        // English mode: show "A" or "a" based on Caps Lock state
+        *pbstrText = SysAllocString(_bCapsLock ? L"A" : L"a");
     }
 
     return (*pbstrText != nullptr) ? S_OK : E_OUTOFMEMORY;
@@ -385,6 +408,34 @@ void CLangBarItemButton::UpdateLangBarButton(BOOL bChineseMode)
 
     // Notify sink that the button has changed
     if (_pLangBarItemSink != nullptr)
+    {
+        _pLangBarItemSink->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP);
+    }
+}
+
+void CLangBarItemButton::UpdateCapsLockState(BOOL bCapsLock)
+{
+    if (_bCapsLock == bCapsLock)
+        return;  // No change
+
+    _bCapsLock = bCapsLock;
+
+    // Only update if in English mode (Chinese mode doesn't show Caps Lock state)
+    if (!_bChineseMode && _pLangBarItemSink != nullptr)
+    {
+        _pLangBarItemSink->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP);
+    }
+}
+
+void CLangBarItemButton::UpdateState(BOOL bChineseMode, BOOL bCapsLock)
+{
+    BOOL needUpdate = (_bChineseMode != bChineseMode) ||
+                      (!bChineseMode && _bCapsLock != bCapsLock);
+
+    _bChineseMode = bChineseMode;
+    _bCapsLock = bCapsLock;
+
+    if (needUpdate && _pLangBarItemSink != nullptr)
     {
         _pLangBarItemSink->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP);
     }

@@ -96,7 +96,8 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		return nil
 	}
 
-	key := strings.ToLower(data.Key)
+	// Preserve original key for English mode (uppercase letters should stay uppercase)
+	key := data.Key
 
 	// Handle Shift key for mode toggle
 	if data.KeyCode == 16 { // VK_SHIFT
@@ -145,8 +146,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	case data.KeyCode == 32: // Space
 		return c.handleSpace()
 
-	case len(key) == 1 && key[0] >= 'a' && key[0] <= 'z':
-		return c.handleAlphaKey(key)
+	case len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')):
+		// Chinese mode: convert to lowercase for pinyin
+		return c.handleAlphaKey(strings.ToLower(key))
 
 	case len(key) == 1 && key[0] >= '1' && key[0] <= '9':
 		return c.handleNumberKey(int(key[0] - '0'))
@@ -314,22 +316,24 @@ func (c *Coordinator) showUI() {
 	}
 
 	// Calculate window position (below caret)
-	// Use reasonable defaults if caret position seems invalid
 	windowX := c.caretX
 	windowY := c.caretY + c.caretHeight + 5
 
-	// Sanity check: if position is unreasonable, use a fallback
-	// This handles cases where caret info hasn't been received yet
-	if windowX <= 0 || windowY <= 0 || windowX > 10000 || windowY > 10000 {
+	// Multi-monitor support: coordinates can be negative (monitors to the left/above primary)
+	// Only use fallback if we haven't received valid caret info yet (both X and Y are 0)
+	// or if coordinates are extremely large (likely garbage values)
+	const maxCoord = 32000 // Windows virtual screen limit is typically around 32767
+	if (c.caretX == 0 && c.caretY == 0) || windowX > maxCoord || windowX < -maxCoord || windowY > maxCoord || windowY < -maxCoord {
 		// Use last known good position or a reasonable default
-		if c.lastValidX > 0 && c.lastValidY > 0 {
+		if c.lastValidX != 0 || c.lastValidY != 0 {
 			windowX = c.lastValidX
 			windowY = c.lastValidY
 		} else {
-			// Fallback to screen center area
+			// Fallback to a safe position on primary monitor
 			windowX = 400
 			windowY = 300
 		}
+		c.logger.Debug("Using fallback position", "x", windowX, "y", windowY, "caretX", c.caretX, "caretY", c.caretY)
 	} else {
 		// Save valid position for future fallback
 		c.lastValidX = windowX
@@ -357,11 +361,12 @@ func (c *Coordinator) showModeIndicator() {
 		modeText = "En"
 	}
 
-	// Use valid position or fallback
+	// Use valid position or fallback (multi-monitor: coordinates can be negative)
 	x := c.caretX
 	y := c.caretY + c.caretHeight + 5
-	if x <= 0 || y <= 0 || x > 10000 || y > 10000 {
-		if c.lastValidX > 0 && c.lastValidY > 0 {
+	const maxCoord = 32000
+	if (c.caretX == 0 && c.caretY == 0) || x > maxCoord || x < -maxCoord || y > maxCoord || y < -maxCoord {
+		if c.lastValidX != 0 || c.lastValidY != 0 {
 			x = c.lastValidX
 			y = c.lastValidY
 		} else {
@@ -427,4 +432,36 @@ func (c *Coordinator) HandleToggleMode() bool {
 	c.showModeIndicator()
 
 	return c.chineseMode
+}
+
+// HandleCapsLockState shows Caps Lock indicator (A/a)
+func (c *Coordinator) HandleCapsLockState(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.uiManager == nil || !c.uiManager.IsReady() {
+		return
+	}
+
+	// Show A for Caps Lock ON, a for OFF
+	indicator := "a"
+	if on {
+		indicator = "A"
+	}
+
+	// Use valid position or fallback (multi-monitor: coordinates can be negative)
+	x := c.caretX
+	y := c.caretY + c.caretHeight + 5
+	const maxCoord = 32000
+	if (c.caretX == 0 && c.caretY == 0) || x > maxCoord || x < -maxCoord || y > maxCoord || y < -maxCoord {
+		if c.lastValidX != 0 || c.lastValidY != 0 {
+			x = c.lastValidX
+			y = c.lastValidY
+		} else {
+			x = 400
+			y = 300
+		}
+	}
+
+	c.uiManager.ShowModeIndicator(indicator, x, y)
 }

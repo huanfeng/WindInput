@@ -129,8 +129,15 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 
 STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
-    // We need to handle Shift key up for mode toggle
-    *pfEaten = (wParam == VK_SHIFT && _shiftPending) ? TRUE : FALSE;
+    // We need to handle Shift key up for mode toggle, and Caps Lock for indicator
+    if ((wParam == VK_SHIFT && _shiftPending) || wParam == VK_CAPITAL)
+    {
+        *pfEaten = TRUE;
+    }
+    else
+    {
+        *pfEaten = FALSE;
+    }
     return S_OK;
 }
 
@@ -147,6 +154,31 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
         _pTextService->ToggleInputMode();
 
         *pfEaten = TRUE;
+        return S_OK;
+    }
+
+    // Handle Caps Lock key release - show A/a indicator and update language bar
+    if (wParam == VK_CAPITAL)
+    {
+        // Get current Caps Lock state (after the key was processed)
+        BOOL capsLockOn = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+
+        // Update language bar to show Caps Lock state (A/a in English mode)
+        _pTextService->UpdateCapsLockState(capsLockOn);
+
+        // Send to Go service for popup indicator
+        CIPCClient* pIPCClient = _pTextService->GetIPCClient();
+        if (pIPCClient != nullptr && pIPCClient->IsConnected())
+        {
+            pIPCClient->SendCapsLockState(capsLockOn);
+
+            // Receive and discard response
+            ServiceResponse response;
+            pIPCClient->ReceiveResponse(response);
+        }
+
+        *pfEaten = TRUE;
+        return S_OK;
     }
 
     return S_OK;

@@ -43,12 +43,19 @@ public:
     // Update the button when mode changes
     void UpdateLangBarButton(BOOL bChineseMode);
 
+    // Update the button when Caps Lock state changes
+    void UpdateCapsLockState(BOOL bCapsLock);
+
+    // Update both mode and Caps Lock state
+    void UpdateState(BOOL bChineseMode, BOOL bCapsLock);
+
 private:
     LONG _refCount;
     CTextService* _pTextService;
     ITfLangBarItemSink* _pLangBarItemSink;
     DWORD _dwCookie;
     BOOL _bChineseMode;
+    BOOL _bCapsLock;  // Caps Lock state
 
     // GUID for this language bar item
     static const GUID _guidLangBarItemButton;

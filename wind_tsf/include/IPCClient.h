@@ -93,6 +93,9 @@ public:
     // Send toggle mode request
     BOOL SendToggleMode();
 
+    // Send Caps Lock state for indicator display
+    BOOL SendCapsLockState(BOOL capsLockOn);
+
     // Check if connected
     BOOL IsConnected() const { return _hPipe != INVALID_HANDLE_VALUE; }
 

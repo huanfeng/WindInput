@@ -52,6 +52,9 @@ public:
     void SetInputMode(BOOL bChineseMode);  // Set mode from service response (no IPC)
     BOOL IsChineseMode() { return _bChineseMode; }
 
+    // Update language bar Caps Lock state
+    void UpdateCapsLockState(BOOL bCapsLock);
+
 private:
     LONG _refCount;
     ITfThreadMgr* _pThreadMgr;
