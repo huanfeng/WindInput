@@ -1,0 +1,27 @@
+# Build output
+build/bin/
+
+# Frontend build output
+frontend/dist/
+
+# Node modules
+frontend/node_modules/
+
+# Wails generated bindings
+frontend/wailsjs/
+
+# Dict files (copied from main project)
+build/dict/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

@@ -1,0 +1,35 @@
+# WindInput 拼音输入法配置示例
+# 将此文件复制到 %APPDATA%\WindInput\config.yaml
+
+general:
+  start_in_chinese_mode: true
+  log_level: info
+
+dictionary:
+  # 拼音主词库
+  system_dict: dict/pinyin/base.txt
+  # 用户词库（自动学习）
+  user_dict: user_dict.txt
+  # 可选：五笔词库（用于显示五笔编码提示）
+  pinyin_dict: ""
+
+engine:
+  # 输入法类型: pinyin / wubi
+  type: pinyin
+
+  wubi:
+    auto_commit: unique_at_4
+    empty_code: clear_at_4
+    top_code_commit: true
+    punct_commit: true
+    show_pinyin_hint: false
+
+hotkeys:
+  toggle_mode: shift
+  # 切换输入法引擎 (拼音 <-> 五笔)
+  switch_engine: ctrl+`
+
+ui:
+  font_size: 18
+  candidates_per_page: 9
+  font_path: ""

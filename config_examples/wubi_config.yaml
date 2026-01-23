@@ -1,0 +1,52 @@
+# WindInput 五笔输入法配置示例
+# 将此文件复制到 %APPDATA%\WindInput\config.yaml
+
+general:
+  start_in_chinese_mode: true
+  log_level: info
+
+dictionary:
+  # 五笔主词库
+  system_dict: dict/wubi/jishuang6.txt
+  # 用户词库（自动学习）
+  user_dict: user_dict.txt
+  # 拼音词库（用于反查）
+  pinyin_dict: dict/pinyin/base.txt
+
+engine:
+  # 输入法类型: pinyin / wubi
+  type: wubi
+
+  wubi:
+    # 自动上屏模式:
+    # - none: 不自动上屏
+    # - unique: 候选唯一时上屏
+    # - unique_at_4: 四码唯一时上屏（推荐）
+    # - unique_full_match: 编码完整匹配且唯一时上屏
+    auto_commit: unique_at_4
+
+    # 空码处理:
+    # - none: 不处理（继续输入）
+    # - clear: 清空编码
+    # - clear_at_4: 四码时清空（推荐）
+    # - to_english: 转为英文上屏
+    empty_code: clear_at_4
+
+    # 五码顶字上屏
+    top_code_commit: true
+
+    # 标点顶字上屏
+    punct_commit: true
+
+    # 显示拼音提示（反查功能）
+    show_pinyin_hint: false
+
+hotkeys:
+  toggle_mode: shift
+  # 切换输入法引擎 (拼音 <-> 五笔)
+  switch_engine: ctrl+`
+
+ui:
+  font_size: 18
+  candidates_per_page: 9
+  font_path: ""
