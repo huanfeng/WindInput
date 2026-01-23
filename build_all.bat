@@ -9,7 +9,7 @@ echo.
 REM Get script directory
 set SCRIPT_DIR=%~dp0
 
-echo [1/4] Building Go service (wind_input.exe)...
+echo [1/5] Building Go service (wind_input.exe)...
 cd "%SCRIPT_DIR%wind_input"
 go build -o ../build/wind_input.exe ./cmd/service
 if %errorLevel% neq 0 (
@@ -20,7 +20,7 @@ if %errorLevel% neq 0 (
 echo Go service built successfully
 echo.
 
-echo [2/4] Building C++ DLL (wind_tsf.dll)...
+echo [2/5] Building C++ DLL (wind_tsf.dll)...
 cd "%SCRIPT_DIR%wind_tsf\build"
 if not exist "%SCRIPT_DIR%wind_tsf\build" (
     mkdir "%SCRIPT_DIR%wind_tsf\build"
@@ -36,7 +36,25 @@ if %errorLevel% neq 0 (
 echo C++ DLL built successfully
 echo.
 
-echo [3/4] Copying dictionaries to build directory...
+echo [3/5] Building Settings UI (wind_setting.exe)...
+cd "%SCRIPT_DIR%wind_setting"
+REM Check if wails is installed
+where wails >nul 2>&1
+if %errorLevel% neq 0 (
+    echo [WARN] Wails CLI not found, skipping wind_setting build
+    echo        Install with: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+) else (
+    wails build
+    if %errorLevel% neq 0 (
+        echo [WARN] wind_setting build failed, continuing...
+    ) else (
+        copy /Y "%SCRIPT_DIR%wind_setting\build\bin\wind_setting.exe" "%SCRIPT_DIR%build\" >nul
+        echo Settings UI built successfully
+    )
+)
+echo.
+
+echo [4/5] Copying dictionaries to build directory...
 cd "%SCRIPT_DIR%"
 if not exist "%SCRIPT_DIR%build\dict\pinyin" mkdir "%SCRIPT_DIR%build\dict\pinyin"
 if not exist "%SCRIPT_DIR%build\dict\wubi" mkdir "%SCRIPT_DIR%build\dict\wubi"
@@ -58,7 +76,7 @@ if exist "%SCRIPT_DIR%ref\极爽词库6.txt" (
 )
 echo.
 
-echo [4/4] Checking output files...
+echo [5/5] Checking output files...
 if not exist "%SCRIPT_DIR%build\wind_tsf.dll" (
     echo [ERROR] wind_tsf.dll not found
     pause
@@ -79,6 +97,7 @@ echo.
 echo Output files:
 echo - build\wind_tsf.dll (TSF Bridge)
 echo - build\wind_input.exe (IME Service with Native UI)
+echo - build\wind_setting.exe (Settings UI, optional)
 echo - build\dict\pinyin\pinyin.txt (Pinyin dictionary)
 echo - build\dict\wubi\wubi86.txt (Wubi dictionary)
 echo.
