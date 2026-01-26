@@ -878,6 +878,26 @@ func (c *Coordinator) HandleFocusGained() *bridge.StatusUpdateData {
 	}
 }
 
+// HandleIMEActivated handles IME being switched back (user selected this IME again)
+// This is called from TSF's Activate method
+func (c *Coordinator) HandleIMEActivated() *bridge.StatusUpdateData {
+	c.logger.Info("IME activated (user switched back to this IME)")
+
+	// Set IME as activated (this will show toolbar if enabled)
+	c.SetIMEActivated(true)
+
+	// Return current status so TSF can sync state
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return &bridge.StatusUpdateData{
+		ChineseMode:        c.chineseMode,
+		FullWidth:          c.fullWidth,
+		ChinesePunctuation: c.chinesePunctuation,
+		ToolbarVisible:     c.toolbarVisible,
+		CapsLock:           ui.GetCapsLockState(),
+	}
+}
+
 // HandleToggleMode toggles the input mode and returns the new state
 func (c *Coordinator) HandleToggleMode() bool {
 	c.mu.Lock()

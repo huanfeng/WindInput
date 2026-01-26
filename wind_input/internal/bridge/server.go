@@ -36,6 +36,7 @@ type MessageHandler interface {
 	HandleFocusLost()                                   // Called when focus is lost
 	HandleFocusGained() *StatusUpdateData               // Called when focus is gained, returns current status
 	HandleIMEDeactivated()                              // Called when IME is being switched away (user selected another IME)
+	HandleIMEActivated() *StatusUpdateData              // Called when IME is switched back (user selected this IME again)
 	HandleToggleMode() bool                             // Called when mode toggle requested, returns new chineseMode state
 	HandleCapsLockState(on bool)                        // Called when Caps Lock state changes, shows A/a indicator
 	HandleMenuCommand(command string) *StatusUpdateData // Called when menu command received
@@ -333,6 +334,17 @@ func (s *Server) processRequest(request *Request, clientID int) *Response {
 	case RequestTypeIMEDeactivated:
 		s.logger.Info("IME deactivated (user switched to another IME)", "clientID", clientID)
 		s.handler.HandleIMEDeactivated()
+		return &Response{Type: ResponseTypeAck}
+
+	case RequestTypeIMEActivated:
+		s.logger.Info("IME activated (user switched back to this IME)", "clientID", clientID)
+		statusUpdate := s.handler.HandleIMEActivated()
+		if statusUpdate != nil {
+			return &Response{
+				Type: ResponseTypeStatusUpdate,
+				Data: statusUpdate,
+			}
+		}
 		return &Response{Type: ResponseTypeAck}
 
 	case RequestTypeFocusGained:

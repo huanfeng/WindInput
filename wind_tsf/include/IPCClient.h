@@ -111,6 +111,9 @@ public:
     // Send IME deactivated notification (when user switches to another IME)
     BOOL SendIMEDeactivated();
 
+    // Send IME activated notification (when user switches back to this IME)
+    BOOL SendIMEActivated();
+
     // Check if connected
     BOOL IsConnected() const { return _hPipe != INVALID_HANDLE_VALUE; }
 

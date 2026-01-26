@@ -111,6 +111,18 @@ STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
         OutputDebugStringW(L"[WindInput] LangBarButton initialized\n");
     }
 
+    // Notify Go service that IME is activated (so it can show toolbar)
+    if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
+    {
+        OutputDebugStringW(L"[WindInput] Sending ime_activated to service\n");
+        if (_pIPCClient->SendIMEActivated())
+        {
+            ServiceResponse response;
+            _pIPCClient->ReceiveResponse(response);
+            OutputDebugStringW(L"[WindInput] ime_activated response received\n");
+        }
+    }
+
     OutputDebugStringW(L"[WindInput] TextService::Activate completed successfully\n");
     return S_OK;
 }

@@ -616,6 +616,19 @@ BOOL CIPCClient::SendIMEDeactivated()
     return _SendMessage(json);
 }
 
+BOOL CIPCClient::SendIMEActivated()
+{
+    if (!_ShouldAttemptOperation())
+    {
+        return FALSE;
+    }
+
+    _LogInfo(L"Sending ime_activated");
+
+    std::wstring json = L"{\"type\":\"ime_activated\",\"data\":{}}";
+    return _SendMessage(json);
+}
+
 BOOL CIPCClient::_SendMessage(const std::wstring& message)
 {
     // Convert to UTF-8

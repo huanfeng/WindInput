@@ -12,6 +12,7 @@ const (
 	RequestTypeFocusLost      RequestType = "focus_lost"
 	RequestTypeFocusGained    RequestType = "focus_gained"    // 输入法获取焦点
 	RequestTypeIMEDeactivated RequestType = "ime_deactivated" // 输入法被切换走
+	RequestTypeIMEActivated   RequestType = "ime_activated"   // 输入法被切换回来
 	RequestTypeToggleMode     RequestType = "toggle_mode"
 	RequestTypeCapsLockState  RequestType = "caps_lock_state"
 	RequestTypeMenuCommand    RequestType = "menu_command"    // 菜单命令
