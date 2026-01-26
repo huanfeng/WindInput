@@ -449,16 +449,138 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight)
     return FALSE;
 }
 
+// Helper function to check if a window is a console/terminal window
+static BOOL IsConsoleWindow(HWND hwnd)
+{
+    if (hwnd == nullptr)
+        return FALSE;
+
+    WCHAR className[256] = {0};
+    if (GetClassNameW(hwnd, className, 256) == 0)
+        return FALSE;
+
+    // Check for known console window classes
+    // ConsoleWindowClass - Traditional conhost.exe console
+    // CASCADIA_HOSTING_WINDOW_CLASS - Windows Terminal
+    // PseudoConsoleWindow - ConPTY pseudo console
+    if (wcscmp(className, L"ConsoleWindowClass") == 0 ||
+        wcscmp(className, L"CASCADIA_HOSTING_WINDOW_CLASS") == 0 ||
+        wcsstr(className, L"Console") != nullptr ||
+        wcsstr(className, L"Terminal") != nullptr)
+    {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+// Try to get caret position for console/terminal windows
+static BOOL GetConsoleCaretPosition(HWND hwndConsole, LONG* px, LONG* py, LONG* pHeight)
+{
+    if (hwndConsole == nullptr)
+        return FALSE;
+
+    // For Windows Terminal and modern consoles, we can try to get the console buffer info
+    // This requires the console to be attached to our process or accessible
+
+    // First, try to get the console window handle and screen buffer info
+    // Note: GetConsoleWindow() returns the console for the CURRENT process,
+    // which may not be the foreground console. We need a different approach.
+
+    // Get window rect for calculations
+    RECT rcWindow;
+    if (!GetWindowRect(hwndConsole, &rcWindow))
+        return FALSE;
+
+    // Get client rect
+    RECT rcClient;
+    if (!GetClientRect(hwndConsole, &rcClient))
+        return FALSE;
+
+    // Calculate client area origin in screen coordinates
+    POINT clientOrigin = {0, 0};
+    ClientToScreen(hwndConsole, &clientOrigin);
+
+    // Try to use GUITHREADINFO - sometimes works for console windows
+    DWORD threadId = GetWindowThreadProcessId(hwndConsole, nullptr);
+    GUITHREADINFO guiInfo = { sizeof(GUITHREADINFO) };
+
+    if (GetGUIThreadInfo(threadId, &guiInfo) && guiInfo.hwndCaret != nullptr)
+    {
+        POINT caretPos;
+        caretPos.x = guiInfo.rcCaret.left;
+        caretPos.y = guiInfo.rcCaret.bottom;
+
+        // Convert from client coordinates to screen coordinates
+        ClientToScreen(guiInfo.hwndCaret, &caretPos);
+
+        // Validate that it's within the console window area
+        if (caretPos.x >= rcWindow.left && caretPos.x <= rcWindow.right &&
+            caretPos.y >= rcWindow.top && caretPos.y <= rcWindow.bottom)
+        {
+            *px = caretPos.x;
+            *py = caretPos.y;
+            *pHeight = max(guiInfo.rcCaret.bottom - guiInfo.rcCaret.top, 16);
+
+            OutputDebugStringW(L"[WindInput] GetConsoleCaretPosition: Got caret from GUITHREADINFO\n");
+            return TRUE;
+        }
+    }
+
+    // Fallback: Position the candidate window at a reasonable location
+    // For consoles, we position it near the bottom of the visible area
+    // This is better than the center, as typing usually happens at the bottom
+
+    // Estimate: console typically shows text near the current cursor line
+    // Position the IME window near the bottom-left of the console
+    int clientWidth = rcClient.right - rcClient.left;
+    int clientHeight = rcClient.bottom - rcClient.top;
+
+    // Position at roughly 10% from left, 80% from top (near bottom where typing usually occurs)
+    *px = clientOrigin.x + (clientWidth * 10 / 100);
+    *py = clientOrigin.y + (clientHeight * 80 / 100);
+    *pHeight = 16;  // Standard console line height approximation
+
+    WCHAR debug[256];
+    wsprintfW(debug, L"[WindInput] GetConsoleCaretPosition: Using console fallback position (%ld, %ld)\n", *px, *py);
+    OutputDebugStringW(debug);
+
+    return TRUE;
+}
+
 BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight)
 {
-    // Method 1 (NEW): Try TSF APIs first - this is the most reliable for browsers
+    // First, check if the foreground window is a console/terminal
+    HWND hwndForeground = GetForegroundWindow();
+    BOOL isConsole = IsConsoleWindow(hwndForeground);
+
+    if (isConsole)
+    {
+        OutputDebugStringW(L"[WindInput] GetCaretPosition: Detected console window\n");
+    }
+
+    // Method 1: Try TSF APIs first - this is the most reliable for browsers and modern apps
     // ITfContextView::GetTextExt provides accurate caret position in Chrome, Edge, etc.
     if (GetCaretPositionFromTSF(px, py, pHeight))
     {
         return TRUE;
     }
 
-    // Method 2: Try to get caret position from the GUI thread info
+    // Method 2: For console windows, use specialized handling
+    if (isConsole)
+    {
+        if (GetConsoleCaretPosition(hwndForeground, px, py, pHeight))
+        {
+            // Save as last known good position
+            s_lastCaretX = *px;
+            s_lastCaretY = *py;
+            s_lastCaretHeight = *pHeight;
+            s_hasLastCaretPos = TRUE;
+            return TRUE;
+        }
+    }
+
+    // Method 3: Try to get caret position from the GUI thread info
     // This works well for traditional Win32 applications
     GUITHREADINFO guiInfo = { sizeof(GUITHREADINFO) };
 
