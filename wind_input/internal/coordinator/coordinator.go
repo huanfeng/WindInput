@@ -823,6 +823,23 @@ func (c *Coordinator) HandleFocusLost() {
 	c.clearState()
 }
 
+// HandleIMEDeactivated handles IME being switched away (user selected another IME)
+// This is called from TSF's Deactivate method, before the client disconnects
+func (c *Coordinator) HandleIMEDeactivated() {
+	c.logger.Info("IME deactivated (user switched to another IME), hiding toolbar")
+
+	c.mu.Lock()
+	c.imeActivated = false
+	c.clearState()
+	c.mu.Unlock()
+
+	// Immediately hide the toolbar
+	if c.uiManager != nil {
+		c.uiManager.SetToolbarVisible(false)
+		c.uiManager.Hide()
+	}
+}
+
 // HandleClientDisconnected handles TSF client disconnection
 // When all clients disconnect (activeClients == 0), hide the toolbar
 func (c *Coordinator) HandleClientDisconnected(activeClients int) {

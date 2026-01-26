@@ -601,6 +601,21 @@ BOOL CIPCClient::SendMenuCommand(const char* command)
     return _SendMessage(oss.str());
 }
 
+BOOL CIPCClient::SendIMEDeactivated()
+{
+    // Don't check circuit breaker here - we want to send this even if failing
+    // This is important for cleanup
+    if (!IsConnected())
+    {
+        return FALSE;
+    }
+
+    _LogInfo(L"Sending ime_deactivated");
+
+    std::wstring json = L"{\"type\":\"ime_deactivated\",\"data\":{}}";
+    return _SendMessage(json);
+}
+
 BOOL CIPCClient::_SendMessage(const std::wstring& message)
 {
     // Convert to UTF-8

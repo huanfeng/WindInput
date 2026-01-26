@@ -125,6 +125,19 @@ STDAPI CTextService::Deactivate()
     // Release key event sink
     _UninitKeyEventSink();
 
+    // Notify Go service that IME is being deactivated (before disconnecting)
+    // This allows the service to hide the toolbar immediately
+    if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
+    {
+        OutputDebugStringW(L"[WindInput] Sending ime_deactivated to service\n");
+        if (_pIPCClient->SendIMEDeactivated())
+        {
+            // Receive response to complete the protocol
+            ServiceResponse response;
+            _pIPCClient->ReceiveResponse(response);
+        }
+    }
+
     // Release IPC client
     _UninitIPCClient();
 

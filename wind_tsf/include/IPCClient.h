@@ -108,6 +108,9 @@ public:
     // Send menu command (toggle_mode, toggle_width, toggle_punct, open_settings, toggle_toolbar)
     BOOL SendMenuCommand(const char* command);
 
+    // Send IME deactivated notification (when user switches to another IME)
+    BOOL SendIMEDeactivated();
+
     // Check if connected
     BOOL IsConnected() const { return _hPipe != INVALID_HANDLE_VALUE; }
 
