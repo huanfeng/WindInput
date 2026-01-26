@@ -660,3 +660,87 @@ func GetCapsLockState() bool {
 	// The low-order bit indicates toggle state (0 = off, 1 = on)
 	return (state & 0x0001) != 0
 }
+
+// CandidateLayout represents the layout direction of the candidate window
+type CandidateLayout int
+
+const (
+	LayoutVertical   CandidateLayout = iota // Candidates displayed vertically (current default)
+	LayoutHorizontal                        // Candidates displayed horizontally (future)
+)
+
+// AdjustCandidatePosition adjusts the candidate window position to ensure it stays within screen bounds.
+// Parameters:
+//   - caretX, caretY: the caret position (where input is happening)
+//   - caretHeight: height of the caret/cursor
+//   - windowWidth, windowHeight: size of the candidate window
+//   - layout: the layout direction of the candidate window
+//
+// Returns adjusted (x, y) position for the candidate window.
+func AdjustCandidatePosition(caretX, caretY, caretHeight, windowWidth, windowHeight int, layout CandidateLayout) (x, y int) {
+	// Get the work area of the monitor containing the caret
+	workLeft, workTop, workRight, workBottom := GetMonitorWorkAreaFromPoint(caretX, caretY)
+
+	// Small gap between caret and candidate window
+	const gap = 5
+
+	switch layout {
+	case LayoutHorizontal:
+		// Horizontal layout: prefer to show to the right of caret
+		// If not enough space on the right, show on the left
+		x = caretX + gap
+		y = caretY
+
+		// Check right boundary
+		if x+windowWidth > workRight {
+			// Not enough space on the right, show on the left
+			x = caretX - windowWidth - gap
+		}
+
+		// Ensure x is within left boundary
+		if x < workLeft {
+			x = workLeft
+		}
+
+		// Check bottom boundary for vertical overflow
+		if y+windowHeight > workBottom {
+			y = workBottom - windowHeight
+		}
+
+		// Ensure y is within top boundary
+		if y < workTop {
+			y = workTop
+		}
+
+	case LayoutVertical:
+		fallthrough
+	default:
+		// Vertical layout (default): prefer to show below caret
+		// If not enough space below, show above
+		x = caretX
+		y = caretY + caretHeight + gap
+
+		// Check bottom boundary
+		if y+windowHeight > workBottom {
+			// Not enough space below, show above the caret
+			y = caretY - windowHeight - gap
+		}
+
+		// Ensure y is within top boundary (in case window is very tall)
+		if y < workTop {
+			y = workTop
+		}
+
+		// Check right boundary for horizontal overflow
+		if x+windowWidth > workRight {
+			x = workRight - windowWidth
+		}
+
+		// Ensure x is within left boundary
+		if x < workLeft {
+			x = workLeft
+		}
+	}
+
+	return x, y
+}

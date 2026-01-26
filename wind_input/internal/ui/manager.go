@@ -15,7 +15,8 @@ type UICommand struct {
 	Type       string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings"
 	Candidates []Candidate
 	Input      string
-	X, Y       int
+	X, Y       int // Caret position (original, not adjusted)
+	CaretHeight int // Height of the caret for position adjustment
 	Page       int
 	TotalPages int
 	ModeText   string
@@ -174,7 +175,7 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 
 	switch cmd.Type {
 	case "show":
-		m.doShowCandidates(cmd.Candidates, cmd.Input, cmd.X, cmd.Y, cmd.Page, cmd.TotalPages)
+		m.doShowCandidates(cmd.Candidates, cmd.Input, cmd.X, cmd.Y, cmd.CaretHeight, cmd.Page, cmd.TotalPages)
 	case "hide":
 		m.doHide()
 	case "mode":
@@ -203,8 +204,12 @@ func (m *Manager) IsReady() bool {
 	return m.ready
 }
 
-// ShowCandidates shows candidates at the given position (async, non-blocking)
-func (m *Manager) ShowCandidates(candidates []Candidate, input string, x, y, page, totalPages int) error {
+// ShowCandidates shows candidates at the given caret position (async, non-blocking)
+// The position will be automatically adjusted to stay within screen bounds.
+// Parameters:
+//   - caretX, caretY: the caret position (where input is happening)
+//   - caretHeight: height of the caret/cursor
+func (m *Manager) ShowCandidates(candidates []Candidate, input string, caretX, caretY, caretHeight, page, totalPages int) error {
 	m.mu.Lock()
 	if !m.ready {
 		m.mu.Unlock()
@@ -214,22 +219,23 @@ func (m *Manager) ShowCandidates(candidates []Candidate, input string, x, y, pag
 	m.input = input
 	m.page = page
 	m.totalPages = totalPages
-	m.caretX = x
-	m.caretY = y
+	m.caretX = caretX
+	m.caretY = caretY
 	m.mu.Unlock()
 
-	m.logger.Debug("Queuing ShowCandidates", "input", input, "count", len(candidates), "x", x, "y", y)
+	m.logger.Debug("Queuing ShowCandidates", "input", input, "count", len(candidates), "caretX", caretX, "caretY", caretY, "caretHeight", caretHeight)
 
 	// Send command to UI thread (non-blocking due to buffered channel)
 	select {
 	case m.cmdCh <- UICommand{
-		Type:       "show",
-		Candidates: candidates,
-		Input:      input,
-		X:          x,
-		Y:          y,
-		Page:       page,
-		TotalPages: totalPages,
+		Type:        "show",
+		Candidates:  candidates,
+		Input:       input,
+		X:           caretX,
+		Y:           caretY,
+		CaretHeight: caretHeight,
+		Page:        page,
+		TotalPages:  totalPages,
 	}:
 		// Signal the event to wake up the message loop
 		if m.cmdEvent != 0 {
@@ -243,17 +249,25 @@ func (m *Manager) ShowCandidates(candidates []Candidate, input string, x, y, pag
 }
 
 // doShowCandidates actually shows candidates (called from UI thread)
-func (m *Manager) doShowCandidates(candidates []Candidate, input string, x, y, page, totalPages int) {
-	m.logger.Debug("doShowCandidates start", "input", input, "count", len(candidates), "x", x, "y", y)
+// Parameters caretX, caretY, caretHeight are the original caret position info.
+func (m *Manager) doShowCandidates(candidates []Candidate, input string, caretX, caretY, caretHeight, page, totalPages int) {
+	m.logger.Debug("doShowCandidates start", "input", input, "count", len(candidates), "caretX", caretX, "caretY", caretY, "caretHeight", caretHeight)
 
-	// Render
+	// Render first to get actual window size
 	m.logger.Debug("Rendering candidates...")
 	img := m.renderer.RenderCandidates(candidates, input, page, totalPages)
-	m.logger.Debug("Render complete", "width", img.Bounds().Dx(), "height", img.Bounds().Dy())
+	windowWidth := img.Bounds().Dx()
+	windowHeight := img.Bounds().Dy()
+	m.logger.Debug("Render complete", "width", windowWidth, "height", windowHeight)
+
+	// Adjust position to stay within screen bounds
+	// Use LayoutVertical for now (current layout), future can add LayoutHorizontal support
+	windowX, windowY := AdjustCandidatePosition(caretX, caretY, caretHeight, windowWidth, windowHeight, LayoutVertical)
+	m.logger.Debug("Position adjusted", "windowX", windowX, "windowY", windowY)
 
 	// Update window
 	m.logger.Debug("Updating window content...")
-	if err := m.window.UpdateContent(img, x, y); err != nil {
+	if err := m.window.UpdateContent(img, windowX, windowY); err != nil {
 		m.logger.Error("UpdateContent failed", "error", err)
 		return
 	}

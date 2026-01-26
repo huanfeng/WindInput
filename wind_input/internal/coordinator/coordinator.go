@@ -723,36 +723,41 @@ func (c *Coordinator) showUI() {
 		}
 	}
 
-	// Calculate window position (below caret)
-	windowX := c.caretX
-	windowY := c.caretY + c.caretHeight + 5
+	// Use caret position for candidate window placement
+	// The UI manager will handle boundary detection and position adjustment
+	caretX := c.caretX
+	caretY := c.caretY
+	caretHeight := c.caretHeight
 
 	// Multi-monitor support: coordinates can be negative (monitors to the left/above primary)
 	// Only use fallback if we haven't received valid caret info yet (both X and Y are 0)
 	// or if coordinates are extremely large (likely garbage values)
 	const maxCoord = 32000 // Windows virtual screen limit is typically around 32767
-	if (c.caretX == 0 && c.caretY == 0) || windowX > maxCoord || windowX < -maxCoord || windowY > maxCoord || windowY < -maxCoord {
+	if (c.caretX == 0 && c.caretY == 0) || caretX > maxCoord || caretX < -maxCoord || caretY > maxCoord || caretY < -maxCoord {
 		// Use last known good position or a reasonable default
 		if c.lastValidX != 0 || c.lastValidY != 0 {
-			windowX = c.lastValidX
-			windowY = c.lastValidY
+			caretX = c.lastValidX
+			caretY = c.lastValidY
+			caretHeight = 20 // Default height for fallback
 		} else {
 			// Fallback to a safe position on primary monitor
-			windowX = 400
-			windowY = 300
+			caretX = 400
+			caretY = 300
+			caretHeight = 20
 		}
-		c.logger.Debug("Using fallback position", "x", windowX, "y", windowY, "caretX", c.caretX, "caretY", c.caretY)
+		c.logger.Debug("Using fallback position", "caretX", caretX, "caretY", caretY)
 	} else {
 		// Save valid position for future fallback
-		c.lastValidX = windowX
-		c.lastValidY = windowY
+		c.lastValidX = caretX
+		c.lastValidY = caretY
 	}
 
 	c.uiManager.ShowCandidates(
 		displayCandidates,
 		c.inputBuffer,
-		windowX,
-		windowY,
+		caretX,
+		caretY,
+		caretHeight,
 		c.currentPage,
 		c.totalPages,
 	)
