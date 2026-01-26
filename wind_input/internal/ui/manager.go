@@ -489,16 +489,28 @@ func (m *Manager) OpenSettings() {
 // doShowToolbar shows the toolbar with optional position and state (called from UI thread)
 func (m *Manager) doShowToolbar(cmd UICommand) {
 	if m.toolbar == nil {
+		m.logger.Warn("doShowToolbar: toolbar is nil")
 		return
 	}
+
+	m.logger.Debug("doShowToolbar called",
+		"x", cmd.ToolbarX,
+		"y", cmd.ToolbarY,
+		"hasState", cmd.ToolbarState != nil)
 
 	// Set position if provided
 	if cmd.ToolbarX != 0 || cmd.ToolbarY != 0 {
 		m.toolbar.SetPosition(cmd.ToolbarX, cmd.ToolbarY)
+		m.logger.Debug("Toolbar position set", "x", cmd.ToolbarX, "y", cmd.ToolbarY)
 	}
 
 	// Set state if provided (before rendering)
 	if cmd.ToolbarState != nil {
+		m.logger.Debug("Toolbar state set",
+			"chineseMode", cmd.ToolbarState.ChineseMode,
+			"fullWidth", cmd.ToolbarState.FullWidth,
+			"chinesePunct", cmd.ToolbarState.ChinesePunct,
+			"capsLock", cmd.ToolbarState.CapsLock)
 		m.toolbar.SetState(*cmd.ToolbarState)
 	} else {
 		// Just render with current state
@@ -506,20 +518,32 @@ func (m *Manager) doShowToolbar(cmd UICommand) {
 	}
 
 	m.toolbar.Show()
-	m.logger.Debug("Toolbar shown", "x", cmd.ToolbarX, "y", cmd.ToolbarY)
+	m.logger.Info("Toolbar shown", "x", cmd.ToolbarX, "y", cmd.ToolbarY)
 }
 
 // doHideToolbar hides the toolbar (called from UI thread)
 func (m *Manager) doHideToolbar() {
 	if m.toolbar != nil {
 		m.toolbar.Hide()
+		m.logger.Info("Toolbar hidden")
+	} else {
+		m.logger.Warn("doHideToolbar: toolbar is nil")
 	}
 }
 
 // doUpdateToolbar updates the toolbar state (called from UI thread)
 func (m *Manager) doUpdateToolbar(state *ToolbarState) {
 	if m.toolbar != nil && state != nil {
+		m.logger.Debug("doUpdateToolbar",
+			"chineseMode", state.ChineseMode,
+			"fullWidth", state.FullWidth,
+			"chinesePunct", state.ChinesePunct,
+			"capsLock", state.CapsLock)
 		m.toolbar.SetState(*state)
+	} else {
+		m.logger.Warn("doUpdateToolbar: toolbar or state is nil",
+			"toolbarNil", m.toolbar == nil,
+			"stateNil", state == nil)
 	}
 }
 

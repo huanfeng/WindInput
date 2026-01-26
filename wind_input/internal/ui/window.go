@@ -612,8 +612,8 @@ func GetCurrentMonitorWorkArea() (left, top, right, bottom int) {
 func GetDefaultToolbarPosition(toolbarWidth, toolbarHeight int) (x, y int) {
 	left, top, right, bottom := GetCurrentMonitorWorkArea()
 
-	// Position at bottom-right corner with some margin
-	margin := 10
+	// Position at bottom-right corner with some margin (DPI scaled)
+	margin := ScaleIntForDPI(10)
 	x = right - toolbarWidth - margin
 	y = bottom - toolbarHeight - margin
 
@@ -633,8 +633,8 @@ func GetDefaultToolbarPosition(toolbarWidth, toolbarHeight int) (x, y int) {
 func GetToolbarPositionForCaret(caretX, caretY, toolbarWidth, toolbarHeight int) (x, y int) {
 	left, top, right, bottom := GetMonitorWorkAreaFromPoint(caretX, caretY)
 
-	// Position at bottom-right corner with some margin
-	margin := 10
+	// Position at bottom-right corner with some margin (DPI scaled)
+	margin := ScaleIntForDPI(10)
 	x = right - toolbarWidth - margin
 	y = bottom - toolbarHeight - margin
 

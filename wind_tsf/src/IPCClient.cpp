@@ -303,7 +303,7 @@ BOOL CIPCClient::_StartService()
     // Start the service process
     STARTUPINFOW si = { sizeof(STARTUPINFOW) };
     si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_SHOW;  // Show console for debugging; change to SW_HIDE for release
+    si.wShowWindow = SW_HIDE;  // Hide console window, use log file for debugging
 
     PROCESS_INFORMATION pi = {};
 

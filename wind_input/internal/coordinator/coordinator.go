@@ -897,7 +897,7 @@ func (c *Coordinator) HandleToggleMode() bool {
 	return c.chineseMode
 }
 
-// HandleCapsLockState shows Caps Lock indicator (A/a)
+// HandleCapsLockState shows Caps Lock indicator (A/a) and updates toolbar
 func (c *Coordinator) HandleCapsLockState(on bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -927,6 +927,16 @@ func (c *Coordinator) HandleCapsLockState(on bool) {
 	}
 
 	c.uiManager.ShowModeIndicator(indicator, x, y)
+
+	// Update toolbar state to sync CapsLock indicator
+	if c.toolbarVisible && c.imeActivated {
+		c.uiManager.UpdateToolbarState(ui.ToolbarState{
+			ChineseMode:  c.chineseMode,
+			FullWidth:    c.fullWidth,
+			ChinesePunct: c.chinesePunctuation,
+			CapsLock:     on,
+		})
+	}
 }
 
 // handleEngineSwitchKey 处理引擎切换快捷键 (Ctrl+`)

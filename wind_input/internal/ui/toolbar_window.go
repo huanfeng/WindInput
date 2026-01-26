@@ -516,23 +516,34 @@ func (w *ToolbarWindow) updateLayeredWindow(img *image.RGBA, x, y int) error {
 // Show shows the toolbar window
 func (w *ToolbarWindow) Show() {
 	if w.hwnd == 0 {
+		w.logger.Warn("ToolbarWindow.Show: hwnd is 0")
 		return
 	}
-	procShowWindow.Call(uintptr(w.hwnd), SW_SHOW)
+
 	w.mu.Lock()
+	wasVisible := w.visible
+	x, y := w.x, w.y
 	w.visible = true
 	w.mu.Unlock()
+
+	procShowWindow.Call(uintptr(w.hwnd), SW_SHOW)
+	w.logger.Debug("ToolbarWindow.Show", "wasVisible", wasVisible, "x", x, "y", y, "hwnd", w.hwnd)
 }
 
 // Hide hides the toolbar window
 func (w *ToolbarWindow) Hide() {
 	if w.hwnd == 0 {
+		w.logger.Warn("ToolbarWindow.Hide: hwnd is 0")
 		return
 	}
-	procShowWindow.Call(uintptr(w.hwnd), SW_HIDE)
+
 	w.mu.Lock()
+	wasVisible := w.visible
 	w.visible = false
 	w.mu.Unlock()
+
+	procShowWindow.Call(uintptr(w.hwnd), SW_HIDE)
+	w.logger.Debug("ToolbarWindow.Hide", "wasVisible", wasVisible, "hwnd", w.hwnd)
 }
 
 // IsVisible returns whether the toolbar is visible
