@@ -7,6 +7,7 @@
 class CKeyEventSink;
 class CIPCClient;
 class CLangBarItemButton;
+class CCaretEditSession;
 
 class CTextService : public ITfTextInputProcessor,
                      public ITfThreadMgrEventSink
@@ -46,6 +47,9 @@ public:
     // Get and send caret position to Go Service
     BOOL GetCaretPosition(LONG* px, LONG* py, LONG* pHeight);
     void SendCaretPositionUpdate();
+
+    // Get caret position using TSF APIs (more accurate for browsers)
+    BOOL GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight);
 
     // Input mode control
     void ToggleInputMode();

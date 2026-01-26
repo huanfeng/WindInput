@@ -29,6 +29,7 @@ set(SOURCES
     src/KeyEventSink.cpp
     src/IPCClient.cpp
     src/LangBarItemButton.cpp
+    src/CaretEditSession.cpp
 )
 
 # 创建 DLL

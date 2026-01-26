@@ -2,6 +2,7 @@
 #include "KeyEventSink.h"
 #include "IPCClient.h"
 #include "LangBarItemButton.h"
+#include "CaretEditSession.h"
 
 CTextService::CTextService()
     : _refCount(1)
@@ -369,10 +370,71 @@ static LONG s_lastCaretY = 0;
 static LONG s_lastCaretHeight = 20;
 static BOOL s_hasLastCaretPos = FALSE;
 
+// Get caret position using TSF APIs (for browsers and modern apps)
+BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight)
+{
+    if (_pThreadMgr == nullptr)
+    {
+        return FALSE;
+    }
+
+    // Get current document manager
+    ITfDocumentMgr* pDocMgr = nullptr;
+    HRESULT hr = _pThreadMgr->GetFocus(&pDocMgr);
+    if (FAILED(hr) || pDocMgr == nullptr)
+    {
+        return FALSE;
+    }
+
+    // Get top context
+    ITfContext* pContext = nullptr;
+    hr = pDocMgr->GetTop(&pContext);
+    pDocMgr->Release();
+
+    if (FAILED(hr) || pContext == nullptr)
+    {
+        return FALSE;
+    }
+
+    // Use EditSession to get caret position
+    RECT rc = {};
+    BOOL result = CCaretEditSession::GetCaretRect(pContext, &rc);
+    pContext->Release();
+
+    if (result)
+    {
+        // rc contains screen coordinates
+        *px = rc.left;
+        *py = rc.bottom;  // Position below the caret
+        *pHeight = rc.bottom - rc.top;
+
+        if (*pHeight <= 0)
+            *pHeight = 20;
+
+        // Save as last known good position
+        s_lastCaretX = *px;
+        s_lastCaretY = *py;
+        s_lastCaretHeight = *pHeight;
+        s_hasLastCaretPos = TRUE;
+
+        OutputDebugStringW(L"[WindInput] GetCaretPositionFromTSF: Success\n");
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight)
 {
-    // Method 1: Try to get caret position from the GUI thread info
-    // This is more reliable than trying to use TSF's GetSelection which requires an edit cookie
+    // Method 1 (NEW): Try TSF APIs first - this is the most reliable for browsers
+    // ITfContextView::GetTextExt provides accurate caret position in Chrome, Edge, etc.
+    if (GetCaretPositionFromTSF(px, py, pHeight))
+    {
+        return TRUE;
+    }
+
+    // Method 2: Try to get caret position from the GUI thread info
+    // This works well for traditional Win32 applications
     GUITHREADINFO guiInfo = { sizeof(GUITHREADINFO) };
 
     if (GetGUIThreadInfo(0, &guiInfo))
@@ -408,7 +470,7 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight)
         }
     }
 
-    // Method 2: Fallback to GetCaretPos
+    // Method 3: Fallback to GetCaretPos
     POINT pt;
     if (GetCaretPos(&pt))
     {
@@ -436,7 +498,7 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight)
         }
     }
 
-    // Method 3: For browsers/WebView2, try to get focus window position
+    // Method 4: For browsers/WebView2, try to get focus window position
     // Browsers often don't expose caret position properly, so we use the focus window
     HWND hwndFocus = GetForegroundWindow();
     if (hwndFocus != nullptr)
@@ -466,7 +528,7 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight)
         }
     }
 
-    // Method 4: Use last known good position if available
+    // Method 5: Use last known good position if available
     if (s_hasLastCaretPos)
     {
         *px = s_lastCaretX;
