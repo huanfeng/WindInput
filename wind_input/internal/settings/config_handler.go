@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/huanfeng/wind_input/internal/config"
-	"github.com/huanfeng/wind_input/internal/engine/wubi"
 )
 
 // ConfigHandler 配置处理器
@@ -124,14 +123,14 @@ func (h *ConfigHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 		// 如果五笔配置改变，立即更新引擎
 		if h.services.EngineMgr != nil && (
-			cfg.Engine.Wubi.AutoCommit != oldWubiConfig.AutoCommit ||
-			cfg.Engine.Wubi.EmptyCode != oldWubiConfig.EmptyCode ||
+			cfg.Engine.Wubi.AutoCommitAt4 != oldWubiConfig.AutoCommitAt4 ||
+			cfg.Engine.Wubi.ClearOnEmptyAt4 != oldWubiConfig.ClearOnEmptyAt4 ||
 			cfg.Engine.Wubi.TopCodeCommit != oldWubiConfig.TopCodeCommit ||
 			cfg.Engine.Wubi.PunctCommit != oldWubiConfig.PunctCommit) {
 			h.updateWubiEngineConfig(&cfg.Engine.Wubi)
 			h.services.Logger.Info("Wubi config updated",
-				"autoCommit", cfg.Engine.Wubi.AutoCommit,
-				"emptyCode", cfg.Engine.Wubi.EmptyCode,
+				"autoCommitAt4", cfg.Engine.Wubi.AutoCommitAt4,
+				"clearOnEmptyAt4", cfg.Engine.Wubi.ClearOnEmptyAt4,
 				"topCodeCommit", cfg.Engine.Wubi.TopCodeCommit,
 				"punctCommit", cfg.Engine.Wubi.PunctCommit)
 		}
@@ -231,10 +230,10 @@ func (h *ConfigHandler) GetConfigMeta(w http.ResponseWriter, r *http.Request) {
 				{Name: "show_wubi_hint", Type: "bool", Description: "显示五笔编码提示", UpdateMode: "hot", Default: true},
 			},
 			"engine.wubi": {
-				{Name: "auto_commit", Type: "string", Description: "自动上屏模式", UpdateMode: "reload", Default: "unique_at_4"},
-				{Name: "empty_code", Type: "string", Description: "空码处理模式", UpdateMode: "reload", Default: "clear_at_4"},
-				{Name: "top_code_commit", Type: "bool", Description: "五码顶字上屏", UpdateMode: "reload", Default: true},
-				{Name: "punct_commit", Type: "bool", Description: "标点顶字上屏", UpdateMode: "reload", Default: true},
+				{Name: "auto_commit_at_4", Type: "bool", Description: "四码唯一时自动上屏", UpdateMode: "hot", Default: true},
+				{Name: "clear_on_empty_at_4", Type: "bool", Description: "四码为空时清空", UpdateMode: "hot", Default: true},
+				{Name: "top_code_commit", Type: "bool", Description: "五码顶字上屏", UpdateMode: "hot", Default: true},
+				{Name: "punct_commit", Type: "bool", Description: "标点顶字上屏", UpdateMode: "hot", Default: true},
 			},
 			"hotkeys": {
 				{Name: "toggle_mode_keys", Type: "[]string", Description: "中英切换键（多选）", UpdateMode: "hot", Default: []string{"lshift", "rshift"}},
@@ -319,24 +318,7 @@ func (h *ConfigHandler) ValidateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 验证五笔配置
-	if req.Config.Engine != nil {
-		switch req.Config.Engine.Wubi.AutoCommit {
-		case "", "none", "unique", "unique_at_4", "unique_full_match":
-			// 有效
-		default:
-			response.Valid = false
-			response.Errors["engine.wubi.auto_commit"] = "无效的自动上屏模式"
-		}
-
-		switch req.Config.Engine.Wubi.EmptyCode {
-		case "", "none", "clear", "clear_at_4", "to_english":
-			// 有效
-		default:
-			response.Valid = false
-			response.Errors["engine.wubi.empty_code"] = "无效的空码处理模式"
-		}
-	}
+	// 五笔配置现在使用 bool 类型，无需验证
 
 	WriteSuccess(w, response)
 }
@@ -380,40 +362,10 @@ func (h *ConfigHandler) ReloadConfig(w http.ResponseWriter, r *http.Request) {
 
 // updateWubiEngineConfig 更新五笔引擎配置
 func (h *ConfigHandler) updateWubiEngineConfig(wubiCfg *config.WubiConfig) {
-	// 转换自动上屏模式
-	var autoCommit wubi.AutoCommitMode
-	switch wubiCfg.AutoCommit {
-	case "none":
-		autoCommit = wubi.AutoCommitNone
-	case "unique":
-		autoCommit = wubi.AutoCommitUnique
-	case "unique_at_4":
-		autoCommit = wubi.AutoCommitUniqueAt4
-	case "unique_full_match":
-		autoCommit = wubi.AutoCommitUniqueFullMatch
-	default:
-		autoCommit = wubi.AutoCommitUniqueAt4 // 默认值
-	}
-
-	// 转换空码处理模式
-	var emptyCode wubi.EmptyCodeMode
-	switch wubiCfg.EmptyCode {
-	case "none":
-		emptyCode = wubi.EmptyCodeNone
-	case "clear":
-		emptyCode = wubi.EmptyCodeClear
-	case "clear_at_4":
-		emptyCode = wubi.EmptyCodeClearAt4
-	case "to_english":
-		emptyCode = wubi.EmptyCodeToEnglish
-	default:
-		emptyCode = wubi.EmptyCodeClearAt4 // 默认值
-	}
-
-	// 更新引擎配置
+	// 更新引擎配置（直接使用 bool 类型）
 	h.services.EngineMgr.UpdateWubiOptions(
-		autoCommit,
-		emptyCode,
+		wubiCfg.AutoCommitAt4,
+		wubiCfg.ClearOnEmptyAt4,
 		wubiCfg.TopCodeCommit,
 		wubiCfg.PunctCommit,
 	)

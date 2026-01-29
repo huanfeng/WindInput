@@ -261,36 +261,12 @@ func main() {
 
 	// 解析五笔配置（无论当前引擎类型，都需要配置以便动态切换）
 	wubiConfig := &wubi.Config{
-		MaxCodeLength: 4,
-		TopCodeCommit: cfg.Engine.Wubi.TopCodeCommit,
-		PunctCommit:   cfg.Engine.Wubi.PunctCommit,
-		FilterMode:    cfg.Engine.FilterMode,
-	}
-	// 解析自动上屏模式
-	switch cfg.Engine.Wubi.AutoCommit {
-	case "none":
-		wubiConfig.AutoCommit = wubi.AutoCommitNone
-	case "unique":
-		wubiConfig.AutoCommit = wubi.AutoCommitUnique
-	case "unique_at_4":
-		wubiConfig.AutoCommit = wubi.AutoCommitUniqueAt4
-	case "unique_full_match":
-		wubiConfig.AutoCommit = wubi.AutoCommitUniqueFullMatch
-	default:
-		wubiConfig.AutoCommit = wubi.AutoCommitUniqueAt4
-	}
-	// 解析空码处理模式
-	switch cfg.Engine.Wubi.EmptyCode {
-	case "none":
-		wubiConfig.EmptyCode = wubi.EmptyCodeNone
-	case "clear":
-		wubiConfig.EmptyCode = wubi.EmptyCodeClear
-	case "clear_at_4":
-		wubiConfig.EmptyCode = wubi.EmptyCodeClearAt4
-	case "to_english":
-		wubiConfig.EmptyCode = wubi.EmptyCodeToEnglish
-	default:
-		wubiConfig.EmptyCode = wubi.EmptyCodeClearAt4
+		MaxCodeLength:   4,
+		AutoCommitAt4:   cfg.Engine.Wubi.AutoCommitAt4,
+		ClearOnEmptyAt4: cfg.Engine.Wubi.ClearOnEmptyAt4,
+		TopCodeCommit:   cfg.Engine.Wubi.TopCodeCommit,
+		PunctCommit:     cfg.Engine.Wubi.PunctCommit,
+		FilterMode:      cfg.Engine.FilterMode,
 	}
 
 	// 设置引擎配置（用于动态切换）

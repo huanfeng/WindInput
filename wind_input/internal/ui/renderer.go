@@ -180,6 +180,20 @@ func (r *Renderer) RenderCandidates(candidates []Candidate, input string, page, 
 			dc.LoadFontFace(r.fontPath, cfg.FontSize)
 		}
 		dc.DrawString(cand.Text, cfg.Padding+32*scale, itemY+cfg.ItemHeight/2+cfg.FontSize/3)
+
+		// Draw comment/hint (e.g., wubi code) if present
+		if cand.Comment != "" {
+			// Measure candidate text width to position comment after it
+			candWidth, _ := dc.MeasureString(cand.Text)
+			commentX := cfg.Padding + 32*scale + candWidth + 8*scale
+
+			// Draw comment in a lighter color
+			dc.SetColor(color.RGBA{150, 150, 150, 255})
+			if fontLoaded {
+				dc.LoadFontFace(r.fontPath, cfg.IndexFontSize) // Use smaller font for comment
+			}
+			dc.DrawString(cand.Comment, commentX, itemY+cfg.ItemHeight/2+cfg.IndexFontSize/3)
+		}
 	}
 
 	// Draw page info

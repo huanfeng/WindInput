@@ -58,10 +58,10 @@ type PinyinConfig struct {
 
 // WubiConfig 五笔引擎配置
 type WubiConfig struct {
-	AutoCommit    string `yaml:"auto_commit" json:"auto_commit"`         // none / unique / unique_at_4 / unique_full_match
-	EmptyCode     string `yaml:"empty_code" json:"empty_code"`           // none / clear / clear_at_4 / to_english
-	TopCodeCommit bool   `yaml:"top_code_commit" json:"top_code_commit"` // 五码顶字上屏
-	PunctCommit   bool   `yaml:"punct_commit" json:"punct_commit"`       // 标点顶字上屏
+	AutoCommitAt4    bool `yaml:"auto_commit_at_4" json:"auto_commit_at_4"`       // 四码唯一时自动上屏
+	ClearOnEmptyAt4  bool `yaml:"clear_on_empty_at_4" json:"clear_on_empty_at_4"` // 四码为空时清空
+	TopCodeCommit    bool `yaml:"top_code_commit" json:"top_code_commit"`         // 五码顶字上屏
+	PunctCommit      bool `yaml:"punct_commit" json:"punct_commit"`               // 标点顶字上屏
 }
 
 // HotkeyConfig contains hotkey settings
@@ -134,10 +134,10 @@ func DefaultConfig() *Config {
 				ShowWubiHint: true,
 			},
 			Wubi: WubiConfig{
-				AutoCommit:    "unique_at_4",
-				EmptyCode:     "clear_at_4",
-				TopCodeCommit: true,
-				PunctCommit:   true,
+				AutoCommitAt4:   false,
+				ClearOnEmptyAt4: false,
+				TopCodeCommit:   true,
+				PunctCommit:     true,
 			},
 		},
 		Hotkeys: HotkeyConfig{

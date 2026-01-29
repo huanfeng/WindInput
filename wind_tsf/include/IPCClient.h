@@ -65,6 +65,7 @@ struct ServiceResponse
     ResponseType type;
     std::wstring text;      // For InsertText
     std::wstring composition; // For UpdateComposition
+    std::wstring newComposition; // For InsertText with new composition (top code commit)
     int caretPos;           // For UpdateComposition
     BOOL chineseMode;       // For ModeChanged, StatusUpdate, and InsertText (when modeChanged)
     BOOL modeChanged;       // For InsertText with mode change (CommitOnSwitch)

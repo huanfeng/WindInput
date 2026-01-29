@@ -56,11 +56,11 @@ func main() {
 
 	// 创建五笔引擎
 	engine := wubi.NewEngine(&wubi.Config{
-		MaxCodeLength: ct.GetMaxCodeLength(),
-		AutoCommit:    wubi.AutoCommitUniqueAt4,
-		EmptyCode:     wubi.EmptyCodeClearAt4,
-		TopCodeCommit: true, // 启用顶码
-		PunctCommit:   true,
+		MaxCodeLength:   ct.GetMaxCodeLength(),
+		AutoCommitAt4:   true,
+		ClearOnEmptyAt4: true,
+		TopCodeCommit:   true, // 启用顶码
+		PunctCommit:     true,
 	})
 	engine.LoadCodeTable(dictPath)
 

@@ -566,22 +566,36 @@ void CKeyEventSink::_HandleServiceResponse()
     case ResponseType::InsertText:
         {
             OutputDebugStringW(L"[WindInput] Processing InsertText response\n");
-            _isComposing = FALSE;
-            _hasCandidates = FALSE;
 
-            // First, end composition to clear the preedit text
-            // This will remove the underlined composition text
-            _pTextService->EndComposition();
-            OutputDebugStringW(L"[WindInput] EndComposition completed\n");
-
-            // Then insert the final text
-            if (!response.text.empty())
+            // Handle new composition if present (top code commit feature)
+            // Use combined method to ensure synchronous execution
+            if (!response.newComposition.empty())
             {
                 WCHAR debug[256];
-                wsprintfW(debug, L"[WindInput] Inserting text: %s\n", response.text.c_str());
+                wsprintfW(debug, L"[WindInput] InsertText with new composition: text='%s', newComp='%s'\n",
+                          response.text.c_str(), response.newComposition.c_str());
                 OutputDebugStringW(debug);
-                _pTextService->InsertText(response.text);
-                OutputDebugStringW(L"[WindInput] InsertText completed\n");
+
+                _pTextService->InsertTextAndStartComposition(response.text, response.newComposition);
+                _isComposing = TRUE;
+                _hasCandidates = TRUE;
+            }
+            else
+            {
+                // No new composition, just insert text normally
+                _pTextService->EndComposition();
+                OutputDebugStringW(L"[WindInput] EndComposition completed\n");
+
+                if (!response.text.empty())
+                {
+                    WCHAR debug[256];
+                    wsprintfW(debug, L"[WindInput] Inserting text: %s\n", response.text.c_str());
+                    OutputDebugStringW(debug);
+                    _pTextService->InsertText(response.text);
+                    OutputDebugStringW(L"[WindInput] InsertText completed\n");
+                }
+                _isComposing = FALSE;
+                _hasCandidates = FALSE;
             }
 
             // Handle mode change if present (CommitOnSwitch feature)

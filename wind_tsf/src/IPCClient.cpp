@@ -803,7 +803,20 @@ BOOL CIPCClient::_ParseResponse(const std::wstring& json, ServiceResponse& respo
             _LogDebug(L"InsertText with mode change: chineseMode=%d", response.chineseMode);
         }
 
-        _LogDebug(L"InsertText: text=%s, modeChanged=%d", response.text.c_str(), response.modeChanged);
+        // Extract new_composition (for top code commit)
+        size_t newCompPos = json.find(L"\"new_composition\":\"");
+        if (newCompPos != std::wstring::npos)
+        {
+            newCompPos += 19;
+            size_t newCompEnd = json.find(L"\"", newCompPos);
+            if (newCompEnd != std::wstring::npos)
+            {
+                response.newComposition = json.substr(newCompPos, newCompEnd - newCompPos);
+                _LogDebug(L"InsertText with new composition: %s", response.newComposition.c_str());
+            }
+        }
+
+        _LogDebug(L"InsertText: text=%s, modeChanged=%d, newComposition=%s", response.text.c_str(), response.modeChanged, response.newComposition.c_str());
     }
     else if (json.find(L"\"type\":\"update_composition\"") != std::wstring::npos)
     {

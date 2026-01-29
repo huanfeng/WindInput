@@ -31,8 +31,8 @@ export interface PinyinConfig {
 
 // 五笔配置
 export interface WubiConfig {
-  auto_commit: string;
-  empty_code: string;
+  auto_commit_at_4: boolean;
+  clear_on_empty_at_4: boolean;
   top_code_commit: boolean;
   punct_commit: boolean;
 }
@@ -249,8 +249,8 @@ export function getDefaultConfig(): Config {
         show_wubi_hint: true,
       },
       wubi: {
-        auto_commit: 'unique_at_4',
-        empty_code: 'clear_at_4',
+        auto_commit_at_4: false,
+        clear_on_empty_at_4: false,
         top_code_commit: true,
         punct_commit: true,
       },

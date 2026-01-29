@@ -18,6 +18,7 @@ class CTextService : public ITfTextInputProcessor,
 {
     friend class CUpdateCompositionEditSession;
     friend class CEndCompositionEditSession;
+    friend class CInsertAndComposeEditSession;
 public:
     CTextService();
     ~CTextService();
@@ -65,6 +66,9 @@ public:
     
     // End current composition
     void EndComposition();
+
+    // Insert text and start new composition (for top code commit)
+    BOOL InsertTextAndStartComposition(const std::wstring& insertText, const std::wstring& newComposition);
 
     // Get and send caret position to Go Service
     BOOL GetCaretPosition(LONG* px, LONG* py, LONG* pHeight);

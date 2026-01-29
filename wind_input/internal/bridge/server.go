@@ -23,11 +23,12 @@ const (
 
 // KeyEventResult represents the result of handling a key event
 type KeyEventResult struct {
-	Type        ResponseType
-	Text        string // For InsertText
-	CaretPos    int    // For UpdateComposition
-	ChineseMode bool   // For ModeChanged
-	ModeChanged bool   // 是否同时切换了模式（用于 InsertText + 模式切换的组合）
+	Type           ResponseType
+	Text           string // For InsertText
+	CaretPos       int    // For UpdateComposition
+	ChineseMode    bool   // For ModeChanged
+	ModeChanged    bool   // 是否同时切换了模式（用于 InsertText + 模式切换的组合）
+	NewComposition string // 插入后的新组合文本（用于五码顶字等场景）
 }
 
 // MessageHandler handles messages from C++ Bridge
@@ -302,13 +303,14 @@ func (s *Server) processRequest(request *Request, clientID int) *Response {
 		// Build response based on result
 		switch result.Type {
 		case ResponseTypeInsertText:
-			s.logger.Debug("Returning InsertText response", "clientID", clientID, "text", result.Text, "modeChanged", result.ModeChanged)
+			s.logger.Debug("Returning InsertText response", "clientID", clientID, "text", result.Text, "modeChanged", result.ModeChanged, "newComposition", result.NewComposition)
 			return &Response{
 				Type: ResponseTypeInsertText,
 				Data: InsertTextData{
-					Text:        result.Text,
-					ModeChanged: result.ModeChanged,
-					ChineseMode: result.ChineseMode,
+					Text:           result.Text,
+					ModeChanged:    result.ModeChanged,
+					ChineseMode:    result.ChineseMode,
+					NewComposition: result.NewComposition,
 				},
 			}
 		case ResponseTypeUpdateComposition:

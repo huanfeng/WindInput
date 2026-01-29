@@ -493,14 +493,14 @@ func (m *Manager) UpdateFilterMode(mode string) {
 }
 
 // UpdateWubiOptions 更新五笔引擎的选项（热更新）
-func (m *Manager) UpdateWubiOptions(autoCommit wubi.AutoCommitMode, emptyCode wubi.EmptyCodeMode, topCodeCommit, punctCommit bool) {
+func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// 更新保存的配置
 	if m.wubiConfig != nil {
-		m.wubiConfig.AutoCommit = autoCommit
-		m.wubiConfig.EmptyCode = emptyCode
+		m.wubiConfig.AutoCommitAt4 = autoCommitAt4
+		m.wubiConfig.ClearOnEmptyAt4 = clearOnEmptyAt4
 		m.wubiConfig.TopCodeCommit = topCodeCommit
 		m.wubiConfig.PunctCommit = punctCommit
 	}
@@ -509,14 +509,14 @@ func (m *Manager) UpdateWubiOptions(autoCommit wubi.AutoCommitMode, emptyCode wu
 	for _, engine := range m.engines {
 		if wubiEngine, ok := engine.(*wubi.Engine); ok {
 			if cfg := wubiEngine.GetConfig(); cfg != nil {
-				cfg.AutoCommit = autoCommit
-				cfg.EmptyCode = emptyCode
+				cfg.AutoCommitAt4 = autoCommitAt4
+				cfg.ClearOnEmptyAt4 = clearOnEmptyAt4
 				cfg.TopCodeCommit = topCodeCommit
 				cfg.PunctCommit = punctCommit
 			}
 		}
 	}
 
-	log.Printf("[EngineManager] 更新五笔选项: autoCommit=%d, emptyCode=%d, topCodeCommit=%v, punctCommit=%v",
-		autoCommit, emptyCode, topCodeCommit, punctCommit)
+	log.Printf("[EngineManager] 更新五笔选项: autoCommitAt4=%v, clearOnEmptyAt4=%v, topCodeCommit=%v, punctCommit=%v",
+		autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit)
 }

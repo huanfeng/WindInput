@@ -10,45 +10,25 @@ import (
 	"github.com/huanfeng/wind_input/internal/dict"
 )
 
-// AutoCommitMode 自动上屏模式
-type AutoCommitMode int
-
-const (
-	AutoCommitNone           AutoCommitMode = iota // 不自动上屏
-	AutoCommitUnique                               // 候选唯一时上屏
-	AutoCommitUniqueAt4                            // 四码唯一时上屏
-	AutoCommitUniqueFullMatch                      // 编码完整匹配且唯一时上屏
-)
-
-// EmptyCodeMode 空码处理模式
-type EmptyCodeMode int
-
-const (
-	EmptyCodeNone        EmptyCodeMode = iota // 不处理（继续输入）
-	EmptyCodeClear                            // 清空编码
-	EmptyCodeClearAt4                         // 四码时清空
-	EmptyCodeToEnglish                        // 转为英文上屏
-)
-
 // Config 五笔引擎配置
 type Config struct {
-	MaxCodeLength int            // 最大码长，默认4
-	AutoCommit    AutoCommitMode // 自动上屏模式
-	EmptyCode     EmptyCodeMode  // 空码处理模式
-	TopCodeCommit bool           // 五码顶字上屏
-	PunctCommit   bool           // 标点顶字上屏
-	FilterMode    string         // 候选过滤模式
+	MaxCodeLength   int    // 最大码长，默认4
+	AutoCommitAt4   bool   // 四码唯一时自动上屏
+	ClearOnEmptyAt4 bool   // 四码为空时清空
+	TopCodeCommit   bool   // 五码顶字上屏
+	PunctCommit     bool   // 标点顶字上屏
+	FilterMode      string // 候选过滤模式
 }
 
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
-		MaxCodeLength: 4,
-		AutoCommit:    AutoCommitUniqueAt4,
-		EmptyCode:     EmptyCodeClearAt4,
-		TopCodeCommit: true,
-		PunctCommit:   true,
-		FilterMode:    "smart",
+		MaxCodeLength:   4,
+		AutoCommitAt4:   false,
+		ClearOnEmptyAt4: false,
+		TopCodeCommit:   true,
+		PunctCommit:     true,
+		FilterMode:      "smart",
 	}
 }
 
@@ -154,16 +134,9 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	// 空码处理
 	if len(candidates) == 0 {
 		result.IsEmpty = true
-		switch e.config.EmptyCode {
-		case EmptyCodeClear:
+		// 四码为空时清空
+		if e.config.ClearOnEmptyAt4 && inputLen >= e.config.MaxCodeLength {
 			result.ShouldClear = true
-		case EmptyCodeClearAt4:
-			if inputLen >= e.config.MaxCodeLength {
-				result.ShouldClear = true
-			}
-		case EmptyCodeToEnglish:
-			result.ToEnglish = true
-			result.CommitText = input
 		}
 		return result
 	}
@@ -197,37 +170,17 @@ func (e *Engine) checkAutoCommit(result *ConvertResult, input string, candidates
 	}
 
 	inputLen := len(input)
-	log.Printf("[Wubi] checkAutoCommit: input=%s, len=%d, candidates=%d, mode=%d, maxCode=%d",
-		input, inputLen, len(candidates), e.config.AutoCommit, e.config.MaxCodeLength)
+	log.Printf("[Wubi] checkAutoCommit: input=%s, len=%d, candidates=%d, autoCommitAt4=%v, maxCode=%d",
+		input, inputLen, len(candidates), e.config.AutoCommitAt4, e.config.MaxCodeLength)
 
-	switch e.config.AutoCommit {
-	case AutoCommitUnique:
-		// 候选唯一时上屏
-		if len(candidates) == 1 {
-			result.ShouldCommit = true
-			result.CommitText = candidates[0].Text
-			log.Printf("[Wubi] AutoCommitUnique triggered: text=%s", result.CommitText)
-		}
-
-	case AutoCommitUniqueAt4:
-		// 四码唯一时上屏
-		if inputLen >= e.config.MaxCodeLength && len(candidates) == 1 {
-			result.ShouldCommit = true
-			result.CommitText = candidates[0].Text
-			log.Printf("[Wubi] AutoCommitUniqueAt4 triggered: text=%s", result.CommitText)
-		} else {
-			log.Printf("[Wubi] AutoCommitUniqueAt4 NOT triggered: inputLen(%d) >= maxCode(%d)=%v, candidates==%d",
-				inputLen, e.config.MaxCodeLength, inputLen >= e.config.MaxCodeLength, len(candidates))
-		}
-
-	case AutoCommitUniqueFullMatch:
-		// 编码完整匹配且唯一时上屏
-		exactMatch := e.codeTable.Lookup(input)
-		if len(exactMatch) == 1 {
-			result.ShouldCommit = true
-			result.CommitText = exactMatch[0].Text
-			log.Printf("[Wubi] AutoCommitUniqueFullMatch triggered: text=%s", result.CommitText)
-		}
+	// 四码唯一时自动上屏
+	if e.config.AutoCommitAt4 && inputLen >= e.config.MaxCodeLength && len(candidates) == 1 {
+		result.ShouldCommit = true
+		result.CommitText = candidates[0].Text
+		log.Printf("[Wubi] AutoCommitAt4 triggered: text=%s", result.CommitText)
+	} else if e.config.AutoCommitAt4 {
+		log.Printf("[Wubi] AutoCommitAt4 NOT triggered: inputLen(%d) >= maxCode(%d)=%v, candidates=%d",
+			inputLen, e.config.MaxCodeLength, inputLen >= e.config.MaxCodeLength, len(candidates))
 	}
 }
 

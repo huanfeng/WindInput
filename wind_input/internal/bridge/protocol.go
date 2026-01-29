@@ -69,9 +69,10 @@ type Response struct {
 
 // InsertTextData for inserting final text
 type InsertTextData struct {
-	Text        string `json:"text"`
-	ModeChanged bool   `json:"mode_changed,omitempty"` // 是否同时切换了模式
-	ChineseMode bool   `json:"chinese_mode,omitempty"` // 切换后的模式（仅当 ModeChanged 为 true 时有效）
+	Text           string `json:"text"`
+	ModeChanged    bool   `json:"mode_changed,omitempty"`    // 是否同时切换了模式
+	ChineseMode    bool   `json:"chinese_mode,omitempty"`    // 切换后的模式（仅当 ModeChanged 为 true 时有效）
+	NewComposition string `json:"new_composition,omitempty"` // 插入后的新组合文本（用于五码顶字等场景）
 }
 
 // CompositionData for updating composition text (pinyin display)

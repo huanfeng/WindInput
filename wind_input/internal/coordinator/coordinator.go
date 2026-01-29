@@ -495,17 +495,22 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 				commitText = transform.ToFullWidth(commitText)
 			}
 
-			// 如果还有剩余输入，继续处理
+			// 如果还有剩余输入，继续处理并更新候选
 			if len(c.inputBuffer) > 0 {
 				c.updateCandidates()
 				c.showUI()
+				// 返回带有新组合的响应，让 C++ 端同时插入文字并开始新组合
+				return &bridge.KeyEventResult{
+					Type:           bridge.ResponseTypeInsertText,
+					Text:           commitText,
+					NewComposition: c.inputBuffer,
+				}
 			} else {
 				c.hideUI()
-			}
-
-			return &bridge.KeyEventResult{
-				Type: bridge.ResponseTypeInsertText,
-				Text: commitText,
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: commitText,
+				}
 			}
 		}
 	}

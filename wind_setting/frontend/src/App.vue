@@ -548,30 +548,26 @@ onUnmounted(() => {
             <div class="card-title">五笔设置</div>
             <div class="setting-item">
               <div class="setting-info">
-                <label>自动上屏</label>
-                <p class="setting-hint">满足条件时自动提交首选</p>
+                <label>四码唯一时自动上屏</label>
+                <p class="setting-hint">输入满四码且只有一个候选时，自动提交首选</p>
               </div>
               <div class="setting-control">
-                <select v-model="formData.engine.wubi.auto_commit" class="select">
-                  <option value="none">不自动上屏</option>
-                  <option value="unique">候选唯一时</option>
-                  <option value="unique_at_4">四码唯一时</option>
-                  <option value="unique_full_match">完整匹配唯一时</option>
-                </select>
+                <label class="switch">
+                  <input type="checkbox" v-model="formData.engine.wubi.auto_commit_at_4" />
+                  <span class="slider"></span>
+                </label>
               </div>
             </div>
             <div class="setting-item">
               <div class="setting-info">
-                <label>空码处理</label>
-                <p class="setting-hint">输入无匹配时的处理方式</p>
+                <label>四码为空时清空</label>
+                <p class="setting-hint">输入满四码但无候选时，自动清空编码</p>
               </div>
               <div class="setting-control">
-                <select v-model="formData.engine.wubi.empty_code" class="select">
-                  <option value="none">继续输入</option>
-                  <option value="clear">清空编码</option>
-                  <option value="clear_at_4">四码时清空</option>
-                  <option value="to_english">转为英文</option>
-                </select>
+                <label class="switch">
+                  <input type="checkbox" v-model="formData.engine.wubi.clear_on_empty_at_4" />
+                  <span class="slider"></span>
+                </label>
               </div>
             </div>
             <div class="setting-item">

@@ -243,6 +243,167 @@ private:
     std::wstring _text;
 };
 
+// EditSession for inserting text and starting new composition (for top code commit)
+class CInsertAndComposeEditSession : public ITfEditSession
+{
+public:
+    CInsertAndComposeEditSession(CTextService* pTextService, ITfContext* pContext,
+                                  const std::wstring& insertText, const std::wstring& newComposition)
+        : _refCount(1), _pTextService(pTextService), _pContext(pContext),
+          _insertText(insertText), _newComposition(newComposition)
+    {
+        _pTextService->AddRef();
+        _pContext->AddRef();
+    }
+
+    ~CInsertAndComposeEditSession()
+    {
+        _pTextService->Release();
+        _pContext->Release();
+    }
+
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj)
+    {
+        if (ppvObj == nullptr) return E_INVALIDARG;
+        *ppvObj = nullptr;
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfEditSession))
+        {
+            *ppvObj = (ITfEditSession*)this;
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&_refCount); }
+    STDMETHODIMP_(ULONG) Release()
+    {
+        LONG cr = InterlockedDecrement(&_refCount);
+        if (cr == 0) delete this;
+        return cr;
+    }
+
+    // ITfEditSession
+    STDMETHODIMP DoEditSession(TfEditCookie ec)
+    {
+        HRESULT hr = S_OK;
+
+        WCHAR debug[512];
+        wsprintfW(debug, L"[WindInput] InsertAndCompose: insert='%s', newComp='%s'\n",
+                  _insertText.c_str(), _newComposition.c_str());
+        OutputDebugStringW(debug);
+
+        // 1. Get current selection to insert text there
+        TF_SELECTION tfSelection;
+        ULONG cFetched;
+        if (FAILED(_pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &tfSelection, &cFetched)) || cFetched != 1)
+        {
+            OutputDebugStringW(L"[WindInput] InsertAndCompose: Failed to get selection\n");
+            return E_FAIL;
+        }
+
+        // 2. Insert the final text at current position
+        if (!_insertText.empty())
+        {
+            hr = tfSelection.range->SetText(ec, 0, _insertText.c_str(), (LONG)_insertText.length());
+            if (FAILED(hr))
+            {
+                OutputDebugStringW(L"[WindInput] InsertAndCompose: Failed to insert text\n");
+                tfSelection.range->Release();
+                return hr;
+            }
+            OutputDebugStringW(L"[WindInput] InsertAndCompose: Text inserted successfully\n");
+
+            // Collapse range to end (after inserted text)
+            tfSelection.range->Collapse(ec, TF_ANCHOR_END);
+        }
+
+        // 3. Now start a new composition for the new input
+        if (!_newComposition.empty())
+        {
+            ITfContextComposition* pContextComp = nullptr;
+            if (FAILED(_pContext->QueryInterface(IID_ITfContextComposition, (void**)&pContextComp)))
+            {
+                OutputDebugStringW(L"[WindInput] InsertAndCompose: Failed to get ITfContextComposition\n");
+                tfSelection.range->Release();
+                return E_FAIL;
+            }
+
+            // Start new composition at current position (after inserted text)
+            hr = pContextComp->StartComposition(
+                ec,
+                tfSelection.range,
+                (ITfCompositionSink*)_pTextService,
+                &_pTextService->_pComposition);
+
+            pContextComp->Release();
+
+            if (FAILED(hr) || _pTextService->_pComposition == nullptr)
+            {
+                OutputDebugStringW(L"[WindInput] InsertAndCompose: Failed to start new composition\n");
+                tfSelection.range->Release();
+                return E_FAIL;
+            }
+
+            OutputDebugStringW(L"[WindInput] InsertAndCompose: New composition started\n");
+
+            // 4. Set the composition text
+            ITfRange* pCompRange = nullptr;
+            if (SUCCEEDED(_pTextService->_pComposition->GetRange(&pCompRange)))
+            {
+                hr = pCompRange->SetText(ec, TF_ST_CORRECTION, _newComposition.c_str(), (LONG)_newComposition.length());
+                if (SUCCEEDED(hr))
+                {
+                    // Apply display attribute
+                    _SetDisplayAttribute(ec, pCompRange);
+
+                    // Set cursor at end of composition
+                    ITfRange* pRangeForSel = nullptr;
+                    if (SUCCEEDED(_pTextService->_pComposition->GetRange(&pRangeForSel)))
+                    {
+                        pRangeForSel->Collapse(ec, TF_ANCHOR_END);
+                        TF_SELECTION sel = {};
+                        sel.range = pRangeForSel;
+                        sel.style.ase = TF_AE_NONE;
+                        sel.style.fInterimChar = FALSE;
+                        _pContext->SetSelection(ec, 1, &sel);
+                        pRangeForSel->Release();
+                    }
+                    OutputDebugStringW(L"[WindInput] InsertAndCompose: Composition text set\n");
+                }
+                pCompRange->Release();
+            }
+        }
+
+        tfSelection.range->Release();
+        return S_OK;
+    }
+
+private:
+    void _SetDisplayAttribute(TfEditCookie ec, ITfRange* pRange)
+    {
+        TfGuidAtom gaDisplayAttr = _pTextService->GetDisplayAttributeInputAtom();
+        if (gaDisplayAttr == TF_INVALID_GUIDATOM) return;
+
+        ITfProperty* pDisplayAttrProp = nullptr;
+        if (FAILED(_pContext->GetProperty(GUID_PROP_ATTRIBUTE, &pDisplayAttrProp))) return;
+
+        VARIANT var;
+        var.vt = VT_I4;
+        var.lVal = gaDisplayAttr;
+        pDisplayAttrProp->SetValue(ec, pRange, &var);
+        pDisplayAttrProp->Release();
+    }
+
+private:
+    LONG _refCount;
+    CTextService* _pTextService;
+    ITfContext* _pContext;
+    std::wstring _insertText;
+    std::wstring _newComposition;
+};
+
 CTextService::CTextService()
     : _refCount(1)
     , _pThreadMgr(nullptr)
@@ -1320,6 +1481,53 @@ void CTextService::EndComposition()
 
     pEditSession->Release();
     pContext->Release();
+}
+
+// Insert text and start new composition (for top code commit)
+BOOL CTextService::InsertTextAndStartComposition(const std::wstring& insertText, const std::wstring& newComposition)
+{
+    WCHAR debug[512];
+    wsprintfW(debug, L"[WindInput] InsertTextAndStartComposition: insert='%s', newComp='%s', _pComposition=%p\n",
+              insertText.c_str(), newComposition.c_str(), _pComposition);
+    OutputDebugStringW(debug);
+
+    // First, end any existing composition
+    if (_pComposition != nullptr)
+    {
+        EndComposition();
+    }
+
+    // Need a document manager
+    ITfDocumentMgr* pDocMgr = nullptr;
+    if (_pThreadMgr == nullptr || FAILED(_pThreadMgr->GetFocus(&pDocMgr)) || pDocMgr == nullptr)
+    {
+        OutputDebugStringW(L"[WindInput] InsertTextAndStartComposition: Failed to get DocMgr\n");
+        return FALSE;
+    }
+
+    ITfContext* pContext = nullptr;
+    HRESULT hr = pDocMgr->GetTop(&pContext);
+    pDocMgr->Release();
+
+    if (FAILED(hr) || pContext == nullptr)
+    {
+        OutputDebugStringW(L"[WindInput] InsertTextAndStartComposition: Failed to get Context\n");
+        return FALSE;
+    }
+
+    CInsertAndComposeEditSession* pEditSession = new CInsertAndComposeEditSession(this, pContext, insertText, newComposition);
+
+    HRESULT hrSession;
+    // Use TF_ES_SYNC to ensure synchronous execution
+    hr = pContext->RequestEditSession(_tfClientId, pEditSession, TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
+
+    wsprintfW(debug, L"[WindInput] InsertTextAndStartComposition: RequestEditSession hr=0x%08X, hrSession=0x%08X\n", hr, hrSession);
+    OutputDebugStringW(debug);
+
+    pEditSession->Release();
+    pContext->Release();
+
+    return SUCCEEDED(hr) && SUCCEEDED(hrSession);
 }
 
 // ============================================================================
