@@ -31,6 +31,7 @@ set(SOURCES
     src/LangBarItemButton.cpp
     src/CaretEditSession.cpp
     src/DisplayAttributeInfo.cpp
+    src/HotkeyManager.cpp
 )
 
 # 创建 DLL

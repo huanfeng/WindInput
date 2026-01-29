@@ -38,12 +38,9 @@ private:
 
     // State
     BOOL _isComposing;
-    BOOL _shiftPending;  // True if Shift was pressed alone (for mode toggle on release)
-
-    // Modifier key flags (using KEY_ prefix to avoid Windows macro conflicts)
-    static const int KEY_MOD_SHIFT = 0x01;
-    static const int KEY_MOD_CTRL  = 0x02;
-    static const int KEY_MOD_ALT   = 0x04;
+    BOOL _hasCandidates;  // True if there are candidates to select
+    BOOL _shiftPending;   // True if Shift was pressed alone (for mode toggle on release)
+    WPARAM _pendingToggleKey;  // The toggle key that is pending (for release detection)
 
     // Helper methods
     int _GetModifierState();

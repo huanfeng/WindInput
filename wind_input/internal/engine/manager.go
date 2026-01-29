@@ -491,3 +491,32 @@ func (m *Manager) UpdateFilterMode(mode string) {
 
 	log.Printf("[EngineManager] 更新过滤模式: %s", mode)
 }
+
+// UpdateWubiOptions 更新五笔引擎的选项（热更新）
+func (m *Manager) UpdateWubiOptions(autoCommit wubi.AutoCommitMode, emptyCode wubi.EmptyCodeMode, topCodeCommit, punctCommit bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 更新保存的配置
+	if m.wubiConfig != nil {
+		m.wubiConfig.AutoCommit = autoCommit
+		m.wubiConfig.EmptyCode = emptyCode
+		m.wubiConfig.TopCodeCommit = topCodeCommit
+		m.wubiConfig.PunctCommit = punctCommit
+	}
+
+	// 更新所有已注册的五笔引擎的配置
+	for _, engine := range m.engines {
+		if wubiEngine, ok := engine.(*wubi.Engine); ok {
+			if cfg := wubiEngine.GetConfig(); cfg != nil {
+				cfg.AutoCommit = autoCommit
+				cfg.EmptyCode = emptyCode
+				cfg.TopCodeCommit = topCodeCommit
+				cfg.PunctCommit = punctCommit
+			}
+		}
+	}
+
+	log.Printf("[EngineManager] 更新五笔选项: autoCommit=%d, emptyCode=%d, topCodeCommit=%v, punctCommit=%v",
+		autoCommit, emptyCode, topCodeCommit, punctCommit)
+}

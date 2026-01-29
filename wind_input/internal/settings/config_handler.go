@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/huanfeng/wind_input/internal/config"
+	"github.com/huanfeng/wind_input/internal/engine/wubi"
 )
 
 // ConfigHandler 配置处理器
@@ -105,6 +106,7 @@ func (h *ConfigHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if req.Engine != nil {
 		oldType := cfg.Engine.Type
 		oldFilterMode := cfg.Engine.FilterMode
+		oldWubiConfig := cfg.Engine.Wubi
 		cfg.Engine = *req.Engine
 
 		// 如果引擎类型改变，需要重载
@@ -118,6 +120,20 @@ func (h *ConfigHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		if cfg.Engine.FilterMode != oldFilterMode && h.services.EngineMgr != nil {
 			h.services.EngineMgr.UpdateFilterMode(cfg.Engine.FilterMode)
 			h.services.Logger.Info("Filter mode updated", "mode", cfg.Engine.FilterMode)
+		}
+
+		// 如果五笔配置改变，立即更新引擎
+		if h.services.EngineMgr != nil && (
+			cfg.Engine.Wubi.AutoCommit != oldWubiConfig.AutoCommit ||
+			cfg.Engine.Wubi.EmptyCode != oldWubiConfig.EmptyCode ||
+			cfg.Engine.Wubi.TopCodeCommit != oldWubiConfig.TopCodeCommit ||
+			cfg.Engine.Wubi.PunctCommit != oldWubiConfig.PunctCommit) {
+			h.updateWubiEngineConfig(&cfg.Engine.Wubi)
+			h.services.Logger.Info("Wubi config updated",
+				"autoCommit", cfg.Engine.Wubi.AutoCommit,
+				"emptyCode", cfg.Engine.Wubi.EmptyCode,
+				"topCodeCommit", cfg.Engine.Wubi.TopCodeCommit,
+				"punctCommit", cfg.Engine.Wubi.PunctCommit)
 		}
 	}
 
@@ -360,4 +376,45 @@ func (h *ConfigHandler) ReloadConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteSuccess(w, response)
+}
+
+// updateWubiEngineConfig 更新五笔引擎配置
+func (h *ConfigHandler) updateWubiEngineConfig(wubiCfg *config.WubiConfig) {
+	// 转换自动上屏模式
+	var autoCommit wubi.AutoCommitMode
+	switch wubiCfg.AutoCommit {
+	case "none":
+		autoCommit = wubi.AutoCommitNone
+	case "unique":
+		autoCommit = wubi.AutoCommitUnique
+	case "unique_at_4":
+		autoCommit = wubi.AutoCommitUniqueAt4
+	case "unique_full_match":
+		autoCommit = wubi.AutoCommitUniqueFullMatch
+	default:
+		autoCommit = wubi.AutoCommitUniqueAt4 // 默认值
+	}
+
+	// 转换空码处理模式
+	var emptyCode wubi.EmptyCodeMode
+	switch wubiCfg.EmptyCode {
+	case "none":
+		emptyCode = wubi.EmptyCodeNone
+	case "clear":
+		emptyCode = wubi.EmptyCodeClear
+	case "clear_at_4":
+		emptyCode = wubi.EmptyCodeClearAt4
+	case "to_english":
+		emptyCode = wubi.EmptyCodeToEnglish
+	default:
+		emptyCode = wubi.EmptyCodeClearAt4 // 默认值
+	}
+
+	// 更新引擎配置
+	h.services.EngineMgr.UpdateWubiOptions(
+		autoCommit,
+		emptyCode,
+		wubiCfg.TopCodeCommit,
+		wubiCfg.PunctCommit,
+	)
 }

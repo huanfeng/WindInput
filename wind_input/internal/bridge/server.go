@@ -38,7 +38,7 @@ type MessageHandler interface {
 	HandleFocusGained() *StatusUpdateData               // Called when focus is gained, returns current status
 	HandleIMEDeactivated()                              // Called when IME is being switched away (user selected another IME)
 	HandleIMEActivated() *StatusUpdateData              // Called when IME is switched back (user selected this IME again)
-	HandleToggleMode() bool                             // Called when mode toggle requested, returns new chineseMode state
+	HandleToggleMode() (commitText string, chineseMode bool) // Called when mode toggle requested, returns commit text (if CommitOnSwitch) and new chineseMode state
 	HandleCapsLockState(on bool)                        // Called when Caps Lock state changes, shows A/a indicator
 	HandleMenuCommand(command string) *StatusUpdateData // Called when menu command received
 	HandleClientDisconnected(activeClients int)         // Called when a client disconnects, with remaining active count
@@ -391,9 +391,23 @@ func (s *Server) processRequest(request *Request, clientID int) *Response {
 		return &Response{Type: ResponseTypeAck}
 
 	case RequestTypeToggleMode:
-		// Toggle input mode and return new state
-		chineseMode := s.handler.HandleToggleMode()
-		s.logger.Debug("Mode toggled", "clientID", clientID, "chineseMode", chineseMode)
+		// Toggle input mode and return new state (with optional commit text for CommitOnSwitch)
+		commitText, chineseMode := s.handler.HandleToggleMode()
+		s.logger.Debug("Mode toggled", "clientID", clientID, "chineseMode", chineseMode, "commitText", commitText)
+
+		// If there's commit text (CommitOnSwitch), return insert_text with mode change
+		if commitText != "" {
+			return &Response{
+				Type: ResponseTypeInsertText,
+				Data: InsertTextData{
+					Text:        commitText,
+					ModeChanged: true,
+					ChineseMode: chineseMode,
+				},
+			}
+		}
+
+		// Otherwise just return mode_changed
 		return &Response{
 			Type: ResponseTypeModeChanged,
 			Data: ModeChangedData{ChineseMode: chineseMode},

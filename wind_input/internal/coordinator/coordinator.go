@@ -304,12 +304,12 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	if toggleKey := c.getToggleModeKey(data.KeyCode); toggleKey != "" {
 		if c.config != nil && c.config.IsToggleModeKey(toggleKey) {
 			// 检查是否需要在切换前上屏已有内容
+			// CommitOnSwitch: 上屏编码（而非候选词），因为用户切换到英文意味着想输入英文
 			var commitText string
-			if c.config.Hotkeys.CommitOnSwitch && len(c.inputBuffer) > 0 && len(c.candidates) > 0 {
+			if c.config.Hotkeys.CommitOnSwitch && len(c.inputBuffer) > 0 {
 				// 只在从中文切换到英文时上屏
 				if c.chineseMode {
-					candidate := c.candidates[0]
-					commitText = candidate.Text
+					commitText = c.inputBuffer
 					if c.fullWidth {
 						commitText = transform.ToFullWidth(commitText)
 					}
@@ -925,6 +925,21 @@ func (c *Coordinator) HandleClientDisconnected(activeClients int) {
 	}
 }
 
+// getHotkeyConfig returns the current hotkey configuration for C++ side
+func (c *Coordinator) getHotkeyConfig() *bridge.HotkeyConfig {
+	if c.config == nil {
+		return nil
+	}
+	return &bridge.HotkeyConfig{
+		ToggleModeKeys:  c.config.Hotkeys.ToggleModeKeys,
+		SwitchEngine:    c.config.Hotkeys.SwitchEngine,
+		ToggleFullWidth: c.config.Hotkeys.ToggleFullWidth,
+		TogglePunct:     c.config.Hotkeys.TogglePunct,
+		SelectKeyGroups: c.config.Input.SelectKeyGroups,
+		PageKeys:        c.config.Input.PageKeys,
+	}
+}
+
 // HandleFocusGained handles focus gained events and returns current status
 func (c *Coordinator) HandleFocusGained() *bridge.StatusUpdateData {
 	c.logger.Debug("Focus gained")
@@ -947,7 +962,7 @@ func (c *Coordinator) HandleFocusGained() *bridge.StatusUpdateData {
 	// Set IME as activated (this will show toolbar if enabled)
 	c.SetIMEActivated(true)
 
-	// Return current status so TSF can sync state
+	// Return current status so TSF can sync state (including hotkey config)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return &bridge.StatusUpdateData{
@@ -956,6 +971,7 @@ func (c *Coordinator) HandleFocusGained() *bridge.StatusUpdateData {
 		ChinesePunctuation: c.chinesePunctuation,
 		ToolbarVisible:     c.toolbarVisible,
 		CapsLock:           ui.GetCapsLockState(),
+		Hotkeys:            c.getHotkeyConfig(),
 	}
 }
 
@@ -982,7 +998,7 @@ func (c *Coordinator) HandleIMEActivated() *bridge.StatusUpdateData {
 	// Set IME as activated (this will show toolbar if enabled)
 	c.SetIMEActivated(true)
 
-	// Return current status so TSF can sync state
+	// Return current status so TSF can sync state (including hotkey config)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return &bridge.StatusUpdateData{
@@ -991,16 +1007,31 @@ func (c *Coordinator) HandleIMEActivated() *bridge.StatusUpdateData {
 		ChinesePunctuation: c.chinesePunctuation,
 		ToolbarVisible:     c.toolbarVisible,
 		CapsLock:           ui.GetCapsLockState(),
+		Hotkeys:            c.getHotkeyConfig(),
 	}
 }
 
 // HandleToggleMode toggles the input mode and returns the new state
-func (c *Coordinator) HandleToggleMode() bool {
+func (c *Coordinator) HandleToggleMode() (commitText string, chineseMode bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Check if CommitOnSwitch is enabled and there's pending input
+	// When switching from Chinese to English, commit the raw input code (not the candidate)
+	// because the user wants to type English, so we output the original typed characters
+	if c.config != nil && c.config.Hotkeys.CommitOnSwitch && len(c.inputBuffer) > 0 {
+		// Only commit when switching from Chinese to English
+		if c.chineseMode {
+			commitText = c.inputBuffer
+			if c.fullWidth {
+				commitText = transform.ToFullWidth(commitText)
+			}
+			c.logger.Debug("CommitOnSwitch: committing input code", "text", commitText)
+		}
+	}
+
 	c.chineseMode = !c.chineseMode
-	c.logger.Debug("Mode toggled via IPC", "chineseMode", c.chineseMode)
+	c.logger.Debug("Mode toggled via IPC", "chineseMode", c.chineseMode, "commitText", commitText)
 
 	// Clear any pending input when switching modes
 	if len(c.inputBuffer) > 0 {
@@ -1027,7 +1058,10 @@ func (c *Coordinator) HandleToggleMode() bool {
 		})
 	}
 
-	return c.chineseMode
+	// Save runtime state if remember_last_state is enabled
+	c.saveRuntimeStateNoLock()
+
+	return commitText, c.chineseMode
 }
 
 // HandleCapsLockState shows Caps Lock indicator (A/a) and updates toolbar
@@ -1141,6 +1175,14 @@ func (c *Coordinator) showEngineIndicator() {
 
 // GetCurrentEngineName 获取当前引擎名称
 func (c *Coordinator) GetCurrentEngineName() string {
+	if c.engineMgr == nil {
+		return "unknown"
+	}
+	return string(c.engineMgr.GetCurrentType())
+}
+
+// getCurrentEngineNameNoLock gets engine name without acquiring lock (caller must hold lock or ensure thread safety)
+func (c *Coordinator) getCurrentEngineNameNoLock() string {
 	if c.engineMgr == nil {
 		return "unknown"
 	}
@@ -1790,6 +1832,29 @@ func (c *Coordinator) saveRuntimeState() {
 			ChinesePunct: c.chinesePunctuation,
 			EngineType:   c.GetCurrentEngineName(),
 		}
+		if err := config.SaveRuntimeState(state); err != nil {
+			c.logger.Error("Failed to save runtime state", "error", err)
+		} else {
+			c.logger.Debug("Runtime state saved", "chineseMode", state.ChineseMode)
+		}
+	}()
+}
+
+// saveRuntimeStateNoLock saves runtime state without acquiring lock (caller must hold lock)
+func (c *Coordinator) saveRuntimeStateNoLock() {
+	if c.config == nil || !c.config.Startup.RememberLastState {
+		return
+	}
+
+	// Capture values while we hold the lock
+	state := &config.RuntimeState{
+		ChineseMode:  c.chineseMode,
+		FullWidth:    c.fullWidth,
+		ChinesePunct: c.chinesePunctuation,
+		EngineType:   c.getCurrentEngineNameNoLock(),
+	}
+
+	go func() {
 		if err := config.SaveRuntimeState(state); err != nil {
 			c.logger.Error("Failed to save runtime state", "error", err)
 		} else {

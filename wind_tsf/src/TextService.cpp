@@ -4,6 +4,7 @@
 #include "LangBarItemButton.h"
 #include "CaretEditSession.h"
 #include "DisplayAttributeInfo.h"
+#include "HotkeyManager.h"
 
 // EditSession for ending composition
 class CEndCompositionEditSession : public ITfEditSession
@@ -250,6 +251,7 @@ CTextService::CTextService()
     , _pKeyEventSink(nullptr)
     , _pIPCClient(nullptr)
     , _pLangBarItemButton(nullptr)
+    , _pHotkeyManager(nullptr)
     , _bChineseMode(TRUE)
     , _pComposition(nullptr)
     , _gaDisplayAttributeInput(TF_INVALID_GUIDATOM)
@@ -339,6 +341,10 @@ STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
     }
     OutputDebugStringW(L"[WindInput] IPCClient initialized\n");
 
+    // Initialize hotkey manager with default config
+    _pHotkeyManager = new CHotkeyManager();
+    OutputDebugStringW(L"[WindInput] HotkeyManager initialized\n");
+
     // Initialize key event sink
     if (!_InitKeyEventSink())
     {
@@ -417,6 +423,13 @@ STDAPI CTextService::Deactivate()
 
     // Release IPC client
     _UninitIPCClient();
+
+    // Release hotkey manager
+    if (_pHotkeyManager != nullptr)
+    {
+        delete _pHotkeyManager;
+        _pHotkeyManager = nullptr;
+    }
 
     // Release thread manager event sink
     _UninitThreadMgrEventSink();
@@ -1011,8 +1024,35 @@ void CTextService::ToggleInputMode()
             ServiceResponse response;
             if (_pIPCClient->ReceiveResponse(response))
             {
-                if (response.type == ResponseType::ModeChanged)
+                if (response.type == ResponseType::InsertText)
                 {
+                    // CommitOnSwitch: insert text and change mode
+                    OutputDebugStringW(L"[WindInput] ToggleInputMode: CommitOnSwitch triggered\n");
+
+                    // End composition first to clear the underlined text
+                    EndComposition();
+
+                    // Insert the committed text
+                    if (!response.text.empty())
+                    {
+                        WCHAR debug[256];
+                        wsprintfW(debug, L"[WindInput] ToggleInputMode: Inserting text: %s\n", response.text.c_str());
+                        OutputDebugStringW(debug);
+                        InsertText(response.text);
+                    }
+
+                    // Update mode
+                    _bChineseMode = response.chineseMode;
+                    OutputDebugStringW(_bChineseMode ?
+                        L"[WindInput] Mode synced from service: Chinese\n" :
+                        L"[WindInput] Mode synced from service: English\n");
+                }
+                else if (response.type == ResponseType::ModeChanged)
+                {
+                    // Normal mode change without text commit
+                    // End any active composition
+                    EndComposition();
+
                     _bChineseMode = response.chineseMode;
                     OutputDebugStringW(_bChineseMode ?
                         L"[WindInput] Mode synced from service: Chinese\n" :
@@ -1021,6 +1061,7 @@ void CTextService::ToggleInputMode()
                 else
                 {
                     // Fallback: toggle locally if unexpected response
+                    EndComposition();
                     _bChineseMode = !_bChineseMode;
                     OutputDebugStringW(L"[WindInput] Unexpected response, toggling locally\n");
                 }
@@ -1028,6 +1069,7 @@ void CTextService::ToggleInputMode()
             else
             {
                 // Fallback: toggle locally if receive failed
+                EndComposition();
                 _bChineseMode = !_bChineseMode;
                 OutputDebugStringW(L"[WindInput] Failed to receive response, toggling locally\n");
             }
@@ -1035,6 +1077,7 @@ void CTextService::ToggleInputMode()
         else
         {
             // Fallback: toggle locally if send failed
+            EndComposition();
             _bChineseMode = !_bChineseMode;
             OutputDebugStringW(L"[WindInput] Failed to send toggle_mode, toggling locally\n");
         }
@@ -1042,6 +1085,7 @@ void CTextService::ToggleInputMode()
     else
     {
         // No IPC connection, toggle locally
+        EndComposition();
         _bChineseMode = !_bChineseMode;
         OutputDebugStringW(L"[WindInput] No IPC connection, toggling locally\n");
     }
@@ -1123,6 +1167,20 @@ void CTextService::SendMenuCommand(const char* command)
                         response.chinesePunct,
                         response.toolbarVisible,
                         (GetKeyState(VK_CAPITAL) & 0x0001) != 0  // Get current Caps Lock state
+                    );
+                }
+
+                // Update hotkey configuration if present
+                if (response.hotkeys.hasData && _pHotkeyManager != nullptr)
+                {
+                    OutputDebugStringW(L"[WindInput] Updating hotkey configuration from status_update\n");
+                    _pHotkeyManager->UpdateConfig(
+                        response.hotkeys.toggleModeKeys,
+                        response.hotkeys.switchEngine,
+                        response.hotkeys.toggleFullWidth,
+                        response.hotkeys.togglePunct,
+                        response.hotkeys.selectKeyGroups,
+                        response.hotkeys.pageKeys
                     );
                 }
             }

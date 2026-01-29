@@ -9,6 +9,7 @@ class CIPCClient;
 class CLangBarItemButton;
 class CCaretEditSession;
 class CDisplayAttributeProvider;
+class CHotkeyManager;
 
 class CTextService : public ITfTextInputProcessor,
                      public ITfThreadMgrEventSink,
@@ -53,6 +54,9 @@ public:
     // Get IPC client
     CIPCClient* GetIPCClient() { return _pIPCClient; }
 
+    // Get hotkey manager
+    CHotkeyManager* GetHotkeyManager() { return _pHotkeyManager; }
+
     // Insert text into current context
     BOOL InsertText(const std::wstring& text);
 
@@ -93,6 +97,7 @@ private:
     CKeyEventSink* _pKeyEventSink;
     CIPCClient* _pIPCClient;
     CLangBarItemButton* _pLangBarItemButton;
+    CHotkeyManager* _pHotkeyManager;
 
     // Input mode state
     BOOL _bChineseMode;

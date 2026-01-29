@@ -98,11 +98,29 @@ type ToolbarActionData struct {
 	Button string `json:"button,omitempty"` // mode, width, punct, settings
 }
 
+// HotkeyConfig contains hotkey configuration for C++ side
+type HotkeyConfig struct {
+	// 中英切换键: lshift, rshift, lctrl, rctrl, capslock
+	ToggleModeKeys []string `json:"toggle_mode_keys"`
+
+	// 功能快捷键: ctrl+`, ctrl+shift+e, shift+space, ctrl+., none
+	SwitchEngine    string `json:"switch_engine"`
+	ToggleFullWidth string `json:"toggle_full_width"`
+	TogglePunct     string `json:"toggle_punct"`
+
+	// 候选选择键组: semicolon_quote, comma_period, lrshift, lrctrl
+	SelectKeyGroups []string `json:"select_key_groups"`
+
+	// 翻页键组: pageupdown, minus_equal, brackets, shift_tab
+	PageKeys []string `json:"page_keys"`
+}
+
 // StatusUpdateData for status update response
 type StatusUpdateData struct {
-	ChineseMode        bool `json:"chinese_mode"`
-	FullWidth          bool `json:"full_width"`
-	ChinesePunctuation bool `json:"chinese_punctuation"`
-	ToolbarVisible     bool `json:"toolbar_visible"`
-	CapsLock           bool `json:"caps_lock"`
+	ChineseMode        bool          `json:"chinese_mode"`
+	FullWidth          bool          `json:"full_width"`
+	ChinesePunctuation bool          `json:"chinese_punctuation"`
+	ToolbarVisible     bool          `json:"toolbar_visible"`
+	CapsLock           bool          `json:"caps_lock"`
+	Hotkeys            *HotkeyConfig `json:"hotkeys,omitempty"` // 快捷键配置（激活时返回）
 }

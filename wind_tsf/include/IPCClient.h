@@ -2,6 +2,7 @@
 
 #include "Globals.h"
 #include <string>
+#include <vector>
 #include <functional>
 #include <atomic>
 
@@ -44,6 +45,20 @@ enum class ResponseType
     Unknown
 };
 
+// Hotkey configuration from Go Service
+struct HotkeyConfigData
+{
+    std::vector<std::wstring> toggleModeKeys;  // lshift, rshift, lctrl, rctrl, capslock
+    std::wstring switchEngine;                  // ctrl+`, ctrl+shift+e, none
+    std::wstring toggleFullWidth;               // shift+space, ctrl+shift+space, none
+    std::wstring togglePunct;                   // ctrl+., ctrl+,, none
+    std::vector<std::wstring> selectKeyGroups;  // semicolon_quote, comma_period, lrshift, lrctrl
+    std::vector<std::wstring> pageKeys;         // pageupdown, minus_equal, brackets, shift_tab
+    BOOL hasData;                               // TRUE if hotkey config was present in response
+
+    HotkeyConfigData() : hasData(FALSE) {}
+};
+
 // Response from Go Service
 struct ServiceResponse
 {
@@ -56,6 +71,7 @@ struct ServiceResponse
     BOOL fullWidth;         // For StatusUpdate
     BOOL chinesePunct;      // For StatusUpdate
     BOOL toolbarVisible;    // For StatusUpdate
+    HotkeyConfigData hotkeys; // For StatusUpdate (hotkey configuration)
     std::wstring error;
 };
 

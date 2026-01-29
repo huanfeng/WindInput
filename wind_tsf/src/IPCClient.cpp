@@ -865,6 +865,71 @@ BOOL CIPCClient::_ParseResponse(const std::wstring& json, ServiceResponse& respo
 
         _LogDebug(L"StatusUpdate: mode=%d, width=%d, punct=%d, toolbar=%d",
                   response.chineseMode, response.fullWidth, response.chinesePunct, response.toolbarVisible);
+
+        // Parse hotkeys configuration if present
+        size_t hotkeysPos = json.find(L"\"hotkeys\":{");
+        if (hotkeysPos != std::wstring::npos)
+        {
+            response.hotkeys.hasData = TRUE;
+            _LogDebug(L"StatusUpdate contains hotkeys config");
+
+            // Helper lambda to parse string array
+            auto parseStringArray = [&json](const wchar_t* fieldName) -> std::vector<std::wstring> {
+                std::vector<std::wstring> result;
+                std::wstring searchKey = std::wstring(L"\"") + fieldName + L"\":[";
+                size_t pos = json.find(searchKey);
+                if (pos != std::wstring::npos)
+                {
+                    pos += searchKey.length();
+                    size_t endPos = json.find(L"]", pos);
+                    if (endPos != std::wstring::npos)
+                    {
+                        std::wstring arrayContent = json.substr(pos, endPos - pos);
+                        size_t strStart = 0;
+                        while ((strStart = arrayContent.find(L"\"", strStart)) != std::wstring::npos)
+                        {
+                            strStart++;
+                            size_t strEnd = arrayContent.find(L"\"", strStart);
+                            if (strEnd != std::wstring::npos)
+                            {
+                                result.push_back(arrayContent.substr(strStart, strEnd - strStart));
+                                strStart = strEnd + 1;
+                            }
+                            else break;
+                        }
+                    }
+                }
+                return result;
+            };
+
+            // Helper lambda to parse string value
+            auto parseStringValue = [&json](const wchar_t* fieldName) -> std::wstring {
+                std::wstring searchKey = std::wstring(L"\"") + fieldName + L"\":\"";
+                size_t pos = json.find(searchKey);
+                if (pos != std::wstring::npos)
+                {
+                    pos += searchKey.length();
+                    size_t endPos = json.find(L"\"", pos);
+                    if (endPos != std::wstring::npos)
+                    {
+                        return json.substr(pos, endPos - pos);
+                    }
+                }
+                return L"";
+            };
+
+            response.hotkeys.toggleModeKeys = parseStringArray(L"toggle_mode_keys");
+            response.hotkeys.switchEngine = parseStringValue(L"switch_engine");
+            response.hotkeys.toggleFullWidth = parseStringValue(L"toggle_full_width");
+            response.hotkeys.togglePunct = parseStringValue(L"toggle_punct");
+            response.hotkeys.selectKeyGroups = parseStringArray(L"select_key_groups");
+            response.hotkeys.pageKeys = parseStringArray(L"page_keys");
+
+            _LogDebug(L"Hotkeys parsed: toggleModeKeys=%d items, selectKeyGroups=%d items, pageKeys=%d items",
+                      (int)response.hotkeys.toggleModeKeys.size(),
+                      (int)response.hotkeys.selectKeyGroups.size(),
+                      (int)response.hotkeys.pageKeys.size());
+        }
     }
     else if (json.find(L"\"type\":\"consumed\"") != std::wstring::npos)
     {

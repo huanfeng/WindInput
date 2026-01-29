@@ -2,6 +2,7 @@
 package wubi
 
 import (
+	"log"
 	"sort"
 	"strings"
 
@@ -196,6 +197,8 @@ func (e *Engine) checkAutoCommit(result *ConvertResult, input string, candidates
 	}
 
 	inputLen := len(input)
+	log.Printf("[Wubi] checkAutoCommit: input=%s, len=%d, candidates=%d, mode=%d, maxCode=%d",
+		input, inputLen, len(candidates), e.config.AutoCommit, e.config.MaxCodeLength)
 
 	switch e.config.AutoCommit {
 	case AutoCommitUnique:
@@ -203,6 +206,7 @@ func (e *Engine) checkAutoCommit(result *ConvertResult, input string, candidates
 		if len(candidates) == 1 {
 			result.ShouldCommit = true
 			result.CommitText = candidates[0].Text
+			log.Printf("[Wubi] AutoCommitUnique triggered: text=%s", result.CommitText)
 		}
 
 	case AutoCommitUniqueAt4:
@@ -210,6 +214,10 @@ func (e *Engine) checkAutoCommit(result *ConvertResult, input string, candidates
 		if inputLen >= e.config.MaxCodeLength && len(candidates) == 1 {
 			result.ShouldCommit = true
 			result.CommitText = candidates[0].Text
+			log.Printf("[Wubi] AutoCommitUniqueAt4 triggered: text=%s", result.CommitText)
+		} else {
+			log.Printf("[Wubi] AutoCommitUniqueAt4 NOT triggered: inputLen(%d) >= maxCode(%d)=%v, candidates==%d",
+				inputLen, e.config.MaxCodeLength, inputLen >= e.config.MaxCodeLength, len(candidates))
 		}
 
 	case AutoCommitUniqueFullMatch:
@@ -218,6 +226,7 @@ func (e *Engine) checkAutoCommit(result *ConvertResult, input string, candidates
 		if len(exactMatch) == 1 {
 			result.ShouldCommit = true
 			result.CommitText = exactMatch[0].Text
+			log.Printf("[Wubi] AutoCommitUniqueFullMatch triggered: text=%s", result.CommitText)
 		}
 	}
 }
@@ -225,11 +234,17 @@ func (e *Engine) checkAutoCommit(result *ConvertResult, input string, candidates
 // HandleTopCode 处理顶码（五码顶字）
 // 当输入第五码时，自动上屏首选并将第五码作为新输入
 func (e *Engine) HandleTopCode(input string) (commitText string, newInput string, shouldCommit bool) {
+	log.Printf("[Wubi] HandleTopCode: input=%s, topCodeCommit=%v, maxCodeLength=%d",
+		input, e.config.TopCodeCommit, e.config.MaxCodeLength)
+
 	if !e.config.TopCodeCommit {
+		log.Printf("[Wubi] HandleTopCode: TopCodeCommit is disabled")
 		return "", input, false
 	}
 
 	if len(input) <= e.config.MaxCodeLength {
+		log.Printf("[Wubi] HandleTopCode: input length %d <= maxCodeLength %d, skipping",
+			len(input), e.config.MaxCodeLength)
 		return "", input, false
 	}
 
@@ -240,11 +255,15 @@ func (e *Engine) HandleTopCode(input string) (commitText string, newInput string
 		candidates = e.codeTable.LookupPrefix(prefix)
 	}
 
+	log.Printf("[Wubi] HandleTopCode: prefix=%s, candidates=%d", prefix, len(candidates))
+
 	if len(candidates) > 0 {
 		sort.Sort(candidate.CandidateList(candidates))
+		log.Printf("[Wubi] HandleTopCode: commit=%s, newInput=%s", candidates[0].Text, input[e.config.MaxCodeLength:])
 		return candidates[0].Text, input[e.config.MaxCodeLength:], true
 	}
 
+	log.Printf("[Wubi] HandleTopCode: no candidates found for prefix %s", prefix)
 	return "", input, false
 }
 

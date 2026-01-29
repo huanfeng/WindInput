@@ -758,7 +758,7 @@ onUnmounted(() => {
                 <p class="setting-hint">可多选，按下任意一个即切换</p>
               </div>
               <div class="setting-control">
-                <div class="checkbox-group">
+                <div class="checkbox-group two-columns">
                   <label class="checkbox-item" v-for="key in ['lshift', 'rshift', 'lctrl', 'rctrl', 'capslock']" :key="key">
                     <input
                       type="checkbox"
@@ -837,7 +837,7 @@ onUnmounted(() => {
                 <p class="setting-hint">可多选，同时启用多组快捷键</p>
               </div>
               <div class="setting-control">
-                <div class="checkbox-group">
+                <div class="checkbox-group two-columns">
                   <label class="checkbox-item" v-for="group in [
                     { value: 'semicolon_quote', label: '; \' 键' },
                     { value: 'comma_period', label: ', . 键' },
@@ -865,7 +865,7 @@ onUnmounted(() => {
                 <p class="setting-hint">可多选，同时启用多组翻页键</p>
               </div>
               <div class="setting-control">
-                <div class="checkbox-group">
+                <div class="checkbox-group two-columns">
                   <label class="checkbox-item" v-for="pk in [
                     { value: 'pageupdown', label: 'PgUp/PgDn' },
                     { value: 'minus_equal', label: '- / =' },
@@ -1263,27 +1263,44 @@ input:checked + .slider:before { transform: translateX(20px); }
 
 /* Checkbox Group */
 .checkbox-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 10px 16px;
+  width: 100%;
+  max-width: 400px;
+}
+.checkbox-group.two-columns {
+  grid-template-columns: repeat(2, 1fr);
 }
 .checkbox-group.vertical {
-  flex-direction: column;
+  grid-template-columns: 1fr;
   gap: 10px;
 }
 .checkbox-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   cursor: pointer;
   font-size: 13px;
   color: #374151;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background-color 0.15s;
+  white-space: nowrap;
+}
+.checkbox-item:hover {
+  background-color: #f3f4f6;
 }
 .checkbox-item input {
   width: 16px;
   height: 16px;
   cursor: pointer;
   accent-color: #2563eb;
+  flex-shrink: 0;
+}
+.checkbox-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Range */

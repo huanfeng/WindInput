@@ -1,6 +1,7 @@
 #include "KeyEventSink.h"
 #include "TextService.h"
 #include "IPCClient.h"
+#include "HotkeyManager.h"
 #include <cctype>
 
 CKeyEventSink::CKeyEventSink(CTextService* pTextService)
@@ -8,7 +9,9 @@ CKeyEventSink::CKeyEventSink(CTextService* pTextService)
     , _pTextService(pTextService)
     , _dwKeySinkCookie(TF_INVALID_COOKIE)
     , _isComposing(FALSE)
+    , _hasCandidates(FALSE)
     , _shiftPending(FALSE)
+    , _pendingToggleKey(0)
 {
     _pTextService->AddRef();
 }
@@ -93,9 +96,11 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 {
     *pfEaten = FALSE;
 
-    // Special handling for Shift key (mode toggle on release)
-    // Note: We still handle Shift even in read-only context for mode switching
-    if (wParam == VK_SHIFT)
+    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+    int modifiers = _GetModifierState();
+
+    // Check if this is a toggle mode key (Shift, Ctrl, CapsLock depending on config)
+    if (pHotkeyMgr != nullptr && pHotkeyMgr->IsToggleModeKey(wParam))
     {
         // Check if this is a key repeat (bit 30 of lParam)
         if (lParam & 0x40000000)
@@ -105,21 +110,36 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             return S_OK;
         }
 
-        // Check if other modifiers are pressed (Ctrl+Shift, Alt+Shift are system shortcuts)
-        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000))
+        // Check if other modifiers are pressed (e.g., Ctrl+Shift is a system shortcut)
+        // Only consider it a toggle if the key is pressed alone
+        BOOL hasOtherModifier = FALSE;
+        if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT)
+        {
+            hasOtherModifier = (GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000);
+        }
+        else if (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL)
+        {
+            hasOtherModifier = (GetAsyncKeyState(VK_SHIFT) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000);
+        }
+        // CapsLock doesn't need modifier check
+
+        if (hasOtherModifier)
         {
             _shiftPending = FALSE;
+            _pendingToggleKey = 0;
             return S_OK;  // Let system handle it
         }
 
-        // Mark shift as pending (will toggle mode on release if no other key pressed)
+        // Mark toggle key as pending (will toggle mode on release if no other key pressed)
         _shiftPending = TRUE;
+        _pendingToggleKey = wParam;
         *pfEaten = TRUE;
         return S_OK;
     }
 
-    // Any other key cancels shift pending
+    // Any other key cancels toggle pending
     _shiftPending = FALSE;
+    _pendingToggleKey = 0;
 
     // Check if context is read-only (browser non-editable area)
     // Don't intercept keys in read-only areas to allow browser shortcuts
@@ -158,15 +178,38 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 
 STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
-    // We need to handle Shift key up for mode toggle, and Caps Lock for indicator
-    if ((wParam == VK_SHIFT && _shiftPending) || wParam == VK_CAPITAL)
+    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+
+    // Handle pending toggle key release
+    if (_shiftPending && _pendingToggleKey != 0)
+    {
+        // Check if this is the same key that was pressed
+        BOOL isMatchingKey = (wParam == _pendingToggleKey);
+        // Also check for generic VK_SHIFT matching VK_LSHIFT/VK_RSHIFT
+        if (!isMatchingKey && (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT))
+        {
+            isMatchingKey = (_pendingToggleKey == VK_SHIFT || _pendingToggleKey == VK_LSHIFT || _pendingToggleKey == VK_RSHIFT);
+        }
+        if (!isMatchingKey && (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL))
+        {
+            isMatchingKey = (_pendingToggleKey == VK_CONTROL || _pendingToggleKey == VK_LCONTROL || _pendingToggleKey == VK_RCONTROL);
+        }
+
+        if (isMatchingKey)
+        {
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+    }
+
+    // Also handle Caps Lock for indicator (always, regardless of config)
+    if (wParam == VK_CAPITAL)
     {
         *pfEaten = TRUE;
+        return S_OK;
     }
-    else
-    {
-        *pfEaten = FALSE;
-    }
+
+    *pfEaten = FALSE;
     return S_OK;
 }
 
@@ -174,21 +217,50 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
 {
     *pfEaten = FALSE;
 
-    // Handle Shift key release for mode toggle
-    if (wParam == VK_SHIFT && _shiftPending)
+    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+
+    // Handle toggle key release for mode toggle
+    if (_shiftPending && _pendingToggleKey != 0)
     {
-        _shiftPending = FALSE;
+        // Check if this is the same key that was pressed
+        BOOL isMatchingKey = (wParam == _pendingToggleKey);
+        // Also check for generic VK_SHIFT matching VK_LSHIFT/VK_RSHIFT
+        if (!isMatchingKey && (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT))
+        {
+            isMatchingKey = (_pendingToggleKey == VK_SHIFT || _pendingToggleKey == VK_LSHIFT || _pendingToggleKey == VK_RSHIFT);
+        }
+        if (!isMatchingKey && (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL))
+        {
+            isMatchingKey = (_pendingToggleKey == VK_CONTROL || _pendingToggleKey == VK_LCONTROL || _pendingToggleKey == VK_RCONTROL);
+        }
 
-        // Toggle mode
-        _pTextService->ToggleInputMode();
+        if (isMatchingKey)
+        {
+            _shiftPending = FALSE;
+            _pendingToggleKey = 0;
 
-        *pfEaten = TRUE;
-        return S_OK;
+            // Toggle mode (handles CapsLock specially - it toggles on key down, not release)
+            if (wParam != VK_CAPITAL)
+            {
+                _pTextService->ToggleInputMode();
+            }
+
+            *pfEaten = TRUE;
+            return S_OK;
+        }
     }
 
     // Handle Caps Lock key release - show A/a indicator and update language bar
+    // CapsLock toggles on release, not on pending
     if (wParam == VK_CAPITAL)
     {
+        // If CapsLock is configured as toggle key and was pending, toggle mode
+        if (pHotkeyMgr != nullptr && pHotkeyMgr->IsToggleModeKey(VK_CAPITAL))
+        {
+            // CapsLock toggles mode
+            _pTextService->ToggleInputMode();
+        }
+
         // Get current Caps Lock state (after the key was processed)
         BOOL capsLockOn = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
 
@@ -285,96 +357,34 @@ int CKeyEventSink::_GetModifierState()
 
 BOOL CKeyEventSink::_IsKeyWeShouldHandle(WPARAM wParam)
 {
-    // Get current modifier state
-    int modifiers = _GetModifierState();
-
-    // Shift key for Chinese/English toggle
-    // Only handle if no other modifier keys are pressed
-    if (wParam == VK_SHIFT)
+    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+    if (pHotkeyMgr == nullptr)
     {
-        // If Ctrl or Alt is also pressed, this is a system shortcut (e.g., Shift+Alt)
-        // Let the system handle it
+        OutputDebugStringW(L"[WindInput] HotkeyManager is null, using fallback logic\n");
+        // Fallback to basic handling
+        int modifiers = _GetModifierState();
         if (modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT))
-        {
-            OutputDebugStringW(L"[WindInput] Shift with Ctrl/Alt, passing to system\n");
             return FALSE;
-        }
-        return TRUE;
-    }
-
-    // Handle Shift+Space (full-width toggle hotkey)
-    if (wParam == VK_SPACE && (modifiers & KEY_MOD_SHIFT) && !(modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT)))
-    {
-        return TRUE;
-    }
-
-    // If Ctrl or Alt is pressed with any key, don't intercept
-    // This allows Ctrl+C, Ctrl+V, Alt+Tab, etc. to work
-    // Exception: Ctrl+` (VK_OEM_3 = 0xC0) for engine switching
-    // Exception: Ctrl+. (VK_OEM_PERIOD = 0xBE) for punctuation toggle
-    if (modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT))
-    {
-        // Allow Ctrl+` for engine switching
-        if ((modifiers & KEY_MOD_CTRL) && !(modifiers & KEY_MOD_ALT) && wParam == VK_OEM_3)
-        {
+        if (wParam >= 'A' && wParam <= 'Z')
             return TRUE;
-        }
-        // Allow Ctrl+. for punctuation toggle
-        if ((modifiers & KEY_MOD_CTRL) && !(modifiers & KEY_MOD_ALT) && wParam == VK_OEM_PERIOD)
-        {
-            return TRUE;
-        }
         return FALSE;
     }
 
-    // Always handle when composing
-    if (_isComposing)
-    {
-        // Handle letters, numbers, backspace, enter, escape, space, and page keys
-        if ((wParam >= 'A' && wParam <= 'Z') ||
-            (wParam >= '1' && wParam <= '9') ||
-            wParam == VK_BACK ||
-            wParam == VK_RETURN ||
-            wParam == VK_ESCAPE ||
-            wParam == VK_SPACE ||
-            wParam == VK_OEM_MINUS ||  // - key for page up
-            wParam == VK_OEM_PLUS ||   // = key for page down
-            _IsPunctuationKey(wParam)) // punctuation keys
-        {
-            return TRUE;
-        }
-    }
-    else
-    {
-        // When not composing in Chinese mode, handle letters and punctuation
-        if (_pTextService->IsChineseMode())
-        {
-            if (wParam >= 'A' && wParam <= 'Z')
-            {
-                return TRUE;
-            }
-            // Handle punctuation in Chinese mode (for direct punctuation conversion)
-            if (_IsPunctuationKey(wParam))
-            {
-                return TRUE;
-            }
-        }
-        else
-        {
-            // English mode: only handle letters
-            if (wParam >= 'A' && wParam <= 'Z')
-            {
-                return TRUE;
-            }
-        }
-    }
+    int modifiers = _GetModifierState();
+    BOOL isChineseMode = _pTextService->IsChineseMode();
 
-    return FALSE;
+    return pHotkeyMgr->ShouldInterceptKey(wParam, modifiers, _isComposing, _hasCandidates, isChineseMode);
 }
 
 // Check if a key is a punctuation key we should handle
 BOOL CKeyEventSink::_IsPunctuationKey(WPARAM wParam)
 {
+    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+    if (pHotkeyMgr != nullptr)
+    {
+        return pHotkeyMgr->IsPunctuationKey(wParam);
+    }
+    // Fallback
     switch (wParam)
     {
     case VK_OEM_COMMA:    // , <
@@ -395,6 +405,12 @@ BOOL CKeyEventSink::_IsPunctuationKey(WPARAM wParam)
 // Convert punctuation virtual key to character
 wchar_t CKeyEventSink::_VirtualKeyToPunctuation(WPARAM wParam, BOOL shiftPressed)
 {
+    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+    if (pHotkeyMgr != nullptr)
+    {
+        return pHotkeyMgr->VirtualKeyToPunctuation(wParam, shiftPressed);
+    }
+    // Fallback
     switch (wParam)
     {
     case VK_OEM_COMMA:   return shiftPressed ? L'<' : L',';
@@ -551,6 +567,7 @@ void CKeyEventSink::_HandleServiceResponse()
         {
             OutputDebugStringW(L"[WindInput] Processing InsertText response\n");
             _isComposing = FALSE;
+            _hasCandidates = FALSE;
 
             // First, end composition to clear the preedit text
             // This will remove the underlined composition text
@@ -578,13 +595,15 @@ void CKeyEventSink::_HandleServiceResponse()
 
     case ResponseType::UpdateComposition:
         OutputDebugStringW(L"[WindInput] Received UpdateComposition from service\n");
-        _isComposing = TRUE;  // Ensure composing state is set
+        _isComposing = TRUE;   // Ensure composing state is set
+        _hasCandidates = TRUE; // Assume there are candidates when composition is updated
         _pTextService->UpdateComposition(response.composition, response.caretPos);
         break;
 
     case ResponseType::ClearComposition:
         OutputDebugStringW(L"[WindInput] Received ClearComposition from service\n");
         _isComposing = FALSE;
+        _hasCandidates = FALSE;
         _pTextService->EndComposition();
         break;
 
@@ -592,6 +611,7 @@ void CKeyEventSink::_HandleServiceResponse()
         OutputDebugStringW(L"[WindInput] Received ModeChanged from service\n");
         // Clear composing state and end any active composition when mode changes
         _isComposing = FALSE;
+        _hasCandidates = FALSE;
         _pTextService->EndComposition();
         // Update local mode state and language bar icon
         _pTextService->SetInputMode(response.chineseMode);

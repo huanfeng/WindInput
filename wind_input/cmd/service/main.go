@@ -241,7 +241,16 @@ func main() {
 	)
 
 	// Initialize engine based on config
-	fullDictPath := filepath.Join(exeDir, cfg.Dictionary.SystemDict)
+	// 根据引擎类型选择正确的词库路径
+	var fullDictPath string
+	switch cfg.Engine.Type {
+	case "wubi":
+		fullDictPath = filepath.Join(exeDir, config.GetWubiDictPath())
+	case "pinyin":
+		fullDictPath = filepath.Join(exeDir, config.GetPinyinDictPath())
+	default:
+		fullDictPath = filepath.Join(exeDir, cfg.Dictionary.SystemDict)
+	}
 	logger.Info("Loading dictionary", "path", fullDictPath, "engine_type", cfg.Engine.Type)
 
 	// 解析拼音配置
