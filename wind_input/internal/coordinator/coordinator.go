@@ -9,6 +9,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/config"
 	"github.com/huanfeng/wind_input/internal/engine"
+	"github.com/huanfeng/wind_input/internal/hotkey"
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/internal/ui"
 )
@@ -58,6 +59,9 @@ type Coordinator struct {
 
 	// Punctuation converter with state (for paired punctuation like quotes)
 	punctConverter *transform.PunctuationConverter
+
+	// Hotkey compiler for binary protocol
+	hotkeyCompiler *hotkey.Compiler
 }
 
 // NewCoordinator creates a new Coordinator
@@ -119,6 +123,7 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		caretY:             100,
 		caretHeight:        20,
 		punctConverter:     transform.NewPunctuationConverter(),
+		hotkeyCompiler:     hotkey.NewCompiler(cfg),
 	}
 
 	// Set up toolbar callbacks
@@ -930,23 +935,16 @@ func (c *Coordinator) HandleClientDisconnected(activeClients int) {
 	}
 }
 
-// getHotkeyConfig returns the current hotkey configuration for C++ side
-func (c *Coordinator) getHotkeyConfig() *bridge.HotkeyConfig {
-	if c.config == nil {
-		return nil
+// getCompiledHotkeys returns compiled hotkey hashes for C++ side
+func (c *Coordinator) getCompiledHotkeys() (keyDownHotkeys, keyUpHotkeys []uint32) {
+	if c.hotkeyCompiler == nil {
+		return nil, nil
 	}
-	c.logger.Debug("Sending hotkey config to C++",
-		"toggle_mode_keys", c.config.Hotkeys.ToggleModeKeys,
-		"select_key_groups", c.config.Input.SelectKeyGroups,
-		"page_keys", c.config.Input.PageKeys)
-	return &bridge.HotkeyConfig{
-		ToggleModeKeys:  c.config.Hotkeys.ToggleModeKeys,
-		SwitchEngine:    c.config.Hotkeys.SwitchEngine,
-		ToggleFullWidth: c.config.Hotkeys.ToggleFullWidth,
-		TogglePunct:     c.config.Hotkeys.TogglePunct,
-		SelectKeyGroups: c.config.Input.SelectKeyGroups,
-		PageKeys:        c.config.Input.PageKeys,
-	}
+	keyDownHotkeys, keyUpHotkeys = c.hotkeyCompiler.Compile()
+	c.logger.Debug("Compiled hotkeys for C++",
+		"keyDownCount", len(keyDownHotkeys),
+		"keyUpCount", len(keyUpHotkeys))
+	return
 }
 
 // HandleFocusGained handles focus gained events and returns current status
@@ -971,7 +969,8 @@ func (c *Coordinator) HandleFocusGained() *bridge.StatusUpdateData {
 	// Set IME as activated (this will show toolbar if enabled)
 	c.SetIMEActivated(true)
 
-	// Return current status so TSF can sync state (including hotkey config)
+	// Return current status so TSF can sync state (including compiled hotkeys)
+	keyDownHotkeys, keyUpHotkeys := c.getCompiledHotkeys()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return &bridge.StatusUpdateData{
@@ -980,7 +979,8 @@ func (c *Coordinator) HandleFocusGained() *bridge.StatusUpdateData {
 		ChinesePunctuation: c.chinesePunctuation,
 		ToolbarVisible:     c.toolbarVisible,
 		CapsLock:           ui.GetCapsLockState(),
-		Hotkeys:            c.getHotkeyConfig(),
+		KeyDownHotkeys:     keyDownHotkeys,
+		KeyUpHotkeys:       keyUpHotkeys,
 	}
 }
 
@@ -1007,7 +1007,8 @@ func (c *Coordinator) HandleIMEActivated() *bridge.StatusUpdateData {
 	// Set IME as activated (this will show toolbar if enabled)
 	c.SetIMEActivated(true)
 
-	// Return current status so TSF can sync state (including hotkey config)
+	// Return current status so TSF can sync state (including compiled hotkeys)
+	keyDownHotkeys, keyUpHotkeys := c.getCompiledHotkeys()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return &bridge.StatusUpdateData{
@@ -1016,7 +1017,8 @@ func (c *Coordinator) HandleIMEActivated() *bridge.StatusUpdateData {
 		ChinesePunctuation: c.chinesePunctuation,
 		ToolbarVisible:     c.toolbarVisible,
 		CapsLock:           ui.GetCapsLockState(),
-		Hotkeys:            c.getHotkeyConfig(),
+		KeyDownHotkeys:     keyDownHotkeys,
+		KeyUpHotkeys:       keyUpHotkeys,
 	}
 }
 

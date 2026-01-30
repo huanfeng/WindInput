@@ -1,52 +1,6 @@
 // Package bridge handles IPC communication with C++ TSF Bridge
 package bridge
 
-import "encoding/json"
-
-// RequestType defines the type of request from C++
-type RequestType string
-
-const (
-	RequestTypeKeyEvent       RequestType = "key_event"
-	RequestTypeCaretUpdate    RequestType = "caret_update"
-	RequestTypeFocusLost      RequestType = "focus_lost"
-	RequestTypeFocusGained    RequestType = "focus_gained"    // 输入法获取焦点
-	RequestTypeIMEDeactivated RequestType = "ime_deactivated" // 输入法被切换走
-	RequestTypeIMEActivated   RequestType = "ime_activated"   // 输入法被切换回来
-	RequestTypeToggleMode     RequestType = "toggle_mode"
-	RequestTypeCapsLockState  RequestType = "caps_lock_state"
-	RequestTypeMenuCommand    RequestType = "menu_command"    // 菜单命令
-	RequestTypeToolbarAction  RequestType = "toolbar_action"  // 工具栏动作
-)
-
-// Request from C++ TSF Bridge
-type Request struct {
-	Type RequestType     `json:"type"`
-	Data json.RawMessage `json:"data"`
-}
-
-// KeyEventData contains key event information
-type KeyEventData struct {
-	Key       string `json:"key"`
-	KeyCode   int    `json:"keycode"`
-	Modifiers int    `json:"modifiers"`
-	Event     string `json:"event"` // "down" or "up"
-	// Caret position (optional, sent with key events to avoid separate caret_update)
-	Caret *CaretData `json:"caret,omitempty"`
-}
-
-// CaretData contains caret position information
-type CaretData struct {
-	X      int `json:"x"`
-	Y      int `json:"y"`
-	Height int `json:"height"`
-}
-
-// CapsLockData contains Caps Lock state
-type CapsLockData struct {
-	CapsLockOn bool `json:"caps_lock_on"`
-}
-
 // ResponseType defines the type of response to C++
 type ResponseType string
 
@@ -56,72 +10,59 @@ const (
 	ResponseTypeClearComposition  ResponseType = "clear_composition"
 	ResponseTypeAck               ResponseType = "ack"
 	ResponseTypeModeChanged       ResponseType = "mode_changed"
-	ResponseTypeStatusUpdate      ResponseType = "status_update" // 状态更新响应
-	ResponseTypeConsumed          ResponseType = "consumed"      // 按键被消费，不产生输出
+	ResponseTypeStatusUpdate      ResponseType = "status_update"
+	ResponseTypeConsumed          ResponseType = "consumed"
 )
 
-// Response to C++ TSF Bridge
-type Response struct {
-	Type  ResponseType `json:"type"`
-	Data  interface{}  `json:"data,omitempty"`
-	Error string       `json:"error,omitempty"`
+// KeyEventData contains key event information (parsed from binary)
+type KeyEventData struct {
+	Key       string // Key name (derived from keycode for backwards compatibility)
+	KeyCode   int    // Virtual key code
+	Modifiers int    // Modifier flags
+	Event     string // "down" or "up"
+	// Caret position (optional, sent with key events)
+	Caret *CaretData
 }
 
-// InsertTextData for inserting final text
-type InsertTextData struct {
-	Text           string `json:"text"`
-	ModeChanged    bool   `json:"mode_changed,omitempty"`    // 是否同时切换了模式
-	ChineseMode    bool   `json:"chinese_mode,omitempty"`    // 切换后的模式（仅当 ModeChanged 为 true 时有效）
-	NewComposition string `json:"new_composition,omitempty"` // 插入后的新组合文本（用于五码顶字等场景）
-}
-
-// CompositionData for updating composition text (pinyin display)
-type CompositionData struct {
-	Text     string `json:"text"`
-	CaretPos int    `json:"caret_pos"`
-}
-
-// ModeChangedData for mode toggle response
-type ModeChangedData struct {
-	ChineseMode bool `json:"chinese_mode"`
-}
-
-// MenuCommandData for menu command requests
-type MenuCommandData struct {
-	Command string `json:"command"` // toggle_mode, toggle_width, toggle_punct, open_settings, toggle_toolbar
-}
-
-// ToolbarActionData for toolbar action requests
-type ToolbarActionData struct {
-	Action string `json:"action"` // click, drag_start, drag_end
-	X      int    `json:"x,omitempty"`
-	Y      int    `json:"y,omitempty"`
-	Button string `json:"button,omitempty"` // mode, width, punct, settings
-}
-
-// HotkeyConfig contains hotkey configuration for C++ side
-type HotkeyConfig struct {
-	// 中英切换键: lshift, rshift, lctrl, rctrl, capslock
-	ToggleModeKeys []string `json:"toggle_mode_keys"`
-
-	// 功能快捷键: ctrl+`, ctrl+shift+e, shift+space, ctrl+., none
-	SwitchEngine    string `json:"switch_engine"`
-	ToggleFullWidth string `json:"toggle_full_width"`
-	TogglePunct     string `json:"toggle_punct"`
-
-	// 候选选择键组: semicolon_quote, comma_period, lrshift, lrctrl
-	SelectKeyGroups []string `json:"select_key_groups"`
-
-	// 翻页键组: pageupdown, minus_equal, brackets, shift_tab
-	PageKeys []string `json:"page_keys"`
+// CaretData contains caret position information
+type CaretData struct {
+	X      int
+	Y      int
+	Height int
 }
 
 // StatusUpdateData for status update response
 type StatusUpdateData struct {
-	ChineseMode        bool          `json:"chinese_mode"`
-	FullWidth          bool          `json:"full_width"`
-	ChinesePunctuation bool          `json:"chinese_punctuation"`
-	ToolbarVisible     bool          `json:"toolbar_visible"`
-	CapsLock           bool          `json:"caps_lock"`
-	Hotkeys            *HotkeyConfig `json:"hotkeys,omitempty"` // 快捷键配置（激活时返回）
+	ChineseMode        bool
+	FullWidth          bool
+	ChinesePunctuation bool
+	ToolbarVisible     bool
+	CapsLock           bool
+	// Hotkey hashes for C++ side (compiled from config)
+	KeyDownHotkeys []uint32
+	KeyUpHotkeys   []uint32
+}
+
+// KeyEventResult represents the result of handling a key event
+type KeyEventResult struct {
+	Type           ResponseType
+	Text           string // For InsertText
+	CaretPos       int    // For UpdateComposition
+	ChineseMode    bool   // For ModeChanged
+	ModeChanged    bool   // Whether mode was also changed (for InsertText + mode change combo)
+	NewComposition string // New composition after commit (for top code scenarios)
+}
+
+// MessageHandler handles messages from C++ Bridge
+type MessageHandler interface {
+	HandleKeyEvent(data KeyEventData) *KeyEventResult
+	HandleCaretUpdate(data CaretData) error
+	HandleFocusLost()
+	HandleFocusGained() *StatusUpdateData
+	HandleIMEDeactivated()
+	HandleIMEActivated() *StatusUpdateData
+	HandleToggleMode() (commitText string, chineseMode bool)
+	HandleCapsLockState(on bool)
+	HandleMenuCommand(command string) *StatusUpdateData
+	HandleClientDisconnected(activeClients int)
 }

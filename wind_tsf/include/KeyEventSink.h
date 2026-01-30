@@ -2,6 +2,7 @@
 
 #include "Globals.h"
 #include <string>
+#include <cstdint>
 
 class CTextService;
 
@@ -29,7 +30,7 @@ public:
     void Uninitialize();
 
     // Reset composing state (called when focus is lost or input field changes)
-    void ResetComposingState() { _isComposing = FALSE; }
+    void ResetComposingState() { _isComposing = FALSE; _hasCandidates = FALSE; }
 
 private:
     LONG _refCount;
@@ -38,19 +39,15 @@ private:
 
     // State
     BOOL _isComposing;
-    BOOL _hasCandidates;  // True if there are candidates to select
-    BOOL _shiftPending;   // True if Shift was pressed alone (for mode toggle on release)
-    WPARAM _pendingToggleKey;  // The toggle key that is pending (for release detection)
+    BOOL _hasCandidates;         // True if there are candidates to select
+    uint32_t _pendingKeyUpKey;   // Key code of pending KeyUp toggle key
+    uint32_t _pendingKeyUpModifiers; // Modifiers when KeyDown was pressed
 
     // Helper methods
-    int _GetModifierState();
-    BOOL _IsKeyWeShouldHandle(WPARAM wParam);
-    BOOL _IsPunctuationKey(WPARAM wParam);
-    wchar_t _VirtualKeyToPunctuation(WPARAM wParam, BOOL shiftPressed);
-    BOOL _SendKeyToService(WPARAM wParam);
+    BOOL _IsMatchingKeyUp(WPARAM wParam, uint32_t pendingKey);
+    BOOL _SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType);
     void _HandleServiceResponse();
 
     // Context state checking (for browser non-editable area detection)
     BOOL _IsContextReadOnly(ITfContext* pContext);
-    BOOL _IsCurrentProcessBrowser();
 };

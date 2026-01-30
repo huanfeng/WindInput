@@ -3,7 +3,6 @@ package bridge
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"golang.org/x/sys/windows"
 )
 
@@ -21,34 +21,11 @@ const (
 	RequestProcessTimeout = 200 * time.Millisecond
 )
 
-// KeyEventResult represents the result of handling a key event
-type KeyEventResult struct {
-	Type           ResponseType
-	Text           string // For InsertText
-	CaretPos       int    // For UpdateComposition
-	ChineseMode    bool   // For ModeChanged
-	ModeChanged    bool   // 是否同时切换了模式（用于 InsertText + 模式切换的组合）
-	NewComposition string // 插入后的新组合文本（用于五码顶字等场景）
-}
-
-// MessageHandler handles messages from C++ Bridge
-type MessageHandler interface {
-	HandleKeyEvent(data KeyEventData) *KeyEventResult
-	HandleCaretUpdate(data CaretData) error
-	HandleFocusLost()                                   // Called when focus is lost
-	HandleFocusGained() *StatusUpdateData               // Called when focus is gained, returns current status
-	HandleIMEDeactivated()                              // Called when IME is being switched away (user selected another IME)
-	HandleIMEActivated() *StatusUpdateData              // Called when IME is switched back (user selected this IME again)
-	HandleToggleMode() (commitText string, chineseMode bool) // Called when mode toggle requested, returns commit text (if CommitOnSwitch) and new chineseMode state
-	HandleCapsLockState(on bool)                        // Called when Caps Lock state changes, shows A/a indicator
-	HandleMenuCommand(command string) *StatusUpdateData // Called when menu command received
-	HandleClientDisconnected(activeClients int)         // Called when a client disconnects, with remaining active count
-}
-
 // Server handles IPC communication with C++ TSF Bridge
 type Server struct {
 	logger  *slog.Logger
 	handler MessageHandler
+	codec   *ipc.BinaryCodec
 
 	mu            sync.Mutex
 	clientCount   int
@@ -60,13 +37,14 @@ func NewServer(handler MessageHandler, logger *slog.Logger) *Server {
 	return &Server{
 		handler:       handler,
 		logger:        logger,
+		codec:         ipc.NewBinaryCodec(),
 		activeHandles: make(map[windows.Handle]bool),
 	}
 }
 
 // Start begins listening for connections from C++ Bridge
 func (s *Server) Start() error {
-	s.logger.Info("Starting Bridge IPC server", "pipe", BridgePipeName)
+	s.logger.Info("Starting Bridge IPC server (binary protocol)", "pipe", BridgePipeName)
 
 	// Create security descriptor allowing Everyone, SYSTEM, and Administrators
 	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)"
@@ -141,19 +119,32 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) {
 
 	s.logger.Debug("Handling client", "clientID", clientID)
 
+	// Create a pipe reader wrapper
+	reader := &pipeReader{handle: handle}
+	writer := &pipeWriter{handle: handle}
+
 	for {
-		request, err := s.readMessage(handle, clientID)
+		// Read header
+		header, err := s.codec.ReadHeader(reader)
 		if err != nil {
 			if err != io.EOF {
-				s.logger.Error("Failed to read message from Bridge", "clientID", clientID, "error", err)
+				s.logger.Error("Failed to read header from Bridge", "clientID", clientID, "error", err)
 			}
 			break
 		}
 
-		// Process request with timeout to prevent blocking
-		response := s.processRequestWithTimeout(request, clientID)
+		// Read payload
+		payload, err := s.codec.ReadPayload(reader, header.Length)
+		if err != nil {
+			s.logger.Error("Failed to read payload from Bridge", "clientID", clientID, "error", err)
+			break
+		}
 
-		if err := s.writeMessage(handle, response, clientID); err != nil {
+		// Process request with timeout
+		response := s.processRequestWithTimeout(header, payload, clientID)
+
+		// Write response
+		if err := s.codec.WriteMessage(writer, response); err != nil {
 			s.logger.Error("Failed to write response to Bridge", "clientID", clientID, "error", err)
 			break
 		}
@@ -162,291 +153,261 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) {
 	s.logger.Info("C++ Bridge disconnected", "clientID", clientID)
 }
 
-func (s *Server) readMessage(handle windows.Handle, clientID int) (*Request, error) {
-	// Read message length (4 bytes) - must read exactly 4 bytes
-	lengthBuf := make([]byte, 4)
-	totalRead := uint32(0)
-	for totalRead < 4 {
-		var bytesRead uint32
-		err := windows.ReadFile(handle, lengthBuf[totalRead:], &bytesRead, nil)
-		if err != nil {
-			return nil, err
-		}
-		if bytesRead == 0 {
-			return nil, io.EOF
-		}
-		totalRead += bytesRead
-	}
-
-	length := *(*uint32)(unsafe.Pointer(&lengthBuf[0]))
-	s.logger.Debug("Read message length", "clientID", clientID, "length", length)
-
-	// Sanity check on length
-	if length == 0 || length > 1024*1024 {
-		return nil, fmt.Errorf("invalid message length: %d", length)
-	}
-
-	// Read message content - loop until all bytes are read
-	buffer := make([]byte, length)
-	totalRead = 0
-	for totalRead < length {
-		var bytesRead uint32
-		err := windows.ReadFile(handle, buffer[totalRead:], &bytesRead, nil)
-		if err != nil {
-			return nil, err
-		}
-		if bytesRead == 0 {
-			return nil, fmt.Errorf("incomplete read: expected %d, got %d", length, totalRead)
-		}
-		totalRead += bytesRead
-	}
-
-	// Only log in debug mode to reduce noise
-	s.logger.Debug("Received from Bridge", "clientID", clientID, "json", string(buffer))
-
-	// Parse JSON
-	var request Request
-	if err := json.Unmarshal(buffer, &request); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	return &request, nil
+// pipeReader wraps windows.Handle for io.Reader
+type pipeReader struct {
+	handle windows.Handle
 }
 
-func (s *Server) writeMessage(handle windows.Handle, response *Response, clientID int) error {
-	// Serialize response
-	data, err := json.Marshal(response)
+func (r *pipeReader) Read(p []byte) (int, error) {
+	var bytesRead uint32
+	err := windows.ReadFile(r.handle, p, &bytesRead, nil)
 	if err != nil {
-		return fmt.Errorf("failed to serialize response: %w", err)
+		return 0, err
 	}
-
-	// Only log in debug mode
-	s.logger.Debug("Sending to Bridge", "clientID", clientID, "json", string(data))
-
-	// Write length prefix
-	length := uint32(len(data))
-	lengthBuf := (*[4]byte)(unsafe.Pointer(&length))[:]
-
-	totalWritten := uint32(0)
-	for totalWritten < 4 {
-		var bytesWritten uint32
-		err = windows.WriteFile(handle, lengthBuf[totalWritten:], &bytesWritten, nil)
-		if err != nil {
-			return err
-		}
-		totalWritten += bytesWritten
+	if bytesRead == 0 {
+		return 0, io.EOF
 	}
+	return int(bytesRead), nil
+}
 
-	// Write content - loop until all bytes are written
-	totalWritten = 0
-	for totalWritten < length {
-		var bytesWritten uint32
-		err = windows.WriteFile(handle, data[totalWritten:], &bytesWritten, nil)
-		if err != nil {
-			return err
-		}
-		totalWritten += bytesWritten
+// pipeWriter wraps windows.Handle for io.Writer
+type pipeWriter struct {
+	handle windows.Handle
+}
+
+func (w *pipeWriter) Write(p []byte) (int, error) {
+	var bytesWritten uint32
+	err := windows.WriteFile(w.handle, p, &bytesWritten, nil)
+	if err != nil {
+		return 0, err
 	}
-
-	return nil
+	return int(bytesWritten), nil
 }
 
 // processRequestWithTimeout wraps processRequest with a timeout
-func (s *Server) processRequestWithTimeout(request *Request, clientID int) *Response {
+func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte, clientID int) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), RequestProcessTimeout)
 	defer cancel()
 
 	// Channel to receive the response
-	resultCh := make(chan *Response, 1)
+	resultCh := make(chan []byte, 1)
 
 	go func() {
-		resultCh <- s.processRequest(request, clientID)
+		resultCh <- s.processRequest(header, payload, clientID)
 	}()
 
 	select {
 	case response := <-resultCh:
 		return response
 	case <-ctx.Done():
-		s.logger.Error("Request processing timed out", "clientID", clientID, "type", request.Type)
-		return &Response{Type: ResponseTypeAck, Error: "processing timeout"}
+		s.logger.Error("Request processing timed out", "clientID", clientID, "command", header.Command)
+		return s.codec.EncodeAck()
 	}
 }
 
-func (s *Server) processRequest(request *Request, clientID int) *Response {
-	// Use Debug level for frequent requests
-	s.logger.Debug("Processing Bridge request", "clientID", clientID, "type", request.Type)
+func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID int) []byte {
+	s.logger.Debug("Processing Bridge request", "clientID", clientID, "command", fmt.Sprintf("0x%04X", header.Command))
 
-	switch request.Type {
-	case RequestTypeKeyEvent:
-		// Parse key event data
-		var keyData KeyEventData
-		if err := json.Unmarshal(request.Data, &keyData); err != nil {
-			s.logger.Error("Failed to parse key event data", "clientID", clientID, "error", err)
-			return &Response{Type: ResponseTypeAck, Error: "invalid key event data"}
-		}
+	switch header.Command {
+	case ipc.CmdKeyEvent:
+		return s.handleKeyEvent(payload, clientID)
 
-		// If caret data is included, update caret position first
-		if keyData.Caret != nil {
-			s.logger.Debug("Received caret with key event", "x", keyData.Caret.X, "y", keyData.Caret.Y, "height", keyData.Caret.Height)
-			if err := s.handler.HandleCaretUpdate(*keyData.Caret); err != nil {
-				s.logger.Debug("Failed to update caret from key event", "error", err)
-			}
-		} else {
-			s.logger.Debug("No caret data in key event", "key", keyData.Key)
-		}
+	case ipc.CmdFocusGained:
+		return s.handleFocusGained(payload, clientID)
 
-		result := s.handler.HandleKeyEvent(keyData)
-		if result == nil {
-			return &Response{Type: ResponseTypeAck}
-		}
-
-		// Build response based on result
-		switch result.Type {
-		case ResponseTypeInsertText:
-			s.logger.Debug("Returning InsertText response", "clientID", clientID, "text", result.Text, "modeChanged", result.ModeChanged, "newComposition", result.NewComposition)
-			return &Response{
-				Type: ResponseTypeInsertText,
-				Data: InsertTextData{
-					Text:           result.Text,
-					ModeChanged:    result.ModeChanged,
-					ChineseMode:    result.ChineseMode,
-					NewComposition: result.NewComposition,
-				},
-			}
-		case ResponseTypeUpdateComposition:
-			return &Response{
-				Type: ResponseTypeUpdateComposition,
-				Data: CompositionData{Text: result.Text, CaretPos: result.CaretPos},
-			}
-		case ResponseTypeClearComposition:
-			return &Response{Type: ResponseTypeClearComposition}
-		case ResponseTypeModeChanged:
-			s.logger.Debug("Returning ModeChanged response", "clientID", clientID, "chineseMode", result.ChineseMode)
-			return &Response{
-				Type: ResponseTypeModeChanged,
-				Data: ModeChangedData{ChineseMode: result.ChineseMode},
-			}
-		case ResponseTypeConsumed:
-			// Key was consumed (e.g., by a hotkey), no output
-			s.logger.Debug("Key consumed by hotkey", "clientID", clientID)
-			return &Response{Type: ResponseTypeConsumed}
-		default:
-			return &Response{Type: ResponseTypeAck}
-		}
-
-	case RequestTypeFocusLost:
+	case ipc.CmdFocusLost:
 		s.handler.HandleFocusLost()
-		return &Response{Type: ResponseTypeAck}
+		return s.codec.EncodeAck()
 
-	case RequestTypeIMEDeactivated:
-		s.logger.Info("IME deactivated (user switched to another IME)", "clientID", clientID)
-		s.handler.HandleIMEDeactivated()
-		return &Response{Type: ResponseTypeAck}
-
-	case RequestTypeIMEActivated:
+	case ipc.CmdIMEActivated:
 		s.logger.Info("IME activated (user switched back to this IME)", "clientID", clientID)
 		statusUpdate := s.handler.HandleIMEActivated()
 		if statusUpdate != nil {
-			return &Response{
-				Type: ResponseTypeStatusUpdate,
-				Data: statusUpdate,
-			}
+			return s.encodeStatusUpdate(statusUpdate)
 		}
-		return &Response{Type: ResponseTypeAck}
+		return s.codec.EncodeAck()
 
-	case RequestTypeFocusGained:
-		// Parse optional caret data from focus_gained
-		var focusData struct {
-			Caret *CaretData `json:"caret,omitempty"`
-		}
-		if len(request.Data) > 0 {
-			if err := json.Unmarshal(request.Data, &focusData); err == nil && focusData.Caret != nil {
-				s.logger.Debug("Focus gained with caret", "x", focusData.Caret.X, "y", focusData.Caret.Y)
-				// Update caret position before handling focus
-				s.handler.HandleCaretUpdate(*focusData.Caret)
-			}
-		}
+	case ipc.CmdIMEDeactivated:
+		s.logger.Info("IME deactivated (user switched to another IME)", "clientID", clientID)
+		s.handler.HandleIMEDeactivated()
+		return s.codec.EncodeAck()
 
-		statusUpdate := s.handler.HandleFocusGained()
-		if statusUpdate != nil {
-			return &Response{
-				Type: ResponseTypeStatusUpdate,
-				Data: statusUpdate,
-			}
-		}
-		return &Response{Type: ResponseTypeAck}
-
-	case RequestTypeCaretUpdate:
-		// Parse caret data
-		var caretData CaretData
-		if err := json.Unmarshal(request.Data, &caretData); err != nil {
-			s.logger.Error("Failed to parse caret data", "clientID", clientID, "error", err)
-			return &Response{Type: ResponseTypeAck, Error: "invalid caret data"}
-		}
-
-		s.logger.Debug("Received caret update", "clientID", clientID, "x", caretData.X, "y", caretData.Y, "height", caretData.Height)
-
-		// Call handler to update caret position
-		if err := s.handler.HandleCaretUpdate(caretData); err != nil {
-			s.logger.Error("Failed to handle caret update", "clientID", clientID, "error", err)
-		}
-		return &Response{Type: ResponseTypeAck}
-
-	case RequestTypeToggleMode:
-		// Toggle input mode and return new state (with optional commit text for CommitOnSwitch)
-		commitText, chineseMode := s.handler.HandleToggleMode()
-		s.logger.Debug("Mode toggled", "clientID", clientID, "chineseMode", chineseMode, "commitText", commitText)
-
-		// If there's commit text (CommitOnSwitch), return insert_text with mode change
-		if commitText != "" {
-			return &Response{
-				Type: ResponseTypeInsertText,
-				Data: InsertTextData{
-					Text:        commitText,
-					ModeChanged: true,
-					ChineseMode: chineseMode,
-				},
-			}
-		}
-
-		// Otherwise just return mode_changed
-		return &Response{
-			Type: ResponseTypeModeChanged,
-			Data: ModeChangedData{ChineseMode: chineseMode},
-		}
-
-	case RequestTypeCapsLockState:
-		// Parse caps lock data
-		var capsData CapsLockData
-		if err := json.Unmarshal(request.Data, &capsData); err != nil {
-			s.logger.Error("Failed to parse caps lock data", "clientID", clientID, "error", err)
-			return &Response{Type: ResponseTypeAck, Error: "invalid caps lock data"}
-		}
-
-		s.logger.Debug("Caps Lock state", "clientID", clientID, "on", capsData.CapsLockOn)
-		s.handler.HandleCapsLockState(capsData.CapsLockOn)
-		return &Response{Type: ResponseTypeAck}
-
-	case RequestTypeMenuCommand:
-		// Parse menu command data
-		var menuData MenuCommandData
-		if err := json.Unmarshal(request.Data, &menuData); err != nil {
-			s.logger.Error("Failed to parse menu command data", "clientID", clientID, "error", err)
-			return &Response{Type: ResponseTypeAck, Error: "invalid menu command data"}
-		}
-
-		s.logger.Info("Menu command received", "clientID", clientID, "command", menuData.Command)
-		statusUpdate := s.handler.HandleMenuCommand(menuData.Command)
-		if statusUpdate != nil {
-			return &Response{
-				Type: ResponseTypeStatusUpdate,
-				Data: statusUpdate,
-			}
-		}
-		return &Response{Type: ResponseTypeAck}
+	case ipc.CmdCaretUpdate:
+		return s.handleCaretUpdate(payload, clientID)
 
 	default:
-		s.logger.Error("Unknown request type from Bridge", "clientID", clientID, "type", request.Type)
-		return &Response{Type: ResponseTypeAck, Error: fmt.Sprintf("unknown request type: %s", request.Type)}
+		s.logger.Error("Unknown command from Bridge", "clientID", clientID, "command", fmt.Sprintf("0x%04X", header.Command))
+		return s.codec.EncodeAck()
+	}
+}
+
+func (s *Server) handleKeyEvent(payload []byte, clientID int) []byte {
+	keyPayload, err := s.codec.DecodeKeyPayload(payload)
+	if err != nil {
+		s.logger.Error("Failed to decode key payload", "clientID", clientID, "error", err)
+		return s.codec.EncodeAck()
+	}
+
+	// Convert to KeyEventData
+	eventType := "down"
+	if keyPayload.EventType == ipc.KeyEventUp {
+		eventType = "up"
+	}
+
+	keyData := KeyEventData{
+		Key:       keyCodeToKeyName(keyPayload.KeyCode),
+		KeyCode:   int(keyPayload.KeyCode),
+		Modifiers: int(keyPayload.Modifiers),
+		Event:     eventType,
+	}
+
+	s.logger.Debug("Key event", "clientID", clientID,
+		"keyCode", keyData.KeyCode,
+		"modifiers", fmt.Sprintf("0x%X", keyData.Modifiers),
+		"event", eventType)
+
+	result := s.handler.HandleKeyEvent(keyData)
+	if result == nil {
+		return s.codec.EncodeAck()
+	}
+
+	// Build response based on result
+	switch result.Type {
+	case ResponseTypeInsertText:
+		s.logger.Debug("Returning CommitText response", "clientID", clientID,
+			"text", result.Text, "modeChanged", result.ModeChanged, "newComposition", result.NewComposition)
+		return s.codec.EncodeCommitText(result.Text, result.NewComposition, result.ModeChanged, result.ChineseMode)
+
+	case ResponseTypeUpdateComposition:
+		return s.codec.EncodeUpdateComposition(result.Text, result.CaretPos)
+
+	case ResponseTypeClearComposition:
+		return s.codec.EncodeClearComposition()
+
+	case ResponseTypeModeChanged:
+		s.logger.Debug("Returning ModeChanged response", "clientID", clientID, "chineseMode", result.ChineseMode)
+		return s.codec.EncodeModeChanged(result.ChineseMode)
+
+	case ResponseTypeConsumed:
+		s.logger.Debug("Key consumed by hotkey", "clientID", clientID)
+		return s.codec.EncodeConsumed()
+
+	default:
+		return s.codec.EncodeAck()
+	}
+}
+
+func (s *Server) handleFocusGained(payload []byte, clientID int) []byte {
+	// Parse optional caret data
+	if len(payload) >= 12 {
+		caretPayload, err := s.codec.DecodeCaretPayload(payload)
+		if err == nil {
+			s.logger.Debug("Focus gained with caret", "x", caretPayload.X, "y", caretPayload.Y)
+			s.handler.HandleCaretUpdate(CaretData{
+				X:      int(caretPayload.X),
+				Y:      int(caretPayload.Y),
+				Height: int(caretPayload.Height),
+			})
+		}
+	}
+
+	statusUpdate := s.handler.HandleFocusGained()
+	if statusUpdate != nil {
+		return s.encodeStatusUpdate(statusUpdate)
+	}
+	return s.codec.EncodeAck()
+}
+
+func (s *Server) handleCaretUpdate(payload []byte, clientID int) []byte {
+	caretPayload, err := s.codec.DecodeCaretPayload(payload)
+	if err != nil {
+		s.logger.Error("Failed to decode caret payload", "clientID", clientID, "error", err)
+		return s.codec.EncodeAck()
+	}
+
+	s.logger.Debug("Caret update", "clientID", clientID,
+		"x", caretPayload.X, "y", caretPayload.Y, "height", caretPayload.Height)
+
+	s.handler.HandleCaretUpdate(CaretData{
+		X:      int(caretPayload.X),
+		Y:      int(caretPayload.Y),
+		Height: int(caretPayload.Height),
+	})
+
+	return s.codec.EncodeAck()
+}
+
+func (s *Server) encodeStatusUpdate(status *StatusUpdateData) []byte {
+	return s.codec.EncodeStatusUpdate(
+		status.ChineseMode,
+		status.FullWidth,
+		status.ChinesePunctuation,
+		status.ToolbarVisible,
+		status.CapsLock,
+		status.KeyDownHotkeys,
+		status.KeyUpHotkeys,
+	)
+}
+
+// keyCodeToKeyName converts a virtual key code to a key name string
+// This is for backwards compatibility with the existing handler interface
+func keyCodeToKeyName(keyCode uint32) string {
+	switch keyCode {
+	case ipc.VK_BACK:
+		return "backspace"
+	case ipc.VK_TAB:
+		return "tab"
+	case ipc.VK_RETURN:
+		return "enter"
+	case ipc.VK_ESCAPE:
+		return "escape"
+	case ipc.VK_SPACE:
+		return "space"
+	case ipc.VK_PRIOR:
+		return "page_up"
+	case ipc.VK_NEXT:
+		return "page_down"
+	case ipc.VK_CAPITAL:
+		return "capslock"
+	case ipc.VK_LSHIFT:
+		return "lshift"
+	case ipc.VK_RSHIFT:
+		return "rshift"
+	case ipc.VK_LCONTROL:
+		return "lctrl"
+	case ipc.VK_RCONTROL:
+		return "rctrl"
+	case ipc.VK_OEM_1:
+		return ";"
+	case ipc.VK_OEM_PLUS:
+		return "="
+	case ipc.VK_OEM_COMMA:
+		return ","
+	case ipc.VK_OEM_MINUS:
+		return "-"
+	case ipc.VK_OEM_PERIOD:
+		return "."
+	case ipc.VK_OEM_2:
+		return "/"
+	case ipc.VK_OEM_3:
+		return "`"
+	case ipc.VK_OEM_4:
+		return "["
+	case ipc.VK_OEM_5:
+		return "\\"
+	case ipc.VK_OEM_6:
+		return "]"
+	case ipc.VK_OEM_7:
+		return "'"
+	default:
+		// Letters A-Z
+		if keyCode >= 0x41 && keyCode <= 0x5A {
+			return string(rune('a' + keyCode - 0x41))
+		}
+		// Numbers 0-9
+		if keyCode >= 0x30 && keyCode <= 0x39 {
+			return string(rune('0' + keyCode - 0x30))
+		}
+		return fmt.Sprintf("vk_%d", keyCode)
 	}
 }

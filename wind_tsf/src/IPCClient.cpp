@@ -1,12 +1,11 @@
 #include "IPCClient.h"
 #include <sstream>
-#include <vector>
 #include <cstdarg>
+#include <cstring>
 
 #pragma comment(lib, "advapi32.lib")
 
 // Static member initialization
-// Default to Info level; can be changed via SetLogLevel()
 IPCLogLevel CIPCClient::s_logLevel = IPCLogLevel::Info;
 
 CIPCClient::CIPCClient()
@@ -102,6 +101,34 @@ void CIPCClient::_LogDebug(const wchar_t* format, ...)
 }
 
 // ============================================================================
+// Encoding helpers
+// ============================================================================
+
+std::wstring CIPCClient::_Utf8ToWide(const char* utf8, size_t length)
+{
+    if (length == 0) return L"";
+
+    int wideSize = MultiByteToWideChar(CP_UTF8, 0, utf8, (int)length, nullptr, 0);
+    if (wideSize <= 0) return L"";
+
+    std::wstring result(wideSize, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8, (int)length, &result[0], wideSize);
+    return result;
+}
+
+std::string CIPCClient::_WideToUtf8(const std::wstring& wide)
+{
+    if (wide.empty()) return "";
+
+    int utf8Size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.length(), nullptr, 0, nullptr, nullptr);
+    if (utf8Size <= 0) return "";
+
+    std::string result(utf8Size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.length(), &result[0], utf8Size, nullptr, nullptr);
+    return result;
+}
+
+// ============================================================================
 // Circuit Breaker
 // ============================================================================
 
@@ -139,7 +166,6 @@ BOOL CIPCClient::_ShouldAttemptOperation()
 
     if (_circuitState == CircuitState::Open)
     {
-        // Check if enough time has passed to try again
         DWORD elapsed = GetTickCount() - _lastFailureTime;
         if (elapsed >= IPCConfig::CIRCUIT_RESET_INTERVAL_MS)
         {
@@ -150,7 +176,6 @@ BOOL CIPCClient::_ShouldAttemptOperation()
         return FALSE;
     }
 
-    // HalfOpen state - allow one attempt
     return TRUE;
 }
 
@@ -184,7 +209,6 @@ BOOL CIPCClient::_WriteWithTimeout(const void* data, DWORD size, DWORD timeoutMs
 
     if (result)
     {
-        // Completed synchronously
         return bytesWritten == size;
     }
 
@@ -195,7 +219,6 @@ BOOL CIPCClient::_WriteWithTimeout(const void* data, DWORD size, DWORD timeoutMs
         return FALSE;
     }
 
-    // Wait for completion with timeout
     DWORD waitResult = WaitForSingleObject(_hEvent, timeoutMs);
 
     if (waitResult == WAIT_TIMEOUT)
@@ -212,7 +235,6 @@ BOOL CIPCClient::_WriteWithTimeout(const void* data, DWORD size, DWORD timeoutMs
         return FALSE;
     }
 
-    // Get the result
     if (!GetOverlappedResult(_hPipe, &overlapped, &bytesWritten, FALSE))
     {
         _LogError(L"GetOverlappedResult failed: %d", GetLastError());
@@ -236,7 +258,6 @@ BOOL CIPCClient::_ReadWithTimeout(void* buffer, DWORD size, DWORD* bytesRead, DW
 
     if (result)
     {
-        // Completed synchronously
         return TRUE;
     }
 
@@ -247,7 +268,6 @@ BOOL CIPCClient::_ReadWithTimeout(void* buffer, DWORD size, DWORD* bytesRead, DW
         return FALSE;
     }
 
-    // Wait for completion with timeout
     DWORD waitResult = WaitForSingleObject(_hEvent, timeoutMs);
 
     if (waitResult == WAIT_TIMEOUT)
@@ -264,7 +284,6 @@ BOOL CIPCClient::_ReadWithTimeout(void* buffer, DWORD size, DWORD* bytesRead, DW
         return FALSE;
     }
 
-    // Get the result
     if (!GetOverlappedResult(_hPipe, &overlapped, bytesRead, FALSE))
     {
         _LogError(L"GetOverlappedResult failed: %d", GetLastError());
@@ -282,7 +301,6 @@ BOOL CIPCClient::_StartService()
 {
     _LogInfo(L"Attempting to start Go service...");
 
-    // Get service executable path (same directory as DLL)
     WCHAR dllPath[MAX_PATH];
 
     if (GetModuleFileNameW(g_hInstance, dllPath, MAX_PATH) == 0)
@@ -291,7 +309,6 @@ BOOL CIPCClient::_StartService()
         return FALSE;
     }
 
-    // Replace DLL filename with wind_input.exe
     WCHAR* lastSlash = wcsrchr(dllPath, L'\\');
     if (lastSlash)
     {
@@ -300,10 +317,9 @@ BOOL CIPCClient::_StartService()
 
     _LogDebug(L"Starting service: %s", dllPath);
 
-    // Start the service process
     STARTUPINFOW si = { sizeof(STARTUPINFOW) };
     si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;  // Hide console window, use log file for debugging
+    si.wShowWindow = SW_HIDE;
 
     PROCESS_INFORMATION pi = {};
 
@@ -323,7 +339,6 @@ BOOL CIPCClient::_StartService()
         return FALSE;
     }
 
-    // Close process handles (we don't need to wait for it)
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
@@ -349,24 +364,21 @@ BOOL CIPCClient::Connect()
         return FALSE;
     }
 
-    _LogDebug(L"Connecting to Go Service...");
+    _LogDebug(L"Connecting to Go Service (binary protocol)...");
 
-    // Try to connect with retries
     for (int attempt = 0; attempt < 3; attempt++)
     {
-        // First check if pipe exists and wait if busy
         if (!WaitNamedPipeW(PIPE_NAME, IPCConfig::CONNECT_TIMEOUT_MS))
         {
             DWORD error = GetLastError();
             if (error == ERROR_FILE_NOT_FOUND)
             {
-                // Pipe doesn't exist, try to start service
                 if (!_serviceStartAttempted)
                 {
                     _serviceStartAttempted = TRUE;
                     if (_StartService())
                     {
-                        Sleep(500);  // Wait for service to initialize
+                        Sleep(500);
                         continue;
                     }
                 }
@@ -378,26 +390,24 @@ BOOL CIPCClient::Connect()
                 _LogDebug(L"WaitNamedPipe timed out, attempt %d", attempt + 1);
                 continue;
             }
-            // Other error, proceed to try CreateFile anyway
         }
 
-        // Open the pipe with FILE_FLAG_OVERLAPPED for async I/O
         _hPipe = CreateFileW(
             PIPE_NAME,
             GENERIC_READ | GENERIC_WRITE,
             0,
             nullptr,
             OPEN_EXISTING,
-            FILE_FLAG_OVERLAPPED,  // Enable overlapped I/O
+            FILE_FLAG_OVERLAPPED,
             nullptr);
 
         if (_hPipe != INVALID_HANDLE_VALUE)
         {
-            // Set pipe mode
             DWORD mode = PIPE_READMODE_BYTE;
             SetNamedPipeHandleState(_hPipe, &mode, nullptr, nullptr);
 
-            _LogInfo(L"Connected to Go Service");
+            _LogInfo(L"Connected to Go Service (binary protocol v%d.%d)",
+                     PROTOCOL_VERSION >> 12, PROTOCOL_VERSION & 0xFFF);
             _RecordSuccess();
             return TRUE;
         }
@@ -407,12 +417,10 @@ BOOL CIPCClient::Connect()
 
         if (error == ERROR_PIPE_BUSY)
         {
-            // Pipe busy, wait and retry
             Sleep(50);
             continue;
         }
 
-        // Other errors
         break;
     }
 
@@ -425,7 +433,6 @@ void CIPCClient::Disconnect()
 {
     if (_hPipe != INVALID_HANDLE_VALUE)
     {
-        // Cancel any pending I/O before closing
         CancelIo(_hPipe);
         CloseHandle(_hPipe);
         _hPipe = INVALID_HANDLE_VALUE;
@@ -434,11 +441,47 @@ void CIPCClient::Disconnect()
 }
 
 // ============================================================================
+// Binary message sending
+// ============================================================================
+
+BOOL CIPCClient::_SendBinaryMessage(uint16_t command, const void* payload, uint32_t payloadSize)
+{
+    // Build header
+    IpcHeader header;
+    header.version = PROTOCOL_VERSION;
+    header.command = command;
+    header.length = payloadSize;
+
+    // Write header
+    if (!_WriteWithTimeout(&header, sizeof(header), IPCConfig::WRITE_TIMEOUT_MS))
+    {
+        _LogError(L"Failed to write message header");
+        _RecordFailure();
+        Disconnect();
+        return FALSE;
+    }
+
+    // Write payload if any
+    if (payloadSize > 0 && payload != nullptr)
+    {
+        if (!_WriteWithTimeout(payload, payloadSize, IPCConfig::WRITE_TIMEOUT_MS))
+        {
+            _LogError(L"Failed to write message payload");
+            _RecordFailure();
+            Disconnect();
+            return FALSE;
+        }
+    }
+
+    _RecordSuccess();
+    return TRUE;
+}
+
+// ============================================================================
 // Message sending
 // ============================================================================
 
-BOOL CIPCClient::SendKeyEvent(const std::wstring& key, int keyCode, int modifiers,
-                              const LONG* px, const LONG* py, const LONG* pHeight)
+BOOL CIPCClient::SendKeyEvent(uint32_t keyCode, uint32_t scanCode, uint32_t modifiers, uint8_t eventType)
 {
     if (!_ShouldAttemptOperation())
     {
@@ -451,29 +494,16 @@ BOOL CIPCClient::SendKeyEvent(const std::wstring& key, int keyCode, int modifier
         return FALSE;
     }
 
-    // Build JSON message
-    std::wostringstream oss;
-    oss << L"{";
-    oss << L"\"type\":\"key_event\",";
-    oss << L"\"data\":{";
-    oss << L"\"key\":\"" << key << L"\",";
-    oss << L"\"keycode\":" << keyCode << L",";
-    oss << L"\"modifiers\":" << modifiers << L",";
-    oss << L"\"event\":\"down\"";
+    KeyPayload payload;
+    payload.keyCode = keyCode;
+    payload.scanCode = scanCode;
+    payload.modifiers = modifiers;
+    payload.eventType = eventType;
+    memset(payload.reserved, 0, sizeof(payload.reserved));
 
-    // Include caret info if provided (avoids separate caret_update call)
-    if (px != nullptr && py != nullptr && pHeight != nullptr)
-    {
-        oss << L",\"caret\":{";
-        oss << L"\"x\":" << *px << L",";
-        oss << L"\"y\":" << *py << L",";
-        oss << L"\"height\":" << *pHeight;
-        oss << L"}";
-    }
+    _LogDebug(L"Sending key event: keyCode=0x%X, mods=0x%X, type=%d", keyCode, modifiers, eventType);
 
-    oss << L"}}";
-
-    return _SendMessage(oss.str());
+    return _SendBinaryMessage(CMD_KEY_EVENT, &payload, sizeof(payload));
 }
 
 BOOL CIPCClient::SendCaretUpdate(int x, int y, int height)
@@ -488,16 +518,14 @@ BOOL CIPCClient::SendCaretUpdate(int x, int y, int height)
         return FALSE;
     }
 
-    std::wostringstream oss;
-    oss << L"{";
-    oss << L"\"type\":\"caret_update\",";
-    oss << L"\"data\":{";
-    oss << L"\"x\":" << x << L",";
-    oss << L"\"y\":" << y << L",";
-    oss << L"\"height\":" << height;
-    oss << L"}}";
+    CaretPayload payload;
+    payload.x = x;
+    payload.y = y;
+    payload.height = height;
 
-    return _SendMessage(oss.str());
+    _LogDebug(L"Sending caret update: x=%d, y=%d, h=%d", x, y, height);
+
+    return _SendBinaryMessage(CMD_CARET_UPDATE, &payload, sizeof(payload));
 }
 
 BOOL CIPCClient::SendFocusLost()
@@ -508,35 +536,10 @@ BOOL CIPCClient::SendFocusLost()
     }
 
     _LogDebug(L"Sending focus_lost");
-
-    std::wstring json = L"{\"type\":\"focus_lost\",\"data\":{}}";
-    return _SendMessage(json);
+    return _SendBinaryMessage(CMD_FOCUS_LOST, nullptr, 0);
 }
 
-BOOL CIPCClient::SendFocusGained(LONG caretX, LONG caretY, LONG caretHeight)
-{
-    // Try to connect if not connected (important for first focus_gained)
-    if (!_ShouldAttemptOperation())
-    {
-        return FALSE;
-    }
-
-    if (!IsConnected() && !Connect())
-    {
-        return FALSE;
-    }
-
-    _LogDebug(L"Sending focus_gained with caret: x=%ld, y=%ld, h=%ld", caretX, caretY, caretHeight);
-
-    // Include caret position so service knows which screen to show toolbar on
-    wchar_t buffer[256];
-    swprintf_s(buffer, L"{\"type\":\"focus_gained\",\"data\":{\"caret\":{\"x\":%ld,\"y\":%ld,\"height\":%ld}}}",
-               caretX, caretY, caretHeight);
-    std::wstring json = buffer;
-    return _SendMessage(json);
-}
-
-BOOL CIPCClient::SendToggleMode()
+BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight)
 {
     if (!_ShouldAttemptOperation())
     {
@@ -548,72 +551,25 @@ BOOL CIPCClient::SendToggleMode()
         return FALSE;
     }
 
-    _LogDebug(L"Sending toggle_mode");
+    _LogDebug(L"Sending focus_gained with caret: x=%d, y=%d, h=%d", caretX, caretY, caretHeight);
 
-    std::wstring json = L"{\"type\":\"toggle_mode\",\"data\":{}}";
-    return _SendMessage(json);
-}
+    CaretPayload payload;
+    payload.x = caretX;
+    payload.y = caretY;
+    payload.height = caretHeight;
 
-BOOL CIPCClient::SendCapsLockState(BOOL capsLockOn)
-{
-    if (!_ShouldAttemptOperation())
-    {
-        return FALSE;
-    }
-
-    if (!IsConnected() && !Connect())
-    {
-        return FALSE;
-    }
-
-    std::wostringstream oss;
-    oss << L"{\"type\":\"caps_lock_state\",\"data\":{\"caps_lock_on\":";
-    oss << (capsLockOn ? L"true" : L"false");
-    oss << L"}}";
-
-    return _SendMessage(oss.str());
-}
-
-BOOL CIPCClient::SendMenuCommand(const char* command)
-{
-    if (!_ShouldAttemptOperation())
-    {
-        return FALSE;
-    }
-
-    if (!IsConnected() && !Connect())
-    {
-        return FALSE;
-    }
-
-    _LogDebug(L"Sending menu_command: %S", command);
-
-    // Convert command to wide string
-    int wideSize = MultiByteToWideChar(CP_UTF8, 0, command, -1, nullptr, 0);
-    std::vector<wchar_t> wideCommand(wideSize);
-    MultiByteToWideChar(CP_UTF8, 0, command, -1, wideCommand.data(), wideSize);
-
-    std::wostringstream oss;
-    oss << L"{\"type\":\"menu_command\",\"data\":{\"command\":\"";
-    oss << wideCommand.data();
-    oss << L"\"}}";
-
-    return _SendMessage(oss.str());
+    return _SendBinaryMessage(CMD_FOCUS_GAINED, &payload, sizeof(payload));
 }
 
 BOOL CIPCClient::SendIMEDeactivated()
 {
-    // Don't check circuit breaker here - we want to send this even if failing
-    // This is important for cleanup
     if (!IsConnected())
     {
         return FALSE;
     }
 
     _LogInfo(L"Sending ime_deactivated");
-
-    std::wstring json = L"{\"type\":\"ime_deactivated\",\"data\":{}}";
-    return _SendMessage(json);
+    return _SendBinaryMessage(CMD_IME_DEACTIVATED, nullptr, 0);
 }
 
 BOOL CIPCClient::SendIMEActivated()
@@ -623,375 +579,291 @@ BOOL CIPCClient::SendIMEActivated()
         return FALSE;
     }
 
+    if (!IsConnected() && !Connect())
+    {
+        return FALSE;
+    }
+
     _LogInfo(L"Sending ime_activated");
-
-    std::wstring json = L"{\"type\":\"ime_activated\",\"data\":{}}";
-    return _SendMessage(json);
-}
-
-BOOL CIPCClient::_SendMessage(const std::wstring& message)
-{
-    // Convert to UTF-8
-    int utf8Size = WideCharToMultiByte(CP_UTF8, 0, message.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (utf8Size <= 0)
-    {
-        _LogError(L"Failed to calculate UTF-8 size");
-        return FALSE;
-    }
-
-    std::vector<char> utf8Buffer(utf8Size);
-    WideCharToMultiByte(CP_UTF8, 0, message.c_str(), -1, utf8Buffer.data(), utf8Size, nullptr, nullptr);
-
-    // Message length (excluding null terminator)
-    DWORD messageLength = static_cast<DWORD>(utf8Size - 1);
-
-    // Write length prefix with timeout
-    if (!_WriteWithTimeout(&messageLength, sizeof(DWORD), IPCConfig::WRITE_TIMEOUT_MS))
-    {
-        _LogError(L"Failed to write message length");
-        _RecordFailure();
-        Disconnect();
-        return FALSE;
-    }
-
-    // Write message content with timeout
-    if (!_WriteWithTimeout(utf8Buffer.data(), messageLength, IPCConfig::WRITE_TIMEOUT_MS))
-    {
-        _LogError(L"Failed to write message content");
-        _RecordFailure();
-        Disconnect();
-        return FALSE;
-    }
-
-    _RecordSuccess();
-    return TRUE;
+    return _SendBinaryMessage(CMD_IME_ACTIVATED, nullptr, 0);
 }
 
 // ============================================================================
 // Message receiving
 // ============================================================================
 
-BOOL CIPCClient::ReceiveResponse(ServiceResponse& response)
+BOOL CIPCClient::_ReceiveBinaryMessage(IpcHeader& header, std::vector<uint8_t>& payload)
 {
-    std::wstring json;
-    if (!_ReceiveMessage(json))
-    {
-        return FALSE;
-    }
-
-    return _ParseResponse(json, response);
-}
-
-BOOL CIPCClient::_ReceiveMessage(std::wstring& message)
-{
-    // Read length prefix with timeout
-    DWORD messageLength;
+    // Read header
     DWORD bytesRead;
-
-    if (!_ReadWithTimeout(&messageLength, sizeof(DWORD), &bytesRead, IPCConfig::READ_TIMEOUT_MS))
+    if (!_ReadWithTimeout(&header, sizeof(header), &bytesRead, IPCConfig::READ_TIMEOUT_MS))
     {
-        _LogError(L"Failed to read message length");
+        _LogError(L"Failed to read message header");
         _RecordFailure();
         Disconnect();
         return FALSE;
     }
 
-    if (bytesRead != sizeof(DWORD))
+    if (bytesRead != sizeof(header))
     {
-        _LogError(L"Incomplete length read: got %d bytes", bytesRead);
+        _LogError(L"Incomplete header read: got %d bytes", bytesRead);
         _RecordFailure();
         Disconnect();
         return FALSE;
     }
 
-    if (messageLength == 0 || messageLength > IPCConfig::MAX_MESSAGE_SIZE)
+    // Validate header
+    if ((header.version >> 12) != (PROTOCOL_VERSION >> 12))
     {
-        _LogError(L"Invalid message length: %d", messageLength);
+        _LogError(L"Protocol version mismatch: got 0x%04X, expected 0x%04X", header.version, PROTOCOL_VERSION);
         _RecordFailure();
         return FALSE;
     }
 
-    // Read message content with timeout
-    std::vector<char> utf8Buffer(messageLength + 1);
-    DWORD totalRead = 0;
-
-    // May need multiple reads for large messages
-    while (totalRead < messageLength)
+    if (header.length > IPCConfig::MAX_MESSAGE_SIZE)
     {
-        DWORD chunkRead;
-        if (!_ReadWithTimeout(utf8Buffer.data() + totalRead, messageLength - totalRead, &chunkRead, IPCConfig::READ_TIMEOUT_MS))
-        {
-            _LogError(L"Failed to read message content");
-            _RecordFailure();
-            Disconnect();
-            return FALSE;
-        }
-
-        if (chunkRead == 0)
-        {
-            _LogError(L"Incomplete content read: expected %d, got %d", messageLength, totalRead);
-            _RecordFailure();
-            Disconnect();
-            return FALSE;
-        }
-
-        totalRead += chunkRead;
-    }
-
-    utf8Buffer[messageLength] = '\0';
-
-    // Convert from UTF-8
-    int wideSize = MultiByteToWideChar(CP_UTF8, 0, utf8Buffer.data(), -1, nullptr, 0);
-    if (wideSize <= 0)
-    {
-        _LogError(L"Failed to calculate wide string size");
+        _LogError(L"Invalid payload length: %d", header.length);
+        _RecordFailure();
         return FALSE;
     }
 
-    std::vector<wchar_t> wideBuffer(wideSize);
-    MultiByteToWideChar(CP_UTF8, 0, utf8Buffer.data(), -1, wideBuffer.data(), wideSize);
+    _LogDebug(L"Received header: cmd=0x%04X, len=%d", header.command, header.length);
 
-    message = wideBuffer.data();
+    // Read payload if any
+    if (header.length > 0)
+    {
+        payload.resize(header.length);
+        DWORD totalRead = 0;
 
-    _LogDebug(L"Received JSON (len=%d): %.200s", (int)message.length(), message.c_str());
+        while (totalRead < header.length)
+        {
+            DWORD chunkRead;
+            if (!_ReadWithTimeout(payload.data() + totalRead, header.length - totalRead, &chunkRead, IPCConfig::READ_TIMEOUT_MS))
+            {
+                _LogError(L"Failed to read payload");
+                _RecordFailure();
+                Disconnect();
+                return FALSE;
+            }
+
+            if (chunkRead == 0)
+            {
+                _LogError(L"Incomplete payload read: expected %d, got %d", header.length, totalRead);
+                _RecordFailure();
+                Disconnect();
+                return FALSE;
+            }
+
+            totalRead += chunkRead;
+        }
+    }
+    else
+    {
+        payload.clear();
+    }
 
     _RecordSuccess();
     return TRUE;
 }
 
-BOOL CIPCClient::_ParseResponse(const std::wstring& json, ServiceResponse& response)
+BOOL CIPCClient::ReceiveResponse(ServiceResponse& response)
 {
-    response.type = ResponseType::Unknown;
-    response.text.clear();
-    response.composition.clear();
-    response.caretPos = 0;
-    response.chineseMode = FALSE;
-    response.fullWidth = FALSE;
-    response.chinesePunct = TRUE;
-    response.toolbarVisible = FALSE;
-    response.error.clear();
+    IpcHeader header;
+    std::vector<uint8_t> payload;
 
-    // Parse type field
-    if (json.find(L"\"type\":\"ack\"") != std::wstring::npos)
+    if (!_ReceiveBinaryMessage(header, payload))
     {
+        return FALSE;
+    }
+
+    return _ParseResponse(header, payload, response);
+}
+
+BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8_t>& payload, ServiceResponse& response)
+{
+    // Reset response
+    response = ServiceResponse();
+
+    switch (header.command)
+    {
+    case CMD_ACK:
         response.type = ResponseType::Ack;
-    }
-    else if (json.find(L"\"type\":\"insert_text\"") != std::wstring::npos)
-    {
-        response.type = ResponseType::InsertText;
-        _LogDebug(L"Response type: InsertText");
+        _LogDebug(L"Response: Ack");
+        break;
 
-        // Extract text from data.text
-        size_t textPos = json.find(L"\"text\":\"");
-        if (textPos != std::wstring::npos)
-        {
-            textPos += 8;
-            size_t textEnd = json.find(L"\"", textPos);
-            if (textEnd != std::wstring::npos)
-            {
-                response.text = json.substr(textPos, textEnd - textPos);
-            }
-        }
-
-        // Extract mode_changed flag (for CommitOnSwitch feature)
-        response.modeChanged = (json.find(L"\"mode_changed\":true") != std::wstring::npos);
-
-        // Extract chinese_mode if mode was changed
-        if (response.modeChanged)
-        {
-            response.chineseMode = (json.find(L"\"chinese_mode\":true") != std::wstring::npos);
-            _LogDebug(L"InsertText with mode change: chineseMode=%d", response.chineseMode);
-        }
-
-        // Extract new_composition (for top code commit)
-        size_t newCompPos = json.find(L"\"new_composition\":\"");
-        if (newCompPos != std::wstring::npos)
-        {
-            newCompPos += 19;
-            size_t newCompEnd = json.find(L"\"", newCompPos);
-            if (newCompEnd != std::wstring::npos)
-            {
-                response.newComposition = json.substr(newCompPos, newCompEnd - newCompPos);
-                _LogDebug(L"InsertText with new composition: %s", response.newComposition.c_str());
-            }
-        }
-
-        _LogDebug(L"InsertText: text=%s, modeChanged=%d, newComposition=%s", response.text.c_str(), response.modeChanged, response.newComposition.c_str());
-    }
-    else if (json.find(L"\"type\":\"update_composition\"") != std::wstring::npos)
-    {
-        response.type = ResponseType::UpdateComposition;
-
-        // Extract composition text
-        size_t textPos = json.find(L"\"text\":\"");
-        if (textPos != std::wstring::npos)
-        {
-            textPos += 8;
-            size_t textEnd = json.find(L"\"", textPos);
-            if (textEnd != std::wstring::npos)
-            {
-                response.composition = json.substr(textPos, textEnd - textPos);
-            }
-        }
-
-        // Extract caret position
-        size_t caretPos = json.find(L"\"caret_pos\":");
-        if (caretPos != std::wstring::npos)
-        {
-            caretPos += 12;
-            std::wstring caretStr;
-            while (caretPos < json.length() && json[caretPos] >= L'0' && json[caretPos] <= L'9')
-            {
-                caretStr += json[caretPos];
-                caretPos++;
-            }
-            if (!caretStr.empty())
-            {
-                response.caretPos = _wtoi(caretStr.c_str());
-            }
-        }
-    }
-    else if (json.find(L"\"type\":\"clear_composition\"") != std::wstring::npos)
-    {
-        response.type = ResponseType::ClearComposition;
-    }
-    else if (json.find(L"\"type\":\"mode_changed\"") != std::wstring::npos)
-    {
-        response.type = ResponseType::ModeChanged;
-        _LogDebug(L"Response type: ModeChanged");
-
-        // Extract chinese_mode from data
-        response.chineseMode = (json.find(L"\"chinese_mode\":true") != std::wstring::npos) ? TRUE : FALSE;
-
-        _LogDebug(L"ModeChanged: chineseMode=%s", response.chineseMode ? L"true" : L"false");
-    }
-    else if (json.find(L"\"type\":\"status_update\"") != std::wstring::npos)
-    {
-        response.type = ResponseType::StatusUpdate;
-        _LogDebug(L"Response type: StatusUpdate");
-
-        // Extract status fields from data
-        response.chineseMode = (json.find(L"\"chinese_mode\":true") != std::wstring::npos) ? TRUE : FALSE;
-        response.fullWidth = (json.find(L"\"full_width\":true") != std::wstring::npos) ? TRUE : FALSE;
-        response.chinesePunct = (json.find(L"\"chinese_punctuation\":true") != std::wstring::npos) ? TRUE : FALSE;
-        response.toolbarVisible = (json.find(L"\"toolbar_visible\":true") != std::wstring::npos) ? TRUE : FALSE;
-
-        _LogDebug(L"StatusUpdate: mode=%d, width=%d, punct=%d, toolbar=%d",
-                  response.chineseMode, response.fullWidth, response.chinesePunct, response.toolbarVisible);
-
-        // Parse hotkeys configuration if present (search for "hotkeys": with optional spaces)
-        size_t hotkeysPos = json.find(L"\"hotkeys\":");
-        if (hotkeysPos != std::wstring::npos)
-        {
-            // Skip whitespace after colon and check for object start
-            size_t checkPos = hotkeysPos + 10; // length of "hotkeys":
-            while (checkPos < json.length() && (json[checkPos] == L' ' || json[checkPos] == L'\t'))
-                checkPos++;
-            if (checkPos < json.length() && json[checkPos] == L'{')
-            {
-                response.hotkeys.hasData = TRUE;
-                _LogDebug(L"StatusUpdate contains hotkeys config");
-
-            // Helper lambda to parse string array (handles optional spaces after colon)
-            auto parseStringArray = [&json](const wchar_t* fieldName) -> std::vector<std::wstring> {
-                std::vector<std::wstring> result;
-                // Search for "fieldName":
-                std::wstring searchKey = std::wstring(L"\"") + fieldName + L"\":";
-                size_t pos = json.find(searchKey);
-                if (pos != std::wstring::npos)
-                {
-                    pos += searchKey.length();
-                    // Skip any whitespace
-                    while (pos < json.length() && (json[pos] == L' ' || json[pos] == L'\t' || json[pos] == L'\n' || json[pos] == L'\r'))
-                        pos++;
-                    // Check for array start
-                    if (pos < json.length() && json[pos] == L'[')
-                    {
-                        pos++; // Skip '['
-                        size_t endPos = json.find(L"]", pos);
-                        if (endPos != std::wstring::npos)
-                        {
-                            std::wstring arrayContent = json.substr(pos, endPos - pos);
-                            size_t strStart = 0;
-                            while ((strStart = arrayContent.find(L"\"", strStart)) != std::wstring::npos)
-                            {
-                                strStart++;
-                                size_t strEnd = arrayContent.find(L"\"", strStart);
-                                if (strEnd != std::wstring::npos)
-                                {
-                                    result.push_back(arrayContent.substr(strStart, strEnd - strStart));
-                                    strStart = strEnd + 1;
-                                }
-                                else break;
-                            }
-                        }
-                    }
-                }
-                return result;
-            };
-
-            // Helper lambda to parse string value (handles optional spaces after colon)
-            auto parseStringValue = [&json](const wchar_t* fieldName) -> std::wstring {
-                std::wstring searchKey = std::wstring(L"\"") + fieldName + L"\":";
-                size_t pos = json.find(searchKey);
-                if (pos != std::wstring::npos)
-                {
-                    pos += searchKey.length();
-                    // Skip any whitespace
-                    while (pos < json.length() && (json[pos] == L' ' || json[pos] == L'\t' || json[pos] == L'\n' || json[pos] == L'\r'))
-                        pos++;
-                    // Check for string start
-                    if (pos < json.length() && json[pos] == L'"')
-                    {
-                        pos++; // Skip opening quote
-                        size_t endPos = json.find(L"\"", pos);
-                        if (endPos != std::wstring::npos)
-                        {
-                            return json.substr(pos, endPos - pos);
-                        }
-                    }
-                }
-                return L"";
-            };
-
-            response.hotkeys.toggleModeKeys = parseStringArray(L"toggle_mode_keys");
-            response.hotkeys.switchEngine = parseStringValue(L"switch_engine");
-            response.hotkeys.toggleFullWidth = parseStringValue(L"toggle_full_width");
-            response.hotkeys.togglePunct = parseStringValue(L"toggle_punct");
-            response.hotkeys.selectKeyGroups = parseStringArray(L"select_key_groups");
-            response.hotkeys.pageKeys = parseStringArray(L"page_keys");
-
-            // Debug: log parsed toggle mode keys
-            std::wstring toggleKeysStr;
-            for (const auto& key : response.hotkeys.toggleModeKeys)
-            {
-                if (!toggleKeysStr.empty()) toggleKeysStr += L",";
-                toggleKeysStr += key;
-            }
-            _LogInfo(L"Hotkeys parsed: toggleModeKeys=[%s] (%d items), selectKeyGroups=%d items, pageKeys=%d items",
-                      toggleKeysStr.c_str(),
-                      (int)response.hotkeys.toggleModeKeys.size(),
-                      (int)response.hotkeys.selectKeyGroups.size(),
-                      (int)response.hotkeys.pageKeys.size());
-            }
-        }
-    }
-    else if (json.find(L"\"type\":\"consumed\"") != std::wstring::npos)
-    {
+    case CMD_CONSUMED:
         response.type = ResponseType::Consumed;
-        _LogDebug(L"Response type: Consumed (key consumed by hotkey)");
-    }
+        _LogDebug(L"Response: Consumed");
+        break;
 
-    // Check for error field
-    size_t errorPos = json.find(L"\"error\":\"");
-    if (errorPos != std::wstring::npos)
-    {
-        errorPos += 9;
-        size_t errorEnd = json.find(L"\"", errorPos);
-        if (errorEnd != std::wstring::npos && errorEnd > errorPos)
+    case CMD_CLEAR_COMPOSITION:
+        response.type = ResponseType::ClearComposition;
+        _LogDebug(L"Response: ClearComposition");
+        break;
+
+    case CMD_COMMIT_TEXT:
         {
-            response.error = json.substr(errorPos, errorEnd - errorPos);
+            response.type = ResponseType::CommitText;
+
+            if (payload.size() < sizeof(CommitTextHeader))
+            {
+                _LogError(L"CommitText payload too short");
+                return FALSE;
+            }
+
+            const CommitTextHeader* commitHeader = reinterpret_cast<const CommitTextHeader*>(payload.data());
+            response.modeChanged = (commitHeader->flags & COMMIT_FLAG_MODE_CHANGED) != 0;
+            response.chineseMode = (commitHeader->flags & COMMIT_FLAG_CHINESE_MODE) != 0;
+
+            // Extract text
+            if (commitHeader->textLength > 0)
+            {
+                size_t textOffset = sizeof(CommitTextHeader);
+                if (textOffset + commitHeader->textLength <= payload.size())
+                {
+                    response.text = _Utf8ToWide(
+                        reinterpret_cast<const char*>(payload.data() + textOffset),
+                        commitHeader->textLength);
+                }
+            }
+
+            // Extract new composition
+            if ((commitHeader->flags & COMMIT_FLAG_HAS_NEW_COMPOSITION) && commitHeader->compositionLength > 0)
+            {
+                size_t compOffset = sizeof(CommitTextHeader) + commitHeader->textLength;
+                if (compOffset + commitHeader->compositionLength <= payload.size())
+                {
+                    response.newComposition = _Utf8ToWide(
+                        reinterpret_cast<const char*>(payload.data() + compOffset),
+                        commitHeader->compositionLength);
+                }
+            }
+
+            _LogDebug(L"Response: CommitText text='%s', modeChanged=%d, newComp='%s'",
+                      response.text.c_str(), response.modeChanged, response.newComposition.c_str());
         }
+        break;
+
+    case CMD_UPDATE_COMPOSITION:
+        {
+            response.type = ResponseType::UpdateComposition;
+
+            if (payload.size() < sizeof(CompositionHeader))
+            {
+                _LogError(L"UpdateComposition payload too short");
+                return FALSE;
+            }
+
+            const CompositionHeader* compHeader = reinterpret_cast<const CompositionHeader*>(payload.data());
+            response.caretPos = compHeader->caretPos;
+
+            // Extract composition text
+            size_t textLength = payload.size() - sizeof(CompositionHeader);
+            if (textLength > 0)
+            {
+                response.composition = _Utf8ToWide(
+                    reinterpret_cast<const char*>(payload.data() + sizeof(CompositionHeader)),
+                    textLength);
+            }
+
+            _LogDebug(L"Response: UpdateComposition text='%s', caret=%d",
+                      response.composition.c_str(), response.caretPos);
+        }
+        break;
+
+    case CMD_MODE_CHANGED:
+        {
+            response.type = ResponseType::ModeChanged;
+
+            if (payload.size() >= 4)
+            {
+                response.statusFlags = *reinterpret_cast<const uint32_t*>(payload.data());
+                response.chineseMode = (response.statusFlags & STATUS_CHINESE_MODE) != 0;
+            }
+
+            _LogDebug(L"Response: ModeChanged chineseMode=%d", response.chineseMode);
+        }
+        break;
+
+    case CMD_STATUS_UPDATE:
+        {
+            response.type = ResponseType::StatusUpdate;
+
+            if (payload.size() < sizeof(StatusHeader))
+            {
+                _LogError(L"StatusUpdate payload too short");
+                return FALSE;
+            }
+
+            const StatusHeader* statusHeader = reinterpret_cast<const StatusHeader*>(payload.data());
+            response.statusFlags = statusHeader->flags;
+            response.chineseMode = (statusHeader->flags & STATUS_CHINESE_MODE) != 0;
+
+            // Extract hotkeys
+            size_t hotkeysOffset = sizeof(StatusHeader);
+            uint32_t totalHotkeys = statusHeader->keyDownCount + statusHeader->keyUpCount;
+
+            if (payload.size() >= hotkeysOffset + totalHotkeys * sizeof(uint32_t))
+            {
+                const uint32_t* hotkeys = reinterpret_cast<const uint32_t*>(payload.data() + hotkeysOffset);
+
+                for (uint32_t i = 0; i < statusHeader->keyDownCount; i++)
+                {
+                    response.keyDownHotkeys.push_back(hotkeys[i]);
+                }
+
+                for (uint32_t i = 0; i < statusHeader->keyUpCount; i++)
+                {
+                    response.keyUpHotkeys.push_back(hotkeys[statusHeader->keyDownCount + i]);
+                }
+            }
+
+            _LogDebug(L"Response: StatusUpdate mode=%d, width=%d, punct=%d, toolbar=%d, keyDown=%d, keyUp=%d",
+                      response.IsChineseMode(), response.IsFullWidth(), response.IsChinesePunct(),
+                      response.IsToolbarVisible(), (int)response.keyDownHotkeys.size(), (int)response.keyUpHotkeys.size());
+        }
+        break;
+
+    case CMD_SYNC_HOTKEYS:
+        {
+            response.type = ResponseType::StatusUpdate; // Treat as status update
+
+            if (payload.size() < sizeof(StatusHeader))
+            {
+                _LogError(L"SyncHotkeys payload too short");
+                return FALSE;
+            }
+
+            const StatusHeader* syncHeader = reinterpret_cast<const StatusHeader*>(payload.data());
+
+            // Extract hotkeys
+            size_t hotkeysOffset = sizeof(StatusHeader);
+            uint32_t totalHotkeys = syncHeader->keyDownCount + syncHeader->keyUpCount;
+
+            if (payload.size() >= hotkeysOffset + totalHotkeys * sizeof(uint32_t))
+            {
+                const uint32_t* hotkeys = reinterpret_cast<const uint32_t*>(payload.data() + hotkeysOffset);
+
+                for (uint32_t i = 0; i < syncHeader->keyDownCount; i++)
+                {
+                    response.keyDownHotkeys.push_back(hotkeys[i]);
+                }
+
+                for (uint32_t i = 0; i < syncHeader->keyUpCount; i++)
+                {
+                    response.keyUpHotkeys.push_back(hotkeys[syncHeader->keyDownCount + i]);
+                }
+            }
+
+            _LogInfo(L"Response: SyncHotkeys keyDown=%d, keyUp=%d",
+                     (int)response.keyDownHotkeys.size(), (int)response.keyUpHotkeys.size());
+        }
+        break;
+
+    default:
+        _LogError(L"Unknown response command: 0x%04X", header.command);
+        response.type = ResponseType::Error;
+        return FALSE;
     }
 
     return TRUE;

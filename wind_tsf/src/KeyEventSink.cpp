@@ -2,6 +2,7 @@
 #include "TextService.h"
 #include "IPCClient.h"
 #include "HotkeyManager.h"
+#include "BinaryProtocol.h"
 #include <cctype>
 
 CKeyEventSink::CKeyEventSink(CTextService* pTextService)
@@ -10,8 +11,8 @@ CKeyEventSink::CKeyEventSink(CTextService* pTextService)
     , _dwKeySinkCookie(TF_INVALID_COOKIE)
     , _isComposing(FALSE)
     , _hasCandidates(FALSE)
-    , _shiftPending(FALSE)
-    , _pendingToggleKey(0)
+    , _pendingKeyUpKey(0)
+    , _pendingKeyUpModifiers(0)
 {
     _pTextService->AddRef();
 }
@@ -70,23 +71,40 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     *pfEaten = FALSE;
 
     // First check if the context is read-only (browser non-editable area)
-    // This is critical for allowing browser shortcuts (Space to scroll, etc.)
     if (_IsContextReadOnly(pContext))
     {
-        // Read-only context, don't intercept any keys
         return S_OK;
     }
 
-    // Normal key handling
-    *pfEaten = _IsKeyWeShouldHandle(wParam);
+    // Get current modifiers and calculate key hash
+    uint32_t modifiers = CHotkeyManager::GetCurrentModifiers();
+    uint32_t keyHash = CHotkeyManager::CalcKeyHash(modifiers, (uint32_t)wParam);
 
-    // Debug: log key handling decision for letter keys
-    if (wParam >= 'A' && wParam <= 'Z')
+    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+
+    // Check if this is a KeyDown hotkey from the whitelist
+    if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownHotkey(keyHash))
     {
-        WCHAR debug[128];
-        wsprintfW(debug, L"[WindInput] OnTestKeyDown: key=%c, eaten=%d, composing=%d, chineseMode=%d\n",
-                  (wchar_t)wParam, *pfEaten, _isComposing, _pTextService->IsChineseMode());
-        OutputDebugStringW(debug);
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
+    // Check for KeyUp triggered keys (toggle mode keys) - we still need to intercept KeyDown
+    if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyUpHotkey(keyHash))
+    {
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
+    // Check basic input keys based on current state
+    if (_isComposing || _hasCandidates || _pTextService->IsChineseMode())
+    {
+        HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
+        if (keyType != HotkeyType::None)
+        {
+            *pfEaten = TRUE;
+            return S_OK;
+        }
     }
 
     return S_OK;
@@ -96,54 +114,13 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 {
     *pfEaten = FALSE;
 
+    uint32_t modifiers = CHotkeyManager::GetCurrentModifiers();
+    uint32_t keyHash = CHotkeyManager::CalcKeyHash(modifiers, (uint32_t)wParam);
+
     CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
-    int modifiers = _GetModifierState();
 
-    // Debug: Log shift/ctrl key events
-    if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT ||
-        wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL)
-    {
-        BOOL lShiftDown = (GetAsyncKeyState(VK_LSHIFT) & 0x8000) != 0;
-        BOOL rShiftDown = (GetAsyncKeyState(VK_RSHIFT) & 0x8000) != 0;
-        BOOL lCtrlDown = (GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0;
-        BOOL rCtrlDown = (GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0;
-        WCHAR debug[256];
-        wsprintfW(debug, L"[WindInput] OnKeyDown: wParam=%d (VK_SHIFT=%d, VK_LSHIFT=%d, VK_RSHIFT=%d), AsyncState: LShift=%d RShift=%d LCtrl=%d RCtrl=%d\n",
-                  (int)wParam, VK_SHIFT, VK_LSHIFT, VK_RSHIFT, lShiftDown, rShiftDown, lCtrlDown, rCtrlDown);
-        OutputDebugStringW(debug);
-    }
-
-    // Check if this is a toggle mode key (Shift, Ctrl, CapsLock depending on config)
-    // But skip if we have candidates and the key is also configured as a select key
-    BOOL isToggleModeKey = (pHotkeyMgr != nullptr && pHotkeyMgr->IsToggleModeKey(wParam));
-
-    // Debug: Log toggle mode key check result
-    if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT ||
-        wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL ||
-        wParam == VK_CAPITAL)
-    {
-        WCHAR debug[256];
-        wsprintfW(debug, L"[WindInput] IsToggleModeKey(%d) = %d\n", (int)wParam, isToggleModeKey);
-        OutputDebugStringW(debug);
-        if (pHotkeyMgr != nullptr)
-        {
-            pHotkeyMgr->LogConfig();
-        }
-    }
-    BOOL useAsSelectKey = FALSE;
-
-    // When candidates are shown, Shift/Ctrl might be used for selection instead of toggle
-    if (isToggleModeKey && _hasCandidates && pHotkeyMgr != nullptr)
-    {
-        HotkeyType type = pHotkeyMgr->GetHotkeyType(wParam, modifiers, _isComposing, _hasCandidates, _pTextService->IsChineseMode());
-        if (type == HotkeyType::SelectCandidate2 || type == HotkeyType::SelectCandidate3)
-        {
-            useAsSelectKey = TRUE;
-            isToggleModeKey = FALSE;  // Use as select key, not toggle mode
-        }
-    }
-
-    if (isToggleModeKey)
+    // Check if this is a KeyUp triggered key (toggle mode keys like Shift, Ctrl, CapsLock)
+    if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyUpHotkey(keyHash))
     {
         // Check if this is a key repeat (bit 30 of lParam)
         if (lParam & 0x40000000)
@@ -154,7 +131,6 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         }
 
         // Check if other modifiers are pressed (e.g., Ctrl+Shift is a system shortcut)
-        // Only consider it a toggle if the key is pressed alone
         BOOL hasOtherModifier = FALSE;
         if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT)
         {
@@ -164,67 +140,55 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         {
             hasOtherModifier = (GetAsyncKeyState(VK_SHIFT) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000);
         }
-        // CapsLock doesn't need modifier check
 
         if (hasOtherModifier)
         {
-            _shiftPending = FALSE;
-            _pendingToggleKey = 0;
+            _pendingKeyUpKey = 0;
+            _pendingKeyUpModifiers = 0;
             return S_OK;  // Let system handle it
         }
 
-        // Mark toggle key as pending (will toggle mode on release if no other key pressed)
-        // Resolve generic VK_SHIFT/VK_CONTROL to specific left/right
-        _shiftPending = TRUE;
-        if (wParam == VK_SHIFT)
-        {
-            if (GetAsyncKeyState(VK_LSHIFT) & 0x8000)
-                _pendingToggleKey = VK_LSHIFT;
-            else if (GetAsyncKeyState(VK_RSHIFT) & 0x8000)
-                _pendingToggleKey = VK_RSHIFT;
-            else
-                _pendingToggleKey = wParam;
-        }
-        else if (wParam == VK_CONTROL)
-        {
-            if (GetAsyncKeyState(VK_LCONTROL) & 0x8000)
-                _pendingToggleKey = VK_LCONTROL;
-            else if (GetAsyncKeyState(VK_RCONTROL) & 0x8000)
-                _pendingToggleKey = VK_RCONTROL;
-            else
-                _pendingToggleKey = wParam;
-        }
-        else
-        {
-            _pendingToggleKey = wParam;
-        }
+        // Mark key as pending for KeyUp toggle
+        _pendingKeyUpKey = (uint32_t)wParam;
+        _pendingKeyUpModifiers = modifiers;
+
         *pfEaten = TRUE;
         return S_OK;
     }
 
-    // Any other key cancels toggle pending
-    _shiftPending = FALSE;
-    _pendingToggleKey = 0;
+    // Any other key cancels pending toggle
+    _pendingKeyUpKey = 0;
+    _pendingKeyUpModifiers = 0;
 
-    // Check if context is read-only (browser non-editable area)
-    // Don't intercept keys in read-only areas to allow browser shortcuts
+    // Check if context is read-only
     if (_IsContextReadOnly(pContext))
     {
         return S_OK;
     }
 
-    if (!_IsKeyWeShouldHandle(wParam))
+    // Check if this is a KeyDown hotkey from whitelist
+    BOOL isKeyDownHotkey = (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownHotkey(keyHash));
+
+    // Check for basic input keys
+    BOOL isInputKey = FALSE;
+    if (_isComposing || _hasCandidates || _pTextService->IsChineseMode())
+    {
+        HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
+        isInputKey = (keyType != HotkeyType::None);
+    }
+
+    if (!isKeyDownHotkey && !isInputKey)
     {
         return S_OK;
     }
 
-    // Send key to Go Service
-    if (!_SendKeyToService(wParam))
+    // Send key to Go Service using binary protocol
+    if (!_SendKeyToService((uint32_t)wParam, modifiers, KEY_EVENT_DOWN))
     {
         OutputDebugStringW(L"[WindInput] Failed to send key to service, passing through\n");
 
         // Service not available - pass through letters directly
-        if (wParam >= 'A' && wParam <= 'Z')
+        if (wParam >= 'A' && wParam <= 'Z' && !(modifiers & (KEYMOD_CTRL | KEYMOD_ALT)))
         {
             std::wstring ch;
             ch = (wchar_t)towlower((wint_t)wParam);
@@ -243,38 +207,26 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 
 STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
-    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+    *pfEaten = FALSE;
 
     // Handle pending toggle key release
-    if (_shiftPending && _pendingToggleKey != 0)
+    if (_pendingKeyUpKey != 0)
     {
-        // Check if this is the same key that was pressed
-        BOOL isMatchingKey = (wParam == _pendingToggleKey);
-        // Also check for generic VK_SHIFT matching VK_LSHIFT/VK_RSHIFT
-        if (!isMatchingKey && (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT))
-        {
-            isMatchingKey = (_pendingToggleKey == VK_SHIFT || _pendingToggleKey == VK_LSHIFT || _pendingToggleKey == VK_RSHIFT);
-        }
-        if (!isMatchingKey && (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL))
-        {
-            isMatchingKey = (_pendingToggleKey == VK_CONTROL || _pendingToggleKey == VK_LCONTROL || _pendingToggleKey == VK_RCONTROL);
-        }
-
-        if (isMatchingKey)
+        // Check if this matches the pending key
+        if (_IsMatchingKeyUp(wParam, _pendingKeyUpKey))
         {
             *pfEaten = TRUE;
             return S_OK;
         }
     }
 
-    // Also handle Caps Lock for indicator (always, regardless of config)
+    // Also handle Caps Lock for indicator
     if (wParam == VK_CAPITAL)
     {
         *pfEaten = TRUE;
         return S_OK;
     }
 
-    *pfEaten = FALSE;
     return S_OK;
 }
 
@@ -282,32 +234,28 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
 {
     *pfEaten = FALSE;
 
-    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
-
     // Handle toggle key release for mode toggle
-    if (_shiftPending && _pendingToggleKey != 0)
+    if (_pendingKeyUpKey != 0)
     {
-        // Check if this is the same key that was pressed
-        BOOL isMatchingKey = (wParam == _pendingToggleKey);
-        // Also check for generic VK_SHIFT matching VK_LSHIFT/VK_RSHIFT
-        if (!isMatchingKey && (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT))
+        if (_IsMatchingKeyUp(wParam, _pendingKeyUpKey))
         {
-            isMatchingKey = (_pendingToggleKey == VK_SHIFT || _pendingToggleKey == VK_LSHIFT || _pendingToggleKey == VK_RSHIFT);
-        }
-        if (!isMatchingKey && (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL))
-        {
-            isMatchingKey = (_pendingToggleKey == VK_CONTROL || _pendingToggleKey == VK_LCONTROL || _pendingToggleKey == VK_RCONTROL);
-        }
+            uint32_t pendingKey = _pendingKeyUpKey;
+            _pendingKeyUpKey = 0;
+            _pendingKeyUpModifiers = 0;
 
-        if (isMatchingKey)
-        {
-            _shiftPending = FALSE;
-            _pendingToggleKey = 0;
-
-            // Toggle mode (handles CapsLock specially - it toggles on key down, not release)
-            if (wParam != VK_CAPITAL)
+            // Send KeyUp event to Go Service for toggle processing
+            if (pendingKey != VK_CAPITAL)
             {
-                _pTextService->ToggleInputMode();
+                // For Shift/Ctrl, send KeyUp event
+                if (_SendKeyToService(pendingKey, 0, KEY_EVENT_UP))
+                {
+                    _HandleServiceResponse();
+                }
+                else
+                {
+                    // Fallback: toggle locally if service unavailable
+                    _pTextService->ToggleInputMode();
+                }
             }
 
             *pfEaten = TRUE;
@@ -315,33 +263,27 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
         }
     }
 
-    // Handle Caps Lock key release - show A/a indicator and update language bar
-    // CapsLock toggles on release, not on pending
+    // Handle Caps Lock key release
     if (wParam == VK_CAPITAL)
     {
-        // If CapsLock is configured as toggle key and was pending, toggle mode
-        if (pHotkeyMgr != nullptr && pHotkeyMgr->IsToggleModeKey(VK_CAPITAL))
+        CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+
+        // Calculate hash for CapsLock
+        uint32_t keyHash = CHotkeyManager::CalcKeyHash(KEYMOD_CAPSLOCK, VK_CAPITAL);
+
+        // Check if CapsLock is configured as toggle key
+        if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyUpHotkey(keyHash))
         {
-            // CapsLock toggles mode
-            _pTextService->ToggleInputMode();
+            // Send KeyUp event to Go Service
+            if (_SendKeyToService(VK_CAPITAL, KEYMOD_CAPSLOCK, KEY_EVENT_UP))
+            {
+                _HandleServiceResponse();
+            }
         }
 
-        // Get current Caps Lock state (after the key was processed)
+        // Get current Caps Lock state and update language bar
         BOOL capsLockOn = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
-
-        // Update language bar to show Caps Lock state (A/a in English mode)
         _pTextService->UpdateCapsLockState(capsLockOn);
-
-        // Send to Go service for popup indicator
-        CIPCClient* pIPCClient = _pTextService->GetIPCClient();
-        if (pIPCClient != nullptr && pIPCClient->IsConnected())
-        {
-            pIPCClient->SendCapsLockState(capsLockOn);
-
-            // Receive and discard response
-            ServiceResponse response;
-            pIPCClient->ReceiveResponse(response);
-        }
 
         *pfEaten = TRUE;
         return S_OK;
@@ -405,93 +347,31 @@ void CKeyEventSink::Uninitialize()
     }
 }
 
-int CKeyEventSink::_GetModifierState()
+// Helper: Check if wParam matches the pending KeyUp key (handles VK_SHIFT -> VK_LSHIFT/RSHIFT mapping)
+BOOL CKeyEventSink::_IsMatchingKeyUp(WPARAM wParam, uint32_t pendingKey)
 {
-    int modifiers = 0;
-
-    // Use GetAsyncKeyState to detect modifier key states
-    if (GetAsyncKeyState(VK_SHIFT) & 0x8000)
-        modifiers |= KEY_MOD_SHIFT;
-    if (GetAsyncKeyState(VK_CONTROL) & 0x8000)
-        modifiers |= KEY_MOD_CTRL;
-    if (GetAsyncKeyState(VK_MENU) & 0x8000)  // VK_MENU = Alt
-        modifiers |= KEY_MOD_ALT;
-
-    return modifiers;
-}
-
-BOOL CKeyEventSink::_IsKeyWeShouldHandle(WPARAM wParam)
-{
-    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
-    if (pHotkeyMgr == nullptr)
-    {
-        OutputDebugStringW(L"[WindInput] HotkeyManager is null, using fallback logic\n");
-        // Fallback to basic handling
-        int modifiers = _GetModifierState();
-        if (modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT))
-            return FALSE;
-        if (wParam >= 'A' && wParam <= 'Z')
-            return TRUE;
-        return FALSE;
-    }
-
-    int modifiers = _GetModifierState();
-    BOOL isChineseMode = _pTextService->IsChineseMode();
-
-    return pHotkeyMgr->ShouldInterceptKey(wParam, modifiers, _isComposing, _hasCandidates, isChineseMode);
-}
-
-// Check if a key is a punctuation key we should handle
-BOOL CKeyEventSink::_IsPunctuationKey(WPARAM wParam)
-{
-    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
-    if (pHotkeyMgr != nullptr)
-    {
-        return pHotkeyMgr->IsPunctuationKey(wParam);
-    }
-    // Fallback
-    switch (wParam)
-    {
-    case VK_OEM_COMMA:    // , <
-    case VK_OEM_PERIOD:   // . >
-    case VK_OEM_1:        // ; :
-    case VK_OEM_2:        // / ?
-    case VK_OEM_3:        // ` ~
-    case VK_OEM_4:        // [ {
-    case VK_OEM_5:        // \ |
-    case VK_OEM_6:        // ] }
-    case VK_OEM_7:        // ' "
+    if (wParam == pendingKey)
         return TRUE;
-    default:
-        return FALSE;
+
+    // Handle generic VK_SHIFT matching VK_LSHIFT/VK_RSHIFT
+    if ((wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) &&
+        (pendingKey == VK_SHIFT || pendingKey == VK_LSHIFT || pendingKey == VK_RSHIFT))
+    {
+        return TRUE;
     }
+
+    // Handle generic VK_CONTROL matching VK_LCONTROL/VK_RCONTROL
+    if ((wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL) &&
+        (pendingKey == VK_CONTROL || pendingKey == VK_LCONTROL || pendingKey == VK_RCONTROL))
+    {
+        return TRUE;
+    }
+
+    return FALSE;
 }
 
-// Convert punctuation virtual key to character
-wchar_t CKeyEventSink::_VirtualKeyToPunctuation(WPARAM wParam, BOOL shiftPressed)
-{
-    CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
-    if (pHotkeyMgr != nullptr)
-    {
-        return pHotkeyMgr->VirtualKeyToPunctuation(wParam, shiftPressed);
-    }
-    // Fallback
-    switch (wParam)
-    {
-    case VK_OEM_COMMA:   return shiftPressed ? L'<' : L',';
-    case VK_OEM_PERIOD:  return shiftPressed ? L'>' : L'.';
-    case VK_OEM_1:       return shiftPressed ? L':' : L';';
-    case VK_OEM_2:       return shiftPressed ? L'?' : L'/';
-    case VK_OEM_3:       return shiftPressed ? L'~' : L'`';
-    case VK_OEM_4:       return shiftPressed ? L'{' : L'[';
-    case VK_OEM_5:       return shiftPressed ? L'|' : L'\\';
-    case VK_OEM_6:       return shiftPressed ? L'}' : L']';
-    case VK_OEM_7:       return shiftPressed ? L'"' : L'\'';
-    default:             return 0;
-    }
-}
-
-BOOL CKeyEventSink::_SendKeyToService(WPARAM wParam)
+// Send key to Go Service using binary protocol
+BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType)
 {
     CIPCClient* pIPCClient = _pTextService->GetIPCClient();
     if (pIPCClient == nullptr)
@@ -500,182 +380,10 @@ BOOL CKeyEventSink::_SendKeyToService(WPARAM wParam)
         return FALSE;
     }
 
-    // Convert virtual key to character/key name
-    std::wstring key;
-    int keyCode = (int)wParam;
-    BOOL needCaret = FALSE;  // Whether to include caret position in request
+    // Get scan code from virtual key (optional, set to 0 if not needed)
+    uint32_t scanCode = MapVirtualKeyW(keyCode, MAPVK_VK_TO_VSC);
 
-    // Get modifier state
-    int modifiers = _GetModifierState();
-    BOOL shiftPressed = (modifiers & KEY_MOD_SHIFT) != 0;
-
-    if (wParam >= 'A' && wParam <= 'Z')
-    {
-        // Letter key - determine case based on Caps Lock and Shift state
-        BOOL capsLock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
-
-        // XOR logic: Caps Lock and Shift cancel each other
-        BOOL shouldBeUppercase = capsLock ^ shiftPressed;
-
-        if (_pTextService->IsChineseMode())
-        {
-            // Chinese mode: always use lowercase for pinyin
-            key = (wchar_t)towlower((wint_t)wParam);
-            _isComposing = TRUE;
-        }
-        else
-        {
-            // English mode: respect Caps Lock and Shift
-            if (shouldBeUppercase)
-            {
-                key = (wchar_t)wParam;  // Already uppercase
-            }
-            else
-            {
-                key = (wchar_t)towlower((wint_t)wParam);
-            }
-        }
-
-        // Always include caret with letter keys (both Chinese and English mode need it)
-        // This replaces the separate caret_update call
-        needCaret = TRUE;
-    }
-    else if (wParam >= '1' && wParam <= '9')
-    {
-        // Number key
-        key = (wchar_t)wParam;
-    }
-    else if (wParam == VK_BACK)
-    {
-        key = L"backspace";
-    }
-    else if (wParam == VK_RETURN)
-    {
-        key = L"enter";
-    }
-    else if (wParam == VK_ESCAPE)
-    {
-        key = L"escape";
-        _isComposing = FALSE;
-    }
-    else if (wParam == VK_SPACE)
-    {
-        key = L"space";
-    }
-    else if (wParam == VK_SHIFT)
-    {
-        // Determine which specific shift was pressed
-        // Use GetAsyncKeyState to check which shift is actually down
-        if (GetAsyncKeyState(VK_LSHIFT) & 0x8000)
-        {
-            key = L"select_2";
-            keyCode = VK_LSHIFT;  // Override to specific shift
-        }
-        else if (GetAsyncKeyState(VK_RSHIFT) & 0x8000)
-        {
-            key = L"select_3";
-            keyCode = VK_RSHIFT;  // Override to specific shift
-        }
-        else
-        {
-            key = L"shift";
-        }
-    }
-    else if (wParam == VK_OEM_3)  // ` key (backtick/tilde)
-    {
-        key = L"`";
-    }
-    else if (wParam == VK_OEM_MINUS)  // - key for page up
-    {
-        key = L"page_up";
-    }
-    else if (wParam == VK_OEM_PLUS)  // = key for page down
-    {
-        key = L"page_down";
-    }
-    else if (wParam == VK_PRIOR)  // Page Up key
-    {
-        key = L"page_up";
-    }
-    else if (wParam == VK_NEXT)  // Page Down key
-    {
-        key = L"page_down";
-    }
-    else if (wParam == VK_TAB)  // Tab key
-    {
-        // Tab without Shift = page down, Shift+Tab = page up
-        if (shiftPressed)
-        {
-            key = L"page_up";
-        }
-        else
-        {
-            key = L"page_down";
-        }
-    }
-    else if (wParam == VK_LSHIFT)  // Left Shift (for candidate selection)
-    {
-        key = L"select_2";
-    }
-    else if (wParam == VK_RSHIFT)  // Right Shift (for candidate selection)
-    {
-        key = L"select_3";
-    }
-    else if (wParam == VK_LCONTROL)  // Left Ctrl (for candidate selection)
-    {
-        key = L"select_2";
-    }
-    else if (wParam == VK_RCONTROL)  // Right Ctrl (for candidate selection)
-    {
-        key = L"select_3";
-    }
-    else if (wParam == VK_CONTROL)  // Generic Ctrl (determine which one)
-    {
-        // Determine which specific ctrl was pressed
-        if (GetAsyncKeyState(VK_LCONTROL) & 0x8000)
-        {
-            key = L"select_2";
-            keyCode = VK_LCONTROL;
-        }
-        else if (GetAsyncKeyState(VK_RCONTROL) & 0x8000)
-        {
-            key = L"select_3";
-            keyCode = VK_RCONTROL;
-        }
-        else
-        {
-            return FALSE;  // Neither specific key pressed
-        }
-    }
-    else if (_IsPunctuationKey(wParam))
-    {
-        // Punctuation key
-        wchar_t punct = _VirtualKeyToPunctuation(wParam, shiftPressed);
-        if (punct != 0)
-        {
-            key = punct;
-        }
-        else
-        {
-            return FALSE;
-        }
-    }
-    else
-    {
-        return FALSE;
-    }
-
-    // Include caret position in the same request if needed
-    if (needCaret)
-    {
-        LONG x, y, height;
-        if (_pTextService->GetCaretPosition(&x, &y, &height))
-        {
-            return pIPCClient->SendKeyEvent(key, keyCode, modifiers, &x, &y, &height);
-        }
-    }
-
-    return pIPCClient->SendKeyEvent(key, keyCode, modifiers);
+    return pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType);
 }
 
 void CKeyEventSink::_HandleServiceResponse()
@@ -694,19 +402,18 @@ void CKeyEventSink::_HandleServiceResponse()
     switch (response.type)
     {
     case ResponseType::Ack:
-        // ACK is common, no need to log
+        // ACK is common, no action needed
         break;
 
-    case ResponseType::InsertText:
+    case ResponseType::CommitText:
         {
-            OutputDebugStringW(L"[WindInput] Processing InsertText response\n");
+            OutputDebugStringW(L"[WindInput] Processing CommitText response\n");
 
             // Handle new composition if present (top code commit feature)
-            // Use combined method to ensure synchronous execution
             if (!response.newComposition.empty())
             {
                 WCHAR debug[256];
-                wsprintfW(debug, L"[WindInput] InsertText with new composition: text='%s', newComp='%s'\n",
+                wsprintfW(debug, L"[WindInput] CommitText with new composition: text='%s', newComp='%s'\n",
                           response.text.c_str(), response.newComposition.c_str());
                 OutputDebugStringW(debug);
 
@@ -718,24 +425,18 @@ void CKeyEventSink::_HandleServiceResponse()
             {
                 // No new composition, just insert text normally
                 _pTextService->EndComposition();
-                OutputDebugStringW(L"[WindInput] EndComposition completed\n");
 
                 if (!response.text.empty())
                 {
-                    WCHAR debug[256];
-                    wsprintfW(debug, L"[WindInput] Inserting text: %s\n", response.text.c_str());
-                    OutputDebugStringW(debug);
                     _pTextService->InsertText(response.text);
-                    OutputDebugStringW(L"[WindInput] InsertText completed\n");
                 }
                 _isComposing = FALSE;
                 _hasCandidates = FALSE;
             }
 
-            // Handle mode change if present (CommitOnSwitch feature)
+            // Handle mode change if present
             if (response.modeChanged)
             {
-                OutputDebugStringW(L"[WindInput] InsertText with mode change - updating language bar\n");
                 _pTextService->SetInputMode(response.chineseMode);
             }
         }
@@ -743,8 +444,8 @@ void CKeyEventSink::_HandleServiceResponse()
 
     case ResponseType::UpdateComposition:
         OutputDebugStringW(L"[WindInput] Received UpdateComposition from service\n");
-        _isComposing = TRUE;   // Ensure composing state is set
-        _hasCandidates = TRUE; // Assume there are candidates when composition is updated
+        _isComposing = TRUE;
+        _hasCandidates = TRUE;
         _pTextService->UpdateComposition(response.composition, response.caretPos);
         break;
 
@@ -757,17 +458,30 @@ void CKeyEventSink::_HandleServiceResponse()
 
     case ResponseType::ModeChanged:
         OutputDebugStringW(L"[WindInput] Received ModeChanged from service\n");
-        // Clear composing state and end any active composition when mode changes
         _isComposing = FALSE;
         _hasCandidates = FALSE;
         _pTextService->EndComposition();
-        // Update local mode state and language bar icon
         _pTextService->SetInputMode(response.chineseMode);
         break;
 
+    case ResponseType::StatusUpdate:
+        {
+            OutputDebugStringW(L"[WindInput] Received StatusUpdate from service\n");
+
+            // Update input mode
+            _pTextService->SetInputMode(response.IsChineseMode());
+
+            // Update hotkey whitelist
+            CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+            if (pHotkeyMgr != nullptr && response.HasHotkeys())
+            {
+                pHotkeyMgr->UpdateHotkeys(response.keyDownHotkeys, response.keyUpHotkeys);
+            }
+        }
+        break;
+
     case ResponseType::Consumed:
-        // Key was consumed by a hotkey (e.g., Shift+Space, Ctrl+.)
-        // Don't output anything, just consume the key
+        // Key was consumed by a hotkey
         OutputDebugStringW(L"[WindInput] Key consumed by hotkey\n");
         break;
 
@@ -777,12 +491,12 @@ void CKeyEventSink::_HandleServiceResponse()
     }
 }
 
-// Check if the current context is read-only (e.g., browser non-editable area)
+// Check if the current context is read-only
 BOOL CKeyEventSink::_IsContextReadOnly(ITfContext* pContext)
 {
     if (!pContext)
     {
-        return TRUE;  // No context, treat as read-only for safety
+        return TRUE;
     }
 
     TF_STATUS tfStatus = {};
@@ -790,63 +504,16 @@ BOOL CKeyEventSink::_IsContextReadOnly(ITfContext* pContext)
 
     if (SUCCEEDED(hr))
     {
-        // Check if the dynamic flags indicate read-only
         if (tfStatus.dwDynamicFlags & TF_SD_READONLY)
         {
-            OutputDebugStringW(L"[WindInput] Context is read-only (TF_SD_READONLY)\n");
             return TRUE;
         }
 
-        // Also check for loading state (some apps set this temporarily)
         if (tfStatus.dwDynamicFlags & TF_SD_LOADING)
         {
-            OutputDebugStringW(L"[WindInput] Context is loading (TF_SD_LOADING)\n");
             return TRUE;
         }
     }
 
-    return FALSE;  // Context is writable
-}
-
-// Check if the current process is a browser (Chrome, Edge, Firefox, etc.)
-BOOL CKeyEventSink::_IsCurrentProcessBrowser()
-{
-    static BOOL s_checked = FALSE;
-    static BOOL s_isBrowser = FALSE;
-
-    // Cache the result since process name doesn't change
-    if (s_checked)
-    {
-        return s_isBrowser;
-    }
-
-    s_checked = TRUE;
-    s_isBrowser = FALSE;
-
-    // Get current process executable name
-    wchar_t exePath[MAX_PATH] = {};
-    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0)
-    {
-        // Extract filename from path
-        wchar_t* fileName = wcsrchr(exePath, L'\\');
-        if (fileName)
-        {
-            fileName++;  // Skip the backslash
-
-            // Check against known browser process names (case-insensitive)
-            if (_wcsicmp(fileName, L"chrome.exe") == 0 ||
-                _wcsicmp(fileName, L"msedge.exe") == 0 ||
-                _wcsicmp(fileName, L"firefox.exe") == 0 ||
-                _wcsicmp(fileName, L"brave.exe") == 0 ||
-                _wcsicmp(fileName, L"opera.exe") == 0 ||
-                _wcsicmp(fileName, L"vivaldi.exe") == 0 ||
-                _wcsicmp(fileName, L"iexplore.exe") == 0)
-            {
-                s_isBrowser = TRUE;
-                OutputDebugStringW(L"[WindInput] Running in browser process\n");
-            }
-        }
-    }
-
-    return s_isBrowser;
+    return FALSE;
 }

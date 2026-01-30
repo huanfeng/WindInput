@@ -551,19 +551,15 @@ STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
                 // If we got a status update, sync state and hotkeys
                 if (response.type == ResponseType::StatusUpdate)
                 {
-                    _bChineseMode = response.chineseMode;
+                    _bChineseMode = response.IsChineseMode();
 
-                    // Update hotkey configuration if present
-                    if (response.hotkeys.hasData && _pHotkeyManager != nullptr)
+                    // Update hotkey whitelist if present
+                    if (response.HasHotkeys() && _pHotkeyManager != nullptr)
                     {
-                        OutputDebugStringW(L"[WindInput] Updating hotkey configuration from ime_activated\n");
-                        _pHotkeyManager->UpdateConfig(
-                            response.hotkeys.toggleModeKeys,
-                            response.hotkeys.switchEngine,
-                            response.hotkeys.toggleFullWidth,
-                            response.hotkeys.togglePunct,
-                            response.hotkeys.selectKeyGroups,
-                            response.hotkeys.pageKeys
+                        OutputDebugStringW(L"[WindInput] Updating hotkey whitelist from ime_activated\n");
+                        _pHotkeyManager->UpdateHotkeys(
+                            response.keyDownHotkeys,
+                            response.keyUpHotkeys
                         );
                     }
                 }
@@ -699,7 +695,7 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                     // If we got a status update, sync our state with the service
                     if (response.type == ResponseType::StatusUpdate)
                     {
-                        _bChineseMode = response.chineseMode;
+                        _bChineseMode = response.IsChineseMode();
                         OutputDebugStringW(L"[WindInput] Synced state from focus_gained response\n");
 
                         // Update language bar button
@@ -708,17 +704,13 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                             _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
                         }
 
-                        // Update hotkey configuration if present
-                        if (response.hotkeys.hasData && _pHotkeyManager != nullptr)
+                        // Update hotkey whitelist if present
+                        if (response.HasHotkeys() && _pHotkeyManager != nullptr)
                         {
-                            OutputDebugStringW(L"[WindInput] Updating hotkey configuration from focus_gained\n");
-                            _pHotkeyManager->UpdateConfig(
-                                response.hotkeys.toggleModeKeys,
-                                response.hotkeys.switchEngine,
-                                response.hotkeys.toggleFullWidth,
-                                response.hotkeys.togglePunct,
-                                response.hotkeys.selectKeyGroups,
-                                response.hotkeys.pageKeys
+                            OutputDebugStringW(L"[WindInput] Updating hotkey whitelist from focus_gained\n");
+                            _pHotkeyManager->UpdateHotkeys(
+                                response.keyDownHotkeys,
+                                response.keyUpHotkeys
                             );
                         }
                     }
@@ -1211,81 +1203,12 @@ void CTextService::_UninitLangBarButton()
 
 void CTextService::ToggleInputMode()
 {
-    OutputDebugStringW(L"[WindInput] ToggleInputMode called\n");
+    OutputDebugStringW(L"[WindInput] ToggleInputMode called (local fallback)\n");
 
-    // Send toggle_mode request to Go service and get new state
-    if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
-    {
-        if (_pIPCClient->SendToggleMode())
-        {
-            ServiceResponse response;
-            if (_pIPCClient->ReceiveResponse(response))
-            {
-                if (response.type == ResponseType::InsertText)
-                {
-                    // CommitOnSwitch: insert text and change mode
-                    OutputDebugStringW(L"[WindInput] ToggleInputMode: CommitOnSwitch triggered\n");
-
-                    // End composition first to clear the underlined text
-                    EndComposition();
-
-                    // Insert the committed text
-                    if (!response.text.empty())
-                    {
-                        WCHAR debug[256];
-                        wsprintfW(debug, L"[WindInput] ToggleInputMode: Inserting text: %s\n", response.text.c_str());
-                        OutputDebugStringW(debug);
-                        InsertText(response.text);
-                    }
-
-                    // Update mode
-                    _bChineseMode = response.chineseMode;
-                    OutputDebugStringW(_bChineseMode ?
-                        L"[WindInput] Mode synced from service: Chinese\n" :
-                        L"[WindInput] Mode synced from service: English\n");
-                }
-                else if (response.type == ResponseType::ModeChanged)
-                {
-                    // Normal mode change without text commit
-                    // End any active composition
-                    EndComposition();
-
-                    _bChineseMode = response.chineseMode;
-                    OutputDebugStringW(_bChineseMode ?
-                        L"[WindInput] Mode synced from service: Chinese\n" :
-                        L"[WindInput] Mode synced from service: English\n");
-                }
-                else
-                {
-                    // Fallback: toggle locally if unexpected response
-                    EndComposition();
-                    _bChineseMode = !_bChineseMode;
-                    OutputDebugStringW(L"[WindInput] Unexpected response, toggling locally\n");
-                }
-            }
-            else
-            {
-                // Fallback: toggle locally if receive failed
-                EndComposition();
-                _bChineseMode = !_bChineseMode;
-                OutputDebugStringW(L"[WindInput] Failed to receive response, toggling locally\n");
-            }
-        }
-        else
-        {
-            // Fallback: toggle locally if send failed
-            EndComposition();
-            _bChineseMode = !_bChineseMode;
-            OutputDebugStringW(L"[WindInput] Failed to send toggle_mode, toggling locally\n");
-        }
-    }
-    else
-    {
-        // No IPC connection, toggle locally
-        EndComposition();
-        _bChineseMode = !_bChineseMode;
-        OutputDebugStringW(L"[WindInput] No IPC connection, toggling locally\n");
-    }
+    // Toggle mode locally (this is used as a fallback when Go service is unavailable)
+    // The actual mode toggle is handled via KeyUp event -> Go service -> ModeChanged response
+    EndComposition();
+    _bChineseMode = !_bChineseMode;
 
     OutputDebugStringW(_bChineseMode ?
         L"[WindInput] Switched to Chinese mode\n" :
@@ -1326,63 +1249,11 @@ void CTextService::SendMenuCommand(const char* command)
 {
     OutputDebugStringW(L"[WindInput] SendMenuCommand called\n");
 
-    if (_pIPCClient == nullptr)
-    {
-        OutputDebugStringW(L"[WindInput] SendMenuCommand: IPC client is null\n");
-        return;
-    }
-
-    if (!_pIPCClient->IsConnected() && !_pIPCClient->Connect())
-    {
-        OutputDebugStringW(L"[WindInput] SendMenuCommand: Failed to connect\n");
-        return;
-    }
-
-    if (_pIPCClient->SendMenuCommand(command))
-    {
-        ServiceResponse response;
-        if (_pIPCClient->ReceiveResponse(response))
-        {
-            // Handle response based on type
-            if (response.type == ResponseType::ModeChanged)
-            {
-                _bChineseMode = response.chineseMode;
-                if (_pLangBarItemButton != nullptr)
-                {
-                    _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
-                }
-            }
-            else if (response.type == ResponseType::StatusUpdate)
-            {
-                // Update all status fields
-                _bChineseMode = response.chineseMode;
-                if (_pLangBarItemButton != nullptr)
-                {
-                    _pLangBarItemButton->UpdateFullStatus(
-                        response.chineseMode,
-                        response.fullWidth,
-                        response.chinesePunct,
-                        response.toolbarVisible,
-                        (GetKeyState(VK_CAPITAL) & 0x0001) != 0  // Get current Caps Lock state
-                    );
-                }
-
-                // Update hotkey configuration if present
-                if (response.hotkeys.hasData && _pHotkeyManager != nullptr)
-                {
-                    OutputDebugStringW(L"[WindInput] Updating hotkey configuration from status_update\n");
-                    _pHotkeyManager->UpdateConfig(
-                        response.hotkeys.toggleModeKeys,
-                        response.hotkeys.switchEngine,
-                        response.hotkeys.toggleFullWidth,
-                        response.hotkeys.togglePunct,
-                        response.hotkeys.selectKeyGroups,
-                        response.hotkeys.pageKeys
-                    );
-                }
-            }
-        }
-    }
+    // TODO: Menu commands will be implemented in a future version
+    // For now, just log the command
+    WCHAR debug[256];
+    wsprintfW(debug, L"[WindInput] SendMenuCommand: command=%hs (not implemented in binary protocol)\n", command);
+    OutputDebugStringW(debug);
 }
 
 void CTextService::UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock)

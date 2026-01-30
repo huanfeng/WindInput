@@ -1,10 +1,12 @@
 #pragma once
 
 #include "Globals.h"
+#include "BinaryProtocol.h"
 #include <string>
 #include <vector>
 #include <functional>
 #include <atomic>
+#include <unordered_set>
 
 // IPC Configuration
 namespace IPCConfig
@@ -32,48 +34,38 @@ enum class IPCLogLevel
     Debug = 3      // Everything including verbose debug
 };
 
-// Response types from Go Service
-enum class ResponseType
-{
-    Ack,
-    InsertText,
-    UpdateComposition,
-    ClearComposition,
-    ModeChanged,
-    StatusUpdate,
-    Consumed,       // Key was consumed by a hotkey (no output)
-    Unknown
-};
-
-// Hotkey configuration from Go Service
-struct HotkeyConfigData
-{
-    std::vector<std::wstring> toggleModeKeys;  // lshift, rshift, lctrl, rctrl, capslock
-    std::wstring switchEngine;                  // ctrl+`, ctrl+shift+e, none
-    std::wstring toggleFullWidth;               // shift+space, ctrl+shift+space, none
-    std::wstring togglePunct;                   // ctrl+., ctrl+,, none
-    std::vector<std::wstring> selectKeyGroups;  // semicolon_quote, comma_period, lrshift, lrctrl
-    std::vector<std::wstring> pageKeys;         // pageupdown, minus_equal, brackets, shift_tab
-    BOOL hasData;                               // TRUE if hotkey config was present in response
-
-    HotkeyConfigData() : hasData(FALSE) {}
-};
-
-// Response from Go Service
+// Response from Go Service (simplified for binary protocol)
 struct ServiceResponse
 {
-    ResponseType type;
-    std::wstring text;      // For InsertText
-    std::wstring composition; // For UpdateComposition
-    std::wstring newComposition; // For InsertText with new composition (top code commit)
-    int caretPos;           // For UpdateComposition
-    BOOL chineseMode;       // For ModeChanged, StatusUpdate, and InsertText (when modeChanged)
-    BOOL modeChanged;       // For InsertText with mode change (CommitOnSwitch)
-    BOOL fullWidth;         // For StatusUpdate
-    BOOL chinesePunct;      // For StatusUpdate
-    BOOL toolbarVisible;    // For StatusUpdate
-    HotkeyConfigData hotkeys; // For StatusUpdate (hotkey configuration)
+    ResponseType type = ResponseType::Error;
+
+    // For CommitText
+    std::wstring text;
+    std::wstring newComposition;
+    bool modeChanged = false;
+    bool chineseMode = false;
+
+    // For UpdateComposition
+    std::wstring composition;
+    int caretPos = 0;
+
+    // For StatusUpdate / ModeChanged
+    uint32_t statusFlags = 0;
+
+    // For SyncHotkeys / StatusUpdate
+    std::vector<uint32_t> keyDownHotkeys;
+    std::vector<uint32_t> keyUpHotkeys;
+
+    // Error
     std::wstring error;
+
+    // Helper methods
+    bool IsChineseMode() const { return (statusFlags & STATUS_CHINESE_MODE) != 0 || chineseMode; }
+    bool IsFullWidth() const { return (statusFlags & STATUS_FULL_WIDTH) != 0; }
+    bool IsChinesePunct() const { return (statusFlags & STATUS_CHINESE_PUNCT) != 0; }
+    bool IsToolbarVisible() const { return (statusFlags & STATUS_TOOLBAR_VISIBLE) != 0; }
+    bool IsCapsLock() const { return (statusFlags & STATUS_CAPS_LOCK) != 0; }
+    bool HasHotkeys() const { return !keyDownHotkeys.empty() || !keyUpHotkeys.empty(); }
 };
 
 // Circuit breaker state
@@ -102,29 +94,17 @@ public:
     // Check if service is available (considers circuit breaker)
     BOOL IsServiceAvailable();
 
-    // Send key event to Go Service (with optional caret info for efficiency)
-    // If caret is provided (px, py, pHeight all non-null), includes caret in the same request
-    BOOL SendKeyEvent(const std::wstring& key, int keyCode, int modifiers = 0,
-                      const LONG* px = nullptr, const LONG* py = nullptr, const LONG* pHeight = nullptr);
+    // Send key event to Go Service (binary protocol)
+    BOOL SendKeyEvent(uint32_t keyCode, uint32_t scanCode, uint32_t modifiers, uint8_t eventType);
 
-    // Send caret position update to Go Service (standalone, use SendKeyEvent with caret for efficiency)
+    // Send caret position update to Go Service
     BOOL SendCaretUpdate(int x, int y, int height);
 
     // Send focus lost notification
     BOOL SendFocusLost();
 
-    // Send focus gained notification (for toolbar display)
-    // Includes caret position so service knows which screen to show toolbar on
-    BOOL SendFocusGained(LONG caretX = 0, LONG caretY = 0, LONG caretHeight = 0);
-
-    // Send toggle mode request
-    BOOL SendToggleMode();
-
-    // Send Caps Lock state for indicator display
-    BOOL SendCapsLockState(BOOL capsLockOn);
-
-    // Send menu command (toggle_mode, toggle_width, toggle_punct, open_settings, toggle_toolbar)
-    BOOL SendMenuCommand(const char* command);
+    // Send focus gained notification (with optional caret position)
+    BOOL SendFocusGained(int caretX = 0, int caretY = 0, int caretHeight = 0);
 
     // Send IME deactivated notification (when user switches to another IME)
     BOOL SendIMEDeactivated();
@@ -169,14 +149,14 @@ private:
     // Start the Go service if not running
     BOOL _StartService();
 
-    // Send message with timeout (length-prefixed JSON)
-    BOOL _SendMessage(const std::wstring& message);
+    // Send binary message (header + payload)
+    BOOL _SendBinaryMessage(uint16_t command, const void* payload, uint32_t payloadSize);
 
-    // Receive message with timeout (length-prefixed JSON)
-    BOOL _ReceiveMessage(std::wstring& message);
+    // Receive binary message
+    BOOL _ReceiveBinaryMessage(IpcHeader& header, std::vector<uint8_t>& payload);
 
-    // Parse response JSON
-    BOOL _ParseResponse(const std::wstring& json, ServiceResponse& response);
+    // Parse binary response
+    BOOL _ParseResponse(const IpcHeader& header, const std::vector<uint8_t>& payload, ServiceResponse& response);
 
     // Overlapped I/O helpers
     BOOL _WriteWithTimeout(const void* data, DWORD size, DWORD timeoutMs);
@@ -186,6 +166,10 @@ private:
     void _RecordSuccess();
     void _RecordFailure();
     BOOL _ShouldAttemptOperation();
+
+    // Encoding helpers
+    static std::wstring _Utf8ToWide(const char* utf8, size_t length);
+    static std::string _WideToUtf8(const std::wstring& wide);
 
     // Logging helpers
     static void _Log(IPCLogLevel level, const wchar_t* format, ...);
