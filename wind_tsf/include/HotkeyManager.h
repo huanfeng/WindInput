@@ -40,6 +40,10 @@ public:
     // Returns true if the key matches a KeyUp hotkey in the whitelist
     BOOL IsKeyUpHotkey(uint32_t keyHash) const;
 
+    // Check if a virtual key is a toggle mode key (Shift/Ctrl for mode switch)
+    // This is a fallback that works even without hotkey whitelist sync
+    static BOOL IsToggleModeKeyByVK(WPARAM vk);
+
     // Check if any hotkeys are configured
     BOOL HasHotkeys() const { return !_keyDownHotkeys.empty() || !_keyUpHotkeys.empty(); }
 
@@ -58,6 +62,11 @@ public:
 
     // Get current modifier state
     static uint32_t GetCurrentModifiers();
+
+    // Normalize modifiers for function hotkey matching
+    // This strips specific left/right modifiers, keeping only generic modifiers
+    // E.g., (ModCtrl | ModLCtrl) -> ModCtrl
+    static uint32_t NormalizeModifiers(uint32_t modifiers);
 
     // Log current configuration (for debugging)
     void LogConfig() const;

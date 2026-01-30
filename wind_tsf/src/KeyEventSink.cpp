@@ -70,6 +70,13 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
 {
     *pfEaten = FALSE;
 
+    // Debug: Log ALL key presses to see what TSF sends us (v2 - with version marker)
+    {
+        WCHAR debug[128];
+        wsprintfW(debug, L"[WindInput-v2] OnTestKeyDown: wParam=0x%02X\n", (uint32_t)wParam);
+        OutputDebugStringW(debug);
+    }
+
     // First check if the context is read-only (browser non-editable area)
     if (_IsContextReadOnly(pContext))
     {
@@ -80,17 +87,58 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     uint32_t modifiers = CHotkeyManager::GetCurrentModifiers();
     uint32_t keyHash = CHotkeyManager::CalcKeyHash(modifiers, (uint32_t)wParam);
 
+    // For function hotkeys (like Ctrl+`), use normalized modifiers (no left/right distinction)
+    uint32_t normalizedMods = CHotkeyManager::NormalizeModifiers(modifiers);
+    uint32_t normalizedKeyHash = CHotkeyManager::CalcKeyHash(normalizedMods, (uint32_t)wParam);
+
     CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
 
     // Check if this is a KeyDown hotkey from the whitelist
-    if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownHotkey(keyHash))
+    // Use normalized hash for function hotkeys (Ctrl+`, Shift+Space, etc.)
+    if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownHotkey(normalizedKeyHash))
     {
+        WCHAR debug[128];
+        wsprintfW(debug, L"[WindInput] KeyDown hotkey matched: vk=0x%02X, hash=0x%08X\n",
+                  (uint32_t)wParam, normalizedKeyHash);
+        OutputDebugStringW(debug);
         *pfEaten = TRUE;
         return S_OK;
     }
 
+    // Debug: log when Tab key is not matched (to diagnose Tab/Shift+Tab issues)
+    if (wParam == VK_TAB)
+    {
+        WCHAR debug[256];
+        wsprintfW(debug, L"[WindInput] Tab not in KeyDown hotkeys: mods=0x%04X, normHash=0x%08X, hasHotkeys=%d\n",
+                  modifiers, normalizedKeyHash, (pHotkeyMgr != nullptr && pHotkeyMgr->HasHotkeys()) ? 1 : 0);
+        OutputDebugStringW(debug);
+    }
+
     // Check for KeyUp triggered keys (toggle mode keys) - we still need to intercept KeyDown
+    // First try hash-based lookup, then fallback to VK-based detection
+    BOOL isToggleModeKey = FALSE;
+
     if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyUpHotkey(keyHash))
+    {
+        isToggleModeKey = TRUE;
+    }
+    else if (CHotkeyManager::IsToggleModeKeyByVK(wParam))
+    {
+        // Fallback: detect toggle mode keys even without hash whitelist sync
+        // This ensures Shift/Ctrl toggle works even if IPC fails
+        isToggleModeKey = TRUE;
+    }
+
+    // Debug: Log toggle mode key detection
+    if (CHotkeyManager::IsToggleModeKeyByVK(wParam))
+    {
+        WCHAR debug[256];
+        wsprintfW(debug, L"[WindInput] OnTestKeyDown: Toggle key wParam=0x%X, mods=0x%X, hash=0x%08X, isToggle=%d\n",
+                  (uint32_t)wParam, modifiers, keyHash, isToggleModeKey);
+        OutputDebugStringW(debug);
+    }
+
+    if (isToggleModeKey)
     {
         *pfEaten = TRUE;
         return S_OK;
@@ -117,11 +165,35 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     uint32_t modifiers = CHotkeyManager::GetCurrentModifiers();
     uint32_t keyHash = CHotkeyManager::CalcKeyHash(modifiers, (uint32_t)wParam);
 
+    // For function hotkeys (like Ctrl+`), use normalized modifiers (no left/right distinction)
+    uint32_t normalizedMods = CHotkeyManager::NormalizeModifiers(modifiers);
+    uint32_t normalizedKeyHash = CHotkeyManager::CalcKeyHash(normalizedMods, (uint32_t)wParam);
+
     CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
 
     // Check if this is a KeyUp triggered key (toggle mode keys like Shift, Ctrl, CapsLock)
+    // Use hash-based lookup first, then fallback to VK-based detection
+    BOOL isToggleModeKey = FALSE;
     if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyUpHotkey(keyHash))
     {
+        isToggleModeKey = TRUE;
+    }
+    else if (CHotkeyManager::IsToggleModeKeyByVK(wParam))
+    {
+        // Fallback: detect toggle mode keys even without hash whitelist sync
+        isToggleModeKey = TRUE;
+    }
+
+    if (isToggleModeKey)
+    {
+        // CapsLock has its own special handling in OnKeyUp, don't set pending here
+        if (wParam == VK_CAPITAL)
+        {
+            // Just consume the KeyDown, let OnKeyUp handle it
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+
         // Check if this is a key repeat (bit 30 of lParam)
         if (lParam & 0x40000000)
         {
@@ -148,9 +220,11 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             return S_OK;  // Let system handle it
         }
 
-        // Mark key as pending for KeyUp toggle
+        // Mark key as pending for KeyUp toggle (Shift/Ctrl only, not CapsLock)
         _pendingKeyUpKey = (uint32_t)wParam;
         _pendingKeyUpModifiers = modifiers;
+
+        OutputDebugStringW(L"[WindInput] OnKeyDown: Toggle mode key pending for KeyUp\n");
 
         *pfEaten = TRUE;
         return S_OK;
@@ -167,7 +241,8 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     }
 
     // Check if this is a KeyDown hotkey from whitelist
-    BOOL isKeyDownHotkey = (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownHotkey(keyHash));
+    // Use normalized hash for function hotkeys (Ctrl+`, Shift+Space, etc.)
+    BOOL isKeyDownHotkey = (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownHotkey(normalizedKeyHash));
 
     // Check for basic input keys
     BOOL isInputKey = FALSE;
@@ -275,18 +350,31 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
         // Calculate hash for CapsLock
         uint32_t keyHash = CHotkeyManager::CalcKeyHash(KEYMOD_CAPSLOCK, VK_CAPITAL);
 
-        // Check if CapsLock is configured as toggle key
-        if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyUpHotkey(keyHash))
+        // Check if CapsLock is configured as toggle key (for Chinese/English switching)
+        BOOL isConfiguredAsToggle = (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyUpHotkey(keyHash));
+
+        // Get current Caps Lock state
+        BOOL capsLockOn = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+
+        // Always send CapsLock event to Go service for:
+        // 1. Mode toggle (if configured)
+        // 2. CapsLock indicator display (A/a prompt)
+        // 3. Toolbar state update
+        // Use a special modifier to indicate whether this is for mode toggle
+        uint32_t mods = KEYMOD_CAPSLOCK;
+        if (!isConfiguredAsToggle)
         {
-            // Send KeyUp event to Go Service
-            if (_SendKeyToService(VK_CAPITAL, KEYMOD_CAPSLOCK, KEY_EVENT_UP))
-            {
-                _HandleServiceResponse();
-            }
+            // Add a marker to indicate this is just for CapsLock state notification, not mode toggle
+            // Go side will check this to decide whether to toggle mode
+            mods |= 0x8000; // High bit as "state notification only" marker
         }
 
-        // Get current Caps Lock state and update language bar
-        BOOL capsLockOn = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+        if (_SendKeyToService(VK_CAPITAL, mods, KEY_EVENT_UP))
+        {
+            _HandleServiceResponse();
+        }
+
+        // Update language bar
         _pTextService->UpdateCapsLockState(capsLockOn);
 
         *pfEaten = TRUE;

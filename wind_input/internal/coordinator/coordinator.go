@@ -296,17 +296,13 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		return c.handleTogglePunct()
 	}
 
-	// Other Ctrl/Alt combinations should be passed to the system
-	if hasCtrl || hasAlt {
-		c.logger.Debug("Key has Ctrl/Alt modifier, passing to system")
-		return nil
-	}
-
-	// Preserve original key for English mode (uppercase letters should stay uppercase)
-	key := data.Key
-
 	// Handle mode toggle keys (lshift, rshift, lctrl, rctrl, capslock)
+	// IMPORTANT: This must be checked BEFORE the Ctrl/Alt pass-through check,
+	// because lctrl/rctrl are toggle mode keys but also set hasCtrl=true
 	if toggleKey := c.getToggleModeKey(data.KeyCode); toggleKey != "" {
+		c.logger.Debug("Toggle mode key detected", "key", toggleKey, "keyCode", data.KeyCode,
+			"isConfigured", c.config != nil && c.config.IsToggleModeKey(toggleKey),
+			"configuredKeys", c.config.Hotkeys.ToggleModeKeys)
 		if c.config != nil && c.config.IsToggleModeKey(toggleKey) {
 			// 检查是否需要在切换前上屏已有内容
 			// CommitOnSwitch: 上屏编码（而非候选词），因为用户切换到英文意味着想输入英文
@@ -368,8 +364,29 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 				Type:        bridge.ResponseTypeModeChanged,
 				ChineseMode: c.chineseMode,
 			}
+		} else if toggleKey == "capslock" {
+			// CapsLock is not configured as mode toggle key, but we still need to show indicator
+			// C++ side sets 0x8000 bit in modifiers to indicate "state notification only"
+			capsLockOn := ui.GetCapsLockState()
+			c.logger.Debug("CapsLock state notification", "on", capsLockOn)
+
+			// Show CapsLock indicator (A/a) - use NoLock version since we already hold the lock
+			c.handleCapsLockStateNoLock(capsLockOn)
+
+			// Return Consumed to indicate we handled it (no mode change)
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 		}
 	}
+
+	// Other Ctrl/Alt combinations should be passed to the system
+	// (after checking toggle mode keys, since lctrl/rctrl are valid toggle keys)
+	if hasCtrl || hasAlt {
+		c.logger.Debug("Key has Ctrl/Alt modifier, passing to system")
+		return nil
+	}
+
+	// Preserve original key for English mode (uppercase letters should stay uppercase)
+	key := data.Key
 
 	// English mode: pass through all keys
 	if !c.chineseMode {
@@ -440,10 +457,10 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	case data.KeyCode == 32: // Space
 		return c.handleSpace()
 
-	case c.isPageUpKey(key, data.KeyCode):
+	case c.isPageUpKey(key, data.KeyCode, uint32(data.Modifiers)):
 		return c.handlePageUp()
 
-	case c.isPageDownKey(key, data.KeyCode):
+	case c.isPageDownKey(key, data.KeyCode, uint32(data.Modifiers)):
 		return c.handlePageDown()
 
 	case len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')):
@@ -672,27 +689,35 @@ func (c *Coordinator) handleNumberKey(num int) *bridge.KeyEventResult {
 }
 
 func (c *Coordinator) handlePageUp() *bridge.KeyEventResult {
-	// Only handle if we have candidates and are not on the first page
-	if len(c.candidates) == 0 || c.currentPage <= 1 {
+	// Pass through only if no candidates
+	if len(c.candidates) == 0 {
 		return nil
 	}
 
-	c.currentPage--
-	c.logger.Debug("Page up", "currentPage", c.currentPage, "totalPages", c.totalPages)
-	c.showUI()
-	return nil
+	// Have candidates - always consume the key, even if at first page
+	if c.currentPage > 1 {
+		c.currentPage--
+		c.logger.Debug("Page up", "currentPage", c.currentPage, "totalPages", c.totalPages)
+		c.showUI()
+	}
+	// Return Consumed to indicate key was handled (don't pass to application)
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 }
 
 func (c *Coordinator) handlePageDown() *bridge.KeyEventResult {
-	// Only handle if we have candidates and are not on the last page
-	if len(c.candidates) == 0 || c.currentPage >= c.totalPages {
+	// Pass through only if no candidates
+	if len(c.candidates) == 0 {
 		return nil
 	}
 
-	c.currentPage++
-	c.logger.Debug("Page down", "currentPage", c.currentPage, "totalPages", c.totalPages)
-	c.showUI()
-	return nil
+	// Have candidates - always consume the key, even if at last page
+	if c.currentPage < c.totalPages {
+		c.currentPage++
+		c.logger.Debug("Page down", "currentPage", c.currentPage, "totalPages", c.totalPages)
+		c.showUI()
+	}
+	// Return Consumed to indicate key was handled (don't pass to application)
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 }
 
 func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
@@ -1079,7 +1104,11 @@ func (c *Coordinator) HandleToggleMode() (commitText string, chineseMode bool) {
 func (c *Coordinator) HandleCapsLockState(on bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.handleCapsLockStateNoLock(on)
+}
 
+// handleCapsLockStateNoLock is the internal version without locking (caller must hold the lock)
+func (c *Coordinator) handleCapsLockStateNoLock(on bool) {
 	if c.uiManager == nil || !c.uiManager.IsReady() {
 		return
 	}
@@ -1875,11 +1904,13 @@ func (c *Coordinator) saveRuntimeStateNoLock() {
 }
 
 // isPageUpKey checks if the key is configured as a page up key
-func (c *Coordinator) isPageUpKey(key string, keyCode int) bool {
+func (c *Coordinator) isPageUpKey(key string, keyCode int, modifiers uint32) bool {
 	if c.config == nil {
 		// 默认支持 PageUp 和 - 键
 		return key == "page_up" || keyCode == 33 || keyCode == 189
 	}
+
+	hasShift := modifiers&ModShift != 0
 
 	for _, pk := range c.config.Input.PageKeys {
 		switch pk {
@@ -1896,19 +1927,23 @@ func (c *Coordinator) isPageUpKey(key string, keyCode int) bool {
 				return true
 			}
 		case "shift_tab":
-			// Shift+Tab 需要在 HandleKeyEvent 中单独处理
-			// 这里不处理，因为需要检测 Shift 修饰键
+			// Shift+Tab = page up
+			if keyCode == 9 && hasShift { // VK_TAB with Shift
+				return true
+			}
 		}
 	}
 	return false
 }
 
 // isPageDownKey checks if the key is configured as a page down key
-func (c *Coordinator) isPageDownKey(key string, keyCode int) bool {
+func (c *Coordinator) isPageDownKey(key string, keyCode int, modifiers uint32) bool {
 	if c.config == nil {
 		// 默认支持 PageDown 和 = 键
 		return key == "page_down" || keyCode == 34 || keyCode == 187
 	}
+
+	hasShift := modifiers&ModShift != 0
 
 	for _, pk := range c.config.Input.PageKeys {
 		switch pk {
@@ -1925,7 +1960,8 @@ func (c *Coordinator) isPageDownKey(key string, keyCode int) bool {
 				return true
 			}
 		case "shift_tab":
-			if keyCode == 9 { // VK_TAB (Tab without Shift = page down)
+			// Tab without Shift = page down
+			if keyCode == 9 && !hasShift { // VK_TAB without Shift
 				return true
 			}
 		}

@@ -42,6 +42,25 @@ BOOL CHotkeyManager::IsKeyUpHotkey(uint32_t keyHash) const
     return _keyUpHotkeys.find(keyHash) != _keyUpHotkeys.end();
 }
 
+// Static method: Check if a virtual key is a toggle mode key
+// This is a fallback that works even without hotkey whitelist sync
+BOOL CHotkeyManager::IsToggleModeKeyByVK(WPARAM vk)
+{
+    switch (vk)
+    {
+    case VK_LSHIFT:
+    case VK_RSHIFT:
+    case VK_SHIFT:
+    case VK_LCONTROL:
+    case VK_RCONTROL:
+    case VK_CONTROL:
+    case VK_CAPITAL:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 // Static method: Classify basic input key type
 HotkeyType CHotkeyManager::ClassifyInputKey(WPARAM vk, uint32_t modifiers)
 {
@@ -167,6 +186,15 @@ uint32_t CHotkeyManager::GetCurrentModifiers()
         modifiers |= KEYMOD_CAPSLOCK;
 
     return modifiers;
+}
+
+// Static method: Normalize modifiers for function hotkey matching
+// This keeps only generic modifiers (SHIFT, CTRL, ALT) and strips specific ones (LSHIFT, RSHIFT, etc.)
+// This is used for matching function hotkeys like Ctrl+` where we don't care about left/right Ctrl
+uint32_t CHotkeyManager::NormalizeModifiers(uint32_t modifiers)
+{
+    // Keep only generic modifiers and CapsLock
+    return modifiers & (KEYMOD_SHIFT | KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_CAPSLOCK);
 }
 
 void CHotkeyManager::LogConfig() const
