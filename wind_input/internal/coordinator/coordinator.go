@@ -597,10 +597,10 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 			}
 		}
 	} else {
-		// Buffer is already empty - this shouldn't happen normally
-		// Return ClearComposition to reset C++ side's _isComposing state
-		c.logger.Debug("Backspace with empty buffer, clearing composition state")
-		return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		// Buffer is already empty - pass through to system
+		// This allows backspace to work normally when not composing
+		c.logger.Debug("Backspace with empty buffer, passing through to system")
+		return nil
 	}
 	return nil
 }

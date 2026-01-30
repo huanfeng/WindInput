@@ -111,17 +111,23 @@ func (c *Compiler) parseHotkeyString(hotkeyStr string) (uint32, bool) {
 }
 
 // compileToggleModeKey compiles a toggle mode key name to KeyHash
+// Note: When a modifier key is pressed, C++ GetCurrentModifiers() returns BOTH
+// the generic modifier (ModShift/ModCtrl) AND the specific one (ModLShift/ModRShift).
+// So we need to include both in the hash for proper matching.
 func (c *Compiler) compileToggleModeKey(key string) (uint32, bool) {
 	switch strings.ToLower(key) {
 	case "lshift":
-		// Left Shift alone (no other modifiers)
-		return ipc.CalcKeyHash(ipc.ModLShift, ipc.VK_LSHIFT), true
+		// Left Shift: includes both generic Shift and specific LShift
+		return ipc.CalcKeyHash(ipc.ModShift|ipc.ModLShift, ipc.VK_LSHIFT), true
 	case "rshift":
-		return ipc.CalcKeyHash(ipc.ModRShift, ipc.VK_RSHIFT), true
+		// Right Shift: includes both generic Shift and specific RShift
+		return ipc.CalcKeyHash(ipc.ModShift|ipc.ModRShift, ipc.VK_RSHIFT), true
 	case "lctrl":
-		return ipc.CalcKeyHash(ipc.ModLCtrl, ipc.VK_LCONTROL), true
+		// Left Ctrl: includes both generic Ctrl and specific LCtrl
+		return ipc.CalcKeyHash(ipc.ModCtrl|ipc.ModLCtrl, ipc.VK_LCONTROL), true
 	case "rctrl":
-		return ipc.CalcKeyHash(ipc.ModRCtrl, ipc.VK_RCONTROL), true
+		// Right Ctrl: includes both generic Ctrl and specific RCtrl
+		return ipc.CalcKeyHash(ipc.ModCtrl|ipc.ModRCtrl, ipc.VK_RCONTROL), true
 	case "capslock":
 		// CapsLock uses special marker
 		return ipc.CalcKeyHash(ipc.ModCapsLock, ipc.VK_CAPITAL), true
@@ -144,13 +150,13 @@ func (c *Compiler) compileSelectKeyGroup(group string) []uint32 {
 		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_OEM_COMMA))  // ,
 		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_OEM_PERIOD)) // .
 	case "lrshift":
-		// Left/Right Shift as select keys
-		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModLShift, ipc.VK_LSHIFT))
-		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModRShift, ipc.VK_RSHIFT))
+		// Left/Right Shift as select keys (include both generic and specific modifiers)
+		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModShift|ipc.ModLShift, ipc.VK_LSHIFT))
+		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModShift|ipc.ModRShift, ipc.VK_RSHIFT))
 	case "lrctrl":
-		// Left/Right Ctrl as select keys
-		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModLCtrl, ipc.VK_LCONTROL))
-		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModRCtrl, ipc.VK_RCONTROL))
+		// Left/Right Ctrl as select keys (include both generic and specific modifiers)
+		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModCtrl|ipc.ModLCtrl, ipc.VK_LCONTROL))
+		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModCtrl|ipc.ModRCtrl, ipc.VK_RCONTROL))
 	}
 
 	return hashes
