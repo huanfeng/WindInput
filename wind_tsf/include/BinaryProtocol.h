@@ -21,6 +21,7 @@ constexpr uint16_t CMD_CARET_UPDATE     = 0x0301; // Caret position update
 // Downstream commands (Go -> C++)
 // ============================================================================
 constexpr uint16_t CMD_ACK                = 0x0001; // Simple acknowledgment
+constexpr uint16_t CMD_PASS_THROUGH       = 0x0002; // Key not handled, pass to system
 constexpr uint16_t CMD_COMMIT_TEXT        = 0x0101; // Commit text
 constexpr uint16_t CMD_UPDATE_COMPOSITION = 0x0102; // Update composition
 constexpr uint16_t CMD_CLEAR_COMPOSITION  = 0x0103; // Clear composition
@@ -173,6 +174,7 @@ inline uint32_t GetCurrentModifiers()
 enum class ResponseType
 {
     Ack,
+    PassThrough,  // Key not handled, pass to system
     CommitText,
     UpdateComposition,
     ClearComposition,

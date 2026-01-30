@@ -182,6 +182,10 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         return S_OK;
     }
 
+    // Update caret position before sending key event
+    // This ensures Go has accurate position for candidate window placement
+    _pTextService->SendCaretPositionUpdate();
+
     // Send key to Go Service using binary protocol
     if (!_SendKeyToService((uint32_t)wParam, modifiers, KEY_EVENT_DOWN))
     {
@@ -198,10 +202,8 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         return S_OK;
     }
 
-    // Handle response from service
-    _HandleServiceResponse();
-
-    *pfEaten = TRUE;
+    // Handle response from service - returns TRUE if key was handled
+    *pfEaten = _HandleServiceResponse();
     return S_OK;
 }
 
@@ -240,14 +242,16 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
         if (_IsMatchingKeyUp(wParam, _pendingKeyUpKey))
         {
             uint32_t pendingKey = _pendingKeyUpKey;
+            uint32_t pendingMods = _pendingKeyUpModifiers;
             _pendingKeyUpKey = 0;
             _pendingKeyUpModifiers = 0;
 
             // Send KeyUp event to Go Service for toggle processing
             if (pendingKey != VK_CAPITAL)
             {
-                // For Shift/Ctrl, send KeyUp event
-                if (_SendKeyToService(pendingKey, 0, KEY_EVENT_UP))
+                // For Shift/Ctrl, send KeyUp event with the saved modifiers
+                // The modifiers were captured when KeyDown was pressed (when the key was still held)
+                if (_SendKeyToService(pendingKey, pendingMods, KEY_EVENT_UP))
                 {
                     _HandleServiceResponse();
                 }
@@ -386,24 +390,29 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
     return pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType);
 }
 
-void CKeyEventSink::_HandleServiceResponse()
+BOOL CKeyEventSink::_HandleServiceResponse()
 {
     CIPCClient* pIPCClient = _pTextService->GetIPCClient();
     if (pIPCClient == nullptr)
-        return;
+        return TRUE; // Default to eating the key if no IPC
 
     ServiceResponse response;
     if (!pIPCClient->ReceiveResponse(response))
     {
         OutputDebugStringW(L"[WindInput] Failed to receive response from service\n");
-        return;
+        return TRUE; // Default to eating the key on error
     }
 
     switch (response.type)
     {
     case ResponseType::Ack:
-        // ACK is common, no action needed
-        break;
+        // ACK means key was handled (consumed without output)
+        return TRUE;
+
+    case ResponseType::PassThrough:
+        // PassThrough means key was NOT handled, pass to system
+        OutputDebugStringW(L"[WindInput] PassThrough: key not handled, passing to system\n");
+        return FALSE;
 
     case ResponseType::CommitText:
         {
@@ -440,21 +449,21 @@ void CKeyEventSink::_HandleServiceResponse()
                 _pTextService->SetInputMode(response.chineseMode);
             }
         }
-        break;
+        return TRUE;
 
     case ResponseType::UpdateComposition:
         OutputDebugStringW(L"[WindInput] Received UpdateComposition from service\n");
         _isComposing = TRUE;
         _hasCandidates = TRUE;
         _pTextService->UpdateComposition(response.composition, response.caretPos);
-        break;
+        return TRUE;
 
     case ResponseType::ClearComposition:
         OutputDebugStringW(L"[WindInput] Received ClearComposition from service\n");
         _isComposing = FALSE;
         _hasCandidates = FALSE;
         _pTextService->EndComposition();
-        break;
+        return TRUE;
 
     case ResponseType::ModeChanged:
         OutputDebugStringW(L"[WindInput] Received ModeChanged from service\n");
@@ -462,7 +471,7 @@ void CKeyEventSink::_HandleServiceResponse()
         _hasCandidates = FALSE;
         _pTextService->EndComposition();
         _pTextService->SetInputMode(response.chineseMode);
-        break;
+        return TRUE;
 
     case ResponseType::StatusUpdate:
         {
@@ -478,17 +487,19 @@ void CKeyEventSink::_HandleServiceResponse()
                 pHotkeyMgr->UpdateHotkeys(response.keyDownHotkeys, response.keyUpHotkeys);
             }
         }
-        break;
+        return TRUE;
 
     case ResponseType::Consumed:
         // Key was consumed by a hotkey
         OutputDebugStringW(L"[WindInput] Key consumed by hotkey\n");
-        break;
+        return TRUE;
 
     default:
         OutputDebugStringW(L"[WindInput] Unknown response type from service\n");
-        break;
+        return TRUE;
     }
+
+    return TRUE; // Default: key was handled
 }
 
 // Check if the current context is read-only

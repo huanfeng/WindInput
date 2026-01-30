@@ -46,7 +46,7 @@ private:
     // Helper methods
     BOOL _IsMatchingKeyUp(WPARAM wParam, uint32_t pendingKey);
     BOOL _SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType);
-    void _HandleServiceResponse();
+    BOOL _HandleServiceResponse(); // Returns TRUE if key was handled, FALSE to pass through
 
     // Context state checking (for browser non-editable area detection)
     BOOL _IsContextReadOnly(ITfContext* pContext);

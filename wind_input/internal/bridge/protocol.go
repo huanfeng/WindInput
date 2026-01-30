@@ -9,6 +9,7 @@ const (
 	ResponseTypeUpdateComposition ResponseType = "update_composition"
 	ResponseTypeClearComposition  ResponseType = "clear_composition"
 	ResponseTypeAck               ResponseType = "ack"
+	ResponseTypePassThrough       ResponseType = "pass_through" // Key not handled, pass to system
 	ResponseTypeModeChanged       ResponseType = "mode_changed"
 	ResponseTypeStatusUpdate      ResponseType = "status_update"
 	ResponseTypeConsumed          ResponseType = "consumed"

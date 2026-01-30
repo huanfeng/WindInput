@@ -110,6 +110,11 @@ func (c *BinaryCodec) EncodeAck() []byte {
 	return c.EncodeHeader(CmdAck, 0)
 }
 
+// EncodePassThrough encodes a pass-through response (key not handled, pass to system)
+func (c *BinaryCodec) EncodePassThrough() []byte {
+	return c.EncodeHeader(CmdPassThrough, 0)
+}
+
 // EncodeConsumed encodes a key consumed response
 func (c *BinaryCodec) EncodeConsumed() []byte {
 	return c.EncodeHeader(CmdConsumed, 0)

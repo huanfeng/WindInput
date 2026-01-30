@@ -17,6 +17,7 @@ const (
 // Downstream commands (Go -> C++)
 const (
 	CmdAck               uint16 = 0x0001 // Simple acknowledgment
+	CmdPassThrough       uint16 = 0x0002 // Key not handled, pass to system
 	CmdCommitText        uint16 = 0x0101 // Commit text to application
 	CmdUpdateComposition uint16 = 0x0102 // Update composition (preedit)
 	CmdClearComposition  uint16 = 0x0103 // Clear composition

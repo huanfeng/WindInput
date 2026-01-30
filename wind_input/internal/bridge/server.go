@@ -268,7 +268,8 @@ func (s *Server) handleKeyEvent(payload []byte, clientID int) []byte {
 
 	result := s.handler.HandleKeyEvent(keyData)
 	if result == nil {
-		return s.codec.EncodeAck()
+		// Key not handled by IME, tell C++ to pass it through to the system
+		return s.codec.EncodePassThrough()
 	}
 
 	// Build response based on result

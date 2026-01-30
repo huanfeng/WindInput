@@ -691,6 +691,11 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
         _LogDebug(L"Response: Ack");
         break;
 
+    case CMD_PASS_THROUGH:
+        response.type = ResponseType::PassThrough;
+        _LogDebug(L"Response: PassThrough (key not handled)");
+        break;
+
     case CMD_CONSUMED:
         response.type = ResponseType::Consumed;
         _LogDebug(L"Response: Consumed");
