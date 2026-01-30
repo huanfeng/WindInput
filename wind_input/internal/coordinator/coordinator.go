@@ -935,6 +935,10 @@ func (c *Coordinator) getHotkeyConfig() *bridge.HotkeyConfig {
 	if c.config == nil {
 		return nil
 	}
+	c.logger.Debug("Sending hotkey config to C++",
+		"toggle_mode_keys", c.config.Hotkeys.ToggleModeKeys,
+		"select_key_groups", c.config.Input.SelectKeyGroups,
+		"page_keys", c.config.Input.PageKeys)
 	return &bridge.HotkeyConfig{
 		ToggleModeKeys:  c.config.Hotkeys.ToggleModeKeys,
 		SwitchEngine:    c.config.Hotkeys.SwitchEngine,

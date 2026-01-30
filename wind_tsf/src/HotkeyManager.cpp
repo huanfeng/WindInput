@@ -32,6 +32,16 @@ void CHotkeyManager::UpdateConfig(
 {
     OutputDebugStringW(L"[WindInput] HotkeyManager::UpdateConfig called\n");
 
+    // Debug: log received keys
+    WCHAR debug[512];
+    wsprintfW(debug, L"[WindInput] UpdateConfig received %d toggle mode keys:\n", (int)toggleModeKeys.size());
+    OutputDebugStringW(debug);
+    for (size_t i = 0; i < toggleModeKeys.size(); i++)
+    {
+        wsprintfW(debug, L"[WindInput]   [%d] = '%s'\n", (int)i, toggleModeKeys[i].c_str());
+        OutputDebugStringW(debug);
+    }
+
     // Parse toggle mode keys
     _toggleModeKeys = TOGGLE_KEY_NONE;
     for (const auto& key : toggleModeKeys)
@@ -41,6 +51,11 @@ void CHotkeyManager::UpdateConfig(
         else if (key == L"lctrl") _toggleModeKeys |= TOGGLE_KEY_LCTRL;
         else if (key == L"rctrl") _toggleModeKeys |= TOGGLE_KEY_RCTRL;
         else if (key == L"capslock") _toggleModeKeys |= TOGGLE_KEY_CAPSLOCK;
+        else
+        {
+            wsprintfW(debug, L"[WindInput] Unknown toggle key: '%s'\n", key.c_str());
+            OutputDebugStringW(debug);
+        }
     }
 
     // Parse function hotkeys

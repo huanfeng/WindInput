@@ -149,6 +149,9 @@ func (h *ConfigHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if req.Hotkeys != nil {
 		cfg.Hotkeys = *req.Hotkeys
 		response.Applied = append(response.Applied, "hotkeys")
+		h.services.Logger.Info("Hotkeys config updated",
+			"toggle_mode_keys", cfg.Hotkeys.ToggleModeKeys,
+			"switch_engine", cfg.Hotkeys.SwitchEngine)
 	}
 
 	// 更新 UI 配置（可热更新）

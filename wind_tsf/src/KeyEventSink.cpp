@@ -99,9 +99,37 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
     int modifiers = _GetModifierState();
 
+    // Debug: Log shift/ctrl key events
+    if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT ||
+        wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL)
+    {
+        BOOL lShiftDown = (GetAsyncKeyState(VK_LSHIFT) & 0x8000) != 0;
+        BOOL rShiftDown = (GetAsyncKeyState(VK_RSHIFT) & 0x8000) != 0;
+        BOOL lCtrlDown = (GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0;
+        BOOL rCtrlDown = (GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0;
+        WCHAR debug[256];
+        wsprintfW(debug, L"[WindInput] OnKeyDown: wParam=%d (VK_SHIFT=%d, VK_LSHIFT=%d, VK_RSHIFT=%d), AsyncState: LShift=%d RShift=%d LCtrl=%d RCtrl=%d\n",
+                  (int)wParam, VK_SHIFT, VK_LSHIFT, VK_RSHIFT, lShiftDown, rShiftDown, lCtrlDown, rCtrlDown);
+        OutputDebugStringW(debug);
+    }
+
     // Check if this is a toggle mode key (Shift, Ctrl, CapsLock depending on config)
     // But skip if we have candidates and the key is also configured as a select key
     BOOL isToggleModeKey = (pHotkeyMgr != nullptr && pHotkeyMgr->IsToggleModeKey(wParam));
+
+    // Debug: Log toggle mode key check result
+    if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT ||
+        wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL ||
+        wParam == VK_CAPITAL)
+    {
+        WCHAR debug[256];
+        wsprintfW(debug, L"[WindInput] IsToggleModeKey(%d) = %d\n", (int)wParam, isToggleModeKey);
+        OutputDebugStringW(debug);
+        if (pHotkeyMgr != nullptr)
+        {
+            pHotkeyMgr->LogConfig();
+        }
+    }
     BOOL useAsSelectKey = FALSE;
 
     // When candidates are shown, Shift/Ctrl might be used for selection instead of toggle

@@ -544,8 +544,30 @@ STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
         if (_pIPCClient->SendIMEActivated())
         {
             ServiceResponse response;
-            _pIPCClient->ReceiveResponse(response);
-            OutputDebugStringW(L"[WindInput] ime_activated response received\n");
+            if (_pIPCClient->ReceiveResponse(response))
+            {
+                OutputDebugStringW(L"[WindInput] ime_activated response received\n");
+
+                // If we got a status update, sync state and hotkeys
+                if (response.type == ResponseType::StatusUpdate)
+                {
+                    _bChineseMode = response.chineseMode;
+
+                    // Update hotkey configuration if present
+                    if (response.hotkeys.hasData && _pHotkeyManager != nullptr)
+                    {
+                        OutputDebugStringW(L"[WindInput] Updating hotkey configuration from ime_activated\n");
+                        _pHotkeyManager->UpdateConfig(
+                            response.hotkeys.toggleModeKeys,
+                            response.hotkeys.switchEngine,
+                            response.hotkeys.toggleFullWidth,
+                            response.hotkeys.togglePunct,
+                            response.hotkeys.selectKeyGroups,
+                            response.hotkeys.pageKeys
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -684,6 +706,20 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                         if (_pLangBarItemButton != nullptr)
                         {
                             _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
+                        }
+
+                        // Update hotkey configuration if present
+                        if (response.hotkeys.hasData && _pHotkeyManager != nullptr)
+                        {
+                            OutputDebugStringW(L"[WindInput] Updating hotkey configuration from focus_gained\n");
+                            _pHotkeyManager->UpdateConfig(
+                                response.hotkeys.toggleModeKeys,
+                                response.hotkeys.switchEngine,
+                                response.hotkeys.toggleFullWidth,
+                                response.hotkeys.togglePunct,
+                                response.hotkeys.selectKeyGroups,
+                                response.hotkeys.pageKeys
+                            );
                         }
                     }
                 }
