@@ -7,6 +7,9 @@
 // Protocol version (major.minor: high 4 bits = major, low 12 bits = minor)
 constexpr uint16_t PROTOCOL_VERSION = 0x1000; // v1.0
 
+// Async flag (used in version field's high bit to mark async requests)
+constexpr uint16_t ASYNC_FLAG = 0x8000; // Async request flag - no response expected
+
 // ============================================================================
 // Upstream commands (C++ -> Go)
 // ============================================================================
@@ -16,6 +19,7 @@ constexpr uint16_t CMD_FOCUS_LOST       = 0x0202; // Focus lost
 constexpr uint16_t CMD_IME_ACTIVATED    = 0x0203; // IME activated
 constexpr uint16_t CMD_IME_DEACTIVATED  = 0x0204; // IME deactivated
 constexpr uint16_t CMD_CARET_UPDATE     = 0x0301; // Caret position update
+constexpr uint16_t CMD_BATCH_EVENTS     = 0x0F01; // Batch events container
 
 // ============================================================================
 // Downstream commands (Go -> C++)
@@ -29,6 +33,7 @@ constexpr uint16_t CMD_MODE_CHANGED       = 0x0201; // Mode changed
 constexpr uint16_t CMD_STATUS_UPDATE      = 0x0202; // Full status update
 constexpr uint16_t CMD_SYNC_HOTKEYS       = 0x0301; // Sync hotkey whitelist
 constexpr uint16_t CMD_CONSUMED           = 0x0401; // Key consumed
+constexpr uint16_t CMD_BATCH_RESPONSE     = 0x0F02; // Batch response container
 
 // ============================================================================
 // Key event types
@@ -68,11 +73,19 @@ constexpr uint32_t STATUS_CAPS_LOCK        = 0x0020; // CapsLock is on
 // Protocol header (8 bytes)
 struct IpcHeader
 {
-    uint16_t version;  // Protocol version
+    uint16_t version;  // Protocol version (high bit may be ASYNC_FLAG)
     uint16_t command;  // Command type
     uint32_t length;   // Payload length in bytes
 };
 static_assert(sizeof(IpcHeader) == 8, "IpcHeader must be 8 bytes");
+
+// Batch events header (4 bytes)
+struct BatchHeader
+{
+    uint16_t eventCount;  // Number of events in this batch
+    uint16_t reserved;    // Reserved for future use
+};
+static_assert(sizeof(BatchHeader) == 4, "BatchHeader must be 4 bytes");
 
 // Key event payload (16 bytes)
 struct KeyPayload

@@ -49,8 +49,9 @@ func (c *BinaryCodec) DecodeHeader(buf []byte) (*IpcHeader, error) {
 		Length:  binary.LittleEndian.Uint32(buf[4:8]),
 	}
 
-	// Check version (only major version must match)
-	if (header.Version >> 12) != (ProtocolVersion >> 12) {
+	// Check version (only major version must match, ignore async flag)
+	baseVersion := header.Version & ^AsyncFlag
+	if (baseVersion >> 12) != (ProtocolVersion >> 12) {
 		return nil, fmt.Errorf("%w: got %04x, expected %04x", ErrVersionMismatch, header.Version, ProtocolVersion)
 	}
 
@@ -325,4 +326,109 @@ func (c *BinaryCodec) ReadPayload(r io.Reader, length uint32) ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+
+// ============================================================================
+// Async and Batch support
+// ============================================================================
+
+// IsAsyncRequest checks if the request has the async flag set (no response expected)
+func (c *BinaryCodec) IsAsyncRequest(header *IpcHeader) bool {
+	return (header.Version & AsyncFlag) != 0
+}
+
+// GetBaseVersion extracts the protocol version without the async flag
+func (c *BinaryCodec) GetBaseVersion(header *IpcHeader) uint16 {
+	return header.Version & ^AsyncFlag
+}
+
+// BatchEvent represents a single event within a batch
+type BatchEvent struct {
+	Header  *IpcHeader
+	Payload []byte
+	IsAsync bool // Whether this event is async (no response needed)
+}
+
+// DecodeBatchEvents decodes a batch events payload into individual events
+func (c *BinaryCodec) DecodeBatchEvents(payload []byte) ([]BatchEvent, error) {
+	if len(payload) < BatchHeaderSize {
+		return nil, fmt.Errorf("batch payload too short: %d bytes", len(payload))
+	}
+
+	// Parse batch header
+	eventCount := binary.LittleEndian.Uint16(payload[0:2])
+	// reserved := binary.LittleEndian.Uint16(payload[2:4])
+
+	events := make([]BatchEvent, 0, eventCount)
+	offset := BatchHeaderSize
+
+	for i := uint16(0); i < eventCount; i++ {
+		// Check if we have enough data for a header
+		if offset+HeaderSize > len(payload) {
+			return nil, fmt.Errorf("batch event %d: incomplete header at offset %d", i, offset)
+		}
+
+		// Parse event header
+		header, err := c.DecodeHeader(payload[offset : offset+HeaderSize])
+		if err != nil {
+			return nil, fmt.Errorf("batch event %d: %w", i, err)
+		}
+		offset += HeaderSize
+
+		// Check if we have enough data for the payload
+		if offset+int(header.Length) > len(payload) {
+			return nil, fmt.Errorf("batch event %d: incomplete payload at offset %d, need %d bytes", i, offset, header.Length)
+		}
+
+		// Extract payload
+		var eventPayload []byte
+		if header.Length > 0 {
+			eventPayload = payload[offset : offset+int(header.Length)]
+			offset += int(header.Length)
+		}
+
+		events = append(events, BatchEvent{
+			Header:  header,
+			Payload: eventPayload,
+			IsAsync: (header.Version & AsyncFlag) != 0,
+		})
+	}
+
+	return events, nil
+}
+
+// EncodeBatchResponse encodes multiple responses into a batch response
+func (c *BinaryCodec) EncodeBatchResponse(responses [][]byte) []byte {
+	if len(responses) == 0 {
+		// Return empty batch response
+		header := c.EncodeHeader(CmdBatchResponse, BatchHeaderSize)
+		batchHeader := make([]byte, BatchHeaderSize)
+		binary.LittleEndian.PutUint16(batchHeader[0:2], 0) // responseCount = 0
+		binary.LittleEndian.PutUint16(batchHeader[2:4], 0) // reserved
+		return append(header, batchHeader...)
+	}
+
+	// Calculate total payload size
+	totalSize := BatchHeaderSize
+	for _, resp := range responses {
+		totalSize += len(resp)
+	}
+
+	// Build batch header
+	batchHeader := make([]byte, BatchHeaderSize)
+	binary.LittleEndian.PutUint16(batchHeader[0:2], uint16(len(responses)))
+	binary.LittleEndian.PutUint16(batchHeader[2:4], 0) // reserved
+
+	// Encode outer header
+	header := c.EncodeHeader(CmdBatchResponse, uint32(totalSize))
+
+	// Combine all parts
+	result := make([]byte, 0, HeaderSize+totalSize)
+	result = append(result, header...)
+	result = append(result, batchHeader...)
+	for _, resp := range responses {
+		result = append(result, resp...)
+	}
+
+	return result
 }

@@ -118,6 +118,24 @@ public:
     // Receive response from service (call this after sending)
     BOOL ReceiveResponse(ServiceResponse& response);
 
+    // ========================================================================
+    // Async and Batch support (for performance optimization)
+    // ========================================================================
+
+    // Send async message (fire-and-forget, no response expected)
+    BOOL SendAsync(uint16_t command, const void* payload, uint32_t size);
+
+    // Send sync message (waits for response)
+    BOOL SendSync(uint16_t command, const void* payload, uint32_t size, ServiceResponse& response);
+
+    // Batch event support
+    void BeginBatch();
+    void AddBatchEvent(uint16_t command, const void* payload, uint32_t size, bool needResponse);
+    BOOL SendBatch(std::vector<ServiceResponse>& responses);
+
+    // Receive batch response
+    BOOL ReceiveBatchResponse(std::vector<ServiceResponse>& responses, int expectedCount);
+
     // Log level control
     static void SetLogLevel(IPCLogLevel level) { s_logLevel = level; }
     static IPCLogLevel GetLogLevel() { return s_logLevel; }
@@ -150,7 +168,7 @@ private:
     BOOL _StartService();
 
     // Send binary message (header + payload)
-    BOOL _SendBinaryMessage(uint16_t command, const void* payload, uint32_t payloadSize);
+    BOOL _SendBinaryMessage(uint16_t command, const void* payload, uint32_t payloadSize, bool async = false);
 
     // Receive binary message
     BOOL _ReceiveBinaryMessage(IpcHeader& header, std::vector<uint8_t>& payload);
@@ -176,4 +194,9 @@ private:
     static void _LogError(const wchar_t* format, ...);
     static void _LogInfo(const wchar_t* format, ...);
     static void _LogDebug(const wchar_t* format, ...);
+
+    // Batch state
+    std::vector<uint8_t> _batchBuffer;
+    std::vector<bool> _batchNeedResponse;
+    uint16_t _batchCount = 0;
 };

@@ -140,8 +140,23 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) {
 			break
 		}
 
+		// Check if this is an async request (no response expected)
+		isAsync := s.codec.IsAsyncRequest(header)
+
+		// Handle batch events
+		if header.Command == ipc.CmdBatchEvents {
+			s.handleBatchEvents(header, payload, writer, clientID)
+			continue
+		}
+
 		// Process request with timeout
 		response := s.processRequestWithTimeout(header, payload, clientID)
+
+		// Skip response for async requests
+		if isAsync {
+			s.logger.Debug("Async request processed, no response sent", "clientID", clientID, "command", fmt.Sprintf("0x%04X", header.Command))
+			continue
+		}
 
 		// Write response
 		if err := s.codec.WriteMessage(writer, response); err != nil {
@@ -336,6 +351,41 @@ func (s *Server) handleCaretUpdate(payload []byte, clientID int) []byte {
 	})
 
 	return s.codec.EncodeAck()
+}
+
+// handleBatchEvents processes a batch of events and sends responses for sync events only
+func (s *Server) handleBatchEvents(header *ipc.IpcHeader, payload []byte, writer *pipeWriter, clientID int) {
+	events, err := s.codec.DecodeBatchEvents(payload)
+	if err != nil {
+		s.logger.Error("Failed to decode batch events", "clientID", clientID, "error", err)
+		return
+	}
+
+	s.logger.Debug("Processing batch events", "clientID", clientID, "count", len(events))
+
+	// Collect responses for sync events
+	var responses [][]byte
+
+	for i, event := range events {
+		// Process each event
+		response := s.processRequestWithTimeout(event.Header, event.Payload, clientID)
+
+		// Only collect responses for sync events
+		if !event.IsAsync {
+			responses = append(responses, response)
+			s.logger.Debug("Batch event sync", "clientID", clientID, "index", i, "command", fmt.Sprintf("0x%04X", event.Header.Command))
+		} else {
+			s.logger.Debug("Batch event async", "clientID", clientID, "index", i, "command", fmt.Sprintf("0x%04X", event.Header.Command))
+		}
+	}
+
+	// Send batch response if there are any sync events
+	if len(responses) > 0 {
+		batchResponse := s.codec.EncodeBatchResponse(responses)
+		if err := s.codec.WriteMessage(writer, batchResponse); err != nil {
+			s.logger.Error("Failed to write batch response to Bridge", "clientID", clientID, "error", err)
+		}
+	}
 }
 
 func (s *Server) encodeStatusUpdate(status *StatusUpdateData) []byte {

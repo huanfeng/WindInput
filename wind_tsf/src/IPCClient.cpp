@@ -444,11 +444,11 @@ void CIPCClient::Disconnect()
 // Binary message sending
 // ============================================================================
 
-BOOL CIPCClient::_SendBinaryMessage(uint16_t command, const void* payload, uint32_t payloadSize)
+BOOL CIPCClient::_SendBinaryMessage(uint16_t command, const void* payload, uint32_t payloadSize, bool async)
 {
     // Build header
     IpcHeader header;
-    header.version = PROTOCOL_VERSION;
+    header.version = async ? (PROTOCOL_VERSION | ASYNC_FLAG) : PROTOCOL_VERSION;
     header.command = command;
     header.length = payloadSize;
 
@@ -523,9 +523,10 @@ BOOL CIPCClient::SendCaretUpdate(int x, int y, int height)
     payload.y = y;
     payload.height = height;
 
-    _LogDebug(L"Sending caret update: x=%d, y=%d, h=%d", x, y, height);
+    _LogDebug(L"Sending caret update (async): x=%d, y=%d, h=%d", x, y, height);
 
-    return _SendBinaryMessage(CMD_CARET_UPDATE, &payload, sizeof(payload));
+    // Send async - no response needed for caret updates
+    return _SendBinaryMessage(CMD_CARET_UPDATE, &payload, sizeof(payload), true /* async */);
 }
 
 BOOL CIPCClient::SendFocusLost()
@@ -535,8 +536,9 @@ BOOL CIPCClient::SendFocusLost()
         return FALSE;
     }
 
-    _LogDebug(L"Sending focus_lost");
-    return _SendBinaryMessage(CMD_FOCUS_LOST, nullptr, 0);
+    _LogDebug(L"Sending focus_lost (async)");
+    // Send async - no response needed for focus lost
+    return _SendBinaryMessage(CMD_FOCUS_LOST, nullptr, 0, true /* async */);
 }
 
 BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight)
@@ -568,8 +570,9 @@ BOOL CIPCClient::SendIMEDeactivated()
         return FALSE;
     }
 
-    _LogInfo(L"Sending ime_deactivated");
-    return _SendBinaryMessage(CMD_IME_DEACTIVATED, nullptr, 0);
+    _LogInfo(L"Sending ime_deactivated (async)");
+    // Send async - no response needed for IME deactivated
+    return _SendBinaryMessage(CMD_IME_DEACTIVATED, nullptr, 0, true /* async */);
 }
 
 BOOL CIPCClient::SendIMEActivated()
@@ -869,6 +872,214 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
         _LogError(L"Unknown response command: 0x%04X", header.command);
         response.type = ResponseType::Error;
         return FALSE;
+    }
+
+    return TRUE;
+}
+
+// ============================================================================
+// Async and Batch support
+// ============================================================================
+
+BOOL CIPCClient::SendAsync(uint16_t command, const void* payload, uint32_t size)
+{
+    if (!_ShouldAttemptOperation())
+    {
+        return FALSE;
+    }
+
+    if (!IsConnected() && !Connect())
+    {
+        return FALSE;
+    }
+
+    return _SendBinaryMessage(command, payload, size, true /* async */);
+}
+
+BOOL CIPCClient::SendSync(uint16_t command, const void* payload, uint32_t size, ServiceResponse& response)
+{
+    if (!_ShouldAttemptOperation())
+    {
+        return FALSE;
+    }
+
+    if (!IsConnected() && !Connect())
+    {
+        return FALSE;
+    }
+
+    if (!_SendBinaryMessage(command, payload, size, false /* sync */))
+    {
+        return FALSE;
+    }
+
+    return ReceiveResponse(response);
+}
+
+void CIPCClient::BeginBatch()
+{
+    _batchBuffer.clear();
+    _batchNeedResponse.clear();
+    _batchCount = 0;
+
+    // Reserve space for BatchHeader (will be filled in SendBatch)
+    _batchBuffer.resize(sizeof(BatchHeader));
+}
+
+void CIPCClient::AddBatchEvent(uint16_t command, const void* payload, uint32_t size, bool needResponse)
+{
+    // Build event header
+    IpcHeader eventHeader;
+    eventHeader.version = needResponse ? PROTOCOL_VERSION : (PROTOCOL_VERSION | ASYNC_FLAG);
+    eventHeader.command = command;
+    eventHeader.length = size;
+
+    // Append header to buffer
+    size_t offset = _batchBuffer.size();
+    _batchBuffer.resize(offset + sizeof(IpcHeader) + size);
+
+    memcpy(_batchBuffer.data() + offset, &eventHeader, sizeof(IpcHeader));
+
+    // Append payload if any
+    if (size > 0 && payload != nullptr)
+    {
+        memcpy(_batchBuffer.data() + offset + sizeof(IpcHeader), payload, size);
+    }
+
+    _batchNeedResponse.push_back(needResponse);
+    _batchCount++;
+}
+
+BOOL CIPCClient::SendBatch(std::vector<ServiceResponse>& responses)
+{
+    if (_batchCount == 0)
+    {
+        return TRUE;
+    }
+
+    if (!_ShouldAttemptOperation())
+    {
+        return FALSE;
+    }
+
+    if (!IsConnected() && !Connect())
+    {
+        return FALSE;
+    }
+
+    // Fill in BatchHeader at the beginning of buffer
+    BatchHeader* batchHeader = reinterpret_cast<BatchHeader*>(_batchBuffer.data());
+    batchHeader->eventCount = _batchCount;
+    batchHeader->reserved = 0;
+
+    _LogDebug(L"Sending batch with %d events, size=%zu", _batchCount, _batchBuffer.size());
+
+    // Send the batch message
+    if (!_SendBinaryMessage(CMD_BATCH_EVENTS, _batchBuffer.data(), static_cast<uint32_t>(_batchBuffer.size()), false))
+    {
+        return FALSE;
+    }
+
+    // Count how many sync responses we expect
+    int syncCount = 0;
+    for (bool needResp : _batchNeedResponse)
+    {
+        if (needResp)
+        {
+            syncCount++;
+        }
+    }
+
+    // Receive batch response if there are sync events
+    if (syncCount > 0)
+    {
+        return ReceiveBatchResponse(responses, syncCount);
+    }
+
+    return TRUE;
+}
+
+BOOL CIPCClient::ReceiveBatchResponse(std::vector<ServiceResponse>& responses, int expectedCount)
+{
+    // Read batch response header
+    IpcHeader header;
+    std::vector<uint8_t> payload;
+
+    if (!_ReceiveBinaryMessage(header, payload))
+    {
+        return FALSE;
+    }
+
+    if (header.command != CMD_BATCH_RESPONSE)
+    {
+        _LogError(L"Expected batch response, got command 0x%04X", header.command);
+        return FALSE;
+    }
+
+    if (payload.size() < sizeof(BatchHeader))
+    {
+        _LogError(L"Batch response payload too short: %zu bytes", payload.size());
+        return FALSE;
+    }
+
+    // Parse batch response header
+    const BatchHeader* batchHeader = reinterpret_cast<const BatchHeader*>(payload.data());
+    uint16_t responseCount = batchHeader->eventCount; // eventCount holds response count in batch response
+
+    if (responseCount != expectedCount)
+    {
+        _LogError(L"Batch response count mismatch: expected %d, got %d", expectedCount, responseCount);
+        // Continue processing what we have
+    }
+
+    _LogDebug(L"Received batch response with %d responses", responseCount);
+
+    // Parse individual responses
+    size_t offset = sizeof(BatchHeader);
+    responses.clear();
+    responses.reserve(responseCount);
+
+    for (uint16_t i = 0; i < responseCount && offset < payload.size(); i++)
+    {
+        // Check if we have enough data for a header
+        if (offset + sizeof(IpcHeader) > payload.size())
+        {
+            _LogError(L"Batch response %d: incomplete header at offset %zu", i, offset);
+            break;
+        }
+
+        // Parse response header
+        const IpcHeader* respHeader = reinterpret_cast<const IpcHeader*>(payload.data() + offset);
+        offset += sizeof(IpcHeader);
+
+        // Check if we have enough data for the payload
+        if (offset + respHeader->length > payload.size())
+        {
+            _LogError(L"Batch response %d: incomplete payload at offset %zu", i, offset);
+            break;
+        }
+
+        // Extract payload
+        std::vector<uint8_t> respPayload;
+        if (respHeader->length > 0)
+        {
+            respPayload.assign(payload.begin() + offset, payload.begin() + offset + respHeader->length);
+            offset += respHeader->length;
+        }
+
+        // Parse response
+        ServiceResponse response;
+        if (_ParseResponse(*respHeader, respPayload, response))
+        {
+            responses.push_back(std::move(response));
+        }
+        else
+        {
+            _LogError(L"Failed to parse batch response %d", i);
+            ServiceResponse errorResp;
+            errorResp.type = ResponseType::Error;
+            responses.push_back(std::move(errorResp));
+        }
     }
 
     return TRUE;

@@ -4,6 +4,9 @@ package ipc
 // Protocol version (major.minor: high 4 bits = major, low 12 bits = minor)
 const ProtocolVersion uint16 = 0x1000 // v1.0
 
+// Async flag (used in version field's high bit to mark async requests)
+const AsyncFlag uint16 = 0x8000 // Async request flag - no response expected
+
 // Upstream commands (C++ -> Go)
 const (
 	CmdKeyEvent       uint16 = 0x0101 // Key event (down/up)
@@ -12,6 +15,7 @@ const (
 	CmdIMEActivated   uint16 = 0x0203 // IME activated (user switched to this IME)
 	CmdIMEDeactivated uint16 = 0x0204 // IME deactivated (user switched to another IME)
 	CmdCaretUpdate    uint16 = 0x0301 // Caret position update
+	CmdBatchEvents    uint16 = 0x0F01 // Batch events container
 )
 
 // Downstream commands (Go -> C++)
@@ -25,6 +29,7 @@ const (
 	CmdStatusUpdate      uint16 = 0x0202 // Full status update
 	CmdSyncHotkeys       uint16 = 0x0301 // Sync hotkey whitelist
 	CmdConsumed          uint16 = 0x0401 // Key consumed (no output)
+	CmdBatchResponse     uint16 = 0x0F02 // Batch response container
 )
 
 // Key event types
@@ -89,11 +94,20 @@ const (
 // Header size in bytes
 const HeaderSize = 8
 
+// BatchHeader size in bytes
+const BatchHeaderSize = 4
+
 // IpcHeader represents the protocol header (8 bytes)
 type IpcHeader struct {
-	Version uint16 // Protocol version
+	Version uint16 // Protocol version (high bit may be AsyncFlag)
 	Command uint16 // Command type
 	Length  uint32 // Payload length in bytes
+}
+
+// BatchHeader represents the batch events header (4 bytes)
+type BatchHeader struct {
+	EventCount uint16 // Number of events in this batch
+	Reserved   uint16 // Reserved for future use
 }
 
 // KeyPayload represents a key event (16 bytes, matches C++ struct)

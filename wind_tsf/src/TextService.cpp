@@ -592,12 +592,8 @@ STDAPI CTextService::Deactivate()
     if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
     {
         OutputDebugStringW(L"[WindInput] Sending ime_deactivated to service\n");
-        if (_pIPCClient->SendIMEDeactivated())
-        {
-            // Receive response to complete the protocol
-            ServiceResponse response;
-            _pIPCClient->ReceiveResponse(response);
-        }
+        // SendIMEDeactivated is async (fire-and-forget), no response expected
+        _pIPCClient->SendIMEDeactivated();
     }
 
     // Release IPC client
@@ -727,14 +723,10 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         // End any active composition before sending focus_lost
         EndComposition();
 
-        // Send focus_lost to service
+        // Send focus_lost to service (async, no response expected)
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
         {
             _pIPCClient->SendFocusLost();
-
-            // Receive response to keep protocol in sync
-            ServiceResponse response;
-            _pIPCClient->ReceiveResponse(response);
         }
 
         // Reset composing state
@@ -1164,13 +1156,10 @@ void CTextService::SendCaretPositionUpdate()
     LONG x, y, height;
     if (GetCaretPosition(&x, &y, &height))
     {
+        // SendCaretUpdate is async (fire-and-forget), no response expected
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
         {
             _pIPCClient->SendCaretUpdate((int)x, (int)y, (int)height);
-
-            // Receive response to keep protocol in sync
-            ServiceResponse response;
-            _pIPCClient->ReceiveResponse(response);
         }
     }
 }
