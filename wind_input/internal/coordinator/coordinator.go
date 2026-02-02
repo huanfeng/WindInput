@@ -1502,6 +1502,91 @@ func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 	c.logger.Debug("Input config updated", "punctFollowMode", c.punctFollowMode)
 }
 
+// UpdateEngineConfig 更新引擎配置
+func (c *Coordinator) UpdateEngineConfig(engineConfig *config.EngineConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if engineConfig == nil || c.engineMgr == nil {
+		return
+	}
+
+	// 检查引擎类型是否改变
+	currentType := c.engineMgr.GetCurrentType()
+	newType := engine.EngineType(engineConfig.Type)
+
+	if currentType != newType {
+		// 清除当前输入状态
+		c.clearState()
+		c.hideUI()
+
+		// 切换引擎
+		if err := c.engineMgr.SwitchEngine(newType); err != nil {
+			c.logger.Error("Failed to switch engine", "error", err, "targetType", newType)
+		} else {
+			c.logger.Info("Engine switched via config reload", "from", currentType, "to", newType)
+		}
+	}
+
+	// 更新引擎选项
+	c.engineMgr.UpdateFilterMode(engineConfig.FilterMode)
+	c.engineMgr.UpdateWubiOptions(
+		engineConfig.Wubi.AutoCommitAt4,
+		engineConfig.Wubi.ClearOnEmptyAt4,
+		engineConfig.Wubi.TopCodeCommit,
+		engineConfig.Wubi.PunctCommit,
+	)
+	c.engineMgr.UpdatePinyinOptions(engineConfig.Pinyin.ShowWubiHint)
+
+	// 更新配置引用
+	if c.config != nil {
+		c.config.Engine = *engineConfig
+	}
+
+	c.logger.Debug("Engine config updated", "type", engineConfig.Type, "filterMode", engineConfig.FilterMode)
+}
+
+// UpdateHotkeyConfig 更新快捷键配置
+func (c *Coordinator) UpdateHotkeyConfig(hotkeyConfig *config.HotkeyConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if hotkeyConfig == nil {
+		return
+	}
+
+	// 更新配置引用
+	if c.config != nil {
+		c.config.Hotkeys = *hotkeyConfig
+	}
+
+	// 重新编译快捷键（如果有编译器的话）
+	if c.hotkeyCompiler != nil {
+		c.hotkeyCompiler.UpdateConfig(c.config)
+	}
+
+	c.logger.Debug("Hotkey config updated",
+		"toggleModeKeys", hotkeyConfig.ToggleModeKeys,
+		"switchEngine", hotkeyConfig.SwitchEngine)
+}
+
+// UpdateStartupConfig 更新启动配置
+func (c *Coordinator) UpdateStartupConfig(startupConfig *config.StartupConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if startupConfig == nil {
+		return
+	}
+
+	// 更新配置引用
+	if c.config != nil {
+		c.config.Startup = *startupConfig
+	}
+
+	c.logger.Debug("Startup config updated", "rememberLastState", startupConfig.RememberLastState)
+}
+
 // ClearInputState 清空输入状态（供外部调用）
 func (c *Coordinator) ClearInputState() {
 	c.mu.Lock()

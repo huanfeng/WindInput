@@ -18,6 +18,11 @@ func NewCompiler(cfg *config.Config) *Compiler {
 	return &Compiler{config: cfg}
 }
 
+// UpdateConfig updates the configuration reference
+func (c *Compiler) UpdateConfig(cfg *config.Config) {
+	c.config = cfg
+}
+
 // Compile compiles all hotkeys into KeyDown and KeyUp hash lists
 // keyDownList: hotkeys triggered on key down
 // keyUpList: hotkeys triggered on key up (toggle mode keys like Shift, Ctrl, CapsLock)

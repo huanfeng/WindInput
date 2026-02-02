@@ -44,12 +44,13 @@ if %errorLevel% neq 0 (
     echo [WARN] Wails CLI not found, skipping wind_setting build
     echo        Install with: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 ) else (
-    wails build
+    REM Build with debug mode for DevTools support
+    wails build -debug
     if %errorLevel% neq 0 (
         echo [WARN] wind_setting build failed, continuing...
     ) else (
         copy /Y "%SCRIPT_DIR%wind_setting\build\bin\wind_setting.exe" "%SCRIPT_DIR%build\" >nul
-        echo Settings UI built successfully
+        echo Settings UI built successfully (debug mode, press F12 for DevTools)
     )
 )
 echo.

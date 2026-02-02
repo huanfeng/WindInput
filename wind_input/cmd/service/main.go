@@ -13,13 +13,14 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/config"
+	"github.com/huanfeng/wind_input/internal/control"
 	"github.com/huanfeng/wind_input/internal/coordinator"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/engine/wubi"
-	"github.com/huanfeng/wind_input/internal/settings"
 	"github.com/huanfeng/wind_input/internal/ui"
+	pkgcontrol "github.com/huanfeng/wind_input/pkg/control"
 )
 
 const mutexName = "Global\\WindInputIMEService"
@@ -194,19 +195,12 @@ func main() {
 		})
 	}
 
-	// 先创建 settings server 以获取 LogHandler（稍后会注册完整的 services）
-	tempLogger := slog.New(stdoutHandler)
-	settingsServer := settings.NewServer(tempLogger)
-
-	// 创建包含 LogHandler 的自定义 slog handler
-	logHandler := settingsServer.GetLogHandler()
-	customHandler := settings.NewSlogHandler(logHandler, stdoutHandler, level)
-	// 如果有文件 handler，用 MultiHandler 包装
+	// 创建 logger（stdout + file）
 	var logger *slog.Logger
 	if fileHandler != nil {
-		logger = slog.New(newMultiHandler(customHandler, fileHandler))
+		logger = slog.New(newMultiHandler(stdoutHandler, fileHandler))
 	} else {
-		logger = slog.New(customHandler)
+		logger = slog.New(stdoutHandler)
 	}
 	slog.SetDefault(logger)
 
@@ -333,19 +327,15 @@ func main() {
 	// Create coordinator with Engine Manager, UI Manager and config
 	coord := coordinator.NewCoordinator(engineMgr, uiManager, cfg, logger)
 
-	// 注册完整的 services 到 settings server
-	settingsServer.RegisterServices(&settings.Services{
-		Config:      cfg,
-		EngineMgr:   engineMgr,
-		Coordinator: coord,
-		Logger:      logger,
-		OnConfigSave: func(c *config.Config) error {
-			return config.Save(c)
-		},
+	// 创建控制管道服务端
+	controlServer := control.NewServer(logger, dictManager)
+	controlServer.SetReloadHandler(&reloadHandlerImpl{
+		coord:  coord,
+		cfg:    cfg,
+		logger: logger,
 	})
-
-	settingsServer.StartAsync()
-	logger.Info("Settings server started", "addr", settings.DefaultAddr)
+	controlServer.StartAsync()
+	logger.Info("Control pipe server started", "pipe", pkgcontrol.PipeName)
 
 	// Create Bridge IPC server (connects to C++)
 	bridgeServer := bridge.NewServer(coord, logger)
@@ -356,6 +346,61 @@ func main() {
 		logger.Error("Bridge server failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// reloadHandlerImpl 实现 control.ReloadHandler 接口
+type reloadHandlerImpl struct {
+	coord  *coordinator.Coordinator
+	cfg    *config.Config
+	logger *slog.Logger
+}
+
+// ReloadConfig 重载配置
+func (h *reloadHandlerImpl) ReloadConfig() error {
+	newCfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	// 更新协调器的配置
+	if h.coord != nil {
+		// 更新引擎配置（包括引擎类型切换）
+		h.coord.UpdateEngineConfig(&newCfg.Engine)
+		// 更新快捷键配置
+		h.coord.UpdateHotkeyConfig(&newCfg.Hotkeys)
+		// 更新启动配置
+		h.coord.UpdateStartupConfig(&newCfg.Startup)
+		// 更新 UI 配置
+		h.coord.UpdateUIConfig(&newCfg.UI)
+		// 更新工具栏配置
+		h.coord.UpdateToolbarConfig(&newCfg.Toolbar)
+		// 更新输入配置
+		h.coord.UpdateInputConfig(&newCfg.Input)
+	}
+
+	// 更新保存的配置引用
+	*h.cfg = *newCfg
+
+	h.logger.Info("Config reloaded successfully",
+		"engineType", newCfg.Engine.Type,
+		"toggleModeKeys", newCfg.Hotkeys.ToggleModeKeys)
+	return nil
+}
+
+// GetStatus 获取服务状态
+func (h *reloadHandlerImpl) GetStatus() *pkgcontrol.ServiceStatus {
+	status := &pkgcontrol.ServiceStatus{
+		Running: true,
+	}
+
+	if h.coord != nil {
+		status.ChineseMode = h.coord.GetChineseMode()
+		status.FullWidth = h.coord.GetFullWidth()
+		status.ChinesePunct = h.coord.GetChinesePunctuation()
+		status.EngineType = h.coord.GetCurrentEngineName()
+	}
+
+	return status
 }
 
 // multiHandler wraps multiple slog handlers

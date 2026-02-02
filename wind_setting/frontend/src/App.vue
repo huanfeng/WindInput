@@ -1,8 +1,15 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, onUnmounted, nextTick } from 'vue';
 import * as api from './api/settings';
+import * as wailsApi from './api/wails';
 import type { Config, Status, EngineInfo, LogEntry } from './api/settings';
+import type { PhraseItem, UserWordItem, ShadowRuleItem, DictStats, FileChangeStatus } from './api/wails';
 import { getDefaultConfig } from './api/settings';
+
+// 检测是否在 Wails 环境中
+const isWailsEnv = computed(() => {
+  return typeof window !== 'undefined' && (window as any).go?.main?.App !== undefined;
+});
 
 // 状态
 const loading = ref(true);
@@ -37,6 +44,36 @@ const logAutoScroll = ref(true);
 const logTotal = ref(0);
 const logContentRef = ref<HTMLElement | null>(null);
 let logTimer: number | null = null;
+
+// 词库管理状态
+const dictSubTab = ref<'phrases' | 'userdict' | 'shadow'>('phrases');
+const phrases = ref<PhraseItem[]>([]);
+const userDict = ref<UserWordItem[]>([]);
+const shadowRules = ref<ShadowRuleItem[]>([]);
+const dictStats = ref<DictStats>({ word_count: 0, phrase_count: 0, shadow_count: 0 });
+const dictLoading = ref(false);
+const dictMessage = ref('');
+const dictMessageType = ref<'success' | 'error'>('success');
+
+// 添加短语表单
+const showAddPhraseForm = ref(false);
+const newPhrase = ref({ code: '', text: '', weight: 0 });
+
+// 添加用户词条表单
+const showAddWordForm = ref(false);
+const newWord = ref({ code: '', text: '', weight: 0 });
+
+// 添加 Shadow 规则表单
+const showAddShadowForm = ref(false);
+const newShadow = ref({ code: '', word: '', action: 'pin', weight: 100 });
+
+// 文件变化状态
+const fileChangeStatus = ref<FileChangeStatus | null>(null);
+const showFileChangeAlert = ref(false);
+let fileCheckTimer: number | null = null;
+
+// 服务运行状态
+const serviceRunning = ref(false);
 
 // 重新组织的标签页 - 按用户视角划分
 const tabs = [
@@ -125,36 +162,88 @@ async function loadData() {
   error.value = '';
 
   try {
-    const healthRes = await api.checkHealth();
-    if (!healthRes.success) {
-      connected.value = false;
-      error.value = '无法连接到输入法服务，请确保 WindInput 正在运行';
-      loading.value = false;
-      return;
+    // 在 Wails 环境中使用 Wails API
+    if (isWailsEnv.value) {
+      await loadDataFromWails();
+    } else {
+      // 非 Wails 环境，尝试使用 HTTP API（兼容开发模式）
+      await loadDataFromHTTP();
     }
-    connected.value = true;
+  } catch (e) {
+    console.error('加载数据失败', e);
+    error.value = '加载数据失败: ' + (e instanceof Error ? e.message : String(e));
+  } finally {
+    loading.value = false;
+  }
+}
 
-    const configRes = await api.getConfig();
-    if (configRes.success && configRes.data) {
-      const cfg = mergeWithDefaults(configRes.data);
-      config.value = cfg;
-      formData.value = JSON.parse(JSON.stringify(cfg));
+// 从 Wails API 加载数据
+async function loadDataFromWails() {
+  connected.value = true; // Wails 环境始终视为已连接
+
+  try {
+    const cfg = await wailsApi.getConfig();
+    if (cfg) {
+      const mergedCfg = mergeWithDefaults(cfg);
+      config.value = mergedCfg;
+      formData.value = JSON.parse(JSON.stringify(mergedCfg));
       checkConflicts();
     }
 
-    const statusRes = await api.getStatus();
-    if (statusRes.success && statusRes.data) {
-      status.value = statusRes.data;
-    }
+    // 检查输入法服务是否运行
+    serviceRunning.value = await wailsApi.checkServiceRunning();
 
-    const enginesRes = await api.getEngineList();
-    if (enginesRes.success && enginesRes.data) {
-      engines.value = enginesRes.data.engines;
-    }
+    // 获取引擎列表（从配置推断）
+    engines.value = [
+      {
+        type: 'pinyin',
+        displayName: '拼音输入',
+        description: '全拼输入法',
+        isActive: config.value?.engine?.type === 'pinyin',
+      },
+      {
+        type: 'wubi',
+        displayName: '五笔输入',
+        description: '86版五笔',
+        isActive: config.value?.engine?.type === 'wubi',
+      },
+    ];
+
+    // 加载词库数据
+    await loadDictData();
   } catch (e) {
-    error.value = '加载数据失败';
-  } finally {
-    loading.value = false;
+    console.error('Wails API 调用失败', e);
+    throw e;
+  }
+}
+
+// 从 HTTP API 加载数据（开发模式兼容）
+async function loadDataFromHTTP() {
+  const healthRes = await api.checkHealth();
+  if (!healthRes.success) {
+    connected.value = false;
+    // 在开发模式下，如果 HTTP 不可用，不显示错误，而是提示用户
+    error.value = '请使用 wails dev 命令启动开发服务器，或运行编译后的应用';
+    return;
+  }
+  connected.value = true;
+
+  const configRes = await api.getConfig();
+  if (configRes.success && configRes.data) {
+    const cfg = mergeWithDefaults(configRes.data);
+    config.value = cfg;
+    formData.value = JSON.parse(JSON.stringify(cfg));
+    checkConflicts();
+  }
+
+  const statusRes = await api.getStatus();
+  if (statusRes.success && statusRes.data) {
+    status.value = statusRes.data;
+  }
+
+  const enginesRes = await api.getEngineList();
+  if (enginesRes.success && enginesRes.data) {
+    engines.value = enginesRes.data.engines;
   }
 }
 
@@ -191,21 +280,30 @@ async function saveConfig() {
   saveMessage.value = '';
 
   try {
-    const res = await api.updateConfig(formData.value);
-    if (res.success && res.data) {
+    if (isWailsEnv.value) {
+      // 使用 Wails API 保存配置
+      await wailsApi.saveConfig(formData.value as any);
       saveMessageType.value = 'success';
       saveMessage.value = '保存成功';
-      if (res.data.needReload.length > 0) {
-        saveMessage.value += '（部分设置需要重载生效）';
-      }
       config.value = JSON.parse(JSON.stringify(formData.value));
     } else {
-      saveMessageType.value = 'error';
-      saveMessage.value = res.error || '保存失败';
+      // 使用 HTTP API
+      const res = await api.updateConfig(formData.value);
+      if (res.success && res.data) {
+        saveMessageType.value = 'success';
+        saveMessage.value = '保存成功';
+        if (res.data.needReload.length > 0) {
+          saveMessage.value += '（部分设置需要重载生效）';
+        }
+        config.value = JSON.parse(JSON.stringify(formData.value));
+      } else {
+        saveMessageType.value = 'error';
+        saveMessage.value = res.error || '保存失败';
+      }
     }
-  } catch (e) {
+  } catch (e: any) {
     saveMessageType.value = 'error';
-    saveMessage.value = '保存失败';
+    saveMessage.value = e.message || '保存失败';
   } finally {
     saving.value = false;
     setTimeout(() => { saveMessage.value = ''; }, 3000);
@@ -215,10 +313,21 @@ async function saveConfig() {
 // 切换引擎
 async function handleSwitchEngine(type: string) {
   try {
-    const res = await api.switchEngine(type);
-    if (res.success) {
+    if (isWailsEnv.value) {
+      // 在 Wails 环境中，修改配置中的引擎类型并保存
       formData.value.engine.type = type;
-      await loadData();
+      await saveConfig();
+      // 更新引擎列表状态
+      engines.value = engines.value.map(e => ({
+        ...e,
+        isActive: e.type === type
+      }));
+    } else {
+      const res = await api.switchEngine(type);
+      if (res.success) {
+        formData.value.engine.type = type;
+        await loadData();
+      }
     }
   } catch (e) {
     console.error('切换引擎失败', e);
@@ -228,16 +337,23 @@ async function handleSwitchEngine(type: string) {
 // 重载配置
 async function handleReload() {
   try {
-    const res = await api.reloadConfig();
-    if (res.success) {
+    if (isWailsEnv.value) {
+      await wailsApi.reloadConfig();
       saveMessageType.value = 'success';
       saveMessage.value = '重载成功';
       await loadData();
     } else {
-      saveMessageType.value = 'error';
-      saveMessage.value = res.error || '重载失败';
+      const res = await api.reloadConfig();
+      if (res.success) {
+        saveMessageType.value = 'success';
+        saveMessage.value = '重载成功';
+        await loadData();
+      } else {
+        saveMessageType.value = 'error';
+        saveMessage.value = res.error || '重载失败';
+      }
     }
-  } catch (e) {
+  } catch (e: any) {
     saveMessageType.value = 'error';
     saveMessage.value = '重载失败';
   }
@@ -247,9 +363,36 @@ async function handleReload() {
 // 刷新状态
 async function refreshStatus() {
   try {
-    const statusRes = await api.getStatus();
-    if (statusRes.success && statusRes.data) {
-      status.value = statusRes.data;
+    if (isWailsEnv.value) {
+      serviceRunning.value = await wailsApi.checkServiceRunning();
+      const serviceStatus = await wailsApi.getServiceStatus();
+      if (serviceStatus) {
+        // 转换为前端期望的格式
+        status.value = {
+          service: {
+            name: 'WindInput',
+            version: '1.0.0',
+            uptime: '',
+            uptimeSec: 0,
+          },
+          engine: {
+            type: serviceStatus.engine_type || '',
+            displayName: serviceStatus.engine_type === 'pinyin' ? '拼音' : '五笔',
+            info: serviceStatus.engine_type || '',
+          },
+          memory: {
+            alloc: 0,
+            sys: 0,
+            allocMB: '',
+            sysMB: '',
+          },
+        };
+      }
+    } else {
+      const statusRes = await api.getStatus();
+      if (statusRes.success && statusRes.data) {
+        status.value = statusRes.data;
+      }
     }
   } catch (e) {
     console.error('刷新状态失败', e);
@@ -335,14 +478,196 @@ watch(activeTab, (tab) => {
       logTimer = null;
     }
   }
+
+  // 切换到词库页面时加载数据
+  if (tab === 'dictionary') {
+    loadDictData();
+  }
 });
+
+// ========== 词库管理方法 ==========
+
+// 加载词库数据
+async function loadDictData() {
+  if (!isWailsEnv.value) return;
+
+  dictLoading.value = true;
+  try {
+    const [phrasesData, userDictData, shadowData, stats, running] = await Promise.all([
+      wailsApi.getPhrases(),
+      wailsApi.getUserDict(),
+      wailsApi.getShadowRules(),
+      wailsApi.getUserDictStats(),
+      wailsApi.checkServiceRunning(),
+    ]);
+    phrases.value = phrasesData || [];
+    userDict.value = userDictData || [];
+    shadowRules.value = shadowData || [];
+    dictStats.value = stats || { word_count: 0, phrase_count: 0, shadow_count: 0 };
+    serviceRunning.value = running;
+  } catch (e) {
+    console.error('加载词库数据失败', e);
+    showDictMessage('加载词库数据失败', 'error');
+  } finally {
+    dictLoading.value = false;
+  }
+}
+
+// 显示词库消息
+function showDictMessage(msg: string, type: 'success' | 'error') {
+  dictMessage.value = msg;
+  dictMessageType.value = type;
+  setTimeout(() => { dictMessage.value = ''; }, 3000);
+}
+
+// 添加短语
+async function handleAddPhrase() {
+  if (!newPhrase.value.code || !newPhrase.value.text) {
+    showDictMessage('请填写编码和文本', 'error');
+    return;
+  }
+
+  try {
+    await wailsApi.addPhrase(newPhrase.value.code, newPhrase.value.text, newPhrase.value.weight);
+    showDictMessage('添加成功', 'success');
+    showAddPhraseForm.value = false;
+    newPhrase.value = { code: '', text: '', weight: 0 };
+    await loadDictData();
+  } catch (e: any) {
+    showDictMessage(e.message || '添加失败', 'error');
+  }
+}
+
+// 删除短语
+async function handleRemovePhrase(item: PhraseItem) {
+  if (!confirm(`确定删除短语 "${item.text}" 吗？`)) return;
+
+  try {
+    await wailsApi.removePhrase(item.code, item.text);
+    showDictMessage('删除成功', 'success');
+    await loadDictData();
+  } catch (e: any) {
+    showDictMessage(e.message || '删除失败', 'error');
+  }
+}
+
+// 添加用户词条
+async function handleAddUserWord() {
+  if (!newWord.value.code || !newWord.value.text) {
+    showDictMessage('请填写编码和文本', 'error');
+    return;
+  }
+
+  try {
+    await wailsApi.addUserWord(newWord.value.code, newWord.value.text, newWord.value.weight);
+    showDictMessage('添加成功', 'success');
+    showAddWordForm.value = false;
+    newWord.value = { code: '', text: '', weight: 0 };
+    await loadDictData();
+  } catch (e: any) {
+    showDictMessage(e.message || '添加失败', 'error');
+  }
+}
+
+// 删除用户词条
+async function handleRemoveUserWord(item: UserWordItem) {
+  if (!confirm(`确定删除词条 "${item.text}" 吗？`)) return;
+
+  try {
+    await wailsApi.removeUserWord(item.code, item.text);
+    showDictMessage('删除成功', 'success');
+    await loadDictData();
+  } catch (e: any) {
+    showDictMessage(e.message || '删除失败', 'error');
+  }
+}
+
+// 添加 Shadow 规则
+async function handleAddShadowRule() {
+  if (!newShadow.value.code || !newShadow.value.word) {
+    showDictMessage('请填写编码和词条', 'error');
+    return;
+  }
+
+  try {
+    await wailsApi.addShadowRule(
+      newShadow.value.code,
+      newShadow.value.word,
+      newShadow.value.action,
+      newShadow.value.weight
+    );
+    showDictMessage('添加成功', 'success');
+    showAddShadowForm.value = false;
+    newShadow.value = { code: '', word: '', action: 'pin', weight: 100 };
+    await loadDictData();
+  } catch (e: any) {
+    showDictMessage(e.message || '添加失败', 'error');
+  }
+}
+
+// 删除 Shadow 规则
+async function handleRemoveShadowRule(item: ShadowRuleItem) {
+  if (!confirm(`确定删除规则 "${item.word}" 吗？`)) return;
+
+  try {
+    await wailsApi.removeShadowRule(item.code, item.word);
+    showDictMessage('删除成功', 'success');
+    await loadDictData();
+  } catch (e: any) {
+    showDictMessage(e.message || '删除失败', 'error');
+  }
+}
+
+// 检查文件变化
+async function checkFileChanges() {
+  if (!isWailsEnv.value) return;
+
+  try {
+    const status = await wailsApi.checkAllFilesModified();
+    fileChangeStatus.value = status;
+
+    if (status.config_changed || status.phrases_changed ||
+        status.shadow_changed || status.userdict_changed) {
+      showFileChangeAlert.value = true;
+    }
+  } catch (e) {
+    console.error('检查文件变化失败', e);
+  }
+}
+
+// 重新加载所有文件
+async function handleReloadAllFiles() {
+  try {
+    await wailsApi.reloadAllFiles();
+    showFileChangeAlert.value = false;
+    fileChangeStatus.value = null;
+    await loadDictData();
+    showDictMessage('已重新加载所有文件', 'success');
+  } catch (e: any) {
+    showDictMessage(e.message || '重新加载失败', 'error');
+  }
+}
+
+// 获取 Shadow action 的显示文本
+function getShadowActionLabel(action: string): string {
+  const labels: Record<string, string> = {
+    'pin': '置顶',
+    'delete': '删除',
+    'adjust': '调整权重',
+  };
+  return labels[action] || action;
+}
 
 onMounted(() => {
   loadData();
+
+  // 定期检查文件变化
+  fileCheckTimer = window.setInterval(checkFileChanges, 5000);
 });
 
 onUnmounted(() => {
   if (logTimer) clearInterval(logTimer);
+  if (fileCheckTimer) clearInterval(fileCheckTimer);
 });
 </script>
 
@@ -704,40 +1029,242 @@ onUnmounted(() => {
         </section>
 
         <!-- ==================== 词库管理 ==================== -->
-        <section v-if="activeTab === 'dictionary'" class="section">
+        <section v-if="activeTab === 'dictionary'" class="section section-wide">
           <div class="section-header">
             <h2>词库管理</h2>
             <p class="section-desc">管理您的词库数据</p>
           </div>
 
-          <div class="settings-card">
-            <div class="card-title">系统词库</div>
-            <div class="dict-info">
-              <div class="dict-item">
-                <span class="dict-label">拼音词库</span>
-                <span class="dict-value">{{ config?.dictionary?.pinyin_dict || '未配置' }}</span>
+          <!-- 文件变化提示 -->
+          <div v-if="showFileChangeAlert" class="settings-card warning-card">
+            <div class="warning-content">
+              <span class="warning-icon">!</span>
+              <div class="warning-text">
+                <p class="warning-title">检测到文件被外部修改</p>
+                <p class="warning-desc">
+                  <span v-if="fileChangeStatus?.config_changed">配置文件 </span>
+                  <span v-if="fileChangeStatus?.phrases_changed">短语文件 </span>
+                  <span v-if="fileChangeStatus?.shadow_changed">Shadow文件 </span>
+                  <span v-if="fileChangeStatus?.userdict_changed">用户词库 </span>
+                  已被修改
+                </p>
               </div>
-              <div class="dict-item">
-                <span class="dict-label">五笔词库</span>
-                <span class="dict-value">dict/wubi/wubi86.txt</span>
-              </div>
+              <button class="btn btn-sm btn-primary" @click="handleReloadAllFiles">重新加载</button>
+              <button class="btn btn-sm" @click="showFileChangeAlert = false">忽略</button>
             </div>
           </div>
 
-          <div class="settings-card">
-            <div class="card-title">用户词库</div>
-            <div class="dict-info">
-              <div class="dict-item">
-                <span class="dict-label">词库路径</span>
-                <span class="dict-value">{{ config?.dictionary?.user_dict || 'user_dict.txt' }}</span>
+          <!-- 词库统计 -->
+          <div class="dict-stats-bar" v-if="isWailsEnv">
+            <div class="stat-chip">
+              <span class="stat-chip-label">短语</span>
+              <span class="stat-chip-value">{{ dictStats.phrase_count }}</span>
+            </div>
+            <div class="stat-chip">
+              <span class="stat-chip-label">用户词</span>
+              <span class="stat-chip-value">{{ dictStats.word_count }}</span>
+            </div>
+            <div class="stat-chip">
+              <span class="stat-chip-label">调整规则</span>
+              <span class="stat-chip-value">{{ dictStats.shadow_count }}</span>
+            </div>
+            <div class="stat-chip" :class="serviceRunning ? 'stat-running' : 'stat-stopped'">
+              <span class="stat-chip-label">输入法服务</span>
+              <span class="stat-chip-value">{{ serviceRunning ? '运行中' : '未运行' }}</span>
+            </div>
+          </div>
+
+          <!-- 消息提示 -->
+          <div v-if="dictMessage" :class="['dict-message', dictMessageType]">
+            {{ dictMessage }}
+          </div>
+
+          <!-- 子标签页 -->
+          <div class="dict-tabs">
+            <button
+              :class="['dict-tab', { active: dictSubTab === 'phrases' }]"
+              @click="dictSubTab = 'phrases'"
+            >用户短语</button>
+            <button
+              :class="['dict-tab', { active: dictSubTab === 'userdict' }]"
+              @click="dictSubTab = 'userdict'"
+            >用户词库</button>
+            <button
+              :class="['dict-tab', { active: dictSubTab === 'shadow' }]"
+              @click="dictSubTab = 'shadow'"
+            >候选调整</button>
+          </div>
+
+          <!-- 非 Wails 环境提示 -->
+          <div v-if="!isWailsEnv" class="settings-card">
+            <div class="dict-note-center">
+              <p>词库管理功能需要在桌面应用中使用</p>
+              <p class="dict-note">请使用 <code>wails dev</code> 或编译后的应用</p>
+            </div>
+          </div>
+
+          <!-- 用户短语 -->
+          <div v-else-if="dictSubTab === 'phrases'" class="dict-content">
+            <div class="dict-toolbar">
+              <button class="btn btn-primary btn-sm" @click="showAddPhraseForm = true">
+                + 添加短语
+              </button>
+              <button class="btn btn-sm" @click="loadDictData" :disabled="dictLoading">
+                {{ dictLoading ? '加载中...' : '刷新' }}
+              </button>
+            </div>
+
+            <!-- 添加短语表单 -->
+            <div v-if="showAddPhraseForm" class="dict-form-card">
+              <div class="form-row">
+                <label>编码</label>
+                <input type="text" v-model="newPhrase.code" class="input" placeholder="如: rq" />
+              </div>
+              <div class="form-row">
+                <label>文本</label>
+                <input type="text" v-model="newPhrase.text" class="input" placeholder="如: {{date}}" />
+              </div>
+              <div class="form-row">
+                <label>权重</label>
+                <input type="number" v-model.number="newPhrase.weight" class="input input-sm" />
+              </div>
+              <div class="form-actions">
+                <button class="btn btn-sm" @click="showAddPhraseForm = false">取消</button>
+                <button class="btn btn-primary btn-sm" @click="handleAddPhrase">添加</button>
               </div>
             </div>
-            <div class="dict-actions">
-              <button class="btn btn-sm" disabled>导出词库</button>
-              <button class="btn btn-sm" disabled>导入词库</button>
-              <button class="btn btn-sm btn-danger" disabled>清空词库</button>
+
+            <!-- 短语列表 -->
+            <div class="dict-list" v-if="phrases.length > 0">
+              <div class="dict-list-item" v-for="(item, idx) in phrases" :key="idx">
+                <div class="dict-item-main">
+                  <span class="dict-item-code">{{ item.code }}</span>
+                  <span class="dict-item-text">{{ item.text }}</span>
+                  <span v-if="item.type" class="dict-item-tag">{{ item.type }}</span>
+                </div>
+                <div class="dict-item-actions">
+                  <button class="btn-icon btn-delete" @click="handleRemovePhrase(item)" title="删除">
+                    &times;
+                  </button>
+                </div>
+              </div>
             </div>
-            <p class="dict-note">词库管理功能开发中...</p>
+            <div v-else class="dict-empty">
+              暂无用户短语
+            </div>
+          </div>
+
+          <!-- 用户词库 -->
+          <div v-else-if="dictSubTab === 'userdict'" class="dict-content">
+            <div class="dict-toolbar">
+              <button class="btn btn-primary btn-sm" @click="showAddWordForm = true">
+                + 添加词条
+              </button>
+              <button class="btn btn-sm" @click="loadDictData" :disabled="dictLoading">
+                {{ dictLoading ? '加载中...' : '刷新' }}
+              </button>
+            </div>
+
+            <!-- 添加词条表单 -->
+            <div v-if="showAddWordForm" class="dict-form-card">
+              <div class="form-row">
+                <label>编码</label>
+                <input type="text" v-model="newWord.code" class="input" placeholder="如: nihao" />
+              </div>
+              <div class="form-row">
+                <label>词条</label>
+                <input type="text" v-model="newWord.text" class="input" placeholder="如: 你好" />
+              </div>
+              <div class="form-row">
+                <label>权重</label>
+                <input type="number" v-model.number="newWord.weight" class="input input-sm" />
+              </div>
+              <div class="form-actions">
+                <button class="btn btn-sm" @click="showAddWordForm = false">取消</button>
+                <button class="btn btn-primary btn-sm" @click="handleAddUserWord">添加</button>
+              </div>
+            </div>
+
+            <!-- 词条列表 -->
+            <div class="dict-list" v-if="userDict.length > 0">
+              <div class="dict-list-item" v-for="(item, idx) in userDict" :key="idx">
+                <div class="dict-item-main">
+                  <span class="dict-item-code">{{ item.code }}</span>
+                  <span class="dict-item-text">{{ item.text }}</span>
+                  <span class="dict-item-weight" v-if="item.weight">{{ item.weight }}</span>
+                </div>
+                <div class="dict-item-actions">
+                  <button class="btn-icon btn-delete" @click="handleRemoveUserWord(item)" title="删除">
+                    &times;
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="dict-empty">
+              暂无用户词条
+            </div>
+          </div>
+
+          <!-- 候选调整 (Shadow) -->
+          <div v-else-if="dictSubTab === 'shadow'" class="dict-content">
+            <div class="dict-toolbar">
+              <button class="btn btn-primary btn-sm" @click="showAddShadowForm = true">
+                + 添加规则
+              </button>
+              <button class="btn btn-sm" @click="loadDictData" :disabled="dictLoading">
+                {{ dictLoading ? '加载中...' : '刷新' }}
+              </button>
+            </div>
+
+            <!-- 添加规则表单 -->
+            <div v-if="showAddShadowForm" class="dict-form-card">
+              <div class="form-row">
+                <label>编码</label>
+                <input type="text" v-model="newShadow.code" class="input" placeholder="如: zg" />
+              </div>
+              <div class="form-row">
+                <label>词条</label>
+                <input type="text" v-model="newShadow.word" class="input" placeholder="如: 中国" />
+              </div>
+              <div class="form-row">
+                <label>操作</label>
+                <select v-model="newShadow.action" class="select">
+                  <option value="pin">置顶</option>
+                  <option value="delete">删除</option>
+                  <option value="adjust">调整权重</option>
+                </select>
+              </div>
+              <div class="form-row" v-if="newShadow.action === 'adjust' || newShadow.action === 'pin'">
+                <label>权重</label>
+                <input type="number" v-model.number="newShadow.weight" class="input input-sm" />
+              </div>
+              <div class="form-actions">
+                <button class="btn btn-sm" @click="showAddShadowForm = false">取消</button>
+                <button class="btn btn-primary btn-sm" @click="handleAddShadowRule">添加</button>
+              </div>
+            </div>
+
+            <!-- 规则列表 -->
+            <div class="dict-list" v-if="shadowRules.length > 0">
+              <div class="dict-list-item" v-for="(item, idx) in shadowRules" :key="idx">
+                <div class="dict-item-main">
+                  <span class="dict-item-code">{{ item.code }}</span>
+                  <span class="dict-item-text">{{ item.word }}</span>
+                  <span class="dict-item-tag" :class="'tag-' + item.action">
+                    {{ getShadowActionLabel(item.action) }}
+                  </span>
+                  <span class="dict-item-weight" v-if="item.weight">{{ item.weight }}</span>
+                </div>
+                <div class="dict-item-actions">
+                  <button class="btn-icon btn-delete" @click="handleRemoveShadowRule(item)" title="删除">
+                    &times;
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="dict-empty">
+              暂无调整规则
+            </div>
           </div>
         </section>
 
@@ -1378,6 +1905,7 @@ input:checked + .slider:before { transform: translateX(20px); }
 .warning-list { font-size: 13px; color: #b45309; margin: 0; padding-left: 16px; }
 
 /* Dictionary */
+.section-wide { max-width: 900px; }
 .dict-info { margin-bottom: 16px; }
 .dict-item {
   display: flex;
@@ -1390,8 +1918,198 @@ input:checked + .slider:before { transform: translateX(20px); }
 .dict-value { font-family: monospace; color: #374151; font-size: 13px; }
 .dict-actions { display: flex; gap: 8px; margin-bottom: 12px; }
 .dict-note { font-size: 12px; color: #9ca3af; font-style: italic; }
+.dict-note-center { text-align: center; padding: 32px; color: #6b7280; }
+.dict-note-center code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; }
 .btn-danger { color: #dc2626; border-color: #fecaca; }
 .btn-danger:hover { background: #fee2e2; }
+
+/* Dictionary Stats Bar */
+.dict-stats-bar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.stat-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: #f3f4f6;
+  border-radius: 20px;
+  font-size: 13px;
+}
+.stat-chip-label { color: #6b7280; }
+.stat-chip-value { font-weight: 500; color: #1f2937; }
+.stat-running { background: #dcfce7; }
+.stat-running .stat-chip-value { color: #166534; }
+.stat-stopped { background: #fee2e2; }
+.stat-stopped .stat-chip-value { color: #991b1b; }
+
+/* Dictionary Message */
+.dict-message {
+  padding: 10px 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+.dict-message.success { background: #dcfce7; color: #166534; }
+.dict-message.error { background: #fee2e2; color: #991b1b; }
+
+/* Dictionary Tabs */
+.dict-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 0;
+}
+.dict-tab {
+  padding: 10px 20px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: #6b7280;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all 0.15s;
+}
+.dict-tab:hover { color: #374151; }
+.dict-tab.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 500; }
+
+/* Dictionary Content */
+.dict-content { min-height: 300px; }
+.dict-toolbar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.dict-empty {
+  text-align: center;
+  padding: 48px;
+  color: #9ca3af;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+/* Dictionary Form */
+.dict-form-card {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.form-row:last-child { margin-bottom: 0; }
+.form-row label {
+  width: 60px;
+  font-size: 13px;
+  color: #6b7280;
+  flex-shrink: 0;
+}
+.form-row .input { flex: 1; max-width: 300px; }
+.form-row .input-sm { max-width: 120px; }
+.form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+/* Dictionary List */
+.dict-list {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.dict-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f3f4f6;
+  transition: background 0.15s;
+}
+.dict-list-item:last-child { border-bottom: none; }
+.dict-list-item:hover { background: #f9fafb; }
+.dict-item-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.dict-item-code {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+  color: #6b7280;
+  background: #f3f4f6;
+  padding: 2px 8px;
+  border-radius: 4px;
+  min-width: 60px;
+}
+.dict-item-text {
+  font-size: 14px;
+  color: #1f2937;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dict-item-tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #e0e7ff;
+  color: #3730a3;
+}
+.dict-item-tag.tag-pin { background: #dcfce7; color: #166534; }
+.dict-item-tag.tag-delete { background: #fee2e2; color: #991b1b; }
+.dict-item-tag.tag-adjust { background: #fef3c7; color: #92400e; }
+.dict-item-weight {
+  font-size: 12px;
+  color: #9ca3af;
+}
+.dict-item-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.btn-icon {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 18px;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.btn-icon:hover { background: #f3f4f6; color: #6b7280; }
+.btn-icon.btn-delete:hover { background: #fee2e2; color: #dc2626; }
+
+/* Warning Card Enhancement */
+.warning-card .warning-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.warning-card .warning-text { flex: 1; }
+.warning-card .warning-desc { font-size: 12px; color: #b45309; margin-top: 2px; }
 
 /* Action Bar */
 .action-bar {

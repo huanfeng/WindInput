@@ -1,10 +1,16 @@
 module wind_setting
 
-go 1.23
-
-require github.com/wailsapp/wails/v2 v2.11.0
+go 1.24.0
 
 require (
+	github.com/huanfeng/wind_input v0.0.0
+	github.com/wailsapp/wails/v2 v2.11.0
+)
+
+replace github.com/huanfeng/wind_input => ../wind_input
+
+require (
+	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
@@ -32,6 +38,7 @@ require (
 	golang.org/x/net v0.35.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 // replace github.com/wailsapp/wails/v2 v2.11.0 => C:\Users\Cartech1\go\pkg\mod
