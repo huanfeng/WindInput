@@ -203,9 +203,6 @@ func (c *Coordinator) handleToolbarToggleWidth() {
 	// Update toolbar state
 	c.syncToolbarState()
 
-	// Save to config
-	c.saveInputConfig()
-
 	// Save runtime state if remember_last_state is enabled
 	c.saveRuntimeState()
 }
@@ -223,9 +220,6 @@ func (c *Coordinator) handleToolbarTogglePunct() {
 
 	// Update toolbar state
 	c.syncToolbarState()
-
-	// Save to config
-	c.saveInputConfig()
 
 	// Save runtime state if remember_last_state is enabled
 	c.saveRuntimeState()
@@ -1488,6 +1482,7 @@ func (c *Coordinator) UpdateToolbarConfig(toolbarConfig *config.ToolbarConfig) {
 }
 
 // UpdateInputConfig 更新输入配置（热更新）
+// 注意：fullWidth 和 chinesePunctuation 是运行时状态，不从配置更新
 func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1496,8 +1491,7 @@ func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 		return
 	}
 
-	c.fullWidth = inputConfig.FullWidth
-	c.chinesePunctuation = inputConfig.ChinesePunctuation
+	// 只更新配置项，不更新运行时状态（fullWidth, chinesePunctuation）
 	c.punctFollowMode = inputConfig.PunctFollowMode
 
 	// 更新配置引用
@@ -1505,20 +1499,7 @@ func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 		c.config.Input = *inputConfig
 	}
 
-	// Reset punctuation converter state when config changes
-	c.punctConverter.Reset()
-
-	// 更新工具栏状态
-	if c.uiManager != nil && c.toolbarVisible {
-		c.uiManager.UpdateToolbarState(ui.ToolbarState{
-			ChineseMode:   c.chineseMode,
-			FullWidth:     c.fullWidth,
-			ChinesePunct:  c.chinesePunctuation,
-			CapsLock:      ui.GetCapsLockState(),
-		})
-	}
-
-	c.logger.Debug("Input config updated", "fullWidth", c.fullWidth, "chinesePunctuation", c.chinesePunctuation, "punctFollowMode", c.punctFollowMode)
+	c.logger.Debug("Input config updated", "punctFollowMode", c.punctFollowMode)
 }
 
 // ClearInputState 清空输入状态（供外部调用）
@@ -1629,9 +1610,6 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 		}
 		c.showIndicator(indicator)
 
-		// Save to config
-		c.saveInputConfig()
-
 		// Save runtime state
 		c.saveRuntimeState()
 
@@ -1648,9 +1626,6 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 			indicator = "中，"
 		}
 		c.showIndicator(indicator)
-
-		// Save to config
-		c.saveInputConfig()
 
 		// Save runtime state
 		c.saveRuntimeState()
@@ -1736,25 +1711,6 @@ func (c *Coordinator) showIndicator(text string) {
 	}
 
 	c.uiManager.ShowModeIndicator(text, x, y)
-}
-
-// saveInputConfig saves the input configuration to file
-func (c *Coordinator) saveInputConfig() {
-	go func() {
-		cfg, err := config.Load()
-		if err != nil {
-			cfg = config.DefaultConfig()
-		}
-
-		cfg.Input.FullWidth = c.fullWidth
-		cfg.Input.ChinesePunctuation = c.chinesePunctuation
-
-		if err := config.Save(cfg); err != nil {
-			c.logger.Error("Failed to save input config", "error", err)
-		} else {
-			c.logger.Debug("Input config saved")
-		}
-	}()
 }
 
 // saveToolbarConfig saves the toolbar configuration to file
@@ -1993,9 +1949,6 @@ func (c *Coordinator) handleToggleFullWidth() *bridge.KeyEventResult {
 	// Update toolbar state
 	c.syncToolbarState()
 
-	// Save to config
-	c.saveInputConfig()
-
 	// Save runtime state if remember_last_state is enabled
 	c.saveRuntimeState()
 
@@ -2020,9 +1973,6 @@ func (c *Coordinator) handleTogglePunct() *bridge.KeyEventResult {
 
 	// Update toolbar state
 	c.syncToolbarState()
-
-	// Save to config
-	c.saveInputConfig()
 
 	// Save runtime state if remember_last_state is enabled
 	c.saveRuntimeState()

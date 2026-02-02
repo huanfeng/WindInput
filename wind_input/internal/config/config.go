@@ -91,14 +91,13 @@ type ToolbarConfig struct {
 }
 
 // InputConfig contains input behavior settings
+// 注意：fullWidth 和 chinesePunctuation 是运行时状态，保存在 state.yaml 中
 type InputConfig struct {
-	FullWidth          bool     `yaml:"full_width" json:"full_width"`                     // 全角模式（运行时状态）
-	ChinesePunctuation bool     `yaml:"chinese_punctuation" json:"chinese_punctuation"`   // 中文标点（运行时状态）
-	PunctFollowMode    bool     `yaml:"punct_follow_mode" json:"punct_follow_mode"`       // 标点随中英文切换
+	PunctFollowMode bool     `yaml:"punct_follow_mode" json:"punct_follow_mode"` // 标点随中英文切换
 	// 候选选择键组（多选）: semicolon_quote, comma_period, lrshift, lrctrl
-	SelectKeyGroups    []string `yaml:"select_key_groups" json:"select_key_groups"`
+	SelectKeyGroups []string `yaml:"select_key_groups" json:"select_key_groups"`
 	// 翻页键（多选）: pageupdown, minus_equal, brackets, shift_tab
-	PageKeys           []string `yaml:"page_keys" json:"page_keys"`
+	PageKeys []string `yaml:"page_keys" json:"page_keys"`
 }
 
 // AdvancedConfig 高级配置
@@ -160,11 +159,9 @@ func DefaultConfig() *Config {
 			PositionY: 0,
 		},
 		Input: InputConfig{
-			FullWidth:          false,
-			ChinesePunctuation: true,
-			PunctFollowMode:    false,
-			SelectKeyGroups:    []string{"semicolon_quote"},
-			PageKeys:           []string{"pageupdown", "minus_equal"},
+			PunctFollowMode: false,
+			SelectKeyGroups: []string{"semicolon_quote"},
+			PageKeys:        []string{"pageupdown", "minus_equal"},
 		},
 		Advanced: AdvancedConfig{
 			LogLevel: "info",
