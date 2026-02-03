@@ -44,6 +44,7 @@ type Manager struct {
 	totalPages int
 	caretX     int
 	caretY     int
+	caretHeight int
 
 	// Sticky position state: once candidate window jumps above caret,
 	// it stays above until input is cleared (new input session)
@@ -65,6 +66,9 @@ type Manager struct {
 
 	// Toolbar callbacks (set by coordinator)
 	toolbarCallbacks *ToolbarCallback
+
+	// Candidate window callbacks (for mouse interaction)
+	candidateCallbacks *CandidateCallback
 
 	// Debug: hide candidate window (for performance testing)
 	hideCandidateWindow bool
@@ -114,6 +118,13 @@ func (m *Manager) Start() error {
 	if err := m.window.Create(); err != nil {
 		return err
 	}
+
+	// Set candidate window callbacks if available
+	m.mu.Lock()
+	if m.candidateCallbacks != nil {
+		m.window.SetCallbacks(m.candidateCallbacks)
+	}
+	m.mu.Unlock()
 
 	// Create toolbar window
 	if err := m.toolbar.Create(); err != nil {
@@ -260,6 +271,7 @@ func (m *Manager) ShowCandidates(candidates []Candidate, input string, caretX, c
 	m.totalPages = totalPages
 	m.caretX = caretX
 	m.caretY = caretY
+	m.caretHeight = caretHeight
 	// Capture current input session for this show command
 	currentSession := m.inputSession
 	m.mu.Unlock()
@@ -302,22 +314,30 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, caretX,
 	m.logger.Debug("doShowCandidates start", "input", input, "count", len(candidates), "caretX", caretX, "caretY", caretY, "caretHeight", caretHeight)
 
 	// Check if this is a new input session (input is shorter than before or empty)
-	// If so, reset the sticky state
+	// If so, reset the sticky state and hover index
 	m.mu.Lock()
 	prevInput := m.input
 	if len(input) < len(prevInput) || input == "" {
 		m.stickyAbove = false
+		m.window.ResetHoverIndex()
 		m.logger.Debug("Reset sticky state", "prevInput", prevInput, "newInput", input)
 	}
 	currentStickyAbove := m.stickyAbove
+	// Get current hover index for rendering
+	hoverIndex := m.window.GetHoverIndex()
 	m.mu.Unlock()
 
-	// Render first to get actual window size
-	m.logger.Debug("Rendering candidates...")
-	img := m.renderer.RenderCandidates(candidates, input, page, totalPages)
+	// Render first to get actual window size (with hover highlight)
+	m.logger.Debug("Rendering candidates...", "hoverIndex", hoverIndex)
+	img, renderResult := m.renderer.RenderCandidates(candidates, input, page, totalPages, hoverIndex)
 	windowWidth := img.Bounds().Dx()
 	windowHeight := img.Bounds().Dy()
 	m.logger.Debug("Render complete", "width", windowWidth, "height", windowHeight)
+
+	// Update hit test rectangles for mouse interaction
+	if renderResult != nil {
+		m.window.SetHitRects(renderResult.Rects)
+	}
 
 	// Determine position preference based on sticky state
 	var preference PositionPreference
@@ -390,10 +410,11 @@ func (m *Manager) Hide() {
 func (m *Manager) doHide() {
 	m.window.Hide()
 
-	// Reset sticky state when hiding (input session ended)
+	// Reset sticky state and hover index when hiding (input session ended)
 	m.mu.Lock()
 	m.stickyAbove = false
 	m.mu.Unlock()
+	m.window.ResetHoverIndex()
 }
 
 // UpdatePosition updates the window position
@@ -545,6 +566,55 @@ func (m *Manager) SetToolbarCallbacks(callbacks *ToolbarCallback) {
 		m.toolbar.SetCallback(callbacks)
 	}
 	m.mu.Unlock()
+}
+
+// SetCandidateCallbacks sets the callbacks for candidate window mouse interactions
+func (m *Manager) SetCandidateCallbacks(callbacks *CandidateCallback) {
+	m.mu.Lock()
+	m.candidateCallbacks = callbacks
+	if m.window != nil {
+		m.window.SetCallbacks(callbacks)
+	}
+	m.mu.Unlock()
+}
+
+// RefreshCandidates re-renders the candidate window with current state
+// Used to update hover highlight without changing candidate data
+func (m *Manager) RefreshCandidates() {
+	m.mu.Lock()
+	if !m.ready || !m.window.IsVisible() {
+		m.mu.Unlock()
+		return
+	}
+	candidates := m.candidates
+	input := m.input
+	page := m.page
+	totalPages := m.totalPages
+	caretX := m.caretX
+	caretY := m.caretY
+	caretHeight := m.caretHeight
+	currentSession := m.inputSession
+	m.mu.Unlock()
+
+	// Re-queue a show command with current data
+	select {
+	case m.cmdCh <- UICommand{
+		Type:         "show",
+		Candidates:   candidates,
+		Input:        input,
+		X:            caretX,
+		Y:            caretY,
+		CaretHeight:  caretHeight,
+		Page:         page,
+		TotalPages:   totalPages,
+		InputSession: currentSession,
+	}:
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
+	default:
+		// Channel full, skip refresh
+	}
 }
 
 // SetToolbarVisible shows or hides the toolbar

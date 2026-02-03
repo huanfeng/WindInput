@@ -129,6 +129,9 @@ const (
 	WM_NCHITTEST = 0x0084
 	WM_SETCURSOR = 0x0020
 
+	// Mouse messages (WM_MOUSEMOVE, WM_LBUTTONDOWN, etc. defined in toolbar_window.go)
+	WM_RBUTTONDOWN = 0x0204
+
 	WM_UPDATE_CONTENT = WM_USER + 1
 	WM_SHOW_WINDOW    = WM_USER + 2
 	WM_HIDE_WINDOW    = WM_USER + 3
@@ -206,6 +209,31 @@ type BITMAPINFO struct {
 	BmiColors [1]uint32
 }
 
+// Global window registry for wndProc to access CandidateWindow instances
+var (
+	candidateWindowsMu sync.RWMutex
+	candidateWindows   = make(map[windows.HWND]*CandidateWindow)
+)
+
+func registerCandidateWindow(hwnd windows.HWND, w *CandidateWindow) {
+	candidateWindowsMu.Lock()
+	candidateWindows[hwnd] = w
+	candidateWindowsMu.Unlock()
+}
+
+func unregisterCandidateWindow(hwnd windows.HWND) {
+	candidateWindowsMu.Lock()
+	delete(candidateWindows, hwnd)
+	candidateWindowsMu.Unlock()
+}
+
+func getCandidateWindow(hwnd windows.HWND) *CandidateWindow {
+	candidateWindowsMu.RLock()
+	w := candidateWindows[hwnd]
+	candidateWindowsMu.RUnlock()
+	return w
+}
+
 // CandidateWindow represents a native Windows candidate window
 type CandidateWindow struct {
 	hwnd   windows.HWND
@@ -220,14 +248,21 @@ type CandidateWindow struct {
 	// For thread-safe updates
 	updateCh chan *image.RGBA
 	closeCh  chan struct{}
+
+	// Mouse interaction support
+	hitRects      []CandidateRect // Bounding rectangles for hit testing
+	hoverIndex    int             // Currently hovered candidate index (-1 for none)
+	trackingMouse bool            // Whether mouse leave tracking is enabled
+	callbacks     *CandidateCallback
 }
 
 // NewCandidateWindow creates a new candidate window
 func NewCandidateWindow(logger *slog.Logger) *CandidateWindow {
 	return &CandidateWindow{
-		logger:   logger,
-		updateCh: make(chan *image.RGBA, 10),
-		closeCh:  make(chan struct{}),
+		logger:     logger,
+		updateCh:   make(chan *image.RGBA, 10),
+		closeCh:    make(chan struct{}),
+		hoverIndex: -1,
 	}
 }
 
@@ -235,15 +270,45 @@ func NewCandidateWindow(logger *slog.Logger) *CandidateWindow {
 func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case WM_DESTROY:
+		unregisterCandidateWindow(windows.HWND(hwnd))
 		procPostQuitMessage.Call(0)
 		return 0
+
 	case WM_NCHITTEST:
-		// Return HTTRANSPARENT (-1) so mouse events pass through
-		// This prevents the busy cursor when hovering over the window
-		return ^uintptr(0) // -1 as uintptr
+		// Return HTCLIENT to receive mouse messages
+		return HTCLIENT
+
 	case WM_SETCURSOR:
 		// Don't change cursor - let the underlying window handle it
 		return 1
+
+	case WM_MOUSEMOVE:
+		w := getCandidateWindow(windows.HWND(hwnd))
+		if w != nil {
+			w.handleMouseMove(lParam)
+		}
+		return 0
+
+	case WM_LBUTTONDOWN:
+		w := getCandidateWindow(windows.HWND(hwnd))
+		if w != nil {
+			w.handleMouseClick(lParam)
+		}
+		return 0
+
+	case WM_RBUTTONDOWN:
+		w := getCandidateWindow(windows.HWND(hwnd))
+		if w != nil {
+			w.handleRightClick(lParam)
+		}
+		return 0
+
+	case WM_MOUSELEAVE:
+		w := getCandidateWindow(windows.HWND(hwnd))
+		if w != nil {
+			w.handleMouseLeave()
+		}
+		return 0
 	}
 	ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
 	return ret
@@ -285,6 +350,7 @@ func (w *CandidateWindow) Create() error {
 	}
 
 	w.hwnd = windows.HWND(hwnd)
+	registerCandidateWindow(w.hwnd, w)
 	w.logger.Info("Candidate window created", "hwnd", hwnd)
 
 	return nil
@@ -491,6 +557,142 @@ func (w *CandidateWindow) Destroy() {
 // Handle returns the window handle
 func (w *CandidateWindow) Handle() windows.HWND {
 	return w.hwnd
+}
+
+// SetHitRects sets the bounding rectangles for hit testing
+func (w *CandidateWindow) SetHitRects(rects []CandidateRect) {
+	w.mu.Lock()
+	w.hitRects = rects
+	w.mu.Unlock()
+}
+
+// SetCallbacks sets the mouse event callbacks
+func (w *CandidateWindow) SetCallbacks(callbacks *CandidateCallback) {
+	w.mu.Lock()
+	w.callbacks = callbacks
+	w.mu.Unlock()
+}
+
+// GetHoverIndex returns the current hover index
+func (w *CandidateWindow) GetHoverIndex() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.hoverIndex
+}
+
+// ResetHoverIndex resets the hover index to -1
+func (w *CandidateWindow) ResetHoverIndex() {
+	w.mu.Lock()
+	w.hoverIndex = -1
+	w.mu.Unlock()
+}
+
+// handleMouseMove processes mouse move events
+func (w *CandidateWindow) handleMouseMove(lParam uintptr) {
+	// Extract mouse position from lParam (relative to window client area)
+	mouseX := int(int16(lParam & 0xFFFF))
+	mouseY := int(int16((lParam >> 16) & 0xFFFF))
+
+	// Enable mouse leave tracking if not already tracking
+	w.mu.Lock()
+	if !w.trackingMouse {
+		tme := TRACKMOUSEEVENT{
+			CbSize:    uint32(unsafe.Sizeof(TRACKMOUSEEVENT{})),
+			DwFlags:   TME_LEAVE,
+			HwndTrack: uintptr(w.hwnd),
+		}
+		procTrackMouseEvent.Call(uintptr(unsafe.Pointer(&tme)))
+		w.trackingMouse = true
+	}
+	hitRects := w.hitRects
+	prevHoverIndex := w.hoverIndex
+	callbacks := w.callbacks
+	w.mu.Unlock()
+
+	// Hit test against candidate rectangles
+	newHoverIndex := -1
+	for _, rect := range hitRects {
+		if float64(mouseX) >= rect.X && float64(mouseX) <= rect.X+rect.W &&
+			float64(mouseY) >= rect.Y && float64(mouseY) <= rect.Y+rect.H {
+			newHoverIndex = rect.Index
+			break
+		}
+	}
+
+	// Update hover index if changed
+	if newHoverIndex != prevHoverIndex {
+		w.mu.Lock()
+		w.hoverIndex = newHoverIndex
+		w.mu.Unlock()
+
+		// Notify callback
+		if callbacks != nil && callbacks.OnHoverChange != nil {
+			callbacks.OnHoverChange(newHoverIndex)
+		}
+	}
+}
+
+// handleMouseClick processes left mouse button click
+func (w *CandidateWindow) handleMouseClick(lParam uintptr) {
+	// Extract mouse position
+	mouseX := int(int16(lParam & 0xFFFF))
+	mouseY := int(int16((lParam >> 16) & 0xFFFF))
+
+	w.mu.Lock()
+	hitRects := w.hitRects
+	callbacks := w.callbacks
+	w.mu.Unlock()
+
+	// Hit test against candidate rectangles
+	for _, rect := range hitRects {
+		if float64(mouseX) >= rect.X && float64(mouseX) <= rect.X+rect.W &&
+			float64(mouseY) >= rect.Y && float64(mouseY) <= rect.Y+rect.H {
+			// Found a hit - notify callback
+			if callbacks != nil && callbacks.OnSelect != nil {
+				callbacks.OnSelect(rect.Index)
+			}
+			return
+		}
+	}
+}
+
+// handleRightClick processes right mouse button click
+func (w *CandidateWindow) handleRightClick(lParam uintptr) {
+	// Extract mouse position
+	mouseX := int(int16(lParam & 0xFFFF))
+	mouseY := int(int16((lParam >> 16) & 0xFFFF))
+
+	w.mu.Lock()
+	hitRects := w.hitRects
+	callbacks := w.callbacks
+	w.mu.Unlock()
+
+	// Hit test against candidate rectangles
+	for _, rect := range hitRects {
+		if float64(mouseX) >= rect.X && float64(mouseX) <= rect.X+rect.W &&
+			float64(mouseY) >= rect.Y && float64(mouseY) <= rect.Y+rect.H {
+			// Found a hit - notify callback
+			if callbacks != nil && callbacks.OnContextMenu != nil {
+				callbacks.OnContextMenu(rect.Index)
+			}
+			return
+		}
+	}
+}
+
+// handleMouseLeave processes mouse leave events
+func (w *CandidateWindow) handleMouseLeave() {
+	w.mu.Lock()
+	prevHoverIndex := w.hoverIndex
+	w.hoverIndex = -1
+	w.trackingMouse = false
+	callbacks := w.callbacks
+	w.mu.Unlock()
+
+	// Notify callback if hover state changed
+	if prevHoverIndex != -1 && callbacks != nil && callbacks.OnHoverChange != nil {
+		callbacks.OnHoverChange(-1)
+	}
 }
 
 // CreateEvent creates a Windows event object

@@ -239,6 +239,9 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 	// Set up toolbar callbacks
 	c.setupToolbarCallbacks()
 
+	// Set up candidate window callbacks for mouse interaction
+	c.setupCandidateCallbacks()
+
 	// Initialize UI config (including debug options)
 	if c.uiManager != nil && cfg != nil {
 		c.uiManager.UpdateConfig(cfg.UI.FontSize, cfg.UI.FontPath, cfg.UI.HideCandidateWindow)
@@ -285,6 +288,88 @@ func (c *Coordinator) setupToolbarCallbacks() {
 			go c.handleToolbarPositionChanged(x, y)
 		},
 	})
+}
+
+// setupCandidateCallbacks sets up the callbacks for candidate window mouse interactions
+// IMPORTANT: These callbacks are invoked from the UI thread (window procedure).
+// We use goroutines to avoid blocking the UI thread with lock acquisition or I/O.
+func (c *Coordinator) setupCandidateCallbacks() {
+	if c.uiManager == nil {
+		return
+	}
+
+	c.uiManager.SetCandidateCallbacks(&ui.CandidateCallback{
+		OnSelect: func(index int) {
+			// Run in goroutine to avoid blocking UI thread
+			go c.handleCandidateSelect(index)
+		},
+		OnHoverChange: func(index int) {
+			// Run in goroutine to avoid blocking UI thread
+			go c.handleCandidateHoverChange(index)
+		},
+		OnContextMenu: func(index int) {
+			// Run in goroutine to avoid blocking UI thread
+			go c.handleCandidateContextMenu(index)
+		},
+	})
+}
+
+// handleCandidateSelect handles candidate selection via mouse click
+func (c *Coordinator) handleCandidateSelect(index int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Convert page-local index to actual candidate index
+	actualIndex := index // The index from hit test is already 0-based within current page
+
+	c.logger.Debug("Candidate selected via mouse", "index", actualIndex)
+
+	if actualIndex < 0 || actualIndex >= len(c.candidates) {
+		c.logger.Warn("Invalid candidate index", "index", actualIndex, "candidateCount", len(c.candidates))
+		return
+	}
+
+	candidate := c.candidates[actualIndex]
+	text := candidate.Text
+
+	// Apply full-width conversion if enabled
+	if c.fullWidth {
+		text = transform.ToFullWidth(text)
+	}
+
+	c.logger.Info("Candidate selected via mouse click", "index", actualIndex, "text", text)
+
+	// Clear state and hide UI
+	c.clearState()
+	c.hideUI()
+
+	// TODO: Send text to TSF via push pipe
+	// For now, we just log the selection. The actual text insertion
+	// requires C++ side support for receiving commit commands via push pipe.
+	c.logger.Debug("Mouse selection would commit text", "text", text)
+}
+
+// handleCandidateHoverChange handles hover state change
+func (c *Coordinator) handleCandidateHoverChange(index int) {
+	c.logger.Debug("Candidate hover changed", "index", index)
+
+	// Refresh the candidate window to show/hide hover highlight
+	if c.uiManager != nil {
+		c.uiManager.RefreshCandidates()
+	}
+}
+
+// handleCandidateContextMenu handles right-click on candidate
+func (c *Coordinator) handleCandidateContextMenu(index int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.logger.Debug("Candidate context menu requested", "index", index)
+
+	// TODO: Show context menu with options like:
+	// - Delete this word
+	// - Copy to clipboard
+	// - View encoding
 }
 
 // handleToolbarToggleMode handles mode toggle from toolbar click

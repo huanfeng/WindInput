@@ -27,8 +27,9 @@ type RenderConfig struct {
 	InputBgColor    color.Color
 	InputTextColor  color.Color
 	BorderColor     color.Color
-	Layout          string // "horizontal" or "vertical"
-	HidePreedit     bool   // Hide preedit area when inline_preedit is enabled
+	HoverBgColor    color.Color // Background color for hovered candidate
+	Layout          string      // "horizontal" or "vertical"
+	HidePreedit     bool        // Hide preedit area when inline_preedit is enabled
 }
 
 // DefaultRenderConfig returns default rendering configuration with DPI scaling
@@ -50,7 +51,8 @@ func DefaultRenderConfig() RenderConfig {
 		InputBgColor:    color.RGBA{240, 240, 240, 255},
 		InputTextColor:  color.RGBA{100, 100, 100, 255},
 		BorderColor:     color.RGBA{200, 200, 200, 255},
-		Layout:          "horizontal", // Default to horizontal layout
+		HoverBgColor:    color.RGBA{230, 240, 255, 255}, // Light blue for hover
+		Layout:          "horizontal",                   // Default to horizontal layout
 		HidePreedit:     false,
 	}
 }
@@ -210,18 +212,20 @@ func (r *Renderer) ensureFontLoaded() {
 
 // RenderCandidates renders candidates to an image
 // Optimized to minimize font loading operations
-func (r *Renderer) RenderCandidates(candidates []Candidate, input string, page, totalPages int) *image.RGBA {
+// hoverIndex: index of the hovered candidate (-1 for none)
+// Returns the rendered image and candidate bounding rectangles for hit testing
+func (r *Renderer) RenderCandidates(candidates []Candidate, input string, page, totalPages int, hoverIndex int) (*image.RGBA, *RenderResult) {
 	cfg := r.config
 
 	// Choose layout based on config
 	if cfg.Layout == "horizontal" {
-		return r.renderHorizontalCandidates(candidates, input, page, totalPages)
+		return r.renderHorizontalCandidates(candidates, input, page, totalPages, hoverIndex)
 	}
-	return r.renderVerticalCandidates(candidates, input, page, totalPages)
+	return r.renderVerticalCandidates(candidates, input, page, totalPages, hoverIndex)
 }
 
 // renderVerticalCandidates renders candidates in vertical layout (traditional style)
-func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string, page, totalPages int) *image.RGBA {
+func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string, page, totalPages int, hoverIndex int) (*image.RGBA, *RenderResult) {
 	cfg := r.config
 	scale := GetDPIScale()
 
@@ -287,7 +291,20 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		y += inputHeight + 4*scale
 	}
 
-	// First pass: draw all index circles (no font needed)
+	// Build candidate rectangles for hit testing
+	result := &RenderResult{
+		Rects: make([]CandidateRect, len(candidates)),
+	}
+
+	// Draw hover background first (if any)
+	if hoverIndex >= 0 && hoverIndex < len(candidates) {
+		itemY := y + float64(hoverIndex)*cfg.ItemHeight
+		dc.SetColor(cfg.HoverBgColor)
+		r.drawRoundedRect(dc, cfg.Padding-2, itemY, width-cfg.Padding*2+2, cfg.ItemHeight, 4*scale)
+		dc.Fill()
+	}
+
+	// First pass: draw all index circles and record bounding boxes
 	for i := range candidates {
 		itemY := y + float64(i)*cfg.ItemHeight
 		indexX := cfg.Padding + 14*scale
@@ -295,6 +312,15 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		dc.SetColor(cfg.IndexBgColor)
 		dc.DrawCircle(indexX, indexY, 11*scale)
 		dc.Fill()
+
+		// Record bounding rectangle
+		result.Rects[i] = CandidateRect{
+			Index: i,
+			X:     cfg.Padding - 2,
+			Y:     itemY,
+			W:     width - cfg.Padding*2 + 2,
+			H:     cfg.ItemHeight,
+		}
 	}
 
 	// Second pass: draw all index numbers (small font)
@@ -356,11 +382,11 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		dc.DrawString(pageText, width/2-tw/2, pageY+16*scale)
 	}
 
-	return dc.Image().(*image.RGBA)
+	return dc.Image().(*image.RGBA), result
 }
 
 // renderHorizontalCandidates renders candidates in horizontal layout (modern style)
-func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input string, page, totalPages int) *image.RGBA {
+func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input string, page, totalPages int, hoverIndex int) (*image.RGBA, *RenderResult) {
 	cfg := r.config
 	scale := GetDPIScale()
 
@@ -373,8 +399,13 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	type candMeasure struct {
 		textWidth    float64
 		commentWidth float64
+		totalWidth   float64 // Total width including index, text, comment
 	}
 	measures := make([]candMeasure, len(candidates))
+
+	indexSize := 18.0 * scale   // Index circle size
+	indexMargin := 4.0 * scale  // Margin between index and text
+	itemSpacing := 12.0 * scale // Space between items
 
 	tmpDc := gg.NewContext(1, 1)
 	if mainFace != nil {
@@ -394,19 +425,18 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		}
 	}
 
-	// Calculate dimensions
-	indexSize := 18.0 * scale   // Index circle size
-	indexMargin := 4.0 * scale  // Margin between index and text
-	itemSpacing := 12.0 * scale // Space between items
+	// Calculate total width for each candidate
+	for i, cand := range candidates {
+		measures[i].totalWidth = indexSize + indexMargin + measures[i].textWidth
+		if cand.Comment != "" {
+			measures[i].totalWidth += 6*scale + measures[i].commentWidth
+		}
+	}
 
 	// Calculate total candidates width
 	candidatesWidth := 0.0
-	for i, cand := range candidates {
-		itemWidth := indexSize + indexMargin + measures[i].textWidth
-		if cand.Comment != "" {
-			itemWidth += 6*scale + measures[i].commentWidth
-		}
-		candidatesWidth += itemWidth
+	for i := range candidates {
+		candidatesWidth += measures[i].totalWidth
 		if i < len(candidates)-1 {
 			candidatesWidth += itemSpacing
 		}
@@ -489,11 +519,34 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		y += inputHeight + 4*scale
 	}
 
+	// Build candidate rectangles for hit testing
+	result := &RenderResult{
+		Rects: make([]CandidateRect, len(candidates)),
+	}
+
 	// Draw candidates horizontally
 	x := cfg.Padding
 	candY := y + candidateRowHeight/2
 
 	for i, cand := range candidates {
+		itemWidth := measures[i].totalWidth
+
+		// Record bounding rectangle (before drawing)
+		result.Rects[i] = CandidateRect{
+			Index: i,
+			X:     x - 4,
+			Y:     y,
+			W:     itemWidth + 8,
+			H:     candidateRowHeight,
+		}
+
+		// Draw hover background if this is the hovered item
+		if i == hoverIndex {
+			dc.SetColor(cfg.HoverBgColor)
+			r.drawRoundedRect(dc, x-4, y, itemWidth+8, candidateRowHeight, 4*scale)
+			dc.Fill()
+		}
+
 		// Draw index circle
 		indexX := x + indexSize/2
 		dc.SetColor(cfg.IndexBgColor)
@@ -526,10 +579,6 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		}
 
 		// Move to next item
-		itemWidth := indexSize + indexMargin + measures[i].textWidth
-		if cand.Comment != "" {
-			itemWidth += 6*scale + measures[i].commentWidth
-		}
 		x += itemWidth + itemSpacing
 	}
 
@@ -542,7 +591,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		dc.DrawString(pageText, width-cfg.Padding-tw, candY+6*scale)
 	}
 
-	return dc.Image().(*image.RGBA)
+	return dc.Image().(*image.RGBA), result
 }
 
 func (r *Renderer) drawRoundedRect(dc *gg.Context, x, y, w, h, radius float64) {
