@@ -98,6 +98,21 @@ type InputConfig struct {
 	SelectKeyGroups []string `yaml:"select_key_groups" json:"select_key_groups"`
 	// 翻页键（多选）: pageupdown, minus_equal, brackets, shift_tab
 	PageKeys []string `yaml:"page_keys" json:"page_keys"`
+	// 临时英文模式配置 (中文模式下 Shift+字母)
+	ShiftTempEnglish ShiftTempEnglishConfig `yaml:"shift_temp_english" json:"shift_temp_english"`
+	// CapsLock 行为配置
+	CapsLockBehavior CapsLockBehaviorConfig `yaml:"capslock_behavior" json:"capslock_behavior"`
+}
+
+// ShiftTempEnglishConfig 临时英文模式配置
+type ShiftTempEnglishConfig struct {
+	Enabled              bool `yaml:"enabled" json:"enabled"`                                 // 是否启用
+	ShowEnglishCandidates bool `yaml:"show_english_candidates" json:"show_english_candidates"` // 显示英文候选
+}
+
+// CapsLockBehaviorConfig CapsLock 行为配置
+type CapsLockBehaviorConfig struct {
+	CancelOnModeSwitch bool `yaml:"cancel_on_mode_switch" json:"cancel_on_mode_switch"` // 切换中英文时是否取消 CapsLock
 }
 
 // AdvancedConfig 高级配置
@@ -162,6 +177,13 @@ func DefaultConfig() *Config {
 			PunctFollowMode: false,
 			SelectKeyGroups: []string{"semicolon_quote"},
 			PageKeys:        []string{"pageupdown", "minus_equal"},
+			ShiftTempEnglish: ShiftTempEnglishConfig{
+				Enabled:              true,
+				ShowEnglishCandidates: true,
+			},
+			CapsLockBehavior: CapsLockBehaviorConfig{
+				CancelOnModeSwitch: false,
+			},
 		},
 		Advanced: AdvancedConfig{
 			LogLevel: "info",

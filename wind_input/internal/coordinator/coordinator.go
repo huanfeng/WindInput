@@ -59,6 +59,10 @@ type Coordinator struct {
 	totalPages        int
 	candidatesPerPage int
 
+	// 临时英文模式状态
+	tempEnglishMode   bool   // 是否处于临时英文模式
+	tempEnglishBuffer string // 临时英文缓冲区
+
 	// Caret position (from C++)
 	caretX      int
 	caretY      int
@@ -494,24 +498,19 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	// Preserve original key for English mode (uppercase letters should stay uppercase)
 	key := data.Key
 
-	// English mode: pass through all keys
+	// English mode: pass through all keys directly to system
 	if !c.chineseMode {
-		// In English mode, letters should be passed through directly (both upper and lower case)
-		if len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')) {
-			return &bridge.KeyEventResult{
-				Type: bridge.ResponseTypeInsertText,
-				Text: key,
-			}
-		}
-		return nil // Let other keys pass through
+		// 纯英文模式：所有按键直接透传给系统，不经过 Go 处理
+		return nil
 	}
 
-	// Chinese mode with CapsLock: output uppercase letters directly
-	// This allows users to quickly type uppercase English while in Chinese mode
+	// Chinese mode with CapsLock: output letters directly (no full-width)
+	// CapsLock ON: letters are uppercase, Shift+letter are lowercase
+	// This allows users to quickly type English while in Chinese mode
 	// Use the CapsLock state from C++ side (data.Toggles) as it's more accurate
 	if data.IsCapsLockOn() {
 		if len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')) {
-			// If there's pending input, commit it first then output the uppercase letter
+			// If there's pending input, commit it first then output the letter
 			if len(c.inputBuffer) > 0 && len(c.candidates) > 0 {
 				// Commit first candidate
 				candidate := c.candidates[0]
@@ -522,30 +521,51 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 				c.clearState()
 				c.hideUI()
 
-				// Convert letter to uppercase and optionally apply full-width
-				upperKey := strings.ToUpper(key)
-				if c.fullWidth {
-					upperKey = transform.ToFullWidth(upperKey)
+				// Shift+letter = lowercase, letter = uppercase (CapsLock behavior)
+				// Note: no full-width conversion for CapsLock English output
+				var outputKey string
+				if hasShift {
+					outputKey = strings.ToLower(key)
+				} else {
+					outputKey = strings.ToUpper(key)
 				}
 
 				return &bridge.KeyEventResult{
 					Type: bridge.ResponseTypeInsertText,
-					Text: text + upperKey,
+					Text: text + outputKey,
 				}
 			}
 
-			// No pending input, just output uppercase letter
+			// No pending input, just output letter
 			c.clearState()
 			c.hideUI()
 
-			upperKey := strings.ToUpper(key)
-			if c.fullWidth {
-				upperKey = transform.ToFullWidth(upperKey)
+			// Shift+letter = lowercase, letter = uppercase (CapsLock behavior)
+			// Note: no full-width conversion for CapsLock English output
+			var outputKey string
+			if hasShift {
+				outputKey = strings.ToLower(key)
+			} else {
+				outputKey = strings.ToUpper(key)
 			}
 
 			return &bridge.KeyEventResult{
 				Type: bridge.ResponseTypeInsertText,
-				Text: upperKey,
+				Text: outputKey,
+			}
+		}
+	}
+
+	// 检查是否处于临时英文模式
+	if c.tempEnglishMode {
+		return c.handleTempEnglishKey(key, &data)
+	}
+
+	// 中文模式下，Shift+字母进入临时英文模式（CapsLock OFF 时）
+	if c.chineseMode && !data.IsCapsLockOn() && hasShift {
+		if c.config != nil && c.config.Input.ShiftTempEnglish.Enabled {
+			if len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')) {
+				return c.enterTempEnglishMode(key)
 			}
 		}
 	}
@@ -1008,6 +1028,8 @@ func (c *Coordinator) hideUI() {
 
 func (c *Coordinator) clearState() {
 	c.inputBuffer = ""
+	c.tempEnglishMode = false
+	c.tempEnglishBuffer = ""
 	c.candidates = nil
 	c.currentPage = 1
 	c.totalPages = 1
@@ -2359,4 +2381,188 @@ func (c *Coordinator) matchHotkey(hotkeyStr string, hasCtrl, hasShift, hasAlt bo
 
 	// Check if the key matches
 	return keyCode == targetKeyCode
+}
+
+// enterTempEnglishMode 进入临时英文模式
+func (c *Coordinator) enterTempEnglishMode(key string) *bridge.KeyEventResult {
+	c.tempEnglishMode = true
+	c.tempEnglishBuffer = strings.ToUpper(key) // Shift+字母输出大写
+
+	c.logger.Debug("Entered temp English mode", "buffer", c.tempEnglishBuffer)
+
+	// 显示临时英文模式 UI
+	c.showTempEnglishUI()
+
+	// 返回 UpdateComposition 让 C++ 端知道进入了 composing 状态
+	// 这样后续的 Backspace/Enter 才会被发送到 Go 端处理
+	return &bridge.KeyEventResult{
+		Type:     bridge.ResponseTypeUpdateComposition,
+		Text:     c.tempEnglishBuffer,
+		CaretPos: len(c.tempEnglishBuffer),
+	}
+}
+
+// handleTempEnglishKey 处理临时英文模式下的按键
+func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData) *bridge.KeyEventResult {
+	hasShift := data.Modifiers&ModShift != 0
+
+	switch {
+	case data.KeyCode == 8: // Backspace
+		if len(c.tempEnglishBuffer) > 0 {
+			c.tempEnglishBuffer = c.tempEnglishBuffer[:len(c.tempEnglishBuffer)-1]
+			if len(c.tempEnglishBuffer) == 0 {
+				return c.exitTempEnglishMode(false, "")
+			}
+			c.showTempEnglishUI()
+			// 返回 UpdateComposition 保持 composing 状态
+			return &bridge.KeyEventResult{
+				Type:     bridge.ResponseTypeUpdateComposition,
+				Text:     c.tempEnglishBuffer,
+				CaretPos: len(c.tempEnglishBuffer),
+			}
+		}
+		// 缓冲区已空，返回 ClearComposition
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+
+	case data.KeyCode == 27: // Escape
+		return c.exitTempEnglishMode(false, "")
+
+	case data.KeyCode == 32: // Space
+		// 上屏缓冲内容
+		text := c.tempEnglishBuffer
+		return c.exitTempEnglishMode(true, text)
+
+	case data.KeyCode == 13: // Enter
+		// Enter 也上屏缓冲内容
+		return c.exitTempEnglishMode(true, c.tempEnglishBuffer)
+
+	case len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')):
+		// 追加字母：Shift+字母=大写，字母=小写
+		var letter string
+		if hasShift {
+			letter = strings.ToUpper(key)
+		} else {
+			letter = strings.ToLower(key)
+		}
+		c.tempEnglishBuffer += letter
+		c.logger.Debug("Temp English buffer updated", "buffer", c.tempEnglishBuffer)
+		c.showTempEnglishUI()
+		// 返回 UpdateComposition 保持 composing 状态
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     c.tempEnglishBuffer,
+			CaretPos: len(c.tempEnglishBuffer),
+		}
+
+	case len(key) == 1 && key[0] >= '0' && key[0] <= '9':
+		// 数字：当前没有英文候选，上屏缓冲内容并输出数字
+		// （如果将来有英文词库/候选，数字应该用于选择候选）
+		if len(c.tempEnglishBuffer) > 0 {
+			text := c.tempEnglishBuffer
+			if c.fullWidth {
+				text = transform.ToFullWidth(text)
+			}
+			c.tempEnglishMode = false
+			c.tempEnglishBuffer = ""
+			c.hideUI()
+			return &bridge.KeyEventResult{
+				Type: bridge.ResponseTypeInsertText,
+				Text: text + key,
+			}
+		}
+		// 缓冲区为空，退出并透传数字
+		c.exitTempEnglishMode(false, "")
+		return nil
+	}
+
+	// 其他按键（如标点）：上屏缓冲内容，然后处理按键
+	if len(c.tempEnglishBuffer) > 0 {
+		text := c.tempEnglishBuffer
+		if c.fullWidth {
+			text = transform.ToFullWidth(text)
+		}
+		c.tempEnglishMode = false
+		c.tempEnglishBuffer = ""
+		c.hideUI()
+		// 如果是标点，处理标点
+		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
+			punctResult := c.handlePunctuation(rune(key[0]))
+			if punctResult != nil {
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: text + punctResult.Text,
+				}
+			}
+		}
+		return &bridge.KeyEventResult{
+			Type: bridge.ResponseTypeInsertText,
+			Text: text,
+		}
+	}
+
+	// 缓冲区为空，退出临时英文模式并透传
+	c.exitTempEnglishMode(false, "")
+	return nil
+}
+
+// exitTempEnglishMode 退出临时英文模式
+func (c *Coordinator) exitTempEnglishMode(commit bool, text string) *bridge.KeyEventResult {
+	c.tempEnglishMode = false
+	c.tempEnglishBuffer = ""
+	c.candidates = nil
+	c.currentPage = 0
+	c.totalPages = 0
+	c.hideUI()
+
+	c.logger.Debug("Exited temp English mode", "commit", commit, "text", text)
+
+	if commit && len(text) > 0 {
+		// 应用全角转换（如果启用）
+		if c.fullWidth {
+			text = transform.ToFullWidth(text)
+		}
+		return &bridge.KeyEventResult{
+			Type: bridge.ResponseTypeInsertText,
+			Text: text,
+		}
+	}
+
+	// 取消时返回 ClearComposition 让 C++ 端清除 composing 状态
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+}
+
+// showTempEnglishUI 显示临时英文模式的 UI
+func (c *Coordinator) showTempEnglishUI() {
+	if c.uiManager == nil || !c.uiManager.IsReady() {
+		return
+	}
+
+	// 使用光标位置
+	caretX := c.caretX
+	caretY := c.caretY
+	caretHeight := c.caretHeight
+
+	const maxCoord = 32000
+	if (c.caretX == 0 && c.caretY == 0) || caretX > maxCoord || caretX < -maxCoord || caretY > maxCoord || caretY < -maxCoord {
+		if c.lastValidX != 0 || c.lastValidY != 0 {
+			caretX = c.lastValidX
+			caretY = c.lastValidY
+			caretHeight = 20
+		} else {
+			caretX = 400
+			caretY = 300
+			caretHeight = 20
+		}
+	}
+
+	// 显示临时英文缓冲区内容（无候选词）
+	c.uiManager.ShowCandidates(
+		nil, // 无候选词
+		c.tempEnglishBuffer,
+		caretX,
+		caretY,
+		caretHeight,
+		1, // currentPage
+		1, // totalPages
+	)
 }

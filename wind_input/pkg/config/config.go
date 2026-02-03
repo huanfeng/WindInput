@@ -82,9 +82,22 @@ type ToolbarConfig struct {
 
 // InputConfig contains input behavior settings
 type InputConfig struct {
-	PunctFollowMode bool     `yaml:"punct_follow_mode" json:"punct_follow_mode"`
-	SelectKeyGroups []string `yaml:"select_key_groups" json:"select_key_groups"`
-	PageKeys        []string `yaml:"page_keys" json:"page_keys"`
+	PunctFollowMode  bool                   `yaml:"punct_follow_mode" json:"punct_follow_mode"`
+	SelectKeyGroups  []string               `yaml:"select_key_groups" json:"select_key_groups"`
+	PageKeys         []string               `yaml:"page_keys" json:"page_keys"`
+	ShiftTempEnglish ShiftTempEnglishConfig `yaml:"shift_temp_english" json:"shift_temp_english"`
+	CapsLockBehavior CapsLockBehaviorConfig `yaml:"capslock_behavior" json:"capslock_behavior"`
+}
+
+// ShiftTempEnglishConfig 临时英文模式配置
+type ShiftTempEnglishConfig struct {
+	Enabled              bool `yaml:"enabled" json:"enabled"`
+	ShowEnglishCandidates bool `yaml:"show_english_candidates" json:"show_english_candidates"`
+}
+
+// CapsLockBehaviorConfig CapsLock 行为配置
+type CapsLockBehaviorConfig struct {
+	CancelOnModeSwitch bool `yaml:"cancel_on_mode_switch" json:"cancel_on_mode_switch"`
 }
 
 // AdvancedConfig 高级配置
@@ -141,6 +154,13 @@ func DefaultConfig() *Config {
 			PunctFollowMode: false,
 			SelectKeyGroups: []string{"semicolon_quote"},
 			PageKeys:        []string{"pageupdown", "minus_equal"},
+			ShiftTempEnglish: ShiftTempEnglishConfig{
+				Enabled:              true,
+				ShowEnglishCandidates: true,
+			},
+			CapsLockBehavior: CapsLockBehaviorConfig{
+				CancelOnModeSwitch: false,
+			},
 		},
 		Advanced: AdvancedConfig{
 			LogLevel: "info",
