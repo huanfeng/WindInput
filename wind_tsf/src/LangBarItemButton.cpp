@@ -12,6 +12,9 @@ DEFINE_GUID(GUID_LBI_INPUTMODE,
 // 使用 GUID_LBI_INPUTMODE 使图标显示在 Windows 11 输入指示器中
 const GUID CLangBarItemButton::_guidLangBarItemButton = GUID_LBI_INPUTMODE;
 
+// Custom message for cross-thread status updates
+const UINT CLangBarItemButton::WM_UPDATE_STATUS = WM_USER + 100;
+
 CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     : _refCount(1)
     , _pTextService(pTextService)
@@ -22,6 +25,7 @@ CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     , _bFullWidth(FALSE)
     , _bChinesePunct(TRUE)
     , _bToolbarVisible(FALSE)
+    , _hMsgWnd(NULL)
 {
     // Initialize Caps Lock state
     _bCapsLock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
@@ -451,6 +455,34 @@ STDAPI CLangBarItemButton::UnadviseSink(DWORD dwCookie)
     return S_OK;
 }
 
+// Message window class name
+static const wchar_t* MSG_WND_CLASS = L"WindInputLangBarMsgWnd";
+static ATOM s_msgWndClass = 0;
+
+LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_UPDATE_STATUS)
+    {
+        // lParam contains pointer to StatusUpdateData (allocated by sender)
+        StatusUpdateData* pData = reinterpret_cast<StatusUpdateData*>(lParam);
+        CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+        if (pThis != nullptr && pData != nullptr)
+        {
+            OutputDebugStringW(L"[WindInput] MsgWndProc: Processing WM_UPDATE_STATUS\n");
+            // Call UpdateFullStatus on the UI thread
+            pThis->UpdateFullStatus(pData->bChineseMode, pData->bFullWidth,
+                                     pData->bChinesePunct, pData->bToolbarVisible, pData->bCapsLock);
+        }
+
+        // Free the data allocated by sender
+        delete pData;
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 BOOL CLangBarItemButton::Initialize()
 {
     OutputDebugStringW(L"[WindInput] LangBarItemButton::Initialize\n");
@@ -459,6 +491,37 @@ BOOL CLangBarItemButton::Initialize()
     {
         OutputDebugStringW(L"[WindInput] LangBarItemButton: _pTextService is null\n");
         return FALSE;
+    }
+
+    // Register message window class if not already registered
+    if (s_msgWndClass == 0)
+    {
+        WNDCLASSEXW wc = { sizeof(WNDCLASSEXW) };
+        wc.lpfnWndProc = _MsgWndProc;
+        wc.hInstance = g_hInstance;
+        wc.lpszClassName = MSG_WND_CLASS;
+        s_msgWndClass = RegisterClassExW(&wc);
+        if (s_msgWndClass == 0)
+        {
+            OutputDebugStringW(L"[WindInput] Failed to register message window class\n");
+        }
+    }
+
+    // Create message-only window for cross-thread updates
+    if (s_msgWndClass != 0)
+    {
+        _hMsgWnd = CreateWindowExW(0, MSG_WND_CLASS, L"", 0, 0, 0, 0, 0,
+                                    HWND_MESSAGE, NULL, g_hInstance, NULL);
+        if (_hMsgWnd != NULL)
+        {
+            // Store this pointer in window data
+            SetWindowLongPtrW(_hMsgWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+            OutputDebugStringW(L"[WindInput] Message window created for cross-thread updates\n");
+        }
+        else
+        {
+            OutputDebugStringW(L"[WindInput] Failed to create message window\n");
+        }
     }
 
     ITfThreadMgr* pThreadMgr = _pTextService->GetThreadMgr();
@@ -499,6 +562,13 @@ BOOL CLangBarItemButton::Initialize()
 void CLangBarItemButton::Uninitialize()
 {
     OutputDebugStringW(L"[WindInput] LangBarItemButton::Uninitialize\n");
+
+    // Destroy message window
+    if (_hMsgWnd != NULL)
+    {
+        DestroyWindow(_hMsgWnd);
+        _hMsgWnd = NULL;
+    }
 
     if (_pTextService == nullptr)
         return;
@@ -578,9 +648,41 @@ void CLangBarItemButton::UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BO
     }
 
     WCHAR debug[256];
-    wsprintfW(debug, L"[WindInput] UpdateFullStatus: mode=%d, width=%d, punct=%d, toolbar=%d, caps=%d\n",
-              bChineseMode, bFullWidth, bChinesePunct, bToolbarVisible, bCapsLock);
+    wsprintfW(debug, L"[WindInput] UpdateFullStatus: mode=%d, width=%d, punct=%d, toolbar=%d, caps=%d, needUpdate=%d\n",
+              bChineseMode, bFullWidth, bChinesePunct, bToolbarVisible, bCapsLock, needUpdate);
     OutputDebugStringW(debug);
+}
+
+void CLangBarItemButton::PostUpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock)
+{
+    // Thread-safe update: post message to message window which runs on UI thread
+    if (_hMsgWnd == NULL)
+    {
+        OutputDebugStringW(L"[WindInput] PostUpdateFullStatus: No message window, falling back to direct call\n");
+        // Fallback to direct call (may not work from async thread)
+        UpdateFullStatus(bChineseMode, bFullWidth, bChinesePunct, bToolbarVisible, bCapsLock);
+        return;
+    }
+
+    // Allocate data on heap (will be freed by message handler)
+    StatusUpdateData* pData = new StatusUpdateData();
+    pData->bChineseMode = bChineseMode;
+    pData->bFullWidth = bFullWidth;
+    pData->bChinesePunct = bChinesePunct;
+    pData->bToolbarVisible = bToolbarVisible;
+    pData->bCapsLock = bCapsLock;
+
+    // Post message to UI thread
+    if (!PostMessageW(_hMsgWnd, WM_UPDATE_STATUS, 0, reinterpret_cast<LPARAM>(pData)))
+    {
+        // PostMessage failed, free data and fallback
+        delete pData;
+        OutputDebugStringW(L"[WindInput] PostUpdateFullStatus: PostMessage failed\n");
+    }
+    else
+    {
+        OutputDebugStringW(L"[WindInput] PostUpdateFullStatus: Message posted to UI thread\n");
+    }
 }
 
 void CLangBarItemButton::ForceRefresh()

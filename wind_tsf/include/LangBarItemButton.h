@@ -59,10 +59,27 @@ public:
     // Update full status (called when receiving status_update from Go service)
     void UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock);
 
+    // Thread-safe update from async thread (posts message to UI thread)
+    void PostUpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock);
+
     // Force refresh the language bar icon (used when focus is gained)
     void ForceRefresh();
 
 private:
+    // Message window for cross-thread updates
+    HWND _hMsgWnd;
+    static LRESULT CALLBACK _MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    static const UINT WM_UPDATE_STATUS;
+
+    // Packed status for message passing
+    struct StatusUpdateData {
+        BOOL bChineseMode;
+        BOOL bFullWidth;
+        BOOL bChinesePunct;
+        BOOL bToolbarVisible;
+        BOOL bCapsLock;
+    };
+
     LONG _refCount;
     CTextService* _pTextService;
     ITfLangBarItemSink* _pLangBarItemSink;

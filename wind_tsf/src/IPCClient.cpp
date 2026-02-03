@@ -15,6 +15,10 @@ CIPCClient::CIPCClient()
     , _circuitState(CircuitState::Closed)
     , _consecutiveFailures(0)
     , _lastFailureTime(0)
+    , _hAsyncThread(NULL)
+    , _hStopEvent(NULL)
+    , _hReadPipe(INVALID_HANDLE_VALUE)
+    , _asyncReaderRunning(FALSE)
 {
     // Create event for overlapped I/O
     _hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -22,10 +26,21 @@ CIPCClient::CIPCClient()
     {
         _LogError(L"Failed to create overlapped event: %d", GetLastError());
     }
+
+    // Initialize critical section for async reader
+    InitializeCriticalSection(&_asyncLock);
+
+    // Create stop event for async reader thread
+    _hStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (_hStopEvent == NULL)
+    {
+        _LogError(L"Failed to create stop event: %d", GetLastError());
+    }
 }
 
 CIPCClient::~CIPCClient()
 {
+    StopAsyncReader();
     Disconnect();
 
     if (_hEvent != NULL)
@@ -33,6 +48,14 @@ CIPCClient::~CIPCClient()
         CloseHandle(_hEvent);
         _hEvent = NULL;
     }
+
+    if (_hStopEvent != NULL)
+    {
+        CloseHandle(_hStopEvent);
+        _hStopEvent = NULL;
+    }
+
+    DeleteCriticalSection(&_asyncLock);
 }
 
 // ============================================================================
@@ -1224,4 +1247,258 @@ BOOL CIPCClient::ReceiveBatchResponse(std::vector<ServiceResponse>& responses, i
     }
 
     return TRUE;
+}
+
+// ============================================================================
+// Async Reader Thread Implementation
+// ============================================================================
+
+void CIPCClient::SetStatePushCallback(StatePushCallback callback)
+{
+    EnterCriticalSection(&_asyncLock);
+    _statePushCallback = callback;
+    LeaveCriticalSection(&_asyncLock);
+}
+
+BOOL CIPCClient::StartAsyncReader()
+{
+    if (_asyncReaderRunning)
+    {
+        _LogDebug(L"Async reader already running");
+        return TRUE;
+    }
+
+    // Reset stop event
+    ResetEvent(_hStopEvent);
+
+    // Connect to push pipe
+    _LogInfo(L"Connecting to push pipe...");
+
+    for (int attempt = 0; attempt < 3; attempt++)
+    {
+        if (!WaitNamedPipeW(PUSH_PIPE_NAME, IPCConfig::CONNECT_TIMEOUT_MS))
+        {
+            DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND)
+            {
+                _LogDebug(L"Push pipe not found, attempt %d", attempt + 1);
+                Sleep(200);
+                continue;
+            }
+            else if (error == ERROR_SEM_TIMEOUT)
+            {
+                _LogDebug(L"WaitNamedPipe timed out for push pipe, attempt %d", attempt + 1);
+                continue;
+            }
+        }
+
+        _hReadPipe = CreateFileW(
+            PUSH_PIPE_NAME,
+            GENERIC_READ,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED,
+            nullptr);
+
+        if (_hReadPipe != INVALID_HANDLE_VALUE)
+        {
+            DWORD mode = PIPE_READMODE_MESSAGE;
+            SetNamedPipeHandleState(_hReadPipe, &mode, nullptr, nullptr);
+            _LogInfo(L"Connected to push pipe");
+            break;
+        }
+
+        DWORD error = GetLastError();
+        _LogDebug(L"Push pipe connection attempt %d failed: error=%d", attempt + 1, error);
+
+        if (error == ERROR_PIPE_BUSY)
+        {
+            Sleep(50);
+            continue;
+        }
+    }
+
+    if (_hReadPipe == INVALID_HANDLE_VALUE)
+    {
+        _LogError(L"Failed to connect to push pipe");
+        return FALSE;
+    }
+
+    // Create async reader thread
+    _hAsyncThread = CreateThread(
+        NULL,
+        0,
+        _AsyncReaderThread,
+        this,
+        0,
+        NULL);
+
+    if (_hAsyncThread == NULL)
+    {
+        _LogError(L"Failed to create async reader thread: %d", GetLastError());
+        CloseHandle(_hReadPipe);
+        _hReadPipe = INVALID_HANDLE_VALUE;
+        return FALSE;
+    }
+
+    _asyncReaderRunning = TRUE;
+    _LogInfo(L"Async reader thread started");
+    return TRUE;
+}
+
+void CIPCClient::StopAsyncReader()
+{
+    if (!_asyncReaderRunning)
+    {
+        return;
+    }
+
+    _LogInfo(L"Stopping async reader thread...");
+
+    // Signal thread to stop
+    SetEvent(_hStopEvent);
+
+    // Wait for thread to exit (with timeout)
+    if (_hAsyncThread != NULL)
+    {
+        DWORD waitResult = WaitForSingleObject(_hAsyncThread, 2000);
+        if (waitResult == WAIT_TIMEOUT)
+        {
+            _LogError(L"Async reader thread did not exit in time, terminating");
+            TerminateThread(_hAsyncThread, 0);
+        }
+        CloseHandle(_hAsyncThread);
+        _hAsyncThread = NULL;
+    }
+
+    // Close push pipe
+    if (_hReadPipe != INVALID_HANDLE_VALUE)
+    {
+        CancelIo(_hReadPipe);
+        CloseHandle(_hReadPipe);
+        _hReadPipe = INVALID_HANDLE_VALUE;
+    }
+
+    _asyncReaderRunning = FALSE;
+    _LogInfo(L"Async reader thread stopped");
+}
+
+BOOL CIPCClient::IsAsyncReaderRunning() const
+{
+    return _asyncReaderRunning;
+}
+
+DWORD WINAPI CIPCClient::_AsyncReaderThread(LPVOID lpParam)
+{
+    CIPCClient* pThis = static_cast<CIPCClient*>(lpParam);
+    pThis->_AsyncReaderLoop();
+    return 0;
+}
+
+void CIPCClient::_AsyncReaderLoop()
+{
+    _LogInfo(L"Async reader loop started");
+
+    HANDLE hReadEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (hReadEvent == NULL)
+    {
+        _LogError(L"Failed to create read event for async reader: %d", GetLastError());
+        return;
+    }
+
+    std::vector<uint8_t> buffer(IPCConfig::PIPE_BUFFER_SIZE);
+    HANDLE waitHandles[2] = { _hStopEvent, hReadEvent };
+
+    while (true)
+    {
+        // Start overlapped read
+        OVERLAPPED overlapped = {};
+        overlapped.hEvent = hReadEvent;
+        ResetEvent(hReadEvent);
+
+        DWORD bytesRead = 0;
+        BOOL result = ReadFile(_hReadPipe, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, &overlapped);
+
+        if (!result)
+        {
+            DWORD error = GetLastError();
+            if (error != ERROR_IO_PENDING)
+            {
+                _LogError(L"Async reader: ReadFile failed: %d", error);
+                break;
+            }
+
+            // Wait for either stop event or read completion
+            DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
+
+            if (waitResult == WAIT_OBJECT_0)
+            {
+                // Stop event signaled
+                _LogInfo(L"Async reader: stop event received");
+                CancelIo(_hReadPipe);
+                break;
+            }
+            else if (waitResult == WAIT_OBJECT_0 + 1)
+            {
+                // Read completed
+                if (!GetOverlappedResult(_hReadPipe, &overlapped, &bytesRead, FALSE))
+                {
+                    DWORD error = GetLastError();
+                    if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED)
+                    {
+                        _LogError(L"Async reader: pipe disconnected");
+                        break;
+                    }
+                    _LogError(L"Async reader: GetOverlappedResult failed: %d", error);
+                    continue;
+                }
+            }
+            else
+            {
+                _LogError(L"Async reader: WaitForMultipleObjects failed: %d", GetLastError());
+                break;
+            }
+        }
+
+        // Process received message
+        if (bytesRead >= sizeof(IpcHeader))
+        {
+            IpcHeader header;
+            memcpy(&header, buffer.data(), sizeof(IpcHeader));
+
+            _LogDebug(L"Async reader: received message cmd=0x%04X, len=%d", header.command, header.length);
+
+            if (header.command == CMD_STATE_PUSH)
+            {
+                // Parse state push
+                std::vector<uint8_t> payload;
+                if (header.length > 0 && bytesRead >= sizeof(IpcHeader) + header.length)
+                {
+                    payload.assign(buffer.begin() + sizeof(IpcHeader),
+                                   buffer.begin() + sizeof(IpcHeader) + header.length);
+                }
+
+                ServiceResponse response;
+                if (_ParseResponse(header, payload, response))
+                {
+                    _LogInfo(L"Async reader: state push received - mode=%d, fullWidth=%d",
+                             response.IsChineseMode(), response.IsFullWidth());
+
+                    // Call callback
+                    EnterCriticalSection(&_asyncLock);
+                    StatePushCallback callback = _statePushCallback;
+                    LeaveCriticalSection(&_asyncLock);
+
+                    if (callback)
+                    {
+                        callback(response);
+                    }
+                }
+            }
+        }
+    }
+
+    CloseHandle(hReadEvent);
+    _LogInfo(L"Async reader loop exited");
 }

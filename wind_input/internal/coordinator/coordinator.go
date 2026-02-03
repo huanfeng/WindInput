@@ -248,6 +248,8 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 }
 
 // setupToolbarCallbacks sets up the callbacks for toolbar button clicks
+// IMPORTANT: These callbacks are invoked from the UI thread (window procedure).
+// We use goroutines to avoid blocking the UI thread with lock acquisition or I/O.
 func (c *Coordinator) setupToolbarCallbacks() {
 	if c.uiManager == nil {
 		return
@@ -255,19 +257,20 @@ func (c *Coordinator) setupToolbarCallbacks() {
 
 	c.uiManager.SetToolbarCallbacks(&ui.ToolbarCallback{
 		OnToggleMode: func() {
-			c.handleToolbarToggleMode()
+			// Run in goroutine to avoid blocking UI thread
+			go c.handleToolbarToggleMode()
 		},
 		OnToggleWidth: func() {
-			c.handleToolbarToggleWidth()
+			go c.handleToolbarToggleWidth()
 		},
 		OnTogglePunct: func() {
-			c.handleToolbarTogglePunct()
+			go c.handleToolbarTogglePunct()
 		},
 		OnOpenSettings: func() {
-			c.handleToolbarOpenSettings()
+			go c.handleToolbarOpenSettings()
 		},
 		OnPositionChanged: func(x, y int) {
-			c.handleToolbarPositionChanged(x, y)
+			go c.handleToolbarPositionChanged(x, y)
 		},
 	})
 }
@@ -278,7 +281,7 @@ func (c *Coordinator) handleToolbarToggleMode() {
 	defer c.mu.Unlock()
 
 	c.chineseMode = !c.chineseMode
-	c.logger.Debug("Mode toggled via toolbar", "chineseMode", c.chineseMode)
+	c.logger.Info("Mode toggled via toolbar", "chineseMode", c.chineseMode)
 
 	// Clear any pending input when switching modes
 	if len(c.inputBuffer) > 0 {
@@ -861,14 +864,15 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 	}
 
 	candidate := c.candidates[index]
-	c.logger.Debug("Candidate selected", "index", index, "text", candidate.Text)
-
-	text := candidate.Text
+	originalText := candidate.Text
+	text := originalText
 
 	// Apply full-width conversion if enabled
 	if c.fullWidth {
 		text = transform.ToFullWidth(text)
 	}
+
+	c.logger.Debug("Candidate selected", "index", index, "original", originalText, "output", text, "fullWidth", c.fullWidth)
 
 	c.clearState()
 	c.hideUI()

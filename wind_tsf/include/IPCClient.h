@@ -145,6 +145,25 @@ public:
     // Receive batch response
     BOOL ReceiveBatchResponse(std::vector<ServiceResponse>& responses, int expectedCount);
 
+    // ========================================================================
+    // Async Reader Thread (for receiving Go's proactive state pushes)
+    // ========================================================================
+
+    // Callback type for state push notifications
+    using StatePushCallback = std::function<void(const ServiceResponse&)>;
+
+    // Set callback for receiving state push from Go
+    void SetStatePushCallback(StatePushCallback callback);
+
+    // Start async reader thread (call after successful connection)
+    BOOL StartAsyncReader();
+
+    // Stop async reader thread
+    void StopAsyncReader();
+
+    // Check if async reader is running
+    BOOL IsAsyncReaderRunning() const;
+
     // Log level control
     static void SetLogLevel(IPCLogLevel level) { s_logLevel = level; }
     static IPCLogLevel GetLogLevel() { return s_logLevel; }
@@ -208,4 +227,16 @@ private:
     std::vector<uint8_t> _batchBuffer;
     std::vector<bool> _batchNeedResponse;
     uint16_t _batchCount = 0;
+
+    // Async reader thread state
+    HANDLE _hAsyncThread = NULL;
+    HANDLE _hStopEvent = NULL;           // Event to signal thread to stop
+    HANDLE _hReadPipe = INVALID_HANDLE_VALUE;  // Separate pipe for async reading
+    StatePushCallback _statePushCallback;
+    CRITICAL_SECTION _asyncLock;         // Lock for thread-safe access
+    volatile BOOL _asyncReaderRunning = FALSE;
+
+    // Async reader thread function
+    static DWORD WINAPI _AsyncReaderThread(LPVOID lpParam);
+    void _AsyncReaderLoop();
 };

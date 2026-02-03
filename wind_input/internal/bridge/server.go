@@ -17,6 +17,7 @@ import (
 
 const (
 	BridgePipeName = `\\.\pipe\wind_input`
+	PushPipeName   = `\\.\pipe\wind_input_push`
 
 	// Buffer size for named pipe (64KB like Weasel)
 	PipeBufferSize = 64 * 1024
@@ -34,6 +35,11 @@ type Server struct {
 	mu            sync.RWMutex
 	clientCount   int
 	activeHandles map[windows.Handle]*pipeWriter // Map handle to writer for broadcasting
+
+	// Push pipe clients (for proactive state push)
+	pushMu          sync.RWMutex
+	pushClientCount int
+	pushClients     map[windows.Handle]*pipeWriter
 }
 
 // NewServer creates a new Bridge IPC server
@@ -43,12 +49,16 @@ func NewServer(handler MessageHandler, logger *slog.Logger) *Server {
 		logger:        logger,
 		codec:         ipc.NewBinaryCodec(),
 		activeHandles: make(map[windows.Handle]*pipeWriter),
+		pushClients:   make(map[windows.Handle]*pipeWriter),
 	}
 }
 
 // Start begins listening for connections from C++ Bridge
 func (s *Server) Start() error {
 	s.logger.Info("Starting Bridge IPC server (binary protocol)", "pipe", BridgePipeName)
+
+	// Start the push pipe listener in a separate goroutine
+	go s.startPushPipeListener()
 
 	// Create security descriptor allowing Everyone, SYSTEM, and Administrators
 	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)"
@@ -543,6 +553,88 @@ func (s *Server) encodeStatusUpdate(status *StatusUpdateData) []byte {
 	)
 }
 
+// startPushPipeListener starts the push pipe listener for state push
+func (s *Server) startPushPipeListener() {
+	s.logger.Info("Starting Push pipe listener", "pipe", PushPipeName)
+
+	// Create security descriptor allowing Everyone, SYSTEM, and Administrators
+	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)"
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		s.logger.Error("Failed to create security descriptor for push pipe", "error", err)
+		sd = nil
+	}
+
+	var sa *windows.SecurityAttributes
+	if sd != nil {
+		sa = &windows.SecurityAttributes{
+			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+			SecurityDescriptor: sd,
+		}
+	}
+
+	for {
+		pipePath, err := windows.UTF16PtrFromString(PushPipeName)
+		if err != nil {
+			s.logger.Error("Failed to convert push pipe path", "error", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		handle, err := windows.CreateNamedPipe(
+			pipePath,
+			windows.PIPE_ACCESS_OUTBOUND, // Write-only for push
+			windows.PIPE_TYPE_MESSAGE|windows.PIPE_WAIT,
+			windows.PIPE_UNLIMITED_INSTANCES,
+			PipeBufferSize,
+			0, // No input buffer needed
+			0,
+			sa,
+		)
+
+		if err != nil {
+			s.logger.Error("Failed to create push pipe", "error", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		s.logger.Debug("Waiting for push pipe connection...")
+
+		err = windows.ConnectNamedPipe(handle, nil)
+		if err != nil && err != windows.ERROR_PIPE_CONNECTED {
+			windows.CloseHandle(handle)
+			continue
+		}
+
+		writer := &pipeWriter{handle: handle}
+
+		s.pushMu.Lock()
+		s.pushClientCount++
+		clientID := s.pushClientCount
+		s.pushClients[handle] = writer
+		s.pushMu.Unlock()
+
+		s.logger.Info("Push pipe client connected", "clientID", clientID)
+
+		// Monitor client disconnection in a separate goroutine
+		go func(h windows.Handle, id int) {
+			// Wait for pipe to break (client disconnects)
+			for {
+				// Try to write a small test message (or wait for error on next push)
+				time.Sleep(5 * time.Second)
+
+				s.pushMu.RLock()
+				_, exists := s.pushClients[h]
+				s.pushMu.RUnlock()
+
+				if !exists {
+					break
+				}
+			}
+		}(handle, clientID)
+	}
+}
+
 // PushStateToAllClients broadcasts state update to all connected TSF clients
 // This is used for proactive state push (e.g., when mode changes via toolbar click)
 func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
@@ -553,29 +645,51 @@ func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
 	// Encode the state push message using CMD_STATE_PUSH
 	encoded := s.encodeStatePush(status)
 
-	// Get all active clients
-	s.mu.RLock()
-	clients := make([]*pipeWriter, 0, len(s.activeHandles))
-	for _, writer := range s.activeHandles {
-		clients = append(clients, writer)
+	// Get all push clients
+	s.pushMu.RLock()
+	clients := make([]windows.Handle, 0, len(s.pushClients))
+	writers := make([]*pipeWriter, 0, len(s.pushClients))
+	for h, writer := range s.pushClients {
+		clients = append(clients, h)
+		writers = append(writers, writer)
 	}
 	clientCount := len(clients)
-	s.mu.RUnlock()
+	s.pushMu.RUnlock()
 
 	if clientCount == 0 {
-		s.logger.Debug("No clients to push state to")
+		s.logger.Debug("No push pipe clients to send state to")
 		return
 	}
 
-	s.logger.Debug("Pushing state to all clients", "count", clientCount, "chineseMode", status.ChineseMode, "capsLock", status.CapsLock)
+	s.logger.Info("Pushing state to TSF clients via push pipe",
+		"count", clientCount,
+		"chineseMode", status.ChineseMode,
+		"fullWidth", status.FullWidth,
+		"capsLock", status.CapsLock)
 
-	// Send to all clients (fire and forget, don't block on failures)
-	for _, writer := range clients {
+	// Send to all clients
+	var failedHandles []windows.Handle
+	successCount := 0
+	for i, writer := range writers {
 		if err := s.codec.WriteMessage(writer, encoded); err != nil {
 			s.logger.Warn("Failed to push state to client", "error", err)
-			// Don't disconnect client on push failure - it might recover
+			failedHandles = append(failedHandles, clients[i])
+		} else {
+			successCount++
 		}
 	}
+
+	// Remove failed clients
+	if len(failedHandles) > 0 {
+		s.pushMu.Lock()
+		for _, h := range failedHandles {
+			delete(s.pushClients, h)
+			windows.CloseHandle(h)
+		}
+		s.pushMu.Unlock()
+	}
+
+	s.logger.Info("State push completed", "success", successCount, "total", clientCount)
 }
 
 // encodeStatePush encodes a state push message (CMD_STATE_PUSH)

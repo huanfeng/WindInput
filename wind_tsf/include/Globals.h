@@ -57,6 +57,7 @@ extern const GUID c_guidLangBarItemButton;
 
 // 命名管道名称 (与 Go Service 通信)
 #define PIPE_NAME               L"\\\\.\\pipe\\wind_input"
+#define PUSH_PIPE_NAME          L"\\\\.\\pipe\\wind_input_push"
 
 // Modifier key flags (using KEY_ prefix to avoid Windows macro conflicts)
 constexpr int KEY_MOD_SHIFT = 0x01;

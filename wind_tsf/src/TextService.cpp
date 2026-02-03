@@ -807,6 +807,43 @@ BOOL CTextService::_InitIPCClient()
         WIND_LOG(L"[WindInput] Failed to connect to Go Service, will retry later\n");
     }
 
+    // Set up state push callback
+    CTextService* pThis = this;
+    _pIPCClient->SetStatePushCallback([pThis](const ServiceResponse& response) {
+        // This callback is called from the async reader thread
+        // We need to update our state and notify the language bar
+        WIND_LOG_FMT(L"[WindInput] State push received: mode=%d, fullWidth=%d, punct=%d, caps=%d\n",
+                     response.IsChineseMode(), response.IsFullWidth(),
+                     response.IsChinesePunct(), response.IsCapsLock());
+
+        // Update internal state (atomic operation, thread-safe)
+        pThis->_bChineseMode = response.IsChineseMode();
+
+        // Update language bar button using thread-safe PostUpdateFullStatus
+        // This posts a message to the UI thread instead of calling COM directly
+        if (pThis->_pLangBarItemButton != nullptr)
+        {
+            pThis->_pLangBarItemButton->PostUpdateFullStatus(
+                response.IsChineseMode(),
+                response.IsFullWidth(),
+                response.IsChinesePunct(),
+                response.IsToolbarVisible(),
+                response.IsCapsLock()
+            );
+        }
+    });
+
+    // Start async reader thread for receiving state pushes from Go
+    if (!_pIPCClient->StartAsyncReader())
+    {
+        WIND_LOG(L"[WindInput] Failed to start async reader thread (non-fatal)\n");
+        // Non-fatal - we can still use sync IPC
+    }
+    else
+    {
+        WIND_LOG(L"[WindInput] Async reader thread started for state push\n");
+    }
+
     return TRUE;
 }
 
@@ -814,6 +851,8 @@ void CTextService::_UninitIPCClient()
 {
     if (_pIPCClient != nullptr)
     {
+        // Stop async reader thread first
+        _pIPCClient->StopAsyncReader();
         _pIPCClient->Disconnect();
         delete _pIPCClient;
         _pIPCClient = nullptr;
