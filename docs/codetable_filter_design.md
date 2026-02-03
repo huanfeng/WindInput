@@ -1,5 +1,8 @@
 # 码表过滤功能设计文档
 
+> **状态**: ✅ 已完成实现
+> **最后更新**: 2026-02-03
+
 ## 1. 功能目标
 
 实现输入法候选词的过滤功能，避免过多生僻字影响日常使用体验。
@@ -159,15 +162,15 @@ func filterCommonOnly(candidates []Candidate) []Candidate {
 
 ## 6. 实现步骤
 
-1. **创建 common_chars.txt** - 包含8105个通用规范汉字
-2. **创建 common_chars.go** - 实现加载和判断函数
-3. **修改 candidate.go** - 添加 IsCommon 字段
-4. **修改 config.go** - 添加 FilterMode 配置
-5. **修改 codetable.go** - 加载时调用 IsStringCommon 标记
-6. **修改 loader.go** - 加载时调用 IsStringCommon 标记
-7. **修改 wubi.go** - Convert 返回前过滤
-8. **修改 pinyin.go** - Convert 返回前过滤
-9. **编译测试**
+1. ✅ **创建 common_chars.txt** - 包含通用规范汉字（`dict/common_chars.txt`）
+2. ✅ **创建 common_chars.go** - 实现加载和判断函数（`dict/common_chars.go`）
+3. ✅ **修改 candidate.go** - 添加 IsCommon 字段（`candidate/candidate.go`）
+4. ✅ **修改 config.go** - 添加 FilterMode 配置（`engine.filter_mode`）
+5. ✅ **修改 codetable.go** - 加载时调用 IsStringCommon 标记
+6. ✅ **修改 loader.go** - 加载时调用 IsStringCommon 标记
+7. ✅ **创建 filter.go** - 实现候选词过滤逻辑（`candidate/filter.go`）
+8. ✅ **集成到引擎** - 五笔和拼音引擎使用过滤功能
+9. ✅ **编译测试** - 功能验证通过
 
 ## 7. 配置示例
 

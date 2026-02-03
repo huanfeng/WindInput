@@ -71,8 +71,12 @@ WindInput 采用分层架构，将系统接口层和业务逻辑层分离：
 | `KeyEventSink.cpp` | `CKeyEventSink` | 按键事件处理，实现 ITfKeyEventSink |
 | `LangBarItemButton.cpp` | `CLangBarItemButton` | 语言栏图标，实现 ITfLangBarItemButton |
 | `IPCClient.cpp` | `CIPCClient` | 命名管道客户端，与 Go 服务通信 |
+| `HotkeyManager.cpp` | `CHotkeyManager` | 快捷键管理，热键白名单匹配 |
+| `CaretEditSession.cpp` | `CCaretEditSession` | 编辑会话管理，光标位置获取 |
+| `DisplayAttributeInfo.cpp` | `CDisplayAttributeInfo` | 显示属性，组字状态样式 |
 | `Register.cpp` | 注册函数 | TSF 组件注册/卸载 |
 | `Globals.cpp` | 全局变量 | GUID 定义、DLL 引用计数 |
+| `BinaryProtocol.h` | 协议定义 | 二进制 IPC 协议结构和命令常量 |
 
 ### 2.2 核心类详解
 
@@ -284,28 +288,61 @@ hr = pProfileMgr->RegisterProfile(
 wind_input/
 ├── cmd/service/main.go          # 服务入口
 └── internal/
-    ├── bridge/                  # C++ 通信层
+    ├── bridge/                  # C++ 通信层（兼容层）
     │   ├── protocol.go          # 协议定义
     │   └── server.go            # 命名管道服务端
+    │
+    ├── ipc/                     # 新 IPC 通信层（二进制协议）
+    │   ├── binary_protocol.go   # 二进制协议定义
+    │   ├── binary_codec.go      # 二进制编解码器
+    │   ├── protocol.go          # 协议常量
+    │   └── server.go            # IPC 服务器
     │
     ├── coordinator/             # 输入协调器
     │   └── coordinator.go       # 状态管理、业务逻辑
     │
-    ├── engine/                  # 输入引擎
+    ├── engine/                  # 输入引擎（多引擎支持）
     │   ├── engine.go            # 接口定义
-    │   └── pinyin/
-    │       ├── pinyin.go        # 拼音引擎实现
-    │       └── syllable.go      # 音节解析
+    │   ├── manager.go           # 引擎管理器
+    │   ├── pinyin/              # 拼音引擎
+    │   │   ├── pinyin.go        # 拼音引擎实现
+    │   │   └── syllable.go      # 音节解析
+    │   └── wubi/                # 五笔引擎
+    │       └── wubi.go          # 五笔引擎实现
     │
-    ├── dict/                    # 词库
+    ├── dict/                    # 词库（高级功能）
     │   ├── dict.go              # 词库接口
-    │   └── loader.go            # 词库加载器
+    │   ├── loader.go            # 词库加载器
+    │   ├── codetable.go         # 码表处理
+    │   ├── common_chars.go      # 通用规范汉字表
+    │   ├── manager.go           # 词库管理器
+    │   ├── user_dict.go         # 用户词库
+    │   └── shadow.go            # 影子词库
     │
-    ├── ui/                      # 候选窗口
+    ├── candidate/               # 候选词管理
+    │   ├── candidate.go         # 候选词结构
+    │   └── filter.go            # 候选词过滤
+    │
+    ├── state/                   # 状态管理
+    │   └── manager.go           # 状态管理器
+    │
+    ├── control/                 # 控制接口
+    │   └── server.go            # 控制服务器（设置工具通信）
+    │
+    ├── hotkey/                  # 快捷键处理
+    │   └── compiler.go          # 快捷键编译器
+    │
+    ├── transform/               # 文本转换
+    │   ├── fullwidth.go         # 全角/半角转换
+    │   └── punctuation.go       # 中英文标点转换
+    │
+    ├── ui/                      # 候选窗口 UI
     │   ├── manager.go           # UI 管理器
     │   ├── window.go            # 窗口操作
     │   ├── renderer.go          # 渲染器
-    │   └── protocol.go          # UI 数据结构
+    │   ├── protocol.go          # UI 数据结构
+    │   ├── toolbar_window.go    # 工具栏窗口
+    │   └── toolbar_renderer.go  # 工具栏渲染器
     │
     └── config/                  # 配置
         └── config.go            # 配置加载/保存
@@ -542,78 +579,120 @@ func Load() (*Config, error) {
 
 ## 4. IPC 通信协议
 
-### 4.1 请求消息 (C++ → Go)
+WindInput 使用**二进制协议**进行 C++ 与 Go 之间的高效通信，采用**双管道架构**。
 
-```json
-// 按键事件
-{
-    "type": "key_event",
-    "data": {
-        "key": "a",
-        "keycode": 65,
-        "modifiers": 0,
-        "event": "down"
-    }
-}
+### 4.1 管道架构
 
-// 光标位置更新
-{
-    "type": "caret_update",
-    "data": {
-        "x": 100,
-        "y": 200,
-        "height": 20
-    }
-}
-
-// 焦点丢失
-{
-    "type": "focus_lost"
-}
-
-// 切换模式
-{
-    "type": "toggle_mode"
-}
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Go 服务 (wind_input.exe)                        │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                        Coordinator (权威状态源)                   │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│         ↑ 接收请求                              ↓ 推送通知              │
+│  ┌──────┴──────┐                         ┌─────┴──────┐              │
+│  │  主管道服务  │                         │ 推送管道服务 │              │
+│  │ (同步响应)  │                         │ (异步通知)  │              │
+│  └──────┬──────┘                         └─────┬──────┘              │
+└─────────┼────────────────────────────────────────┼────────────────────┘
+          │ \\.\pipe\wind_input                    │ \\.\pipe\wind_input_push
+          │ (请求/响应)                            │ (推送)
+┌─────────┼────────────────────────────────────────┼────────────────────┐
+│  TSF DLL│                                        │                    │
+│  ┌──────┴──────┐                         ┌─────┴──────┐              │
+│  │ IPCClient   │                         │ AsyncReader │              │
+│  │ (发送请求)  │                         │ (接收推送)  │              │
+│  └─────────────┘                         └─────────────┘              │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 响应消息 (Go → C++)
+**主管道 (`\\.\pipe\wind_input`)**:
+- TSF → Go 发送请求，等待同步响应
+- 用于：按键事件、模式切换请求、焦点事件等
+- 同步调用模式，阻塞等待响应
 
-```json
-// 确认收到
-{
-    "type": "ack"
-}
+**推送管道 (`\\.\pipe\wind_input_push`)**:
+- Go → TSF 单向推送通知
+- 用于：状态变更广播、热键更新等
+- 独立线程异步读取，不阻塞主流程
 
-// 插入文字
-{
-    "type": "insert_text",
-    "data": {
-        "text": "你好"
-    }
-}
+### 4.2 协议格式
 
-// 清除组字
-{
-    "type": "clear_composition"
-}
-
-// 模式变更
-{
-    "type": "mode_changed",
-    "data": {
-        "chinese_mode": true
-    }
-}
+```
+┌──────────────┬──────────────┬──────────────┬─────────────────────────┐
+│  2 bytes     │  2 bytes     │  4 bytes     │     N bytes             │
+│  Version     │  Command     │  Length = N  │     Payload             │
+└──────────────┴──────────────┴──────────────┴─────────────────────────┘
 ```
 
-### 4.3 修饰键定义
+**协议版本**: `0x1001` (v1.1，支持 barrier 机制)
+
+### 4.2 上行命令 (C++ → Go)
+
+| 命令 | 值 | 说明 |
+|------|-----|------|
+| `CMD_KEY_EVENT` | 0x0101 | 按键事件 (KeyDown/KeyUp) |
+| `CMD_COMMIT_REQUEST` | 0x0104 | 提交请求（带 barrier 序号） |
+| `CMD_FOCUS_GAINED` | 0x0201 | 获得焦点 |
+| `CMD_FOCUS_LOST` | 0x0202 | 焦点丢失 |
+| `CMD_IME_ACTIVATED` | 0x0203 | 输入法激活 |
+| `CMD_MODE_NOTIFY` | 0x0205 | 模式变更通知（本地切换） |
+| `CMD_TOGGLE_MODE` | 0x0207 | 请求切换模式（UI 点击） |
+| `CMD_CARET_UPDATE` | 0x0301 | 光标位置更新 |
+
+### 4.3 下行命令 (Go → C++)
+
+| 命令 | 值 | 说明 |
+|------|-----|------|
+| `CMD_ACK` | 0x0001 | 简单确认 |
+| `CMD_PASS_THROUGH` | 0x0002 | 按键不处理，透传系统 |
+| `CMD_COMMIT_TEXT` | 0x0101 | 提交文字到应用 |
+| `CMD_UPDATE_COMPOSITION` | 0x0102 | 更新组字状态 |
+| `CMD_CLEAR_COMPOSITION` | 0x0103 | 清除组字 |
+| `CMD_COMMIT_RESULT` | 0x0105 | 提交结果（barrier 响应） |
+| `CMD_MODE_CHANGED` | 0x0201 | 模式已变更 |
+| `CMD_STATUS_UPDATE` | 0x0202 | 完整状态更新 |
+| `CMD_SYNC_HOTKEYS` | 0x0301 | 同步热键白名单 |
+
+### 4.4 KeyPayload 结构 (16 字节)
+
+```cpp
+struct KeyPayload {
+    uint32_t keyCode;      // Virtual key code
+    uint32_t scanCode;     // Scan code
+    uint32_t modifiers;    // 修饰键状态
+    uint8_t  eventType;    // 0=KeyDown, 1=KeyUp
+    uint8_t  toggles;      // Toggle 键状态 (CapsLock/NumLock/ScrollLock)
+    uint16_t eventSeq;     // 事件序号
+};
+```
+
+### 4.5 修饰键定义
 
 ```go
 const (
-    ModShift = 0x01
-    ModCtrl  = 0x02
-    ModAlt   = 0x04
+    ModShift    = 0x0001  // 通用 Shift
+    ModCtrl     = 0x0002  // 通用 Ctrl
+    ModAlt      = 0x0004  // Alt
+    ModWin      = 0x0008  // Windows 键
+    ModLShift   = 0x0010  // 左 Shift
+    ModRShift   = 0x0020  // 右 Shift
+    ModLCtrl    = 0x0040  // 左 Ctrl
+    ModRCtrl    = 0x0080  // 右 Ctrl
+    ModCapsLock = 0x0100  // CapsLock 标记
+)
+```
+
+### 4.6 状态标志
+
+```go
+const (
+    StatusChineseMode    = 0x0001  // 中文模式
+    StatusFullWidth      = 0x0002  // 全角模式
+    StatusChinesePunct   = 0x0004  // 中文标点
+    StatusToolbarVisible = 0x0008  // 工具栏可见
+    StatusModeChanged    = 0x0010  // 模式刚变更
+    StatusCapsLock       = 0x0020  // CapsLock 开启
 )
 ```
 
@@ -679,19 +758,56 @@ const (
 
 ## 6. 调试指南
 
-### 6.1 C++ 调试
+### 6.1 C++ TSF 日志系统
+
+TSF 层使用分级日志系统，定义在 `Globals.h` 中：
+
+**日志级别**:
+| 级别 | 值 | 说明 |
+|------|-----|------|
+| `OFF` | 0 | 禁用所有日志 |
+| `ERROR` | 1 | 仅严重错误 |
+| `WARN` | 2 | 警告和错误 |
+| `INFO` | 3 | 重要信息（默认） |
+| `DEBUG` | 4 | 调试信息 |
+| `TRACE` | 5 | 追踪信息（非常详细） |
+
+**使用方法**:
 
 ```cpp
-// 使用 OutputDebugString
-OutputDebugStringW(L"[WindInput] KeyEventSink::OnKeyDown\n");
+// 错误日志（始终输出）
+WIND_LOG_ERROR(L"Critical error occurred");
+WIND_LOG_ERROR_FMT(L"Error code: %d", errorCode);
 
-// 格式化输出
-WCHAR debug[256];
-wsprintfW(debug, L"[WindInput] Key: %d (0x%X)\n", keyCode, keyCode);
-OutputDebugStringW(debug);
+// 警告日志
+WIND_LOG_WARN(L"Something unexpected");
+
+// 信息日志
+WIND_LOG_INFO(L"Operation completed");
+WIND_LOG_INFO_FMT(L"Connected to pipe: %s", pipeName);
+
+// 调试日志（需启用 WIND_DEBUG_LOG）
+WIND_LOG_DEBUG(L"Detailed debug info");
+WIND_LOG_DEBUG_FMT(L"Key: 0x%X, Mods: 0x%X", keyCode, modifiers);
+
+// 追踪日志（非常详细）
+WIND_LOG_TRACE(L"Function entry/exit");
 ```
 
-使用 DebugView 或 Visual Studio 输出窗口查看。
+**配置方式**:
+
+```cpp
+// 在 Globals.h 中取消注释以启用详细日志
+#define WIND_DEBUG_LOG
+
+// 或编译时指定日志级别
+#define WIND_LOG_LEVEL WIND_LOG_LEVEL_DEBUG
+```
+
+**查看日志**:
+- 使用 DebugView（Sysinternals 工具）
+- Visual Studio 输出窗口
+- 日志前缀：`[WindInput][LEVEL]`
 
 ### 6.2 Go 调试
 
@@ -775,7 +891,84 @@ case RequestTypeNewFeature:
 
 ---
 
-## 8. 参考资料
+## 8. 设置工具架构
+
+### 8.1 概述
+
+WindInput 设置工具 (`wind_setting`) 是独立的 GUI 应用，通过**控制管道**与输入服务通信。
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    wind_setting (设置工具)                               │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  Vue 3 前端 (Wails)                                              │   │
+│  │  - 配置界面                                                       │   │
+│  │  - 词库管理                                                       │   │
+│  └───────────────────────────┬─────────────────────────────────────┘   │
+│                               │ Wails 绑定                              │
+│  ┌───────────────────────────┴─────────────────────────────────────┐   │
+│  │  Go 后端                                                          │   │
+│  │  - 读写配置文件                                                   │   │
+│  │  - 发送重载命令                                                   │   │
+│  └───────────────────────────┬─────────────────────────────────────┘   │
+└───────────────────────────────┼─────────────────────────────────────────┘
+                                │
+            ┌───────────────────┴───────────────────┐
+            │                                       │
+            ▼ 直接读写                              ▼ 控制管道
+    ┌───────────────────┐               ┌───────────────────────┐
+    │ %APPDATA%\WindInput│               │ \\.\pipe\wind_input_  │
+    │   config.yaml     │               │      control          │
+    │   state.yaml      │               └───────────┬───────────┘
+    └───────────────────┘                           │
+                                                    ▼
+                                    ┌───────────────────────────┐
+                                    │   wind_input.exe          │
+                                    │   (重新加载配置/词库)      │
+                                    └───────────────────────────┘
+```
+
+### 8.2 控制管道协议
+
+**管道名称**: `\\.\pipe\wind_input_control`
+
+**支持的命令**:
+
+| 命令 | 说明 |
+|------|------|
+| `PING` | 心跳检测，验证服务是否运行 |
+| `RELOAD_CONFIG` | 重新加载配置文件 |
+| `RELOAD_PHRASES` | 重新加载短语定义 |
+| `RELOAD_SHADOW` | 重新加载 Shadow 规则 |
+| `RELOAD_USERDICT` | 重新加载用户词库 |
+| `RELOAD_ALL` | 重新加载所有配置和词库 |
+| `GET_STATUS` | 获取服务状态 |
+
+**协议格式**:
+```
+请求: COMMAND [JSON_ARGS]\n
+响应: STATUS [JSON_DATA/MESSAGE]\n
+
+状态: OK | ERROR message | DATA json
+```
+
+### 8.3 工作流程
+
+1. **修改配置**：
+   - 用户在设置界面修改选项
+   - wind_setting 直接写入 `config.yaml`
+
+2. **通知服务**：
+   - 发送 `RELOAD_CONFIG` 到控制管道
+   - 服务重新加载配置文件并应用
+
+3. **实时生效**：
+   - 大部分配置支持热更新
+   - 无需重启输入法
+
+---
+
+## 9. 参考资料
 
 - [TSF 官方文档](https://docs.microsoft.com/en-us/windows/win32/tsf/text-services-framework)
 - [TSF ITfTextInputProcessor](https://docs.microsoft.com/en-us/windows/win32/api/msctf/nn-msctf-itftextinputprocessor)

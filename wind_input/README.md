@@ -4,13 +4,14 @@ WindInput 输入法的 Go 服务端，负责输入逻辑处理、词库管理和
 
 ## 功能
 
-- 拼音输入引擎
-- 词库加载与查询
-- 候选词生成与排序
-- 命名管道 IPC 服务
-- 原生 Windows 候选窗口
-- YAML 配置系统
-- DPI 缩放支持
+- **多引擎支持**: 拼音引擎、五笔引擎
+- **词库系统**: 码表加载、通用字过滤、用户词库
+- **候选词管理**: 智能排序与过滤
+- **二进制 IPC**: 高效的进程间通信协议
+- **候选窗口**: 原生 Win32 窗口
+- **工具栏**: 可拖动状态显示
+- **配置系统**: YAML 格式，支持热更新
+- **DPI 支持**: 自动适配高分辨率
 
 ## 项目结构
 
@@ -19,34 +20,61 @@ wind_input/
 ├── cmd/service/
 │   └── main.go              # 服务入口
 └── internal/
-    ├── bridge/              # C++ 通信层
-    │   ├── protocol.go      # IPC 协议定义
-    │   └── server.go        # 命名管道服务端
+    ├── ipc/                 # IPC 通信层（二进制协议）
+    │   ├── binary_protocol.go  # 协议定义
+    │   ├── binary_codec.go     # 编解码器
+    │   └── server.go           # IPC 服务器
+    │
+    ├── bridge/              # 兼容层（JSON 协议）
+    │   ├── protocol.go
+    │   └── server.go
     │
     ├── coordinator/         # 输入协调器
-    │   └── coordinator.go   # 状态管理、业务逻辑
+    │   └── coordinator.go   # 状态管理、核心逻辑
     │
-    ├── engine/              # 输入引擎
+    ├── engine/              # 多引擎支持
     │   ├── engine.go        # 引擎接口
-    │   └── pinyin/
-    │       ├── pinyin.go    # 拼音引擎
-    │       └── syllable.go  # 音节解析
+    │   ├── manager.go       # 引擎管理器
+    │   ├── pinyin/          # 拼音引擎
+    │   │   ├── pinyin.go
+    │   │   └── syllable.go
+    │   └── wubi/            # 五笔引擎
+    │       └── wubi.go
     │
-    ├── dict/                # 词库
+    ├── dict/                # 词库系统
     │   ├── dict.go          # 词库接口
-    │   └── loader.go        # 词库加载器
+    │   ├── loader.go        # 加载器
+    │   ├── codetable.go     # 码表处理
+    │   ├── common_chars.go  # 通用规范汉字
+    │   ├── manager.go       # 词库管理
+    │   └── user_dict.go     # 用户词库
     │
     ├── candidate/           # 候选词
-    │   └── candidate.go     # 候选词结构
+    │   ├── candidate.go     # 候选词结构
+    │   └── filter.go        # 候选词过滤
     │
-    ├── ui/                  # 候选窗口 UI
+    ├── state/               # 状态管理
+    │   └── manager.go
+    │
+    ├── hotkey/              # 快捷键处理
+    │   └── compiler.go
+    │
+    ├── transform/           # 文本转换
+    │   ├── fullwidth.go     # 全角/半角
+    │   └── punctuation.go   # 标点转换
+    │
+    ├── control/             # 控制接口
+    │   └── server.go        # 与设置工具通信
+    │
+    ├── ui/                  # UI 组件
     │   ├── manager.go       # UI 管理器
-    │   ├── window.go        # 窗口操作 (Win32)
-    │   ├── renderer.go      # 渲染器 (Go image)
-    │   └── protocol.go      # UI 数据结构
+    │   ├── window.go        # 候选窗口 (Win32)
+    │   ├── renderer.go      # 渲染器
+    │   ├── toolbar_window.go   # 工具栏窗口
+    │   └── toolbar_renderer.go # 工具栏渲染
     │
     └── config/              # 配置系统
-        └── config.go        # 配置加载/保存
+        └── config.go
 ```
 
 ## 构建
@@ -76,22 +104,37 @@ go build -ldflags "-H windowsgui" -o ../build/wind_input.exe ./cmd/service
 ./wind_input.exe -save-config
 ```
 
+## 管道架构
+
+Go 服务监听三个命名管道：
+
+| 管道 | 方向 | 用途 |
+|------|------|------|
+| `\\.\pipe\wind_input` | TSF→Go | 主通道，同步请求/响应 |
+| `\\.\pipe\wind_input_push` | Go→TSF | 推送通道，异步状态通知 |
+| `\\.\pipe\wind_input_control` | 设置→Go | 控制通道，配置重载 |
+
+**主管道**: 处理按键事件、模式切换等，同步返回响应。
+
+**推送管道**: 向 TSF 推送状态变更、热键更新等通知。
+
+**控制管道**: 接收设置工具的重载命令（`RELOAD_CONFIG` 等）。
+
 ## 核心组件
 
-### Bridge Server
+### IPC Server
 
-处理与 C++ TSF 的通信：
+处理与 C++ TSF 的二进制协议通信：
 
 ```go
+// 主管道：同步请求/响应
 type Server struct {
     handler MessageHandler
 }
 
-type MessageHandler interface {
-    HandleKeyEvent(data KeyEventData) *KeyEventResult
-    HandleCaretUpdate(data CaretData) error
-    HandleFocusLost()
-    HandleToggleMode() bool
+// 推送管道：异步通知
+type PushServer struct {
+    clients map[*PushClient]bool
 }
 ```
 
@@ -120,19 +163,27 @@ type Coordinator struct {
 
 ### Engine
 
-输入引擎接口：
+输入引擎接口（支持多引擎）：
 
 ```go
 type Engine interface {
     Convert(input string, maxCandidates int) ([]Candidate, error)
     Reset()
+    Type() string
 }
 ```
 
-拼音引擎实现：
+**拼音引擎**:
 - 音节解析: `nihao` → `["ni", "hao"]`
 - 词组匹配: 优先匹配长词
 - 权重排序: 高频词优先
+- 五笔反查提示
+
+**五笔引擎**:
+- 码表匹配: 精确匹配编码
+- 自动上屏: 四码唯一时可自动上屏
+- 五码顶字: 第五码自动顶出首选
+- 标点顶字: 标点自动提交首选
 
 ### UI Manager
 
@@ -167,25 +218,32 @@ type Config struct {
 
 配置路径：`%APPDATA%\WindInput\config.yaml`
 
-## IPC 协议
+## IPC 协议（二进制）
 
-### 请求 (C++ → Go)
+使用高效的二进制协议，协议版本 v1.1。
 
-| 类型 | 说明 |
-|------|------|
-| `key_event` | 按键事件 |
-| `caret_update` | 光标位置更新 |
-| `focus_lost` | 焦点丢失 |
-| `toggle_mode` | 请求切换模式 |
+### 上行命令 (C++ → Go)
 
-### 响应 (Go → C++)
+| 命令 | 代码 | 说明 |
+|------|------|------|
+| `CMD_KEY_EVENT` | 0x0101 | 按键事件 |
+| `CMD_COMMIT_REQUEST` | 0x0104 | 提交请求（barrier） |
+| `CMD_FOCUS_GAINED` | 0x0201 | 获得焦点 |
+| `CMD_FOCUS_LOST` | 0x0202 | 焦点丢失 |
+| `CMD_IME_ACTIVATED` | 0x0203 | 输入法激活 |
+| `CMD_CARET_UPDATE` | 0x0301 | 光标位置更新 |
 
-| 类型 | 说明 |
-|------|------|
-| `ack` | 确认，无操作 |
-| `insert_text` | 插入文字 |
-| `clear_composition` | 清除组字 |
-| `mode_changed` | 模式已切换 |
+### 下行命令 (Go → C++)
+
+| 命令 | 代码 | 说明 |
+|------|------|------|
+| `CMD_ACK` | 0x0001 | 简单确认 |
+| `CMD_PASS_THROUGH` | 0x0002 | 按键透传 |
+| `CMD_COMMIT_TEXT` | 0x0101 | 提交文字 |
+| `CMD_UPDATE_COMPOSITION` | 0x0102 | 更新组字 |
+| `CMD_MODE_CHANGED` | 0x0201 | 模式变更 |
+| `CMD_STATUS_UPDATE` | 0x0202 | 状态更新 |
+| `CMD_SYNC_HOTKEYS` | 0x0301 | 同步热键 |
 
 ## 词库格式
 

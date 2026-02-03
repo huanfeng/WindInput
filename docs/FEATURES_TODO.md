@@ -78,82 +78,82 @@ PhraseRule=短语规则
 
 ---
 
-### 第二阶段：输入体验增强（中优先级）
+### 第二阶段：输入体验增强（中优先级）✅ 大部分完成
 
-#### 5. 临时英文模式
-- [ ] 按特定键（如 `;`）进入临时英文
-- [ ] 输入完成后（空格/回车）自动切回中文
-- [ ] 支持句中英文穿插
+#### 5. 临时英文模式 ✅ 已完成
+- [x] Shift+字母 进入临时英文模式
+- [x] 输入完成后自动切回中文
+- [x] 支持显示英文候选（可配置）
+- [x] 配置项：`input.shift_temp_english.enabled`
 
-#### 6. 自动上屏策略（五笔专用）
-- [ ] 不上屏
-- [ ] 四码唯一时自动上屏
-- [ ] 候选唯一时自动上屏
-- [ ] 编码完整匹配且唯一时上屏
+#### 6. 自动上屏策略（五笔专用）✅ 已完成
+- [x] 不上屏（默认）
+- [x] 四码唯一时自动上屏 (`engine.wubi.auto_commit_at_4`)
+- [x] 五码顶字上屏 (`engine.wubi.top_code_commit`)
+- [x] 标点顶字上屏 (`engine.wubi.punct_commit`)
 
-#### 7. 空码处理策略
-- [ ] 不清空（继续输入）
-- [ ] 自动清空
-- [ ] 四码自动清空
-- [ ] 转为英文上屏
+#### 7. 空码处理策略 ✅ 已完成
+- [x] 不清空（继续输入）
+- [x] 四码自动清空 (`engine.wubi.clear_on_empty_at_4`)
 
-#### 8. 候选词排序
-- [ ] 按词库顺序
-- [ ] 按词频排序
-- [ ] 按输入次数排序（需用户词库）
-- [ ] 单字优先
-- [ ] 用户词优先
-
----
-
-### 第三阶段：快捷操作（中优先级）
-
-#### 9. 二三候选上屏快捷键
-- [ ] 分号/引号键（`;` / `'`）
-- [ ] 逗号/句号键（`,` / `.`）
-- [ ] 可配置选项
-
-#### 10. 标点符号顶字上屏
-- [ ] 中文标点顶首选上屏
-- [ ] 可配置开关
-
-#### 11. 候选翻页
-- [ ] PageUp / PageDown
-- [ ] 减号/加号（`-` / `=`）
-- [ ] 逗号/句号（`,` / `.`）
-- [ ] 左右方括号（`[` / `]`）
-- [ ] 支持多选配置
+#### 8. 候选词排序 ⏳ 部分完成
+- [x] 按词库顺序
+- [x] 按词频排序
+- [ ] 按输入次数排序（需用户词库学习）
+- [ ] 单字优先选项
+- [ ] 用户词优先选项
 
 ---
 
-### 第四阶段：模式切换（中优先级）
+### 第三阶段：快捷操作（中优先级）✅ 已完成
 
-#### 12. 中英文切换热键
-- [ ] 左 Shift
-- [ ] 右 Shift
-- [ ] 左 Ctrl
-- [ ] 右 Ctrl
-- [ ] CapsLock
-- [ ] 支持多选配置
+#### 9. 二三候选上屏快捷键 ✅ 已完成
+- [x] 分号/引号键（`;` / `'`）- `semicolon_quote`
+- [x] 逗号/句号键（`,` / `.`）- `comma_period`
+- [x] 左/右 Shift - `lrshift`
+- [x] 左/右 Ctrl - `lrctrl`
+- [x] 配置项：`input.select_key_groups`（支持多选）
 
-#### 13. 中文切换到英文时处理
-- [ ] 已有编码清空
-- [ ] 已有编码上屏
-- [ ] 可配置选项
+#### 10. 标点符号顶字上屏 ✅ 已完成
+- [x] 中文标点顶首选上屏
+- [x] 配置项：`engine.wubi.punct_commit`
 
-#### 14. 全半角切换
-- [ ] 无（禁用）
-- [ ] Shift+空格
-- [ ] Ctrl+Shift+空格
+#### 11. 候选翻页 ✅ 已完成
+- [x] PageUp / PageDown - `pageupdown`
+- [x] 减号/加号（`-` / `=`）- `minus_equal`
+- [x] 左右方括号（`[` / `]`）- `brackets`
+- [x] Shift+Tab / Tab - `shift_tab`
+- [x] 配置项：`input.page_keys`（支持多选）
 
-#### 15. 中英文标点切换
-- [ ] 无（禁用）
-- [ ] Ctrl+句号
-- [ ] Ctrl+Shift+句号
+---
 
-#### 16. 标点状态独立
-- [ ] 标点状态不随中英文状态变化
-- [ ] 用于习惯中文下使用英文标点的用户
+### 第四阶段：模式切换（中优先级）✅ 已完成
+
+#### 12. 中英文切换热键 ✅ 已完成
+- [x] 左 Shift (`lshift`)
+- [x] 右 Shift (`rshift`)
+- [x] 左 Ctrl (`lctrl`)
+- [x] 右 Ctrl (`rctrl`)
+- [x] CapsLock (`capslock`)
+- [x] 配置项：`hotkeys.toggle_mode_keys`（支持多选）
+
+#### 13. 中文切换到英文时处理 ✅ 已完成
+- [x] 已有编码上屏
+- [x] 配置项：`hotkeys.commit_on_switch`
+
+#### 14. 全半角切换 ✅ 已完成
+- [x] 无（禁用）
+- [x] Shift+空格
+- [x] 配置项：`hotkeys.toggle_full_width`
+
+#### 15. 中英文标点切换 ✅ 已完成
+- [x] 无（禁用）
+- [x] Ctrl+句号
+- [x] 配置项：`hotkeys.toggle_punct`
+
+#### 16. 标点状态独立 ✅ 已完成
+- [x] 标点随中英文切换（可配置）
+- [x] 配置项：`input.punct_follow_mode`
 
 ---
 
@@ -180,84 +180,104 @@ PhraseRule=短语规则
 
 ---
 
-## 配置结构扩展
+## 配置结构（当前实现）
 
 ```yaml
-general:
-  start_in_chinese_mode: true
-  log_level: info
-  input_method: wubi  # pinyin / wubi / ...
+startup:
+  remember_last_state: false          # 记忆前次状态
+  default_chinese_mode: true          # 默认中文模式
+  default_full_width: false           # 默认半角
+  default_chinese_punct: true         # 默认中文标点
 
 dictionary:
-  system_dict: dict/wubi/jishuang6.txt
+  system_dict: dict/pinyin/pinyin.txt
   user_dict: user_dict.txt
-  pinyin_dict: dict/pinyin/base.txt  # 用于反查
+  pinyin_dict: dict/pinyin/pinyin.txt  # 用于反查
 
 engine:
-  # 五笔引擎配置
-  wubi:
-    auto_commit: unique_at_4  # none / unique / unique_at_4 / unique_full_match
-    empty_code: clear_at_4    # none / clear / clear_at_4 / commit_english
-    show_pinyin_hint: true    # 显示拼音反查
+  type: pinyin                        # pinyin / wubi
+  filter_mode: smart                  # smart / general / gb18030
 
-  # 拼音引擎配置
   pinyin:
-    fuzzy_pinyin: false
-    double_pinyin: false
+    show_wubi_hint: true              # 显示五笔编码提示
+
+  wubi:
+    auto_commit_at_4: false           # 四码唯一自动上屏
+    clear_on_empty_at_4: false        # 四码为空时清空
+    top_code_commit: true             # 五码顶字上屏
+    punct_commit: true                # 标点顶字上屏
 
 hotkeys:
-  toggle_mode: [left_shift]           # 支持多选
-  second_candidate: semicolon         # semicolon / comma / none
-  third_candidate: apostrophe         # apostrophe / period / none
-  page_up: [pageup, minus, bracket_left]
-  page_down: [pagedown, equal, bracket_right]
-  temp_english: semicolon             # 临时英文触发键
+  toggle_mode_keys: [lshift, rshift]  # 中英切换键（多选）
+  commit_on_switch: true              # 切换时编码上屏
+  switch_engine: "ctrl+`"             # 切换引擎
+  toggle_full_width: shift+space      # 全半角切换
+  toggle_punct: "ctrl+."              # 中英标点切换
 
-punctuation:
-  full_width: false
-  follow_mode: true                   # 标点跟随中英文状态
-  toggle_full_width: shift_space      # none / shift_space / ctrl_shift_space
-  toggle_chinese_punct: ctrl_period   # none / ctrl_period / ctrl_shift_period
+input:
+  punct_follow_mode: false            # 标点随中英文切换
+  select_key_groups: [semicolon_quote] # 2/3候选键组（多选）
+  page_keys: [pageupdown, minus_equal] # 翻页键（多选）
+  shift_temp_english:
+    enabled: true                     # 临时英文模式
+    show_english_candidates: true     # 显示英文候选
+  capslock_behavior:
+    cancel_on_mode_switch: false      # 切换时取消 CapsLock
+
+toolbar:
+  visible: false                      # 显示工具栏
+  position_x: 0
+  position_y: 0
 
 ui:
   font_size: 18
   candidates_per_page: 9
   font_path: ""
-  show_code_hint: true                # 显示编码提示
+  inline_preedit: true                # 嵌入式编码行
+
+advanced:
+  log_level: info                     # debug/info/warn/error
 ```
 
 ---
 
 ## 实现优先级排序
 
-### P0 - 立即实现（本次迭代）
+### P0 - ✅ 已完成
 1. 通用码表加载器
 2. 五笔引擎基础实现
 3. 基础输入测试
+4. 二进制 IPC 协议
 
-### P1 - 短期实现
-4. 自动上屏策略
-5. 空码处理
-6. 反查功能
-7. 二三候选上屏
+### P1 - ✅ 已完成
+5. 自动上屏策略
+6. 空码处理
+7. 反查功能框架
+8. 二三候选上屏
 
-### P2 - 中期实现
-8. 临时英文
-9. 候选翻页配置
-10. 中英切换热键配置
-11. 标点相关配置
+### P2 - ✅ 已完成
+9. 临时英文模式
+10. 候选翻页配置
+11. 中英切换热键配置
+12. 标点相关配置
+13. 工具栏 UI
 
-### P3 - 长期实现
-12. 用户词库学习
-13. 自定义短语
-14. 模糊音
-15. 云同步
+### P3 - 待实现
+14. 用户词库学习
+15. 自定义短语
+16. 模糊音
+17. 云同步
 
 ---
 
 ## 下一步行动
 
-1. **实现通用码表解析器** - 支持 `[CODETABLEHEADER]` 格式
-2. **创建五笔引擎** - 基于码表的简单匹配引擎
-3. **重构引擎管理** - 支持多引擎切换
-4. **测试基础输入** - 验证五笔输入流程
+### 当前进度
+第一至第四阶段的核心功能已基本完成，可投入日常使用。
+
+### 下一步计划
+1. **用户词库学习** - 记录用户输入习惯，自动调整词频
+2. **自定义短语** - 支持用户自定义缩写
+3. **模糊音支持** - 拼音引擎的容错输入
+4. **设置界面完善** - wind_setting 功能开发
+5. **稳定性优化** - 修复边界情况和潜在问题

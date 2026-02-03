@@ -20,19 +20,21 @@ wind_tsf/
 │   ├── ClassFactory.cpp      # COM 类工厂
 │   ├── TextService.cpp       # TSF 主服务实现
 │   ├── KeyEventSink.cpp      # 按键事件处理
+│   ├── HotkeyManager.cpp     # 快捷键管理器
 │   ├── LangBarItemButton.cpp # 语言栏图标
 │   ├── IPCClient.cpp         # 命名管道客户端
+│   ├── CaretEditSession.cpp  # 编辑会话管理
+│   ├── DisplayAttributeInfo.cpp # 显示属性
 │   └── Register.cpp          # TSF 注册/卸载
 ├── include/
-│   ├── Globals.h
+│   ├── BinaryProtocol.h      # 二进制协议定义
+│   ├── HotkeyManager.h       # 快捷键管理器
 │   ├── TextService.h
 │   ├── KeyEventSink.h
 │   ├── LangBarItemButton.h
 │   ├── IPCClient.h
-│   ├── ClassFactory.h
-│   └── Register.h
+│   └── ...
 ├── resource/
-│   ├── resource.h            # 资源 ID 定义
 │   └── wind_tsf.rc           # 资源文件
 └── CMakeLists.txt
 ```
@@ -98,9 +100,27 @@ TSF 输入法主服务，实现以下接口：
 命名管道客户端：
 
 - 管道名称: `\\.\pipe\wind_input`
-- 协议: 长度前缀 + JSON
+- 协议: 二进制协议（BinaryProtocol.h）
 - 自动重连机制
 - 自动启动 Go 服务
+
+### CHotkeyManager
+
+快捷键管理器，负责：
+
+- 解析 Go 端下发的热键配置
+- 维护热键白名单（KeyHash 格式）
+- 判断按键是否需要拦截
+- 支持 KeyDown/KeyUp 不同热键列表
+
+### BinaryProtocol.h
+
+定义二进制 IPC 协议：
+
+- 协议头（8 字节）：版本 + 命令 + 长度
+- KeyPayload（16 字节）：按键事件数据
+- 状态标志位定义
+- 命令常量（CMD_KEY_EVENT 等）
 
 ## TSF 注册
 
@@ -142,45 +162,95 @@ regsvr32 /u wind_tsf.dll
 
 ## 调试
 
-1. 构建 Debug 配置:
-   ```batch
-   cmake --build . --config Debug
-   ```
+### 构建调试版本
 
-2. 注册 Debug DLL
-
-3. 打开 DebugView 或 Visual Studio 输出窗口
-
-4. 附加到任意 TSF 应用进程 (如 notepad.exe)
-
-所有调试输出使用 `OutputDebugStringW`，前缀为 `[WindInput]`。
-
-## IPC 消息格式
-
-### 发送给 Go 服务
-
-```json
-// 按键事件
-{"type": "key_event", "data": {"key": "a", "keycode": 65, "modifiers": 0}}
-
-// 光标位置
-{"type": "caret_update", "data": {"x": 100, "y": 200, "height": 20}}
-
-// 焦点丢失
-{"type": "focus_lost"}
-
-// 切换模式
-{"type": "toggle_mode"}
+```batch
+cmake --build . --config Debug
 ```
 
-### 从 Go 服务接收
+### 日志系统
 
-```json
-{"type": "ack"}
-{"type": "insert_text", "data": {"text": "你好"}}
-{"type": "mode_changed", "data": {"chinese_mode": true}}
-{"type": "clear_composition"}
+TSF 层使用分级日志系统（定义在 `Globals.h`）：
+
+| 级别 | 宏 | 说明 |
+|------|-----|------|
+| ERROR | `WIND_LOG_ERROR` | 严重错误（始终启用） |
+| WARN | `WIND_LOG_WARN` | 警告信息 |
+| INFO | `WIND_LOG_INFO` | 重要信息（默认） |
+| DEBUG | `WIND_LOG_DEBUG` | 调试信息 |
+| TRACE | `WIND_LOG_TRACE` | 追踪信息 |
+
+**使用示例**:
+
+```cpp
+WIND_LOG_INFO(L"Operation completed");
+WIND_LOG_DEBUG_FMT(L"Key: 0x%X, Mods: 0x%X", keyCode, modifiers);
+WIND_LOG_ERROR_FMT(L"Failed with error: %d", GetLastError());
 ```
+
+**启用详细日志**:
+
+在 `Globals.h` 中取消注释：
+```cpp
+#define WIND_DEBUG_LOG
+```
+
+### 查看日志
+
+1. 使用 DebugView (Sysinternals)
+2. Visual Studio 输出窗口
+3. 附加到 TSF 应用进程 (如 notepad.exe)
+
+日志前缀格式：`[WindInput][LEVEL] message`
+
+## 双管道架构
+
+TSF 层使用两个命名管道与 Go 服务通信：
+
+| 管道 | 名称 | 方向 | 用途 |
+|------|------|------|------|
+| 主管道 | `\\.\pipe\wind_input` | TSF → Go | 同步请求/响应 |
+| 推送管道 | `\\.\pipe\wind_input_push` | Go → TSF | 异步状态推送 |
+
+**主管道**: 用于按键事件、模式切换等需要同步响应的操作。
+
+**推送管道**:
+- 独立线程 (`AsyncReader`) 监听
+- 接收状态变更、热键更新等通知
+- 不阻塞主输入流程
+
+## IPC 消息格式（二进制协议）
+
+### 协议头格式（8 字节）
+
+```cpp
+struct IpcHeader {
+    uint16_t version;   // 协议版本 (0x1001)
+    uint16_t command;   // 命令类型
+    uint32_t length;    // Payload 长度
+};
+```
+
+### 上行命令 (C++ → Go)
+
+| 命令 | 代码 | 说明 |
+|------|------|------|
+| CMD_KEY_EVENT | 0x0101 | 按键事件 |
+| CMD_FOCUS_GAINED | 0x0201 | 获得焦点 |
+| CMD_FOCUS_LOST | 0x0202 | 焦点丢失 |
+| CMD_IME_ACTIVATED | 0x0203 | 输入法激活 |
+| CMD_CARET_UPDATE | 0x0301 | 光标更新 |
+
+### 下行命令 (Go → C++)
+
+| 命令 | 代码 | 说明 |
+|------|------|------|
+| CMD_ACK | 0x0001 | 确认 |
+| CMD_COMMIT_TEXT | 0x0101 | 提交文字 |
+| CMD_UPDATE_COMPOSITION | 0x0102 | 更新组字 |
+| CMD_MODE_CHANGED | 0x0201 | 模式变更 |
+| CMD_STATUS_UPDATE | 0x0202 | 状态更新 |
+| CMD_SYNC_HOTKEYS | 0x0301 | 同步热键 |
 
 ## 注意事项
 
