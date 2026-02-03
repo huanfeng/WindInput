@@ -703,6 +703,62 @@ func (s *Server) encodeStatePush(status *StatusUpdateData) []byte {
 	)
 }
 
+// PushCommitTextToAllClients broadcasts a commit text command to all connected TSF clients
+// This is used for proactive text insertion (e.g., when user clicks a candidate with mouse)
+func (s *Server) PushCommitTextToAllClients(text string) {
+	if text == "" {
+		s.logger.Debug("PushCommitText: empty text, skipping")
+		return
+	}
+
+	// Encode the commit text message using CMD_COMMIT_TEXT
+	encoded := s.codec.EncodeCommitText(text, "", false, false)
+
+	// Get all push clients
+	s.pushMu.RLock()
+	clients := make([]windows.Handle, 0, len(s.pushClients))
+	writers := make([]*pipeWriter, 0, len(s.pushClients))
+	for h, writer := range s.pushClients {
+		clients = append(clients, h)
+		writers = append(writers, writer)
+	}
+	clientCount := len(clients)
+	s.pushMu.RUnlock()
+
+	if clientCount == 0 {
+		s.logger.Debug("No push pipe clients to send commit text to")
+		return
+	}
+
+	s.logger.Info("Pushing commit text to TSF clients via push pipe",
+		"count", clientCount,
+		"text", text)
+
+	// Send to all clients
+	var failedHandles []windows.Handle
+	successCount := 0
+	for i, writer := range writers {
+		if err := s.codec.WriteMessage(writer, encoded); err != nil {
+			s.logger.Warn("Failed to push commit text to client", "error", err)
+			failedHandles = append(failedHandles, clients[i])
+		} else {
+			successCount++
+		}
+	}
+
+	// Remove failed clients
+	if len(failedHandles) > 0 {
+		s.pushMu.Lock()
+		for _, h := range failedHandles {
+			delete(s.pushClients, h)
+			windows.CloseHandle(h)
+		}
+		s.pushMu.Unlock()
+	}
+
+	s.logger.Info("Commit text push completed", "success", successCount, "total", clientCount)
+}
+
 // GetActiveClientCount returns the number of active TSF clients
 func (s *Server) GetActiveClientCount() int {
 	s.mu.RLock()

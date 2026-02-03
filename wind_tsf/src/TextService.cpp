@@ -833,6 +833,15 @@ BOOL CTextService::_InitIPCClient()
         }
     });
 
+    // Set up commit text callback for mouse click on candidate
+    _pIPCClient->SetCommitTextCallback([pThis](const std::wstring& text) {
+        // This callback is called from the async reader thread
+        WIND_LOG_INFO_FMT(L"Commit text received from Go: '%s'\n", text.c_str());
+
+        // Insert the text using SendInput (works from any thread)
+        pThis->InsertText(text);
+    });
+
     // Start async reader thread for receiving state pushes from Go
     if (!_pIPCClient->StartAsyncReader())
     {

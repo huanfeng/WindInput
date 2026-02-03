@@ -1260,6 +1260,13 @@ void CIPCClient::SetStatePushCallback(StatePushCallback callback)
     LeaveCriticalSection(&_asyncLock);
 }
 
+void CIPCClient::SetCommitTextCallback(CommitTextCallback callback)
+{
+    EnterCriticalSection(&_asyncLock);
+    _commitTextCallback = callback;
+    LeaveCriticalSection(&_asyncLock);
+}
+
 BOOL CIPCClient::StartAsyncReader()
 {
     if (_asyncReaderRunning)
@@ -1493,6 +1500,32 @@ void CIPCClient::_AsyncReaderLoop()
                     if (callback)
                     {
                         callback(response);
+                    }
+                }
+            }
+            else if (header.command == CMD_COMMIT_TEXT)
+            {
+                // Parse commit text (from Go - mouse click on candidate)
+                std::vector<uint8_t> payload;
+                if (header.length > 0 && bytesRead >= sizeof(IpcHeader) + header.length)
+                {
+                    payload.assign(buffer.begin() + sizeof(IpcHeader),
+                                   buffer.begin() + sizeof(IpcHeader) + header.length);
+                }
+
+                ServiceResponse response;
+                if (_ParseResponse(header, payload, response))
+                {
+                    _LogInfo(L"Async reader: commit text received - text='%s'", response.text.c_str());
+
+                    // Call callback
+                    EnterCriticalSection(&_asyncLock);
+                    CommitTextCallback callback = _commitTextCallback;
+                    LeaveCriticalSection(&_asyncLock);
+
+                    if (callback && !response.text.empty())
+                    {
+                        callback(response.text);
                     }
                 }
             }

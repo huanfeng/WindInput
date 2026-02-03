@@ -152,8 +152,14 @@ public:
     // Callback type for state push notifications
     using StatePushCallback = std::function<void(const ServiceResponse&)>;
 
+    // Callback type for commit text from Go (mouse click on candidate)
+    using CommitTextCallback = std::function<void(const std::wstring&)>;
+
     // Set callback for receiving state push from Go
     void SetStatePushCallback(StatePushCallback callback);
+
+    // Set callback for receiving commit text from Go (mouse click on candidate)
+    void SetCommitTextCallback(CommitTextCallback callback);
 
     // Start async reader thread (call after successful connection)
     BOOL StartAsyncReader();
@@ -233,6 +239,7 @@ private:
     HANDLE _hStopEvent = NULL;           // Event to signal thread to stop
     HANDLE _hReadPipe = INVALID_HANDLE_VALUE;  // Separate pipe for async reading
     StatePushCallback _statePushCallback;
+    CommitTextCallback _commitTextCallback;
     CRITICAL_SECTION _asyncLock;         // Lock for thread-safe access
     volatile BOOL _asyncReaderRunning = FALSE;
 

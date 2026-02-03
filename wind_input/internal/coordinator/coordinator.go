@@ -83,6 +83,7 @@ type Coordinator struct {
 // BridgeServer interface for broadcasting state to TSF clients
 type BridgeServer interface {
 	PushStateToAllClients(status *bridge.StatusUpdateData)
+	PushCommitTextToAllClients(text string)
 }
 
 // SetBridgeServer sets the bridge server for state broadcasting
@@ -317,7 +318,6 @@ func (c *Coordinator) setupCandidateCallbacks() {
 // handleCandidateSelect handles candidate selection via mouse click
 func (c *Coordinator) handleCandidateSelect(index int) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Convert page-local index to actual candidate index
 	actualIndex := index // The index from hit test is already 0-based within current page
@@ -326,6 +326,7 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 
 	if actualIndex < 0 || actualIndex >= len(c.candidates) {
 		c.logger.Warn("Invalid candidate index", "index", actualIndex, "candidateCount", len(c.candidates))
+		c.mu.Unlock()
 		return
 	}
 
@@ -343,10 +344,15 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 	c.clearState()
 	c.hideUI()
 
-	// TODO: Send text to TSF via push pipe
-	// For now, we just log the selection. The actual text insertion
-	// requires C++ side support for receiving commit commands via push pipe.
-	c.logger.Debug("Mouse selection would commit text", "text", text)
+	// Get bridge server reference (release lock before network I/O)
+	bridgeServer := c.bridgeServer
+	c.mu.Unlock()
+
+	// Send text to TSF via push pipe
+	if bridgeServer != nil && text != "" {
+		bridgeServer.PushCommitTextToAllClients(text)
+		c.logger.Debug("Commit text pushed to TSF clients", "text", text)
+	}
 }
 
 // handleCandidateHoverChange handles hover state change
