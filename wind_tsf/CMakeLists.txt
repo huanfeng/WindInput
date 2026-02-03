@@ -34,8 +34,11 @@ set(SOURCES
     src/HotkeyManager.cpp
 )
 
+# Resource file for icon
+set(RESOURCE_FILE ${CMAKE_SOURCE_DIR}/res/resource.rc)
+
 # 创建 DLL
-add_library(wind_tsf SHARED ${SOURCES})
+add_library(wind_tsf SHARED ${SOURCES} ${RESOURCE_FILE})
 
 # 注意：库通过源文件中的 #pragma comment 链接
 

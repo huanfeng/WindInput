@@ -27,6 +27,8 @@ type RenderConfig struct {
 	InputBgColor    color.Color
 	InputTextColor  color.Color
 	BorderColor     color.Color
+	Layout          string // "horizontal" or "vertical"
+	HidePreedit     bool   // Hide preedit area when inline_preedit is enabled
 }
 
 // DefaultRenderConfig returns default rendering configuration with DPI scaling
@@ -48,6 +50,8 @@ func DefaultRenderConfig() RenderConfig {
 		InputBgColor:    color.RGBA{240, 240, 240, 255},
 		InputTextColor:  color.RGBA{100, 100, 100, 255},
 		BorderColor:     color.RGBA{200, 200, 200, 255},
+		Layout:          "horizontal", // Default to horizontal layout
+		HidePreedit:     false,
 	}
 }
 
@@ -153,6 +157,23 @@ func (r *Renderer) UpdateFont(fontSize float64, fontPath string) {
 	}
 }
 
+// SetLayout sets the candidate layout mode
+func (r *Renderer) SetLayout(layout string) {
+	if layout == "horizontal" || layout == "vertical" {
+		r.config.Layout = layout
+	}
+}
+
+// SetHidePreedit sets whether to hide the preedit area
+func (r *Renderer) SetHidePreedit(hide bool) {
+	r.config.HidePreedit = hide
+}
+
+// GetLayout returns the current layout mode
+func (r *Renderer) GetLayout() string {
+	return r.config.Layout
+}
+
 // ensureFontLoaded loads the font if not already cached
 func (r *Renderer) ensureFontLoaded() {
 	if r.fontReady && r.fontCache.font != nil {
@@ -191,6 +212,17 @@ func (r *Renderer) ensureFontLoaded() {
 // Optimized to minimize font loading operations
 func (r *Renderer) RenderCandidates(candidates []Candidate, input string, page, totalPages int) *image.RGBA {
 	cfg := r.config
+
+	// Choose layout based on config
+	if cfg.Layout == "horizontal" {
+		return r.renderHorizontalCandidates(candidates, input, page, totalPages)
+	}
+	return r.renderVerticalCandidates(candidates, input, page, totalPages)
+}
+
+// renderVerticalCandidates renders candidates in vertical layout (traditional style)
+func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string, page, totalPages int) *image.RGBA {
+	cfg := r.config
 	scale := GetDPIScale()
 
 	// Calculate dimensions with DPI scaling
@@ -201,12 +233,18 @@ func (r *Renderer) RenderCandidates(candidates []Candidate, input string, page, 
 
 	width := 280.0 * scale
 	inputHeight := 30.0 * scale
+	if cfg.HidePreedit {
+		inputHeight = 0
+	}
 	contentHeight := float64(candidateCount) * cfg.ItemHeight
 	pageInfoHeight := 0.0
 	if totalPages > 1 {
 		pageInfoHeight = 24.0 * scale
 	}
 	height := cfg.Padding*2 + inputHeight + contentHeight + pageInfoHeight + 4*scale
+	if cfg.HidePreedit {
+		height = cfg.Padding*2 + contentHeight + pageInfoHeight
+	}
 
 	// Create context
 	dc := gg.NewContext(int(width), int(height))
@@ -234,18 +272,20 @@ func (r *Renderer) RenderCandidates(candidates []Candidate, input string, page, 
 
 	y := cfg.Padding
 
-	// Draw input area
-	dc.SetColor(cfg.InputBgColor)
-	r.drawRoundedRect(dc, cfg.Padding, y, width-cfg.Padding*2-2, inputHeight, 4*scale)
-	dc.Fill()
+	// Draw input area (if not hidden)
+	if !cfg.HidePreedit {
+		dc.SetColor(cfg.InputBgColor)
+		r.drawRoundedRect(dc, cfg.Padding, y, width-cfg.Padding*2-2, inputHeight, 4*scale)
+		dc.Fill()
 
-	// Draw input text
-	if mainFace != nil {
-		dc.SetFontFace(mainFace)
-		dc.SetColor(cfg.InputTextColor)
-		dc.DrawString(input, cfg.Padding+8*scale, y+inputHeight/2+cfg.FontSize/3)
+		// Draw input text
+		if mainFace != nil {
+			dc.SetFontFace(mainFace)
+			dc.SetColor(cfg.InputTextColor)
+			dc.DrawString(input, cfg.Padding+8*scale, y+inputHeight/2+cfg.FontSize/3)
+		}
+		y += inputHeight + 4*scale
 	}
-	y += inputHeight + 4*scale
 
 	// First pass: draw all index circles (no font needed)
 	for i := range candidates {
@@ -314,6 +354,192 @@ func (r *Renderer) RenderCandidates(candidates []Candidate, input string, page, 
 		pageText := fmt.Sprintf("%d / %d  (← →)", page, totalPages)
 		tw, _ := dc.MeasureString(pageText)
 		dc.DrawString(pageText, width/2-tw/2, pageY+16*scale)
+	}
+
+	return dc.Image().(*image.RGBA)
+}
+
+// renderHorizontalCandidates renders candidates in horizontal layout (modern style)
+func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input string, page, totalPages int) *image.RGBA {
+	cfg := r.config
+	scale := GetDPIScale()
+
+	// Get cached font faces
+	mainFace := r.fontCache.getFace(cfg.FontSize)
+	smallFace := r.fontCache.getFace(cfg.IndexFontSize)
+	pageFace := r.fontCache.getFace(12 * scale)
+
+	// Measure all candidates to calculate total width
+	type candMeasure struct {
+		textWidth    float64
+		commentWidth float64
+	}
+	measures := make([]candMeasure, len(candidates))
+
+	tmpDc := gg.NewContext(1, 1)
+	if mainFace != nil {
+		tmpDc.SetFontFace(mainFace)
+		for i, cand := range candidates {
+			tw, _ := tmpDc.MeasureString(cand.Text)
+			measures[i].textWidth = tw
+		}
+	}
+	if smallFace != nil {
+		tmpDc.SetFontFace(smallFace)
+		for i, cand := range candidates {
+			if cand.Comment != "" {
+				cw, _ := tmpDc.MeasureString(cand.Comment)
+				measures[i].commentWidth = cw
+			}
+		}
+	}
+
+	// Calculate dimensions
+	indexSize := 18.0 * scale   // Index circle size
+	indexMargin := 4.0 * scale  // Margin between index and text
+	itemSpacing := 12.0 * scale // Space between items
+
+	// Calculate total candidates width
+	candidatesWidth := 0.0
+	for i, cand := range candidates {
+		itemWidth := indexSize + indexMargin + measures[i].textWidth
+		if cand.Comment != "" {
+			itemWidth += 6*scale + measures[i].commentWidth
+		}
+		candidatesWidth += itemWidth
+		if i < len(candidates)-1 {
+			candidatesWidth += itemSpacing
+		}
+	}
+
+	// Page info width
+	pageInfoWidth := 0.0
+	if totalPages > 1 && pageFace != nil {
+		tmpDc.SetFontFace(pageFace)
+		pageText := fmt.Sprintf("%d/%d", page, totalPages)
+		pageInfoWidth, _ = tmpDc.MeasureString(pageText)
+		pageInfoWidth += 20 * scale // padding
+	}
+
+	// Input area (preedit)
+	inputWidth := 0.0
+	inputHeight := 0.0
+	if !cfg.HidePreedit && input != "" {
+		if mainFace != nil {
+			tmpDc.SetFontFace(mainFace)
+			inputWidth, _ = tmpDc.MeasureString(input)
+			inputWidth += 16 * scale // padding
+		}
+		inputHeight = 24 * scale
+	}
+
+	// Total width
+	minWidth := 200.0 * scale
+	contentWidth := cfg.Padding*2 + candidatesWidth + pageInfoWidth
+	if inputWidth > 0 {
+		contentWidth = cfg.Padding*2 + inputWidth
+		if candidatesWidth+pageInfoWidth > inputWidth {
+			contentWidth = cfg.Padding*2 + candidatesWidth + pageInfoWidth
+		}
+	}
+	width := contentWidth
+	if width < minWidth {
+		width = minWidth
+	}
+
+	// Height calculation
+	candidateRowHeight := 32.0 * scale
+	height := cfg.Padding*2 + candidateRowHeight
+	if inputHeight > 0 {
+		height += inputHeight + 4*scale
+	}
+
+	// Create context
+	dc := gg.NewContext(int(width), int(height))
+
+	// Draw shadow
+	dc.SetColor(color.RGBA{0, 0, 0, 15})
+	r.drawRoundedRect(dc, 2, 2, width, height, cfg.CornerRadius)
+	dc.Fill()
+
+	// Draw background
+	dc.SetColor(cfg.BackgroundColor)
+	r.drawRoundedRect(dc, 0, 0, width-2, height-2, cfg.CornerRadius)
+	dc.Fill()
+
+	// Draw border
+	dc.SetColor(cfg.BorderColor)
+	dc.SetLineWidth(1)
+	r.drawRoundedRect(dc, 0.5, 0.5, width-3, height-3, cfg.CornerRadius)
+	dc.Stroke()
+
+	y := cfg.Padding
+
+	// Draw input area (preedit) - if not hidden
+	if !cfg.HidePreedit && input != "" {
+		dc.SetColor(cfg.InputBgColor)
+		r.drawRoundedRect(dc, cfg.Padding, y, width-cfg.Padding*2-2, inputHeight, 4*scale)
+		dc.Fill()
+
+		if mainFace != nil {
+			dc.SetFontFace(mainFace)
+			dc.SetColor(cfg.InputTextColor)
+			dc.DrawString(input, cfg.Padding+8*scale, y+inputHeight/2+cfg.FontSize/3)
+		}
+		y += inputHeight + 4*scale
+	}
+
+	// Draw candidates horizontally
+	x := cfg.Padding
+	candY := y + candidateRowHeight/2
+
+	for i, cand := range candidates {
+		// Draw index circle
+		indexX := x + indexSize/2
+		dc.SetColor(cfg.IndexBgColor)
+		dc.DrawCircle(indexX, candY, indexSize/2)
+		dc.Fill()
+
+		// Draw index number
+		if smallFace != nil {
+			dc.SetFontFace(smallFace)
+			dc.SetColor(cfg.IndexColor)
+			indexStr := string(rune('0' + cand.Index))
+			tw, _ := dc.MeasureString(indexStr)
+			dc.DrawString(indexStr, indexX-tw/2, candY+cfg.IndexFontSize/3)
+		}
+
+		// Draw candidate text
+		textX := x + indexSize + indexMargin
+		if mainFace != nil {
+			dc.SetFontFace(mainFace)
+			dc.SetColor(cfg.TextColor)
+			dc.DrawString(cand.Text, textX, candY+cfg.FontSize/3)
+		}
+
+		// Draw comment if present
+		if cand.Comment != "" && smallFace != nil {
+			commentX := textX + measures[i].textWidth + 6*scale
+			dc.SetFontFace(smallFace)
+			dc.SetColor(color.RGBA{150, 150, 150, 255})
+			dc.DrawString(cand.Comment, commentX, candY+cfg.IndexFontSize/3)
+		}
+
+		// Move to next item
+		itemWidth := indexSize + indexMargin + measures[i].textWidth
+		if cand.Comment != "" {
+			itemWidth += 6*scale + measures[i].commentWidth
+		}
+		x += itemWidth + itemSpacing
+	}
+
+	// Draw page info (right aligned)
+	if totalPages > 1 && pageFace != nil {
+		dc.SetFontFace(pageFace)
+		dc.SetColor(cfg.InputTextColor)
+		pageText := fmt.Sprintf("%d/%d", page, totalPages)
+		tw, _ := dc.MeasureString(pageText)
+		dc.DrawString(pageText, width-cfg.Padding-tw, candY+6*scale)
 	}
 
 	return dc.Image().(*image.RGBA)

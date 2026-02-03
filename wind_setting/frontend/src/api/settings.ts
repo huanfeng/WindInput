@@ -61,6 +61,10 @@ export interface UIConfig {
   font_path: string;
   inline_preedit: boolean;
   hide_candidate_window: boolean;
+  candidate_layout: string;
+  status_indicator_duration: number;
+  status_indicator_offset_x: number;
+  status_indicator_offset_y: number;
 }
 
 // 工具栏配置
@@ -269,6 +273,10 @@ export function getDefaultConfig(): Config {
       font_path: '',
       inline_preedit: true,
       hide_candidate_window: false,
+      candidate_layout: 'horizontal',
+      status_indicator_duration: 800,
+      status_indicator_offset_x: 0,
+      status_indicator_offset_y: -30,
     },
     toolbar: {
       visible: false,

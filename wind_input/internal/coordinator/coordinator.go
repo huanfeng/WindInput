@@ -242,6 +242,18 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 	// Initialize UI config (including debug options)
 	if c.uiManager != nil && cfg != nil {
 		c.uiManager.UpdateConfig(cfg.UI.FontSize, cfg.UI.FontPath, cfg.UI.HideCandidateWindow)
+		// Set candidate layout (horizontal/vertical)
+		if cfg.UI.CandidateLayout != "" {
+			c.uiManager.SetCandidateLayout(cfg.UI.CandidateLayout)
+		}
+		// Set hide preedit when inline preedit is enabled
+		c.uiManager.SetHidePreedit(cfg.UI.InlinePreedit)
+		// Set status indicator config
+		c.uiManager.UpdateStatusIndicatorConfig(
+			cfg.UI.StatusIndicatorDuration,
+			cfg.UI.StatusIndicatorOffsetX,
+			cfg.UI.StatusIndicatorOffsetY,
+		)
 	}
 
 	return c
@@ -726,7 +738,15 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 		}
 	}
 
-	return nil // Just show candidates, don't insert anything yet
+	// When InlinePreedit is disabled, we still need to tell TSF that we have an active
+	// composition so that subsequent keys (ESC, Backspace, Enter) are intercepted.
+	// Return UpdateComposition with empty text - TSF will set _isComposing=TRUE but
+	// won't display anything in the application.
+	return &bridge.KeyEventResult{
+		Type:     bridge.ResponseTypeUpdateComposition,
+		Text:     "",
+		CaretPos: 0,
+	}
 }
 
 func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
@@ -751,12 +771,19 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 				CaretPos: len(c.inputBuffer),
 			}
 		}
-	} else {
-		// Buffer is already empty - pass through to system
-		// This allows backspace to work normally when not composing
-		c.logger.Debug("Backspace with empty buffer, passing through to system")
-		return nil
+
+		// When InlinePreedit is disabled, still use UpdateComposition with empty text
+		// so that TSF knows there's an active composition
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     "",
+			CaretPos: 0,
+		}
 	}
+
+	// Buffer is already empty - pass through to system
+	// This allows backspace to work normally when not composing
+	c.logger.Debug("Backspace with empty buffer, passing through to system")
 	return nil
 }
 
@@ -1007,9 +1034,11 @@ func (c *Coordinator) showModeIndicator() {
 		modeText = "En"
 	}
 
-	// Use valid position or fallback (multi-monitor: coordinates can be negative)
+	// Use caret position directly. The offset is applied in doShowModeIndicator.
+	// Note: caretX, caretY from TSF is typically the top-left of the caret.
+	// We pass this directly and let the user configure offset to position the indicator.
 	x := c.caretX
-	y := c.caretY + c.caretHeight + 5
+	y := c.caretY
 	const maxCoord = 32000
 	if (c.caretX == 0 && c.caretY == 0) || x > maxCoord || x < -maxCoord || y > maxCoord || y < -maxCoord {
 		if c.lastValidX != 0 || c.lastValidY != 0 {
@@ -1567,6 +1596,18 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 	// 通知 UI Manager 更新字体等设置
 	if c.uiManager != nil {
 		c.uiManager.UpdateConfig(uiConfig.FontSize, uiConfig.FontPath, uiConfig.HideCandidateWindow)
+		// Update candidate layout
+		if uiConfig.CandidateLayout != "" {
+			c.uiManager.SetCandidateLayout(uiConfig.CandidateLayout)
+		}
+		// Update hide preedit setting
+		c.uiManager.SetHidePreedit(uiConfig.InlinePreedit)
+		// Update status indicator config
+		c.uiManager.UpdateStatusIndicatorConfig(
+			uiConfig.StatusIndicatorDuration,
+			uiConfig.StatusIndicatorOffsetX,
+			uiConfig.StatusIndicatorOffsetY,
+		)
 	}
 
 	c.logger.Debug("UI config updated", "candidatesPerPage", c.candidatesPerPage)

@@ -66,11 +66,15 @@ type HotkeyConfig struct {
 
 // UIConfig contains UI settings
 type UIConfig struct {
-	FontSize            float64 `yaml:"font_size" json:"font_size"`
-	CandidatesPerPage   int     `yaml:"candidates_per_page" json:"candidates_per_page"`
-	FontPath            string  `yaml:"font_path" json:"font_path"`
-	InlinePreedit       bool    `yaml:"inline_preedit" json:"inline_preedit"`
-	HideCandidateWindow bool    `yaml:"hide_candidate_window" json:"hide_candidate_window"`
+	FontSize                float64 `yaml:"font_size" json:"font_size"`
+	CandidatesPerPage       int     `yaml:"candidates_per_page" json:"candidates_per_page"`
+	FontPath                string  `yaml:"font_path" json:"font_path"`
+	InlinePreedit           bool    `yaml:"inline_preedit" json:"inline_preedit"`
+	HideCandidateWindow     bool    `yaml:"hide_candidate_window" json:"hide_candidate_window"`
+	CandidateLayout         string  `yaml:"candidate_layout" json:"candidate_layout"`                     // 候选布局：horizontal 或 vertical
+	StatusIndicatorDuration int     `yaml:"status_indicator_duration" json:"status_indicator_duration"`   // 状态提示显示时长（毫秒）
+	StatusIndicatorOffsetX  int     `yaml:"status_indicator_offset_x" json:"status_indicator_offset_x"`   // 状态提示 X 偏移量
+	StatusIndicatorOffsetY  int     `yaml:"status_indicator_offset_y" json:"status_indicator_offset_y"`   // 状态提示 Y 偏移量
 }
 
 // ToolbarConfig contains toolbar settings
@@ -140,10 +144,14 @@ func DefaultConfig() *Config {
 			TogglePunct:     "ctrl+.",
 		},
 		UI: UIConfig{
-			FontSize:          18,
-			CandidatesPerPage: 9,
-			FontPath:          "",
-			InlinePreedit:     true,
+			FontSize:                18,
+			CandidatesPerPage:       9,
+			FontPath:                "",
+			InlinePreedit:           true,
+			CandidateLayout:         "horizontal",
+			StatusIndicatorDuration: 800,
+			StatusIndicatorOffsetX:  0,
+			StatusIndicatorOffsetY:  -30,
 		},
 		Toolbar: ToolbarConfig{
 			Visible:   false,

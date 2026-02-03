@@ -1,0 +1,5 @@
+// WindInput TSF Resource File
+// Icon resource for input method display in Windows settings
+
+// Icon index 0 - Main input method icon
+0 ICON "wind_input.ico"

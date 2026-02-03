@@ -132,21 +132,24 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     // Check basic input keys based on current state
     // Different handling based on key type:
     // - Letter/number/punctuation keys: intercept in Chinese mode
-    // - Backspace/Enter/Escape: only intercept when there's an active composition
+    // - Backspace/Enter/Escape: only intercept when there's an active composition or input session
     BOOL isChineseMode = _pTextService->IsChineseMode();
     // Use TextService's composition state - this is the source of truth in async architecture
     BOOL hasComposition = _pTextService->HasActiveComposition();
+    // Also check _hasCandidates for cases where InlinePreedit is disabled
+    // (Go sends UpdateComposition with empty text, _hasCandidates is TRUE but HasActiveComposition is FALSE)
+    BOOL hasInputSession = hasComposition || _hasCandidates;
 
-    if (hasComposition || isChineseMode)
+    if (hasInputSession || isChineseMode)
     {
         HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
 
         if (keyType == HotkeyType::Backspace || keyType == HotkeyType::Enter ||
             keyType == HotkeyType::Escape || keyType == HotkeyType::Space)
         {
-            // Only intercept if we have composition
+            // Only intercept if we have composition or active input session
             // Space should only be intercepted when there are candidates to select
-            if (hasComposition)
+            if (hasInputSession)
             {
                 *pfEaten = TRUE;
                 return S_OK;
@@ -283,22 +286,24 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // Check for basic input keys
     // IMPORTANT: Different handling based on key type:
     // - Letter/number/punctuation keys: intercept in Chinese mode (start new composition)
-    // - Backspace/Enter/Escape: only intercept when there's an active composition
+    // - Backspace/Enter/Escape: only intercept when there's an active composition or input session
     //   (otherwise, pass through to application)
     BOOL isInputKey = FALSE;
     BOOL isChineseMode = _pTextService->IsChineseMode();
     // Use TextService's composition state - this is the source of truth in async architecture
     BOOL hasComposition = _pTextService->HasActiveComposition();
+    // Also check _hasCandidates for cases where InlinePreedit is disabled
+    BOOL hasInputSession = hasComposition || _hasCandidates;
 
-    if (hasComposition || isChineseMode)
+    if (hasInputSession || isChineseMode)
     {
         HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
 
-        // Backspace, Enter, Escape should only be intercepted when there's an active composition
+        // Backspace, Enter, Escape should only be intercepted when there's an active composition or input session
         // Otherwise they should pass through to the application
         if (keyType == HotkeyType::Backspace || keyType == HotkeyType::Enter || keyType == HotkeyType::Escape)
         {
-            isInputKey = hasComposition;  // Only intercept if we have composition
+            isInputKey = hasInputSession;  // Only intercept if we have composition or input session
         }
         else
         {

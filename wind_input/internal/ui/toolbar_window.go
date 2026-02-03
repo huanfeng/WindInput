@@ -14,10 +14,12 @@ import (
 
 // Additional Windows constants for toolbar
 const (
-	WM_LBUTTONDOWN = 0x0201
-	WM_LBUTTONUP   = 0x0202
-	WM_MOUSEMOVE   = 0x0200
-	WM_RBUTTONUP   = 0x0205
+	WM_LBUTTONDOWN  = 0x0201
+	WM_LBUTTONUP    = 0x0202
+	WM_MOUSEMOVE    = 0x0200
+	WM_RBUTTONUP    = 0x0205
+	WM_MOUSELEAVE   = 0x02A3
+	WM_TIMER        = 0x0113
 	// WM_SETCURSOR defined in window.go
 
 	HTCLIENT = 1
@@ -25,20 +27,30 @@ const (
 	GWL_WNDPROC = -4
 
 	// Cursor IDs
-	IDC_ARROW    = 32512
-	IDC_SIZEALL  = 32646
-	IDC_HAND     = 32649
+	IDC_ARROW   = 32512
+	IDC_SIZEALL = 32646
+	IDC_HAND    = 32649
+
+	// Tooltip constants
+	TOOLTIP_TIMER_ID    = 1
+	TOOLTIP_DELAY_MS    = 400 // Delay before showing tooltip
+	TOOLTIP_HIDE_MS     = 3000 // Auto-hide after this time
+	TME_LEAVE           = 0x00000002
 )
 
 var (
-	procSetWindowLongPtrW = user32.NewProc("SetWindowLongPtrW")
-	procCallWindowProcW   = user32.NewProc("CallWindowProcW")
-	procGetCursorPos      = user32.NewProc("GetCursorPos")
-	procScreenToClient    = user32.NewProc("ScreenToClient")
-	procSetCapture        = user32.NewProc("SetCapture")
-	procReleaseCapture    = user32.NewProc("ReleaseCapture")
-	procLoadCursorW       = user32.NewProc("LoadCursorW")
-	procSetCursor         = user32.NewProc("SetCursor")
+	procSetWindowLongPtrW    = user32.NewProc("SetWindowLongPtrW")
+	procCallWindowProcW      = user32.NewProc("CallWindowProcW")
+	procGetCursorPos         = user32.NewProc("GetCursorPos")
+	procScreenToClient       = user32.NewProc("ScreenToClient")
+	procClientToScreen       = user32.NewProc("ClientToScreen")
+	procSetCapture           = user32.NewProc("SetCapture")
+	procReleaseCapture       = user32.NewProc("ReleaseCapture")
+	procLoadCursorW          = user32.NewProc("LoadCursorW")
+	procSetCursor            = user32.NewProc("SetCursor")
+	procSetTimer             = user32.NewProc("SetTimer")
+	procKillTimer            = user32.NewProc("KillTimer")
+	procTrackMouseEvent      = user32.NewProc("TrackMouseEvent")
 )
 
 // ToolbarHitResult represents which part of the toolbar was hit
@@ -71,6 +83,14 @@ type ToolbarCallback struct {
 	OnPositionChanged func(x, y int)
 }
 
+// TRACKMOUSEEVENT for TrackMouseEvent API
+type TRACKMOUSEEVENT struct {
+	CbSize      uint32
+	DwFlags     uint32
+	HwndTrack   uintptr
+	DwHoverTime uint32
+}
+
 // ToolbarWindow represents the toolbar window
 type ToolbarWindow struct {
 	hwnd     windows.HWND
@@ -85,9 +105,9 @@ type ToolbarWindow struct {
 	state    ToolbarState
 
 	// Dragging state
-	dragging   bool
-	dragStartX int
-	dragStartY int
+	dragging    bool
+	dragStartX  int
+	dragStartY  int
 	dragOffsetX int
 	dragOffsetY int
 
@@ -96,6 +116,12 @@ type ToolbarWindow struct {
 
 	// Original window procedure for subclassing
 	originalWndProc uintptr
+
+	// Tooltip state
+	tooltipHwnd    windows.HWND     // Tooltip window handle
+	hoverButton    ToolbarHitResult // Currently hovered button
+	tooltipVisible bool             // Is tooltip currently visible
+	trackingMouse  bool             // Is mouse tracking enabled
 }
 
 // Global toolbar instance for window procedure callback
@@ -127,7 +153,11 @@ func toolbarWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	case WM_LBUTTONUP:
 		return globalToolbar.handleMouseUp(hwnd, lParam)
 	case WM_MOUSEMOVE:
-		return globalToolbar.handleMouseMove(hwnd, lParam)
+		return globalToolbar.handleMouseMoveWithTooltip(hwnd, lParam)
+	case WM_MOUSELEAVE:
+		return globalToolbar.handleMouseLeave(hwnd)
+	case WM_TIMER:
+		return globalToolbar.handleTimer(hwnd, wParam)
 	case WM_NCHITTEST:
 		// Return HTCLIENT so we receive mouse messages
 		return HTCLIENT
@@ -162,8 +192,8 @@ func (w *ToolbarWindow) Create() error {
 	exStyle := uint32(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
 	style := uint32(WS_POPUP)
 
-	// Initial size
-	w.width = ScaleIntForDPI(140)
+	// Initial size - match toolbarBaseWidth/Height in toolbar_renderer.go
+	w.width = ScaleIntForDPI(116)
 	w.height = ScaleIntForDPI(30)
 
 	hwnd, _, err := procCreateWindowExW.Call(
@@ -185,10 +215,67 @@ func (w *ToolbarWindow) Create() error {
 
 	w.logger.Info("Toolbar window created", "hwnd", hwnd)
 
+	// Create tooltip window
+	w.createTooltipWindow()
+
 	// Render initial content
 	w.Render()
 
 	return nil
+}
+
+// createTooltipWindow creates the tooltip window
+func (w *ToolbarWindow) createTooltipWindow() {
+	tooltipClassName, _ := syscall.UTF16PtrFromString("IMEToolbarTooltip")
+
+	wc := WNDCLASSEXW{
+		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEXW{})),
+		LpfnWndProc:   syscall.NewCallback(defWndProc),
+		LpszClassName: tooltipClassName,
+	}
+
+	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+
+	exStyle := uint32(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
+	style := uint32(WS_POPUP)
+
+	hwnd, _, _ := procCreateWindowExW.Call(
+		uintptr(exStyle),
+		uintptr(unsafe.Pointer(tooltipClassName)),
+		0,
+		uintptr(style),
+		0, 0, 1, 1,
+		0, 0, 0, 0,
+	)
+
+	if hwnd != 0 {
+		w.tooltipHwnd = windows.HWND(hwnd)
+		w.logger.Debug("Tooltip window created", "hwnd", hwnd)
+	}
+}
+
+// defWndProc is a simple default window procedure
+func defWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
+	ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
+	return ret
+}
+
+// getTooltipText returns the tooltip text for a button
+func (w *ToolbarWindow) getTooltipText(button ToolbarHitResult) string {
+	switch button {
+	case HitGrip:
+		return "拖动工具栏"
+	case HitModeButton:
+		return "切换中文/英文"
+	case HitWidthButton:
+		return "切换全角/半角"
+	case HitPunctButton:
+		return "切换中/英标点"
+	case HitSettingsButton:
+		return "打开设置"
+	default:
+		return ""
+	}
 }
 
 // handleMouseDown handles WM_LBUTTONDOWN
@@ -199,6 +286,10 @@ func (w *ToolbarWindow) handleMouseDown(hwnd uintptr, lParam uintptr) uintptr {
 	hit := w.renderer.HitTest(x, y, w.width, w.height)
 
 	w.logger.Debug("Toolbar mouse down", "x", x, "y", y, "hit", hit)
+
+	// Hide tooltip and cancel timer when mouse is pressed
+	procKillTimer.Call(hwnd, TOOLTIP_TIMER_ID)
+	w.hideTooltip()
 
 	w.mu.Lock()
 	w.dragStartX = x
@@ -283,7 +374,7 @@ func (w *ToolbarWindow) handleMouseUp(hwnd uintptr, lParam uintptr) uintptr {
 	return 0
 }
 
-// handleMouseMove handles WM_MOUSEMOVE
+// handleMouseMove handles WM_MOUSEMOVE (legacy, kept for compatibility)
 func (w *ToolbarWindow) handleMouseMove(hwnd uintptr, lParam uintptr) uintptr {
 	w.mu.Lock()
 	if !w.dragging {
@@ -313,6 +404,225 @@ func (w *ToolbarWindow) handleMouseMove(hwnd uintptr, lParam uintptr) uintptr {
 	)
 
 	return 0
+}
+
+// handleMouseMoveWithTooltip handles WM_MOUSEMOVE with tooltip support
+func (w *ToolbarWindow) handleMouseMoveWithTooltip(hwnd uintptr, lParam uintptr) uintptr {
+	x := int(int16(lParam & 0xFFFF))
+	y := int(int16((lParam >> 16) & 0xFFFF))
+
+	// Check if dragging
+	w.mu.Lock()
+	if w.dragging {
+		w.mu.Unlock()
+		return w.handleMouseMove(hwnd, lParam)
+	}
+
+	// Enable mouse leave tracking if not already enabled
+	if !w.trackingMouse {
+		tme := TRACKMOUSEEVENT{
+			CbSize:    uint32(unsafe.Sizeof(TRACKMOUSEEVENT{})),
+			DwFlags:   TME_LEAVE,
+			HwndTrack: hwnd,
+		}
+		procTrackMouseEvent.Call(uintptr(unsafe.Pointer(&tme)))
+		w.trackingMouse = true
+	}
+
+	// Check which button is hovered
+	newHover := w.renderer.HitTest(x, y, w.width, w.height)
+	oldHover := w.hoverButton
+
+	if newHover != oldHover {
+		w.hoverButton = newHover
+		w.mu.Unlock()
+
+		// Cancel any pending tooltip timer
+		procKillTimer.Call(hwnd, TOOLTIP_TIMER_ID)
+
+		// Hide current tooltip if shown
+		if w.tooltipVisible {
+			w.hideTooltip()
+		}
+
+		// Start new tooltip timer if hovering a button
+		if newHover != HitNone {
+			procSetTimer.Call(hwnd, TOOLTIP_TIMER_ID, TOOLTIP_DELAY_MS, 0)
+		}
+	} else {
+		w.mu.Unlock()
+	}
+
+	return 0
+}
+
+// handleMouseLeave handles WM_MOUSELEAVE
+func (w *ToolbarWindow) handleMouseLeave(hwnd uintptr) uintptr {
+	w.mu.Lock()
+	w.trackingMouse = false
+	w.hoverButton = HitNone
+	w.mu.Unlock()
+
+	// Cancel tooltip timer and hide tooltip
+	procKillTimer.Call(uintptr(hwnd), TOOLTIP_TIMER_ID)
+	w.hideTooltip()
+
+	return 0
+}
+
+// handleTimer handles WM_TIMER for tooltip
+func (w *ToolbarWindow) handleTimer(hwnd uintptr, wParam uintptr) uintptr {
+	if wParam == TOOLTIP_TIMER_ID {
+		procKillTimer.Call(hwnd, TOOLTIP_TIMER_ID)
+
+		w.mu.Lock()
+		button := w.hoverButton
+		w.mu.Unlock()
+
+		if button != HitNone {
+			w.showTooltip(button)
+		}
+	}
+	return 0
+}
+
+// showTooltip shows the tooltip for a button
+func (w *ToolbarWindow) showTooltip(button ToolbarHitResult) {
+	if w.tooltipHwnd == 0 {
+		return
+	}
+
+	text := w.getTooltipText(button)
+	if text == "" {
+		return
+	}
+
+	// Render tooltip
+	img := w.renderer.RenderTooltip(text)
+	if img == nil {
+		return
+	}
+
+	// Get button bounds in screen coordinates
+	bx, _, bw, _ := w.renderer.GetButtonBounds(button)
+
+	w.mu.Lock()
+	screenX := w.x + bx + bw/2 - img.Bounds().Dx()/2
+	screenY := w.y + w.height + 4 // Below toolbar
+	w.mu.Unlock()
+
+	// Update layered window
+	w.updateTooltipLayeredWindow(img, screenX, screenY)
+
+	// Show tooltip
+	procShowWindow.Call(uintptr(w.tooltipHwnd), SW_SHOW)
+	w.tooltipVisible = true
+}
+
+// hideTooltip hides the tooltip
+func (w *ToolbarWindow) hideTooltip() {
+	if w.tooltipHwnd != 0 && w.tooltipVisible {
+		procShowWindow.Call(uintptr(w.tooltipHwnd), SW_HIDE)
+		w.tooltipVisible = false
+	}
+}
+
+// updateTooltipLayeredWindow updates the tooltip layered window
+func (w *ToolbarWindow) updateTooltipLayeredWindow(img *image.RGBA, x, y int) {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	hdcScreen, _, _ := procGetDC.Call(0)
+	if hdcScreen == 0 {
+		return
+	}
+	defer procReleaseDC.Call(0, hdcScreen)
+
+	hdcMem, _, _ := procCreateCompatibleDC.Call(hdcScreen)
+	if hdcMem == 0 {
+		return
+	}
+	defer procDeleteDC.Call(hdcMem)
+
+	bi := BITMAPINFO{
+		BmiHeader: BITMAPINFOHEADER{
+			BiSize:        uint32(unsafe.Sizeof(BITMAPINFOHEADER{})),
+			BiWidth:       int32(width),
+			BiHeight:      -int32(height),
+			BiPlanes:      1,
+			BiBitCount:    32,
+			BiCompression: BI_RGB,
+		},
+	}
+
+	var bits unsafe.Pointer
+	hBitmap, _, _ := procCreateDIBSection.Call(
+		hdcMem,
+		uintptr(unsafe.Pointer(&bi)),
+		DIB_RGB_COLORS,
+		uintptr(unsafe.Pointer(&bits)),
+		0, 0,
+	)
+	if hBitmap == 0 {
+		return
+	}
+	defer procDeleteObject.Call(hBitmap)
+
+	procSelectObject.Call(hdcMem, hBitmap)
+
+	// Copy image data
+	pixelCount := width * height
+	dstSlice := unsafe.Slice((*byte)(bits), pixelCount*4)
+
+	for i := 0; i < pixelCount; i++ {
+		srcIdx := i * 4
+		dstIdx := i * 4
+
+		r := img.Pix[srcIdx+0]
+		g := img.Pix[srcIdx+1]
+		b := img.Pix[srcIdx+2]
+		a := img.Pix[srcIdx+3]
+
+		if a == 255 {
+			dstSlice[dstIdx+0] = b
+			dstSlice[dstIdx+1] = g
+			dstSlice[dstIdx+2] = r
+			dstSlice[dstIdx+3] = a
+		} else if a == 0 {
+			dstSlice[dstIdx+0] = 0
+			dstSlice[dstIdx+1] = 0
+			dstSlice[dstIdx+2] = 0
+			dstSlice[dstIdx+3] = 0
+		} else {
+			dstSlice[dstIdx+0] = byte(uint16(b) * uint16(a) / 255)
+			dstSlice[dstIdx+1] = byte(uint16(g) * uint16(a) / 255)
+			dstSlice[dstIdx+2] = byte(uint16(r) * uint16(a) / 255)
+			dstSlice[dstIdx+3] = a
+		}
+	}
+
+	ptSrc := POINT{X: 0, Y: 0}
+	ptDst := POINT{X: int32(x), Y: int32(y)}
+	size := SIZE{Cx: int32(width), Cy: int32(height)}
+	blend := BLENDFUNCTION{
+		BlendOp:             AC_SRC_OVER,
+		BlendFlags:          0,
+		SourceConstantAlpha: 255,
+		AlphaFormat:         AC_SRC_ALPHA,
+	}
+
+	procUpdateLayeredWindow.Call(
+		uintptr(w.tooltipHwnd),
+		hdcScreen,
+		uintptr(unsafe.Pointer(&ptDst)),
+		uintptr(unsafe.Pointer(&size)),
+		hdcMem,
+		uintptr(unsafe.Pointer(&ptSrc)),
+		0,
+		uintptr(unsafe.Pointer(&blend)),
+		ULW_ALPHA,
+	)
 }
 
 // handleSetCursor handles WM_SETCURSOR - sets appropriate cursor based on mouse position
@@ -556,6 +866,11 @@ func (w *ToolbarWindow) IsVisible() bool {
 
 // Destroy destroys the toolbar window
 func (w *ToolbarWindow) Destroy() {
+	// Destroy tooltip window first
+	if w.tooltipHwnd != 0 {
+		procDestroyWindow.Call(uintptr(w.tooltipHwnd))
+		w.tooltipHwnd = 0
+	}
 	if w.hwnd != 0 {
 		procDestroyWindow.Call(uintptr(w.hwnd))
 		w.hwnd = 0

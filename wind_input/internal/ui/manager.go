@@ -68,6 +68,15 @@ type Manager struct {
 
 	// Debug: hide candidate window (for performance testing)
 	hideCandidateWindow bool
+
+	// Mode indicator version: incremented on each mode indicator show
+	// Used to cancel previous hide timers when a new indicator is shown
+	modeIndicatorVersion uint64
+
+	// UI config for status indicator
+	statusIndicatorDuration int // Duration in milliseconds
+	statusIndicatorOffsetX  int // X offset for status indicator
+	statusIndicatorOffsetY  int // Y offset for status indicator
 }
 
 // NewManager creates a new UI manager
@@ -79,13 +88,16 @@ func NewManager(logger *slog.Logger) *Manager {
 	}
 
 	return &Manager{
-		window:   NewCandidateWindow(logger),
-		renderer: NewRenderer(DefaultRenderConfig()),
-		toolbar:  NewToolbarWindow(logger),
-		logger:   logger,
-		readyCh:  make(chan struct{}),
-		cmdCh:    make(chan UICommand, 100), // Buffered channel to avoid blocking IPC
-		cmdEvent: event,
+		window:                  NewCandidateWindow(logger),
+		renderer:                NewRenderer(DefaultRenderConfig()),
+		toolbar:                 NewToolbarWindow(logger),
+		logger:                  logger,
+		readyCh:                 make(chan struct{}),
+		cmdCh:                   make(chan UICommand, 100), // Buffered channel to avoid blocking IPC
+		cmdEvent:                event,
+		statusIndicatorDuration: 800, // Default 800ms
+		statusIndicatorOffsetX:  0,
+		statusIndicatorOffsetY:  5, // Slightly below cursor
 	}
 }
 
@@ -316,8 +328,12 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, caretX,
 	}
 
 	// Adjust position to stay within screen bounds
-	// Use LayoutVertical for now (current layout), future can add LayoutHorizontal support
-	windowX, windowY, showAbove := AdjustCandidatePosition(caretX, caretY, caretHeight, windowWidth, windowHeight, LayoutVertical, preference)
+	// Determine layout from renderer config
+	layout := LayoutVertical
+	if m.renderer != nil && m.renderer.GetLayout() == "horizontal" {
+		layout = LayoutHorizontal
+	}
+	windowX, windowY, showAbove := AdjustCandidatePosition(caretX, caretY, caretHeight, windowWidth, windowHeight, layout, preference)
 	m.logger.Debug("Position adjusted", "windowX", windowX, "windowY", windowY, "showAbove", showAbove, "stickyAbove", currentStickyAbove)
 
 	// Update sticky state if we're now showing above
@@ -437,11 +453,24 @@ func (m *Manager) ShowModeIndicator(mode string, x, y int) {
 
 // doShowModeIndicator actually shows the mode indicator (called from UI thread)
 func (m *Manager) doShowModeIndicator(mode string, x, y int) {
+	// Increment version to cancel any pending hide timers
+	m.mu.Lock()
+	m.modeIndicatorVersion++
+	currentVersion := m.modeIndicatorVersion
+	duration := m.statusIndicatorDuration
+	offsetX := m.statusIndicatorOffsetX
+	offsetY := m.statusIndicatorOffsetY
+	m.mu.Unlock()
+
+	// Apply offset to position
+	adjustedX := x + offsetX
+	adjustedY := y + offsetY
+
 	// Render mode indicator
 	img := m.renderer.RenderModeIndicator(mode)
 
 	// Update window
-	if err := m.window.UpdateContent(img, x, y); err != nil {
+	if err := m.window.UpdateContent(img, adjustedX, adjustedY); err != nil {
 		m.logger.Error("UpdateContent failed", "error", err)
 		return
 	}
@@ -449,10 +478,21 @@ func (m *Manager) doShowModeIndicator(mode string, x, y int) {
 	// Show window briefly
 	m.window.Show()
 
-	// Hide after a short delay (send through channel for thread safety)
+	// Hide after delay, but only if version hasn't changed
+	// This ensures that rapid state changes reset the timer
 	go func() {
-		time.Sleep(800 * time.Millisecond)
-		m.Hide() // Use public method which goes through channel
+		time.Sleep(time.Duration(duration) * time.Millisecond)
+
+		// Check if version is still the same
+		m.mu.Lock()
+		versionNow := m.modeIndicatorVersion
+		m.mu.Unlock()
+
+		if versionNow == currentVersion {
+			// Version unchanged, safe to hide
+			m.Hide() // Use public method which goes through channel
+		}
+		// If version changed, another indicator was shown, so don't hide
 	}()
 }
 
@@ -467,6 +507,34 @@ func (m *Manager) UpdateConfig(fontSize float64, fontPath string, hideCandidateW
 	m.hideCandidateWindow = hideCandidateWindow
 	m.mu.Unlock()
 	m.logger.Info("UI config updated", "fontSize", fontSize, "fontPath", fontPath, "hideCandidateWindow", hideCandidateWindow)
+}
+
+// UpdateStatusIndicatorConfig 更新状态提示配置
+func (m *Manager) UpdateStatusIndicatorConfig(duration, offsetX, offsetY int) {
+	m.mu.Lock()
+	if duration > 0 {
+		m.statusIndicatorDuration = duration
+	}
+	m.statusIndicatorOffsetX = offsetX
+	m.statusIndicatorOffsetY = offsetY
+	m.mu.Unlock()
+	m.logger.Info("Status indicator config updated", "duration", duration, "offsetX", offsetX, "offsetY", offsetY)
+}
+
+// SetCandidateLayout 设置候选框布局模式
+func (m *Manager) SetCandidateLayout(layout string) {
+	if m.renderer != nil {
+		m.renderer.SetLayout(layout)
+		m.logger.Info("Candidate layout updated", "layout", layout)
+	}
+}
+
+// SetHidePreedit 设置是否隐藏预编辑区域
+func (m *Manager) SetHidePreedit(hide bool) {
+	if m.renderer != nil {
+		m.renderer.SetHidePreedit(hide)
+		m.logger.Info("Hide preedit updated", "hide", hide)
+	}
 }
 
 // SetToolbarCallbacks sets the callbacks for toolbar actions

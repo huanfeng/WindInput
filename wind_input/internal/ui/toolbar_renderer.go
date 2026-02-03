@@ -10,7 +10,7 @@ import (
 
 // Toolbar layout constants (will be scaled for DPI)
 const (
-	toolbarBaseWidth  = 140
+	toolbarBaseWidth  = 116 // gripWidth + 4 * buttonWidth + 2 = 10 + 104 + 2 = 116
 	toolbarBaseHeight = 30
 	gripWidth         = 10
 	buttonWidth       = 26
@@ -41,15 +41,16 @@ func (r *ToolbarRenderer) Render(state ToolbarState) *image.RGBA {
 
 	dc := gg.NewContext(width, height)
 
-	// Background with rounded corners
-	radius := 4.0 * scale
+	// Background with rounded corners - brighter, more modern look
+	radius := 6.0 * scale
 	dc.DrawRoundedRectangle(0, 0, float64(width), float64(height), radius)
-	dc.SetRGBA(0.95, 0.95, 0.95, 0.95) // Light gray, slightly transparent
+	// Gradient-like effect: lighter top to slightly darker bottom
+	dc.SetRGBA(1.0, 1.0, 1.0, 0.98) // Pure white, slightly transparent
 	dc.Fill()
 
-	// Border
+	// Border - subtle blue tint for a more modern look
 	dc.DrawRoundedRectangle(0.5, 0.5, float64(width)-1, float64(height)-1, radius)
-	dc.SetRGBA(0.7, 0.7, 0.7, 1)
+	dc.SetRGBA(0.78, 0.82, 0.88, 1) // Light blue-gray border
 	dc.SetLineWidth(1)
 	dc.Stroke()
 
@@ -117,7 +118,8 @@ func (r *ToolbarRenderer) drawGrip(dc *gg.Context, scale float64, height int) {
 	dotSize := 2.0 * scale
 	dotGap := 4.0 * scale
 
-	dc.SetRGBA(0.5, 0.5, 0.5, 0.6)
+	// Modern subtle grip dots with blue tint
+	dc.SetRGBA(0.60, 0.68, 0.78, 0.7) // Blue-gray dots (#99ADC7)
 
 	// Draw dots pattern
 	startY := float64(height)/2 - dotGap
@@ -133,13 +135,13 @@ func (r *ToolbarRenderer) drawGrip(dc *gg.Context, scale float64, height int) {
 
 // drawModeButton draws the mode button (中/En/A)
 func (r *ToolbarRenderer) drawModeButton(dc *gg.Context, x, y, w, h float64, state ToolbarState, scale float64) {
-	// Background
+	// Background - vibrant colors
 	if state.ChineseMode {
-		dc.SetRGBA(0.26, 0.52, 0.96, 1) // Blue for Chinese
+		dc.SetRGBA(0.20, 0.56, 0.96, 1) // Bright blue for Chinese (#339AF5)
 	} else {
-		dc.SetRGBA(0.5, 0.5, 0.5, 1) // Gray for English
+		dc.SetRGBA(0.45, 0.50, 0.58, 1) // Slate gray for English (#737F94)
 	}
-	radius := 3.0 * scale
+	radius := 4.0 * scale
 	dc.DrawRoundedRectangle(x, y, w, h, radius)
 	dc.Fill()
 
@@ -158,13 +160,13 @@ func (r *ToolbarRenderer) drawModeButton(dc *gg.Context, x, y, w, h float64, sta
 
 // drawWidthButton draws the full/half width button
 func (r *ToolbarRenderer) drawWidthButton(dc *gg.Context, x, y, w, h float64, fullWidth bool, scale float64) {
-	// Background
+	// Background - modern teal/green
 	if fullWidth {
-		dc.SetRGBA(0.2, 0.6, 0.2, 1) // Green for full-width
+		dc.SetRGBA(0.18, 0.72, 0.60, 1) // Teal green for full-width (#2EB899)
 	} else {
-		dc.SetRGBA(0.8, 0.8, 0.8, 1) // Light gray for half-width
+		dc.SetRGBA(0.90, 0.92, 0.94, 1) // Light cool gray for half-width (#E6EAEF)
 	}
-	radius := 3.0 * scale
+	radius := 4.0 * scale
 	dc.DrawRoundedRectangle(x, y, w, h, radius)
 	dc.Fill()
 
@@ -172,7 +174,7 @@ func (r *ToolbarRenderer) drawWidthButton(dc *gg.Context, x, y, w, h float64, fu
 	if fullWidth {
 		dc.SetRGBA(1, 1, 1, 1)
 	} else {
-		dc.SetRGBA(0.3, 0.3, 0.3, 1)
+		dc.SetRGBA(0.35, 0.40, 0.48, 1) // Darker text for better contrast
 	}
 	text := "半"
 	if fullWidth {
@@ -183,13 +185,13 @@ func (r *ToolbarRenderer) drawWidthButton(dc *gg.Context, x, y, w, h float64, fu
 
 // drawPunctButton draws the punctuation button
 func (r *ToolbarRenderer) drawPunctButton(dc *gg.Context, x, y, w, h float64, chinesePunct bool, scale float64) {
-	// Background
+	// Background - vibrant orange/coral
 	if chinesePunct {
-		dc.SetRGBA(0.8, 0.4, 0.1, 1) // Orange for Chinese punctuation
+		dc.SetRGBA(0.96, 0.52, 0.26, 1) // Coral orange for Chinese punctuation (#F58543)
 	} else {
-		dc.SetRGBA(0.8, 0.8, 0.8, 1) // Light gray for English punctuation
+		dc.SetRGBA(0.90, 0.92, 0.94, 1) // Light cool gray for English punctuation (#E6EAEF)
 	}
-	radius := 3.0 * scale
+	radius := 4.0 * scale
 	dc.DrawRoundedRectangle(x, y, w, h, radius)
 	dc.Fill()
 
@@ -197,7 +199,7 @@ func (r *ToolbarRenderer) drawPunctButton(dc *gg.Context, x, y, w, h float64, ch
 	if chinesePunct {
 		dc.SetRGBA(1, 1, 1, 1)
 	} else {
-		dc.SetRGBA(0.3, 0.3, 0.3, 1)
+		dc.SetRGBA(0.35, 0.40, 0.48, 1) // Darker text for better contrast
 	}
 	text := ","
 	if chinesePunct {
@@ -208,20 +210,20 @@ func (r *ToolbarRenderer) drawPunctButton(dc *gg.Context, x, y, w, h float64, ch
 
 // drawSettingsButton draws the settings button (gear icon)
 func (r *ToolbarRenderer) drawSettingsButton(dc *gg.Context, x, y, w, h float64, scale float64) {
-	// Background
-	dc.SetRGBA(0.85, 0.85, 0.85, 1)
-	radius := 3.0 * scale
+	// Background - subtle purple/violet tint
+	dc.SetRGBA(0.90, 0.92, 0.94, 1) // Light cool gray (#E6EAEF)
+	radius := 4.0 * scale
 	dc.DrawRoundedRectangle(x, y, w, h, radius)
 	dc.Fill()
 
-	// Draw gear icon
+	// Draw gear icon - modern purple/violet color
 	centerX := x + w/2
 	centerY := y + h/2
 	outerR := 8.0 * scale
 	innerR := 4.0 * scale
 	toothHeight := 2.5 * scale
 
-	dc.SetRGBA(0.4, 0.4, 0.4, 1)
+	dc.SetRGBA(0.48, 0.40, 0.72, 1) // Muted purple (#7A66B8)
 
 	// Draw gear teeth
 	teeth := 8
@@ -239,7 +241,7 @@ func (r *ToolbarRenderer) drawSettingsButton(dc *gg.Context, x, y, w, h float64,
 	dc.Fill()
 
 	// Draw inner circle (hole)
-	dc.SetRGBA(0.85, 0.85, 0.85, 1)
+	dc.SetRGBA(0.90, 0.92, 0.94, 1) // Match button background
 	dc.DrawCircle(centerX, centerY, innerR)
 	dc.Fill()
 }
@@ -319,4 +321,45 @@ func CreateModeIndicatorColor(chineseMode bool) color.RGBA {
 		return color.RGBA{R: 66, G: 133, B: 244, A: 255} // Blue
 	}
 	return color.RGBA{R: 128, G: 128, B: 128, A: 255} // Gray
+}
+
+// RenderTooltip renders a tooltip with the given text
+func (r *ToolbarRenderer) RenderTooltip(text string) *image.RGBA {
+	scale := GetDPIScale()
+
+	// Calculate text size
+	fontSize := 12.0 * scale
+	padding := 6.0 * scale
+
+	// Create temporary context to measure text
+	tmpDc := gg.NewContext(1, 1)
+	if err := r.loadFont(tmpDc, fontSize); err == nil {
+		// Font loaded successfully
+	}
+	textWidth, _ := tmpDc.MeasureString(text)
+
+	width := int(textWidth + padding*2 + 2)
+	height := int(fontSize + padding*2)
+
+	dc := gg.NewContext(width, height)
+
+	// Background - dark tooltip style
+	radius := 4.0 * scale
+	dc.DrawRoundedRectangle(0, 0, float64(width), float64(height), radius)
+	dc.SetRGBA(0.15, 0.18, 0.22, 0.95) // Dark background (#262E38)
+	dc.Fill()
+
+	// Border
+	dc.DrawRoundedRectangle(0.5, 0.5, float64(width)-1, float64(height)-1, radius)
+	dc.SetRGBA(0.3, 0.35, 0.42, 1) // Subtle border
+	dc.SetLineWidth(1)
+	dc.Stroke()
+
+	// Text
+	if err := r.loadFont(dc, fontSize); err == nil {
+		dc.SetRGBA(0.95, 0.95, 0.95, 1) // Light text
+		dc.DrawStringAnchored(text, float64(width)/2, float64(height)/2, 0.5, 0.5)
+	}
+
+	return dc.Image().(*image.RGBA)
 }

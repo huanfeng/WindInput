@@ -81,6 +81,11 @@ type UIConfig struct {
 	FontPath            string  `yaml:"font_path" json:"font_path"`
 	InlinePreedit       bool    `yaml:"inline_preedit" json:"inline_preedit"`               // 启用嵌入式编码行
 	HideCandidateWindow bool    `yaml:"hide_candidate_window" json:"hide_candidate_window"` // 调试：隐藏候选框（测试性能）
+	CandidateLayout     string  `yaml:"candidate_layout" json:"candidate_layout"`           // 候选布局：horizontal（横向）或 vertical（纵向）
+	// 状态提示配置
+	StatusIndicatorDuration int `yaml:"status_indicator_duration" json:"status_indicator_duration"` // 状态提示显示时长（毫秒），默认 800
+	StatusIndicatorOffsetX  int `yaml:"status_indicator_offset_x" json:"status_indicator_offset_x"` // 状态提示 X 偏移量
+	StatusIndicatorOffsetY  int `yaml:"status_indicator_offset_y" json:"status_indicator_offset_y"` // 状态提示 Y 偏移量
 }
 
 // ToolbarConfig contains toolbar settings
@@ -163,10 +168,14 @@ func DefaultConfig() *Config {
 			TogglePunct:     "ctrl+.",
 		},
 		UI: UIConfig{
-			FontSize:          18,
-			CandidatesPerPage: 9,
-			FontPath:          "",
-			InlinePreedit:     true,
+			FontSize:                18,
+			CandidatesPerPage:       9,
+			FontPath:                "",
+			InlinePreedit:           true,
+			CandidateLayout:         "horizontal", // 默认横向布局
+			StatusIndicatorDuration: 800,          // 默认 800 毫秒
+			StatusIndicatorOffsetX:  0,            // 默认无偏移
+			StatusIndicatorOffsetY:  -30,          // 默认向上偏移，更靠近光标
 		},
 		Toolbar: ToolbarConfig{
 			Visible:   false,

@@ -288,13 +288,22 @@ STDAPI CLangBarItemButton::GetIcon(HICON* phIcon)
         return E_FAIL;
     }
 
-    // Create compatible bitmap (simpler, more reliable)
-    HBITMAP hBitmap = CreateCompatibleBitmap(hdcScreen, iconSize, iconSize);
-    if (hBitmap == NULL)
+    // Create 32-bit DIB section for better compatibility with Windows 10/11
+    BITMAPINFO bmi = { 0 };
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = iconSize;
+    bmi.bmiHeader.biHeight = -iconSize;  // Top-down DIB
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = nullptr;
+    HBITMAP hBitmap = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    if (hBitmap == NULL || pBits == nullptr)
     {
         DeleteDC(hdcMem);
         ReleaseDC(NULL, hdcScreen);
-        WIND_LOG_ERROR(L"GetIcon: CreateCompatibleBitmap failed\n");
+        WIND_LOG_ERROR(L"GetIcon: CreateDIBSection failed\n");
         return E_FAIL;
     }
     HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBitmap);
@@ -330,14 +339,29 @@ STDAPI CLangBarItemButton::GetIcon(HICON* phIcon)
         GB2312_CHARSET,  // Chinese charset
         OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY,
+        CLEARTYPE_QUALITY,  // Use ClearType for better rendering
         DEFAULT_PITCH | FF_DONTCARE,
-        L"SimHei"  // SimHei supports Chinese
+        L"Microsoft YaHei"  // Microsoft YaHei has better coverage
     );
 
     if (hFont == NULL)
     {
-        // Fallback to system font
+        // Fallback to SimHei
+        hFont = CreateFontW(
+            fontSize, 0, 0, 0, FW_BOLD,
+            FALSE, FALSE, FALSE,
+            GB2312_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE,
+            L"SimHei"
+        );
+    }
+
+    if (hFont == NULL)
+    {
+        // Final fallback to system font
         hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     }
 
@@ -364,22 +388,40 @@ STDAPI CLangBarItemButton::GetIcon(HICON* phIcon)
         DeleteObject(hFont);
     }
 
-    // Create monochrome mask bitmap (all black = all opaque)
-    HDC hdcMask = CreateCompatibleDC(hdcScreen);
-    HBITMAP hMaskBitmap = CreateCompatibleBitmap(hdcMask, iconSize, iconSize);
-    if (hMaskBitmap == NULL)
+    // Set alpha channel to fully opaque for all pixels
+    // DIB section pixels are in BGRA format
+    BYTE* pixels = (BYTE*)pBits;
+    for (int i = 0; i < iconSize * iconSize; i++)
     {
-        // Fallback: create simple monochrome bitmap
-        hMaskBitmap = CreateBitmap(iconSize, iconSize, 1, 1, NULL);
+        pixels[i * 4 + 3] = 255;  // Set alpha to opaque
     }
-    HBITMAP hOldMask = (HBITMAP)SelectObject(hdcMask, hMaskBitmap);
 
-    // Fill mask with black (0 = opaque in mask)
-    RECT rcMask = { 0, 0, iconSize, iconSize };
-    FillRect(hdcMask, &rcMask, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    // Create monochrome mask bitmap (all zeros = fully opaque)
+    // Use CreateDIBSection for proper initialization
+    BITMAPINFO bmiMask = { 0 };
+    bmiMask.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmiMask.bmiHeader.biWidth = iconSize;
+    bmiMask.bmiHeader.biHeight = iconSize;  // Bottom-up for mask (positive height)
+    bmiMask.bmiHeader.biPlanes = 1;
+    bmiMask.bmiHeader.biBitCount = 1;
+    bmiMask.bmiHeader.biCompression = BI_RGB;
 
-    SelectObject(hdcMask, hOldMask);
-    DeleteDC(hdcMask);
+    void* pMaskBits = nullptr;
+    HBITMAP hMaskBitmap = CreateDIBSection(hdcMem, &bmiMask, DIB_RGB_COLORS, &pMaskBits, NULL, 0);
+    if (hMaskBitmap == NULL || pMaskBits == nullptr)
+    {
+        SelectObject(hdcMem, hOldBitmap);
+        DeleteObject(hBitmap);
+        DeleteDC(hdcMem);
+        ReleaseDC(NULL, hdcScreen);
+        WIND_LOG_ERROR(L"GetIcon: CreateDIBSection for mask failed\n");
+        return E_FAIL;
+    }
+
+    // Fill mask with zeros (0 = opaque in mask)
+    // Each row is padded to DWORD boundary
+    int maskRowBytes = ((iconSize + 31) / 32) * 4;
+    memset(pMaskBits, 0, maskRowBytes * iconSize);
 
     SelectObject(hdcMem, hOldBitmap);
     DeleteDC(hdcMem);

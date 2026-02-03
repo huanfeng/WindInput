@@ -993,10 +993,56 @@ onUnmounted(() => {
                 </label>
               </div>
             </div>
+            <div class="setting-item">
+              <div class="setting-info">
+                <label>候选布局</label>
+                <p class="setting-hint">候选词的排列方式</p>
+              </div>
+              <div class="setting-control">
+                <select v-model="formData.ui.candidate_layout" class="select">
+                  <option value="horizontal">横向</option>
+                  <option value="vertical">纵向</option>
+                </select>
+              </div>
+            </div>
           </div>
 
           <div class="settings-card">
-            <div class="card-title">状态栏</div>
+            <div class="card-title">状态提示</div>
+            <div class="setting-item">
+              <div class="setting-info">
+                <label>显示时长</label>
+                <p class="setting-hint">中英切换等状态提示的显示时间</p>
+              </div>
+              <div class="setting-control range-control">
+                <input type="range" min="200" max="2000" step="100" v-model.number="formData.ui.status_indicator_duration" />
+                <span class="range-value">{{ formData.ui.status_indicator_duration }}ms</span>
+              </div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-info">
+                <label>水平偏移</label>
+                <p class="setting-hint">状态提示相对光标的水平偏移</p>
+              </div>
+              <div class="setting-control range-control">
+                <input type="range" min="-50" max="50" step="5" v-model.number="formData.ui.status_indicator_offset_x" />
+                <span class="range-value">{{ formData.ui.status_indicator_offset_x }}px</span>
+              </div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-info">
+                <label>垂直偏移</label>
+                <p class="setting-hint">状态提示相对光标的垂直偏移（负值=向上）</p>
+              </div>
+              <div class="setting-control range-control">
+                <input type="range" min="-100" max="50" step="5" v-model.number="formData.ui.status_indicator_offset_y" />
+                <span class="range-value">{{ formData.ui.status_indicator_offset_y }}px</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <div class="card-title">工具栏</div>
             <div class="setting-item">
               <div class="setting-info">
                 <label>显示工具栏</label>
