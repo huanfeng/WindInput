@@ -46,6 +46,7 @@ const (
 	menuPaddingY        = 4
 	menuMinWidth        = 120
 	menuFontSize        = 12.0
+	menuCornerRadius    = 6 // Corner radius for rounded rectangle
 
 	// Windows message for popup menu
 	WM_CAPTURECHANGED = 0x0215
@@ -341,14 +342,21 @@ func (m *PopupMenu) render() *image.RGBA {
 	dc := gg.NewContext(width, height)
 	m.loadFont(dc, fontSize)
 
-	// Fill background
-	dc.SetRGB(1, 1, 1)
+	// Calculate corner radius with DPI scaling
+	radius := float64(menuCornerRadius) * scale
+
+	// Fill background with rounded rectangle
+	dc.SetRGBA(1, 1, 1, 0) // Transparent background first
 	dc.Clear()
 
-	// Draw border
-	dc.SetRGB(0.78, 0.78, 0.78)
-	dc.DrawRectangle(0, 0, float64(width), float64(height))
-	dc.Stroke()
+	// Draw filled rounded rectangle for background
+	dc.SetRGB(1, 1, 1)
+	dc.DrawRoundedRectangle(0.5, 0.5, float64(width)-1, float64(height)-1, radius)
+	dc.Fill()
+
+	// Set clip to rounded rectangle so hover backgrounds don't overflow
+	dc.DrawRoundedRectangle(1, 1, float64(width)-2, float64(height)-2, radius-1)
+	dc.Clip()
 
 	// Draw items
 	y := padY
@@ -383,6 +391,12 @@ func (m *PopupMenu) render() *image.RGBA {
 			y += itemH
 		}
 	}
+
+	// Reset clip and draw border
+	dc.ResetClip()
+	dc.SetRGB(0.78, 0.78, 0.78)
+	dc.DrawRoundedRectangle(0.5, 0.5, float64(width)-1, float64(height)-1, radius)
+	dc.Stroke()
 
 	return dc.Image().(*image.RGBA)
 }
@@ -500,11 +514,21 @@ func (m *PopupMenu) trackMouseLeave() {
 
 // handleMouseMove handles mouse move events
 func (m *PopupMenu) handleMouseMove(lParam uintptr) {
+	mouseX := int(int16(lParam & 0xFFFF))
 	mouseY := int(int16((lParam >> 16) & 0xFFFF))
 
 	m.mu.Lock()
+	menuWidth := m.width
+	menuHeight := m.height
 	oldHover := m.hoverIndex
-	m.hoverIndex = m.hitTest(mouseY)
+
+	// Only show hover if mouse is actually inside the menu bounds
+	// (SetCapture can send mouse events even when cursor is outside)
+	if mouseX >= 0 && mouseX < menuWidth && mouseY >= 0 && mouseY < menuHeight {
+		m.hoverIndex = m.hitTest(mouseY)
+	} else {
+		m.hoverIndex = -1
+	}
 
 	if m.hoverIndex != oldHover {
 		m.mu.Unlock()
