@@ -1349,12 +1349,19 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 func (c *Coordinator) HandleFocusLost() {
 	c.logger.Debug("Focus lost, clearing state")
 
-	// Set IME as deactivated (this will hide toolbar)
-	c.SetIMEActivated(false)
+	// NOTE: Do NOT hide toolbar on focus lost!
+	// FocusLost is a temporary state - user might click outside the input field
+	// but still stay in the same application. Toolbar should remain visible.
+	// Only hide toolbar when:
+	// 1. IME is switched to another input method (HandleIMEDeactivated)
+	// 2. All TSF clients disconnect (HandleClientDisconnected)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Clear input state and hide candidate window
 	c.clearState()
+	c.hideUI()
 }
 
 // HandleIMEDeactivated handles IME being switched away (user selected another IME)
