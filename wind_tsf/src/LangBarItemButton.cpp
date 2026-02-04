@@ -571,7 +571,7 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
 
         if (pThis != nullptr && pData != nullptr && pThis->_pTextService != nullptr)
         {
-            WIND_LOG_DEBUG_FMT(L"MsgWndProc: Processing WM_COMMIT_TEXT, text='%s'\n", pData->text.c_str());
+            WIND_LOG_DEBUG_FMT(L"MsgWndProc: Processing WM_COMMIT_TEXT, textLen=%zu\n", pData->text.length());
 
             // IMPORTANT: On UI thread, first end composition, then insert text
             // This ensures the composition text is cleared before inserting final text
@@ -815,7 +815,7 @@ void CLangBarItemButton::PostCommitText(const std::wstring& text)
     }
     else
     {
-        WIND_LOG_DEBUG_FMT(L"PostCommitText: Message posted to UI thread, text='%s'\n", text.c_str());
+        WIND_LOG_DEBUG_FMT(L"PostCommitText: Message posted to UI thread, textLen=%zu\n", text.length());
     }
 }
 

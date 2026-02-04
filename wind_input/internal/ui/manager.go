@@ -12,7 +12,7 @@ import (
 
 // UICommand represents a command to the UI thread
 type UICommand struct {
-	Type       string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings"
+	Type       string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings", "hide_menu"
 	Candidates []Candidate
 	Input      string
 	X, Y       int // Caret position (original, not adjusted)
@@ -250,6 +250,8 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 		m.doUpdateToolbar(cmd.ToolbarState)
 	case "settings":
 		m.doOpenSettings(cmd.SettingsPage)
+	case "hide_menu":
+		m.doHideCandidateMenu()
 	}
 }
 
@@ -270,6 +272,41 @@ func (m *Manager) IsReady() bool {
 func (m *Manager) IsCandidateMenuOpen() bool {
 	if m.window != nil {
 		return m.window.IsMenuOpen()
+	}
+	return false
+}
+
+// HideCandidateMenu hides the candidate window's context menu if it's open (async, thread-safe)
+func (m *Manager) HideCandidateMenu() {
+	m.mu.Lock()
+	if !m.ready {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
+	// Send command to UI thread (don't call HideMenu directly - it has Win32 calls)
+	select {
+	case m.cmdCh <- UICommand{Type: "hide_menu"}:
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
+	default:
+		m.logger.Warn("UI command channel full, dropping hide_menu command")
+	}
+}
+
+// doHideCandidateMenu actually hides the menu (called from UI thread)
+func (m *Manager) doHideCandidateMenu() {
+	if m.window != nil {
+		m.window.HideMenu()
+	}
+}
+
+// CandidateMenuContainsPoint checks if the given screen coordinates are within the candidate menu
+func (m *Manager) CandidateMenuContainsPoint(screenX, screenY int) bool {
+	if m.window != nil {
+		return m.window.MenuContainsPoint(screenX, screenY)
 	}
 	return false
 }

@@ -282,8 +282,10 @@ type CandidateWindow struct {
 	trackingMouse bool            // Whether mouse leave tracking is enabled
 	callbacks     *CandidateCallback
 
-	// Menu state (for ESC key handling coordination)
-	menuOpen bool // Whether context menu is currently open
+	// Custom popup menu (doesn't steal focus)
+	popupMenu        *PopupMenu
+	menuOpen         bool // Whether context menu is currently open
+	menuTargetIndex  int  // The candidate index that was right-clicked
 }
 
 // NewCandidateWindow creates a new candidate window
@@ -386,6 +388,13 @@ func (w *CandidateWindow) Create() error {
 	w.hwnd = windows.HWND(hwnd)
 	registerCandidateWindow(w.hwnd, w)
 	w.logger.Info("Candidate window created", "hwnd", hwnd)
+
+	// Create custom popup menu (doesn't steal focus)
+	w.popupMenu = NewPopupMenu()
+	if err := w.popupMenu.Create(); err != nil {
+		w.logger.Warn("Failed to create popup menu", "error", err)
+		// Non-fatal, continue without popup menu
+	}
 
 	return nil
 }
@@ -553,6 +562,9 @@ func (w *CandidateWindow) Hide() {
 	if w.hwnd == 0 {
 		return
 	}
+	// Also hide popup menu if open
+	w.HideMenu()
+
 	procShowWindow.Call(uintptr(w.hwnd), SW_HIDE)
 	w.mu.Lock()
 	w.visible = false
@@ -582,6 +594,11 @@ func (w *CandidateWindow) SetPosition(x, y int) {
 
 // Destroy destroys the window
 func (w *CandidateWindow) Destroy() {
+	// Destroy popup menu first
+	if w.popupMenu != nil {
+		w.popupMenu.Destroy()
+		w.popupMenu = nil
+	}
 	if w.hwnd != 0 {
 		procDestroyWindow.Call(uintptr(w.hwnd))
 		w.hwnd = 0
@@ -626,6 +643,32 @@ func (w *CandidateWindow) IsMenuOpen() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.menuOpen
+}
+
+// HideMenu hides the popup menu if it's open
+func (w *CandidateWindow) HideMenu() {
+	w.mu.Lock()
+	popupMenu := w.popupMenu
+	wasOpen := w.menuOpen
+	w.menuOpen = false
+	w.mu.Unlock()
+
+	if wasOpen && popupMenu != nil {
+		popupMenu.Hide()
+	}
+}
+
+// MenuContainsPoint checks if the given screen coordinates are within the popup menu
+func (w *CandidateWindow) MenuContainsPoint(screenX, screenY int) bool {
+	w.mu.Lock()
+	popupMenu := w.popupMenu
+	menuOpen := w.menuOpen
+	w.mu.Unlock()
+
+	if !menuOpen || popupMenu == nil {
+		return false
+	}
+	return popupMenu.ContainsPoint(screenX, screenY)
 }
 
 // handleMouseMove processes mouse move events
@@ -711,9 +754,9 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 
 	w.mu.Lock()
 	hitRects := w.hitRects
-	callbacks := w.callbacks
 	windowX := w.x
 	windowY := w.y
+	popupMenu := w.popupMenu
 	w.mu.Unlock()
 
 	// Hit test against candidate rectangles
@@ -730,113 +773,76 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 		return
 	}
 
+	// Check if popup menu is available
+	if popupMenu == nil {
+		w.logger.Warn("Popup menu not available")
+		return
+	}
+
 	// Determine candidate count for enable/disable logic
 	candidateCount := len(hitRects)
 	isFirst := hitIndex == 0
 	isLast := hitIndex == candidateCount-1
 
-	// Create popup menu
-	hMenu, _, _ := procCreatePopupMenu.Call()
-	if hMenu == 0 {
-		return
+	// Build menu items
+	items := []MenuItem{
+		{ID: IDM_CANDIDATE_MOVEUP, Text: "前移(U)", Disabled: isFirst},
+		{ID: IDM_CANDIDATE_MOVEDOWN, Text: "后移(D)", Disabled: isLast},
+		{ID: IDM_CANDIDATE_MOVETOP, Text: "置顶(T)", Disabled: isFirst},
+		{Separator: true},
+		{ID: IDM_CANDIDATE_DELETE, Text: "删除词条(X)"},
+		{Separator: true},
+		{ID: IDM_CANDIDATE_SETTINGS, Text: "打开设置(S)..."},
 	}
-	defer procDestroyMenu.Call(hMenu)
-
-	// Add menu items with conditional graying
-	moveUpText, _ := syscall.UTF16PtrFromString("前移(&U)")
-	moveDownText, _ := syscall.UTF16PtrFromString("后移(&D)")
-	moveTopText, _ := syscall.UTF16PtrFromString("置顶(&T)")
-	deleteText, _ := syscall.UTF16PtrFromString("删除词条(&X)")
-	settingsText, _ := syscall.UTF16PtrFromString("打开设置(&S)...")
-
-	// Move Up - disabled if first
-	moveUpFlags := uintptr(MF_STRING)
-	if isFirst {
-		moveUpFlags |= MF_GRAYED
-	}
-	procAppendMenuW.Call(hMenu, moveUpFlags, IDM_CANDIDATE_MOVEUP, uintptr(unsafe.Pointer(moveUpText)))
-
-	// Move Down - disabled if last
-	moveDownFlags := uintptr(MF_STRING)
-	if isLast {
-		moveDownFlags |= MF_GRAYED
-	}
-	procAppendMenuW.Call(hMenu, moveDownFlags, IDM_CANDIDATE_MOVEDOWN, uintptr(unsafe.Pointer(moveDownText)))
-
-	// Move to Top - disabled if first
-	moveTopFlags := uintptr(MF_STRING)
-	if isFirst {
-		moveTopFlags |= MF_GRAYED
-	}
-	procAppendMenuW.Call(hMenu, moveTopFlags, IDM_CANDIDATE_MOVETOP, uintptr(unsafe.Pointer(moveTopText)))
-
-	// Separator
-	procAppendMenuW.Call(hMenu, MF_SEPARATOR, 0, 0)
-
-	// Delete
-	procAppendMenuW.Call(hMenu, MF_STRING, IDM_CANDIDATE_DELETE, uintptr(unsafe.Pointer(deleteText)))
-
-	// Separator
-	procAppendMenuW.Call(hMenu, MF_SEPARATOR, 0, 0)
-
-	// Settings
-	procAppendMenuW.Call(hMenu, MF_STRING, IDM_CANDIDATE_SETTINGS, uintptr(unsafe.Pointer(settingsText)))
 
 	// Calculate screen position
 	screenX := windowX + mouseX
 	screenY := windowY + mouseY
 
-	// Note: Do NOT call SetForegroundWindow to avoid losing input focus
-	// which would cause IME switching issues
-
-	// Set menu open flag (for ESC key handling coordination)
+	// Set menu open flag and target index
 	w.mu.Lock()
 	w.menuOpen = true
+	w.menuTargetIndex = hitIndex
 	w.mu.Unlock()
 
-	// Show popup menu and wait for selection
-	// TPM_RETURNCMD: Return the command instead of posting WM_COMMAND
-	// Note: Removed TPM_NONOTIFY so menu can properly handle ESC key
-	ret, _, _ := procTrackPopupMenu.Call(
-		hMenu,
-		TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD,
-		uintptr(screenX),
-		uintptr(screenY),
-		0,
-		uintptr(w.hwnd),
-		0,
-	)
+	// Show custom popup menu (doesn't steal focus)
+	popupMenu.Show(items, screenX, screenY, func(id int) {
+		// Handle menu selection in callback
+		w.mu.Lock()
+		w.menuOpen = false
+		targetIndex := w.menuTargetIndex
+		cb := w.callbacks
+		w.mu.Unlock()
 
-	// Clear menu open flag
-	w.mu.Lock()
-	w.menuOpen = false
-	w.mu.Unlock()
-
-	// Handle menu selection
-	if ret != 0 && callbacks != nil {
-		switch ret {
-		case IDM_CANDIDATE_MOVEUP:
-			if callbacks.OnMoveUp != nil {
-				callbacks.OnMoveUp(hitIndex)
-			}
-		case IDM_CANDIDATE_MOVEDOWN:
-			if callbacks.OnMoveDown != nil {
-				callbacks.OnMoveDown(hitIndex)
-			}
-		case IDM_CANDIDATE_MOVETOP:
-			if callbacks.OnMoveTop != nil {
-				callbacks.OnMoveTop(hitIndex)
-			}
-		case IDM_CANDIDATE_DELETE:
-			if callbacks.OnDelete != nil {
-				callbacks.OnDelete(hitIndex)
-			}
-		case IDM_CANDIDATE_SETTINGS:
-			if callbacks.OnOpenSettings != nil {
-				callbacks.OnOpenSettings()
+		if cb != nil {
+			switch id {
+			case IDM_CANDIDATE_MOVEUP:
+				if cb.OnMoveUp != nil {
+					cb.OnMoveUp(targetIndex)
+				}
+			case IDM_CANDIDATE_MOVEDOWN:
+				if cb.OnMoveDown != nil {
+					cb.OnMoveDown(targetIndex)
+				}
+			case IDM_CANDIDATE_MOVETOP:
+				if cb.OnMoveTop != nil {
+					cb.OnMoveTop(targetIndex)
+				}
+			case IDM_CANDIDATE_DELETE:
+				if cb.OnDelete != nil {
+					cb.OnDelete(targetIndex)
+				}
+			case IDM_CANDIDATE_SETTINGS:
+				if cb.OnOpenSettings != nil {
+					cb.OnOpenSettings()
+				}
 			}
 		}
-	}
+	})
+
+	// Note: Unlike TrackPopupMenu, our custom popup doesn't block.
+	// The callback will be called when user clicks a menu item.
+	// We handle ESC key and click-outside in the coordinator.
 }
 
 // handleMouseLeave processes mouse leave events

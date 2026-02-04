@@ -845,8 +845,8 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
                 }
             }
 
-            _LogDebug(L"Response: CommitText text='%s', modeChanged=%d, newComp='%s'",
-                      response.text.c_str(), response.modeChanged, response.newComposition.c_str());
+            _LogDebug(L"Response: CommitText textLen=%zu, modeChanged=%d, hasNewComp=%d",
+                      response.text.length(), response.modeChanged, !response.newComposition.empty());
         }
         break;
 
@@ -872,8 +872,8 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
                     textLength);
             }
 
-            _LogDebug(L"Response: UpdateComposition text='%s', caret=%d",
-                      response.composition.c_str(), response.caretPos);
+            _LogDebug(L"Response: UpdateComposition textLen=%zu, caret=%d",
+                      response.composition.length(), response.caretPos);
         }
         break;
 
@@ -1027,8 +1027,8 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
                 }
             }
 
-            _LogDebug(L"Response: CommitResult barrierSeq=%d, text='%s', modeChanged=%d",
-                      resultPayload->barrierSeq, response.text.c_str(), response.modeChanged);
+            _LogDebug(L"Response: CommitResult barrierSeq=%d, textLen=%zu, modeChanged=%d",
+                      resultPayload->barrierSeq, response.text.length(), response.modeChanged);
         }
         break;
 
@@ -1580,7 +1580,7 @@ void CIPCClient::_AsyncReaderLoop()
                 ServiceResponse response;
                 if (_ParseResponse(header, payload, response))
                 {
-                    _LogInfo(L"Async reader: commit text received - text='%s'", response.text.c_str());
+                    _LogDebug(L"Async reader: commit text received, textLen=%zu", response.text.length());
 
                     // Call callback
                     EnterCriticalSection(&_asyncLock);

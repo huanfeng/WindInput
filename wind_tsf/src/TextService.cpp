@@ -853,7 +853,7 @@ BOOL CTextService::_InitIPCClient()
     // Set up commit text callback for mouse click on candidate
     _pIPCClient->SetCommitTextCallback([pThis](const std::wstring& text) {
         // This callback is called from the async reader thread
-        WIND_LOG_INFO_FMT(L"Commit text received from Go: '%s'\n", text.c_str());
+        WIND_LOG_DEBUG_FMT(L"Commit text received from Go, textLen=%zu\n", text.length());
 
         // Use PostCommitText to ensure EndComposition is called before InsertText on UI thread
         // This fixes the issue where text was inserted into composition range
@@ -1589,8 +1589,8 @@ STDAPI CTextService::OnCompositionTerminated(TfEditCookie ecWrite, ITfCompositio
 // Update composition text
 BOOL CTextService::UpdateComposition(const std::wstring& text, int caretPos)
 {
-    WIND_LOG_DEBUG_FMT(L"UpdateComposition called, text='%s', _pComposition=%p\n",
-                 text.c_str(), _pComposition);
+    WIND_LOG_DEBUG_FMT(L"UpdateComposition called, textLen=%zu, _pComposition=%p\n",
+                 text.length(), _pComposition);
 
     // OPTIMIZATION: Skip if the composition text is the same as last time
     // This avoids unnecessary TSF RequestEditSession calls which can be slow in some apps

@@ -64,7 +64,7 @@ public:
 
     // Update composition text (Inline Composition)
     BOOL UpdateComposition(const std::wstring& text, int caretPos);
-    
+
     // End current composition
     void EndComposition();
 

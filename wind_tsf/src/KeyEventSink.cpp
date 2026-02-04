@@ -708,8 +708,8 @@ BOOL CKeyEventSink::_HandleServiceResponse()
             // Handle new composition if present (top code commit feature)
             if (!response.newComposition.empty())
             {
-                WIND_LOG_TRACE_FMT(L"CommitText with new composition: text='%s', newComp='%s'\n",
-                             response.text.c_str(), response.newComposition.c_str());
+                WIND_LOG_TRACE_FMT(L"CommitText with new composition: textLen=%zu, newCompLen=%zu\n",
+                             response.text.length(), response.newComposition.length());
 
                 _pTextService->InsertTextAndStartComposition(response.text, response.newComposition);
                 _isComposing = TRUE;

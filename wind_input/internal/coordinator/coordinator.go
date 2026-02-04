@@ -100,7 +100,7 @@ type Coordinator struct {
 // BridgeServer interface for broadcasting state to TSF clients
 type BridgeServer interface {
 	PushStateToAllClients(status *bridge.StatusUpdateData)
-	PushCommitTextToAllClients(text string)
+	PushCommitTextToActiveClient(text string) // Only send to active client for security
 	RestartService()
 }
 
@@ -375,7 +375,7 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 		text = transform.ToFullWidth(text)
 	}
 
-	c.logger.Info("Candidate selected via mouse click", "index", actualIndex, "text", text)
+	c.logger.Debug("Candidate selected via mouse click", "index", actualIndex)
 
 	// Clear state and hide UI
 	c.clearState()
@@ -385,10 +385,9 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 	bridgeServer := c.bridgeServer
 	c.mu.Unlock()
 
-	// Send text to TSF via push pipe
+	// Send text to TSF via push pipe (only to active client for security)
 	if bridgeServer != nil && text != "" {
-		bridgeServer.PushCommitTextToAllClients(text)
-		c.logger.Debug("Commit text pushed to TSF clients", "text", text)
+		bridgeServer.PushCommitTextToActiveClient(text)
 	}
 }
 
@@ -421,8 +420,7 @@ func (c *Coordinator) handleCandidateMoveUp(index int) {
 		return
 	}
 
-	candidate := c.candidates[index]
-	c.logger.Info("Request to move candidate up", "text", candidate.Text, "index", index)
+	c.logger.Debug("Request to move candidate up", "index", index)
 
 	// TODO: Implement candidate priority adjustment
 	// This would require:
@@ -443,8 +441,7 @@ func (c *Coordinator) handleCandidateMoveDown(index int) {
 		return
 	}
 
-	candidate := c.candidates[index]
-	c.logger.Info("Request to move candidate down", "text", candidate.Text, "index", index)
+	c.logger.Debug("Request to move candidate down", "index", index)
 
 	// TODO: Implement candidate priority adjustment
 }
@@ -461,8 +458,7 @@ func (c *Coordinator) handleCandidateMoveTop(index int) {
 		return
 	}
 
-	candidate := c.candidates[index]
-	c.logger.Info("Request to move candidate to top", "text", candidate.Text, "index", index)
+	c.logger.Debug("Request to move candidate to top", "index", index)
 
 	// TODO: Implement candidate priority adjustment
 	// Set this candidate's priority to be highest
@@ -480,11 +476,9 @@ func (c *Coordinator) handleCandidateDelete(index int) {
 		return
 	}
 
-	candidate := c.candidates[index]
-	text := candidate.Text
 	c.mu.Unlock()
 
-	c.logger.Info("Request to delete user word", "text", text)
+	c.logger.Debug("Request to delete user word", "index", index)
 
 	// Show confirmation dialog
 	// TODO: Implement confirmation dialog via UI manager
@@ -906,7 +900,7 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 		commitText, newInput, shouldCommit := c.engineMgr.HandleTopCode(c.inputBuffer)
 		if shouldCommit {
 			c.inputBuffer = newInput
-			c.logger.Debug("Top code commit", "text", commitText, "newInput", newInput)
+			c.logger.Debug("Top code commit", "newInputLen", len(newInput))
 
 			// Apply full-width conversion if enabled
 			if c.fullWidth {
@@ -1062,10 +1056,12 @@ func (c *Coordinator) handleEnter() *bridge.KeyEventResult {
 }
 
 func (c *Coordinator) handleEscape() *bridge.KeyEventResult {
-	// If candidate context menu is open, pass through ESC to let system/menu handle it
+	// If candidate context menu is open, close it and consume ESC
 	if c.uiManager != nil && c.uiManager.IsCandidateMenuOpen() {
-		c.logger.Debug("ESC passed through: candidate context menu is open")
-		return &bridge.KeyEventResult{Type: bridge.ResponseTypePassThrough}
+		c.logger.Debug("ESC closes candidate context menu")
+		c.uiManager.HideCandidateMenu()
+		// Return Consumed to eat the ESC key (don't pass to app)
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 	}
 
 	if len(c.inputBuffer) > 0 {
@@ -1600,7 +1596,7 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 	}
 
 	candidate := c.candidates[index]
-	c.logger.Debug("Candidate selected (internal)", "index", index, "text", candidate.Text)
+	c.logger.Debug("Candidate selected (internal)", "index", index)
 
 	text := candidate.Text
 
@@ -1666,12 +1662,12 @@ func (c *Coordinator) HandleToggleMode() (commitText string, chineseMode bool) {
 			if c.fullWidth {
 				commitText = transform.ToFullWidth(commitText)
 			}
-			c.logger.Debug("CommitOnSwitch: committing input code", "text", commitText)
+			c.logger.Debug("CommitOnSwitch: committing input code")
 		}
 	}
 
 	c.chineseMode = !c.chineseMode
-	c.logger.Debug("Mode toggled via IPC", "chineseMode", c.chineseMode, "commitText", commitText)
+	c.logger.Debug("Mode toggled via IPC", "chineseMode", c.chineseMode, "hasCommitText", commitText != "")
 
 	// Clear any pending input when switching modes
 	if len(c.inputBuffer) > 0 {
@@ -2837,7 +2833,7 @@ func (c *Coordinator) exitTempEnglishMode(commit bool, text string) *bridge.KeyE
 	c.totalPages = 0
 	c.hideUI()
 
-	c.logger.Debug("Exited temp English mode", "commit", commit, "text", text)
+	c.logger.Debug("Exited temp English mode", "commit", commit, "textLen", len(text))
 
 	if commit && len(text) > 0 {
 		// 应用全角转换（如果启用）

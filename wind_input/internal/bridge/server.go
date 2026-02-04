@@ -15,6 +15,24 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+var (
+	kernel32                       = windows.NewLazySystemDLL("kernel32.dll")
+	procGetNamedPipeClientProcessId = kernel32.NewProc("GetNamedPipeClientProcessId")
+)
+
+// getNamedPipeClientProcessId returns the process ID of the client connected to the named pipe
+func getNamedPipeClientProcessId(handle windows.Handle) (uint32, error) {
+	var processID uint32
+	ret, _, err := procGetNamedPipeClientProcessId.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&processID)),
+	)
+	if ret == 0 {
+		return 0, err
+	}
+	return processID, nil
+}
+
 const (
 	BridgePipeName = `\\.\pipe\wind_input`
 	PushPipeName   = `\\.\pipe\wind_input_push`
@@ -37,19 +55,25 @@ type Server struct {
 	activeHandles map[windows.Handle]*pipeWriter // Map handle to writer for broadcasting
 
 	// Push pipe clients (for proactive state push)
-	pushMu          sync.RWMutex
-	pushClientCount int
-	pushClients     map[windows.Handle]*pipeWriter
+	pushMu            sync.RWMutex
+	pushClientCount   int
+	pushClients       map[windows.Handle]*pipeWriter
+	pushClientsByPID  map[uint32]windows.Handle // Map process ID to push pipe handle
+
+	// Active client tracking (for secure, targeted push)
+	activeMu        sync.RWMutex
+	activeProcessID uint32 // Process ID of the client that has focus
 }
 
 // NewServer creates a new Bridge IPC server
 func NewServer(handler MessageHandler, logger *slog.Logger) *Server {
 	return &Server{
-		handler:       handler,
-		logger:        logger,
-		codec:         ipc.NewBinaryCodec(),
-		activeHandles: make(map[windows.Handle]*pipeWriter),
-		pushClients:   make(map[windows.Handle]*pipeWriter),
+		handler:          handler,
+		logger:           logger,
+		codec:            ipc.NewBinaryCodec(),
+		activeHandles:    make(map[windows.Handle]*pipeWriter),
+		pushClients:      make(map[windows.Handle]*pipeWriter),
+		pushClientsByPID: make(map[uint32]windows.Handle),
 	}
 }
 
@@ -135,7 +159,14 @@ func (s *Server) Start() error {
 func (s *Server) handleClient(handle windows.Handle, clientID int) {
 	defer windows.CloseHandle(handle)
 
-	s.logger.Debug("Handling client", "clientID", clientID)
+	// Get the client's process ID for tracking active client
+	processID, err := getNamedPipeClientProcessId(handle)
+	if err != nil {
+		s.logger.Warn("Failed to get client process ID", "clientID", clientID, "error", err)
+		processID = 0 // Continue without process ID tracking
+	} else {
+		s.logger.Debug("Handling client", "clientID", clientID, "processID", processID)
+	}
 
 	// Create a pipe reader wrapper
 	reader := &pipeReader{handle: handle}
@@ -163,12 +194,12 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) {
 
 		// Handle batch events
 		if header.Command == ipc.CmdBatchEvents {
-			s.handleBatchEvents(header, payload, writer, clientID)
+			s.handleBatchEvents(header, payload, writer, clientID, processID)
 			continue
 		}
 
 		// Process request with timeout
-		response := s.processRequestWithTimeout(header, payload, clientID)
+		response := s.processRequestWithTimeout(header, payload, clientID, processID)
 
 		// Skip response for async requests
 		if isAsync {
@@ -265,7 +296,7 @@ func (w *pipeWriter) Write(p []byte) (int, error) {
 }
 
 // processRequestWithTimeout wraps processRequest with a timeout
-func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte, clientID int) []byte {
+func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte, clientID int, processID uint32) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), RequestProcessTimeout)
 	defer cancel()
 
@@ -273,7 +304,7 @@ func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte
 	resultCh := make(chan []byte, 1)
 
 	go func() {
-		resultCh <- s.processRequest(header, payload, clientID)
+		resultCh <- s.processRequest(header, payload, clientID, processID)
 	}()
 
 	select {
@@ -285,8 +316,22 @@ func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte
 	}
 }
 
-func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID int) []byte {
+func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID int, processID uint32) []byte {
 	s.logger.Debug("Processing Bridge request", "clientID", clientID, "command", fmt.Sprintf("0x%04X", header.Command))
+
+	// Update active process ID for events that indicate this client is active
+	// This ensures activeProcessID is always current, even if FocusGained wasn't received yet
+	switch header.Command {
+	case ipc.CmdKeyEvent, ipc.CmdCommitRequest, ipc.CmdFocusGained, ipc.CmdIMEActivated, ipc.CmdCaretUpdate:
+		if processID != 0 {
+			s.activeMu.Lock()
+			if s.activeProcessID != processID {
+				s.logger.Info("Active process updated", "clientID", clientID, "oldProcessID", s.activeProcessID, "newProcessID", processID)
+				s.activeProcessID = processID
+			}
+			s.activeMu.Unlock()
+		}
+	}
 
 	switch header.Command {
 	case ipc.CmdKeyEvent:
@@ -296,14 +341,14 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 		return s.handleCommitRequest(payload, clientID)
 
 	case ipc.CmdFocusGained:
-		return s.handleFocusGained(payload, clientID)
+		return s.handleFocusGained(payload, clientID, processID)
 
 	case ipc.CmdFocusLost:
 		s.handler.HandleFocusLost()
 		return s.codec.EncodeAck()
 
 	case ipc.CmdIMEActivated:
-		s.logger.Info("IME activated (user switched back to this IME)", "clientID", clientID)
+		s.logger.Info("IME activated (user switched back to this IME)", "clientID", clientID, "processID", processID)
 		statusUpdate := s.handler.HandleIMEActivated()
 		if statusUpdate != nil {
 			return s.encodeStatusUpdate(statusUpdate)
@@ -371,7 +416,7 @@ func (s *Server) handleKeyEvent(payload []byte, clientID int) []byte {
 	switch result.Type {
 	case ResponseTypeInsertText:
 		s.logger.Debug("Returning CommitText response", "clientID", clientID,
-			"text", result.Text, "modeChanged", result.ModeChanged, "newComposition", result.NewComposition)
+			"modeChanged", result.ModeChanged, "hasNewComposition", result.NewComposition != "")
 		return s.codec.EncodeCommitText(result.Text, result.NewComposition, result.ModeChanged, result.ChineseMode)
 
 	case ResponseTypeUpdateComposition:
@@ -393,7 +438,9 @@ func (s *Server) handleKeyEvent(payload []byte, clientID int) []byte {
 	}
 }
 
-func (s *Server) handleFocusGained(payload []byte, clientID int) []byte {
+func (s *Server) handleFocusGained(payload []byte, clientID int, processID uint32) []byte {
+	// Note: activeProcessID is already updated in processRequest() for all relevant commands
+
 	// Parse optional caret data
 	if len(payload) >= 12 {
 		caretPayload, err := s.codec.DecodeCaretPayload(payload)
@@ -524,7 +571,7 @@ func (s *Server) handleModeNotify(payload []byte, clientID int) []byte {
 }
 
 // handleBatchEvents processes a batch of events and sends responses for sync events only
-func (s *Server) handleBatchEvents(header *ipc.IpcHeader, payload []byte, writer *pipeWriter, clientID int) {
+func (s *Server) handleBatchEvents(header *ipc.IpcHeader, payload []byte, writer *pipeWriter, clientID int, processID uint32) {
 	events, err := s.codec.DecodeBatchEvents(payload)
 	if err != nil {
 		s.logger.Error("Failed to decode batch events", "clientID", clientID, "error", err)
@@ -538,7 +585,7 @@ func (s *Server) handleBatchEvents(header *ipc.IpcHeader, payload []byte, writer
 
 	for i, event := range events {
 		// Process each event
-		response := s.processRequestWithTimeout(event.Header, event.Payload, clientID)
+		response := s.processRequestWithTimeout(event.Header, event.Payload, clientID, processID)
 
 		// Only collect responses for sync events
 		if !event.IsAsync {
@@ -625,16 +672,27 @@ func (s *Server) startPushPipeListener() {
 
 		writer := &pipeWriter{handle: handle}
 
+		// Get the client's process ID for targeted push
+		pushProcessID, err := getNamedPipeClientProcessId(handle)
+		if err != nil {
+			s.logger.Warn("Failed to get push pipe client process ID", "error", err)
+			pushProcessID = 0
+		}
+
 		s.pushMu.Lock()
 		s.pushClientCount++
 		clientID := s.pushClientCount
 		s.pushClients[handle] = writer
+		// Store mapping from process ID to push pipe handle
+		if pushProcessID != 0 {
+			s.pushClientsByPID[pushProcessID] = handle
+		}
 		s.pushMu.Unlock()
 
-		s.logger.Info("Push pipe client connected", "clientID", clientID)
+		s.logger.Info("Push pipe client connected", "clientID", clientID, "processID", pushProcessID)
 
 		// Note: We don't actively monitor disconnection here.
-		// Client disconnection is detected when write fails in PushCommitTextToAllClients
+		// Client disconnection is detected when write fails in PushCommitTextToActiveClient
 		// or PushStateToAllClients. This avoids false positives from GetNamedPipeHandleState
 		// which can return "Access is denied" on valid pipes.
 	}
@@ -650,13 +708,24 @@ func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
 	// Encode the state push message using CMD_STATE_PUSH
 	encoded := s.encodeStatePush(status)
 
-	// Get all push clients
+	// Get all push clients with their process IDs
 	s.pushMu.RLock()
-	clients := make([]windows.Handle, 0, len(s.pushClients))
-	writers := make([]*pipeWriter, 0, len(s.pushClients))
+	type clientInfo struct {
+		handle    windows.Handle
+		writer    *pipeWriter
+		processID uint32
+	}
+	clients := make([]clientInfo, 0, len(s.pushClients))
 	for h, writer := range s.pushClients {
-		clients = append(clients, h)
-		writers = append(writers, writer)
+		// Find the process ID for this handle
+		var pid uint32
+		for p, handle := range s.pushClientsByPID {
+			if handle == h {
+				pid = p
+				break
+			}
+		}
+		clients = append(clients, clientInfo{handle: h, writer: writer, processID: pid})
 	}
 	clientCount := len(clients)
 	s.pushMu.RUnlock()
@@ -673,23 +742,26 @@ func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
 		"capsLock", status.CapsLock)
 
 	// Send to all clients
-	var failedHandles []windows.Handle
+	var failedClients []clientInfo
 	successCount := 0
-	for i, writer := range writers {
-		if err := s.codec.WriteMessage(writer, encoded); err != nil {
-			s.logger.Warn("Failed to push state to client", "error", err)
-			failedHandles = append(failedHandles, clients[i])
+	for _, client := range clients {
+		if err := s.codec.WriteMessage(client.writer, encoded); err != nil {
+			s.logger.Warn("Failed to push state to client", "processID", client.processID, "error", err)
+			failedClients = append(failedClients, client)
 		} else {
 			successCount++
 		}
 	}
 
 	// Remove failed clients
-	if len(failedHandles) > 0 {
+	if len(failedClients) > 0 {
 		s.pushMu.Lock()
-		for _, h := range failedHandles {
-			delete(s.pushClients, h)
-			windows.CloseHandle(h)
+		for _, client := range failedClients {
+			delete(s.pushClients, client.handle)
+			if client.processID != 0 {
+				delete(s.pushClientsByPID, client.processID)
+			}
+			windows.CloseHandle(client.handle)
 		}
 		s.pushMu.Unlock()
 	}
@@ -708,60 +780,61 @@ func (s *Server) encodeStatePush(status *StatusUpdateData) []byte {
 	)
 }
 
-// PushCommitTextToAllClients broadcasts a commit text command to all connected TSF clients
+// PushCommitTextToActiveClient sends a commit text command to the active TSF client only
 // This is used for proactive text insertion (e.g., when user clicks a candidate with mouse)
-func (s *Server) PushCommitTextToAllClients(text string) {
+// For security, we only send to the client that currently has focus, not to all clients
+func (s *Server) PushCommitTextToActiveClient(text string) {
 	if text == "" {
 		s.logger.Debug("PushCommitText: empty text, skipping")
+		return
+	}
+
+	// Get the active process ID
+	s.activeMu.RLock()
+	activeProcessID := s.activeProcessID
+	s.activeMu.RUnlock()
+
+	if activeProcessID == 0 {
+		s.logger.Warn("PushCommitText: no active client recorded, cannot send")
+		return
+	}
+
+	// Find the push pipe handle for the active process
+	s.pushMu.RLock()
+	handle, exists := s.pushClientsByPID[activeProcessID]
+	var writer *pipeWriter
+	if exists {
+		writer = s.pushClients[handle]
+	}
+	s.pushMu.RUnlock()
+
+	if !exists || writer == nil {
+		s.logger.Warn("PushCommitText: no push pipe for active process",
+			"activeProcessID", activeProcessID)
 		return
 	}
 
 	// Encode the commit text message using CMD_COMMIT_TEXT
 	encoded := s.codec.EncodeCommitText(text, "", false, false)
 
-	// Get all push clients
-	s.pushMu.RLock()
-	clients := make([]windows.Handle, 0, len(s.pushClients))
-	writers := make([]*pipeWriter, 0, len(s.pushClients))
-	for h, writer := range s.pushClients {
-		clients = append(clients, h)
-		writers = append(writers, writer)
-	}
-	clientCount := len(clients)
-	s.pushMu.RUnlock()
+	s.logger.Debug("Pushing commit text to active TSF client via push pipe",
+		"processID", activeProcessID)
 
-	if clientCount == 0 {
-		s.logger.Debug("No push pipe clients to send commit text to")
+	// Send to the active client only
+	if err := s.codec.WriteMessage(writer, encoded); err != nil {
+		s.logger.Warn("Failed to push commit text to active client",
+			"processID", activeProcessID, "error", err)
+
+		// Remove the failed client
+		s.pushMu.Lock()
+		delete(s.pushClients, handle)
+		delete(s.pushClientsByPID, activeProcessID)
+		s.pushMu.Unlock()
+		windows.CloseHandle(handle)
 		return
 	}
 
-	s.logger.Info("Pushing commit text to TSF clients via push pipe",
-		"count", clientCount,
-		"text", text)
-
-	// Send to all clients
-	var failedHandles []windows.Handle
-	successCount := 0
-	for i, writer := range writers {
-		if err := s.codec.WriteMessage(writer, encoded); err != nil {
-			s.logger.Warn("Failed to push commit text to client", "error", err)
-			failedHandles = append(failedHandles, clients[i])
-		} else {
-			successCount++
-		}
-	}
-
-	// Remove failed clients
-	if len(failedHandles) > 0 {
-		s.pushMu.Lock()
-		for _, h := range failedHandles {
-			delete(s.pushClients, h)
-			windows.CloseHandle(h)
-		}
-		s.pushMu.Unlock()
-	}
-
-	s.logger.Info("Commit text push completed", "success", successCount, "total", clientCount)
+	s.logger.Info("Commit text push completed to active client", "processID", activeProcessID)
 }
 
 // GetActiveClientCount returns the number of active TSF clients
@@ -776,14 +849,23 @@ func (s *Server) GetActiveClientCount() int {
 func (s *Server) RestartService() {
 	s.logger.Info("RestartService: Disconnecting all clients to force reconnection")
 
-	// Close all push pipe clients
+	// Close all push pipe clients and clear process ID mappings
 	s.pushMu.Lock()
 	pushClientCount := len(s.pushClients)
 	for h := range s.pushClients {
 		windows.CloseHandle(h)
 		delete(s.pushClients, h)
 	}
+	// Clear all process ID mappings
+	for pid := range s.pushClientsByPID {
+		delete(s.pushClientsByPID, pid)
+	}
 	s.pushMu.Unlock()
+
+	// Clear active process ID
+	s.activeMu.Lock()
+	s.activeProcessID = 0
+	s.activeMu.Unlock()
 
 	// Close all request-response clients
 	s.mu.Lock()
