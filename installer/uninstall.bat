@@ -1,5 +1,5 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 
 echo ======================================
 echo WindInput IME Uninstaller
@@ -15,7 +15,8 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
-set INSTALL_DIR=%ProgramFiles%\WindInput
+set "INSTALL_DIR=%ProgramW6432%\WindInput"
+if "%ProgramW6432%"=="" set "INSTALL_DIR=%ProgramFiles%\WindInput"
 
 echo [1/5] Stopping service...
 taskkill /F /IM wind_input.exe >nul 2>&1
@@ -34,7 +35,7 @@ for %%f in ("%INSTALL_DIR%\wind_tsf*.dll") do (
 echo [3/5] Deleting files...
 
 REM Generate random suffix for renaming locked files
-set RANDOM_SUFFIX=%TIME:~6,2%%TIME:~9,2%%RANDOM%
+set "RANDOM_SUFFIX=%RANDOM%%RANDOM%"
 
 REM Try to delete the main DLL
 if exist "%INSTALL_DIR%\wind_tsf.dll" (
@@ -64,6 +65,8 @@ for %%f in ("%INSTALL_DIR%\*.bak") do (
 )
 
 echo [5/5] Removing directory...
+REM Remove Start Menu shortcut
+del /F "%ProgramData%\Microsoft\Windows\Start Menu\Programs\WindInput Settings.lnk" >nul 2>&1
 REM Delete dict folder
 if exist "%INSTALL_DIR%\dict" (
     rmdir /S /Q "%INSTALL_DIR%\dict" >nul 2>&1

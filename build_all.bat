@@ -1,5 +1,5 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 
 echo ======================================
 echo WindInput - Build All
@@ -7,9 +7,19 @@ echo ======================================
 echo.
 
 REM Get script directory
-set SCRIPT_DIR=%~dp0
+set "SCRIPT_DIR=%~dp0"
+
+REM Wails build mode: debug (default), release, skip
+set "WAILS_MODE=debug"
+if /I "%~1"=="-wails-debug" set "WAILS_MODE=debug"
+if /I "%~1"=="-wails-release" set "WAILS_MODE=release"
+if /I "%~1"=="-wails-skip" set "WAILS_MODE=skip"
+if /I "%~1"=="debug" set "WAILS_MODE=debug"
+if /I "%~1"=="release" set "WAILS_MODE=release"
+if /I "%~1"=="skip" set "WAILS_MODE=skip"
 
 echo [1/5] Building Go service (wind_input.exe)...
+if not exist "%SCRIPT_DIR%build" mkdir "%SCRIPT_DIR%build"
 cd "%SCRIPT_DIR%wind_input"
 go build -o ../build/wind_input.exe ./cmd/service
 if %errorLevel% neq 0 (
@@ -21,10 +31,9 @@ echo Go service built successfully
 echo.
 
 echo [2/5] Building C++ DLL (wind_tsf.dll)...
+if not exist "%SCRIPT_DIR%wind_tsf\build" mkdir "%SCRIPT_DIR%wind_tsf\build"
 cd "%SCRIPT_DIR%wind_tsf\build"
-if not exist "%SCRIPT_DIR%wind_tsf\build" (
-    mkdir "%SCRIPT_DIR%wind_tsf\build"
-    cd "%SCRIPT_DIR%wind_tsf\build"
+if not exist "%SCRIPT_DIR%wind_tsf\build\CMakeCache.txt" (
     cmake ..
 )
 cmake --build . --config Release
@@ -37,20 +46,29 @@ echo C++ DLL built successfully
 echo.
 
 echo [3/5] Building Settings UI (wind_setting.exe)...
-cd "%SCRIPT_DIR%wind_setting"
-REM Check if wails is installed
-where wails >nul 2>&1
-if %errorLevel% neq 0 (
-    echo [WARN] Wails CLI not found, skipping wind_setting build
-    echo        Install with: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+if /I "%WAILS_MODE%"=="skip" (
+    echo [INFO] Wails build skipped by parameter
 ) else (
-    REM Build with debug mode for DevTools support
-    wails build -debug
+    cd "%SCRIPT_DIR%wind_setting"
+    REM Check if wails is installed
+    where wails >nul 2>&1
     if %errorLevel% neq 0 (
-        echo [WARN] wind_setting build failed, continuing...
+        echo [WARN] Wails CLI not found, skipping wind_setting build
+        echo        Install with: go install github.com/wailsapp/wails/v2/cmd/wails@latest
     ) else (
-        copy /Y "%SCRIPT_DIR%wind_setting\build\bin\wind_setting.exe" "%SCRIPT_DIR%build\" >nul
-        echo Settings UI built successfully (debug mode, press F12 for DevTools)
+        set "WAILS_FLAGS="
+        if /I "%WAILS_MODE%"=="debug" set "WAILS_FLAGS=-debug"
+        wails build %WAILS_FLAGS%
+        if %errorLevel% neq 0 (
+            echo [WARN] wind_setting build failed, continuing...
+        ) else (
+            copy /Y "%SCRIPT_DIR%wind_setting\build\bin\wind_setting.exe" "%SCRIPT_DIR%build\" >nul
+            if /I "%WAILS_MODE%"=="debug" (
+                echo Settings UI built successfully ^(debug mode, press F12 for DevTools^)
+            ) else (
+                echo Settings UI built successfully ^(release mode^)
+            )
+        )
     )
 )
 echo.
@@ -116,5 +134,10 @@ echo   cd build ^&^& wind_input.exe -log debug
 echo.
 echo For installation:
 echo   Run installer\install.bat as Administrator
+echo.
+echo Wails build options:
+echo   build_all.bat -wails-debug   (default)
+echo   build_all.bat -wails-release
+echo   build_all.bat -wails-skip
 echo.
 

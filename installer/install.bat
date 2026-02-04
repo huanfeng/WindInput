@@ -1,5 +1,5 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 
 echo ======================================
 echo WindInput IME Installer
@@ -40,11 +40,12 @@ timeout /t 1 /nobreak >nul
 
 echo [3/8] Creating install directory...
 echo [4/8] Handling existing files...
-set INSTALL_DIR=%ProgramFiles%\WindInput
+set "INSTALL_DIR=%ProgramW6432%\WindInput"
+if "%ProgramW6432%"=="" set "INSTALL_DIR=%ProgramFiles%\WindInput"
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
-REM Generate random suffix based on time
-set RANDOM_SUFFIX=%TIME:~6,2%%TIME:~9,2%%RANDOM%
+REM Generate random suffix
+set "RANDOM_SUFFIX=%RANDOM%%RANDOM%"
 
 REM Handle old DLL - try to delete, if fails rename it
 if exist "%INSTALL_DIR%\wind_tsf.dll" (
