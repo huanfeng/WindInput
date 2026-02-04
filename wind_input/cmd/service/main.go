@@ -343,6 +343,32 @@ func main() {
 	// Set bridge server on coordinator for state broadcasting
 	coord.SetBridgeServer(bridgeServer)
 
+	// Listen for restart requests in a separate goroutine
+	go func() {
+		<-coordinator.RestartRequested()
+		logger.Info("Restart requested, starting new process...")
+
+		// Get current executable path
+		exePath, err := os.Executable()
+		if err != nil {
+			logger.Error("Failed to get executable path for restart", "error", err)
+			return
+		}
+
+		// Start new process with same arguments
+		procAttr := &os.ProcAttr{
+			Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
+		}
+		_, err = os.StartProcess(exePath, os.Args, procAttr)
+		if err != nil {
+			logger.Error("Failed to start new process", "error", err)
+			return
+		}
+
+		logger.Info("New process started, exiting current process...")
+		os.Exit(0)
+	}()
+
 	// Start Bridge server (blocks main thread)
 	logger.Info("Starting Bridge IPC server...")
 	if err := bridgeServer.Start(); err != nil {

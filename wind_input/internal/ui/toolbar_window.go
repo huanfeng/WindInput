@@ -76,12 +76,22 @@ type ToolbarState struct {
 
 // ToolbarCallback represents callbacks for toolbar actions
 type ToolbarCallback struct {
-	OnToggleMode     func()
-	OnToggleWidth    func()
-	OnTogglePunct    func()
-	OnOpenSettings   func()
+	OnToggleMode      func()
+	OnToggleWidth     func()
+	OnTogglePunct     func()
+	OnOpenSettings    func()
 	OnPositionChanged func(x, y int)
+	OnContextMenu     func(action ToolbarContextMenuAction)
 }
+
+// ToolbarContextMenuAction represents actions from toolbar context menu
+type ToolbarContextMenuAction int
+
+const (
+	ToolbarMenuSettings ToolbarContextMenuAction = iota
+	ToolbarMenuRestartService
+	ToolbarMenuAbout
+)
 
 // TRACKMOUSEEVENT for TrackMouseEvent API
 type TRACKMOUSEEVENT struct {
@@ -152,6 +162,8 @@ func toolbarWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		return globalToolbar.handleMouseDown(hwnd, lParam)
 	case WM_LBUTTONUP:
 		return globalToolbar.handleMouseUp(hwnd, lParam)
+	case WM_RBUTTONUP:
+		return globalToolbar.handleRightClick(hwnd, lParam)
 	case WM_MOUSEMOVE:
 		return globalToolbar.handleMouseMoveWithTooltip(hwnd, lParam)
 	case WM_MOUSELEAVE:
@@ -369,6 +381,74 @@ func (w *ToolbarWindow) handleMouseUp(hwnd uintptr, lParam uintptr) uintptr {
 				w.callback.OnOpenSettings()
 			}
 		}
+	}
+
+	return 0
+}
+
+// handleRightClick handles WM_RBUTTONUP to show context menu
+func (w *ToolbarWindow) handleRightClick(hwnd uintptr, lParam uintptr) uintptr {
+	w.logger.Debug("Toolbar right click")
+
+	// Hide tooltip
+	w.hideTooltip()
+
+	// Get toolbar window position for menu placement (above the toolbar)
+	w.mu.Lock()
+	toolbarX := w.x
+	toolbarY := w.y
+	w.mu.Unlock()
+
+	// Create popup menu
+	hMenu, _, _ := procCreatePopupMenu.Call()
+	if hMenu == 0 {
+		return 0
+	}
+	defer procDestroyMenu.Call(hMenu)
+
+	// Menu item IDs
+	const (
+		IDM_SETTINGS = 1
+		IDM_RESTART  = 2
+		IDM_ABOUT    = 3
+	)
+
+	// Add menu items
+	settingsText, _ := syscall.UTF16PtrFromString("设置...")
+	restartText, _ := syscall.UTF16PtrFromString("重启服务...")
+	aboutText, _ := syscall.UTF16PtrFromString("关于...")
+
+	procAppendMenuW.Call(hMenu, MF_STRING, IDM_SETTINGS, uintptr(unsafe.Pointer(settingsText)))
+	procAppendMenuW.Call(hMenu, MF_STRING, IDM_RESTART, uintptr(unsafe.Pointer(restartText)))
+	procAppendMenuW.Call(hMenu, MF_SEPARATOR, 0, 0)
+	procAppendMenuW.Call(hMenu, MF_STRING, IDM_ABOUT, uintptr(unsafe.Pointer(aboutText)))
+
+	// Show menu above the toolbar (use TPM_BOTTOMALIGN so menu appears above the point)
+	// Note: Don't call SetForegroundWindow to avoid losing input focus
+	ret, _, _ := procTrackPopupMenu.Call(
+		hMenu,
+		TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RETURNCMD|TPM_NONOTIFY,
+		uintptr(toolbarX),
+		uintptr(toolbarY), // Menu will appear above this Y position
+		0,
+		hwnd,
+		0,
+	)
+
+	// Handle menu selection
+	if ret != 0 && w.callback != nil && w.callback.OnContextMenu != nil {
+		var action ToolbarContextMenuAction
+		switch ret {
+		case IDM_SETTINGS:
+			action = ToolbarMenuSettings
+		case IDM_RESTART:
+			action = ToolbarMenuRestartService
+		case IDM_ABOUT:
+			action = ToolbarMenuAbout
+		default:
+			return 0
+		}
+		w.callback.OnContextMenu(action)
 	}
 
 	return 0

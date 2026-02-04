@@ -766,6 +766,34 @@ func (s *Server) GetActiveClientCount() int {
 	return len(s.activeHandles)
 }
 
+// RestartService disconnects all clients to force reconnection
+// This can be used when the input method is in an abnormal state
+func (s *Server) RestartService() {
+	s.logger.Info("RestartService: Disconnecting all clients to force reconnection")
+
+	// Close all push pipe clients
+	s.pushMu.Lock()
+	pushClientCount := len(s.pushClients)
+	for h := range s.pushClients {
+		windows.CloseHandle(h)
+		delete(s.pushClients, h)
+	}
+	s.pushMu.Unlock()
+
+	// Close all request-response clients
+	s.mu.Lock()
+	reqClientCount := len(s.activeHandles)
+	for h := range s.activeHandles {
+		windows.CloseHandle(h)
+		delete(s.activeHandles, h)
+	}
+	s.mu.Unlock()
+
+	s.logger.Info("RestartService: All clients disconnected",
+		"pushClients", pushClientCount,
+		"requestClients", reqClientCount)
+}
+
 // keyCodeToKeyName converts a virtual key code to a key name string
 // This is for backwards compatibility with the existing handler interface
 func keyCodeToKeyName(keyCode uint32) string {

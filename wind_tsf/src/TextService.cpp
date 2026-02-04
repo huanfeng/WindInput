@@ -5,6 +5,7 @@
 #include "CaretEditSession.h"
 #include "DisplayAttributeInfo.h"
 #include "HotkeyManager.h"
+#include <vector>
 
 // EditSession for ending composition
 // NOTE: This class takes ownership of the composition pointer passed to it.
@@ -838,8 +839,17 @@ BOOL CTextService::_InitIPCClient()
         // This callback is called from the async reader thread
         WIND_LOG_INFO_FMT(L"Commit text received from Go: '%s'\n", text.c_str());
 
-        // Insert the text using SendInput (works from any thread)
-        pThis->InsertText(text);
+        // Use PostCommitText to ensure EndComposition is called before InsertText on UI thread
+        // This fixes the issue where text was inserted into composition range
+        if (pThis->_pLangBarItemButton != nullptr)
+        {
+            pThis->_pLangBarItemButton->PostCommitText(text);
+        }
+        else
+        {
+            // Fallback: direct InsertText (composition won't be ended properly)
+            pThis->InsertText(text);
+        }
     });
 
     // Start async reader thread for receiving state pushes from Go
@@ -868,59 +878,178 @@ void CTextService::_UninitIPCClient()
     }
 }
 
+// EditSession for inserting text at current selection
+class CInsertTextEditSession : public ITfEditSession
+{
+public:
+    CInsertTextEditSession(CTextService* pTextService, ITfContext* pContext, const std::wstring& text)
+        : _refCount(1), _pTextService(pTextService), _pContext(pContext), _text(text), _success(FALSE)
+    {
+        _pTextService->AddRef();
+        _pContext->AddRef();
+    }
+
+    ~CInsertTextEditSession()
+    {
+        _pTextService->Release();
+        _pContext->Release();
+    }
+
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj)
+    {
+        if (ppvObj == nullptr) return E_INVALIDARG;
+        *ppvObj = nullptr;
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfEditSession))
+        {
+            *ppvObj = (ITfEditSession*)this;
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&_refCount); }
+    STDMETHODIMP_(ULONG) Release()
+    {
+        LONG cr = InterlockedDecrement(&_refCount);
+        if (cr == 0) delete this;
+        return cr;
+    }
+
+    // ITfEditSession
+    STDMETHODIMP DoEditSession(TfEditCookie ec)
+    {
+        // Get ITfInsertAtSelection interface
+        ITfInsertAtSelection* pInsertAtSel = nullptr;
+        HRESULT hr = _pContext->QueryInterface(IID_ITfInsertAtSelection, (void**)&pInsertAtSel);
+        if (FAILED(hr) || pInsertAtSel == nullptr)
+        {
+            WIND_LOG_DEBUG(L"InsertTextEditSession: Failed to get ITfInsertAtSelection\n");
+            return E_FAIL;
+        }
+
+        // Insert text at current selection
+        ITfRange* pRange = nullptr;
+        hr = pInsertAtSel->InsertTextAtSelection(
+            ec,
+            0,  // No special flags
+            _text.c_str(),
+            (LONG)_text.length(),
+            &pRange);
+
+        pInsertAtSel->Release();
+
+        if (FAILED(hr))
+        {
+            WIND_LOG_DEBUG_FMT(L"InsertTextEditSession: InsertTextAtSelection failed hr=0x%08X\n", hr);
+            return hr;
+        }
+
+        if (pRange != nullptr)
+        {
+            // Move selection to end of inserted text
+            pRange->Collapse(ec, TF_ANCHOR_END);
+
+            TF_SELECTION sel = {};
+            sel.range = pRange;
+            sel.style.ase = TF_AE_NONE;
+            sel.style.fInterimChar = FALSE;
+            _pContext->SetSelection(ec, 1, &sel);
+
+            pRange->Release();
+        }
+
+        _success = TRUE;
+        WIND_LOG_DEBUG_FMT(L"InsertTextEditSession: Successfully inserted '%s'\n", _text.c_str());
+        return S_OK;
+    }
+
+    BOOL GetSuccess() const { return _success; }
+
+private:
+    LONG _refCount;
+    CTextService* _pTextService;
+    ITfContext* _pContext;
+    std::wstring _text;
+    BOOL _success;
+};
+
 BOOL CTextService::InsertText(const std::wstring& text)
 {
-    if (_pThreadMgr == nullptr)
+    if (text.empty())
     {
-        WIND_LOG_ERROR(L"ThreadMgr is null\n");
-        return FALSE;
+        return TRUE;
     }
 
-    // Get current document manager
-    ITfDocumentMgr* pDocMgr = nullptr;
-    HRESULT hr = _pThreadMgr->GetFocus(&pDocMgr);
-    if (FAILED(hr) || pDocMgr == nullptr)
+    // Try TSF method first (works on main thread with proper context)
+    if (_pThreadMgr != nullptr)
     {
-        WIND_LOG_DEBUG(L"Failed to get focus document manager\n");
-        return FALSE;
+        // Get current document manager
+        ITfDocumentMgr* pDocMgr = nullptr;
+        HRESULT hr = _pThreadMgr->GetFocus(&pDocMgr);
+        if (SUCCEEDED(hr) && pDocMgr != nullptr)
+        {
+            // Get top context
+            ITfContext* pContext = nullptr;
+            hr = pDocMgr->GetTop(&pContext);
+            pDocMgr->Release();
+
+            if (SUCCEEDED(hr) && pContext != nullptr)
+            {
+                // Try to insert using TSF EditSession
+                CInsertTextEditSession* pEditSession = new CInsertTextEditSession(this, pContext, text);
+
+                HRESULT hrSession;
+                // Use TF_ES_SYNC to ensure synchronous execution
+                hr = pContext->RequestEditSession(_tfClientId, pEditSession, TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
+
+                BOOL success = pEditSession->GetSuccess();
+                pEditSession->Release();
+                pContext->Release();
+
+                if (SUCCEEDED(hr) && SUCCEEDED(hrSession) && success)
+                {
+                    WIND_LOG_DEBUG(L"InsertText: Successfully used TSF method\n");
+                    return TRUE;
+                }
+
+                WIND_LOG_DEBUG_FMT(L"InsertText: TSF method failed (hr=0x%08X, hrSession=0x%08X), falling back to SendInput\n", hr, hrSession);
+            }
+        }
     }
 
-    // Get top context
-    ITfContext* pContext = nullptr;
-    hr = pDocMgr->GetTop(&pContext);
-    pDocMgr->Release();
+    // Fallback: Use SendInput for batch input (all characters at once)
+    // This works from any thread and is used when TSF method fails
+    WIND_LOG_DEBUG_FMT(L"InsertText: Using SendInput batch method for '%s'\n", text.c_str());
 
-    if (FAILED(hr) || pContext == nullptr)
-    {
-        WIND_LOG_DEBUG(L"Failed to get top context\n");
-        return FALSE;
-    }
+    // Allocate INPUT structures for all characters (2 per char: down + up)
+    std::vector<INPUT> inputs;
+    inputs.reserve(text.length() * 2);
 
-    // Get edit session
-    ITfEditSession* pEditSession = nullptr;
-
-    // For simplicity, use keyboard simulation to insert text
-    // This is a workaround - proper implementation would use ITfInsertAtSelection
-    pContext->Release();
-
-    // Use SendInput to simulate keyboard input
     for (wchar_t ch : text)
     {
-        INPUT input[2] = {};
+        INPUT inputDown = {};
+        inputDown.type = INPUT_KEYBOARD;
+        inputDown.ki.wVk = 0;
+        inputDown.ki.wScan = ch;
+        inputDown.ki.dwFlags = KEYEVENTF_UNICODE;
+        inputs.push_back(inputDown);
 
-        // Key down
-        input[0].type = INPUT_KEYBOARD;
-        input[0].ki.wVk = 0;
-        input[0].ki.wScan = ch;
-        input[0].ki.dwFlags = KEYEVENTF_UNICODE;
+        INPUT inputUp = {};
+        inputUp.type = INPUT_KEYBOARD;
+        inputUp.ki.wVk = 0;
+        inputUp.ki.wScan = ch;
+        inputUp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        inputs.push_back(inputUp);
+    }
 
-        // Key up
-        input[1].type = INPUT_KEYBOARD;
-        input[1].ki.wVk = 0;
-        input[1].ki.wScan = ch;
-        input[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+    // Send all inputs at once - this makes text appear instantly
+    UINT sent = SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT));
 
-        SendInput(2, input, sizeof(INPUT));
+    if (sent != inputs.size())
+    {
+        WIND_LOG_WARN_FMT(L"InsertText: SendInput sent %u of %u inputs\n", sent, (UINT)inputs.size());
     }
 
     return TRUE;

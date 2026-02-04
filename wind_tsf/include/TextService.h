@@ -19,6 +19,7 @@ class CTextService : public ITfTextInputProcessor,
     friend class CUpdateCompositionEditSession;
     friend class CEndCompositionEditSession;
     friend class CInsertAndComposeEditSession;
+    friend class CInsertTextEditSession;
 public:
     CTextService();
     ~CTextService();

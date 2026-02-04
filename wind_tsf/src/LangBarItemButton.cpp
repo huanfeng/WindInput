@@ -12,8 +12,9 @@ DEFINE_GUID(GUID_LBI_INPUTMODE,
 // 使用 GUID_LBI_INPUTMODE 使图标显示在 Windows 11 输入指示器中
 const GUID CLangBarItemButton::_guidLangBarItemButton = GUID_LBI_INPUTMODE;
 
-// Custom message for cross-thread status updates
+// Custom messages for cross-thread updates
 const UINT CLangBarItemButton::WM_UPDATE_STATUS = WM_USER + 100;
+const UINT CLangBarItemButton::WM_COMMIT_TEXT = WM_USER + 101;
 
 CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     : _refCount(1)
@@ -86,9 +87,11 @@ STDAPI CLangBarItemButton::GetInfo(TF_LANGBARITEMINFO* pInfo)
     pInfo->guidItem = _guidLangBarItemButton;
 
     // TF_LBI_STYLE_BTN_BUTTON: 显示为可点击按钮
+    // TF_LBI_STYLE_BTN_MENU: 支持右键菜单 (InitMenu/OnMenuSelect)
     // TF_LBI_STYLE_SHOWNINTRAY: 在系统托盘/输入指示器区域显示
     // TF_LBI_STYLE_TEXTCOLORICON: 图标颜色随主题变化
     pInfo->dwStyle = TF_LBI_STYLE_BTN_BUTTON |
+                     TF_LBI_STYLE_BTN_MENU |
                      TF_LBI_STYLE_SHOWNINTRAY |
                      TF_LBI_STYLE_TEXTCOLORICON;
 
@@ -150,7 +153,17 @@ STDAPI CLangBarItemButton::GetTooltipString(BSTR* pbstrToolTip)
 
 STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcArea)
 {
-    // Toggle mode via Go service (all state changes go through Go)
+    WIND_LOG_DEBUG_FMT(L"OnClick: click=%d\n", click);
+
+    // TF_LBI_CLK_RIGHT = 1 (right click) - do nothing, TSF will call InitMenu
+    // TF_LBI_CLK_LEFT = 2 (left click) - toggle mode
+    if (click == TF_LBI_CLK_RIGHT)
+    {
+        // Do nothing for right click - TSF will automatically call InitMenu/OnMenuSelect
+        return S_OK;
+    }
+
+    // Left click: Toggle mode via Go service (all state changes go through Go)
     if (_pTextService != nullptr)
     {
         CIPCClient* pIPCClient = _pTextService->GetIPCClient();
@@ -210,10 +223,34 @@ STDAPI CLangBarItemButton::InitMenu(ITfMenu* pMenu)
         L"\x663E\x793A\x5DE5\x5177\x680F", 5,  // 显示工具栏
         NULL);
 
+    // Separator
+    pMenu->AddMenuItem(0, TF_LBMENUF_SEPARATOR, NULL, NULL, NULL, 0, NULL);
+
+    // 词库管理...
+    pMenu->AddMenuItem(MENU_ID_DICTIONARY, 0,
+        NULL, NULL,
+        L"\x8BCD\x5E93\x7BA1\x7406...", 5,  // 词库管理...
+        NULL);
+
     // 设置...
     pMenu->AddMenuItem(MENU_ID_OPEN_SETTINGS, 0,
         NULL, NULL,
         L"\x8BBE\x7F6E...", 3,  // 设置...
+        NULL);
+
+    // Separator
+    pMenu->AddMenuItem(0, TF_LBMENUF_SEPARATOR, NULL, NULL, NULL, 0, NULL);
+
+    // 关于
+    pMenu->AddMenuItem(MENU_ID_ABOUT, 0,
+        NULL, NULL,
+        L"\x5173\x4E8E", 2,  // 关于
+        NULL);
+
+    // 退出
+    pMenu->AddMenuItem(MENU_ID_EXIT, 0,
+        NULL, NULL,
+        L"\x9000\x51FA", 2,  // 退出
         NULL);
 
     return S_OK;
@@ -244,6 +281,15 @@ STDAPI CLangBarItemButton::OnMenuSelect(UINT wID)
         break;
     case MENU_ID_OPEN_SETTINGS:
         command = "open_settings";
+        break;
+    case MENU_ID_DICTIONARY:
+        command = "open_dictionary";
+        break;
+    case MENU_ID_ABOUT:
+        command = "show_about";
+        break;
+    case MENU_ID_EXIT:
+        command = "exit";
         break;
     default:
         return E_INVALIDARG;
@@ -517,6 +563,26 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         delete pData;
         return 0;
     }
+    else if (msg == WM_COMMIT_TEXT)
+    {
+        // lParam contains pointer to CommitTextData (allocated by sender)
+        CommitTextData* pData = reinterpret_cast<CommitTextData*>(lParam);
+        CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+        if (pThis != nullptr && pData != nullptr && pThis->_pTextService != nullptr)
+        {
+            WIND_LOG_DEBUG_FMT(L"MsgWndProc: Processing WM_COMMIT_TEXT, text='%s'\n", pData->text.c_str());
+
+            // IMPORTANT: On UI thread, first end composition, then insert text
+            // This ensures the composition text is cleared before inserting final text
+            pThis->_pTextService->EndComposition();
+            pThis->_pTextService->InsertText(pData->text);
+        }
+
+        // Free the data allocated by sender
+        delete pData;
+        return 0;
+    }
 
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -714,6 +780,42 @@ void CLangBarItemButton::PostUpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth
     else
     {
         WIND_LOG_DEBUG(L"PostUpdateFullStatus: Message posted to UI thread\n");
+    }
+}
+
+void CLangBarItemButton::PostCommitText(const std::wstring& text)
+{
+    // Thread-safe commit: post message to message window which runs on UI thread
+    // This ensures EndComposition is called before InsertText on the correct thread
+    if (_hMsgWnd == NULL)
+    {
+        WIND_LOG_WARN(L"PostCommitText: No message window, using direct InsertText\n");
+        // Fallback to direct InsertText (composition won't be ended properly)
+        if (_pTextService != nullptr)
+        {
+            _pTextService->InsertText(text);
+        }
+        return;
+    }
+
+    // Allocate data on heap (will be freed by message handler)
+    CommitTextData* pData = new CommitTextData();
+    pData->text = text;
+
+    // Post message to UI thread
+    if (!PostMessageW(_hMsgWnd, WM_COMMIT_TEXT, 0, reinterpret_cast<LPARAM>(pData)))
+    {
+        // PostMessage failed, free data and fallback
+        delete pData;
+        WIND_LOG_WARN(L"PostCommitText: PostMessage failed, using direct InsertText\n");
+        if (_pTextService != nullptr)
+        {
+            _pTextService->InsertText(text);
+        }
+    }
+    else
+    {
+        WIND_LOG_DEBUG_FMT(L"PostCommitText: Message posted to UI thread, text='%s'\n", text.c_str());
     }
 }
 

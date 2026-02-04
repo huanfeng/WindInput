@@ -26,6 +26,8 @@ type UICommand struct {
 	ToolbarY     int
 	// Input session version for preventing stale show commands
 	InputSession uint64
+	// Settings page to open (e.g., "about")
+	SettingsPage string
 }
 
 // Manager manages the candidate window UI
@@ -247,7 +249,7 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 	case "toolbar_update":
 		m.doUpdateToolbar(cmd.ToolbarState)
 	case "settings":
-		m.doOpenSettings()
+		m.doOpenSettings(cmd.SettingsPage)
 	}
 }
 
@@ -631,6 +633,11 @@ func (m *Manager) RefreshCandidates() {
 }
 
 // ShowTooltipForCandidate shows a tooltip for the candidate at the given page-local index
+// TODO: 反查功能待实现 - 需要以下数据支持：
+//   1. 拼音反查：根据汉字查询拼音（需要拼音字典数据）
+//   2. 五笔编码反查：显示汉字的完整五笔编码（需要编码反查表）
+//   3. 可选：五笔拆字方法展示
+// 目前 candidate.Comment 字段为空，因为引擎未返回 Hint 信息
 func (m *Manager) ShowTooltipForCandidate(pageIndex int, mouseX, mouseY int) {
 	m.mu.Lock()
 	if !m.ready || m.tooltip == nil {
@@ -750,6 +757,11 @@ func (m *Manager) GetToolbarPosition() (int, int) {
 
 // OpenSettings opens the settings window
 func (m *Manager) OpenSettings() {
+	m.OpenSettingsWithPage("")
+}
+
+// OpenSettingsWithPage opens the settings window with a specific page
+func (m *Manager) OpenSettingsWithPage(page string) {
 	m.mu.Lock()
 	if !m.ready {
 		m.mu.Unlock()
@@ -758,7 +770,7 @@ func (m *Manager) OpenSettings() {
 	m.mu.Unlock()
 
 	select {
-	case m.cmdCh <- UICommand{Type: "settings"}:
+	case m.cmdCh <- UICommand{Type: "settings", SettingsPage: page}:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -829,8 +841,9 @@ func (m *Manager) doUpdateToolbar(state *ToolbarState) {
 }
 
 // doOpenSettings opens the settings window (called from UI thread)
-func (m *Manager) doOpenSettings() {
-	m.logger.Info("Opening settings application")
+// page parameter can specify a specific page to open (e.g., "about")
+func (m *Manager) doOpenSettings(page string) {
+	m.logger.Info("Opening settings application", "page", page)
 
 	// Try to launch wind_setting.exe
 	// First try the install directory, then fall back to current directory
@@ -844,17 +857,30 @@ func (m *Manager) doOpenSettings() {
 	}
 
 	openPtr, _ := windows.UTF16PtrFromString("open")
+
+	// Prepare parameters if page is specified
+	var paramsPtr *uint16
+	if page != "" {
+		params := "--page=" + page
+		paramsPtr, _ = windows.UTF16PtrFromString(params)
+	}
+
 	var lastRet uintptr
 	var lastErr error
 
 	for _, path := range paths {
 		pathPtr, _ := windows.UTF16PtrFromString(path)
 
+		var paramsArg uintptr
+		if paramsPtr != nil {
+			paramsArg = uintptr(unsafe.Pointer(paramsPtr))
+		}
+
 		ret, _, err := procShellExecuteW.Call(
 			0,                                // hwnd
 			uintptr(unsafe.Pointer(openPtr)), // lpOperation ("open")
 			uintptr(unsafe.Pointer(pathPtr)), // lpFile (path to exe)
-			0,                                // lpParameters
+			paramsArg,                        // lpParameters
 			0,                                // lpDirectory
 			1,                                // nShowCmd (SW_SHOWNORMAL)
 		)
@@ -864,7 +890,7 @@ func (m *Manager) doOpenSettings() {
 
 		// ShellExecuteW returns >32 on success
 		if ret > 32 {
-			m.logger.Info("Settings application launched successfully", "path", path)
+			m.logger.Info("Settings application launched successfully", "path", path, "page", page)
 			return
 		}
 	}
@@ -872,7 +898,11 @@ func (m *Manager) doOpenSettings() {
 	// All paths failed, fall back to opening the web URL
 	m.logger.Warn("Failed to launch wind_setting.exe, falling back to web URL", "ret", lastRet, "error", lastErr)
 
+	// Build URL with page parameter
 	url := "http://127.0.0.1:18923"
+	if page != "" {
+		url += "/#/" + page
+	}
 	urlPtr, _ := windows.UTF16PtrFromString(url)
 
 	ret, _, err := procShellExecuteW.Call(
@@ -887,6 +917,6 @@ func (m *Manager) doOpenSettings() {
 	if ret <= 32 {
 		m.logger.Error("Failed to open settings URL", "error", err, "ret", ret)
 	} else {
-		m.logger.Info("Settings URL opened successfully (fallback)")
+		m.logger.Info("Settings URL opened successfully (fallback)", "url", url)
 	}
 }

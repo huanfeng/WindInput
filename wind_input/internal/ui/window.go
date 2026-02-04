@@ -51,6 +51,13 @@ var (
 	procDeleteObject         = gdi32.NewProc("DeleteObject")
 	procCreateDIBSection     = gdi32.NewProc("CreateDIBSection")
 	procGetDeviceCaps        = gdi32.NewProc("GetDeviceCaps")
+
+	// Popup menu APIs
+	procCreatePopupMenu   = user32.NewProc("CreatePopupMenu")
+	procDestroyMenu       = user32.NewProc("DestroyMenu")
+	procAppendMenuW       = user32.NewProc("AppendMenuW")
+	procTrackPopupMenu    = user32.NewProc("TrackPopupMenu")
+	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 )
 
 // DPI constants
@@ -131,6 +138,26 @@ const (
 
 	// Mouse messages (WM_MOUSEMOVE, WM_LBUTTONDOWN, etc. defined in toolbar_window.go)
 	WM_RBUTTONDOWN = 0x0204
+	WM_COMMAND     = 0x0111
+
+	// Menu flags
+	MF_STRING    = 0x0000
+	MF_SEPARATOR = 0x0800
+	MF_GRAYED    = 0x0001
+
+	// TrackPopupMenu flags
+	TPM_LEFTALIGN    = 0x0000
+	TPM_TOPALIGN     = 0x0000
+	TPM_BOTTOMALIGN  = 0x0020
+	TPM_RETURNCMD    = 0x0100
+	TPM_NONOTIFY     = 0x0080
+
+	// Candidate context menu IDs
+	IDM_CANDIDATE_MOVEUP   = 1001
+	IDM_CANDIDATE_MOVEDOWN = 1002
+	IDM_CANDIDATE_MOVETOP  = 1003
+	IDM_CANDIDATE_DELETE   = 1004
+	IDM_CANDIDATE_SETTINGS = 1005
 
 	WM_UPDATE_CONTENT = WM_USER + 1
 	WM_SHOW_WINDOW    = WM_USER + 2
@@ -664,24 +691,124 @@ func (w *CandidateWindow) handleMouseClick(lParam uintptr) {
 
 // handleRightClick processes right mouse button click
 func (w *CandidateWindow) handleRightClick(lParam uintptr) {
-	// Extract mouse position
+	// Extract mouse position (relative to window)
 	mouseX := int(int16(lParam & 0xFFFF))
 	mouseY := int(int16((lParam >> 16) & 0xFFFF))
 
 	w.mu.Lock()
 	hitRects := w.hitRects
 	callbacks := w.callbacks
+	windowX := w.x
+	windowY := w.y
 	w.mu.Unlock()
 
 	// Hit test against candidate rectangles
+	var hitIndex int = -1
 	for _, rect := range hitRects {
 		if float64(mouseX) >= rect.X && float64(mouseX) <= rect.X+rect.W &&
 			float64(mouseY) >= rect.Y && float64(mouseY) <= rect.Y+rect.H {
-			// Found a hit - notify callback
-			if callbacks != nil && callbacks.OnContextMenu != nil {
-				callbacks.OnContextMenu(rect.Index)
+			hitIndex = rect.Index
+			break
+		}
+	}
+
+	if hitIndex < 0 {
+		return
+	}
+
+	// Determine candidate count for enable/disable logic
+	candidateCount := len(hitRects)
+	isFirst := hitIndex == 0
+	isLast := hitIndex == candidateCount-1
+
+	// Create popup menu
+	hMenu, _, _ := procCreatePopupMenu.Call()
+	if hMenu == 0 {
+		return
+	}
+	defer procDestroyMenu.Call(hMenu)
+
+	// Add menu items with conditional graying
+	moveUpText, _ := syscall.UTF16PtrFromString("前移(&U)")
+	moveDownText, _ := syscall.UTF16PtrFromString("后移(&D)")
+	moveTopText, _ := syscall.UTF16PtrFromString("置顶(&T)")
+	deleteText, _ := syscall.UTF16PtrFromString("删除词条(&X)")
+	settingsText, _ := syscall.UTF16PtrFromString("打开设置(&S)...")
+
+	// Move Up - disabled if first
+	moveUpFlags := uintptr(MF_STRING)
+	if isFirst {
+		moveUpFlags |= MF_GRAYED
+	}
+	procAppendMenuW.Call(hMenu, moveUpFlags, IDM_CANDIDATE_MOVEUP, uintptr(unsafe.Pointer(moveUpText)))
+
+	// Move Down - disabled if last
+	moveDownFlags := uintptr(MF_STRING)
+	if isLast {
+		moveDownFlags |= MF_GRAYED
+	}
+	procAppendMenuW.Call(hMenu, moveDownFlags, IDM_CANDIDATE_MOVEDOWN, uintptr(unsafe.Pointer(moveDownText)))
+
+	// Move to Top - disabled if first
+	moveTopFlags := uintptr(MF_STRING)
+	if isFirst {
+		moveTopFlags |= MF_GRAYED
+	}
+	procAppendMenuW.Call(hMenu, moveTopFlags, IDM_CANDIDATE_MOVETOP, uintptr(unsafe.Pointer(moveTopText)))
+
+	// Separator
+	procAppendMenuW.Call(hMenu, MF_SEPARATOR, 0, 0)
+
+	// Delete
+	procAppendMenuW.Call(hMenu, MF_STRING, IDM_CANDIDATE_DELETE, uintptr(unsafe.Pointer(deleteText)))
+
+	// Separator
+	procAppendMenuW.Call(hMenu, MF_SEPARATOR, 0, 0)
+
+	// Settings
+	procAppendMenuW.Call(hMenu, MF_STRING, IDM_CANDIDATE_SETTINGS, uintptr(unsafe.Pointer(settingsText)))
+
+	// Calculate screen position
+	screenX := windowX + mouseX
+	screenY := windowY + mouseY
+
+	// Set foreground window to receive menu messages properly
+	procSetForegroundWindow.Call(uintptr(w.hwnd))
+
+	// Show popup menu and wait for selection
+	ret, _, _ := procTrackPopupMenu.Call(
+		hMenu,
+		TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD|TPM_NONOTIFY,
+		uintptr(screenX),
+		uintptr(screenY),
+		0,
+		uintptr(w.hwnd),
+		0,
+	)
+
+	// Handle menu selection
+	if ret != 0 && callbacks != nil {
+		switch ret {
+		case IDM_CANDIDATE_MOVEUP:
+			if callbacks.OnMoveUp != nil {
+				callbacks.OnMoveUp(hitIndex)
 			}
-			return
+		case IDM_CANDIDATE_MOVEDOWN:
+			if callbacks.OnMoveDown != nil {
+				callbacks.OnMoveDown(hitIndex)
+			}
+		case IDM_CANDIDATE_MOVETOP:
+			if callbacks.OnMoveTop != nil {
+				callbacks.OnMoveTop(hitIndex)
+			}
+		case IDM_CANDIDATE_DELETE:
+			if callbacks.OnDelete != nil {
+				callbacks.OnDelete(hitIndex)
+			}
+		case IDM_CANDIDATE_SETTINGS:
+			if callbacks.OnOpenSettings != nil {
+				callbacks.OnOpenSettings()
+			}
 		}
 	}
 }

@@ -15,6 +15,23 @@ import (
 	"github.com/huanfeng/wind_input/internal/ui"
 )
 
+// Restart request channel - main should listen to this
+var restartRequestCh = make(chan struct{}, 1)
+
+// RequestRestart signals that a restart is requested
+func RequestRestart() {
+	select {
+	case restartRequestCh <- struct{}{}:
+	default:
+		// Channel already has a request pending
+	}
+}
+
+// RestartRequested returns a channel that signals when restart is requested
+func RestartRequested() <-chan struct{} {
+	return restartRequestCh
+}
+
 // Modifier key flags (must match C++ side)
 const (
 	ModShift = 0x01
@@ -84,6 +101,7 @@ type Coordinator struct {
 type BridgeServer interface {
 	PushStateToAllClients(status *bridge.StatusUpdateData)
 	PushCommitTextToAllClients(text string)
+	RestartService()
 }
 
 // SetBridgeServer sets the bridge server for state broadcasting
@@ -288,6 +306,9 @@ func (c *Coordinator) setupToolbarCallbacks() {
 		OnPositionChanged: func(x, y int) {
 			go c.handleToolbarPositionChanged(x, y)
 		},
+		OnContextMenu: func(action ui.ToolbarContextMenuAction) {
+			go c.handleToolbarContextMenu(action)
+		},
 	})
 }
 
@@ -308,9 +329,25 @@ func (c *Coordinator) setupCandidateCallbacks() {
 			// Run in goroutine to avoid blocking UI thread
 			go c.handleCandidateHoverChange(index, mouseX, mouseY)
 		},
-		OnContextMenu: func(index int) {
+		OnMoveUp: func(index int) {
 			// Run in goroutine to avoid blocking UI thread
-			go c.handleCandidateContextMenu(index)
+			go c.handleCandidateMoveUp(index)
+		},
+		OnMoveDown: func(index int) {
+			// Run in goroutine to avoid blocking UI thread
+			go c.handleCandidateMoveDown(index)
+		},
+		OnMoveTop: func(index int) {
+			// Run in goroutine to avoid blocking UI thread
+			go c.handleCandidateMoveTop(index)
+		},
+		OnDelete: func(index int) {
+			// Run in goroutine to avoid blocking UI thread
+			go c.handleCandidateDelete(index)
+		},
+		OnOpenSettings: func() {
+			// Run in goroutine to avoid blocking UI thread
+			go c.handleCandidateOpenSettings()
 		},
 	})
 }
@@ -372,17 +409,98 @@ func (c *Coordinator) handleCandidateHoverChange(index, mouseX, mouseY int) {
 	}
 }
 
-// handleCandidateContextMenu handles right-click on candidate
-func (c *Coordinator) handleCandidateContextMenu(index int) {
+// handleCandidateMoveUp handles move up action from context menu
+func (c *Coordinator) handleCandidateMoveUp(index int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.logger.Debug("Candidate context menu requested", "index", index)
+	c.logger.Debug("Candidate move up requested", "index", index)
 
-	// TODO: Show context menu with options like:
-	// - Delete this word
-	// - Copy to clipboard
-	// - View encoding
+	if index <= 0 || index >= len(c.candidates) {
+		c.logger.Warn("Invalid candidate index for move up", "index", index)
+		return
+	}
+
+	candidate := c.candidates[index]
+	c.logger.Info("Request to move candidate up", "text", candidate.Text, "index", index)
+
+	// TODO: Implement candidate priority adjustment
+	// This would require:
+	// 1. Swap priority/weight with the previous candidate
+	// 2. Save to user dictionary or priority file
+	// 3. Refresh the candidate list
+}
+
+// handleCandidateMoveDown handles move down action from context menu
+func (c *Coordinator) handleCandidateMoveDown(index int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.logger.Debug("Candidate move down requested", "index", index)
+
+	if index < 0 || index >= len(c.candidates)-1 {
+		c.logger.Warn("Invalid candidate index for move down", "index", index)
+		return
+	}
+
+	candidate := c.candidates[index]
+	c.logger.Info("Request to move candidate down", "text", candidate.Text, "index", index)
+
+	// TODO: Implement candidate priority adjustment
+}
+
+// handleCandidateMoveTop handles move to top action from context menu
+func (c *Coordinator) handleCandidateMoveTop(index int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.logger.Debug("Candidate move to top requested", "index", index)
+
+	if index <= 0 || index >= len(c.candidates) {
+		c.logger.Warn("Invalid candidate index for move to top", "index", index)
+		return
+	}
+
+	candidate := c.candidates[index]
+	c.logger.Info("Request to move candidate to top", "text", candidate.Text, "index", index)
+
+	// TODO: Implement candidate priority adjustment
+	// Set this candidate's priority to be highest
+}
+
+// handleCandidateDelete handles delete action from context menu
+func (c *Coordinator) handleCandidateDelete(index int) {
+	c.mu.Lock()
+
+	c.logger.Debug("Candidate delete requested", "index", index)
+
+	if index < 0 || index >= len(c.candidates) {
+		c.logger.Warn("Invalid candidate index for delete", "index", index)
+		c.mu.Unlock()
+		return
+	}
+
+	candidate := c.candidates[index]
+	text := candidate.Text
+	c.mu.Unlock()
+
+	c.logger.Info("Request to delete user word", "text", text)
+
+	// Show confirmation dialog
+	// TODO: Implement confirmation dialog via UI manager
+	// For now, just log the request
+	// if confirmed {
+	//     // Delete from user dictionary
+	//     // Refresh candidate list
+	// }
+}
+
+// handleCandidateOpenSettings handles open settings action from context menu
+func (c *Coordinator) handleCandidateOpenSettings() {
+	c.logger.Info("Opening settings from candidate context menu")
+	if c.uiManager != nil {
+		c.uiManager.OpenSettings()
+	}
 }
 
 // handleToolbarToggleMode handles mode toggle from toolbar click
@@ -459,6 +577,43 @@ func (c *Coordinator) handleToolbarOpenSettings() {
 func (c *Coordinator) handleToolbarPositionChanged(x, y int) {
 	c.logger.Debug("Toolbar position changed", "x", x, "y", y)
 	c.saveToolbarPosition(x, y)
+}
+
+// handleToolbarContextMenu handles toolbar right-click context menu action
+func (c *Coordinator) handleToolbarContextMenu(action ui.ToolbarContextMenuAction) {
+	c.logger.Debug("Toolbar context menu action", "action", action)
+
+	switch action {
+	case ui.ToolbarMenuSettings:
+		c.logger.Info("Opening settings from toolbar context menu")
+		c.handleToolbarOpenSettings()
+
+	case ui.ToolbarMenuRestartService:
+		c.logger.Info("Restart service requested from toolbar context menu")
+		c.resetAndResync()
+
+	case ui.ToolbarMenuAbout:
+		c.logger.Info("Opening about page from toolbar context menu")
+		// Open settings with "about" parameter
+		if c.uiManager != nil {
+			c.uiManager.OpenSettingsWithPage("about")
+		}
+	}
+}
+
+// resetAndResync restarts the Go service process
+// It starts a new process and exits the current one
+func (c *Coordinator) resetAndResync() {
+	c.logger.Info("Restarting Go service process...")
+
+	// Clear current state and hide UI
+	c.mu.Lock()
+	c.clearState()
+	c.hideUI()
+	c.mu.Unlock()
+
+	// Request process restart through the restart manager
+	RequestRestart()
 }
 
 // syncToolbarState synchronizes the current state to the toolbar
@@ -2034,6 +2189,25 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 		if c.uiManager != nil {
 			c.uiManager.OpenSettings()
 		}
+
+	case "open_dictionary":
+		c.logger.Info("Opening dictionary manager requested")
+		// TODO: Open dictionary manager dialog
+		// if c.uiManager != nil {
+		//     c.uiManager.OpenDictionaryManager()
+		// }
+
+	case "show_about":
+		c.logger.Info("Showing about dialog requested")
+		// TODO: Show about dialog
+		// if c.uiManager != nil {
+		//     c.uiManager.ShowAboutDialog()
+		// }
+
+	case "exit":
+		c.logger.Info("Exit requested from menu")
+		// TODO: Signal application exit
+		// For now, just log the request
 	}
 
 	// Broadcast state to all clients if needed

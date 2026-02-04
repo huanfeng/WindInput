@@ -12,6 +12,9 @@ class CTextService;
 #define MENU_ID_TOGGLE_PUNCT     3
 #define MENU_ID_TOGGLE_TOOLBAR   4
 #define MENU_ID_OPEN_SETTINGS    5
+#define MENU_ID_DICTIONARY       6
+#define MENU_ID_ABOUT            7
+#define MENU_ID_EXIT             8
 
 // Language bar button for showing Chinese/English mode
 class CLangBarItemButton : public ITfLangBarItemButton,
@@ -62,6 +65,10 @@ public:
     // Thread-safe update from async thread (posts message to UI thread)
     void PostUpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock);
 
+    // Thread-safe commit text from async thread (posts message to UI thread)
+    // This ensures EndComposition is called before InsertText on the correct thread
+    void PostCommitText(const std::wstring& text);
+
     // Force refresh the language bar icon (used when focus is gained)
     void ForceRefresh();
 
@@ -70,6 +77,7 @@ private:
     HWND _hMsgWnd;
     static LRESULT CALLBACK _MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static const UINT WM_UPDATE_STATUS;
+    static const UINT WM_COMMIT_TEXT;
 
     // Packed status for message passing
     struct StatusUpdateData {
@@ -78,6 +86,11 @@ private:
         BOOL bChinesePunct;
         BOOL bToolbarVisible;
         BOOL bCapsLock;
+    };
+
+    // Data for commit text message
+    struct CommitTextData {
+        std::wstring text;
     };
 
     LONG _refCount;
