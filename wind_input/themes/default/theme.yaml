@@ -1,0 +1,52 @@
+meta:
+  name: "默认主题"
+  version: "1.0"
+  author: "WindInput"
+
+candidate_window:
+  background_color: "#FFFFFFF5"  # 略微透明的白色
+  border_color: "#C8C8C8"
+  text_color: "#1E1E1E"
+  index_color: "#FFFFFF"
+  index_bg_color: "#4285F4"      # 蓝色
+  hover_bg_color: "#E6F0FF"      # 浅蓝色
+  input_bg_color: "#F0F0F0"
+  input_text_color: "#646464"
+  comment_color: "#969696"
+  shadow_color: "#0000000F"
+
+toolbar:
+  background_color: "#FFFFFFFA"
+  border_color: "#C7D1E0"        # 浅蓝灰边框
+  grip_color: "#99ADC7B3"
+  mode_chinese_bg_color: "#339AF5"   # 亮蓝色
+  mode_english_bg_color: "#737F94"   # 石板灰
+  mode_text_color: "#FFFFFF"
+  full_width_on_bg_color: "#2EB899"  # 青绿色
+  full_width_off_bg_color: "#E6EAEF"
+  full_width_on_color: "#FFFFFF"
+  full_width_off_color: "#59667A"
+  punct_chinese_bg_color: "#F58543"  # 珊瑚橙
+  punct_english_bg_color: "#E6EAEF"
+  punct_chinese_color: "#FFFFFF"
+  punct_english_color: "#59667A"
+  settings_bg_color: "#E6EAEF"
+  settings_icon_color: "#7A66B8"     # 柔和紫色
+  settings_hole_color: "#E6EAEF"
+
+popup_menu:
+  background_color: "#FFFFFF"
+  border_color: "#C7C7C7"
+  text_color: "#000000"
+  disabled_color: "#A1A1A1"
+  hover_bg_color: "#0078D4"      # Windows 蓝
+  hover_text_color: "#FFFFFF"
+  separator_color: "#DBDBDB"
+
+tooltip:
+  background_color: "#3C3C3CF0"
+  text_color: "#FFFFFF"
+
+mode_indicator:
+  background_color: "#323232E6"
+  text_color: "#FFFFFF"

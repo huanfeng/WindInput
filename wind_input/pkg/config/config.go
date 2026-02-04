@@ -75,6 +75,7 @@ type UIConfig struct {
 	StatusIndicatorDuration int     `yaml:"status_indicator_duration" json:"status_indicator_duration"` // 状态提示显示时长（毫秒）
 	StatusIndicatorOffsetX  int     `yaml:"status_indicator_offset_x" json:"status_indicator_offset_x"` // 状态提示 X 偏移量
 	StatusIndicatorOffsetY  int     `yaml:"status_indicator_offset_y" json:"status_indicator_offset_y"` // 状态提示 Y 偏移量
+	Theme                   string  `yaml:"theme" json:"theme"`                                         // 主题名称：default, dark 或自定义主题名
 }
 
 // ToolbarConfig contains toolbar settings
@@ -152,6 +153,7 @@ func DefaultConfig() *Config {
 			StatusIndicatorDuration: 800,
 			StatusIndicatorOffsetX:  0,
 			StatusIndicatorOffsetY:  -30,
+			Theme:                   "default",
 		},
 		Toolbar: ToolbarConfig{
 			Visible:   false,

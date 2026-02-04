@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/huanfeng/wind_input/internal/theme"
 	"github.com/fogleman/gg"
 	"golang.org/x/sys/windows"
 )
@@ -18,9 +19,10 @@ type TooltipWindow struct {
 	hwnd   windows.HWND
 	logger *slog.Logger
 
-	mu      sync.Mutex
-	visible bool
-	text    string
+	mu            sync.Mutex
+	visible       bool
+	text          string
+	resolvedTheme *theme.ResolvedTheme
 }
 
 // NewTooltipWindow creates a new tooltip window
@@ -28,6 +30,23 @@ func NewTooltipWindow(logger *slog.Logger) *TooltipWindow {
 	return &TooltipWindow{
 		logger: logger,
 	}
+}
+
+// SetTheme sets the theme for the tooltip window
+func (w *TooltipWindow) SetTheme(resolved *theme.ResolvedTheme) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.resolvedTheme = resolved
+}
+
+// getTooltipColors returns tooltip colors from theme or defaults
+func (w *TooltipWindow) getTooltipColors() (bgColor, textColor color.Color) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.resolvedTheme != nil {
+		return w.resolvedTheme.Tooltip.BackgroundColor, w.resolvedTheme.Tooltip.TextColor
+	}
+	return color.RGBA{60, 60, 60, 240}, color.RGBA{255, 255, 255, 255}
 }
 
 // Global tooltip window registry
@@ -152,6 +171,7 @@ func (w *TooltipWindow) Destroy() {
 // render renders the tooltip text to an image
 func (w *TooltipWindow) render(text string) *image.RGBA {
 	scale := GetDPIScale()
+	bgColor, textColor := w.getTooltipColors()
 
 	// Measure text
 	fontSize := 14.0 * scale
@@ -180,12 +200,12 @@ func (w *TooltipWindow) render(text string) *image.RGBA {
 	}
 
 	// Draw background
-	dc.SetColor(color.RGBA{60, 60, 60, 240})
+	dc.SetColor(bgColor)
 	dc.DrawRoundedRectangle(0, 0, width, height, 4*scale)
 	dc.Fill()
 
 	// Draw text
-	dc.SetColor(color.RGBA{255, 255, 255, 255})
+	dc.SetColor(textColor)
 	dc.DrawString(text, padding, padding+fontSize*0.8)
 
 	return dc.Image().(*image.RGBA)

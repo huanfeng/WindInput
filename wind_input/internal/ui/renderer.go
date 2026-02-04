@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/huanfeng/wind_input/internal/theme"
 	"github.com/fogleman/gg"
 	"github.com/golang/freetype/truetype"
 	"golang.org/x/image/font"
@@ -119,10 +120,11 @@ func (fc *fontCache) getFace(size float64) font.Face {
 
 // Renderer renders candidate window content
 type Renderer struct {
-	config    RenderConfig
-	fontPath  string
-	fontCache *fontCache
-	fontReady bool
+	config        RenderConfig
+	fontPath      string
+	fontCache     *fontCache
+	fontReady     bool
+	resolvedTheme *theme.ResolvedTheme
 }
 
 // NewRenderer creates a new renderer
@@ -169,6 +171,48 @@ func (r *Renderer) SetLayout(layout string) {
 // SetHidePreedit sets whether to hide the preedit area
 func (r *Renderer) SetHidePreedit(hide bool) {
 	r.config.HidePreedit = hide
+}
+
+// SetTheme sets the theme for the renderer and updates colors
+func (r *Renderer) SetTheme(resolved *theme.ResolvedTheme) {
+	if resolved == nil {
+		return
+	}
+	r.resolvedTheme = resolved
+	// Update config colors from theme
+	colors := resolved.CandidateWindow
+	r.config.BackgroundColor = colors.BackgroundColor
+	r.config.BorderColor = colors.BorderColor
+	r.config.TextColor = colors.TextColor
+	r.config.IndexColor = colors.IndexColor
+	r.config.IndexBgColor = colors.IndexBgColor
+	r.config.HoverBgColor = colors.HoverBgColor
+	r.config.InputBgColor = colors.InputBgColor
+	r.config.InputTextColor = colors.InputTextColor
+}
+
+// getCommentColor returns the comment color from theme or default
+func (r *Renderer) getCommentColor() color.Color {
+	if r.resolvedTheme != nil {
+		return r.resolvedTheme.CandidateWindow.CommentColor
+	}
+	return color.RGBA{150, 150, 150, 255}
+}
+
+// getShadowColor returns the shadow color from theme or default
+func (r *Renderer) getShadowColor() color.Color {
+	if r.resolvedTheme != nil {
+		return r.resolvedTheme.CandidateWindow.ShadowColor
+	}
+	return color.RGBA{0, 0, 0, 15}
+}
+
+// getModeIndicatorColors returns mode indicator colors from theme or defaults
+func (r *Renderer) getModeIndicatorColors() (bgColor, textColor color.Color) {
+	if r.resolvedTheme != nil {
+		return r.resolvedTheme.ModeIndicator.BackgroundColor, r.resolvedTheme.ModeIndicator.TextColor
+	}
+	return color.RGBA{50, 50, 50, 230}, color.RGBA{255, 255, 255, 255}
 }
 
 // GetLayout returns the current layout mode
@@ -254,7 +298,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	dc := gg.NewContext(int(width), int(height))
 
 	// Draw shadow (simplified - just 1 layer instead of 4)
-	dc.SetColor(color.RGBA{0, 0, 0, 15})
+	dc.SetColor(r.getShadowColor())
 	r.drawRoundedRect(dc, 2, 2, width, height, cfg.CornerRadius)
 	dc.Fill()
 
@@ -366,7 +410,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	// Fourth pass: draw all comments (small font)
 	if len(comments) > 0 && smallFace != nil {
 		dc.SetFontFace(smallFace)
-		dc.SetColor(color.RGBA{150, 150, 150, 255})
+		dc.SetColor(r.getCommentColor())
 		for _, c := range comments {
 			dc.DrawString(c.text, c.x, c.y)
 		}
@@ -488,7 +532,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	dc := gg.NewContext(int(width), int(height))
 
 	// Draw shadow
-	dc.SetColor(color.RGBA{0, 0, 0, 15})
+	dc.SetColor(r.getShadowColor())
 	r.drawRoundedRect(dc, 2, 2, width, height, cfg.CornerRadius)
 	dc.Fill()
 
@@ -574,7 +618,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		if cand.Comment != "" && smallFace != nil {
 			commentX := textX + measures[i].textWidth + 6*scale
 			dc.SetFontFace(smallFace)
-			dc.SetColor(color.RGBA{150, 150, 150, 255})
+			dc.SetColor(r.getCommentColor())
 			dc.DrawString(cand.Comment, commentX, candY+cfg.IndexFontSize/3)
 		}
 
@@ -618,8 +662,11 @@ func (r *Renderer) RenderModeIndicator(mode string) *image.RGBA {
 
 	dc := gg.NewContext(int(width), int(height))
 
+	// Get colors from theme
+	bgColor, textColor := r.getModeIndicatorColors()
+
 	// Draw background
-	dc.SetColor(color.RGBA{50, 50, 50, 230})
+	dc.SetColor(bgColor)
 	r.drawRoundedRect(dc, 2*scale, 2*scale, width-4*scale, height-4*scale, 6*scale)
 	dc.Fill()
 
@@ -630,7 +677,7 @@ func (r *Renderer) RenderModeIndicator(mode string) *image.RGBA {
 	}
 
 	// Draw mode text
-	dc.SetColor(color.RGBA{255, 255, 255, 255})
+	dc.SetColor(textColor)
 	tw, _ := dc.MeasureString(mode)
 	dc.DrawString(mode, width/2-tw/2, height/2+7*scale)
 

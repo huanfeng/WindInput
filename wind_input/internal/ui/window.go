@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/huanfeng/wind_input/internal/theme"
 	"golang.org/x/sys/windows"
 )
 
@@ -621,6 +622,15 @@ func (w *CandidateWindow) SetHitRects(rects []CandidateRect) {
 func (w *CandidateWindow) SetCallbacks(callbacks *CandidateCallback) {
 	w.mu.Lock()
 	w.callbacks = callbacks
+	w.mu.Unlock()
+}
+
+// SetTheme sets the theme for the candidate window's popup menu
+func (w *CandidateWindow) SetTheme(resolved *theme.ResolvedTheme) {
+	w.mu.Lock()
+	if w.popupMenu != nil {
+		w.popupMenu.SetTheme(resolved)
+	}
 	w.mu.Unlock()
 }
 

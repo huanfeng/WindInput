@@ -1,0 +1,52 @@
+meta:
+  name: "暗色主题"
+  version: "1.0"
+  author: "WindInput"
+
+candidate_window:
+  background_color: "#2D2D2DF5"
+  border_color: "#404040"
+  text_color: "#E0E0E0"
+  index_color: "#FFFFFF"
+  index_bg_color: "#4285F4"
+  hover_bg_color: "#3D4A5C"
+  input_bg_color: "#3A3A3A"
+  input_text_color: "#B0B0B0"
+  comment_color: "#808080"
+  shadow_color: "#0000001A"
+
+toolbar:
+  background_color: "#2D2D2DFA"
+  border_color: "#404040"
+  grip_color: "#5A5A5AB3"
+  mode_chinese_bg_color: "#339AF5"
+  mode_english_bg_color: "#5A5A5A"
+  mode_text_color: "#FFFFFF"
+  full_width_on_bg_color: "#2EB899"
+  full_width_off_bg_color: "#404040"
+  full_width_on_color: "#FFFFFF"
+  full_width_off_color: "#B0B0B0"
+  punct_chinese_bg_color: "#F58543"
+  punct_english_bg_color: "#404040"
+  punct_chinese_color: "#FFFFFF"
+  punct_english_color: "#B0B0B0"
+  settings_bg_color: "#404040"
+  settings_icon_color: "#9B8CCE"
+  settings_hole_color: "#404040"
+
+popup_menu:
+  background_color: "#2D2D2D"
+  border_color: "#404040"
+  text_color: "#E0E0E0"
+  disabled_color: "#707070"
+  hover_bg_color: "#0078D4"
+  hover_text_color: "#FFFFFF"
+  separator_color: "#404040"
+
+tooltip:
+  background_color: "#1E1E1EF0"
+  text_color: "#E0E0E0"
+
+mode_indicator:
+  background_color: "#1E1E1EE6"
+  text_color: "#E0E0E0"

@@ -7,6 +7,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/huanfeng/wind_input/internal/theme"
 	"golang.org/x/sys/windows"
 )
 
@@ -32,9 +33,10 @@ type UICommand struct {
 
 // Manager manages the candidate window UI
 type Manager struct {
-	window   *CandidateWindow
-	renderer *Renderer
-	logger   *slog.Logger
+	window       *CandidateWindow
+	renderer     *Renderer
+	logger       *slog.Logger
+	themeManager *theme.Manager
 
 	// Toolbar window
 	toolbar *ToolbarWindow
@@ -96,11 +98,15 @@ func NewManager(logger *slog.Logger) *Manager {
 		logger.Error("Failed to create event", "error", err)
 	}
 
+	// Create theme manager
+	themeManager := theme.NewManager(logger)
+
 	return &Manager{
 		window:                  NewCandidateWindow(logger),
 		renderer:                NewRenderer(DefaultRenderConfig()),
 		toolbar:                 NewToolbarWindow(logger),
 		tooltip:                 NewTooltipWindow(logger),
+		themeManager:            themeManager,
 		logger:                  logger,
 		readyCh:                 make(chan struct{}),
 		cmdCh:                   make(chan UICommand, 100), // Buffered channel to avoid blocking IPC
@@ -660,6 +666,72 @@ func (m *Manager) SetHidePreedit(hide bool) {
 		m.renderer.SetHidePreedit(hide)
 		m.logger.Info("Hide preedit updated", "hide", hide)
 	}
+}
+
+// LoadTheme loads a theme by name and applies it to all renderers
+func (m *Manager) LoadTheme(themeName string) error {
+	if m.themeManager == nil {
+		return nil
+	}
+
+	// Load the theme
+	if err := m.themeManager.LoadTheme(themeName); err != nil {
+		m.logger.Warn("Failed to load theme, using default", "theme", themeName, "error", err)
+	}
+
+	// Apply theme to all renderers
+	resolved := m.themeManager.GetResolvedTheme()
+	m.applyTheme(resolved)
+
+	m.logger.Info("Theme loaded", "theme", themeName)
+	return nil
+}
+
+// applyTheme applies the resolved theme to all UI components
+func (m *Manager) applyTheme(resolved *theme.ResolvedTheme) {
+	if resolved == nil {
+		return
+	}
+
+	// Apply to candidate window renderer
+	if m.renderer != nil {
+		m.renderer.SetTheme(resolved)
+	}
+
+	// Apply to toolbar (this also handles popup menu in toolbar)
+	if m.toolbar != nil {
+		m.toolbar.SetTheme(resolved)
+	}
+
+	// Apply to popup menus via candidate window
+	if m.window != nil {
+		m.window.SetTheme(resolved)
+	}
+
+	// Apply to tooltip
+	if m.tooltip != nil {
+		m.tooltip.SetTheme(resolved)
+	}
+}
+
+// GetAvailableThemes returns a list of available theme names
+func (m *Manager) GetAvailableThemes() []string {
+	if m.themeManager == nil {
+		return []string{"default", "dark"}
+	}
+	return m.themeManager.ListAvailableThemes()
+}
+
+// GetCurrentThemeName returns the name of the currently loaded theme
+func (m *Manager) GetCurrentThemeName() string {
+	if m.themeManager == nil {
+		return "default"
+	}
+	t := m.themeManager.GetCurrentTheme()
+	if t != nil {
+		return t.Meta.Name
+	}
+	return "default"
 }
 
 // SetToolbarCallbacks sets the callbacks for toolbar actions

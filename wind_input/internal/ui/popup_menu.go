@@ -3,10 +3,12 @@ package ui
 
 import (
 	"image"
+	"image/color"
 	"sync"
 	"syscall"
 	"unsafe"
 
+	"github.com/huanfeng/wind_input/internal/theme"
 	"github.com/fogleman/gg"
 	"golang.org/x/sys/windows"
 )
@@ -34,6 +36,9 @@ type PopupMenu struct {
 	width      int
 	height     int
 	hoverIndex int // -1 for none
+
+	// Theme
+	resolvedTheme *theme.ResolvedTheme
 
 	mu sync.Mutex
 }
@@ -156,6 +161,30 @@ func popupMenuWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr 
 func NewPopupMenu() *PopupMenu {
 	return &PopupMenu{
 		hoverIndex: -1,
+	}
+}
+
+// SetTheme sets the theme for the popup menu
+func (m *PopupMenu) SetTheme(resolved *theme.ResolvedTheme) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resolvedTheme = resolved
+}
+
+// getPopupMenuColors returns popup menu colors from theme or defaults
+func (m *PopupMenu) getPopupMenuColors() *theme.ResolvedPopupMenuColors {
+	if m.resolvedTheme != nil {
+		return &m.resolvedTheme.PopupMenu
+	}
+	// Return default colors
+	return &theme.ResolvedPopupMenuColors{
+		BackgroundColor: color.RGBA{255, 255, 255, 255},
+		BorderColor:     color.RGBA{199, 199, 199, 255},
+		TextColor:       color.RGBA{0, 0, 0, 255},
+		DisabledColor:   color.RGBA{161, 161, 161, 255},
+		HoverBgColor:    color.RGBA{0, 120, 212, 255},
+		HoverTextColor:  color.RGBA{255, 255, 255, 255},
+		SeparatorColor:  color.RGBA{219, 219, 219, 255},
 	}
 }
 
@@ -330,6 +359,7 @@ func (m *PopupMenu) render() *image.RGBA {
 	hoverIdx := m.hoverIndex
 	width := m.width
 	height := m.height
+	colors := m.getPopupMenuColors()
 	m.mu.Unlock()
 
 	scale := GetDPIScale()
@@ -350,7 +380,7 @@ func (m *PopupMenu) render() *image.RGBA {
 	dc.Clear()
 
 	// Draw filled rounded rectangle for background
-	dc.SetRGB(1, 1, 1)
+	dc.SetColor(colors.BackgroundColor)
 	dc.DrawRoundedRectangle(0.5, 0.5, float64(width)-1, float64(height)-1, radius)
 	dc.Fill()
 
@@ -364,25 +394,25 @@ func (m *PopupMenu) render() *image.RGBA {
 		if item.Separator {
 			// Draw separator line
 			sepY := float64(y + sepH/2)
-			dc.SetRGB(0.86, 0.86, 0.86)
+			dc.SetColor(colors.SeparatorColor)
 			dc.DrawLine(4*scale, sepY, float64(width)-4*scale, sepY)
 			dc.Stroke()
 			y += sepH
 		} else {
 			// Draw item background if hovered
 			if i == hoverIdx && !item.Disabled {
-				dc.SetRGB(0, 0.47, 0.84) // Windows blue
+				dc.SetColor(colors.HoverBgColor)
 				dc.DrawRectangle(1, float64(y), float64(width-2), float64(itemH))
 				dc.Fill()
 			}
 
 			// Draw text
 			if item.Disabled {
-				dc.SetRGB(0.63, 0.63, 0.63)
+				dc.SetColor(colors.DisabledColor)
 			} else if i == hoverIdx {
-				dc.SetRGB(1, 1, 1)
+				dc.SetColor(colors.HoverTextColor)
 			} else {
-				dc.SetRGB(0, 0, 0)
+				dc.SetColor(colors.TextColor)
 			}
 
 			textY := float64(y) + float64(itemH)/2 + fontSize/3
@@ -394,7 +424,7 @@ func (m *PopupMenu) render() *image.RGBA {
 
 	// Reset clip and draw border
 	dc.ResetClip()
-	dc.SetRGB(0.78, 0.78, 0.78)
+	dc.SetColor(colors.BorderColor)
 	dc.DrawRoundedRectangle(0.5, 0.5, float64(width)-1, float64(height)-1, radius)
 	dc.Stroke()
 

@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/huanfeng/wind_input/internal/theme"
 	"golang.org/x/sys/windows"
 )
 
@@ -772,6 +773,18 @@ func (w *ToolbarWindow) SetCallback(callback *ToolbarCallback) {
 	w.mu.Lock()
 	w.callback = callback
 	w.mu.Unlock()
+}
+
+// SetTheme sets the theme for the toolbar and re-renders
+func (w *ToolbarWindow) SetTheme(resolved *theme.ResolvedTheme) {
+	if w.renderer != nil {
+		w.renderer.SetTheme(resolved)
+	}
+	if w.popupMenu != nil {
+		w.popupMenu.SetTheme(resolved)
+	}
+	// Re-render with new theme
+	w.Render()
 }
 
 // SetState sets the toolbar state and re-renders

@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 
+	"github.com/huanfeng/wind_input/internal/theme"
 	"github.com/fogleman/gg"
 )
 
@@ -19,7 +20,8 @@ const (
 
 // ToolbarRenderer renders the toolbar UI
 type ToolbarRenderer struct {
-	fontPath string
+	fontPath      string
+	resolvedTheme *theme.ResolvedTheme
 }
 
 // NewToolbarRenderer creates a new toolbar renderer
@@ -32,25 +34,65 @@ func (r *ToolbarRenderer) SetFontPath(path string) {
 	r.fontPath = path
 }
 
+// SetTheme sets the theme for the toolbar renderer
+func (r *ToolbarRenderer) SetTheme(resolved *theme.ResolvedTheme) {
+	r.resolvedTheme = resolved
+}
+
+// getToolbarColors returns toolbar colors from theme or defaults
+func (r *ToolbarRenderer) getToolbarColors() *theme.ResolvedToolbarColors {
+	if r.resolvedTheme != nil {
+		return &r.resolvedTheme.Toolbar
+	}
+	// Return default colors
+	return &theme.ResolvedToolbarColors{
+		BackgroundColor:     color.RGBA{255, 255, 255, 250},
+		BorderColor:         color.RGBA{199, 209, 224, 255},
+		GripColor:           color.RGBA{153, 173, 199, 179},
+		ModeChineseBgColor:  color.RGBA{51, 154, 245, 255},
+		ModeEnglishBgColor:  color.RGBA{115, 127, 148, 255},
+		ModeTextColor:       color.RGBA{255, 255, 255, 255},
+		FullWidthOnBgColor:  color.RGBA{46, 184, 153, 255},
+		FullWidthOffBgColor: color.RGBA{230, 234, 239, 255},
+		FullWidthOnColor:    color.RGBA{255, 255, 255, 255},
+		FullWidthOffColor:   color.RGBA{89, 102, 122, 255},
+		PunctChineseBgColor: color.RGBA{245, 133, 67, 255},
+		PunctEnglishBgColor: color.RGBA{230, 234, 239, 255},
+		PunctChineseColor:   color.RGBA{255, 255, 255, 255},
+		PunctEnglishColor:   color.RGBA{89, 102, 122, 255},
+		SettingsBgColor:     color.RGBA{230, 234, 239, 255},
+		SettingsIconColor:   color.RGBA{122, 102, 184, 255},
+		SettingsHoleColor:   color.RGBA{230, 234, 239, 255},
+	}
+}
+
+// getTooltipColors returns tooltip colors from theme or defaults
+func (r *ToolbarRenderer) getTooltipColors() (bgColor, textColor, borderColor color.Color) {
+	if r.resolvedTheme != nil {
+		return r.resolvedTheme.Tooltip.BackgroundColor, r.resolvedTheme.Tooltip.TextColor, color.RGBA{77, 89, 107, 255}
+	}
+	return color.RGBA{38, 46, 56, 242}, color.RGBA{242, 242, 242, 255}, color.RGBA{77, 89, 107, 255}
+}
+
 // Render renders the toolbar with the given state
 func (r *ToolbarRenderer) Render(state ToolbarState) *image.RGBA {
 	scale := GetDPIScale()
+	colors := r.getToolbarColors()
 
 	width := int(float64(toolbarBaseWidth) * scale)
 	height := int(float64(toolbarBaseHeight) * scale)
 
 	dc := gg.NewContext(width, height)
 
-	// Background with rounded corners - brighter, more modern look
+	// Background with rounded corners
 	radius := 6.0 * scale
 	dc.DrawRoundedRectangle(0, 0, float64(width), float64(height), radius)
-	// Gradient-like effect: lighter top to slightly darker bottom
-	dc.SetRGBA(1.0, 1.0, 1.0, 0.98) // Pure white, slightly transparent
+	dc.SetColor(colors.BackgroundColor)
 	dc.Fill()
 
-	// Border - subtle blue tint for a more modern look
+	// Border
 	dc.DrawRoundedRectangle(0.5, 0.5, float64(width)-1, float64(height)-1, radius)
-	dc.SetRGBA(0.78, 0.82, 0.88, 1) // Light blue-gray border
+	dc.SetColor(colors.BorderColor)
 	dc.SetLineWidth(1)
 	dc.Stroke()
 
@@ -61,7 +103,7 @@ func (r *ToolbarRenderer) Render(state ToolbarState) *image.RGBA {
 	}
 
 	// Draw grip handle (left side)
-	r.drawGrip(dc, scale, height)
+	r.drawGrip(dc, scale, height, colors)
 
 	// Draw buttons
 	x := gripWidth * scale
@@ -69,19 +111,19 @@ func (r *ToolbarRenderer) Render(state ToolbarState) *image.RGBA {
 	padding := buttonPadding * scale
 
 	// Mode button (中/En/A)
-	r.drawModeButton(dc, x+padding, padding, buttonW-padding*2, float64(height)-padding*2, state, scale)
+	r.drawModeButton(dc, x+padding, padding, buttonW-padding*2, float64(height)-padding*2, state, scale, colors)
 	x += buttonW
 
 	// Full-width button (全/半)
-	r.drawWidthButton(dc, x+padding, padding, buttonW-padding*2, float64(height)-padding*2, state.FullWidth, scale)
+	r.drawWidthButton(dc, x+padding, padding, buttonW-padding*2, float64(height)-padding*2, state.FullWidth, scale, colors)
 	x += buttonW
 
 	// Punctuation button (，/,)
-	r.drawPunctButton(dc, x+padding, padding, buttonW-padding*2, float64(height)-padding*2, state.ChinesePunct, scale)
+	r.drawPunctButton(dc, x+padding, padding, buttonW-padding*2, float64(height)-padding*2, state.ChinesePunct, scale, colors)
 	x += buttonW
 
 	// Settings button (gear icon)
-	r.drawSettingsButton(dc, x+padding, padding, buttonW-padding*2, float64(height)-padding*2, scale)
+	r.drawSettingsButton(dc, x+padding, padding, buttonW-padding*2, float64(height)-padding*2, scale, colors)
 
 	return dc.Image().(*image.RGBA)
 }
@@ -113,13 +155,13 @@ func (r *ToolbarRenderer) loadFont(dc *gg.Context, fontSize float64) error {
 }
 
 // drawGrip draws the grip handle for dragging
-func (r *ToolbarRenderer) drawGrip(dc *gg.Context, scale float64, height int) {
+func (r *ToolbarRenderer) drawGrip(dc *gg.Context, scale float64, height int, colors *theme.ResolvedToolbarColors) {
 	gripW := gripWidth * scale
 	dotSize := 2.0 * scale
 	dotGap := 4.0 * scale
 
-	// Modern subtle grip dots with blue tint
-	dc.SetRGBA(0.60, 0.68, 0.78, 0.7) // Blue-gray dots (#99ADC7)
+	// Modern subtle grip dots
+	dc.SetColor(colors.GripColor)
 
 	// Draw dots pattern
 	startY := float64(height)/2 - dotGap
@@ -134,19 +176,19 @@ func (r *ToolbarRenderer) drawGrip(dc *gg.Context, scale float64, height int) {
 }
 
 // drawModeButton draws the mode button (中/En/A)
-func (r *ToolbarRenderer) drawModeButton(dc *gg.Context, x, y, w, h float64, state ToolbarState, scale float64) {
+func (r *ToolbarRenderer) drawModeButton(dc *gg.Context, x, y, w, h float64, state ToolbarState, scale float64, colors *theme.ResolvedToolbarColors) {
 	// Background - vibrant colors
 	if state.ChineseMode {
-		dc.SetRGBA(0.20, 0.56, 0.96, 1) // Bright blue for Chinese (#339AF5)
+		dc.SetColor(colors.ModeChineseBgColor)
 	} else {
-		dc.SetRGBA(0.45, 0.50, 0.58, 1) // Slate gray for English (#737F94)
+		dc.SetColor(colors.ModeEnglishBgColor)
 	}
 	radius := 4.0 * scale
 	dc.DrawRoundedRectangle(x, y, w, h, radius)
 	dc.Fill()
 
 	// Text
-	dc.SetRGBA(1, 1, 1, 1)
+	dc.SetColor(colors.ModeTextColor)
 	var text string
 	if state.ChineseMode {
 		text = "中"
@@ -159,12 +201,12 @@ func (r *ToolbarRenderer) drawModeButton(dc *gg.Context, x, y, w, h float64, sta
 }
 
 // drawWidthButton draws the full/half width button
-func (r *ToolbarRenderer) drawWidthButton(dc *gg.Context, x, y, w, h float64, fullWidth bool, scale float64) {
-	// Background - modern teal/green
+func (r *ToolbarRenderer) drawWidthButton(dc *gg.Context, x, y, w, h float64, fullWidth bool, scale float64, colors *theme.ResolvedToolbarColors) {
+	// Background
 	if fullWidth {
-		dc.SetRGBA(0.18, 0.72, 0.60, 1) // Teal green for full-width (#2EB899)
+		dc.SetColor(colors.FullWidthOnBgColor)
 	} else {
-		dc.SetRGBA(0.90, 0.92, 0.94, 1) // Light cool gray for half-width (#E6EAEF)
+		dc.SetColor(colors.FullWidthOffBgColor)
 	}
 	radius := 4.0 * scale
 	dc.DrawRoundedRectangle(x, y, w, h, radius)
@@ -172,9 +214,9 @@ func (r *ToolbarRenderer) drawWidthButton(dc *gg.Context, x, y, w, h float64, fu
 
 	// Text
 	if fullWidth {
-		dc.SetRGBA(1, 1, 1, 1)
+		dc.SetColor(colors.FullWidthOnColor)
 	} else {
-		dc.SetRGBA(0.35, 0.40, 0.48, 1) // Darker text for better contrast
+		dc.SetColor(colors.FullWidthOffColor)
 	}
 	text := "半"
 	if fullWidth {
@@ -184,12 +226,12 @@ func (r *ToolbarRenderer) drawWidthButton(dc *gg.Context, x, y, w, h float64, fu
 }
 
 // drawPunctButton draws the punctuation button
-func (r *ToolbarRenderer) drawPunctButton(dc *gg.Context, x, y, w, h float64, chinesePunct bool, scale float64) {
-	// Background - vibrant orange/coral
+func (r *ToolbarRenderer) drawPunctButton(dc *gg.Context, x, y, w, h float64, chinesePunct bool, scale float64, colors *theme.ResolvedToolbarColors) {
+	// Background
 	if chinesePunct {
-		dc.SetRGBA(0.96, 0.52, 0.26, 1) // Coral orange for Chinese punctuation (#F58543)
+		dc.SetColor(colors.PunctChineseBgColor)
 	} else {
-		dc.SetRGBA(0.90, 0.92, 0.94, 1) // Light cool gray for English punctuation (#E6EAEF)
+		dc.SetColor(colors.PunctEnglishBgColor)
 	}
 	radius := 4.0 * scale
 	dc.DrawRoundedRectangle(x, y, w, h, radius)
@@ -197,9 +239,9 @@ func (r *ToolbarRenderer) drawPunctButton(dc *gg.Context, x, y, w, h float64, ch
 
 	// Text (comma as indicator)
 	if chinesePunct {
-		dc.SetRGBA(1, 1, 1, 1)
+		dc.SetColor(colors.PunctChineseColor)
 	} else {
-		dc.SetRGBA(0.35, 0.40, 0.48, 1) // Darker text for better contrast
+		dc.SetColor(colors.PunctEnglishColor)
 	}
 	text := ","
 	if chinesePunct {
@@ -209,21 +251,21 @@ func (r *ToolbarRenderer) drawPunctButton(dc *gg.Context, x, y, w, h float64, ch
 }
 
 // drawSettingsButton draws the settings button (gear icon)
-func (r *ToolbarRenderer) drawSettingsButton(dc *gg.Context, x, y, w, h float64, scale float64) {
-	// Background - subtle purple/violet tint
-	dc.SetRGBA(0.90, 0.92, 0.94, 1) // Light cool gray (#E6EAEF)
+func (r *ToolbarRenderer) drawSettingsButton(dc *gg.Context, x, y, w, h float64, scale float64, colors *theme.ResolvedToolbarColors) {
+	// Background
+	dc.SetColor(colors.SettingsBgColor)
 	radius := 4.0 * scale
 	dc.DrawRoundedRectangle(x, y, w, h, radius)
 	dc.Fill()
 
-	// Draw gear icon - modern purple/violet color
+	// Draw gear icon
 	centerX := x + w/2
 	centerY := y + h/2
 	outerR := 8.0 * scale
 	innerR := 4.0 * scale
 	toothHeight := 2.5 * scale
 
-	dc.SetRGBA(0.48, 0.40, 0.72, 1) // Muted purple (#7A66B8)
+	dc.SetColor(colors.SettingsIconColor)
 
 	// Draw gear teeth
 	teeth := 8
@@ -241,7 +283,7 @@ func (r *ToolbarRenderer) drawSettingsButton(dc *gg.Context, x, y, w, h float64,
 	dc.Fill()
 
 	// Draw inner circle (hole)
-	dc.SetRGBA(0.90, 0.92, 0.94, 1) // Match button background
+	dc.SetColor(colors.SettingsHoleColor)
 	dc.DrawCircle(centerX, centerY, innerR)
 	dc.Fill()
 }
@@ -326,6 +368,7 @@ func CreateModeIndicatorColor(chineseMode bool) color.RGBA {
 // RenderTooltip renders a tooltip with the given text
 func (r *ToolbarRenderer) RenderTooltip(text string) *image.RGBA {
 	scale := GetDPIScale()
+	bgColor, textColor, borderColor := r.getTooltipColors()
 
 	// Calculate text size
 	fontSize := 12.0 * scale
@@ -343,21 +386,21 @@ func (r *ToolbarRenderer) RenderTooltip(text string) *image.RGBA {
 
 	dc := gg.NewContext(width, height)
 
-	// Background - dark tooltip style
+	// Background
 	radius := 4.0 * scale
 	dc.DrawRoundedRectangle(0, 0, float64(width), float64(height), radius)
-	dc.SetRGBA(0.15, 0.18, 0.22, 0.95) // Dark background (#262E38)
+	dc.SetColor(bgColor)
 	dc.Fill()
 
 	// Border
 	dc.DrawRoundedRectangle(0.5, 0.5, float64(width)-1, float64(height)-1, radius)
-	dc.SetRGBA(0.3, 0.35, 0.42, 1) // Subtle border
+	dc.SetColor(borderColor)
 	dc.SetLineWidth(1)
 	dc.Stroke()
 
 	// Text
 	if err := r.loadFont(dc, fontSize); err == nil {
-		dc.SetRGBA(0.95, 0.95, 0.95, 1) // Light text
+		dc.SetColor(textColor)
 		dc.DrawStringAnchored(text, float64(width)/2, float64(height)/2, 0.5, 0.5)
 	}
 
