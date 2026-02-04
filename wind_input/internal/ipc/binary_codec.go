@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	ErrInvalidHeader  = errors.New("invalid protocol header")
+	ErrInvalidHeader   = errors.New("invalid protocol header")
 	ErrVersionMismatch = errors.New("protocol version mismatch")
 	ErrPayloadTooLarge = errors.New("payload too large")
 )
@@ -415,7 +415,7 @@ func (c *BinaryCodec) EncodeStatePush(chineseMode, fullWidth, chinesePunct, tool
 	// Encode status header (no hotkeys for push)
 	statusHeader := make([]byte, 12)
 	binary.LittleEndian.PutUint32(statusHeader[0:4], flags)
-	binary.LittleEndian.PutUint32(statusHeader[4:8], 0) // keyDownCount = 0
+	binary.LittleEndian.PutUint32(statusHeader[4:8], 0)  // keyDownCount = 0
 	binary.LittleEndian.PutUint32(statusHeader[8:12], 0) // keyUpCount = 0
 
 	// Combine all parts

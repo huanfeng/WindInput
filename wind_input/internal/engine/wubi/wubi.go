@@ -34,7 +34,7 @@ func DefaultConfig() *Config {
 
 // Engine 五笔输入引擎
 type Engine struct {
-	codeTable   *dict.CodeTable   // 主码表
+	codeTable   *dict.CodeTable // 主码表
 	config      *Config
 	dictManager *dict.DictManager // 词库管理器（可选，用于查询用户词和短语）
 }
@@ -65,15 +65,14 @@ func (e *Engine) LoadCodeTable(path string) error {
 	return nil
 }
 
-
 // ConvertResult 转换结果
 type ConvertResult struct {
-	Candidates    []candidate.Candidate
-	ShouldCommit  bool   // 是否应该自动上屏
-	CommitText    string // 自动上屏的文字
-	IsEmpty       bool   // 是否空码
-	ShouldClear   bool   // 是否应该清空
-	ToEnglish     bool   // 是否转为英文
+	Candidates   []candidate.Candidate
+	ShouldCommit bool   // 是否应该自动上屏
+	CommitText   string // 自动上屏的文字
+	IsEmpty      bool   // 是否空码
+	ShouldClear  bool   // 是否应该清空
+	ToEnglish    bool   // 是否转为英文
 }
 
 // Convert 转换输入为候选词

@@ -12,14 +12,14 @@ import (
 
 // UICommand represents a command to the UI thread
 type UICommand struct {
-	Type       string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings", "hide_menu"
-	Candidates []Candidate
-	Input      string
-	X, Y       int // Caret position (original, not adjusted)
+	Type        string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings", "hide_menu"
+	Candidates  []Candidate
+	Input       string
+	X, Y        int // Caret position (original, not adjusted)
 	CaretHeight int // Height of the caret for position adjustment
-	Page       int
-	TotalPages int
-	ModeText   string
+	Page        int
+	TotalPages  int
+	ModeText    string
 	// Toolbar state and position
 	ToolbarState *ToolbarState
 	ToolbarX     int
@@ -42,13 +42,13 @@ type Manager struct {
 	// Tooltip window for encoding lookup
 	tooltip *TooltipWindow
 
-	mu         sync.Mutex
-	candidates []Candidate
-	input      string
-	page       int
-	totalPages int
-	caretX     int
-	caretY     int
+	mu          sync.Mutex
+	candidates  []Candidate
+	input       string
+	page        int
+	totalPages  int
+	caretX      int
+	caretY      int
 	caretHeight int
 
 	// Sticky position state: once candidate window jumps above caret,
@@ -60,8 +60,8 @@ type Manager struct {
 	inputSession        uint64
 	currentInputSession uint64 // The session being displayed (for UI thread)
 
-	ready    bool
-	readyCh  chan struct{}
+	ready   bool
+	readyCh chan struct{}
 
 	// Command channel for async UI updates
 	cmdCh chan UICommand
@@ -256,7 +256,6 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 		m.doHideToolbarMenu()
 	}
 }
-
 
 // WaitReady waits until the UI manager is ready
 func (m *Manager) WaitReady() {
@@ -724,9 +723,10 @@ func (m *Manager) RefreshCandidates() {
 
 // ShowTooltipForCandidate shows a tooltip for the candidate at the given page-local index
 // TODO: 反查功能待实现 - 需要以下数据支持：
-//   1. 拼音反查：根据汉字查询拼音（需要拼音字典数据）
-//   2. 五笔编码反查：显示汉字的完整五笔编码（需要编码反查表）
-//   3. 可选：五笔拆字方法展示
+//  1. 拼音反查：根据汉字查询拼音（需要拼音字典数据）
+//  2. 五笔编码反查：显示汉字的完整五笔编码（需要编码反查表）
+//  3. 可选：五笔拆字方法展示
+//
 // 目前 candidate.Comment 字段为空，因为引擎未返回 Hint 信息
 func (m *Manager) ShowTooltipForCandidate(pageIndex int, mouseX, mouseY int) {
 	m.mu.Lock()

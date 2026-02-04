@@ -148,8 +148,8 @@ func (c *Compiler) compileSelectKeyGroup(group string) []uint32 {
 	switch group {
 	case "semicolon_quote":
 		// ; and '
-		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_OEM_1))   // ;
-		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_OEM_7))   // '
+		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_OEM_1)) // ;
+		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_OEM_7)) // '
 	case "comma_period":
 		// , and .
 		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_OEM_COMMA))  // ,

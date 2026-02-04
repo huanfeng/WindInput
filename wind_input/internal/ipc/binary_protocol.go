@@ -76,32 +76,32 @@ const (
 
 // Virtual key codes (Windows VK_* constants)
 const (
-	VK_BACK      uint32 = 0x08
-	VK_TAB       uint32 = 0x09
-	VK_RETURN    uint32 = 0x0D
-	VK_SHIFT     uint32 = 0x10
-	VK_CONTROL   uint32 = 0x11
-	VK_MENU      uint32 = 0x12 // Alt
-	VK_CAPITAL   uint32 = 0x14 // CapsLock
-	VK_ESCAPE    uint32 = 0x1B
-	VK_SPACE     uint32 = 0x20
-	VK_PRIOR     uint32 = 0x21 // PageUp
-	VK_NEXT      uint32 = 0x22 // PageDown
-	VK_LSHIFT    uint32 = 0xA0
-	VK_RSHIFT    uint32 = 0xA1
-	VK_LCONTROL  uint32 = 0xA2
-	VK_RCONTROL  uint32 = 0xA3
-	VK_OEM_1     uint32 = 0xBA // ;:
-	VK_OEM_PLUS  uint32 = 0xBB // =+
-	VK_OEM_COMMA uint32 = 0xBC // ,<
-	VK_OEM_MINUS uint32 = 0xBD // -_
+	VK_BACK       uint32 = 0x08
+	VK_TAB        uint32 = 0x09
+	VK_RETURN     uint32 = 0x0D
+	VK_SHIFT      uint32 = 0x10
+	VK_CONTROL    uint32 = 0x11
+	VK_MENU       uint32 = 0x12 // Alt
+	VK_CAPITAL    uint32 = 0x14 // CapsLock
+	VK_ESCAPE     uint32 = 0x1B
+	VK_SPACE      uint32 = 0x20
+	VK_PRIOR      uint32 = 0x21 // PageUp
+	VK_NEXT       uint32 = 0x22 // PageDown
+	VK_LSHIFT     uint32 = 0xA0
+	VK_RSHIFT     uint32 = 0xA1
+	VK_LCONTROL   uint32 = 0xA2
+	VK_RCONTROL   uint32 = 0xA3
+	VK_OEM_1      uint32 = 0xBA // ;:
+	VK_OEM_PLUS   uint32 = 0xBB // =+
+	VK_OEM_COMMA  uint32 = 0xBC // ,<
+	VK_OEM_MINUS  uint32 = 0xBD // -_
 	VK_OEM_PERIOD uint32 = 0xBE // .>
-	VK_OEM_2     uint32 = 0xBF // /?
-	VK_OEM_3     uint32 = 0xC0 // `~
-	VK_OEM_4     uint32 = 0xDB // [{
-	VK_OEM_5     uint32 = 0xDC // \|
-	VK_OEM_6     uint32 = 0xDD // ]}
-	VK_OEM_7     uint32 = 0xDE // '"
+	VK_OEM_2      uint32 = 0xBF // /?
+	VK_OEM_3      uint32 = 0xC0 // `~
+	VK_OEM_4      uint32 = 0xDB // [{
+	VK_OEM_5      uint32 = 0xDC // \|
+	VK_OEM_6      uint32 = 0xDD // ]}
+	VK_OEM_7      uint32 = 0xDE // '"
 )
 
 // Header size in bytes

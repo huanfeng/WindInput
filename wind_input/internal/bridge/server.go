@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	kernel32                       = windows.NewLazySystemDLL("kernel32.dll")
+	kernel32                        = windows.NewLazySystemDLL("kernel32.dll")
 	procGetNamedPipeClientProcessId = kernel32.NewProc("GetNamedPipeClientProcessId")
 )
 
@@ -55,10 +55,10 @@ type Server struct {
 	activeHandles map[windows.Handle]*pipeWriter // Map handle to writer for broadcasting
 
 	// Push pipe clients (for proactive state push)
-	pushMu            sync.RWMutex
-	pushClientCount   int
-	pushClients       map[windows.Handle]*pipeWriter
-	pushClientsByPID  map[uint32]windows.Handle // Map process ID to push pipe handle
+	pushMu           sync.RWMutex
+	pushClientCount  int
+	pushClients      map[windows.Handle]*pipeWriter
+	pushClientsByPID map[uint32]windows.Handle // Map process ID to push pipe handle
 
 	// Active client tracking (for secure, targeted push)
 	activeMu        sync.RWMutex

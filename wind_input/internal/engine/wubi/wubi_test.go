@@ -58,13 +58,13 @@ func TestWubiBasicLookup(t *testing.T) {
 	}
 
 	tests := []struct {
-		code        string
-		contains    string // 期望包含的字（不要求首选）
-		minResults  int    // 最少返回数量
-		desc        string
+		code       string
+		contains   string // 期望包含的字（不要求首选）
+		minResults int    // 最少返回数量
+		desc       string
 	}{
 		{"a", "工", 1, "一级简码"},
-		{"g", "一", 1, "一级简码"},  // 实际首选可能是 "一"
+		{"g", "一", 1, "一级简码"}, // 实际首选可能是 "一"
 		{"aa", "式", 1, "二级简码"},
 		{"gg", "五", 1, "二级简码"},
 		{"gggg", "王", 1, "四码全码"},
@@ -167,10 +167,10 @@ func TestWubiNoPinyinContamination(t *testing.T) {
 
 	// 这些是典型的拼音编码，五笔中应该没有或有不同的结果
 	pinyinCodes := []string{
-		"ni",   // 拼音 "你"
-		"hao",  // 拼音 "好"
-		"wo",   // 拼音 "我"
-		"shi",  // 拼音 "是"
+		"ni",  // 拼音 "你"
+		"hao", // 拼音 "好"
+		"wo",  // 拼音 "我"
+		"shi", // 拼音 "是"
 	}
 
 	for _, code := range pinyinCodes {

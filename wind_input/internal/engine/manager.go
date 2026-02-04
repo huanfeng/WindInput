@@ -180,11 +180,11 @@ func (m *Manager) HandleTopCode(input string) (commitText string, newInput strin
 
 // EngineConfig 引擎配置
 type EngineConfig struct {
-	Type           EngineType
-	DictPath       string
-	WubiDictPath   string         // 五笔词库路径（用于拼音反查五笔）
-	PinyinConfig   *pinyin.Config // 拼音引擎配置
-	WubiConfig     *wubi.Config   // 五笔引擎配置
+	Type         EngineType
+	DictPath     string
+	WubiDictPath string         // 五笔词库路径（用于拼音反查五笔）
+	PinyinConfig *pinyin.Config // 拼音引擎配置
+	WubiConfig   *wubi.Config   // 五笔引擎配置
 }
 
 // InitializeFromConfig 从配置初始化引擎

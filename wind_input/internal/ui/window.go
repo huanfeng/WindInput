@@ -18,45 +18,45 @@ var (
 	msimg32  = windows.NewLazySystemDLL("msimg32.dll")
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
-	procRegisterClassExW         = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW          = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW           = user32.NewProc("DefWindowProcW")
-	procShowWindow               = user32.NewProc("ShowWindow")
-	procUpdateWindow             = user32.NewProc("UpdateWindow")
-	procDestroyWindow            = user32.NewProc("DestroyWindow")
-	procGetDC                    = user32.NewProc("GetDC")
-	procReleaseDC                = user32.NewProc("ReleaseDC")
-	procSetWindowPos             = user32.NewProc("SetWindowPos")
-	procUpdateLayeredWindow      = user32.NewProc("UpdateLayeredWindow")
-	procGetMessageW              = user32.NewProc("GetMessageW")
-	procPeekMessageW             = user32.NewProc("PeekMessageW")
-	procTranslateMessage         = user32.NewProc("TranslateMessage")
-	procDispatchMessageW         = user32.NewProc("DispatchMessageW")
-	procPostQuitMessage          = user32.NewProc("PostQuitMessage")
-	procPostMessageW             = user32.NewProc("PostMessageW")
-	procGetDpiForSystem          = user32.NewProc("GetDpiForSystem")
+	procRegisterClassExW          = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW           = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW            = user32.NewProc("DefWindowProcW")
+	procShowWindow                = user32.NewProc("ShowWindow")
+	procUpdateWindow              = user32.NewProc("UpdateWindow")
+	procDestroyWindow             = user32.NewProc("DestroyWindow")
+	procGetDC                     = user32.NewProc("GetDC")
+	procReleaseDC                 = user32.NewProc("ReleaseDC")
+	procSetWindowPos              = user32.NewProc("SetWindowPos")
+	procUpdateLayeredWindow       = user32.NewProc("UpdateLayeredWindow")
+	procGetMessageW               = user32.NewProc("GetMessageW")
+	procPeekMessageW              = user32.NewProc("PeekMessageW")
+	procTranslateMessage          = user32.NewProc("TranslateMessage")
+	procDispatchMessageW          = user32.NewProc("DispatchMessageW")
+	procPostQuitMessage           = user32.NewProc("PostQuitMessage")
+	procPostMessageW              = user32.NewProc("PostMessageW")
+	procGetDpiForSystem           = user32.NewProc("GetDpiForSystem")
 	procMsgWaitForMultipleObjects = user32.NewProc("MsgWaitForMultipleObjects")
-	procMonitorFromPoint         = user32.NewProc("MonitorFromPoint")
-	procGetMonitorInfoW          = user32.NewProc("GetMonitorInfoW")
-	procGetKeyState              = user32.NewProc("GetKeyState")
+	procMonitorFromPoint          = user32.NewProc("MonitorFromPoint")
+	procGetMonitorInfoW           = user32.NewProc("GetMonitorInfoW")
+	procGetKeyState               = user32.NewProc("GetKeyState")
 
-	procCreateEventW  = kernel32.NewProc("CreateEventW")
-	procSetEvent      = kernel32.NewProc("SetEvent")
-	procResetEvent    = kernel32.NewProc("ResetEvent")
-	procCloseHandle   = kernel32.NewProc("CloseHandle")
+	procCreateEventW = kernel32.NewProc("CreateEventW")
+	procSetEvent     = kernel32.NewProc("SetEvent")
+	procResetEvent   = kernel32.NewProc("ResetEvent")
+	procCloseHandle  = kernel32.NewProc("CloseHandle")
 
-	procCreateCompatibleDC   = gdi32.NewProc("CreateCompatibleDC")
-	procDeleteDC             = gdi32.NewProc("DeleteDC")
-	procSelectObject         = gdi32.NewProc("SelectObject")
-	procDeleteObject         = gdi32.NewProc("DeleteObject")
-	procCreateDIBSection     = gdi32.NewProc("CreateDIBSection")
-	procGetDeviceCaps        = gdi32.NewProc("GetDeviceCaps")
+	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
+	procDeleteDC           = gdi32.NewProc("DeleteDC")
+	procSelectObject       = gdi32.NewProc("SelectObject")
+	procDeleteObject       = gdi32.NewProc("DeleteObject")
+	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
+	procGetDeviceCaps      = gdi32.NewProc("GetDeviceCaps")
 
 	// Popup menu APIs
-	procCreatePopupMenu   = user32.NewProc("CreatePopupMenu")
-	procDestroyMenu       = user32.NewProc("DestroyMenu")
-	procAppendMenuW       = user32.NewProc("AppendMenuW")
-	procTrackPopupMenu    = user32.NewProc("TrackPopupMenu")
+	procCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
+	procDestroyMenu         = user32.NewProc("DestroyMenu")
+	procAppendMenuW         = user32.NewProc("AppendMenuW")
+	procTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
 	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 )
 
@@ -146,11 +146,11 @@ const (
 	MF_GRAYED    = 0x0001
 
 	// TrackPopupMenu flags
-	TPM_LEFTALIGN    = 0x0000
-	TPM_TOPALIGN     = 0x0000
-	TPM_BOTTOMALIGN  = 0x0020
-	TPM_RETURNCMD    = 0x0100
-	TPM_NONOTIFY     = 0x0080
+	TPM_LEFTALIGN   = 0x0000
+	TPM_TOPALIGN    = 0x0000
+	TPM_BOTTOMALIGN = 0x0020
+	TPM_RETURNCMD   = 0x0100
+	TPM_NONOTIFY    = 0x0080
 
 	// Candidate context menu IDs
 	IDM_CANDIDATE_MOVEUP   = 1001
@@ -173,9 +173,9 @@ const (
 	// MsgWaitForMultipleObjects flags
 	QS_ALLINPUT = 0x04FF
 
-	WAIT_OBJECT_0  = 0x00000000
-	WAIT_TIMEOUT   = 0x00000102
-	INFINITE       = 0xFFFFFFFF
+	WAIT_OBJECT_0 = 0x00000000
+	WAIT_TIMEOUT  = 0x00000102
+	INFINITE      = 0xFFFFFFFF
 )
 
 type WNDCLASSEXW struct {
@@ -283,9 +283,9 @@ type CandidateWindow struct {
 	callbacks     *CandidateCallback
 
 	// Custom popup menu (doesn't steal focus)
-	popupMenu        *PopupMenu
-	menuOpen         bool // Whether context menu is currently open
-	menuTargetIndex  int  // The candidate index that was right-clicked
+	popupMenu       *PopupMenu
+	menuOpen        bool // Whether context menu is currently open
+	menuTargetIndex int  // The candidate index that was right-clicked
 }
 
 // NewCandidateWindow creates a new candidate window
@@ -889,11 +889,11 @@ func CloseEvent(event windows.Handle) {
 func MsgWaitForMultipleObjects(event windows.Handle, timeoutMs uint32) uint32 {
 	handles := [1]uintptr{uintptr(event)}
 	ret, _, _ := procMsgWaitForMultipleObjects.Call(
-		1,                               // nCount
+		1,                                    // nCount
 		uintptr(unsafe.Pointer(&handles[0])), // pHandles
-		0,                               // bWaitAll = FALSE
-		uintptr(timeoutMs),              // dwMilliseconds
-		QS_ALLINPUT,                     // dwWakeMask
+		0,                                    // bWaitAll = FALSE
+		uintptr(timeoutMs),                   // dwMilliseconds
+		QS_ALLINPUT,                          // dwWakeMask
 	)
 	return uint32(ret)
 }

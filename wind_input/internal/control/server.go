@@ -25,8 +25,8 @@ type ReloadHandler interface {
 
 // Server 控制管道服务端
 type Server struct {
-	logger       *slog.Logger
-	dictManager  *dict.DictManager
+	logger        *slog.Logger
+	dictManager   *dict.DictManager
 	reloadHandler ReloadHandler
 
 	listener net.Listener

@@ -71,10 +71,10 @@ type UIConfig struct {
 	FontPath                string  `yaml:"font_path" json:"font_path"`
 	InlinePreedit           bool    `yaml:"inline_preedit" json:"inline_preedit"`
 	HideCandidateWindow     bool    `yaml:"hide_candidate_window" json:"hide_candidate_window"`
-	CandidateLayout         string  `yaml:"candidate_layout" json:"candidate_layout"`                     // 候选布局：horizontal 或 vertical
-	StatusIndicatorDuration int     `yaml:"status_indicator_duration" json:"status_indicator_duration"`   // 状态提示显示时长（毫秒）
-	StatusIndicatorOffsetX  int     `yaml:"status_indicator_offset_x" json:"status_indicator_offset_x"`   // 状态提示 X 偏移量
-	StatusIndicatorOffsetY  int     `yaml:"status_indicator_offset_y" json:"status_indicator_offset_y"`   // 状态提示 Y 偏移量
+	CandidateLayout         string  `yaml:"candidate_layout" json:"candidate_layout"`                   // 候选布局：horizontal 或 vertical
+	StatusIndicatorDuration int     `yaml:"status_indicator_duration" json:"status_indicator_duration"` // 状态提示显示时长（毫秒）
+	StatusIndicatorOffsetX  int     `yaml:"status_indicator_offset_x" json:"status_indicator_offset_x"` // 状态提示 X 偏移量
+	StatusIndicatorOffsetY  int     `yaml:"status_indicator_offset_y" json:"status_indicator_offset_y"` // 状态提示 Y 偏移量
 }
 
 // ToolbarConfig contains toolbar settings
@@ -95,7 +95,7 @@ type InputConfig struct {
 
 // ShiftTempEnglishConfig 临时英文模式配置
 type ShiftTempEnglishConfig struct {
-	Enabled              bool `yaml:"enabled" json:"enabled"`
+	Enabled               bool `yaml:"enabled" json:"enabled"`
 	ShowEnglishCandidates bool `yaml:"show_english_candidates" json:"show_english_candidates"`
 }
 
@@ -163,7 +163,7 @@ func DefaultConfig() *Config {
 			SelectKeyGroups: []string{"semicolon_quote"},
 			PageKeys:        []string{"pageupdown", "minus_equal"},
 			ShiftTempEnglish: ShiftTempEnglishConfig{
-				Enabled:              true,
+				Enabled:               true,
 				ShowEnglishCandidates: true,
 			},
 			CapsLockBehavior: CapsLockBehaviorConfig{

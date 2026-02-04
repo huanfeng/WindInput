@@ -9,16 +9,16 @@ import (
 
 // Config 拼音引擎配置
 type Config struct {
-	ShowWubiHint bool // 显示五笔编码提示
+	ShowWubiHint bool   // 显示五笔编码提示
 	FilterMode   string // 候选过滤模式
 }
 
 // Engine 拼音引擎
 type Engine struct {
-	dict          dict.Dict
-	wubiTable     *dict.CodeTable            // 五笔码表（用于反查）
-	wubiReverse   map[string][]string        // 汉字 -> 五笔编码（反向索引）
-	config        *Config
+	dict        dict.Dict
+	wubiTable   *dict.CodeTable     // 五笔码表（用于反查）
+	wubiReverse map[string][]string // 汉字 -> 五笔编码（反向索引）
+	config      *Config
 }
 
 // NewEngine 创建拼音引擎

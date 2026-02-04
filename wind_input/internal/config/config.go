@@ -30,10 +30,10 @@ type Config struct {
 
 // StartupConfig 启动/默认状态配置
 type StartupConfig struct {
-	RememberLastState   bool `yaml:"remember_last_state" json:"remember_last_state"`       // 记忆前次状态（优先级最高）
-	DefaultChineseMode  bool `yaml:"default_chinese_mode" json:"default_chinese_mode"`     // 默认中文模式
-	DefaultFullWidth    bool `yaml:"default_full_width" json:"default_full_width"`         // 默认全角
-	DefaultChinesePunct bool `yaml:"default_chinese_punct" json:"default_chinese_punct"`   // 默认中文标点
+	RememberLastState   bool `yaml:"remember_last_state" json:"remember_last_state"`     // 记忆前次状态（优先级最高）
+	DefaultChineseMode  bool `yaml:"default_chinese_mode" json:"default_chinese_mode"`   // 默认中文模式
+	DefaultFullWidth    bool `yaml:"default_full_width" json:"default_full_width"`       // 默认全角
+	DefaultChinesePunct bool `yaml:"default_chinese_punct" json:"default_chinese_punct"` // 默认中文标点
 }
 
 // DictionaryConfig contains dictionary settings
@@ -58,20 +58,20 @@ type PinyinConfig struct {
 
 // WubiConfig 五笔引擎配置
 type WubiConfig struct {
-	AutoCommitAt4    bool `yaml:"auto_commit_at_4" json:"auto_commit_at_4"`       // 四码唯一时自动上屏
-	ClearOnEmptyAt4  bool `yaml:"clear_on_empty_at_4" json:"clear_on_empty_at_4"` // 四码为空时清空
-	TopCodeCommit    bool `yaml:"top_code_commit" json:"top_code_commit"`         // 五码顶字上屏
-	PunctCommit      bool `yaml:"punct_commit" json:"punct_commit"`               // 标点顶字上屏
+	AutoCommitAt4   bool `yaml:"auto_commit_at_4" json:"auto_commit_at_4"`       // 四码唯一时自动上屏
+	ClearOnEmptyAt4 bool `yaml:"clear_on_empty_at_4" json:"clear_on_empty_at_4"` // 四码为空时清空
+	TopCodeCommit   bool `yaml:"top_code_commit" json:"top_code_commit"`         // 五码顶字上屏
+	PunctCommit     bool `yaml:"punct_commit" json:"punct_commit"`               // 标点顶字上屏
 }
 
 // HotkeyConfig contains hotkey settings
 type HotkeyConfig struct {
 	// 中英文切换键（多选）: lshift, rshift, lctrl, rctrl, capslock
-	ToggleModeKeys   []string `yaml:"toggle_mode_keys" json:"toggle_mode_keys"`
-	CommitOnSwitch   bool     `yaml:"commit_on_switch" json:"commit_on_switch"`           // 中文切换为英文时已有编码上屏
-	SwitchEngine     string   `yaml:"switch_engine" json:"switch_engine"`                 // ctrl+`, ctrl+shift+e, none
-	ToggleFullWidth  string   `yaml:"toggle_full_width" json:"toggle_full_width"`         // shift+space, ctrl+shift+space, none
-	TogglePunct      string   `yaml:"toggle_punct" json:"toggle_punct"`                   // ctrl+., ctrl+,, none
+	ToggleModeKeys  []string `yaml:"toggle_mode_keys" json:"toggle_mode_keys"`
+	CommitOnSwitch  bool     `yaml:"commit_on_switch" json:"commit_on_switch"`   // 中文切换为英文时已有编码上屏
+	SwitchEngine    string   `yaml:"switch_engine" json:"switch_engine"`         // ctrl+`, ctrl+shift+e, none
+	ToggleFullWidth string   `yaml:"toggle_full_width" json:"toggle_full_width"` // shift+space, ctrl+shift+space, none
+	TogglePunct     string   `yaml:"toggle_punct" json:"toggle_punct"`           // ctrl+., ctrl+,, none
 }
 
 // UIConfig contains UI settings
@@ -98,7 +98,7 @@ type ToolbarConfig struct {
 // InputConfig contains input behavior settings
 // 注意：fullWidth 和 chinesePunctuation 是运行时状态，保存在 state.yaml 中
 type InputConfig struct {
-	PunctFollowMode bool     `yaml:"punct_follow_mode" json:"punct_follow_mode"` // 标点随中英文切换
+	PunctFollowMode bool `yaml:"punct_follow_mode" json:"punct_follow_mode"` // 标点随中英文切换
 	// 候选选择键组（多选）: semicolon_quote, comma_period, lrshift, lrctrl
 	SelectKeyGroups []string `yaml:"select_key_groups" json:"select_key_groups"`
 	// 翻页键（多选）: pageupdown, minus_equal, brackets, shift_tab
@@ -111,7 +111,7 @@ type InputConfig struct {
 
 // ShiftTempEnglishConfig 临时英文模式配置
 type ShiftTempEnglishConfig struct {
-	Enabled              bool `yaml:"enabled" json:"enabled"`                                 // 是否启用
+	Enabled               bool `yaml:"enabled" json:"enabled"`                                 // 是否启用
 	ShowEnglishCandidates bool `yaml:"show_english_candidates" json:"show_english_candidates"` // 显示英文候选
 }
 
@@ -187,7 +187,7 @@ func DefaultConfig() *Config {
 			SelectKeyGroups: []string{"semicolon_quote"},
 			PageKeys:        []string{"pageupdown", "minus_equal"},
 			ShiftTempEnglish: ShiftTempEnglishConfig{
-				Enabled:              true,
+				Enabled:               true,
 				ShowEnglishCandidates: true,
 			},
 			CapsLockBehavior: CapsLockBehaviorConfig{

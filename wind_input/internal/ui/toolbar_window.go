@@ -14,12 +14,12 @@ import (
 
 // Additional Windows constants for toolbar
 const (
-	WM_LBUTTONDOWN  = 0x0201
-	WM_LBUTTONUP    = 0x0202
-	WM_MOUSEMOVE    = 0x0200
-	WM_RBUTTONUP    = 0x0205
-	WM_MOUSELEAVE   = 0x02A3
-	WM_TIMER        = 0x0113
+	WM_LBUTTONDOWN = 0x0201
+	WM_LBUTTONUP   = 0x0202
+	WM_MOUSEMOVE   = 0x0200
+	WM_RBUTTONUP   = 0x0205
+	WM_MOUSELEAVE  = 0x02A3
+	WM_TIMER       = 0x0113
 	// WM_SETCURSOR defined in window.go
 
 	HTCLIENT = 1
@@ -32,37 +32,37 @@ const (
 	IDC_HAND    = 32649
 
 	// Tooltip constants
-	TOOLTIP_TIMER_ID    = 1
-	TOOLTIP_DELAY_MS    = 400 // Delay before showing tooltip
-	TOOLTIP_HIDE_MS     = 3000 // Auto-hide after this time
-	TME_LEAVE           = 0x00000002
+	TOOLTIP_TIMER_ID = 1
+	TOOLTIP_DELAY_MS = 400  // Delay before showing tooltip
+	TOOLTIP_HIDE_MS  = 3000 // Auto-hide after this time
+	TME_LEAVE        = 0x00000002
 )
 
 var (
-	procSetWindowLongPtrW    = user32.NewProc("SetWindowLongPtrW")
-	procCallWindowProcW      = user32.NewProc("CallWindowProcW")
-	procGetCursorPos         = user32.NewProc("GetCursorPos")
-	procScreenToClient       = user32.NewProc("ScreenToClient")
-	procClientToScreen       = user32.NewProc("ClientToScreen")
-	procSetCapture           = user32.NewProc("SetCapture")
-	procReleaseCapture       = user32.NewProc("ReleaseCapture")
-	procLoadCursorW          = user32.NewProc("LoadCursorW")
-	procSetCursor            = user32.NewProc("SetCursor")
-	procSetTimer             = user32.NewProc("SetTimer")
-	procKillTimer            = user32.NewProc("KillTimer")
-	procTrackMouseEvent      = user32.NewProc("TrackMouseEvent")
+	procSetWindowLongPtrW = user32.NewProc("SetWindowLongPtrW")
+	procCallWindowProcW   = user32.NewProc("CallWindowProcW")
+	procGetCursorPos      = user32.NewProc("GetCursorPos")
+	procScreenToClient    = user32.NewProc("ScreenToClient")
+	procClientToScreen    = user32.NewProc("ClientToScreen")
+	procSetCapture        = user32.NewProc("SetCapture")
+	procReleaseCapture    = user32.NewProc("ReleaseCapture")
+	procLoadCursorW       = user32.NewProc("LoadCursorW")
+	procSetCursor         = user32.NewProc("SetCursor")
+	procSetTimer          = user32.NewProc("SetTimer")
+	procKillTimer         = user32.NewProc("KillTimer")
+	procTrackMouseEvent   = user32.NewProc("TrackMouseEvent")
 )
 
 // ToolbarHitResult represents which part of the toolbar was hit
 type ToolbarHitResult int
 
 const (
-	HitNone ToolbarHitResult = iota
-	HitGrip                  // Drag handle
-	HitModeButton            // Chinese/English mode button
-	HitWidthButton           // Full/Half width button
-	HitPunctButton           // Punctuation button
-	HitSettingsButton        // Settings button
+	HitNone           ToolbarHitResult = iota
+	HitGrip                            // Drag handle
+	HitModeButton                      // Chinese/English mode button
+	HitWidthButton                     // Full/Half width button
+	HitPunctButton                     // Punctuation button
+	HitSettingsButton                  // Settings button
 )
 
 // ToolbarState represents the current state of the toolbar
@@ -107,12 +107,12 @@ type ToolbarWindow struct {
 	logger   *slog.Logger
 	renderer *ToolbarRenderer
 
-	mu       sync.Mutex
-	visible  bool
-	x, y     int
-	width    int
-	height   int
-	state    ToolbarState
+	mu      sync.Mutex
+	visible bool
+	x, y    int
+	width   int
+	height  int
+	state   ToolbarState
 
 	// Dragging state
 	dragging    bool

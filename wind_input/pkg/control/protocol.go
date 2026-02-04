@@ -12,13 +12,13 @@ const PipeName = `\\.\pipe\wind_input_control`
 
 // 命令类型
 const (
-	CmdPing          = "PING"
-	CmdReloadConfig  = "RELOAD_CONFIG"
-	CmdReloadPhrases = "RELOAD_PHRASES"
-	CmdReloadShadow  = "RELOAD_SHADOW"
+	CmdPing           = "PING"
+	CmdReloadConfig   = "RELOAD_CONFIG"
+	CmdReloadPhrases  = "RELOAD_PHRASES"
+	CmdReloadShadow   = "RELOAD_SHADOW"
 	CmdReloadUserDict = "RELOAD_USERDICT"
-	CmdReloadAll     = "RELOAD_ALL"
-	CmdGetStatus     = "GET_STATUS"
+	CmdReloadAll      = "RELOAD_ALL"
+	CmdGetStatus      = "GET_STATUS"
 )
 
 // 响应状态

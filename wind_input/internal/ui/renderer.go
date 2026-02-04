@@ -7,8 +7,8 @@ import (
 	"os"
 	"sync"
 
-	"github.com/golang/freetype/truetype"
 	"github.com/fogleman/gg"
+	"github.com/golang/freetype/truetype"
 	"golang.org/x/image/font"
 )
 

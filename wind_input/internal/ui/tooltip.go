@@ -5,8 +5,8 @@ import (
 	"image"
 	"image/color"
 	"log/slog"
-	"syscall"
 	"sync"
+	"syscall"
 	"unsafe"
 
 	"github.com/fogleman/gg"

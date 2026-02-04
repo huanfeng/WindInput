@@ -43,9 +43,9 @@ const (
 type EffectiveMode int
 
 const (
-	ModeChinese     EffectiveMode = iota // 中文模式
-	ModeEnglishLower                     // 英文小写模式
-	ModeEnglishUpper                     // 英文大写模式 (CapsLock on)
+	ModeChinese      EffectiveMode = iota // 中文模式
+	ModeEnglishLower                      // 英文小写模式
+	ModeEnglishUpper                      // 英文大写模式 (CapsLock on)
 )
 
 // Coordinator orchestrates between C++ Bridge, Engine, and native UI
