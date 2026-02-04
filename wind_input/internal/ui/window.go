@@ -306,7 +306,11 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		return HTCLIENT
 
 	case WM_SETCURSOR:
-		// Don't change cursor - let the underlying window handle it
+		// Set arrow cursor explicitly to avoid spinning cursor on first show
+		cursor, _, _ := procLoadCursorW.Call(0, IDC_ARROW)
+		if cursor != 0 {
+			procSetCursor.Call(cursor)
+		}
 		return 1
 
 	case WM_MOUSEMOVE:
@@ -772,13 +776,15 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	screenX := windowX + mouseX
 	screenY := windowY + mouseY
 
-	// Set foreground window to receive menu messages properly
-	procSetForegroundWindow.Call(uintptr(w.hwnd))
+	// Note: Do NOT call SetForegroundWindow to avoid losing input focus
+	// which would cause IME switching issues
 
 	// Show popup menu and wait for selection
+	// TPM_RETURNCMD: Return the command instead of posting WM_COMMAND
+	// Note: Removed TPM_NONOTIFY so menu can properly handle ESC key
 	ret, _, _ := procTrackPopupMenu.Call(
 		hMenu,
-		TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD|TPM_NONOTIFY,
+		TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RETURNCMD,
 		uintptr(screenX),
 		uintptr(screenY),
 		0,

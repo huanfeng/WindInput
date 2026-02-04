@@ -93,6 +93,9 @@ private:
         std::wstring text;
     };
 
+    // Show popup menu manually (Windows 11 workaround)
+    void _ShowPopupMenu(POINT pt);
+
     LONG _refCount;
     CTextService* _pTextService;
     ITfLangBarItemSink* _pLangBarItemSink;

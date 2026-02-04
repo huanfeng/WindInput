@@ -564,6 +564,22 @@ STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
                 {
                     _bChineseMode = response.IsChineseMode();
 
+                    // Sync full status to LangBarItemButton
+                    if (_pLangBarItemButton != nullptr)
+                    {
+                        BOOL bCapsLock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+                        _pLangBarItemButton->UpdateFullStatus(
+                            response.IsChineseMode(),
+                            response.IsFullWidth(),
+                            response.IsChinesePunct(),
+                            response.IsToolbarVisible(),
+                            bCapsLock
+                        );
+                        WIND_LOG_INFO_FMT(L"Synced full status: mode=%d, width=%d, punct=%d, toolbar=%d\n",
+                            response.IsChineseMode(), response.IsFullWidth(),
+                            response.IsChinesePunct(), response.IsToolbarVisible());
+                    }
+
                     // Update hotkey whitelist if present
                     if (response.HasHotkeys() && _pHotkeyManager != nullptr)
                     {
@@ -1434,11 +1450,73 @@ void CTextService::UpdateCapsLockState(BOOL bCapsLock)
 
 void CTextService::SendMenuCommand(const char* command)
 {
-    WIND_LOG_DEBUG(L"SendMenuCommand called\n");
+    WIND_LOG_INFO_FMT(L"SendMenuCommand: command=%hs\n", command);
 
-    // TODO: Menu commands will be implemented in a future version
-    // For now, just log the command
-    WIND_LOG_DEBUG_FMT(L"SendMenuCommand: command=%hs (not implemented in binary protocol)\n", command);
+    CIPCClient* pClient = _pIPCClient;
+    CIPCClient* pTempClient = nullptr;
+
+    // If main IPC client is null (Deactivate was called), create temporary connection
+    if (pClient == nullptr)
+    {
+        WIND_LOG_INFO(L"SendMenuCommand: Main IPC null, creating temporary connection\n");
+        pTempClient = new CIPCClient();
+        if (pTempClient == nullptr)
+        {
+            WIND_LOG_ERROR(L"SendMenuCommand: Failed to create temporary IPC client\n");
+            return;
+        }
+        if (!pTempClient->Connect())
+        {
+            WIND_LOG_WARN(L"SendMenuCommand: Temporary connection failed\n");
+            delete pTempClient;
+            return;
+        }
+        pClient = pTempClient;
+        WIND_LOG_INFO(L"SendMenuCommand: Temporary connection established\n");
+    }
+    else if (!pClient->IsConnected())
+    {
+        // Main client exists but disconnected, try to reconnect
+        WIND_LOG_INFO(L"SendMenuCommand: IPC disconnected, attempting reconnect\n");
+        if (!pClient->Connect())
+        {
+            WIND_LOG_WARN(L"SendMenuCommand: Reconnect failed\n");
+            return;
+        }
+        WIND_LOG_INFO(L"SendMenuCommand: Reconnected successfully\n");
+    }
+
+    // Send menu command via IPC (command is UTF-8 string)
+    size_t commandLen = strlen(command);
+    ServiceResponse response;
+    if (pClient->SendSync(CMD_MENU_COMMAND, command, (uint32_t)commandLen, response))
+    {
+        WIND_LOG_INFO(L"SendMenuCommand: Command sent successfully\n");
+
+        // Apply any status updates from response
+        if (response.type == ResponseType::StatusUpdate)
+        {
+            BOOL bChineseMode = response.IsChineseMode();
+            BOOL bFullWidth = response.IsFullWidth();
+            BOOL bChinesePunct = response.IsChinesePunct();
+            BOOL bToolbarVisible = response.IsToolbarVisible();
+            BOOL bCapsLock = response.IsCapsLock();
+
+            UpdateFullStatus(bChineseMode, bFullWidth, bChinesePunct, bToolbarVisible, bCapsLock);
+        }
+    }
+    else
+    {
+        WIND_LOG_WARN(L"SendMenuCommand: Failed to send command\n");
+    }
+
+    // Clean up temporary client if we created one
+    if (pTempClient != nullptr)
+    {
+        pTempClient->Disconnect();
+        delete pTempClient;
+        WIND_LOG_DEBUG(L"SendMenuCommand: Temporary connection closed\n");
+    }
 }
 
 void CTextService::UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock)

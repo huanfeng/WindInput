@@ -321,6 +321,9 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 	case ipc.CmdToggleMode:
 		return s.handleToggleMode(clientID)
 
+	case ipc.CmdMenuCommand:
+		return s.handleMenuCommand(payload, clientID)
+
 	case ipc.CmdCaretUpdate:
 		return s.handleCaretUpdate(payload, clientID)
 
@@ -483,6 +486,20 @@ func (s *Server) handleToggleMode(clientID int) []byte {
 	return s.codec.EncodeModeChanged(chineseMode)
 }
 
+func (s *Server) handleMenuCommand(payload []byte, clientID int) []byte {
+	// Payload is UTF-8 encoded command string
+	command := string(payload)
+	s.logger.Info("Menu command from TSF", "clientID", clientID, "command", command)
+
+	// Call handler to process menu command
+	statusUpdate := s.handler.HandleMenuCommand(command)
+
+	if statusUpdate != nil {
+		return s.encodeStatusUpdate(statusUpdate)
+	}
+	return s.codec.EncodeAck()
+}
+
 func (s *Server) handleModeNotify(payload []byte, clientID int) []byte {
 	if len(payload) < 4 {
 		s.logger.Error("Mode notify payload too short", "clientID", clientID)
@@ -619,15 +636,31 @@ func (s *Server) startPushPipeListener() {
 		// Monitor client disconnection in a separate goroutine
 		go func(h windows.Handle, id int) {
 			// Wait for pipe to break (client disconnects)
+			// Use GetNamedPipeHandleState to check if pipe is still connected
 			for {
-				// Try to write a small test message (or wait for error on next push)
-				time.Sleep(5 * time.Second)
+				time.Sleep(2 * time.Second)
 
 				s.pushMu.RLock()
 				_, exists := s.pushClients[h]
 				s.pushMu.RUnlock()
 
 				if !exists {
+					break
+				}
+
+				// Try to get pipe state to detect disconnection
+				var state, curInstances uint32
+				err := windows.GetNamedPipeHandleState(h, &state, &curInstances, nil, nil, nil, 0)
+				if err != nil {
+					s.logger.Debug("Push pipe client disconnected (detected via state check)", "clientID", id, "error", err)
+
+					// Remove from clients map and close handle
+					s.pushMu.Lock()
+					if _, exists := s.pushClients[h]; exists {
+						delete(s.pushClients, h)
+						windows.CloseHandle(h)
+					}
+					s.pushMu.Unlock()
 					break
 				}
 			}

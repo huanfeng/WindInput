@@ -153,13 +153,16 @@ STDAPI CLangBarItemButton::GetTooltipString(BSTR* pbstrToolTip)
 
 STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcArea)
 {
-    WIND_LOG_DEBUG_FMT(L"OnClick: click=%d\n", click);
+    // TfLBIClick values: TF_LBI_CLK_RIGHT=1, TF_LBI_CLK_LEFT=2
+    WIND_LOG_INFO_FMT(L"OnClick: click=%d (1=right, 2=left), pt=(%ld,%ld)\n", click, pt.x, pt.y);
 
-    // TF_LBI_CLK_RIGHT = 1 (right click) - do nothing, TSF will call InitMenu
-    // TF_LBI_CLK_LEFT = 2 (left click) - toggle mode
+    // TF_LBI_CLK_RIGHT = 1 (right click) - show popup menu
+    // NOTE: Windows 11 changed the Language Bar implementation and no longer calls InitMenu.
+    // We need to create and show the popup menu ourselves.
     if (click == TF_LBI_CLK_RIGHT)
     {
-        // Do nothing for right click - TSF will automatically call InitMenu/OnMenuSelect
+        WIND_LOG_INFO(L"OnClick: Right click - showing popup menu manually (Windows 11 workaround)\n");
+        _ShowPopupMenu(pt);
         return S_OK;
     }
 
@@ -186,10 +189,13 @@ STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcAr
 
 STDAPI CLangBarItemButton::InitMenu(ITfMenu* pMenu)
 {
-    if (pMenu == nullptr)
-        return E_INVALIDARG;
+    WIND_LOG_INFO(L"InitMenu called by TSF - setting up right-click menu\n");
 
-    WIND_LOG_DEBUG(L"InitMenu called\n");
+    if (pMenu == nullptr)
+    {
+        WIND_LOG_ERROR(L"InitMenu: pMenu is null\n");
+        return E_INVALIDARG;
+    }
 
     // Add menu items
     // 中文模式
@@ -247,11 +253,7 @@ STDAPI CLangBarItemButton::InitMenu(ITfMenu* pMenu)
         L"\x5173\x4E8E", 2,  // 关于
         NULL);
 
-    // 退出
-    pMenu->AddMenuItem(MENU_ID_EXIT, 0,
-        NULL, NULL,
-        L"\x9000\x51FA", 2,  // 退出
-        NULL);
+    // Note: "Exit" menu item removed - IME exit is meaningless
 
     return S_OK;
 }
@@ -288,9 +290,7 @@ STDAPI CLangBarItemButton::OnMenuSelect(UINT wID)
     case MENU_ID_ABOUT:
         command = "show_about";
         break;
-    case MENU_ID_EXIT:
-        command = "exit";
-        break;
+    // Note: MENU_ID_EXIT removed - IME exit is meaningless
     default:
         return E_INVALIDARG;
     }
@@ -833,4 +833,105 @@ void CLangBarItemButton::ForceRefresh()
     }
 
     WIND_LOG_DEBUG_FMT(L"ForceRefresh: mode=%d, caps=%d\n", _bChineseMode, _bCapsLock);
+}
+
+// Show popup menu manually (Windows 11 workaround)
+// Windows 11 no longer calls InitMenu via TSF, so we create popup menu ourselves
+void CLangBarItemButton::_ShowPopupMenu(POINT pt)
+{
+    // Log current state for debugging
+    WIND_LOG_INFO_FMT(L"_ShowPopupMenu: Current state - chineseMode=%d, fullWidth=%d, chinesePunct=%d, toolbarVisible=%d\n",
+                      _bChineseMode, _bFullWidth, _bChinesePunct, _bToolbarVisible);
+
+    HMENU hMenu = CreatePopupMenu();
+    if (hMenu == NULL)
+    {
+        WIND_LOG_ERROR(L"_ShowPopupMenu: CreatePopupMenu failed\n");
+        return;
+    }
+
+    // Menu items (same as InitMenu)
+    // 中文模式
+    AppendMenuW(hMenu, _bChineseMode ? MF_CHECKED : MF_UNCHECKED,
+                MENU_ID_TOGGLE_MODE, L"\x4E2D\x6587\x6A21\x5F0F");  // 中文模式
+
+    // 全角
+    AppendMenuW(hMenu, _bFullWidth ? MF_CHECKED : MF_UNCHECKED,
+                MENU_ID_TOGGLE_WIDTH, L"\x5168\x89D2");  // 全角
+
+    // 中文标点
+    AppendMenuW(hMenu, _bChinesePunct ? MF_CHECKED : MF_UNCHECKED,
+                MENU_ID_TOGGLE_PUNCT, L"\x4E2D\x6587\x6807\x70B9");  // 中文标点
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+
+    // 显示工具栏
+    AppendMenuW(hMenu, _bToolbarVisible ? MF_CHECKED : MF_UNCHECKED,
+                MENU_ID_TOGGLE_TOOLBAR, L"\x663E\x793A\x5DE5\x5177\x680F");  // 显示工具栏
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+
+    // 词库管理...
+    AppendMenuW(hMenu, MF_STRING, MENU_ID_DICTIONARY, L"\x8BCD\x5E93\x7BA1\x7406...");  // 词库管理...
+
+    // 设置...
+    AppendMenuW(hMenu, MF_STRING, MENU_ID_OPEN_SETTINGS, L"\x8BBE\x7F6E...");  // 设置...
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+
+    // 关于
+    AppendMenuW(hMenu, MF_STRING, MENU_ID_ABOUT, L"\x5173\x4E8E");  // 关于
+
+    // Note: "Exit" menu item removed - IME exit is meaningless
+
+    WIND_LOG_INFO(L"_ShowPopupMenu: Showing popup menu\n");
+
+    // IMPORTANT: Use WS_EX_NOACTIVATE to prevent focus change
+    // Focus change would cause TextService::Deactivate and IPC disconnect
+    // This means menu commands would fail to send
+
+    // Create a temporary popup window for menu owner
+    // WS_EX_NOACTIVATE prevents the window from activating and changing focus
+    HWND hTempWnd = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        L"STATIC",  // Use static control class (always available)
+        L"",
+        WS_POPUP,
+        pt.x, pt.y, 0, 0,  // Zero size at click position
+        NULL, NULL, g_hInstance, NULL
+    );
+
+    if (hTempWnd == NULL)
+    {
+        WIND_LOG_ERROR(L"_ShowPopupMenu: Failed to create temp window\n");
+        DestroyMenu(hMenu);
+        return;
+    }
+
+    // Note: Do NOT call SetForegroundWindow - it would cause focus change
+    // and trigger TextService::Deactivate, breaking IPC communication
+
+    // Show the popup menu
+    // TPM_RIGHTBUTTON: respond to right click in menu
+    // TPM_RETURNCMD: return the menu item id
+    UINT flags = TPM_RIGHTBUTTON | TPM_RETURNCMD;
+    UINT cmd = TrackPopupMenu(hMenu, flags, pt.x, pt.y, 0, hTempWnd, NULL);
+
+    // Post WM_NULL to ensure the menu closes properly (Microsoft KB article workaround)
+    PostMessageW(hTempWnd, WM_NULL, 0, 0);
+
+    // Clean up
+    DestroyWindow(hTempWnd);
+    DestroyMenu(hMenu);
+
+    if (cmd != 0)
+    {
+        WIND_LOG_INFO_FMT(L"_ShowPopupMenu: Menu item selected: %d\n", cmd);
+        // Call OnMenuSelect to handle the command
+        OnMenuSelect(cmd);
+    }
+    else
+    {
+        WIND_LOG_DEBUG(L"_ShowPopupMenu: Menu cancelled\n");
+    }
 }

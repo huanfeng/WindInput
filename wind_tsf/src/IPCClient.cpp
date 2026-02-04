@@ -1419,6 +1419,62 @@ void CIPCClient::_AsyncReaderLoop()
 
     while (true)
     {
+        // Check if we need to reconnect to push pipe
+        if (_hReadPipe == INVALID_HANDLE_VALUE)
+        {
+            _LogInfo(L"Async reader: attempting to reconnect to push pipe...");
+
+            // Wait a bit before reconnecting
+            DWORD waitResult = WaitForSingleObject(_hStopEvent, 1000);
+            if (waitResult == WAIT_OBJECT_0)
+            {
+                _LogInfo(L"Async reader: stop event received during reconnect wait");
+                break;
+            }
+
+            // Try to reconnect
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (WaitForSingleObject(_hStopEvent, 0) == WAIT_OBJECT_0)
+                {
+                    break; // Stop requested
+                }
+
+                if (WaitNamedPipeW(PUSH_PIPE_NAME, 500))
+                {
+                    _hReadPipe = CreateFileW(
+                        PUSH_PIPE_NAME,
+                        GENERIC_READ,
+                        0,
+                        nullptr,
+                        OPEN_EXISTING,
+                        FILE_FLAG_OVERLAPPED,
+                        nullptr);
+
+                    if (_hReadPipe != INVALID_HANDLE_VALUE)
+                    {
+                        DWORD mode = PIPE_READMODE_MESSAGE;
+                        SetNamedPipeHandleState(_hReadPipe, &mode, nullptr, nullptr);
+                        _LogInfo(L"Async reader: reconnected to push pipe");
+
+                        // After reconnecting, notify that IME is still active
+                        // This will make Go service show toolbar if needed
+                        _LogInfo(L"Async reader: sending ime_activated after reconnect");
+                        // Note: We can't call SendIMEActivated here as it uses the main pipe
+                        // The toolbar will be shown when user next gains focus or types
+                        break;
+                    }
+                }
+                Sleep(200);
+            }
+
+            if (_hReadPipe == INVALID_HANDLE_VALUE)
+            {
+                _LogError(L"Async reader: failed to reconnect to push pipe, will retry...");
+                continue;
+            }
+        }
+
         // Start overlapped read
         OVERLAPPED overlapped = {};
         overlapped.hEvent = hReadEvent;
@@ -1433,7 +1489,10 @@ void CIPCClient::_AsyncReaderLoop()
             if (error != ERROR_IO_PENDING)
             {
                 _LogError(L"Async reader: ReadFile failed: %d", error);
-                break;
+                // Close handle and try to reconnect
+                CloseHandle(_hReadPipe);
+                _hReadPipe = INVALID_HANDLE_VALUE;
+                continue;
             }
 
             // Wait for either stop event or read completion
@@ -1454,8 +1513,10 @@ void CIPCClient::_AsyncReaderLoop()
                     DWORD error = GetLastError();
                     if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED)
                     {
-                        _LogError(L"Async reader: pipe disconnected");
-                        break;
+                        _LogInfo(L"Async reader: pipe disconnected, will reconnect...");
+                        CloseHandle(_hReadPipe);
+                        _hReadPipe = INVALID_HANDLE_VALUE;
+                        continue;
                     }
                     _LogError(L"Async reader: GetOverlappedResult failed: %d", error);
                     continue;
@@ -1464,7 +1525,10 @@ void CIPCClient::_AsyncReaderLoop()
             else
             {
                 _LogError(L"Async reader: WaitForMultipleObjects failed: %d", GetLastError());
-                break;
+                // Close handle and try to reconnect
+                CloseHandle(_hReadPipe);
+                _hReadPipe = INVALID_HANDLE_VALUE;
+                continue;
             }
         }
 

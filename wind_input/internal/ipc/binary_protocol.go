@@ -17,6 +17,7 @@ const (
 	CmdIMEDeactivated uint16 = 0x0204 // IME deactivated (user switched to another IME)
 	CmdModeNotify     uint16 = 0x0205 // Mode changed notification (TSF local toggle, async)
 	CmdToggleMode     uint16 = 0x0207 // Toggle mode request (from UI click)
+	CmdMenuCommand    uint16 = 0x0208 // Menu command (toggle_mode, toggle_width, etc.)
 	CmdCaretUpdate    uint16 = 0x0301 // Caret position update
 	CmdBatchEvents    uint16 = 0x0F01 // Batch events container
 )

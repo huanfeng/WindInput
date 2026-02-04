@@ -21,6 +21,7 @@ constexpr uint16_t CMD_IME_ACTIVATED    = 0x0203; // IME activated
 constexpr uint16_t CMD_IME_DEACTIVATED  = 0x0204; // IME deactivated
 constexpr uint16_t CMD_MODE_NOTIFY      = 0x0205; // Mode changed notification (TSF local toggle, async)
 constexpr uint16_t CMD_TOGGLE_MODE      = 0x0207; // Toggle mode request (from UI click)
+constexpr uint16_t CMD_MENU_COMMAND     = 0x0208; // Menu command (toggle_mode, toggle_width, etc.)
 constexpr uint16_t CMD_CARET_UPDATE     = 0x0301; // Caret position update
 constexpr uint16_t CMD_BATCH_EVENTS     = 0x0F01; // Batch events container
 
