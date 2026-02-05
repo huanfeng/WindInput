@@ -59,15 +59,19 @@ if /I "%WAILS_MODE%"=="skip" (
         set "WAILS_FLAGS="
         if /I "%WAILS_MODE%"=="debug" set "WAILS_FLAGS=-debug"
         wails build %WAILS_FLAGS%
-        if %errorLevel% neq 0 (
-            echo [警告] wind_setting 构建失败,继续后续步骤...
+        if errorlevel 1 (
+            echo [错误] wind_setting 构建失败,终止后续流程。
+            exit /b 1
+        )
+        if not exist "%SCRIPT_DIR%wind_setting\build\bin\wind_setting.exe" (
+            echo [错误] wind_setting.exe 未生成,终止后续流程。
+            exit /b 1
+        )
+        copy /Y "%SCRIPT_DIR%wind_setting\build\bin\wind_setting.exe" "%SCRIPT_DIR%build\" >nul
+        if /I "%WAILS_MODE%"=="debug" (
+            echo 设置界面构建成功 ^(debug 模式,可按 F12 打开 DevTools^)
         ) else (
-            copy /Y "%SCRIPT_DIR%wind_setting\build\bin\wind_setting.exe" "%SCRIPT_DIR%build\" >nul
-            if /I "%WAILS_MODE%"=="debug" (
-                echo 设置界面构建成功 ^(debug 模式,可按 F12 打开 DevTools^)
-            ) else (
-                echo 设置界面构建成功 ^(release 模式^)
-            )
+            echo 设置界面构建成功 ^(release 模式^)
         )
     )
 )
