@@ -7,9 +7,9 @@ import (
 	"os"
 	"sync"
 
-	"github.com/huanfeng/wind_input/pkg/theme"
 	"github.com/fogleman/gg"
 	"github.com/golang/freetype/truetype"
+	"github.com/huanfeng/wind_input/pkg/theme"
 	"golang.org/x/image/font"
 )
 

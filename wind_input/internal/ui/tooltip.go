@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/huanfeng/wind_input/pkg/theme"
 	"github.com/fogleman/gg"
+	"github.com/huanfeng/wind_input/pkg/theme"
 	"golang.org/x/sys/windows"
 )
 

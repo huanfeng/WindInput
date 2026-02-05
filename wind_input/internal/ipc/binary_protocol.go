@@ -9,18 +9,18 @@ const AsyncFlag uint16 = 0x8000 // Async request flag - no response expected
 
 // Upstream commands (C++ -> Go)
 const (
-	CmdKeyEvent       uint16 = 0x0101 // Key event (down/up)
-	CmdCommitRequest  uint16 = 0x0104 // Commit request with barrier (Space/Enter/number select)
-	CmdFocusGained    uint16 = 0x0201 // Focus gained
-	CmdFocusLost      uint16 = 0x0202 // Focus lost
-	CmdIMEActivated   uint16 = 0x0203 // IME activated (user switched to this IME)
-	CmdIMEDeactivated uint16 = 0x0204 // IME deactivated (user switched to another IME)
-	CmdModeNotify     uint16 = 0x0205 // Mode changed notification (TSF local toggle, async)
-	CmdToggleMode     uint16 = 0x0207 // Toggle mode request (from UI click)
-	CmdMenuCommand              uint16 = 0x0208 // Menu command (toggle_mode, toggle_width, etc.)
-	CmdCompositionTerminated    uint16 = 0x0209 // Composition unexpectedly terminated (e.g., user clicked in input field)
-	CmdCaretUpdate              uint16 = 0x0301 // Caret position update
-	CmdBatchEvents    uint16 = 0x0F01 // Batch events container
+	CmdKeyEvent              uint16 = 0x0101 // Key event (down/up)
+	CmdCommitRequest         uint16 = 0x0104 // Commit request with barrier (Space/Enter/number select)
+	CmdFocusGained           uint16 = 0x0201 // Focus gained
+	CmdFocusLost             uint16 = 0x0202 // Focus lost
+	CmdIMEActivated          uint16 = 0x0203 // IME activated (user switched to this IME)
+	CmdIMEDeactivated        uint16 = 0x0204 // IME deactivated (user switched to another IME)
+	CmdModeNotify            uint16 = 0x0205 // Mode changed notification (TSF local toggle, async)
+	CmdToggleMode            uint16 = 0x0207 // Toggle mode request (from UI click)
+	CmdMenuCommand           uint16 = 0x0208 // Menu command (toggle_mode, toggle_width, etc.)
+	CmdCompositionTerminated uint16 = 0x0209 // Composition unexpectedly terminated (e.g., user clicked in input field)
+	CmdCaretUpdate           uint16 = 0x0301 // Caret position update
+	CmdBatchEvents           uint16 = 0x0F01 // Batch events container
 )
 
 // Downstream commands (Go -> C++)

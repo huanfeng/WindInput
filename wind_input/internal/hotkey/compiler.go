@@ -4,8 +4,8 @@ package hotkey
 import (
 	"strings"
 
-	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/internal/ipc"
+	"github.com/huanfeng/wind_input/pkg/config"
 )
 
 // Compiler compiles hotkey configuration into KeyHash lists for C++ side

@@ -5,8 +5,8 @@ import (
 	"image"
 	"image/color"
 
-	"github.com/huanfeng/wind_input/pkg/theme"
 	"github.com/fogleman/gg"
+	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
 // Toolbar layout constants (will be scaled for DPI)
