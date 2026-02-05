@@ -273,17 +273,15 @@ func main() {
 		FilterMode:   cfg.Engine.FilterMode,
 	}
 
-	// 解析五笔配置（无论当前引擎类型，都需要配置以便动态切换）
-	wubiConfig := &wubi.Config{
-		MaxCodeLength:   4,
-		AutoCommitAt4:   cfg.Engine.Wubi.AutoCommitAt4,
-		ClearOnEmptyAt4: cfg.Engine.Wubi.ClearOnEmptyAt4,
-		TopCodeCommit:   cfg.Engine.Wubi.TopCodeCommit,
-		PunctCommit:     cfg.Engine.Wubi.PunctCommit,
-		FilterMode:      cfg.Engine.FilterMode,
-		ShowCodeHint:    cfg.Engine.Wubi.ShowCodeHint,
-		SingleCodeInput: cfg.Engine.Wubi.SingleCodeInput,
-	}
+	// 解析五笔配置（以默认配置为基础，覆盖用户设置，避免遗漏新增字段）
+	wubiConfig := wubi.DefaultConfig()
+	wubiConfig.AutoCommitAt4 = cfg.Engine.Wubi.AutoCommitAt4
+	wubiConfig.ClearOnEmptyAt4 = cfg.Engine.Wubi.ClearOnEmptyAt4
+	wubiConfig.TopCodeCommit = cfg.Engine.Wubi.TopCodeCommit
+	wubiConfig.PunctCommit = cfg.Engine.Wubi.PunctCommit
+	wubiConfig.FilterMode = cfg.Engine.FilterMode
+	wubiConfig.ShowCodeHint = cfg.Engine.Wubi.ShowCodeHint
+	wubiConfig.SingleCodeInput = cfg.Engine.Wubi.SingleCodeInput
 
 	// 设置引擎配置（用于动态切换）
 	engineMgr.SetPinyinConfig(pinyinConfig)
