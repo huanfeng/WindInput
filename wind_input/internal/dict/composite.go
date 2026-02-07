@@ -236,3 +236,38 @@ func (c *CompositeDict) LookupPhrase(syllables []string) []candidate.Candidate {
 func (c *CompositeDict) LookupPrefix(prefix string, limit int) []candidate.Candidate {
 	return c.SearchPrefix(prefix, limit)
 }
+
+// LookupAbbrev 实现 dict.AbbrevSearchable 接口
+// 遍历所有层查找简拼匹配
+func (c *CompositeDict) LookupAbbrev(code string, limit int) []candidate.Candidate {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	var results []candidate.Candidate
+
+	for _, layer := range c.layers {
+		if al, ok := layer.(interface {
+			SearchAbbrev(code string, limit int) []candidate.Candidate
+		}); ok {
+			layerResults := al.SearchAbbrev(code, 0)
+			for _, cand := range layerResults {
+				if seen[cand.Text] {
+					continue
+				}
+				seen[cand.Text] = true
+				results = append(results, cand)
+			}
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Weight > results[j].Weight
+	})
+
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results
+}

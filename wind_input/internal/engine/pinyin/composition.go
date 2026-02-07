@@ -128,12 +128,20 @@ func (b *CompositionBuilder) Build(parsed *ParseResult) *CompositionState {
 	}
 
 	// 分离完整音节和未完成音节
-	for _, syllable := range parsed.Syllables {
+	// 非末尾的 partial 音节视为"已确认的段"加入 CompletedSyllables，
+	// 仅最后一个 partial 保留为 PartialSyllable
+	for i, syllable := range parsed.Syllables {
 		if syllable.IsExact() {
 			comp.CompletedSyllables = append(comp.CompletedSyllables, syllable.Text)
 		} else if syllable.IsPartial() {
-			comp.PartialSyllable = syllable.Text
-			comp.PossibleContinues = syllable.Possible
+			if i < len(parsed.Syllables)-1 {
+				// 非末尾的 partial：加入已完成列表
+				comp.CompletedSyllables = append(comp.CompletedSyllables, syllable.Text)
+			} else {
+				// 末尾的 partial：保留为未完成音节
+				comp.PartialSyllable = syllable.Text
+				comp.PossibleContinues = syllable.Possible
+			}
 		}
 	}
 

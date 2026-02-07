@@ -19,6 +19,7 @@ import (
 const (
 	weightViterbi       = 3000000 // Viterbi 整句候选
 	weightExactMatch    = 2000000 // 精确匹配（字数=音节数）
+	weightFirstChar     = 1900000 // 首音节单字（多音节输入时，紧随精确匹配）
 	weightPrefixClose   = 1800000 // 前缀匹配（字数接近）
 	weightPrefixMatch   = 1700000 // 前缀匹配（一般）
 	weightExactOther    = 1500000 // 精确匹配（字数≠音节数）
@@ -26,6 +27,7 @@ const (
 	weightPartialPrefix = 800000  // 未完成音节前缀词
 	weightPartialChar   = 600000  // 未完成音节单字
 	weightSingleChar    = 500000  // 首音节单字
+	weightPhrasePrefix  = 300000  // partial 输入时的多字词前缀匹配
 )
 
 // ConvertEx 扩展版转换方法
@@ -60,9 +62,10 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	completedSyllables := parsed.CompletedSyllables()
 	syllableCount := len(completedSyllables)
 	partial := parsed.PartialSyllable()
+	allSyllables := parsed.SyllableTexts()
 
-	logDebug("[PinyinEngine] input=%q preedit=%q completed=%v partial=%q",
-		input, result.PreeditDisplay, completedSyllables, partial)
+	logDebug("[PinyinEngine] input=%q preedit=%q completed=%v partial=%q allSyllables=%v",
+		input, result.PreeditDisplay, completedSyllables, partial, allSyllables)
 
 	// 3. 收集候选词
 	candidatesMap := make(map[string]*candidate.Candidate)
@@ -97,7 +100,6 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 					Text:           sentence,
 					Code:           input,
 					Weight:         weightViterbi - rank,
-					IsCommon:       true,
 					ConsumedLength: len(input),
 				}
 				candidatesMap[sentence] = &c
@@ -149,29 +151,32 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	}
 
 	// 3c. 前缀匹配（输入 "wome" 时找到 "women"→我们）
-	if ps, ok := e.dict.(dict.PrefixSearchable); ok {
-		prefixLimit := 50
-		if maxCandidates > 0 {
-			prefixLimit = maxCandidates * 2
-		}
-		prefixResults := ps.LookupPrefix(input, prefixLimit)
-		for i, cand := range prefixResults {
-			if _, exists := candidatesMap[cand.Text]; exists {
-				continue
+	// 仅在有已完成音节时运行；纯 partial 输入（如 "b","zh"）由 3f 处理
+	if syllableCount > 0 {
+		if ps, ok := e.dict.(dict.PrefixSearchable); ok {
+			prefixLimit := 50
+			if maxCandidates > 0 {
+				prefixLimit = maxCandidates * 2
 			}
-			c := cand
-			charCount := len([]rune(c.Text))
-			if charCount == syllableCount+1 && partial == "" {
-				c.Weight = weightPrefixClose - i
-			} else if charCount == syllableCount {
-				c.Weight = weightPrefixMatch - i
-			} else {
-				c.Weight = weightSubPhrase - i
+			prefixResults := ps.LookupPrefix(input, prefixLimit)
+			for i, cand := range prefixResults {
+				if _, exists := candidatesMap[cand.Text]; exists {
+					continue
+				}
+				c := cand
+				charCount := len([]rune(c.Text))
+				if charCount == syllableCount+1 && partial == "" {
+					c.Weight = weightPrefixClose - i
+				} else if charCount == syllableCount {
+					c.Weight = weightPrefixMatch - i
+				} else {
+					c.Weight = weightSubPhrase - i
+				}
+				c.ConsumedLength = len(input)
+				candidatesMap[c.Text] = &c
 			}
-			c.ConsumedLength = len(input)
-			candidatesMap[c.Text] = &c
+			logDebug("[PinyinEngine] prefix match for %q: %d results", input, len(prefixResults))
 		}
-		logDebug("[PinyinEngine] prefix match for %q: %d results", input, len(prefixResults))
 	}
 
 	// 3d. 子词组查找（如 "nihao" → 查找 "ni"+"hao" 对应的词组）
@@ -214,7 +219,12 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				continue
 			}
 			c := sc.cand
-			c.Weight = weightSingleChar - j
+			// 多音节输入时提升首音节单字权重，确保它们出现在精确匹配之后、前缀匹配之前
+			if syllableCount >= 2 {
+				c.Weight = weightFirstChar - j
+			} else {
+				c.Weight = weightSingleChar - j
+			}
 			c.ConsumedLength = len(firstSyllable)
 			candidatesMap[c.Text] = &c
 		}
@@ -240,6 +250,27 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
+	// 3e2. 当有多个 partial 音节时，为首音节生成单字候选
+	// 例如输入 "bzd"，所有音节 ["b","z","d"] 都是 partial，completedSyllables 为空
+	// 此时应为首音节 "b" 生成单字候选（按空格先上屏首音节）
+	// 注意：单 partial（如 "b"）由 3f 处理，避免权重冲突
+	if syllableCount == 0 && len(allSyllables) > 1 {
+		firstPartial := allSyllables[0]
+		possibles := e.syllableTrie.GetPossibleSyllables(firstPartial)
+		for _, syllable := range possibles {
+			charResults := e.dict.Lookup(syllable)
+			for j, cand := range charResults {
+				if _, exists := candidatesMap[cand.Text]; exists {
+					continue
+				}
+				c := cand
+				c.Weight = weightSingleChar - j
+				c.ConsumedLength = len(firstPartial)
+				candidatesMap[c.Text] = &c
+			}
+		}
+	}
+
 	// 3f. 未完成音节的前缀查找
 	if partial != "" {
 		if ps, ok := e.dict.(dict.PrefixSearchable); ok {
@@ -250,7 +281,14 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 					continue
 				}
 				c := cand
-				c.Weight = weightPartialPrefix - i
+				charCount := len([]rune(c.Text))
+				if charCount == 1 {
+					// 单字候选保持高权重
+					c.Weight = weightPartialPrefix - i
+				} else {
+					// 多字词/短语降低权重，避免"版权"、UUID 等出现在单字前面
+					c.Weight = weightPhrasePrefix - i
+				}
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
 			}
@@ -265,12 +303,34 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 					continue
 				}
 				c := cand
-				// 有已完成音节时降低权重，避免与首音节单字争排名
-				if len(completedSyllables) > 0 {
-					c.Weight = weightPartialChar - len(completedSyllables)*10000 - j
+				// 有已完成音节或多个 partial 音节时降低权重，避免与首音节单字争排名
+				otherSyllableCount := len(completedSyllables)
+				if otherSyllableCount == 0 && len(allSyllables) > 1 {
+					otherSyllableCount = len(allSyllables) - 1
+				}
+				if otherSyllableCount > 0 {
+					c.Weight = weightPartialChar - otherSyllableCount*10000 - j
 				} else {
 					c.Weight = weightPartialChar - j
 				}
+				c.ConsumedLength = len(input)
+				candidatesMap[c.Text] = &c
+			}
+		}
+	}
+
+	// 3g. 简拼词组匹配（多个 partial 声母时）
+	// 例如 "bzd" → allSyllables=["b","z","d"]，匹配 "不知道"(bu zhi dao) 等
+	if len(allSyllables) >= 2 && syllableCount == 0 {
+		abbrevCode := strings.Join(allSyllables, "")
+		if as, ok := e.dict.(dict.AbbrevSearchable); ok {
+			abbrevResults := as.LookupAbbrev(abbrevCode, 30)
+			for i, cand := range abbrevResults {
+				if _, exists := candidatesMap[cand.Text]; exists {
+					continue
+				}
+				c := cand
+				c.Weight = weightExactMatch - i
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
 			}

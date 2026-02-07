@@ -17,6 +17,7 @@ import (
 // 支持从 Rime dict.yaml 格式或 CodeTable 格式加载
 type PinyinDict struct {
 	trie       *Trie // Trie 索引，用于精确和前缀搜索
+	abbrevTrie *Trie // 简拼索引（声母首字母 → 词条），用于简拼词组匹配
 	entryCount int
 }
 
@@ -29,6 +30,7 @@ func NewPinyinDict() *PinyinDict {
 // 自动查找并加载 8105.dict.yaml 和 base.dict.yaml
 func (d *PinyinDict) LoadRimeDir(dirPath string) error {
 	d.trie = NewTrie()
+	d.abbrevTrie = NewTrie()
 	d.entryCount = 0
 
 	files := []string{
@@ -113,6 +115,16 @@ func (d *PinyinDict) loadRimeFile(path string) (int, error) {
 			Weight: weight,
 		}
 		d.trie.Insert(code, cand)
+
+		// 构建简拼索引：对 2 字及以上的词条，取每个音节首字母拼接
+		syllables := strings.Fields(pinyin)
+		if len(syllables) >= 2 && d.abbrevTrie != nil {
+			abbrev := buildAbbrev(syllables)
+			if abbrev != "" {
+				d.abbrevTrie.Insert(abbrev, cand)
+			}
+		}
+
 		count++
 	}
 
@@ -212,4 +224,37 @@ func (l *PinyinDictLayer) Search(code string, limit int) []candidate.Candidate {
 // SearchPrefix 前缀查询
 func (l *PinyinDictLayer) SearchPrefix(prefix string, limit int) []candidate.Candidate {
 	return l.dict.LookupPrefix(prefix, limit)
+}
+
+// SearchAbbrev 简拼查询
+func (l *PinyinDictLayer) SearchAbbrev(code string, limit int) []candidate.Candidate {
+	return l.dict.LookupAbbrev(code, limit)
+}
+
+// LookupAbbrev 简拼查找，返回匹配声母缩写的词条
+func (d *PinyinDict) LookupAbbrev(code string, limit int) []candidate.Candidate {
+	if d.abbrevTrie == nil {
+		return nil
+	}
+	code = strings.ToLower(code)
+	results := d.abbrevTrie.Search(code)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Weight > results[j].Weight
+	})
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results
+}
+
+// buildAbbrev 从音节列表构建简拼编码（取每个音节首字母）
+func buildAbbrev(syllables []string) string {
+	var b strings.Builder
+	for _, s := range syllables {
+		if len(s) == 0 {
+			return ""
+		}
+		b.WriteByte(s[0])
+	}
+	return b.String()
 }

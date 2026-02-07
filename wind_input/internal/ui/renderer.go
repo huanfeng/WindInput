@@ -280,6 +280,19 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	}
 
 	width := 280.0 * scale
+
+	// 动态调整宽度以适应长输入文本
+	mainFace := r.fontCache.getFace(cfg.FontSize)
+	if mainFace != nil && input != "" {
+		tmpDc := gg.NewContext(1, 1)
+		tmpDc.SetFontFace(mainFace)
+		inputTextWidth, _ := tmpDc.MeasureString(input)
+		minInputWidth := inputTextWidth + cfg.Padding*2 + 16*scale
+		if minInputWidth > width {
+			width = minInputWidth
+		}
+	}
+
 	inputHeight := 30.0 * scale
 	if cfg.HidePreedit {
 		inputHeight = 0
@@ -313,8 +326,10 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	r.drawRoundedRect(dc, 0.5, 0.5, width-3, height-3, cfg.CornerRadius)
 	dc.Stroke()
 
-	// Get cached font faces
-	mainFace := r.fontCache.getFace(cfg.FontSize)
+	// Get cached font faces (mainFace already obtained above for width calculation)
+	if mainFace == nil {
+		mainFace = r.fontCache.getFace(cfg.FontSize)
+	}
 	smallFace := r.fontCache.getFace(cfg.IndexFontSize)
 	pageFace := r.fontCache.getFace(12 * scale)
 

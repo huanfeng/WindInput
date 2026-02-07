@@ -166,7 +166,9 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 	return results
 }
 
-// SearchPrefix 前缀查询（短语层通常只支持精确匹配）
+// SearchPrefix 前缀查询
+// 注意：命令（uuid、date 等）仅支持精确匹配，不参与前缀搜索
+// 避免输入 "u" 就触发 uuid 命令生成 UUID 字符串
 func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candidate {
 	pl.mu.RLock()
 	defer pl.mu.RUnlock()
@@ -174,14 +176,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 	prefix = strings.ToLower(prefix)
 	var results []candidate.Candidate
 
-	// 遍历命令
-	for code, handler := range pl.commands {
-		if strings.HasPrefix(code, prefix) {
-			results = append(results, handler()...)
-		}
-	}
-
-	// 遍历短语
+	// 遍历短语（不包含命令）
 	for code, entries := range pl.phrases {
 		if strings.HasPrefix(code, prefix) {
 			for _, e := range entries {

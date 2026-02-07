@@ -1375,9 +1375,16 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 
 	// 更新预编辑显示状态
 	c.preeditDisplay = result.PreeditDisplay
+	// 安全校验：去除分隔符后应与 inputBuffer 一致，否则 fallback
 	if c.preeditDisplay != "" {
-		c.syllableBoundaries = c.calcSyllableBoundaries(
-			result.CompletedSyllables, result.PartialSyllable)
+		stripped := strings.ReplaceAll(c.preeditDisplay, "'", "")
+		if stripped != strings.ToLower(c.inputBuffer) {
+			c.preeditDisplay = ""
+			c.syllableBoundaries = nil
+		} else {
+			c.syllableBoundaries = c.calcSyllableBoundaries(
+				result.CompletedSyllables, result.PartialSyllable)
+		}
 	} else {
 		c.syllableBoundaries = nil
 	}

@@ -44,9 +44,9 @@ func (d *DAG) MaximumMatch() []string {
 
 	for pos < n {
 		if pos >= len(d.nodes) || len(d.nodes[pos]) == 0 {
-			// 当前位置无法匹配任何音节，跳过一个字符
-			pos++
-			continue
+			// 当前位置无法匹配任何完整音节，停止匹配
+			// 余部交由 Parser 用 MatchPrefixAt 迭代处理
+			break
 		}
 
 		// 选择最长的匹配

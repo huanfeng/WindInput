@@ -57,25 +57,34 @@ func (p *PinyinParser) Parse(input string) *ParseResult {
 		coveredEnd += len(syllable)
 	}
 
-	// 检查是否有未被覆盖的尾部（可能是未完成音节）
-	if coveredEnd < len(input) {
-		remainder := input[coveredEnd:]
-		prefix, isComplete, possible := p.syllableTrie.MatchPrefixAt(remainder, 0)
+	// 迭代处理所有未被覆盖的尾部字符
+	// 使用 MatchPrefixAt 逐段匹配，确保不会丢失任何字符
+	pos := coveredEnd
+	for pos < len(input) {
+		prefix, isComplete, possible := p.syllableTrie.MatchPrefixAt(input, pos)
 
 		if prefix != "" {
 			syllableType := SyllablePartial
 			if isComplete {
-				// 实际上如果 DAG 没有匹配到，但是 Trie 认为是完整的，
-				// 说明该音节完整但与前一个音节有切分歧义
 				syllableType = SyllableExact
 			}
 			result.Syllables = append(result.Syllables, ParsedSyllable{
 				Text:     prefix,
 				Type:     syllableType,
-				Start:    coveredEnd,
-				End:      coveredEnd + len(prefix),
+				Start:    pos,
+				End:      pos + len(prefix),
 				Possible: possible,
 			})
+			pos += len(prefix)
+		} else {
+			// 单个字符无法匹配任何前缀，作为 partial 音节保留
+			result.Syllables = append(result.Syllables, ParsedSyllable{
+				Text:  string(input[pos]),
+				Type:  SyllablePartial,
+				Start: pos,
+				End:   pos + 1,
+			})
+			pos++
 		}
 	}
 
@@ -161,10 +170,10 @@ func (p *PinyinParser) ParseWithDetail(input string, maxSegmentations int) *Pars
 		pos += len(syllable)
 	}
 
-	// 处理未覆盖的尾部
-	if bestCoverage < len(input) {
-		remainder := input[bestCoverage:]
-		prefix, isComplete, possible := p.syllableTrie.MatchPrefixAt(remainder, 0)
+	// 迭代处理所有未覆盖的尾部字符
+	pos = bestCoverage
+	for pos < len(input) {
+		prefix, isComplete, possible := p.syllableTrie.MatchPrefixAt(input, pos)
 
 		if prefix != "" {
 			syllableType := SyllablePartial
@@ -174,14 +183,22 @@ func (p *PinyinParser) ParseWithDetail(input string, maxSegmentations int) *Pars
 			best.Syllables = append(best.Syllables, ParsedSyllable{
 				Text:     prefix,
 				Type:     syllableType,
-				Start:    bestCoverage,
-				End:      bestCoverage + len(prefix),
+				Start:    pos,
+				End:      pos + len(prefix),
 				Possible: possible,
 			})
 			result.PartialSuffix = prefix
+			pos += len(prefix)
 		} else {
-			// 完全无法识别的尾部
-			result.PartialSuffix = remainder
+			// 单个字符无法匹配任何前缀，作为 partial 音节保留
+			best.Syllables = append(best.Syllables, ParsedSyllable{
+				Text:  string(input[pos]),
+				Type:  SyllablePartial,
+				Start: pos,
+				End:   pos + 1,
+			})
+			result.PartialSuffix = string(input[pos])
+			pos++
 		}
 	}
 

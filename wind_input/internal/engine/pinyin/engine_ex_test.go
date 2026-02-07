@@ -58,6 +58,16 @@ sort: by_weight
 周	zhou	900
 住	zhu	900
 麽	me	100
+不	bu	1000
+白	bai	900
+北	bei	900
+北京	bei jing	800
+不知道	bu zhi dao	700
+你好吗	ni hao ma	600
+吗	ma	800
+替	ti	900
+温	wen	800
+提问	ti wen	700
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "8105.dict.yaml"), []byte(content), 0644); err != nil {
 		t.Fatalf("写入测试文件失败: %v", err)
@@ -735,6 +745,265 @@ func TestEngineConvertViaConvert(t *testing.T) {
 	}
 	if len(raw) == 0 {
 		t.Error("ConvertRaw('nihao') should return candidates")
+	}
+}
+
+// TestEngineConvertExAbbrev 简拼词组匹配测试
+func TestEngineConvertExAbbrev(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	// 输入 "bzd" 应匹配简拼 "不知道"（bu zhi dao → b+z+d）
+	t.Run("bzd_abbrev", func(t *testing.T) {
+		result := engine.ConvertEx("bzd", 20)
+
+		for i, c := range result.Candidates {
+			if i >= 10 {
+				break
+			}
+			t.Logf("bzd candidate[%d]: %s (weight=%d, consumed=%d)", i, c.Text, c.Weight, c.ConsumedLength)
+		}
+
+		// "不知道" 应该在候选列表中
+		found := false
+		for _, c := range result.Candidates {
+			if c.Text == "不知道" {
+				found = true
+				if c.ConsumedLength != 3 {
+					t.Errorf("'不知道' ConsumedLength = %d, want 3", c.ConsumedLength)
+				}
+				break
+			}
+		}
+		if !found {
+			var texts []string
+			for _, c := range result.Candidates {
+				texts = append(texts, c.Text)
+			}
+			t.Errorf("ConvertEx('bzd') should contain '不知道', got %v", texts)
+		}
+	})
+
+	// 输入 "nh" 应匹配简拼 "你好"（ni hao → n+h）
+	t.Run("nh_abbrev", func(t *testing.T) {
+		result := engine.ConvertEx("nh", 20)
+
+		for i, c := range result.Candidates {
+			if i >= 10 {
+				break
+			}
+			t.Logf("nh candidate[%d]: %s (weight=%d, consumed=%d)", i, c.Text, c.Weight, c.ConsumedLength)
+		}
+
+		found := false
+		for _, c := range result.Candidates {
+			if c.Text == "你好" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			var texts []string
+			for _, c := range result.Candidates {
+				texts = append(texts, c.Text)
+			}
+			t.Errorf("ConvertEx('nh') should contain '你好', got %v", texts)
+		}
+	})
+}
+
+// TestEngineConvertExFirstPartialCandidate 首音节候选测试
+// 当所有音节都是 partial 时，首音节应生成单字候选
+func TestEngineConvertExFirstPartialCandidate(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	// 输入 "bzd"，所有音节 ["b","z","d"] 都是 partial
+	// 首音节 "b" 应生成候选（不、白、北 等 b 开头的单字）
+	result := engine.ConvertEx("bzd", 30)
+
+	for i, c := range result.Candidates {
+		if i >= 15 {
+			break
+		}
+		t.Logf("bzd candidate[%d]: %s (weight=%d, consumed=%d)", i, c.Text, c.Weight, c.ConsumedLength)
+	}
+
+	// 检查首音节 "b" 的单字候选存在
+	bChars := []string{"不", "白", "北"}
+	for _, want := range bChars {
+		found := false
+		for _, c := range result.Candidates {
+			if c.Text == want {
+				found = true
+				// 首音节单字的 ConsumedLength 应为 1（只消耗 "b"）
+				if c.ConsumedLength != 1 {
+					t.Errorf("'%s' ConsumedLength = %d, want 1", want, c.ConsumedLength)
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ConvertEx('bzd') should contain '%s' as first partial candidate", want)
+		}
+	}
+
+	// 简拼词组 "不知道" 应排在首音节单字 "不" 之前（权重更高）
+	bzdIdx := -1
+	buIdx := -1
+	for i, c := range result.Candidates {
+		if c.Text == "不知道" && bzdIdx == -1 {
+			bzdIdx = i
+		}
+		if c.Text == "不" && buIdx == -1 {
+			buIdx = i
+		}
+	}
+	if bzdIdx >= 0 && buIdx >= 0 && bzdIdx > buIdx {
+		t.Errorf("'不知道'(idx=%d) should rank before '不'(idx=%d)", bzdIdx, buIdx)
+	}
+}
+
+// TestEngineConvertExMultiSyllableShowsSingleChars 多音节输入应同时显示首音节单字
+func TestEngineConvertExMultiSyllableShowsSingleChars(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	// 输入 "nihao"（2 音节），应同时包含词组"你好"和首音节单字"你"、"妮"
+	result := engine.ConvertEx("nihao", 30)
+
+	for i, c := range result.Candidates {
+		if i >= 10 {
+			break
+		}
+		t.Logf("nihao candidate[%d]: %s (weight=%d, consumed=%d)", i, c.Text, c.Weight, c.ConsumedLength)
+	}
+
+	// 词组"你好"应在首位
+	if len(result.Candidates) == 0 || result.Candidates[0].Text != "你好" {
+		t.Errorf("First candidate should be '你好'")
+	}
+
+	// 首音节单字"妮"应在候选列表中（"你"可能已被精确匹配包含）
+	found := false
+	foundIdx := -1
+	for i, c := range result.Candidates {
+		if c.Text == "妮" {
+			found = true
+			foundIdx = i
+			break
+		}
+	}
+	if !found {
+		var texts []string
+		for _, c := range result.Candidates {
+			texts = append(texts, c.Text)
+		}
+		t.Fatalf("nihao should contain '妮' as first syllable char, got %v", texts)
+	}
+
+	// "妮"应排在前 10 名内（不应被推到很远的位置）
+	if foundIdx > 10 {
+		t.Errorf("'妮' at position %d, should be within top 10", foundIdx)
+	}
+
+	// "妮"的 ConsumedLength 应为 2（只消耗 "ni"）
+	for _, c := range result.Candidates {
+		if c.Text == "妮" && c.ConsumedLength != 2 {
+			t.Errorf("'妮' ConsumedLength = %d, want 2", c.ConsumedLength)
+		}
+	}
+}
+
+// TestEngineConvertExTiwenShowsChars "tiwen" 应同时显示词组和首音节单字
+func TestEngineConvertExTiwenShowsChars(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("tiwen", 30)
+
+	for i, c := range result.Candidates {
+		if i >= 10 {
+			break
+		}
+		t.Logf("tiwen candidate[%d]: %s (weight=%d, consumed=%d)", i, c.Text, c.Weight, c.ConsumedLength)
+	}
+
+	// "提问" 词组应存在
+	foundPhrase := false
+	for _, c := range result.Candidates {
+		if c.Text == "提问" {
+			foundPhrase = true
+			break
+		}
+	}
+	if !foundPhrase {
+		t.Error("tiwen should contain '提问'")
+	}
+
+	// "替" 首音节单字也应存在
+	foundChar := false
+	charIdx := -1
+	for i, c := range result.Candidates {
+		if c.Text == "替" {
+			foundChar = true
+			charIdx = i
+			break
+		}
+	}
+	if !foundChar {
+		var texts []string
+		for _, c := range result.Candidates {
+			texts = append(texts, c.Text)
+		}
+		t.Fatalf("tiwen should contain '替', got %v", texts)
+	}
+
+	// "替" 应在前 5 名内
+	if charIdx > 5 {
+		t.Errorf("'替' at position %d, should be within top 5", charIdx)
+	}
+
+	// "替" 的 ConsumedLength 应为 2（只消耗 "ti"）
+	for _, c := range result.Candidates {
+		if c.Text == "替" && c.ConsumedLength != 2 {
+			t.Errorf("'替' ConsumedLength = %d, want 2", c.ConsumedLength)
+		}
+	}
+}
+
+// TestEngineConvertExSingleLetterPriority 单字母输入时单字应优先于词组
+func TestEngineConvertExSingleLetterPriority(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	// 输入 "b"：单字（不、白、北）应排在词组（版权等）前面
+	result := engine.ConvertEx("b", 30)
+
+	for i, c := range result.Candidates {
+		if i >= 10 {
+			break
+		}
+		t.Logf("b candidate[%d]: %s (weight=%d, consumed=%d)", i, c.Text, c.Weight, c.ConsumedLength)
+	}
+
+	// 找到第一个单字和第一个多字词的位置
+	firstSingleCharIdx := -1
+	firstPhraseIdx := -1
+	for i, c := range result.Candidates {
+		charCount := len([]rune(c.Text))
+		if charCount == 1 && firstSingleCharIdx == -1 {
+			firstSingleCharIdx = i
+		}
+		if charCount > 1 && firstPhraseIdx == -1 {
+			firstPhraseIdx = i
+		}
+	}
+
+	// 单字应排在词组前面
+	if firstSingleCharIdx >= 0 && firstPhraseIdx >= 0 && firstSingleCharIdx > firstPhraseIdx {
+		t.Errorf("Single char (idx=%d) should appear before phrase (idx=%d) for 'b' input",
+			firstSingleCharIdx, firstPhraseIdx)
 	}
 }
 

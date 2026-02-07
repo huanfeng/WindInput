@@ -18,3 +18,9 @@ type Dict interface {
 type PrefixSearchable interface {
 	LookupPrefix(prefix string, limit int) []candidate.Candidate
 }
+
+// AbbrevSearchable 支持简拼搜索的词库接口（可选扩展）
+// 简拼是每个音节首字母的拼接，如 "bzd" 匹配 "bu zhi dao"（不知道）
+type AbbrevSearchable interface {
+	LookupAbbrev(code string, limit int) []candidate.Candidate
+}

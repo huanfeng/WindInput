@@ -68,6 +68,30 @@ func TestParserParse(t *testing.T) {
 			wantCompletedTexts: []string{"ni"},
 			wantHasPartial:     false,
 		},
+		// Bug 修复: "zho" 应解析为一个 partial 音节，而非错位为 "o'ho"
+		{
+			input:              "zho",
+			wantSyllableCount:  1,
+			wantCompletedTexts: []string{},
+			wantPartial:        "zho",
+			wantHasPartial:     true,
+		},
+		// Bug 修复: "dh" 的 "h" 不应被丢弃
+		{
+			input:              "dh",
+			wantSyllableCount:  2,
+			wantCompletedTexts: []string{},
+			wantPartial:        "h",
+			wantHasPartial:     true,
+		},
+		// Bug 修复: "dddd" 纯声母序列应产生 4 个音节
+		{
+			input:              "dddd",
+			wantSyllableCount:  4,
+			wantCompletedTexts: []string{},
+			wantPartial:        "d",
+			wantHasPartial:     true,
+		},
 		// 空输入
 		{
 			input:             "",
@@ -162,6 +186,9 @@ func TestParserQuickParse(t *testing.T) {
 		{"nihao", []string{"ni", "hao"}},
 		{"zhongguo", []string{"zhong", "guo"}},
 		{"nihaozh", []string{"ni", "hao", "zh"}},
+		{"zho", []string{"zho"}},
+		{"dh", []string{"d", "h"}},
+		{"dddd", []string{"d", "d", "d", "d"}},
 		{"", nil},
 	}
 
