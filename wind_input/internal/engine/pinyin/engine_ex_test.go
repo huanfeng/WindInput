@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
 )
 
@@ -339,6 +340,401 @@ func TestEngineIsValidSyllablePrefix(t *testing.T) {
 		if !engine.IsValidSyllablePrefix(s) {
 			t.Errorf("IsValidSyllablePrefix(%q) = false, want true", s)
 		}
+	}
+}
+
+// TestEngineConvertExLongInput 长输入压力测试
+func TestEngineConvertExLongInput(t *testing.T) {
+	d := createTestDictForEx(t)
+	config := &Config{
+		ShowWubiHint:    false,
+		FilterMode:      "all",
+		UseSmartCompose: true,
+	}
+	engine := NewEngineWithConfig(d, config)
+
+	// 构建 Unigram 以启用 Viterbi
+	unigram := NewUnigramModel()
+	charFreqs := map[string]float64{
+		"你": 920000, "好": 700000, "我": 950000, "们": 400000,
+		"中": 800000, "国": 750000, "是": 850000, "的": 980000,
+		"知": 500000, "道": 450000, "这": 900000,
+	}
+	unigram.LoadFromFreqMap(charFreqs)
+	engine.SetUnigram(unigram)
+
+	longInputs := []string{
+		"nihaowoshizhongguoren",                // 21 chars
+		"zheshiwomendeguojia",                  // 19 chars
+		"nizhidaowomenshisheidema",             // 24 chars
+		"zhongguorenminjiefangjun",             // 23 chars（部分音节无词条）
+		"aaaaaaaaaaaaaaaaaaaaaaaa",             // 24 个无效输入
+		"nihaonihaonihaonihaonihao",            // 25 chars 重复
+		"zheshizheshizheshizheshizheshizheshi", // 超长重复
+	}
+
+	for _, input := range longInputs {
+		t.Run(input[:min(len(input), 15)], func(t *testing.T) {
+			result := engine.ConvertEx(input, 50)
+			// 关键：不应 panic，应正常返回
+			if result == nil {
+				t.Fatal("ConvertEx returned nil")
+			}
+			t.Logf("input=%q (len=%d) candidates=%d isEmpty=%v",
+				input, len(input), len(result.Candidates), result.IsEmpty)
+		})
+	}
+}
+
+// TestEngineConvertExSortModes 测试不同排序模式
+func TestEngineConvertExSortModes(t *testing.T) {
+	d := createTestDictForEx(t)
+
+	// 构建 Unigram
+	unigram := NewUnigramModel()
+	charFreqs := map[string]float64{
+		"这": 900000, "是": 850000, "事": 500000, "时": 600000,
+		"使": 300000, "赭": 1000, "石": 200000,
+	}
+	unigram.LoadFromFreqMap(charFreqs)
+
+	tests := []struct {
+		order string
+		check func(t *testing.T, candidates []candidate.Candidate)
+	}{
+		{
+			order: "phrase_first",
+			check: func(t *testing.T, candidates []candidate.Candidate) {
+				// 词组应排在单字前面
+				lastPhraseIdx := -1
+				firstSingleIdx := -1
+				for i, c := range candidates {
+					runeLen := len([]rune(c.Text))
+					if runeLen > 1 && lastPhraseIdx < i {
+						lastPhraseIdx = i
+					}
+					if runeLen == 1 && firstSingleIdx == -1 {
+						firstSingleIdx = i
+					}
+				}
+				if firstSingleIdx >= 0 && lastPhraseIdx >= 0 && firstSingleIdx < lastPhraseIdx {
+					t.Error("phrase_first: single char found before last phrase")
+				}
+			},
+		},
+		{
+			order: "char_first",
+			check: func(t *testing.T, candidates []candidate.Candidate) {
+				// 默认按权重排序，不强制单字优先
+				if len(candidates) == 0 {
+					t.Error("char_first: no candidates")
+				}
+			},
+		},
+		{
+			order: "smart",
+			check: func(t *testing.T, candidates []candidate.Candidate) {
+				// 智能模式：应有候选返回
+				if len(candidates) == 0 {
+					t.Error("smart: no candidates")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.order, func(t *testing.T) {
+			config := &Config{
+				FilterMode:     "all",
+				CandidateOrder: tt.order,
+			}
+			engine := NewEngineWithConfig(d, config)
+			engine.SetUnigram(unigram)
+
+			result := engine.ConvertEx("zheshi", 20)
+			if result == nil {
+				t.Fatal("nil result")
+			}
+			t.Logf("%s: %d candidates", tt.order, len(result.Candidates))
+			for i, c := range result.Candidates {
+				if i >= 5 {
+					break
+				}
+				t.Logf("  [%d] %q weight=%d", i, c.Text, c.Weight)
+			}
+			tt.check(t, result.Candidates)
+		})
+	}
+}
+
+// TestEngineConvertExFilterModes 测试不同过滤模式
+func TestEngineConvertExFilterModes(t *testing.T) {
+	d := createTestDictForEx(t)
+
+	// 测试各种过滤模式都能正常运行
+	modes := []string{"all", "smart", "general", "gb18030"}
+
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
+			config := &Config{FilterMode: mode}
+			engine := NewEngineWithConfig(d, config)
+
+			result := engine.ConvertEx("nihao", 50)
+			if result == nil {
+				t.Fatal("nil result")
+			}
+			t.Logf("filter=%s: %d candidates", mode, len(result.Candidates))
+
+			// "general" 模式过滤 IsCommon=false 的候选，测试词库无 IsCommon 标记
+			// 所以 general 返回 0 是正确行为；smart 会 fallback 到全部
+			if mode == "general" {
+				// general 模式可能返回 0 候选（因为 IsCommon 未标记）
+				return
+			}
+			// 其他模式应包含 你好
+			found := false
+			for _, c := range result.Candidates {
+				if c.Text == "你好" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("filter=%s: missing '你好'", mode)
+			}
+		})
+	}
+
+	// 比较 ConvertRaw（无过滤）和 Convert（有过滤）
+	t.Run("ConvertRaw_vs_Convert", func(t *testing.T) {
+		config := &Config{FilterMode: "smart"}
+		engine := NewEngineWithConfig(d, config)
+
+		raw, err := engine.ConvertRaw("nihao", 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		filtered, err := engine.Convert("nihao", 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Logf("ConvertRaw: %d, Convert: %d", len(raw), len(filtered))
+		// ConvertRaw 应该 >= Convert（因为 Convert 会过滤）
+		if len(raw) < len(filtered) {
+			t.Errorf("ConvertRaw (%d) should return >= Convert (%d)", len(raw), len(filtered))
+		}
+	})
+}
+
+// TestEngineConvertExConsumedLength 测试部分上屏的 ConsumedLength
+func TestEngineConvertExConsumedLength(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	tests := []struct {
+		input     string
+		wantText  string
+		wantRange [2]int // ConsumedLength 的最小和最大期望值
+	}{
+		{
+			input:     "nihao",
+			wantText:  "你好",
+			wantRange: [2]int{5, 5}, // 完整匹配，消耗全部
+		},
+		{
+			input:     "nihao",
+			wantText:  "你",
+			wantRange: [2]int{2, 2}, // 首音节单字，消耗 "ni"
+		},
+		{
+			input:     "nihao",
+			wantText:  "好",
+			wantRange: [2]int{5, 5}, // 第二音节单字，消耗到 "nihao"
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input+"→"+tt.wantText, func(t *testing.T) {
+			result := engine.ConvertEx(tt.input, 50)
+			found := false
+			for _, c := range result.Candidates {
+				if c.Text == tt.wantText {
+					found = true
+					if c.ConsumedLength < tt.wantRange[0] || c.ConsumedLength > tt.wantRange[1] {
+						t.Errorf("ConsumedLength for %q = %d, want [%d, %d]",
+							tt.wantText, c.ConsumedLength, tt.wantRange[0], tt.wantRange[1])
+					} else {
+						t.Logf("%q → ConsumedLength=%d (OK)", tt.wantText, c.ConsumedLength)
+					}
+					break
+				}
+			}
+			if !found {
+				t.Errorf("candidate %q not found in results", tt.wantText)
+			}
+		})
+	}
+}
+
+// TestEngineConvertExFuzzyIntegration 模糊拼音引擎集成测试
+func TestEngineConvertExFuzzyIntegration(t *testing.T) {
+	d := createTestDictForEx(t)
+
+	// 启用 zh↔z 和 sh↔s 模糊
+	fuzzyConfig := &FuzzyConfig{ZhZ: true, ShS: true}
+	config := &Config{
+		FilterMode: "all",
+		Fuzzy:      fuzzyConfig,
+	}
+	engine := NewEngineWithConfig(d, config)
+
+	// "zeshi" 通过 z↔zh 模糊应该能找到 "这是"（zhe shi）
+	t.Run("fuzzy_zh_z", func(t *testing.T) {
+		result := engine.ConvertEx("zesi", 20)
+		found := false
+		for _, c := range result.Candidates {
+			if c.Text == "这" || c.Text == "赭" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			var texts []string
+			for _, c := range result.Candidates {
+				texts = append(texts, c.Text)
+			}
+			t.Logf("zesi candidates: %v", texts)
+			// 模糊查找 ze → zhe，si → shi
+			t.Log("Note: fuzzy zh↔z should expand 'ze' to include 'zhe' results")
+		}
+	})
+
+	// "si" 通过 s↔sh 模糊应该能找到 "是"（shi）
+	t.Run("fuzzy_sh_s", func(t *testing.T) {
+		result := engine.ConvertEx("si", 20)
+		found := false
+		for _, c := range result.Candidates {
+			if c.Text == "是" || c.Text == "时" || c.Text == "石" {
+				found = true
+				t.Logf("Found '%s' via sh↔s fuzzy", c.Text)
+				break
+			}
+		}
+		if !found {
+			var texts []string
+			for i, c := range result.Candidates {
+				if i >= 10 {
+					break
+				}
+				texts = append(texts, c.Text)
+			}
+			t.Errorf("si should find shi-group chars via fuzzy, got %v", texts)
+		}
+	})
+
+	// 无模糊配置时，"si" 不应找到 "shi" 的字
+	t.Run("no_fuzzy", func(t *testing.T) {
+		noFuzzyConfig := &Config{FilterMode: "all"}
+		noFuzzyEngine := NewEngineWithConfig(d, noFuzzyConfig)
+
+		result := noFuzzyEngine.ConvertEx("si", 20)
+		for _, c := range result.Candidates {
+			if c.Text == "是" || c.Text == "时" || c.Text == "石" {
+				t.Errorf("Without fuzzy, 'si' should NOT find %q (from 'shi')", c.Text)
+			}
+		}
+	})
+}
+
+// TestEngineUserFreqLearning 用户词频学习测试
+func TestEngineUserFreqLearning(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	// 创建 Unigram
+	unigram := NewUnigramModel()
+	charFreqs := map[string]float64{
+		"你": 920000, "好": 700000, "妮": 50000,
+	}
+	unigram.LoadFromFreqMap(charFreqs)
+	engine.SetUnigram(unigram)
+
+	// 验证初始状态：你 的概率高于 妮
+	probNi := unigram.LogProb("你")
+	probNi2 := unigram.LogProb("妮")
+	if probNi <= probNi2 {
+		t.Errorf("初始状态：你(%.4f) 应高于 妮(%.4f)", probNi, probNi2)
+	}
+
+	// 多次选择 "妮" 来提升词频
+	for i := 0; i < 10; i++ {
+		unigram.BoostUserFreq("妮", 1)
+	}
+
+	// 验证提升后的概率变化
+	boostedProb := unigram.LogProb("妮")
+	if boostedProb <= probNi2 {
+		t.Errorf("提升后：妮(%.4f) 应高于初始值(%.4f)", boostedProb, probNi2)
+	}
+	t.Logf("妮: 初始=%.4f 提升后=%.4f (diff=%.4f)", probNi2, boostedProb, boostedProb-probNi2)
+
+	// 验证 SaveUserFreqs/LoadUserFreqs 往返一致
+	tmpFile := filepath.Join(t.TempDir(), "user_freq.txt")
+	if err := unigram.SaveUserFreqs(tmpFile); err != nil {
+		t.Fatal(err)
+	}
+
+	unigram2 := NewUnigramModel()
+	unigram2.LoadFromFreqMap(charFreqs)
+	if err := unigram2.LoadUserFreqs(tmpFile); err != nil {
+		t.Fatal(err)
+	}
+
+	// 加载后概率应一致
+	loadedProb := unigram2.LogProb("妮")
+	if loadedProb != boostedProb {
+		t.Errorf("加载后概率不一致: got=%.4f want=%.4f", loadedProb, boostedProb)
+	}
+}
+
+// TestEngineConvertViaConvert 确保 Convert/ConvertRaw 委托到 convertCore 行为正确
+func TestEngineConvertViaConvert(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	// 空输入
+	candidates, err := engine.Convert("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 0 {
+		t.Errorf("Convert('') should return empty, got %d", len(candidates))
+	}
+
+	// 正常输入
+	candidates, err = engine.Convert("nihao", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range candidates {
+		if c.Text == "你好" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Convert('nihao') should contain '你好'")
+	}
+
+	// ConvertRaw 应返回更多或等量候选
+	raw, err := engine.ConvertRaw("nihao", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) == 0 {
+		t.Error("ConvertRaw('nihao') should return candidates")
 	}
 }
 

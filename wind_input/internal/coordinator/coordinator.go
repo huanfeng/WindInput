@@ -71,6 +71,7 @@ type Coordinator struct {
 
 	// Input state
 	inputBuffer       string
+	inputCursorPos    int // 光标在 inputBuffer 中的字节位置（0 = 最左，len(inputBuffer) = 最右）
 	candidates        []ui.Candidate
 	currentPage       int
 	totalPages        int
@@ -840,6 +841,18 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 
 	// Chinese mode handling
 	switch {
+	case data.KeyCode == 37: // Left arrow
+		return c.handleCursorLeft()
+
+	case data.KeyCode == 39: // Right arrow
+		return c.handleCursorRight()
+
+	case data.KeyCode == 36: // Home
+		return c.handleCursorHome()
+
+	case data.KeyCode == 35: // End
+		return c.handleCursorEnd()
+
 	case data.KeyCode == 8: // Backspace
 		return c.handleBackspace()
 
@@ -898,14 +911,17 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 
 func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	startTime := time.Now()
-	c.inputBuffer += key
-	c.logger.Debug("Input buffer updated", "buffer", c.inputBuffer)
+	// 在光标位置插入字符
+	c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + key + c.inputBuffer[c.inputCursorPos:]
+	c.inputCursorPos += len(key)
+	c.logger.Debug("Input buffer updated", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
 
 	// 处理顶码（如五笔的五码顶字）
 	if c.engineMgr != nil {
 		commitText, newInput, shouldCommit := c.engineMgr.HandleTopCode(c.inputBuffer)
 		if shouldCommit {
 			c.inputBuffer = newInput
+			c.inputCursorPos = len(newInput)
 			c.logger.Debug("Top code commit", "newInputLen", len(newInput))
 
 			// Apply full-width conversion if enabled
@@ -987,7 +1003,7 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 		return &bridge.KeyEventResult{
 			Type:     bridge.ResponseTypeUpdateComposition,
 			Text:     c.inputBuffer,
-			CaretPos: len(c.inputBuffer),
+			CaretPos: c.inputCursorPos,
 		}
 	}
 
@@ -1003,9 +1019,11 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 }
 
 func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
-	if len(c.inputBuffer) > 0 {
-		c.inputBuffer = c.inputBuffer[:len(c.inputBuffer)-1]
-		c.logger.Debug("Input buffer after backspace", "buffer", c.inputBuffer)
+	if len(c.inputBuffer) > 0 && c.inputCursorPos > 0 {
+		// 在光标位置删除前一个字符
+		c.inputBuffer = c.inputBuffer[:c.inputCursorPos-1] + c.inputBuffer[c.inputCursorPos:]
+		c.inputCursorPos--
+		c.logger.Debug("Input buffer after backspace", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
 
 		if len(c.inputBuffer) == 0 {
 			c.clearState()
@@ -1021,7 +1039,7 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 			return &bridge.KeyEventResult{
 				Type:     bridge.ResponseTypeUpdateComposition,
 				Text:     c.inputBuffer,
-				CaretPos: len(c.inputBuffer),
+				CaretPos: c.inputCursorPos,
 			}
 		}
 
@@ -1034,10 +1052,84 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 		}
 	}
 
-	// Buffer is already empty - pass through to system
-	// This allows backspace to work normally when not composing
-	c.logger.Debug("Backspace with empty buffer, passing through to system")
-	return nil
+	if len(c.inputBuffer) == 0 {
+		// Buffer is already empty - pass through to system
+		c.logger.Debug("Backspace with empty buffer, passing through to system")
+		return nil
+	}
+
+	// Cursor at beginning but buffer not empty - consume the key (don't pass to system)
+	return &bridge.KeyEventResult{
+		Type: bridge.ResponseTypeConsumed,
+	}
+}
+
+func (c *Coordinator) handleCursorLeft() *bridge.KeyEventResult {
+	if len(c.inputBuffer) == 0 {
+		return nil // 无输入时透传
+	}
+	if c.inputCursorPos > 0 {
+		c.inputCursorPos--
+		c.logger.Debug("Cursor left", "cursor", c.inputCursorPos)
+		if c.config != nil && c.config.UI.InlinePreedit {
+			return &bridge.KeyEventResult{
+				Type:     bridge.ResponseTypeUpdateComposition,
+				Text:     c.inputBuffer,
+				CaretPos: c.inputCursorPos,
+			}
+		}
+	}
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+}
+
+func (c *Coordinator) handleCursorRight() *bridge.KeyEventResult {
+	if len(c.inputBuffer) == 0 {
+		return nil // 无输入时透传
+	}
+	if c.inputCursorPos < len(c.inputBuffer) {
+		c.inputCursorPos++
+		c.logger.Debug("Cursor right", "cursor", c.inputCursorPos)
+		if c.config != nil && c.config.UI.InlinePreedit {
+			return &bridge.KeyEventResult{
+				Type:     bridge.ResponseTypeUpdateComposition,
+				Text:     c.inputBuffer,
+				CaretPos: c.inputCursorPos,
+			}
+		}
+	}
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+}
+
+func (c *Coordinator) handleCursorHome() *bridge.KeyEventResult {
+	if len(c.inputBuffer) == 0 {
+		return nil
+	}
+	c.inputCursorPos = 0
+	c.logger.Debug("Cursor home", "cursor", c.inputCursorPos)
+	if c.config != nil && c.config.UI.InlinePreedit {
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     c.inputBuffer,
+			CaretPos: c.inputCursorPos,
+		}
+	}
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+}
+
+func (c *Coordinator) handleCursorEnd() *bridge.KeyEventResult {
+	if len(c.inputBuffer) == 0 {
+		return nil
+	}
+	c.inputCursorPos = len(c.inputBuffer)
+	c.logger.Debug("Cursor end", "cursor", c.inputCursorPos)
+	if c.config != nil && c.config.UI.InlinePreedit {
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     c.inputBuffer,
+			CaretPos: c.inputCursorPos,
+		}
+	}
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 }
 
 func (c *Coordinator) handleEnter() *bridge.KeyEventResult {
@@ -1171,12 +1263,17 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 	// 拼音引擎部分上屏：候选消耗的输入长度小于缓冲区长度时，保留剩余部分
 	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
 	if isPinyin && cand.ConsumedLength > 0 && cand.ConsumedLength < len(c.inputBuffer) {
+		// 用户词频学习：记录选词
+		consumedCode := c.inputBuffer[:cand.ConsumedLength]
+		c.engineMgr.OnCandidateSelected(consumedCode, originalText)
+
 		remaining := c.inputBuffer[cand.ConsumedLength:]
 		c.logger.Debug("Partial commit (pinyin)", "index", index, "text", text,
 			"consumed", cand.ConsumedLength, "remaining", remaining)
 
-		// 更新缓冲区为剩余部分，重新触发候选更新
+		// 更新缓冲区为剩余部分，光标重置到末尾，重新触发候选更新
 		c.inputBuffer = remaining
+		c.inputCursorPos = len(remaining)
 		c.currentPage = 1
 		c.updateCandidates()
 		c.showUI()
@@ -1186,6 +1283,11 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 			Text:           text,
 			NewComposition: remaining,
 		}
+	}
+
+	// 用户词频学习：记录选词
+	if isPinyin && c.engineMgr != nil {
+		c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText)
 	}
 
 	c.logger.Debug("Candidate selected", "index", index, "original", originalText, "output", text, "fullWidth", c.fullWidth)
@@ -1359,6 +1461,7 @@ func (c *Coordinator) hideUI() {
 
 func (c *Coordinator) clearState() {
 	c.inputBuffer = ""
+	c.inputCursorPos = 0
 	c.tempEnglishMode = false
 	c.tempEnglishBuffer = ""
 	c.candidates = nil
@@ -1666,13 +1769,19 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 	}
 
 	// 拼音引擎部分上屏
+	originalText := cand.Text
 	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
 	if isPinyin && cand.ConsumedLength > 0 && cand.ConsumedLength < len(c.inputBuffer) {
+		// 用户词频学习：记录选词
+		consumedCode := c.inputBuffer[:cand.ConsumedLength]
+		c.engineMgr.OnCandidateSelected(consumedCode, originalText)
+
 		remaining := c.inputBuffer[cand.ConsumedLength:]
 		c.logger.Debug("Partial commit internal (pinyin)", "index", index, "text", text,
 			"consumed", cand.ConsumedLength, "remaining", remaining)
 
 		c.inputBuffer = remaining
+		c.inputCursorPos = len(remaining)
 		c.currentPage = 1
 		c.updateCandidates()
 		c.showUI()
@@ -1682,6 +1791,11 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 			Text:           text,
 			NewComposition: remaining,
 		}
+	}
+
+	// 用户词频学习：记录选词
+	if isPinyin && c.engineMgr != nil {
+		c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText)
 	}
 
 	c.clearState()

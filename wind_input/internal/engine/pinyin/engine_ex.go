@@ -1,7 +1,6 @@
 package pinyin
 
 import (
-	"log"
 	"sort"
 	"strings"
 
@@ -32,6 +31,12 @@ const (
 // ConvertEx 扩展版转换方法
 // 返回包含组合态的完整转换结果
 func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult {
+	return e.convertCore(input, maxCandidates, false)
+}
+
+// convertCore 核心转换逻辑（统一的候选生成流水线）
+// skipFilter=true 时跳过候选过滤（用于 ConvertRaw 测试场景）
+func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *PinyinConvertResult {
 	result := &PinyinConvertResult{
 		Candidates: make([]candidate.Candidate, 0),
 	}
@@ -56,7 +61,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 	syllableCount := len(completedSyllables)
 	partial := parsed.PartialSyllable()
 
-	log.Printf("[PinyinEngine.ConvertEx] input=%q preedit=%q completed=%v partial=%q",
+	logDebug("[PinyinEngine] input=%q preedit=%q completed=%v partial=%q",
 		input, result.PreeditDisplay, completedSyllables, partial)
 
 	// 3. 收集候选词
@@ -86,7 +91,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 				if _, exists := candidatesMap[sentence]; exists {
 					continue
 				}
-				log.Printf("[PinyinEngine.ConvertEx] Viterbi[%d]: %q words=%v logprob=%.4f",
+				logDebug("[PinyinEngine] Viterbi[%d]: %q words=%v logprob=%.4f",
 					rank, sentence, vResult.Words, vResult.LogProb)
 				c := candidate.Candidate{
 					Text:           sentence,
@@ -100,9 +105,9 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 		}
 	}
 
-	// 3b. 精确匹配完整音节序列的词组
+	// 3b. 精确匹配完整音节序列的词组（含模糊变体）
 	if syllableCount > 0 && partial == "" {
-		exactResults := e.dict.Lookup(input)
+		exactResults := e.lookupWithFuzzy(input, completedSyllables)
 		// 使用 Unigram 单字频率对精确匹配进行二次排序
 		type scoredExact struct {
 			cand  candidate.Candidate
@@ -140,7 +145,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 			c.ConsumedLength = len(input)
 			candidatesMap[c.Text] = &c
 		}
-		log.Printf("[PinyinEngine.ConvertEx] exact match for %q: %d results", input, len(exactResults))
+		logDebug("[PinyinEngine] exact match for %q: %d results", input, len(exactResults))
 	}
 
 	// 3c. 前缀匹配（输入 "wome" 时找到 "women"→我们）
@@ -166,7 +171,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 			c.ConsumedLength = len(input)
 			candidatesMap[c.Text] = &c
 		}
-		log.Printf("[PinyinEngine.ConvertEx] prefix match for %q: %d results", input, len(prefixResults))
+		logDebug("[PinyinEngine] prefix match for %q: %d results", input, len(prefixResults))
 	}
 
 	// 3d. 子词组查找（如 "nihao" → 查找 "ni"+"hao" 对应的词组）
@@ -184,9 +189,9 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 
 	// 3e. 单字候选
 	if syllableCount > 0 {
-		// 使用 Unigram 对首音节单字排序
+		// 使用 Unigram 对首音节单字排序（含模糊变体）
 		firstSyllable := completedSyllables[0]
-		charResults := e.dict.Lookup(firstSyllable)
+		charResults := e.lookupWithFuzzy(firstSyllable, []string{firstSyllable})
 
 		type scoredChar struct {
 			cand  candidate.Candidate
@@ -214,10 +219,10 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 			candidatesMap[c.Text] = &c
 		}
 
-		// 非首音节的单字（更低权重）
+		// 非首音节的单字（更低权重，含模糊变体）
 		for i := 1; i < syllableCount; i++ {
 			syllable := completedSyllables[i]
-			others := e.dict.Lookup(syllable)
+			others := e.lookupWithFuzzy(syllable, []string{syllable})
 			for j, cand := range others {
 				if _, exists := candidatesMap[cand.Text]; exists {
 					continue
@@ -250,21 +255,24 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 				candidatesMap[c.Text] = &c
 			}
 		}
-		// 按完整音节前缀查找单字
-		if len(completedSyllables) == 0 {
-			st := e.syllableTrie
-			possibles := st.GetPossibleSyllables(partial)
-			for _, syllable := range possibles {
-				charResults := e.dict.Lookup(syllable)
-				for j, cand := range charResults {
-					if _, exists := candidatesMap[cand.Text]; exists {
-						continue
-					}
-					c := cand
-					c.Weight = weightPartialChar - j
-					c.ConsumedLength = len(input)
-					candidatesMap[c.Text] = &c
+		// 按完整音节前缀查找单字（即使有已完成音节，也应为 partial 部分生成候选）
+		st := e.syllableTrie
+		possibles := st.GetPossibleSyllables(partial)
+		for _, syllable := range possibles {
+			charResults := e.dict.Lookup(syllable)
+			for j, cand := range charResults {
+				if _, exists := candidatesMap[cand.Text]; exists {
+					continue
 				}
+				c := cand
+				// 有已完成音节时降低权重，避免与首音节单字争排名
+				if len(completedSyllables) > 0 {
+					c.Weight = weightPartialChar - len(completedSyllables)*10000 - j
+				} else {
+					c.Weight = weightPartialChar - j
+				}
+				c.ConsumedLength = len(input)
+				candidatesMap[c.Text] = &c
 			}
 		}
 	}
@@ -279,13 +287,13 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 	e.sortCandidates(result.Candidates, candidateOrder, syllableCount)
 
 	// 6. 应用过滤
-	filterMode := "smart"
-	if e.config != nil && e.config.FilterMode != "" {
-		filterMode = e.config.FilterMode
+	if !skipFilter {
+		filterMode := "smart"
+		if e.config != nil && e.config.FilterMode != "" {
+			filterMode = e.config.FilterMode
+		}
+		result.Candidates = candidate.FilterCandidates(result.Candidates, filterMode)
 	}
-	beforeFilter := len(result.Candidates)
-	result.Candidates = candidate.FilterCandidates(result.Candidates, filterMode)
-	log.Printf("[PinyinEngine.ConvertEx] Filter: mode=%s before=%d after=%d", filterMode, beforeFilter, len(result.Candidates))
 
 	// 7. 检查是否空码
 	if len(result.Candidates) == 0 {
@@ -302,7 +310,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult
 	// 9. 添加五笔编码提示
 	e.addWubiHints(result.Candidates)
 
-	log.Printf("[PinyinEngine.ConvertEx] final candidates=%d isEmpty=%v",
+	logDebug("[PinyinEngine] final candidates=%d isEmpty=%v",
 		len(result.Candidates), result.IsEmpty)
 
 	return result
@@ -353,14 +361,15 @@ func (e *Engine) sortCandidates(candidates []candidate.Candidate, order string, 
 	}
 }
 
-// lookupSubPhrasesEx 查找子词组
+// lookupSubPhrasesEx 查找子词组（含模糊变体）
 func (e *Engine) lookupSubPhrasesEx(syllables []string, candidatesMap map[string]*candidate.Candidate) {
 	n := len(syllables)
 	// 查找所有连续子序列组成的词组
 	for length := n; length >= 2; length-- {
 		for start := 0; start <= n-length; start++ {
-			subKey := strings.Join(syllables[start:start+length], "")
-			results := e.dict.Lookup(subKey)
+			subSyllables := syllables[start : start+length]
+			subKey := strings.Join(subSyllables, "")
+			results := e.lookupWithFuzzy(subKey, subSyllables)
 			for i, cand := range results {
 				if _, exists := candidatesMap[cand.Text]; exists {
 					continue
@@ -374,15 +383,78 @@ func (e *Engine) lookupSubPhrasesEx(syllables []string, candidatesMap map[string
 				}
 				c.Weight = weightSubPhrase + bonus - start*10000 - i
 				// 计算该子词组消耗的输入长度
-				consumedLen := 0
-				for k := 0; k < start+length; k++ {
-					consumedLen += len(syllables[k])
+				if start == 0 {
+					// 从头开始的子词组：仅消耗对应音节，支持部分上屏
+					consumedLen := 0
+					for k := 0; k < length; k++ {
+						consumedLen += len(syllables[k])
+					}
+					c.ConsumedLength = consumedLen
+				} else {
+					// 非首位子词组：消耗全部输入（避免前缀音节丢失）
+					totalLen := 0
+					for _, s := range syllables {
+						totalLen += len(s)
+					}
+					c.ConsumedLength = totalLen
 				}
-				c.ConsumedLength = consumedLen
 				candidatesMap[c.Text] = &c
 			}
 		}
 	}
+}
+
+// lookupWithFuzzy 带模糊拼音的词库查找
+// syllables 为已切分的音节列表（用于生成模糊变体），可为 nil 表示不做模糊扩展
+func (e *Engine) lookupWithFuzzy(code string, syllables []string) []candidate.Candidate {
+	results := e.dict.Lookup(code)
+
+	fuzzy := e.getFuzzyConfig()
+	if fuzzy == nil || !fuzzy.Enabled() {
+		return results
+	}
+
+	seen := make(map[string]bool)
+	for _, c := range results {
+		seen[c.Text] = true
+	}
+
+	// 单音节：直接生成音节变体查找
+	if len(syllables) <= 1 {
+		syllable := code
+		if len(syllables) == 1 {
+			syllable = syllables[0]
+		}
+		for _, v := range fuzzy.Variants(syllable) {
+			for _, c := range e.dict.Lookup(v) {
+				if !seen[c.Text] {
+					seen[c.Text] = true
+					results = append(results, c)
+				}
+			}
+		}
+		return results
+	}
+
+	// 多音节：展开所有组合
+	for _, altCode := range fuzzy.ExpandCode(syllables) {
+		for _, c := range e.dict.Lookup(altCode) {
+			if !seen[c.Text] {
+				seen[c.Text] = true
+				results = append(results, c)
+			}
+		}
+	}
+
+	return results
+}
+
+// getFuzzyConfig 获取模糊拼音配置
+func (e *Engine) getFuzzyConfig() *FuzzyConfig {
+	if e.config != nil {
+		return e.config.Fuzzy
+	}
+	return nil
 }
 
 // ============================================================

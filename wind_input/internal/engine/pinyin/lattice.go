@@ -42,75 +42,55 @@ func BuildLattice(input string, st *SyllableTrie, d dict.Dict, unigram *UnigramM
 	// 构建 DAG
 	dag := BuildDAG(input, st)
 
-	// 收集所有可能的音节段
-	type segInfo struct {
-		start     int
-		end       int
-		syllables []string
-	}
+	// 边收集边查找：递归遍历 DAG，直接查词库，避免无效段
+	seen := make(map[string]bool)
+	maxWordLen := 6 // 中文词语最长约 6 音节（成语/固定短语）
+	maxNodes := 2000
 
-	var segments []segInfo
-	collected := 0
-	maxDepth := 8
-	maxCollected := 500
-
-	var collectSegments func(pos int, startPos int, syllables []string)
-	collectSegments = func(pos int, startPos int, syllables []string) {
-		if collected >= maxCollected || len(syllables) > maxDepth {
+	var collectAndLookup func(pos int, startPos int, syllables []string)
+	collectAndLookup = func(pos int, startPos int, syllables []string) {
+		if lattice.size >= maxNodes || len(syllables) > maxWordLen {
 			return
 		}
 
 		if len(syllables) > 0 {
-			segments = append(segments, segInfo{
-				start:     startPos,
-				end:       pos,
-				syllables: copySyllables(syllables),
-			})
-			collected++
+			code := strings.Join(syllables, "")
+			results := d.Lookup(code)
+			for _, cand := range results {
+				key := latticeKey(startPos, pos, cand.Text)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+
+				logProb := calcLogProb(cand, unigram)
+				node := LatticeNode{
+					Start:     startPos,
+					End:       pos,
+					Word:      cand.Text,
+					Syllables: copySyllables(syllables),
+					LogProb:   logProb,
+				}
+				lattice.nodes[pos] = append(lattice.nodes[pos], node)
+				lattice.size++
+			}
 		}
 
 		if pos >= n || pos >= len(dag.nodes) {
 			return
 		}
 
-		for _, node := range dag.nodes[pos] {
-			collectSegments(node.End, startPos, append(syllables, node.Syllables[0]))
+		for _, dagNode := range dag.nodes[pos] {
+			collectAndLookup(dagNode.End, startPos, append(syllables, dagNode.Syllables[0]))
 		}
 	}
 
-	// 从每个位置开始收集
+	// 从每个位置开始收集并查词
 	for startPos := 0; startPos < n; startPos++ {
 		if startPos < len(dag.nodes) && len(dag.nodes[startPos]) > 0 {
-			for _, node := range dag.nodes[startPos] {
-				collectSegments(node.End, startPos, []string{node.Syllables[0]})
+			for _, dagNode := range dag.nodes[startPos] {
+				collectAndLookup(dagNode.End, startPos, []string{dagNode.Syllables[0]})
 			}
-		}
-	}
-
-	// 对每个段，在词库中查找匹配
-	seen := make(map[string]bool)
-	for _, seg := range segments {
-		code := strings.Join(seg.syllables, "")
-
-		results := d.Lookup(code)
-		for _, cand := range results {
-			key := latticeKey(seg.start, seg.end, cand.Text)
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-
-			logProb := calcLogProb(cand, unigram)
-
-			node := LatticeNode{
-				Start:     seg.start,
-				End:       seg.end,
-				Word:      cand.Text,
-				Syllables: seg.syllables,
-				LogProb:   logProb,
-			}
-			lattice.nodes[seg.end] = append(lattice.nodes[seg.end], node)
-			lattice.size++
 		}
 	}
 
@@ -183,14 +163,6 @@ func (l *Lattice) GetInput() string {
 // IsEmpty 检查网格是否为空
 func (l *Lattice) IsEmpty() bool {
 	return l.size == 0
-}
-
-func totalLen(syllables []string) int {
-	total := 0
-	for _, s := range syllables {
-		total += len(s)
-	}
-	return total
 }
 
 func copySyllables(syllables []string) []string {

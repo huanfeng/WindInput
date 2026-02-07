@@ -44,9 +44,22 @@ type EngineConfig struct {
 
 // PinyinConfig 拼音引擎配置
 type PinyinConfig struct {
-	ShowWubiHint    bool   `yaml:"show_wubi_hint" json:"show_wubi_hint"`
-	UseSmartCompose bool   `yaml:"use_smart_compose" json:"use_smart_compose"`
-	CandidateOrder  string `yaml:"candidate_order" json:"candidate_order"` // 候选排序：char_first/phrase_first/smart
+	ShowWubiHint    bool              `yaml:"show_wubi_hint" json:"show_wubi_hint"`
+	UseSmartCompose bool              `yaml:"use_smart_compose" json:"use_smart_compose"`
+	CandidateOrder  string            `yaml:"candidate_order" json:"candidate_order"` // 候选排序：char_first/phrase_first/smart
+	Fuzzy           FuzzyPinyinConfig `yaml:"fuzzy" json:"fuzzy"`
+}
+
+// FuzzyPinyinConfig 模糊拼音配置
+type FuzzyPinyinConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"` // 总开关
+	ZhZ     bool `yaml:"zh_z" json:"zh_z"`       // zh ↔ z
+	ChC     bool `yaml:"ch_c" json:"ch_c"`       // ch ↔ c
+	ShS     bool `yaml:"sh_s" json:"sh_s"`       // sh ↔ s
+	NL      bool `yaml:"n_l" json:"n_l"`         // n ↔ l
+	AnAng   bool `yaml:"an_ang" json:"an_ang"`   // an ↔ ang
+	EnEng   bool `yaml:"en_eng" json:"en_eng"`   // en ↔ eng
+	InIng   bool `yaml:"in_ing" json:"in_ing"`   // in ↔ ing
 }
 
 // WubiConfig 五笔引擎配置

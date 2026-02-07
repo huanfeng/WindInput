@@ -11,9 +11,10 @@ import (
 
 // UnigramModel 一元语言模型
 type UnigramModel struct {
-	logProbs map[string]float64 // word -> log(P(word))
-	total    float64            // 总频次
-	minProb  float64            // 最小概率（用于未知词）
+	logProbs  map[string]float64 // word -> log(P(word))
+	total     float64            // 总频次
+	minProb   float64            // 最小概率（用于未知词）
+	userFreqs map[string]int     // 用户选词频次（运行时累积）
 }
 
 // NewUnigramModel 创建空的 Unigram 模型
@@ -96,11 +97,25 @@ func (m *UnigramModel) LoadFromFreqMap(freqs map[string]float64) {
 }
 
 // LogProb 获取词语的对数概率
+// 如果用户有选词历史，会给予额外的概率提升
 func (m *UnigramModel) LogProb(word string) float64 {
+	baseProb := m.minProb
 	if prob, ok := m.logProbs[word]; ok {
-		return prob
+		baseProb = prob
 	}
-	return m.minProb
+
+	// 用户频率提升：每次选词增加约 0.5 的 logprob 提升
+	if m.userFreqs != nil {
+		if freq, ok := m.userFreqs[word]; ok && freq > 0 {
+			boost := float64(freq) * 0.5
+			if boost > 5.0 {
+				boost = 5.0 // 封顶，避免单词过度主导
+			}
+			return baseProb + boost
+		}
+	}
+
+	return baseProb
 }
 
 // Contains 检查词语是否在模型中
@@ -112,6 +127,71 @@ func (m *UnigramModel) Contains(word string) bool {
 // Size 返回词汇量
 func (m *UnigramModel) Size() int {
 	return len(m.logProbs)
+}
+
+// BoostUserFreq 增加用户选词频次
+func (m *UnigramModel) BoostUserFreq(word string, delta int) {
+	if m.userFreqs == nil {
+		m.userFreqs = make(map[string]int)
+	}
+	m.userFreqs[word] += delta
+}
+
+// LoadUserFreqs 从文件加载用户选词频次
+// 格式: 词语\t频次
+func (m *UnigramModel) LoadUserFreqs(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // 文件不存在是正常的
+		}
+		return err
+	}
+	defer file.Close()
+
+	m.userFreqs = make(map[string]int)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
+			continue
+		}
+		freq, err := strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		m.userFreqs[parts[0]] = freq
+	}
+	return scanner.Err()
+}
+
+// SaveUserFreqs 保存用户选词频次到文件
+func (m *UnigramModel) SaveUserFreqs(path string) error {
+	if m.userFreqs == nil || len(m.userFreqs) == 0 {
+		return nil
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	writer.WriteString("# Wind Input 用户词频\n")
+	for word, freq := range m.userFreqs {
+		fmt.Fprintf(writer, "%s\t%d\n", word, freq)
+	}
+	return writer.Flush()
+}
+
+// GetUserFreqs 获取用户词频（用于持久化）
+func (m *UnigramModel) GetUserFreqs() map[string]int {
+	return m.userFreqs
 }
 
 // CharBasedScore 基于单字频率估算词组的常见程度

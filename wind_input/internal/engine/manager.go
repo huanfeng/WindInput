@@ -267,6 +267,24 @@ func (m *Manager) initPinyinEngine(dictPath, wubiDictPath string, config *pinyin
 		}
 	}
 
+	// 设置 DictManager（用于用户词频学习）
+	if m.dictManager != nil {
+		engine.SetDictManager(m.dictManager)
+	}
+
+	// 加载用户词频
+	userFreqPath := "dict/pinyin/user_freq.txt"
+	if m.exeDir != "" {
+		userFreqPath = m.exeDir + "/" + userFreqPath
+	}
+	if engine.GetUnigram() != nil {
+		if err := engine.GetUnigram().LoadUserFreqs(userFreqPath); err != nil {
+			log.Printf("[EngineManager] 加载用户词频失败: %v", err)
+		} else {
+			log.Printf("[EngineManager] 用户词频加载成功")
+		}
+	}
+
 	m.RegisterEngine(EngineTypePinyin, engine)
 	return m.SetCurrentEngine(EngineTypePinyin)
 }
@@ -483,6 +501,22 @@ func (m *Manager) loadPinyinEngineLocked() error {
 		}
 	}
 
+	// 设置 DictManager（用于用户词频学习）
+	if m.dictManager != nil {
+		engine.SetDictManager(m.dictManager)
+	}
+
+	// 加载用户词频
+	userFreqPath := "dict/pinyin/user_freq.txt"
+	if m.exeDir != "" {
+		userFreqPath = m.exeDir + "/" + userFreqPath
+	}
+	if engine.GetUnigram() != nil {
+		if err := engine.GetUnigram().LoadUserFreqs(userFreqPath); err != nil {
+			log.Printf("[EngineManager] 加载用户词频失败: %v", err)
+		}
+	}
+
 	m.engines[EngineTypePinyin] = engine
 	return nil
 }
@@ -533,6 +567,42 @@ func isAbsPath(path string) bool {
 	}
 	// Unix 绝对路径
 	return path[0] == '/'
+}
+
+// OnCandidateSelected 选词回调，通知引擎用户选择了某个候选词
+// code 为输入的编码（如拼音字符串），text 为选中的文字
+func (m *Manager) OnCandidateSelected(code, text string) {
+	engine := m.GetCurrentEngine()
+	if engine == nil {
+		return
+	}
+
+	// 拼音引擎：记录选词到用户词典
+	if pinyinEngine, ok := engine.(*pinyin.Engine); ok {
+		pinyinEngine.OnCandidateSelected(code, text)
+	}
+}
+
+// SaveUserFreqs 保存拼音引擎的用户词频到文件
+func (m *Manager) SaveUserFreqs() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, eng := range m.engines {
+		if pinyinEngine, ok := eng.(*pinyin.Engine); ok {
+			unigram := pinyinEngine.GetUnigram()
+			if unigram == nil {
+				continue
+			}
+			userFreqPath := "dict/pinyin/user_freq.txt"
+			if m.exeDir != "" {
+				userFreqPath = m.exeDir + "/" + userFreqPath
+			}
+			if err := unigram.SaveUserFreqs(userFreqPath); err != nil {
+				log.Printf("[EngineManager] 保存用户词频失败: %v", err)
+			}
+		}
+	}
 }
 
 // GetEngineDisplayName 获取引擎显示名称

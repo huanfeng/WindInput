@@ -242,6 +242,11 @@ func main() {
 		dataDir = exeDir
 	}
 	dictManager := dict.NewDictManager(dataDir)
+	defer func() {
+		engineMgr.SaveUserFreqs()
+		dictManager.Close()
+		logger.Info("DictManager closed, user data saved")
+	}()
 	if err := dictManager.Initialize(); err != nil {
 		logger.Warn("Failed to initialize dict manager", "error", err)
 	} else {
@@ -273,6 +278,18 @@ func main() {
 		FilterMode:      cfg.Engine.FilterMode,
 		UseSmartCompose: cfg.Engine.Pinyin.UseSmartCompose,
 		CandidateOrder:  cfg.Engine.Pinyin.CandidateOrder,
+	}
+	// 映射模糊拼音配置
+	if cfg.Engine.Pinyin.Fuzzy.Enabled {
+		pinyinConfig.Fuzzy = &pinyin.FuzzyConfig{
+			ZhZ:   cfg.Engine.Pinyin.Fuzzy.ZhZ,
+			ChC:   cfg.Engine.Pinyin.Fuzzy.ChC,
+			ShS:   cfg.Engine.Pinyin.Fuzzy.ShS,
+			NL:    cfg.Engine.Pinyin.Fuzzy.NL,
+			AnAng: cfg.Engine.Pinyin.Fuzzy.AnAng,
+			EnEng: cfg.Engine.Pinyin.Fuzzy.EnEng,
+			InIng: cfg.Engine.Pinyin.Fuzzy.InIng,
+		}
 	}
 
 	// 解析五笔配置（以默认配置为基础，覆盖用户设置，避免遗漏新增字段）

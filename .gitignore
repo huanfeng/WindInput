@@ -71,6 +71,9 @@ Desktop.ini
 # Generated dictionary files
 /dict/pinyin/unigram.txt
 
+# User frequency data (runtime generated)
+/dict/pinyin/user_freq.txt
+
 # Logs
 *.log
 
