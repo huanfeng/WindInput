@@ -40,7 +40,7 @@ func BuildLattice(input string, st *SyllableTrie, d dict.Dict, unigram UnigramLo
 	dag := BuildDAG(input, st)
 
 	// 边收集边查找：递归遍历 DAG，直接查词库，避免无效段
-	seen := make(map[string]bool)
+	seen := make(map[string]bool, 128)
 	maxWordLen := 6 // 中文词语最长约 6 音节（成语/固定短语）
 	maxNodes := 2000
 
@@ -169,8 +169,14 @@ func copySyllables(syllables []string) []string {
 }
 
 // latticeKey 生成节点去重 key
+// 使用固定 buffer 减少临时字符串分配
 func latticeKey(start, end int, word string) string {
-	return strconv.Itoa(start) + ":" + strconv.Itoa(end) + ":" + word
+	var buf [24]byte
+	b := strconv.AppendInt(buf[:0], int64(start), 10)
+	b = append(b, ':')
+	b = strconv.AppendInt(b, int64(end), 10)
+	b = append(b, ':')
+	return string(b) + word
 }
 
 // LatticeFromCandidates 从候选词列表直接构建简单 Lattice

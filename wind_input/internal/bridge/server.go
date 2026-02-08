@@ -59,6 +59,7 @@ type Server struct {
 	pushClientCount  int
 	pushClients      map[windows.Handle]*pipeWriter
 	pushClientsByPID map[uint32]windows.Handle // Map process ID to push pipe handle
+	pushHandleToPID  map[windows.Handle]uint32 // 反向映射：handle → PID，避免 O(n²) 查找
 
 	// Active client tracking (for secure, targeted push)
 	activeMu        sync.RWMutex
@@ -74,6 +75,7 @@ func NewServer(handler MessageHandler, logger *slog.Logger) *Server {
 		activeHandles:    make(map[windows.Handle]*pipeWriter),
 		pushClients:      make(map[windows.Handle]*pipeWriter),
 		pushClientsByPID: make(map[uint32]windows.Handle),
+		pushHandleToPID:  make(map[windows.Handle]uint32),
 	}
 }
 
@@ -297,10 +299,17 @@ func (w *pipeWriter) Write(p []byte) (int, error) {
 
 // processRequestWithTimeout wraps processRequest with a timeout
 func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte, clientID int, processID uint32) []byte {
+	// 快速命令直接同步执行，避免 goroutine + channel 分配
+	switch header.Command {
+	case ipc.CmdFocusGained, ipc.CmdFocusLost, ipc.CmdIMEActivated,
+		ipc.CmdCompositionTerminated, ipc.CmdCaretUpdate:
+		return s.processRequest(header, payload, clientID, processID)
+	}
+
+	// 耗时命令（如按键处理）仍使用 goroutine + timeout
 	ctx, cancel := context.WithTimeout(context.Background(), RequestProcessTimeout)
 	defer cancel()
 
-	// Channel to receive the response
 	resultCh := make(chan []byte, 1)
 
 	go func() {
@@ -691,6 +700,7 @@ func (s *Server) startPushPipeListener() {
 		// Store mapping from process ID to push pipe handle
 		if pushProcessID != 0 {
 			s.pushClientsByPID[pushProcessID] = handle
+			s.pushHandleToPID[handle] = pushProcessID
 		}
 		s.pushMu.Unlock()
 
@@ -722,14 +732,8 @@ func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
 	}
 	clients := make([]clientInfo, 0, len(s.pushClients))
 	for h, writer := range s.pushClients {
-		// Find the process ID for this handle
-		var pid uint32
-		for p, handle := range s.pushClientsByPID {
-			if handle == h {
-				pid = p
-				break
-			}
-		}
+		// 使用反向映射 O(1) 查找 PID
+		pid := s.pushHandleToPID[h]
 		clients = append(clients, clientInfo{handle: h, writer: writer, processID: pid})
 	}
 	clientCount := len(clients)
@@ -763,6 +767,7 @@ func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
 		s.pushMu.Lock()
 		for _, client := range failedClients {
 			delete(s.pushClients, client.handle)
+			delete(s.pushHandleToPID, client.handle)
 			if client.processID != 0 {
 				delete(s.pushClientsByPID, client.processID)
 			}
@@ -833,6 +838,7 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 		// Remove the failed client
 		s.pushMu.Lock()
 		delete(s.pushClients, handle)
+		delete(s.pushHandleToPID, handle)
 		delete(s.pushClientsByPID, activeProcessID)
 		s.pushMu.Unlock()
 		windows.CloseHandle(handle)
@@ -860,6 +866,7 @@ func (s *Server) RestartService() {
 	for h := range s.pushClients {
 		windows.CloseHandle(h)
 		delete(s.pushClients, h)
+		delete(s.pushHandleToPID, h)
 	}
 	// Clear all process ID mappings
 	for pid := range s.pushClientsByPID {

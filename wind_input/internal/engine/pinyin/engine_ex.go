@@ -44,8 +44,8 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 
 	input = strings.ToLower(input)
 
-	// 1. 解析输入为音节
-	parser := NewPinyinParser()
+	// 1. 解析输入为音节（复用引擎的 SyllableTrie，避免每次按键重建）
+	parser := NewPinyinParserWithTrie(e.syllableTrie)
 	parsed := parser.Parse(input)
 
 	// 2. 构建组合态
@@ -65,8 +65,8 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	logDebug("[PinyinEngine] input=%q preedit=%q completed=%v partial=%q allSyllables=%v",
 		input, result.PreeditDisplay, completedSyllables, partial, allSyllables)
 
-	// 3. 收集候选词
-	candidatesMap := make(map[string]*candidate.Candidate)
+	// 3. 收集候选词（预分配容量避免多次扩容）
+	candidatesMap := make(map[string]*candidate.Candidate, 64)
 
 	// 获取候选排序模式
 	candidateOrder := "char_first"
@@ -504,7 +504,7 @@ func (e *Engine) lookupWithFuzzy(code string, syllables []string) []candidate.Ca
 		return results
 	}
 
-	seen := make(map[string]bool)
+	seen := make(map[string]bool, len(results))
 	for _, c := range results {
 		seen[c.Text] = true
 	}
@@ -559,7 +559,7 @@ func (e *Engine) ParseInput(input string) *CompositionState {
 	}
 
 	input = strings.ToLower(input)
-	parser := NewPinyinParser()
+	parser := NewPinyinParserWithTrie(e.syllableTrie)
 	parsed := parser.Parse(input)
 
 	builder := NewCompositionBuilder()

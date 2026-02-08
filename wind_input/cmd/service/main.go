@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 	"unsafe"
 
@@ -110,6 +111,12 @@ func isPipeAlreadyExists() bool {
 }
 
 func main() {
+	// 内存管理策略：降低内存波动
+	// 软限制 150MB，超过后 GC 更频繁运行
+	debug.SetMemoryLimit(150 * 1024 * 1024)
+	// 降低 GOGC：默认 100 表示堆翻倍才 GC，改为 50 更频繁回收
+	debug.SetGCPercent(50)
+
 	// Set DPI awareness BEFORE any UI operations
 	setDPIAwareness()
 

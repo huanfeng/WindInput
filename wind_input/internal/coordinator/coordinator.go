@@ -3,6 +3,8 @@ package coordinator
 
 import (
 	"log/slog"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -98,6 +100,11 @@ type Coordinator struct {
 
 	// Hotkey compiler for binary protocol
 	hotkeyCompiler *hotkey.Compiler
+
+	// 热键缓存（避免每次焦点变化重新编译）
+	cachedKeyDownHotkeys []uint32
+	cachedKeyUpHotkeys   []uint32
+	hotkeysDirty         bool // 配置变化时置 true
 }
 
 // BridgeServer interface for broadcasting state to TSF clients
@@ -256,6 +263,7 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		caretHeight:        20,
 		punctConverter:     transform.NewPunctuationConverter(),
 		hotkeyCompiler:     hotkey.NewCompiler(cfg),
+		hotkeysDirty:       true, // 首次使用时需要编译
 	}
 
 	// Set up toolbar callbacks
@@ -1564,6 +1572,14 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 func (c *Coordinator) HandleFocusLost() {
 	c.logger.Debug("Focus lost, clearing state and hiding toolbar")
 
+	// 焦点变化后异步释放内存（非阻塞，不影响响应速度）
+	defer func() {
+		go func() {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}()
+	}()
+
 	// Hide toolbar on real focus lost (user switched to another window/app)
 	c.SetIMEActivated(false)
 
@@ -1625,20 +1641,33 @@ func (c *Coordinator) HandleClientDisconnected(activeClients int) {
 }
 
 // getCompiledHotkeys returns compiled hotkey hashes for C++ side
+// 使用缓存避免每次焦点变化重新编译
 func (c *Coordinator) getCompiledHotkeys() (keyDownHotkeys, keyUpHotkeys []uint32) {
 	if c.hotkeyCompiler == nil {
 		return nil, nil
 	}
-	keyDownHotkeys, keyUpHotkeys = c.hotkeyCompiler.Compile()
+	if !c.hotkeysDirty && c.cachedKeyDownHotkeys != nil {
+		return c.cachedKeyDownHotkeys, c.cachedKeyUpHotkeys
+	}
+	c.cachedKeyDownHotkeys, c.cachedKeyUpHotkeys = c.hotkeyCompiler.Compile()
+	c.hotkeysDirty = false
 	c.logger.Debug("Compiled hotkeys for C++",
-		"keyDownCount", len(keyDownHotkeys),
-		"keyUpCount", len(keyUpHotkeys))
-	return
+		"keyDownCount", len(c.cachedKeyDownHotkeys),
+		"keyUpCount", len(c.cachedKeyUpHotkeys))
+	return c.cachedKeyDownHotkeys, c.cachedKeyUpHotkeys
 }
 
 // HandleFocusGained handles focus gained events and returns current status
 func (c *Coordinator) HandleFocusGained() *bridge.StatusUpdateData {
 	c.logger.Debug("Focus gained")
+
+	// 焦点变化后异步释放内存（非阻塞，不影响响应速度）
+	defer func() {
+		go func() {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}()
+	}()
 
 	// Clear any pending input state when focus changes
 	// This ensures composition state is consistent
@@ -2198,6 +2227,7 @@ func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 		c.config.Input = *inputConfig
 	}
 
+	c.hotkeysDirty = true // SelectKeyGroups/PageKeys 变化也影响热键
 	c.logger.Debug("Input config updated", "punctFollowMode", c.punctFollowMode)
 }
 
@@ -2265,6 +2295,7 @@ func (c *Coordinator) UpdateHotkeyConfig(hotkeyConfig *config.HotkeyConfig) {
 	if c.hotkeyCompiler != nil {
 		c.hotkeyCompiler.UpdateConfig(c.config)
 	}
+	c.hotkeysDirty = true // 标记缓存失效，下次获取时重新编译
 
 	c.logger.Debug("Hotkey config updated",
 		"toggleModeKeys", hotkeyConfig.ToggleModeKeys,
