@@ -3,6 +3,8 @@ package engine
 import (
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
@@ -221,13 +223,25 @@ func (m *Manager) initPinyinEngine(dictPath, wubiDictPath string, config *pinyin
 	// 确定使用哪个词库
 	var d dict.Dict
 
-	// 加载拼音词库（从 Rime dict.yaml 格式加载）
+	// 加载拼音词库：优先使用预编译 .wdb，不存在则 fallback 到 YAML
 	pinyinDict := dict.NewPinyinDict()
 	if dictPath != "" {
-		if err := pinyinDict.LoadRimeDir(dictPath); err != nil {
-			return fmt.Errorf("加载拼音词库失败: %w", err)
+		wdbPath := filepath.Join(dictPath, "pinyin.wdb")
+		if _, err := os.Stat(wdbPath); err == nil {
+			if err := pinyinDict.LoadBinary(wdbPath); err != nil {
+				log.Printf("[EngineManager] 加载二进制词库失败，fallback 到 YAML: %v", err)
+				if err := pinyinDict.LoadRimeDir(dictPath); err != nil {
+					return fmt.Errorf("加载拼音词库失败: %w", err)
+				}
+			} else {
+				log.Printf("[EngineManager] 拼音词库(二进制)加载成功，编码数: %d", pinyinDict.EntryCount())
+			}
+		} else {
+			if err := pinyinDict.LoadRimeDir(dictPath); err != nil {
+				return fmt.Errorf("加载拼音词库失败: %w", err)
+			}
+			log.Printf("[EngineManager] 拼音词库(YAML)加载成功，词条数: %d", pinyinDict.EntryCount())
 		}
-		log.Printf("[EngineManager] 拼音词库加载成功，词条数: %d", pinyinDict.EntryCount())
 	}
 
 	if m.dictManager != nil {
@@ -277,13 +291,7 @@ func (m *Manager) initPinyinEngine(dictPath, wubiDictPath string, config *pinyin
 	if m.exeDir != "" {
 		userFreqPath = m.exeDir + "/" + userFreqPath
 	}
-	if engine.GetUnigram() != nil {
-		if err := engine.GetUnigram().LoadUserFreqs(userFreqPath); err != nil {
-			log.Printf("[EngineManager] 加载用户词频失败: %v", err)
-		} else {
-			log.Printf("[EngineManager] 用户词频加载成功")
-		}
-	}
+	loadPinyinUserFreqs(engine, userFreqPath)
 
 	m.RegisterEngine(EngineTypePinyin, engine)
 	return m.SetCurrentEngine(EngineTypePinyin)
@@ -452,12 +460,24 @@ func (m *Manager) loadPinyinEngineLocked() error {
 	// 确定使用哪个词库
 	var d dict.Dict
 
-	// 加载拼音词库（从 Rime dict.yaml 格式加载）
+	// 加载拼音词库：优先使用预编译 .wdb，不存在则 fallback 到 YAML
 	pinyinDict := dict.NewPinyinDict()
-	if err := pinyinDict.LoadRimeDir(fullPath); err != nil {
-		return fmt.Errorf("加载拼音词库失败: %w", err)
+	wdbPath := filepath.Join(fullPath, "pinyin.wdb")
+	if _, wdbErr := os.Stat(wdbPath); wdbErr == nil {
+		if err := pinyinDict.LoadBinary(wdbPath); err != nil {
+			log.Printf("[EngineManager] 加载二进制词库失败，fallback 到 YAML: %v", err)
+			if err := pinyinDict.LoadRimeDir(fullPath); err != nil {
+				return fmt.Errorf("加载拼音词库失败: %w", err)
+			}
+		} else {
+			log.Printf("[EngineManager] 拼音词库(二进制)加载成功，编码数: %d", pinyinDict.EntryCount())
+		}
+	} else {
+		if err := pinyinDict.LoadRimeDir(fullPath); err != nil {
+			return fmt.Errorf("加载拼音词库失败: %w", err)
+		}
+		log.Printf("[EngineManager] 拼音词库(YAML)加载成功，词条数: %d", pinyinDict.EntryCount())
 	}
-	log.Printf("[EngineManager] 拼音词库加载成功，词条数: %d", pinyinDict.EntryCount())
 
 	if m.dictManager != nil {
 		// 注册系统词库
@@ -511,11 +531,7 @@ func (m *Manager) loadPinyinEngineLocked() error {
 	if m.exeDir != "" {
 		userFreqPath = m.exeDir + "/" + userFreqPath
 	}
-	if engine.GetUnigram() != nil {
-		if err := engine.GetUnigram().LoadUserFreqs(userFreqPath); err != nil {
-			log.Printf("[EngineManager] 加载用户词频失败: %v", err)
-		}
-	}
+	loadPinyinUserFreqs(engine, userFreqPath)
 
 	m.engines[EngineTypePinyin] = engine
 	return nil
@@ -590,17 +606,51 @@ func (m *Manager) SaveUserFreqs() {
 
 	for _, eng := range m.engines {
 		if pinyinEngine, ok := eng.(*pinyin.Engine); ok {
-			unigram := pinyinEngine.GetUnigram()
-			if unigram == nil {
-				continue
-			}
 			userFreqPath := "dict/pinyin/user_freq.txt"
 			if m.exeDir != "" {
 				userFreqPath = m.exeDir + "/" + userFreqPath
 			}
-			if err := unigram.SaveUserFreqs(userFreqPath); err != nil {
-				log.Printf("[EngineManager] 保存用户词频失败: %v", err)
-			}
+			savePinyinUserFreqs(pinyinEngine, userFreqPath)
+		}
+	}
+}
+
+// loadPinyinUserFreqs 加载拼音引擎的用户词频（兼容内存模式和二进制模式）
+func loadPinyinUserFreqs(engine *pinyin.Engine, path string) {
+	if engine.GetUnigram() == nil {
+		return
+	}
+	if m := engine.GetUnigramModel(); m != nil {
+		if err := m.LoadUserFreqs(path); err != nil {
+			log.Printf("[EngineManager] 加载用户词频失败: %v", err)
+		} else {
+			log.Printf("[EngineManager] 用户词频加载成功")
+		}
+		return
+	}
+	if bm := engine.GetBinaryUnigramModel(); bm != nil {
+		if err := bm.LoadUserFreqs(path); err != nil {
+			log.Printf("[EngineManager] 加载用户词频失败: %v", err)
+		} else {
+			log.Printf("[EngineManager] 用户词频加载成功")
+		}
+	}
+}
+
+// savePinyinUserFreqs 保存拼音引擎的用户词频
+func savePinyinUserFreqs(engine *pinyin.Engine, path string) {
+	if engine.GetUnigram() == nil {
+		return
+	}
+	if m := engine.GetUnigramModel(); m != nil {
+		if err := m.SaveUserFreqs(path); err != nil {
+			log.Printf("[EngineManager] 保存用户词频失败: %v", err)
+		}
+		return
+	}
+	if bm := engine.GetBinaryUnigramModel(); bm != nil {
+		if err := bm.SaveUserFreqs(path); err != nil {
+			log.Printf("[EngineManager] 保存用户词频失败: %v", err)
 		}
 	}
 }

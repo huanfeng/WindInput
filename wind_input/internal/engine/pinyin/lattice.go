@@ -26,18 +26,15 @@ type Lattice struct {
 
 // BuildLattice 构建词网格
 // 对于输入的每个音节切分位置，查找词库中的所有匹配词语
-func BuildLattice(input string, st *SyllableTrie, d dict.Dict, unigram *UnigramModel) *Lattice {
+func BuildLattice(input string, st *SyllableTrie, d dict.Dict, unigram UnigramLookup) *Lattice {
 	n := len(input)
 	lattice := &Lattice{
 		nodes: make([][]LatticeNode, n+1),
 		input: input,
 	}
 
-	// 获取词库的 Trie（如果可用）
-	var dictTrie *dict.Trie
-	if pd, ok := d.(*dict.PinyinDict); ok {
-		dictTrie = pd.GetTrie()
-	}
+	// 获取前缀搜索能力（如果可用）
+	ps, hasPrefixSearch := d.(dict.PrefixSearchable)
 
 	// 构建 DAG
 	dag := BuildDAG(input, st)
@@ -104,8 +101,8 @@ func BuildLattice(input string, st *SyllableTrie, d dict.Dict, unigram *UnigramM
 			endPos := dagNode.End
 
 			results := d.Lookup(syllable)
-			if len(results) == 0 && dictTrie != nil {
-				results = dictTrie.SearchPrefix(syllable, 5)
+			if len(results) == 0 && hasPrefixSearch {
+				results = ps.LookupPrefix(syllable, 5)
 			}
 
 			for _, cand := range results {
@@ -134,7 +131,7 @@ func BuildLattice(input string, st *SyllableTrie, d dict.Dict, unigram *UnigramM
 }
 
 // calcLogProb 计算节点的对数概率
-func calcLogProb(cand candidate.Candidate, unigram *UnigramModel) float64 {
+func calcLogProb(cand candidate.Candidate, unigram UnigramLookup) float64 {
 	if unigram != nil {
 		return unigram.LogProb(cand.Text)
 	}
@@ -177,7 +174,7 @@ func latticeKey(start, end int, word string) string {
 }
 
 // LatticeFromCandidates 从候选词列表直接构建简单 Lattice
-func LatticeFromCandidates(input string, syllables []string, candidates []candidate.Candidate, unigram *UnigramModel) *Lattice {
+func LatticeFromCandidates(input string, syllables []string, candidates []candidate.Candidate, unigram UnigramLookup) *Lattice {
 	n := len(input)
 	lattice := &Lattice{
 		nodes: make([][]LatticeNode, n+1),

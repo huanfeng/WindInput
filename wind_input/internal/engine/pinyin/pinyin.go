@@ -2,6 +2,8 @@ package pinyin
 
 import (
 	"log"
+	"os"
+	"strings"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
@@ -30,7 +32,7 @@ type Config struct {
 type Engine struct {
 	dict         dict.Dict
 	syllableTrie *SyllableTrie       // 音节 Trie
-	unigram      *UnigramModel       // Unigram 语言模型
+	unigram      UnigramLookup       // Unigram 语言模型（接口：支持内存模式和 mmap 模式）
 	bigram       *BigramModel        // Bigram 语言模型（可选）
 	wubiTable    *dict.CodeTable     // 五笔码表（用于反查）
 	wubiReverse  map[string][]string // 汉字 -> 五笔编码（反向索引）
@@ -70,7 +72,21 @@ func (e *Engine) GetConfig() *Config {
 }
 
 // LoadUnigram 加载 Unigram 语言模型
+// 优先尝试同目录下的 unigram.wdb，不存在则 fallback 到文本文件
 func (e *Engine) LoadUnigram(path string) error {
+	// 尝试加载二进制版本
+	wdbPath := strings.TrimSuffix(path, ".txt") + ".wdb"
+	if _, err := os.Stat(wdbPath); err == nil {
+		bm, err := NewBinaryUnigramModel(wdbPath)
+		if err == nil {
+			e.unigram = bm
+			log.Printf("[PinyinEngine] Unigram 模型(二进制)加载成功: %d 词条", bm.Size())
+			return nil
+		}
+		log.Printf("[PinyinEngine] 加载二进制 Unigram 失败，fallback 到文本: %v", err)
+	}
+
+	// Fallback 到文本格式
 	m := NewUnigramModel()
 	if err := m.Load(path); err != nil {
 		return err
@@ -92,14 +108,32 @@ func (e *Engine) LoadBigram(path string) error {
 	return nil
 }
 
-// SetUnigram 直接设置 Unigram 模型
-func (e *Engine) SetUnigram(m *UnigramModel) {
+// SetUnigram 直接设置 Unigram 模型（接口类型）
+func (e *Engine) SetUnigram(m UnigramLookup) {
 	e.unigram = m
 }
 
-// GetUnigram 获取 Unigram 模型
-func (e *Engine) GetUnigram() *UnigramModel {
+// GetUnigram 获取 Unigram 模型（接口类型）
+func (e *Engine) GetUnigram() UnigramLookup {
 	return e.unigram
+}
+
+// GetUnigramModel 获取内存模式的 UnigramModel（用于用户词频管理等）
+// 如果不是内存模式则返回 nil
+func (e *Engine) GetUnigramModel() *UnigramModel {
+	if m, ok := e.unigram.(*UnigramModel); ok {
+		return m
+	}
+	return nil
+}
+
+// GetBinaryUnigramModel 获取二进制模式的 BinaryUnigramModel
+// 如果不是二进制模式则返回 nil
+func (e *Engine) GetBinaryUnigramModel() *BinaryUnigramModel {
+	if m, ok := e.unigram.(*BinaryUnigramModel); ok {
+		return m
+	}
+	return nil
 }
 
 // LoadWubiTable 加载五笔码表（用于反查）

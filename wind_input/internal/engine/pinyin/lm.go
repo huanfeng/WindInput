@@ -7,7 +7,18 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/huanfeng/wind_input/internal/dict/binformat"
 )
+
+// UnigramLookup Unigram 语言模型查询接口
+// 用于抽象 UnigramModel（内存模式）和 BinaryUnigramModel（mmap 模式）
+type UnigramLookup interface {
+	LogProb(word string) float64
+	Contains(word string) bool
+	CharBasedScore(word string) float64
+	BoostUserFreq(word string, delta int)
+}
 
 // UnigramModel 一元语言模型
 type UnigramModel struct {
@@ -214,12 +225,12 @@ func (m *UnigramModel) CharBasedScore(word string) float64 {
 // BigramModel 二元语言模型
 type BigramModel struct {
 	logProbs map[string]map[string]float64 // word1 -> word2 -> log(P(word2|word1))
-	unigram  *UnigramModel                 // 回退模型
+	unigram  UnigramLookup                 // 回退模型
 	lambda   float64                       // 插值系数
 }
 
 // NewBigramModel 创建 Bigram 模型
-func NewBigramModel(unigram *UnigramModel) *BigramModel {
+func NewBigramModel(unigram UnigramLookup) *BigramModel {
 	return &BigramModel{
 		logProbs: make(map[string]map[string]float64),
 		unigram:  unigram,
@@ -304,3 +315,124 @@ func logSumExp(a, b float64) float64 {
 	}
 	return b + math.Log1p(math.Exp(a-b))
 }
+
+// BinaryUnigramModel 基于 mmap 的 Unigram 模型
+// 实现 UnigramLookup 接口，核心数据在 mmap 中不占 Go 堆
+type BinaryUnigramModel struct {
+	reader    *binformat.UnigramReader
+	userFreqs map[string]int // 用户选词频次（运行时累积，在内存中）
+}
+
+// NewBinaryUnigramModel 从二进制文件加载 Unigram 模型
+func NewBinaryUnigramModel(path string) (*BinaryUnigramModel, error) {
+	reader, err := binformat.OpenUnigram(path)
+	if err != nil {
+		return nil, fmt.Errorf("打开二进制 Unigram 失败: %w", err)
+	}
+	return &BinaryUnigramModel{reader: reader}, nil
+}
+
+// LogProb 获取词语的对数概率
+func (m *BinaryUnigramModel) LogProb(word string) float64 {
+	baseProb := m.reader.LogProb(word)
+	if m.userFreqs != nil {
+		if freq, ok := m.userFreqs[word]; ok && freq > 0 {
+			boost := float64(freq) * 0.5
+			if boost > 5.0 {
+				boost = 5.0
+			}
+			return baseProb + boost
+		}
+	}
+	return baseProb
+}
+
+// Contains 检查词语是否在模型中
+func (m *BinaryUnigramModel) Contains(word string) bool {
+	return m.reader.Contains(word)
+}
+
+// CharBasedScore 基于单字频率估算词组常见度
+func (m *BinaryUnigramModel) CharBasedScore(word string) float64 {
+	return m.reader.CharBasedScore(word)
+}
+
+// BoostUserFreq 增加用户选词频次
+func (m *BinaryUnigramModel) BoostUserFreq(word string, delta int) {
+	if m.userFreqs == nil {
+		m.userFreqs = make(map[string]int)
+	}
+	m.userFreqs[word] += delta
+}
+
+// Size 返回词汇量
+func (m *BinaryUnigramModel) Size() int {
+	return m.reader.Size()
+}
+
+// Close 关闭底层 mmap 资源
+func (m *BinaryUnigramModel) Close() error {
+	return m.reader.Close()
+}
+
+// LoadUserFreqs 从文件加载用户选词频次
+func (m *BinaryUnigramModel) LoadUserFreqs(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer file.Close()
+
+	m.userFreqs = make(map[string]int)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
+			continue
+		}
+		freq, err := strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		m.userFreqs[parts[0]] = freq
+	}
+	return scanner.Err()
+}
+
+// SaveUserFreqs 保存用户选词频次到文件
+func (m *BinaryUnigramModel) SaveUserFreqs(path string) error {
+	if m.userFreqs == nil || len(m.userFreqs) == 0 {
+		return nil
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	writer.WriteString("# Wind Input 用户词频\n")
+	for word, freq := range m.userFreqs {
+		fmt.Fprintf(writer, "%s\t%d\n", word, freq)
+	}
+	return writer.Flush()
+}
+
+// GetUserFreqs 获取用户词频
+func (m *BinaryUnigramModel) GetUserFreqs() map[string]int {
+	return m.userFreqs
+}
+
+// 确保 BinaryUnigramModel 实现 UnigramLookup 接口
+var _ UnigramLookup = (*BinaryUnigramModel)(nil)
+
+// 确保 UnigramModel 实现 UnigramLookup 接口
+var _ UnigramLookup = (*UnigramModel)(nil)

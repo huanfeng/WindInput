@@ -16,4 +16,3 @@ func TestPhraseLayerSearchCommandMarksIsCommand(t *testing.T) {
 		}
 	}
 }
-

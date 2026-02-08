@@ -11,14 +11,18 @@ import (
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/dict/binformat"
 )
 
-// PinyinDict 拼音专用词库（基于 Trie 索引）
-// 支持从 Rime dict.yaml 格式或 CodeTable 格式加载
+// PinyinDict 拼音专用词库（基于 Trie 索引或 mmap 二进制文件）
+// 支持从 Rime dict.yaml 格式或预编译的 .wdb 二进制格式加载
 type PinyinDict struct {
-	trie       *Trie // Trie 索引，用于精确和前缀搜索
-	abbrevTrie *Trie // 简拼索引（声母首字母 → 词条），用于简拼词组匹配
+	trie       *Trie // Trie 索引，用于精确和前缀搜索（YAML 模式）
+	abbrevTrie *Trie // 简拼索引（声母首字母 → 词条），用于简拼词组匹配（YAML 模式）
 	entryCount int
+
+	// 二进制模式（mmap）
+	binReader *binformat.DictReader
 }
 
 // NewPinyinDict 创建拼音词库
@@ -59,6 +63,32 @@ func (d *PinyinDict) LoadRimeDir(dirPath string) error {
 	}
 
 	d.entryCount = d.trie.EntryCount()
+	return nil
+}
+
+// LoadBinary 从预编译的 .wdb 文件加载词库（mmap 模式）
+func (d *PinyinDict) LoadBinary(wdbPath string) error {
+	reader, err := binformat.OpenDict(wdbPath)
+	if err != nil {
+		return fmt.Errorf("打开二进制词库失败: %w", err)
+	}
+	d.binReader = reader
+	d.entryCount = reader.KeyCount()
+	d.trie = nil
+	d.abbrevTrie = nil
+	return nil
+}
+
+// IsBinaryMode 检查是否为二进制模式
+func (d *PinyinDict) IsBinaryMode() bool {
+	return d.binReader != nil
+}
+
+// Close 关闭词库（释放 mmap 资源）
+func (d *PinyinDict) Close() error {
+	if d.binReader != nil {
+		return d.binReader.Close()
+	}
 	return nil
 }
 
@@ -137,6 +167,9 @@ func (d *PinyinDict) loadRimeFile(path string) (int, error) {
 
 // Lookup 查找拼音对应的候选词
 func (d *PinyinDict) Lookup(pinyin string) []candidate.Candidate {
+	if d.binReader != nil {
+		return d.binReader.Lookup(pinyin)
+	}
 	if d.trie == nil {
 		return nil
 	}
@@ -145,7 +178,13 @@ func (d *PinyinDict) Lookup(pinyin string) []candidate.Candidate {
 
 // LookupPhrase 查找短语（将音节拼接后查找）
 func (d *PinyinDict) LookupPhrase(syllables []string) []candidate.Candidate {
-	if d.trie == nil || len(syllables) == 0 {
+	if len(syllables) == 0 {
+		return nil
+	}
+	if d.binReader != nil {
+		return d.binReader.LookupPhrase(syllables)
+	}
+	if d.trie == nil {
 		return nil
 	}
 	key := strings.ToLower(strings.Join(syllables, ""))
@@ -154,6 +193,9 @@ func (d *PinyinDict) LookupPhrase(syllables []string) []candidate.Candidate {
 
 // LookupPrefix 前缀查找，返回所有以 prefix 开头的候选词
 func (d *PinyinDict) LookupPrefix(prefix string, limit int) []candidate.Candidate {
+	if d.binReader != nil {
+		return d.binReader.LookupPrefix(prefix, limit)
+	}
 	if d.trie == nil {
 		return nil
 	}
@@ -170,6 +212,9 @@ func (d *PinyinDict) LookupPrefix(prefix string, limit int) []candidate.Candidat
 
 // HasPrefix 检查是否有以 prefix 开头的词条
 func (d *PinyinDict) HasPrefix(prefix string) bool {
+	if d.binReader != nil {
+		return d.binReader.HasPrefix(prefix)
+	}
 	if d.trie == nil {
 		return false
 	}
@@ -233,6 +278,9 @@ func (l *PinyinDictLayer) SearchAbbrev(code string, limit int) []candidate.Candi
 
 // LookupAbbrev 简拼查找，返回匹配声母缩写的词条
 func (d *PinyinDict) LookupAbbrev(code string, limit int) []candidate.Candidate {
+	if d.binReader != nil {
+		return d.binReader.LookupAbbrev(code, limit)
+	}
 	if d.abbrevTrie == nil {
 		return nil
 	}

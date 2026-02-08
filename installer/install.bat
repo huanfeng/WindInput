@@ -129,10 +129,24 @@ if exist "%BUILD_DIR%\dict\pinyin\base.dict.yaml" (
     echo        请先运行 build_all.bat
 )
 
-REM 从 build 复制 Unigram 语言模型
+REM 从 build 复制预编译二进制词库（优先使用）
+if exist "%BUILD_DIR%\dict\pinyin\pinyin.wdb" (
+    copy /Y "%BUILD_DIR%\dict\pinyin\pinyin.wdb" "%INSTALL_DIR%\dict\pinyin\pinyin.wdb" >nul
+    echo   - 预编译拼音词库: pinyin.wdb
+) else (
+    echo [提示] pinyin.wdb 不存在,将使用 YAML 词库（内存占用较高）
+)
+if exist "%BUILD_DIR%\dict\pinyin\unigram.wdb" (
+    copy /Y "%BUILD_DIR%\dict\pinyin\unigram.wdb" "%INSTALL_DIR%\dict\pinyin\unigram.wdb" >nul
+    echo   - 预编译语言模型: unigram.wdb
+) else (
+    echo [提示] unigram.wdb 不存在,将使用文本格式（内存占用较高）
+)
+
+REM 从 build 复制 Unigram 语言模型（fallback）
 if exist "%BUILD_DIR%\dict\pinyin\unigram.txt" (
     copy /Y "%BUILD_DIR%\dict\pinyin\unigram.txt" "%INSTALL_DIR%\dict\pinyin\unigram.txt" >nul
-    echo   - 语言模型: unigram.txt
+    echo   - 语言模型 ^(fallback^): unigram.txt
 ) else (
     echo [提示] Unigram 语言模型不存在,智能组句功能不可用
 )
@@ -192,9 +206,11 @@ echo 已安装组件:
 echo - wind_tsf.dll (TSF 桥接)
 echo - wind_input.exe (输入法服务)
 echo - wind_setting.exe (设置界面)
-echo - dict\pinyin\8105.dict.yaml (拼音单字词库)
-echo - dict\pinyin\base.dict.yaml (拼音基础词库)
-echo - dict\pinyin\unigram.txt (语言模型)
+echo - dict\pinyin\pinyin.wdb (预编译拼音词库)
+echo - dict\pinyin\unigram.wdb (预编译语言模型)
+echo - dict\pinyin\8105.dict.yaml (拼音单字词库, fallback)
+echo - dict\pinyin\base.dict.yaml (拼音基础词库, fallback)
+echo - dict\pinyin\unigram.txt (语言模型, fallback)
 echo - dict\wubi\wubi86.txt (五笔86词库)
 echo - dict\common_chars.txt (常用字表)
 echo.

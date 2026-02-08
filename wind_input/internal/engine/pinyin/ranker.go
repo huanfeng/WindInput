@@ -47,7 +47,7 @@ func DefaultRankerConfig() *RankerConfig {
 // Ranker 候选排序器
 type Ranker struct {
 	config  *RankerConfig
-	unigram *UnigramModel
+	unigram UnigramLookup
 	bigram  *BigramModel
 }
 
@@ -62,7 +62,7 @@ func NewRanker(config *RankerConfig) *Ranker {
 }
 
 // SetUnigram 设置 Unigram 语言模型
-func (r *Ranker) SetUnigram(m *UnigramModel) {
+func (r *Ranker) SetUnigram(m UnigramLookup) {
 	r.unigram = m
 }
 
