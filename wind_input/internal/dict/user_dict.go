@@ -86,7 +86,7 @@ func (ud *UserDict) Search(code string, limit int) []candidate.Candidate {
 
 	// 排序
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Weight > results[j].Weight
+		return candidate.Better(results[i], results[j])
 	})
 
 	// 限制数量
@@ -119,7 +119,7 @@ func (ud *UserDict) SearchPrefix(prefix string, limit int) []candidate.Candidate
 
 	// 排序
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Weight > results[j].Weight
+		return candidate.Better(results[i], results[j])
 	})
 
 	// 限制数量

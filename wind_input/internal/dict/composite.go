@@ -151,12 +151,12 @@ func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []
 		nonToppedStart := len(topped)
 		nonTopped := finalResults[nonToppedStart:]
 		sort.Slice(nonTopped, func(i, j int) bool {
-			return nonTopped[i].Weight > nonTopped[j].Weight
+			return candidate.Better(nonTopped[i], nonTopped[j])
 		})
 	} else if len(topped) == 0 {
 		// 没有置顶词，全部按权重排序
 		sort.Slice(finalResults, func(i, j int) bool {
-			return finalResults[i].Weight > finalResults[j].Weight
+			return candidate.Better(finalResults[i], finalResults[j])
 		})
 	}
 
@@ -237,6 +237,25 @@ func (c *CompositeDict) LookupPrefix(prefix string, limit int) []candidate.Candi
 	return c.SearchPrefix(prefix, limit)
 }
 
+// LookupCommand 实现 dict.CommandSearchable 接口
+// 仅查找特殊命令（uuid, date 等），不返回普通词条
+func (c *CompositeDict) LookupCommand(code string) []candidate.Candidate {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, layer := range c.layers {
+		if cl, ok := layer.(interface {
+			SearchCommand(code string, limit int) []candidate.Candidate
+		}); ok {
+			results := cl.SearchCommand(code, 0)
+			if len(results) > 0 {
+				return results
+			}
+		}
+	}
+	return nil
+}
+
 // LookupAbbrev 实现 dict.AbbrevSearchable 接口
 // 遍历所有层查找简拼匹配
 func (c *CompositeDict) LookupAbbrev(code string, limit int) []candidate.Candidate {
@@ -262,7 +281,7 @@ func (c *CompositeDict) LookupAbbrev(code string, limit int) []candidate.Candida
 	}
 
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Weight > results[j].Weight
+		return candidate.Better(results[i], results[j])
 	})
 
 	if limit > 0 && len(results) > limit {

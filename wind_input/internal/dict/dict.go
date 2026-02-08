@@ -24,3 +24,9 @@ type PrefixSearchable interface {
 type AbbrevSearchable interface {
 	LookupAbbrev(code string, limit int) []candidate.Candidate
 }
+
+// CommandSearchable 支持特殊命令查找的词库接口（可选扩展）
+// 仅查找命令（uuid, date, time 等），不返回普通词条
+type CommandSearchable interface {
+	LookupCommand(code string) []candidate.Candidate
+}

@@ -99,7 +99,10 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 	var exactCandidates []candidate.Candidate
 	if e.dictManager != nil {
 		if phraseLayer := e.dictManager.GetPhraseLayer(); phraseLayer != nil {
+			// 查询普通短语
 			exactCandidates = append(exactCandidates, phraseLayer.Search(input, 0)...)
+			// 查询命令（uuid, date 等）——命令仅通过 SearchCommand 访问
+			exactCandidates = append(exactCandidates, phraseLayer.SearchCommand(input, 0)...)
 		}
 		if userDict := e.dictManager.GetUserDict(); userDict != nil {
 			exactCandidates = append(exactCandidates, userDict.Search(input, 0)...)
@@ -173,7 +176,10 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 
 	if e.dictManager != nil {
 		if phraseLayer := e.dictManager.GetPhraseLayer(); phraseLayer != nil {
+			// 查询普通短语
 			exactCandidates = append(exactCandidates, phraseLayer.Search(input, 0)...)
+			// 查询命令（uuid, date 等）——命令仅通过 SearchCommand 访问
+			exactCandidates = append(exactCandidates, phraseLayer.SearchCommand(input, 0)...)
 		}
 		if userDict := e.dictManager.GetUserDict(); userDict != nil {
 			exactCandidates = append(exactCandidates, userDict.Search(input, 0)...)

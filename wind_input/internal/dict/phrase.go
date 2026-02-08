@@ -25,6 +25,10 @@ type PhraseLayer struct {
 
 	// 命令短语: code -> CommandHandler
 	commands map[string]CommandHandler
+
+	// 命令结果缓存：同一 code 重复查询时返回缓存，避免 UUID/时间 候选不断刷新
+	cmdCache    map[string][]candidate.Candidate
+	cmdCacheKey string // 当前缓存对应的输入（输入变化时整体失效）
 }
 
 // PhraseEntry 短语条目
@@ -58,6 +62,7 @@ func NewPhraseLayer(name string, filePath string) *PhraseLayer {
 		filePath: filePath,
 		phrases:  make(map[string][]PhraseEntry),
 		commands: make(map[string]CommandHandler),
+		cmdCache: make(map[string][]candidate.Candidate),
 	}
 
 	// 注册内置命令
@@ -129,6 +134,8 @@ func (pl *PhraseLayer) Type() LayerType {
 }
 
 // Search 精确查询
+// 注意：此方法仅查询普通短语，不返回命令结果（uuid, date 等）。
+// 命令结果仅通过 SearchCommand() 方法访问，防止任意代码路径意外触发命令。
 func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 	pl.mu.RLock()
 	defer pl.mu.RUnlock()
@@ -136,12 +143,7 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 	code = strings.ToLower(code)
 	var results []candidate.Candidate
 
-	// 1. 检查命令
-	if handler, ok := pl.commands[code]; ok {
-		results = append(results, handler()...)
-	}
-
-	// 2. 检查普通短语
+	// 仅查询普通短语（不含命令）
 	if entries, ok := pl.phrases[code]; ok {
 		for _, e := range entries {
 			text := pl.expandTemplate(e.Text)
@@ -155,7 +157,7 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 
 	// 排序
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Weight > results[j].Weight
+		return candidate.Better(results[i], results[j])
 	})
 
 	// 限制数量
@@ -164,6 +166,57 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 	}
 
 	return results
+}
+
+// InvalidateCache 清除命令结果缓存
+// 当用户输入变化或需要刷新命令结果时调用
+func (pl *PhraseLayer) InvalidateCache() {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	pl.cmdCache = make(map[string][]candidate.Candidate)
+}
+
+// InvalidateCacheForInput 根据输入变化决定是否清除缓存
+// 如果输入与上次缓存的输入不同，则清除缓存
+func (pl *PhraseLayer) InvalidateCacheForInput(input string) {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	if pl.cmdCacheKey != input {
+		pl.cmdCache = make(map[string][]candidate.Candidate)
+		pl.cmdCacheKey = input
+	}
+}
+
+// SearchCommand 仅查找命令（不含普通短语和词条）
+// 用于引擎步骤 0 的特殊命令匹配，只返回 uuid/date/time 等命令结果
+func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candidate {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+
+	code = strings.ToLower(code)
+	handler, ok := pl.commands[code]
+	if !ok {
+		return nil
+	}
+
+	// 使用缓存
+	if cached, hit := pl.cmdCache[code]; hit {
+		if limit > 0 && len(cached) > limit {
+			return cached[:limit]
+		}
+		return cached
+	}
+
+	cmdResults := handler()
+	for i := range cmdResults {
+		cmdResults[i].IsCommand = true
+	}
+	pl.cmdCache[code] = cmdResults
+
+	if limit > 0 && len(cmdResults) > limit {
+		return cmdResults[:limit]
+	}
+	return cmdResults
 }
 
 // SearchPrefix 前缀查询
@@ -192,7 +245,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 
 	// 排序
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Weight > results[j].Weight
+		return candidate.Better(results[i], results[j])
 	})
 
 	// 限制数量

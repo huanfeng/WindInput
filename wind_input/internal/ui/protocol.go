@@ -7,6 +7,7 @@ type Candidate struct {
 	Index          int
 	Comment        string
 	Weight         int
+	IsCommand      bool
 	ConsumedLength int // 该候选消耗的输入长度（拼音部分上屏用）
 }
 

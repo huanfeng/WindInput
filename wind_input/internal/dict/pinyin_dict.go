@@ -160,7 +160,7 @@ func (d *PinyinDict) LookupPrefix(prefix string, limit int) []candidate.Candidat
 	prefix = strings.ToLower(prefix)
 	results := d.trie.SearchPrefix(prefix, limit)
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Weight > results[j].Weight
+		return candidate.Better(results[i], results[j])
 	})
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
@@ -239,7 +239,7 @@ func (d *PinyinDict) LookupAbbrev(code string, limit int) []candidate.Candidate 
 	code = strings.ToLower(code)
 	results := d.abbrevTrie.Search(code)
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Weight > results[j].Weight
+		return candidate.Better(results[i], results[j])
 	})
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]

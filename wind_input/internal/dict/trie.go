@@ -70,7 +70,7 @@ func (t *Trie) SearchPrefix(prefix string, limit int) []candidate.Candidate {
 	t.collectAll(node, &results, limit)
 
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Weight > results[j].Weight
+		return candidate.Better(results[i], results[j])
 	})
 
 	if limit > 0 && len(results) > limit {
@@ -110,10 +110,16 @@ func (t *Trie) collectAll(node *TrieNode, results *[]candidate.Candidate, limit 
 	if node.isEnd {
 		*results = append(*results, node.candidates...)
 	}
-	for _, child := range node.children {
+	keys := make([]byte, 0, len(node.children))
+	for k := range node.children {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	for _, k := range keys {
 		if limit > 0 && len(*results) >= limit {
 			return
 		}
+		child := node.children[k]
 		t.collectAll(child, results, limit)
 	}
 }

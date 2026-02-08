@@ -1273,9 +1273,11 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 	// 拼音引擎部分上屏：候选消耗的输入长度小于缓冲区长度时，保留剩余部分
 	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
 	if isPinyin && cand.ConsumedLength > 0 && cand.ConsumedLength < len(c.inputBuffer) {
-		// 用户词频学习：记录选词
-		consumedCode := c.inputBuffer[:cand.ConsumedLength]
-		c.engineMgr.OnCandidateSelected(consumedCode, originalText)
+		// 用户词频学习：命令候选不进入学习，避免污染用户词典（如 uuid）。
+		if !cand.IsCommand {
+			consumedCode := c.inputBuffer[:cand.ConsumedLength]
+			c.engineMgr.OnCandidateSelected(consumedCode, originalText)
+		}
 
 		remaining := c.inputBuffer[cand.ConsumedLength:]
 		c.logger.Debug("Partial commit (pinyin)", "index", index, "text", text,
@@ -1295,8 +1297,8 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 		}
 	}
 
-	// 用户词频学习：记录选词
-	if isPinyin && c.engineMgr != nil {
+	// 用户词频学习：命令候选不进入学习，避免污染用户词典（如 uuid）。
+	if isPinyin && c.engineMgr != nil && !cand.IsCommand {
 		c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText)
 	}
 
@@ -1396,6 +1398,7 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 			Text:           ec.Text,
 			Index:          i + 1,
 			Weight:         ec.Weight,
+			IsCommand:      ec.IsCommand,
 			ConsumedLength: ec.ConsumedLength,
 		}
 		// 如果有提示信息（如反查编码），添加到注释
@@ -1846,9 +1849,11 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 	originalText := cand.Text
 	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
 	if isPinyin && cand.ConsumedLength > 0 && cand.ConsumedLength < len(c.inputBuffer) {
-		// 用户词频学习：记录选词
-		consumedCode := c.inputBuffer[:cand.ConsumedLength]
-		c.engineMgr.OnCandidateSelected(consumedCode, originalText)
+		// 用户词频学习：命令候选不进入学习，避免污染用户词典（如 uuid）。
+		if !cand.IsCommand {
+			consumedCode := c.inputBuffer[:cand.ConsumedLength]
+			c.engineMgr.OnCandidateSelected(consumedCode, originalText)
+		}
 
 		remaining := c.inputBuffer[cand.ConsumedLength:]
 		c.logger.Debug("Partial commit internal (pinyin)", "index", index, "text", text,
@@ -1867,8 +1872,8 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 		}
 	}
 
-	// 用户词频学习：记录选词
-	if isPinyin && c.engineMgr != nil {
+	// 用户词频学习：命令候选不进入学习，避免污染用户词典（如 uuid）。
+	if isPinyin && c.engineMgr != nil && !cand.IsCommand {
 		c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText)
 	}
 

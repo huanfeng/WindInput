@@ -3,6 +3,7 @@ package pinyin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
@@ -68,6 +69,8 @@ sort: by_weight
 替	ti	900
 温	wen	800
 提问	ti wen	700
+在	zai	1000
+你在吗	ni zai ma	700
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "8105.dict.yaml"), []byte(content), 0644); err != nil {
 		t.Fatalf("写入测试文件失败: %v", err)
@@ -1004,6 +1007,435 @@ func TestEngineConvertExSingleLetterPriority(t *testing.T) {
 	if firstSingleCharIdx >= 0 && firstPhraseIdx >= 0 && firstSingleCharIdx > firstPhraseIdx {
 		t.Errorf("Single char (idx=%d) should appear before phrase (idx=%d) for 'b' input",
 			firstSingleCharIdx, firstPhraseIdx)
+	}
+}
+
+// ============================================================
+// 重构后的新增测试用例
+// ============================================================
+
+// createTestDictWithPhraseLayer 创建带 PhraseLayer 的 CompositeDict
+// 用于测试 uuid/date 等命令
+func createTestDictWithPhraseLayer(t *testing.T) dict.Dict {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	content := `# Rime dictionary
+---
+name: test
+version: "1.0"
+sort: by_weight
+...
+啊	a	1000
+你	ni	1000
+好	hao	1000
+你好	ni hao	800
+我	wo	1000
+们	men	1000
+我们	wo men	800
+不	bu	1000
+知	zhi	1000
+道	dao	1000
+知道	zhi dao	800
+不知道	bu zhi dao	700
+在	zai	1000
+吗	ma	800
+你在吗	ni zai ma	700
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "8105.dict.yaml"), []byte(content), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+
+	pinyinDict := dict.NewPinyinDict()
+	if err := pinyinDict.LoadRimeDir(tmpDir); err != nil {
+		t.Fatalf("加载词库失败: %v", err)
+	}
+
+	// 创建 CompositeDict，添加 PhraseLayer 和 PinyinDictLayer
+	composite := dict.NewCompositeDict()
+
+	phraseLayer := dict.NewPhraseLayer("phrases", filepath.Join(tmpDir, "phrases.yaml"))
+	composite.AddLayer(phraseLayer)
+
+	systemLayer := dict.NewPinyinDictLayer("pinyin-system", dict.LayerTypeSystem, pinyinDict)
+	composite.AddLayer(systemLayer)
+
+	return composite
+}
+
+// TestCommand_uuid 输入 "uuid" 应返回 UUID 格式字符串
+func TestCommand_uuid(t *testing.T) {
+	d := createTestDictWithPhraseLayer(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("uuid", 10)
+
+	for i, c := range result.Candidates {
+		if i >= 5 {
+			break
+		}
+		t.Logf("uuid candidate[%d]: %s (weight=%d)", i, c.Text, c.Weight)
+	}
+
+	if len(result.Candidates) == 0 {
+		t.Fatal("ConvertEx('uuid') returned no candidates")
+	}
+
+	// 检查是否包含 UUID 格式（xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）
+	found := false
+	for _, c := range result.Candidates {
+		if len(c.Text) == 36 && c.Text[8] == '-' && c.Text[13] == '-' {
+			found = true
+			t.Logf("Found UUID: %s", c.Text)
+			break
+		}
+	}
+	if !found {
+		t.Error("ConvertEx('uuid') should contain a UUID format string")
+	}
+}
+
+// TestCommand_date 输入 "date" 应返回日期格式
+func TestCommand_date(t *testing.T) {
+	d := createTestDictWithPhraseLayer(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("date", 10)
+
+	for i, c := range result.Candidates {
+		if i >= 5 {
+			break
+		}
+		t.Logf("date candidate[%d]: %s (weight=%d)", i, c.Text, c.Weight)
+	}
+
+	if len(result.Candidates) == 0 {
+		t.Fatal("ConvertEx('date') returned no candidates")
+	}
+
+	// 检查是否包含日期格式（如 2026-02-07 或 2026年02月07日）
+	found := false
+	for _, c := range result.Candidates {
+		if len(c.Text) >= 8 && (c.Text[4] == '-' || strings.Contains(c.Text, "年")) {
+			found = true
+			t.Logf("Found date: %s", c.Text)
+			break
+		}
+	}
+	if !found {
+		t.Error("ConvertEx('date') should contain a date format string")
+	}
+}
+
+// TestCommand_uNotUuid 输入 "u" 不应显示 UUID
+func TestCommand_uNotUuid(t *testing.T) {
+	d := createTestDictWithPhraseLayer(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("u", 10)
+
+	for i, c := range result.Candidates {
+		if i >= 5 {
+			break
+		}
+		t.Logf("u candidate[%d]: %s (weight=%d)", i, c.Text, c.Weight)
+	}
+
+	// "u" 不应包含 UUID 格式字符串
+	for _, c := range result.Candidates {
+		if len(c.Text) == 36 && c.Text[8] == '-' && c.Text[13] == '-' {
+			t.Errorf("ConvertEx('u') should NOT contain UUID, but found: %s", c.Text)
+		}
+	}
+}
+
+// TestCommand_uuidCacheStability UUID 命令缓存应保持候选稳定
+func TestCommand_uuidCacheStability(t *testing.T) {
+	d := createTestDictWithPhraseLayer(t)
+	engine := NewEngine(d)
+
+	// 第一次查询
+	result1 := engine.ConvertEx("uuid", 10)
+	// 第二次查询
+	result2 := engine.ConvertEx("uuid", 10)
+
+	if len(result1.Candidates) == 0 || len(result2.Candidates) == 0 {
+		t.Fatal("uuid should return candidates")
+	}
+
+	// 两次查询的 UUID 应该相同（因为缓存）
+	var uuid1, uuid2 string
+	for _, c := range result1.Candidates {
+		if len(c.Text) == 36 && c.Text[8] == '-' {
+			uuid1 = c.Text
+			break
+		}
+	}
+	for _, c := range result2.Candidates {
+		if len(c.Text) == 36 && c.Text[8] == '-' {
+			uuid2 = c.Text
+			break
+		}
+	}
+	if uuid1 != uuid2 {
+		t.Errorf("UUID should be cached: first=%q second=%q", uuid1, uuid2)
+	}
+}
+
+// TestAbbrev_bzd 简拼 "bzd" 应匹配"不知道"
+func TestAbbrev_bzd(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("bzd", 20)
+
+	found := false
+	for _, c := range result.Candidates {
+		if c.Text == "不知道" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		var texts []string
+		for _, c := range result.Candidates {
+			texts = append(texts, c.Text)
+		}
+		t.Errorf("ConvertEx('bzd') should contain '不知道', got %v", texts)
+	}
+}
+
+// TestAbbrev_nh 简拼 "nh" 应匹配"你好"
+func TestAbbrev_nh(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("nh", 20)
+
+	found := false
+	for _, c := range result.Candidates {
+		if c.Text == "你好" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		var texts []string
+		for _, c := range result.Candidates {
+			texts = append(texts, c.Text)
+		}
+		t.Errorf("ConvertEx('nh') should contain '你好', got %v", texts)
+	}
+}
+
+// TestMixedAbbrev_nizm 混合简拼 "nizm" 应匹配"你在吗"
+func TestMixedAbbrev_nizm(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("nizm", 20)
+
+	for i, c := range result.Candidates {
+		if i >= 10 {
+			break
+		}
+		t.Logf("nizm candidate[%d]: %s (weight=%d, consumed=%d)", i, c.Text, c.Weight, c.ConsumedLength)
+	}
+
+	// "你在吗" 应在候选中（混合简拼：ni+z+m → abbrev="nzm"）
+	found := false
+	for _, c := range result.Candidates {
+		if c.Text == "你在吗" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		var texts []string
+		for _, c := range result.Candidates {
+			texts = append(texts, c.Text)
+		}
+		t.Errorf("ConvertEx('nizm') should contain '你在吗', got %v", texts)
+	}
+}
+
+// TestAbbrevDuplicateKeepsHigherWeight
+// 回归测试：当同一文本同时来自前缀匹配（用户词）和简拼匹配（系统词）时，
+// 应保留简拼路径的高权重候选，避免“上屏后下次消失/后移”。
+func TestAbbrevDuplicateKeepsHigherWeight(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	content := `# Rime dictionary
+---
+name: test
+version: "1.0"
+sort: by_weight
+...
+司法官	si fa guan	800
+司	si	500
+法	fa	500
+官	guan	500
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "8105.dict.yaml"), []byte(content), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+
+	pinyinDict := dict.NewPinyinDict()
+	if err := pinyinDict.LoadRimeDir(tmpDir); err != nil {
+		t.Fatalf("加载词库失败: %v", err)
+	}
+
+	userDictPath := filepath.Join(tmpDir, "user_words.txt")
+	ud := dict.NewUserDict("user", userDictPath)
+	t.Cleanup(func() { _ = ud.Close() })
+	if err := ud.Add("sfg", "司法官", 100); err != nil {
+		t.Fatalf("添加用户词失败: %v", err)
+	}
+
+	composite := dict.NewCompositeDict()
+	composite.AddLayer(ud)
+	composite.AddLayer(dict.NewPinyinDictLayer("pinyin-system", dict.LayerTypeSystem, pinyinDict))
+
+	engine := NewEngine(composite)
+	result := engine.ConvertEx("sfg", 50)
+
+	found := false
+	gotWeight := 0
+	for _, c := range result.Candidates {
+		if c.Text == "司法官" {
+			found = true
+			gotWeight = c.Weight
+			break
+		}
+	}
+	if !found {
+		t.Fatal("ConvertEx('sfg') should contain '司法官'")
+	}
+
+	// 简拼匹配应给到 L2 层级权重，不应被前缀 L4 权重覆盖。
+	if gotWeight < weightExactMatch-500 {
+		t.Fatalf("'司法官' weight too low: got=%d, want >= %d", gotWeight, weightExactMatch-500)
+	}
+}
+
+// TestMixedAbbrev_nihao "nihao" 应该"你好"排第一
+func TestMixedAbbrev_nihao(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("nihao", 20)
+
+	if len(result.Candidates) == 0 {
+		t.Fatal("nihao should return candidates")
+	}
+
+	// "你好" 应排第一
+	if result.Candidates[0].Text != "你好" {
+		t.Errorf("First candidate should be '你好', got %q", result.Candidates[0].Text)
+	}
+
+	// "你" 应在前 5 名
+	foundIdx := -1
+	for i, c := range result.Candidates {
+		if c.Text == "你" {
+			foundIdx = i
+			break
+		}
+	}
+	if foundIdx < 0 || foundIdx >= 5 {
+		t.Errorf("'你' should be in top 5, found at %d", foundIdx)
+	}
+}
+
+// TestPartialSuffix_nihaozh "nihaozh" 应有"你好"和 zh 相关候选
+func TestPartialSuffix_nihaozh(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("nihaozh", 20)
+
+	for i, c := range result.Candidates {
+		if i >= 10 {
+			break
+		}
+		t.Logf("nihaozh candidate[%d]: %s (weight=%d, consumed=%d)", i, c.Text, c.Weight, c.ConsumedLength)
+	}
+
+	// 应包含 "你好"（前缀匹配 nihao）
+	foundNihao := false
+	for _, c := range result.Candidates {
+		if c.Text == "你好" {
+			foundNihao = true
+			break
+		}
+	}
+	if !foundNihao {
+		t.Error("ConvertEx('nihaozh') should contain '你好'")
+	}
+
+	// 应包含 zh 开头的字（如"中"、"知"等）
+	foundZhChar := false
+	zhChars := []string{"中", "知", "之", "真", "正", "张", "找", "这", "周", "住"}
+	for _, c := range result.Candidates {
+		for _, zh := range zhChars {
+			if c.Text == zh {
+				foundZhChar = true
+				break
+			}
+		}
+		if foundZhChar {
+			break
+		}
+	}
+	if !foundZhChar {
+		t.Error("ConvertEx('nihaozh') should contain zh-prefix chars like '中','知' etc.")
+	}
+}
+
+// TestSingleLetter_b 单字母 "b" 输入时单字应排在词组前面
+func TestSingleLetter_b(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("b", 30)
+
+	if len(result.Candidates) == 0 {
+		t.Fatal("ConvertEx('b') returned no candidates")
+	}
+
+	// 找到第一个单字和第一个多字词的位置
+	firstSingleCharIdx := -1
+	firstPhraseIdx := -1
+	for i, c := range result.Candidates {
+		charCount := len([]rune(c.Text))
+		if charCount == 1 && firstSingleCharIdx == -1 {
+			firstSingleCharIdx = i
+		}
+		if charCount > 1 && firstPhraseIdx == -1 {
+			firstPhraseIdx = i
+		}
+	}
+
+	// 单字应排在词组前面
+	if firstSingleCharIdx >= 0 && firstPhraseIdx >= 0 && firstSingleCharIdx > firstPhraseIdx {
+		t.Errorf("Single char (idx=%d) should appear before phrase (idx=%d) for 'b' input",
+			firstSingleCharIdx, firstPhraseIdx)
+	}
+}
+
+// TestWeightLevels 验证权重层级关系正确
+func TestWeightLevels(t *testing.T) {
+	if weightCommand <= weightViterbi {
+		t.Error("weightCommand should be > weightViterbi")
+	}
+	if weightViterbi <= weightExactMatch {
+		t.Error("weightViterbi should be > weightExactMatch")
+	}
+	if weightExactMatch <= weightFirstSyllable {
+		t.Error("weightExactMatch should be > weightFirstSyllable")
+	}
+	if weightFirstSyllable <= weightSupplement {
+		t.Error("weightFirstSyllable should be > weightSupplement")
 	}
 }
 

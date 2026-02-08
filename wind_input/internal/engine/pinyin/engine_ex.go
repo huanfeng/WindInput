@@ -14,20 +14,14 @@ import (
 // ============================================================
 
 // ============================================================
-// 权重层级常量（统一权重体系）
+// 权重层级常量（5 级权重体系）
 // ============================================================
 const (
-	weightViterbi       = 3000000 // Viterbi 整句候选
-	weightExactMatch    = 2000000 // 精确匹配（字数=音节数）
-	weightFirstChar     = 1900000 // 首音节单字（多音节输入时，紧随精确匹配）
-	weightPrefixClose   = 1800000 // 前缀匹配（字数接近）
-	weightPrefixMatch   = 1700000 // 前缀匹配（一般）
-	weightExactOther    = 1500000 // 精确匹配（字数≠音节数）
-	weightSubPhrase     = 1000000 // 子词组
-	weightPartialPrefix = 800000  // 未完成音节前缀词
-	weightPartialChar   = 600000  // 未完成音节单字
-	weightSingleChar    = 500000  // 首音节单字
-	weightPhrasePrefix  = 300000  // partial 输入时的多字词前缀匹配
+	weightCommand       = 4000000 // L0: 特殊命令精确匹配（uuid, date 等）
+	weightViterbi       = 3000000 // L1: Viterbi 整句候选
+	weightExactMatch    = 2000000 // L2: 精确匹配 + 混合简拼（字数=音节数）
+	weightFirstSyllable = 1500000 // L3: 首音节单字 + 前缀接近匹配
+	weightSupplement    = 500000  // L4: 子词组、partial 前缀、非首音节单字
 )
 
 // ConvertEx 扩展版转换方法
@@ -59,6 +53,10 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	result.Composition = builder.Build(parsed)
 	result.PreeditDisplay = result.Composition.PreeditText
 
+	// 注意：以下变量来自 parsed（原始解析结果），而非 composition。
+	// - completedSyllables: 仅包含 Exact 音节（如 "ni","hao"），不含 partial
+	// - allSyllables: 包含所有音节文本（Exact + Partial），用于简拼匹配
+	// composition.CompletedSyllables 会把非末尾 partial 提升为 completed（仅用于 UI 显示）
 	completedSyllables := parsed.CompletedSyllables()
 	syllableCount := len(completedSyllables)
 	partial := parsed.PartialSyllable()
@@ -76,7 +74,23 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		candidateOrder = e.config.CandidateOrder
 	}
 
-	// 3a. Viterbi 智能组句（多音节且无未完成音节时使用）
+	// ── 步骤 0：特殊命令精确匹配（仅查命令，不查普通词条） ──
+	// 通过 CommandSearchable 接口仅查询 PhraseLayer 中的命令（uuid, date 等），
+	// 不会把普通拼音词条提升到命令权重。对所有输入无条件执行。
+	if cs, ok := e.dict.(dict.CommandSearchable); ok {
+		cmdResults := cs.LookupCommand(input)
+		for i, cand := range cmdResults {
+			c := cand
+			c.Weight = weightCommand + 1000 - i
+			c.ConsumedLength = len(input)
+			candidatesMap[c.Text] = &c
+		}
+		if len(cmdResults) > 0 {
+			logDebug("[PinyinEngine] command match for %q: %d results", input, len(cmdResults))
+		}
+	}
+
+	// ── 3a. Viterbi 智能组句（多音节且无未完成音节时使用） ──
 	useViterbi := e.config != nil && e.config.UseSmartCompose &&
 		e.unigram != nil && syllableCount >= 2 && partial == "" &&
 		len(input) >= smartComposeThreshold
@@ -84,7 +98,6 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	if useViterbi {
 		lattice := BuildLattice(input, e.syllableTrie, e.dict, e.unigram)
 		if !lattice.IsEmpty() {
-			// 获取 Top-3 最优路径
 			vResults := ViterbiTopK(lattice, e.bigram, 3)
 			for rank, vResult := range vResults {
 				if vResult == nil || len(vResult.Words) == 0 {
@@ -107,10 +120,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	// 3b. 精确匹配完整音节序列的词组（含模糊变体）
+	// ── 3b. 精确匹配完整音节序列的词组（含模糊变体） ──
 	if syllableCount > 0 && partial == "" {
 		exactResults := e.lookupWithFuzzy(input, completedSyllables)
-		// 使用 Unigram 单字频率对精确匹配进行二次排序
 		type scoredExact struct {
 			cand  candidate.Candidate
 			score float64
@@ -123,15 +135,19 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				lmScore = e.unigram.CharBasedScore(cand.Text)
 			}
 			se := scoredExact{cand: cand, score: lmScore}
-			// 字数匹配音节数的给予额外加成
 			if charCount == syllableCount {
 				se.score += 100
 			}
 			scored = append(scored, se)
 		}
-		// 按 LM 分数降序排列
 		sort.Slice(scored, func(i, j int) bool {
-			return scored[i].score > scored[j].score
+			if scored[i].score != scored[j].score {
+				return scored[i].score > scored[j].score
+			}
+			if scored[i].cand.Text != scored[j].cand.Text {
+				return scored[i].cand.Text < scored[j].cand.Text
+			}
+			return scored[i].cand.Code < scored[j].cand.Code
 		})
 		for i, se := range scored {
 			if _, exists := candidatesMap[se.cand.Text]; exists {
@@ -142,7 +158,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			if charCount == syllableCount {
 				c.Weight = weightExactMatch - i
 			} else {
-				c.Weight = weightExactOther - i
+				c.Weight = weightExactMatch - 500000 - i // 字数不匹配：降级
 			}
 			c.ConsumedLength = len(input)
 			candidatesMap[c.Text] = &c
@@ -150,8 +166,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		logDebug("[PinyinEngine] exact match for %q: %d results", input, len(exactResults))
 	}
 
-	// 3c. 前缀匹配（输入 "wome" 时找到 "women"→我们）
-	// 仅在有已完成音节时运行；纯 partial 输入（如 "b","zh"）由 3f 处理
+	// ── 3c. 前缀匹配（输入 "wome" 时找到 "women"→我们） ──
 	if syllableCount > 0 {
 		if ps, ok := e.dict.(dict.PrefixSearchable); ok {
 			prefixLimit := 50
@@ -166,11 +181,11 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				c := cand
 				charCount := len([]rune(c.Text))
 				if charCount == syllableCount+1 && partial == "" {
-					c.Weight = weightPrefixClose - i
+					c.Weight = weightFirstSyllable + 300000 - i // 字数接近：L3 上段
 				} else if charCount == syllableCount {
-					c.Weight = weightPrefixMatch - i
+					c.Weight = weightFirstSyllable + 200000 - i // 字数一致：L3 中段
 				} else {
-					c.Weight = weightSubPhrase - i
+					c.Weight = weightSupplement - i // 其他：L4
 				}
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
@@ -179,22 +194,23 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	// 3d. 子词组查找（如 "nihao" → 查找 "ni"+"hao" 对应的词组）
+	// ── 3d. 子词组查找（如 "nihao" → 查找 "ni"+"hao" 对应的词组） ──
+	// 对于有 partial 后缀的输入（如 "nihaozh"），DAG 只能覆盖到 "nihao"，
+	// 此时 joined 是 input 的前缀而非完全相等，也应执行子词组查找。
 	var mainPath []string
 	if syllableCount > 1 {
 		dag := BuildDAG(input, e.syllableTrie)
 		mainPath = dag.MaximumMatch()
 		if len(mainPath) > 1 {
 			joined := strings.Join(mainPath, "")
-			if joined == input {
+			if joined == input || strings.HasPrefix(input, joined) {
 				e.lookupSubPhrasesEx(mainPath, candidatesMap)
 			}
 		}
 	}
 
-	// 3e. 单字候选
+	// ── 3e. 单字候选 ──
 	if syllableCount > 0 {
-		// 使用 Unigram 对首音节单字排序（含模糊变体）
 		firstSyllable := completedSyllables[0]
 		charResults := e.lookupWithFuzzy(firstSyllable, []string{firstSyllable})
 
@@ -211,7 +227,13 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			scoredChars = append(scoredChars, scoredChar{cand: cand, score: lmScore})
 		}
 		sort.Slice(scoredChars, func(i, j int) bool {
-			return scoredChars[i].score > scoredChars[j].score
+			if scoredChars[i].score != scoredChars[j].score {
+				return scoredChars[i].score > scoredChars[j].score
+			}
+			if scoredChars[i].cand.Text != scoredChars[j].cand.Text {
+				return scoredChars[i].cand.Text < scoredChars[j].cand.Text
+			}
+			return scoredChars[i].cand.Code < scoredChars[j].cand.Code
 		})
 
 		for j, sc := range scoredChars {
@@ -219,17 +241,16 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				continue
 			}
 			c := sc.cand
-			// 多音节输入时提升首音节单字权重，确保它们出现在精确匹配之后、前缀匹配之前
 			if syllableCount >= 2 {
-				c.Weight = weightFirstChar - j
+				c.Weight = weightFirstSyllable - j // L3：多音节输入的首音节单字
 			} else {
-				c.Weight = weightSingleChar - j
+				c.Weight = weightSupplement - j // L4：单音节输入的单字
 			}
 			c.ConsumedLength = len(firstSyllable)
 			candidatesMap[c.Text] = &c
 		}
 
-		// 非首音节的单字（更低权重，含模糊变体）
+		// 非首音节的单字（L4 权重）
 		for i := 1; i < syllableCount; i++ {
 			syllable := completedSyllables[i]
 			others := e.lookupWithFuzzy(syllable, []string{syllable})
@@ -238,8 +259,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 					continue
 				}
 				c := cand
-				c.Weight = weightSingleChar - i*10000 - j
-				// 非首音节单字的 ConsumedLength 需要计算到该音节的结束位置
+				c.Weight = weightSupplement - i*10000 - j
 				consumedLen := 0
 				for k := 0; k <= i; k++ {
 					consumedLen += len(completedSyllables[k])
@@ -250,10 +270,8 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	// 3e2. 当有多个 partial 音节时，为首音节生成单字候选
-	// 例如输入 "bzd"，所有音节 ["b","z","d"] 都是 partial，completedSyllables 为空
-	// 此时应为首音节 "b" 生成单字候选（按空格先上屏首音节）
-	// 注意：单 partial（如 "b"）由 3f 处理，避免权重冲突
+	// ── 3e2. 多 partial 音节时的首音节单字候选 ──
+	// 例如 "bzd" → ["b","z","d"] 都是 partial，为首音节 "b" 生成单字候选
 	if syllableCount == 0 && len(allSyllables) > 1 {
 		firstPartial := allSyllables[0]
 		possibles := e.syllableTrie.GetPossibleSyllables(firstPartial)
@@ -264,18 +282,17 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 					continue
 				}
 				c := cand
-				c.Weight = weightSingleChar - j
+				c.Weight = weightSupplement - j
 				c.ConsumedLength = len(firstPartial)
 				candidatesMap[c.Text] = &c
 			}
 		}
 	}
 
-	// 3f. 未完成音节的前缀查找
+	// ── 3f. 未完成音节的前缀查找 ──
 	if partial != "" {
 		if ps, ok := e.dict.(dict.PrefixSearchable); ok {
-			partialPrefix := input
-			prefixResults := ps.LookupPrefix(partialPrefix, 30)
+			prefixResults := ps.LookupPrefix(input, 30)
 			for i, cand := range prefixResults {
 				if _, exists := candidatesMap[cand.Text]; exists {
 					continue
@@ -283,19 +300,16 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				c := cand
 				charCount := len([]rune(c.Text))
 				if charCount == 1 {
-					// 单字候选保持高权重
-					c.Weight = weightPartialPrefix - i
+					c.Weight = weightSupplement + 300000 - i // 单字候选：L4 上段
 				} else {
-					// 多字词/短语降低权重，避免"版权"、UUID 等出现在单字前面
-					c.Weight = weightPhrasePrefix - i
+					c.Weight = weightSupplement - 200000 - i // 多字词：L4 下段
 				}
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
 			}
 		}
-		// 按完整音节前缀查找单字（即使有已完成音节，也应为 partial 部分生成候选）
-		st := e.syllableTrie
-		possibles := st.GetPossibleSyllables(partial)
+		// 按完整音节前缀查找单字
+		possibles := e.syllableTrie.GetPossibleSyllables(partial)
 		for _, syllable := range possibles {
 			charResults := e.dict.Lookup(syllable)
 			for j, cand := range charResults {
@@ -303,15 +317,17 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 					continue
 				}
 				c := cand
-				// 有已完成音节或多个 partial 音节时降低权重，避免与首音节单字争排名
 				otherSyllableCount := len(completedSyllables)
 				if otherSyllableCount == 0 && len(allSyllables) > 1 {
 					otherSyllableCount = len(allSyllables) - 1
 				}
 				if otherSyllableCount > 0 {
-					c.Weight = weightPartialChar - otherSyllableCount*10000 - j
+					// 有其他音节时降低权重，避免末尾 partial 的单字排在首音节单字前面
+					// 例如 "bzd" 时，"d" 的单字（到、的）应排在 "b" 的单字（不、白）之后
+					c.Weight = weightSupplement - 100000 - otherSyllableCount*10000 - j
 				} else {
-					c.Weight = weightPartialChar - j
+					// 单 partial 输入（如 "b"）：保持较高权重
+					c.Weight = weightSupplement + 100000 - j
 				}
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
@@ -319,20 +335,35 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	// 3g. 简拼词组匹配（多个 partial 声母时）
-	// 例如 "bzd" → allSyllables=["b","z","d"]，匹配 "不知道"(bu zhi dao) 等
-	if len(allSyllables) >= 2 && syllableCount == 0 {
-		abbrevCode := strings.Join(allSyllables, "")
+	// ── 3g. 简拼/混合简拼词组匹配 ──
+	// 纯简拼：bzd → allSyllables=["b","z","d"] → abbrev="bzd"
+	// 混合简拼：nizm → allSyllables=["ni","z","m"] → abbrev="nzm"
+	if len(allSyllables) >= 2 {
+		var abbrevBuilder strings.Builder
+		for _, s := range allSyllables {
+			abbrevBuilder.WriteByte(s[0])
+		}
+		abbrevCode := abbrevBuilder.String()
+
 		if as, ok := e.dict.(dict.AbbrevSearchable); ok {
 			abbrevResults := as.LookupAbbrev(abbrevCode, 30)
 			for i, cand := range abbrevResults {
-				if _, exists := candidatesMap[cand.Text]; exists {
-					continue
-				}
 				c := cand
-				c.Weight = weightExactMatch - i
+				charCount := len([]rune(c.Text))
+				if charCount == len(allSyllables) {
+					c.Weight = weightExactMatch - 100 - i // 字数匹配音节数：L2
+				} else {
+					c.Weight = weightSupplement + 400000 - i // 字数不匹配：L4 高段
+				}
 				c.ConsumedLength = len(input)
-				candidatesMap[c.Text] = &c
+				if existing, exists := candidatesMap[c.Text]; exists {
+					// 重复文本时保留更高优先级候选，避免前缀低权重覆盖简拼高权重。
+					if candidate.Better(c, *existing) {
+						candidatesMap[c.Text] = &c
+					}
+				} else {
+					candidatesMap[c.Text] = &c
+				}
 			}
 		}
 	}
@@ -389,16 +420,15 @@ func (e *Engine) sortCandidates(candidates []candidate.Candidate, order string, 
 			if iIsPhrase != jIsPhrase {
 				return iIsPhrase // 词组排前面
 			}
-			return candidates[i].Weight > candidates[j].Weight
+			return candidate.Better(candidates[i], candidates[j])
 		})
 	case "smart":
-		// 智能混排：完全按权重排序，但对单字候选使用 Unigram 分数微调
+		// 智能混排：完全按权重排序，但对 L4 层单字候选使用 Unigram 分数微调
 		if e.unigram != nil {
 			for i := range candidates {
-				if len([]rune(candidates[i].Text)) == 1 && candidates[i].Weight >= weightSingleChar && candidates[i].Weight < weightPartialChar {
-					// 用 Unigram 分数微调单字权重
+				w := candidates[i].Weight
+				if len([]rune(candidates[i].Text)) == 1 && w >= weightSupplement && w < weightFirstSyllable {
 					lmScore := e.unigram.LogProb(candidates[i].Text)
-					// 将 logprob（通常 -20 到 -5）映射到 0-9999 的范围
 					bonus := int((lmScore + 20) * 600)
 					if bonus < 0 {
 						bonus = 0
@@ -406,17 +436,17 @@ func (e *Engine) sortCandidates(candidates []candidate.Candidate, order string, 
 					if bonus > 9999 {
 						bonus = 9999
 					}
-					candidates[i].Weight = weightSingleChar + bonus
+					candidates[i].Weight = weightSupplement + bonus
 				}
 			}
 		}
 		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].Weight > candidates[j].Weight
+			return candidate.Better(candidates[i], candidates[j])
 		})
 	default: // "char_first" 或默认
 		// 单字优先：默认按权重排序即可（权重体系已保证单字在同音节下排在词组前面的逻辑）
 		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].Weight > candidates[j].Weight
+			return candidate.Better(candidates[i], candidates[j])
 		})
 	}
 }
@@ -441,7 +471,7 @@ func (e *Engine) lookupSubPhrasesEx(syllables []string, candidatesMap map[string
 				if charCount == length {
 					bonus += 50000
 				}
-				c.Weight = weightSubPhrase + bonus - start*10000 - i
+				c.Weight = weightSupplement + bonus - start*10000 - i
 				// 计算该子词组消耗的输入长度
 				if start == 0 {
 					// 从头开始的子词组：仅消耗对应音节，支持部分上屏

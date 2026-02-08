@@ -63,6 +63,33 @@ func TestTrieSearchPrefix(t *testing.T) {
 	}
 }
 
+func TestTrieSearchPrefixDeterministicWithLimit(t *testing.T) {
+	trie := NewTrie()
+
+	// 构造同权重候选，验证 limit 场景下结果稳定（不受 map 迭代顺序影响）。
+	trie.Insert("sa", candidate.Candidate{Text: "司", Code: "sa", Weight: 100})
+	trie.Insert("sb", candidate.Candidate{Text: "法", Code: "sb", Weight: 100})
+	trie.Insert("sc", candidate.Candidate{Text: "官", Code: "sc", Weight: 100})
+
+	first := trie.SearchPrefix("s", 2)
+	if len(first) != 2 {
+		t.Fatalf("first SearchPrefix(s, 2) = %d条, want 2", len(first))
+	}
+
+	for i := 0; i < 10; i++ {
+		got := trie.SearchPrefix("s", 2)
+		if len(got) != 2 {
+			t.Fatalf("SearchPrefix(s, 2) = %d条, want 2", len(got))
+		}
+		if got[0].Text != first[0].Text || got[1].Text != first[1].Text {
+			t.Fatalf("SearchPrefix(s, 2) not deterministic: first=%v got=%v",
+				[]string{first[0].Text, first[1].Text},
+				[]string{got[0].Text, got[1].Text},
+			)
+		}
+	}
+}
+
 func TestTrieHasPrefix(t *testing.T) {
 	trie := NewTrie()
 

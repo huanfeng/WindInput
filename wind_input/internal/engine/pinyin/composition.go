@@ -130,6 +130,10 @@ func (b *CompositionBuilder) Build(parsed *ParseResult) *CompositionState {
 	// 分离完整音节和未完成音节
 	// 非末尾的 partial 音节视为"已确认的段"加入 CompletedSyllables，
 	// 仅最后一个 partial 保留为 PartialSyllable
+	//
+	// 注意：composition 的 CompletedSyllables 包含提升后的 partial（用于 UI 显示），
+	// 而 convertCore 使用 parsed.CompletedSyllables()（仅 Exact 音节）做查询逻辑，
+	// 两者用途不同，不可混淆。
 	for i, syllable := range parsed.Syllables {
 		if syllable.IsExact() {
 			comp.CompletedSyllables = append(comp.CompletedSyllables, syllable.Text)
