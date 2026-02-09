@@ -834,13 +834,31 @@ func (r *Renderer) drawRoundedRect(dc *gg.Context, x, y, w, h, radius float64) {
 	dc.ClosePath()
 }
 
-// RenderModeIndicator renders a mode indicator (中/En)
+// RenderModeIndicator renders a mode indicator with adaptive width
 func (r *Renderer) RenderModeIndicator(mode string) *image.RGBA {
 	scale := GetDPIScale()
 
-	width := 50.0 * scale
+	minWidth := 50.0 * scale
 	height := 36.0 * scale
 	fontSize := 20.0 * scale
+	padding := 12.0 * scale
+
+	// Use cached font face
+	face := r.fontCache.getFace(fontSize)
+
+	// Measure text width to determine canvas width
+	var textWidth float64
+	if face != nil {
+		tmpDc := gg.NewContext(1, 1)
+		tmpDc.SetFontFace(face)
+		textWidth, _ = tmpDc.MeasureString(mode)
+	}
+
+	// Adaptive width: max(minWidth, textWidth + padding*2)
+	width := textWidth + padding*2
+	if width < minWidth {
+		width = minWidth
+	}
 
 	dc := gg.NewContext(int(width), int(height))
 
@@ -852,13 +870,11 @@ func (r *Renderer) RenderModeIndicator(mode string) *image.RGBA {
 	r.drawRoundedRect(dc, 2*scale, 2*scale, width-4*scale, height-4*scale, 6*scale)
 	dc.Fill()
 
-	// Use cached font face
-	face := r.fontCache.getFace(fontSize)
 	if face != nil {
 		dc.SetFontFace(face)
 	}
 
-	// Draw mode text
+	// Draw mode text (centered)
 	dc.SetColor(textColor)
 	tw, _ := dc.MeasureString(mode)
 	dc.DrawString(mode, width/2-tw/2, height/2+7*scale)

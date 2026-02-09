@@ -1533,22 +1533,11 @@ func (c *Coordinator) showUI() {
 	)
 }
 
-func (c *Coordinator) showModeIndicator() {
-	if c.uiManager == nil || !c.uiManager.IsReady() {
-		return
-	}
-
-	// Show a brief indicator of the current mode
-	modeText := "中"
-	if !c.chineseMode {
-		modeText = "En"
-	}
-
-	// Use caret position directly. The offset is applied in doShowModeIndicator.
-	// Note: caretX, caretY from TSF is typically the top-left of the caret.
-	// We pass this directly and let the user configure offset to position the indicator.
-	x := c.caretX
-	y := c.caretY
+// getIndicatorPosition returns the unified position for all status indicators.
+// Falls back to lastValid or default position if current caret position is invalid.
+func (c *Coordinator) getIndicatorPosition() (x, y int) {
+	x = c.caretX
+	y = c.caretY
 	const maxCoord = 32000
 	if (c.caretX == 0 && c.caretY == 0) || x > maxCoord || x < -maxCoord || y > maxCoord || y < -maxCoord {
 		if c.lastValidX != 0 || c.lastValidY != 0 {
@@ -1559,7 +1548,32 @@ func (c *Coordinator) showModeIndicator() {
 			y = 300
 		}
 	}
+	return x, y
+}
 
+func (c *Coordinator) showModeIndicator() {
+	if c.uiManager == nil || !c.uiManager.IsReady() {
+		return
+	}
+
+	// Build composite mode text: Chinese mode shows "中·五笔" or "中·拼音", English mode shows "En"
+	var modeText string
+	if !c.chineseMode {
+		modeText = "En"
+	} else if c.engineMgr != nil {
+		switch c.engineMgr.GetCurrentType() {
+		case engine.EngineTypeWubi:
+			modeText = "中·五笔"
+		case engine.EngineTypePinyin:
+			modeText = "中·拼音"
+		default:
+			modeText = "中"
+		}
+	} else {
+		modeText = "中"
+	}
+
+	x, y := c.getIndicatorPosition()
 	c.uiManager.ShowModeIndicator(modeText, x, y)
 }
 
@@ -2048,20 +2062,7 @@ func (c *Coordinator) handleCapsLockStateNoLock(on bool) {
 		indicator = "A"
 	}
 
-	// Use valid position or fallback (multi-monitor: coordinates can be negative)
-	x := c.caretX
-	y := c.caretY + c.caretHeight + 5
-	const maxCoord = 32000
-	if (c.caretX == 0 && c.caretY == 0) || x > maxCoord || x < -maxCoord || y > maxCoord || y < -maxCoord {
-		if c.lastValidX != 0 || c.lastValidY != 0 {
-			x = c.lastValidX
-			y = c.lastValidY
-		} else {
-			x = 400
-			y = 300
-		}
-	}
-
+	x, y := c.getIndicatorPosition()
 	c.uiManager.ShowModeIndicator(indicator, x, y)
 	// Note: Toolbar state is already updated by broadcastState() which is called
 	// before handleCapsLockStateNoLock() in the CapsLock handling path.
@@ -2079,7 +2080,10 @@ func (c *Coordinator) handleEngineSwitchKey() *bridge.KeyEventResult {
 
 	// 清除当前输入状态
 	c.clearState()
-	c.hideUI()
+	// Only hide UI if there was active input, to avoid hide→show flicker
+	if hadInput {
+		c.hideUI()
+	}
 
 	// 切换引擎
 	newType, err := c.engineMgr.ToggleEngine()
@@ -2114,30 +2118,25 @@ func (c *Coordinator) handleEngineSwitchKey() *bridge.KeyEventResult {
 	return nil
 }
 
-// showEngineIndicator 显示引擎切换指示器
+// showEngineIndicator 显示引擎切换指示器（复合显示引擎名+当前模式）
 func (c *Coordinator) showEngineIndicator() {
 	if c.uiManager == nil || !c.uiManager.IsReady() {
 		return
 	}
 
-	// 获取引擎显示名称
-	engineName := c.engineMgr.GetEngineDisplayName()
-
-	// Use valid position or fallback
-	x := c.caretX
-	y := c.caretY + c.caretHeight + 5
-	const maxCoord = 32000
-	if (c.caretX == 0 && c.caretY == 0) || x > maxCoord || x < -maxCoord || y > maxCoord || y < -maxCoord {
-		if c.lastValidX != 0 || c.lastValidY != 0 {
-			x = c.lastValidX
-			y = c.lastValidY
-		} else {
-			x = 400
-			y = 300
-		}
+	// Build composite text: engine name + current mode
+	var text string
+	switch c.engineMgr.GetCurrentType() {
+	case engine.EngineTypeWubi:
+		text = "中·五笔"
+	case engine.EngineTypePinyin:
+		text = "中·拼音"
+	default:
+		text = c.engineMgr.GetEngineDisplayName()
 	}
 
-	c.uiManager.ShowModeIndicator(engineName, x, y)
+	x, y := c.getIndicatorPosition()
+	c.uiManager.ShowModeIndicator(text, x, y)
 }
 
 // GetCurrentEngineName 获取当前引擎名称
@@ -2586,20 +2585,7 @@ func (c *Coordinator) showIndicator(text string) {
 		return
 	}
 
-	// Use valid position or fallback
-	x := c.caretX
-	y := c.caretY + c.caretHeight + 5
-	const maxCoord = 32000
-	if (c.caretX == 0 && c.caretY == 0) || x > maxCoord || x < -maxCoord || y > maxCoord || y < -maxCoord {
-		if c.lastValidX != 0 || c.lastValidY != 0 {
-			x = c.lastValidX
-			y = c.lastValidY
-		} else {
-			x = 400
-			y = 300
-		}
-	}
-
+	x, y := c.getIndicatorPosition()
 	c.uiManager.ShowModeIndicator(text, x, y)
 }
 

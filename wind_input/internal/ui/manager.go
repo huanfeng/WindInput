@@ -620,6 +620,14 @@ func (m *Manager) doShowModeIndicator(mode string, x, y int) {
 	// Render mode indicator
 	img := m.renderer.RenderModeIndicator(mode)
 
+	// Clear candidate hit test data to prevent mouse interactions
+	// from triggering old candidate window display.
+	// The mode indicator and candidate window share the same window,
+	// so stale hitRects would cause RefreshCandidates on mouse hover.
+	m.window.SetHitRects(nil)
+	m.window.SetPageRects(nil, nil)
+	m.window.ResetMouseTracking()
+
 	// Update window
 	if err := m.window.UpdateContent(img, adjustedX, adjustedY); err != nil {
 		m.logger.Error("UpdateContent failed", "error", err)

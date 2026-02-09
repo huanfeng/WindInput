@@ -428,6 +428,10 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
                     mods = KEYMOD_CTRL | KEYMOD_RCTRL;
                 }
 
+                // Update caret position before sending toggle key
+                // This ensures status indicators appear at the correct position
+                _pTextService->SendCaretPositionUpdate();
+
                 // Send KeyUp event to Go service (SYNC mode, wait for response)
                 // Go will check config and return ModeChanged if key is configured as toggle
                 // All state changes go through Go service - no local fallback
@@ -474,6 +478,9 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
             // Go side will check this to decide whether to toggle mode
             mods |= 0x8000; // High bit as "state notification only" marker
         }
+
+        // Update caret position before sending CapsLock event
+        _pTextService->SendCaretPositionUpdate();
 
         // SYNC: Send key event and wait for response
         // Go service will push state update followed by CMD_CONSUMED response

@@ -548,6 +548,10 @@ STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
         WIND_LOG_INFO(L"LangBarButton initialized\n");
     }
 
+    // Update caret position before notifying activation
+    // This ensures status indicators appear at the correct position immediately
+    SendCaretPositionUpdate();
+
     // Notify Go service that IME is activated (so it can show toolbar)
     if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
     {
