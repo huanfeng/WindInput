@@ -56,9 +56,11 @@ if /I "%WAILS_MODE%"=="skip" (
         echo [警告] 未找到 Wails CLI,已跳过 wind_setting 构建
         echo        安装命令: go install github.com/wailsapp/wails/v2/cmd/wails@latest
     ) else (
-        set "WAILS_FLAGS="
-        if /I "%WAILS_MODE%"=="debug" set "WAILS_FLAGS=-debug"
-        wails build %WAILS_FLAGS%
+        if /I "%WAILS_MODE%"=="debug" (
+            wails build -debug
+        ) else (
+            wails build
+        )
         if errorlevel 1 (
             echo [错误] wind_setting 构建失败,终止后续流程。
             exit /b 1
