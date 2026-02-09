@@ -872,6 +872,22 @@ BOOL CTextService::_InitIPCClient()
         }
     });
 
+    // Set up clear composition callback for mode toggle via menu
+    _pIPCClient->SetClearCompositionCallback([pThis]() {
+        // This callback is called from the async reader thread
+        WIND_LOG_DEBUG(L"Clear composition received from Go service\n");
+
+        if (pThis->_pLangBarItemButton != nullptr)
+        {
+            pThis->_pLangBarItemButton->PostClearComposition();
+        }
+        else
+        {
+            // Fallback: direct EndComposition
+            pThis->EndComposition();
+        }
+    });
+
     // Start async reader thread for receiving state pushes from Go
     if (!_pIPCClient->StartAsyncReader())
     {
@@ -1520,6 +1536,63 @@ void CTextService::SendMenuCommand(const char* command)
         pTempClient->Disconnect();
         delete pTempClient;
         WIND_LOG_DEBUG(L"SendMenuCommand: Temporary connection closed\n");
+    }
+}
+
+void CTextService::SendShowContextMenu(int screenX, int screenY)
+{
+    WIND_LOG_INFO_FMT(L"SendShowContextMenu: x=%d, y=%d\n", screenX, screenY);
+
+    CIPCClient* pClient = _pIPCClient;
+    CIPCClient* pTempClient = nullptr;
+
+    // If main IPC client is null (Deactivate was called), create temporary connection
+    if (pClient == nullptr)
+    {
+        WIND_LOG_INFO(L"SendShowContextMenu: Main IPC null, creating temporary connection\n");
+        pTempClient = new CIPCClient();
+        if (pTempClient == nullptr)
+        {
+            WIND_LOG_ERROR(L"SendShowContextMenu: Failed to create temporary IPC client\n");
+            return;
+        }
+        if (!pTempClient->Connect())
+        {
+            WIND_LOG_WARN(L"SendShowContextMenu: Temporary connection failed\n");
+            delete pTempClient;
+            return;
+        }
+        pClient = pTempClient;
+        WIND_LOG_INFO(L"SendShowContextMenu: Temporary connection established\n");
+    }
+    else if (!pClient->IsConnected())
+    {
+        WIND_LOG_INFO(L"SendShowContextMenu: IPC disconnected, attempting reconnect\n");
+        if (!pClient->Connect())
+        {
+            WIND_LOG_WARN(L"SendShowContextMenu: Reconnect failed\n");
+            return;
+        }
+        WIND_LOG_INFO(L"SendShowContextMenu: Reconnected successfully\n");
+    }
+
+    // Build payload: int32 x + int32 y = 8 bytes
+    struct {
+        int32_t x;
+        int32_t y;
+    } payload;
+    payload.x = (int32_t)screenX;
+    payload.y = (int32_t)screenY;
+
+    // Send async (fire-and-forget, Go side will show the menu)
+    pClient->SendAsync(CMD_SHOW_CONTEXT_MENU, &payload, sizeof(payload));
+
+    // Clean up temporary client if we created one
+    if (pTempClient != nullptr)
+    {
+        pTempClient->Disconnect();
+        delete pTempClient;
+        WIND_LOG_DEBUG(L"SendShowContextMenu: Temporary connection closed\n");
     }
 }
 

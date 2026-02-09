@@ -329,8 +329,9 @@ func main() {
 
 	if err := engineMgr.InitializeFromConfig(engineConfig); err != nil {
 		logger.Warn("Failed to initialize engine from config, falling back to pinyin", "error", err)
-		// 回退到拼音引擎
+		// 回退到拼音引擎，同时修正词库路径
 		engineConfig.Type = engine.EngineTypePinyin
+		engineConfig.DictPath = filepath.Join(exeDir, config.GetPinyinDictPath())
 		if err := engineMgr.InitializeFromConfig(engineConfig); err != nil {
 			logger.Error("Failed to initialize fallback engine", "error", err)
 			os.Exit(1)

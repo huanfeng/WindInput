@@ -19,6 +19,7 @@ const (
 	CmdToggleMode            uint16 = 0x0207 // Toggle mode request (from UI click)
 	CmdMenuCommand           uint16 = 0x0208 // Menu command (toggle_mode, toggle_width, etc.)
 	CmdCompositionTerminated uint16 = 0x0209 // Composition unexpectedly terminated (e.g., user clicked in input field)
+	CmdShowContextMenu       uint16 = 0x020A // 请求显示右键菜单（TSF发送屏幕坐标）
 	CmdCaretUpdate           uint16 = 0x0301 // Caret position update
 	CmdBatchEvents           uint16 = 0x0F01 // Batch events container
 )

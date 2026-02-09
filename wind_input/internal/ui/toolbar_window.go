@@ -83,6 +83,7 @@ type ToolbarCallback struct {
 	OnOpenSettings    func()
 	OnPositionChanged func(x, y int)
 	OnContextMenu     func(action ToolbarContextMenuAction)
+	OnShowMenu        func(screenX, screenY, flipRefY int) // 请求显示统一菜单 (flipRefY: 下方放不下时翻转到此Y上方, 0=禁用)
 }
 
 // ToolbarContextMenuAction represents actions from toolbar context menu
@@ -294,7 +295,7 @@ func (w *ToolbarWindow) getTooltipText(button ToolbarHitResult) string {
 	case HitPunctButton:
 		return "切换中/英标点"
 	case HitSettingsButton:
-		return "打开设置"
+		return "菜单"
 	default:
 		return ""
 	}
@@ -391,9 +392,18 @@ func (w *ToolbarWindow) handleMouseUp(hwnd uintptr, lParam uintptr) uintptr {
 				w.callback.OnTogglePunct()
 			}
 		case HitSettingsButton:
-			w.logger.Info("Settings button clicked")
-			if w.callback.OnOpenSettings != nil {
-				w.callback.OnOpenSettings()
+			w.logger.Info("Settings button clicked - showing unified menu")
+			if w.callback.OnShowMenu != nil {
+				// Calculate menu position: below the settings button
+				bx, _, bw, _ := w.renderer.GetButtonBounds(HitSettingsButton)
+				scale := GetDPIScale()
+				gap := int(4 * scale)
+				w.mu.Lock()
+				menuX := w.x + bx + bw/2
+				menuY := w.y + w.height + gap
+				flipRefY := w.y - gap // 如果下方放不下，翻转到工具栏上方
+				w.mu.Unlock()
+				w.callback.OnShowMenu(menuX, menuY, flipRefY)
 			}
 		}
 	}
@@ -401,81 +411,25 @@ func (w *ToolbarWindow) handleMouseUp(hwnd uintptr, lParam uintptr) uintptr {
 	return 0
 }
 
-// handleRightClick handles WM_RBUTTONUP to show context menu
+// handleRightClick handles WM_RBUTTONUP to show unified context menu
 func (w *ToolbarWindow) handleRightClick(hwnd uintptr, lParam uintptr) uintptr {
-	w.logger.Debug("Toolbar right click")
+	w.logger.Debug("Toolbar right click - showing unified menu")
 
 	// Hide tooltip
 	w.hideTooltip()
 
-	if w.popupMenu == nil {
-		w.logger.Warn("Popup menu not initialized")
-		return 0
-	}
-
-	// Get toolbar window position for menu placement (above the toolbar)
-	w.mu.Lock()
-	toolbarX := w.x
-	toolbarY := w.y
-	w.mu.Unlock()
-
-	// Menu item IDs
-	const (
-		IDM_SETTINGS = 1
-		IDM_RESTART  = 2
-		IDM_ABOUT    = 3
-	)
-
-	// Build menu items
-	items := []MenuItem{
-		{ID: IDM_SETTINGS, Text: "设置..."},
-		{ID: IDM_RESTART, Text: "重启服务..."},
-		{ID: 0, Text: "", Separator: true},
-		{ID: IDM_ABOUT, Text: "关于..."},
-	}
-
-	// Calculate menu height more accurately
-	// Use DPI-scaled values matching popup_menu.go constants
-	scale := GetDPIScale()
-	itemHeight := int(float64(24) * scale)     // menuItemHeight
-	separatorHeight := int(float64(9) * scale) // menuSeparatorHeight
-	paddingY := int(float64(4) * scale)        // menuPaddingY
-
-	menuHeight := paddingY * 2 // Top and bottom padding
-	for _, item := range items {
-		if item.Separator {
-			menuHeight += separatorHeight
-		} else {
-			menuHeight += itemHeight
-		}
-	}
-
-	// Position menu above the toolbar
-	menuY := toolbarY - menuHeight - 2 // 2px gap
-	if menuY < 0 {
-		// If not enough space above, show below
+	if w.callback != nil && w.callback.OnShowMenu != nil {
+		// Show menu at same position as settings button (below toolbar center, with flip support)
+		bx, _, bw, _ := w.renderer.GetButtonBounds(HitSettingsButton)
+		scale := GetDPIScale()
+		gap := int(4 * scale)
 		w.mu.Lock()
-		menuY = toolbarY + w.height + 2
+		menuX := w.x + bx + bw/2
+		menuY := w.y + w.height + gap
+		flipRefY := w.y - gap // 如果下方放不下，翻转到工具栏上方
 		w.mu.Unlock()
+		w.callback.OnShowMenu(menuX, menuY, flipRefY)
 	}
-
-	// Show custom popup menu (non-blocking, doesn't steal focus)
-	w.popupMenu.Show(items, toolbarX, menuY, func(id int) {
-		if w.callback != nil && w.callback.OnContextMenu != nil {
-			var action ToolbarContextMenuAction
-			switch id {
-			case IDM_SETTINGS:
-				action = ToolbarMenuSettings
-			case IDM_RESTART:
-				action = ToolbarMenuRestartService
-			case IDM_ABOUT:
-				action = ToolbarMenuAbout
-			default:
-				return
-			}
-			w.callback.OnContextMenu(action)
-		}
-	})
 
 	return 0
 }

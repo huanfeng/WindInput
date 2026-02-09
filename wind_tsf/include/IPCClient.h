@@ -159,11 +159,17 @@ public:
     // Callback type for commit text from Go (mouse click on candidate)
     using CommitTextCallback = std::function<void(const std::wstring&)>;
 
+    // Callback type for clear composition from Go (mode toggle via menu)
+    using ClearCompositionCallback = std::function<void()>;
+
     // Set callback for receiving state push from Go
     void SetStatePushCallback(StatePushCallback callback);
 
     // Set callback for receiving commit text from Go (mouse click on candidate)
     void SetCommitTextCallback(CommitTextCallback callback);
+
+    // Set callback for receiving clear composition from Go (mode toggle via menu)
+    void SetClearCompositionCallback(ClearCompositionCallback callback);
 
     // Start async reader thread (call after successful connection)
     BOOL StartAsyncReader();
@@ -244,6 +250,7 @@ private:
     HANDLE _hReadPipe = INVALID_HANDLE_VALUE;  // Separate pipe for async reading
     StatePushCallback _statePushCallback;
     CommitTextCallback _commitTextCallback;
+    ClearCompositionCallback _clearCompositionCallback;
     CRITICAL_SECTION _asyncLock;         // Lock for thread-safe access
     volatile BOOL _asyncReaderRunning = FALSE;
 

@@ -107,4 +107,6 @@ type MessageHandler interface {
 	HandleCommitRequest(data CommitRequestData) *CommitResultData
 	// Mode notification from TSF (local toggle)
 	HandleModeNotify(data ModeNotifyData)
+	// Context menu request from TSF (screen coordinates)
+	HandleShowContextMenu(screenX, screenY int)
 }

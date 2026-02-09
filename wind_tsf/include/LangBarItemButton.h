@@ -69,6 +69,10 @@ public:
     // This ensures EndComposition is called before InsertText on the correct thread
     void PostCommitText(const std::wstring& text);
 
+    // Thread-safe clear composition from async thread (posts message to UI thread)
+    // Used when mode is toggled via menu while there's an active composition
+    void PostClearComposition();
+
     // Force refresh the language bar icon (used when focus is gained)
     void ForceRefresh();
 
@@ -78,6 +82,7 @@ private:
     static LRESULT CALLBACK _MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static const UINT WM_UPDATE_STATUS;
     static const UINT WM_COMMIT_TEXT;
+    static const UINT WM_CLEAR_COMPOSITION;
 
     // Packed status for message passing
     struct StatusUpdateData {

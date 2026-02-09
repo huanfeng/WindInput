@@ -383,6 +383,9 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 	case ipc.CmdMenuCommand:
 		return s.handleMenuCommand(payload, clientID)
 
+	case ipc.CmdShowContextMenu:
+		return s.handleShowContextMenu(payload, clientID)
+
 	case ipc.CmdCaretUpdate:
 		return s.handleCaretUpdate(payload, clientID)
 
@@ -491,6 +494,22 @@ func (s *Server) handleCaretUpdate(payload []byte, clientID int) []byte {
 		Height: int(caretPayload.Height),
 	})
 
+	return s.codec.EncodeAck()
+}
+
+func (s *Server) handleShowContextMenu(payload []byte, clientID int) []byte {
+	if len(payload) < 8 {
+		s.logger.Error("ShowContextMenu payload too short", "clientID", clientID)
+		return s.codec.EncodeAck()
+	}
+
+	screenX := int(int32(binary.LittleEndian.Uint32(payload[0:4])))
+	screenY := int(int32(binary.LittleEndian.Uint32(payload[4:8])))
+
+	s.logger.Info("ShowContextMenu request from TSF", "clientID", clientID,
+		"screenX", screenX, "screenY", screenY)
+
+	s.handler.HandleShowContextMenu(screenX, screenY)
 	return s.codec.EncodeAck()
 }
 
@@ -846,6 +865,58 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 	}
 
 	s.logger.Info("Commit text push completed to active client", "processID", activeProcessID)
+}
+
+// PushClearCompositionToActiveClient sends a clear composition command to the active TSF client
+// This is used when mode is toggled via menu/toolbar while there's an active composition
+func (s *Server) PushClearCompositionToActiveClient() {
+	// Get the active process ID
+	s.activeMu.RLock()
+	activeProcessID := s.activeProcessID
+	s.activeMu.RUnlock()
+
+	if activeProcessID == 0 {
+		s.logger.Debug("PushClearComposition: no active client recorded, skipping")
+		return
+	}
+
+	// Find the push pipe handle for the active process
+	s.pushMu.RLock()
+	handle, exists := s.pushClientsByPID[activeProcessID]
+	var writer *pipeWriter
+	if exists {
+		writer = s.pushClients[handle]
+	}
+	s.pushMu.RUnlock()
+
+	if !exists || writer == nil {
+		s.logger.Debug("PushClearComposition: no push pipe for active process",
+			"activeProcessID", activeProcessID)
+		return
+	}
+
+	// Encode the clear composition message
+	encoded := s.codec.EncodeClearComposition()
+
+	s.logger.Debug("Pushing clear composition to active TSF client via push pipe",
+		"processID", activeProcessID)
+
+	// Send to the active client only
+	if err := s.codec.WriteMessage(writer, encoded); err != nil {
+		s.logger.Warn("Failed to push clear composition to active client",
+			"processID", activeProcessID, "error", err)
+
+		// Remove the failed client
+		s.pushMu.Lock()
+		delete(s.pushClients, handle)
+		delete(s.pushHandleToPID, handle)
+		delete(s.pushClientsByPID, activeProcessID)
+		s.pushMu.Unlock()
+		windows.CloseHandle(handle)
+		return
+	}
+
+	s.logger.Debug("Clear composition push completed to active client", "processID", activeProcessID)
 }
 
 // GetActiveClientCount returns the number of active TSF clients

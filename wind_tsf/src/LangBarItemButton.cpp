@@ -15,6 +15,7 @@ const GUID CLangBarItemButton::_guidLangBarItemButton = GUID_LBI_INPUTMODE;
 // Custom messages for cross-thread updates
 const UINT CLangBarItemButton::WM_UPDATE_STATUS = WM_USER + 100;
 const UINT CLangBarItemButton::WM_COMMIT_TEXT = WM_USER + 101;
+const UINT CLangBarItemButton::WM_CLEAR_COMPOSITION = WM_USER + 102;
 
 CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     : _refCount(1)
@@ -189,7 +190,7 @@ STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcAr
 
 STDAPI CLangBarItemButton::InitMenu(ITfMenu* pMenu)
 {
-    WIND_LOG_INFO(L"InitMenu called by TSF - setting up right-click menu\n");
+    WIND_LOG_INFO(L"InitMenu called by TSF - returning empty menu (unified menu handled by Go service)\n");
 
     if (pMenu == nullptr)
     {
@@ -197,64 +198,9 @@ STDAPI CLangBarItemButton::InitMenu(ITfMenu* pMenu)
         return E_INVALIDARG;
     }
 
-    // Add menu items
-    // 中文模式
-    pMenu->AddMenuItem(MENU_ID_TOGGLE_MODE,
-        _bChineseMode ? TF_LBMENUF_CHECKED : 0,
-        NULL, NULL,
-        L"\x4E2D\x6587\x6A21\x5F0F", 4,  // 中文模式
-        NULL);
-
-    // 全角
-    pMenu->AddMenuItem(MENU_ID_TOGGLE_WIDTH,
-        _bFullWidth ? TF_LBMENUF_CHECKED : 0,
-        NULL, NULL,
-        L"\x5168\x89D2", 2,  // 全角
-        NULL);
-
-    // 中文标点
-    pMenu->AddMenuItem(MENU_ID_TOGGLE_PUNCT,
-        _bChinesePunct ? TF_LBMENUF_CHECKED : 0,
-        NULL, NULL,
-        L"\x4E2D\x6587\x6807\x70B9", 4,  // 中文标点
-        NULL);
-
-    // Separator
-    pMenu->AddMenuItem(0, TF_LBMENUF_SEPARATOR, NULL, NULL, NULL, 0, NULL);
-
-    // 显示工具栏
-    pMenu->AddMenuItem(MENU_ID_TOGGLE_TOOLBAR,
-        _bToolbarVisible ? TF_LBMENUF_CHECKED : 0,
-        NULL, NULL,
-        L"\x663E\x793A\x5DE5\x5177\x680F", 5,  // 显示工具栏
-        NULL);
-
-    // Separator
-    pMenu->AddMenuItem(0, TF_LBMENUF_SEPARATOR, NULL, NULL, NULL, 0, NULL);
-
-    // 词库管理...
-    pMenu->AddMenuItem(MENU_ID_DICTIONARY, 0,
-        NULL, NULL,
-        L"\x8BCD\x5E93\x7BA1\x7406...", 5,  // 词库管理...
-        NULL);
-
-    // 设置...
-    pMenu->AddMenuItem(MENU_ID_OPEN_SETTINGS, 0,
-        NULL, NULL,
-        L"\x8BBE\x7F6E...", 3,  // 设置...
-        NULL);
-
-    // Separator
-    pMenu->AddMenuItem(0, TF_LBMENUF_SEPARATOR, NULL, NULL, NULL, 0, NULL);
-
-    // 关于
-    pMenu->AddMenuItem(MENU_ID_ABOUT, 0,
-        NULL, NULL,
-        L"\x5173\x4E8E", 2,  // 关于
-        NULL);
-
-    // Note: "Exit" menu item removed - IME exit is meaningless
-
+    // Return S_OK with empty menu - the unified menu is rendered by Go service
+    // On Win10, TSF may still call InitMenu, but we don't add any items
+    // so no native menu will be displayed
     return S_OK;
 }
 
@@ -583,6 +529,17 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         delete pData;
         return 0;
     }
+    else if (msg == WM_CLEAR_COMPOSITION)
+    {
+        CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+        if (pThis != nullptr && pThis->_pTextService != nullptr)
+        {
+            WIND_LOG_DEBUG(L"MsgWndProc: Processing WM_CLEAR_COMPOSITION\n");
+            pThis->_pTextService->EndComposition();
+        }
+        return 0;
+    }
 
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -819,6 +776,33 @@ void CLangBarItemButton::PostCommitText(const std::wstring& text)
     }
 }
 
+void CLangBarItemButton::PostClearComposition()
+{
+    // Thread-safe: post message to message window which runs on UI thread
+    if (_hMsgWnd == NULL)
+    {
+        WIND_LOG_WARN(L"PostClearComposition: No message window, using direct EndComposition\n");
+        if (_pTextService != nullptr)
+        {
+            _pTextService->EndComposition();
+        }
+        return;
+    }
+
+    if (!PostMessageW(_hMsgWnd, WM_CLEAR_COMPOSITION, 0, 0))
+    {
+        WIND_LOG_WARN(L"PostClearComposition: PostMessage failed, using direct EndComposition\n");
+        if (_pTextService != nullptr)
+        {
+            _pTextService->EndComposition();
+        }
+    }
+    else
+    {
+        WIND_LOG_DEBUG(L"PostClearComposition: Message posted to UI thread\n");
+    }
+}
+
 void CLangBarItemButton::ForceRefresh()
 {
     WIND_LOG_DEBUG(L"ForceRefresh called\n");
@@ -835,103 +819,14 @@ void CLangBarItemButton::ForceRefresh()
     WIND_LOG_DEBUG_FMT(L"ForceRefresh: mode=%d, caps=%d\n", _bChineseMode, _bCapsLock);
 }
 
-// Show popup menu manually (Windows 11 workaround)
-// Windows 11 no longer calls InitMenu via TSF, so we create popup menu ourselves
+// Show popup menu by sending screen coordinates to Go service
+// Go service renders the unified menu with consistent styling
 void CLangBarItemButton::_ShowPopupMenu(POINT pt)
 {
-    // Log current state for debugging
-    WIND_LOG_INFO_FMT(L"_ShowPopupMenu: Current state - chineseMode=%d, fullWidth=%d, chinesePunct=%d, toolbarVisible=%d\n",
-                      _bChineseMode, _bFullWidth, _bChinesePunct, _bToolbarVisible);
+    WIND_LOG_INFO_FMT(L"_ShowPopupMenu: Sending context menu request to Go service at (%ld, %ld)\n", pt.x, pt.y);
 
-    HMENU hMenu = CreatePopupMenu();
-    if (hMenu == NULL)
+    if (_pTextService != nullptr)
     {
-        WIND_LOG_ERROR(L"_ShowPopupMenu: CreatePopupMenu failed\n");
-        return;
-    }
-
-    // Menu items (same as InitMenu)
-    // 中文模式
-    AppendMenuW(hMenu, _bChineseMode ? MF_CHECKED : MF_UNCHECKED,
-                MENU_ID_TOGGLE_MODE, L"\x4E2D\x6587\x6A21\x5F0F");  // 中文模式
-
-    // 全角
-    AppendMenuW(hMenu, _bFullWidth ? MF_CHECKED : MF_UNCHECKED,
-                MENU_ID_TOGGLE_WIDTH, L"\x5168\x89D2");  // 全角
-
-    // 中文标点
-    AppendMenuW(hMenu, _bChinesePunct ? MF_CHECKED : MF_UNCHECKED,
-                MENU_ID_TOGGLE_PUNCT, L"\x4E2D\x6587\x6807\x70B9");  // 中文标点
-
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-
-    // 显示工具栏
-    AppendMenuW(hMenu, _bToolbarVisible ? MF_CHECKED : MF_UNCHECKED,
-                MENU_ID_TOGGLE_TOOLBAR, L"\x663E\x793A\x5DE5\x5177\x680F");  // 显示工具栏
-
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-
-    // 词库管理...
-    AppendMenuW(hMenu, MF_STRING, MENU_ID_DICTIONARY, L"\x8BCD\x5E93\x7BA1\x7406...");  // 词库管理...
-
-    // 设置...
-    AppendMenuW(hMenu, MF_STRING, MENU_ID_OPEN_SETTINGS, L"\x8BBE\x7F6E...");  // 设置...
-
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-
-    // 关于
-    AppendMenuW(hMenu, MF_STRING, MENU_ID_ABOUT, L"\x5173\x4E8E");  // 关于
-
-    // Note: "Exit" menu item removed - IME exit is meaningless
-
-    WIND_LOG_INFO(L"_ShowPopupMenu: Showing popup menu\n");
-
-    // IMPORTANT: Use WS_EX_NOACTIVATE to prevent focus change
-    // Focus change would cause TextService::Deactivate and IPC disconnect
-    // This means menu commands would fail to send
-
-    // Create a temporary popup window for menu owner
-    // WS_EX_NOACTIVATE prevents the window from activating and changing focus
-    HWND hTempWnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-        L"STATIC",  // Use static control class (always available)
-        L"",
-        WS_POPUP,
-        pt.x, pt.y, 0, 0,  // Zero size at click position
-        NULL, NULL, g_hInstance, NULL
-    );
-
-    if (hTempWnd == NULL)
-    {
-        WIND_LOG_ERROR(L"_ShowPopupMenu: Failed to create temp window\n");
-        DestroyMenu(hMenu);
-        return;
-    }
-
-    // Note: Do NOT call SetForegroundWindow - it would cause focus change
-    // and trigger TextService::Deactivate, breaking IPC communication
-
-    // Show the popup menu
-    // TPM_RIGHTBUTTON: respond to right click in menu
-    // TPM_RETURNCMD: return the menu item id
-    UINT flags = TPM_RIGHTBUTTON | TPM_RETURNCMD;
-    UINT cmd = TrackPopupMenu(hMenu, flags, pt.x, pt.y, 0, hTempWnd, NULL);
-
-    // Post WM_NULL to ensure the menu closes properly (Microsoft KB article workaround)
-    PostMessageW(hTempWnd, WM_NULL, 0, 0);
-
-    // Clean up
-    DestroyWindow(hTempWnd);
-    DestroyMenu(hMenu);
-
-    if (cmd != 0)
-    {
-        WIND_LOG_INFO_FMT(L"_ShowPopupMenu: Menu item selected: %d\n", cmd);
-        // Call OnMenuSelect to handle the command
-        OnMenuSelect(cmd);
-    }
-    else
-    {
-        WIND_LOG_DEBUG(L"_ShowPopupMenu: Menu cancelled\n");
+        _pTextService->SendShowContextMenu(pt.x, pt.y);
     }
 }

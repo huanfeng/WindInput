@@ -898,36 +898,14 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	screenY := windowY + mouseY
 
 	if hitIndex < 0 {
-		// Right-clicked on blank area — show simplified menu
-		items := []MenuItem{
-			{ID: IDM_CANDIDATE_SETTINGS, Text: "设置(S)..."},
-			{Separator: true},
-			{ID: IDM_CANDIDATE_ABOUT, Text: "关于(A)..."},
-		}
-
+		// Right-clicked on blank area — show unified menu via callback
 		w.mu.Lock()
-		w.menuOpen = true
+		cb := w.callbacks
 		w.mu.Unlock()
 
-		popupMenu.Show(items, screenX, screenY, func(id int) {
-			w.mu.Lock()
-			w.menuOpen = false
-			cb := w.callbacks
-			w.mu.Unlock()
-
-			if cb != nil {
-				switch id {
-				case IDM_CANDIDATE_SETTINGS:
-					if cb.OnOpenSettings != nil {
-						cb.OnOpenSettings()
-					}
-				case IDM_CANDIDATE_ABOUT:
-					if cb.OnAbout != nil {
-						cb.OnAbout()
-					}
-				}
-			}
-		})
+		if cb != nil && cb.OnShowUnifiedMenu != nil {
+			cb.OnShowUnifiedMenu(screenX, screenY)
+		}
 		return
 	}
 

@@ -11,9 +11,65 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Unified menu ID constants
+const (
+	UnifiedMenuToggleMode    = 100
+	UnifiedMenuToggleWidth   = 101
+	UnifiedMenuTogglePunct   = 102
+	UnifiedMenuToggleToolbar = 103
+	UnifiedMenuThemeBase     = 200 // 主题ID: 200+i
+	UnifiedMenuDictionary    = 300
+	UnifiedMenuSettings      = 301
+	UnifiedMenuAbout         = 302
+)
+
+// UnifiedMenuState holds the current state for building the unified menu
+type UnifiedMenuState struct {
+	ChineseMode    bool
+	FullWidth      bool
+	ChinesePunct   bool
+	ToolbarVisible bool
+	Themes         []string
+	CurrentTheme   string
+}
+
+// BuildUnifiedMenuItems constructs the unified menu item list
+func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
+	items := []MenuItem{
+		{ID: UnifiedMenuToggleMode, Text: "中文模式", Checked: state.ChineseMode},
+		{ID: UnifiedMenuToggleWidth, Text: "全角", Checked: state.FullWidth},
+		{ID: UnifiedMenuTogglePunct, Text: "中文标点", Checked: state.ChinesePunct},
+		{Separator: true},
+		{ID: UnifiedMenuToggleToolbar, Text: "显示工具栏", Checked: state.ToolbarVisible},
+	}
+
+	// Build theme submenu if there are themes
+	if len(state.Themes) > 0 {
+		var themeChildren []MenuItem
+		for i, name := range state.Themes {
+			themeChildren = append(themeChildren, MenuItem{
+				ID:      UnifiedMenuThemeBase + i,
+				Text:    name,
+				Checked: name == state.CurrentTheme,
+			})
+		}
+		items = append(items, MenuItem{Text: "主题", Children: themeChildren})
+	}
+
+	items = append(items,
+		MenuItem{Separator: true},
+		MenuItem{ID: UnifiedMenuDictionary, Text: "词库管理..."},
+		MenuItem{ID: UnifiedMenuSettings, Text: "设置..."},
+		MenuItem{Separator: true},
+		MenuItem{ID: UnifiedMenuAbout, Text: "关于"},
+	)
+
+	return items
+}
+
 // UICommand represents a command to the UI thread
 type UICommand struct {
-	Type        string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings", "hide_menu"
+	Type        string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings", "hide_menu", "show_unified_menu"
 	Candidates  []Candidate
 	Input       string
 	CursorPos   int // Cursor position within Input (display position, for rendering cursor indicator)
@@ -30,6 +86,10 @@ type UICommand struct {
 	InputSession uint64
 	// Settings page to open (e.g., "about")
 	SettingsPage string
+	// Unified menu
+	MenuState    *UnifiedMenuState
+	MenuCallback func(id int)
+	FlipRefY     int // 翻转参考Y（下方放不下时翻转到此Y上方，0=禁用）
 }
 
 // Manager manages the candidate window UI
@@ -98,6 +158,9 @@ type Manager struct {
 	// Track last rendered content to distinguish content updates from hover refreshes
 	lastRenderedInput string
 	lastRenderedPage  int
+
+	// Unified popup menu (shared across toolbar/candidate/TSF entries)
+	unifiedPopupMenu *PopupMenu
 }
 
 // NewManager creates a new UI manager
@@ -164,6 +227,12 @@ func (m *Manager) Start() error {
 	if err := m.tooltip.Create(); err != nil {
 		m.logger.Error("Failed to create tooltip window", "error", err)
 		// Non-fatal, continue without tooltip
+	}
+
+	// Create unified popup menu
+	m.unifiedPopupMenu = NewPopupMenu()
+	if err := m.unifiedPopupMenu.Create(); err != nil {
+		m.logger.Error("Failed to create unified popup menu", "error", err)
 	}
 
 	m.mu.Lock()
@@ -269,6 +338,8 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 		m.doHideCandidateMenu()
 	case "hide_toolbar_menu":
 		m.doHideToolbarMenu()
+	case "show_unified_menu":
+		m.doShowUnifiedMenu(cmd)
 	}
 }
 
@@ -362,6 +433,71 @@ func (m *Manager) doHideToolbarMenu() {
 	}
 }
 
+// ShowUnifiedMenu shows the unified right-click menu at the specified position (async, thread-safe)
+func (m *Manager) ShowUnifiedMenu(screenX, screenY, flipRefY int, state UnifiedMenuState, callback func(id int)) {
+	m.mu.Lock()
+	if !m.ready {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
+	select {
+	case m.cmdCh <- UICommand{
+		Type:         "show_unified_menu",
+		X:            screenX,
+		Y:            screenY,
+		FlipRefY:     flipRefY,
+		MenuState:    &state,
+		MenuCallback: callback,
+	}:
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
+	default:
+		m.logger.Warn("UI command channel full, dropping show_unified_menu command")
+	}
+}
+
+// doShowUnifiedMenu shows the unified menu (called from UI thread)
+func (m *Manager) doShowUnifiedMenu(cmd UICommand) {
+	if m.unifiedPopupMenu == nil || cmd.MenuState == nil {
+		return
+	}
+
+	// Hide any existing toolbar/candidate menus first
+	m.doHideCandidateMenu()
+	m.doHideToolbarMenu()
+
+	// Set flip reference Y for screen edge handling
+	if cmd.FlipRefY > 0 {
+		m.unifiedPopupMenu.SetFlipRefY(cmd.FlipRefY)
+	}
+
+	items := BuildUnifiedMenuItems(*cmd.MenuState)
+	m.unifiedPopupMenu.Show(items, cmd.X, cmd.Y, func(id int) {
+		if cmd.MenuCallback != nil {
+			cmd.MenuCallback(id)
+		}
+	})
+}
+
+// IsUnifiedMenuOpen returns whether the unified popup menu is open
+func (m *Manager) IsUnifiedMenuOpen() bool {
+	if m.unifiedPopupMenu != nil {
+		return m.unifiedPopupMenu.IsVisible()
+	}
+	return false
+}
+
+// HideUnifiedMenu hides the unified popup menu (for use from non-UI threads)
+func (m *Manager) HideUnifiedMenu() {
+	// The unified menu auto-hides on click-outside, but this can be called to force hide
+	if m.unifiedPopupMenu != nil {
+		m.unifiedPopupMenu.Hide()
+	}
+}
+
 // ToolbarMenuContainsPoint checks if the given screen coordinates are within the toolbar menu
 func (m *Manager) ToolbarMenuContainsPoint(screenX, screenY int) bool {
 	if m.toolbar != nil {
@@ -430,6 +566,12 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	}
 
 	m.logger.Debug("doShowCandidates start", "input", input, "count", len(candidates), "caretX", caretX, "caretY", caretY, "caretHeight", caretHeight)
+
+	// Cancel any pending mode indicator hide timer
+	// (mode indicator's goroutine checks modeIndicatorVersion before calling Hide)
+	m.mu.Lock()
+	m.modeIndicatorVersion++
+	m.mu.Unlock()
 
 	// Check if this is a new input session (input is shorter than before or empty)
 	// If so, reset the sticky state and hover index
@@ -562,6 +704,10 @@ func (m *Manager) Destroy() {
 	}
 	if m.tooltip != nil {
 		m.tooltip.Destroy()
+	}
+	if m.unifiedPopupMenu != nil {
+		m.unifiedPopupMenu.Destroy()
+		m.unifiedPopupMenu = nil
 	}
 	if m.cmdEvent != 0 {
 		CloseEvent(m.cmdEvent)
@@ -719,6 +865,11 @@ func (m *Manager) LoadTheme(themeName string) error {
 	resolved := m.themeManager.GetResolvedTheme()
 	m.applyTheme(resolved)
 
+	// Refresh candidate window if it's currently visible
+	if m.window != nil && m.window.IsVisible() {
+		m.RefreshCandidates()
+	}
+
 	m.logger.Info("Theme loaded", "theme", themeName)
 	return nil
 }
@@ -747,6 +898,11 @@ func (m *Manager) applyTheme(resolved *theme.ResolvedTheme) {
 	// Apply to tooltip
 	if m.tooltip != nil {
 		m.tooltip.SetTheme(resolved)
+	}
+
+	// Apply to unified popup menu
+	if m.unifiedPopupMenu != nil {
+		m.unifiedPopupMenu.SetTheme(resolved)
 	}
 }
 

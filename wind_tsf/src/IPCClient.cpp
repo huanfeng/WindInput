@@ -1279,6 +1279,13 @@ void CIPCClient::SetCommitTextCallback(CommitTextCallback callback)
     LeaveCriticalSection(&_asyncLock);
 }
 
+void CIPCClient::SetClearCompositionCallback(ClearCompositionCallback callback)
+{
+    EnterCriticalSection(&_asyncLock);
+    _clearCompositionCallback = callback;
+    LeaveCriticalSection(&_asyncLock);
+}
+
 BOOL CIPCClient::StartAsyncReader()
 {
     if (_asyncReaderRunning)
@@ -1603,6 +1610,20 @@ void CIPCClient::_AsyncReaderLoop()
                     {
                         callback(response.text);
                     }
+                }
+            }
+            else if (header.command == CMD_CLEAR_COMPOSITION)
+            {
+                _LogInfo(L"Async reader: clear composition received from Go service");
+
+                // Call callback
+                EnterCriticalSection(&_asyncLock);
+                ClearCompositionCallback callback = _clearCompositionCallback;
+                LeaveCriticalSection(&_asyncLock);
+
+                if (callback)
+                {
+                    callback();
                 }
             }
         }

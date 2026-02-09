@@ -96,6 +96,9 @@ public:
     // Send menu command to Go service
     void SendMenuCommand(const char* command);
 
+    // Send show context menu request to Go service (screen coordinates)
+    void SendShowContextMenu(int screenX, int screenY);
+
     // Update full status from Go service response
     void UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock);
 

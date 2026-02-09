@@ -19,6 +19,8 @@ type MenuItem struct {
 	Text      string
 	Disabled  bool
 	Separator bool
+	Checked   bool       // 勾选状态（显示 ✓）
+	Children  []MenuItem // 子菜单项（非空时显示 ▸，hover展开）
 }
 
 // PopupMenuCallback is called when a menu item is selected
@@ -40,6 +42,16 @@ type PopupMenu struct {
 	// Theme
 	resolvedTheme *theme.ResolvedTheme
 
+	// Submenu support
+	submenu      *PopupMenu // 当前展开的子菜单实例
+	submenuIndex int        // 展开子菜单对应的父菜单项索引(-1=无)
+	parentMenu   *PopupMenu // 父菜单引用
+	hasChecked   bool       // items中是否有Checked项
+	hasChildren  bool       // items中是否有Children项
+
+	// Flip support: when menu can't fit below Y, flip above flipRefY
+	flipRefY int // 翻转参考Y（0=禁用）
+
 	mu sync.Mutex
 }
 
@@ -52,6 +64,8 @@ const (
 	menuMinWidth        = 120
 	menuFontSize        = 12.0
 	menuCornerRadius    = 6 // Corner radius for rounded rectangle
+	menuCheckMarkWidth  = 18
+	menuArrowWidth      = 14
 
 	// Windows message for popup menu
 	WM_CAPTURECHANGED = 0x0215
@@ -59,6 +73,10 @@ const (
 	// Timer for checking mouse state (for click-outside detection)
 	MENU_CHECK_TIMER_ID = 100
 	MENU_CHECK_INTERVAL = 50 // ms
+
+	// Timer for submenu expand delay
+	SUBMENU_TIMER_ID = 101
+	SUBMENU_DELAY_MS = 250 // ms
 )
 
 var (
@@ -140,15 +158,31 @@ func popupMenuWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr 
 		// Capture was taken away from us - hide the menu
 		m := getPopupMenu(windows.HWND(hwnd))
 		if m != nil && m.IsVisible() {
+			// Don't hide if capture was taken by our submenu
+			m.mu.Lock()
+			sub := m.submenu
+			m.mu.Unlock()
+			if sub != nil && sub.hwnd != 0 && windows.HWND(wParam) == sub.hwnd {
+				return 0
+			}
 			m.Hide()
 		}
 		return 0
 
 	case WM_TIMER:
-		if wParam == MENU_CHECK_TIMER_ID {
-			m := getPopupMenu(windows.HWND(hwnd))
-			if m != nil {
+		m := getPopupMenu(windows.HWND(hwnd))
+		if m != nil {
+			switch wParam {
+			case MENU_CHECK_TIMER_ID:
 				m.checkMouseState()
+			case SUBMENU_TIMER_ID:
+				procKillTimer.Call(hwnd, SUBMENU_TIMER_ID)
+				m.mu.Lock()
+				idx := m.hoverIndex
+				m.mu.Unlock()
+				if idx >= 0 {
+					m.showSubmenu(idx)
+				}
 			}
 		}
 		return 0
@@ -160,7 +194,8 @@ func popupMenuWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr 
 // NewPopupMenu creates a new popup menu
 func NewPopupMenu() *PopupMenu {
 	return &PopupMenu{
-		hoverIndex: -1,
+		hoverIndex:   -1,
+		submenuIndex: -1,
 	}
 }
 
@@ -169,6 +204,14 @@ func (m *PopupMenu) SetTheme(resolved *theme.ResolvedTheme) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.resolvedTheme = resolved
+}
+
+// SetFlipRefY sets the Y coordinate to flip above when there's not enough space below.
+// Set to 0 to disable flip behavior.
+func (m *PopupMenu) SetFlipRefY(y int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.flipRefY = y
 }
 
 // getPopupMenuColors returns popup menu colors from theme or defaults
@@ -232,6 +275,18 @@ func (m *PopupMenu) Show(items []MenuItem, x, y int, callback PopupMenuCallback)
 	m.items = items
 	m.callback = callback
 	m.hoverIndex = -1
+	m.submenuIndex = -1
+	// Scan items for checked/children flags
+	m.hasChecked = false
+	m.hasChildren = false
+	for _, item := range items {
+		if item.Checked {
+			m.hasChecked = true
+		}
+		if len(item.Children) > 0 {
+			m.hasChildren = true
+		}
+	}
 	m.mu.Unlock()
 
 	// Calculate menu size
@@ -245,8 +300,22 @@ func (m *PopupMenu) Show(items []MenuItem, x, y int, callback PopupMenuCallback)
 	if x < workLeft {
 		x = workLeft
 	}
+	// Vertical: prefer below, flip above flipRefY if not enough space
+	m.mu.Lock()
+	flipY := m.flipRefY
+	m.flipRefY = 0 // 使用后重置
+	m.mu.Unlock()
 	if y+m.height > workBottom {
-		y = workBottom - m.height
+		if flipY > 0 {
+			aboveY := flipY - m.height
+			if aboveY >= workTop {
+				y = aboveY
+			} else {
+				y = workBottom - m.height
+			}
+		} else {
+			y = workBottom - m.height
+		}
 	}
 	if y < workTop {
 		y = workTop
@@ -264,13 +333,17 @@ func (m *PopupMenu) Show(items []MenuItem, x, y int, callback PopupMenuCallback)
 
 	m.mu.Lock()
 	m.visible = true
+	isChild := m.parentMenu != nil
 	m.mu.Unlock()
 
-	// Capture mouse to detect clicks outside the menu
-	procSetCapture.Call(uintptr(m.hwnd))
+	// Only root menu captures mouse and starts timer
+	if !isChild {
+		// Capture mouse to detect clicks outside the menu
+		procSetCapture.Call(uintptr(m.hwnd))
 
-	// Start timer to check mouse state (backup for cross-process click detection)
-	procSetTimer.Call(uintptr(m.hwnd), MENU_CHECK_TIMER_ID, MENU_CHECK_INTERVAL, 0)
+		// Start timer to check mouse state (backup for cross-process click detection)
+		procSetTimer.Call(uintptr(m.hwnd), MENU_CHECK_TIMER_ID, MENU_CHECK_INTERVAL, 0)
+	}
 
 	// Start tracking mouse leave
 	m.trackMouseLeave()
@@ -278,16 +351,23 @@ func (m *PopupMenu) Show(items []MenuItem, x, y int, callback PopupMenuCallback)
 
 // Hide hides the popup menu
 func (m *PopupMenu) Hide() {
+	// Hide submenu first
+	m.hideSubmenu()
+
 	m.mu.Lock()
 	wasVisible := m.visible
 	m.visible = false
+	isChild := m.parentMenu != nil
 	m.mu.Unlock()
 
 	if wasVisible {
-		// Stop the mouse check timer
-		procKillTimer.Call(uintptr(m.hwnd), MENU_CHECK_TIMER_ID)
-		// Release mouse capture
-		procReleaseCapture.Call()
+		// Stop timers
+		procKillTimer.Call(uintptr(m.hwnd), SUBMENU_TIMER_ID)
+		if !isChild {
+			// Only root menu releases capture and stops check timer
+			procKillTimer.Call(uintptr(m.hwnd), MENU_CHECK_TIMER_ID)
+			procReleaseCapture.Call()
+		}
 		procShowWindow.Call(uintptr(m.hwnd), SW_HIDE)
 	}
 }
@@ -301,6 +381,7 @@ func (m *PopupMenu) IsVisible() bool {
 
 // Destroy destroys the popup menu window
 func (m *PopupMenu) Destroy() {
+	m.hideSubmenu()
 	if m.hwnd != 0 {
 		procDestroyWindow.Call(uintptr(m.hwnd))
 		m.hwnd = 0
@@ -314,7 +395,16 @@ func (m *PopupMenu) calculateSize() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.width = int(float64(menuMinWidth) * scale)
+	extraLeft := 0.0
+	if m.hasChecked {
+		extraLeft = float64(menuCheckMarkWidth) * scale
+	}
+	extraRight := 0.0
+	if m.hasChildren {
+		extraRight = float64(menuArrowWidth) * scale
+	}
+
+	m.width = int(float64(menuMinWidth)*scale + extraLeft + extraRight)
 	m.height = int(float64(menuPaddingY*2) * scale)
 
 	// Create a temporary context to measure text
@@ -329,7 +419,7 @@ func (m *PopupMenu) calculateSize() {
 			m.height += int(float64(menuItemHeight) * scale)
 			// Calculate text width
 			tw, _ := dc.MeasureString(item.Text)
-			itemWidth := int(tw + float64(menuPaddingX*2)*scale)
+			itemWidth := int(tw + float64(menuPaddingX)*scale + extraLeft + extraRight + float64(menuPaddingX)*scale)
 			if itemWidth > m.width {
 				m.width = itemWidth
 			}
@@ -337,7 +427,7 @@ func (m *PopupMenu) calculateSize() {
 	}
 }
 
-// loadFont loads font for the context
+// loadFont loads font for the context (Chinese text)
 func (m *PopupMenu) loadFont(dc *gg.Context, fontSize float64) {
 	fonts := []string{
 		"C:/Windows/Fonts/msyh.ttc",
@@ -352,13 +442,32 @@ func (m *PopupMenu) loadFont(dc *gg.Context, fontSize float64) {
 	}
 }
 
+// loadSymbolFont loads a symbol-capable font for rendering ✓ ▸ etc.
+func (m *PopupMenu) loadSymbolFont(dc *gg.Context, fontSize float64) {
+	fonts := []string{
+		"C:/Windows/Fonts/seguisym.ttf", // Segoe UI Symbol (Win7+, best coverage)
+		"C:/Windows/Fonts/segmdl2.ttf",  // Segoe MDL2 Assets (Win10+)
+		"C:/Windows/Fonts/segoeui.ttf",  // Segoe UI
+		"C:/Windows/Fonts/arial.ttf",    // Arial
+		"C:/Windows/Fonts/msyh.ttc",     // Microsoft YaHei (fallback)
+	}
+	for _, path := range fonts {
+		if err := dc.LoadFontFace(path, fontSize); err == nil {
+			return
+		}
+	}
+}
+
 // render renders the menu to an image
 func (m *PopupMenu) render() *image.RGBA {
 	m.mu.Lock()
 	items := m.items
 	hoverIdx := m.hoverIndex
+	submenuIdx := m.submenuIndex
 	width := m.width
 	height := m.height
+	hasChecked := m.hasChecked
+	hasChildren := m.hasChildren
 	colors := m.getPopupMenuColors()
 	m.mu.Unlock()
 
@@ -368,6 +477,14 @@ func (m *PopupMenu) render() *image.RGBA {
 	sepH := int(float64(menuSeparatorHeight) * scale)
 	padX := float64(menuPaddingX) * scale
 	padY := int(float64(menuPaddingY) * scale)
+	checkW := 0.0
+	if hasChecked {
+		checkW = float64(menuCheckMarkWidth) * scale
+	}
+	arrowW := 0.0
+	if hasChildren {
+		arrowW = float64(menuArrowWidth) * scale
+	}
 
 	dc := gg.NewContext(width, height)
 	m.loadFont(dc, fontSize)
@@ -399,24 +516,62 @@ func (m *PopupMenu) render() *image.RGBA {
 			dc.Stroke()
 			y += sepH
 		} else {
-			// Draw item background if hovered
-			if i == hoverIdx && !item.Disabled {
+			// Determine if this item should be highlighted
+			isHovered := (i == hoverIdx && !item.Disabled) || (i == submenuIdx)
+
+			// Draw item background if hovered or submenu is open for this item
+			if isHovered {
 				dc.SetColor(colors.HoverBgColor)
 				dc.DrawRectangle(1, float64(y), float64(width-2), float64(itemH))
 				dc.Fill()
 			}
 
+			// Draw check mark using symbol font
+			if item.Checked {
+				if item.Disabled {
+					dc.SetColor(colors.DisabledColor)
+				} else if isHovered {
+					dc.SetColor(colors.HoverTextColor)
+				} else {
+					dc.SetColor(colors.TextColor)
+				}
+				m.loadSymbolFont(dc, fontSize)
+				cx := padX/2 + checkW/2
+				cy := float64(y) + float64(itemH)/2 + fontSize/3
+				sw, _ := dc.MeasureString("✓")
+				dc.DrawString("✓", cx-sw/2, cy)
+				m.loadFont(dc, fontSize) // switch back to text font
+			}
+
 			// Draw text
 			if item.Disabled {
 				dc.SetColor(colors.DisabledColor)
-			} else if i == hoverIdx {
+			} else if isHovered {
 				dc.SetColor(colors.HoverTextColor)
 			} else {
 				dc.SetColor(colors.TextColor)
 			}
 
+			textX := padX + checkW
 			textY := float64(y) + float64(itemH)/2 + fontSize/3
-			dc.DrawString(item.Text, padX, textY)
+			dc.DrawString(item.Text, textX, textY)
+
+			// Draw submenu arrow using symbol font
+			if len(item.Children) > 0 {
+				if item.Disabled {
+					dc.SetColor(colors.DisabledColor)
+				} else if isHovered {
+					dc.SetColor(colors.HoverTextColor)
+				} else {
+					dc.SetColor(colors.TextColor)
+				}
+				m.loadSymbolFont(dc, fontSize)
+				ax := float64(width) - padX/2 - arrowW/2
+				ay := float64(y) + float64(itemH)/2 + fontSize/3
+				sw, _ := dc.MeasureString("▸")
+				dc.DrawString("▸", ax-sw/2, ay)
+				m.loadFont(dc, fontSize) // switch back to text font
+			}
 
 			y += itemH
 		}
@@ -550,18 +705,67 @@ func (m *PopupMenu) handleMouseMove(lParam uintptr) {
 	m.mu.Lock()
 	menuWidth := m.width
 	menuHeight := m.height
+	menuX := m.x
+	menuY := m.y
+	sub := m.submenu
 	oldHover := m.hoverIndex
 
+	// Check if mouse is in submenu area (for event forwarding)
+	insideParent := mouseX >= 0 && mouseX < menuWidth && mouseY >= 0 && mouseY < menuHeight
+	m.mu.Unlock()
+
+	// If submenu is open and mouse is in submenu area, forward to submenu
+	// This takes priority even when the submenu overlaps with the parent menu
+	if sub != nil {
+		screenX := menuX + mouseX
+		screenY := menuY + mouseY
+		if m.forwardMouseMoveToSubmenu(screenX, screenY) {
+			// Mouse is in submenu - keep parent hover on submenu item, don't change
+			return
+		}
+	}
+
+	m.mu.Lock()
 	// Only show hover if mouse is actually inside the menu bounds
-	// (SetCapture can send mouse events even when cursor is outside)
-	if mouseX >= 0 && mouseX < menuWidth && mouseY >= 0 && mouseY < menuHeight {
+	if insideParent {
 		m.hoverIndex = m.hitTest(mouseY)
 	} else {
 		m.hoverIndex = -1
 	}
 
-	if m.hoverIndex != oldHover {
+	newHover := m.hoverIndex
+
+	if newHover != oldHover {
+		// Check if the new hover item has children
+		hasChildren := false
+		if newHover >= 0 && newHover < len(m.items) {
+			hasChildren = len(m.items[newHover].Children) > 0
+		}
+		submenuIdx := m.submenuIndex
 		m.mu.Unlock()
+
+		// Kill any pending submenu timer
+		procKillTimer.Call(uintptr(m.hwnd), SUBMENU_TIMER_ID)
+
+		if hasChildren {
+			// Start submenu delay timer
+			procSetTimer.Call(uintptr(m.hwnd), SUBMENU_TIMER_ID, SUBMENU_DELAY_MS, 0)
+		} else if submenuIdx >= 0 && newHover != submenuIdx {
+			// Before closing submenu, check if mouse is in the submenu tree
+			if newHover == -1 {
+				// Mouse is outside parent menu - convert to screen coords and check submenu
+				screenX := menuX + mouseX
+				screenY := menuY + mouseY
+				if !m.isPointInMenuTree(screenX, screenY) {
+					m.hideSubmenu()
+				}
+				// else: mouse is in submenu area, keep submenu open
+			} else {
+				// Moved to a different menu item - close submenu
+				m.hideSubmenu()
+			}
+		}
+
 		// Re-render with new hover state
 		m.updateWindow()
 		m.trackMouseLeave()
@@ -570,8 +774,90 @@ func (m *PopupMenu) handleMouseMove(lParam uintptr) {
 	}
 }
 
+// forwardMouseMoveToSubmenu forwards a mouse move event to the submenu if the screen
+// coordinates are inside it. Returns true if forwarded.
+func (m *PopupMenu) forwardMouseMoveToSubmenu(screenX, screenY int) bool {
+	m.mu.Lock()
+	sub := m.submenu
+	m.mu.Unlock()
+
+	if sub == nil {
+		return false
+	}
+
+	sub.mu.Lock()
+	sx, sy, sw, sh := sub.x, sub.y, sub.width, sub.height
+	subVisible := sub.visible
+	sub.mu.Unlock()
+
+	if !subVisible || screenX < sx || screenX >= sx+sw || screenY < sy || screenY >= sy+sh {
+		return false
+	}
+
+	// Convert to client coordinates relative to submenu
+	clientX := screenX - sx
+	clientY := screenY - sy
+	newLParam := uintptr(uint16(clientX)) | (uintptr(uint16(clientY)) << 16)
+	sub.handleMouseMove(newLParam)
+	return true
+}
+
+// forwardClickToSubmenu forwards a click event to the submenu if the screen
+// coordinates are inside it. Returns true if forwarded.
+func (m *PopupMenu) forwardClickToSubmenu(screenX, screenY int) bool {
+	m.mu.Lock()
+	sub := m.submenu
+	m.mu.Unlock()
+
+	if sub == nil {
+		return false
+	}
+
+	sub.mu.Lock()
+	sx, sy, sw, sh := sub.x, sub.y, sub.width, sub.height
+	subVisible := sub.visible
+	sub.mu.Unlock()
+
+	if !subVisible || screenX < sx || screenX >= sx+sw || screenY < sy || screenY >= sy+sh {
+		return false
+	}
+
+	// Convert to client coordinates relative to submenu
+	clientX := screenX - sx
+	clientY := screenY - sy
+	newLParam := uintptr(uint16(clientX)) | (uintptr(uint16(clientY)) << 16)
+	sub.handleClick(newLParam)
+	return true
+}
+
 // handleMouseLeave handles mouse leave events
 func (m *PopupMenu) handleMouseLeave() {
+	// Use GetCursorPos to check actual cursor position
+	// This handles the case where events are forwarded via SetCapture from parent menu:
+	// WM_MOUSELEAVE fires because Windows doesn't think the cursor is over this window,
+	// but the cursor is actually in our bounds (events are forwarded from parent).
+	var pt struct{ X, Y int32 }
+	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	screenX := int(pt.X)
+	screenY := int(pt.Y)
+
+	m.mu.Lock()
+	x, y, w, h := m.x, m.y, m.width, m.height
+	submenuIdx := m.submenuIndex
+	m.mu.Unlock()
+
+	// If cursor is still inside this menu, don't clear hover
+	if screenX >= x && screenX < x+w && screenY >= y && screenY < y+h {
+		return
+	}
+
+	// If submenu is open, check if mouse is still in the menu tree
+	if submenuIdx >= 0 {
+		if m.isPointInMenuTree(screenX, screenY) {
+			return // Mouse is in submenu area, don't clear hover
+		}
+	}
+
 	m.mu.Lock()
 	if m.hoverIndex != -1 {
 		m.hoverIndex = -1
@@ -591,11 +877,21 @@ func (m *PopupMenu) handleClick(lParam uintptr) {
 	m.mu.Lock()
 	menuWidth := m.width
 	menuHeight := m.height
+	menuX := m.x
+	menuY := m.y
 	m.mu.Unlock()
+
+	// If submenu is open, check if click is in submenu area first
+	// This takes priority even when the submenu overlaps with the parent menu
+	screenX := menuX + mouseX
+	screenY := menuY + mouseY
+	if m.forwardClickToSubmenu(screenX, screenY) {
+		return
+	}
 
 	// Check if click is outside the menu bounds
 	if mouseX < 0 || mouseX >= menuWidth || mouseY < 0 || mouseY >= menuHeight {
-		// Click outside menu - just hide it (don't trigger any callback)
+		// Click outside menu tree - hide everything
 		m.Hide()
 		return
 	}
@@ -606,6 +902,13 @@ func (m *PopupMenu) handleClick(lParam uintptr) {
 	if index >= 0 && index < len(m.items) {
 		item := m.items[index]
 		if !item.Disabled && !item.Separator {
+			// If item has children, show submenu instead of triggering callback
+			if len(item.Children) > 0 {
+				m.mu.Unlock()
+				m.showSubmenu(index)
+				return
+			}
+
 			callback := m.callback
 			id := item.ID
 			m.mu.Unlock()
@@ -650,17 +953,138 @@ func (m *PopupMenu) hitTest(mouseY int) int {
 	return -1
 }
 
-// ContainsPoint checks if the given screen coordinates are within the menu
-func (m *PopupMenu) ContainsPoint(screenX, screenY int) bool {
+// showSubmenu creates and shows a submenu for the item at the given index
+func (m *PopupMenu) showSubmenu(index int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if index < 0 || index >= len(m.items) || len(m.items[index].Children) == 0 {
+		m.mu.Unlock()
+		return
+	}
+	// Already showing this submenu
+	if m.submenuIndex == index && m.submenu != nil {
+		m.mu.Unlock()
+		return
+	}
+	children := m.items[index].Children
+	resolvedTheme := m.resolvedTheme
+	callback := m.callback
+	menuX := m.x
+	menuWidth := m.width
+	m.mu.Unlock()
 
-	if !m.visible {
+	// Hide existing submenu if any
+	m.hideSubmenu()
+
+	// Calculate submenu position (right side of parent item)
+	scale := GetDPIScale()
+	itemH := int(float64(menuItemHeight) * scale)
+	sepH := int(float64(menuSeparatorHeight) * scale)
+	padY := int(float64(menuPaddingY) * scale)
+
+	itemY := padY
+	m.mu.Lock()
+	for i, item := range m.items {
+		if i == index {
+			break
+		}
+		if item.Separator {
+			itemY += sepH
+		} else {
+			itemY += itemH
+		}
+	}
+	menuY := m.y
+	m.mu.Unlock()
+
+	subX := menuX + menuWidth - 2 // Slight overlap
+	subY := menuY + itemY
+
+	// Create submenu
+	sub := NewPopupMenu()
+	sub.parentMenu = m
+	if resolvedTheme != nil {
+		sub.resolvedTheme = resolvedTheme
+	}
+	if err := sub.Create(); err != nil {
+		return
+	}
+
+	m.mu.Lock()
+	m.submenu = sub
+	m.submenuIndex = index
+	m.mu.Unlock()
+
+	// Show submenu - callback proxies to parent's callback
+	sub.Show(children, subX, subY, func(id int) {
+		// Propagate to root callback and hide root menu
+		if callback != nil {
+			callback(id)
+		}
+	})
+
+	// Re-render parent to show highlight on submenu item
+	m.updateWindow()
+}
+
+// hideSubmenu hides and cleans up the current submenu
+func (m *PopupMenu) hideSubmenu() {
+	m.mu.Lock()
+	sub := m.submenu
+	m.submenu = nil
+	m.submenuIndex = -1
+	m.mu.Unlock()
+
+	if sub != nil {
+		sub.Hide()
+		sub.Destroy()
+	}
+}
+
+// isPointInSubmenu checks if coordinates (relative to parent menu window) are inside the submenu
+func (m *PopupMenu) isPointInSubmenu(clientX, clientY int) bool {
+	m.mu.Lock()
+	sub := m.submenu
+	menuX := m.x
+	menuY := m.y
+	m.mu.Unlock()
+
+	if sub == nil {
 		return false
 	}
 
-	return screenX >= m.x && screenX < m.x+m.width &&
-		screenY >= m.y && screenY < m.y+m.height
+	// Convert to screen coordinates
+	screenX := menuX + clientX
+	screenY := menuY + clientY
+
+	return sub.isPointInMenuTree(screenX, screenY)
+}
+
+// isPointInMenuTree checks if screen coordinates are in this menu or any of its submenus
+func (m *PopupMenu) isPointInMenuTree(screenX, screenY int) bool {
+	m.mu.Lock()
+	x, y, w, h := m.x, m.y, m.width, m.height
+	visible := m.visible
+	sub := m.submenu
+	m.mu.Unlock()
+
+	if !visible {
+		return false
+	}
+
+	if screenX >= x && screenX < x+w && screenY >= y && screenY < y+h {
+		return true
+	}
+
+	if sub != nil {
+		return sub.isPointInMenuTree(screenX, screenY)
+	}
+
+	return false
+}
+
+// ContainsPoint checks if the given screen coordinates are within the menu tree
+func (m *PopupMenu) ContainsPoint(screenX, screenY int) bool {
+	return m.isPointInMenuTree(screenX, screenY)
 }
 
 // GetBounds returns the menu bounds (x, y, width, height)
@@ -670,7 +1094,7 @@ func (m *PopupMenu) GetBounds() (int, int, int, int) {
 	return m.x, m.y, m.width, m.height
 }
 
-// checkMouseState checks if mouse button is pressed outside the menu
+// checkMouseState checks if mouse button is pressed outside the menu tree
 // This is a backup mechanism for cross-process click detection where SetCapture doesn't work
 func (m *PopupMenu) checkMouseState() {
 	if !m.IsVisible() {
@@ -688,15 +1112,9 @@ func (m *PopupMenu) checkMouseState() {
 	var pt struct{ X, Y int32 }
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
 
-	// Check if cursor is outside the menu
-	m.mu.Lock()
-	menuX, menuY := m.x, m.y
-	menuW, menuH := m.width, m.height
-	m.mu.Unlock()
-
-	if int(pt.X) < menuX || int(pt.X) >= menuX+menuW ||
-		int(pt.Y) < menuY || int(pt.Y) >= menuY+menuH {
-		// Mouse pressed outside menu - close it
+	// Check if cursor is inside the menu tree (including submenus)
+	if !m.isPointInMenuTree(int(pt.X), int(pt.Y)) {
+		// Mouse pressed outside menu tree - close it
 		m.Hide()
 	}
 }

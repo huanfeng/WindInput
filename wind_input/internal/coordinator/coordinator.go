@@ -111,6 +111,7 @@ type Coordinator struct {
 type BridgeServer interface {
 	PushStateToAllClients(status *bridge.StatusUpdateData)
 	PushCommitTextToActiveClient(text string) // Only send to active client for security
+	PushClearCompositionToActiveClient()      // Clear inline composition on active client
 	RestartService()
 }
 
@@ -326,6 +327,9 @@ func (c *Coordinator) setupToolbarCallbacks() {
 		OnContextMenu: func(action ui.ToolbarContextMenuAction) {
 			go c.handleToolbarContextMenu(action)
 		},
+		OnShowMenu: func(screenX, screenY, flipRefY int) {
+			go c.handleShowUnifiedMenu(screenX, screenY, flipRefY)
+		},
 	})
 }
 
@@ -385,6 +389,9 @@ func (c *Coordinator) setupCandidateCallbacks() {
 		OnAbout: func() {
 			// Run in goroutine to avoid blocking UI thread
 			go c.handleCandidateAbout()
+		},
+		OnShowUnifiedMenu: func(screenX, screenY int) {
+			go c.handleShowUnifiedMenu(screenX, screenY, 0)
 		},
 	})
 }
@@ -551,9 +558,15 @@ func (c *Coordinator) handleToolbarToggleMode() {
 	c.logger.Info("Mode toggled via toolbar", "chineseMode", c.chineseMode)
 
 	// Clear any pending input when switching modes
-	if len(c.inputBuffer) > 0 {
+	hadInput := len(c.inputBuffer) > 0
+	if hadInput {
 		c.clearState()
 		c.hideUI()
+	}
+
+	// Notify TSF side to clear inline composition if there was active input
+	if hadInput && c.bridgeServer != nil {
+		go c.bridgeServer.PushClearCompositionToActiveClient()
 	}
 
 	// Sync punctuation with mode if enabled
@@ -638,6 +651,68 @@ func (c *Coordinator) handleToolbarContextMenu(action ui.ToolbarContextMenuActio
 			c.uiManager.OpenSettingsWithPage("about")
 		}
 	}
+}
+
+// handleShowUnifiedMenu shows the unified context menu at the given screen position
+func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
+	if c.uiManager == nil {
+		return
+	}
+
+	c.mu.Lock()
+	state := ui.UnifiedMenuState{
+		ChineseMode:    c.chineseMode,
+		FullWidth:      c.fullWidth,
+		ChinesePunct:   c.chinesePunctuation,
+		ToolbarVisible: c.toolbarVisible,
+		Themes:         c.uiManager.GetAvailableThemes(),
+		CurrentTheme:   c.uiManager.GetCurrentThemeName(),
+	}
+	c.mu.Unlock()
+
+	c.uiManager.ShowUnifiedMenu(screenX, screenY, flipRefY, state, func(id int) {
+		go c.handleUnifiedMenuAction(id)
+	})
+}
+
+// handleUnifiedMenuAction handles a menu item selection from the unified menu
+func (c *Coordinator) handleUnifiedMenuAction(id int) {
+	switch {
+	case id == ui.UnifiedMenuToggleMode:
+		c.handleToolbarToggleMode()
+	case id == ui.UnifiedMenuToggleWidth:
+		c.handleToolbarToggleWidth()
+	case id == ui.UnifiedMenuTogglePunct:
+		c.handleToolbarTogglePunct()
+	case id == ui.UnifiedMenuToggleToolbar:
+		c.HandleMenuCommand("toggle_toolbar")
+	case id == ui.UnifiedMenuDictionary:
+		if c.uiManager != nil {
+			c.uiManager.OpenSettingsWithPage("dictionary")
+		}
+	case id == ui.UnifiedMenuSettings:
+		c.handleToolbarOpenSettings()
+	case id == ui.UnifiedMenuAbout:
+		if c.uiManager != nil {
+			c.uiManager.OpenSettingsWithPage("about")
+		}
+	case id >= ui.UnifiedMenuThemeBase && id < ui.UnifiedMenuThemeBase+100:
+		// Theme selection
+		themeIndex := id - ui.UnifiedMenuThemeBase
+		themes := c.uiManager.GetAvailableThemes()
+		if themeIndex >= 0 && themeIndex < len(themes) {
+			themeName := themes[themeIndex]
+			c.logger.Info("Theme selected from unified menu", "theme", themeName)
+			c.uiManager.LoadTheme(themeName)
+			// Save to config
+			c.saveThemeConfig(themeName)
+		}
+	}
+}
+
+// HandleShowContextMenu handles context menu request from TSF (bridge interface)
+func (c *Coordinator) HandleShowContextMenu(screenX, screenY int) {
+	c.handleShowUnifiedMenu(screenX, screenY, 0)
 }
 
 // resetAndResync restarts the Go service process
@@ -2541,17 +2616,15 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 
 	case "open_dictionary":
 		c.logger.Info("Opening dictionary manager requested")
-		// TODO: Open dictionary manager dialog
-		// if c.uiManager != nil {
-		//     c.uiManager.OpenDictionaryManager()
-		// }
+		if c.uiManager != nil {
+			c.uiManager.OpenSettingsWithPage("dictionary")
+		}
 
 	case "show_about":
 		c.logger.Info("Showing about dialog requested")
-		// TODO: Show about dialog
-		// if c.uiManager != nil {
-		//     c.uiManager.ShowAboutDialog()
-		// }
+		if c.uiManager != nil {
+			c.uiManager.OpenSettingsWithPage("about")
+		}
 
 	case "exit":
 		c.logger.Info("Exit requested from menu")
@@ -2603,6 +2676,24 @@ func (c *Coordinator) saveToolbarConfig() {
 			c.logger.Error("Failed to save toolbar config", "error", err)
 		} else {
 			c.logger.Debug("Toolbar config saved")
+		}
+	}()
+}
+
+// saveThemeConfig saves the theme name to config
+func (c *Coordinator) saveThemeConfig(themeName string) {
+	go func() {
+		cfg, err := config.Load()
+		if err != nil {
+			cfg = config.DefaultConfig()
+		}
+
+		cfg.UI.Theme = themeName
+
+		if err := config.Save(cfg); err != nil {
+			c.logger.Error("Failed to save theme config", "error", err)
+		} else {
+			c.logger.Debug("Theme config saved", "theme", themeName)
 		}
 	}()
 }
