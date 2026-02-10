@@ -464,8 +464,15 @@ func loadWubiTableForPinyin(engine *pinyin.Engine, srcPath string) error {
 		}
 	}
 
-	// 其次：缓存目录的 wubi.wdb
+	// 其次：缓存目录的 wubi.wdb（不存在则按需生成）
 	wdbCachePath := dictcache.CachePath("wubi")
+	if dictcache.NeedsRegenerate([]string{srcPath}, wdbCachePath) {
+		log.Printf("[EngineManager] 五笔反查码表缓存不存在，按需生成")
+		if err := dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath); err != nil {
+			return fmt.Errorf("生成五笔反查码表缓存失败: %w", err)
+		}
+	}
+
 	if err := engine.LoadWubiTableBinary(wdbCachePath); err == nil {
 		log.Printf("[EngineManager] 五笔反查码表(缓存 wdb, mmap)加载成功")
 		return nil
