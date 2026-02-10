@@ -6,7 +6,7 @@ func DefaultTheme() *Theme {
 		Meta: ThemeMeta{
 			Name:    "默认主题",
 			Version: "1.0",
-			Author:  "WindInput",
+			Author:  "清风输入法",
 		},
 		CandidateWindow: CandidateWindowColors{
 			BackgroundColor: "#FFFFFFF5", // Slightly transparent white
@@ -65,7 +65,7 @@ func DarkTheme() *Theme {
 		Meta: ThemeMeta{
 			Name:    "暗色主题",
 			Version: "1.0",
-			Author:  "WindInput",
+			Author:  "清风输入法",
 		},
 		CandidateWindow: CandidateWindowColors{
 			BackgroundColor: "#2D2D2DF5",

@@ -1,4 +1,4 @@
-# WindInput - Windows 输入法
+# 清风输入法 (WindInput) - Windows 输入法
 
 基于 Windows TSF (Text Services Framework) 框架的中文输入法，采用 C++ 实现 TSF 核心层，Go 实现输入引擎和候选窗口。
 
@@ -58,6 +58,33 @@ installer\install.bat
 以**管理员权限**运行：
 ```batch
 installer\uninstall.bat
+```
+
+### 生成正式安装包 (NSIS)
+
+面向最终用户发布时，使用 NSIS 生成单文件安装包：
+
+```batch
+installer\build_nsis.bat 0.1.0
+```
+
+输出文件：
+
+```text
+build\installer\清风输入法-0.1.0-Setup.exe
+```
+
+可选参数（跳过构建，仅打包现有 `build\` 产物）：
+
+```batch
+installer\build_nsis.bat 0.1.0 --skip-build
+```
+
+静默安装/卸载（用于脚本化部署）：
+
+```batch
+build\installer\清风输入法-0.1.0-Setup.exe /S
+"%ProgramFiles%\WindInput\uninstall.exe" /S
 ```
 
 ## 项目结构
@@ -198,7 +225,7 @@ advanced:
 
 ## 使用方法
 
-1. 安装后，使用 `Win + Space` 或 `Ctrl + Shift` 切换到 WindInput 输入法
+1. 安装后，使用 `Win + Space` 或 `Ctrl + Shift` 切换到 **清风输入法**
 2. 输入拼音，候选窗口自动显示
 3. 使用数字键 1-9 选择候选词，或空格选择第一个
 4. 按 `Shift` 切换中英文模式

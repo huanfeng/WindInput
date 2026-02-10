@@ -62,7 +62,7 @@ func main() {
 
 	// Create application with options
 	err := wails.Run(&options.App{
-		Title:     "WindInput 设置",
+		Title:     "清风输入法 设置",
 		Width:     800,
 		Height:    600,
 		MinWidth:  600,

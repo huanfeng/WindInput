@@ -157,8 +157,8 @@ func main() {
 		// Use MessageBox to show error (since this might be started without console)
 		user32 := windows.NewLazySystemDLL("user32.dll")
 		messageBox := user32.NewProc("MessageBoxW")
-		title, _ := windows.UTF16PtrFromString("WindInput IME Service")
-		msg, _ := windows.UTF16PtrFromString("Another instance is already running.")
+		title, _ := windows.UTF16PtrFromString("清风输入法 服务")
+		msg, _ := windows.UTF16PtrFromString("另一实例已在运行。")
 		messageBox.Call(0, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x40) // MB_ICONINFORMATION
 		os.Exit(0)
 	}

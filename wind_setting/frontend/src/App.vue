@@ -478,7 +478,7 @@ async function refreshStatus() {
         // 转换为前端期望的格式
         status.value = {
           service: {
-            name: "WindInput",
+            name: "清风输入法",
             version: "1.0.0",
             uptime: "",
             uptimeSec: 0,
@@ -923,14 +923,13 @@ function handleDocumentClick(event: MouseEvent) {
 <template>
   <div class="app">
     <aside class="sidebar">
-      <div class="logo">
-        <span class="logo-icon">🌬</span>
-        <div class="logo-title">
-          <span class="logo-text">WindInput</span>
-          <span class="logo-version" v-if="status"
-            >v{{ status.service.version }}</span
-          >
-        </div>
+            <div class="logo">
+              <span class="logo-icon">🌬</span>
+              <div class="logo-title">
+                <span class="logo-text">清风输入法</span>
+                <span class="logo-version" v-if="status"
+                  >v{{ status.service.version }}</span>
+              </div>
         <span
           class="status-dot-inline"
           :class="connected ? 'connected' : 'disconnected'"
@@ -2362,13 +2361,13 @@ function handleDocumentClick(event: MouseEvent) {
         <section v-if="activeTab === 'about'" class="section">
           <div class="section-header">
             <h2>关于</h2>
-            <p class="section-desc">WindInput 输入法信息</p>
+            <p class="section-desc">清风输入法 信息</p>
           </div>
 
           <div class="settings-card about-card" v-if="status">
             <div class="about-simple">
               <div class="about-icon-wrap">
-                <img :src="appIconUrl" alt="WindInput" />
+                <img :src="appIconUrl" alt="清风输入法" />
               </div>
               <div class="about-title">
                 <h3>{{ status.service.name }}</h3>

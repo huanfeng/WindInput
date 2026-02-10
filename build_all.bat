@@ -137,6 +137,12 @@ if exist "%SCRIPT_DIR%dict\pinyin\unigram.txt" (
     echo [提示] Unigram 语言模型不存在,智能组句功能不可用
 )
 
+REM 清理 rime 临时下载目录(已复制到 pinyin/, 避免安装包冗余)
+if exist "%RIME_DIR%" (
+    rmdir /S /Q "%RIME_DIR%" >nul 2>&1
+    echo   - 已清理 rime 临时下载目录
+)
+
 echo.
 
 echo [6/7] 生成预编译二进制词库(.wdb)...
@@ -218,13 +224,13 @@ echo 输出文件:
 echo - build\wind_tsf.dll(TSF 桥接)
 echo - build\wind_input.exe(输入法服务)
 echo - build\wind_setting.exe(设置界面)
-echo - build\dict\pinyin\pinyin.wdb(预编译拼音词库)
-echo - build\dict\pinyin\unigram.wdb(预编译语言模型)
-echo - build\dict\pinyin\8105.dict.yaml(拼音单字词库, wdb 转换源)
-echo - build\dict\pinyin\base.dict.yaml(拼音基础词库, wdb 转换源)
-echo - build\dict\pinyin\unigram.txt(Unigram 语言模型, wdb 转换源)
-echo - build\dict\wubi\wubi86.txt(五笔词库, wdb 转换源)
-echo - build\dict\wubi\wubi.wdb(预编译五笔词库)
+echo - build\dict\pinyin\8105.dict.yaml(拼音单字词库)
+echo - build\dict\pinyin\base.dict.yaml(拼音基础词库)
+echo - build\dict\pinyin\unigram.txt(Unigram 语言模型)
+echo - build\dict\pinyin\pinyin.wdb(预编译拼音词库, 开发调试用)
+echo - build\dict\pinyin\unigram.wdb(预编译语言模型, 开发调试用)
+echo - build\dict\wubi\wubi86.txt(五笔词库)
+echo - build\dict\wubi\wubi.wdb(预编译五笔词库, 开发调试用)
 echo - build\dict\common_chars.txt(常用字表)
 echo.
 echo 词库来源: 雾凇拼音 rime-ice (https://github.com/iDvel/rime-ice)

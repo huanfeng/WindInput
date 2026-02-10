@@ -2,7 +2,7 @@
 setlocal
 
 echo ======================================
-echo WindInput 输入法安装程序
+echo 清风输入法安装程序
 echo ======================================
 echo.
 
@@ -108,67 +108,42 @@ if exist "%BUILD_DIR%\wind_setting.exe" (
     echo [提示] 未找到 wind_setting.exe,已跳过(可选)
 )
 
-echo [6/8] 从 build 目录复制词库...
+echo [6/8] 从 build 目录复制词库(源文件, wdb 运行时自动生成)...
 REM 创建词库目录
 if not exist "%INSTALL_DIR%\dict\pinyin" mkdir "%INSTALL_DIR%\dict\pinyin"
 if not exist "%INSTALL_DIR%\dict\wubi" mkdir "%INSTALL_DIR%\dict\wubi"
 
-REM 从 build 复制拼音词库（Rime 格式）
+REM 拼音词库源文件（Rime YAML 格式）
 if exist "%BUILD_DIR%\dict\pinyin\8105.dict.yaml" (
     copy /Y "%BUILD_DIR%\dict\pinyin\8105.dict.yaml" "%INSTALL_DIR%\dict\pinyin\8105.dict.yaml" >nul
     echo   - 拼音单字词库: 8105.dict.yaml
 ) else (
-    echo [警告] build 目录中未找到拼音单字词库
-    echo        请先运行 build_all.bat
+    echo [警告] build 目录中未找到拼音单字词库,请先运行 build_all.bat
 )
 if exist "%BUILD_DIR%\dict\pinyin\base.dict.yaml" (
     copy /Y "%BUILD_DIR%\dict\pinyin\base.dict.yaml" "%INSTALL_DIR%\dict\pinyin\base.dict.yaml" >nul
     echo   - 拼音基础词库: base.dict.yaml
 ) else (
-    echo [警告] build 目录中未找到拼音基础词库
-    echo        请先运行 build_all.bat
+    echo [警告] build 目录中未找到拼音基础词库,请先运行 build_all.bat
 )
 
-REM 从 build 复制预编译二进制词库（优先使用）
-if exist "%BUILD_DIR%\dict\pinyin\pinyin.wdb" (
-    copy /Y "%BUILD_DIR%\dict\pinyin\pinyin.wdb" "%INSTALL_DIR%\dict\pinyin\pinyin.wdb" >nul
-    echo   - 预编译拼音词库: pinyin.wdb
-) else (
-    echo [提示] pinyin.wdb 不存在,运行时将自动从 YAML 转换
-)
-if exist "%BUILD_DIR%\dict\pinyin\unigram.wdb" (
-    copy /Y "%BUILD_DIR%\dict\pinyin\unigram.wdb" "%INSTALL_DIR%\dict\pinyin\unigram.wdb" >nul
-    echo   - 预编译语言模型: unigram.wdb
-) else (
-    echo [提示] unigram.wdb 不存在,运行时将自动从文本转换
-)
-
-REM 从 build 复制 Unigram 语言模型（wdb 转换源）
+REM Unigram 语言模型源文件
 if exist "%BUILD_DIR%\dict\pinyin\unigram.txt" (
     copy /Y "%BUILD_DIR%\dict\pinyin\unigram.txt" "%INSTALL_DIR%\dict\pinyin\unigram.txt" >nul
-    echo   - 语言模型源文件: unigram.txt
+    echo   - 语言模型: unigram.txt
 ) else (
     echo [提示] Unigram 语言模型不存在,智能组句功能不可用
 )
 
-REM 从 build 复制五笔词库
+REM 五笔码表
 if exist "%BUILD_DIR%\dict\wubi\wubi86.txt" (
     copy /Y "%BUILD_DIR%\dict\wubi\wubi86.txt" "%INSTALL_DIR%\dict\wubi\wubi86.txt" >nul
     echo   - 五笔词库: wubi86.txt
 ) else (
-    echo [警告] build 目录中未找到五笔词库
-    echo        请先运行 build_all.bat
-)
-REM 从 build 复制预编译五笔词库
-if exist "%BUILD_DIR%\dict\wubi\wubi.wdb" (
-    copy /Y "%BUILD_DIR%\dict\wubi\wubi.wdb" "%INSTALL_DIR%\dict\wubi\wubi.wdb" >nul
-    echo   - 预编译五笔词库: wubi.wdb
-)
-if exist "%BUILD_DIR%\dict\wubi\wubi.wdb.meta.json" (
-    copy /Y "%BUILD_DIR%\dict\wubi\wubi.wdb.meta.json" "%INSTALL_DIR%\dict\wubi\wubi.wdb.meta.json" >nul
+    echo [警告] build 目录中未找到五笔词库,请先运行 build_all.bat
 )
 
-REM 从 build 复制常用字表
+REM 常用字表
 if exist "%BUILD_DIR%\dict\common_chars.txt" (
     copy /Y "%BUILD_DIR%\dict\common_chars.txt" "%INSTALL_DIR%\dict\common_chars.txt" >nul
     echo   - 常用字表: common_chars.txt
@@ -187,7 +162,7 @@ if %errorLevel% neq 0 (
 echo [8/8] 创建快捷方式...
 REM 创建开始菜单快捷方式
 if exist "%INSTALL_DIR%\wind_setting.exe" (
-    powershell -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%ProgramData%\Microsoft\Windows\Start Menu\Programs\WindInput 设置.lnk'); $s.TargetPath = '%INSTALL_DIR%\wind_setting.exe'; $s.WorkingDirectory = '%INSTALL_DIR%'; $s.Description = 'WindInput Settings'; $s.Save()" >nul 2>&1
+    powershell -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%ProgramData%\Microsoft\Windows\Start Menu\Programs\清风输入法 设置.lnk'); $s.TargetPath = '%INSTALL_DIR%\wind_setting.exe'; $s.WorkingDirectory = '%INSTALL_DIR%'; $s.Description = '清风输入法 设置'; $s.Save()" >nul 2>&1
     if %errorLevel% equ 0 (
         echo   - 开始菜单快捷方式已创建
     )
@@ -214,20 +189,17 @@ echo 已安装组件:
 echo - wind_tsf.dll (TSF 桥接)
 echo - wind_input.exe (输入法服务)
 echo - wind_setting.exe (设置界面)
-echo - dict\pinyin\pinyin.wdb (预编译拼音词库)
-echo - dict\pinyin\unigram.wdb (预编译语言模型)
 echo - dict\pinyin\8105.dict.yaml (拼音单字词库)
 echo - dict\pinyin\base.dict.yaml (拼音基础词库)
 echo - dict\pinyin\unigram.txt (语言模型)
 echo - dict\wubi\wubi86.txt (五笔86词库)
-echo - dict\wubi\wubi.wdb (预编译五笔词库)
 echo - dict\common_chars.txt (常用字表)
 echo.
 echo 服务将在使用输入法时自动启动。
 echo.
 echo 使用方法:
 echo 1. 按 Win+Space 切换输入法
-echo 2. 从输入法列表选择“WindInput”
+echo 2. 从输入法列表选择“清风输入法”
 echo 3. 开始输入(默认拼音模式)
 echo.
 echo 热键:
@@ -235,7 +207,7 @@ echo - Shift: 切换中英文模式
 echo - Ctrl+`: 切换拼音/五笔引擎
 echo.
 echo 设置:
-echo - 运行 wind_setting.exe 或在开始菜单中找到“WindInput 设置”
+echo - 运行 wind_setting.exe 或在开始菜单中找到“清风输入法 设置”
 echo - 配置位置: %%APPDATA%%\WindInput\config.yaml
 echo.
 echo 注意: 如果旧文件无法删除,请重启电脑后

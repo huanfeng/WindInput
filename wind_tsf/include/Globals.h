@@ -133,8 +133,8 @@ extern const GUID c_guidProfile;
 extern const GUID c_guidLangBarItemButton;
 
 // 输入法名称
-#define TEXTSERVICE_NAME        L"御风输入法"
-#define TEXTSERVICE_DESC        L"WindInput Input Method"
+#define TEXTSERVICE_NAME        L"清风输入法"
+#define TEXTSERVICE_DESC        L"清风输入法 (WindInput)"
 #define TEXTSERVICE_ICON_INDEX  0
 
 // 语言 ID (简体中文)

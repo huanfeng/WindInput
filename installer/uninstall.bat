@@ -2,7 +2,7 @@
 setlocal
 
 echo ======================================
-echo WindInput 输入法卸载程序
+echo 清风输入法卸载程序
 echo ======================================
 echo.
 
@@ -66,7 +66,7 @@ for %%f in ("%INSTALL_DIR%\*.bak") do (
 
 echo [5/6] 移除目录...
 REM 删除开始菜单快捷方式
-del /F "%ProgramData%\Microsoft\Windows\Start Menu\Programs\WindInput 设置.lnk" >nul 2>&1
+del /F "%ProgramData%\Microsoft\Windows\Start Menu\Programs\清风输入法 设置.lnk" >nul 2>&1
 REM 删除词库目录
 if exist "%INSTALL_DIR%\dict" (
     rmdir /S /Q "%INSTALL_DIR%\dict" >nul 2>&1

@@ -130,23 +130,23 @@ STDAPI CLangBarItemButton::GetTooltipString(BSTR* pbstrToolTip)
 
     if (effectiveChinese)
     {
-        *pbstrToolTip = SysAllocString(L"WindInput - 中文模式");
+        *pbstrToolTip = SysAllocString(L"清风输入法 - 中文模式");
     }
     else if (_bCapsLock)
     {
         if (_bChineseMode)
         {
             // Chinese mode with CapsLock = temporary English uppercase
-            *pbstrToolTip = SysAllocString(L"WindInput - 英文大写 (中文模式, Caps Lock)");
+            *pbstrToolTip = SysAllocString(L"清风输入法 - 英文大写 (中文模式, Caps Lock)");
         }
         else
         {
-            *pbstrToolTip = SysAllocString(L"WindInput - English Mode (Caps Lock ON)");
+            *pbstrToolTip = SysAllocString(L"清风输入法 - 英文模式 (Caps Lock 开)");
         }
     }
     else
     {
-        *pbstrToolTip = SysAllocString(L"WindInput - English Mode (Caps Lock OFF)");
+        *pbstrToolTip = SysAllocString(L"清风输入法 - 英文模式 (Caps Lock 关)");
     }
 
     return (*pbstrToolTip != nullptr) ? S_OK : E_OUTOFMEMORY;
