@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, onUnmounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import * as api from "./api/settings";
 import * as wailsApi from "./api/wails";
 import type { Config, Status, EngineInfo } from "./api/settings";
@@ -42,9 +42,6 @@ const formData = ref<Config>(getDefaultConfig());
 // 主题相关状态
 const availableThemes = ref<ThemeInfo[]>([]);
 const themePreview = ref<ThemePreview | null>(null);
-
-// 词库组件引用
-const dictPageRef = ref<InstanceType<typeof DictionaryPage> | null>(null);
 
 const repoUrl = "https://github.com/huanfeng/WindInput";
 const appIconUrl = new URL(
@@ -389,13 +386,6 @@ async function handleOpenExternalLink(url: string) {
   }
 }
 
-// 切换到词库标签页时加载数据
-watch(activeTab, (tab) => {
-  if (tab === "dictionary" && dictPageRef.value) {
-    dictPageRef.value.loadDictData();
-  }
-});
-
 onMounted(async () => {
   await loadData();
   if (isWailsEnv.value) {
@@ -476,22 +466,22 @@ onMounted(async () => {
 
       <div v-else class="content">
         <GeneralPage
-          v-if="activeTab === 'general'"
+          v-show="activeTab === 'general'"
           :formData="formData"
           :engines="engines"
         />
 
-        <InputPage v-if="activeTab === 'input'" :formData="formData" />
+        <InputPage v-show="activeTab === 'input'" :formData="formData" />
 
         <HotkeyPage
-          v-if="activeTab === 'hotkey'"
+          v-show="activeTab === 'hotkey'"
           :formData="formData"
           :hotkeyConflicts="hotkeyConflicts"
           @update:hotkeyConflicts="hotkeyConflicts = $event"
         />
 
         <AppearancePage
-          v-if="activeTab === 'appearance'"
+          v-show="activeTab === 'appearance'"
           :formData="formData"
           :isWailsEnv="isWailsEnv"
           :availableThemes="availableThemes"
@@ -500,20 +490,19 @@ onMounted(async () => {
         />
 
         <DictionaryPage
-          v-if="activeTab === 'dictionary'"
-          ref="dictPageRef"
+          v-show="activeTab === 'dictionary'"
           :isWailsEnv="isWailsEnv"
         />
 
         <AdvancedPage
-          v-if="activeTab === 'advanced'"
+          v-show="activeTab === 'advanced'"
           :formData="formData"
           :isWailsEnv="isWailsEnv"
           @openLogFolder="handleOpenLogFolder"
         />
 
         <AboutPage
-          v-if="activeTab === 'about'"
+          v-show="activeTab === 'about'"
           :status="status"
           :appIconUrl="appIconUrl"
           :repoUrl="repoUrl"

@@ -228,7 +228,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import * as wailsApi from "../api/wails";
 import type {
   PhraseItem,
@@ -439,7 +439,9 @@ function getShadowActionLabel(action: string): string {
   return labels[action] || action;
 }
 
-defineExpose({ loadDictData });
+onMounted(() => {
+  loadDictData();
+});
 </script>
 
 <style scoped>
