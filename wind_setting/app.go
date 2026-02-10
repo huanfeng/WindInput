@@ -677,11 +677,11 @@ func (a *App) GetThemePreview(themeName string) (map[string]interface{}, error) 
 
 // OpenLogFolder opens the log directory in the system file explorer.
 func (a *App) OpenLogFolder() error {
-	base := os.Getenv("APPDATA")
+	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
-		return fmt.Errorf("APPDATA not set")
+		return fmt.Errorf("LOCALAPPDATA not set")
 	}
-	path := filepath.Join(base, "WindInput")
+	path := filepath.Join(base, "WindInput", "logs")
 	return exec.Command("explorer.exe", path).Start()
 }
 

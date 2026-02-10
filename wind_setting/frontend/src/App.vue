@@ -48,7 +48,7 @@ const testFilterMode = ref("current");
 const testLoading = ref(false);
 
 // 日志页面状态
-const logPath = "%APPDATA%\\WindInput\\";
+const logPath = "%LOCALAPPDATA%\\WindInput\\logs\\";
 
 // 词库管理状态
 const dictSubTab = ref<"phrases" | "userdict" | "shadow">("phrases");

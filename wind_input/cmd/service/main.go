@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -203,14 +205,18 @@ func main() {
 		Level: level,
 	})
 
-	// 创建文件日志 handler（日志文件在 %APPDATA%\WindInput\wind_input.log）
+	// 创建文件日志 handler（日志文件在 %LOCALAPPDATA%\WindInput\logs\wind_input.log）
 	var fileHandler slog.Handler
-	logDir := filepath.Join(os.Getenv("APPDATA"), "WindInput")
+	logBase := os.Getenv("LOCALAPPDATA")
+	if logBase == "" {
+		logBase = os.TempDir()
+	}
+	logDir := filepath.Join(logBase, "WindInput", "logs")
 	os.MkdirAll(logDir, 0755)
 	logFilePath := filepath.Join(logDir, "wind_input.log")
-	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	rotWriter, err := newRotatingWriter(logFilePath, 5*1024*1024, 3) // 5MB, 3 backups
 	if err == nil {
-		fileHandler = slog.NewTextHandler(logFile, &slog.HandlerOptions{
+		fileHandler = slog.NewTextHandler(rotWriter, &slog.HandlerOptions{
 			Level: level,
 		})
 	}
@@ -476,6 +482,104 @@ func (h *reloadHandlerImpl) GetStatus() *pkgcontrol.ServiceStatus {
 	}
 
 	return status
+}
+
+// rotatingWriter 实现日志文件轮转的 io.Writer
+type rotatingWriter struct {
+	mu       sync.Mutex
+	file     *os.File
+	filePath string
+	maxSize  int64 // 单文件最大字节数
+	maxFiles int   // 最大备份文件数
+	curSize  int64 // 当前文件大小
+}
+
+func newRotatingWriter(filePath string, maxSize int64, maxFiles int) (*rotatingWriter, error) {
+	w := &rotatingWriter{
+		filePath: filePath,
+		maxSize:  maxSize,
+		maxFiles: maxFiles,
+	}
+
+	// 检查已有文件大小，若超限则先轮转
+	if info, err := os.Stat(filePath); err == nil {
+		if info.Size() >= maxSize {
+			w.rotateFiles()
+		}
+	}
+
+	// 打开或创建文件
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open log file: %w", err)
+	}
+
+	// 获取当前文件大小
+	if info, err := f.Stat(); err == nil {
+		w.curSize = info.Size()
+	}
+
+	w.file = f
+	return w, nil
+}
+
+func (w *rotatingWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	n, err = w.file.Write(p)
+	if err != nil {
+		return n, err
+	}
+	w.curSize += int64(n)
+
+	if w.curSize >= w.maxSize {
+		w.rotate()
+	}
+	return n, nil
+}
+
+func (w *rotatingWriter) rotate() {
+	w.file.Close()
+	w.rotateFiles()
+
+	f, err := os.OpenFile(w.filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		// 无法创建新文件，尝试回退
+		return
+	}
+	w.file = f
+	w.curSize = 0
+}
+
+// rotateFiles 移动备份链：3→删除, 2→3, 1→2, current→1
+func (w *rotatingWriter) rotateFiles() {
+	ext := filepath.Ext(w.filePath)
+	base := w.filePath[:len(w.filePath)-len(ext)]
+
+	// 删除最旧的备份
+	oldest := fmt.Sprintf("%s.%d%s", base, w.maxFiles, ext)
+	os.Remove(oldest)
+
+	// 依次重命名：N-1→N, ..., 1→2
+	for i := w.maxFiles - 1; i >= 1; i-- {
+		src := fmt.Sprintf("%s.%d%s", base, i, ext)
+		dst := fmt.Sprintf("%s.%d%s", base, i+1, ext)
+		os.Rename(src, dst)
+	}
+
+	// 当前文件→.1
+	first := fmt.Sprintf("%s.%d%s", base, 1, ext)
+	os.Rename(w.filePath, first)
+}
+
+func (w *rotatingWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file != nil {
+		return w.file.Close()
+	}
+	return nil
 }
 
 // multiHandler wraps multiple slog handlers
