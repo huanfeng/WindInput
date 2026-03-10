@@ -396,6 +396,13 @@ func main() {
 	// Set bridge server on coordinator for state broadcasting
 	coord.SetBridgeServer(bridgeServer)
 
+	// Listen for exit requests in a separate goroutine
+	go func() {
+		<-coordinator.ExitRequested()
+		logger.Info("Exit requested, shutting down...")
+		os.Exit(0)
+	}()
+
 	// Listen for restart requests in a separate goroutine
 	go func() {
 		<-coordinator.RestartRequested()

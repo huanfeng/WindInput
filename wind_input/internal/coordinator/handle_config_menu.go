@@ -194,8 +194,7 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 
 	case "exit":
 		c.logger.Info("Exit requested from menu")
-		// TODO: Signal application exit
-		// For now, just log the request
+		RequestExit()
 	}
 
 	// Broadcast state to all clients if needed

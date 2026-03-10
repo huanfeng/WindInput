@@ -80,3 +80,5 @@ Desktop.ini
 # Logs
 *.log
 
+# OMC
+.omc

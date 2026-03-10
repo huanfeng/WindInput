@@ -30,6 +30,23 @@ func RestartRequested() <-chan struct{} {
 	return restartRequestCh
 }
 
+// Exit request channel - main should listen to this
+var exitRequestCh = make(chan struct{}, 1)
+
+// RequestExit signals that an application exit is requested
+func RequestExit() {
+	select {
+	case exitRequestCh <- struct{}{}:
+	default:
+		// Channel already has a request pending
+	}
+}
+
+// ExitRequested returns a channel that signals when exit is requested
+func ExitRequested() <-chan struct{} {
+	return exitRequestCh
+}
+
 // Modifier key flags (must match C++ side)
 const (
 	ModShift = 0x01

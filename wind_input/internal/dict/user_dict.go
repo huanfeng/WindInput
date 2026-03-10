@@ -3,6 +3,7 @@ package dict
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strconv"
@@ -387,7 +388,7 @@ func (ud *UserDict) doSave() {
 		ud.mu.Lock()
 		ud.dirty = true
 		ud.mu.Unlock()
-		// TODO: 记录错误日志
+		slog.Error("Failed to save user dict", "name", ud.name, "path", ud.filePath, "error", err)
 	}
 }
 
