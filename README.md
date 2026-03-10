@@ -262,7 +262,10 @@ advanced:
 
 ## 文档
 
-详细开发文档请参阅 [docs/architecture.md](docs/architecture.md)
+详细开发文档请参阅：
+
+- [docs/architecture.md](docs/architecture.md) - 架构设计文档
+- [docs/wubi_requirements.md](docs/wubi_requirements.md) - 基于用户功能汇总整理的五笔需求文档
 
 ## 许可证
 
