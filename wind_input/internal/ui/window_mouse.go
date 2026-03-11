@@ -208,8 +208,6 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 		{ID: IDM_CANDIDATE_MOVETOP, Text: "置顶(T)", Disabled: isFirst},
 		{Separator: true},
 		{ID: IDM_CANDIDATE_DELETE, Text: "删除词条(X)"},
-		{Separator: true},
-		{ID: IDM_CANDIDATE_SETTINGS, Text: "打开设置(S)..."},
 	}
 
 	// Set menu open flag and target index
@@ -244,10 +242,6 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 			case IDM_CANDIDATE_DELETE:
 				if cb.OnDelete != nil {
 					cb.OnDelete(targetIndex)
-				}
-			case IDM_CANDIDATE_SETTINGS:
-				if cb.OnOpenSettings != nil {
-					cb.OnOpenSettings()
 				}
 			}
 		}

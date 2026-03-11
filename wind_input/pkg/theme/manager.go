@@ -12,11 +12,12 @@ import (
 
 // Manager manages theme loading and switching
 type Manager struct {
-	logger       *slog.Logger
-	mu           sync.RWMutex
-	currentTheme *Theme
-	resolved     *ResolvedTheme
-	themeDirs    []string // Directories to search for themes
+	logger         *slog.Logger
+	mu             sync.RWMutex
+	currentTheme   *Theme
+	currentThemeID string // Theme ID used for loading (e.g., "default", "dark")
+	resolved       *ResolvedTheme
+	themeDirs      []string // Directories to search for themes
 }
 
 // NewManager creates a new theme manager
@@ -63,6 +64,13 @@ func (m *Manager) initThemeDirs() {
 func (m *Manager) LoadTheme(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Track theme ID
+	if name == "" {
+		m.currentThemeID = "default"
+	} else {
+		m.currentThemeID = name
+	}
 
 	// Handle built-in themes
 	if name == "default" || name == "" {
@@ -204,6 +212,50 @@ func (m *Manager) ListAvailableThemes() []string {
 	}
 
 	return result
+}
+
+// ThemeDisplayInfo contains theme ID and display name
+type ThemeDisplayInfo struct {
+	ID          string // Theme ID used for loading (e.g., "default", "dark")
+	DisplayName string // Human-readable name (e.g., "默认主题 1.0")
+}
+
+// ListAvailableThemeInfos returns theme display info (ID + display name) for all available themes
+func (m *Manager) ListAvailableThemeInfos() []ThemeDisplayInfo {
+	ids := m.ListAvailableThemes()
+	infos := make([]ThemeDisplayInfo, 0, len(ids))
+
+	// Built-in theme display names
+	builtinNames := map[string]string{
+		"default": DefaultTheme().Meta.Name + " " + DefaultTheme().Meta.Version,
+		"dark":    DarkTheme().Meta.Name + " " + DarkTheme().Meta.Version,
+		"msime":   MSIMETheme().Meta.Name + " " + MSIMETheme().Meta.Version,
+	}
+
+	for _, id := range ids {
+		displayName := id
+		if name, ok := builtinNames[id]; ok {
+			displayName = name
+		} else {
+			// Try to read display name from theme file
+			if t, err := m.loadThemeFile(id); err == nil && t.Meta.Name != "" {
+				displayName = t.Meta.Name
+				if t.Meta.Version != "" {
+					displayName += " " + t.Meta.Version
+				}
+			}
+		}
+		infos = append(infos, ThemeDisplayInfo{ID: id, DisplayName: displayName})
+	}
+
+	return infos
+}
+
+// GetCurrentThemeID returns the ID of the currently loaded theme
+func (m *Manager) GetCurrentThemeID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.currentThemeID
 }
 
 // GetThemeDirs returns the theme search directories

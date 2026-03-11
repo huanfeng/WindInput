@@ -4,6 +4,7 @@ package coordinator
 import (
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/ui"
+	"github.com/huanfeng/wind_input/pkg/config"
 )
 
 // SetIMEActivated sets the IME activation state
@@ -191,6 +192,23 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 		if c.uiManager != nil {
 			c.uiManager.OpenSettingsWithPage("about")
 		}
+
+	case "reload_config":
+		c.logger.Info("Reload config requested from menu")
+		go func() {
+			newCfg, err := config.Load()
+			if err != nil {
+				c.logger.Error("Failed to load config for reload", "error", err)
+				return
+			}
+			c.UpdateEngineConfig(&newCfg.Engine)
+			c.UpdateHotkeyConfig(&newCfg.Hotkeys)
+			c.UpdateStartupConfig(&newCfg.Startup)
+			c.UpdateUIConfig(&newCfg.UI)
+			c.UpdateToolbarConfig(&newCfg.Toolbar)
+			c.UpdateInputConfig(&newCfg.Input)
+			c.logger.Info("Config reloaded successfully from menu")
+		}()
 
 	case "exit":
 		c.logger.Info("Exit requested from menu")

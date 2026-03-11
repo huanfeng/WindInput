@@ -482,14 +482,21 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 		return
 	}
 
+	// Build theme menu items from theme info
+	themeInfos := c.uiManager.GetAvailableThemeInfos()
+	themeMenuItems := make([]ui.ThemeMenuItem, len(themeInfos))
+	for i, info := range themeInfos {
+		themeMenuItems[i] = ui.ThemeMenuItem{ID: info.ID, DisplayName: info.DisplayName}
+	}
+
 	c.mu.Lock()
 	state := ui.UnifiedMenuState{
 		ChineseMode:    c.chineseMode,
 		FullWidth:      c.fullWidth,
 		ChinesePunct:   c.chinesePunctuation,
 		ToolbarVisible: c.toolbarVisible,
-		Themes:         c.uiManager.GetAvailableThemes(),
-		CurrentTheme:   c.uiManager.GetCurrentThemeName(),
+		Themes:         themeMenuItems,
+		CurrentThemeID: c.uiManager.GetCurrentThemeID(),
 	}
 	c.mu.Unlock()
 
@@ -509,6 +516,9 @@ func (c *Coordinator) handleUnifiedMenuAction(id int) {
 		c.handleToolbarTogglePunct()
 	case id == ui.UnifiedMenuToggleToolbar:
 		c.HandleMenuCommand("toggle_toolbar")
+	case id == ui.UnifiedMenuReloadConfig:
+		c.logger.Info("Reload config from unified menu")
+		c.HandleMenuCommand("reload_config")
 	case id == ui.UnifiedMenuDictionary:
 		if c.uiManager != nil {
 			c.uiManager.OpenSettingsWithPage("dictionary")
@@ -522,13 +532,13 @@ func (c *Coordinator) handleUnifiedMenuAction(id int) {
 	case id >= ui.UnifiedMenuThemeBase && id < ui.UnifiedMenuThemeBase+100:
 		// Theme selection
 		themeIndex := id - ui.UnifiedMenuThemeBase
-		themes := c.uiManager.GetAvailableThemes()
-		if themeIndex >= 0 && themeIndex < len(themes) {
-			themeName := themes[themeIndex]
-			c.logger.Info("Theme selected from unified menu", "theme", themeName)
-			c.uiManager.LoadTheme(themeName)
+		themeInfos := c.uiManager.GetAvailableThemeInfos()
+		if themeIndex >= 0 && themeIndex < len(themeInfos) {
+			themeID := themeInfos[themeIndex].ID
+			c.logger.Info("Theme selected from unified menu", "theme", themeID)
+			c.uiManager.LoadTheme(themeID)
 			// Save to config
-			c.saveThemeConfig(themeName)
+			c.saveThemeConfig(themeID)
 		}
 	}
 }

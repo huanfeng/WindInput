@@ -16,10 +16,17 @@ const (
 	UnifiedMenuTogglePunct   = 102
 	UnifiedMenuToggleToolbar = 103
 	UnifiedMenuThemeBase     = 200 // 主题ID: 200+i
+	UnifiedMenuReloadConfig  = 299
 	UnifiedMenuDictionary    = 300
 	UnifiedMenuSettings      = 301
 	UnifiedMenuAbout         = 302
 )
+
+// ThemeMenuItem holds theme ID and display name for menu rendering
+type ThemeMenuItem struct {
+	ID          string // Theme ID for loading (e.g., "default")
+	DisplayName string // Display name (e.g., "默认主题 1.0")
+}
 
 // UnifiedMenuState holds the current state for building the unified menu
 type UnifiedMenuState struct {
@@ -27,8 +34,8 @@ type UnifiedMenuState struct {
 	FullWidth      bool
 	ChinesePunct   bool
 	ToolbarVisible bool
-	Themes         []string
-	CurrentTheme   string
+	Themes         []ThemeMenuItem
+	CurrentThemeID string // Current theme ID for checked state
 }
 
 // BuildUnifiedMenuItems constructs the unified menu item list
@@ -44,17 +51,19 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 	// Build theme submenu if there are themes
 	if len(state.Themes) > 0 {
 		var themeChildren []MenuItem
-		for i, name := range state.Themes {
+		for i, t := range state.Themes {
 			themeChildren = append(themeChildren, MenuItem{
 				ID:      UnifiedMenuThemeBase + i,
-				Text:    name,
-				Checked: name == state.CurrentTheme,
+				Text:    t.DisplayName,
+				Checked: t.ID == state.CurrentThemeID,
 			})
 		}
 		items = append(items, MenuItem{Text: "主题", Children: themeChildren})
 	}
 
 	items = append(items,
+		MenuItem{Separator: true},
+		MenuItem{ID: UnifiedMenuReloadConfig, Text: "重载配置"},
 		MenuItem{Separator: true},
 		MenuItem{ID: UnifiedMenuDictionary, Text: "词库管理..."},
 		MenuItem{ID: UnifiedMenuSettings, Text: "设置..."},

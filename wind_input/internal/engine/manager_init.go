@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/dict"
@@ -207,6 +209,13 @@ func (m *Manager) initWubiEngine(dictPath string, config *wubi.Config) error {
 
 	// 后台预生成拼音 wdb，避免首次临时拼音切换卡顿
 	go m.preGeneratePinyinWdb()
+
+	// 码表加载完成后主动释放转换过程中产生的临时内存
+	go func() {
+		runtime.GC()
+		debug.FreeOSMemory()
+		log.Printf("[EngineManager] 五笔引擎初始化后内存已释放")
+	}()
 
 	return nil
 }
@@ -461,4 +470,9 @@ func (m *Manager) preGeneratePinyinWdb() {
 			}
 		}
 	}
+
+	// 预生成完成后主动释放转换过程中产生的临时内存
+	runtime.GC()
+	debug.FreeOSMemory()
+	log.Printf("[EngineManager] 拼音 wdb 预生成后内存已释放")
 }

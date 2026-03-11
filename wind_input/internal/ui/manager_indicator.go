@@ -227,3 +227,22 @@ func (m *Manager) GetCurrentThemeName() string {
 	}
 	return "default"
 }
+
+// GetCurrentThemeID returns the ID of the currently loaded theme (e.g., "default", "dark")
+func (m *Manager) GetCurrentThemeID() string {
+	if m.themeManager == nil {
+		return "default"
+	}
+	return m.themeManager.GetCurrentThemeID()
+}
+
+// GetAvailableThemeInfos returns theme display info (ID + display name) for all available themes
+func (m *Manager) GetAvailableThemeInfos() []theme.ThemeDisplayInfo {
+	if m.themeManager == nil {
+		return []theme.ThemeDisplayInfo{
+			{ID: "default", DisplayName: "默认主题"},
+			{ID: "dark", DisplayName: "暗色主题"},
+		}
+	}
+	return m.themeManager.ListAvailableThemeInfos()
+}
