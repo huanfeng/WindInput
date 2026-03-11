@@ -195,14 +195,14 @@ func popupMenuWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr 
 	return ret
 }
 
-// NewPopupMenu creates a new popup menu
+// NewPopupMenu creates a new popup menu with its own rendering resources.
 func NewPopupMenu() *PopupMenu {
 	tr := NewTextRenderer()
 	fontCfg := NewFontConfig()
 	tr.SetGDIParams(fontCfg.GetEffectiveGDIWeight(), fontCfg.GetEffectiveGDIScale())
 	cache := newFontCache()
 
-	// Load primary font from centralized config
+	// Load primary font from centralized config (lazy — no truetype parsing yet)
 	resolved := fontCfg.ResolvePrimaryFont()
 	if resolved != "" {
 		cache.loadFont(resolved)
@@ -216,6 +216,20 @@ func NewPopupMenu() *PopupMenu {
 		textRenderer: tr,
 		textDrawer:   newGDIDrawer(tr),
 		fontConfig:   fontCfg,
+	}
+}
+
+// newPopupMenuShared creates a submenu that shares rendering resources with its parent.
+// This avoids duplicating fontCache, TextRenderer, and FontConfig per submenu,
+// significantly reducing memory when submenus are created/destroyed frequently.
+func newPopupMenuShared(parent *PopupMenu) *PopupMenu {
+	return &PopupMenu{
+		hoverIndex:   -1,
+		submenuIndex: -1,
+		fontCache:    parent.fontCache,
+		textRenderer: parent.textRenderer,
+		textDrawer:   parent.textDrawer,
+		fontConfig:   parent.fontConfig,
 	}
 }
 
@@ -233,7 +247,7 @@ func (m *PopupMenu) SetTextRenderMode(mode TextRenderMode) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if mode == TextRenderModeFreetype {
-		m.textDrawer = newFreeTypeDrawer(m.fontCache)
+		m.textDrawer = newFreeTypeDrawer(m.fontCache, m.fontConfig)
 	} else {
 		m.textDrawer = newGDIDrawer(m.textRenderer)
 	}

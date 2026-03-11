@@ -68,7 +68,7 @@ func (w *TooltipWindow) SetTextRenderMode(mode TextRenderMode) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if mode == TextRenderModeFreetype {
-		w.textDrawer = newFreeTypeDrawer(w.fontCache)
+		w.textDrawer = newFreeTypeDrawer(w.fontCache, w.fontConfig)
 	} else {
 		w.textDrawer = newGDIDrawer(w.textRenderer)
 	}

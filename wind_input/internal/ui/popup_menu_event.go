@@ -306,8 +306,8 @@ func (m *PopupMenu) showSubmenu(index int) {
 	subX := menuX + menuWidth - 2 // Slight overlap
 	subY := menuY + itemY
 
-	// Create submenu
-	sub := NewPopupMenu()
+	// Create submenu sharing parent's rendering resources
+	sub := newPopupMenuShared(m)
 	sub.parentMenu = m
 	if resolvedTheme != nil {
 		sub.resolvedTheme = resolvedTheme

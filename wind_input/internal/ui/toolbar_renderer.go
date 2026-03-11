@@ -54,7 +54,7 @@ func (r *ToolbarRenderer) SetGDIFontParams(weight int, scale float64) {
 // SetTextRenderMode switches between GDI and FreeType text rendering
 func (r *ToolbarRenderer) SetTextRenderMode(mode TextRenderMode) {
 	if mode == TextRenderModeFreetype {
-		r.textDrawer = newFreeTypeDrawer(r.fontCache)
+		r.textDrawer = newFreeTypeDrawer(r.fontCache, r.fontConfig)
 	} else {
 		r.textDrawer = newGDIDrawer(r.textRenderer)
 	}

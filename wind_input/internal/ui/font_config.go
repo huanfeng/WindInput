@@ -3,6 +3,9 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"sync"
+
+	"github.com/golang/freetype/truetype"
 )
 
 // GDI font weight constants (Windows LOGFONT.lfWeight values)
@@ -45,11 +48,10 @@ type FontConfig struct {
 // defaultSystemFontNames lists font file names (relative to system Fonts directory).
 // Ordered by priority: CJK-capable fonts first, then symbol/Latin fonts.
 var defaultSystemFontNames = []string{
-	"msyh.ttc",    // Microsoft YaHei (best CJK + Latin coverage)
-	"simhei.ttf",  // SimHei (CJK)
-	"simsun.ttc",  // SimSun (CJK)
-	"segoeui.ttf", // Segoe UI (Latin, UI symbols)
-	"arial.ttf",   // Arial (Latin fallback)
+	"msyh.ttc",     // Microsoft YaHei (best CJK + Latin coverage)
+	"segoeui.ttf",  // Segoe UI (Latin, UI symbols)
+	"seguisym.ttf", // Segoe UI Symbol (✓, ▸, and other symbols)
+	"arial.ttf",    // Arial (Latin fallback)
 }
 
 // getSystemFontsDir returns the system Fonts directory path.
@@ -177,4 +179,62 @@ func (fc *FontConfig) GetEffectiveGDIScale() float64 {
 		return 1.0
 	}
 	return fc.GDIFontScale
+}
+
+// --- Global font registry (package-level singleton) ---
+// All UI components share parsed truetype.Font instances to avoid loading
+// the same font file multiple times. Each font file (e.g., msyh.ttc ~25MB)
+// is read and parsed only once, regardless of how many components use it.
+
+var (
+	globalFontsMu sync.Mutex
+	globalFonts   map[string]*truetype.Font // path -> parsed font
+)
+
+// GetSharedFont returns a shared parsed truetype.Font for the given path.
+// The font is loaded and parsed only once; subsequent calls return the cached instance.
+// This is used by both fontCache (primary font) and freeTypeDrawer (fallback fonts)
+// to ensure font data is not duplicated in memory.
+func GetSharedFont(path string) (*truetype.Font, error) {
+	globalFontsMu.Lock()
+	defer globalFontsMu.Unlock()
+
+	if globalFonts == nil {
+		globalFonts = make(map[string]*truetype.Font)
+	}
+
+	if f, ok := globalFonts[path]; ok {
+		return f, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := truetype.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	globalFonts[path] = f
+	return f, nil
+}
+
+// fallbackFontEntry holds a parsed font and its source path.
+type fallbackFontEntry struct {
+	font *truetype.Font
+	path string
+}
+
+// GetSharedFallbackFonts returns shared fallback font entries for the given paths.
+// Each font is loaded via GetSharedFont (global cache), so no duplication occurs.
+func GetSharedFallbackFonts(fallbackPaths []string) []fallbackFontEntry {
+	var entries []fallbackFontEntry
+	for _, path := range fallbackPaths {
+		f, err := GetSharedFont(path)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, fallbackFontEntry{font: f, path: path})
+	}
+	return entries
 }

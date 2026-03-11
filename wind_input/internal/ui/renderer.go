@@ -1,9 +1,9 @@
 package ui
 
 import (
+	"errors"
 	"image"
 	"image/color"
-	"os"
 	"sync"
 
 	"github.com/fogleman/gg"
@@ -62,11 +62,16 @@ func DefaultRenderConfig() RenderConfig {
 }
 
 // fontCache caches loaded fonts and font faces
+// maxFontFaces limits the number of cached font.Face instances per fontCache.
+// When exceeded, the least recently used face is closed and evicted.
+const maxFontFaces = 16
+
 type fontCache struct {
-	mu       sync.RWMutex
-	font     *truetype.Font
-	fontPath string
-	faces    map[float64]font.Face // Cache font faces by size
+	mu        sync.RWMutex
+	font      *truetype.Font
+	fontPath  string
+	faces     map[float64]font.Face // Cache font faces by size
+	faceOrder []float64             // LRU order: most recently used at end
 }
 
 func newFontCache() *fontCache {
@@ -75,27 +80,50 @@ func newFontCache() *fontCache {
 	}
 }
 
-// loadFont loads a TTF font from the given path
+// loadFont records the font path for lazy loading.
+// The actual truetype.Font is NOT parsed here — it is deferred to getFace()
+// on first use. This ensures GDI-mode components never load FreeType font data.
 func (fc *fontCache) loadFont(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
+	if fc.fontPath == path && fc.font != nil {
+		return nil // Already loaded
 	}
-	f, err := truetype.Parse(data)
+	// Close existing faces when switching fonts
+	for _, face := range fc.faces {
+		face.Close()
+	}
+	fc.faces = make(map[float64]font.Face)
+	fc.faceOrder = nil
+	fc.font = nil // Will be loaded lazily in getFace()
+	fc.fontPath = path
+	return nil
+}
+
+// ensureFontParsed loads the truetype.Font from the global registry on demand.
+// Must be called with fc.mu held for writing.
+func (fc *fontCache) ensureFontParsed() error {
+	if fc.font != nil {
+		return nil
+	}
+	if fc.fontPath == "" {
+		return errors.New("no font path set")
+	}
+	f, err := GetSharedFont(fc.fontPath)
 	if err != nil {
 		return err
 	}
 	fc.font = f
-	fc.fontPath = path
-	fc.faces = make(map[float64]font.Face) // Clear cached faces
 	return nil
 }
 
-// getFace returns a cached font face for the given size
+// getFace returns a cached font face for the given size, with LRU eviction.
 func (fc *fontCache) getFace(size float64) font.Face {
 	fc.mu.RLock()
 	if face, ok := fc.faces[size]; ok {
 		fc.mu.RUnlock()
+		// Promote to most-recently-used (deferred to avoid write lock contention)
+		fc.mu.Lock()
+		fc.touchLRU(size)
+		fc.mu.Unlock()
 		return face
 	}
 	fc.mu.RUnlock()
@@ -105,10 +133,12 @@ func (fc *fontCache) getFace(size float64) font.Face {
 
 	// Double-check
 	if face, ok := fc.faces[size]; ok {
+		fc.touchLRU(size)
 		return face
 	}
 
-	if fc.font == nil {
+	// Lazy load the truetype.Font on first getFace call
+	if err := fc.ensureFontParsed(); err != nil {
 		return nil
 	}
 
@@ -117,8 +147,33 @@ func (fc *fontCache) getFace(size float64) font.Face {
 		DPI:     72,
 		Hinting: font.HintingFull,
 	})
+
+	// Evict LRU if at capacity
+	if len(fc.faces) >= maxFontFaces && len(fc.faceOrder) > 0 {
+		oldest := fc.faceOrder[0]
+		fc.faceOrder = fc.faceOrder[1:]
+		if oldFace, ok := fc.faces[oldest]; ok {
+			oldFace.Close()
+			delete(fc.faces, oldest)
+		}
+	}
+
 	fc.faces[size] = face
+	fc.faceOrder = append(fc.faceOrder, size)
 	return face
+}
+
+// touchLRU moves size to the end of the LRU order. Must be called with fc.mu held.
+func (fc *fontCache) touchLRU(size float64) {
+	for i, s := range fc.faceOrder {
+		if s == size {
+			fc.faceOrder = append(fc.faceOrder[:i], fc.faceOrder[i+1:]...)
+			fc.faceOrder = append(fc.faceOrder, size)
+			return
+		}
+	}
+	// Not found (shouldn't happen), add it
+	fc.faceOrder = append(fc.faceOrder, size)
 }
 
 // Renderer renders candidate window content
@@ -154,7 +209,7 @@ func NewRenderer(config RenderConfig) *Renderer {
 // updateTextDrawer creates the appropriate TextDrawer based on current render mode
 func (r *Renderer) updateTextDrawer() {
 	if r.config.TextRenderMode == TextRenderModeFreetype {
-		r.textDrawer = newFreeTypeDrawer(r.fontCache)
+		r.textDrawer = newFreeTypeDrawer(r.fontCache, r.fontConfig)
 	} else {
 		r.textDrawer = newGDIDrawer(r.textRenderer)
 	}
@@ -269,9 +324,9 @@ func (r *Renderer) GetLayout() string {
 	return r.config.Layout
 }
 
-// ensureFontLoaded loads the font if not already cached, using FontConfig.
+// ensureFontLoaded resolves the primary font path and records it for lazy loading.
 func (r *Renderer) ensureFontLoaded() {
-	if r.fontReady && r.fontCache.font != nil {
+	if r.fontReady && r.fontCache.fontPath != "" {
 		return
 	}
 

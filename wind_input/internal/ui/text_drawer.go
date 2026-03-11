@@ -3,8 +3,11 @@ package ui
 import (
 	"image"
 	"image/color"
+	"unicode/utf8"
 
 	"github.com/fogleman/gg"
+	"github.com/golang/freetype/truetype"
+	"golang.org/x/image/font"
 )
 
 // TextRenderMode defines the text rendering backend
@@ -36,39 +39,166 @@ type TextDrawer interface {
 	Close()
 }
 
-// --- FreeType (original) implementation ---
+// --- FreeType (original) implementation with font fallback ---
 
-// freeTypeDrawer wraps gg/freetype for text rendering, preserving the original rendering behavior.
+// freeTypeDrawer wraps gg/freetype for text rendering with glyph-level font fallback.
+// When the primary font lacks a glyph (e.g., ✓ or ▸), it automatically tries
+// fallback fonts from the shared font pool until one is found that contains the glyph.
+// Fallback fonts are shared across all freeTypeDrawer instances to minimize memory usage.
 type freeTypeDrawer struct {
-	cache *fontCache
-	dc    *gg.Context
+	cache          *fontCache
+	dc             *gg.Context
+	fontConfig     *FontConfig
+	fallbackCaches []*fontCache        // Font face caches (one per shared fallback font)
+	fallbackFonts  []fallbackFontEntry // References to shared font pool entries
+	fallbackInited bool                // Whether fallback has been initialized
 }
 
-func newFreeTypeDrawer(cache *fontCache) *freeTypeDrawer {
-	return &freeTypeDrawer{cache: cache}
+func newFreeTypeDrawer(cache *fontCache, fontConfig *FontConfig) *freeTypeDrawer {
+	return &freeTypeDrawer{
+		cache:      cache,
+		fontConfig: fontConfig,
+	}
 }
 
 func (d *freeTypeDrawer) SetFont(fontPath string) {
 	d.cache.mu.Lock()
 	defer d.cache.mu.Unlock()
 	d.cache.loadFont(fontPath)
+	// Reset fallback when primary font changes
+	d.fallbackInited = false
+	d.fallbackCaches = nil
+	d.fallbackFonts = nil
+}
+
+// initFallbacks lazily initializes fallback using the shared font pool.
+// The actual font files are loaded only once globally via GetSharedFallbackFonts.
+// Each drawer only creates its own fontCache (for size-specific font.Face caching).
+func (d *freeTypeDrawer) initFallbacks() {
+	if d.fallbackInited {
+		return
+	}
+	d.fallbackInited = true
+
+	if d.fontConfig == nil {
+		return
+	}
+
+	fallbackPaths := d.fontConfig.GetFallbackFonts()
+	shared := GetSharedFallbackFonts(fallbackPaths)
+
+	for _, entry := range shared {
+		// Create a lightweight fontCache that references the shared parsed font.
+		// Only the font.Face cache (per size) is per-drawer; the font data is shared.
+		fc := newFontCache()
+		fc.font = entry.font
+		fc.fontPath = entry.path
+		d.fallbackCaches = append(d.fallbackCaches, fc)
+		d.fallbackFonts = append(d.fallbackFonts, entry)
+	}
+}
+
+// hasGlyph checks if the given font contains a glyph for the rune.
+func hasGlyph(f *truetype.Font, r rune) bool {
+	if f == nil {
+		return false
+	}
+	return f.Index(r) != 0
+}
+
+// fontSegment represents a contiguous run of text that uses the same font.
+type fontSegment struct {
+	text string
+	face font.Face
+}
+
+// segmentByFont splits text into segments, each using the best available font.
+// The primary font is preferred; fallback fonts are tried for missing glyphs.
+func (d *freeTypeDrawer) segmentByFont(text string, fontSize float64) []fontSegment {
+	d.initFallbacks()
+
+	primaryFont := d.cache.font
+	primaryFace := d.cache.getFace(fontSize)
+	if primaryFace == nil {
+		return nil
+	}
+
+	// Fast path: if no fallbacks, just use primary for everything
+	if len(d.fallbackFonts) == 0 {
+		return []fontSegment{{text: text, face: primaryFace}}
+	}
+
+	var segments []fontSegment
+	var currentText []byte
+	var currentFace font.Face
+
+	for i := 0; i < len(text); {
+		r, size := utf8.DecodeRuneInString(text[i:])
+		if r == utf8.RuneError && size <= 1 {
+			i++
+			continue
+		}
+
+		// Determine which face to use for this rune
+		var bestFace font.Face
+		if hasGlyph(primaryFont, r) {
+			bestFace = primaryFace
+		} else {
+			// Try fallback fonts from the shared pool
+			for j, entry := range d.fallbackFonts {
+				if hasGlyph(entry.font, r) {
+					bestFace = d.fallbackCaches[j].getFace(fontSize)
+					break
+				}
+			}
+			if bestFace == nil {
+				// No font has this glyph, use primary anyway
+				bestFace = primaryFace
+			}
+		}
+
+		if bestFace != currentFace {
+			// Flush current segment
+			if len(currentText) > 0 {
+				segments = append(segments, fontSegment{text: string(currentText), face: currentFace})
+				currentText = currentText[:0]
+			}
+			currentFace = bestFace
+		}
+		currentText = append(currentText, text[i:i+size]...)
+		i += size
+	}
+
+	// Flush last segment
+	if len(currentText) > 0 {
+		segments = append(segments, fontSegment{text: string(currentText), face: currentFace})
+	}
+
+	return segments
 }
 
 func (d *freeTypeDrawer) MeasureString(text string, fontSize float64) float64 {
 	if text == "" {
 		return 0
 	}
-	face := d.cache.getFace(fontSize)
-	if face == nil {
+
+	segments := d.segmentByFont(text, fontSize)
+	if len(segments) == 0 {
 		return 0
 	}
+
 	dc := d.dc
 	if dc == nil {
 		dc = gg.NewContext(1, 1)
 	}
-	dc.SetFontFace(face)
-	w, _ := dc.MeasureString(text)
-	return w
+
+	var totalW float64
+	for _, seg := range segments {
+		dc.SetFontFace(seg.face)
+		w, _ := dc.MeasureString(seg.text)
+		totalW += w
+	}
+	return totalW
 }
 
 func (d *freeTypeDrawer) BeginDraw(img *image.RGBA) {
@@ -79,13 +209,20 @@ func (d *freeTypeDrawer) DrawString(text string, x, y float64, fontSize float64,
 	if d.dc == nil || text == "" {
 		return
 	}
-	face := d.cache.getFace(fontSize)
-	if face == nil {
+
+	segments := d.segmentByFont(text, fontSize)
+	if len(segments) == 0 {
 		return
 	}
-	d.dc.SetFontFace(face)
+
 	d.dc.SetColor(clr)
-	d.dc.DrawString(text, x, y)
+	drawX := x
+	for _, seg := range segments {
+		d.dc.SetFontFace(seg.face)
+		d.dc.DrawString(seg.text, drawX, y)
+		w, _ := d.dc.MeasureString(seg.text)
+		drawX += w
+	}
 }
 
 func (d *freeTypeDrawer) EndDraw() {
@@ -95,6 +232,8 @@ func (d *freeTypeDrawer) EndDraw() {
 func (d *freeTypeDrawer) Close() {
 	// fontCache is shared, not owned by this drawer
 	d.dc = nil
+	d.fallbackCaches = nil
+	d.fallbackFonts = nil
 }
 
 // --- GDI implementation ---
