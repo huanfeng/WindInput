@@ -311,9 +311,17 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		if cfg.UI.TextRenderMode != "" {
 			c.uiManager.SetTextRenderMode(cfg.UI.TextRenderMode)
 		}
-		// 设置GDI字体参数
+		// 设置候选框GDI字体参数
 		if cfg.UI.GDIFontWeight > 0 || cfg.UI.GDIFontScale > 0 {
 			c.uiManager.SetGDIFontParams(cfg.UI.GDIFontWeight, cfg.UI.GDIFontScale)
+		}
+		// 设置菜单GDI字体参数（独立于候选框）
+		if cfg.UI.MenuFontWeight > 0 {
+			c.uiManager.SetMenuFontParams(cfg.UI.MenuFontWeight, cfg.UI.GDIFontScale)
+		}
+		// 设置菜单字体大小
+		if cfg.UI.MenuFontSize > 0 {
+			c.uiManager.SetMenuFontSize(cfg.UI.MenuFontSize)
 		}
 		// 加载主题
 		if cfg.UI.Theme != "" {

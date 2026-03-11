@@ -51,10 +51,11 @@ type PopupMenu struct {
 	flipRefY int // 翻转参考Y（0=禁用）
 
 	// Text rendering
-	fontCache    *fontCache
-	textRenderer *TextRenderer
-	textDrawer   TextDrawer
-	fontConfig   *FontConfig
+	fontCache            *fontCache
+	textRenderer         *TextRenderer
+	textDrawer           TextDrawer
+	fontConfig           *FontConfig
+	menuFontSizeOverride float64 // 0 = use default menuFontSize constant
 
 	mu sync.Mutex
 }
@@ -196,10 +197,13 @@ func popupMenuWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr 
 }
 
 // NewPopupMenu creates a new popup menu with its own rendering resources.
+// Menus default to SemiBold (600) weight for better readability at small font sizes.
 func NewPopupMenu() *PopupMenu {
 	tr := NewTextRenderer()
 	fontCfg := NewFontConfig()
-	tr.SetGDIParams(fontCfg.GetEffectiveGDIWeight(), fontCfg.GetEffectiveGDIScale())
+	// Menus use SemiBold by default (600), overriding the global default (500 Medium).
+	// GDI weight 400-500 looks nearly identical; 600 is the minimum for visibly bolder text.
+	tr.SetGDIParams(FontWeightSemiBold, fontCfg.GetEffectiveGDIScale())
 	cache := newFontCache()
 
 	// Load primary font from centralized config (lazy — no truetype parsing yet)
@@ -240,6 +244,34 @@ func (m *PopupMenu) SetGDIFontParams(weight int, scale float64) {
 	if m.textRenderer != nil {
 		m.textRenderer.SetGDIParams(weight, scale)
 	}
+}
+
+// SetMenuFontSize sets the base font size for menu text (before DPI scaling).
+// Pass 0 to use the default (menuFontSize constant = 12.0).
+func (m *PopupMenu) SetMenuFontSize(size float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.menuFontSizeOverride = size
+}
+
+// getMenuFontSize returns the effective menu font size (base, before DPI scaling).
+func (m *PopupMenu) getMenuFontSize() float64 {
+	if m.menuFontSizeOverride > 0 {
+		return m.menuFontSizeOverride
+	}
+	return menuFontSize
+}
+
+// getMenuItemHeight returns the effective menu item height (base, before DPI scaling).
+// Auto-adapts to font size: baseline is fontSize=12 → itemHeight=24 (2x ratio).
+// Minimum is menuItemHeight (24) to avoid cramped layout at small font sizes.
+func (m *PopupMenu) getMenuItemHeight() int {
+	fs := m.getMenuFontSize()
+	h := int(fs * 2)
+	if h < menuItemHeight {
+		h = menuItemHeight
+	}
+	return h
 }
 
 // SetTextRenderMode switches between GDI and FreeType text rendering
@@ -462,14 +494,15 @@ func (m *PopupMenu) calculateSize() {
 	m.height = int(float64(menuPaddingY*2) * scale)
 
 	// Use TextDrawer for text measurement (consistent with render)
-	fontSize := menuFontSize * scale
+	fontSize := m.getMenuFontSize() * scale
 	td := m.textDrawer
 
+	itemH := m.getMenuItemHeight()
 	for _, item := range m.items {
 		if item.Separator {
 			m.height += int(float64(menuSeparatorHeight) * scale)
 		} else {
-			m.height += int(float64(menuItemHeight) * scale)
+			m.height += int(float64(itemH) * scale)
 			// Calculate text width using TextDrawer
 			tw := td.MeasureString(item.Text, fontSize)
 			itemWidth := int(tw + float64(menuPaddingX)*scale + extraLeft + extraRight + float64(menuPaddingX)*scale)

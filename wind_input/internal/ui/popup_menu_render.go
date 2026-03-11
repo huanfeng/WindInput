@@ -28,11 +28,12 @@ func (m *PopupMenu) render() *image.RGBA {
 	hasChildren := m.hasChildren
 	colors := m.getPopupMenuColors()
 	td := m.textDrawer
+	baseFontSize := m.getMenuFontSize()
 	m.mu.Unlock()
 
 	scale := GetDPIScale()
-	fontSize := menuFontSize * scale
-	itemH := int(float64(menuItemHeight) * scale)
+	fontSize := baseFontSize * scale
+	itemH := int(float64(m.getMenuItemHeight()) * scale)
 	sepH := int(float64(menuSeparatorHeight) * scale)
 	padX := float64(menuPaddingX) * scale
 	padY := int(float64(menuPaddingY) * scale)

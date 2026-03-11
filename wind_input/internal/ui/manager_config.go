@@ -47,7 +47,7 @@ func (m *Manager) SetCandidateLayout(layout string) {
 	}
 }
 
-// SetGDIFontParams 设置GDI字体粗细和缩放（广播到所有UI组件）
+// SetGDIFontParams 设置候选框、工具栏和编码提示的GDI字体粗细和缩放
 func (m *Manager) SetGDIFontParams(weight int, scale float64) {
 	if m.renderer != nil {
 		m.renderer.SetGDIFontParams(weight, scale)
@@ -58,10 +58,23 @@ func (m *Manager) SetGDIFontParams(weight int, scale float64) {
 	if m.tooltip != nil {
 		m.tooltip.SetGDIFontParams(weight, scale)
 	}
+	m.logger.Info("GDI font params updated (candidate/toolbar/tooltip)", "weight", weight, "scale", scale)
+}
+
+// SetMenuFontParams 设置菜单的GDI字体粗细（独立于候选框）
+func (m *Manager) SetMenuFontParams(weight int, scale float64) {
 	if m.unifiedPopupMenu != nil {
 		m.unifiedPopupMenu.SetGDIFontParams(weight, scale)
 	}
-	m.logger.Info("GDI font params updated", "weight", weight, "scale", scale)
+	m.logger.Info("GDI font params updated (menu)", "weight", weight, "scale", scale)
+}
+
+// SetMenuFontSize 设置菜单字体大小（DPI缩放前基础值）
+func (m *Manager) SetMenuFontSize(size float64) {
+	if m.unifiedPopupMenu != nil {
+		m.unifiedPopupMenu.SetMenuFontSize(size)
+	}
+	m.logger.Info("Menu font size updated", "size", size)
 }
 
 // SetTextRenderMode 设置文本渲染模式（"gdi" 或 "freetype"）

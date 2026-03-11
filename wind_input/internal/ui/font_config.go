@@ -32,10 +32,11 @@ type FontConfig struct {
 	// Reserved for future use: users can configure preferred fonts via config file.
 	UserFonts []string
 
-	// GDIFontWeight controls the font weight for GDI rendering.
+	// GDIFontWeight controls the font weight for GDI rendering (candidate box).
 	// Valid range: 100 (thin) to 900 (heavy). Common values:
-	//   400 = Normal (default), 500 = Medium, 600 = SemiBold, 700 = Bold
-	// Higher values produce thicker/heavier strokes.
+	//   400 = Normal, 500 = Medium (default), 600 = SemiBold, 700 = Bold
+	// Note: GDI weight 400 and 500 look nearly identical; 600 is the minimum
+	// for visibly bolder text. Menu components use their own weight setting.
 	GDIFontWeight int
 
 	// GDIFontScale controls the font size multiplier for GDI rendering.

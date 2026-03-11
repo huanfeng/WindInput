@@ -103,8 +103,10 @@ type UIConfig struct {
 
 	// 文本渲染设置
 	TextRenderMode string  `yaml:"text_render_mode,omitempty" json:"text_render_mode,omitempty"` // 文本渲染引擎："gdi"（默认，Windows原生）或 "freetype"（FreeType渲染）
-	GDIFontWeight  int     `yaml:"gdi_font_weight,omitempty" json:"gdi_font_weight,omitempty"`   // GDI字体粗细：100~900，默认400(Normal)，500=Medium，600=SemiBold，700=Bold
+	GDIFontWeight  int     `yaml:"gdi_font_weight,omitempty" json:"gdi_font_weight,omitempty"`   // 候选框GDI字体粗细：100~900，默认500(Medium)
 	GDIFontScale   float64 `yaml:"gdi_font_scale,omitempty" json:"gdi_font_scale,omitempty"`     // GDI字体缩放：0.5~2.0，默认1.0，值越大文字越大
+	MenuFontWeight int     `yaml:"menu_font_weight,omitempty" json:"menu_font_weight,omitempty"` // 菜单GDI字体粗细：100~900，默认600(SemiBold)
+	MenuFontSize   float64 `yaml:"menu_font_size,omitempty" json:"menu_font_size,omitempty"`     // 菜单字体大小：默认12.0（DPI缩放前基础值）
 }
 
 // ToolbarConfig contains toolbar settings

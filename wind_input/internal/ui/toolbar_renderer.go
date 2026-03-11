@@ -32,6 +32,7 @@ type ToolbarRenderer struct {
 func NewToolbarRenderer() *ToolbarRenderer {
 	fc := NewFontConfig()
 	tr := NewTextRenderer()
+	// Toolbar text is relatively large, use same weight as candidate box
 	tr.SetGDIParams(fc.GetEffectiveGDIWeight(), fc.GetEffectiveGDIScale())
 
 	r := &ToolbarRenderer{

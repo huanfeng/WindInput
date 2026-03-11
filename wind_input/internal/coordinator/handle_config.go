@@ -54,9 +54,17 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 		if uiConfig.TextRenderMode != "" {
 			c.uiManager.SetTextRenderMode(uiConfig.TextRenderMode)
 		}
-		// 设置GDI字体参数
+		// 设置候选框GDI字体参数
 		if uiConfig.GDIFontWeight > 0 || uiConfig.GDIFontScale > 0 {
 			c.uiManager.SetGDIFontParams(uiConfig.GDIFontWeight, uiConfig.GDIFontScale)
+		}
+		// 设置菜单GDI字体参数
+		if uiConfig.MenuFontWeight > 0 {
+			c.uiManager.SetMenuFontParams(uiConfig.MenuFontWeight, uiConfig.GDIFontScale)
+		}
+		// 设置菜单字体大小
+		if uiConfig.MenuFontSize > 0 {
+			c.uiManager.SetMenuFontSize(uiConfig.MenuFontSize)
 		}
 		// 更新主题
 		if uiConfig.Theme != "" {

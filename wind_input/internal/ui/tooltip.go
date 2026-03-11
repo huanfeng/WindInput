@@ -35,6 +35,7 @@ type TooltipWindow struct {
 func NewTooltipWindow(logger *slog.Logger) *TooltipWindow {
 	tr := NewTextRenderer()
 	fontCfg := NewFontConfig()
+	// Tooltips use the same weight as candidate box (gdi_font_weight, default Medium 500)
 	tr.SetGDIParams(fontCfg.GetEffectiveGDIWeight(), fontCfg.GetEffectiveGDIScale())
 	cache := newFontCache()
 

@@ -84,9 +84,24 @@ func FontPathToName(fontPath string) string {
 	return "Microsoft YaHei"
 }
 
+// containsSymbolChars returns true if text contains characters from the
+// Geometric Shapes Unicode block (U+25A0–U+25FF) or Dingbats (U+2700–U+27BF)
+// that are typically missing from CJK fonts like Microsoft YaHei.
+// These characters need a symbol font (Segoe UI Symbol) for reliable rendering.
+func containsSymbolChars(text string) bool {
+	for _, r := range text {
+		if (r >= 0x25A0 && r <= 0x25FF) || // Geometric Shapes (▸, ▶, ■, etc.)
+			(r >= 0x2700 && r <= 0x27BF) { // Dingbats (✓ is U+2713, in this range)
+			return true
+		}
+	}
+	return false
+}
+
 type gdiFontKey struct {
-	size int
-	bold bool
+	size   int
+	bold   bool
+	symbol bool // true = use Segoe UI Symbol instead of primary font
 }
 
 // TextRenderer provides text drawing and measurement using Windows GDI.
@@ -169,9 +184,24 @@ func (tr *TextRenderer) SetFont(fontPath string) {
 	tr.fontName = name
 }
 
+// symbolFontName is the font used for geometric shapes and dingbats
+// that are typically missing from CJK fonts.
+const symbolFontName = "Segoe UI Symbol"
+
 // getFont returns a cached HFONT for the given size (caller must hold fontMu or be in single-threaded context)
 func (tr *TextRenderer) getFont(size int, bold bool) uintptr {
-	key := gdiFontKey{size: size, bold: bold}
+	return tr.getFontInternal(size, bold, false)
+}
+
+// getSymbolFont returns a cached HFONT using Segoe UI Symbol for symbol characters
+func (tr *TextRenderer) getSymbolFont(size int) uintptr {
+	return tr.getFontInternal(size, false, true)
+}
+
+// getFontInternal creates or returns a cached HFONT.
+// When symbol=true, uses Segoe UI Symbol instead of the primary font.
+func (tr *TextRenderer) getFontInternal(size int, bold bool, symbol bool) uintptr {
+	key := gdiFontKey{size: size, bold: bold, symbol: symbol}
 	if hFont, ok := tr.fonts[key]; ok {
 		return hFont
 	}
@@ -188,7 +218,13 @@ func (tr *TextRenderer) getFont(size int, bold bool) uintptr {
 		weight = uintptr(fwBold)
 	}
 
-	faceName, _ := syscall.UTF16PtrFromString(tr.fontName)
+	// Choose font family
+	name := tr.fontName
+	if symbol {
+		name = symbolFontName
+	}
+
+	faceName, _ := syscall.UTF16PtrFromString(name)
 	hFont, _, _ := procCreateFontW.Call(
 		uintptr(int32(-scaledSize)),
 		0, 0, 0,
@@ -235,16 +271,23 @@ func (tr *TextRenderer) measureOnDC(hdc uintptr, text string) float64 {
 
 // MeasureString measures text width for the given font size.
 // Returns width in pixels, compatible with gg.MeasureString usage.
+// For symbol characters, uses Segoe UI Symbol font for accurate measurement.
 func (tr *TextRenderer) MeasureString(text string, fontSize float64) float64 {
 	if text == "" {
 		return 0
 	}
 
 	size := int(math.Round(fontSize))
+	useSymbol := containsSymbolChars(text)
 
 	// Use session DC if available (avoids creating temp DC)
 	if tr.inDraw && tr.drawDC != 0 {
-		hFont := tr.getFont(size, false)
+		var hFont uintptr
+		if useSymbol {
+			hFont = tr.getSymbolFont(size)
+		} else {
+			hFont = tr.getFont(size, false)
+		}
 		if hFont != 0 {
 			procSelectObject.Call(tr.drawDC, hFont)
 		}
@@ -264,7 +307,12 @@ func (tr *TextRenderer) MeasureString(text string, fontSize float64) float64 {
 	}
 	defer procDeleteDC.Call(hdc)
 
-	hFont := tr.getFont(size, false)
+	var hFont uintptr
+	if useSymbol {
+		hFont = tr.getSymbolFont(size)
+	} else {
+		hFont = tr.getFont(size, false)
+	}
 	if hFont != 0 {
 		procSelectObject.Call(hdc, hFont)
 	}
@@ -346,13 +394,20 @@ func (tr *TextRenderer) BeginDraw(img *image.RGBA) {
 
 // DrawString draws text at the given baseline position (like gg.DrawString).
 // Must be called between BeginDraw and EndDraw.
+// For geometric shapes and dingbats (▸, ✓, etc.), automatically falls back
+// to Segoe UI Symbol font since most CJK fonts lack these glyphs.
 func (tr *TextRenderer) DrawString(text string, x, y float64, fontSize float64, clr color.Color) {
 	if !tr.inDraw || text == "" {
 		return
 	}
 
 	size := int(math.Round(fontSize))
-	hFont := tr.getFont(size, false)
+	var hFont uintptr
+	if containsSymbolChars(text) {
+		hFont = tr.getSymbolFont(size)
+	} else {
+		hFont = tr.getFont(size, false)
+	}
 	if hFont == 0 {
 		return
 	}
@@ -389,15 +444,31 @@ func (tr *TextRenderer) endDrawInternal() {
 		return
 	}
 
-	// Copy pixels back (BGRA → RGBA), preserving original alpha
+	// Copy pixels back (BGRA → RGBA).
+	// For pixels modified by GDI text rendering (RGB changed), force alpha to 255
+	// so text appears fully opaque even on semi-transparent backgrounds (e.g. A=245).
+	// Without this fix, text inherits the background's alpha and appears washed out
+	// after premultiplied alpha compositing in UpdateLayeredWindow.
 	pixelCount := tr.drawWidth * tr.drawHeight
 	srcSlice := unsafe.Slice((*byte)(tr.drawBits), pixelCount*4)
 	for i := 0; i < pixelCount; i++ {
 		si := i * 4
-		tr.drawImg.Pix[si+0] = srcSlice[si+2] // R
-		tr.drawImg.Pix[si+1] = srcSlice[si+1] // G
-		tr.drawImg.Pix[si+2] = srcSlice[si+0] // B
-		// Alpha: keep original value from image (don't copy GDI's 255)
+		newR := srcSlice[si+2]
+		newG := srcSlice[si+1]
+		newB := srcSlice[si+0]
+		oldR := tr.drawImg.Pix[si+0]
+		oldG := tr.drawImg.Pix[si+1]
+		oldB := tr.drawImg.Pix[si+2]
+
+		tr.drawImg.Pix[si+0] = newR
+		tr.drawImg.Pix[si+1] = newG
+		tr.drawImg.Pix[si+2] = newB
+
+		// If GDI changed any RGB component, this pixel has text on it → make fully opaque
+		if newR != oldR || newG != oldG || newB != oldB {
+			tr.drawImg.Pix[si+3] = 255
+		}
+		// Otherwise keep original alpha (background pixels unchanged)
 	}
 
 	// Cleanup GDI resources
