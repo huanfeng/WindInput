@@ -1,6 +1,9 @@
 package ui
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 // GDI font weight constants (Windows LOGFONT.lfWeight values)
 const (
@@ -22,6 +25,9 @@ type FontConfig struct {
 	// SystemFonts lists system fonts in priority order for fallback.
 	// When a font lacks certain glyphs, subsequent fonts in the list are tried.
 	SystemFonts []string
+	// UserFonts holds user-configured additional fonts (prepended before SystemFonts).
+	// Reserved for future use: users can configure preferred fonts via config file.
+	UserFonts []string
 
 	// GDIFontWeight controls the font weight for GDI rendering.
 	// Valid range: 100 (thin) to 900 (heavy). Common values:
@@ -36,35 +42,77 @@ type FontConfig struct {
 	GDIFontScale float64
 }
 
-// defaultSystemFonts is the default system font fallback chain for Windows.
-// Fonts are ordered by priority: CJK-capable fonts first, then symbol/Latin fonts.
-var defaultSystemFonts = []string{
-	"C:/Windows/Fonts/msyh.ttc",    // Microsoft YaHei (best CJK + Latin coverage)
-	"C:/Windows/Fonts/simhei.ttf",  // SimHei (CJK)
-	"C:/Windows/Fonts/simsun.ttc",  // SimSun (CJK)
-	"C:/Windows/Fonts/segoeui.ttf", // Segoe UI (Latin, UI symbols)
-	"C:/Windows/Fonts/arial.ttf",   // Arial (Latin fallback)
+// defaultSystemFontNames lists font file names (relative to system Fonts directory).
+// Ordered by priority: CJK-capable fonts first, then symbol/Latin fonts.
+var defaultSystemFontNames = []string{
+	"msyh.ttc",    // Microsoft YaHei (best CJK + Latin coverage)
+	"simhei.ttf",  // SimHei (CJK)
+	"simsun.ttc",  // SimSun (CJK)
+	"segoeui.ttf", // Segoe UI (Latin, UI symbols)
+	"arial.ttf",   // Arial (Latin fallback)
+}
+
+// getSystemFontsDir returns the system Fonts directory path.
+// Uses WINDIR environment variable to avoid hardcoding "C:\Windows".
+func getSystemFontsDir() string {
+	winDir := os.Getenv("WINDIR")
+	if winDir == "" {
+		// Fallback: try SystemRoot (always set on Windows)
+		winDir = os.Getenv("SystemRoot")
+	}
+	if winDir == "" {
+		// Last resort fallback
+		winDir = "C:\\Windows"
+	}
+	return filepath.Join(winDir, "Fonts")
+}
+
+// buildDefaultSystemFonts constructs full paths from font file names and system Fonts directory.
+func buildDefaultSystemFonts() []string {
+	fontsDir := getSystemFontsDir()
+	fonts := make([]string, len(defaultSystemFontNames))
+	for i, name := range defaultSystemFontNames {
+		fonts[i] = filepath.Join(fontsDir, name)
+	}
+	return fonts
 }
 
 // NewFontConfig creates a FontConfig with the default system font chain.
 func NewFontConfig() *FontConfig {
 	return &FontConfig{
-		SystemFonts:   append([]string{}, defaultSystemFonts...),
+		SystemFonts:   buildDefaultSystemFonts(),
 		GDIFontWeight: FontWeightMedium,
 		GDIFontScale:  1.0,
 	}
 }
 
+// SetUserFonts sets user-configured fonts that take priority over system fonts.
+// These are prepended before SystemFonts when resolving the primary font.
+// Reserved for future config file integration.
+func (fc *FontConfig) SetUserFonts(fonts []string) {
+	fc.UserFonts = fonts
+}
+
+// allFonts returns the combined font list: UserFonts first, then SystemFonts.
+func (fc *FontConfig) allFonts() []string {
+	if len(fc.UserFonts) == 0 {
+		return fc.SystemFonts
+	}
+	combined := make([]string, 0, len(fc.UserFonts)+len(fc.SystemFonts))
+	combined = append(combined, fc.UserFonts...)
+	combined = append(combined, fc.SystemFonts...)
+	return combined
+}
+
 // ResolvePrimaryFont returns the first available font path.
-// If PrimaryFont is set and exists, it is used; otherwise the SystemFonts
-// chain is searched in order.
+// Search order: PrimaryFont → UserFonts → SystemFonts.
 func (fc *FontConfig) ResolvePrimaryFont() string {
 	if fc.PrimaryFont != "" {
 		if _, err := os.Stat(fc.PrimaryFont); err == nil {
 			return fc.PrimaryFont
 		}
 	}
-	for _, path := range fc.SystemFonts {
+	for _, path := range fc.allFonts() {
 		if _, err := os.Stat(path); err == nil {
 			return path
 		}
@@ -77,7 +125,7 @@ func (fc *FontConfig) ResolvePrimaryFont() string {
 func (fc *FontConfig) GetFallbackFonts() []string {
 	primary := fc.ResolvePrimaryFont()
 	var fallbacks []string
-	for _, path := range fc.SystemFonts {
+	for _, path := range fc.allFonts() {
 		if path != primary {
 			if _, err := os.Stat(path); err == nil {
 				fallbacks = append(fallbacks, path)
