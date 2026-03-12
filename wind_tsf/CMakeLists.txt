@@ -73,7 +73,6 @@ target_compile_options(wind_dwrite PRIVATE
 )
 
 target_link_libraries(wind_dwrite PRIVATE
-    d2d1
     dwrite
 )
 

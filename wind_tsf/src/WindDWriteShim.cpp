@@ -2,10 +2,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <d2d1.h>
-#include <d2d1helper.h>
 #include <dwrite.h>
-#include <dxgiformat.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -19,7 +16,6 @@
 #include <unordered_map>
 #include <vector>
 
-#pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 
 using Microsoft::WRL::ComPtr;
@@ -55,6 +51,91 @@ struct FormatKeyHash {
 
 constexpr size_t kMaxTextFormats = 32;
 
+// ---------------------------------------------------------------------------
+// GdiTextRenderer: bridges IDWriteTextLayout::Draw() to
+// IDWriteBitmapRenderTarget::DrawGlyphRun(), eliminating D2D entirely.
+// ---------------------------------------------------------------------------
+class GdiTextRenderer : public IDWriteTextRenderer {
+public:
+    GdiTextRenderer(IDWriteBitmapRenderTarget* bitmapRT,
+                    IDWriteRenderingParams* params,
+                    COLORREF textColor)
+        : refCount_(1), bitmapRT_(bitmapRT), params_(params), textColor_(textColor) {}
+
+    // IUnknown
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return InterlockedIncrement(&refCount_);
+    }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG count = InterlockedDecrement(&refCount_);
+        if (count == 0) delete this;
+        return count;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+        if (!ppvObject) return E_POINTER;
+        if (riid == __uuidof(IUnknown) ||
+            riid == __uuidof(IDWritePixelSnapping) ||
+            riid == __uuidof(IDWriteTextRenderer)) {
+            *ppvObject = this;
+            AddRef();
+            return S_OK;
+        }
+        *ppvObject = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    // IDWritePixelSnapping
+    HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL* isDisabled) override {
+        *isDisabled = FALSE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX* transform) override {
+        return bitmapRT_->GetCurrentTransform(transform);
+    }
+    HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT* pixelsPerDip) override {
+        *pixelsPerDip = bitmapRT_->GetPixelsPerDip();
+        return S_OK;
+    }
+
+    // IDWriteTextRenderer
+    HRESULT STDMETHODCALLTYPE DrawGlyphRun(
+        void*,
+        FLOAT baselineOriginX,
+        FLOAT baselineOriginY,
+        DWRITE_MEASURING_MODE measuringMode,
+        const DWRITE_GLYPH_RUN* glyphRun,
+        const DWRITE_GLYPH_RUN_DESCRIPTION*,
+        IUnknown*) override
+    {
+        return bitmapRT_->DrawGlyphRun(
+            baselineOriginX, baselineOriginY,
+            measuringMode, glyphRun,
+            params_, textColor_);
+    }
+
+    HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT, const DWRITE_UNDERLINE*, IUnknown*) override {
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH*, IUnknown*) override {
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override {
+        return S_OK;
+    }
+
+    void SetTextColor(COLORREF color) { textColor_ = color; }
+
+private:
+    ULONG refCount_;
+    IDWriteBitmapRenderTarget* bitmapRT_;
+    IDWriteRenderingParams* params_;
+    COLORREF textColor_;
+};
+
+// ---------------------------------------------------------------------------
+// SharedResources: global singleton holding DWrite factory, GDI interop,
+// shared bitmap render target, and text format cache with LRU eviction.
+// ---------------------------------------------------------------------------
 class SharedResources {
 public:
     bool IsValid() const {
@@ -115,20 +196,43 @@ public:
         return dwriteFactory_.Get();
     }
 
-    ID2D1Factory* D2DFactory() const {
-        return d2dFactory_.Get();
-    }
-
-    // Shared draw resources: render target + brush.
-    // LockDraw must be paired with UnlockDraw. Only one draw session at a time.
-    bool LockDraw(ID2D1DCRenderTarget** ppRT, ID2D1SolidColorBrush** ppBrush) {
+    // Lock the shared bitmap render target for a draw session.
+    // Caller must call UnlockDraw() when done.
+    // Returns the BitmapRenderTarget resized to (width x height) and the
+    // rendering params for DrawGlyphRun.
+    bool LockDraw(int width, int height,
+                  IDWriteBitmapRenderTarget** ppBitmapRT,
+                  IDWriteRenderingParams** ppParams) {
         drawMu_.lock();
-        if (!EnsureDrawResources()) {
-            drawMu_.unlock();
-            return false;
+
+        HRESULT hr = S_OK;
+        if (!bitmapRT_) {
+            HDC screenDC = GetDC(nullptr);
+            hr = gdiInterop_->CreateBitmapRenderTarget(screenDC, width, height, &bitmapRT_);
+            ReleaseDC(nullptr, screenDC);
+            if (FAILED(hr) || !bitmapRT_) {
+                drawMu_.unlock();
+                return false;
+            }
+            // Font sizes from Go are already DPI-scaled physical pixels.
+            // Disable BitmapRT's automatic DPI scaling to avoid double-scaling.
+            bitmapRT_->SetPixelsPerDip(1.0f);
+        } else {
+            SIZE curSize{};
+            bitmapRT_->GetSize(&curSize);
+            if (curSize.cx < width || curSize.cy < height) {
+                int newW = (std::max)(static_cast<int>(curSize.cx), width);
+                int newH = (std::max)(static_cast<int>(curSize.cy), height);
+                hr = bitmapRT_->Resize(newW, newH);
+                if (FAILED(hr)) {
+                    drawMu_.unlock();
+                    return false;
+                }
+            }
         }
-        *ppRT = renderTarget_.Get();
-        *ppBrush = brush_.Get();
+
+        *ppBitmapRT = bitmapRT_.Get();
+        *ppParams = renderingParams_.Get();
         return true;
     }
 
@@ -138,8 +242,7 @@ public:
 
     void ReleaseDrawResources() {
         std::lock_guard<std::mutex> lock(drawMu_);
-        brush_.Reset();
-        renderTarget_.Reset();
+        bitmapRT_.Reset();
     }
 
 private:
@@ -159,38 +262,18 @@ private:
             return false;
         }
 
-        hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2dFactory_.GetAddressOf());
-        if (FAILED(hr)) {
+        hr = dwriteFactory_->GetGdiInterop(&gdiInterop_);
+        if (FAILED(hr) || !gdiInterop_) {
             return false;
         }
 
-        return true;
-    }
-
-    bool EnsureDrawResources() {
-        if (renderTarget_ && brush_) {
-            return true;
-        }
-
-        if (!renderTarget_) {
-            D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-                D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)
-            );
-
-            HRESULT hr = d2dFactory_->CreateDCRenderTarget(&props, &renderTarget_);
-            if (FAILED(hr) || !renderTarget_) {
-                return false;
-            }
-            renderTarget_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-        }
-
-        if (!brush_) {
-            HRESULT hr = renderTarget_->CreateSolidColorBrush(
-                D2D1::ColorF(D2D1::ColorF::Black),
-                &brush_
-            );
-            if (FAILED(hr) || !brush_) {
+        // Use monitor-aware rendering params for optimal ClearType quality.
+        HMONITOR monitor = MonitorFromWindow(nullptr, MONITOR_DEFAULTTOPRIMARY);
+        hr = dwriteFactory_->CreateMonitorRenderingParams(monitor, &renderingParams_);
+        if (FAILED(hr) || !renderingParams_) {
+            // Fallback to default rendering params.
+            hr = dwriteFactory_->CreateRenderingParams(&renderingParams_);
+            if (FAILED(hr)) {
                 return false;
             }
         }
@@ -218,13 +301,13 @@ private:
     bool valid_ = false;
     mutable std::mutex mu_;
     ComPtr<IDWriteFactory> dwriteFactory_;
-    ComPtr<ID2D1Factory> d2dFactory_;
+    ComPtr<IDWriteGdiInterop> gdiInterop_;
+    ComPtr<IDWriteRenderingParams> renderingParams_;
     std::unordered_map<FormatKey, ComPtr<IDWriteTextFormat>, FormatKeyHash> formats_;
     std::vector<FormatKey> formatLRU_;
 
     std::mutex drawMu_;
-    ComPtr<ID2D1DCRenderTarget> renderTarget_;
-    ComPtr<ID2D1SolidColorBrush> brush_;
+    ComPtr<IDWriteBitmapRenderTarget> bitmapRT_;
 };
 
 std::mutex gSharedResourcesMu;
@@ -321,12 +404,13 @@ public:
             return false;
         }
 
-        ID2D1DCRenderTarget* rt = nullptr;
-        ID2D1SolidColorBrush* br = nullptr;
-        if (!shared->LockDraw(&rt, &br)) {
+        IDWriteBitmapRenderTarget* bitmapRT = nullptr;
+        IDWriteRenderingParams* params = nullptr;
+        if (!shared->LockDraw(width, height, &bitmapRT, &params)) {
             return false;
         }
 
+        // Create a memory DC + DIB section for RGBA <-> BGRA conversion.
         HDC screenDC = GetDC(nullptr);
         if (!screenDC) {
             shared->UnlockDraw();
@@ -364,6 +448,7 @@ public:
             return false;
         }
 
+        // Copy RGBA -> BGRA into our DIB.
         auto* dst = static_cast<uint8_t*>(bits);
         for (int y = 0; y < height; ++y) {
             uint8_t* srcRow = rgba + y * stride;
@@ -377,21 +462,12 @@ public:
             }
         }
 
-        RECT rect{0, 0, width, height};
-        HRESULT hr = rt->BindDC(memDC, &rect);
-        if (FAILED(hr)) {
-            SelectObject(memDC, oldBmp);
-            DeleteObject(bitmap);
-            DeleteDC(memDC);
-            shared->UnlockDraw();
-            return false;
-        }
+        // Blit the background into the shared BitmapRenderTarget.
+        HDC bitmapDC = bitmapRT->GetMemoryDC();
+        BitBlt(bitmapDC, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
 
-        rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        rt->BeginDraw();
-
-        renderTarget_ = rt;
-        brush_ = br;
+        bitmapRT_ = bitmapRT;
+        renderingParams_ = params;
         drawRGBA_ = rgba;
         drawStride_ = stride;
         drawWidth_ = width;
@@ -406,7 +482,7 @@ public:
 
     bool DrawString(const wchar_t* text, int x, int y, int fontSize, uint32_t rgba, bool useSymbol) {
         std::lock_guard<std::mutex> lock(mu_);
-        if (!inDraw_ || !text || fontSize <= 0 || !renderTarget_ || !brush_) {
+        if (!inDraw_ || !text || fontSize <= 0 || !bitmapRT_) {
             return false;
         }
 
@@ -432,6 +508,7 @@ public:
             return false;
         }
 
+        // Get baseline from line metrics.
         DWRITE_TEXT_METRICS metrics{};
         layout->GetMetrics(&metrics);
 
@@ -445,18 +522,16 @@ public:
             }
         }
 
-        D2D1_COLOR_F color{};
-        color.r = static_cast<float>(rgba & 0xFF) / 255.0f;
-        color.g = static_cast<float>((rgba >> 8) & 0xFF) / 255.0f;
-        color.b = static_cast<float>((rgba >> 16) & 0xFF) / 255.0f;
-        color.a = static_cast<float>((rgba >> 24) & 0xFF) / 255.0f;
-        brush_->SetColor(color);
+        // Convert RGBA to COLORREF (0x00BBGGRR).
+        COLORREF textColor = RGB(rgba & 0xFF, (rgba >> 8) & 0xFF, (rgba >> 16) & 0xFF);
 
-        D2D1_POINT_2F origin{
-            static_cast<float>(x),
-            static_cast<float>(y) - baseline,
-        };
-        renderTarget_->DrawTextLayout(origin, layout.Get(), brush_, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        // Draw using our GDI text renderer bridge.
+        auto* renderer = new GdiTextRenderer(bitmapRT_, renderingParams_, textColor);
+        float originX = static_cast<float>(x);
+        float originY = static_cast<float>(y) - baseline;
+        layout->Draw(nullptr, renderer, originX, originY);
+        renderer->Release();
+
         return true;
     }
 
@@ -476,10 +551,13 @@ private:
             return true;
         }
 
-        if (renderTarget_) {
-            renderTarget_->EndDraw();
+        // Blit rendered result from BitmapRenderTarget back to our DIB.
+        if (bitmapRT_ && drawDC_) {
+            HDC bitmapDC = bitmapRT_->GetMemoryDC();
+            BitBlt(drawDC_, 0, 0, drawWidth_, drawHeight_, bitmapDC, 0, 0, SRCCOPY);
         }
 
+        // Convert BGRA -> RGBA and detect text pixels for alpha.
         if (drawRGBA_ && drawBits_) {
             for (int y = 0; y < drawHeight_; ++y) {
                 uint8_t* dstRow = drawRGBA_ + y * drawStride_;
@@ -510,8 +588,8 @@ private:
             DeleteDC(drawDC_);
         }
 
-        renderTarget_ = nullptr;
-        brush_ = nullptr;
+        bitmapRT_ = nullptr;
+        renderingParams_ = nullptr;
         drawRGBA_ = nullptr;
         drawStride_ = 0;
         drawWidth_ = 0;
@@ -535,8 +613,8 @@ private:
     float fontScale_ = 1.0f;
 
     // Borrowed from SharedResources during draw session (not owned)
-    ID2D1DCRenderTarget* renderTarget_ = nullptr;
-    ID2D1SolidColorBrush* brush_ = nullptr;
+    IDWriteBitmapRenderTarget* bitmapRT_ = nullptr;
+    IDWriteRenderingParams* renderingParams_ = nullptr;
 
     bool inDraw_ = false;
     uint8_t* drawRGBA_ = nullptr;
