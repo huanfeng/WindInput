@@ -53,6 +53,8 @@ struct FormatKeyHash {
     }
 };
 
+constexpr size_t kMaxTextFormats = 32;
+
 class SharedResources {
 public:
     bool IsValid() const {
@@ -81,6 +83,7 @@ public:
         std::lock_guard<std::mutex> lock(mu_);
         auto it = formats_.find(key);
         if (it != formats_.end()) {
+            TouchFormatLRU(key);
             return it->second;
         }
 
@@ -101,7 +104,10 @@ public:
 
         format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+
+        EvictFormatLRU();
         formats_.emplace(key, format);
+        formatLRU_.push_back(key);
         return format;
     }
 
@@ -111,6 +117,29 @@ public:
 
     ID2D1Factory* D2DFactory() const {
         return d2dFactory_.Get();
+    }
+
+    // Shared draw resources: render target + brush.
+    // LockDraw must be paired with UnlockDraw. Only one draw session at a time.
+    bool LockDraw(ID2D1DCRenderTarget** ppRT, ID2D1SolidColorBrush** ppBrush) {
+        drawMu_.lock();
+        if (!EnsureDrawResources()) {
+            drawMu_.unlock();
+            return false;
+        }
+        *ppRT = renderTarget_.Get();
+        *ppBrush = brush_.Get();
+        return true;
+    }
+
+    void UnlockDraw() {
+        drawMu_.unlock();
+    }
+
+    void ReleaseDrawResources() {
+        std::lock_guard<std::mutex> lock(drawMu_);
+        brush_.Reset();
+        renderTarget_.Reset();
     }
 
 private:
@@ -138,11 +167,64 @@ private:
         return true;
     }
 
+    bool EnsureDrawResources() {
+        if (renderTarget_ && brush_) {
+            return true;
+        }
+
+        if (!renderTarget_) {
+            D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)
+            );
+
+            HRESULT hr = d2dFactory_->CreateDCRenderTarget(&props, &renderTarget_);
+            if (FAILED(hr) || !renderTarget_) {
+                return false;
+            }
+            renderTarget_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+        }
+
+        if (!brush_) {
+            HRESULT hr = renderTarget_->CreateSolidColorBrush(
+                D2D1::ColorF(D2D1::ColorF::Black),
+                &brush_
+            );
+            if (FAILED(hr) || !brush_) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    void TouchFormatLRU(const FormatKey& key) {
+        for (auto it = formatLRU_.begin(); it != formatLRU_.end(); ++it) {
+            if (*it == key) {
+                formatLRU_.erase(it);
+                formatLRU_.push_back(key);
+                return;
+            }
+        }
+    }
+
+    void EvictFormatLRU() {
+        while (formats_.size() >= kMaxTextFormats && !formatLRU_.empty()) {
+            formats_.erase(formatLRU_.front());
+            formatLRU_.erase(formatLRU_.begin());
+        }
+    }
+
     bool valid_ = false;
     mutable std::mutex mu_;
     ComPtr<IDWriteFactory> dwriteFactory_;
     ComPtr<ID2D1Factory> d2dFactory_;
     std::unordered_map<FormatKey, ComPtr<IDWriteTextFormat>, FormatKeyHash> formats_;
+    std::vector<FormatKey> formatLRU_;
+
+    std::mutex drawMu_;
+    ComPtr<ID2D1DCRenderTarget> renderTarget_;
+    ComPtr<ID2D1SolidColorBrush> brush_;
 };
 
 std::mutex gSharedResourcesMu;
@@ -162,6 +244,9 @@ SharedResources* AcquireSharedResources() {
 
 bool ShutdownSharedResources() {
     std::lock_guard<std::mutex> lock(gSharedResourcesMu);
+    if (gSharedResources) {
+        gSharedResources->ReleaseDrawResources();
+    }
     gSharedResources.reset();
     return true;
 }
@@ -191,10 +276,6 @@ public:
         }
 
         std::lock_guard<std::mutex> lock(mu_);
-        if (!IsValid()) {
-            return false;
-        }
-
         auto* shared = AcquireSharedResources();
         if (!shared) {
             return false;
@@ -229,20 +310,33 @@ public:
 
     bool BeginDraw(uint8_t* rgba, int width, int height, int stride) {
         std::lock_guard<std::mutex> lock(mu_);
-        if (!IsValid() || !rgba || width <= 0 || height <= 0 || stride <= 0) {
+        if (!rgba || width <= 0 || height <= 0 || stride <= 0) {
             return false;
         }
 
         EndDrawLocked();
 
+        auto* shared = AcquireSharedResources();
+        if (!shared) {
+            return false;
+        }
+
+        ID2D1DCRenderTarget* rt = nullptr;
+        ID2D1SolidColorBrush* br = nullptr;
+        if (!shared->LockDraw(&rt, &br)) {
+            return false;
+        }
+
         HDC screenDC = GetDC(nullptr);
         if (!screenDC) {
+            shared->UnlockDraw();
             return false;
         }
 
         HDC memDC = CreateCompatibleDC(screenDC);
         ReleaseDC(nullptr, screenDC);
         if (!memDC) {
+            shared->UnlockDraw();
             return false;
         }
 
@@ -258,6 +352,7 @@ public:
         HBITMAP bitmap = CreateDIBSection(memDC, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
         if (!bitmap || !bits) {
             DeleteDC(memDC);
+            shared->UnlockDraw();
             return false;
         }
 
@@ -265,6 +360,7 @@ public:
         if (!oldBmp) {
             DeleteObject(bitmap);
             DeleteDC(memDC);
+            shared->UnlockDraw();
             return false;
         }
 
@@ -281,25 +377,21 @@ public:
             }
         }
 
-        if (!EnsureDrawResourcesLocked()) {
-            SelectObject(memDC, oldBmp);
-            DeleteObject(bitmap);
-            DeleteDC(memDC);
-            return false;
-        }
-
         RECT rect{0, 0, width, height};
-        HRESULT hr = renderTarget_->BindDC(memDC, &rect);
+        HRESULT hr = rt->BindDC(memDC, &rect);
         if (FAILED(hr)) {
             SelectObject(memDC, oldBmp);
             DeleteObject(bitmap);
             DeleteDC(memDC);
+            shared->UnlockDraw();
             return false;
         }
 
-        renderTarget_->SetTransform(D2D1::Matrix3x2F::Identity());
-        renderTarget_->BeginDraw();
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        rt->BeginDraw();
 
+        renderTarget_ = rt;
+        brush_ = br;
         drawRGBA_ = rgba;
         drawStride_ = stride;
         drawWidth_ = width;
@@ -314,7 +406,7 @@ public:
 
     bool DrawString(const wchar_t* text, int x, int y, int fontSize, uint32_t rgba, bool useSymbol) {
         std::lock_guard<std::mutex> lock(mu_);
-        if (!IsValid() || !inDraw_ || !text || fontSize <= 0 || !renderTarget_ || !brush_) {
+        if (!inDraw_ || !text || fontSize <= 0 || !renderTarget_ || !brush_) {
             return false;
         }
 
@@ -364,7 +456,7 @@ public:
             static_cast<float>(x),
             static_cast<float>(y) - baseline,
         };
-        renderTarget_->DrawTextLayout(origin, layout.Get(), brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+        renderTarget_->DrawTextLayout(origin, layout.Get(), brush_, D2D1_DRAW_TEXT_OPTIONS_NONE);
         return true;
     }
 
@@ -373,54 +465,12 @@ public:
         return EndDrawLocked();
     }
 
-    void ReleaseNativeResources() {
+    ~Renderer() {
         std::lock_guard<std::mutex> lock(mu_);
         EndDrawLocked();
-        brush_.Reset();
-        renderTarget_.Reset();
-    }
-
-    ~Renderer() {
-        ReleaseNativeResources();
     }
 
 private:
-    bool EnsureDrawResourcesLocked() {
-        if (renderTarget_ && brush_) {
-            return true;
-        }
-
-        auto* shared = AcquireSharedResources();
-        if (!shared) {
-            return false;
-        }
-
-        if (!renderTarget_) {
-            D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-                D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)
-            );
-
-            HRESULT hr = shared->D2DFactory()->CreateDCRenderTarget(&props, &renderTarget_);
-            if (FAILED(hr) || !renderTarget_) {
-                return false;
-            }
-            renderTarget_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-        }
-
-        if (!brush_) {
-            HRESULT hr = renderTarget_->CreateSolidColorBrush(
-                D2D1::ColorF(D2D1::ColorF::Black),
-                &brush_
-            );
-            if (FAILED(hr) || !brush_) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     bool EndDrawLocked() {
         if (!inDraw_) {
             return true;
@@ -460,6 +510,8 @@ private:
             DeleteDC(drawDC_);
         }
 
+        renderTarget_ = nullptr;
+        brush_ = nullptr;
         drawRGBA_ = nullptr;
         drawStride_ = 0;
         drawWidth_ = 0;
@@ -469,6 +521,11 @@ private:
         drawOldBitmap_ = nullptr;
         drawBits_ = nullptr;
         inDraw_ = false;
+
+        auto* shared = AcquireSharedResources();
+        if (shared) {
+            shared->UnlockDraw();
+        }
         return true;
     }
 
@@ -477,8 +534,9 @@ private:
     int fontWeight_ = static_cast<int>(DWRITE_FONT_WEIGHT_NORMAL);
     float fontScale_ = 1.0f;
 
-    ComPtr<ID2D1DCRenderTarget> renderTarget_;
-    ComPtr<ID2D1SolidColorBrush> brush_;
+    // Borrowed from SharedResources during draw session (not owned)
+    ID2D1DCRenderTarget* renderTarget_ = nullptr;
+    ID2D1SolidColorBrush* brush_ = nullptr;
 
     bool inDraw_ = false;
     uint8_t* drawRGBA_ = nullptr;
