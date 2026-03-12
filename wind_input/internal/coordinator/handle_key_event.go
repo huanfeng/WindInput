@@ -103,6 +103,18 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 			capsLockOn := data.IsCapsLockOn()
 			c.logger.Debug("CapsLock state notification", "on", capsLockOn)
 
+			// CapsLock 切换时，清理所有待处理的输入缓冲
+			// 避免残留状态导致后续数字、标点等按键行为异常
+			var capsCommitText string
+			hasPending := c.hasPendingInput()
+			if hasPending {
+				if c.config != nil && c.config.Hotkeys.CommitOnSwitch {
+					capsCommitText = c.getPendingBufferText()
+				}
+				c.clearState()
+				c.hideUI()
+			}
+
 			// Update CapsLock state and broadcast if changed
 			if c.capsLockOn != capsLockOn {
 				c.capsLockOn = capsLockOn
@@ -112,7 +124,15 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 			// Show CapsLock indicator (A/a) - use NoLock version since we already hold the lock
 			c.handleCapsLockStateNoLock(capsLockOn)
 
-			// Return Consumed to indicate we handled it (no mode change)
+			if capsCommitText != "" {
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: capsCommitText,
+				}
+			}
+			if hasPending {
+				return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+			}
 			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 		} else {
 			// Toggle key recognized (lshift/rshift/lctrl/rctrl) but not configured
