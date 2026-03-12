@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/transform"
 )
 
@@ -32,7 +33,7 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 	hasShift := data.Modifiers&ModShift != 0
 
 	switch {
-	case data.KeyCode == 8: // Backspace
+	case uint32(data.KeyCode) == ipc.VK_BACK:
 		if len(c.tempEnglishBuffer) > 0 {
 			c.tempEnglishBuffer = c.tempEnglishBuffer[:len(c.tempEnglishBuffer)-1]
 			if len(c.tempEnglishBuffer) == 0 {
@@ -49,15 +50,15 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		// 缓冲区已空，返回 ClearComposition
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
 
-	case data.KeyCode == 27: // Escape
+	case uint32(data.KeyCode) == ipc.VK_ESCAPE:
 		return c.exitTempEnglishMode(false, "")
 
-	case data.KeyCode == 32: // Space
+	case uint32(data.KeyCode) == ipc.VK_SPACE:
 		// 上屏缓冲内容
 		text := c.tempEnglishBuffer
 		return c.exitTempEnglishMode(true, text)
 
-	case data.KeyCode == 13: // Enter
+	case uint32(data.KeyCode) == ipc.VK_RETURN:
 		// Enter 也上屏缓冲内容
 		return c.exitTempEnglishMode(true, c.tempEnglishBuffer)
 

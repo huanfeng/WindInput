@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/transform"
 )
 
@@ -25,19 +26,20 @@ var shiftedKeyMap = map[byte]byte{
 // numpadKeyToChar returns the character for a numpad key code, or "" if not a numpad key.
 // Numpad keys always output their character directly, bypassing IME processing.
 func numpadKeyToChar(keyCode int) string {
-	if keyCode >= 0x60 && keyCode <= 0x69 {
-		return string(rune('0' + keyCode - 0x60))
+	k := uint32(keyCode)
+	if k >= ipc.VK_NUMPAD0 && k <= ipc.VK_NUMPAD9 {
+		return string(rune('0' + k - ipc.VK_NUMPAD0))
 	}
-	switch keyCode {
-	case 0x6A:
+	switch k {
+	case ipc.VK_MULTIPLY:
 		return "*"
-	case 0x6B:
+	case ipc.VK_ADD:
 		return "+"
-	case 0x6D:
+	case ipc.VK_SUBTRACT:
 		return "-"
-	case 0x6E:
+	case ipc.VK_DECIMAL:
 		return "."
-	case 0x6F:
+	case ipc.VK_DIVIDE:
 		return "/"
 	}
 	return ""
@@ -300,29 +302,30 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	}
 
 	// Chinese mode handling
+	vk := uint32(data.KeyCode)
 	switch {
-	case data.KeyCode == 37: // Left arrow
+	case vk == ipc.VK_LEFT:
 		return c.handleCursorLeft()
 
-	case data.KeyCode == 39: // Right arrow
+	case vk == ipc.VK_RIGHT:
 		return c.handleCursorRight()
 
-	case data.KeyCode == 36: // Home
+	case vk == ipc.VK_HOME:
 		return c.handleCursorHome()
 
-	case data.KeyCode == 35: // End
+	case vk == ipc.VK_END:
 		return c.handleCursorEnd()
 
-	case data.KeyCode == 8: // Backspace
+	case vk == ipc.VK_BACK:
 		return c.handleBackspace()
 
-	case data.KeyCode == 13: // Enter
+	case vk == ipc.VK_RETURN:
 		return c.handleEnter()
 
-	case data.KeyCode == 27: // Escape
+	case vk == ipc.VK_ESCAPE:
 		return c.handleEscape()
 
-	case data.KeyCode == 32: // Space
+	case vk == ipc.VK_SPACE:
 		return c.handleSpace()
 
 	case c.isPageUpKey(key, data.KeyCode, uint32(data.Modifiers)):

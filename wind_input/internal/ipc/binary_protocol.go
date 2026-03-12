@@ -89,6 +89,10 @@ const (
 	VK_SPACE      uint32 = 0x20
 	VK_PRIOR      uint32 = 0x21 // PageUp
 	VK_NEXT       uint32 = 0x22 // PageDown
+	VK_END        uint32 = 0x23
+	VK_HOME       uint32 = 0x24
+	VK_LEFT       uint32 = 0x25
+	VK_RIGHT      uint32 = 0x27
 	VK_LSHIFT     uint32 = 0xA0
 	VK_RSHIFT     uint32 = 0xA1
 	VK_LCONTROL   uint32 = 0xA2

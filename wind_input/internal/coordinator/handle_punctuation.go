@@ -3,6 +3,7 @@ package coordinator
 
 import (
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/transform"
 )
 
@@ -16,19 +17,19 @@ func (c *Coordinator) isSelectKey2(key string, keyCode int) bool {
 	for _, group := range c.config.Input.SelectKeyGroups {
 		switch group {
 		case "semicolon_quote":
-			if key == ";" || keyCode == 186 { // VK_OEM_1
+			if key == ";" || uint32(keyCode) == ipc.VK_OEM_1 {
 				return true
 			}
 		case "comma_period":
-			if key == "," || keyCode == 188 { // VK_OEM_COMMA
+			if key == "," || uint32(keyCode) == ipc.VK_OEM_COMMA {
 				return true
 			}
 		case "lrshift":
-			if keyCode == 160 { // VK_LSHIFT
+			if uint32(keyCode) == ipc.VK_LSHIFT {
 				return true
 			}
 		case "lrctrl":
-			if keyCode == 162 { // VK_LCONTROL
+			if uint32(keyCode) == ipc.VK_LCONTROL {
 				return true
 			}
 		}
@@ -46,19 +47,19 @@ func (c *Coordinator) isSelectKey3(key string, keyCode int) bool {
 	for _, group := range c.config.Input.SelectKeyGroups {
 		switch group {
 		case "semicolon_quote":
-			if key == "'" || keyCode == 222 { // VK_OEM_7
+			if key == "'" || uint32(keyCode) == ipc.VK_OEM_7 {
 				return true
 			}
 		case "comma_period":
-			if key == "." || keyCode == 190 { // VK_OEM_PERIOD
+			if key == "." || uint32(keyCode) == ipc.VK_OEM_PERIOD {
 				return true
 			}
 		case "lrshift":
-			if keyCode == 161 { // VK_RSHIFT
+			if uint32(keyCode) == ipc.VK_RSHIFT {
 				return true
 			}
 		case "lrctrl":
-			if keyCode == 163 { // VK_RCONTROL
+			if uint32(keyCode) == ipc.VK_RCONTROL {
 				return true
 			}
 		}
@@ -207,18 +208,18 @@ func (c *Coordinator) handleTogglePunct() *bridge.KeyEventResult {
 
 // getToggleModeKey maps keycode to toggle mode key name
 func (c *Coordinator) getToggleModeKey(keyCode int) string {
-	switch keyCode {
-	case 160: // VK_LSHIFT
+	switch uint32(keyCode) {
+	case ipc.VK_LSHIFT:
 		return "lshift"
-	case 161: // VK_RSHIFT
+	case ipc.VK_RSHIFT:
 		return "rshift"
-	case 16: // VK_SHIFT (generic shift)
+	case ipc.VK_SHIFT:
 		return "lshift" // 默认作为左Shift处理
-	case 162: // VK_LCONTROL
+	case ipc.VK_LCONTROL:
 		return "lctrl"
-	case 163: // VK_RCONTROL
+	case ipc.VK_RCONTROL:
 		return "rctrl"
-	case 20: // VK_CAPITAL (Caps Lock)
+	case ipc.VK_CAPITAL:
 		return "capslock"
 	}
 	return ""
@@ -228,7 +229,7 @@ func (c *Coordinator) getToggleModeKey(keyCode int) string {
 func (c *Coordinator) isPageUpKey(key string, keyCode int, modifiers uint32) bool {
 	if c.config == nil {
 		// 默认支持 PageUp 和 - 键（Shift+- 应输出 _ 而非翻页）
-		return key == "page_up" || keyCode == 33 || (keyCode == 189 && modifiers&ModShift == 0)
+		return key == "page_up" || uint32(keyCode) == ipc.VK_PRIOR || (uint32(keyCode) == ipc.VK_OEM_MINUS && modifiers&ModShift == 0)
 	}
 
 	hasShift := modifiers&ModShift != 0
@@ -236,22 +237,22 @@ func (c *Coordinator) isPageUpKey(key string, keyCode int, modifiers uint32) boo
 	for _, pk := range c.config.Input.PageKeys {
 		switch pk {
 		case "pageupdown":
-			if key == "page_up" || keyCode == 33 { // VK_PRIOR
+			if key == "page_up" || uint32(keyCode) == ipc.VK_PRIOR {
 				return true
 			}
 		case "minus_equal":
 			// Shift+- 应输出 _ 而非翻页
-			if !hasShift && keyCode == 189 { // VK_OEM_MINUS
+			if !hasShift && uint32(keyCode) == ipc.VK_OEM_MINUS {
 				return true
 			}
 		case "brackets":
 			// Shift+[ 应输出 { 而非翻页
-			if !hasShift && keyCode == 219 { // VK_OEM_4 ([)
+			if !hasShift && uint32(keyCode) == ipc.VK_OEM_4 {
 				return true
 			}
 		case "shift_tab":
 			// Shift+Tab = page up
-			if keyCode == 9 && hasShift { // VK_TAB with Shift
+			if uint32(keyCode) == ipc.VK_TAB && hasShift {
 				return true
 			}
 		}
@@ -263,7 +264,7 @@ func (c *Coordinator) isPageUpKey(key string, keyCode int, modifiers uint32) boo
 func (c *Coordinator) isPageDownKey(key string, keyCode int, modifiers uint32) bool {
 	if c.config == nil {
 		// 默认支持 PageDown 和 = 键
-		return key == "page_down" || keyCode == 34 || (keyCode == 187 && modifiers&ModShift == 0)
+		return key == "page_down" || uint32(keyCode) == ipc.VK_NEXT || (uint32(keyCode) == ipc.VK_OEM_PLUS && modifiers&ModShift == 0)
 	}
 
 	hasShift := modifiers&ModShift != 0
@@ -271,22 +272,22 @@ func (c *Coordinator) isPageDownKey(key string, keyCode int, modifiers uint32) b
 	for _, pk := range c.config.Input.PageKeys {
 		switch pk {
 		case "pageupdown":
-			if key == "page_down" || keyCode == 34 { // VK_NEXT
+			if key == "page_down" || uint32(keyCode) == ipc.VK_NEXT {
 				return true
 			}
 		case "minus_equal":
 			// Shift+= 应输出 + 而非翻页
-			if !hasShift && keyCode == 187 { // VK_OEM_PLUS (=)
+			if !hasShift && uint32(keyCode) == ipc.VK_OEM_PLUS {
 				return true
 			}
 		case "brackets":
 			// Shift+] 应输出 } 而非翻页
-			if !hasShift && keyCode == 221 { // VK_OEM_6 (])
+			if !hasShift && uint32(keyCode) == ipc.VK_OEM_6 {
 				return true
 			}
 		case "shift_tab":
 			// Tab without Shift = page down
-			if keyCode == 9 && !hasShift { // VK_TAB without Shift
+			if uint32(keyCode) == ipc.VK_TAB && !hasShift {
 				return true
 			}
 		}
@@ -311,24 +312,24 @@ func (c *Coordinator) matchHotkey(hotkeyStr string, hasCtrl, hasShift, hasAlt bo
 	switch hotkeyStr {
 	case "ctrl+`":
 		needCtrl = true
-		targetKeyCode = 192 // VK_OEM_3
+		targetKeyCode = int(ipc.VK_OEM_3)
 	case "ctrl+shift+e":
 		needCtrl = true
 		needShift = true
-		targetKeyCode = 69 // VK_E
+		targetKeyCode = 69 // VK_E (0x45)
 	case "shift+space":
 		needShift = true
-		targetKeyCode = 32 // VK_SPACE
+		targetKeyCode = int(ipc.VK_SPACE)
 	case "ctrl+shift+space":
 		needCtrl = true
 		needShift = true
-		targetKeyCode = 32 // VK_SPACE
+		targetKeyCode = int(ipc.VK_SPACE)
 	case "ctrl+.":
 		needCtrl = true
-		targetKeyCode = 190 // VK_OEM_PERIOD
+		targetKeyCode = int(ipc.VK_OEM_PERIOD)
 	case "ctrl+,":
 		needCtrl = true
-		targetKeyCode = 188 // VK_OEM_COMMA
+		targetKeyCode = int(ipc.VK_OEM_COMMA)
 	default:
 		// Unknown hotkey format
 		c.logger.Debug("Unknown hotkey format", "hotkey", hotkeyStr)

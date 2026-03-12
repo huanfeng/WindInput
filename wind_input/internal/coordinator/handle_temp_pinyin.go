@@ -6,6 +6,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/engine"
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/internal/ui"
 )
@@ -27,13 +28,13 @@ func (c *Coordinator) isTempPinyinTrigger(key string, keyCode int) bool {
 	for _, tk := range c.config.Input.TempPinyin.TriggerKeys {
 		switch tk {
 		case "backtick":
-			if key == "`" || keyCode == 192 {
+			if key == "`" || uint32(keyCode) == ipc.VK_OEM_3 {
 				return true
 			}
 		case "semicolon":
 			// 仅在输入缓冲区为空且无候选时触发
 			// 有候选时 semicolon 仍用于二三候选选择
-			if (key == ";" || keyCode == 186) && len(c.candidates) == 0 {
+			if (key == ";" || uint32(keyCode) == ipc.VK_OEM_1) && len(c.candidates) == 0 {
 				return true
 			}
 		}
@@ -49,11 +50,11 @@ func (c *Coordinator) isTempPinyinTriggerKeyMatch(key string, keyCode int) bool 
 	for _, tk := range c.config.Input.TempPinyin.TriggerKeys {
 		switch tk {
 		case "backtick":
-			if key == "`" || keyCode == 192 {
+			if key == "`" || uint32(keyCode) == ipc.VK_OEM_3 {
 				return true
 			}
 		case "semicolon":
-			if key == ";" || keyCode == 186 {
+			if key == ";" || uint32(keyCode) == ipc.VK_OEM_1 {
 				return true
 			}
 		}
@@ -129,7 +130,7 @@ func (c *Coordinator) handleTempPinyinKey(key string, data *bridge.KeyEventData)
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
-	case data.KeyCode == 32: // Space
+	case uint32(data.KeyCode) == ipc.VK_SPACE:
 		// 选择第一个候选
 		if len(c.candidates) > 0 {
 			pageStart := (c.currentPage - 1) * c.candidatesPerPage
@@ -138,14 +139,14 @@ func (c *Coordinator) handleTempPinyinKey(key string, data *bridge.KeyEventData)
 		// 无候选时退出
 		return c.exitTempPinyinMode(false, "")
 
-	case data.KeyCode == 13: // Enter
+	case uint32(data.KeyCode) == ipc.VK_RETURN:
 		// 上屏拼音原文字母
 		if len(c.tempPinyinBuffer) > 0 {
 			return c.exitTempPinyinMode(true, c.tempPinyinBuffer)
 		}
 		return c.exitTempPinyinMode(false, "")
 
-	case data.KeyCode == 8: // Backspace
+	case uint32(data.KeyCode) == ipc.VK_BACK:
 		if len(c.tempPinyinBuffer) > 0 {
 			c.tempPinyinBuffer = c.tempPinyinBuffer[:len(c.tempPinyinBuffer)-1]
 			if len(c.tempPinyinBuffer) == 0 {
@@ -166,7 +167,7 @@ func (c *Coordinator) handleTempPinyinKey(key string, data *bridge.KeyEventData)
 		}
 		return c.exitTempPinyinMode(false, "")
 
-	case data.KeyCode == 27: // Escape
+	case uint32(data.KeyCode) == ipc.VK_ESCAPE:
 		return c.exitTempPinyinMode(false, "")
 
 	case c.isPageUpKey(key, data.KeyCode, uint32(data.Modifiers)):
