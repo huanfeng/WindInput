@@ -66,13 +66,18 @@ func (c *Coordinator) isSelectKey3(key string, keyCode int) bool {
 	return false
 }
 
-// isPunctuation checks if a character is a punctuation mark that can be converted
+// isPunctuation checks if a character is a punctuation/symbol that should be
+// handled by the punctuation pipeline. This includes all characters that may
+// have Chinese punctuation mappings or may be customized by user in the future.
 func (c *Coordinator) isPunctuation(r rune) bool {
-	// Check common punctuation marks
 	switch r {
+	// 基础标点（有中文映射）
 	case ',', '.', '?', '!', ':', ';', '\'', '"',
 		'(', ')', '[', ']', '{', '}', '<', '>',
 		'~', '@', '$', '`', '^', '_':
+		return true
+	// Shift+数字/符号产生的字符（部分有中文映射，其余预留自定义转换）
+	case '#', '%', '&', '*', '+', '|', '/', '\\':
 		return true
 	}
 	return false
@@ -222,8 +227,8 @@ func (c *Coordinator) getToggleModeKey(keyCode int) string {
 // isPageUpKey checks if the key is configured as a page up key
 func (c *Coordinator) isPageUpKey(key string, keyCode int, modifiers uint32) bool {
 	if c.config == nil {
-		// 默认支持 PageUp 和 - 键
-		return key == "page_up" || keyCode == 33 || keyCode == 189
+		// 默认支持 PageUp 和 - 键（Shift+- 应输出 _ 而非翻页）
+		return key == "page_up" || keyCode == 33 || (keyCode == 189 && modifiers&ModShift == 0)
 	}
 
 	hasShift := modifiers&ModShift != 0
@@ -235,11 +240,13 @@ func (c *Coordinator) isPageUpKey(key string, keyCode int, modifiers uint32) boo
 				return true
 			}
 		case "minus_equal":
-			if keyCode == 189 { // VK_OEM_MINUS
+			// Shift+- 应输出 _ 而非翻页
+			if !hasShift && keyCode == 189 { // VK_OEM_MINUS
 				return true
 			}
 		case "brackets":
-			if keyCode == 219 { // VK_OEM_4 ([)
+			// Shift+[ 应输出 { 而非翻页
+			if !hasShift && keyCode == 219 { // VK_OEM_4 ([)
 				return true
 			}
 		case "shift_tab":
@@ -256,7 +263,7 @@ func (c *Coordinator) isPageUpKey(key string, keyCode int, modifiers uint32) boo
 func (c *Coordinator) isPageDownKey(key string, keyCode int, modifiers uint32) bool {
 	if c.config == nil {
 		// 默认支持 PageDown 和 = 键
-		return key == "page_down" || keyCode == 34 || keyCode == 187
+		return key == "page_down" || keyCode == 34 || (keyCode == 187 && modifiers&ModShift == 0)
 	}
 
 	hasShift := modifiers&ModShift != 0
@@ -268,11 +275,13 @@ func (c *Coordinator) isPageDownKey(key string, keyCode int, modifiers uint32) b
 				return true
 			}
 		case "minus_equal":
-			if keyCode == 187 { // VK_OEM_PLUS (=)
+			// Shift+= 应输出 + 而非翻页
+			if !hasShift && keyCode == 187 { // VK_OEM_PLUS (=)
 				return true
 			}
 		case "brackets":
-			if keyCode == 221 { // VK_OEM_6 (])
+			// Shift+] 应输出 } 而非翻页
+			if !hasShift && keyCode == 221 { // VK_OEM_6 (])
 				return true
 			}
 		case "shift_tab":

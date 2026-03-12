@@ -93,6 +93,13 @@ const (
 	VK_RSHIFT     uint32 = 0xA1
 	VK_LCONTROL   uint32 = 0xA2
 	VK_RCONTROL   uint32 = 0xA3
+	VK_NUMPAD0    uint32 = 0x60 // Numpad 0
+	VK_NUMPAD9    uint32 = 0x69 // Numpad 9
+	VK_MULTIPLY   uint32 = 0x6A // Numpad *
+	VK_ADD        uint32 = 0x6B // Numpad +
+	VK_SUBTRACT   uint32 = 0x6D // Numpad -
+	VK_DECIMAL    uint32 = 0x6E // Numpad .
+	VK_DIVIDE     uint32 = 0x6F // Numpad /
 	VK_OEM_1      uint32 = 0xBA // ;:
 	VK_OEM_PLUS   uint32 = 0xBB // =+
 	VK_OEM_COMMA  uint32 = 0xBC // ,<

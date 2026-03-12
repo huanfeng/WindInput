@@ -9,6 +9,40 @@ import (
 	"github.com/huanfeng/wind_input/internal/transform"
 )
 
+// shiftedKeyMap maps unshifted key → shifted character (US keyboard layout)
+// Used to resolve the actual typed character when Shift is held.
+// This table can be extended or replaced by user config for custom keyboard layouts.
+var shiftedKeyMap = map[byte]byte{
+	'1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+	'6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+	'-': '_', '=': '+',
+	'[': '{', ']': '}', '\\': '|',
+	';': ':', '\'': '"',
+	',': '<', '.': '>', '/': '?',
+	'`': '~',
+}
+
+// numpadKeyToChar returns the character for a numpad key code, or "" if not a numpad key.
+// Numpad keys always output their character directly, bypassing IME processing.
+func numpadKeyToChar(keyCode int) string {
+	if keyCode >= 0x60 && keyCode <= 0x69 {
+		return string(rune('0' + keyCode - 0x60))
+	}
+	switch keyCode {
+	case 0x6A:
+		return "*"
+	case 0x6B:
+		return "+"
+	case 0x6D:
+		return "-"
+	case 0x6E:
+		return "."
+	case 0x6F:
+		return "/"
+	}
+	return ""
+}
+
 // HandleKeyEvent handles key events from C++ Bridge
 // Returns a result indicating what action to take
 func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventResult {
@@ -159,6 +193,31 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		return nil
 	}
 
+	// 小键盘按键：始终直接输出字符，不参与候选选择或标点转换
+	if numpadChar := numpadKeyToChar(data.KeyCode); numpadChar != "" {
+		if c.hasPendingInput() {
+			c.clearState()
+			c.hideUI()
+		}
+		text := numpadChar
+		if c.fullWidth {
+			text = transform.ToFullWidth(text)
+		}
+		return &bridge.KeyEventResult{
+			Type: bridge.ResponseTypeInsertText,
+			Text: text,
+		}
+	}
+
+	// Shift+符号/数字键解析：将物理键映射为实际输入字符
+	// 例如 Shift+1 → "!", Shift+, → "<", Shift+; → ":"
+	// 字母键不在此映射中，由后续 Shift+字母逻辑单独处理
+	if hasShift && len(key) == 1 {
+		if shifted, ok := shiftedKeyMap[key[0]]; ok {
+			key = string(shifted)
+		}
+	}
+
 	// Chinese mode with CapsLock: output letters directly (no full-width)
 	// CapsLock ON: letters are uppercase, Shift+letter are lowercase
 	// This allows users to quickly type English while in Chinese mode
@@ -221,8 +280,8 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		return c.handleTempPinyinKey(key, &data)
 	}
 
-	// 检查是否应触发临时拼音模式
-	if c.isTempPinyinTrigger(key, data.KeyCode) {
+	// 检查是否应触发临时拼音模式（Shift 时不触发，Shift+` 应输出 ~）
+	if !hasShift && c.isTempPinyinTrigger(key, data.KeyCode) {
 		return c.enterTempPinyinMode()
 	}
 
@@ -279,8 +338,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	case len(key) == 1 && key[0] >= '1' && key[0] <= '9':
 		return c.handleNumberKey(int(key[0] - '0'))
 
-	case c.isSelectKey2(key, data.KeyCode):
+	case !hasShift && c.isSelectKey2(key, data.KeyCode):
 		// Handle 2nd candidate selection key (e.g., semicolon)
+		// Shift 时不触发选择（Shift+; 应输出 : 而非选候选）
 		if len(c.candidates) >= 2 && len(c.inputBuffer) > 0 {
 			return c.selectCandidate(1) // Select 2nd candidate (index 1)
 		}
@@ -290,8 +350,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		}
 		return nil
 
-	case c.isSelectKey3(key, data.KeyCode):
+	case !hasShift && c.isSelectKey3(key, data.KeyCode):
 		// Handle 3rd candidate selection key (e.g., quote)
+		// Shift 时不触发选择（Shift+' 应输出 " 而非选候选）
 		if len(c.candidates) >= 3 && len(c.inputBuffer) > 0 {
 			return c.selectCandidate(2) // Select 3rd candidate (index 2)
 		}

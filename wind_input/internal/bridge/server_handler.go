@@ -420,6 +420,23 @@ func keyCodeToKeyName(keyCode uint32) string {
 		if keyCode >= 0x30 && keyCode <= 0x39 {
 			return string(rune('0' + keyCode - 0x30))
 		}
+		// Numpad 0-9
+		if keyCode >= 0x60 && keyCode <= 0x69 {
+			return string(rune('0' + keyCode - 0x60))
+		}
+		// Numpad operators
+		switch keyCode {
+		case 0x6A: // VK_MULTIPLY
+			return "*"
+		case 0x6B: // VK_ADD
+			return "+"
+		case 0x6D: // VK_SUBTRACT
+			return "-"
+		case 0x6E: // VK_DECIMAL
+			return "."
+		case 0x6F: // VK_DIVIDE
+			return "/"
+		}
 		return fmt.Sprintf("vk_%d", keyCode)
 	}
 }

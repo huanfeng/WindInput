@@ -41,6 +41,26 @@ func (c *Coordinator) isTempPinyinTrigger(key string, keyCode int) bool {
 	return false
 }
 
+// isTempPinyinTriggerKeyMatch 仅检查按键是否匹配临时拼音触发键（不检查状态条件）
+func (c *Coordinator) isTempPinyinTriggerKeyMatch(key string, keyCode int) bool {
+	if c.config == nil {
+		return false
+	}
+	for _, tk := range c.config.Input.TempPinyin.TriggerKeys {
+		switch tk {
+		case "backtick":
+			if key == "`" || keyCode == 192 {
+				return true
+			}
+		case "semicolon":
+			if key == ";" || keyCode == 186 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // enterTempPinyinMode 进入临时拼音模式
 func (c *Coordinator) enterTempPinyinMode() *bridge.KeyEventResult {
 	// 确保拼音引擎已加载
@@ -162,6 +182,53 @@ func (c *Coordinator) handleTempPinyinKey(key string, data *bridge.KeyEventData)
 			c.showTempPinyinUI()
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	case c.isTempPinyinTriggerKeyMatch(key, data.KeyCode):
+		// 再次按下触发键：缓冲区为空时输出对应的标点符号
+		if len(c.tempPinyinBuffer) == 0 {
+			triggerChar := key
+			if len(triggerChar) == 1 {
+				punctText := triggerChar
+				if c.chinesePunctuation {
+					if converted, ok := c.punctConverter.ToChinesePunctStr(rune(triggerChar[0])); ok {
+						punctText = converted
+					}
+				}
+				if c.fullWidth {
+					punctText = transform.ToFullWidth(punctText)
+				}
+				return c.exitTempPinyinMode(true, punctText)
+			}
+		}
+		// 缓冲区有内容时，按标点处理（同 default 逻辑）
+		if len(c.candidates) > 0 {
+			pageStart := (c.currentPage - 1) * c.candidatesPerPage
+			cand := c.candidates[pageStart]
+			text := cand.Text
+			if c.fullWidth {
+				text = transform.ToFullWidth(text)
+			}
+
+			c.tempPinyinMode = false
+			c.tempPinyinBuffer = ""
+			c.preeditDisplay = ""
+			c.candidates = nil
+			c.currentPage = 1
+			c.totalPages = 1
+			c.hideUI()
+
+			punctText := key
+			if len(key) == 1 && c.chinesePunctuation {
+				if converted, ok := c.punctConverter.ToChinesePunctStr(rune(key[0])); ok {
+					punctText = converted
+				}
+			}
+			return &bridge.KeyEventResult{
+				Type: bridge.ResponseTypeInsertText,
+				Text: text + punctText,
+			}
+		}
+		return c.exitTempPinyinMode(false, "")
 
 	default:
 		// 其他按键（如标点）
