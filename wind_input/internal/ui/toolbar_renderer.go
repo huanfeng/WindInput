@@ -32,25 +32,87 @@ type ToolbarRenderer struct {
 // NewToolbarRenderer creates a new toolbar renderer
 func NewToolbarRenderer() *ToolbarRenderer {
 	fc := NewFontConfig()
-	tr := NewTextRenderer()
-	dwr := NewDWriteRenderer("toolbar")
-	// Toolbar text is relatively large, use same weight as candidate box
-	tr.SetGDIParams(fc.GetEffectiveGDIWeight(), fc.GetEffectiveGDIScale())
-	dwr.SetGDIParams(fc.GetEffectiveGDIWeight(), fc.GetEffectiveGDIScale())
-
 	r := &ToolbarRenderer{
-		fontCache:      newFontCache(),
-		textRenderer:   tr,
-		dwriteRenderer: dwr,
-		fontConfig:     fc,
+		fontConfig: fc,
 	}
-	r.ensureFontLoaded()
-	r.textDrawer = newGDIDrawer(r.textRenderer)
+	r.SetTextRenderMode(TextRenderModeGDI)
 	return r
+}
+
+func (r *ToolbarRenderer) resolvePrimaryFontPath() string {
+	if r.fontPath != "" {
+		r.fontConfig.SetPrimaryFont(r.fontPath)
+	}
+	resolved := r.fontConfig.ResolvePrimaryFont()
+	if resolved != "" {
+		r.fontPath = resolved
+	}
+	return resolved
+}
+
+func (r *ToolbarRenderer) ensureTextRenderer() *TextRenderer {
+	if r.textRenderer != nil {
+		return r.textRenderer
+	}
+	tr := NewTextRenderer()
+	tr.SetGDIParams(r.fontConfig.GetEffectiveGDIWeight(), r.fontConfig.GetEffectiveGDIScale())
+	if resolved := r.resolvePrimaryFontPath(); resolved != "" {
+		tr.SetFont(resolved)
+	}
+	r.textRenderer = tr
+	return tr
+}
+
+func (r *ToolbarRenderer) ensureDWriteRenderer() *DWriteRenderer {
+	if r.dwriteRenderer != nil {
+		return r.dwriteRenderer
+	}
+	dwr := NewDWriteRenderer("toolbar")
+	dwr.SetGDIParams(r.fontConfig.GetEffectiveGDIWeight(), r.fontConfig.GetEffectiveGDIScale())
+	if resolved := r.resolvePrimaryFontPath(); resolved != "" {
+		dwr.SetFont(resolved)
+	}
+	r.dwriteRenderer = dwr
+	return dwr
+}
+
+func (r *ToolbarRenderer) ensureFontCache() *fontCache {
+	if r.fontCache == nil {
+		r.fontCache = newFontCache()
+	}
+	if resolved := r.resolvePrimaryFontPath(); resolved != "" {
+		r.fontCache.mu.Lock()
+		_ = r.fontCache.loadFont(resolved)
+		r.fontCache.mu.Unlock()
+	}
+	return r.fontCache
+}
+
+func (r *ToolbarRenderer) releaseGDIBackend() {
+	if r.textRenderer != nil {
+		r.textRenderer.Close()
+		r.textRenderer = nil
+	}
+}
+
+func (r *ToolbarRenderer) releaseDWriteBackend() {
+	if r.dwriteRenderer != nil {
+		r.dwriteRenderer.Close()
+		r.dwriteRenderer = nil
+	}
+}
+
+func (r *ToolbarRenderer) releaseFreeTypeBackend() {
+	if r.fontCache != nil {
+		r.fontCache.Close()
+		r.fontCache = nil
+	}
 }
 
 // SetGDIFontParams updates GDI font weight and scale for text rendering
 func (r *ToolbarRenderer) SetGDIFontParams(weight int, scale float64) {
+	r.fontConfig.SetGDIFontWeight(weight)
+	r.fontConfig.SetGDIFontScale(scale)
 	if r.textRenderer != nil {
 		r.textRenderer.SetGDIParams(weight, scale)
 	}
@@ -63,65 +125,52 @@ func (r *ToolbarRenderer) SetGDIFontParams(weight int, scale float64) {
 func (r *ToolbarRenderer) SetTextRenderMode(mode TextRenderMode) {
 	switch mode {
 	case TextRenderModeFreetype:
-		r.textDrawer = newFreeTypeDrawer(r.fontCache, r.fontConfig)
+		fc := r.ensureFontCache()
+		r.releaseGDIBackend()
+		r.releaseDWriteBackend()
+		r.textDrawer = newFreeTypeDrawer(fc, r.fontConfig)
 	case TextRenderModeDirectWrite:
-		if r.dwriteRenderer != nil && r.dwriteRenderer.IsAvailable() {
-			r.textDrawer = newDirectWriteDrawer(r.dwriteRenderer)
-		} else {
-			r.textDrawer = newGDIDrawer(r.textRenderer)
-		}
-	default:
-		r.textDrawer = newGDIDrawer(r.textRenderer)
-	}
-}
-
-// ensureFontLoaded loads a font into the cache using FontConfig.
-func (r *ToolbarRenderer) ensureFontLoaded() {
-	r.fontCache.mu.Lock()
-	defer r.fontCache.mu.Unlock()
-
-	if r.fontPath != "" {
-		r.fontConfig.SetPrimaryFont(r.fontPath)
-	}
-
-	resolved := r.fontConfig.ResolvePrimaryFont()
-	if resolved != "" {
-		if err := r.fontCache.loadFont(resolved); err == nil {
-			r.fontPath = resolved
-			r.textRenderer.SetFont(resolved)
-			r.dwriteRenderer.SetFont(resolved)
+		dwr := r.ensureDWriteRenderer()
+		if dwr != nil && dwr.IsAvailable() {
+			r.releaseGDIBackend()
+			r.releaseFreeTypeBackend()
+			r.textDrawer = newDirectWriteDrawer(dwr)
 			return
 		}
+		r.releaseDWriteBackend()
+		tr := r.ensureTextRenderer()
+		r.releaseFreeTypeBackend()
+		r.textDrawer = newGDIDrawer(tr)
+	default:
+		tr := r.ensureTextRenderer()
+		r.releaseDWriteBackend()
+		r.releaseFreeTypeBackend()
+		r.textDrawer = newGDIDrawer(tr)
 	}
 }
 
 // SetFontPath sets the font path for rendering
 func (r *ToolbarRenderer) SetFontPath(path string) {
 	r.fontPath = path
-	r.fontConfig.SetPrimaryFont(path)
-	resolved := r.fontConfig.ResolvePrimaryFont()
-	if resolved != "" {
-		path = resolved
-		r.fontPath = resolved
+	resolved := r.resolvePrimaryFontPath()
+	if r.fontCache != nil && resolved != "" {
+		r.fontCache.mu.Lock()
+		_ = r.fontCache.loadFont(resolved)
+		r.fontCache.mu.Unlock()
 	}
-	r.fontCache.mu.Lock()
-	r.fontCache.loadFont(path)
-	r.fontCache.mu.Unlock()
-	r.textRenderer.SetFont(path)
-	r.dwriteRenderer.SetFont(path)
+	if r.textRenderer != nil && resolved != "" {
+		r.textRenderer.SetFont(resolved)
+	}
+	if r.dwriteRenderer != nil && resolved != "" {
+		r.dwriteRenderer.SetFont(resolved)
+	}
 }
 
 // Close releases renderer-owned font and text resources.
 func (r *ToolbarRenderer) Close() {
-	if r.fontCache != nil {
-		r.fontCache.Close()
-	}
-	if r.textRenderer != nil {
-		r.textRenderer.Close()
-	}
-	if r.dwriteRenderer != nil {
-		r.dwriteRenderer.Close()
-	}
+	r.releaseFreeTypeBackend()
+	r.releaseGDIBackend()
+	r.releaseDWriteBackend()
 }
 
 // SetTheme sets the theme for the toolbar renderer

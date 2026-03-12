@@ -21,8 +21,11 @@ var (
 	procWindDWriteBeginDraw       = windDWriteDLL.NewProc("WindDWriteBeginDraw")
 	procWindDWriteDrawString      = windDWriteDLL.NewProc("WindDWriteDrawString")
 	procWindDWriteEndDraw         = windDWriteDLL.NewProc("WindDWriteEndDraw")
+	procWindDWriteShutdown        = windDWriteDLL.NewProc("WindDWriteShutdown")
 	windDWriteLoadOnce            sync.Once
 	windDWriteLoadErr             error
+	windDWriteRefsMu              sync.Mutex
+	windDWriteActiveHandles       int
 )
 
 const (
@@ -44,6 +47,7 @@ func loadWindDWriteDLL() error {
 			procWindDWriteBeginDraw,
 			procWindDWriteDrawString,
 			procWindDWriteEndDraw,
+			procWindDWriteShutdown,
 		}
 		for _, proc := range procs {
 			if err := proc.Find(); err != nil {
@@ -60,6 +64,35 @@ func boolToUintptr(v bool) uintptr {
 		return 1
 	}
 	return 0
+}
+
+func registerWindDWriteHandle(component string) {
+	windDWriteRefsMu.Lock()
+	defer windDWriteRefsMu.Unlock()
+	windDWriteActiveHandles++
+	slog.Info("DirectWrite renderer handle retained", "component", component, "activeHandles", windDWriteActiveHandles)
+}
+
+func releaseWindDWriteHandle(component string) {
+	windDWriteRefsMu.Lock()
+	if windDWriteActiveHandles > 0 {
+		windDWriteActiveHandles--
+	}
+	active := windDWriteActiveHandles
+	windDWriteRefsMu.Unlock()
+
+	slog.Info("DirectWrite renderer handle released", "component", component, "activeHandles", active)
+
+	if active != 0 {
+		return
+	}
+
+	ret, _, err := procWindDWriteShutdown.Call()
+	if ret == 0 {
+		slog.Warn("DirectWrite shared resources shutdown failed", "dll", "wind_dwrite.dll", "error", err)
+		return
+	}
+	slog.Info("DirectWrite shared resources released", "dll", "wind_dwrite.dll")
 }
 
 // DWriteRenderer provides text drawing and measurement using the native C++ DirectWrite shim.
@@ -121,6 +154,7 @@ func (r *DWriteRenderer) ensureHandleLocked() bool {
 	r.handle = handle
 	r.loaded = true
 	r.applyConfigLocked()
+	registerWindDWriteHandle(r.component)
 	if !r.statusLogged {
 		slog.Info("DirectWrite renderer initialized", "component", r.component, "dll", "wind_dwrite.dll", "font", r.fontName, "weight", r.fontWeight, "scale", r.fontScale)
 		r.statusLogged = true
@@ -309,5 +343,6 @@ func (r *DWriteRenderer) Close() {
 	if r.handle != 0 {
 		procWindDWriteDestroyRenderer.Call(r.handle)
 		r.handle = 0
+		releaseWindDWriteHandle(r.component)
 	}
 }

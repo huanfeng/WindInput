@@ -5,13 +5,15 @@
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite.h>
+#include <dxgiformat.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <cstdint>
+#include <cstring>
 #include <cwchar>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -28,59 +30,182 @@ constexpr wchar_t kDefaultFontName[] = L"Microsoft YaHei";
 constexpr wchar_t kSymbolFontName[] = L"Segoe UI Symbol";
 
 struct FormatKey {
+    std::wstring family;
+    int weight = 0;
     int size = 0;
     bool symbol = false;
 
     bool operator==(const FormatKey& other) const {
-        return size == other.size && symbol == other.symbol;
+        return weight == other.weight &&
+               size == other.size &&
+               symbol == other.symbol &&
+               family == other.family;
     }
 };
 
 struct FormatKeyHash {
     size_t operator()(const FormatKey& key) const {
-        return (static_cast<size_t>(key.size) << 1) ^ static_cast<size_t>(key.symbol);
+        size_t h = std::hash<std::wstring>{}(key.family);
+        h ^= static_cast<size_t>(key.weight) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= static_cast<size_t>(key.size) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= static_cast<size_t>(key.symbol) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
     }
 };
 
-class Renderer {
+class SharedResources {
 public:
-    Renderer() {
+    bool IsValid() const {
+        return valid_;
+    }
+
+    ComPtr<IDWriteTextFormat> GetTextFormat(
+        const std::wstring& family,
+        int weight,
+        float scale,
+        int fontSize,
+        bool useSymbol
+    ) {
+        if (!valid_ || fontSize <= 0) {
+            return nullptr;
+        }
+
+        const int scaledSize = (std::max)(1, static_cast<int>(std::lround(fontSize * scale)));
+        FormatKey key{
+            useSymbol ? std::wstring(kSymbolFontName) : family,
+            weight > 0 ? weight : static_cast<int>(DWRITE_FONT_WEIGHT_NORMAL),
+            scaledSize,
+            useSymbol,
+        };
+
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = formats_.find(key);
+        if (it != formats_.end()) {
+            return it->second;
+        }
+
+        ComPtr<IDWriteTextFormat> format;
+        HRESULT hr = dwriteFactory_->CreateTextFormat(
+            key.family.c_str(),
+            nullptr,
+            static_cast<DWRITE_FONT_WEIGHT>(key.weight),
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            static_cast<FLOAT>(key.size),
+            L"zh-CN",
+            &format
+        );
+        if (FAILED(hr) || !format) {
+            return nullptr;
+        }
+
+        format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        formats_.emplace(key, format);
+        return format;
+    }
+
+    IDWriteFactory* DWriteFactory() const {
+        return dwriteFactory_.Get();
+    }
+
+    ID2D1Factory* D2DFactory() const {
+        return d2dFactory_.Get();
+    }
+
+private:
+    friend SharedResources* AcquireSharedResources();
+
+    SharedResources() {
         valid_ = Initialize();
     }
 
+    bool Initialize() {
+        HRESULT hr = DWriteCreateFactory(
+            DWRITE_FACTORY_TYPE_SHARED,
+            __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(dwriteFactory_.GetAddressOf())
+        );
+        if (FAILED(hr)) {
+            return false;
+        }
+
+        hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2dFactory_.GetAddressOf());
+        if (FAILED(hr)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    bool valid_ = false;
+    mutable std::mutex mu_;
+    ComPtr<IDWriteFactory> dwriteFactory_;
+    ComPtr<ID2D1Factory> d2dFactory_;
+    std::unordered_map<FormatKey, ComPtr<IDWriteTextFormat>, FormatKeyHash> formats_;
+};
+
+std::mutex gSharedResourcesMu;
+std::unique_ptr<SharedResources> gSharedResources;
+
+SharedResources* AcquireSharedResources() {
+    std::lock_guard<std::mutex> lock(gSharedResourcesMu);
+    if (!gSharedResources) {
+        auto resources = std::unique_ptr<SharedResources>(new SharedResources());
+        if (!resources->IsValid()) {
+            return nullptr;
+        }
+        gSharedResources = std::move(resources);
+    }
+    return gSharedResources.get();
+}
+
+bool ShutdownSharedResources() {
+    std::lock_guard<std::mutex> lock(gSharedResourcesMu);
+    gSharedResources.reset();
+    return true;
+}
+
+class Renderer {
+public:
+    Renderer() = default;
+
     bool IsValid() const {
-        return valid_;
+        return AcquireSharedResources() != nullptr;
     }
 
     void SetFont(const wchar_t* fontName) {
         std::lock_guard<std::mutex> lock(mu_);
         fontName_ = (fontName && fontName[0] != L'\0') ? fontName : kDefaultFontName;
-        ClearFormatsLocked();
     }
 
     void SetFontParams(int weight, float scale) {
         std::lock_guard<std::mutex> lock(mu_);
-        fontWeight_ = weight > 0 ? weight : DWRITE_FONT_WEIGHT_NORMAL;
+        fontWeight_ = weight > 0 ? weight : static_cast<int>(DWRITE_FONT_WEIGHT_NORMAL);
         fontScale_ = scale > 0.0f ? scale : 1.0f;
-        ClearFormatsLocked();
     }
 
     bool MeasureString(const wchar_t* text, int fontSize, bool useSymbol, int* width) {
         if (!text || !width || fontSize <= 0) {
             return false;
         }
+
         std::lock_guard<std::mutex> lock(mu_);
-        if (!valid_) {
+        if (!IsValid()) {
             return false;
         }
 
-        ComPtr<IDWriteTextFormat> format = GetTextFormatLocked(fontSize, useSymbol);
+        auto* shared = AcquireSharedResources();
+        if (!shared) {
+            return false;
+        }
+        auto format = shared->GetTextFormat(fontName_, fontWeight_, fontScale_, fontSize, useSymbol);
         if (!format) {
             return false;
         }
 
         ComPtr<IDWriteTextLayout> layout;
-        HRESULT hr = dwriteFactory_->CreateTextLayout(
+        HRESULT hr = shared->DWriteFactory()->CreateTextLayout(
             text,
             static_cast<UINT32>(wcslen(text)),
             format.Get(),
@@ -104,7 +229,7 @@ public:
 
     bool BeginDraw(uint8_t* rgba, int width, int height, int stride) {
         std::lock_guard<std::mutex> lock(mu_);
-        if (!valid_ || !rgba || width <= 0 || height <= 0 || stride <= 0) {
+        if (!IsValid() || !rgba || width <= 0 || height <= 0 || stride <= 0) {
             return false;
         }
 
@@ -156,6 +281,13 @@ public:
             }
         }
 
+        if (!EnsureDrawResourcesLocked()) {
+            SelectObject(memDC, oldBmp);
+            DeleteObject(bitmap);
+            DeleteDC(memDC);
+            return false;
+        }
+
         RECT rect{0, 0, width, height};
         HRESULT hr = renderTarget_->BindDC(memDC, &rect);
         if (FAILED(hr)) {
@@ -182,17 +314,21 @@ public:
 
     bool DrawString(const wchar_t* text, int x, int y, int fontSize, uint32_t rgba, bool useSymbol) {
         std::lock_guard<std::mutex> lock(mu_);
-        if (!valid_ || !inDraw_ || !text || fontSize <= 0) {
+        if (!IsValid() || !inDraw_ || !text || fontSize <= 0 || !renderTarget_ || !brush_) {
             return false;
         }
 
-        ComPtr<IDWriteTextFormat> format = GetTextFormatLocked(fontSize, useSymbol);
+        auto* shared = AcquireSharedResources();
+        if (!shared) {
+            return false;
+        }
+        auto format = shared->GetTextFormat(fontName_, fontWeight_, fontScale_, fontSize, useSymbol);
         if (!format) {
             return false;
         }
 
         ComPtr<IDWriteTextLayout> layout;
-        HRESULT hr = dwriteFactory_->CreateTextLayout(
+        HRESULT hr = shared->DWriteFactory()->CreateTextLayout(
             text,
             static_cast<UINT32>(wcslen(text)),
             format.Get(),
@@ -237,77 +373,52 @@ public:
         return EndDrawLocked();
     }
 
-    ~Renderer() {
+    void ReleaseNativeResources() {
+        std::lock_guard<std::mutex> lock(mu_);
         EndDrawLocked();
+        brush_.Reset();
+        renderTarget_.Reset();
+    }
+
+    ~Renderer() {
+        ReleaseNativeResources();
     }
 
 private:
-    bool Initialize() {
-        HRESULT hr = DWriteCreateFactory(
-            DWRITE_FACTORY_TYPE_SHARED,
-            __uuidof(IDWriteFactory),
-            reinterpret_cast<IUnknown**>(dwriteFactory_.GetAddressOf())
-        );
-        if (FAILED(hr)) {
+    bool EnsureDrawResourcesLocked() {
+        if (renderTarget_ && brush_) {
+            return true;
+        }
+
+        auto* shared = AcquireSharedResources();
+        if (!shared) {
             return false;
         }
 
-        hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2dFactory_.GetAddressOf());
-        if (FAILED(hr)) {
-            return false;
+        if (!renderTarget_) {
+            D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)
+            );
+
+            HRESULT hr = shared->D2DFactory()->CreateDCRenderTarget(&props, &renderTarget_);
+            if (FAILED(hr) || !renderTarget_) {
+                return false;
+            }
+            renderTarget_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
         }
 
-        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)
-        );
-
-        hr = d2dFactory_->CreateDCRenderTarget(&props, &renderTarget_);
-        if (FAILED(hr)) {
-            return false;
+        if (!brush_) {
+            HRESULT hr = renderTarget_->CreateSolidColorBrush(
+                D2D1::ColorF(D2D1::ColorF::Black),
+                &brush_
+            );
+            if (FAILED(hr) || !brush_) {
+                return false;
+            }
         }
 
-        renderTarget_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-
-        hr = renderTarget_->CreateSolidColorBrush(
-            D2D1::ColorF(D2D1::ColorF::Black),
-            &brush_
-        );
-        return SUCCEEDED(hr);
-    }
-
-    ComPtr<IDWriteTextFormat> GetTextFormatLocked(int fontSize, bool useSymbol) {
-        const int scaledSize = (std::max)(1, static_cast<int>(std::lround(fontSize * fontScale_)));
-        const FormatKey key{scaledSize, useSymbol};
-        auto it = formats_.find(key);
-        if (it != formats_.end()) {
-            return it->second;
-        }
-
-        ComPtr<IDWriteTextFormat> format;
-        const wchar_t* family = useSymbol ? kSymbolFontName : fontName_.c_str();
-        HRESULT hr = dwriteFactory_->CreateTextFormat(
-            family,
-            nullptr,
-            static_cast<DWRITE_FONT_WEIGHT>(fontWeight_),
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            static_cast<FLOAT>(scaledSize),
-            L"zh-CN",
-            &format
-        );
-        if (FAILED(hr) || !format) {
-            return nullptr;
-        }
-
-        format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-        formats_.emplace(key, format);
-        return format;
-    }
-
-    void ClearFormatsLocked() {
-        formats_.clear();
+        return true;
     }
 
     bool EndDrawLocked() {
@@ -361,17 +472,13 @@ private:
         return true;
     }
 
-    bool valid_ = false;
     std::mutex mu_;
     std::wstring fontName_ = kDefaultFontName;
-    int fontWeight_ = DWRITE_FONT_WEIGHT_NORMAL;
+    int fontWeight_ = static_cast<int>(DWRITE_FONT_WEIGHT_NORMAL);
     float fontScale_ = 1.0f;
 
-    ComPtr<IDWriteFactory> dwriteFactory_;
-    ComPtr<ID2D1Factory> d2dFactory_;
     ComPtr<ID2D1DCRenderTarget> renderTarget_;
     ComPtr<ID2D1SolidColorBrush> brush_;
-    std::unordered_map<FormatKey, ComPtr<IDWriteTextFormat>, FormatKeyHash> formats_;
 
     bool inDraw_ = false;
     uint8_t* drawRGBA_ = nullptr;
@@ -484,6 +591,10 @@ __declspec(dllexport) BOOL WindDWriteEndDraw(void* handle) {
         return FALSE;
     }
     return renderer->EndDraw() ? TRUE : FALSE;
+}
+
+__declspec(dllexport) BOOL WindDWriteShutdown() {
+    return ShutdownSharedResources() ? TRUE : FALSE;
 }
 
 } // extern "C"

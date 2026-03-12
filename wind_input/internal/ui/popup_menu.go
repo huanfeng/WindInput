@@ -55,6 +55,7 @@ type PopupMenu struct {
 	textRenderer         *TextRenderer
 	dwriteRenderer       *DWriteRenderer
 	textDrawer           TextDrawer
+	renderMode           TextRenderMode
 	fontConfig           *FontConfig
 	menuFontSizeOverride float64 // 0 = use default menuFontSize constant
 
@@ -200,31 +201,14 @@ func popupMenuWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr 
 // NewPopupMenu creates a new popup menu with its own rendering resources.
 // Menus default to SemiBold (600) weight for better readability at small font sizes.
 func NewPopupMenu() *PopupMenu {
-	tr := NewTextRenderer()
-	dwr := NewDWriteRenderer("popup_menu")
 	fontCfg := NewFontConfig()
-	// Menus use SemiBold by default (600), overriding the global default (500 Medium).
-	// GDI weight 400-500 looks nearly identical; 600 is the minimum for visibly bolder text.
-	tr.SetGDIParams(FontWeightSemiBold, fontCfg.GetEffectiveGDIScale())
-	dwr.SetGDIParams(FontWeightSemiBold, fontCfg.GetEffectiveGDIScale())
-	cache := newFontCache()
-
-	// Load primary font from centralized config (lazy — no truetype parsing yet)
-	resolved := fontCfg.ResolvePrimaryFont()
-	if resolved != "" {
-		cache.loadFont(resolved)
-		tr.SetFont(resolved)
-		dwr.SetFont(resolved)
-	}
+	fontCfg.SetGDIFontWeight(FontWeightSemiBold)
 
 	return &PopupMenu{
-		hoverIndex:     -1,
-		submenuIndex:   -1,
-		fontCache:      cache,
-		textRenderer:   tr,
-		dwriteRenderer: dwr,
-		textDrawer:     newGDIDrawer(tr),
-		fontConfig:     fontCfg,
+		hoverIndex:   -1,
+		submenuIndex: -1,
+		renderMode:   TextRenderModeGDI,
+		fontConfig:   fontCfg,
 	}
 }
 
@@ -244,9 +228,113 @@ func newPopupMenuShared(parent *PopupMenu) *PopupMenu {
 		textRenderer:         parent.textRenderer,
 		dwriteRenderer:       parent.dwriteRenderer,
 		textDrawer:           parent.textDrawer,
+		renderMode:           parent.renderMode,
 		fontConfig:           parent.fontConfig,
 		menuFontSizeOverride: menuFontSizeOverride,
 		resolvedTheme:        resolvedTheme,
+	}
+}
+
+func (m *PopupMenu) resolvePrimaryFontPathLocked() string {
+	resolved := m.fontConfig.ResolvePrimaryFont()
+	if resolved != "" {
+		m.fontConfig.SetPrimaryFont(resolved)
+	}
+	return resolved
+}
+
+func (m *PopupMenu) ensureTextRendererLocked() *TextRenderer {
+	if m.textRenderer != nil {
+		return m.textRenderer
+	}
+	tr := NewTextRenderer()
+	tr.SetGDIParams(m.fontConfig.GetEffectiveGDIWeight(), m.fontConfig.GetEffectiveGDIScale())
+	if resolved := m.resolvePrimaryFontPathLocked(); resolved != "" {
+		tr.SetFont(resolved)
+	}
+	m.textRenderer = tr
+	return tr
+}
+
+func (m *PopupMenu) ensureDWriteRendererLocked() *DWriteRenderer {
+	if m.dwriteRenderer != nil {
+		return m.dwriteRenderer
+	}
+	dwr := NewDWriteRenderer("popup_menu")
+	dwr.SetGDIParams(m.fontConfig.GetEffectiveGDIWeight(), m.fontConfig.GetEffectiveGDIScale())
+	if resolved := m.resolvePrimaryFontPathLocked(); resolved != "" {
+		dwr.SetFont(resolved)
+	}
+	m.dwriteRenderer = dwr
+	return dwr
+}
+
+func (m *PopupMenu) ensureFontCacheLocked() *fontCache {
+	if m.fontCache == nil {
+		m.fontCache = newFontCache()
+	}
+	if resolved := m.resolvePrimaryFontPathLocked(); resolved != "" {
+		m.fontCache.mu.Lock()
+		_ = m.fontCache.loadFont(resolved)
+		m.fontCache.mu.Unlock()
+	}
+	return m.fontCache
+}
+
+func (m *PopupMenu) releaseGDIBackendLocked() {
+	if m.parentMenu != nil {
+		return
+	}
+	if m.textRenderer != nil {
+		m.textRenderer.Close()
+		m.textRenderer = nil
+	}
+}
+
+func (m *PopupMenu) releaseDWriteBackendLocked() {
+	if m.parentMenu != nil {
+		return
+	}
+	if m.dwriteRenderer != nil {
+		m.dwriteRenderer.Close()
+		m.dwriteRenderer = nil
+	}
+}
+
+func (m *PopupMenu) releaseFreeTypeBackendLocked() {
+	if m.parentMenu != nil {
+		return
+	}
+	if m.fontCache != nil {
+		m.fontCache.Close()
+		m.fontCache = nil
+	}
+}
+
+func (m *PopupMenu) ensureActiveTextDrawerLocked() {
+	switch m.renderMode {
+	case TextRenderModeFreetype:
+		fc := m.ensureFontCacheLocked()
+		m.releaseGDIBackendLocked()
+		m.releaseDWriteBackendLocked()
+		m.textDrawer = newFreeTypeDrawer(fc, m.fontConfig)
+	case TextRenderModeDirectWrite:
+		dwr := m.ensureDWriteRendererLocked()
+		if dwr != nil && dwr.IsAvailable() {
+			m.releaseGDIBackendLocked()
+			m.releaseFreeTypeBackendLocked()
+			m.textDrawer = newDirectWriteDrawer(dwr)
+			return
+		}
+		m.releaseDWriteBackendLocked()
+		tr := m.ensureTextRendererLocked()
+		m.releaseFreeTypeBackendLocked()
+		m.textDrawer = newGDIDrawer(tr)
+	default:
+		tr := m.ensureTextRendererLocked()
+		m.releaseDWriteBackendLocked()
+		m.releaseFreeTypeBackendLocked()
+		m.textDrawer = newGDIDrawer(tr)
 	}
 }
 
@@ -254,6 +342,8 @@ func newPopupMenuShared(parent *PopupMenu) *PopupMenu {
 func (m *PopupMenu) SetGDIFontParams(weight int, scale float64) {
 	m.mu.Lock()
 	sub := m.submenu
+	m.fontConfig.SetGDIFontWeight(weight)
+	m.fontConfig.SetGDIFontScale(scale)
 	if m.textRenderer != nil {
 		m.textRenderer.SetGDIParams(weight, scale)
 	}
@@ -272,11 +362,13 @@ func (m *PopupMenu) SetFontPath(path string) {
 	m.mu.Lock()
 	sub := m.submenu
 	m.fontConfig.SetPrimaryFont(path)
-	resolved := m.fontConfig.ResolvePrimaryFont()
+	resolved := m.resolvePrimaryFontPathLocked()
 	if resolved != "" {
-		m.fontCache.mu.Lock()
-		m.fontCache.loadFont(resolved)
-		m.fontCache.mu.Unlock()
+		if m.fontCache != nil {
+			m.fontCache.mu.Lock()
+			_ = m.fontCache.loadFont(resolved)
+			m.fontCache.mu.Unlock()
+		}
 		if m.textRenderer != nil {
 			m.textRenderer.SetFont(resolved)
 		}
@@ -327,18 +419,8 @@ func (m *PopupMenu) getMenuItemHeight() int {
 // SetTextRenderMode switches between GDI, FreeType, and DirectWrite text rendering
 func (m *PopupMenu) SetTextRenderMode(mode TextRenderMode) {
 	m.mu.Lock()
-	switch mode {
-	case TextRenderModeFreetype:
-		m.textDrawer = newFreeTypeDrawer(m.fontCache, m.fontConfig)
-	case TextRenderModeDirectWrite:
-		if m.dwriteRenderer != nil && m.dwriteRenderer.IsAvailable() {
-			m.textDrawer = newDirectWriteDrawer(m.dwriteRenderer)
-		} else {
-			m.textDrawer = newGDIDrawer(m.textRenderer)
-		}
-	default:
-		m.textDrawer = newGDIDrawer(m.textRenderer)
-	}
+	m.renderMode = mode
+	m.ensureActiveTextDrawerLocked()
 	sub := m.submenu
 	m.mu.Unlock()
 
@@ -440,6 +522,7 @@ func (m *PopupMenu) Show(items []MenuItem, x, y int, callback PopupMenuCallback)
 			m.hasChildren = true
 		}
 	}
+	m.ensureActiveTextDrawerLocked()
 	m.mu.Unlock()
 
 	// Calculate menu size
@@ -540,15 +623,11 @@ func (m *PopupMenu) Destroy() {
 		m.hwnd = 0
 	}
 	if m.parentMenu == nil {
-		if m.fontCache != nil {
-			m.fontCache.Close()
-		}
-		if m.textRenderer != nil {
-			m.textRenderer.Close()
-		}
-		if m.dwriteRenderer != nil {
-			m.dwriteRenderer.Close()
-		}
+		m.mu.Lock()
+		m.releaseFreeTypeBackendLocked()
+		m.releaseGDIBackendLocked()
+		m.releaseDWriteBackendLocked()
+		m.mu.Unlock()
 	}
 }
 
@@ -573,6 +652,7 @@ func (m *PopupMenu) calculateSize() {
 
 	// Use TextDrawer for text measurement (consistent with render)
 	fontSize := m.getMenuFontSize() * scale
+	m.ensureActiveTextDrawerLocked()
 	td := m.textDrawer
 
 	itemH := m.getMenuItemHeight()
