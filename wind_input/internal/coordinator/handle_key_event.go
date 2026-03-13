@@ -353,6 +353,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		}
 		return nil
 
+	case !hasShift && c.isPinyinSeparator(key, data.KeyCode):
+		return c.handlePinyinSeparator()
+
 	case !hasShift && c.isSelectKey3(key, data.KeyCode):
 		// Handle 3rd candidate selection key (e.g., quote)
 		// Shift 时不触发选择（Shift+' 应输出 " 而非选候选）

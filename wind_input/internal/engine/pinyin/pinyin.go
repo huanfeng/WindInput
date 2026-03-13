@@ -38,6 +38,7 @@ type Engine struct {
 	wubiReverse  map[string][]string // 汉字 -> 五笔编码（反向索引）
 	config       *Config
 	dictManager  *dict.DictManager // 词库管理器（用于用户词频学习）
+	scorer       *Scorer           // 统一候选评分器
 }
 
 // NewEngine 创建拼音引擎
@@ -46,6 +47,7 @@ func NewEngine(d dict.Dict) *Engine {
 		dict:         d,
 		syllableTrie: NewSyllableTrie(),
 		config:       &Config{ShowWubiHint: false, FilterMode: "smart"},
+		scorer:       NewScorer(nil, nil),
 	}
 }
 
@@ -58,6 +60,7 @@ func NewEngineWithConfig(d dict.Dict, config *Config) *Engine {
 		dict:         d,
 		syllableTrie: NewSyllableTrie(),
 		config:       config,
+		scorer:       NewScorer(nil, nil),
 	}
 }
 
@@ -92,6 +95,7 @@ func (e *Engine) LoadUnigram(path string) error {
 		return err
 	}
 	e.unigram = m
+	e.scorer = NewScorer(e.unigram, e.bigram)
 	return nil
 }
 
@@ -105,6 +109,7 @@ func (e *Engine) LoadBigram(path string) error {
 		return err
 	}
 	e.bigram = m
+	e.scorer = NewScorer(e.unigram, e.bigram)
 	return nil
 }
 

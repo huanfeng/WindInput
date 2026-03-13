@@ -185,6 +185,34 @@ func (t MatchType) String() string {
 }
 
 // ============================================================
+// 候选评分特征
+// ============================================================
+
+// CandidateFeatures 候选评分特征
+//
+// MatchType vs IsFuzzy 语义区分：
+//   - MatchType 描述「结构匹配质量」：Exact（音节完全对应）、Partial（最后音节为前缀）、Fuzzy（仅通过模糊音规则命中）
+//   - IsFuzzy 是一个「来源标记」：该候选是否经由模糊拼音扩展（zh↔z 等）召回
+//   - 两者可以组合：MatchExact + IsFuzzy=true 表示「通过模糊音找到，但音节数完全对齐」
+//   - Scorer 中 MatchType 决定基础分层，IsFuzzy 施加额外惩罚
+type CandidateFeatures struct {
+	MatchType     MatchType // 结构匹配质量：Exact/Partial/Fuzzy
+	SyllableMatch bool      // 字数是否等于音节数
+	CharCount     int       // 字符数
+	SyllableCount int       // 对应音节数
+	IsUserWord    bool      // 是否用户词
+	IsFuzzy       bool      // 是否经模糊拼音扩展召回
+	IsPartial     bool      // 是否 partial 匹配（末尾音节未完成）
+	IsAbbrev      bool      // 是否简拼匹配
+	IsViterbi     bool      // 是否 Viterbi 组句结果
+	IsCommand     bool      // 是否命令
+	LMScore       float64   // 语言模型分数 (log prob)
+	BigramScore   float64   // Bigram 上下文分数（Phase 3 接通后生效）
+	FreqScore     float64   // 词频分数
+	SegmentRank   int       // 切分路径排名（0=主路径）
+}
+
+// ============================================================
 // 转换结果
 // ============================================================
 

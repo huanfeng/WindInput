@@ -3,6 +3,7 @@ package coordinator
 
 import (
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/transform"
 )
@@ -293,6 +294,36 @@ func (c *Coordinator) isPageDownKey(key string, keyCode int, modifiers uint32) b
 		}
 	}
 	return false
+}
+
+// isPinyinSeparator 判断按键是否应作为拼音分隔符处理
+// 条件：1) 当前是拼音模式 2) 有未提交的输入 3) 按键是 '
+func (c *Coordinator) isPinyinSeparator(key string, keyCode int) bool {
+	if c.engineMgr == nil || c.engineMgr.GetCurrentType() != engine.EngineTypePinyin {
+		return false
+	}
+	if len(c.inputBuffer) == 0 {
+		return false
+	}
+	if key == "'" || uint32(keyCode) == ipc.VK_OEM_7 {
+		return true
+	}
+	return false
+}
+
+// handlePinyinSeparator 将分隔符插入输入缓冲区并刷新候选
+func (c *Coordinator) handlePinyinSeparator() *bridge.KeyEventResult {
+	c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + "'" + c.inputBuffer[c.inputCursorPos:]
+	c.inputCursorPos += 1
+	c.logger.Debug("Pinyin separator inserted", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
+
+	c.updateCandidates()
+	c.showUI()
+
+	return &bridge.KeyEventResult{
+		Type:           bridge.ResponseTypeUpdateComposition,
+		NewComposition: c.inputBuffer,
+	}
 }
 
 // matchHotkey checks if the current key event matches the configured hotkey string

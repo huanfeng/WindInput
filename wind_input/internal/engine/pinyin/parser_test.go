@@ -234,6 +234,40 @@ func TestParserParseWithDetail(t *testing.T) {
 	}
 }
 
+func TestParseSeparator(t *testing.T) {
+	p := NewPinyinParser()
+
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"xi'an", []string{"xi", "an"}},
+		{"chang'an", []string{"chang", "an"}},
+		{"fan'an", []string{"fan", "an"}},
+		{"pi'ao", []string{"pi", "ao"}},
+		{"xian", []string{"xian"}},
+		{"xi'an'ren", []string{"xi", "an", "ren"}},
+		{"xi'", []string{"xi"}},
+		{"xi''an", []string{"xi", "an"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := p.Parse(tt.input)
+			texts := result.SyllableTexts()
+			if len(texts) != len(tt.expected) {
+				t.Errorf("Parse(%q): got %v, want %v", tt.input, texts, tt.expected)
+				return
+			}
+			for i := range texts {
+				if texts[i] != tt.expected[i] {
+					t.Errorf("Parse(%q)[%d]: got %q, want %q", tt.input, i, texts[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkParserParse(b *testing.B) {
 	parser := NewPinyinParser()
 	inputs := []string{

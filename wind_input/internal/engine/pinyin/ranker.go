@@ -215,6 +215,99 @@ func DeduplicateCandidates(candidates []candidate.Candidate) []candidate.Candida
 	return result
 }
 
+// ============================================================
+// Scorer 统一候选评分器
+// 使用特征向量计算归一化分数，替代硬编码权重层级
+// ============================================================
+
+// Scorer 统一候选评分器
+type Scorer struct {
+	unigram UnigramLookup
+	bigram  *BigramModel
+}
+
+// NewScorer 创建统一评分器
+func NewScorer(unigram UnigramLookup, bigram *BigramModel) *Scorer {
+	return &Scorer{unigram: unigram, bigram: bigram}
+}
+
+// Score 根据特征向量计算候选分数
+// 返回值越大越优先
+func (s *Scorer) Score(f CandidateFeatures) float64 {
+	score := 0.0
+
+	// 1. 来源基础分（决定大类优先级）
+	if f.IsCommand {
+		score += 4000
+	} else if f.IsViterbi {
+		score += 3000
+	} else {
+		switch f.MatchType {
+		case MatchExact:
+			score += 2000
+		case MatchPartial:
+			score += 1000
+		case MatchFuzzy:
+			score += 800
+		}
+	}
+
+	// 2. 音节对齐奖励
+	if f.SyllableMatch {
+		score += 500
+	}
+
+	// 3. 语言模型分数（归一化到 0~400 区间）
+	// LMScore 通常在 [-20, 0] 范围，线性映射
+	lmNorm := (f.LMScore + 20.0) * 20.0 // [-20,0] → [0,400]
+	if lmNorm < 0 {
+		lmNorm = 0
+	}
+	if lmNorm > 400 {
+		lmNorm = 400
+	}
+	score += lmNorm
+
+	// 4. Bigram 上下文奖励
+	if f.BigramScore != 0 {
+		biNorm := (f.BigramScore + 20.0) * 10.0
+		if biNorm < 0 {
+			biNorm = 0
+		}
+		if biNorm > 200 {
+			biNorm = 200
+		}
+		score += biNorm
+	}
+
+	// 5. 用户词加成
+	if f.IsUserWord {
+		score += 300
+	}
+
+	// 6. 词长奖励（鼓励长词匹配）
+	score += float64(f.CharCount) * 20.0
+
+	// 7. 惩罚项
+	if f.IsFuzzy {
+		score -= 100 // 模糊命中惩罚
+	}
+	if f.IsPartial {
+		score -= 150 // partial 匹配惩罚
+	}
+	if f.IsAbbrev {
+		score -= 50 // 简拼轻微惩罚
+	}
+	if f.SegmentRank > 0 {
+		score -= float64(f.SegmentRank) * 30.0 // 非主路径惩罚
+	}
+
+	// 8. 词频分数（微调：字典频率仅用于同层级内细粒度排序）
+	score += f.FreqScore * 0.00001
+
+	return score
+}
+
 // MergeCandidates 合并多个候选列表，去重并重新排序
 func MergeCandidates(lists ...[]candidate.Candidate) []candidate.Candidate {
 	// 计算总容量

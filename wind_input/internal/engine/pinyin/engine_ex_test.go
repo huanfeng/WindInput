@@ -71,6 +71,9 @@ sort: by_weight
 提问	ti wen	700
 在	zai	1000
 你在吗	ni zai ma	700
+西	xi	1000
+安	an	1000
+西安	xi an	800
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "8105.dict.yaml"), []byte(content), 0644); err != nil {
 		t.Fatalf("写入测试文件失败: %v", err)
@@ -1436,6 +1439,78 @@ func TestWeightLevels(t *testing.T) {
 	}
 	if weightFirstSyllable <= weightSupplement {
 		t.Error("weightFirstSyllable should be > weightSupplement")
+	}
+}
+
+// TestConvertWithSeparator 测试含 ' 分隔符的输入（如 xi'an）能正确产出候选
+func TestConvertWithSeparator(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	// 测试 xi'an 应该能产出候选
+	result := engine.ConvertEx("xi'an", 20)
+	if result.IsEmpty {
+		t.Fatal("expected candidates for xi'an")
+	}
+
+	// 验证候选中包含来自 xi + an 切分的结果
+	if len(result.Candidates) == 0 {
+		t.Error("xi'an should produce candidates")
+	}
+
+	// 验证候选中包含 "西安"（xi an 完整匹配）
+	foundXian := false
+	for _, c := range result.Candidates {
+		if c.Text == "西安" {
+			foundXian = true
+			t.Logf("Found '西安' with ConsumedLength=%d weight=%d", c.ConsumedLength, c.Weight)
+			break
+		}
+	}
+	if !foundXian {
+		var texts []string
+		for _, c := range result.Candidates {
+			texts = append(texts, c.Text)
+		}
+		t.Errorf("xi'an should contain '西安', got %v", texts)
+	}
+
+	// 验证 ConsumedLength 基于原始输入（含分隔符），不超过 len("xi'an")=5
+	for _, c := range result.Candidates {
+		if c.ConsumedLength > len("xi'an") {
+			t.Errorf("ConsumedLength %d exceeds input length %d for candidate %q",
+				c.ConsumedLength, len("xi'an"), c.Text)
+		}
+	}
+}
+
+// TestConvertMultiSegmentation 多切分并行打分测试
+// "xian" 可切为 "xian" 或 "xi+an"，候选中应同时包含来自两条路径的词
+func TestConvertMultiSegmentation(t *testing.T) {
+	d := createTestDictForEx(t)
+	engine := NewEngine(d)
+
+	result := engine.ConvertEx("xian", 50)
+	if result.IsEmpty {
+		t.Fatal("expected candidates for 'xian'")
+	}
+
+	var texts []string
+	for _, c := range result.Candidates {
+		texts = append(texts, c.Text)
+	}
+	t.Logf("candidates for 'xian': %v", texts)
+
+	// 检查是否有来自 xi+an 切分的词（"西安"）
+	hasXiAn := false
+	for _, c := range result.Candidates {
+		if c.Text == "西安" {
+			hasXiAn = true
+			break
+		}
+	}
+	if !hasXiAn {
+		t.Error("missing '西安' from xi+an segmentation alternative")
 	}
 }
 

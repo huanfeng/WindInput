@@ -209,3 +209,27 @@ func TestCompositionBuilderSetSeparator(t *testing.T) {
 		t.Errorf("PreeditText with space separator = %q, want %q", comp.PreeditText, "ni hao")
 	}
 }
+
+func TestCompositionWithExplicitSeparator(t *testing.T) {
+	p := NewPinyinParser()
+	builder := NewCompositionBuilder()
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"xi'an", "xi'an"},
+		{"xi'an'ren", "xi'an'ren"},
+		{"chang'an", "chang'an"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := p.Parse(tt.input)
+			comp := builder.Build(result)
+			if comp.PreeditText != tt.expected {
+				t.Errorf("input=%q: expected preedit %q, got %q", tt.input, tt.expected, comp.PreeditText)
+			}
+		})
+	}
+}

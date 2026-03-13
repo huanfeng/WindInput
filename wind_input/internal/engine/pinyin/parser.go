@@ -28,6 +28,7 @@ func NewPinyinParserWithTrie(st *SyllableTrie) *PinyinParser {
 
 // Parse 解析拼音输入
 // 返回解析结果，包含完整音节和可能的未完成音节
+// 支持 ' 显式分隔符，如 "xi'an" 强制在 ' 处断开产出 ["xi", "an"]
 func (p *PinyinParser) Parse(input string) *ParseResult {
 	if len(input) == 0 {
 		return &ParseResult{Input: input}
@@ -39,29 +40,57 @@ func (p *PinyinParser) Parse(input string) *ParseResult {
 		Syllables: make([]ParsedSyllable, 0),
 	}
 
-	// 使用 DAG 进行音节切分
-	dag := BuildDAG(input, p.syllableTrie)
+	if strings.Contains(input, "'") {
+		p.parseWithSeparator(input, result)
+		return result
+	}
 
-	// 获取最大匹配路径
+	p.parseSegment(input, 0, result)
+	p.checkLastSyllableContinuations(result)
+
+	return result
+}
+
+// parseWithSeparator 按 ' 分割输入后逐段解析
+func (p *PinyinParser) parseWithSeparator(input string, result *ParseResult) {
+	segments := strings.Split(input, "'")
+	offset := 0
+	for i, seg := range segments {
+		if seg == "" {
+			if i < len(segments)-1 {
+				offset++ // 跳过 ' 字符
+			}
+			continue
+		}
+		p.parseSegment(seg, offset, result)
+		offset += len(seg)
+		if i < len(segments)-1 {
+			offset++ // 跳过 ' 字符
+		}
+	}
+	p.checkLastSyllableContinuations(result)
+}
+
+// parseSegment 对单个片段执行 DAG 最大匹配并处理尾部字符
+func (p *PinyinParser) parseSegment(segment string, baseOffset int, result *ParseResult) {
+	dag := BuildDAG(segment, p.syllableTrie)
 	mainPath := dag.MaximumMatch()
 
-	// 计算完整音节覆盖到的位置
 	coveredEnd := 0
 	for _, syllable := range mainPath {
 		result.Syllables = append(result.Syllables, ParsedSyllable{
 			Text:  syllable,
 			Type:  SyllableExact,
-			Start: coveredEnd,
-			End:   coveredEnd + len(syllable),
+			Start: baseOffset + coveredEnd,
+			End:   baseOffset + coveredEnd + len(syllable),
 		})
 		coveredEnd += len(syllable)
 	}
 
 	// 迭代处理所有未被覆盖的尾部字符
-	// 使用 MatchPrefixAt 逐段匹配，确保不会丢失任何字符
 	pos := coveredEnd
-	for pos < len(input) {
-		prefix, isComplete, possible := p.syllableTrie.MatchPrefixAt(input, pos)
+	for pos < len(segment) {
+		prefix, isComplete, possible := p.syllableTrie.MatchPrefixAt(segment, pos)
 
 		if prefix != "" {
 			syllableType := SyllablePartial
@@ -71,47 +100,45 @@ func (p *PinyinParser) Parse(input string) *ParseResult {
 			result.Syllables = append(result.Syllables, ParsedSyllable{
 				Text:     prefix,
 				Type:     syllableType,
-				Start:    pos,
-				End:      pos + len(prefix),
+				Start:    baseOffset + pos,
+				End:      baseOffset + pos + len(prefix),
 				Possible: possible,
 			})
 			pos += len(prefix)
 		} else {
 			// 单个字符无法匹配任何前缀，作为 partial 音节保留
 			result.Syllables = append(result.Syllables, ParsedSyllable{
-				Text:  string(input[pos]),
+				Text:  string(segment[pos]),
 				Type:  SyllablePartial,
-				Start: pos,
-				End:   pos + 1,
+				Start: baseOffset + pos,
+				End:   baseOffset + pos + 1,
 			})
 			pos++
 		}
 	}
+}
 
-	// 如果最后一个音节是完整音节，检查是否有可能的续写
-	// 这对于如 "ni" 这种音节很重要，因为它可以续写为 "nian", "niang" 等
-	if len(result.Syllables) > 0 {
-		lastIdx := len(result.Syllables) - 1
-		last := &result.Syllables[lastIdx]
-		if last.Type == SyllableExact && len(last.Possible) == 0 {
-			// 检查是否有以该音节为前缀的更长音节
-			possible := p.syllableTrie.GetPossibleSyllables(last.Text)
-			// 过滤掉完全相同的音节，只保留续写
-			var continuations []string
-			for _, ps := range possible {
-				if ps != last.Text {
-					// 提取后缀部分
-					suffix := ps[len(last.Text):]
-					if suffix != "" {
-						continuations = append(continuations, suffix)
-					}
+// checkLastSyllableContinuations 检查最后一个音节是否有可能的续写
+// 这对于如 "ni" 这种音节很重要，因为它可以续写为 "nian", "niang" 等
+func (p *PinyinParser) checkLastSyllableContinuations(result *ParseResult) {
+	if len(result.Syllables) == 0 {
+		return
+	}
+	lastIdx := len(result.Syllables) - 1
+	last := &result.Syllables[lastIdx]
+	if last.Type == SyllableExact && len(last.Possible) == 0 {
+		possible := p.syllableTrie.GetPossibleSyllables(last.Text)
+		var continuations []string
+		for _, ps := range possible {
+			if ps != last.Text {
+				suffix := ps[len(last.Text):]
+				if suffix != "" {
+					continuations = append(continuations, suffix)
 				}
 			}
-			last.Possible = continuations
 		}
+		last.Possible = continuations
 	}
-
-	return result
 }
 
 // ParseWithDetail 解析拼音输入并返回详细信息

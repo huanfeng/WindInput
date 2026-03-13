@@ -24,23 +24,7 @@ func (e *Engine) sortCandidates(candidates []candidate.Candidate, order string, 
 			return candidate.Better(candidates[i], candidates[j])
 		})
 	case "smart":
-		// 智能混排：完全按权重排序，但对 L4 层单字候选使用 Unigram 分数微调
-		if e.unigram != nil {
-			for i := range candidates {
-				w := candidates[i].Weight
-				if len([]rune(candidates[i].Text)) == 1 && w >= weightSupplement && w < weightFirstSyllable {
-					lmScore := e.unigram.LogProb(candidates[i].Text)
-					bonus := int((lmScore + 20) * 600)
-					if bonus < 0 {
-						bonus = 0
-					}
-					if bonus > 9999 {
-						bonus = 9999
-					}
-					candidates[i].Weight = weightSupplement + bonus
-				}
-			}
-		}
+		// 智能混排：Scorer 已统一处理 LM 分数，直接按权重排序
 		sort.Slice(candidates, func(i, j int) bool {
 			return candidate.Better(candidates[i], candidates[j])
 		})
@@ -61,18 +45,14 @@ func (e *Engine) lookupSubPhrasesEx(syllables []string, candidatesMap map[string
 			subSyllables := syllables[start : start+length]
 			subKey := strings.Join(subSyllables, "")
 			results := e.lookupWithFuzzy(subKey, subSyllables)
-			for i, cand := range results {
+			for _, cand := range results {
 				if _, exists := candidatesMap[cand.Text]; exists {
 					continue
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				// 子词组权重：词越长越优先，匹配字数越接近音节数越好
-				bonus := length * 100000
-				if charCount == length {
-					bonus += 50000
-				}
-				c.Weight = weightSupplement + bonus - start*10000 - i
+				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, length, charCount, featureOpts{})
+				c.Weight = e.scorerWeight(f)
 				// 计算该子词组消耗的输入长度
 				if start == 0 {
 					// 从头开始的子词组：仅消耗对应音节，支持部分上屏
