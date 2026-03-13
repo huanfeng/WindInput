@@ -206,6 +206,78 @@ func TestEngineConvertWithRealDict(t *testing.T) {
 	}
 }
 
+func TestExplicitSeparator_XiAn(t *testing.T) {
+	// 测试显式分隔符 xi'an 的候选排序：西安应排在前列
+	paths := []string{
+		"D:/Develop/workspace/go_dev/WindInput/build/dict/pinyin",
+		"../../build/dict/pinyin",
+	}
+
+	var dictPath string
+	for _, p := range paths {
+		if _, err := os.Stat(filepath.Join(p, "8105.dict.yaml")); err == nil {
+			dictPath = p
+			break
+		}
+	}
+	if dictPath == "" {
+		t.Skip("跳过测试：无法找到 Rime 词库目录")
+	}
+
+	pinyinDict := dict.NewPinyinDict()
+	if err := pinyinDict.LoadRimeDir(dictPath); err != nil {
+		t.Fatalf("加载词库失败: %v", err)
+	}
+
+	composite := dict.NewCompositeDict()
+	layer := dict.NewPinyinDictLayer("pinyin-system", dict.LayerTypeSystem, pinyinDict)
+	composite.AddLayer(layer)
+
+	config := &Config{
+		FilterMode:      "all",
+		UseSmartCompose: false,
+	}
+	engine := NewEngineWithConfig(composite, config)
+
+	// 测试带显式分隔符的输入
+	input := "xi'an"
+	result := engine.ConvertEx(input, 50)
+
+	t.Logf("输入: %q, 候选数: %d", input, len(result.Candidates))
+	for i, c := range result.Candidates {
+		if i < 15 {
+			t.Logf("  [%d] text=%q code=%q weight=%d consumed=%d", i, c.Text, c.Code, c.Weight, c.ConsumedLength)
+		}
+	}
+
+	// 西安必须出现在前 3 个候选中
+	found := false
+	for i, c := range result.Candidates {
+		if c.Text == "西安" {
+			found = true
+			if i > 2 {
+				t.Errorf("西安 排在第 %d 位，期望在前 3 位", i+1)
+			} else {
+				t.Logf("西安 排在第 %d 位 ✓", i+1)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("未找到候选 西安")
+	}
+
+	// 同时测试不带分隔符的 xian
+	input2 := "xian"
+	result2 := engine.ConvertEx(input2, 50)
+	t.Logf("\n输入: %q, 候选数: %d", input2, len(result2.Candidates))
+	for i, c := range result2.Candidates {
+		if i < 10 {
+			t.Logf("  [%d] text=%q code=%q weight=%d consumed=%d", i, c.Text, c.Code, c.Weight, c.ConsumedLength)
+		}
+	}
+}
+
 func TestSyllablesPruning(t *testing.T) {
 	// 测试长输入不会导致指数级爆炸
 	results := ParseSyllables("zhongguorenminjiefangjun")

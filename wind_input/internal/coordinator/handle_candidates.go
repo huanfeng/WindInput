@@ -9,10 +9,16 @@ import (
 )
 
 // compositionText 返回当前应显示的组合文本。
-// 拼音模式返回带音节分隔符的文本（如 "zhong'guo"），五笔或未解析时 fallback 到 inputBuffer。
+// 拼音模式返回带音节分隔符的文本（如 "zhong guo"），五笔或未解析时 fallback 到 inputBuffer。
 func (c *Coordinator) compositionText() string {
 	if c.preeditDisplay != "" {
-		return c.preeditDisplay
+		display := c.preeditDisplay
+		// 如果 inputBuffer 以 ' 结尾但 preeditDisplay 没有，补上尾部的 '
+		// （用户刚输入分隔符但还没有后续字符，引擎的 preedit 不含尾部分隔符）
+		if strings.HasSuffix(c.inputBuffer, "'") && !strings.HasSuffix(display, "'") {
+			display += "'"
+		}
+		return display
 	}
 	return c.inputBuffer
 }
@@ -72,10 +78,13 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 
 	// 更新预编辑显示状态
 	c.preeditDisplay = result.PreeditDisplay
-	// 安全校验：去除分隔符后应与 inputBuffer 一致，否则 fallback
+	// 安全校验：去除分隔符后应与 inputBuffer（同样去掉分隔符）一致，否则 fallback
+	// preeditDisplay 中自动切分用空格、用户分隔符用 '，inputBuffer 中用户分隔符用 '
+	// 两边都需要去掉 ' 和空格后再比较
 	if c.preeditDisplay != "" {
-		stripped := strings.ReplaceAll(c.preeditDisplay, "'", "")
-		if stripped != strings.ToLower(c.inputBuffer) {
+		stripped := strings.ReplaceAll(strings.ReplaceAll(c.preeditDisplay, "'", ""), " ", "")
+		inputStripped := strings.ReplaceAll(strings.ToLower(c.inputBuffer), "'", "")
+		if stripped != inputStripped {
 			c.preeditDisplay = ""
 			c.syllableBoundaries = nil
 		} else {
@@ -104,7 +113,14 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 		c.candidates[i] = cand
 	}
 
-	c.logger.Debug("Got candidates", "count", len(c.candidates), "empty", result.IsEmpty)
+	c.logger.Debug("Got candidates", "count", len(c.candidates), "empty", result.IsEmpty,
+		"input", c.inputBuffer, "preedit", c.preeditDisplay)
+	// Debug: log top 3 candidates for ranking investigation
+	for i := 0; i < len(c.candidates) && i < 3; i++ {
+		cand := c.candidates[i]
+		c.logger.Debug("Candidate", "rank", i+1, "text", cand.Text, "weight", cand.Weight,
+			"code", cand.Code, "consumed", cand.ConsumedLength)
+	}
 
 	// Calculate pagination
 	c.totalPages = (len(c.candidates) + c.candidatesPerPage - 1) / c.candidatesPerPage

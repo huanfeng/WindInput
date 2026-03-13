@@ -56,7 +56,7 @@ type CompositionState struct {
 	PossibleContinues []string
 
 	// 预编辑区显示文本
-	// 例如："ni'hao'zh" 或 "ni hao zh_"
+	// 自动切分用空格分隔（如 "ni hao zh"），用户显式分隔符用 '（如 "xi'an"）
 	PreeditText string
 
 	// 光标在预编辑文本中的位置
@@ -64,6 +64,10 @@ type CompositionState struct {
 
 	// 高亮区域列表（用于 UI 显示不同样式）
 	Highlights []PreeditHighlight
+
+	// 显式分隔符标记：ExplicitSeps[i] 为 true 表示第 i 和第 i+1 个音节之间
+	// 的分隔符是用户手动输入的 '，否则为自动切分（显示为空格）
+	ExplicitSeps []bool
 }
 
 // HasPartial 是否有未完成的音节
@@ -101,17 +105,17 @@ func (c *CompositionState) TotalSyllableCount() int {
 
 // CompositionBuilder 用于构建 CompositionState
 type CompositionBuilder struct {
-	separator string // 音节分隔符，默认 "'"
+	separator string // 自动切分分隔符，默认 " "（空格）
 }
 
 // NewCompositionBuilder 创建组合态构建器
 func NewCompositionBuilder() *CompositionBuilder {
 	return &CompositionBuilder{
-		separator: "'",
+		separator: " ",
 	}
 }
 
-// SetSeparator 设置音节分隔符
+// SetSeparator 设置自动切分分隔符
 func (b *CompositionBuilder) SetSeparator(sep string) *CompositionBuilder {
 	b.separator = sep
 	return b
@@ -126,6 +130,14 @@ func (b *CompositionBuilder) Build(parsed *ParseResult) *CompositionState {
 	comp := &CompositionState{
 		CompletedSyllables: make([]string, 0),
 	}
+
+	// 检测显式分隔符：音节之间有间隙（原始输入中的 ' 被跳过）表示用户手动输入了分隔符
+	explicitSeps := make([]bool, 0, len(parsed.Syllables)-1)
+	for i := 0; i < len(parsed.Syllables)-1; i++ {
+		gap := parsed.Syllables[i+1].Start - parsed.Syllables[i].End
+		explicitSeps = append(explicitSeps, gap > 0)
+	}
+	comp.ExplicitSeps = explicitSeps
 
 	// 分离完整音节和未完成音节
 	// 非末尾的 partial 音节视为"已确认的段"加入 CompletedSyllables，
@@ -157,22 +169,30 @@ func (b *CompositionBuilder) Build(parsed *ParseResult) *CompositionState {
 }
 
 // buildPreedit 构建预编辑文本和高亮区域
+// 自动切分用 b.separator（默认空格），用户显式分隔符用 '
 func (b *CompositionBuilder) buildPreedit(comp *CompositionState) (string, []PreeditHighlight) {
 	var builder strings.Builder
 	var highlights []PreeditHighlight
 	pos := 0
+	sepIdx := 0
 
 	// 添加已完成的音节
 	for i, syllable := range comp.CompletedSyllables {
 		if i > 0 {
-			// 添加分隔符
+			// 选择分隔符：显式用 '，自动用空格
+			sep := b.separator
+			if sepIdx < len(comp.ExplicitSeps) && comp.ExplicitSeps[sepIdx] {
+				sep = "'"
+			}
+			sepIdx++
+
 			highlights = append(highlights, PreeditHighlight{
 				Start: pos,
-				End:   pos + len(b.separator),
+				End:   pos + len(sep),
 				Type:  HighlightSeparator,
 			})
-			builder.WriteString(b.separator)
-			pos += len(b.separator)
+			builder.WriteString(sep)
+			pos += len(sep)
 		}
 
 		// 添加音节
@@ -188,14 +208,19 @@ func (b *CompositionBuilder) buildPreedit(comp *CompositionState) (string, []Pre
 	// 添加未完成的音节
 	if comp.PartialSyllable != "" {
 		if len(comp.CompletedSyllables) > 0 {
-			// 添加分隔符
+			// 选择分隔符
+			sep := b.separator
+			if sepIdx < len(comp.ExplicitSeps) && comp.ExplicitSeps[sepIdx] {
+				sep = "'"
+			}
+
 			highlights = append(highlights, PreeditHighlight{
 				Start: pos,
-				End:   pos + len(b.separator),
+				End:   pos + len(sep),
 				Type:  HighlightSeparator,
 			})
-			builder.WriteString(b.separator)
-			pos += len(b.separator)
+			builder.WriteString(sep)
+			pos += len(sep)
 		}
 
 		// 添加未完成音节（不同样式）

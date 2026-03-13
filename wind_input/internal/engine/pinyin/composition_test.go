@@ -16,13 +16,13 @@ func TestCompositionBuilder(t *testing.T) {
 	}{
 		{
 			input:           "nihao",
-			wantPreedit:     "ni'hao",
+			wantPreedit:     "ni hao",
 			wantHasPartial:  false,
 			wantCursorAtEnd: true,
 		},
 		{
 			input:           "nihaozh",
-			wantPreedit:     "ni'hao'zh",
+			wantPreedit:     "ni hao zh",
 			wantHasPartial:  true,
 			wantCursorAtEnd: true,
 		},
@@ -34,7 +34,7 @@ func TestCompositionBuilder(t *testing.T) {
 		},
 		{
 			input:           "zhongguo",
-			wantPreedit:     "zhong'guo",
+			wantPreedit:     "zhong guo",
 			wantHasPartial:  false,
 			wantCursorAtEnd: true,
 		},
@@ -74,12 +74,12 @@ func TestCompositionStateHighlights(t *testing.T) {
 	parsed := parser.Parse("nihaozh")
 	comp := builder.Build(parsed)
 
-	// 期望: ni'hao'zh
+	// 期望: ni hao zh（自动切分用空格）
 	// 高亮区域:
 	// [0,2) = "ni" (Completed)
-	// [2,3) = "'" (Separator)
+	// [2,3) = " " (Separator)
 	// [3,6) = "hao" (Completed)
-	// [6,7) = "'" (Separator)
+	// [6,7) = " " (Separator)
 	// [7,9) = "zh" (Partial)
 
 	expectedHighlights := []struct {
@@ -88,9 +88,9 @@ func TestCompositionStateHighlights(t *testing.T) {
 		highlight HighlightType
 	}{
 		{0, 2, HighlightCompleted}, // ni
-		{2, 3, HighlightSeparator}, // '
+		{2, 3, HighlightSeparator}, // space
 		{3, 6, HighlightCompleted}, // hao
-		{6, 7, HighlightSeparator}, // '
+		{6, 7, HighlightSeparator}, // space
 		{7, 9, HighlightPartial},   // zh
 	}
 
@@ -117,8 +117,8 @@ func TestCompositionBuildFromSyllables(t *testing.T) {
 		[]string{"a", "ai", "an"},
 	)
 
-	if comp.PreeditText != "ni'hao'zh" {
-		t.Errorf("PreeditText = %q, want %q", comp.PreeditText, "ni'hao'zh")
+	if comp.PreeditText != "ni hao zh" {
+		t.Errorf("PreeditText = %q, want %q", comp.PreeditText, "ni hao zh")
 	}
 
 	if len(comp.CompletedSyllables) != 2 {

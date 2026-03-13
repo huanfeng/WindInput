@@ -347,6 +347,11 @@ func (c *Coordinator) isPinyinSeparator(key string, keyCode int) bool {
 // handlePinyinSeparator 将分隔符插入输入缓冲区并刷新候选
 // 无论物理按键是 ' 还是 `，都统一插入 ' 作为拼音分隔符（引擎层只认 '）
 func (c *Coordinator) handlePinyinSeparator() *bridge.KeyEventResult {
+	// 防止连续分隔符：如果光标前已经是 '，则忽略本次输入
+	if c.inputCursorPos > 0 && c.inputBuffer[c.inputCursorPos-1] == '\'' {
+		c.logger.Debug("Ignoring consecutive pinyin separator")
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
 	c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + "'" + c.inputBuffer[c.inputCursorPos:]
 	c.inputCursorPos++
 	c.logger.Debug("Pinyin separator inserted", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
@@ -354,9 +359,19 @@ func (c *Coordinator) handlePinyinSeparator() *bridge.KeyEventResult {
 	c.updateCandidates()
 	c.showUI()
 
+	// Handle Inline Preedit (与 handleAlphaKey 保持一致)
+	if c.config != nil && c.config.UI.InlinePreedit {
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     c.compositionText(),
+			CaretPos: c.displayCursorPos(),
+		}
+	}
+
 	return &bridge.KeyEventResult{
-		Type:           bridge.ResponseTypeUpdateComposition,
-		NewComposition: c.inputBuffer,
+		Type:     bridge.ResponseTypeUpdateComposition,
+		Text:     "",
+		CaretPos: 0,
 	}
 }
 

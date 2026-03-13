@@ -98,25 +98,25 @@ func TestEngineConvertEx(t *testing.T) {
 	}{
 		{
 			input:          "nihao",
-			wantPreedit:    "ni'hao",
+			wantPreedit:    "ni hao",
 			wantContain:    "你好",
 			wantHasPartial: false,
 		},
 		{
 			input:          "zhongguo",
-			wantPreedit:    "zhong'guo",
+			wantPreedit:    "zhong guo",
 			wantContain:    "中国",
 			wantHasPartial: false,
 		},
 		{
 			input:          "women",
-			wantPreedit:    "wo'men",
+			wantPreedit:    "wo men",
 			wantContain:    "我们",
 			wantHasPartial: false,
 		},
 		{
 			input:          "nihaozh",
-			wantPreedit:    "ni'hao'zh",
+			wantPreedit:    "ni hao zh",
 			wantHasPartial: true,
 		},
 		{
@@ -285,8 +285,8 @@ func TestEngineParseInput(t *testing.T) {
 		input       string
 		wantPreedit string
 	}{
-		{"nihao", "ni'hao"},
-		{"nihaozh", "ni'hao'zh"},
+		{"nihao", "ni hao"},
+		{"nihaozh", "ni hao zh"},
 		{"zh", "zh"},
 		{"", ""},
 	}
