@@ -182,6 +182,10 @@ type Renderer struct {
 	config        RenderConfig
 	resolvedTheme *theme.ResolvedTheme
 	TextBackendManager
+
+	// Base (unscaled) values for DPI recalculation
+	baseFontSize float64
+	lastDPI      int // Last DPI used for scaling; 0 means not yet set
 }
 
 // NewRenderer creates a new renderer
@@ -189,6 +193,7 @@ func NewRenderer(config RenderConfig) *Renderer {
 	r := &Renderer{
 		config:             config,
 		TextBackendManager: NewTextBackendManager("candidate"),
+		baseFontSize:       18, // Default base font size (unscaled)
 	}
 	r.SetTextRenderMode(config.TextRenderMode)
 	return r
@@ -210,6 +215,7 @@ func (r *Renderer) UpdateFont(fontSize float64, fontPath string) {
 	scale := GetDPIScale()
 
 	if fontSize > 0 {
+		r.baseFontSize = fontSize
 		r.config.FontSize = fontSize * scale
 		r.config.IndexFontSize = (fontSize - 4) * scale
 	}
@@ -217,6 +223,30 @@ func (r *Renderer) UpdateFont(fontSize float64, fontPath string) {
 	if fontPath != "" && fontPath != r.FontPath() {
 		r.SetFontPath(fontPath)
 	}
+}
+
+// refreshDPIIfNeeded checks if DPI has changed since last render and recalculates if needed.
+func (r *Renderer) refreshDPIIfNeeded() {
+	currentDPI := GetEffectiveDPI()
+	if r.lastDPI != currentDPI {
+		r.lastDPI = currentDPI
+		r.RefreshDPIScale()
+	}
+}
+
+// RefreshDPIScale recalculates all DPI-dependent config values.
+// Called when the effective DPI changes (e.g., monitor switch).
+func (r *Renderer) RefreshDPIScale() {
+	scale := GetDPIScale()
+	baseFontSize := r.baseFontSize
+	if baseFontSize <= 0 {
+		baseFontSize = 18
+	}
+	r.config.FontSize = baseFontSize * scale
+	r.config.IndexFontSize = (baseFontSize - 4) * scale
+	r.config.Padding = 10 * scale
+	r.config.ItemHeight = 32 * scale
+	r.config.CornerRadius = 8 * scale
 }
 
 // SetLayout sets the candidate layout mode

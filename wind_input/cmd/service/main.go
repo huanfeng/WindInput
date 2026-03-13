@@ -137,6 +137,9 @@ func main() {
 	// Set DPI awareness BEFORE any UI operations
 	setDPIAwareness()
 
+	// Initialize effective DPI with system DPI value
+	ui.SetEffectiveDPI(ui.GetSystemDPI())
+
 	// Parse command line arguments (these override config file settings)
 	dictPath := flag.String("dict", "", "Dictionary file path (overrides config)")
 	logLevel := flag.String("log", "", "Log level: debug, info, warn, error (overrides config)")

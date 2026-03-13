@@ -217,6 +217,11 @@ func (m *Manager) Start() error {
 	}
 	m.mu.Unlock()
 
+	// Register DPI change callback to re-render all UI on monitor switch
+	m.window.SetOnDPIChanged(func() {
+		m.doDPIChanged()
+	})
+
 	// Create toolbar window
 	if err := m.toolbar.Create(); err != nil {
 		m.logger.Error("Failed to create toolbar window", "error", err)
@@ -347,6 +352,8 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 		m.doHideToolbarMenu()
 	case "show_unified_menu":
 		m.doShowUnifiedMenu(cmd)
+	case "dpi_changed":
+		m.doDPIChanged()
 	}
 }
 

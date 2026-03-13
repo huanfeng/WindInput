@@ -181,6 +181,16 @@ func toolbarWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	case WM_SETCURSOR:
 		// Set appropriate cursor based on position
 		return globalToolbar.handleSetCursor(hwnd, lParam)
+
+	case WM_DPICHANGED:
+		// wParam: LOWORD = new X DPI, HIWORD = new Y DPI
+		newDPI := int(wParam & 0xFFFF)
+		if newDPI > 0 {
+			SetEffectiveDPI(newDPI)
+		}
+		// Resize toolbar for new DPI and re-render
+		globalToolbar.handleDPIChanged()
+		return 0
 	}
 
 	ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
@@ -513,6 +523,18 @@ func (w *ToolbarWindow) Destroy() {
 		w.renderer.Close()
 		w.renderer = nil
 	}
+}
+
+// handleDPIChanged handles a DPI change: resizes the toolbar and re-renders.
+func (w *ToolbarWindow) handleDPIChanged() {
+	// Recalculate toolbar size with new DPI
+	w.mu.Lock()
+	w.width = ScaleIntForDPI(116)
+	w.height = ScaleIntForDPI(30)
+	w.mu.Unlock()
+
+	// Re-render with the new DPI scale
+	w.Render()
 }
 
 // HideMenu hides the toolbar context menu if visible

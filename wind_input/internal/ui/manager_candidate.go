@@ -89,6 +89,11 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	hoverPageBtn := m.window.GetHoverPageBtn()
 	m.mu.Unlock()
 
+	// Update effective DPI based on caret position before rendering.
+	// This ensures correct DPI when the caret is on a different monitor,
+	// even before WM_DPICHANGED is received by our windows.
+	UpdateEffectiveDPIFromPoint(caretX, caretY)
+
 	// Render first to get actual window size (with hover highlight)
 	m.logger.Debug("Rendering candidates...", "hoverIndex", hoverIndex, "hoverPageBtn", hoverPageBtn)
 	img, renderResult := m.renderer.RenderCandidates(candidates, input, cursorPos, page, totalPages, hoverIndex, hoverPageBtn)
@@ -233,6 +238,57 @@ func (m *Manager) RefreshCandidates() {
 		}
 	default:
 		// Channel full, skip refresh
+	}
+}
+
+// NotifyDPIChanged notifies the manager that DPI has changed (async, thread-safe).
+// This triggers re-rendering of all visible windows with the new DPI scale.
+func (m *Manager) NotifyDPIChanged() {
+	m.mu.Lock()
+	if !m.ready {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
+	select {
+	case m.cmdCh <- UICommand{Type: "dpi_changed"}:
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
+	default:
+		m.logger.Warn("UI command channel full, dropping dpi_changed command")
+	}
+}
+
+// doDPIChanged handles DPI change: re-renders visible candidate window and toolbar (called from UI thread).
+func (m *Manager) doDPIChanged() {
+	m.logger.Info("DPI changed, re-rendering UI")
+
+	// Re-render toolbar (resize + re-render)
+	if m.toolbar != nil {
+		m.toolbar.handleDPIChanged()
+	}
+
+	// Recalculate renderer's DPI-dependent config (font size, padding, etc.)
+	if m.renderer != nil {
+		m.renderer.RefreshDPIScale()
+	}
+
+	// Re-render candidate window if visible
+	if m.window != nil && m.window.IsVisible() {
+		m.mu.Lock()
+		candidates := m.candidates
+		input := m.input
+		cursorPos := m.cursorPos
+		page := m.page
+		totalPages := m.totalPages
+		caretX := m.caretX
+		caretY := m.caretY
+		caretHeight := m.caretHeight
+		m.mu.Unlock()
+
+		m.doShowCandidates(candidates, input, cursorPos, caretX, caretY, caretHeight, page, totalPages)
 	}
 }
 

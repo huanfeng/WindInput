@@ -36,6 +36,7 @@ var (
 	procPostQuitMessage           = user32.NewProc("PostQuitMessage")
 	procPostMessageW              = user32.NewProc("PostMessageW")
 	procGetDpiForSystem           = user32.NewProc("GetDpiForSystem")
+	procGetDpiForWindow           = user32.NewProc("GetDpiForWindow")
 	procMsgWaitForMultipleObjects = user32.NewProc("MsgWaitForMultipleObjects")
 	procMonitorFromPoint          = user32.NewProc("MonitorFromPoint")
 	procGetMonitorInfoW           = user32.NewProc("GetMonitorInfoW")
@@ -114,6 +115,8 @@ const (
 	IDM_CANDIDATE_DELETE   = 1004
 	IDM_CANDIDATE_SETTINGS = 1005
 	IDM_CANDIDATE_ABOUT    = 1006
+
+	WM_DPICHANGED = 0x02E0
 
 	WM_UPDATE_CONTENT = WM_USER + 1
 	WM_SHOW_WINDOW    = WM_USER + 2
@@ -227,6 +230,9 @@ type CandidateWindow struct {
 	popupMenu       *PopupMenu
 	menuOpen        bool // Whether context menu is currently open
 	menuTargetIndex int  // The candidate index that was right-clicked
+
+	// DPI change callback
+	onDPIChanged func()
 }
 
 // NewCandidateWindow creates a new candidate window
@@ -284,6 +290,23 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		w := candidateWindows.Get(windows.HWND(hwnd))
 		if w != nil {
 			w.handleMouseLeave()
+		}
+		return 0
+
+	case WM_DPICHANGED:
+		// wParam: LOWORD = new X DPI, HIWORD = new Y DPI
+		newDPI := int(wParam & 0xFFFF)
+		if newDPI > 0 {
+			SetEffectiveDPI(newDPI)
+		}
+		w := candidateWindows.Get(windows.HWND(hwnd))
+		if w != nil {
+			w.mu.Lock()
+			cb := w.onDPIChanged
+			w.mu.Unlock()
+			if cb != nil {
+				cb()
+			}
 		}
 		return 0
 	}
@@ -441,6 +464,13 @@ func (w *CandidateWindow) SetPageRects(pageUp, pageDown *CandidateRect) {
 func (w *CandidateWindow) SetCallbacks(callbacks *CandidateCallback) {
 	w.mu.Lock()
 	w.callbacks = callbacks
+	w.mu.Unlock()
+}
+
+// SetOnDPIChanged sets a callback invoked when WM_DPICHANGED is received.
+func (w *CandidateWindow) SetOnDPIChanged(fn func()) {
+	w.mu.Lock()
+	w.onDPIChanged = fn
 	w.mu.Unlock()
 }
 

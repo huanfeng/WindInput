@@ -11,6 +11,8 @@ import (
 // hoverIndex: index of the hovered candidate (-1 for none)
 // Returns the rendered image and candidate bounding rectangles for hit testing
 func (r *Renderer) RenderCandidates(candidates []Candidate, input string, cursorPos int, page, totalPages int, hoverIndex int, hoverPageBtn string) (*image.RGBA, *RenderResult) {
+	// Auto-refresh DPI-dependent config if DPI changed since last render
+	r.refreshDPIIfNeeded()
 	cfg := r.config
 
 	if cfg.Layout == "horizontal" {
