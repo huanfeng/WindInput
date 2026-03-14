@@ -113,8 +113,9 @@ const (
 	IDM_CANDIDATE_MOVEDOWN = 1002
 	IDM_CANDIDATE_MOVETOP  = 1003
 	IDM_CANDIDATE_DELETE   = 1004
-	IDM_CANDIDATE_SETTINGS = 1005
-	IDM_CANDIDATE_ABOUT    = 1006
+	IDM_CANDIDATE_RESET    = 1005
+	IDM_CANDIDATE_SETTINGS = 1006
+	IDM_CANDIDATE_ABOUT    = 1007
 
 	WM_DPICHANGED = 0x02E0
 
@@ -219,6 +220,7 @@ type CandidateWindow struct {
 	pageDownRect        *CandidateRect  // Bounding rectangle for page down button
 	pageStartIndex      int             // 当前页首个候选的全局索引
 	totalCandidateCount int             // 候选总数（所有页）
+	hasShadowFlags      []bool          // 当前页各候选是否有 Shadow 修改
 	hoverIndex          int             // Currently hovered candidate index (-1 for none)
 	hoverPageBtn        string          // "" = none, "up" = page up hovered, "down" = page down hovered
 	trackingMouse       bool            // Whether mouse leave tracking is enabled
@@ -467,6 +469,13 @@ func (w *CandidateWindow) SetCandidatePageInfo(pageStartIndex, totalCount int) {
 	w.mu.Lock()
 	w.pageStartIndex = pageStartIndex
 	w.totalCandidateCount = totalCount
+	w.mu.Unlock()
+}
+
+// SetCandidateHasShadow 设置当前页各候选的 Shadow 修改标记
+func (w *CandidateWindow) SetCandidateHasShadow(flags []bool) {
+	w.mu.Lock()
+	w.hasShadowFlags = flags
 	w.mu.Unlock()
 }
 

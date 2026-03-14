@@ -120,6 +120,13 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	}
 	m.window.SetCandidatePageInfo(pageStartIndex, totalCandidateCount)
 
+	// 设置当前页各候选的 Shadow 修改标记
+	hasShadowFlags := make([]bool, len(candidates))
+	for i, c := range candidates {
+		hasShadowFlags[i] = c.HasShadow
+	}
+	m.window.SetCandidateHasShadow(hasShadowFlags)
+
 	// Determine position preference based on sticky state
 	var preference PositionPreference
 	if currentStickyAbove {

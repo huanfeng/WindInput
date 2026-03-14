@@ -9,7 +9,8 @@ type Candidate struct {
 	Comment        string
 	Weight         int
 	IsCommand      bool
-	ConsumedLength int // 该候选消耗的输入长度（拼音部分上屏用）
+	ConsumedLength int  // 该候选消耗的输入长度（拼音部分上屏用）
+	HasShadow      bool // 是否存在 Shadow 层修改（用于右键菜单"恢复默认"）
 }
 
 // CandidateRect represents the bounding rectangle of a candidate item
@@ -38,6 +39,7 @@ type CandidateCallback struct {
 	OnMoveDown        func(index int)                     // Called when user selects "Move Down" from context menu
 	OnMoveTop         func(index int)                     // Called when user selects "Move to Top" from context menu
 	OnDelete          func(index int)                     // Called when user selects "Delete" from context menu
+	OnResetDefault    func(index int)                     // Called when user selects "Reset to Default" from context menu
 	OnOpenSettings    func()                              // Called when user selects "Settings" from context menu
 	OnAbout           func()                              // Called when user selects "About" from context menu
 	OnShowUnifiedMenu func(screenX, screenY int)          // Called when user right-clicks blank area to show unified menu

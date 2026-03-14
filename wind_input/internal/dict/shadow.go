@@ -272,6 +272,20 @@ func (sl *ShadowLayer) IsTopped(code string, word string) bool {
 	return false
 }
 
+// HasRule 检查指定编码和词语是否存在 Shadow 规则
+func (sl *ShadowLayer) HasRule(code string, word string) bool {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	code = strings.ToLower(code)
+	for _, r := range sl.rules[code] {
+		if r.Word == word {
+			return true
+		}
+	}
+	return false
+}
+
 // GetRuleCount 获取规则数量
 func (sl *ShadowLayer) GetRuleCount() int {
 	sl.mu.RLock()

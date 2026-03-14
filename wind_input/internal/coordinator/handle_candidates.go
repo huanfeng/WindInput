@@ -96,8 +96,20 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 	}
 
 	// Convert to UI candidates
+	// Check shadow layer for HasShadow flags
+	var shadowLayer interface {
+		HasRule(code string, word string) bool
+	}
+	if c.engineMgr != nil {
+		shadowLayer = c.engineMgr.GetDictManager().GetShadowLayer()
+	}
+
 	c.candidates = make([]ui.Candidate, len(result.Candidates))
 	for i, ec := range result.Candidates {
+		code := ec.Code
+		if code == "" {
+			code = c.inputBuffer
+		}
 		cand := ui.Candidate{
 			Text:           ec.Text,
 			Code:           ec.Code,
@@ -105,6 +117,9 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 			Weight:         ec.Weight,
 			IsCommand:      ec.IsCommand,
 			ConsumedLength: ec.ConsumedLength,
+		}
+		if shadowLayer != nil && !ec.IsCommand {
+			cand.HasShadow = shadowLayer.HasRule(code, ec.Text)
 		}
 		// 如果有提示信息（如反查编码），添加到注释
 		if ec.Hint != "" {
@@ -161,11 +176,12 @@ func (c *Coordinator) showUI() {
 	displayCandidates := make([]ui.Candidate, len(pageCandidates))
 	for i, cand := range pageCandidates {
 		displayCandidates[i] = ui.Candidate{
-			Text:    cand.Text,
-			Code:    cand.Code,
-			Index:   i + 1,
-			Comment: cand.Comment,
-			Weight:  cand.Weight,
+			Text:      cand.Text,
+			Code:      cand.Code,
+			Index:     i + 1,
+			Comment:   cand.Comment,
+			Weight:    cand.Weight,
+			HasShadow: cand.HasShadow,
 		}
 	}
 

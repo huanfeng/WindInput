@@ -164,6 +164,7 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	popupMenu := w.popupMenu
 	pageStartIndex := w.pageStartIndex
 	totalCandidateCount := w.totalCandidateCount
+	hasShadowFlags := w.hasShadowFlags
 	w.mu.Unlock()
 
 	// Hit test against candidate rectangles
@@ -203,11 +204,16 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	isGlobalFirst := globalIndex == 0
 	isGlobalLast := totalCandidateCount <= 0 || globalIndex >= totalCandidateCount-1
 
+	// Check if this candidate has shadow modifications
+	hasShadow := hitIndex >= 0 && hitIndex < len(hasShadowFlags) && hasShadowFlags[hitIndex]
+
 	// Build menu items
 	items := []MenuItem{
 		{ID: IDM_CANDIDATE_MOVEUP, Text: "前移(U)", Disabled: isGlobalFirst},
 		{ID: IDM_CANDIDATE_MOVEDOWN, Text: "后移(D)", Disabled: isGlobalLast},
 		{ID: IDM_CANDIDATE_MOVETOP, Text: "置顶(T)", Disabled: isGlobalFirst},
+		{Separator: true},
+		{ID: IDM_CANDIDATE_RESET, Text: "恢复默认(R)", Disabled: !hasShadow},
 		{Separator: true},
 		{ID: IDM_CANDIDATE_DELETE, Text: "删除词条(X)"},
 	}
@@ -240,6 +246,10 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 			case IDM_CANDIDATE_MOVETOP:
 				if cb.OnMoveTop != nil {
 					cb.OnMoveTop(targetIndex)
+				}
+			case IDM_CANDIDATE_RESET:
+				if cb.OnResetDefault != nil {
+					cb.OnResetDefault(targetIndex)
 				}
 			case IDM_CANDIDATE_DELETE:
 				if cb.OnDelete != nil {

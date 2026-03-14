@@ -90,6 +90,10 @@ func (c *Coordinator) setupCandidateCallbacks() {
 			// Run in goroutine to avoid blocking UI thread
 			go c.handleCandidateDelete(index)
 		},
+		OnResetDefault: func(index int) {
+			// Run in goroutine to avoid blocking UI thread
+			go c.handleCandidateResetDefault(index)
+		},
 		OnOpenSettings: func() {
 			// Run in goroutine to avoid blocking UI thread
 			go c.handleCandidateOpenSettings()
@@ -343,6 +347,54 @@ func (c *Coordinator) handleCandidateDelete(index int) {
 		shadowLayer := c.engineMgr.GetDictManager().GetShadowLayer()
 		if shadowLayer != nil {
 			shadowLayer.Delete(code, candidate.Text)
+			if err := shadowLayer.Save(); err != nil {
+				c.logger.Error("Failed to save shadow layer", "error", err)
+			}
+		}
+	}
+
+	// Re-acquire lock to refresh UI
+	c.mu.Lock()
+	c.updateCandidates()
+	c.showUI()
+	c.mu.Unlock()
+}
+
+// handleCandidateResetDefault handles reset to default action from context menu
+// Removes all shadow rules for the candidate, restoring its original dictionary state
+func (c *Coordinator) handleCandidateResetDefault(index int) {
+	c.mu.Lock()
+
+	c.logger.Debug("Candidate reset default requested", "index", index)
+
+	// Convert page-local index to actual candidate index
+	actualIndex := (c.currentPage-1)*c.candidatesPerPage + index
+
+	if actualIndex < 0 || actualIndex >= len(c.candidates) {
+		c.logger.Warn("Invalid candidate index for reset default", "actualIndex", actualIndex)
+		c.mu.Unlock()
+		return
+	}
+
+	candidate := c.candidates[actualIndex]
+	if candidate.IsCommand {
+		c.logger.Debug("Cannot reset command candidate", "text", candidate.Text)
+		c.mu.Unlock()
+		return
+	}
+
+	code := candidate.Code
+	if code == "" {
+		code = c.inputBuffer
+	}
+
+	c.mu.Unlock()
+
+	// Remove shadow rule without lock
+	if c.engineMgr != nil {
+		shadowLayer := c.engineMgr.GetDictManager().GetShadowLayer()
+		if shadowLayer != nil {
+			shadowLayer.RemoveRule(code, candidate.Text)
 			if err := shadowLayer.Save(); err != nil {
 				c.logger.Error("Failed to save shadow layer", "error", err)
 			}
