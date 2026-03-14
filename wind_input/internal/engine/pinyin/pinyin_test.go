@@ -278,6 +278,57 @@ func TestExplicitSeparator_XiAn(t *testing.T) {
 	}
 }
 
+func TestLeadingPartialCandidates(t *testing.T) {
+	// 测试 sdem/sdeo 等首段 partial 音节输入的候选排序
+	paths := []string{
+		"../../build/dict/pinyin",
+	}
+
+	var dictPath string
+	for _, p := range paths {
+		if _, err := os.Stat(filepath.Join(p, "8105.dict.yaml")); err == nil {
+			dictPath = p
+			break
+		}
+	}
+	if dictPath == "" {
+		t.Skip("跳过测试：无法找到 Rime 词库目录")
+	}
+
+	pinyinDict := dict.NewPinyinDict()
+	if err := pinyinDict.LoadRimeDir(dictPath); err != nil {
+		t.Fatalf("加载词库失败: %v", err)
+	}
+
+	composite := dict.NewCompositeDict()
+	layer := dict.NewPinyinDictLayer("pinyin-system", dict.LayerTypeSystem, pinyinDict)
+	composite.AddLayer(layer)
+
+	config := &Config{
+		FilterMode:      "all",
+		UseSmartCompose: false,
+	}
+	engine := NewEngineWithConfig(composite, config)
+
+	for _, input := range []string{"sdem", "sdeo", "sde", "bdem"} {
+		result := engine.ConvertEx(input, 50)
+		t.Logf("\n输入: %q, preedit=%q, 候选数: %d", input, result.PreeditDisplay, len(result.Candidates))
+		for i, c := range result.Candidates {
+			if i < 15 {
+				t.Logf("  [%d] text=%q code=%q weight=%d consumed=%d", i, c.Text, c.Code, c.Weight, c.ConsumedLength)
+			}
+		}
+
+		// 首个候选不应该是 "的" (de)，因为第一个字符不是 d
+		if len(result.Candidates) > 0 {
+			first := result.Candidates[0]
+			if first.Text == "的" {
+				t.Errorf("输入 %q: 首候选不应为 '的'，第一字符是 %c", input, input[0])
+			}
+		}
+	}
+}
+
 func TestSyllablesPruning(t *testing.T) {
 	// 测试长输入不会导致指数级爆炸
 	results := ParseSyllables("zhongguorenminjiefangjun")

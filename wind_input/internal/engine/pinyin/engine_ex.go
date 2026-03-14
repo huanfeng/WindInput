@@ -107,6 +107,12 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	logDebug("[PinyinEngine] input=%q preedit=%q completed=%v partial=%q allSyllables=%v",
 		input, result.PreeditDisplay, completedSyllables, partial, allSyllables)
 
+	// 检查首个 completed syllable 是否也是输入的第一个段
+	// 例如 sdem → allSyllables=["s","de","m"]，completedSyllables=["de"]
+	// "de" 不是第一段，不应获得首音节优先权
+	firstCompletedIsLeading := syllableCount > 0 && len(allSyllables) > 0 &&
+		allSyllables[0] == completedSyllables[0]
+
 	// 3. 收集候选词（预分配容量避免多次扩容）
 	candidatesMap := make(map[string]*candidate.Candidate, 64)
 
@@ -167,6 +173,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	}
 
 	// ── 3b. 精确匹配完整音节序列的词组（含模糊变体） ──
+	hasExplicitSep := strings.Contains(input, "'")
 	if syllableCount > 0 && partial == "" {
 		exactResults := e.lookupWithFuzzy(queryInput, completedSyllables)
 		for _, cand := range exactResults {
@@ -175,7 +182,17 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			}
 			c := cand
 			charCount := len([]rune(c.Text))
-			f := e.buildFeatures(c.Text, float64(c.Weight), MatchExact, syllableCount, charCount, featureOpts{})
+			// 当输入含显式分隔符时，字数不匹配音节数的候选降级为 MatchPartial
+			// 例如 xi'an (2 音节)：西安(2字)→MatchExact，见(1字)→MatchPartial
+			// 当首段是 partial 时（如 sdem），completed 音节匹配整体降级
+			matchType := MatchExact
+			if hasExplicitSep && charCount != syllableCount {
+				matchType = MatchPartial
+			}
+			if !firstCompletedIsLeading {
+				matchType = MatchPartial
+			}
+			f := e.buildFeatures(c.Text, float64(c.Weight), matchType, syllableCount, charCount, featureOpts{isPartial: !firstCompletedIsLeading})
 			c.Weight = e.scorerWeight(f)
 			c.ConsumedLength = len(input)
 			candidatesMap[c.Text] = &c
@@ -201,7 +218,11 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchExact, len(altSyllables), charCount, featureOpts{segmentRank: 1})
+				altMatchType := MatchExact
+				if !firstCompletedIsLeading {
+					altMatchType = MatchPartial
+				}
+				f := e.buildFeatures(c.Text, float64(c.Weight), altMatchType, len(altSyllables), charCount, featureOpts{segmentRank: 1, isPartial: !firstCompletedIsLeading})
 				c.Weight = e.scorerWeight(f)
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
@@ -237,8 +258,14 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 此时 joined 是 input 的前缀而非完全相等，也应执行子词组查找。
 	var mainPath []string
 	if syllableCount > 1 {
-		dag := BuildDAG(queryInput, e.syllableTrie)
-		mainPath = dag.MaximumMatch()
+		if strings.Contains(input, "'") {
+			// 显式分隔符：用户明确指定了切分方式（如 xi'an），
+			// 直接使用解析得到的音节，不依赖 DAG（DAG 会把 "xian" 当作单音节）
+			mainPath = completedSyllables
+		} else {
+			dag := BuildDAG(queryInput, e.syllableTrie)
+			mainPath = dag.MaximumMatch()
+		}
 		if len(mainPath) > 1 {
 			joined := strings.Join(mainPath, "")
 			if joined == queryInput || strings.HasPrefix(queryInput, joined) {
@@ -248,6 +275,37 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	}
 
 	// ── 3e. 单字候选 ──
+
+	// ── 3e-leading. 首段 partial 音节的单字候选 ──
+	// 当首个 completed 不是输入首段时（如 sdem → "s" 在 "de" 前），
+	// 为首段 partial 音节生成候选，权重高于首 completed 音节的候选
+	if syllableCount > 0 && !firstCompletedIsLeading {
+		leadingPartial := allSyllables[0]
+		possibles := e.syllableTrie.GetPossibleSyllables(leadingPartial)
+		const maxLeadingPerSyllable = 5
+		for _, syllable := range possibles {
+			charResults := e.dict.Lookup(syllable)
+			added := 0
+			for _, cand := range charResults {
+				if added >= maxLeadingPerSyllable {
+					break
+				}
+				if _, exists := candidatesMap[cand.Text]; exists {
+					continue
+				}
+				c := cand
+				charCount := len([]rune(c.Text))
+				// 首段 partial 使用 MatchExact：用户首先输入的段理应获得最高优先级
+				// 这确保 "s" 的候选（世、是等）排在 "de"（的、得等）之前
+				f := e.buildFeatures(c.Text, float64(c.Weight), MatchExact, 1, charCount, featureOpts{})
+				c.Weight = e.scorerWeight(f)
+				c.ConsumedLength = len(leadingPartial)
+				candidatesMap[c.Text] = &c
+				added++
+			}
+		}
+	}
+
 	if syllableCount > 0 {
 		firstSyllable := completedSyllables[0]
 		charResults := e.lookupWithFuzzy(firstSyllable, []string{firstSyllable})
@@ -259,13 +317,26 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			c := cand
 			charCount := len([]rune(c.Text))
 			// 首音节单字：多音节输入时为 Partial（只消耗部分输入），单音节为 Exact
+			// 如果首个 completed 不是输入首段（前面有 partial），降级为 MatchPartial
 			matchType := MatchExact
-			if syllableCount >= 2 {
+			if syllableCount >= 2 || !firstCompletedIsLeading {
 				matchType = MatchPartial
 			}
-			f := e.buildFeatures(c.Text, float64(c.Weight), matchType, 1, charCount, featureOpts{})
+			isPartial := !firstCompletedIsLeading
+			f := e.buildFeatures(c.Text, float64(c.Weight), matchType, 1, charCount, featureOpts{isPartial: isPartial})
 			c.Weight = e.scorerWeight(f)
-			c.ConsumedLength = len(firstSyllable)
+			// ConsumedLength 需包含前面的 partial 段
+			consumed := len(firstSyllable)
+			if !firstCompletedIsLeading {
+				// 前面有 partial 段，加上它们的长度
+				for _, s := range allSyllables {
+					if s == completedSyllables[0] {
+						break
+					}
+					consumed += len(s)
+				}
+			}
+			c.ConsumedLength = consumed
 			candidatesMap[c.Text] = &c
 		}
 
@@ -371,7 +442,13 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			for _, cand := range abbrevResults {
 				c := cand
 				charCount := len([]rune(c.Text))
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchExact, len(allSyllables), charCount, featureOpts{isAbbrev: true})
+				abbrevMatchType := MatchExact
+				// 仅当有 completed 音节且首 completed 不是输入首段时降级
+				// 纯缩写（如 bzd，syllableCount=0）保持 MatchExact
+				if syllableCount > 0 && !firstCompletedIsLeading {
+					abbrevMatchType = MatchPartial
+				}
+				f := e.buildFeatures(c.Text, float64(c.Weight), abbrevMatchType, len(allSyllables), charCount, featureOpts{isAbbrev: true, isPartial: syllableCount > 0 && !firstCompletedIsLeading})
 				c.Weight = e.scorerWeight(f)
 				c.ConsumedLength = len(input)
 				if existing, exists := candidatesMap[c.Text]; exists {
