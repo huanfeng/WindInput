@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"runtime/debug"
 
 	"github.com/huanfeng/wind_input/internal/ipc"
 )
@@ -36,7 +37,13 @@ func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte
 	}
 }
 
-func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID int, processID uint32) []byte {
+func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID int, processID uint32) (resp []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("PANIC in processRequest", "clientID", clientID, "command", fmt.Sprintf("0x%04X", header.Command), "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
+			resp = s.codec.EncodeAck()
+		}
+	}()
 	s.logger.Debug("Processing Bridge request", "clientID", clientID, "command", fmt.Sprintf("0x%04X", header.Command))
 
 	// Update active process ID for events that indicate this client is active

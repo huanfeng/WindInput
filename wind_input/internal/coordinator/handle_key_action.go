@@ -391,7 +391,7 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 		return &bridge.KeyEventResult{
 			Type:           bridge.ResponseTypeInsertText,
 			Text:           text,
-			NewComposition: remaining,
+			NewComposition: c.compositionText(),
 		}
 	}
 

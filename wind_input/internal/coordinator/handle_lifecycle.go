@@ -131,6 +131,7 @@ func (c *Coordinator) HandleFocusGained() *bridge.StatusUpdateData {
 	c.mu.Lock()
 	if len(c.inputBuffer) > 0 {
 		c.inputBuffer = ""
+		c.inputCursorPos = 0
 		c.candidates = nil
 		c.currentPage = 1
 		c.totalPages = 1
@@ -173,6 +174,7 @@ func (c *Coordinator) HandleIMEActivated() *bridge.StatusUpdateData {
 	c.mu.Lock()
 	if len(c.inputBuffer) > 0 {
 		c.inputBuffer = ""
+		c.inputCursorPos = 0
 		c.candidates = nil
 		c.currentPage = 1
 		c.totalPages = 1
@@ -354,7 +356,7 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 		return &bridge.KeyEventResult{
 			Type:           bridge.ResponseTypeInsertText,
 			Text:           text,
-			NewComposition: remaining,
+			NewComposition: c.compositionText(),
 		}
 	}
 
