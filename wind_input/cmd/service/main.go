@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/control"
 	"github.com/huanfeng/wind_input/internal/coordinator"
 	"github.com/huanfeng/wind_input/internal/dict"
@@ -262,6 +263,10 @@ func main() {
 	}
 	// 设置初始活跃引擎词库
 	dictManager.SetActiveEngine(cfg.Engine.Type)
+	// 设置候选排序模式
+	if cfg.Engine.Wubi.CandidateSortMode != "" {
+		dictManager.SetSortMode(candidate.CandidateSortMode(cfg.Engine.Wubi.CandidateSortMode))
+	}
 	engineMgr.SetDictManager(dictManager)
 
 	// Initialize engine based on config
@@ -310,6 +315,7 @@ func main() {
 	wubiConfig.FilterMode = cfg.Engine.FilterMode
 	wubiConfig.ShowCodeHint = cfg.Engine.Wubi.ShowCodeHint
 	wubiConfig.SingleCodeInput = cfg.Engine.Wubi.SingleCodeInput
+	wubiConfig.CandidateSortMode = cfg.Engine.Wubi.CandidateSortMode
 
 	// 设置引擎配置（用于动态切换）
 	engineMgr.SetPinyinConfig(pinyinConfig)

@@ -170,6 +170,7 @@ func (c *Coordinator) UpdateEngineConfig(engineConfig *config.EngineConfig) {
 		engineConfig.Wubi.PunctCommit,
 		engineConfig.Wubi.ShowCodeHint,
 		engineConfig.Wubi.SingleCodeInput,
+		engineConfig.Wubi.CandidateSortMode,
 	)
 	c.engineMgr.UpdatePinyinOptions(&engineConfig.Pinyin)
 

@@ -5,7 +5,9 @@ package ui
 // Parameters:
 //   - caretX, caretY: the caret position (where input is happening)
 //   - caretHeight: height of the caret/cursor
-func (m *Manager) ShowCandidates(candidates []Candidate, input string, cursorPos, caretX, caretY, caretHeight, page, totalPages int) error {
+//   - totalCandidateCount: total number of candidates across all pages
+//   - candidatesPerPage: number of candidates per page
+func (m *Manager) ShowCandidates(candidates []Candidate, input string, cursorPos, caretX, caretY, caretHeight, page, totalPages, totalCandidateCount, candidatesPerPage int) error {
 	m.mu.Lock()
 	if !m.ready {
 		m.mu.Unlock()
@@ -16,6 +18,8 @@ func (m *Manager) ShowCandidates(candidates []Candidate, input string, cursorPos
 	m.cursorPos = cursorPos
 	m.page = page
 	m.totalPages = totalPages
+	m.totalCandidateCount = totalCandidateCount
+	m.candidatesPerPage = candidatesPerPage
 	m.caretX = caretX
 	m.caretY = caretY
 	m.caretHeight = caretHeight
@@ -28,16 +32,18 @@ func (m *Manager) ShowCandidates(candidates []Candidate, input string, cursorPos
 	// Send command to UI thread (non-blocking due to buffered channel)
 	select {
 	case m.cmdCh <- UICommand{
-		Type:         "show",
-		Candidates:   candidates,
-		Input:        input,
-		CursorPos:    cursorPos,
-		X:            caretX,
-		Y:            caretY,
-		CaretHeight:  caretHeight,
-		Page:         page,
-		TotalPages:   totalPages,
-		InputSession: currentSession,
+		Type:                "show",
+		Candidates:          candidates,
+		Input:               input,
+		CursorPos:           cursorPos,
+		X:                   caretX,
+		Y:                   caretY,
+		CaretHeight:         caretHeight,
+		Page:                page,
+		TotalPages:          totalPages,
+		TotalCandidateCount: totalCandidateCount,
+		CandidatesPerPage:   candidatesPerPage,
+		InputSession:        currentSession,
 	}:
 		// Signal the event to wake up the message loop
 		if m.cmdEvent != 0 {
@@ -52,7 +58,7 @@ func (m *Manager) ShowCandidates(candidates []Candidate, input string, cursorPos
 
 // doShowCandidates actually shows candidates (called from UI thread)
 // Parameters caretX, caretY, caretHeight are the original caret position info.
-func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorPos, caretX, caretY, caretHeight, page, totalPages int) {
+func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorPos, caretX, caretY, caretHeight, page, totalPages, totalCandidateCount, candidatesPerPage int) {
 	// Debug: skip rendering if hide_candidate_window is enabled
 	if m.hideCandidateWindow {
 		m.logger.Debug("doShowCandidates skipped (hide_candidate_window enabled)")
@@ -106,6 +112,13 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 		m.window.SetHitRects(renderResult.Rects)
 		m.window.SetPageRects(renderResult.PageUpRect, renderResult.PageDownRect)
 	}
+
+	// 设置分页信息，用于右键菜单的全局位置判断
+	pageStartIndex := 0
+	if candidatesPerPage > 0 {
+		pageStartIndex = (page - 1) * candidatesPerPage
+	}
+	m.window.SetCandidatePageInfo(pageStartIndex, totalCandidateCount)
 
 	// Determine position preference based on sticky state
 	var preference PositionPreference
@@ -213,6 +226,8 @@ func (m *Manager) RefreshCandidates() {
 	cursorPos := m.cursorPos
 	page := m.page
 	totalPages := m.totalPages
+	totalCandidateCount := m.totalCandidateCount
+	candidatesPerPage := m.candidatesPerPage
 	caretX := m.caretX
 	caretY := m.caretY
 	caretHeight := m.caretHeight
@@ -222,16 +237,18 @@ func (m *Manager) RefreshCandidates() {
 	// Re-queue a show command with current data
 	select {
 	case m.cmdCh <- UICommand{
-		Type:         "show",
-		Candidates:   candidates,
-		Input:        input,
-		CursorPos:    cursorPos,
-		X:            caretX,
-		Y:            caretY,
-		CaretHeight:  caretHeight,
-		Page:         page,
-		TotalPages:   totalPages,
-		InputSession: currentSession,
+		Type:                "show",
+		Candidates:          candidates,
+		Input:               input,
+		CursorPos:           cursorPos,
+		X:                   caretX,
+		Y:                   caretY,
+		CaretHeight:         caretHeight,
+		Page:                page,
+		TotalPages:          totalPages,
+		TotalCandidateCount: totalCandidateCount,
+		CandidatesPerPage:   candidatesPerPage,
+		InputSession:        currentSession,
 	}:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
@@ -283,12 +300,14 @@ func (m *Manager) doDPIChanged() {
 		cursorPos := m.cursorPos
 		page := m.page
 		totalPages := m.totalPages
+		totalCandidateCount := m.totalCandidateCount
+		candidatesPerPage := m.candidatesPerPage
 		caretX := m.caretX
 		caretY := m.caretY
 		caretHeight := m.caretHeight
 		m.mu.Unlock()
 
-		m.doShowCandidates(candidates, input, cursorPos, caretX, caretY, caretHeight, page, totalPages)
+		m.doShowCandidates(candidates, input, cursorPos, caretX, caretY, caretHeight, page, totalPages, totalCandidateCount, candidatesPerPage)
 	}
 }
 

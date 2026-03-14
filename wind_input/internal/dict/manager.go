@@ -125,6 +125,13 @@ func (dm *DictManager) GetCompositeDict() *CompositeDict {
 	return dm.compositeDict
 }
 
+// SetSortMode 设置候选排序模式
+func (dm *DictManager) SetSortMode(mode candidate.CandidateSortMode) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	dm.compositeDict.SetSortMode(mode)
+}
+
 // GetUserDict 获取当前活跃的用户词库（用于添加用户词）
 func (dm *DictManager) GetUserDict() *UserDict {
 	dm.mu.RLock()

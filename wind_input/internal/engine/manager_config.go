@@ -3,6 +3,7 @@ package engine
 import (
 	"log"
 
+	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/engine/wubi"
@@ -97,7 +98,7 @@ func (m *Manager) UpdateFilterMode(mode string) {
 }
 
 // UpdateWubiOptions 更新五笔引擎的选项（热更新）
-func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput bool) {
+func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput bool, candidateSortMode string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -109,6 +110,7 @@ func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommi
 		m.wubiConfig.PunctCommit = punctCommit
 		m.wubiConfig.ShowCodeHint = showCodeHint
 		m.wubiConfig.SingleCodeInput = singleCodeInput
+		m.wubiConfig.CandidateSortMode = candidateSortMode
 	}
 
 	// 更新所有已注册的五笔引擎的配置
@@ -121,12 +123,18 @@ func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommi
 				cfg.PunctCommit = punctCommit
 				cfg.ShowCodeHint = showCodeHint
 				cfg.SingleCodeInput = singleCodeInput
+				cfg.CandidateSortMode = candidateSortMode
 			}
 		}
 	}
 
-	log.Printf("[EngineManager] 更新五笔选项: autoCommitAt4=%v, clearOnEmptyAt4=%v, topCodeCommit=%v, punctCommit=%v, showCodeHint=%v, singleCodeInput=%v",
-		autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput)
+	// 更新词库管理器的排序模式
+	if m.dictManager != nil {
+		m.dictManager.SetSortMode(candidate.CandidateSortMode(candidateSortMode))
+	}
+
+	log.Printf("[EngineManager] 更新五笔选项: autoCommitAt4=%v, clearOnEmptyAt4=%v, topCodeCommit=%v, punctCommit=%v, showCodeHint=%v, singleCodeInput=%v, candidateSortMode=%s",
+		autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, candidateSortMode)
 }
 
 // UpdatePinyinOptions 更新拼音引擎的选项（热更新）

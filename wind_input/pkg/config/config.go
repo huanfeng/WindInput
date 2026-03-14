@@ -70,12 +70,13 @@ type FuzzyPinyinConfig struct {
 
 // WubiConfig 五笔引擎配置
 type WubiConfig struct {
-	AutoCommitAt4   bool `yaml:"auto_commit_at_4" json:"auto_commit_at_4"`
-	ClearOnEmptyAt4 bool `yaml:"clear_on_empty_at_4" json:"clear_on_empty_at_4"`
-	TopCodeCommit   bool `yaml:"top_code_commit" json:"top_code_commit"`
-	PunctCommit     bool `yaml:"punct_commit" json:"punct_commit"`
-	ShowCodeHint    bool `yaml:"show_code_hint" json:"show_code_hint"`
-	SingleCodeInput bool `yaml:"single_code_input" json:"single_code_input"`
+	AutoCommitAt4     bool   `yaml:"auto_commit_at_4" json:"auto_commit_at_4"`
+	ClearOnEmptyAt4   bool   `yaml:"clear_on_empty_at_4" json:"clear_on_empty_at_4"`
+	TopCodeCommit     bool   `yaml:"top_code_commit" json:"top_code_commit"`
+	PunctCommit       bool   `yaml:"punct_commit" json:"punct_commit"`
+	ShowCodeHint      bool   `yaml:"show_code_hint" json:"show_code_hint"`
+	SingleCodeInput   bool   `yaml:"single_code_input" json:"single_code_input"`
+	CandidateSortMode string `yaml:"candidate_sort_mode" json:"candidate_sort_mode"` // 候选排序模式：frequency（词频）、natural（自然顺序）
 }
 
 // HotkeyConfig contains hotkey settings
@@ -171,11 +172,12 @@ func DefaultConfig() *Config {
 				UseSmartCompose: true,
 			},
 			Wubi: WubiConfig{
-				AutoCommitAt4:   false,
-				ClearOnEmptyAt4: false,
-				TopCodeCommit:   false,
-				PunctCommit:     true,
-				ShowCodeHint:    true,
+				AutoCommitAt4:     false,
+				ClearOnEmptyAt4:   false,
+				TopCodeCommit:     false,
+				PunctCommit:       true,
+				ShowCodeHint:      true,
+				CandidateSortMode: "frequency",
 			},
 		},
 		Hotkeys: HotkeyConfig{

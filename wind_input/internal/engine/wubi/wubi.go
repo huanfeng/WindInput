@@ -13,15 +13,16 @@ import (
 
 // Config 五笔引擎配置
 type Config struct {
-	MaxCodeLength   int    // 最大码长，默认4
-	AutoCommitAt4   bool   // 四码唯一时自动上屏
-	ClearOnEmptyAt4 bool   // 四码为空时清空
-	TopCodeCommit   bool   // 五码顶字上屏
-	PunctCommit     bool   // 标点顶字上屏
-	FilterMode      string // 候选过滤模式
-	ShowCodeHint    bool   // 是否显示编码提示
-	SingleCodeInput bool   // 逐字键入模式（关闭前缀匹配）
-	DedupCandidates bool   // 候选去重（内部开关，未来可能开放给用户）
+	MaxCodeLength     int    // 最大码长，默认4
+	AutoCommitAt4     bool   // 四码唯一时自动上屏
+	ClearOnEmptyAt4   bool   // 四码为空时清空
+	TopCodeCommit     bool   // 五码顶字上屏
+	PunctCommit       bool   // 标点顶字上屏
+	FilterMode        string // 候选过滤模式
+	ShowCodeHint      bool   // 是否显示编码提示
+	SingleCodeInput   bool   // 逐字键入模式（关闭前缀匹配）
+	DedupCandidates   bool   // 候选去重（内部开关，未来可能开放给用户）
+	CandidateSortMode string // 候选排序模式：frequency（词频）、natural（自然顺序）
 }
 
 // DefaultConfig 返回默认配置

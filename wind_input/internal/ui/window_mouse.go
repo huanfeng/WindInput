@@ -162,6 +162,8 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	windowX := w.x
 	windowY := w.y
 	popupMenu := w.popupMenu
+	pageStartIndex := w.pageStartIndex
+	totalCandidateCount := w.totalCandidateCount
 	w.mu.Unlock()
 
 	// Hit test against candidate rectangles
@@ -196,16 +198,16 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 		return
 	}
 
-	// Determine candidate count for enable/disable logic
-	candidateCount := len(hitRects)
-	isFirst := hitIndex == 0
-	isLast := hitIndex == candidateCount-1
+	// Determine enable/disable using global candidate position (not page-local)
+	globalIndex := pageStartIndex + hitIndex
+	isGlobalFirst := globalIndex == 0
+	isGlobalLast := totalCandidateCount <= 0 || globalIndex >= totalCandidateCount-1
 
 	// Build menu items
 	items := []MenuItem{
-		{ID: IDM_CANDIDATE_MOVEUP, Text: "前移(U)", Disabled: isFirst},
-		{ID: IDM_CANDIDATE_MOVEDOWN, Text: "后移(D)", Disabled: isLast},
-		{ID: IDM_CANDIDATE_MOVETOP, Text: "置顶(T)", Disabled: isFirst},
+		{ID: IDM_CANDIDATE_MOVEUP, Text: "前移(U)", Disabled: isGlobalFirst},
+		{ID: IDM_CANDIDATE_MOVEDOWN, Text: "后移(D)", Disabled: isGlobalLast},
+		{ID: IDM_CANDIDATE_MOVETOP, Text: "置顶(T)", Disabled: isGlobalFirst},
 		{Separator: true},
 		{ID: IDM_CANDIDATE_DELETE, Text: "删除词条(X)"},
 	}

@@ -15,6 +15,9 @@ type CompositeDict struct {
 
 	// Shadow 规则提供者（可选）
 	shadowProvider ShadowProvider
+
+	// 排序模式
+	sortMode candidate.CandidateSortMode
 }
 
 // NewCompositeDict 创建聚合词库
@@ -57,6 +60,23 @@ func (c *CompositeDict) SetShadowProvider(provider ShadowProvider) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.shadowProvider = provider
+}
+
+// SetSortMode 设置候选排序模式
+func (c *CompositeDict) SetSortMode(mode candidate.CandidateSortMode) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sortMode = mode
+}
+
+// GetSortMode 获取当前排序模式
+func (c *CompositeDict) GetSortMode() candidate.CandidateSortMode {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.sortMode == "" {
+		return candidate.SortByFrequency
+	}
+	return c.sortMode
 }
 
 // Search 聚合查询
@@ -144,19 +164,24 @@ func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []
 	// 3. 合并置顶词和普通结果
 	finalResults := append(topped, results...)
 
-	// 4. 排序（置顶词已经在最前面，其余按权重排序）
-	// 置顶词保持原顺序，非置顶词按权重排序
+	// 4. 排序（置顶词已经在最前面，其余按排序模式排序）
+	// 置顶词保持原顺序，非置顶词按配置的排序模式排序
+	comparator := candidate.Better
+	if c.sortMode == candidate.SortByNatural {
+		comparator = candidate.BetterNatural
+	}
+
 	if len(topped) > 0 && len(results) > 0 {
 		// 只对非置顶部分排序
 		nonToppedStart := len(topped)
 		nonTopped := finalResults[nonToppedStart:]
 		sort.Slice(nonTopped, func(i, j int) bool {
-			return candidate.Better(nonTopped[i], nonTopped[j])
+			return comparator(nonTopped[i], nonTopped[j])
 		})
 	} else if len(topped) == 0 {
-		// 没有置顶词，全部按权重排序
+		// 没有置顶词，全部排序
 		sort.Slice(finalResults, func(i, j int) bool {
-			return candidate.Better(finalResults[i], finalResults[j])
+			return comparator(finalResults[i], finalResults[j])
 		})
 	}
 

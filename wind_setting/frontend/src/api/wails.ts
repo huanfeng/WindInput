@@ -271,6 +271,7 @@ export function getDefaultConfig(): Config {
         clear_on_empty_at_4: false,
         top_code_commit: false,
         punct_commit: true,
+        candidate_sort_mode: "frequency",
       },
     },
     hotkeys: {

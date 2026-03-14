@@ -78,15 +78,17 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 
 // UICommand represents a command to the UI thread
 type UICommand struct {
-	Type        string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings", "hide_menu", "show_unified_menu"
-	Candidates  []Candidate
-	Input       string
-	CursorPos   int // Cursor position within Input (display position, for rendering cursor indicator)
-	X, Y        int // Caret position (original, not adjusted)
-	CaretHeight int // Height of the caret for position adjustment
-	Page        int
-	TotalPages  int
-	ModeText    string
+	Type                string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings", "hide_menu", "show_unified_menu"
+	Candidates          []Candidate
+	Input               string
+	CursorPos           int // Cursor position within Input (display position, for rendering cursor indicator)
+	X, Y                int // Caret position (original, not adjusted)
+	CaretHeight         int // Height of the caret for position adjustment
+	Page                int
+	TotalPages          int
+	TotalCandidateCount int // 候选总数（所有页）
+	CandidatesPerPage   int // 每页候选数
+	ModeText            string
 	// Toolbar state and position
 	ToolbarState *ToolbarState
 	ToolbarX     int
@@ -114,15 +116,17 @@ type Manager struct {
 	// Tooltip window for encoding lookup
 	tooltip *TooltipWindow
 
-	mu          sync.Mutex
-	candidates  []Candidate
-	input       string
-	cursorPos   int
-	page        int
-	totalPages  int
-	caretX      int
-	caretY      int
-	caretHeight int
+	mu                  sync.Mutex
+	candidates          []Candidate
+	input               string
+	cursorPos           int
+	page                int
+	totalPages          int
+	totalCandidateCount int
+	candidatesPerPage   int
+	caretX              int
+	caretY              int
+	caretHeight         int
 
 	// Sticky position state: once candidate window jumps above caret,
 	// it stays above until input is cleared (new input session)
@@ -333,7 +337,7 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 			return
 		}
 		m.currentInputSession = cmd.InputSession
-		m.doShowCandidates(cmd.Candidates, cmd.Input, cmd.CursorPos, cmd.X, cmd.Y, cmd.CaretHeight, cmd.Page, cmd.TotalPages)
+		m.doShowCandidates(cmd.Candidates, cmd.Input, cmd.CursorPos, cmd.X, cmd.Y, cmd.CaretHeight, cmd.Page, cmd.TotalPages, cmd.TotalCandidateCount, cmd.CandidatesPerPage)
 	case "hide":
 		// Update current session to the hide command's session
 		m.currentInputSession = cmd.InputSession

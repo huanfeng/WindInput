@@ -294,9 +294,10 @@ func (r *DictReader) readEntries(i int) []candidate.Candidate {
 
 		text := r.readString(textOff, textLen)
 		results = append(results, candidate.Candidate{
-			Text:   text,
-			Code:   code,
-			Weight: int(weight),
+			Text:         text,
+			Code:         code,
+			Weight:       int(weight),
+			NaturalOrder: int(j), // 二进制文件中的存储顺序即自然顺序
 		})
 	}
 	return results

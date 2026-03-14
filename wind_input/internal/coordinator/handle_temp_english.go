@@ -191,5 +191,7 @@ func (c *Coordinator) showTempEnglishUI() {
 		caretHeight,
 		1, // currentPage
 		1, // totalPages
+		0, // totalCandidateCount
+		0, // candidatesPerPage
 	)
 }

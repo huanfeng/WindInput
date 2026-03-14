@@ -436,5 +436,7 @@ func (c *Coordinator) showTempPinyinUI() {
 		caretHeight,
 		c.currentPage,
 		c.totalPages,
+		len(c.candidates),
+		c.candidatesPerPage,
 	)
 }

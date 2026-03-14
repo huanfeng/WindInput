@@ -207,6 +207,8 @@ func (c *Coordinator) showUI() {
 		caretHeight,
 		c.currentPage,
 		c.totalPages,
+		len(c.candidates),
+		c.candidatesPerPage,
 	)
 }
 

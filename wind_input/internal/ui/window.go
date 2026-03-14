@@ -214,17 +214,19 @@ type CandidateWindow struct {
 	closeCh  chan struct{}
 
 	// Mouse interaction support
-	hitRects        []CandidateRect // Bounding rectangles for hit testing
-	pageUpRect      *CandidateRect  // Bounding rectangle for page up button
-	pageDownRect    *CandidateRect  // Bounding rectangle for page down button
-	hoverIndex      int             // Currently hovered candidate index (-1 for none)
-	hoverPageBtn    string          // "" = none, "up" = page up hovered, "down" = page down hovered
-	trackingMouse   bool            // Whether mouse leave tracking is enabled
-	callbacks       *CandidateCallback
-	mouseHasMoved   bool // Whether mouse has physically moved since last content update
-	hasLastMousePos bool // Whether we have a stored previous mouse position
-	lastMouseX      int  // Last mouse X position (window-relative)
-	lastMouseY      int  // Last mouse Y position (window-relative)
+	hitRects            []CandidateRect // Bounding rectangles for hit testing
+	pageUpRect          *CandidateRect  // Bounding rectangle for page up button
+	pageDownRect        *CandidateRect  // Bounding rectangle for page down button
+	pageStartIndex      int             // 当前页首个候选的全局索引
+	totalCandidateCount int             // 候选总数（所有页）
+	hoverIndex          int             // Currently hovered candidate index (-1 for none)
+	hoverPageBtn        string          // "" = none, "up" = page up hovered, "down" = page down hovered
+	trackingMouse       bool            // Whether mouse leave tracking is enabled
+	callbacks           *CandidateCallback
+	mouseHasMoved       bool // Whether mouse has physically moved since last content update
+	hasLastMousePos     bool // Whether we have a stored previous mouse position
+	lastMouseX          int  // Last mouse X position (window-relative)
+	lastMouseY          int  // Last mouse Y position (window-relative)
 
 	// Custom popup menu (doesn't steal focus)
 	popupMenu       *PopupMenu
@@ -457,6 +459,14 @@ func (w *CandidateWindow) SetPageRects(pageUp, pageDown *CandidateRect) {
 	w.mu.Lock()
 	w.pageUpRect = pageUp
 	w.pageDownRect = pageDown
+	w.mu.Unlock()
+}
+
+// SetCandidatePageInfo 设置候选分页信息（用于右键菜单判断全局位置）
+func (w *CandidateWindow) SetCandidatePageInfo(pageStartIndex, totalCount int) {
+	w.mu.Lock()
+	w.pageStartIndex = pageStartIndex
+	w.totalCandidateCount = totalCount
 	w.mu.Unlock()
 }
 

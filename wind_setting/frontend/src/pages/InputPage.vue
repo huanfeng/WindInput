@@ -28,10 +28,7 @@
         </div>
         <div class="setting-control">
           <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.input.punct_follow_mode"
-            />
+            <input type="checkbox" v-model="formData.input.punct_follow_mode" />
             <span class="slider"></span>
           </label>
         </div>
@@ -44,9 +41,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>四码唯一时自动上屏</label>
-          <p class="setting-hint">
-            输入满四码且只有一个候选时，自动提交首选
-          </p>
+          <p class="setting-hint">输入满四码且只有一个候选时，自动提交首选</p>
         </div>
         <div class="setting-control">
           <label class="switch">
@@ -61,9 +56,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>四码为空时清空</label>
-          <p class="setting-hint">
-            输入满四码但无候选时，自动清空编码
-          </p>
+          <p class="setting-hint">输入满四码但无候选时，自动清空编码</p>
         </div>
         <div class="setting-control">
           <label class="switch">
@@ -108,9 +101,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>逐字键入</label>
-          <p class="setting-hint">
-            仅显示精确匹配候选，关闭逐码前缀匹配
-          </p>
+          <p class="setting-hint">仅显示精确匹配候选，关闭逐码前缀匹配</p>
         </div>
         <div class="setting-control">
           <label class="switch">
@@ -125,9 +116,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>编码提示</label>
-          <p class="setting-hint">
-            在逐码候选后显示剩余编码，帮助学习全码
-          </p>
+          <p class="setting-hint">在逐码候选后显示剩余编码，帮助学习全码</p>
         </div>
         <div class="setting-control">
           <label class="switch">
@@ -137,6 +126,21 @@
             />
             <span class="slider"></span>
           </label>
+        </div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>候选排序</label>
+          <p class="setting-hint">控制候选词的排列顺序</p>
+        </div>
+        <div class="setting-control">
+          <select
+            v-model="formData.engine.wubi.candidate_sort_mode"
+            class="select"
+          >
+            <option value="frequency">词频排序</option>
+            <option value="natural">自然顺序</option>
+          </select>
         </div>
       </div>
     </div>
@@ -190,10 +194,7 @@
       <div class="fuzzy-dialog">
         <div class="fuzzy-dialog-header">
           <h3>模糊音配置</h3>
-          <button
-            class="fuzzy-dialog-close"
-            @click="showFuzzyDialog = false"
-          >
+          <button class="fuzzy-dialog-close" @click="showFuzzyDialog = false">
             &times;
           </button>
         </div>
