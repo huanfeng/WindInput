@@ -519,6 +519,9 @@ func (c *Coordinator) handleUnifiedMenuAction(id int) {
 	case id == ui.UnifiedMenuReloadConfig:
 		c.logger.Info("Reload config from unified menu")
 		c.HandleMenuCommand("reload_config")
+	case id == ui.UnifiedMenuRestartService:
+		c.logger.Info("Restart service requested from unified menu")
+		c.resetAndResync()
 	case id == ui.UnifiedMenuDictionary:
 		if c.uiManager != nil {
 			c.uiManager.OpenSettingsWithPage("dictionary")

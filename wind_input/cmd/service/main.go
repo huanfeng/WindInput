@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -32,15 +33,6 @@ func showErrorMessageBox(message string) {
 	title, _ := windows.UTF16PtrFromString("清风输入法")
 	msg, _ := windows.UTF16PtrFromString(message)
 	messageBox.Call(0, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x10) // MB_ICONERROR
-}
-
-// showInfoMessageBox 显示信息弹框（MB_ICONINFORMATION）
-func showInfoMessageBox(message string) {
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	messageBox := user32.NewProc("MessageBoxW")
-	title, _ := windows.UTF16PtrFromString("清风输入法")
-	msg, _ := windows.UTF16PtrFromString(message)
-	messageBox.Call(0, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x40) // MB_ICONINFORMATION
 }
 
 // DPI awareness constants
@@ -98,6 +90,25 @@ func checkSingleton() (windows.Handle, bool) {
 	return 0, false
 }
 
+// waitForPreviousExit waits for the previous instance to fully exit (pipe and mutex released)
+// Used during restart to avoid "another instance already running" detection
+func waitForPreviousExit() {
+	const maxWait = 10 * time.Second
+	const pollInterval = 100 * time.Millisecond
+
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		if !isPipeAlreadyExists() {
+			// Pipe is gone, previous instance has exited
+			// Wait a bit more for mutex to be released
+			time.Sleep(pollInterval)
+			return
+		}
+		time.Sleep(pollInterval)
+	}
+	// Timeout: proceed anyway, singleton check will handle it
+}
+
 // Also check if our pipe already exists (another way to detect running instance)
 func isPipeAlreadyExists() bool {
 	pipePath, _ := windows.UTF16PtrFromString(bridge.BridgePipeName)
@@ -144,6 +155,7 @@ func main() {
 	dictPath := flag.String("dict", "", "Dictionary file path (overrides config)")
 	logLevel := flag.String("log", "", "Log level: debug, info, warn, error (overrides config)")
 	saveDefaultConfig := flag.Bool("save-config", false, "Save default configuration and exit")
+	isRestart := flag.Bool("restart", false, "Internal flag: wait for previous instance to exit before starting")
 	flag.Parse()
 
 	// Load configuration
@@ -172,9 +184,13 @@ func main() {
 		cfg.Dictionary.SystemDict = *dictPath
 	}
 
-	// Check if another instance is already running
+	// If restarting, wait for previous instance to fully exit
+	if *isRestart {
+		waitForPreviousExit()
+	}
+
+	// Check if another instance is already running (silently exit, no popup)
 	if isPipeAlreadyExists() {
-		showInfoMessageBox("另一实例已在运行。")
 		os.Exit(0)
 	}
 
@@ -376,17 +392,31 @@ func main() {
 			return
 		}
 
-		// Start new process with same arguments
+		// Build args: preserve original args but add --restart flag
+		// so the new process knows to wait for us to exit
+		args := append([]string{exePath}, os.Args[1:]...)
+		hasRestart := false
+		for _, arg := range args {
+			if arg == "--restart" || arg == "-restart" {
+				hasRestart = true
+				break
+			}
+		}
+		if !hasRestart {
+			args = append(args, "--restart")
+		}
+
+		// Start new process with --restart flag
 		procAttr := &os.ProcAttr{
 			Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
 		}
-		_, err = os.StartProcess(exePath, os.Args, procAttr)
+		_, err = os.StartProcess(exePath, args, procAttr)
 		if err != nil {
 			logger.Error("Failed to start new process", "error", err)
 			return
 		}
 
-		logger.Info("New process started, exiting current process...")
+		logger.Info("New process started with --restart flag, exiting current process...")
 		os.Exit(0)
 	}()
 

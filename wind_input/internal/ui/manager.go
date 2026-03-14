@@ -11,15 +11,16 @@ import (
 
 // Unified menu ID constants
 const (
-	UnifiedMenuToggleMode    = 100
-	UnifiedMenuToggleWidth   = 101
-	UnifiedMenuTogglePunct   = 102
-	UnifiedMenuToggleToolbar = 103
-	UnifiedMenuThemeBase     = 200 // 主题ID: 200+i
-	UnifiedMenuReloadConfig  = 299
-	UnifiedMenuDictionary    = 300
-	UnifiedMenuSettings      = 301
-	UnifiedMenuAbout         = 302
+	UnifiedMenuToggleMode     = 100
+	UnifiedMenuToggleWidth    = 101
+	UnifiedMenuTogglePunct    = 102
+	UnifiedMenuToggleToolbar  = 103
+	UnifiedMenuThemeBase      = 200 // 主题ID: 200+i
+	UnifiedMenuReloadConfig   = 299
+	UnifiedMenuRestartService = 303
+	UnifiedMenuDictionary     = 300
+	UnifiedMenuSettings       = 301
+	UnifiedMenuAbout          = 302
 )
 
 // ThemeMenuItem holds theme ID and display name for menu rendering
@@ -64,6 +65,7 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 	items = append(items,
 		MenuItem{Separator: true},
 		MenuItem{ID: UnifiedMenuReloadConfig, Text: "重载配置"},
+		MenuItem{ID: UnifiedMenuRestartService, Text: "重启服务"},
 		MenuItem{Separator: true},
 		MenuItem{ID: UnifiedMenuDictionary, Text: "词库管理..."},
 		MenuItem{ID: UnifiedMenuSettings, Text: "设置..."},
