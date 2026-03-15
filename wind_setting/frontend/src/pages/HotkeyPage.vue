@@ -6,10 +6,7 @@
     </div>
 
     <!-- 冲突警告 -->
-    <div
-      v-if="hotkeyConflicts.length > 0"
-      class="settings-card warning-card"
-    >
+    <div v-if="hotkeyConflicts.length > 0" class="settings-card warning-card">
       <div class="warning-content">
         <span class="warning-icon">⚠</span>
         <div>
@@ -33,13 +30,7 @@
           <div class="checkbox-group two-columns">
             <label
               class="checkbox-item"
-              v-for="key in [
-                'lshift',
-                'rshift',
-                'lctrl',
-                'rctrl',
-                'capslock',
-              ]"
+              v-for="key in ['lshift', 'rshift', 'lctrl', 'rctrl', 'capslock']"
               :key="key"
             >
               <input
@@ -57,9 +48,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>切换时编码上屏</label>
-          <p class="setting-hint">
-            中文切换为英文时，将已输入的编码直接上屏
-          </p>
+          <p class="setting-hint">中文切换为英文时，将已输入的编码直接上屏</p>
         </div>
         <div class="setting-control">
           <label class="switch">
@@ -95,10 +84,7 @@
           <p class="setting-hint">切换字符宽度模式</p>
         </div>
         <div class="setting-control">
-          <select
-            v-model="formData.hotkeys.toggle_full_width"
-            class="select"
-          >
+          <select v-model="formData.hotkeys.toggle_full_width" class="select">
             <option value="shift+space">Shift + Space</option>
             <option value="ctrl+shift+space">Ctrl + Shift + Space</option>
             <option value="none">不使用</option>
@@ -170,17 +156,44 @@
           </p>
         </div>
         <div class="setting-control">
-          <select
-            v-model="formData.input.pinyin_separator"
-            class="select"
-          >
-            <option value="auto">
-              自动（' 被选择键占用时改用 `）
-            </option>
+          <select v-model="formData.input.pinyin_separator" class="select">
+            <option value="auto">自动（' 被选择键占用时改用 `）</option>
             <option value="quote">' 单引号</option>
             <option value="backtick">` 反引号</option>
             <option value="none">不使用</option>
           </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- 移动高亮候选项 -->
+    <div class="settings-card">
+      <div class="card-title">移动高亮候选项</div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>高亮移动按键</label>
+          <p class="setting-hint">
+            可多选，用于在候选列表中移动选中项。Tab/Shift+Tab 与翻页键互斥
+          </p>
+        </div>
+        <div class="setting-control">
+          <div class="checkbox-group">
+            <label
+              class="checkbox-item"
+              v-for="hk in [
+                { value: 'arrows', label: '上/下方向键' },
+                { value: 'tab', label: 'Tab / Shift+Tab' },
+              ]"
+              :key="hk.value"
+            >
+              <input
+                type="checkbox"
+                :checked="formData.input.highlight_keys.includes(hk.value)"
+                @change="toggleHighlightKey(hk.value)"
+              />
+              <span>{{ hk.label }}</span>
+            </label>
+          </div>
         </div>
       </div>
     </div>
@@ -208,9 +221,7 @@
               <input
                 type="checkbox"
                 :checked="formData.input.page_keys.includes(pk.value)"
-                @change="
-                  toggleArrayValue(formData.input.page_keys, pk.value)
-                "
+                @change="togglePageKey(pk.value)"
               />
               <span>{{ pk.label }}</span>
             </label>
@@ -225,9 +236,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>触发键</label>
-          <p class="setting-hint">
-            五笔模式下按触发键临时切换拼音输入
-          </p>
+          <p class="setting-hint">五笔模式下按触发键临时切换拼音输入</p>
         </div>
         <div class="setting-control">
           <div class="checkbox-group">
@@ -242,9 +251,7 @@
               <input
                 type="checkbox"
                 :checked="
-                  formData.input.temp_pinyin.trigger_keys.includes(
-                    tk.value,
-                  )
+                  formData.input.temp_pinyin.trigger_keys.includes(tk.value)
                 "
                 @change="
                   toggleArrayValue(
@@ -345,10 +352,36 @@ function toggleArrayValue(arr: string[], value: string) {
   checkConflicts();
 }
 
+function toggleHighlightKey(value: string) {
+  toggleArrayValue(props.formData.input.highlight_keys, value);
+  // Tab/Shift+Tab 与翻页互斥
+  if (value === "tab" && props.formData.input.highlight_keys.includes("tab")) {
+    const idx = props.formData.input.page_keys.indexOf("shift_tab");
+    if (idx >= 0) {
+      props.formData.input.page_keys.splice(idx, 1);
+    }
+  }
+}
+
+function togglePageKey(value: string) {
+  toggleArrayValue(props.formData.input.page_keys, value);
+  // Tab/Shift+Tab 与高亮移动互斥
+  if (
+    value === "shift_tab" &&
+    props.formData.input.page_keys.includes("shift_tab")
+  ) {
+    const idx = props.formData.input.highlight_keys.indexOf("tab");
+    if (idx >= 0) {
+      props.formData.input.highlight_keys.splice(idx, 1);
+    }
+  }
+}
+
 watch(
   () => [
     props.formData.hotkeys.toggle_mode_keys,
     props.formData.input.select_key_groups,
+    props.formData.input.highlight_keys,
   ],
   checkConflicts,
   { deep: true },

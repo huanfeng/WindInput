@@ -226,6 +226,46 @@ func (c *Coordinator) getToggleModeKey(keyCode int) string {
 	return ""
 }
 
+// isHighlightUpKey checks if the key is configured as a highlight up key
+func (c *Coordinator) isHighlightUpKey(keyCode uint32, modifiers uint32) bool {
+	if c.config == nil {
+		return false
+	}
+	for _, hk := range c.config.Input.HighlightKeys {
+		switch hk {
+		case "arrows":
+			if keyCode == ipc.VK_UP {
+				return true
+			}
+		case "tab":
+			if keyCode == ipc.VK_TAB && modifiers&ModShift != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isHighlightDownKey checks if the key is configured as a highlight down key
+func (c *Coordinator) isHighlightDownKey(keyCode uint32, modifiers uint32) bool {
+	if c.config == nil {
+		return false
+	}
+	for _, hk := range c.config.Input.HighlightKeys {
+		switch hk {
+		case "arrows":
+			if keyCode == ipc.VK_DOWN {
+				return true
+			}
+		case "tab":
+			if keyCode == ipc.VK_TAB && modifiers&ModShift == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isPageUpKey checks if the key is configured as a page up key
 func (c *Coordinator) isPageUpKey(key string, keyCode int, modifiers uint32) bool {
 	if c.config == nil {

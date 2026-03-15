@@ -107,6 +107,7 @@ export interface InputConfig {
   punct_follow_mode: boolean;
   select_key_groups: string[];
   page_keys: string[];
+  highlight_keys: string[]; // 移动高亮候选项: "arrows"(上/下方向键), "tab"(Tab/Shift+Tab)
   pinyin_separator: string; // 拼音分隔符: "auto", "quote", "backtick", "none"
   temp_pinyin: TempPinyinConfig;
 }
@@ -353,6 +354,7 @@ export function getDefaultConfig(): Config {
       punct_follow_mode: false,
       select_key_groups: ["semicolon_quote"],
       page_keys: ["pageupdown", "minus_equal"],
+      highlight_keys: ["arrows"],
       pinyin_separator: "auto",
       temp_pinyin: {
         trigger_keys: ["backtick"],

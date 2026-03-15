@@ -312,6 +312,7 @@ async function resetCurrentPageDefaults() {
         ...formData.value.input,
         select_key_groups: [...defaults.input.select_key_groups],
         page_keys: [...defaults.input.page_keys],
+        highlight_keys: [...defaults.input.highlight_keys],
       };
       break;
     case "appearance":

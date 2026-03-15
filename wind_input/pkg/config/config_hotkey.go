@@ -187,5 +187,20 @@ func (c *Config) ValidateHotkeyConflicts() []string {
 		}
 	}
 
+	for _, hk := range c.Input.HighlightKeys {
+		var keys []string
+		switch hk {
+		case "tab":
+			keys = []string{"shift_tab", "tab"}
+		}
+		for _, key := range keys {
+			if existing, ok := usedKeys[key]; ok {
+				conflicts = append(conflicts, fmt.Sprintf("按键 %s 同时用于: %s 和 移动高亮", key, existing))
+			} else {
+				usedKeys[key] = "移动高亮"
+			}
+		}
+	}
+
 	return conflicts
 }

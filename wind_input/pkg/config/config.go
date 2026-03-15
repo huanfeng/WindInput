@@ -120,6 +120,7 @@ type InputConfig struct {
 	PunctFollowMode  bool                   `yaml:"punct_follow_mode" json:"punct_follow_mode"`
 	SelectKeyGroups  []string               `yaml:"select_key_groups" json:"select_key_groups"`
 	PageKeys         []string               `yaml:"page_keys" json:"page_keys"`
+	HighlightKeys    []string               `yaml:"highlight_keys" json:"highlight_keys"`     // 移动高亮候选项: "arrows"(上/下方向键), "tab"(Tab/Shift+Tab)
 	PinyinSeparator  string                 `yaml:"pinyin_separator" json:"pinyin_separator"` // 拼音分隔符: "auto", "quote", "backtick", "none"
 	ShiftTempEnglish ShiftTempEnglishConfig `yaml:"shift_temp_english" json:"shift_temp_english"`
 	CapsLockBehavior CapsLockBehaviorConfig `yaml:"capslock_behavior" json:"capslock_behavior"`
@@ -209,6 +210,7 @@ func DefaultConfig() *Config {
 			PunctFollowMode: false,
 			SelectKeyGroups: []string{"semicolon_quote"},
 			PageKeys:        []string{"pageupdown", "minus_equal"},
+			HighlightKeys:   []string{"arrows"},
 			PinyinSeparator: "auto",
 			ShiftTempEnglish: ShiftTempEnglishConfig{
 				Enabled:               true,

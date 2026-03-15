@@ -60,6 +60,12 @@ func (c *Compiler) Compile() (keyDownList, keyUpList []uint32) {
 		keyDownList = append(keyDownList, hashes...)
 	}
 
+	// 4. Highlight keys (arrows are CursorKeys handled by C++, tab needs explicit registration)
+	for _, hk := range c.config.Input.HighlightKeys {
+		hashes := c.compileHighlightKeyGroup(hk)
+		keyDownList = append(keyDownList, hashes...)
+	}
+
 	// =========================================================================
 	// KeyUp triggered hotkeys (toggle mode keys)
 	// =========================================================================
@@ -185,6 +191,21 @@ func (c *Compiler) compilePageKeyGroup(group string) []uint32 {
 		// Shift+Tab for page up, Tab alone for page down
 		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModShift, ipc.VK_TAB)) // Shift+Tab
 		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_TAB))            // Tab
+	}
+
+	return hashes
+}
+
+// compileHighlightKeyGroup compiles a highlight key group to KeyHash list
+func (c *Compiler) compileHighlightKeyGroup(group string) []uint32 {
+	var hashes []uint32
+
+	switch group {
+	case "tab":
+		// Tab for highlight down, Shift+Tab for highlight up
+		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModShift, ipc.VK_TAB)) // Shift+Tab
+		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_TAB))            // Tab
+		// "arrows" doesn't need compilation - VK_UP/VK_DOWN are CursorKeys handled by C++
 	}
 
 	return hashes

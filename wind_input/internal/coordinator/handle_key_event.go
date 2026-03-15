@@ -304,10 +304,10 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	// Chinese mode handling
 	vk := uint32(data.KeyCode)
 	switch {
-	case vk == ipc.VK_UP:
+	case c.isHighlightUpKey(vk, uint32(data.Modifiers)):
 		return c.handleArrowUp()
 
-	case vk == ipc.VK_DOWN:
+	case c.isHighlightDownKey(vk, uint32(data.Modifiers)):
 		return c.handleArrowDown()
 
 	case vk == ipc.VK_LEFT:
