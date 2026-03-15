@@ -209,10 +209,66 @@ public:
         }
 
         pRange->Release();
+
+        // Cache caret position from within this valid edit session.
+        // This is critical for WebView apps where a separate CCaretEditSession
+        // with TF_INVALID_COOKIE would be rejected.
+        if (SUCCEEDED(hr))
+        {
+            _CacheCaretPosition(ec);
+        }
+
         return hr;
     }
 
 private:
+    void _CacheCaretPosition(TfEditCookie ec)
+    {
+        ITfContextView* pContextView = nullptr;
+        if (FAILED(_pContext->GetActiveView(&pContextView)) || pContextView == nullptr)
+            return;
+
+        // Get current caret position (selection)
+        TF_SELECTION sel[1];
+        ULONG fetched = 0;
+        if (SUCCEEDED(_pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, sel, &fetched)) && fetched > 0 && sel[0].range != nullptr)
+        {
+            RECT caretRect = {};
+            BOOL clipped = FALSE;
+            if (SUCCEEDED(pContextView->GetTextExt(ec, sel[0].range, &caretRect, &clipped)))
+            {
+                _pTextService->_cachedCaretRect = caretRect;
+                _pTextService->_hasCachedCaretPos = TRUE;
+            }
+            sel[0].range->Release();
+        }
+
+        // Get composition start position
+        if (_pTextService->_pComposition != nullptr)
+        {
+            ITfRange* pCompRange = nullptr;
+            if (SUCCEEDED(_pTextService->_pComposition->GetRange(&pCompRange)) && pCompRange != nullptr)
+            {
+                ITfRange* pStartRange = nullptr;
+                if (SUCCEEDED(pCompRange->Clone(&pStartRange)) && pStartRange != nullptr)
+                {
+                    pStartRange->Collapse(ec, TF_ANCHOR_START);
+                    RECT compStartRect = {};
+                    BOOL clipped = FALSE;
+                    if (SUCCEEDED(pContextView->GetTextExt(ec, pStartRange, &compStartRect, &clipped)))
+                    {
+                        _pTextService->_cachedCompStartRect = compStartRect;
+                        _pTextService->_hasCachedCompStartPos = TRUE;
+                    }
+                    pStartRange->Release();
+                }
+                pCompRange->Release();
+            }
+        }
+
+        pContextView->Release();
+    }
+
     void _SetDisplayAttribute(TfEditCookie ec, ITfRange* pRange)
     {
         // Get the display attribute atom from TextService
@@ -426,8 +482,12 @@ CTextService::CTextService()
     , _pHotkeyManager(nullptr)
     , _bChineseMode(TRUE)
     , _pComposition(nullptr)
+    , _hasCachedCaretPos(FALSE)
+    , _hasCachedCompStartPos(FALSE)
     , _gaDisplayAttributeInput(TF_INVALID_GUIDATOM)
 {
+    ZeroMemory(&_cachedCaretRect, sizeof(_cachedCaretRect));
+    ZeroMemory(&_cachedCompStartRect, sizeof(_cachedCompStartRect));
     DllAddRef();
 }
 
@@ -1386,21 +1446,51 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight)
 
 void CTextService::SendCaretPositionUpdate()
 {
-    LONG x, y, height;
-    if (GetCaretPosition(&x, &y, &height))
+    LONG x = 0, y = 0, height = 20;
+    LONG compStartX = 0, compStartY = 0;
+    BOOL hasPosition = FALSE;
+
+    // Priority 1: Use cached position from edit session (reliable for WebView apps
+    // where separate CaretEditSession with TF_INVALID_COOKIE is rejected)
+    if (_hasCachedCaretPos)
     {
-        // Also get composition start position if there's an active composition
-        LONG compStartX = 0, compStartY = 0;
+        x = _cachedCaretRect.left;
+        y = _cachedCaretRect.bottom;
+        height = _cachedCaretRect.bottom - _cachedCaretRect.top;
+        if (height <= 0) height = 20;
+        hasPosition = TRUE;
+
+        if (_hasCachedCompStartPos)
+        {
+            compStartX = _cachedCompStartRect.left;
+            compStartY = _cachedCompStartRect.bottom;
+        }
+
+        // Clear cache (one-shot: next call falls back to normal methods)
+        _hasCachedCaretPos = FALSE;
+        _hasCachedCompStartPos = FALSE;
+
+        WIND_LOG_DEBUG(L"SendCaretPositionUpdate: Using cached position from edit session\n");
+    }
+
+    // Priority 2: Normal method (separate edit session + fallbacks)
+    if (!hasPosition)
+    {
+        if (!GetCaretPosition(&x, &y, &height))
+        {
+            return; // No position available at all
+        }
+
         if (_pComposition != nullptr)
         {
             GetCompositionStartPosition(&compStartX, &compStartY);
         }
+    }
 
-        // SendCaretUpdate is async (fire-and-forget), no response expected
-        if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
-        {
-            _pIPCClient->SendCaretUpdate((int)x, (int)y, (int)height, (int)compStartX, (int)compStartY);
-        }
+    // SendCaretUpdate is async (fire-and-forget), no response expected
+    if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
+    {
+        _pIPCClient->SendCaretUpdate((int)x, (int)y, (int)height, (int)compStartX, (int)compStartY);
     }
 }
 

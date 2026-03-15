@@ -628,7 +628,7 @@ BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight)
 
     _LogDebug(L"Sending focus_gained with caret: x=%d, y=%d, h=%d", caretX, caretY, caretHeight);
 
-    CaretPayload payload;
+    CaretPayload payload = {};  // Zero-initialize to avoid garbage in compositionStartX/Y
     payload.x = caretX;
     payload.y = caretY;
     payload.height = caretHeight;

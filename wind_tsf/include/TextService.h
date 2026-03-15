@@ -125,6 +125,13 @@ private:
     std::wstring _lastCompositionText;  // Cache to skip redundant updates
     BOOL _asyncEdit;  // Track if last RequestEditSession returned TF_S_ASYNC (Weasel optimization)
 
+    // Cached caret position from edit session (for WebView apps where separate
+    // CaretEditSession with TF_INVALID_COOKIE may be rejected)
+    RECT _cachedCaretRect;
+    RECT _cachedCompStartRect;
+    BOOL _hasCachedCaretPos;
+    BOOL _hasCachedCompStartPos;
+
     // Display Attribute
     TfGuidAtom _gaDisplayAttributeInput;
 

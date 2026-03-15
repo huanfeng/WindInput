@@ -36,7 +36,6 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	// start/update, providing the up-to-date position.
 	if len(c.inputBuffer) > 0 && len(c.candidates) > 0 && c.uiManager != nil {
 		if c.pendingFirstShow {
-			// First character: C++ has now sent the post-response position, show window for the first time
 			c.pendingFirstShow = false
 			c.logger.Debug("Pending first show resolved, displaying candidate window")
 		}
