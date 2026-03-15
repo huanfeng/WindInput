@@ -188,9 +188,15 @@ func (c *Coordinator) showUI() {
 
 	// Use caret position for candidate window placement
 	// The UI manager will handle boundary detection and position adjustment
+	// When inline preedit is enabled, anchor the window at the composition start position
+	// instead of following the current caret (which moves as the user types)
 	caretX := c.caretX
 	caretY := c.caretY
 	caretHeight := c.caretHeight
+	if c.config != nil && c.config.UI.InlinePreedit && c.compositionStartValid {
+		caretX = c.compositionStartX
+		caretY = c.compositionStartY
+	}
 
 	// Multi-monitor support: coordinates can be negative (monitors to the left/above primary)
 	// Only use fallback if we haven't received valid caret info yet (both X and Y are 0)

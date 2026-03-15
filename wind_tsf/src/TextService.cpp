@@ -1389,12 +1389,58 @@ void CTextService::SendCaretPositionUpdate()
     LONG x, y, height;
     if (GetCaretPosition(&x, &y, &height))
     {
+        // Also get composition start position if there's an active composition
+        LONG compStartX = 0, compStartY = 0;
+        if (_pComposition != nullptr)
+        {
+            GetCompositionStartPosition(&compStartX, &compStartY);
+        }
+
         // SendCaretUpdate is async (fire-and-forget), no response expected
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
         {
-            _pIPCClient->SendCaretUpdate((int)x, (int)y, (int)height);
+            _pIPCClient->SendCaretUpdate((int)x, (int)y, (int)height, (int)compStartX, (int)compStartY);
         }
     }
+}
+
+BOOL CTextService::GetCompositionStartPosition(LONG* px, LONG* py)
+{
+    if (_pComposition == nullptr || _pThreadMgr == nullptr)
+    {
+        return FALSE;
+    }
+
+    ITfDocumentMgr* pDocMgr = nullptr;
+    HRESULT hr = _pThreadMgr->GetFocus(&pDocMgr);
+    if (FAILED(hr) || pDocMgr == nullptr)
+    {
+        return FALSE;
+    }
+
+    ITfContext* pContext = nullptr;
+    hr = pDocMgr->GetTop(&pContext);
+    pDocMgr->Release();
+    if (FAILED(hr) || pContext == nullptr)
+    {
+        return FALSE;
+    }
+
+    RECT caretRect = {}, compStartRect = {};
+    BOOL hasCompStart = FALSE;
+    BOOL result = CCaretEditSession::GetCaretAndCompositionStartRect(
+        pContext, _pComposition, &caretRect, &compStartRect, &hasCompStart);
+    pContext->Release();
+
+    if (result && hasCompStart)
+    {
+        *px = compStartRect.left;
+        *py = compStartRect.bottom;
+        WIND_LOG_DEBUG_FMT(L"GetCompositionStartPosition: x=%ld, y=%ld\n", *px, *py);
+        return TRUE;
+    }
+
+    return FALSE;
 }
 
 BOOL CTextService::_InitLangBarButton()

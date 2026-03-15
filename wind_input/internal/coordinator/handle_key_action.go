@@ -11,6 +11,7 @@ import (
 
 func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	startTime := time.Now()
+	wasEmpty := len(c.inputBuffer) == 0
 	// 在光标位置插入字符
 	c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + key + c.inputBuffer[c.inputCursorPos:]
 	c.inputCursorPos += len(key)
@@ -92,7 +93,14 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	}
 
 	showStart := time.Now()
-	c.showUI()
+	// 首字符时延迟显示候选窗口，等待 C++ 响应后发来的准确位置
+	// 避免窗口先出现在旧位置再跳到新位置
+	if wasEmpty {
+		c.pendingFirstShow = true
+		c.logger.Debug("First character, deferring candidate window display")
+	} else {
+		c.showUI()
+	}
 	showElapsed := time.Since(showStart)
 
 	totalElapsed := time.Since(startTime)

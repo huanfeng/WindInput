@@ -24,12 +24,23 @@ public:
     // Returns TRUE if successful, FALSE otherwise
     static BOOL GetCaretRect(ITfContext* pContext, RECT* prc);
 
+    // Execute the session and get both caret position and composition start position
+    static BOOL GetCaretAndCompositionStartRect(ITfContext* pContext, ITfComposition* pComposition,
+                                                 RECT* pCaretRect, RECT* pCompStartRect, BOOL* pHasCompStart);
+
     // Get the result after DoEditSession is called
     BOOL GetResult(RECT* prc);
+
+    // Set composition to also query its start position
+    void SetComposition(ITfComposition* pComposition) { _pComposition = pComposition; }
+    BOOL GetCompositionStartResult(RECT* prc);
 
 private:
     LONG _refCount;
     ITfContext* _pContext;
+    ITfComposition* _pComposition;
     RECT _caretRect;
+    RECT _compositionStartRect;
+    BOOL _hasCompositionStart;
     BOOL _succeeded;
 };

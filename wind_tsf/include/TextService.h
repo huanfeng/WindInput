@@ -78,6 +78,7 @@ public:
 
     // Get caret position using TSF APIs (more accurate for browsers)
     BOOL GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight);
+    BOOL GetCompositionStartPosition(LONG* px, LONG* py);
 
     // Input mode control
     void ToggleInputMode();

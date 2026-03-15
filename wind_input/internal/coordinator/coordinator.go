@@ -93,7 +93,8 @@ type Coordinator struct {
 	currentPage        int
 	totalPages         int
 	candidatesPerPage  int
-	selectedIndex int // 当前页内选中的候选索引（0-based），用于上下箭头键选择
+	selectedIndex      int  // 当前页内选中的候选索引（0-based），用于上下箭头键选择
+	pendingFirstShow   bool // 首字符延迟显示：等待 C++ 响应后的准确位置再显示候选窗口
 
 	// 临时英文模式状态
 	tempEnglishMode   bool   // 是否处于临时英文模式
@@ -108,6 +109,13 @@ type Coordinator struct {
 	caretY      int
 	caretHeight int
 	caretValid  bool // true if we have received valid caret position (coordinates can be negative in multi-monitor)
+
+	// Composition start position: captured when inputBuffer transitions from empty to non-empty.
+	// Used to anchor the candidate window at the start of the composition when inline preedit is enabled,
+	// instead of following the current caret position which moves as the user types.
+	compositionStartX     int
+	compositionStartY     int
+	compositionStartValid bool
 
 	// Last known valid window position (for fallback)
 	lastValidX int
@@ -386,6 +394,8 @@ func (c *Coordinator) clearState() {
 	c.currentPage = 1
 	c.totalPages = 1
 	c.selectedIndex = 0
+	c.pendingFirstShow = false
+	c.compositionStartValid = false
 
 	// 清除命令结果缓存，确保 uuid/date/time 等下次生成新值
 	c.engineMgr.InvalidateCommandCache()

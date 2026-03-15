@@ -21,7 +21,28 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	c.caretHeight = data.Height
 	c.caretValid = true // Mark that we have received valid caret position
 
-	c.logger.Debug("Caret position updated", "x", c.caretX, "y", c.caretY, "height", c.caretHeight)
+	// Store composition start position from C++ TSF (via ITfComposition::GetRange)
+	if data.CompositionStartX != 0 || data.CompositionStartY != 0 {
+		c.compositionStartX = data.CompositionStartX
+		c.compositionStartY = data.CompositionStartY
+		c.compositionStartValid = true
+	}
+
+	c.logger.Debug("Caret position updated", "x", c.caretX, "y", c.caretY, "height", c.caretHeight,
+		"compStartX", data.CompositionStartX, "compStartY", data.CompositionStartY)
+
+	// If there's active input, refresh the candidate window position.
+	// This handles the case where C++ re-sends caret update after composition
+	// start/update, providing the up-to-date position.
+	if len(c.inputBuffer) > 0 && len(c.candidates) > 0 && c.uiManager != nil {
+		if c.pendingFirstShow {
+			// First character: C++ has now sent the post-response position, show window for the first time
+			c.pendingFirstShow = false
+			c.logger.Debug("Pending first show resolved, displaying candidate window")
+		}
+		c.showUI()
+	}
+
 	return nil
 }
 

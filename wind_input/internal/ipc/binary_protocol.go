@@ -148,11 +148,13 @@ type KeyPayload struct {
 	EventSeq  uint16 // Monotonic event sequence number
 }
 
-// CaretPayload represents caret position (12 bytes, matches C++ struct)
+// CaretPayload represents caret position (20 bytes, matches C++ struct)
 type CaretPayload struct {
-	X      int32
-	Y      int32
-	Height int32
+	X                 int32
+	Y                 int32
+	Height            int32
+	CompositionStartX int32 // Screen X of composition range start (0 if no composition)
+	CompositionStartY int32 // Screen Y of composition range start (0 if no composition)
 }
 
 // CompositionPayload for update_composition response

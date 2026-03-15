@@ -114,14 +114,16 @@ struct KeyPayload
 };
 static_assert(sizeof(KeyPayload) == 16, "KeyPayload must be 16 bytes");
 
-// Caret position payload (12 bytes)
+// Caret position payload (20 bytes)
 struct CaretPayload
 {
     int32_t x;
     int32_t y;
     int32_t height;
+    int32_t compositionStartX; // Screen X of composition range start (0 if no composition)
+    int32_t compositionStartY; // Screen Y of composition range start (0 if no composition)
 };
-static_assert(sizeof(CaretPayload) == 12, "CaretPayload must be 12 bytes");
+static_assert(sizeof(CaretPayload) == 20, "CaretPayload must be 20 bytes");
 
 // Composition update header (before UTF-8 text)
 struct CompositionHeader

@@ -565,7 +565,7 @@ BOOL CIPCClient::SendCommitRequest(const uint8_t* payload, uint32_t payloadSize)
     return _SendBinaryMessage(CMD_COMMIT_REQUEST, payload, payloadSize);
 }
 
-BOOL CIPCClient::SendCaretUpdate(int x, int y, int height)
+BOOL CIPCClient::SendCaretUpdate(int x, int y, int height, int compositionStartX, int compositionStartY)
 {
     if (!_ShouldAttemptOperation())
     {
@@ -581,8 +581,10 @@ BOOL CIPCClient::SendCaretUpdate(int x, int y, int height)
     payload.x = x;
     payload.y = y;
     payload.height = height;
+    payload.compositionStartX = compositionStartX;
+    payload.compositionStartY = compositionStartY;
 
-    _LogDebug(L"Sending caret update (async): x=%d, y=%d, h=%d", x, y, height);
+    _LogDebug(L"Sending caret update (async): x=%d, y=%d, h=%d, compStart=(%d,%d)", x, y, height, compositionStartX, compositionStartY);
 
     // Send async - no response needed for caret updates
     return _SendBinaryMessage(CMD_CARET_UPDATE, &payload, sizeof(payload), true /* async */);

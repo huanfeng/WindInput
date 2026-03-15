@@ -125,11 +125,19 @@ func (c *BinaryCodec) DecodeCaretPayload(buf []byte) (*CaretPayload, error) {
 		return nil, fmt.Errorf("caret payload too short: %d bytes", len(buf))
 	}
 
-	return &CaretPayload{
+	payload := &CaretPayload{
 		X:      int32(binary.LittleEndian.Uint32(buf[0:4])),
 		Y:      int32(binary.LittleEndian.Uint32(buf[4:8])),
 		Height: int32(binary.LittleEndian.Uint32(buf[8:12])),
-	}, nil
+	}
+
+	// Extended fields (20 bytes): composition start position
+	if len(buf) >= 20 {
+		payload.CompositionStartX = int32(binary.LittleEndian.Uint32(buf[12:16]))
+		payload.CompositionStartY = int32(binary.LittleEndian.Uint32(buf[16:20]))
+	}
+
+	return payload, nil
 }
 
 // ============================================================================

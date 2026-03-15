@@ -102,7 +102,7 @@ public:
     BOOL SendCommitRequest(const uint8_t* payload, uint32_t payloadSize);
 
     // Send caret position update to Go Service
-    BOOL SendCaretUpdate(int x, int y, int height);
+    BOOL SendCaretUpdate(int x, int y, int height, int compositionStartX = 0, int compositionStartY = 0);
 
     // Send focus lost notification
     BOOL SendFocusLost();

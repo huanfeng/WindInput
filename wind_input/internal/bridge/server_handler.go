@@ -182,9 +182,11 @@ func (s *Server) handleFocusGained(payload []byte, clientID int, processID uint3
 		if err == nil {
 			s.logger.Debug("Focus gained with caret", "x", caretPayload.X, "y", caretPayload.Y)
 			s.handler.HandleCaretUpdate(CaretData{
-				X:      int(caretPayload.X),
-				Y:      int(caretPayload.Y),
-				Height: int(caretPayload.Height),
+				X:                 int(caretPayload.X),
+				Y:                 int(caretPayload.Y),
+				Height:            int(caretPayload.Height),
+				CompositionStartX: int(caretPayload.CompositionStartX),
+				CompositionStartY: int(caretPayload.CompositionStartY),
 			})
 		}
 	}
@@ -207,9 +209,11 @@ func (s *Server) handleCaretUpdate(payload []byte, clientID int) []byte {
 		"x", caretPayload.X, "y", caretPayload.Y, "height", caretPayload.Height)
 
 	s.handler.HandleCaretUpdate(CaretData{
-		X:      int(caretPayload.X),
-		Y:      int(caretPayload.Y),
-		Height: int(caretPayload.Height),
+		X:                 int(caretPayload.X),
+		Y:                 int(caretPayload.Y),
+		Height:            int(caretPayload.Height),
+		CompositionStartX: int(caretPayload.CompositionStartX),
+		CompositionStartY: int(caretPayload.CompositionStartY),
 	})
 
 	return s.codec.EncodeAck()

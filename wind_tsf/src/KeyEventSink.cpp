@@ -745,6 +745,9 @@ BOOL CKeyEventSink::_HandleServiceResponse()
                 _pTextService->InsertTextAndStartComposition(response.text, response.newComposition);
                 _isComposing = TRUE;
                 _hasCandidates = TRUE;
+
+                // Re-send caret position after composition change
+                _pTextService->SendCaretPositionUpdate();
             }
             else
             {
@@ -788,6 +791,10 @@ BOOL CKeyEventSink::_HandleServiceResponse()
             _isComposing = TRUE;
             _hasCandidates = TRUE;
             _pTextService->UpdateComposition(response.composition, response.caretPos);
+
+            // Re-send caret position after composition update so Go can
+            // reposition the candidate window with the up-to-date coordinates.
+            _pTextService->SendCaretPositionUpdate();
 
             QueryPerformanceCounter(&ucEnd);
             int ucMs = (int)((ucEnd.QuadPart - ucStart.QuadPart) * 1000 / freq.QuadPart);

@@ -5,6 +5,8 @@
 CCaretEditSession::CCaretEditSession(ITfContext* pContext)
     : _refCount(1)
     , _pContext(pContext)
+    , _pComposition(nullptr)
+    , _hasCompositionStart(FALSE)
     , _succeeded(FALSE)
 {
     if (_pContext)
@@ -12,6 +14,7 @@ CCaretEditSession::CCaretEditSession(ITfContext* pContext)
         _pContext->AddRef();
     }
     ZeroMemory(&_caretRect, sizeof(_caretRect));
+    ZeroMemory(&_compositionStartRect, sizeof(_compositionStartRect));
 }
 
 CCaretEditSession::~CCaretEditSession()
@@ -100,6 +103,33 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
         }
 
         sel[0].range->Release();
+
+        // If a composition is set, also get the start position of the composition range
+        if (_succeeded && _pComposition != nullptr)
+        {
+            ITfRange* pCompRange = nullptr;
+            hr = _pComposition->GetRange(&pCompRange);
+            if (SUCCEEDED(hr) && pCompRange != nullptr)
+            {
+                // Clone the range and collapse to the start
+                ITfRange* pStartRange = nullptr;
+                hr = pCompRange->Clone(&pStartRange);
+                if (SUCCEEDED(hr) && pStartRange != nullptr)
+                {
+                    pStartRange->Collapse(ec, TF_ANCHOR_START);
+                    BOOL clippedComp = FALSE;
+                    hr = pContextView->GetTextExt(ec, pStartRange, &_compositionStartRect, &clippedComp);
+                    if (SUCCEEDED(hr))
+                    {
+                        _hasCompositionStart = TRUE;
+                        WIND_LOG_DEBUG_FMT(L"CaretEditSession: Composition start (%ld, %ld)\n",
+                                  _compositionStartRect.left, _compositionStartRect.bottom);
+                    }
+                    pStartRange->Release();
+                }
+                pCompRange->Release();
+            }
+        }
     }
     else
     {
@@ -128,6 +158,16 @@ BOOL CCaretEditSession::GetResult(RECT* prc)
     if (_succeeded && prc)
     {
         *prc = _caretRect;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+BOOL CCaretEditSession::GetCompositionStartResult(RECT* prc)
+{
+    if (_hasCompositionStart && prc)
+    {
+        *prc = _compositionStartRect;
         return TRUE;
     }
     return FALSE;
@@ -172,5 +212,49 @@ BOOL CCaretEditSession::GetCaretRect(ITfContext* pContext, RECT* prc)
 
     pEditSession->Release();
 
+    return result;
+}
+
+// Static method to get both caret rect and composition start rect
+BOOL CCaretEditSession::GetCaretAndCompositionStartRect(ITfContext* pContext, ITfComposition* pComposition,
+                                                         RECT* pCaretRect, RECT* pCompStartRect, BOOL* pHasCompStart)
+{
+    if (pContext == nullptr || pCaretRect == nullptr)
+    {
+        return FALSE;
+    }
+
+    CCaretEditSession* pEditSession = new CCaretEditSession(pContext);
+    if (pEditSession == nullptr)
+    {
+        return FALSE;
+    }
+
+    // Set composition so DoEditSession will also query its start position
+    pEditSession->SetComposition(pComposition);
+
+    HRESULT hrSession = S_OK;
+    HRESULT hr = pContext->RequestEditSession(
+        TF_INVALID_COOKIE,
+        pEditSession,
+        TF_ES_SYNC | TF_ES_READ,
+        &hrSession
+    );
+
+    BOOL result = FALSE;
+    if (SUCCEEDED(hr) && SUCCEEDED(hrSession))
+    {
+        result = pEditSession->GetResult(pCaretRect);
+        if (pCompStartRect && pHasCompStart)
+        {
+            *pHasCompStart = pEditSession->GetCompositionStartResult(pCompStartRect);
+        }
+    }
+    else
+    {
+        WIND_LOG_ERROR_FMT(L"RequestEditSession failed hr=0x%08X, hrSession=0x%08X\n", hr, hrSession);
+    }
+
+    pEditSession->Release();
     return result;
 }

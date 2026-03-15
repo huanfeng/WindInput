@@ -40,9 +40,11 @@ func (d *KeyEventData) IsCapsLockOn() bool {
 
 // CaretData contains caret position information
 type CaretData struct {
-	X      int
-	Y      int
-	Height int
+	X                 int
+	Y                 int
+	Height            int
+	CompositionStartX int // Screen X of composition range start (0 if no composition)
+	CompositionStartY int // Screen Y of composition range start (0 if no composition)
 }
 
 // StatusUpdateData for status update response
