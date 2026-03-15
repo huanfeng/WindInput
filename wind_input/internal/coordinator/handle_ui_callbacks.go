@@ -4,7 +4,6 @@ package coordinator
 import (
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/internal/ui"
-	"github.com/huanfeng/wind_input/pkg/config"
 )
 
 // setupToolbarCallbacks sets up the callbacks for toolbar button clicks
@@ -501,9 +500,10 @@ func (c *Coordinator) handleToolbarOpenSettings() {
 }
 
 // handleToolbarPositionChanged handles toolbar position change (after dragging)
+// Toolbar position is temporary and not persisted to config.
+// On IME reload, toolbar will return to its default calculated position.
 func (c *Coordinator) handleToolbarPositionChanged(x, y int) {
-	c.logger.Debug("Toolbar position changed", "x", x, "y", y)
-	c.saveToolbarPosition(x, y)
+	c.logger.Debug("Toolbar position changed (temporary)", "x", x, "y", y)
 }
 
 // handleToolbarContextMenu handles toolbar right-click context menu action
@@ -622,18 +622,4 @@ func (c *Coordinator) resetAndResync() {
 // Note: This should be called with lock held, or use broadcastState() instead
 func (c *Coordinator) syncToolbarState() {
 	c.syncToolbarStateNoLock()
-}
-
-// saveToolbarPosition saves the toolbar position to config
-func (c *Coordinator) saveToolbarPosition(x, y int) {
-	if c.config == nil {
-		return
-	}
-
-	c.config.Toolbar.PositionX = x
-	c.config.Toolbar.PositionY = y
-
-	if err := config.Save(c.config); err != nil {
-		c.logger.Error("Failed to save toolbar position", "error", err)
-	}
 }

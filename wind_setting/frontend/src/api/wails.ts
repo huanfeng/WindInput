@@ -295,8 +295,6 @@ export function getDefaultConfig(): Config {
     },
     toolbar: {
       visible: true,
-      position_x: 0,
-      position_y: 0,
     },
     input: {
       punct_follow_mode: false,

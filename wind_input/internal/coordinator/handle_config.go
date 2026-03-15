@@ -94,7 +94,22 @@ func (c *Coordinator) UpdateToolbarConfig(toolbarConfig *config.ToolbarConfig) {
 	// 通知 UI Manager 更新工具栏状态
 	if c.uiManager != nil {
 		if c.toolbarVisible && c.imeActivated {
-			c.uiManager.ShowToolbarWithState(toolbarConfig.PositionX, toolbarConfig.PositionY, ui.ToolbarState{
+			// 动态计算工具栏位置，不使用保存的坐标
+			toolbarWidth, toolbarHeight := 140, 30
+			var posX, posY int
+			if c.caretValid {
+				posX, posY = ui.GetToolbarPositionForCaret(
+					c.caretX, c.caretY,
+					ui.ScaleIntForDPI(toolbarWidth),
+					ui.ScaleIntForDPI(toolbarHeight),
+				)
+			} else {
+				posX, posY = ui.GetDefaultToolbarPosition(
+					ui.ScaleIntForDPI(toolbarWidth),
+					ui.ScaleIntForDPI(toolbarHeight),
+				)
+			}
+			c.uiManager.ShowToolbarWithState(posX, posY, ui.ToolbarState{
 				ChineseMode:   c.chineseMode,
 				FullWidth:     c.fullWidth,
 				ChinesePunct:  c.chinesePunctuation,

@@ -93,8 +93,6 @@ export interface UIConfig {
 // 工具栏配置
 export interface ToolbarConfig {
   visible: boolean;
-  position_x: number;
-  position_y: number;
 }
 
 // 临时拼音配置
@@ -348,8 +346,6 @@ export function getDefaultConfig(): Config {
     },
     toolbar: {
       visible: true,
-      position_x: 0,
-      position_y: 0,
     },
     input: {
       full_width: false,

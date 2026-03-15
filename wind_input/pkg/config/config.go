@@ -112,9 +112,7 @@ type UIConfig struct {
 
 // ToolbarConfig contains toolbar settings
 type ToolbarConfig struct {
-	Visible   bool `yaml:"visible" json:"visible"`
-	PositionX int  `yaml:"position_x" json:"position_x"`
-	PositionY int  `yaml:"position_y" json:"position_y"`
+	Visible bool `yaml:"visible" json:"visible"`
 }
 
 // InputConfig contains input behavior settings
@@ -205,9 +203,7 @@ func DefaultConfig() *Config {
 			MenuFontSize:            12.0,
 		},
 		Toolbar: ToolbarConfig{
-			Visible:   true,
-			PositionX: 0,
-			PositionY: 0,
+			Visible: true,
 		},
 		Input: InputConfig{
 			PunctFollowMode: false,
