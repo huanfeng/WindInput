@@ -44,7 +44,7 @@ func ParseHexColor(hex string) (color.Color, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid alpha component: %w", err)
 		}
-		return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a)}, nil
+		return color.NRGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a)}, nil
 
 	default:
 		return nil, fmt.Errorf("invalid hex color format: expected 6 or 8 characters, got %d", len(hex))
