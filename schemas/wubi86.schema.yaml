@@ -1,0 +1,33 @@
+schema:
+  id: wubi86
+  name: "五笔86"
+  icon_label: "五"
+  version: "1.0"
+  author: "WindInput"
+  description: "王码五笔86版输入方案"
+
+engine:
+  type: codetable
+  codetable:
+    max_code_length: 4
+    auto_commit_unique: false
+    clear_on_empty_max: false
+    top_code_commit: true
+    punct_commit: true
+    show_code_hint: true
+    single_code_input: false
+    candidate_sort_mode: frequency
+  filter_mode: smart
+
+dictionaries:
+  - id: wubi86_main
+    path: "dict/wubi/wubi86.txt"
+    type: codetable
+    default: true
+
+user_data:
+  shadow_file: "shadow_wubi86.yaml"
+  user_dict_file: "user_words_wubi86.txt"
+
+learning:
+  mode: manual

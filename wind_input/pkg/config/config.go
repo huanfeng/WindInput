@@ -10,13 +10,20 @@ import (
 // Config represents the application configuration
 type Config struct {
 	Startup    StartupConfig    `yaml:"startup" json:"startup"`
-	Dictionary DictionaryConfig `yaml:"dictionary" json:"dictionary"`
-	Engine     EngineConfig     `yaml:"engine" json:"engine"`
+	Schema     SchemaConfig     `yaml:"schema" json:"schema"`
+	Dictionary DictionaryConfig `yaml:"dictionary" json:"dictionary"` // Deprecated: 迁移到 schema 文件，Phase 3 移除
+	Engine     EngineConfig     `yaml:"engine" json:"engine"`         // Deprecated: 迁移到 schema 文件，Phase 3 移除
 	Hotkeys    HotkeyConfig     `yaml:"hotkeys" json:"hotkeys"`
 	UI         UIConfig         `yaml:"ui" json:"ui"`
 	Toolbar    ToolbarConfig    `yaml:"toolbar" json:"toolbar"`
 	Input      InputConfig      `yaml:"input" json:"input"`
 	Advanced   AdvancedConfig   `yaml:"advanced" json:"advanced"`
+}
+
+// SchemaConfig 输入方案配置
+type SchemaConfig struct {
+	Active    string   `yaml:"active" json:"active"`       // 当前活跃方案 ID
+	Available []string `yaml:"available" json:"available"` // 可切换方案 ID 列表（顺序决定切换顺序）
 }
 
 // StartupConfig 启动/默认状态配置
@@ -156,6 +163,10 @@ func DefaultConfig() *Config {
 			DefaultChineseMode:  true,
 			DefaultFullWidth:    false,
 			DefaultChinesePunct: true,
+		},
+		Schema: SchemaConfig{
+			Active:    "wubi86",
+			Available: []string{"wubi86", "pinyin"},
 		},
 		Dictionary: DictionaryConfig{
 			SystemDict:     "dict/wubi/wubi86.txt",

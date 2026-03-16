@@ -1,0 +1,37 @@
+schema:
+  id: pinyin
+  name: "全拼"
+  icon_label: "拼"
+  version: "1.0"
+  author: "WindInput"
+  description: "全拼输入方案"
+
+engine:
+  type: pinyin
+  pinyin:
+    scheme: full
+    show_wubi_hint: true
+    use_smart_compose: true
+    candidate_order: smart
+    fuzzy:
+      enabled: false
+  filter_mode: smart
+
+dictionaries:
+  - id: pinyin_main
+    path: "dict/pinyin"
+    type: rime_pinyin
+    default: true
+  - id: wubi_reverse
+    path: "dict/wubi/wubi86.txt"
+    type: codetable
+    role: reverse_lookup
+
+user_data:
+  shadow_file: "shadow_pinyin.yaml"
+  user_dict_file: "user_words_pinyin.txt"
+  user_freq_file: "user_freq_pinyin.txt"
+
+learning:
+  mode: auto
+  unigram_path: "dict/pinyin/unigram.txt"
