@@ -122,12 +122,42 @@
 
 ---
 
-## Phase 4：统一 DictLayer 接口，五笔走 CompositeDict
+## Phase 4：统一 DictLayer 接口，拼音引擎使用 CompositeDict ✅
 
-**状态**：待实施
+**完成时间**：2026-03-16
+
+### 变更内容
+
+1. **删除 Dict 接口** — dict.go 现在只剩 DictLayer/MutableLayer/ShadowProvider
+2. **拼音引擎改用 `*dict.CompositeDict`** — struct 字段、构造函数、所有调用点
+3. **移除类型断言** — engine_ex.go/lexicon.go/lattice.go 中的 PrefixSearchable/AbbrevSearchable/CommandSearchable 断言改为直接方法调用
+4. **factory.go** — 无 DictManager 时创建独立 CompositeDict
+5. **测试更新** — 新增 `wrapInCompositeDict` 辅助函数
+
+### 检查点
+- [x] dict.go 只剩 DictLayer/MutableLayer/ShadowProvider
+- [x] 拼音引擎无 Dict 接口引用
+- [x] 所有测试通过
+- [x] `go build ./...` 通过
 
 ---
 
-## Phase 5：LearningStrategy 接口定义
+## Phase 5：LearningStrategy 接口定义 ✅
 
-**状态**：待实施
+**完成时间**：2026-03-16
+
+### 变更内容
+
+1. **新建 `schema/learning.go`**
+   - `LearningStrategy` 接口（OnCandidateCommitted/Reset）
+   - `ManualLearning` — 码表默认，不自动造词
+   - `AutoLearning` — 拼音默认，多字词自动学习（占位实现）
+   - `FrequencyLearning` — 仅调频
+   - `NewLearningStrategy(mode, userDict)` 工厂函数
+
+2. **测试覆盖** — 三种策略的功能验证
+
+### 检查点
+- [x] LearningStrategy 接口可正常调用
+- [x] 三种策略实现正确
+- [x] 所有测试通过
