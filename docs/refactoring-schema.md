@@ -80,9 +80,45 @@
 
 ---
 
-## Phase 3：Schema 驱动引擎创建与方案切换
+## Phase 3：Schema 驱动引擎创建与方案切换 ✅
 
-**状态**：待实施
+**完成时间**：2026-03-16
+
+### 变更内容
+
+1. **新建 `schema/factory.go`**
+   - `CreateEngineFromSchema()` — 根据 Schema 创建引擎（codetable/pinyin）
+   - 迁移所有词库加载逻辑（loadPinyinDict, loadWubiCodeTable, loadUnigramModel 等）
+   - `SavePinyinUserFreqs()` / `LoadWubiTableForPinyinEngine()` 导出函数
+
+2. **重写 `engine/manager.go`**
+   - engines 改为 `map[string]Engine`（schema ID 为 key）
+   - 新增 `SwitchSchema()` / `ToggleSchema()` — Schema 驱动引擎切换
+   - 新增 `ActivateTempSchema()` / `DeactivateTempSchema()` — 临时方案切换
+   - 新增 `IsCurrentEngineType()` / `GetSchemaDisplayInfo()` — Schema 信息查询
+   - 保留 `ToggleEngine()`/`SwitchEngine()`/`RegisterEngine()` 等兼容方法
+
+3. **删除 `engine/manager_init.go`** — 逻辑迁移到 factory.go
+4. **删除 `engine/manager_userfreq.go`** — 逻辑迁移到 manager.go + factory.go
+5. **重写 `engine/manager_config.go`** — 移除已迁移方法，保留热更新方法
+
+6. **更新 `cmd/service/main.go`**
+   - SchemaManager 初始化 → SwitchSchema 驱动引擎创建
+   - 移除所有 pinyin/wubi 硬编码路径和配置
+
+7. **更新 Coordinator**
+   - `handle_mode.go` — ToggleSchema + Schema 名称显示
+   - `handle_temp_pinyin.go` — 用 `schema.EngineTypeCodeTable` 检查引擎类型
+
+8. **新增 `config.UpdateSchemaActive()`**
+
+### 检查点
+
+- [x] Schema 驱动引擎创建
+- [x] ToggleSchema 方案切换
+- [x] 临时方案切换 API（ActivateTempSchema/DeactivateTempSchema）
+- [x] 所有测试通过
+- [x] `go build ./...` 通过
 
 ---
 

@@ -5,16 +5,16 @@ import (
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
-	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/ipc"
+	"github.com/huanfeng/wind_input/internal/schema"
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/internal/ui"
 )
 
 // isTempPinyinTrigger 检查按键是否应触发临时拼音模式
 func (c *Coordinator) isTempPinyinTrigger(key string, keyCode int) bool {
-	// 仅五笔引擎下生效
-	if c.engineMgr == nil || c.engineMgr.GetCurrentType() != engine.EngineTypeWubi {
+	// 仅码表类型引擎下生效（如五笔）
+	if c.engineMgr == nil || !c.engineMgr.IsCurrentEngineType(schema.EngineTypeCodeTable) {
 		return false
 	}
 	// 仅输入缓冲区为空时触发

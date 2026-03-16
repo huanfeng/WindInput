@@ -22,6 +22,18 @@ func UpdateEngineType(engineType string) error {
 	return Save(cfg)
 }
 
+// UpdateSchemaActive 更新活跃方案 ID 到配置文件
+func UpdateSchemaActive(schemaID string) error {
+	cfg, err := Load()
+	if err != nil {
+		cfg = DefaultConfig()
+	}
+
+	cfg.Schema.Active = schemaID
+
+	return Save(cfg)
+}
+
 // IsToggleModeKey 检查按键是否为中英切换键
 func (c *Config) IsToggleModeKey(key string) bool {
 	for _, k := range c.Hotkeys.ToggleModeKeys {

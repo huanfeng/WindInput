@@ -3,7 +3,6 @@ package coordinator
 
 import (
 	"github.com/huanfeng/wind_input/internal/bridge"
-	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
@@ -131,26 +130,21 @@ func (c *Coordinator) handleEngineSwitchKey() *bridge.KeyEventResult {
 		c.hideUI()
 	}
 
-	// 切换引擎
-	newType, err := c.engineMgr.ToggleEngine()
+	// 切换方案
+	newSchemaID, err := c.engineMgr.ToggleSchema()
 	if err != nil {
-		c.logger.Error("Failed to switch engine", "error", err)
+		c.logger.Error("Failed to switch schema", "error", err)
 		return nil
 	}
 
-	c.logger.Info("Engine switched", "newType", newType)
-
-	// 同步词库管理器的活跃引擎
-	if dm := c.engineMgr.GetDictManager(); dm != nil {
-		dm.SetActiveEngine(string(newType))
-	}
+	c.logger.Info("Schema switched", "newSchema", newSchemaID)
 
 	// 保存到用户配置
 	go func() {
-		if err := config.UpdateEngineType(string(newType)); err != nil {
-			c.logger.Error("Failed to save engine type to config", "error", err)
+		if err := config.UpdateSchemaActive(newSchemaID); err != nil {
+			c.logger.Error("Failed to save schema to config", "error", err)
 		} else {
-			c.logger.Debug("Engine type saved to config", "type", newType)
+			c.logger.Debug("Schema saved to config", "schema", newSchemaID)
 		}
 	}()
 
@@ -170,16 +164,8 @@ func (c *Coordinator) showEngineIndicator() {
 		return
 	}
 
-	// Build composite text: engine name + current mode
-	var text string
-	switch c.engineMgr.GetCurrentType() {
-	case engine.EngineTypeWubi:
-		text = "中·五笔"
-	case engine.EngineTypePinyin:
-		text = "中·拼音"
-	default:
-		text = c.engineMgr.GetEngineDisplayName()
-	}
+	name, _ := c.engineMgr.GetSchemaDisplayInfo()
+	text := "中·" + name
 
 	x, y := c.getIndicatorPosition()
 	c.uiManager.ShowModeIndicator(text, x, y)

@@ -13,13 +13,11 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
-	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/control"
 	"github.com/huanfeng/wind_input/internal/coordinator"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine"
-	"github.com/huanfeng/wind_input/internal/engine/pinyin"
-	"github.com/huanfeng/wind_input/internal/engine/wubi"
+	"github.com/huanfeng/wind_input/internal/schema"
 	"github.com/huanfeng/wind_input/internal/ui"
 	"github.com/huanfeng/wind_input/pkg/config"
 	pkgcontrol "github.com/huanfeng/wind_input/pkg/control"
@@ -227,21 +225,23 @@ func main() {
 
 	// Create engine manager
 	engineMgr := engine.NewManager()
-
-	// Set paths for dynamic engine switching
 	engineMgr.SetExeDir(exeDir)
-	engineMgr.SetDictPaths(
-		filepath.Join(exeDir, config.GetPinyinDictPath()),
-		filepath.Join(exeDir, config.GetWubiDictPath()),
-	)
 
-	// Initialize DictManager (manages user dict, phrases, shadow rules)
-	// Use config dir as data dir (same location as config.yaml)
+	// Initialize SchemaManager
 	dataDir, err := config.GetConfigDir()
 	if err != nil {
 		logger.Warn("Failed to get config dir, using exe dir", "error", err)
 		dataDir = exeDir
 	}
+	schemaMgr := schema.NewSchemaManager(exeDir, dataDir)
+	if err := schemaMgr.LoadSchemas(); err != nil {
+		logger.Error("Failed to load schemas", "error", err)
+		showErrorMessageBox("输入方案加载失败，服务无法启动。\n\n原因：" + err.Error())
+		os.Exit(1)
+	}
+	engineMgr.SetSchemaManager(schemaMgr)
+
+	// Initialize DictManager (manages user dict, phrases, shadow rules)
 	dictManager := dict.NewDictManager(dataDir)
 	defer func() {
 		engineMgr.SaveUserFreqs()
@@ -251,94 +251,66 @@ func main() {
 	if err := dictManager.Initialize(); err != nil {
 		logger.Warn("Failed to initialize dict manager", "error", err)
 	}
-	// 根据配置的活跃方案切换用户数据层
-	dictManager.SetActiveEngine(cfg.Engine.Type)
+	engineMgr.SetDictManager(dictManager)
+
+	// 确定活跃方案 ID
+	activeSchemaID := cfg.Schema.Active
+	if activeSchemaID == "" {
+		// 兼容旧配置：从 engine.type 映射
+		switch cfg.Engine.Type {
+		case "pinyin":
+			activeSchemaID = "pinyin"
+		default:
+			activeSchemaID = "wubi86"
+		}
+	}
+
+	// 通过 Schema 驱动引擎创建和词库切换
+	if err := schemaMgr.SetActive(activeSchemaID); err != nil {
+		logger.Warn("Active schema not found, using first available", "schema", activeSchemaID, "error", err)
+		schemas := schemaMgr.ListSchemas()
+		if len(schemas) > 0 {
+			activeSchemaID = schemas[0].ID
+			schemaMgr.SetActive(activeSchemaID)
+		}
+	}
+
+	activeSchema := schemaMgr.GetActiveSchema()
+	if activeSchema != nil {
+		// 切换 DictManager 的用户数据层
+		dictManager.SwitchSchema(activeSchemaID, activeSchema.UserData.ShadowFile, activeSchema.UserData.UserDictFile)
+	}
+
 	stats := dictManager.GetStats()
 	logger.Info("DictManager initialized",
 		"phrases", stats["phrases"],
 		"commands", stats["commands"],
 		"user_words", stats["user_words"],
 		"shadow_rules", stats["shadow_rules"])
-	// 设置候选排序模式
-	if cfg.Engine.Wubi.CandidateSortMode != "" {
-		dictManager.SetSortMode(candidate.CandidateSortMode(cfg.Engine.Wubi.CandidateSortMode))
-	}
-	engineMgr.SetDictManager(dictManager)
 
-	// Initialize engine based on config
-	// 根据引擎类型选择正确的词库路径
-	var fullDictPath string
-	switch cfg.Engine.Type {
-	case "wubi":
-		fullDictPath = filepath.Join(exeDir, config.GetWubiDictPath())
-	case "pinyin":
-		fullDictPath = filepath.Join(exeDir, config.GetPinyinDictPath())
-	default:
-		fullDictPath = filepath.Join(exeDir, cfg.Dictionary.SystemDict)
-	}
-	logger.Info("Loading dictionary", "path", fullDictPath, "engine_type", cfg.Engine.Type)
-
-	// 解析拼音配置
-	pinyinConfig := &pinyin.Config{
-		ShowWubiHint:    cfg.Engine.Pinyin.ShowWubiHint,
-		FilterMode:      cfg.Engine.FilterMode,
-		UseSmartCompose: cfg.Engine.Pinyin.UseSmartCompose,
-		CandidateOrder:  cfg.Engine.Pinyin.CandidateOrder,
-	}
-	// 映射模糊拼音配置
-	if cfg.Engine.Pinyin.Fuzzy.Enabled {
-		pinyinConfig.Fuzzy = &pinyin.FuzzyConfig{
-			ZhZ:     cfg.Engine.Pinyin.Fuzzy.ZhZ,
-			ChC:     cfg.Engine.Pinyin.Fuzzy.ChC,
-			ShS:     cfg.Engine.Pinyin.Fuzzy.ShS,
-			NL:      cfg.Engine.Pinyin.Fuzzy.NL,
-			FH:      cfg.Engine.Pinyin.Fuzzy.FH,
-			RL:      cfg.Engine.Pinyin.Fuzzy.RL,
-			AnAng:   cfg.Engine.Pinyin.Fuzzy.AnAng,
-			EnEng:   cfg.Engine.Pinyin.Fuzzy.EnEng,
-			InIng:   cfg.Engine.Pinyin.Fuzzy.InIng,
-			IanIang: cfg.Engine.Pinyin.Fuzzy.IanIang,
-			UanUang: cfg.Engine.Pinyin.Fuzzy.UanUang,
+	// 创建并激活引擎
+	if err := engineMgr.SwitchSchema(activeSchemaID); err != nil {
+		logger.Warn("Failed to initialize engine, trying fallback", "schema", activeSchemaID, "error", err)
+		// 尝试回退到其他方案
+		fallbackOK := false
+		for _, s := range schemaMgr.ListSchemas() {
+			if s.ID != activeSchemaID {
+				if err2 := engineMgr.SwitchSchema(s.ID); err2 == nil {
+					activeSchemaID = s.ID
+					schemaMgr.SetActive(s.ID)
+					fallbackOK = true
+					break
+				}
+			}
 		}
-	}
-
-	// 解析五笔配置（以默认配置为基础，覆盖用户设置，避免遗漏新增字段）
-	wubiConfig := wubi.DefaultConfig()
-	wubiConfig.AutoCommitAt4 = cfg.Engine.Wubi.AutoCommitAt4
-	wubiConfig.ClearOnEmptyAt4 = cfg.Engine.Wubi.ClearOnEmptyAt4
-	wubiConfig.TopCodeCommit = cfg.Engine.Wubi.TopCodeCommit
-	wubiConfig.PunctCommit = cfg.Engine.Wubi.PunctCommit
-	wubiConfig.FilterMode = cfg.Engine.FilterMode
-	wubiConfig.ShowCodeHint = cfg.Engine.Wubi.ShowCodeHint
-	wubiConfig.SingleCodeInput = cfg.Engine.Wubi.SingleCodeInput
-	wubiConfig.CandidateSortMode = cfg.Engine.Wubi.CandidateSortMode
-
-	// 设置引擎配置（用于动态切换）
-	engineMgr.SetPinyinConfig(pinyinConfig)
-	engineMgr.SetWubiConfig(wubiConfig)
-
-	// 初始化引擎
-	engineConfig := &engine.EngineConfig{
-		Type:         engine.EngineType(cfg.Engine.Type),
-		DictPath:     fullDictPath,
-		WubiDictPath: filepath.Join(exeDir, config.GetWubiDictPath()),
-		PinyinConfig: pinyinConfig,
-		WubiConfig:   wubiConfig,
-	}
-
-	if err := engineMgr.InitializeFromConfig(engineConfig); err != nil {
-		logger.Warn("Failed to initialize engine from config, falling back to pinyin", "error", err)
-		// 回退到拼音引擎，同时修正词库路径
-		engineConfig.Type = engine.EngineTypePinyin
-		engineConfig.DictPath = filepath.Join(exeDir, config.GetPinyinDictPath())
-		if err2 := engineMgr.InitializeFromConfig(engineConfig); err2 != nil {
-			logger.Error("Failed to initialize fallback engine", "error", err2)
-			showErrorMessageBox("输入法引擎初始化失败，服务无法启动。\n\n原因：" + err.Error() + "\n\n回退引擎也初始化失败：" + err2.Error())
+		if !fallbackOK {
+			logger.Error("All engines failed to initialize")
+			showErrorMessageBox("输入法引擎初始化失败，服务无法启动。\n\n原因：" + err.Error())
 			os.Exit(1)
 		}
 	}
 
-	logger.Info("Engine initialized", "info", engineMgr.GetEngineInfo())
+	logger.Info("Engine initialized", "schema", activeSchemaID, "info", engineMgr.GetEngineInfo())
 
 	// Create UI Manager (native Windows UI)
 	uiManager := ui.NewManager(logger)

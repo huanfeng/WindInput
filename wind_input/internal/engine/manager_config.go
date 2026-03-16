@@ -4,85 +4,19 @@ import (
 	"log"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
-	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/engine/wubi"
+	"github.com/huanfeng/wind_input/internal/schema"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
-// SetExeDir 设置可执行文件目录
-func (m *Manager) SetExeDir(dir string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.exeDir = dir
-}
-
-// SetDictManager 设置词库管理器
-func (m *Manager) SetDictManager(dm *dict.DictManager) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.dictManager = dm
-}
-
-// GetDictManager 获取词库管理器
-func (m *Manager) GetDictManager() *dict.DictManager {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.dictManager
-}
-
-// SetDictPaths 设置词库路径
-func (m *Manager) SetDictPaths(pinyinPath, wubiPath string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.pinyinDictPath = pinyinPath
-	m.wubiDictPath = wubiPath
-}
-
-// SetPinyinConfig 设置拼音配置
-func (m *Manager) SetPinyinConfig(config *pinyin.Config) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.pinyinConfig = config
-}
-
-// SetWubiConfig 设置五笔配置
-func (m *Manager) SetWubiConfig(config *wubi.Config) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.wubiConfig = config
-}
-
-// UpdateFilterMode 更新当前引擎的过滤模式
+// UpdateFilterMode 更新所有引擎的过滤模式
 func (m *Manager) UpdateFilterMode(mode string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 更新保存的配置
-	if m.pinyinConfig != nil {
-		m.pinyinConfig.FilterMode = mode
-	}
-	if m.wubiConfig != nil {
-		m.wubiConfig.FilterMode = mode
-	}
-
-	// 更新当前运行的引擎配置
-	if m.currentEngine != nil {
-		switch e := m.currentEngine.(type) {
-		case *pinyin.Engine:
-			if cfg := e.GetConfig(); cfg != nil {
-				cfg.FilterMode = mode
-			}
-		case *wubi.Engine:
-			if cfg := e.GetConfig(); cfg != nil {
-				cfg.FilterMode = mode
-			}
-		}
-	}
-
-	// 更新所有已注册引擎的配置
-	for _, engine := range m.engines {
-		switch e := engine.(type) {
+	for _, eng := range m.engines {
+		switch e := eng.(type) {
 		case *pinyin.Engine:
 			if cfg := e.GetConfig(); cfg != nil {
 				cfg.FilterMode = mode
@@ -102,20 +36,8 @@ func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommi
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 更新保存的配置
-	if m.wubiConfig != nil {
-		m.wubiConfig.AutoCommitAt4 = autoCommitAt4
-		m.wubiConfig.ClearOnEmptyAt4 = clearOnEmptyAt4
-		m.wubiConfig.TopCodeCommit = topCodeCommit
-		m.wubiConfig.PunctCommit = punctCommit
-		m.wubiConfig.ShowCodeHint = showCodeHint
-		m.wubiConfig.SingleCodeInput = singleCodeInput
-		m.wubiConfig.CandidateSortMode = candidateSortMode
-	}
-
-	// 更新所有已注册的五笔引擎的配置
-	for _, engine := range m.engines {
-		if wubiEngine, ok := engine.(*wubi.Engine); ok {
+	for _, eng := range m.engines {
+		if wubiEngine, ok := eng.(*wubi.Engine); ok {
 			if cfg := wubiEngine.GetConfig(); cfg != nil {
 				cfg.AutoCommitAt4 = autoCommitAt4
 				cfg.ClearOnEmptyAt4 = clearOnEmptyAt4
@@ -128,7 +50,6 @@ func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommi
 		}
 	}
 
-	// 更新词库管理器的排序模式
 	if m.dictManager != nil {
 		m.dictManager.SetSortMode(candidate.CandidateSortMode(candidateSortMode))
 	}
@@ -148,74 +69,69 @@ func (m *Manager) UpdatePinyinOptions(pinyinCfg *config.PinyinConfig) {
 
 	showWubiHint := pinyinCfg.ShowWubiHint
 
-	// 更新保存的配置
-	if m.pinyinConfig != nil {
-		m.pinyinConfig.ShowWubiHint = showWubiHint
-		// 更新模糊拼音配置
-		if pinyinCfg.Fuzzy.Enabled {
-			m.pinyinConfig.Fuzzy = &pinyin.FuzzyConfig{
-				ZhZ:     pinyinCfg.Fuzzy.ZhZ,
-				ChC:     pinyinCfg.Fuzzy.ChC,
-				ShS:     pinyinCfg.Fuzzy.ShS,
-				NL:      pinyinCfg.Fuzzy.NL,
-				FH:      pinyinCfg.Fuzzy.FH,
-				RL:      pinyinCfg.Fuzzy.RL,
-				AnAng:   pinyinCfg.Fuzzy.AnAng,
-				EnEng:   pinyinCfg.Fuzzy.EnEng,
-				InIng:   pinyinCfg.Fuzzy.InIng,
-				IanIang: pinyinCfg.Fuzzy.IanIang,
-				UanUang: pinyinCfg.Fuzzy.UanUang,
-			}
-		} else {
-			m.pinyinConfig.Fuzzy = nil
+	for _, eng := range m.engines {
+		pinyinEngine, ok := eng.(*pinyin.Engine)
+		if !ok {
+			continue
 		}
-	}
 
-	// 更新所有已注册的拼音引擎的配置
-	for _, engine := range m.engines {
-		if pinyinEngine, ok := engine.(*pinyin.Engine); ok {
-			if cfg := pinyinEngine.GetConfig(); cfg != nil {
-				oldShowWubiHint := cfg.ShowWubiHint
-				cfg.ShowWubiHint = showWubiHint
+		if cfg := pinyinEngine.GetConfig(); cfg != nil {
+			oldShowWubiHint := cfg.ShowWubiHint
+			cfg.ShowWubiHint = showWubiHint
 
-				// 更新模糊拼音配置
-				if pinyinCfg.Fuzzy.Enabled {
-					cfg.Fuzzy = &pinyin.FuzzyConfig{
-						ZhZ:     pinyinCfg.Fuzzy.ZhZ,
-						ChC:     pinyinCfg.Fuzzy.ChC,
-						ShS:     pinyinCfg.Fuzzy.ShS,
-						NL:      pinyinCfg.Fuzzy.NL,
-						FH:      pinyinCfg.Fuzzy.FH,
-						RL:      pinyinCfg.Fuzzy.RL,
-						AnAng:   pinyinCfg.Fuzzy.AnAng,
-						EnEng:   pinyinCfg.Fuzzy.EnEng,
-						InIng:   pinyinCfg.Fuzzy.InIng,
-						IanIang: pinyinCfg.Fuzzy.IanIang,
-						UanUang: pinyinCfg.Fuzzy.UanUang,
-					}
-				} else {
-					cfg.Fuzzy = nil
+			if pinyinCfg.Fuzzy.Enabled {
+				cfg.Fuzzy = &pinyin.FuzzyConfig{
+					ZhZ:   pinyinCfg.Fuzzy.ZhZ,
+					ChC:   pinyinCfg.Fuzzy.ChC,
+					ShS:   pinyinCfg.Fuzzy.ShS,
+					NL:    pinyinCfg.Fuzzy.NL,
+					FH:    pinyinCfg.Fuzzy.FH,
+					RL:    pinyinCfg.Fuzzy.RL,
+					AnAng: pinyinCfg.Fuzzy.AnAng,
+					EnEng: pinyinCfg.Fuzzy.EnEng,
+					InIng: pinyinCfg.Fuzzy.InIng,
 				}
-
-				// 从 true→false：释放反向索引
-				if oldShowWubiHint && !showWubiHint {
-					pinyinEngine.ReleaseWubiHint()
-				}
+			} else {
+				cfg.Fuzzy = nil
 			}
-			// 如果开启反查但五笔码表未加载，则加载（仅 wdb 二进制）
-			if showWubiHint && m.wubiDictPath != "" {
-				wubiFullPath := m.wubiDictPath
-				if m.exeDir != "" && !isAbsPath(m.wubiDictPath) {
-					wubiFullPath = m.exeDir + "/" + m.wubiDictPath
-				}
-				if err := loadWubiTableForPinyin(pinyinEngine, wubiFullPath); err != nil {
-					log.Printf("[EngineManager] 加载五笔反查码表失败: %v", err)
-				} else {
-					log.Printf("[EngineManager] 五笔反查码表加载成功")
-				}
+
+			if oldShowWubiHint && !showWubiHint {
+				pinyinEngine.ReleaseWubiHint()
 			}
+		}
+
+		// 如果开启反查但五笔码表未加载，从 Schema 获取路径并加载
+		if showWubiHint && m.schemaManager != nil {
+			m.loadWubiReverseForPinyin(pinyinEngine)
 		}
 	}
 
 	log.Printf("[EngineManager] 更新拼音选项: showWubiHint=%v, fuzzyEnabled=%v", showWubiHint, pinyinCfg.Fuzzy.Enabled)
+}
+
+// loadWubiReverseForPinyin 从方案配置中查找五笔反查路径并加载
+func (m *Manager) loadWubiReverseForPinyin(pinyinEngine *pinyin.Engine) {
+	if m.schemaManager == nil {
+		return
+	}
+
+	// 查找拼音方案中的反查词库
+	for _, info := range m.schemaManager.ListSchemas() {
+		s := m.schemaManager.GetSchema(info.ID)
+		if s == nil || s.Engine.Type != schema.EngineTypePinyin {
+			continue
+		}
+		for _, d := range s.GetDictsByRole(schema.DictRoleReverseLookup) {
+			rdPath := d.Path
+			if m.exeDir != "" && !isAbsPath(rdPath) {
+				rdPath = m.exeDir + "/" + rdPath
+			}
+			if err := schema.LoadWubiTableForPinyinEngine(pinyinEngine, rdPath); err != nil {
+				log.Printf("[EngineManager] 加载五笔反查码表失败: %v", err)
+			} else {
+				log.Printf("[EngineManager] 五笔反查码表加载成功")
+			}
+			return
+		}
+	}
 }
