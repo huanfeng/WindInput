@@ -178,7 +178,13 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 	}
 
 	// Phase 5: 排序 + 截断
-	sort.Sort(candidate.CandidateList(allCandidates))
+	comparator := candidate.Better
+	if e.config != nil && e.config.CandidateSortMode == string(candidate.SortByNatural) {
+		comparator = candidate.BetterNatural
+	}
+	sort.Slice(allCandidates, func(i, j int) bool {
+		return comparator(allCandidates[i], allCandidates[j])
+	})
 	if maxCandidates > 0 && len(allCandidates) > maxCandidates {
 		allCandidates = allCandidates[:maxCandidates]
 	}
@@ -253,7 +259,13 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	}
 
 	// ========== Phase 5: 排序 + 过滤 + 截断 ==========
-	sort.Sort(candidate.CandidateList(allCandidates))
+	comparator := candidate.Better
+	if e.config != nil && e.config.CandidateSortMode == string(candidate.SortByNatural) {
+		comparator = candidate.BetterNatural
+	}
+	sort.Slice(allCandidates, func(i, j int) bool {
+		return comparator(allCandidates[i], allCandidates[j])
+	})
 
 	filterMode := "smart"
 	if e.config != nil && e.config.FilterMode != "" {
