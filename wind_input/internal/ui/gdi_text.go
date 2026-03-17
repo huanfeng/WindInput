@@ -433,6 +433,39 @@ func (tr *TextRenderer) DrawString(text string, x, y float64, fontSize float64, 
 	)
 }
 
+// DrawStringWithWeight draws text with a specific font weight (100-900).
+// Weight >= 600 uses bold font, otherwise uses normal font.
+func (tr *TextRenderer) DrawStringWithWeight(text string, x, y float64, fontSize float64, clr color.Color, weight int) {
+	if !tr.inDraw || text == "" {
+		return
+	}
+
+	size := int(math.Round(fontSize))
+	bold := weight >= 600
+	hFont := tr.getFont(size, bold)
+	if hFont == 0 {
+		return
+	}
+	procSelectObject.Call(tr.drawDC, hFont)
+
+	cr, cg, cb, _ := clr.RGBA()
+	colorRef := uint32(byte(cr>>8)) | uint32(byte(cg>>8))<<8 | uint32(byte(cb>>8))<<16
+	procSetTextColor.Call(tr.drawDC, uintptr(colorRef))
+
+	tm := tr.getMetrics(tr.drawDC, size, bold)
+	drawX := int(math.Round(x))
+	drawY := int(math.Round(y)) - int(tm.TmAscent)
+
+	textW, _ := syscall.UTF16FromString(text)
+	procTextOutW.Call(
+		tr.drawDC,
+		uintptr(drawX),
+		uintptr(drawY),
+		uintptr(unsafe.Pointer(&textW[0])),
+		uintptr(len(textW)-1),
+	)
+}
+
 // EndDraw finishes the drawing session and copies GDI-rendered text back to the image.
 // Alpha channel from the original image is preserved.
 func (tr *TextRenderer) EndDraw() {

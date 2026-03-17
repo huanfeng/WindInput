@@ -14,27 +14,34 @@ import (
 // RenderConfig contains rendering configuration.
 // 这里只描述候选窗的视觉参数；字体文件选择与 fallback 细节由 FontConfig 接管。
 type RenderConfig struct {
-	FontPath        string
-	FontSize        float64
-	IndexFontSize   float64
-	Padding         float64
-	ItemHeight      float64
-	CornerRadius    float64
-	BackgroundColor color.Color
-	TextColor       color.Color
-	IndexColor      color.Color
-	IndexBgColor    color.Color
-	InputBgColor    color.Color
-	InputTextColor  color.Color
-	BorderColor     color.Color
-	HoverBgColor    color.Color    // Background color for hovered candidate
-	SelectedBgColor color.Color    // Background color for keyboard-selected candidate
-	Layout          string         // "horizontal" or "vertical"
-	HidePreedit     bool           // Hide preedit area when inline_preedit is enabled
-	IndexStyle      string         // "circle" (default) or "text" (plain text index)
-	AccentBarColor  color.Color    // Left accent bar color, nil = no bar
-	HasAccentBar    bool           // Whether to draw accent bar
-	TextRenderMode  TextRenderMode // "gdi" (Windows native) or "freetype" (original)
+	FontPath         string
+	FontSize         float64
+	IndexFontSize    float64
+	Padding          float64
+	ItemHeight       float64
+	CornerRadius     float64
+	BackgroundColor  color.Color
+	TextColor        color.Color
+	IndexColor       color.Color
+	IndexBgColor     color.Color
+	InputBgColor     color.Color
+	InputTextColor   color.Color
+	BorderColor      color.Color
+	HoverBgColor     color.Color    // Background color for hovered candidate
+	SelectedBgColor  color.Color    // Background color for keyboard-selected candidate
+	Layout           string         // "horizontal" or "vertical"
+	HidePreedit      bool           // Hide preedit area when inline_preedit is enabled
+	IndexStyle       string         // "circle" (default) or "text" (plain text index)
+	AccentBarColor   color.Color    // Left accent bar color, nil = no bar
+	HasAccentBar     bool           // Whether to draw accent bar
+	IndexFontWeight  int            // Index number font weight (100-900), 0 = use global weight
+	ItemPaddingLeft  float64        // Left padding of each candidate item (px), 0 = default 8
+	ItemPaddingRight float64        // Right padding of each candidate item (px), 0 = default 8
+	WindowPaddingX   float64        // Horizontal window padding (px), 0 = default (use Padding)
+	WindowPaddingY   float64        // Vertical window padding (px), 0 = default (use Padding)
+	AlwaysShowPager  bool           // Always show page navigation (disable buttons when not navigable)
+	ShowPageNumber   bool           // Show page number text (e.g. "1/3")
+	TextRenderMode   TextRenderMode // "gdi" (Windows native) or "freetype" (original)
 }
 
 // DefaultRenderConfig returns default rendering configuration with DPI scaling
@@ -59,6 +66,7 @@ func DefaultRenderConfig() RenderConfig {
 		HoverBgColor:    color.RGBA{230, 240, 255, 255}, // Light blue for hover
 		Layout:          "horizontal",                   // Default to horizontal layout
 		HidePreedit:     false,
+		ShowPageNumber:  true,
 	}
 }
 
@@ -283,6 +291,27 @@ func (r *Renderer) SetTheme(resolved *theme.ResolvedTheme) {
 	r.config.IndexStyle = resolved.Style.IndexStyle
 	r.config.AccentBarColor = resolved.Style.AccentBarColor
 	r.config.HasAccentBar = resolved.Style.HasAccentBar
+	r.config.IndexFontWeight = resolved.Style.IndexFontWeight
+	r.config.ItemPaddingLeft = resolved.Style.ItemPaddingLeft
+	r.config.ItemPaddingRight = resolved.Style.ItemPaddingRight
+	r.config.AlwaysShowPager = resolved.Style.AlwaysShowPager
+	r.config.ShowPageNumber = resolved.Style.ShowPageNumber
+	// Apply window padding from theme (override base Padding)
+	if resolved.Style.WindowPaddingX > 0 || resolved.Style.WindowPaddingY > 0 {
+		scale := GetDPIScale()
+		if resolved.Style.WindowPaddingX > 0 {
+			r.config.WindowPaddingX = resolved.Style.WindowPaddingX * scale
+		}
+		if resolved.Style.WindowPaddingY > 0 {
+			r.config.WindowPaddingY = resolved.Style.WindowPaddingY * scale
+		}
+	}
+	if resolved.Style.CornerRadius > 0 {
+		r.config.CornerRadius = resolved.Style.CornerRadius * GetDPIScale()
+	}
+	if resolved.Style.RowHeight > 0 {
+		r.config.ItemHeight = resolved.Style.RowHeight * GetDPIScale()
+	}
 }
 
 // getCommentColor returns the comment color from theme or default

@@ -73,8 +73,17 @@ type ModeIndicatorColors struct {
 
 // CandidateWindowStyle defines rendering style options for the candidate window
 type CandidateWindowStyle struct {
-	IndexStyle     string `yaml:"index_style" json:"index_style"`           // "circle" (default) or "text"
-	AccentBarColor string `yaml:"accent_bar_color" json:"accent_bar_color"` // Left accent bar color, empty = no bar
+	IndexStyle       string  `yaml:"index_style" json:"index_style"`               // "circle" (default) or "text"
+	AccentBarColor   string  `yaml:"accent_bar_color" json:"accent_bar_color"`     // Left accent bar color, empty = no bar
+	IndexFontWeight  int     `yaml:"index_font_weight" json:"index_font_weight"`   // Index number font weight (100-900), 0 = use global weight
+	ItemPaddingLeft  float64 `yaml:"item_padding_left" json:"item_padding_left"`   // Left padding of each candidate item (px, 0 = default 8)
+	ItemPaddingRight float64 `yaml:"item_padding_right" json:"item_padding_right"` // Right padding of each candidate item (px, 0 = default 8)
+	WindowPaddingX   float64 `yaml:"window_padding_x" json:"window_padding_x"`     // Horizontal window padding (px, 0 = default 10)
+	WindowPaddingY   float64 `yaml:"window_padding_y" json:"window_padding_y"`     // Vertical window padding (px, 0 = default 10)
+	CornerRadius     float64 `yaml:"corner_radius" json:"corner_radius"`           // Window corner radius (px, 0 = default 8)
+	RowHeight        float64 `yaml:"row_height" json:"row_height"`                 // Candidate row height (px, 0 = default 32)
+	AlwaysShowPager  bool    `yaml:"always_show_pager" json:"always_show_pager"`   // Always show page navigation (disable buttons when not navigable)
+	ShowPageNumber   *bool   `yaml:"show_page_number" json:"show_page_number"`     // Show page number text (e.g. "1/3"), nil = true (default show)
 }
 
 // Theme represents a complete theme configuration
@@ -149,9 +158,18 @@ type ResolvedModeIndicatorColors struct {
 
 // ResolvedCandidateWindowStyle contains parsed style options
 type ResolvedCandidateWindowStyle struct {
-	IndexStyle     string      // "circle" or "text"
-	AccentBarColor color.Color // nil if no accent bar
-	HasAccentBar   bool
+	IndexStyle       string      // "circle" or "text"
+	AccentBarColor   color.Color // nil if no accent bar
+	HasAccentBar     bool
+	IndexFontWeight  int     // Index number font weight (100-900), 0 = use global weight
+	ItemPaddingLeft  float64 // Left padding of each candidate item (px, 0 = default 8)
+	ItemPaddingRight float64 // Right padding of each candidate item (px, 0 = default 8)
+	WindowPaddingX   float64 // Horizontal window padding (px, 0 = default 10)
+	WindowPaddingY   float64 // Vertical window padding (px, 0 = default 10)
+	CornerRadius     float64 // Window corner radius (px, 0 = default 8)
+	RowHeight        float64 // Candidate row height (px, 0 = default 32)
+	AlwaysShowPager  bool    // Always show page navigation
+	ShowPageNumber   bool    // Show page number text (e.g. "1/3")
 }
 
 // ResolvedTheme contains all resolved (parsed) colors
@@ -167,8 +185,22 @@ type ResolvedTheme struct {
 
 // resolveStyle parses the style configuration
 func (t *Theme) resolveStyle() ResolvedCandidateWindowStyle {
+	// ShowPageNumber defaults to true when not explicitly set
+	showPageNumber := true
+	if t.Style.ShowPageNumber != nil {
+		showPageNumber = *t.Style.ShowPageNumber
+	}
 	style := ResolvedCandidateWindowStyle{
-		IndexStyle: "circle", // default
+		IndexStyle:       "circle", // default
+		IndexFontWeight:  t.Style.IndexFontWeight,
+		ItemPaddingLeft:  t.Style.ItemPaddingLeft,
+		ItemPaddingRight: t.Style.ItemPaddingRight,
+		WindowPaddingX:   t.Style.WindowPaddingX,
+		WindowPaddingY:   t.Style.WindowPaddingY,
+		CornerRadius:     t.Style.CornerRadius,
+		RowHeight:        t.Style.RowHeight,
+		AlwaysShowPager:  t.Style.AlwaysShowPager,
+		ShowPageNumber:   showPageNumber,
 	}
 	if t.Style.IndexStyle == "text" {
 		style.IndexStyle = "text"

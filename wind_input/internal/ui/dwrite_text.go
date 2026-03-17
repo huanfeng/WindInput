@@ -317,6 +317,54 @@ func (r *DWriteRenderer) DrawString(text string, x, y float64, fontSize float64,
 	)
 }
 
+// DrawStringWithWeight draws text with a specific font weight (100-900).
+// Temporarily switches the font weight for this draw call, then restores it.
+func (r *DWriteRenderer) DrawStringWithWeight(text string, x, y float64, fontSize float64, clr color.Color, weight int) {
+	if text == "" || weight <= 0 {
+		r.DrawString(text, x, y, fontSize, clr)
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !r.inDraw || r.handle == 0 {
+		return
+	}
+
+	// Temporarily switch font weight
+	origWeight := r.fontWeight
+	if weight != origWeight {
+		scaleBits := math.Float32bits(float32(r.fontScale))
+		procWindDWriteSetFontParams.Call(r.handle, uintptr(weight), uintptr(scaleBits))
+		r.fontWeight = weight
+	}
+
+	textW, _ := syscall.UTF16PtrFromString(text)
+	cr, cg, cb, ca := clr.RGBA()
+	rgba := uint32(byte(cr>>8)) |
+		uint32(byte(cg>>8))<<8 |
+		uint32(byte(cb>>8))<<16 |
+		uint32(byte(ca>>8))<<24
+
+	procWindDWriteDrawString.Call(
+		r.handle,
+		uintptr(unsafe.Pointer(textW)),
+		uintptr(int32(math.Round(x))),
+		uintptr(int32(math.Round(y))),
+		uintptr(int32(math.Round(fontSize))),
+		uintptr(rgba),
+		boolToUintptr(containsSymbolChars(text)),
+	)
+
+	// Restore original weight
+	if weight != origWeight {
+		scaleBits := math.Float32bits(float32(r.fontScale))
+		procWindDWriteSetFontParams.Call(r.handle, uintptr(origWeight), uintptr(scaleBits))
+		r.fontWeight = origWeight
+	}
+}
+
 func (r *DWriteRenderer) endDrawLocked() {
 	if !r.inDraw || r.handle == 0 {
 		return

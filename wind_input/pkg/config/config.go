@@ -190,7 +190,7 @@ func DefaultConfig() *Config {
 			TextRenderMode:          "directwrite",
 			GDIFontWeight:           500,
 			GDIFontScale:            1.0,
-			MenuFontWeight:          600,
+			MenuFontWeight:          500,
 			MenuFontSize:            12.0,
 		},
 		Toolbar: ToolbarConfig{

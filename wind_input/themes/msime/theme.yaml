@@ -6,6 +6,12 @@ meta:
 style:
   index_style: "text"
   accent_bar_color: "#0078D4"
+  index_font_weight: 400
+  item_padding_left: 4
+  item_padding_right: 8
+  window_padding_x: 8
+  window_padding_y: 6
+  always_show_pager: true
 
 candidate_window:
   background_color: "#FFFFFF"

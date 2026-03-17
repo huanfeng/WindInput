@@ -27,6 +27,16 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	scale := GetDPIScale()
 	td := r.textDrawer
 
+	// Effective window padding (theme-configurable)
+	padX := cfg.Padding
+	padY := cfg.Padding
+	if cfg.WindowPaddingX > 0 {
+		padX = cfg.WindowPaddingX
+	}
+	if cfg.WindowPaddingY > 0 {
+		padY = cfg.WindowPaddingY
+	}
+
 	candidateCount := len(candidates)
 	if candidateCount == 0 {
 		candidateCount = 1
@@ -37,7 +47,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	// Measure input text width for dynamic width adjustment
 	if input != "" {
 		inputTextWidth := td.MeasureString(input, cfg.FontSize)
-		minInputWidth := inputTextWidth + cfg.Padding*2 + 16*scale
+		minInputWidth := inputTextWidth + padX*2 + 16*scale
 		if minInputWidth > width {
 			width = minInputWidth
 		}
@@ -48,13 +58,20 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		inputHeight = 0
 	}
 	contentHeight := float64(candidateCount) * cfg.ItemHeight
+	showVerticalPager := totalPages > 1 || cfg.AlwaysShowPager
 	pageInfoHeight := 0.0
-	if totalPages > 1 {
+	if showVerticalPager {
+		if totalPages < 1 {
+			totalPages = 1
+		}
+		if page < 1 {
+			page = 1
+		}
 		pageInfoHeight = 24.0 * scale
 	}
-	height := cfg.Padding*2 + inputHeight + contentHeight + pageInfoHeight + 4*scale
+	height := padY*2 + inputHeight + contentHeight + pageInfoHeight + 4*scale
 	if cfg.HidePreedit {
-		height = cfg.Padding*2 + contentHeight + pageInfoHeight
+		height = padY*2 + contentHeight + pageInfoHeight
 	}
 
 	// Font size variants
@@ -71,13 +88,13 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	}
 
 	// Text layout constants
-	textStartX := cfg.Padding + 32*scale
+	textStartX := padX + 32*scale
 	if cfg.IndexStyle == "text" {
-		textStartX = cfg.Padding + 24*scale
+		textStartX = padX + 24*scale
 	}
 
 	// Candidate start Y (after input area)
-	candStartY := cfg.Padding
+	candStartY := padY
 	if !cfg.HidePreedit {
 		candStartY += inputHeight + 4*scale
 	}
@@ -87,7 +104,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	hasCursor := false
 	if !cfg.HidePreedit && cursorPos >= 0 && cursorPos <= len(input) {
 		cursorText := input[:cursorPos]
-		textX := cfg.Padding + 8*scale
+		textX := padX + 8*scale
 		cursorDrawX = textX + td.MeasureString(cursorText, cfg.FontSize)
 		hasCursor = true
 	}
@@ -114,9 +131,12 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	// Pre-compute page text measurement
 	var pageText string
 	var pageW float64
-	if totalPages > 1 {
-		pageText = fmt.Sprintf(" %d / %d ", page, totalPages)
-		pageW = td.MeasureString(pageText, pageFontSize)
+	showVerticalPageNumber := cfg.ShowPageNumber
+	if showVerticalPager {
+		if showVerticalPageNumber {
+			pageText = fmt.Sprintf(" %d / %d ", page, totalPages)
+			pageW = td.MeasureString(pageText, pageFontSize)
+		}
 	}
 
 	// ===== PHASE 1: Draw all shapes with gg =====
@@ -141,12 +161,12 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	// Input area background and cursor line
 	if !cfg.HidePreedit {
 		dc.SetColor(cfg.InputBgColor)
-		r.drawRoundedRect(dc, cfg.Padding, cfg.Padding, width-cfg.Padding*2-2, inputHeight, 4*scale)
+		r.drawRoundedRect(dc, padX, padY, width-padX*2-2, inputHeight, 4*scale)
 		dc.Fill()
 
 		if hasCursor {
-			cursorTopY := cfg.Padding + 4*scale
-			cursorBottomY := cfg.Padding + inputHeight - 4*scale
+			cursorTopY := padY + 4*scale
+			cursorBottomY := padY + inputHeight - 4*scale
 			dc.SetColor(cfg.InputTextColor)
 			dc.SetLineWidth(1.5 * scale)
 			dc.DrawLine(cursorDrawX, cursorTopY, cursorDrawX, cursorBottomY)
@@ -163,7 +183,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	if selectedIndex >= 0 && selectedIndex < len(candidates) {
 		itemY := candStartY + float64(selectedIndex)*cfg.ItemHeight
 		dc.SetColor(cfg.SelectedBgColor)
-		r.drawRoundedRect(dc, cfg.Padding-2, itemY, width-cfg.Padding*2+2, cfg.ItemHeight, 4*scale)
+		r.drawRoundedRect(dc, padX-2, itemY, width-padX*2+2, cfg.ItemHeight, 4*scale)
 		dc.Fill()
 
 		// Accent bar — drawn inside the selected highlight box
@@ -171,7 +191,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 			barWidth := 3.0 * scale
 			barMarginY := cfg.ItemHeight * 0.2 // 竖条上下各留 20%，条高约 60%
 			dc.SetColor(cfg.AccentBarColor)
-			r.drawRoundedRect(dc, cfg.Padding-1, itemY+barMarginY, barWidth, cfg.ItemHeight-barMarginY*2, barWidth/2)
+			r.drawRoundedRect(dc, padX-1, itemY+barMarginY, barWidth, cfg.ItemHeight-barMarginY*2, barWidth/2)
 			dc.Fill()
 		}
 	}
@@ -180,7 +200,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	if hoverIndex >= 0 && hoverIndex < len(candidates) && hoverIndex != selectedIndex {
 		itemY := candStartY + float64(hoverIndex)*cfg.ItemHeight
 		dc.SetColor(cfg.HoverBgColor)
-		r.drawRoundedRect(dc, cfg.Padding-2, itemY, width-cfg.Padding*2+2, cfg.ItemHeight, 4*scale)
+		r.drawRoundedRect(dc, padX-2, itemY, width-padX*2+2, cfg.ItemHeight, 4*scale)
 		dc.Fill()
 	}
 
@@ -189,7 +209,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		itemY := candStartY + float64(i)*cfg.ItemHeight
 
 		if cfg.IndexStyle != "text" {
-			indexX := cfg.Padding + 14*scale
+			indexX := padX + 14*scale
 			indexY := itemY + cfg.ItemHeight/2
 			dc.SetColor(cfg.IndexBgColor)
 			dc.DrawCircle(indexX, indexY, 11*scale)
@@ -198,15 +218,15 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 
 		result.Rects[i] = CandidateRect{
 			Index: i,
-			X:     cfg.Padding - 2,
+			X:     padX - 2,
 			Y:     itemY,
-			W:     width - cfg.Padding*2 + 2,
+			W:     width - padX*2 + 2,
 			H:     cfg.ItemHeight,
 		}
 	}
 
 	// Page info chevrons (shapes only)
-	if totalPages > 1 {
+	if showVerticalPager {
 		pageY := candStartY + float64(len(candidates))*cfg.ItemHeight + 4*scale
 		arrowSize := 8.0 * scale
 		arrowPad := 8.0 * scale
@@ -216,35 +236,41 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		centerY := pageY + 10*scale
 
 		// Page up button
+		canPageUp := page > 1
 		pageUpBtnRect := CandidateRect{X: startX, Y: pageY, W: arrowW, H: 20 * scale}
-		if hoverPageBtn == "up" {
+		if canPageUp && hoverPageBtn == "up" {
 			dc.SetColor(cfg.HoverBgColor)
 			r.drawRoundedRect(dc, pageUpBtnRect.X, pageUpBtnRect.Y, pageUpBtnRect.W, pageUpBtnRect.H, 4*scale)
 			dc.Fill()
 		}
 		leftArrowColor := cfg.IndexBgColor
-		if page <= 1 {
+		if !canPageUp {
 			leftArrowColor = cfg.InputTextColor
 		}
 		dc.SetColor(leftArrowColor)
 		r.drawChevronLeft(dc, startX+arrowW/2, centerY, arrowSize, 1.5*scale)
-		result.PageUpRect = &pageUpBtnRect
+		if canPageUp {
+			result.PageUpRect = &pageUpBtnRect
+		}
 
 		// Page down button
+		canPageDown := page < totalPages
 		pageDownBtnRect := CandidateRect{X: startX + arrowW + pageW, Y: pageY, W: arrowW, H: 20 * scale}
-		if hoverPageBtn == "down" {
+		if canPageDown && hoverPageBtn == "down" {
 			dc.SetColor(cfg.HoverBgColor)
 			r.drawRoundedRect(dc, pageDownBtnRect.X, pageDownBtnRect.Y, pageDownBtnRect.W, pageDownBtnRect.H, 4*scale)
 			dc.Fill()
 		}
 		rightArrowColor := cfg.IndexBgColor
-		if page >= totalPages {
+		if !canPageDown {
 			rightArrowColor = cfg.InputTextColor
 		}
 		rightCenterX := startX + arrowW + pageW + arrowW/2
 		dc.SetColor(rightArrowColor)
 		r.drawChevronRight(dc, rightCenterX, centerY, arrowSize, 1.5*scale)
-		result.PageDownRect = &pageDownBtnRect
+		if canPageDown {
+			result.PageDownRect = &pageDownBtnRect
+		}
 	}
 
 	// ===== PHASE 2: Draw all text =====
@@ -253,23 +279,32 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 
 	// Input text
 	if !cfg.HidePreedit && input != "" {
-		textX := cfg.Padding + 8*scale
-		textY := cfg.Padding + inputHeight/2 + cfg.FontSize/3
+		textX := padX + 8*scale
+		textY := padY + inputHeight/2 + cfg.FontSize/3
 		td.DrawString(input, textX, textY, cfg.FontSize, cfg.InputTextColor)
 	}
 
 	// Index numbers
+	vertIndexWeight := cfg.IndexFontWeight
 	for i, cand := range candidates {
 		itemY := candStartY + float64(i)*cfg.ItemHeight
 		indexStr := string(rune('0' + cand.Index))
 
 		if isTextIndex {
-			td.DrawString(indexStr, cfg.Padding+4*scale, itemY+cfg.ItemHeight/2+indexTextSize/3, indexTextSize, cfg.IndexColor)
+			if vertIndexWeight > 0 {
+				td.DrawStringWithWeight(indexStr, padX+4*scale, itemY+cfg.ItemHeight/2+indexTextSize/3, indexTextSize, cfg.IndexColor, vertIndexWeight)
+			} else {
+				td.DrawString(indexStr, padX+4*scale, itemY+cfg.ItemHeight/2+indexTextSize/3, indexTextSize, cfg.IndexColor)
+			}
 		} else {
-			indexX := cfg.Padding + 14*scale
+			indexX := padX + 14*scale
 			indexY := itemY + cfg.ItemHeight/2
 			tw := td.MeasureString(indexStr, cfg.IndexFontSize)
-			td.DrawString(indexStr, indexX-tw/2, indexY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor)
+			if vertIndexWeight > 0 {
+				td.DrawStringWithWeight(indexStr, indexX-tw/2, indexY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor, vertIndexWeight)
+			} else {
+				td.DrawString(indexStr, indexX-tw/2, indexY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor)
+			}
 		}
 	}
 
@@ -286,7 +321,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	}
 
 	// Page text
-	if totalPages > 1 {
+	if showVerticalPager && showVerticalPageNumber && pageText != "" {
 		pageY := candStartY + float64(len(candidates))*cfg.ItemHeight + 4*scale
 		arrowSize := 8.0 * scale
 		arrowPad := 8.0 * scale
@@ -308,6 +343,16 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	cfg := r.config
 	scale := GetDPIScale()
 	td := r.textDrawer
+
+	// Effective window padding (theme-configurable)
+	padX := cfg.Padding
+	padY := cfg.Padding
+	if cfg.WindowPaddingX > 0 {
+		padX = cfg.WindowPaddingX
+	}
+	if cfg.WindowPaddingY > 0 {
+		padY = cfg.WindowPaddingY
+	}
 
 	// Font size variants
 	isTextIndex := cfg.IndexStyle == "text"
@@ -373,14 +418,30 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		}
 	}
 
-	// Calculate total candidates width
-	candidatesWidth := 0.0
+	// Item padding (left/right can be set separately)
+	bgPadL := 8.0 * scale // default left padding
+	bgPadR := 8.0 * scale // default right padding
+	if cfg.ItemPaddingLeft > 0 {
+		bgPadL = cfg.ItemPaddingLeft * scale
+	}
+	if cfg.ItemPaddingRight > 0 {
+		bgPadR = cfg.ItemPaddingRight * scale
+	}
+
+	// Calculate total candidates width (including padding)
+	// Effective spacing = right pad of prev item + left pad of next item
+	effectiveSpacingForWidth := bgPadR + bgPadL
+	if itemSpacing > effectiveSpacingForWidth {
+		effectiveSpacingForWidth = itemSpacing
+	}
+	candidatesWidth := bgPadL // leading padding for first item
 	for i := range candidates {
 		candidatesWidth += measures[i].totalWidth
 		if i < len(candidates)-1 {
-			candidatesWidth += itemSpacing
+			candidatesWidth += effectiveSpacingForWidth
 		}
 	}
+	candidatesWidth += bgPadR // trailing padding for last item
 
 	// Page info width
 	arrowSize := 8.0 * scale
@@ -389,10 +450,22 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	pageInfoWidth := 0.0
 	var pageText string
 	var pageW float64
-	if totalPages > 1 {
-		pageText = fmt.Sprintf(" %d/%d ", page, totalPages)
-		pageW = td.MeasureString(pageText, pageFontSize)
-		pageInfoWidth = arrowW + pageW + arrowW + 8*scale
+	showPager := totalPages > 1 || cfg.AlwaysShowPager
+	showPageNumber := cfg.ShowPageNumber
+	if showPager {
+		if totalPages < 1 {
+			totalPages = 1
+		}
+		if page < 1 {
+			page = 1
+		}
+		if showPageNumber {
+			pageText = fmt.Sprintf(" %d/%d ", page, totalPages)
+			pageW = td.MeasureString(pageText, pageFontSize)
+			pageInfoWidth = arrowW + pageW + arrowW + 8*scale
+		} else {
+			pageInfoWidth = arrowW + arrowW + 8*scale
+		}
 	}
 
 	// Input area (preedit)
@@ -412,11 +485,11 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 	// Total width
 	minWidth := 200.0 * scale
-	contentWidth := cfg.Padding*2 + accentBarExtra + candidatesWidth + pageInfoWidth
+	contentWidth := padX*2 + accentBarExtra + candidatesWidth + pageInfoWidth
 	if inputWidth > 0 {
-		contentWidth = cfg.Padding*2 + accentBarExtra + inputWidth
+		contentWidth = padX*2 + accentBarExtra + inputWidth
 		if accentBarExtra+candidatesWidth+pageInfoWidth > accentBarExtra+inputWidth {
-			contentWidth = cfg.Padding*2 + accentBarExtra + candidatesWidth + pageInfoWidth
+			contentWidth = padX*2 + accentBarExtra + candidatesWidth + pageInfoWidth
 		}
 	}
 	width := contentWidth
@@ -426,7 +499,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 	// Height calculation
 	candidateRowHeight := 32.0 * scale
-	height := cfg.Padding*2 + candidateRowHeight
+	height := padY*2 + candidateRowHeight
 	if inputHeight > 0 {
 		height += inputHeight + 4*scale
 	}
@@ -436,7 +509,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	hasCursor := false
 	if !cfg.HidePreedit && input != "" && cursorPos >= 0 && cursorPos <= len(input) {
 		cursorText := input[:cursorPos]
-		preeditX := cfg.Padding + accentBarExtra
+		preeditX := padX + accentBarExtra
 		textX := preeditX + 8*scale
 		cursorDrawX = textX + td.MeasureString(cursorText, cfg.FontSize)
 		hasCursor = true
@@ -454,12 +527,12 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		accentBarOffset = 3.0*scale + 2*scale
 	}
 
-	candStartY := cfg.Padding
+	candStartY := padY
 	if !cfg.HidePreedit && input != "" {
 		candStartY += inputHeight + 4*scale
 	}
 
-	xPos := cfg.Padding + accentBarOffset
+	xPos := padX + accentBarOffset + bgPadL
 	for i := range candidates {
 		positions[i].x = xPos
 		if isTextIndex {
@@ -467,7 +540,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		} else {
 			positions[i].textX = xPos + indexSize + indexMargin
 		}
-		xPos += measures[i].totalWidth + itemSpacing
+		xPos += measures[i].totalWidth + effectiveSpacingForWidth
 	}
 
 	// ===== PHASE 1: Draw all shapes with gg =====
@@ -489,13 +562,13 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	r.drawRoundedRect(dc, 0.5, 0.5, width-3, height-3, cfg.CornerRadius)
 	dc.Stroke()
 
-	y := cfg.Padding
+	y := padY
 
 	// Input area shapes
 	if !cfg.HidePreedit && input != "" {
-		preeditX := cfg.Padding + accentBarOffset
+		preeditX := padX + accentBarOffset
 		dc.SetColor(cfg.InputBgColor)
-		r.drawRoundedRect(dc, preeditX, y, width-preeditX-cfg.Padding-2, inputHeight, 4*scale)
+		r.drawRoundedRect(dc, preeditX, y, width-preeditX-padX-2, inputHeight, 4*scale)
 		dc.Fill()
 
 		if hasCursor {
@@ -515,26 +588,26 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 	candY := candStartY + candidateRowHeight/2
 
-	// Horizontal layout padding for hover/selected backgrounds
-	bgPadX := 8.0 * scale // 左右各 8px，更好的包裹效果
-
 	// Draw candidate shapes (selected bg, hover bg, accent bar, index circles)
 	for i := range candidates {
 		itemWidth := measures[i].totalWidth
 		px := positions[i].x
 
+		bgX := px - bgPadL
+		bgW := bgPadL + itemWidth + bgPadR
+
 		result.Rects[i] = CandidateRect{
 			Index: i,
-			X:     px - bgPadX,
+			X:     bgX,
 			Y:     candStartY,
-			W:     itemWidth + bgPadX*2,
+			W:     bgW,
 			H:     candidateRowHeight,
 		}
 
 		// Selected background (keyboard selection via up/down arrows)
 		if i == selectedIndex {
 			dc.SetColor(cfg.SelectedBgColor)
-			r.drawRoundedRect(dc, px-bgPadX, candStartY, itemWidth+bgPadX*2, candidateRowHeight, 4*scale)
+			r.drawRoundedRect(dc, bgX, candStartY, bgW, candidateRowHeight, 4*scale)
 			dc.Fill()
 
 			// Accent bar — drawn inside the selected highlight box
@@ -542,7 +615,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 				barWidth := 3.0 * scale
 				barMarginY := candidateRowHeight * 0.2 // 竖条上下各留 20%，条高约 60%
 				dc.SetColor(cfg.AccentBarColor)
-				r.drawRoundedRect(dc, px-bgPadX+1, candStartY+barMarginY, barWidth, candidateRowHeight-barMarginY*2, barWidth/2)
+				r.drawRoundedRect(dc, bgX+1, candStartY+barMarginY, barWidth, candidateRowHeight-barMarginY*2, barWidth/2)
 				dc.Fill()
 			}
 		}
@@ -550,7 +623,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		// Hover background (mouse hover, takes visual precedence)
 		if i == hoverIndex && i != selectedIndex {
 			dc.SetColor(cfg.HoverBgColor)
-			r.drawRoundedRect(dc, px-bgPadX, candStartY, itemWidth+bgPadX*2, candidateRowHeight, 4*scale)
+			r.drawRoundedRect(dc, bgX, candStartY, bgW, candidateRowHeight, 4*scale)
 			dc.Fill()
 		}
 
@@ -564,40 +637,46 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	}
 
 	// Page info chevrons (shapes only)
-	if totalPages > 1 {
+	if showPager {
 		totalW := arrowW + pageW + arrowW
-		startX := width - cfg.Padding - totalW
+		startX := width - padX - totalW
 
 		// Page up button
+		canPageUp := page > 1
 		pageUpBtnRect := CandidateRect{X: startX, Y: candStartY, W: arrowW, H: candidateRowHeight}
-		if hoverPageBtn == "up" {
+		if canPageUp && hoverPageBtn == "up" {
 			dc.SetColor(cfg.HoverBgColor)
 			r.drawRoundedRect(dc, pageUpBtnRect.X, pageUpBtnRect.Y, pageUpBtnRect.W, pageUpBtnRect.H, 4*scale)
 			dc.Fill()
 		}
 		leftArrowColor := cfg.IndexBgColor
-		if page <= 1 {
+		if !canPageUp {
 			leftArrowColor = cfg.InputTextColor
 		}
 		dc.SetColor(leftArrowColor)
 		r.drawChevronLeft(dc, startX+arrowW/2, candY, arrowSize, 1.5*scale)
-		result.PageUpRect = &pageUpBtnRect
+		if canPageUp {
+			result.PageUpRect = &pageUpBtnRect
+		}
 
 		// Page down button
+		canPageDown := page < totalPages
 		pageDownBtnRect := CandidateRect{X: startX + arrowW + pageW, Y: candStartY, W: arrowW, H: candidateRowHeight}
-		if hoverPageBtn == "down" {
+		if canPageDown && hoverPageBtn == "down" {
 			dc.SetColor(cfg.HoverBgColor)
 			r.drawRoundedRect(dc, pageDownBtnRect.X, pageDownBtnRect.Y, pageDownBtnRect.W, pageDownBtnRect.H, 4*scale)
 			dc.Fill()
 		}
 		rightArrowColor := cfg.IndexBgColor
-		if page >= totalPages {
+		if !canPageDown {
 			rightArrowColor = cfg.InputTextColor
 		}
 		rightCenterX := startX + arrowW + pageW + arrowW/2
 		dc.SetColor(rightArrowColor)
 		r.drawChevronRight(dc, rightCenterX, candY, arrowSize, 1.5*scale)
-		result.PageDownRect = &pageDownBtnRect
+		if canPageDown {
+			result.PageDownRect = &pageDownBtnRect
+		}
 	}
 
 	// ===== PHASE 2: Draw all text =====
@@ -606,25 +685,34 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 	// Input text
 	if !cfg.HidePreedit && input != "" {
-		preeditX := cfg.Padding + accentBarOffset
+		preeditX := padX + accentBarOffset
 		textX := preeditX + 8*scale
-		textY := cfg.Padding + inputHeight/2 + cfg.FontSize/3
+		textY := padY + inputHeight/2 + cfg.FontSize/3
 		td.DrawString(input, textX, textY, cfg.FontSize, cfg.InputTextColor)
 	}
 
 	// Candidate text (index, text, comment)
+	indexWeight := cfg.IndexFontWeight
 	for i, cand := range candidates {
 		px := positions[i].x
 
 		// Index
 		if isTextIndex {
 			indexStr := string(rune('0' + cand.Index))
-			td.DrawString(indexStr, px, candY+indexTextSize/3, indexTextSize, cfg.IndexColor)
+			if indexWeight > 0 {
+				td.DrawStringWithWeight(indexStr, px, candY+indexTextSize/3, indexTextSize, cfg.IndexColor, indexWeight)
+			} else {
+				td.DrawString(indexStr, px, candY+indexTextSize/3, indexTextSize, cfg.IndexColor)
+			}
 		} else {
 			indexX := px + indexSize/2
 			indexStr := string(rune('0' + cand.Index))
 			tw := td.MeasureString(indexStr, cfg.IndexFontSize)
-			td.DrawString(indexStr, indexX-tw/2, candY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor)
+			if indexWeight > 0 {
+				td.DrawStringWithWeight(indexStr, indexX-tw/2, candY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor, indexWeight)
+			} else {
+				td.DrawString(indexStr, indexX-tw/2, candY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor)
+			}
 		}
 
 		// Candidate text
@@ -638,9 +726,9 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	}
 
 	// Page text
-	if totalPages > 1 {
+	if showPager && showPageNumber && pageText != "" {
 		totalW := arrowW + pageW + arrowW
-		startX := width - cfg.Padding - totalW
+		startX := width - padX - totalW
 		td.DrawString(pageText, startX+arrowW, candY+6*scale, pageFontSize, cfg.InputTextColor)
 	}
 

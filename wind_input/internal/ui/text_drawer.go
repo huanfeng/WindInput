@@ -35,6 +35,9 @@ type TextDrawer interface {
 	BeginDraw(img *image.RGBA)
 	// DrawString draws text at baseline position (x, y), matching gg.DrawString coordinates.
 	DrawString(text string, x, y float64, fontSize float64, clr color.Color)
+	// DrawStringWithWeight draws text with a specific font weight (100-900).
+	// If weight <= 0, behaves like DrawString with global weight.
+	DrawStringWithWeight(text string, x, y float64, fontSize float64, clr color.Color, weight int)
 	// EndDraw finalizes text drawing and flushes results to the image.
 	EndDraw()
 	// Close releases all resources held by this drawer.
@@ -223,6 +226,11 @@ func (d *freeTypeDrawer) DrawString(text string, x, y float64, fontSize float64,
 	}
 }
 
+func (d *freeTypeDrawer) DrawStringWithWeight(text string, x, y float64, fontSize float64, clr color.Color, weight int) {
+	// FreeType doesn't support per-draw weight, fall back to regular DrawString
+	d.DrawString(text, x, y, fontSize, clr)
+}
+
 func (d *freeTypeDrawer) EndDraw() {
 	if d.target != nil && d.dc != nil {
 		if overlay, ok := d.dc.Image().(*image.RGBA); ok {
@@ -268,6 +276,10 @@ func (d *gdiDrawer) DrawString(text string, x, y float64, fontSize float64, clr 
 	d.tr.DrawString(text, x, y, fontSize, clr)
 }
 
+func (d *gdiDrawer) DrawStringWithWeight(text string, x, y float64, fontSize float64, clr color.Color, weight int) {
+	d.tr.DrawStringWithWeight(text, x, y, fontSize, clr, weight)
+}
+
 func (d *gdiDrawer) EndDraw() {
 	d.tr.EndDraw()
 }
@@ -301,6 +313,10 @@ func (d *directWriteDrawer) BeginDraw(img *image.RGBA) {
 
 func (d *directWriteDrawer) DrawString(text string, x, y float64, fontSize float64, clr color.Color) {
 	d.tr.DrawString(text, x, y, fontSize, clr)
+}
+
+func (d *directWriteDrawer) DrawStringWithWeight(text string, x, y float64, fontSize float64, clr color.Color, weight int) {
+	d.tr.DrawStringWithWeight(text, x, y, fontSize, clr, weight)
 }
 
 func (d *directWriteDrawer) EndDraw() {
