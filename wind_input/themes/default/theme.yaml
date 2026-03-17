@@ -1,7 +1,7 @@
 meta:
   name: "默认主题"
   version: "1.0"
-  author: "WindInput"
+  author: "清风输入法"
 
 candidate_window:
   background_color: "#FFFFFF"
@@ -10,6 +10,7 @@ candidate_window:
   index_color: "#FFFFFF"
   index_bg_color: "#4285F4"      # 蓝色
   hover_bg_color: "#E6F0FF"      # 浅蓝色
+  selected_bg_color: "#E6F0FF"
   input_bg_color: "#F0F0F0"
   input_text_color: "#646464"
   comment_color: "#969696"

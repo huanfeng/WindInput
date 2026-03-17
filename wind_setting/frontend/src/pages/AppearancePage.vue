@@ -24,7 +24,6 @@ const themeOptions = computed(() => {
     description: theme.author ? `作者 ${theme.author}` : "暂无描述",
     version: theme.version || "",
     isActive: theme.is_active,
-    isBuiltin: theme.is_builtin,
   }));
 });
 
@@ -106,9 +105,6 @@ onUnmounted(() => {
               >
                 <div class="theme-option-title">
                   <span class="theme-option-name">{{ theme.label }}</span>
-                  <span v-if="theme.isBuiltin" class="theme-badge builtin"
-                    >内置</span
-                  >
                   <span v-if="theme.isActive" class="theme-badge active"
                     >当前</span
                   >

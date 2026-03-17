@@ -1,7 +1,7 @@
 meta:
   name: "暗色主题"
   version: "1.0"
-  author: "WindInput"
+  author: "清风输入法"
 
 candidate_window:
   background_color: "#2D2D2D"
@@ -10,6 +10,7 @@ candidate_window:
   index_color: "#FFFFFF"
   index_bg_color: "#4285F4"
   hover_bg_color: "#3D4A5C"
+  selected_bg_color: "#3D4A5C"
   input_bg_color: "#3A3A3A"
   input_text_color: "#B0B0B0"
   comment_color: "#808080"

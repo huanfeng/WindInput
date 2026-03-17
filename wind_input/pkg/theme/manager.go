@@ -23,13 +23,21 @@ type Manager struct {
 // NewManager creates a new theme manager
 func NewManager(logger *slog.Logger) *Manager {
 	m := &Manager{
-		logger:       logger,
-		currentTheme: DefaultTheme(),
+		logger: logger,
 	}
-	m.resolved = m.currentTheme.Resolve()
 
 	// Initialize theme search paths
 	m.initThemeDirs()
+
+	// Try to load "default" theme from file
+	if err := m.loadAndApply("default"); err != nil {
+		if logger != nil {
+			logger.Warn("无法从文件加载默认主题，使用内置空主题", "error", err)
+		}
+		m.currentTheme = emptyTheme()
+		m.currentThemeID = "default"
+		m.resolved = m.currentTheme.Resolve()
+	}
 
 	return m
 }
@@ -56,66 +64,45 @@ func (m *Manager) initThemeDirs() {
 	}
 }
 
-// LoadTheme loads a theme by name
+// loadAndApply loads a theme from file and applies it (caller must not hold lock)
+func (m *Manager) loadAndApply(name string) error {
+	theme, err := m.loadThemeFile(name)
+	if err != nil {
+		return err
+	}
+	m.currentTheme = theme
+	m.currentThemeID = name
+	m.resolved = m.currentTheme.Resolve()
+	return nil
+}
+
+// LoadTheme loads a theme by name from theme directories.
 // Name can be:
-// - "default" or "dark" for built-in themes
-// - A theme directory name to search in theme directories
+// - A theme directory name to search in theme directories (e.g., "default", "dark", "msime")
 // - An absolute path to a theme.yaml file
 func (m *Manager) LoadTheme(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Track theme ID
 	if name == "" {
-		m.currentThemeID = "default"
-	} else {
-		m.currentThemeID = name
-	}
-
-	// Handle built-in themes
-	if name == "default" || name == "" {
-		m.currentTheme = DefaultTheme()
-		m.resolved = m.currentTheme.Resolve()
-		if m.logger != nil {
-			m.logger.Info("Loaded built-in default theme")
-		}
-		return nil
-	}
-
-	if name == "dark" {
-		m.currentTheme = DarkTheme()
-		m.resolved = m.currentTheme.Resolve()
-		if m.logger != nil {
-			m.logger.Info("Loaded built-in dark theme")
-		}
-		return nil
-	}
-
-	if name == "msime" {
-		m.currentTheme = MSIMETheme()
-		m.resolved = m.currentTheme.Resolve()
-		if m.logger != nil {
-			m.logger.Info("Loaded built-in Microsoft IME theme")
-		}
-		return nil
+		name = "default"
 	}
 
 	// Try to load from file
 	theme, err := m.loadThemeFile(name)
 	if err != nil {
 		if m.logger != nil {
-			m.logger.Warn("Failed to load theme, using default", "name", name, "error", err)
+			m.logger.Error("加载主题失败", "name", name, "error", err,
+				"search_dirs", m.themeDirs)
 		}
-		// Fall back to default theme
-		m.currentTheme = DefaultTheme()
-		m.resolved = m.currentTheme.Resolve()
-		return err
+		return fmt.Errorf("加载主题 %q 失败: %w (搜索路径: %v)", name, err, m.themeDirs)
 	}
 
 	m.currentTheme = theme
+	m.currentThemeID = name
 	m.resolved = m.currentTheme.Resolve()
 	if m.logger != nil {
-		m.logger.Info("Loaded theme", "name", theme.Meta.Name, "path", name)
+		m.logger.Info("Loaded theme", "name", theme.Meta.Name, "id", name)
 	}
 	return nil
 }
@@ -152,8 +139,7 @@ func (m *Manager) loadThemeFromPath(path string) (*Theme, error) {
 		return nil, fmt.Errorf("failed to read theme file: %w", err)
 	}
 
-	// Start with default theme to fill in any missing values
-	theme := DefaultTheme()
+	theme := &Theme{}
 	if err := yaml.Unmarshal(data, theme); err != nil {
 		return nil, fmt.Errorf("failed to parse theme file: %w", err)
 	}
@@ -177,7 +163,8 @@ func (m *Manager) GetResolvedTheme() *ResolvedTheme {
 
 // ListAvailableThemes returns a list of available theme names
 func (m *Manager) ListAvailableThemes() []string {
-	themes := []string{"default", "dark", "msime"}
+	seen := make(map[string]bool)
+	var themes []string
 
 	// Scan theme directories
 	for _, dir := range m.themeDirs {
@@ -191,27 +178,28 @@ func (m *Manager) ListAvailableThemes() []string {
 				// Check if it contains theme.yaml
 				themePath := filepath.Join(dir, entry.Name(), "theme.yaml")
 				if _, err := os.Stat(themePath); err == nil {
-					themes = append(themes, entry.Name())
+					name := entry.Name()
+					if !seen[name] {
+						seen[name] = true
+						themes = append(themes, name)
+					}
 				}
 			} else if filepath.Ext(entry.Name()) == ".yaml" {
 				// Single file theme
-				themeName := entry.Name()[:len(entry.Name())-5] // Remove .yaml
-				themes = append(themes, themeName)
+				name := entry.Name()[:len(entry.Name())-5] // Remove .yaml
+				if !seen[name] {
+					seen[name] = true
+					themes = append(themes, name)
+				}
 			}
 		}
 	}
 
-	// Deduplicate
-	seen := make(map[string]bool)
-	result := make([]string, 0, len(themes))
-	for _, t := range themes {
-		if !seen[t] {
-			seen[t] = true
-			result = append(result, t)
-		}
+	if len(themes) == 0 && m.logger != nil {
+		m.logger.Warn("未找到任何主题文件", "search_dirs", m.themeDirs)
 	}
 
-	return result
+	return themes
 }
 
 // ThemeDisplayInfo contains theme ID and display name
@@ -225,24 +213,13 @@ func (m *Manager) ListAvailableThemeInfos() []ThemeDisplayInfo {
 	ids := m.ListAvailableThemes()
 	infos := make([]ThemeDisplayInfo, 0, len(ids))
 
-	// Built-in theme display names
-	builtinNames := map[string]string{
-		"default": DefaultTheme().Meta.Name + " " + DefaultTheme().Meta.Version,
-		"dark":    DarkTheme().Meta.Name + " " + DarkTheme().Meta.Version,
-		"msime":   MSIMETheme().Meta.Name + " " + MSIMETheme().Meta.Version,
-	}
-
 	for _, id := range ids {
 		displayName := id
-		if name, ok := builtinNames[id]; ok {
-			displayName = name
-		} else {
-			// Try to read display name from theme file
-			if t, err := m.loadThemeFile(id); err == nil && t.Meta.Name != "" {
-				displayName = t.Meta.Name
-				if t.Meta.Version != "" {
-					displayName += " " + t.Meta.Version
-				}
+		// Try to read display name from theme file
+		if t, err := m.loadThemeFile(id); err == nil && t.Meta.Name != "" {
+			displayName = t.Meta.Name
+			if t.Meta.Version != "" {
+				displayName += " " + t.Meta.Version
 			}
 		}
 		infos = append(infos, ThemeDisplayInfo{ID: id, DisplayName: displayName})

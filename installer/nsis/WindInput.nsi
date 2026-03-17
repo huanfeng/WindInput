@@ -331,6 +331,15 @@ install_cleanup_bak_end:
   SetOutPath "$INSTDIR\schemas"
   File "${BUILD_DIR}\schemas\wubi86.schema.yaml"
   File "${BUILD_DIR}\schemas\pinyin.schema.yaml"
+
+  ; --- Step 6c: Theme files ---
+  DetailPrint "正在复制主题文件..."
+  SetOutPath "$INSTDIR\themes\default"
+  File "${BUILD_DIR}\themes\default\theme.yaml"
+  SetOutPath "$INSTDIR\themes\dark"
+  File "${BUILD_DIR}\themes\dark\theme.yaml"
+  SetOutPath "$INSTDIR\themes\msime"
+  File "${BUILD_DIR}\themes\msime\theme.yaml"
   SetOutPath "$INSTDIR"
 
   ; --- Step 7: Register NEW DLL (always at original path, guaranteed new version) ---
@@ -422,6 +431,7 @@ uninst_setting_done:
   Delete /REBOOTOK "$INSTDIR\uninstall.exe"
   RMDir /r /REBOOTOK "$INSTDIR\dict"
   RMDir /r /REBOOTOK "$INSTDIR\schemas"
+  RMDir /r /REBOOTOK "$INSTDIR\themes"
   ; Cleanup .old_* and .bak files
   FindFirst $0 $1 "$INSTDIR\*.old_*"
 uninst_cleanup_old_loop:

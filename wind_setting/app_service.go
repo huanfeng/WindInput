@@ -110,9 +110,8 @@ func (a *App) GetAvailableThemes() ([]ThemeInfo, error) {
 	themes := make([]ThemeInfo, 0, len(themeNames))
 	for _, name := range themeNames {
 		info := ThemeInfo{
-			Name:      name,
-			IsBuiltin: name == "default" || name == "dark" || name == "msime",
-			IsActive:  name == currentTheme,
+			Name:     name,
+			IsActive: name == currentTheme,
 		}
 
 		// 加载主题以获取显示名称

@@ -718,10 +718,6 @@ input:checked + .slider:before {
   border-radius: 4px;
   font-weight: 600;
 }
-.theme-badge.builtin {
-  background: #e5e7eb;
-  color: #6b7280;
-}
 .theme-badge.active {
   background: #dcfce7;
   color: #166534;

@@ -14,6 +14,7 @@ candidate_window:
   index_color: "#888888"
   index_bg_color: "#0078D4"
   hover_bg_color: "#EBF0FE"
+  selected_bg_color: "#80808010"
   input_bg_color: "#F5F5F5"
   input_text_color: "#666666"
   comment_color: "#999999"

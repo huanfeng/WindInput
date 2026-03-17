@@ -162,6 +162,24 @@ if exist "%SCRIPT_DIR%data\schemas\*.schema.yaml" (
 ) else (
     echo [警告] 未找到输入方案配置文件
 )
+
+REM 复制主题文件
+echo   - 复制主题文件...
+set "THEMES_SRC=%SCRIPT_DIR%wind_input\themes"
+set "THEMES_DST=%SCRIPT_DIR%build\themes"
+if exist "%THEMES_SRC%" (
+    for /D %%d in ("%THEMES_SRC%\*") do (
+        if exist "%%d\theme.yaml" (
+            set "THEME_NAME=%%~nd"
+            if not exist "%THEMES_DST%\%%~nd" mkdir "%THEMES_DST%\%%~nd"
+            copy /Y "%%d\theme.yaml" "%THEMES_DST%\%%~nd\theme.yaml" >nul
+            echo     - %%~nd
+        )
+    )
+    echo   - 主题文件复制完成
+) else (
+    echo [警告] 未找到主题目录
+)
 echo.
 
 echo [6/6] 检查输出文件...
@@ -199,6 +217,7 @@ echo - build\dict\pinyin\unigram.txt(Unigram 语言模型)
 echo - build\dict\wubi86\wubi86.txt(五笔词库)
 echo - build\dict\common_chars.txt(常用字表)
 echo - build\schemas\*.schema.yaml(输入方案配置)
+echo - build\themes\*\theme.yaml(主题配置)
 echo.
 echo 注: .wdb 二进制词库由运行时按需自动生成并缓存
 echo.
