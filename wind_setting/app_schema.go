@@ -35,7 +35,7 @@ type SchemaConfigEngine struct {
 	Type       string                 `yaml:"type" json:"type"`
 	CodeTable  map[string]interface{} `yaml:"codetable,omitempty" json:"codetable,omitempty"`
 	Pinyin     map[string]interface{} `yaml:"pinyin,omitempty" json:"pinyin,omitempty"`
-	FilterMode string                `yaml:"filter_mode" json:"filter_mode"`
+	FilterMode string                 `yaml:"filter_mode" json:"filter_mode"`
 }
 
 // SchemaConfigDict 词库配置项
@@ -62,11 +62,11 @@ type SchemaConfigLearning struct {
 
 // SchemaConfig 完整方案配置（YAML 结构，前端可直接编辑）
 type SchemaConfig struct {
-	Schema       SchemaConfigMeta     `yaml:"schema" json:"schema"`
-	Engine       SchemaConfigEngine   `yaml:"engine" json:"engine"`
-	Dicts        []SchemaConfigDict   `yaml:"dictionaries" json:"dictionaries"`
-	UserData     SchemaConfigUserData `yaml:"user_data" json:"user_data"`
-	Learning     SchemaConfigLearning `yaml:"learning" json:"learning"`
+	Schema   SchemaConfigMeta     `yaml:"schema" json:"schema"`
+	Engine   SchemaConfigEngine   `yaml:"engine" json:"engine"`
+	Dicts    []SchemaConfigDict   `yaml:"dictionaries" json:"dictionaries"`
+	UserData SchemaConfigUserData `yaml:"user_data" json:"user_data"`
+	Learning SchemaConfigLearning `yaml:"learning" json:"learning"`
 }
 
 // GetAvailableSchemas 获取所有可用的输入方案列表
