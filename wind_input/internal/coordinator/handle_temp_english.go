@@ -163,10 +163,14 @@ func (c *Coordinator) showTempEnglishUI() {
 		return
 	}
 
-	// 使用光标位置
+	// 使用光标位置（与 showUI 一致：InlinePreedit 时锚定到 composition 起始位置）
 	caretX := c.caretX
 	caretY := c.caretY
 	caretHeight := c.caretHeight
+	if c.config != nil && c.config.UI.InlinePreedit && c.compositionStartValid {
+		caretX = c.compositionStartX
+		caretY = c.compositionStartY
+	}
 
 	const maxCoord = 32000
 	if (c.caretX == 0 && c.caretY == 0) || caretX > maxCoord || caretX < -maxCoord || caretY > maxCoord || caretY < -maxCoord {

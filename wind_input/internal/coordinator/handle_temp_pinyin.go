@@ -195,6 +195,118 @@ func (c *Coordinator) handleTempPinyinKey(key string, data *bridge.KeyEventData)
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
+	case c.isHighlightUpKey(uint32(data.KeyCode), uint32(data.Modifiers)):
+		if len(c.candidates) > 0 {
+			if c.selectedIndex > 0 {
+				c.selectedIndex--
+				c.showTempPinyinUI()
+			} else if c.currentPage > 1 {
+				c.currentPage--
+				startIdx := (c.currentPage - 1) * c.candidatesPerPage
+				endIdx := startIdx + c.candidatesPerPage
+				if endIdx > len(c.candidates) {
+					endIdx = len(c.candidates)
+				}
+				c.selectedIndex = endIdx - startIdx - 1
+				c.showTempPinyinUI()
+			}
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	case c.isHighlightDownKey(uint32(data.KeyCode), uint32(data.Modifiers)):
+		if len(c.candidates) > 0 {
+			startIdx := (c.currentPage - 1) * c.candidatesPerPage
+			endIdx := startIdx + c.candidatesPerPage
+			if endIdx > len(c.candidates) {
+				endIdx = len(c.candidates)
+			}
+			pageCount := endIdx - startIdx
+			if c.selectedIndex < pageCount-1 {
+				c.selectedIndex++
+				c.showTempPinyinUI()
+			} else if c.currentPage < c.totalPages {
+				c.currentPage++
+				c.selectedIndex = 0
+				c.showTempPinyinUI()
+			}
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	case data.Modifiers&ModShift == 0 && c.isSelectKey2(key, data.KeyCode):
+		// 二候选选择键（如 ;）：有候选时选第2候选
+		if len(c.candidates) >= 2 {
+			pageStart := (c.currentPage - 1) * c.candidatesPerPage
+			idx := pageStart + 1
+			if idx < len(c.candidates) {
+				return c.selectTempPinyinCandidate(idx)
+			}
+		}
+		// 仅1个候选时，上屏第1候选+对应标点
+		if len(c.candidates) > 0 {
+			pageStart := (c.currentPage - 1) * c.candidatesPerPage
+			cand := c.candidates[pageStart]
+			text := cand.Text
+			if c.fullWidth {
+				text = transform.ToFullWidth(text)
+			}
+			punctText := key
+			if len(key) == 1 && c.chinesePunctuation {
+				if converted, ok := c.punctConverter.ToChinesePunctStr(rune(key[0])); ok {
+					punctText = converted
+				}
+			}
+			return c.exitTempPinyinMode(true, text+punctText)
+		}
+		return c.exitTempPinyinMode(false, "")
+
+	case data.Modifiers&ModShift == 0 && c.isTempPinyinSeparator(key, data.KeyCode):
+		// 拼音分隔符（如 '）：追加到临时拼音缓冲区
+		if len(c.tempPinyinBuffer) > 0 {
+			// 防止连续分隔符
+			if c.tempPinyinBuffer[len(c.tempPinyinBuffer)-1] != '\'' {
+				c.tempPinyinBuffer += "'"
+				c.updateTempPinyinCandidates()
+				c.showTempPinyinUI()
+				preedit := "`" + c.preeditDisplay
+				if c.preeditDisplay == "" {
+					preedit = "`" + c.tempPinyinBuffer
+				}
+				return &bridge.KeyEventResult{
+					Type:     bridge.ResponseTypeUpdateComposition,
+					Text:     preedit,
+					CaretPos: len(preedit),
+				}
+			}
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	case data.Modifiers&ModShift == 0 && c.isSelectKey3(key, data.KeyCode):
+		// 三候选选择键（如 '）：有候选时选第3候选
+		if len(c.candidates) >= 3 {
+			pageStart := (c.currentPage - 1) * c.candidatesPerPage
+			idx := pageStart + 2
+			if idx < len(c.candidates) {
+				return c.selectTempPinyinCandidate(idx)
+			}
+		}
+		// 无足够候选时，上屏第1候选+对应标点
+		if len(c.candidates) > 0 {
+			pageStart := (c.currentPage - 1) * c.candidatesPerPage
+			cand := c.candidates[pageStart]
+			text := cand.Text
+			if c.fullWidth {
+				text = transform.ToFullWidth(text)
+			}
+			punctText := key
+			if len(key) == 1 && c.chinesePunctuation {
+				if converted, ok := c.punctConverter.ToChinesePunctStr(rune(key[0])); ok {
+					punctText = converted
+				}
+			}
+			return c.exitTempPinyinMode(true, text+punctText)
+		}
+		return c.exitTempPinyinMode(false, "")
+
 	case c.isTempPinyinTriggerKeyMatch(key, data.KeyCode):
 		// 再次按下触发键：缓冲区为空时输出对应的标点符号
 		if len(c.tempPinyinBuffer) == 0 {
@@ -212,7 +324,7 @@ func (c *Coordinator) handleTempPinyinKey(key string, data *bridge.KeyEventData)
 				return c.exitTempPinyinMode(true, punctText)
 			}
 		}
-		// 缓冲区有内容时，按标点处理（同 default 逻辑）
+		// 缓冲区有内容时，上屏第1候选+触发键标点
 		if len(c.candidates) > 0 {
 			pageStart := (c.currentPage - 1) * c.candidatesPerPage
 			cand := c.candidates[pageStart]
@@ -220,25 +332,13 @@ func (c *Coordinator) handleTempPinyinKey(key string, data *bridge.KeyEventData)
 			if c.fullWidth {
 				text = transform.ToFullWidth(text)
 			}
-
-			c.tempPinyinMode = false
-			c.tempPinyinBuffer = ""
-			c.preeditDisplay = ""
-			c.candidates = nil
-			c.currentPage = 1
-			c.totalPages = 1
-			c.hideUI()
-
 			punctText := key
 			if len(key) == 1 && c.chinesePunctuation {
 				if converted, ok := c.punctConverter.ToChinesePunctStr(rune(key[0])); ok {
 					punctText = converted
 				}
 			}
-			return &bridge.KeyEventResult{
-				Type: bridge.ResponseTypeInsertText,
-				Text: text + punctText,
-			}
+			return c.exitTempPinyinMode(true, text+punctText)
 		}
 		return c.exitTempPinyinMode(false, "")
 
@@ -253,28 +353,15 @@ func (c *Coordinator) handleTempPinyinKey(key string, data *bridge.KeyEventData)
 				text = transform.ToFullWidth(text)
 			}
 
-			c.tempPinyinMode = false
-			c.tempPinyinBuffer = ""
-			c.preeditDisplay = ""
-			c.candidates = nil
-			c.currentPage = 1
-			c.totalPages = 1
-			c.hideUI()
-
 			// 处理标点
+			punctText := ""
 			if len(key) == 1 && c.isPunctuation(rune(key[0])) {
 				punctResult := c.handlePunctuation(rune(key[0]))
 				if punctResult != nil {
-					return &bridge.KeyEventResult{
-						Type: bridge.ResponseTypeInsertText,
-						Text: text + punctResult.Text,
-					}
+					punctText = punctResult.Text
 				}
 			}
-			return &bridge.KeyEventResult{
-				Type: bridge.ResponseTypeInsertText,
-				Text: text,
-			}
+			return c.exitTempPinyinMode(true, text+punctText)
 		}
 
 		// 无候选时退出
@@ -394,10 +481,14 @@ func (c *Coordinator) showTempPinyinUI() {
 		return
 	}
 
-	// 使用光标位置
+	// 使用光标位置（与 showUI 一致：InlinePreedit 时锚定到 composition 起始位置）
 	caretX := c.caretX
 	caretY := c.caretY
 	caretHeight := c.caretHeight
+	if c.config != nil && c.config.UI.InlinePreedit && c.compositionStartValid {
+		caretX = c.compositionStartX
+		caretY = c.compositionStartY
+	}
 
 	const maxCoord = 32000
 	if (c.caretX == 0 && c.caretY == 0) || caretX > maxCoord || caretX < -maxCoord || caretY > maxCoord || caretY < -maxCoord {
@@ -456,4 +547,44 @@ func (c *Coordinator) showTempPinyinUI() {
 		c.candidatesPerPage,
 		c.selectedIndex,
 	)
+}
+
+// isTempPinyinSeparator 检查按键是否为临时拼音模式下的分隔符
+// 与 isPinyinSeparator 逻辑一致，但跳过引擎类型检查（临时拼音下引擎仍为码表类型）
+func (c *Coordinator) isTempPinyinSeparator(key string, keyCode int) bool {
+	if len(c.tempPinyinBuffer) == 0 {
+		return false
+	}
+
+	separatorMode := "auto"
+	if c.config != nil && c.config.Input.PinyinSeparator != "" {
+		separatorMode = c.config.Input.PinyinSeparator
+	}
+
+	switch separatorMode {
+	case "none":
+		return false
+	case "quote":
+		return key == "'" || uint32(keyCode) == ipc.VK_OEM_7
+	case "backtick":
+		return key == "`" || uint32(keyCode) == ipc.VK_OEM_3
+	case "auto":
+		isQuote := key == "'" || uint32(keyCode) == ipc.VK_OEM_7
+		isBacktick := key == "`" || uint32(keyCode) == ipc.VK_OEM_3
+		if isQuote {
+			// ' 同时是选择键时不作为分隔符
+			if c.isSelectKey3(key, keyCode) {
+				return false
+			}
+			return true
+		}
+		if isBacktick {
+			// 只有当 ' 被选择键占用时，` 才作为分隔符
+			quoteIsSelectKey := c.isSelectKey3("'", int(ipc.VK_OEM_7))
+			return quoteIsSelectKey
+		}
+		return false
+	default:
+		return false
+	}
 }

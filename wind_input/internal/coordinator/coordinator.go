@@ -388,6 +388,10 @@ func (c *Coordinator) clearState() {
 	c.syllableBoundaries = nil
 	c.tempEnglishMode = false
 	c.tempEnglishBuffer = ""
+	// 清除临时拼音状态时，同步卸载引擎层的拼音词库层，避免污染五笔查询
+	if c.tempPinyinMode && c.engineMgr != nil {
+		c.engineMgr.DeactivateTempPinyin()
+	}
 	c.tempPinyinMode = false
 	c.tempPinyinBuffer = ""
 	c.candidates = nil

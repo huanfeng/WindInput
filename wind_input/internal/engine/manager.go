@@ -242,12 +242,18 @@ func (m *Manager) loadSchemaEngineLocked(schemaID string) error {
 	}
 
 	// 缓存 factory 注册的系统词库层（用于切换回缓存引擎时重新注册）
+	// 根据引擎类型查找对应的层名，避免在 CompositeDict 中同时存在多种层时缓存错误的层
 	if m.dictManager != nil {
-		// factory 根据引擎类型注册了 "codetable-system" 或 "pinyin-system"
-		for _, name := range []string{"codetable-system", "pinyin-system"} {
-			if layer := m.dictManager.GetCompositeDict().GetLayerByName(name); layer != nil {
+		var layerName string
+		switch bundle.Engine.(type) {
+		case *pinyin.Engine:
+			layerName = "pinyin-system"
+		case *wubi.Engine:
+			layerName = "codetable-system"
+		}
+		if layerName != "" {
+			if layer := m.dictManager.GetCompositeDict().GetLayerByName(layerName); layer != nil {
 				m.systemLayers[schemaID] = layer
-				break
 			}
 		}
 	}
