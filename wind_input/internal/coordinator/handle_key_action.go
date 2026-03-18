@@ -62,24 +62,46 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 		if c.fullWidth {
 			text = transform.ToFullWidth(text)
 		}
+		// 拼接已确认段的文本
+		prefix := c.confirmedPrefix()
+		if c.fullWidth && prefix != "" {
+			prefix = transform.ToFullWidth(prefix)
+		}
 		c.clearState()
 		c.hideUI()
 		return &bridge.KeyEventResult{
 			Type: bridge.ResponseTypeInsertText,
-			Text: text,
+			Text: prefix + text,
 		}
 	}
 
 	// 检查空码处理
 	if result != nil && result.IsEmpty {
 		if result.ShouldClear {
+			// 如果有已确认段，先上屏确认段的文字再清空
+			if len(c.confirmedSegments) > 0 {
+				prefix := c.confirmedPrefix()
+				if c.fullWidth {
+					prefix = transform.ToFullWidth(prefix)
+				}
+				c.clearState()
+				c.hideUI()
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: prefix,
+				}
+			}
 			c.clearState()
 			c.hideUI()
 			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
 		}
 		if result.ToEnglish {
+			// 拼接已确认段 + 剩余编码作为英文上屏
+			prefix := c.confirmedPrefix()
+			if c.fullWidth && prefix != "" {
+				prefix = transform.ToFullWidth(prefix)
+			}
 			text := c.inputBuffer
-			// Apply full-width conversion if enabled
 			if c.fullWidth {
 				text = transform.ToFullWidth(text)
 			}
@@ -87,7 +109,7 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 			c.hideUI()
 			return &bridge.KeyEventResult{
 				Type: bridge.ResponseTypeInsertText,
-				Text: text,
+				Text: prefix + text,
 			}
 		}
 	}
@@ -133,10 +155,15 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 		c.inputCursorPos--
 		c.logger.Debug("Input buffer after backspace", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
 
-		if len(c.inputBuffer) == 0 {
+		if len(c.inputBuffer) == 0 && len(c.confirmedSegments) == 0 {
 			c.clearState()
 			c.hideUI()
 			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		}
+
+		// inputBuffer 为空但仍有确认段时，回退到上一个确认段
+		if len(c.inputBuffer) == 0 && len(c.confirmedSegments) > 0 {
+			return c.popConfirmedSegment()
 		}
 
 		c.updateCandidates()
@@ -160,8 +187,39 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 		}
 	}
 
+	// 光标在编码最左边按退格，且有确认段 → 弹出最后确认段，拼接到当前 buffer 前面
+	if len(c.inputBuffer) > 0 && c.inputCursorPos == 0 && len(c.confirmedSegments) > 0 {
+		lastSeg := c.confirmedSegments[len(c.confirmedSegments)-1]
+		c.confirmedSegments = c.confirmedSegments[:len(c.confirmedSegments)-1]
+		c.inputBuffer = lastSeg.ConsumedCode + c.inputBuffer
+		c.inputCursorPos = len(lastSeg.ConsumedCode)
+		c.logger.Debug("Backspace at cursor 0: pop confirmed segment",
+			"restored", lastSeg.ConsumedCode, "buffer", c.inputBuffer)
+
+		c.updateCandidates()
+		c.showUI()
+
+		if c.config != nil && c.config.UI.InlinePreedit {
+			return &bridge.KeyEventResult{
+				Type:     bridge.ResponseTypeUpdateComposition,
+				Text:     c.compositionText(),
+				CaretPos: c.displayCursorPos(),
+			}
+		}
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     "",
+			CaretPos: 0,
+		}
+	}
+
+	// inputBuffer 为空且有确认段 → 弹出最后确认段恢复编码
+	if len(c.inputBuffer) == 0 && len(c.confirmedSegments) > 0 {
+		return c.popConfirmedSegment()
+	}
+
 	if len(c.inputBuffer) == 0 {
-		// Buffer is already empty - pass through to system
+		// Buffer is already empty and no confirmed segments - pass through to system
 		c.logger.Debug("Backspace with empty buffer, passing through to system")
 		return nil
 	}
@@ -169,6 +227,32 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 	// Cursor at beginning but buffer not empty - consume the key (don't pass to system)
 	return &bridge.KeyEventResult{
 		Type: bridge.ResponseTypeConsumed,
+	}
+}
+
+// popConfirmedSegment 弹出最后一个确认段，将其编码恢复到 inputBuffer 中。
+func (c *Coordinator) popConfirmedSegment() *bridge.KeyEventResult {
+	lastSeg := c.confirmedSegments[len(c.confirmedSegments)-1]
+	c.confirmedSegments = c.confirmedSegments[:len(c.confirmedSegments)-1]
+	c.inputBuffer = lastSeg.ConsumedCode
+	c.inputCursorPos = len(lastSeg.ConsumedCode)
+	c.logger.Debug("Pop confirmed segment", "restored", lastSeg.ConsumedCode,
+		"remainingSegments", len(c.confirmedSegments))
+
+	c.updateCandidates()
+	c.showUI()
+
+	if c.config != nil && c.config.UI.InlinePreedit {
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     c.compositionText(),
+			CaretPos: c.displayCursorPos(),
+		}
+	}
+	return &bridge.KeyEventResult{
+		Type:     bridge.ResponseTypeUpdateComposition,
+		Text:     "",
+		CaretPos: 0,
 	}
 }
 
@@ -297,13 +381,24 @@ func (c *Coordinator) handleArrowDown() *bridge.KeyEventResult {
 }
 
 func (c *Coordinator) handleEnter() *bridge.KeyEventResult {
-	// Commit raw input as text
-	if len(c.inputBuffer) > 0 {
-		text := c.inputBuffer
-
-		// Apply full-width conversion if enabled
-		if c.fullWidth {
-			text = transform.ToFullWidth(text)
+	// Commit all confirmed segments + raw input as text
+	if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
+		var finalText string
+		// 拼接已确认段的汉字
+		for _, seg := range c.confirmedSegments {
+			t := seg.Text
+			if c.fullWidth {
+				t = transform.ToFullWidth(t)
+			}
+			finalText += t
+		}
+		// 追加剩余原始编码
+		if len(c.inputBuffer) > 0 {
+			raw := c.inputBuffer
+			if c.fullWidth {
+				raw = transform.ToFullWidth(raw)
+			}
+			finalText += raw
 		}
 
 		c.clearState()
@@ -311,7 +406,7 @@ func (c *Coordinator) handleEnter() *bridge.KeyEventResult {
 
 		return &bridge.KeyEventResult{
 			Type: bridge.ResponseTypeInsertText,
-			Text: text,
+			Text: finalText,
 		}
 	}
 	return nil
@@ -334,7 +429,7 @@ func (c *Coordinator) handleEscape() *bridge.KeyEventResult {
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 	}
 
-	if len(c.inputBuffer) > 0 {
+	if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
 		c.clearState()
 		c.hideUI()
 	}
@@ -349,20 +444,29 @@ func (c *Coordinator) handleSpace() *bridge.KeyEventResult {
 		if index < len(c.candidates) {
 			return c.selectCandidate(index)
 		}
-	} else if len(c.inputBuffer) > 0 {
-		// No candidates, commit raw input
-		text := c.inputBuffer
-
-		// Apply full-width conversion if enabled
-		if c.fullWidth {
-			text = transform.ToFullWidth(text)
+	} else if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
+		// No candidates, commit confirmed segments + raw input
+		var finalText string
+		for _, seg := range c.confirmedSegments {
+			t := seg.Text
+			if c.fullWidth {
+				t = transform.ToFullWidth(t)
+			}
+			finalText += t
+		}
+		if len(c.inputBuffer) > 0 {
+			raw := c.inputBuffer
+			if c.fullWidth {
+				raw = transform.ToFullWidth(raw)
+			}
+			finalText += raw
 		}
 
 		c.clearState()
 		c.hideUI()
 		return &bridge.KeyEventResult{
 			Type: bridge.ResponseTypeInsertText,
-			Text: text,
+			Text: finalText,
 		}
 	}
 	return nil
@@ -425,18 +529,27 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 		text = transform.ToFullWidth(text)
 	}
 
-	// 拼音引擎部分上屏：候选消耗的输入长度小于缓冲区长度时，保留剩余部分
+	// 拼音引擎分步确认：候选消耗的输入长度小于缓冲区长度时，
+	// 将已确认的文字暂存到 confirmedSegments 而非直接上屏，
+	// 用户可以通过退格键回退重新选词。
 	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
 	if isPinyin && cand.ConsumedLength > 0 && cand.ConsumedLength < len(c.inputBuffer) {
 		// 用户词频学习：命令候选不进入学习，避免污染用户词典（如 uuid）。
+		consumedCode := c.inputBuffer[:cand.ConsumedLength]
 		if !cand.IsCommand {
-			consumedCode := c.inputBuffer[:cand.ConsumedLength]
 			c.engineMgr.OnCandidateSelected(consumedCode, originalText)
 		}
 
 		remaining := c.inputBuffer[cand.ConsumedLength:]
-		c.logger.Debug("Partial commit (pinyin)", "index", index, "text", text,
-			"consumed", cand.ConsumedLength, "remaining", remaining)
+		c.logger.Debug("Partial confirm (pinyin)", "index", index, "text", text,
+			"consumed", cand.ConsumedLength, "remaining", remaining,
+			"confirmedCount", len(c.confirmedSegments)+1)
+
+		// 推入确认栈，不上屏
+		c.confirmedSegments = append(c.confirmedSegments, ConfirmedSegment{
+			Text:         originalText,
+			ConsumedCode: consumedCode,
+		})
 
 		// 更新缓冲区为剩余部分，光标重置到末尾，重新触发候选更新
 		c.inputBuffer = remaining
@@ -445,25 +558,41 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 		c.updateCandidates()
 		c.showUI()
 
+		// 返回 UpdateComposition 而非 InsertText，文字留在组合态中
 		return &bridge.KeyEventResult{
-			Type:           bridge.ResponseTypeInsertText,
-			Text:           text,
-			NewComposition: c.compositionText(),
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     c.compositionText(),
+			CaretPos: c.displayCursorPos(),
 		}
 	}
 
-	// 用户词频学习：命令候选不进入学习，避免污染用户词典（如 uuid）。
+	// 完全消费或非拼音：连同所有确认段一次性上屏
 	if isPinyin && c.engineMgr != nil && !cand.IsCommand {
 		c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText)
 	}
 
-	c.logger.Debug("Candidate selected", "index", index, "original", originalText, "output", text, "fullWidth", c.fullWidth)
+	// 拼接所有已确认段的文本 + 当前选中的候选
+	finalText := text
+	if isPinyin && len(c.confirmedSegments) > 0 {
+		var allText string
+		for _, seg := range c.confirmedSegments {
+			t := seg.Text
+			if c.fullWidth {
+				t = transform.ToFullWidth(t)
+			}
+			allText += t
+		}
+		finalText = allText + text
+	}
+
+	c.logger.Debug("Candidate selected (full commit)", "index", index, "original", originalText,
+		"output", finalText, "fullWidth", c.fullWidth, "confirmedSegments", len(c.confirmedSegments))
 
 	c.clearState()
 	c.hideUI()
 
 	return &bridge.KeyEventResult{
 		Type: bridge.ResponseTypeInsertText,
-		Text: text,
+		Text: finalText,
 	}
 }

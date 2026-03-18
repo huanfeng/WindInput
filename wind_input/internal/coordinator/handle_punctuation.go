@@ -92,8 +92,8 @@ func (c *Coordinator) isPunctuation(r rune) bool {
 func (c *Coordinator) handlePunctuation(r rune) *bridge.KeyEventResult {
 	c.logger.Debug("handlePunctuation", "char", string(r), "buffer", c.inputBuffer)
 
-	// If there's input in buffer, check if we should commit first (punct_commit)
-	if len(c.inputBuffer) > 0 && len(c.candidates) > 0 {
+	// If there's input in buffer (or confirmed segments), check if we should commit first (punct_commit)
+	if (len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0) && len(c.candidates) > 0 {
 		// Check if punct_commit is enabled in wubi config
 		punctCommit := false
 		if c.engineMgr != nil {
@@ -107,13 +107,23 @@ func (c *Coordinator) handlePunctuation(r rune) *bridge.KeyEventResult {
 		}
 
 		if punctCommit {
-			// Commit first candidate, then output punctuation
+			// Commit first candidate (with confirmed segments), then output punctuation
 			candidate := c.candidates[0]
 			text := candidate.Text
 
 			// Apply full-width conversion if enabled
 			if c.fullWidth {
 				text = transform.ToFullWidth(text)
+			}
+
+			// Prepend confirmed segments
+			var prefix string
+			for _, seg := range c.confirmedSegments {
+				t := seg.Text
+				if c.fullWidth {
+					t = transform.ToFullWidth(t)
+				}
+				prefix += t
 			}
 
 			// Convert punctuation
@@ -136,13 +146,13 @@ func (c *Coordinator) handlePunctuation(r rune) *bridge.KeyEventResult {
 
 			return &bridge.KeyEventResult{
 				Type: bridge.ResponseTypeInsertText,
-				Text: text + punctText,
+				Text: prefix + text + punctText,
 			}
 		}
 	}
 
-	// If there's input buffer but punct_commit is not enabled, just let it pass through
-	if len(c.inputBuffer) > 0 {
+	// If there's input buffer or confirmed segments but punct_commit is not enabled, just let it pass through
+	if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
 		return nil
 	}
 

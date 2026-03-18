@@ -3,14 +3,29 @@ package coordinator
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/ui"
 )
 
+// confirmedPrefix 返回所有已确认段的汉字拼接文本。
+func (c *Coordinator) confirmedPrefix() string {
+	if len(c.confirmedSegments) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, seg := range c.confirmedSegments {
+		b.WriteString(seg.Text)
+	}
+	return b.String()
+}
+
 // compositionText 返回当前应显示的组合文本。
+// 拼音分步确认时，前缀为已确认的汉字，后跟活动编码的拼音显示。
 // 拼音模式返回带音节分隔符的文本（如 "zhong guo"），五笔或未解析时 fallback 到 inputBuffer。
 func (c *Coordinator) compositionText() string {
+	prefix := c.confirmedPrefix()
 	if c.preeditDisplay != "" {
 		display := c.preeditDisplay
 		// 如果 inputBuffer 以 ' 结尾但 preeditDisplay 没有，补上尾部的 '
@@ -18,9 +33,9 @@ func (c *Coordinator) compositionText() string {
 		if strings.HasSuffix(c.inputBuffer, "'") && !strings.HasSuffix(display, "'") {
 			display += "'"
 		}
-		return display
+		return prefix + display
 	}
-	return c.inputBuffer
+	return prefix + c.inputBuffer
 }
 
 // calcSyllableBoundaries 从已完成音节和部分音节计算边界位置。
@@ -44,11 +59,21 @@ func (c *Coordinator) calcSyllableBoundaries(completedSyllables []string, partia
 	return boundaries
 }
 
-// displayCursorPos 将 inputCursorPos（基于 inputBuffer 的字节位置）映射到 preeditDisplay 中的显示位置。
-// 公式：displayPos = inputCursorPos + count(boundary <= inputCursorPos)
+// displayCursorPos 将 inputCursorPos（基于 inputBuffer 的字节位置）映射到组合显示文本中的
+// 光标位置。返回值是 rune 计数（即 UTF-16 code unit 计数，对 BMP 字符），
+// 与 C++ TSF 侧的 wstring 偏移一致。
+//
+// 确认文本前缀是中文（每个汉字 UTF-8 3字节 = 1 rune），
+// 拼音编码部分是纯 ASCII（每字节 = 1 rune），两者用不同方式计算偏移。
 func (c *Coordinator) displayCursorPos() int {
+	// 确认段前缀用 rune 计数（中文字符在 UTF-16 中也是 1 code unit）
+	prefixRuneLen := 0
+	for _, seg := range c.confirmedSegments {
+		prefixRuneLen += utf8.RuneCountInString(seg.Text)
+	}
+	// inputBuffer 是纯 ASCII (a-z, ')，字节数 == rune 数
 	if c.preeditDisplay == "" {
-		return c.inputCursorPos
+		return prefixRuneLen + c.inputCursorPos
 	}
 	offset := 0
 	for _, b := range c.syllableBoundaries {
@@ -56,7 +81,7 @@ func (c *Coordinator) displayCursorPos() int {
 			offset++
 		}
 	}
-	return c.inputCursorPos + offset
+	return prefixRuneLen + c.inputCursorPos + offset
 }
 
 func (c *Coordinator) updateCandidates() {

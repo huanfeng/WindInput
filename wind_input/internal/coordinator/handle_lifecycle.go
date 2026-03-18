@@ -297,20 +297,29 @@ func (c *Coordinator) handleSpaceInternal() *bridge.KeyEventResult {
 		if index < len(c.candidates) {
 			return c.selectCandidateInternal(index)
 		}
-	} else if len(c.inputBuffer) > 0 {
-		// No candidates, commit raw input
-		text := c.inputBuffer
-
-		// Apply full-width conversion if enabled
-		if c.fullWidth {
-			text = transform.ToFullWidth(text)
+	} else if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
+		// No candidates, commit confirmed segments + raw input
+		var finalText string
+		for _, seg := range c.confirmedSegments {
+			t := seg.Text
+			if c.fullWidth {
+				t = transform.ToFullWidth(t)
+			}
+			finalText += t
+		}
+		if len(c.inputBuffer) > 0 {
+			raw := c.inputBuffer
+			if c.fullWidth {
+				raw = transform.ToFullWidth(raw)
+			}
+			finalText += raw
 		}
 
 		c.clearState()
 		c.hideUI()
 		return &bridge.KeyEventResult{
 			Type: bridge.ResponseTypeInsertText,
-			Text: text,
+			Text: finalText,
 		}
 	}
 	return nil
@@ -318,19 +327,28 @@ func (c *Coordinator) handleSpaceInternal() *bridge.KeyEventResult {
 
 // handleEnterInternal is the internal implementation of handleEnter (without lock)
 func (c *Coordinator) handleEnterInternal() *bridge.KeyEventResult {
-	if len(c.inputBuffer) > 0 {
-		text := c.inputBuffer
-
-		// Apply full-width conversion if enabled
-		if c.fullWidth {
-			text = transform.ToFullWidth(text)
+	if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
+		var finalText string
+		for _, seg := range c.confirmedSegments {
+			t := seg.Text
+			if c.fullWidth {
+				t = transform.ToFullWidth(t)
+			}
+			finalText += t
+		}
+		if len(c.inputBuffer) > 0 {
+			raw := c.inputBuffer
+			if c.fullWidth {
+				raw = transform.ToFullWidth(raw)
+			}
+			finalText += raw
 		}
 
 		c.clearState()
 		c.hideUI()
 		return &bridge.KeyEventResult{
 			Type: bridge.ResponseTypeInsertText,
-			Text: text,
+			Text: finalText,
 		}
 	}
 	return nil
@@ -355,26 +373,33 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 	cand := c.candidates[index]
 	c.logger.Debug("Candidate selected (internal)", "index", index)
 
-	text := cand.Text
+	originalText := cand.Text
+	text := originalText
 
 	// Apply full-width conversion if enabled
 	if c.fullWidth {
 		text = transform.ToFullWidth(text)
 	}
 
-	// 拼音引擎部分上屏
-	originalText := cand.Text
+	// 拼音引擎分步确认：候选消耗的输入长度小于缓冲区长度时，
+	// 将已确认的文字暂存到 confirmedSegments 而非直接上屏。
 	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
 	if isPinyin && cand.ConsumedLength > 0 && cand.ConsumedLength < len(c.inputBuffer) {
-		// 用户词频学习：命令候选不进入学习，避免污染用户词典（如 uuid）。
+		consumedCode := c.inputBuffer[:cand.ConsumedLength]
 		if !cand.IsCommand {
-			consumedCode := c.inputBuffer[:cand.ConsumedLength]
 			c.engineMgr.OnCandidateSelected(consumedCode, originalText)
 		}
 
 		remaining := c.inputBuffer[cand.ConsumedLength:]
-		c.logger.Debug("Partial commit internal (pinyin)", "index", index, "text", text,
-			"consumed", cand.ConsumedLength, "remaining", remaining)
+		c.logger.Debug("Partial confirm internal (pinyin)", "index", index, "text", text,
+			"consumed", cand.ConsumedLength, "remaining", remaining,
+			"confirmedCount", len(c.confirmedSegments)+1)
+
+		// 推入确认栈，不上屏
+		c.confirmedSegments = append(c.confirmedSegments, ConfirmedSegment{
+			Text:         originalText,
+			ConsumedCode: consumedCode,
+		})
 
 		c.inputBuffer = remaining
 		c.inputCursorPos = len(remaining)
@@ -382,16 +407,31 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 		c.updateCandidates()
 		c.showUI()
 
+		// 返回 UpdateComposition 而非 InsertText
 		return &bridge.KeyEventResult{
-			Type:           bridge.ResponseTypeInsertText,
-			Text:           text,
-			NewComposition: c.compositionText(),
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     c.compositionText(),
+			CaretPos: c.displayCursorPos(),
 		}
 	}
 
-	// 用户词频学习：命令候选不进入学习，避免污染用户词典（如 uuid）。
+	// 完全消费或非拼音：连同所有确认段一次性上屏
 	if isPinyin && c.engineMgr != nil && !cand.IsCommand {
 		c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText)
+	}
+
+	// 拼接所有已确认段的文本 + 当前选中的候选
+	finalText := text
+	if isPinyin && len(c.confirmedSegments) > 0 {
+		var allText string
+		for _, seg := range c.confirmedSegments {
+			t := seg.Text
+			if c.fullWidth {
+				t = transform.ToFullWidth(t)
+			}
+			allText += t
+		}
+		finalText = allText + text
 	}
 
 	c.clearState()
@@ -399,6 +439,6 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 
 	return &bridge.KeyEventResult{
 		Type: bridge.ResponseTypeInsertText,
-		Text: text,
+		Text: finalText,
 	}
 }

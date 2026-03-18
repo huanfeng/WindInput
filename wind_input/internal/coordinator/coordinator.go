@@ -63,6 +63,14 @@ const (
 	ModeEnglishUpper                      // 英文大写模式 (CapsLock on)
 )
 
+// ConfirmedSegment 代表拼音分步确认中一个已确认但未上屏的文本段。
+// 用户选词后，如果输入缓冲区未完全消费，候选文字暂存于此而非直接上屏，
+// 用户可通过退格键回退到上一个确认段重新选词。
+type ConfirmedSegment struct {
+	Text         string // 已确认的汉字，如 "我们"
+	ConsumedCode string // 消耗的原始拼音编码，如 "women"
+}
+
 // Coordinator orchestrates between C++ Bridge, Engine, and native UI
 type Coordinator struct {
 	engineMgr    *engine.Manager
@@ -86,9 +94,10 @@ type Coordinator struct {
 
 	// Input state
 	inputBuffer        string
-	inputCursorPos     int    // 光标在 inputBuffer 中的字节位置（0 = 最左，len(inputBuffer) = 最右）
-	preeditDisplay     string // 带音节分隔符的显示文本（如 "zhong'guo"），五笔时为空
-	syllableBoundaries []int  // 音节边界在 inputBuffer 中的位置（如 [5] 表示位置 5 处有分隔符）
+	inputCursorPos     int                // 光标在 inputBuffer 中的字节位置（0 = 最左，len(inputBuffer) = 最右）
+	preeditDisplay     string             // 带音节分隔符的显示文本（如 "zhong'guo"），五笔时为空
+	syllableBoundaries []int              // 音节边界在 inputBuffer 中的位置（如 [5] 表示位置 5 处有分隔符）
+	confirmedSegments  []ConfirmedSegment // 拼音分步确认：已确认但未上屏的文本段
 	candidates         []ui.Candidate
 	currentPage        int
 	totalPages         int
@@ -358,16 +367,27 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 
 // hasPendingInput 检查是否有任何类型的待处理输入
 func (c *Coordinator) hasPendingInput() bool {
-	return len(c.inputBuffer) > 0 || len(c.tempEnglishBuffer) > 0 || len(c.tempPinyinBuffer) > 0
+	return len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 || len(c.tempEnglishBuffer) > 0 || len(c.tempPinyinBuffer) > 0
 }
 
 // getPendingBufferText 获取当前待处理缓冲区的文本（用于 CommitOnSwitch 上屏）
-// 优先级：主输入缓冲 > 临时英文缓冲 > 临时拼音缓冲
+// 优先级：主输入缓冲（含确认段）> 临时英文缓冲 > 临时拼音缓冲
 func (c *Coordinator) getPendingBufferText() string {
+	// 如果有确认段，拼接确认文本 + 剩余编码
+	if len(c.confirmedSegments) > 0 || len(c.inputBuffer) > 0 {
+		var text string
+		for _, seg := range c.confirmedSegments {
+			text += seg.Text
+		}
+		text += c.inputBuffer
+		if c.fullWidth {
+			return transform.ToFullWidth(text)
+		}
+		return text
+	}
+
 	var text string
 	switch {
-	case len(c.inputBuffer) > 0:
-		text = c.inputBuffer
 	case len(c.tempEnglishBuffer) > 0:
 		text = c.tempEnglishBuffer
 	case len(c.tempPinyinBuffer) > 0:
@@ -386,6 +406,7 @@ func (c *Coordinator) clearState() {
 	c.inputCursorPos = 0
 	c.preeditDisplay = ""
 	c.syllableBoundaries = nil
+	c.confirmedSegments = nil
 	c.tempEnglishMode = false
 	c.tempEnglishBuffer = ""
 	// 清除临时拼音状态时，同步卸载引擎层的拼音词库层，避免污染五笔查询
