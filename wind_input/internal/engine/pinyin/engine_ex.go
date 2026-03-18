@@ -106,6 +106,10 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	partial := parsed.PartialSyllable()
 	allSyllables := parsed.SyllableTexts()
 
+	// 预计算关键长度（基于 Parser 的音节位置信息，含分隔符）
+	// allCompletedEnd: 所有已完成音节在原始输入中的结束位置
+	allCompletedEnd := parsed.ConsumedBytesForCompletedN(syllableCount)
+
 	logDebug("[PinyinEngine] input=%q preedit=%q completed=%v partial=%q allSyllables=%v parseElapsed=%v",
 		input, result.PreeditDisplay, completedSyllables, partial, allSyllables, time.Since(convertStart))
 
@@ -141,43 +145,22 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	// ── 3a. Viterbi 智能组句（多音节且无未完成音节时使用） ──
-	useViterbi := e.config != nil && e.config.UseSmartCompose &&
-		e.unigram != nil && syllableCount >= 2 && partial == "" &&
-		len(input) >= smartComposeThreshold
+	// Viterbi 智能组句已移除：与分步确认（方案二）的逐词上屏模式不兼容。
+	// 分步确认依赖精确的 ConsumedLength 来驱动状态机，Viterbi 的全局整句结果
+	// 无法与逐词消费机制协调。词组匹配由步骤 1（精确匹配）和步骤 2（子词组）覆盖。
 
-	if useViterbi {
-		lattice := BuildLattice(queryInput, e.syllableTrie, e.dict, e.unigram)
-		if !lattice.IsEmpty() {
-			vResults := ViterbiTopK(lattice, e.bigram, 3)
-			for rank, vResult := range vResults {
-				if vResult == nil || len(vResult.Words) == 0 {
-					continue
-				}
-				sentence := vResult.String()
-				if _, exists := candidatesMap[sentence]; exists {
-					continue
-				}
-				logDebug("[PinyinEngine] Viterbi[%d]: %q words=%v logprob=%.4f",
-					rank, sentence, vResult.Words, vResult.LogProb)
-				charCount := len([]rune(sentence))
-				vf := e.buildFeatures(sentence, 0, MatchExact, charCount, charCount, featureOpts{isViterbi: true})
-				vf.LMScore = vResult.LogProb
-				c := candidate.Candidate{
-					Text:           sentence,
-					Code:           input,
-					Weight:         e.scorerWeight(vf),
-					ConsumedLength: len(input),
-				}
-				candidatesMap[sentence] = &c
-			}
-		}
-	}
+	completedCode := strings.Join(completedSyllables, "")
 
-	// ── 3b. 精确匹配完整音节序列的词组（含模糊变体） ──
+	// ── 步骤 1：精确匹配完整音节序列的词组（含模糊变体） ──
+	// 当有 partial 后缀时，仍对已完成音节部分执行精确匹配，
+	// 这样 "wobuzhidaog" 中的 "wobuzhidao" 仍能精确匹配 "我不知道"。
 	hasExplicitSep := strings.Contains(input, "'")
-	if syllableCount > 0 && partial == "" {
-		exactResults := e.lookupWithFuzzy(queryInput, completedSyllables)
+	if syllableCount > 0 {
+		exactInput := completedCode
+		if partial == "" {
+			exactInput = queryInput // 无 partial 时用完整输入
+		}
+		exactResults := e.lookupWithFuzzy(exactInput, completedSyllables)
 		for _, cand := range exactResults {
 			if _, exists := candidatesMap[cand.Text]; exists {
 				continue
@@ -196,13 +179,13 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			}
 			f := e.buildFeatures(c.Text, float64(c.Weight), matchType, syllableCount, charCount, featureOpts{isPartial: !firstCompletedIsLeading})
 			c.Weight = e.scorerWeight(f)
-			c.ConsumedLength = len(input)
+			c.ConsumedLength = allCompletedEnd // 基于 Parser 音节位置精确计算
 			candidatesMap[c.Text] = &c
 		}
-		logDebug("[PinyinEngine] exact match for %q: %d results", input, len(exactResults))
+		logDebug("[PinyinEngine] exact match for %q: %d results (partial=%q)", exactInput, len(exactResults), partial)
 	}
 
-	// ── 3b-alt. 多切分并行打分 ──
+	// ── 步骤 1b：多切分并行打分 ──
 	// 对无显式分隔符的输入，获取备选切分路径的候选
 	// 即使有 partial 后缀（如 "xianr"），也对完整音节部分做多切分
 	if !strings.Contains(input, "'") && syllableCount > 0 {
@@ -226,13 +209,17 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				f := e.buildFeatures(c.Text, float64(c.Weight), altMatchType, len(altSyllables), charCount, featureOpts{segmentRank: 1, isPartial: !firstCompletedIsLeading})
 				c.Weight = e.scorerWeight(f)
-				c.ConsumedLength = len(input)
+				// alt 路径的 ConsumedLength 基于其音节覆盖长度，不含 partial 后缀
+				c.ConsumedLength = len(altCode)
+				if c.ConsumedLength > len(input) {
+					c.ConsumedLength = len(input)
+				}
 				candidatesMap[c.Text] = &c
 			}
 		}
 	}
 
-	// ── 3c. 前缀匹配（输入 "wome" 时找到 "women"→我们） ──
+	// ── 步骤 3：前缀匹配（输入 "wome" 时找到 "women"→我们） ──
 	if syllableCount > 0 {
 		{
 			prefixLimit := 50
@@ -255,30 +242,16 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	// ── 3d. 子词组查找（如 "nihao" → 查找 "ni"+"hao" 对应的词组） ──
-	// 对于有 partial 后缀的输入（如 "nihaozh"），DAG 只能覆盖到 "nihao"，
-	// 此时 joined 是 input 的前缀而非完全相等，也应执行子词组查找。
-	var mainPath []string
+	// ── 步骤 2：子词组查找（如 "nihaoshijie" → 查找 "你好"、"世界" 等子词组） ──
+	// 直接使用 Parser 已解析的 completedSyllables，不再冗余重建 DAG。
+	// 枚举所有从首位开始的连续子序列，支持部分上屏。
 	if syllableCount > 1 {
-		if strings.Contains(input, "'") {
-			// 显式分隔符：用户明确指定了切分方式（如 xi'an），
-			// 直接使用解析得到的音节，不依赖 DAG（DAG 会把 "xian" 当作单音节）
-			mainPath = completedSyllables
-		} else {
-			dag := BuildDAG(queryInput, e.syllableTrie)
-			mainPath = dag.MaximumMatch()
-		}
-		if len(mainPath) > 1 {
-			joined := strings.Join(mainPath, "")
-			if joined == queryInput || strings.HasPrefix(queryInput, joined) {
-				e.lookupSubPhrasesEx(mainPath, candidatesMap)
-			}
-		}
+		e.lookupSubPhrasesEx(completedSyllables, parsed, candidatesMap)
 	}
 
-	// ── 3e. 单字候选 ──
+	// ── 步骤 4：单字候选 ──
 
-	// ── 3e-leading. 首段 partial 音节的单字候选 ──
+	// ── 4a. 首段 partial 音节的单字候选 ──
 	// 当首个 completed 不是输入首段时（如 sdem → "s" 在 "de" 前），
 	// 为首段 partial 音节生成候选，权重高于首 completed 音节的候选
 	if syllableCount > 0 && !firstCompletedIsLeading {
@@ -327,18 +300,8 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			isPartial := !firstCompletedIsLeading
 			f := e.buildFeatures(c.Text, float64(c.Weight), matchType, 1, charCount, featureOpts{isPartial: isPartial})
 			c.Weight = e.scorerWeight(f)
-			// ConsumedLength 需包含前面的 partial 段
-			consumed := len(firstSyllable)
-			if !firstCompletedIsLeading {
-				// 前面有 partial 段，加上它们的长度
-				for _, s := range allSyllables {
-					if s == completedSyllables[0] {
-						break
-					}
-					consumed += len(s)
-				}
-			}
-			c.ConsumedLength = consumed
+			// 基于 Parser 位置：消耗到第 1 个已完成音节的结束位置（自动包含前置 partial 段）
+			c.ConsumedLength = parsed.ConsumedBytesForCompletedN(1)
 			candidatesMap[c.Text] = &c
 		}
 
@@ -354,17 +317,14 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				charCount := len([]rune(c.Text))
 				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, 1, charCount, featureOpts{isPartial: true})
 				c.Weight = e.scorerWeight(f)
-				consumedLen := 0
-				for k := 0; k <= i; k++ {
-					consumedLen += len(completedSyllables[k])
-				}
-				c.ConsumedLength = consumedLen
+				// 基于 Parser 位置精确计算：消耗到第 i+1 个已完成音节的结束位置
+				c.ConsumedLength = parsed.ConsumedBytesForCompletedN(i + 1)
 				candidatesMap[c.Text] = &c
 			}
 		}
 	}
 
-	// ── 3e2. 多 partial 音节时的首音节单字候选 ──
+	// ── 4b. 多 partial 音节时的首音节单字候选 ──
 	// 例如 "bzd" → ["b","z","d"] 都是 partial，为首音节 "b" 生成单字候选
 	if syllableCount == 0 && len(allSyllables) > 1 {
 		firstPartial := allSyllables[0]
@@ -391,7 +351,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	// ── 3f. 未完成音节的前缀查找 ──
+	// ── 步骤 5：未完成音节的前缀查找 ──
 	if partial != "" {
 		{
 			prefixResults := e.dict.LookupPrefix(queryInput, 30)
@@ -443,7 +403,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	// ── 3g. 简拼/混合简拼词组匹配 ──
+	// ── 步骤 6：简拼/混合简拼词组匹配 ──
 	// 纯简拼：bzd → allSyllables=["b","z","d"] → abbrev="bzd"
 	// 混合简拼：nizm → allSyllables=["ni","z","m"] → abbrev="nzm"
 	if len(allSyllables) >= 2 {
@@ -458,13 +418,16 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			for _, cand := range abbrevResults {
 				c := cand
 				charCount := len([]rune(c.Text))
+				// 简拼匹配的权重策略：
+				// - 纯缩写（如 sfg/bzd，syllableCount=0）：MatchExact（用户明确输入的是首字母）
+				// - 有完整音节时（如 dazhongwu → dzw）：MatchPartial（简拼不应压过子词组/精确匹配）
+				// 这确保 "dazhongwu" 的子词组 "大众" 不会被简拼 "对自我"(dzw) 压过，
+				// 但纯简拼 "sfg" → "司法官" 仍保持高权重。
 				abbrevMatchType := MatchExact
-				// 仅当有 completed 音节且首 completed 不是输入首段时降级
-				// 纯缩写（如 bzd，syllableCount=0）保持 MatchExact
-				if syllableCount > 0 && !firstCompletedIsLeading {
+				if syllableCount > 0 {
 					abbrevMatchType = MatchPartial
 				}
-				f := e.buildFeatures(c.Text, float64(c.Weight), abbrevMatchType, len(allSyllables), charCount, featureOpts{isAbbrev: true, isPartial: syllableCount > 0 && !firstCompletedIsLeading})
+				f := e.buildFeatures(c.Text, float64(c.Weight), abbrevMatchType, len(allSyllables), charCount, featureOpts{isAbbrev: true})
 				c.Weight = e.scorerWeight(f)
 				c.ConsumedLength = len(input)
 				if existing, exists := candidatesMap[c.Text]; exists {

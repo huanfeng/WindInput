@@ -37,7 +37,8 @@ func (e *Engine) sortCandidates(candidates []candidate.Candidate, order string, 
 }
 
 // lookupSubPhrasesEx 查找子词组（含模糊变体）
-func (e *Engine) lookupSubPhrasesEx(syllables []string, candidatesMap map[string]*candidate.Candidate) {
+// parsed 用于精确计算 ConsumedLength（基于原始输入中的音节位置，含分隔符）。
+func (e *Engine) lookupSubPhrasesEx(syllables []string, parsed *ParseResult, candidatesMap map[string]*candidate.Candidate) {
 	n := len(syllables)
 	// 查找所有连续子序列组成的词组
 	for length := n; length >= 2; length-- {
@@ -53,21 +54,13 @@ func (e *Engine) lookupSubPhrasesEx(syllables []string, candidatesMap map[string
 				charCount := len([]rune(c.Text))
 				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, length, charCount, featureOpts{})
 				c.Weight = e.scorerWeight(f)
-				// 计算该子词组消耗的输入长度
+				// ConsumedLength 基于 Parser 的音节位置精确计算
 				if start == 0 {
-					// 从头开始的子词组：仅消耗对应音节，支持部分上屏
-					consumedLen := 0
-					for k := 0; k < length; k++ {
-						consumedLen += len(syllables[k])
-					}
-					c.ConsumedLength = consumedLen
+					// 从头开始的子词组：消耗到第 length 个已完成音节的结束位置
+					c.ConsumedLength = parsed.ConsumedBytesForCompletedN(length)
 				} else {
 					// 非首位子词组：消耗全部输入（避免前缀音节丢失）
-					totalLen := 0
-					for _, s := range syllables {
-						totalLen += len(s)
-					}
-					c.ConsumedLength = totalLen
+					c.ConsumedLength = len(parsed.Input)
 				}
 				candidatesMap[c.Text] = &c
 			}

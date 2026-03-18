@@ -107,6 +107,56 @@ func (r *ParseResult) IsComplete() bool {
 	return false
 }
 
+// ConsumedBytesForSyllables 计算前 n 个音节（包含 Partial）在原始输入中消耗的字节数。
+// 这基于 Parser 输出的音节位置信息，包含音节间的分隔符（如 '）。
+// n 超出音节总数时返回整个输入的长度。
+func (r *ParseResult) ConsumedBytesForSyllables(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	if n >= len(r.Syllables) {
+		return len(r.Input)
+	}
+	return r.Syllables[n-1].End
+}
+
+// ConsumedBytesForCompletedN 计算匹配前 n 个已完成（Exact）音节在原始输入中消耗的字节数。
+// 考虑了 Exact 之前可能存在的 Partial 音节（如 "sdem" 中 "s" 在 "de" 之前）。
+// 返回第 n 个 Exact 音节的 End 位置。
+func (r *ParseResult) ConsumedBytesForCompletedN(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	completedCount := 0
+	for _, s := range r.Syllables {
+		if s.IsExact() {
+			completedCount++
+			if completedCount == n {
+				return s.End
+			}
+		}
+	}
+	return len(r.Input)
+}
+
+// CompletedSyllableEnd 返回第 index 个已完成（Exact）音节的 End 位置（0-based）。
+// 用于子词组场景：从第 0 到第 index 个 Exact 音节消耗的字节数 = CompletedSyllableEnd(index)。
+func (r *ParseResult) CompletedSyllableEnd(index int) int {
+	if index < 0 {
+		return 0
+	}
+	completedCount := 0
+	for _, s := range r.Syllables {
+		if s.IsExact() {
+			if completedCount == index {
+				return s.End
+			}
+			completedCount++
+		}
+	}
+	return len(r.Input)
+}
+
 // SyllableTexts 返回所有音节的文本（包括未完成的）
 func (r *ParseResult) SyllableTexts() []string {
 	result := make([]string, len(r.Syllables))

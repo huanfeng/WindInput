@@ -216,9 +216,6 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 	return result.Candidates, nil
 }
 
-// smartComposeThreshold 智能组句的输入长度阈值
-const smartComposeThreshold = 4
-
 // addWubiHints 添加五笔编码提示
 func (e *Engine) addWubiHints(candidates []candidate.Candidate) {
 	if e.config == nil || !e.config.ShowWubiHint || e.wubiTable == nil {
