@@ -123,6 +123,7 @@ private:
     // Composition
     ITfComposition* _pComposition;
     std::wstring _lastCompositionText;  // Cache to skip redundant updates
+    int _lastCaretPos = -1;             // Cache caret position to detect cursor movement
     BOOL _asyncEdit;  // Track if last RequestEditSession returned TF_S_ASYNC (Weasel optimization)
 
     // Cached caret position from edit session (for WebView apps where separate

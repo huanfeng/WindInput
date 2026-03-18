@@ -95,8 +95,8 @@ private:
 class CUpdateCompositionEditSession : public ITfEditSession
 {
 public:
-    CUpdateCompositionEditSession(CTextService* pTextService, ITfContext* pContext, const std::wstring& text)
-        : _refCount(1), _pTextService(pTextService), _pContext(pContext), _text(text)
+    CUpdateCompositionEditSession(CTextService* pTextService, ITfContext* pContext, const std::wstring& text, int caretPos = -1)
+        : _refCount(1), _pTextService(pTextService), _pContext(pContext), _text(text), _caretPos(caretPos)
     {
         _pTextService->AddRef();
         _pContext->AddRef();
@@ -190,14 +190,27 @@ public:
             // 4. Apply display attribute to show underline
             _SetDisplayAttribute(ec, pRange);
 
-            // 5. Get the range again after SetText (it may have changed)
+            // 5. Position cursor within composition
+            // If _caretPos is valid and less than text length, position cursor there;
+            // otherwise collapse to end (default behavior).
             ITfRange* pRangeForSel = nullptr;
             if (SUCCEEDED(_pTextService->_pComposition->GetRange(&pRangeForSel)))
             {
-                // Collapse range to end for cursor position
-                pRangeForSel->Collapse(ec, TF_ANCHOR_END);
+                if (_caretPos >= 0 && _caretPos < (int)_text.length())
+                {
+                    // Move the range start to the caret position, then collapse to start
+                    // This positions the cursor at the specified offset within the composition
+                    LONG shifted = 0;
+                    pRangeForSel->Collapse(ec, TF_ANCHOR_START);
+                    pRangeForSel->ShiftEnd(ec, (LONG)_caretPos, &shifted, nullptr);
+                    pRangeForSel->ShiftStart(ec, (LONG)_caretPos, &shifted, nullptr);
+                }
+                else
+                {
+                    // Default: cursor at end of composition
+                    pRangeForSel->Collapse(ec, TF_ANCHOR_END);
+                }
 
-                // Set selection at end of composition
                 TF_SELECTION sel = {};
                 sel.range = pRangeForSel;
                 sel.style.ase = TF_AE_NONE;
@@ -222,6 +235,8 @@ public:
     }
 
 private:
+    int _caretPos;  // Cursor position within composition (-1 = at end)
+
     void _CacheCaretPosition(TfEditCookie ec)
     {
         ITfContextView* pContextView = nullptr;
@@ -1749,6 +1764,7 @@ STDAPI CTextService::OnCompositionTerminated(TfEditCookie ecWrite, ITfCompositio
 
     // Clear composition text cache
     _lastCompositionText.clear();
+    _lastCaretPos = -1;
 
     // Only release if this is the same composition we're tracking
     // It may have already been released in DoEditSession
@@ -1802,11 +1818,12 @@ BOOL CTextService::UpdateComposition(const std::wstring& text, int caretPos)
     WIND_LOG_DEBUG_FMT(L"UpdateComposition called, textLen=%zu, _pComposition=%p\n",
                  text.length(), _pComposition);
 
-    // OPTIMIZATION: Skip if the composition text is the same as last time
+    // OPTIMIZATION: Skip if both composition text AND caret position are the same as last time
     // This avoids unnecessary TSF RequestEditSession calls which can be slow in some apps
-    if (text == _lastCompositionText && _pComposition != nullptr)
+    // Note: must compare caretPos too, otherwise cursor movement (left/right arrow) gets skipped
+    if (text == _lastCompositionText && caretPos == _lastCaretPos && _pComposition != nullptr)
     {
-        WIND_LOG_DEBUG(L"UpdateComposition: Skipping duplicate (same as last)\n");
+        WIND_LOG_DEBUG(L"UpdateComposition: Skipping duplicate (same text and caret)\n");
         return TRUE;
     }
 
@@ -1828,7 +1845,7 @@ BOOL CTextService::UpdateComposition(const std::wstring& text, int caretPos)
         return FALSE;
     }
 
-    CUpdateCompositionEditSession* pEditSession = new CUpdateCompositionEditSession(this, pContext, text);
+    CUpdateCompositionEditSession* pEditSession = new CUpdateCompositionEditSession(this, pContext, text, caretPos);
 
     // Timing: measure RequestEditSession duration
     LARGE_INTEGER startTime, endTime, freq;
@@ -1854,6 +1871,7 @@ BOOL CTextService::UpdateComposition(const std::wstring& text, int caretPos)
     if (SUCCEEDED(hr))
     {
         _lastCompositionText = text;
+        _lastCaretPos = caretPos;
     }
 
     return SUCCEEDED(hr);
@@ -1871,6 +1889,7 @@ void CTextService::EndComposition()
 
     // Clear composition text cache
     _lastCompositionText.clear();
+    _lastCaretPos = -1;
 
     // If there's no active composition, nothing to do
     if (_pComposition == nullptr)
