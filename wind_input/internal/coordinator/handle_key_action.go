@@ -9,8 +9,18 @@ import (
 	"github.com/huanfeng/wind_input/internal/transform"
 )
 
+// maxInputBufferLen 输入缓冲区最大长度（字节），超过此长度拒绝新输入
+const maxInputBufferLen = 60
+
 func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	startTime := time.Now()
+
+	// 限制输入缓冲区长度，超长输入没有实际意义且影响性能
+	if len(c.inputBuffer)+len(key) > maxInputBufferLen {
+		c.logger.Debug("Input buffer length limit reached", "current", len(c.inputBuffer), "max", maxInputBufferLen)
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
+
 	wasEmpty := len(c.inputBuffer) == 0
 	// 在光标位置插入字符
 	c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + key + c.inputBuffer[c.inputCursorPos:]
