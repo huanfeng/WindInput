@@ -220,7 +220,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	}
 
 	// ── 步骤 3：前缀匹配（输入 "wome" 时找到 "women"→我们） ──
-	if syllableCount > 0 {
+	// 当有显式分隔符时跳过：queryInput 去掉了 '，会把 "xi'ande" 当作 "xiande"
+	// 匹配到 "显得比"(xiandebi) 等不尊重分隔符边界的结果
+	if syllableCount > 0 && !hasExplicitSep {
 		{
 			prefixLimit := 50
 			if maxCandidates > 0 {
@@ -298,14 +300,18 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				matchType = MatchPartial
 			}
 			isPartial := !firstCompletedIsLeading
-			f := e.buildFeatures(c.Text, float64(c.Weight), matchType, 1, charCount, featureOpts{isPartial: isPartial})
+			// 传入实际总音节数（而非1），避免单字触发 SyllableMatch(+500)
+			f := e.buildFeatures(c.Text, float64(c.Weight), matchType, syllableCount, charCount, featureOpts{isPartial: isPartial})
 			c.Weight = e.scorerWeight(f)
 			// 基于 Parser 位置：消耗到第 1 个已完成音节的结束位置（自动包含前置 partial 段）
 			c.ConsumedLength = parsed.ConsumedBytesForCompletedN(1)
 			candidatesMap[c.Text] = &c
 		}
 
-		// 非首音节的单字
+		// 非首音节的单字：降级为 MatchFuzzy，防止高频字（如"的"）
+		// 因 UserWord/LM/FreqScore 叠加压过首位子词组和精确匹配。
+		// 在分步确认模型中，非首音节单字消耗大量输入（从头到该音节），
+		// 用户通常应先确认首位词组再处理后续音节。
 		for i := 1; i < syllableCount; i++ {
 			syllable := completedSyllables[i]
 			others := e.lookupWithFuzzy(syllable, []string{syllable})
@@ -315,7 +321,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, 1, charCount, featureOpts{isPartial: true})
+				f := e.buildFeatures(c.Text, float64(c.Weight), MatchFuzzy, syllableCount, charCount, featureOpts{isPartial: true})
 				c.Weight = e.scorerWeight(f)
 				// 基于 Parser 位置精确计算：消耗到第 i+1 个已完成音节的结束位置
 				c.ConsumedLength = parsed.ConsumedBytesForCompletedN(i + 1)
@@ -393,8 +399,20 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				if otherSyllableCount == 0 && len(allSyllables) > 1 {
 					otherSyllableCount = len(allSyllables) - 1
 				}
-				// 有其他音节时标记为 isPartial 降低权重，避免末尾 partial 单字排在首音节单字前
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, 1, charCount, featureOpts{isPartial: otherSyllableCount > 0})
+				// partial 展开的单字：有其他完整音节时降级为 MatchFuzzy，
+				// 确保高频单字（如"的""在"）不会因 UserWord/LM 加成压过子词组匹配
+				partialMatchType := MatchPartial
+				if otherSyllableCount > 0 {
+					partialMatchType = MatchFuzzy
+				}
+				totalSyllables := len(allSyllables)
+				f := e.buildFeatures(c.Text, float64(c.Weight), partialMatchType, totalSyllables, charCount, featureOpts{isPartial: otherSyllableCount > 0})
+				// 额外惩罚：partial 展开的单字在多音节输入中消耗全部输入，
+				// 是最差的候选选择。施加与音节数成比例的额外惩罚，
+				// 确保即使极高频字（如"的" UserWord+FreqScore 叠加）也不会压过首音节候选。
+				if otherSyllableCount > 0 {
+					f.FreqScore = 0 // 清除词频加成，防止高频字跨层级
+				}
 				c.Weight = e.scorerWeight(f)
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
@@ -427,7 +445,10 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				if syllableCount > 0 {
 					abbrevMatchType = MatchPartial
 				}
-				f := e.buildFeatures(c.Text, float64(c.Weight), abbrevMatchType, len(allSyllables), charCount, featureOpts{isAbbrev: true})
+				// 简拼传 0 作为 syllableCount，确保不触发 SyllableMatch：
+				// 简拼 "nzbz" 匹配 "你在不在"(4字) 时，len(allSyllables)=4==charCount=4
+				// 会错误触发 SyllableMatch(+500)，导致简拼压过正确的子词组
+				f := e.buildFeatures(c.Text, float64(c.Weight), abbrevMatchType, 0, charCount, featureOpts{isAbbrev: true})
 				c.Weight = e.scorerWeight(f)
 				c.ConsumedLength = len(input)
 				if existing, exists := candidatesMap[c.Text]; exists {

@@ -52,7 +52,16 @@ func (e *Engine) lookupSubPhrasesEx(syllables []string, parsed *ParseResult, can
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, length, charCount, featureOpts{})
+				// 首位子词组（start==0）用 MatchPartial，支持部分上屏
+				// 非首位子词组（start>0）标记 isPartial 施加 -150 惩罚，
+				// 并传 0 作为 syllableCount 防止 SyllableMatch，
+				// 避免 "发发发发发发"(6字=6音节) 等非首位子词组获得不当 +500 奖励
+				isNonStart := start > 0
+				subSyllableCount := length
+				if isNonStart {
+					subSyllableCount = 0 // 非首位不给 SyllableMatch
+				}
+				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, subSyllableCount, charCount, featureOpts{isPartial: isNonStart})
 				c.Weight = e.scorerWeight(f)
 				// ConsumedLength 基于 Parser 的音节位置精确计算
 				if start == 0 {
