@@ -26,27 +26,27 @@ Var RANDOM_SUFFIX
 
 !if /FileExists "${BUILD_DIR}\wind_tsf.dll"
 !else
-!error "Missing file: ${BUILD_DIR}\wind_tsf.dll. Run build_all.bat first."
+!error "Missing file: ${BUILD_DIR}\wind_tsf.dll. Run build_all.ps1 first."
 !endif
 
 !if /FileExists "${BUILD_DIR}\wind_input.exe"
 !else
-!error "Missing file: ${BUILD_DIR}\wind_input.exe. Run build_all.bat first."
+!error "Missing file: ${BUILD_DIR}\wind_input.exe. Run build_all.ps1 first."
 !endif
 
 !if /FileExists "${BUILD_DIR}\wind_dwrite.dll"
 !else
-!error "Missing file: ${BUILD_DIR}\wind_dwrite.dll. Run build_all.bat first."
+!error "Missing file: ${BUILD_DIR}\wind_dwrite.dll. Run build_all.ps1 first."
 !endif
 
 !if /FileExists "${BUILD_DIR}\wind_setting.exe"
 !else
-!error "Missing file: ${BUILD_DIR}\wind_setting.exe. Run build_all.bat -wails-release first."
+!error "Missing file: ${BUILD_DIR}\wind_setting.exe. Run build_all.ps1 -WailsMode release first."
 !endif
 
 !if /FileExists "${BUILD_DIR}\dict\pinyin\8105.dict.yaml"
 !else
-!error "Missing file: ${BUILD_DIR}\dict\pinyin\8105.dict.yaml. Run build_all.bat first."
+!error "Missing file: ${BUILD_DIR}\dict\pinyin\8105.dict.yaml. Run build_all.ps1 first."
 !endif
 
 Name "${APP_NAME}"
