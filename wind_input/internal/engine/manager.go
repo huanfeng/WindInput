@@ -582,11 +582,26 @@ func (m *Manager) SaveUserFreqs() {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	for _, eng := range m.engines {
+	for schemaID, eng := range m.engines {
 		if pinyinEngine, ok := eng.(*pinyin.Engine); ok {
-			userFreqPath := "dict/pinyin/user_freq.txt"
+			// 检查拼音引擎的用户词频开关
+			cfg := pinyinEngine.GetConfig()
+			if cfg == nil || !cfg.EnableUserFreq {
+				continue
+			}
+			// 从 schema 配置获取词频文件路径
+			userFreqFile := ""
+			if m.schemaManager != nil {
+				if s := m.schemaManager.GetSchema(schemaID); s != nil {
+					userFreqFile = s.UserData.UserFreqFile
+				}
+			}
+			if userFreqFile == "" {
+				continue
+			}
+			userFreqPath := userFreqFile
 			if m.exeDir != "" {
-				userFreqPath = m.exeDir + "/" + userFreqPath
+				userFreqPath = m.exeDir + "/" + userFreqFile
 			}
 			schema.SavePinyinUserFreqs(pinyinEngine, userFreqPath)
 		}

@@ -33,5 +33,5 @@ user_data:
   user_freq_file: "user_freq_pinyin.txt"
 
 learning:
-  mode: auto
+  mode: manual
   unigram_path: "dict/pinyin/unigram.txt"

@@ -26,6 +26,7 @@ type Config struct {
 	UseSmartCompose bool         // 启用智能组句（Viterbi）
 	CandidateOrder  string       // 候选排序模式：char_first(单字优先)/phrase_first(词组优先)/smart(智能混排)
 	Fuzzy           *FuzzyConfig // 模糊拼音配置（nil 表示不启用）
+	EnableUserFreq  bool         // 启用用户词频学习（默认 false，关闭词频文件生成）
 }
 
 // Engine 拼音引擎
@@ -258,6 +259,10 @@ func (e *Engine) SetDictManager(dm *dict.DictManager) {
 // OnCandidateSelected 用户选词回调
 // 记录用户选择，用于词频学习
 func (e *Engine) OnCandidateSelected(code, text string) {
+	// 用户词频学习开关（默认关闭）
+	if e.config == nil || !e.config.EnableUserFreq {
+		return
+	}
 	if e.dictManager == nil {
 		return
 	}

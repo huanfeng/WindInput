@@ -181,9 +181,15 @@ func createPinyinEngine(s *Schema, exeDir string, dm *dict.DictManager) (*Engine
 		engine.SetDictManager(dm)
 	}
 
-	// 加载用户词频
-	userFreqPath := resolvePath(exeDir, "dict/pinyin/user_freq.txt")
-	loadPinyinUserFreqs(engine, userFreqPath)
+	// 加载用户词频（仅在 learning.mode=auto 或 frequency 时加载）
+	// 路径从 schema.UserData.UserFreqFile 读取
+	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
+		if s.UserData.UserFreqFile != "" {
+			userFreqPath := resolvePath(exeDir, s.UserData.UserFreqFile)
+			loadPinyinUserFreqs(engine, userFreqPath)
+		}
+		config.EnableUserFreq = true // 同步到引擎 config，控制 OnCandidateSelected
+	}
 
 	return &EngineBundle{
 		SchemaID: s.Schema.ID,
