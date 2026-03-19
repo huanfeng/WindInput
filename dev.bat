@@ -18,8 +18,10 @@ echo 4. 构建(Debug)
 echo 5. 安装
 echo 6. 卸载
 echo 7. 卸载 / 安装
+echo 8. 生成安装包(Release)
+echo 9. 生成安装包(跳过编译)
 echo.
-set /p CHOICE=请选择 (1-7):
+set /p CHOICE=请选择 (1-9):
 echo.
 if "%CHOICE%"=="" exit /b 1
 
@@ -31,6 +33,8 @@ if "%CHOICE%"=="4" goto combo_4
 if "%CHOICE%"=="5" goto combo_5
 if "%CHOICE%"=="6" goto combo_6
 if "%CHOICE%"=="7" goto combo_7
+if "%CHOICE%"=="8" goto combo_8
+if "%CHOICE%"=="9" goto combo_9
 
 echo [ERROR] 无效选项: %CHOICE%
 exit /b 1
@@ -78,6 +82,14 @@ call :DoUninstall || exit /b 1
 call :DoInstall || exit /b 1
 exit /b 0
 
+:combo_8
+call :DoBuildInstaller || exit /b 1
+exit /b 0
+
+:combo_9
+call :DoBuildInstallerSkip || exit /b 1
+exit /b 0
+
 :EnsureAdmin
 net session >nul 2>&1
 if %errorLevel% neq 0 (
@@ -104,5 +116,15 @@ exit /b 0
 
 :DoUninstall
 call "%SCRIPT_DIR%installer\uninstall.bat"
+if %errorLevel% neq 0 exit /b 1
+exit /b 0
+
+:DoBuildInstaller
+call "%SCRIPT_DIR%installer\build_nsis.bat"
+if %errorLevel% neq 0 exit /b 1
+exit /b 0
+
+:DoBuildInstallerSkip
+call "%SCRIPT_DIR%installer\build_nsis.bat" --skip-build
 if %errorLevel% neq 0 exit /b 1
 exit /b 0
