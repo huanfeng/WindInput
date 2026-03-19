@@ -1315,9 +1315,10 @@ sort: by_weight
 		t.Fatal("ConvertEx('sfg') should contain '司法官'")
 	}
 
-	// 简拼匹配应给到 L2 层级权重，不应被前缀 L4 权重覆盖。
-	if gotWeight < weightExactMatch-500 {
-		t.Fatalf("'司法官' weight too low: got=%d, want >= %d", gotWeight, weightExactMatch-500)
+	// 简拼匹配应有合理权重（Rime 评分：纯简拼 initialQuality=3.0，coverage=1.0）
+	// score = exp(nw) + 4.0，最小约 4.0，映射后 weight >= 4_000_000
+	if gotWeight < 3_000_000 {
+		t.Fatalf("'司法官' weight too low: got=%d, want >= 3000000", gotWeight)
 	}
 }
 
@@ -1426,19 +1427,29 @@ func TestSingleLetter_b(t *testing.T) {
 	}
 }
 
-// TestWeightLevels 验证权重层级关系正确
+// TestWeightLevels 验证 Rime 评分体系的层级关系正确
+// Command(iq=100) > 精确匹配(iq=4) > 子词组首位(iq=3) > 前缀匹配(iq=2) > 非首音节单字(iq=0.5)
 func TestWeightLevels(t *testing.T) {
-	if weightCommand <= weightViterbi {
-		t.Error("weightCommand should be > weightViterbi")
+	scorer := NewRimeScorer(nil, nil)
+
+	// 使用相同的 dictWeight 和 coverage=1.0，只对比 initialQuality 差异
+	wCommand := scorer.Score(0, 100.0, 1.0)
+	wExact := scorer.Score(0, 4.0, 1.0)
+	wSubPhrase := scorer.Score(0, 3.0, 1.0)
+	wPrefix := scorer.Score(0, 2.0, 1.0)
+	wSupplement := scorer.Score(0, 0.5, 1.0)
+
+	if wCommand <= wExact {
+		t.Errorf("Command(%.1f) should be > Exact(%.1f)", wCommand, wExact)
 	}
-	if weightViterbi <= weightExactMatch {
-		t.Error("weightViterbi should be > weightExactMatch")
+	if wExact <= wSubPhrase {
+		t.Errorf("Exact(%.1f) should be > SubPhrase(%.1f)", wExact, wSubPhrase)
 	}
-	if weightExactMatch <= weightFirstSyllable {
-		t.Error("weightExactMatch should be > weightFirstSyllable")
+	if wSubPhrase <= wPrefix {
+		t.Errorf("SubPhrase(%.1f) should be > Prefix(%.1f)", wSubPhrase, wPrefix)
 	}
-	if weightFirstSyllable <= weightSupplement {
-		t.Error("weightFirstSyllable should be > weightSupplement")
+	if wPrefix <= wSupplement {
+		t.Errorf("Prefix(%.1f) should be > Supplement(%.1f)", wPrefix, wSupplement)
 	}
 }
 

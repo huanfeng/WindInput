@@ -38,7 +38,8 @@ func (e *Engine) sortCandidates(candidates []candidate.Candidate, order string, 
 
 // lookupSubPhrasesEx 查找子词组（含模糊变体）
 // parsed 用于精确计算 ConsumedLength（基于原始输入中的音节位置，含分隔符）。
-func (e *Engine) lookupSubPhrasesEx(syllables []string, parsed *ParseResult, candidatesMap map[string]*candidate.Candidate) {
+// totalSyllableCount 用于 Rime 评分的 coverage 计算。
+func (e *Engine) lookupSubPhrasesEx(syllables []string, parsed *ParseResult, totalSyllableCount int, candidatesMap map[string]*candidate.Candidate) {
 	n := len(syllables)
 	// 查找所有连续子序列组成的词组
 	for length := n; length >= 2; length-- {
@@ -52,17 +53,16 @@ func (e *Engine) lookupSubPhrasesEx(syllables []string, parsed *ParseResult, can
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				// 首位子词组（start==0）用 MatchPartial，支持部分上屏
-				// 非首位子词组（start>0）标记 isPartial 施加 -150 惩罚，
-				// 并传 0 作为 syllableCount 防止 SyllableMatch，
-				// 避免 "发发发发发发"(6字=6音节) 等非首位子词组获得不当 +500 奖励
-				isNonStart := start > 0
-				subSyllableCount := length
-				if isNonStart {
-					subSyllableCount = 0 // 非首位不给 SyllableMatch
+				// 步骤 2：子词组评分
+				// start==0（首位）initialQuality=3.0，start>0（非首位）initialQuality=2.0
+				// 非首位需要足够高以不被大量单字候选挤出候选列表
+				// （Rime 中 Poet 造句器覆盖长句，我们没有 Poet，需要子词组补位）
+				iq := 3.0
+				if start > 0 {
+					iq = 2.0
 				}
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, subSyllableCount, charCount, featureOpts{isPartial: isNonStart})
-				c.Weight = e.scorerWeight(f)
+				coverage := float64(length) / float64(totalSyllableCount)
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverage, charCount)
 				// ConsumedLength 基于 Parser 的音节位置精确计算
 				if start == 0 {
 					// 从头开始的子词组：消耗到第 length 个已完成音节的结束位置

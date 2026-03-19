@@ -9,60 +9,22 @@ import (
 	"github.com/huanfeng/wind_input/internal/dict"
 )
 
+// rimeScore 计算 Rime 风格评分并映射到 int 权重
+// text: 候选文本（用于 LM 查询）
+// dictWeight: 词库原始权重
+// initialQuality: 来源基础偏移（查 initialQuality 值表）
+// coverage: 音节覆盖率（consumedSyllableCount / totalSyllableCount）
+// charCount: 候选字符数
+func (e *Engine) rimeScore(text string, dictWeight float64, initialQuality float64, coverage float64, charCount int) int {
+	score := e.rimeScorer.ScoreWithLM(text, dictWeight, initialQuality, coverage, charCount)
+	return int(score * 1000000)
+}
+
 // ============================================================
 // Engine 扩展方法
 // 使用新的 Parser → Lexicon → Ranker 流水线
 // ============================================================
 
-// ============================================================
-// 权重层级常量（5 级权重体系）
-// ============================================================
-const (
-	weightCommand       = 4000000 // L0: 特殊命令精确匹配（uuid, date 等）
-	weightViterbi       = 3000000 // L1: Viterbi 整句候选
-	weightExactMatch    = 2000000 // L2: 精确匹配 + 混合简拼（字数=音节数）
-	weightFirstSyllable = 1500000 // L3: 首音节单字 + 前缀接近匹配
-	weightSupplement    = 500000  // L4: 子词组、partial 前缀、非首音节单字
-)
-
-// featureOpts 构建候选特征的可选参数
-type featureOpts struct {
-	isUser, isFuzzy, isPartial, isAbbrev, isViterbi, isCommand bool
-	segmentRank                                                int
-}
-
-// buildFeatures 为候选构建特征向量
-func (e *Engine) buildFeatures(text string, freqScore float64, matchType MatchType, syllableCount int, charCount int, opts featureOpts) CandidateFeatures {
-	f := CandidateFeatures{
-		MatchType:     matchType,
-		SyllableMatch: charCount == syllableCount,
-		CharCount:     charCount,
-		SyllableCount: syllableCount,
-		IsUserWord:    opts.isUser,
-		IsFuzzy:       opts.isFuzzy,
-		IsPartial:     opts.isPartial,
-		IsAbbrev:      opts.isAbbrev,
-		IsViterbi:     opts.isViterbi,
-		IsCommand:     opts.isCommand,
-		FreqScore:     freqScore,
-		SegmentRank:   opts.segmentRank,
-	}
-	// 计算语言模型分数
-	if e.unigram != nil && text != "" {
-		if charCount == 1 {
-			f.LMScore = e.unigram.LogProb(text)
-		} else {
-			f.LMScore = e.unigram.CharBasedScore(text)
-		}
-	}
-	return f
-}
-
-// scorerWeight 使用 Scorer 计算权重，将 float64 分数映射到 int 权重空间
-// 乘以 1000 使数值范围与原有硬编码权重（500000~4000000）一致
-func (e *Engine) scorerWeight(f CandidateFeatures) int {
-	return int(e.scorer.Score(f) * 1000)
-}
 
 // ConvertEx 扩展版转换方法
 // 返回包含组合态的完整转换结果
@@ -96,6 +58,12 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	builder := NewCompositionBuilder()
 	result.Composition = builder.Build(parsed)
 	result.PreeditDisplay = result.Composition.PreeditText
+
+	// totalSyllableCount 用于 coverage 计算（Rime 评分模型）
+	totalSyllableCount := len(parsed.Syllables)
+	if totalSyllableCount == 0 {
+		totalSyllableCount = 1 // 防止除零
+	}
 
 	// 注意：以下变量来自 parsed（原始解析结果），而非 composition。
 	// - completedSyllables: 仅包含 Exact 音节（如 "ni","hao"），不含 partial
@@ -135,8 +103,8 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		cmdResults := e.dict.LookupCommand(queryInput)
 		for _, cand := range cmdResults {
 			c := cand
-			f := e.buildFeatures(c.Text, float64(c.Weight), MatchExact, 0, len([]rune(c.Text)), featureOpts{isCommand: true})
-			c.Weight = e.scorerWeight(f)
+			charCount := len([]rune(c.Text))
+			c.Weight = e.rimeScore(c.Text, float64(c.Weight), 100.0, 1.0, charCount)
 			c.ConsumedLength = len(input)
 			candidatesMap[c.Text] = &c
 		}
@@ -167,18 +135,15 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			}
 			c := cand
 			charCount := len([]rune(c.Text))
-			// 当输入含显式分隔符时，字数不匹配音节数的候选降级为 MatchPartial
-			// 例如 xi'an (2 音节)：西安(2字)→MatchExact，见(1字)→MatchPartial
-			// 当首段是 partial 时（如 sdem），completed 音节匹配整体降级
-			matchType := MatchExact
-			if hasExplicitSep && charCount != syllableCount {
-				matchType = MatchPartial
-			}
+			// 首段是 partial 时（如 sdem），completed 音节匹配整体降级
+			iq := 4.0
 			if !firstCompletedIsLeading {
-				matchType = MatchPartial
+				iq = 2.0
+			} else if hasExplicitSep && charCount != syllableCount {
+				iq = 2.0 // 显式分隔符下字数不匹配音节数，降级
 			}
-			f := e.buildFeatures(c.Text, float64(c.Weight), matchType, syllableCount, charCount, featureOpts{isPartial: !firstCompletedIsLeading})
-			c.Weight = e.scorerWeight(f)
+			coverage := float64(syllableCount) / float64(totalSyllableCount)
+			c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverage, charCount)
 			c.ConsumedLength = allCompletedEnd // 基于 Parser 音节位置精确计算
 			candidatesMap[c.Text] = &c
 		}
@@ -203,12 +168,12 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				altMatchType := MatchExact
+				iq := 3.5
 				if !firstCompletedIsLeading {
-					altMatchType = MatchPartial
+					iq = 2.0
 				}
-				f := e.buildFeatures(c.Text, float64(c.Weight), altMatchType, len(altSyllables), charCount, featureOpts{segmentRank: 1, isPartial: !firstCompletedIsLeading})
-				c.Weight = e.scorerWeight(f)
+				coverage := float64(len(altSyllables)) / float64(totalSyllableCount)
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverage, charCount)
 				// alt 路径的 ConsumedLength 基于其音节覆盖长度，不含 partial 后缀
 				c.ConsumedLength = len(altCode)
 				if c.ConsumedLength > len(input) {
@@ -235,8 +200,8 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, syllableCount, charCount, featureOpts{})
-				c.Weight = e.scorerWeight(f)
+				coverage := float64(syllableCount) / float64(totalSyllableCount)
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), 2.0, coverage, charCount)
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
 			}
@@ -248,7 +213,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 直接使用 Parser 已解析的 completedSyllables，不再冗余重建 DAG。
 	// 枚举所有从首位开始的连续子序列，支持部分上屏。
 	if syllableCount > 1 {
-		e.lookupSubPhrasesEx(completedSyllables, parsed, candidatesMap)
+		e.lookupSubPhrasesEx(completedSyllables, parsed, totalSyllableCount, candidatesMap)
 	}
 
 	// ── 步骤 4：单字候选 ──
@@ -272,10 +237,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				// 首段 partial 使用 MatchExact：用户首先输入的段理应获得最高优先级
-				// 这确保 "s" 的候选（世、是等）排在 "de"（的、得等）之前
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchExact, 1, charCount, featureOpts{})
-				c.Weight = e.scorerWeight(f)
+				// 步骤 4a：首段 partial 单字，initialQuality=3.0，coverage=1/total
+				coverage := 1.0 / float64(totalSyllableCount)
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), 3.0, coverage, charCount)
 				c.ConsumedLength = len(leadingPartial)
 				candidatesMap[c.Text] = &c
 				added++
@@ -293,25 +257,24 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			}
 			c := cand
 			charCount := len([]rune(c.Text))
-			// 首音节单字：多音节输入时为 Partial（只消耗部分输入），单音节为 Exact
-			// 如果首个 completed 不是输入首段（前面有 partial），降级为 MatchPartial
-			matchType := MatchExact
-			if syllableCount >= 2 || !firstCompletedIsLeading {
-				matchType = MatchPartial
+			// 步骤 4：首音节单字 initialQuality 按场景区分
+			// 单音节输入=4.0，多音节输入=2.5，非首段 completed=1.5（降级）
+			iq := 4.0
+			if syllableCount >= 2 {
+				iq = 2.5
 			}
-			isPartial := !firstCompletedIsLeading
-			// 传入实际总音节数（而非1），避免单字触发 SyllableMatch(+500)
-			f := e.buildFeatures(c.Text, float64(c.Weight), matchType, syllableCount, charCount, featureOpts{isPartial: isPartial})
-			c.Weight = e.scorerWeight(f)
+			if !firstCompletedIsLeading {
+				iq = 1.5
+			}
+			coverage := 1.0 / float64(totalSyllableCount)
+			c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverage, charCount)
 			// 基于 Parser 位置：消耗到第 1 个已完成音节的结束位置（自动包含前置 partial 段）
 			c.ConsumedLength = parsed.ConsumedBytesForCompletedN(1)
 			candidatesMap[c.Text] = &c
 		}
 
-		// 非首音节的单字：降级为 MatchFuzzy，防止高频字（如"的"）
+		// 非首音节的单字：initialQuality=0.5，防止高频字（如"的"）
 		// 因 UserWord/LM/FreqScore 叠加压过首位子词组和精确匹配。
-		// 在分步确认模型中，非首音节单字消耗大量输入（从头到该音节），
-		// 用户通常应先确认首位词组再处理后续音节。
 		for i := 1; i < syllableCount; i++ {
 			syllable := completedSyllables[i]
 			others := e.lookupWithFuzzy(syllable, []string{syllable})
@@ -321,8 +284,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchFuzzy, syllableCount, charCount, featureOpts{isPartial: true})
-				c.Weight = e.scorerWeight(f)
+				// 步骤 4：非首音节单字，initialQuality=0.5
+				coverage := float64(i+1) / float64(totalSyllableCount)
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), 0.5, coverage, charCount)
 				// 基于 Parser 位置精确计算：消耗到第 i+1 个已完成音节的结束位置
 				c.ConsumedLength = parsed.ConsumedBytesForCompletedN(i + 1)
 				candidatesMap[c.Text] = &c
@@ -348,8 +312,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				f := e.buildFeatures(c.Text, float64(c.Weight), MatchPartial, 1, charCount, featureOpts{isPartial: true})
-				c.Weight = e.scorerWeight(f)
+				// 步骤 4b：多 partial 首字，initialQuality=2.0
+				coverage := 1.0 / float64(totalSyllableCount)
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), 2.0, coverage, charCount)
 				c.ConsumedLength = len(firstPartial)
 				candidatesMap[c.Text] = &c
 				added++
@@ -367,13 +332,14 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				// 单字候选优先于多字词（partial 输入时用户更可能想要单字）
-				matchType := MatchPartial
+				// 步骤 5：partial 前缀词组
+				// 单字 initialQuality=1.5，多字词 initialQuality=1.0
+				iq := 1.5
 				if charCount > 1 {
-					matchType = MatchFuzzy // 多字词降级到 Fuzzy 层
+					iq = 1.0
 				}
-				f := e.buildFeatures(c.Text, float64(c.Weight), matchType, syllableCount, charCount, featureOpts{isPartial: true})
-				c.Weight = e.scorerWeight(f)
+				coverage := float64(syllableCount) / float64(totalSyllableCount)
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverage, charCount)
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
 			}
@@ -399,21 +365,15 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				if otherSyllableCount == 0 && len(allSyllables) > 1 {
 					otherSyllableCount = len(allSyllables) - 1
 				}
-				// partial 展开的单字：有其他完整音节时降级为 MatchFuzzy，
-				// 确保高频单字（如"的""在"）不会因 UserWord/LM 加成压过子词组匹配
-				partialMatchType := MatchPartial
-				if otherSyllableCount > 0 {
-					partialMatchType = MatchFuzzy
+				// 步骤 5：partial 展开单字，initialQuality=0.0（coverage 也清零，是最低优先级候选）
+				// 有其他完整音节时 coverage=0 额外压制高频字跨层级
+				iq := 0.0
+				coverageVal := 0.0
+				if otherSyllableCount == 0 {
+					// 纯 partial 输入时给予少量 coverage
+					coverageVal = 1.0 / float64(totalSyllableCount)
 				}
-				totalSyllables := len(allSyllables)
-				f := e.buildFeatures(c.Text, float64(c.Weight), partialMatchType, totalSyllables, charCount, featureOpts{isPartial: otherSyllableCount > 0})
-				// 额外惩罚：partial 展开的单字在多音节输入中消耗全部输入，
-				// 是最差的候选选择。施加与音节数成比例的额外惩罚，
-				// 确保即使极高频字（如"的" UserWord+FreqScore 叠加）也不会压过首音节候选。
-				if otherSyllableCount > 0 {
-					f.FreqScore = 0 // 清除词频加成，防止高频字跨层级
-				}
-				c.Weight = e.scorerWeight(f)
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverageVal, charCount)
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
 				added++
@@ -436,20 +396,14 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			for _, cand := range abbrevResults {
 				c := cand
 				charCount := len([]rune(c.Text))
-				// 简拼匹配的权重策略：
-				// - 纯缩写（如 sfg/bzd，syllableCount=0）：MatchExact（用户明确输入的是首字母）
-				// - 有完整音节时（如 dazhongwu → dzw）：MatchPartial（简拼不应压过子词组/精确匹配）
-				// 这确保 "dazhongwu" 的子词组 "大众" 不会被简拼 "对自我"(dzw) 压过，
-				// 但纯简拼 "sfg" → "司法官" 仍保持高权重。
-				abbrevMatchType := MatchExact
+				// 步骤 6：简拼匹配
+				// 纯简拼（syllableCount=0）initialQuality=3.0，有完整音节时=1.0
+				iq := 3.0
 				if syllableCount > 0 {
-					abbrevMatchType = MatchPartial
+					iq = 1.0
 				}
-				// 简拼传 0 作为 syllableCount，确保不触发 SyllableMatch：
-				// 简拼 "nzbz" 匹配 "你在不在"(4字) 时，len(allSyllables)=4==charCount=4
-				// 会错误触发 SyllableMatch(+500)，导致简拼压过正确的子词组
-				f := e.buildFeatures(c.Text, float64(c.Weight), abbrevMatchType, 0, charCount, featureOpts{isAbbrev: true})
-				c.Weight = e.scorerWeight(f)
+				// 简拼匹配全部音节首字母，coverage=1.0
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, 1.0, charCount)
 				c.ConsumedLength = len(input)
 				if existing, exists := candidatesMap[c.Text]; exists {
 					if candidate.Better(c, *existing) {
@@ -559,8 +513,8 @@ func (e *Engine) applyShadowRules(input string, candidates []candidate.Candidate
 			continue
 		}
 		if toppedMap[c.Text] {
-			// 置顶权重高于拼音引擎最高权重(weightCommand=4000000)
-			c.Weight = 5000000
+			// 置顶权重高于所有引擎权重（Command 最大约 101*1000000=101,000,000）
+			c.Weight = 200000000
 			needResort = true
 		} else if newWeight, ok := reweighted[c.Text]; ok {
 			c.Weight = newWeight

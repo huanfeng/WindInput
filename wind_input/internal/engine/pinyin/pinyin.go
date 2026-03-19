@@ -38,7 +38,8 @@ type Engine struct {
 	wubiReverse  map[string][]string // 汉字 -> 五笔编码（反向索引）
 	config       *Config
 	dictManager  *dict.DictManager // 词库管理器（用于用户词频学习）
-	scorer       *Scorer           // 统一候选评分器
+	scorer       *Scorer           // 统一候选评分器（deprecated，保留供五笔引擎引用）
+	rimeScorer   *RimeScorer       // Rime 风格连续评分器
 }
 
 // NewEngine 创建拼音引擎
@@ -48,6 +49,7 @@ func NewEngine(d *dict.CompositeDict) *Engine {
 		syllableTrie: NewSyllableTrie(),
 		config:       &Config{ShowWubiHint: false, FilterMode: "smart"},
 		scorer:       NewScorer(nil, nil),
+		rimeScorer:   NewRimeScorer(nil, nil),
 	}
 }
 
@@ -61,6 +63,7 @@ func NewEngineWithConfig(d *dict.CompositeDict, config *Config) *Engine {
 		syllableTrie: NewSyllableTrie(),
 		config:       config,
 		scorer:       NewScorer(nil, nil),
+		rimeScorer:   NewRimeScorer(nil, nil),
 	}
 }
 
@@ -83,6 +86,8 @@ func (e *Engine) LoadUnigram(path string) error {
 		bm, err := NewBinaryUnigramModel(wdbPath)
 		if err == nil {
 			e.unigram = bm
+			e.scorer = NewScorer(e.unigram, e.bigram)
+			e.rimeScorer = NewRimeScorer(e.unigram, e.bigram)
 			log.Printf("[PinyinEngine] Unigram 模型(二进制)加载成功: %d 词条", bm.Size())
 			return nil
 		}
@@ -96,6 +101,7 @@ func (e *Engine) LoadUnigram(path string) error {
 	}
 	e.unigram = m
 	e.scorer = NewScorer(e.unigram, e.bigram)
+	e.rimeScorer = NewRimeScorer(e.unigram, e.bigram)
 	return nil
 }
 
@@ -110,6 +116,7 @@ func (e *Engine) LoadBigram(path string) error {
 	}
 	e.bigram = m
 	e.scorer = NewScorer(e.unigram, e.bigram)
+	e.rimeScorer = NewRimeScorer(e.unigram, e.bigram)
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package pinyin
 
 import (
+	"math"
 	"sort"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
@@ -331,4 +332,70 @@ func MergeCandidates(lists ...[]candidate.Candidate) []candidate.Candidate {
 	})
 
 	return deduped
+}
+
+// ============================================================
+// RimeScorer Rime 风格连续评分器
+// 参照 librime script_translator.cc 的评分模型
+// ============================================================
+
+// rimeMaxDictWeight 词库最大权重（归一化基准）
+const rimeMaxDictWeight = 1000000.0
+
+// NormalizeWeight 将词库整数 weight 归一化到 [-15, 0] 区间
+func NormalizeWeight(dictWeight float64) float64 {
+	if dictWeight <= 0 {
+		return -15.0
+	}
+	if dictWeight >= rimeMaxDictWeight {
+		return 0.0
+	}
+	return (dictWeight/rimeMaxDictWeight)*15.0 - 15.0
+}
+
+// RimeScorer Rime 风格的连续评分器
+type RimeScorer struct {
+	unigram UnigramLookup
+	bigram  *BigramModel
+}
+
+// NewRimeScorer 创建 Rime 风格评分器
+func NewRimeScorer(unigram UnigramLookup, bigram *BigramModel) *RimeScorer {
+	return &RimeScorer{unigram: unigram, bigram: bigram}
+}
+
+// Score 计算 Rime 风格的候选评分（不含 LM）
+// normalizedWeight: 归一化后的词频权重 [-15, 0]
+// initialQuality: 来源基础偏移
+// coverage: 音节覆盖率 [0, 1]
+func (s *RimeScorer) Score(normalizedWeight float64, initialQuality float64, coverage float64) float64 {
+	return math.Exp(normalizedWeight) + initialQuality + coverage
+}
+
+// ScoreWithLM 带语言模型加成的 Rime 风格评分
+// text: 候选文本（用于 LM 查询）
+// dictWeight: 词库原始权重（整数，将被归一化）
+// initialQuality: 来源基础偏移（见设计文档中的 initialQuality 值表）
+// coverage: 音节覆盖率 [0, 1]（consumedSyllables / totalSyllables）
+// charCount: 候选字符数（1=单字用 LogProb，>1 用 CharBasedScore）
+func (s *RimeScorer) ScoreWithLM(text string, dictWeight float64, initialQuality float64, coverage float64, charCount int) float64 {
+	nw := NormalizeWeight(dictWeight)
+	// LM 加成
+	if s.unigram != nil && text != "" {
+		var lmScore float64
+		if charCount == 1 {
+			lmScore = s.unigram.LogProb(text)
+		} else {
+			lmScore = s.unigram.CharBasedScore(text)
+		}
+		nw += lmScore * 0.3
+	}
+	// 限制范围，防止极端值
+	if nw > 0 {
+		nw = 0
+	}
+	if nw < -20 {
+		nw = -20
+	}
+	return math.Exp(nw) + initialQuality + coverage
 }
