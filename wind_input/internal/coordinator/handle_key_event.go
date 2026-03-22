@@ -182,6 +182,15 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	// Other Ctrl/Alt combinations should be passed to the system
 	// (after checking toggle mode keys, since lctrl/rctrl are valid toggle keys)
 	if hasCtrl || hasAlt {
+		if c.hasPendingInput() {
+			// 输入态下 Ctrl/Alt 组合键（非已注册热键）：取消输入，让 C++ 端透传按键给宿主程序
+			// 例如 Ctrl+S 保存、Ctrl+C 复制等，用户意图是执行快捷键而非继续打字
+			c.logger.Debug("Ctrl/Alt combo during composing, clearing state for pass-through",
+				"ctrl", hasCtrl, "alt", hasAlt, "keyCode", data.KeyCode)
+			c.clearState()
+			c.hideUI()
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		}
 		c.logger.Debug("Key has Ctrl/Alt modifier, passing to system")
 		return nil
 	}
@@ -324,6 +333,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	case vk == ipc.VK_BACK:
 		return c.handleBackspace()
 
+	case vk == ipc.VK_DELETE:
+		return c.handleDelete()
+
 	case vk == ipc.VK_RETURN:
 		return c.handleEnter()
 
@@ -350,6 +362,14 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		// No candidates — fall through to punctuation if applicable
 		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
 			return c.handlePunctuation(rune(key[0]))
+		}
+		return nil
+
+	case vk == ipc.VK_TAB:
+		// Tab 安全网：输入态下始终消费，防止透传给宿主程序导致焦点跳转
+		// 如果 Tab 已被 isHighlightDownKey/UpKey 匹配则不会到达此处
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 		}
 		return nil
 

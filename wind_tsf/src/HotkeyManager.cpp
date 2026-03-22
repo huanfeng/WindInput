@@ -110,6 +110,8 @@ HotkeyType CHotkeyManager::ClassifyInputKey(WPARAM vk, uint32_t modifiers)
     case VK_DOWN:   // Down arrow
     case VK_HOME:   // Home
     case VK_END:    // End
+    case VK_DELETE: // Delete
+    case VK_INSERT: // Insert (reserved for future Ctrl+Insert word management)
         return HotkeyType::CursorKey;
     }
 

@@ -240,6 +240,52 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 	}
 }
 
+// handleDelete 处理 Delete 键（前删：删除光标后方的字符）
+// 与 Backspace（退删）互补，提供完整的编码编辑体验
+func (c *Coordinator) handleDelete() *bridge.KeyEventResult {
+	if len(c.inputBuffer) == 0 {
+		// 无输入缓冲但有 pending 状态（如确认段）→ 吃掉，不透传
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
+		return nil // 完全无输入时透传
+	}
+	if c.inputCursorPos < len(c.inputBuffer) {
+		// 前删：删除光标位置的字符
+		c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + c.inputBuffer[c.inputCursorPos+1:]
+		c.logger.Debug("Delete key", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
+
+		if len(c.inputBuffer) == 0 && len(c.confirmedSegments) == 0 {
+			c.clearState()
+			c.hideUI()
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		}
+
+		// inputBuffer 清空但仍有确认段时，回退到上一个确认段
+		if len(c.inputBuffer) == 0 && len(c.confirmedSegments) > 0 {
+			return c.popConfirmedSegment()
+		}
+
+		c.updateCandidates()
+		c.showUI()
+
+		if c.config != nil && c.config.UI.InlinePreedit {
+			return &bridge.KeyEventResult{
+				Type:     bridge.ResponseTypeUpdateComposition,
+				Text:     c.compositionText(),
+				CaretPos: c.displayCursorPos(),
+			}
+		}
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     "",
+			CaretPos: 0,
+		}
+	}
+	// 光标在末尾 → 吃掉，不透传给系统
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+}
+
 // popConfirmedSegment 弹出最后一个确认段，将其编码恢复到 inputBuffer 中。
 func (c *Coordinator) popConfirmedSegment() *bridge.KeyEventResult {
 	lastSeg := c.confirmedSegments[len(c.confirmedSegments)-1]
@@ -268,7 +314,10 @@ func (c *Coordinator) popConfirmedSegment() *bridge.KeyEventResult {
 
 func (c *Coordinator) handleCursorLeft() *bridge.KeyEventResult {
 	if len(c.inputBuffer) == 0 {
-		return nil // 无输入时透传
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
+		return nil // 完全无输入时透传
 	}
 	if c.inputCursorPos > 0 {
 		c.inputCursorPos--
@@ -288,7 +337,10 @@ func (c *Coordinator) handleCursorLeft() *bridge.KeyEventResult {
 
 func (c *Coordinator) handleCursorRight() *bridge.KeyEventResult {
 	if len(c.inputBuffer) == 0 {
-		return nil // 无输入时透传
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
+		return nil // 完全无输入时透传
 	}
 	if c.inputCursorPos < len(c.inputBuffer) {
 		c.inputCursorPos++
@@ -308,6 +360,9 @@ func (c *Coordinator) handleCursorRight() *bridge.KeyEventResult {
 
 func (c *Coordinator) handleCursorHome() *bridge.KeyEventResult {
 	if len(c.inputBuffer) == 0 {
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
 		return nil
 	}
 	c.inputCursorPos = 0
@@ -326,6 +381,9 @@ func (c *Coordinator) handleCursorHome() *bridge.KeyEventResult {
 
 func (c *Coordinator) handleCursorEnd() *bridge.KeyEventResult {
 	if len(c.inputBuffer) == 0 {
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
 		return nil
 	}
 	c.inputCursorPos = len(c.inputBuffer)
@@ -344,7 +402,10 @@ func (c *Coordinator) handleCursorEnd() *bridge.KeyEventResult {
 
 func (c *Coordinator) handleArrowUp() *bridge.KeyEventResult {
 	if len(c.candidates) == 0 {
-		return nil // 无候选时透传
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
+		return nil // 完全无输入时透传
 	}
 	if c.selectedIndex > 0 {
 		c.selectedIndex--
@@ -367,7 +428,10 @@ func (c *Coordinator) handleArrowUp() *bridge.KeyEventResult {
 
 func (c *Coordinator) handleArrowDown() *bridge.KeyEventResult {
 	if len(c.candidates) == 0 {
-		return nil // 无候选时透传
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
+		return nil // 完全无输入时透传
 	}
 	// 计算当前页候选数量
 	startIdx := (c.currentPage - 1) * c.candidatesPerPage
@@ -492,8 +556,11 @@ func (c *Coordinator) handleNumberKey(num int) *bridge.KeyEventResult {
 }
 
 func (c *Coordinator) handlePageUp() *bridge.KeyEventResult {
-	// Pass through only if no candidates
+	// Pass through only if no candidates and no pending input
 	if len(c.candidates) == 0 {
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
 		return nil
 	}
 
@@ -509,8 +576,11 @@ func (c *Coordinator) handlePageUp() *bridge.KeyEventResult {
 }
 
 func (c *Coordinator) handlePageDown() *bridge.KeyEventResult {
-	// Pass through only if no candidates
+	// Pass through only if no candidates and no pending input
 	if len(c.candidates) == 0 {
+		if c.hasPendingInput() {
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
 		return nil
 	}
 

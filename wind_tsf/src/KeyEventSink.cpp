@@ -170,6 +170,18 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
 
     if (hasInputSession || isChineseMode)
     {
+        // Ctrl/Alt combos during active input session: intercept so OnKeyDown can
+        // send to Go for state cleanup, then pass through to the host application.
+        // This prevents dangling composition state when user presses Ctrl+S, Ctrl+C, etc.
+        // Note: registered hotkeys (Ctrl+`, Shift+Space) are already caught above.
+        if (hasInputSession && (modifiers & (KEYMOD_CTRL | KEYMOD_ALT)))
+        {
+            WIND_LOG_DEBUG_FMT(L"OnTestKeyDown: Ctrl/Alt during session, eating for cleanup: vk=0x%02X\n",
+                         (uint32_t)wParam);
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+
         HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
 
         if (keyType == HotkeyType::Backspace || keyType == HotkeyType::Enter ||
@@ -347,20 +359,36 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // Also check _hasCandidates for cases where InlinePreedit is disabled
     BOOL hasInputSession = hasComposition || _hasCandidates;
 
+    // Track whether this is a Ctrl/Alt combo that needs cleanup-then-passthrough
+    BOOL isCtrlAltCleanup = FALSE;
+
     if (hasInputSession || isChineseMode)
     {
-        HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
-
-        // Backspace, Enter, Escape, CursorKey should only be intercepted when there's an active composition or input session
-        // Otherwise they should pass through to the application
-        if (keyType == HotkeyType::Backspace || keyType == HotkeyType::Enter ||
-            keyType == HotkeyType::Escape || keyType == HotkeyType::CursorKey)
+        // Ctrl/Alt combos during active input session: mark as input key so we can
+        // send to Go for state cleanup. After response, we'll override pfEaten=FALSE.
+        // Note: registered hotkeys are already caught by isKeyDownHotkey above.
+        if (hasInputSession && (modifiers & (KEYMOD_CTRL | KEYMOD_ALT)) && !isKeyDownHotkey)
         {
-            isInputKey = hasInputSession;  // Only intercept if we have composition or input session
+            isInputKey = TRUE;
+            isCtrlAltCleanup = TRUE;
+            WIND_LOG_DEBUG_FMT(L"OnKeyDown: Ctrl/Alt during session, sending to Go for cleanup: vk=0x%02X\n",
+                         (uint32_t)wParam);
         }
         else
         {
-            isInputKey = (keyType != HotkeyType::None);
+            HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
+
+            // Backspace, Enter, Escape, CursorKey should only be intercepted when there's an active composition or input session
+            // Otherwise they should pass through to the application
+            if (keyType == HotkeyType::Backspace || keyType == HotkeyType::Enter ||
+                keyType == HotkeyType::Escape || keyType == HotkeyType::CursorKey)
+            {
+                isInputKey = hasInputSession;  // Only intercept if we have composition or input session
+            }
+            else
+            {
+                isInputKey = (keyType != HotkeyType::None);
+            }
         }
     }
 
@@ -408,6 +436,16 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // SYNC: Wait for response and handle it directly
     // This is simpler and matches Weasel's architecture
     *pfEaten = _HandleServiceResponse();
+
+    // Ctrl/Alt combo during active session: Go has cleared its state and returned
+    // ClearComposition, which ended the TSF composition. Now override pfEaten to
+    // FALSE so the key (e.g., Ctrl+S) passes through to the host application.
+    if (isCtrlAltCleanup && *pfEaten)
+    {
+        WIND_LOG_DEBUG(L"OnKeyDown: Ctrl/Alt cleanup done, overriding to pass-through\n");
+        *pfEaten = FALSE;
+    }
+
     return S_OK;
 }
 

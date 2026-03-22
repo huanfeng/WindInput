@@ -95,6 +95,8 @@ const (
 	VK_UP         uint32 = 0x26
 	VK_RIGHT      uint32 = 0x27
 	VK_DOWN       uint32 = 0x28
+	VK_INSERT     uint32 = 0x2D // Insert
+	VK_DELETE     uint32 = 0x2E // Delete
 	VK_LSHIFT     uint32 = 0xA0
 	VK_RSHIFT     uint32 = 0xA1
 	VK_LCONTROL   uint32 = 0xA2
