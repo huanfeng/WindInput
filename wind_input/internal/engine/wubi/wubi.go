@@ -158,7 +158,7 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 				}
 			}
 		}
-		prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixExcludeExact(input, 50)...)
+		prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixExcludeExact(input, 0)...)
 	}
 
 	// Phase 3: 处理前缀候选
@@ -233,16 +233,20 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 			}
 		}
 		if e.codeTable != nil {
-			prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixExcludeExact(input, 50)...)
+			prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixExcludeExact(input, 0)...)
 		}
 	}
 
-	// ========== Phase 3: 处理前缀候选（code hint + 降权）==========
+	// ========== Phase 3: 处理前缀候选（code hint + 按剩余码长分层降权）==========
+	// 参考 RIME table_translator: 前缀候选 (completion) 整体排在精确匹配之后。
+	// 在此基础上按剩余码长分层：剩余1键 > 剩余2键 > 剩余3键，
+	// 同层内保持原始 weight 排序。
 	for i := range prefixCandidates {
 		if e.config.ShowCodeHint && len(prefixCandidates[i].Code) > inputLen {
 			prefixCandidates[i].Hint = prefixCandidates[i].Code[inputLen:]
 		}
-		prefixCandidates[i].Weight -= 2000000
+		remaining := len(prefixCandidates[i].Code) - inputLen
+		prefixCandidates[i].Weight -= remaining * 1000000
 	}
 
 	// ========== Phase 4: 合并 + 去重（Shadow top/delete 已由 CompositeDict 处理）==========

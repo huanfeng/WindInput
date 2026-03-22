@@ -99,7 +99,7 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 	}
 
 	// 使用扩展转换获取更多信息
-	result := c.engineMgr.ConvertEx(c.inputBuffer, 50)
+	result := c.engineMgr.ConvertEx(c.inputBuffer, 0)
 
 	// 更新预编辑显示状态
 	c.preeditDisplay = result.PreeditDisplay
