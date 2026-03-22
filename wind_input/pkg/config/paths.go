@@ -100,9 +100,9 @@ func EnsureConfigDir() error {
 	return os.MkdirAll(configDir, 0755)
 }
 
-// GetWubiDictPath returns the path to the wubi dictionary
+// GetWubiDictPath returns the path to the wubi dictionary main file
 func GetWubiDictPath() string {
-	return "dict/wubi86/wubi86.txt"
+	return "dict/wubi86/wubi86_jidian.dict.yaml"
 }
 
 // GetPinyinDictPath returns the path to the pinyin dictionary directory

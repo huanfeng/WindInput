@@ -19,12 +19,12 @@ engine:
 
 dictionaries:
   - id: pinyin_main
-    path: "dict/pinyin"
+    path: "dict/pinyin/rime_ice.dict.yaml"
     type: rime_pinyin
     default: true
   - id: wubi_reverse
-    path: "dict/wubi86/wubi86.txt"
-    type: codetable
+    path: "dict/wubi86/wubi86_jidian.dict.yaml"
+    type: rime_wubi
     role: reverse_lookup
 
 user_data:

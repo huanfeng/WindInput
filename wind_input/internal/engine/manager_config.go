@@ -129,7 +129,7 @@ func (m *Manager) loadWubiReverseForPinyin(pinyinEngine *pinyin.Engine) {
 			if m.exeDir != "" && !isAbsPath(rdPath) {
 				rdPath = m.exeDir + "/" + rdPath
 			}
-			if err := schema.LoadWubiTableForPinyinEngine(pinyinEngine, rdPath); err != nil {
+			if err := schema.LoadWubiTableForPinyinEngine(pinyinEngine, rdPath, d.Type); err != nil {
 				log.Printf("[EngineManager] 加载五笔反查码表失败: %v", err)
 			} else {
 				log.Printf("[EngineManager] 五笔反查码表加载成功")

@@ -72,7 +72,7 @@ func createCodeTableEngine(s *Schema, exeDir string, dm *dict.DictManager) (*Eng
 	dictSpec := s.GetDefaultDictSpec()
 	if dictSpec != nil {
 		srcPath := resolvePath(exeDir, dictSpec.Path)
-		if err := loadWubiCodeTable(engine, srcPath); err != nil {
+		if err := loadWubiCodeTable(engine, srcPath, dictSpec.Type); err != nil {
 			return nil, fmt.Errorf("加载码表失败: %w", err)
 		}
 		log.Printf("[SchemaFactory] 码表加载成功 (%s), 词条数: %d", s.Schema.ID, engine.GetEntryCount())
@@ -175,7 +175,7 @@ func createPinyinEngine(s *Schema, exeDir string, dm *dict.DictManager) (*Engine
 	reverseDicts := s.GetDictsByRole(DictRoleReverseLookup)
 	for _, rd := range reverseDicts {
 		rdPath := resolvePath(exeDir, rd.Path)
-		if err := loadWubiTableForPinyin(engine, rdPath); err != nil {
+		if err := loadWubiTableForPinyin(engine, rdPath, rd.Type); err != nil {
 			log.Printf("[SchemaFactory] 加载反查码表失败: %v", err)
 		} else {
 			log.Printf("[SchemaFactory] 反查码表加载成功")
@@ -206,12 +206,10 @@ func createPinyinEngine(s *Schema, exeDir string, dm *dict.DictManager) (*Engine
 // --- 词库加载辅助函数（从 manager_init.go 迁移） ---
 
 func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string) error {
-	wdbInDir := filepath.Join(dictPath, "pinyin.wdb")
-	srcPaths := []string{
-		filepath.Join(dictPath, "8105.dict.yaml"),
-		filepath.Join(dictPath, "base.dict.yaml"),
-	}
+	dictDir := filepath.Dir(dictPath)
+	srcPaths := dictcache.RimePinyinSourcePaths(dictPath)
 
+	wdbInDir := filepath.Join(dictDir, "pinyin.wdb")
 	if !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
 		if err := pinyinDict.LoadBinary(wdbInDir); err == nil {
 			log.Printf("[SchemaFactory] 拼音词库(预编译 wdb)加载成功, 编码数: %d", pinyinDict.EntryCount())
@@ -273,19 +271,37 @@ func loadUnigramModel(engine *pinyin.Engine, txtPath string) error {
 	return fmt.Errorf("Unigram 模型 wdb 不可用，智能组句功能将不可用")
 }
 
-func loadWubiCodeTable(engine *wubi.Engine, srcPath string) error {
-	srcDir := filepath.Dir(srcPath)
+func loadWubiCodeTable(engine *wubi.Engine, srcPath, dictType string) error {
+	var srcDir string
+	var srcPaths []string
+
+	if dictType == "rime_wubi" {
+		// srcPath 是主词库 .dict.yaml 文件路径，自动发现关联词库
+		srcDir = filepath.Dir(srcPath)
+		srcPaths = dictcache.RimeWubiSourcePaths(srcPath)
+	} else {
+		// 传统单文件码表格式
+		srcDir = filepath.Dir(srcPath)
+		srcPaths = []string{srcPath}
+	}
+
 	wdbInDir := filepath.Join(srcDir, "wubi.wdb")
-	if !dictcache.NeedsRegenerate([]string{srcPath}, wdbInDir) {
+	if len(srcPaths) > 0 && !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
 		if err := loadWubiFromWdb(engine, wdbInDir); err == nil {
 			return nil
 		}
 	}
 
 	wdbCachePath := dictcache.CachePath("wubi")
-	if dictcache.NeedsRegenerate([]string{srcPath}, wdbCachePath) {
-		if err := dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath); err != nil {
-			return fmt.Errorf("转换五笔码表到 wdb 失败: %w", err)
+	if len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
+		var convertErr error
+		if dictType == "rime_wubi" {
+			convertErr = dictcache.ConvertRimeWubiToWdb(srcPath, wdbCachePath)
+		} else {
+			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath)
+		}
+		if convertErr != nil {
+			return fmt.Errorf("转换五笔码表到 wdb 失败: %w", convertErr)
 		}
 	}
 
@@ -320,23 +336,39 @@ func loadWubiFromWdb(engine *wubi.Engine, wdbPath string) error {
 }
 
 // LoadWubiTableForPinyinEngine 为拼音引擎加载五笔反查码表（导出供热更新使用）
-func LoadWubiTableForPinyinEngine(engine *pinyin.Engine, srcPath string) error {
-	return loadWubiTableForPinyin(engine, srcPath)
+func LoadWubiTableForPinyinEngine(engine *pinyin.Engine, srcPath, dictType string) error {
+	return loadWubiTableForPinyin(engine, srcPath, dictType)
 }
 
-func loadWubiTableForPinyin(engine *pinyin.Engine, srcPath string) error {
-	srcDir := filepath.Dir(srcPath)
+func loadWubiTableForPinyin(engine *pinyin.Engine, srcPath, dictType string) error {
+	var srcDir string
+	var srcPaths []string
+
+	if dictType == "rime_wubi" {
+		srcDir = filepath.Dir(srcPath)
+		srcPaths = dictcache.RimeWubiSourcePaths(srcPath)
+	} else {
+		srcDir = filepath.Dir(srcPath)
+		srcPaths = []string{srcPath}
+	}
+
 	wdbInDir := filepath.Join(srcDir, "wubi.wdb")
-	if !dictcache.NeedsRegenerate([]string{srcPath}, wdbInDir) {
+	if len(srcPaths) > 0 && !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
 		if err := engine.LoadWubiTableBinary(wdbInDir); err == nil {
 			return nil
 		}
 	}
 
 	wdbCachePath := dictcache.CachePath("wubi")
-	if dictcache.NeedsRegenerate([]string{srcPath}, wdbCachePath) {
-		if err := dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath); err != nil {
-			return fmt.Errorf("生成五笔反查码表缓存失败: %w", err)
+	if len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
+		var convertErr error
+		if dictType == "rime_wubi" {
+			convertErr = dictcache.ConvertRimeWubiToWdb(srcPath, wdbCachePath)
+		} else {
+			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath)
+		}
+		if convertErr != nil {
+			return fmt.Errorf("生成五笔反查码表缓存失败: %w", convertErr)
 		}
 	}
 
@@ -399,13 +431,10 @@ func preGeneratePinyinWdb(s *Schema, exeDir string) {
 
 	// 如果当前方案没有拼音词库，尝试默认路径
 	if pinyinDictPath == "" {
-		pinyinDictPath = resolvePath(exeDir, "dict/pinyin")
+		pinyinDictPath = resolvePath(exeDir, "dict/pinyin/rime_ice.dict.yaml")
 	}
 
-	srcPaths := []string{
-		filepath.Join(pinyinDictPath, "8105.dict.yaml"),
-		filepath.Join(pinyinDictPath, "base.dict.yaml"),
-	}
+	srcPaths := dictcache.RimePinyinSourcePaths(pinyinDictPath)
 	wdbCachePath := dictcache.CachePath("pinyin")
 	if dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
 		log.Printf("[SchemaFactory] 后台预生成拼音 wdb...")

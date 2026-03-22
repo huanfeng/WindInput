@@ -82,17 +82,21 @@ if (Test-Path $settingExe) {
 
 # [6/12] 复制词库
 Write-Host "[6/12] 从 build 目录复制词库(源文件, wdb 运行时自动生成)..."
-$dictDirs = @("dict\pinyin", "dict\wubi86")
+$dictDirs = @("dict\pinyin", "dict\pinyin\cn_dicts", "dict\wubi86")
 foreach ($d in $dictDirs) {
     $target = Join-Path $InstallDir $d
     if (-not (Test-Path $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
 }
 
 $dictFiles = @(
-    @{ Src = "dict\pinyin\8105.dict.yaml"; Desc = "拼音单字词库: 8105.dict.yaml" },
-    @{ Src = "dict\pinyin\base.dict.yaml"; Desc = "拼音基础词库: base.dict.yaml" },
+    @{ Src = "dict\pinyin\rime_ice.dict.yaml"; Desc = "拼音词库入口: rime_ice.dict.yaml" },
+    @{ Src = "dict\pinyin\cn_dicts\8105.dict.yaml"; Desc = "拼音单字词库: cn_dicts/8105.dict.yaml" },
+    @{ Src = "dict\pinyin\cn_dicts\base.dict.yaml"; Desc = "拼音基础词库: cn_dicts/base.dict.yaml" },
     @{ Src = "dict\pinyin\unigram.txt"; Desc = "语言模型: unigram.txt"; Optional = $true },
-    @{ Src = "dict\wubi86\wubi86.txt"; Desc = "五笔词库: wubi86.txt" },
+    @{ Src = "dict\wubi86\wubi86_jidian.dict.yaml"; Desc = "五笔主词库: wubi86_jidian.dict.yaml" },
+    @{ Src = "dict\wubi86\wubi86_jidian_extra.dict.yaml"; Desc = "五笔扩展词库: wubi86_jidian_extra.dict.yaml"; Optional = $true },
+    @{ Src = "dict\wubi86\wubi86_jidian_extra_district.dict.yaml"; Desc = "五笔行政区域词库: wubi86_jidian_extra_district.dict.yaml"; Optional = $true },
+    @{ Src = "dict\wubi86\wubi86_jidian_user.dict.yaml"; Desc = "五笔用户词库模板: wubi86_jidian_user.dict.yaml"; Optional = $true },
     @{ Src = "dict\common_chars.txt"; Desc = "常用字表: common_chars.txt" }
 )
 
@@ -197,10 +201,10 @@ Write-Host "- wind_tsf.dll (TSF 桥接)"
 Write-Host "- wind_dwrite.dll (DirectWrite 渲染 Shim)"
 Write-Host "- wind_input.exe (输入法服务)"
 Write-Host "- wind_setting.exe (设置界面)"
-Write-Host "- dict\pinyin\8105.dict.yaml (拼音单字词库)"
-Write-Host "- dict\pinyin\base.dict.yaml (拼音基础词库)"
+Write-Host "- dict\pinyin\rime_ice.dict.yaml (拼音词库入口)"
+Write-Host "- dict\pinyin\cn_dicts\*.dict.yaml (拼音词库数据)"
 Write-Host "- dict\pinyin\unigram.txt (语言模型)"
-Write-Host "- dict\wubi86\wubi86.txt (五笔86词库)"
+Write-Host "- dict\wubi86\wubi86_jidian*.dict.yaml (五笔86词库, rime 格式)"
 Write-Host "- dict\common_chars.txt (常用字表)"
 Write-Host "- schemas\*.schema.yaml (输入方案配置)"
 Write-Host "- themes\*\theme.yaml (主题配置)"

@@ -99,32 +99,48 @@ if ($WailsMode -eq "skip") {
 }
 Write-Host ""
 
-# [4/6] 下载拼音词库
-Write-Host "[4/6] 下载拼音词库(rime-ice)..."
-$RimeDir = Join-Path $ScriptDir ".cache\rime"
-if (-not (Test-Path $RimeDir)) { New-Item -ItemType Directory -Path $RimeDir -Force | Out-Null }
+# [4/6] 下载词库 (rime-ice + rime-wubi86-jidian)
+Write-Host "[4/6] 下载词库..."
 
-$RimeBaseUrl = "https://raw.githubusercontent.com/iDvel/rime-ice/main/cn_dicts"
-
-function Download-RimeFile {
-    param([string]$FileName, [string]$Description)
-    $targetPath = Join-Path $RimeDir $FileName
+function Download-RemoteFile {
+    param([string]$BaseUrl, [string]$FileName, [string]$TargetDir, [string]$Description)
+    $targetPath = Join-Path $TargetDir $FileName
     if (Test-Path $targetPath) {
         Write-Host "  - $FileName 已存在,跳过下载"
         return
     }
     Write-Host "  - 下载 $FileName ($Description)..."
     try {
-        Invoke-WebRequest -Uri "$RimeBaseUrl/$FileName" -OutFile $targetPath -UseBasicParsing
+        Invoke-WebRequest -Uri "$BaseUrl/$FileName" -OutFile $targetPath -UseBasicParsing
     } catch {
         Write-Host "[错误] 下载 $FileName 失败" -ForegroundColor Red
         exit 1
     }
 }
 
-Download-RimeFile "8105.dict.yaml" "单字词库, 约112KB"
-Download-RimeFile "base.dict.yaml" "基础词库, 约16MB"
-Download-RimeFile "tencent.dict.yaml" "腾讯词频, 约17MB"
+# 拼音词库 (rime-ice)，按原始目录结构下载
+Write-Host "  拼音词库 (rime-ice):"
+$RimePinyinDir = Join-Path $ScriptDir ".cache\rime"
+$RimePinyinCnDicts = Join-Path $RimePinyinDir "cn_dicts"
+if (-not (Test-Path $RimePinyinDir)) { New-Item -ItemType Directory -Path $RimePinyinDir -Force | Out-Null }
+if (-not (Test-Path $RimePinyinCnDicts)) { New-Item -ItemType Directory -Path $RimePinyinCnDicts -Force | Out-Null }
+
+$RimeIceBaseUrl = "https://raw.githubusercontent.com/iDvel/rime-ice/main"
+Download-RemoteFile $RimeIceBaseUrl "rime_ice.dict.yaml" $RimePinyinDir "词库入口描述文件"
+Download-RemoteFile "$RimeIceBaseUrl/cn_dicts" "8105.dict.yaml" $RimePinyinCnDicts "单字词库, 约112KB"
+Download-RemoteFile "$RimeIceBaseUrl/cn_dicts" "base.dict.yaml" $RimePinyinCnDicts "基础词库, 约16MB"
+Download-RemoteFile "$RimeIceBaseUrl/cn_dicts" "tencent.dict.yaml" $RimePinyinCnDicts "腾讯词频, 约17MB"
+
+# 五笔词库 (rime-wubi86-jidian)
+Write-Host "  五笔词库 (rime-wubi86-jidian):"
+$RimeWubiDir = Join-Path $ScriptDir ".cache\rime-wubi"
+if (-not (Test-Path $RimeWubiDir)) { New-Item -ItemType Directory -Path $RimeWubiDir -Force | Out-Null }
+$RimeWubiUrl = "https://raw.githubusercontent.com/KyleBing/rime-wubi86-jidian/master"
+
+Download-RemoteFile $RimeWubiUrl "wubi86_jidian.dict.yaml" $RimeWubiDir "主词库"
+Download-RemoteFile $RimeWubiUrl "wubi86_jidian_extra.dict.yaml" $RimeWubiDir "扩展词库"
+Download-RemoteFile $RimeWubiUrl "wubi86_jidian_extra_district.dict.yaml" $RimeWubiDir "行政区域词库"
+Download-RemoteFile $RimeWubiUrl "wubi86_jidian_user.dict.yaml" $RimeWubiDir "用户词库模板"
 Write-Host ""
 
 # [5/6] 准备词库文件
@@ -134,21 +150,27 @@ $wubiDir = Join-Path $BuildDir "dict\wubi86"
 if (-not (Test-Path $pinyinDir)) { New-Item -ItemType Directory -Path $pinyinDir -Force | Out-Null }
 if (-not (Test-Path $wubiDir)) { New-Item -ItemType Directory -Path $wubiDir -Force | Out-Null }
 
-# 复制拼音词库
-$rime8105 = Join-Path $RimeDir "8105.dict.yaml"
-if (Test-Path $rime8105) {
-    Copy-Item -Path $rime8105 -Destination (Join-Path $pinyinDir "8105.dict.yaml") -Force
-    Write-Host "  - 已复制拼音单字词库 8105.dict.yaml"
+# 复制拼音词库（保持原始目录结构）
+$pinyinCnDictsDir = Join-Path $pinyinDir "cn_dicts"
+if (-not (Test-Path $pinyinCnDictsDir)) { New-Item -ItemType Directory -Path $pinyinCnDictsDir -Force | Out-Null }
+
+$rimeIceMain = Join-Path $RimePinyinDir "rime_ice.dict.yaml"
+if (Test-Path $rimeIceMain) {
+    Copy-Item -Path $rimeIceMain -Destination (Join-Path $pinyinDir "rime_ice.dict.yaml") -Force
+    Write-Host "  - 已复制拼音词库入口 rime_ice.dict.yaml"
 } else {
-    Write-Host "[警告] 未找到 8105.dict.yaml" -ForegroundColor Yellow
+    Write-Host "[警告] 未找到 rime_ice.dict.yaml" -ForegroundColor Yellow
 }
 
-$rimeBase = Join-Path $RimeDir "base.dict.yaml"
-if (Test-Path $rimeBase) {
-    Copy-Item -Path $rimeBase -Destination (Join-Path $pinyinDir "base.dict.yaml") -Force
-    Write-Host "  - 已复制拼音基础词库 base.dict.yaml"
-} else {
-    Write-Host "[警告] 未找到 base.dict.yaml" -ForegroundColor Yellow
+$pinyinDictFiles = @("8105.dict.yaml", "base.dict.yaml")
+foreach ($df in $pinyinDictFiles) {
+    $src = Join-Path $RimePinyinCnDicts $df
+    if (Test-Path $src) {
+        Copy-Item -Path $src -Destination (Join-Path $pinyinCnDictsDir $df) -Force
+        Write-Host "  - 已复制 cn_dicts/$df"
+    } else {
+        Write-Host "[警告] 未找到 cn_dicts/$df" -ForegroundColor Yellow
+    }
 }
 
 # 生成 Unigram 语言模型
@@ -159,7 +181,7 @@ if (-not (Test-Path $unigramPath)) {
     Write-Host "  - 生成 Unigram 语言模型..."
     Push-Location (Join-Path $ScriptDir "wind_input")
     try {
-        & go run ./cmd/gen_unigram -rime $RimeDir -output $unigramPath
+        & go run ./cmd/gen_unigram -rime $RimePinyinCnDicts -output $unigramPath
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[警告] Unigram 生成失败,智能组句功能不可用" -ForegroundColor Yellow
         } else {
@@ -180,13 +202,25 @@ if (Test-Path $unigramPath) {
     Write-Host "[提示] Unigram 语言模型不存在,智能组句功能不可用" -ForegroundColor Cyan
 }
 
-# 复制五笔词库
-$wubiSrc = Join-Path $ScriptDir "ref\极爽词库6.txt"
-if (Test-Path $wubiSrc) {
-    Copy-Item -Path $wubiSrc -Destination (Join-Path $wubiDir "wubi86.txt") -Force
-    Write-Host "  - 已复制五笔词库"
+# 复制五笔词库 (rime-wubi86-jidian)
+$wubiFiles = @(
+    "wubi86_jidian.dict.yaml",
+    "wubi86_jidian_extra.dict.yaml",
+    "wubi86_jidian_extra_district.dict.yaml",
+    "wubi86_jidian_user.dict.yaml"
+)
+$wubiCopied = 0
+foreach ($wf in $wubiFiles) {
+    $wubiSrc = Join-Path $RimeWubiDir $wf
+    if (Test-Path $wubiSrc) {
+        Copy-Item -Path $wubiSrc -Destination (Join-Path $wubiDir $wf) -Force
+        $wubiCopied++
+    }
+}
+if ($wubiCopied -gt 0) {
+    Write-Host "  - 已复制五笔词库 ($wubiCopied 个文件)"
 } else {
-    Write-Host "[警告] ref 目录中未找到五笔词库" -ForegroundColor Yellow
+    Write-Host "[警告] 未找到五笔词库文件" -ForegroundColor Yellow
 }
 
 # 复制常用字表
@@ -252,14 +286,16 @@ Write-Host "- build\wind_setting.exe（设置界面）"
 Write-Host "- build\dict\pinyin\8105.dict.yaml（拼音单字词库）"
 Write-Host "- build\dict\pinyin\base.dict.yaml（拼音基础词库）"
 Write-Host "- build\dict\pinyin\unigram.txt（Unigram 语言模型）"
-Write-Host "- build\dict\wubi86\wubi86.txt（五笔词库）"
+Write-Host "- build\dict\wubi86\wubi86_jidian*.dict.yaml（五笔词库, rime 格式）"
 Write-Host "- build\dict\common_chars.txt（常用字表）"
 Write-Host "- build\schemas\*.schema.yaml（输入方案配置）"
 Write-Host "- build\themes\*\theme.yaml（主题配置）"
 Write-Host ""
 Write-Host "注: .wdb 二进制词库由运行时按需自动生成并缓存"
 Write-Host ""
-Write-Host "词库来源: 雾凇拼音 rime-ice (https://github.com/iDvel/rime-ice)"
+Write-Host "词库来源:"
+Write-Host "  拼音: 雾凇拼音 rime-ice (https://github.com/iDvel/rime-ice)"
+Write-Host "  五笔: 极点五笔 rime-wubi86-jidian (https://github.com/KyleBing/rime-wubi86-jidian)"
 Write-Host ""
 Write-Host "开发调试:"
 Write-Host "  cd build; .\wind_input.exe -log debug"
