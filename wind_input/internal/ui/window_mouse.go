@@ -203,19 +203,41 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	globalIndex := pageStartIndex + hitIndex
 	isGlobalFirst := globalIndex == 0
 	isGlobalLast := totalCandidateCount <= 0 || globalIndex >= totalCandidateCount-1
+	isSingleCandidate := totalCandidateCount <= 1
 
 	// Check if this candidate has shadow modifications
 	hasShadow := hitIndex >= 0 && hitIndex < len(hasShadowFlags) && hasShadowFlags[hitIndex]
 
+	// Check if candidate is single character (cannot delete)
+	isSingleChar := false
+	candidateTexts := w.candidateTexts
+	if hitIndex >= 0 && hitIndex < len(candidateTexts) {
+		isSingleChar = len([]rune(candidateTexts[hitIndex])) <= 1
+	}
+
+	// Check if pinyin mode (disable move up/down)
+	isPinyin := w.isPinyinMode
+
+	// 菜单状态规则：
+	// 前移: 首位禁用 | 单候选禁用 | 拼音禁用
+	// 后移: 末位禁用 | 单候选禁用 | 拼音禁用
+	// 置顶: 首位禁用 | 拼音首位也禁用
+	// 删除: 单字禁用
+	// 恢复默认: 无 Shadow 修改时禁用
+	disableMoveUp := isGlobalFirst || isSingleCandidate || isPinyin
+	disableMoveDown := isGlobalLast || isSingleCandidate || isPinyin
+	disableTop := isGlobalFirst
+	disableDelete := isSingleChar
+
 	// Build menu items
 	items := []MenuItem{
-		{ID: IDM_CANDIDATE_MOVEUP, Text: "前移(U)", Disabled: isGlobalFirst},
-		{ID: IDM_CANDIDATE_MOVEDOWN, Text: "后移(D)", Disabled: isGlobalLast},
-		{ID: IDM_CANDIDATE_MOVETOP, Text: "置顶(T)", Disabled: isGlobalFirst},
+		{ID: IDM_CANDIDATE_MOVEUP, Text: "前移(U)", Disabled: disableMoveUp},
+		{ID: IDM_CANDIDATE_MOVEDOWN, Text: "后移(D)", Disabled: disableMoveDown},
+		{ID: IDM_CANDIDATE_MOVETOP, Text: "置顶(T)", Disabled: disableTop},
 		{Separator: true},
 		{ID: IDM_CANDIDATE_RESET, Text: "恢复默认(R)", Disabled: !hasShadow},
 		{Separator: true},
-		{ID: IDM_CANDIDATE_DELETE, Text: "删除词条(X)"},
+		{ID: IDM_CANDIDATE_DELETE, Text: "删除词条(X)", Disabled: disableDelete},
 	}
 
 	// Set menu open flag and target index

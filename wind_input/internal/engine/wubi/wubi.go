@@ -243,7 +243,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		prefixCandidates[i].Weight -= 2000000
 	}
 
-	// ========== Phase 4: 合并 + 去重（Shadow 已由 CompositeDict 处理，无需 applyShadowRules）==========
+	// ========== Phase 4: 合并 + 去重（Shadow top/delete 已由 CompositeDict 处理）==========
 	allCandidates := append(exactCandidates, prefixCandidates...)
 	if e.config.DedupCandidates {
 		allCandidates = dedup(allCandidates)
@@ -266,6 +266,15 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	sort.Slice(allCandidates, func(i, j int) bool {
 		return comparator(allCandidates[i], allCandidates[j])
 	})
+
+	// ========== Phase 6: Shadow 拦截器（pin + delete） ==========
+	// 在引擎最终排序后统一应用，不修改 weight，只做呈现层位置覆盖和过滤。
+	if e.dictManager != nil {
+		if shadowLayer := e.dictManager.GetShadowLayer(); shadowLayer != nil {
+			rules := shadowLayer.GetShadowRules(input)
+			allCandidates = dict.ApplyShadowPins(allCandidates, rules)
+		}
+	}
 
 	filterMode := "smart"
 	if e.config != nil && e.config.FilterMode != "" {

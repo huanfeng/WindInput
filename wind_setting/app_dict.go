@@ -391,10 +391,10 @@ func (a *App) ExportUserDict() (*ImportExportResult, error) {
 
 // ShadowRuleItem Shadow 规则项（用于前端）
 type ShadowRuleItem struct {
-	Code   string `json:"code"`
-	Word   string `json:"word"`
-	Action string `json:"action"`
-	Weight int    `json:"weight"`
+	Code     string `json:"code"`
+	Word     string `json:"word"`
+	Type     string `json:"type"`     // "pin" 或 "delete"
+	Position int    `json:"position"` // 仅 pin 有效
 }
 
 // GetShadowRules 获取所有 Shadow 规则
@@ -409,13 +409,20 @@ func (a *App) GetShadowRules() ([]ShadowRuleItem, error) {
 	}
 
 	var items []ShadowRuleItem
-	for code, rules := range cfg.Rules {
-		for _, r := range rules {
+	for code, cc := range cfg.Rules {
+		for _, p := range cc.Pinned {
 			items = append(items, ShadowRuleItem{
-				Code:   code,
-				Word:   r.Word,
-				Action: r.Action,
-				Weight: r.Weight,
+				Code:     code,
+				Word:     p.Word,
+				Type:     "pin",
+				Position: p.Position,
+			})
+		}
+		for _, d := range cc.Deleted {
+			items = append(items, ShadowRuleItem{
+				Code: code,
+				Word: d,
+				Type: "delete",
 			})
 		}
 	}
@@ -423,13 +430,31 @@ func (a *App) GetShadowRules() ([]ShadowRuleItem, error) {
 	return items, nil
 }
 
-// AddShadowRule 添加 Shadow 规则
-func (a *App) AddShadowRule(code, word, action string, weight int) error {
+// PinShadowWord 固定词到指定位置
+func (a *App) PinShadowWord(code, word string, position int) error {
 	if a.shadowEditor == nil {
 		return fmt.Errorf("shadow editor not initialized")
 	}
 
-	a.shadowEditor.AddRule(code, word, action, weight)
+	a.shadowEditor.PinWord(code, word, position)
+
+	if err := a.shadowEditor.Save(); err != nil {
+		return err
+	}
+
+	a.fileWatcher.UpdateState(a.shadowEditor.GetFilePath())
+	go a.NotifyReload("shadow")
+
+	return nil
+}
+
+// DeleteShadowWord 隐藏词条
+func (a *App) DeleteShadowWord(code, word string) error {
+	if a.shadowEditor == nil {
+		return fmt.Errorf("shadow editor not initialized")
+	}
+
+	a.shadowEditor.DeleteWord(code, word)
 
 	if err := a.shadowEditor.Save(); err != nil {
 		return err

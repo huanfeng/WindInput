@@ -124,10 +124,13 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 
 	// 设置当前页各候选的 Shadow 修改标记
 	hasShadowFlags := make([]bool, len(candidates))
+	candidateTexts := make([]string, len(candidates))
 	for i, c := range candidates {
 		hasShadowFlags[i] = c.HasShadow
+		candidateTexts[i] = c.Text
 	}
 	m.window.SetCandidateHasShadow(hasShadowFlags)
+	m.window.SetCandidateMenuState(candidateTexts, m.isPinyinMode)
 
 	// Determine position preference based on sticky state
 	var preference PositionPreference
@@ -364,4 +367,11 @@ func (m *Manager) CandidateMenuContainsPoint(screenX, screenY int) bool {
 		return m.window.MenuContainsPoint(screenX, screenY)
 	}
 	return false
+}
+
+// SetPinyinMode 设置是否为拼音模式（影响右键菜单前移/后移启用状态）
+func (m *Manager) SetPinyinMode(isPinyin bool) {
+	m.mu.Lock()
+	m.isPinyinMode = isPinyin
+	m.mu.Unlock()
 }

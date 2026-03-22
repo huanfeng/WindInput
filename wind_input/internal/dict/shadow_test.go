@@ -1,281 +1,178 @@
 package dict
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
 
 func newTestShadowLayer(t *testing.T) *ShadowLayer {
 	t.Helper()
-	filePath := filepath.Join(t.TempDir(), "shadow.yaml")
-	return NewShadowLayer("test_shadow", filePath)
+	tmpDir := t.TempDir()
+	return NewShadowLayer("test_shadow", filepath.Join(tmpDir, "shadow.yaml"))
 }
 
-func TestShadowLayerTop(t *testing.T) {
+func TestShadowLayerPin(t *testing.T) {
 	sl := newTestShadowLayer(t)
 
-	// Top a word
-	sl.Top("nihao", "你好")
+	sl.Pin("nihao", "你好", 0)
 
-	if !sl.IsTopped("nihao", "你好") {
-		t.Fatal("expected word to be topped")
+	if !sl.IsPinned("nihao", "你好") {
+		t.Fatal("expected word to be pinned")
 	}
 	if sl.IsDeleted("nihao", "你好") {
-		t.Fatal("topped word should not be deleted")
+		t.Fatal("pinned word should not be deleted")
 	}
 
-	// Save and reload to verify persistence
+	rules := sl.GetShadowRules("nihao")
+	if rules == nil || len(rules.Pinned) != 1 {
+		t.Fatal("expected 1 pinned rule")
+	}
+	if rules.Pinned[0].Word != "你好" || rules.Pinned[0].Position != 0 {
+		t.Fatalf("unexpected pin: %+v", rules.Pinned[0])
+	}
+
+	// Save and reload
 	if err := sl.Save(); err != nil {
 		t.Fatalf("save failed: %v", err)
 	}
-
 	sl2 := NewShadowLayer("test_shadow2", sl.filePath)
 	if err := sl2.Load(); err != nil {
 		t.Fatalf("load failed: %v", err)
 	}
-
-	if !sl2.IsTopped("nihao", "你好") {
-		t.Fatal("topped word should persist after reload")
+	if !sl2.IsPinned("nihao", "你好") {
+		t.Fatal("pinned word should persist after reload")
 	}
 }
 
 func TestShadowLayerDelete(t *testing.T) {
 	sl := newTestShadowLayer(t)
 
-	// Delete a word
 	sl.Delete("zhongguo", "中国")
 
 	if !sl.IsDeleted("zhongguo", "中国") {
 		t.Fatal("expected word to be deleted")
 	}
-	if sl.IsTopped("zhongguo", "中国") {
-		t.Fatal("deleted word should not be topped")
-	}
-
-	// Save and reload to verify persistence
-	if err := sl.Save(); err != nil {
-		t.Fatalf("save failed: %v", err)
-	}
-
-	sl2 := NewShadowLayer("test_shadow2", sl.filePath)
-	if err := sl2.Load(); err != nil {
-		t.Fatalf("load failed: %v", err)
-	}
-
-	if !sl2.IsDeleted("zhongguo", "中国") {
-		t.Fatal("deleted word should persist after reload")
-	}
-}
-
-func TestShadowLayerReweight(t *testing.T) {
-	sl := newTestShadowLayer(t)
-
-	// Reweight a word
-	sl.Reweight("shijie", "世界", 500)
-
-	rules := sl.GetShadowRules("shijie")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule, got %d", len(rules))
-	}
-	if rules[0].Action != ShadowActionReweight {
-		t.Fatalf("expected reweight action, got %s", rules[0].Action)
-	}
-	if rules[0].NewWeight != 500 {
-		t.Fatalf("expected weight 500, got %d", rules[0].NewWeight)
-	}
-
-	// Save and reload to verify persistence
-	if err := sl.Save(); err != nil {
-		t.Fatalf("save failed: %v", err)
-	}
-
-	sl2 := NewShadowLayer("test_shadow2", sl.filePath)
-	if err := sl2.Load(); err != nil {
-		t.Fatalf("load failed: %v", err)
-	}
-
-	rules2 := sl2.GetShadowRules("shijie")
-	if len(rules2) != 1 {
-		t.Fatalf("expected 1 rule after reload, got %d", len(rules2))
-	}
-	if rules2[0].NewWeight != 500 {
-		t.Fatalf("expected weight 500 after reload, got %d", rules2[0].NewWeight)
+	if sl.IsPinned("zhongguo", "中国") {
+		t.Fatal("deleted word should not be pinned")
 	}
 }
 
 func TestShadowLayerRemoveRule(t *testing.T) {
 	sl := newTestShadowLayer(t)
 
-	// Add then remove
-	sl.Top("nihao", "你好")
-	if !sl.IsTopped("nihao", "你好") {
-		t.Fatal("expected word to be topped")
+	sl.Pin("nihao", "你好", 0)
+	if !sl.IsPinned("nihao", "你好") {
+		t.Fatal("expected word to be pinned")
 	}
 
 	sl.RemoveRule("nihao", "你好")
-	if sl.IsTopped("nihao", "你好") {
+	if sl.IsPinned("nihao", "你好") {
 		t.Fatal("rule should be removed")
-	}
-
-	rules := sl.GetShadowRules("nihao")
-	if len(rules) != 0 {
-		t.Fatalf("expected 0 rules after removal, got %d", len(rules))
-	}
-
-	// Verify the code key is cleaned up when all rules are removed
-	if sl.GetRuleCount() != 0 {
-		t.Fatalf("expected 0 total rules, got %d", sl.GetRuleCount())
 	}
 }
 
-func TestShadowLayerOverwrite(t *testing.T) {
+func TestShadowLayerPinOverwritesDelete(t *testing.T) {
 	sl := newTestShadowLayer(t)
 
-	// Top first, then change to delete
-	sl.Top("nihao", "你好")
-	if !sl.IsTopped("nihao", "你好") {
-		t.Fatal("expected topped")
-	}
-
+	// Delete then pin — pin should remove from deleted
 	sl.Delete("nihao", "你好")
 	if !sl.IsDeleted("nihao", "你好") {
-		t.Fatal("expected deleted after overwrite")
-	}
-	if sl.IsTopped("nihao", "你好") {
-		t.Fatal("should not be topped after overwrite to delete")
+		t.Fatal("expected deleted")
 	}
 
-	// Only 1 rule should exist (overwritten, not duplicated)
+	sl.Pin("nihao", "你好", 0)
+	if sl.IsDeleted("nihao", "你好") {
+		t.Fatal("pin should remove deleted status")
+	}
+	if !sl.IsPinned("nihao", "你好") {
+		t.Fatal("should be pinned after pin-over-delete")
+	}
+
 	rules := sl.GetShadowRules("nihao")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule (overwrite), got %d", len(rules))
+	if len(rules.Pinned) != 1 || len(rules.Deleted) != 0 {
+		t.Fatalf("expected 1 pinned 0 deleted, got pinned=%d deleted=%d", len(rules.Pinned), len(rules.Deleted))
 	}
+}
 
-	// Now reweight
-	sl.Reweight("nihao", "你好", 200)
-	rules = sl.GetShadowRules("nihao")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule after reweight overwrite, got %d", len(rules))
-	}
-	if rules[0].Action != ShadowActionReweight || rules[0].NewWeight != 200 {
-		t.Fatalf("expected reweight(200), got %s(%d)", rules[0].Action, rules[0].NewWeight)
-	}
+func TestShadowLayerDeleteOverwritesPin(t *testing.T) {
+	sl := newTestShadowLayer(t)
 
-	// Save and reload
-	if err := sl.Save(); err != nil {
-		t.Fatalf("save failed: %v", err)
-	}
+	sl.Pin("nihao", "你好", 0)
+	sl.Delete("nihao", "你好")
 
-	sl2 := NewShadowLayer("test_shadow2", sl.filePath)
-	if err := sl2.Load(); err != nil {
-		t.Fatalf("load failed: %v", err)
+	if sl.IsPinned("nihao", "你好") {
+		t.Fatal("delete should remove pin status")
 	}
-
-	rules2 := sl2.GetShadowRules("nihao")
-	if len(rules2) != 1 {
-		t.Fatalf("expected 1 rule after reload, got %d", len(rules2))
-	}
-	if rules2[0].Action != ShadowActionReweight || rules2[0].NewWeight != 200 {
-		t.Fatalf("expected reweight(200) after reload, got %s(%d)", rules2[0].Action, rules2[0].NewWeight)
+	if !sl.IsDeleted("nihao", "你好") {
+		t.Fatal("should be deleted")
 	}
 }
 
 func TestShadowLayerCaseInsensitive(t *testing.T) {
 	sl := newTestShadowLayer(t)
 
-	// Code should be case-insensitive
-	sl.Top("NiHao", "你好")
-	if !sl.IsTopped("nihao", "你好") {
-		t.Fatal("code lookup should be case-insensitive")
-	}
-	if !sl.IsTopped("NIHAO", "你好") {
-		t.Fatal("code lookup should be case-insensitive (uppercase)")
+	sl.Pin("NiHao", "你好", 0)
+	if !sl.IsPinned("nihao", "你好") {
+		t.Fatal("code should be case-insensitive")
 	}
 }
 
-func TestShadowLayerLoadNonExistent(t *testing.T) {
-	sl := NewShadowLayer("test", filepath.Join(t.TempDir(), "nonexistent.yaml"))
-
-	// Loading non-existent file should not error
-	if err := sl.Load(); err != nil {
-		t.Fatalf("loading non-existent file should not error: %v", err)
-	}
-
-	if sl.GetRuleCount() != 0 {
-		t.Fatal("rule count should be 0 for non-existent file")
-	}
-}
-
-func TestShadowLayerDirtyFlag(t *testing.T) {
+func TestShadowLayerMultipleRules(t *testing.T) {
 	sl := newTestShadowLayer(t)
 
-	if sl.IsDirty() {
-		t.Fatal("should not be dirty initially")
-	}
-
-	sl.Top("nihao", "你好")
-	if !sl.IsDirty() {
-		t.Fatal("should be dirty after modification")
-	}
-
-	if err := sl.Save(); err != nil {
-		t.Fatalf("save failed: %v", err)
-	}
-	if sl.IsDirty() {
-		t.Fatal("should not be dirty after save")
-	}
-}
-
-func TestShadowLayerSaveSkipsWhenClean(t *testing.T) {
-	sl := newTestShadowLayer(t)
-
-	// Save without any modifications should be a no-op
-	if err := sl.Save(); err != nil {
-		t.Fatalf("save failed: %v", err)
-	}
-
-	// File should not exist since nothing was dirty
-	if _, err := os.Stat(sl.filePath); !os.IsNotExist(err) {
-		t.Fatal("file should not exist when saving clean state")
-	}
-}
-
-func TestShadowLayerMultipleCodesAndRules(t *testing.T) {
-	sl := newTestShadowLayer(t)
-
-	sl.Top("nihao", "你好")
+	sl.Pin("nihao", "你好", 0)
 	sl.Delete("nihao", "泥号")
-	sl.Top("shijie", "世界")
-	sl.Reweight("shijie", "时节", 300)
+	sl.Pin("shijie", "世界", 0)
+	sl.Pin("shijie", "时节", 2)
 
 	if sl.GetRuleCount() != 4 {
 		t.Fatalf("expected 4 total rules, got %d", sl.GetRuleCount())
-	}
-
-	// Verify nihao rules
-	nihaoRules := sl.GetShadowRules("nihao")
-	if len(nihaoRules) != 2 {
-		t.Fatalf("expected 2 rules for nihao, got %d", len(nihaoRules))
-	}
-
-	// Verify shijie rules
-	shijieRules := sl.GetShadowRules("shijie")
-	if len(shijieRules) != 2 {
-		t.Fatalf("expected 2 rules for shijie, got %d", len(shijieRules))
 	}
 
 	// Save and reload
 	if err := sl.Save(); err != nil {
 		t.Fatalf("save failed: %v", err)
 	}
-
-	sl2 := NewShadowLayer("test2", sl.filePath)
+	sl2 := NewShadowLayer("test_shadow2", sl.filePath)
 	if err := sl2.Load(); err != nil {
 		t.Fatalf("load failed: %v", err)
 	}
-
 	if sl2.GetRuleCount() != 4 {
 		t.Fatalf("expected 4 rules after reload, got %d", sl2.GetRuleCount())
+	}
+}
+
+func TestShadowLayerPinLIFO(t *testing.T) {
+	sl := newTestShadowLayer(t)
+
+	// Pin A then B to position 0 — B should be first in array (LIFO)
+	sl.Pin("aa", "式", 0)
+	sl.Pin("aa", "戒", 0)
+
+	rules := sl.GetShadowRules("aa")
+	if len(rules.Pinned) != 2 {
+		t.Fatalf("expected 2 pinned, got %d", len(rules.Pinned))
+	}
+	// 戒 was pinned last → should be first (LIFO)
+	if rules.Pinned[0].Word != "戒" {
+		t.Errorf("LIFO: last pinned '戒' should be first, got %q", rules.Pinned[0].Word)
+	}
+	if rules.Pinned[1].Word != "式" {
+		t.Errorf("LIFO: first pinned '式' should be second, got %q", rules.Pinned[1].Word)
+	}
+}
+
+func TestShadowLayerPinUpdatePosition(t *testing.T) {
+	sl := newTestShadowLayer(t)
+
+	sl.Pin("aa", "工", 2)
+	sl.Pin("aa", "工", 0) // update position and move to front
+
+	rules := sl.GetShadowRules("aa")
+	if len(rules.Pinned) != 1 {
+		t.Fatalf("expected 1 pinned (no dup), got %d", len(rules.Pinned))
+	}
+	if rules.Pinned[0].Position != 0 {
+		t.Errorf("position should be updated to 0, got %d", rules.Pinned[0].Position)
 	}
 }

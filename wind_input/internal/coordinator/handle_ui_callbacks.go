@@ -2,6 +2,7 @@
 package coordinator
 
 import (
+	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/internal/ui"
 )
@@ -163,102 +164,101 @@ func (c *Coordinator) handleCandidateHoverChange(index, tooltipX, tooltipY int) 
 	}
 }
 
-// handleCandidateMoveUp handles move up action from context menu
+// handleCandidateMoveUp handles move up action from context menu.
+// 五笔：所有可见候选（含前缀匹配）都可前移，规则按当前 inputBuffer 存储。
+// 拼音：不支持前移。
 func (c *Coordinator) handleCandidateMoveUp(index int) {
 	c.mu.Lock()
 
 	c.logger.Debug("Candidate move up requested", "index", index)
 
-	// Convert page-local index to actual candidate index
 	actualIndex := (c.currentPage-1)*c.candidatesPerPage + index
-
 	if actualIndex <= 0 || actualIndex >= len(c.candidates) {
-		c.logger.Warn("Invalid candidate index for move up", "actualIndex", actualIndex)
 		c.mu.Unlock()
 		return
 	}
 
-	candidate := c.candidates[actualIndex]
-	if candidate.IsCommand {
-		c.logger.Debug("Cannot move command candidate", "text", candidate.Text)
+	// 单候选或命令候选不可操作
+	if len(c.candidates) <= 1 {
+		c.mu.Unlock()
+		return
+	}
+	cand := c.candidates[actualIndex]
+	if cand.IsCommand {
 		c.mu.Unlock()
 		return
 	}
 
-	prevCandidate := c.candidates[actualIndex-1]
-	code := candidate.Code
-	if code == "" {
-		code = c.inputBuffer
+	// 拼音引擎不支持前移/后移
+	if c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin {
+		c.mu.Unlock()
+		return
 	}
 
-	// Calculate new weight: just above the previous candidate
-	newWeight := prevCandidate.Weight + 1
-
+	// 前移 = pin(当前位置 - 1)
+	code := c.inputBuffer
+	targetPosition := actualIndex - 1
 	c.mu.Unlock()
 
-	// Perform shadow operation without lock
 	if c.engineMgr != nil {
 		shadowLayer := c.engineMgr.GetDictManager().GetShadowLayer()
 		if shadowLayer != nil {
-			shadowLayer.Reweight(code, candidate.Text, newWeight)
+			shadowLayer.Pin(code, cand.Text, targetPosition)
 			if err := shadowLayer.Save(); err != nil {
 				c.logger.Error("Failed to save shadow layer", "error", err)
 			}
 		}
 	}
 
-	// Re-acquire lock to refresh UI
 	c.mu.Lock()
 	c.updateCandidates()
 	c.showUI()
 	c.mu.Unlock()
 }
 
-// handleCandidateMoveDown handles move down action from context menu
+// handleCandidateMoveDown handles move down action from context menu.
+// 五笔：所有可见候选都可后移。拼音：不支持。
 func (c *Coordinator) handleCandidateMoveDown(index int) {
 	c.mu.Lock()
 
 	c.logger.Debug("Candidate move down requested", "index", index)
 
-	// Convert page-local index to actual candidate index
 	actualIndex := (c.currentPage-1)*c.candidatesPerPage + index
-
 	if actualIndex < 0 || actualIndex >= len(c.candidates)-1 {
-		c.logger.Warn("Invalid candidate index for move down", "actualIndex", actualIndex)
 		c.mu.Unlock()
 		return
 	}
 
-	candidate := c.candidates[actualIndex]
-	if candidate.IsCommand {
-		c.logger.Debug("Cannot move command candidate", "text", candidate.Text)
+	if len(c.candidates) <= 1 {
+		c.mu.Unlock()
+		return
+	}
+	cand := c.candidates[actualIndex]
+	if cand.IsCommand {
 		c.mu.Unlock()
 		return
 	}
 
-	nextCandidate := c.candidates[actualIndex+1]
-	code := candidate.Code
-	if code == "" {
-		code = c.inputBuffer
+	if c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin {
+		c.mu.Unlock()
+		return
 	}
 
-	// Calculate new weight: just below the next candidate
-	newWeight := nextCandidate.Weight - 1
-
+	// 后移 = pin(当前位置 + 1)
+	code := c.inputBuffer
+	targetPosition := actualIndex + 1
 	c.mu.Unlock()
 
-	// Perform shadow operation without lock
 	if c.engineMgr != nil {
 		shadowLayer := c.engineMgr.GetDictManager().GetShadowLayer()
 		if shadowLayer != nil {
-			shadowLayer.Reweight(code, candidate.Text, newWeight)
+			shadowLayer.Pin(code, cand.Text, targetPosition)
 			if err := shadowLayer.Save(); err != nil {
 				c.logger.Error("Failed to save shadow layer", "error", err)
 			}
 		}
 	}
 
-	// Re-acquire lock to refresh UI
 	c.mu.Lock()
 	c.updateCandidates()
 	c.showUI()
@@ -287,72 +287,69 @@ func (c *Coordinator) handleCandidateMoveTop(index int) {
 		return
 	}
 
-	code := candidate.Code
-	if code == "" {
-		code = c.inputBuffer
-	}
+	// 统一用 inputBuffer 作为 code（规则只在当前输入编码下生效）
+	code := c.inputBuffer
 
 	c.mu.Unlock()
 
-	// Perform shadow operation without lock
 	if c.engineMgr != nil {
 		shadowLayer := c.engineMgr.GetDictManager().GetShadowLayer()
 		if shadowLayer != nil {
-			shadowLayer.Top(code, candidate.Text)
+			shadowLayer.Pin(code, candidate.Text, 0)
 			if err := shadowLayer.Save(); err != nil {
 				c.logger.Error("Failed to save shadow layer", "error", err)
 			}
 		}
 	}
 
-	// Re-acquire lock to refresh UI
 	c.mu.Lock()
 	c.updateCandidates()
 	c.showUI()
 	c.mu.Unlock()
 }
 
-// handleCandidateDelete handles delete action from context menu
+// handleCandidateDelete handles delete action from context menu.
+// 单字不允许删除（防止某个字永远打不出来）。
+// 所有可见的多字词候选都可删除，规则按当前 inputBuffer 存储。
 func (c *Coordinator) handleCandidateDelete(index int) {
 	c.mu.Lock()
 
 	c.logger.Debug("Candidate delete requested", "index", index)
 
-	// Convert page-local index to actual candidate index
 	actualIndex := (c.currentPage-1)*c.candidatesPerPage + index
-
 	if actualIndex < 0 || actualIndex >= len(c.candidates) {
-		c.logger.Warn("Invalid candidate index for delete", "actualIndex", actualIndex)
 		c.mu.Unlock()
 		return
 	}
 
-	candidate := c.candidates[actualIndex]
-	if candidate.IsCommand {
-		c.logger.Debug("Cannot delete command candidate", "text", candidate.Text)
+	cand := c.candidates[actualIndex]
+	if cand.IsCommand {
 		c.mu.Unlock()
 		return
 	}
 
-	code := candidate.Code
-	if code == "" {
-		code = c.inputBuffer
+	// 单字不允许删除
+	if len([]rune(cand.Text)) <= 1 {
+		c.logger.Debug("Cannot delete single character", "text", cand.Text)
+		c.mu.Unlock()
+		return
 	}
+
+	// 统一用 inputBuffer 作为 code
+	code := c.inputBuffer
 
 	c.mu.Unlock()
 
-	// Perform shadow operation without lock
 	if c.engineMgr != nil {
 		shadowLayer := c.engineMgr.GetDictManager().GetShadowLayer()
 		if shadowLayer != nil {
-			shadowLayer.Delete(code, candidate.Text)
+			shadowLayer.Delete(code, cand.Text)
 			if err := shadowLayer.Save(); err != nil {
 				c.logger.Error("Failed to save shadow layer", "error", err)
 			}
 		}
 	}
 
-	// Re-acquire lock to refresh UI
 	c.mu.Lock()
 	c.updateCandidates()
 	c.showUI()
@@ -382,10 +379,8 @@ func (c *Coordinator) handleCandidateResetDefault(index int) {
 		return
 	}
 
-	code := candidate.Code
-	if code == "" {
-		code = c.inputBuffer
-	}
+	// 统一用 inputBuffer 作为 code
+	code := c.inputBuffer
 
 	c.mu.Unlock()
 

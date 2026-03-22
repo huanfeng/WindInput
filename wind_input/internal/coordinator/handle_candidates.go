@@ -143,8 +143,9 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 			IsCommand:      ec.IsCommand,
 			ConsumedLength: ec.ConsumedLength,
 		}
+		// HasShadow 统一用 inputBuffer 查询（Shadow 规则按当前输入编码存储）
 		if shadowLayer != nil && !ec.IsCommand {
-			cand.HasShadow = shadowLayer.HasRule(code, ec.Text)
+			cand.HasShadow = shadowLayer.HasRule(c.inputBuffer, ec.Text)
 		}
 		// 如果有提示信息（如反查编码），添加到注释
 		if ec.Hint != "" {
@@ -178,6 +179,10 @@ func (c *Coordinator) showUI() {
 		c.logger.Warn("UI manager not ready")
 		return
 	}
+
+	// 设置拼音模式标记（影响右键菜单前移/后移启用状态）
+	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
+	c.uiManager.SetPinyinMode(isPinyin)
 
 	// When InlinePreedit is enabled and there are no candidates,
 	// hide the candidate window (only show the inline preedit in the application)

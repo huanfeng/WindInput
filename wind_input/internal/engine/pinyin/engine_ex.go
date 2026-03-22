@@ -1,7 +1,6 @@
 package pinyin
 
 import (
-	"sort"
 	"strings"
 	"time"
 
@@ -24,7 +23,6 @@ func (e *Engine) rimeScore(text string, dictWeight float64, initialQuality float
 // Engine 扩展方法
 // 使用新的 Parser → Lexicon → Ranker 流水线
 // ============================================================
-
 
 // ConvertEx 扩展版转换方法
 // 返回包含组合态的完整转换结果
@@ -494,8 +492,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	return result
 }
 
-// applyShadowRules 在拼音引擎的权重分配之后应用 Shadow 规则
-// 拼音引擎会覆盖 CompositeDict 设置的权重，所以需要在最终排序后再次应用
+// applyShadowRules 在拼音引擎最终排序后应用 Shadow 拦截器（pin + delete）。
+// 拼音只支持置顶（pin position=0）和删除，不支持前移/后移。
+// 统一使用 dict.ApplyShadowPins，不修改 weight。
 func (e *Engine) applyShadowRules(input string, candidates []candidate.Candidate) []candidate.Candidate {
 	if e.dictManager == nil {
 		return candidates
@@ -505,63 +504,7 @@ func (e *Engine) applyShadowRules(input string, candidates []candidate.Candidate
 		return candidates
 	}
 
-	// 收集所有相关 code 的 Shadow 规则
-	// 拼音场景：用户输入 "nihao" 但候选可能来自不同路径（精确、前缀、子词组等）
-	// 需要同时查 input 和每个候选的 Code
-	deleted := make(map[string]bool)
-	toppedMap := make(map[string]bool)
-	reweighted := make(map[string]int)
-
-	codeSet := make(map[string]bool)
-	codeSet[input] = true
-	for _, c := range candidates {
-		if c.Code != "" && c.Code != input {
-			codeSet[c.Code] = true
-		}
-	}
-
-	for code := range codeSet {
-		rules := shadowLayer.GetShadowRules(code)
-		for _, rule := range rules {
-			switch rule.Action {
-			case dict.ShadowActionDelete:
-				deleted[rule.Word] = true
-			case dict.ShadowActionTop:
-				toppedMap[rule.Word] = true
-			case dict.ShadowActionReweight:
-				reweighted[rule.Word] = rule.NewWeight
-			}
-		}
-	}
-
-	if len(deleted) == 0 && len(toppedMap) == 0 && len(reweighted) == 0 {
-		return candidates
-	}
-
-	// 应用规则：过滤删除项，标记置顶项和调权项
-	needResort := false
-	var results []candidate.Candidate
-	for _, c := range candidates {
-		if deleted[c.Text] {
-			continue
-		}
-		if toppedMap[c.Text] {
-			// 置顶权重高于所有引擎权重（Command 最大约 101*1000000=101,000,000）
-			c.Weight = 200000000
-			needResort = true
-		} else if newWeight, ok := reweighted[c.Text]; ok {
-			c.Weight = newWeight
-			needResort = true
-		}
-		results = append(results, c)
-	}
-
-	// 有权重变化时重新排序
-	if needResort {
-		sort.SliceStable(results, func(i, j int) bool {
-			return results[i].Weight > results[j].Weight
-		})
-	}
-
-	return results
+	// 只查当前 input 编码的规则（不再遍历所有候选 Code，避免误删）
+	rules := shadowLayer.GetShadowRules(input)
+	return dict.ApplyShadowPins(candidates, rules)
 }

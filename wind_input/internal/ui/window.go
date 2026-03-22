@@ -221,6 +221,8 @@ type CandidateWindow struct {
 	pageStartIndex      int             // 当前页首个候选的全局索引
 	totalCandidateCount int             // 候选总数（所有页）
 	hasShadowFlags      []bool          // 当前页各候选是否有 Shadow 修改
+	candidateTexts      []string        // 当前页各候选的文本（用于菜单状态判断）
+	isPinyinMode        bool            // 是否拼音模式（拼音禁用前移/后移）
 	hoverIndex          int             // Currently hovered candidate index (-1 for none)
 	hoverPageBtn        string          // "" = none, "up" = page up hovered, "down" = page down hovered
 	trackingMouse       bool            // Whether mouse leave tracking is enabled
@@ -476,6 +478,14 @@ func (w *CandidateWindow) SetCandidatePageInfo(pageStartIndex, totalCount int) {
 func (w *CandidateWindow) SetCandidateHasShadow(flags []bool) {
 	w.mu.Lock()
 	w.hasShadowFlags = flags
+	w.mu.Unlock()
+}
+
+// SetCandidateMenuState 设置右键菜单所需的额外状态
+func (w *CandidateWindow) SetCandidateMenuState(texts []string, isPinyin bool) {
+	w.mu.Lock()
+	w.candidateTexts = texts
+	w.isPinyinMode = isPinyin
 	w.mu.Unlock()
 }
 

@@ -97,100 +97,131 @@ func (c *CompositeDict) SearchPrefix(prefix string, limit int) []candidate.Candi
 }
 
 // searchInternal 内部查询逻辑
+// Shadow 的 pin/delete 不在此处处理——统一由引擎层 Phase 6（ApplyShadowPins）在最终排序后应用。
+// CompositeDict 只负责层级合并、去重和基础排序。
 func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []candidate.Candidate {
-	// 1. 获取 Shadow 规则
-	var shadowRules []ShadowRule
-	deleted := make(map[string]bool)
-	topped := make([]candidate.Candidate, 0)
-	reweighted := make(map[string]int)
-
-	if c.shadowProvider != nil {
-		shadowRules = c.shadowProvider.GetShadowRules(code)
-		for _, rule := range shadowRules {
-			switch rule.Action {
-			case ShadowActionDelete:
-				deleted[rule.Word] = true
-			case ShadowActionTop:
-				// 置顶词稍后添加到结果最前面
-				topped = append(topped, candidate.Candidate{
-					Text:   rule.Word,
-					Code:   rule.Code,
-					Weight: 999999, // 置顶词使用最高权重
-				})
-			case ShadowActionReweight:
-				reweighted[rule.Word] = rule.NewWeight
-			}
-		}
-	}
-
-	// 2. 遍历所有层收集候选词
+	// 1. 遍历所有层收集候选词
 	seen := make(map[string]bool)
 	var results []candidate.Candidate
-
-	// 先添加置顶词到 seen 集合
-	for _, cand := range topped {
-		seen[cand.Text] = true
-	}
 
 	for _, layer := range c.layers {
 		var layerResults []candidate.Candidate
 		if isPrefix {
-			layerResults = layer.SearchPrefix(code, 0) // 不限制，后面统一限制
+			layerResults = layer.SearchPrefix(code, 0)
 		} else {
 			layerResults = layer.Search(code, 0)
 		}
 
 		for _, cand := range layerResults {
-			// 跳过被删除的词
-			if deleted[cand.Text] {
-				continue
-			}
-
-			// 跳过已经出现过的词（上层优先）
 			if seen[cand.Text] {
 				continue
 			}
 			seen[cand.Text] = true
-
-			// 应用权重调整
-			if newWeight, ok := reweighted[cand.Text]; ok {
-				cand.Weight = newWeight
-			}
-
 			results = append(results, cand)
 		}
 	}
 
-	// 3. 合并置顶词和普通结果
-	finalResults := append(topped, results...)
-
-	// 4. 排序（置顶词已经在最前面，其余按排序模式排序）
-	// 置顶词保持原顺序，非置顶词按配置的排序模式排序
+	// 2. 排序
 	comparator := candidate.Better
 	if c.sortMode == candidate.SortByNatural {
 		comparator = candidate.BetterNatural
 	}
+	sort.Slice(results, func(i, j int) bool {
+		return comparator(results[i], results[j])
+	})
 
-	if len(topped) > 0 && len(results) > 0 {
-		// 只对非置顶部分排序
-		nonToppedStart := len(topped)
-		nonTopped := finalResults[nonToppedStart:]
-		sort.Slice(nonTopped, func(i, j int) bool {
-			return comparator(nonTopped[i], nonTopped[j])
-		})
-	} else if len(topped) == 0 {
-		// 没有置顶词，全部排序
-		sort.Slice(finalResults, func(i, j int) bool {
-			return comparator(finalResults[i], finalResults[j])
-		})
+	// 3. 限制返回数量
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
 	}
 
-	// 5. 限制返回数量
-	if limit > 0 && len(finalResults) > limit {
-		finalResults = finalResults[:limit]
+	return results
+}
+
+// ApplyShadowPins 在已排序的候选列表上应用 Shadow 的 pin（位置固定）和 delete（隐藏）规则。
+// 这是引擎 Phase 6 的统一拦截器，五笔和拼音共用。
+//
+// 处理逻辑：
+//  1. 移除 deleted 中的词（单字跳过）
+//  2. 提取有 pin 规则的候选
+//  3. 按 pin position 放置（LIFO 碰撞顺延）
+//  4. 未被 pin 的候选按原始顺序填充剩余位置
+func ApplyShadowPins(candidates []candidate.Candidate, rules *ShadowRules) []candidate.Candidate {
+	if rules == nil || (len(rules.Pinned) == 0 && len(rules.Deleted) == 0) {
+		return candidates
 	}
 
-	return finalResults
+	// 1. 构建 deleted 集合（单字不删）
+	deletedSet := make(map[string]bool, len(rules.Deleted))
+	for _, word := range rules.Deleted {
+		if len([]rune(word)) > 1 {
+			deletedSet[word] = true
+		}
+	}
+
+	// 2. 过滤 deleted，同时记录 pinned 候选的原始信息
+	pinnedWords := make(map[string]bool, len(rules.Pinned))
+	for _, p := range rules.Pinned {
+		pinnedWords[p.Word] = true
+	}
+
+	var unpinned []candidate.Candidate                  // 未被 pin 的候选
+	pinnedCands := make(map[string]candidate.Candidate) // word → 候选信息
+	for _, c := range candidates {
+		if deletedSet[c.Text] {
+			continue
+		}
+		if pinnedWords[c.Text] {
+			pinnedCands[c.Text] = c
+		} else {
+			unpinned = append(unpinned, c)
+		}
+	}
+
+	// 3. 按 pin 规则分配槽位（LIFO：数组前面的优先级高）
+	// slots[position] = candidate
+	slots := make(map[int]candidate.Candidate)
+	usedPositions := make(map[int]bool)
+
+	for _, pin := range rules.Pinned {
+		cand, exists := pinnedCands[pin.Word]
+		if !exists {
+			continue // pin 的词不在候选列表中（词库变更后自然失效）
+		}
+
+		pos := pin.Position
+		if pos < 0 {
+			pos = 0
+		}
+
+		// 碰撞顺延：找到最近的空槽位
+		for usedPositions[pos] {
+			pos++
+		}
+		slots[pos] = cand
+		usedPositions[pos] = true
+	}
+
+	// 4. 合并：pin 词插入指定位置，unpinned 填充剩余
+	totalLen := len(slots) + len(unpinned)
+	result := make([]candidate.Candidate, 0, totalLen)
+	unpinnedIdx := 0
+
+	for i := 0; i < totalLen; i++ {
+		if cand, ok := slots[i]; ok {
+			result = append(result, cand)
+		} else if unpinnedIdx < len(unpinned) {
+			result = append(result, unpinned[unpinnedIdx])
+			unpinnedIdx++
+		}
+	}
+	// 追加剩余 unpinned（pin position 超出范围时）
+	for unpinnedIdx < len(unpinned) {
+		result = append(result, unpinned[unpinnedIdx])
+		unpinnedIdx++
+	}
+
+	return result
 }
 
 // GetLayers 获取所有层（用于调试）

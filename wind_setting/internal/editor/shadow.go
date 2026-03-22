@@ -1,6 +1,8 @@
 package editor
 
 import (
+	"strings"
+
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/dictfile"
 )
@@ -81,16 +83,29 @@ func (e *ShadowEditor) GetShadowConfig() *dictfile.ShadowConfig {
 	return e.data
 }
 
-// AddRule 添加规则
-func (e *ShadowEditor) AddRule(code, word, action string, weight int) {
+// PinWord 固定词到指定位置
+func (e *ShadowEditor) PinWord(code, word string, position int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if e.data == nil {
-		e.data = &dictfile.ShadowConfig{Rules: make(map[string][]dictfile.ShadowRuleConfig)}
+		e.data = &dictfile.ShadowConfig{Rules: make(map[string]*dictfile.ShadowCodeConfig)}
 	}
 
-	dictfile.AddShadowRule(e.data, code, word, action, weight)
+	dictfile.PinWord(e.data, code, word, position)
+	e.dirty = true
+}
+
+// DeleteWord 删除（隐藏）词条
+func (e *ShadowEditor) DeleteWord(code, word string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.data == nil {
+		e.data = &dictfile.ShadowConfig{Rules: make(map[string]*dictfile.ShadowCodeConfig)}
+	}
+
+	dictfile.DeleteWord(e.data, code, word)
 	e.dirty = true
 }
 
@@ -110,23 +125,8 @@ func (e *ShadowEditor) RemoveRule(code, word string) bool {
 	return removed
 }
 
-// TopWord 置顶词条
-func (e *ShadowEditor) TopWord(code, word string) {
-	e.AddRule(code, word, "top", 0)
-}
-
-// DeleteWord 删除（隐藏）词条
-func (e *ShadowEditor) DeleteWord(code, word string) {
-	e.AddRule(code, word, "delete", 0)
-}
-
-// ReweightWord 调整权重
-func (e *ShadowEditor) ReweightWord(code, word string, weight int) {
-	e.AddRule(code, word, "reweight", weight)
-}
-
 // GetRulesByCode 获取指定编码的规则
-func (e *ShadowEditor) GetRulesByCode(code string) []dictfile.ShadowRuleConfig {
+func (e *ShadowEditor) GetRulesByCode(code string) *dictfile.ShadowCodeConfig {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -134,7 +134,10 @@ func (e *ShadowEditor) GetRulesByCode(code string) []dictfile.ShadowRuleConfig {
 		return nil
 	}
 
-	return dictfile.GetShadowRules(e.data, code)
+	if e.data == nil || e.data.Rules == nil {
+		return nil
+	}
+	return e.data.Rules[strings.ToLower(code)]
 }
 
 // GetRuleCount 获取规则数量

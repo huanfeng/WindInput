@@ -244,95 +244,62 @@
     <!-- 候选调整 (Shadow) -->
     <div v-else-if="dictSubTab === 'shadow'" class="dict-content">
       <div class="dict-toolbar">
-        <button
-          class="btn btn-primary btn-sm"
-          @click="showAddShadowForm = true"
-        >
+        <button class="btn btn-primary btn-sm" @click="openShadowDialog()">
           + 添加规则
         </button>
-        <button
-          class="btn btn-sm"
-          @click="loadDictData"
-          :disabled="dictLoading"
-        >
+        <button class="btn btn-sm" @click="loadDictData" :disabled="dictLoading">
           {{ dictLoading ? "加载中..." : "刷新" }}
         </button>
       </div>
-      <div v-if="showAddShadowForm" class="dict-form-card">
-        <div class="form-row">
-          <label>编码</label>
-          <input
-            type="text"
-            v-model="newShadow.code"
-            class="input"
-            placeholder="如: zg"
-          />
-        </div>
-        <div class="form-row">
-          <label>词条</label>
-          <input
-            type="text"
-            v-model="newShadow.word"
-            class="input"
-            placeholder="如: 中国"
-          />
-        </div>
-        <div class="form-row">
-          <label>操作</label>
-          <select v-model="newShadow.action" class="select">
-            <option value="pin">置顶</option>
-            <option value="delete">删除</option>
-            <option value="adjust">调整权重</option>
-          </select>
-        </div>
-        <div
-          class="form-row"
-          v-if="newShadow.action === 'adjust' || newShadow.action === 'pin'"
-        >
-          <label>权重</label>
-          <input
-            type="number"
-            v-model.number="newShadow.weight"
-            class="input input-sm"
-          />
-        </div>
-        <div class="form-actions">
-          <button class="btn btn-sm" @click="showAddShadowForm = false">
-            取消
-          </button>
-          <button class="btn btn-primary btn-sm" @click="handleAddShadowRule">
-            添加
-          </button>
-        </div>
-      </div>
       <div class="dict-list" v-if="shadowRules.length > 0">
-        <div
-          class="dict-list-item"
-          v-for="(item, idx) in shadowRules"
-          :key="idx"
-        >
+        <div class="dict-list-item" v-for="(item, idx) in shadowRules" :key="idx">
           <div class="dict-item-main">
             <span class="dict-item-code">{{ item.code }}</span>
             <span class="dict-item-text">{{ item.word }}</span>
-            <span class="dict-item-tag" :class="'tag-' + item.action">
-              {{ getShadowActionLabel(item.action) }}
+            <span class="dict-item-tag" :class="'tag-' + item.type">
+              {{ getShadowActionLabel(item.type) }}
             </span>
-            <span class="dict-item-weight" v-if="item.weight">{{
-              item.weight
-            }}</span>
+            <span class="dict-item-weight" v-if="item.type === 'pin'">
+              位置: {{ item.position }}
+            </span>
           </div>
           <div class="dict-item-actions">
-            <button
-              class="btn-icon btn-delete"
-              @click="handleRemoveShadowRule(item)"
-              title="删除"
-            >
-              &times;
-            </button>
+            <button class="btn-icon" @click="openShadowDialog(item)" title="编辑">✎</button>
+            <button class="btn-icon btn-delete" @click="handleRemoveShadowRule(item)" title="删除">&times;</button>
           </div>
         </div>
       </div>
       <div v-else class="dict-empty">暂无调整规则</div>
+    </div>
+
+    <!-- Shadow 规则对话框 -->
+    <div v-if="shadowDialogVisible" class="dialog-overlay" @click.self="shadowDialogVisible = false">
+      <div class="dialog-box">
+        <div class="dialog-title">{{ shadowDialogEditing ? '编辑规则' : '添加规则' }}</div>
+        <div class="form-row">
+          <label>编码</label>
+          <input type="text" v-model="shadowForm.code" class="input" placeholder="如: sf" :disabled="shadowDialogEditing" />
+        </div>
+        <div class="form-row">
+          <label>词条</label>
+          <input type="text" v-model="shadowForm.word" class="input" placeholder="如: 村" :disabled="shadowDialogEditing" />
+        </div>
+        <div class="form-row">
+          <label>操作</label>
+          <select v-model="shadowForm.action" class="select">
+            <option value="pin">固定位置</option>
+            <option value="delete">隐藏词条</option>
+          </select>
+        </div>
+        <div class="form-row" v-if="shadowForm.action === 'pin'">
+          <label>目标位置</label>
+          <input type="number" v-model.number="shadowForm.position" class="input input-sm" min="0" placeholder="0=首位" />
+        </div>
+        <div class="dialog-actions">
+          <button class="btn btn-sm" @click="shadowDialogVisible = false">取消</button>
+          <button class="btn btn-primary btn-sm" @click="handleSaveShadowRule">{{ shadowDialogEditing ? '保存' : '添加' }}</button>
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -372,8 +339,10 @@ const userDictSchema = ref<string>("wubi86");
 const showAddWordForm = ref(false);
 const newWord = ref({ code: "", text: "", weight: 0 });
 
-const showAddShadowForm = ref(false);
-const newShadow = ref({ code: "", word: "", action: "pin", weight: 100 });
+// showAddShadowForm removed — replaced by shadowDialogVisible
+const shadowDialogVisible = ref(false);
+const shadowDialogEditing = ref(false);
+const shadowForm = ref({ code: "", word: "", action: "pin", position: 0 });
 
 const fileChangeStatus = ref<FileChangeStatus | null>(null);
 const showFileChangeAlert = ref(false);
@@ -532,24 +501,48 @@ async function handleExportUserDict() {
   }
 }
 
-async function handleAddShadowRule() {
-  if (!newShadow.value.code || !newShadow.value.word) {
+function openShadowDialog(item?: wailsApi.ShadowRuleItem) {
+  if (item) {
+    // 编辑模式
+    shadowDialogEditing.value = true;
+    shadowForm.value = {
+      code: item.code,
+      word: item.word,
+      action: item.type,
+      position: item.position || 0,
+    };
+  } else {
+    // 添加模式
+    shadowDialogEditing.value = false;
+    shadowForm.value = { code: "", word: "", action: "pin", position: 0 };
+  }
+  shadowDialogVisible.value = true;
+}
+
+async function handleSaveShadowRule() {
+  if (!shadowForm.value.code || !shadowForm.value.word) {
     showDictMessage("请填写编码和词条", "error");
     return;
   }
   try {
-    await wailsApi.addShadowRule(
-      newShadow.value.code,
-      newShadow.value.word,
-      newShadow.value.action,
-      newShadow.value.weight,
-    );
-    showDictMessage("添加成功", "success");
-    showAddShadowForm.value = false;
-    newShadow.value = { code: "", word: "", action: "pin", weight: 100 };
+    // 编辑时先移除旧规则
+    if (shadowDialogEditing.value) {
+      await wailsApi.removeShadowRule(shadowForm.value.code, shadowForm.value.word);
+    }
+    if (shadowForm.value.action === "pin") {
+      await wailsApi.pinShadowWord(
+        shadowForm.value.code,
+        shadowForm.value.word,
+        shadowForm.value.position,
+      );
+    } else {
+      await wailsApi.deleteShadowWord(shadowForm.value.code, shadowForm.value.word);
+    }
+    showDictMessage(shadowDialogEditing.value ? "保存成功" : "添加成功", "success");
+    shadowDialogVisible.value = false;
     await loadDictData();
   } catch (e: any) {
-    showDictMessage(e.message || "添加失败", "error");
+    showDictMessage(e.message || "操作失败", "error");
   }
 }
 
@@ -594,13 +587,12 @@ async function handleReloadAllFiles() {
   }
 }
 
-function getShadowActionLabel(action: string): string {
+function getShadowActionLabel(type: string): string {
   const labels: Record<string, string> = {
-    pin: "置顶",
+    pin: "固定位置",
     delete: "删除",
-    adjust: "调整权重",
   };
-  return labels[action] || action;
+  return labels[type] || type;
 }
 
 onMounted(() => {

@@ -14,7 +14,7 @@ import (
 func LoadShadow() (*ShadowConfig, error) {
 	path, err := config.GetShadowPath()
 	if err != nil {
-		return &ShadowConfig{Rules: make(map[string][]ShadowRuleConfig)}, err
+		return &ShadowConfig{Rules: make(map[string]*ShadowCodeConfig)}, err
 	}
 	return LoadShadowFrom(path)
 }
@@ -24,7 +24,7 @@ func LoadShadowFrom(path string) (*ShadowConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &ShadowConfig{Rules: make(map[string][]ShadowRuleConfig)}, nil
+			return &ShadowConfig{Rules: make(map[string]*ShadowCodeConfig)}, nil
 		}
 		return nil, fmt.Errorf("failed to read shadow file: %w", err)
 	}
@@ -35,7 +35,7 @@ func LoadShadowFrom(path string) (*ShadowConfig, error) {
 	}
 
 	if cfg.Rules == nil {
-		cfg.Rules = make(map[string][]ShadowRuleConfig)
+		cfg.Rules = make(map[string]*ShadowCodeConfig)
 	}
 
 	return &cfg, nil
@@ -64,76 +64,101 @@ func SaveShadowTo(cfg *ShadowConfig, path string) error {
 	return fileutil.AtomicWrite(path, data, 0644)
 }
 
-// AddShadowRule 添加 Shadow 规则
-// action: "top", "delete", "reweight"
-func AddShadowRule(cfg *ShadowConfig, code, word, action string, weight int) {
+// PinWord 固定词到指定位置（置顶 = position 0）
+func PinWord(cfg *ShadowConfig, code, word string, position int) {
 	code = strings.ToLower(code)
+	cc := getOrCreateCode(cfg, code)
 
-	// 检查是否已存在
-	rules := cfg.Rules[code]
-	for i, r := range rules {
-		if r.Word == word {
-			// 更新已有规则
-			cfg.Rules[code][i].Action = action
-			cfg.Rules[code][i].Weight = weight
-			return
+	// 从 deleted 移除
+	cc.Deleted = removeStr(cc.Deleted, word)
+
+	// 从 pinned 移除旧记录
+	for i, p := range cc.Pinned {
+		if p.Word == word {
+			cc.Pinned = append(cc.Pinned[:i], cc.Pinned[i+1:]...)
+			break
 		}
 	}
 
-	// 添加新规则
-	cfg.Rules[code] = append(cfg.Rules[code], ShadowRuleConfig{
-		Word:   word,
-		Action: action,
-		Weight: weight,
-	})
+	// 插入到头部（LIFO）
+	cc.Pinned = append([]ShadowPinConfig{{Word: word, Position: position}}, cc.Pinned...)
 }
 
-// RemoveShadowRule 删除 Shadow 规则
+// DeleteWord 隐藏词条
+func DeleteWord(cfg *ShadowConfig, code, word string) {
+	code = strings.ToLower(code)
+	cc := getOrCreateCode(cfg, code)
+
+	// 从 pinned 移除
+	for i, p := range cc.Pinned {
+		if p.Word == word {
+			cc.Pinned = append(cc.Pinned[:i], cc.Pinned[i+1:]...)
+			break
+		}
+	}
+
+	// 去重添加到 deleted
+	for _, d := range cc.Deleted {
+		if d == word {
+			return
+		}
+	}
+	cc.Deleted = append(cc.Deleted, word)
+}
+
+// RemoveShadowRule 移除词的所有规则
 func RemoveShadowRule(cfg *ShadowConfig, code, word string) bool {
 	code = strings.ToLower(code)
-	rules, ok := cfg.Rules[code]
+	cc, ok := cfg.Rules[code]
 	if !ok {
 		return false
 	}
 
-	for i, r := range rules {
-		if r.Word == word {
-			cfg.Rules[code] = append(rules[:i], rules[i+1:]...)
-			if len(cfg.Rules[code]) == 0 {
-				delete(cfg.Rules, code)
-			}
-			return true
+	changed := false
+	for i, p := range cc.Pinned {
+		if p.Word == word {
+			cc.Pinned = append(cc.Pinned[:i], cc.Pinned[i+1:]...)
+			changed = true
+			break
 		}
 	}
-	return false
-}
-
-// GetShadowRules 获取指定编码的所有规则
-func GetShadowRules(cfg *ShadowConfig, code string) []ShadowRuleConfig {
-	code = strings.ToLower(code)
-	return cfg.Rules[code]
-}
-
-// TopWord 置顶词条
-func TopWord(cfg *ShadowConfig, code, word string) {
-	AddShadowRule(cfg, code, word, string(ShadowActionTop), 0)
-}
-
-// DeleteWord 删除（隐藏）词条
-func DeleteWord(cfg *ShadowConfig, code, word string) {
-	AddShadowRule(cfg, code, word, string(ShadowActionDelete), 0)
-}
-
-// ReweightWord 调整词条权重
-func ReweightWord(cfg *ShadowConfig, code, word string, weight int) {
-	AddShadowRule(cfg, code, word, string(ShadowActionReweight), weight)
+	newDeleted := removeStr(cc.Deleted, word)
+	if len(newDeleted) != len(cc.Deleted) {
+		cc.Deleted = newDeleted
+		changed = true
+	}
+	if changed && len(cc.Pinned) == 0 && len(cc.Deleted) == 0 {
+		delete(cfg.Rules, code)
+	}
+	return changed
 }
 
 // GetRuleCount 获取规则总数
 func GetRuleCount(cfg *ShadowConfig) int {
 	count := 0
-	for _, rules := range cfg.Rules {
-		count += len(rules)
+	for _, cc := range cfg.Rules {
+		count += len(cc.Pinned) + len(cc.Deleted)
 	}
 	return count
+}
+
+func getOrCreateCode(cfg *ShadowConfig, code string) *ShadowCodeConfig {
+	if cfg.Rules == nil {
+		cfg.Rules = make(map[string]*ShadowCodeConfig)
+	}
+	cc, ok := cfg.Rules[code]
+	if !ok {
+		cc = &ShadowCodeConfig{}
+		cfg.Rules[code] = cc
+	}
+	return cc
+}
+
+func removeStr(slice []string, s string) []string {
+	for i, v := range slice {
+		if v == s {
+			return append(slice[:i], slice[i+1:]...)
+		}
+	}
+	return slice
 }

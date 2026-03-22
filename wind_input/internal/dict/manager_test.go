@@ -61,27 +61,27 @@ func TestDictManager_ShadowIsolation(t *testing.T) {
 
 	// 在 wubi86 方案下置顶
 	dm.SwitchSchema("wubi86", "shadow_wubi86.yaml", "user_words_wubi86.txt")
-	dm.TopWord("abc", "测试")
+	dm.PinWord("abc", "测试", 0)
 
 	wubiShadow := dm.GetShadowLayer()
 	rules := wubiShadow.GetShadowRules("abc")
-	if len(rules) != 1 {
-		t.Fatalf("wubi86 应有 1 条 shadow 规则, 实际=%d", len(rules))
+	if rules == nil || len(rules.Pinned) != 1 {
+		t.Fatalf("wubi86 应有 1 条 pin 规则")
 	}
 
 	// 切换到 pinyin，shadow 应该是独立的
 	dm.SwitchSchema("pinyin", "shadow_pinyin.yaml", "user_words_pinyin.txt")
 	pinyinShadow := dm.GetShadowLayer()
 	pinyinRules := pinyinShadow.GetShadowRules("abc")
-	if len(pinyinRules) != 0 {
-		t.Errorf("pinyin 不应有 shadow 规则, 实际=%d", len(pinyinRules))
+	if pinyinRules != nil && (len(pinyinRules.Pinned) > 0 || len(pinyinRules.Deleted) > 0) {
+		t.Errorf("pinyin 不应有 shadow 规则")
 	}
 
 	// 切换回 wubi86，shadow 规则应该还在
 	dm.SwitchSchema("wubi86", "shadow_wubi86.yaml", "user_words_wubi86.txt")
 	rules2 := dm.GetShadowLayer().GetShadowRules("abc")
-	if len(rules2) != 1 {
-		t.Errorf("wubi86 shadow 规则应还在, 实际=%d", len(rules2))
+	if rules2 == nil || len(rules2.Pinned) != 1 {
+		t.Errorf("wubi86 shadow 规则应还在")
 	}
 }
 
@@ -111,7 +111,7 @@ func TestDictManager_SaveAndReload(t *testing.T) {
 	dm.Initialize()
 	dm.SwitchSchema("wubi86", "shadow_wubi86.yaml", "user_words_wubi86.txt")
 	dm.AddUserWord("test", "保存测试", 200)
-	dm.TopWord("test", "保存测试")
+	dm.PinWord("test", "保存测试", 0)
 	dm.Save()
 	dm.Close()
 
@@ -136,8 +136,8 @@ func TestDictManager_SaveAndReload(t *testing.T) {
 	}
 
 	rules := dm2.GetShadowLayer().GetShadowRules("test")
-	if len(rules) != 1 {
-		t.Errorf("重新加载后应有 1 条 shadow 规则, 实际=%d", len(rules))
+	if rules == nil || len(rules.Pinned) != 1 {
+		t.Errorf("重新加载后应有 1 条 pin 规则")
 	}
 }
 

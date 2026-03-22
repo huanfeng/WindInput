@@ -24,25 +24,21 @@ type PhrasesConfig struct {
 	Phrases []PhraseConfig `yaml:"phrases" json:"phrases"`
 }
 
-// ShadowAction Shadow 层操作类型
-type ShadowAction string
+// ShadowPinConfig pin 规则配置（固定位置）
+type ShadowPinConfig struct {
+	Word     string `yaml:"word" json:"word"`
+	Position int    `yaml:"position" json:"position"`
+}
 
-const (
-	ShadowActionTop      ShadowAction = "top"      // 置顶
-	ShadowActionDelete   ShadowAction = "delete"   // 删除（隐藏）
-	ShadowActionReweight ShadowAction = "reweight" // 调整权重
-)
-
-// ShadowRuleConfig 单个规则配置
-type ShadowRuleConfig struct {
-	Word   string `yaml:"word" json:"word"`
-	Action string `yaml:"action" json:"action"` // "top", "delete", "reweight"
-	Weight int    `yaml:"weight" json:"weight"` // 仅 reweight 时有效
+// ShadowCodeConfig 单个编码下的规则
+type ShadowCodeConfig struct {
+	Pinned  []ShadowPinConfig `yaml:"pinned,omitempty" json:"pinned,omitempty"`
+	Deleted []string          `yaml:"deleted,omitempty" json:"deleted,omitempty"`
 }
 
 // ShadowConfig shadow.yaml 配置结构
 type ShadowConfig struct {
-	Rules map[string][]ShadowRuleConfig `yaml:"rules" json:"rules"`
+	Rules map[string]*ShadowCodeConfig `yaml:"rules" json:"rules"`
 }
 
 // UserWord 用户词条

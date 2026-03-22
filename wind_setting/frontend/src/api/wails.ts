@@ -191,13 +191,19 @@ export async function getShadowRules(): Promise<ShadowRuleItem[]> {
   return App.GetShadowRules();
 }
 
-export async function addShadowRule(
+export async function pinShadowWord(
   code: string,
   word: string,
-  action: string,
-  weight: number = 0,
+  position: number,
 ): Promise<void> {
-  return App.AddShadowRule(code, word, action, weight);
+  return App.PinShadowWord(code, word, position);
+}
+
+export async function deleteShadowWord(
+  code: string,
+  word: string,
+): Promise<void> {
+  return App.DeleteShadowWord(code, word);
 }
 
 export async function removeShadowRule(

@@ -56,28 +56,23 @@ type DictLayer interface {
 	SearchPrefix(prefix string, limit int) []candidate.Candidate
 }
 
-// ShadowAction Shadow 层操作类型
-type ShadowAction string
+// PinnedWord 固定位置的词条（呈现层位置覆盖）
+type PinnedWord struct {
+	Word     string // 词语
+	Position int    // 目标位置（0=首位，1=第二位...）
+}
 
-const (
-	ShadowActionTop      ShadowAction = "top"      // 置顶
-	ShadowActionDelete   ShadowAction = "delete"   // 删除（隐藏）
-	ShadowActionReweight ShadowAction = "reweight" // 调整权重
-)
-
-// ShadowRule Shadow 规则
-type ShadowRule struct {
-	Code      string       // 编码
-	Word      string       // 词语
-	Action    ShadowAction // 操作类型
-	NewWeight int          // 新权重（仅 reweight 时有效）
+// ShadowRules 一个编码下的所有 Shadow 规则
+type ShadowRules struct {
+	Pinned  []PinnedWord // 固定位置的词（数组顺序=时间戳，前面的优先级高）
+	Deleted []string     // 被隐藏的词（仅多字词）
 }
 
 // ShadowProvider Shadow 规则提供者接口
-// 用于在聚合时应用用户的置顶/删除/调序操作
+// 引擎在最终排序后调用，实现呈现层的位置覆盖和过滤
 type ShadowProvider interface {
 	// GetShadowRules 获取指定编码的 Shadow 规则
-	GetShadowRules(code string) []ShadowRule
+	GetShadowRules(code string) *ShadowRules
 }
 
 // MutableLayer 可写入的词库层接口

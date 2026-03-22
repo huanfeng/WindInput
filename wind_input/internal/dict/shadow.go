@@ -10,56 +10,58 @@ import (
 )
 
 // ShadowLayer 用户修正层
-// 记录用户对系统词的置顶、删除、调序操作
-// 实现 ShadowProvider 接口
+// 记录用户对候选词的位置固定（pin）和隐藏（delete）操作。
+// 实现 ShadowProvider 接口，在引擎最终排序后应用呈现层覆盖。
 type ShadowLayer struct {
 	mu       sync.RWMutex
 	name     string
 	filePath string
-
-	// 规则存储: code -> []ShadowRule
-	rules map[string][]ShadowRule
-
-	// 脏标记
-	dirty bool
+	rules    map[string]*ShadowRules // code -> rules
+	dirty    bool
 }
 
-// ShadowConfig shadow.yaml 配置结构
-type ShadowConfig struct {
-	Rules map[string][]ShadowRuleConfig `yaml:"rules"`
+// ── YAML 序列化结构 ──
+
+// shadowConfig shadow.yaml 顶层结构
+type shadowConfig struct {
+	Rules map[string]*shadowCodeConfig `yaml:"rules"`
 }
 
-// ShadowRuleConfig 单个规则配置
-type ShadowRuleConfig struct {
-	Word   string `yaml:"word"`
-	Action string `yaml:"action"` // "top", "delete", "reweight"
-	Weight int    `yaml:"weight"` // 仅 reweight 时有效
+// shadowCodeConfig 单个编码下的规则配置
+type shadowCodeConfig struct {
+	Pinned  []shadowPinConfig `yaml:"pinned,omitempty"`
+	Deleted []string          `yaml:"deleted,omitempty"`
 }
 
-// NewShadowLayer 创建 Shadow 层
+// shadowPinConfig 单个 pin 规则
+type shadowPinConfig struct {
+	Word     string `yaml:"word"`
+	Position int    `yaml:"position"`
+}
+
+// ── 构造和基础方法 ──
+
 func NewShadowLayer(name string, filePath string) *ShadowLayer {
 	return &ShadowLayer{
 		name:     name,
 		filePath: filePath,
-		rules:    make(map[string][]ShadowRule),
+		rules:    make(map[string]*ShadowRules),
 	}
 }
 
-// Name 返回层名称
 func (sl *ShadowLayer) Name() string {
 	return sl.name
 }
 
 // GetShadowRules 获取指定编码的 Shadow 规则（实现 ShadowProvider 接口）
-func (sl *ShadowLayer) GetShadowRules(code string) []ShadowRule {
+func (sl *ShadowLayer) GetShadowRules(code string) *ShadowRules {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
-
-	code = strings.ToLower(code)
-	return sl.rules[code]
+	return sl.rules[strings.ToLower(code)]
 }
 
-// Load 从 YAML 文件加载
+// ── 加载和保存 ──
+
 func (sl *ShadowLayer) Load() error {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
@@ -67,38 +69,29 @@ func (sl *ShadowLayer) Load() error {
 	data, err := os.ReadFile(sl.filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 文件不存在是正常的
 			return nil
 		}
 		return fmt.Errorf("failed to read shadow file: %w", err)
 	}
 
-	var config ShadowConfig
+	var config shadowConfig
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return fmt.Errorf("failed to parse shadow file: %w", err)
 	}
 
-	// 清空现有规则
-	sl.rules = make(map[string][]ShadowRule)
-
-	// 加载规则
-	for code, ruleConfigs := range config.Rules {
+	sl.rules = make(map[string]*ShadowRules)
+	for code, cc := range config.Rules {
 		code = strings.ToLower(code)
-		for _, rc := range ruleConfigs {
-			rule := ShadowRule{
-				Code:      code,
-				Word:      rc.Word,
-				Action:    ShadowAction(rc.Action),
-				NewWeight: rc.Weight,
-			}
-			sl.rules[code] = append(sl.rules[code], rule)
+		sr := &ShadowRules{}
+		for _, p := range cc.Pinned {
+			sr.Pinned = append(sr.Pinned, PinnedWord{Word: p.Word, Position: p.Position})
 		}
+		sr.Deleted = append(sr.Deleted, cc.Deleted...)
+		sl.rules[code] = sr
 	}
-
 	return nil
 }
 
-// Save 保存到 YAML 文件
 func (sl *ShadowLayer) Save() error {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
@@ -107,20 +100,17 @@ func (sl *ShadowLayer) Save() error {
 		return nil
 	}
 
-	config := ShadowConfig{
-		Rules: make(map[string][]ShadowRuleConfig),
-	}
-
-	for code, rules := range sl.rules {
-		var ruleConfigs []ShadowRuleConfig
-		for _, r := range rules {
-			ruleConfigs = append(ruleConfigs, ShadowRuleConfig{
-				Word:   r.Word,
-				Action: string(r.Action),
-				Weight: r.NewWeight,
-			})
+	config := shadowConfig{Rules: make(map[string]*shadowCodeConfig)}
+	for code, sr := range sl.rules {
+		if len(sr.Pinned) == 0 && len(sr.Deleted) == 0 {
+			continue
 		}
-		config.Rules[code] = ruleConfigs
+		cc := &shadowCodeConfig{}
+		for _, p := range sr.Pinned {
+			cc.Pinned = append(cc.Pinned, shadowPinConfig{Word: p.Word, Position: p.Position})
+		}
+		cc.Deleted = append(cc.Deleted, sr.Deleted...)
+		config.Rules[code] = cc
 	}
 
 	data, err := yaml.Marshal(&config)
@@ -128,13 +118,10 @@ func (sl *ShadowLayer) Save() error {
 		return fmt.Errorf("failed to marshal shadow config: %w", err)
 	}
 
-	// 写入临时文件
 	tmpPath := sl.filePath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write shadow file: %w", err)
 	}
-
-	// 原子替换
 	if err := os.Rename(tmpPath, sl.filePath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to rename shadow file: %w", err)
@@ -144,163 +131,172 @@ func (sl *ShadowLayer) Save() error {
 	return nil
 }
 
-// Top 置顶词条
-func (sl *ShadowLayer) Top(code string, word string) {
+// ── 操作方法 ──
+
+// Pin 将词固定到指定位置。
+// 置顶 = Pin(code, word, 0)。前移 = Pin(code, word, 当前位置-1)。
+// 如果已存在该词的 pin，更新 position 并移到数组头部（LIFO 后发先至）。
+// 如果该词在 deleted 中，自动移除 deleted 状态。
+func (sl *ShadowLayer) Pin(code string, word string, position int) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
 	code = strings.ToLower(code)
+	if position < 0 {
+		position = 0
+	}
 
-	// 检查是否已存在
-	for i, r := range sl.rules[code] {
-		if r.Word == word {
-			sl.rules[code][i].Action = ShadowActionTop
-			sl.dirty = true
-			return
+	sr := sl.getOrCreate(code)
+
+	// 从 deleted 中移除（如果存在）
+	sr.Deleted = removeString(sr.Deleted, word)
+
+	// 从 pinned 中移除旧记录
+	for i, p := range sr.Pinned {
+		if p.Word == word {
+			sr.Pinned = append(sr.Pinned[:i], sr.Pinned[i+1:]...)
+			break
 		}
 	}
 
-	// 添加新规则
-	sl.rules[code] = append(sl.rules[code], ShadowRule{
-		Code:   code,
-		Word:   word,
-		Action: ShadowActionTop,
-	})
+	// 插入到数组头部（LIFO：最后操作的优先级最高）
+	sr.Pinned = append([]PinnedWord{{Word: word, Position: position}}, sr.Pinned...)
 	sl.dirty = true
 }
 
-// Delete 删除（隐藏）词条
+// Delete 隐藏词条（仅多字词，单字由调用方检查）。
+// 如果该词在 pinned 中，自动移除 pin 状态。
 func (sl *ShadowLayer) Delete(code string, word string) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
 	code = strings.ToLower(code)
+	sr := sl.getOrCreate(code)
 
-	// 检查是否已存在
-	for i, r := range sl.rules[code] {
-		if r.Word == word {
-			sl.rules[code][i].Action = ShadowActionDelete
-			sl.dirty = true
-			return
+	// 从 pinned 中移除
+	for i, p := range sr.Pinned {
+		if p.Word == word {
+			sr.Pinned = append(sr.Pinned[:i], sr.Pinned[i+1:]...)
+			break
 		}
 	}
 
-	// 添加新规则
-	sl.rules[code] = append(sl.rules[code], ShadowRule{
-		Code:   code,
-		Word:   word,
-		Action: ShadowActionDelete,
-	})
-	sl.dirty = true
-}
-
-// Reweight 调整权重
-func (sl *ShadowLayer) Reweight(code string, word string, newWeight int) {
-	sl.mu.Lock()
-	defer sl.mu.Unlock()
-
-	code = strings.ToLower(code)
-
-	// 检查是否已存在
-	for i, r := range sl.rules[code] {
-		if r.Word == word {
-			sl.rules[code][i].Action = ShadowActionReweight
-			sl.rules[code][i].NewWeight = newWeight
-			sl.dirty = true
-			return
+	// 添加到 deleted（去重）
+	for _, d := range sr.Deleted {
+		if d == word {
+			return // 已存在
 		}
 	}
-
-	// 添加新规则
-	sl.rules[code] = append(sl.rules[code], ShadowRule{
-		Code:      code,
-		Word:      word,
-		Action:    ShadowActionReweight,
-		NewWeight: newWeight,
-	})
+	sr.Deleted = append(sr.Deleted, word)
 	sl.dirty = true
 }
 
-// RemoveRule 移除规则（恢复默认行为）
+// RemoveRule 移除词的所有规则（恢复默认行为）
 func (sl *ShadowLayer) RemoveRule(code string, word string) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
 	code = strings.ToLower(code)
-	rules, ok := sl.rules[code]
+	sr, ok := sl.rules[code]
 	if !ok {
 		return
 	}
 
-	for i, r := range rules {
-		if r.Word == word {
-			sl.rules[code] = append(rules[:i], rules[i+1:]...)
-			if len(sl.rules[code]) == 0 {
-				delete(sl.rules, code)
-			}
-			sl.dirty = true
-			return
+	changed := false
+	// 从 pinned 移除
+	for i, p := range sr.Pinned {
+		if p.Word == word {
+			sr.Pinned = append(sr.Pinned[:i], sr.Pinned[i+1:]...)
+			changed = true
+			break
 		}
+	}
+	// 从 deleted 移除
+	newDeleted := removeString(sr.Deleted, word)
+	if len(newDeleted) != len(sr.Deleted) {
+		sr.Deleted = newDeleted
+		changed = true
+	}
+
+	if changed {
+		// 清理空规则
+		if len(sr.Pinned) == 0 && len(sr.Deleted) == 0 {
+			delete(sl.rules, code)
+		}
+		sl.dirty = true
 	}
 }
 
-// IsDeleted 检查词条是否被删除
+// ── 查询方法 ──
+
+func (sl *ShadowLayer) IsPinned(code string, word string) bool {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	code = strings.ToLower(code)
+	if sr, ok := sl.rules[code]; ok {
+		for _, p := range sr.Pinned {
+			if p.Word == word {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (sl *ShadowLayer) IsDeleted(code string, word string) bool {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
-
 	code = strings.ToLower(code)
-	for _, r := range sl.rules[code] {
-		if r.Word == word && r.Action == ShadowActionDelete {
-			return true
+	if sr, ok := sl.rules[code]; ok {
+		for _, d := range sr.Deleted {
+			if d == word {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// IsTopped 检查词条是否被置顶
-func (sl *ShadowLayer) IsTopped(code string, word string) bool {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	code = strings.ToLower(code)
-	for _, r := range sl.rules[code] {
-		if r.Word == word && r.Action == ShadowActionTop {
-			return true
-		}
-	}
-	return false
-}
-
-// HasRule 检查指定编码和词语是否存在 Shadow 规则
 func (sl *ShadowLayer) HasRule(code string, word string) bool {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	code = strings.ToLower(code)
-	for _, r := range sl.rules[code] {
-		if r.Word == word {
-			return true
-		}
-	}
-	return false
+	return sl.IsPinned(code, word) || sl.IsDeleted(code, word)
 }
 
-// GetRuleCount 获取规则数量
 func (sl *ShadowLayer) GetRuleCount() int {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
-
 	count := 0
-	for _, rules := range sl.rules {
-		count += len(rules)
+	for _, sr := range sl.rules {
+		count += len(sr.Pinned) + len(sr.Deleted)
 	}
 	return count
 }
 
-// IsDirty 检查是否有未保存的修改
 func (sl *ShadowLayer) IsDirty() bool {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 	return sl.dirty
+}
+
+func (sl *ShadowLayer) GetFilePath() string {
+	return sl.filePath
+}
+
+// ── 内部辅助 ──
+
+func (sl *ShadowLayer) getOrCreate(code string) *ShadowRules {
+	sr, ok := sl.rules[code]
+	if !ok {
+		sr = &ShadowRules{}
+		sl.rules[code] = sr
+	}
+	return sr
+}
+
+func removeString(slice []string, s string) []string {
+	for i, v := range slice {
+		if v == s {
+			return append(slice[:i], slice[i+1:]...)
+		}
+	}
+	return slice
 }

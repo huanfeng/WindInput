@@ -203,10 +203,10 @@ func (dm *DictManager) AddUserWord(code, text string, weight int) error {
 	return dm.activeUserDict.Add(code, text, weight)
 }
 
-// TopWord 置顶词条
-func (dm *DictManager) TopWord(code, word string) {
+// PinWord 固定词到指定位置（置顶 = position 0）
+func (dm *DictManager) PinWord(code, word string, position int) {
 	if dm.activeShadow != nil {
-		dm.activeShadow.Top(code, word)
+		dm.activeShadow.Pin(code, word, position)
 	}
 }
 

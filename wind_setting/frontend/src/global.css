@@ -847,6 +847,42 @@ input:checked + .slider:before {
   border-top: 1px solid var(--border-color, #e5e7eb);
 }
 
+/* ========== Shared: Generic Dialog ========== */
+.dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.dialog-box {
+  background: var(--bg-card, #fff);
+  color: var(--text-primary, #1f2937);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  width: 380px;
+  max-width: 90vw;
+  padding: 20px;
+}
+.dialog-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color, #e5e7eb);
+}
+
 /* ========== Shared: Select Dropdown ========== */
 .setting-control select {
   padding: 6px 28px 6px 10px;
