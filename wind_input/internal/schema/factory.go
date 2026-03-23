@@ -12,6 +12,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/dict/dictcache"
+	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/engine/wubi"
 )
@@ -19,7 +20,7 @@ import (
 // EngineBundle 引擎创建结果（包含引擎实例和相关资源）
 type EngineBundle struct {
 	SchemaID string
-	Engine   interface{} // *pinyin.Engine 或 *wubi.Engine
+	Engine   interface{} // *pinyin.Engine 或 *wubi.Engine 或 *mixed.Engine
 }
 
 // CreateEngineFromSchema 根据 Schema 创建引擎实例并加载词库
@@ -29,6 +30,8 @@ func CreateEngineFromSchema(s *Schema, exeDir string, dm *dict.DictManager) (*En
 		return createCodeTableEngine(s, exeDir, dm)
 	case EngineTypePinyin:
 		return createPinyinEngine(s, exeDir, dm)
+	case EngineTypeMixed:
+		return createMixedEngine(s, exeDir, dm)
 	default:
 		return nil, fmt.Errorf("不支持的引擎类型: %s", s.Engine.Type)
 	}
@@ -475,6 +478,203 @@ func resolvePath(exeDir, path string) string {
 		return filepath.Join(exeDir, path)
 	}
 	return path
+}
+
+// createMixedEngine 创建混输引擎（五笔+拼音并行查询）
+// 五笔引擎使用 DictManager 的主 CompositeDict（含 codetable-system 层），
+// 拼音引擎使用独立的 CompositeDict（含 pinyin-system 层），避免交叉污染。
+func createMixedEngine(s *Schema, exeDir string, dm *dict.DictManager) (*EngineBundle, error) {
+	// === 1. 读取混输配置 ===
+	mixedSpec := s.Engine.Mixed
+	if mixedSpec == nil {
+		mixedSpec = &MixedSpec{
+			MinPinyinLength: 2,
+			WubiWeightBoost: 10000000,
+			ShowSourceHint:  true,
+		}
+	}
+
+	// === 2. 创建五笔引擎 ===
+	codeTableSpec := s.Engine.CodeTable
+	if codeTableSpec == nil {
+		codeTableSpec = &CodeTableSpec{
+			MaxCodeLength:     4,
+			TopCodeCommit:     true,
+			PunctCommit:       true,
+			ShowCodeHint:      true,
+			CandidateSortMode: "frequency",
+		}
+	}
+
+	wubiConfig := &wubi.Config{
+		MaxCodeLength:     codeTableSpec.MaxCodeLength,
+		AutoCommitAt4:     codeTableSpec.AutoCommitUnique,
+		ClearOnEmptyAt4:   codeTableSpec.ClearOnEmptyMax,
+		TopCodeCommit:     codeTableSpec.TopCodeCommit,
+		PunctCommit:       codeTableSpec.PunctCommit,
+		ShowCodeHint:      codeTableSpec.ShowCodeHint,
+		SingleCodeInput:   codeTableSpec.SingleCodeInput,
+		FilterMode:        s.Engine.FilterMode,
+		CandidateSortMode: codeTableSpec.CandidateSortMode,
+		DedupCandidates:   true,
+	}
+
+	// 五笔学习配置
+	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
+		wubiConfig.EnableUserFreq = true
+		wubiConfig.ProtectTopN = s.Learning.ProtectTopN
+	}
+
+	wubiEngine := wubi.NewEngine(wubiConfig)
+
+	// 加载五笔码表（从 dictionaries 中查找五笔词库）
+	var wubiDictSpec *DictSpec
+	for i := range s.Dicts {
+		if s.Dicts[i].Default {
+			wubiDictSpec = &s.Dicts[i]
+			break
+		}
+	}
+	if wubiDictSpec != nil {
+		srcPath := resolvePath(exeDir, wubiDictSpec.Path)
+		if err := loadWubiCodeTable(wubiEngine, srcPath, wubiDictSpec.Type); err != nil {
+			return nil, fmt.Errorf("混输：加载五笔码表失败: %w", err)
+		}
+		log.Printf("[SchemaFactory] 混输：五笔码表加载成功 (%s), 词条数: %d", s.Schema.ID, wubiEngine.GetEntryCount())
+	}
+
+	// 注册五笔码表到 DictManager 的主 CompositeDict
+	if dm != nil {
+		codeTable := wubiEngine.GetCodeTable()
+		if codeTable != nil {
+			systemLayer := dict.NewCodeTableLayer("codetable-system", dict.LayerTypeSystem, codeTable)
+			dm.RegisterSystemLayer("codetable-system", systemLayer)
+		}
+		wubiEngine.SetDictManager(dm)
+		dm.SetSortMode(candidate.CandidateSortMode(codeTableSpec.CandidateSortMode))
+	}
+
+	// === 3. 创建拼音引擎（使用独立的 CompositeDict）===
+	pinyinSpec := s.Engine.Pinyin
+	if pinyinSpec == nil {
+		pinyinSpec = &PinyinSpec{
+			Scheme:          "full",
+			ShowWubiHint:    true,
+			UseSmartCompose: true,
+		}
+	}
+
+	pinyinConfig := &pinyin.Config{
+		ShowWubiHint: pinyinSpec.ShowWubiHint,
+		FilterMode:   s.Engine.FilterMode,
+	}
+
+	// 模糊音配置
+	if pinyinSpec.Fuzzy != nil && pinyinSpec.Fuzzy.Enabled {
+		pinyinConfig.Fuzzy = &pinyin.FuzzyConfig{
+			ZhZ:   pinyinSpec.Fuzzy.ZhZ,
+			ChC:   pinyinSpec.Fuzzy.ChC,
+			ShS:   pinyinSpec.Fuzzy.ShS,
+			NL:    pinyinSpec.Fuzzy.NL,
+			FH:    pinyinSpec.Fuzzy.FH,
+			RL:    pinyinSpec.Fuzzy.RL,
+			AnAng: pinyinSpec.Fuzzy.AnAng,
+			EnEng: pinyinSpec.Fuzzy.EnEng,
+			InIng: pinyinSpec.Fuzzy.InIng,
+		}
+	}
+
+	// 加载拼音词库
+	pinyinDict := dict.NewPinyinDict()
+	var pinyinDictSpec *DictSpec
+	for i := range s.Dicts {
+		if s.Dicts[i].Type == "rime_pinyin" {
+			pinyinDictSpec = &s.Dicts[i]
+			break
+		}
+	}
+	if pinyinDictSpec != nil {
+		dictPath := resolvePath(exeDir, pinyinDictSpec.Path)
+		if err := loadPinyinDict(pinyinDict, dictPath); err != nil {
+			return nil, fmt.Errorf("混输：加载拼音词库失败: %w", err)
+		}
+	}
+
+	// 创建独立的 CompositeDict（仅包含拼音系统层，不污染五笔查询）
+	pinyinCompositeDict := dict.NewCompositeDict()
+	pinyinSystemLayer := dict.NewPinyinDictLayer("pinyin-system", dict.LayerTypeSystem, pinyinDict)
+	pinyinCompositeDict.AddLayer(pinyinSystemLayer)
+
+	// 缓存拼音系统层到 engine manager（供临时拼音模式恢复使用）
+	if dm != nil {
+		dm.RegisterSystemLayer("pinyin-system", pinyinSystemLayer)
+		// 立即从主 CompositeDict 移除拼音层，只保留在独立 dict 中
+		if mainDict := dm.GetCompositeDict(); mainDict != nil {
+			mainDict.RemoveLayer("pinyin-system")
+		}
+	}
+
+	pinyinEngine := pinyin.NewEngineWithConfig(pinyinCompositeDict, pinyinConfig)
+
+	// 加载 Unigram 语言模型
+	if s.Learning.UnigramPath != "" {
+		unigramTxtPath := resolvePath(exeDir, s.Learning.UnigramPath)
+		if err := loadUnigramModel(pinyinEngine, unigramTxtPath); err != nil {
+			log.Printf("[SchemaFactory] 混输：%v", err)
+		}
+	}
+
+	// 加载反查词库（五笔反查）
+	reverseDicts := s.GetDictsByRole(DictRoleReverseLookup)
+	for _, rd := range reverseDicts {
+		rdPath := resolvePath(exeDir, rd.Path)
+		if err := loadWubiTableForPinyin(pinyinEngine, rdPath, rd.Type); err != nil {
+			log.Printf("[SchemaFactory] 混输：加载反查码表失败: %v", err)
+		}
+	}
+
+	// 设置拼音引擎的 DictManager（用于用户词频学习）
+	if dm != nil {
+		pinyinEngine.SetDictManager(dm)
+	}
+
+	// 加载拼音用户词频
+	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
+		if s.UserData.UserFreqFile != "" {
+			userFreqPath := resolvePath(exeDir, s.UserData.UserFreqFile)
+			loadPinyinUserFreqs(pinyinEngine, userFreqPath)
+		}
+		pinyinConfig.EnableUserFreq = true
+	}
+
+	// === 4. 创建混输引擎 ===
+	mixedConfig := &mixed.Config{
+		MinPinyinLength: mixedSpec.MinPinyinLength,
+		WubiWeightBoost: mixedSpec.WubiWeightBoost,
+		ShowSourceHint:  mixedSpec.ShowSourceHint,
+	}
+	if mixedConfig.MinPinyinLength <= 0 {
+		mixedConfig.MinPinyinLength = 2
+	}
+	if mixedConfig.WubiWeightBoost <= 0 {
+		mixedConfig.WubiWeightBoost = 10000000
+	}
+
+	mixedEngine := mixed.NewEngine(wubiEngine, pinyinEngine, mixedConfig)
+
+	log.Printf("[SchemaFactory] 混输引擎创建成功 (%s): 五笔=%d词条, 拼音=%d编码",
+		s.Schema.ID, wubiEngine.GetEntryCount(), pinyinDict.EntryCount())
+
+	// GC 释放临时内存
+	go func() {
+		runtime.GC()
+		debug.FreeOSMemory()
+	}()
+
+	return &EngineBundle{
+		SchemaID: s.Schema.ID,
+		Engine:   mixedEngine,
+	}, nil
 }
 
 func isAbsPath(path string) bool {
