@@ -95,8 +95,8 @@ func validateSchema(s *Schema, path string) error {
 	if s.Engine.Type == "" {
 		return fmt.Errorf("方案 %s: engine.type 不能为空", s.Schema.ID)
 	}
-	if s.Engine.Type != EngineTypeCodeTable && s.Engine.Type != EngineTypePinyin {
-		return fmt.Errorf("方案 %s: engine.type 不支持的值 %q（仅支持 codetable/pinyin）", s.Schema.ID, s.Engine.Type)
+	if s.Engine.Type != EngineTypeCodeTable && s.Engine.Type != EngineTypePinyin && s.Engine.Type != EngineTypeMixed {
+		return fmt.Errorf("方案 %s: engine.type 不支持的值 %q（仅支持 codetable/pinyin/mixed）", s.Schema.ID, s.Engine.Type)
 	}
 	if len(s.Dicts) == 0 {
 		return fmt.Errorf("方案 %s: dictionaries 不能为空", s.Schema.ID)

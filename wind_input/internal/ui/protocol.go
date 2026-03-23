@@ -9,8 +9,9 @@ type Candidate struct {
 	Comment        string
 	Weight         int
 	IsCommand      bool
-	ConsumedLength int  // 该候选消耗的输入长度（拼音部分上屏用）
-	HasShadow      bool // 是否存在 Shadow 层修改（用于右键菜单"恢复默认"）
+	ConsumedLength int    // 该候选消耗的输入长度（拼音部分上屏用）
+	HasShadow      bool   // 是否存在 Shadow 层修改（用于右键菜单"恢复默认"）
+	Source         string // 候选来源（混输模式下区分 "wubi"/"pinyin"）
 }
 
 // CandidateRect represents the bounding rectangle of a candidate item

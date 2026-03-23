@@ -26,6 +26,7 @@ type EngineType string
 const (
 	EngineTypeCodeTable EngineType = "codetable"
 	EngineTypePinyin    EngineType = "pinyin"
+	EngineTypeMixed     EngineType = "mixed" // 五笔拼音混输
 )
 
 // EngineSpec 引擎规格
@@ -33,7 +34,15 @@ type EngineSpec struct {
 	Type       EngineType     `yaml:"type"`
 	CodeTable  *CodeTableSpec `yaml:"codetable,omitempty"`
 	Pinyin     *PinyinSpec    `yaml:"pinyin,omitempty"`
+	Mixed      *MixedSpec     `yaml:"mixed,omitempty"`
 	FilterMode string         `yaml:"filter_mode"`
+}
+
+// MixedSpec 混输引擎配置
+type MixedSpec struct {
+	MinPinyinLength int  `yaml:"min_pinyin_length"` // 拼音最小触发长度，默认2
+	WubiWeightBoost int  `yaml:"wubi_weight_boost"` // 五笔权重提升值，默认10000000
+	ShowSourceHint  bool `yaml:"show_source_hint"`  // 是否在候选提示中显示来源标记
 }
 
 // CodeTableSpec 码表引擎配置

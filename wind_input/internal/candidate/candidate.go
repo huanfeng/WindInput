@@ -1,16 +1,26 @@
 package candidate
 
+// CandidateSource 候选词来源（混输模式下区分）
+type CandidateSource string
+
+const (
+	SourceNone   CandidateSource = ""       // 未标记（单引擎模式）
+	SourceWubi   CandidateSource = "wubi"   // 来自五笔引擎
+	SourcePinyin CandidateSource = "pinyin" // 来自拼音引擎
+)
+
 // Candidate 候选词
 type Candidate struct {
-	Text           string // 候选文字
-	Pinyin         string // 拼音（兼容旧代码）
-	Code           string // 通用编码（五笔/拼音等）
-	Weight         int    // 权重（用于排序）
-	NaturalOrder   int    // 自然顺序（词库中同一编码下的原始位置，0-based）
-	Hint           string // 提示信息（如反查时显示的编码）
-	IsCommon       bool   // 是否为通用规范汉字
-	IsCommand      bool   // 是否为命令候选（uuid/date/time 等）
-	ConsumedLength int    // 该候选消耗的输入长度（拼音部分上屏用）
+	Text           string          // 候选文字
+	Pinyin         string          // 拼音（兼容旧代码）
+	Code           string          // 通用编码（五笔/拼音等）
+	Weight         int             // 权重（用于排序）
+	NaturalOrder   int             // 自然顺序（词库中同一编码下的原始位置，0-based）
+	Hint           string          // 提示信息（如反查时显示的编码）
+	IsCommon       bool            // 是否为通用规范汉字
+	IsCommand      bool            // 是否为命令候选（uuid/date/time 等）
+	ConsumedLength int             // 该候选消耗的输入长度（拼音部分上屏用）
+	Source         CandidateSource // 候选来源（混输模式下区分五笔/拼音）
 }
 
 // CandidateList 候选词列表
