@@ -7,6 +7,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/engine/wubi"
 	"github.com/huanfeng/wind_input/internal/schema"
@@ -237,6 +238,8 @@ func (m *Manager) loadSchemaEngineLocked(schemaID string) error {
 		m.engines[schemaID] = eng
 	case *wubi.Engine:
 		m.engines[schemaID] = eng
+	case *mixed.Engine:
+		m.engines[schemaID] = eng
 	default:
 		return fmt.Errorf("未知引擎类型: %T", bundle.Engine)
 	}
@@ -249,6 +252,9 @@ func (m *Manager) loadSchemaEngineLocked(schemaID string) error {
 		case *pinyin.Engine:
 			layerName = "pinyin-system"
 		case *wubi.Engine:
+			layerName = "codetable-system"
+		case *mixed.Engine:
+			// 混输引擎注册的是 codetable-system 层（拼音层在独立 CompositeDict 中）
 			layerName = "codetable-system"
 		}
 		if layerName != "" {
@@ -282,11 +288,16 @@ func (m *Manager) GetCurrentEngine() Engine {
 	return m.currentEngine
 }
 
-// GetCurrentType 获取当前方案 ID（兼容旧代码，返回 EngineType）
+// GetCurrentType 获取当前引擎类型（通过 SchemaManager 读取真实的 engine.type）
 func (m *Manager) GetCurrentType() EngineType {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return EngineType(m.currentID)
+	if m.schemaManager != nil {
+		if s := m.schemaManager.GetSchema(m.currentID); s != nil {
+			return EngineType(s.Engine.Type)
+		}
+	}
+	return EngineType(m.currentID) // fallback
 }
 
 // GetCurrentSchemaID 获取当前方案 ID
@@ -378,6 +389,27 @@ func (m *Manager) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		return &ConvertResult{}
 	}
 
+	if mixedEngine, ok := engine.(*mixed.Engine); ok {
+		mixedResult := mixedEngine.ConvertEx(input, maxCandidates)
+		result := &ConvertResult{
+			Candidates:   mixedResult.Candidates,
+			ShouldCommit: mixedResult.ShouldCommit,
+			CommitText:   mixedResult.CommitText,
+			IsEmpty:      mixedResult.IsEmpty,
+			ShouldClear:  mixedResult.ShouldClear,
+			ToEnglish:    mixedResult.ToEnglish,
+			NewInput:     mixedResult.NewInput,
+		}
+		// 拼音降级模式时填充预编辑区信息
+		if mixedResult.IsPinyinFallback {
+			result.PreeditDisplay = mixedResult.PreeditDisplay
+			result.CompletedSyllables = mixedResult.CompletedSyllables
+			result.PartialSyllable = mixedResult.PartialSyllable
+			result.HasPartial = mixedResult.HasPartial
+		}
+		return result
+	}
+
 	if wubiEngine, ok := engine.(*wubi.Engine); ok {
 		wubiResult := wubiEngine.ConvertEx(input, maxCandidates)
 		return &ConvertResult{
@@ -429,6 +461,9 @@ func (m *Manager) GetMaxCodeLength() int {
 	if engine == nil {
 		return 0
 	}
+	if mixedEngine, ok := engine.(*mixed.Engine); ok {
+		return mixedEngine.GetMaxCodeLength()
+	}
 	if wubiEngine, ok := engine.(*wubi.Engine); ok {
 		return wubiEngine.GetConfig().MaxCodeLength
 	}
@@ -440,6 +475,9 @@ func (m *Manager) HandleTopCode(input string) (commitText string, newInput strin
 	engine := m.GetCurrentEngine()
 	if engine == nil {
 		return "", input, false
+	}
+	if mixedEngine, ok := engine.(*mixed.Engine); ok {
+		return mixedEngine.HandleTopCode(input)
 	}
 	if wubiEngine, ok := engine.(*wubi.Engine); ok {
 		return wubiEngine.HandleTopCode(input)
@@ -468,6 +506,17 @@ func (m *Manager) GetEngineInfo() string {
 	}
 
 	schemaID := m.GetCurrentSchemaID()
+
+	if mixedEngine, ok := engine.(*mixed.Engine); ok {
+		wubiEng := mixedEngine.GetWubiEngine()
+		if wubiEng != nil {
+			info := wubiEng.GetCodeTableInfo()
+			if info != nil {
+				return fmt.Sprintf("%s: %s+拼音混输 (%d词条)", schemaID, info.Name, wubiEng.GetEntryCount())
+			}
+		}
+		return schemaID + ": 混输"
+	}
 
 	if wubiEngine, ok := engine.(*wubi.Engine); ok {
 		info := wubiEngine.GetCodeTableInfo()
@@ -597,10 +646,20 @@ func (m *Manager) ConvertWithPinyin(input string, maxCandidates int) *ConvertRes
 	return result
 }
 
-// OnCandidateSelected 选词回调（拼音 + 五笔统一路由）
-func (m *Manager) OnCandidateSelected(code, text string) {
+// OnCandidateSelected 选词回调（拼音 + 五笔 + 混输统一路由）
+// source 为可选参数，混输模式下传入候选来源（"wubi"/"pinyin"）以路由到正确的子引擎
+func (m *Manager) OnCandidateSelected(code, text string, source ...string) {
 	engine := m.GetCurrentEngine()
 	if engine == nil {
+		return
+	}
+	// 混输引擎：按来源路由到对应子引擎
+	if mixedEngine, ok := engine.(*mixed.Engine); ok {
+		src := candidate.SourceNone
+		if len(source) > 0 {
+			src = candidate.CandidateSource(source[0])
+		}
+		mixedEngine.OnCandidateSelected(code, text, src)
 		return
 	}
 	if pinyinEngine, ok := engine.(*pinyin.Engine); ok {
@@ -619,29 +678,41 @@ func (m *Manager) SaveUserFreqs() {
 	defer m.mu.RUnlock()
 
 	for schemaID, eng := range m.engines {
+		// 直接的拼音引擎
 		if pinyinEngine, ok := eng.(*pinyin.Engine); ok {
-			// 检查拼音引擎的用户词频开关
-			cfg := pinyinEngine.GetConfig()
-			if cfg == nil || !cfg.EnableUserFreq {
-				continue
+			m.savePinyinUserFreqsLocked(schemaID, pinyinEngine)
+			continue
+		}
+		// 混输引擎：保存内部拼音引擎的用户词频
+		if mixedEngine, ok := eng.(*mixed.Engine); ok {
+			if pinyinEngine := mixedEngine.GetPinyinEngine(); pinyinEngine != nil {
+				m.savePinyinUserFreqsLocked(schemaID, pinyinEngine)
 			}
-			// 从 schema 配置获取词频文件路径
-			userFreqFile := ""
-			if m.schemaManager != nil {
-				if s := m.schemaManager.GetSchema(schemaID); s != nil {
-					userFreqFile = s.UserData.UserFreqFile
-				}
-			}
-			if userFreqFile == "" {
-				continue
-			}
-			userFreqPath := userFreqFile
-			if m.exeDir != "" {
-				userFreqPath = m.exeDir + "/" + userFreqFile
-			}
-			schema.SavePinyinUserFreqs(pinyinEngine, userFreqPath)
+			continue
 		}
 	}
+}
+
+// savePinyinUserFreqsLocked 保存拼音用户词频（调用方已持有读锁）
+func (m *Manager) savePinyinUserFreqsLocked(schemaID string, pinyinEngine *pinyin.Engine) {
+	cfg := pinyinEngine.GetConfig()
+	if cfg == nil || !cfg.EnableUserFreq {
+		return
+	}
+	userFreqFile := ""
+	if m.schemaManager != nil {
+		if s := m.schemaManager.GetSchema(schemaID); s != nil {
+			userFreqFile = s.UserData.UserFreqFile
+		}
+	}
+	if userFreqFile == "" {
+		return
+	}
+	userFreqPath := userFreqFile
+	if m.exeDir != "" {
+		userFreqPath = m.exeDir + "/" + userFreqFile
+	}
+	schema.SavePinyinUserFreqs(pinyinEngine, userFreqPath)
 }
 
 // findPinyinSchemaID 查找拼音方案 ID（需要持有读锁或写锁）

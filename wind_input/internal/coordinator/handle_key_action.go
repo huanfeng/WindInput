@@ -613,11 +613,12 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 	// 将已确认的文字暂存到 confirmedSegments 而非直接上屏，
 	// 用户可以通过退格键回退重新选词。
 	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
-	if isPinyin && cand.ConsumedLength > 0 && cand.ConsumedLength < len(c.inputBuffer) {
+	isMixed := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypeMixed
+	if (isPinyin || (isMixed && cand.ConsumedLength > 0)) && cand.ConsumedLength > 0 && cand.ConsumedLength < len(c.inputBuffer) {
 		// 用户词频学习：命令候选不进入学习，避免污染用户词典（如 uuid）。
 		consumedCode := c.inputBuffer[:cand.ConsumedLength]
 		if !cand.IsCommand {
-			c.engineMgr.OnCandidateSelected(consumedCode, originalText)
+			c.engineMgr.OnCandidateSelected(consumedCode, originalText, cand.Source)
 		}
 
 		remaining := c.inputBuffer[cand.ConsumedLength:]
@@ -648,12 +649,12 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 
 	// 完全消费：触发学习回调（拼音和五笔统一）
 	if c.engineMgr != nil && !cand.IsCommand {
-		c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText)
+		c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText, cand.Source)
 	}
 
 	// 拼接所有已确认段的文本 + 当前选中的候选
 	finalText := text
-	if isPinyin && len(c.confirmedSegments) > 0 {
+	if (isPinyin || isMixed) && len(c.confirmedSegments) > 0 {
 		var allText string
 		for _, seg := range c.confirmedSegments {
 			t := seg.Text

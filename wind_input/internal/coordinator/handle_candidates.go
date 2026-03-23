@@ -142,6 +142,7 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 			Weight:         ec.Weight,
 			IsCommand:      ec.IsCommand,
 			ConsumedLength: ec.ConsumedLength,
+			Source:         string(ec.Source),
 		}
 		// HasShadow 统一用 inputBuffer 查询（Shadow 规则按当前输入编码存储）
 		if shadowLayer != nil && !ec.IsCommand {
@@ -299,6 +300,8 @@ func (c *Coordinator) showModeIndicator() {
 			modeText = "中·五笔"
 		case engine.EngineTypePinyin:
 			modeText = "中·拼音"
+		case engine.EngineTypeMixed:
+			modeText = "中·混输"
 		default:
 			modeText = "中"
 		}

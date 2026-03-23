@@ -135,6 +135,7 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 	// 收集学习所需信息（在 clearState 前）
 	code := c.inputBuffer
 	isCommand := candidate.IsCommand
+	candidateSource := candidate.Source
 	engineMgr := c.engineMgr
 
 	c.logger.Debug("Candidate selected via mouse click", "index", actualIndex)
@@ -149,7 +150,7 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 
 	// 触发选词学习回调
 	if engineMgr != nil && !isCommand && originalText != "" {
-		engineMgr.OnCandidateSelected(code, originalText)
+		engineMgr.OnCandidateSelected(code, originalText, candidateSource)
 	}
 
 	// Send text to TSF via push pipe (only to active client for security)

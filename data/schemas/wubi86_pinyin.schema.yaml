@@ -1,0 +1,52 @@
+schema:
+  id: wubi86_pinyin
+  name: "五笔拼音"
+  icon_label: "混"
+  version: "1.0"
+  author: "内置"
+  description: "五笔86+拼音混合输入方案，五笔优先，拼音补充"
+
+engine:
+  type: mixed
+  codetable:
+    max_code_length: 4
+    auto_commit_unique: false
+    clear_on_empty_max: false
+    top_code_commit: true
+    punct_commit: true
+    show_code_hint: true
+    single_code_input: false
+    candidate_sort_mode: frequency
+  pinyin:
+    scheme: full
+    show_wubi_hint: true
+    use_smart_compose: true
+    candidate_order: smart
+  mixed:
+    min_pinyin_length: 2
+    wubi_weight_boost: 10000000
+    show_source_hint: true
+  filter_mode: smart
+
+dictionaries:
+  - id: wubi86_main
+    path: "dict/wubi86/wubi86_jidian.dict.yaml"
+    type: rime_wubi
+    default: true
+  - id: pinyin_main
+    path: "dict/pinyin/rime_ice.dict.yaml"
+    type: rime_pinyin
+  - id: wubi_reverse
+    path: "dict/wubi86/wubi86_jidian.dict.yaml"
+    type: rime_wubi
+    role: reverse_lookup
+
+user_data:
+  shadow_file: "shadow_wubi86_pinyin.yaml"
+  user_dict_file: "user_words_wubi86_pinyin.txt"
+  user_freq_file: "user_freq_wubi86_pinyin.txt"
+
+learning:
+  mode: frequency
+  unigram_path: "dict/pinyin/unigram.txt"
+  protect_top_n: 3
