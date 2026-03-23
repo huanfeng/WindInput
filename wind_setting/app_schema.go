@@ -35,6 +35,7 @@ type SchemaConfigEngine struct {
 	Type       string                 `yaml:"type" json:"type"`
 	CodeTable  map[string]interface{} `yaml:"codetable,omitempty" json:"codetable,omitempty"`
 	Pinyin     map[string]interface{} `yaml:"pinyin,omitempty" json:"pinyin,omitempty"`
+	Mixed      map[string]interface{} `yaml:"mixed,omitempty" json:"mixed,omitempty"`
 	FilterMode string                 `yaml:"filter_mode" json:"filter_mode"`
 }
 

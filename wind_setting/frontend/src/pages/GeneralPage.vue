@@ -42,10 +42,12 @@ const disabledSchemas = computed(() =>
 // 获取引擎类型的显示文本
 function getEngineTypeLabel(schemaID: string): string {
   const info = allSchemas.value.find((s) => s.id === schemaID);
-  const type = info?.engine_type || schemaConfigs.value[schemaID]?.engine?.type || "";
+  const type =
+    info?.engine_type || schemaConfigs.value[schemaID]?.engine?.type || "";
   const labels: Record<string, string> = {
     codetable: "码表",
     pinyin: "拼音",
+    mixed: "混输",
   };
   return labels[type] || type || "";
 }
@@ -183,6 +185,14 @@ function getPinyinConfig(schemaID: string) {
   return cfg.engine.pinyin;
 }
 
+// 混输配置
+function getMixedConfig(schemaID: string) {
+  const cfg = schemaConfigs.value[schemaID];
+  if (!cfg) return {};
+  if (!cfg.engine.mixed) cfg.engine.mixed = {};
+  return cfg.engine.mixed;
+}
+
 function getFuzzyConfig(schemaID: string) {
   const py = getPinyinConfig(schemaID);
   if (!py.fuzzy) py.fuzzy = {};
@@ -268,17 +278,23 @@ onUnmounted(() => {
             >
               <div class="schema-add-option-main">
                 <span class="schema-add-option-name">{{ schema.name }}</span>
-                <span class="schema-add-option-type">{{ schema.engine_type === 'codetable' ? '码表' : schema.engine_type === 'pinyin' ? '拼音' : schema.engine_type }}</span>
+                <span class="schema-add-option-type">{{
+                  schema.engine_type === "codetable"
+                    ? "码表"
+                    : schema.engine_type === "pinyin"
+                      ? "拼音"
+                      : schema.engine_type
+                }}</span>
               </div>
-              <div v-if="schema.description" class="schema-add-option-desc">{{ schema.description }}</div>
+              <div v-if="schema.description" class="schema-add-option-desc">
+                {{ schema.description }}
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      <p class="schema-list-hint">
-        使用箭头调整顺序，快捷键切换时按此顺序循环
-      </p>
+      <p class="schema-list-hint">使用箭头调整顺序，快捷键切换时按此顺序循环</p>
 
       <div v-if="schemaLoading" class="schema-list-loading">加载中...</div>
 
@@ -297,21 +313,30 @@ onUnmounted(() => {
                 :disabled="index === 0"
                 @click.stop="moveSchema(index, -1)"
                 title="上移"
-              >&#9650;</button>
+              >
+                &#9650;
+              </button>
               <button
                 class="schema-sort-btn"
                 :disabled="index === enabledSchemaIDs.length - 1"
                 @click.stop="moveSchema(index, 1)"
                 title="下移"
-              >&#9660;</button>
+              >
+                &#9660;
+              </button>
             </div>
             <div class="schema-row-info">
               <div class="schema-row-main">
                 <span class="schema-row-name">
                   {{ getSchemaInfo(schemaID)?.name || schemaID }}
                 </span>
-                <span class="schema-row-type">{{ getEngineTypeLabel(schemaID) }}</span>
-                <span v-if="getSchemaVersion(schemaID)" class="schema-row-version">
+                <span class="schema-row-type">{{
+                  getEngineTypeLabel(schemaID)
+                }}</span>
+                <span
+                  v-if="getSchemaVersion(schemaID)"
+                  class="schema-row-version"
+                >
                   v{{ getSchemaVersion(schemaID) }}
                 </span>
               </div>
@@ -329,7 +354,9 @@ onUnmounted(() => {
               </button>
               <span v-else class="schema-active-badge">当前方案</span>
               <button
-                v-if="schemaID !== activeSchemaID && enabledSchemaIDs.length > 1"
+                v-if="
+                  schemaID !== activeSchemaID && enabledSchemaIDs.length > 1
+                "
                 class="btn-icon btn-delete"
                 @click.stop="disableSchema(schemaID)"
                 title="移除方案"
@@ -341,7 +368,10 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div v-if="!schemaLoading && enabledSchemaIDs.length === 0" class="schema-list-empty">
+      <div
+        v-if="!schemaLoading && enabledSchemaIDs.length === 0"
+        class="schema-list-empty"
+      >
         暂无已启用的方案
       </div>
     </div>
@@ -355,7 +385,8 @@ onUnmounted(() => {
             v-if="schemaID === activeSchemaID"
             class="theme-badge active"
             style="margin-left: 8px"
-          >当前</span>
+            >当前</span
+          >
         </div>
 
         <!-- 码表类型 -->
@@ -538,6 +569,161 @@ onUnmounted(() => {
             </div>
           </div>
         </template>
+
+        <!-- 混输类型（五笔配置 + 拼音配置 + 混输专属配置） -->
+        <template v-if="getEngineType(schemaID) === 'mixed'">
+          <!-- 五笔配置区 -->
+          <div class="setting-section-title">五笔设置</div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>显示编码提示</label>
+              <p class="setting-hint">在前缀匹配的候选词旁显示剩余编码</p>
+            </div>
+            <div class="setting-control">
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="getCodetableConfig(schemaID).show_code_hint"
+                  @change="onSchemaConfigChange(schemaID)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>标点顶码上屏</label>
+              <p class="setting-hint">输入标点时自动上屏首选</p>
+            </div>
+            <div class="setting-control">
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="getCodetableConfig(schemaID).punct_commit"
+                  @change="onSchemaConfigChange(schemaID)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>候选排序</label>
+              <p class="setting-hint">五笔候选词的排列方式</p>
+            </div>
+            <div class="setting-control">
+              <select
+                v-model="getCodetableConfig(schemaID).candidate_sort_mode"
+                @change="onSchemaConfigChange(schemaID)"
+              >
+                <option value="frequency">词频优先</option>
+                <option value="natural">原始顺序</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 拼音配置区 -->
+          <div class="setting-section-title">拼音设置</div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>五笔反查提示</label>
+              <p class="setting-hint">在拼音候选词旁显示对应的五笔编码</p>
+            </div>
+            <div class="setting-control">
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="getPinyinConfig(schemaID).show_wubi_hint"
+                  @change="onSchemaConfigChange(schemaID)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>智能组句</label>
+              <p class="setting-hint">使用语言模型优化多字词组匹配</p>
+            </div>
+            <div class="setting-control">
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="getPinyinConfig(schemaID).use_smart_compose"
+                  @change="onSchemaConfigChange(schemaID)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>模糊音</label>
+              <p class="setting-hint">
+                允许近似发音输入（已启用
+                {{ getFuzzyEnabledCount(schemaID) }} 组）
+              </p>
+            </div>
+            <div class="setting-control">
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="getFuzzyConfig(schemaID).enabled"
+                  @change="onSchemaConfigChange(schemaID)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div v-if="getFuzzyConfig(schemaID).enabled" class="setting-item">
+            <div class="setting-info">
+              <label>模糊音配置</label>
+              <p class="setting-hint">选择需要启用的模糊音组</p>
+            </div>
+            <div class="setting-control">
+              <button class="btn btn-sm" @click="openFuzzyDialog(schemaID)">
+                配置
+              </button>
+            </div>
+          </div>
+
+          <!-- 混输专属配置区 -->
+          <div class="setting-section-title">混输设置</div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>拼音最小触发长度</label>
+              <p class="setting-hint">
+                输入几码后开始查询拼音候选（1=始终查询，2=两码起查询）
+              </p>
+            </div>
+            <div class="setting-control">
+              <select
+                v-model.number="getMixedConfig(schemaID).min_pinyin_length"
+                @change="onSchemaConfigChange(schemaID)"
+              >
+                <option :value="1">1码</option>
+                <option :value="2">2码</option>
+                <option :value="3">3码</option>
+              </select>
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>显示来源标记</label>
+              <p class="setting-hint">在拼音候选旁显示"拼"标记以区分来源</p>
+            </div>
+            <div class="setting-control">
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="getMixedConfig(schemaID).show_source_hint"
+                  @change="onSchemaConfigChange(schemaID)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </template>
       </div>
     </template>
 
@@ -563,9 +749,7 @@ onUnmounted(() => {
             >
               <input
                 type="checkbox"
-                v-model="
-                  (getFuzzyConfig(fuzzyEditSchemaID) as any)[pair.field]
-                "
+                v-model="(getFuzzyConfig(fuzzyEditSchemaID) as any)[pair.field]"
                 @change="onSchemaConfigChange(fuzzyEditSchemaID)"
               />
               <span class="fuzzy-pair-label">{{ pair.label }}</span>
@@ -776,5 +960,19 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 混输设置分区标题 */
+.setting-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #6b7280;
+  padding: 10px 0 4px 0;
+  border-top: 1px solid #f0f0f0;
+  margin-top: 4px;
+}
+.setting-section-title:first-child {
+  border-top: none;
+  margin-top: 0;
 }
 </style>
