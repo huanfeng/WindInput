@@ -496,8 +496,9 @@ func (m *Manager) EnsurePinyinLoaded() error {
 	return m.loadSchemaEngineLocked(pinyinID)
 }
 
-// ActivateTempPinyin 激活临时拼音模式：将拼音系统词库层注册到 CompositeDict
-// 调用方（coordinator）在进入临时拼音模式时调用
+// ActivateTempPinyin 激活临时拼音模式：交换系统词库层
+// 临时移除五笔码表层 + 注册拼音词库层，避免五笔候选污染拼音查询结果。
+// 调用方（coordinator）在进入临时拼音模式时调用。
 func (m *Manager) ActivateTempPinyin() {
 	m.mu.RLock()
 	pinyinID := m.findPinyinSchemaID()
@@ -507,10 +508,24 @@ func (m *Manager) ActivateTempPinyin() {
 		return
 	}
 	compositeDict := m.dictManager.GetCompositeDict()
-	if compositeDict != nil && compositeDict.GetLayerByName("pinyin-system") != nil {
-		return // 已注册
+	if compositeDict == nil {
+		return
 	}
 
+	// 1. 临时移除五笔码表层，避免五笔候选污染拼音查询结果
+	//    直接操作 CompositeDict（不通过 DictManager.UnregisterSystemLayer），
+	//    保留 DictManager.systemLayers 中的引用供后续恢复。
+	if compositeDict.GetLayerByName("codetable-system") != nil {
+		compositeDict.RemoveLayer("codetable-system")
+		log.Printf("[EngineManager] 临时拼音：暂时移除五笔码表层")
+	}
+
+	// 2. 如果拼音词库层已注册（首次由 createPinyinEngine 注册），直接返回
+	if compositeDict.GetLayerByName("pinyin-system") != nil {
+		return
+	}
+
+	// 3. 重新注册拼音词库层（第二次及后续进入临时拼音时）
 	m.mu.RLock()
 	layer, ok := m.systemLayers[pinyinID]
 	m.mu.RUnlock()
@@ -521,16 +536,32 @@ func (m *Manager) ActivateTempPinyin() {
 	}
 }
 
-// DeactivateTempPinyin 退出临时拼音模式：从 CompositeDict 卸载拼音系统词库层
-// 避免拼音词库污染五笔引擎的查询结果
+// DeactivateTempPinyin 退出临时拼音模式：恢复系统词库层
+// 卸载拼音词库层 + 恢复五笔码表层。
 func (m *Manager) DeactivateTempPinyin() {
 	if m.dictManager == nil {
 		return
 	}
 	compositeDict := m.dictManager.GetCompositeDict()
-	if compositeDict != nil && compositeDict.GetLayerByName("pinyin-system") != nil {
+	if compositeDict == nil {
+		return
+	}
+
+	// 1. 卸载拼音词库层
+	if compositeDict.GetLayerByName("pinyin-system") != nil {
 		m.dictManager.UnregisterSystemLayer("pinyin-system")
 		log.Printf("[EngineManager] 临时拼音：卸载拼音词库层")
+	}
+
+	// 2. 恢复五笔码表层
+	m.mu.RLock()
+	currentID := m.currentID
+	wubiLayer, ok := m.systemLayers[currentID]
+	m.mu.RUnlock()
+
+	if ok && wubiLayer != nil && compositeDict.GetLayerByName(wubiLayer.Name()) == nil {
+		compositeDict.AddLayer(wubiLayer)
+		log.Printf("[EngineManager] 临时拼音：恢复五笔码表层")
 	}
 }
 
