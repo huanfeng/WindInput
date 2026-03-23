@@ -224,7 +224,7 @@ if ($wubiCopied -gt 0) {
 }
 
 # 复制常用字表
-$commonChars = Join-Path $ScriptDir "dict\common_chars.txt"
+$commonChars = Join-Path $ScriptDir "data\dict\common_chars.txt"
 if (Test-Path $commonChars) {
     Copy-Item -Path $commonChars -Destination (Join-Path $BuildDir "dict\common_chars.txt") -Force
     Write-Host "  - 已复制常用字表"

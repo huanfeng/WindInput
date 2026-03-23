@@ -3,7 +3,7 @@ schema:
   name: "全拼"
   icon_label: "拼"
   version: "1.0"
-  author: "WindInput"
+  author: "内置"
   description: "全拼输入方案"
 
 engine:
