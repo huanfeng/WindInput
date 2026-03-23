@@ -218,6 +218,22 @@ async function saveConfig() {
   }
 }
 
+// 检测是否有未保存的修改
+function hasUnsavedChanges(): boolean {
+  if (!config.value) return false;
+  return JSON.stringify(formData.value) !== JSON.stringify(config.value);
+}
+
+// 重新加载配置（丢弃本地修改，从实际文件重新读取）
+async function handleReloadConfig() {
+  if (hasUnsavedChanges()) {
+    if (!confirm("当前有未保存的修改，重新加载将丢弃这些修改。确定继续吗？")) {
+      return;
+    }
+  }
+  await handleReload();
+}
+
 // 重载配置
 async function handleReload() {
   try {
@@ -441,6 +457,9 @@ onMounted(async () => {
         <div class="sidebar-actions">
           <button class="btn" @click="resetCurrentPageDefaults">
             恢复本页默认
+          </button>
+          <button class="btn" @click="handleReloadConfig">
+            重新加载
           </button>
           <button
             class="btn btn-primary"

@@ -14,11 +14,32 @@
           <p class="setting-hint">过滤候选词中的生僻字</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.engine.filter_mode" class="select">
-            <option value="smart">智能模式（推荐）</option>
-            <option value="general">仅常用字</option>
-            <option value="gb18030">大字符集</option>
-          </select>
+          <div class="filter-dropdown" ref="filterDropdownRef">
+            <button
+              class="filter-select"
+              type="button"
+              @click="filterDropdownOpen = !filterDropdownOpen"
+            >
+              <span class="filter-select-label">{{ currentFilterOption.label }}</span>
+              <span v-if="currentFilterOption.tag" class="filter-select-tag">{{ currentFilterOption.tag }}</span>
+              <span class="filter-select-arrow">&#9662;</span>
+            </button>
+            <div v-if="filterDropdownOpen" class="filter-menu">
+              <div
+                v-for="opt in filterModeOptions"
+                :key="opt.value"
+                class="filter-option"
+                :class="{ selected: formData.engine.filter_mode === opt.value }"
+                @click="selectFilterMode(opt.value)"
+              >
+                <div class="filter-option-main">
+                  <span class="filter-option-name">{{ opt.label }}</span>
+                  <span v-if="opt.tag" class="filter-option-tag">{{ opt.tag }}</span>
+                </div>
+                <div class="filter-option-desc">{{ opt.desc }}</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="setting-item">
@@ -144,9 +165,150 @@
 </template>
 
 <script setup lang="ts">
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import type { Config } from "../api/settings";
 
-defineProps<{
+const props = defineProps<{
   formData: Config;
 }>();
+
+const filterDropdownOpen = ref(false);
+const filterDropdownRef = ref<HTMLElement | null>(null);
+
+const filterModeOptions = [
+  {
+    value: "smart",
+    label: "智能模式",
+    desc: "优先常用字，空码时自动检索大字符集",
+    tag: "推荐",
+  },
+  {
+    value: "general",
+    label: "仅常用字",
+    desc: "只显示 GB2312 范围内的常用汉字",
+  },
+  {
+    value: "gb18030",
+    label: "大字符集",
+    desc: "包含全部 CJK 汉字，含生僻字和扩展区",
+  },
+];
+
+const currentFilterOption = computed(() =>
+  filterModeOptions.find((o) => o.value === props.formData.engine.filter_mode) ||
+    filterModeOptions[0],
+);
+
+function selectFilterMode(value: string) {
+  props.formData.engine.filter_mode = value;
+  filterDropdownOpen.value = false;
+}
+
+function handleDocumentClick(event: MouseEvent) {
+  if (
+    filterDropdownRef.value &&
+    !filterDropdownRef.value.contains(event.target as Node)
+  ) {
+    filterDropdownOpen.value = false;
+  }
+}
+
+onMounted(() => {
+  document.addEventListener("click", handleDocumentClick);
+});
+
+onUnmounted(() => {
+  document.removeEventListener("click", handleDocumentClick);
+});
 </script>
+
+<style scoped>
+.filter-dropdown {
+  position: relative;
+}
+.filter-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  color: #1f2937;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  min-width: 160px;
+}
+.filter-select:hover {
+  border-color: #9ca3af;
+}
+.filter-select:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+.filter-select-label {
+  flex: 1;
+  text-align: left;
+}
+.filter-select-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #dcfce7;
+  color: #166534;
+  font-weight: 500;
+}
+.filter-select-arrow {
+  color: #6b7280;
+  font-size: 11px;
+}
+.filter-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+  min-width: 280px;
+  padding: 6px;
+}
+.filter-option {
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.filter-option:hover {
+  background-color: #f3f4f6;
+}
+.filter-option.selected {
+  background-color: #eff6ff;
+}
+.filter-option-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.filter-option-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1f2937;
+}
+.filter-option-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #dcfce7;
+  color: #166534;
+  font-weight: 500;
+}
+.filter-option-desc {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 3px;
+}
+</style>

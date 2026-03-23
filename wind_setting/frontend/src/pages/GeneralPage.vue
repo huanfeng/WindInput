@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import type { Config, EngineInfo } from "../api/settings";
 import * as wailsApi from "../api/wails";
 import type { SchemaConfig, SchemaInfo } from "../api/wails";
@@ -13,26 +13,60 @@ const emit = defineEmits<{
   switchEngine: [type: string];
 }>();
 
-// 方案选择下拉
-const schemaDropdownOpen = ref(false);
-const schemaDropdownRef = ref<HTMLElement | null>(null);
-
 // 所有可用方案
 const allSchemas = ref<SchemaInfo[]>([]);
 
-// 已勾选方案的 ID 列表（有序）
+// 已启用方案的 ID 列表（有序）
 const enabledSchemaIDs = ref<string[]>([]);
 
 // 各方案的配置（schemaID -> config）
 const schemaConfigs = ref<Record<string, SchemaConfig>>({});
 const schemaLoading = ref(false);
 
-// 模糊音对话框（记录当前编辑的方案 ID）
+// 添加方案下拉
+const showAddDropdown = ref(false);
+const addDropdownRef = ref<HTMLElement | null>(null);
+
+// 模糊音对话框
 const showFuzzyDialog = ref(false);
 const fuzzyEditSchemaID = ref("");
 
 // 当前活跃方案 ID
 const activeSchemaID = computed(() => props.formData.schema?.active || "");
+
+// 未启用的方案列表
+const disabledSchemas = computed(() =>
+  allSchemas.value.filter((s) => !enabledSchemaIDs.value.includes(s.id)),
+);
+
+// 获取引擎类型的显示文本
+function getEngineTypeLabel(schemaID: string): string {
+  const info = allSchemas.value.find((s) => s.id === schemaID);
+  const type = info?.engine_type || schemaConfigs.value[schemaID]?.engine?.type || "";
+  const labels: Record<string, string> = {
+    codetable: "码表",
+    pinyin: "拼音",
+  };
+  return labels[type] || type || "";
+}
+
+// 获取方案副标题（作者 + 描述）
+function getSchemaSubtitle(schemaID: string): string {
+  const info = allSchemas.value.find((s) => s.id === schemaID);
+  const cfg = schemaConfigs.value[schemaID];
+  const parts: string[] = [];
+  const author = cfg?.schema?.author;
+  if (author) parts.push(author);
+  const desc = info?.description || cfg?.schema?.description;
+  if (desc) parts.push(desc);
+  return parts.join(" · ") || schemaID;
+}
+
+// 获取方案版本
+function getSchemaVersion(schemaID: string): string {
+  const info = allSchemas.value.find((s) => s.id === schemaID);
+  return info?.version || schemaConfigs.value[schemaID]?.schema?.version || "";
+}
 
 // 加载所有方案信息和配置
 async function loadAllSchemas() {
@@ -41,7 +75,6 @@ async function loadAllSchemas() {
     const schemas = await wailsApi.getAvailableSchemas();
     allSchemas.value = schemas || [];
 
-    // 初始化已勾选列表（从 config.schema.available）
     const available = props.formData.schema?.available || [];
     if (available.length > 0) {
       enabledSchemaIDs.value = available.filter((id: string) =>
@@ -51,7 +84,6 @@ async function loadAllSchemas() {
       enabledSchemaIDs.value = schemas.map((s) => s.id);
     }
 
-    // 加载每个已勾选方案的配置
     for (const id of enabledSchemaIDs.value) {
       await loadSchemaConfig(id);
     }
@@ -85,40 +117,49 @@ function onSchemaConfigChange(schemaID: string) {
   }, 800);
 }
 
-// 切换方案勾选状态
-function toggleSchemaEnabled(schemaID: string) {
+// 启用方案
+function enableSchema(schemaID: string) {
+  if (enabledSchemaIDs.value.includes(schemaID)) return;
+  enabledSchemaIDs.value.push(schemaID);
+  loadSchemaConfig(schemaID);
+  props.formData.schema.available = [...enabledSchemaIDs.value];
+  showAddDropdown.value = false;
+}
+
+// 禁用方案
+function disableSchema(schemaID: string) {
+  if (enabledSchemaIDs.value.length <= 1) return;
+  if (schemaID === activeSchemaID.value) return;
   const idx = enabledSchemaIDs.value.indexOf(schemaID);
   if (idx >= 0) {
-    // 取消勾选：不允许取消最后一个，不允许取消当前活跃方案
-    if (enabledSchemaIDs.value.length <= 1) return;
-    if (schemaID === activeSchemaID.value) return;
     enabledSchemaIDs.value.splice(idx, 1);
     delete schemaConfigs.value[schemaID];
-  } else {
-    // 勾选：追加到末尾
-    enabledSchemaIDs.value.push(schemaID);
-    loadSchemaConfig(schemaID);
   }
-  // 同步到 config
   props.formData.schema.available = [...enabledSchemaIDs.value];
 }
 
-function isSchemaEnabled(schemaID: string) {
-  return enabledSchemaIDs.value.includes(schemaID);
-}
-
-function getSchemaInfo(schemaID: string): SchemaInfo | undefined {
-  return allSchemas.value.find((s) => s.id === schemaID);
-}
-
-// 切换活跃方案
-function onActiveSchemaSelect(schemaID: string) {
+// 设为当前方案
+function setActiveSchema(schemaID: string) {
   if (schemaID === activeSchemaID.value) return;
   props.formData.schema.active = schemaID;
   props.engines.forEach((engine) => {
     engine.isActive = engine.type === schemaID;
   });
   emit("switchEngine", schemaID);
+}
+
+// 箭头排序
+function moveSchema(index: number, direction: -1 | 1) {
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= enabledSchemaIDs.value.length) return;
+  const arr = [...enabledSchemaIDs.value];
+  [arr[index], arr[targetIndex]] = [arr[targetIndex], arr[index]];
+  enabledSchemaIDs.value = arr;
+  props.formData.schema.available = [...arr];
+}
+
+function getSchemaInfo(schemaID: string): SchemaInfo | undefined {
+  return allSchemas.value.find((s) => s.id === schemaID);
 }
 
 // 获取方案的引擎类型
@@ -179,13 +220,12 @@ function setAllFuzzyPairs(enabled: boolean) {
   onSchemaConfigChange(fuzzyEditSchemaID.value);
 }
 
-// 点击外部关闭下拉
 function handleDocumentClick(event: MouseEvent) {
   if (
-    schemaDropdownRef.value &&
-    !schemaDropdownRef.value.contains(event.target as Node)
+    addDropdownRef.value &&
+    !addDropdownRef.value.contains(event.target as Node)
   ) {
-    schemaDropdownOpen.value = false;
+    showAddDropdown.value = false;
   }
 }
 
@@ -207,87 +247,107 @@ onUnmounted(() => {
       <p class="section-desc">管理输入方案和方案专属设置</p>
     </div>
 
-    <!-- 方案管理 -->
-    <div class="settings-card">
-      <div class="card-title">输入方案</div>
-
-      <!-- 当前活跃方案 -->
-      <div class="setting-item">
-        <div class="setting-info">
-          <label>当前方案</label>
-          <p class="setting-hint">可通过快捷键循环切换（按键设置中配置）</p>
-        </div>
-        <div class="setting-control">
-          <div class="segmented-control">
-            <button
-              v-for="id in enabledSchemaIDs"
-              :key="id"
-              :class="{ active: id === activeSchemaID }"
-              :disabled="id === activeSchemaID"
-              @click="onActiveSchemaSelect(id)"
-            >
-              {{ getSchemaInfo(id)?.name || id }}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 可用方案勾选 -->
-      <div class="setting-item">
-        <div class="setting-info">
-          <label>可用方案</label>
-          <p class="setting-hint">管理方案切换列表</p>
-        </div>
-        <div class="setting-control">
-          <div
-            class="theme-dropdown schema-dropdown"
-            ref="schemaDropdownRef"
+    <!-- 方案列表 -->
+    <div class="settings-card schema-list-card">
+      <div class="card-title schema-list-header">
+        <span>输入方案</span>
+        <div class="schema-add-dropdown" ref="addDropdownRef">
+          <button
+            class="btn btn-sm btn-primary"
+            :disabled="disabledSchemas.length === 0"
+            @click="showAddDropdown = !showAddDropdown"
           >
-            <button
-              class="btn btn-sm"
-              type="button"
-              @click="schemaDropdownOpen = !schemaDropdownOpen"
+            + 添加方案
+          </button>
+          <div v-if="showAddDropdown" class="schema-add-menu">
+            <div
+              v-for="schema in disabledSchemas"
+              :key="schema.id"
+              class="schema-add-option"
+              @click="enableSchema(schema.id)"
             >
-              管理 ({{ enabledSchemaIDs.length }}/{{ allSchemas.length }})
-              <span class="theme-select-arrow">&#9662;</span>
-            </button>
-            <div v-if="schemaDropdownOpen" class="theme-options schema-options">
-              <label
-                v-for="schema in allSchemas"
-                :key="schema.id"
-                class="schema-check-item"
-                :class="{
-                  disabled:
-                    schema.id === activeSchemaID &&
-                    enabledSchemaIDs.length <= 1,
-                }"
-              >
-                <input
-                  type="checkbox"
-                  :checked="isSchemaEnabled(schema.id)"
-                  :disabled="
-                    schema.id === activeSchemaID &&
-                    enabledSchemaIDs.length <= 1
-                  "
-                  @change="toggleSchemaEnabled(schema.id)"
-                />
-                <div class="schema-check-info">
-                  <span class="schema-check-name">{{ schema.name }}</span>
-                  <span
-                    v-if="schema.id === activeSchemaID"
-                    class="theme-badge active"
-                    >当前</span
-                  >
-                </div>
-              </label>
+              <div class="schema-add-option-main">
+                <span class="schema-add-option-name">{{ schema.name }}</span>
+                <span class="schema-add-option-type">{{ schema.engine_type === 'codetable' ? '码表' : schema.engine_type === 'pinyin' ? '拼音' : schema.engine_type }}</span>
+              </div>
+              <div v-if="schema.description" class="schema-add-option-desc">{{ schema.description }}</div>
             </div>
           </div>
         </div>
       </div>
+
+      <p class="schema-list-hint">
+        使用箭头调整顺序，快捷键切换时按此顺序循环
+      </p>
+
+      <div v-if="schemaLoading" class="schema-list-loading">加载中...</div>
+
+      <div v-else class="schema-list">
+        <div
+          v-for="(schemaID, index) in enabledSchemaIDs"
+          :key="schemaID"
+          class="schema-item"
+          :class="{ 'schema-item-active': schemaID === activeSchemaID }"
+        >
+          <div class="schema-row">
+            <!-- 排序箭头 -->
+            <div class="schema-sort-btns">
+              <button
+                class="schema-sort-btn"
+                :disabled="index === 0"
+                @click.stop="moveSchema(index, -1)"
+                title="上移"
+              >&#9650;</button>
+              <button
+                class="schema-sort-btn"
+                :disabled="index === enabledSchemaIDs.length - 1"
+                @click.stop="moveSchema(index, 1)"
+                title="下移"
+              >&#9660;</button>
+            </div>
+            <div class="schema-row-info">
+              <div class="schema-row-main">
+                <span class="schema-row-name">
+                  {{ getSchemaInfo(schemaID)?.name || schemaID }}
+                </span>
+                <span class="schema-row-type">{{ getEngineTypeLabel(schemaID) }}</span>
+                <span v-if="getSchemaVersion(schemaID)" class="schema-row-version">
+                  v{{ getSchemaVersion(schemaID) }}
+                </span>
+              </div>
+              <div class="schema-row-sub">
+                {{ getSchemaSubtitle(schemaID) }}
+              </div>
+            </div>
+            <div class="schema-row-actions">
+              <button
+                v-if="schemaID !== activeSchemaID"
+                class="btn btn-sm"
+                @click.stop="setActiveSchema(schemaID)"
+              >
+                设为当前
+              </button>
+              <span v-else class="schema-active-badge">当前方案</span>
+              <button
+                v-if="schemaID !== activeSchemaID && enabledSchemaIDs.length > 1"
+                class="btn-icon btn-delete"
+                @click.stop="disableSchema(schemaID)"
+                title="移除方案"
+              >
+                &times;
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="!schemaLoading && enabledSchemaIDs.length === 0" class="schema-list-empty">
+        暂无已启用的方案
+      </div>
     </div>
 
-    <!-- 各方案配置（所有已勾选方案） -->
-    <template v-for="schemaID in enabledSchemaIDs" :key="schemaID">
+    <!-- 各方案配置 Card -->
+    <template v-for="schemaID in enabledSchemaIDs" :key="'cfg-' + schemaID">
       <div v-if="schemaConfigs[schemaID]" class="settings-card">
         <div class="card-title">
           <span>{{ schemaConfigs[schemaID].schema?.name || schemaID }}</span>
@@ -295,8 +355,7 @@ onUnmounted(() => {
             v-if="schemaID === activeSchemaID"
             class="theme-badge active"
             style="margin-left: 8px"
-            >当前</span
-          >
+          >当前</span>
         </div>
 
         <!-- 码表类型 -->
@@ -534,43 +593,188 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.schema-dropdown {
-  position: relative;
+/* Schema list card */
+.schema-list-card {
+  padding-bottom: 8px;
 }
-.schema-options {
-  min-width: 200px;
-  right: 0;
-  left: auto;
+.schema-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
-.schema-check-item {
+.schema-list-hint {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 12px;
+  text-align: left;
+}
+.schema-list-loading,
+.schema-list-empty {
+  text-align: center;
+  padding: 24px;
+  color: #9ca3af;
+}
+
+/* Schema list */
+.schema-list {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* Schema item */
+.schema-item {
+  border-bottom: 1px solid #e5e7eb;
+}
+.schema-item:last-child {
+  border-bottom: none;
+}
+
+/* Schema row */
+.schema-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 14px;
-  cursor: pointer;
-  font-size: 13px;
+  padding: 12px 14px;
   transition: background-color 0.15s;
 }
-.schema-check-item:hover {
-  background-color: var(--bg-hover, #f3f4f6);
-}
-.schema-check-item.disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.schema-check-item input {
-  width: 16px;
-  height: 16px;
-  cursor: pointer;
-  accent-color: var(--accent-color, #2563eb);
+
+/* Sort buttons */
+.schema-sort-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   flex-shrink: 0;
 }
-.schema-check-info {
+.schema-sort-btn {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  width: 18px;
+  height: 14px;
+  border: none;
+  background: none;
+  color: #c0c4cc;
+  font-size: 9px;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0;
+  line-height: 1;
+  transition: all 0.15s;
 }
-.schema-check-name {
+.schema-sort-btn:hover:not(:disabled) {
+  background: #e5e7eb;
+  color: #374151;
+}
+.schema-sort-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+/* Schema row info (two lines) */
+.schema-row-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.schema-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.schema-row-name {
+  font-size: 14px;
   font-weight: 500;
+  color: #1f2937;
+}
+.schema-row-type {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  color: #6b7280;
+  flex-shrink: 0;
+}
+.schema-row-version {
+  font-size: 11px;
+  color: #9ca3af;
+  flex-shrink: 0;
+}
+.schema-row-sub {
+  font-size: 12px;
+  color: #9ca3af;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Schema row actions */
+.schema-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.schema-active-badge {
+  font-size: 12px;
+  font-weight: 500;
+  color: #2563eb;
+  padding: 4px 10px;
+  background: #eff6ff;
+  border-radius: 6px;
+}
+
+/* Add schema dropdown */
+.schema-add-dropdown {
+  position: relative;
+}
+.schema-add-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+  min-width: 260px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+}
+.schema-add-option {
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.schema-add-option:hover {
+  background-color: #f3f4f6;
+}
+.schema-add-option-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.schema-add-option-name {
+  font-size: 13px;
+  color: #1f2937;
+}
+.schema-add-option-type {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  color: #6b7280;
+}
+.schema-add-option-desc {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

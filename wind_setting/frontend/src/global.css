@@ -580,16 +580,12 @@ input:checked + .slider:before {
   max-width: 300px;
 }
 
-/* ========== Theme Dropdown (shared: GeneralPage + AppearancePage) ========== */
+/* ========== Theme Dropdown (AppearancePage) ========== */
 .theme-dropdown {
   position: relative;
 }
-.theme-dropdown,
-.input-mode-dropdown {
+.theme-dropdown {
   min-width: 320px;
-}
-.input-mode-dropdown {
-  min-width: 360px;
 }
 .theme-select {
   width: 100%;
