@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $TAG"
+
+      # --- Setup toolchains ---
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wind_input/go.mod
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: wind_setting/frontend/pnpm-lock.yaml
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          echo "C:\Program Files (x86)\NSIS" >> $env:GITHUB_PATH
+
+      - name: Install frontend dependencies
+        working-directory: wind_setting/frontend
+        run: pnpm install --frozen-lockfile
+
+      # --- Write version from tag into VERSION file (tag is the source of truth) ---
+      - name: Set version from tag
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.tag }}"
+          Set-Content -Path VERSION -Value $version -NoNewline -Encoding UTF8
+          Write-Host "VERSION set to: $version"
+
+      # --- Build all + package installer (single pipeline, proper error propagation) ---
+      - name: Build and package installer
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.tag }}"
+          installer\build_nsis.ps1 -Version $version
+
+      # --- Generate release notes from conventional commits ---
+      - name: Generate release notes
+        shell: pwsh
+        run: |
+          # Find previous tag
+          $currentTag = "${{ github.ref_name }}"
+          $allTags = git tag --sort=-version:refname | Where-Object { $_ -ne $currentTag }
+          $prevTag = if ($allTags) { ($allTags | Select-Object -First 1) } else { $null }
+
+          if ($prevTag) {
+            $range = "$prevTag..HEAD"
+          } else {
+            $range = "HEAD"
+          }
+          Write-Host "Range: $range (prev: $prevTag)"
+
+          # Get all commit subjects
+          $commits = git log $range --pretty=format:"%s" --no-merges | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+
+          # Categorize
+          $categories = [ordered]@{
+            "feat"     = @{ title = "## ✨ 新功能"; items = @() }
+            "fix"      = @{ title = "## 🐛 Bug 修复"; items = @() }
+            "refactor" = @{ title = "## 🔨 重构"; items = @() }
+            "perf"     = @{ title = "## ⚡ 性能优化"; items = @() }
+            "other"    = @{ title = "## 🔧 其他变更"; items = @() }
+          }
+
+          foreach ($msg in $commits) {
+            if ($msg -match '^(feat|fix|refactor|perf|chore|ci|docs)(\(([^)]+)\))?:\s*(.+)$') {
+              $type = $Matches[1]
+              $scope = $Matches[3]
+              $desc = $Matches[4]
+              $entry = if ($scope) { "- **$scope**: $desc" } else { "- $desc" }
+
+              switch ($type) {
+                "feat"     { $categories["feat"].items += $entry }
+                "fix"      { $categories["fix"].items += $entry }
+                "refactor" { $categories["refactor"].items += $entry }
+                "perf"     { $categories["perf"].items += $entry }
+                default    { $categories["other"].items += $entry }
+              }
+            } else {
+              $categories["other"].items += "- $msg"
+            }
+          }
+
+          # Build markdown
+          $body = ""
+          foreach ($cat in $categories.Values) {
+            if ($cat.items.Count -gt 0) {
+              $body += "$($cat.title)`n`n"
+              $body += ($cat.items -join "`n") + "`n`n"
+            }
+          }
+
+          if (-not $body) {
+            $body = "Initial release.`n"
+          }
+
+          [System.IO.File]::WriteAllText("release_notes.md", $body, [System.Text.UTF8Encoding]::new($false))
+          Write-Host "Release notes generated ($($commits.Count) commits)"
+
+      # --- Upload & Release ---
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindInput-${{ steps.version.outputs.tag }}
+          path: build/installer/WindInput-*-Setup.exe
+
+      - name: Create GitHub Release (draft)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ steps.version.outputs.tag }}"
+          $tag = "${{ github.ref_name }}"
+          $installer = "build\installer\WindInput-$version-Setup.exe"
+
+          # Chinese title via Unicode code points (avoids YAML encoding issues)
+          $appName = -join @([char]0x6E05, [char]0x98CE, [char]0x8F93, [char]0x5165, [char]0x6CD5)
+
+          gh release create $tag `
+            --draft `
+            --title "$appName v$version" `
+            --notes-file release_notes.md `
+            $installer

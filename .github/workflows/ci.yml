@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "pic/**"
+      - "LICENSE"
+      - "NOTICE.md"
+  pull_request:
+    branches: [main]
+
+jobs:
+  go-check:
+    name: Go Build & Test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wind_input/go.mod
+
+      - name: Build
+        working-directory: wind_input
+        run: go build ./...
+
+      - name: Vet
+        working-directory: wind_input
+        run: go vet ./...
+
+      - name: Test
+        working-directory: wind_input
+        run: go test ./... -v -count=1

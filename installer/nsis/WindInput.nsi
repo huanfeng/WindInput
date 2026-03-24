@@ -44,13 +44,13 @@ Var RANDOM_SUFFIX
 !error "Missing file: ${BUILD_DIR}\wind_setting.exe. Run build_all.ps1 -WailsMode release first."
 !endif
 
-!if /FileExists "${BUILD_DIR}\dict\pinyin\8105.dict.yaml"
+!if /FileExists "${BUILD_DIR}\dict\pinyin\cn_dicts\8105.dict.yaml"
 !else
-!error "Missing file: ${BUILD_DIR}\dict\pinyin\8105.dict.yaml. Run build_all.ps1 first."
+!error "Missing file: ${BUILD_DIR}\dict\pinyin\cn_dicts\8105.dict.yaml. Run build_all.ps1 first."
 !endif
 
 Name "${APP_NAME}"
-OutFile "${OUTPUT_DIR}\${APP_NAME}-${APP_VERSION}-Setup.exe"
+OutFile "${OUTPUT_DIR}\WindInput-${APP_VERSION}-Setup.exe"
 InstallDir "$PROGRAMFILES64\${APP_DIRNAME}"
 InstallDirRegKey HKLM "${UNINST_KEY}" "InstallLocation"
 ShowInstDetails show

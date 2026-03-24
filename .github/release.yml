@@ -1,0 +1,28 @@
+changelog:
+  categories:
+    - title: "🆕 新功能"
+      labels:
+        - enhancement
+        - feature
+    - title: "🐛 Bug 修复"
+      labels:
+        - bug
+        - fix
+    - title: "🔧 维护"
+      labels:
+        - chore
+        - maintenance
+    - title: "📖 文档"
+      labels:
+        - documentation
+    - title: "⚡ 性能"
+      labels:
+        - performance
+    - title: "🔨 重构"
+      labels:
+        - refactor
+  exclude:
+    labels:
+      - skip-changelog
+    authors:
+      - dependabot
