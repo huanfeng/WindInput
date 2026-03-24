@@ -13,12 +13,22 @@ Write-Host ""
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $BuildDir = Join-Path $ScriptDir "build"
 
+# 读取版本号
+$VersionFile = Join-Path $ScriptDir "VERSION"
+if (Test-Path $VersionFile) {
+    $AppVersion = (Get-Content $VersionFile -Raw).Trim()
+} else {
+    $AppVersion = "dev"
+}
+Write-Host "版本: $AppVersion"
+Write-Host ""
+
 # [1/6] 构建 Go 服务
 Write-Host "[1/6] 构建 Go 服务(wind_input.exe)..."
 if (-not (Test-Path $BuildDir)) { New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null }
 Push-Location (Join-Path $ScriptDir "wind_input")
 try {
-    & go build -ldflags "-H windowsgui" -o (Join-Path $BuildDir "wind_input.exe") ./cmd/service
+    & go build -ldflags "-H windowsgui -X main.version=$AppVersion" -o (Join-Path $BuildDir "wind_input.exe") ./cmd/service
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[错误] Go 构建失败" -ForegroundColor Red
         exit 1

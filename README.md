@@ -1,277 +1,112 @@
-# 清风输入法 (WindInput) - Windows 输入法
+﻿<p align="center">
+  <img src="pic/logo_fix.png" alt="清风输入法" width="128">
+</p>
 
-基于 Windows TSF (Text Services Framework) 框架的中文输入法，采用 C++ 实现 TSF 核心层，Go 实现输入引擎和候选窗口。
+<h1 align="center">清风输入法 (WindInput)</h1>
+
+<p align="center">
+  一款轻量、快速的 Windows 中文输入法
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.1.0--alpha-blue" alt="Version">
+  <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-brightgreen" alt="Platform">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+</p>
+
+> **⚠️ 早期开发阶段**
+>
+> 本项目目前处于 alpha 阶段（v0.1.0-alpha），功能和配置格式可能随版本更新发生变化。
+> 升级后如遇到异常，请尝试删除配置目录 `%APPDATA%\WindInput\` 以恢复默认配置。
 
 ## 特性
 
-- **TSF 原生集成**: 完全兼容 Windows 10/11 的输入法框架
-- **C++/Go 混合架构**: C++ 处理系统接口，Go 处理输入逻辑
-- **二进制协议通信**: 高效的进程间通信
-- **多引擎支持**: 支持拼音和五笔输入
-- **中英文切换**: 可配置切换键（Shift/Ctrl/CapsLock）
-- **临时英文模式**: Shift+字母快速输入英文
-- **候选窗口**: 跟随光标的原生 Windows 候选窗口
-- **工具栏**: 可拖动的状态显示工具栏
-- **高 DPI 支持**: 自动适配高分辨率显示器
-- **配置文件**: YAML 格式配置，支持热更新
-- **设置工具**: 基于 Wails 的图形化设置界面
+- **专为五笔设计** — 支持五笔 86、五笔拼音混输，同时提供全拼和双拼输入
+- **智能候选** — 精准匹配，快速上屏
+- **高 DPI 适配** — 完美支持高分辨率和多显示器环境，界面清晰锐利
+- **快捷切换** — Shift/Ctrl/CapsLock 中英文切换可配置，Shift + 字母临时英文输入
+- **方案驱动** — 通过 YAML 方案文件灵活定义输入行为
+- **图形设置** — 内置设置工具，所有配置可视化调整，修改即时生效
+- **轻量运行** — 资源占用低，启动迅速
 
-## 系统要求
+## 安装
 
-- Windows 10 或 Windows 11
-- Visual Studio 2017 或更高版本 (含 C++ 桌面开发工具)
-- Go 1.21 或更高版本
-- CMake 3.15 或更高版本
+### 使用安装包（推荐）
 
-## 快速开始
+从 [Releases](../../releases) 页面下载最新的安装包（`清风输入法-x.x.x-Setup.exe`），双击运行即可。
 
-### 构建项目
+安装完成后，按 `Win + Space` 或 `Ctrl + Shift` 切换到清风输入法。
 
-使用一键构建脚本（PowerShell）：
-```powershell
-.\build_all.ps1
-```
+### 手动构建安装
 
-或手动分步构建：
-
-```powershell
-# 构建 C++ TSF DLL
-cd wind_tsf
-mkdir build; cd build
-cmake ..
-cmake --build . --config Release
-
-# 构建 Go 服务
-cd wind_input
-go build -ldflags "-H windowsgui" -o ../build/wind_input.exe ./cmd/service
-```
-
-### 安装
-
-以**管理员权限**运行：
-```powershell
-installer\install.ps1
-```
-
-### 卸载
-
-以**管理员权限**运行：
-```powershell
-installer\uninstall.ps1
-```
-
-### 生成正式安装包 (NSIS)
-
-面向最终用户发布时，使用 NSIS 生成单文件安装包：
-
-```powershell
-installer\build_nsis.ps1 -Version 0.1.0
-```
-
-输出文件：
-
-```text
-build\installer\清风输入法-0.1.0-Setup.exe
-```
-
-可选参数（跳过构建，仅打包现有 `build\` 产物）：
-
-```powershell
-installer\build_nsis.ps1 -Version 0.1.0 -SkipBuild
-```
-
-静默安装/卸载（用于脚本化部署）：
-
-```batch
-build\installer\清风输入法-0.1.0-Setup.exe /S
-"%ProgramFiles%\WindInput\uninstall.exe" /S
-```
-
-## 项目结构
-
-```
-WindInput/
-├── wind_tsf/              # C++ TSF 核心 (DLL)
-│   ├── src/               # 源代码
-│   │   ├── dllmain.cpp    # DLL 入口点
-│   │   ├── TextService.cpp # TSF 主服务
-│   │   ├── KeyEventSink.cpp # 按键处理
-│   │   ├── HotkeyManager.cpp # 快捷键管理
-│   │   ├── IPCClient.cpp  # 命名管道客户端
-│   │   └── ...            # 其他组件
-│   └── include/           # 头文件 (含 BinaryProtocol.h)
-│
-├── wind_input/            # Go 输入服务
-│   ├── cmd/service/       # 服务入口
-│   └── internal/
-│       ├── ipc/           # 二进制协议通信
-│       ├── coordinator/   # 输入协调器
-│       ├── engine/        # 多引擎支持
-│       │   ├── pinyin/    # 拼音引擎
-│       │   └── wubi/      # 五笔引擎
-│       ├── dict/          # 词库管理（含码表过滤）
-│       ├── ui/            # 候选窗口和工具栏
-│       ├── transform/     # 文本转换（全角/标点）
-│       └── config/        # 配置管理
-│
-├── wind_setting/          # 设置工具 (Wails + Vue 3)
-│   ├── frontend/          # Vue 3 前端
-│   └── *.go               # Go 后端
-│
-├── dict/                  # 词库文件
-│   ├── pinyin/            # 拼音词库
-│   ├── wubi/              # 五笔词库
-│   └── common_chars.txt   # 通用规范汉字表
-│
-├── installer/             # 安装脚本
-│   ├── install.bat
-│   └── uninstall.bat
-│
-├── build/                 # 构建输出
-└── docs/                  # 开发文档
-```
-
-## 技术架构
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                    Windows 应用程序                       │
-│                (记事本、浏览器、Office 等)                 │
-└────────────────────────┬─────────────────────────────────┘
-                         │ TSF 接口
-┌────────────────────────┼─────────────────────────────────┐
-│    wind_tsf.dll        │           C++                   │
-│   ┌────────────────────▼───────────────────────┐         │
-│   │              TextService                   │         │
-│   │     ITfTextInputProcessor 实现             │         │
-│   └─────────────┬───────────────────┬──────────┘         │
-│                 │                   │                    │
-│   ┌─────────────▼─────┐   ┌────────▼────────┐           │
-│   │  KeyEventSink     │   │ LangBarItemButton│           │
-│   │  按键事件处理      │   │   语言栏图标    │           │
-│   └─────────────┬─────┘   └─────────────────┘           │
-│   ┌─────────────▼─────────────────────────┐             │
-│   │   IPCClient (双管道)                   │             │
-│   │   主管道: 请求/响应  推送管道: 接收通知 │             │
-│   └─────────────┬─────────────────────────┘             │
-└─────────────────┼────────────────────────────────────────┘
-                  │ \\.\pipe\wind_input (主管道)
-                  │ \\.\pipe\wind_input_push (推送管道)
-┌─────────────────┼────────────────────────────────────────┐
-│  wind_input.exe │           Go                           │
-│   ┌─────────────▼─────────────────────────┐             │
-│   │   IPC Server (二进制协议)              │             │
-│   └─────────────┬─────────────────────────┘             │
-│   ┌─────────────▼─────────────────────────┐             │
-│   │          Coordinator                   │             │
-│   │     输入协调器 (权威状态源)            │             │
-│   └─────┬───────────────────┬─────────────┘             │
-│         │                   │                            │
-│   ┌─────▼─────┐       ┌─────▼──────────┐                │
-│   │  Engine   │       │   UI Manager   │                │
-│   │拼音/五笔  │       │  候选窗/工具栏  │                │
-│   └─────┬─────┘       └────────────────┘                │
-│         │                                                │
-│   ┌─────▼─────┐   ┌────────────────────┐                │
-│   │   Dict    │   │  Control Server    │◄── 设置工具    │
-│   │   词库    │   │ \\.\pipe\wind_     │   通知重载     │
-│   └───────────┘   │   input_control    │                │
-│                   └────────────────────┘                │
-└──────────────────────────────────────────────────────────┘
-```
-
-### 管道说明
-
-| 管道 | 用途 |
-|------|------|
-| `\\.\pipe\wind_input` | TSF→Go 请求/响应（同步） |
-| `\\.\pipe\wind_input_push` | Go→TSF 状态推送（异步） |
-| `\\.\pipe\wind_input_control` | 设置工具→Go 配置重载 |
-
-## 配置
-
-配置文件位于 `%APPDATA%\WindInput\config.yaml`:
-
-```yaml
-startup:
-  remember_last_state: false   # 记忆前次状态
-  default_chinese_mode: true   # 启动默认中文模式
-
-engine:
-  type: pinyin                 # pinyin / wubi
-  filter_mode: smart           # smart / general / gb18030
-  wubi:
-    auto_commit_at_4: false    # 四码唯一自动上屏
-    top_code_commit: true      # 五码顶字上屏
-
-hotkeys:
-  toggle_mode_keys: [lshift, rshift]  # 中英切换键
-  commit_on_switch: true       # 切换时编码上屏
-  switch_engine: "ctrl+`"      # 切换引擎
-
-input:
-  select_key_groups: [semicolon_quote]  # 2/3候选键
-  page_keys: [pageupdown, minus_equal]  # 翻页键
-  shift_temp_english:
-    enabled: true              # 临时英文模式
-
-ui:
-  font_size: 18                # 字体大小
-  candidates_per_page: 9       # 每页候选数
-
-advanced:
-  log_level: info              # 日志级别
-```
+如需从源码构建，请参阅 [开发文档](docs/DEVELOPMENT.md)。
 
 ## 使用方法
 
-1. 安装后，使用 `Win + Space` 或 `Ctrl + Shift` 切换到 **清风输入法**
-2. 输入拼音，候选窗口自动显示
-3. 使用数字键 1-9 选择候选词，或空格选择第一个
-4. 按 `Shift` 切换中英文模式
-5. 按 `Esc` 取消当前输入
-6. 按 `Enter` 输出原始拼音
+1. 使用 `Win + Space` 或 `Ctrl + Shift` 切换到**清风输入法**
+2. 输入拼音或五笔编码，候选窗口自动显示
+3. 数字键 `1-9` 选择候选词，`空格` 选择第一个
+4. `Shift` 切换中英文模式
+5. `Esc` 取消当前输入
+6. `Enter` 输出原始编码
 
-## 开发状态
+## 配置
 
-### 核心功能
-- [x] TSF 框架集成与 Windows 10/11 兼容
-- [x] 二进制协议 IPC 通信
-- [x] 拼音引擎
-- [x] 五笔引擎
-- [x] 候选窗口与工具栏 UI
-- [x] 中英文切换（多键位支持）
-- [x] 临时英文模式
-- [x] 语言栏图标
-- [x] DPI 缩放支持
+配置文件位于 `%APPDATA%\WindInput\config.yaml`，也可通过设置工具修改：
 
-### 输入特性
-- [x] 自动上屏策略
-- [x] 五码顶字/标点顶字
-- [x] 候选翻页配置
-- [x] 2/3候选快捷键
-- [x] 全角/半角切换
-- [x] 中英文标点切换
-- [x] 码表过滤（通用规范汉字）
+```yaml
+engine:
+  type: pinyin              # pinyin / wubi
 
-### 待开发
-- [ ] 用户词库学习
-- [ ] 模糊音支持
-- [ ] 自定义短语
-- [ ] 云同步
+hotkeys:
+  toggle_mode_keys: [lshift, rshift]   # 中英切换键
 
-## 文档
+ui:
+  font_size: 18             # 候选窗字体大小
+  candidates_per_page: 9    # 每页候选数量
+```
 
-详细开发文档请参阅：
+完整配置项请参阅设置工具中的说明。
 
-- [docs/architecture.md](docs/architecture.md) - 架构设计文档
-- [docs/wubi_requirements.md](docs/wubi_requirements.md) - 基于用户功能汇总整理的五笔需求文档
+## 技术概览
+
+清风输入法采用 C++/Go 混合架构：
+
+| 组件 | 技术 | 职责 |
+|------|------|------|
+| `wind_tsf` | C++ | Windows TSF 框架接口，键盘事件捕获 |
+| `wind_input` | Go | 输入引擎、候选词管理、UI 渲染 |
+| `wind_setting` | Go + Vue 3 | 图形化设置工具 |
+
+架构详情和开发指南请参阅 [开发文档](docs/DEVELOPMENT.md)。
+
+## 参与贡献
+
+欢迎贡献代码、报告 Bug 或提出建议！请阅读 [贡献指南](CONTRIBUTING.md) 了解详情。
+
+> 注意：首次提交 PR 需要签署 [贡献者许可协议 (CLA)](CLA.md)。
+
+## 第三方资源
+
+本项目的词库数据使用了以下开源项目：
+
+| 资源 | 用途 | 许可证 |
+|------|------|--------|
+| [雾凇拼音 (rime-ice)](https://github.com/iDvel/rime-ice) | 拼音词库数据源 | GPL-3.0 |
+| [极点五笔 for Rime](https://github.com/KyleBing/rime-wubi86-jidian) | 五笔 86 码表数据源 | Apache-2.0 |
+| 腾讯词向量 | 词频权重参考 | — |
+
+详细的第三方资源声明请参阅 [NOTICE.md](NOTICE.md)。
 
 ## 许可证
 
-MIT License
+本项目源代码采用 [MIT 许可证](LICENSE)。
 
-## 致谢
+词库数据来源于第三方项目，适用各自的许可证条款，详见 [NOTICE.md](NOTICE.md)。
 
-- [Windows TSF 官方文档](https://docs.microsoft.com/en-us/windows/win32/tsf/text-services-framework)
-- [Windows Classic Samples](https://github.com/microsoft/Windows-classic-samples)
+## 相关链接
+
+- [更新日志](CHANGELOG.md)
+- [开发文档](docs/DEVELOPMENT.md)
+- [贡献指南](CONTRIBUTING.md)
+- [第三方声明](NOTICE.md)
