@@ -199,6 +199,45 @@ function getFuzzyConfig(schemaID: string) {
   return py.fuzzy;
 }
 
+// 双拼方案
+const shuangpinLayoutNames: Record<string, string> = {
+  xiaohe: "小鹤双拼",
+  ziranma: "自然码",
+  mspy: "微软双拼",
+  sogou: "搜狗双拼",
+  abc: "智能ABC",
+  ziguang: "紫光双拼",
+};
+
+function getShuangpinLayout(schemaID: string): string {
+  const py = getPinyinConfig(schemaID);
+  return py.shuangpin?.layout || "xiaohe";
+}
+
+function getShuangpinLayoutName(schemaID: string): string {
+  const layout = getShuangpinLayout(schemaID);
+  return shuangpinLayoutNames[layout] || layout;
+}
+
+function getSchemaDisplayName(schemaID: string): string {
+  const cfg = schemaConfigs.value[schemaID];
+  if (!cfg) return ""; // 未加载时返回空，让模板 fallback
+  const baseName = cfg.schema?.name || schemaID;
+  // 双拼方案：显示 "双拼 · 小鹤双拼" 格式
+  if (cfg.engine?.pinyin?.scheme === "shuangpin") {
+    return `${baseName} · ${getShuangpinLayoutName(schemaID)}`;
+  }
+  return baseName;
+}
+
+function onShuangpinLayoutChange(schemaID: string, event: Event) {
+  const target = event.target as HTMLSelectElement;
+  const py = getPinyinConfig(schemaID);
+  if (!py.shuangpin) py.shuangpin = {};
+  py.shuangpin.layout = target.value;
+  onSchemaConfigChange(schemaID);
+}
+
 // 模糊音
 const fuzzyPairs = [
   { field: "zh_z", label: "zh ↔ z", example: "yi'zi → 一直" },
@@ -328,7 +367,7 @@ onUnmounted(() => {
             <div class="schema-row-info">
               <div class="schema-row-main">
                 <span class="schema-row-name">
-                  {{ getSchemaInfo(schemaID)?.name || schemaID }}
+                  {{ getSchemaDisplayName(schemaID) || getSchemaInfo(schemaID)?.name || schemaID }}
                 </span>
                 <span class="schema-row-type">{{
                   getEngineTypeLabel(schemaID)
@@ -380,7 +419,7 @@ onUnmounted(() => {
     <template v-for="schemaID in enabledSchemaIDs" :key="'cfg-' + schemaID">
       <div v-if="schemaConfigs[schemaID]" class="settings-card">
         <div class="card-title">
-          <span>{{ schemaConfigs[schemaID].schema?.name || schemaID }}</span>
+          <span>{{ getSchemaDisplayName(schemaID) }}</span>
           <span
             v-if="schemaID === activeSchemaID"
             class="theme-badge active"
@@ -506,6 +545,29 @@ onUnmounted(() => {
 
         <!-- 拼音类型 -->
         <template v-if="getEngineType(schemaID) === 'pinyin'">
+          <!-- 双拼方案选择 -->
+          <div
+            v-if="getPinyinConfig(schemaID).scheme === 'shuangpin'"
+            class="setting-item"
+          >
+            <div class="setting-info">
+              <label>双拼方案</label>
+              <p class="setting-hint">选择双拼键位布局</p>
+            </div>
+            <div class="setting-control">
+              <select
+                :value="getShuangpinLayout(schemaID)"
+                @change="onShuangpinLayoutChange(schemaID, $event)"
+              >
+                <option value="xiaohe">小鹤双拼</option>
+                <option value="ziranma">自然码</option>
+                <option value="mspy">微软双拼</option>
+                <option value="sogou">搜狗双拼</option>
+                <option value="abc">智能ABC</option>
+                <option value="ziguang">紫光双拼</option>
+              </select>
+            </div>
+          </div>
           <div class="setting-item">
             <div class="setting-info">
               <label>五笔反查提示</label>

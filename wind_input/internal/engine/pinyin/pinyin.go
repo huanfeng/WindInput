@@ -7,6 +7,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/engine/pinyin/shuangpin"
 )
 
 // DebugLog 控制是否输出调试日志（每次按键触发的高频信息）
@@ -42,6 +43,9 @@ type Engine struct {
 	dictManager  *dict.DictManager // 词库管理器（用于用户词频学习）
 	scorer       *Scorer           // 统一候选评分器（deprecated，保留供五笔引擎引用）
 	rimeScorer   *RimeScorer       // Rime 风格连续评分器
+
+	// 双拼支持
+	spConverter *shuangpin.Converter // 双拼转换器（nil 表示全拼模式）
 }
 
 // NewEngine 创建拼音引擎
@@ -250,6 +254,21 @@ func (e *Engine) AddWubiHintsForced(candidates []candidate.Candidate) {
 			candidates[i].Hint = wubiCode
 		}
 	}
+}
+
+// SetShuangpinConverter 设置双拼转换器（nil 表示全拼模式）
+func (e *Engine) SetShuangpinConverter(conv *shuangpin.Converter) {
+	e.spConverter = conv
+}
+
+// GetShuangpinConverter 获取双拼转换器
+func (e *Engine) GetShuangpinConverter() *shuangpin.Converter {
+	return e.spConverter
+}
+
+// IsShuangpin 是否为双拼模式
+func (e *Engine) IsShuangpin() bool {
+	return e.spConverter != nil
 }
 
 // SetDictManager 设置词库管理器（用于用户词频学习）

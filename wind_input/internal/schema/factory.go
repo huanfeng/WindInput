@@ -14,6 +14,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/dict/dictcache"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
+	"github.com/huanfeng/wind_input/internal/engine/pinyin/shuangpin"
 	"github.com/huanfeng/wind_input/internal/engine/wubi"
 )
 
@@ -165,6 +166,17 @@ func createPinyinEngine(s *Schema, exeDir string, dm *dict.DictManager) (*Engine
 	}
 
 	engine := pinyin.NewEngineWithConfig(compositeDict, config)
+
+	// 配置双拼转换器
+	if spec.Scheme == "shuangpin" && spec.Shuangpin != nil {
+		spScheme := shuangpin.Get(spec.Shuangpin.Layout)
+		if spScheme != nil {
+			engine.SetShuangpinConverter(shuangpin.NewConverter(spScheme))
+			log.Printf("[SchemaFactory] 双拼模式: layout=%s (%s)", spScheme.ID, spScheme.Name)
+		} else {
+			log.Printf("[SchemaFactory] 未知的双拼方案: %s，回退到全拼", spec.Shuangpin.Layout)
+		}
+	}
 
 	// 加载 Unigram 语言模型
 	if s.Learning.UnigramPath != "" {
@@ -617,6 +629,15 @@ func createMixedEngine(s *Schema, exeDir string, dm *dict.DictManager) (*EngineB
 	}
 
 	pinyinEngine := pinyin.NewEngineWithConfig(pinyinCompositeDict, pinyinConfig)
+
+	// 混输模式下的双拼转换器
+	if pinyinSpec.Scheme == "shuangpin" && pinyinSpec.Shuangpin != nil {
+		spScheme := shuangpin.Get(pinyinSpec.Shuangpin.Layout)
+		if spScheme != nil {
+			pinyinEngine.SetShuangpinConverter(shuangpin.NewConverter(spScheme))
+			log.Printf("[SchemaFactory] 混输双拼模式: layout=%s (%s)", spScheme.ID, spScheme.Name)
+		}
+	}
 
 	// 加载 Unigram 语言模型
 	if s.Learning.UnigramPath != "" {

@@ -401,11 +401,11 @@ export namespace main {
 	    pinyin?: Record<string, any>;
 	    mixed?: Record<string, any>;
 	    filter_mode: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new SchemaConfigEngine(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.type = source["type"];

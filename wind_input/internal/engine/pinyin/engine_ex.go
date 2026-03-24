@@ -6,6 +6,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/engine/pinyin/shuangpin"
 )
 
 // rimeScore 计算 Rime 风格评分并映射到 int 权重
@@ -43,6 +44,24 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	}
 
 	input = strings.ToLower(input)
+
+	// ── 双拼预处理：将双拼键序列转换为全拼 ──
+	var spResult *shuangpinConvertResult
+	originalInput := input // 保存原始双拼输入（用于 ConsumedLength 回映）
+	if e.spConverter != nil {
+		spResult = e.shuangpinPreprocess(input)
+		input = spResult.fullPinyin // 替换为全拼继续处理
+		if len(input) == 0 {
+			result.IsEmpty = true
+			// 如果有 partial，设置预编辑区为声母提示
+			if spResult.hasPartial {
+				result.PreeditDisplay = spResult.preeditDisplay
+			}
+			return result
+		}
+	}
+	_ = originalInput // 在后处理中使用
+
 	convertStart := time.Now()
 
 	// 去除显式分隔符，得到纯拼音字符串用于词库查询
@@ -489,10 +508,46 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	e.addWubiHints(result.Candidates)
 	logDebug("[PinyinEngine] wubiHints elapsed=%v", time.Since(wubiStart))
 
+	// 10. 双拼后处理：回映 ConsumedLength + 替换预编辑显示
+	if spResult != nil {
+		e.shuangpinPostprocess(result, spResult, originalInput)
+	}
+
 	logDebug("[PinyinEngine] final candidates=%d isEmpty=%v elapsed=%v",
 		len(result.Candidates), result.IsEmpty, time.Since(convertStart))
 
 	return result
+}
+
+// shuangpinConvertResult 双拼预处理的内部结果
+type shuangpinConvertResult struct {
+	raw            *shuangpin.ConvertResult
+	fullPinyin     string
+	preeditDisplay string
+	hasPartial     bool
+}
+
+// shuangpinPreprocess 双拼→全拼预处理
+func (e *Engine) shuangpinPreprocess(input string) *shuangpinConvertResult {
+	raw := e.spConverter.Convert(input)
+	return &shuangpinConvertResult{
+		raw:            raw,
+		fullPinyin:     raw.FullPinyin,
+		preeditDisplay: raw.PreeditDisplay,
+		hasPartial:     raw.HasPartial,
+	}
+}
+
+// shuangpinPostprocess 双拼后处理：回映 ConsumedLength，替换预编辑显示
+func (e *Engine) shuangpinPostprocess(result *PinyinConvertResult, spResult *shuangpinConvertResult, originalInput string) {
+	// 替换预编辑显示为双拼转换后的全拼显示
+	result.PreeditDisplay = spResult.preeditDisplay
+
+	// 回映所有候选的 ConsumedLength（全拼位置→双拼位置）
+	for i := range result.Candidates {
+		fpConsumed := result.Candidates[i].ConsumedLength
+		result.Candidates[i].ConsumedLength = spResult.raw.MapConsumedLength(fpConsumed)
+	}
 }
 
 // applyShadowRules 在拼音引擎最终排序后应用 Shadow 拦截器（pin + delete）。

@@ -6,6 +6,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
+	"github.com/huanfeng/wind_input/internal/engine/pinyin/shuangpin"
 	"github.com/huanfeng/wind_input/internal/engine/wubi"
 	"github.com/huanfeng/wind_input/internal/schema"
 	"github.com/huanfeng/wind_input/pkg/config"
@@ -142,6 +143,41 @@ func (m *Manager) UpdatePinyinOptions(pinyinCfg *config.PinyinConfig) {
 	}
 
 	log.Printf("[EngineManager] 更新拼音选项: showWubiHint=%v, fuzzyEnabled=%v", pinyinCfg.ShowWubiHint, pinyinCfg.Fuzzy.Enabled)
+}
+
+// UpdateShuangpinLayout 热更新双拼方案布局
+// layoutID: 方案 ID（如 "xiaohe", "ziranma", "mspy" 等），空字符串表示切回全拼
+func (m *Manager) UpdateShuangpinLayout(layoutID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, eng := range m.engines {
+		var pe *pinyin.Engine
+		switch e := eng.(type) {
+		case *pinyin.Engine:
+			pe = e
+		case *mixed.Engine:
+			pe = e.GetPinyinEngine()
+		}
+		if pe == nil {
+			continue
+		}
+		if layoutID == "" {
+			// 切回全拼
+			pe.SetShuangpinConverter(nil)
+		} else {
+			scheme := shuangpin.Get(layoutID)
+			if scheme != nil {
+				pe.SetShuangpinConverter(shuangpin.NewConverter(scheme))
+			}
+		}
+	}
+
+	if layoutID == "" {
+		log.Printf("[EngineManager] 切换到全拼模式")
+	} else {
+		log.Printf("[EngineManager] 更新双拼方案: %s", layoutID)
+	}
 }
 
 // loadWubiReverseForPinyin 从方案配置中查找五笔反查路径并加载

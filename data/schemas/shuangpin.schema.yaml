@@ -1,0 +1,39 @@
+schema:
+  id: shuangpin
+  name: "双拼"
+  icon_label: "双"
+  version: "1.0"
+  author: "内置"
+  description: "双拼输入方案，每个汉字固定两键输入，支持多种键位布局"
+
+engine:
+  type: pinyin
+  pinyin:
+    scheme: shuangpin
+    shuangpin:
+      layout: xiaohe
+    show_wubi_hint: true
+    use_smart_compose: true
+    candidate_order: smart
+    fuzzy:
+      enabled: false
+  filter_mode: smart
+
+dictionaries:
+  - id: pinyin_main
+    path: "dict/pinyin/rime_ice.dict.yaml"
+    type: rime_pinyin
+    default: true
+  - id: wubi_reverse
+    path: "dict/wubi86/wubi86_jidian.dict.yaml"
+    type: rime_wubi
+    role: reverse_lookup
+
+user_data:
+  shadow_file: "shadow_shuangpin.yaml"
+  user_dict_file: "user_words_shuangpin.txt"
+  user_freq_file: "user_freq_shuangpin.txt"
+
+learning:
+  mode: manual
+  unigram_path: "dict/pinyin/unigram.txt"
