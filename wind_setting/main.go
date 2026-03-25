@@ -8,7 +8,8 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	"github.com/wailsapp/wails/v2/pkg/options/windows"
+	wailsWindows "github.com/wailsapp/wails/v2/pkg/options/windows"
+	"golang.org/x/sys/windows"
 )
 
 //go:embed all:frontend/dist
@@ -53,8 +54,15 @@ func parseStartPage() string {
 }
 
 func main() {
-	// 解析启动页面参数
+	// 解析启动页面参数（需在单例检查前解析，以便发送给已有实例）
 	startPage := parseStartPage()
+
+	// 单例检查：如果已有实例在运行，发送页面参数、激活其窗口并退出
+	mutexHandle, ok := ensureSingleInstance(startPage)
+	if !ok {
+		return
+	}
+	defer windows.CloseHandle(mutexHandle)
 
 	// Create an instance of the app structure
 	app := NewApp()
@@ -76,7 +84,7 @@ func main() {
 		Bind: []interface{}{
 			app,
 		},
-		Windows: &windows.Options{
+		Windows: &wailsWindows.Options{
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
 			DisableWindowIcon:    false,

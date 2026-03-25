@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
+import { EventsOn } from "../wailsjs/runtime/runtime";
 import * as api from "./api/settings";
 import * as wailsApi from "./api/wails";
 import type { Config, Status, EngineInfo } from "./api/settings";
@@ -435,6 +436,13 @@ onMounted(async () => {
     } catch (e) {
       // 忽略错误，使用默认页面
     }
+
+    // 监听其他实例发来的页面切换请求
+    EventsOn("navigate", (page: string) => {
+      if (page) {
+        activeTab.value = page;
+      }
+    });
   }
 });
 </script>

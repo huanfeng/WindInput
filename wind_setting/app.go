@@ -50,6 +50,9 @@ func (a *App) GetVersion() string {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
+	// 启动 IPC 监听，接收其他实例的页面切换请求
+	startIPCListener(ctx)
+
 	// 初始化编辑器
 	var err error
 
