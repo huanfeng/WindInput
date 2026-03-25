@@ -197,8 +197,8 @@ onUnmounted(() => {
                     <div
                       v-for="(item, idx) in [
                         { n: '1', text: '中文', hover: true },
-                        { n: '2', text: '中纹', comment: 'ggtt' },
-                        { n: '3', text: '忠文' },
+                        { n: '2', text: '清风', comment: 'igmq' },
+                        { n: '3', text: '输入' },
                       ]"
                       :key="idx"
                       class="preview-candidate-item"
