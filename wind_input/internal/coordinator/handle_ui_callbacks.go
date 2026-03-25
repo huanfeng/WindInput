@@ -829,7 +829,19 @@ func (c *Coordinator) resetAndResync() {
 	c.mu.Lock()
 	c.clearState()
 	c.hideUI()
+	bridgeServer := c.bridgeServer
 	c.mu.Unlock()
+
+	// Notify active TSF client to clear inline composition before restart
+	// This prevents dangling composition state in applications
+	if bridgeServer != nil {
+		bridgeServer.PushClearCompositionToActiveClient()
+	}
+
+	// Unregister global hotkeys before exit
+	if c.uiManager != nil {
+		c.uiManager.UnregisterGlobalHotkeys()
+	}
 
 	// Request process restart through the restart manager
 	RequestRestart()
