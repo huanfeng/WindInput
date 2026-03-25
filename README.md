@@ -106,7 +106,7 @@ ui:
 
 ## 交流与反馈
 
-- **QQ 交流群**: [1085293418](https://qm.qq.com/q/group?groupId=1085293418) — 清风输入法官方交流群
+- **QQ 交流群**: [1085293418](https://qm.qq.com/q/u2A8FfafIs) — 清风输入法官方交流群
 - **GitHub Issues**: [问题反馈](../../issues) — 报告 Bug 或提出建议
 
 ## 相关链接

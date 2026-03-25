@@ -106,7 +106,7 @@ async function copyQQGroup(event: Event) {
 
         <button
           class="link-card qq-card"
-          @click="$emit('openExternalLink', 'https://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=&group_code=1085293418')"
+          @click="$emit('openExternalLink', 'https://qm.qq.com/q/u2A8FfafIs')"
         >
           <span class="link-card-icon icon-qq" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
