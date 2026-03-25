@@ -71,8 +71,8 @@ Desktop.ini
 *.bak
 *.old_*
 
-# Generated dictionary files
-/data/dict/pinyin/unigram.txt
+# Generated dictionary files (cached in .cache/, built to build/)
+/dict/
 
 # User frequency data (runtime generated)
 /data/dict/pinyin/user_freq.txt

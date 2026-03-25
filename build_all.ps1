@@ -221,7 +221,7 @@ foreach ($df in $pinyinDictFiles) {
 }
 
 # 生成 Unigram 语言模型
-$unigramSrcDir = Join-Path $ScriptDir "dict\pinyin"
+$unigramSrcDir = Join-Path $ScriptDir ".cache\pinyin"
 $unigramPath = Join-Path $unigramSrcDir "unigram.txt"
 if (-not (Test-Path $unigramSrcDir)) { New-Item -ItemType Directory -Path $unigramSrcDir -Force | Out-Null }
 if (-not (Test-Path $unigramPath)) {
