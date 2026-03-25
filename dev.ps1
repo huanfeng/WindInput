@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Position=0)]
-    [ValidateSet("1","2","3","4","5","6","7","8","9","")]
+    [ValidateSet("1","2","3","4","5","6","7","8","9","s","")]
     [string]$Choice = ""
 )
 
@@ -49,6 +49,32 @@ function Do-BuildInstallerSkip {
     if ($LASTEXITCODE -ne 0) { exit 1 }
 }
 
+function Do-BuildSetting {
+    & "$ScriptDir\build_all.ps1" -WailsMode release -SettingOnly
+    if ($LASTEXITCODE -ne 0) { exit 1 }
+}
+
+function Do-DeploySetting {
+    $InstallDir = if ($env:ProgramW6432) { Join-Path $env:ProgramW6432 "WindInput" } else { Join-Path $env:ProgramFiles "WindInput" }
+    $settingExe = Join-Path $ScriptDir "build\wind_setting.exe"
+
+    if (-not (Test-Path $settingExe)) {
+        Write-Host "[错误] 未找到 build\wind_setting.exe，请先构建" -ForegroundColor Red
+        exit 1
+    }
+    if (-not (Test-Path $InstallDir)) {
+        Write-Host "[错误] 安装目录不存在: $InstallDir，请先完整安装" -ForegroundColor Red
+        exit 1
+    }
+
+    # 关闭已运行的设置程序
+    Get-Process -Name "wind_setting" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+
+    Copy-Item -Path $settingExe -Destination $InstallDir -Force
+    Write-Host "[完成] wind_setting.exe 已部署到 $InstallDir" -ForegroundColor Green
+}
+
 # 交互式菜单
 if (-not $Choice) {
     Write-Host "======================================"
@@ -63,8 +89,9 @@ if (-not $Choice) {
     Write-Host "7. 卸载 / 安装"
     Write-Host "8. 生成安装包(Release)"
     Write-Host "9. 生成安装包(跳过编译)"
+    Write-Host "s. 构建设置 / 部署设置"
     Write-Host ""
-    $Choice = Read-Host "请选择 (1-9)"
+    $Choice = Read-Host "请选择 (1-9, s)"
     if (-not $Choice) { exit 1 }
 }
 
@@ -78,6 +105,7 @@ switch ($Choice) {
     "7" { Ensure-Admin; Do-Uninstall; Do-Install }
     "8" { Do-BuildInstaller }
     "9" { Do-BuildInstallerSkip }
+    "s" { Ensure-Admin; Do-BuildSetting; Do-DeploySetting }
     default {
         Write-Host "[ERROR] 无效选项: $Choice" -ForegroundColor Red
         exit 1

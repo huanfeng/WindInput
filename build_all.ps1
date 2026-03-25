@@ -1,6 +1,8 @@
 ﻿param(
     [ValidateSet("debug", "release", "skip")]
-    [string]$WailsMode = "debug"
+    [string]$WailsMode = "debug",
+
+    [switch]$SettingOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +24,41 @@ if (Test-Path $VersionFile) {
 }
 Write-Host "版本: $AppVersion"
 Write-Host ""
+
+# SettingOnly 模式：只构建设置界面
+if ($SettingOnly) {
+    Write-Host "[SettingOnly] 仅构建设置界面..."
+    Write-Host ""
+
+    Push-Location (Join-Path $ScriptDir "wind_setting")
+    try {
+        if (-not (Get-Command wails -ErrorAction SilentlyContinue)) {
+            Write-Host "[错误] 未找到 Wails CLI" -ForegroundColor Red
+            exit 1
+        }
+        if ($WailsMode -eq "debug") {
+            & wails build -debug -ldflags "-X main.version=$AppVersion"
+        } else {
+            & wails build -ldflags "-X main.version=$AppVersion"
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[错误] wind_setting 构建失败" -ForegroundColor Red
+            exit 1
+        }
+        $settingExe = Join-Path $ScriptDir "wind_setting\build\bin\wind_setting.exe"
+        if (-not (Test-Path $settingExe)) {
+            Write-Host "[错误] wind_setting.exe 未生成" -ForegroundColor Red
+            exit 1
+        }
+        Copy-Item -Path $settingExe -Destination $BuildDir -Force
+        Write-Host "设置界面构建成功 ($WailsMode 模式)"
+    } finally {
+        Pop-Location
+    }
+    Write-Host ""
+    Write-Host "输出: build\wind_setting.exe"
+    exit 0
+}
 
 # [1/6] 构建 Go 服务
 Write-Host "[1/6] 构建 Go 服务(wind_input.exe)..."
