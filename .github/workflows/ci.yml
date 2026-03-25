@@ -35,6 +35,12 @@ jobs:
         working-directory: wind_input
         run: go test ./... -v -count=1
 
+      - name: Prepare wind_setting frontend stub
+        working-directory: wind_setting
+        run: |
+          mkdir -p frontend/dist
+          echo "<!-- CI stub -->" > frontend/dist/index.html
+
       - name: Build wind_setting
         working-directory: wind_setting
         run: go build ./...
