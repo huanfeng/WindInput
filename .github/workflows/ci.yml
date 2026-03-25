@@ -23,14 +23,22 @@ jobs:
         with:
           go-version-file: wind_input/go.mod
 
-      - name: Build
+      - name: Build wind_input
         working-directory: wind_input
         run: go build ./...
 
-      - name: Vet
+      - name: Vet wind_input
         working-directory: wind_input
         run: go vet ./...
 
-      - name: Test
+      - name: Test wind_input
         working-directory: wind_input
         run: go test ./... -v -count=1
+
+      - name: Build wind_setting
+        working-directory: wind_setting
+        run: go build ./...
+
+      - name: Vet wind_setting
+        working-directory: wind_setting
+        run: go vet ./...
