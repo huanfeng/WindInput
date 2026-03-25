@@ -11,10 +11,12 @@ import (
 
 // Unified menu ID constants
 const (
-	UnifiedMenuToggleMode     = 100
+	UnifiedMenuToggleMode     = 100 // Deprecated: replaced by schema submenu
 	UnifiedMenuToggleWidth    = 101
 	UnifiedMenuTogglePunct    = 102
 	UnifiedMenuToggleToolbar  = 103
+	UnifiedMenuSchemaEnglish  = 140 // 英文模式
+	UnifiedMenuSchemaBase     = 150 // 方案ID: 150+i
 	UnifiedMenuThemeBase      = 200 // 主题ID: 200+i
 	UnifiedMenuThemeStyleBase = 250 // 主题风格ID: 250+i (0=system, 1=light, 2=dark)
 	UnifiedMenuReloadConfig   = 299
@@ -30,12 +32,20 @@ type ThemeMenuItem struct {
 	DisplayName string // Display name (e.g., "默认主题 1.0")
 }
 
+// SchemaMenuItem holds schema ID and display name for menu rendering
+type SchemaMenuItem struct {
+	ID   string // Schema ID (e.g., "wubi86")
+	Name string // Display name (e.g., "五笔86")
+}
+
 // UnifiedMenuState holds the current state for building the unified menu
 type UnifiedMenuState struct {
 	ChineseMode       bool
 	FullWidth         bool
 	ChinesePunct      bool
 	ToolbarVisible    bool
+	Schemas           []SchemaMenuItem // Available schemas in order
+	CurrentSchemaID   string           // Current active schema ID
 	Themes            []ThemeMenuItem
 	CurrentThemeID    string // Current theme ID for checked state
 	CurrentThemeStyle string // Current theme style: "system", "light", "dark"
@@ -43,8 +53,26 @@ type UnifiedMenuState struct {
 
 // BuildUnifiedMenuItems constructs the unified menu item list
 func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
+	// Build schema submenu: 英文 + available schemas
+	var schemaChildren []MenuItem
+	schemaChildren = append(schemaChildren, MenuItem{
+		ID:      UnifiedMenuSchemaEnglish,
+		Text:    "英文",
+		Checked: !state.ChineseMode,
+	})
+	if len(state.Schemas) > 0 {
+		schemaChildren = append(schemaChildren, MenuItem{Separator: true})
+		for i, s := range state.Schemas {
+			schemaChildren = append(schemaChildren, MenuItem{
+				ID:      UnifiedMenuSchemaBase + i,
+				Text:    s.Name,
+				Checked: state.ChineseMode && s.ID == state.CurrentSchemaID,
+			})
+		}
+	}
+
 	items := []MenuItem{
-		{ID: UnifiedMenuToggleMode, Text: "中文模式", Checked: state.ChineseMode},
+		{Text: "输入方案", Children: schemaChildren},
 		{ID: UnifiedMenuToggleWidth, Text: "全角", Checked: state.FullWidth},
 		{ID: UnifiedMenuTogglePunct, Text: "中文标点", Checked: state.ChinesePunct},
 		{Separator: true},

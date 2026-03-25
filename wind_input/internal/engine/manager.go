@@ -323,6 +323,56 @@ func (m *Manager) GetEngineDisplayName() string {
 	return "?"
 }
 
+// GetSchemaNameByID 按 ID 获取方案显示名称
+func (m *Manager) GetSchemaNameByID(id string) string {
+	m.mu.RLock()
+	sm := m.schemaManager
+	m.mu.RUnlock()
+
+	if sm != nil {
+		s := sm.GetSchema(id)
+		if s != nil {
+			return s.Schema.Name
+		}
+	}
+	return id
+}
+
+// SwitchToSchemaByID 切换到指定方案（含 DictManager 同步和 SchemaManager 更新）
+func (m *Manager) SwitchToSchemaByID(schemaID string) error {
+	m.mu.RLock()
+	sm := m.schemaManager
+	currentID := m.currentID
+	m.mu.RUnlock()
+
+	if sm == nil {
+		return fmt.Errorf("SchemaManager 未设置")
+	}
+	if schemaID == currentID {
+		return nil
+	}
+
+	if err := m.SwitchSchema(schemaID); err != nil {
+		return err
+	}
+
+	// 同步 DictManager
+	m.mu.RLock()
+	dm := m.dictManager
+	m.mu.RUnlock()
+	if dm != nil {
+		s := sm.GetSchema(schemaID)
+		if s != nil {
+			dm.SwitchSchema(schemaID, s.UserData.ShadowFile, s.UserData.UserDictFile)
+		}
+	}
+
+	// 更新 SchemaManager 的活跃方案
+	sm.SetActive(schemaID)
+
+	return nil
+}
+
 // GetSchemaDisplayInfo 获取方案显示信息（名称 + 图标）
 func (m *Manager) GetSchemaDisplayInfo() (name, iconLabel string) {
 	m.mu.RLock()

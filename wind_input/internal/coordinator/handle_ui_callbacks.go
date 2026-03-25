@@ -5,6 +5,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/internal/ui"
+	"github.com/huanfeng/wind_input/pkg/config"
 )
 
 // setupToolbarCallbacks sets up the callbacks for toolbar button clicks
@@ -548,9 +549,22 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 		themeMenuItems[i] = ui.ThemeMenuItem{ID: info.ID, DisplayName: info.DisplayName}
 	}
 
+	// Build schema menu items from config available list
+	var schemaMenuItems []ui.SchemaMenuItem
+	c.mu.Lock()
+	if c.config != nil && c.engineMgr != nil {
+		for _, schemaID := range c.config.Schema.Available {
+			name := c.engineMgr.GetSchemaNameByID(schemaID)
+			schemaMenuItems = append(schemaMenuItems, ui.SchemaMenuItem{ID: schemaID, Name: name})
+		}
+	}
+	currentSchemaID := ""
+	if c.engineMgr != nil {
+		currentSchemaID = c.engineMgr.GetCurrentSchemaID()
+	}
+
 	// Get current theme style from config
 	currentThemeStyle := "system"
-	c.mu.Lock()
 	if c.config != nil && c.config.UI.ThemeStyle != "" {
 		currentThemeStyle = c.config.UI.ThemeStyle
 	}
@@ -559,6 +573,8 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 		FullWidth:         c.fullWidth,
 		ChinesePunct:      c.chinesePunctuation,
 		ToolbarVisible:    c.toolbarVisible,
+		Schemas:           schemaMenuItems,
+		CurrentSchemaID:   currentSchemaID,
 		Themes:            themeMenuItems,
 		CurrentThemeID:    c.uiManager.GetCurrentThemeID(),
 		CurrentThemeStyle: currentThemeStyle,
@@ -573,8 +589,10 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 // handleUnifiedMenuAction handles a menu item selection from the unified menu
 func (c *Coordinator) handleUnifiedMenuAction(id int) {
 	switch {
-	case id == ui.UnifiedMenuToggleMode:
-		c.handleToolbarToggleMode()
+	case id == ui.UnifiedMenuSchemaEnglish:
+		c.handleSwitchToEnglish()
+	case id >= ui.UnifiedMenuSchemaBase && id < ui.UnifiedMenuSchemaBase+50:
+		c.handleSchemaMenuSelection(id - ui.UnifiedMenuSchemaBase)
 	case id == ui.UnifiedMenuToggleWidth:
 		c.handleToolbarToggleWidth()
 	case id == ui.UnifiedMenuTogglePunct:
@@ -626,6 +644,105 @@ func (c *Coordinator) handleUnifiedMenuAction(id int) {
 			// Save to config
 			c.saveThemeConfig(themeID)
 		}
+	}
+}
+
+// handleSwitchToEnglish switches to English mode from the schema submenu
+func (c *Coordinator) handleSwitchToEnglish() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.chineseMode {
+		return // already English
+	}
+
+	c.chineseMode = false
+
+	// Clear any pending input
+	hadInput := len(c.inputBuffer) > 0
+	if hadInput {
+		c.clearState()
+		c.hideUI()
+	}
+
+	// Notify TSF to clear composition
+	if hadInput && c.bridgeServer != nil {
+		go c.bridgeServer.PushClearCompositionToActiveClient()
+	}
+
+	// Sync punctuation with mode if enabled
+	if c.punctFollowMode {
+		c.chinesePunctuation = false
+	}
+	c.punctConverter.Reset()
+
+	// Save runtime state
+	c.saveRuntimeState()
+
+	// Show mode indicator
+	c.showModeIndicator()
+
+	// Broadcast state
+	c.broadcastState()
+}
+
+// handleSchemaMenuSelection handles schema selection from the schema submenu
+func (c *Coordinator) handleSchemaMenuSelection(index int) {
+	c.mu.Lock()
+
+	if c.config == nil || c.engineMgr == nil {
+		c.mu.Unlock()
+		return
+	}
+
+	available := c.config.Schema.Available
+	if index < 0 || index >= len(available) {
+		c.mu.Unlock()
+		return
+	}
+
+	targetSchemaID := available[index]
+	currentSchemaID := c.engineMgr.GetCurrentSchemaID()
+
+	// Switch to Chinese mode if needed
+	if !c.chineseMode {
+		c.chineseMode = true
+		if c.punctFollowMode {
+			c.chinesePunctuation = true
+		}
+		c.punctConverter.Reset()
+	}
+
+	// Clear any pending input
+	hadInput := len(c.inputBuffer) > 0
+	if hadInput {
+		c.clearState()
+		c.hideUI()
+	}
+
+	needSchemaSwitch := targetSchemaID != currentSchemaID
+	c.mu.Unlock()
+
+	// Switch schema (without coordinator lock, engine manager has its own lock)
+	if needSchemaSwitch {
+		if err := c.engineMgr.SwitchToSchemaByID(targetSchemaID); err != nil {
+			c.logger.Error("Failed to switch schema from menu", "error", err)
+		} else {
+			if err := config.UpdateSchemaActive(targetSchemaID); err != nil {
+				c.logger.Error("Failed to save schema to config", "error", err)
+			}
+		}
+	}
+
+	c.mu.Lock()
+	c.saveRuntimeState()
+	c.showEngineIndicator()
+	c.broadcastState()
+	c.mu.Unlock()
+
+	// Notify TSF to clear composition if there was active input
+	if hadInput && c.bridgeServer != nil {
+		c.bridgeServer.PushClearCompositionToActiveClient()
 	}
 }
 
