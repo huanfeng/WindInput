@@ -130,8 +130,12 @@ func (c *Coordinator) handleEngineSwitchKey() *bridge.KeyEventResult {
 		c.hideUI()
 	}
 
-	// 切换方案
-	newSchemaID, err := c.engineMgr.ToggleSchema()
+	// 按配置中的 Available 列表切换方案
+	var available []string
+	if c.config != nil {
+		available = c.config.Schema.Available
+	}
+	newSchemaID, err := c.engineMgr.ToggleSchema(available)
 	if err != nil {
 		c.logger.Error("Failed to switch schema", "error", err)
 		return nil

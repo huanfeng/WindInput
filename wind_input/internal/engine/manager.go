@@ -108,7 +108,9 @@ func (m *Manager) SwitchSchema(schemaID string) error {
 }
 
 // ToggleSchema 按 available 列表循环切换方案
-func (m *Manager) ToggleSchema() (string, error) {
+// available 为配置中启用的方案 ID 列表（顺序决定切换顺序）；
+// 若为空则回退到 SchemaManager 中所有已加载方案。
+func (m *Manager) ToggleSchema(available []string) (string, error) {
 	m.mu.RLock()
 	sm := m.schemaManager
 	currentID := m.currentID
@@ -118,27 +120,31 @@ func (m *Manager) ToggleSchema() (string, error) {
 		return currentID, fmt.Errorf("SchemaManager 未设置")
 	}
 
-	activeSchema := sm.GetActiveSchema()
-	if activeSchema == nil {
-		return currentID, fmt.Errorf("无活跃方案")
+	// 使用 available 列表；若为空则回退到所有已加载方案
+	var idList []string
+	if len(available) > 0 {
+		idList = available
+	} else {
+		schemas := sm.ListSchemas()
+		for _, s := range schemas {
+			idList = append(idList, s.ID)
+		}
 	}
 
-	// 获取可用方案列表，找到下一个
-	schemas := sm.ListSchemas()
-	if len(schemas) <= 1 {
+	if len(idList) <= 1 {
 		return currentID, nil
 	}
 
 	// 找当前方案在列表中的位置，切换到下一个
 	nextID := ""
-	for i, s := range schemas {
-		if s.ID == currentID {
-			nextID = schemas[(i+1)%len(schemas)].ID
+	for i, id := range idList {
+		if id == currentID {
+			nextID = idList[(i+1)%len(idList)]
 			break
 		}
 	}
 	if nextID == "" {
-		nextID = schemas[0].ID
+		nextID = idList[0]
 	}
 
 	if err := m.SwitchSchema(nextID); err != nil {
@@ -813,7 +819,7 @@ func (m *Manager) SetCurrentEngine(engineType EngineType) error {
 // ToggleEngine 在方案之间切换（兼容旧代码）
 // Deprecated: 使用 ToggleSchema
 func (m *Manager) ToggleEngine() (EngineType, error) {
-	newID, err := m.ToggleSchema()
+	newID, err := m.ToggleSchema(nil)
 	return EngineType(newID), err
 }
 
