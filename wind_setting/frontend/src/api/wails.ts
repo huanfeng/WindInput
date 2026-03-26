@@ -43,6 +43,16 @@ export interface DictStats {
   shadow_count: number;
 }
 
+// 方案词库统计类型
+export interface SchemaDictStatsItem {
+  schema_id: string;
+  schema_name: string;
+  icon_label: string;
+  word_count: number;
+  shadow_count: number;
+  temp_word_count: number;
+}
+
 // 主题预览数据类型
 export interface ThemePreview {
   meta: {
@@ -112,6 +122,11 @@ export async function getPhrases(): Promise<PhraseItem[]> {
   return App.GetPhrases();
 }
 
+// 系统短语管理
+export async function getSystemPhrases(): Promise<PhraseItem[]> {
+  return App.GetSystemPhrases();
+}
+
 export async function savePhrases(items: PhraseItem[]): Promise<void> {
   return App.SavePhrases(items);
 }
@@ -119,13 +134,39 @@ export async function savePhrases(items: PhraseItem[]): Promise<void> {
 export async function addPhrase(
   code: string,
   text: string,
-  weight: number = 0,
+  position: number = 1,
 ): Promise<void> {
-  return App.AddPhrase(code, text, weight);
+  return App.AddPhrase(code, text, position);
 }
 
 export async function removePhrase(code: string, text: string): Promise<void> {
   return App.RemovePhrase(code, text);
+}
+
+export async function updatePhrase(
+  oldCode: string,
+  oldText: string,
+  newCode: string,
+  newText: string,
+  newPosition: number,
+): Promise<void> {
+  return App.UpdatePhrase(oldCode, oldText, newCode, newText, newPosition);
+}
+
+export async function overrideSystemPhrase(
+  code: string,
+  text: string,
+  position: number,
+  disabled: boolean,
+): Promise<void> {
+  return App.OverrideSystemPhrase(code, text, position, disabled);
+}
+
+export async function removeSystemPhraseOverride(
+  code: string,
+  text: string,
+): Promise<void> {
+  return App.RemoveSystemPhraseOverride(code, text);
 }
 
 export async function checkPhrasesModified(): Promise<boolean> {
@@ -204,7 +245,118 @@ export async function exportUserDict(): Promise<ImportExportResult> {
   return App.ExportUserDict() as unknown as ImportExportResult;
 }
 
-// Shadow 管理
+// ===== 按方案操作词库 =====
+
+export async function getEnabledSchemasWithDictStats(): Promise<
+  SchemaDictStatsItem[]
+> {
+  return App.GetEnabledSchemasWithDictStats() as unknown as SchemaDictStatsItem[];
+}
+
+export async function getUserDictBySchema(
+  schemaID: string,
+): Promise<UserWordItem[]> {
+  return App.GetUserDictBySchema(schemaID);
+}
+
+export async function addUserWordForSchema(
+  schemaID: string,
+  code: string,
+  text: string,
+  weight: number = 0,
+): Promise<void> {
+  return App.AddUserWordForSchema(schemaID, code, text, weight);
+}
+
+export async function removeUserWordForSchema(
+  schemaID: string,
+  code: string,
+  text: string,
+): Promise<void> {
+  return App.RemoveUserWordForSchema(schemaID, code, text);
+}
+
+export async function searchUserDictBySchema(
+  schemaID: string,
+  query: string,
+  limit: number = 100,
+): Promise<UserWordItem[]> {
+  return App.SearchUserDictBySchema(schemaID, query, limit);
+}
+
+export async function importUserDictForSchema(
+  schemaID: string,
+): Promise<ImportExportResult> {
+  return App.ImportUserDictForSchema(schemaID) as unknown as ImportExportResult;
+}
+
+export async function exportUserDictForSchema(
+  schemaID: string,
+): Promise<ImportExportResult> {
+  return App.ExportUserDictForSchema(schemaID) as unknown as ImportExportResult;
+}
+
+// ===== 临时词库管理 =====
+
+export interface TempWordItem {
+  code: string;
+  text: string;
+  weight: number;
+  count: number;
+}
+
+export async function getTempDictBySchema(schemaID: string): Promise<TempWordItem[]> {
+  return App.GetTempDictBySchema(schemaID) as unknown as TempWordItem[];
+}
+
+export async function clearTempDictForSchema(schemaID: string): Promise<number> {
+  return App.ClearTempDictForSchema(schemaID);
+}
+
+export async function promoteTempWordForSchema(schemaID: string, code: string, text: string): Promise<void> {
+  return App.PromoteTempWordForSchema(schemaID, code, text);
+}
+
+export async function promoteAllTempWordsForSchema(schemaID: string): Promise<number> {
+  return App.PromoteAllTempWordsForSchema(schemaID);
+}
+
+export async function removeTempWordForSchema(schemaID: string, code: string, text: string): Promise<void> {
+  return App.RemoveTempWordForSchema(schemaID, code, text);
+}
+
+export async function getShadowBySchema(
+  schemaID: string,
+): Promise<ShadowRuleItem[]> {
+  return App.GetShadowBySchema(schemaID);
+}
+
+export async function pinShadowWordForSchema(
+  schemaID: string,
+  code: string,
+  word: string,
+  position: number,
+): Promise<void> {
+  return App.PinShadowWordForSchema(schemaID, code, word, position);
+}
+
+export async function deleteShadowWordForSchema(
+  schemaID: string,
+  code: string,
+  word: string,
+): Promise<void> {
+  return App.DeleteShadowWordForSchema(schemaID, code, word);
+}
+
+export async function removeShadowRuleForSchema(
+  schemaID: string,
+  code: string,
+  word: string,
+): Promise<void> {
+  return App.RemoveShadowRuleForSchema(schemaID, code, word);
+}
+
+// Shadow 管理（旧接口保留）
 export async function getShadowRules(): Promise<ShadowRuleItem[]> {
   return App.GetShadowRules();
 }
