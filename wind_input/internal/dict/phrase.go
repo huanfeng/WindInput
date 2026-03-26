@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/pkg/fileutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -133,11 +134,12 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 	for _, e := range entries {
 		expanded := pl.templateEngine.Expand(e.Text)
 		results = append(results, candidate.Candidate{
-			Text:      expanded,
-			Code:      code,
-			Weight:    positionToWeight(e.Position),
-			IsCommand: true,
-			IsCommon:  true, // 动态短语不应被 smart 过滤
+			Text:           expanded,
+			Code:           code,
+			Weight:         positionToWeight(e.Position),
+			IsCommand:      true,
+			IsCommon:       true,   // 动态短语不应被 smart 过滤
+			PhraseTemplate: e.Text, // 携带原始模板文本，用于右键菜单定位条目
 		})
 	}
 
@@ -371,4 +373,294 @@ func sortByPosition(candidates []candidate.Candidate) {
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].Weight > candidates[j].Weight
 	})
+}
+
+// ===== 右键菜单：短语位置调整 =====
+
+// MovePhraseUp 在同一编码组内将短语前移一位（position 减小）
+// templateText 为原始模板文本（如 "$Y-$MM-$DD"），用于精确定位条目
+func (pl *PhraseLayer) MovePhraseUp(code, templateText string) error {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+
+	code = strings.ToLower(code)
+	entries := pl.getDynEntriesSorted(code)
+	if entries == nil {
+		entries = pl.getStatEntriesSorted(code)
+	}
+	if len(entries) < 2 {
+		return nil
+	}
+
+	// 找到目标条目及其上方的条目
+	targetIdx := -1
+	for i, e := range entries {
+		if e.Text == templateText {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx <= 0 { // 已在首位或未找到
+		return nil
+	}
+
+	// 交换相邻两个条目的 position
+	pl.swapEntryPositions(code, entries[targetIdx].Text, entries[targetIdx-1].Text)
+	pl.clearCmdCache(code)
+
+	return pl.savePositionOverrides(code, entries[targetIdx].Text, entries[targetIdx-1].Text)
+}
+
+// MovePhraseDown 在同一编码组内将短语后移一位（position 增大）
+func (pl *PhraseLayer) MovePhraseDown(code, templateText string) error {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+
+	code = strings.ToLower(code)
+	entries := pl.getDynEntriesSorted(code)
+	if entries == nil {
+		entries = pl.getStatEntriesSorted(code)
+	}
+	if len(entries) < 2 {
+		return nil
+	}
+
+	targetIdx := -1
+	for i, e := range entries {
+		if e.Text == templateText {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 || targetIdx >= len(entries)-1 { // 已在末位或未找到
+		return nil
+	}
+
+	pl.swapEntryPositions(code, entries[targetIdx].Text, entries[targetIdx+1].Text)
+	pl.clearCmdCache(code)
+
+	return pl.savePositionOverrides(code, entries[targetIdx].Text, entries[targetIdx+1].Text)
+}
+
+// MovePhraseToTop 将短语移动到同一编码组的首位
+func (pl *PhraseLayer) MovePhraseToTop(code, templateText string) error {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+
+	code = strings.ToLower(code)
+	entries := pl.getDynEntriesSorted(code)
+	if entries == nil {
+		entries = pl.getStatEntriesSorted(code)
+	}
+	if len(entries) < 2 {
+		return nil
+	}
+
+	targetIdx := -1
+	for i, e := range entries {
+		if e.Text == templateText {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx <= 0 { // 已在首位或未找到
+		return nil
+	}
+
+	// 与首位交换
+	pl.swapEntryPositions(code, entries[targetIdx].Text, entries[0].Text)
+	pl.clearCmdCache(code)
+
+	return pl.savePositionOverrides(code, entries[targetIdx].Text, entries[0].Text)
+}
+
+// HasPhraseOverride 检查用户是否覆盖了指定短语的位置
+func (pl *PhraseLayer) HasPhraseOverride(code, templateText string) bool {
+	pl.mu.RLock()
+	defer pl.mu.RUnlock()
+
+	code = strings.ToLower(code)
+
+	// 检查动态短语
+	for _, e := range pl.dynamicPhrases[code] {
+		if e.Text == templateText && !e.IsSystem {
+			return true
+		}
+	}
+	// 检查静态短语
+	for _, e := range pl.staticPhrases[code] {
+		if e.Text == templateText && !e.IsSystem {
+			return true
+		}
+	}
+	return false
+}
+
+// ResetPhraseOverride 移除用户对指定短语的位置覆盖，恢复系统默认
+func (pl *PhraseLayer) ResetPhraseOverride(code, templateText string) error {
+	pl.mu.Lock()
+
+	code = strings.ToLower(code)
+
+	// 从用户文件中移除此条目
+	removed := pl.removeUserOverride(code, templateText)
+	pl.clearCmdCache(code)
+	pl.mu.Unlock()
+
+	if !removed {
+		return nil
+	}
+
+	// 重新加载以恢复系统默认
+	return pl.Load()
+}
+
+// ===== 内部辅助方法 =====
+
+// getDynEntriesSorted 获取动态短语条目（按 position 升序）
+func (pl *PhraseLayer) getDynEntriesSorted(code string) []PhraseEntry {
+	entries, ok := pl.dynamicPhrases[code]
+	if !ok || len(entries) == 0 {
+		return nil
+	}
+	sorted := make([]PhraseEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Position < sorted[j].Position
+	})
+	return sorted
+}
+
+// getStatEntriesSorted 获取静态短语条目（按 position 升序）
+func (pl *PhraseLayer) getStatEntriesSorted(code string) []PhraseEntry {
+	entries, ok := pl.staticPhrases[code]
+	if !ok || len(entries) == 0 {
+		return nil
+	}
+	sorted := make([]PhraseEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Position < sorted[j].Position
+	})
+	return sorted
+}
+
+// swapEntryPositions 交换同一编码下两个条目的 position（内存中）
+func (pl *PhraseLayer) swapEntryPositions(code, text1, text2 string) {
+	// 先尝试动态短语
+	if pl.swapInMap(pl.dynamicPhrases, code, text1, text2) {
+		return
+	}
+	// 再尝试静态短语
+	pl.swapInMap(pl.staticPhrases, code, text1, text2)
+}
+
+func (pl *PhraseLayer) swapInMap(m map[string][]PhraseEntry, code, text1, text2 string) bool {
+	entries, ok := m[code]
+	if !ok {
+		return false
+	}
+	idx1, idx2 := -1, -1
+	for i, e := range entries {
+		if e.Text == text1 {
+			idx1 = i
+		}
+		if e.Text == text2 {
+			idx2 = i
+		}
+	}
+	if idx1 < 0 || idx2 < 0 {
+		return false
+	}
+	entries[idx1].Position, entries[idx2].Position = entries[idx2].Position, entries[idx1].Position
+	return true
+}
+
+// clearCmdCache 清除指定编码的命令缓存
+func (pl *PhraseLayer) clearCmdCache(code string) {
+	delete(pl.cmdCache, code)
+}
+
+// removeUserOverride 从用户文件配置中移除指定条目的覆盖
+func (pl *PhraseLayer) removeUserOverride(code, templateText string) bool {
+	if pl.userFilePath == "" {
+		return false
+	}
+	data, err := os.ReadFile(pl.userFilePath)
+	if err != nil {
+		return false
+	}
+	var config PhrasesFileConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return false
+	}
+	found := false
+	filtered := config.Phrases[:0]
+	for _, p := range config.Phrases {
+		if strings.ToLower(p.Code) == code && p.Text == templateText {
+			found = true
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	if !found {
+		return false
+	}
+	config.Phrases = filtered
+	out, err := yaml.Marshal(&config)
+	if err != nil {
+		return false
+	}
+	_ = fileutil.AtomicWrite(pl.userFilePath, out, 0644)
+	return true
+}
+
+// savePositionOverrides 将两个条目的当前 position 持久化到用户文件
+func (pl *PhraseLayer) savePositionOverrides(code, text1, text2 string) error {
+	if pl.userFilePath == "" {
+		return fmt.Errorf("no user file path configured")
+	}
+
+	// 查找当前 position
+	pos1, pos2 := 0, 0
+	for _, entries := range []map[string][]PhraseEntry{pl.dynamicPhrases, pl.staticPhrases} {
+		for _, e := range entries[code] {
+			if e.Text == text1 {
+				pos1 = e.Position
+			}
+			if e.Text == text2 {
+				pos2 = e.Position
+			}
+		}
+	}
+
+	// 加载用户文件
+	var config PhrasesFileConfig
+	data, err := os.ReadFile(pl.userFilePath)
+	if err == nil {
+		_ = yaml.Unmarshal(data, &config)
+	}
+
+	// 更新或添加条目
+	updateOrAdd := func(text string, position int) {
+		for i, p := range config.Phrases {
+			if strings.ToLower(p.Code) == code && p.Text == text {
+				config.Phrases[i].Position = position
+				return
+			}
+		}
+		config.Phrases = append(config.Phrases, PhraseFileEntry{
+			Code:     code,
+			Text:     text,
+			Position: position,
+		})
+	}
+	updateOrAdd(text1, pos1)
+	updateOrAdd(text2, pos2)
+
+	out, err := yaml.Marshal(&config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal phrases: %w", err)
+	}
+	return fileutil.AtomicWrite(pl.userFilePath, out, 0644)
 }

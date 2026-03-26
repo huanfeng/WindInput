@@ -122,15 +122,17 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	}
 	m.window.SetCandidatePageInfo(pageStartIndex, totalCandidateCount)
 
-	// 设置当前页各候选的 Shadow 修改标记
+	// 设置当前页各候选的 Shadow 修改标记和命令标记
 	hasShadowFlags := make([]bool, len(candidates))
 	candidateTexts := make([]string, len(candidates))
+	isCommandFlags := make([]bool, len(candidates))
 	for i, c := range candidates {
 		hasShadowFlags[i] = c.HasShadow
 		candidateTexts[i] = c.Text
+		isCommandFlags[i] = c.IsCommand
 	}
 	m.window.SetCandidateHasShadow(hasShadowFlags)
-	m.window.SetCandidateMenuState(candidateTexts, m.isPinyinMode)
+	m.window.SetCandidateMenuState(candidateTexts, m.isPinyinMode, isCommandFlags)
 
 	// Determine position preference based on sticky state
 	var preference PositionPreference

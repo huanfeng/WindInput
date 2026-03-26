@@ -243,7 +243,7 @@ func (c *Coordinator) handleCandidateHoverChange(index, tooltipX, tooltipY int) 
 
 // handleCandidateMoveUp handles move up action from context menu.
 // 五笔：所有可见候选（含前缀匹配）都可前移，规则按当前 inputBuffer 存储。
-// 拼音：不支持前移。
+// 拼音普通候选：不支持前移。命令候选（短语）：通过 PhraseLayer 调整 position。
 func (c *Coordinator) handleCandidateMoveUp(index int) {
 	c.mu.Lock()
 
@@ -255,18 +255,25 @@ func (c *Coordinator) handleCandidateMoveUp(index int) {
 		return
 	}
 
-	// 单候选或命令候选不可操作
 	if len(c.candidates) <= 1 {
 		c.mu.Unlock()
 		return
 	}
 	cand := c.candidates[actualIndex]
-	if cand.IsCommand {
+
+	// 命令候选（短语）：通过 PhraseLayer 调整位置
+	if cand.IsCommand && cand.PhraseTemplate != "" {
+		code := c.inputBuffer
+		c.mu.Unlock()
+		c.handlePhraseMoveUp(code, cand.PhraseTemplate)
+		c.mu.Lock()
+		c.updateCandidates()
+		c.showUI()
 		c.mu.Unlock()
 		return
 	}
 
-	// 拼音引擎不支持前移/后移
+	// 拼音引擎普通候选不支持前移/后移
 	if c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin {
 		c.mu.Unlock()
 		return
@@ -294,7 +301,7 @@ func (c *Coordinator) handleCandidateMoveUp(index int) {
 }
 
 // handleCandidateMoveDown handles move down action from context menu.
-// 五笔：所有可见候选都可后移。拼音：不支持。
+// 五笔：所有可见候选都可后移。拼音普通候选：不支持。命令候选（短语）：通过 PhraseLayer 调整。
 func (c *Coordinator) handleCandidateMoveDown(index int) {
 	c.mu.Lock()
 
@@ -311,11 +318,20 @@ func (c *Coordinator) handleCandidateMoveDown(index int) {
 		return
 	}
 	cand := c.candidates[actualIndex]
-	if cand.IsCommand {
+
+	// 命令候选（短语）：通过 PhraseLayer 调整位置
+	if cand.IsCommand && cand.PhraseTemplate != "" {
+		code := c.inputBuffer
+		c.mu.Unlock()
+		c.handlePhraseMoveDown(code, cand.PhraseTemplate)
+		c.mu.Lock()
+		c.updateCandidates()
+		c.showUI()
 		c.mu.Unlock()
 		return
 	}
 
+	// 拼音引擎普通候选不支持后移
 	if c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin {
 		c.mu.Unlock()
 		return
@@ -357,9 +373,16 @@ func (c *Coordinator) handleCandidateMoveTop(index int) {
 		return
 	}
 
-	candidate := c.candidates[actualIndex]
-	if candidate.IsCommand {
-		c.logger.Debug("Cannot move command candidate to top", "text", candidate.Text)
+	cand := c.candidates[actualIndex]
+
+	// 命令候选（短语）：通过 PhraseLayer 置顶
+	if cand.IsCommand && cand.PhraseTemplate != "" {
+		code := c.inputBuffer
+		c.mu.Unlock()
+		c.handlePhraseMoveToTop(code, cand.PhraseTemplate)
+		c.mu.Lock()
+		c.updateCandidates()
+		c.showUI()
 		c.mu.Unlock()
 		return
 	}
@@ -372,7 +395,7 @@ func (c *Coordinator) handleCandidateMoveTop(index int) {
 	if c.engineMgr != nil {
 		shadowLayer := c.engineMgr.GetDictManager().GetShadowLayer()
 		if shadowLayer != nil {
-			shadowLayer.Pin(code, candidate.Text, 0)
+			shadowLayer.Pin(code, cand.Text, 0)
 			if err := shadowLayer.Save(); err != nil {
 				c.logger.Error("Failed to save shadow layer", "error", err)
 			}
@@ -449,9 +472,16 @@ func (c *Coordinator) handleCandidateResetDefault(index int) {
 		return
 	}
 
-	candidate := c.candidates[actualIndex]
-	if candidate.IsCommand {
-		c.logger.Debug("Cannot reset command candidate", "text", candidate.Text)
+	cand := c.candidates[actualIndex]
+
+	// 命令候选（短语）：移除用户位置覆盖，恢复系统默认
+	if cand.IsCommand && cand.PhraseTemplate != "" {
+		code := c.inputBuffer
+		c.mu.Unlock()
+		c.handlePhraseReset(code, cand.PhraseTemplate)
+		c.mu.Lock()
+		c.updateCandidates()
+		c.showUI()
 		c.mu.Unlock()
 		return
 	}
@@ -465,7 +495,7 @@ func (c *Coordinator) handleCandidateResetDefault(index int) {
 	if c.engineMgr != nil {
 		shadowLayer := c.engineMgr.GetDictManager().GetShadowLayer()
 		if shadowLayer != nil {
-			shadowLayer.RemoveRule(code, candidate.Text)
+			shadowLayer.RemoveRule(code, cand.Text)
 			if err := shadowLayer.Save(); err != nil {
 				c.logger.Error("Failed to save shadow layer", "error", err)
 			}
@@ -484,6 +514,64 @@ func (c *Coordinator) handleCandidateOpenSettings() {
 	c.logger.Info("Opening settings from candidate context menu")
 	if c.uiManager != nil {
 		c.uiManager.OpenSettings()
+	}
+}
+
+// ===== 短语位置调整辅助方法 =====
+
+// handlePhraseMoveUp 通过 PhraseLayer 将短语前移一位
+func (c *Coordinator) handlePhraseMoveUp(code, templateText string) {
+	if c.engineMgr == nil {
+		return
+	}
+	phraseLayer := c.engineMgr.GetDictManager().GetPhraseLayer()
+	if phraseLayer == nil {
+		return
+	}
+	if err := phraseLayer.MovePhraseUp(code, templateText); err != nil {
+		c.logger.Error("Failed to move phrase up", "error", err, "code", code)
+	}
+}
+
+// handlePhraseMoveDown 通过 PhraseLayer 将短语后移一位
+func (c *Coordinator) handlePhraseMoveDown(code, templateText string) {
+	if c.engineMgr == nil {
+		return
+	}
+	phraseLayer := c.engineMgr.GetDictManager().GetPhraseLayer()
+	if phraseLayer == nil {
+		return
+	}
+	if err := phraseLayer.MovePhraseDown(code, templateText); err != nil {
+		c.logger.Error("Failed to move phrase down", "error", err, "code", code)
+	}
+}
+
+// handlePhraseMoveToTop 通过 PhraseLayer 将短语置顶
+func (c *Coordinator) handlePhraseMoveToTop(code, templateText string) {
+	if c.engineMgr == nil {
+		return
+	}
+	phraseLayer := c.engineMgr.GetDictManager().GetPhraseLayer()
+	if phraseLayer == nil {
+		return
+	}
+	if err := phraseLayer.MovePhraseToTop(code, templateText); err != nil {
+		c.logger.Error("Failed to move phrase to top", "error", err, "code", code)
+	}
+}
+
+// handlePhraseReset 移除短语的用户位置覆盖，恢复系统默认
+func (c *Coordinator) handlePhraseReset(code, templateText string) {
+	if c.engineMgr == nil {
+		return
+	}
+	phraseLayer := c.engineMgr.GetDictManager().GetPhraseLayer()
+	if phraseLayer == nil {
+		return
+	}
+	if err := phraseLayer.ResetPhraseOverride(code, templateText); err != nil {
+		c.logger.Error("Failed to reset phrase override", "error", err, "code", code)
 	}
 }
 

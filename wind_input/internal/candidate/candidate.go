@@ -21,6 +21,7 @@ type Candidate struct {
 	IsCommand      bool            // 是否为命令候选（uuid/date/time 等）
 	ConsumedLength int             // 该候选消耗的输入长度（拼音部分上屏用）
 	Source         CandidateSource // 候选来源（混输模式下区分五笔/拼音）
+	PhraseTemplate string          // 动态短语的原始模板文本（如 "$Y-$MM-$DD"），用于定位 PhraseLayer 条目
 }
 
 // CandidateList 候选词列表

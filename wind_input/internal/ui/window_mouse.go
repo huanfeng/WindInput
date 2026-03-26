@@ -215,19 +215,22 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 		isSingleChar = len([]rune(candidateTexts[hitIndex])) <= 1
 	}
 
-	// Check if pinyin mode (disable move up/down)
+	// Check if pinyin mode (disable move up/down for non-command candidates)
 	isPinyin := w.isPinyinMode
 
+	// 检查是否为命令候选（短语），命令候选在拼音模式下也允许前移/后移
+	isCommand := hitIndex >= 0 && hitIndex < len(w.isCommandFlags) && w.isCommandFlags[hitIndex]
+
 	// 菜单状态规则：
-	// 前移: 首位禁用 | 单候选禁用 | 拼音禁用
-	// 后移: 末位禁用 | 单候选禁用 | 拼音禁用
-	// 置顶: 首位禁用 | 拼音首位也禁用
-	// 删除: 单字禁用
-	// 恢复默认: 无 Shadow 修改时禁用
-	disableMoveUp := isGlobalFirst || isSingleCandidate || isPinyin
-	disableMoveDown := isGlobalLast || isSingleCandidate || isPinyin
+	// 前移: 首位禁用 | 单候选禁用 | 拼音非命令禁用
+	// 后移: 末位禁用 | 单候选禁用 | 拼音非命令禁用
+	// 置顶: 首位禁用
+	// 删除: 单字禁用 | 命令候选禁用
+	// 恢复默认: 无 Shadow/短语覆盖时禁用
+	disableMoveUp := isGlobalFirst || isSingleCandidate || (isPinyin && !isCommand)
+	disableMoveDown := isGlobalLast || isSingleCandidate || (isPinyin && !isCommand)
 	disableTop := isGlobalFirst
-	disableDelete := isSingleChar
+	disableDelete := isSingleChar || isCommand
 
 	// Build menu items
 	items := []MenuItem{
