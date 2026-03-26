@@ -42,9 +42,9 @@ dictionaries:
     role: reverse_lookup
 
 user_data:
-  shadow_file: "shadow_wubi86_pinyin.yaml"
-  user_dict_file: "user_words_wubi86_pinyin.txt"
-  user_freq_file: "user_freq_wubi86_pinyin.txt"
+  shadow_file: "wubi86_pinyin.shadow.yaml"
+  user_dict_file: "wubi86_pinyin.userwords.txt"
+  user_freq_file: "wubi86_pinyin.userfreq.txt"
 
 learning:
   mode: frequency

@@ -52,13 +52,16 @@ type SchemaConfigDict struct {
 type SchemaConfigUserData struct {
 	ShadowFile   string `yaml:"shadow_file" json:"shadow_file"`
 	UserDictFile string `yaml:"user_dict_file" json:"user_dict_file"`
+	TempDictFile string `yaml:"temp_dict_file,omitempty" json:"temp_dict_file,omitempty"`
 	UserFreqFile string `yaml:"user_freq_file,omitempty" json:"user_freq_file,omitempty"`
 }
 
 // SchemaConfigLearning 学习策略配置
 type SchemaConfigLearning struct {
-	Mode        string `yaml:"mode" json:"mode"`
-	UnigramPath string `yaml:"unigram_path,omitempty" json:"unigram_path,omitempty"`
+	Mode             string `yaml:"mode" json:"mode"`
+	UnigramPath      string `yaml:"unigram_path,omitempty" json:"unigram_path,omitempty"`
+	TempMaxEntries   int    `yaml:"temp_max_entries,omitempty" json:"temp_max_entries,omitempty"`
+	TempPromoteCount int    `yaml:"temp_promote_count,omitempty" json:"temp_promote_count,omitempty"`
 }
 
 // SchemaConfig 完整方案配置（YAML 结构，前端可直接编辑）
@@ -80,8 +83,8 @@ func (a *App) GetAvailableSchemas() ([]SchemaInfo, error) {
 
 	schemas := make(map[string]SchemaInfo)
 
-	// 先加载内置方案
-	loadSchemaInfoFromDir(filepath.Join(exeDir, "schemas"), schemas)
+	// 先加载内置方案（exeDir/data/schemas）
+	loadSchemaInfoFromDir(filepath.Join(exeDir, "data", "schemas"), schemas)
 
 	// 再加载用户方案（覆盖同 ID）
 	if configDir != "" {
@@ -213,9 +216,9 @@ func findSchemaFile(schemaID string) (string, error) {
 		}
 	}
 
-	// 回退到应用目录
+	// 回退到程序数据目录
 	exeDir := getExeDir()
-	exePath := filepath.Join(exeDir, "schemas", filename)
+	exePath := filepath.Join(exeDir, "data", "schemas", filename)
 	if _, err := os.Stat(exePath); err == nil {
 		return exePath, nil
 	}

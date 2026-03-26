@@ -13,15 +13,6 @@ import (
 	"github.com/huanfeng/wind_input/pkg/fileutil"
 )
 
-// LoadUserDict 从默认路径加载用户词库
-func LoadUserDict() (*UserDictData, error) {
-	path, err := config.GetUserDictPath()
-	if err != nil {
-		return &UserDictData{Words: []UserWord{}}, err
-	}
-	return LoadUserDictFrom(path)
-}
-
 // LoadUserDictFrom 从指定路径加载用户词库
 func LoadUserDictFrom(path string) (*UserDictData, error) {
 	file, err := os.Open(path)
@@ -82,15 +73,6 @@ func LoadUserDictFrom(path string) (*UserDictData, error) {
 	}
 
 	return &UserDictData{Words: words}, nil
-}
-
-// SaveUserDict 保存用户词库到默认路径
-func SaveUserDict(data *UserDictData) error {
-	path, err := config.GetUserDictPath()
-	if err != nil {
-		return err
-	}
-	return SaveUserDictTo(data, path)
 }
 
 // SaveUserDictTo 保存用户词库到指定路径

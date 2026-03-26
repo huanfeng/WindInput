@@ -1,6 +1,8 @@
 package editor
 
 import (
+	"path/filepath"
+
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/dictfile"
 )
@@ -22,21 +24,24 @@ func NewUserDictEditor() (*UserDictEditor, error) {
 
 // NewUserDictEditorForSchema 根据方案 ID 创建用户词库编辑器
 func NewUserDictEditorForSchema(schemaID string) (*UserDictEditor, error) {
-	var path string
-	var err error
-	switch schemaID {
-	case "pinyin":
-		path, err = config.GetPinyinUserDictPath()
-	default:
-		path, err = config.GetWubiUserDictPath()
-	}
+	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return nil, err
 	}
 
+	// 统一命名: {schemaID}.userwords.txt
+	path := filepath.Join(configDir, schemaID+".userwords.txt")
+
 	return &UserDictEditor{
 		BaseEditor: NewBaseEditor(path),
 	}, nil
+}
+
+// NewUserDictEditorWithPath 使用指定文件路径创建用户词库编辑器
+func NewUserDictEditorWithPath(filePath string) *UserDictEditor {
+	return &UserDictEditor{
+		BaseEditor: NewBaseEditor(filePath),
+	}
 }
 
 // Load 加载用户词库
@@ -82,6 +87,18 @@ func (e *UserDictEditor) GetUserDict() *dictfile.UserDictData {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.data
+}
+
+// SetUserDict 设置用户词库数据（用于清空等操作）
+func (e *UserDictEditor) SetUserDict(data *dictfile.UserDictData) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if data == nil {
+		e.data = &dictfile.UserDictData{Words: []dictfile.UserWord{}}
+	} else {
+		e.data = data
+	}
+	e.dirty = true
 }
 
 // AddWord 添加词条

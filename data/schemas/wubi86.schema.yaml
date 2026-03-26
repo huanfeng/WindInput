@@ -26,8 +26,8 @@ dictionaries:
     default: true
 
 user_data:
-  shadow_file: "shadow_wubi86.yaml"
-  user_dict_file: "user_words_wubi86.txt"
+  shadow_file: "wubi86.shadow.yaml"
+  user_dict_file: "wubi86.userwords.txt"
 
 learning:
   mode: manual

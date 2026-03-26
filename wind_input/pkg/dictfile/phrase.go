@@ -9,15 +9,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LoadPhrases 从默认路径加载短语配置
-func LoadPhrases() (*PhrasesConfig, error) {
-	path, err := config.GetPhrasesPath()
-	if err != nil {
-		return &PhrasesConfig{Phrases: []PhraseConfig{}}, err
-	}
-	return LoadPhrasesFrom(path)
-}
-
 // LoadPhrasesFrom 从指定路径加载短语配置
 func LoadPhrasesFrom(path string) (*PhrasesConfig, error) {
 	data, err := os.ReadFile(path)
@@ -36,15 +27,6 @@ func LoadPhrasesFrom(path string) (*PhrasesConfig, error) {
 	return &cfg, nil
 }
 
-// SavePhrases 保存短语配置到默认路径
-func SavePhrases(cfg *PhrasesConfig) error {
-	path, err := config.GetPhrasesPath()
-	if err != nil {
-		return err
-	}
-	return SavePhrasesTo(cfg, path)
-}
-
 // SavePhrasesTo 保存短语配置到指定路径
 func SavePhrasesTo(cfg *PhrasesConfig, path string) error {
 	if err := config.EnsureConfigDir(); err != nil {
@@ -61,21 +43,20 @@ func SavePhrasesTo(cfg *PhrasesConfig, path string) error {
 
 // AddPhrase 添加短语到配置
 // 返回 true 表示新增，false 表示更新已有项
-func AddPhrase(cfg *PhrasesConfig, code, text string, weight int) bool {
+func AddPhrase(cfg *PhrasesConfig, code, text string, position int) bool {
 	// 检查是否已存在
 	for i, p := range cfg.Phrases {
 		if p.Code == code && p.Text == text {
-			// 更新权重
-			cfg.Phrases[i].Weight = weight
+			cfg.Phrases[i].Position = position
 			return false
 		}
 	}
 
 	// 添加新短语
 	cfg.Phrases = append(cfg.Phrases, PhraseConfig{
-		Code:   code,
-		Text:   text,
-		Weight: weight,
+		Code:     code,
+		Text:     text,
+		Position: position,
 	})
 	return true
 }

@@ -30,9 +30,9 @@ dictionaries:
     role: reverse_lookup
 
 user_data:
-  shadow_file: "shadow_shuangpin.yaml"
-  user_dict_file: "user_words_shuangpin.txt"
-  user_freq_file: "user_freq_shuangpin.txt"
+  shadow_file: "shuangpin.shadow.yaml"
+  user_dict_file: "shuangpin.userwords.txt"
+  user_freq_file: "shuangpin.userfreq.txt"
 
 learning:
   mode: manual

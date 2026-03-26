@@ -29,13 +29,20 @@ func NewShadowEditorForSchema(schemaID string) (*ShadowEditor, error) {
 		return nil, err
 	}
 
-	// 按方案 ID 确定 shadow 文件名
-	shadowFile := "shadow_" + schemaID + ".yaml"
+	// 按方案 ID 确定 shadow 文件名: {schemaID}.shadow.yaml
+	shadowFile := schemaID + ".shadow.yaml"
 	path := configDir + "/" + shadowFile
 
 	return &ShadowEditor{
 		BaseEditor: NewBaseEditor(path),
 	}, nil
+}
+
+// NewShadowEditorWithPath 使用指定文件路径创建 Shadow 编辑器
+func NewShadowEditorWithPath(filePath string) *ShadowEditor {
+	return &ShadowEditor{
+		BaseEditor: NewBaseEditor(filePath),
+	}
 }
 
 // Load 加载 Shadow 配置

@@ -1,0 +1,62 @@
+# WindInput 系统短语
+# 随程序打包发布，用户不应直接修改此文件
+# 文本中的 $变量 会在运行时自动展开
+# 支持 $var 和 ${var} 两种语法，$$ 转义为 $
+
+phrases:
+  # ===== 日期 =====
+  - code: "date"
+    text: "$Y-$MM-$DD"
+    position: 1
+  - code: "date"
+    text: "$Y年$MM月$DD日"
+    position: 2
+  - code: "date"
+    text: "$Y/$MM/$DD"
+    position: 3
+  - code: "date"
+    text: "$MM/$DD/$Y"
+    position: 4
+  - code: "date"
+    text: "${YC}年${MC}月${DC}日"
+    position: 5
+
+  # ===== 时间 =====
+  - code: "time"
+    text: "$HH:$mm:$ss"
+    position: 1
+  - code: "time"
+    text: "$HH:$mm"
+    position: 2
+  - code: "time"
+    text: "$HH时$mm分$ss秒"
+    position: 3
+
+  # ===== 日期时间 =====
+  - code: "datm"
+    text: "$Y-$MM-$DD $HH:$mm:$ss"
+    position: 1
+  - code: "datm"
+    text: "$Y年$MM月$DD日 $HH:$mm:$ss"
+    position: 2
+
+  # ===== 星期 =====
+  - code: "week"
+    text: "$W"
+    position: 1
+  - code: "week"
+    text: "$Y年$MM月$DD日 $W"
+    position: 2
+
+  # ===== UUID =====
+  - code: "uuid"
+    text: "$uuid"
+    position: 1
+
+  # ===== 时间戳 =====
+  - code: "tmts"
+    text: "$ts"
+    position: 2
+  - code: "tmts"
+    text: "$tsms"
+    position: 3

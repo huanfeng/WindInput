@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 
 	"github.com/huanfeng/wind_input/pkg/control"
 
@@ -17,10 +18,16 @@ type App struct {
 	startPage string
 
 	// 编辑器
-	configEditor   *editor.ConfigEditor
-	phraseEditor   *editor.PhraseEditor
-	shadowEditor   *editor.ShadowEditor
-	userDictEditor *editor.UserDictEditor
+	configEditor       *editor.ConfigEditor
+	phraseEditor       *editor.PhraseEditor // 用户短语编辑器
+	systemPhraseEditor *editor.PhraseEditor // 系统短语编辑器（只读）
+	shadowEditor       *editor.ShadowEditor
+	userDictEditor     *editor.UserDictEditor
+
+	// 按方案缓存的编辑器（用于左右分栏 UI 按方案独立操作）
+	schemaUserDicts map[string]*editor.UserDictEditor
+	schemaShadows   map[string]*editor.ShadowEditor
+	schemaTempDicts map[string]*editor.UserDictEditor // 临时词库复用 UserDictEditor
 
 	// 文件监控
 	fileWatcher *filesync.FileWatcher
@@ -32,7 +39,10 @@ type App struct {
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{
-		controlClient: control.NewClient(),
+		controlClient:   control.NewClient(),
+		schemaUserDicts: make(map[string]*editor.UserDictEditor),
+		schemaShadows:   make(map[string]*editor.ShadowEditor),
+		schemaTempDicts: make(map[string]*editor.UserDictEditor),
 	}
 }
 
@@ -66,6 +76,11 @@ func (a *App) startup(ctx context.Context) {
 		a.phraseEditor.Load()
 	}
 
+	// 初始化系统短语编辑器（只读，从 exe/data 目录加载）
+	systemPhrasePath := filepath.Join(getExeDir(), "data", "system.phrases.yaml")
+	a.systemPhraseEditor = editor.NewPhraseEditorWithPath(systemPhrasePath)
+	a.systemPhraseEditor.Load()
+
 	a.shadowEditor, err = editor.NewShadowEditor()
 	if err == nil {
 		a.shadowEditor.Load()
@@ -94,6 +109,23 @@ func (a *App) startup(ctx context.Context) {
 
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {
+	// 保存按方案缓存的编辑器
+	for _, ed := range a.schemaUserDicts {
+		if ed.IsDirty() {
+			ed.Save()
+		}
+	}
+	for _, ed := range a.schemaShadows {
+		if ed.IsDirty() {
+			ed.Save()
+		}
+	}
+	for _, ed := range a.schemaTempDicts {
+		if ed.IsDirty() {
+			ed.Save()
+		}
+	}
+
 	if a.fileWatcher != nil {
 		a.fileWatcher.Stop()
 	}

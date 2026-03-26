@@ -213,14 +213,17 @@ func main() {
 	}
 	exeDir := filepath.Dir(exePath)
 
+	// Program data directory (exeDir/data)
+	dataRoot := config.GetDataDir(exeDir)
+
 	// Initialize common chars table for filtering
-	commonCharsPath := filepath.Join(exeDir, "dict", "common_chars.txt")
+	commonCharsPath := filepath.Join(dataRoot, "dict", "common_chars.txt")
 	dict.InitCommonCharsWithPath(commonCharsPath)
 	logger.Info("Common chars table initialized", "path", commonCharsPath, "count", dict.GetCommonCharCount())
 
 	// Create engine manager
 	engineMgr := engine.NewManager()
-	engineMgr.SetExeDir(exeDir)
+	engineMgr.SetExeDir(dataRoot)
 
 	// Initialize SchemaManager
 	dataDir, err := config.GetConfigDir()
@@ -228,7 +231,7 @@ func main() {
 		logger.Warn("Failed to get config dir, using exe dir", "error", err)
 		dataDir = exeDir
 	}
-	schemaMgr := schema.NewSchemaManager(exeDir, dataDir)
+	schemaMgr := schema.NewSchemaManager(dataRoot, dataDir)
 	if err := schemaMgr.LoadSchemas(); err != nil {
 		logger.Error("Failed to load schemas", "error", err)
 		showErrorMessageBox("输入方案加载失败，服务无法启动。\n\n原因：" + err.Error())
@@ -237,7 +240,7 @@ func main() {
 	engineMgr.SetSchemaManager(schemaMgr)
 
 	// Initialize DictManager (manages user dict, phrases, shadow rules)
-	dictManager := dict.NewDictManager(dataDir)
+	dictManager := dict.NewDictManager(dataDir, dataRoot)
 	defer func() {
 		engineMgr.SaveUserFreqs()
 		dictManager.Close()

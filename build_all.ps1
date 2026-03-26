@@ -192,8 +192,10 @@ Write-Host ""
 
 # [5/6] 准备词库文件
 Write-Host "[5/6] 准备词库文件..."
-$pinyinDir = Join-Path $BuildDir "dict\pinyin"
-$wubiDir = Join-Path $BuildDir "dict\wubi86"
+$DataDir = Join-Path $BuildDir "data"
+if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+$pinyinDir = Join-Path $DataDir "dict\pinyin"
+$wubiDir = Join-Path $DataDir "dict\wubi86"
 if (-not (Test-Path $pinyinDir)) { New-Item -ItemType Directory -Path $pinyinDir -Force | Out-Null }
 if (-not (Test-Path $wubiDir)) { New-Item -ItemType Directory -Path $wubiDir -Force | Out-Null }
 
@@ -273,14 +275,14 @@ if ($wubiCopied -gt 0) {
 # 复制常用字表
 $commonChars = Join-Path $ScriptDir "data\dict\common_chars.txt"
 if (Test-Path $commonChars) {
-    Copy-Item -Path $commonChars -Destination (Join-Path $BuildDir "dict\common_chars.txt") -Force
+    Copy-Item -Path $commonChars -Destination (Join-Path $DataDir "dict\common_chars.txt") -Force
     Write-Host "  - 已复制常用字表"
 } else {
     Write-Host "[警告] 未找到常用字表" -ForegroundColor Yellow
 }
 
 # 复制输入方案配置
-$schemasDir = Join-Path $BuildDir "schemas"
+$schemasDir = Join-Path $DataDir "schemas"
 if (-not (Test-Path $schemasDir)) { New-Item -ItemType Directory -Path $schemasDir -Force | Out-Null }
 $schemaFiles = Get-ChildItem -Path (Join-Path $ScriptDir "data\schemas") -Filter "*.schema.yaml" -ErrorAction SilentlyContinue
 if ($schemaFiles) {
@@ -290,10 +292,19 @@ if ($schemaFiles) {
     Write-Host "[警告] 未找到输入方案配置文件" -ForegroundColor Yellow
 }
 
+# 复制系统短语配置
+$systemPhrases = Join-Path $ScriptDir "data\system.phrases.yaml"
+if (Test-Path $systemPhrases) {
+    Copy-Item -Path $systemPhrases -Destination (Join-Path $DataDir "system.phrases.yaml") -Force
+    Write-Host "  - 已复制系统短语配置"
+} else {
+    Write-Host "[警告] 未找到系统短语配置文件" -ForegroundColor Yellow
+}
+
 # 复制主题文件
 Write-Host "  - 复制主题文件..."
 $themesSrc = Join-Path $ScriptDir "wind_input\themes"
-$themesDst = Join-Path $BuildDir "themes"
+$themesDst = Join-Path $DataDir "themes"
 if (Test-Path $themesSrc) {
     Get-ChildItem -Path $themesSrc -Directory | ForEach-Object {
         $themeYaml = Join-Path $_.FullName "theme.yaml"
@@ -330,13 +341,13 @@ Write-Host "- build\wind_tsf.dll（TSF 桥接）"
 Write-Host "- build\wind_dwrite.dll（DirectWrite 渲染 Shim）"
 Write-Host "- build\wind_input.exe（输入法服务）"
 Write-Host "- build\wind_setting.exe（设置界面）"
-Write-Host "- build\dict\pinyin\8105.dict.yaml（拼音单字词库）"
-Write-Host "- build\dict\pinyin\base.dict.yaml（拼音基础词库）"
-Write-Host "- build\dict\pinyin\unigram.txt（Unigram 语言模型）"
-Write-Host "- build\dict\wubi86\wubi86_jidian*.dict.yaml（五笔词库, rime 格式）"
-Write-Host "- build\dict\common_chars.txt（常用字表）"
-Write-Host "- build\schemas\*.schema.yaml（输入方案配置）"
-Write-Host "- build\themes\*\theme.yaml（主题配置）"
+Write-Host "- build\data\dict\pinyin\*.dict.yaml（拼音词库）"
+Write-Host "- build\data\dict\pinyin\unigram.txt（Unigram 语言模型）"
+Write-Host "- build\data\dict\wubi86\wubi86_jidian*.dict.yaml（五笔词库）"
+Write-Host "- build\data\dict\common_chars.txt（常用字表）"
+Write-Host "- build\data\schemas\*.schema.yaml（输入方案配置）"
+Write-Host "- build\data\system.phrases.yaml（系统短语配置）"
+Write-Host "- build\data\themes\*\theme.yaml（主题配置）"
 Write-Host ""
 Write-Host "注: .wdb 二进制词库由运行时按需自动生成并缓存"
 Write-Host ""

@@ -28,9 +28,9 @@ dictionaries:
     role: reverse_lookup
 
 user_data:
-  shadow_file: "shadow_pinyin.yaml"
-  user_dict_file: "user_words_pinyin.txt"
-  user_freq_file: "user_freq_pinyin.txt"
+  shadow_file: "pinyin.shadow.yaml"
+  user_dict_file: "pinyin.userwords.txt"
+  user_freq_file: "pinyin.userfreq.txt"
 
 learning:
   mode: manual

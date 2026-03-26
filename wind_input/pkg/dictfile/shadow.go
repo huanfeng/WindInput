@@ -10,15 +10,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LoadShadow 从默认路径加载 Shadow 配置
-func LoadShadow() (*ShadowConfig, error) {
-	path, err := config.GetShadowPath()
-	if err != nil {
-		return &ShadowConfig{Rules: make(map[string]*ShadowCodeConfig)}, err
-	}
-	return LoadShadowFrom(path)
-}
-
 // LoadShadowFrom 从指定路径加载 Shadow 配置
 func LoadShadowFrom(path string) (*ShadowConfig, error) {
 	data, err := os.ReadFile(path)
@@ -39,15 +30,6 @@ func LoadShadowFrom(path string) (*ShadowConfig, error) {
 	}
 
 	return &cfg, nil
-}
-
-// SaveShadow 保存 Shadow 配置到默认路径
-func SaveShadow(cfg *ShadowConfig) error {
-	path, err := config.GetShadowPath()
-	if err != nil {
-		return err
-	}
-	return SaveShadowTo(cfg, path)
 }
 
 // SaveShadowTo 保存 Shadow 配置到指定路径

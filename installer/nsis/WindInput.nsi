@@ -44,9 +44,9 @@ Var RANDOM_SUFFIX
 !error "Missing file: ${BUILD_DIR}\wind_setting.exe. Run build_all.ps1 -WailsMode release first."
 !endif
 
-!if /FileExists "${BUILD_DIR}\dict\pinyin\cn_dicts\8105.dict.yaml"
+!if /FileExists "${BUILD_DIR}\data\dict\pinyin\cn_dicts\8105.dict.yaml"
 !else
-!error "Missing file: ${BUILD_DIR}\dict\pinyin\cn_dicts\8105.dict.yaml. Run build_all.ps1 first."
+!error "Missing file: ${BUILD_DIR}\data\dict\pinyin\cn_dicts\8105.dict.yaml. Run build_all.ps1 first."
 !endif
 
 Name "${APP_NAME}"
@@ -338,34 +338,36 @@ install_cleanup_bak_end:
 
   ; --- Step 6: Dictionary files ---
   DetailPrint "正在复制词库文件..."
-  SetOutPath "$INSTDIR\dict"
-  File "${BUILD_DIR}\dict\common_chars.txt"
-  SetOutPath "$INSTDIR\dict\pinyin"
-  File "${BUILD_DIR}\dict\pinyin\rime_ice.dict.yaml"
-  File /nonfatal "${BUILD_DIR}\dict\pinyin\unigram.txt"
-  SetOutPath "$INSTDIR\dict\pinyin\cn_dicts"
-  File "${BUILD_DIR}\dict\pinyin\cn_dicts\8105.dict.yaml"
-  File "${BUILD_DIR}\dict\pinyin\cn_dicts\base.dict.yaml"
-  SetOutPath "$INSTDIR\dict\wubi86"
-  File "${BUILD_DIR}\dict\wubi86\wubi86_jidian.dict.yaml"
-  File /nonfatal "${BUILD_DIR}\dict\wubi86\wubi86_jidian_extra.dict.yaml"
-  File /nonfatal "${BUILD_DIR}\dict\wubi86\wubi86_jidian_extra_district.dict.yaml"
-  File /nonfatal "${BUILD_DIR}\dict\wubi86\wubi86_jidian_user.dict.yaml"
+  SetOutPath "$INSTDIR\data\dict"
+  File "${BUILD_DIR}\data\dict\common_chars.txt"
+  SetOutPath "$INSTDIR\data\dict\pinyin"
+  File "${BUILD_DIR}\data\dict\pinyin\rime_ice.dict.yaml"
+  File /nonfatal "${BUILD_DIR}\data\dict\pinyin\unigram.txt"
+  SetOutPath "$INSTDIR\data\dict\pinyin\cn_dicts"
+  File "${BUILD_DIR}\data\dict\pinyin\cn_dicts\8105.dict.yaml"
+  File "${BUILD_DIR}\data\dict\pinyin\cn_dicts\base.dict.yaml"
+  SetOutPath "$INSTDIR\data\dict\wubi86"
+  File "${BUILD_DIR}\data\dict\wubi86\wubi86_jidian.dict.yaml"
+  File /nonfatal "${BUILD_DIR}\data\dict\wubi86\wubi86_jidian_extra.dict.yaml"
+  File /nonfatal "${BUILD_DIR}\data\dict\wubi86\wubi86_jidian_extra_district.dict.yaml"
+  File /nonfatal "${BUILD_DIR}\data\dict\wubi86\wubi86_jidian_user.dict.yaml"
 
   ; --- Step 6b: Schema files (input method configurations) ---
   DetailPrint "正在复制输入方案配置..."
-  SetOutPath "$INSTDIR\schemas"
-  File "${BUILD_DIR}\schemas\wubi86.schema.yaml"
-  File "${BUILD_DIR}\schemas\pinyin.schema.yaml"
+  SetOutPath "$INSTDIR\data\schemas"
+  File "${BUILD_DIR}\data\schemas\wubi86.schema.yaml"
+  File "${BUILD_DIR}\data\schemas\pinyin.schema.yaml"
 
   ; --- Step 6c: Theme files ---
   DetailPrint "正在复制主题文件..."
-  SetOutPath "$INSTDIR\themes\default"
-  File "${BUILD_DIR}\themes\default\theme.yaml"
-  SetOutPath "$INSTDIR\themes\dark"
-  File "${BUILD_DIR}\themes\dark\theme.yaml"
-  SetOutPath "$INSTDIR\themes\msime"
-  File "${BUILD_DIR}\themes\msime\theme.yaml"
+  SetOutPath "$INSTDIR\data"
+  File "${BUILD_DIR}\data\system.phrases.yaml"
+  SetOutPath "$INSTDIR\data\themes\default"
+  File "${BUILD_DIR}\data\themes\default\theme.yaml"
+  SetOutPath "$INSTDIR\data\themes\dark"
+  File /nonfatal "${BUILD_DIR}\data\themes\dark\theme.yaml"
+  SetOutPath "$INSTDIR\data\themes\msime"
+  File "${BUILD_DIR}\data\themes\msime\theme.yaml"
   SetOutPath "$INSTDIR"
 
   ; --- Step 7: Register NEW DLL (always at original path, guaranteed new version) ---
@@ -462,9 +464,7 @@ uninst_setting_done:
 
   ; --- Step 4: Remove remaining files and directories ---
   Delete /REBOOTOK "$INSTDIR\uninstall.exe"
-  RMDir /r /REBOOTOK "$INSTDIR\dict"
-  RMDir /r /REBOOTOK "$INSTDIR\schemas"
-  RMDir /r /REBOOTOK "$INSTDIR\themes"
+  RMDir /r /REBOOTOK "$INSTDIR\data"
   ; Cleanup .old_* and .bak files
   FindFirst $0 $1 "$INSTDIR\*.old_*"
 uninst_cleanup_old_loop:

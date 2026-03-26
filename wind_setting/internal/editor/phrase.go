@@ -11,9 +11,9 @@ type PhraseEditor struct {
 	data *dictfile.PhrasesConfig
 }
 
-// NewPhraseEditor 创建短语编辑器
+// NewPhraseEditor 创建短语编辑器（加载用户短语 user.phrases.yaml）
 func NewPhraseEditor() (*PhraseEditor, error) {
-	path, err := config.GetPhrasesPath()
+	path, err := config.GetUserPhrasesPath()
 	if err != nil {
 		return nil, err
 	}
@@ -21,6 +21,13 @@ func NewPhraseEditor() (*PhraseEditor, error) {
 	return &PhraseEditor{
 		BaseEditor: NewBaseEditor(path),
 	}, nil
+}
+
+// NewPhraseEditorWithPath 使用指定文件路径创建短语编辑器
+func NewPhraseEditorWithPath(filePath string) *PhraseEditor {
+	return &PhraseEditor{
+		BaseEditor: NewBaseEditor(filePath),
+	}
 }
 
 // Load 加载短语配置

@@ -80,11 +80,14 @@ if (Test-Path $settingExe) {
     Write-Host "[提示] 未找到 wind_setting.exe,已跳过(可选)" -ForegroundColor Cyan
 }
 
-# [6/12] 复制词库
-Write-Host "[6/12] 从 build 目录复制词库(源文件, wdb 运行时自动生成)..."
-$dictDirs = @("dict\pinyin", "dict\pinyin\cn_dicts", "dict\wubi86")
-foreach ($d in $dictDirs) {
-    $target = Join-Path $InstallDir $d
+# [6/12] 复制数据目录（词库、方案、短语、主题）
+Write-Host "[6/12] 复制数据目录(data/)..."
+$BuildDataDir = Join-Path $BuildDir "data"
+$InstallDataDir = Join-Path $InstallDir "data"
+
+$dataDirs = @("dict\pinyin", "dict\pinyin\cn_dicts", "dict\wubi86", "schemas")
+foreach ($d in $dataDirs) {
+    $target = Join-Path $InstallDataDir $d
     if (-not (Test-Path $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
 }
 
@@ -97,12 +100,13 @@ $dictFiles = @(
     @{ Src = "dict\wubi86\wubi86_jidian_extra.dict.yaml"; Desc = "五笔扩展词库: wubi86_jidian_extra.dict.yaml"; Optional = $true },
     @{ Src = "dict\wubi86\wubi86_jidian_extra_district.dict.yaml"; Desc = "五笔行政区域词库: wubi86_jidian_extra_district.dict.yaml"; Optional = $true },
     @{ Src = "dict\wubi86\wubi86_jidian_user.dict.yaml"; Desc = "五笔用户词库模板: wubi86_jidian_user.dict.yaml"; Optional = $true },
-    @{ Src = "dict\common_chars.txt"; Desc = "常用字表: common_chars.txt" }
+    @{ Src = "dict\common_chars.txt"; Desc = "常用字表: common_chars.txt" },
+    @{ Src = "system.phrases.yaml"; Desc = "系统短语配置: system.phrases.yaml" }
 )
 
 foreach ($df in $dictFiles) {
-    $srcPath = Join-Path $BuildDir $df.Src
-    $dstPath = Join-Path $InstallDir $df.Src
+    $srcPath = Join-Path $BuildDataDir $df.Src
+    $dstPath = Join-Path $InstallDataDir $df.Src
     $dstDir = Split-Path -Parent $dstPath
     if (-not (Test-Path $dstDir)) { New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
 
@@ -112,27 +116,27 @@ foreach ($df in $dictFiles) {
     } elseif ($df.Optional) {
         Write-Host "[提示] $($df.Desc -replace ':.*', '') 不存在,智能组句功能不可用" -ForegroundColor Cyan
     } else {
-        Write-Host "[警告] build 目录中未找到 $($df.Src),请先运行 build_all.ps1" -ForegroundColor Yellow
+        Write-Host "[警告] build\data 目录中未找到 $($df.Src),请先运行 build_all.ps1" -ForegroundColor Yellow
     }
 }
 
 # [7/12] 复制输入方案配置
 Write-Host "[7/12] 复制输入方案配置..."
-$schemasDir = Join-Path $InstallDir "schemas"
+$schemasDir = Join-Path $InstallDataDir "schemas"
 if (-not (Test-Path $schemasDir)) { New-Item -ItemType Directory -Path $schemasDir -Force | Out-Null }
-$schemaFiles = Get-ChildItem -Path (Join-Path $BuildDir "schemas") -Filter "*.schema.yaml" -ErrorAction SilentlyContinue
+$schemaFiles = Get-ChildItem -Path (Join-Path $BuildDataDir "schemas") -Filter "*.schema.yaml" -ErrorAction SilentlyContinue
 if ($schemaFiles) {
     $schemaFiles | Copy-Item -Destination $schemasDir -Force
     Write-Host "  - 输入方案配置已复制"
 } else {
-    Write-Host "[警告] build 目录中未找到输入方案配置" -ForegroundColor Yellow
+    Write-Host "[警告] build\data 目录中未找到输入方案配置" -ForegroundColor Yellow
 }
 
 # [8/12] 复制主题文件
 Write-Host "[8/12] 复制主题文件..."
-$themesSource = Join-Path $BuildDir "themes"
+$themesSource = Join-Path $BuildDataDir "themes"
 if (Test-Path $themesSource) {
-    $themesTarget = Join-Path $InstallDir "themes"
+    $themesTarget = Join-Path $InstallDataDir "themes"
     if (-not (Test-Path $themesTarget)) { New-Item -ItemType Directory -Path $themesTarget -Force | Out-Null }
     Get-ChildItem -Path $themesSource -Directory | ForEach-Object {
         $themeYaml = Join-Path $_.FullName "theme.yaml"
@@ -144,7 +148,7 @@ if (Test-Path $themesSource) {
         }
     }
 } else {
-    Write-Host "[警告] build 目录中未找到主题文件" -ForegroundColor Yellow
+    Write-Host "[警告] build\data 目录中未找到主题文件" -ForegroundColor Yellow
 }
 
 # [9/12] 注册 COM 组件
@@ -201,13 +205,14 @@ Write-Host "- wind_tsf.dll (TSF 桥接)"
 Write-Host "- wind_dwrite.dll (DirectWrite 渲染 Shim)"
 Write-Host "- wind_input.exe (输入法服务)"
 Write-Host "- wind_setting.exe (设置界面)"
-Write-Host "- dict\pinyin\rime_ice.dict.yaml (拼音词库入口)"
-Write-Host "- dict\pinyin\cn_dicts\*.dict.yaml (拼音词库数据)"
-Write-Host "- dict\pinyin\unigram.txt (语言模型)"
-Write-Host "- dict\wubi86\wubi86_jidian*.dict.yaml (五笔86词库, rime 格式)"
-Write-Host "- dict\common_chars.txt (常用字表)"
-Write-Host "- schemas\*.schema.yaml (输入方案配置)"
-Write-Host "- themes\*\theme.yaml (主题配置)"
+Write-Host "- data\dict\pinyin\rime_ice.dict.yaml (拼音词库入口)"
+Write-Host "- data\dict\pinyin\cn_dicts\*.dict.yaml (拼音词库数据)"
+Write-Host "- data\dict\pinyin\unigram.txt (语言模型)"
+Write-Host "- data\dict\wubi86\wubi86_jidian*.dict.yaml (五笔86词库)"
+Write-Host "- data\dict\common_chars.txt (常用字表)"
+Write-Host "- data\schemas\*.schema.yaml (输入方案配置)"
+Write-Host "- data\system.phrases.yaml (系统短语配置)"
+Write-Host "- data\themes\*\theme.yaml (主题配置)"
 Write-Host ""
 Write-Host "服务已自动启动，并已配置开机自启动。"
 Write-Host ""

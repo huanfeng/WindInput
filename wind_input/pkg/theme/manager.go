@@ -61,10 +61,10 @@ func (m *Manager) initThemeDirs() {
 		m.themeDirs = append(m.themeDirs, userThemesDir)
 	}
 
-	// 2. Executable directory: <exe_dir>/themes
+	// 2. Program data directory: <exe_dir>/data/themes
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
-		themesDir := filepath.Join(exeDir, "themes")
+		themesDir := filepath.Join(exeDir, "data", "themes")
 		m.themeDirs = append(m.themeDirs, themesDir)
 	}
 

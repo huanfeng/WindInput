@@ -8,17 +8,15 @@ import (
 )
 
 const (
-	AppName            = "WindInput"
-	ConfigFileName     = "config.yaml"
-	StateFileName      = "state.yaml"
-	UserDictFile       = "user_dict.txt" // Deprecated: kept for backward compatibility
-	PinyinUserDictFile = "pinyin_user_words.txt"
-	WubiUserDictFile   = "wubi_user_words.txt"
-	PhrasesFile        = "phrases.yaml"
-	ShadowFile         = "shadow.yaml"
+	AppName           = "WindInput"
+	DataSubDir        = "data"                // 程序目录下的数据子目录
+	ConfigFileName    = "config.yaml"         // 用户配置
+	StateFileName     = "state.yaml"          // 用户状态
+	SystemPhrasesFile = "system.phrases.yaml" // 系统短语（data/ 目录）
+	UserPhrasesFile   = "user.phrases.yaml"   // 用户短语（用户目录）
 )
 
-// GetConfigDir returns the configuration directory path
+// GetConfigDir returns the user configuration directory path
 // On Windows: %APPDATA%\WindInput
 func GetConfigDir() (string, error) {
 	configDir, err := os.UserConfigDir()
@@ -26,6 +24,11 @@ func GetConfigDir() (string, error) {
 		return "", fmt.Errorf("failed to get user config dir: %w", err)
 	}
 	return filepath.Join(configDir, AppName), nil
+}
+
+// GetDataDir returns the program data directory path (exeDir/data)
+func GetDataDir(exeDir string) string {
+	return filepath.Join(exeDir, DataSubDir)
 }
 
 // GetConfigPath returns the full path to the config file
@@ -46,49 +49,13 @@ func GetStatePath() (string, error) {
 	return filepath.Join(configDir, StateFileName), nil
 }
 
-// GetUserDictPath returns the full path to the user dictionary (deprecated, kept for compatibility)
-func GetUserDictPath() (string, error) {
+// GetUserPhrasesPath returns the full path to the user phrases file
+func GetUserPhrasesPath() (string, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(configDir, UserDictFile), nil
-}
-
-// GetPinyinUserDictPath returns the full path to the pinyin user dictionary
-func GetPinyinUserDictPath() (string, error) {
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, PinyinUserDictFile), nil
-}
-
-// GetWubiUserDictPath returns the full path to the wubi user dictionary
-func GetWubiUserDictPath() (string, error) {
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, WubiUserDictFile), nil
-}
-
-// GetPhrasesPath returns the full path to the phrases file
-func GetPhrasesPath() (string, error) {
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, PhrasesFile), nil
-}
-
-// GetShadowPath returns the full path to the shadow file
-func GetShadowPath() (string, error) {
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, ShadowFile), nil
+	return filepath.Join(configDir, UserPhrasesFile), nil
 }
 
 // EnsureConfigDir ensures the config directory exists
@@ -98,14 +65,4 @@ func EnsureConfigDir() error {
 		return err
 	}
 	return os.MkdirAll(configDir, 0755)
-}
-
-// GetWubiDictPath returns the path to the wubi dictionary main file
-func GetWubiDictPath() string {
-	return "dict/wubi86/wubi86_jidian.dict.yaml"
-}
-
-// GetPinyinDictPath returns the path to the pinyin dictionary directory
-func GetPinyinDictPath() string {
-	return "dict/pinyin"
 }
