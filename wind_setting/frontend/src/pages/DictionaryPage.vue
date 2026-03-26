@@ -103,7 +103,7 @@
           </div>
 
           <!-- 用户短语列表 -->
-          <div v-if="phraseCategory === 'user'">
+          <div v-if="phraseCategory === 'user'" class="dict-list-wrapper">
             <div v-if="phrases.length > 0" class="dict-list dict-list-scrollable">
               <div
                 class="dict-list-item"
@@ -134,7 +134,7 @@
           </div>
 
           <!-- 系统短语列表 -->
-          <div v-else>
+          <div v-else class="dict-list-wrapper">
             <div v-if="systemPhrases.length > 0" class="dict-list dict-list-scrollable">
               <div
                 class="dict-list-item"
@@ -1341,6 +1341,38 @@ onUnmounted(() => {
   font-size: 13px;
   color: #9ca3af;
   font-style: italic;
+}
+
+/* ===== 列表外层包裹（传递 flex 链） ===== */
+.dict-list-wrapper {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ===== 滚动条（圆角容器适配） ===== */
+.dict-list-scrollable::-webkit-scrollbar,
+.dict-table-wrap::-webkit-scrollbar,
+.dict-schema-panel::-webkit-scrollbar {
+  width: 6px;
+}
+.dict-list-scrollable::-webkit-scrollbar-track,
+.dict-table-wrap::-webkit-scrollbar-track,
+.dict-schema-panel::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 4px 0;
+}
+.dict-list-scrollable::-webkit-scrollbar-thumb,
+.dict-table-wrap::-webkit-scrollbar-thumb,
+.dict-schema-panel::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+.dict-list-scrollable::-webkit-scrollbar-thumb:hover,
+.dict-table-wrap::-webkit-scrollbar-thumb:hover,
+.dict-schema-panel::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
 }
 
 /* ===== 列表（内部滚动） ===== */
