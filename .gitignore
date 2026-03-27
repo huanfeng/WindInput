@@ -80,7 +80,8 @@ Desktop.ini
 # Logs
 *.log
 
-# OMC
+# OMC/OMX
 .omc
+.omx
 
 package.json.md5
