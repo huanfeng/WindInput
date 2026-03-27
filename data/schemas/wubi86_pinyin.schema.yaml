@@ -45,8 +45,11 @@ user_data:
   shadow_file: "wubi86_pinyin.shadow.yaml"
   user_dict_file: "wubi86_pinyin.userwords.txt"
   user_freq_file: "wubi86_pinyin.userfreq.txt"
+  temp_dict_file: "wubi86_pinyin.tempdict.txt"
 
 learning:
   mode: frequency
   unigram_path: "dict/pinyin/unigram.txt"
   protect_top_n: 3
+  temp_max_entries: 5000
+  temp_promote_count: 3

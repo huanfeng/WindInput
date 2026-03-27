@@ -202,6 +202,9 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 	isCommand := candidate.IsCommand
 	candidateSource := candidate.Source
 	engineMgr := c.engineMgr
+	confirmedSegs := c.confirmedSegments
+	isPinyin := engineMgr != nil && engineMgr.GetCurrentType() == engine.EngineTypePinyin
+	isMixed := engineMgr != nil && engineMgr.GetCurrentType() == engine.EngineTypeMixed
 
 	c.logger.Debug("Candidate selected via mouse click", "index", actualIndex)
 
@@ -215,7 +218,19 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 
 	// 触发选词学习回调
 	if engineMgr != nil && !isCommand && originalText != "" {
-		engineMgr.OnCandidateSelected(code, originalText, candidateSource)
+		if (isPinyin || isMixed) && len(confirmedSegs) > 0 {
+			// 分段输入：合并所有段的编码和文本，作为完整词组学习
+			var fullCode, fullText string
+			for _, seg := range confirmedSegs {
+				fullCode += seg.ConsumedCode
+				fullText += seg.Text
+			}
+			fullCode += code
+			fullText += originalText
+			engineMgr.OnCandidateSelected(fullCode, fullText, candidateSource)
+		} else {
+			engineMgr.OnCandidateSelected(code, originalText, candidateSource)
+		}
 	}
 
 	// Send text to TSF via push pipe (only to active client for security)

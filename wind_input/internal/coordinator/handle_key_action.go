@@ -649,7 +649,19 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 
 	// 完全消费：触发学习回调（拼音和五笔统一）
 	if c.engineMgr != nil && !cand.IsCommand {
-		c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText, cand.Source)
+		if (isPinyin || isMixed) && len(c.confirmedSegments) > 0 {
+			// 分段输入：合并所有段的编码和文本，作为完整词组学习
+			var fullCode, fullText string
+			for _, seg := range c.confirmedSegments {
+				fullCode += seg.ConsumedCode
+				fullText += seg.Text
+			}
+			fullCode += c.inputBuffer
+			fullText += originalText
+			c.engineMgr.OnCandidateSelected(fullCode, fullText, cand.Source)
+		} else {
+			c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText, cand.Source)
+		}
 	}
 
 	// 拼接所有已确认段的文本 + 当前选中的候选

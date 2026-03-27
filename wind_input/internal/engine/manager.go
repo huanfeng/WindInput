@@ -158,7 +158,8 @@ func (m *Manager) ToggleSchema(available []string) (string, error) {
 	if dm != nil {
 		s := sm.GetSchema(nextID)
 		if s != nil {
-			dm.SwitchSchema(nextID, s.UserData.ShadowFile, s.UserData.UserDictFile)
+			dm.SwitchSchemaFull(nextID, s.UserData.ShadowFile, s.UserData.UserDictFile,
+				s.UserData.TempDictFile, s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
 		}
 	}
 
@@ -369,7 +370,8 @@ func (m *Manager) SwitchToSchemaByID(schemaID string) error {
 	if dm != nil {
 		s := sm.GetSchema(schemaID)
 		if s != nil {
-			dm.SwitchSchema(schemaID, s.UserData.ShadowFile, s.UserData.UserDictFile)
+			dm.SwitchSchemaFull(schemaID, s.UserData.ShadowFile, s.UserData.UserDictFile,
+				s.UserData.TempDictFile, s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
 		}
 	}
 

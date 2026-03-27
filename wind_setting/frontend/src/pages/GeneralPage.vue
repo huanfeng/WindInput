@@ -193,6 +193,14 @@ function getMixedConfig(schemaID: string) {
   return cfg.engine.mixed;
 }
 
+// 学习配置
+function getLearningConfig(schemaID: string) {
+  const cfg = schemaConfigs.value[schemaID];
+  if (!cfg) return { mode: "frequency" };
+  if (!cfg.learning) cfg.learning = { mode: "frequency" };
+  return cfg.learning;
+}
+
 function getFuzzyConfig(schemaID: string) {
   const py = getPinyinConfig(schemaID);
   if (!py.fuzzy) py.fuzzy = {};
@@ -367,7 +375,11 @@ onUnmounted(() => {
             <div class="schema-row-info">
               <div class="schema-row-main">
                 <span class="schema-row-name">
-                  {{ getSchemaDisplayName(schemaID) || getSchemaInfo(schemaID)?.name || schemaID }}
+                  {{
+                    getSchemaDisplayName(schemaID) ||
+                    getSchemaInfo(schemaID)?.name ||
+                    schemaID
+                  }}
                 </span>
                 <span class="schema-row-type">{{
                   getEngineTypeLabel(schemaID)
@@ -630,6 +642,22 @@ onUnmounted(() => {
               </button>
             </div>
           </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>词频学习</label>
+              <p class="setting-hint">选择输入法如何学习你的用词习惯</p>
+            </div>
+            <div class="setting-control">
+              <select
+                v-model="getLearningConfig(schemaID).mode"
+                @change="onSchemaConfigChange(schemaID)"
+              >
+                <option value="manual">不学习</option>
+                <option value="frequency">仅调频</option>
+                <option value="auto">自动造词</option>
+              </select>
+            </div>
+          </div>
         </template>
 
         <!-- 混输类型（五笔配置 + 拼音配置 + 混输专属配置） -->
@@ -751,6 +779,22 @@ onUnmounted(() => {
 
           <!-- 混输专属配置区 -->
           <div class="setting-section-title">混输设置</div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>词频学习</label>
+              <p class="setting-hint">选择输入法如何学习你的用词习惯</p>
+            </div>
+            <div class="setting-control">
+              <select
+                v-model="getLearningConfig(schemaID).mode"
+                @change="onSchemaConfigChange(schemaID)"
+              >
+                <option value="manual">不学习</option>
+                <option value="frequency">仅调频</option>
+                <option value="auto">自动造词</option>
+              </select>
+            </div>
+          </div>
           <div class="setting-item">
             <div class="setting-info">
               <label>拼音最小触发长度</label>

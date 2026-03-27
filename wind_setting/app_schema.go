@@ -60,6 +60,7 @@ type SchemaConfigUserData struct {
 type SchemaConfigLearning struct {
 	Mode             string `yaml:"mode" json:"mode"`
 	UnigramPath      string `yaml:"unigram_path,omitempty" json:"unigram_path,omitempty"`
+	ProtectTopN      int    `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty"`
 	TempMaxEntries   int    `yaml:"temp_max_entries,omitempty" json:"temp_max_entries,omitempty"`
 	TempPromoteCount int    `yaml:"temp_promote_count,omitempty" json:"temp_promote_count,omitempty"`
 }

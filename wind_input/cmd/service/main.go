@@ -270,7 +270,8 @@ func main() {
 	activeSchema := schemaMgr.GetActiveSchema()
 	if activeSchema != nil {
 		// 切换 DictManager 的用户数据层
-		dictManager.SwitchSchema(activeSchemaID, activeSchema.UserData.ShadowFile, activeSchema.UserData.UserDictFile)
+		dictManager.SwitchSchemaFull(activeSchemaID, activeSchema.UserData.ShadowFile, activeSchema.UserData.UserDictFile,
+			activeSchema.UserData.TempDictFile, activeSchema.Learning.TempMaxEntries, activeSchema.Learning.TempPromoteCount)
 	}
 
 	stats := dictManager.GetStats()
@@ -425,7 +426,8 @@ func (h *reloadHandlerImpl) ReloadConfig() error {
 			h.schemaMgr.SetActive(newSchemaID)
 			s := h.schemaMgr.GetSchema(newSchemaID)
 			if s != nil && h.dictMgr != nil {
-				h.dictMgr.SwitchSchema(newSchemaID, s.UserData.ShadowFile, s.UserData.UserDictFile)
+				h.dictMgr.SwitchSchemaFull(newSchemaID, s.UserData.ShadowFile, s.UserData.UserDictFile,
+					s.UserData.TempDictFile, s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
 			}
 		}
 	}

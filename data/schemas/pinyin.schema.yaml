@@ -31,7 +31,10 @@ user_data:
   shadow_file: "pinyin.shadow.yaml"
   user_dict_file: "pinyin.userwords.txt"
   user_freq_file: "pinyin.userfreq.txt"
+  temp_dict_file: "pinyin.tempdict.txt"
 
 learning:
   mode: manual
   unigram_path: "dict/pinyin/unigram.txt"
+  temp_max_entries: 5000
+  temp_promote_count: 3
