@@ -118,6 +118,11 @@ export interface AdvancedConfig {
   log_level: string;
 }
 
+export interface TSFLogConfig {
+  mode: string;
+  level: string;
+}
+
 // 输入方案配置
 export interface SchemaConfig {
   active: string;
@@ -332,5 +337,12 @@ export function getDefaultConfig(): Config {
     advanced: {
       log_level: "info",
     },
+  };
+}
+
+export function getDefaultTSFLogConfig(): TSFLogConfig {
+  return {
+    mode: "none",
+    level: "info",
   };
 }

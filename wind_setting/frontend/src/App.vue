@@ -3,9 +3,9 @@ import { ref, onMounted, computed } from "vue";
 import { EventsOn } from "../wailsjs/runtime/runtime";
 import * as api from "./api/settings";
 import * as wailsApi from "./api/wails";
-import type { Config, Status, EngineInfo } from "./api/settings";
+import type { Config, Status, EngineInfo, TSFLogConfig } from "./api/settings";
 import type { ThemeInfo, ThemePreview } from "./api/wails";
-import { getDefaultConfig } from "./api/settings";
+import { getDefaultConfig, getDefaultTSFLogConfig } from "./api/settings";
 
 import GeneralPage from "./pages/GeneralPage.vue";
 import InputPage from "./pages/InputPage.vue";
@@ -34,11 +34,13 @@ const hotkeyConflicts = ref<string[]>([]);
 
 // 数据
 const config = ref<Config | null>(null);
+const savedTSFLogConfig = ref<TSFLogConfig>(getDefaultTSFLogConfig());
 const status = ref<Status | null>(null);
 const engines = ref<EngineInfo[]>([]);
 
 // 表单数据（用于编辑）
 const formData = ref<Config>(getDefaultConfig());
+const tsfLogConfig = ref<TSFLogConfig>(getDefaultTSFLogConfig());
 
 // 主题相关状态
 const availableThemes = ref<ThemeInfo[]>([]);
@@ -92,6 +94,10 @@ async function loadDataFromWails() {
       formData.value = JSON.parse(JSON.stringify(mergedCfg));
     }
 
+    const currentTSFLogConfig = await wailsApi.getTSFLogConfig();
+    tsfLogConfig.value = JSON.parse(JSON.stringify(currentTSFLogConfig));
+    savedTSFLogConfig.value = JSON.parse(JSON.stringify(currentTSFLogConfig));
+
     // 从 schema.available 动态构建方案列表
     const schemaDisplayMap: Record<string, { name: string; desc: string }> = {
       wubi86: { name: "五笔输入", desc: "86版五笔" },
@@ -128,6 +134,8 @@ async function loadDataFromHTTP() {
     config.value = cfg;
     formData.value = JSON.parse(JSON.stringify(cfg));
   }
+  tsfLogConfig.value = getDefaultTSFLogConfig();
+  savedTSFLogConfig.value = getDefaultTSFLogConfig();
 
   const statusRes = await api.getStatus();
   if (statusRes.success && statusRes.data) {
@@ -191,9 +199,11 @@ async function saveConfig() {
   try {
     if (isWailsEnv.value) {
       await wailsApi.saveConfig(formData.value as any);
+      await wailsApi.saveTSFLogConfig(tsfLogConfig.value);
       saveMessageType.value = "success";
       saveMessage.value = "保存成功";
       config.value = JSON.parse(JSON.stringify(formData.value));
+      savedTSFLogConfig.value = JSON.parse(JSON.stringify(tsfLogConfig.value));
     } else {
       const res = await api.updateConfig(formData.value);
       if (res.success && res.data) {
@@ -222,7 +232,13 @@ async function saveConfig() {
 // 检测是否有未保存的修改
 function hasUnsavedChanges(): boolean {
   if (!config.value) return false;
-  return JSON.stringify(formData.value) !== JSON.stringify(config.value);
+  const configChanged = JSON.stringify(formData.value) !== JSON.stringify(config.value);
+  if (!isWailsEnv.value) return configChanged;
+
+  return (
+    configChanged ||
+    JSON.stringify(tsfLogConfig.value) !== JSON.stringify(savedTSFLogConfig.value)
+  );
 }
 
 // 重新加载配置（丢弃本地修改，从实际文件重新读取）
@@ -543,6 +559,7 @@ onMounted(async () => {
         <AdvancedPage
           v-show="activeTab === 'advanced'"
           :formData="formData"
+          :tsfLogConfig="tsfLogConfig"
           :isWailsEnv="isWailsEnv"
           @openLogFolder="handleOpenLogFolder"
           @openConfigFolder="handleOpenConfigFolder"

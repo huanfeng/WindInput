@@ -2,10 +2,15 @@
 
 // 导入 Wails 生成的绑定和模型
 import * as App from "../../wailsjs/go/main/App";
-import { main, config, control } from "../../wailsjs/go/models";
+import { main, control } from "../../wailsjs/go/models";
+import {
+  getDefaultConfig as getHTTPDefaultConfig,
+  getDefaultTSFLogConfig as getHTTPTSFLogConfig,
+  type Config,
+  type TSFLogConfig,
+} from "./settings";
 
 // 重新导出类型
-export type Config = config.Config;
 export type PhraseItem = main.PhraseItem;
 export type UserWordItem = main.UserWordItem;
 export type ShadowRuleItem = main.ShadowRuleItem;
@@ -102,11 +107,19 @@ export interface ThemePreview {
 
 // 配置管理
 export async function getConfig(): Promise<Config> {
-  return App.GetConfig();
+  return (await App.GetConfig()) as any;
 }
 
 export async function saveConfig(cfg: Config): Promise<void> {
-  return App.SaveConfig(cfg);
+  return App.SaveConfig(cfg as any);
+}
+
+export async function getTSFLogConfig(): Promise<TSFLogConfig> {
+  return (await (window as any).go.main.App.GetTSFLogConfig()) as any;
+}
+
+export async function saveTSFLogConfig(cfg: TSFLogConfig): Promise<void> {
+  return (window as any).go.main.App.SaveTSFLogConfig(cfg as any);
 }
 
 export async function checkConfigModified(): Promise<boolean> {
@@ -442,80 +455,9 @@ export async function getVersion(): Promise<string> {
 
 // 默认配置
 export function getDefaultConfig(): Config {
-  return new config.Config({
-    startup: {
-      remember_last_state: false,
-      default_chinese_mode: true,
-      default_full_width: false,
-      default_chinese_punct: true,
-    },
-    schema: {
-      active: "wubi86",
-      available: ["wubi86", "pinyin"],
-    },
-    dictionary: {
-      system_dict: "dict/wubi86/wubi86.txt",
-      pinyin_user_dict: "pinyin_user_words.txt",
-      wubi_user_dict: "wubi_user_words.txt",
-      pinyin_dict: "dict/pinyin",
-    },
-    engine: {
-      type: "wubi",
-      filter_mode: "smart",
-      pinyin: {
-        show_wubi_hint: true,
-        fuzzy: {
-          enabled: false,
-          zh_z: false,
-          ch_c: false,
-          sh_s: false,
-          n_l: false,
-          f_h: false,
-          r_l: false,
-          an_ang: false,
-          en_eng: false,
-          in_ing: false,
-          ian_iang: false,
-          uan_uang: false,
-        },
-      },
-      wubi: {
-        auto_commit_at_4: false,
-        clear_on_empty_at_4: false,
-        top_code_commit: false,
-        punct_commit: true,
-        candidate_sort_mode: "frequency",
-      },
-    },
-    hotkeys: {
-      toggle_mode_keys: ["lshift", "rshift"],
-      commit_on_switch: true,
-      switch_engine: "ctrl+`",
-      toggle_full_width: "shift+space",
-      toggle_punct: "ctrl+.",
-    },
-    ui: {
-      font_size: 18,
-      candidates_per_page: 7,
-      font_path: "",
-      inline_preedit: true,
-      hide_candidate_window: false,
-      candidate_layout: "horizontal",
-      status_indicator_duration: 800,
-      status_indicator_offset_x: 0,
-      status_indicator_offset_y: 0,
-      theme: "default",
-    },
-    toolbar: {
-      visible: true,
-    },
-    input: {
-      punct_follow_mode: false,
-      select_key_groups: ["semicolon_quote"],
-      page_keys: ["pageupdown", "minus_equal"],
-    },
-    advanced: {
-      log_level: "info",
-    },
-  });
+  return getHTTPDefaultConfig();
+}
+
+export function getDefaultTSFLogConfig(): TSFLogConfig {
+  return getHTTPTSFLogConfig();
 }
