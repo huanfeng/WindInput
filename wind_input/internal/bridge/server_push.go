@@ -11,8 +11,9 @@ import (
 func (s *Server) startPushPipeListener() {
 	s.logger.Info("Starting Push pipe listener", "pipe", PushPipeName)
 
-	// Create security descriptor allowing Everyone, SYSTEM, and Administrators
-	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)"
+	// Allow desktop clients plus AppContainer/modern hosts (e.g. Start menu search).
+	// S:(ML;;NW;;;LW) = Mandatory Label: Low integrity — required for UWP/AppContainer
+	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)"
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		s.logger.Error("Failed to create security descriptor for push pipe", "error", err)

@@ -32,7 +32,10 @@ namespace WindLog {
     inline void Output(int level, const wchar_t* msg) {
         auto& logger = CFileLogger::Instance();
         auto fileLevel = _ToFileLevel(level);
-        if (!logger.IsEnabled(fileLevel))
+
+        // Quick exit: skip TRACE/DEBUG for ring buffer to avoid per-keystroke overhead
+        bool ringWorthy = (fileLevel <= CFileLogger::LogLevel::Info);
+        if (!ringWorthy && !logger.IsEnabled(fileLevel))
             return;
 
         // Strip trailing \n\r for clean message
@@ -42,13 +45,21 @@ namespace WindLog {
         while (len > 0 && (cleanMsg[len - 1] == L'\n' || cleanMsg[len - 1] == L'\r'))
             cleanMsg[--len] = L'\0';
 
-        logger.Write(fileLevel, cleanMsg);
+        // Write to ring buffer for INFO and above (Ctrl+Shift+F11 dump)
+        if (ringWorthy)
+            logger.WriteToRingBuffer(fileLevel, cleanMsg);
+
+        // Normal file/debugstring output only if enabled
+        if (logger.IsEnabled(fileLevel))
+            logger.Write(fileLevel, cleanMsg);
     }
 
     inline void OutputFmt(int level, const wchar_t* fmt, ...) {
         auto& logger = CFileLogger::Instance();
         auto fileLevel = _ToFileLevel(level);
-        if (!logger.IsEnabled(fileLevel))
+
+        bool ringWorthy = (fileLevel <= CFileLogger::LogLevel::Info);
+        if (!ringWorthy && !logger.IsEnabled(fileLevel))
             return;
 
         WCHAR msgBuf[512];
@@ -62,7 +73,11 @@ namespace WindLog {
         while (len > 0 && (msgBuf[len - 1] == L'\n' || msgBuf[len - 1] == L'\r'))
             msgBuf[--len] = L'\0';
 
-        logger.Write(fileLevel, msgBuf);
+        if (ringWorthy)
+            logger.WriteToRingBuffer(fileLevel, msgBuf);
+
+        if (logger.IsEnabled(fileLevel))
+            logger.Write(fileLevel, msgBuf);
     }
 }
 
@@ -126,6 +141,7 @@ extern const GUID c_guidLangBarItemButton;
 #define TEXTSERVICE_LANGID      0x0804
 
 // 命名管道名称 (与 Go Service 通信)
+// 注意：不使用 LOCAL\ 前缀，AppContainer 进程可能无法访问带目录前缀的管道
 #define PIPE_NAME               L"\\\\.\\pipe\\wind_input"
 #define PUSH_PIPE_NAME          L"\\\\.\\pipe\\wind_input_push"
 

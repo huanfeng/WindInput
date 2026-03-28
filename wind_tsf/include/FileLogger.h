@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <cstdint>
+#include <string>
 
 // ============================================================================
 // FileLogger - Multi-process safe logging for TSF DLL
@@ -18,6 +19,9 @@
 //
 // Multi-process safety: Named Mutex + append-mode file I/O
 // Auto-rotation: 5MB max, rotates to wind_tsf.old.log
+//
+// Ring Buffer: Always captures last RING_BUFFER_LINES log entries in memory,
+//   regardless of mode. Press Ctrl+Shift+F11 to dump via text insertion.
 // ============================================================================
 
 class CFileLogger
@@ -51,6 +55,7 @@ public:
     void Shutdown();
 
     // Write a log entry (thread-safe, multi-process safe)
+    // Also always writes to the in-memory ring buffer.
     void Write(LogLevel level, const wchar_t* message);
 
     // Fast-path check: is logging enabled at this level?
@@ -58,6 +63,16 @@ public:
     bool IsEnabled(LogLevel level) const {
         return _mode != LogMode::None && level != LogLevel::Off && level <= _level;
     }
+
+    // Ring buffer: always enabled (captures even when mode=none)
+    // Returns true if ring buffer has captured entries
+    bool IsRingBufferEnabled() const { return true; }
+
+    // Write directly to ring buffer (bypasses mode/level checks)
+    void WriteToRingBuffer(LogLevel level, const wchar_t* message);
+
+    // Dump all ring buffer entries as a single wstring, then clear
+    std::wstring DumpRingBuffer();
 
     // Accessors
     LogLevel GetLevel() const { return _level; }
@@ -101,6 +116,14 @@ private:
     wchar_t _logDir[MAX_PATH];
     wchar_t _logPath[MAX_PATH];
     wchar_t _configPath[MAX_PATH];
+
+    // Ring buffer for in-memory log capture (always active)
+    static constexpr int RING_BUFFER_LINES = 200;
+    static constexpr int RING_LINE_MAX = 256;
+    wchar_t _ringBuffer[RING_BUFFER_LINES][RING_LINE_MAX];
+    int _ringHead;   // Next write position
+    int _ringCount;  // Total entries written (capped at RING_BUFFER_LINES)
+    CRITICAL_SECTION _ringLock;
 
     static constexpr DWORD MAX_LOG_SIZE = 5 * 1024 * 1024; // 5MB
     static constexpr DWORD MUTEX_TIMEOUT_MS = 500;

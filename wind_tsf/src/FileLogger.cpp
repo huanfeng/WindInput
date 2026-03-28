@@ -13,15 +13,20 @@ CFileLogger::CFileLogger()
     , _initialized(false)
     , _hMutex(nullptr)
     , _pid(0)
+    , _ringHead(0)
+    , _ringCount(0)
 {
     _logDir[0] = L'\0';
     _logPath[0] = L'\0';
     _configPath[0] = L'\0';
+    memset(_ringBuffer, 0, sizeof(_ringBuffer));
+    InitializeCriticalSection(&_ringLock);
 }
 
 CFileLogger::~CFileLogger()
 {
     Shutdown();
+    DeleteCriticalSection(&_ringLock);
 }
 
 CFileLogger& CFileLogger::Instance()
@@ -314,4 +319,68 @@ const wchar_t* CFileLogger::_LevelStr(LogLevel level)
     case LogLevel::Trace: return L"TRACE";
     default:              return L"?????";
     }
+}
+
+// ============================================================================
+// Ring Buffer (always active, no file system / debug string dependency)
+// ============================================================================
+
+void CFileLogger::WriteToRingBuffer(LogLevel level, const wchar_t* message)
+{
+    if (message == nullptr)
+        return;
+
+    EnterCriticalSection(&_ringLock);
+
+    wchar_t timestamp[32];
+    _FormatTimestamp(timestamp, _countof(timestamp));
+
+    _snwprintf_s(_ringBuffer[_ringHead], RING_LINE_MAX, _TRUNCATE,
+        L"%ls [%-5ls] %ls",
+        timestamp, _LevelStr(level), message);
+
+    _ringHead = (_ringHead + 1) % RING_BUFFER_LINES;
+    if (_ringCount < RING_BUFFER_LINES)
+        _ringCount++;
+
+    LeaveCriticalSection(&_ringLock);
+}
+
+std::wstring CFileLogger::DumpRingBuffer()
+{
+    EnterCriticalSection(&_ringLock);
+
+    std::wstring result;
+    result.reserve(_ringCount * 128);
+
+    // Header
+    wchar_t header[128];
+    _snwprintf_s(header, _countof(header), _TRUNCATE,
+        L"=== WindInput TSF Log Dump (PID:%lu, entries:%d) ===\r\n", _pid, _ringCount);
+    result += header;
+
+    if (_ringCount == 0)
+    {
+        result += L"(empty)\r\n";
+    }
+    else
+    {
+        // Start from oldest entry
+        int start = (_ringCount < RING_BUFFER_LINES) ? 0 : _ringHead;
+        for (int i = 0; i < _ringCount; i++)
+        {
+            int idx = (start + i) % RING_BUFFER_LINES;
+            result += _ringBuffer[idx];
+            result += L"\r\n";
+        }
+    }
+
+    result += L"=== End Log Dump ===\r\n";
+
+    // Clear buffer after dump
+    _ringHead = 0;
+    _ringCount = 0;
+
+    LeaveCriticalSection(&_ringLock);
+    return result;
 }

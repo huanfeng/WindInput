@@ -84,8 +84,12 @@ func (s *Server) Start() error {
 	// Start the push pipe listener in a separate goroutine
 	go s.startPushPipeListener()
 
-	// Create security descriptor allowing Everyone, SYSTEM, and Administrators
-	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)"
+	// Allow desktop clients plus AppContainer/modern hosts (e.g. Start menu search).
+	// S:(ML;;NW;;;LW) = Mandatory Label: Low integrity — required for UWP/AppContainer
+	//   processes (Microsoft Store, Start Menu) which run at low integrity level.
+	//   Without this, the mandatory integrity check blocks access before DACL evaluation.
+	// D: = DACL: WD=Everyone, SY=SYSTEM, BA=Administrators, AC=ALL APPLICATION PACKAGES
+	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)"
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		s.logger.Error("Failed to create security descriptor", "error", err)

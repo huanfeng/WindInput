@@ -8,13 +8,33 @@ Write-Host ""
 
 $InstallDir = if ($env:ProgramW6432) { Join-Path $env:ProgramW6432 "WindInput" } else { Join-Path $env:ProgramFiles "WindInput" }
 
-# [1/7] 停止服务
-Write-Host "[1/7] 停止服务..."
+# [1/8] 停止服务
+Write-Host "[1/8] 停止服务..."
 Get-Process -Name "wind_input" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
-# [2/7] 注销 COM 组件
-Write-Host "[2/7] 注销 COM 组件..."
+# [2/8] 从系统输入法列表移除
+Write-Host "[2/8] 从系统输入法列表移除..."
+try {
+    if (-not ([System.Management.Automation.PSTypeName]'WindInputHelper').Type) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WindInputHelper {
+    [DllImport("input.dll", CharSet = CharSet.Unicode)]
+    public static extern bool InstallLayoutOrTip(string profile, uint flags);
+}
+"@
+    }
+    $profileStr = "0804:{7E5A5C60-1234-4567-89AB-CDEF01234567}{7E5A5C61-1234-4567-89AB-CDEF01234567}"
+    [WindInputHelper]::InstallLayoutOrTip($profileStr, 0x00000001) | Out-Null
+    Write-Host "  - 已从系统输入法列表移除"
+} catch {
+    Write-Host "[警告] 移除系统输入法注册失败: $_" -ForegroundColor Yellow
+}
+
+# [3/8] 注销 COM 组件
+Write-Host "[3/8] 注销 COM 组件..."
 $tsfDll = Join-Path $InstallDir "wind_tsf.dll"
 if (Test-Path $tsfDll) {
     & regsvr32 /u /s $tsfDll 2>$null
@@ -24,8 +44,8 @@ Get-ChildItem -Path $InstallDir -Filter "wind_tsf*.dll" -ErrorAction SilentlyCon
     & regsvr32 /u /s $_.FullName 2>$null
 }
 
-# [3/7] 删除文件
-Write-Host "[3/7] 删除文件..."
+# [4/8] 删除文件
+Write-Host "[4/8] 删除文件..."
 $RandomSuffix = Get-Random -Maximum 99999999
 
 $filesToDelete = @("wind_tsf.dll", "wind_dwrite.dll", "wind_input.exe")
@@ -41,13 +61,13 @@ foreach ($f in $filesToDelete) {
     }
 }
 
-# [4/7] 清理备份文件
-Write-Host "[4/7] 清理备份文件..."
+# [5/8] 清理备份文件
+Write-Host "[5/8] 清理备份文件..."
 Get-ChildItem -Path $InstallDir -Filter "*.old_*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 Get-ChildItem -Path $InstallDir -Filter "*.bak" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
-# [5/7] 移除开机自启动
-Write-Host "[5/7] 移除开机自启动..."
+# [6/8] 移除开机自启动
+Write-Host "[6/8] 移除开机自启动..."
 try {
     Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "WindInput" -Force -ErrorAction Stop
     Write-Host "  - 已移除开机自启动注册表项"
@@ -55,8 +75,8 @@ try {
     Write-Host "  - 未找到开机自启动注册表项(已跳过)"
 }
 
-# [6/7] 移除目录
-Write-Host "[6/7] 移除目录..."
+# [7/8] 移除目录
+Write-Host "[7/8] 移除目录..."
 # 删除开始菜单快捷方式
 $shortcutPath = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\清风输入法 设置.lnk"
 if (Test-Path $shortcutPath) {
@@ -74,8 +94,8 @@ foreach ($subDir in @("dict", "schemas", "themes")) {
 # 尝试删除安装目录
 Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 
-# [7/7] 清理缓存目录
-Write-Host "[7/7] 清理缓存目录..."
+# [8/8] 清理缓存目录
+Write-Host "[8/8] 清理缓存目录..."
 $cacheDir = Join-Path $env:LOCALAPPDATA "WindInput\cache"
 if (Test-Path $cacheDir) {
     Remove-Item -Path $cacheDir -Recurse -Force -ErrorAction SilentlyContinue

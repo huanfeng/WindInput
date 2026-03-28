@@ -12,7 +12,7 @@ class CDisplayAttributeProvider;
 class CHotkeyManager;
 struct ServiceResponse;
 
-class CTextService : public ITfTextInputProcessor,
+class CTextService : public ITfTextInputProcessorEx,
                      public ITfThreadMgrEventSink,
                      public ITfCompositionSink,
                      public ITfDisplayAttributeProvider
@@ -33,6 +33,9 @@ public:
     // ITfTextInputProcessor
     STDMETHODIMP Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId);
     STDMETHODIMP Deactivate();
+
+    // ITfTextInputProcessorEx
+    STDMETHODIMP ActivateEx(ITfThreadMgr* pThreadMgr, TfClientId tfClientId, DWORD dwFlags);
 
     // ITfThreadMgrEventSink
     STDMETHODIMP OnInitDocumentMgr(ITfDocumentMgr* pDocMgr);
@@ -111,6 +114,7 @@ private:
     ITfThreadMgr* _pThreadMgr;
     TfClientId _tfClientId;
     DWORD _dwThreadMgrEventSinkCookie;
+    DWORD _activateFlags;  // ActivateEx flags (TF_TMAE_SECUREMODE, etc.)
 
     // Components
     CKeyEventSink* _pKeyEventSink;

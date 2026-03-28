@@ -80,6 +80,21 @@ if (Test-Path $settingExe) {
     Write-Host "[提示] 未找到 wind_setting.exe,已跳过(可选)" -ForegroundColor Cyan
 }
 
+# 为现代宿主（开始菜单 / 搜索等 AppContainer 进程）授予 TSF DLL 读取执行权限
+Write-Host "  - 正在设置 TSF DLL 权限..."
+$appPackagesSid = "*S-1-15-2-1"
+foreach ($dllName in @("wind_tsf.dll", "wind_dwrite.dll")) {
+    $dllPath = Join-Path $InstallDir $dllName
+    if (Test-Path $dllPath) {
+        & icacls $dllPath /grant "${appPackagesSid}:(RX)" /c | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[警告] 设置 $dllName 的 ALL APPLICATION PACKAGES 权限失败" -ForegroundColor Yellow
+        } else {
+            Write-Host "    * $dllName 已授予 ALL APPLICATION PACKAGES 读取执行权限"
+        }
+    }
+}
+
 # [6/12] 复制数据目录（词库、方案、短语、主题）
 Write-Host "[6/12] 复制数据目录(data/)..."
 $BuildDataDir = Join-Path $BuildDir "data"
@@ -159,8 +174,38 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# [10/12] 配置开机自启动
-Write-Host "[10/12] 配置开机自启动..."
+# [10/13] 调用 InstallLayoutOrTip 将输入法注册到系统输入法列表
+Write-Host "[10/13] 注册系统输入法..."
+try {
+    $inputDll = Join-Path $env:SystemRoot "System32\input.dll"
+    if (Test-Path $inputDll) {
+        if (-not ([System.Management.Automation.PSTypeName]'WindInputHelper').Type) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WindInputHelper {
+    [DllImport("input.dll", CharSet = CharSet.Unicode)]
+    public static extern bool InstallLayoutOrTip(string profile, uint flags);
+}
+"@
+        }
+        # 格式: "LANGID:{CLSID}{ProfileGUID}"
+        $profileStr = "0804:{7E5A5C60-1234-4567-89AB-CDEF01234567}{7E5A5C61-1234-4567-89AB-CDEF01234567}"
+        $result = [WindInputHelper]::InstallLayoutOrTip($profileStr, 0)
+        if ($result) {
+            Write-Host "  - 输入法已注册到系统输入法列表"
+        } else {
+            Write-Host "[警告] InstallLayoutOrTip 返回失败，输入法可能需要手动添加" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[警告] 未找到 input.dll，跳过系统输入法注册" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "[警告] 系统输入法注册失败: $_" -ForegroundColor Yellow
+}
+
+# [11/13] 配置开机自启动
+Write-Host "[11/13] 配置开机自启动..."
 $exePath = Join-Path $InstallDir "wind_input.exe"
 try {
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "WindInput" -Value "`"$exePath`"" -Force
@@ -169,13 +214,13 @@ try {
     Write-Host "[警告] 添加开机自启动失败" -ForegroundColor Yellow
 }
 
-# [11/12] 预启动输入法服务
-Write-Host "[11/12] 预启动输入法服务..."
+# [12/13] 预启动输入法服务
+Write-Host "[12/13] 预启动输入法服务..."
 Start-Process -FilePath $exePath
 Write-Host "  - 服务已在后台启动"
 
-# [12/12] 创建快捷方式
-Write-Host "[12/12] 创建快捷方式..."
+# [13/13] 创建快捷方式
+Write-Host "[13/13] 创建快捷方式..."
 $settingInstalled = Join-Path $InstallDir "wind_setting.exe"
 if (Test-Path $settingInstalled) {
     $ws = New-Object -ComObject WScript.Shell

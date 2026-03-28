@@ -129,6 +129,14 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
 {
     *pfEaten = FALSE;
 
+    // Ctrl+Shift+F12: Dump TSF ring buffer logs to clipboard (works in AppContainer)
+    if (wParam == VK_F12 && (GetKeyState(VK_CONTROL) & 0x8000)
+        && (GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000))
+    {
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
     // Trace: Log ALL key presses (very high frequency)
     WIND_LOG_TRACE_FMT(L"OnTestKeyDown: wParam=0x%02X\n", (uint32_t)wParam);
 
@@ -299,6 +307,34 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
 STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
+
+    // Ctrl+Alt+Shift+F11: Dump TSF ring buffer logs to clipboard (debug aid for AppContainer)
+    if (wParam == VK_F11 && (GetKeyState(VK_CONTROL) & 0x8000)
+        && (GetKeyState(VK_SHIFT) & 0x8000) && (GetKeyState(VK_MENU) & 0x8000))
+    {
+        *pfEaten = TRUE;
+        std::wstring logs = CFileLogger::Instance().DumpRingBuffer();
+        if (!logs.empty() && OpenClipboard(nullptr))
+        {
+            EmptyClipboard();
+            size_t cbSize = (logs.size() + 1) * sizeof(wchar_t);
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, cbSize);
+            if (hMem)
+            {
+                wchar_t* pDst = (wchar_t*)GlobalLock(hMem);
+                if (pDst)
+                {
+                    memcpy(pDst, logs.c_str(), cbSize);
+                    GlobalUnlock(hMem);
+                    SetClipboardData(CF_UNICODETEXT, hMem);
+                }
+            }
+            CloseClipboard();
+            // Brief notification via SendInput so user knows it worked
+            _pTextService->InsertText(L"[WindInput TSF Log to clipboard]");
+        }
+        return S_OK;
+    }
 
     // Update modifier state machine for this KeyDown event
     _UpdateModsOnKeyDown(wParam);

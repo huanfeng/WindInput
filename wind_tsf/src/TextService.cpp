@@ -491,6 +491,7 @@ CTextService::CTextService()
     , _pThreadMgr(nullptr)
     , _tfClientId(TF_CLIENTID_NULL)
     , _dwThreadMgrEventSinkCookie(TF_INVALID_COOKIE)
+    , _activateFlags(0)
     , _pKeyEventSink(nullptr)
     , _pIPCClient(nullptr)
     , _pLangBarItemButton(nullptr)
@@ -522,6 +523,10 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
     if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfTextInputProcessor))
     {
         *ppvObj = (ITfTextInputProcessor*)this;
+    }
+    else if (IsEqualIID(riid, IID_ITfTextInputProcessorEx))
+    {
+        *ppvObj = (ITfTextInputProcessorEx*)this;
     }
     else if (IsEqualIID(riid, IID_ITfThreadMgrEventSink))
     {
@@ -564,7 +569,14 @@ STDAPI_(ULONG) CTextService::Release()
 
 STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
 {
-    WIND_LOG_INFO_FMT(L"TextService::Activate called tfClientId=0x%08X", tfClientId);
+    return ActivateEx(pThreadMgr, tfClientId, 0);
+}
+
+STDAPI CTextService::ActivateEx(ITfThreadMgr* pThreadMgr, TfClientId tfClientId, DWORD dwFlags)
+{
+    WIND_LOG_INFO_FMT(L"TextService::ActivateEx called tfClientId=0x%08X dwFlags=0x%08X", tfClientId, dwFlags);
+
+    _activateFlags = dwFlags;
 
     WindHostProcessInfo currentHost;
     if (WindQueryCurrentProcessInfo(&currentHost))

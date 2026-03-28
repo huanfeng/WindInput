@@ -458,7 +458,7 @@ BOOL CIPCClient::Connect()
         break;
     }
 
-    _LogError(L"Failed to connect to Go Service");
+    _LogError(L"Failed to connect to Go Service (pipe=%s, lastErr=%d)", PIPE_NAME, GetLastError());
     {
         WindHostProcessInfo currentHost;
         if (WindQueryCurrentProcessInfo(&currentHost))

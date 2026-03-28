@@ -303,6 +303,13 @@ install_input_done:
     Abort
 install_setting_done:
 
+  ; --- Step 4b: Grant read/execute to ALL APPLICATION PACKAGES for TSF DLLs ---
+  DetailPrint "正在设置现代宿主 DLL 权限..."
+  nsExec::ExecToLog 'cmd /c icacls "$INSTDIR\wind_tsf.dll" /grant *S-1-15-2-1:^(RX^) /c'
+  Pop $0
+  nsExec::ExecToLog 'cmd /c icacls "$INSTDIR\wind_dwrite.dll" /grant *S-1-15-2-1:^(RX^) /c'
+  Pop $0
+
   ; --- Step 5: Cleanup staging + old backup files ---
   DetailPrint "正在清理旧文件..."
   Delete "$PLUGINSDIR\stage\wind_tsf.dll"
@@ -379,7 +386,14 @@ install_cleanup_bak_end:
     SetRebootFlag true
   ${EndIf}
 
-  ; --- Step 8: Auto-start on login (registry Run key) ---
+  ; --- Step 8: Register input method via InstallLayoutOrTip ---
+  DetailPrint "正在注册系统输入法..."
+  System::Call 'input::InstallLayoutOrTip(w "0804:{7E5A5C60-1234-4567-89AB-CDEF01234567}{7E5A5C61-1234-4567-89AB-CDEF01234567}", i 0) i .r0'
+  ${If} $0 == 0
+    DetailPrint "警告: InstallLayoutOrTip 调用失败，输入法可能需要手动添加"
+  ${EndIf}
+
+  ; --- Step 9: Auto-start on login (registry Run key) ---
   DetailPrint "正在配置开机自启动..."
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "WindInput" '"$INSTDIR\wind_input.exe"'
 
@@ -424,7 +438,10 @@ Section "Uninstall"
   Pop $0 ; discard nsExec exit code
   Sleep 1000
 
-  ; --- Step 2: Unregister DLL ---
+  ; --- Step 2: Unregister input method and DLL ---
+  DetailPrint "正在从系统输入法列表移除..."
+  System::Call 'input::InstallLayoutOrTip(w "0804:{7E5A5C60-1234-4567-89AB-CDEF01234567}{7E5A5C61-1234-4567-89AB-CDEF01234567}", i 0x00000001) i .r0'
+
   IfFileExists "$INSTDIR\wind_tsf.dll" uninstall_has_dll uninstall_unreg_done
 uninstall_has_dll:
   DetailPrint "正在注销 COM 组件..."
