@@ -26,7 +26,7 @@ public class WindInputHelper {
 }
 "@
     }
-    $profileStr = "0804:{7E5A5C60-1234-4567-89AB-CDEF01234567}{7E5A5C61-1234-4567-89AB-CDEF01234567}"
+    $profileStr = "0804:{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}"
     [WindInputHelper]::InstallLayoutOrTip($profileStr, 0x00000001) | Out-Null
     Write-Host "  - 已从系统输入法列表移除"
 } catch {

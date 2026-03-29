@@ -1,14 +1,5 @@
 #include "DisplayAttributeInfo.h"
 
-// Define GUIDs for display attributes
-// {7E5A5C63-1234-4567-89AB-CDEF01234567}
-const GUID c_guidDisplayAttributeInput =
-{ 0x7e5a5c63, 0x1234, 0x4567, { 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67 } };
-
-// {7E5A5C64-1234-4567-89AB-CDEF01234567}
-const GUID c_guidDisplayAttributeConverted =
-{ 0x7e5a5c64, 0x1234, 0x4567, { 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x68 } };
-
 // ============================================================================
 // CDisplayAttributeInfoInput
 // ============================================================================

@@ -122,15 +122,20 @@ struct WindHostProcessInfo
 };
 
 // GUID 定义
-// {7E5A5C60-1234-4567-89AB-CDEF01234567}
-// 注意：实际使用时应该生成唯一的 GUID
+// {99C2EE30-5C57-45A2-9C63-FB54B34FD90A}
 extern const CLSID c_clsidTextService;
 
-// {7E5A5C61-1234-4567-89AB-CDEF01234567}
+// {99C2EE31-5C57-45A2-9C63-FB54B34FD90A}
 extern const GUID c_guidProfile;
 
-// {7E5A5C62-1234-4567-89AB-CDEF01234567}
+// {99C2EE32-5C57-45A2-9C63-FB54B34FD90A}
 extern const GUID c_guidLangBarItemButton;
+
+// {99C2EE33-5C57-45A2-9C63-FB54B34FD90A}
+extern const GUID c_guidDisplayAttributeInput;
+
+// {99C2EE34-5C57-45A2-9C63-FB54B34FD90A}
+extern const GUID c_guidDisplayAttributeConverted;
 
 // 输入法名称
 #define TEXTSERVICE_NAME        L"清风输入法"

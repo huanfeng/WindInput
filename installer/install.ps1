@@ -190,7 +190,7 @@ public class WindInputHelper {
 "@
         }
         # 格式: "LANGID:{CLSID}{ProfileGUID}"
-        $profileStr = "0804:{7E5A5C60-1234-4567-89AB-CDEF01234567}{7E5A5C61-1234-4567-89AB-CDEF01234567}"
+        $profileStr = "0804:{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}"
         $result = [WindInputHelper]::InstallLayoutOrTip($profileStr, 0)
         if ($result) {
             Write-Host "  - 输入法已注册到系统输入法列表"

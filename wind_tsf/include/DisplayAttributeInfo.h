@@ -2,14 +2,6 @@
 
 #include "Globals.h"
 
-// GUID for our display attribute (Input composition)
-// {7E5A5C63-1234-4567-89AB-CDEF01234567}
-extern const GUID c_guidDisplayAttributeInput;
-
-// GUID for converted text display attribute
-// {7E5A5C64-1234-4567-89AB-CDEF01234567}
-extern const GUID c_guidDisplayAttributeConverted;
-
 // Display Attribute Info for input/composition text (with underline)
 class CDisplayAttributeInfoInput : public ITfDisplayAttributeInfo
 {

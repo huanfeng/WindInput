@@ -388,7 +388,7 @@ install_cleanup_bak_end:
 
   ; --- Step 8: Register input method via InstallLayoutOrTip ---
   DetailPrint "正在注册系统输入法..."
-  System::Call 'input::InstallLayoutOrTip(w "0804:{7E5A5C60-1234-4567-89AB-CDEF01234567}{7E5A5C61-1234-4567-89AB-CDEF01234567}", i 0) i .r0'
+  System::Call 'input::InstallLayoutOrTip(w "0804:{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}", i 0) i .r0'
   ${If} $0 == 0
     DetailPrint "警告: InstallLayoutOrTip 调用失败，输入法可能需要手动添加"
   ${EndIf}
@@ -440,7 +440,7 @@ Section "Uninstall"
 
   ; --- Step 2: Unregister input method and DLL ---
   DetailPrint "正在从系统输入法列表移除..."
-  System::Call 'input::InstallLayoutOrTip(w "0804:{7E5A5C60-1234-4567-89AB-CDEF01234567}{7E5A5C61-1234-4567-89AB-CDEF01234567}", i 0x00000001) i .r0'
+  System::Call 'input::InstallLayoutOrTip(w "0804:{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}", i 0x00000001) i .r0'
 
   IfFileExists "$INSTDIR\wind_tsf.dll" uninstall_has_dll uninstall_unreg_done
 uninstall_has_dll:
