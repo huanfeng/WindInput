@@ -16,7 +16,6 @@ package ui
 
 /*
 #include <stdint.h>
-#include <math.h>
 
 // Forward declaration of the Go callback (defined below via //export).
 extern uintptr_t goDrawGlyphRunBridge(
@@ -78,8 +77,11 @@ func goDrawGlyphRunBridge(
 	glyphRunDescription C.uintptr_t,
 	clientDrawingEffect C.uintptr_t,
 ) C.uintptr_t {
-	tr := (*goTextRenderer)(unsafe.Pointer(uintptr(thisPtr)))
-	if tr.bitmapTarget == 0 {
+	// Convert C.uintptr_t → Go pointer via //export bridge.
+	// The thisPtr is a valid goTextRenderer* passed through COM vtable.
+	addr := uintptr(thisPtr)
+	tr := (*goTextRenderer)(*((*unsafe.Pointer)(unsafe.Pointer(&addr))))
+	if tr.bitmapTarget == nil {
 		return 0 // S_OK
 	}
 
@@ -87,16 +89,16 @@ func goDrawGlyphRunBridge(
 	yBits := uintptr(math.Float32bits(float32(baselineOriginY)))
 
 	// Call IDWriteBitmapRenderTarget::DrawGlyphRun (vtable index 3).
-	vtablePtr := *(*uintptr)(unsafe.Pointer(tr.bitmapTarget))
-	methodPtr := *(*uintptr)(unsafe.Pointer(vtablePtr + uintptr(dwBmpVtDrawGlyphRun)*unsafe.Sizeof(uintptr(0))))
+	vtbl := *(*unsafe.Pointer)(tr.bitmapTarget)
+	methodPtr := *(*uintptr)(unsafe.Add(vtbl, unsafe.Sizeof(uintptr(0))*uintptr(dwBmpVtDrawGlyphRun)))
 	var blackBoxRect RECT
 	syscall.SyscallN(methodPtr,
-		tr.bitmapTarget,
+		uintptr(tr.bitmapTarget),
 		xBits,
 		yBits,
 		uintptr(measuringMode),
 		uintptr(glyphRun),
-		tr.renderParams,
+		uintptr(tr.renderParams),
 		uintptr(tr.textColor),
 		uintptr(unsafe.Pointer(&blackBoxRect)),
 	)

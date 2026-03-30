@@ -32,7 +32,7 @@ type SharedMemory struct {
 	name     string
 	size     uint32
 	hMapping windows.Handle
-	pView    uintptr
+	pView    unsafe.Pointer
 	hEvent   windows.Handle
 	evtName  string
 	sequence uint32
@@ -76,19 +76,21 @@ func NewSharedMemory(name, evtName string, size uint32) (*SharedMemory, error) {
 	}
 
 	// Map view
-	pView, _, err := procMapViewOfFile.Call(
+	pViewAddr, _, err := procMapViewOfFile.Call(
 		hMapping,
 		fileMapAllAccess,
 		0, 0, // offset
 		uintptr(size),
 	)
-	if pView == 0 {
+	if pViewAddr == 0 {
 		windows.CloseHandle(windows.Handle(hMapping))
 		return nil, fmt.Errorf("MapViewOfFile failed: %w", err)
 	}
+	// Convert syscall uintptr return to unsafe.Pointer using the approved double-indirect pattern.
+	pView := *(*unsafe.Pointer)(unsafe.Pointer(&pViewAddr))
 
 	// Zero the header
-	headerSlice := unsafe.Slice((*byte)(unsafe.Pointer(pView)), ipc.SharedRenderHeaderSize)
+	headerSlice := unsafe.Slice((*byte)(pView), ipc.SharedRenderHeaderSize)
 	for i := range headerSlice {
 		headerSlice[i] = 0
 	}
@@ -102,7 +104,7 @@ func NewSharedMemory(name, evtName string, size uint32) (*SharedMemory, error) {
 		uintptr(unsafe.Pointer(evtNamePtr)),
 	)
 	if hEvent == 0 {
-		procUnmapViewOfFile.Call(pView)
+		procUnmapViewOfFile.Call(uintptr(pView))
 		windows.CloseHandle(windows.Handle(hMapping))
 		return nil, fmt.Errorf("CreateEvent failed: %w", err)
 	}
@@ -123,7 +125,7 @@ func (sm *SharedMemory) WriteFrame(img *image.RGBA, screenX, screenY int) error 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if sm.pView == 0 {
+	if sm.pView == nil {
 		return fmt.Errorf("shared memory not mapped")
 	}
 
@@ -154,7 +156,7 @@ func (sm *SharedMemory) WriteFrame(img *image.RGBA, screenX, screenY int) error 
 	binary.LittleEndian.PutUint32(headerBuf[36:40], dataSize)
 	// reserved bytes [40:64] stay zero
 
-	dst := unsafe.Slice((*byte)(unsafe.Pointer(sm.pView)), ipc.SharedRenderHeaderSize+dataSize)
+	dst := unsafe.Slice((*byte)(sm.pView), ipc.SharedRenderHeaderSize+dataSize)
 
 	// Copy header
 	copy(dst[:ipc.SharedRenderHeaderSize], headerBuf)
@@ -182,7 +184,7 @@ func (sm *SharedMemory) WriteHide() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if sm.pView == 0 {
+	if sm.pView == nil {
 		return
 	}
 
@@ -195,7 +197,7 @@ func (sm *SharedMemory) WriteHide() {
 	binary.LittleEndian.PutUint32(headerBuf[8:12], sm.sequence)
 	// flags = 0 (not visible, no content)
 
-	dst := unsafe.Slice((*byte)(unsafe.Pointer(sm.pView)), ipc.SharedRenderHeaderSize)
+	dst := unsafe.Slice((*byte)(sm.pView), ipc.SharedRenderHeaderSize)
 	copy(dst, headerBuf)
 
 	procSetEvent.Call(uintptr(sm.hEvent))
@@ -206,9 +208,9 @@ func (sm *SharedMemory) Close() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if sm.pView != 0 {
-		procUnmapViewOfFile.Call(sm.pView)
-		sm.pView = 0
+	if sm.pView != nil {
+		procUnmapViewOfFile.Call(uintptr(sm.pView))
+		sm.pView = nil
 	}
 	if sm.hMapping != 0 {
 		windows.CloseHandle(sm.hMapping)

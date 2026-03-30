@@ -32,11 +32,12 @@ var dwIIDFactory = dwGUID{
 }
 
 // dwComCall invokes a COM method by vtable index.
-func dwComCall(obj uintptr, vtableIndex int, args ...uintptr) (uintptr, error) {
-	vtablePtr := *(*uintptr)(unsafe.Pointer(obj))
-	methodPtr := *(*uintptr)(unsafe.Pointer(vtablePtr + uintptr(vtableIndex)*unsafe.Sizeof(uintptr(0))))
+// obj is an unsafe.Pointer to the COM object (avoids uintptr→Pointer vet warnings).
+func dwComCall(obj unsafe.Pointer, vtableIndex int, args ...uintptr) (uintptr, error) {
+	vtbl := *(*unsafe.Pointer)(obj)
+	methodPtr := *(*uintptr)(unsafe.Add(vtbl, unsafe.Sizeof(uintptr(0))*uintptr(vtableIndex)))
 	allArgs := make([]uintptr, 0, 1+len(args))
-	allArgs = append(allArgs, obj)
+	allArgs = append(allArgs, uintptr(obj))
 	allArgs = append(allArgs, args...)
 	ret, _, _ := syscall.SyscallN(methodPtr, allArgs...)
 	if int32(ret) < 0 {
@@ -46,8 +47,8 @@ func dwComCall(obj uintptr, vtableIndex int, args ...uintptr) (uintptr, error) {
 }
 
 // dwComRelease calls IUnknown::Release (vtable index 2).
-func dwComRelease(obj uintptr) {
-	if obj != 0 {
+func dwComRelease(obj unsafe.Pointer) {
+	if obj != nil {
 		dwComCall(obj, 2)
 	}
 }
@@ -159,9 +160,9 @@ type goTextRendererVtable struct {
 type goTextRenderer struct {
 	vtable       *goTextRendererVtable // must be first field
 	refCount     int32
-	bitmapTarget uintptr // IDWriteBitmapRenderTarget*
-	renderParams uintptr // IDWriteRenderingParams*
-	textColor    uint32  // COLORREF (0x00BBGGRR)
+	bitmapTarget unsafe.Pointer // IDWriteBitmapRenderTarget*
+	renderParams unsafe.Pointer // IDWriteRenderingParams*
+	textColor    uint32         // COLORREF (0x00BBGGRR)
 }
 
 // Global vtable — initialized once, shared by all goTextRenderer instances.
@@ -189,61 +190,62 @@ func initDWTextRendererVtable() *goTextRendererVtable {
 }
 
 // --- COM callback implementations ---
+// Parameters use unsafe.Pointer (not uintptr) to satisfy go vet's unsafeptr check.
+// syscall.NewCallback supports pointer parameter types.
 
 const dwSOK = 0
 
-func dwTR_QueryInterface(this uintptr, riid uintptr, ppvObject uintptr) uintptr {
-	if ppvObject == 0 {
+func dwTR_QueryInterface(this unsafe.Pointer, riid unsafe.Pointer, ppvObject unsafe.Pointer) uintptr {
+	if ppvObject == nil {
 		return 0x80004003 // E_POINTER
 	}
-	iid := (*dwGUID)(unsafe.Pointer(riid))
+	iid := (*dwGUID)(riid)
 	if dwGUIDEqual(iid, &dwIIDUnknown) ||
 		dwGUIDEqual(iid, &dwIIDTextRenderer) ||
 		dwGUIDEqual(iid, &dwIIDPixelSnapping) {
-		*(*uintptr)(unsafe.Pointer(ppvObject)) = this
+		*(*unsafe.Pointer)(ppvObject) = this
 		dwTR_AddRef(this)
 		return dwSOK
 	}
-	*(*uintptr)(unsafe.Pointer(ppvObject)) = 0
+	*(*unsafe.Pointer)(ppvObject) = nil
 	return 0x80004002 // E_NOINTERFACE
 }
 
-func dwTR_AddRef(this uintptr) uintptr {
-	tr := (*goTextRenderer)(unsafe.Pointer(this))
+func dwTR_AddRef(this unsafe.Pointer) uintptr {
+	tr := (*goTextRenderer)(this)
 	return uintptr(atomic.AddInt32(&tr.refCount, 1))
 }
 
-func dwTR_Release(this uintptr) uintptr {
-	tr := (*goTextRenderer)(unsafe.Pointer(this))
+func dwTR_Release(this unsafe.Pointer) uintptr {
+	tr := (*goTextRenderer)(this)
 	return uintptr(atomic.AddInt32(&tr.refCount, -1))
 }
 
-func dwTR_IsPixelSnappingDisabled(this uintptr, clientDrawingContext uintptr, isDisabled uintptr) uintptr {
-	if isDisabled != 0 {
-		*(*int32)(unsafe.Pointer(isDisabled)) = 0 // FALSE — pixel snapping enabled
+func dwTR_IsPixelSnappingDisabled(this unsafe.Pointer, clientDrawingContext unsafe.Pointer, isDisabled unsafe.Pointer) uintptr {
+	if isDisabled != nil {
+		*(*int32)(isDisabled) = 0 // FALSE — pixel snapping enabled
 	}
 	return dwSOK
 }
 
-func dwTR_GetCurrentTransform(this uintptr, clientDrawingContext uintptr, transform uintptr) uintptr {
-	if transform != 0 {
-		m := (*dwriteMatrix)(unsafe.Pointer(transform))
+func dwTR_GetCurrentTransform(this unsafe.Pointer, clientDrawingContext unsafe.Pointer, transform unsafe.Pointer) uintptr {
+	if transform != nil {
+		m := (*dwriteMatrix)(transform)
 		*m = dwriteMatrix{M11: 1.0, M22: 1.0} // identity
 	}
 	return dwSOK
 }
 
-func dwTR_GetPixelsPerDip(this uintptr, clientDrawingContext uintptr, pixelsPerDip uintptr) uintptr {
-	if pixelsPerDip != 0 {
-		*(*float32)(unsafe.Pointer(pixelsPerDip)) = 1.0
+func dwTR_GetPixelsPerDip(this unsafe.Pointer, clientDrawingContext unsafe.Pointer, pixelsPerDip unsafe.Pointer) uintptr {
+	if pixelsPerDip != nil {
+		*(*float32)(pixelsPerDip) = 1.0
 	}
 	return dwSOK
 }
 
 // dwTR_DrawGlyphRun is NOT used — DrawGlyphRun is handled by the CGO bridge
 // (dwrite_cgo_windows.go) which correctly receives float parameters from XMM
-// registers via the C trampoline. This stub exists only as documentation.
-// The vtable entry points to dwCGODrawGlyphRunCallback() instead.
+// registers via the C trampoline. The vtable entry points to dwCGODrawGlyphRunCallback().
 
 func dwTR_DrawUnderline(this, clientDrawingContext, baselineOriginX, baselineOriginY, underline, clientDrawingEffect uintptr) uintptr {
 	return dwSOK
@@ -270,7 +272,7 @@ var (
 	procDWSetDIBits        *syscall.LazyProc
 	procDWGetCurrentObject *syscall.LazyProc
 
-	dwriteSharedFactory uintptr
+	dwriteSharedFactory unsafe.Pointer
 	dwriteInitOnce      sync.Once
 	dwriteInitErr       error
 )
@@ -289,13 +291,13 @@ func initDWriteShared() error {
 		procDWSetDIBits = gdi.NewProc("SetDIBits")
 		procDWGetCurrentObject = gdi.NewProc("GetCurrentObject")
 
-		var factory uintptr
+		var factory unsafe.Pointer
 		hr, _, _ := procDWriteCreateFactory.Call(
 			dwFactoryTypeShared,
 			uintptr(unsafe.Pointer(&dwIIDFactory)),
 			uintptr(unsafe.Pointer(&factory)),
 		)
-		if int32(hr) < 0 || factory == 0 {
+		if int32(hr) < 0 || factory == nil {
 			dwriteInitErr = syscall.Errno(hr)
 			return
 		}
@@ -309,18 +311,18 @@ func initDWriteShared() error {
 // ═══════════════════════════════════════════════════════════════
 
 type dwBackend struct {
-	gdiInterop    uintptr // IDWriteGdiInterop*
-	bitmapTarget  uintptr // IDWriteBitmapRenderTarget*
-	renderParams  uintptr // IDWriteRenderingParams*
+	gdiInterop    unsafe.Pointer // IDWriteGdiInterop*
+	bitmapTarget  unsafe.Pointer // IDWriteBitmapRenderTarget*
+	renderParams  unsafe.Pointer // IDWriteRenderingParams*
 	renderer      *goTextRenderer
 	width, height int
 }
 
-func newDWBackend(factory uintptr) (*dwBackend, error) {
+func newDWBackend(factory unsafe.Pointer) (*dwBackend, error) {
 	b := &dwBackend{}
 
 	// IDWriteFactory::GetGdiInterop (vtable 17)
-	var gdiInterop uintptr
+	var gdiInterop unsafe.Pointer
 	_, err := dwComCall(factory, dwVtGetGdiInterop, uintptr(unsafe.Pointer(&gdiInterop)))
 	if err != nil {
 		return nil, err
@@ -328,7 +330,7 @@ func newDWBackend(factory uintptr) (*dwBackend, error) {
 	b.gdiInterop = gdiInterop
 
 	// IDWriteFactory::CreateRenderingParams (vtable 10)
-	var renderParams uintptr
+	var renderParams unsafe.Pointer
 	_, err = dwComCall(factory, dwVtCreateRenderingParams, uintptr(unsafe.Pointer(&renderParams)))
 	if err != nil {
 		dwComRelease(gdiInterop)
@@ -349,14 +351,14 @@ func newDWBackend(factory uintptr) (*dwBackend, error) {
 
 func (b *dwBackend) ensureSize(w, h int) error {
 	// Always recreate at exact size to avoid SetDIBits/GetDIBits width mismatch.
-	if w == b.width && h == b.height && b.bitmapTarget != 0 {
+	if w == b.width && h == b.height && b.bitmapTarget != nil {
 		return nil
 	}
-	if b.bitmapTarget != 0 {
+	if b.bitmapTarget != nil {
 		dwComRelease(b.bitmapTarget)
-		b.bitmapTarget = 0
+		b.bitmapTarget = nil
 	}
-	var target uintptr
+	var target unsafe.Pointer
 	_, err := dwComCall(b.gdiInterop, dwGdiVtCreateBitmapRenderTarget,
 		0, // hdc = NULL → use screen DC
 		uintptr(uint32(w)),
@@ -380,7 +382,7 @@ func (b *dwBackend) ensureSize(w, h int) error {
 }
 
 func (b *dwBackend) getMemoryDC() uintptr {
-	if b.bitmapTarget == 0 {
+	if b.bitmapTarget == nil {
 		return 0
 	}
 	dc, _ := dwComCall(b.bitmapTarget, dwBmpVtGetMemoryDC)
@@ -388,7 +390,7 @@ func (b *dwBackend) getMemoryDC() uintptr {
 }
 
 // copyFromImage copies an RGBA region from the Go image into the GDI bitmap
-// as BGRA, so that GDI text rendering blends with the real background.
+// as BGRA, so that DirectWrite text rendering blends with the real background.
 func (b *dwBackend) copyFromImage(src *image.RGBA, srcX, srcY, w, h int) {
 	memDC := b.getMemoryDC()
 	if memDC == 0 {
@@ -417,7 +419,6 @@ func (b *dwBackend) copyFromImage(src *image.RGBA, srcX, srcY, w, h int) {
 				buf[di+2] = src.Pix[si+0] // R
 				buf[di+3] = src.Pix[si+3] // A (preserved but unused by GDI)
 			}
-			// Out-of-bounds pixels stay zero (black).
 		}
 	}
 
@@ -442,8 +443,6 @@ func (b *dwBackend) copyFromImage(src *image.RGBA, srcX, srcY, w, h int) {
 
 // copyToImageRGB reads BGRA pixels from the GDI bitmap and writes only
 // the R,G,B channels back to the target image, preserving the original alpha.
-// This matches the C++ shim's approach: ClearType renders directly on the
-// real background, so no alpha extraction is needed.
 func (b *dwBackend) copyToImageRGB(dst *image.RGBA, dstX, dstY, w, h int) {
 	memDC := b.getMemoryDC()
 	if memDC == 0 {
@@ -493,24 +492,23 @@ func (b *dwBackend) copyToImageRGB(dst *image.RGBA, dstX, dstY, w, h int) {
 			dst.Pix[di+0] = pixels[si+2] // R
 			dst.Pix[di+1] = pixels[si+1] // G
 			dst.Pix[di+2] = pixels[si+0] // B
-			// dst.Pix[di+3] unchanged — preserve original alpha
 		}
 	}
 }
 
 func (b *dwBackend) close() {
 	b.renderer = nil
-	if b.bitmapTarget != 0 {
+	if b.bitmapTarget != nil {
 		dwComRelease(b.bitmapTarget)
-		b.bitmapTarget = 0
+		b.bitmapTarget = nil
 	}
-	if b.renderParams != 0 {
+	if b.renderParams != nil {
 		dwComRelease(b.renderParams)
-		b.renderParams = 0
+		b.renderParams = nil
 	}
-	if b.gdiInterop != 0 {
+	if b.gdiInterop != nil {
 		dwComRelease(b.gdiInterop)
-		b.gdiInterop = 0
+		b.gdiInterop = nil
 	}
 }
 
@@ -518,10 +516,10 @@ func (b *dwBackend) close() {
 // Text format / layout helpers
 // ═══════════════════════════════════════════════════════════════
 
-func dwCreateTextFormat(factory uintptr, family string, weight int, fontSize float64) (uintptr, error) {
+func dwCreateTextFormat(factory unsafe.Pointer, family string, weight int, fontSize float64) (unsafe.Pointer, error) {
 	familyW, _ := syscall.UTF16PtrFromString(family)
 	localeW, _ := syscall.UTF16PtrFromString("en-us")
-	var textFormat uintptr
+	var textFormat unsafe.Pointer
 	_, err := dwComCall(factory, dwVtCreateTextFormat,
 		uintptr(unsafe.Pointer(familyW)),
 		0, // fontCollection = NULL (system default)
@@ -533,35 +531,35 @@ func dwCreateTextFormat(factory uintptr, family string, weight int, fontSize flo
 		uintptr(unsafe.Pointer(&textFormat)),
 	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	return textFormat, nil
 }
 
-func dwCreateTextLayout(factory uintptr, textFormat uintptr, text string) (uintptr, error) {
+func dwCreateTextLayout(factory unsafe.Pointer, textFormat unsafe.Pointer, text string) (unsafe.Pointer, error) {
 	textUTF16, _ := syscall.UTF16FromString(text)
-	var layout uintptr
+	var layout unsafe.Pointer
 	_, err := dwComCall(factory, dwVtCreateTextLayout,
 		uintptr(unsafe.Pointer(&textUTF16[0])),
 		uintptr(uint32(len(textUTF16)-1)), // exclude NUL
-		textFormat,
+		uintptr(unsafe.Pointer(textFormat)),
 		uintptr(math.Float32bits(float32(100000))), // maxWidth (huge → single line)
 		uintptr(math.Float32bits(float32(100000))), // maxHeight
 		uintptr(unsafe.Pointer(&layout)),
 	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	return layout, nil
 }
 
-func dwGetTextMetrics(layout uintptr) (dwTextMetrics, error) {
+func dwGetTextMetrics(layout unsafe.Pointer) (dwTextMetrics, error) {
 	var m dwTextMetrics
 	_, err := dwComCall(layout, dwLayoutVtGetMetrics, uintptr(unsafe.Pointer(&m)))
 	return m, err
 }
 
-func dwGetLineMetrics(layout uintptr) ([]dwLineMetrics, error) {
+func dwGetLineMetrics(layout unsafe.Pointer) ([]dwLineMetrics, error) {
 	var lineCount uint32
 	dwComCall(layout, dwLayoutVtGetLineMetrics, 0, 0, uintptr(unsafe.Pointer(&lineCount)))
 	if lineCount == 0 {
@@ -626,7 +624,7 @@ type DWriteRenderer struct {
 	backend *dwBackend
 
 	// Cached text format (most-recently-used parameters).
-	cachedFormat       uintptr
+	cachedFormat       unsafe.Pointer
 	cachedFormatFamily string
 	cachedFormatWeight int
 	cachedFormatSize   float64
@@ -693,20 +691,20 @@ func (r *DWriteRenderer) ensureInitLocked() bool {
 }
 
 // getFormatLocked returns a cached or freshly-created text format.
-func (r *DWriteRenderer) getFormatLocked(family string, weight int, fontSize float64) uintptr {
-	if r.cachedFormat != 0 &&
+func (r *DWriteRenderer) getFormatLocked(family string, weight int, fontSize float64) unsafe.Pointer {
+	if r.cachedFormat != nil &&
 		r.cachedFormatFamily == family &&
 		r.cachedFormatWeight == weight &&
 		r.cachedFormatSize == fontSize {
 		return r.cachedFormat
 	}
-	if r.cachedFormat != 0 {
+	if r.cachedFormat != nil {
 		dwComRelease(r.cachedFormat)
-		r.cachedFormat = 0
+		r.cachedFormat = nil
 	}
 	f, err := dwCreateTextFormat(dwriteSharedFactory, family, weight, fontSize)
 	if err != nil {
-		return 0
+		return nil
 	}
 	r.cachedFormat = f
 	r.cachedFormatFamily = family
@@ -773,12 +771,12 @@ func (r *DWriteRenderer) MeasureString(text string, fontSize float64) float64 {
 	}
 
 	format := r.getFormatLocked(family, r.fontWeight, scaledSize)
-	if format == 0 {
+	if format == nil {
 		return 0
 	}
 
 	layout, err := dwCreateTextLayout(dwriteSharedFactory, format, text)
-	if err != nil || layout == 0 {
+	if err != nil || layout == nil {
 		return 0
 	}
 	defer dwComRelease(layout)
@@ -842,9 +840,7 @@ func (r *DWriteRenderer) drawStringLocked(text string, x, y float64, fontSize fl
 
 	// --- Measurement via DirectWrite ---
 
-	// For DrawStringWithWeight the weight may differ from r.fontWeight.
-	// Use a temporary format if that's the case to avoid polluting the cache.
-	var format uintptr
+	var format unsafe.Pointer
 	if weight == r.fontWeight {
 		format = r.getFormatLocked(family, weight, scaledSize)
 	} else {
@@ -855,12 +851,12 @@ func (r *DWriteRenderer) drawStringLocked(text string, x, y float64, fontSize fl
 		}
 		defer dwComRelease(format)
 	}
-	if format == 0 {
+	if format == nil {
 		return
 	}
 
 	layout, err := dwCreateTextLayout(dwriteSharedFactory, format, text)
-	if err != nil || layout == 0 {
+	if err != nil || layout == nil {
 		return
 	}
 	defer dwComRelease(layout)
@@ -926,9 +922,9 @@ func (r *DWriteRenderer) Close() {
 	r.inDraw = false
 	r.target = nil
 
-	if r.cachedFormat != 0 {
+	if r.cachedFormat != nil {
 		dwComRelease(r.cachedFormat)
-		r.cachedFormat = 0
+		r.cachedFormat = nil
 	}
 	if r.backend != nil {
 		r.backend.close()
