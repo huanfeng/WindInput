@@ -162,24 +162,6 @@ type goTextRenderer struct {
 	bitmapTarget uintptr // IDWriteBitmapRenderTarget*
 	renderParams uintptr // IDWriteRenderingParams*
 	textColor    uint32  // COLORREF (0x00BBGGRR)
-
-	// Pre-computed positions — avoids relying on float callback params
-	// (Windows x64 COM calls put floats only in XMM registers which
-	// syscall.NewCallback may not reliably extract as uintptr).
-	baseline float32 // Y baseline from GetLineMetrics, set before Draw
-	currentX float32 // cumulative X advance, reset before Draw
-}
-
-// dwGlyphRun mirrors DWRITE_GLYPH_RUN for reading glyph data in callbacks.
-type dwGlyphRun struct {
-	FontFace      uintptr // IDWriteFontFace*
-	FontEmSize    float32
-	GlyphCount    uint32
-	GlyphIndices  uintptr // const UINT16*
-	GlyphAdvances uintptr // const FLOAT*
-	GlyphOffsets  uintptr // const DWRITE_GLYPH_OFFSET*
-	IsSideways    int32   // BOOL
-	BidiLevel     uint32
 }
 
 // Global vtable — initialized once, shared by all goTextRenderer instances.
@@ -197,7 +179,7 @@ func initDWTextRendererVtable() *goTextRendererVtable {
 			IsPixelSnappingDisabled: syscall.NewCallback(dwTR_IsPixelSnappingDisabled),
 			GetCurrentTransform:     syscall.NewCallback(dwTR_GetCurrentTransform),
 			GetPixelsPerDip:         syscall.NewCallback(dwTR_GetPixelsPerDip),
-			DrawGlyphRun:            syscall.NewCallback(dwTR_DrawGlyphRun),
+			DrawGlyphRun:            dwCGODrawGlyphRunCallback(), // CGO bridge — correct float ABI
 			DrawUnderline:           syscall.NewCallback(dwTR_DrawUnderline),
 			DrawStrikethrough:       syscall.NewCallback(dwTR_DrawStrikethrough),
 			DrawInlineObject:        syscall.NewCallback(dwTR_DrawInlineObject),
@@ -258,58 +240,10 @@ func dwTR_GetPixelsPerDip(this uintptr, clientDrawingContext uintptr, pixelsPerD
 	return dwSOK
 }
 
-// dwTR_DrawGlyphRun — the core callback. Delegates to IDWriteBitmapRenderTarget::DrawGlyphRun.
-//
-// IMPORTANT: We do NOT use the callback's float parameters (baselineOriginX/Y) because
-// Windows x64 COM calls place floats exclusively in XMM registers, which
-// syscall.NewCallback cannot reliably extract as uintptr. Instead, we use
-// pre-computed positions (tr.currentX, tr.baseline) and advance tr.currentX
-// by summing glyph advances after each run.
-func dwTR_DrawGlyphRun(
-	this uintptr,
-	clientDrawingContext uintptr,
-	_ uintptr, // baselineOriginX — unreliable, use tr.currentX instead
-	_ uintptr, // baselineOriginY — unreliable, use tr.baseline instead
-	measuringMode uintptr,
-	glyphRun uintptr,
-	glyphRunDescription uintptr,
-	clientDrawingEffect uintptr,
-) uintptr {
-	tr := (*goTextRenderer)(unsafe.Pointer(this))
-	if tr.bitmapTarget == 0 {
-		return dwSOK
-	}
-
-	// Use pre-computed positions.
-	xBits := uintptr(math.Float32bits(tr.currentX))
-	yBits := uintptr(math.Float32bits(tr.baseline))
-
-	// Call IDWriteBitmapRenderTarget::DrawGlyphRun (vtable index 3) directly.
-	vtablePtr := *(*uintptr)(unsafe.Pointer(tr.bitmapTarget))
-	methodPtr := *(*uintptr)(unsafe.Pointer(vtablePtr + uintptr(dwBmpVtDrawGlyphRun)*unsafe.Sizeof(uintptr(0))))
-	var blackBoxRect RECT
-	syscall.SyscallN(methodPtr,
-		tr.bitmapTarget,
-		xBits,
-		yBits,
-		measuringMode,
-		glyphRun,
-		tr.renderParams,
-		uintptr(tr.textColor),
-		uintptr(unsafe.Pointer(&blackBoxRect)),
-	)
-
-	// Advance currentX by summing glyph advances for the next run.
-	run := (*dwGlyphRun)(unsafe.Pointer(glyphRun))
-	if run.GlyphAdvances != 0 && run.GlyphCount > 0 {
-		advances := unsafe.Slice((*float32)(unsafe.Pointer(run.GlyphAdvances)), run.GlyphCount)
-		for _, adv := range advances {
-			tr.currentX += adv
-		}
-	}
-
-	return dwSOK
-}
+// dwTR_DrawGlyphRun is NOT used — DrawGlyphRun is handled by the CGO bridge
+// (dwrite_cgo_windows.go) which correctly receives float parameters from XMM
+// registers via the C trampoline. This stub exists only as documentation.
+// The vtable entry points to dwCGODrawGlyphRunCallback() instead.
 
 func dwTR_DrawUnderline(this, clientDrawingContext, baselineOriginX, baselineOriginY, underline, clientDrawingEffect uintptr) uintptr {
 	return dwSOK
@@ -960,11 +894,9 @@ func (r *DWriteRenderer) drawStringLocked(text string, x, y float64, fontSize fl
 	}
 	r.backend.copyFromImage(r.target, dstX, dstY, bmpW, bmpH)
 
-	// Set up renderer state for the callback.
+	// Set text color on the renderer: COLORREF = 0x00BBGGRR
 	cr, cg, cb, _ := clr.RGBA()
 	r.backend.renderer.textColor = uint32(cb>>8)<<16 | uint32(cg>>8)<<8 | uint32(cr>>8)
-	r.backend.renderer.baseline = float32(baseline) // Y position for all glyph runs
-	r.backend.renderer.currentX = 0                 // X advances cumulatively per glyph run
 
 	// Render via DirectWrite: IDWriteTextLayout::Draw (vtable 58)
 	dwComCall(layout, dwLayoutVtDraw,
