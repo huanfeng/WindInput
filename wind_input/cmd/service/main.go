@@ -340,6 +340,10 @@ func main() {
 	// Create Bridge IPC server (connects to C++)
 	bridgeServer := bridge.NewServer(coord, logger)
 
+	// Create host render manager for Band window proxy rendering (Start Menu etc.)
+	hostRenderMgr := bridge.NewHostRenderManager(logger, cfg.Advanced.HostRenderProcesses)
+	bridgeServer.SetHostRenderManager(hostRenderMgr)
+
 	// Set bridge server on coordinator for state broadcasting
 	coord.SetBridgeServer(bridgeServer)
 

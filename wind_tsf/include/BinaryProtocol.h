@@ -41,7 +41,13 @@ constexpr uint16_t CMD_STATUS_UPDATE      = 0x0202; // Full status update
 constexpr uint16_t CMD_STATE_PUSH         = 0x0206; // State push (broadcast to all clients)
 constexpr uint16_t CMD_SYNC_HOTKEYS       = 0x0301; // Sync hotkey whitelist
 constexpr uint16_t CMD_CONSUMED           = 0x0401; // Key consumed
+constexpr uint16_t CMD_HOST_RENDER_SETUP  = 0x0501; // Host render setup (shared memory + event names)
 constexpr uint16_t CMD_BATCH_RESPONSE     = 0x0F02; // Batch response container
+
+// ============================================================================
+// Host render commands (C++ -> Go)
+// ============================================================================
+constexpr uint16_t CMD_HOST_RENDER_REQUEST = 0x0501; // DLL requests host render setup
 
 // ============================================================================
 // Key event types
@@ -79,6 +85,7 @@ constexpr uint32_t STATUS_CHINESE_PUNCT    = 0x0004; // Chinese punctuation
 constexpr uint32_t STATUS_TOOLBAR_VISIBLE  = 0x0008; // Toolbar visible
 constexpr uint32_t STATUS_MODE_CHANGED     = 0x0010; // Mode was just changed
 constexpr uint32_t STATUS_CAPS_LOCK        = 0x0020; // CapsLock is on
+constexpr uint32_t STATUS_HOST_RENDER_AVAIL = 0x0040; // Host render available (DLL should request setup)
 
 // ============================================================================
 // Protocol structures (must match Go side exactly)
@@ -187,6 +194,50 @@ static_assert(sizeof(CommitResultPayload) == 12, "CommitResultPayload must be 12
 // COMMIT_FLAG_HAS_NEW_COMPOSITION = 0x0002
 // COMMIT_FLAG_CHINESE_MODE       = 0x0004
 
+// ============================================================================
+// Host render shared memory structures
+// ============================================================================
+
+// Shared memory magic and version
+constexpr uint32_t SHARED_RENDER_MAGIC   = 0x57494E44; // 'WIND'
+constexpr uint32_t SHARED_RENDER_VERSION = 1;
+
+// Shared memory flags
+constexpr uint32_t SHARED_FLAG_VISIBLE       = 0x0001; // Window should be visible
+constexpr uint32_t SHARED_FLAG_CONTENT_READY = 0x0002; // New content is ready to render
+
+// Max shared memory size (4MB, covers up to ~1024x1024 BGRA)
+constexpr uint32_t MAX_SHARED_RENDER_SIZE = 4 * 1024 * 1024;
+
+// Shared render header (64 bytes, at start of shared memory)
+// Followed by BGRA pixel data
+struct SharedRenderHeader
+{
+    uint32_t magic;      // SHARED_RENDER_MAGIC
+    uint32_t version;    // SHARED_RENDER_VERSION
+    uint32_t sequence;   // Monotonic, incremented each write by Go
+    uint32_t flags;      // SHARED_FLAG_* bits
+    int32_t  x;          // Screen X position
+    int32_t  y;          // Screen Y position
+    uint32_t width;      // Bitmap width in pixels
+    uint32_t height;     // Bitmap height in pixels
+    uint32_t stride;     // Bytes per row (width * 4)
+    uint32_t dataSize;   // Total BGRA pixel data size in bytes
+    uint32_t reserved[6];// Padding to 64 bytes
+};
+static_assert(sizeof(SharedRenderHeader) == 64, "SharedRenderHeader must be 64 bytes");
+
+// Host render setup payload (from Go, response to CMD_HOST_RENDER_REQUEST)
+// Wire format: maxBufferSize(4) + shmNameLen(4) + eventNameLen(4) + shmName + eventName
+struct HostRenderSetupHeader
+{
+    uint32_t maxBufferSize;  // Maximum shared memory size
+    uint32_t shmNameLen;     // Length of shared memory name (UTF-8)
+    uint32_t eventNameLen;   // Length of event name (UTF-8)
+    // Followed by: shmName (shmNameLen bytes) + eventName (eventNameLen bytes)
+};
+static_assert(sizeof(HostRenderSetupHeader) == 12, "HostRenderSetupHeader must be 12 bytes");
+
 #pragma pack(pop)
 
 // ============================================================================
@@ -242,6 +293,7 @@ enum class ResponseType
     StatusUpdate,
     SyncHotkeys,
     Consumed,
+    HostRenderSetup, // Host render setup (shared memory info)
     Error
 };
 

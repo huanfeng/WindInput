@@ -349,6 +349,62 @@ func (c *BinaryCodec) EncodeStatusUpdate(chineseMode, fullWidth, chinesePunct, t
 	return result
 }
 
+// EncodeStatusUpdateEx encodes a status update with optional host render flag.
+func (c *BinaryCodec) EncodeStatusUpdateEx(chineseMode, fullWidth, chinesePunct, toolbarVisible, capsLock, hostRenderAvail bool,
+	keyDownHotkeys, keyUpHotkeys []uint32, iconLabel string) []byte {
+
+	// Build flags
+	var flags uint32
+	if chineseMode {
+		flags |= StatusChineseMode
+	}
+	if fullWidth {
+		flags |= StatusFullWidth
+	}
+	if chinesePunct {
+		flags |= StatusChinesePunct
+	}
+	if toolbarVisible {
+		flags |= StatusToolbarVisible
+	}
+	if capsLock {
+		flags |= StatusCapsLock
+	}
+	if hostRenderAvail {
+		flags |= StatusHostRenderAvail
+	}
+
+	keyDownCount := uint32(len(keyDownHotkeys))
+	keyUpCount := uint32(len(keyUpHotkeys))
+	labelBytes := []byte(iconLabel)
+
+	payloadLen := uint32(12 + (keyDownCount+keyUpCount)*4 + uint32(len(labelBytes)))
+	header := c.EncodeHeader(CmdStatusUpdate, payloadLen)
+
+	statusHeader := make([]byte, 12)
+	binary.LittleEndian.PutUint32(statusHeader[0:4], flags)
+	binary.LittleEndian.PutUint32(statusHeader[4:8], keyDownCount)
+	binary.LittleEndian.PutUint32(statusHeader[8:12], keyUpCount)
+
+	hotkeys := make([]byte, (keyDownCount+keyUpCount)*4)
+	offset := 0
+	for _, h := range keyDownHotkeys {
+		binary.LittleEndian.PutUint32(hotkeys[offset:offset+4], h)
+		offset += 4
+	}
+	for _, h := range keyUpHotkeys {
+		binary.LittleEndian.PutUint32(hotkeys[offset:offset+4], h)
+		offset += 4
+	}
+
+	result := make([]byte, 0, HeaderSize+payloadLen)
+	result = append(result, header...)
+	result = append(result, statusHeader...)
+	result = append(result, hotkeys...)
+	result = append(result, labelBytes...)
+	return result
+}
+
 // EncodeSyncHotkeys encodes a hotkey sync message
 // Format: StatusHeader (12 bytes, but only keyDownCount and keyUpCount used) + keyHash values
 func (c *BinaryCodec) EncodeSyncHotkeys(keyDownHotkeys, keyUpHotkeys []uint32) []byte {
@@ -437,6 +493,29 @@ func (c *BinaryCodec) EncodeStatePush(chineseMode, fullWidth, chinesePunct, tool
 	result = append(result, statusHeader...)
 	result = append(result, labelBytes...)
 
+	return result
+}
+
+// EncodeHostRenderSetup encodes a host render setup response (CMD_HOST_RENDER_SETUP)
+// Contains shared memory name, event name, and max buffer size
+func (c *BinaryCodec) EncodeHostRenderSetup(setup *HostRenderSetupPayload) []byte {
+	shmBytes := []byte(setup.ShmName)
+	evtBytes := []byte(setup.EventName)
+
+	// Payload: maxBufferSize(4) + shmNameLen(4) + eventNameLen(4) + shmName + eventName
+	payloadLen := uint32(12 + len(shmBytes) + len(evtBytes))
+	header := c.EncodeHeader(CmdHostRenderSetup, payloadLen)
+
+	setupHeader := make([]byte, 12)
+	binary.LittleEndian.PutUint32(setupHeader[0:4], setup.MaxBufferSize)
+	binary.LittleEndian.PutUint32(setupHeader[4:8], uint32(len(shmBytes)))
+	binary.LittleEndian.PutUint32(setupHeader[8:12], uint32(len(evtBytes)))
+
+	result := make([]byte, 0, HeaderSize+payloadLen)
+	result = append(result, header...)
+	result = append(result, setupHeader...)
+	result = append(result, shmBytes...)
+	result = append(result, evtBytes...)
 	return result
 }
 

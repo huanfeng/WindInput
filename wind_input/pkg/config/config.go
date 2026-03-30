@@ -124,6 +124,9 @@ type CapsLockBehaviorConfig struct {
 // AdvancedConfig 高级配置
 type AdvancedConfig struct {
 	LogLevel string `yaml:"log_level" json:"log_level"`
+	// HostRenderProcesses 启用宿主进程代理渲染的进程白名单（进程名，不区分大小写）
+	// 在这些进程中，候选窗口将通过 DLL 内 CreateWindowInBand 创建，以解决 z-order 问题
+	HostRenderProcesses []string `yaml:"host_render_processes,omitempty" json:"host_render_processes,omitempty"`
 }
 
 // DefaultConfig returns the default configuration
@@ -185,7 +188,8 @@ func DefaultConfig() *Config {
 			},
 		},
 		Advanced: AdvancedConfig{
-			LogLevel: "info",
+			LogLevel:            "info",
+			HostRenderProcesses: []string{"SearchHost.exe"},
 		},
 	}
 }

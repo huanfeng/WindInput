@@ -3,6 +3,7 @@ package bridge
 
 import (
 	"fmt"
+	"image"
 	"io"
 	"log/slog"
 	"sync"
@@ -62,6 +63,9 @@ type Server struct {
 	// Active client tracking (for secure, targeted push)
 	activeMu        sync.RWMutex
 	activeProcessID uint32 // Process ID of the client that has focus
+
+	// Host render manager (for Band window proxy rendering)
+	hostRender *HostRenderManager
 }
 
 // NewServer creates a new Bridge IPC server
@@ -75,6 +79,40 @@ func NewServer(handler MessageHandler, logger *slog.Logger) *Server {
 		pushClientsByPID: make(map[uint32]windows.Handle),
 		pushHandleToPID:  make(map[windows.Handle]uint32),
 	}
+}
+
+// SetHostRenderManager sets the host render manager for Band window proxy rendering.
+func (s *Server) SetHostRenderManager(hrm *HostRenderManager) {
+	s.hostRender = hrm
+}
+
+// GetHostRenderManager returns the host render manager.
+func (s *Server) GetHostRenderManager() *HostRenderManager {
+	return s.hostRender
+}
+
+// GetActiveHostRender returns write/hide functions if the active process has host rendering.
+// Returns nil functions if host rendering is not active.
+func (s *Server) GetActiveHostRender() (writeFrame func(img *image.RGBA, x, y int) error, hideFunc func()) {
+	if s.hostRender == nil {
+		return nil, nil
+	}
+
+	s.activeMu.RLock()
+	pid := s.activeProcessID
+	s.activeMu.RUnlock()
+
+	if pid == 0 {
+		return nil, nil
+	}
+
+	state := s.hostRender.GetActiveState(pid)
+	if state == nil || state.SHM == nil {
+		return nil, nil
+	}
+
+	shm := state.SHM
+	return shm.WriteFrame, shm.WriteHide
 }
 
 // Start begins listening for connections from C++ Bridge
@@ -147,12 +185,17 @@ func (s *Server) Start() error {
 
 		// Handle client in a separate goroutine to allow concurrent connections
 		go func(h windows.Handle, id int) {
-			s.handleClient(h, id)
+			pid := s.handleClient(h, id)
 
 			s.mu.Lock()
 			delete(s.activeHandles, h)
 			activeCount := len(s.activeHandles)
 			s.mu.Unlock()
+
+			// Clean up host render resources for this client
+			if s.hostRender != nil && pid != 0 {
+				s.hostRender.CleanupClient(pid)
+			}
 
 			// Notify handler that a client disconnected
 			s.handler.HandleClientDisconnected(activeCount)
@@ -160,7 +203,7 @@ func (s *Server) Start() error {
 	}
 }
 
-func (s *Server) handleClient(handle windows.Handle, clientID int) {
+func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 	defer windows.CloseHandle(handle)
 
 	// Get the client's process ID for tracking active client
@@ -219,6 +262,7 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) {
 	}
 
 	s.logger.Info("C++ Bridge disconnected", "clientID", clientID)
+	return processID
 }
 
 // pipeReader wraps windows.Handle for io.Reader

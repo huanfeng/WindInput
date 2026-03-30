@@ -45,6 +45,31 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	return nil
 }
 
+// HandleHostRenderReady is called when host render shared memory is set up for the active client.
+// This triggers updating the UI manager's render callbacks immediately, without waiting for next focus change.
+func (c *Coordinator) HandleHostRenderReady() {
+	c.updateHostRenderState()
+}
+
+// updateHostRenderState checks if the active process has host rendering and updates
+// the UI manager's render callbacks accordingly.
+func (c *Coordinator) updateHostRenderState() {
+	if c.bridgeServer == nil || c.uiManager == nil {
+		return
+	}
+
+	writeFrame, hideFunc := c.bridgeServer.GetActiveHostRender()
+	if writeFrame != nil {
+		c.logger.Info("Enabling host render for active process")
+		c.uiManager.SetHostRenderFunc(writeFrame, hideFunc)
+	} else {
+		if c.uiManager.IsHostRendering() {
+			c.logger.Info("Disabling host render for active process")
+		}
+		c.uiManager.SetHostRenderFunc(nil, nil)
+	}
+}
+
 // HandleFocusLost handles focus lost events (real focus change, e.g., user clicked another window)
 func (c *Coordinator) HandleFocusLost() {
 	c.logger.Debug("Focus lost, clearing state and hiding toolbar")
@@ -56,6 +81,11 @@ func (c *Coordinator) HandleFocusLost() {
 			debug.FreeOSMemory()
 		}()
 	}()
+
+	// Clear host render on focus lost (next focus gained will re-evaluate)
+	if c.uiManager != nil && c.uiManager.IsHostRendering() {
+		c.uiManager.SetHostRenderFunc(nil, nil)
+	}
 
 	// Hide toolbar on real focus lost (user switched to another window/app)
 	c.SetIMEActivated(false)
@@ -145,6 +175,9 @@ func (c *Coordinator) HandleFocusGained() *bridge.StatusUpdateData {
 			debug.FreeOSMemory()
 		}()
 	}()
+
+	// Update host render state for the new active process
+	c.updateHostRenderState()
 
 	// Clear any pending input state when focus changes
 	// This ensures composition state is consistent

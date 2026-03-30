@@ -14,7 +14,7 @@ func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte
 	// 快速命令直接同步执行，避免 goroutine + channel 分配
 	switch header.Command {
 	case ipc.CmdFocusGained, ipc.CmdFocusLost, ipc.CmdIMEActivated,
-		ipc.CmdCompositionTerminated, ipc.CmdCaretUpdate:
+		ipc.CmdCompositionTerminated, ipc.CmdCaretUpdate, ipc.CmdHostRenderRequest:
 		return s.processRequest(header, payload, clientID, processID)
 	}
 
@@ -83,7 +83,7 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 		s.logger.Info("IME activated (user switched back to this IME)", "clientID", clientID, "processID", processID)
 		statusUpdate := s.handler.HandleIMEActivated()
 		if statusUpdate != nil {
-			return s.encodeStatusUpdate(statusUpdate)
+			return s.encodeStatusUpdateWithHostRender(statusUpdate, processID)
 		}
 		return s.codec.EncodeAck()
 
@@ -106,6 +106,9 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 
 	case ipc.CmdCaretUpdate:
 		return s.handleCaretUpdate(payload, clientID)
+
+	case ipc.CmdHostRenderRequest:
+		return s.handleHostRenderRequest(clientID, processID)
 
 	default:
 		s.logger.Error("Unknown command from Bridge", "clientID", clientID, "command", fmt.Sprintf("0x%04X", header.Command))
@@ -371,6 +374,50 @@ func (s *Server) encodeStatusUpdate(status *StatusUpdateData) []byte {
 		status.KeyUpHotkeys,
 		status.IconLabel,
 	)
+}
+
+// encodeStatusUpdateWithHostRender encodes a status update, adding the HOST_RENDER_AVAIL flag
+// if the process is whitelisted for host rendering.
+func (s *Server) encodeStatusUpdateWithHostRender(status *StatusUpdateData, processID uint32) []byte {
+	hostRenderAvail := false
+	if s.hostRender != nil && processID != 0 {
+		hostRenderAvail = s.hostRender.IsProcessWhitelisted(processID)
+	}
+	return s.codec.EncodeStatusUpdateEx(
+		status.ChineseMode,
+		status.FullWidth,
+		status.ChinesePunctuation,
+		status.ToolbarVisible,
+		status.CapsLock,
+		hostRenderAvail,
+		status.KeyDownHotkeys,
+		status.KeyUpHotkeys,
+		status.IconLabel,
+	)
+}
+
+// handleHostRenderRequest handles CmdHostRenderRequest from DLL
+func (s *Server) handleHostRenderRequest(clientID int, processID uint32) []byte {
+	if s.hostRender == nil || processID == 0 {
+		s.logger.Warn("Host render request rejected: no manager or no PID", "clientID", clientID)
+		return s.codec.EncodeAck()
+	}
+
+	setup, err := s.hostRender.SetupHostRender(processID)
+	if err != nil {
+		s.logger.Error("Failed to setup host render", "clientID", clientID, "processID", processID, "error", err)
+		return s.codec.EncodeAck()
+	}
+
+	s.logger.Info("Host render setup sent", "clientID", clientID, "processID", processID,
+		"shmName", setup.ShmName, "eventName", setup.EventName)
+
+	// Notify coordinator that host render is ready so it can update UI render callbacks.
+	// This handles the case where FocusGained arrived before host render was set up
+	// (e.g., during first activation when OnSetFocus fires before _DoFullStateSync).
+	s.handler.HandleHostRenderReady()
+
+	return s.codec.EncodeHostRenderSetup(setup)
 }
 
 // keyCodeToKeyName converts a virtual key code to a key name string

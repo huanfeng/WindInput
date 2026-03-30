@@ -37,7 +37,13 @@ const (
 	CmdStatePush         uint16 = 0x0206 // State push (broadcast to all clients)
 	CmdSyncHotkeys       uint16 = 0x0301 // Sync hotkey whitelist
 	CmdConsumed          uint16 = 0x0401 // Key consumed (no output)
+	CmdHostRenderSetup   uint16 = 0x0501 // Host render setup (shared memory + event names)
 	CmdBatchResponse     uint16 = 0x0F02 // Batch response container
+)
+
+// Host render commands (C++ -> Go)
+const (
+	CmdHostRenderRequest uint16 = 0x0501 // DLL requests host render setup after seeing HOST_RENDER flag
 )
 
 // Key event types
@@ -68,12 +74,13 @@ const (
 
 // Status flags for StatusPayload
 const (
-	StatusChineseMode    uint32 = 0x0001 // Chinese mode
-	StatusFullWidth      uint32 = 0x0002 // Full-width mode
-	StatusChinesePunct   uint32 = 0x0004 // Chinese punctuation
-	StatusToolbarVisible uint32 = 0x0008 // Toolbar visible
-	StatusModeChanged    uint32 = 0x0010 // Mode was just changed
-	StatusCapsLock       uint32 = 0x0020 // CapsLock is on
+	StatusChineseMode     uint32 = 0x0001 // Chinese mode
+	StatusFullWidth       uint32 = 0x0002 // Full-width mode
+	StatusChinesePunct    uint32 = 0x0004 // Chinese punctuation
+	StatusToolbarVisible  uint32 = 0x0008 // Toolbar visible
+	StatusModeChanged     uint32 = 0x0010 // Mode was just changed
+	StatusCapsLock        uint32 = 0x0020 // CapsLock is on
+	StatusHostRenderAvail uint32 = 0x0040 // Host render available (DLL should request setup)
 )
 
 // Virtual key codes (Windows VK_* constants)
@@ -206,6 +213,45 @@ const (
 	CommitFlagHasNewComposition uint16 = 0x0002
 	CommitFlagChineseMode       uint16 = 0x0004
 )
+
+// Shared memory constants for host render
+const (
+	SharedRenderMagic   uint32 = 0x57494E44 // 'WIND'
+	SharedRenderVersion uint32 = 1
+
+	// SharedRenderHeader flags
+	SharedFlagVisible      uint32 = 0x0001 // Window should be visible
+	SharedFlagContentReady uint32 = 0x0002 // New content is ready to render
+
+	// SharedRenderHeaderSize is the fixed header size in shared memory (64 bytes)
+	SharedRenderHeaderSize = 64
+
+	// MaxSharedRenderSize is the max shared memory allocation (4MB, covers ~1024x1024 BGRA)
+	MaxSharedRenderSize = 4 * 1024 * 1024
+)
+
+// SharedRenderHeader is the header at the start of shared memory.
+// Total size: 64 bytes. Followed by BGRA pixel data.
+type SharedRenderHeader struct {
+	Magic    uint32 // 0x57494E44 = 'WIND'
+	Version  uint32 // 1
+	Sequence uint32 // Monotonic, incremented each write by Go
+	Flags    uint32 // SharedFlag* bits
+	X        int32  // Screen X position
+	Y        int32  // Screen Y position
+	Width    uint32 // Bitmap width in pixels
+	Height   uint32 // Bitmap height in pixels
+	Stride   uint32 // Bytes per row (width * 4)
+	DataSize uint32 // Total BGRA pixel data size in bytes
+	// 40 bytes used, 24 bytes reserved to reach 64
+}
+
+// HostRenderSetupPayload is sent from Go to DLL with shared memory details.
+type HostRenderSetupPayload struct {
+	MaxBufferSize uint32 // Maximum shared memory size
+	ShmName       string // Shared memory name (e.g. "Local\\WindInput_SHM_12345")
+	EventName     string // Named event name (e.g. "Local\\WindInput_EVT_12345")
+}
 
 // CalcKeyHash computes the key hash for hotkey matching
 // Format: (modifiers << 16) | keyCode

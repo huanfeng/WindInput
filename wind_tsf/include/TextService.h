@@ -10,6 +10,7 @@ class CLangBarItemButton;
 class CCaretEditSession;
 class CDisplayAttributeProvider;
 class CHotkeyManager;
+class CHostWindow;
 struct ServiceResponse;
 
 class CTextService : public ITfTextInputProcessorEx,
@@ -121,6 +122,7 @@ private:
     CIPCClient* _pIPCClient;
     CLangBarItemButton* _pLangBarItemButton;
     CHotkeyManager* _pHotkeyManager;
+    CHostWindow* _pHostWindow;
 
     // Input mode state
     BOOL _bChineseMode;

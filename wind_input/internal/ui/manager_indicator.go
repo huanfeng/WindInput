@@ -52,22 +52,38 @@ func (m *Manager) doShowModeIndicator(mode string, x, y int) {
 	// Render mode indicator
 	img := m.renderer.RenderModeIndicator(mode)
 
-	// Clear candidate hit test data to prevent mouse interactions
-	// from triggering old candidate window display.
-	// The mode indicator and candidate window share the same window,
-	// so stale hitRects would cause RefreshCandidates on mouse hover.
-	m.window.SetHitRects(nil)
-	m.window.SetPageRects(nil, nil)
-	m.window.ResetMouseTracking()
+	// Check if host rendering is active (Band window proxy)
+	m.mu.Lock()
+	hostRender := m.hostRenderFunc
+	m.mu.Unlock()
 
-	// Update window
-	if err := m.window.UpdateContent(img, adjustedX, adjustedY); err != nil {
-		m.logger.Error("UpdateContent failed", "error", err)
-		return
+	if hostRender != nil {
+		// Send mode indicator bitmap to DLL via shared memory
+		if err := hostRender(img, adjustedX, adjustedY); err != nil {
+			m.logger.Error("Host render mode indicator failed", "error", err)
+		}
+		// Hide local window if it was visible
+		if m.window.IsVisible() {
+			m.window.Hide()
+		}
+	} else {
+		// Clear candidate hit test data to prevent mouse interactions
+		// from triggering old candidate window display.
+		// The mode indicator and candidate window share the same window,
+		// so stale hitRects would cause RefreshCandidates on mouse hover.
+		m.window.SetHitRects(nil)
+		m.window.SetPageRects(nil, nil)
+		m.window.ResetMouseTracking()
+
+		// Update window
+		if err := m.window.UpdateContent(img, adjustedX, adjustedY); err != nil {
+			m.logger.Error("UpdateContent failed", "error", err)
+			return
+		}
+
+		// Show window briefly
+		m.window.Show()
 	}
-
-	// Show window briefly
-	m.window.Show()
 
 	// Hide after delay, but only if version hasn't changed
 	// This ensures that rapid state changes reset the timer

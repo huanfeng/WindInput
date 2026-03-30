@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"image"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -223,6 +224,11 @@ type Manager struct {
 
 	// Global hotkey state (RegisterHotKey for combination hotkeys)
 	globalHotkeys *globalHotkeyState
+
+	// Host render callback: when set, rendered bitmap is sent here instead of local window.
+	// Used for Band window proxy rendering in high-Band processes (e.g. Start Menu).
+	hostRenderFunc func(img *image.RGBA, x, y int) error
+	hostHideFunc   func()
 }
 
 // NewManager creates a new UI manager
@@ -486,6 +492,23 @@ func (m *Manager) UnregisterGlobalHotkeys() {
 	default:
 		m.logger.Warn("Command channel full, dropping unregister_hotkeys")
 	}
+}
+
+// SetHostRenderFunc sets the host render callback.
+// When set, rendered bitmaps are sent to this function instead of the local window.
+// Pass nil to disable host rendering and resume local window rendering.
+func (m *Manager) SetHostRenderFunc(renderFunc func(img *image.RGBA, x, y int) error, hideFunc func()) {
+	m.mu.Lock()
+	m.hostRenderFunc = renderFunc
+	m.hostHideFunc = hideFunc
+	m.mu.Unlock()
+}
+
+// IsHostRendering returns whether host rendering is currently active.
+func (m *Manager) IsHostRendering() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hostRenderFunc != nil
 }
 
 // SetToolbarCallbacks sets the callbacks for toolbar actions

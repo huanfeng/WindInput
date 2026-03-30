@@ -5,6 +5,7 @@
 #include "CaretEditSession.h"
 #include "DisplayAttributeInfo.h"
 #include "HotkeyManager.h"
+#include "HostWindow.h"
 #include <vector>
 
 // EditSession for ending composition
@@ -496,6 +497,7 @@ CTextService::CTextService()
     , _pIPCClient(nullptr)
     , _pLangBarItemButton(nullptr)
     , _pHotkeyManager(nullptr)
+    , _pHostWindow(nullptr)
     , _bChineseMode(TRUE)
     , _focusSessionId(0)
     , _pComposition(nullptr)
@@ -682,6 +684,14 @@ STDAPI CTextService::Deactivate()
         WIND_LOG_DEBUG(L"Sending ime_deactivated to service\n");
         // SendIMEDeactivated is async (fire-and-forget), no response expected
         _pIPCClient->SendIMEDeactivated();
+    }
+
+    // Release host window (before IPC client, so shared memory is still valid during shutdown)
+    if (_pHostWindow != nullptr)
+    {
+        _pHostWindow->Uninitialize();
+        delete _pHostWindow;
+        _pHostWindow = nullptr;
     }
 
     // Release IPC client
@@ -917,6 +927,32 @@ void CTextService::_DoFullStateSync()
         if (_pIPCClient->ReceiveResponse(response))
         {
             _SyncStateFromResponse(response);
+
+            // Check if host render is available for this process
+            if (response.IsHostRenderAvailable() && _pHostWindow == nullptr)
+            {
+                WIND_LOG_INFO(L"Host render available, requesting setup\n");
+                ServiceResponse hrResponse;
+                if (_pIPCClient->SendHostRenderRequest(hrResponse) &&
+                    hrResponse.type == ResponseType::HostRenderSetup &&
+                    !hrResponse.shmName.empty() && !hrResponse.eventName.empty())
+                {
+                    _pHostWindow = new CHostWindow();
+                    if (!_pHostWindow->Initialize(
+                        hrResponse.shmName.c_str(),
+                        hrResponse.eventName.c_str(),
+                        hrResponse.maxBufferSize))
+                    {
+                        WIND_LOG_WARN(L"Host window initialization failed, falling back to Go window\n");
+                        delete _pHostWindow;
+                        _pHostWindow = nullptr;
+                    }
+                    else
+                    {
+                        WIND_LOG_INFO(L"Host window initialized successfully\n");
+                    }
+                }
+            }
         }
     }
 

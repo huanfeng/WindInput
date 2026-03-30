@@ -663,6 +663,27 @@ BOOL CIPCClient::SendIMEActivated()
     return _SendBinaryMessage(CMD_IME_ACTIVATED, nullptr, 0);
 }
 
+BOOL CIPCClient::SendHostRenderRequest(ServiceResponse& response)
+{
+    if (!_ShouldAttemptOperation())
+    {
+        return FALSE;
+    }
+
+    if (!IsConnected())
+    {
+        return FALSE;
+    }
+
+    _LogInfo(L"Sending host_render_request");
+    if (!_SendBinaryMessage(CMD_HOST_RENDER_REQUEST, nullptr, 0))
+    {
+        return FALSE;
+    }
+
+    return ReceiveResponse(response);
+}
+
 BOOL CIPCClient::SendModeNotify(bool chineseMode, bool clearInput)
 {
     if (!_ShouldAttemptOperation())
@@ -1073,6 +1094,41 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
 
             _LogDebug(L"Response: CommitResult barrierSeq=%d, textLen=%zu, modeChanged=%d",
                       resultPayload->barrierSeq, response.text.length(), response.modeChanged);
+        }
+        break;
+
+    case CMD_HOST_RENDER_SETUP:
+        {
+            response.type = ResponseType::HostRenderSetup;
+
+            if (payload.size() < sizeof(HostRenderSetupHeader))
+            {
+                _LogError(L"HostRenderSetup payload too short");
+                return FALSE;
+            }
+
+            const HostRenderSetupHeader* setupHeader = reinterpret_cast<const HostRenderSetupHeader*>(payload.data());
+            response.maxBufferSize = setupHeader->maxBufferSize;
+
+            size_t offset = sizeof(HostRenderSetupHeader);
+            // Extract shared memory name
+            if (setupHeader->shmNameLen > 0 && offset + setupHeader->shmNameLen <= payload.size())
+            {
+                response.shmName = _Utf8ToWide(
+                    reinterpret_cast<const char*>(payload.data() + offset),
+                    setupHeader->shmNameLen);
+                offset += setupHeader->shmNameLen;
+            }
+            // Extract event name
+            if (setupHeader->eventNameLen > 0 && offset + setupHeader->eventNameLen <= payload.size())
+            {
+                response.eventName = _Utf8ToWide(
+                    reinterpret_cast<const char*>(payload.data() + offset),
+                    setupHeader->eventNameLen);
+            }
+
+            _LogInfo(L"Response: HostRenderSetup shm=%ls, event=%ls, maxSize=%u",
+                     response.shmName.c_str(), response.eventName.c_str(), response.maxBufferSize);
         }
         break;
 

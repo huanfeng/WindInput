@@ -2,6 +2,7 @@
 package coordinator
 
 import (
+	"image"
 	"log/slog"
 	"sync"
 
@@ -152,6 +153,9 @@ type BridgeServer interface {
 	PushCommitTextToActiveClient(text string) // Only send to active client for security
 	PushClearCompositionToActiveClient()      // Clear inline composition on active client
 	RestartService()
+	// GetActiveHostRender returns write/hide functions if the active process has host rendering.
+	// Returns nil functions if host rendering is not active for the current process.
+	GetActiveHostRender() (writeFrame func(img *image.RGBA, x, y int) error, hideFunc func())
 }
 
 // SetBridgeServer sets the bridge server for state broadcasting

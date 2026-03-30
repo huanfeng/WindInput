@@ -32,6 +32,7 @@ set(SOURCES
     src/CaretEditSession.cpp
     src/DisplayAttributeInfo.cpp
     src/HotkeyManager.cpp
+    src/HostWindow.cpp
     src/FileLogger.cpp
 )
 

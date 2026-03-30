@@ -114,4 +114,6 @@ type MessageHandler interface {
 	HandleModeNotify(data ModeNotifyData)
 	// Context menu request from TSF (screen coordinates)
 	HandleShowContextMenu(screenX, screenY int)
+	// Called when host render is set up for the active client (shared memory ready)
+	HandleHostRenderReady()
 }

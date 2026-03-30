@@ -57,10 +57,16 @@ struct ServiceResponse
     std::vector<uint32_t> keyDownHotkeys;
     std::vector<uint32_t> keyUpHotkeys;
 
+    // For HostRenderSetup
+    std::wstring shmName;
+    std::wstring eventName;
+    uint32_t maxBufferSize = 0;
+
     // Error
     std::wstring error;
 
     // Helper methods
+    bool IsHostRenderAvailable() const { return (statusFlags & STATUS_HOST_RENDER_AVAIL) != 0; }
     bool IsChineseMode() const { return (statusFlags & STATUS_CHINESE_MODE) != 0 || chineseMode; }
     bool IsFullWidth() const { return (statusFlags & STATUS_FULL_WIDTH) != 0; }
     bool IsChinesePunct() const { return (statusFlags & STATUS_CHINESE_PUNCT) != 0; }
@@ -119,6 +125,10 @@ public:
 
     // Send IME activated notification (when user switches back to this IME)
     BOOL SendIMEActivated();
+
+    // Send host render request (after activation with HOST_RENDER_AVAIL flag)
+    // Gets back shared memory and event names for host rendering
+    BOOL SendHostRenderRequest(ServiceResponse& response);
 
     // Send mode change notification (async, for local mode toggle)
     // This notifies Go that TSF has locally toggled the mode

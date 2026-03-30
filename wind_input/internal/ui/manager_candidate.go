@@ -159,6 +159,25 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 		m.logger.Debug("Set sticky state to above")
 	}
 
+	// Check if host rendering is active (Band window proxy)
+	m.mu.Lock()
+	hostRender := m.hostRenderFunc
+	m.mu.Unlock()
+
+	if hostRender != nil {
+		// Send bitmap to DLL via shared memory for host window rendering
+		m.logger.Debug("Host rendering: sending bitmap to shared memory...")
+		if err := hostRender(img, windowX, windowY); err != nil {
+			m.logger.Error("Host render failed", "error", err)
+		}
+		// Hide local window if it was visible (mode switch from local to host)
+		if m.window.IsVisible() {
+			m.window.Hide()
+		}
+		m.logger.Debug("doShowCandidates complete (host render)")
+		return
+	}
+
 	// Update window
 	m.logger.Debug("Updating window content...")
 	if err := m.window.UpdateContent(img, windowX, windowY); err != nil {
@@ -205,10 +224,14 @@ func (m *Manager) Hide() {
 func (m *Manager) doHide() {
 	m.window.Hide()
 
-	// Reset sticky state and hover index when hiding (input session ended)
+	// Also hide host window if active
 	m.mu.Lock()
+	hostHide := m.hostHideFunc
 	m.stickyAbove = false
 	m.mu.Unlock()
+	if hostHide != nil {
+		hostHide()
+	}
 	m.window.ResetHoverIndex()
 }
 
