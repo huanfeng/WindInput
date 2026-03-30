@@ -182,8 +182,18 @@ func (e *Engine) convertWubiOnly(input string, maxCandidates int) *ConvertResult
 		wubiResult.Candidates[i].Source = candidate.SourceWubi
 	}
 
+	candidates := wubiResult.Candidates
+
+	// 应用 Shadow 规则（置顶/删除）
+	if e.dictManager != nil {
+		if shadowLayer := e.dictManager.GetShadowLayer(); shadowLayer != nil {
+			rules := shadowLayer.GetShadowRules(input)
+			candidates = dict.ApplyShadowPins(candidates, rules)
+		}
+	}
+
 	return &ConvertResult{
-		Candidates:   wubiResult.Candidates,
+		Candidates:   candidates,
 		ShouldCommit: wubiResult.ShouldCommit,
 		CommitText:   wubiResult.CommitText,
 		IsEmpty:      wubiResult.IsEmpty,
@@ -205,8 +215,18 @@ func (e *Engine) convertPinyinFallback(input string, maxCandidates int) *Convert
 		pinyinResult.Candidates[i].Source = candidate.SourcePinyin
 	}
 
+	candidates := pinyinResult.Candidates
+
+	// 应用 Shadow 规则（置顶/删除）
+	if e.dictManager != nil {
+		if shadowLayer := e.dictManager.GetShadowLayer(); shadowLayer != nil {
+			rules := shadowLayer.GetShadowRules(input)
+			candidates = dict.ApplyShadowPins(candidates, rules)
+		}
+	}
+
 	result := &ConvertResult{
-		Candidates:       pinyinResult.Candidates,
+		Candidates:       candidates,
 		IsEmpty:          pinyinResult.IsEmpty,
 		IsPinyinFallback: true,
 		PreeditDisplay:   pinyinResult.PreeditDisplay,
