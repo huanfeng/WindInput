@@ -564,7 +564,7 @@ func resolveVKFromKeyName(name string) int {
 		return int(ipc.VK_OEM_6)
 	case "-":
 		return int(ipc.VK_OEM_MINUS)
-	case "=":
+	case "=", "equal":
 		return int(ipc.VK_OEM_PLUS)
 	case "tab":
 		return 0x09

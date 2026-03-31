@@ -213,6 +213,10 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 			c.uiManager.OpenSettingsWithPage("dictionary")
 		}
 
+	case "add_word":
+		c.logger.Info("Quick add word requested from menu")
+		c.enterAddWordMode()
+
 	case "show_about":
 		c.logger.Info("Showing about dialog requested")
 		if c.uiManager != nil {

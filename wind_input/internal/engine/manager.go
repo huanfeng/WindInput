@@ -33,6 +33,10 @@ type Manager struct {
 
 	// 词库管理器
 	dictManager *dict.DictManager
+
+	// 反向索引缓存（字 → 编码列表）
+	cachedReverseIndex    map[string][]string
+	cachedReverseSchemaID string
 }
 
 // NewManager 创建引擎管理器
@@ -90,6 +94,9 @@ func (m *Manager) SwitchSchema(schemaID string) error {
 	if eng, ok := m.engines[schemaID]; ok {
 		m.currentID = schemaID
 		m.currentEngine = eng
+		// 清空反向索引缓存，切换方案后重建
+		m.cachedReverseIndex = nil
+		m.cachedReverseSchemaID = ""
 		// 重新注册缓存引擎的系统词库层
 		m.reRegisterSystemLayer(schemaID)
 		log.Printf("[EngineManager] 切换到已加载方案: %s", schemaID)
@@ -103,6 +110,9 @@ func (m *Manager) SwitchSchema(schemaID string) error {
 
 	m.currentID = schemaID
 	m.currentEngine = m.engines[schemaID]
+	// 清空反向索引缓存，切换方案后重建
+	m.cachedReverseIndex = nil
+	m.cachedReverseSchemaID = ""
 	log.Printf("[EngineManager] 加载并切换方案: %s", schemaID)
 	return nil
 }
@@ -829,6 +839,71 @@ func (m *Manager) ToggleEngine() (EngineType, error) {
 // Deprecated: 使用 SwitchSchema
 func (m *Manager) SwitchEngine(targetType EngineType) error {
 	return m.SwitchSchema(string(targetType))
+}
+
+// GetEncoderRules 获取当前方案的编码规则（用于加词时自动计算编码）
+func (m *Manager) GetEncoderRules() []schema.EncoderRule {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.schemaManager == nil {
+		return nil
+	}
+
+	s := m.schemaManager.GetSchema(m.currentID)
+	if s == nil || s.Encoder == nil {
+		return nil
+	}
+
+	return s.Encoder.Rules
+}
+
+// GetReverseIndex 获取当前码表的反向索引（字 → 编码列表）
+// 首次调用时构建并缓存，切换方案后自动重建
+func (m *Manager) GetReverseIndex() map[string][]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 缓存命中
+	if m.cachedReverseIndex != nil && m.cachedReverseSchemaID == m.currentID {
+		return m.cachedReverseIndex
+	}
+
+	if m.dictManager == nil {
+		return nil
+	}
+
+	composite := m.dictManager.GetCompositeDict()
+	if composite == nil {
+		return nil
+	}
+
+	// 从系统层中找到 CodeTableLayer
+	layers := composite.GetLayersByType(dict.LayerTypeSystem)
+	for _, layer := range layers {
+		if ctl, ok := layer.(*dict.CodeTableLayer); ok {
+			ct := ctl.GetCodeTable()
+			if ct != nil {
+				m.cachedReverseIndex = ct.BuildReverseIndex()
+				m.cachedReverseSchemaID = m.currentID
+				return m.cachedReverseIndex
+			}
+		}
+	}
+
+	// 备选：直接通过层名查找 codetable-system
+	if ctLayer := composite.GetLayerByName("codetable-system"); ctLayer != nil {
+		if ctl, ok := ctLayer.(*dict.CodeTableLayer); ok {
+			ct := ctl.GetCodeTable()
+			if ct != nil {
+				m.cachedReverseIndex = ct.BuildReverseIndex()
+				m.cachedReverseSchemaID = m.currentID
+				return m.cachedReverseIndex
+			}
+		}
+	}
+
+	return nil
 }
 
 // isAbsPath 判断是否为绝对路径

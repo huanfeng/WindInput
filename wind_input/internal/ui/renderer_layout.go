@@ -120,9 +120,13 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		if cand.Comment != "" {
 			itemY := candStartY + float64(i)*cfg.ItemHeight
 			candWidth := td.MeasureString(cand.Text, cfg.FontSize)
+			tx := textStartX
+			if cand.Index < 0 {
+				tx = padX + 8*scale
+			}
 			comments = append(comments, commentInfo{
 				text: cand.Comment,
-				x:    textStartX + candWidth + 8*scale,
+				x:    tx + candWidth + 8*scale,
 				y:    itemY + cfg.ItemHeight/2 + commentSize/3,
 			})
 		}
@@ -208,7 +212,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	for i := range candidates {
 		itemY := candStartY + float64(i)*cfg.ItemHeight
 
-		if cfg.IndexStyle != "text" {
+		if cfg.IndexStyle != "text" && candidates[i].Index >= 0 {
 			indexX := padX + 14*scale
 			indexY := itemY + cfg.ItemHeight/2
 			dc.SetColor(cfg.IndexBgColor)
@@ -288,6 +292,9 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	vertIndexWeight := cfg.IndexFontWeight
 	for i, cand := range candidates {
 		itemY := candStartY + float64(i)*cfg.ItemHeight
+		if cand.Index < 0 {
+			continue // 负索引跳过绘制（如加词模式）
+		}
 		indexStr := string(rune('0' + cand.Index))
 
 		if isTextIndex {
@@ -311,7 +318,11 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	// Candidate texts
 	for i, cand := range candidates {
 		itemY := candStartY + float64(i)*cfg.ItemHeight
-		td.DrawString(cand.Text, textStartX, itemY+cfg.ItemHeight/2+cfg.FontSize/3, cfg.FontSize, cfg.TextColor)
+		tx := textStartX
+		if cand.Index < 0 {
+			tx = padX + 8*scale // 无序号时文本靠左
+		}
+		td.DrawString(cand.Text, tx, itemY+cfg.ItemHeight/2+cfg.FontSize/3, cfg.FontSize, cfg.TextColor)
 	}
 
 	// Comments
@@ -389,6 +400,10 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	// Measure index text widths for text style
 	if isTextIndex {
 		for i, cand := range candidates {
+			if cand.Index < 0 {
+				indexTextWidths[i] = 0
+				continue
+			}
 			indexStr := string(rune('0' + cand.Index))
 			indexTextWidths[i] = td.MeasureString(indexStr, indexTextSize)
 		}
@@ -408,7 +423,10 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 	// Calculate total width for each candidate
 	for i, cand := range candidates {
-		if isTextIndex {
+		if cand.Index < 0 {
+			// 无序号候选：不包含 index 宽度
+			measures[i].totalWidth = measures[i].textWidth
+		} else if isTextIndex {
 			measures[i].totalWidth = indexTextWidths[i] + indexMargin + measures[i].textWidth
 		} else {
 			measures[i].totalWidth = indexSize + indexMargin + measures[i].textWidth
@@ -535,7 +553,9 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	xPos := padX + accentBarOffset + bgPadL
 	for i := range candidates {
 		positions[i].x = xPos
-		if isTextIndex {
+		if candidates[i].Index < 0 {
+			positions[i].textX = xPos // 无序号：文本直接从起始位置开始
+		} else if isTextIndex {
 			positions[i].textX = xPos + indexTextWidths[i] + indexMargin
 		} else {
 			positions[i].textX = xPos + indexSize + indexMargin
@@ -627,8 +647,8 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 			dc.Fill()
 		}
 
-		// Index circle (non-text style only)
-		if !isTextIndex {
+		// Index circle (non-text style only, skip for negative index)
+		if !isTextIndex && candidates[i].Index >= 0 {
 			indexX := px + indexSize/2
 			dc.SetColor(cfg.IndexBgColor)
 			dc.DrawCircle(indexX, candY, indexSize/2)
@@ -696,22 +716,24 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	for i, cand := range candidates {
 		px := positions[i].x
 
-		// Index
-		if isTextIndex {
-			indexStr := string(rune('0' + cand.Index))
-			if indexWeight > 0 {
-				td.DrawStringWithWeight(indexStr, px, candY+indexTextSize/3, indexTextSize, cfg.IndexColor, indexWeight)
+		// Index（负索引跳过绘制，如加词模式）
+		if cand.Index >= 0 {
+			if isTextIndex {
+				indexStr := string(rune('0' + cand.Index))
+				if indexWeight > 0 {
+					td.DrawStringWithWeight(indexStr, px, candY+indexTextSize/3, indexTextSize, cfg.IndexColor, indexWeight)
+				} else {
+					td.DrawString(indexStr, px, candY+indexTextSize/3, indexTextSize, cfg.IndexColor)
+				}
 			} else {
-				td.DrawString(indexStr, px, candY+indexTextSize/3, indexTextSize, cfg.IndexColor)
-			}
-		} else {
-			indexX := px + indexSize/2
-			indexStr := string(rune('0' + cand.Index))
-			tw := td.MeasureString(indexStr, cfg.IndexFontSize)
-			if indexWeight > 0 {
-				td.DrawStringWithWeight(indexStr, indexX-tw/2, candY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor, indexWeight)
-			} else {
-				td.DrawString(indexStr, indexX-tw/2, candY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor)
+				indexX := px + indexSize/2
+				indexStr := string(rune('0' + cand.Index))
+				tw := td.MeasureString(indexStr, cfg.IndexFontSize)
+				if indexWeight > 0 {
+					td.DrawStringWithWeight(indexStr, indexX-tw/2, candY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor, indexWeight)
+				} else {
+					td.DrawString(indexStr, indexX-tw/2, candY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor)
+				}
 			}
 		}
 

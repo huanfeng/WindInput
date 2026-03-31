@@ -8,6 +8,7 @@ type Schema struct {
 	Dicts    []DictSpec   `yaml:"dictionaries"`
 	UserData UserDataSpec `yaml:"user_data"`
 	Learning LearningSpec `yaml:"learning"`
+	Encoder  *EncoderSpec `yaml:"encoder,omitempty"` // 造词编码规则（codetable 方案用）
 }
 
 // SchemaInfo 方案基本信息
@@ -127,6 +128,20 @@ type LearningSpec struct {
 	ProtectTopN      int          `yaml:"protect_top_n,omitempty"`      // 首选保护：前 N 位锁定码表原始顺序
 	TempMaxEntries   int          `yaml:"temp_max_entries,omitempty"`   // 临时词库最大条目数（默认 5000）
 	TempPromoteCount int          `yaml:"temp_promote_count,omitempty"` // 选择几次后晋升到用户词库（默认 5）
+}
+
+// EncoderSpec 造词编码规则配置
+type EncoderSpec struct {
+	Rules           []EncoderRule `yaml:"rules"`
+	MaxWordLength   int           `yaml:"max_word_length,omitempty"`
+	ExcludePatterns []string      `yaml:"exclude_patterns,omitempty"`
+}
+
+// EncoderRule 单条编码规则
+type EncoderRule struct {
+	LengthEqual   int    `yaml:"length_equal,omitempty"`
+	LengthInRange []int  `yaml:"length_in_range,omitempty,flow"`
+	Formula       string `yaml:"formula"`
 }
 
 // GetDefaultDictSpec 获取默认词库规格（dictionaries 中 default=true 的项）

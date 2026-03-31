@@ -667,6 +667,22 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 		}
 	}
 
+	// 记录输入历史（用于加词推荐）
+	if c.inputHistory != nil && !cand.IsCommand {
+		histText := originalText
+		histCode := c.inputBuffer
+		if (isPinyin || isMixed) && len(c.confirmedSegments) > 0 {
+			var fCode, fText string
+			for _, seg := range c.confirmedSegments {
+				fCode += seg.ConsumedCode
+				fText += seg.Text
+			}
+			histText = fText + originalText
+			histCode = fCode + c.inputBuffer
+		}
+		c.inputHistory.Record(histText, histCode, "", 0)
+	}
+
 	// 拼接所有已确认段的文本 + 当前选中的候选
 	finalText := text
 	if (isPinyin || isMixed) && len(c.confirmedSegments) > 0 {

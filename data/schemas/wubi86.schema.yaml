@@ -32,3 +32,13 @@ user_data:
 learning:
   mode: manual
   protect_top_n: 3
+
+encoder:
+  max_word_length: 10
+  rules:
+    - length_equal: 2
+      formula: "AaAbBaBb"
+    - length_equal: 3
+      formula: "AaBaCaCb"
+    - length_in_range: [4, 10]
+      formula: "AaBaCaZa"

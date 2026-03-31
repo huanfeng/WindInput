@@ -47,6 +47,16 @@ user_data:
   user_freq_file: "wubi86_pinyin.userfreq.txt"
   temp_dict_file: "wubi86_pinyin.tempdict.txt"
 
+encoder:
+  max_word_length: 10
+  rules:
+    - length_equal: 2
+      formula: "AaAbBaBb"
+    - length_equal: 3
+      formula: "AaBaCaCb"
+    - length_in_range: [4, 10]
+      formula: "AaBaCaZa"
+
 learning:
   mode: frequency
   unigram_path: "dict/pinyin/unigram.txt"

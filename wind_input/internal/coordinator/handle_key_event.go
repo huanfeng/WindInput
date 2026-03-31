@@ -87,6 +87,16 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		}
 	}
 
+	// 加词模式按键拦截（优先于其他处理）
+	if c.addWordActive {
+		return c.handleAddWordKey(data)
+	}
+
+	// 加词快捷键
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.AddWord, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+		return c.enterAddWordMode()
+	}
+
 	// Handle mode toggle keys (lshift, rshift, lctrl, rctrl, capslock)
 	// IMPORTANT: This must be checked BEFORE the Ctrl/Alt pass-through check,
 	// because lctrl/rctrl are toggle mode keys but also set hasCtrl=true

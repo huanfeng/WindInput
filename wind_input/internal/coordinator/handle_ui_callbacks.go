@@ -212,6 +212,22 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 
 	c.logger.Debug("Candidate selected via mouse click", "index", actualIndex)
 
+	// 记录输入历史（用于加词推荐）
+	if c.inputHistory != nil && !isCommand {
+		histText := originalText
+		histCode := code
+		if (isPinyin || isMixed) && len(confirmedSegs) > 0 {
+			var fCode, fText string
+			for _, seg := range confirmedSegs {
+				fCode += seg.ConsumedCode
+				fText += seg.Text
+			}
+			histText = fText + originalText
+			histCode = fCode + code
+		}
+		c.inputHistory.Record(histText, histCode, "", 0)
+	}
+
 	// Clear state and hide UI
 	c.clearState()
 	c.hideUI()

@@ -145,6 +145,15 @@ type Coordinator struct {
 
 	// Dark mode watcher for system theme changes
 	darkModeWatcher *theme.DarkModeWatcher
+
+	// 输入历史：追踪最近上屏文字，用于加词推荐
+	inputHistory *InputHistory
+
+	// 加词模式状态
+	addWordActive bool   // 是否处于加词模式
+	addWordChars  []rune // 可选字符池
+	addWordLen    int    // 当前选取的词长
+	addWordCode   string // 自动计算的编码
 }
 
 // BridgeServer interface for broadcasting state to TSF clients
@@ -323,6 +332,7 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		punctConverter:     transform.NewPunctuationConverter(),
 		hotkeyCompiler:     hotkey.NewCompiler(cfg),
 		hotkeysDirty:       true, // 首次使用时需要编译
+		inputHistory:       NewInputHistory(20),
 	}
 
 	// Set up toolbar callbacks
@@ -493,6 +503,11 @@ func (c *Coordinator) clearState() {
 	c.selectedIndex = 0
 	c.pendingFirstShow = false
 	c.compositionStartValid = false
+	// 清理加词模式状态
+	c.addWordActive = false
+	c.addWordChars = nil
+	c.addWordLen = 0
+	c.addWordCode = ""
 
 	// 清除命令结果缓存，确保 uuid/date/time 等下次生成新值
 	c.engineMgr.InvalidateCommandCache()
