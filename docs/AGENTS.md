@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-03-29 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # 文档目录 (docs/)
 
@@ -67,6 +67,7 @@
 6. **测试验收** → 参考 `testing/testing-guide.md` 的对应章节
 7. **性能问题** → 参考 `archive/memory-optimization.md`
 8. **词频相关** → 参考 `testing/test-word-frequency.md`
+9. **Win11 开始菜单候选框 z-order / HostWindow 机制** → 先读 `design/startmenu-zorder-solution.md`
 
 ### 修改文档
 

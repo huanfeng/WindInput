@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-03-23 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # src
 
@@ -10,7 +10,7 @@
 | 文件 | 说明 |
 |------|------|
 | `main.ts` | Vue 应用入口，挂载 `App.vue` 到 `#app` |
-| `App.vue` | 根组件：侧边栏 + 内容区；管理全局 `formData`（Config）、`status`、`engines`、`availableThemes`、`themePreview` |
+| `App.vue` | 根组件：侧边栏 + 内容区；管理全局 `formData`（Config）、`status`、`engines`、`availableThemes`、`themePreview`；通过 `provideToast()` 提供全局 Toast 上下文；包含 `AddWordPage` 对话框逻辑（独立加词窗口模式和嵌入弹出模式） |
 | `style.css` | 基础全局样式 |
 | `global.css` | 补充全局样式（字体等） |
 | `vite-env.d.ts` | Vite 环境类型声明 |
@@ -19,7 +19,9 @@
 | 目录 | 说明 |
 |------|------|
 | `api/` | API 调用层 |
-| `pages/` | 各设置页面组件 |
+| `pages/` | 各设置页面组件（含 AddWordPage） |
+| `components/` | 可复用组件（ToastContainer） (see `components/AGENTS.md`) |
+| `composables/` | Vue composables（useToast） (see `composables/AGENTS.md`) |
 | `assets/` | 静态资源 |
 
 ## For AI Agents
@@ -30,6 +32,8 @@
 - 标签页 ID 与页面组件一一对应：`general`、`input`、`hotkey`、`appearance`、`dictionary`、`advanced`、`about`
 - 配置合并：`mergeWithDefaults(cfg)` 将服务端配置与前端默认值深合并，防止后端未定义字段导致 UI 异常
 - 快捷键冲突由 `HotkeyPage` 检测后通过 emit 上报 `hotkeyConflicts`，有冲突时禁止保存
+- **Toast 系统**：`App.vue` 调用 `provideToast()` 建立 Toast 上下文，所有子组件通过 `useToast()` 获取 `toast()` 函数；`ToastContainer` 通过 `<Teleport to="body">` 渲染到 body 顶层，实现全局浮动通知
+- **加词对话框**：`App.vue` 控制 `showAddWordDialog`；独立模式（`isStandaloneAddWord`）下关闭时调用 `Quit()` 退出进程；通过 Wails 事件 `navigate-addword` 支持从候选框快捷加词
 
 ### Testing Requirements
 - TypeScript 编译无错误：`pnpm run build`
@@ -41,6 +45,12 @@
 const props = defineProps<{ formData: Config }>()
 // 修改：props.formData.engine.type = 'pinyin'
 // 保存由 App.vue 统一处理，页面组件不直接调用 saveConfig
+
+// Toast 使用（子组件内）
+import { useToast } from '../composables/useToast'
+const { toast } = useToast()
+toast('保存成功')
+toast('操作失败', 'error')
 ```
 
 ## Dependencies
@@ -48,8 +58,11 @@ const props = defineProps<{ formData: Config }>()
 - `./api/settings` — HTTP API 类型和函数
 - `./api/wails` — Wails IPC 封装
 - `./pages/*` — 各设置页面
+- `./components/ToastContainer` — 全局 Toast 渲染容器
+- `./composables/useToast` — Toast provide/inject 逻辑
 
 ### External
 - Vue 3（`ref`、`computed`、`onMounted`）
+- Wails runtime（`EventsOn`、`Quit`、`Show`、`WindowSetAlwaysOnTop`）
 
 <!-- MANUAL: -->

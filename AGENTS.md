@@ -1,4 +1,4 @@
-<!-- Generated: 2026-03-13 | Updated: 2026-03-23 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # WindInput - 清风输入法
 
@@ -27,8 +27,8 @@ Schema 驱动流程:
   data/schemas/*.schema.yaml → SchemaManager → EngineFactory → Engine + Dict
 ```
 
-- **wind_tsf**: C++17 DLL，实现 Windows TSF (Text Services Framework) 接口，负责系统级输入法注册和键盘事件捕获
-- **wind_input**: Go 服务进程，Schema 驱动的核心输入引擎（拼音连续评分 + 五笔码表），候选词管理，UI 渲染
+- **wind_tsf**: C++17 DLL，实现 Windows TSF (Text Services Framework) 接口，负责系统级输入法注册和键盘事件捕获；新增 HostWindow 机制解决 Win11 开始菜单候选框 z-order 问题
+- **wind_input**: Go 服务进程，Schema 驱动的核心输入引擎（拼音连续评分 + 五笔码表），候选词管理，UI 渲染；通过 CGO 直接调用系统 dwrite.dll（已移除独立 wind_dwrite.dll）
 - **wind_setting**: Wails v2 桌面应用，Go 后端 + Vue 3 前端，提供用户设置和方案管理界面
 
 ## Key Files
@@ -47,10 +47,11 @@ Schema 驱动流程:
 | `wind_tsf/` | C++ TSF 桥接层 DLL (see `wind_tsf/AGENTS.md`) |
 | `wind_input/` | Go 输入引擎服务 (see `wind_input/AGENTS.md`) |
 | `wind_setting/` | Wails 设置界面应用 (see `wind_setting/AGENTS.md`) |
-| `data/` | Schema 方案定义、词库源数据、示例文件 (see `data/dict/AGENTS.md`) |
+| `data/` | Schema 方案定义、词库源数据、默认配置文件 (see `data/AGENTS.md`) |
 | `docs/` | 项目文档：design/ 设计方案、requirements/ 需求规划、testing/ 测试指南、archive/ 历史文档 (see `docs/AGENTS.md`) |
 | `dict/` | 运行时词库数据（unigram 等） |
 | `installer/` | 安装/卸载脚本 (see `installer/AGENTS.md`) |
+| `scripts/` | 构建辅助和工具脚本（版本管理、诊断工具）(see `scripts/AGENTS.md`) |
 | `pic/` | 项目截图和图片资源 |
 
 ## For AI Agents
@@ -65,10 +66,10 @@ Schema 驱动流程:
 
 ### Build Steps
 1. `[1/6]` Go 服务: `cd wind_input && go build -ldflags "-H windowsgui" -o ../build/wind_input.exe ./cmd/service`
-2. `[2/6]` C++ DLL: `cd wind_tsf/build && cmake .. && cmake --build . --config Release`（输出 wind_tsf.dll + wind_dwrite.dll）
+2. `[2/6]` C++ DLL: `cd wind_tsf/build && cmake .. && cmake --build . --config Release`（仅输出 wind_tsf.dll；wind_dwrite.dll 已移除，Go 侧通过 CGO 直接调用系统 dwrite.dll）
 3. `[3/6]` 设置界面: `cd wind_setting && wails build [-debug]`
 4. `[4/6]` 下载 rime-ice 拼音词库到 `.cache/rime/`
-5. `[5/6]` 复制词库和 Schema 配置到 `build/`
+5. `[5/6]` 复制词库、Schema 配置和默认配置（config.yaml）到 `build/`
 6. `[6/6]` 验证构建产物
 
 ### Testing Requirements

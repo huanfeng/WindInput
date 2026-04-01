@@ -1,17 +1,18 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-03-23 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # res/ - Resource Files
 
 ## Purpose
 
-Resource files for the TSF DLL, including icon, version information, and manifest. These files are compiled into the DLL binary at build time via the resource compiler (RC.exe).
+Resource files for the TSF DLL, including icon and version information template. These files are compiled into the DLL binary at build time via the resource compiler (RC.exe). `version.rc.in` 是 CMake 模板，构建时自动替换版本号变量生成 `version.rc`。
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `resource.rc` | Resource script defining icon and other resources |
+| `resource.rc` | Resource script defining icon resource (index 0 = wind_input.ico) |
+| `version.rc.in` | CMake 版本资源模板；`configure_file` 将 `@APP_VERSION_*@` 占位符替换为实际版本号后输出到 build 目录的 `version.rc`，写入 DLL 的 VERSIONINFO 文件属性 |
 | `wind_input.ico` | Icon image displayed in Windows language bar and settings |
 
 ## Resource Content
@@ -144,38 +145,24 @@ dumpbin /resources wind_tsf.dll | findstr "Icon"
 4. **Keep transparency** via alpha channel
 5. **Use ICO format** - package all sizes in single .ico file
 
-### Adding Version Information
+### version.rc.in 模板说明
 
-To add version info to the DLL, extend resource.rc:
+版本信息通过 CMake `configure_file` 机制自动注入，不需要手工编辑：
 
-```rc
-1 VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
-FILEOS VOS__WINDOWS32
-FILETYPE VFT_DLL
-BEGIN
-    BLOCK "StringFileInfo"
-    BEGIN
-        BLOCK "080404B0"
-        BEGIN
-            VALUE "FileVersion", "1.0.0.0\0"
-            VALUE "ProductVersion", "1.0.0.0\0"
-            VALUE "ProductName", "清风输入法\0"
-            VALUE "FileDescription", "Windows TSF Chinese Input Method\0"
-            VALUE "LegalCopyright", "Copyright (c) 2024\0"
-        END
-    END
-    BLOCK "VarFileInfo"
-    BEGIN
-        VALUE "Translation", 0x0804, 0x04B0
-    END
-END
+```
+# CMakeLists.txt 调用：
+configure_file(res/version.rc.in ${CMAKE_BINARY_DIR}/version.rc @ONLY)
 ```
 
-Then link into DLL and verify with:
+模板中的占位符（如 `@APP_VERSION_MAJOR@`、`@APP_VERSION_STR@`）由 CMake 替换为：
+- `-DAPP_VERSION_MAJOR` / `MINOR` / `PATCH` / `BUILD` 参数值
+- `-DAPP_VERSION_STR` 字符串（如 `"1.0.0"`）
+
+验证 DLL 版本信息：
 ```bash
 wmic datafile where name="<path>\\wind_tsf.dll" get Version
+# 或在 PowerShell 中：
+(Get-Item "build\wind_tsf.dll").VersionInfo.FileVersion
 ```
 
 <!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->

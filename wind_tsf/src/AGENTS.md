@@ -1,11 +1,13 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-03-23 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # src/ - Implementation Files
 
 ## Purpose
 
-C++ implementation files for the TSF DLL. 主体文件编译链接进 `wind_tsf.dll`；`WindDWriteShim.cpp` 单独构建为 `wind_dwrite.dll`（DirectWrite 渲染模块）。文件按组件（text service, IPC, hotkey, UI, logging）和入口点（dllmain）组织。
+C++ implementation files for the TSF DLL。所有文件编译链接进唯一目标 `wind_tsf.dll`。文件按组件（text service, IPC, hotkey, UI, host window, logging）和入口点（dllmain）组织。
+
+> **注意：`WindDWriteShim.cpp` 已移除。** DirectWrite 渲染改由 Go 侧通过 CGO 直接调用系统 dwrite.dll，不再在 C++ 侧构建。
 
 ## Key Files
 
@@ -23,7 +25,7 @@ C++ implementation files for the TSF DLL. 主体文件编译链接进 `wind_tsf.
 | `DisplayAttributeInfo.cpp` | Display attribute classes (styling for composition text) |
 | `Register.cpp` | Registry integration (DllRegisterServer, DllUnregisterServer, profile/category registration) |
 | `FileLogger.cpp` | CFileLogger implementation (Init/Shutdown, config file reading, file write with Named Mutex, auto-rotation at 5MB) |
-| `WindDWriteShim.cpp` | **单独构建为 wind_dwrite.dll**；DirectWrite text rendering bridge (GdiTextRenderer, color emoji, text format caching) |
+| `HostWindow.cpp` | CHostWindow implementation（创建 Band 级分层窗口、共享内存渲染帧读取、渲染线程、动态解析 CreateWindowInBand/GetWindowBand API） |
 
 ## Component Responsibilities
 
@@ -153,21 +155,15 @@ mode=none    # none | file | debugstring | all
 level=debug  # off | error | warn | info | debug | trace
 ```
 
-### WindDWriteShim.cpp
-
-> **注意：此文件单独构建为 `wind_dwrite.dll`，不链接进 `wind_tsf.dll`。**
-
-- `GdiTextRenderer` - IDWriteTextRenderer implementation
-  - `DrawGlyphRun()` - Render glyphs to bitmap render target
-  - Color emoji support via `IDWriteFactory2::TranslateColorGlyphRun()`
-  - Per-layer alpha blending for emoji rendering
-- Text format cache management
-  - `FormatKey` - Cache key (font family, weight, size, symbol flag)
-  - LRU eviction (max 32 cached formats)
-  - Thread-safe access with synchronization
-- GDI integration
-  - Bitmap render target creation and management
-  - HDC color conversion and blending
+### HostWindow.cpp
+- `CHostWindow::Initialize()` - 接收共享内存/事件名，调用 `_ResolveAPIs()` 和 `_CreateBandWindow()`，启动渲染线程
+- `CHostWindow::Uninitialize()` - 停止渲染线程，销毁窗口，解除共享内存映射
+- `CHostWindow::_ResolveAPIs()` - 动态从 user32.dll 获取 `CreateWindowInBand` 和 `GetWindowBand` 函数指针
+- `CHostWindow::_GetHostBand()` - 获取宿主进程前台窗口的 DWM Band 等级
+- `CHostWindow::_CreateBandWindow()` - 在指定 Band 等级创建 `WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` 无边框窗口
+- `CHostWindow::_RenderThread()` / `_RenderLoop()` - 渲染线程：等待事件信号 → 读取 SharedRenderHeader → 跳过过期帧 → `_RenderFrame()`
+- `CHostWindow::_RenderFrame()` - 将共享内存像素数据通过 `UpdateLayeredWindow` 渲染到分层窗口
+- `CHostWindow::_HideWindow()` - 隐藏窗口（候选框消失时调用）
 
 ## For AI Agents
 
@@ -228,8 +224,7 @@ if (_circuitState == CircuitState::Open) {
 ### Testing Requirements
 
 **Build Verification:**
-- All .cpp files (except WindDWriteShim.cpp) must compile with /utf-8 /W3 flags into wind_tsf.dll
-- `WindDWriteShim.cpp` compiles separately into wind_dwrite.dll (links dwrite.lib)
+- 所有 .cpp 文件（含 HostWindow.cpp）必须以 /utf-8 /W3 编译进 wind_tsf.dll
 - wind_tsf.dll must export 4 functions via wind_tsf.def
 - No C5260 warnings about pragma pack mismatch
 
@@ -264,6 +259,6 @@ if (_circuitState == CircuitState::Open) {
 - Windows SDK: kernel32, ole32, user32 (linked via pragma comment in source)
 - MSVC Runtime: libc, libcmt (C runtime)
 - TSF Libraries: msctf.lib, ctfutb.lib
-- DirectWrite: dwrite.lib (wind_dwrite.dll only)
+- DirectWrite: 不再由 C++ 侧链接；Go 侧通过 CGO 直接调用系统 dwrite.dll
 
 <!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->

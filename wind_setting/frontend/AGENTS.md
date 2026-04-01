@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-03-23 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # frontend
 
@@ -21,6 +21,8 @@
 | `src/` | 前端源码根目录 |
 | `src/api/` | API 调用层（Wails IPC + HTTP fallback） |
 | `src/pages/` | 各设置页面 Vue 组件 |
+| `src/components/` | 可复用 Vue 组件（全局 Toast 容器等） |
+| `src/composables/` | Vue composables（useToast 等） |
 | `src/assets/` | 静态资源（字体、图片） |
 
 ## For AI Agents

@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-03-23 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # api
 
@@ -25,24 +25,42 @@
 - `wails.ts` 导出的 `getDefaultConfig()` 使用 `config.Config` 构造器（Wails 模型类），`settings.ts` 的版本返回普通对象字面量；两者用途不同，注意区分
 - 所有 `wails.ts` 函数均返回 `Promise`，错误由 Wails 运行时以 rejected Promise 传递
 
-### wails.ts 导出的 API 分组（2026-03-23）
+### wails.ts 导出的 API 分组（2026-04-01）
 | 分组 | 函数 |
 |------|------|
-| Schema 方案管理 | `getAvailableSchemas`、`getSchemaConfig`、`saveSchemaConfig`、`switchActiveSchema` |
-| 配置管理 | `getConfig`、`saveConfig`、`checkConfigModified`、`reloadConfig` |
-| 短语管理 | `getPhrases`、`savePhrases`、`addPhrase`、`removePhrase`、`checkPhrasesModified`、`reloadPhrases` |
-| 用户词库 | `getUserDict`、`addUserWord`、`removeUserWord`、`searchUserDict`、`getUserDictStats`、`checkUserDictModified`、`reloadUserDict`、`getUserDictSchemaID`、`switchUserDictSchema`、`importUserDict`、`exportUserDict` |
-| Shadow 规则 | `getShadowRules`、`pinShadowWord`、`deleteShadowWord`、`removeShadowRule` |
-| 服务控制 | `checkServiceRunning`、`notifyReload`、`openLogFolder`、`openExternalURL`、`getServiceStatus` |
-| 文件变化检测 | `checkAllFilesModified`、`reloadAllFiles` |
+| Schema 方案管理 | `getAvailableSchemas`、`getSchemaConfig`、`saveSchemaConfig`、`switchActiveSchema`、`getEnabledSchemasWithDictStats` |
+| 配置管理 | `getConfig`、`saveConfig`、`reloadConfig`、`getTSFLogConfig`、`saveTSFLogConfig` |
+| 短语管理 | `getPhrases`、`getSystemPhrases`、`savePhrases`、`addPhrase`、`removePhrase`、`updatePhrase`、`overrideSystemPhrase`、`removeSystemPhraseOverride` |
+| 用户词库（当前方案） | `getUserDict`、`addUserWord`、`removeUserWord`、`searchUserDict`、`getUserDictStats`、`reloadUserDict`、`getUserDictSchemaID`、`switchUserDictSchema`、`importUserDict`、`exportUserDict` |
+| 用户词库（按方案） | `getUserDictBySchema`、`addUserWordForSchema`、`removeUserWordForSchema`、`searchUserDictBySchema`、`importUserDictForSchema`、`exportUserDictForSchema` |
+| 临时词库 | `getTempDictBySchema`、`clearTempDictForSchema`、`promoteTempWordForSchema`、`promoteAllTempWordsForSchema`、`removeTempWordForSchema` |
+| Shadow 规则（当前方案） | `getShadowRules`、`pinShadowWord`、`deleteShadowWord`、`removeShadowRule` |
+| Shadow 规则（按方案） | `getShadowBySchema`、`pinShadowWordForSchema`、`deleteShadowWordForSchema`、`removeShadowRuleForSchema` |
+| 服务控制 | `notifyReload`、`openLogFolder`、`openConfigFolder`、`openExternalURL`、`getServiceStatus` |
 | 主题管理 | `getAvailableThemes`、`getThemePreview` |
-| 其他 | `getStartPage`、`getDefaultConfig` |
+| 加词参数 | `getAddWordParams` |
+| 其他 | `getStartPage`、`getVersion`、`getDefaultConfig`、`getDefaultTSFLogConfig` |
 
 ### Shadow API 说明（2026-03-13 架构重构）
 旧的 `topShadowWord`/`reweightShadowWord` 已移除，替换为：
 - `pinShadowWord(code, word, position)` — 固定词条到指定候选位置
 - `deleteShadowWord(code, word)` — 隐藏词条
 - `removeShadowRule(code, word)` — 彻底移除 Shadow 规则（撤销 pin 或 delete）
+
+### 新增类型（2026-04-01）
+- `SchemaDictStatsItem` — 方案词库统计（`schema_id`、`schema_name`、`icon_label`、`word_count`、`shadow_count`、`temp_word_count`）
+- `TempWordItem` — 临时词库词条（`code`、`text`、`weight`、`count`）
+- `ImportExportResult` — 导入导出结果（`cancelled`、`count`、`total?`、`path?`）
+- `AddWordParams` — 加词参数（`text`、`code`、`schema_id`），由 Go 后端在加词模式启动时填入
+- `ThemePreview` — 主题预览数据（已迁移到 `wails.ts` 定义，包含 `meta`、`candidate_window`、`toolbar`、`style?`、`is_dark?` 结构）
+
+### settings.ts 变更（2026-04-01）
+- `HotkeyConfig` 新增字段：`delete_candidate`、`pin_candidate`、`toggle_toolbar`、`open_settings`
+- `InputConfig` 新增字段：`highlight_keys`（候选移动键）、`pinyin_separator`（拼音分隔符）、`temp_pinyin`（临时拼音配置，含 `trigger_keys`）
+- `UIConfig` 新增字段：`theme_style`（`"system" | "light" | "dark"`）、`status_indicator_offset_x/y`
+- `WubiConfig` 新增字段：`single_code_input`、`candidate_sort_mode`
+- 新增接口：`TSFLogConfig`（`mode`、`level`）、`TempPinyinConfig`（`trigger_keys`）、`ToolbarConfig`（`visible`）
+- 新增 `getDefaultTSFLogConfig()` 工厂函数
 
 ### Testing Requirements
 - `pnpm run build`（TypeScript 类型检查）

@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-03-23 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # internal/dict
 
@@ -26,7 +26,7 @@
 | `shadow.go` | `ShadowLayer`：pin(position)+delete 架构——`pinned` 列表按位置固定词条，`deleted` 列表隐藏词条；YAML 序列化 |
 | `user_dict.go` | `UserDict`：用户词频学习，按权重排序，持久化为 JSON |
 | `adapter.go` | 引擎词库适配器（将 binformat Reader 适配为词库层） |
-| `common_chars.go` | 通用规范汉字表加载（`InitCommonCharsWithPath`） |
+| `common_chars.go` | 通用规范汉字表加载：`InitCommonChars`（从默认路径加载）、`InitCommonCharsWithPath`（指定路径）；内置约 2500 个核心常用字作为 fallback；`IsCommonChar`/`IsStringCommon` 判断字符/字符串是否全部为通用规范汉字；`AddCommonChars` 运行时扩展；`ResetCommonCharsForTesting` 测试专用重置 |
 | `loader.go` | 词库加载工具函数 |
 | `dict.go` | 保留文件（原 Dict 接口定义，部分接口已迁移，修改前先确认引用） |
 | `trie.go` | 前缀 Trie 数据结构，供拼音词库使用 |

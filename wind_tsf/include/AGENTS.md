@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-03-23 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # include/ - Header Files
 
@@ -23,7 +23,7 @@ Public and internal header files defining interfaces, structures, and protocols 
 | `DisplayAttributeInfo.h` | CDisplayAttributeInfoInput, CDisplayAttributeProvider (composition text styling) |
 | `Register.h` | RegisterServer, UnregisterServer functions (Windows registry integration) |
 | `FileLogger.h` | CFileLogger class (运行时可配置文件日志，单例，支持 none/file/debugstring/all 四种输出模式，5MB 自动轮转，多进程安全) |
-| `WindDWriteShim.h` | (if exists) DirectWrite text rendering bridge and emoji support |
+| `HostWindow.h` | CHostWindow 类（开始菜单宿主进程代理渲染窗口，通过 CreateWindowInBand 解决 Win11 z-order 问题，使用共享内存接收 Go 侧渲染帧） |
 
 ## Architecture Overview
 
@@ -35,6 +35,11 @@ TextService.h
 ├── LangBarItemButton.h
 ├── CaretEditSession.h
 ├── HotkeyManager.h
+├── HostWindow.h
+├── Globals.h
+└── BinaryProtocol.h
+
+HostWindow.h
 ├── Globals.h
 └── BinaryProtocol.h
 

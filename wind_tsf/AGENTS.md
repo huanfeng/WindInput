@@ -1,4 +1,4 @@
-<!-- Generated: 2026-03-13 | Updated: 2026-03-23 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
 
 # wind_tsf - Windows TSF Input Method Bridge
 
@@ -12,15 +12,17 @@ C++17 DLL implementing the Windows Text Services Framework (TSF) interface for t
 - Provides language bar UI integration and hotkey management
 - Implements display attributes (underline) for composition text
 - Maintains state synchronization with the Go service via binary protocol
-- Provides DirectWrite text rendering shim for candidate UI rendering
+- Provides HostWindow 机制，在宿主进程（如开始菜单）内通过 CreateWindowInBand 创建带外层级窗口，解决 Win11 开始菜单候选框 z-order 问题
 
 The DLL is built with CMake/MSVC and exports standard TSF COM interfaces (DllCanUnloadNow, DllGetClassObject, DllRegisterServer, DllUnregisterServer).
+
+> **注意：wind_dwrite.dll 已移除。** DirectWrite 渲染改由 Go 侧通过 CGO 直接调用系统 dwrite.dll，C++ 侧不再构建 wind_dwrite 目标。CMakeLists.txt 现在只构建 wind_tsf.dll 一个目标。
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `CMakeLists.txt` | CMake build configuration (C++17, UTF-8；构建两个目标：wind_tsf + wind_dwrite，均输出到 ../build/) |
+| `CMakeLists.txt` | CMake 构建配置（C++17, UTF-8；唯一目标 wind_tsf.dll 输出到 ../build/；从 res/version.rc.in 模板生成版本资源） |
 | `wind_tsf.def` | Module definition file (exports COM entry points) |
 | `README.md` | Project documentation |
 
@@ -30,7 +32,7 @@ The DLL is built with CMake/MSVC and exports standard TSF COM interfaces (DllCan
 |-----------|---------|
 | `include/` | Header files (see `include/AGENTS.md`) |
 | `src/` | Implementation files (see `src/AGENTS.md`) |
-| `res/` | Resource file for icon (see `res/AGENTS.md`) |
+| `res/` | Resource files: icon + version.rc.in 模板 (see `res/AGENTS.md`) |
 
 ## Build Instructions
 
@@ -43,8 +45,12 @@ cmake --build . --config Release
 ```
 
 Output:
-- `../build/wind_tsf.dll` — 主 TSF 输入法 DLL
-- `../build/wind_dwrite.dll` — DirectWrite 渲染模块（单独库）
+- `../build/wind_tsf.dll` — 主 TSF 输入法 DLL（唯一构建目标）
+
+版本号可通过 `-D` 参数传入：
+```bash
+cmake .. -DAPP_VERSION_MAJOR=1 -DAPP_VERSION_MINOR=0 -DAPP_VERSION_PATCH=0 -DAPP_VERSION_STR="1.0.0"
+```
 
 ## IPC Communication
 
@@ -68,7 +74,7 @@ Output:
 - `CTextService` - Main TSF text input processor (ITfTextInputProcessor, ITfThreadMgrEventSink, ITfCompositionSink, ITfDisplayAttributeProvider)
 - `CClassFactory` - COM class factory for instantiation
 - `CDisplayAttributeInfo` - Composition text styling (underline effect)
-- `CCaretEditSession` - TSF edit session for caret position retrieval
+- `CCaretEditSession` - TSF edit session for caret position retrieval（已修复 edit session 调用时序问题）
 - Full state sync mechanism (`_DoFullStateSync()`) after reconnection
 
 ### Input Processing (KeyEventSink)
@@ -103,6 +109,15 @@ Output:
 - Classification: toggle mode, letter, number, punctuation, backspace, enter, escape, space, tab, page key, cursor key, select key
 - Key normalization (left/right modifier handling)
 
+### HostWindow（开始菜单宿主窗口代理）
+- `CHostWindow` - 在宿主进程（如 SearchHost.exe）内通过 `CreateWindowInBand`（user32.dll 非公开 API）创建与宿主同级 Band 的分层窗口
+- Go 服务通过共享内存传递渲染帧（像素数据），HostWindow 的渲染线程读取 SharedRenderHeader 并 BitBlt 到分层窗口
+- `_ResolveAPIs()` - 动态解析 CreateWindowInBand 和 GetWindowBand 函数指针
+- `_GetHostBand()` - 获取宿主进程前台窗口的 Band 等级
+- `_CreateBandWindow()` - 在宿主进程的 Band 等级创建无边框分层窗口
+- `_RenderThread()` / `_RenderLoop()` - 渲染线程，等待事件信号后读取共享内存渲染一帧
+- 支持跳过过期帧（lastSequence 机制）
+
 ### File Logging (FileLogger)
 - `CFileLogger` - 运行时可配置的文件日志单例（`FileLogger.h` / `FileLogger.cpp`）
 - 四种输出模式：`none`（默认，零开销）/ `file` / `debugstring` / `all`
@@ -112,15 +127,13 @@ Output:
 - 自动轮转：超过 5MB 时重命名为 `wind_tsf.old.log`
 - 在 `dllmain.cpp` 的 DLL_PROCESS_ATTACH / DLL_PROCESS_DETACH 中 Init/Shutdown
 
-### DirectWrite Rendering (WindDWriteShim)
+## CLSID / GUID 正式化
 
-> **wind_dwrite.dll** — 单独构建目标，不链接进 wind_tsf.dll。
+CLSID 已替换为正式 UUID 并集中管理（Globals.h / Globals.cpp）：
+- `c_clsidTextService` = `{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}`
+- `c_guidProfile`      = `{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}`
 
-- `GdiTextRenderer` - Bridge from IDWriteTextLayout to GDI rendering
-- Color emoji support via `IDWriteFactory2::TranslateColorGlyphRun`
-- Per-layer alpha blending for emoji rendering
-- Text format caching with LRU eviction
-- Bitmap render target management for candidate UI
+安装脚本中的 InstallLayoutOrTip 调用使用同一套 GUID。
 
 ## Dependencies
 
@@ -145,6 +158,7 @@ When implementing features or fixes in wind_tsf:
 4. **COM reference counting:** Use SafeRelease() template for interface cleanup
 5. **Named pipes:** Connection is lazy (on-demand), with circuit breaker fallback
 6. **Edit sessions:** For TSF API calls (composition, caret position), must be called within RequestEditSession
+7. **HostWindow:** 只在 host_render_processes 配置的进程中激活（由 Go 服务通过 IPC 指令触发 Initialize）
 
 ### Common Patterns
 
@@ -194,7 +208,7 @@ When implementing features or fixes in wind_tsf:
 
 **Build Verification:**
 - `cmake --build . --config Release` must succeed with no C++ compiler errors
-- Produces two DLLs: `wind_tsf.dll` (main TSF) and `wind_dwrite.dll` (DirectWrite shim)
+- 产出唯一目标：`wind_tsf.dll`（不再产出 wind_dwrite.dll）
 - wind_tsf.dll must export 4 functions: DllCanUnloadNow, DllGetClassObject, DllRegisterServer, DllUnregisterServer
 
 **Registration:**
