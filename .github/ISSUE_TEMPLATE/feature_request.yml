@@ -1,0 +1,52 @@
+name: 功能建议
+description: 提出一个新功能或改进建议
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你的建议！请描述你期望的功能，我们会认真评估。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题或需求
+      description: 你希望解决什么问题？或在什么场景下需要这个功能？
+      placeholder: 在使用五笔输入时，我经常遇到……
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望的解决方案
+      description: 描述你理想中的功能表现
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案
+      description: 你是否考虑过其他替代方案？
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: 功能类别
+      options:
+        - 输入引擎（候选、编码、上屏逻辑）
+        - 词库管理
+        - 界面与主题
+        - 设置工具
+        - 安装与部署
+        - 性能优化
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 其他信息
+      description: 其他补充说明、截图或参考

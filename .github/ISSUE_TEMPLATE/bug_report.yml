@@ -1,0 +1,98 @@
+name: Bug 反馈
+description: 报告一个 Bug 帮助我们改进
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你提交 Bug 反馈！请尽量详细地描述问题，以便我们复现和修复。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 请清晰、简洁地描述你遇到的问题
+      placeholder: 在某某场景下，输入法出现了某某异常行为……
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请提供能复现此问题的操作步骤
+      placeholder: |
+        1. 切换到清风输入法
+        2. 打开某某应用
+        3. 输入 '...'
+        4. 出现异常
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你期望的正确行为是什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么？
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 清风输入法版本
+      description: 可在设置工具的「关于」中查看
+      placeholder: "0.1.0-alpha"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: windows-version
+    attributes:
+      label: Windows 版本
+      options:
+        - Windows 11
+        - Windows 10
+    validations:
+      required: true
+
+  - type: dropdown
+    id: schema
+    attributes:
+      label: 当前使用的输入方案
+      options:
+        - 五笔 86
+        - 五笔拼音混输
+        - 全拼
+        - 双拼
+        - 其他（请在描述中说明）
+    validations:
+      required: false
+
+  - type: textarea
+    id: app
+    attributes:
+      label: 出现问题的应用程序
+      description: 在哪个应用中出现了此问题？（如 Edge、VS Code、微信等）
+      placeholder: Microsoft Edge
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图或日志
+      description: |
+        如有截图请在此粘贴。日志文件位于 `%LOCALAPPDATA%\WindInput\logs\`
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 其他信息
+      description: 其他你认为有帮助的信息（自定义配置、特殊环境等）
