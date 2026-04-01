@@ -6,10 +6,10 @@
 phrases:
   # ===== 日期 =====
   - code: "date"
-    text: "$Y-$MM-$DD"
+    text: "$Y年$MM月$DD日"
     position: 1
   - code: "date"
-    text: "$Y年$MM月$DD日"
+    text: "$Y-$MM-$DD"
     position: 2
   - code: "date"
     text: "$Y/$MM/$DD"

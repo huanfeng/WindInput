@@ -13,16 +13,21 @@ schema:
   active: "wubi86"
   available:
     - "wubi86"
-    - "pinyin"
+    - "wubi86_pinyin"
 
 hotkeys:
   toggle_mode_keys:
     - "lshift"
     - "rshift"
   commit_on_switch: true
-  switch_engine: "ctrl+`"
+  switch_engine: "ctrl+shift+e"
   toggle_full_width: "shift+space"
   toggle_punct: "ctrl+."
+  delete_candidate: ctrl+shift+number
+  pin_candidate: ctrl+number
+  toggle_toolbar: ctrl+shift+o
+  open_settings: ctrl+shift+p
+  add_word: ctrl+shift+equal
 
 ui:
   font_size: 18
@@ -48,13 +53,14 @@ toolbar:
 input:
   punct_follow_mode: false
   select_key_groups:
-    - "semicolon_quote"
+    - semicolon_quote
   page_keys:
-    - "pageupdown"
-    - "minus_equal"
+    - pageupdown
+    - minus_equal
   highlight_keys:
-    - "arrows"
-  pinyin_separator: "auto"
+    - arrows
+    - tab
+  pinyin_separator: auto
   shift_temp_english:
     enabled: true
     show_english_candidates: true

@@ -300,7 +300,7 @@ onUnmounted(() => {
 <template>
   <section class="section">
     <div class="section-header">
-      <h2>常用设置</h2>
+      <h2>方案设置</h2>
       <p class="section-desc">管理输入方案和方案专属设置</p>
     </div>
 

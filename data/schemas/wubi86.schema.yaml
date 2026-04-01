@@ -4,7 +4,7 @@ schema:
   icon_label: "五"
   version: "1.0"
   author: "内置"
-  description: "王码五笔86版输入方案"
+  description: "五笔86版输入方案"
 
 engine:
   type: codetable

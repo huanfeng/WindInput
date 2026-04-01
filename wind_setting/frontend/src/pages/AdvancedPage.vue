@@ -37,7 +37,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>TSF 日志输出方式</label>
-          <p class="setting-hint">写入 tsf_log_config，新的 TSF 宿主进程会按此方式输出</p>
+          <p class="setting-hint">仅对新进程生效</p>
         </div>
         <div class="setting-control">
           <select v-model="props.tsfLogConfig.mode" class="select">
@@ -51,11 +51,11 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>TSF 日志级别</label>
-          <p class="setting-hint">建议平时用 Info，需要追踪兼容性问题时再切到 Debug / Trace</p>
+          <p class="setting-hint">请仅在调试问题时才使用 Debug / Trace</p>
         </div>
         <div class="setting-control">
           <select v-model="props.tsfLogConfig.level" class="select">
-            <option value="off">Off（仅关闭输出）</option>
+            <option value="off">Off（关闭）</option>
             <option value="error">Error（错误）</option>
             <option value="warn">Warn（警告）</option>
             <option value="info">Info（信息）</option>
@@ -76,7 +76,6 @@
         <div class="setting-info">
           <label>日志目录</label>
           <p class="setting-hint">{{ logPath }}</p>
-          <p class="setting-hint">TSF 配置文件：{{ tsfConfigPath }}</p>
         </div>
         <div class="setting-control">
           <button class="btn btn-sm" @click="$emit('openLogFolder')">打开文件夹</button>

@@ -45,7 +45,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>标点随中英文切换</label>
-          <p class="setting-hint">切换到英文模式时自动切换英文标点</p>
+          <p class="setting-hint">切换到中文模式时自动切换中文标点</p>
         </div>
         <div class="setting-control">
           <label class="switch">

@@ -67,7 +67,7 @@ const appIconUrl = new URL(
 
 // 标签页定义
 const tabs = [
-  { id: "general", label: "常用", icon: "🏠" },
+  { id: "general", label: "方案", icon: "🏠" },
   { id: "input", label: "输入", icon: "⌨" },
   { id: "hotkey", label: "按键", icon: "🎮" },
   { id: "appearance", label: "外观", icon: "🎨" },
