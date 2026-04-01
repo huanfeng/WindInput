@@ -145,8 +145,8 @@ function handleCancel() {
 
 onMounted(async () => {
   try {
-    const list = await wailsApi.getAvailableSchemas();
-    schemas.value = list.map((s) => ({ id: s.id, name: s.name }));
+    const list = await wailsApi.getEnabledSchemasWithDictStats();
+    schemas.value = list.map((s) => ({ id: s.schema_id, name: s.schema_name }));
   } catch {
     schemas.value = [];
   }
