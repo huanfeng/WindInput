@@ -1,7 +1,7 @@
 schema:
   id: wubi86_pinyin
   name: "五笔拼音"
-  icon_label: "混"
+  icon_label: "中"
   version: "1.0"
   author: "内置"
   description: "五笔86+拼音混合输入方案，五笔优先，拼音补充"

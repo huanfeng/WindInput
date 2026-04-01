@@ -1,6 +1,6 @@
 schema:
   id: wubi86
-  name: "五笔86"
+  name: "五笔"
   icon_label: "五"
   version: "1.0"
   author: "内置"

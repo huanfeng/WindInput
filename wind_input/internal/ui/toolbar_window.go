@@ -72,7 +72,8 @@ type ToolbarState struct {
 	CapsLock      bool
 	FullWidth     bool
 	ChinesePunct  bool
-	EffectiveMode int // 0=Chinese, 1=EnglishLower, 2=EnglishUpper
+	EffectiveMode int    // 0=Chinese, 1=EnglishLower, 2=EnglishUpper
+	ModeLabel     string // Schema icon_label for Chinese mode (e.g., "拼", "五", "双", "混")
 }
 
 // ToolbarCallback represents callbacks for toolbar actions

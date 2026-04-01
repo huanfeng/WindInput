@@ -307,19 +307,15 @@ func (c *Coordinator) showModeIndicator() {
 	// Keep mode indicators on the same rendering path as candidates.
 	c.updateHostRenderState()
 
-	// Build composite mode text: Chinese mode shows "中·五笔" or "中·拼音", English mode shows "En"
+	// Build mode text: Chinese mode shows schema name (e.g., "全拼", "五笔"), English mode shows "英"
 	var modeText string
 	if !c.chineseMode {
 		modeText = "英"
 	} else if c.engineMgr != nil {
-		switch c.engineMgr.GetCurrentType() {
-		case engine.EngineTypeWubi:
-			modeText = "中·五笔"
-		case engine.EngineTypePinyin:
-			modeText = "中·拼音"
-		case engine.EngineTypeMixed:
-			modeText = "中·混输"
-		default:
+		name, _ := c.engineMgr.GetSchemaDisplayInfo()
+		if name != "" {
+			modeText = name
+		} else {
 			modeText = "中"
 		}
 	} else {

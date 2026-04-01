@@ -101,17 +101,14 @@ func (c *Coordinator) handleCapsLockStateNoLock(on bool) {
 		return
 	}
 
-	// Show A for Caps Lock ON, 英 for OFF
-	indicator := "英"
 	if on {
-		indicator = "A"
+		// CapsLock ON: always show "A"
+		x, y := c.getIndicatorPosition()
+		c.uiManager.ShowModeIndicator("A", x, y)
+	} else {
+		// CapsLock OFF: show current mode indicator (schema name or "英")
+		c.showModeIndicator()
 	}
-
-	x, y := c.getIndicatorPosition()
-	c.uiManager.ShowModeIndicator(indicator, x, y)
-	// Note: Toolbar state is already updated by broadcastState() which is called
-	// before handleCapsLockStateNoLock() in the CapsLock handling path.
-	// We don't need to update it again here.
 }
 
 // handleEngineSwitchKey 处理引擎切换快捷键 (Ctrl+`)
@@ -162,17 +159,10 @@ func (c *Coordinator) handleEngineSwitchKey() *bridge.KeyEventResult {
 	return nil
 }
 
-// showEngineIndicator 显示引擎切换指示器（复合显示引擎名+当前模式）
+// showEngineIndicator 显示引擎切换指示器（使用方案名称）
 func (c *Coordinator) showEngineIndicator() {
-	if c.uiManager == nil || !c.uiManager.IsReady() {
-		return
-	}
-
-	name, _ := c.engineMgr.GetSchemaDisplayInfo()
-	text := "中·" + name
-
-	x, y := c.getIndicatorPosition()
-	c.uiManager.ShowModeIndicator(text, x, y)
+	// Reuse showModeIndicator which now uses schema name
+	c.showModeIndicator()
 }
 
 // GetCurrentEngineName 获取当前引擎名称

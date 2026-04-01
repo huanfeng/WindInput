@@ -210,10 +210,16 @@ func (c *Coordinator) IsCapsLockOn() bool {
 
 // getIconLabelNoLock computes the taskbar icon label based on current state (caller must hold lock)
 // This determines what character is displayed in the Windows taskbar input indicator
-// Currently uses simple 中/英/A labels; engine-specific labels (拼/五/双) planned for future
+// Chinese mode uses the schema's icon_label (e.g., "拼", "五", "双", "混")
 func (c *Coordinator) getIconLabelNoLock() string {
 	effectiveChinese := c.chineseMode && !c.capsLockOn
 	if effectiveChinese {
+		if c.engineMgr != nil {
+			_, iconLabel := c.engineMgr.GetSchemaDisplayInfo()
+			if iconLabel != "" {
+				return iconLabel
+			}
+		}
 		return "中"
 	}
 	if c.capsLockOn {
@@ -253,22 +259,32 @@ func (c *Coordinator) broadcastState() {
 	}
 }
 
-// syncToolbarStateNoLock synchronizes the current state to the toolbar (without lock)
-func (c *Coordinator) syncToolbarStateNoLock() {
-	if c.uiManager == nil {
-		return
-	}
-
-	// Use effective mode for toolbar display
+// buildToolbarState creates a ToolbarState from current coordinator state (caller must hold lock)
+func (c *Coordinator) buildToolbarState() ui.ToolbarState {
 	effectiveMode := c.getEffectiveModeNoLock()
 
-	c.uiManager.UpdateToolbarState(ui.ToolbarState{
+	// Get icon_label from current schema for toolbar display
+	var modeLabel string
+	if c.engineMgr != nil {
+		_, modeLabel = c.engineMgr.GetSchemaDisplayInfo()
+	}
+
+	return ui.ToolbarState{
 		ChineseMode:   effectiveMode == ModeChinese,
 		FullWidth:     c.fullWidth,
 		ChinesePunct:  c.chinesePunctuation && effectiveMode == ModeChinese,
 		CapsLock:      c.capsLockOn,
 		EffectiveMode: int(effectiveMode),
-	})
+		ModeLabel:     modeLabel,
+	}
+}
+
+// syncToolbarStateNoLock synchronizes the current state to the toolbar (without lock)
+func (c *Coordinator) syncToolbarStateNoLock() {
+	if c.uiManager == nil {
+		return
+	}
+	c.uiManager.UpdateToolbarState(c.buildToolbarState())
 }
 
 // NewCoordinator creates a new Coordinator

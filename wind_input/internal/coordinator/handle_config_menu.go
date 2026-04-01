@@ -69,14 +69,7 @@ func (c *Coordinator) SetIMEActivated(activated bool) {
 			c.logger.Debug("Toolbar position calculated", "x", posX, "y", posY, "caretX", c.caretX, "caretY", c.caretY)
 
 			// Show toolbar with position and state in one atomic operation
-			effMode := c.getEffectiveModeNoLock()
-			c.uiManager.ShowToolbarWithState(posX, posY, ui.ToolbarState{
-				ChineseMode:   effMode == ModeChinese,
-				FullWidth:     c.fullWidth,
-				ChinesePunct:  c.chinesePunctuation && effMode == ModeChinese,
-				CapsLock:      c.capsLockOn,
-				EffectiveMode: int(effMode),
-			})
+			c.uiManager.ShowToolbarWithState(posX, posY, c.buildToolbarState())
 		}
 	} else {
 		// IME deactivated - unregister global hotkeys
@@ -151,7 +144,7 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 		// Show indicator
 		indicator := "英."
 		if c.chinesePunctuation {
-			indicator = "中，"
+			indicator = "中。"
 		}
 		c.showIndicator(indicator)
 
@@ -183,13 +176,7 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 						ui.ScaleIntForDPI(toolbarHeight),
 					)
 				}
-				c.uiManager.ShowToolbarWithState(posX, posY, ui.ToolbarState{
-					ChineseMode:   c.chineseMode,
-					FullWidth:     c.fullWidth,
-					ChinesePunct:  c.chinesePunctuation,
-					CapsLock:      c.capsLockOn,
-					EffectiveMode: int(c.getEffectiveModeNoLock()),
-				})
+				c.uiManager.ShowToolbarWithState(posX, posY, c.buildToolbarState())
 			} else {
 				c.uiManager.SetToolbarVisible(false)
 			}
@@ -348,6 +335,9 @@ func (c *Coordinator) showIndicator(text string) {
 	if c.uiManager == nil || !c.uiManager.IsReady() {
 		return
 	}
+
+	// Ensure host render state is up-to-date (same as showModeIndicator)
+	c.updateHostRenderState()
 
 	x, y := c.getIndicatorPosition()
 	c.uiManager.ShowModeIndicator(text, x, y)

@@ -107,13 +107,7 @@ func (c *Coordinator) UpdateToolbarConfig(toolbarConfig *config.ToolbarConfig) {
 					ui.ScaleIntForDPI(toolbarHeight),
 				)
 			}
-			c.uiManager.ShowToolbarWithState(posX, posY, ui.ToolbarState{
-				ChineseMode:   c.chineseMode,
-				FullWidth:     c.fullWidth,
-				ChinesePunct:  c.chinesePunctuation,
-				CapsLock:      c.capsLockOn,
-				EffectiveMode: int(c.getEffectiveModeNoLock()),
-			})
+			c.uiManager.ShowToolbarWithState(posX, posY, c.buildToolbarState())
 		} else {
 			c.uiManager.SetToolbarVisible(false)
 		}

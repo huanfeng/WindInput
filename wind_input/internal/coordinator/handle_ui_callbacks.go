@@ -661,6 +661,13 @@ func (c *Coordinator) handleToolbarToggleWidth() {
 	c.fullWidth = !c.fullWidth
 	c.logger.Debug("Full-width toggled via toolbar", "fullWidth", c.fullWidth)
 
+	// Show indicator
+	indicator := "半"
+	if c.fullWidth {
+		indicator = "全"
+	}
+	c.showIndicator(indicator)
+
 	// Save runtime state if remember_last_state is enabled
 	c.saveRuntimeState()
 
@@ -683,6 +690,13 @@ func (c *Coordinator) handleToolbarTogglePunct() {
 
 	// Reset punctuation converter state
 	c.punctConverter.Reset()
+
+	// Show indicator
+	indicator := "英."
+	if c.chinesePunctuation {
+		indicator = "中，"
+	}
+	c.showIndicator(indicator)
 
 	// Save runtime state if remember_last_state is enabled
 	c.saveRuntimeState()
