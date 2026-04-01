@@ -354,6 +354,15 @@ if ($schemaFiles) {
     Write-Host "[警告] 未找到输入方案配置文件" -ForegroundColor Yellow
 }
 
+# 复制默认配置文件
+$configYaml = Join-Path $ScriptDir "data\config.yaml"
+if (Test-Path $configYaml) {
+    Copy-Item -Path $configYaml -Destination (Join-Path $DataDir "config.yaml") -Force
+    Write-Host "  - 已复制默认配置文件"
+} else {
+    Write-Host "[警告] 未找到默认配置文件" -ForegroundColor Yellow
+}
+
 # 复制系统短语配置
 $systemPhrases = Join-Path $ScriptDir "data\system.phrases.yaml"
 if (Test-Path $systemPhrases) {
@@ -406,6 +415,7 @@ Write-Host "- build\data\dict\pinyin\*.dict.yaml（拼音词库）"
 Write-Host "- build\data\dict\pinyin\unigram.txt（Unigram 语言模型）"
 Write-Host "- build\data\dict\wubi86\wubi86_jidian*.dict.yaml（五笔词库）"
 Write-Host "- build\data\dict\common_chars.txt（常用字表）"
+Write-Host "- build\data\config.yaml（默认配置）"
 Write-Host "- build\data\schemas\*.schema.yaml（输入方案配置）"
 Write-Host "- build\data\system.phrases.yaml（系统短语配置）"
 Write-Host "- build\data\themes\*\theme.yaml（主题配置）"

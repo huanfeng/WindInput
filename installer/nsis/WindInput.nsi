@@ -344,9 +344,10 @@ install_cleanup_bak_end:
   File "${BUILD_DIR}\data\schemas\wubi86.schema.yaml"
   File "${BUILD_DIR}\data\schemas\pinyin.schema.yaml"
 
-  ; --- Step 6c: Theme files ---
-  DetailPrint "正在复制主题文件..."
+  ; --- Step 6c: Default config and theme files ---
+  DetailPrint "正在复制配置和主题文件..."
   SetOutPath "$INSTDIR\data"
+  File "${BUILD_DIR}\data\config.yaml"
   File "${BUILD_DIR}\data\system.phrases.yaml"
   SetOutPath "$INSTDIR\data\themes\default"
   File "${BUILD_DIR}\data\themes\default\theme.yaml"

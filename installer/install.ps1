@@ -146,6 +146,15 @@ if ($schemaFiles) {
     Write-Host "[警告] build\data 目录中未找到输入方案配置" -ForegroundColor Yellow
 }
 
+# [7b/12] 复制默认配置文件
+$configSrc = Join-Path $BuildDataDir "config.yaml"
+if (Test-Path $configSrc) {
+    Copy-Item -Path $configSrc -Destination (Join-Path $InstallDataDir "config.yaml") -Force
+    Write-Host "  - 默认配置文件已复制"
+} else {
+    Write-Host "[警告] build\data 目录中未找到默认配置文件 config.yaml" -ForegroundColor Yellow
+}
+
 # [8/12] 复制主题文件
 Write-Host "[8/12] 复制主题文件..."
 $themesSource = Join-Path $BuildDataDir "themes"
