@@ -10,7 +10,7 @@ import (
 const (
 	addWordMinLen     = 2    // 最小加词长度
 	addWordDefaultLen = 2    // 默认加词长度
-	addWordMaxWeight  = 5000 // 手动加词默认权重
+	addWordMaxWeight  = 1200 // 手动加词默认权重（略高于系统词库归一化中位 1000）
 )
 
 // addWordCompositionPlaceholder 加词模式使用的占位 composition 文本

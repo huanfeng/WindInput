@@ -24,6 +24,11 @@ dictionaries:
     path: "dict/wubi86/wubi86_jidian.dict.yaml"
     type: rime_wubi
     default: true
+    weight_spec:
+      median: 10
+      max: 890
+      min: 5
+      mode: linear
 
 user_data:
   shadow_file: "wubi86.shadow.yaml"

@@ -15,7 +15,8 @@ import (
 )
 
 // MaxDynamicWeight UserDict 动态权重硬上限，防止 weight 无限膨胀
-const MaxDynamicWeight = 2000
+// 与系统词库归一化后的统一区间 [0, 10000] 对齐
+const MaxDynamicWeight = 10000
 
 // UserDict 用户词库
 // 实现 MutableLayer 接口，支持用户造词的增删改查和持久化

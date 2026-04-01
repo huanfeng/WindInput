@@ -303,17 +303,17 @@ func (e *Engine) OnCandidateSelected(code, text string) {
 
 	if e.config.FrequencyOnly {
 		// 仅调频模式：只调整已有词条权重，不创建新词
-		userDict.IncreaseWeight(code, text, 10)
+		userDict.IncreaseWeight(code, text, 20)
 	} else {
 		// 自动学习模式：优先使用临时词库
 		tempDict := e.dictManager.GetTempDict()
 		if tempDict != nil {
-			promoted := tempDict.LearnWord(code, text, 10)
+			promoted := tempDict.LearnWord(code, text, 20)
 			if promoted {
 				tempDict.PromoteWord(code, text)
 			}
 		} else {
-			userDict.OnWordSelected(code, text, 100, 10, 2)
+			userDict.OnWordSelected(code, text, 800, 20, 2)
 		}
 	}
 

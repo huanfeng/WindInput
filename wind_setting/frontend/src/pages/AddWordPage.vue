@@ -35,7 +35,7 @@
         <div class="addword-field">
           <label class="addword-label">
             权重
-            <span class="addword-hint">值越大排序越靠前，建议 1000~9000</span>
+            <span class="addword-hint">值越大排序越靠前，系统词中位约 1000</span>
           </label>
           <input
             class="addword-input addword-weight"
@@ -85,7 +85,7 @@ const emit = defineEmits<{
 const wordText = ref("");
 const wordCode = ref("");
 const schemaID = ref("");
-const wordWeight = ref(5000);
+const wordWeight = ref(1200);
 const schemas = ref<SchemaItem[]>([]);
 const { toast } = useToast();
 const adding = ref(false);

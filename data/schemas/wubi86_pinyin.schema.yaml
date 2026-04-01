@@ -33,9 +33,18 @@ dictionaries:
     path: "dict/wubi86/wubi86_jidian.dict.yaml"
     type: rime_wubi
     default: true
+    weight_spec:
+      median: 10
+      max: 890
+      min: 5
+      mode: linear
   - id: pinyin_main
     path: "dict/pinyin/rime_ice.dict.yaml"
     type: rime_pinyin
+    weight_spec:
+      median: 200
+      max: 19260817
+      mode: log
   - id: wubi_reverse
     path: "dict/wubi86/wubi86_jidian.dict.yaml"
     type: rime_wubi

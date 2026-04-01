@@ -140,7 +140,8 @@ func writeMetaJSON(path string, meta *CodeTableMeta) error {
 // ConvertPinyinToWdb 将拼音 YAML 词库转换为 wdb 二进制格式
 // mainDictPath 为主词库 .dict.yaml 文件路径（如 rime_ice.dict.yaml），
 // 自动从其 import_tables 发现关联词库（如 cn_dicts/8105.dict.yaml）。
-func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger) error {
+// normalizer 可选，非 nil 时对权重做归一化映射。
+func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger, normalizer ...*dict.WeightNormalizer) error {
 	logger.Info("转换拼音词库", "src", mainDictPath, "dst", wdbPath)
 
 	dictDir := filepath.Dir(mainDictPath)
@@ -171,15 +172,25 @@ func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger) error
 
 	writer := binformat.NewDictWriter()
 
+	// 获取归一化器（可选）
+	var norm *dict.WeightNormalizer
+	if len(normalizer) > 0 {
+		norm = normalizer[0]
+	}
+
 	for code, entries := range codeEntries {
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].weight > entries[j].weight
 		})
 		binEntries := make([]binformat.DictEntry, len(entries))
 		for i, e := range entries {
+			w := e.weight
+			if norm != nil {
+				w = norm.Normalize(w)
+			}
 			binEntries[i] = binformat.DictEntry{
 				Text:   e.text,
-				Weight: int32(e.weight),
+				Weight: int32(w),
 			}
 		}
 		writer.AddCode(code, binEntries)
@@ -191,9 +202,13 @@ func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger) error
 		})
 		binEntries := make([]binformat.DictEntry, len(entries))
 		for i, e := range entries {
+			w := e.weight
+			if norm != nil {
+				w = norm.Normalize(w)
+			}
 			binEntries[i] = binformat.DictEntry{
 				Text:   e.text,
-				Weight: int32(e.weight),
+				Weight: int32(w),
 			}
 		}
 		writer.AddAbbrev(abbrev, binEntries)
@@ -317,7 +332,7 @@ func ConvertUnigramToWdb(txtPath, wdbPath string, logger *slog.Logger) error {
 // import_tables 发现关联词库，并扫描同目录下同名前缀的额外词库文件。
 // 遵循 RIME 标准：所有词库平等合并，按 weight 统一排序。
 // 精确匹配优先于前缀匹配由引擎层 -2000000 降权保障，无需此处调整权重。
-func ConvertRimeWubiToWdb(mainDictPath, wdbPath string, logger *slog.Logger) error {
+func ConvertRimeWubiToWdb(mainDictPath, wdbPath string, logger *slog.Logger, normalizer ...*dict.WeightNormalizer) error {
 	logger.Info("转换 rime 五笔词库", "src", mainDictPath, "dst", wdbPath)
 
 	dictDir := filepath.Dir(mainDictPath)
@@ -352,6 +367,12 @@ func ConvertRimeWubiToWdb(mainDictPath, wdbPath string, logger *slog.Logger) err
 		return fmt.Errorf("未加载到任何五笔词条")
 	}
 
+	// 获取归一化器（可选）
+	var norm *dict.WeightNormalizer
+	if len(normalizer) > 0 {
+		norm = normalizer[0]
+	}
+
 	writer := binformat.NewDictWriter()
 
 	for code, entries := range codeEntries {
@@ -360,9 +381,13 @@ func ConvertRimeWubiToWdb(mainDictPath, wdbPath string, logger *slog.Logger) err
 		})
 		binEntries := make([]binformat.DictEntry, len(entries))
 		for i, e := range entries {
+			w := e.weight
+			if norm != nil {
+				w = norm.Normalize(w)
+			}
 			binEntries[i] = binformat.DictEntry{
 				Text:   e.text,
-				Weight: int32(e.weight),
+				Weight: int32(w),
 			}
 		}
 		writer.AddCode(code, binEntries)

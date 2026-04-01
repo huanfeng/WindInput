@@ -1,6 +1,8 @@
 // Package schema 提供输入方案定义和管理功能
 package schema
 
+import "github.com/huanfeng/wind_input/internal/dict"
+
 // Schema 输入方案定义
 type Schema struct {
 	Schema   SchemaInfo   `yaml:"schema"`
@@ -97,11 +99,33 @@ const (
 
 // DictSpec 词库规格
 type DictSpec struct {
-	ID      string   `yaml:"id"`
-	Path    string   `yaml:"path"`
-	Type    string   `yaml:"type"`
-	Default bool     `yaml:"default"`
-	Role    DictRole `yaml:"role,omitempty"`
+	ID         string      `yaml:"id"`
+	Path       string      `yaml:"path"`
+	Type       string      `yaml:"type"`
+	Default    bool        `yaml:"default"`
+	Role       DictRole    `yaml:"role,omitempty"`
+	WeightSpec *WeightSpec `yaml:"weight_spec,omitempty"` // 权重归一化参数
+}
+
+// WeightNormMode 权重归一化算法
+type WeightNormMode string
+
+const (
+	WeightNormLinear WeightNormMode = "linear" // 分段线性映射（适合跨度小的码表词库）
+	WeightNormLog    WeightNormMode = "log"    // 对数映射（适合长尾分布的拼音词库）
+)
+
+// NormalizedWeightMax 归一化后的权重上限
+const NormalizedWeightMax = 10000
+
+// WeightSpec 词库权重归一化参数
+// 用于将不同词库的原始权重映射到统一的 [0, NormalizedWeightMax] 区间
+type WeightSpec struct {
+	Median int            `yaml:"median"`           // 原始权重中位数（映射到统一区间的基准点）
+	Max    int            `yaml:"max"`              // 原始权重最大值
+	Min    int            `yaml:"min,omitempty"`    // 原始权重最小值（默认 0）
+	Mode   WeightNormMode `yaml:"mode"`             // 映射算法
+	Target int            `yaml:"target,omitempty"` // 中位映射目标值（默认 1000）
 }
 
 // UserDataSpec 用户数据配置
@@ -142,6 +166,14 @@ type EncoderRule struct {
 	LengthEqual   int    `yaml:"length_equal,omitempty"`
 	LengthInRange []int  `yaml:"length_in_range,omitempty,flow"`
 	Formula       string `yaml:"formula"`
+}
+
+// NewWeightNormalizer 从 WeightSpec 创建归一化器，spec 为 nil 时返回 nil
+func (ws *WeightSpec) NewWeightNormalizer() *dict.WeightNormalizer {
+	if ws == nil {
+		return nil
+	}
+	return dict.NewWeightNormalizer(string(ws.Mode), ws.Median, ws.Max, ws.Min, ws.Target)
 }
 
 // GetDefaultDictSpec 获取默认词库规格（dictionaries 中 default=true 的项）

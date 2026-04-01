@@ -77,7 +77,11 @@ func createCodeTableEngine(s *Schema, exeDir string, dm *dict.DictManager, logge
 	dictSpec := s.GetDefaultDictSpec()
 	if dictSpec != nil {
 		srcPath := resolvePath(exeDir, dictSpec.Path)
-		if err := loadWubiCodeTable(engine, srcPath, dictSpec.Type, logger); err != nil {
+		var norm *dict.WeightNormalizer
+		if dictSpec.WeightSpec != nil {
+			norm = dictSpec.WeightSpec.NewWeightNormalizer()
+		}
+		if err := loadWubiCodeTable(engine, srcPath, dictSpec.Type, logger, norm); err != nil {
 			return nil, fmt.Errorf("加载码表失败: %w", err)
 		}
 		logger.Info("码表加载成功", "schemaID", s.Schema.ID, "entryCount", engine.GetEntryCount())
@@ -147,7 +151,11 @@ func createPinyinEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *
 	dictSpec := s.GetDefaultDictSpec()
 	if dictSpec != nil {
 		dictPath := resolvePath(exeDir, dictSpec.Path)
-		if err := loadPinyinDict(pinyinDict, dictPath, logger); err != nil {
+		var norm *dict.WeightNormalizer
+		if dictSpec.WeightSpec != nil {
+			norm = dictSpec.WeightSpec.NewWeightNormalizer()
+		}
+		if err := loadPinyinDict(pinyinDict, dictPath, logger, norm); err != nil {
 			return nil, fmt.Errorf("加载拼音词库失败: %w", err)
 		}
 	}
@@ -222,7 +230,7 @@ func createPinyinEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *
 
 // --- 词库加载辅助函数（从 manager_init.go 迁移） ---
 
-func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string, logger *slog.Logger) error {
+func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string, logger *slog.Logger, normalizer *dict.WeightNormalizer) error {
 	dictDir := filepath.Dir(dictPath)
 	srcPaths := dictcache.RimePinyinSourcePaths(dictPath)
 
@@ -236,7 +244,7 @@ func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string, logger *slog.L
 
 	wdbCachePath := dictcache.CachePath("pinyin")
 	if dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
-		if err := dictcache.ConvertPinyinToWdb(dictPath, wdbCachePath, logger); err != nil {
+		if err := dictcache.ConvertPinyinToWdb(dictPath, wdbCachePath, logger, normalizer); err != nil {
 			if _, statErr := os.Stat(wdbInDir); statErr == nil {
 				if err := pinyinDict.LoadBinary(wdbInDir); err == nil {
 					return nil
@@ -288,7 +296,7 @@ func loadUnigramModel(engine *pinyin.Engine, txtPath string, logger *slog.Logger
 	return fmt.Errorf("Unigram 模型 wdb 不可用，智能组句功能将不可用")
 }
 
-func loadWubiCodeTable(engine *wubi.Engine, srcPath, dictType string, logger *slog.Logger) error {
+func loadWubiCodeTable(engine *wubi.Engine, srcPath, dictType string, logger *slog.Logger, normalizer *dict.WeightNormalizer) error {
 	var srcDir string
 	var srcPaths []string
 
@@ -313,7 +321,7 @@ func loadWubiCodeTable(engine *wubi.Engine, srcPath, dictType string, logger *sl
 	if len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
 		var convertErr error
 		if dictType == "rime_wubi" {
-			convertErr = dictcache.ConvertRimeWubiToWdb(srcPath, wdbCachePath, logger)
+			convertErr = dictcache.ConvertRimeWubiToWdb(srcPath, wdbCachePath, logger, normalizer)
 		} else {
 			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath, logger)
 		}
@@ -437,11 +445,15 @@ func SavePinyinUserFreqs(engine *pinyin.Engine, path string) {
 }
 
 func preGeneratePinyinWdb(s *Schema, exeDir string, logger *slog.Logger) {
-	// 查找拼音词库路径
+	// 查找拼音词库路径及归一化参数
 	var pinyinDictPath string
+	var norm *dict.WeightNormalizer
 	for _, d := range s.Dicts {
 		if d.Type == "rime_pinyin" {
 			pinyinDictPath = resolvePath(exeDir, d.Path)
+			if d.WeightSpec != nil {
+				norm = d.WeightSpec.NewWeightNormalizer()
+			}
 			break
 		}
 	}
@@ -455,7 +467,7 @@ func preGeneratePinyinWdb(s *Schema, exeDir string, logger *slog.Logger) {
 	wdbCachePath := dictcache.CachePath("pinyin")
 	if dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
 		logger.Debug("后台预生成拼音 wdb...")
-		if err := dictcache.ConvertPinyinToWdb(pinyinDictPath, wdbCachePath, logger); err != nil {
+		if err := dictcache.ConvertPinyinToWdb(pinyinDictPath, wdbCachePath, logger, norm); err != nil {
 			logger.Warn("后台预生成拼音 wdb 失败", "err", err)
 		}
 	}
@@ -553,7 +565,11 @@ func createMixedEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *s
 	}
 	if wubiDictSpec != nil {
 		srcPath := resolvePath(exeDir, wubiDictSpec.Path)
-		if err := loadWubiCodeTable(wubiEngine, srcPath, wubiDictSpec.Type, logger); err != nil {
+		var wubiNorm *dict.WeightNormalizer
+		if wubiDictSpec.WeightSpec != nil {
+			wubiNorm = wubiDictSpec.WeightSpec.NewWeightNormalizer()
+		}
+		if err := loadWubiCodeTable(wubiEngine, srcPath, wubiDictSpec.Type, logger, wubiNorm); err != nil {
 			return nil, fmt.Errorf("混输：加载五笔码表失败: %w", err)
 		}
 		logger.Info("混输：五笔码表加载成功", "schemaID", s.Schema.ID, "entryCount", wubiEngine.GetEntryCount())
@@ -612,7 +628,11 @@ func createMixedEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *s
 	}
 	if pinyinDictSpec != nil {
 		dictPath := resolvePath(exeDir, pinyinDictSpec.Path)
-		if err := loadPinyinDict(pinyinDict, dictPath, logger); err != nil {
+		var pinyinNorm *dict.WeightNormalizer
+		if pinyinDictSpec.WeightSpec != nil {
+			pinyinNorm = pinyinDictSpec.WeightSpec.NewWeightNormalizer()
+		}
+		if err := loadPinyinDict(pinyinDict, dictPath, logger, pinyinNorm); err != nil {
 			return nil, fmt.Errorf("混输：加载拼音词库失败: %w", err)
 		}
 	}
