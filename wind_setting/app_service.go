@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/control"
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
@@ -231,7 +232,7 @@ func (a *App) OpenLogFolder() error {
 	if base == "" {
 		return fmt.Errorf("LOCALAPPDATA not set")
 	}
-	path := filepath.Join(base, "WindInput", "logs")
+	path := filepath.Join(base, buildvariant.AppName(), "logs")
 	return exec.Command("explorer.exe", path).Start()
 }
 
@@ -241,7 +242,7 @@ func (a *App) OpenConfigFolder() error {
 	if base == "" {
 		return fmt.Errorf("APPDATA not set")
 	}
-	path := filepath.Join(base, "WindInput")
+	path := filepath.Join(base, buildvariant.AppName())
 	return exec.Command("explorer.exe", path).Start()
 }
 

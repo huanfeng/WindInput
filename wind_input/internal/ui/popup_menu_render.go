@@ -156,6 +156,7 @@ func (m *PopupMenu) render() *image.RGBA {
 	}
 	td.EndDraw()
 
+	DrawDebugBanner(img)
 	return img
 }
 

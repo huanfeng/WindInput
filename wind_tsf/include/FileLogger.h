@@ -4,16 +4,27 @@
 #include <cstdint>
 #include <string>
 
+// Log path macros for debug variant coexistence
+#ifdef WIND_DEBUG_VARIANT
+#define WIND_LOG_DIR_NAME       L"WindInputDebug"
+#define WIND_LOG_FILE_NAME      L"wind_tsf_debug.log"
+#define WIND_LOG_CONFIG_NAME    L"tsf_debug_log_config"
+#else
+#define WIND_LOG_DIR_NAME       L"WindInput"
+#define WIND_LOG_FILE_NAME      L"wind_tsf.log"
+#define WIND_LOG_CONFIG_NAME    L"tsf_log_config"
+#endif
+
 // ============================================================================
 // FileLogger - Multi-process safe logging for TSF DLL
 //
 // Output modes (controlled by config file):
 //   none        - No output (default, near-zero overhead)
-//   file        - Write to %LOCALAPPDATA%\WindInput\logs\wind_tsf.log
+//   file        - Write to %LOCALAPPDATA%\<WIND_LOG_DIR_NAME>\logs\<WIND_LOG_FILE_NAME>
 //   debugstring - OutputDebugStringW only (viewable in DebugView)
 //   all         - Both file and OutputDebugStringW
 //
-// Config file: %LOCALAPPDATA%\WindInput\logs\tsf_log_config
+// Config file: %LOCALAPPDATA%\<WIND_LOG_DIR_NAME>\logs\<WIND_LOG_CONFIG_NAME>
 //   mode=none
 //   level=debug
 //

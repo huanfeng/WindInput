@@ -1,18 +1,50 @@
-﻿#Requires -RunAsAdministrator
+﻿param(
+    [switch]$DebugVariant
+)
+#Requires -RunAsAdministrator
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Stop"
 
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+
+if ($DebugVariant) {
+    $AppDirName = "WindInputDebug"
+    $DllName = "wind_tsf_debug.dll"
+    $ExeName = "wind_input_debug.exe"
+    $SettingName = "wind_setting_debug.exe"
+    $ServiceProcessName = "wind_input_debug"
+    $SettingProcessName = "wind_setting_debug"
+    $RunKeyName = "WindInputDebug"
+    $ShortcutFolder = "清风输入法 Debug"
+    $ShortcutName = "清风输入法 Debug 设置"
+    $DisplayName = "清风输入法 (Debug)"
+    $ProfileStr = "0804:{99C2DEB0-5C57-45A2-9C63-FB54B34FD90A}{99C2DEB1-5C57-45A2-9C63-FB54B34FD90A}"
+    $BuildDir = Join-Path (Split-Path -Parent $ScriptDir) "build_debug"
+} else {
+    $AppDirName = "WindInput"
+    $DllName = "wind_tsf.dll"
+    $ExeName = "wind_input.exe"
+    $SettingName = "wind_setting.exe"
+    $ServiceProcessName = "wind_input"
+    $SettingProcessName = "wind_setting"
+    $RunKeyName = "WindInput"
+    $ShortcutFolder = "清风输入法"
+    $ShortcutName = "清风输入法 设置"
+    $DisplayName = "清风输入法"
+    $ProfileStr = "0804:{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}"
+    $BuildDir = Join-Path (Split-Path -Parent $ScriptDir) "build"
+}
+
+$InstallDir = if ($env:ProgramW6432) { Join-Path $env:ProgramW6432 $AppDirName } else { Join-Path $env:ProgramFiles $AppDirName }
+
 Write-Host "======================================"
-Write-Host "清风输入法安装程序"
+Write-Host "$DisplayName 安装程序"
 Write-Host "======================================"
 Write-Host ""
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$BuildDir = Join-Path (Split-Path -Parent $ScriptDir) "build"
-
 # [1/12] 检查文件
 Write-Host "[1/12] 检查文件..."
-$requiredFiles = @("wind_tsf.dll", "wind_input.exe")
+$requiredFiles = @($DllName, $ExeName)
 foreach ($f in $requiredFiles) {
     if (-not (Test-Path (Join-Path $BuildDir $f))) {
         Write-Host "[错误] 未找到 $f" -ForegroundColor Red
@@ -23,14 +55,13 @@ foreach ($f in $requiredFiles) {
 
 # [2/12] 停止旧进程
 Write-Host "[2/12] 停止旧进程..."
-Get-Process -Name "wind_setting" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Get-Process -Name "wind_input" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -Name $SettingProcessName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -Name $ServiceProcessName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 
 # [3/12] 创建安装目录
 Write-Host "[3/12] 创建安装目录..."
 Write-Host "[4/12] 处理已有文件..."
-$InstallDir = if ($env:ProgramW6432) { Join-Path $env:ProgramW6432 "WindInput" } else { Join-Path $env:ProgramFiles "WindInput" }
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
@@ -62,10 +93,10 @@ function Remove-OldFile {
     }
 }
 
-Remove-OldFile -FilePath (Join-Path $InstallDir "wind_tsf.dll") -FileName "wind_tsf.dll" -UnregisterCOM
+Remove-OldFile -FilePath (Join-Path $InstallDir $DllName) -FileName $DllName -UnregisterCOM
 Remove-OldFile -FilePath (Join-Path $InstallDir "wind_dwrite.dll") -FileName "wind_dwrite.dll"  # 清理旧版本遗留
-Remove-OldFile -FilePath (Join-Path $InstallDir "wind_input.exe") -FileName "wind_input.exe"
-Remove-OldFile -FilePath (Join-Path $InstallDir "wind_setting.exe") -FileName "wind_setting.exe"
+Remove-OldFile -FilePath (Join-Path $InstallDir $ExeName) -FileName $ExeName
+Remove-OldFile -FilePath (Join-Path $InstallDir $SettingName) -FileName $SettingName
 
 # [5/12] 复制文件
 Write-Host "[5/12] 复制文件..."
@@ -73,24 +104,24 @@ foreach ($f in $requiredFiles) {
     Copy-Item -Path (Join-Path $BuildDir $f) -Destination $InstallDir -Force
 }
 
-$settingExe = Join-Path $BuildDir "wind_setting.exe"
+$settingExe = Join-Path $BuildDir $SettingName
 if (Test-Path $settingExe) {
     Copy-Item -Path $settingExe -Destination $InstallDir -Force
-    Write-Host "  - wind_setting.exe 已复制"
+    Write-Host "  - $SettingName 已复制"
 } else {
-    Write-Host "[提示] 未找到 wind_setting.exe,已跳过(可选)" -ForegroundColor Cyan
+    Write-Host "[提示] 未找到 $SettingName,已跳过(可选)" -ForegroundColor Cyan
 }
 
 # 为现代宿主（开始菜单 / 搜索等 AppContainer 进程）授予 TSF DLL 读取执行权限
 Write-Host "  - 正在设置 TSF DLL 权限..."
 $appPackagesSid = "*S-1-15-2-1"
-$tsfDllPath = Join-Path $InstallDir "wind_tsf.dll"
+$tsfDllPath = Join-Path $InstallDir $DllName
 if (Test-Path $tsfDllPath) {
     & icacls $tsfDllPath /grant "${appPackagesSid}:(RX)" /c | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[警告] 设置 wind_tsf.dll 的 ALL APPLICATION PACKAGES 权限失败" -ForegroundColor Yellow
+        Write-Host "[警告] 设置 $DllName 的 ALL APPLICATION PACKAGES 权限失败" -ForegroundColor Yellow
     } else {
-        Write-Host "    * wind_tsf.dll 已授予 ALL APPLICATION PACKAGES 读取执行权限"
+        Write-Host "    * $DllName 已授予 ALL APPLICATION PACKAGES 读取执行权限"
     }
 }
 
@@ -176,7 +207,7 @@ if (Test-Path $themesSource) {
 
 # [9/12] 注册 COM 组件
 Write-Host "[9/12] 注册 COM 组件..."
-$regResult = & regsvr32 /s (Join-Path $InstallDir "wind_tsf.dll") 2>&1
+$regResult = & regsvr32 /s (Join-Path $InstallDir $DllName) 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[错误] COM 注册失败" -ForegroundColor Red
     exit 1
@@ -198,8 +229,7 @@ public class WindInputHelper {
 "@
         }
         # 格式: "LANGID:{CLSID}{ProfileGUID}"
-        $profileStr = "0804:{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}"
-        $result = [WindInputHelper]::InstallLayoutOrTip($profileStr, 0)
+        $result = [WindInputHelper]::InstallLayoutOrTip($ProfileStr, 0)
         if ($result) {
             Write-Host "  - 输入法已注册到系统输入法列表"
         } else {
@@ -214,9 +244,9 @@ public class WindInputHelper {
 
 # [11/13] 配置开机自启动
 Write-Host "[11/13] 配置开机自启动..."
-$exePath = Join-Path $InstallDir "wind_input.exe"
+$exePath = Join-Path $InstallDir $ExeName
 try {
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "WindInput" -Value "`"$exePath`"" -Force
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $RunKeyName -Value "`"$exePath`"" -Force
     Write-Host "  - 已添加开机自启动注册表项"
 } catch {
     Write-Host "[警告] 添加开机自启动失败" -ForegroundColor Yellow
@@ -229,13 +259,13 @@ Write-Host "  - 服务已在后台启动"
 
 # [13/13] 创建快捷方式
 Write-Host "[13/13] 创建快捷方式..."
-$settingInstalled = Join-Path $InstallDir "wind_setting.exe"
+$settingInstalled = Join-Path $InstallDir $SettingName
 if (Test-Path $settingInstalled) {
     $ws = New-Object -ComObject WScript.Shell
-    $shortcut = $ws.CreateShortcut("$env:ProgramData\Microsoft\Windows\Start Menu\Programs\清风输入法 设置.lnk")
+    $shortcut = $ws.CreateShortcut("$env:ProgramData\Microsoft\Windows\Start Menu\Programs\$ShortcutName.lnk")
     $shortcut.TargetPath = $settingInstalled
     $shortcut.WorkingDirectory = $InstallDir
-    $shortcut.Description = "清风输入法 设置"
+    $shortcut.Description = $ShortcutName
     $shortcut.Save()
     Write-Host "  - 开始菜单快捷方式已创建"
 }
@@ -254,9 +284,9 @@ Write-Host ""
 Write-Host "安装目录: $InstallDir"
 Write-Host ""
 Write-Host "已安装组件:"
-Write-Host "- wind_tsf.dll (TSF 桥接)"
-Write-Host "- wind_input.exe (输入法服务)"
-Write-Host "- wind_setting.exe (设置界面)"
+Write-Host "- $DllName (TSF 桥接)"
+Write-Host "- $ExeName (输入法服务)"
+Write-Host "- $SettingName (设置界面)"
 Write-Host "- data\dict\pinyin\rime_ice.dict.yaml (拼音词库入口)"
 Write-Host "- data\dict\pinyin\cn_dicts\*.dict.yaml (拼音词库数据)"
 Write-Host "- data\dict\pinyin\unigram.txt (语言模型)"
@@ -270,7 +300,7 @@ Write-Host "服务已自动启动，并已配置开机自启动。"
 Write-Host ""
 Write-Host "使用方法:"
 Write-Host "1. 按 Win+Space 切换输入法"
-Write-Host "2. 从输入法列表选择`"清风输入法`""
+Write-Host "2. 从输入法列表选择`"$DisplayName`""
 Write-Host "3. 开始输入(默认拼音模式)"
 Write-Host ""
 Write-Host "热键:"
@@ -278,8 +308,8 @@ Write-Host "- Shift: 切换中英文模式"
 Write-Host "- Ctrl+Shift+E`: 切换拼音/五笔引擎"
 Write-Host ""
 Write-Host "设置:"
-Write-Host "- 运行 wind_setting.exe 或在开始菜单中找到`"清风输入法 设置`""
-Write-Host "- 配置位置: %APPDATA%\WindInput\config.yaml"
+Write-Host "- 运行 $SettingName 或在开始菜单中找到`"$ShortcutName`""
+Write-Host "- 配置位置: %APPDATA%\$AppDirName\config.yaml"
 Write-Host ""
 Write-Host "注意: 如果旧文件无法删除,请重启电脑后"
 Write-Host "重新运行安装程序以完成清理。"

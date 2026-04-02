@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 )
 
 const (
@@ -55,7 +57,7 @@ func getTSFLogConfigPath() (string, error) {
 	if base == "" {
 		return "", fmt.Errorf("LOCALAPPDATA not set")
 	}
-	return filepath.Join(base, "WindInput", "logs", "tsf_log_config"), nil
+	return filepath.Join(base, buildvariant.AppName(), "logs", "tsf_log_config"), nil
 }
 
 func loadTSFLogConfig() (mode, level string, err error) {

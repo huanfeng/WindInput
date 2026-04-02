@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/huanfeng/wind_input/internal/ipc"
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"golang.org/x/sys/windows"
 )
 
@@ -32,10 +33,12 @@ func getNamedPipeClientProcessId(handle windows.Handle) (uint32, error) {
 	return processID, nil
 }
 
-const (
-	BridgePipeName = `\\.\pipe\wind_input`
-	PushPipeName   = `\\.\pipe\wind_input_push`
+var (
+	BridgePipeName = `\\.\pipe\wind_input` + buildvariant.Suffix()
+	PushPipeName   = `\\.\pipe\wind_input` + buildvariant.Suffix() + `_push`
+)
 
+const (
 	// Buffer size for named pipe (64KB like Weasel)
 	PipeBufferSize = 64 * 1024
 

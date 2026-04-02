@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/control"
 
 	"wind_setting/internal/editor"
@@ -60,8 +61,17 @@ func (a *App) GetAddWordParams() AddWordParams {
 }
 
 // GetVersion 获取应用版本号（供前端调用）
+// Debug variant 返回 "版本号 (Debug)"
 func (a *App) GetVersion() string {
+	if buildvariant.IsDebug() {
+		return version + " (Debug)"
+	}
 	return version
+}
+
+// IsDebugVariant 返回是否为调试版构建（供前端调用）
+func (a *App) IsDebugVariant() bool {
+	return buildvariant.IsDebug()
 }
 
 // startup is called when the app starts

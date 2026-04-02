@@ -193,6 +193,7 @@ func (w *TooltipWindow) render(text string) *image.RGBA {
 	td.DrawString(text, padding, padding+fontSize*0.8, fontSize, textColor)
 	td.EndDraw()
 
+	DrawDebugBanner(img)
 	return img
 }
 

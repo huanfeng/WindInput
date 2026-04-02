@@ -61,7 +61,11 @@ void CFileLogger::Init()
     // Create named mutex for file write synchronization (only needed for file mode)
     if (_mode == LogMode::File || _mode == LogMode::All)
     {
+#ifdef WIND_DEBUG_VARIANT
+        _hMutex = CreateMutexW(nullptr, FALSE, L"Local\\WindInputDebugTSFLogMutex");
+#else
         _hMutex = CreateMutexW(nullptr, FALSE, L"Local\\WindInputTSFLogMutex");
+#endif
         if (_hMutex == nullptr)
         {
             OutputDebugStringW(L"[WindInput][FileLogger] Failed to create mutex, file logging disabled\n");
@@ -186,13 +190,13 @@ void CFileLogger::_BuildPaths()
         return;
 
     _snwprintf_s(_logDir, _countof(_logDir), _TRUNCATE,
-        L"%ls\\WindInput\\logs", appData);
+        L"%ls\\" WIND_LOG_DIR_NAME L"\\logs", appData);
 
     _snwprintf_s(_logPath, _countof(_logPath), _TRUNCATE,
-        L"%ls\\wind_tsf.log", _logDir);
+        L"%ls\\" WIND_LOG_FILE_NAME, _logDir);
 
     _snwprintf_s(_configPath, _countof(_configPath), _TRUNCATE,
-        L"%ls\\tsf_log_config", _logDir);
+        L"%ls\\" WIND_LOG_CONFIG_NAME, _logDir);
 }
 
 void CFileLogger::_ReadConfig()
@@ -292,7 +296,11 @@ void CFileLogger::_RotateIfNeeded()
 
     wchar_t oldPath[MAX_PATH];
     _snwprintf_s(oldPath, _countof(oldPath), _TRUNCATE,
+#ifdef WIND_DEBUG_VARIANT
+        L"%ls\\wind_tsf_debug.old.log", _logDir);
+#else
         L"%ls\\wind_tsf.old.log", _logDir);
+#endif
 
     DeleteFileW(oldPath);
     MoveFileW(_logPath, oldPath);

@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 )
 
 const (
-	AppName           = "WindInput"
 	DataSubDir        = "data"                // 程序目录下的数据子目录
 	ConfigFileName    = "config.yaml"         // 用户配置
 	StateFileName     = "state.yaml"          // 用户状态
@@ -24,7 +25,12 @@ func GetConfigDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get user config dir: %w", err)
 	}
-	return filepath.Join(configDir, AppName), nil
+	return filepath.Join(configDir, buildvariant.AppName()), nil
+}
+
+// GetAppName returns the application name based on build variant
+func GetAppName() string {
+	return buildvariant.AppName()
 }
 
 // GetDataDir returns the program data directory path (exeDir/data)

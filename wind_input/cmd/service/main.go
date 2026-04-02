@@ -19,17 +19,18 @@ import (
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/schema"
 	"github.com/huanfeng/wind_input/internal/ui"
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
 	pkgcontrol "github.com/huanfeng/wind_input/pkg/control"
 )
 
-const mutexName = "Global\\WindInputIMEService"
+var mutexName = "Global\\WindInput" + buildvariant.Suffix() + "IMEService"
 
 // showErrorMessageBox 显示错误弹框（MB_ICONERROR）
 func showErrorMessageBox(message string) {
 	user32 := windows.NewLazySystemDLL("user32.dll")
 	messageBox := user32.NewProc("MessageBoxW")
-	title, _ := windows.UTF16PtrFromString("清风输入法")
+	title, _ := windows.UTF16PtrFromString(buildvariant.DisplayName())
 	msg, _ := windows.UTF16PtrFromString(message)
 	messageBox.Call(0, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x10) // MB_ICONERROR
 }
@@ -198,7 +199,7 @@ func main() {
 	// 初始化日志系统
 	logger := setupLogger(cfg.Advanced.LogLevel)
 
-	logger.Info("WindInput IME Service starting...")
+	logger.Info(buildvariant.DisplayName() + " IME Service starting...")
 
 	// Log config location
 	if configPath, err := config.GetConfigPath(); err == nil {

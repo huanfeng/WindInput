@@ -178,6 +178,7 @@ func (r *ToolbarRenderer) Render(state ToolbarState) *image.RGBA {
 	}
 
 	td.EndDraw()
+	DrawDebugBanner(img)
 	return img
 }
 
@@ -405,5 +406,6 @@ func (r *ToolbarRenderer) RenderTooltip(text string) *image.RGBA {
 	td.DrawString(text, float64(width)/2-tw/2, float64(height)/2+fontSize*0.35, fontSize, textColor)
 	td.EndDraw()
 
+	DrawDebugBanner(img)
 	return img
 }

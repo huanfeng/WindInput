@@ -2,7 +2,9 @@
 
 # Build outputs (project-level)
 /build/
+/build_debug/
 /wind_tsf/build/
+/wind_tsf/build_debug/
 
 # Build cache (rime downloads, etc.)
 /.cache/

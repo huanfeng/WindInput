@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 )
 
 // 管道名称
-const PipeName = `\\.\pipe\wind_input_control`
+var PipeName = `\\.\pipe\wind_input` + buildvariant.Suffix() + `_control`
 
 // 命令类型
 const (

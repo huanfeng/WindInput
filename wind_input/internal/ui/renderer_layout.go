@@ -346,6 +346,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 
 	td.EndDraw()
 
+	DrawDebugBanner(img)
 	return img, result
 }
 
@@ -756,5 +757,6 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 	td.EndDraw()
 
+	DrawDebugBanner(img)
 	return img, result
 }

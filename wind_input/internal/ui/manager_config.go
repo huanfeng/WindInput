@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"fmt"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 )
 
 // UpdateConfig 更新 UI 配置（热更新）
@@ -171,9 +174,13 @@ func (m *Manager) doOpenSettings(page string) {
 	procShellExecuteW := shell32.NewProc("ShellExecuteW")
 
 	// Try paths in order of preference
+	settingExe := "wind_setting.exe"
+	if buildvariant.IsDebug() {
+		settingExe = "wind_setting_debug.exe"
+	}
 	paths := []string{
-		"C:\\Program Files\\WindInput\\wind_setting.exe",
-		"wind_setting.exe", // Current directory or PATH
+		fmt.Sprintf("C:\\Program Files\\%s\\%s", buildvariant.AppName(), settingExe),
+		settingExe, // Current directory or PATH
 	}
 
 	openPtr, _ := windows.UTF16PtrFromString("open")

@@ -2,7 +2,9 @@
     [ValidateSet("debug", "release", "skip")]
     [string]$WailsMode = "debug",
 
-    [switch]$SettingOnly
+    [switch]$SettingOnly,
+
+    [switch]$DebugVariant
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +16,11 @@ Write-Host ""
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $BuildDir = Join-Path $ScriptDir "build"
+
+if ($DebugVariant) {
+    $BuildDir = Join-Path $ScriptDir "build_debug"
+    Write-Host "*** DEBUG VARIANT BUILD ***" -ForegroundColor Magenta
+}
 
 # 读取版本号
 $VersionFile = Join-Path $ScriptDir "VERSION"
@@ -66,6 +73,12 @@ if ($SettingOnly) {
         [System.IO.File]::WriteAllText($wailsJsonPath, $jsonText, (New-Object System.Text.UTF8Encoding $false))
     }
 
+    $settingLdflags = "-X main.version=$AppVersion"
+    if ($DebugVariant) {
+        $settingLdflags += " -X github.com/huanfeng/wind_input/pkg/buildvariant.variant=debug"
+    }
+    $settingDstName = if ($DebugVariant) { "wind_setting_debug.exe" } else { "wind_setting.exe" }
+
     Push-Location (Join-Path $ScriptDir "wind_setting")
     try {
         if (-not (Get-Command wails -ErrorAction SilentlyContinue)) {
@@ -73,9 +86,9 @@ if ($SettingOnly) {
             exit 1
         }
         if ($WailsMode -eq "debug") {
-            & wails build -debug -ldflags "-X main.version=$AppVersion"
+            & wails build -debug -ldflags $settingLdflags
         } else {
-            & wails build -ldflags "-X main.version=$AppVersion"
+            & wails build -ldflags $settingLdflags
         }
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[错误] wind_setting 构建失败" -ForegroundColor Red
@@ -86,18 +99,20 @@ if ($SettingOnly) {
             Write-Host "[错误] wind_setting.exe 未生成" -ForegroundColor Red
             exit 1
         }
-        Copy-Item -Path $settingExe -Destination $BuildDir -Force
+        Copy-Item -Path $settingExe -Destination (Join-Path $BuildDir $settingDstName) -Force
         Write-Host "设置界面构建成功 ($WailsMode 模式)"
     } finally {
         Pop-Location
     }
     Write-Host ""
-    Write-Host "输出: build\wind_setting.exe"
+    $buildDirName = if ($DebugVariant) { "build_debug" } else { "build" }
+    Write-Host "输出: $buildDirName\$settingDstName"
     exit 0
 }
 
 # [1/6] 构建 Go 服务
-Write-Host "[1/6] 构建 Go 服务(wind_input.exe)..."
+$goExeName = if ($DebugVariant) { "wind_input_debug.exe" } else { "wind_input.exe" }
+Write-Host "[1/6] 构建 Go 服务($goExeName)..."
 if (-not (Test-Path $BuildDir)) { New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null }
 Push-Location (Join-Path $ScriptDir "wind_input")
 try {
@@ -113,7 +128,11 @@ try {
     }
     Pop-Location
 
-    & go build -ldflags "-H windowsgui -X main.version=$AppVersion" -o (Join-Path $BuildDir "wind_input.exe") ./cmd/service
+    $goLdflags = "-H windowsgui -X main.version=$AppVersion"
+    if ($DebugVariant) {
+        $goLdflags += " -X github.com/huanfeng/wind_input/pkg/buildvariant.variant=debug"
+    }
+    & go build -ldflags $goLdflags -o (Join-Path $BuildDir $goExeName) ./cmd/service
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[错误] Go 构建失败" -ForegroundColor Red
         exit 1
@@ -125,8 +144,9 @@ Write-Host "Go 服务构建成功"
 Write-Host ""
 
 # [2/6] 构建 C++ DLL
-Write-Host "[2/6] 构建 C++ DLL (wind_tsf.dll)..."
-$cppBuildDir = Join-Path $ScriptDir "wind_tsf\build"
+$dllName = if ($DebugVariant) { "wind_tsf_debug.dll" } else { "wind_tsf.dll" }
+Write-Host "[2/6] 构建 C++ DLL ($dllName)..."
+$cppBuildDir = if ($DebugVariant) { Join-Path $ScriptDir "wind_tsf\build_debug" } else { Join-Path $ScriptDir "wind_tsf\build" }
 if (-not (Test-Path $cppBuildDir)) { New-Item -ItemType Directory -Path $cppBuildDir -Force | Out-Null }
 Push-Location $cppBuildDir
 try {
@@ -135,7 +155,11 @@ try {
         Remove-Item (Join-Path $cppBuildDir "CMakeCache.txt") -Force
         Remove-Item (Join-Path $cppBuildDir "CMakeFiles") -Recurse -Force -ErrorAction SilentlyContinue
     }
-    & cmake .. "-DAPP_VERSION_MAJOR=$VerMajor" "-DAPP_VERSION_MINOR=$VerMinor" "-DAPP_VERSION_PATCH=$VerPatch" "-DAPP_VERSION_BUILD=$VerBuild" "-DAPP_VERSION_STR=$VersionCore"
+    $cmakeArgs = @("..", "-DAPP_VERSION_MAJOR=$VerMajor", "-DAPP_VERSION_MINOR=$VerMinor", "-DAPP_VERSION_PATCH=$VerPatch", "-DAPP_VERSION_BUILD=$VerBuild", "-DAPP_VERSION_STR=$VersionCore")
+    if ($DebugVariant) {
+        $cmakeArgs += "-DWIND_DEBUG_VARIANT=ON"
+    }
+    & cmake @cmakeArgs
     if ($LASTEXITCODE -ne 0) { Write-Host "[错误] CMake 配置失败" -ForegroundColor Red; exit 1 }
     & cmake --build . --config Release
     if ($LASTEXITCODE -ne 0) {
@@ -146,15 +170,26 @@ try {
     Pop-Location
 }
 
-if (-not (Test-Path (Join-Path $BuildDir "wind_tsf.dll"))) {
-    Write-Host "[错误] C++ 构建完成但 wind_tsf.dll 未生成到 build 目录" -ForegroundColor Red
-    exit 1
+# 确保 DLL 在正确的输出目录中
+if (-not (Test-Path (Join-Path $BuildDir $dllName))) {
+    # CMake 可能将 DLL 输出到其 build 目录下，手动复制
+    $cmakeDllRelease = Join-Path $cppBuildDir "Release\$dllName"
+    $cmakeDllRoot = Join-Path $cppBuildDir $dllName
+    if (Test-Path $cmakeDllRelease) {
+        Copy-Item -Path $cmakeDllRelease -Destination $BuildDir -Force
+    } elseif (Test-Path $cmakeDllRoot) {
+        Copy-Item -Path $cmakeDllRoot -Destination $BuildDir -Force
+    } else {
+        Write-Host "[错误] C++ 构建完成但 $dllName 未找到" -ForegroundColor Red
+        exit 1
+    }
 }
 Write-Host "C++ DLL 构建成功"
 Write-Host ""
 
 # [3/6] 构建设置界面
-Write-Host "[3/6] 构建设置界面(wind_setting.exe)..."
+$settingDstName = if ($DebugVariant) { "wind_setting_debug.exe" } else { "wind_setting.exe" }
+Write-Host "[3/6] 构建设置界面($settingDstName)..."
 if ($WailsMode -eq "skip") {
     Write-Host "[提示] 已按参数跳过 Wails 构建"
 } else {
@@ -164,16 +199,18 @@ if ($WailsMode -eq "skip") {
         $wailsJsonPath = Join-Path $ScriptDir "wind_setting\wails.json"
         if (Test-Path $wailsJsonPath) {
             $wailsJson = Get-Content $wailsJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $productDisplayName = if ($DebugVariant) { "清风输入法 Debug 设置" } else { "清风输入法 设置" }
             if (-not $wailsJson.info) {
                 $wailsJson | Add-Member -NotePropertyName "info" -NotePropertyValue ([PSCustomObject]@{
                     companyName = "清风输入法"
-                    productName = "清风输入法 设置"
+                    productName = $productDisplayName
                     productVersion = $VersionCore
                     copyright = "Copyright © 2026 清风输入法"
                     comments = "清风输入法设置工具"
                 }) -Force
             } else {
                 $wailsJson.info | Add-Member -NotePropertyName "productVersion" -NotePropertyValue $VersionCore -Force
+                $wailsJson.info | Add-Member -NotePropertyName "productName" -NotePropertyValue $productDisplayName -Force
             }
             $jsonText = $wailsJson | ConvertTo-Json -Depth 10
             [System.IO.File]::WriteAllText($wailsJsonPath, $jsonText, (New-Object System.Text.UTF8Encoding $false))
@@ -185,10 +222,14 @@ if ($WailsMode -eq "skip") {
             Write-Host "       如需跳过此步骤,请使用: .\build_all.ps1 -WailsMode skip" -ForegroundColor Yellow
             exit 1
         } else {
+            $wailsLdflags = "-X main.version=$AppVersion"
+            if ($DebugVariant) {
+                $wailsLdflags += " -X github.com/huanfeng/wind_input/pkg/buildvariant.variant=debug"
+            }
             if ($WailsMode -eq "debug") {
-                & wails build -debug -ldflags "-X main.version=$AppVersion"
+                & wails build -debug -ldflags $wailsLdflags
             } else {
-                & wails build -ldflags "-X main.version=$AppVersion"
+                & wails build -ldflags $wailsLdflags
             }
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "[错误] wind_setting 构建失败,终止后续流程。" -ForegroundColor Red
@@ -199,7 +240,7 @@ if ($WailsMode -eq "skip") {
                 Write-Host "[错误] wind_setting.exe 未生成,终止后续流程。" -ForegroundColor Red
                 exit 1
             }
-            Copy-Item -Path $settingExe -Destination $BuildDir -Force
+            Copy-Item -Path $settingExe -Destination (Join-Path $BuildDir $settingDstName) -Force
             if ($WailsMode -eq "debug") {
                 Write-Host "设置界面构建成功 (debug 模式,可按 F12 打开 DevTools)"
             } else {
@@ -398,7 +439,7 @@ Write-Host ""
 
 # [6/6] 检查输出文件
 Write-Host "[6/6] 检查输出文件..."
-$checkFiles = @("wind_tsf.dll", "wind_input.exe")
+$checkFiles = if ($DebugVariant) { @("wind_tsf_debug.dll", "wind_input_debug.exe") } else { @("wind_tsf.dll", "wind_input.exe") }
 foreach ($f in $checkFiles) {
     if (-not (Test-Path (Join-Path $BuildDir $f))) {
         Write-Host "[错误] 未找到 $f" -ForegroundColor Red
@@ -406,23 +447,28 @@ foreach ($f in $checkFiles) {
     }
 }
 
+$buildDirLabel = if ($DebugVariant) { "build_debug" } else { "build" }
+$dllLabel = if ($DebugVariant) { "wind_tsf_debug.dll" } else { "wind_tsf.dll" }
+$exeLabel = if ($DebugVariant) { "wind_input_debug.exe" } else { "wind_input.exe" }
+$settingLabel = if ($DebugVariant) { "wind_setting_debug.exe" } else { "wind_setting.exe" }
+
 Write-Host ""
 Write-Host "======================================"
 Write-Host "构建完成！"
 Write-Host "======================================"
 Write-Host ""
 Write-Host "输出文件:"
-Write-Host "- build\wind_tsf.dll（TSF 桥接）"
-Write-Host "- build\wind_input.exe（输入法服务）"
-Write-Host "- build\wind_setting.exe（设置界面）"
-Write-Host "- build\data\dict\pinyin\*.dict.yaml（拼音词库）"
-Write-Host "- build\data\dict\pinyin\unigram.txt（Unigram 语言模型）"
-Write-Host "- build\data\dict\wubi86\wubi86_jidian*.dict.yaml（五笔词库）"
-Write-Host "- build\data\dict\common_chars.txt（常用字表）"
-Write-Host "- build\data\config.yaml（默认配置）"
-Write-Host "- build\data\schemas\*.schema.yaml（输入方案配置）"
-Write-Host "- build\data\system.phrases.yaml（系统短语配置）"
-Write-Host "- build\data\themes\*\theme.yaml（主题配置）"
+Write-Host "- $buildDirLabel\$dllLabel（TSF 桥接）"
+Write-Host "- $buildDirLabel\$exeLabel（输入法服务）"
+Write-Host "- $buildDirLabel\$settingLabel（设置界面）"
+Write-Host "- $buildDirLabel\data\dict\pinyin\*.dict.yaml（拼音词库）"
+Write-Host "- $buildDirLabel\data\dict\pinyin\unigram.txt（Unigram 语言模型）"
+Write-Host "- $buildDirLabel\data\dict\wubi86\wubi86_jidian*.dict.yaml（五笔词库）"
+Write-Host "- $buildDirLabel\data\dict\common_chars.txt（常用字表）"
+Write-Host "- $buildDirLabel\data\config.yaml（默认配置）"
+Write-Host "- $buildDirLabel\data\schemas\*.schema.yaml（输入方案配置）"
+Write-Host "- $buildDirLabel\data\system.phrases.yaml（系统短语配置）"
+Write-Host "- $buildDirLabel\data\themes\*\theme.yaml（主题配置）"
 Write-Host ""
 Write-Host "注: .wdb 二进制词库由运行时按需自动生成并缓存"
 Write-Host ""
@@ -431,13 +477,18 @@ Write-Host "  拼音: 雾凇拼音 rime-ice (https://github.com/iDvel/rime-ice)"
 Write-Host "  五笔: 极点五笔 rime-wubi86-jidian (https://github.com/KyleBing/rime-wubi86-jidian)"
 Write-Host ""
 Write-Host "开发调试:"
-Write-Host "  cd build; .\wind_input.exe -log debug"
+Write-Host "  cd $buildDirLabel; .\$exeLabel -log debug"
 Write-Host ""
 Write-Host "安装:"
-Write-Host "  以管理员身份运行 installer\install.ps1"
+if ($DebugVariant) {
+    Write-Host "  以管理员身份运行 installer\install.ps1 -DebugVariant"
+} else {
+    Write-Host "  以管理员身份运行 installer\install.ps1"
+}
 Write-Host ""
 Write-Host "Wails 构建选项:"
 Write-Host "  .\build_all.ps1                      (默认 debug)"
 Write-Host "  .\build_all.ps1 -WailsMode release"
 Write-Host "  .\build_all.ps1 -WailsMode skip"
+Write-Host "  .\build_all.ps1 -DebugVariant         (调试版变体)"
 exit 0

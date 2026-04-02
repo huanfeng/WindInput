@@ -1,0 +1,7 @@
+LIBRARY "@TSF_TARGET_NAME@"
+
+EXPORTS
+    DllCanUnloadNow     PRIVATE
+    DllGetClassObject   PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE

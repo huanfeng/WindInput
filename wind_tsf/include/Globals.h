@@ -11,7 +11,7 @@
 // Logging Configuration
 // ============================================================================
 // All log levels are compiled in. Output is controlled at runtime via config file:
-//   %LOCALAPPDATA%\WindInput\logs\tsf_log_config
+//   %LOCALAPPDATA%\<WIND_LOG_DIR_NAME>\logs\<WIND_LOG_CONFIG_NAME>
 //
 // Config format (one key=value per line):
 //   mode=none          Output mode: none(default) | file | debugstring | all
@@ -138,8 +138,13 @@ extern const GUID c_guidDisplayAttributeInput;
 extern const GUID c_guidDisplayAttributeConverted;
 
 // 输入法名称
+#ifdef WIND_DEBUG_VARIANT
+#define TEXTSERVICE_NAME        L"清风输入法 (Debug)"
+#define TEXTSERVICE_DESC        L"清风输入法 Debug (WindInputDebug)"
+#else
 #define TEXTSERVICE_NAME        L"清风输入法"
 #define TEXTSERVICE_DESC        L"清风输入法 (WindInput)"
+#endif
 #define TEXTSERVICE_ICON_INDEX  0
 
 // 语言 ID (简体中文)
@@ -147,8 +152,13 @@ extern const GUID c_guidDisplayAttributeConverted;
 
 // 命名管道名称 (与 Go Service 通信)
 // 注意：不使用 LOCAL\ 前缀，AppContainer 进程可能无法访问带目录前缀的管道
+#ifdef WIND_DEBUG_VARIANT
+#define PIPE_NAME               L"\\\\.\\pipe\\wind_input_debug"
+#define PUSH_PIPE_NAME          L"\\\\.\\pipe\\wind_input_debug_push"
+#else
 #define PIPE_NAME               L"\\\\.\\pipe\\wind_input"
 #define PUSH_PIPE_NAME          L"\\\\.\\pipe\\wind_input_push"
+#endif
 
 // Modifier key flags (using KEY_ prefix to avoid Windows macro conflicts)
 constexpr int KEY_MOD_SHIFT = 0x01;

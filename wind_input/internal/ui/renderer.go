@@ -8,6 +8,7 @@ import (
 
 	"github.com/gogpu/gg"
 	ggtext "github.com/gogpu/gg/text"
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
@@ -414,4 +415,67 @@ func (r *Renderer) RenderModeIndicator(mode string) *image.RGBA {
 	td.EndDraw()
 
 	return img
+}
+
+// DrawDebugBanner draws a small anti-aliased red dot in the top-right area (debug variant only)
+// Inset from the corner to stay within rounded rectangle bounds.
+func DrawDebugBanner(img *image.RGBA) {
+	if !buildvariant.IsDebug() {
+		return
+	}
+
+	bounds := img.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	if w < 20 || h < 20 {
+		return
+	}
+
+	scale := GetDPIScale()
+	radius := 4.0 * scale // 红点半径
+	inset := 8.0 * scale  // 从边缘内缩，避开圆角
+
+	// 红点中心（右上角内缩）
+	cxf := float64(w) - inset
+	cyf := inset
+
+	// 扫描范围：圆心 ± (radius+1)，+1 为抗锯齿过渡带
+	ri := int(math.Ceil(radius)) + 1
+	for dy := -ri; dy <= ri; dy++ {
+		for dx := -ri; dx <= ri; dx++ {
+			dist := math.Sqrt(float64(dx)*float64(dx) + float64(dy)*float64(dy))
+			if dist > radius+1 {
+				continue
+			}
+
+			// 抗锯齿：边缘 1px 过渡带内线性插值 alpha
+			var alpha float64
+			if dist <= radius-0.5 {
+				alpha = 1.0
+			} else if dist >= radius+0.5 {
+				alpha = 0.0
+			} else {
+				alpha = 1.0 - (dist - (radius - 0.5))
+			}
+			if alpha <= 0 {
+				continue
+			}
+
+			px := bounds.Min.X + int(cxf) + dx
+			py := bounds.Min.Y + int(cyf) + dy
+			if px < bounds.Min.X || px >= bounds.Max.X || py < bounds.Min.Y || py >= bounds.Max.Y {
+				continue
+			}
+
+			// Alpha 混合：将红点与背景像素混合
+			a := uint8(alpha * 255)
+			bg := img.RGBAAt(px, py)
+			invA := 255 - uint16(a)
+			nr := uint8((uint16(220)*uint16(a) + uint16(bg.R)*invA) / 255)
+			ng := uint8((uint16(40)*uint16(a) + uint16(bg.G)*invA) / 255)
+			nb := uint8((uint16(40)*uint16(a) + uint16(bg.B)*invA) / 255)
+			na := uint8(math.Min(float64(uint16(a)+uint16(bg.A)), 255))
+			img.SetRGBA(px, py, color.RGBA{nr, ng, nb, na})
+		}
+	}
 }
