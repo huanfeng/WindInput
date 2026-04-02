@@ -582,14 +582,14 @@ onUnmounted(() => {
           </div>
           <div class="setting-item">
             <div class="setting-info">
-              <label>五笔反查提示</label>
-              <p class="setting-hint">在候选词旁显示对应的五笔编码</p>
+              <label>编码反查提示</label>
+              <p class="setting-hint">在候选词旁显示对应的码表编码</p>
             </div>
             <div class="setting-control">
               <label class="switch">
                 <input
                   type="checkbox"
-                  v-model="getPinyinConfig(schemaID).show_wubi_hint"
+                  v-model="getPinyinConfig(schemaID).show_code_hint"
                   @change="onSchemaConfigChange(schemaID)"
                 />
                 <span class="slider"></span>
@@ -662,8 +662,8 @@ onUnmounted(() => {
 
         <!-- 混输类型（五笔配置 + 拼音配置 + 混输专属配置） -->
         <template v-if="getEngineType(schemaID) === 'mixed'">
-          <!-- 五笔配置区 -->
-          <div class="setting-section-title">五笔设置</div>
+          <!-- 码表配置区 -->
+          <div class="setting-section-title">码表设置</div>
           <div class="setting-item">
             <div class="setting-info">
               <label>显示编码提示</label>
@@ -699,7 +699,7 @@ onUnmounted(() => {
           <div class="setting-item">
             <div class="setting-info">
               <label>候选排序</label>
-              <p class="setting-hint">五笔候选词的排列方式</p>
+              <p class="setting-hint">码表候选词的排列方式</p>
             </div>
             <div class="setting-control">
               <select
@@ -716,14 +716,14 @@ onUnmounted(() => {
           <div class="setting-section-title">拼音设置</div>
           <div class="setting-item">
             <div class="setting-info">
-              <label>五笔反查提示</label>
-              <p class="setting-hint">在拼音候选词旁显示对应的五笔编码</p>
+              <label>编码反查提示</label>
+              <p class="setting-hint">在拼音候选词旁显示对应的码表编码</p>
             </div>
             <div class="setting-control">
               <label class="switch">
                 <input
                   type="checkbox"
-                  v-model="getPinyinConfig(schemaID).show_wubi_hint"
+                  v-model="getPinyinConfig(schemaID).show_code_hint"
                   @change="onSchemaConfigChange(schemaID)"
                 />
                 <span class="slider"></span>

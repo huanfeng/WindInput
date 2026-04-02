@@ -281,7 +281,8 @@ type PinyinConvertResult struct {
 	CompletedText string
 
 	// 状态标记
-	HasMore    bool // 是否还有更多候选
-	IsEmpty    bool // 是否空码（无候选）
-	NeedRefine bool // 是否需要用户继续输入以细化
+	HasMore         bool // 是否还有更多候选
+	IsEmpty         bool // 是否空码（无候选）
+	NeedRefine      bool // 是否需要用户继续输入以细化
+	HasFullSyllable bool // 输入中是否包含至少一个完整音节（非简拼）
 }

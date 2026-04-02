@@ -1,5 +1,5 @@
-// Package wubi 提供五笔输入法引擎
-package wubi
+// Package codetable 提供码表输入法引擎
+package codetable
 
 import (
 	"log/slog"
@@ -11,39 +11,48 @@ import (
 	"github.com/huanfeng/wind_input/internal/dict"
 )
 
-// Config 五笔引擎配置
+const (
+	// PrefixWeightPenalty 前缀匹配固定降权值（ConvertRaw 使用）
+	PrefixWeightPenalty = 2000000
+	// PrefixWeightPenaltyPerKey 前缀匹配每剩余键降权值（ConvertEx 使用）
+	PrefixWeightPenaltyPerKey = 1000000
+)
+
+// Config 码表引擎配置
 type Config struct {
-	MaxCodeLength     int    // 最大码长，默认4
-	AutoCommitAt4     bool   // 四码唯一时自动上屏
-	ClearOnEmptyAt4   bool   // 四码为空时清空
-	TopCodeCommit     bool   // 五码顶字上屏
-	PunctCommit       bool   // 标点顶字上屏
-	FilterMode        string // 候选过滤模式
-	ShowCodeHint      bool   // 是否显示编码提示
-	SingleCodeInput   bool   // 逐字键入模式（关闭前缀匹配）
-	DedupCandidates   bool   // 候选去重（内部开关，未来可能开放给用户）
-	CandidateSortMode string // 候选排序模式：frequency（词频）、natural（自然顺序）
-	EnableUserFreq    bool   // 启用用户词频学习
-	FrequencyOnly     bool   // 仅调频模式：不创建新词，只调整已有词条权重
-	ProtectTopN       int    // 首选保护：前 N 位锁定码表原始顺序
-	SkipShadow        bool   // 跳过 Shadow 规则应用（混输模式下由外层统一应用）
+	MaxCodeLength      int    // 最大码长，默认4
+	AutoCommitAt4      bool   // 四码唯一时自动上屏
+	ClearOnEmptyAt4    bool   // 四码为空时清空
+	TopCodeCommit      bool   // 五码顶字上屏
+	PunctCommit        bool   // 标点顶字上屏
+	FilterMode         string // 候选过滤模式
+	ShowCodeHint       bool   // 是否显示编码提示
+	SingleCodeInput    bool   // 逐字键入模式（关闭前缀匹配）
+	DedupCandidates    bool   // 候选去重（内部开关，未来可能开放给用户）
+	CandidateSortMode  string // 候选排序模式：frequency（词频）、natural（自然顺序）
+	EnableUserFreq     bool   // 启用用户词频学习
+	FrequencyOnly      bool   // 仅调频模式：不创建新词，只调整已有词条权重
+	ProtectTopN        int    // 首选保护：前 N 位锁定码表原始顺序
+	SkipShadow         bool   // 跳过 Shadow 规则应用（混输模式下由外层统一应用）
+	SkipSingleCharFreq bool   // 单字不自动调频
 }
 
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
-		MaxCodeLength:   4,
-		AutoCommitAt4:   false,
-		ClearOnEmptyAt4: false,
-		TopCodeCommit:   true,
-		PunctCommit:     true,
-		FilterMode:      "smart",
-		ShowCodeHint:    true,
-		DedupCandidates: true,
+		MaxCodeLength:      4,
+		AutoCommitAt4:      false,
+		ClearOnEmptyAt4:    false,
+		TopCodeCommit:      true,
+		PunctCommit:        true,
+		FilterMode:         "smart",
+		ShowCodeHint:       true,
+		DedupCandidates:    true,
+		SkipSingleCharFreq: true,
 	}
 }
 
-// Engine 五笔输入引擎
+// Engine 码表输入引擎
 type Engine struct {
 	codeTable   *dict.CodeTable // 主码表
 	config      *Config
@@ -51,7 +60,7 @@ type Engine struct {
 	logger      *slog.Logger
 }
 
-// NewEngine 创建五笔引擎
+// NewEngine 创建码表引擎
 func NewEngine(config *Config, logger *slog.Logger) *Engine {
 	if config == nil {
 		config = DefaultConfig()
@@ -173,7 +182,7 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 		if e.config.ShowCodeHint && len(prefixCandidates[i].Code) > inputLen {
 			prefixCandidates[i].Hint = prefixCandidates[i].Code[inputLen:]
 		}
-		prefixCandidates[i].Weight -= 2000000
+		prefixCandidates[i].Weight -= PrefixWeightPenalty
 	}
 
 	// Phase 4: 合并 + 去重
@@ -253,7 +262,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 			prefixCandidates[i].Hint = prefixCandidates[i].Code[inputLen:]
 		}
 		remaining := len(prefixCandidates[i].Code) - inputLen
-		prefixCandidates[i].Weight -= remaining * 1000000
+		prefixCandidates[i].Weight -= remaining * PrefixWeightPenaltyPerKey
 	}
 
 	// ========== Phase 4: 合并 + 去重（Shadow top/delete 已由 CompositeDict 处理）==========
@@ -337,7 +346,7 @@ func (e *Engine) checkAutoCommit(result *ConvertResult, input string, candidates
 	inputLen := len(input)
 	e.logger.Debug("checkAutoCommit", "input", input, "len", inputLen, "candidates", len(candidates), "autoCommitAt4", e.config.AutoCommitAt4, "maxCode", e.config.MaxCodeLength)
 
-	// 四码唯一时自动上屏
+	// 达到最大码长且唯一时自动上屏
 	if e.config.AutoCommitAt4 && inputLen >= e.config.MaxCodeLength && len(candidates) == 1 {
 		result.ShouldCommit = true
 		result.CommitText = candidates[0].Text
@@ -347,8 +356,8 @@ func (e *Engine) checkAutoCommit(result *ConvertResult, input string, candidates
 	}
 }
 
-// HandleTopCode 处理顶码（五码顶字）
-// 当输入第五码时，自动上屏首选并将第五码作为新输入
+// HandleTopCode 处理顶码（超过最大码长时顶字）
+// 当输入超过最大码长时，自动上屏首选并将多余的码作为新输入
 // 通过 ConvertEx 走完整候选流水线，确保顶码结果与用户看到的首选一致
 func (e *Engine) HandleTopCode(input string) (commitText string, newInput string, shouldCommit bool) {
 	e.logger.Debug("HandleTopCode", "input", input, "topCodeCommit", e.config.TopCodeCommit, "maxCodeLength", e.config.MaxCodeLength)
@@ -363,7 +372,7 @@ func (e *Engine) HandleTopCode(input string) (commitText string, newInput string
 		return "", input, false
 	}
 
-	// 取前四码，走完整候选流水线（包括用户词、短语、Shadow 规则）
+	// 取前 N 码（最大码长），走完整候选流水线（包括用户词、短语、Shadow 规则）
 	prefix := input[:e.config.MaxCodeLength]
 	result := e.ConvertEx(prefix, 1)
 
@@ -380,7 +389,7 @@ func (e *Engine) HandleTopCode(input string) (commitText string, newInput string
 
 // Reset 重置引擎状态
 func (e *Engine) Reset() {
-	// 五笔引擎无状态，无需重置
+	// 码表引擎无状态，无需重置
 }
 
 // OnCandidateSelected 用户选词回调（词频学习）
@@ -397,8 +406,8 @@ func (e *Engine) OnCandidateSelected(code, text string) {
 		return
 	}
 
-	// 单字不自动调频（五笔单字靠码表固定顺序）
-	if len([]rune(text)) <= 1 {
+	// 单字不自动调频（码表单字靠码表固定顺序）
+	if e.config.SkipSingleCharFreq && len([]rune(text)) <= 1 {
 		return
 	}
 
@@ -447,7 +456,7 @@ func (e *Engine) getOriginalRank(code, text string) int {
 
 // Type 返回引擎类型
 func (e *Engine) Type() string {
-	return "wubi"
+	return "codetable"
 }
 
 // GetConfig 获取配置

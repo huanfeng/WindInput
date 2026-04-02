@@ -256,7 +256,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>临时拼音触发键</label>
-          <p class="setting-hint">五笔模式下按触发键临时切换拼音输入</p>
+          <p class="setting-hint">码表模式下按触发键临时切换拼音输入</p>
         </div>
         <div class="setting-control">
           <div class="checkbox-group">
@@ -290,35 +290,88 @@
     <!-- 更多快捷键 -->
     <div class="settings-card">
       <div class="card-title">更多快捷键</div>
-      <div class="setting-item" v-for="item in genericHotkeyItems" :key="item.field">
+      <div
+        class="setting-item"
+        v-for="item in genericHotkeyItems"
+        :key="item.field"
+      >
         <div class="setting-info">
           <label>{{ item.label }}</label>
           <p class="setting-hint">{{ item.hint }}</p>
         </div>
         <div class="setting-control">
-          <div class="hotkey-recorder"
-               :class="{ recording: recordingField === item.field }"
-               tabindex="0"
-               @click="toggleRecording(item.field)"
-               @blur="stopRecording(item.field)"
-               @keydown="handleRecordKeydown($event, item.field)">
-            <span class="hotkey-display" :class="{ placeholder: isPlaceholder(item.field) }">
+          <div
+            class="hotkey-recorder"
+            :class="{ recording: recordingField === item.field }"
+            tabindex="0"
+            @click="toggleRecording(item.field)"
+            @blur="stopRecording(item.field)"
+            @keydown="handleRecordKeydown($event, item.field)"
+          >
+            <span
+              class="hotkey-display"
+              :class="{ placeholder: isPlaceholder(item.field) }"
+            >
               {{ getRecorderDisplay(item.field) }}
             </span>
-            <button v-if="getHotkeyValue(item.field) !== 'none' && recordingField !== item.field"
-                    class="hotkey-action-btn" @click.stop="clearHotkey(item.field)"
-                    title="清除">
-              <svg width="14" height="14" viewBox="0 0 14 14"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <button
+              v-if="
+                getHotkeyValue(item.field) !== 'none' &&
+                recordingField !== item.field
+              "
+              class="hotkey-action-btn"
+              @click.stop="clearHotkey(item.field)"
+              title="清除"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14">
+                <path
+                  d="M3.5 3.5l7 7M10.5 3.5l-7 7"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                />
+              </svg>
             </button>
-            <button v-if="recordingField === item.field"
-                    class="hotkey-action-btn" @mousedown.prevent.stop="stopRecording(item.field)"
-                    title="取消录入">
-              <svg width="14" height="14" viewBox="0 0 14 14"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <button
+              v-if="recordingField === item.field"
+              class="hotkey-action-btn"
+              @mousedown.prevent.stop="stopRecording(item.field)"
+              title="取消录入"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14">
+                <path
+                  d="M3.5 3.5l7 7M10.5 3.5l-7 7"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                />
+              </svg>
             </button>
-            <button v-if="hasNonDefaultValue(item.field) && recordingField !== item.field"
-                    class="hotkey-action-btn" @click.stop="restoreDefault(item.field)"
-                    title="恢复默认">
-              <svg width="14" height="14" viewBox="0 0 14 14"><path d="M2.5 7.5a5 5 0 1 1 1 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M2.5 10.5v-3h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <button
+              v-if="
+                hasNonDefaultValue(item.field) && recordingField !== item.field
+              "
+              class="hotkey-action-btn"
+              @click.stop="restoreDefault(item.field)"
+              title="恢复默认"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14">
+                <path
+                  d="M2.5 7.5a5 5 0 1 1 1 3"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                />
+                <path
+                  d="M2.5 10.5v-3h3"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
             </button>
           </div>
         </div>
@@ -343,7 +396,11 @@ const emit = defineEmits<{
 
 // 通用快捷键字段定义
 const genericHotkeyItems = [
-  { field: "toggle_toolbar", label: "显示/隐藏状态栏", hint: "切换状态栏的显示状态" },
+  {
+    field: "toggle_toolbar",
+    label: "显示/隐藏状态栏",
+    hint: "切换状态栏的显示状态",
+  },
   { field: "open_settings", label: "打开设置", hint: "打开设置窗口" },
 ];
 
@@ -448,22 +505,42 @@ function mapKeyToName(key: string, _code: string): string | null {
     return key;
   }
   const specialKeys: Record<string, string> = {
-    "`": "`", "~": "`",
-    "-": "-", _: "-",
-    "=": "=", "+": "=",
-    "[": "[", "{": "[",
-    "]": "]", "}": "]",
-    "\\": "\\", "|": "\\",
-    ";": ";", ":": ";",
-    "'": "'", '"': "'",
-    ",": ",", "<": ",",
-    ".": ".", ">": ".",
-    "/": "/", "?": "/",
+    "`": "`",
+    "~": "`",
+    "-": "-",
+    _: "-",
+    "=": "=",
+    "+": "=",
+    "[": "[",
+    "{": "[",
+    "]": "]",
+    "}": "]",
+    "\\": "\\",
+    "|": "\\",
+    ";": ";",
+    ":": ";",
+    "'": "'",
+    '"': "'",
+    ",": ",",
+    "<": ",",
+    ".": ".",
+    ">": ".",
+    "/": "/",
+    "?": "/",
     " ": "space",
     Tab: "tab",
-    F1: "f1", F2: "f2", F3: "f3", F4: "f4",
-    F5: "f5", F6: "f6", F7: "f7", F8: "f8",
-    F9: "f9", F10: "f10", F11: "f11", F12: "f12",
+    F1: "f1",
+    F2: "f2",
+    F3: "f3",
+    F4: "f4",
+    F5: "f5",
+    F6: "f6",
+    F7: "f7",
+    F8: "f8",
+    F9: "f9",
+    F10: "f10",
+    F11: "f11",
+    F12: "f12",
   };
   return specialKeys[key] || null;
 }
@@ -482,13 +559,34 @@ function formatHotkeyDisplay(value: string): string {
   if (!value || value === "none") return "未设置（点击录入）";
 
   const labels: Record<string, string> = {
-    ctrl: "Ctrl", shift: "Shift", alt: "Alt",
-    space: "Space", tab: "Tab",
-    f1: "F1", f2: "F2", f3: "F3", f4: "F4",
-    f5: "F5", f6: "F6", f7: "F7", f8: "F8",
-    f9: "F9", f10: "F10", f11: "F11", f12: "F12",
-    "`": "`", "-": "-", "=": "=", "[": "[", "]": "]",
-    "\\": "\\", ";": ";", "'": "'", ",": ",", ".": ".", "/": "/",
+    ctrl: "Ctrl",
+    shift: "Shift",
+    alt: "Alt",
+    space: "Space",
+    tab: "Tab",
+    f1: "F1",
+    f2: "F2",
+    f3: "F3",
+    f4: "F4",
+    f5: "F5",
+    f6: "F6",
+    f7: "F7",
+    f8: "F8",
+    f9: "F9",
+    f10: "F10",
+    f11: "F11",
+    f12: "F12",
+    "`": "`",
+    "-": "-",
+    "=": "=",
+    "[": "[",
+    "]": "]",
+    "\\": "\\",
+    ";": ";",
+    "'": "'",
+    ",": ",",
+    ".": ".",
+    "/": "/",
   };
 
   return value
@@ -655,7 +753,9 @@ watch(
   border-radius: 4px;
   cursor: pointer;
   color: var(--text-secondary, #999);
-  transition: color 0.15s, background 0.15s;
+  transition:
+    color 0.15s,
+    background 0.15s;
   flex-shrink: 0;
 }
 .hotkey-action-btn:hover {

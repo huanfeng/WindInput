@@ -10,7 +10,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
-	"github.com/huanfeng/wind_input/internal/engine/wubi"
+	"github.com/huanfeng/wind_input/internal/engine/codetable"
 )
 
 func main() {
@@ -56,7 +56,7 @@ func main() {
 	fmt.Println()
 
 	// 创建五笔引擎
-	engine := wubi.NewEngine(&wubi.Config{
+	engine := codetable.NewEngine(&codetable.Config{
 		MaxCodeLength:   ct.GetMaxCodeLength(),
 		AutoCommitAt4:   true,
 		ClearOnEmptyAt4: true,

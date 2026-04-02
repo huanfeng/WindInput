@@ -34,7 +34,7 @@ type StartupConfig struct {
 
 // PinyinConfig 拼音引擎配置
 type PinyinConfig struct {
-	ShowWubiHint    bool              `yaml:"show_wubi_hint" json:"show_wubi_hint"`
+	ShowCodeHint    bool              `yaml:"show_code_hint" json:"show_code_hint"`
 	UseSmartCompose bool              `yaml:"use_smart_compose" json:"use_smart_compose"`
 	CandidateOrder  string            `yaml:"candidate_order" json:"candidate_order"` // 候选排序：char_first/phrase_first/smart
 	Fuzzy           FuzzyPinyinConfig `yaml:"fuzzy" json:"fuzzy"`
@@ -260,13 +260,13 @@ func LoadFrom(path string) (*Config, error) {
 
 // applyConfigFallbacks 对关键字段进行兜底处理
 func applyConfigFallbacks(cfg *Config) {
-	// Schema 兜底：如果 active 为空，使用默认值
-	if cfg.Schema.Active == "" {
-		cfg.Schema.Active = "wubi86"
-	}
 	// 如果 available 为空，使用默认值
 	if len(cfg.Schema.Available) == 0 {
 		cfg.Schema.Available = []string{"wubi86", "pinyin"}
+	}
+	// Schema 兜底：如果 active 为空，取 available 的第一个
+	if cfg.Schema.Active == "" && len(cfg.Schema.Available) > 0 {
+		cfg.Schema.Active = cfg.Schema.Available[0]
 	}
 
 	// 迁移旧的 theme:"dark" 配置到新格式

@@ -22,7 +22,7 @@ export interface DictionaryConfig {
   system_dict: string;
   user_dict?: string;
   pinyin_user_dict: string;
-  wubi_user_dict: string;
+  codetable_user_dict: string;
   pinyin_dict: string;
 }
 
@@ -44,12 +44,12 @@ export interface FuzzyPinyinConfig {
 
 // 拼音配置
 export interface PinyinConfig {
-  show_wubi_hint: boolean;
+  show_code_hint: boolean;
   fuzzy: FuzzyPinyinConfig;
 }
 
-// 五笔配置
-export interface WubiConfig {
+// 码表配置
+export interface CodetableConfig {
   auto_commit_at_4: boolean;
   clear_on_empty_at_4: boolean;
   top_code_commit: boolean;
@@ -64,7 +64,7 @@ export interface EngineConfig {
   type: string;
   filter_mode: string;
   pinyin: PinyinConfig;
-  wubi: WubiConfig;
+  codetable: CodetableConfig;
 }
 
 // 快捷键配置
@@ -270,14 +270,14 @@ export function getDefaultConfig(): Config {
     dictionary: {
       system_dict: "dict/wubi86/wubi86.txt",
       pinyin_user_dict: "pinyin_user_words.txt",
-      wubi_user_dict: "wubi_user_words.txt",
+      codetable_user_dict: "wubi_user_words.txt",
       pinyin_dict: "dict/pinyin",
     },
     engine: {
-      type: "wubi",
+      type: "codetable",
       filter_mode: "smart",
       pinyin: {
-        show_wubi_hint: true,
+        show_code_hint: true,
         fuzzy: {
           enabled: false,
           zh_z: false,
@@ -293,7 +293,7 @@ export function getDefaultConfig(): Config {
           uan_uang: false,
         },
       },
-      wubi: {
+      codetable: {
         auto_commit_at_4: false,
         clear_on_empty_at_4: false,
         top_code_commit: false,

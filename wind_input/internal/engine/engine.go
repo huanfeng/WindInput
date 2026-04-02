@@ -6,9 +6,9 @@ import "github.com/huanfeng/wind_input/internal/candidate"
 type EngineType string
 
 const (
-	EngineTypePinyin EngineType = "pinyin" // 拼音
-	EngineTypeWubi   EngineType = "wubi"   // 五笔
-	EngineTypeMixed  EngineType = "mixed"  // 五笔拼音混输
+	EngineTypePinyin    EngineType = "pinyin"    // 拼音
+	EngineTypeCodetable EngineType = "codetable" // 码表
+	EngineTypeMixed     EngineType = "mixed"     // 码表拼音混输
 )
 
 // Engine 输入引擎接口

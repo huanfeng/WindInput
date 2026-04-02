@@ -88,6 +88,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// composition.CompletedSyllables 会把非末尾 partial 提升为 completed（仅用于 UI 显示）
 	completedSyllables := parsed.CompletedSyllables()
 	syllableCount := len(completedSyllables)
+	result.HasFullSyllable = syllableCount > 0
 	partial := parsed.PartialSyllable()
 	allSyllables := parsed.SyllableTexts()
 
@@ -504,10 +505,10 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		result.HasMore = true
 	}
 
-	// 9. 添加五笔编码提示
-	wubiStart := time.Now()
-	e.addWubiHints(result.Candidates)
-	e.logger.Debug("wubiHints", "elapsed", time.Since(wubiStart))
+	// 9. 添加编码提示
+	codeHintStart := time.Now()
+	e.addCodeHints(result.Candidates)
+	e.logger.Debug("codeHints", "elapsed", time.Since(codeHintStart))
 
 	// 10. 双拼后处理：回映 ConsumedLength + 替换预编辑显示
 	if spResult != nil {

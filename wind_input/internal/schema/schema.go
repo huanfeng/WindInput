@@ -43,28 +43,30 @@ type EngineSpec struct {
 
 // MixedSpec 混输引擎配置
 type MixedSpec struct {
-	MinPinyinLength int  `yaml:"min_pinyin_length"` // 拼音最小触发长度，默认2
-	WubiWeightBoost int  `yaml:"wubi_weight_boost"` // 五笔权重提升值，默认10000000
-	ShowSourceHint  bool `yaml:"show_source_hint"`  // 是否在候选提示中显示来源标记
+	MinPinyinLength      int  `yaml:"min_pinyin_length"`      // 拼音最小触发长度，默认2
+	CodetableWeightBoost int  `yaml:"codetable_weight_boost"` // 码表权重提升值，默认10000000
+	ShowSourceHint       bool `yaml:"show_source_hint"`       // 是否在候选提示中显示来源标记
 }
 
 // CodeTableSpec 码表引擎配置
 type CodeTableSpec struct {
-	MaxCodeLength     int    `yaml:"max_code_length"`
-	AutoCommitUnique  bool   `yaml:"auto_commit_unique"`
-	ClearOnEmptyMax   bool   `yaml:"clear_on_empty_max"`
-	TopCodeCommit     bool   `yaml:"top_code_commit"`
-	PunctCommit       bool   `yaml:"punct_commit"`
-	ShowCodeHint      bool   `yaml:"show_code_hint"`
-	SingleCodeInput   bool   `yaml:"single_code_input"`
-	CandidateSortMode string `yaml:"candidate_sort_mode"`
+	MaxCodeLength      int    `yaml:"max_code_length"`
+	AutoCommitUnique   bool   `yaml:"auto_commit_unique"`
+	ClearOnEmptyMax    bool   `yaml:"clear_on_empty_max"`
+	TopCodeCommit      bool   `yaml:"top_code_commit"`
+	PunctCommit        bool   `yaml:"punct_commit"`
+	ShowCodeHint       bool   `yaml:"show_code_hint"`
+	SingleCodeInput    bool   `yaml:"single_code_input"`
+	CandidateSortMode  string `yaml:"candidate_sort_mode"`
+	DedupCandidates    *bool  `yaml:"dedup_candidates,omitempty"`
+	SkipSingleCharFreq *bool  `yaml:"skip_single_char_freq"` // 单字不自动调频（指针以区分未设置和 false）
 }
 
 // PinyinSpec 拼音引擎配置
 type PinyinSpec struct {
 	Scheme          string         `yaml:"scheme"`
 	Shuangpin       *ShuangpinSpec `yaml:"shuangpin,omitempty"`
-	ShowWubiHint    bool           `yaml:"show_wubi_hint"`
+	ShowCodeHint    bool           `yaml:"show_code_hint"`
 	UseSmartCompose bool           `yaml:"use_smart_compose"`
 	CandidateOrder  string         `yaml:"candidate_order"`
 	Fuzzy           *FuzzySpec     `yaml:"fuzzy,omitempty"`

@@ -14,11 +14,11 @@ func main() {
 	outDir := flag.String("out", "dict/wubi86", "输出目录")
 	flag.Parse()
 
-	wdbPath := filepath.Join(*outDir, "wubi.wdb")
+	wdbPath := filepath.Join(*outDir, "codetable.wdb")
 
 	if err := dictcache.ConvertCodeTableToWdb(*srcPath, wdbPath, slog.Default()); err != nil {
-		log.Fatalf("生成 wubi.wdb 失败: %v", err)
+		log.Fatalf("生成 codetable.wdb 失败: %v", err)
 	}
 
-	log.Printf("wubi.wdb 生成完毕 → %s", wdbPath)
+	log.Printf("codetable.wdb 生成完毕 → %s", wdbPath)
 }

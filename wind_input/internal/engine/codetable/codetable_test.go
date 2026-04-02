@@ -1,4 +1,4 @@
-package wubi
+package codetable
 
 import (
 	"os"
@@ -13,7 +13,7 @@ import (
 func getTestDictPath(t *testing.T) string {
 	// 尝试多个可能的路径
 	paths := []string{
-		"../../../../build/dict/wubi86/wubi86.txt", // 从 wind_input/internal/engine/wubi 到 build
+		"../../../../build/dict/wubi86/wubi86.txt", // 从 wind_input/internal/engine/codetable 到 build
 		"../../../build/dict/wubi86/wubi86.txt",
 		"../../build/dict/wubi86/wubi86.txt",
 		"../build/dict/wubi86/wubi86.txt",
@@ -31,7 +31,7 @@ func getTestDictPath(t *testing.T) string {
 		}
 	}
 
-	t.Skip("跳过测试：未找到五笔词库文件")
+	t.Skip("跳过测试：未找到码表词库文件")
 	return ""
 }
 
@@ -48,8 +48,8 @@ func initCommonCharsForTest(dictPath string) {
 	dict.InitCommonCharsWithPath(commonPath)
 }
 
-// TestWubiBasicLookup 测试基本的五笔编码查询
-func TestWubiBasicLookup(t *testing.T) {
+// TestCodetableBasicLookup 测试基本的码表编码查询
+func TestCodetableBasicLookup(t *testing.T) {
 	dictPath := getTestDictPath(t)
 
 	engine := NewEngine(DefaultConfig(), nil)
@@ -103,8 +103,8 @@ func getCandidateTexts(candidates []candidate.Candidate) []string {
 	return texts
 }
 
-// TestWubiEmptyCode 测试空码处理
-func TestWubiEmptyCode(t *testing.T) {
+// TestCodetableEmptyCode 测试空码处理
+func TestCodetableEmptyCode(t *testing.T) {
 	dictPath := getTestDictPath(t)
 
 	engine := NewEngine(DefaultConfig(), nil)
@@ -133,8 +133,8 @@ func TestWubiEmptyCode(t *testing.T) {
 	}
 }
 
-// TestWubiPrefixMatch 测试前缀匹配
-func TestWubiPrefixMatch(t *testing.T) {
+// TestCodetablePrefixMatch 测试前缀匹配
+func TestCodetablePrefixMatch(t *testing.T) {
 	dictPath := getTestDictPath(t)
 
 	engine := NewEngine(DefaultConfig(), nil)
@@ -156,8 +156,8 @@ func TestWubiPrefixMatch(t *testing.T) {
 	}
 }
 
-// TestWubiNoPinyinContamination 测试五笔结果不包含拼音编码
-func TestWubiNoPinyinContamination(t *testing.T) {
+// TestCodetableNoPinyinContamination 测试码表结果不包含拼音编码
+func TestCodetableNoPinyinContamination(t *testing.T) {
 	dictPath := getTestDictPath(t)
 
 	engine := NewEngine(DefaultConfig(), nil)
@@ -165,7 +165,7 @@ func TestWubiNoPinyinContamination(t *testing.T) {
 		t.Fatalf("加载码表失败: %v", err)
 	}
 
-	// 这些是典型的拼音编码，五笔中应该没有或有不同的结果
+	// 这些是典型的拼音编码，码表中应该没有或有不同的结果
 	pinyinCodes := []string{
 		"ni",  // 拼音 "你"
 		"hao", // 拼音 "好"
@@ -176,9 +176,9 @@ func TestWubiNoPinyinContamination(t *testing.T) {
 	for _, code := range pinyinCodes {
 		result := engine.ConvertEx(code, 10)
 		if len(result.Candidates) > 0 {
-			// 验证返回的是五笔编码结果，不是拼音结果
+			// 验证返回的是码表编码结果，不是拼音结果
 			for _, c := range result.Candidates {
-				// 五笔编码的候选词应该有 Code 字段
+				// 码表编码的候选词应该有 Code 字段
 				if c.Pinyin != "" && c.Code == "" {
 					t.Errorf("编码 %s 返回了拼音候选词 %s，可能存在拼音污染",
 						code, c.Text)
@@ -189,8 +189,8 @@ func TestWubiNoPinyinContamination(t *testing.T) {
 	}
 }
 
-// TestWubiWithDictManager 测试带 DictManager 的查询
-func TestWubiWithDictManager(t *testing.T) {
+// TestCodetableWithDictManager 测试带 DictManager 的查询
+func TestCodetableWithDictManager(t *testing.T) {
 	dictPath := getTestDictPath(t)
 
 	// 创建临时目录
@@ -209,7 +209,7 @@ func TestWubiWithDictManager(t *testing.T) {
 		t.Fatalf("添加用户词失败: %v", err)
 	}
 
-	// 创建五笔引擎
+	// 创建码表引擎
 	engine := NewEngine(DefaultConfig(), nil)
 	if err := engine.LoadCodeTable(dictPath); err != nil {
 		t.Fatalf("加载码表失败: %v", err)
@@ -234,15 +234,15 @@ func TestWubiWithDictManager(t *testing.T) {
 		t.Error("用户词 '测试词' 应该在候选列表中")
 	}
 
-	// 查询五笔编码，确保不受用户词影响
+	// 查询码表编码，确保不受用户词影响
 	result = engine.ConvertEx("gggg", 10)
 	if len(result.Candidates) == 0 || result.Candidates[0].Text != "王" {
-		t.Error("五笔编码 gggg 应该首选 '王'")
+		t.Error("编码 gggg 应该首选 '王'")
 	}
 }
 
-// TestWubiAutoCommit 测试自动上屏
-func TestWubiAutoCommit(t *testing.T) {
+// TestCodetableAutoCommit 测试自动上屏
+func TestCodetableAutoCommit(t *testing.T) {
 	dictPath := getTestDictPath(t)
 
 	config := DefaultConfig()
@@ -260,12 +260,12 @@ func TestWubiAutoCommit(t *testing.T) {
 
 	// 如果只有一个候选且开启了 AutoCommitAt4，应该自动上屏
 	if len(result.Candidates) == 1 && !result.ShouldCommit {
-		t.Error("四码唯一时应该自动上屏")
+		t.Error("达到最大码长且唯一时应该自动上屏")
 	}
 }
 
-// TestWubiTopCodeCommit 测试五码顶字
-func TestWubiTopCodeCommit(t *testing.T) {
+// TestCodetableTopCodeCommit 测试顶码上屏
+func TestCodetableTopCodeCommit(t *testing.T) {
 	dictPath := getTestDictPath(t)
 
 	config := DefaultConfig()
@@ -276,13 +276,13 @@ func TestWubiTopCodeCommit(t *testing.T) {
 		t.Fatalf("加载码表失败: %v", err)
 	}
 
-	// 输入五码，前四码应该上屏，第五码作为新输入
+	// 输入超过最大码长，前四码应该上屏，多余的码作为新输入
 	commitText, newInput, shouldCommit := engine.HandleTopCode("gggga")
 	t.Logf("gggga: commit=%s, newInput=%s, shouldCommit=%v",
 		commitText, newInput, shouldCommit)
 
 	if !shouldCommit {
-		t.Error("五码应该触发顶字上屏")
+		t.Error("超过最大码长应该触发顶字上屏")
 	}
 	if newInput != "a" {
 		t.Errorf("新输入应该是 'a'，实际是 '%s'", newInput)

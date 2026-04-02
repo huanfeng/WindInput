@@ -83,7 +83,7 @@ engine:
     scheme: shuangpin
     shuangpin:
       layout: ziranma
-    show_wubi_hint: false
+    show_code_hint: false
     use_smart_compose: true
   filter_mode: smart
 dictionaries:

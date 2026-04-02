@@ -19,19 +19,19 @@ engine:
     candidate_sort_mode: frequency
   pinyin:
     scheme: full
-    show_wubi_hint: true
+    show_code_hint: true
     use_smart_compose: true
     candidate_order: smart
   mixed:
     min_pinyin_length: 2
-    wubi_weight_boost: 10000000
+    codetable_weight_boost: 10000000
     show_source_hint: true
   filter_mode: smart
 
 dictionaries:
   - id: wubi86_main
     path: "dict/wubi86/wubi86_jidian.dict.yaml"
-    type: rime_wubi
+    type: rime_codetable
     default: true
     weight_spec:
       median: 10
@@ -45,9 +45,9 @@ dictionaries:
       median: 200
       max: 19260817
       mode: log
-  - id: wubi_reverse
+  - id: codetable_reverse
     path: "dict/wubi86/wubi86_jidian.dict.yaml"
-    type: rime_wubi
+    type: rime_codetable
     role: reverse_lookup
 
 user_data:

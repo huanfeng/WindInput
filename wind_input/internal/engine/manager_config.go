@@ -2,10 +2,10 @@ package engine
 
 import (
 	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin/shuangpin"
-	"github.com/huanfeng/wind_input/internal/engine/wubi"
 	"github.com/huanfeng/wind_input/internal/schema"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
@@ -21,12 +21,12 @@ func (m *Manager) UpdateFilterMode(mode string) {
 			if cfg := e.GetConfig(); cfg != nil {
 				cfg.FilterMode = mode
 			}
-		case *wubi.Engine:
+		case *codetable.Engine:
 			if cfg := e.GetConfig(); cfg != nil {
 				cfg.FilterMode = mode
 			}
 		case *mixed.Engine:
-			if we := e.GetWubiEngine(); we != nil {
+			if we := e.GetCodetableEngine(); we != nil {
 				if cfg := we.GetConfig(); cfg != nil {
 					cfg.FilterMode = mode
 				}
@@ -42,20 +42,20 @@ func (m *Manager) UpdateFilterMode(mode string) {
 	m.logger.Info("更新过滤模式", "mode", mode)
 }
 
-// UpdateWubiOptions 更新五笔引擎的选项（热更新）
-func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput bool, candidateSortMode string) {
+// UpdateCodetableOptions 更新码表引擎的选项（热更新）
+func (m *Manager) UpdateCodetableOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput bool, candidateSortMode string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, eng := range m.engines {
-		// 直接的五笔引擎
-		if wubiEngine, ok := eng.(*wubi.Engine); ok {
-			updateWubiConfig(wubiEngine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, candidateSortMode)
+		// 直接的码表引擎
+		if codetableEngine, ok := eng.(*codetable.Engine); ok {
+			updateCodetableConfig(codetableEngine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, candidateSortMode)
 		}
-		// 混输引擎的五笔子引擎
+		// 混输引擎的码表子引擎
 		if mixedEngine, ok := eng.(*mixed.Engine); ok {
-			if we := mixedEngine.GetWubiEngine(); we != nil {
-				updateWubiConfig(we, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, candidateSortMode)
+			if we := mixedEngine.GetCodetableEngine(); we != nil {
+				updateCodetableConfig(we, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, candidateSortMode)
 			}
 		}
 	}
@@ -64,7 +64,7 @@ func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommi
 		m.dictManager.SetSortMode(candidate.CandidateSortMode(candidateSortMode))
 	}
 
-	m.logger.Info("更新五笔选项",
+	m.logger.Info("更新码表选项",
 		"autoCommitAt4", autoCommitAt4,
 		"clearOnEmptyAt4", clearOnEmptyAt4,
 		"topCodeCommit", topCodeCommit,
@@ -74,9 +74,9 @@ func (m *Manager) UpdateWubiOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommi
 		"candidateSortMode", candidateSortMode)
 }
 
-// updateWubiConfig 更新五笔引擎配置（内部辅助函数）
-func updateWubiConfig(wubiEngine *wubi.Engine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput bool, candidateSortMode string) {
-	if cfg := wubiEngine.GetConfig(); cfg != nil {
+// updateCodetableConfig 更新码表引擎配置（内部辅助函数）
+func updateCodetableConfig(codetableEngine *codetable.Engine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput bool, candidateSortMode string) {
+	if cfg := codetableEngine.GetConfig(); cfg != nil {
 		cfg.AutoCommitAt4 = autoCommitAt4
 		cfg.ClearOnEmptyAt4 = clearOnEmptyAt4
 		cfg.TopCodeCommit = topCodeCommit
@@ -91,10 +91,10 @@ func updateWubiConfig(wubiEngine *wubi.Engine, autoCommitAt4, clearOnEmptyAt4, t
 
 // updatePinyinConfig 更新拼音引擎配置（内部辅助函数）
 func updatePinyinConfig(pinyinEngine *pinyin.Engine, pinyinCfg *config.PinyinConfig) {
-	showWubiHint := pinyinCfg.ShowWubiHint
+	showCodeHint := pinyinCfg.ShowCodeHint
 	if cfg := pinyinEngine.GetConfig(); cfg != nil {
-		oldShowWubiHint := cfg.ShowWubiHint
-		cfg.ShowWubiHint = showWubiHint
+		oldShowCodeHint := cfg.ShowCodeHint
+		cfg.ShowCodeHint = showCodeHint
 
 		if pinyinCfg.Fuzzy.Enabled {
 			cfg.Fuzzy = &pinyin.FuzzyConfig{
@@ -112,8 +112,8 @@ func updatePinyinConfig(pinyinEngine *pinyin.Engine, pinyinCfg *config.PinyinCon
 			cfg.Fuzzy = nil
 		}
 
-		if oldShowWubiHint && !showWubiHint {
-			pinyinEngine.ReleaseWubiHint()
+		if oldShowCodeHint && !showCodeHint {
+			pinyinEngine.ReleaseCodeHint()
 		}
 	}
 }
@@ -131,22 +131,22 @@ func (m *Manager) UpdatePinyinOptions(pinyinCfg *config.PinyinConfig) {
 		// 直接的拼音引擎
 		if pinyinEngine, ok := eng.(*pinyin.Engine); ok {
 			updatePinyinConfig(pinyinEngine, pinyinCfg)
-			if pinyinCfg.ShowWubiHint && m.schemaManager != nil {
-				m.loadWubiReverseForPinyin(pinyinEngine)
+			if pinyinCfg.ShowCodeHint && m.schemaManager != nil {
+				m.loadCodetableReverseForPinyin(pinyinEngine)
 			}
 		}
 		// 混输引擎的拼音子引擎
 		if mixedEngine, ok := eng.(*mixed.Engine); ok {
 			if pe := mixedEngine.GetPinyinEngine(); pe != nil {
 				updatePinyinConfig(pe, pinyinCfg)
-				if pinyinCfg.ShowWubiHint && m.schemaManager != nil {
-					m.loadWubiReverseForPinyin(pe)
+				if pinyinCfg.ShowCodeHint && m.schemaManager != nil {
+					m.loadCodetableReverseForPinyin(pe)
 				}
 			}
 		}
 	}
 
-	m.logger.Info("更新拼音选项", "showWubiHint", pinyinCfg.ShowWubiHint, "fuzzyEnabled", pinyinCfg.Fuzzy.Enabled)
+	m.logger.Info("更新拼音选项", "showCodeHint", pinyinCfg.ShowCodeHint, "fuzzyEnabled", pinyinCfg.Fuzzy.Enabled)
 }
 
 // UpdateShuangpinLayout 热更新双拼方案布局
@@ -184,8 +184,8 @@ func (m *Manager) UpdateShuangpinLayout(layoutID string) {
 	}
 }
 
-// loadWubiReverseForPinyin 从方案配置中查找五笔反查路径并加载
-func (m *Manager) loadWubiReverseForPinyin(pinyinEngine *pinyin.Engine) {
+// loadCodetableReverseForPinyin 从方案配置中查找码表反查路径并加载
+func (m *Manager) loadCodetableReverseForPinyin(pinyinEngine *pinyin.Engine) {
 	if m.schemaManager == nil {
 		return
 	}
@@ -201,10 +201,10 @@ func (m *Manager) loadWubiReverseForPinyin(pinyinEngine *pinyin.Engine) {
 			if m.exeDir != "" && !isAbsPath(rdPath) {
 				rdPath = m.exeDir + "/" + rdPath
 			}
-			if err := schema.LoadWubiTableForPinyinEngine(pinyinEngine, rdPath, d.Type, m.logger); err != nil {
-				m.logger.Warn("加载五笔反查码表失败", "error", err)
+			if err := schema.LoadCodetableForPinyinEngine(pinyinEngine, rdPath, d.Type, info.ID, m.logger); err != nil {
+				m.logger.Warn("加载码表反查失败", "error", err)
 			} else {
-				m.logger.Info("五笔反查码表加载成功")
+				m.logger.Info("码表反查加载成功")
 			}
 			return
 		}

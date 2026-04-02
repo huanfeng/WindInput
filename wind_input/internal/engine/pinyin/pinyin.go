@@ -12,7 +12,7 @@ import (
 
 // Config 拼音引擎配置
 type Config struct {
-	ShowWubiHint    bool         // 显示五笔编码提示
+	ShowCodeHint    bool         // 显示编码提示
 	FilterMode      string       // 候选过滤模式
 	UseSmartCompose bool         // 启用智能组句（Viterbi）
 	CandidateOrder  string       // 候选排序模式：char_first(单字优先)/phrase_first(词组优先)/smart(智能混排)
@@ -24,17 +24,17 @@ type Config struct {
 
 // Engine 拼音引擎
 type Engine struct {
-	dict         *dict.CompositeDict
-	syllableTrie *SyllableTrie       // 音节 Trie
-	unigram      UnigramLookup       // Unigram 语言模型（接口：支持内存模式和 mmap 模式）
-	bigram       *BigramModel        // Bigram 语言模型（可选）
-	wubiTable    *dict.CodeTable     // 五笔码表（用于反查）
-	wubiReverse  map[string][]string // 汉字 -> 五笔编码（反向索引）
-	config       *Config
-	dictManager  *dict.DictManager // 词库管理器（用于用户词频学习）
-	scorer       *Scorer           // 统一候选评分器（deprecated，保留供五笔引擎引用）
-	rimeScorer   *RimeScorer       // Rime 风格连续评分器
-	logger       *slog.Logger
+	dict            *dict.CompositeDict
+	syllableTrie    *SyllableTrie       // 音节 Trie
+	unigram         UnigramLookup       // Unigram 语言模型（接口：支持内存模式和 mmap 模式）
+	bigram          *BigramModel        // Bigram 语言模型（可选）
+	codeHintTable   *dict.CodeTable     // 编码反查码表
+	codeHintReverse map[string][]string // 汉字 -> 编码（反向索引）
+	config          *Config
+	dictManager     *dict.DictManager // 词库管理器（用于用户词频学习）
+	scorer          *Scorer           // 统一候选评分器（deprecated，保留供五笔引擎引用）
+	rimeScorer      *RimeScorer       // Rime 风格连续评分器
+	logger          *slog.Logger
 
 	// 双拼支持
 	spConverter *shuangpin.Converter // 双拼转换器（nil 表示全拼模式）
@@ -48,7 +48,7 @@ func NewEngine(d *dict.CompositeDict, logger *slog.Logger) *Engine {
 	return &Engine{
 		dict:         d,
 		syllableTrie: NewSyllableTrie(),
-		config:       &Config{ShowWubiHint: false, FilterMode: "smart"},
+		config:       &Config{ShowCodeHint: false, FilterMode: "smart"},
 		scorer:       NewScorer(nil, nil),
 		rimeScorer:   NewRimeScorer(nil, nil),
 		logger:       logger,
@@ -58,7 +58,7 @@ func NewEngine(d *dict.CompositeDict, logger *slog.Logger) *Engine {
 // NewEngineWithConfig 创建带配置的拼音引擎
 func NewEngineWithConfig(d *dict.CompositeDict, config *Config, logger *slog.Logger) *Engine {
 	if config == nil {
-		config = &Config{ShowWubiHint: false, FilterMode: "smart"}
+		config = &Config{ShowCodeHint: false, FilterMode: "smart"}
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -161,37 +161,37 @@ func (e *Engine) GetBinaryUnigramModel() *BinaryUnigramModel {
 // 	if err != nil {
 // 		return err
 // 	}
-// 	e.wubiTable = ct
-// 	e.wubiReverse = nil // 延迟构建
+// 	e.codeHintTable = ct
+// 	e.codeHintReverse = nil // 延迟构建
 // 	return nil
 // }
 
-// LoadWubiTableBinary 加载五笔码表的 wdb 二进制格式（mmap 模式，几乎不占堆内存）
-func (e *Engine) LoadWubiTableBinary(wdbPath string) error {
+// LoadCodeHintTableBinary 加载编码反查码表的 wdb 二进制格式（mmap 模式，几乎不占堆内存）
+func (e *Engine) LoadCodeHintTableBinary(wdbPath string) error {
 	ct := dict.NewCodeTable()
 	if err := ct.LoadBinary(wdbPath); err != nil {
 		return err
 	}
-	e.wubiTable = ct
-	e.wubiReverse = nil // 延迟构建
+	e.codeHintTable = ct
+	e.codeHintReverse = nil // 延迟构建
 	return nil
 }
 
-// ReleaseWubiHint 释放五笔反查资源
-func (e *Engine) ReleaseWubiHint() {
-	e.wubiReverse = nil
-	e.logger.Info("五笔反向索引已释放")
+// ReleaseCodeHint 释放编码反查资源
+func (e *Engine) ReleaseCodeHint() {
+	e.codeHintReverse = nil
+	e.logger.Info("编码反查索引已释放")
 }
 
-// lookupWubiCode 查找汉字的五笔编码
-func (e *Engine) lookupWubiCode(text string) string {
+// lookupCodeHint 查找汉字的编码提示
+func (e *Engine) lookupCodeHint(text string) string {
 	// 懒构建反向索引
-	if e.wubiReverse == nil && e.wubiTable != nil {
-		e.logger.Debug("懒构建五笔反向索引")
-		e.wubiReverse = e.wubiTable.BuildReverseIndex()
-		e.logger.Debug("五笔反向索引构建完成")
+	if e.codeHintReverse == nil && e.codeHintTable != nil {
+		e.logger.Debug("懒构建编码反查索引")
+		e.codeHintReverse = e.codeHintTable.BuildReverseIndex()
+		e.logger.Debug("编码反查索引构建完成")
 	}
-	if e.wubiReverse == nil {
+	if e.codeHintReverse == nil {
 		return ""
 	}
 
@@ -202,15 +202,15 @@ func (e *Engine) lookupWubiCode(text string) string {
 
 	// 单字：直接返回编码
 	if len(runes) == 1 {
-		codes := e.wubiReverse[text]
+		codes := e.codeHintReverse[text]
 		if len(codes) > 0 {
 			return codes[0]
 		}
 		return ""
 	}
 
-	// 词组：只有五笔码表中真实存在该词组时才返回编码
-	codes := e.wubiReverse[text]
+	// 词组：只有码表中真实存在该词组时才返回编码
+	codes := e.codeHintReverse[text]
 	if len(codes) > 0 {
 		return codes[0]
 	}
@@ -229,29 +229,29 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 	return result.Candidates, nil
 }
 
-// addWubiHints 添加五笔编码提示
-func (e *Engine) addWubiHints(candidates []candidate.Candidate) {
-	if e.config == nil || !e.config.ShowWubiHint || e.wubiTable == nil {
+// addCodeHints 添加编码提示
+func (e *Engine) addCodeHints(candidates []candidate.Candidate) {
+	if e.config == nil || !e.config.ShowCodeHint || e.codeHintTable == nil {
 		return
 	}
 	for i := range candidates {
-		wubiCode := e.lookupWubiCode(candidates[i].Text)
-		if wubiCode != "" {
-			candidates[i].Hint = wubiCode
+		codeHint := e.lookupCodeHint(candidates[i].Text)
+		if codeHint != "" {
+			candidates[i].Hint = codeHint
 		}
 	}
 }
 
-// AddWubiHintsForced 强制添加五笔编码提示（不检查 ShowWubiHint 配置）
-// 用于临时拼音模式，无论用户是否开启了五笔提示都强制显示
-func (e *Engine) AddWubiHintsForced(candidates []candidate.Candidate) {
-	if e.wubiReverse == nil && e.wubiTable == nil {
+// AddCodeHintsForced 强制添加编码提示（不检查 ShowCodeHint 配置）
+// 用于临时拼音模式，无论用户是否开启了编码提示都强制显示
+func (e *Engine) AddCodeHintsForced(candidates []candidate.Candidate) {
+	if e.codeHintReverse == nil && e.codeHintTable == nil {
 		return
 	}
 	for i := range candidates {
-		wubiCode := e.lookupWubiCode(candidates[i].Text)
-		if wubiCode != "" {
-			candidates[i].Hint = wubiCode
+		codeHint := e.lookupCodeHint(candidates[i].Text)
+		if codeHint != "" {
+			candidates[i].Hint = codeHint
 		}
 	}
 }

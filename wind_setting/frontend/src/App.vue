@@ -178,7 +178,7 @@ function mergeWithDefaults(cfg: any): Config {
           ...cfg.engine?.pinyin?.fuzzy,
         },
       },
-      wubi: { ...defaults.engine.wubi, ...cfg.engine?.wubi },
+      codetable: { ...defaults.engine.codetable, ...cfg.engine?.codetable },
     },
     hotkeys: { ...defaults.hotkeys, ...cfg.hotkeys },
     ui: { ...defaults.ui, ...cfg.ui },
@@ -306,7 +306,9 @@ async function refreshStatus() {
           engine: {
             type: serviceStatus.engine_type || "",
             displayName:
-              serviceStatus.engine_type === "pinyin" ? "拼音" : "五笔",
+              { pinyin: "拼音", codetable: "码表", mixed: "混输" }[
+                serviceStatus.engine_type
+              ] ?? "码表",
             info: serviceStatus.engine_type || "",
           },
           memory: {
@@ -343,7 +345,7 @@ async function resetCurrentPageDefaults() {
         ...formData.value.engine,
         filter_mode: defaults.engine.filter_mode,
         pinyin: { ...defaults.engine.pinyin },
-        wubi: { ...defaults.engine.wubi },
+        codetable: { ...defaults.engine.codetable },
       };
       formData.value.input = {
         ...formData.value.input,

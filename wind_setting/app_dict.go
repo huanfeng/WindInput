@@ -383,7 +383,13 @@ func (a *App) GetUserDictSchemaID() string {
 	if err != nil {
 		return "wubi86"
 	}
-	return cfg.Schema.Active
+	if cfg.Schema.Active != "" {
+		return cfg.Schema.Active
+	}
+	if len(cfg.Schema.Available) > 0 {
+		return cfg.Schema.Available[0]
+	}
+	return "wubi86"
 }
 
 // SwitchUserDictSchema 切换用户词库到指定方案

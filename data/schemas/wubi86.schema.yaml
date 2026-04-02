@@ -22,7 +22,7 @@ engine:
 dictionaries:
   - id: wubi86_main
     path: "dict/wubi86/wubi86_jidian.dict.yaml"
-    type: rime_wubi
+    type: rime_codetable
     default: true
     weight_spec:
       median: 10

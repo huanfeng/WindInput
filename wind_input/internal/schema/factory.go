@@ -12,16 +12,16 @@ import (
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/dict/dictcache"
+	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin/shuangpin"
-	"github.com/huanfeng/wind_input/internal/engine/wubi"
 )
 
 // EngineBundle 引擎创建结果（包含引擎实例和相关资源）
 type EngineBundle struct {
 	SchemaID string
-	Engine   interface{} // *pinyin.Engine 或 *wubi.Engine 或 *mixed.Engine
+	Engine   interface{} // *pinyin.Engine 或 *codetable.Engine 或 *mixed.Engine
 }
 
 // CreateEngineFromSchema 根据 Schema 创建引擎实例并加载词库
@@ -51,27 +51,36 @@ func createCodeTableEngine(s *Schema, exeDir string, dm *dict.DictManager, logge
 		}
 	}
 
-	config := &wubi.Config{
-		MaxCodeLength:     spec.MaxCodeLength,
-		AutoCommitAt4:     spec.AutoCommitUnique,
-		ClearOnEmptyAt4:   spec.ClearOnEmptyMax,
-		TopCodeCommit:     spec.TopCodeCommit,
-		PunctCommit:       spec.PunctCommit,
-		ShowCodeHint:      spec.ShowCodeHint,
-		SingleCodeInput:   spec.SingleCodeInput,
-		FilterMode:        s.Engine.FilterMode,
-		CandidateSortMode: spec.CandidateSortMode,
-		DedupCandidates:   true,
+	dedupCandidates := true
+	if spec.DedupCandidates != nil {
+		dedupCandidates = *spec.DedupCandidates
+	}
+	skipSingleCharFreq := true // 默认值：单字不自动调频
+	if spec.SkipSingleCharFreq != nil {
+		skipSingleCharFreq = *spec.SkipSingleCharFreq
+	}
+	config := &codetable.Config{
+		MaxCodeLength:      spec.MaxCodeLength,
+		AutoCommitAt4:      spec.AutoCommitUnique,
+		ClearOnEmptyAt4:    spec.ClearOnEmptyMax,
+		TopCodeCommit:      spec.TopCodeCommit,
+		PunctCommit:        spec.PunctCommit,
+		ShowCodeHint:       spec.ShowCodeHint,
+		SingleCodeInput:    spec.SingleCodeInput,
+		FilterMode:         s.Engine.FilterMode,
+		CandidateSortMode:  spec.CandidateSortMode,
+		DedupCandidates:    dedupCandidates,
+		SkipSingleCharFreq: skipSingleCharFreq,
 	}
 
-	// 五笔学习配置
+	// 码表学习配置
 	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
 		config.EnableUserFreq = true
 		config.FrequencyOnly = (s.Learning.Mode == LearningFrequency)
 		config.ProtectTopN = s.Learning.ProtectTopN
 	}
 
-	engine := wubi.NewEngine(config, logger)
+	engine := codetable.NewEngine(config, logger)
 
 	// 加载主码表
 	dictSpec := s.GetDefaultDictSpec()
@@ -81,7 +90,7 @@ func createCodeTableEngine(s *Schema, exeDir string, dm *dict.DictManager, logge
 		if dictSpec.WeightSpec != nil {
 			norm = dictSpec.WeightSpec.NewWeightNormalizer()
 		}
-		if err := loadWubiCodeTable(engine, srcPath, dictSpec.Type, logger, norm); err != nil {
+		if err := loadCodetable(engine, srcPath, dictSpec.Type, s.Schema.ID, logger, norm); err != nil {
 			return nil, fmt.Errorf("加载码表失败: %w", err)
 		}
 		logger.Info("码表加载成功", "schemaID", s.Schema.ID, "entryCount", engine.GetEntryCount())
@@ -120,13 +129,13 @@ func createPinyinEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *
 	if spec == nil {
 		spec = &PinyinSpec{
 			Scheme:          "full",
-			ShowWubiHint:    true,
+			ShowCodeHint:    true,
 			UseSmartCompose: true,
 		}
 	}
 
 	config := &pinyin.Config{
-		ShowWubiHint: spec.ShowWubiHint,
+		ShowCodeHint: spec.ShowCodeHint,
 		FilterMode:   s.Engine.FilterMode,
 	}
 
@@ -199,7 +208,7 @@ func createPinyinEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *
 	reverseDicts := s.GetDictsByRole(DictRoleReverseLookup)
 	for _, rd := range reverseDicts {
 		rdPath := resolvePath(exeDir, rd.Path)
-		if err := loadWubiTableForPinyin(engine, rdPath, rd.Type, logger); err != nil {
+		if err := loadCodetableForPinyin(engine, rdPath, rd.Type, s.Schema.ID, logger); err != nil {
 			logger.Warn("加载反查码表失败", "err", err)
 		} else {
 			logger.Info("反查码表加载成功")
@@ -296,47 +305,47 @@ func loadUnigramModel(engine *pinyin.Engine, txtPath string, logger *slog.Logger
 	return fmt.Errorf("Unigram 模型 wdb 不可用，智能组句功能将不可用")
 }
 
-func loadWubiCodeTable(engine *wubi.Engine, srcPath, dictType string, logger *slog.Logger, normalizer *dict.WeightNormalizer) error {
+func loadCodetable(engine *codetable.Engine, srcPath, dictType, schemaID string, logger *slog.Logger, normalizer *dict.WeightNormalizer) error {
 	var srcDir string
 	var srcPaths []string
 
-	if dictType == "rime_wubi" {
+	if dictType == "rime_codetable" {
 		// srcPath 是主词库 .dict.yaml 文件路径，自动发现关联词库
 		srcDir = filepath.Dir(srcPath)
-		srcPaths = dictcache.RimeWubiSourcePaths(srcPath)
+		srcPaths = dictcache.RimeCodetableSourcePaths(srcPath)
 	} else {
 		// 传统单文件码表格式
 		srcDir = filepath.Dir(srcPath)
 		srcPaths = []string{srcPath}
 	}
 
-	wdbInDir := filepath.Join(srcDir, "wubi.wdb")
+	wdbInDir := filepath.Join(srcDir, schemaID+".wdb")
 	if len(srcPaths) > 0 && !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
-		if err := loadWubiFromWdb(engine, wdbInDir); err == nil {
+		if err := loadCodetableFromWdb(engine, wdbInDir); err == nil {
 			return nil
 		}
 	}
 
-	wdbCachePath := dictcache.CachePath("wubi")
+	wdbCachePath := dictcache.CachePath(schemaID)
 	if len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
 		var convertErr error
-		if dictType == "rime_wubi" {
-			convertErr = dictcache.ConvertRimeWubiToWdb(srcPath, wdbCachePath, logger, normalizer)
+		if dictType == "rime_codetable" {
+			convertErr = dictcache.ConvertRimeCodetableToWdb(srcPath, wdbCachePath, logger, normalizer)
 		} else {
 			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath, logger)
 		}
 		if convertErr != nil {
-			return fmt.Errorf("转换五笔码表到 wdb 失败: %w", convertErr)
+			return fmt.Errorf("转换码表到 wdb 失败: %w", convertErr)
 		}
 	}
 
-	if err := loadWubiFromWdb(engine, wdbCachePath); err != nil {
-		return fmt.Errorf("加载缓存 wubi.wdb 失败: %w", err)
+	if err := loadCodetableFromWdb(engine, wdbCachePath); err != nil {
+		return fmt.Errorf("加载缓存 %s.wdb 失败: %w", schemaID, err)
 	}
 	return nil
 }
 
-func loadWubiFromWdb(engine *wubi.Engine, wdbPath string) error {
+func loadCodetableFromWdb(engine *codetable.Engine, wdbPath string) error {
 	if err := engine.LoadCodeTableBinary(wdbPath); err != nil {
 		return err
 	}
@@ -360,48 +369,48 @@ func loadWubiFromWdb(engine *wubi.Engine, wdbPath string) error {
 	return nil
 }
 
-// LoadWubiTableForPinyinEngine 为拼音引擎加载五笔反查码表（导出供热更新使用）
-func LoadWubiTableForPinyinEngine(engine *pinyin.Engine, srcPath, dictType string, logger *slog.Logger) error {
-	return loadWubiTableForPinyin(engine, srcPath, dictType, logger)
+// LoadCodetableForPinyinEngine 为拼音引擎加载码表反查（导出供热更新使用）
+func LoadCodetableForPinyinEngine(engine *pinyin.Engine, srcPath, dictType, schemaID string, logger *slog.Logger) error {
+	return loadCodetableForPinyin(engine, srcPath, dictType, schemaID, logger)
 }
 
-func loadWubiTableForPinyin(engine *pinyin.Engine, srcPath, dictType string, logger *slog.Logger) error {
+func loadCodetableForPinyin(engine *pinyin.Engine, srcPath, dictType, schemaID string, logger *slog.Logger) error {
 	var srcDir string
 	var srcPaths []string
 
-	if dictType == "rime_wubi" {
+	if dictType == "rime_codetable" {
 		srcDir = filepath.Dir(srcPath)
-		srcPaths = dictcache.RimeWubiSourcePaths(srcPath)
+		srcPaths = dictcache.RimeCodetableSourcePaths(srcPath)
 	} else {
 		srcDir = filepath.Dir(srcPath)
 		srcPaths = []string{srcPath}
 	}
 
-	wdbInDir := filepath.Join(srcDir, "wubi.wdb")
+	wdbInDir := filepath.Join(srcDir, schemaID+".wdb")
 	if len(srcPaths) > 0 && !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
-		if err := engine.LoadWubiTableBinary(wdbInDir); err == nil {
+		if err := engine.LoadCodeHintTableBinary(wdbInDir); err == nil {
 			return nil
 		}
 	}
 
-	wdbCachePath := dictcache.CachePath("wubi")
+	wdbCachePath := dictcache.CachePath(schemaID)
 	if len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
 		var convertErr error
-		if dictType == "rime_wubi" {
-			convertErr = dictcache.ConvertRimeWubiToWdb(srcPath, wdbCachePath, logger)
+		if dictType == "rime_codetable" {
+			convertErr = dictcache.ConvertRimeCodetableToWdb(srcPath, wdbCachePath, logger)
 		} else {
 			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath, logger)
 		}
 		if convertErr != nil {
-			return fmt.Errorf("生成五笔反查码表缓存失败: %w", convertErr)
+			return fmt.Errorf("生成码表反查缓存失败: %w", convertErr)
 		}
 	}
 
-	if err := engine.LoadWubiTableBinary(wdbCachePath); err == nil {
+	if err := engine.LoadCodeHintTableBinary(wdbCachePath); err == nil {
 		return nil
 	}
 
-	return fmt.Errorf("五笔反查码表 wdb 不可用")
+	return fmt.Errorf("码表反查 wdb 不可用")
 }
 
 // LoadPinyinUserFreqs 加载拼音用户词频
@@ -514,9 +523,9 @@ func createMixedEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *s
 	mixedSpec := s.Engine.Mixed
 	if mixedSpec == nil {
 		mixedSpec = &MixedSpec{
-			MinPinyinLength: 2,
-			WubiWeightBoost: 10000000,
-			ShowSourceHint:  true,
+			MinPinyinLength:      2,
+			CodetableWeightBoost: 10000000,
+			ShowSourceHint:       true,
 		}
 	}
 
@@ -532,57 +541,66 @@ func createMixedEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *s
 		}
 	}
 
-	wubiConfig := &wubi.Config{
-		MaxCodeLength:     codeTableSpec.MaxCodeLength,
-		AutoCommitAt4:     codeTableSpec.AutoCommitUnique,
-		ClearOnEmptyAt4:   codeTableSpec.ClearOnEmptyMax,
-		TopCodeCommit:     codeTableSpec.TopCodeCommit,
-		PunctCommit:       codeTableSpec.PunctCommit,
-		ShowCodeHint:      codeTableSpec.ShowCodeHint,
-		SingleCodeInput:   codeTableSpec.SingleCodeInput,
-		FilterMode:        s.Engine.FilterMode,
-		CandidateSortMode: codeTableSpec.CandidateSortMode,
-		DedupCandidates:   true,
-		SkipShadow:        true, // 混输模式：Shadow 由 MixedEngine 合并后统一应用
+	mixedDedupCandidates := true
+	if codeTableSpec.DedupCandidates != nil {
+		mixedDedupCandidates = *codeTableSpec.DedupCandidates
+	}
+	mixedSkipSingleCharFreq := true // 默认值：单字不自动调频
+	if codeTableSpec.SkipSingleCharFreq != nil {
+		mixedSkipSingleCharFreq = *codeTableSpec.SkipSingleCharFreq
+	}
+	codetableConfig := &codetable.Config{
+		MaxCodeLength:      codeTableSpec.MaxCodeLength,
+		AutoCommitAt4:      codeTableSpec.AutoCommitUnique,
+		ClearOnEmptyAt4:    codeTableSpec.ClearOnEmptyMax,
+		TopCodeCommit:      codeTableSpec.TopCodeCommit,
+		PunctCommit:        codeTableSpec.PunctCommit,
+		ShowCodeHint:       codeTableSpec.ShowCodeHint,
+		SingleCodeInput:    codeTableSpec.SingleCodeInput,
+		FilterMode:         s.Engine.FilterMode,
+		CandidateSortMode:  codeTableSpec.CandidateSortMode,
+		DedupCandidates:    mixedDedupCandidates,
+		SkipShadow:         true, // 混输模式：Shadow 由 MixedEngine 合并后统一应用
+		SkipSingleCharFreq: mixedSkipSingleCharFreq,
 	}
 
-	// 五笔学习配置
+	// 码表学习配置
 	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
-		wubiConfig.EnableUserFreq = true
-		wubiConfig.FrequencyOnly = (s.Learning.Mode == LearningFrequency)
-		wubiConfig.ProtectTopN = s.Learning.ProtectTopN
+		codetableConfig.EnableUserFreq = true
+		codetableConfig.FrequencyOnly = (s.Learning.Mode == LearningFrequency)
+		codetableConfig.ProtectTopN = s.Learning.ProtectTopN
 	}
 
-	wubiEngine := wubi.NewEngine(wubiConfig, logger)
+	codetableEngine := codetable.NewEngine(codetableConfig, logger)
 
-	// 加载五笔码表（从 dictionaries 中查找五笔词库）
-	var wubiDictSpec *DictSpec
+	// 加载码表（从 dictionaries 中查找默认词库）
+	var codetableDictSpec *DictSpec
 	for i := range s.Dicts {
 		if s.Dicts[i].Default {
-			wubiDictSpec = &s.Dicts[i]
+			codetableDictSpec = &s.Dicts[i]
 			break
 		}
 	}
-	if wubiDictSpec != nil {
-		srcPath := resolvePath(exeDir, wubiDictSpec.Path)
-		var wubiNorm *dict.WeightNormalizer
-		if wubiDictSpec.WeightSpec != nil {
-			wubiNorm = wubiDictSpec.WeightSpec.NewWeightNormalizer()
+	if codetableDictSpec != nil {
+		srcPath := resolvePath(exeDir, codetableDictSpec.Path)
+		var codetableNorm *dict.WeightNormalizer
+		if codetableDictSpec.WeightSpec != nil {
+			codetableNorm = codetableDictSpec.WeightSpec.NewWeightNormalizer()
 		}
-		if err := loadWubiCodeTable(wubiEngine, srcPath, wubiDictSpec.Type, logger, wubiNorm); err != nil {
-			return nil, fmt.Errorf("混输：加载五笔码表失败: %w", err)
+		if err := loadCodetable(codetableEngine, srcPath, codetableDictSpec.Type, s.Schema.ID, logger, codetableNorm); err != nil {
+			return nil, fmt.Errorf("混输：加载码表失败: %w", err)
 		}
-		logger.Info("混输：五笔码表加载成功", "schemaID", s.Schema.ID, "entryCount", wubiEngine.GetEntryCount())
+		logger.Info("混输：码表加载成功", "schemaID", s.Schema.ID, "entryCount", codetableEngine.GetEntryCount())
 	}
 
-	// 注册五笔码表到 DictManager 的主 CompositeDict
+	// 注册码表到 DictManager 的主 CompositeDict
 	if dm != nil {
-		codeTable := wubiEngine.GetCodeTable()
+		codeTable := codetableEngine.GetCodeTable()
 		if codeTable != nil {
 			systemLayer := dict.NewCodeTableLayer("codetable-system", dict.LayerTypeSystem, codeTable)
 			dm.RegisterSystemLayer("codetable-system", systemLayer)
 		}
-		wubiEngine.SetDictManager(dm)
+		codetableEngine.SetDictManager(dm)
 		dm.SetSortMode(candidate.CandidateSortMode(codeTableSpec.CandidateSortMode))
 	}
 
@@ -591,13 +609,13 @@ func createMixedEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *s
 	if pinyinSpec == nil {
 		pinyinSpec = &PinyinSpec{
 			Scheme:          "full",
-			ShowWubiHint:    true,
+			ShowCodeHint:    true,
 			UseSmartCompose: true,
 		}
 	}
 
 	pinyinConfig := &pinyin.Config{
-		ShowWubiHint: pinyinSpec.ShowWubiHint,
+		ShowCodeHint: pinyinSpec.ShowCodeHint,
 		FilterMode:   s.Engine.FilterMode,
 		SkipShadow:   true, // 混输模式：Shadow 由 MixedEngine 合并后统一应用
 	}
@@ -670,11 +688,11 @@ func createMixedEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *s
 		}
 	}
 
-	// 加载反查词库（五笔反查）
+	// 加载反查词库
 	reverseDicts := s.GetDictsByRole(DictRoleReverseLookup)
 	for _, rd := range reverseDicts {
 		rdPath := resolvePath(exeDir, rd.Path)
-		if err := loadWubiTableForPinyin(pinyinEngine, rdPath, rd.Type, logger); err != nil {
+		if err := loadCodetableForPinyin(pinyinEngine, rdPath, rd.Type, s.Schema.ID, logger); err != nil {
 			logger.Warn("混输：加载反查码表失败", "err", err)
 		}
 	}
@@ -696,25 +714,25 @@ func createMixedEngine(s *Schema, exeDir string, dm *dict.DictManager, logger *s
 
 	// === 4. 创建混输引擎 ===
 	mixedConfig := &mixed.Config{
-		MinPinyinLength: mixedSpec.MinPinyinLength,
-		WubiWeightBoost: mixedSpec.WubiWeightBoost,
-		ShowSourceHint:  mixedSpec.ShowSourceHint,
+		MinPinyinLength:      mixedSpec.MinPinyinLength,
+		CodetableWeightBoost: mixedSpec.CodetableWeightBoost,
+		ShowSourceHint:       mixedSpec.ShowSourceHint,
 	}
 	if mixedConfig.MinPinyinLength <= 0 {
 		mixedConfig.MinPinyinLength = 2
 	}
-	if mixedConfig.WubiWeightBoost <= 0 {
-		mixedConfig.WubiWeightBoost = 10000000
+	if mixedConfig.CodetableWeightBoost <= 0 {
+		mixedConfig.CodetableWeightBoost = 10000000
 	}
 
-	mixedEngine := mixed.NewEngine(wubiEngine, pinyinEngine, mixedConfig, logger)
+	mixedEngine := mixed.NewEngine(codetableEngine, pinyinEngine, mixedConfig, logger)
 
 	// 设置 DictManager（用于合并后统一应用 Shadow 规则）
 	if dm != nil {
 		mixedEngine.SetDictManager(dm)
 	}
 
-	logger.Info("混输引擎创建成功", "schemaID", s.Schema.ID, "wubiEntries", wubiEngine.GetEntryCount(), "pinyinEntries", pinyinDict.EntryCount())
+	logger.Info("混输引擎创建成功", "schemaID", s.Schema.ID, "codetableEntries", codetableEngine.GetEntryCount(), "pinyinEntries", pinyinDict.EntryCount())
 
 	// GC 释放临时内存
 	go func() {

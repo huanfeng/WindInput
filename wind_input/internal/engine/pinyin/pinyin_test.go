@@ -138,7 +138,7 @@ func TestEngineConvertWithRealDict(t *testing.T) {
 
 	// 创建引擎（关闭 smart 过滤，先测试无过滤情况）
 	config := &Config{
-		ShowWubiHint:    false,
+		ShowCodeHint:    false,
 		FilterMode:      "all",
 		UseSmartCompose: false,
 	}

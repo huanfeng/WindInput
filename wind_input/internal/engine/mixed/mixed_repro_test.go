@@ -39,16 +39,16 @@ func newRealMixedEngine(t *testing.T) *Engine {
 	pinyinEngine := pinyin.NewEngineWithConfig(pinyinComposite, &pinyin.Config{
 		FilterMode:      "smart",
 		UseSmartCompose: true,
-		ShowWubiHint:    true,
+		ShowCodeHint:    true,
 	}, nil)
 	if err := pinyinEngine.LoadUnigram(filepath.Join(dictRoot, "pinyin", "unigram.txt")); err != nil {
 		t.Fatalf("load unigram: %v", err)
 	}
 
 	return NewEngine(nil, pinyinEngine, &Config{
-		MinPinyinLength: 2,
-		WubiWeightBoost: 10000000,
-		ShowSourceHint:  true,
+		MinPinyinLength:      2,
+		CodetableWeightBoost: 10000000,
+		ShowSourceHint:       true,
 	}, nil)
 }
 

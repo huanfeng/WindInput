@@ -1,4 +1,4 @@
-// Package mixed 提供五笔拼音混合输入引擎
+// Package mixed 提供码表拼音混合输入引擎
 package mixed
 
 import (
@@ -9,30 +9,39 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
-	"github.com/huanfeng/wind_input/internal/engine/wubi"
+)
+
+const (
+	// AbbrevPenalty3 纯简拼3码降权值
+	AbbrevPenalty3 = 2000000
+	// AbbrevPenalty4Plus 纯简拼4码及以上降权值
+	AbbrevPenalty4Plus = 3500000
+	// CodetablePrefixBoostRatio 码表前缀匹配提权比例（相对于 CodetableWeightBoost）
+	CodetablePrefixBoostRatio = 6 // 即 60%
 )
 
 // Config 混输引擎配置
 type Config struct {
-	MinPinyinLength int  // 拼音最小触发长度，默认2
-	WubiWeightBoost int  // 五笔候选权重提升基线，默认10000000
-	ShowSourceHint  bool // 是否在 Hint 中标记来源
+	MinPinyinLength      int  // 拼音最小触发长度，默认2
+	CodetableWeightBoost int  // 码表候选权重提升基线，默认10000000
+	ShowSourceHint       bool // 是否在 Hint 中标记来源
 }
 
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
-		MinPinyinLength: 2,
-		WubiWeightBoost: 10000000,
-		ShowSourceHint:  true,
+		MinPinyinLength:      2,
+		CodetableWeightBoost: 10000000,
+		ShowSourceHint:       true,
 	}
 }
 
 // ConvertResult 混输转换结果
 type ConvertResult struct {
 	Candidates   []candidate.Candidate
-	ShouldCommit bool   // 是否应该自动上屏（来自五笔侧）
+	ShouldCommit bool   // 是否应该自动上屏（来自码表侧）
 	CommitText   string // 自动上屏的文字
 	IsEmpty      bool   // 是否空码
 	ShouldClear  bool   // 是否应该清空
@@ -47,19 +56,19 @@ type ConvertResult struct {
 	IsPinyinFallback   bool     // 是否为拼音降级模式（>maxCodeLen 时）
 }
 
-// Engine 五笔拼音混合输入引擎
-// 内部持有独立的五笔引擎和拼音引擎，并行查询后合并候选词。
+// Engine 码表拼音混合输入引擎
+// 内部持有独立的码表引擎和拼音引擎，并行查询后合并候选词。
 type Engine struct {
-	wubiEngine   *wubi.Engine
-	pinyinEngine *pinyin.Engine
-	config       *Config
-	maxCodeLen   int               // 五笔最大码长（通常为4）
-	dictManager  *dict.DictManager // 词库管理器（用于 Shadow 规则访问）
-	logger       *slog.Logger
+	codetableEngine *codetable.Engine
+	pinyinEngine    *pinyin.Engine
+	config          *Config
+	maxCodeLen      int               // 码表最大码长（通常为4）
+	dictManager     *dict.DictManager // 词库管理器（用于 Shadow 规则访问）
+	logger          *slog.Logger
 }
 
 // NewEngine 创建混输引擎
-func NewEngine(wubiEng *wubi.Engine, pinyinEng *pinyin.Engine, config *Config, logger *slog.Logger) *Engine {
+func NewEngine(codetableEng *codetable.Engine, pinyinEng *pinyin.Engine, config *Config, logger *slog.Logger) *Engine {
 	if config == nil {
 		config = DefaultConfig()
 	}
@@ -67,15 +76,15 @@ func NewEngine(wubiEng *wubi.Engine, pinyinEng *pinyin.Engine, config *Config, l
 		logger = slog.Default()
 	}
 	maxCodeLen := 4
-	if wubiEng != nil && wubiEng.GetConfig() != nil {
-		maxCodeLen = wubiEng.GetConfig().MaxCodeLength
+	if codetableEng != nil && codetableEng.GetConfig() != nil {
+		maxCodeLen = codetableEng.GetConfig().MaxCodeLength
 	}
 	return &Engine{
-		wubiEngine:   wubiEng,
-		pinyinEngine: pinyinEng,
-		config:       config,
-		maxCodeLen:   maxCodeLen,
-		logger:       logger,
+		codetableEngine: codetableEng,
+		pinyinEngine:    pinyinEng,
+		config:          config,
+		maxCodeLen:      maxCodeLen,
+		logger:          logger,
 	}
 }
 
@@ -94,8 +103,8 @@ func (e *Engine) Convert(input string, maxCandidates int) ([]candidate.Candidate
 
 // Reset 重置引擎状态
 func (e *Engine) Reset() {
-	if e.wubiEngine != nil {
-		e.wubiEngine.Reset()
+	if e.codetableEngine != nil {
+		e.codetableEngine.Reset()
 	}
 	if e.pinyinEngine != nil {
 		e.pinyinEngine.Reset()
@@ -104,7 +113,7 @@ func (e *Engine) Reset() {
 
 // --- ExtendedEngine 接口实现 ---
 
-// GetMaxCodeLength 获取最大码长（取五笔的最大码长）
+// GetMaxCodeLength 获取最大码长（取码表的最大码长）
 func (e *Engine) GetMaxCodeLength() int {
 	return e.maxCodeLen
 }
@@ -112,7 +121,7 @@ func (e *Engine) GetMaxCodeLength() int {
 // ShouldAutoCommit 检查是否应该自动上屏
 // 混输模式下由 ConvertEx 内部的五笔引擎 checkAutoCommit 处理，此方法供接口兼容
 func (e *Engine) ShouldAutoCommit(input string, candidates []candidate.Candidate) (bool, string) {
-	// 五笔的自动上屏逻辑在 wubi.ConvertEx 内部处理（checkAutoCommit），
+	// 码表的自动上屏逻辑在 codetable.ConvertEx 内部处理（checkAutoCommit），
 	// 结果通过 ConvertResult.ShouldCommit 返回，无需在此重复
 	return false, ""
 }
@@ -124,9 +133,9 @@ func (e *Engine) HandleEmptyCode(input string) (shouldClear bool, toEnglish bool
 	if len(input) >= e.config.MinPinyinLength {
 		return false, false, ""
 	}
-	// 短编码时委托给五笔的空码处理逻辑
-	if e.wubiEngine != nil && e.wubiEngine.GetConfig() != nil {
-		cfg := e.wubiEngine.GetConfig()
+	// 短编码时委托给码表的空码处理逻辑
+	if e.codetableEngine != nil && e.codetableEngine.GetConfig() != nil {
+		cfg := e.codetableEngine.GetConfig()
 		if cfg.ClearOnEmptyAt4 && len(input) >= cfg.MaxCodeLength {
 			return true, false, ""
 		}
@@ -135,8 +144,8 @@ func (e *Engine) HandleEmptyCode(input string) (shouldClear bool, toEnglish bool
 }
 
 // HandleTopCode 处理顶码
-// 混输模式下禁用五笔顶字：超过 maxCodeLen 的输入统一由 ConvertEx 降级为拼音查询，
-// 而非触发五笔顶字上屏（用户可能在输入拼音，如 "buyao" → "不要"）。
+// 混输模式下禁用码表顶字：超过 maxCodeLen 的输入统一由 ConvertEx 降级为拼音查询，
+// 而非触发码表顶字上屏（用户可能在输入拼音，如 "buyao" → "不要"）。
 func (e *Engine) HandleTopCode(input string) (commitText string, newInput string, shouldCommit bool) {
 	return "", input, false
 }
@@ -145,8 +154,8 @@ func (e *Engine) HandleTopCode(input string) (commitText string, newInput string
 
 // ConvertEx 混输核心转换方法
 // 根据输入长度选择查询策略：
-//   - 1码：仅查五笔
-//   - 2~maxCodeLen码：并行查五笔+拼音，五笔优先
+//   - 1码：仅查码表
+//   - 2~maxCodeLen码：并行查码表+拼音，码表优先
 //   - >maxCodeLen码：降级为纯拼音
 func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	result := &ConvertResult{}
@@ -167,27 +176,27 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 
 	if inputLen < e.config.MinPinyinLength {
 		// 低于拼音触发长度：仅查五笔
-		return e.convertWubiOnly(input, maxCandidates)
+		return e.convertCodetableOnly(input, maxCandidates)
 	}
 
-	// 2~maxCodeLen码：并行查五笔+拼音
+	// 2~maxCodeLen码：并行查码表+拼音
 	return e.convertMixed(input, maxCandidates)
 }
 
-// convertWubiOnly 仅查五笔引擎
-func (e *Engine) convertWubiOnly(input string, maxCandidates int) *ConvertResult {
-	if e.wubiEngine == nil {
+// convertCodetableOnly 仅查码表引擎
+func (e *Engine) convertCodetableOnly(input string, maxCandidates int) *ConvertResult {
+	if e.codetableEngine == nil {
 		return &ConvertResult{IsEmpty: true}
 	}
 
-	wubiResult := e.wubiEngine.ConvertEx(input, maxCandidates)
+	codetableResult := e.codetableEngine.ConvertEx(input, maxCandidates)
 
 	// 标记来源
-	for i := range wubiResult.Candidates {
-		wubiResult.Candidates[i].Source = candidate.SourceWubi
+	for i := range codetableResult.Candidates {
+		codetableResult.Candidates[i].Source = candidate.SourceCodetable
 	}
 
-	candidates := wubiResult.Candidates
+	candidates := codetableResult.Candidates
 
 	// 应用 Shadow 规则（置顶/删除）
 	if e.dictManager != nil {
@@ -199,11 +208,11 @@ func (e *Engine) convertWubiOnly(input string, maxCandidates int) *ConvertResult
 
 	return &ConvertResult{
 		Candidates:   candidates,
-		ShouldCommit: wubiResult.ShouldCommit,
-		CommitText:   wubiResult.CommitText,
-		IsEmpty:      wubiResult.IsEmpty,
-		ShouldClear:  wubiResult.ShouldClear,
-		ToEnglish:    wubiResult.ToEnglish,
+		ShouldCommit: codetableResult.ShouldCommit,
+		CommitText:   codetableResult.CommitText,
+		IsEmpty:      codetableResult.IsEmpty,
+		ShouldClear:  codetableResult.ShouldClear,
+		ToEnglish:    codetableResult.ToEnglish,
 	}
 }
 
@@ -244,31 +253,33 @@ func (e *Engine) convertPinyinFallback(input string, maxCandidates int) *Convert
 	return result
 }
 
-// convertMixed 并行查询五笔+拼音，合并候选词
+// convertMixed 并行查询码表+拼音，合并候选词
 func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
-	var wubiCandidates []candidate.Candidate
+	var codetableCandidates []candidate.Candidate
 	var pinyinCandidates []candidate.Candidate
-	var wubiResult *wubi.ConvertResult
+	var codetableResult *codetable.ConvertResult
 
 	var wg sync.WaitGroup
 
-	// 并行查询五笔
-	if e.wubiEngine != nil {
+	// 并行查询码表
+	if e.codetableEngine != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			wubiResult = e.wubiEngine.ConvertEx(input, maxCandidates)
-			wubiCandidates = wubiResult.Candidates
+			codetableResult = e.codetableEngine.ConvertEx(input, maxCandidates)
+			codetableCandidates = codetableResult.Candidates
 		}()
 	}
 
 	// 并行查询拼音
+	var pinyinHasFullSyllable bool
 	if e.pinyinEngine != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			pinyinResult := e.pinyinEngine.ConvertEx(input, maxCandidates)
 			pinyinCandidates = pinyinResult.Candidates
+			pinyinHasFullSyllable = pinyinResult.HasFullSyllable
 		}()
 	}
 
@@ -276,43 +287,43 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 
 	// === 双向夹击权重策略 ===
 	//
-	// 五笔侧（提权）：
+	// 码表侧（提权）：
 	//   精确匹配(code==input): +10M — 绝对第一层
 	//   前缀匹配(code>input):  +6M  — 跨越拼音简拼的 ~4.5M 天花板
 	//
-	// 拼音侧（纯辅音简拼降权）：
-	//   2码简拼: 保持原值 — 高频救急场景（bg→不过, ds→但是）
-	//   3码简拼: -2M       — 五笔意图远大于拼音（sfg→上翻盖 降为 ~2.5M）
-	//   4码简拼: -3.5M     — 纯噪声压制（wfht→... 降为 ~1M）
-	//   含元音输入: 保持原值 — 正常混输
-	wubiPrefixBoost := e.config.WubiWeightBoost * 6 / 10 // 6M
-	for i := range wubiCandidates {
-		wubiCandidates[i].Source = candidate.SourceWubi
-		if wubiCandidates[i].Code == input {
-			wubiCandidates[i].Weight += e.config.WubiWeightBoost // +10M
+	// 拼音侧（基于解析质量降权）：
+	//   拼音含完整音节（如 shi、bao）: 保持原值 — 可能是有效拼音输入
+	//   纯简拼（无完整音节，如 sfg、wfht）:
+	//     2码: 保持原值 — 高频救急场景（bg→不过, ds→但是）
+	//     3码: -2M     — 码表意图远大于拼音（sfg 降为 ~2.5M）
+	//     4码: -3.5M   — 纯噪声压制（wfht 降为 ~1M）
+	codetablePrefixBoost := e.config.CodetableWeightBoost * CodetablePrefixBoostRatio / 10 // 6M
+	for i := range codetableCandidates {
+		codetableCandidates[i].Source = candidate.SourceCodetable
+		if codetableCandidates[i].Code == input {
+			codetableCandidates[i].Weight += e.config.CodetableWeightBoost // +10M
 		} else {
-			wubiCandidates[i].Weight += wubiPrefixBoost // +6M
+			codetableCandidates[i].Weight += codetablePrefixBoost // +6M
 		}
 	}
 
-	hasVowel := containsVowel(input)
 	inputLen := len(input)
 	for i := range pinyinCandidates {
 		pinyinCandidates[i].Source = candidate.SourcePinyin
-		// 纯辅音输入时，简拼按长度递减降权
-		if !hasVowel && inputLen >= 3 {
+		// 拼音无完整音节时（纯简拼），按长度递减降权
+		if !pinyinHasFullSyllable && inputLen >= 3 {
 			switch {
 			case inputLen == 3:
-				pinyinCandidates[i].Weight -= 2000000 // 3码简拼 ~4.5M→~2.5M
+				pinyinCandidates[i].Weight -= AbbrevPenalty3 // 3码简拼 ~4.5M→~2.5M
 			default:
-				pinyinCandidates[i].Weight -= 3500000 // 4码简拼 ~4.5M→~1M
+				pinyinCandidates[i].Weight -= AbbrevPenalty4Plus // 4码简拼 ~4.5M→~1M
 			}
 		}
 	}
 
-	// 合并：五笔在前，拼音在后
-	merged := make([]candidate.Candidate, 0, len(wubiCandidates)+len(pinyinCandidates))
-	merged = append(merged, wubiCandidates...)
+	// 合并：码表在前，拼音在后
+	merged := make([]candidate.Candidate, 0, len(codetableCandidates)+len(pinyinCandidates))
+	merged = append(merged, codetableCandidates...)
 	merged = append(merged, pinyinCandidates...)
 
 	// 按权重排序
@@ -344,16 +355,16 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 		IsEmpty:    len(merged) == 0,
 	}
 
-	// 继承五笔侧的自动上屏状态
-	if wubiResult != nil {
-		result.ShouldCommit = wubiResult.ShouldCommit
-		result.CommitText = wubiResult.CommitText
+	// 继承码表侧的自动上屏状态
+	if codetableResult != nil {
+		result.ShouldCommit = codetableResult.ShouldCommit
+		result.CommitText = codetableResult.CommitText
 	}
 
-	// 如果五笔空码但拼音有结果，不标记为空码
-	if result.IsEmpty && e.wubiEngine != nil {
-		wubiEmpty := wubiResult != nil && wubiResult.IsEmpty
-		if wubiEmpty {
+	// 如果码表空码但拼音有结果，不标记为空码
+	if result.IsEmpty && e.codetableEngine != nil {
+		codetableEmpty := codetableResult != nil && codetableResult.IsEmpty
+		if codetableEmpty {
 			result.ShouldClear = false // 不清空，拼音兜底
 		}
 	}
@@ -362,25 +373,12 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 		addSourceHints(result.Candidates)
 	}
 
-	e.logger.Debug("convertMixed", "input", input, "wubi", len(wubiCandidates), "pinyin", len(pinyinCandidates), "merged", len(merged))
+	e.logger.Debug("convertMixed", "input", input, "codetable", len(codetableCandidates), "pinyin", len(pinyinCandidates), "merged", len(merged))
 
 	return result
 }
 
 // --- 辅助函数 ---
-
-// containsVowel 检查输入是否包含元音字母（a/e/i/o/u/v）
-// 有效的拼音输入一定包含元音，纯辅音序列（如 sfg）是五笔编码，无需查拼音。
-// v 作为 ü 的替代也算元音（如 nv=女, lv=绿）。
-func containsVowel(input string) bool {
-	for _, c := range input {
-		switch c {
-		case 'a', 'e', 'i', 'o', 'u', 'v':
-			return true
-		}
-	}
-	return false
-}
 
 var seenPool = sync.Pool{New: func() any { return make(map[string]struct{}, 64) }}
 
@@ -420,18 +418,18 @@ func addSourceHints(candidates []candidate.Candidate) {
 // OnCandidateSelected 选词回调，按来源路由到对应引擎
 func (e *Engine) OnCandidateSelected(code, text string, source candidate.CandidateSource) {
 	switch source {
-	case candidate.SourceWubi:
-		if e.wubiEngine != nil {
-			e.wubiEngine.OnCandidateSelected(code, text)
+	case candidate.SourceCodetable:
+		if e.codetableEngine != nil {
+			e.codetableEngine.OnCandidateSelected(code, text)
 		}
 	case candidate.SourcePinyin:
 		if e.pinyinEngine != nil {
 			e.pinyinEngine.OnCandidateSelected(code, text)
 		}
 	default:
-		// 未标记来源时，默认路由到五笔
-		if e.wubiEngine != nil {
-			e.wubiEngine.OnCandidateSelected(code, text)
+		// 未标记来源时，默认路由到码表
+		if e.codetableEngine != nil {
+			e.codetableEngine.OnCandidateSelected(code, text)
 		}
 	}
 }
@@ -445,9 +443,9 @@ func (e *Engine) SetDictManager(dm *dict.DictManager) {
 
 // --- Getter ---
 
-// GetWubiEngine 获取内部五笔引擎（供 manager 使用）
-func (e *Engine) GetWubiEngine() *wubi.Engine {
-	return e.wubiEngine
+// GetCodetableEngine 获取内部码表引擎（供 manager 使用）
+func (e *Engine) GetCodetableEngine() *codetable.Engine {
+	return e.codetableEngine
 }
 
 // GetPinyinEngine 获取内部拼音引擎（供 manager 使用）

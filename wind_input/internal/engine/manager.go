@@ -7,9 +7,9 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
-	"github.com/huanfeng/wind_input/internal/engine/wubi"
 	"github.com/huanfeng/wind_input/internal/schema"
 )
 
@@ -183,7 +183,7 @@ func (m *Manager) ToggleSchema(available []string) (string, error) {
 	return nextID, nil
 }
 
-// ActivateTempSchema 临时激活方案（如五笔下临时用拼音）
+// ActivateTempSchema 临时激活方案（如码表方案下临时用拼音）
 func (m *Manager) ActivateTempSchema(schemaID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -257,7 +257,7 @@ func (m *Manager) loadSchemaEngineLocked(schemaID string) error {
 	switch eng := bundle.Engine.(type) {
 	case *pinyin.Engine:
 		m.engines[schemaID] = eng
-	case *wubi.Engine:
+	case *codetable.Engine:
 		m.engines[schemaID] = eng
 	case *mixed.Engine:
 		m.engines[schemaID] = eng
@@ -272,7 +272,7 @@ func (m *Manager) loadSchemaEngineLocked(schemaID string) error {
 		switch bundle.Engine.(type) {
 		case *pinyin.Engine:
 			layerName = "pinyin-system"
-		case *wubi.Engine:
+		case *codetable.Engine:
 			layerName = "codetable-system"
 		case *mixed.Engine:
 			// 混输引擎注册的是 codetable-system 层（拼音层在独立 CompositeDict 中）
@@ -448,8 +448,8 @@ func (m *Manager) ConvertRaw(input string, maxCandidates int) ([]candidate.Candi
 	if pinyinEngine, ok := engine.(*pinyin.Engine); ok {
 		return pinyinEngine.ConvertRaw(input, maxCandidates)
 	}
-	if wubiEngine, ok := engine.(*wubi.Engine); ok {
-		return wubiEngine.ConvertRaw(input, maxCandidates)
+	if codetableEngine, ok := engine.(*codetable.Engine); ok {
+		return codetableEngine.ConvertRaw(input, maxCandidates)
 	}
 	return engine.Convert(input, maxCandidates)
 }
@@ -482,15 +482,15 @@ func (m *Manager) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		return result
 	}
 
-	if wubiEngine, ok := engine.(*wubi.Engine); ok {
-		wubiResult := wubiEngine.ConvertEx(input, maxCandidates)
+	if codetableEngine, ok := engine.(*codetable.Engine); ok {
+		codetableResult := codetableEngine.ConvertEx(input, maxCandidates)
 		return &ConvertResult{
-			Candidates:   wubiResult.Candidates,
-			ShouldCommit: wubiResult.ShouldCommit,
-			CommitText:   wubiResult.CommitText,
-			IsEmpty:      wubiResult.IsEmpty,
-			ShouldClear:  wubiResult.ShouldClear,
-			ToEnglish:    wubiResult.ToEnglish,
+			Candidates:   codetableResult.Candidates,
+			ShouldCommit: codetableResult.ShouldCommit,
+			CommitText:   codetableResult.CommitText,
+			IsEmpty:      codetableResult.IsEmpty,
+			ShouldClear:  codetableResult.ShouldClear,
+			ToEnglish:    codetableResult.ToEnglish,
 		}
 	}
 
@@ -536,8 +536,8 @@ func (m *Manager) GetMaxCodeLength() int {
 	if mixedEngine, ok := engine.(*mixed.Engine); ok {
 		return mixedEngine.GetMaxCodeLength()
 	}
-	if wubiEngine, ok := engine.(*wubi.Engine); ok {
-		return wubiEngine.GetConfig().MaxCodeLength
+	if codetableEngine, ok := engine.(*codetable.Engine); ok {
+		return codetableEngine.GetConfig().MaxCodeLength
 	}
 	return 100
 }
@@ -551,8 +551,8 @@ func (m *Manager) HandleTopCode(input string) (commitText string, newInput strin
 	if mixedEngine, ok := engine.(*mixed.Engine); ok {
 		return mixedEngine.HandleTopCode(input)
 	}
-	if wubiEngine, ok := engine.(*wubi.Engine); ok {
-		return wubiEngine.HandleTopCode(input)
+	if codetableEngine, ok := engine.(*codetable.Engine); ok {
+		return codetableEngine.HandleTopCode(input)
 	}
 	return "", input, false
 }
@@ -580,20 +580,20 @@ func (m *Manager) GetEngineInfo() string {
 	schemaID := m.GetCurrentSchemaID()
 
 	if mixedEngine, ok := engine.(*mixed.Engine); ok {
-		wubiEng := mixedEngine.GetWubiEngine()
-		if wubiEng != nil {
-			info := wubiEng.GetCodeTableInfo()
+		codetableEng := mixedEngine.GetCodetableEngine()
+		if codetableEng != nil {
+			info := codetableEng.GetCodeTableInfo()
 			if info != nil {
-				return fmt.Sprintf("%s: %s+拼音混输 (%d词条)", schemaID, info.Name, wubiEng.GetEntryCount())
+				return fmt.Sprintf("%s: %s+拼音混输 (%d词条)", schemaID, info.Name, codetableEng.GetEntryCount())
 			}
 		}
 		return schemaID + ": 混输"
 	}
 
-	if wubiEngine, ok := engine.(*wubi.Engine); ok {
-		info := wubiEngine.GetCodeTableInfo()
+	if codetableEngine, ok := engine.(*codetable.Engine); ok {
+		info := codetableEngine.GetCodeTableInfo()
 		if info != nil {
-			return fmt.Sprintf("%s: %s (%d词条)", schemaID, info.Name, wubiEngine.GetEntryCount())
+			return fmt.Sprintf("%s: %s (%d词条)", schemaID, info.Name, codetableEngine.GetEntryCount())
 		}
 	}
 
@@ -618,7 +618,7 @@ func (m *Manager) EnsurePinyinLoaded() error {
 }
 
 // ActivateTempPinyin 激活临时拼音模式：交换系统词库层
-// 临时移除五笔码表层 + 注册拼音词库层，避免五笔候选污染拼音查询结果。
+// 临时移除码表层 + 注册拼音词库层，避免码表候选污染拼音查询结果。
 // 调用方（coordinator）在进入临时拼音模式时调用。
 func (m *Manager) ActivateTempPinyin() {
 	m.mu.RLock()
@@ -633,12 +633,12 @@ func (m *Manager) ActivateTempPinyin() {
 		return
 	}
 
-	// 1. 临时移除五笔码表层，避免五笔候选污染拼音查询结果
+	// 1. 临时移除码表层，避免码表候选污染拼音查询结果
 	//    直接操作 CompositeDict（不通过 DictManager.UnregisterSystemLayer），
 	//    保留 DictManager.systemLayers 中的引用供后续恢复。
 	if compositeDict.GetLayerByName("codetable-system") != nil {
 		compositeDict.RemoveLayer("codetable-system")
-		m.logger.Info("临时拼音：暂时移除五笔码表层")
+		m.logger.Info("临时拼音：暂时移除码表层")
 	}
 
 	// 2. 如果拼音词库层已注册（首次由 createPinyinEngine 注册），直接返回
@@ -658,7 +658,7 @@ func (m *Manager) ActivateTempPinyin() {
 }
 
 // DeactivateTempPinyin 退出临时拼音模式：恢复系统词库层
-// 卸载拼音词库层 + 恢复五笔码表层。
+// 卸载拼音词库层 + 恢复码表层。
 func (m *Manager) DeactivateTempPinyin() {
 	if m.dictManager == nil {
 		return
@@ -674,15 +674,15 @@ func (m *Manager) DeactivateTempPinyin() {
 		m.logger.Info("临时拼音：卸载拼音词库层")
 	}
 
-	// 2. 恢复五笔码表层
+	// 2. 恢复码表层
 	m.mu.RLock()
 	currentID := m.currentID
-	wubiLayer, ok := m.systemLayers[currentID]
+	codetableLayer, ok := m.systemLayers[currentID]
 	m.mu.RUnlock()
 
-	if ok && wubiLayer != nil && compositeDict.GetLayerByName(wubiLayer.Name()) == nil {
-		compositeDict.AddLayer(wubiLayer)
-		m.logger.Info("临时拼音：恢复五笔码表层")
+	if ok && codetableLayer != nil && compositeDict.GetLayerByName(codetableLayer.Name()) == nil {
+		compositeDict.AddLayer(codetableLayer)
+		m.logger.Info("临时拼音：恢复码表层")
 	}
 }
 
@@ -703,7 +703,7 @@ func (m *Manager) ConvertWithPinyin(input string, maxCandidates int) *ConvertRes
 	}
 
 	pinyinResult := pe.ConvertEx(input, maxCandidates)
-	pe.AddWubiHintsForced(pinyinResult.Candidates)
+	pe.AddCodeHintsForced(pinyinResult.Candidates)
 
 	result := &ConvertResult{
 		Candidates:     pinyinResult.Candidates,
@@ -718,8 +718,8 @@ func (m *Manager) ConvertWithPinyin(input string, maxCandidates int) *ConvertRes
 	return result
 }
 
-// OnCandidateSelected 选词回调（拼音 + 五笔 + 混输统一路由）
-// source 为可选参数，混输模式下传入候选来源（"wubi"/"pinyin"）以路由到正确的子引擎
+// OnCandidateSelected 选词回调（拼音 + 码表 + 混输统一路由）
+// source 为可选参数，混输模式下传入候选来源（"codetable"/"pinyin"）以路由到正确的子引擎
 func (m *Manager) OnCandidateSelected(code, text string, source ...string) {
 	engine := m.GetCurrentEngine()
 	if engine == nil {
@@ -738,8 +738,8 @@ func (m *Manager) OnCandidateSelected(code, text string, source ...string) {
 		pinyinEngine.OnCandidateSelected(code, text)
 		return
 	}
-	if wubiEngine, ok := engine.(*wubi.Engine); ok {
-		wubiEngine.OnCandidateSelected(code, text)
+	if codetableEngine, ok := engine.(*codetable.Engine); ok {
+		codetableEngine.OnCandidateSelected(code, text)
 		return
 	}
 }

@@ -1,4 +1,4 @@
-package wubi
+package codetable
 
 import (
 	"testing"
@@ -41,7 +41,7 @@ func newTestEngineWithFreq(t *testing.T, protectTopN int) (*Engine, *dict.UserDi
 	return engine, userDict
 }
 
-func TestWubiOnCandidateSelected_DisabledByDefault(t *testing.T) {
+func TestCodetableOnCandidateSelected_DisabledByDefault(t *testing.T) {
 	config := &Config{
 		MaxCodeLength:  4,
 		EnableUserFreq: false, // 关闭
@@ -52,7 +52,7 @@ func TestWubiOnCandidateSelected_DisabledByDefault(t *testing.T) {
 	engine.OnCandidateSelected("sf", "树发")
 }
 
-func TestWubiOnCandidateSelected_SingleCharSkipped(t *testing.T) {
+func TestCodetableOnCandidateSelected_SingleCharSkipped(t *testing.T) {
 	engine, userDict := newTestEngineWithFreq(t, 0)
 	defer userDict.Close()
 
@@ -64,7 +64,7 @@ func TestWubiOnCandidateSelected_SingleCharSkipped(t *testing.T) {
 	}
 }
 
-func TestWubiOnCandidateSelected_ProtectTopN(t *testing.T) {
+func TestCodetableOnCandidateSelected_ProtectTopN(t *testing.T) {
 	engine, userDict := newTestEngineWithFreq(t, 3)
 	defer userDict.Close()
 
@@ -92,7 +92,7 @@ func TestWubiOnCandidateSelected_ProtectTopN(t *testing.T) {
 	}
 }
 
-func TestWubiOnCandidateSelected_BeyondProtectTopN(t *testing.T) {
+func TestCodetableOnCandidateSelected_BeyondProtectTopN(t *testing.T) {
 	engine, userDict := newTestEngineWithFreq(t, 2)
 	defer userDict.Close()
 
@@ -121,7 +121,7 @@ func TestWubiOnCandidateSelected_BeyondProtectTopN(t *testing.T) {
 	}
 }
 
-func TestWubiOnCandidateSelected_NotInCodeTable(t *testing.T) {
+func TestCodetableOnCandidateSelected_NotInCodeTable(t *testing.T) {
 	engine, userDict := newTestEngineWithFreq(t, 3)
 	defer userDict.Close()
 
@@ -133,7 +133,7 @@ func TestWubiOnCandidateSelected_NotInCodeTable(t *testing.T) {
 	}
 }
 
-func TestWubiGetOriginalRank(t *testing.T) {
+func TestCodetableGetOriginalRank(t *testing.T) {
 	engine, userDict := newTestEngineWithFreq(t, 0)
 	defer userDict.Close()
 

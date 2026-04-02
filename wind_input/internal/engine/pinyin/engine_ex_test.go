@@ -363,7 +363,7 @@ func TestEngineIsValidSyllablePrefix(t *testing.T) {
 func TestEngineConvertExLongInput(t *testing.T) {
 	d := createTestDictForEx(t)
 	config := &Config{
-		ShowWubiHint:    false,
+		ShowCodeHint:    false,
 		FilterMode:      "all",
 		UseSmartCompose: true,
 	}

@@ -4,9 +4,9 @@ package candidate
 type CandidateSource string
 
 const (
-	SourceNone   CandidateSource = ""       // 未标记（单引擎模式）
-	SourceWubi   CandidateSource = "wubi"   // 来自五笔引擎
-	SourcePinyin CandidateSource = "pinyin" // 来自拼音引擎
+	SourceNone      CandidateSource = ""          // 未标记（单引擎模式）
+	SourceCodetable CandidateSource = "codetable" // 来自码表引擎
+	SourcePinyin    CandidateSource = "pinyin"    // 来自拼音引擎
 )
 
 // Candidate 候选词

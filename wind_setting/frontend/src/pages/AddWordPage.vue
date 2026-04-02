@@ -19,7 +19,7 @@
           <input
             class="addword-input"
             v-model="wordCode"
-            placeholder="输入编码（五笔编码等）"
+            placeholder="输入编码"
           />
         </div>
 
@@ -35,7 +35,9 @@
         <div class="addword-field">
           <label class="addword-label">
             权重
-            <span class="addword-hint">值越大排序越靠前，系统词中位约 1000</span>
+            <span class="addword-hint"
+              >值越大排序越靠前，系统词中位约 1000</span
+            >
           </label>
           <input
             class="addword-input addword-weight"

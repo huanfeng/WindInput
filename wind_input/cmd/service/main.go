@@ -255,7 +255,11 @@ func main() {
 	// 确定活跃方案 ID
 	activeSchemaID := cfg.Schema.Active
 	if activeSchemaID == "" {
-		activeSchemaID = "wubi86"
+		if len(cfg.Schema.Available) > 0 {
+			activeSchemaID = cfg.Schema.Available[0]
+		} else {
+			activeSchemaID = "wubi86"
+		}
 	}
 
 	// 通过 Schema 驱动引擎创建和词库切换
@@ -480,7 +484,7 @@ func (h *reloadHandlerImpl) reloadActiveSchemaConfig() {
 	switch s.Engine.Type {
 	case schema.EngineTypeCodeTable:
 		if spec := s.Engine.CodeTable; spec != nil {
-			h.engineMgr.UpdateWubiOptions(
+			h.engineMgr.UpdateCodetableOptions(
 				spec.AutoCommitUnique,
 				spec.ClearOnEmptyMax,
 				spec.TopCodeCommit,
@@ -495,7 +499,7 @@ func (h *reloadHandlerImpl) reloadActiveSchemaConfig() {
 	case schema.EngineTypePinyin:
 		if spec := s.Engine.Pinyin; spec != nil {
 			pinyinCfg := &config.PinyinConfig{
-				ShowWubiHint:    spec.ShowWubiHint,
+				ShowCodeHint:    spec.ShowCodeHint,
 				UseSmartCompose: spec.UseSmartCompose,
 				CandidateOrder:  spec.CandidateOrder,
 			}

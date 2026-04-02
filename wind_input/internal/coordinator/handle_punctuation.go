@@ -6,7 +6,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/engine"
-	"github.com/huanfeng/wind_input/internal/engine/wubi"
+	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/transform"
 )
@@ -100,8 +100,8 @@ func (c *Coordinator) handlePunctuation(r rune) *bridge.KeyEventResult {
 		punctCommit := false
 		if c.engineMgr != nil {
 			if eng := c.engineMgr.GetCurrentEngine(); eng != nil {
-				if wubiEng, ok := eng.(*wubi.Engine); ok {
-					if cfg := wubiEng.GetConfig(); cfg != nil {
+				if codetableEng, ok := eng.(*codetable.Engine); ok {
+					if cfg := codetableEng.GetConfig(); cfg != nil {
 						punctCommit = cfg.PunctCommit
 					}
 				}
