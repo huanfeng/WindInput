@@ -119,38 +119,13 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 		needBroadcast = true
 
 	case "toggle_width":
-		c.fullWidth = !c.fullWidth
+		c.applyToggleFullWidth()
 		c.logger.Debug("Full-width toggled via menu", "fullWidth", c.fullWidth)
-
-		// Show indicator
-		indicator := "半"
-		if c.fullWidth {
-			indicator = "全"
-		}
-		c.showIndicator(indicator)
-
-		// Save runtime state
-		c.saveRuntimeState()
-
 		needBroadcast = true
 
 	case "toggle_punct":
-		c.chinesePunctuation = !c.chinesePunctuation
+		c.applyTogglePunct()
 		c.logger.Debug("Chinese punctuation toggled via menu", "chinesePunctuation", c.chinesePunctuation)
-
-		// Reset punctuation converter state
-		c.punctConverter.Reset()
-
-		// Show indicator
-		indicator := "英."
-		if c.chinesePunctuation {
-			indicator = "中。"
-		}
-		c.showIndicator(indicator)
-
-		// Save runtime state
-		c.saveRuntimeState()
-
 		needBroadcast = true
 
 	case "toggle_toolbar":

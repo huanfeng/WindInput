@@ -658,20 +658,8 @@ func (c *Coordinator) handleToolbarToggleWidth() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.fullWidth = !c.fullWidth
+	c.applyToggleFullWidth()
 	c.logger.Debug("Full-width toggled via toolbar", "fullWidth", c.fullWidth)
-
-	// Show indicator
-	indicator := "半"
-	if c.fullWidth {
-		indicator = "全"
-	}
-	c.showIndicator(indicator)
-
-	// Save runtime state if remember_last_state is enabled
-	c.saveRuntimeState()
-
-	// Broadcast state to toolbar and all TSF clients
 	c.broadcastState()
 }
 
@@ -685,23 +673,8 @@ func (c *Coordinator) handleToolbarTogglePunct() {
 		return
 	}
 
-	c.chinesePunctuation = !c.chinesePunctuation
+	c.applyTogglePunct()
 	c.logger.Debug("Chinese punctuation toggled via toolbar", "chinesePunctuation", c.chinesePunctuation)
-
-	// Reset punctuation converter state
-	c.punctConverter.Reset()
-
-	// Show indicator
-	indicator := "英."
-	if c.chinesePunctuation {
-		indicator = "中，"
-	}
-	c.showIndicator(indicator)
-
-	// Save runtime state if remember_last_state is enabled
-	c.saveRuntimeState()
-
-	// Broadcast state to toolbar and all TSF clients
 	c.broadcastState()
 }
 

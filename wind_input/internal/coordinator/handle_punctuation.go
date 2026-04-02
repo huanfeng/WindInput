@@ -179,26 +179,35 @@ func (c *Coordinator) handlePunctuation(r rune) *bridge.KeyEventResult {
 	}
 }
 
-// handleToggleFullWidth handles the full-width toggle hotkey (e.g., Shift+Space)
-func (c *Coordinator) handleToggleFullWidth() *bridge.KeyEventResult {
+// applyToggleFullWidth 执行全角切换的核心逻辑（需持锁调用）
+func (c *Coordinator) applyToggleFullWidth() {
 	c.fullWidth = !c.fullWidth
-	c.logger.Debug("Full-width toggled via hotkey", "fullWidth", c.fullWidth)
-
-	// Show indicator
 	indicator := "半"
 	if c.fullWidth {
 		indicator = "全"
 	}
 	c.showIndicator(indicator)
-
-	// Update toolbar state
-	c.syncToolbarState()
-
-	// Save runtime state if remember_last_state is enabled
 	c.saveRuntimeState()
+}
 
-	// Consume the key (don't let it pass through)
+// handleToggleFullWidth handles the full-width toggle hotkey (e.g., Shift+Space)
+func (c *Coordinator) handleToggleFullWidth() *bridge.KeyEventResult {
+	c.applyToggleFullWidth()
+	c.logger.Debug("Full-width toggled via hotkey", "fullWidth", c.fullWidth)
+	c.syncToolbarState()
 	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+}
+
+// applyTogglePunct 执行标点切换的核心逻辑（需持锁调用）
+func (c *Coordinator) applyTogglePunct() {
+	c.chinesePunctuation = !c.chinesePunctuation
+	c.punctConverter.Reset()
+	indicator := "英."
+	if c.chinesePunctuation {
+		indicator = "中。"
+	}
+	c.showIndicator(indicator)
+	c.saveRuntimeState()
 }
 
 // handleTogglePunct handles the punctuation toggle hotkey (e.g., Ctrl+.)
@@ -208,26 +217,9 @@ func (c *Coordinator) handleTogglePunct() *bridge.KeyEventResult {
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 	}
 
-	c.chinesePunctuation = !c.chinesePunctuation
+	c.applyTogglePunct()
 	c.logger.Debug("Chinese punctuation toggled via hotkey", "chinesePunctuation", c.chinesePunctuation)
-
-	// Reset punctuation converter state
-	c.punctConverter.Reset()
-
-	// Show indicator
-	indicator := "英."
-	if c.chinesePunctuation {
-		indicator = "中，"
-	}
-	c.showIndicator(indicator)
-
-	// Update toolbar state
 	c.syncToolbarState()
-
-	// Save runtime state if remember_last_state is enabled
-	c.saveRuntimeState()
-
-	// Consume the key (don't let it pass through)
 	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 }
 
