@@ -67,6 +67,9 @@ type Engine struct {
 	maxCodeLen      int               // 码表最大码长（通常为4）
 	dictManager     *dict.DictManager // 词库管理器（用于 Shadow 规则访问）
 	logger          *slog.Logger
+
+	// 编码反查：从主码表懒构建的反向索引（汉字→编码），用于给拼音候选添加主编码提示
+	reverseIndex map[string][]string
 }
 
 // NewEngine 创建混输引擎
@@ -362,6 +365,7 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 		}
 	}
 
+	e.addCodeHintsFromCodetable(result.Candidates)
 	if e.config.ShowSourceHint {
 		addSourceHints(result.Candidates)
 	}
@@ -487,6 +491,7 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 		}
 	}
 
+	e.addCodeHintsFromCodetable(result.Candidates)
 	if e.config.ShowSourceHint {
 		addSourceHints(result.Candidates)
 	}
@@ -515,6 +520,31 @@ func dedupByText(candidates []candidate.Candidate) []candidate.Candidate {
 	}
 	seenPool.Put(seen)
 	return result
+}
+
+// addCodeHintsFromCodetable 使用主码表的反向索引为拼音候选添加主编码提示
+// 懒构建反向索引，避免在引擎创建时额外加载反查码表
+func (e *Engine) addCodeHintsFromCodetable(candidates []candidate.Candidate) {
+	if e.codetableEngine == nil {
+		return
+	}
+	// 懒构建反向索引
+	if e.reverseIndex == nil {
+		ct := e.codetableEngine.GetCodeTable()
+		if ct == nil {
+			return
+		}
+		e.reverseIndex = ct.BuildReverseIndex()
+	}
+	for i := range candidates {
+		if candidates[i].Source != candidate.SourcePinyin {
+			continue
+		}
+		codes := e.reverseIndex[candidates[i].Text]
+		if len(codes) > 0 {
+			candidates[i].Hint = codes[0]
+		}
+	}
 }
 
 // addSourceHints 为混输候选添加来源标记提示

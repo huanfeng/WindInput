@@ -238,7 +238,7 @@ func (m *Manager) IsTempSchemaActive() bool {
 }
 
 // loadSchemaEngineLocked 加载方案引擎（调用方必须持有锁）
-func (m *Manager) loadSchemaEngineLocked(schemaID string) error {
+func (m *Manager) loadSchemaEngineLocked(schemaID string, opts ...schema.EngineCreateOptions) error {
 	if m.schemaManager == nil {
 		return fmt.Errorf("SchemaManager 未设置")
 	}
@@ -255,7 +255,7 @@ func (m *Manager) loadSchemaEngineLocked(schemaID string) error {
 	if m.schemaManager != nil {
 		dataDir = m.schemaManager.GetDataDir()
 	}
-	bundle, err := schema.CreateEngineFromSchema(s, m.exeDir, dataDir, m.dictManager, m.logger, resolver)
+	bundle, err := schema.CreateEngineFromSchema(s, m.exeDir, dataDir, m.dictManager, m.logger, resolver, opts...)
 	if err != nil {
 		return fmt.Errorf("创建方案 %q 引擎失败: %w", schemaID, err)
 	}
@@ -621,7 +621,8 @@ func (m *Manager) EnsurePinyinLoaded() error {
 	}
 
 	m.logger.Info("临时拼音：加载拼音引擎")
-	return m.loadSchemaEngineLocked(pinyinID)
+	// 跳过反查码表加载：临时拼音模式由 Manager.GetReverseIndex() 动态提供当前主方案的反向索引
+	return m.loadSchemaEngineLocked(pinyinID, schema.EngineCreateOptions{SkipReverseLookup: true})
 }
 
 // ActivateTempPinyin 激活临时拼音模式：交换系统词库层
@@ -710,7 +711,18 @@ func (m *Manager) ConvertWithPinyin(input string, maxCandidates int) *ConvertRes
 	}
 
 	pinyinResult := pe.ConvertEx(input, maxCandidates)
-	pe.AddCodeHintsForced(pinyinResult.Candidates)
+
+	// 使用当前主方案的反向索引添加编码提示（而非拼音引擎自带的反查码表），
+	// 这样切换不同主方案（五笔/郑码等）时，临时拼音始终显示当前主编码。
+	reverseIndex := m.GetReverseIndex()
+	if len(reverseIndex) > 0 {
+		for i := range pinyinResult.Candidates {
+			codes := reverseIndex[pinyinResult.Candidates[i].Text]
+			if len(codes) > 0 {
+				pinyinResult.Candidates[i].Hint = codes[0]
+			}
+		}
+	}
 
 	result := &ConvertResult{
 		Candidates:     pinyinResult.Candidates,
@@ -972,6 +984,19 @@ func (m *Manager) GetReverseIndex() map[string][]string {
 	// 备选：直接通过层名查找 codetable-system
 	if ctLayer := composite.GetLayerByName("codetable-system"); ctLayer != nil {
 		if ctl, ok := ctLayer.(*dict.CodeTableLayer); ok {
+			ct := ctl.GetCodeTable()
+			if ct != nil {
+				m.cachedReverseIndex = ct.BuildReverseIndex()
+				m.cachedReverseSchemaID = m.currentID
+				return m.cachedReverseIndex
+			}
+		}
+	}
+
+	// 回退：从 systemLayers 缓存中查找（临时拼音模式下码表层已从 CompositeDict 移除，
+	// 但 systemLayers 中仍保留引用）
+	if layer, ok := m.systemLayers[m.currentID]; ok && layer != nil {
+		if ctl, ok := layer.(*dict.CodeTableLayer); ok {
 			ct := ctl.GetCodeTable()
 			if ct != nil {
 				m.cachedReverseIndex = ct.BuildReverseIndex()

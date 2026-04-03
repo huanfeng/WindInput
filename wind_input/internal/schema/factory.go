@@ -27,13 +27,22 @@ type EngineBundle struct {
 // SchemaResolver 方案解析器，用于混输引擎查找被引用的方案
 type SchemaResolver func(schemaID string) *Schema
 
+// EngineCreateOptions 引擎创建选项
+type EngineCreateOptions struct {
+	SkipReverseLookup bool // 跳过反查码表加载（临时拼音模式下由 Manager 提供反向索引）
+}
+
 // CreateEngineFromSchema 根据 Schema 创建引擎实例并加载词库
-func CreateEngineFromSchema(s *Schema, exeDir, dataDir string, dm *dict.DictManager, logger *slog.Logger, resolver SchemaResolver) (*EngineBundle, error) {
+func CreateEngineFromSchema(s *Schema, exeDir, dataDir string, dm *dict.DictManager, logger *slog.Logger, resolver SchemaResolver, opts ...EngineCreateOptions) (*EngineBundle, error) {
+	var opt EngineCreateOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	switch s.Engine.Type {
 	case EngineTypeCodeTable:
 		return createCodeTableEngine(s, exeDir, dataDir, dm, logger)
 	case EngineTypePinyin:
-		return createPinyinEngine(s, exeDir, dataDir, dm, logger)
+		return createPinyinEngine(s, exeDir, dataDir, dm, logger, opt)
 	case EngineTypeMixed:
 		return createMixedEngine(s, exeDir, dataDir, dm, logger, resolver)
 	default:
@@ -127,7 +136,7 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 }
 
 // createPinyinEngine 创建拼音引擎
-func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, logger *slog.Logger) (*EngineBundle, error) {
+func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, logger *slog.Logger, opt EngineCreateOptions) (*EngineBundle, error) {
 	spec := s.Engine.Pinyin
 	if spec == nil {
 		spec = &PinyinSpec{
@@ -208,13 +217,16 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 	}
 
 	// 加载反查词库（如五笔反查）
-	reverseDicts := s.GetDictsByRole(DictRoleReverseLookup)
-	for _, rd := range reverseDicts {
-		rdPath := resolvePath(exeDir, dataDir, rd.Path)
-		if err := loadCodetableForPinyin(engine, rdPath, rd.Type, s.Schema.ID, logger); err != nil {
-			logger.Warn("加载反查码表失败", "err", err)
-		} else {
-			logger.Info("反查码表加载成功")
+	// 临时拼音模式下跳过：由 Manager.GetReverseIndex() 动态提供当前主方案的反向索引
+	if !opt.SkipReverseLookup {
+		reverseDicts := s.GetDictsByRole(DictRoleReverseLookup)
+		for _, rd := range reverseDicts {
+			rdPath := resolvePath(exeDir, dataDir, rd.Path)
+			if err := loadCodetableForPinyin(engine, rdPath, rd.Type, s.Schema.ID, logger); err != nil {
+				logger.Warn("加载反查码表失败", "err", err)
+			} else {
+				logger.Info("反查码表加载成功")
+			}
 		}
 	}
 
@@ -389,14 +401,16 @@ func loadCodetableForPinyin(engine *pinyin.Engine, srcPath, dictType, schemaID s
 		srcPaths = []string{srcPath}
 	}
 
-	wdbInDir := filepath.Join(srcDir, schemaID+".wdb")
+	// 使用 _reverse 后缀避免与拼音词库缓存（CachePath(schemaID)）冲突
+	reverseName := schemaID + "_reverse"
+	wdbInDir := filepath.Join(srcDir, reverseName+".wdb")
 	if len(srcPaths) > 0 && !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
 		if err := engine.LoadCodeHintTableBinary(wdbInDir); err == nil {
 			return nil
 		}
 	}
 
-	wdbCachePath := dictcache.CachePath(schemaID)
+	wdbCachePath := dictcache.CachePath(reverseName)
 	if len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
 		var convertErr error
 		if dictType == "rime_codetable" {
@@ -786,20 +800,9 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		}
 	}
 
-	// 加载反查词库（优先从混输方案，其次从主方案，再从拼音方案）
-	reverseDicts := s.GetDictsByRole(DictRoleReverseLookup)
-	if len(reverseDicts) == 0 && primarySchema != nil {
-		reverseDicts = primarySchema.GetDictsByRole(DictRoleReverseLookup)
-	}
-	if len(reverseDicts) == 0 && secondarySchema != nil {
-		reverseDicts = secondarySchema.GetDictsByRole(DictRoleReverseLookup)
-	}
-	for _, rd := range reverseDicts {
-		rdPath := resolvePath(exeDir, dataDir, rd.Path)
-		if err := loadCodetableForPinyin(pinyinEngine, rdPath, rd.Type, codetableCacheID, logger); err != nil {
-			logger.Warn("混输：加载反查码表失败", "err", err)
-		}
-	}
+	// 混输模式下跳过拼音子引擎的反查码表加载：
+	// 由 mixed.Engine.addCodeHintsFromCodetable() 直接使用主码表的反向索引，
+	// 避免生成冗余的 _reverse.wdb 文件
 
 	// 设置拼音引擎的 DictManager（用于用户词频学习）
 	if dm != nil {

@@ -135,13 +135,10 @@ func (m *Manager) UpdatePinyinOptions(pinyinCfg *config.PinyinConfig) {
 				m.loadCodetableReverseForPinyin(pinyinEngine)
 			}
 		}
-		// 混输引擎的拼音子引擎
+		// 混输引擎的拼音子引擎（仅更新配置，反查由 mixed.Engine.addCodeHintsFromCodetable 处理）
 		if mixedEngine, ok := eng.(*mixed.Engine); ok {
 			if pe := mixedEngine.GetPinyinEngine(); pe != nil {
 				updatePinyinConfig(pe, pinyinCfg)
-				if pinyinCfg.ShowCodeHint && m.schemaManager != nil {
-					m.loadCodetableReverseForPinyin(pe)
-				}
 			}
 		}
 	}
