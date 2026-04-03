@@ -190,14 +190,22 @@ func (s *Server) Start() error {
 		go func(h windows.Handle, id int) {
 			pid := s.handleClient(h, id)
 
+			// Capture the current setup sequence BEFORE acquiring the main lock.
+			// This prevents a race where the old connection's cleanup goroutine
+			// destroys a newer connection's SharedMemory for the same PID.
+			var setupSeq uint64
+			if s.hostRender != nil && pid != 0 {
+				setupSeq = s.hostRender.GetSetupSeq(pid)
+			}
+
 			s.mu.Lock()
 			delete(s.activeHandles, h)
 			activeCount := len(s.activeHandles)
 			s.mu.Unlock()
 
-			// Clean up host render resources for this client
-			if s.hostRender != nil && pid != 0 {
-				s.hostRender.CleanupClient(pid)
+			// Clean up host render resources only if the generation matches
+			if s.hostRender != nil && pid != 0 && setupSeq != 0 {
+				s.hostRender.CleanupClient(pid, setupSeq)
 			}
 
 			// Notify handler that a client disconnected

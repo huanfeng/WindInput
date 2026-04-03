@@ -168,14 +168,23 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 		// Send bitmap to DLL via shared memory for host window rendering
 		m.logger.Debug("Host rendering: sending bitmap to shared memory...")
 		if err := hostRender(img, windowX, windowY); err != nil {
-			m.logger.Error("Host render failed", "error", err)
+			// Host render failed (e.g., shared memory closed after process restart).
+			// Clear the stale function so subsequent calls don't keep failing,
+			// and fall through to the local window path as a fallback.
+			m.logger.Error("Host render failed, clearing stale func", "error", err)
+			m.mu.Lock()
+			m.hostRenderFunc = nil
+			m.hostHideFunc = nil
+			m.mu.Unlock()
+			// Fall through to local window rendering below
+		} else {
+			// Hide local window if it was visible (mode switch from local to host)
+			if m.window.IsVisible() {
+				m.window.Hide()
+			}
+			m.logger.Debug("doShowCandidates complete (host render)")
+			return
 		}
-		// Hide local window if it was visible (mode switch from local to host)
-		if m.window.IsVisible() {
-			m.window.Hide()
-		}
-		m.logger.Debug("doShowCandidates complete (host render)")
-		return
 	}
 
 	// Position stability: suppress micro-shifts (< 4px) when window is already visible.

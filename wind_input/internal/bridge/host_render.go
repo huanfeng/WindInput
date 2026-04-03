@@ -22,7 +22,8 @@ const processQueryLimitedInformation = 0x1000
 type HostRenderState struct {
 	ProcessID uint32
 	SHM       *SharedMemory
-	Active    bool // Whether host render is currently active
+	Active    bool   // Whether host render is currently active
+	SetupSeq  uint64 // Monotonic counter to distinguish old vs new state
 }
 
 // HostRenderManager manages host rendering for whitelisted processes.
@@ -31,6 +32,7 @@ type HostRenderManager struct {
 	logger    *slog.Logger
 	whitelist map[string]bool             // Lowercase process names
 	clients   map[uint32]*HostRenderState // PID -> state
+	setupSeq  uint64                      // Monotonic counter for setup generation
 }
 
 // NewHostRenderManager creates a new host render manager with the given whitelist.
@@ -95,10 +97,12 @@ func (m *HostRenderManager) SetupHostRender(processID uint32) (*ipc.HostRenderSe
 		return nil, fmt.Errorf("failed to create shared memory for PID %d: %w", processID, err)
 	}
 
+	m.setupSeq++
 	m.clients[processID] = &HostRenderState{
 		ProcessID: processID,
 		SHM:       shm,
 		Active:    true,
+		SetupSeq:  m.setupSeq,
 	}
 
 	m.logger.Info("Host render setup created",
@@ -114,6 +118,17 @@ func (m *HostRenderManager) SetupHostRender(processID uint32) (*ipc.HostRenderSe
 	}, nil
 }
 
+// GetSetupSeq returns the current setup sequence for a process, or 0 if not found.
+// Used by disconnect handlers to pass to CleanupClient for race-safe cleanup.
+func (m *HostRenderManager) GetSetupSeq(processID uint32) uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if state, ok := m.clients[processID]; ok {
+		return state.SetupSeq
+	}
+	return 0
+}
+
 // GetActiveState returns the host render state for a process, or nil if not active.
 func (m *HostRenderManager) GetActiveState(processID uint32) *HostRenderState {
 	m.mu.RLock()
@@ -126,7 +141,10 @@ func (m *HostRenderManager) GetActiveState(processID uint32) *HostRenderState {
 }
 
 // CleanupClient removes host render state for a disconnected client.
-func (m *HostRenderManager) CleanupClient(processID uint32) {
+// The expectedSeq parameter prevents a race condition where an old connection's
+// cleanup goroutine destroys a newer connection's SharedMemory for the same PID.
+// Pass 0 to force cleanup regardless of generation (e.g., CleanupAll).
+func (m *HostRenderManager) CleanupClient(processID uint32, expectedSeq uint64) {
 	if processID == 0 {
 		return
 	}
@@ -134,14 +152,26 @@ func (m *HostRenderManager) CleanupClient(processID uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if state, ok := m.clients[processID]; ok {
-		if state.SHM != nil {
-			state.SHM.WriteHide()
-			state.SHM.Close()
-		}
-		delete(m.clients, processID)
-		m.logger.Info("Host render cleanup", "processID", processID)
+	state, ok := m.clients[processID]
+	if !ok {
+		return
 	}
+
+	// If expectedSeq is specified, only clean up if the generation matches.
+	// A newer SetupHostRender call increments setupSeq, so the old cleanup
+	// goroutine's expectedSeq won't match the new state.
+	if expectedSeq != 0 && state.SetupSeq != expectedSeq {
+		m.logger.Info("Host render cleanup skipped: stale generation",
+			"processID", processID, "expected", expectedSeq, "current", state.SetupSeq)
+		return
+	}
+
+	if state.SHM != nil {
+		state.SHM.WriteHide()
+		state.SHM.Close()
+	}
+	delete(m.clients, processID)
+	m.logger.Info("Host render cleanup", "processID", processID, "seq", expectedSeq)
 }
 
 // CleanupAll closes all shared memory resources.

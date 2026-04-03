@@ -23,6 +23,7 @@ CHostWindow::CHostWindow()
     : _hwnd(NULL)
     , _wndClassAtom(0)
     , _active(FALSE)
+    , _currentBand(0)
     , _hSharedMem(NULL)
     , _pSharedMem(nullptr)
     , _maxBufferSize(0)
@@ -58,7 +59,7 @@ BOOL CHostWindow::_ResolveAPIs()
     return TRUE;
 }
 
-DWORD CHostWindow::_GetHostBand()
+DWORD CHostWindow::GetHostBand()
 {
     DWORD currentPID = GetCurrentProcessId();
     DWORD band = 0;
@@ -136,13 +137,30 @@ BOOL CHostWindow::_CreateBandWindow(DWORD band)
     DWORD exStyle = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
     DWORD style = WS_POPUP;
 
+    // For WS_POPUP windows, the hWndParent parameter sets the "owner" window.
+    // Owned windows always appear above their owner in z-order.
+    // Use the foreground window from the same process as owner to ensure the
+    // candidate window appears above the host's search panel (especially at band=13).
+    HWND owner = NULL;
+    HWND hwndFg = GetForegroundWindow();
+    if (hwndFg)
+    {
+        DWORD fgPID = 0;
+        GetWindowThreadProcessId(hwndFg, &fgPID);
+        if (fgPID == GetCurrentProcessId())
+        {
+            owner = hwndFg;
+            WIND_LOG_INFO_FMT(L"HostWindow: Using owner hwnd=0x%p for band=%u\n", owner, band);
+        }
+    }
+
     _hwnd = _pfnCreateWindowInBand(
         exStyle,
         _wndClassAtom,
         L"",
         style,
         0, 0, 1, 1,
-        NULL,   // no parent
+        owner,  // owner window for correct z-order
         NULL,   // no menu
         g_hInstance,
         NULL,   // no param
@@ -158,6 +176,7 @@ BOOL CHostWindow::_CreateBandWindow(DWORD band)
     // Verify the actual band
     DWORD actualBand = 0;
     _pfnGetWindowBand(_hwnd, &actualBand);
+    _currentBand = actualBand;
     WIND_LOG_INFO_FMT(L"HostWindow: Created Band window, hwnd=0x%p, band=%u, actual=%u\n",
         _hwnd, band, actualBand);
 
@@ -177,7 +196,7 @@ BOOL CHostWindow::Initialize(const wchar_t* shmName, const wchar_t* eventName, D
         return FALSE;
 
     // Check host Band
-    DWORD hostBand = _GetHostBand();
+    DWORD hostBand = GetHostBand();
     if (hostBand <= 1)
     {
         WIND_LOG_INFO_FMT(L"HostWindow: Host band=%u (<=1), not needed\n", hostBand);
@@ -214,7 +233,8 @@ BOOL CHostWindow::Initialize(const wchar_t* shmName, const wchar_t* eventName, D
         return FALSE;
     }
 
-    // Create Band window
+    // Use the same band as the host process. Other IMEs (e.g., Weasel) confirm
+    // that band 13 (ZBID_IMMERSIVE_SEARCH) is correct for the taskbar search context.
     if (!_CreateBandWindow(hostBand))
     {
         CloseHandle(_hEvent);
@@ -301,6 +321,32 @@ void CHostWindow::Uninitialize()
     {
         WIND_LOG_INFO(L"HostWindow: Uninitialized\n");
     }
+}
+
+BOOL CHostWindow::UpdateBand(DWORD newBand)
+{
+    if (!_pfnCreateWindowInBand || !_pfnGetWindowBand)
+        return FALSE;
+
+    if (newBand <= 1 || newBand == _currentBand)
+        return TRUE; // No change needed
+
+    WIND_LOG_INFO_FMT(L"HostWindow: Band changed %u -> %u, recreating window\n",
+        _currentBand, newBand);
+
+    if (_hwnd)
+    {
+        DestroyWindow(_hwnd);
+        _hwnd = NULL;
+    }
+
+    if (!_CreateBandWindow(newBand))
+    {
+        WIND_LOG_ERROR_FMT(L"HostWindow: Failed to recreate window at band=%u\n", newBand);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 DWORD WINAPI CHostWindow::_RenderThread(LPVOID param)
@@ -440,10 +486,13 @@ void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pix
         WIND_LOG_WARN_FMT(L"HostWindow: UpdateLayeredWindow failed, err=%u\n", GetLastError());
     }
 
-    // Show window if not yet visible
-    if (ok && !IsWindowVisible(_hwnd))
+    if (ok)
     {
-        ShowWindow(_hwnd, SW_SHOWNA);
+        // Bring to topmost z-order within the band on every frame.
+        // Without this, the host process's own windows (e.g., taskbar search popup)
+        // can cover the candidate window when both share the same or adjacent bands.
+        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
 
     // Cleanup

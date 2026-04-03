@@ -101,10 +101,11 @@ func (c *Coordinator) HandleFocusLost() {
 		}()
 	}()
 
-	// Clear host render on focus lost (next focus gained will re-evaluate)
-	if c.uiManager != nil && c.uiManager.IsHostRendering() {
-		c.uiManager.SetHostRenderFunc(nil, nil)
-	}
+	// 注意：不在此处清除 hostRenderFunc。HostRender 绑定到进程级别（共享内存按 PID
+	// 建立），不应因进程内焦点变化而清除。showUI() 在每次绑定前调用
+	// updateHostRenderState() 自动根据 activeProcessID 重新评估，切换到非 HostRender
+	// 进程时会自然清除。若在此清除，开始菜单等受限环境中频繁的焦点抖动会导致
+	// doShowCandidates 执行时 hostRenderFunc 为 nil，候选框回退到不可见的本地窗口。
 
 	// Hide toolbar on real focus lost (user switched to another window/app)
 	c.SetIMEActivated(false)
@@ -120,6 +121,15 @@ func (c *Coordinator) HandleFocusLost() {
 // Unlike HandleFocusLost, this does NOT hide the toolbar since the user is still
 // in the same input field.
 func (c *Coordinator) HandleCompositionTerminated() {
+	// HostRender 模式下（开始菜单等受限环境），SearchHost 的搜索框不支持 TSF
+	// composition，DLL 每次设置 composition 文本后搜索框会立即终止它。但在
+	// HostRender 模式下候选框通过 Band 窗口独立渲染，不依赖 TSF composition，
+	// 因此忽略 composition 终止事件，保持输入状态和候选窗口不变。
+	if c.uiManager != nil && c.uiManager.IsHostRendering() {
+		c.logger.Debug("Composition terminated in host render mode, ignoring")
+		return
+	}
+
 	c.logger.Debug("Composition terminated, clearing input state")
 
 	c.mu.Lock()

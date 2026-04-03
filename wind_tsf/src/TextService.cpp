@@ -988,7 +988,17 @@ void CTextService::_EnsureHostRenderSetup(const ServiceResponse& response, BOOL 
     }
 
     if (_pHostWindow != nullptr && !forceRefresh)
+    {
+        // Check if the host's band has changed (e.g., user switched from
+        // Start Menu search band=6 to taskbar search band=13).
+        // UpdateBand recreates only the display window, not the shared memory.
+        DWORD currentHostBand = _pHostWindow->GetHostBand();
+        if (currentHostBand > 1 && currentHostBand != _pHostWindow->GetCurrentBand())
+        {
+            _pHostWindow->UpdateBand(currentHostBand);
+        }
         return;
+    }
 
     if (_pHostWindow != nullptr)
     {

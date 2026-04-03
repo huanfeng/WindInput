@@ -130,7 +130,12 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	// ITfTextLayoutSink::OnLayoutChange 会在应用重排后触发准确的 caret update。
 	// 我们跳过同步调用栈内的 stale 更新（通常 <5ms），等待 OnLayoutChange 的更新
 	// （通常 15-30ms），避免候选框先出现在错误位置再跳动。
-	if wasEmpty {
+	//
+	// 例外：HostRender 模式下（开始菜单等受限环境），TSF 的 RequestEditSession 始终
+	// 失败导致 composition 文本无法写入，OnLayoutChange 永远不会触发。此时光标位置
+	// 已经是 fallback 近似值，等待精确位置没有意义，直接显示即可。
+	isHostRendering := c.uiManager != nil && c.uiManager.IsHostRendering()
+	if wasEmpty && !isHostRendering {
 		c.pendingFirstShow = true
 		c.pendingFirstShowTime = time.Now()
 		c.logger.Debug("First character, deferring candidate window for OnLayoutChange")

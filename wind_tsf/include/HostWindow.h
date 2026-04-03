@@ -24,6 +24,16 @@ public:
     // Returns TRUE if the host window is active and rendering.
     BOOL IsActive() const { return _active; }
 
+    // Returns the current Band of the display window.
+    DWORD GetCurrentBand() const { return _currentBand; }
+
+    // Recreate the display window at a new Band (called from TSF thread on focus change).
+    // Shared memory and render thread are NOT affected.
+    BOOL UpdateBand(DWORD newBand);
+
+    // Get the Band of the host process's foreground window.
+    DWORD GetHostBand();
+
 private:
     // Render thread entry point
     static DWORD WINAPI _RenderThread(LPVOID param);
@@ -38,9 +48,6 @@ private:
     // Try to resolve CreateWindowInBand and GetWindowBand from user32.dll
     BOOL _ResolveAPIs();
 
-    // Get the Band of the host process's foreground window
-    DWORD _GetHostBand();
-
     // Create the layered window in the host's Band
     BOOL _CreateBandWindow(DWORD band);
 
@@ -48,6 +55,7 @@ private:
     HWND _hwnd;
     ATOM _wndClassAtom;
     BOOL _active;
+    DWORD _currentBand; // Band of the current window (0 if no window)
 
     // Shared memory
     HANDLE _hSharedMem;

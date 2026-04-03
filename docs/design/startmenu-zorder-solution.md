@@ -1,7 +1,7 @@
 # Win11 开始菜单候选框 z-order 解决方案
 
-> 状态：方案 A 已实现
-> 最后更新：2026-03-30
+> 状态：方案 A 已实现并稳定
+> 最后更新：2026-04-03
 
 ## 1. 问题描述
 
@@ -213,9 +213,80 @@ typedef BOOL (WINAPI* GetWindowBand_t)(HWND hwnd, DWORD* pdwBand);
 4. 安装程序需将 exe 放到 `%ProgramFiles%\WindInput\`
 5. 启动方式无需改变（UIAccess 程序由 Windows 自动提权 Band）
 
-## 6. 已知问题
+## 6. 实现中发现并解决的问题（2026-04-03）
 
-### 6.1 服务端重启后首字符候选框不显示
+方案 A 实现后在开始菜单和任务栏搜索中遇到了一系列稳定性问题，以下是排查过程和最终解决方案。
+
+### 6.1 首字符 pendingFirstShow 延迟导致候选框不显示
+
+**根因**：`pendingFirstShow` 机制在首字符时延迟 100ms 等待 `OnLayoutChange` 提供精确光标位置。但在开始菜单中 TSF `RequestEditSession` 始终失败（`TF_E_NOLOCK`），`OnLayoutChange` 永远不触发。
+
+**修复**：HostRender 模式下跳过 `pendingFirstShow` 延迟，直接显示候选窗。HostRender 本就使用 fallback 近似位置，等待精确位置无意义。
+
+**文件**：`wind_input/internal/coordinator/handle_key_action.go`
+
+### 6.2 焦点抖动清除 hostRenderFunc 导致渲染回退到不可见的本地窗口
+
+**根因**：`HandleFocusLost` 会清除 `hostRenderFunc`。开始菜单搜索结果更新等内部操作触发 TSF 焦点变化 → `hostRenderFunc` 在 `showUI()` 入队到 UI 线程处理之间被清空 → `doShowCandidates` 回退到本地窗口（不可见）。
+
+**修复**：`HandleFocusLost` 不再清除 `hostRenderFunc`。HostRender 绑定进程级（按 PID），`showUI()` 每次渲染前通过 `updateHostRenderState()` 按 `activeProcessID` 自动重新评估。
+
+**文件**：`wind_input/internal/coordinator/handle_lifecycle.go`
+
+### 6.3 SearchHost 不支持 TSF composition，composition 终止清空输入状态
+
+**根因**：开始菜单搜索框不支持 TSF composition。DLL 每次设置 composition 文本后搜索框立即终止 → `OnCompositionUnexpectedlyTerminated` → Go 端 `HandleCompositionTerminated` 清空输入状态 + 隐藏候选框。
+
+**修复**：HostRender 模式下忽略 `HandleCompositionTerminated`。候选框通过 Band 窗口独立渲染，不依赖 TSF composition。
+
+**文件**：`wind_input/internal/coordinator/handle_lifecycle.go`
+
+### 6.4 host render 失败时静默 return 导致候选框完全消失
+
+**根因**：`doShowCandidates` 中 `hostRender()` 调用失败（如共享内存已关闭）后仍执行 `return`，既不通过 host render 显示，也不回退到本地窗口。
+
+**修复**：失败时清除过期的 `hostRenderFunc`，回退到本地窗口渲染。下次 `showUI()` 时 `updateHostRenderState()` 自动恢复。
+
+**文件**：`wind_input/internal/ui/manager_candidate.go`
+
+### 6.5 旧连接清理 goroutine 竞态销毁新连接的共享内存
+
+**根因**：DLL 断开管道再重连（同 PID）时，旧连接的清理 goroutine 中 `CleanupClient(PID)` 可能在新连接的 `SetupHostRender(PID)` 之后执行，误删新创建的 SharedMemory。
+
+**修复**：为 `HostRenderState` 添加 `SetupSeq` 单调递增计数器。`CleanupClient` 接受 `expectedSeq` 参数，仅清理匹配版本的状态，新版本不受旧清理影响。
+
+**文件**：`wind_input/internal/bridge/host_render.go`、`wind_input/internal/bridge/server.go`
+
+### 6.6 同进程不同 Band 窗口需要动态切换
+
+**根因**：SearchHost.exe 的不同搜索入口使用不同 band（开始菜单搜索 band=6，任务栏搜索 band=13）。原实现按 PID 只创建一个 HostWindow，切换场景后候选框在错误层级。
+
+**修复**：
+- HostWindow 的 Band 显示窗口与共享内存解耦
+- 在 TSF 线程的 `_EnsureHostRenderSetup` 中检测 band 变化，调用 `UpdateBand()` 只重建显示窗口
+- 共享内存和渲染线程不受影响，切换毫秒级完成
+
+**文件**：`wind_tsf/src/HostWindow.cpp`、`wind_tsf/include/HostWindow.h`、`wind_tsf/src/TextService.cpp`
+
+### 6.7 Band=13 窗口不可见（owner 关系）
+
+**根因**：band=13 (ZBID_IMMERSIVE_SEARCH) 窗口通过 `UpdateLayeredWindow` 渲染成功、`IsWindowVisible` 返回 TRUE，但用户看不到。其他输入法的候选窗口有搜索窗口作为 Parent/Owner。
+
+**修复**：`CreateWindowInBand` 时将同进程的前台窗口设为 owner。对于 `WS_POPUP` 窗口，Windows 保证 owned 窗口在 owner 之上显示。
+
+**文件**：`wind_tsf/src/HostWindow.cpp`
+
+### 6.8 渲染线程跨线程 DestroyWindow 导致卡死
+
+**根因**：早期实现在渲染线程中调用 `_UpdateBandIfNeeded()` → `DestroyWindow()` + `EnumWindows()`，跨线程窗口销毁可能导致 SendMessage 死锁。
+
+**修复**：band 变化检测移到 TSF 线程（`_EnsureHostRenderSetup`），渲染线程只负责读取共享内存和调用 `UpdateLayeredWindow`。
+
+**文件**：`wind_tsf/src/HostWindow.cpp`、`wind_tsf/src/TextService.cpp`
+
+## 7. 已知遗留问题
+
+### 7.1 服务端重启后首字符候选框不显示
 
 **触发条件**：手动重启 Go 服务端或服务端异常退出后，切换到使用 Host 渲染的应用（如开始菜单），输入第一个字符。
 
@@ -243,13 +314,13 @@ typedef BOOL (WINAPI* GetWindowBand_t)(HWND hwnd, DWORD* pdwBand);
 - 在 `_DoFullStateSync` 中补发 `FocusGained`，使进程加入白名单
 - 或让 `IMEActivated` 的处理也设置进程白名单
 
-## 7. 推荐路线
+## 8. 推荐路线
 
 **短期**：实现方案 A（DLL 代理渲染），无需额外成本，技术可行性已验证。
 
 **长期**：如果获得代码签名证书，可切换到方案 B，简化架构。两个方案可以共存——有签名时用 UIAccess，无签名时降级到 DLL 代理渲染。
 
-## 8. 参考资料
+## 9. 参考资料
 
 - [Window z-order in Windows 10 – ADeltaX](https://blog.adeltax.com/window-z-order-in-windows-10/)
 - [How to call SetWindowBand – ADeltaX](https://blog.adeltax.com/how-to-call-setwindowband/)
