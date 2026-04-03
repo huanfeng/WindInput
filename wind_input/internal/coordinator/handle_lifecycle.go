@@ -4,6 +4,7 @@ package coordinator
 import (
 	"runtime"
 	"runtime/debug"
+	"time"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/engine"
@@ -34,12 +35,30 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	// If there's active input, refresh the candidate window position.
 	// This handles the case where C++ re-sends caret update after composition
 	// start/update, providing the up-to-date position.
-	if len(c.inputBuffer) > 0 && len(c.candidates) > 0 && c.uiManager != nil {
+	hasInput := len(c.inputBuffer) > 0
+	hasCandidates := len(c.candidates) > 0
+	hasUI := c.uiManager != nil
+	if hasInput && hasCandidates && hasUI {
 		if c.pendingFirstShow {
+			// 首字符延迟显示：跳过同步调用栈内的 stale 更新。
+			// OnKeyDown → SendCaretPositionUpdate 和 UpdateComposition → SendCaretPositionUpdate
+			// 都在同一调用栈中完成，此时 GetTextExt 可能返回旧坐标。
+			// OnLayoutChange 在应用消息循环运行后触发（通常 10-30ms），坐标才可靠。
+			// 超过 100ms 仍未收到新更新时强制显示，避免候选窗口不出现。
+			elapsed := time.Since(c.pendingFirstShowTime)
+			if elapsed < 10*time.Millisecond {
+				// 同步调用栈内的更新，跳过（坐标可能 stale）
+				c.logger.Debug("pendingFirstShow: skipping early caret update",
+					"elapsed", elapsed.String())
+				return nil
+			}
+			// OnLayoutChange 或超时后的更新，可信赖
 			c.pendingFirstShow = false
-			c.logger.Debug("Pending first show resolved, displaying candidate window")
+			c.logger.Debug("pendingFirstShow resolved", "elapsed", elapsed.String())
 		}
 		c.showUI()
+	} else if c.pendingFirstShow && hasInput && hasUI && !hasCandidates {
+		// 首字符但还没有候选（引擎还在处理），保持 pending
 	}
 
 	return nil

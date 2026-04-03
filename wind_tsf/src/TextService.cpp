@@ -514,6 +514,8 @@ CTextService::CTextService()
     , _lastKnownCaretY(0)
     , _lastKnownCaretHeight(DEFAULT_CARET_HEIGHT)
     , _gaDisplayAttributeInput(TF_INVALID_GUIDATOM)
+    , _dwLayoutSinkCookie(TF_INVALID_COOKIE)
+    , _pLayoutSinkContext(nullptr)
 {
     ZeroMemory(&_cachedCaretRect, sizeof(_cachedCaretRect));
     ZeroMemory(&_cachedCompStartRect, sizeof(_cachedCompStartRect));
@@ -551,6 +553,10 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
     else if (IsEqualIID(riid, IID_ITfDisplayAttributeProvider))
     {
         *ppvObj = (ITfDisplayAttributeProvider*)this;
+    }
+    else if (IsEqualIID(riid, IID_ITfTextLayoutSink))
+    {
+        *ppvObj = (ITfTextLayoutSink*)this;
     }
 
     if (*ppvObj)
@@ -678,6 +684,9 @@ STDAPI CTextService::Deactivate()
     // End any active composition before deactivating
     EndComposition();
 
+    // Unregister layout sink
+    _UnadviseTextLayoutSink();
+
     // Release language bar button
     _UninitLangBarButton();
 
@@ -777,6 +786,15 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         _focusSessionId++;
         WIND_LOG_DEBUG_FMT(L"Focus gained focusSession=%llu", _focusSessionId);
 
+        // Register ITfTextLayoutSink on the new context to receive
+        // layout change notifications (for accurate candidate window positioning)
+        ITfContext* pContext = nullptr;
+        if (SUCCEEDED(pDocMgrFocus->GetTop(&pContext)) && pContext != nullptr)
+        {
+            _AdviseTextLayoutSink(pContext);
+            pContext->Release();
+        }
+
         WindHostProcessInfo currentHost;
         if (WindQueryCurrentProcessInfo(&currentHost))
             WindLogHostProcessInfo(4, L"compat.focus.current_host", currentHost);
@@ -863,6 +881,9 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         {
             _pKeyEventSink->ResetComposingState();
         }
+
+        // Unregister layout sink when losing focus
+        _UnadviseTextLayoutSink();
 
         _needsFocusRecovery = FALSE;
     }
@@ -1540,7 +1561,7 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight)
         return TRUE;
     }
 
-    // Method 2: For console windows, use specialized handling
+    // For console windows, use specialized handling
     if (isConsole)
     {
         if (GetConsoleCaretPosition(hwndForeground, px, py, pHeight))
@@ -1591,7 +1612,7 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight)
         }
     }
 
-    // Method 3: Fallback to GetCaretPos
+    // Fallback to GetCaretPos
     POINT pt;
     if (GetCaretPos(&pt))
     {
@@ -2037,6 +2058,57 @@ STDAPI CTextService::OnCompositionTerminated(TfEditCookie ecWrite, ITfCompositio
     }
 
     return S_OK;
+}
+
+// ITfTextLayoutSink - called by TSF when the text layout changes.
+// This fires after the app has reflowed text (processed WM_PAINT etc.),
+// so GetTextExt now returns the correct, up-to-date coordinates.
+STDAPI CTextService::OnLayoutChange(ITfContext* pContext, TfLayoutCode lCode, ITfContextView* pView)
+{
+    if (lCode == TF_LC_CHANGE && _pComposition != nullptr)
+    {
+        WIND_LOG_DEBUG(L"OnLayoutChange: TF_LC_CHANGE with active composition, updating caret position\n");
+        SendCaretPositionUpdate();
+    }
+    return S_OK;
+}
+
+void CTextService::_AdviseTextLayoutSink(ITfContext* pContext)
+{
+    // Unadvise previous if any
+    _UnadviseTextLayoutSink();
+
+    if (pContext == nullptr)
+        return;
+
+    ITfSource* pSource = nullptr;
+    if (SUCCEEDED(pContext->QueryInterface(IID_ITfSource, (void**)&pSource)) && pSource != nullptr)
+    {
+        if (SUCCEEDED(pSource->AdviseSink(IID_ITfTextLayoutSink, (ITfTextLayoutSink*)this, &_dwLayoutSinkCookie)))
+        {
+            _pLayoutSinkContext = pContext;
+            _pLayoutSinkContext->AddRef();
+            WIND_LOG_DEBUG(L"TextLayoutSink advised successfully\n");
+        }
+        pSource->Release();
+    }
+}
+
+void CTextService::_UnadviseTextLayoutSink()
+{
+    if (_pLayoutSinkContext != nullptr && _dwLayoutSinkCookie != TF_INVALID_COOKIE)
+    {
+        ITfSource* pSource = nullptr;
+        if (SUCCEEDED(_pLayoutSinkContext->QueryInterface(IID_ITfSource, (void**)&pSource)) && pSource != nullptr)
+        {
+            pSource->UnadviseSink(_dwLayoutSinkCookie);
+            pSource->Release();
+        }
+        _pLayoutSinkContext->Release();
+        _pLayoutSinkContext = nullptr;
+        _dwLayoutSinkCookie = TF_INVALID_COOKIE;
+        WIND_LOG_DEBUG(L"TextLayoutSink unadvised\n");
+    }
 }
 
 // Update composition text

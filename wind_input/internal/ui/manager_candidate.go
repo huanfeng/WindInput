@@ -178,9 +178,29 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 		return
 	}
 
+	// Position stability: suppress micro-shifts (< 4px) when window is already visible.
+	// Some apps (EverEdit) report slightly different caret height on the first vs
+	// subsequent GetTextExt calls, causing a 1-2px vertical jump.
+	actualX, actualY := windowX, windowY
+	if m.window.IsVisible() {
+		prevX, prevY := m.window.GetPosition()
+		dx := actualX - prevX
+		dy := actualY - prevY
+		if dx < 0 {
+			dx = -dx
+		}
+		if dy < 0 {
+			dy = -dy
+		}
+		if dx < 4 && dy < 4 {
+			actualX = prevX
+			actualY = prevY
+		}
+	}
+
 	// Update window
 	m.logger.Debug("Updating window content...")
-	if err := m.window.UpdateContent(img, windowX, windowY); err != nil {
+	if err := m.window.UpdateContent(img, actualX, actualY); err != nil {
 		m.logger.Error("UpdateContent failed", "error", err)
 		return
 	}

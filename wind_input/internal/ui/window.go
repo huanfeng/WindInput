@@ -421,6 +421,13 @@ func (w *CandidateWindow) IsVisible() bool {
 	return w.visible
 }
 
+// GetPosition returns the current window position
+func (w *CandidateWindow) GetPosition() (x, y int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.x, w.y
+}
+
 // SetPosition sets the window position
 func (w *CandidateWindow) SetPosition(x, y int) {
 	if w.hwnd == 0 {

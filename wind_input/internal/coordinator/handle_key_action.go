@@ -125,13 +125,27 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	}
 
 	showStart := time.Now()
-	// 首字符且尚未拿到有效 caret 时，延迟显示候选窗口，等待 C++ 响应后
-	// 的 caret update 再显示，避免窗口先出现在错误位置。
-	// 服务重启后的首个按键会在 C++ 重连后补发 caret update；如果当前位置
-	// 已经有效，则直接显示，避免必须等到第二个字符。
-	if wasEmpty && !c.caretValid {
+	// 首字符延迟显示候选窗口。某些应用（EverEdit、微信等）在 composition 创建后
+	// 不会立即更新 GetTextExt 返回值，需要等消息循环运行（WM_PAINT）后才会刷新。
+	// ITfTextLayoutSink::OnLayoutChange 会在应用重排后触发准确的 caret update。
+	// 我们跳过同步调用栈内的 stale 更新（通常 <5ms），等待 OnLayoutChange 的更新
+	// （通常 15-30ms），避免候选框先出现在错误位置再跳动。
+	if wasEmpty {
 		c.pendingFirstShow = true
-		c.logger.Debug("First character, deferring candidate window display")
+		c.pendingFirstShowTime = time.Now()
+		c.logger.Debug("First character, deferring candidate window for OnLayoutChange")
+
+		// 超时回退：如果 100ms 内 OnLayoutChange 没有触发（应用不支持），强制显示
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.pendingFirstShow && len(c.inputBuffer) > 0 && len(c.candidates) > 0 {
+				c.pendingFirstShow = false
+				c.logger.Debug("pendingFirstShow timeout, force showing")
+				c.showUI()
+			}
+		}()
 	} else {
 		c.pendingFirstShow = false
 		c.showUI()

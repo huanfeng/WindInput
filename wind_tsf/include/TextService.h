@@ -16,7 +16,8 @@ struct ServiceResponse;
 class CTextService : public ITfTextInputProcessorEx,
                      public ITfThreadMgrEventSink,
                      public ITfCompositionSink,
-                     public ITfDisplayAttributeProvider
+                     public ITfDisplayAttributeProvider,
+                     public ITfTextLayoutSink
 {
     friend class CUpdateCompositionEditSession;
     friend class CEndCompositionEditSession;
@@ -51,6 +52,9 @@ public:
     // ITfDisplayAttributeProvider
     STDMETHODIMP EnumDisplayAttributeInfo(IEnumTfDisplayAttributeInfo** ppEnum);
     STDMETHODIMP GetDisplayAttributeInfo(REFGUID guid, ITfDisplayAttributeInfo** ppInfo);
+
+    // ITfTextLayoutSink
+    STDMETHODIMP OnLayoutChange(ITfContext* pContext, TfLayoutCode lCode, ITfContextView* pView);
 
     // Get thread manager
     ITfThreadMgr* GetThreadMgr() { return _pThreadMgr; }
@@ -151,6 +155,12 @@ private:
 
     // Display Attribute
     TfGuidAtom _gaDisplayAttributeInput;
+
+    // ITfTextLayoutSink registration
+    DWORD _dwLayoutSinkCookie;
+    ITfContext* _pLayoutSinkContext;  // Context we registered the sink on
+    void _AdviseTextLayoutSink(ITfContext* pContext);
+    void _UnadviseTextLayoutSink();
 
     BOOL _InitThreadMgrEventSink();
     void _UninitThreadMgrEventSink();

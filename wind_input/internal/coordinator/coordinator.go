@@ -5,6 +5,7 @@ import (
 	"image"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/engine"
@@ -95,17 +96,18 @@ type Coordinator struct {
 	imeActivated       bool // true = IME is activated (has focus)
 
 	// Input state
-	inputBuffer        string
-	inputCursorPos     int                // 光标在 inputBuffer 中的字节位置（0 = 最左，len(inputBuffer) = 最右）
-	preeditDisplay     string             // 带音节分隔符的显示文本（如 "zhong'guo"），五笔时为空
-	syllableBoundaries []int              // 音节边界在 inputBuffer 中的位置（如 [5] 表示位置 5 处有分隔符）
-	confirmedSegments  []ConfirmedSegment // 拼音分步确认：已确认但未上屏的文本段
-	candidates         []ui.Candidate
-	currentPage        int
-	totalPages         int
-	candidatesPerPage  int
-	selectedIndex      int  // 当前页内选中的候选索引（0-based），用于上下箭头键选择
-	pendingFirstShow   bool // 首字符延迟显示：等待 C++ 响应后的准确位置再显示候选窗口
+	inputBuffer          string
+	inputCursorPos       int                // 光标在 inputBuffer 中的字节位置（0 = 最左，len(inputBuffer) = 最右）
+	preeditDisplay       string             // 带音节分隔符的显示文本（如 "zhong'guo"），五笔时为空
+	syllableBoundaries   []int              // 音节边界在 inputBuffer 中的位置（如 [5] 表示位置 5 处有分隔符）
+	confirmedSegments    []ConfirmedSegment // 拼音分步确认：已确认但未上屏的文本段
+	candidates           []ui.Candidate
+	currentPage          int
+	totalPages           int
+	candidatesPerPage    int
+	selectedIndex        int       // 当前页内选中的候选索引（0-based），用于上下箭头键选择
+	pendingFirstShow     bool      // 首字符延迟显示：等待布局更新后的准确位置再显示候选窗口
+	pendingFirstShowTime time.Time // pendingFirstShow 设置的时间，用于跳过同步调用栈内的 stale 更新
 
 	// 临时英文模式状态
 	tempEnglishMode   bool   // 是否处于临时英文模式
