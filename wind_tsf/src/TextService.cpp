@@ -7,6 +7,7 @@
 #include "HotkeyManager.h"
 #include "HostWindow.h"
 #include <vector>
+#include <ShellScalingApi.h>
 
 // EditSession for ending composition
 // NOTE: This class takes ownership of the composition pointer passed to it.
@@ -1684,6 +1685,85 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight)
     return FALSE;
 }
 
+// Convert logical coordinates to physical screen coordinates when the host process
+// is not Per-Monitor DPI aware. DPI-unaware apps receive virtualized 96-DPI coordinates
+// from Windows, but our Go service (wind_input.exe) is Per-Monitor DPI aware and works
+// in physical pixels. This mismatch causes the candidate window to appear at the wrong
+// position in legacy/old applications.
+static void ConvertToPhysicalCoordinates(LONG& x, LONG& y, LONG& height,
+                                         LONG& compStartX, LONG& compStartY)
+{
+    // Dynamically load to support older Windows versions
+    static auto pGetProcessDpiAwareness =
+        reinterpret_cast<decltype(&GetProcessDpiAwareness)>(
+            GetProcAddress(GetModuleHandleW(L"shcore.dll"), "GetProcessDpiAwareness"));
+    static auto pLogicalToPhysicalPointForPerMonitorDPI =
+        reinterpret_cast<BOOL(WINAPI*)(HWND, LPPOINT)>(
+            GetProcAddress(GetModuleHandleW(L"user32.dll"), "LogicalToPhysicalPointForPerMonitorDPI"));
+    static auto pGetDpiForMonitor =
+        reinterpret_cast<decltype(&GetDpiForMonitor)>(
+            GetProcAddress(GetModuleHandleW(L"shcore.dll"), "GetDpiForMonitor"));
+
+    if (!pGetProcessDpiAwareness || !pLogicalToPhysicalPointForPerMonitorDPI)
+        return;
+
+    PROCESS_DPI_AWARENESS awareness = PROCESS_PER_MONITOR_DPI_AWARE;
+    if (FAILED(pGetProcessDpiAwareness(nullptr, &awareness)))
+        return;
+
+    if (awareness == PROCESS_PER_MONITOR_DPI_AWARE)
+        return; // Already physical coordinates, no conversion needed
+
+    WIND_LOG_DEBUG_FMT(L"ConvertToPhysicalCoordinates: host DPI awareness=%d, before: caret(%ld,%ld h=%ld) comp(%ld,%ld)",
+                       (int)awareness, x, y, height, compStartX, compStartY);
+
+    HWND hwnd = GetForegroundWindow();
+    if (!hwnd)
+        return;
+
+    // Convert caret position
+    POINT ptCaret = { x, y };
+    if (!pLogicalToPhysicalPointForPerMonitorDPI(hwnd, &ptCaret))
+        return;
+
+    // Convert a second point to derive the physical height
+    POINT ptCaretTop = { x, y - height };
+    if (!pLogicalToPhysicalPointForPerMonitorDPI(hwnd, &ptCaretTop))
+    {
+        // Fallback: scale height using monitor DPI
+        if (pGetDpiForMonitor)
+        {
+            HMONITOR hMon = MonitorFromPoint(ptCaret, MONITOR_DEFAULTTONEAREST);
+            UINT dpiX = 96, dpiY = 96;
+            if (hMon && SUCCEEDED(pGetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)))
+            {
+                height = MulDiv(height, (int)dpiX, 96);
+            }
+        }
+    }
+    else
+    {
+        height = ptCaret.y - ptCaretTop.y;
+    }
+
+    x = ptCaret.x;
+    y = ptCaret.y;
+
+    // Convert composition start position if present
+    if (compStartX != 0 || compStartY != 0)
+    {
+        POINT ptComp = { compStartX, compStartY };
+        if (pLogicalToPhysicalPointForPerMonitorDPI(hwnd, &ptComp))
+        {
+            compStartX = ptComp.x;
+            compStartY = ptComp.y;
+        }
+    }
+
+    WIND_LOG_DEBUG_FMT(L"ConvertToPhysicalCoordinates: after: caret(%ld,%ld h=%ld) comp(%ld,%ld)",
+                       x, y, height, compStartX, compStartY);
+}
+
 void CTextService::SendCaretPositionUpdate()
 {
     LONG x = 0, y = 0, height = 20;
@@ -1740,6 +1820,12 @@ void CTextService::SendCaretPositionUpdate()
         {
             GetCompositionStartPosition(&compStartX, &compStartY);
         }
+    }
+
+    // Convert logical coordinates to physical if host is not Per-Monitor DPI aware
+    if (hasPosition)
+    {
+        ConvertToPhysicalCoordinates(x, y, height, compStartX, compStartY);
     }
 
     if (hasPosition)
