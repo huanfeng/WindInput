@@ -98,6 +98,10 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 		return nil
 	}
 
+	// Z 键重复上屏：当输入为 "z" 且方案启用了该功能时，
+	// 将上一次上屏的内容作为首选候选插入到候选列表顶部。
+	zKeyRepeat := c.inputBuffer == "z" && c.engineMgr.IsZKeyRepeatEnabled()
+
 	// 使用扩展转换获取更多信息
 	result := c.engineMgr.ConvertEx(c.inputBuffer, 0)
 
@@ -162,6 +166,26 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 			cand.Comment = ec.Hint
 		}
 		c.candidates[i] = cand
+	}
+
+	// Z 键重复上屏：将上一次上屏的内容作为首选候选插入到列表顶部
+	if zKeyRepeat && c.inputHistory != nil {
+		records := c.inputHistory.GetRecentRecords(1, 0)
+		if len(records) > 0 {
+			repeatCand := ui.Candidate{
+				Text:   records[0].Text,
+				Code:   "z",
+				Index:  1,
+				Weight: 999999999, // 确保排在最前
+			}
+			c.candidates = append([]ui.Candidate{repeatCand}, c.candidates...)
+			// 重新编号
+			for i := range c.candidates {
+				c.candidates[i].Index = i + 1
+			}
+			// 插入重复候选后不再是空码
+			result.IsEmpty = false
+		}
 	}
 
 	c.logger.Debug("Got candidates", "count", len(c.candidates), "empty", result.IsEmpty,

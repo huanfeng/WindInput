@@ -847,6 +847,28 @@ func (m *Manager) IsTempPinyinEnabled() bool {
 	return tp.Enabled
 }
 
+// IsZKeyRepeatEnabled 检查当前方案是否开启了 Z 键重复上屏功能
+func (m *Manager) IsZKeyRepeatEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.schemaManager == nil || m.currentID == "" {
+		return false
+	}
+	s := m.schemaManager.GetSchema(m.currentID)
+	if s == nil {
+		return false
+	}
+	// 码表方案：从 CodeTableSpec 读取
+	if s.Engine.CodeTable != nil && s.Engine.CodeTable.ZKeyRepeat != nil {
+		return *s.Engine.CodeTable.ZKeyRepeat
+	}
+	// 混输方案：从 MixedSpec 读取
+	if s.Engine.Mixed != nil && s.Engine.Mixed.ZKeyRepeat != nil {
+		return *s.Engine.Mixed.ZKeyRepeat
+	}
+	return false
+}
+
 // findPinyinSchemaIDLocked 查找拼音方案 ID（调用方已持有读锁）
 func (m *Manager) findPinyinSchemaIDLocked() string {
 	return m.findPinyinSchemaID()

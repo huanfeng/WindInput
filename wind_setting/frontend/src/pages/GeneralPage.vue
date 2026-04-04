@@ -722,6 +722,24 @@ onUnmounted(() => {
           </div>
           <div class="setting-item">
             <div class="setting-info">
+              <label>Z键重复上屏</label>
+              <p class="setting-hint">
+                输入z时首选为上一次上屏的内容，快速重复输入
+              </p>
+            </div>
+            <div class="setting-control">
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="getCodetableConfig(schemaID).z_key_repeat"
+                  @change="onSchemaConfigChange(schemaID)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
               <label>临时拼音</label>
               <p class="setting-hint">
                 通过触发键临时切换拼音输入，用于查找不会打的字
@@ -1039,6 +1057,24 @@ onUnmounted(() => {
                 <input
                   type="checkbox"
                   v-model="getMixedConfig(schemaID).enable_abbrev_match"
+                  @change="onSchemaConfigChange(schemaID)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>Z键重复上屏</label>
+              <p class="setting-hint">
+                输入z时首选为上一次上屏的内容，快速重复输入
+              </p>
+            </div>
+            <div class="setting-control">
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="getMixedConfig(schemaID).z_key_repeat"
                   @change="onSchemaConfigChange(schemaID)"
                 />
                 <span class="slider"></span>

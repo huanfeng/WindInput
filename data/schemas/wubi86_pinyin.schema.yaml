@@ -14,6 +14,7 @@ engine:
     min_pinyin_length: 2
     codetable_weight_boost: 10000000
     show_source_hint: true
+    z_key_repeat: true
   filter_mode: smart
 
 # 用户数据从引用方案继承：

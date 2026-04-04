@@ -17,6 +17,7 @@ engine:
     show_code_hint: true
     single_code_input: false
     candidate_sort_mode: frequency
+    z_key_repeat: true
     temp_pinyin:
       enabled: true
       schema: pinyin

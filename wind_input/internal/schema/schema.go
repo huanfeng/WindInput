@@ -50,6 +50,7 @@ type MixedSpec struct {
 	ShowSourceHint       bool   `yaml:"show_source_hint"`       // 是否在候选提示中显示来源标记
 	EnableAbbrevMatch    *bool  `yaml:"enable_abbrev_match"`    // 混输模式下是否启用简拼匹配（默认 false）
 	PinyinOnlyOverflow   *bool  `yaml:"pinyin_only_overflow"`   // 超过最大码长时仅查拼音（默认 true）
+	ZKeyRepeat           *bool  `yaml:"z_key_repeat,omitempty"` // Z键重复上屏：输入z时首选为上次上屏的内容
 }
 
 // TempPinyinSpec 码表方案的临时拼音配置
@@ -69,8 +70,9 @@ type CodeTableSpec struct {
 	SingleCodeInput    bool            `yaml:"single_code_input"`
 	CandidateSortMode  string          `yaml:"candidate_sort_mode"`
 	DedupCandidates    *bool           `yaml:"dedup_candidates,omitempty"`
-	SkipSingleCharFreq *bool           `yaml:"skip_single_char_freq"` // 单字不自动调频（指针以区分未设置和 false）
-	TempPinyin         *TempPinyinSpec `yaml:"temp_pinyin,omitempty"` // 临时拼音配置
+	SkipSingleCharFreq *bool           `yaml:"skip_single_char_freq"`  // 单字不自动调频（指针以区分未设置和 false）
+	TempPinyin         *TempPinyinSpec `yaml:"temp_pinyin,omitempty"`  // 临时拼音配置
+	ZKeyRepeat         *bool           `yaml:"z_key_repeat,omitempty"` // Z键重复上屏：输入z时首选为上次上屏的内容
 }
 
 // PinyinSpec 拼音引擎配置
