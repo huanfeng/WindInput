@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"log/slog"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -247,15 +248,15 @@ func dwTR_GetPixelsPerDip(this unsafe.Pointer, clientDrawingContext unsafe.Point
 // (dwrite_cgo_windows.go) which correctly receives float parameters from XMM
 // registers via the C trampoline. The vtable entry points to dwCGODrawGlyphRunCallback().
 
-func dwTR_DrawUnderline(this, clientDrawingContext, baselineOriginX, baselineOriginY, underline, clientDrawingEffect uintptr) uintptr {
+func dwTR_DrawUnderline(this, clientDrawingContext unsafe.Pointer, baselineOriginX, baselineOriginY uintptr, underline, clientDrawingEffect unsafe.Pointer) uintptr {
 	return dwSOK
 }
 
-func dwTR_DrawStrikethrough(this, clientDrawingContext, baselineOriginX, baselineOriginY, strikethrough, clientDrawingEffect uintptr) uintptr {
+func dwTR_DrawStrikethrough(this, clientDrawingContext unsafe.Pointer, baselineOriginX, baselineOriginY uintptr, strikethrough, clientDrawingEffect unsafe.Pointer) uintptr {
 	return dwSOK
 }
 
-func dwTR_DrawInlineObject(this, clientDrawingContext, originX, originY, inlineObject uintptr, isSideways, isRightToLeft uintptr, clientDrawingEffect uintptr) uintptr {
+func dwTR_DrawInlineObject(this, clientDrawingContext unsafe.Pointer, originX, originY uintptr, inlineObject unsafe.Pointer, isSideways, isRightToLeft uintptr, clientDrawingEffect unsafe.Pointer) uintptr {
 	return dwSOK
 }
 
@@ -901,6 +902,9 @@ func (r *DWriteRenderer) drawStringLocked(text string, x, y float64, fontSize fl
 		uintptr(math.Float32bits(float32(0))),       // originX
 		uintptr(math.Float32bits(float32(0))),       // originY
 	)
+	// renderer 是 Go 堆对象，通过 uintptr 传给 COM 后在回调中传回，
+	// 需要确保 COM 回调期间 GC 不会回收它。
+	runtime.KeepAlive(r.backend.renderer)
 
 	// Copy result back — only RGB channels, original alpha preserved.
 	r.backend.copyToImageRGB(r.target, dstX, dstY, bmpW, bmpH)

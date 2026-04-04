@@ -11,6 +11,7 @@ import (
 // MmapFile 内存映射文件
 type MmapFile struct {
 	data     []byte
+	baseAddr unsafe.Pointer // 映射基址，用于 UnmapViewOfFile
 	fileH    windows.Handle
 	mappingH windows.Handle
 }
@@ -75,10 +76,12 @@ func MmapOpen(path string) (*MmapFile, error) {
 
 	// 将映射的内存区域构造为 []byte 切片
 	// addr 是 MapViewOfFile 返回的有效指针，通过 &addr 间接转换以满足 go vet 检查
-	data := unsafe.Slice((*byte)(*(*unsafe.Pointer)(unsafe.Pointer(&addr))), int(size))
+	baseAddr := *(*unsafe.Pointer)(unsafe.Pointer(&addr))
+	data := unsafe.Slice((*byte)(baseAddr), int(size))
 
 	return &MmapFile{
 		data:     data,
+		baseAddr: baseAddr,
 		fileH:    fileH,
 		mappingH: mappingH,
 	}, nil
@@ -91,11 +94,12 @@ func (m *MmapFile) Data() []byte {
 
 // Close 关闭内存映射
 func (m *MmapFile) Close() error {
-	if m.data != nil {
-		if err := windows.UnmapViewOfFile(uintptr(unsafe.Pointer(&m.data[0]))); err != nil {
+	if m.baseAddr != nil {
+		if err := windows.UnmapViewOfFile(uintptr(m.baseAddr)); err != nil {
 			return fmt.Errorf("取消映射失败: %w", err)
 		}
 		m.data = nil
+		m.baseAddr = nil
 	}
 	if m.mappingH != 0 {
 		windows.CloseHandle(m.mappingH)
