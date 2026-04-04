@@ -231,8 +231,9 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		exactCandidates = append(exactCandidates, compositeDict.LookupCommand(input)...)
 	}
 
-	// 始终直接查询 codeTable（确保测试和无 CompositeDict 注册场景正常）
-	if e.codeTable != nil {
+	// 降级路径：仅当无 DictManager 时直接查询 codeTable（测试场景）
+	// 有 DictManager 时系统码表已作为 layer 注册在 CompositeDict 中，无需重复查询
+	if e.codeTable != nil && e.dictManager == nil {
 		exactCandidates = append(exactCandidates, e.codeTable.Lookup(input)...)
 	}
 
@@ -248,7 +249,8 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 				}
 			}
 		}
-		if e.codeTable != nil {
+		// 降级路径：仅当无 DictManager 时直接查询 codeTable（测试场景）
+		if e.codeTable != nil && e.dictManager == nil {
 			prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixExcludeExact(input, 0)...)
 		}
 	}
