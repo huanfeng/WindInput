@@ -190,11 +190,11 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 
 	c.logger.Debug("Got candidates", "count", len(c.candidates), "empty", result.IsEmpty,
 		"input", c.inputBuffer, "preedit", c.preeditDisplay)
-	// Debug: log top 3 candidates for ranking investigation
-	for i := 0; i < len(c.candidates) && i < 3; i++ {
-		cand := c.candidates[i]
-		c.logger.Debug("Candidate", "rank", i+1, "text", cand.Text, "weight", cand.Weight,
-			"code", cand.Code, "consumed", cand.ConsumedLength)
+	// Debug: log top 3 candidates for ranking investigation (use engine result for NaturalOrder)
+	for i := 0; i < len(result.Candidates) && i < 3; i++ {
+		ec := result.Candidates[i]
+		c.logger.Debug("Candidate", "rank", i+1, "text", ec.Text, "weight", ec.Weight,
+			"code", ec.Code, "naturalOrder", ec.NaturalOrder, "consumed", ec.ConsumedLength)
 	}
 
 	// Calculate pagination

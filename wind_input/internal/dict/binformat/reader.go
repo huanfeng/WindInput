@@ -164,7 +164,7 @@ func (r *DictReader) LookupPrefix(prefix string, limit int) []candidate.Candidat
 		}
 	}
 
-	sort.Slice(results, func(i, j int) bool {
+	sort.SliceStable(results, func(i, j int) bool {
 		return candidate.Better(results[i], results[j])
 	})
 	if limit > 0 && len(results) > limit {
@@ -199,7 +199,7 @@ func (r *DictReader) LookupAbbrev(code string, limit int) []candidate.Candidate 
 		return nil
 	}
 	results := r.readAbbrevEntries(idx)
-	sort.Slice(results, func(i, j int) bool {
+	sort.SliceStable(results, func(i, j int) bool {
 		return candidate.Better(results[i], results[j])
 	})
 	if limit > 0 && len(results) > limit {
@@ -243,7 +243,7 @@ func (r *DictReader) LookupPrefixExcludeExact(prefix string, limit int) []candid
 		}
 	}
 
-	sort.Slice(results, func(i, j int) bool {
+	sort.SliceStable(results, func(i, j int) bool {
 		return candidate.Better(results[i], results[j])
 	})
 	if limit > 0 && len(results) > limit {

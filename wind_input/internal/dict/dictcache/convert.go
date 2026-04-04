@@ -179,8 +179,11 @@ func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger, norma
 	}
 
 	for code, entries := range codeEntries {
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].weight > entries[j].weight
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].weight != entries[j].weight {
+				return entries[i].weight > entries[j].weight
+			}
+			return entries[i].naturalOrder < entries[j].naturalOrder
 		})
 		binEntries := make([]binformat.DictEntry, len(entries))
 		for i, e := range entries {
@@ -197,8 +200,11 @@ func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger, norma
 	}
 
 	for abbrev, entries := range abbrevEntries {
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].weight > entries[j].weight
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].weight != entries[j].weight {
+				return entries[i].weight > entries[j].weight
+			}
+			return entries[i].naturalOrder < entries[j].naturalOrder
 		})
 		binEntries := make([]binformat.DictEntry, len(entries))
 		for i, e := range entries {
@@ -376,8 +382,11 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 	writer := binformat.NewDictWriter()
 
 	for code, entries := range codeEntries {
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].weight > entries[j].weight
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].weight != entries[j].weight {
+				return entries[i].weight > entries[j].weight
+			}
+			return entries[i].naturalOrder < entries[j].naturalOrder
 		})
 		binEntries := make([]binformat.DictEntry, len(entries))
 		for i, e := range entries {
@@ -580,8 +589,9 @@ func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, logg
 		}
 
 		codeEntries[code] = append(codeEntries[code], dictEntry{
-			text:   text,
-			weight: weight,
+			text:         text,
+			weight:       weight,
+			naturalOrder: len(codeEntries[code]),
 		})
 		count++
 	}
@@ -592,8 +602,9 @@ func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, logg
 // ---- 内部辅助 ----
 
 type dictEntry struct {
-	text   string
-	weight int
+	text         string
+	weight       int
+	naturalOrder int // 同编码下的原始顺序（0-based，按文件出现顺序）
 }
 
 func loadRimeFile(path string, codeEntries map[string][]dictEntry, abbrevEntries map[string][]dictEntry, logger *slog.Logger) (int, error) {
@@ -638,8 +649,9 @@ func loadRimeFile(path string, codeEntries map[string][]dictEntry, abbrevEntries
 
 		code := strings.ReplaceAll(pinyin, " ", "")
 		codeEntries[code] = append(codeEntries[code], dictEntry{
-			text:   text,
-			weight: weight,
+			text:         text,
+			weight:       weight,
+			naturalOrder: len(codeEntries[code]),
 		})
 
 		// 构建简拼索引（2 字及以上）
@@ -655,8 +667,9 @@ func loadRimeFile(path string, codeEntries map[string][]dictEntry, abbrevEntries
 			abbrev := abbrevBuilder.String()
 			if abbrev != "" {
 				abbrevEntries[abbrev] = append(abbrevEntries[abbrev], dictEntry{
-					text:   text,
-					weight: weight,
+					text:         text,
+					weight:       weight,
+					naturalOrder: len(abbrevEntries[abbrev]),
 				})
 			}
 		}

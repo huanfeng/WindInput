@@ -200,7 +200,7 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 	if e.config != nil && e.config.CandidateSortMode == string(candidate.SortByNatural) {
 		comparator = candidate.BetterNatural
 	}
-	sort.Slice(allCandidates, func(i, j int) bool {
+	sort.SliceStable(allCandidates, func(i, j int) bool {
 		return comparator(allCandidates[i], allCandidates[j])
 	})
 	if maxCandidates > 0 && len(allCandidates) > maxCandidates {
@@ -285,7 +285,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	if e.config != nil && e.config.CandidateSortMode == string(candidate.SortByNatural) {
 		comparator = candidate.BetterNatural
 	}
-	sort.Slice(allCandidates, func(i, j int) bool {
+	sort.SliceStable(allCandidates, func(i, j int) bool {
 		return comparator(allCandidates[i], allCandidates[j])
 	})
 

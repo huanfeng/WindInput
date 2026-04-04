@@ -40,8 +40,11 @@ func (l *CodeTableLayer) Search(code string, limit int) []candidate.Candidate {
 	// 排序
 	sorted := make([]candidate.Candidate, len(results))
 	copy(sorted, results)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Weight > sorted[j].Weight
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Weight != sorted[j].Weight {
+			return sorted[i].Weight > sorted[j].Weight
+		}
+		return sorted[i].NaturalOrder < sorted[j].NaturalOrder
 	})
 
 	// 限制数量
@@ -59,8 +62,11 @@ func (l *CodeTableLayer) SearchPrefix(prefix string, limit int) []candidate.Cand
 	// 排序
 	sorted := make([]candidate.Candidate, len(results))
 	copy(sorted, results)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Weight > sorted[j].Weight
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Weight != sorted[j].Weight {
+			return sorted[i].Weight > sorted[j].Weight
+		}
+		return sorted[i].NaturalOrder < sorted[j].NaturalOrder
 	})
 
 	// 限制数量
@@ -109,8 +115,11 @@ func (l *SimpleDictLayer) Search(code string, limit int) []candidate.Candidate {
 	// 排序
 	sorted := make([]candidate.Candidate, len(results))
 	copy(sorted, results)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Weight > sorted[j].Weight
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Weight != sorted[j].Weight {
+			return sorted[i].Weight > sorted[j].Weight
+		}
+		return sorted[i].NaturalOrder < sorted[j].NaturalOrder
 	})
 
 	// 限制数量
@@ -135,8 +144,11 @@ func (l *SimpleDictLayer) SearchPrefix(prefix string, limit int) []candidate.Can
 	}
 
 	// 排序
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Weight > results[j].Weight
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Weight != results[j].Weight {
+			return results[i].Weight > results[j].Weight
+		}
+		return results[i].NaturalOrder < results[j].NaturalOrder
 	})
 
 	// 限制数量

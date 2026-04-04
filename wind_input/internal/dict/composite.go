@@ -126,7 +126,7 @@ func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []
 	if c.sortMode == candidate.SortByNatural {
 		comparator = candidate.BetterNatural
 	}
-	sort.Slice(results, func(i, j int) bool {
+	sort.SliceStable(results, func(i, j int) bool {
 		return comparator(results[i], results[j])
 	})
 

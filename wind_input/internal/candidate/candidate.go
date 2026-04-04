@@ -51,16 +51,16 @@ const (
 )
 
 // Better 比较两个候选的优先级（返回 a 是否应排在 b 前）
-// 规则：权重降序；同权重按编码升序（保持词库自然顺序）；再按文本升序；最后按消耗长度降序。
+// 规则：权重降序；同权重+同编码按自然顺序升序（保持词库原始顺序）；再按编码升序；最后按消耗长度降序。
 func Better(a, b Candidate) bool {
 	if a.Weight != b.Weight {
 		return a.Weight > b.Weight
 	}
+	if a.Code == b.Code && a.NaturalOrder != b.NaturalOrder {
+		return a.NaturalOrder < b.NaturalOrder
+	}
 	if a.Code != b.Code {
 		return a.Code < b.Code
-	}
-	if a.Text != b.Text {
-		return a.Text < b.Text
 	}
 	return a.ConsumedLength > b.ConsumedLength
 }
