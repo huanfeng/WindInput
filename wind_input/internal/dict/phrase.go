@@ -53,6 +53,7 @@ type PhrasesFileConfig struct {
 type PhraseFileEntry struct {
 	Code     string `yaml:"code"`
 	Text     string `yaml:"text"`
+	Texts    string `yaml:"texts,omitempty"` // 数组映射：每个字符展开为独立候选
 	Position int    `yaml:"position"`
 	Disabled bool   `yaml:"disabled,omitempty"`
 }
@@ -245,13 +246,30 @@ func (pl *PhraseLayer) loadFile(path string, isSystem bool) error {
 
 	for _, p := range config.Phrases {
 		code := strings.ToLower(p.Code)
-		if code == "" || p.Text == "" {
+		if code == "" || (p.Text == "" && p.Texts == "") {
 			continue
 		}
 
 		position := p.Position
 		if position <= 0 {
 			position = 1
+		}
+
+		// texts 字段：每个字符展开为独立候选
+		if p.Texts != "" {
+			if p.Disabled {
+				continue
+			}
+			runes := []rune(p.Texts)
+			for idx, r := range runes {
+				arrEntry := PhraseEntry{
+					Text:     string(r),
+					Position: position + idx,
+					IsSystem: isSystem,
+				}
+				pl.staticPhrases[code] = append(pl.staticPhrases[code], arrEntry)
+			}
+			continue
 		}
 
 		// 用户文件可以覆盖系统短语（同 code+text 的条目）
@@ -270,20 +288,6 @@ func (pl *PhraseLayer) loadFile(path string, isSystem bool) error {
 
 		// 被禁用的条目不加入查询索引（但仍可被前端读取）
 		if p.Disabled {
-			continue
-		}
-
-		// $[...] 数组映射：展开为多个静态候选
-		if HasArrayMapping(p.Text) {
-			items := ExpandArrayMapping(p.Text)
-			for idx, item := range items {
-				arrEntry := PhraseEntry{
-					Text:     item,
-					Position: position + idx,
-					IsSystem: isSystem,
-				}
-				pl.staticPhrases[code] = append(pl.staticPhrases[code], arrEntry)
-			}
 			continue
 		}
 

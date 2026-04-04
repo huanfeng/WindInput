@@ -194,28 +194,6 @@ func HasVariable(text string) bool {
 	return strings.Contains(text, "$")
 }
 
-// HasArrayMapping 检测文本是否为数组映射格式 $[...]
-func HasArrayMapping(text string) bool {
-	return strings.HasPrefix(text, "$[") && strings.HasSuffix(text, "]")
-}
-
-// ExpandArrayMapping 展开数组映射，每个字符（rune）成为一个独立候选
-// 输入: "$[①②③④⑤]"
-// 输出: ["①", "②", "③", "④", "⑤"]
-func ExpandArrayMapping(text string) []string {
-	if !HasArrayMapping(text) {
-		return nil
-	}
-	// 去掉 $[ 和 ]
-	inner := text[2 : len(text)-1]
-	runes := []rune(inner)
-	result := make([]string, len(runes))
-	for i, r := range runes {
-		result[i] = string(r)
-	}
-	return result
-}
-
 // ===== 辅助函数 =====
 
 // toChinese 将数字字符串逐字转换为中文（如 "2026" → "二〇二六"）
