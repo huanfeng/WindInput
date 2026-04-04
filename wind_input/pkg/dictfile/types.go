@@ -11,12 +11,14 @@ type PhraseEntry struct {
 
 // PhraseConfig 单个短语配置
 // Text 支持变量模板语法（$Y, $MM, $DD, ${var} 等），运行时自动展开
-// Text 支持数组映射语法 $[字符列表]，每个字符展开为一个独立候选
+// Texts 字段用于数组映射，每个字符展开为一个独立候选
 type PhraseConfig struct {
-	Code     string `yaml:"code" json:"code"`                   // 触发编码
-	Text     string `yaml:"text" json:"text"`                   // 输出文本（可包含 $变量 或 $[映射]）
-	Position int    `yaml:"position" json:"position"`           // 候选位置（1=第一候选, 2=第二候选...）
-	Disabled bool   `yaml:"disabled,omitempty" json:"disabled"` // 是否禁用
+	Code     string `yaml:"code" json:"code"`                             // 触发编码
+	Text     string `yaml:"text" json:"text"`                             // 输出文本（可包含 $变量）
+	Texts    string `yaml:"texts,omitempty" json:"texts,omitempty"`       // 数组映射：每个字符展开为独立候选
+	Name     string `yaml:"name,omitempty" json:"name,omitempty"`         // 显示名称（用于组候选展示）
+	Position int    `yaml:"position" json:"position"`                     // 候选位置（1=第一候选, 2=第二候选...）
+	Disabled bool   `yaml:"disabled,omitempty" json:"disabled,omitempty"` // 是否禁用
 }
 
 // PhrasesConfig 短语配置文件结构（system.phrases.yaml / user.phrases.yaml）

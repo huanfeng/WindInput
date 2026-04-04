@@ -64,120 +64,120 @@ phrases:
   # ===== zz 系列：特殊符号快捷输入 =====
   # texts 字段：每个字符自动展开为独立候选项
 
-  # zzbd - 标点符号
   - code: "zzbd"
+    name: "标点"
     texts: '、。·ˉˇ¨〃々—～‖…‘’“”〔〕〈〉《》「」『』〖〗【】±×÷∶∧∨∑∏∪∩∈∷√⊥∥∠⌒⊙∫∮≡≌≈∽∝≠≮≯≤≥∞∵∴♂♀°′″℃＄¤￠￡‰§№☆★○●◎◇◆□■△▲※→←↑↓〓'
     position: 1
 
-  # zzde - 大写俄文字母
-  - code: "zzde"
-    texts: "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯЁ"
-    position: 1
-
-  # zzdl - 大写罗马数字
-  - code: "zzdl"
-    texts: "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ"
-    position: 1
-
-  # zzds - 带点数字序号
-  - code: "zzds"
-    texts: "⒈⒉⒊⒋⒌⒍⒎⒏⒐⒑⒒⒓⒔⒕⒖⒗⒘⒙⒚⒛"
-    position: 1
-
-  # zzdw - 单位符号
-  - code: "zzdw"
-    texts: "㎎㎏㎜㎝㎞㎡㏄㏎㏑㏒㏕"
-    position: 1
-
-  # zzdx - 大写希腊字母
-  - code: "zzdx"
-    texts: "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ"
-    position: 1
-
-  # zzhb - 货币符号
-  - code: "zzhb"
-    texts: "＄￠￡￥¤"
-    position: 1
-
-  # zzjp - 日文片假名
-  - code: "zzjp"
-    texts: "ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴヵヶーヽヾ"
-    position: 1
-
-  # zzjt - 箭头符号
-  - code: "zzjt"
-    texts: "→↑←↓↖↗↘↙"
-    position: 1
-
-  # zzks - 括号数字序号
-  - code: "zzks"
-    texts: "⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇"
-    position: 1
-
-  # zzpj - 日文平假名
-  - code: "zzpj"
-    texts: "ぁあぃいぅうぇえぉおかがきぎぱくぐけげこごさざしじすずせぜそぞただちぢっつづてでとどなにぬねのはばひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろゎわゐゑをん゛゜ゝゞ"
-    position: 1
-
-  # zzpp - 偏旁部首
-  - code: "zzpp"
-    texts: "亻彳讠饣艹丶乛亠冖宀冫丷扌氵灬丨亅丿乚勹匚冂凵爫忄丬纟疒阝刂卩犭辶廴钅礻衤罒覀夂癶耂牜虍歺糹釒飠"
-    position: 1
-
-  # zzpy - 拼音符号
-  - code: "zzpy"
-    texts: "āáǎàōóǒòêēéěèīíǐìǖǘǚǜüūúǔù"
-    position: 1
-
-  # zzsx - 数学符号
-  - code: "zzsx"
-    texts: "＋－＜＝＞±×÷∈∏∑∕√∝∞∟∠∣∥∧∨∩∪∫∮∴∵∶∷∽≈≌≒≠≡≤≥≦≧≮≯⊕⊙⊥⊿"
-    position: 1
-
-  # zzsz - 实心圆圈数字
   - code: "zzsz"
+    name: "数字"
     texts: "❶❷❸❹❺❻❼❽❾❿"
-    position: 1
+    position: 2
 
-  # zzts - 特殊符号
-  - code: "zzts"
-    texts: "℃°‰♂♀§№☆★○●◎◇◆□■△▲※〓＃＆＠＼＾＿￣"
-    position: 1
-
-  # zzxe - 小写俄文字母
-  - code: "zzxe"
-    texts: "абвгдежзийклмнопрстуфхцчшщъыьэюяё"
-    position: 1
-
-  # zzxl - 小写罗马数字
-  - code: "zzxl"
-    texts: "ⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ"
-    position: 1
-
-  # zzxx - 小写希腊字母
-  - code: "zzxx"
-    texts: "αβγδεζηθικλμνξοπρστυφχψω"
-    position: 1
-
-  # zzys - 圆圈数字
-  - code: "zzys"
-    texts: "①②③④⑤⑥⑦⑧⑨⑩"
-    position: 1
-
-  # zzzm - 圆圈字母
   - code: "zzzm"
+    name: "字母"
     texts: "ⓐⓑⓒⓓⓔⓕⓖⓗⓘⓙⓚⓛⓜⓝⓞⓟⓠⓡⓢⓣⓤⓥⓦⓧⓨⓩ"
-    position: 1
+    position: 3
 
-  # zzzs - 中文括号数字
+  - code: "zzpp"
+    name: "偏旁"
+    texts: "亻彳讠饣艹丶乛亠冖宀冫丷扌氵灬丨亅丿乚勹匚冂凵爫忄丬纟疒阝刂卩犭辶廴钅礻衤罒覀夂癶耂牜虍歺糹釒飠"
+    position: 4
+
+  - code: "zzdw"
+    name: "单位"
+    texts: "㎎㎏㎜㎝㎞㎡㏄㏎㏑㏒㏕"
+    position: 5
+
+  - code: "zzpy"
+    name: "拼音"
+    texts: "āáǎàōóǒòêēéěèīíǐìǖǘǚǜüūúǔù"
+    position: 6
+
+  - code: "zzds"
+    name: "点号数字"
+    texts: "⒈⒉⒊⒋⒌⒍⒎⒏⒐⒑⒒⒓⒔⒕⒖⒗⒘⒙⒚⒛"
+    position: 7
+
+  - code: "zzks"
+    name: "括号数字"
+    texts: "⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇"
+    position: 8
+
+  - code: "zzys"
+    name: "圆圈数字"
+    texts: "①②③④⑤⑥⑦⑧⑨⑩"
+    position: 9
+
   - code: "zzzs"
+    name: "中文数字"
     texts: "㈠㈡㈢㈣㈤㈥㈦㈧㈨㈩"
-    position: 1
+    position: 10
 
-  # zzzy - 注音符号
+  - code: "zzhb"
+    name: "货币符号"
+    texts: "＄￠￡￥¤"
+    position: 11
+
+  - code: "zzjt"
+    name: "箭头符号"
+    texts: "→↑←↓↖↗↘↙"
+    position: 12
+
+  - code: "zzde"
+    name: "大写俄文"
+    texts: "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯЁ"
+    position: 13
+
+  - code: "zzxe"
+    name: "小写俄文"
+    texts: "абвгдежзийклмнопрстуфхцчшщъыьэюяё"
+    position: 14
+
+  - code: "zzdl"
+    name: "大写罗马"
+    texts: "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ"
+    position: 15
+
+  - code: "zzxl"
+    name: "小写罗马"
+    texts: "ⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ"
+    position: 16
+
+  - code: "zzdx"
+    name: "大写希腊"
+    texts: "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ"
+    position: 17
+
+  - code: "zzxx"
+    name: "小写希腊"
+    texts: "αβγδεζηθικλμνξοπρστυφχψω"
+    position: 18
+
+  - code: "zzpj"
+    name: "平假名"
+    texts: "ぁあぃいぅうぇえぉおかがきぎぱくぐけげこごさざしじすずせぜそぞただちぢっつづてでとどなにぬねのはばひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろゎわゐゑをん゛゜ゝゞ"
+    position: 19
+
+  - code: "zzjp"
+    name: "片假名"
+    texts: "ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴヵヶーヽヾ"
+    position: 20
+
+  - code: "zzsx"
+    name: "数学符号"
+    texts: "＋－＜＝＞±×÷∈∏∑∕√∝∞∟∠∣∥∧∨∩∪∫∮∴∵∶∷∽≈≌≒≠≡≤≥≦≧≮≯⊕⊙⊥⊿"
+    position: 21
+
+  - code: "zzts"
+    name: "特殊符号"
+    texts: "℃°‰♂♀§№☆★○●◎◇◆□■△▲※〓＃＆＠＼＾＿￣"
+    position: 22
+
   - code: "zzzy"
+    name: "注音符号"
     texts: "ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ"
-    position: 1
+    position: 23
 
   # ===== zz 系列：日期时间快捷输入 =====
 

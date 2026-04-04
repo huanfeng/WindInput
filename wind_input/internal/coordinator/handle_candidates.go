@@ -148,6 +148,8 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 			ConsumedLength: ec.ConsumedLength,
 			Source:         string(ec.Source),
 			PhraseTemplate: ec.PhraseTemplate,
+			IsGroup:        ec.IsGroup,
+			GroupCode:      ec.GroupCode,
 		}
 		// HasShadow 统一用 inputBuffer 查询（Shadow 规则按当前输入编码存储）
 		if ec.IsCommand && ec.PhraseTemplate != "" {

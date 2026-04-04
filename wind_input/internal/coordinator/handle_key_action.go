@@ -623,6 +623,22 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 	}
 
 	cand := c.candidates[index]
+
+	// 组候选：替换 inputBuffer 为组的完整编码，触发二级展开
+	if cand.IsGroup && cand.GroupCode != "" {
+		c.inputBuffer = cand.GroupCode
+		c.inputCursorPos = len(c.inputBuffer)
+		c.currentPage = 1
+		c.selectedIndex = 0
+		c.updateCandidates()
+		c.showUI()
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     c.compositionText(),
+			CaretPos: c.displayCursorPos(),
+		}
+	}
+
 	originalText := cand.Text
 	text := originalText
 

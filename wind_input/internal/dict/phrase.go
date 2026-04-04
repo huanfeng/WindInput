@@ -28,6 +28,10 @@ type PhraseLayer struct {
 	// 动态短语（含 $ 变量）: code -> []PhraseEntry，仅精确匹配
 	dynamicPhrases map[string][]PhraseEntry
 
+	// 数组组信息（texts 字段）: code -> PhraseGroup
+	// 前缀搜索时返回组名候选而非展开字符
+	phraseGroups map[string]PhraseGroup
+
 	// 模板引擎
 	templateEngine *TemplateEngine
 
@@ -44,6 +48,16 @@ type PhraseEntry struct {
 	Disabled bool   // 是否被禁用
 }
 
+// PhraseGroup 数组类型短语组的元数据（texts 字段的条目）
+type PhraseGroup struct {
+	Code     string // 完整编码（如 "zzbd"）
+	Name     string // 显示名称（如 "标点符号"）
+	Texts    string // 原始字符列表
+	Position int    // 排序位置
+	IsSystem bool   // 是否来自系统短语
+	Disabled bool   // 是否被禁用
+}
+
 // PhrasesFileConfig 短语文件的 YAML 结构
 type PhrasesFileConfig struct {
 	Phrases []PhraseFileEntry `yaml:"phrases"`
@@ -54,6 +68,7 @@ type PhraseFileEntry struct {
 	Code     string `yaml:"code"`
 	Text     string `yaml:"text"`
 	Texts    string `yaml:"texts,omitempty"` // 数组映射：每个字符展开为独立候选
+	Name     string `yaml:"name,omitempty"`  // 组显示名称（用于 texts 类型的候选展示）
 	Position int    `yaml:"position"`
 	Disabled bool   `yaml:"disabled,omitempty"`
 }
@@ -68,6 +83,7 @@ func NewPhraseLayer(name string, systemPath, userPath string) *PhraseLayer {
 		userFilePath:   userPath,
 		staticPhrases:  make(map[string][]PhraseEntry),
 		dynamicPhrases: make(map[string][]PhraseEntry),
+		phraseGroups:   make(map[string]PhraseGroup),
 		templateEngine: GetTemplateEngine(),
 		cmdCache:       make(map[string][]candidate.Candidate),
 	}
@@ -154,6 +170,7 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 }
 
 // SearchPrefix 前缀查询（仅静态短语）
+// 对 phraseGroups 中的条目，前缀搜索返回组名候选而非展开字符
 func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candidate {
 	pl.mu.RLock()
 	defer pl.mu.RUnlock()
@@ -161,8 +178,31 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 	prefix = strings.ToLower(prefix)
 	var results []candidate.Candidate
 
+	// 1. 处理 phraseGroups：返回组名候选
+	for code, group := range pl.phraseGroups {
+		if code != prefix && strings.HasPrefix(code, prefix) && !group.Disabled {
+			displayName := group.Name
+			if displayName == "" {
+				displayName = code
+			}
+			results = append(results, candidate.Candidate{
+				Text:      displayName,
+				Code:      code,
+				Weight:    positionToWeight(group.Position),
+				Hint:      code[len(prefix):], // 显示编码后缀（如 zz→zzbd 显示 "bd"）
+				IsCommon:  true,
+				IsGroup:   true,
+				GroupCode: code,
+			})
+		}
+	}
+
+	// 2. 处理普通静态短语（跳过 phraseGroups 已覆盖的编码）
 	for code, entries := range pl.staticPhrases {
 		if strings.HasPrefix(code, prefix) {
+			if _, isGroup := pl.phraseGroups[code]; isGroup {
+				continue // 此编码的字符级候选不参与前缀搜索
+			}
 			for _, e := range entries {
 				results = append(results, candidate.Candidate{
 					Text:     e.Text,
@@ -208,6 +248,7 @@ func (pl *PhraseLayer) Load() error {
 
 	pl.staticPhrases = make(map[string][]PhraseEntry)
 	pl.dynamicPhrases = make(map[string][]PhraseEntry)
+	pl.phraseGroups = make(map[string]PhraseGroup)
 	pl.cmdCache = make(map[string][]candidate.Candidate)
 
 	// 1. 加载系统短语
@@ -255,8 +296,16 @@ func (pl *PhraseLayer) loadFile(path string, isSystem bool) error {
 			position = 1
 		}
 
-		// texts 字段：每个字符展开为独立候选
+		// texts 字段：注册为组并展开字符到精确匹配索引
 		if p.Texts != "" {
+			pl.phraseGroups[code] = PhraseGroup{
+				Code:     code,
+				Name:     p.Name,
+				Texts:    p.Texts,
+				Position: position,
+				IsSystem: isSystem,
+				Disabled: p.Disabled,
+			}
 			if p.Disabled {
 				continue
 			}
