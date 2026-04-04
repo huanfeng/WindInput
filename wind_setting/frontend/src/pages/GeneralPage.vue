@@ -293,6 +293,12 @@ function getCodetableConfig(schemaID: string) {
   return cfg.engine.codetable;
 }
 
+// 获取方案的最大码长（默认4）
+function getMaxCodeLength(schemaID: string): number {
+  const ct = getCodetableConfig(schemaID);
+  return (ct as any).max_code_length || 4;
+}
+
 // 拼音配置
 function getPinyinConfig(schemaID: string) {
   const cfg = schemaConfigs.value[schemaID];
@@ -577,8 +583,8 @@ onUnmounted(() => {
         <template v-if="getEngineType(schemaID) === 'codetable'">
           <div class="setting-item">
             <div class="setting-info">
-              <label>四码唯一自动上屏</label>
-              <p class="setting-hint">输入四码且只有唯一候选时自动上屏</p>
+              <label>满码唯一自动上屏</label>
+              <p class="setting-hint">输入达到最大码长（{{ getMaxCodeLength(schemaID) }}码）且只有唯一候选时自动上屏</p>
             </div>
             <div class="setting-control">
               <label class="switch">
@@ -593,8 +599,8 @@ onUnmounted(() => {
           </div>
           <div class="setting-item">
             <div class="setting-info">
-              <label>四码空码清空</label>
-              <p class="setting-hint">输入四码无匹配时自动清空</p>
+              <label>满码空码清空</label>
+              <p class="setting-hint">输入达到最大码长（{{ getMaxCodeLength(schemaID) }}码）无匹配时自动清空</p>
             </div>
             <div class="setting-control">
               <label class="switch">
@@ -610,7 +616,7 @@ onUnmounted(() => {
           <div class="setting-item">
             <div class="setting-info">
               <label>顶码上屏</label>
-              <p class="setting-hint">输入第五码时自动上屏首选</p>
+              <p class="setting-hint">超过最大码长（{{ getMaxCodeLength(schemaID) }}码）时自动上屏首选</p>
             </div>
             <div class="setting-control">
               <label class="switch">

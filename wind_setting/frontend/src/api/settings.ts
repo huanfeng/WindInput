@@ -50,6 +50,7 @@ export interface PinyinConfig {
 
 // 码表配置
 export interface CodetableConfig {
+  max_code_length?: number; // 最大码长（来自方案定义，只读）
   auto_commit_at_4: boolean;
   clear_on_empty_at_4: boolean;
   top_code_commit: boolean;
