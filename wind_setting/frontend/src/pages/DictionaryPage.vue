@@ -146,20 +146,26 @@
               恢复默认
             </button>
             <div class="toolbar-spacer"></div>
-            <button
-              class="btn btn-sm"
-              @click="handleImportPhrases"
-              title="导入"
+            <div
+              class="toolbar-more"
+              @click.stop="showPhraseMenu = !showPhraseMenu"
             >
-              导入
-            </button>
-            <button
-              class="btn btn-sm"
-              @click="handleExportPhrases"
-              title="导出"
-            >
-              导出
-            </button>
+              <button class="btn btn-sm">...</button>
+              <div v-if="showPhraseMenu" class="toolbar-dropdown">
+                <div
+                  class="dropdown-item"
+                  @click="handleImportPhrases(); showPhraseMenu = false"
+                >
+                  导入
+                </div>
+                <div
+                  class="dropdown-item"
+                  @click="handleExportPhrases(); showPhraseMenu = false"
+                >
+                  导出
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- 用户短语列表 -->
@@ -857,6 +863,19 @@
         </div>
       </div>
     </div>
+    <!-- ========== 确认对话框 ========== -->
+    <div v-if="confirmVisible" class="dialog-overlay" @click.self="handleCancel">
+      <div class="dialog-box" style="max-width: 360px">
+        <div class="dialog-title">确认</div>
+        <div style="padding: 8px 0 16px; font-size: 14px; color: #374151; white-space: pre-line">
+          {{ confirmMessage }}
+        </div>
+        <div class="dialog-actions">
+          <button class="btn btn-sm" @click="handleCancel">取消</button>
+          <button class="btn btn-primary btn-sm" @click="handleConfirm">确定</button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -864,6 +883,7 @@
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import * as wailsApi from "../api/wails";
 import { useToast } from "../composables/useToast";
+import { useConfirm } from "../composables/useConfirm";
 import AddWordPage from "./AddWordPage.vue";
 import type {
   PhraseItem,
@@ -880,6 +900,7 @@ const props = defineProps<{
 
 // ===== 全局 Toast =====
 const { toast } = useToast();
+const { confirmVisible, confirmMessage, confirm, handleConfirm, handleCancel } = useConfirm();
 
 // ===== 通用状态 =====
 const dictSubTab = ref<"phrases" | "userdict" | "shadow" | "temp">("phrases");
@@ -1042,6 +1063,7 @@ function toggleAllTemps() {
 // 下拉菜单
 const showWordMenu = ref(false);
 const showTempMenu = ref(false);
+const showPhraseMenu = ref(false);
 
 // ===== 候选调整 =====
 const shadowRules = ref<ShadowRuleItem[]>([]);
@@ -1306,7 +1328,7 @@ async function handleResetSystemPhrase() {
 
 // ===== 恢复系统默认 =====
 async function handleResetAllSystemPhrases() {
-  if (!confirm("确定恢复所有系统短语为默认设置？\n这将删除所有对系统短语的禁用和位置调整。")) return;
+  if (!(await confirm("确定恢复所有系统短语为默认设置？\n这将删除所有对系统短语的禁用和位置调整。"))) return;
   try {
     await wailsApi.resetAllSystemPhraseOverrides();
     showDictMessage("已恢复为系统默认", "success");
@@ -1513,7 +1535,7 @@ async function handlePromoteTempWord(item: TempWordItem) {
 }
 
 async function handlePromoteAllTemp() {
-  if (!confirm("确定将所有临时词条转为永久词条吗？")) return;
+  if (!(await confirm("确定将所有临时词条转为永久词条吗？"))) return;
   try {
     const count = await wailsApi.promoteAllTempWordsForSchema(
       selectedSchemaID.value,
@@ -1527,7 +1549,7 @@ async function handlePromoteAllTemp() {
 }
 
 async function handleClearTempDict() {
-  if (!confirm("确定清空临时词库吗？此操作不可恢复。")) return;
+  if (!(await confirm("确定清空临时词库吗？此操作不可恢复。"))) return;
   try {
     const count = await wailsApi.clearTempDictForSchema(selectedSchemaID.value);
     showDictMessage(`已清空 ${count} 条临时词条`, "success");
@@ -1691,6 +1713,7 @@ async function handleReloadAllFiles() {
 function closeDropdowns() {
   showWordMenu.value = false;
   showTempMenu.value = false;
+  showPhraseMenu.value = false;
 }
 
 onMounted(() => {
@@ -1822,7 +1845,6 @@ onUnmounted(() => {
   margin-bottom: 12px;
   flex-shrink: 0;
   flex-wrap: nowrap;
-  overflow: hidden;
 }
 .toolbar-spacer {
   flex: 1;
