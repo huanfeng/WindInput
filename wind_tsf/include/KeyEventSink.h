@@ -31,10 +31,7 @@ public:
     void Uninitialize();
 
     // Reset composing state (called when focus is lost or input field changes)
-    void ResetComposingState() { _isComposing = FALSE; _hasCandidates = FALSE; _lastPassthroughDigit = 0; _digitCaretY = 0; }
-
-    // Clear digit pass-through tracking (called by OnEndEdit when selection changes)
-    void ClearPassthroughDigit() { _lastPassthroughDigit = 0; _digitCaretY = 0; }
+    void ResetComposingState() { _isComposing = FALSE; _hasCandidates = FALSE; _lastPassthroughDigit = 0; }
 
     // Called when composition is unexpectedly terminated by the application
     // This resets state and notifies Go service to clear input buffer
@@ -49,7 +46,6 @@ private:
     BOOL _isComposing;
     BOOL _hasCandidates;         // True if there are candidates to select
     WCHAR _lastPassthroughDigit; // Last digit key that passed through (for smart punct fallback in apps where TSF can't read text)
-    LONG  _digitCaretY;          // Caret Y when _lastPassthroughDigit was set (for cross-line movement detection)
     uint32_t _pendingKeyUpKey;   // Key code of pending KeyUp toggle key
     uint32_t _pendingKeyUpModifiers; // Modifiers when KeyDown was pressed
     DWORD    _pendingKeyDownTime;    // GetTickCount() when toggle key was pressed down

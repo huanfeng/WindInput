@@ -2261,16 +2261,14 @@ STDAPI CTextService::OnEndEdit(ITfContext* pContext, TfEditCookie ecReadOnly, IT
     pEditRecord->GetSelectionStatus(&selChanged);
 
     // When selection changes outside of composition (e.g., mouse click, arrow keys),
-    // clear digit pass-through tracking and notify Go to reset smart punct state.
+    // notify Go to reset smart punct state.
     // During composition, Go tracks state internally via key events.
+    // NOTE: Do NOT call ClearPassthroughDigit() here. OnEndEdit fires for normal digit
+    // insertion too (cursor moves after typing '1'), which would incorrectly clear the
+    // digit tracking that OnTestKeyDown just set. Mouse click detection relies on
+    // caret Y comparison in _SendKeyToService instead.
     if (selChanged && _pComposition == nullptr)
     {
-        // Clear C++ side digit tracking (handles editors where OnEndEdit fires on mouse click)
-        if (_pKeyEventSink != nullptr)
-        {
-            _pKeyEventSink->ClearPassthroughDigit();
-        }
-
         // Notify Go side to reset its smart punct state
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
         {

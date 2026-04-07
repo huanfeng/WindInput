@@ -84,12 +84,10 @@ public:
     // Insert text and start new composition (for top code commit)
     BOOL InsertTextAndStartComposition(const std::wstring& insertText, const std::wstring& newComposition);
 
-    // Get cached character before caret (set by ITfTextEditSink::OnEndEdit)
-    // Used by KeyEventSink to include prevChar in key events for smart punctuation
-    WCHAR GetCachedPrevChar() const { return _cachedPrevChar; }
-
-    // Get last known caret Y position (for cross-line movement detection)
-    LONG GetLastKnownCaretY() const { return _lastKnownCaretY; }
+    // Get and consume cached character before caret (set by ITfTextEditSink::OnEndEdit).
+    // Returns the cached value and clears it to prevent stale values persisting across
+    // key events in apps where OnEndEdit fires late or not at all (e.g., WeChat).
+    WCHAR ConsumeCachedPrevChar() { WCHAR c = _cachedPrevChar; _cachedPrevChar = 0; return c; }
 
     // Get and send caret position to Go Service
     BOOL GetCaretPosition(LONG* px, LONG* py, LONG* pHeight);

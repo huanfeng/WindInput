@@ -60,7 +60,6 @@ CKeyEventSink::CKeyEventSink(CTextService* pTextService)
     , _isComposing(FALSE)
     , _hasCandidates(FALSE)
     , _lastPassthroughDigit(0)
-    , _digitCaretY(0)
     , _pendingKeyUpKey(0)
     , _pendingKeyUpModifiers(0)
     , _pendingKeyDownTime(0)
@@ -312,12 +311,10 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         if (wParam >= '0' && wParam <= '9')
         {
             _lastPassthroughDigit = (WCHAR)wParam;
-            _digitCaretY = _pTextService->GetLastKnownCaretY();
         }
         else
         {
             _lastPassthroughDigit = 0;
-            _digitCaretY = 0;
         }
     }
 
@@ -921,27 +918,17 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
 
     // Get character before caret for smart punctuation:
     // 1. Prefer ITfTextEditSink::OnEndEdit cache (works in Notepad, browsers, etc.)
+    //    Consume (clear) to prevent stale values in apps where OnEndEdit fires late (e.g., WeChat)
     // 2. Fallback to digit pass-through tracking (for editors like EverEdit where TSF text access fails)
-    uint16_t prevChar = (uint16_t)_pTextService->GetCachedPrevChar();
-    if (prevChar == 0 && _lastPassthroughDigit != 0)
+    uint16_t prevChar = (uint16_t)_pTextService->ConsumeCachedPrevChar();
+    // Digit pass-through fallback: only apply for period/comma keys (smart punct targets).
+    // Other keys (e.g., Shift for mode toggle) must NOT consume _lastPassthroughDigit,
+    // otherwise the digit info is lost before the actual punctuation key arrives.
+    if (prevChar == 0 && _lastPassthroughDigit != 0 &&
+        (keyCode == VK_OEM_PERIOD || keyCode == VK_OEM_COMMA))
     {
-        // Cross-line movement detection: if caret Y changed since digit was typed,
-        // the user likely moved cursor (mouse click to another line), discard the digit tracking.
-        // Same-line mouse movement cannot be detected without proper ITfTextEditSink support.
-        LONG currentY = _pTextService->GetLastKnownCaretY();
-        if (_digitCaretY != 0 && currentY != 0 && currentY != _digitCaretY)
-        {
-            WIND_LOG_DEBUG_FMT(L"Smart punct: caret Y changed (%ld -> %ld), clearing digit tracking\n",
-                _digitCaretY, currentY);
-            _lastPassthroughDigit = 0;
-            _digitCaretY = 0;
-        }
-        else
-        {
-            prevChar = (uint16_t)_lastPassthroughDigit;
-            _lastPassthroughDigit = 0;  // 已消费，清除以避免后续标点误判
-            _digitCaretY = 0;
-        }
+        prevChar = (uint16_t)_lastPassthroughDigit;
+        _lastPassthroughDigit = 0;  // 已消费，清除以避免后续标点误判
     }
 
     BOOL result = pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType, toggles, eventSeq, prevChar);
