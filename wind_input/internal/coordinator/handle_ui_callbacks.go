@@ -747,6 +747,10 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 	if c.config != nil && c.config.UI.ThemeStyle != "" {
 		currentThemeStyle = c.config.UI.ThemeStyle
 	}
+	currentFilterMode := "smart"
+	if c.config != nil && c.config.Input.FilterMode != "" {
+		currentFilterMode = c.config.Input.FilterMode
+	}
 	state := ui.UnifiedMenuState{
 		ChineseMode:       c.chineseMode,
 		FullWidth:         c.fullWidth,
@@ -754,6 +758,7 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 		ToolbarVisible:    c.toolbarVisible,
 		Schemas:           schemaMenuItems,
 		CurrentSchemaID:   currentSchemaID,
+		CurrentFilterMode: currentFilterMode,
 		Themes:            themeMenuItems,
 		CurrentThemeID:    c.uiManager.GetCurrentThemeID(),
 		CurrentThemeStyle: currentThemeStyle,
@@ -811,6 +816,23 @@ func (c *Coordinator) handleUnifiedMenuAction(id int) {
 			}
 			c.mu.Unlock()
 			c.saveThemeStyleConfig(newStyle)
+		}
+	case id >= ui.UnifiedMenuFilterModeBase && id < ui.UnifiedMenuFilterModeBase+10:
+		// Filter mode selection
+		modeIndex := id - ui.UnifiedMenuFilterModeBase
+		modes := []string{"smart", "general", "gb18030"}
+		if modeIndex >= 0 && modeIndex < len(modes) {
+			newMode := modes[modeIndex]
+			c.logger.Info("Filter mode selected from unified menu", "mode", newMode)
+			c.mu.Lock()
+			if c.config != nil {
+				c.config.Input.FilterMode = newMode
+			}
+			if c.engineMgr != nil {
+				c.engineMgr.UpdateFilterMode(newMode)
+			}
+			c.mu.Unlock()
+			c.saveFilterModeConfig(newMode)
 		}
 	case id >= ui.UnifiedMenuThemeBase && id < ui.UnifiedMenuThemeBase+100:
 		// Theme selection

@@ -10,7 +10,7 @@
       <div class="card-title">字符与标点</div>
       <div class="setting-item">
         <div class="setting-info">
-          <label>候选字符范围</label>
+          <label>候选检索范围</label>
           <p class="setting-hint">过滤候选词中的生僻字</p>
         </div>
         <div class="setting-control">
@@ -33,7 +33,7 @@
                 v-for="opt in filterModeOptions"
                 :key="opt.value"
                 class="filter-option"
-                :class="{ selected: formData.engine.filter_mode === opt.value }"
+                :class="{ selected: formData.input.filter_mode === opt.value }"
                 @click="selectFilterMode(opt.value)"
               >
                 <div class="filter-option-main">
@@ -197,30 +197,30 @@ const filterModeOptions = [
   {
     value: "smart",
     label: "智能模式",
-    desc: "优先常用字，空码时自动检索大字符集",
+    desc: "优先常用字，无结果时自动扩展到全部字符",
     tag: "推荐",
   },
   {
     value: "general",
     label: "仅常用字",
-    desc: "只显示 GB2312 范围内的常用汉字",
+    desc: "只显示通用规范汉字表中的常用汉字",
   },
   {
     value: "gb18030",
-    label: "大字符集",
-    desc: "包含全部 CJK 汉字，含生僻字和扩展区",
+    label: "全部字符",
+    desc: "不限制字符范围，包含生僻字",
   },
 ];
 
 const currentFilterOption = computed(
   () =>
     filterModeOptions.find(
-      (o) => o.value === props.formData.engine.filter_mode,
+      (o) => o.value === props.formData.input.filter_mode,
     ) || filterModeOptions[0],
 );
 
 function selectFilterMode(value: string) {
-  props.formData.engine.filter_mode = value;
+  props.formData.input.filter_mode = value;
   filterDropdownOpen.value = false;
 }
 

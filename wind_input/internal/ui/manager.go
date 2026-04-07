@@ -20,6 +20,7 @@ const (
 	UnifiedMenuSchemaBase     = 150 // 方案ID: 150+i
 	UnifiedMenuThemeBase      = 200 // 主题ID: 200+i
 	UnifiedMenuThemeStyleBase = 250 // 主题风格ID: 250+i (0=system, 1=light, 2=dark)
+	UnifiedMenuFilterModeBase = 260 // 检索范围ID: 260+i (0=smart, 1=general, 2=gb18030)
 	UnifiedMenuReloadConfig   = 299
 	UnifiedMenuRestartService = 303
 	UnifiedMenuDictionary     = 300
@@ -47,6 +48,7 @@ type UnifiedMenuState struct {
 	ToolbarVisible    bool
 	Schemas           []SchemaMenuItem // Available schemas in order
 	CurrentSchemaID   string           // Current active schema ID
+	CurrentFilterMode string           // Current filter mode: "smart", "general", "gb18030"
 	Themes            []ThemeMenuItem
 	CurrentThemeID    string // Current theme ID for checked state
 	CurrentThemeStyle string // Current theme style: "system", "light", "dark"
@@ -72,8 +74,20 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 		}
 	}
 
+	// Build filter mode submenu
+	filterMode := state.CurrentFilterMode
+	if filterMode == "" {
+		filterMode = "smart"
+	}
+	filterChildren := []MenuItem{
+		{ID: UnifiedMenuFilterModeBase, Text: "智能模式", Checked: filterMode == "smart"},
+		{ID: UnifiedMenuFilterModeBase + 1, Text: "常用字", Checked: filterMode == "general"},
+		{ID: UnifiedMenuFilterModeBase + 2, Text: "全部字符", Checked: filterMode == "gb18030"},
+	}
+
 	items := []MenuItem{
 		{Text: "输入方案", Children: schemaChildren},
+		{Text: "检索范围", Children: filterChildren},
 		{ID: UnifiedMenuToggleWidth, Text: "全角", Checked: state.FullWidth},
 		{ID: UnifiedMenuTogglePunct, Text: "中文标点", Checked: state.ChinesePunct},
 		{Separator: true},

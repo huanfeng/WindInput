@@ -63,7 +63,6 @@ export interface CodetableConfig {
 // 引擎配置
 export interface EngineConfig {
   type: string;
-  filter_mode: string;
   pinyin: PinyinConfig;
   codetable: CodetableConfig;
 }
@@ -111,6 +110,7 @@ export interface InputConfig {
   full_width: boolean;
   chinese_punctuation: boolean;
   punct_follow_mode: boolean;
+  filter_mode: string; // 候选过滤模式: "smart", "general", "gb18030"
   smart_punct_after_digit: boolean;
   select_key_groups: string[];
   page_keys: string[];
@@ -277,7 +277,6 @@ export function getDefaultConfig(): Config {
     },
     engine: {
       type: "codetable",
-      filter_mode: "smart",
       pinyin: {
         show_code_hint: true,
         fuzzy: {
@@ -336,6 +335,7 @@ export function getDefaultConfig(): Config {
       full_width: false,
       chinese_punctuation: true,
       punct_follow_mode: false,
+      filter_mode: "smart",
       smart_punct_after_digit: true,
       select_key_groups: ["semicolon_quote"],
       page_keys: ["pageupdown", "minus_equal"],

@@ -310,6 +310,11 @@ func main() {
 
 	logger.Info("Engine initialized", "schema", activeSchemaID, "info", engineMgr.GetEngineInfo())
 
+	// 从全局配置应用候选过滤模式（覆盖 schema 默认值）
+	if cfg.Input.FilterMode != "" {
+		engineMgr.UpdateFilterMode(cfg.Input.FilterMode)
+	}
+
 	// Create UI Manager (native Windows UI)
 	uiManager := ui.NewManager(logger)
 
@@ -453,6 +458,11 @@ func (h *reloadHandlerImpl) ReloadConfig() error {
 		h.coord.UpdateInputConfig(&newCfg.Input)
 	}
 
+	// 从全局配置更新候选过滤模式
+	if newCfg.Input.FilterMode != "" {
+		h.engineMgr.UpdateFilterMode(newCfg.Input.FilterMode)
+	}
+
 	// 更新保存的配置引用
 	*h.cfg = *newCfg
 
@@ -494,7 +504,6 @@ func (h *reloadHandlerImpl) reloadActiveSchemaConfig() {
 				spec.CandidateSortMode,
 			)
 		}
-		h.engineMgr.UpdateFilterMode(s.Engine.FilterMode)
 
 	case schema.EngineTypePinyin:
 		if spec := s.Engine.Pinyin; spec != nil {
@@ -519,7 +528,6 @@ func (h *reloadHandlerImpl) reloadActiveSchemaConfig() {
 			}
 			h.engineMgr.UpdatePinyinOptions(pinyinCfg)
 		}
-		h.engineMgr.UpdateFilterMode(s.Engine.FilterMode)
 	}
 
 	h.logger.Debug("Schema config reloaded", "schema", activeID, "engineType", s.Engine.Type)

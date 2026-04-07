@@ -343,13 +343,13 @@ async function resetCurrentPageDefaults() {
     case "input":
       formData.value.engine = {
         ...formData.value.engine,
-        filter_mode: defaults.engine.filter_mode,
         pinyin: { ...defaults.engine.pinyin },
         codetable: { ...defaults.engine.codetable },
       };
       formData.value.input = {
         ...formData.value.input,
         punct_follow_mode: defaults.input.punct_follow_mode,
+        filter_mode: defaults.input.filter_mode,
       };
       break;
     case "hotkey":

@@ -63,6 +63,24 @@ func (c *Coordinator) saveThemeStyleConfig(themeStyle string) {
 	}()
 }
 
+// saveFilterModeConfig saves the filter mode to config
+func (c *Coordinator) saveFilterModeConfig(filterMode string) {
+	go func() {
+		cfg, err := config.Load()
+		if err != nil {
+			cfg = config.DefaultConfig()
+		}
+
+		cfg.Input.FilterMode = filterMode
+
+		if err := config.Save(cfg); err != nil {
+			c.logger.Error("Failed to save filter mode config", "error", err)
+		} else {
+			c.logger.Debug("Filter mode config saved", "filterMode", filterMode)
+		}
+	}()
+}
+
 // GetFullWidth returns the current full-width mode state
 func (c *Coordinator) GetFullWidth() bool {
 	c.mu.Lock()

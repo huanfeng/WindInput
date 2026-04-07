@@ -101,6 +101,7 @@ type ToolbarConfig struct {
 // InputConfig contains input behavior settings
 type InputConfig struct {
 	PunctFollowMode      bool                   `yaml:"punct_follow_mode" json:"punct_follow_mode"`
+	FilterMode           string                 `yaml:"filter_mode" json:"filter_mode"` // 候选过滤模式: "smart"(智能), "general"(仅常用字), "gb18030"(不限制)
 	SelectKeyGroups      []string               `yaml:"select_key_groups" json:"select_key_groups"`
 	PageKeys             []string               `yaml:"page_keys" json:"page_keys"`
 	HighlightKeys        []string               `yaml:"highlight_keys" json:"highlight_keys"`                   // 移动高亮候选项: "arrows"(上/下方向键), "tab"(Tab/Shift+Tab)
@@ -184,6 +185,7 @@ func DefaultConfig() *Config {
 		Input: InputConfig{
 			SmartPunctAfterDigit: true,
 			PunctFollowMode:      false,
+			FilterMode:           "smart",
 			SelectKeyGroups:      []string{"semicolon_quote"},
 			PageKeys:             []string{"pageupdown", "minus_equal"},
 			HighlightKeys:        []string{"arrows"},

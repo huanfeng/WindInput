@@ -52,6 +52,7 @@ toolbar:
 
 input:
   punct_follow_mode: false
+  filter_mode: smart
   select_key_groups:
     - semicolon_quote
   page_keys:
