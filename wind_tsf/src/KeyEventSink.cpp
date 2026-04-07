@@ -224,6 +224,18 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         return S_OK;
     }
 
+    // Any non-toggle-mode key cancels pending toggle.
+    // IMPORTANT: Must clear here because OnKeyDown may NOT be called
+    // if this key is not eaten (e.g., Shift+Enter in English mode).
+    // TSF only calls OnKeyDown when OnTestKeyDown sets pfEaten=TRUE.
+    if (_pendingKeyUpKey != 0)
+    {
+        WIND_LOG_DEBUG_FMT(L"OnTestKeyDown: Non-toggle key vk=0x%02X cancels pending toggle\n", (uint32_t)wParam);
+        _pendingKeyUpKey = 0;
+        _pendingKeyUpModifiers = 0;
+    }
+    _anyKeyAfterToggle = TRUE;
+
     // Check basic input keys based on current state
     // Different handling based on key type:
     // - Letter/number/punctuation keys: intercept in Chinese mode
