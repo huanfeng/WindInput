@@ -16,7 +16,7 @@ type Candidate struct {
 	Code           string          // 通用编码（五笔/拼音等）
 	Weight         int             // 权重（用于排序）
 	NaturalOrder   int             // 自然顺序（词库中同一编码下的原始位置，0-based）
-	Hint           string          // 提示信息（如反查时显示的编码）
+	Comment        string          // 注释/提示信息（如反查时显示的编码）
 	IsCommon       bool            // 是否为通用规范汉字
 	IsCommand      bool            // 是否为命令候选（uuid/date/time 等）
 	ConsumedLength int             // 该候选消耗的输入长度（拼音部分上屏用）
@@ -24,6 +24,8 @@ type Candidate struct {
 	PhraseTemplate string          // 动态短语的原始模板文本（如 "$Y-$MM-$DD"），用于定位 PhraseLayer 条目
 	IsGroup        bool            // 是否为组候选（选中后展开二级列表而非上屏）
 	GroupCode      string          // 组的完整编码（选中后替换 inputBuffer，如 "zzbd"）
+	Index          int             // 显示序号（UI 渲染用，1-9/0）
+	HasShadow      bool            // 是否存在 Shadow 层修改（UI 右键菜单"恢复默认"用）
 }
 
 // CandidateList 候选词列表

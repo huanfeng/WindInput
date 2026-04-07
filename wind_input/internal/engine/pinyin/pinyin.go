@@ -238,7 +238,7 @@ func (e *Engine) addCodeHints(candidates []candidate.Candidate) {
 	for i := range candidates {
 		codeHint := e.lookupCodeHint(candidates[i].Text)
 		if codeHint != "" {
-			candidates[i].Hint = codeHint
+			candidates[i].Comment = codeHint
 		}
 	}
 }
@@ -252,7 +252,7 @@ func (e *Engine) AddCodeHintsForced(candidates []candidate.Candidate) {
 	for i := range candidates {
 		codeHint := e.lookupCodeHint(candidates[i].Text)
 		if codeHint != "" {
-			candidates[i].Hint = codeHint
+			candidates[i].Comment = codeHint
 		}
 	}
 }

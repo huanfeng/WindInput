@@ -197,7 +197,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 				Text:      displayName,
 				Code:      code,
 				Weight:    positionToWeight(group.Position),
-				Hint:      code[len(prefix):], // 显示编码后缀（如 zz→zzbd 显示 "bd"）
+				Comment:   code[len(prefix):], // 显示编码后缀（如 zz→zzbd 显示 "bd"）
 				IsCommon:  true,
 				IsGroup:   true,
 				GroupCode: code,

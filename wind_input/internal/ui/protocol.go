@@ -1,21 +1,10 @@
 // Package ui provides native Windows UI for candidate window
 package ui
 
-// Candidate represents a candidate word
-type Candidate struct {
-	Text           string
-	Code           string // 编码（拼音/五笔），用于 Shadow 层操作
-	Index          int
-	Comment        string
-	Weight         int
-	IsCommand      bool
-	ConsumedLength int    // 该候选消耗的输入长度（拼音部分上屏用）
-	HasShadow      bool   // 是否存在 Shadow 层修改（用于右键菜单"恢复默认"）
-	Source         string // 候选来源（混输模式下区分 "codetable"/"pinyin"）
-	PhraseTemplate string // 动态短语的原始模板文本（如 "$Y-$MM-$DD"），用于位置调整
-	IsGroup        bool   // 是否为组候选（选中后展开二级列表而非上屏）
-	GroupCode      string // 组的完整编码（选中后替换 inputBuffer）
-}
+import "github.com/huanfeng/wind_input/internal/candidate"
+
+// Candidate 是 candidate.Candidate 的类型别名，消除重复定义
+type Candidate = candidate.Candidate
 
 // CandidateRect represents the bounding rectangle of a candidate item
 type CandidateRect struct {

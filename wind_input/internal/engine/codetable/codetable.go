@@ -180,7 +180,7 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 	// Phase 3: 处理前缀候选
 	for i := range prefixCandidates {
 		if e.config.ShowCodeHint && len(prefixCandidates[i].Code) > inputLen {
-			prefixCandidates[i].Hint = prefixCandidates[i].Code[inputLen:]
+			prefixCandidates[i].Comment = prefixCandidates[i].Code[inputLen:]
 		}
 		prefixCandidates[i].Weight -= PrefixWeightPenalty
 	}
@@ -261,7 +261,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	// 同层内保持原始 weight 排序。
 	for i := range prefixCandidates {
 		if e.config.ShowCodeHint && len(prefixCandidates[i].Code) > inputLen {
-			prefixCandidates[i].Hint = prefixCandidates[i].Code[inputLen:]
+			prefixCandidates[i].Comment = prefixCandidates[i].Code[inputLen:]
 		}
 		remaining := len(prefixCandidates[i].Code) - inputLen
 		prefixCandidates[i].Weight -= remaining * PrefixWeightPenaltyPerKey

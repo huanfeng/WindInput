@@ -117,7 +117,7 @@ func (m *Manager) ConvertWithPinyin(input string, maxCandidates int) *ConvertRes
 		for i := range pinyinResult.Candidates {
 			codes := reverseIndex[pinyinResult.Candidates[i].Text]
 			if len(codes) > 0 {
-				pinyinResult.Candidates[i].Hint = codes[0]
+				pinyinResult.Candidates[i].Comment = codes[0]
 			}
 		}
 	}

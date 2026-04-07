@@ -12,7 +12,6 @@ import (
 
 // Unified menu ID constants
 const (
-	UnifiedMenuToggleMode     = 100 // Deprecated: replaced by schema submenu
 	UnifiedMenuToggleWidth    = 101
 	UnifiedMenuTogglePunct    = 102
 	UnifiedMenuToggleToolbar  = 103

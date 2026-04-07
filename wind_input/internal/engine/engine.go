@@ -1,14 +1,18 @@
 package engine
 
-import "github.com/huanfeng/wind_input/internal/candidate"
+import (
+	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/schema"
+)
 
-// EngineType 引擎类型
-type EngineType string
+// EngineType 是 schema.EngineType 的类型别名，避免破坏现有代码
+type EngineType = schema.EngineType
 
+// 引擎类型常量（引用 schema 包的定义）
 const (
-	EngineTypePinyin    EngineType = "pinyin"    // 拼音
-	EngineTypeCodetable EngineType = "codetable" // 码表
-	EngineTypeMixed     EngineType = "mixed"     // 码表拼音混输
+	EngineTypePinyin    = schema.EngineTypePinyin
+	EngineTypeCodetable = schema.EngineTypeCodeTable
+	EngineTypeMixed     = schema.EngineTypeMixed
 )
 
 // Engine 输入引擎接口

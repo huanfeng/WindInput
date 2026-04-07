@@ -162,20 +162,6 @@ func (dm *DictManager) SwitchSchemaFull(schemaID, shadowFile, userDictFile, temp
 	dm.logger.Info("切换到方案", "schemaID", schemaID)
 }
 
-// SetActiveEngine 兼容旧代码的切换方法
-// Deprecated: 请使用 SwitchSchema
-func (dm *DictManager) SetActiveEngine(engineType string) {
-	// 映射旧引擎类型到方案 ID 和默认文件名
-	switch engineType {
-	case "pinyin":
-		dm.SwitchSchema("pinyin", "pinyin.shadow.yaml", "pinyin.userwords.txt")
-	case "wubi":
-		dm.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
-	default:
-		dm.logger.Warn("未知引擎类型", "engineType", engineType)
-	}
-}
-
 // RegisterSystemLayer 注册系统词库层
 func (dm *DictManager) RegisterSystemLayer(name string, layer DictLayer) {
 	dm.mu.Lock()

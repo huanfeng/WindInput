@@ -134,38 +134,19 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 	}
 
 	c.candidates = make([]ui.Candidate, len(result.Candidates))
-	for i, ec := range result.Candidates {
-		code := ec.Code
-		if code == "" {
-			code = c.inputBuffer
-		}
-		cand := ui.Candidate{
-			Text:           ec.Text,
-			Code:           ec.Code,
-			Index:          i + 1,
-			Weight:         ec.Weight,
-			IsCommand:      ec.IsCommand,
-			ConsumedLength: ec.ConsumedLength,
-			Source:         string(ec.Source),
-			PhraseTemplate: ec.PhraseTemplate,
-			IsGroup:        ec.IsGroup,
-			GroupCode:      ec.GroupCode,
-		}
+	for i, cand := range result.Candidates {
+		cand.Index = i + 1
 		// HasShadow 统一用 inputBuffer 查询（Shadow 规则按当前输入编码存储）
-		if ec.IsCommand && ec.PhraseTemplate != "" {
+		if cand.IsCommand && cand.PhraseTemplate != "" {
 			// 命令候选：检查 PhraseLayer 是否有用户覆盖
 			if c.engineMgr != nil {
 				phraseLayer := c.engineMgr.GetDictManager().GetPhraseLayer()
 				if phraseLayer != nil {
-					cand.HasShadow = phraseLayer.HasPhraseOverride(c.inputBuffer, ec.PhraseTemplate)
+					cand.HasShadow = phraseLayer.HasPhraseOverride(c.inputBuffer, cand.PhraseTemplate)
 				}
 			}
-		} else if shadowLayer != nil && !ec.IsCommand {
-			cand.HasShadow = shadowLayer.HasRule(c.inputBuffer, ec.Text)
-		}
-		// 如果有提示信息（如反查编码），添加到注释
-		if ec.Hint != "" {
-			cand.Comment = ec.Hint
+		} else if shadowLayer != nil && !cand.IsCommand {
+			cand.HasShadow = shadowLayer.HasRule(c.inputBuffer, cand.Text)
 		}
 		c.candidates[i] = cand
 	}
@@ -246,15 +227,9 @@ func (c *Coordinator) showUI() {
 
 	// Re-index for display (1-9, 0 for 10th)
 	displayCandidates := make([]ui.Candidate, len(pageCandidates))
-	for i, cand := range pageCandidates {
-		displayCandidates[i] = ui.Candidate{
-			Text:      cand.Text,
-			Code:      cand.Code,
-			Index:     (i + 1) % 10,
-			Comment:   cand.Comment,
-			Weight:    cand.Weight,
-			HasShadow: cand.HasShadow,
-		}
+	copy(displayCandidates, pageCandidates)
+	for i := range displayCandidates {
+		displayCandidates[i].Index = (i + 1) % 10
 	}
 
 	// Use caret position for candidate window placement

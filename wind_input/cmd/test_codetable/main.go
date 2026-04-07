@@ -133,8 +133,8 @@ func printCandidates(candidates []candidate.Candidate, max int) {
 	for i := 0; i < count; i++ {
 		c := sorted[i]
 		hint := ""
-		if c.Hint != "" {
-			hint = fmt.Sprintf(" [%s]", c.Hint)
+		if c.Comment != "" {
+			hint = fmt.Sprintf(" [%s]", c.Comment)
 		}
 		fmt.Printf("    %d. %s (词频:%d)%s\n", i+1, c.Text, c.Weight, hint)
 	}

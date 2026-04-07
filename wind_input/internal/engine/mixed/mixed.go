@@ -542,20 +542,20 @@ func (e *Engine) addCodeHintsFromCodetable(candidates []candidate.Candidate) {
 		}
 		codes := e.reverseIndex[candidates[i].Text]
 		if len(codes) > 0 {
-			candidates[i].Hint = codes[0]
+			candidates[i].Comment = codes[0]
 		}
 	}
 }
 
 // addSourceHints 为混输候选添加来源标记提示
-// 仅在拼音候选的 Hint 中添加 "[拼]" 前缀，帮助用户区分
+// 仅在拼音候选的 Comment 中添加 "拼" 前缀，帮助用户区分
 func addSourceHints(candidates []candidate.Candidate) {
 	for i := range candidates {
 		if candidates[i].Source == candidate.SourcePinyin {
-			if candidates[i].Hint == "" {
-				candidates[i].Hint = "拼"
+			if candidates[i].Comment == "" {
+				candidates[i].Comment = "拼"
 			} else {
-				candidates[i].Hint = "拼|" + candidates[i].Hint
+				candidates[i].Comment = "拼|" + candidates[i].Comment
 			}
 		}
 	}

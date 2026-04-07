@@ -321,7 +321,7 @@ func (m *Manager) GetCurrentType() EngineType {
 	defer m.mu.RUnlock()
 	if m.schemaManager != nil {
 		if s := m.schemaManager.GetSchema(m.currentID); s != nil {
-			return EngineType(s.Engine.Type)
+			return s.Engine.Type
 		}
 	}
 	return EngineType(m.currentID) // fallback
@@ -431,46 +431,6 @@ func (m *Manager) IsCurrentEngineType(engineType schema.EngineType) bool {
 		}
 	}
 	return false
-}
-
-// --- 兼容旧代码的方法 ---
-
-// RegisterEngine 注册引擎（兼容旧代码）
-// Deprecated: 使用 SwitchSchema
-func (m *Manager) RegisterEngine(engineType EngineType, engine Engine) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.engines[string(engineType)] = engine
-}
-
-// SetCurrentEngine 设置当前引擎（兼容旧代码）
-// Deprecated: 使用 SwitchSchema
-func (m *Manager) SetCurrentEngine(engineType EngineType) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	id := string(engineType)
-	engine, ok := m.engines[id]
-	if !ok {
-		return fmt.Errorf("引擎未注册: %s", engineType)
-	}
-
-	m.currentID = id
-	m.currentEngine = engine
-	return nil
-}
-
-// ToggleEngine 在方案之间切换（兼容旧代码）
-// Deprecated: 使用 ToggleSchema
-func (m *Manager) ToggleEngine() (EngineType, error) {
-	newID, err := m.ToggleSchema(nil)
-	return EngineType(newID), err
-}
-
-// SwitchEngine 切换引擎（兼容旧代码）
-// Deprecated: 使用 SwitchSchema
-func (m *Manager) SwitchEngine(targetType EngineType) error {
-	return m.SwitchSchema(string(targetType))
 }
 
 // isAbsPath 判断是否为绝对路径

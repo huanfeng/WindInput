@@ -186,7 +186,7 @@ func (m *Manager) GetEngineInfo() string {
 
 // OnCandidateSelected 选词回调（拼音 + 码表 + 混输统一路由）
 // source 为可选参数，混输模式下传入候选来源（"codetable"/"pinyin"）以路由到正确的子引擎
-func (m *Manager) OnCandidateSelected(code, text string, source ...string) {
+func (m *Manager) OnCandidateSelected(code, text string, source ...candidate.CandidateSource) {
 	engine := m.GetCurrentEngine()
 	if engine == nil {
 		return
@@ -195,7 +195,7 @@ func (m *Manager) OnCandidateSelected(code, text string, source ...string) {
 	if mixedEngine, ok := engine.(*mixed.Engine); ok {
 		src := candidate.SourceNone
 		if len(source) > 0 {
-			src = candidate.CandidateSource(source[0])
+			src = source[0]
 		}
 		mixedEngine.OnCandidateSelected(code, text, src)
 		return

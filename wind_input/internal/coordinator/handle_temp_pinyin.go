@@ -385,19 +385,12 @@ func (c *Coordinator) updateTempPinyinCandidates() {
 	maxCandidates := 100
 	result := c.engineMgr.ConvertWithPinyin(c.tempPinyinBuffer, maxCandidates)
 
-	// 转换为 ui.Candidate 列表
-	uiCandidates := make([]ui.Candidate, len(result.Candidates))
-	for i, cand := range result.Candidates {
-		uiCandidates[i] = ui.Candidate{
-			Text:           cand.Text,
-			Index:          i + 1,
-			Comment:        cand.Hint, // 五笔编码作为 Comment 显示
-			Weight:         cand.Weight,
-			ConsumedLength: cand.ConsumedLength,
-		}
+	// 设置显示序号
+	for i := range result.Candidates {
+		result.Candidates[i].Index = i + 1
 	}
 
-	c.candidates = uiCandidates
+	c.candidates = result.Candidates
 	c.preeditDisplay = result.PreeditDisplay
 
 	// 计算分页
@@ -521,13 +514,9 @@ func (c *Coordinator) showTempPinyinUI() {
 
 	// 重新编号显示（1-9, 0 for 10th）
 	displayCandidates := make([]ui.Candidate, len(pageCandidates))
-	for i, cand := range pageCandidates {
-		displayCandidates[i] = ui.Candidate{
-			Text:    cand.Text,
-			Index:   (i + 1) % 10,
-			Comment: cand.Comment,
-			Weight:  cand.Weight,
-		}
+	copy(displayCandidates, pageCandidates)
+	for i := range displayCandidates {
+		displayCandidates[i].Index = (i + 1) % 10
 	}
 
 	// 构建预编辑文本

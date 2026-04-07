@@ -141,21 +141,3 @@ func TestDictManager_SaveAndReload(t *testing.T) {
 	}
 }
 
-func TestDictManager_SetActiveEngine_Compat(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	dm := NewDictManager(tmpDir, tmpDir, nil)
-	dm.Initialize()
-	defer dm.Close()
-
-	// 兼容旧调用
-	dm.SetActiveEngine("wubi")
-	if dm.GetActiveSchemaID() != "wubi86" {
-		t.Errorf("SetActiveEngine('wubi') 应映射到 wubi86, 实际=%s", dm.GetActiveSchemaID())
-	}
-
-	dm.SetActiveEngine("pinyin")
-	if dm.GetActiveSchemaID() != "pinyin" {
-		t.Errorf("SetActiveEngine('pinyin') 应映射到 pinyin, 实际=%s", dm.GetActiveSchemaID())
-	}
-}
