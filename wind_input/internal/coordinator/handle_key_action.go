@@ -31,6 +31,11 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	if c.engineMgr != nil {
 		commitText, newInput, shouldCommit := c.engineMgr.HandleTopCode(c.inputBuffer)
 		if shouldCommit {
+			// 记录输入历史（用于z键重复上屏），需在修改 inputBuffer 之前记录
+			if c.inputHistory != nil {
+				commitCode := c.inputBuffer[:len(c.inputBuffer)-len(newInput)]
+				c.inputHistory.Record(commitText, commitCode, "", 0)
+			}
 			c.inputBuffer = newInput
 			c.inputCursorPos = len(newInput)
 			c.logger.Debug("Top code commit", "newInputLen", len(newInput))
@@ -68,6 +73,10 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	// 检查自动上屏
 	if result != nil && result.ShouldCommit {
 		text := result.CommitText
+		// 记录输入历史（用于z键重复上屏），需在 clearState 之前记录
+		if c.inputHistory != nil {
+			c.inputHistory.Record(result.CommitText, c.inputBuffer, "", 0)
+		}
 		// Apply full-width conversion if enabled
 		if c.fullWidth {
 			text = transform.ToFullWidth(text)
