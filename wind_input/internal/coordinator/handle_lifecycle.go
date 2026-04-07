@@ -22,8 +22,8 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	// 导致 rect.bottom 在不同时刻差异达 20px，但 rect.top 始终稳定（差异 ≤1px）。
 	if c.activeCompatRule != nil && c.activeCompatRule.CaretUseTop && data.Height > 0 {
 		rawH := data.Height
-		data.Y = data.Y - rawH            // bottom → top
-		data.Height = 1                    // 最小高度，确保候选框紧贴文字下方
+		data.Y = data.Y - rawH // bottom → top
+		data.Height = 1        // 最小高度，确保候选框紧贴文字下方
 		if data.CompositionStartY != 0 {
 			data.CompositionStartY = data.CompositionStartY - rawH
 		}
@@ -40,10 +40,6 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 		c.compositionStartY = data.CompositionStartY
 		c.compositionStartValid = true
 	}
-
-	c.logger.Debug("caret.diag update",
-		"x", c.caretX, "y", c.caretY, "h", c.caretHeight,
-		"csX", data.CompositionStartX, "csY", data.CompositionStartY)
 
 	// If there's active input, refresh the candidate window position.
 	// This handles the case where C++ re-sends caret update after composition

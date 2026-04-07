@@ -177,10 +177,8 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 				if c.pendingFirstShow && len(c.inputBuffer) > 0 && len(c.candidates) > 0 {
 					c.pendingFirstShow = false
 					c.updateCaretProfile(true)
-					c.logger.Debug("caret.diag first=timeout posA",
+					c.logger.Debug("caret.diag first=timeout",
 						"x", c.diagPreKeyCaretX, "y", c.diagPreKeyCaretY,
-						"posNow", [2]int{c.caretX, c.caretY},
-						"updates", c.diagCaretUpdateCount,
 						"pid", c.activeProcessID)
 					c.showUI()
 				}
