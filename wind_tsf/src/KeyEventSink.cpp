@@ -953,7 +953,7 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
 
 BOOL CKeyEventSink::_HandleServiceResponse()
 {
-    LARGE_INTEGER startTime, midTime, endTime, freq;
+    LARGE_INTEGER startTime, midTime, freq;
     QueryPerformanceCounter(&startTime);
     QueryPerformanceFrequency(&freq);
 
@@ -1021,7 +1021,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
 
     case ResponseType::CommitText:
         {
-            LARGE_INTEGER ctStart, ctMid1, ctMid2, ctEnd;
+            LARGE_INTEGER ctStart, ctMid1, ctEnd;
             QueryPerformanceCounter(&ctStart);
 
             WIND_LOG_DEBUG(L"Processing CommitText response\n");
@@ -1041,23 +1041,15 @@ BOOL CKeyEventSink::_HandleServiceResponse()
             }
             else
             {
-                // No new composition, just insert text normally
-                _pTextService->EndComposition();
+                // No new composition, commit text atomically (end composition + insert in one EditSession)
+                _pTextService->CommitText(response.text);
                 QueryPerformanceCounter(&ctMid1);
-
-                if (!response.text.empty())
-                {
-                    _pTextService->InsertText(response.text);
-                }
-                QueryPerformanceCounter(&ctMid2);
 
                 _isComposing = FALSE;
                 _hasCandidates = FALSE;
 
-                // Log detailed timing (use integer ms to avoid wsprintfW %f issue)
-                int endCompMs = (int)((ctMid1.QuadPart - ctStart.QuadPart) * 1000 / freq.QuadPart);
-                int insertMs = (int)((ctMid2.QuadPart - ctMid1.QuadPart) * 1000 / freq.QuadPart);
-                WIND_LOG_TRACE_FMT(L"CommitText: EndComposition=%dms, InsertText=%dms\n", endCompMs, insertMs);
+                int commitMs = (int)((ctMid1.QuadPart - ctStart.QuadPart) * 1000 / freq.QuadPart);
+                WIND_LOG_TRACE_FMT(L"CommitText: atomic commit=%dms\n", commitMs);
             }
 
             // Handle mode change if present
@@ -1367,21 +1359,17 @@ void CKeyEventSink::_HandleCommitResult(uint16_t barrierSeq, const std::wstring&
     // Clear pending state
     _pendingCommit.waiting = false;
 
-    // Commit the text
-    if (!text.empty())
-    {
-        _pTextService->InsertText(text);
-    }
-
-    // Handle new composition
+    // Commit the text and handle composition atomically
     if (!newComp.empty())
     {
-        _pTextService->UpdateComposition(newComp, (int)newComp.length());
+        // Has new composition: use InsertTextAndStartComposition (now handles end old composition internally)
+        _pTextService->InsertTextAndStartComposition(text, newComp);
         _isComposing = TRUE;
     }
     else
     {
-        _pTextService->EndComposition();
+        // No new composition: atomic commit (end composition + insert text)
+        _pTextService->CommitText(text);
         _isComposing = FALSE;
         _hasCandidates = FALSE;
     }

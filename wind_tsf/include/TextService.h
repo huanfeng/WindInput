@@ -22,6 +22,7 @@ class CTextService : public ITfTextInputProcessorEx,
 {
     friend class CUpdateCompositionEditSession;
     friend class CEndCompositionEditSession;
+    friend class CCommitTextEditSession;
     friend class CInsertAndComposeEditSession;
     friend class CInsertTextEditSession;
 public:
@@ -77,6 +78,9 @@ public:
 
     // Update composition text (Inline Composition)
     BOOL UpdateComposition(const std::wstring& text, int caretPos);
+
+    // Commit text atomically (end composition + insert text in one EditSession)
+    BOOL CommitText(const std::wstring& text);
 
     // End current composition
     void EndComposition();

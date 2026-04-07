@@ -93,6 +93,122 @@ private:
     ITfComposition* _pComposition;  // Owned composition pointer
 };
 
+// EditSession for committing text atomically (end composition + insert text in one session)
+// This prevents race conditions where async EndComposition clears text inserted by a subsequent InsertText.
+class CCommitTextEditSession : public ITfEditSession
+{
+public:
+    // pComposition ownership is transferred to this object (may be nullptr if no active composition)
+    CCommitTextEditSession(CTextService* pTextService, ITfContext* pContext,
+                           ITfComposition* pComposition, const std::wstring& text)
+        : _refCount(1), _pTextService(pTextService), _pContext(pContext),
+          _pComposition(pComposition), _text(text), _success(FALSE)
+    {
+        _pTextService->AddRef();
+        _pContext->AddRef();
+    }
+
+    ~CCommitTextEditSession()
+    {
+        _pTextService->Release();
+        _pContext->Release();
+        if (_pComposition != nullptr)
+        {
+            WIND_LOG_DEBUG(L"~CCommitTextEditSession: Releasing orphaned composition\n");
+            _pComposition->Release();
+            _pComposition = nullptr;
+        }
+    }
+
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj)
+    {
+        if (ppvObj == nullptr) return E_INVALIDARG;
+        *ppvObj = nullptr;
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfEditSession))
+        {
+            *ppvObj = (ITfEditSession*)this;
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&_refCount); }
+    STDMETHODIMP_(ULONG) Release()
+    {
+        LONG cr = InterlockedDecrement(&_refCount);
+        if (cr == 0) delete this;
+        return cr;
+    }
+
+    // ITfEditSession
+    STDMETHODIMP DoEditSession(TfEditCookie ec)
+    {
+        // Step 1: End composition if active
+        if (_pComposition != nullptr)
+        {
+            ITfRange* pRange = nullptr;
+            if (SUCCEEDED(_pComposition->GetRange(&pRange)))
+            {
+                pRange->SetText(ec, 0, L"", 0);
+                pRange->Release();
+            }
+            _pComposition->EndComposition(ec);
+            _pComposition->Release();
+            _pComposition = nullptr;
+            WIND_LOG_DEBUG(L"CCommitTextEditSession: Composition ended\n");
+        }
+
+        // Step 2: Insert text at current selection
+        if (!_text.empty())
+        {
+            ITfInsertAtSelection* pInsertAtSel = nullptr;
+            HRESULT hr = _pContext->QueryInterface(IID_ITfInsertAtSelection, (void**)&pInsertAtSel);
+            if (FAILED(hr) || pInsertAtSel == nullptr)
+            {
+                WIND_LOG_DEBUG(L"CCommitTextEditSession: Failed to get ITfInsertAtSelection\n");
+                return E_FAIL;
+            }
+
+            ITfRange* pRange = nullptr;
+            hr = pInsertAtSel->InsertTextAtSelection(ec, 0, _text.c_str(), (LONG)_text.length(), &pRange);
+            pInsertAtSel->Release();
+
+            if (FAILED(hr))
+            {
+                WIND_LOG_DEBUG_FMT(L"CCommitTextEditSession: InsertTextAtSelection failed hr=0x%08X\n", hr);
+                return hr;
+            }
+
+            if (pRange != nullptr)
+            {
+                pRange->Collapse(ec, TF_ANCHOR_END);
+                TF_SELECTION sel = {};
+                sel.range = pRange;
+                sel.style.ase = TF_AE_NONE;
+                sel.style.fInterimChar = FALSE;
+                _pContext->SetSelection(ec, 1, &sel);
+                pRange->Release();
+            }
+        }
+
+        _success = TRUE;
+        WIND_LOG_DEBUG(L"CCommitTextEditSession: Text committed successfully\n");
+        return S_OK;
+    }
+
+    BOOL GetSuccess() const { return _success; }
+
+private:
+    LONG _refCount;
+    CTextService* _pTextService;
+    ITfContext* _pContext;
+    ITfComposition* _pComposition;  // Owned composition pointer
+    std::wstring _text;
+    BOOL _success;
+};
+
 // EditSession for updating composition
 class CUpdateCompositionEditSession : public ITfEditSession
 {
@@ -333,10 +449,12 @@ private:
 class CInsertAndComposeEditSession : public ITfEditSession
 {
 public:
+    // pOldComposition ownership is transferred (may be nullptr)
     CInsertAndComposeEditSession(CTextService* pTextService, ITfContext* pContext,
+                                  ITfComposition* pOldComposition,
                                   const std::wstring& insertText, const std::wstring& newComposition)
         : _refCount(1), _pTextService(pTextService), _pContext(pContext),
-          _insertText(insertText), _newComposition(newComposition)
+          _pOldComposition(pOldComposition), _insertText(insertText), _newComposition(newComposition)
     {
         _pTextService->AddRef();
         _pContext->AddRef();
@@ -346,6 +464,12 @@ public:
     {
         _pTextService->Release();
         _pContext->Release();
+        if (_pOldComposition != nullptr)
+        {
+            WIND_LOG_DEBUG(L"~CInsertAndComposeEditSession: Releasing orphaned old composition\n");
+            _pOldComposition->Release();
+            _pOldComposition = nullptr;
+        }
     }
 
     // IUnknown
@@ -377,6 +501,21 @@ public:
 
         WIND_LOG_DEBUG_FMT(L"InsertAndCompose: insert='%s', newComp='%s'\n",
                      _insertText.c_str(), _newComposition.c_str());
+
+        // 0. End old composition if present (atomically in same EditSession)
+        if (_pOldComposition != nullptr)
+        {
+            ITfRange* pRange = nullptr;
+            if (SUCCEEDED(_pOldComposition->GetRange(&pRange)))
+            {
+                pRange->SetText(ec, 0, L"", 0);
+                pRange->Release();
+            }
+            _pOldComposition->EndComposition(ec);
+            _pOldComposition->Release();
+            _pOldComposition = nullptr;
+            WIND_LOG_DEBUG(L"InsertAndCompose: Old composition ended\n");
+        }
 
         // 1. Get current selection to insert text there
         TF_SELECTION tfSelection;
@@ -465,6 +604,8 @@ public:
     }
 
 private:
+    ITfComposition* _pOldComposition;  // Owned old composition pointer
+
     void _SetDisplayAttribute(TfEditCookie ec, ITfRange* pRange)
     {
         TfGuidAtom gaDisplayAttr = _pTextService->GetDisplayAttributeInputAtom();
@@ -2381,6 +2522,111 @@ BOOL CTextService::UpdateComposition(const std::wstring& text, int caretPos)
     return SUCCEEDED(hr);
 }
 
+// Commit text atomically: end composition + insert text in a single EditSession.
+// This avoids race conditions in browsers where async EndComposition could clear
+// text that was inserted by a subsequent synchronous InsertText.
+BOOL CTextService::CommitText(const std::wstring& text)
+{
+    LARGE_INTEGER startTime, endTime, freq;
+    QueryPerformanceCounter(&startTime);
+    QueryPerformanceFrequency(&freq);
+
+    // Clear composition text cache
+    _lastCompositionText.clear();
+    _lastCaretPos = -1;
+
+    // Transfer ownership of _pComposition to the EditSession
+    ITfComposition* pCompToEnd = _pComposition;
+    _pComposition = nullptr;
+
+    if (text.empty() && pCompToEnd == nullptr)
+    {
+        WIND_LOG_DEBUG(L"CommitText: Nothing to do (no text, no composition)\n");
+        return TRUE;
+    }
+
+    // Need a document manager to request edit session
+    ITfDocumentMgr* pDocMgr = nullptr;
+    if (_pThreadMgr == nullptr || FAILED(_pThreadMgr->GetFocus(&pDocMgr)) || pDocMgr == nullptr)
+    {
+        WIND_LOG_DEBUG(L"CommitText: Can't get DocMgr, falling back\n");
+        if (pCompToEnd != nullptr) pCompToEnd->Release();
+        goto fallback;
+    }
+
+    {
+        ITfContext* pContext = nullptr;
+        HRESULT hr = pDocMgr->GetTop(&pContext);
+        pDocMgr->Release();
+
+        if (FAILED(hr) || pContext == nullptr)
+        {
+            WIND_LOG_DEBUG(L"CommitText: Can't get Context, falling back\n");
+            if (pCompToEnd != nullptr) pCompToEnd->Release();
+            goto fallback;
+        }
+
+        CCommitTextEditSession* pEditSession = new CCommitTextEditSession(this, pContext, pCompToEnd, text);
+        // pCompToEnd ownership transferred to pEditSession
+
+        HRESULT hrSession;
+        hr = pContext->RequestEditSession(_tfClientId, pEditSession, TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
+
+        BOOL success = pEditSession->GetSuccess();
+        pEditSession->Release();
+        pContext->Release();
+
+        QueryPerformanceCounter(&endTime);
+        int durationMs = (int)((endTime.QuadPart - startTime.QuadPart) * 1000 / freq.QuadPart);
+
+        if (SUCCEEDED(hr) && SUCCEEDED(hrSession) && success)
+        {
+            WIND_LOG_DEBUG_FMT(L"CommitText: TSF atomic commit succeeded, duration=%dms\n", durationMs);
+            return TRUE;
+        }
+
+        WIND_LOG_DEBUG_FMT(L"CommitText: TSF method failed (hr=0x%08X, hrSession=0x%08X), falling back to SendInput, duration=%dms\n",
+                     hr, hrSession, durationMs);
+    }
+
+fallback:
+    // Fallback: Use SendInput (same as InsertText fallback path)
+    if (text.empty())
+    {
+        return TRUE;
+    }
+
+    WIND_LOG_DEBUG_FMT(L"CommitText: Using SendInput fallback for textLen=%zu\n", text.length());
+
+    std::vector<INPUT> inputs;
+    inputs.reserve(text.length() * 2);
+
+    for (wchar_t ch : text)
+    {
+        INPUT inputDown = {};
+        inputDown.type = INPUT_KEYBOARD;
+        inputDown.ki.wVk = 0;
+        inputDown.ki.wScan = ch;
+        inputDown.ki.dwFlags = KEYEVENTF_UNICODE;
+        inputs.push_back(inputDown);
+
+        INPUT inputUp = {};
+        inputUp.type = INPUT_KEYBOARD;
+        inputUp.ki.wVk = 0;
+        inputUp.ki.wScan = ch;
+        inputUp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        inputs.push_back(inputUp);
+    }
+
+    UINT sent = SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT));
+    if (sent != inputs.size())
+    {
+        WIND_LOG_WARN_FMT(L"CommitText: SendInput sent %u of %u inputs\n", sent, (UINT)inputs.size());
+    }
+
+    return TRUE;
+}
+
 // End composition
 // NOTE: This method is now ASYNC - it returns immediately without waiting for
 // the composition to actually end. The _pComposition pointer is cleared immediately
@@ -2461,17 +2707,20 @@ BOOL CTextService::InsertTextAndStartComposition(const std::wstring& insertText,
     WIND_LOG_DEBUG_FMT(L"InsertTextAndStartComposition: insert='%s', newComp='%s', _pComposition=%p\n",
                  insertText.c_str(), newComposition.c_str(), _pComposition);
 
-    // First, end any existing composition
-    if (_pComposition != nullptr)
-    {
-        EndComposition();
-    }
+    // Clear composition text cache
+    _lastCompositionText.clear();
+    _lastCaretPos = -1;
+
+    // Transfer ownership of old composition to EditSession (will be ended atomically inside DoEditSession)
+    ITfComposition* pOldComp = _pComposition;
+    _pComposition = nullptr;
 
     // Need a document manager
     ITfDocumentMgr* pDocMgr = nullptr;
     if (_pThreadMgr == nullptr || FAILED(_pThreadMgr->GetFocus(&pDocMgr)) || pDocMgr == nullptr)
     {
         WIND_LOG_ERROR(L"InsertTextAndStartComposition: Failed to get DocMgr\n");
+        if (pOldComp != nullptr) pOldComp->Release();
         return FALSE;
     }
 
@@ -2482,10 +2731,11 @@ BOOL CTextService::InsertTextAndStartComposition(const std::wstring& insertText,
     if (FAILED(hr) || pContext == nullptr)
     {
         WIND_LOG_ERROR(L"InsertTextAndStartComposition: Failed to get Context\n");
+        if (pOldComp != nullptr) pOldComp->Release();
         return FALSE;
     }
 
-    CInsertAndComposeEditSession* pEditSession = new CInsertAndComposeEditSession(this, pContext, insertText, newComposition);
+    CInsertAndComposeEditSession* pEditSession = new CInsertAndComposeEditSession(this, pContext, pOldComp, insertText, newComposition);
 
     HRESULT hrSession;
     // Use TF_ES_SYNC to ensure synchronous execution
