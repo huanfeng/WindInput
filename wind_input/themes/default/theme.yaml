@@ -4,6 +4,12 @@ meta:
   author: "清风输入法"
   order: 0
 
+style:
+  window_padding_x: 8
+  window_padding_y: 6
+  item_padding_left: 8
+  item_padding_right: 8
+
 light:
   candidate_window:
     background_color: "#FFFFFF"
