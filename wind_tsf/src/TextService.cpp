@@ -661,6 +661,8 @@ CTextService::CTextService()
     , _dwTextEditSinkCookie(TF_INVALID_COOKIE)
     , _pTextEditSinkContext(nullptr)
     , _cachedPrevChar(0)
+    , _dwOpenCloseSinkCookie(TF_INVALID_COOKIE)
+    , _bInCompartmentChange(FALSE)
 {
     ZeroMemory(&_cachedCaretRect, sizeof(_cachedCaretRect));
     ZeroMemory(&_cachedCompStartRect, sizeof(_cachedCompStartRect));
@@ -706,6 +708,10 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
     else if (IsEqualIID(riid, IID_ITfTextEditSink))
     {
         *ppvObj = (ITfTextEditSink*)this;
+    }
+    else if (IsEqualIID(riid, IID_ITfCompartmentEventSink))
+    {
+        *ppvObj = (ITfCompartmentEventSink*)this;
     }
 
     if (*ppvObj)
@@ -809,6 +815,17 @@ STDAPI CTextService::ActivateEx(ITfThreadMgr* pThreadMgr, TfClientId tfClientId,
         WIND_LOG_INFO(L"LangBarButton initialized\n");
     }
 
+    // Initialize compartment event sink for GUID_COMPARTMENT_KEYBOARD_OPENCLOSE
+    // This allows us to respond when the system toggles the IME open/close state (e.g., Ctrl+Space)
+    if (!_InitOpenCloseCompartment())
+    {
+        WIND_LOG_WARN(L"_InitOpenCloseCompartment failed (non-fatal)\n");
+    }
+    else
+    {
+        WIND_LOG_INFO(L"OpenCloseCompartment initialized\n");
+    }
+
     // Update caret position before notifying activation
     // This ensures status indicators appear at the correct position immediately
     SendCaretPositionUpdate();
@@ -842,6 +859,9 @@ STDAPI CTextService::Deactivate()
 
     // Release display attribute
     _UninitDisplayAttribute();
+
+    // Release compartment event sink
+    _UninitOpenCloseCompartment();
 
     // Release key event sink
     _UninitKeyEventSink();
@@ -1083,6 +1103,11 @@ void CTextService::_SyncStateFromResponse(const ServiceResponse& response)
 
     _bChineseMode = response.IsChineseMode();
 
+    // Sync compartment so system OPENCLOSE state matches our mode
+    // This is critical: without it, switching apps causes compartment desync
+    // (e.g., _bChineseMode=TRUE but compartment=FALSE → first Ctrl+Space has no effect)
+    _SetOpenCloseCompartment(_bChineseMode);
+
     // Sync full status to LangBarItemButton
     if (_pLangBarItemButton != nullptr)
     {
@@ -1185,6 +1210,183 @@ void CTextService::_EnsureHostRenderSetup(const ServiceResponse& response, BOOL 
     {
         WIND_LOG_WARN(L"Host render setup request failed, falling back to Go window\n");
     }
+}
+
+// ============================================================================
+// Compartment event sink for GUID_COMPARTMENT_KEYBOARD_OPENCLOSE
+// ============================================================================
+
+BOOL CTextService::_InitOpenCloseCompartment()
+{
+    if (_pThreadMgr == nullptr)
+        return FALSE;
+
+    ITfCompartmentMgr* pCompMgr = nullptr;
+    HRESULT hr = _pThreadMgr->QueryInterface(IID_ITfCompartmentMgr, (void**)&pCompMgr);
+    if (FAILED(hr) || pCompMgr == nullptr)
+    {
+        WIND_LOG_ERROR(L"Failed to get ITfCompartmentMgr from ThreadMgr\n");
+        return FALSE;
+    }
+
+    ITfCompartment* pCompartment = nullptr;
+    hr = pCompMgr->GetCompartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, &pCompartment);
+    pCompMgr->Release();
+
+    if (FAILED(hr) || pCompartment == nullptr)
+    {
+        WIND_LOG_ERROR(L"Failed to get GUID_COMPARTMENT_KEYBOARD_OPENCLOSE compartment\n");
+        return FALSE;
+    }
+
+    // Set initial state to open (Chinese mode)
+    VARIANT var;
+    var.vt = VT_I4;
+    var.lVal = TRUE;
+    pCompartment->SetValue(_tfClientId, &var);
+
+    // Advise for changes
+    ITfSource* pSource = nullptr;
+    hr = pCompartment->QueryInterface(IID_ITfSource, (void**)&pSource);
+    pCompartment->Release();
+
+    if (FAILED(hr) || pSource == nullptr)
+    {
+        WIND_LOG_ERROR(L"Failed to get ITfSource from compartment\n");
+        return FALSE;
+    }
+
+    hr = pSource->AdviseSink(IID_ITfCompartmentEventSink, (ITfCompartmentEventSink*)this, &_dwOpenCloseSinkCookie);
+    pSource->Release();
+
+    if (FAILED(hr))
+    {
+        WIND_LOG_ERROR(L"Failed to advise compartment event sink\n");
+        _dwOpenCloseSinkCookie = TF_INVALID_COOKIE;
+        return FALSE;
+    }
+
+    WIND_LOG_DEBUG(L"Compartment OPENCLOSE sink advised successfully\n");
+    return TRUE;
+}
+
+void CTextService::_UninitOpenCloseCompartment()
+{
+    if (_dwOpenCloseSinkCookie == TF_INVALID_COOKIE || _pThreadMgr == nullptr)
+        return;
+
+    ITfCompartmentMgr* pCompMgr = nullptr;
+    if (SUCCEEDED(_pThreadMgr->QueryInterface(IID_ITfCompartmentMgr, (void**)&pCompMgr)) && pCompMgr != nullptr)
+    {
+        ITfCompartment* pCompartment = nullptr;
+        if (SUCCEEDED(pCompMgr->GetCompartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, &pCompartment)) && pCompartment != nullptr)
+        {
+            ITfSource* pSource = nullptr;
+            if (SUCCEEDED(pCompartment->QueryInterface(IID_ITfSource, (void**)&pSource)) && pSource != nullptr)
+            {
+                pSource->UnadviseSink(_dwOpenCloseSinkCookie);
+                pSource->Release();
+            }
+            pCompartment->Release();
+        }
+        pCompMgr->Release();
+    }
+
+    _dwOpenCloseSinkCookie = TF_INVALID_COOKIE;
+    WIND_LOG_DEBUG(L"Compartment OPENCLOSE sink unadvised\n");
+}
+
+BOOL CTextService::_SetOpenCloseCompartment(BOOL bOpen)
+{
+    if (_pThreadMgr == nullptr)
+        return FALSE;
+
+    ITfCompartmentMgr* pCompMgr = nullptr;
+    HRESULT hr = _pThreadMgr->QueryInterface(IID_ITfCompartmentMgr, (void**)&pCompMgr);
+    if (FAILED(hr) || pCompMgr == nullptr)
+        return FALSE;
+
+    ITfCompartment* pCompartment = nullptr;
+    hr = pCompMgr->GetCompartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, &pCompartment);
+    pCompMgr->Release();
+
+    if (FAILED(hr) || pCompartment == nullptr)
+        return FALSE;
+
+    // Set guard to prevent re-entrant OnChange
+    _bInCompartmentChange = TRUE;
+
+    VARIANT var;
+    var.vt = VT_I4;
+    var.lVal = bOpen ? TRUE : FALSE;
+    hr = pCompartment->SetValue(_tfClientId, &var);
+    pCompartment->Release();
+
+    _bInCompartmentChange = FALSE;
+
+    return SUCCEEDED(hr);
+}
+
+STDAPI CTextService::OnChange(REFGUID rguid)
+{
+    if (!IsEqualGUID(rguid, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE))
+        return S_OK;
+
+    // Avoid re-entrant handling when we set the compartment ourselves
+    if (_bInCompartmentChange)
+        return S_OK;
+
+    if (_pThreadMgr == nullptr)
+        return S_OK;
+
+    // Read current compartment value
+    ITfCompartmentMgr* pCompMgr = nullptr;
+    HRESULT hr = _pThreadMgr->QueryInterface(IID_ITfCompartmentMgr, (void**)&pCompMgr);
+    if (FAILED(hr) || pCompMgr == nullptr)
+        return S_OK;
+
+    ITfCompartment* pCompartment = nullptr;
+    hr = pCompMgr->GetCompartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, &pCompartment);
+    pCompMgr->Release();
+
+    if (FAILED(hr) || pCompartment == nullptr)
+        return S_OK;
+
+    VARIANT var;
+    VariantInit(&var);
+    hr = pCompartment->GetValue(&var);
+    pCompartment->Release();
+
+    if (FAILED(hr) || var.vt != VT_I4)
+        return S_OK;
+
+    BOOL bOpen = (var.lVal != 0);
+    WIND_LOG_INFO_FMT(L"Compartment OPENCLOSE changed: %d (current mode: %s)\n",
+        bOpen, _bChineseMode ? L"Chinese" : L"English");
+
+    // Only act if state actually differs from current mode
+    if ((bOpen && _bChineseMode) || (!bOpen && !_bChineseMode))
+        return S_OK;
+
+    // End any active composition when switching to English
+    if (!bOpen)
+        EndComposition();
+
+    // Update local state
+    _bChineseMode = bOpen;
+
+    // Update language bar
+    if (_pLangBarItemButton != nullptr)
+        _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
+
+    // Notify Go service (async, fire-and-forget)
+    if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
+    {
+        _pIPCClient->SendModeNotify(bOpen ? true : false, true /* clearInput */);
+    }
+
+    WIND_LOG_INFO_FMT(L"Mode switched via system compartment to %s\n", _bChineseMode ? L"Chinese" : L"English");
+    return S_OK;
 }
 
 void CTextService::_DoFullStateSync()
@@ -2080,6 +2282,9 @@ void CTextService::ToggleInputMode()
 
     WIND_LOG_INFO_FMT(L"Switched to %s mode\n", _bChineseMode ? L"Chinese" : L"English");
 
+    // Sync compartment state so system knows our open/close status
+    _SetOpenCloseCompartment(_bChineseMode);
+
     // Update language bar button
     if (_pLangBarItemButton != nullptr)
     {
@@ -2093,6 +2298,9 @@ void CTextService::SetInputMode(BOOL bChineseMode)
     _bChineseMode = bChineseMode;
 
     WIND_LOG_INFO_FMT(L"Mode set to %s (from service)\n", _bChineseMode ? L"Chinese" : L"English");
+
+    // Sync compartment state so system knows our open/close status
+    _SetOpenCloseCompartment(_bChineseMode);
 
     // Update language bar button
     if (_pLangBarItemButton != nullptr)
@@ -2241,6 +2449,9 @@ void CTextService::SendShowContextMenu(int screenX, int screenY)
 void CTextService::UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock, const wchar_t* iconLabel)
 {
     _bChineseMode = bChineseMode;
+
+    // Sync compartment state so system knows our open/close status
+    _SetOpenCloseCompartment(_bChineseMode);
 
     if (_pLangBarItemButton != nullptr)
     {

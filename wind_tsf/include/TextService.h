@@ -18,7 +18,8 @@ class CTextService : public ITfTextInputProcessorEx,
                      public ITfCompositionSink,
                      public ITfDisplayAttributeProvider,
                      public ITfTextLayoutSink,
-                     public ITfTextEditSink
+                     public ITfTextEditSink,
+                     public ITfCompartmentEventSink
 {
     friend class CUpdateCompositionEditSession;
     friend class CEndCompositionEditSession;
@@ -60,6 +61,9 @@ public:
 
     // ITfTextEditSink
     STDMETHODIMP OnEndEdit(ITfContext* pContext, TfEditCookie ecReadOnly, ITfEditRecord* pEditRecord);
+
+    // ITfCompartmentEventSink
+    STDMETHODIMP OnChange(REFGUID rguid);
 
     // Get thread manager
     ITfThreadMgr* GetThreadMgr() { return _pThreadMgr; }
@@ -183,6 +187,14 @@ private:
 
     // Cached character before caret (updated by OnEndEdit, consumed by KeyEventSink)
     WCHAR _cachedPrevChar;
+
+    // Compartment event sink (GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)
+    DWORD _dwOpenCloseSinkCookie;
+    BOOL _bInCompartmentChange;  // Guard against re-entrant OnChange
+
+    BOOL _InitOpenCloseCompartment();
+    void _UninitOpenCloseCompartment();
+    BOOL _SetOpenCloseCompartment(BOOL bOpen);
 
     BOOL _InitThreadMgrEventSink();
     void _UninitThreadMgrEventSink();
