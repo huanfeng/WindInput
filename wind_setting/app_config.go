@@ -50,6 +50,11 @@ func (a *App) CheckConfigModified() (bool, error) {
 	return a.configEditor.HasChanged()
 }
 
+// GetDefaultConfig 获取系统默认配置（代码默认值 + data/config.yaml 合并结果）
+func (a *App) GetDefaultConfig() (*config.Config, error) {
+	return config.SystemDefaultConfig(), nil
+}
+
 // ReloadConfig 重新加载配置（丢弃本地修改）
 func (a *App) ReloadConfig() error {
 	if a.configEditor == nil {

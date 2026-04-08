@@ -169,7 +169,7 @@ func DefaultConfig() *Config {
 			PinCandidate:    "ctrl+number",
 			ToggleToolbar:   "none",
 			OpenSettings:    "none",
-			AddWord:         "ctrl+shift+equal",
+			AddWord:         "ctrl+equal",
 		},
 		UI: UIConfig{
 			FontSize:                18,
@@ -343,6 +343,24 @@ func SaveTo(config *Config, path string) error {
 	}
 
 	return nil
+}
+
+// SystemDefaultConfig returns the system default configuration
+// by merging code defaults (Layer 1) with bundled data/config.yaml (Layer 2).
+// This is the "factory default" that excludes user customizations.
+func SystemDefaultConfig() *Config {
+	cfg := DefaultConfig()
+
+	if sysPath, err := GetSystemConfigPath(); err == nil {
+		if sysData, err := os.ReadFile(sysPath); err == nil {
+			if err := yaml.Unmarshal(sysData, cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "[config] warning: failed to parse system config %s: %v\n", sysPath, err)
+			}
+		}
+	}
+
+	applyConfigFallbacks(cfg)
+	return cfg
 }
 
 // SaveDefault saves the default configuration to file

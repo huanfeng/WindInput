@@ -382,12 +382,13 @@
 
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
-import type { Config } from "../api/settings";
+import type { Config, HotkeyConfig } from "../api/settings";
 import { getDefaultConfig } from "../api/settings";
 
 const props = defineProps<{
   formData: Config;
   hotkeyConflicts: string[];
+  systemDefaults?: Config;
 }>();
 
 const emit = defineEmits<{
@@ -404,8 +405,10 @@ const genericHotkeyItems = [
   { field: "open_settings", label: "打开设置", hint: "打开设置窗口" },
 ];
 
-// 默认值缓存
-const defaults = getDefaultConfig().hotkeys;
+// 默认值缓存（优先使用系统默认配置）
+const defaults = computed<HotkeyConfig>(
+  () => props.systemDefaults?.hotkeys || getDefaultConfig().hotkeys,
+);
 
 // 按键录入器状态
 const recordingField = ref<string | null>(null);
@@ -435,7 +438,7 @@ function getRecorderDisplay(field: string): string {
 
 function hasNonDefaultValue(field: string): boolean {
   const current = getHotkeyValue(field);
-  const def = (defaults as any)[field] || "none";
+  const def = (defaults.value as any)[field] || "none";
   return current !== def;
 }
 
@@ -551,7 +554,7 @@ function clearHotkey(field: string) {
 }
 
 function restoreDefault(field: string) {
-  (props.formData.hotkeys as any)[field] = (defaults as any)[field] || "none";
+  (props.formData.hotkeys as any)[field] = (defaults.value as any)[field] || "none";
   recordingField.value = null;
 }
 

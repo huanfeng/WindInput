@@ -55,6 +55,9 @@ const engines = ref<EngineInfo[]>([]);
 const formData = ref<Config>(getDefaultConfig());
 const tsfLogConfig = ref<TSFLogConfig>(getDefaultTSFLogConfig());
 
+// 系统默认配置缓存（代码默认值 + data/config.yaml 合并结果）
+const systemDefaults = ref<Config>(getDefaultConfig());
+
 // 主题相关状态
 const availableThemes = ref<ThemeInfo[]>([]);
 const themePreview = ref<ThemePreview | null>(null);
@@ -100,6 +103,16 @@ async function loadDataFromWails() {
   connected.value = true;
 
   try {
+    // 加载系统默认配置（代码默认值 + data/config.yaml）
+    try {
+      const sysDefaults = await wailsApi.fetchSystemDefaultConfig();
+      if (sysDefaults) {
+        systemDefaults.value = mergeWithDefaults(sysDefaults);
+      }
+    } catch (e) {
+      console.warn("加载系统默认配置失败，使用硬编码默认值", e);
+    }
+
     const cfg = await wailsApi.getConfig();
     if (cfg) {
       const mergedCfg = mergeWithDefaults(cfg);
@@ -334,9 +347,9 @@ async function refreshStatus() {
   }
 }
 
-// 重置为当前页面默认
+// 重置为当前页面默认（使用系统默认配置：代码默认值 + data/config.yaml）
 async function resetCurrentPageDefaults() {
-  const defaults = getDefaultConfig();
+  const defaults = systemDefaults.value;
   let changed = true;
 
   switch (activeTab.value) {
@@ -591,6 +604,7 @@ onMounted(async () => {
           v-show="activeTab === 'hotkey'"
           :formData="formData"
           :hotkeyConflicts="hotkeyConflicts"
+          :systemDefaults="systemDefaults"
           @update:hotkeyConflicts="hotkeyConflicts = $event"
         />
 

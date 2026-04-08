@@ -492,7 +492,19 @@ export async function getVersion(): Promise<string> {
   return App.GetVersion();
 }
 
-// 默认配置
+// 默认配置（从后端获取系统默认值：代码默认 + data/config.yaml 合并）
+// Go Config 不含 dictionary/engine（由方案单独管理），前端用硬编码默认值补齐
+export async function fetchSystemDefaultConfig(): Promise<Config> {
+  const goDefaults = (await App.GetDefaultConfig()) as unknown as Partial<Config>;
+  const httpDefaults = getHTTPDefaultConfig();
+  return {
+    ...httpDefaults,
+    ...goDefaults,
+    input: { ...httpDefaults.input, ...goDefaults.input },
+  };
+}
+
+// 硬编码默认配置（仅用于初始化，后续应使用 fetchSystemDefaultConfig）
 export function getDefaultConfig(): Config {
   return getHTTPDefaultConfig();
 }
