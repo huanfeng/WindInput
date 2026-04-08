@@ -183,6 +183,9 @@ public:
     // Callback type for clear composition from Go (mode toggle via menu)
     using ClearCompositionCallback = std::function<void()>;
 
+    // Callback type for config sync from Go (generic key/value push)
+    using SyncConfigCallback = std::function<void(const std::string& key, const std::vector<uint8_t>& value)>;
+
     // Set callback for receiving state push from Go
     void SetStatePushCallback(StatePushCallback callback);
 
@@ -191,6 +194,9 @@ public:
 
     // Set callback for receiving clear composition from Go (mode toggle via menu)
     void SetClearCompositionCallback(ClearCompositionCallback callback);
+
+    // Set callback for receiving config sync from Go (generic key/value push)
+    void SetSyncConfigCallback(SyncConfigCallback callback);
 
     // Start async reader thread (call after successful connection)
     BOOL StartAsyncReader();
@@ -280,6 +286,7 @@ private:
     StatePushCallback _statePushCallback;
     CommitTextCallback _commitTextCallback;
     ClearCompositionCallback _clearCompositionCallback;
+    SyncConfigCallback _syncConfigCallback;
     CRITICAL_SECTION _asyncLock;         // Lock for thread-safe access
     volatile BOOL _asyncReaderRunning = FALSE;
 

@@ -99,11 +99,11 @@
           </label>
         </div>
       </div>
-      <div class="setting-item item-disabled">
+      <div class="setting-item">
         <div class="setting-info">
           <label>英文标点自动配对</label>
           <p class="setting-hint">
-            英文模式下自动配对括号（开发中）
+            英文模式或英文标点下自动配对括号
           </p>
         </div>
         <div class="setting-control">
@@ -111,7 +111,6 @@
             <input
               type="checkbox"
               v-model="formData.input.auto_pair.english"
-              disabled
             />
             <span class="slider"></span>
           </label>

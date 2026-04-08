@@ -4,6 +4,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"golang.org/x/sys/windows"
 )
 
@@ -313,6 +314,50 @@ func (s *Server) PushClearCompositionToActiveClient() {
 	}
 
 	s.logger.Debug("Clear composition push completed to active client", "processID", activeProcessID)
+}
+
+// PushEnglishPairConfigToAllClients pushes English auto-pair config to all TSF clients
+func (s *Server) PushEnglishPairConfigToAllClients(enabled bool, pairs [][]string) {
+	value := ipc.EncodeEnglishPairsValue(enabled, pairs)
+	encoded := s.codec.EncodeSyncConfig(ipc.ConfigKeyEnglishPairs, value)
+
+	s.pushMu.RLock()
+	type clientInfo struct {
+		handle windows.Handle
+		writer *pipeWriter
+	}
+	clients := make([]clientInfo, 0, len(s.pushClients))
+	for h, w := range s.pushClients {
+		clients = append(clients, clientInfo{handle: h, writer: w})
+	}
+	s.pushMu.RUnlock()
+
+	if len(clients) == 0 {
+		s.logger.Debug("No push pipe clients to send English pair config to")
+		return
+	}
+
+	var failedHandles []windows.Handle
+	for _, client := range clients {
+		if err := s.codec.WriteMessage(client.writer, encoded); err != nil {
+			s.logger.Debug("Failed to push English pair config", "error", err)
+			failedHandles = append(failedHandles, client.handle)
+		}
+	}
+
+	if len(failedHandles) > 0 {
+		s.pushMu.Lock()
+		for _, h := range failedHandles {
+			pid := s.pushHandleToPID[h]
+			delete(s.pushClients, h)
+			delete(s.pushHandleToPID, h)
+			if pid != 0 {
+				delete(s.pushClientsByPID, pid)
+			}
+			windows.CloseHandle(h)
+		}
+		s.pushMu.Unlock()
+	}
 }
 
 // GetActiveClientCount returns the number of active TSF clients

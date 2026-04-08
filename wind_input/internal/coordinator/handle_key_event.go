@@ -237,6 +237,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		if c.pairTracker != nil {
 			c.pairTracker.Clear()
 		}
+		if c.pairTrackerEn != nil {
+			c.pairTrackerEn.Clear()
+		}
 		text := numpadChar
 		if c.fullWidth {
 			text = transform.ToFullWidth(text)
@@ -352,6 +355,13 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 			c.pairTracker.Clear()
 		}
 	}
+	if c.pairTrackerEn != nil {
+		switch vk {
+		case ipc.VK_LEFT, ipc.VK_RIGHT, ipc.VK_UP, ipc.VK_DOWN,
+			ipc.VK_HOME, ipc.VK_END, ipc.VK_RETURN, ipc.VK_ESCAPE:
+			c.pairTrackerEn.Clear()
+		}
+	}
 
 	switch {
 	case c.isHighlightUpKey(vk, uint32(data.Modifiers)):
@@ -426,6 +436,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 			if c.pairTracker != nil {
 				c.pairTracker.Clear()
 			}
+			if c.pairTrackerEn != nil {
+				c.pairTrackerEn.Clear()
+			}
 			c.lastOutputWasDigit = true
 		}
 		return result
@@ -435,6 +448,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		if result == nil {
 			if c.pairTracker != nil {
 				c.pairTracker.Clear()
+			}
+			if c.pairTrackerEn != nil {
+				c.pairTrackerEn.Clear()
 			}
 			c.lastOutputWasDigit = true
 		}

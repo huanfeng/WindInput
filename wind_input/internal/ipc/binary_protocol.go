@@ -37,6 +37,7 @@ const (
 	CmdStatusUpdate         uint16 = 0x0202 // Full status update
 	CmdStatePush            uint16 = 0x0206 // State push (broadcast to all clients)
 	CmdSyncHotkeys          uint16 = 0x0301 // Sync hotkey whitelist
+	CmdSyncConfig           uint16 = 0x0303 // Sync config key/value (generic)
 	CmdCommitTextWithCursor uint16 = 0x0106 // Commit text with cursor offset
 	CmdMoveCursor           uint16 = 0x0107 // Move cursor (skip over)
 	CmdDeletePair           uint16 = 0x0108 // Delete pair (smart backspace)
@@ -44,6 +45,9 @@ const (
 	CmdHostRenderSetup      uint16 = 0x0501 // Host render setup (shared memory + event names)
 	CmdBatchResponse        uint16 = 0x0F02 // Batch response container
 )
+
+// Config sync keys (used with CmdSyncConfig)
+const ConfigKeyEnglishPairs = "en_pairs"
 
 // Host render commands (C++ -> Go)
 const (

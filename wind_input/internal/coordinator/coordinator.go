@@ -179,7 +179,8 @@ type Coordinator struct {
 
 	// Auto-pair tracker for bracket pairing (push on insert, pop on skip/delete)
 	pairTracker    *transform.PairTracker
-	pairInsertTime time.Time // 最近一次自动配对插入的时间，用于抑制 SelectionChanged 清栈
+	pairTrackerEn  *transform.PairTracker // 英文配对追踪器
+	pairInsertTime time.Time              // 最近一次自动配对插入的时间，用于抑制 SelectionChanged 清栈
 
 	// Hotkey compiler for binary protocol
 	hotkeyCompiler *hotkey.Compiler
@@ -208,6 +209,7 @@ type BridgeServer interface {
 	PushStateToAllClients(status *bridge.StatusUpdateData)
 	PushCommitTextToActiveClient(text string) // Only send to active client for security
 	PushClearCompositionToActiveClient()      // Clear inline composition on active client
+	PushEnglishPairConfigToAllClients(enabled bool, pairs [][]string)
 	RestartService()
 	// GetActiveHostRender returns write/hide functions if the active process has host rendering.
 	// Returns nil functions if host rendering is not active for the current process.
@@ -397,6 +399,7 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		},
 		punctConverter: transform.NewPunctuationConverter(),
 		pairTracker:    transform.NewPairTracker(cfg.Input.AutoPair.ChinesePairs),
+		pairTrackerEn:  transform.NewPairTracker(cfg.Input.AutoPair.EnglishPairs),
 		hotkeyCompiler: hotkey.NewCompiler(cfg),
 		hotkeysDirty:   true, // 首次使用时需要编译
 		inputHistory:   NewInputHistory(20),
@@ -584,6 +587,9 @@ func (c *Coordinator) clearState() {
 	// 清空配对栈（输入状态重置意味着光标位置不再可预测）
 	if c.pairTracker != nil {
 		c.pairTracker.Clear()
+	}
+	if c.pairTrackerEn != nil {
+		c.pairTrackerEn.Clear()
 	}
 
 	// 清除命令结果缓存，确保 uuid/date/time 等下次生成新值

@@ -165,12 +165,12 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 			commitText := prefix + text
 
 			// punct_commit 后的标点也支持自动配对
-			if c.shouldAutoPair() {
+			if tracker := c.getAutoPairTracker(); tracker != nil {
 				punctRunes := []rune(punctText)
 				if len(punctRunes) == 1 {
-					if right, ok := c.pairTracker.GetRight(punctRunes[0]); ok {
+					if right, ok := tracker.GetRight(punctRunes[0]); ok {
 						pairPunctText := punctText + string(right)
-						c.pairTracker.Push(punctRunes[0], right)
+						tracker.Push(punctRunes[0], right)
 						c.pairInsertTime = time.Now()
 						c.logger.Debug("Auto-pair: insert pair after punct_commit", "text", pairPunctText)
 						return &bridge.KeyEventResult{
@@ -215,26 +215,26 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 	}
 
 	// 自动配对：检查转换后的标点是否需要配对
-	if c.shouldAutoPair() {
+	if tracker := c.getAutoPairTracker(); tracker != nil {
 		punctRunes := []rune(punctText)
 		if len(punctRunes) == 1 {
 			// 智能跳过：输入右标点时，如果栈顶匹配则跳过
-			if c.pairTracker.IsRight(punctRunes[0]) {
-				if entry, ok := c.pairTracker.Peek(); ok && entry.Right == punctRunes[0] {
-					c.pairTracker.Pop()
+			if tracker.IsRight(punctRunes[0]) {
+				if entry, ok := tracker.Peek(); ok && entry.Right == punctRunes[0] {
+					tracker.Pop()
 					c.logger.Debug("Auto-pair: smart skip", "char", punctText)
 					return &bridge.KeyEventResult{
 						Type: bridge.ResponseTypeMoveCursorRight,
 					}
 				}
 				// 栈顶不匹配，清空栈
-				c.pairTracker.Clear()
+				tracker.Clear()
 			}
 
 			// 自动配对：输入左标点时，插入配对并回退光标
-			if right, ok := c.pairTracker.GetRight(punctRunes[0]); ok {
+			if right, ok := tracker.GetRight(punctRunes[0]); ok {
 				pairText := punctText + string(right)
-				c.pairTracker.Push(punctRunes[0], right)
+				tracker.Push(punctRunes[0], right)
 				c.pairInsertTime = time.Now()
 				c.logger.Debug("Auto-pair: insert pair", "text", pairText)
 				return &bridge.KeyEventResult{
@@ -269,26 +269,29 @@ func (c *Coordinator) shouldSmartPunct(r rune, afterDigit bool, prevChar rune) b
 	return afterDigit
 }
 
-// shouldAutoPair 判断当前是否应启用自动配对
-func (c *Coordinator) shouldAutoPair() bool {
-	if c.config == nil || !c.config.Input.AutoPair.Chinese {
-		return false
-	}
-	if !c.chineseMode || !c.chinesePunctuation {
-		return false
-	}
-	if c.pairTracker == nil {
-		return false
+// getAutoPairTracker 返回当前应使用的配对追踪器，nil 表示不启用配对
+func (c *Coordinator) getAutoPairTracker() *transform.PairTracker {
+	if c.config == nil {
+		return nil
 	}
 	// 检查应用黑名单
 	if len(c.config.Input.AutoPair.Blacklist) > 0 && c.activeProcessName != "" {
 		for _, proc := range c.config.Input.AutoPair.Blacklist {
 			if strings.EqualFold(proc, c.activeProcessName) {
-				return false
+				return nil
 			}
 		}
 	}
-	return true
+	if !c.chineseMode {
+		return nil // 英文模式由 C++ 处理
+	}
+	if c.chinesePunctuation && c.config.Input.AutoPair.Chinese {
+		return c.pairTracker
+	}
+	if !c.chinesePunctuation && c.config.Input.AutoPair.English {
+		return c.pairTrackerEn
+	}
+	return nil
 }
 
 // applyToggleFullWidth 执行全角切换的核心逻辑（需持锁调用）

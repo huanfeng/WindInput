@@ -51,6 +51,32 @@ namespace
             decision ? decision : L"-"
         );
     }
+
+    // Map VK code + shift state to the actual character for English auto-pair
+    wchar_t _MapVkToEnglishPairChar(WPARAM vk, bool hasShift)
+    {
+        if (hasShift)
+        {
+            switch (vk)
+            {
+            case '9':          return L'(';
+            case '0':          return L')';
+            case VK_OEM_4:     return L'{';  // [ key + Shift = {
+            case VK_OEM_6:     return L'}';  // ] key + Shift = }
+            case VK_OEM_COMMA: return L'<';  // , key + Shift = <
+            case VK_OEM_PERIOD:return L'>';  // . key + Shift = >
+            }
+        }
+        else
+        {
+            switch (vk)
+            {
+            case VK_OEM_4:     return L'[';
+            case VK_OEM_6:     return L']';
+            }
+        }
+        return 0;
+    }
 }
 
 CKeyEventSink::CKeyEventSink(CTextService* pTextService)
@@ -258,6 +284,27 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     // (Go sends UpdateComposition with empty text, _hasCandidates is TRUE but HasActiveComposition is FALSE)
     BOOL hasInputSession = hasComposition || _hasCandidates;
 
+    // English auto-pair: intercept bracket keys in English mode
+    if (!isChineseMode && _englishPairEngine.IsEnabled())
+    {
+        bool hasShift = (modifiers & KEYMOD_SHIFT) != 0;
+        wchar_t pairChar = _MapVkToEnglishPairChar(wParam, hasShift);
+        if (pairChar != 0 && (_englishPairEngine.IsLeft(pairChar) || _englishPairEngine.IsRight(pairChar)))
+        {
+            *pfEaten = TRUE;
+            _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::None,
+                            isChineseMode, hasComposition, _hasCandidates, hasInputSession, TRUE, L"english_autopair");
+            return S_OK;
+        }
+    }
+
+    // Clear English pair stack when non-pair key is pressed in English mode
+    if (!isChineseMode && !_englishPairEngine.IsEmpty())
+    {
+        // If we reach here, the key was NOT a pair key (would have returned above)
+        _englishPairEngine.Clear();
+    }
+
     if (hasInputSession || isChineseMode)
     {
         // Ctrl/Alt combos during active input session: intercept so OnKeyDown can
@@ -381,6 +428,63 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 
     // Check barrier timeout
     _CheckBarrierTimeout();
+
+    // English auto-pair handling (before toggle key detection and Go IPC)
+    if (!_pTextService->IsChineseMode() && _englishPairEngine.IsEnabled())
+    {
+        uint32_t mods = CHotkeyManager::GetCurrentModifiers();
+        bool hasShift = (mods & KEYMOD_SHIFT) != 0;
+        wchar_t pairChar = _MapVkToEnglishPairChar(wParam, hasShift);
+
+        if (pairChar != 0)
+        {
+            // Smart skip: right bracket matches stack top
+            if (_englishPairEngine.IsRight(pairChar))
+            {
+                PairEngine::Entry entry;
+                if (_englishPairEngine.Peek(entry) && entry.right == pairChar)
+                {
+                    _englishPairEngine.Pop(entry);
+                    WIND_LOG_DEBUG_FMT(L"English auto-pair: smart skip '%c'\n", pairChar);
+                    _SimulatePairKey(VK_RIGHT);
+                    *pfEaten = TRUE;
+                    return S_OK;
+                }
+                // Stack doesn't match — clear and let the char through
+                _englishPairEngine.Clear();
+                // Fall through to insert the right bracket normally
+            }
+
+            // Auto-pair: left bracket
+            if (_englishPairEngine.IsLeft(pairChar))
+            {
+                wchar_t rightChar = _englishPairEngine.GetRight(pairChar);
+                if (rightChar != 0)
+                {
+                    std::wstring pairText;
+                    pairText += pairChar;
+                    pairText += rightChar;
+
+                    WIND_LOG_DEBUG_FMT(L"English auto-pair: insert pair '%c%c'\n", pairChar, rightChar);
+                    _pTextService->CommitText(pairText);
+                    _SimulatePairKey(VK_LEFT);
+                    _englishPairEngine.Push(pairChar, rightChar);
+
+                    *pfEaten = TRUE;
+                    return S_OK;
+                }
+            }
+
+            // Right bracket with no stack match: insert the character normally
+            if (_englishPairEngine.IsRight(pairChar))
+            {
+                std::wstring ch(1, pairChar);
+                _pTextService->InsertText(ch);
+                *pfEaten = TRUE;
+                return S_OK;
+            }
+        }
+    }
 
     uint32_t modifiers = CHotkeyManager::GetCurrentModifiers();
     uint32_t keyHash = CHotkeyManager::CalcKeyHash(modifiers, (uint32_t)wParam);
@@ -1389,6 +1493,33 @@ void CKeyEventSink::_SyncStateFromResponse(uint32_t statusFlags)
     // Sync mode from Go response
     bool chineseMode = (statusFlags & STATUS_CHINESE_MODE) != 0;
     _pTextService->SetInputMode(chineseMode);
+}
+
+// ============================================================================
+// Config sync handler
+// ============================================================================
+
+void CKeyEventSink::OnSyncConfig(const std::string& key, const std::vector<uint8_t>& value)
+{
+    if (key == CONFIG_KEY_ENGLISH_PAIRS)
+    {
+        if (value.size() < 2) return;
+        bool enabled = value[0] != 0;
+        uint8_t count = value[1];
+
+        std::vector<std::pair<wchar_t, wchar_t>> pairs;
+        for (int i = 0; i < count && (2 + i * 4 + 4) <= value.size(); i++)
+        {
+            uint16_t left = *reinterpret_cast<const uint16_t*>(value.data() + 2 + i * 4);
+            uint16_t right = *reinterpret_cast<const uint16_t*>(value.data() + 2 + i * 4 + 2);
+            pairs.push_back({(wchar_t)left, (wchar_t)right});
+        }
+
+        _englishPairEngine.SetPairs(pairs);
+        _englishPairEngine.SetEnabled(enabled);
+
+        WIND_LOG_INFO_FMT(L"English pair config updated: enabled=%d, pairs=%d\n", enabled, (int)pairs.size());
+    }
 }
 
 // ============================================================================

@@ -41,6 +41,7 @@ constexpr uint16_t CMD_MODE_CHANGED       = 0x0201; // Mode changed
 constexpr uint16_t CMD_STATUS_UPDATE      = 0x0202; // Full status update
 constexpr uint16_t CMD_STATE_PUSH         = 0x0206; // State push (broadcast to all clients)
 constexpr uint16_t CMD_SYNC_HOTKEYS       = 0x0301; // Sync hotkey whitelist
+constexpr uint16_t CMD_SYNC_CONFIG        = 0x0303; // Sync config key/value (generic)
 constexpr uint16_t CMD_CONSUMED           = 0x0401; // Key consumed
 constexpr uint16_t CMD_COMMIT_TEXT_WITH_CURSOR = 0x0106; // Commit text with cursor offset
 constexpr uint16_t CMD_MOVE_CURSOR             = 0x0107; // Move cursor (smart skip)
@@ -273,6 +274,9 @@ static_assert(sizeof(HostRenderSetupHeader) == 12, "HostRenderSetupHeader must b
 // ============================================================================
 // Helper functions
 // ============================================================================
+
+// Config sync keys (must match Go side)
+constexpr const char* CONFIG_KEY_ENGLISH_PAIRS = "en_pairs";
 
 // Calculate key hash for hotkey matching
 // Format: (modifiers << 16) | keyCode

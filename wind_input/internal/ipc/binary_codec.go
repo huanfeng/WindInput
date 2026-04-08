@@ -490,6 +490,60 @@ func (c *BinaryCodec) EncodeSyncHotkeys(keyDownHotkeys, keyUpHotkeys []uint32) [
 	return result
 }
 
+// EncodeSyncConfig 编码通用配置同步命令
+// Format: keyLen(2, LE) + valueLen(4, LE) + key(UTF-8) + value(bytes)
+func (c *BinaryCodec) EncodeSyncConfig(key string, value []byte) []byte {
+	keyBytes := []byte(key)
+	payloadLen := uint32(6 + len(keyBytes) + len(value))
+	header := c.EncodeHeader(CmdSyncConfig, payloadLen)
+
+	payload := make([]byte, 6)
+	binary.LittleEndian.PutUint16(payload[0:2], uint16(len(keyBytes)))
+	binary.LittleEndian.PutUint32(payload[2:6], uint32(len(value)))
+
+	result := make([]byte, 0, HeaderSize+payloadLen)
+	result = append(result, header...)
+	result = append(result, payload...)
+	result = append(result, keyBytes...)
+	result = append(result, value...)
+	return result
+}
+
+// EncodeEnglishPairsValue 编码英文配对表的 value
+// Format: enabled(1) + count(1) + pairs(N × 4bytes: left_u16 + right_u16)
+func EncodeEnglishPairsValue(enabled bool, pairs [][]string) []byte {
+	var buf []byte
+	if enabled {
+		buf = append(buf, 1)
+	} else {
+		buf = append(buf, 0)
+	}
+
+	// Parse pairs
+	type pair struct{ left, right uint16 }
+	var parsed []pair
+	for _, p := range pairs {
+		if len(p) != 2 {
+			continue
+		}
+		leftRunes := []rune(p[0])
+		rightRunes := []rune(p[1])
+		if len(leftRunes) != 1 || len(rightRunes) != 1 {
+			continue
+		}
+		parsed = append(parsed, pair{uint16(leftRunes[0]), uint16(rightRunes[0])})
+	}
+
+	buf = append(buf, byte(len(parsed)))
+	for _, p := range parsed {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint16(b[0:2], p.left)
+		binary.LittleEndian.PutUint16(b[2:4], p.right)
+		buf = append(buf, b...)
+	}
+	return buf
+}
+
 // WriteMessage writes a complete message (header + payload) to a writer
 func (c *BinaryCodec) WriteMessage(w io.Writer, message []byte) error {
 	_, err := w.Write(message)

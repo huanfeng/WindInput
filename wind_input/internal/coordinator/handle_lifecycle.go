@@ -141,6 +141,11 @@ func (c *Coordinator) HandleSelectionChanged(prevChar rune) {
 			c.pairTracker.Clear()
 		}
 	}
+	if c.pairTrackerEn != nil {
+		if c.pairInsertTime.IsZero() || time.Since(c.pairInsertTime) > 200*time.Millisecond {
+			c.pairTrackerEn.Clear()
+		}
+	}
 	c.lastOutputWasDigit = false
 	c.logger.Debug("Selection changed, reset smart punct state", "prevChar", string(prevChar))
 }
@@ -329,6 +334,14 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 	// Sync CapsLock state from system on focus gain
 	c.capsLockOn = ui.GetCapsLockState()
 
+	// Push English auto-pair config to C++ side
+	if c.bridgeServer != nil && c.config != nil {
+		c.bridgeServer.PushEnglishPairConfigToAllClients(
+			c.config.Input.AutoPair.English,
+			c.config.Input.AutoPair.EnglishPairs,
+		)
+	}
+
 	return &bridge.StatusUpdateData{
 		ChineseMode:        c.chineseMode,
 		FullWidth:          c.fullWidth,
@@ -377,6 +390,14 @@ func (c *Coordinator) HandleIMEActivated(processID uint32) *bridge.StatusUpdateD
 
 	// Sync CapsLock state from system on IME activation
 	c.capsLockOn = ui.GetCapsLockState()
+
+	// Push English auto-pair config to C++ side
+	if c.bridgeServer != nil && c.config != nil {
+		c.bridgeServer.PushEnglishPairConfigToAllClients(
+			c.config.Input.AutoPair.English,
+			c.config.Input.AutoPair.EnglishPairs,
+		)
+	}
 
 	return &bridge.StatusUpdateData{
 		ChineseMode:        c.chineseMode,

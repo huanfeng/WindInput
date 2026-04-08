@@ -138,6 +138,17 @@ func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 	if c.pairTracker != nil {
 		c.pairTracker.UpdatePairs(inputConfig.AutoPair.ChinesePairs)
 	}
+	if c.pairTrackerEn != nil {
+		c.pairTrackerEn.UpdatePairs(inputConfig.AutoPair.EnglishPairs)
+	}
+
+	// 推送英文配对配置到 C++ 侧
+	if c.bridgeServer != nil {
+		go c.bridgeServer.PushEnglishPairConfigToAllClients(
+			inputConfig.AutoPair.English,
+			inputConfig.AutoPair.EnglishPairs,
+		)
+	}
 
 	c.hotkeysDirty = true // SelectKeyGroups/PageKeys 变化也影响热键
 	c.logger.Debug("Input config updated", "punctFollowMode", c.punctFollowMode)

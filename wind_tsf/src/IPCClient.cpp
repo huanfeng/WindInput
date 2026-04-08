@@ -1435,6 +1435,13 @@ void CIPCClient::SetClearCompositionCallback(ClearCompositionCallback callback)
     LeaveCriticalSection(&_asyncLock);
 }
 
+void CIPCClient::SetSyncConfigCallback(SyncConfigCallback callback)
+{
+    EnterCriticalSection(&_asyncLock);
+    _syncConfigCallback = callback;
+    LeaveCriticalSection(&_asyncLock);
+}
+
 BOOL CIPCClient::StartAsyncReader()
 {
     if (_asyncReaderRunning)
@@ -1780,6 +1787,39 @@ void CIPCClient::_AsyncReaderLoop()
                 if (callback)
                 {
                     callback();
+                }
+            }
+            else if (header.command == CMD_SYNC_CONFIG)
+            {
+                // Parse config sync: keyLen(2, LE) + valueLen(4, LE) + key(UTF-8) + value(bytes)
+                std::vector<uint8_t> payload;
+                if (header.length > 0 && bytesRead >= sizeof(IpcHeader) + header.length)
+                {
+                    payload.assign(buffer.begin() + sizeof(IpcHeader),
+                                   buffer.begin() + sizeof(IpcHeader) + header.length);
+                }
+
+                if (payload.size() >= 6)
+                {
+                    uint16_t keyLen = *reinterpret_cast<const uint16_t*>(payload.data());
+                    uint32_t valueLen = *reinterpret_cast<const uint32_t*>(payload.data() + 2);
+
+                    if (payload.size() >= 6 + keyLen + valueLen)
+                    {
+                        std::string key(reinterpret_cast<const char*>(payload.data() + 6), keyLen);
+                        std::vector<uint8_t> value(payload.data() + 6 + keyLen, payload.data() + 6 + keyLen + valueLen);
+
+                        _LogInfo(L"Async reader: config sync received key=%hs valueLen=%u", key.c_str(), valueLen);
+
+                        EnterCriticalSection(&_asyncLock);
+                        SyncConfigCallback configCallback = _syncConfigCallback;
+                        LeaveCriticalSection(&_asyncLock);
+
+                        if (configCallback)
+                        {
+                            configCallback(key, value);
+                        }
+                    }
                 }
             }
         }

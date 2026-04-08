@@ -1666,6 +1666,14 @@ BOOL CTextService::_InitIPCClient()
         }
     });
 
+    // Set up config sync callback for English auto-pair
+    _pIPCClient->SetSyncConfigCallback([pThis](const std::string& key, const std::vector<uint8_t>& value) {
+        if (pThis->_pKeyEventSink != nullptr)
+        {
+            pThis->_pKeyEventSink->OnSyncConfig(key, value);
+        }
+    });
+
     // Start async reader thread for receiving state pushes from Go
     if (!_pIPCClient->StartAsyncReader())
     {
