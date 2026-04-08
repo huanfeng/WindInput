@@ -41,11 +41,12 @@ type SchemaConfigEngine struct {
 
 // SchemaConfigDict 词库配置项
 type SchemaConfigDict struct {
-	ID      string `yaml:"id" json:"id"`
-	Path    string `yaml:"path" json:"path"`
-	Type    string `yaml:"type" json:"type"`
-	Default bool   `yaml:"default" json:"default"`
-	Role    string `yaml:"role,omitempty" json:"role,omitempty"`
+	ID         string      `yaml:"id" json:"id"`
+	Path       string      `yaml:"path" json:"path"`
+	Type       string      `yaml:"type" json:"type"`
+	Default    bool        `yaml:"default" json:"default"`
+	Role       string      `yaml:"role,omitempty" json:"role,omitempty"`
+	WeightSpec interface{} `yaml:"weight_spec,omitempty" json:"weight_spec,omitempty"`
 }
 
 // SchemaConfigUserData 用户数据配置
@@ -72,6 +73,8 @@ type SchemaConfig struct {
 	Dicts    []SchemaConfigDict   `yaml:"dictionaries" json:"dictionaries"`
 	UserData SchemaConfigUserData `yaml:"user_data" json:"user_data"`
 	Learning SchemaConfigLearning `yaml:"learning" json:"learning"`
+	// 以下字段由 wind_input 核心使用，设置界面不编辑但保存时必须保留
+	Encoder interface{} `yaml:"encoder,omitempty" json:"encoder,omitempty"`
 }
 
 // GetAvailableSchemas 获取所有可用的输入方案列表

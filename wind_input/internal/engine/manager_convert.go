@@ -367,5 +367,24 @@ func (m *Manager) GetReverseIndex() map[string][]string {
 		}
 	}
 
+	// 最终回退：直接从当前引擎获取码表构建反向索引
+	// 当 CompositeDict 和 systemLayers 缓存都找不到 CodeTableLayer 时，
+	// 直接从当前引擎（codetable 或 mixed）获取 CodeTable
+	if engine := m.currentEngine; engine != nil {
+		var ct *dict.CodeTable
+		if codetableEngine, ok := engine.(*codetable.Engine); ok {
+			ct = codetableEngine.GetCodeTable()
+		} else if mixedEngine, ok := engine.(*mixed.Engine); ok {
+			if codetableEngine := mixedEngine.GetCodetableEngine(); codetableEngine != nil {
+				ct = codetableEngine.GetCodeTable()
+			}
+		}
+		if ct != nil {
+			m.cachedReverseIndex = ct.BuildReverseIndex()
+			m.cachedReverseSchemaID = m.currentID
+			return m.cachedReverseIndex
+		}
+	}
+
 	return nil
 }
