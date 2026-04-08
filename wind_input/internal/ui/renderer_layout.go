@@ -146,9 +146,9 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	// ===== PHASE 1: Draw all shapes with gg =====
 	dc := gg.NewContext(int(width), int(height))
 
-	// Shadow
+	// Shadow (same size as background, offset 2px to bottom-right)
 	dc.SetColor(r.getShadowColor())
-	r.drawRoundedRect(dc, 2, 2, width, height, cfg.CornerRadius)
+	r.drawRoundedRect(dc, 2, 2, width-2, height-2, cfg.CornerRadius)
 	dc.Fill()
 
 	// Background
@@ -567,9 +567,9 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	// ===== PHASE 1: Draw all shapes with gg =====
 	dc := gg.NewContext(int(width), int(height))
 
-	// Shadow
+	// Shadow (same size as background, offset 2px to bottom-right)
 	dc.SetColor(r.getShadowColor())
-	r.drawRoundedRect(dc, 2, 2, width, height, cfg.CornerRadius)
+	r.drawRoundedRect(dc, 2, 2, width-2, height-2, cfg.CornerRadius)
 	dc.Fill()
 
 	// Background
