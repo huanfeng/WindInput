@@ -511,7 +511,7 @@ func (c *BinaryCodec) EncodeSyncConfig(key string, value []byte) []byte {
 
 // EncodeEnglishPairsValue 编码英文配对表的 value
 // Format: enabled(1) + count(1) + pairs(N × 4bytes: left_u16 + right_u16)
-func EncodeEnglishPairsValue(enabled bool, pairs [][]string) []byte {
+func EncodeEnglishPairsValue(enabled bool, pairs []string) []byte {
 	var buf []byte
 	if enabled {
 		buf = append(buf, 1)
@@ -522,16 +522,12 @@ func EncodeEnglishPairsValue(enabled bool, pairs [][]string) []byte {
 	// Parse pairs
 	type pair struct{ left, right uint16 }
 	var parsed []pair
-	for _, p := range pairs {
-		if len(p) != 2 {
+	for _, s := range pairs {
+		runes := []rune(s)
+		if len(runes) != 2 {
 			continue
 		}
-		leftRunes := []rune(p[0])
-		rightRunes := []rune(p[1])
-		if len(leftRunes) != 1 || len(rightRunes) != 1 {
-			continue
-		}
-		parsed = append(parsed, pair{uint16(leftRunes[0]), uint16(rightRunes[0])})
+		parsed = append(parsed, pair{uint16(runes[0]), uint16(runes[1])})
 	}
 
 	buf = append(buf, byte(len(parsed)))

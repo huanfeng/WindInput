@@ -3,7 +3,7 @@ package transform
 import "testing"
 
 func TestPairTracker_BasicPairing(t *testing.T) {
-	pt := NewPairTracker([][]string{{"（", "）"}, {"【", "】"}})
+	pt := NewPairTracker([]string{"（）", "【】"})
 
 	if !pt.IsLeft('（') {
 		t.Error("（ should be left")
@@ -26,7 +26,7 @@ func TestPairTracker_BasicPairing(t *testing.T) {
 }
 
 func TestPairTracker_StackOperations(t *testing.T) {
-	pt := NewPairTracker([][]string{{"（", "）"}, {"【", "】"}})
+	pt := NewPairTracker([]string{"（）", "【】"})
 
 	_, ok := pt.Peek()
 	if ok {
@@ -60,7 +60,7 @@ func TestPairTracker_StackOperations(t *testing.T) {
 }
 
 func TestPairTracker_Clear(t *testing.T) {
-	pt := NewPairTracker([][]string{{"（", "）"}})
+	pt := NewPairTracker([]string{"（）"})
 	pt.Push('（', '）')
 	pt.Push('（', '）')
 	pt.Clear()
@@ -71,12 +71,12 @@ func TestPairTracker_Clear(t *testing.T) {
 }
 
 func TestPairTracker_UpdatePairs(t *testing.T) {
-	pt := NewPairTracker([][]string{{"（", "）"}})
+	pt := NewPairTracker([]string{"（）"})
 	if !pt.IsLeft('（') {
 		t.Error("（ should be left before update")
 	}
 
-	pt.UpdatePairs([][]string{{"《", "》"}})
+	pt.UpdatePairs([]string{"《》"})
 	if pt.IsLeft('（') {
 		t.Error("（ should not be left after update")
 	}
@@ -85,7 +85,7 @@ func TestPairTracker_UpdatePairs(t *testing.T) {
 	}
 
 	pt.Push('《', '》')
-	pt.UpdatePairs([][]string{{"《", "》"}})
+	pt.UpdatePairs([]string{"《》"})
 	_, ok := pt.Peek()
 	if ok {
 		t.Error("Stack should be cleared after UpdatePairs")

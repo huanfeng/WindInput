@@ -317,7 +317,7 @@ func (s *Server) PushClearCompositionToActiveClient() {
 }
 
 // PushEnglishPairConfigToAllClients pushes English auto-pair config to all TSF clients
-func (s *Server) PushEnglishPairConfigToAllClients(enabled bool, pairs [][]string) {
+func (s *Server) PushEnglishPairConfigToAllClients(enabled bool, pairs []string) {
 	value := ipc.EncodeEnglishPairsValue(enabled, pairs)
 	encoded := s.codec.EncodeSyncConfig(ipc.ConfigKeyEnglishPairs, value)
 

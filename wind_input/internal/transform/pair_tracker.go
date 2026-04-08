@@ -13,32 +13,28 @@ type PairTracker struct {
 	rightSet map[rune]bool // 右标点集合
 }
 
-// NewPairTracker 创建配对追踪器，pairs 格式为 [["（","）"], ...]
-func NewPairTracker(pairs [][]string) *PairTracker {
+// NewPairTracker 创建配对追踪器，pairs 格式为 ["（）", "【】", ...]
+func NewPairTracker(pairs []string) *PairTracker {
 	pt := &PairTracker{}
 	pt.buildMaps(pairs)
 	return pt
 }
 
-func (pt *PairTracker) buildMaps(pairs [][]string) {
+func (pt *PairTracker) buildMaps(pairs []string) {
 	pt.pairMap = make(map[rune]rune, len(pairs))
 	pt.rightSet = make(map[rune]bool, len(pairs))
-	for _, p := range pairs {
-		if len(p) != 2 {
+	for _, s := range pairs {
+		runes := []rune(s)
+		if len(runes) != 2 {
 			continue
 		}
-		left := []rune(p[0])
-		right := []rune(p[1])
-		if len(left) != 1 || len(right) != 1 {
-			continue
-		}
-		pt.pairMap[left[0]] = right[0]
-		pt.rightSet[right[0]] = true
+		pt.pairMap[runes[0]] = runes[1]
+		pt.rightSet[runes[1]] = true
 	}
 }
 
 // UpdatePairs 更新配对映射（配置热更新时调用），同时清空栈
-func (pt *PairTracker) UpdatePairs(pairs [][]string) {
+func (pt *PairTracker) UpdatePairs(pairs []string) {
 	pt.buildMaps(pairs)
 	pt.stack = nil
 }

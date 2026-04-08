@@ -25,15 +25,16 @@ hotkeys:
   toggle_punct: "ctrl+."
   delete_candidate: ctrl+shift+number
   pin_candidate: ctrl+number
-  toggle_toolbar: ctrl+shift+o
-  open_settings: ctrl+shift+p
-  add_word: ctrl+shift+equal
+  toggle_toolbar: ctrl+shift+\
+  open_settings: ctrl+shift+]
+  add_word: ctrl+equal
 
 ui:
   font_size: 18
   candidates_per_page: 7
   font_path: ""
   inline_preedit: true
+  hide_candidate_window: false
   candidate_layout: "horizontal"
   status_indicator_duration: 800
   status_indicator_offset_x: 0
@@ -61,6 +62,7 @@ input:
   highlight_keys:
     - arrows
     - tab
+  smart_punct_after_digit: true
   pinyin_separator: auto
   shift_temp_english:
     enabled: true
@@ -69,8 +71,21 @@ input:
     cancel_on_mode_switch: false
   temp_pinyin:
     trigger_keys:
-      - "backtick"
-
+      - backtick
+    auto_pair:
+      chinese: true
+      english: true
+      blacklist: []
+      chinese_pairs:
+        - "（）"
+        - "【】"
+        - "｛｝"
+        - "《》"
+        - "〈〉"
+      english_pairs:
+        - "()"
+        - "[]"
+        - "{}"
 advanced:
   log_level: "info"
   host_render_processes:

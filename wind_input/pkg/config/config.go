@@ -120,11 +120,24 @@ type TempPinyinConfig struct {
 
 // AutoPairConfig 自动标点配对配置
 type AutoPairConfig struct {
-	Chinese      bool       `yaml:"chinese" json:"chinese"`             // 中文标点自动配对
-	English      bool       `yaml:"english" json:"english"`             // 英文标点自动配对
-	Blacklist    []string   `yaml:"blacklist" json:"blacklist"`         // 应用黑名单
-	ChinesePairs [][]string `yaml:"chinese_pairs" json:"chinese_pairs"` // 中文配对表
-	EnglishPairs [][]string `yaml:"english_pairs" json:"english_pairs"` // 英文配对表
+	Chinese      bool     `yaml:"chinese" json:"chinese"`             // 中文标点自动配对
+	English      bool     `yaml:"english" json:"english"`             // 英文标点自动配对
+	Blacklist    []string `yaml:"blacklist" json:"blacklist"`         // 应用黑名单
+	ChinesePairs []string `yaml:"chinese_pairs" json:"chinese_pairs"` // 中文配对表，如 ["（）", "【】"]
+	EnglishPairs []string `yaml:"english_pairs" json:"english_pairs"` // 英文配对表，如 ["()", "[]"]
+}
+
+// ParsePairs 将字符串配对列表解析为左右 rune 对
+// 每个字符串应恰好包含2个 rune，如 "（）"
+func ParsePairs(pairs []string) [][2]rune {
+	var result [][2]rune
+	for _, s := range pairs {
+		runes := []rune(s)
+		if len(runes) == 2 {
+			result = append(result, [2]rune{runes[0], runes[1]})
+		}
+	}
+	return result
 }
 
 // ShiftTempEnglishConfig 临时英文模式配置
@@ -211,22 +224,11 @@ func DefaultConfig() *Config {
 				TriggerKeys: []string{"backtick"},
 			},
 			AutoPair: AutoPairConfig{
-				Chinese:   true,
-				English:   false,
-				Blacklist: []string{},
-				ChinesePairs: [][]string{
-					{"（", "）"},
-					{"【", "】"},
-					{"｛", "｝"},
-					{"《", "》"},
-					{"〈", "〉"},
-				},
-				EnglishPairs: [][]string{
-					{"(", ")"},
-					{"[", "]"},
-					{"{", "}"},
-					{"<", ">"},
-				},
+				Chinese:      false,
+				English:      false,
+				Blacklist:    []string{},
+				ChinesePairs: []string{"（）", "【】", "｛｝", "《》", "〈〉"},
+				EnglishPairs: []string{"()", "[]", "{}", "<>"},
 			},
 		},
 		Advanced: AdvancedConfig{

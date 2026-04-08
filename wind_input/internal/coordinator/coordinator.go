@@ -209,7 +209,7 @@ type BridgeServer interface {
 	PushStateToAllClients(status *bridge.StatusUpdateData)
 	PushCommitTextToActiveClient(text string) // Only send to active client for security
 	PushClearCompositionToActiveClient()      // Clear inline composition on active client
-	PushEnglishPairConfigToAllClients(enabled bool, pairs [][]string)
+	PushEnglishPairConfigToAllClients(enabled bool, pairs []string)
 	RestartService()
 	// GetActiveHostRender returns write/hide functions if the active process has host rendering.
 	// Returns nil functions if host rendering is not active for the current process.

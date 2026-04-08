@@ -110,8 +110,8 @@ export interface AutoPairConfig {
   chinese: boolean;
   english: boolean;
   blacklist: string[];
-  chinese_pairs: string[][];
-  english_pairs: string[][];
+  chinese_pairs: string[];
+  english_pairs: string[];
 }
 
 // 输入配置
@@ -358,19 +358,8 @@ export function getDefaultConfig(): Config {
         chinese: true,
         english: false,
         blacklist: [],
-        chinese_pairs: [
-          ["（", "）"],
-          ["【", "】"],
-          ["｛", "｝"],
-          ["《", "》"],
-          ["〈", "〉"],
-        ],
-        english_pairs: [
-          ["(", ")"],
-          ["[", "]"],
-          ["{", "}"],
-          ["<", ">"],
-        ],
+        chinese_pairs: ["（）", "【】", "｛｝", "《》", "〈〉"],
+        english_pairs: ["()", "[]", "{}", "<>"],
       },
     },
     advanced: {
