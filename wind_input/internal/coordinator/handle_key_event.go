@@ -234,6 +234,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 			c.clearState()
 			c.hideUI()
 		}
+		if c.pairTracker != nil {
+			c.pairTracker.Clear()
+		}
 		text := numpadChar
 		if c.fullWidth {
 			text = transform.ToFullWidth(text)
@@ -340,6 +343,16 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 
 	// Chinese mode handling
 	vk := uint32(data.KeyCode)
+
+	// 自动配对：方向键、Enter、Escape 等清空配对栈
+	if c.pairTracker != nil {
+		switch vk {
+		case ipc.VK_LEFT, ipc.VK_RIGHT, ipc.VK_UP, ipc.VK_DOWN,
+			ipc.VK_HOME, ipc.VK_END, ipc.VK_RETURN, ipc.VK_ESCAPE:
+			c.pairTracker.Clear()
+		}
+	}
+
 	switch {
 	case c.isHighlightUpKey(vk, uint32(data.Modifiers)):
 		return c.handleArrowUp()
@@ -410,6 +423,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		result := c.handleNumberKey(int(key[0] - '0'))
 		if result == nil {
 			// 数字直通（无候选词选择），标记用于智能标点
+			if c.pairTracker != nil {
+				c.pairTracker.Clear()
+			}
 			c.lastOutputWasDigit = true
 		}
 		return result
@@ -417,6 +433,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	case len(key) == 1 && key[0] == '0':
 		result := c.handleNumberKey(10)
 		if result == nil {
+			if c.pairTracker != nil {
+				c.pairTracker.Clear()
+			}
 			c.lastOutputWasDigit = true
 		}
 		return result

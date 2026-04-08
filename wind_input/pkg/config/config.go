@@ -110,11 +110,21 @@ type InputConfig struct {
 	ShiftTempEnglish     ShiftTempEnglishConfig `yaml:"shift_temp_english" json:"shift_temp_english"`
 	CapsLockBehavior     CapsLockBehaviorConfig `yaml:"capslock_behavior" json:"capslock_behavior"`
 	TempPinyin           TempPinyinConfig       `yaml:"temp_pinyin" json:"temp_pinyin"`
+	AutoPair             AutoPairConfig         `yaml:"auto_pair" json:"auto_pair"`
 }
 
 // TempPinyinConfig 临时拼音模式配置
 type TempPinyinConfig struct {
 	TriggerKeys []string `yaml:"trigger_keys" json:"trigger_keys"` // 触发键: "backtick", "semicolon"
+}
+
+// AutoPairConfig 自动标点配对配置
+type AutoPairConfig struct {
+	Chinese      bool       `yaml:"chinese" json:"chinese"`             // 中文标点自动配对
+	English      bool       `yaml:"english" json:"english"`             // 英文标点自动配对
+	Blacklist    []string   `yaml:"blacklist" json:"blacklist"`         // 应用黑名单
+	ChinesePairs [][]string `yaml:"chinese_pairs" json:"chinese_pairs"` // 中文配对表
+	EnglishPairs [][]string `yaml:"english_pairs" json:"english_pairs"` // 英文配对表
 }
 
 // ShiftTempEnglishConfig 临时英文模式配置
@@ -199,6 +209,23 @@ func DefaultConfig() *Config {
 			},
 			TempPinyin: TempPinyinConfig{
 				TriggerKeys: []string{"backtick"},
+			},
+			AutoPair: AutoPairConfig{
+				Chinese:   true,
+				English:   false,
+				Blacklist: []string{},
+				ChinesePairs: [][]string{
+					{"（", "）"},
+					{"【", "】"},
+					{"｛", "｝"},
+					{"《", "》"},
+					{"〈", "〉"},
+				},
+				EnglishPairs: [][]string{
+					{"(", ")"},
+					{"[", "]"},
+					{"{", "}"},
+				},
 			},
 		},
 		Advanced: AdvancedConfig{

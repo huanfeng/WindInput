@@ -134,6 +134,13 @@ func (c *Coordinator) HandleSelectionChanged(prevChar rune) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 选区变化时清空配对栈（自动配对插入后 200ms 内的 SelectionChanged 事件除外，
+	// 这些事件是 CommitText 和光标移动引发的，不是用户操作）
+	if c.pairTracker != nil {
+		if c.pairInsertTime.IsZero() || time.Since(c.pairInsertTime) > 200*time.Millisecond {
+			c.pairTracker.Clear()
+		}
+	}
 	c.lastOutputWasDigit = false
 	c.logger.Debug("Selection changed, reset smart punct state", "prevChar", string(prevChar))
 }

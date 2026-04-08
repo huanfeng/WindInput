@@ -42,6 +42,9 @@ constexpr uint16_t CMD_STATUS_UPDATE      = 0x0202; // Full status update
 constexpr uint16_t CMD_STATE_PUSH         = 0x0206; // State push (broadcast to all clients)
 constexpr uint16_t CMD_SYNC_HOTKEYS       = 0x0301; // Sync hotkey whitelist
 constexpr uint16_t CMD_CONSUMED           = 0x0401; // Key consumed
+constexpr uint16_t CMD_COMMIT_TEXT_WITH_CURSOR = 0x0106; // Commit text with cursor offset
+constexpr uint16_t CMD_MOVE_CURSOR             = 0x0107; // Move cursor (smart skip)
+constexpr uint16_t CMD_DELETE_PAIR             = 0x0108; // Delete pair (smart backspace)
 constexpr uint16_t CMD_HOST_RENDER_SETUP  = 0x0501; // Host render setup (shared memory + event names)
 constexpr uint16_t CMD_BATCH_RESPONSE     = 0x0F02; // Batch response container
 
@@ -170,6 +173,22 @@ struct CommitTextHeader
     // Followed by UTF-8 text, then optional UTF-8 new composition
 };
 static_assert(sizeof(CommitTextHeader) == 12, "CommitTextHeader must be 12 bytes");
+
+// Commit text with cursor payload
+struct CommitTextWithCursorPayload
+{
+    uint32_t textLength;    // Length of text (UTF-8)
+    uint32_t cursorOffset;  // Chars to move left from end of inserted text
+    // Followed by UTF-8 text
+};
+static_assert(sizeof(CommitTextWithCursorPayload) == 8, "CommitTextWithCursorPayload must be 8 bytes");
+
+// Move cursor payload
+struct MoveCursorPayload
+{
+    uint32_t direction; // 1=right
+};
+static_assert(sizeof(MoveCursorPayload) == 4, "MoveCursorPayload must be 4 bytes");
 
 // Commit text flags
 constexpr uint32_t COMMIT_FLAG_MODE_CHANGED       = 0x0001;
@@ -304,6 +323,9 @@ enum class ResponseType
     StatusUpdate,
     SyncHotkeys,
     Consumed,
+    InsertTextWithCursor, // Insert text and position cursor
+    MoveCursorRight,      // Move cursor right (smart skip)
+    DeletePair,           // Delete left + right char (smart delete)
     HostRenderSetup, // Host render setup (shared memory info)
     Error
 };
@@ -321,6 +343,7 @@ struct ParsedResponse
     // For UpdateComposition
     std::wstring composition;
     int caretPos = 0;
+    int cursorOffset = 0;  // For InsertTextWithCursor: chars to move left from end
 
     // For StatusUpdate / ModeChanged
     uint32_t statusFlags = 0;

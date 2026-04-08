@@ -16,6 +16,11 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	startTime := time.Now()
 	c.lastKeyTime = startTime
 
+	// 输入字母时清空配对栈（光标和配对之间插入了内容）
+	if c.pairTracker != nil {
+		c.pairTracker.Clear()
+	}
+
 	// 限制输入缓冲区长度，超长输入没有实际意义且影响性能
 	if len(c.inputBuffer)+len(key) > maxInputBufferLen {
 		c.logger.Debug("Input buffer length limit reached", "current", len(c.inputBuffer), "max", maxInputBufferLen)

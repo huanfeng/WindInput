@@ -27,19 +27,22 @@ const (
 
 // Downstream commands (Go -> C++)
 const (
-	CmdAck               uint16 = 0x0001 // Simple acknowledgment
-	CmdPassThrough       uint16 = 0x0002 // Key not handled, pass to system
-	CmdCommitText        uint16 = 0x0101 // Commit text to application
-	CmdUpdateComposition uint16 = 0x0102 // Update composition (preedit)
-	CmdClearComposition  uint16 = 0x0103 // Clear composition
-	CmdCommitResult      uint16 = 0x0105 // Commit result (response to COMMIT_REQUEST)
-	CmdModeChanged       uint16 = 0x0201 // Mode changed
-	CmdStatusUpdate      uint16 = 0x0202 // Full status update
-	CmdStatePush         uint16 = 0x0206 // State push (broadcast to all clients)
-	CmdSyncHotkeys       uint16 = 0x0301 // Sync hotkey whitelist
-	CmdConsumed          uint16 = 0x0401 // Key consumed (no output)
-	CmdHostRenderSetup   uint16 = 0x0501 // Host render setup (shared memory + event names)
-	CmdBatchResponse     uint16 = 0x0F02 // Batch response container
+	CmdAck                  uint16 = 0x0001 // Simple acknowledgment
+	CmdPassThrough          uint16 = 0x0002 // Key not handled, pass to system
+	CmdCommitText           uint16 = 0x0101 // Commit text to application
+	CmdUpdateComposition    uint16 = 0x0102 // Update composition (preedit)
+	CmdClearComposition     uint16 = 0x0103 // Clear composition
+	CmdCommitResult         uint16 = 0x0105 // Commit result (response to COMMIT_REQUEST)
+	CmdModeChanged          uint16 = 0x0201 // Mode changed
+	CmdStatusUpdate         uint16 = 0x0202 // Full status update
+	CmdStatePush            uint16 = 0x0206 // State push (broadcast to all clients)
+	CmdSyncHotkeys          uint16 = 0x0301 // Sync hotkey whitelist
+	CmdCommitTextWithCursor uint16 = 0x0106 // Commit text with cursor offset
+	CmdMoveCursor           uint16 = 0x0107 // Move cursor (skip over)
+	CmdDeletePair           uint16 = 0x0108 // Delete pair (smart backspace)
+	CmdConsumed             uint16 = 0x0401 // Key consumed (no output)
+	CmdHostRenderSetup      uint16 = 0x0501 // Host render setup (shared memory + event names)
+	CmdBatchResponse        uint16 = 0x0F02 // Batch response container
 )
 
 // Host render commands (C++ -> Go)

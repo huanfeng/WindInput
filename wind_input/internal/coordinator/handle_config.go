@@ -134,6 +134,11 @@ func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 		c.config.Input = *inputConfig
 	}
 
+	// 更新自动配对配置
+	if c.pairTracker != nil {
+		c.pairTracker.UpdatePairs(inputConfig.AutoPair.ChinesePairs)
+	}
+
 	c.hotkeysDirty = true // SelectKeyGroups/PageKeys 变化也影响热键
 	c.logger.Debug("Input config updated", "punctFollowMode", c.punctFollowMode)
 }

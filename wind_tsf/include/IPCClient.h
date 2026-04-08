@@ -43,6 +43,9 @@ struct ServiceResponse
     bool modeChanged = false;
     bool chineseMode = false;
 
+    // For InsertTextWithCursor
+    int cursorOffset = 0;
+
     // For UpdateComposition
     std::wstring composition;
     int caretPos = 0;

@@ -176,6 +176,19 @@ func (s *Server) handleKeyEvent(payload []byte, clientID int) []byte {
 		s.logger.Debug("Key consumed by hotkey", "clientID", clientID)
 		return s.codec.EncodeConsumed()
 
+	case ResponseTypeInsertTextWithCursor:
+		s.logger.Debug("Returning CommitTextWithCursor response", "clientID", clientID,
+			"cursorOffset", result.CursorOffset)
+		return s.codec.EncodeCommitTextWithCursor(result.Text, result.CursorOffset)
+
+	case ResponseTypeMoveCursorRight:
+		s.logger.Debug("Returning MoveCursorRight response", "clientID", clientID)
+		return s.codec.EncodeMoveCursor(1)
+
+	case ResponseTypeDeletePair:
+		s.logger.Debug("Returning DeletePair response", "clientID", clientID)
+		return s.codec.EncodeDeletePair()
+
 	default:
 		return s.codec.EncodeAck()
 	}

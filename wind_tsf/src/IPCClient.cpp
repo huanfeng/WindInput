@@ -1119,6 +1119,45 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
         }
         break;
 
+    case CMD_COMMIT_TEXT_WITH_CURSOR:
+        {
+            response.type = ResponseType::InsertTextWithCursor;
+            if (payload.size() < sizeof(CommitTextWithCursorPayload))
+            {
+                _LogError(L"CommitTextWithCursor payload too short");
+                return FALSE;
+            }
+            const CommitTextWithCursorPayload* p = reinterpret_cast<const CommitTextWithCursorPayload*>(payload.data());
+            response.cursorOffset = (int)p->cursorOffset;
+            if (p->textLength > 0)
+            {
+                size_t textOffset = sizeof(CommitTextWithCursorPayload);
+                if (textOffset + p->textLength <= payload.size())
+                {
+                    response.text = _Utf8ToWide(
+                        reinterpret_cast<const char*>(payload.data() + textOffset),
+                        p->textLength);
+                }
+            }
+            _LogDebug(L"Response: InsertTextWithCursor textLen=%zu, cursorOffset=%d",
+                      response.text.length(), response.cursorOffset);
+        }
+        break;
+
+    case CMD_MOVE_CURSOR:
+        {
+            response.type = ResponseType::MoveCursorRight;
+            _LogDebug(L"Response: MoveCursorRight");
+        }
+        break;
+
+    case CMD_DELETE_PAIR:
+        {
+            response.type = ResponseType::DeletePair;
+            _LogDebug(L"Response: DeletePair");
+        }
+        break;
+
     case CMD_HOST_RENDER_SETUP:
         {
             response.type = ResponseType::HostRenderSetup;

@@ -130,6 +130,13 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
 {
     *pfEaten = FALSE;
 
+    // Auto-pair: bypass IME for self-generated SendInput keys (VK_LEFT/RIGHT/DELETE/BACK)
+    if (_TryConsumeSkipKey(wParam))
+    {
+        *pfEaten = FALSE; // Let it pass directly to the app
+        return S_OK;
+    }
+
     // Ctrl+Shift+F12: Dump TSF ring buffer logs to clipboard (works in AppContainer)
     if (wParam == VK_F12 && (GetKeyState(VK_CONTROL) & 0x8000)
         && (GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000))
@@ -616,9 +623,28 @@ STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lP
 {
     *pfEaten = FALSE;
 
+    // Auto-pair: bypass IME for self-generated SendInput key releases
+    if (_TryConsumeSkipKey(wParam))
+    {
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+
     // Keyboard disabled by system: pass through all keys
     if (_pTextService->IsKeyboardDisabled())
         return S_OK;
+
+    // Intercept modifier release if we have a pending auto-pair action
+    if (_pendingPairAction.active)
+    {
+        if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT ||
+            wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL ||
+            wParam == VK_MENU || wParam == VK_LMENU || wParam == VK_RMENU)
+        {
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+    }
 
     // Handle pending toggle key release
     if (_pendingKeyUpKey != 0)
@@ -647,6 +673,30 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
 
     // Update modifier state machine for this KeyUp event
     _UpdateModsOnKeyUp(wParam);
+
+    // Execute pending auto-pair action when all modifiers are released
+    if (_pendingPairAction.active && !_AreModifiersHeld())
+    {
+        WIND_LOG_DEBUG_FMT(L"Auto-pair: executing deferred vk=0x%02X x%d (modifiers released)\n",
+            (WORD)_pendingPairAction.vk, _pendingPairAction.count);
+        for (int i = 0; i < _pendingPairAction.count; i++)
+        {
+            _PushSkipKey(_pendingPairAction.vk);
+            INPUT inputs[2] = {};
+            inputs[0].type = INPUT_KEYBOARD;
+            inputs[0].ki.wVk = _pendingPairAction.vk;
+            inputs[1].type = INPUT_KEYBOARD;
+            inputs[1].ki.wVk = _pendingPairAction.vk;
+            inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(2, inputs, sizeof(INPUT));
+        }
+        _pendingPairAction = {};
+        // Consume the modifier key-up to prevent mode toggle.
+        // The user pressed Shift for a shifted character (e.g., parenthesis),
+        // not for toggling input mode.
+        *pfEaten = TRUE;
+        return S_OK;
+    }
 
     // Handle toggle key release for mode toggle
     if (_pendingKeyUpKey != 0)
@@ -1126,6 +1176,32 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         WIND_LOG_DEBUG(L"Key consumed by hotkey\n");
         return TRUE;
 
+    case ResponseType::InsertTextWithCursor:
+        {
+            WIND_LOG_DEBUG(L"Processing InsertTextWithCursor response\n");
+            _pTextService->CommitText(response.text);
+            _isComposing = FALSE;
+            _hasCandidates = FALSE;
+            for (int i = 0; i < response.cursorOffset; i++)
+                _SimulatePairKey(VK_LEFT);
+        }
+        return TRUE;
+
+    case ResponseType::MoveCursorRight:
+        {
+            WIND_LOG_DEBUG(L"Processing MoveCursorRight response (smart skip)\n");
+            _SimulatePairKey(VK_RIGHT);
+        }
+        return TRUE;
+
+    case ResponseType::DeletePair:
+        {
+            WIND_LOG_DEBUG(L"Processing DeletePair response (smart delete)\n");
+            _SimulatePairKey(VK_DELETE);
+            _SimulatePairKey(VK_BACK);
+        }
+        return TRUE;
+
     default:
         WIND_LOG_ERROR(L"Unknown response type from service");
         return TRUE;
@@ -1407,5 +1483,84 @@ void CKeyEventSink::_CheckBarrierTimeout()
         _isComposing = FALSE;
         _hasCandidates = FALSE;
     }
+}
+
+// ============================================================================
+// Auto-pair key simulation (deferred + skip list approach)
+//
+// When modifiers are held (e.g., Shift for "("), we defer the cursor key
+// until modifiers are released. This avoids the fundamental flaw of the
+// "release modifiers via SendInput" approach: releasing and restoring Shift
+// via SendInput causes the OS to generate additional Shift key-down events
+// (with repeat bit 0), which re-arms _pendingKeyUpKey and triggers mode
+// toggle when the physical Shift is released.
+// ============================================================================
+
+void CKeyEventSink::_SimulatePairKey(WORD vk)
+{
+    if (_AreModifiersHeld())
+    {
+        // Defer: save action, execute when modifiers released
+        if (!_pendingPairAction.active)
+        {
+            _pendingPairAction.vk = vk;
+            _pendingPairAction.count = 1;
+            _pendingPairAction.active = true;
+        }
+        else if (_pendingPairAction.vk == vk)
+        {
+            // Same key deferred again (e.g., Shift+< pressed multiple times)
+            // Only the last pair's cursor positioning matters, keep count = 1
+        }
+        else
+        {
+            // Different key — replace pending action
+            _pendingPairAction.vk = vk;
+            _pendingPairAction.count = 1;
+        }
+        WIND_LOG_DEBUG_FMT(L"Auto-pair: deferred vk=0x%02X x%d (modifiers held)\n",
+            (WORD)vk, _pendingPairAction.count);
+        return;
+    }
+
+    // No modifiers: execute immediately via skip list
+    _PushSkipKey(vk);
+
+    INPUT inputs[2] = {};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = vk;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = vk;
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, inputs, sizeof(INPUT));
+}
+
+bool CKeyEventSink::_AreModifiersHeld()
+{
+    return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ||
+           (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
+           (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+}
+
+void CKeyEventSink::_PushSkipKey(WORD vk)
+{
+    if (_skipKeyCount < MAX_SKIP_KEYS)
+    {
+        _skipKeys[_skipKeyCount++] = vk;
+    }
+}
+
+BOOL CKeyEventSink::_TryConsumeSkipKey(WPARAM wParam)
+{
+    if (_skipKeyCount > 0 && _skipKeys[0] == (WORD)wParam)
+    {
+        // Shift remaining entries left
+        for (int i = 1; i < _skipKeyCount; i++)
+            _skipKeys[i - 1] = _skipKeys[i];
+        _skipKeyCount--;
+        WIND_LOG_DEBUG_FMT(L"Auto-pair: skip key 0x%02X bypassed IME, remaining=%d\n", (WORD)wParam, _skipKeyCount);
+        return TRUE;
+    }
+    return FALSE;
 }
 

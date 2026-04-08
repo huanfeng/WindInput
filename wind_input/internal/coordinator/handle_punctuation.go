@@ -3,6 +3,7 @@ package coordinator
 
 import (
 	"strings"
+	"time"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/engine"
@@ -161,9 +162,29 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 			c.clearState()
 			c.hideUI()
 
+			commitText := prefix + text
+
+			// punct_commit 后的标点也支持自动配对
+			if c.shouldAutoPair() {
+				punctRunes := []rune(punctText)
+				if len(punctRunes) == 1 {
+					if right, ok := c.pairTracker.GetRight(punctRunes[0]); ok {
+						pairPunctText := punctText + string(right)
+						c.pairTracker.Push(punctRunes[0], right)
+						c.pairInsertTime = time.Now()
+						c.logger.Debug("Auto-pair: insert pair after punct_commit", "text", pairPunctText)
+						return &bridge.KeyEventResult{
+							Type:         bridge.ResponseTypeInsertTextWithCursor,
+							Text:         commitText + pairPunctText,
+							CursorOffset: 1,
+						}
+					}
+				}
+			}
+
 			return &bridge.KeyEventResult{
 				Type: bridge.ResponseTypeInsertText,
-				Text: prefix + text + punctText,
+				Text: commitText + punctText,
 			}
 		}
 	}
@@ -193,6 +214,38 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 		punctText = transform.ToFullWidth(punctText)
 	}
 
+	// 自动配对：检查转换后的标点是否需要配对
+	if c.shouldAutoPair() {
+		punctRunes := []rune(punctText)
+		if len(punctRunes) == 1 {
+			// 智能跳过：输入右标点时，如果栈顶匹配则跳过
+			if c.pairTracker.IsRight(punctRunes[0]) {
+				if entry, ok := c.pairTracker.Peek(); ok && entry.Right == punctRunes[0] {
+					c.pairTracker.Pop()
+					c.logger.Debug("Auto-pair: smart skip", "char", punctText)
+					return &bridge.KeyEventResult{
+						Type: bridge.ResponseTypeMoveCursorRight,
+					}
+				}
+				// 栈顶不匹配，清空栈
+				c.pairTracker.Clear()
+			}
+
+			// 自动配对：输入左标点时，插入配对并回退光标
+			if right, ok := c.pairTracker.GetRight(punctRunes[0]); ok {
+				pairText := punctText + string(right)
+				c.pairTracker.Push(punctRunes[0], right)
+				c.pairInsertTime = time.Now()
+				c.logger.Debug("Auto-pair: insert pair", "text", pairText)
+				return &bridge.KeyEventResult{
+					Type:         bridge.ResponseTypeInsertTextWithCursor,
+					Text:         pairText,
+					CursorOffset: 1,
+				}
+			}
+		}
+	}
+
 	return &bridge.KeyEventResult{
 		Type: bridge.ResponseTypeInsertText,
 		Text: punctText,
@@ -214,6 +267,28 @@ func (c *Coordinator) shouldSmartPunct(r rune, afterDigit bool, prevChar rune) b
 	}
 	// 回退：Go 端按键状态追踪
 	return afterDigit
+}
+
+// shouldAutoPair 判断当前是否应启用自动配对
+func (c *Coordinator) shouldAutoPair() bool {
+	if c.config == nil || !c.config.Input.AutoPair.Chinese {
+		return false
+	}
+	if !c.chineseMode || !c.chinesePunctuation {
+		return false
+	}
+	if c.pairTracker == nil {
+		return false
+	}
+	// 检查应用黑名单
+	if len(c.config.Input.AutoPair.Blacklist) > 0 && c.activeProcessName != "" {
+		for _, proc := range c.config.Input.AutoPair.Blacklist {
+			if strings.EqualFold(proc, c.activeProcessName) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // applyToggleFullWidth 执行全角切换的核心逻辑（需持锁调用）
@@ -239,6 +314,9 @@ func (c *Coordinator) handleToggleFullWidth() *bridge.KeyEventResult {
 func (c *Coordinator) applyTogglePunct() {
 	c.chinesePunctuation = !c.chinesePunctuation
 	c.punctConverter.Reset()
+	if c.pairTracker != nil {
+		c.pairTracker.Clear()
+	}
 	indicator := "英."
 	if c.chinesePunctuation {
 		indicator = "中。"

@@ -5,14 +5,17 @@ package bridge
 type ResponseType string
 
 const (
-	ResponseTypeInsertText        ResponseType = "insert_text"
-	ResponseTypeUpdateComposition ResponseType = "update_composition"
-	ResponseTypeClearComposition  ResponseType = "clear_composition"
-	ResponseTypeAck               ResponseType = "ack"
-	ResponseTypePassThrough       ResponseType = "pass_through" // Key not handled, pass to system
-	ResponseTypeModeChanged       ResponseType = "mode_changed"
-	ResponseTypeStatusUpdate      ResponseType = "status_update"
-	ResponseTypeConsumed          ResponseType = "consumed"
+	ResponseTypeInsertText           ResponseType = "insert_text"
+	ResponseTypeUpdateComposition    ResponseType = "update_composition"
+	ResponseTypeClearComposition     ResponseType = "clear_composition"
+	ResponseTypeAck                  ResponseType = "ack"
+	ResponseTypePassThrough          ResponseType = "pass_through" // Key not handled, pass to system
+	ResponseTypeModeChanged          ResponseType = "mode_changed"
+	ResponseTypeStatusUpdate         ResponseType = "status_update"
+	ResponseTypeConsumed             ResponseType = "consumed"
+	ResponseTypeInsertTextWithCursor ResponseType = "insert_text_with_cursor" // 插入文本并定位光标
+	ResponseTypeMoveCursorRight      ResponseType = "move_cursor_right"       // 光标右移（智能跳过）
+	ResponseTypeDeletePair           ResponseType = "delete_pair"             // 删除配对（智能删除）
 )
 
 // Toggle key state flags (matching C++ TOGGLE_* constants)
@@ -71,6 +74,7 @@ type KeyEventResult struct {
 	ChineseMode    bool   // For ModeChanged
 	ModeChanged    bool   // Whether mode was also changed (for InsertText + mode change combo)
 	NewComposition string // New composition after commit (for top code scenarios)
+	CursorOffset   int    // For InsertTextWithCursor: 光标从文本末尾向左偏移的字符数
 }
 
 // CommitRequestData contains commit request information (barrier mechanism)

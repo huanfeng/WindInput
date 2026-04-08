@@ -252,6 +252,45 @@ func (c *BinaryCodec) EncodeCommitText(text, newComposition string, modeChanged,
 	return result
 }
 
+// EncodeCommitTextWithCursor 编码带光标偏移的文本插入响应
+// Format: textLength(4) + cursorOffset(4) + UTF-8 text
+func (c *BinaryCodec) EncodeCommitTextWithCursor(text string, cursorOffset int) []byte {
+	textBytes := []byte(text)
+	payloadLen := uint32(8 + len(textBytes))
+	header := c.EncodeHeader(CmdCommitTextWithCursor, payloadLen)
+
+	payload := make([]byte, 8)
+	binary.LittleEndian.PutUint32(payload[0:4], uint32(len(textBytes)))
+	binary.LittleEndian.PutUint32(payload[4:8], uint32(cursorOffset))
+
+	result := make([]byte, 0, HeaderSize+payloadLen)
+	result = append(result, header...)
+	result = append(result, payload...)
+	result = append(result, textBytes...)
+	return result
+}
+
+// EncodeMoveCursor 编码光标移动响应（智能跳过）
+// Format: direction(4) — 1=right
+func (c *BinaryCodec) EncodeMoveCursor(direction int) []byte {
+	payloadLen := uint32(4)
+	header := c.EncodeHeader(CmdMoveCursor, payloadLen)
+
+	payload := make([]byte, 4)
+	binary.LittleEndian.PutUint32(payload[0:4], uint32(direction))
+
+	result := make([]byte, 0, HeaderSize+payloadLen)
+	result = append(result, header...)
+	result = append(result, payload...)
+	return result
+}
+
+// EncodeDeletePair 编码配对删除响应（智能删除）
+// Format: no payload (fixed behavior: delete 1 char left + 1 char right)
+func (c *BinaryCodec) EncodeDeletePair() []byte {
+	return c.EncodeHeader(CmdDeletePair, 0)
+}
+
 // EncodeUpdateComposition encodes an update composition response
 // Format: CompositionHeader (4 bytes) + UTF-8 text
 func (c *BinaryCodec) EncodeUpdateComposition(text string, caretPos int) []byte {
