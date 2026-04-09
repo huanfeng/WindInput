@@ -6,6 +6,7 @@ SetCompressor /SOLID lzma
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
 !include "x64.nsh"
+!include "nsDialogs.nsh"
 
 !ifndef APP_VERSION
 !define APP_VERSION "0.1.0"
@@ -23,6 +24,12 @@ SetCompressor /SOLID lzma
 !define OUTPUT_DIR "..\..\build\installer"
 
 Var RANDOM_SUFFIX
+Var CleanRoaming
+Var CleanLocal
+Var BackupToDesktop
+Var hCleanRoaming
+Var hCleanLocal
+Var hBackupToDesktop
 
 !if /FileExists "${BUILD_DIR}\wind_tsf.dll"
 !else
@@ -91,6 +98,7 @@ VIAddVersionKey "LegalCopyright" "Copyright (c) WindInput Project"
 
 !insertmacro MUI_UNPAGE_WELCOME
 !insertmacro MUI_UNPAGE_CONFIRM
+UninstPage custom un.UserDataPageCreate un.UserDataPageLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 ; --- 卸载完成页 ---
 !define MUI_FINISHPAGE_TITLE "${APP_NAME} ${APP_VERSION} 卸载完成"
@@ -107,6 +115,12 @@ Function .onInit
     SetErrorLevel 2
     Abort
   ${EndIf}
+FunctionEnd
+
+Function un.onInit
+  StrCpy $CleanRoaming ${BST_UNCHECKED}
+  StrCpy $CleanLocal ${BST_CHECKED}
+  StrCpy $BackupToDesktop ${BST_CHECKED}
 FunctionEnd
 
 ; ---------- Shared helpers ----------
@@ -221,6 +235,72 @@ Function un.BackupIfLocked
 un_backup_done:
   Pop $0
   Pop $1
+FunctionEnd
+
+; ---------- Uninstall: user data cleanup page ----------
+
+Function un.UserDataPageCreate
+  SetShellVarContext current
+
+  ; If neither Roaming nor Local user data exists, skip this page
+  IfFileExists "$APPDATA\${APP_DIRNAME}\*.*" un_userdata_show 0
+  IfFileExists "$LOCALAPPDATA\${APP_DIRNAME}\*.*" un_userdata_show 0
+  Abort
+un_userdata_show:
+
+  !insertmacro MUI_HEADER_TEXT "清理用户数据" "选择是否清除用户配置和缓存数据"
+
+  nsDialogs::Create 1018
+  Pop $0
+
+  ${NSD_CreateLabel} 0 0 100% 24u "卸载程序检测到以下用户数据，请选择是否清除："
+  Pop $0
+
+  ; Checkbox: clean Roaming data (user config, state, phrases)
+  ${NSD_CreateCheckbox} 0 30u 100% 12u "清除用户配置数据（用户配置、输入状态、自定义短语）"
+  Pop $hCleanRoaming
+  ${NSD_SetState} $hCleanRoaming ${BST_UNCHECKED}
+  ${NSD_OnClick} $hCleanRoaming un.OnCleanRoamingClick
+
+  ${NSD_CreateLabel} 12u 44u 100% 12u "$APPDATA\${APP_DIRNAME}"
+  Pop $0
+  SetCtlColors $0 808080 transparent
+
+  ; Checkbox: clean Local data (dict cache)
+  ${NSD_CreateCheckbox} 0 62u 100% 12u "清除本地缓存数据（词库缓存，可安全删除）"
+  Pop $hCleanLocal
+  ${NSD_SetState} $hCleanLocal ${BST_CHECKED}
+
+  ${NSD_CreateLabel} 12u 76u 100% 12u "$LOCALAPPDATA\${APP_DIRNAME}"
+  Pop $0
+  SetCtlColors $0 808080 transparent
+
+  ; Checkbox: backup Roaming to desktop before deletion
+  ${NSD_CreateCheckbox} 0 94u 100% 12u "备份配置数据到桌面（推荐）"
+  Pop $hBackupToDesktop
+  ${NSD_SetState} $hBackupToDesktop ${BST_CHECKED}
+  EnableWindow $hBackupToDesktop 0 ; disabled until "clean Roaming" is checked
+
+  ${NSD_CreateLabel} 0 116u 100% 24u "注意：自定义短语等数据删除后无法恢复，建议勾选备份选项。"
+  Pop $0
+  SetCtlColors $0 CC6600 transparent
+
+  nsDialogs::Show
+FunctionEnd
+
+Function un.OnCleanRoamingClick
+  ${NSD_GetState} $hCleanRoaming $0
+  ${If} $0 == ${BST_CHECKED}
+    EnableWindow $hBackupToDesktop 1
+  ${Else}
+    EnableWindow $hBackupToDesktop 0
+  ${EndIf}
+FunctionEnd
+
+Function un.UserDataPageLeave
+  ${NSD_GetState} $hCleanRoaming $CleanRoaming
+  ${NSD_GetState} $hCleanLocal $CleanLocal
+  ${NSD_GetState} $hBackupToDesktop $BackupToDesktop
 FunctionEnd
 
 Section "Install"
@@ -545,10 +625,30 @@ uninst_cleanup_bak_end:
   Delete "$SMPROGRAMS\清风输入法\卸载 清风输入法.lnk"
   RMDir "$SMPROGRAMS\清风输入法"
 
-  DetailPrint "正在清理缓存..."
-  RMDir /r /REBOOTOK "$LOCALAPPDATA\WindInput\cache"
+  ; --- Step 6: Clean user data ---
+  SetShellVarContext current
 
-  ; --- Step 6: Registry ---
+  ${If} $CleanRoaming == ${BST_CHECKED}
+    ${If} $BackupToDesktop == ${BST_CHECKED}
+      DetailPrint "正在备份用户数据到桌面..."
+      CreateDirectory "$DESKTOP\${APP_DIRNAME}_Backup"
+      CopyFiles /SILENT "$APPDATA\${APP_DIRNAME}\*.*" "$DESKTOP\${APP_DIRNAME}_Backup"
+    ${EndIf}
+    DetailPrint "正在清除用户配置数据..."
+    RMDir /r "$APPDATA\${APP_DIRNAME}"
+  ${EndIf}
+
+  ${If} $CleanLocal == ${BST_CHECKED}
+    DetailPrint "正在清除本地缓存数据..."
+    RMDir /r "$LOCALAPPDATA\${APP_DIRNAME}"
+  ${Else}
+    DetailPrint "正在清理缓存..."
+    RMDir /r "$LOCALAPPDATA\${APP_DIRNAME}\cache"
+  ${EndIf}
+
+  SetShellVarContext all
+
+  ; --- Step 7: Registry ---
   ; Remove auto-start entry
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "WindInput"
   DeleteRegKey HKLM "${UNINST_KEY}"
