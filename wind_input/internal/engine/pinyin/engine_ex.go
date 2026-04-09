@@ -344,25 +344,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			candidatesMap[c.Text] = &c
 		}
 
-		// 非首音节的单字：initialQuality=0.5，防止高频字（如"的"）
-		// 因 UserWord/LM/FreqScore 叠加压过首位子词组和精确匹配。
-		for i := 1; i < syllableCount; i++ {
-			syllable := completedSyllables[i]
-			others := e.lookupWithFuzzy(syllable, []string{syllable})
-			for _, cand := range others {
-				if _, exists := candidatesMap[cand.Text]; exists {
-					continue
-				}
-				c := cand
-				charCount := len([]rune(c.Text))
-				// 步骤 4：非首音节单字，initialQuality=0.5
-				coverage := float64(i+1) / float64(totalSyllableCount)
-				c.Weight = e.rimeScore(c.Text, float64(c.Weight), 0.5, coverage, charCount)
-				// 基于 Parser 位置精确计算：消耗到第 i+1 个已完成音节的结束位置
-				c.ConsumedLength = parsed.ConsumedBytesForCompletedN(i + 1)
-				candidatesMap[c.Text] = &c
-			}
-		}
+		// 非首音节单字不再加入初始候选列表。
+		// 这些候选（如 linwai 中的"外/歪/崴"）选中后会丢弃前面未确认的音节（lin），
+		// 造成用户输入丢失。它们应在用户部分上屏确认首音节后自然出现。
 	}
 
 	// ── 4b. 多 partial 音节时的首音节单字候选 ──

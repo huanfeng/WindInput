@@ -99,7 +99,7 @@ func TestNizhibuzhidao_KeyAssertions(t *testing.T) {
 		},
 		{
 			input:       "nizhi",
-			mustContain: []string{"你知", "你", "知"},
+			mustContain: []string{"你知", "你"},
 			desc:        "ni+zhi，你知应在候选中",
 		},
 		{
@@ -113,8 +113,8 @@ func TestNizhibuzhidao_KeyAssertions(t *testing.T) {
 		},
 		{
 			input:       "nizhibu",
-			mustContain: []string{"你知", "你", "不"},
-			desc:        "ni+zhi+bu，你知和不应在候选中",
+			mustContain: []string{"你知", "你"},
+			desc:        "ni+zhi+bu，你知应在候选中",
 			consumedCheck: map[string]int{
 				"你知": 5, // consumed=len("nizhi")=5
 				"你":  2,

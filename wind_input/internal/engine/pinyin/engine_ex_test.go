@@ -557,11 +557,7 @@ func TestEngineConvertExConsumedLength(t *testing.T) {
 			wantText:  "你",
 			wantRange: [2]int{2, 2}, // 首音节单字，消耗 "ni"
 		},
-		{
-			input:     "nihao",
-			wantText:  "好",
-			wantRange: [2]int{5, 5}, // 第二音节单字，消耗到 "nihao"
-		},
+		// "好" 不再作为非首音节单字候选出现（选中会丢弃 "ni"）
 	}
 
 	for _, tt := range tests {

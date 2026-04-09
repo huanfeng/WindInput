@@ -109,10 +109,10 @@ func TestIncrementalInput_KeyAssertions(t *testing.T) {
 		{"nishu", []string{"你"}, "", "ni+shu，你应保留"},
 		{"nishuo", []string{"你说"}, "你说", "ni+shuo 精确匹配你说"},
 		{"nishuob", []string{"你说"}, "", "ni+shuo+b(partial)，你说应保留"},
-		{"nishuobu", []string{"你说", "不"}, "", "ni+shuo+bu，你说和不应在候选中"},
+		{"nishuobu", []string{"你说"}, "", "ni+shuo+bu，你说应在候选中"},
 		{"nishuobush", []string{"你说"}, "", "ni+shuo+bu+sh(partial)，你说应保留"},
 		{"nishuobushu", []string{"你说"}, "", "ni+shuo+bu+shu，你说应保留"},
-		{"nishuobushuo", []string{"你说", "说", "不说"}, "", "完整输入，你说和说/不说应在候选中"},
+		{"nishuobushuo", []string{"你说", "不说"}, "", "完整输入，你说和不说应在候选中"},
 	}
 
 	for _, tt := range tests {
