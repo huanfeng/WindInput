@@ -62,50 +62,6 @@
       </div>
     </div>
 
-    <!-- 功能快捷键 -->
-    <div class="settings-card">
-      <div class="card-title">功能快捷键</div>
-      <div class="setting-item">
-        <div class="setting-info">
-          <label>切换输入方案</label>
-          <p class="setting-hint">在已启用的输入方案间循环切换</p>
-        </div>
-        <div class="setting-control">
-          <select v-model="formData.hotkeys.switch_engine" class="select">
-            <option value="ctrl+`">Ctrl + `</option>
-            <option value="ctrl+shift+e">Ctrl + Shift + E</option>
-            <option value="none">不使用</option>
-          </select>
-        </div>
-      </div>
-      <div class="setting-item">
-        <div class="setting-info">
-          <label>切换全角/半角</label>
-          <p class="setting-hint">切换字符宽度模式</p>
-        </div>
-        <div class="setting-control">
-          <select v-model="formData.hotkeys.toggle_full_width" class="select">
-            <option value="shift+space">Shift + Space</option>
-            <option value="ctrl+shift+space">Ctrl + Shift + Space</option>
-            <option value="none">不使用</option>
-          </select>
-        </div>
-      </div>
-      <div class="setting-item">
-        <div class="setting-info">
-          <label>切换中/英文标点</label>
-          <p class="setting-hint">切换标点符号类型</p>
-        </div>
-        <div class="setting-control">
-          <select v-model="formData.hotkeys.toggle_punct" class="select">
-            <option value="ctrl+.">Ctrl + .</option>
-            <option value="ctrl+,">Ctrl + ,</option>
-            <option value="none">不使用</option>
-          </select>
-        </div>
-      </div>
-    </div>
-
     <!-- 候选词管理 -->
     <div class="settings-card">
       <div class="card-title">候选词管理</div>
@@ -287,103 +243,27 @@
       </div>
     </div>
 
-    <!-- 更多快捷键 -->
+    <!-- 功能快捷键 -->
     <div class="settings-card">
-      <div class="card-title">更多快捷键</div>
-      <div
-        class="setting-item"
-        v-for="item in genericHotkeyItems"
+      <div class="card-title">功能快捷键</div>
+      <HotkeyComposer
+        v-for="item in composerItems"
         :key="item.field"
-      >
-        <div class="setting-info">
-          <label>{{ item.label }}</label>
-          <p class="setting-hint">{{ item.hint }}</p>
-        </div>
-        <div class="setting-control">
-          <div
-            class="hotkey-recorder"
-            :class="{ recording: recordingField === item.field }"
-            tabindex="0"
-            @click="toggleRecording(item.field)"
-            @blur="stopRecording(item.field)"
-            @keydown="handleRecordKeydown($event, item.field)"
-          >
-            <span
-              class="hotkey-display"
-              :class="{ placeholder: isPlaceholder(item.field) }"
-            >
-              {{ getRecorderDisplay(item.field) }}
-            </span>
-            <button
-              v-if="
-                getHotkeyValue(item.field) !== 'none' &&
-                recordingField !== item.field
-              "
-              class="hotkey-action-btn"
-              @click.stop="clearHotkey(item.field)"
-              title="清除"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14">
-                <path
-                  d="M3.5 3.5l7 7M10.5 3.5l-7 7"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                />
-              </svg>
-            </button>
-            <button
-              v-if="recordingField === item.field"
-              class="hotkey-action-btn"
-              @mousedown.prevent.stop="stopRecording(item.field)"
-              title="取消录入"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14">
-                <path
-                  d="M3.5 3.5l7 7M10.5 3.5l-7 7"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                />
-              </svg>
-            </button>
-            <button
-              v-if="
-                hasNonDefaultValue(item.field) && recordingField !== item.field
-              "
-              class="hotkey-action-btn"
-              @click.stop="restoreDefault(item.field)"
-              title="恢复默认"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14">
-                <path
-                  d="M2.5 7.5a5 5 0 1 1 1 3"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                />
-                <path
-                  d="M2.5 10.5v-3h3"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            </button>
-          </div>
-        </div>
-      </div>
+        :label="item.label"
+        :hint="item.hint"
+        :model-value="getHotkeyValue(item.field)"
+        :default-value="getDefaultValue(item.field)"
+        @update:model-value="setHotkeyValue(item.field, $event)"
+      />
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from "vue";
+import { watch, computed } from "vue";
 import type { Config, HotkeyConfig } from "../api/settings";
 import { getDefaultConfig } from "../api/settings";
+import HotkeyComposer from "../components/HotkeyComposer.vue";
 
 const props = defineProps<{
   formData: Config;
@@ -395,23 +275,40 @@ const emit = defineEmits<{
   "update:hotkeyConflicts": [conflicts: string[]];
 }>();
 
-// 通用快捷键字段定义
-const genericHotkeyItems = [
+// 功能快捷键定义（统一使用 HotkeyComposer）
+const composerItems = [
+  {
+    field: "switch_engine",
+    label: "切换输入方案",
+    hint: "在已启用的输入方案间循环切换",
+  },
+  {
+    field: "toggle_full_width",
+    label: "切换全角/半角",
+    hint: "切换字符宽度模式",
+  },
+  {
+    field: "toggle_punct",
+    label: "切换中/英文标点",
+    hint: "切换标点符号类型",
+  },
   {
     field: "toggle_toolbar",
     label: "显示/隐藏状态栏",
     hint: "切换状态栏的显示状态",
   },
   { field: "open_settings", label: "打开设置", hint: "打开设置窗口" },
+  {
+    field: "add_word",
+    label: "快捷加词",
+    hint: "快速将输入的内容加入用户词库",
+  },
 ];
 
 // 默认值缓存（优先使用系统默认配置）
 const defaults = computed<HotkeyConfig>(
   () => props.systemDefaults?.hotkeys || getDefaultConfig().hotkeys,
 );
-
-// 按键录入器状态
-const recordingField = ref<string | null>(null);
 
 // 候选操作快捷键冲突检测
 const candidateActionConflict = computed(() => {
@@ -420,189 +317,26 @@ const candidateActionConflict = computed(() => {
   return pin !== "none" && del !== "none" && pin === del;
 });
 
-// --- 按键录入器方法 ---
+// --- HotkeyComposer 辅助方法 ---
 
 function getHotkeyValue(field: string): string {
   return (props.formData.hotkeys as any)[field] || "none";
 }
 
-function isPlaceholder(field: string): boolean {
-  if (recordingField.value === field) return false;
-  return getHotkeyValue(field) === "none";
+function getDefaultValue(field: string): string {
+  return (defaults.value as any)[field] || "none";
 }
 
-function getRecorderDisplay(field: string): string {
-  if (recordingField.value === field) return "请按下快捷键...";
-  return formatHotkeyDisplay(getHotkeyValue(field));
-}
-
-function hasNonDefaultValue(field: string): boolean {
-  const current = getHotkeyValue(field);
-  const def = (defaults.value as any)[field] || "none";
-  return current !== def;
-}
-
-function toggleRecording(field: string) {
-  if (recordingField.value === field) {
-    recordingField.value = null;
-  } else {
-    recordingField.value = field;
-  }
-}
-
-function stopRecording(field: string) {
-  if (recordingField.value === field) {
-    recordingField.value = null;
-  }
-}
-
-function handleRecordKeydown(e: KeyboardEvent, field: string) {
-  if (recordingField.value !== field) return;
-  e.preventDefault();
-  e.stopPropagation();
-
-  // ESC 取消录入
-  if (e.key === "Escape") {
-    recordingField.value = null;
-    return;
-  }
-
-  // 只有修饰键按下时不记录（等待实际按键）
-  if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) {
-    return;
-  }
-
-  // 必须包含至少一个修饰键
-  if (!e.ctrlKey && !e.shiftKey && !e.altKey) {
-    return;
-  }
-
-  // 构建快捷键字符串
-  const parts: string[] = [];
-  if (e.ctrlKey) parts.push("ctrl");
-  if (e.shiftKey) parts.push("shift");
-  if (e.altKey) parts.push("alt");
-
-  const keyName = mapKeyToName(e.key, e.code);
-  if (!keyName) return;
-
-  parts.push(keyName);
-  const hotkeyStr = parts.join("+");
-
-  // 冲突解决：如果其他通用快捷键字段使用了相同的组合，自动清除旧绑定
-  for (const item of genericHotkeyItems) {
-    if (item.field !== field && getHotkeyValue(item.field) === hotkeyStr) {
-      (props.formData.hotkeys as any)[item.field] = "none";
+function setHotkeyValue(field: string, value: string) {
+  // 冲突解决：如果其他功能快捷键使用了相同的组合，自动清除旧绑定
+  if (value !== "none") {
+    for (const item of composerItems) {
+      if (item.field !== field && getHotkeyValue(item.field) === value) {
+        (props.formData.hotkeys as any)[item.field] = "none";
+      }
     }
   }
-
-  (props.formData.hotkeys as any)[field] = hotkeyStr;
-  recordingField.value = null;
-}
-
-function mapKeyToName(key: string, _code: string): string | null {
-  if (key.length === 1 && /[a-zA-Z]/.test(key)) {
-    return key.toLowerCase();
-  }
-  if (key.length === 1 && /[0-9]/.test(key)) {
-    return key;
-  }
-  const specialKeys: Record<string, string> = {
-    "`": "`",
-    "~": "`",
-    "-": "-",
-    _: "-",
-    "=": "=",
-    "+": "=",
-    "[": "[",
-    "{": "[",
-    "]": "]",
-    "}": "]",
-    "\\": "\\",
-    "|": "\\",
-    ";": ";",
-    ":": ";",
-    "'": "'",
-    '"': "'",
-    ",": ",",
-    "<": ",",
-    ".": ".",
-    ">": ".",
-    "/": "/",
-    "?": "/",
-    " ": "space",
-    Tab: "tab",
-    F1: "f1",
-    F2: "f2",
-    F3: "f3",
-    F4: "f4",
-    F5: "f5",
-    F6: "f6",
-    F7: "f7",
-    F8: "f8",
-    F9: "f9",
-    F10: "f10",
-    F11: "f11",
-    F12: "f12",
-  };
-  return specialKeys[key] || null;
-}
-
-function clearHotkey(field: string) {
-  (props.formData.hotkeys as any)[field] = "none";
-  recordingField.value = null;
-}
-
-function restoreDefault(field: string) {
-  (props.formData.hotkeys as any)[field] = (defaults.value as any)[field] || "none";
-  recordingField.value = null;
-}
-
-function formatHotkeyDisplay(value: string): string {
-  if (!value || value === "none") return "未设置（点击录入）";
-
-  const labels: Record<string, string> = {
-    ctrl: "Ctrl",
-    shift: "Shift",
-    alt: "Alt",
-    space: "Space",
-    tab: "Tab",
-    f1: "F1",
-    f2: "F2",
-    f3: "F3",
-    f4: "F4",
-    f5: "F5",
-    f6: "F6",
-    f7: "F7",
-    f8: "F8",
-    f9: "F9",
-    f10: "F10",
-    f11: "F11",
-    f12: "F12",
-    "`": "`",
-    "-": "-",
-    "=": "=",
-    "[": "[",
-    "]": "]",
-    "\\": "\\",
-    ";": ";",
-    "'": "'",
-    ",": ",",
-    ".": ".",
-    "/": "/",
-  };
-
-  return value
-    .split("+")
-    .map((part) => {
-      const trimmed = part.trim();
-      if (labels[trimmed]) return labels[trimmed];
-      if (trimmed.length === 1 && /[a-z]/.test(trimmed))
-        return trimmed.toUpperCase();
-      if (trimmed.length === 1 && /[0-9]/.test(trimmed)) return trimmed;
-      return trimmed;
-    })
-    .join(" + ");
+  (props.formData.hotkeys as any)[field] = value;
 }
 
 // --- 原有逻辑 ---
@@ -712,59 +446,6 @@ watch(
 </script>
 
 <style scoped>
-.hotkey-recorder {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 200px;
-  padding: 6px 10px;
-  border: 1px solid var(--border-color, #d0d0d0);
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  transition:
-    border-color 0.2s,
-    box-shadow 0.2s;
-  background: var(--input-bg, #fff);
-}
-.hotkey-recorder:focus,
-.hotkey-recorder.recording {
-  outline: none;
-  border-color: var(--primary-color, #4a90d9);
-  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.2);
-}
-.hotkey-recorder.recording .hotkey-display {
-  color: var(--primary-color, #4a90d9);
-}
-.hotkey-display {
-  flex: 1;
-  color: var(--text-color, #333);
-  user-select: none;
-}
-.hotkey-display.placeholder {
-  color: var(--text-secondary, #999);
-}
-.hotkey-action-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--text-secondary, #999);
-  transition:
-    color 0.15s,
-    background 0.15s;
-  flex-shrink: 0;
-}
-.hotkey-action-btn:hover {
-  color: var(--text-color, #333);
-  background: var(--hover-bg, rgba(0, 0, 0, 0.06));
-}
 .warning-inline {
   display: flex;
   align-items: center;

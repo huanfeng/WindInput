@@ -78,6 +78,7 @@ export interface HotkeyConfig {
   pin_candidate: string; // "ctrl+number", "ctrl+shift+number", "none"
   toggle_toolbar: string; // 通用按键组合或 "none"
   open_settings: string; // 通用按键组合或 "none"
+  add_word: string; // 快捷加词: 通用按键组合或 "none"
 }
 
 // UI配置
@@ -325,6 +326,7 @@ export function getDefaultConfig(): Config {
       pin_candidate: "ctrl+number",
       toggle_toolbar: "none",
       open_settings: "none",
+      add_word: "ctrl+=",
     },
     ui: {
       font_size: 18,
