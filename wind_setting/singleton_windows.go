@@ -10,13 +10,14 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-const (
-	mutexName   = "Global\\WindInput_Setting_SingleInstance"
-	eventName   = "Global\\WindInput_Setting_NavigateEvent"
-	windowTitle = "清风输入法 设置"
+var (
+	mutexName   = "Global\\WindInput_Setting_SingleInstance" + buildvariant.Suffix()
+	eventName   = "Global\\WindInput_Setting_NavigateEvent" + buildvariant.Suffix()
+	windowTitle = buildvariant.DisplayName() + " 设置"
 )
 
 var (
@@ -36,7 +37,7 @@ const swRestore = 9
 
 // navigateFilePath returns the path used to pass page name between instances.
 func navigateFilePath() string {
-	return filepath.Join(os.TempDir(), "WindInput_Setting_Navigate.txt")
+	return filepath.Join(os.TempDir(), "WindInput_Setting_Navigate"+buildvariant.Suffix()+".txt")
 }
 
 // ensureSingleInstance checks if another instance is already running.
