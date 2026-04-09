@@ -324,7 +324,9 @@ func Save(config *Config) error {
 
 // SaveTo saves the configuration to a specific path
 // If path is empty, uses the default config path
-func SaveTo(config *Config, path string) error {
+// 使用 diff 保存：只将与系统默认值不同的字段写入用户配置文件，
+// 使未修改的字段能自动跟随系统默认值的更新。
+func SaveTo(cfg *Config, path string) error {
 	if err := EnsureConfigDir(); err != nil {
 		return fmt.Errorf("failed to create config dir: %w", err)
 	}
@@ -337,9 +339,22 @@ func SaveTo(config *Config, path string) error {
 		}
 	}
 
-	data, err := yaml.Marshal(config)
+	// 计算与系统默认配置的差异，只保存用户修改过的字段
+	base := SystemDefaultConfig()
+	diff, err := ComputeYAMLDiff(base, cfg)
 	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
+		// diff 失败时回退到全量保存
+		fmt.Fprintf(os.Stderr, "[config] warning: diff failed, falling back to full save: %v\n", err)
+		data, err := yaml.Marshal(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to marshal config: %w", err)
+		}
+		return os.WriteFile(path, data, 0644)
+	}
+
+	data, err := yaml.Marshal(diff)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config diff: %w", err)
 	}
 
 	if err := os.WriteFile(path, data, 0644); err != nil {

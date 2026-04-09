@@ -117,26 +117,45 @@ func (a *App) GetAvailableSchemas() ([]SchemaInfo, error) {
 }
 
 // GetSchemaConfig 获取指定方案的完整配置
+// 使用合并读取：先加载内置方案作为基础，再叠加用户方案覆盖
 func (a *App) GetSchemaConfig(schemaID string) (*SchemaConfig, error) {
-	path, err := findSchemaFile(schemaID)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("读取方案文件失败: %w", err)
-	}
-
 	var cfg SchemaConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("解析方案文件失败: %w", err)
+
+	// Layer 1: 加载内置方案作为基础
+	builtinPath, builtinErr := findBuiltinSchemaFile(schemaID)
+	if builtinErr == nil {
+		data, err := os.ReadFile(builtinPath)
+		if err != nil {
+			return nil, fmt.Errorf("读取内置方案文件失败: %w", err)
+		}
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("解析内置方案文件失败: %w", err)
+		}
+	}
+
+	// Layer 2: 叠加用户方案覆盖（缺失字段保留内置值）
+	userPath, userErr := findUserSchemaFile(schemaID)
+	if userErr == nil {
+		data, err := os.ReadFile(userPath)
+		if err != nil {
+			return nil, fmt.Errorf("读取用户方案文件失败: %w", err)
+		}
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("解析用户方案文件失败: %w", err)
+		}
+	}
+
+	// 内置和用户方案都不存在
+	if builtinErr != nil && userErr != nil {
+		return nil, fmt.Errorf("方案文件不存在: %s", schemaID)
 	}
 
 	return &cfg, nil
 }
 
 // SaveSchemaConfig 保存方案配置（写入用户目录的方案文件）
+// 使用 diff 保存：只将与内置方案不同的字段写入用户文件，
+// 使未修改的字段能自动跟随内置方案的更新。
 func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
@@ -149,11 +168,36 @@ func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
 		return fmt.Errorf("创建方案目录失败: %w", err)
 	}
 
-	// 写入用户目录的方案文件
 	path := filepath.Join(userSchemaDir, schemaID+".schema.yaml")
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("序列化方案配置失败: %w", err)
+
+	// 尝试加载内置方案作为 diff 基准
+	var data []byte
+	builtinPath, builtinErr := findBuiltinSchemaFile(schemaID)
+	if builtinErr == nil {
+		builtinData, err := os.ReadFile(builtinPath)
+		if err == nil {
+			var baseCfg SchemaConfig
+			if err := yaml.Unmarshal(builtinData, &baseCfg); err == nil {
+				diff, err := config.ComputeYAMLDiff(&baseCfg, cfg)
+				if err == nil {
+					// 确保 schema.id 始终存在（合并时需要用 ID 匹配内置方案）
+					ensureSchemaID(diff, schemaID)
+					data, err = yaml.Marshal(diff)
+					if err != nil {
+						data = nil // 回退到全量保存
+					}
+				}
+			}
+		}
+	}
+
+	// diff 失败或无内置方案（用户自定义方案）：全量保存
+	if data == nil {
+		var err error
+		data, err = yaml.Marshal(cfg)
+		if err != nil {
+			return fmt.Errorf("序列化方案配置失败: %w", err)
+		}
 	}
 
 	if err := os.WriteFile(path, data, 0644); err != nil {
@@ -166,6 +210,16 @@ func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
 	}
 
 	return nil
+}
+
+// ensureSchemaID 确保 diff map 中包含 schema.id 字段
+func ensureSchemaID(diff map[string]interface{}, schemaID string) {
+	schemaMap, ok := diff["schema"].(map[string]interface{})
+	if !ok {
+		schemaMap = make(map[string]interface{})
+		diff["schema"] = schemaMap
+	}
+	schemaMap["id"] = schemaID
 }
 
 // SwitchActiveSchema 切换活跃方案
@@ -332,6 +386,31 @@ func findSchemaFile(schemaID string) (string, error) {
 	}
 
 	return "", fmt.Errorf("方案文件不存在: %s", schemaID)
+}
+
+// findBuiltinSchemaFile 查找内置方案文件（程序数据目录）
+func findBuiltinSchemaFile(schemaID string) (string, error) {
+	filename := schemaID + ".schema.yaml"
+	exeDir := getExeDir()
+	exePath := filepath.Join(exeDir, "data", "schemas", filename)
+	if _, err := os.Stat(exePath); err == nil {
+		return exePath, nil
+	}
+	return "", fmt.Errorf("内置方案文件不存在: %s", schemaID)
+}
+
+// findUserSchemaFile 查找用户方案文件（用户配置目录）
+func findUserSchemaFile(schemaID string) (string, error) {
+	filename := schemaID + ".schema.yaml"
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	userPath := filepath.Join(configDir, "schemas", filename)
+	if _, err := os.Stat(userPath); err == nil {
+		return userPath, nil
+	}
+	return "", fmt.Errorf("用户方案文件不存在: %s", schemaID)
 }
 
 func getExeDir() string {
