@@ -7,6 +7,8 @@ import type {
   SchemaInfo,
   SchemaReference,
 } from "../api/wails";
+import SchemaDetailPanel from "../components/SchemaDetailPanel.vue";
+import SchemaManagerDialog from "../components/SchemaManagerDialog.vue";
 
 const props = defineProps<{
   formData: Config;
@@ -27,9 +29,11 @@ const enabledSchemaIDs = ref<string[]>([]);
 const schemaConfigs = ref<Record<string, SchemaConfig>>({});
 const schemaLoading = ref(false);
 
-// 添加方案下拉
-const showAddDropdown = ref(false);
-const addDropdownRef = ref<HTMLElement | null>(null);
+// 方案管理对话框
+const showSchemaManager = ref(false);
+
+// 方案详情浮层
+const detailSchemaID = ref<string | null>(null);
 
 // 模糊音对话框
 const showFuzzyDialog = ref(false);
@@ -43,10 +47,6 @@ const referencedOnlyIDs = ref<string[]>([]);
 // 当前活跃方案 ID
 const activeSchemaID = computed(() => props.formData.schema?.active || "");
 
-// 未启用的方案列表
-const disabledSchemas = computed(() =>
-  allSchemas.value.filter((s) => !enabledSchemaIDs.value.includes(s.id)),
-);
 
 // 获取引擎类型的显示文本
 function getEngineTypeLabel(schemaID: string): string {
@@ -165,7 +165,6 @@ function enableSchema(schemaID: string) {
   enabledSchemaIDs.value.push(schemaID);
   loadSchemaConfig(schemaID);
   props.formData.schema.available = [...enabledSchemaIDs.value];
-  showAddDropdown.value = false;
   refreshSchemaReferences();
 }
 
@@ -421,22 +420,16 @@ function setAllFuzzyPairs(enabled: boolean) {
   onSchemaConfigChange(fuzzyEditSchemaID.value);
 }
 
-function handleDocumentClick(event: MouseEvent) {
-  if (
-    addDropdownRef.value &&
-    !addDropdownRef.value.contains(event.target as Node)
-  ) {
-    showAddDropdown.value = false;
-  }
+// 打开方案详情对话框
+function openSchemaDetail(schemaID: string) {
+  detailSchemaID.value = schemaID;
 }
 
 onMounted(() => {
-  document.addEventListener("click", handleDocumentClick);
   loadAllSchemas();
 });
 
 onUnmounted(() => {
-  document.removeEventListener("click", handleDocumentClick);
   Object.values(saveTimers).forEach(clearTimeout);
 });
 </script>
@@ -452,39 +445,12 @@ onUnmounted(() => {
     <div class="settings-card schema-list-card">
       <div class="card-title schema-list-header">
         <span>输入方案</span>
-        <div class="schema-add-dropdown" ref="addDropdownRef">
-          <button
-            class="btn btn-sm btn-primary"
-            :disabled="disabledSchemas.length === 0"
-            @click="showAddDropdown = !showAddDropdown"
-          >
-            + 添加方案
-          </button>
-          <div v-if="showAddDropdown" class="schema-add-menu">
-            <div
-              v-for="schema in disabledSchemas"
-              :key="schema.id"
-              class="schema-add-option"
-              @click="enableSchema(schema.id)"
-            >
-              <div class="schema-add-option-main">
-                <span class="schema-add-option-name">{{ schema.name }}</span>
-                <span class="schema-add-option-type">{{
-                  { codetable: "码表", pinyin: "拼音", mixed: "混输" }[
-                    schema.engine_type
-                  ] || schema.engine_type
-                }}</span>
-                <span v-if="schema.error" class="schema-row-error">异常</span>
-              </div>
-              <div v-if="schema.error" class="schema-add-option-desc schema-error-msg">
-                {{ schema.error }}
-              </div>
-              <div v-else-if="schema.description" class="schema-add-option-desc">
-                {{ schema.description }}
-              </div>
-            </div>
-          </div>
-        </div>
+        <button
+          class="btn btn-sm btn-primary"
+          @click="showSchemaManager = true"
+        >
+          方案管理
+        </button>
       </div>
 
       <p class="schema-list-hint">使用箭头调整顺序，快捷键切换时按此顺序循环</p>
@@ -555,6 +521,17 @@ onUnmounted(() => {
             </div>
             <div class="schema-row-actions">
               <button
+                class="btn-icon btn-detail"
+                @click.stop="openSchemaDetail(schemaID)"
+                title="查看详情"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5" />
+                  <path d="M8 7v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                  <circle cx="8" cy="5" r="0.75" fill="currentColor" />
+                </svg>
+              </button>
+              <button
                 v-if="schemaID !== activeSchemaID"
                 class="btn btn-sm"
                 @click.stop="setActiveSchema(schemaID)"
@@ -564,16 +541,6 @@ onUnmounted(() => {
                 设为当前
               </button>
               <span v-else class="schema-active-badge">当前方案</span>
-              <button
-                v-if="
-                  schemaID !== activeSchemaID && enabledSchemaIDs.length > 1
-                "
-                class="btn-icon btn-delete"
-                @click.stop="disableSchema(schemaID)"
-                title="移除方案"
-              >
-                &times;
-              </button>
             </div>
           </div>
         </div>
@@ -584,6 +551,44 @@ onUnmounted(() => {
         class="schema-list-empty"
       >
         暂无已启用的方案
+      </div>
+    </div>
+
+    <!-- 方案管理对话框 -->
+    <SchemaManagerDialog
+      :visible="showSchemaManager"
+      :enabledSchemaIDs="enabledSchemaIDs"
+      :allSchemas="allSchemas"
+      :schemaConfigs="schemaConfigs"
+      :schemaReferences="schemaReferences"
+      @close="showSchemaManager = false"
+      @enable-schema="enableSchema"
+      @disable-schema="disableSchema"
+      @schemas-changed="loadAllSchemas"
+    />
+
+    <!-- 方案详情对话框 -->
+    <div
+      v-if="detailSchemaID"
+      class="dialog-overlay"
+      @click.self="detailSchemaID = null"
+    >
+      <div class="dialog-box dialog-sectioned schema-detail-dialog">
+        <div class="dialog-header">
+          <h3>方案详情</h3>
+          <button class="dialog-close" @click="detailSchemaID = null">&times;</button>
+        </div>
+        <div class="dialog-body">
+          <SchemaDetailPanel
+            v-if="getSchemaInfo(detailSchemaID)"
+            :schema="getSchemaInfo(detailSchemaID)!"
+            :config="schemaConfigs[detailSchemaID]"
+            :references="schemaReferences[detailSchemaID]"
+          />
+        </div>
+        <div class="dialog-footer">
+          <button class="btn btn-sm btn-primary" @click="detailSchemaID = null">关闭</button>
+        </div>
       </div>
     </div>
 
@@ -1303,12 +1308,36 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+/* Schema detail dialog */
+.schema-detail-dialog {
+  width: 420px;
+  max-width: 90vw;
+}
+
 /* Schema row actions */
 .schema-row-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+.btn-detail {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: none;
+  color: #9ca3af;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.15s;
+  padding: 0;
+}
+.btn-detail:hover {
+  background: #f3f4f6;
+  color: #2563eb;
 }
 .schema-active-badge {
   font-size: 12px;
@@ -1319,57 +1348,6 @@ onUnmounted(() => {
   border-radius: 6px;
 }
 
-/* Add schema dropdown */
-.schema-add-dropdown {
-  position: relative;
-}
-.schema-add-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 10;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
-  min-width: 260px;
-  max-height: 320px;
-  overflow-y: auto;
-  padding: 6px;
-}
-.schema-add-option {
-  padding: 10px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background-color 0.15s;
-}
-.schema-add-option:hover {
-  background-color: #f3f4f6;
-}
-.schema-add-option-main {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.schema-add-option-name {
-  font-size: 13px;
-  color: #1f2937;
-}
-.schema-add-option-type {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: #f3f4f6;
-  color: #6b7280;
-}
-.schema-add-option-desc {
-  font-size: 12px;
-  color: #9ca3af;
-  margin-top: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* 混输设置分区标题 */
 .setting-section-title {

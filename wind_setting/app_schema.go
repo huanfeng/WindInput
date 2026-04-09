@@ -1,14 +1,72 @@
 package main
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/bodgit/sevenzip"
 	"github.com/huanfeng/wind_input/pkg/config"
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"gopkg.in/yaml.v3"
 )
+
+// archiveEntry 统一的压缩包文件条目接口
+type archiveEntry struct {
+	Name  string
+	IsDir bool
+	Open  func() (io.ReadCloser, error)
+}
+
+// readZipEntries 从 ZIP 读取所有条目
+func readZipEntries(path string) ([]archiveEntry, io.Closer, error) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	entries := make([]archiveEntry, 0, len(r.File))
+	for _, f := range r.File {
+		f := f
+		entries = append(entries, archiveEntry{
+			Name:  f.Name,
+			IsDir: f.FileInfo().IsDir(),
+			Open:  f.Open,
+		})
+	}
+	return entries, r, nil
+}
+
+// read7zEntries 从 7z 读取所有条目
+func read7zEntries(path string) ([]archiveEntry, io.Closer, error) {
+	r, err := sevenzip.OpenReader(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	entries := make([]archiveEntry, 0, len(r.File))
+	for _, f := range r.File {
+		f := f
+		entries = append(entries, archiveEntry{
+			Name:  f.Name,
+			IsDir: f.FileInfo().IsDir(),
+			Open:  f.Open,
+		})
+	}
+	return entries, r, nil
+}
+
+// openArchive 根据扩展名自动选择解压方式
+func openArchive(path string) ([]archiveEntry, io.Closer, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".7z":
+		return read7zEntries(path)
+	default:
+		return readZipEntries(path)
+	}
+}
 
 // SchemaInfo 方案基本信息（前端展示用）
 type SchemaInfo struct {
@@ -18,6 +76,7 @@ type SchemaInfo struct {
 	Version     string `json:"version" yaml:"version"`
 	Description string `json:"description" yaml:"description"`
 	EngineType  string `json:"engine_type"`     // codetable | pinyin | mixed（从 engine.type 读取）
+	Source      string `json:"source"`          // builtin | user（方案来源）
 	Error       string `json:"error,omitempty"` // 验证错误信息，非空表示方案异常
 }
 
@@ -105,6 +164,12 @@ func (a *App) GetAvailableSchemas() ([]SchemaInfo, error) {
 			continue
 		}
 
+		// 判断方案来源
+		source := "user"
+		if _, builtinCheckErr := findBuiltinSchemaFile(id); builtinCheckErr == nil {
+			source = "builtin"
+		}
+
 		info := SchemaInfo{
 			ID:          cfg.Schema.ID,
 			Name:        cfg.Schema.Name,
@@ -112,6 +177,7 @@ func (a *App) GetAvailableSchemas() ([]SchemaInfo, error) {
 			Version:     cfg.Schema.Version,
 			Description: cfg.Schema.Description,
 			EngineType:  cfg.Engine.Type,
+			Source:      source,
 		}
 
 		// 结构验证：引擎类型
@@ -554,4 +620,490 @@ func (a *App) GetReferencedSchemaIDs() ([]string, error) {
 		}
 	}
 	return result, nil
+}
+
+// ExportSchema 将指定方案打包为 ZIP 导出
+// ZIP 内容与 WindInputCodeTable 格式一致：{schemaID}.schema.yaml + 词典文件
+func (a *App) ExportSchema(schemaID string) (string, error) {
+	cfg, err := a.GetSchemaConfig(schemaID)
+	if err != nil {
+		return "", fmt.Errorf("加载方案配置失败: %w", err)
+	}
+
+	version := cfg.Schema.Version
+	if version == "" {
+		version = "1.0"
+	}
+	defaultName := fmt.Sprintf("%s-%s.zip", schemaID, version)
+
+	savePath, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		Title:           "导出输入方案",
+		DefaultFilename: defaultName,
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "ZIP 文件", Pattern: "*.zip"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("保存对话框失败: %w", err)
+	}
+	if savePath == "" {
+		return "", nil // 用户取消
+	}
+
+	// 创建 ZIP 文件
+	zipFile, err := os.Create(savePath)
+	if err != nil {
+		return "", fmt.Errorf("创建 ZIP 文件失败: %w", err)
+	}
+	defer zipFile.Close()
+
+	w := zip.NewWriter(zipFile)
+	defer w.Close()
+
+	// 写入方案配置文件（完整合并后的配置）
+	schemaYAML, err := yaml.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("序列化方案配置失败: %w", err)
+	}
+	schemaFileName := schemaID + ".schema.yaml"
+	fw, err := w.Create(schemaFileName)
+	if err != nil {
+		return "", fmt.Errorf("添加方案文件到 ZIP 失败: %w", err)
+	}
+	if _, err := fw.Write(schemaYAML); err != nil {
+		return "", fmt.Errorf("写入方案文件失败: %w", err)
+	}
+
+	// 收集并写入词典文件
+	exeDir := getExeDir()
+	exeDataDir := filepath.Join(exeDir, "data")
+	configDir, _ := config.GetConfigDir()
+
+	for _, dict := range cfg.Dicts {
+		if dict.Path == "" {
+			continue
+		}
+		dictAbsPath := resolveDictFilePath(dict.Path, exeDataDir, configDir)
+		if dictAbsPath == "" {
+			continue
+		}
+		data, err := os.ReadFile(dictAbsPath)
+		if err != nil {
+			continue
+		}
+		dfw, err := w.Create(dict.Path)
+		if err != nil {
+			continue
+		}
+		dfw.Write(data)
+	}
+
+	return savePath, nil
+}
+
+// ImportPreviewSchema 单个方案的预览信息
+type ImportPreviewSchema struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Author      string `json:"author"`
+	Description string `json:"description"`
+	EngineType  string `json:"engine_type"`
+	DictCount   int    `json:"dict_count"`
+	Conflict    bool   `json:"conflict"`
+	ConflictSrc string `json:"conflict_src"` // builtin | user
+}
+
+// ImportPreview 导入预览信息
+type ImportPreview struct {
+	ZipPath   string                `json:"zip_path"`   // ZIP 文件路径（用于后续确认导入）
+	Schemas   []ImportPreviewSchema `json:"schemas"`    // ZIP 中包含的所有方案
+	FileCount int                   `json:"file_count"` // ZIP 文件总数
+}
+
+// PreviewImportSchema 打开文件对话框，读取 ZIP 中所有方案的预览信息（不解压）
+func (a *App) PreviewImportSchema() (*ImportPreview, error) {
+	openPath, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "导入输入方案",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "方案包 (*.zip, *.7z)", Pattern: "*.zip;*.7z"},
+			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("打开对话框失败: %w", err)
+	}
+	if openPath == "" {
+		return nil, nil // 用户取消
+	}
+
+	entries, closer, err := openArchive(openPath)
+	if err != nil {
+		return nil, fmt.Errorf("打开压缩包失败: %w", err)
+	}
+	defer closer.Close()
+
+	// 检测公共前缀（多一层目录的情况）
+	prefix := detectCommonPrefix(entries)
+
+	// 收集所有 .schema.yaml 条目
+	type schemaEntry struct {
+		name string
+		open func() (io.ReadCloser, error)
+	}
+	var schemaEntries []schemaEntry
+	fileCount := 0
+	for _, e := range entries {
+		if e.IsDir {
+			continue
+		}
+		fileCount++
+		name := filepath.Base(stripPrefix(e.Name, prefix))
+		if strings.HasSuffix(name, ".schema.yaml") {
+			schemaEntries = append(schemaEntries, schemaEntry{name: e.Name, open: e.Open})
+		}
+	}
+	if len(schemaEntries) == 0 {
+		return nil, fmt.Errorf("压缩包中未找到 .schema.yaml 文件")
+	}
+
+	preview := &ImportPreview{
+		ZipPath:   openPath,
+		FileCount: fileCount,
+	}
+
+	for _, se := range schemaEntries {
+		rc, err := se.open()
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			continue
+		}
+
+		var cfg SchemaConfig
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			continue
+		}
+		schemaID := strings.TrimSuffix(filepath.Base(se.name), ".schema.yaml")
+		if cfg.Schema.ID == "" {
+			cfg.Schema.ID = schemaID
+		}
+
+		ps := ImportPreviewSchema{
+			ID:          cfg.Schema.ID,
+			Name:        cfg.Schema.Name,
+			Version:     cfg.Schema.Version,
+			Author:      cfg.Schema.Author,
+			Description: cfg.Schema.Description,
+			EngineType:  cfg.Engine.Type,
+			DictCount:   len(cfg.Dicts),
+		}
+
+		if _, err := findBuiltinSchemaFile(cfg.Schema.ID); err == nil {
+			ps.Conflict = true
+			ps.ConflictSrc = "builtin"
+		} else if _, err := findUserSchemaFile(cfg.Schema.ID); err == nil {
+			ps.Conflict = true
+			ps.ConflictSrc = "user"
+		}
+
+		preview.Schemas = append(preview.Schemas, ps)
+	}
+
+	return preview, nil
+}
+
+// ConfirmImportSchema 确认导入方案（从指定压缩包解压到用户方案目录）
+func (a *App) ConfirmImportSchema(zipPath string) (*SchemaInfo, error) {
+	entries, closer, err := openArchive(zipPath)
+	if err != nil {
+		return nil, fmt.Errorf("打开压缩包失败: %w", err)
+	}
+	defer closer.Close()
+
+	// 检测是否多了一层目录（所有文件都在同一个顶层目录下）
+	prefix := detectCommonPrefix(entries)
+
+	// 查找第一个 .schema.yaml 以获取方案信息
+	var firstCfg *SchemaConfig
+	var firstSchemaID string
+	for _, e := range entries {
+		if e.IsDir {
+			continue
+		}
+		name := stripPrefix(e.Name, prefix)
+		baseName := filepath.Base(name)
+		if strings.HasSuffix(baseName, ".schema.yaml") {
+			rc, err := e.Open()
+			if err != nil {
+				continue
+			}
+			data, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				continue
+			}
+			var cfg SchemaConfig
+			if err := yaml.Unmarshal(data, &cfg); err != nil {
+				continue
+			}
+			schemaID := strings.TrimSuffix(baseName, ".schema.yaml")
+			if cfg.Schema.ID == "" {
+				cfg.Schema.ID = schemaID
+			}
+			if firstCfg == nil {
+				firstCfg = &cfg
+				firstSchemaID = cfg.Schema.ID
+			}
+		}
+	}
+	if firstCfg == nil {
+		return nil, fmt.Errorf("压缩包中未找到 .schema.yaml 文件")
+	}
+
+	// 解压到用户方案目录
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("获取配置目录失败: %w", err)
+	}
+	schemasDir := filepath.Join(configDir, "schemas")
+	if err := os.MkdirAll(schemasDir, 0755); err != nil {
+		return nil, fmt.Errorf("创建方案目录失败: %w", err)
+	}
+
+	for _, e := range entries {
+		if e.IsDir {
+			continue
+		}
+		name := stripPrefix(e.Name, prefix)
+		cleanName := filepath.Clean(name)
+		if strings.Contains(cleanName, "..") || cleanName == "." {
+			continue
+		}
+		destPath := filepath.Join(schemasDir, cleanName)
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			continue
+		}
+		src, err := e.Open()
+		if err != nil {
+			continue
+		}
+		dst, err := os.Create(destPath)
+		if err != nil {
+			src.Close()
+			continue
+		}
+		io.Copy(dst, src)
+		dst.Close()
+		src.Close()
+	}
+
+	info := SchemaInfo{
+		ID:         firstSchemaID,
+		Name:       firstCfg.Schema.Name,
+		IconLabel:  firstCfg.Schema.IconLabel,
+		Version:    firstCfg.Schema.Version,
+		EngineType: firstCfg.Engine.Type,
+		Source:     "user",
+	}
+	return &info, nil
+}
+
+// detectCommonPrefix 检测压缩包中是否所有文件都在同一个顶层目录下
+// 如果是，返回该目录前缀（如 "jjm-1.0/"），否则返回空字符串
+func detectCommonPrefix(entries []archiveEntry) string {
+	var firstDir string
+	for _, e := range entries {
+		name := filepath.ToSlash(e.Name)
+		parts := strings.SplitN(name, "/", 2)
+		if len(parts) < 2 {
+			// 有文件直接在根目录，无公共前缀
+			return ""
+		}
+		dir := parts[0]
+		if firstDir == "" {
+			firstDir = dir
+		} else if dir != firstDir {
+			return ""
+		}
+	}
+	if firstDir != "" {
+		return firstDir + "/"
+	}
+	return ""
+}
+
+// stripPrefix 去除路径的公共前缀
+func stripPrefix(name, prefix string) string {
+	if prefix == "" {
+		return name
+	}
+	name = filepath.ToSlash(name)
+	if strings.HasPrefix(name, prefix) {
+		return name[len(prefix):]
+	}
+	return name
+}
+
+// DeleteSchema 删除用户方案文件（仅允许删除用户方案，不允许删除内置方案）
+func (a *App) DeleteSchema(schemaID string) error {
+	// 检查是否为内置方案
+	if _, err := findBuiltinSchemaFile(schemaID); err == nil {
+		return fmt.Errorf("不允许删除内置方案: %s", schemaID)
+	}
+
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return fmt.Errorf("获取配置目录失败: %w", err)
+	}
+	schemasDir := filepath.Join(configDir, "schemas")
+
+	// 删除方案配置文件
+	schemaFile := filepath.Join(schemasDir, schemaID+".schema.yaml")
+	if _, err := os.Stat(schemaFile); err == nil {
+		if err := os.Remove(schemaFile); err != nil {
+			return fmt.Errorf("删除方案文件失败: %w", err)
+		}
+	}
+
+	// 删除方案关联的词典目录（如果存在）
+	dictDir := filepath.Join(schemasDir, schemaID)
+	if info, err := os.Stat(dictDir); err == nil && info.IsDir() {
+		if err := os.RemoveAll(dictDir); err != nil {
+			return fmt.Errorf("删除词典目录失败: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// ExportSchemas 将多个方案打包为一个 ZIP 导出
+func (a *App) ExportSchemas(schemaIDs []string) (string, error) {
+	if len(schemaIDs) == 0 {
+		return "", fmt.Errorf("未选择要导出的方案")
+	}
+
+	// 构造默认文件名：以主码表方案的 ID 和版本号命名
+	primaryID := schemaIDs[0]
+	version := ""
+	for _, sid := range schemaIDs {
+		cfg, err := a.GetSchemaConfig(sid)
+		if err != nil {
+			continue
+		}
+		if cfg.Engine.Type != "mixed" {
+			primaryID = sid
+			version = cfg.Schema.Version
+			break
+		}
+	}
+	if version == "" {
+		if cfg, err := a.GetSchemaConfig(schemaIDs[0]); err == nil {
+			version = cfg.Schema.Version
+		}
+	}
+	if version == "" {
+		version = "1.0"
+	}
+	defaultName := fmt.Sprintf("%s-%s.zip", primaryID, version)
+
+	savePath, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		Title:           "导出输入方案",
+		DefaultFilename: defaultName,
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "ZIP 文件", Pattern: "*.zip"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("保存对话框失败: %w", err)
+	}
+	if savePath == "" {
+		return "", nil
+	}
+
+	zipFile, err := os.Create(savePath)
+	if err != nil {
+		return "", fmt.Errorf("创建 ZIP 文件失败: %w", err)
+	}
+	defer zipFile.Close()
+
+	w := zip.NewWriter(zipFile)
+	defer w.Close()
+
+	exeDir := getExeDir()
+	exeDataDir := filepath.Join(exeDir, "data")
+	configDir, _ := config.GetConfigDir()
+	writtenPaths := make(map[string]bool) // 已写入的文件路径去重
+
+	for _, sid := range schemaIDs {
+		cfg, err := a.GetSchemaConfig(sid)
+		if err != nil {
+			continue
+		}
+
+		// 写入方案配置
+		schemaFileName := sid + ".schema.yaml"
+		if !writtenPaths[schemaFileName] {
+			schemaYAML, err := yaml.Marshal(cfg)
+			if err != nil {
+				continue
+			}
+			fw, err := w.Create(schemaFileName)
+			if err != nil {
+				continue
+			}
+			fw.Write(schemaYAML)
+			writtenPaths[schemaFileName] = true
+		}
+
+		// 写入词典文件（去重）
+		for _, dict := range cfg.Dicts {
+			if dict.Path == "" || writtenPaths[dict.Path] {
+				continue
+			}
+			absPath := resolveDictFilePath(dict.Path, exeDataDir, configDir)
+			if absPath == "" {
+				continue
+			}
+			data, err := os.ReadFile(absPath)
+			if err != nil {
+				continue
+			}
+			dfw, err := w.Create(dict.Path)
+			if err != nil {
+				continue
+			}
+			dfw.Write(data)
+			writtenPaths[dict.Path] = true
+		}
+	}
+
+	return savePath, nil
+}
+
+// resolveDictFilePath 查找词典文件的绝对路径（找到第一个存在的）
+func resolveDictFilePath(dictPath, exeDataDir, configDir string) string {
+	if filepath.IsAbs(dictPath) {
+		if _, err := os.Stat(dictPath); err == nil {
+			return dictPath
+		}
+		return ""
+	}
+	searchDirs := make([]string, 0, 4)
+	if exeDataDir != "" {
+		searchDirs = append(searchDirs, exeDataDir, filepath.Join(exeDataDir, "schemas"))
+	}
+	if configDir != "" {
+		searchDirs = append(searchDirs, configDir, filepath.Join(configDir, "schemas"))
+	}
+	for _, dir := range searchDirs {
+		candidate := filepath.Join(dir, dictPath)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }

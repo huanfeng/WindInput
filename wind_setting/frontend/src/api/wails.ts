@@ -59,6 +59,48 @@ export async function getReferencedSchemaIDs(): Promise<string[]> {
   return App.GetReferencedSchemaIDs() as any;
 }
 
+// ===== Schema Import/Export/Delete =====
+
+export interface ImportPreviewSchema {
+  id: string;
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  engine_type: string;
+  dict_count: number;
+  conflict: boolean;
+  conflict_src: string;
+}
+
+export interface ImportPreview {
+  zip_path: string;
+  schemas: ImportPreviewSchema[];
+  file_count: number;
+}
+
+export async function exportSchema(schemaID: string): Promise<string> {
+  return App.ExportSchema(schemaID);
+}
+
+export async function exportSchemas(schemaIDs: string[]): Promise<string> {
+  return App.ExportSchemas(schemaIDs);
+}
+
+export async function previewImportSchema(): Promise<ImportPreview | null> {
+  return App.PreviewImportSchema() as unknown as ImportPreview | null;
+}
+
+export async function confirmImportSchema(
+  zipPath: string,
+): Promise<SchemaInfo | null> {
+  return App.ConfirmImportSchema(zipPath) as unknown as SchemaInfo | null;
+}
+
+export async function deleteSchema(schemaID: string): Promise<void> {
+  return App.DeleteSchema(schemaID);
+}
+
 // 词库统计类型
 export interface DictStats {
   word_count: number;
