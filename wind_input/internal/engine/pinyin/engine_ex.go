@@ -172,10 +172,14 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				coverage := float64(syllableCount) / float64(totalSyllableCount)
 				// 造句的 dictWeight 用 Viterbi 路径的 LogProb 反映整句质量
-				// LogProb 通常在 [-30, 0] 范围，转换为正向权重
-				sentenceWeight := (vResult.LogProb + 30.0) * 30000.0
+				// LogProb 通常在 [-30, 0] 范围，映射到 [0, rimeMaxDictWeight] 区间，
+				// 与词库归一化权重同尺度，确保 NormalizeWeight 不会截断信息。
+				sentenceWeight := (vResult.LogProb + 30.0) / 30.0 * rimeMaxDictWeight
 				if sentenceWeight < 0 {
 					sentenceWeight = 0
+				}
+				if sentenceWeight > rimeMaxDictWeight {
+					sentenceWeight = rimeMaxDictWeight
 				}
 				c := candidate.Candidate{
 					Text:           sentence,
@@ -201,9 +205,6 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 		exactResults := e.lookupWithFuzzy(exactInput, completedSyllables)
 		for _, cand := range exactResults {
-			if _, exists := candidatesMap[cand.Text]; exists {
-				continue
-			}
 			c := cand
 			charCount := len([]rune(c.Text))
 			// 首段是 partial 时（如 sdem），completed 音节匹配整体降级
@@ -216,6 +217,13 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			coverage := float64(syllableCount) / float64(totalSyllableCount)
 			c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverage, charCount)
 			c.ConsumedLength = allCompletedEnd // 基于 Parser 音节位置精确计算
+			// 精确匹配的词频权重最可靠：如果候选已存在（如来自 Viterbi），保留更高权重
+			if existing, exists := candidatesMap[c.Text]; exists {
+				if c.Weight > existing.Weight {
+					candidatesMap[c.Text] = &c
+				}
+				continue
+			}
 			candidatesMap[c.Text] = &c
 		}
 		e.logger.Debug("exact match", "input", exactInput, "results", len(exactResults), "partial", partial)
