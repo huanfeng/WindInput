@@ -161,11 +161,14 @@ func (c *Coordinator) handleEngineSwitchKey() *bridge.KeyEventResult {
 		c.showEngineIndicator()
 	}
 
+	// 广播状态更新到工具栏和所有 TSF 客户端（更新 iconLabel 等）
+	c.broadcastState()
+
 	// 返回 ClearComposition 让 C++ 端清除 _isComposing 状态
 	if hadInput {
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
 	}
-	return nil
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 }
 
 // showEngineIndicator 显示引擎切换指示器（使用方案名称）
