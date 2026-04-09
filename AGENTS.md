@@ -1,10 +1,13 @@
-<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-04-08 -->
 
 # WindInput - 清风输入法
 
 ## Purpose
 
-Windows 中文输入法，支持拼音和五笔双模式。采用 C++ TSF 框架 + Go 输入引擎 + Vue 3 设置界面的多语言混合架构。核心采用 **Schema（输入方案）驱动架构**，通过 YAML 方案文件定义引擎类型、词库配置和学习策略。
+Windows 中文输入法，支持拼音和五笔双模式。采用 C++ TSF 框架 + Go 输入引擎 + Vue 3 设置界面的混合架构。核心采用 **Schema（输入方案）驱动架构**，通过 YAML 方案文件定义引擎类型、词库配置和学习策略。本项目包含三个主要模块：
+- **wind_tsf**：C++ TSF 桥接层 DLL
+- **wind_input**：Go 输入引擎服务
+- **wind_setting**：Wails 设置界面应用
 
 ## Architecture
 
@@ -27,8 +30,8 @@ Schema 驱动流程:
   data/schemas/*.schema.yaml → SchemaManager → EngineFactory → Engine + Dict
 ```
 
-- **wind_tsf**: C++17 DLL，实现 Windows TSF (Text Services Framework) 接口，负责系统级输入法注册和键盘事件捕获；新增 HostWindow 机制解决 Win11 开始菜单候选框 z-order 问题
-- **wind_input**: Go 服务进程，Schema 驱动的核心输入引擎（拼音连续评分 + 五笔码表），候选词管理，UI 渲染；通过 CGO 直接调用系统 dwrite.dll（已移除独立 wind_dwrite.dll）
+- **wind_tsf**: C++17 DLL，实现 Windows TSF (Text Services Framework) 接口，负责系统级输入法注册和键盘事件捕获；采用 HostWindow 机制解决 Win11 开始菜单候选框 z-order 问题
+- **wind_input**: Go 服务进程，Schema 驱动的核心输入引擎（拼音连续评分 + 五笔码表），候选词管理，UI 渲染；通过 CGO 直接调用系统 dwrite.dll
 - **wind_setting**: Wails v2 桌面应用，Go 后端 + Vue 3 前端，提供用户设置和方案管理界面
 
 ## Key Files

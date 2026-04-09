@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-08 -->
 
 # pkg/config
 
@@ -23,7 +23,7 @@
   2. 系统预置配置（`data/config.yaml`，通过 `GetSystemConfigPath()` 定位）覆盖
   3. 用户配置（`%APPDATA%\WindInput\config.yaml`）覆盖
 - **Schema 方案系统**：`SchemaConfig`（`Active` + `Available` 字段），用于多方案切换（`wubi86`/`pinyin`）
-- **新增 HotkeyConfig 字段**：`DeleteCandidate`（删除候选）、`PinCandidate`（置顶候选）、`ToggleToolbar`（切换工具栏）、`OpenSettings`（打开设置）、`AddWord`（快捷加词，默认 `ctrl+shift+equal`）
+- **新增 HotkeyConfig 字段**：`DeleteCandidate`（删除候选）、`PinCandidate`（置顶候选）、`ToggleToolbar`（切换工具栏）、`OpenSettings`（打开设置）、`AddWord`（快捷加词，默认 `ctrl+equal`）
 - **新增 UIConfig 字段**：`TextRenderMode`（`directwrite`/`gdi`/`freetype`）、`GDIFontWeight`、`GDIFontScale`、`MenuFontWeight`、`MenuFontSize`
 - **新增 AdvancedConfig 字段**：`HostRenderProcesses`（Band 窗口宿主进程白名单，默认 `["SearchHost.exe"]`）
 - 新增配置项时：在对应子结构体添加字段，设置 YAML 标签，在 `DefaultConfig()` 中提供默认值，在 `applyConfigFallbacks()` 中处理兜底

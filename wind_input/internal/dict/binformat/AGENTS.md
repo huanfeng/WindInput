@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-04-08 -->
 
 # internal/dict/binformat
 
@@ -21,6 +21,7 @@
 | `unigram_writer.go` | `UnigramWriter`：unigram.wdb 写入器（`Add`、`Write`） |
 | `mmap_windows.go` | Windows mmap 实现（`CreateFileMapping`/`MapViewOfFile`） |
 | `binformat_test.go` | 读写往返测试 |
+| `meta_test.go` | 元数据序列化测试 |
 
 ## For AI Agents
 

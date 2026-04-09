@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-01 | Updated: 2026-04-01 -->
+<!-- Generated: 2026-04-01 | Updated: 2026-04-08 -->
 
 # internal/engine/pinyin/shuangpin
 

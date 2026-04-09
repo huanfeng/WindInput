@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-04-08 -->
 
 # internal/dict
 
@@ -30,6 +30,9 @@
 | `loader.go` | 词库加载工具函数 |
 | `dict.go` | 保留文件（原 Dict 接口定义，部分接口已迁移，修改前先确认引用） |
 | `trie.go` | 前缀 Trie 数据结构，供拼音词库使用 |
+| `temp_dict.go` | 临时词库实现，用于临时拼音模式 |
+| `template.go` | 短语模板变量处理 |
+| `weight_norm.go` | 权重规范化处理 |
 
 ## Subdirectories
 | Directory | Purpose |

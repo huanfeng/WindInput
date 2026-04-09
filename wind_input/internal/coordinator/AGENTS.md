@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-04-08 -->
 
 # internal/coordinator
 
@@ -25,6 +25,7 @@
 | `handle_ui_callbacks.go` | UI 回调（工具栏按钮点击、候选窗口鼠标事件） |
 | `handle_addword.go` | 快捷加词功能：`enterAddWordMode`/`exitAddWordMode` 管理加词模式进出；`handleAddWordKey` 在加词模式下处理 ↑↓/Enter/Esc/Ctrl+Enter；`confirmAddWord` 将词条写入 UserDict；`openAddWordDialog` 打开设置页加词对话框；`calcWordCodeForCurrentSchema` 根据编码规则和反向索引自动计算词的编码 |
 | `input_history.go` | `InputHistory`：按客户端 ID 隔离的上屏记录器；`Record` 追加记录并裁剪至 maxChars；`GetRecentChars` 提取最近 N 个字符（正序），用于加词推荐；`GetRecentRecords` 返回最近记录（最新在前）；仅内存存储，不持久化（有测试文件 `input_history_test.go`） |
+| `reload_handler.go` | `ReloadHandler` 接口实现，供 `internal/control` 调用配置热重载 |
 | `confirmed_segments_test.go` | 已确认分段逻辑测试 |
 
 ## For AI Agents

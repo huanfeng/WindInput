@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-01 | Updated: 2026-04-01 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-04-08 -->
 
 # schemas/ - 输入方案定义文件
 

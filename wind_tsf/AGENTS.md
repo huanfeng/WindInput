@@ -1,4 +1,4 @@
-<!-- Generated: 2026-03-13 | Updated: 2026-04-01 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-08 -->
 
 # wind_tsf - Windows TSF Input Method Bridge
 
