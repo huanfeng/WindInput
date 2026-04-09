@@ -12,6 +12,7 @@ import type { Config, Status, EngineInfo, TSFLogConfig } from "./api/settings";
 import type { ThemeInfo, ThemePreview } from "./api/wails";
 import { getDefaultConfig, getDefaultTSFLogConfig } from "./api/settings";
 import { provideToast } from "./composables/useToast";
+import { useConfirm } from "./composables/useConfirm";
 import ToastContainer from "./components/ToastContainer.vue";
 
 import GeneralPage from "./pages/GeneralPage.vue";
@@ -33,6 +34,7 @@ const isWailsEnv = computed(() => {
 
 // 全局 Toast
 const { toasts, toast } = provideToast();
+const { confirmVisible, confirmMessage, confirm: customConfirm, handleConfirm, handleCancel } = useConfirm();
 
 // 状态
 const loading = ref(true);
@@ -278,9 +280,8 @@ function handleAddWordClose() {
 // 重新加载配置（丢弃本地修改，从实际文件重新读取）
 async function handleReloadConfig() {
   if (hasUnsavedChanges()) {
-    if (!confirm("当前有未保存的修改，重新加载将丢弃这些修改。确定继续吗？")) {
-      return;
-    }
+    const ok = await customConfirm("当前有未保存的修改，重新加载将丢弃这些修改。确定继续吗？");
+    if (!ok) return;
   }
   await handleReload();
 }
@@ -641,5 +642,18 @@ onMounted(async () => {
         />
       </div>
     </main>
+    <!-- 确认对话框 -->
+    <div v-if="confirmVisible" class="dialog-overlay" @click.self="handleCancel">
+      <div class="dialog-box" style="max-width: 360px">
+        <div class="dialog-title">确认</div>
+        <div style="padding: 8px 0 16px; font-size: 14px; color: #374151; white-space: pre-line">
+          {{ confirmMessage }}
+        </div>
+        <div class="dialog-actions">
+          <button class="btn btn-sm" @click="handleCancel">取消</button>
+          <button class="btn btn-primary btn-sm" @click="handleConfirm">确定</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

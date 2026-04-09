@@ -154,15 +154,15 @@
               <div v-if="showPhraseMenu" class="toolbar-dropdown">
                 <div
                   class="dropdown-item"
-                  @click="handleImportPhrases(); showPhraseMenu = false"
+                  @click.stop="handleImportPhrases(); showPhraseMenu = false"
                 >
-                  导入
+                  {{ phraseCategory === 'user' ? '导入用户短语' : '导入系统短语' }}
                 </div>
                 <div
                   class="dropdown-item"
-                  @click="handleExportPhrases(); showPhraseMenu = false"
+                  @click.stop="handleExportPhrases(); showPhraseMenu = false"
                 >
-                  导出
+                  {{ phraseCategory === 'user' ? '导出用户短语' : '导出系统短语' }}
                 </div>
               </div>
             </div>
@@ -341,21 +341,21 @@
               <div v-if="showWordMenu" class="toolbar-dropdown">
                 <div
                   class="dropdown-item"
-                  @click="
+                  @click.stop="
                     handleImportUserDict();
                     showWordMenu = false;
                   "
                 >
-                  导入词库
+                  导入用户词库
                 </div>
                 <div
                   class="dropdown-item"
-                  @click="
+                  @click.stop="
                     handleExportUserDict();
                     showWordMenu = false;
                   "
                 >
-                  导出词库
+                  导出用户词库
                 </div>
               </div>
             </div>
@@ -604,7 +604,7 @@
               <div v-if="showTempMenu" class="toolbar-dropdown">
                 <div
                   class="dropdown-item"
-                  @click="
+                  @click.stop="
                     handleClearTempDict();
                     showTempMenu = false;
                   "

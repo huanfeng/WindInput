@@ -116,12 +116,10 @@ function isEnabled(schemaID: string): boolean {
 
 function canExport(schemaID: string): boolean {
   const schema = props.allSchemas.find((s) => s.id === schemaID);
-  // 拼音类型暂不支持导出
   return !!schema && schema.engine_type !== "pinyin";
 }
 
 function selectSchema(schemaID: string) {
-  if (!canExport(schemaID)) return;
   selectedID.value = selectedID.value === schemaID ? null : schemaID;
   exportSuccess.value = false;
 }
@@ -364,10 +362,7 @@ function close() {
               v-for="schema in filteredSchemas"
               :key="schema.id"
               class="schema-mgr-item"
-              :class="{
-                'schema-mgr-item-selected': selectedID === schema.id,
-                'schema-mgr-item-no-export': !canExport(schema.id),
-              }"
+              :class="{ 'schema-mgr-item-selected': selectedID === schema.id }"
               @click="selectSchema(schema.id)"
             >
               <div class="schema-mgr-row">
@@ -460,14 +455,16 @@ function close() {
           </button>
           <button
             class="btn btn-sm"
-            :disabled="exporting || !selectedID"
+            :disabled="exporting || !selectedID || !canExport(selectedID!)"
             @click="handleExportClick"
+            :title="selectedID && !canExport(selectedID) ? '拼音方案暂不支持导出' : ''"
           >
             {{ exporting ? "导出中..." : "导出方案" }}
           </button>
         </div>
         <div class="schema-mgr-footer-center">
           <span v-if="exportSuccess" class="schema-mgr-footer-toast">导出成功</span>
+          <span v-else-if="selectedID && !canExport(selectedID)" class="schema-mgr-footer-hint">拼音方案暂不支持导出</span>
           <span v-else-if="selectedID" class="schema-mgr-footer-hint">已选中「{{ getSchemaName(selectedID) }}」</span>
         </div>
         <button class="btn btn-sm" @click="close">关闭</button>
@@ -728,9 +725,6 @@ function close() {
 }
 .schema-mgr-item-selected:hover {
   background: #dbeafe;
-}
-.schema-mgr-item-no-export {
-  cursor: default;
 }
 
 /* Row */
