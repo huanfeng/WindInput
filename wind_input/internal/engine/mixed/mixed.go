@@ -149,24 +149,14 @@ func (e *Engine) HandleEmptyCode(input string) (shouldClear bool, toEnglish bool
 }
 
 // HandleTopCode 处理顶码
-// 混输模式下根据拼音解析质量智能决定是否触发顶码：
-//   - 拼音能解析出完整音节（如 "buyao"）→ 不触发顶码，走 ConvertEx 的混合查询
-//   - 拼音无法解析为完整音节（纯声母如 "sfght"）→ 触发码表顶码
+// 混输模式下码表顶码优先：前 maxCodeLen 码在码表中有候选时直接触发，
+// 不受拼音能否解析的影响。这确保五笔全码（如 rcqn=反馈）在继续输入时自动上屏。
 func (e *Engine) HandleTopCode(input string) (commitText string, newInput string, shouldCommit bool) {
 	if len(input) <= e.maxCodeLen {
 		return "", input, false
 	}
 
-	// 检查拼音引擎能否解析出完整音节
-	if e.pinyinEngine != nil {
-		pinyinResult := e.pinyinEngine.ConvertEx(input, 1)
-		if pinyinResult.HasFullSyllable {
-			// 拼音能解析 → 不触发顶码，交给 ConvertEx 处理
-			return "", input, false
-		}
-	}
-
-	// 拼音无法解析（纯声母）→ 委托码表引擎处理顶码
+	// 码表顶码优先：检查前 N 码是否有码表候选
 	if e.codetableEngine != nil {
 		return e.codetableEngine.HandleTopCode(input)
 	}
