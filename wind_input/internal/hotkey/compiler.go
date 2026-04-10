@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/ipc"
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
@@ -53,6 +54,11 @@ func (c *Compiler) Compile() (keyDownList, keyUpList []uint32) {
 	}
 	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.OpenSettings); ok {
 		keyDownList = append(keyDownList, hash)
+	}
+
+	// Debug: Ctrl+Shift+R for clipboard paste code (hardcoded, debug only)
+	if buildvariant.IsDebug() {
+		keyDownList = append(keyDownList, ipc.CalcKeyHash(ipc.ModCtrl|ipc.ModShift, 0x52))
 	}
 
 	// 2. Select key groups (semicolon_quote, comma_period, lrshift, lrctrl)

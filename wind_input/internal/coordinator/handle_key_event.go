@@ -8,6 +8,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/transform"
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 )
 
 // shiftedKeyMap maps unshifted key → shifted character (US keyboard layout)
@@ -104,6 +105,11 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		if num := c.matchCandidateActionKey(c.config.Hotkeys.PinCandidate, hasCtrl, hasShift, data.KeyCode); num > 0 {
 			return c.handlePinCandidateByKey(num)
 		}
+	}
+
+	// Ctrl+Shift+R: 剪切板编码粘贴（调试用），任何状态下可用，仅 Debug 版本
+	if buildvariant.IsDebug() && hasCtrl && hasShift && !hasAlt && data.KeyCode == 0x52 {
+		return c.handleClipboardPasteCode()
 	}
 
 	// 加词模式按键拦截（优先于其他处理）

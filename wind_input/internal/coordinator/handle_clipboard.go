@@ -26,8 +26,9 @@ func (c *Coordinator) handleCandidateCopy(index int) {
 	}
 }
 
-// filterClipboardCode reads clipboard and filters to valid input characters (a-z, ').
-func filterClipboardCode() (string, error) {
+// readClipboardCode reads clipboard outside the lock and filters to valid input characters.
+// Caller must temporarily release c.mu before calling, then re-acquire after.
+func readClipboardCode() (string, error) {
 	text, err := clipboard.GetText()
 	if err != nil {
 		return "", err
@@ -42,14 +43,26 @@ func filterClipboardCode() (string, error) {
 			filtered = append(filtered, ch+32)
 		}
 	}
+
+	// Truncate to max input buffer length
+	if len(filtered) > maxInputBufferLen {
+		filtered = filtered[:maxInputBufferLen]
+	}
+
 	return string(filtered), nil
 }
 
-// handlePasteCodeReplace reads encoding from clipboard and replaces the input buffer (Ctrl+R).
-func (c *Coordinator) handlePasteCodeReplace() *bridge.KeyEventResult {
+// handleClipboardPasteCode reads encoding from clipboard and replaces the input buffer (Ctrl+Shift+R).
+// Works in any state (empty or non-empty input buffer).
+// Caller must hold c.mu; this function temporarily releases and re-acquires the lock.
+func (c *Coordinator) handleClipboardPasteCode() *bridge.KeyEventResult {
 	consumed := &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
-	code, err := filterClipboardCode()
+	// Release lock during clipboard read to avoid blocking other goroutines
+	c.mu.Unlock()
+	code, err := readClipboardCode()
+	c.mu.Lock()
+
 	if err != nil {
 		c.logger.Error("Failed to read clipboard", "error", err)
 		return consumed
@@ -61,39 +74,25 @@ func (c *Coordinator) handlePasteCodeReplace() *bridge.KeyEventResult {
 
 	c.logger.Debug("Replace input buffer from clipboard", "len", len(code))
 
-	c.clearState()
+	// Replace input buffer directly, preserving UI/session state
 	c.inputBuffer = code
 	c.inputCursorPos = len(code)
-	c.updateCandidates()
-	c.showUI()
-
-	return consumed
-}
-
-// handlePasteCodeAppend reads encoding from clipboard and appends to input buffer (Ctrl+V).
-func (c *Coordinator) handlePasteCodeAppend() *bridge.KeyEventResult {
-	consumed := &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
-
-	code, err := filterClipboardCode()
-	if err != nil {
-		c.logger.Error("Failed to read clipboard", "error", err)
-		return consumed
-	}
-	if len(code) == 0 {
-		c.logger.Debug("Clipboard contains no valid input characters")
-		return consumed
-	}
-
-	c.logger.Debug("Append clipboard code to input buffer", "len", len(code))
-
-	// Insert at cursor position
-	before := c.inputBuffer[:c.inputCursorPos]
-	after := c.inputBuffer[c.inputCursorPos:]
-	c.inputBuffer = before + code + after
-	c.inputCursorPos += len(code)
+	c.preeditDisplay = ""
+	c.syllableBoundaries = nil
 	c.confirmedSegments = nil
 	c.updateCandidates()
 	c.showUI()
 
-	return consumed
+	if c.config != nil && c.config.UI.InlinePreedit {
+		return &bridge.KeyEventResult{
+			Type:     bridge.ResponseTypeUpdateComposition,
+			Text:     c.compositionText(),
+			CaretPos: c.displayCursorPos(),
+		}
+	}
+	return &bridge.KeyEventResult{
+		Type:     bridge.ResponseTypeUpdateComposition,
+		Text:     "",
+		CaretPos: 0,
+	}
 }
