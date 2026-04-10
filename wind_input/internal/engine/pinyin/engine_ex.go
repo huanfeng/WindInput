@@ -145,7 +145,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	if contiguousCount >= 2 && e.unigram != nil && len(completedCode) >= 4 {
 		lattice := BuildLattice(completedCode, e.syllableTrie, e.dict, e.unigram)
 		if !lattice.IsEmpty() {
-			vResults := ViterbiTopK(lattice, e.bigram, 3)
+			vResults := ViterbiTopK(lattice, e.bigram, 1)
 			for _, vResult := range vResults {
 				if vResult == nil || len(vResult.Words) == 0 {
 					continue
