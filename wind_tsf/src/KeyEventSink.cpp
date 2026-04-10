@@ -65,6 +65,7 @@ namespace
             case VK_OEM_6:     return L'}';  // ] key + Shift = }
             case VK_OEM_COMMA: return L'<';  // , key + Shift = <
             case VK_OEM_PERIOD:return L'>';  // . key + Shift = >
+            case VK_OEM_7:     return L'"';  // ' key + Shift = "
             }
         }
         else
@@ -73,6 +74,7 @@ namespace
             {
             case VK_OEM_4:     return L'[';
             case VK_OEM_6:     return L']';
+            case VK_OEM_7:     return L'\''; // ' key
             }
         }
         return 0;

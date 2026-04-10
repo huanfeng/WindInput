@@ -709,3 +709,22 @@ func resolveVKFromKeyName(name string) int {
 	}
 	return 0
 }
+
+// updatePairedQuotes 根据中文配对表更新 PunctuationConverter 的引号配对状态
+// 当引号在配对表中时，跳过交替逻辑，始终输出左引号由配对追踪器补全右引号
+func (c *Coordinator) updatePairedQuotes(chinesePairs []string) {
+	var singlePaired, doublePaired bool
+	for _, s := range chinesePairs {
+		runes := []rune(s)
+		if len(runes) != 2 {
+			continue
+		}
+		if runes[0] == '\u2018' && runes[1] == '\u2019' {
+			singlePaired = true
+		}
+		if runes[0] == '\u201C' && runes[1] == '\u201D' {
+			doublePaired = true
+		}
+	}
+	c.punctConverter.SetPairedQuotes(singlePaired, doublePaired)
+}

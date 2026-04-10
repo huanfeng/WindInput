@@ -86,34 +86,87 @@
         <div class="setting-info">
           <label>中文标点自动配对</label>
           <p class="setting-hint">
-            输入左括号类标点时自动补全右标点，如输入《自动变为《》
+            输入左括号类标点时自动补全右标点（已启用
+            {{ getEnabledPairCount("chinese") }} 组）
           </p>
         </div>
-        <div class="setting-control">
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.input.auto_pair.chinese"
-            />
-            <span class="slider"></span>
+        <div class="setting-control inline-control">
+          <label class="checkbox-label">
+            <input type="checkbox" v-model="formData.input.auto_pair.chinese" />
+            启用
           </label>
+          <button
+            class="btn btn-sm"
+            :disabled="!formData.input.auto_pair.chinese"
+            @click="openPairDialog('chinese')"
+          >
+            配置
+          </button>
         </div>
       </div>
       <div class="setting-item">
         <div class="setting-info">
           <label>英文标点自动配对</label>
           <p class="setting-hint">
-            英文模式或英文标点下自动配对括号
+            英文模式或英文标点下自动配对括号（已启用
+            {{ getEnabledPairCount("english") }} 组）
           </p>
         </div>
-        <div class="setting-control">
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.input.auto_pair.english"
-            />
-            <span class="slider"></span>
+        <div class="setting-control inline-control">
+          <label class="checkbox-label">
+            <input type="checkbox" v-model="formData.input.auto_pair.english" />
+            启用
           </label>
+          <button
+            class="btn btn-sm"
+            :disabled="!formData.input.auto_pair.english"
+            @click="openPairDialog('english')"
+          >
+            配置
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 标点配对配置对话框 -->
+    <div
+      class="dialog-overlay"
+      v-if="showPairDialog"
+      @click.self="showPairDialog = false"
+    >
+      <div class="dialog-box dialog-sectioned">
+        <div class="dialog-header">
+          <h3>{{ pairDialogType === "chinese" ? "中文" : "英文" }}配对配置</h3>
+          <button class="dialog-close" @click="showPairDialog = false">
+            ×
+          </button>
+        </div>
+        <div class="dialog-body">
+          <div class="pair-items-grid">
+            <label
+              class="pair-item"
+              v-for="item in currentPairOptions"
+              :key="item.pair"
+            >
+              <input
+                type="checkbox"
+                :checked="isPairEnabled(item.pair)"
+                @change="togglePair(item.pair)"
+              />
+              <span class="pair-symbol">{{ item.left }} {{ item.right }}</span>
+              <span class="pair-desc">{{ item.desc }}</span>
+            </label>
+          </div>
+        </div>
+        <div class="dialog-footer">
+          <button class="btn btn-sm" @click="setAllPairs(true)">全选</button>
+          <button class="btn btn-sm" @click="setAllPairs(false)">全不选</button>
+          <button
+            class="btn btn-sm btn-primary"
+            @click="showPairDialog = false"
+          >
+            确定
+          </button>
         </div>
       </div>
     </div>
@@ -231,6 +284,82 @@ const props = defineProps<{
 
 const filterDropdownOpen = ref(false);
 const filterDropdownRef = ref<HTMLElement | null>(null);
+
+// 标点配对配置
+const showPairDialog = ref(false);
+const pairDialogType = ref<"chinese" | "english">("chinese");
+
+const chinesePairOptions = [
+  { pair: "（）", left: "（", right: "）", desc: "圆括号" },
+  { pair: "【】", left: "【", right: "】", desc: "方括号" },
+  { pair: "｛｝", left: "｛", right: "｝", desc: "花括号" },
+  { pair: "《》", left: "《", right: "》", desc: "书名号" },
+  { pair: "〈〉", left: "〈", right: "〉", desc: "尖括号" },
+  { pair: "\u2018\u2019", left: "\u2018", right: "\u2019", desc: "单引号" },
+  { pair: "\u201C\u201D", left: "\u201C", right: "\u201D", desc: "双引号" },
+];
+
+const englishPairOptions = [
+  { pair: "()", left: "(", right: ")", desc: "圆括号" },
+  { pair: "[]", left: "[", right: "]", desc: "方括号" },
+  { pair: "{}", left: "{", right: "}", desc: "花括号" },
+  { pair: "''", left: "'", right: "'", desc: "单引号" },
+  { pair: '""', left: '"', right: '"', desc: "双引号" },
+];
+
+const currentPairOptions = computed(() =>
+  pairDialogType.value === "chinese" ? chinesePairOptions : englishPairOptions,
+);
+
+function getEnabledPairCount(type: "chinese" | "english") {
+  const pairs =
+    type === "chinese"
+      ? props.formData.input.auto_pair.chinese_pairs
+      : props.formData.input.auto_pair.english_pairs;
+  return pairs ? pairs.length : 0;
+}
+
+function openPairDialog(type: "chinese" | "english") {
+  pairDialogType.value = type;
+  showPairDialog.value = true;
+}
+
+function isPairEnabled(pair: string) {
+  const pairs =
+    pairDialogType.value === "chinese"
+      ? props.formData.input.auto_pair.chinese_pairs
+      : props.formData.input.auto_pair.english_pairs;
+  return pairs ? pairs.includes(pair) : false;
+}
+
+function togglePair(pair: string) {
+  const key =
+    pairDialogType.value === "chinese" ? "chinese_pairs" : "english_pairs";
+  if (!props.formData.input.auto_pair[key]) {
+    props.formData.input.auto_pair[key] = [];
+  }
+  const pairs = props.formData.input.auto_pair[key];
+  const idx = pairs.indexOf(pair);
+  if (idx >= 0) {
+    pairs.splice(idx, 1);
+  } else {
+    pairs.push(pair);
+  }
+}
+
+function setAllPairs(enabled: boolean) {
+  const key =
+    pairDialogType.value === "chinese" ? "chinese_pairs" : "english_pairs";
+  const options =
+    pairDialogType.value === "chinese"
+      ? chinesePairOptions
+      : englishPairOptions;
+  if (enabled) {
+    props.formData.input.auto_pair[key] = options.map((o) => o.pair);
+  } else {
+    props.formData.input.auto_pair[key] = [];
+  }
+}
 
 const filterModeOptions = [
   {

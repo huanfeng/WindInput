@@ -141,6 +141,8 @@ func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 	if c.pairTrackerEn != nil {
 		c.pairTrackerEn.UpdatePairs(inputConfig.AutoPair.EnglishPairs)
 	}
+	// 根据配对表更新引号配对状态
+	c.updatePairedQuotes(inputConfig.AutoPair.ChinesePairs)
 
 	// 推送英文配对配置到 C++ 侧
 	if c.bridgeServer != nil {

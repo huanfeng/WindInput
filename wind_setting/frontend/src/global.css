@@ -828,6 +828,41 @@ input:checked + .slider:before {
   font-size: 12px;
 }
 
+/* Pair config content */
+.pair-items-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 16px;
+}
+.pair-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  border-radius: 6px;
+  transition: background-color 0.15s;
+}
+.pair-item:hover {
+  background-color: var(--bg-hover, #f3f4f6);
+}
+.pair-item input {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent-color, #2563eb);
+  flex-shrink: 0;
+}
+.pair-symbol {
+  font-weight: 500;
+  min-width: 40px;
+}
+.pair-desc {
+  color: var(--text-secondary, #9ca3af);
+  font-size: 12px;
+}
+
 /* ========== Shared: Sub Tabs ========== */
 .sub-tabs {
   display: flex;
@@ -873,6 +908,25 @@ input:checked + .slider:before {
   outline: none;
   border-color: var(--accent-color, #2563eb);
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+/* ========== Inline Control (checkbox + button) ========== */
+.inline-control {
+  gap: 12px;
+}
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-primary, #1f2937);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.checkbox-label input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
 }
 
 /* ========== Responsive ========== */

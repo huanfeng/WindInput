@@ -408,6 +408,9 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		appCompat:      appCompat,
 	}
 
+	// 根据配对表设置引号配对状态
+	c.updatePairedQuotes(cfg.Input.AutoPair.ChinesePairs)
+
 	// Set up toolbar callbacks
 	c.setupToolbarCallbacks()
 

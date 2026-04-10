@@ -69,6 +69,9 @@ type PunctuationConverter struct {
 	// 引号状态: true=下次输出左引号, false=下次输出右引号
 	singleQuoteLeft bool
 	doubleQuoteLeft bool
+	// 已配对的引号：这些引号始终输出左引号，由配对逻辑负责补全右引号
+	pairedSingleQuote bool
+	pairedDoubleQuote bool
 }
 
 // NewPunctuationConverter creates a new punctuation converter
@@ -77,6 +80,13 @@ func NewPunctuationConverter() *PunctuationConverter {
 		singleQuoteLeft: true,
 		doubleQuoteLeft: true,
 	}
+}
+
+// SetPairedQuotes 设置哪些引号由配对逻辑接管（跳过交替输出）
+// 当引号在配对表中时，始终输出左引号，配对追踪器会自动补全右引号
+func (c *PunctuationConverter) SetPairedQuotes(singlePaired, doublePaired bool) {
+	c.pairedSingleQuote = singlePaired
+	c.pairedDoubleQuote = doublePaired
 }
 
 // Reset resets the converter state (e.g., when switching modes)
@@ -91,6 +101,10 @@ func (c *PunctuationConverter) ToChinesePunct(r rune) (rune, bool) {
 	// 处理成对标点（引号）
 	switch r {
 	case '\'':
+		if c.pairedSingleQuote {
+			// 配对模式：始终输出左引号，由配对追踪器补全右引号
+			return chineseSingleQuoteLeft, true
+		}
 		if c.singleQuoteLeft {
 			c.singleQuoteLeft = false
 			return chineseSingleQuoteLeft, true
@@ -99,6 +113,9 @@ func (c *PunctuationConverter) ToChinesePunct(r rune) (rune, bool) {
 			return chineseSingleQuoteRight, true
 		}
 	case '"':
+		if c.pairedDoubleQuote {
+			return chineseDoubleQuoteLeft, true
+		}
 		if c.doubleQuoteLeft {
 			c.doubleQuoteLeft = false
 			return chineseDoubleQuoteLeft, true
