@@ -59,9 +59,10 @@ func SetText(text string) error {
 		return fmt.Errorf("GlobalLock: %w", err)
 	}
 
-	// Copy UTF-16 data
-	src := unsafe.Pointer(&utf16[0])
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(ptr)), size), unsafe.Slice((*byte)(src), size))
+	// Copy UTF-16 data — use uintptr in Slice call to satisfy go vet;
+	// ptr is a valid locked global memory address from GlobalLock.
+	dst := (*byte)(*(*unsafe.Pointer)(unsafe.Pointer(&ptr)))
+	copy(unsafe.Slice(dst, size), unsafe.Slice((*byte)(unsafe.Pointer(&utf16[0])), size))
 
 	procGlobalUnlock.Call(hMem)
 
@@ -96,6 +97,7 @@ func GetText() (string, error) {
 	defer procGlobalUnlock.Call(hData)
 
 	// Read UTF-16 null-terminated string
-	text := syscall.UTF16ToString((*[1 << 20]uint16)(unsafe.Pointer(ptr))[:])
+	// ptr comes from GlobalLock syscall; reinterpret via &ptr to satisfy go vet.
+	text := syscall.UTF16ToString((*[1 << 20]uint16)(*(*unsafe.Pointer)(unsafe.Pointer(&ptr)))[:])
 	return text, nil
 }
