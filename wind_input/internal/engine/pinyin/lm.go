@@ -113,6 +113,11 @@ func (m *UnigramModel) LogProb(word string) float64 {
 	baseProb := m.minProb
 	if prob, ok := m.logProbs[word]; ok {
 		baseProb = prob
+	} else if len([]rune(word)) > 1 {
+		// 多字词不在 unigram 模型中：使用字符平均 LogProb 估算，
+		// 避免 fallback 到 minProb 导致词库中的合法多字词（如"和解"）
+		// 在 Viterbi 中被单字组合（如"和"+"接"）碾压。
+		baseProb = m.CharBasedScore(word)
 	}
 
 	// 用户频率提升：每次选词增加约 0.5 的 logprob 提升
@@ -304,10 +309,8 @@ func (m *BigramModel) LogProb(word1, word2 string) float64 {
 		}
 	}
 
-	// 回退到 Unigram，施加惩罚：bigram 中找不到该词对说明共现概率极低，
-	// 仅凭高频单字不应获得与真实词组相当的分数。
-	// 惩罚值 -4.0 约等于将概率缩小到 ~1.8%，确保真实词组路径始终占优。
-	const backoffPenalty = -4.0
+	// 回退到 Unigram，施加轻微惩罚
+	const backoffPenalty = -1.0
 	return uniProb + backoffPenalty
 }
 
@@ -338,6 +341,10 @@ func NewBinaryUnigramModel(path string) (*BinaryUnigramModel, error) {
 // LogProb 获取词语的对数概率
 func (m *BinaryUnigramModel) LogProb(word string) float64 {
 	baseProb := m.reader.LogProb(word)
+	// 多字词不在模型中时使用字符平均 LogProb 估算
+	if !m.reader.Contains(word) && len([]rune(word)) > 1 {
+		baseProb = m.CharBasedScore(word)
+	}
 	if m.userFreqs != nil {
 		if freq, ok := m.userFreqs[word]; ok && freq > 0 {
 			boost := float64(freq) * 0.5

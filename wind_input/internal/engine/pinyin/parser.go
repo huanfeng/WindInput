@@ -87,9 +87,28 @@ func (p *PinyinParser) parseSegment(segment string, baseOffset int, result *Pars
 		coveredEnd += len(syllable)
 	}
 
-	// 迭代处理所有未被覆盖的尾部字符
+	// 迭代处理未被 MaximumMatch 覆盖的字符
 	pos := coveredEnd
 	for pos < len(segment) {
+		// 尝试从当前位置开始用 DP MaximumMatch 处理剩余部分，
+		// 避免贪心 MatchPrefixAt 导致歧义切分（如 "hen" 吞掉 "he+ni"）。
+		remainder := segment[pos:]
+		remainDAG := BuildDAG(remainder, p.syllableTrie)
+		remainPath := remainDAG.MaximumMatch()
+		if len(remainPath) > 0 {
+			for _, syllable := range remainPath {
+				result.Syllables = append(result.Syllables, ParsedSyllable{
+					Text:  syllable,
+					Type:  SyllableExact,
+					Start: baseOffset + pos,
+					End:   baseOffset + pos + len(syllable),
+				})
+				pos += len(syllable)
+			}
+			continue
+		}
+
+		// DP 也无法处理（当前位置不是有效音节起点），用 MatchPrefixAt 处理单个音节/字符
 		prefix, isComplete, possible := p.syllableTrie.MatchPrefixAt(segment, pos)
 
 		if prefix != "" {

@@ -1,6 +1,7 @@
 package pinyin
 
 import (
+	"log/slog"
 	"math"
 	"strings"
 )
@@ -39,6 +40,9 @@ func ViterbiDecode(lattice *Lattice, bigram *BigramModel) *ViterbiResult {
 	}
 	dp[0].logProb = 0 // 起点概率为 0（log(1)=0）
 
+	logger := slog.Default()
+	traceEnabled := n >= 8 // 仅对较长输入启用详细追踪
+
 	// 前向传播
 	for endPos := 1; endPos <= n; endPos++ {
 		nodes := lattice.GetNodesEndingAt(endPos)
@@ -62,6 +66,14 @@ func ViterbiDecode(lattice *Lattice, bigram *BigramModel) *ViterbiResult {
 			totalProb := dp[startPos].logProb + transProb
 
 			if totalProb > dp[endPos].logProb {
+				if traceEnabled {
+					logger.Debug("[VITERBI_TRACE] dp_update",
+						"pos", endPos, "word", node.Word,
+						"from", startPos, "prevWord", dp[startPos].word,
+						"transProb", transProb, "nodeLogProb", node.LogProb,
+						"totalProb", totalProb,
+						"oldBest", dp[endPos].word, "oldProb", dp[endPos].logProb)
+				}
 				dp[endPos].logProb = totalProb
 				dp[endPos].prevPos = startPos
 				dp[endPos].word = node.Word
@@ -69,8 +81,25 @@ func ViterbiDecode(lattice *Lattice, bigram *BigramModel) *ViterbiResult {
 		}
 	}
 
+	// 打印最终 dp 状态
+	if traceEnabled {
+		for i := 0; i <= n; i++ {
+			if dp[i].logProb > math.Inf(-1) {
+				logger.Debug("[VITERBI_TRACE] dp_final", "pos", i, "word", dp[i].word, "logProb", dp[i].logProb, "prevPos", dp[i].prevPos)
+			}
+		}
+		// 打印 endPos=n 的所有候选节点
+		endNodes := lattice.GetNodesEndingAt(n)
+		for _, nd := range endNodes {
+			logger.Debug("[VITERBI_TRACE] end_node", "word", nd.Word, "start", nd.Start, "end", nd.End, "logProb", nd.LogProb)
+		}
+	}
+
 	// 检查是否有到达终点的路径
 	if dp[n].logProb == math.Inf(-1) {
+		if traceEnabled {
+			logger.Debug("[VITERBI_TRACE] no_path", "input", lattice.input, "n", n)
+		}
 		return nil
 	}
 
@@ -79,6 +108,9 @@ func ViterbiDecode(lattice *Lattice, bigram *BigramModel) *ViterbiResult {
 	pos := n
 	for pos > 0 {
 		if dp[pos].word == "" {
+			if traceEnabled {
+				logger.Debug("[VITERBI_TRACE] backtrack_break", "pos", pos, "emptyWord", true)
+			}
 			break
 		}
 		words = append(words, dp[pos].word)
@@ -91,6 +123,12 @@ func ViterbiDecode(lattice *Lattice, bigram *BigramModel) *ViterbiResult {
 	// 反转词序列
 	for i, j := 0, len(words)-1; i < j; i, j = i+1, j-1 {
 		words[i], words[j] = words[j], words[i]
+	}
+
+	if traceEnabled {
+		logger.Debug("[VITERBI_TRACE] result",
+			"input", lattice.input, "words", strings.Join(words, "|"),
+			"logProb", dp[n].logProb)
 	}
 
 	return &ViterbiResult{

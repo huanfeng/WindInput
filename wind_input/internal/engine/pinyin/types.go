@@ -120,6 +120,24 @@ func (r *ParseResult) ConsumedBytesForSyllables(n int) int {
 	return r.Syllables[n-1].End
 }
 
+// ContiguousCompletedFromStart 返回从输入起始位置连续的完成音节（无 partial 间隔）。
+// 例如：
+//   - "nihao"  → [ni(E),hao(E)]           → (["ni","hao"], 5)
+//   - "nihdao" → [ni(E),h(P),dao(E)]      → (["ni"], 2)
+//   - "lwai"   → [l(P),wai(E)]            → ([], 0)
+//   - "nihaoh" → [ni(E),hao(E),h(P)]      → (["ni","hao"], 5)
+func (r *ParseResult) ContiguousCompletedFromStart() (syllables []string, endPos int) {
+	for _, s := range r.Syllables {
+		if s.IsExact() {
+			syllables = append(syllables, s.Text)
+			endPos = s.End
+		} else {
+			break
+		}
+	}
+	return
+}
+
 // ConsumedBytesForCompletedN 计算匹配前 n 个已完成（Exact）音节在原始输入中消耗的字节数。
 // 考虑了 Exact 之前可能存在的 Partial 音节（如 "sdem" 中 "s" 在 "de" 之前）。
 // 返回第 n 个 Exact 音节的 End 位置。

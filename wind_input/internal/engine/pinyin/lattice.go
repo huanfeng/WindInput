@@ -1,6 +1,7 @@
 package pinyin
 
 import (
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -33,12 +34,24 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 		input: input,
 	}
 
+	logger := slog.Default()
+	traceEnabled := n >= 8
+
 	// CompositeDict 始终支持前缀搜索
 	ps := d
 	hasPrefixSearch := true
 
 	// 构建 DAG
 	dag := BuildDAG(input, st)
+
+	if traceEnabled {
+		// 打印 DAG 结构
+		for i := 0; i < n && i < len(dag.nodes); i++ {
+			for _, dn := range dag.nodes[i] {
+				logger.Debug("[LATTICE_TRACE] dag_node", "pos", i, "end", dn.End, "syllable", dn.Syllables[0])
+			}
+		}
+	}
 
 	// 边收集边查找：递归遍历 DAG，直接查词库，避免无效段
 	seen := make(map[string]bool, 128)
@@ -62,6 +75,13 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 				seen[key] = true
 
 				logProb := calcLogProb(cand, unigram)
+				if traceEnabled && len([]rune(cand.Text)) > 1 {
+					logger.Debug("[LATTICE_TRACE] multichar_node",
+						"word", cand.Text, "code", code,
+						"start", startPos, "end", pos,
+						"logProb", logProb, "dictWeight", cand.Weight,
+						"inUnigram", unigram != nil && unigram.Contains(cand.Text))
+				}
 				node := LatticeNode{
 					Start:     startPos,
 					End:       pos,
@@ -139,11 +159,19 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 
 // calcLogProb 计算节点的对数概率
 func calcLogProb(cand candidate.Candidate, unigram UnigramLookup) float64 {
-	if unigram != nil {
+	if unigram == nil {
+		return float64(cand.Weight) / 100000.0
+	}
+
+	charCount := len([]rune(cand.Text))
+
+	// 单字或 unigram 模型中存在的词：直接使用 LogProb
+	if charCount <= 1 || unigram.Contains(cand.Text) {
 		return unigram.LogProb(cand.Text)
 	}
-	// 没有语言模型时使用权重的归一化值
-	return float64(cand.Weight) / 100000.0
+
+	// 多字词不在 unigram 模型中：使用字符平均 LogProb 估算
+	return unigram.CharBasedScore(cand.Text)
 }
 
 // GetNodesEndingAt 获取结束于指定位置的所有节点

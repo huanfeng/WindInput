@@ -92,17 +92,21 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	partial := parsed.PartialSyllable()
 	allSyllables := parsed.SyllableTexts()
 
-	// 预计算关键长度（基于 Parser 的音节位置信息，含分隔符）
-	// allCompletedEnd: 所有已完成音节在原始输入中的结束位置
-	allCompletedEnd := parsed.ConsumedBytesForCompletedN(syllableCount)
+	// 计算从输入起始位置连续的完成音节（无 partial 间隔）。
+	// 只有连续完成音节才能安全地生成候选，否则 ConsumedLength 会跨过中间的 partial 导致输入丢失。
+	// 例如："nihao" → contiguous=["ni","hao"]，"nihdao" → contiguous=["ni"]，"lwai" → contiguous=[]
+	contiguousSyllables, contiguousEnd := parsed.ContiguousCompletedFromStart()
+	contiguousCount := len(contiguousSyllables)
 
-	e.logger.Debug("convertCore", "input", input, "preedit", result.PreeditDisplay, "completed", completedSyllables, "partial", partial, "allSyllables", allSyllables, "parseElapsed", time.Since(convertStart))
+	// allCompletedEnd: 连续完成音节在原始输入中的结束位置（安全消耗范围）
+	allCompletedEnd := contiguousEnd
+
+	e.logger.Debug("convertCore", "input", input, "preedit", result.PreeditDisplay,
+		"completed", completedSyllables, "contiguous", contiguousSyllables,
+		"partial", partial, "allSyllables", allSyllables, "parseElapsed", time.Since(convertStart))
 
 	// 检查首个 completed syllable 是否也是输入的第一个段
-	// 例如 sdem → allSyllables=["s","de","m"]，completedSyllables=["de"]
-	// "de" 不是第一段，不应获得首音节优先权
-	firstCompletedIsLeading := syllableCount > 0 && len(allSyllables) > 0 &&
-		allSyllables[0] == completedSyllables[0]
+	firstCompletedIsLeading := contiguousCount > 0
 
 	// 3. 收集候选词（预分配容量避免多次扩容）
 	candidatesMap := make(map[string]*candidate.Candidate, 64)
@@ -130,14 +134,15 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	completedCode := strings.Join(completedSyllables, "")
+	// 使用连续完成音节生成候选的编码（安全范围，不跨越 partial 间隔）
+	completedCode := strings.Join(contiguousSyllables, "")
 
 	// ── 步骤 0b：动态规划造句（Poet） ──
 	// 参照 Rime Poet：对已完成音节构建词网格，动态规划找最优词序列组合。
-	// 触发条件：≥2 完成音节 + 有 unigram 模型。
-	// ConsumedLength = allCompletedEnd（仅消耗已完成音节，与分步确认兼容）。
+	// 触发条件：≥2 连续完成音节 + 有 unigram 模型。
+	// ConsumedLength = allCompletedEnd（仅消耗连续完成音节，不跨越 partial 间隔）。
 	// 造句结果作为普通候选参与排序，不享有绝对优先——Rime 中造句和精确匹配同级。
-	if syllableCount >= 2 && e.unigram != nil && len(completedCode) >= 4 {
+	if contiguousCount >= 2 && e.unigram != nil && len(completedCode) >= 4 {
 		lattice := BuildLattice(completedCode, e.syllableTrie, e.dict, e.unigram)
 		if !lattice.IsEmpty() {
 			vResults := ViterbiTopK(lattice, e.bigram, 3)
@@ -162,7 +167,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				// 短输入（≤3 音节）的纯单字拼凑直接丢弃，不作为候选。
 				// 这些组合（如"前他""林歪"）不是真实词组，对用户没有价值。
 				// 长句（≥4 音节）保留单字回退作为兜底，确保输入始终有结果。
-				if allSingleChar && syllableCount <= 3 {
+				if allSingleChar && contiguousCount <= 3 {
 					continue
 				}
 				// 长句中的纯单字拼凑降低优先级
@@ -170,7 +175,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				if allSingleChar {
 					iq = 1.0
 				}
-				coverage := float64(syllableCount) / float64(totalSyllableCount)
+				coverage := float64(contiguousCount) / float64(totalSyllableCount)
 				// 造句的 dictWeight 用 Viterbi 路径的 LogProb 反映整句质量
 				// LogProb 通常在 [-30, 0] 范围，映射到 [0, rimeMaxDictWeight] 区间，
 				// 与词库归一化权重同尺度，确保 NormalizeWeight 不会截断信息。
@@ -198,23 +203,20 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 当有 partial 后缀时，仍对已完成音节部分执行精确匹配，
 	// 这样 "wobuzhidaog" 中的 "wobuzhidao" 仍能精确匹配 "我不知道"。
 	hasExplicitSep := strings.Contains(input, "'")
-	if syllableCount > 0 {
+	if contiguousCount > 0 {
 		exactInput := completedCode
 		if partial == "" {
 			exactInput = queryInput // 无 partial 时用完整输入
 		}
-		exactResults := e.lookupWithFuzzy(exactInput, completedSyllables)
+		exactResults := e.lookupWithFuzzy(exactInput, contiguousSyllables)
 		for _, cand := range exactResults {
 			c := cand
 			charCount := len([]rune(c.Text))
-			// 首段是 partial 时（如 sdem），completed 音节匹配整体降级
 			iq := 4.0
-			if !firstCompletedIsLeading {
-				iq = 2.0
-			} else if hasExplicitSep && charCount != syllableCount {
+			if hasExplicitSep && charCount != contiguousCount {
 				iq = 2.0 // 显式分隔符下字数不匹配音节数，降级
 			}
-			coverage := float64(syllableCount) / float64(totalSyllableCount)
+			coverage := float64(contiguousCount) / float64(totalSyllableCount)
 			c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverage, charCount)
 			c.ConsumedLength = allCompletedEnd // 基于 Parser 音节位置精确计算
 			// 精确匹配的词频权重最可靠：如果候选已存在（如来自 Viterbi），保留更高权重
@@ -232,7 +234,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// ── 步骤 1b：多切分并行打分 ──
 	// 对无显式分隔符的输入，获取备选切分路径的候选
 	// 即使有 partial 后缀（如 "xianr"），也对完整音节部分做多切分
-	if !strings.Contains(input, "'") && syllableCount > 0 {
+	if contiguousCount > 0 && !strings.Contains(input, "'") {
 		detail := parser.ParseWithDetail(queryInput, 4)
 		for _, alt := range detail.Alternatives {
 			altSyllables := alt.CompletedSyllables()
@@ -266,7 +268,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// ── 步骤 3：前缀匹配（输入 "wome" 时找到 "women"→我们） ──
 	// 当有显式分隔符时跳过：queryInput 去掉了 '，会把 "xi'ande" 当作 "xiande"
 	// 匹配到 "显得比"(xiandebi) 等不尊重分隔符边界的结果
-	if syllableCount > 0 && !hasExplicitSep {
+	if contiguousCount > 0 && !hasExplicitSep {
 		{
 			prefixLimit := 50
 			if maxCandidates > 0 {
@@ -279,7 +281,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				coverage := float64(syllableCount) / float64(totalSyllableCount)
+				coverage := float64(contiguousCount) / float64(totalSyllableCount)
 				c.Weight = e.rimeScore(c.Text, float64(c.Weight), 2.0, coverage, charCount)
 				c.ConsumedLength = len(input)
 				candidatesMap[c.Text] = &c
@@ -291,8 +293,8 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// ── 步骤 2：子词组查找（如 "nihaoshijie" → 查找 "你好"、"世界" 等子词组） ──
 	// 直接使用 Parser 已解析的 completedSyllables，不再冗余重建 DAG。
 	// 枚举所有从首位开始的连续子序列，支持部分上屏。
-	if syllableCount > 1 {
-		e.lookupSubPhrasesEx(completedSyllables, parsed, totalSyllableCount, candidatesMap)
+	if contiguousCount > 1 {
+		e.lookupSubPhrasesEx(contiguousSyllables, parsed, totalSyllableCount, candidatesMap)
 	}
 
 	// ── 步骤 4：单字候选 ──
@@ -300,7 +302,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// ── 4a. 首段 partial 音节的单字候选 ──
 	// 当首个 completed 不是输入首段时（如 sdem → "s" 在 "de" 前），
 	// 为首段 partial 音节生成候选，权重高于首 completed 音节的候选
-	if syllableCount > 0 && !firstCompletedIsLeading {
+	if contiguousCount == 0 && syllableCount > 0 {
 		leadingPartial := allSyllables[0]
 		possibles := e.syllableTrie.GetPossibleSyllables(leadingPartial)
 		const maxLeadingPerSyllable = 5
@@ -316,6 +318,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
+				if charCount != 1 {
+					continue // 步骤 4a 仅取单字，多字词的 ConsumedLength 无法正确覆盖
+				}
 				// 步骤 4a：首段 partial 单字，initialQuality=3.0，coverage=1/total
 				coverage := 1.0 / float64(totalSyllableCount)
 				c.Weight = e.rimeScore(c.Text, float64(c.Weight), 3.0, coverage, charCount)
@@ -326,8 +331,12 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	if syllableCount > 0 {
-		firstSyllable := completedSyllables[0]
+	// 首个完成音节的单字候选：仅当它是输入首段时生成。
+	// 当首段是 partial 时（如 lwai 中 "l" 在 "wai" 前），首个完成音节的单字候选
+	// 的 ConsumedLength 会包含前面的 partial，选中后导致 partial 被丢弃。
+	// 用户应先通过步骤 4a 处理 leading partial。
+	if contiguousCount > 0 {
+		firstSyllable := contiguousSyllables[0]
 		charResults := e.lookupWithFuzzy(firstSyllable, []string{firstSyllable})
 
 		for _, cand := range charResults {
@@ -337,17 +346,14 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			c := cand
 			charCount := len([]rune(c.Text))
 			// 步骤 4：首音节单字 initialQuality 按场景区分
-			// 单音节输入=4.0，多音节输入=2.5，非首段 completed=1.5（降级）
+			// 单音节输入=4.0，多音节输入=2.5
 			iq := 4.0
 			if syllableCount >= 2 {
 				iq = 2.5
 			}
-			if !firstCompletedIsLeading {
-				iq = 1.5
-			}
 			coverage := 1.0 / float64(totalSyllableCount)
 			c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverage, charCount)
-			// 基于 Parser 位置：消耗到第 1 个已完成音节的结束位置（自动包含前置 partial 段）
+			// 基于 Parser 位置：消耗到第 1 个已完成音节的结束位置
 			c.ConsumedLength = parsed.ConsumedBytesForCompletedN(1)
 			candidatesMap[c.Text] = &c
 		}
@@ -359,7 +365,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 
 	// ── 4b. 多 partial 音节时的首音节单字候选 ──
 	// 例如 "bzd" → ["b","z","d"] 都是 partial，为首音节 "b" 生成单字候选
-	if syllableCount == 0 && len(allSyllables) > 1 {
+	if contiguousCount == 0 && len(allSyllables) > 1 {
 		firstPartial := allSyllables[0]
 		possibles := e.syllableTrie.GetPossibleSyllables(firstPartial)
 		const maxMultiPartialPerSyllable = 5
@@ -375,6 +381,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
+				if charCount != 1 {
+					continue // 步骤 4b 仅取单字，多字词的 ConsumedLength 无法正确覆盖
+				}
 				// 步骤 4b：多 partial 首字，initialQuality=2.0
 				coverage := 1.0 / float64(totalSyllableCount)
 				c.Weight = e.rimeScore(c.Text, float64(c.Weight), 2.0, coverage, charCount)
@@ -386,7 +395,8 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	}
 
 	// ── 步骤 5：未完成音节的前缀查找 ──
-	if partial != "" {
+	// 步骤 5 安全条件：trailing partial 紧跟在连续完成音节之后，或是单独的 partial 输入
+	if partial != "" && (contiguousCount > 0 || len(allSyllables) == 1) {
 		{
 			prefixResults := e.dict.LookupPrefix(queryInput, 30)
 			for _, cand := range prefixResults {
@@ -448,18 +458,31 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 纯简拼：bzd → allSyllables=["b","z","d"] → abbrev="bzd"
 	// 混合简拼：nizm → allSyllables=["ni","z","m"] → abbrev="nzm"
 	// 混输模式下可通过 SkipAbbrev 关闭简拼匹配以减少噪声
-	if len(allSyllables) >= 2 && !(e.config != nil && e.config.SkipAbbrev) {
+	// 简拼匹配：仅在全部音节都是 partial 时运行（纯简拼模式，如 "bzd"/"nh"）。
+	// 混合输入（如 "lwai"=l+wai）中，全拼音节的首字母不应被当作简拼处理，
+	// 否则 "lw" 会匹配"龙王"(long+wang) 但实际输入的 "wai" ≠ "w"，导致 "ai" 丢弃。
+	// TODO: 实现简拼+全拼混合匹配策略（如 "ldao" → 匹配第二音节为 "dao" 的词组）
+	isPureAbbrev := syllableCount == 0 && len(allSyllables) >= 2
+	if isPureAbbrev && !(e.config != nil && e.config.SkipAbbrev) {
 		var abbrevBuilder strings.Builder
 		for _, s := range allSyllables {
 			abbrevBuilder.WriteByte(s[0])
 		}
 		abbrevCode := abbrevBuilder.String()
+		totalSyllables := len(allSyllables)
 
 		{
 			abbrevResults := e.dict.LookupAbbrev(abbrevCode, 30)
 			for _, cand := range abbrevResults {
 				c := cand
 				charCount := len([]rune(c.Text))
+				// 简拼候选的字数必须等于音节数，确保完整覆盖所有音节。
+				// 例如 lwai(2音节) 的简拼 "lw" 只接受 2 字词（如"两位"），
+				// 但 ConsumedLength 必须覆盖全部输入，否则会丢弃未匹配的部分。
+				// 字数不等于音节数时跳过，避免选中后丢弃编码。
+				if charCount != totalSyllables {
+					continue
+				}
 				// 步骤 6：简拼匹配
 				// 纯简拼（syllableCount=0）initialQuality=3.0，有完整音节时=1.0
 				iq := 3.0

@@ -36,25 +36,67 @@ func BuildDAG(input string, st *SyllableTrie) *DAG {
 	return dag
 }
 
-// MaximumMatch 正向最大匹配，返回贪心切分的音节序列
+// MaximumMatch 全局最优切分，返回覆盖最多输入字符的音节序列
+// 使用动态规划而非贪心，避免局部最长匹配导致后续位置无法继续。
+// 例如 "henihejiele"：贪心选 "hen" 后 "i" 无法匹配导致丢失 "ni"，
+// DP 会选择 "he"+"ni"+"he"+"jie"+"le" 覆盖全部输入。
 func (d *DAG) MaximumMatch() []string {
-	var result []string
-	pos := 0
 	n := len(d.input)
-
-	for pos < n {
-		if pos >= len(d.nodes) || len(d.nodes[pos]) == 0 {
-			// 当前位置无法匹配任何完整音节，停止匹配
-			// 余部交由 Parser 用 MatchPrefixAt 迭代处理
-			break
-		}
-
-		// 选择最长的匹配
-		best := d.nodes[pos][0] // 已经从长到短排序
-		result = append(result, best.Syllables[0])
-		pos = best.End
+	if n == 0 {
+		return nil
 	}
 
+	// dp[i] = 从位置 0 到位置 i 的最大覆盖字符数
+	// prev[i] = 到达位置 i 时选择的音节（用于回溯）
+	dp := make([]int, n+1)
+	prev := make([]string, n+1)
+	prevPos := make([]int, n+1)
+
+	for i := range dp {
+		dp[i] = -1 // 不可达
+		prevPos[i] = -1
+	}
+	dp[0] = 0
+
+	for pos := 0; pos < n; pos++ {
+		if dp[pos] < 0 {
+			continue // 此位置不可达
+		}
+		if pos >= len(d.nodes) {
+			continue
+		}
+		for _, node := range d.nodes[pos] {
+			end := node.End
+			covered := dp[pos] + (end - pos)
+			if covered > dp[end] {
+				dp[end] = covered
+				prev[end] = node.Syllables[0]
+				prevPos[end] = pos
+			}
+		}
+	}
+
+	// 找到最远可达位置（优先覆盖全部输入，否则取最远）
+	bestEnd := 0
+	for i := n; i >= 0; i-- {
+		if dp[i] >= 0 {
+			bestEnd = i
+			break
+		}
+	}
+	if bestEnd == 0 {
+		return nil
+	}
+
+	// 回溯构建音节序列
+	var result []string
+	for pos := bestEnd; pos > 0 && prevPos[pos] >= 0; pos = prevPos[pos] {
+		result = append(result, prev[pos])
+	}
+	// 反转
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
 	return result
 }
 

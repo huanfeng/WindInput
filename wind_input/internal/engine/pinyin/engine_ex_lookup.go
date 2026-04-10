@@ -41,7 +41,10 @@ func (e *Engine) sortCandidates(candidates []candidate.Candidate, order string, 
 // totalSyllableCount 用于 Rime 评分的 coverage 计算。
 func (e *Engine) lookupSubPhrasesEx(syllables []string, parsed *ParseResult, totalSyllableCount int, candidatesMap map[string]*candidate.Candidate) {
 	n := len(syllables)
-	// 查找所有连续子序列组成的词组
+	// 查找所有连续子序列组成的词组。
+	// start=0（首位）：initialQuality=3.0，ConsumedLength 精确到子词组末尾。
+	// start>0（非首位）：initialQuality=2.0（降级），ConsumedLength 到子词组末尾
+	//   （前面的音节一并消耗——用户主动选择时知道前缀会被牺牲）。
 	for length := n; length >= 2; length-- {
 		for start := 0; start <= n-length; start++ {
 			subSyllables := syllables[start : start+length]
@@ -53,24 +56,15 @@ func (e *Engine) lookupSubPhrasesEx(syllables []string, parsed *ParseResult, tot
 				}
 				c := cand
 				charCount := len([]rune(c.Text))
-				// 步骤 2：子词组评分
-				// start==0（首位）initialQuality=3.0，start>0（非首位）initialQuality=2.0
-				// 非首位需要足够高以不被大量单字候选挤出候选列表
-				// （Rime 中 Poet 造句器覆盖长句，我们没有 Poet，需要子词组补位）
+				// start=0: initialQuality=3.0, start>0: 降级为 2.0
 				iq := 3.0
 				if start > 0 {
 					iq = 2.0
 				}
 				coverage := float64(length) / float64(totalSyllableCount)
 				c.Weight = e.rimeScore(c.Text, float64(c.Weight), iq, coverage, charCount)
-				// ConsumedLength 基于 Parser 的音节位置精确计算
-				if start == 0 {
-					// 从头开始的子词组：消耗到第 length 个已完成音节的结束位置
-					c.ConsumedLength = parsed.ConsumedBytesForCompletedN(length)
-				} else {
-					// 非首位子词组：消耗全部输入（避免前缀音节丢失）
-					c.ConsumedLength = len(parsed.Input)
-				}
+				// ConsumedLength: 消耗到子词组最后一个音节的结束位置（包含前面的音节）
+				c.ConsumedLength = parsed.ConsumedBytesForCompletedN(start + length)
 				candidatesMap[c.Text] = &c
 			}
 		}
