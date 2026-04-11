@@ -103,31 +103,27 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>次选/三选快捷键</label>
-          <p class="setting-hint">选中第2、3位候选词的快捷键，可多选</p>
+          <p class="setting-hint">选中第2、3位候选词的快捷键</p>
         </div>
         <div class="setting-control">
-          <div class="checkbox-group two-columns">
+          <div class="checkbox-group key-group-grid">
             <label
               class="checkbox-item"
               v-for="group in [
-                { value: 'semicolon_quote', label: '; \' 键' },
-                { value: 'comma_period', label: ', . 键' },
-                { value: 'lrshift', label: 'L/R Shift' },
-                { value: 'lrctrl', label: 'L/R Ctrl' },
+                { value: 'semicolon_quote', label: '; / \'', tip: '分号/引号' },
+                { value: 'comma_period', label: ', / .', tip: '逗号/句号' },
+                { value: 'lrshift', label: 'L / R Shift', tip: '左Shift/右Shift' },
+                { value: 'lrctrl', label: 'L / R Ctrl', tip: '左Ctrl/右Ctrl' },
               ]"
               :key="group.value"
+              :title="group.tip"
             >
               <input
                 type="checkbox"
                 :checked="
                   formData.input.select_key_groups.includes(group.value)
                 "
-                @change="
-                  toggleArrayValue(
-                    formData.input.select_key_groups,
-                    group.value,
-                  )
-                "
+                @change="toggleSelectKeyGroup(group.value)"
               />
               <span>{{ group.label }}</span>
             </label>
@@ -138,18 +134,20 @@
         <div class="setting-info">
           <label>高亮移动按键</label>
           <p class="setting-hint">
-            可多选，用于在候选列表中移动选中项。Tab/Shift+Tab 与翻页键互斥
+            在候选列表中移动选中项
+            <br />Tab/Shift+Tab 与翻页键互斥
           </p>
         </div>
         <div class="setting-control">
-          <div class="checkbox-group">
+          <div class="checkbox-group key-group-grid">
             <label
               class="checkbox-item"
               v-for="hk in [
-                { value: 'arrows', label: '上/下方向键' },
-                { value: 'tab', label: 'Tab / Shift+Tab' },
+                { value: 'arrows', label: '↑ / ↓', tip: '上/下方向键' },
+                { value: 'tab', label: 'Tab / Shift+Tab', tip: 'Tab键/Shift+Tab键' },
               ]"
               :key="hk.value"
+              :title="hk.tip"
             >
               <input
                 type="checkbox"
@@ -164,19 +162,20 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>翻页快捷键</label>
-          <p class="setting-hint">可多选，同时启用多组翻页键</p>
+          <p class="setting-hint">同时启用多组翻页键</p>
         </div>
         <div class="setting-control">
-          <div class="checkbox-group two-columns">
+          <div class="checkbox-group key-group-grid">
             <label
               class="checkbox-item"
               v-for="pk in [
-                { value: 'pageupdown', label: 'PgUp/PgDn' },
-                { value: 'minus_equal', label: '- / =' },
-                { value: 'brackets', label: '[ / ]' },
-                { value: 'shift_tab', label: 'Shift+Tab / Tab' },
+                { value: 'pageupdown', label: 'PgUp / PgDn', tip: '上翻页/下翻页' },
+                { value: 'minus_equal', label: '- / =', tip: '减号/等号' },
+                { value: 'brackets', label: '[ / ]', tip: '左方括号/右方括号' },
+                { value: 'shift_tab', label: 'Shift+Tab / Tab', tip: 'Shift+Tab键/Tab键' },
               ]"
               :key="pk.value"
+              :title="pk.tip"
             >
               <input
                 type="checkbox"
@@ -184,6 +183,38 @@
                 @change="togglePageKey(pk.value)"
               />
               <span>{{ pk.label }}</span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>以词定字</label>
+          <p class="setting-hint">
+            输入词组后按指定键只取第1或第2个字
+            <br />与翻页/候选键互斥，启用后自动取消冲突项
+          </p>
+        </div>
+        <div class="setting-control">
+          <div class="checkbox-group key-group-grid">
+            <label
+              class="checkbox-item"
+              v-for="sc in [
+                { value: 'comma_period', label: ', / .', tip: '逗号/句号' },
+                { value: 'minus_equal', label: '- / =', tip: '减号/等号' },
+                { value: 'brackets', label: '[ / ]', tip: '左方括号/右方括号' },
+              ]"
+              :key="sc.value"
+              :title="sc.tip"
+            >
+              <input
+                type="checkbox"
+                :checked="
+                  formData.input.select_char_keys.includes(sc.value)
+                "
+                @change="toggleSelectCharKey(sc.value)"
+              />
+              <span>{{ sc.label }}</span>
             </label>
           </div>
         </div>
@@ -456,6 +487,17 @@ function toggleArrayValue(arr: string[], value: string) {
   checkConflicts();
 }
 
+function toggleSelectKeyGroup(value: string) {
+  toggleArrayValue(props.formData.input.select_key_groups, value);
+  // 二三候选键 comma_period 与以词定字 comma_period 互斥
+  if (
+    value === "comma_period" &&
+    props.formData.input.select_key_groups.includes("comma_period")
+  ) {
+    removeFromArray(props.formData.input.select_char_keys, "comma_period");
+  }
+}
+
 function toggleHighlightKey(value: string) {
   toggleArrayValue(props.formData.input.highlight_keys, value);
   if (value === "tab" && props.formData.input.highlight_keys.includes("tab")) {
@@ -477,6 +519,41 @@ function togglePageKey(value: string) {
       props.formData.input.highlight_keys.splice(idx, 1);
     }
   }
+  // 翻页键与以词定字互斥: minus_equal / brackets
+  if (
+    (value === "minus_equal" || value === "brackets") &&
+    props.formData.input.page_keys.includes(value)
+  ) {
+    removeFromArray(props.formData.input.select_char_keys, value);
+  }
+}
+
+function toggleSelectCharKey(value: string) {
+  toggleArrayValue(props.formData.input.select_char_keys, value);
+  if (!props.formData.input.select_char_keys.includes(value)) {
+    // 取消选择，无需处理冲突
+    checkConflicts();
+    return;
+  }
+  // 启用以词定字时，自动移除冲突的按键绑定
+  if (value === "comma_period") {
+    // 与二三候选键 comma_period 冲突
+    removeFromArray(props.formData.input.select_key_groups, "comma_period");
+  } else if (value === "minus_equal") {
+    // 与翻页键 minus_equal 冲突
+    removeFromArray(props.formData.input.page_keys, "minus_equal");
+  } else if (value === "brackets") {
+    // 与翻页键 brackets 冲突
+    removeFromArray(props.formData.input.page_keys, "brackets");
+  }
+  checkConflicts();
+}
+
+function removeFromArray(arr: string[], value: string) {
+  const idx = arr.indexOf(value);
+  if (idx >= 0) {
+    arr.splice(idx, 1);
+  }
 }
 
 watch(
@@ -484,6 +561,7 @@ watch(
     props.formData.hotkeys.toggle_mode_keys,
     props.formData.input.select_key_groups,
     props.formData.input.highlight_keys,
+    props.formData.input.select_char_keys,
   ],
   checkConflicts,
   { deep: true },
@@ -491,6 +569,9 @@ watch(
 </script>
 
 <style scoped>
+.key-group-grid {
+  grid-template-columns: repeat(2, 130px);
+}
 .warning-inline {
   display: flex;
   align-items: center;

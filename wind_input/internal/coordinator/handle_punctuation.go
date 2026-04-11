@@ -73,6 +73,54 @@ func (c *Coordinator) isSelectKey3(key string, keyCode int) bool {
 	return false
 }
 
+// isSelectCharFirstKey checks if the key is configured as "select first char from word" key
+func (c *Coordinator) isSelectCharFirstKey(key string, keyCode int) bool {
+	if c.config == nil {
+		return false
+	}
+	for _, group := range c.config.Input.SelectCharKeys {
+		switch group {
+		case "comma_period":
+			if key == "," || uint32(keyCode) == ipc.VK_OEM_COMMA {
+				return true
+			}
+		case "minus_equal":
+			if key == "-" || uint32(keyCode) == ipc.VK_OEM_MINUS {
+				return true
+			}
+		case "brackets":
+			if key == "[" || uint32(keyCode) == ipc.VK_OEM_4 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isSelectCharSecondKey checks if the key is configured as "select second char from word" key
+func (c *Coordinator) isSelectCharSecondKey(key string, keyCode int) bool {
+	if c.config == nil {
+		return false
+	}
+	for _, group := range c.config.Input.SelectCharKeys {
+		switch group {
+		case "comma_period":
+			if key == "." || uint32(keyCode) == ipc.VK_OEM_PERIOD {
+				return true
+			}
+		case "minus_equal":
+			if key == "=" || uint32(keyCode) == ipc.VK_OEM_PLUS {
+				return true
+			}
+		case "brackets":
+			if key == "]" || uint32(keyCode) == ipc.VK_OEM_6 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isPunctuation checks if a character is a punctuation/symbol that should be
 // handled by the punctuation pipeline. This includes all characters that may
 // have Chinese punctuation mappings or may be customized by user in the future.

@@ -125,6 +125,48 @@ func (c *Config) IsPageDownKey(key string) bool {
 	return false
 }
 
+// IsSelectCharFirstKey 检查按键是否为以词定字第1字按键
+func (c *Config) IsSelectCharFirstKey(key string) bool {
+	for _, group := range c.Input.SelectCharKeys {
+		switch group {
+		case "comma_period":
+			if key == "comma" {
+				return true
+			}
+		case "minus_equal":
+			if key == "minus" {
+				return true
+			}
+		case "brackets":
+			if key == "lbracket" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsSelectCharSecondKey 检查按键是否为以词定字第2字按键
+func (c *Config) IsSelectCharSecondKey(key string) bool {
+	for _, group := range c.Input.SelectCharKeys {
+		switch group {
+		case "comma_period":
+			if key == "period" {
+				return true
+			}
+		case "minus_equal":
+			if key == "equal" {
+				return true
+			}
+		case "brackets":
+			if key == "rbracket" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ValidateHotkeyConflicts 检查快捷键冲突
 func (c *Config) ValidateHotkeyConflicts() []string {
 	conflicts := []string{}
@@ -191,6 +233,25 @@ func (c *Config) ValidateHotkeyConflicts() []string {
 				conflicts = append(conflicts, fmt.Sprintf("按键 %s 同时用于: %s 和 移动高亮", key, existing))
 			} else {
 				usedKeys[key] = "移动高亮"
+			}
+		}
+	}
+
+	for _, sc := range c.Input.SelectCharKeys {
+		var keys []string
+		switch sc {
+		case "comma_period":
+			keys = []string{"comma", "period"}
+		case "minus_equal":
+			keys = []string{"minus", "equal"}
+		case "brackets":
+			keys = []string{"lbracket", "rbracket"}
+		}
+		for _, key := range keys {
+			if existing, ok := usedKeys[key]; ok {
+				conflicts = append(conflicts, fmt.Sprintf("按键 %s 同时用于: %s 和 以词定字", key, existing))
+			} else {
+				usedKeys[key] = "以词定字"
 			}
 		}
 	}

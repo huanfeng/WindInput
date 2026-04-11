@@ -417,6 +417,25 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	case vk == ipc.VK_SPACE:
 		return c.handleSpace()
 
+	case !hasShift && c.isSelectCharFirstKey(key, data.KeyCode):
+		if result := c.handleSelectChar(0); result != nil {
+			return result
+		}
+		// 无候选或候选词长度不足时，回退为标点处理
+		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
+			return c.handlePunctuation(rune(key[0]), prevDigitState, data.PrevChar)
+		}
+		return nil
+
+	case !hasShift && c.isSelectCharSecondKey(key, data.KeyCode):
+		if result := c.handleSelectChar(1); result != nil {
+			return result
+		}
+		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
+			return c.handlePunctuation(rune(key[0]), prevDigitState, data.PrevChar)
+		}
+		return nil
+
 	case c.isPageUpKey(key, data.KeyCode, uint32(data.Modifiers)):
 		if result := c.handlePageUp(); result != nil {
 			return result

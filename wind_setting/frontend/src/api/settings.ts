@@ -127,6 +127,7 @@ export interface InputConfig {
   select_key_groups: string[];
   page_keys: string[];
   highlight_keys: string[]; // 移动高亮候选项: "arrows"(上/下方向键), "tab"(Tab/Shift+Tab)
+  select_char_keys: string[]; // 以词定字按键: "comma_period"(,.), "minus_equal"(-=), "brackets"([])
   pinyin_separator: string; // 拼音分隔符: "auto", "quote", "backtick", "none"
   temp_pinyin: TempPinyinConfig;
   auto_pair: AutoPairConfig;
@@ -363,6 +364,7 @@ export function getDefaultConfig(): Config {
       select_key_groups: ["semicolon_quote"],
       page_keys: ["pageupdown", "minus_equal"],
       highlight_keys: ["arrows"],
+      select_char_keys: [],
       pinyin_separator: "auto",
       temp_pinyin: {
         trigger_keys: ["backtick"],

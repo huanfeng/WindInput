@@ -595,6 +595,57 @@ func (c *Coordinator) handleSpace() *bridge.KeyEventResult {
 	return nil
 }
 
+// handleSelectChar 以词定字：从当前高亮候选词中取第 charIndex 个字符上屏（0-based）
+func (c *Coordinator) handleSelectChar(charIndex int) *bridge.KeyEventResult {
+	if len(c.candidates) == 0 || len(c.inputBuffer) == 0 {
+		return nil
+	}
+
+	index := (c.currentPage-1)*c.candidatesPerPage + c.selectedIndex
+	if index >= len(c.candidates) {
+		return nil
+	}
+
+	cand := c.candidates[index]
+	runes := []rune(cand.Text)
+
+	// 候选词长度不足时不生效，回退为标点处理
+	if charIndex >= len(runes) {
+		return nil
+	}
+
+	text := string(runes[charIndex])
+	if c.fullWidth {
+		text = transform.ToFullWidth(text)
+	}
+
+	// 拼接已确认段的文本
+	prefix := c.confirmedPrefix()
+	if c.fullWidth && prefix != "" {
+		prefix = transform.ToFullWidth(prefix)
+	}
+
+	// 记录输入历史
+	if c.inputHistory != nil {
+		c.inputHistory.Record(text, c.inputBuffer, "", 0)
+	}
+
+	// 用户词频学习
+	if c.engineMgr != nil && !cand.IsCommand {
+		c.engineMgr.OnCandidateSelected(c.inputBuffer, cand.Text, cand.Source)
+	}
+
+	c.logger.Debug("Select char from word", "charIndex", charIndex, "char", text, "word", cand.Text)
+
+	c.clearState()
+	c.hideUI()
+
+	return &bridge.KeyEventResult{
+		Type: bridge.ResponseTypeInsertText,
+		Text: prefix + text,
+	}
+}
+
 func (c *Coordinator) handleNumberKey(num int) *bridge.KeyEventResult {
 	// num is 1-9 or 10 (key '0'), convert to 0-based index within current page
 	index := (c.currentPage-1)*c.candidatesPerPage + (num - 1)
