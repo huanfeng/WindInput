@@ -300,31 +300,66 @@ func (c *Coordinator) getIndicatorPosition() (x, y int) {
 	return x, y
 }
 
-func (c *Coordinator) showModeIndicator() {
+// updateStatusIndicator 更新状态提示（合并显示输入模式+标点+全半角）
+func (c *Coordinator) updateStatusIndicator() {
 	if c.uiManager == nil || !c.uiManager.IsReady() {
 		return
 	}
 
-	// Keep mode indicators on the same rendering path as candidates.
+	// 确保 host render 状态是最新的
 	c.updateHostRenderState()
 
-	// Build mode text: Chinese mode shows schema name (e.g., "全拼", "五笔"), English mode shows "英"
-	var modeText string
-	if !c.chineseMode {
-		modeText = "英"
-	} else if c.engineMgr != nil {
-		name, _ := c.engineMgr.GetSchemaDisplayInfo()
-		if name != "" {
-			modeText = name
-		} else {
-			modeText = "中"
-		}
-	} else {
-		modeText = "中"
+	state := ui.StatusState{
+		ModeLabel:  c.getStatusModeLabel(),
+		PunctLabel: c.getStatusPunctLabel(),
+		WidthLabel: c.getStatusWidthLabel(),
 	}
 
 	x, y := c.getIndicatorPosition()
-	c.uiManager.ShowModeIndicator(modeText, x, y)
+	c.uiManager.ShowStatusIndicator(state, x, y)
+}
+
+// getStatusModeLabel 获取模式标签（支持简写/全称，CapsLock 时返回 "A"）
+func (c *Coordinator) getStatusModeLabel() string {
+	if c.capsLockOn {
+		return "A"
+	}
+	if !c.chineseMode {
+		return "英"
+	}
+	if c.engineMgr != nil {
+		name, iconLabel := c.engineMgr.GetSchemaDisplayInfo()
+		style := c.config.UI.StatusIndicator.SchemaNameStyle
+		if style == "short" && iconLabel != "" {
+			return iconLabel
+		}
+		if name != "" {
+			return name
+		}
+	}
+	return "中"
+}
+
+// getStatusPunctLabel 获取标点状态标签
+func (c *Coordinator) getStatusPunctLabel() string {
+	if c.chinesePunctuation {
+		return "。"
+	}
+	return "."
+}
+
+// getStatusWidthLabel 获取全半角状态标签
+// 全角: ● (实心圆), 半角: ◑ (半实心圆)，始终显示以保持统一
+func (c *Coordinator) getStatusWidthLabel() string {
+	if c.fullWidth {
+		return "●"
+	}
+	return "◑"
+}
+
+// showModeIndicator 向后兼容，转发到 updateStatusIndicator
+func (c *Coordinator) showModeIndicator() {
+	c.updateStatusIndicator()
 }
 
 func (c *Coordinator) hideUI() {

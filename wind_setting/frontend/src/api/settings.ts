@@ -82,6 +82,27 @@ export interface HotkeyConfig {
   global_hotkeys: string[]; // 注册为全局热键的快捷键名称列表
 }
 
+// 状态提示配置
+export interface StatusIndicatorConfig {
+  enabled: boolean;
+  duration: number;
+  display_mode: string; // "temp" | "always"
+  schema_name_style: string; // "short" | "full"
+  show_mode: boolean;
+  show_punct: boolean;
+  show_full_width: boolean;
+  position_mode: string; // "follow_caret" | "custom"
+  offset_x: number;
+  offset_y: number;
+  custom_x: number;
+  custom_y: number;
+  font_size: number;
+  opacity: number;
+  background_color: string;
+  text_color: string;
+  border_radius: number;
+}
+
 // UI配置
 export interface UIConfig {
   font_size: number;
@@ -90,9 +111,7 @@ export interface UIConfig {
   inline_preedit: boolean;
   hide_candidate_window: boolean;
   candidate_layout: string;
-  status_indicator_duration: number;
-  status_indicator_offset_x: number;
-  status_indicator_offset_y: number;
+  status_indicator: StatusIndicatorConfig;
   theme: string;
   theme_style: string; // "system" | "light" | "dark"
 }
@@ -345,9 +364,25 @@ export function getDefaultConfig(): Config {
       inline_preedit: true,
       hide_candidate_window: false,
       candidate_layout: "horizontal",
-      status_indicator_duration: 800,
-      status_indicator_offset_x: 0,
-      status_indicator_offset_y: 0,
+      status_indicator: {
+        enabled: true,
+        duration: 800,
+        display_mode: "temp",
+        schema_name_style: "full",
+        show_mode: true,
+        show_punct: true,
+        show_full_width: false,
+        position_mode: "follow_caret",
+        offset_x: 0,
+        offset_y: 0,
+        custom_x: 0,
+        custom_y: 0,
+        font_size: 18,
+        opacity: 0.9,
+        background_color: "",
+        text_color: "",
+        border_radius: 6,
+      },
       theme: "default",
       theme_style: "system",
     },

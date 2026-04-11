@@ -24,6 +24,9 @@ func (m *Manager) UpdateConfig(fontSize float64, fontPath string, hideCandidateW
 	if m.unifiedPopupMenu != nil {
 		m.unifiedPopupMenu.SetFontPath(fontPath)
 	}
+	if m.status != nil {
+		m.status.SetFontPath(fontPath)
+	}
 	if m.window != nil {
 		m.window.SetMenuFontPath(fontPath)
 	}
@@ -44,6 +47,20 @@ func (m *Manager) UpdateStatusIndicatorConfig(duration, offsetX, offsetY int) {
 	m.statusIndicatorOffsetY = offsetY
 	m.mu.Unlock()
 	m.logger.Info("Status indicator config updated", "duration", duration, "offsetX", offsetX, "offsetY", offsetY)
+}
+
+// UpdateStatusIndicatorFullConfig 更新完整状态提示配置
+func (m *Manager) UpdateStatusIndicatorFullConfig(cfg StatusWindowConfig) {
+	if m.status != nil {
+		m.status.SetConfig(cfg)
+	}
+	// 同步旧字段保持兼容
+	m.mu.Lock()
+	m.statusIndicatorDuration = cfg.Duration
+	m.statusIndicatorOffsetX = cfg.OffsetX
+	m.statusIndicatorOffsetY = cfg.OffsetY
+	m.mu.Unlock()
+	m.logger.Info("Status indicator full config updated", "displayMode", string(cfg.DisplayMode), "duration", cfg.Duration)
 }
 
 // SetTooltipDelay 设置编码提示延迟显示时间（毫秒）
@@ -73,6 +90,10 @@ func (m *Manager) SetGDIFontParams(weight int, scale float64) {
 	if m.tooltip != nil {
 		m.tooltip.SetGDIFontParams(weight, scale)
 	}
+	if m.status != nil {
+		// 状态窗口使用较细字重（400=Normal），小尺寸文字避免过粗
+		m.status.SetGDIFontParams(400, scale)
+	}
 	m.logger.Info("GDI font params updated (candidate/toolbar/tooltip)", "weight", weight, "scale", scale)
 }
 
@@ -87,6 +108,9 @@ func (m *Manager) SetMenuFontParams(weight int, scale float64) {
 	if m.window != nil {
 		m.window.SetMenuFontParams(weight, scale)
 	}
+	if m.status != nil {
+		m.status.SetMenuFontParams(weight, scale)
+	}
 	m.logger.Info("GDI font params updated (menu)", "weight", weight, "scale", scale)
 }
 
@@ -100,6 +124,9 @@ func (m *Manager) SetMenuFontSize(size float64) {
 	}
 	if m.window != nil {
 		m.window.SetMenuFontSize(size)
+	}
+	if m.status != nil {
+		m.status.SetMenuFontSize(size)
 	}
 	m.logger.Info("Menu font size updated", "size", size)
 }
@@ -127,6 +154,9 @@ func (m *Manager) SetTextRenderMode(mode string) {
 	}
 	if m.window != nil {
 		m.window.SetTextRenderMode(renderMode)
+	}
+	if m.status != nil {
+		m.status.SetTextRenderMode(renderMode)
 	}
 	m.logger.Info("Text render mode updated", "mode", mode)
 }

@@ -100,15 +100,9 @@ func (c *Coordinator) handleCapsLockStateNoLock(on bool) {
 	if c.uiManager == nil || !c.uiManager.IsReady() {
 		return
 	}
-
-	if on {
-		// CapsLock ON: always show "A"
-		x, y := c.getIndicatorPosition()
-		c.uiManager.ShowModeIndicator("A", x, y)
-	} else {
-		// CapsLock OFF: show current mode indicator (schema name or "英")
-		c.showModeIndicator()
-	}
+	// CapsLock 状态变化时统一走合并状态显示
+	// getStatusModeLabel() 内部会检查 c.capsLockOn 返回 "A"
+	c.updateStatusIndicator()
 }
 
 // handleEngineSwitchKey 处理引擎切换快捷键 (Ctrl+`)

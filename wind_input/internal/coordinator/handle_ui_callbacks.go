@@ -42,6 +42,18 @@ func (c *Coordinator) setupToolbarCallbacks() {
 	})
 }
 
+// setupStatusWindowCallbacks 设置状态窗口右键菜单回调
+func (c *Coordinator) setupStatusWindowCallbacks() {
+	if c.uiManager == nil {
+		return
+	}
+	if sw := c.uiManager.GetStatusWindow(); sw != nil {
+		sw.SetMenuCallback(func(action ui.StatusMenuAction) {
+			go c.handleStatusMenuAction(action)
+		})
+	}
+}
+
 // setupGlobalHotkeyCallbacks sets up the callback for global hotkey events (RegisterHotKey)
 func (c *Coordinator) setupGlobalHotkeyCallbacks() {
 	if c.uiManager == nil {
@@ -717,6 +729,9 @@ func (c *Coordinator) handleToolbarToggleMode() {
 
 	// Save runtime state if remember_last_state is enabled
 	c.saveRuntimeState()
+
+	// 更新状态提示窗口
+	c.updateStatusIndicator()
 
 	// Broadcast state to toolbar and all TSF clients
 	c.broadcastState()

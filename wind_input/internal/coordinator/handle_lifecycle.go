@@ -173,6 +173,8 @@ func (c *Coordinator) updateHostRenderState() {
 		}
 		c.uiManager.SetHostRenderFunc(nil, nil)
 	}
+	// TODO: StatusWindow 的 host render 集成需要 DLL 侧协议扩展，
+	// 当前状态窗口使用本地窗口渲染。后续可通过 sw.SetHostRenderFunc 接入。
 }
 
 // HandleFocusLost handles focus lost events (real focus change, e.g., user clicked another window)
@@ -192,6 +194,13 @@ func (c *Coordinator) HandleFocusLost() {
 	// updateHostRenderState() 自动根据 activeProcessID 重新评估，切换到非 HostRender
 	// 进程时会自然清除。若在此清除，开始菜单等受限环境中频繁的焦点抖动会导致
 	// doShowCandidates 执行时 hostRenderFunc 为 nil，候选框回退到不可见的本地窗口。
+
+	// 常驻模式：失去焦点时隐藏状态
+	if c.config != nil && c.config.UI.StatusIndicator.DisplayMode == "always" {
+		if c.uiManager != nil {
+			c.uiManager.HideStatusIndicator()
+		}
+	}
 
 	// Hide toolbar on real focus lost (user switched to another window/app)
 	c.SetIMEActivated(false)
@@ -240,10 +249,11 @@ func (c *Coordinator) HandleIMEDeactivated() {
 	c.clearState()
 	c.mu.Unlock()
 
-	// Immediately hide the toolbar
+	// Immediately hide the toolbar and status indicator
 	if c.uiManager != nil {
 		c.uiManager.SetToolbarVisible(false)
 		c.uiManager.Hide()
+		c.uiManager.HideStatusIndicator()
 	}
 }
 
@@ -326,6 +336,13 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 	// Set IME as activated (this will show toolbar if enabled)
 	c.SetIMEActivated(true)
 
+	// 常驻模式：获得焦点时显示状态
+	c.mu.Lock()
+	if c.config != nil && c.config.UI.StatusIndicator.Enabled && c.config.UI.StatusIndicator.DisplayMode == "always" {
+		c.updateStatusIndicator()
+	}
+	c.mu.Unlock()
+
 	// Return current status so TSF can sync state (including compiled hotkeys)
 	keyDownHotkeys, keyUpHotkeys := c.getCompiledHotkeys()
 	c.mu.Lock()
@@ -382,6 +399,13 @@ func (c *Coordinator) HandleIMEActivated(processID uint32) *bridge.StatusUpdateD
 
 	// Set IME as activated (this will show toolbar if enabled)
 	c.SetIMEActivated(true)
+
+	// 常驻模式：IME 激活时显示状态
+	c.mu.Lock()
+	if c.config != nil && c.config.UI.StatusIndicator.Enabled && c.config.UI.StatusIndicator.DisplayMode == "always" {
+		c.updateStatusIndicator()
+	}
+	c.mu.Unlock()
 
 	// Return current status so TSF can sync state (including compiled hotkeys)
 	keyDownHotkeys, keyUpHotkeys := c.getCompiledHotkeys()

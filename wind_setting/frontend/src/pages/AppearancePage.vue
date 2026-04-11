@@ -403,60 +403,238 @@ onUnmounted(() => {
 
     <div class="settings-card">
       <div class="card-title">状态提示</div>
+
+      <!-- 总开关 -->
       <div class="setting-item">
         <div class="setting-info">
-          <label>显示时长</label>
-          <p class="setting-hint">中英切换等状态提示的显示时间</p>
+          <label>启用状态提示</label>
+          <p class="setting-hint">切换输入状态时显示提示</p>
         </div>
-        <div class="setting-control range-control">
-          <input
-            type="range"
-            min="200"
-            max="2000"
-            step="100"
-            v-model.number="formData.ui.status_indicator_duration"
-          />
-          <span class="range-value"
-            >{{ formData.ui.status_indicator_duration }}ms</span
-          >
+        <div class="setting-control">
+          <label class="switch">
+            <input
+              type="checkbox"
+              v-model="formData.ui.status_indicator.enabled"
+            />
+            <span class="slider"></span>
+          </label>
         </div>
       </div>
-      <div class="setting-item">
-        <div class="setting-info">
-          <label>水平偏移</label>
-          <p class="setting-hint">状态提示相对光标的水平偏移</p>
+
+      <template v-if="formData.ui.status_indicator.enabled">
+        <!-- 显示模式 -->
+        <div class="setting-item">
+          <div class="setting-info">
+            <label>显示模式</label>
+            <p class="setting-hint">
+              临时显示在切换时闪现后自动消失，常驻显示在有输入焦点时始终显示
+            </p>
+          </div>
+          <div class="setting-control">
+            <select
+              v-model="formData.ui.status_indicator.display_mode"
+              class="select"
+            >
+              <option value="temp">临时显示</option>
+              <option value="always">常驻显示 (beta)</option>
+            </select>
+          </div>
         </div>
-        <div class="setting-control range-control">
-          <input
-            type="range"
-            min="-50"
-            max="50"
-            step="5"
-            v-model.number="formData.ui.status_indicator_offset_x"
-          />
-          <span class="range-value"
-            >{{ formData.ui.status_indicator_offset_x }}px</span
-          >
+
+        <!-- 临时显示时长（仅临时模式） -->
+        <div
+          class="setting-item"
+          v-if="formData.ui.status_indicator.display_mode === 'temp'"
+        >
+          <div class="setting-info">
+            <label>显示时长</label>
+            <p class="setting-hint">状态提示的显示时间</p>
+          </div>
+          <div class="setting-control range-control">
+            <input
+              type="range"
+              min="200"
+              max="3000"
+              step="100"
+              v-model.number="formData.ui.status_indicator.duration"
+            />
+            <span class="range-value"
+              >{{ formData.ui.status_indicator.duration }}ms</span
+            >
+          </div>
         </div>
-      </div>
-      <div class="setting-item">
-        <div class="setting-info">
-          <label>垂直偏移</label>
-          <p class="setting-hint">状态提示相对光标的垂直偏移（负值=向上）</p>
+
+        <!-- 方案名风格 -->
+        <div class="setting-item">
+          <div class="setting-info">
+            <label>方案名显示</label>
+            <p class="setting-hint">中文模式下显示的方案名称风格</p>
+          </div>
+          <div class="setting-control">
+            <select
+              v-model="formData.ui.status_indicator.schema_name_style"
+              class="select"
+            >
+              <option value="full">全称（五笔、全拼）</option>
+              <option value="short">简写（五、拼）</option>
+            </select>
+          </div>
         </div>
-        <div class="setting-control range-control">
-          <input
-            type="range"
-            min="-100"
-            max="100"
-            step="5"
-            v-model.number="formData.ui.status_indicator_offset_y"
-          />
-          <span class="range-value"
-            >{{ formData.ui.status_indicator_offset_y }}px</span
-          >
+
+        <!-- 显示内容 -->
+        <div class="setting-item">
+          <div class="setting-info">
+            <label>显示内容</label>
+            <p class="setting-hint">选择状态提示中显示的信息</p>
+          </div>
+          <div class="setting-control inline-control">
+            <label class="checkbox-label">
+              <input
+                type="checkbox"
+                v-model="formData.ui.status_indicator.show_mode"
+              />
+              模式
+            </label>
+            <label class="checkbox-label">
+              <input
+                type="checkbox"
+                v-model="formData.ui.status_indicator.show_punct"
+              />
+              标点
+            </label>
+            <label class="checkbox-label">
+              <input
+                type="checkbox"
+                v-model="formData.ui.status_indicator.show_full_width"
+              />
+              全半角
+            </label>
+          </div>
         </div>
-      </div>
+
+        <!-- 位置设置 -->
+        <div class="setting-item">
+          <div class="setting-info">
+            <label>位置模式</label>
+            <p class="setting-hint">
+              跟随光标或固定在自定义位置（可拖动状态窗口定位）
+            </p>
+          </div>
+          <div class="setting-control">
+            <select
+              v-model="formData.ui.status_indicator.position_mode"
+              class="select"
+            >
+              <option value="follow_caret">跟随光标</option>
+              <option value="custom">自定义位置</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 跟随模式偏移 -->
+        <template
+          v-if="formData.ui.status_indicator.position_mode === 'follow_caret'"
+        >
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>水平偏移</label>
+              <p class="setting-hint">状态提示相对光标的水平偏移</p>
+            </div>
+            <div class="setting-control range-control">
+              <input
+                type="range"
+                min="-50"
+                max="50"
+                step="5"
+                v-model.number="formData.ui.status_indicator.offset_x"
+              />
+              <span class="range-value"
+                >{{ formData.ui.status_indicator.offset_x }}px</span
+              >
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>垂直偏移</label>
+              <p class="setting-hint">
+                状态提示相对光标的垂直偏移（负值=向上）
+              </p>
+            </div>
+            <div class="setting-control range-control">
+              <input
+                type="range"
+                min="-100"
+                max="100"
+                step="5"
+                v-model.number="formData.ui.status_indicator.offset_y"
+              />
+              <span class="range-value"
+                >{{ formData.ui.status_indicator.offset_y }}px</span
+              >
+            </div>
+          </div>
+        </template>
+
+        <!-- 外观设置 -->
+        <div class="setting-item">
+          <div class="setting-info">
+            <label>字体大小</label>
+            <p class="setting-hint">状态提示的字体大小</p>
+          </div>
+          <div class="setting-control range-control">
+            <input
+              type="range"
+              min="10"
+              max="24"
+              step="1"
+              v-model.number="formData.ui.status_indicator.font_size"
+            />
+            <span class="range-value"
+              >{{ formData.ui.status_indicator.font_size }}px</span
+            >
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label>透明度</label>
+            <p class="setting-hint">状态提示窗口的透明度</p>
+          </div>
+          <div class="setting-control range-control">
+            <input
+              type="range"
+              min="0.3"
+              max="1"
+              step="0.05"
+              v-model.number="formData.ui.status_indicator.opacity"
+            />
+            <span class="range-value"
+              >{{
+                Math.round(formData.ui.status_indicator.opacity * 100)
+              }}%</span
+            >
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label>圆角</label>
+            <p class="setting-hint">状态提示窗口的圆角半径</p>
+          </div>
+          <div class="setting-control range-control">
+            <input
+              type="range"
+              min="0"
+              max="16"
+              step="1"
+              v-model.number="formData.ui.status_indicator.border_radius"
+            />
+            <span class="range-value"
+              >{{ formData.ui.status_indicator.border_radius }}px</span
+            >
+          </div>
+        </div>
+      </template>
     </div>
 
     <div class="settings-card">
@@ -611,5 +789,18 @@ onUnmounted(() => {
     flex-direction: column;
     gap: 12px;
   }
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.checkbox-label input[type="checkbox"] {
+  cursor: pointer;
 }
 </style>

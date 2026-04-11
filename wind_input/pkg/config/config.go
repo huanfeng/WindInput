@@ -71,6 +71,27 @@ type HotkeyConfig struct {
 	GlobalHotkeys   []string `yaml:"global_hotkeys" json:"global_hotkeys"`     // 注册为全局热键的快捷键名称列表
 }
 
+// StatusIndicatorConfig 状态提示配置
+type StatusIndicatorConfig struct {
+	Enabled         bool    `yaml:"enabled" json:"enabled"`
+	Duration        int     `yaml:"duration" json:"duration"`
+	DisplayMode     string  `yaml:"display_mode" json:"display_mode"`
+	SchemaNameStyle string  `yaml:"schema_name_style" json:"schema_name_style"`
+	ShowMode        bool    `yaml:"show_mode" json:"show_mode"`
+	ShowPunct       bool    `yaml:"show_punct" json:"show_punct"`
+	ShowFullWidth   bool    `yaml:"show_full_width" json:"show_full_width"`
+	PositionMode    string  `yaml:"position_mode" json:"position_mode"`
+	OffsetX         int     `yaml:"offset_x" json:"offset_x"`
+	OffsetY         int     `yaml:"offset_y" json:"offset_y"`
+	CustomX         int     `yaml:"custom_x" json:"custom_x"`
+	CustomY         int     `yaml:"custom_y" json:"custom_y"`
+	FontSize        float64 `yaml:"font_size" json:"font_size"`
+	Opacity         float64 `yaml:"opacity" json:"opacity"`
+	BackgroundColor string  `yaml:"background_color" json:"background_color"`
+	TextColor       string  `yaml:"text_color" json:"text_color"`
+	BorderRadius    float64 `yaml:"border_radius" json:"border_radius"`
+}
+
 // UIConfig contains UI settings
 type UIConfig struct {
 	FontSize                float64 `yaml:"font_size" json:"font_size"`
@@ -92,6 +113,8 @@ type UIConfig struct {
 	GDIFontScale   float64 `yaml:"gdi_font_scale,omitempty" json:"gdi_font_scale,omitempty"`     // GDI字体缩放：0.5~2.0，默认1.0，值越大文字越大
 	MenuFontWeight int     `yaml:"menu_font_weight,omitempty" json:"menu_font_weight,omitempty"` // 菜单GDI字体粗细：100~900，默认600(SemiBold)
 	MenuFontSize   float64 `yaml:"menu_font_size,omitempty" json:"menu_font_size,omitempty"`     // 菜单字体大小：默认12.0（DPI缩放前基础值）
+
+	StatusIndicator StatusIndicatorConfig `yaml:"status_indicator" json:"status_indicator"` // 状态提示配置
 }
 
 // ToolbarConfig contains toolbar settings
@@ -211,6 +234,21 @@ func DefaultConfig() *Config {
 			GDIFontScale:            1.0,
 			MenuFontWeight:          500,
 			MenuFontSize:            12.0,
+			StatusIndicator: StatusIndicatorConfig{
+				Enabled:         true,
+				Duration:        800,
+				DisplayMode:     "temp",
+				SchemaNameStyle: "full",
+				ShowMode:        true,
+				ShowPunct:       true,
+				ShowFullWidth:   false,
+				PositionMode:    "follow_caret",
+				OffsetX:         0,
+				OffsetY:         0,
+				FontSize:        18,
+				Opacity:         0.9,
+				BorderRadius:    6,
+			},
 		},
 		Toolbar: ToolbarConfig{
 			Visible: true,
@@ -324,6 +362,23 @@ func applyConfigFallbacks(cfg *Config) {
 	// ThemeStyle 兜底
 	if cfg.UI.ThemeStyle == "" {
 		cfg.UI.ThemeStyle = "system"
+	}
+
+	// 迁移旧的状态提示字段到新的 StatusIndicator 结构
+	migrateStatusIndicatorConfig(cfg)
+}
+
+// migrateStatusIndicatorConfig 将旧的状态提示字段迁移到新的 StatusIndicatorConfig 结构
+func migrateStatusIndicatorConfig(cfg *Config) {
+	si := &cfg.UI.StatusIndicator
+	if si.Duration == 0 && cfg.UI.StatusIndicatorDuration > 0 {
+		si.Duration = cfg.UI.StatusIndicatorDuration
+	}
+	if si.OffsetX == 0 && cfg.UI.StatusIndicatorOffsetX != 0 {
+		si.OffsetX = cfg.UI.StatusIndicatorOffsetX
+	}
+	if si.OffsetY == 0 && cfg.UI.StatusIndicatorOffsetY != 0 {
+		si.OffsetY = cfg.UI.StatusIndicatorOffsetY
 	}
 }
 

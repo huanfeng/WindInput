@@ -356,16 +356,3 @@ func (c *Coordinator) buildGlobalHotkeyEntries() []ui.GlobalHotkeyEntry {
 	}
 	return entries
 }
-
-// showIndicator shows a brief indicator text
-func (c *Coordinator) showIndicator(text string) {
-	if c.uiManager == nil || !c.uiManager.IsReady() {
-		return
-	}
-
-	// Ensure host render state is up-to-date (same as showModeIndicator)
-	c.updateHostRenderState()
-
-	x, y := c.getIndicatorPosition()
-	c.uiManager.ShowModeIndicator(text, x, y)
-}

@@ -133,7 +133,7 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 
 // UICommand represents a command to the UI thread
 type UICommand struct {
-	Type                string // "show", "hide", "mode", "toolbar_show", "toolbar_hide", "toolbar_update", "settings", "hide_menu", "show_unified_menu"
+	Type                string // "show", "hide", "mode", "status", "status_hide", "toolbar_show", "toolbar_hide", "toolbar_update", "settings", "hide_menu", "show_unified_menu"
 	Candidates          []Candidate
 	Input               string
 	CursorPos           int // Cursor position within Input (display position, for rendering cursor indicator)
@@ -157,6 +157,8 @@ type UICommand struct {
 	MenuState    *UnifiedMenuState
 	MenuCallback func(id int)
 	FlipRefY     int // 翻转参考Y（下方放不下时翻转到此Y上方，0=禁用）
+	// 状态提示
+	StatusState *StatusState
 	// Global hotkey registration
 	HotkeyEntries []GlobalHotkeyEntry
 }
@@ -173,6 +175,9 @@ type Manager struct {
 
 	// Tooltip window for encoding lookup
 	tooltip *TooltipWindow
+
+	// 独立的状态提示窗口
+	status *StatusWindow
 
 	mu                  sync.Mutex
 	candidates          []Candidate
@@ -260,6 +265,7 @@ func NewManager(logger *slog.Logger) *Manager {
 		renderer:      NewRenderer(DefaultRenderConfig()),
 		toolbar:       NewToolbarWindow(logger),
 		tooltip:       NewTooltipWindow(logger),
+		status:        NewStatusWindow(logger),
 		themeManager:  themeManager,
 		logger:        logger,
 		readyCh:       make(chan struct{}),
@@ -314,6 +320,11 @@ func (m *Manager) Start() error {
 	if err := m.tooltip.Create(); err != nil {
 		m.logger.Error("Failed to create tooltip window", "error", err)
 		// Non-fatal, continue without tooltip
+	}
+
+	// 创建独立状态提示窗口
+	if err := m.status.Create(); err != nil {
+		m.logger.Error("Failed to create status window", "error", err)
 	}
 
 	// Create unified popup menu
@@ -418,6 +429,12 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 		m.doHide()
 	case "mode":
 		m.doShowModeIndicator(cmd.ModeText, cmd.X, cmd.Y)
+	case "status":
+		if cmd.StatusState != nil {
+			m.doShowStatus(*cmd.StatusState, cmd.X, cmd.Y)
+		}
+	case "status_hide":
+		m.doHideStatus()
 	case "toolbar_show":
 		m.doShowToolbar(cmd)
 	case "toolbar_hide":
@@ -467,6 +484,10 @@ func (m *Manager) Destroy() {
 	if m.tooltip != nil {
 		m.tooltip.Destroy()
 		m.tooltip = nil
+	}
+	if m.status != nil {
+		m.status.Destroy()
+		m.status = nil
 	}
 	if m.unifiedPopupMenu != nil {
 		m.unifiedPopupMenu.Destroy()
@@ -532,6 +553,11 @@ func (m *Manager) SetToolbarCallbacks(callbacks *ToolbarCallback) {
 		m.toolbar.SetCallback(callbacks)
 	}
 	m.mu.Unlock()
+}
+
+// GetStatusWindow 返回状态窗口实例（供外部设置回调）
+func (m *Manager) GetStatusWindow() *StatusWindow {
+	return m.status
 }
 
 // SetCandidateCallbacks sets the callbacks for candidate window mouse interactions

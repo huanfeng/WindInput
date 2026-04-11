@@ -42,12 +42,33 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 		}
 		// Update hide preedit setting
 		c.uiManager.SetHidePreedit(uiConfig.InlinePreedit)
-		// Update status indicator config
+		// Update status indicator config (旧字段兼容)
 		c.uiManager.UpdateStatusIndicatorConfig(
 			uiConfig.StatusIndicatorDuration,
 			uiConfig.StatusIndicatorOffsetX,
 			uiConfig.StatusIndicatorOffsetY,
 		)
+		// 更新完整状态提示配置
+		siCfg := uiConfig.StatusIndicator
+		c.uiManager.UpdateStatusIndicatorFullConfig(ui.StatusWindowConfig{
+			Enabled:         siCfg.Enabled,
+			DisplayMode:     ui.StatusDisplayMode(siCfg.DisplayMode),
+			Duration:        siCfg.Duration,
+			SchemaNameStyle: siCfg.SchemaNameStyle,
+			ShowMode:        siCfg.ShowMode,
+			ShowPunct:       siCfg.ShowPunct,
+			ShowFullWidth:   siCfg.ShowFullWidth,
+			PositionMode:    ui.StatusPositionMode(siCfg.PositionMode),
+			OffsetX:         siCfg.OffsetX,
+			OffsetY:         siCfg.OffsetY,
+			CustomX:         siCfg.CustomX,
+			CustomY:         siCfg.CustomY,
+			FontSize:        siCfg.FontSize,
+			Opacity:         siCfg.Opacity,
+			BackgroundColor: siCfg.BackgroundColor,
+			TextColor:       siCfg.TextColor,
+			BorderRadius:    siCfg.BorderRadius,
+		})
 		// 设置编码提示延迟
 		c.uiManager.SetTooltipDelay(uiConfig.TooltipDelay)
 		// 设置文本渲染模式

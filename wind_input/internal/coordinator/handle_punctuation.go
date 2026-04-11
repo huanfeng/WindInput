@@ -326,11 +326,7 @@ func (c *Coordinator) getAutoPairTracker() *transform.PairTracker {
 // applyToggleFullWidth 执行全角切换的核心逻辑（需持锁调用）
 func (c *Coordinator) applyToggleFullWidth() {
 	c.fullWidth = !c.fullWidth
-	indicator := "半"
-	if c.fullWidth {
-		indicator = "全"
-	}
-	c.showIndicator(indicator)
+	c.updateStatusIndicator()
 	c.saveRuntimeState()
 }
 
@@ -349,11 +345,7 @@ func (c *Coordinator) applyTogglePunct() {
 	if c.pairTracker != nil {
 		c.pairTracker.Clear()
 	}
-	indicator := "英."
-	if c.chinesePunctuation {
-		indicator = "中。"
-	}
-	c.showIndicator(indicator)
+	c.updateStatusIndicator()
 	c.saveRuntimeState()
 }
 

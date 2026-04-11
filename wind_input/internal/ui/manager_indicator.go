@@ -6,8 +6,13 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// ShowModeIndicator shows a brief mode indicator (中/En) (async, non-blocking)
+// ShowModeIndicator 向后兼容：单模式文本显示，内部转发到 ShowStatusIndicator
 func (m *Manager) ShowModeIndicator(mode string, x, y int) {
+	m.ShowStatusIndicator(StatusState{ModeLabel: mode}, x, y)
+}
+
+// ShowStatusIndicator 显示合并状态提示（异步，非阻塞）
+func (m *Manager) ShowStatusIndicator(state StatusState, x, y int) {
 	m.mu.Lock()
 	if !m.ready {
 		m.mu.Unlock()
@@ -15,92 +20,107 @@ func (m *Manager) ShowModeIndicator(mode string, x, y int) {
 	}
 	m.mu.Unlock()
 
-	m.logger.Debug("Queuing ShowModeIndicator", "mode", mode)
-
-	// Send command to UI thread (non-blocking)
 	select {
 	case m.cmdCh <- UICommand{
-		Type:     "mode",
-		ModeText: mode,
-		X:        x,
-		Y:        y,
+		Type:        "status",
+		StatusState: &state,
+		X:           x,
+		Y:           y,
 	}:
-		// Signal the event to wake up the message loop
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
 	default:
-		m.logger.Warn("UI command channel full, dropping mode command")
+		m.logger.Warn("UI command channel full, dropping status command")
 	}
 }
 
-// doShowModeIndicator actually shows the mode indicator (called from UI thread)
+// HideStatusIndicator 隐藏状态提示窗口（异步）
+func (m *Manager) HideStatusIndicator() {
+	select {
+	case m.cmdCh <- UICommand{Type: "status_hide"}:
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
+	default:
+	}
+}
+
+// doShowModeIndicator 向后兼容：转发到 doShowStatus
 func (m *Manager) doShowModeIndicator(mode string, x, y int) {
-	// Increment version to cancel any pending hide timers
-	m.mu.Lock()
-	m.modeIndicatorVersion++
-	currentVersion := m.modeIndicatorVersion
-	duration := m.statusIndicatorDuration
-	offsetX := m.statusIndicatorOffsetX
-	offsetY := m.statusIndicatorOffsetY
-	m.mu.Unlock()
+	m.doShowStatus(StatusState{ModeLabel: mode}, x, y)
+}
 
-	// Apply offset to position
-	adjustedX := x + offsetX
-	adjustedY := y + offsetY
-
-	// Render mode indicator
-	img := m.renderer.RenderModeIndicator(mode)
-
-	// Check if host rendering is active (Band window proxy)
-	m.mu.Lock()
-	hostRender := m.hostRenderFunc
-	m.mu.Unlock()
-
-	if hostRender != nil {
-		// Send mode indicator bitmap to DLL via shared memory
-		if err := hostRender(img, adjustedX, adjustedY); err != nil {
-			m.logger.Error("Host render mode indicator failed", "error", err)
-		}
-		// Hide local window if it was visible
-		if m.window.IsVisible() {
-			m.window.Hide()
-		}
-	} else {
-		// Clear candidate hit test data to prevent mouse interactions
-		// from triggering old candidate window display.
-		// The mode indicator and candidate window share the same window,
-		// so stale hitRects would cause RefreshCandidates on mouse hover.
-		m.window.SetHitRects(nil)
-		m.window.SetPageRects(nil, nil)
-		m.window.ResetMouseTracking()
-
-		// Update window
-		if err := m.window.UpdateContent(img, adjustedX, adjustedY); err != nil {
-			m.logger.Error("UpdateContent failed", "error", err)
-			return
-		}
-
-		// Show window briefly
-		m.window.Show()
+// doShowStatus 在 UI 线程中显示状态提示
+func (m *Manager) doShowStatus(state StatusState, x, y int) {
+	if m.status == nil {
+		return
 	}
 
-	// Hide after delay, but only if version hasn't changed
-	// This ensures that rapid state changes reset the timer
-	go func() {
-		time.Sleep(time.Duration(duration) * time.Millisecond)
+	cfg := m.status.GetConfig()
+	if !cfg.Enabled {
+		return
+	}
 
-		// Check if version is still the same
-		m.mu.Lock()
-		versionNow := m.modeIndicatorVersion
-		m.mu.Unlock()
+	// 计算位置
+	var finalX, finalY int
+	if cfg.PositionMode == StatusPositionCustom {
+		finalX = cfg.CustomX
+		finalY = cfg.CustomY
+	} else {
+		finalX = x + cfg.OffsetX
+		finalY = y + cfg.OffsetY
+	}
 
-		if versionNow == currentVersion {
-			// Version unchanged, safe to hide
-			m.Hide() // Use public method which goes through channel
+	// 临时模式下重置拖动位置
+	if cfg.DisplayMode == StatusDisplayModeTemp {
+		m.status.ResetDragPosition()
+	}
+
+	// Host render 路径
+	m.status.mu.Lock()
+	hostRender := m.status.hostRenderFunc
+	m.status.mu.Unlock()
+
+	if hostRender != nil {
+		// 先更新状态以便宿主渲染
+		m.status.mu.Lock()
+		m.status.state = state
+		m.status.mu.Unlock()
+
+		if err := hostRender(finalX, finalY); err != nil {
+			m.logger.Error("Host render status indicator failed", "error", err)
 		}
-		// If version changed, another indicator was shown, so don't hide
-	}()
+		if m.status.IsVisible() {
+			m.status.Hide()
+		}
+	} else {
+		// 更新内部状态并显示
+		m.status.mu.Lock()
+		m.status.state = state
+		m.status.mu.Unlock()
+
+		m.status.Show(finalX, finalY)
+	}
+
+	// 临时模式下启动自动隐藏
+	if cfg.DisplayMode == StatusDisplayModeTemp {
+		m.status.scheduleHide()
+	}
+}
+
+// doHideStatus 在 UI 线程中隐藏状态提示
+func (m *Manager) doHideStatus() {
+	if m.status == nil {
+		return
+	}
+	m.status.mu.Lock()
+	hostHide := m.status.hostHideFunc
+	m.status.mu.Unlock()
+	if hostHide != nil {
+		hostHide()
+	}
+	m.status.Hide()
 }
 
 // ShowTooltipForCandidate shows a tooltip for the candidate at the given page-local index
@@ -221,6 +241,11 @@ func (m *Manager) applyTheme(resolved *theme.ResolvedTheme) {
 	// Apply to unified popup menu
 	if m.unifiedPopupMenu != nil {
 		m.unifiedPopupMenu.SetTheme(resolved)
+	}
+
+	// 应用到状态窗口
+	if m.status != nil {
+		m.status.SetTheme(resolved)
 	}
 }
 

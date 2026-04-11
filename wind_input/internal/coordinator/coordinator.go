@@ -420,6 +420,9 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 	// Set up candidate window callbacks for mouse interaction
 	c.setupCandidateCallbacks()
 
+	// 设置状态窗口右键菜单回调
+	c.setupStatusWindowCallbacks()
+
 	// Set up global hotkey callbacks (RegisterHotKey for combination hotkeys)
 	c.setupGlobalHotkeyCallbacks()
 
@@ -432,12 +435,33 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		}
 		// Set hide preedit when inline preedit is enabled
 		c.uiManager.SetHidePreedit(cfg.UI.InlinePreedit)
-		// Set status indicator config
+		// Set status indicator config (旧字段兼容)
 		c.uiManager.UpdateStatusIndicatorConfig(
 			cfg.UI.StatusIndicatorDuration,
 			cfg.UI.StatusIndicatorOffsetX,
 			cfg.UI.StatusIndicatorOffsetY,
 		)
+		// 初始化完整状态提示配置
+		siCfg := cfg.UI.StatusIndicator
+		c.uiManager.UpdateStatusIndicatorFullConfig(ui.StatusWindowConfig{
+			Enabled:         siCfg.Enabled,
+			DisplayMode:     ui.StatusDisplayMode(siCfg.DisplayMode),
+			Duration:        siCfg.Duration,
+			SchemaNameStyle: siCfg.SchemaNameStyle,
+			ShowMode:        siCfg.ShowMode,
+			ShowPunct:       siCfg.ShowPunct,
+			ShowFullWidth:   siCfg.ShowFullWidth,
+			PositionMode:    ui.StatusPositionMode(siCfg.PositionMode),
+			OffsetX:         siCfg.OffsetX,
+			OffsetY:         siCfg.OffsetY,
+			CustomX:         siCfg.CustomX,
+			CustomY:         siCfg.CustomY,
+			FontSize:        siCfg.FontSize,
+			Opacity:         siCfg.Opacity,
+			BackgroundColor: siCfg.BackgroundColor,
+			TextColor:       siCfg.TextColor,
+			BorderRadius:    siCfg.BorderRadius,
+		})
 		// 设置编码提示延迟
 		c.uiManager.SetTooltipDelay(cfg.UI.TooltipDelay)
 		// 设置文本渲染模式

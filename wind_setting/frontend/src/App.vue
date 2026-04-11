@@ -34,7 +34,13 @@ const isWailsEnv = computed(() => {
 
 // 全局 Toast
 const { toasts, toast } = provideToast();
-const { confirmVisible, confirmMessage, confirm: customConfirm, handleConfirm, handleCancel } = useConfirm();
+const {
+  confirmVisible,
+  confirmMessage,
+  confirm: customConfirm,
+  handleConfirm,
+  handleCancel,
+} = useConfirm();
 
 // 状态
 const loading = ref(true);
@@ -196,7 +202,14 @@ function mergeWithDefaults(cfg: any): Config {
       codetable: { ...defaults.engine.codetable, ...cfg.engine?.codetable },
     },
     hotkeys: { ...defaults.hotkeys, ...cfg.hotkeys },
-    ui: { ...defaults.ui, ...cfg.ui },
+    ui: {
+      ...defaults.ui,
+      ...cfg.ui,
+      status_indicator: {
+        ...defaults.ui.status_indicator,
+        ...cfg.ui?.status_indicator,
+      },
+    },
     toolbar: { ...defaults.toolbar, ...cfg.toolbar },
     input: {
       ...defaults.input,
@@ -280,7 +293,9 @@ function handleAddWordClose() {
 // 重新加载配置（丢弃本地修改，从实际文件重新读取）
 async function handleReloadConfig() {
   if (hasUnsavedChanges()) {
-    const ok = await customConfirm("当前有未保存的修改，重新加载将丢弃这些修改。确定继续吗？");
+    const ok = await customConfirm(
+      "当前有未保存的修改，重新加载将丢弃这些修改。确定继续吗？",
+    );
     if (!ok) return;
   }
   await handleReload();
@@ -383,7 +398,10 @@ async function resetCurrentPageDefaults() {
       };
       break;
     case "appearance":
-      formData.value.ui = { ...defaults.ui };
+      formData.value.ui = {
+        ...defaults.ui,
+        status_indicator: { ...defaults.ui.status_indicator },
+      };
       formData.value.toolbar = { ...defaults.toolbar };
       if (isWailsEnv.value) {
         await loadThemePreview(formData.value.ui.theme);
@@ -644,15 +662,28 @@ onMounted(async () => {
       </div>
     </main>
     <!-- 确认对话框 -->
-    <div v-if="confirmVisible" class="dialog-overlay" @click.self="handleCancel">
+    <div
+      v-if="confirmVisible"
+      class="dialog-overlay"
+      @click.self="handleCancel"
+    >
       <div class="dialog-box" style="max-width: 360px">
         <div class="dialog-title">确认</div>
-        <div style="padding: 8px 0 16px; font-size: 14px; color: #374151; white-space: pre-line">
+        <div
+          style="
+            padding: 8px 0 16px;
+            font-size: 14px;
+            color: #374151;
+            white-space: pre-line;
+          "
+        >
           {{ confirmMessage }}
         </div>
         <div class="dialog-actions">
           <button class="btn btn-sm" @click="handleCancel">取消</button>
-          <button class="btn btn-primary btn-sm" @click="handleConfirm">确定</button>
+          <button class="btn btn-primary btn-sm" @click="handleConfirm">
+            确定
+          </button>
         </div>
       </div>
     </div>

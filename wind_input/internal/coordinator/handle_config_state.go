@@ -3,6 +3,7 @@ package coordinator
 
 import (
 	"github.com/huanfeng/wind_input/internal/transform"
+	"github.com/huanfeng/wind_input/internal/ui"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
@@ -77,6 +78,89 @@ func (c *Coordinator) saveFilterModeConfig(filterMode string) {
 			c.logger.Error("Failed to save filter mode config", "error", err)
 		} else {
 			c.logger.Debug("Filter mode config saved", "filterMode", filterMode)
+		}
+	}()
+}
+
+// handleStatusMenuAction 处理状态窗口右键菜单动作
+func (c *Coordinator) handleStatusMenuAction(action ui.StatusMenuAction) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	switch action {
+	case ui.StatusMenuSwitchToAlways:
+		c.config.UI.StatusIndicator.DisplayMode = "always"
+		c.applyStatusIndicatorConfig()
+		c.saveStatusIndicatorConfig()
+		// 取消临时模式的待执行隐藏，然后立即显示
+		if sw := c.uiManager.GetStatusWindow(); sw != nil {
+			sw.CancelPendingHide()
+		}
+		c.updateStatusIndicator()
+	case ui.StatusMenuSwitchToTemp:
+		c.config.UI.StatusIndicator.DisplayMode = "temp"
+		c.applyStatusIndicatorConfig()
+		c.saveStatusIndicatorConfig()
+		// 立即显示一次（触发临时模式的自动隐藏倒计时）
+		c.updateStatusIndicator()
+	case ui.StatusMenuSettings:
+		if c.uiManager != nil {
+			c.uiManager.OpenSettingsWithPage("appearance")
+		}
+	case ui.StatusMenuHide:
+		c.config.UI.StatusIndicator.Enabled = false
+		c.applyStatusIndicatorConfig()
+		c.saveStatusIndicatorConfig()
+		if c.uiManager != nil {
+			c.uiManager.HideStatusIndicator()
+		}
+	}
+}
+
+// applyStatusIndicatorConfig 将当前配置应用到状态窗口
+func (c *Coordinator) applyStatusIndicatorConfig() {
+	if c.uiManager == nil {
+		return
+	}
+	siCfg := c.config.UI.StatusIndicator
+	c.uiManager.UpdateStatusIndicatorFullConfig(ui.StatusWindowConfig{
+		Enabled:         siCfg.Enabled,
+		DisplayMode:     ui.StatusDisplayMode(siCfg.DisplayMode),
+		Duration:        siCfg.Duration,
+		SchemaNameStyle: siCfg.SchemaNameStyle,
+		ShowMode:        siCfg.ShowMode,
+		ShowPunct:       siCfg.ShowPunct,
+		ShowFullWidth:   siCfg.ShowFullWidth,
+		PositionMode:    ui.StatusPositionMode(siCfg.PositionMode),
+		OffsetX:         siCfg.OffsetX,
+		OffsetY:         siCfg.OffsetY,
+		CustomX:         siCfg.CustomX,
+		CustomY:         siCfg.CustomY,
+		FontSize:        siCfg.FontSize,
+		Opacity:         siCfg.Opacity,
+		BackgroundColor: siCfg.BackgroundColor,
+		TextColor:       siCfg.TextColor,
+		BorderRadius:    siCfg.BorderRadius,
+	})
+}
+
+// saveStatusIndicatorConfig 异步保存状态提示配置到文件
+func (c *Coordinator) saveStatusIndicatorConfig() {
+	// 在持有锁时捕获当前值
+	siCfg := c.config.UI.StatusIndicator
+
+	go func() {
+		cfg, err := config.Load()
+		if err != nil {
+			cfg = config.DefaultConfig()
+		}
+
+		cfg.UI.StatusIndicator = siCfg
+
+		if err := config.Save(cfg); err != nil {
+			c.logger.Error("Failed to save status indicator config", "error", err)
+		} else {
+			c.logger.Debug("Status indicator config saved")
 		}
 	}()
 }
