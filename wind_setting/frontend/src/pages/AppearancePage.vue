@@ -485,7 +485,7 @@ onUnmounted(() => {
             <input
               type="range"
               min="200"
-              max="3000"
+              max="30000"
               step="100"
               v-model.number="formData.ui.status_indicator.duration"
             />
