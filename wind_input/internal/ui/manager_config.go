@@ -1,7 +1,8 @@
 package ui
 
 import (
-	"fmt"
+	"os"
+	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -203,15 +204,16 @@ func (m *Manager) doOpenSettings(page string) {
 	shell32 := windows.NewLazySystemDLL("shell32.dll")
 	procShellExecuteW := shell32.NewProc("ShellExecuteW")
 
-	// Try paths in order of preference
+	// Try paths in order of preference: same directory as current exe first
 	settingExe := "wind_setting.exe"
 	if buildvariant.IsDebug() {
 		settingExe = "wind_setting_debug.exe"
 	}
-	paths := []string{
-		fmt.Sprintf("C:\\Program Files\\%s\\%s", buildvariant.AppName(), settingExe),
-		settingExe, // Current directory or PATH
+	var paths []string
+	if exePath, err := os.Executable(); err == nil {
+		paths = append(paths, filepath.Join(filepath.Dir(exePath), settingExe))
 	}
+	paths = append(paths, settingExe) // Fallback: current directory or PATH
 
 	openPtr, _ := windows.UTF16PtrFromString("open")
 
