@@ -506,6 +506,13 @@ func (c *Coordinator) handleArrowDown() *bridge.KeyEventResult {
 func (c *Coordinator) handleEnter() *bridge.KeyEventResult {
 	// Commit all confirmed segments + raw input as text
 	if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
+		// 检查回车键行为配置：clear 模式下清空编码
+		if c.config != nil && c.config.Input.EnterBehavior == "clear" {
+			c.clearState()
+			c.hideUI()
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		}
+
 		var finalText string
 		// 拼接已确认段的汉字
 		for _, seg := range c.confirmedSegments {
@@ -568,7 +575,14 @@ func (c *Coordinator) handleSpace() *bridge.KeyEventResult {
 			return c.selectCandidate(index)
 		}
 	} else if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
-		// No candidates, commit confirmed segments + raw input
+		// No candidates (空码), check space_on_empty_behavior config
+		if c.config != nil && c.config.Input.SpaceOnEmptyBehavior == "clear" {
+			c.clearState()
+			c.hideUI()
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		}
+
+		// Default: commit confirmed segments + raw input
 		var finalText string
 		for _, seg := range c.confirmedSegments {
 			t := seg.Text

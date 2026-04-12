@@ -133,6 +133,8 @@ type InputConfig struct {
 	SelectCharKeys       []string               `yaml:"select_char_keys" json:"select_char_keys"`               // 以词定字按键: "comma_period"(,.), "minus_equal"(-=), "brackets"([])
 	SmartPunctAfterDigit bool                   `yaml:"smart_punct_after_digit" json:"smart_punct_after_digit"` // 数字后标点智能转换（默认 true）
 	SmartPunctList       string                 `yaml:"smart_punct_list" json:"smart_punct_list"`               // 数字后保持英文的标点字符，如 ".,:"
+	EnterBehavior        string                 `yaml:"enter_behavior" json:"enter_behavior"`                   // 回车键行为: "commit"(上屏编码), "clear"(清空编码)
+	SpaceOnEmptyBehavior string                 `yaml:"space_on_empty_behavior" json:"space_on_empty_behavior"` // 空码时空格键行为: "commit"(上屏编码), "clear"(清空编码)
 	PinyinSeparator      string                 `yaml:"pinyin_separator" json:"pinyin_separator"`               // 拼音分隔符: "auto", "quote", "backtick", "none"
 	ShiftTempEnglish     ShiftTempEnglishConfig `yaml:"shift_temp_english" json:"shift_temp_english"`
 	CapsLockBehavior     CapsLockBehaviorConfig `yaml:"capslock_behavior" json:"capslock_behavior"`
@@ -267,6 +269,8 @@ func DefaultConfig() *Config {
 		Input: InputConfig{
 			SmartPunctAfterDigit: true,
 			SmartPunctList:       ".,:",
+			EnterBehavior:        "commit",
+			SpaceOnEmptyBehavior: "commit",
 			PunctFollowMode:      false,
 			FilterMode:           "smart",
 			SelectKeyGroups:      []string{"semicolon_quote"},

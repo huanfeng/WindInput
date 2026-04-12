@@ -168,6 +168,35 @@
       </div>
     </div>
 
+    <!-- 按键行为 -->
+    <div class="settings-card">
+      <div class="card-title">按键行为</div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>回车键功能</label>
+          <p class="setting-hint">有编码时按回车键的处理方式</p>
+        </div>
+        <div class="setting-control">
+          <select v-model="formData.input.enter_behavior">
+            <option value="commit">上屏编码</option>
+            <option value="clear">清空编码</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>空码时空格键功能</label>
+          <p class="setting-hint">无候选词时按空格键的处理方式</p>
+        </div>
+        <div class="setting-control">
+          <select v-model="formData.input.space_on_empty_behavior">
+            <option value="commit">上屏编码</option>
+            <option value="clear">清空编码</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
     <!-- 标点配对 -->
     <div class="settings-card">
       <div class="card-title">标点配对</div>
@@ -335,9 +364,7 @@
       >
         <div class="setting-info">
           <label>小数保留位数</label>
-          <p class="setting-hint">
-            计算结果最多保留的小数位数（0 表示取整）
-          </p>
+          <p class="setting-hint">计算结果最多保留的小数位数（0 表示取整）</p>
         </div>
         <div class="setting-control">
           <input

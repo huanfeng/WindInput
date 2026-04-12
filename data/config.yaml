@@ -66,6 +66,8 @@ input:
     - tab
   smart_punct_after_digit: true
   smart_punct_list: ".,:"
+  enter_behavior: commit
+  space_on_empty_behavior: commit
   pinyin_separator: auto
   shift_temp_english:
     enabled: true
