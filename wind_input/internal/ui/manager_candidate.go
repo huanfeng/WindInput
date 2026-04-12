@@ -76,11 +76,12 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	m.mu.Unlock()
 
 	// Check if this is a new input session (input is shorter than before or empty)
-	// If so, reset the sticky state and hover index
+	// If so, reset the sticky state, drag pinned state, and hover index
 	m.mu.Lock()
 	prevInput := m.input
 	if len(input) < len(prevInput) || input == "" {
 		m.stickyAbove = false
+		m.window.ResetDragPinned()
 		m.window.ResetHoverIndex()
 		m.logger.Debug("Reset sticky state", "prevInput", prevInput, "newInput", input)
 	}
@@ -135,29 +136,37 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	m.window.SetCandidateMenuState(candidateTexts, m.isPinyinMode, isCommandFlags)
 	m.window.SetQuickInputMode(m.isQuickInputMode)
 
-	// Determine position preference based on sticky state
-	var preference PositionPreference
-	if currentStickyAbove {
-		preference = PositionAbove
+	// If user has dragged the window, keep the current position (skip auto-positioning)
+	var windowX, windowY int
+	if m.window.IsDragPinned() {
+		windowX, windowY = m.window.GetPosition()
+		m.logger.Debug("Position pinned by drag", "windowX", windowX, "windowY", windowY)
 	} else {
-		preference = PositionAuto
-	}
+		// Determine position preference based on sticky state
+		var preference PositionPreference
+		if currentStickyAbove {
+			preference = PositionAbove
+		} else {
+			preference = PositionAuto
+		}
 
-	// Adjust position to stay within screen bounds
-	// Determine layout from renderer config
-	layout := LayoutVertical
-	if m.renderer != nil && m.renderer.GetLayout() == "horizontal" {
-		layout = LayoutHorizontal
-	}
-	windowX, windowY, showAbove := AdjustCandidatePosition(caretX, caretY, caretHeight, windowWidth, windowHeight, layout, preference)
-	m.logger.Debug("Position adjusted", "windowX", windowX, "windowY", windowY, "showAbove", showAbove, "stickyAbove", currentStickyAbove)
+		// Adjust position to stay within screen bounds
+		// Determine layout from renderer config
+		layout := LayoutVertical
+		if m.renderer != nil && m.renderer.GetLayout() == "horizontal" {
+			layout = LayoutHorizontal
+		}
+		var showAbove bool
+		windowX, windowY, showAbove = AdjustCandidatePosition(caretX, caretY, caretHeight, windowWidth, windowHeight, layout, preference)
+		m.logger.Debug("Position adjusted", "windowX", windowX, "windowY", windowY, "showAbove", showAbove, "stickyAbove", currentStickyAbove)
 
-	// Update sticky state if we're now showing above
-	if showAbove && !currentStickyAbove {
-		m.mu.Lock()
-		m.stickyAbove = true
-		m.mu.Unlock()
-		m.logger.Debug("Set sticky state to above")
+		// Update sticky state if we're now showing above
+		if showAbove && !currentStickyAbove {
+			m.mu.Lock()
+			m.stickyAbove = true
+			m.mu.Unlock()
+			m.logger.Debug("Set sticky state to above")
+		}
 	}
 
 	// Check if host rendering is active (Band window proxy)
@@ -263,6 +272,7 @@ func (m *Manager) doHide() {
 		hostHide()
 	}
 	m.window.ResetHoverIndex()
+	m.window.ResetDragPinned()
 }
 
 // UpdatePosition updates the window position

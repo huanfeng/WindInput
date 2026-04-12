@@ -24,6 +24,13 @@ func (w *CandidateWindow) handleMouseMove(lParam uintptr) {
 		w.trackingMouse = true
 	}
 
+	// If dragging, handle drag move and skip hover logic
+	if w.dragging {
+		w.mu.Unlock()
+		w.handleDragMove(lParam)
+		return
+	}
+
 	// Detect real mouse movement: the first WM_MOUSEMOVE after content update
 	// only stores the position; subsequent moves with different coordinates
 	// confirm that the user is actually moving the mouse.
@@ -150,6 +157,86 @@ func (w *CandidateWindow) handleMouseClick(lParam uintptr) {
 			}
 			return
 		}
+	}
+
+	// No hit on any interactive element — start dragging
+	w.handleDragStart(lParam)
+}
+
+// isDragging returns whether the window is currently being dragged
+func (w *CandidateWindow) isDragging() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dragging
+}
+
+// IsDragPinned returns whether the window position is pinned by user drag
+func (w *CandidateWindow) IsDragPinned() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dragPinned
+}
+
+// ResetDragPinned resets the drag pinned state
+func (w *CandidateWindow) ResetDragPinned() {
+	w.mu.Lock()
+	w.dragPinned = false
+	w.mu.Unlock()
+}
+
+// handleDragStart begins dragging the candidate window
+func (w *CandidateWindow) handleDragStart(lParam uintptr) {
+	clientX := int(int16(lParam & 0xFFFF))
+	clientY := int(int16((lParam >> 16) & 0xFFFF))
+
+	w.mu.Lock()
+	w.dragging = true
+	w.dragStartX = clientX
+	w.dragStartY = clientY
+	w.mu.Unlock()
+
+	// Capture mouse to track movement outside the window
+	procSetCapture.Call(uintptr(w.hwnd))
+}
+
+// handleDragMove moves the window during a drag operation
+func (w *CandidateWindow) handleDragMove(lParam uintptr) {
+	clientX := int(int16(lParam & 0xFFFF))
+	clientY := int(int16((lParam >> 16) & 0xFFFF))
+
+	w.mu.Lock()
+	dx := clientX - w.dragStartX
+	dy := clientY - w.dragStartY
+	newX := w.x + dx
+	newY := w.y + dy
+	w.x = newX
+	w.y = newY
+	w.mu.Unlock()
+
+	procSetWindowPos.Call(
+		uintptr(w.hwnd),
+		HWND_TOPMOST,
+		uintptr(newX), uintptr(newY),
+		0, 0,
+		SWP_NOSIZE|SWP_NOACTIVATE,
+	)
+}
+
+// handleDragEnd finishes dragging and pins the position
+func (w *CandidateWindow) handleDragEnd() {
+	w.mu.Lock()
+	wasDragging := w.dragging
+	w.dragging = false
+	w.mu.Unlock()
+
+	if wasDragging {
+		procReleaseCapture.Call()
+
+		w.mu.Lock()
+		w.dragPinned = true
+		w.mu.Unlock()
+
+		w.logger.Debug("候选框拖动完成，位置已锁定")
 	}
 }
 

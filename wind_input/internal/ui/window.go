@@ -240,6 +240,12 @@ type CandidateWindow struct {
 	lastMouseX          int  // Last mouse X position (window-relative)
 	lastMouseY          int  // Last mouse Y position (window-relative)
 
+	// Drag support: allow user to drag the candidate window by blank area
+	dragging   bool // Whether the window is being dragged
+	dragStartX int  // Mouse X at drag start (window-relative)
+	dragStartY int  // Mouse Y at drag start (window-relative)
+	dragPinned bool // Whether position is pinned by user drag (suppress auto-positioning)
+
 	// Custom popup menu (doesn't steal focus)
 	popupMenu       *PopupMenu
 	menuOpen        bool // Whether context menu is currently open
@@ -272,7 +278,14 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		return HTCLIENT
 
 	case WM_SETCURSOR:
-		// Set arrow cursor explicitly to avoid spinning cursor on first show
+		w := candidateWindows.Get(windows.HWND(hwnd))
+		if w != nil && w.isDragging() {
+			cursor, _, _ := procLoadCursorW.Call(0, IDC_SIZEALL)
+			if cursor != 0 {
+				procSetCursor.Call(cursor)
+			}
+			return 1
+		}
 		cursor, _, _ := procLoadCursorW.Call(0, IDC_ARROW)
 		if cursor != 0 {
 			procSetCursor.Call(cursor)
@@ -290,6 +303,13 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		w := candidateWindows.Get(windows.HWND(hwnd))
 		if w != nil {
 			w.handleMouseClick(lParam)
+		}
+		return 0
+
+	case WM_LBUTTONUP:
+		w := candidateWindows.Get(windows.HWND(hwnd))
+		if w != nil {
+			w.handleDragEnd()
 		}
 		return 0
 
