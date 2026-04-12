@@ -281,7 +281,15 @@ func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string, logger *slog.L
 	}
 
 	if err := pinyinDict.LoadBinary(wdbCachePath); err != nil {
-		return fmt.Errorf("加载缓存拼音词库失败: %w", err)
+		// 缓存文件可能损坏（截断），删除后重新生成
+		logger.Warn("缓存拼音词库损坏，删除后重新生成", "path", wdbCachePath, "error", err)
+		os.Remove(wdbCachePath)
+		if err := dictcache.ConvertPinyinToWdb(dictPath, wdbCachePath, logger, normalizer); err != nil {
+			return fmt.Errorf("重新生成拼音词库失败: %w", err)
+		}
+		if err := pinyinDict.LoadBinary(wdbCachePath); err != nil {
+			return fmt.Errorf("加载重新生成的拼音词库失败: %w", err)
+		}
 	}
 	logger.Info("拼音词库(缓存 wdb)加载成功", "entryCount", pinyinDict.EntryCount())
 	return nil
@@ -316,6 +324,18 @@ func loadUnigramModel(engine *pinyin.Engine, txtPath string, logger *slog.Logger
 			engine.SetUnigram(bm)
 			logger.Info("Unigram 模型(缓存 wdb)加载成功", "size", bm.Size())
 			return nil
+		}
+		// 缓存文件可能损坏，删除后重新生成
+		logger.Warn("缓存 Unigram 模型损坏，删除后重新生成", "path", wdbCachePath, "error", err)
+		os.Remove(wdbCachePath)
+		if _, statErr := os.Stat(txtPath); statErr == nil {
+			if convErr := dictcache.ConvertUnigramToWdb(txtPath, wdbCachePath, logger); convErr == nil {
+				if bm, err := pinyin.NewBinaryUnigramModel(wdbCachePath); err == nil {
+					engine.SetUnigram(bm)
+					logger.Info("Unigram 模型(重新生成)加载成功", "size", bm.Size())
+					return nil
+				}
+			}
 		}
 	}
 
@@ -357,7 +377,21 @@ func loadCodetable(engine *codetable.Engine, srcPath, dictType, schemaID string,
 	}
 
 	if err := loadCodetableFromWdb(engine, wdbCachePath); err != nil {
-		return fmt.Errorf("加载缓存 %s.wdb 失败: %w", schemaID, err)
+		// 缓存文件可能损坏，删除后重新生成
+		logger.Warn("缓存码表损坏，删除后重新生成", "path", wdbCachePath, "error", err)
+		os.Remove(wdbCachePath)
+		var convertErr error
+		if dictType == "rime_codetable" {
+			convertErr = dictcache.ConvertRimeCodetableToWdb(srcPath, wdbCachePath, logger, normalizer)
+		} else {
+			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath, logger)
+		}
+		if convertErr != nil {
+			return fmt.Errorf("重新生成码表失败: %w", convertErr)
+		}
+		if err := loadCodetableFromWdb(engine, wdbCachePath); err != nil {
+			return fmt.Errorf("加载重新生成的 %s.wdb 失败: %w", schemaID, err)
+		}
 	}
 	return nil
 }

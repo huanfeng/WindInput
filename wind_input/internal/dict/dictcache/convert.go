@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 
+	"io"
+
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/dict/binformat"
 )
@@ -76,22 +78,10 @@ func ConvertCodeTableToWdb(srcPath, wdbPath string, logger *slog.Logger) error {
 	}
 	writer.SetMeta(metaJSON)
 
-	// 确保输出目录存在
-	os.MkdirAll(filepath.Dir(wdbPath), 0755)
-
-	// 写入 wdb 文件
-	f, err := os.Create(wdbPath)
-	if err != nil {
-		return fmt.Errorf("创建 wdb 文件失败: %w", err)
-	}
-	defer f.Close()
-
-	bw := bufio.NewWriter(f)
-	if err := writer.Write(bw); err != nil {
-		return fmt.Errorf("写入 wdb 失败: %w", err)
-	}
-	if err := bw.Flush(); err != nil {
-		return fmt.Errorf("flush 失败: %w", err)
+	if err := atomicWriteWdb(wdbPath, func(w io.Writer) error {
+		return writer.Write(w)
+	}); err != nil {
+		return err
 	}
 
 	// Deprecated: 写入 meta.json sidecar（Phase 3 移除，manager_init.go 仍在使用）
@@ -220,20 +210,10 @@ func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger, norma
 		writer.AddAbbrev(abbrev, binEntries)
 	}
 
-	os.MkdirAll(filepath.Dir(wdbPath), 0755)
-
-	f, err := os.Create(wdbPath)
-	if err != nil {
-		return fmt.Errorf("创建 wdb 文件失败: %w", err)
-	}
-	defer f.Close()
-
-	bw := bufio.NewWriter(f)
-	if err := writer.Write(bw); err != nil {
-		return fmt.Errorf("写入 wdb 失败: %w", err)
-	}
-	if err := bw.Flush(); err != nil {
-		return fmt.Errorf("flush 失败: %w", err)
+	if err := atomicWriteWdb(wdbPath, func(w io.Writer) error {
+		return writer.Write(w)
+	}); err != nil {
+		return err
 	}
 
 	logger.Info("拼音词库转换完成", "codes", len(codeEntries), "abbrevs", len(abbrevEntries))
@@ -313,20 +293,10 @@ func ConvertUnigramToWdb(txtPath, wdbPath string, logger *slog.Logger) error {
 		writer.Add(word, logProb)
 	}
 
-	os.MkdirAll(filepath.Dir(wdbPath), 0755)
-
-	f, err := os.Create(wdbPath)
-	if err != nil {
-		return fmt.Errorf("创建文件失败: %w", err)
-	}
-	defer f.Close()
-
-	bw := bufio.NewWriter(f)
-	if err := writer.Write(bw); err != nil {
-		return fmt.Errorf("写入失败: %w", err)
-	}
-	if err := bw.Flush(); err != nil {
-		return fmt.Errorf("flush 失败: %w", err)
+	if err := atomicWriteWdb(wdbPath, func(w io.Writer) error {
+		return writer.Write(w)
+	}); err != nil {
+		return err
 	}
 
 	logger.Info("Unigram 转换完成", "count", len(freqs))
@@ -417,20 +387,10 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 	}
 	writer.SetMeta(metaJSON)
 
-	os.MkdirAll(filepath.Dir(wdbPath), 0755)
-
-	f, err := os.Create(wdbPath)
-	if err != nil {
-		return fmt.Errorf("创建 wdb 文件失败: %w", err)
-	}
-	defer f.Close()
-
-	bw := bufio.NewWriter(f)
-	if err := writer.Write(bw); err != nil {
-		return fmt.Errorf("写入 wdb 失败: %w", err)
-	}
-	if err := bw.Flush(); err != nil {
-		return fmt.Errorf("flush 失败: %w", err)
+	if err := atomicWriteWdb(wdbPath, func(w io.Writer) error {
+		return writer.Write(w)
+	}); err != nil {
+		return err
 	}
 
 	if err := writeMetaJSON(MetaPath(wdbPath), &meta); err != nil {
@@ -597,6 +557,42 @@ func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, logg
 	}
 
 	return count, scanner.Err()
+}
+
+// atomicWriteWdb 原子写入 wdb 文件：先写入临时文件，再 rename 到目标路径
+// 防止进程被杀或并发写入导致目标文件被截断
+func atomicWriteWdb(wdbPath string, writeFn func(w io.Writer) error) error {
+	os.MkdirAll(filepath.Dir(wdbPath), 0755)
+
+	tmpPath := wdbPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+
+	bw := bufio.NewWriter(f)
+	if err := writeFn(bw); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("写入 wdb 失败: %w", err)
+	}
+	if err := bw.Flush(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("flush 失败: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("关闭临时文件失败: %w", err)
+	}
+
+	// Windows 上 rename 目标文件已存在时会失败，需先删除
+	os.Remove(wdbPath)
+	if err := os.Rename(tmpPath, wdbPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("原子替换失败: %w", err)
+	}
+	return nil
 }
 
 // ---- 内部辅助 ----

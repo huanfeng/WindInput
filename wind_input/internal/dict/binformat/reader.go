@@ -58,12 +58,20 @@ func OpenDict(path string) (*DictReader, error) {
 		return nil, err
 	}
 
-	// 验证偏移量在文件范围内
+	// 验证偏移量在文件范围内（检测截断的缓存文件）
 	dataLen := uint32(len(data))
 	if r.header.IndexOff >= dataLen || r.header.DataOff > dataLen || r.header.StrOff > dataLen {
 		mf.Close()
 		return nil, fmt.Errorf("文件头包含非法偏移量: IndexOff=%d DataOff=%d StrOff=%d fileLen=%d",
 			r.header.IndexOff, r.header.DataOff, r.header.StrOff, dataLen)
+	}
+	if r.header.AbbrevOff > 0 && r.header.AbbrevOff > dataLen {
+		mf.Close()
+		return nil, fmt.Errorf("文件可能被截断: AbbrevOff=%d fileLen=%d", r.header.AbbrevOff, dataLen)
+	}
+	if r.header.MetaOff > 0 && r.header.MetaOff > dataLen {
+		mf.Close()
+		return nil, fmt.Errorf("文件可能被截断: MetaOff=%d fileLen=%d", r.header.MetaOff, dataLen)
 	}
 
 	r.keyIndexBase = r.header.IndexOff
