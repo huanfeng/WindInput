@@ -247,10 +247,13 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     {
         isToggleModeKey = TRUE;
     }
-    else if (CHotkeyManager::IsToggleModeKeyByVK(wParam))
+    else if ((pHotkeyMgr == nullptr || !pHotkeyMgr->HasHotkeys()) && CHotkeyManager::IsToggleModeKeyByVK(wParam))
     {
-        // Fallback: detect toggle mode keys even without hash whitelist sync
-        // This ensures Shift/Ctrl toggle works even if IPC fails
+        // Fallback: detect toggle mode keys ONLY when hotkey whitelist hasn't been loaded yet.
+        // Once the whitelist is loaded, trust it — if a key isn't in the whitelist,
+        // it shouldn't be treated as a toggle key. Without this guard, Ctrl/Shift are
+        // unconditionally intercepted even when not configured as toggle keys,
+        // breaking modifier key usage in apps like Fusion 360.
         isToggleModeKey = TRUE;
     }
 
@@ -504,9 +507,9 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     {
         isToggleModeKey = TRUE;
     }
-    else if (CHotkeyManager::IsToggleModeKeyByVK(wParam))
+    else if ((pHotkeyMgr == nullptr || !pHotkeyMgr->HasHotkeys()) && CHotkeyManager::IsToggleModeKeyByVK(wParam))
     {
-        // Fallback: detect toggle mode keys even without hash whitelist sync
+        // Fallback: only use VK-based detection when hotkey whitelist hasn't been loaded yet
         isToggleModeKey = TRUE;
     }
 
@@ -695,7 +698,10 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         if (wParam >= 'A' && wParam <= 'Z' && !(modifiers & (KEYMOD_CTRL | KEYMOD_ALT)))
         {
             std::wstring ch;
-            ch = (wchar_t)towlower((wint_t)wParam);
+            if (modifiers & KEYMOD_SHIFT)
+                ch = (wchar_t)wParam;                      // Shift held: uppercase
+            else
+                ch = (wchar_t)towlower((wint_t)wParam);    // No Shift: lowercase
             _pTextService->InsertText(ch);
             *pfEaten = TRUE;
             _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::Letter,
