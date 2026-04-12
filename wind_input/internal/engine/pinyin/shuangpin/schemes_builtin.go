@@ -40,11 +40,11 @@ func xiaoheScheme() *Scheme {
 
 	finals := map[byte][]string{
 		'a': {"a"},
-		'o': {"o"},
+		'o': {"uo", "o"},
 		'e': {"e"},
 		'i': {"i"},
 		'u': {"u"},
-		'v': {"v"},
+		'v': {"ui", "v"},
 		'b': {"in"},
 		'c': {"ao"},
 		'd': {"ai"},
@@ -56,7 +56,7 @@ func xiaoheScheme() *Scheme {
 		'l': {"iang", "uang"},
 		'm': {"ian"},
 		'n': {"iao"},
-		'p': {"ou"},
+		'p': {"ie"},
 		'q': {"iu"},
 		'r': {"uan", "er"},
 		's': {"ong", "iong"},
@@ -64,7 +64,7 @@ func xiaoheScheme() *Scheme {
 		'w': {"ei"},
 		'x': {"ia", "ua"},
 		'y': {"un"},
-		'z': {"ui"},
+		'z': {"ou"},
 	}
 
 	zeroInitials := map[byte][]string{

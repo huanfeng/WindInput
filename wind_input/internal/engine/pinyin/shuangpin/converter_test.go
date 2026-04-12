@@ -74,6 +74,17 @@ func TestXiaoheZhChSh(t *testing.T) {
 		{"vs", "zhong", "v=zh, s=ong → zhong"},
 		{"ig", "cheng", "i=ch, g=eng → cheng"},
 		{"uf", "shen", "u=sh, f=en → shen"},
+		{"vv", "zhui", "v=zh, v=ui → zhui"},
+		{"dv", "dui", "d=d, v=ui → dui"},
+		{"gv", "gui", "g=g, v=ui → gui"},
+		{"go", "guo", "g=g, o=uo → guo"},
+		{"ho", "huo", "h=h, o=uo → huo"},
+		{"xp", "xie", "x=x, p=ie → xie"},
+		{"bp", "bie", "b=b, p=ie → bie"},
+		{"zz", "zou", "z=z, z=ou → zou"},
+		{"dz", "dou", "d=d, z=ou → dou"},
+		{"nv", "nv", "n=n, v=v(ü) → nv（女）"},
+		{"lv", "lv", "l=l, v=v(ü) → lv（绿）"},
 	}
 
 	for _, tt := range tests {
