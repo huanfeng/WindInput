@@ -85,6 +85,17 @@ func goDrawGlyphRunBridge(
 		return 0 // S_OK
 	}
 
+	// Try color glyph rendering first (COLR/CPAL emoji, colored fonts).
+	// If the glyph run has color layers, render each layer with its color.
+	if dwDrawColorGlyphRun(
+		tr.bitmapTarget, tr.renderParams, tr.textColor,
+		float32(baselineOriginX), float32(baselineOriginY),
+		uintptr(measuringMode), uintptr(glyphRun), uintptr(glyphRunDescription),
+	) {
+		return 0 // S_OK — color rendering handled
+	}
+
+	// Monochrome fallback — no color layers available.
 	xBits := uintptr(math.Float32bits(float32(baselineOriginX)))
 	yBits := uintptr(math.Float32bits(float32(baselineOriginY)))
 

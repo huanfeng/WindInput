@@ -32,6 +32,12 @@ var dwIIDFactory = dwGUID{
 	[8]byte{0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48},
 }
 
+// IID for IDWriteFactory2 (Windows 8.1+, color emoji / COLR glyph support).
+var dwIIDFactory2 = dwGUID{
+	0x0439fc60, 0xca44, 0x4994,
+	[8]byte{0x8d, 0xee, 0x3a, 0x9a, 0xf7, 0xb7, 0x32, 0xec},
+}
+
 // dwComCall invokes a COM method by vtable index.
 // obj is an unsafe.Pointer to the COM object (avoids uintptr→Pointer vet warnings).
 func dwComCall(obj unsafe.Pointer, vtableIndex int, args ...uintptr) (uintptr, error) {
@@ -89,6 +95,17 @@ const (
 	dwBmpVtSetPixelsPerDip = 6
 )
 
+// IDWriteFactory2 vtable index (extends IDWriteFactory1 which extends IDWriteFactory).
+// Factory(3-23) + Factory1(24-25) + Factory2(26-30).
+const dwFactory2VtTranslateColorGlyphRun = 28
+
+// IDWriteColorGlyphRunEnumerator vtable indices.
+// IUnknown(0-2) + MoveNext(3) + GetCurrentRun(4).
+const (
+	dwColorEnumVtMoveNext      = 3
+	dwColorEnumVtGetCurrentRun = 4
+)
+
 const dwObjBitmap = 7
 
 type dwTextMetrics struct {
@@ -110,6 +127,30 @@ type dwLineMetrics struct {
 	Height                   float32
 	Baseline                 float32
 	IsTrimmed                int32
+}
+
+// dwColorGlyphRun maps DWRITE_COLOR_GLYPH_RUN (Windows 8.1+).
+// The struct starts with an embedded DWRITE_GLYPH_RUN so the pointer
+// can be passed directly to IDWriteBitmapRenderTarget::DrawGlyphRun.
+type dwColorGlyphRun struct {
+	// DWRITE_GLYPH_RUN (48 bytes on x64)
+	FontFace      unsafe.Pointer // IDWriteFontFace*
+	FontEmSize    float32
+	GlyphCount    uint32
+	GlyphIndices  unsafe.Pointer // const UINT16*
+	GlyphAdvances unsafe.Pointer // const FLOAT*
+	GlyphOffsets  unsafe.Pointer // const DWRITE_GLYPH_OFFSET*
+	IsSideways    int32          // BOOL
+	BidiLevel     uint32
+	// DWRITE_COLOR_GLYPH_RUN additional fields
+	GlyphRunDescription unsafe.Pointer
+	BaselineOriginX     float32
+	BaselineOriginY     float32
+	RunColorR           float32
+	RunColorG           float32
+	RunColorB           float32
+	RunColorA           float32
+	PaletteIndex        uint16
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -273,9 +314,10 @@ var (
 	procDWSetDIBits        *syscall.LazyProc
 	procDWGetCurrentObject *syscall.LazyProc
 
-	dwriteSharedFactory unsafe.Pointer
-	dwriteInitOnce      sync.Once
-	dwriteInitErr       error
+	dwriteSharedFactory  unsafe.Pointer
+	dwriteSharedFactory2 unsafe.Pointer // IDWriteFactory2*, nil if color glyphs unavailable
+	dwriteInitOnce       sync.Once
+	dwriteInitErr        error
 )
 
 func initDWriteShared() error {
@@ -303,6 +345,17 @@ func initDWriteShared() error {
 			return
 		}
 		dwriteSharedFactory = factory
+
+		// Try to get IDWriteFactory2 for color emoji support (COLR/CPAL fonts).
+		// Optional — if unavailable, emoji renders as monochrome silhouettes.
+		var factory2 unsafe.Pointer
+		if ret, _ := dwComCall(factory, 0, // IUnknown::QueryInterface
+			uintptr(unsafe.Pointer(&dwIIDFactory2)),
+			uintptr(unsafe.Pointer(&factory2)),
+		); ret == 0 && factory2 != nil {
+			dwriteSharedFactory2 = factory2
+			slog.Info("DirectWrite color glyph support available (IDWriteFactory2)")
+		}
 	})
 	return dwriteInitErr
 }
@@ -938,4 +991,92 @@ func (r *DWriteRenderer) Close() {
 		releaseDWriteHandle(r.component)
 		r.loaded = false
 	}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Color glyph run support (COLR/CPAL emoji)
+// ═══════════════════════════════════════════════════════════════
+
+// dwDrawColorGlyphRun attempts to render a glyph run as colored layers using
+// IDWriteFactory2::TranslateColorGlyphRun. Returns true if color rendering
+// succeeded, false if the glyph run has no color information (caller should
+// fall back to monochrome rendering).
+func dwDrawColorGlyphRun(
+	bitmapTarget, renderParams unsafe.Pointer,
+	textColor uint32,
+	baseX, baseY float32,
+	measuringMode, glyphRun, glyphRunDesc uintptr,
+) bool {
+	if dwriteSharedFactory2 == nil {
+		return false
+	}
+
+	// IDWriteFactory2::TranslateColorGlyphRun (vtable 28)
+	// Returns S_OK with color layers, or DWRITE_E_NOCOLOR for non-color glyphs.
+	f2Vtbl := *(*unsafe.Pointer)(dwriteSharedFactory2)
+	translateMethod := *(*uintptr)(unsafe.Add(f2Vtbl, unsafe.Sizeof(uintptr(0))*uintptr(dwFactory2VtTranslateColorGlyphRun)))
+
+	var colorEnum unsafe.Pointer
+	ret, _, _ := syscall.SyscallN(translateMethod,
+		uintptr(dwriteSharedFactory2),
+		uintptr(math.Float32bits(baseX)),
+		uintptr(math.Float32bits(baseY)),
+		glyphRun,
+		glyphRunDesc,
+		measuringMode,
+		0, // worldToDeviceTransform = NULL
+		0, // colorPaletteIndex = 0
+		uintptr(unsafe.Pointer(&colorEnum)),
+	)
+	if int32(ret) < 0 || colorEnum == nil {
+		return false
+	}
+	defer dwComRelease(colorEnum)
+
+	// Cache DrawGlyphRun method pointer for the loop.
+	bmpVtbl := *(*unsafe.Pointer)(bitmapTarget)
+	drawMethod := *(*uintptr)(unsafe.Add(bmpVtbl, unsafe.Sizeof(uintptr(0))*uintptr(dwBmpVtDrawGlyphRun)))
+
+	for {
+		var hasRun int32
+		dwComCall(colorEnum, dwColorEnumVtMoveNext, uintptr(unsafe.Pointer(&hasRun)))
+		if hasRun == 0 {
+			break
+		}
+
+		var runPtr unsafe.Pointer
+		dwComCall(colorEnum, dwColorEnumVtGetCurrentRun, uintptr(unsafe.Pointer(&runPtr)))
+		if runPtr == nil {
+			continue
+		}
+
+		colorRun := (*dwColorGlyphRun)(runPtr)
+
+		// PaletteIndex 0xFFFF means "use the text color specified by the caller".
+		var colorRef uint32
+		if colorRun.PaletteIndex == 0xFFFF {
+			colorRef = textColor
+		} else {
+			r := byte(colorRun.RunColorR * 255)
+			g := byte(colorRun.RunColorG * 255)
+			b := byte(colorRun.RunColorB * 255)
+			colorRef = uint32(b)<<16 | uint32(g)<<8 | uint32(r)
+		}
+
+		// Draw this color layer. The DWRITE_GLYPH_RUN is at offset 0 of
+		// DWRITE_COLOR_GLYPH_RUN, so runPtr can be passed directly.
+		var blackBoxRect RECT
+		syscall.SyscallN(drawMethod,
+			uintptr(bitmapTarget),
+			uintptr(math.Float32bits(colorRun.BaselineOriginX)),
+			uintptr(math.Float32bits(colorRun.BaselineOriginY)),
+			measuringMode,
+			uintptr(runPtr), // &DWRITE_GLYPH_RUN at offset 0
+			uintptr(renderParams),
+			uintptr(colorRef),
+			uintptr(unsafe.Pointer(&blackBoxRect)),
+		)
+	}
+
+	return true
 }
