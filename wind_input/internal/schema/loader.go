@@ -54,7 +54,44 @@ func DiscoverSchemas(exeDir, dataDir string) (map[string]*Schema, error) {
 		return nil, fmt.Errorf("未找到任何输入方案文件")
 	}
 
+	// 解析混输方案的 UserData 继承关系
+	resolveMixedSchemaUserData(schemas)
+
 	return schemas, nil
+}
+
+// resolveMixedSchemaUserData 为引用式混输方案填充从主方案继承的 UserData 字段
+// 避免在引擎创建时才继承（局部修改不回写 SchemaManager）导致后续读取为空
+func resolveMixedSchemaUserData(schemas map[string]*Schema) {
+	for _, s := range schemas {
+		if s.Engine.Type != EngineTypeMixed || s.Engine.Mixed == nil {
+			continue
+		}
+
+		// 从主方案继承 shadow/user_dict/temp_dict
+		if primary := s.Engine.Mixed.PrimarySchema; primary != "" {
+			if ps, ok := schemas[primary]; ok {
+				if s.UserData.ShadowFile == "" {
+					s.UserData.ShadowFile = ps.UserData.ShadowFile
+				}
+				if s.UserData.UserDictFile == "" {
+					s.UserData.UserDictFile = ps.UserData.UserDictFile
+				}
+				if s.UserData.TempDictFile == "" && ps.UserData.TempDictFile != "" {
+					s.UserData.TempDictFile = ps.UserData.TempDictFile
+				}
+			}
+		}
+
+		// 从次方案继承 user_freq
+		if secondary := s.Engine.Mixed.SecondarySchema; secondary != "" {
+			if ss, ok := schemas[secondary]; ok {
+				if s.UserData.UserFreqFile == "" && ss.UserData.UserFreqFile != "" {
+					s.UserData.UserFreqFile = ss.UserData.UserFreqFile
+				}
+			}
+		}
+	}
 }
 
 // loadSchemasFromDir 从指定目录加载所有方案文件

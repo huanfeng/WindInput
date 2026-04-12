@@ -3,6 +3,7 @@ package dict
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -108,7 +109,7 @@ func (dm *DictManager) SwitchSchemaFull(schemaID, shadowFile, userDictFile, temp
 	// 2. 懒加载目标方案的 ShadowLayer
 	shadow, ok := dm.shadowLayers[schemaID]
 	if !ok {
-		shadowPath := filepath.Join(dm.dataDir, shadowFile)
+		shadowPath := dm.resolveDataPath(shadowFile, schemaID+".shadow.yaml")
 		shadow = NewShadowLayer("shadow_"+schemaID, shadowPath)
 		if err := shadow.Load(); err != nil {
 			dm.logger.Warn("加载 Shadow 规则失败", "schemaID", schemaID, "error", err)
@@ -123,7 +124,7 @@ func (dm *DictManager) SwitchSchemaFull(schemaID, shadowFile, userDictFile, temp
 	// 3. 懒加载目标方案的 UserDict
 	userDict, ok := dm.userDicts[schemaID]
 	if !ok {
-		userDictPath := filepath.Join(dm.dataDir, userDictFile)
+		userDictPath := dm.resolveDataPath(userDictFile, schemaID+".userwords.txt")
 		userDict = NewUserDict("user_"+schemaID, userDictPath)
 		if err := userDict.Load(); err != nil {
 			dm.logger.Warn("加载用户词库失败", "schemaID", schemaID, "error", err)
@@ -160,6 +161,20 @@ func (dm *DictManager) SwitchSchemaFull(schemaID, shadowFile, userDictFile, temp
 
 	dm.activeSchemaID = schemaID
 	dm.logger.Info("切换到方案", "schemaID", schemaID)
+}
+
+// resolveDataPath 解析用户数据文件路径，防止文件名为空或路径指向目录
+func (dm *DictManager) resolveDataPath(fileName, fallback string) string {
+	if fileName == "" {
+		dm.logger.Warn("用户数据文件名为空，使用默认值", "fallback", fallback)
+		fileName = fallback
+	}
+	p := filepath.Join(dm.dataDir, fileName)
+	if info, err := os.Stat(p); err == nil && info.IsDir() {
+		dm.logger.Warn("用户数据路径是目录而非文件，使用默认值", "path", p, "fallback", fallback)
+		p = filepath.Join(dm.dataDir, fallback)
+	}
+	return p
 }
 
 // RegisterSystemLayer 注册系统词库层
