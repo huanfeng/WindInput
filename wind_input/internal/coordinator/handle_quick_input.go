@@ -113,6 +113,11 @@ func (c *Coordinator) enterQuickInputMode() *bridge.KeyEventResult {
 const maxQuickInputBufferLen = 20
 
 func (c *Coordinator) handleQuickInputKey(key string, data *bridge.KeyEventData) *bridge.KeyEventResult {
+	// 如果处于临时拼音子模式，委托给拼音按键处理
+	if c.quickInputPinyinMode {
+		return c.handleQuickInputPinyinKey(key, data)
+	}
+
 	vk := uint32(data.KeyCode)
 
 	switch {
@@ -129,12 +134,12 @@ func (c *Coordinator) handleQuickInputKey(key string, data *bridge.KeyEventData)
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
-	// 回车：上屏缓冲区原文
+	// 回车：上屏缓冲区原文；缓冲区为空时上屏触发键字符
 	case vk == ipc.VK_RETURN:
 		if len(c.quickInputBuffer) > 0 {
 			return c.exitQuickInputMode(true, c.quickInputBuffer)
 		}
-		return c.exitQuickInputMode(false, "")
+		return c.exitQuickInputMode(true, c.quickInputPrefix())
 
 	// 退格：删缓冲区末字符
 	case vk == ipc.VK_BACK:
@@ -244,13 +249,10 @@ func (c *Coordinator) handleQuickInputKey(key string, data *bridge.KeyEventData)
 		if lower >= 'A' && lower <= 'Z' {
 			lower = lower - 'A' + 'a'
 		}
-		// Z 键重复上屏：缓冲区为空时，重复上一次上屏内容
-		if lower == 'z' && len(c.quickInputBuffer) == 0 {
-			return c.handleQuickInputRepeat()
-		}
-		// 缓冲区为空时不用字母选候选（重复候选只能用空格上屏）
+		// 缓冲区为空时：进入临时拼音子模式（字母作为拼音首字母）
+		// z 键也进入拼音模式（重复上屏功能通过空格实现）
 		if len(c.quickInputBuffer) == 0 {
-			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+			return c.enterQuickInputPinyinMode(string(lower))
 		}
 		idx := int(lower - 'a')
 		pageStart := (c.currentPage - 1) * c.candidatesPerPage
@@ -412,11 +414,24 @@ func (c *Coordinator) selectQuickInputCandidate(index int) *bridge.KeyEventResul
 		text = transform.ToFullWidth(text)
 	}
 
+	// 记录输入历史，供重复上屏功能使用
+	if c.inputHistory != nil {
+		c.inputHistory.Record(text, "", "", 0)
+	}
+
 	return c.exitQuickInputMode(true, text)
 }
 
 // exitQuickInputMode 退出快捷输入模式
 func (c *Coordinator) exitQuickInputMode(commit bool, text string) *bridge.KeyEventResult {
+	// 清理临时拼音子模式状态（防御性：正常路径由 exitQuickInputPinyinMode 提前清理）
+	if c.quickInputPinyinDictSwapped && c.engineMgr != nil {
+		c.engineMgr.DeactivateTempPinyin()
+	}
+	c.quickInputPinyinMode = false
+	c.quickInputPinyinBuffer = ""
+	c.quickInputPinyinDictSwapped = false
+
 	// 恢复布局（如果之前保存了）
 	if c.savedLayout != "" && c.uiManager != nil {
 		c.uiManager.SetCandidateLayout(c.savedLayout)

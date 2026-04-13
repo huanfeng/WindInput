@@ -132,9 +132,12 @@ type addWordState struct {
 
 // quickInputState 快捷输入模式状态
 type quickInputState struct {
-	quickInputMode   bool   // 是否处于快捷输入模式
-	quickInputBuffer string // 分号后的输入缓冲区（不含触发键本身）
-	savedLayout      string // 进入快捷输入前的布局（用于退出时恢复）
+	quickInputMode              bool   // 是否处于快捷输入模式
+	quickInputBuffer            string // 分号后的输入缓冲区（不含触发键本身）
+	quickInputPinyinMode        bool   // 是否处于快捷输入的临时拼音子模式
+	quickInputPinyinBuffer      string // 快捷输入临时拼音缓冲区
+	quickInputPinyinDictSwapped bool   // 是否已交换词库层（仅码表引擎下为 true）
+	savedLayout                 string // 进入快捷输入前的布局（用于退出时恢复）
 }
 
 // Coordinator orchestrates between C++ Bridge, Engine, and native UI
@@ -591,6 +594,8 @@ func (c *Coordinator) getPendingBufferText() string {
 		text = c.tempEnglishBuffer
 	case len(c.tempPinyinBuffer) > 0:
 		text = c.tempPinyinBuffer
+	case c.quickInputMode && len(c.quickInputPinyinBuffer) > 0:
+		text = c.quickInputPinyinBuffer
 	case c.quickInputMode && len(c.quickInputBuffer) > 0:
 		text = c.quickInputBuffer
 	default:
@@ -631,6 +636,10 @@ func (c *Coordinator) clearState() {
 	c.addWordCode = ""
 	// 清理快捷输入模式状态（恢复布局需在重置标志前执行）
 	if c.quickInputMode {
+		// 如果处于快捷输入的临时拼音子模式且已交换词库层，先恢复
+		if c.quickInputPinyinDictSwapped && c.engineMgr != nil {
+			c.engineMgr.DeactivateTempPinyin()
+		}
 		if c.savedLayout != "" && c.uiManager != nil {
 			c.uiManager.SetCandidateLayout(c.savedLayout)
 		}
@@ -643,6 +652,9 @@ func (c *Coordinator) clearState() {
 	}
 	c.quickInputMode = false
 	c.quickInputBuffer = ""
+	c.quickInputPinyinMode = false
+	c.quickInputPinyinBuffer = ""
+	c.quickInputPinyinDictSwapped = false
 	c.savedLayout = ""
 
 	// 注意：不清除 caretProfiles 和 activeProcessID，它们需要跨 composition 持久化
