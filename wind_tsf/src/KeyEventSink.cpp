@@ -1145,13 +1145,20 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
     // 2. Fallback to digit pass-through tracking (for editors like EverEdit where TSF text access fails)
     uint16_t prevChar = (uint16_t)_pTextService->ConsumeCachedPrevChar();
     // Digit pass-through fallback: only apply for period/comma keys (smart punct targets).
-    // Other keys (e.g., Shift for mode toggle) must NOT consume _lastPassthroughDigit,
-    // otherwise the digit info is lost before the actual punctuation key arrives.
     if (prevChar == 0 && _lastPassthroughDigit != 0 &&
         (keyCode == VK_OEM_PERIOD || keyCode == VK_OEM_COMMA))
     {
         prevChar = (uint16_t)_lastPassthroughDigit;
         _lastPassthroughDigit = 0;  // 已消费，清除以避免后续标点误判
+    }
+    // Clear stale digit passthrough when any non-smart-punct key is sent to Go.
+    // Without this, _lastPassthroughDigit persists through eaten keys (composition,
+    // candidate selection, etc.), causing e.g. "58的。" to incorrectly use digit
+    // fallback and output "." instead of "。" in non-TSF apps.
+    else if (_lastPassthroughDigit != 0 &&
+             keyCode != VK_OEM_PERIOD && keyCode != VK_OEM_COMMA)
+    {
+        _lastPassthroughDigit = 0;
     }
 
     BOOL result = pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType, toggles, eventSeq, prevChar);
