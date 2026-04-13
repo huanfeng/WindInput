@@ -146,30 +146,36 @@ func (c *Coordinator) isPunctuation(r rune) bool {
 func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) *bridge.KeyEventResult {
 	c.logger.Debug("handlePunctuation", "char", string(r), "buffer", c.inputBuffer)
 
-	// If there's input in buffer (or confirmed segments), check if we should commit first (punct_commit)
-	if (len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0) && len(c.candidates) > 0 {
-		// Check if punct_commit is enabled in wubi config
-		punctCommit := false
+	// Check if punct_commit is enabled in wubi/mixed config
+	punctCommitEnabled := false
+	if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
 		if c.engineMgr != nil {
 			if eng := c.engineMgr.GetCurrentEngine(); eng != nil {
 				switch e := eng.(type) {
 				case *codetable.Engine:
 					if cfg := e.GetConfig(); cfg != nil {
-						punctCommit = cfg.PunctCommit
+						punctCommitEnabled = cfg.PunctCommit
 					}
 				case *mixed.Engine:
 					if we := e.GetCodetableEngine(); we != nil {
 						if cfg := we.GetConfig(); cfg != nil {
-							punctCommit = cfg.PunctCommit
+							punctCommitEnabled = cfg.PunctCommit
 						}
 					}
 				}
 			}
 		}
+	}
 
-		if punctCommit {
-			// Commit first candidate (with confirmed segments), then output punctuation
-			candidate := c.candidates[0]
+	// If there's input in buffer (or confirmed segments) and candidates, commit first candidate then output punctuation
+	if (len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0) && len(c.candidates) > 0 {
+		if punctCommitEnabled {
+			// Commit highlighted candidate (with confirmed segments), then output punctuation
+			highlightedIndex := (c.currentPage-1)*c.candidatesPerPage + c.selectedIndex
+			if highlightedIndex >= len(c.candidates) {
+				highlightedIndex = 0
+			}
+			candidate := c.candidates[highlightedIndex]
 			text := candidate.Text
 
 			// Apply full-width conversion if enabled
@@ -217,6 +223,35 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 				Type: bridge.ResponseTypeInsertText,
 				Text: commitText + punctText,
 			}
+		}
+	}
+
+	// punct_commit 启用但无候选（空码）：丢弃编码，清空缓冲区，直接输出标点
+	if punctCommitEnabled && (len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0) && len(c.candidates) == 0 {
+		punctText := c.convertPunct(r, afterDigit, prevChar)
+		c.clearState()
+		c.hideUI()
+
+		// 空码 punct_commit 后的标点也支持自动配对
+		if tracker := c.getAutoPairTracker(); tracker != nil {
+			punctRunes := []rune(punctText)
+			if len(punctRunes) == 1 {
+				if right, ok := tracker.GetRight(punctRunes[0]); ok {
+					pairPunctText := punctText + string(right)
+					tracker.Push(punctRunes[0], right)
+					c.pairInsertTime = time.Now()
+					return &bridge.KeyEventResult{
+						Type:         bridge.ResponseTypeInsertTextWithCursor,
+						Text:         pairPunctText,
+						CursorOffset: 1,
+					}
+				}
+			}
+		}
+
+		return &bridge.KeyEventResult{
+			Type: bridge.ResponseTypeInsertText,
+			Text: punctText,
 		}
 	}
 

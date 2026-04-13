@@ -623,7 +623,7 @@ func (c *Coordinator) handleSelectChar(charIndex int) *bridge.KeyEventResult {
 	cand := c.candidates[index]
 	runes := []rune(cand.Text)
 
-	// 候选词长度不足时不生效，回退为标点处理
+	// 候选词长度不足时返回 nil，由调用方按 overflow 策略处理
 	if charIndex >= len(runes) {
 		return nil
 	}
@@ -662,11 +662,57 @@ func (c *Coordinator) handleSelectChar(charIndex int) *bridge.KeyEventResult {
 
 func (c *Coordinator) handleNumberKey(num int) *bridge.KeyEventResult {
 	// num is 1-9 or 10 (key '0'), convert to 0-based index within current page
-	index := (c.currentPage-1)*c.candidatesPerPage + (num - 1)
-	if index < len(c.candidates) {
+	pageStart := (c.currentPage - 1) * c.candidatesPerPage
+	index := pageStart + (num - 1)
+
+	// 计算当前页的有效候选数量
+	pageEnd := pageStart + c.candidatesPerPage
+	if pageEnd > len(c.candidates) {
+		pageEnd = len(c.candidates)
+	}
+	currentPageCount := pageEnd - pageStart
+
+	if num <= currentPageCount {
 		return c.selectCandidate(index)
 	}
-	return nil
+
+	// 数字键无效：按 overflow_behavior.number_key 处理
+	return c.handleOverflowNumberKey(num)
+}
+
+// handleOverflowNumberKey 处理数字键超出当前页候选范围的情况
+func (c *Coordinator) handleOverflowNumberKey(num int) *bridge.KeyEventResult {
+	if len(c.candidates) == 0 {
+		return nil
+	}
+
+	behavior := "ignore"
+	if c.config != nil && c.config.Input.OverflowBehavior.NumberKey != "" {
+		behavior = c.config.Input.OverflowBehavior.NumberKey
+	}
+
+	highlightedIndex := (c.currentPage-1)*c.candidatesPerPage + c.selectedIndex
+	if highlightedIndex >= len(c.candidates) {
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
+
+	switch behavior {
+	case "commit":
+		// 候选上屏：上屏当前高亮候选
+		return c.selectCandidate(highlightedIndex)
+
+	case "commit_and_input":
+		// 顶码上屏：上屏当前高亮候选，然后数字字符直接输出
+		result := c.selectCandidate(highlightedIndex)
+		if result != nil {
+			digit := string(rune('0' + num%10))
+			result.Text += digit
+		}
+		return result
+
+	default: // "ignore"
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
 }
 
 func (c *Coordinator) handlePageUp() *bridge.KeyEventResult {
@@ -833,5 +879,158 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 	return &bridge.KeyEventResult{
 		Type: bridge.ResponseTypeInsertText,
 		Text: finalText,
+	}
+}
+
+// handleOverflowSelectKey 处理二三候选键无效时的行为（候选数量不足或无候选）
+// triggerKey 是触发按键的字符（如 ";", "'"）
+func (c *Coordinator) handleOverflowSelectKey(triggerKey string) *bridge.KeyEventResult {
+	if len(c.inputBuffer) == 0 {
+		return nil
+	}
+
+	behavior := "ignore"
+	if c.config != nil && c.config.Input.OverflowBehavior.SelectKey != "" {
+		behavior = c.config.Input.OverflowBehavior.SelectKey
+	}
+
+	// 无候选时（空码）
+	if len(c.candidates) == 0 {
+		switch behavior {
+		case "commit":
+			// 候选上屏：无候选可上屏，清空缓冲区
+			c.clearState()
+			c.hideUI()
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		case "commit_and_input":
+			// 顶码上屏：清空缓冲区，按键字符按正常流程继续处理
+			c.clearState()
+			c.hideUI()
+			if len(triggerKey) == 1 {
+				ch := rune(triggerKey[0])
+				if c.isPunctuation(ch) {
+					return c.handlePunctuation(ch, false, 0)
+				}
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: triggerKey,
+				}
+			}
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		default: // "ignore"
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
+	}
+
+	highlightedIndex := (c.currentPage-1)*c.candidatesPerPage + c.selectedIndex
+	if highlightedIndex >= len(c.candidates) {
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
+
+	switch behavior {
+	case "commit":
+		// 候选上屏：上屏当前高亮候选
+		return c.selectCandidate(highlightedIndex)
+	case "commit_and_input":
+		// 顶码上屏：上屏当前高亮候选，然后按键字符按正常流程处理
+		result := c.selectCandidate(highlightedIndex)
+		if result != nil && len(triggerKey) == 1 {
+			ch := rune(triggerKey[0])
+			if c.isPunctuation(ch) {
+				punctResult := c.handlePunctuation(ch, false, 0)
+				if punctResult != nil && punctResult.Text != "" {
+					result.Text += punctResult.Text
+				}
+			} else {
+				result.Text += triggerKey
+			}
+		}
+		return result
+	default: // "ignore"
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
+}
+
+// overflowSelectCharBehavior 返回以词定字键无效时的策略
+func (c *Coordinator) overflowSelectCharBehavior() string {
+	if c.config != nil && c.config.Input.OverflowBehavior.SelectCharKey != "" {
+		return c.config.Input.OverflowBehavior.SelectCharKey
+	}
+	return "ignore"
+}
+
+// handleSelectCharWithOverflow 以词定字的完整处理流程，包含 overflow 策略
+// charIndex: 取第几个字符(0-based)，key: 触发按键字符，prevDigitState/prevChar: 标点处理参数
+func (c *Coordinator) handleSelectCharWithOverflow(charIndex int, key string, prevDigitState bool, prevChar rune) *bridge.KeyEventResult {
+	// 正常以词定字
+	if result := c.handleSelectChar(charIndex); result != nil {
+		return result
+	}
+
+	// handleSelectChar 返回 nil 说明：无候选/候选词长度不足/无 inputBuffer
+	if len(c.inputBuffer) == 0 {
+		// 无输入缓冲时回退为标点处理
+		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
+			return c.handlePunctuation(rune(key[0]), prevDigitState, prevChar)
+		}
+		return nil
+	}
+
+	behavior := c.overflowSelectCharBehavior()
+
+	// 无候选时（空码）
+	if len(c.candidates) == 0 {
+		switch behavior {
+		case "commit":
+			// 候选上屏：无候选可上屏，清空缓冲区
+			c.clearState()
+			c.hideUI()
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		case "commit_and_input":
+			// 顶码上屏：清空缓冲区，按键字符按正常流程继续处理
+			c.clearState()
+			c.hideUI()
+			if len(key) == 1 {
+				ch := rune(key[0])
+				if c.isPunctuation(ch) {
+					return c.handlePunctuation(ch, false, 0)
+				}
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: key,
+				}
+			}
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+		default: // "ignore"
+			return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+		}
+	}
+
+	highlightedIndex := (c.currentPage-1)*c.candidatesPerPage + c.selectedIndex
+	if highlightedIndex >= len(c.candidates) {
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
+
+	switch behavior {
+	case "commit":
+		// 候选上屏：上屏当前高亮候选
+		return c.selectCandidate(highlightedIndex)
+	case "commit_and_input":
+		// 顶码上屏：上屏当前高亮候选，然后按键字符按正常流程处理
+		commitResult := c.selectCandidate(highlightedIndex)
+		if commitResult != nil && len(key) == 1 {
+			ch := rune(key[0])
+			if c.isPunctuation(ch) {
+				punctResult := c.handlePunctuation(ch, false, 0)
+				if punctResult != nil && punctResult.Text != "" {
+					commitResult.Text += punctResult.Text
+				}
+			} else {
+				commitResult.Text += key
+			}
+		}
+		return commitResult
+	default: // "ignore"
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 	}
 }

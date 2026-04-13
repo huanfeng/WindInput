@@ -197,6 +197,50 @@
       </div>
     </div>
 
+    <!-- 候选无效按键 -->
+    <div class="settings-card">
+      <div class="card-title">候选无效按键</div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>数字键无效时</label>
+          <p class="setting-hint">按的数字超出当前页候选数量时的处理方式</p>
+        </div>
+        <div class="setting-control">
+          <select v-model="formData.input.overflow_behavior.number_key">
+            <option value="ignore">不起作用</option>
+            <option value="commit">候选上屏</option>
+            <option value="commit_and_input">顶码上屏</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>次选三选键无效时</label>
+          <p class="setting-hint">候选数量不足时按次选或三选键的处理方式</p>
+        </div>
+        <div class="setting-control">
+          <select v-model="formData.input.overflow_behavior.select_key">
+            <option value="ignore">不起作用</option>
+            <option value="commit">候选上屏</option>
+            <option value="commit_and_input">顶码上屏</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>以词定字键无效时</label>
+          <p class="setting-hint">候选词长度不足时按以词定字键的处理方式</p>
+        </div>
+        <div class="setting-control">
+          <select v-model="formData.input.overflow_behavior.select_char_key">
+            <option value="ignore">不起作用</option>
+            <option value="commit">候选上屏</option>
+            <option value="commit_and_input">顶码上屏</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
     <!-- 标点配对 -->
     <div class="settings-card">
       <div class="card-title">标点配对</div>

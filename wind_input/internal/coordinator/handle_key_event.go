@@ -428,21 +428,14 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		return c.handleSpace()
 
 	case !hasShift && c.isSelectCharFirstKey(key, data.KeyCode):
-		if result := c.handleSelectChar(0); result != nil {
+		if result := c.handleSelectCharWithOverflow(0, key, prevDigitState, data.PrevChar); result != nil {
 			return result
-		}
-		// 无候选或候选词长度不足时，回退为标点处理
-		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
-			return c.handlePunctuation(rune(key[0]), prevDigitState, data.PrevChar)
 		}
 		return nil
 
 	case !hasShift && c.isSelectCharSecondKey(key, data.KeyCode):
-		if result := c.handleSelectChar(1); result != nil {
+		if result := c.handleSelectCharWithOverflow(1, key, prevDigitState, data.PrevChar); result != nil {
 			return result
-		}
-		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
-			return c.handlePunctuation(rune(key[0]), prevDigitState, data.PrevChar)
 		}
 		return nil
 
@@ -511,7 +504,13 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		if len(c.candidates) >= 2 && len(c.inputBuffer) > 0 {
 			return c.selectCandidate(1) // Select 2nd candidate (index 1)
 		}
-		// If no candidates, treat as punctuation
+		// 候选不足时（含无候选），按 overflow 策略处理
+		if len(c.inputBuffer) > 0 {
+			if result := c.handleOverflowSelectKey(key); result != nil {
+				return result
+			}
+		}
+		// 无输入缓冲时，按标点处理
 		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
 			return c.handlePunctuation(rune(key[0]), prevDigitState, data.PrevChar)
 		}
@@ -526,7 +525,13 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		if len(c.candidates) >= 3 && len(c.inputBuffer) > 0 {
 			return c.selectCandidate(2) // Select 3rd candidate (index 2)
 		}
-		// If no candidates, treat as punctuation
+		// 候选不足时（含无候选），按 overflow 策略处理
+		if len(c.inputBuffer) > 0 {
+			if result := c.handleOverflowSelectKey(key); result != nil {
+				return result
+			}
+		}
+		// 无输入缓冲时，按标点处理
 		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
 			return c.handlePunctuation(rune(key[0]), prevDigitState, data.PrevChar)
 		}

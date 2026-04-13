@@ -91,6 +91,11 @@ input:
         - "()"
         - "[]"
         - "{}"
+  overflow_behavior:
+    number_key: "ignore"
+    select_key: "ignore"
+    select_char_key: "ignore"
+
 advanced:
   log_level: "info"
   host_render_processes:

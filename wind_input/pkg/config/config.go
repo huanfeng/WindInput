@@ -142,6 +142,17 @@ type InputConfig struct {
 	AutoPair             AutoPairConfig         `yaml:"auto_pair" json:"auto_pair"`
 	PunctCustom          PunctCustomConfig      `yaml:"punct_custom" json:"punct_custom"`
 	QuickInput           QuickInputConfig       `yaml:"quick_input" json:"quick_input"`
+	OverflowBehavior     OverflowBehaviorConfig `yaml:"overflow_behavior" json:"overflow_behavior"` // 候选按键无效时的处理策略
+}
+
+// OverflowBehaviorConfig 候选按键无效时的处理策略
+type OverflowBehaviorConfig struct {
+	// 数字键无效时: "ignore"(不起作用) | "commit"(顶字上屏) | "commit_and_input"(顶字上屏并输入数字)
+	NumberKey string `yaml:"number_key" json:"number_key"`
+	// 二三候选键无效时: "ignore"(不起作用) | "commit"(顶字上屏) | "commit_and_input"(顶字上屏并输入编码)
+	SelectKey string `yaml:"select_key" json:"select_key"`
+	// 以词定字键无效时: "ignore"(不起作用) | "commit"(顶字上屏) | "commit_and_input"(顶字上屏并输入编码)
+	SelectCharKey string `yaml:"select_char_key" json:"select_char_key"`
 }
 
 // QuickInputConfig 快捷输入配置
@@ -300,6 +311,11 @@ func DefaultConfig() *Config {
 				TriggerKey:    "semicolon",
 				ForceVertical: true,
 				DecimalPlaces: 6,
+			},
+			OverflowBehavior: OverflowBehaviorConfig{
+				NumberKey:     "ignore",
+				SelectKey:     "ignore",
+				SelectCharKey: "ignore",
 			},
 		},
 		Advanced: AdvancedConfig{

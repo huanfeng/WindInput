@@ -229,6 +229,10 @@ function mergeWithDefaults(cfg: any): Config {
         ...defaults.input.auto_pair,
         ...cfg.input?.auto_pair,
       },
+      overflow_behavior: {
+        ...defaults.input.overflow_behavior,
+        ...cfg.input?.overflow_behavior,
+      },
     },
     advanced: { ...defaults.advanced, ...cfg.advanced },
   };
@@ -393,6 +397,7 @@ async function resetCurrentPageDefaults() {
         smart_punct_after_digit: defaults.input.smart_punct_after_digit,
         auto_pair: { ...defaults.input.auto_pair },
         quick_input: { ...defaults.input.quick_input },
+        overflow_behavior: { ...defaults.input.overflow_behavior },
       };
       break;
     case "hotkey":

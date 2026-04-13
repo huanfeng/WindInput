@@ -155,6 +155,14 @@ export interface InputConfig {
   auto_pair: AutoPairConfig;
   punct_custom: PunctCustomConfig;
   quick_input: QuickInputConfig;
+  overflow_behavior: OverflowBehaviorConfig;
+}
+
+// 候选按键无效时的处理策略
+export interface OverflowBehaviorConfig {
+  number_key: string; // "ignore" | "commit" | "commit_and_input"
+  select_key: string; // "ignore" | "commit" | "commit_and_input"
+  select_char_key: string; // "ignore" | "commit" | "commit_and_input"
 }
 
 // 快捷输入配置
@@ -435,6 +443,11 @@ export function getDefaultConfig(): Config {
         trigger_key: "semicolon",
         force_vertical: true,
         decimal_places: 6,
+      },
+      overflow_behavior: {
+        number_key: "ignore",
+        select_key: "ignore",
+        select_char_key: "ignore",
       },
     },
     advanced: {
