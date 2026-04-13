@@ -266,6 +266,12 @@ func (e *Engine) convertPinyinOnly(input string, maxCandidates int) *ConvertResu
 		result.PartialSyllable = pinyinResult.Composition.PartialSyllable
 		result.HasPartial = pinyinResult.Composition.HasPartial()
 	}
+
+	e.addCodeHintsFromCodetable(result.Candidates)
+	if e.config.ShowSourceHint {
+		addSourceHints(result.Candidates)
+	}
+
 	return result
 }
 
