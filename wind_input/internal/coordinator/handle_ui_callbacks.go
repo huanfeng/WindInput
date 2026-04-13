@@ -846,6 +846,7 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 		Themes:            themeMenuItems,
 		CurrentThemeID:    c.uiManager.GetCurrentThemeID(),
 		CurrentThemeStyle: currentThemeStyle,
+		Version:           c.version,
 	}
 	c.mu.Unlock()
 

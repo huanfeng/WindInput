@@ -149,6 +149,7 @@ type Coordinator struct {
 	logger       *slog.Logger
 	config       *config.Config
 	bridgeServer BridgeServer // Interface for broadcasting state to TSF clients
+	version      string       // App version for display in menu
 
 	mu sync.Mutex
 
@@ -238,6 +239,11 @@ func (c *Coordinator) SetBridgeServer(server BridgeServer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.bridgeServer = server
+}
+
+// SetVersion sets the app version for display in the menu
+func (c *Coordinator) SetVersion(v string) {
+	c.version = v
 }
 
 // GetEffectiveMode returns the effective input mode considering CapsLock

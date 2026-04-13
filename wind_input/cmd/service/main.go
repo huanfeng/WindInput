@@ -336,6 +336,7 @@ func main() {
 
 	// Create coordinator with Engine Manager, UI Manager and config
 	coord := coordinator.NewCoordinator(engineMgr, uiManager, cfg, appCompat, logger)
+	coord.SetVersion(version)
 
 	// 创建控制管道服务端
 	controlServer := control.NewServer(logger, dictManager)

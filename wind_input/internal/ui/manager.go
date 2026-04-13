@@ -51,6 +51,14 @@ type UnifiedMenuState struct {
 	Themes            []ThemeMenuItem
 	CurrentThemeID    string // Current theme ID for checked state
 	CurrentThemeStyle string // Current theme style: "system", "light", "dark"
+	Version           string // App version for display in "About" menu item
+}
+
+func aboutText(version string) string {
+	if version != "" && version != "dev" {
+		return "关于 (" + version + ")"
+	}
+	return "关于"
 }
 
 // BuildUnifiedMenuItems constructs the unified menu item list
@@ -125,7 +133,7 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 		MenuItem{ID: UnifiedMenuDictionary, Text: "词库管理..."},
 		MenuItem{ID: UnifiedMenuSettings, Text: "设置..."},
 		MenuItem{Separator: true},
-		MenuItem{ID: UnifiedMenuAbout, Text: "关于"},
+		MenuItem{ID: UnifiedMenuAbout, Text: aboutText(state.Version)},
 	)
 
 	return items
