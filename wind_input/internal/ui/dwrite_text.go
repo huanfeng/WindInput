@@ -5,6 +5,7 @@ package ui
 // Reference: github.com/huanfeng/go-wui/platform/windows/dwrite.go
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"log/slog"
@@ -97,7 +98,34 @@ const (
 
 // IDWriteFactory2 vtable index (extends IDWriteFactory1 which extends IDWriteFactory).
 // Factory(3-23) + Factory1(24-25) + Factory2(26-30).
-const dwFactory2VtTranslateColorGlyphRun = 28
+const (
+	dwFactory2VtGetSystemFontFallback     = 26
+	dwFactory2VtCreateFontFallbackBuilder = 27
+	dwFactory2VtTranslateColorGlyphRun    = 28
+)
+
+// IDWriteFontFallbackBuilder vtable indices.
+// IUnknown(0-2) + AddMapping(3) + AddMappings(4) + CreateFontFallback(5).
+const (
+	dwFallbackBuilderVtAddMapping         = 3
+	dwFallbackBuilderVtAddMappings        = 4
+	dwFallbackBuilderVtCreateFontFallback = 5
+)
+
+// dwUnicodeRange matches DWRITE_UNICODE_RANGE.
+type dwUnicodeRange struct {
+	first, last uint32
+}
+
+// IDWriteTextLayout2 vtable index for SetFontFallback.
+// IDWriteTextFormat(0-27) + IDWriteTextLayout(28-66) + IDWriteTextLayout1(67-70) + IDWriteTextLayout2(71-79).
+const dwLayout2VtSetFontFallback = 78
+
+// IID for IDWriteTextLayout2 (Windows 8.1+).
+var dwIIDTextLayout2 = dwGUID{
+	0x1093c18f, 0x8d5e, 0x43f0,
+	[8]byte{0xb0, 0x64, 0x09, 0x17, 0x31, 0x1b, 0x52, 0x5e},
+}
 
 // IDWriteColorGlyphRunEnumerator vtable indices.
 // IUnknown(0-2) + MoveNext(3) + GetCurrentRun(4).
@@ -314,10 +342,11 @@ var (
 	procDWSetDIBits        *syscall.LazyProc
 	procDWGetCurrentObject *syscall.LazyProc
 
-	dwriteSharedFactory  unsafe.Pointer
-	dwriteSharedFactory2 unsafe.Pointer // IDWriteFactory2*, nil if color glyphs unavailable
-	dwriteInitOnce       sync.Once
-	dwriteInitErr        error
+	dwriteSharedFactory      unsafe.Pointer
+	dwriteSharedFactory2     unsafe.Pointer // IDWriteFactory2*, nil if color glyphs unavailable
+	dwriteSystemFontFallback unsafe.Pointer // IDWriteFontFallback* for rare character fallback
+	dwriteInitOnce           sync.Once
+	dwriteInitErr            error
 )
 
 func initDWriteShared() error {
@@ -355,6 +384,23 @@ func initDWriteShared() error {
 		); ret == 0 && factory2 != nil {
 			dwriteSharedFactory2 = factory2
 			slog.Info("DirectWrite color glyph support available (IDWriteFactory2)")
+
+			// Build custom font fallback with explicit CJK font mappings + system fallback as base.
+			// This ensures rare CJK characters (e.g., U+9FB6) fall back to SimSun/MingLiU
+			// even if the system default fallback doesn't map to them.
+			if customFallback := dwBuildCustomFontFallback(factory2); customFallback != nil {
+				dwriteSystemFontFallback = customFallback
+				slog.Info("DirectWrite custom font fallback built (CJK + system)")
+			} else {
+				// Fall back to system font fallback if custom build fails
+				var fontFallback unsafe.Pointer
+				if ret2, _ := dwComCall(factory2, dwFactory2VtGetSystemFontFallback,
+					uintptr(unsafe.Pointer(&fontFallback)),
+				); ret2 == 0 && fontFallback != nil {
+					dwriteSystemFontFallback = fontFallback
+					slog.Info("DirectWrite system font fallback available (fallback path)")
+				}
+			}
 		}
 	})
 	return dwriteInitErr
@@ -604,7 +650,119 @@ func dwCreateTextLayout(factory unsafe.Pointer, textFormat unsafe.Pointer, text 
 	if err != nil {
 		return nil, err
 	}
+
+	// Set system font fallback on the layout for rare character support
+	// (CJK Extended B-H, etc.). Requires IDWriteTextLayout2 (Windows 8.1+).
+	dwSetSystemFontFallback(layout)
+
 	return layout, nil
+}
+
+// dwBuildCustomFontFallback creates a font fallback that maps CJK Unicode ranges
+// to comprehensive CJK fonts (SimSun, MingLiU, MS Gothic) and includes the system
+// fallback as a base. This ensures characters like U+9FB6 (龶) render correctly
+// even when the primary font (e.g., Microsoft YaHei) lacks the glyph.
+func dwBuildCustomFontFallback(factory2 unsafe.Pointer) unsafe.Pointer {
+	// Create font fallback builder
+	var builder unsafe.Pointer
+	if ret, _ := dwComCall(factory2, dwFactory2VtCreateFontFallbackBuilder,
+		uintptr(unsafe.Pointer(&builder)),
+	); int32(ret) < 0 || builder == nil {
+		slog.Warn("DirectWrite: CreateFontFallbackBuilder failed", "hr", fmt.Sprintf("0x%08X", ret))
+		return nil
+	}
+	defer dwComRelease(builder)
+
+	// CJK Unicode ranges that need fallback coverage
+	ranges := []dwUnicodeRange{
+		{0x2E80, 0x33FF},   // CJK Radicals, Kangxi Radicals, CJK Symbols
+		{0x3400, 0x9FFF},   // CJK Extension A + CJK Unified Ideographs
+		{0xE000, 0xF8FF},   // Private Use Area (Wubi radicals etc.)
+		{0xF900, 0xFAFF},   // CJK Compatibility Ideographs
+		{0x20000, 0x323AF}, // CJK Extensions B-G
+	}
+
+	// Target CJK font families (order = priority)
+	familyNames := []string{"SimSun", "MingLiU", "MS Gothic", "Microsoft YaHei"}
+	familyPtrs := make([]*uint16, len(familyNames))
+	for i, name := range familyNames {
+		familyPtrs[i], _ = syscall.UTF16PtrFromString(name)
+	}
+
+	// AddMapping(ranges, rangesCount, targetFamilyNames, targetFamilyNamesCount,
+	//            fontCollection, localeName, baseFamilyName, scale)
+	ret, _ := dwComCall(builder, dwFallbackBuilderVtAddMapping,
+		uintptr(unsafe.Pointer(&ranges[0])),
+		uintptr(uint32(len(ranges))),
+		uintptr(unsafe.Pointer(&familyPtrs[0])),
+		uintptr(uint32(len(familyPtrs))),
+		0,                              // fontCollection = NULL (system)
+		0,                              // localeName = NULL
+		0,                              // baseFamilyName = NULL
+		uintptr(math.Float32bits(1.0)), // scale = 1.0
+	)
+	if int32(ret) < 0 {
+		slog.Warn("DirectWrite: AddMapping for CJK failed", "hr", fmt.Sprintf("0x%08X", ret))
+		return nil
+	}
+
+	// Add system fallback mappings as base (for non-CJK characters)
+	var sysFallback unsafe.Pointer
+	if ret2, _ := dwComCall(factory2, dwFactory2VtGetSystemFontFallback,
+		uintptr(unsafe.Pointer(&sysFallback)),
+	); ret2 == 0 && sysFallback != nil {
+		dwComCall(builder, dwFallbackBuilderVtAddMappings,
+			uintptr(sysFallback),
+		)
+		dwComRelease(sysFallback)
+	}
+
+	// Build the final fallback object
+	var fallback unsafe.Pointer
+	if ret3, _ := dwComCall(builder, dwFallbackBuilderVtCreateFontFallback,
+		uintptr(unsafe.Pointer(&fallback)),
+	); int32(ret3) < 0 || fallback == nil {
+		slog.Warn("DirectWrite: CreateFontFallback failed", "hr", fmt.Sprintf("0x%08X", ret3))
+		return nil
+	}
+
+	runtime.KeepAlive(ranges)
+	runtime.KeepAlive(familyPtrs)
+	return fallback
+}
+
+// dwSetSystemFontFallback sets the system font fallback on a text layout
+// so that characters missing from the primary font fall back to system fonts.
+var dwFontFallbackLogOnce sync.Once
+
+func dwSetSystemFontFallback(layout unsafe.Pointer) {
+	if dwriteSystemFontFallback == nil || layout == nil {
+		return
+	}
+	// QueryInterface for IDWriteTextLayout2
+	var layout2 unsafe.Pointer
+	if ret, _ := dwComCall(layout, 0, // IUnknown::QueryInterface
+		uintptr(unsafe.Pointer(&dwIIDTextLayout2)),
+		uintptr(unsafe.Pointer(&layout2)),
+	); ret != 0 || layout2 == nil {
+		dwFontFallbackLogOnce.Do(func() {
+			slog.Warn("DirectWrite font fallback: IDWriteTextLayout2 not available", "hr", fmt.Sprintf("0x%08X", ret))
+		})
+		return
+	}
+	defer dwComRelease(layout2)
+
+	// IDWriteTextLayout2::SetFontFallback(IDWriteFontFallback*)
+	ret, _ := dwComCall(layout2, dwLayout2VtSetFontFallback,
+		uintptr(dwriteSystemFontFallback),
+	)
+	dwFontFallbackLogOnce.Do(func() {
+		if int32(ret) < 0 {
+			slog.Warn("DirectWrite SetFontFallback failed", "hr", fmt.Sprintf("0x%08X", ret))
+		} else {
+			slog.Info("DirectWrite system font fallback applied to text layout")
+		}
+	})
 }
 
 func dwGetTextMetrics(layout unsafe.Pointer) (dwTextMetrics, error) {
