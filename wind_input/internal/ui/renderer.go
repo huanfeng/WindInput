@@ -15,35 +15,43 @@ import (
 // RenderConfig contains rendering configuration.
 // 这里只描述候选窗的视觉参数；字体文件选择与 fallback 细节由 FontConfig 接管。
 type RenderConfig struct {
-	FontPath         string
-	FontSize         float64
-	IndexFontSize    float64
-	Padding          float64
-	ItemHeight       float64
-	CornerRadius     float64
-	BackgroundColor  color.Color
-	TextColor        color.Color
-	IndexColor       color.Color
-	IndexBgColor     color.Color
-	InputBgColor     color.Color
-	InputTextColor   color.Color
-	BorderColor      color.Color
-	HoverBgColor     color.Color    // Background color for hovered candidate
-	SelectedBgColor  color.Color    // Background color for keyboard-selected candidate
-	Layout           string         // "horizontal" or "vertical"
-	HidePreedit      bool           // Hide preedit area when inline_preedit is enabled
-	IndexStyle       string         // "circle" (default) or "text" (plain text index)
-	AccentBarColor   color.Color    // Left accent bar color, nil = no bar
-	HasAccentBar     bool           // Whether to draw accent bar
-	IndexFontWeight  int            // Index number font weight (100-900), 0 = use global weight
-	ItemPaddingLeft  float64        // Left padding of each candidate item (px), 0 = default 8
-	ItemPaddingRight float64        // Right padding of each candidate item (px), 0 = default 8
-	WindowPaddingX   float64        // Horizontal window padding (px), 0 = default (use Padding)
-	WindowPaddingY   float64        // Vertical window padding (px), 0 = default (use Padding)
-	AlwaysShowPager  bool           // Always show page navigation (disable buttons when not navigable)
-	ShowPageNumber   bool           // Show page number text (e.g. "1/3")
-	TextRenderMode   TextRenderMode // "gdi" (Windows native) or "freetype" (original)
-	ModeLabel        string         // Temporary mode label (e.g. "临时拼音", "快捷输入"), empty = no label
+	FontPath           string
+	FontSize           float64
+	IndexFontSize      float64
+	Padding            float64
+	ItemHeight         float64
+	CornerRadius       float64
+	BackgroundColor    color.Color
+	TextColor          color.Color
+	IndexColor         color.Color
+	IndexBgColor       color.Color
+	InputBgColor       color.Color
+	InputTextColor     color.Color
+	BorderColor        color.Color
+	HoverBgColor       color.Color    // Background color for hovered candidate
+	SelectedBgColor    color.Color    // Background color for keyboard-selected candidate
+	Layout             string         // "horizontal" or "vertical"
+	HidePreedit        bool           // Hide preedit area when inline_preedit is enabled
+	IndexStyle         string         // "circle" (default) or "text" (plain text index)
+	AccentBarColor     color.Color    // Left accent bar color, nil = no bar
+	HasAccentBar       bool           // Whether to draw accent bar
+	IndexFontWeight    int            // Index number font weight (100-900), 0 = use global weight
+	ItemPaddingLeft    float64        // Left padding of each candidate item (px), 0 = default 8
+	ItemPaddingRight   float64        // Right padding of each candidate item (px), 0 = default 8
+	WindowPaddingX     float64        // Horizontal window padding (px), 0 = default (use Padding)
+	WindowPaddingY     float64        // Vertical window padding (px), 0 = default (use Padding)
+	IndexMarginRight   float64        // Gap between index and candidate text (scaled px)
+	TextMarginRight    float64        // Gap after candidate text (scaled px)
+	CommentMarginLeft  float64        // Gap between candidate text and comment (scaled px)
+	CommentMarginRight float64        // Gap after comment to item right edge (scaled px)
+	VerticalMinWidth   float64        // Vertical layout minimum width (scaled px), 0 = auto
+	VerticalMaxWidth   float64        // Vertical layout maximum width (scaled px), 0 = default 600
+	HorizontalMinWidth float64        // Horizontal layout minimum width (scaled px), 0 = default 200
+	HorizontalMaxWidth float64        // Horizontal layout maximum width (scaled px), 0 = no limit
+	AlwaysShowPager    bool           // Always show page navigation (disable buttons when not navigable)
+	ShowPageNumber     bool           // Show page number text (e.g. "1/3")
+	TextRenderMode     TextRenderMode // "gdi" (Windows native) or "freetype" (original)
+	ModeLabel          string         // Temporary mode label (e.g. "临时拼音", "快捷输入"), empty = no label
 }
 
 // DefaultRenderConfig returns default rendering configuration with DPI scaling
@@ -304,20 +312,52 @@ func (r *Renderer) SetTheme(resolved *theme.ResolvedTheme) {
 	r.config.AlwaysShowPager = resolved.Style.AlwaysShowPager
 	r.config.ShowPageNumber = resolved.Style.ShowPageNumber
 	// Apply window padding from theme (override base Padding)
-	if resolved.Style.WindowPaddingX > 0 || resolved.Style.WindowPaddingY > 0 {
-		scale := GetDPIScale()
-		if resolved.Style.WindowPaddingX > 0 {
-			r.config.WindowPaddingX = resolved.Style.WindowPaddingX * scale
-		}
-		if resolved.Style.WindowPaddingY > 0 {
-			r.config.WindowPaddingY = resolved.Style.WindowPaddingY * scale
-		}
+	scale := GetDPIScale()
+	if resolved.Style.WindowPaddingX > 0 {
+		r.config.WindowPaddingX = resolved.Style.WindowPaddingX * scale
+	}
+	if resolved.Style.WindowPaddingY > 0 {
+		r.config.WindowPaddingY = resolved.Style.WindowPaddingY * scale
 	}
 	if resolved.Style.CornerRadius > 0 {
-		r.config.CornerRadius = resolved.Style.CornerRadius * GetDPIScale()
+		r.config.CornerRadius = resolved.Style.CornerRadius * scale
 	}
 	if resolved.Style.RowHeight > 0 {
-		r.config.ItemHeight = resolved.Style.RowHeight * GetDPIScale()
+		r.config.ItemHeight = resolved.Style.RowHeight * scale
+	}
+	// Apply element spacing from theme
+	if resolved.Style.IndexMarginRight > 0 {
+		r.config.IndexMarginRight = resolved.Style.IndexMarginRight * scale
+	} else {
+		r.config.IndexMarginRight = 4 * scale // default
+	}
+	if resolved.Style.TextMarginRight > 0 {
+		r.config.TextMarginRight = resolved.Style.TextMarginRight * scale
+	} else {
+		r.config.TextMarginRight = 4 * scale // default
+	}
+	if resolved.Style.CommentMarginLeft > 0 {
+		r.config.CommentMarginLeft = resolved.Style.CommentMarginLeft * scale
+	} else {
+		r.config.CommentMarginLeft = 8 * scale // default
+	}
+	if resolved.Style.CommentMarginRight > 0 {
+		r.config.CommentMarginRight = resolved.Style.CommentMarginRight * scale
+	} else {
+		r.config.CommentMarginRight = 4 * scale // default
+	}
+	// Apply width limits from theme (separate for vertical and horizontal)
+	if resolved.Style.VerticalMinWidth > 0 {
+		r.config.VerticalMinWidth = resolved.Style.VerticalMinWidth * scale
+	}
+	if resolved.Style.VerticalMaxWidth > 0 {
+		r.config.VerticalMaxWidth = resolved.Style.VerticalMaxWidth * scale
+	}
+	if resolved.Style.HorizontalMinWidth > 0 {
+		r.config.HorizontalMinWidth = resolved.Style.HorizontalMinWidth * scale
+	}
+	if resolved.Style.HorizontalMaxWidth > 0 {
+		r.config.HorizontalMaxWidth = resolved.Style.HorizontalMaxWidth * scale
 	}
 }
 

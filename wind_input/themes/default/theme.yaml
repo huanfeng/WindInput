@@ -9,6 +9,10 @@ style:
   window_padding_y: 6
   item_padding_left: 8
   item_padding_right: 8
+  index_margin_right: 4
+  text_margin_right: 4
+  comment_margin_left: 8
+  comment_margin_right: 4
 
 light:
   candidate_window:

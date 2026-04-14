@@ -42,34 +42,104 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		candidateCount = 1
 	}
 
-	width := 280.0 * scale
+	// 纵向布局宽度：基于候选内容动态计算
+	width := 0.0
 
 	// Measure input text width for dynamic width adjustment
+	// ModeLabel（临时拼音、快捷输入等）显示在输入行右侧，需要一起计算宽度
+	modeLabelWidth := 0.0
+	if cfg.ModeLabel != "" {
+		modeLabelWidth = td.MeasureString(cfg.ModeLabel, cfg.IndexFontSize) + 12*scale // label + 左右间距
+	}
 	if input != "" {
 		inputTextWidth := td.MeasureString(input, cfg.FontSize)
-		minInputWidth := inputTextWidth + padX*2 + 16*scale
+		minInputWidth := inputTextWidth + padX*2 + 16*scale + modeLabelWidth
 		if minInputWidth > width {
 			width = minInputWidth
 		}
+	} else if modeLabelWidth > 0 {
+		// 无输入但有 ModeLabel 时（如临时英文初始状态），确保窗口能容纳标签
+		minLabelWidth := padX*2 + modeLabelWidth
+		if minLabelWidth > width {
+			width = minLabelWidth
+		}
 	}
 
-	// Measure candidate text widths for dynamic width adjustment (vertical layout)
-	// When candidates are long (e.g., quick input amounts), expand window width accordingly
-	textStartX := padX + 32*scale
-	if cfg.IndexStyle == "text" {
-		textStartX = padX + 24*scale
+	// Element spacing (from theme config)
+	indexMarginRight := cfg.IndexMarginRight   // 序号与候选文本间距
+	commentMarginLeft := cfg.CommentMarginLeft // 候选文本与编码提示间距
+
+	// Index area width + text start position
+	isTextIndex := cfg.IndexStyle == "text"
+	indexAreaWidth := 28.0 * scale // circle style: center(14) + radius(11) + gap(3)
+	if isTextIndex {
+		indexAreaWidth = 20.0 * scale // text style: narrower
 	}
-	maxCandWidth := 600.0 * scale // 最大宽度上限
+	textStartX := padX + indexAreaWidth + indexMarginRight
+
+	// 编码提示实际渲染字体大小（text 索引样式时更大）
+	commentSizeForWidth := cfg.IndexFontSize
+	if isTextIndex {
+		commentSizeForWidth = cfg.IndexFontSize + 2*scale
+	}
+
+	// Item right padding
+	itemPadR := 8.0 * scale
+	if cfg.ItemPaddingRight > 0 {
+		itemPadR = cfg.ItemPaddingRight * scale
+	}
+
+	// Width limits (from theme config, with defaults)
+	maxCandWidth := 600.0 * scale
+	if cfg.VerticalMaxWidth > 0 {
+		maxCandWidth = cfg.VerticalMaxWidth
+	}
+
+	textMarginRight := cfg.TextMarginRight       // 候选文本右间距
+	commentMarginRight := cfg.CommentMarginRight // 编码提示右间距
+
 	for _, cand := range candidates {
-		candTextWidth := td.MeasureString(cand.Text, cfg.FontSize)
+		candTextWidth := td.MeasureString(cand.Text, cfg.FontSize) + textMarginRight
 		if cand.Comment != "" {
-			candTextWidth += 8*scale + td.MeasureString(cand.Comment, cfg.IndexFontSize)
+			candTextWidth += commentMarginLeft + td.MeasureString(cand.Comment, commentSizeForWidth) + commentMarginRight
 		}
-		minCandWidth := textStartX + candTextWidth + padX
+		minCandWidth := textStartX + candTextWidth + itemPadR
 		if minCandWidth > width && minCandWidth <= maxCandWidth {
 			width = minCandWidth
 		} else if minCandWidth > maxCandWidth {
 			width = maxCandWidth
+		}
+	}
+
+	// 确保页码指示器能完整显示
+	showVerticalPager := totalPages > 1 || cfg.AlwaysShowPager
+	if showVerticalPager && cfg.ShowPageNumber {
+		pageFontSize := 12.0 * scale
+		if isTextIndex {
+			pageFontSize = 14 * scale
+		}
+		pageText := fmt.Sprintf(" %d / %d ", page, totalPages)
+		pageW := td.MeasureString(pageText, pageFontSize)
+		arrowSize := 8.0 * scale
+		arrowPad := 8.0 * scale
+		arrowW := arrowSize + arrowPad*2
+		pagerWidth := arrowW + pageW + arrowW + padX*2
+		if pagerWidth > width {
+			width = pagerWidth
+		}
+	}
+
+	// 确保最小宽度不小于合理下限
+	if cfg.VerticalMinWidth > 0 {
+		// 主题配置了明确的最小宽度
+		if width < cfg.VerticalMinWidth {
+			width = cfg.VerticalMinWidth
+		}
+	} else {
+		// 自动计算：索引区 + 一个汉字宽度 + 右侧边距
+		autoMinWidth := textStartX + td.MeasureString("汉", cfg.FontSize) + itemPadR
+		if width < autoMinWidth {
+			width = autoMinWidth
 		}
 	}
 
@@ -78,7 +148,6 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		inputHeight = 0
 	}
 	contentHeight := float64(candidateCount) * cfg.ItemHeight
-	showVerticalPager := totalPages > 1 || cfg.AlwaysShowPager
 	pageInfoHeight := 0.0
 	if showVerticalPager {
 		if totalPages < 1 {
@@ -94,8 +163,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		height = padY*2 + contentHeight + pageInfoHeight
 	}
 
-	// Font size variants
-	isTextIndex := cfg.IndexStyle == "text"
+	// Font size variants (isTextIndex already computed above for dynamic width)
 	indexTextSize := cfg.FontSize
 	commentSize := cfg.IndexFontSize
 	if isTextIndex {
@@ -142,7 +210,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 			}
 			comments = append(comments, commentInfo{
 				text: cand.Comment,
-				x:    tx + candWidth + 8*scale,
+				x:    tx + candWidth + commentMarginLeft,
 				y:    itemY + cfg.ItemHeight/2 + commentSize/3,
 			})
 		}
@@ -357,7 +425,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	// Candidate texts (with ellipsis truncation for long text)
 	ellipsis := "…"
 	ellipsisWidth := td.MeasureString(ellipsis, cfg.FontSize)
-	borderPadding := 8.0 * scale // 预留给右边框的空间
+	borderPadding := itemPadR // 右侧边距复用 itemPadR
 	for i, cand := range candidates {
 		itemY := candStartY + float64(i)*cfg.ItemHeight
 		tx := textStartX
@@ -450,11 +518,10 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	measures := make([]candMeasure, len(candidates))
 
 	indexSize := 18.0 * scale
-	indexMargin := 4.0 * scale
+	indexMargin := cfg.IndexMarginRight // 从主题配置获取
 	itemSpacing := 12.0 * scale
 
 	if isTextIndex {
-		indexMargin = 2.0 * scale
 		itemSpacing = 16.0 * scale
 	}
 
@@ -491,14 +558,14 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	for i, cand := range candidates {
 		if cand.Index < 0 {
 			// 无序号候选：不包含 index 宽度
-			measures[i].totalWidth = measures[i].textWidth
+			measures[i].totalWidth = measures[i].textWidth + cfg.TextMarginRight
 		} else if isTextIndex {
-			measures[i].totalWidth = indexTextWidths[i] + indexMargin + measures[i].textWidth
+			measures[i].totalWidth = indexTextWidths[i] + indexMargin + measures[i].textWidth + cfg.TextMarginRight
 		} else {
-			measures[i].totalWidth = indexSize + indexMargin + measures[i].textWidth
+			measures[i].totalWidth = indexSize + indexMargin + measures[i].textWidth + cfg.TextMarginRight
 		}
 		if cand.Comment != "" {
-			measures[i].totalWidth += 6*scale + measures[i].commentWidth
+			measures[i].totalWidth += cfg.CommentMarginLeft + measures[i].commentWidth + cfg.CommentMarginRight
 		}
 	}
 
@@ -553,11 +620,20 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	}
 
 	// Input area (preedit)
+	// ModeLabel（临时拼音、快捷输入等）显示在输入行右侧，需要一起计算宽度
+	modeLabelWidth := 0.0
+	if cfg.ModeLabel != "" {
+		modeLabelWidth = td.MeasureString(cfg.ModeLabel, cfg.IndexFontSize) + 12*scale
+	}
 	inputWidth := 0.0
 	inputHeight := 0.0
 	if !cfg.HidePreedit && input != "" {
 		inputWidth = td.MeasureString(input, cfg.FontSize)
-		inputWidth += 16 * scale
+		inputWidth += 16*scale + modeLabelWidth
+		inputHeight = 24 * scale
+	} else if !cfg.HidePreedit && modeLabelWidth > 0 {
+		// 无输入但有 ModeLabel（如临时英文初始状态）
+		inputWidth = modeLabelWidth + 16*scale
 		inputHeight = 24 * scale
 	}
 
@@ -569,6 +645,9 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 	// Total width
 	minWidth := 200.0 * scale
+	if cfg.HorizontalMinWidth > 0 {
+		minWidth = cfg.HorizontalMinWidth
+	}
 	contentWidth := padX*2 + accentBarExtra + candidatesWidth + pageInfoWidth
 	if inputWidth > 0 {
 		contentWidth = padX*2 + accentBarExtra + inputWidth
@@ -580,9 +659,12 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	if width < minWidth {
 		width = minWidth
 	}
+	if cfg.HorizontalMaxWidth > 0 && width > cfg.HorizontalMaxWidth {
+		width = cfg.HorizontalMaxWidth
+	}
 
 	// Height calculation
-	candidateRowHeight := 32.0 * scale
+	candidateRowHeight := cfg.ItemHeight
 	height := padY*2 + candidateRowHeight
 	if inputHeight > 0 {
 		height += inputHeight + 4*scale
@@ -834,7 +916,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 		// Comment
 		if cand.Comment != "" {
-			commentX := positions[i].textX + measures[i].textWidth + 6*scale
+			commentX := positions[i].textX + measures[i].textWidth + cfg.CommentMarginLeft
 			td.DrawString(cand.Comment, commentX, candY+commentSize/3, commentSize, r.getCommentColor())
 		}
 	}

@@ -81,17 +81,25 @@ type ModeIndicatorColors struct {
 
 // CandidateWindowStyle defines rendering style options for the candidate window
 type CandidateWindowStyle struct {
-	IndexStyle       string  `yaml:"index_style" json:"index_style"`               // "circle" (default) or "text"
-	AccentBarColor   string  `yaml:"accent_bar_color" json:"accent_bar_color"`     // Left accent bar color, empty = no bar
-	IndexFontWeight  int     `yaml:"index_font_weight" json:"index_font_weight"`   // Index number font weight (100-900), 0 = use global weight
-	ItemPaddingLeft  float64 `yaml:"item_padding_left" json:"item_padding_left"`   // Left padding of each candidate item (px, 0 = default 8)
-	ItemPaddingRight float64 `yaml:"item_padding_right" json:"item_padding_right"` // Right padding of each candidate item (px, 0 = default 8)
-	WindowPaddingX   float64 `yaml:"window_padding_x" json:"window_padding_x"`     // Horizontal window padding (px, 0 = default 10)
-	WindowPaddingY   float64 `yaml:"window_padding_y" json:"window_padding_y"`     // Vertical window padding (px, 0 = default 10)
-	CornerRadius     float64 `yaml:"corner_radius" json:"corner_radius"`           // Window corner radius (px, 0 = default 8)
-	RowHeight        float64 `yaml:"row_height" json:"row_height"`                 // Candidate row height (px, 0 = default 32)
-	AlwaysShowPager  bool    `yaml:"always_show_pager" json:"always_show_pager"`   // Always show page navigation (disable buttons when not navigable)
-	ShowPageNumber   *bool   `yaml:"show_page_number" json:"show_page_number"`     // Show page number text (e.g. "1/3"), nil = true (default show)
+	IndexStyle         string  `yaml:"index_style" json:"index_style"`                   // "circle" (default) or "text"
+	AccentBarColor     string  `yaml:"accent_bar_color" json:"accent_bar_color"`         // Left accent bar color, empty = no bar
+	IndexFontWeight    int     `yaml:"index_font_weight" json:"index_font_weight"`       // Index number font weight (100-900), 0 = use global weight
+	ItemPaddingLeft    float64 `yaml:"item_padding_left" json:"item_padding_left"`       // Left padding of each candidate item (px, 0 = default 8)
+	ItemPaddingRight   float64 `yaml:"item_padding_right" json:"item_padding_right"`     // Right padding of each candidate item (px, 0 = default 8)
+	WindowPaddingX     float64 `yaml:"window_padding_x" json:"window_padding_x"`         // Horizontal window padding (px, 0 = default 10)
+	WindowPaddingY     float64 `yaml:"window_padding_y" json:"window_padding_y"`         // Vertical window padding (px, 0 = default 10)
+	CornerRadius       float64 `yaml:"corner_radius" json:"corner_radius"`               // Window corner radius (px, 0 = default 8)
+	RowHeight          float64 `yaml:"row_height" json:"row_height"`                     // Candidate row height (px, 0 = default 32)
+	IndexMarginRight   float64 `yaml:"index_margin_right" json:"index_margin_right"`     // Gap between index and candidate text (px, 0 = default 4)
+	TextMarginRight    float64 `yaml:"text_margin_right" json:"text_margin_right"`       // Gap after candidate text (px, 0 = default 4)
+	CommentMarginLeft  float64 `yaml:"comment_margin_left" json:"comment_margin_left"`   // Gap between candidate text and comment (px, 0 = default 8)
+	CommentMarginRight float64 `yaml:"comment_margin_right" json:"comment_margin_right"` // Gap after comment to item right edge (px, 0 = default 4)
+	VerticalMinWidth   float64 `yaml:"vertical_min_width" json:"vertical_min_width"`     // Vertical layout minimum width (px, 0 = auto)
+	VerticalMaxWidth   float64 `yaml:"vertical_max_width" json:"vertical_max_width"`     // Vertical layout maximum width (px, 0 = default 600)
+	HorizontalMinWidth float64 `yaml:"horizontal_min_width" json:"horizontal_min_width"` // Horizontal layout minimum width (px, 0 = default 200)
+	HorizontalMaxWidth float64 `yaml:"horizontal_max_width" json:"horizontal_max_width"` // Horizontal layout maximum width (px, 0 = no limit)
+	AlwaysShowPager    bool    `yaml:"always_show_pager" json:"always_show_pager"`       // Always show page navigation (disable buttons when not navigable)
+	ShowPageNumber     *bool   `yaml:"show_page_number" json:"show_page_number"`         // Show page number text (e.g. "1/3"), nil = true (default show)
 }
 
 // ThemeVariant contains all color sections for one appearance mode (light or dark)
@@ -220,18 +228,26 @@ type ResolvedModeIndicatorColors struct {
 
 // ResolvedCandidateWindowStyle contains parsed style options
 type ResolvedCandidateWindowStyle struct {
-	IndexStyle       string      // "circle" or "text"
-	AccentBarColor   color.Color // nil if no accent bar
-	HasAccentBar     bool
-	IndexFontWeight  int     // Index number font weight (100-900), 0 = use global weight
-	ItemPaddingLeft  float64 // Left padding of each candidate item (px, 0 = default 8)
-	ItemPaddingRight float64 // Right padding of each candidate item (px, 0 = default 8)
-	WindowPaddingX   float64 // Horizontal window padding (px, 0 = default 10)
-	WindowPaddingY   float64 // Vertical window padding (px, 0 = default 10)
-	CornerRadius     float64 // Window corner radius (px, 0 = default 8)
-	RowHeight        float64 // Candidate row height (px, 0 = default 32)
-	AlwaysShowPager  bool    // Always show page navigation
-	ShowPageNumber   bool    // Show page number text (e.g. "1/3")
+	IndexStyle         string      // "circle" or "text"
+	AccentBarColor     color.Color // nil if no accent bar
+	HasAccentBar       bool
+	IndexFontWeight    int     // Index number font weight (100-900), 0 = use global weight
+	ItemPaddingLeft    float64 // Left padding of each candidate item (px, 0 = default 8)
+	ItemPaddingRight   float64 // Right padding of each candidate item (px, 0 = default 8)
+	WindowPaddingX     float64 // Horizontal window padding (px, 0 = default 10)
+	WindowPaddingY     float64 // Vertical window padding (px, 0 = default 10)
+	CornerRadius       float64 // Window corner radius (px, 0 = default 8)
+	RowHeight          float64 // Candidate row height (px, 0 = default 32)
+	IndexMarginRight   float64 // Gap between index and candidate text (px, 0 = default 4)
+	TextMarginRight    float64 // Gap after candidate text (px, 0 = default 4)
+	CommentMarginLeft  float64 // Gap between candidate text and comment (px, 0 = default 8)
+	CommentMarginRight float64 // Gap after comment to item right edge (px, 0 = default 4)
+	VerticalMinWidth   float64 // Vertical layout minimum width (px, 0 = auto)
+	VerticalMaxWidth   float64 // Vertical layout maximum width (px, 0 = default 600)
+	HorizontalMinWidth float64 // Horizontal layout minimum width (px, 0 = default 200)
+	HorizontalMaxWidth float64 // Horizontal layout maximum width (px, 0 = no limit)
+	AlwaysShowPager    bool    // Always show page navigation
+	ShowPageNumber     bool    // Show page number text (e.g. "1/3")
 }
 
 // ResolvedTheme contains all resolved (parsed) colors
@@ -253,16 +269,24 @@ func (t *Theme) resolveStyle() ResolvedCandidateWindowStyle {
 		showPageNumber = *t.Style.ShowPageNumber
 	}
 	style := ResolvedCandidateWindowStyle{
-		IndexStyle:       "circle", // default
-		IndexFontWeight:  t.Style.IndexFontWeight,
-		ItemPaddingLeft:  t.Style.ItemPaddingLeft,
-		ItemPaddingRight: t.Style.ItemPaddingRight,
-		WindowPaddingX:   t.Style.WindowPaddingX,
-		WindowPaddingY:   t.Style.WindowPaddingY,
-		CornerRadius:     t.Style.CornerRadius,
-		RowHeight:        t.Style.RowHeight,
-		AlwaysShowPager:  t.Style.AlwaysShowPager,
-		ShowPageNumber:   showPageNumber,
+		IndexStyle:         "circle", // default
+		IndexFontWeight:    t.Style.IndexFontWeight,
+		ItemPaddingLeft:    t.Style.ItemPaddingLeft,
+		ItemPaddingRight:   t.Style.ItemPaddingRight,
+		WindowPaddingX:     t.Style.WindowPaddingX,
+		WindowPaddingY:     t.Style.WindowPaddingY,
+		CornerRadius:       t.Style.CornerRadius,
+		RowHeight:          t.Style.RowHeight,
+		IndexMarginRight:   t.Style.IndexMarginRight,
+		TextMarginRight:    t.Style.TextMarginRight,
+		CommentMarginLeft:  t.Style.CommentMarginLeft,
+		CommentMarginRight: t.Style.CommentMarginRight,
+		VerticalMinWidth:   t.Style.VerticalMinWidth,
+		VerticalMaxWidth:   t.Style.VerticalMaxWidth,
+		HorizontalMinWidth: t.Style.HorizontalMinWidth,
+		HorizontalMaxWidth: t.Style.HorizontalMaxWidth,
+		AlwaysShowPager:    t.Style.AlwaysShowPager,
+		ShowPageNumber:     showPageNumber,
 	}
 	if t.Style.IndexStyle == "text" {
 		style.IndexStyle = "text"
