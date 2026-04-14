@@ -16,6 +16,9 @@ type CompositeDict struct {
 	// Shadow 规则提供者（可选）
 	shadowProvider ShadowProvider
 
+	// 词频评分器（可选）
+	freqScorer FreqScorer
+
 	// 排序模式
 	sortMode candidate.CandidateSortMode
 }
@@ -60,6 +63,13 @@ func (c *CompositeDict) SetShadowProvider(provider ShadowProvider) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.shadowProvider = provider
+}
+
+// SetFreqScorer 设置词频评分器
+func (c *CompositeDict) SetFreqScorer(scorer FreqScorer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.freqScorer = scorer
 }
 
 // SetSortMode 设置候选排序模式
@@ -121,7 +131,17 @@ func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []
 		}
 	}
 
-	// 2. 排序
+	// 2. 应用词频加成
+	if c.freqScorer != nil {
+		for i := range results {
+			boost := c.freqScorer.FreqBoost(results[i].Code, results[i].Text)
+			if boost > 0 {
+				results[i].Weight += boost
+			}
+		}
+	}
+
+	// 3. 排序
 	comparator := candidate.Better
 	if c.sortMode == candidate.SortByNatural {
 		comparator = candidate.BetterNatural
@@ -130,7 +150,7 @@ func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []
 		return comparator(results[i], results[j])
 	})
 
-	// 3. 限制返回数量
+	// 4. 限制返回数量
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}

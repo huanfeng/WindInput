@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/store"
 )
 
 // DictManager 词库管理器
@@ -25,16 +26,29 @@ type DictManager struct {
 	// 全局层
 	phraseLayer *PhraseLayer // Lv1: 特殊短语（全局共享）
 
-	// 按方案隔离的层
+	// ── 文件后端（useStore=false 时使用）──
 	shadowLayers map[string]*ShadowLayer // schemaID -> ShadowLayer
 	userDicts    map[string]*UserDict    // schemaID -> UserDict
 	tempDicts    map[string]*TempDict    // schemaID -> TempDict
 
-	// 当前活跃方案
+	// 当前活跃方案（文件后端）
 	activeSchemaID string
 	activeShadow   *ShadowLayer
 	activeUserDict *UserDict
 	activeTempDict *TempDict
+
+	// ── Store 后端（useStore=true 时使用）──
+	store             *store.Store
+	useStore          bool
+	storeUserLayers   map[string]*StoreUserLayer   // schemaID -> StoreUserLayer
+	storeTempLayers   map[string]*StoreTempLayer   // schemaID -> StoreTempLayer
+	storeShadowLayers map[string]*StoreShadowLayer // schemaID -> StoreShadowLayer
+	freqScorers       map[string]*StoreFreqScorer  // schemaID -> StoreFreqScorer
+
+	// 当前活跃方案（Store 后端）
+	activeStoreUser   *StoreUserLayer
+	activeStoreTemp   *StoreTempLayer
+	activeStoreShadow *StoreShadowLayer
 
 	// 聚合词库
 	compositeDict *CompositeDict
@@ -51,15 +65,50 @@ func NewDictManager(dataDir, systemDir string, logger *slog.Logger) *DictManager
 		logger = slog.Default()
 	}
 	return &DictManager{
-		logger:        logger,
-		dataDir:       dataDir,
-		systemDir:     systemDir,
-		shadowLayers:  make(map[string]*ShadowLayer),
-		userDicts:     make(map[string]*UserDict),
-		tempDicts:     make(map[string]*TempDict),
-		systemLayers:  make(map[string]DictLayer),
-		compositeDict: NewCompositeDict(),
+		logger:            logger,
+		dataDir:           dataDir,
+		systemDir:         systemDir,
+		shadowLayers:      make(map[string]*ShadowLayer),
+		userDicts:         make(map[string]*UserDict),
+		tempDicts:         make(map[string]*TempDict),
+		storeUserLayers:   make(map[string]*StoreUserLayer),
+		storeTempLayers:   make(map[string]*StoreTempLayer),
+		storeShadowLayers: make(map[string]*StoreShadowLayer),
+		freqScorers:       make(map[string]*StoreFreqScorer),
+		systemLayers:      make(map[string]DictLayer),
+		compositeDict:     NewCompositeDict(),
 	}
+}
+
+// OpenStore 打开 bbolt 数据库并启用 Store 后端
+// 应在 Initialize() 之前调用
+func (dm *DictManager) OpenStore(dbPath string) error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+
+	dm.store = s
+	dm.useStore = true
+	dm.logger.Info("Store 后端已启用", "path", dbPath)
+	return nil
+}
+
+// UseStore 返回是否使用 Store 后端
+func (dm *DictManager) UseStore() bool {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	return dm.useStore
+}
+
+// GetStore 获取底层 Store（可用于词频记录等）
+func (dm *DictManager) GetStore() *store.Store {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	return dm.store
 }
 
 // Initialize 初始化全局层（短语层）
@@ -101,6 +150,68 @@ func (dm *DictManager) SwitchSchemaFull(schemaID, shadowFile, userDictFile, temp
 		return
 	}
 
+	if dm.useStore {
+		dm.switchSchemaStore(schemaID, tempMaxEntries, tempPromoteCount)
+	} else {
+		dm.switchSchemaFile(schemaID, shadowFile, userDictFile, tempDictFile, tempMaxEntries, tempPromoteCount)
+	}
+
+	dm.activeSchemaID = schemaID
+	dm.logger.Info("切换到方案", "schemaID", schemaID)
+}
+
+// switchSchemaStore Store 后端的方案切换
+func (dm *DictManager) switchSchemaStore(schemaID string, tempMaxEntries, tempPromoteCount int) {
+	// 1. 移除旧的 Store 用户词库层
+	if dm.activeStoreUser != nil {
+		dm.compositeDict.RemoveLayer(dm.activeStoreUser.Name())
+	}
+
+	// 2. 懒加载 StoreShadowLayer
+	shadowLayer, ok := dm.storeShadowLayers[schemaID]
+	if !ok {
+		shadowLayer = NewStoreShadowLayer(dm.store, schemaID)
+		dm.storeShadowLayers[schemaID] = shadowLayer
+		dm.logger.Info("Store Shadow 层已创建", "schemaID", schemaID)
+	}
+	dm.compositeDict.SetShadowProvider(shadowLayer)
+	dm.activeStoreShadow = shadowLayer
+
+	// 3. 懒加载 StoreUserLayer
+	userLayer, ok := dm.storeUserLayers[schemaID]
+	if !ok {
+		userLayer = NewStoreUserLayer(dm.store, schemaID)
+		dm.storeUserLayers[schemaID] = userLayer
+		dm.logger.Info("Store 用户词库层已创建", "schemaID", schemaID, "entries", userLayer.EntryCount())
+	}
+	dm.compositeDict.AddLayer(userLayer)
+	dm.activeStoreUser = userLayer
+
+	// 4. 设置词频评分器
+	scorer, ok := dm.freqScorers[schemaID]
+	if !ok {
+		scorer = NewStoreFreqScorer(dm.store, schemaID)
+		dm.freqScorers[schemaID] = scorer
+	}
+	dm.compositeDict.SetFreqScorer(scorer)
+
+	// 5. 懒加载 StoreTempLayer
+	if dm.activeStoreTemp != nil {
+		dm.compositeDict.RemoveLayer(dm.activeStoreTemp.Name())
+	}
+	tempLayer, ok := dm.storeTempLayers[schemaID]
+	if !ok {
+		tempLayer = NewStoreTempLayer(dm.store, schemaID)
+		tempLayer.SetLimits(tempMaxEntries, tempPromoteCount)
+		dm.storeTempLayers[schemaID] = tempLayer
+		dm.logger.Info("Store 临时词库层已创建", "schemaID", schemaID)
+	}
+	dm.compositeDict.AddLayer(tempLayer)
+	dm.activeStoreTemp = tempLayer
+}
+
+// switchSchemaFile 文件后端的方案切换（原有逻辑）
+func (dm *DictManager) switchSchemaFile(schemaID, shadowFile, userDictFile, tempDictFile string, tempMaxEntries, tempPromoteCount int) {
 	// 1. 从 CompositeDict 移除旧的 UserDict 层
 	if dm.activeUserDict != nil {
 		dm.compositeDict.RemoveLayer(dm.activeUserDict.Name())
@@ -158,9 +269,6 @@ func (dm *DictManager) SwitchSchemaFull(schemaID, shadowFile, userDictFile, temp
 	} else {
 		dm.activeTempDict = nil
 	}
-
-	dm.activeSchemaID = schemaID
-	dm.logger.Info("切换到方案", "schemaID", schemaID)
 }
 
 // resolveDataPath 解析用户数据文件路径，防止文件名为空或路径指向目录
@@ -250,6 +358,12 @@ func (dm *DictManager) GetActiveSchemaID() string {
 
 // AddUserWord 添加用户词
 func (dm *DictManager) AddUserWord(code, text string, weight int) error {
+	if dm.useStore {
+		if dm.activeStoreUser == nil {
+			return fmt.Errorf("Store 用户词库层未初始化")
+		}
+		return dm.activeStoreUser.Add(code, text, weight)
+	}
 	if dm.activeUserDict == nil {
 		return fmt.Errorf("用户词库未初始化")
 	}
@@ -258,6 +372,12 @@ func (dm *DictManager) AddUserWord(code, text string, weight int) error {
 
 // PinWord 固定词到指定位置（置顶 = position 0）
 func (dm *DictManager) PinWord(code, word string, position int) {
+	if dm.useStore {
+		if dm.activeStoreShadow != nil {
+			dm.activeStoreShadow.Pin(code, word, position)
+		}
+		return
+	}
 	if dm.activeShadow != nil {
 		dm.activeShadow.Pin(code, word, position)
 	}
@@ -265,15 +385,62 @@ func (dm *DictManager) PinWord(code, word string, position int) {
 
 // DeleteWord 删除（隐藏）词条
 func (dm *DictManager) DeleteWord(code, word string) {
+	if dm.useStore {
+		if dm.activeStoreShadow != nil {
+			dm.activeStoreShadow.Delete(code, word)
+		}
+		return
+	}
 	if dm.activeShadow != nil {
 		dm.activeShadow.Delete(code, word)
 	}
+}
+
+// RemoveShadowRule 移除词的所有 Shadow 规则
+func (dm *DictManager) RemoveShadowRule(code, word string) {
+	if dm.useStore {
+		if dm.activeStoreShadow != nil {
+			dm.activeStoreShadow.RemoveRule(code, word)
+		}
+		return
+	}
+	if dm.activeShadow != nil {
+		dm.activeShadow.RemoveRule(code, word)
+	}
+}
+
+// ── Store 后端专用访问器 ──
+
+// GetStoreUserLayer 获取当前活跃的 Store 用户词库层（仅 Store 模式下有效）
+func (dm *DictManager) GetStoreUserLayer() *StoreUserLayer {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	return dm.activeStoreUser
+}
+
+// GetStoreTempLayer 获取当前活跃的 Store 临时词库层（仅 Store 模式下有效）
+func (dm *DictManager) GetStoreTempLayer() *StoreTempLayer {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	return dm.activeStoreTemp
+}
+
+// GetStoreShadowLayer 获取当前活跃的 Store Shadow 层（仅 Store 模式下有效）
+func (dm *DictManager) GetStoreShadowLayer() *StoreShadowLayer {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	return dm.activeStoreShadow
 }
 
 // Save 保存所有可写层
 func (dm *DictManager) Save() error {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
+
+	// Store 后端无需手动保存（bbolt 自动持久化）
+	if dm.useStore {
+		return nil
+	}
 
 	var errs []error
 
@@ -309,18 +476,26 @@ func (dm *DictManager) Close() error {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
+	// 关闭文件后端
 	for _, ud := range dm.userDicts {
 		ud.Close()
 	}
-
 	for _, td := range dm.tempDicts {
 		td.Close()
 	}
-
 	for _, sl := range dm.shadowLayers {
 		if sl.IsDirty() {
 			sl.Save()
 		}
+	}
+
+	// 关闭 Store 后端
+	if dm.store != nil {
+		if err := dm.store.Close(); err != nil {
+			dm.logger.Error("关闭 Store 失败", "error", err)
+			return err
+		}
+		dm.store = nil
 	}
 
 	return nil
@@ -370,19 +545,31 @@ func (dm *DictManager) GetStats() map[string]int {
 		stats["commands"] = dm.phraseLayer.GetCommandCount()
 	}
 
-	if dm.activeShadow != nil {
-		stats["shadow_rules"] = dm.activeShadow.GetRuleCount()
+	if dm.useStore {
+		if dm.activeStoreShadow != nil {
+			stats["shadow_rules"] = dm.activeStoreShadow.GetRuleCount()
+		}
+		if dm.activeStoreUser != nil {
+			stats["user_words"] = dm.activeStoreUser.EntryCount()
+		}
+		if dm.activeStoreTemp != nil {
+			stats["temp_words"] = dm.activeStoreTemp.GetWordCount()
+		}
+		stats["schema_count"] = len(dm.storeShadowLayers)
+		stats["store_enabled"] = 1
+	} else {
+		if dm.activeShadow != nil {
+			stats["shadow_rules"] = dm.activeShadow.GetRuleCount()
+		}
+		if dm.activeUserDict != nil {
+			stats["user_words"] = dm.activeUserDict.EntryCount()
+		}
+		if dm.activeTempDict != nil {
+			stats["temp_words"] = dm.activeTempDict.GetWordCount()
+		}
+		stats["schema_count"] = len(dm.shadowLayers)
 	}
 
-	if dm.activeUserDict != nil {
-		stats["user_words"] = dm.activeUserDict.EntryCount()
-	}
-
-	if dm.activeTempDict != nil {
-		stats["temp_words"] = dm.activeTempDict.GetWordCount()
-	}
-
-	stats["schema_count"] = len(dm.shadowLayers)
 	stats["total_layers"] = len(dm.compositeDict.GetLayers())
 
 	return stats
