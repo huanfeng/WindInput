@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/google/uuid"
 	bolt "go.etcd.io/bbolt"
@@ -10,6 +11,7 @@ import (
 var (
 	bucketMeta    = []byte("Meta")
 	bucketSchemas = []byte("Schemas")
+	bucketPhrases = []byte("Phrases")
 )
 
 // Store wraps a bbolt database with helpers for the wind_input schema.
@@ -42,6 +44,9 @@ func (s *Store) init() error {
 		}
 		if _, err := tx.CreateBucketIfNotExists(bucketSchemas); err != nil {
 			return fmt.Errorf("create Schemas bucket: %w", err)
+		}
+		if _, err := tx.CreateBucketIfNotExists(bucketPhrases); err != nil {
+			return fmt.Errorf("create Phrases bucket: %w", err)
 		}
 
 		// Seed version if not yet set.
@@ -182,4 +187,25 @@ func schemaSubBucket(tx *bolt.Tx, schemaID, sub string, create bool) (*bolt.Buck
 		return nil, fmt.Errorf("sub-bucket %q/%q not found", schemaID, sub)
 	}
 	return b, nil
+}
+
+// ListSchemaIDs returns a sorted list of all schema IDs that have data stored
+// under the Schemas bucket.
+func (s *Store) ListSchemaIDs() ([]string, error) {
+	var ids []string
+	err := s.db.View(func(tx *bolt.Tx) error {
+		schemas := tx.Bucket(bucketSchemas)
+		if schemas == nil {
+			return nil
+		}
+		return schemas.ForEach(func(k, v []byte) error {
+			// Only include sub-buckets (v is nil for buckets).
+			if v == nil && schemas.Bucket(k) != nil {
+				ids = append(ids, string(k))
+			}
+			return nil
+		})
+	})
+	sort.Strings(ids)
+	return ids, err
 }
