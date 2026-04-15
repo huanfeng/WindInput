@@ -7,6 +7,7 @@ import (
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/control"
+	"github.com/huanfeng/wind_input/pkg/rpcapi"
 
 	"wind_setting/internal/editor"
 	"wind_setting/internal/filesync"
@@ -27,13 +28,9 @@ type App struct {
 	phraseEditor           *editor.PhraseEditor // 用户短语编辑器
 	systemPhraseEditor     *editor.PhraseEditor // 系统短语编辑器（程序目录，只读）
 	systemUserPhraseEditor *editor.PhraseEditor // 用户目录的系统短语（修改后的副本）
-	shadowEditor           *editor.ShadowEditor
-	userDictEditor         *editor.UserDictEditor
 
-	// 按方案缓存的编辑器（用于左右分栏 UI 按方案独立操作）
-	schemaUserDicts map[string]*editor.UserDictEditor
-	schemaShadows   map[string]*editor.ShadowEditor
-	schemaTempDicts map[string]*editor.UserDictEditor // 临时词库复用 UserDictEditor
+	// RPC 客户端（词库/Shadow 操作走 RPC）
+	rpcClient *rpcapi.Client
 
 	// 文件监控
 	fileWatcher *filesync.FileWatcher
@@ -45,10 +42,8 @@ type App struct {
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{
-		controlClient:   control.NewClient(),
-		schemaUserDicts: make(map[string]*editor.UserDictEditor),
-		schemaShadows:   make(map[string]*editor.ShadowEditor),
-		schemaTempDicts: make(map[string]*editor.UserDictEditor),
+		controlClient: control.NewClient(),
+		rpcClient:     rpcapi.NewClient(),
 	}
 }
 
@@ -108,16 +103,6 @@ func (a *App) startup(ctx context.Context) {
 		a.systemUserPhraseEditor.Load() // 文件可能不存在，Load 会返回错误但不影响
 	}
 
-	a.shadowEditor, err = editor.NewShadowEditor()
-	if err == nil {
-		a.shadowEditor.Load()
-	}
-
-	a.userDictEditor, err = editor.NewUserDictEditor()
-	if err == nil {
-		a.userDictEditor.Load()
-	}
-
 	// 初始化文件监控
 	a.fileWatcher = filesync.NewFileWatcher()
 	if a.configEditor != nil {
@@ -126,33 +111,10 @@ func (a *App) startup(ctx context.Context) {
 	if a.phraseEditor != nil {
 		a.fileWatcher.Watch(a.phraseEditor.GetFilePath())
 	}
-	if a.shadowEditor != nil {
-		a.fileWatcher.Watch(a.shadowEditor.GetFilePath())
-	}
-	if a.userDictEditor != nil {
-		a.fileWatcher.Watch(a.userDictEditor.GetFilePath())
-	}
 }
 
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {
-	// 保存按方案缓存的编辑器
-	for _, ed := range a.schemaUserDicts {
-		if ed.IsDirty() {
-			ed.Save()
-		}
-	}
-	for _, ed := range a.schemaShadows {
-		if ed.IsDirty() {
-			ed.Save()
-		}
-	}
-	for _, ed := range a.schemaTempDicts {
-		if ed.IsDirty() {
-			ed.Save()
-		}
-	}
-
 	if a.fileWatcher != nil {
 		a.fileWatcher.Stop()
 	}

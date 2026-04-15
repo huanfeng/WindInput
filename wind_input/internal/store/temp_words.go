@@ -230,6 +230,18 @@ func (s *Store) ClearTempWords(schemaID string) (int, error) {
 }
 
 // TempWordCount returns the number of temp words stored for the given schema.
+// RemoveTempWord 删除临时词条
+func (s *Store) RemoveTempWord(schemaID, code, text string) error {
+	code = strings.ToLower(code)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b, err := schemaSubBucket(tx, schemaID, string(bucketTempWords), false)
+		if err != nil || b == nil {
+			return nil
+		}
+		return b.Delete(userWordsKey(code, text))
+	})
+}
+
 func (s *Store) TempWordCount(schemaID string) (int, error) {
 	var count int
 	err := s.db.View(func(tx *bolt.Tx) error {

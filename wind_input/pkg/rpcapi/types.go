@@ -95,6 +95,90 @@ type PinnedEntry struct {
 	Position int    `json:"position"`
 }
 
+// DictGetTempArgs 临时词库查询请求
+type DictGetTempArgs struct {
+	SchemaID string `json:"schema_id,omitempty"`
+	Prefix   string `json:"prefix,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+	Offset   int    `json:"offset,omitempty"`
+}
+
+// DictClearTempArgs 清空临时词库请求
+type DictClearTempArgs struct {
+	SchemaID string `json:"schema_id,omitempty"`
+}
+
+// DictClearTempReply 清空临时词库响应
+type DictClearTempReply struct {
+	Count int `json:"count"`
+}
+
+// DictPromoteTempArgs 临时词条晋升请求
+type DictPromoteTempArgs struct {
+	SchemaID string `json:"schema_id,omitempty"`
+	Code     string `json:"code"`
+	Text     string `json:"text"`
+}
+
+// DictPromoteAllTempArgs 全部晋升请求
+type DictPromoteAllTempArgs struct {
+	SchemaID string `json:"schema_id,omitempty"`
+}
+
+// DictPromoteAllTempReply 全部晋升响应
+type DictPromoteAllTempReply struct {
+	Count int `json:"count"`
+}
+
+// DictRemoveTempArgs 删除临时词条请求
+type DictRemoveTempArgs struct {
+	SchemaID string `json:"schema_id,omitempty"`
+	Code     string `json:"code"`
+	Text     string `json:"text"`
+}
+
+// DictSchemaStatsArgs 方案统计请求
+type DictSchemaStatsArgs struct {
+	SchemaID string `json:"schema_id"`
+}
+
+// DictSchemaStatsReply 方案统计响应
+type DictSchemaStatsReply struct {
+	WordCount     int `json:"word_count"`
+	ShadowCount   int `json:"shadow_count"`
+	TempWordCount int `json:"temp_word_count"`
+}
+
+// DictBatchAddArgs 批量添加请求
+type DictBatchAddArgs struct {
+	SchemaID string      `json:"schema_id,omitempty"`
+	Words    []WordEntry `json:"words"`
+}
+
+// DictBatchAddReply 批量添加响应
+type DictBatchAddReply struct {
+	Count int `json:"count"`
+}
+
+// ── Shadow 扩展类型 ──
+
+// ShadowGetAllRulesArgs 获取所有规则请求
+type ShadowGetAllRulesArgs struct {
+	SchemaID string `json:"schema_id,omitempty"`
+}
+
+// ShadowGetAllRulesReply 所有规则响应
+type ShadowGetAllRulesReply struct {
+	Rules []ShadowCodeRules `json:"rules"`
+}
+
+// ShadowCodeRules 单个编码下的规则
+type ShadowCodeRules struct {
+	Code    string        `json:"code"`
+	Pinned  []PinnedEntry `json:"pinned,omitempty"`
+	Deleted []string      `json:"deleted,omitempty"`
+}
+
 // ── System 服务类型 ──
 
 // Empty 空参数/响应

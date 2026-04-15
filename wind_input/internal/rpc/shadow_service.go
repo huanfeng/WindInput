@@ -52,6 +52,28 @@ func (s *ShadowService) RemoveRule(args *rpcapi.ShadowDeleteArgs, reply *rpcapi.
 	return s.store.RemoveShadowRule(schemaID, args.Code, args.Word)
 }
 
+// GetAllRules 获取指定方案的所有 Shadow 规则
+func (s *ShadowService) GetAllRules(args *rpcapi.ShadowGetAllRulesArgs, reply *rpcapi.ShadowGetAllRulesReply) error {
+	if s.store == nil {
+		return fmt.Errorf("store not available")
+	}
+	schemaID := s.resolveSchemaID(args.SchemaID)
+	allRules, err := s.store.GetAllShadowRules(schemaID)
+	if err != nil {
+		return err
+	}
+
+	for code, rec := range allRules {
+		cr := rpcapi.ShadowCodeRules{Code: code}
+		for _, p := range rec.Pinned {
+			cr.Pinned = append(cr.Pinned, rpcapi.PinnedEntry{Word: p.Word, Position: p.Position})
+		}
+		cr.Deleted = rec.Deleted
+		reply.Rules = append(reply.Rules, cr)
+	}
+	return nil
+}
+
 // GetRules 获取指定编码的规则
 func (s *ShadowService) GetRules(args *rpcapi.ShadowGetRulesArgs, reply *rpcapi.ShadowRulesReply) error {
 	if s.store == nil {

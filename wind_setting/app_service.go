@@ -49,11 +49,6 @@ func (a *App) CheckAllFilesModified() (*FileChangeStatus, error) {
 	if changed, _ := a.CheckPhrasesModified(); changed {
 		status.PhrasesChanged = true
 	}
-	if a.shadowEditor != nil {
-		if changed, _ := a.shadowEditor.HasChanged(); changed {
-			status.ShadowChanged = true
-		}
-	}
 	if changed, _ := a.CheckUserDictModified(); changed {
 		status.UserDictChanged = true
 	}
@@ -70,11 +65,6 @@ func (a *App) ReloadAllFiles() error {
 	}
 	if err := a.ReloadPhrases(); err != nil {
 		lastErr = err
-	}
-	if a.shadowEditor != nil {
-		if err := a.shadowEditor.Reload(); err != nil {
-			lastErr = err
-		}
 	}
 	if err := a.ReloadUserDict(); err != nil {
 		lastErr = err

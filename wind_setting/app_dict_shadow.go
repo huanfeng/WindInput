@@ -14,28 +14,24 @@ type ShadowRuleItem struct {
 
 // GetShadowRules 获取所有 Shadow 规则
 func (a *App) GetShadowRules() ([]ShadowRuleItem, error) {
-	if a.shadowEditor == nil {
-		return nil, fmt.Errorf("shadow editor not initialized")
-	}
-
-	cfg := a.shadowEditor.GetShadowConfig()
-	if cfg == nil {
-		return []ShadowRuleItem{}, nil
+	reply, err := a.rpcClient.ShadowGetAllRules("")
+	if err != nil {
+		return nil, fmt.Errorf("获取 Shadow 规则失败: %w", err)
 	}
 
 	var items []ShadowRuleItem
-	for code, cc := range cfg.Rules {
-		for _, p := range cc.Pinned {
+	for _, cr := range reply.Rules {
+		for _, p := range cr.Pinned {
 			items = append(items, ShadowRuleItem{
-				Code:     code,
+				Code:     cr.Code,
 				Word:     p.Word,
 				Type:     "pin",
 				Position: p.Position,
 			})
 		}
-		for _, d := range cc.Deleted {
+		for _, d := range cr.Deleted {
 			items = append(items, ShadowRuleItem{
-				Code: code,
+				Code: cr.Code,
 				Word: d,
 				Type: "delete",
 			})
@@ -47,56 +43,15 @@ func (a *App) GetShadowRules() ([]ShadowRuleItem, error) {
 
 // PinShadowWord 固定词到指定位置
 func (a *App) PinShadowWord(code, word string, position int) error {
-	if a.shadowEditor == nil {
-		return fmt.Errorf("shadow editor not initialized")
-	}
-
-	a.shadowEditor.PinWord(code, word, position)
-
-	if err := a.shadowEditor.Save(); err != nil {
-		return err
-	}
-
-	a.fileWatcher.UpdateState(a.shadowEditor.GetFilePath())
-	go a.NotifyReload("shadow")
-
-	return nil
+	return a.rpcClient.ShadowPin("", code, word, position)
 }
 
 // DeleteShadowWord 隐藏词条
 func (a *App) DeleteShadowWord(code, word string) error {
-	if a.shadowEditor == nil {
-		return fmt.Errorf("shadow editor not initialized")
-	}
-
-	a.shadowEditor.DeleteWord(code, word)
-
-	if err := a.shadowEditor.Save(); err != nil {
-		return err
-	}
-
-	a.fileWatcher.UpdateState(a.shadowEditor.GetFilePath())
-	go a.NotifyReload("shadow")
-
-	return nil
+	return a.rpcClient.ShadowDelete("", code, word)
 }
 
 // RemoveShadowRule 删除 Shadow 规则
 func (a *App) RemoveShadowRule(code, word string) error {
-	if a.shadowEditor == nil {
-		return fmt.Errorf("shadow editor not initialized")
-	}
-
-	if !a.shadowEditor.RemoveRule(code, word) {
-		return fmt.Errorf("rule not found")
-	}
-
-	if err := a.shadowEditor.Save(); err != nil {
-		return err
-	}
-
-	a.fileWatcher.UpdateState(a.shadowEditor.GetFilePath())
-	go a.NotifyReload("shadow")
-
-	return nil
+	return a.rpcClient.ShadowRemoveRule("", code, word)
 }
