@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -100,6 +102,92 @@ func (s *Store) ResetStreak(schemaID, code, text string) error {
 		}
 		return b.Put(key, data)
 	})
+}
+
+// FreqEntry holds a frequency record with its parsed code and text.
+type FreqEntry struct {
+	Code   string
+	Text   string
+	Record FreqRecord
+}
+
+// SearchFreqPrefix returns freq entries whose key starts with the given prefix.
+// If prefix is empty, returns all entries. Results are limited by limit (0 = unlimited).
+func (s *Store) SearchFreqPrefix(schemaID, prefix string, limit int) ([]FreqEntry, error) {
+	var results []FreqEntry
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b, err := schemaSubBucket(tx, schemaID, string(bucketFreq), false)
+		if err != nil {
+			return nil
+		}
+		c := b.Cursor()
+		var k, v []byte
+		if prefix == "" {
+			k, v = c.First()
+		} else {
+			k, v = c.Seek([]byte(prefix))
+		}
+		pfx := []byte(prefix)
+		for ; k != nil; k, v = c.Next() {
+			if prefix != "" && !bytes.HasPrefix(k, pfx) {
+				break
+			}
+			parts := strings.SplitN(string(k), ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			var rec FreqRecord
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return fmt.Errorf("SearchFreqPrefix unmarshal key %q: %w", k, err)
+			}
+			results = append(results, FreqEntry{
+				Code:   parts[0],
+				Text:   parts[1],
+				Record: rec,
+			})
+			if limit > 0 && len(results) >= limit {
+				break
+			}
+		}
+		return nil
+	})
+	return results, err
+}
+
+// DeleteFreq removes a single frequency record.
+func (s *Store) DeleteFreq(schemaID, code, text string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b, err := schemaSubBucket(tx, schemaID, string(bucketFreq), false)
+		if err != nil {
+			return nil
+		}
+		return b.Delete([]byte(freqKey(code, text)))
+	})
+}
+
+// ClearAllFreq removes all frequency data for a schema by deleting and
+// recreating the Freq sub-bucket. Returns the number of entries removed.
+func (s *Store) ClearAllFreq(schemaID string) (int, error) {
+	var count int
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		parent, err := schemaBucket(tx, schemaID, true)
+		if err != nil {
+			return fmt.Errorf("ClearAllFreq: %w", err)
+		}
+		fb := parent.Bucket(bucketFreq)
+		if fb == nil {
+			return nil
+		}
+		count = fb.Stats().KeyN
+		if err := parent.DeleteBucket(bucketFreq); err != nil {
+			return fmt.Errorf("ClearAllFreq delete: %w", err)
+		}
+		if _, err := parent.CreateBucket(bucketFreq); err != nil {
+			return fmt.Errorf("ClearAllFreq recreate: %w", err)
+		}
+		return nil
+	})
+	return count, err
 }
 
 // GetAllFreq returns all FreqRecords for the given schema, keyed by "code:text".

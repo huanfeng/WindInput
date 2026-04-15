@@ -185,6 +185,132 @@ func TestFreq_BoostMax(t *testing.T) {
 	}
 }
 
+func TestFreq_SearchPrefix(t *testing.T) {
+	s := openFreqTestStore(t)
+	schemaID := "wubi86"
+
+	// Insert 3 entries with different code prefixes.
+	entries := [][2]string{
+		{"abc", "你"},
+		{"abd", "好"},
+		{"xyz", "世"},
+	}
+	for _, e := range entries {
+		if err := s.IncrementFreq(schemaID, e[0], e[1]); err != nil {
+			t.Fatalf("IncrementFreq %v: %v", e, err)
+		}
+	}
+
+	// Search with prefix "ab" → should return 2 entries.
+	results, err := s.SearchFreqPrefix(schemaID, "ab", 0)
+	if err != nil {
+		t.Fatalf("SearchFreqPrefix(ab, 0): %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected 2 results for prefix 'ab', got %d", len(results))
+	}
+
+	// Search with empty prefix → should return all 3.
+	results, err = s.SearchFreqPrefix(schemaID, "", 0)
+	if err != nil {
+		t.Fatalf("SearchFreqPrefix('', 0): %v", err)
+	}
+	if len(results) != 3 {
+		t.Errorf("expected 3 results for empty prefix, got %d", len(results))
+	}
+
+	// Search with prefix "ab" and limit 1 → should return 1.
+	results, err = s.SearchFreqPrefix(schemaID, "ab", 1)
+	if err != nil {
+		t.Fatalf("SearchFreqPrefix(ab, 1): %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result for prefix 'ab' with limit 1, got %d", len(results))
+	}
+
+	// Verify FreqEntry fields are correctly parsed.
+	for _, r := range results {
+		if r.Code == "" || r.Text == "" {
+			t.Errorf("FreqEntry has empty Code or Text: %+v", r)
+		}
+		if r.Record.Count != 1 {
+			t.Errorf("expected Count=1, got %d", r.Record.Count)
+		}
+	}
+
+	// Search non-existent schema → should return nil.
+	results, err = s.SearchFreqPrefix("nonexistent", "ab", 0)
+	if err != nil {
+		t.Fatalf("SearchFreqPrefix nonexistent schema: %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil for nonexistent schema, got %v", results)
+	}
+}
+
+func TestFreq_Delete(t *testing.T) {
+	s := openFreqTestStore(t)
+	schemaID := "wubi86"
+	code := "tttt"
+	text := "的"
+
+	// Increment then delete.
+	if err := s.IncrementFreq(schemaID, code, text); err != nil {
+		t.Fatalf("IncrementFreq: %v", err)
+	}
+
+	if err := s.DeleteFreq(schemaID, code, text); err != nil {
+		t.Fatalf("DeleteFreq: %v", err)
+	}
+
+	// Verify record is gone (zero record).
+	rec, err := s.GetFreq(schemaID, code, text)
+	if err != nil {
+		t.Fatalf("GetFreq after delete: %v", err)
+	}
+	if rec.Count != 0 {
+		t.Errorf("expected Count=0 after delete, got %d", rec.Count)
+	}
+
+	// Delete on nonexistent schema should be a no-op.
+	if err := s.DeleteFreq("nonexistent", code, text); err != nil {
+		t.Errorf("DeleteFreq nonexistent schema should be no-op, got %v", err)
+	}
+}
+
+func TestFreq_ClearAll(t *testing.T) {
+	s := openFreqTestStore(t)
+	schemaID := "wubi86"
+
+	pairs := [][2]string{
+		{"tttt", "的"},
+		{"aaaa", "工"},
+		{"ssss", "木"},
+	}
+	for _, p := range pairs {
+		if err := s.IncrementFreq(schemaID, p[0], p[1]); err != nil {
+			t.Fatalf("IncrementFreq %v: %v", p, err)
+		}
+	}
+
+	count, err := s.ClearAllFreq(schemaID)
+	if err != nil {
+		t.Fatalf("ClearAllFreq: %v", err)
+	}
+	if count != len(pairs) {
+		t.Errorf("expected count=%d, got %d", len(pairs), count)
+	}
+
+	// Verify all entries are gone.
+	all, err := s.GetAllFreq(schemaID)
+	if err != nil {
+		t.Fatalf("GetAllFreq after clear: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("expected empty map after ClearAllFreq, got %d entries", len(all))
+	}
+}
+
 func TestFreq_GetAllFreq(t *testing.T) {
 	s := openFreqTestStore(t)
 	schemaID := "wubi86"
