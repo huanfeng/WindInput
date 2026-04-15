@@ -218,7 +218,7 @@ func (e *Engine) convertCodetableOnly(input string, maxCandidates int) *ConvertR
 
 	// 应用 Shadow 规则（置顶/删除）
 	if e.dictManager != nil {
-		if shadowLayer := e.dictManager.GetShadowLayer(); shadowLayer != nil {
+		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			candidates = dict.ApplyShadowPins(candidates, rules)
 		}
@@ -249,7 +249,7 @@ func (e *Engine) convertPinyinOnly(input string, maxCandidates int) *ConvertResu
 	candidates := pinyinResult.Candidates
 
 	if e.dictManager != nil {
-		if shadowLayer := e.dictManager.GetShadowLayer(); shadowLayer != nil {
+		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			candidates = dict.ApplyShadowPins(candidates, rules)
 		}
@@ -336,7 +336,7 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 
 	// 应用 Shadow 规则
 	if e.dictManager != nil {
-		if shadowLayer := e.dictManager.GetShadowLayer(); shadowLayer != nil {
+		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			merged = dict.ApplyShadowPins(merged, rules)
 		}
@@ -458,7 +458,7 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 	// 子引擎内部各自应用了 Shadow，但合并+重排序后位置被打乱，需要在最终列表上重新应用。
 	// ApplyShadowPins 是幂等的：先移除 deleted 词，再按 pin position 分配槽位。
 	if e.dictManager != nil {
-		if shadowLayer := e.dictManager.GetShadowLayer(); shadowLayer != nil {
+		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			merged = dict.ApplyShadowPins(merged, rules)
 		}

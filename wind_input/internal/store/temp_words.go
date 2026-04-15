@@ -69,6 +69,7 @@ func (s *Store) GetTempWords(schemaID, code string) ([]UserWordRecord, error) {
 			if err := json.Unmarshal(v, &rec); err != nil {
 				continue
 			}
+			rec.Code = code
 			results = append(results, rec)
 		}
 		return nil
@@ -96,6 +97,8 @@ func (s *Store) SearchTempWordsPrefix(schemaID, prefix string, limit int) ([]Use
 			if err := json.Unmarshal(v, &rec); err != nil {
 				continue
 			}
+			kCode, _ := parseUserWordsKey(k)
+			rec.Code = kCode
 			results = append(results, rec)
 		}
 		return nil

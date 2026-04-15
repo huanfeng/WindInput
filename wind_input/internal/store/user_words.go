@@ -12,7 +12,9 @@ import (
 var bucketUserWords = []byte("UserWords")
 
 // UserWordRecord is the JSON-encoded value stored under a user/temp word key.
+// Code is not stored in JSON (it's part of the bbolt key), but populated by search methods.
 type UserWordRecord struct {
+	Code      string `json:"-"` // 从 key 解析，不序列化
 	Text      string `json:"t"`
 	Weight    int    `json:"w"`
 	Count     int    `json:"c,omitempty"`
@@ -133,6 +135,7 @@ func (s *Store) GetUserWords(schemaID, code string) ([]UserWordRecord, error) {
 			if err := json.Unmarshal(v, &rec); err != nil {
 				continue
 			}
+			rec.Code = code
 			results = append(results, rec)
 		}
 		return nil
@@ -160,6 +163,8 @@ func (s *Store) SearchUserWordsPrefix(schemaID, prefix string, limit int) ([]Use
 			if err := json.Unmarshal(v, &rec); err != nil {
 				continue
 			}
+			kCode, _ := parseUserWordsKey(k)
+			rec.Code = kCode
 			results = append(results, rec)
 		}
 		return nil

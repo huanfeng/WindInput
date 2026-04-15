@@ -328,10 +328,21 @@ func (dm *DictManager) GetUserDict() *UserDict {
 	return dm.activeUserDict
 }
 
-// GetShadowLayer 获取当前活跃的 Shadow 层
+// GetShadowLayer 获取当前活跃的 Shadow 层（文件后端）
 func (dm *DictManager) GetShadowLayer() *ShadowLayer {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
+	return dm.activeShadow
+}
+
+// GetShadowProvider 获取当前活跃的 ShadowProvider（兼容两种后端）
+// 引擎应使用此方法而非 GetShadowLayer
+func (dm *DictManager) GetShadowProvider() ShadowProvider {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	if dm.useStore {
+		return dm.activeStoreShadow
+	}
 	return dm.activeShadow
 }
 

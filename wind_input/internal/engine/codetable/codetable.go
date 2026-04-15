@@ -295,7 +295,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	// 在引擎最终排序后统一应用，不修改 weight，只做呈现层位置覆盖和过滤。
 	// 混输模式下由外层 MixedEngine 统一应用，此处跳过避免干扰。
 	if !e.config.SkipShadow && e.dictManager != nil {
-		if shadowLayer := e.dictManager.GetShadowLayer(); shadowLayer != nil {
+		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			allCandidates = dict.ApplyShadowPins(allCandidates, rules)
 		}

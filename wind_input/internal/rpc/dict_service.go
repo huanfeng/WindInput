@@ -57,6 +57,7 @@ func (d *DictService) Search(args *rpcapi.DictSearchArgs, reply *rpcapi.DictSear
 	reply.Words = make([]rpcapi.WordEntry, len(pageWords))
 	for i, w := range pageWords {
 		reply.Words[i] = rpcapi.WordEntry{
+			Code:      w.Code,
 			Text:      w.Text,
 			Weight:    w.Weight,
 			Count:     w.Count,
@@ -227,6 +228,7 @@ func (d *DictService) GetTemp(args *rpcapi.DictGetTempArgs, reply *rpcapi.DictSe
 	reply.Words = make([]rpcapi.WordEntry, len(pageWords))
 	for i, w := range pageWords {
 		reply.Words[i] = rpcapi.WordEntry{
+			Code:      w.Code,
 			Text:      w.Text,
 			Weight:    w.Weight,
 			Count:     w.Count,

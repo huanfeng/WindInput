@@ -634,7 +634,7 @@ func (e *Engine) applyShadowRules(input string, candidates []candidate.Candidate
 	if e.dictManager == nil {
 		return candidates
 	}
-	shadowLayer := e.dictManager.GetShadowLayer()
+	shadowLayer := e.dictManager.GetShadowProvider()
 	if shadowLayer == nil {
 		return candidates
 	}
