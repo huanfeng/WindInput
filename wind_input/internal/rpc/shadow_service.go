@@ -11,9 +11,10 @@ import (
 
 // ShadowService Shadow 规则管理 RPC 服务
 type ShadowService struct {
-	store  *store.Store
-	dm     *dict.DictManager
-	logger *slog.Logger
+	store       *store.Store
+	dm          *dict.DictManager
+	logger      *slog.Logger
+	broadcaster *EventBroadcaster
 }
 
 func (s *ShadowService) resolveSchemaID(id string) string {
@@ -30,7 +31,11 @@ func (s *ShadowService) Pin(args *rpcapi.ShadowPinArgs, reply *rpcapi.Empty) err
 	}
 	schemaID := s.resolveSchemaID(args.SchemaID)
 	s.logger.Info("RPC Shadow.Pin", "schemaID", schemaID, "code", args.Code, "position", args.Position)
-	return s.store.PinShadow(schemaID, args.Code, args.Word, args.Position)
+	if err := s.store.PinShadow(schemaID, args.Code, args.Word, args.Position); err != nil {
+		return err
+	}
+	s.broadcaster.Broadcast(rpcapi.EventMessage{Type: "shadow", SchemaID: schemaID, Action: "add"})
+	return nil
 }
 
 // Delete 隐藏词条
@@ -40,7 +45,11 @@ func (s *ShadowService) Delete(args *rpcapi.ShadowDeleteArgs, reply *rpcapi.Empt
 	}
 	schemaID := s.resolveSchemaID(args.SchemaID)
 	s.logger.Info("RPC Shadow.Delete", "schemaID", schemaID, "code", args.Code)
-	return s.store.DeleteShadow(schemaID, args.Code, args.Word)
+	if err := s.store.DeleteShadow(schemaID, args.Code, args.Word); err != nil {
+		return err
+	}
+	s.broadcaster.Broadcast(rpcapi.EventMessage{Type: "shadow", SchemaID: schemaID, Action: "add"})
+	return nil
 }
 
 // RemoveRule 移除所有规则
@@ -49,7 +58,11 @@ func (s *ShadowService) RemoveRule(args *rpcapi.ShadowDeleteArgs, reply *rpcapi.
 		return fmt.Errorf("store not available")
 	}
 	schemaID := s.resolveSchemaID(args.SchemaID)
-	return s.store.RemoveShadowRule(schemaID, args.Code, args.Word)
+	if err := s.store.RemoveShadowRule(schemaID, args.Code, args.Word); err != nil {
+		return err
+	}
+	s.broadcaster.Broadcast(rpcapi.EventMessage{Type: "shadow", SchemaID: schemaID, Action: "remove"})
+	return nil
 }
 
 // GetAllRules 获取指定方案的所有 Shadow 规则

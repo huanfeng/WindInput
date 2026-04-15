@@ -10,8 +10,9 @@ import (
 
 // PhraseService 短语管理 RPC 服务
 type PhraseService struct {
-	store  *store.Store
-	logger *slog.Logger
+	store       *store.Store
+	logger      *slog.Logger
+	broadcaster *EventBroadcaster
 }
 
 // List 获取所有短语
@@ -73,7 +74,11 @@ func (p *PhraseService) Add(args *rpcapi.PhraseAddArgs, reply *rpcapi.Empty) err
 	}
 
 	p.logger.Info("RPC Phrase.Add", "type", args.Type, "codeLen", len(args.Code))
-	return p.store.AddPhrase(rec)
+	if err := p.store.AddPhrase(rec); err != nil {
+		return err
+	}
+	p.broadcaster.Broadcast(rpcapi.EventMessage{Type: "phrase", Action: "add"})
+	return nil
 }
 
 // Update 更新短语
@@ -136,6 +141,7 @@ func (p *PhraseService) Update(args *rpcapi.PhraseUpdateArgs, reply *rpcapi.Empt
 		p.logger.Info("RPC Phrase.Update", "codeLen", len(args.Code))
 	}
 
+	p.broadcaster.Broadcast(rpcapi.EventMessage{Type: "phrase", Action: "update"})
 	return nil
 }
 
@@ -149,7 +155,11 @@ func (p *PhraseService) Remove(args *rpcapi.PhraseRemoveArgs, reply *rpcapi.Empt
 	}
 
 	p.logger.Info("RPC Phrase.Remove", "codeLen", len(args.Code))
-	return p.store.RemovePhrase(args.Code, args.Text, args.Name)
+	if err := p.store.RemovePhrase(args.Code, args.Text, args.Name); err != nil {
+		return err
+	}
+	p.broadcaster.Broadcast(rpcapi.EventMessage{Type: "phrase", Action: "remove"})
+	return nil
 }
 
 // ResetDefaults 重置为默认短语（清空后由下次 Seed 重新填充）
@@ -159,5 +169,9 @@ func (p *PhraseService) ResetDefaults(args *rpcapi.Empty, reply *rpcapi.Empty) e
 	}
 
 	p.logger.Info("RPC Phrase.ResetDefaults")
-	return p.store.ClearAllPhrases()
+	if err := p.store.ClearAllPhrases(); err != nil {
+		return err
+	}
+	p.broadcaster.Broadcast(rpcapi.EventMessage{Type: "phrase", Action: "reset"})
+	return nil
 }

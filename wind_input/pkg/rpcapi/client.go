@@ -1,6 +1,8 @@
 package rpcapi
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/rpc"
 	"net/rpc/jsonrpc"
@@ -328,4 +330,36 @@ func (c *Client) SystemListSchemas() (*ListSchemasReply, error) {
 	var reply ListSchemasReply
 	err := c.call("System.ListSchemas", &Empty{}, &reply)
 	return &reply, err
+}
+
+// ── Event 方法 ──
+
+// SubscribeEvents connects to the event pipe and calls handler for each event.
+// Blocks until context is cancelled or connection error.
+func (c *Client) SubscribeEvents(ctx context.Context, handler func(EventMessage)) error {
+	conn, err := winio.DialPipe(RPCEventPipeName, &c.timeout)
+	if err != nil {
+		return fmt.Errorf("connect to event pipe: %w", err)
+	}
+
+	// Close connection when context is done
+	go func() {
+		<-ctx.Done()
+		conn.Close()
+	}()
+
+	dec := json.NewDecoder(conn)
+	for {
+		var msg EventMessage
+		if err := dec.Decode(&msg); err != nil {
+			// Check if context was cancelled (expected shutdown)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				return fmt.Errorf("decode event: %w", err)
+			}
+		}
+		handler(msg)
+	}
 }

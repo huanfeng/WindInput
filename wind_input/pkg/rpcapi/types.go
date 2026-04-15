@@ -7,6 +7,18 @@ import "github.com/huanfeng/wind_input/pkg/buildvariant"
 // RPC 管道名称
 var RPCPipeName = `\\.\pipe\wind_input` + buildvariant.Suffix() + `_rpc`
 
+// ── Event 类型 ──
+
+// RPCEventPipeName 事件推送管道名称
+var RPCEventPipeName = `\\.\pipe\wind_input` + buildvariant.Suffix() + `_events`
+
+// EventMessage 数据变化事件
+type EventMessage struct {
+	Type     string `json:"type"`                // "userdict" | "temp" | "shadow" | "freq" | "phrase"
+	SchemaID string `json:"schema_id,omitempty"` // 方案 ID
+	Action   string `json:"action"`              // "add" | "remove" | "update" | "clear" | "reset"
+}
+
 // ── Dict 服务类型 ──
 
 // DictSearchArgs 词库搜索请求

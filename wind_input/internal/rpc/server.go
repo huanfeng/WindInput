@@ -23,11 +23,13 @@ type Server struct {
 	store       *store.Store
 	rpcServer   *rpc.Server
 
-	listener net.Listener
-	wg       sync.WaitGroup
-	stopCh   chan struct{}
-	mu       sync.Mutex
-	running  bool
+	listener    net.Listener
+	wg          sync.WaitGroup
+	stopCh      chan struct{}
+	mu          sync.Mutex
+	running     bool
+	broadcaster *EventBroadcaster
+	eventServer *EventPipeServer
 
 	statusProvider StatusProvider
 }
@@ -45,6 +47,7 @@ func NewServer(logger *slog.Logger, dm *dict.DictManager, s *store.Store) *Serve
 		logger:      logger,
 		dictManager: dm,
 		store:       s,
+		broadcaster: NewEventBroadcaster(logger),
 		rpcServer:   rpc.NewServer(),
 		stopCh:      make(chan struct{}),
 	}
@@ -67,8 +70,8 @@ func (s *Server) Start() error {
 	s.mu.Unlock()
 
 	// 注册服务
-	dictSvc := &DictService{store: s.store, dm: s.dictManager, logger: s.logger}
-	shadowSvc := &ShadowService{store: s.store, dm: s.dictManager, logger: s.logger}
+	dictSvc := &DictService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
+	shadowSvc := &ShadowService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
 	systemSvc := &SystemService{dm: s.dictManager, store: s.store, server: s, logger: s.logger}
 
 	if err := s.rpcServer.RegisterName("Dict", dictSvc); err != nil {
@@ -81,7 +84,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("register System service: %w", err)
 	}
 
-	phraseSvc := &PhraseService{store: s.store, logger: s.logger}
+	phraseSvc := &PhraseService{store: s.store, logger: s.logger, broadcaster: s.broadcaster}
 	if err := s.rpcServer.RegisterName("Phrase", phraseSvc); err != nil {
 		return fmt.Errorf("register Phrase service: %w", err)
 	}
@@ -101,6 +104,13 @@ func (s *Server) Start() error {
 	s.mu.Lock()
 	s.running = true
 	s.mu.Unlock()
+
+	// 启动事件推送管道
+	s.eventServer = NewEventPipeServer(s.broadcaster, s.logger)
+	if err := s.eventServer.Start(); err != nil {
+		s.logger.Error("Failed to start event pipe", "error", err)
+		// Non-fatal: RPC still works without events
+	}
 
 	s.logger.Info("RPC server started", "pipe", rpcapi.RPCPipeName)
 
@@ -130,6 +140,9 @@ func (s *Server) Stop() {
 	s.mu.Unlock()
 
 	close(s.stopCh)
+	if s.eventServer != nil {
+		s.eventServer.Stop()
+	}
 	if s.listener != nil {
 		s.listener.Close()
 	}

@@ -13,9 +13,10 @@ import (
 
 // DictService 词库管理 RPC 服务
 type DictService struct {
-	store  *store.Store
-	dm     *dict.DictManager
-	logger *slog.Logger
+	store       *store.Store
+	dm          *dict.DictManager
+	logger      *slog.Logger
+	broadcaster *EventBroadcaster
 }
 
 func (d *DictService) resolveSchemaID(id string) string {
@@ -114,7 +115,11 @@ func (d *DictService) Add(args *rpcapi.DictAddArgs, reply *rpcapi.Empty) error {
 	}
 
 	d.logger.Info("RPC Dict.Add", "schemaID", schemaID, "codeLen", len(args.Code), "textLen", len([]rune(args.Text)))
-	return d.store.AddUserWord(schemaID, args.Code, args.Text, weight)
+	if err := d.store.AddUserWord(schemaID, args.Code, args.Text, weight); err != nil {
+		return err
+	}
+	d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "userdict", SchemaID: schemaID, Action: "add"})
+	return nil
 }
 
 // Remove 删除用户词条
@@ -128,7 +133,11 @@ func (d *DictService) Remove(args *rpcapi.DictRemoveArgs, reply *rpcapi.Empty) e
 
 	schemaID := d.resolveSchemaID(args.SchemaID)
 	d.logger.Info("RPC Dict.Remove", "schemaID", schemaID, "codeLen", len(args.Code), "textLen", len([]rune(args.Text)))
-	return d.store.RemoveUserWord(schemaID, args.Code, args.Text)
+	if err := d.store.RemoveUserWord(schemaID, args.Code, args.Text); err != nil {
+		return err
+	}
+	d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "userdict", SchemaID: schemaID, Action: "remove"})
+	return nil
 }
 
 // Update 更新词条权重
@@ -141,7 +150,11 @@ func (d *DictService) Update(args *rpcapi.DictUpdateArgs, reply *rpcapi.Empty) e
 	}
 
 	schemaID := d.resolveSchemaID(args.SchemaID)
-	return d.store.UpdateUserWordWeight(schemaID, args.Code, args.Text, args.NewWeight)
+	if err := d.store.UpdateUserWordWeight(schemaID, args.Code, args.Text, args.NewWeight); err != nil {
+		return err
+	}
+	d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "userdict", SchemaID: schemaID, Action: "update"})
+	return nil
 }
 
 // GetStats 获取词库统计
@@ -186,6 +199,9 @@ func (d *DictService) BatchAdd(args *rpcapi.DictBatchAddArgs, reply *rpcapi.Dict
 	}
 
 	d.logger.Info("RPC Dict.BatchAdd", "schemaID", schemaID, "count", reply.Count)
+	if reply.Count > 0 {
+		d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "userdict", SchemaID: schemaID, Action: "add"})
+	}
 	return nil
 }
 
@@ -261,6 +277,9 @@ func (d *DictService) ClearTemp(args *rpcapi.DictClearTempArgs, reply *rpcapi.Di
 	}
 	reply.Count = count
 	d.logger.Info("RPC Dict.ClearTemp", "schemaID", schemaID, "cleared", count)
+	if count > 0 {
+		d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "temp", SchemaID: schemaID, Action: "clear"})
+	}
 	return nil
 }
 
@@ -270,7 +289,12 @@ func (d *DictService) PromoteTemp(args *rpcapi.DictPromoteTempArgs, reply *rpcap
 		return fmt.Errorf("store not available")
 	}
 	schemaID := d.resolveSchemaID(args.SchemaID)
-	return d.store.PromoteTempWord(schemaID, args.Code, args.Text)
+	if err := d.store.PromoteTempWord(schemaID, args.Code, args.Text); err != nil {
+		return err
+	}
+	d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "temp", SchemaID: schemaID, Action: "remove"})
+	d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "userdict", SchemaID: schemaID, Action: "add"})
+	return nil
 }
 
 // PromoteAllTemp 晋升所有临时词条
@@ -300,6 +324,10 @@ func (d *DictService) PromoteAllTemp(args *rpcapi.DictPromoteAllTempArgs, reply 
 	d.store.ClearTempWords(schemaID)
 
 	d.logger.Info("RPC Dict.PromoteAllTemp", "schemaID", schemaID, "promoted", reply.Count)
+	if reply.Count > 0 {
+		d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "temp", SchemaID: schemaID, Action: "clear"})
+		d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "userdict", SchemaID: schemaID, Action: "add"})
+	}
 	return nil
 }
 
@@ -362,7 +390,11 @@ func (d *DictService) DeleteFreq(args *rpcapi.FreqDeleteArgs, reply *rpcapi.Empt
 
 	schemaID := d.resolveSchemaID(args.SchemaID)
 	d.logger.Info("RPC Dict.DeleteFreq", "schemaID", schemaID, "codeLen", len(args.Code))
-	return d.store.DeleteFreq(schemaID, args.Code, args.Text)
+	if err := d.store.DeleteFreq(schemaID, args.Code, args.Text); err != nil {
+		return err
+	}
+	d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "freq", SchemaID: schemaID, Action: "remove"})
+	return nil
 }
 
 // ClearFreq 清空指定方案的所有词频数据
@@ -378,5 +410,8 @@ func (d *DictService) ClearFreq(args *rpcapi.FreqClearArgs, reply *rpcapi.FreqCl
 	}
 	reply.Count = count
 	d.logger.Info("RPC Dict.ClearFreq", "schemaID", schemaID, "cleared", count)
+	if count > 0 {
+		d.broadcaster.Broadcast(rpcapi.EventMessage{Type: "freq", SchemaID: schemaID, Action: "clear"})
+	}
 	return nil
 }
