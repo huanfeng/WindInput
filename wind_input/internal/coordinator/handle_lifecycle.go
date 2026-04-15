@@ -226,10 +226,23 @@ func (c *Coordinator) HandleCompositionTerminated() {
 		return
 	}
 
-	c.logger.Debug("Composition terminated, clearing input state")
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// 安全网：如果 composition 终止事件在最近一次按键后很短时间内到达（<100ms），
+	// 且输入缓冲区非空，说明这很可能是应用异步处理 composition 变更导致的竞态
+	// （如顶码上屏后 InsertTextAndStartComposition 创建的新 composition 被应用终止），
+	// 而非用户主动点击其他位置。此时保留输入状态，下一个按键的 UpdateComposition
+	// 会自动重建 composition。
+	if len(c.inputBuffer) > 0 && !c.lastKeyTime.IsZero() &&
+		time.Since(c.lastKeyTime) < 100*time.Millisecond {
+		c.logger.Debug("Composition terminated shortly after key event, preserving input state",
+			"sinceLastKey", time.Since(c.lastKeyTime).String(),
+			"bufferLen", len(c.inputBuffer))
+		return
+	}
+
+	c.logger.Debug("Composition terminated, clearing input state")
 
 	// 光标位置可能已变化（用户点击了输入框内其他位置），重置数字后智能标点状态
 	c.lastOutputWasDigit = false

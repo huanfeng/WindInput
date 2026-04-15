@@ -55,11 +55,26 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 			if len(c.inputBuffer) > 0 {
 				c.updateCandidates()
 				c.showUI()
-				// 返回带有新组合的响应，让 C++ 端同时插入文字并开始新组合
+
+				// InlinePreedit 开启时，让 C++ 端原子地插入文字并开始新组合
+				if c.config != nil && c.config.UI.InlinePreedit {
+					return &bridge.KeyEventResult{
+						Type:           bridge.ResponseTypeInsertText,
+						Text:           commitText,
+						NewComposition: c.inputBuffer,
+					}
+				}
+				// InlinePreedit 关闭时，不发送 NewComposition（避免应用看到
+				// 意外的 composition 文本而终止 composition），改为通过 push
+				// pipe 发送空 UpdateComposition 来重建 composition。push pipe
+				// 使用 PostMessageW 异步投递，会在 C++ 处理完 CommitText 同步
+				// 响应后执行，时序安全。
+				if c.bridgeServer != nil {
+					c.bridgeServer.PushUpdateCompositionToActiveClient("", 0)
+				}
 				return &bridge.KeyEventResult{
-					Type:           bridge.ResponseTypeInsertText,
-					Text:           commitText,
-					NewComposition: c.inputBuffer,
+					Type: bridge.ResponseTypeInsertText,
+					Text: commitText,
 				}
 			} else {
 				c.hideUI()

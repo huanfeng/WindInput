@@ -695,10 +695,12 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         {
             WIND_LOG_DEBUG_FMT(L"MsgWndProc: Processing WM_COMMIT_TEXT, textLen=%zu\n", pData->text.length());
 
-            // IMPORTANT: On UI thread, first end composition, then insert text
-            // This ensures the composition text is cleared before inserting final text
-            pThis->_pTextService->EndComposition();
-            pThis->_pTextService->InsertText(pData->text);
+            // Use atomic CommitText which ends composition + inserts text in a single
+            // TF_ES_SYNC EditSession. The previous separate EndComposition(async) +
+            // InsertText(sync) approach caused a race condition where the async
+            // EndComposition could clear the just-inserted text, especially in apps
+            // like VSCode and browsers when InlinePreedit is disabled.
+            pThis->_pTextService->CommitText(pData->text);
             // Reset KeyEventSink state so shortcut keys work again
             pThis->_pTextService->ResetComposingState();
         }
