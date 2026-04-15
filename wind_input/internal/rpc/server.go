@@ -84,7 +84,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("register System service: %w", err)
 	}
 
-	phraseSvc := &PhraseService{store: s.store, logger: s.logger, broadcaster: s.broadcaster}
+	phraseSvc := &PhraseService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
 	if err := s.rpcServer.RegisterName("Phrase", phraseSvc); err != nil {
 		return fmt.Errorf("register Phrase service: %w", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/store"
 	"github.com/huanfeng/wind_input/pkg/fileutil"
 	"gopkg.in/yaml.v3"
 )
@@ -286,6 +287,103 @@ func (pl *PhraseLayer) Load() error {
 	}
 
 	return nil
+}
+
+// LoadFromStore loads phrases from the bbolt Store's Phrases bucket.
+// This replaces file-based loading when Store backend is enabled.
+func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+
+	// Clear existing data
+	pl.staticPhrases = make(map[string][]PhraseEntry)
+	pl.dynamicPhrases = make(map[string][]PhraseEntry)
+	pl.phraseGroups = make(map[string]PhraseGroup)
+	pl.cmdCache = make(map[string][]candidate.Candidate)
+	pl.cmdCacheKey = ""
+
+	records, err := s.GetAllPhrases()
+	if err != nil {
+		return fmt.Errorf("load phrases from store: %w", err)
+	}
+
+	for _, rec := range records {
+		if !rec.Enabled {
+			continue
+		}
+
+		code := strings.ToLower(rec.Code)
+		position := rec.Position
+		if position <= 0 {
+			position = 1
+		}
+
+		switch rec.Type {
+		case "array":
+			pg := PhraseGroup{
+				Code:     code,
+				Name:     rec.Name,
+				Texts:    rec.Texts,
+				Position: position,
+				IsSystem: rec.IsSystem,
+			}
+			pl.phraseGroups[code] = pg
+			// Expand array characters into static phrases (same logic as loadFile)
+			runes := []rune(rec.Texts)
+			for idx, r := range runes {
+				arrEntry := PhraseEntry{
+					Text:     string(r),
+					Position: position + idx,
+					IsSystem: rec.IsSystem,
+				}
+				pl.staticPhrases[code] = append(pl.staticPhrases[code], arrEntry)
+			}
+
+		case "dynamic":
+			entry := PhraseEntry{
+				Text:     rec.Text,
+				Position: position,
+				IsSystem: rec.IsSystem,
+			}
+			pl.dynamicPhrases[code] = append(pl.dynamicPhrases[code], entry)
+
+		default: // "static"
+			entry := PhraseEntry{
+				Text:     rec.Text,
+				Position: position,
+				IsSystem: rec.IsSystem,
+			}
+			pl.staticPhrases[code] = append(pl.staticPhrases[code], entry)
+		}
+	}
+
+	return nil
+}
+
+// parsePhraseYAMLFile reads a phrases YAML file and returns PhraseFileEntry slice.
+func parsePhraseYAMLFile(path string) ([]PhraseFileEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var config PhrasesFileConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("parse phrases file %s: %w", path, err)
+	}
+
+	return config.Phrases, nil
+}
+
+// detectPhraseType determines the type string from a PhraseFileEntry.
+func detectPhraseType(e PhraseFileEntry) string {
+	if e.Texts != "" {
+		return "array"
+	}
+	if HasVariable(e.Text) {
+		return "dynamic"
+	}
+	return "static"
 }
 
 // loadFile 从文件加载短语（需持有写锁）

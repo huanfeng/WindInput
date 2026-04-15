@@ -124,13 +124,127 @@ func (dm *DictManager) Initialize() error {
 	systemPhraseUserPath := filepath.Join(dm.dataDir, "system.phrases.yaml")
 	userPhrasePath := filepath.Join(dm.dataDir, "user.phrases.yaml")
 	dm.phraseLayer = NewPhraseLayerEx("phrases", systemPhrasePath, systemPhraseUserPath, userPhrasePath)
-	if err := dm.phraseLayer.Load(); err != nil {
-		dm.logger.Warn("加载短语配置失败", "error", err)
+
+	if dm.useStore {
+		// Store backend: seed defaults then load from Store
+		if err := dm.SeedDefaultPhrases(); err != nil {
+			dm.logger.Error("种子默认短语失败", "error", err)
+		}
+		if err := dm.phraseLayer.LoadFromStore(dm.store); err != nil {
+			dm.logger.Warn("从 Store 加载短语失败", "error", err)
+		} else {
+			dm.logger.Info("短语层从 Store 加载成功", "phrases", dm.phraseLayer.GetPhraseCount(), "commands", dm.phraseLayer.GetCommandCount())
+		}
 	} else {
-		dm.logger.Info("短语层加载成功", "phrases", dm.phraseLayer.GetPhraseCount(), "commands", dm.phraseLayer.GetCommandCount())
+		// File backend: keep existing logic
+		if err := dm.phraseLayer.Load(); err != nil {
+			dm.logger.Warn("加载短语配置失败", "error", err)
+		} else {
+			dm.logger.Info("短语层加载成功", "phrases", dm.phraseLayer.GetPhraseCount(), "commands", dm.phraseLayer.GetCommandCount())
+		}
 	}
+
 	dm.compositeDict.AddLayer(dm.phraseLayer)
 
+	return nil
+}
+
+// SeedDefaultPhrases populates the Phrases bucket with system defaults
+// if it is currently empty. This is called once on first startup.
+func (dm *DictManager) SeedDefaultPhrases() error {
+	if dm.store == nil {
+		return nil
+	}
+
+	count, err := dm.store.PhraseCount()
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil // Already seeded
+	}
+
+	var records []store.PhraseRecord
+
+	// Load system phrases: prefer user-dir copy, fall back to system-dir original
+	systemFile := filepath.Join(dm.systemDir, "system.phrases.yaml")
+	systemUserFile := filepath.Join(dm.dataDir, "system.phrases.yaml")
+
+	systemLoaded := false
+	if entries, err := parsePhraseYAMLFile(systemUserFile); err == nil {
+		for _, e := range entries {
+			if e.Code == "" || (e.Text == "" && e.Texts == "") {
+				continue
+			}
+			rec := store.PhraseRecord{
+				Code:     strings.ToLower(e.Code),
+				Text:     e.Text,
+				Texts:    e.Texts,
+				Name:     e.Name,
+				Type:     detectPhraseType(e),
+				Position: e.Position,
+				Enabled:  !e.Disabled,
+				IsSystem: true,
+			}
+			if rec.Position <= 0 {
+				rec.Position = 1
+			}
+			records = append(records, rec)
+		}
+		systemLoaded = true
+	}
+	if !systemLoaded {
+		if entries, err := parsePhraseYAMLFile(systemFile); err == nil {
+			for _, e := range entries {
+				if e.Code == "" || (e.Text == "" && e.Texts == "") {
+					continue
+				}
+				rec := store.PhraseRecord{
+					Code:     strings.ToLower(e.Code),
+					Text:     e.Text,
+					Texts:    e.Texts,
+					Name:     e.Name,
+					Type:     detectPhraseType(e),
+					Position: e.Position,
+					Enabled:  !e.Disabled,
+					IsSystem: true,
+				}
+				if rec.Position <= 0 {
+					rec.Position = 1
+				}
+				records = append(records, rec)
+			}
+		}
+	}
+
+	// Load user phrases (if exist)
+	userFile := filepath.Join(dm.dataDir, "user.phrases.yaml")
+	if entries, err := parsePhraseYAMLFile(userFile); err == nil {
+		for _, e := range entries {
+			if e.Code == "" || (e.Text == "" && e.Texts == "") {
+				continue
+			}
+			rec := store.PhraseRecord{
+				Code:     strings.ToLower(e.Code),
+				Text:     e.Text,
+				Texts:    e.Texts,
+				Name:     e.Name,
+				Type:     detectPhraseType(e),
+				Position: e.Position,
+				Enabled:  !e.Disabled,
+				IsSystem: false,
+			}
+			if rec.Position <= 0 {
+				rec.Position = 1
+			}
+			records = append(records, rec)
+		}
+	}
+
+	if len(records) > 0 {
+		dm.logger.Info("种子默认短语", "count", len(records))
+		return dm.store.SeedPhrases(records)
+	}
 	return nil
 }
 
@@ -594,10 +708,13 @@ func (dm *DictManager) ReloadPhrases() error {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	if dm.phraseLayer != nil {
-		return dm.phraseLayer.Load()
+	if dm.phraseLayer == nil {
+		return nil
 	}
-	return nil
+	if dm.useStore {
+		return dm.phraseLayer.LoadFromStore(dm.store)
+	}
+	return dm.phraseLayer.Load()
 }
 
 // ReloadShadow 重新加载当前方案的 Shadow 规则

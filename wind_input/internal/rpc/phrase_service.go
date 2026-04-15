@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/store"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 )
@@ -11,8 +12,18 @@ import (
 // PhraseService 短语管理 RPC 服务
 type PhraseService struct {
 	store       *store.Store
+	dm          *dict.DictManager
 	logger      *slog.Logger
 	broadcaster *EventBroadcaster
+}
+
+// reloadPhrases 通知引擎重新从 Store 加载短语到内存
+func (p *PhraseService) reloadPhrases() {
+	if p.dm != nil {
+		if err := p.dm.ReloadPhrases(); err != nil {
+			p.logger.Error("重载短语失败", "error", err)
+		}
+	}
 }
 
 // List 获取所有短语
@@ -77,6 +88,7 @@ func (p *PhraseService) Add(args *rpcapi.PhraseAddArgs, reply *rpcapi.Empty) err
 	if err := p.store.AddPhrase(rec); err != nil {
 		return err
 	}
+	p.reloadPhrases()
 	p.broadcaster.Broadcast(rpcapi.EventMessage{Type: "phrase", Action: "add"})
 	return nil
 }
@@ -141,6 +153,7 @@ func (p *PhraseService) Update(args *rpcapi.PhraseUpdateArgs, reply *rpcapi.Empt
 		p.logger.Info("RPC Phrase.Update", "codeLen", len(args.Code))
 	}
 
+	p.reloadPhrases()
 	p.broadcaster.Broadcast(rpcapi.EventMessage{Type: "phrase", Action: "update"})
 	return nil
 }
@@ -158,11 +171,12 @@ func (p *PhraseService) Remove(args *rpcapi.PhraseRemoveArgs, reply *rpcapi.Empt
 	if err := p.store.RemovePhrase(args.Code, args.Text, args.Name); err != nil {
 		return err
 	}
+	p.reloadPhrases()
 	p.broadcaster.Broadcast(rpcapi.EventMessage{Type: "phrase", Action: "remove"})
 	return nil
 }
 
-// ResetDefaults 重置为默认短语（清空后由下次 Seed 重新填充）
+// ResetDefaults 重置为默认短语（清空后立即重新种子）
 func (p *PhraseService) ResetDefaults(args *rpcapi.Empty, reply *rpcapi.Empty) error {
 	if p.store == nil {
 		return fmt.Errorf("store not available")
@@ -172,6 +186,13 @@ func (p *PhraseService) ResetDefaults(args *rpcapi.Empty, reply *rpcapi.Empty) e
 	if err := p.store.ClearAllPhrases(); err != nil {
 		return err
 	}
+	// 清空后立即重新种子系统默认短语
+	if p.dm != nil {
+		if err := p.dm.SeedDefaultPhrases(); err != nil {
+			p.logger.Error("重新种子默认短语失败", "error", err)
+		}
+	}
+	p.reloadPhrases()
 	p.broadcaster.Broadcast(rpcapi.EventMessage{Type: "phrase", Action: "reset"})
 	return nil
 }
