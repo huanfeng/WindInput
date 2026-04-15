@@ -767,13 +767,24 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // This is simpler and matches Weasel's architecture
     *pfEaten = _HandleServiceResponse();
 
-    // Ctrl/Alt combo during active session: Go has cleared its state and returned
-    // ClearComposition, which ended the TSF composition. Now override pfEaten to
-    // FALSE so the key (e.g., Ctrl+S) passes through to the host application.
+    // Ctrl/Alt combo during active session: decide pass-through based on Go's response.
+    // If Go handled the key as a candidate operation (pin/delete) and the composition
+    // is still active, respect Go's decision and eat the key. Only override to FALSE
+    // when Go actually cleared the composition (e.g., Ctrl+S cleanup).
     if (isCtrlAltCleanup && *pfEaten)
     {
-        WIND_LOG_DEBUG(L"OnKeyDown: Ctrl/Alt cleanup done, overriding to pass-through\n");
-        *pfEaten = FALSE;
+        if (_hasCandidates || _isComposing)
+        {
+            // Go handled it as a candidate action (e.g., Ctrl+number pin/delete),
+            // composition still active — keep pfEaten=TRUE to prevent app from seeing the key.
+            WIND_LOG_DEBUG(L"OnKeyDown: Ctrl/Alt key handled by Go (session still active), eating key\n");
+        }
+        else
+        {
+            // Go cleared composition (cleanup) — pass key through to the host application.
+            WIND_LOG_DEBUG(L"OnKeyDown: Ctrl/Alt cleanup done, overriding to pass-through\n");
+            *pfEaten = FALSE;
+        }
     }
 
     _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers,
