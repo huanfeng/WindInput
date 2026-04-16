@@ -2,7 +2,7 @@
 
 // 导入 Wails 生成的绑定和模型
 import * as App from "../../wailsjs/go/main/App";
-import { main, control } from "../../wailsjs/go/models";
+import { main, rpcapi } from "../../wailsjs/go/models";
 import {
   getDefaultConfig as getHTTPDefaultConfig,
   getDefaultTSFLogConfig as getHTTPTSFLogConfig,
@@ -14,7 +14,7 @@ import {
 export type UserWordItem = main.UserWordItem;
 export type ShadowRuleItem = main.ShadowRuleItem;
 export type FileChangeStatus = main.FileChangeStatus;
-export type ServiceStatus = control.ServiceStatus;
+export type ServiceStatus = rpcapi.SystemStatusReply;
 export type ThemeInfo = main.ThemeInfo;
 export type SchemaInfo = main.SchemaInfo;
 export type SchemaConfig = main.SchemaConfig;
@@ -542,7 +542,7 @@ export async function removeShadowRule(
   return App.RemoveShadowRule(code, word);
 }
 
-// 控制管道
+// 服务通信
 export async function notifyReload(target: string): Promise<void> {
   return App.NotifyReload(target);
 }

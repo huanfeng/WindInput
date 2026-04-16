@@ -1,7 +1,6 @@
 package rpc
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -135,14 +134,13 @@ func (e *EventPipeServer) handleConn(conn net.Conn) {
 	id, ch := e.broadcaster.Subscribe()
 	defer e.broadcaster.Unsubscribe(id)
 
-	enc := json.NewEncoder(conn)
 	for {
 		select {
 		case msg, ok := <-ch:
 			if !ok {
 				return // channel closed
 			}
-			if err := enc.Encode(msg); err != nil {
+			if err := rpcapi.WriteMessage(conn, &msg); err != nil {
 				return // write error, client disconnected
 			}
 		case <-e.stopCh:

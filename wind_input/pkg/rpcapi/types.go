@@ -319,9 +319,16 @@ type SystemStatusReply struct {
 	SchemaID     string `json:"schema_id"`
 	EngineType   string `json:"engine_type"`
 	ChineseMode  bool   `json:"chinese_mode"`
+	FullWidth    bool   `json:"full_width"`
+	ChinesePunct bool   `json:"chinese_punct"`
 	StoreEnabled bool   `json:"store_enabled"`
 	UserWords    int    `json:"user_words"`
 	TempWords    int    `json:"temp_words"`
 	Phrases      int    `json:"phrases"`
 	ShadowRules  int    `json:"shadow_rules"`
+}
+
+// NotifyReloadArgs 通知重载请求
+type NotifyReloadArgs struct {
+	Target string `json:"target"` // "config" | "phrases" | "shadow" | "userdict" | "all"
 }

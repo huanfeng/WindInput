@@ -3,6 +3,7 @@ package rpc
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/store"
@@ -12,10 +13,11 @@ import (
 
 // SystemService 系统管理 RPC 服务
 type SystemService struct {
-	dm     *dict.DictManager
-	store  *store.Store
-	server *Server
-	logger *slog.Logger
+	dm             *dict.DictManager
+	store          *store.Store
+	server         *Server
+	logger         *slog.Logger
+	configReloader ConfigReloader
 }
 
 // Ping 心跳检测
@@ -42,6 +44,8 @@ func (s *SystemService) GetStatus(args *rpcapi.Empty, reply *rpcapi.SystemStatus
 	if provider != nil {
 		reply.EngineType = provider.GetEngineType()
 		reply.ChineseMode = provider.IsChineseMode()
+		reply.FullWidth = provider.IsFullWidth()
+		reply.ChinesePunct = provider.IsChinesePunct()
 	}
 
 	return nil
@@ -53,10 +57,82 @@ func (s *SystemService) ReloadPhrases(args *rpcapi.Empty, reply *rpcapi.Empty) e
 	return s.dm.ReloadPhrases()
 }
 
-// ReloadAll 重载所有
+// ReloadAll 重载所有（配置、短语、Shadow、用户词库）
 func (s *SystemService) ReloadAll(args *rpcapi.Empty, reply *rpcapi.Empty) error {
 	s.logger.Info("RPC System.ReloadAll")
-	return s.dm.ReloadPhrases()
+	var errors []string
+
+	if s.configReloader != nil {
+		if err := s.configReloader.ReloadConfig(); err != nil {
+			errors = append(errors, fmt.Sprintf("config: %v", err))
+		}
+	}
+	if s.dm != nil {
+		if err := s.dm.ReloadPhrases(); err != nil {
+			errors = append(errors, fmt.Sprintf("phrases: %v", err))
+		}
+		if err := s.dm.ReloadShadow(); err != nil {
+			errors = append(errors, fmt.Sprintf("shadow: %v", err))
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("%s", strings.Join(errors, "; "))
+	}
+	return nil
+}
+
+// ReloadConfig 重载配置文件（触发方案切换、引擎选项更新等）
+func (s *SystemService) ReloadConfig(args *rpcapi.Empty, reply *rpcapi.Empty) error {
+	s.logger.Info("RPC System.ReloadConfig")
+	if s.configReloader == nil {
+		return fmt.Errorf("config reloader not available")
+	}
+	return s.configReloader.ReloadConfig()
+}
+
+// ReloadShadow 重载 Shadow 规则
+func (s *SystemService) ReloadShadow(args *rpcapi.Empty, reply *rpcapi.Empty) error {
+	s.logger.Info("RPC System.ReloadShadow")
+	if s.dm == nil {
+		return fmt.Errorf("dict manager not available")
+	}
+	return s.dm.ReloadShadow()
+}
+
+// ReloadUserDict 重载用户词库
+func (s *SystemService) ReloadUserDict(args *rpcapi.Empty, reply *rpcapi.Empty) error {
+	s.logger.Info("RPC System.ReloadUserDict")
+	if s.dm == nil {
+		return fmt.Errorf("dict manager not available")
+	}
+	// Store 后端实时读取，无需手动重载
+	if s.dm.UseStore() {
+		return nil
+	}
+	userDict := s.dm.GetUserDict()
+	if userDict == nil {
+		return fmt.Errorf("user dict not initialized")
+	}
+	return userDict.Load()
+}
+
+// NotifyReload 通知重载指定目标（统一入口）
+func (s *SystemService) NotifyReload(args *rpcapi.NotifyReloadArgs, reply *rpcapi.Empty) error {
+	switch args.Target {
+	case "config", "schema":
+		return s.ReloadConfig(&rpcapi.Empty{}, reply)
+	case "phrases":
+		return s.ReloadPhrases(&rpcapi.Empty{}, reply)
+	case "shadow":
+		return s.ReloadShadow(&rpcapi.Empty{}, reply)
+	case "userdict":
+		return s.ReloadUserDict(&rpcapi.Empty{}, reply)
+	case "all":
+		return s.ReloadAll(&rpcapi.Empty{}, reply)
+	default:
+		return fmt.Errorf("unknown reload target: %s", args.Target)
+	}
 }
 
 // ResetDB 重置数据库（清除用户词库、临时词库、Shadow 规则、词频数据）

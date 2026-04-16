@@ -36,6 +36,7 @@ type Server struct {
 	eventServer *EventPipeServer
 
 	statusProvider StatusProvider
+	configReloader ConfigReloader
 }
 
 // StatusProvider 系统状态提供者接口
@@ -43,6 +44,13 @@ type StatusProvider interface {
 	GetSchemaID() string
 	GetEngineType() string
 	IsChineseMode() bool
+	IsFullWidth() bool
+	IsChinesePunct() bool
+}
+
+// ConfigReloader 配置重载接口（由 coordinator.ReloadHandler 实现）
+type ConfigReloader interface {
+	ReloadConfig() error
 }
 
 // NewServer 创建 IPC 服务端
@@ -64,6 +72,13 @@ func (s *Server) SetStatusProvider(provider StatusProvider) {
 	s.statusProvider = provider
 }
 
+// SetConfigReloader 设置配置重载处理器
+func (s *Server) SetConfigReloader(reloader ConfigReloader) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.configReloader = reloader
+}
+
 // Start 启动 IPC 服务
 func (s *Server) Start() error {
 	s.mu.Lock()
@@ -76,7 +91,7 @@ func (s *Server) Start() error {
 	// 创建服务实例
 	dictSvc := &DictService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
 	shadowSvc := &ShadowService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
-	systemSvc := &SystemService{dm: s.dictManager, store: s.store, server: s, logger: s.logger}
+	systemSvc := &SystemService{dm: s.dictManager, store: s.store, server: s, logger: s.logger, configReloader: s.configReloader}
 	phraseSvc := &PhraseService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
 
 	// 注册 Dict 方法
@@ -112,6 +127,10 @@ func (s *Server) Start() error {
 	RegisterMethod(s.router, "System.ResetDB", systemSvc.ResetDB)
 	RegisterMethod(s.router, "System.DeleteSchema", systemSvc.DeleteSchema)
 	RegisterMethod(s.router, "System.ListSchemas", systemSvc.ListSchemas)
+	RegisterMethod(s.router, "System.ReloadConfig", systemSvc.ReloadConfig)
+	RegisterMethod(s.router, "System.ReloadShadow", systemSvc.ReloadShadow)
+	RegisterMethod(s.router, "System.ReloadUserDict", systemSvc.ReloadUserDict)
+	RegisterMethod(s.router, "System.NotifyReload", systemSvc.NotifyReload)
 
 	// 注册 Phrase 方法
 	RegisterMethod(s.router, "Phrase.List", phraseSvc.List)
@@ -223,6 +242,16 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		// 清除写超时
 		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
+		// 校验协议版本
+		if req.Version != rpcapi.ProtocolVersion {
+			resp := rpcapi.Response{
+				ID:    req.ID,
+				Error: fmt.Sprintf("protocol version mismatch: client=%d, server=%d", req.Version, rpcapi.ProtocolVersion),
+			}
+			rpcapi.WriteMessage(conn, &resp)
+			return
+		}
 
 		result, err := s.router.Dispatch(req.Method, req.Params)
 

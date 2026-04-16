@@ -9,11 +9,16 @@ import (
 
 const maxMessageSize = 16 * 1024 * 1024 // 16MB
 
+// ProtocolVersion 协议版本号，客户端和服务端必须一致
+// 修改协议格式（帧结构、字段语义）时递增
+const ProtocolVersion = 1
+
 // Request IPC 请求报文
 type Request struct {
-	ID     uint64          `json:"id"`
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
+	Version int             `json:"v"`
+	ID      uint64          `json:"id"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params"`
 }
 
 // Response IPC 响应报文

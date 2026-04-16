@@ -7,26 +7,26 @@ import (
 	"path/filepath"
 
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
-	"github.com/huanfeng/wind_input/pkg/control"
+	"github.com/huanfeng/wind_input/pkg/rpcapi"
 	"github.com/huanfeng/wind_input/pkg/systemfont"
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// ========== 控制管道 ==========
+// ========== 服务通信 ==========
 
 // CheckServiceRunning 检查服务是否运行
 func (a *App) CheckServiceRunning() (bool, error) {
-	return a.controlClient.IsServiceRunning(), nil
+	return a.rpcClient.IsAvailable(), nil
 }
 
 // NotifyReload 通知服务重载
 func (a *App) NotifyReload(target string) error {
-	return a.controlClient.NotifyReload(target)
+	return a.rpcClient.SystemNotifyReload(target)
 }
 
 // GetServiceStatus 获取服务状态
-func (a *App) GetServiceStatus() (*control.ServiceStatus, error) {
-	return a.controlClient.GetStatus()
+func (a *App) GetServiceStatus() (*rpcapi.SystemStatusReply, error) {
+	return a.rpcClient.SystemGetStatus()
 }
 
 // ResetUserData 重置用户数据（清除用户词库、临时词库、Shadow 规则、词频）

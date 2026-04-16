@@ -23,7 +23,7 @@ func (c *testClient) call(method string, args, reply any) error {
 	if err != nil {
 		return err
 	}
-	req := rpcapi.Request{ID: 1, Method: method, Params: params}
+	req := rpcapi.Request{Version: rpcapi.ProtocolVersion, ID: 1, Method: method, Params: params}
 	if err := rpcapi.WriteMessage(c.conn, &req); err != nil {
 		return err
 	}

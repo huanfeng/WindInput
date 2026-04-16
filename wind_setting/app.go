@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
-	"github.com/huanfeng/wind_input/pkg/control"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -27,21 +26,17 @@ type App struct {
 	// 编辑器
 	configEditor *editor.ConfigEditor
 
-	// RPC 客户端（词库/Shadow 操作走 RPC）
+	// RPC 客户端（所有 IPC 操作统一走 RPC）
 	rpcClient *rpcapi.Client
 
 	// 文件监控
 	fileWatcher *filesync.FileWatcher
-
-	// 控制管道客户端
-	controlClient *control.Client
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{
-		controlClient: control.NewClient(),
-		rpcClient:     rpcapi.NewClient(),
+		rpcClient: rpcapi.NewClient(),
 	}
 }
 

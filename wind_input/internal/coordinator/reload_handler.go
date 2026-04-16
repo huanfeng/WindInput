@@ -7,10 +7,9 @@ import (
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/schema"
 	"github.com/huanfeng/wind_input/pkg/config"
-	pkgcontrol "github.com/huanfeng/wind_input/pkg/control"
 )
 
-// ReloadHandler 实现 control.ReloadHandler 接口，负责配置热重载和状态查询。
+// ReloadHandler 实现 rpc.ConfigReloader 接口，负责配置热重载。
 // 协调 schema/engine/dict 等子系统的配置变更。
 type ReloadHandler struct {
 	coord     *Coordinator
@@ -177,20 +176,4 @@ func (h *ReloadHandler) applyPinyinSpec(spec *schema.PinyinSpec) {
 		}
 	}
 	h.engineMgr.UpdatePinyinOptions(pinyinCfg)
-}
-
-// GetStatus 获取服务状态
-func (h *ReloadHandler) GetStatus() *pkgcontrol.ServiceStatus {
-	status := &pkgcontrol.ServiceStatus{
-		Running: true,
-	}
-
-	if h.coord != nil {
-		status.ChineseMode = h.coord.GetChineseMode()
-		status.FullWidth = h.coord.GetFullWidth()
-		status.ChinesePunct = h.coord.GetChinesePunctuation()
-		status.EngineType = h.coord.GetCurrentEngineName()
-	}
-
-	return status
 }

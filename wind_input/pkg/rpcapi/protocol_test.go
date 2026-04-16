@@ -9,7 +9,7 @@ import (
 )
 
 func TestWriteReadMessage_RoundTrip(t *testing.T) {
-	req := Request{ID: 42, Method: "Dict.Add", Params: []byte(`{"code":"ab","text":"测试"}`)}
+	req := Request{Version: ProtocolVersion, ID: 42, Method: "Dict.Add", Params: []byte(`{"code":"ab","text":"测试"}`)}
 	var buf bytes.Buffer
 
 	if err := WriteMessage(&buf, &req); err != nil {
@@ -21,7 +21,7 @@ func TestWriteReadMessage_RoundTrip(t *testing.T) {
 		t.Fatalf("ReadMessage: %v", err)
 	}
 
-	if got.ID != 42 || got.Method != "Dict.Add" {
+	if got.Version != ProtocolVersion || got.ID != 42 || got.Method != "Dict.Add" {
 		t.Errorf("unexpected: %+v", got)
 	}
 }
@@ -62,7 +62,7 @@ func TestWriteReadMessage_MultipleMessages(t *testing.T) {
 	var buf bytes.Buffer
 
 	for i := uint64(1); i <= 5; i++ {
-		req := Request{ID: i, Method: "System.Ping"}
+		req := Request{Version: ProtocolVersion, ID: i, Method: "System.Ping"}
 		if err := WriteMessage(&buf, &req); err != nil {
 			t.Fatal(err)
 		}
@@ -128,9 +128,10 @@ func TestReadMessage_TooLarge(t *testing.T) {
 func TestWriteReadMessage_UnicodePayload(t *testing.T) {
 	// 测试包含中文、换行符、特殊字符的数据不会被破坏
 	req := Request{
-		ID:     1,
-		Method: "Dict.Add",
-		Params: []byte(`{"code":"abc","text":"你好\n世界\t🌍"}`),
+		Version: ProtocolVersion,
+		ID:      1,
+		Method:  "Dict.Add",
+		Params:  []byte(`{"code":"abc","text":"你好\n世界\t🌍"}`),
 	}
 	var buf bytes.Buffer
 
@@ -149,7 +150,7 @@ func TestWriteReadMessage_UnicodePayload(t *testing.T) {
 }
 
 func TestWriteReadMessage_EmptyParams(t *testing.T) {
-	req := Request{ID: 1, Method: "System.Ping"}
+	req := Request{Version: ProtocolVersion, ID: 1, Method: "System.Ping"}
 	var buf bytes.Buffer
 
 	WriteMessage(&buf, &req)

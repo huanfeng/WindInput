@@ -12,7 +12,6 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
-	"github.com/huanfeng/wind_input/internal/control"
 	"github.com/huanfeng/wind_input/internal/coordinator"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine"
@@ -21,10 +20,21 @@ import (
 	"github.com/huanfeng/wind_input/internal/ui"
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
-	pkgcontrol "github.com/huanfeng/wind_input/pkg/control"
 )
 
 var mutexName = "Global\\WindInput" + buildvariant.Suffix() + "IMEService"
+
+// statusAdapter 将 coordinator 和 dictManager 适配为 rpc.StatusProvider 接口
+type statusAdapter struct {
+	coord *coordinator.Coordinator
+	dm    *dict.DictManager
+}
+
+func (a *statusAdapter) GetSchemaID() string   { return a.dm.GetActiveSchemaID() }
+func (a *statusAdapter) GetEngineType() string { return a.coord.GetCurrentEngineName() }
+func (a *statusAdapter) IsChineseMode() bool   { return a.coord.GetChineseMode() }
+func (a *statusAdapter) IsFullWidth() bool     { return a.coord.GetFullWidth() }
+func (a *statusAdapter) IsChinesePunct() bool  { return a.coord.GetChinesePunctuation() }
 
 // showErrorMessageBox 显示错误弹框（MB_ICONERROR）
 func showErrorMessageBox(message string) {
@@ -346,18 +356,12 @@ func main() {
 	coord := coordinator.NewCoordinator(engineMgr, uiManager, cfg, appCompat, logger)
 	coord.SetVersion(version)
 
-	// 创建控制管道服务端
-	controlServer := control.NewServer(logger, dictManager)
-	controlServer.SetReloadHandler(coordinator.NewReloadHandler(coord, cfg, schemaMgr, engineMgr, dictManager, logger))
-	controlServer.StartAsync()
-	logger.Info("Control pipe server started", "pipe", pkgcontrol.PipeName)
-
-	// Start RPC server (JSON-RPC over named pipe for settings GUI)
-	if dictManager.UseStore() {
-		rpcServer := imrpc.NewServer(logger, dictManager, dictManager.GetStore())
-		defer rpcServer.Stop()
-		rpcServer.StartAsync()
-	}
+	// 启动 RPC 服务端（统一 IPC 通道，供设置端使用）
+	rpcServer := imrpc.NewServer(logger, dictManager, dictManager.GetStore())
+	rpcServer.SetConfigReloader(coordinator.NewReloadHandler(coord, cfg, schemaMgr, engineMgr, dictManager, logger))
+	rpcServer.SetStatusProvider(&statusAdapter{coord: coord, dm: dictManager})
+	defer rpcServer.Stop()
+	rpcServer.StartAsync()
 
 	// Create Bridge IPC server (connects to C++)
 	bridgeServer := bridge.NewServer(coord, logger)

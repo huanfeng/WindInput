@@ -304,8 +304,8 @@ func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
 	}
 
 	// 通知 wind_input 服务重新加载配置
-	if a.controlClient != nil {
-		a.controlClient.NotifyReload("schema")
+	if a.rpcClient != nil {
+		a.rpcClient.SystemNotifyReload("schema")
 	}
 
 	return nil
@@ -329,8 +329,8 @@ func (a *App) SwitchActiveSchema(schemaID string) error {
 	}
 
 	// 通知 wind_input 服务
-	if a.controlClient != nil {
-		a.controlClient.NotifyReload("config")
+	if a.rpcClient != nil {
+		a.rpcClient.SystemNotifyReload("config")
 	}
 
 	return nil

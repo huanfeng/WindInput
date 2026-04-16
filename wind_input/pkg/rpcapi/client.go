@@ -61,9 +61,10 @@ func (c *Client) call(method string, args, reply any) error {
 
 	// 发送请求
 	req := Request{
-		ID:     globalID.Add(1),
-		Method: method,
-		Params: params,
+		Version: ProtocolVersion,
+		ID:      globalID.Add(1),
+		Method:  method,
+		Params:  params,
 	}
 
 	conn.SetWriteDeadline(time.Now().Add(c.timeout))
@@ -301,6 +302,27 @@ func (c *Client) SystemReloadAll() error {
 	return c.call("System.ReloadAll", &Empty{}, &Empty{})
 }
 
+// SystemReloadConfig 重载配置
+func (c *Client) SystemReloadConfig() error {
+	return c.call("System.ReloadConfig", &Empty{}, &Empty{})
+}
+
+// SystemReloadShadow 重载 Shadow 规则
+func (c *Client) SystemReloadShadow() error {
+	return c.call("System.ReloadShadow", &Empty{}, &Empty{})
+}
+
+// SystemReloadUserDict 重载用户词库
+func (c *Client) SystemReloadUserDict() error {
+	return c.call("System.ReloadUserDict", &Empty{}, &Empty{})
+}
+
+// SystemNotifyReload 通知服务重载指定目标
+// target: "config", "phrases", "shadow", "userdict", "all"
+func (c *Client) SystemNotifyReload(target string) error {
+	return c.call("System.NotifyReload", &NotifyReloadArgs{Target: target}, &Empty{})
+}
+
 // SystemResetDB 重置数据库（清除指定方案或全部用户数据）
 func (c *Client) SystemResetDB(schemaID string) error {
 	var reply SystemResetDBReply
@@ -396,15 +418,14 @@ func (c *Client) SubscribeEvents(ctx context.Context, handler func(EventMessage)
 		conn.Close()
 	}()
 
-	dec := json.NewDecoder(conn)
 	for {
 		var msg EventMessage
-		if err := dec.Decode(&msg); err != nil {
+		if err := ReadMessage(conn, &msg); err != nil {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
-				return fmt.Errorf("decode event: %w", err)
+				return fmt.Errorf("read event: %w", err)
 			}
 		}
 		handler(msg)
