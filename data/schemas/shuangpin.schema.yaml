@@ -33,11 +33,6 @@ dictionaries:
     type: rime_codetable
     role: reverse_lookup
 
-user_data:
-  shadow_file: "shuangpin.shadow.yaml"
-  user_dict_file: "shuangpin.userwords.txt"
-  user_freq_file: "shuangpin.userfreq.txt"
-
 learning:
   mode: manual
   unigram_path: "pinyin/unigram.txt"

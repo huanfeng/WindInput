@@ -1,142 +1,158 @@
 package dict
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/huanfeng/wind_input/internal/store"
 )
 
-func TestDictManager_SwitchSchema(t *testing.T) {
+// setupTestManager 创建基于 Store 的测试 DictManager
+func setupTestManager(t *testing.T) *DictManager {
+	t.Helper()
 	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
 
 	dm := NewDictManager(tmpDir, tmpDir, nil)
-	if err := dm.Initialize(); err != nil {
-		t.Fatalf("Initialize 失败: %v", err)
+	if err := dm.OpenStore(dbPath); err != nil {
+		t.Fatalf("OpenStore failed: %v", err)
 	}
-	defer dm.Close()
+	if err := dm.Initialize(); err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+	t.Cleanup(func() { dm.Close() })
+	return dm
+}
 
-	// 切换到 wubi86
-	dm.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
+func TestDictManager_SwitchSchema(t *testing.T) {
+	dm := setupTestManager(t)
+
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
 
 	if dm.GetActiveSchemaID() != "wubi86" {
-		t.Errorf("期望 activeSchemaID=wubi86, 实际=%s", dm.GetActiveSchemaID())
+		t.Errorf("expected wubi86, got %s", dm.GetActiveSchemaID())
 	}
-	if dm.GetShadowLayer() == nil {
-		t.Error("ShadowLayer 不应为 nil")
+	if dm.GetStoreShadowLayer() == nil {
+		t.Error("StoreShadowLayer should not be nil")
 	}
-	if dm.GetUserDict() == nil {
-		t.Error("UserDict 不应为 nil")
+	if dm.GetStoreUserLayer() == nil {
+		t.Error("StoreUserLayer should not be nil")
 	}
 
-	// 添加用户词到 wubi86
+	// 添加用户词
 	if err := dm.AddUserWord("test", "测试", 100); err != nil {
-		t.Fatalf("AddUserWord 失败: %v", err)
+		t.Fatalf("AddUserWord failed: %v", err)
 	}
 
 	// 切换到 pinyin
-	dm.SwitchSchema("pinyin", "pinyin.shadow.yaml", "pinyin.userwords.txt")
-
+	dm.SwitchSchemaFull("pinyin", "pinyin", 5000, 5)
 	if dm.GetActiveSchemaID() != "pinyin" {
-		t.Errorf("期望 activeSchemaID=pinyin, 实际=%s", dm.GetActiveSchemaID())
+		t.Errorf("expected pinyin, got %s", dm.GetActiveSchemaID())
+	}
+	if dm.GetStoreUserLayer().EntryCount() != 0 {
+		t.Errorf("pinyin should have 0 entries, got %d", dm.GetStoreUserLayer().EntryCount())
 	}
 
-	// pinyin 的用户词库应该是空的
-	if dm.GetUserDict().EntryCount() != 0 {
-		t.Errorf("pinyin 用户词库应为空, 实际=%d", dm.GetUserDict().EntryCount())
-	}
-
-	// 切换回 wubi86，用户词应该还在
-	dm.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
-	if dm.GetUserDict().EntryCount() != 1 {
-		t.Errorf("wubi86 用户词库应有 1 条, 实际=%d", dm.GetUserDict().EntryCount())
+	// 切换回 wubi86，数据应保留
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
+	if dm.GetStoreUserLayer().EntryCount() != 1 {
+		t.Errorf("wubi86 should have 1 entry, got %d", dm.GetStoreUserLayer().EntryCount())
 	}
 }
 
 func TestDictManager_ShadowIsolation(t *testing.T) {
-	tmpDir := t.TempDir()
+	dm := setupTestManager(t)
 
-	dm := NewDictManager(tmpDir, tmpDir, nil)
-	dm.Initialize()
-	defer dm.Close()
-
-	// 在 wubi86 方案下置顶
-	dm.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
 	dm.PinWord("abc", "测试", 0)
 
-	wubiShadow := dm.GetShadowLayer()
-	rules := wubiShadow.GetShadowRules("abc")
+	rules := dm.GetStoreShadowLayer().GetShadowRules("abc")
 	if rules == nil || len(rules.Pinned) != 1 {
-		t.Fatalf("wubi86 应有 1 条 pin 规则")
+		t.Fatal("wubi86 should have 1 pin rule")
 	}
 
-	// 切换到 pinyin，shadow 应该是独立的
-	dm.SwitchSchema("pinyin", "pinyin.shadow.yaml", "pinyin.userwords.txt")
-	pinyinShadow := dm.GetShadowLayer()
-	pinyinRules := pinyinShadow.GetShadowRules("abc")
+	// 切换到 pinyin，shadow 应独立
+	dm.SwitchSchemaFull("pinyin", "pinyin", 5000, 5)
+	pinyinRules := dm.GetStoreShadowLayer().GetShadowRules("abc")
 	if pinyinRules != nil && (len(pinyinRules.Pinned) > 0 || len(pinyinRules.Deleted) > 0) {
-		t.Errorf("pinyin 不应有 shadow 规则")
+		t.Error("pinyin should have no shadow rules")
 	}
 
-	// 切换回 wubi86，shadow 规则应该还在
-	dm.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
-	rules2 := dm.GetShadowLayer().GetShadowRules("abc")
+	// 切换回 wubi86，规则应保留
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
+	rules2 := dm.GetStoreShadowLayer().GetShadowRules("abc")
 	if rules2 == nil || len(rules2.Pinned) != 1 {
-		t.Errorf("wubi86 shadow 规则应还在")
+		t.Error("wubi86 shadow rules should persist")
 	}
 }
 
 func TestDictManager_SameSchemaNoOp(t *testing.T) {
-	tmpDir := t.TempDir()
+	dm := setupTestManager(t)
 
-	dm := NewDictManager(tmpDir, tmpDir, nil)
-	dm.Initialize()
-	defer dm.Close()
-
-	dm.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
 	dm.AddUserWord("a", "甲", 100)
 
 	// 再次切换到相同方案应该是 no-op
-	dm.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
-
-	if dm.GetUserDict().EntryCount() != 1 {
-		t.Errorf("同方案切换不应丢失数据, 实际=%d", dm.GetUserDict().EntryCount())
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
+	if dm.GetStoreUserLayer().EntryCount() != 1 {
+		t.Error("same-schema switch should not lose data")
 	}
 }
 
-func TestDictManager_SaveAndReload(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestDictManager_MixedSchemaSharesData(t *testing.T) {
+	dm := setupTestManager(t)
 
-	// 第一次：创建并保存
-	dm := NewDictManager(tmpDir, tmpDir, nil)
-	dm.Initialize()
-	dm.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
-	dm.AddUserWord("test", "保存测试", 200)
-	dm.PinWord("test", "保存测试", 0)
-	dm.Save()
-	dm.Close()
+	// 混输方案 wubi86_pinyin 应与主方案 wubi86 共享用户数据
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
+	dm.AddUserWord("test", "测试", 100)
 
-	// 验证文件已生成
-	userDictPath := filepath.Join(tmpDir, "wubi86.userwords.txt")
-	if _, err := os.Stat(userDictPath); os.IsNotExist(err) {
-		t.Error("用户词库文件应已创建")
-	}
-	shadowPath := filepath.Join(tmpDir, "wubi86.shadow.yaml")
-	if _, err := os.Stat(shadowPath); os.IsNotExist(err) {
-		t.Error("Shadow 文件应已创建")
-	}
-
-	// 第二次：重新加载
-	dm2 := NewDictManager(tmpDir, tmpDir, nil)
-	dm2.Initialize()
-	dm2.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
-	defer dm2.Close()
-
-	if dm2.GetUserDict().EntryCount() != 1 {
-		t.Errorf("重新加载后应有 1 条用户词, 实际=%d", dm2.GetUserDict().EntryCount())
-	}
-
-	rules := dm2.GetShadowLayer().GetShadowRules("test")
-	if rules == nil || len(rules.Pinned) != 1 {
-		t.Errorf("重新加载后应有 1 条 pin 规则")
+	// 混输方案使用相同的 dataSchemaID
+	dm.SwitchSchemaFull("wubi86_pinyin", "wubi86", 5000, 5)
+	if dm.GetStoreUserLayer().EntryCount() != 1 {
+		t.Errorf("mixed schema should share data with primary, got %d entries", dm.GetStoreUserLayer().EntryCount())
 	}
 }
+
+func TestDictManager_StoreFreqScorer(t *testing.T) {
+	dm := setupTestManager(t)
+
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
+
+	// 通过 Store 记录词频
+	s := dm.GetStore()
+	if s == nil {
+		t.Fatal("Store should not be nil")
+	}
+
+	s.IncrementFreq("wubi86", "abc", "测试")
+	s.IncrementFreq("wubi86", "abc", "测试")
+
+	rec, err := s.GetFreq("wubi86", "abc", "测试")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Count != 2 {
+		t.Errorf("expected freq count 2, got %d", rec.Count)
+	}
+}
+
+func TestDictManager_DeleteAndRemoveShadow(t *testing.T) {
+	dm := setupTestManager(t)
+
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
+
+	// 隐藏词条
+	dm.DeleteWord("abc", "测试")
+	if !dm.HasShadowRule("abc", "测试") {
+		t.Error("should have shadow rule after DeleteWord")
+	}
+
+	// 移除规则
+	dm.RemoveShadowRule("abc", "测试")
+	if dm.HasShadowRule("abc", "测试") {
+		t.Error("should not have shadow rule after RemoveShadowRule")
+	}
+}
+
+// 确保 store 包被使用（setupTestManager 间接使用）
+var _ = store.FreqRecord{}

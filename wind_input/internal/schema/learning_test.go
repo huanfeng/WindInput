@@ -1,11 +1,9 @@
 package schema
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
-	"github.com/huanfeng/wind_input/internal/dict"
 )
 
 func TestManualLearning(t *testing.T) {
@@ -20,54 +18,20 @@ func TestManualLearning(t *testing.T) {
 	}
 }
 
-func TestAutoLearning(t *testing.T) {
-	tmpDir := t.TempDir()
-	userDictPath := filepath.Join(tmpDir, "user_words.txt")
+func TestAutoLearning_NilSafe(t *testing.T) {
+	strategy := NewLearningStrategy(LearningAuto, nil)
 
-	ud := dict.NewUserDict("test", userDictPath)
-	ud.Load()
-	defer ud.Close()
-
-	strategy := NewLearningStrategy(LearningAuto, ud)
-
-	// 单字不学习
-	strategy.OnCandidateCommitted("ni", "你", candidate.Candidate{})
-	if ud.EntryCount() != 0 {
-		t.Errorf("单字不应学习, 实际词条数=%d", ud.EntryCount())
-	}
-
-	// 多字词学习
+	// nil userLayer 不应 panic
 	strategy.OnCandidateCommitted("nihao", "你好", candidate.Candidate{Weight: 100})
-	// IncreaseWeight 在词条不存在时不会创建新词条（这是当前行为）
-	// AutoLearning 的完整逻辑后续实现
-
-	// 命令不学习
-	strategy.OnCandidateCommitted("uuid", "xxx-xxx", candidate.Candidate{IsCommand: true})
+	strategy.Reset()
 }
 
-func TestFrequencyLearning(t *testing.T) {
-	tmpDir := t.TempDir()
-	userDictPath := filepath.Join(tmpDir, "user_words.txt")
+func TestFrequencyLearning_NilSafe(t *testing.T) {
+	strategy := NewLearningStrategy(LearningFrequency, nil)
 
-	ud := dict.NewUserDict("test", userDictPath)
-	ud.Load()
-	defer ud.Close()
-
-	// 先添加一个词条
-	ud.Add("nihao", "你好", 100)
-
-	strategy := NewLearningStrategy(LearningFrequency, ud)
-
-	// 调频应增加权重
+	// nil userLayer 不应 panic
 	strategy.OnCandidateCommitted("nihao", "你好", candidate.Candidate{})
-
-	results := ud.Search("nihao", 10)
-	if len(results) == 0 {
-		t.Fatal("应有结果")
-	}
-	if results[0].Weight != 101 {
-		t.Errorf("权重应为 101, 实际=%d", results[0].Weight)
-	}
+	strategy.Reset()
 }
 
 func TestNewLearningStrategy_DefaultIsManual(t *testing.T) {

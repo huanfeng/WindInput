@@ -8,6 +8,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/store"
 )
 
 func createTestDictForEx(t *testing.T) *dict.CompositeDict {
@@ -685,15 +686,22 @@ func TestEngineUserFreqLearning(t *testing.T) {
 	}
 	t.Logf("妮: 初始=%.4f 提升后=%.4f (diff=%.4f)", probNi2, boostedProb, boostedProb-probNi2)
 
-	// 验证 SaveUserFreqs/LoadUserFreqs 往返一致
-	tmpFile := filepath.Join(t.TempDir(), "user_freq.txt")
-	if err := unigram.SaveUserFreqs(tmpFile); err != nil {
+	// 验证 SaveUserFreqsToStore/LoadUserFreqsFromStore 往返一致
+	tmpDir := t.TempDir()
+	s, err := store.Open(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	schemaID := "test-pinyin"
+	if err := unigram.SaveUserFreqsToStore(s, schemaID); err != nil {
 		t.Fatal(err)
 	}
 
 	unigram2 := NewUnigramModel()
 	unigram2.LoadFromFreqMap(charFreqs)
-	if err := unigram2.LoadUserFreqs(tmpFile); err != nil {
+	if err := unigram2.LoadUserFreqsFromStore(s, schemaID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1065,7 +1073,35 @@ sort: by_weight
 	composite := dict.NewCompositeDict()
 
 	phraseLayer := dict.NewPhraseLayer("phrases", systemPhrasesPath, filepath.Join(tmpDir, "user.phrases.yaml"))
-	if err := phraseLayer.Load(); err != nil {
+	// 使用 Store 加载短语
+	phraseStore, err := store.Open(filepath.Join(tmpDir, "phrase.db"))
+	if err != nil {
+		t.Fatalf("打开短语 Store 失败: %v", err)
+	}
+	t.Cleanup(func() { phraseStore.Close() })
+	// 种子短语到 Store
+	if entries, err := dict.ParsePhraseYAMLFile(systemPhrasesPath); err == nil {
+		var records []store.PhraseRecord
+		for _, e := range entries {
+			rec := store.PhraseRecord{
+				Code: e.Code, Text: e.Text, Texts: e.Texts, Name: e.Name,
+				Position: e.Position, Enabled: true, IsSystem: true,
+			}
+			if rec.Text != "" && strings.Contains(rec.Text, "$") {
+				rec.Type = "dynamic"
+			} else if rec.Texts != "" {
+				rec.Type = "array"
+			} else {
+				rec.Type = "static"
+			}
+			if rec.Position <= 0 {
+				rec.Position = 1
+			}
+			records = append(records, rec)
+		}
+		phraseStore.SeedPhrases(records)
+	}
+	if err := phraseLayer.LoadFromStore(phraseStore); err != nil {
 		t.Fatalf("加载短语层失败: %v", err)
 	}
 	composite.AddLayer(phraseLayer)
@@ -1274,15 +1310,19 @@ sort: by_weight
 		t.Fatalf("加载词库失败: %v", err)
 	}
 
-	userDictPath := filepath.Join(tmpDir, "user_words.txt")
-	ud := dict.NewUserDict("user", userDictPath)
-	t.Cleanup(func() { _ = ud.Close() })
-	if err := ud.Add("sfg", "司法官", 100); err != nil {
+	// 使用 Store 创建用户词库层
+	userStore, err := store.Open(filepath.Join(tmpDir, "user.db"))
+	if err != nil {
+		t.Fatalf("打开用户词库 Store 失败: %v", err)
+	}
+	t.Cleanup(func() { userStore.Close() })
+	userLayer := dict.NewStoreUserLayer(userStore, "test")
+	if err := userLayer.Add("sfg", "司法官", 100); err != nil {
 		t.Fatalf("添加用户词失败: %v", err)
 	}
 
 	composite := dict.NewCompositeDict()
-	composite.AddLayer(ud)
+	composite.AddLayer(userLayer)
 	composite.AddLayer(dict.NewPinyinDictLayer("pinyin-system", dict.LayerTypeSystem, pinyinDict))
 
 	engine := NewEngine(composite, nil)

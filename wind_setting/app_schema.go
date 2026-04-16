@@ -109,14 +109,6 @@ type SchemaConfigDict struct {
 	WeightSpec interface{} `yaml:"weight_spec,omitempty" json:"weight_spec,omitempty"`
 }
 
-// SchemaConfigUserData 用户数据配置
-type SchemaConfigUserData struct {
-	ShadowFile   string `yaml:"shadow_file" json:"shadow_file"`
-	UserDictFile string `yaml:"user_dict_file" json:"user_dict_file"`
-	TempDictFile string `yaml:"temp_dict_file,omitempty" json:"temp_dict_file,omitempty"`
-	UserFreqFile string `yaml:"user_freq_file,omitempty" json:"user_freq_file,omitempty"`
-}
-
 // SchemaConfigLearning 学习策略配置
 type SchemaConfigLearning struct {
 	Mode             string `yaml:"mode" json:"mode"`
@@ -131,7 +123,6 @@ type SchemaConfig struct {
 	Schema   SchemaConfigMeta     `yaml:"schema" json:"schema"`
 	Engine   SchemaConfigEngine   `yaml:"engine" json:"engine"`
 	Dicts    []SchemaConfigDict   `yaml:"dictionaries" json:"dictionaries"`
-	UserData SchemaConfigUserData `yaml:"user_data" json:"user_data"`
 	Learning SchemaConfigLearning `yaml:"learning" json:"learning"`
 	// 以下字段由 wind_input 核心使用，设置界面不编辑但保存时必须保留
 	Encoder interface{} `yaml:"encoder,omitempty" json:"encoder,omitempty"`

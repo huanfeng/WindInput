@@ -154,6 +154,21 @@ func (s *Store) SearchFreqPrefix(schemaID, prefix string, limit int) ([]FreqEntr
 	return results, err
 }
 
+// PutFreq sets a FreqRecord directly for the given (code, text) pair.
+func (s *Store) PutFreq(schemaID, code, text string, rec FreqRecord) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b, err := schemaSubBucket(tx, schemaID, string(bucketFreq), true)
+		if err != nil {
+			return fmt.Errorf("PutFreq: %w", err)
+		}
+		data, err := json.Marshal(rec)
+		if err != nil {
+			return fmt.Errorf("PutFreq marshal: %w", err)
+		}
+		return b.Put([]byte(freqKey(code, text)), data)
+	})
+}
+
 // DeleteFreq removes a single frequency record.
 func (s *Store) DeleteFreq(schemaID, code, text string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {

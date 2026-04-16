@@ -250,45 +250,6 @@ func (pl *PhraseLayer) InvalidateCacheForInput(input string) {
 	}
 }
 
-// Load 加载系统短语和用户短语
-func (pl *PhraseLayer) Load() error {
-	pl.mu.Lock()
-	defer pl.mu.Unlock()
-
-	pl.staticPhrases = make(map[string][]PhraseEntry)
-	pl.dynamicPhrases = make(map[string][]PhraseEntry)
-	pl.phraseGroups = make(map[string]PhraseGroup)
-	pl.cmdCache = make(map[string][]candidate.Candidate)
-
-	// 1. 加载系统短语：优先用户目录的同名文件，不存在则用程序目录的原始文件
-	systemLoaded := false
-	if pl.systemUserFilePath != "" {
-		if err := pl.loadFile(pl.systemUserFilePath, true); err == nil {
-			systemLoaded = true
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("failed to load user system phrases: %w", err)
-		}
-	}
-	if !systemLoaded && pl.systemFilePath != "" {
-		if err := pl.loadFile(pl.systemFilePath, true); err != nil {
-			if !os.IsNotExist(err) {
-				return fmt.Errorf("failed to load system phrases: %w", err)
-			}
-		}
-	}
-
-	// 2. 加载用户短语
-	if pl.userFilePath != "" {
-		if err := pl.loadFile(pl.userFilePath, false); err != nil {
-			if !os.IsNotExist(err) {
-				return fmt.Errorf("failed to load user phrases: %w", err)
-			}
-		}
-	}
-
-	return nil
-}
-
 // LoadFromStore loads phrases from the bbolt Store's Phrases bucket.
 // This replaces file-based loading when Store backend is enabled.
 func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
@@ -360,8 +321,8 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 	return nil
 }
 
-// parsePhraseYAMLFile reads a phrases YAML file and returns PhraseFileEntry slice.
-func parsePhraseYAMLFile(path string) ([]PhraseFileEntry, error) {
+// ParsePhraseYAMLFile reads a phrases YAML file and returns PhraseFileEntry slice.
+func ParsePhraseYAMLFile(path string) ([]PhraseFileEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -386,110 +347,6 @@ func detectPhraseType(e PhraseFileEntry) string {
 	return "static"
 }
 
-// loadFile 从文件加载短语（需持有写锁）
-func (pl *PhraseLayer) loadFile(path string, isSystem bool) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
-	var config PhrasesFileConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return fmt.Errorf("failed to parse phrases file %s: %w", path, err)
-	}
-
-	for _, p := range config.Phrases {
-		code := strings.ToLower(p.Code)
-		if code == "" || (p.Text == "" && p.Texts == "") {
-			continue
-		}
-
-		position := p.Position
-		if position <= 0 {
-			position = 1
-		}
-
-		// texts 字段：注册为组并展开字符到精确匹配索引
-		if p.Texts != "" {
-			pl.phraseGroups[code] = PhraseGroup{
-				Code:     code,
-				Name:     p.Name,
-				Texts:    p.Texts,
-				Position: position,
-				IsSystem: isSystem,
-				Disabled: p.Disabled,
-			}
-			if p.Disabled {
-				continue
-			}
-			runes := []rune(p.Texts)
-			for idx, r := range runes {
-				arrEntry := PhraseEntry{
-					Text:     string(r),
-					Position: position + idx,
-					IsSystem: isSystem,
-				}
-				pl.staticPhrases[code] = append(pl.staticPhrases[code], arrEntry)
-			}
-			continue
-		}
-
-		// 用户文件可以覆盖系统短语（同 code+text 的条目）
-		if !isSystem {
-			phraseID := code + "||" + p.Text
-			// 检查并移除系统短语中的同名条目（用户覆盖）
-			pl.removeEntryByID(phraseID)
-		}
-
-		entry := PhraseEntry{
-			Text:     p.Text,
-			Position: position,
-			IsSystem: isSystem,
-			Disabled: p.Disabled,
-		}
-
-		// 被禁用的条目不加入查询索引（但仍可被前端读取）
-		if p.Disabled {
-			continue
-		}
-
-		// 含 $变量 的为动态短语，否则为静态短语
-		if HasVariable(p.Text) {
-			pl.dynamicPhrases[code] = append(pl.dynamicPhrases[code], entry)
-		} else {
-			pl.staticPhrases[code] = append(pl.staticPhrases[code], entry)
-		}
-	}
-
-	return nil
-}
-
-// removeEntryByID 根据 "code||text" 从所有索引中移除条目（用于用户覆盖系统短语）
-func (pl *PhraseLayer) removeEntryByID(id string) {
-	for code, entries := range pl.staticPhrases {
-		for i, e := range entries {
-			if code+"||"+e.Text == id {
-				pl.staticPhrases[code] = append(entries[:i], entries[i+1:]...)
-				if len(pl.staticPhrases[code]) == 0 {
-					delete(pl.staticPhrases, code)
-				}
-				return
-			}
-		}
-	}
-	for code, entries := range pl.dynamicPhrases {
-		for i, e := range entries {
-			if code+"||"+e.Text == id {
-				pl.dynamicPhrases[code] = append(entries[:i], entries[i+1:]...)
-				if len(pl.dynamicPhrases[code]) == 0 {
-					delete(pl.dynamicPhrases, code)
-				}
-				return
-			}
-		}
-	}
-}
-
 // GetPhraseCount 获取静态短语数量
 func (pl *PhraseLayer) GetPhraseCount() int {
 	pl.mu.RLock()
@@ -512,16 +369,6 @@ func (pl *PhraseLayer) GetCommandCount() int {
 		count += len(entries)
 	}
 	return count
-}
-
-// GetUserFilePath 获取用户短语文件路径
-func (pl *PhraseLayer) GetUserFilePath() string {
-	return pl.userFilePath
-}
-
-// GetSystemFilePath 获取系统短语文件路径
-func (pl *PhraseLayer) GetSystemFilePath() string {
-	return pl.systemFilePath
 }
 
 // ===== 辅助函数 =====
@@ -677,8 +524,8 @@ func (pl *PhraseLayer) ResetPhraseOverride(code, templateText string) error {
 		return nil
 	}
 
-	// 重新加载以恢复系统默认
-	return pl.Load()
+	// TODO: 后续迁移短语位置覆盖到 Store 后端后，此处应重新从 Store 加载
+	return nil
 }
 
 // ===== 内部辅助方法 =====

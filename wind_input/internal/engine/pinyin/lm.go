@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/dict/binformat"
+	"github.com/huanfeng/wind_input/internal/store"
 )
 
 // UnigramLookup Unigram 语言模型查询接口
@@ -153,56 +154,37 @@ func (m *UnigramModel) BoostUserFreq(word string, delta int) {
 	m.userFreqs[word] += delta
 }
 
-// LoadUserFreqs 从文件加载用户选词频次
-// 格式: 词语\t频次
-func (m *UnigramModel) LoadUserFreqs(path string) error {
-	file, err := os.Open(path)
+// LoadUserFreqsFromStore 从 Store 的 Freq bucket 加载用户词频
+func (m *UnigramModel) LoadUserFreqsFromStore(s *store.Store, schemaID string) error {
+	entries, err := s.SearchFreqPrefix(schemaID, "__uf:", 0)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // 文件不存在是正常的
-		}
 		return err
 	}
-	defer file.Close()
-
-	m.userFreqs = make(map[string]int)
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.Split(line, "\t")
-		if len(parts) < 2 {
-			continue
-		}
-		freq, err := strconv.Atoi(parts[1])
-		if err != nil {
-			continue
-		}
-		m.userFreqs[parts[0]] = freq
-	}
-	return scanner.Err()
-}
-
-// SaveUserFreqs 保存用户选词频次到文件
-func (m *UnigramModel) SaveUserFreqs(path string) error {
-	if m.userFreqs == nil || len(m.userFreqs) == 0 {
+	if len(entries) == 0 {
 		return nil
 	}
-
-	file, err := os.Create(path)
-	if err != nil {
-		return err
+	m.userFreqs = make(map[string]int)
+	for _, e := range entries {
+		m.userFreqs[e.Text] = int(e.Record.Count)
 	}
-	defer file.Close()
+	return nil
+}
 
-	writer := bufio.NewWriter(file)
-	writer.WriteString("# Wind Input 用户词频\n")
+// SaveUserFreqsToStore 将用户词频保存到 Store
+func (m *UnigramModel) SaveUserFreqsToStore(s *store.Store, schemaID string) error {
+	if len(m.userFreqs) == 0 {
+		return nil
+	}
 	for word, freq := range m.userFreqs {
-		fmt.Fprintf(writer, "%s\t%d\n", word, freq)
+		if freq <= 0 {
+			continue
+		}
+		rec := store.FreqRecord{Count: uint32(freq)}
+		if err := s.PutFreq(schemaID, "__uf", word, rec); err != nil {
+			return err
+		}
 	}
-	return writer.Flush()
+	return nil
 }
 
 // GetUserFreqs 获取用户词频（用于持久化）
@@ -385,55 +367,37 @@ func (m *BinaryUnigramModel) Close() error {
 	return m.reader.Close()
 }
 
-// LoadUserFreqs 从文件加载用户选词频次
-func (m *BinaryUnigramModel) LoadUserFreqs(path string) error {
-	file, err := os.Open(path)
+// LoadUserFreqsFromStore 从 Store 的 Freq bucket 加载用户词频
+func (m *BinaryUnigramModel) LoadUserFreqsFromStore(s *store.Store, schemaID string) error {
+	entries, err := s.SearchFreqPrefix(schemaID, "__uf:", 0)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
-	defer file.Close()
-
-	m.userFreqs = make(map[string]int)
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.Split(line, "\t")
-		if len(parts) < 2 {
-			continue
-		}
-		freq, err := strconv.Atoi(parts[1])
-		if err != nil {
-			continue
-		}
-		m.userFreqs[parts[0]] = freq
-	}
-	return scanner.Err()
-}
-
-// SaveUserFreqs 保存用户选词频次到文件
-func (m *BinaryUnigramModel) SaveUserFreqs(path string) error {
-	if m.userFreqs == nil || len(m.userFreqs) == 0 {
+	if len(entries) == 0 {
 		return nil
 	}
-
-	file, err := os.Create(path)
-	if err != nil {
-		return err
+	m.userFreqs = make(map[string]int)
+	for _, e := range entries {
+		m.userFreqs[e.Text] = int(e.Record.Count)
 	}
-	defer file.Close()
+	return nil
+}
 
-	writer := bufio.NewWriter(file)
-	writer.WriteString("# Wind Input 用户词频\n")
+// SaveUserFreqsToStore 将用户词频保存到 Store
+func (m *BinaryUnigramModel) SaveUserFreqsToStore(s *store.Store, schemaID string) error {
+	if len(m.userFreqs) == 0 {
+		return nil
+	}
 	for word, freq := range m.userFreqs {
-		fmt.Fprintf(writer, "%s\t%d\n", word, freq)
+		if freq <= 0 {
+			continue
+		}
+		rec := store.FreqRecord{Count: uint32(freq)}
+		if err := s.PutFreq(schemaID, "__uf", word, rec); err != nil {
+			return err
+		}
 	}
-	return writer.Flush()
+	return nil
 }
 
 // GetUserFreqs 获取用户词频

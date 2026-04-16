@@ -28,7 +28,7 @@ func (s *SystemService) Ping(args *rpcapi.Empty, reply *rpcapi.Empty) error {
 // GetStatus 获取系统状态
 func (s *SystemService) GetStatus(args *rpcapi.Empty, reply *rpcapi.SystemStatusReply) error {
 	reply.Running = true
-	reply.StoreEnabled = s.dm.UseStore()
+	reply.StoreEnabled = true
 	reply.SchemaID = s.dm.GetActiveSchemaID()
 
 	stats := s.dm.GetStats()
@@ -71,9 +71,6 @@ func (s *SystemService) ReloadAll(args *rpcapi.Empty, reply *rpcapi.Empty) error
 		if err := s.dm.ReloadPhrases(); err != nil {
 			errors = append(errors, fmt.Sprintf("phrases: %v", err))
 		}
-		if err := s.dm.ReloadShadow(); err != nil {
-			errors = append(errors, fmt.Sprintf("shadow: %v", err))
-		}
 	}
 
 	if len(errors) > 0 {
@@ -94,10 +91,8 @@ func (s *SystemService) ReloadConfig(args *rpcapi.Empty, reply *rpcapi.Empty) er
 // ReloadShadow 重载 Shadow 规则
 func (s *SystemService) ReloadShadow(args *rpcapi.Empty, reply *rpcapi.Empty) error {
 	s.logger.Info("RPC System.ReloadShadow")
-	if s.dm == nil {
-		return fmt.Errorf("dict manager not available")
-	}
-	return s.dm.ReloadShadow()
+	// Store 后端实时读取，无需手动重载
+	return nil
 }
 
 // ReloadUserDict 重载用户词库
@@ -107,14 +102,7 @@ func (s *SystemService) ReloadUserDict(args *rpcapi.Empty, reply *rpcapi.Empty) 
 		return fmt.Errorf("dict manager not available")
 	}
 	// Store 后端实时读取，无需手动重载
-	if s.dm.UseStore() {
-		return nil
-	}
-	userDict := s.dm.GetUserDict()
-	if userDict == nil {
-		return fmt.Errorf("user dict not initialized")
-	}
-	return userDict.Load()
+	return nil
 }
 
 // NotifyReload 通知重载指定目标（统一入口）

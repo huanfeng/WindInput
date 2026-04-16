@@ -50,8 +50,8 @@ func (h *ReloadHandler) ReloadConfig() error {
 			h.schemaMgr.SetActive(newSchemaID)
 			s := h.schemaMgr.GetSchema(newSchemaID)
 			if s != nil && h.dictMgr != nil {
-				h.dictMgr.SwitchSchemaFull(newSchemaID, s.UserData.ShadowFile, s.UserData.UserDictFile,
-					s.UserData.TempDictFile, s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
+				h.dictMgr.SwitchSchemaFull(newSchemaID, s.DataSchemaID(),
+					s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
 			}
 		}
 	}

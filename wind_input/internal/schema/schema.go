@@ -8,7 +8,6 @@ type Schema struct {
 	Schema   SchemaInfo   `yaml:"schema"`
 	Engine   EngineSpec   `yaml:"engine"`
 	Dicts    []DictSpec   `yaml:"dictionaries"`
-	UserData UserDataSpec `yaml:"user_data"`
 	Learning LearningSpec `yaml:"learning"`
 	Encoder  *EncoderSpec `yaml:"encoder,omitempty"` // 造词编码规则（codetable 方案用）
 }
@@ -145,14 +144,6 @@ type WeightSpec struct {
 	Target int            `yaml:"target,omitempty"` // 中位映射目标值（默认 1000）
 }
 
-// UserDataSpec 用户数据配置
-type UserDataSpec struct {
-	ShadowFile   string `yaml:"shadow_file"`
-	UserDictFile string `yaml:"user_dict_file"`
-	TempDictFile string `yaml:"temp_dict_file,omitempty"`
-	UserFreqFile string `yaml:"user_freq_file,omitempty"`
-}
-
 // LearningMode 学习模式
 type LearningMode string
 
@@ -204,6 +195,15 @@ func (s *Schema) GetDefaultDictSpec() *DictSpec {
 		return &s.Dicts[0]
 	}
 	return nil
+}
+
+// DataSchemaID 返回数据方案 ID
+// 混输方案返回主方案 ID（与主方案共享用户数据），其他返回自身 ID
+func (s *Schema) DataSchemaID() string {
+	if s.Engine.Type == EngineTypeMixed && s.Engine.Mixed != nil && s.Engine.Mixed.PrimarySchema != "" {
+		return s.Engine.Mixed.PrimarySchema
+	}
+	return s.Schema.ID
 }
 
 // GetDictsByRole 按角色筛选词库规格

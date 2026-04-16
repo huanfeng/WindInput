@@ -292,8 +292,8 @@ func main() {
 	activeSchema := schemaMgr.GetActiveSchema()
 	if activeSchema != nil {
 		// 切换 DictManager 的用户数据层
-		dictManager.SwitchSchemaFull(activeSchemaID, activeSchema.UserData.ShadowFile, activeSchema.UserData.UserDictFile,
-			activeSchema.UserData.TempDictFile, activeSchema.Learning.TempMaxEntries, activeSchema.Learning.TempPromoteCount)
+		dictManager.SwitchSchemaFull(activeSchemaID, activeSchema.DataSchemaID(),
+			activeSchema.Learning.TempMaxEntries, activeSchema.Learning.TempPromoteCount)
 	}
 
 	stats := dictManager.GetStats()

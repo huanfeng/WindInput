@@ -31,12 +31,6 @@ dictionaries:
     type: rime_codetable
     role: reverse_lookup
 
-user_data:
-  shadow_file: "pinyin.shadow.yaml"
-  user_dict_file: "pinyin.userwords.txt"
-  user_freq_file: "pinyin.userfreq.txt"
-  temp_dict_file: "pinyin.tempdict.txt"
-
 learning:
   mode: manual
   unigram_path: "pinyin/unigram.txt"

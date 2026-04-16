@@ -203,7 +203,7 @@ func TestCodetableWithDictManager(t *testing.T) {
 	if err := dm.Initialize(); err != nil {
 		t.Fatalf("初始化 DictManager 失败: %v", err)
 	}
-	dm.SwitchSchema("wubi86", "wubi86.shadow.yaml", "wubi86.userwords.txt")
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
 	defer dm.Close()
 
 	// 添加测试用户词

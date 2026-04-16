@@ -34,10 +34,6 @@ dictionaries:
       min: 5
       mode: linear
 
-user_data:
-  shadow_file: "wubi86.shadow.yaml"
-  user_dict_file: "wubi86.userwords.txt"
-
 learning:
   mode: manual
   protect_top_n: 3

@@ -16,6 +16,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin/shuangpin"
+	"github.com/huanfeng/wind_input/internal/store"
 )
 
 // EngineBundle 引擎创建结果（包含引擎实例和相关资源）
@@ -238,11 +239,9 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 	}
 
 	// 加载用户词频（仅在 learning.mode=auto 或 frequency 时加载）
-	// 路径从 schema.UserData.UserFreqFile 读取
 	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
-		if s.UserData.UserFreqFile != "" {
-			userFreqPath := resolvePath(exeDir, dataDir, s.UserData.UserFreqFile)
-			loadPinyinUserFreqs(engine, userFreqPath, logger)
+		if dm != nil && dm.GetStore() != nil {
+			loadPinyinUserFreqs(engine, dm.GetStore(), s.DataSchemaID(), logger)
 		}
 		config.EnableUserFreq = true // 同步到引擎 config，控制 OnCandidateSelected
 		config.FrequencyOnly = (s.Learning.Mode == LearningFrequency)
@@ -466,42 +465,42 @@ func loadCodetableForPinyin(engine *pinyin.Engine, srcPath, dictType, schemaID s
 	return fmt.Errorf("码表反查 wdb 不可用")
 }
 
-// LoadPinyinUserFreqs 加载拼音用户词频
-func loadPinyinUserFreqs(engine *pinyin.Engine, path string, logger *slog.Logger) {
+// loadPinyinUserFreqs 从 Store 加载拼音用户词频
+func loadPinyinUserFreqs(engine *pinyin.Engine, s *store.Store, schemaID string, logger *slog.Logger) {
 	if engine.GetUnigram() == nil {
 		return
 	}
 	if m := engine.GetUnigramModel(); m != nil {
-		if err := m.LoadUserFreqs(path); err != nil {
-			logger.Warn("加载用户词频失败", "err", err)
-		} else {
-			logger.Info("用户词频加载成功")
+		if err := m.LoadUserFreqsFromStore(s, schemaID); err != nil {
+			logger.Warn("加载拼音用户词频失败", "error", err)
+		} else if m.GetUserFreqs() != nil {
+			logger.Info("用户词频加载成功", "entries", len(m.GetUserFreqs()))
 		}
 		return
 	}
 	if bm := engine.GetBinaryUnigramModel(); bm != nil {
-		if err := bm.LoadUserFreqs(path); err != nil {
-			logger.Warn("加载用户词频失败", "err", err)
-		} else {
-			logger.Info("用户词频加载成功")
+		if err := bm.LoadUserFreqsFromStore(s, schemaID); err != nil {
+			logger.Warn("加载拼音用户词频失败(binary)", "error", err)
+		} else if bm.GetUserFreqs() != nil {
+			logger.Info("用户词频加载成功(binary)", "entries", len(bm.GetUserFreqs()))
 		}
 	}
 }
 
-// SavePinyinUserFreqs 保存拼音用户词频
-func SavePinyinUserFreqs(engine *pinyin.Engine, path string) {
+// SavePinyinUserFreqs 将拼音用户词频保存到 Store
+func SavePinyinUserFreqs(engine *pinyin.Engine, s *store.Store, schemaID string) {
 	if engine.GetUnigram() == nil {
 		return
 	}
 	if m := engine.GetUnigramModel(); m != nil {
-		if err := m.SaveUserFreqs(path); err != nil {
-			slog.Default().Warn("保存用户词频失败", "err", err)
+		if err := m.SaveUserFreqsToStore(s, schemaID); err != nil {
+			slog.Error("保存拼音用户词频失败", "error", err)
 		}
 		return
 	}
 	if bm := engine.GetBinaryUnigramModel(); bm != nil {
-		if err := bm.SaveUserFreqs(path); err != nil {
-			slog.Default().Warn("保存用户词频失败", "err", err)
+		if err := bm.SaveUserFreqsToStore(s, schemaID); err != nil {
+			slog.Error("保存拼音用户词频失败(binary)", "error", err)
 		}
 	}
 }
@@ -617,25 +616,6 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 			return nil, fmt.Errorf("混输：拼音方案 %q 不存在", mixedSpec.SecondarySchema)
 		}
 		logger.Info("混输：引用拼音方案", "secondary", mixedSpec.SecondarySchema)
-	}
-
-	// === 继承用户数据路径 ===
-	// 引用式混输方案的用户数据跟随主方案，不再独立维护
-	if primarySchema != nil {
-		if s.UserData.ShadowFile == "" {
-			s.UserData.ShadowFile = primarySchema.UserData.ShadowFile
-		}
-		if s.UserData.UserDictFile == "" {
-			s.UserData.UserDictFile = primarySchema.UserData.UserDictFile
-		}
-		if s.UserData.TempDictFile == "" && primarySchema.UserData.TempDictFile != "" {
-			s.UserData.TempDictFile = primarySchema.UserData.TempDictFile
-		}
-	}
-	if secondarySchema != nil {
-		if s.UserData.UserFreqFile == "" && secondarySchema.UserData.UserFreqFile != "" {
-			s.UserData.UserFreqFile = secondarySchema.UserData.UserFreqFile
-		}
 	}
 
 	// === 2. 创建码表引擎 ===
@@ -847,9 +827,8 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 
 	// 加载拼音用户词频
 	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
-		if s.UserData.UserFreqFile != "" {
-			userFreqPath := resolvePath(exeDir, dataDir, s.UserData.UserFreqFile)
-			loadPinyinUserFreqs(pinyinEngine, userFreqPath, logger)
+		if dm != nil && dm.GetStore() != nil {
+			loadPinyinUserFreqs(pinyinEngine, dm.GetStore(), s.DataSchemaID(), logger)
 		}
 		pinyinConfig.EnableUserFreq = true
 		pinyinConfig.FrequencyOnly = (s.Learning.Mode == LearningFrequency)

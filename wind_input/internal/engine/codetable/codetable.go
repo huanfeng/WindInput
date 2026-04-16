@@ -148,8 +148,8 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 			exactCandidates = append(exactCandidates, phraseLayer.Search(input, 0)...)
 			exactCandidates = append(exactCandidates, phraseLayer.SearchCommand(input, 0)...)
 		}
-		if userDict := e.dictManager.GetUserDict(); userDict != nil {
-			exactCandidates = append(exactCandidates, userDict.Search(input, 0)...)
+		if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
+			exactCandidates = append(exactCandidates, userLayer.Search(input, 0)...)
 		}
 	}
 	exactCandidates = append(exactCandidates, e.codeTable.Lookup(input)...)
@@ -166,8 +166,8 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 					}
 				}
 			}
-			if userDict := e.dictManager.GetUserDict(); userDict != nil {
-				for _, c := range userDict.SearchPrefix(input, 0) {
+			if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
+				for _, c := range userLayer.SearchPrefix(input, 0) {
 					if c.Code != input {
 						prefixCandidates = append(prefixCandidates, c)
 					}
@@ -417,36 +417,6 @@ func (e *Engine) OnCandidateSelected(code, text string) {
 		}
 	}
 
-	// Store 后端路径
-	if e.dictManager.UseStore() {
-		e.onCandidateSelectedStore(code, text)
-		return
-	}
-
-	// 文件后端路径
-	userDict := e.dictManager.GetUserDict()
-	if userDict == nil {
-		return
-	}
-
-	if e.config.FrequencyOnly {
-		userDict.IncreaseWeight(code, text, 20)
-		return
-	}
-
-	tempDict := e.dictManager.GetTempDict()
-	if tempDict != nil {
-		promoted := tempDict.LearnWord(code, text, 20)
-		if promoted {
-			tempDict.PromoteWord(code, text)
-		}
-	} else {
-		userDict.OnWordSelected(code, text, 800, 20, 3)
-	}
-}
-
-// onCandidateSelectedStore Store 后端的选词回调
-func (e *Engine) onCandidateSelectedStore(code, text string) {
 	// 记录独立词频
 	if s := e.dictManager.GetStore(); s != nil {
 		s.IncrementFreq(e.dictManager.GetActiveSchemaID(), code, text)

@@ -26,9 +26,6 @@ dictionaries:
     path: "dict/test.txt"
     type: codetable
     default: true
-user_data:
-  shadow_file: "test.shadow.yaml"
-  user_dict_file: "test.userwords.txt"
 learning:
   mode: manual
 `
@@ -240,9 +237,6 @@ dictionaries:
     path: "dict/test.txt"
     type: rime_codetable
     default: true
-user_data:
-  shadow_file: "test.shadow.yaml"
-  user_dict_file: "test.userwords.txt"
 learning:
   mode: manual
   protect_top_n: 3
@@ -314,12 +308,9 @@ learning:
 		t.Errorf("encoder.max_word_length 应保留内置值 10, 实际=%d", s.Encoder.MaxWordLength)
 	}
 
-	// dictionaries 和 user_data 应保留内置值（用户未指定）
+	// dictionaries 应保留内置值（用户未指定）
 	if len(s.Dicts) != 1 || s.Dicts[0].ID != "main" {
 		t.Errorf("dictionaries 应保留内置配置, 实际=%d 个", len(s.Dicts))
-	}
-	if s.UserData.ShadowFile != "test.shadow.yaml" {
-		t.Errorf("shadow_file 应保留内置值, 实际=%s", s.UserData.ShadowFile)
 	}
 }
 

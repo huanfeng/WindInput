@@ -3,11 +3,74 @@ package dict
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/huanfeng/wind_input/internal/store"
 )
 
+// loadPhraseLayerFromYAML 测试辅助：将 YAML 短语文件种子到 Store 后加载 PhraseLayer
+func loadPhraseLayerFromYAML(t *testing.T, systemFile, userFile string) *PhraseLayer {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// 种子短语到 Store
+	var records []store.PhraseRecord
+	for _, file := range []struct {
+		path     string
+		isSystem bool
+	}{
+		{systemFile, true},
+		{userFile, false},
+	} {
+		if file.path == "" {
+			continue
+		}
+		entries, err := ParsePhraseYAMLFile(file.path)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.Code == "" || (e.Text == "" && e.Texts == "") {
+				continue
+			}
+			rec := store.PhraseRecord{
+				Code:     strings.ToLower(e.Code),
+				Text:     e.Text,
+				Texts:    e.Texts,
+				Name:     e.Name,
+				Type:     detectPhraseType(e),
+				Position: e.Position,
+				Enabled:  !e.Disabled,
+				IsSystem: file.isSystem,
+			}
+			if rec.Position <= 0 {
+				rec.Position = 1
+			}
+			records = append(records, rec)
+		}
+	}
+	if len(records) > 0 {
+		if err := s.SeedPhrases(records); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pl := NewPhraseLayerEx("phrases", systemFile, "", userFile)
+	if err := pl.LoadFromStore(s); err != nil {
+		t.Fatal(err)
+	}
+	return pl
+}
+
 func TestPhraseLayerSearchCommandMarksIsCommand(t *testing.T) {
-	// 创建临时系统短语文件，包含一个动态短语（含 $uuid 变量）
 	tmpDir := t.TempDir()
 	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
 	content := `phrases:
@@ -19,10 +82,7 @@ func TestPhraseLayerSearchCommandMarksIsCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pl := NewPhraseLayer("phrases", systemFile, "")
-	if err := pl.Load(); err != nil {
-		t.Fatal(err)
-	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
 
 	results := pl.SearchCommand("uuid", 10)
 	if len(results) == 0 {
@@ -48,10 +108,7 @@ func TestPhraseLayerStaticPhrase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pl := NewPhraseLayer("phrases", "", userFile)
-	if err := pl.Load(); err != nil {
-		t.Fatal(err)
-	}
+	pl := loadPhraseLayerFromYAML(t, "", userFile)
 
 	results := pl.Search("dz", 10)
 	if len(results) != 1 {
@@ -74,10 +131,7 @@ func TestPhraseLayerDynamicExpansion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pl := NewPhraseLayer("phrases", systemFile, "")
-	if err := pl.Load(); err != nil {
-		t.Fatal(err)
-	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
 
 	// 动态短语不应出现在 Search 中
 	results := pl.Search("rq", 10)
@@ -119,10 +173,7 @@ func TestPhraseLayerGroupSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pl := NewPhraseLayer("phrases", systemFile, "")
-	if err := pl.Load(); err != nil {
-		t.Fatal(err)
-	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
 
 	// 1. SearchPrefix("zz") 应返回组名候选，而非展开字符
 	prefixResults := pl.SearchPrefix("zz", 0)
@@ -198,10 +249,7 @@ func TestPhraseLayerGroupDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pl := NewPhraseLayer("phrases", systemFile, "")
-	if err := pl.Load(); err != nil {
-		t.Fatal(err)
-	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
 
 	// 禁用的组不应出现在前缀搜索中
 	results := pl.SearchPrefix("zz", 0)

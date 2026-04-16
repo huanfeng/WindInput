@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/huanfeng/wind_input/internal/dict"
-	"github.com/huanfeng/wind_input/internal/store"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 )
 
@@ -47,17 +46,16 @@ func setupTestRPC(t *testing.T) *testClient {
 	t.Helper()
 	dir := t.TempDir()
 
-	s, err := store.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
+	dm := dict.NewDictManager(dir, dir, nil)
+	if err := dm.OpenStore(filepath.Join(dir, "test.db")); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
-
-	dm := dict.NewDictManager(dir, dir, nil)
+	t.Cleanup(func() { dm.Close() })
 	if err := dm.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	dm.SwitchSchema("test", "", "")
+	dm.SwitchSchemaFull("test", "test", 5000, 5)
+	s := dm.GetStore()
 
 	logger := slog.Default()
 	router := NewRouter()

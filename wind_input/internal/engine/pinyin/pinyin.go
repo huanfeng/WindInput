@@ -301,7 +301,6 @@ func (e *Engine) SetDictManager(dm *dict.DictManager) {
 // OnCandidateSelected 用户选词回调
 // 记录用户选择，用于词频学习（带误选保护）
 func (e *Engine) OnCandidateSelected(code, text string) {
-	// 用户词频学习开关（默认关闭）
 	if e.config == nil || !e.config.EnableUserFreq {
 		return
 	}
@@ -309,7 +308,6 @@ func (e *Engine) OnCandidateSelected(code, text string) {
 		return
 	}
 
-	// 单字不写入 UserDict（避免膨胀），但更新 Unigram 频率（单字频率对造句重要）
 	runes := []rune(text)
 	if len(runes) < 2 {
 		if e.unigram != nil {
@@ -318,21 +316,6 @@ func (e *Engine) OnCandidateSelected(code, text string) {
 		return
 	}
 
-	// Store 后端路径
-	if e.dictManager.UseStore() {
-		e.onCandidateSelectedStore(code, text)
-	} else {
-		e.onCandidateSelectedFile(code, text)
-	}
-
-	// 更新 Unigram 用户频率（两种模式都需要）
-	if e.unigram != nil {
-		e.unigram.BoostUserFreq(text, 1)
-	}
-}
-
-// onCandidateSelectedStore Store 后端的选词回调
-func (e *Engine) onCandidateSelectedStore(code, text string) {
 	// 记录独立词频
 	if s := e.dictManager.GetStore(); s != nil {
 		s.IncrementFreq(e.dictManager.GetActiveSchemaID(), code, text)
@@ -342,42 +325,23 @@ func (e *Engine) onCandidateSelectedStore(code, text string) {
 		if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
 			userLayer.IncreaseWeight(code, text, 20)
 		}
-		return
-	}
-
-	tempLayer := e.dictManager.GetStoreTempLayer()
-	if tempLayer != nil {
-		promoted := tempLayer.LearnWord(code, text, 20)
-		if promoted {
-			tempLayer.PromoteWord(code, text)
-		}
 	} else {
-		if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
-			userLayer.OnWordSelected(code, text, 800, 20, 2)
+		tempLayer := e.dictManager.GetStoreTempLayer()
+		if tempLayer != nil {
+			promoted := tempLayer.LearnWord(code, text, 20)
+			if promoted {
+				tempLayer.PromoteWord(code, text)
+			}
+		} else {
+			if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
+				userLayer.OnWordSelected(code, text, 800, 20, 2)
+			}
 		}
 	}
-}
 
-// onCandidateSelectedFile 文件后端的选词回调
-func (e *Engine) onCandidateSelectedFile(code, text string) {
-	userDict := e.dictManager.GetUserDict()
-	if userDict == nil {
-		return
-	}
-
-	if e.config.FrequencyOnly {
-		userDict.IncreaseWeight(code, text, 20)
-		return
-	}
-
-	tempDict := e.dictManager.GetTempDict()
-	if tempDict != nil {
-		promoted := tempDict.LearnWord(code, text, 20)
-		if promoted {
-			tempDict.PromoteWord(code, text)
-		}
-	} else {
-		userDict.OnWordSelected(code, text, 800, 20, 2)
+	// 更新 Unigram 用户频率
+	if e.unigram != nil {
+		e.unigram.BoostUserFreq(text, 1)
 	}
 }
 

@@ -10,6 +10,9 @@ import (
 	"github.com/huanfeng/wind_input/internal/store"
 )
 
+// MaxDynamicWeight 用户词库动态权重硬上限
+const MaxDynamicWeight = 2000
+
 // ─────────────────────────────────────────
 // StoreUserLayer — implements MutableLayer
 // ─────────────────────────────────────────

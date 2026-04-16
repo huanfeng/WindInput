@@ -239,20 +239,10 @@ func (m *Manager) savePinyinUserFreqsLocked(schemaID string, pinyinEngine *pinyi
 	if cfg == nil || !cfg.EnableUserFreq {
 		return
 	}
-	userFreqFile := ""
-	if m.schemaManager != nil {
-		if s := m.schemaManager.GetSchema(schemaID); s != nil {
-			userFreqFile = s.UserData.UserFreqFile
-		}
-	}
-	if userFreqFile == "" {
+	if m.dictManager == nil || m.dictManager.GetStore() == nil {
 		return
 	}
-	userFreqPath := userFreqFile
-	if m.exeDir != "" {
-		userFreqPath = m.exeDir + "/" + userFreqFile
-	}
-	schema.SavePinyinUserFreqs(pinyinEngine, userFreqPath)
+	schema.SavePinyinUserFreqs(pinyinEngine, m.dictManager.GetStore(), schemaID)
 }
 
 // GetEncoderRules 获取当前方案的编码规则（用于加词时自动计算编码）
