@@ -1,10 +1,10 @@
 package rpc
 
 import (
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
-	"net/rpc"
-	"net/rpc/jsonrpc"
 	"path/filepath"
 	"testing"
 
@@ -13,8 +13,37 @@ import (
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 )
 
-// setupTestRPC 创建测试用 RPC 客户端（通过 net.Pipe 模拟管道连接）
-func setupTestRPC(t *testing.T) *rpc.Client {
+// testClient 测试用轻量客户端，通过 net.Pipe 直连服务端
+type testClient struct {
+	conn net.Conn
+}
+
+func (c *testClient) call(method string, args, reply any) error {
+	params, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	req := rpcapi.Request{ID: 1, Method: method, Params: params}
+	if err := rpcapi.WriteMessage(c.conn, &req); err != nil {
+		return err
+	}
+	var resp rpcapi.Response
+	if err := rpcapi.ReadMessage(c.conn, &resp); err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	if reply != nil && len(resp.Result) > 0 {
+		return json.Unmarshal(resp.Result, reply)
+	}
+	return nil
+}
+
+func (c *testClient) Close() { c.conn.Close() }
+
+// setupTestRPC 创建测试用服务端和客户端（通过 net.Pipe 模拟管道连接）
+func setupTestRPC(t *testing.T) *testClient {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -28,43 +57,65 @@ func setupTestRPC(t *testing.T) *rpc.Client {
 	if err := dm.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	// 切换到测试方案（确保 GetActiveSchemaID 返回非空）
 	dm.SwitchSchema("test", "", "")
 
 	logger := slog.Default()
-	rpcServer := rpc.NewServer()
-	rpcServer.RegisterName("Dict", &DictService{store: s, dm: dm, logger: logger})
-	rpcServer.RegisterName("Shadow", &ShadowService{store: s, dm: dm, logger: logger})
-	rpcServer.RegisterName("System", &SystemService{dm: dm, server: &Server{}, logger: logger})
+	router := NewRouter()
+	broadcaster := NewEventBroadcaster(logger)
+
+	dictSvc := &DictService{store: s, dm: dm, logger: logger, broadcaster: broadcaster}
+	shadowSvc := &ShadowService{store: s, dm: dm, logger: logger, broadcaster: broadcaster}
+	systemSvc := &SystemService{dm: dm, server: &Server{}, logger: logger}
+
+	RegisterMethod(router, "Dict.Search", dictSvc.Search)
+	RegisterMethod(router, "Dict.SearchByCode", dictSvc.SearchByCode)
+	RegisterMethod(router, "Dict.Add", dictSvc.Add)
+	RegisterMethod(router, "Dict.Remove", dictSvc.Remove)
+	RegisterMethod(router, "Dict.Update", dictSvc.Update)
+	RegisterMethod(router, "Dict.GetStats", dictSvc.GetStats)
+	RegisterMethod(router, "Dict.GetSchemaStats", dictSvc.GetSchemaStats)
+	RegisterMethod(router, "Dict.BatchAdd", dictSvc.BatchAdd)
+	RegisterMethod(router, "Shadow.Pin", shadowSvc.Pin)
+	RegisterMethod(router, "Shadow.Delete", shadowSvc.Delete)
+	RegisterMethod(router, "Shadow.RemoveRule", shadowSvc.RemoveRule)
+	RegisterMethod(router, "Shadow.GetRules", shadowSvc.GetRules)
+	RegisterMethod(router, "System.Ping", systemSvc.Ping)
+	RegisterMethod(router, "System.GetStatus", systemSvc.GetStatus)
 
 	serverConn, clientConn := net.Pipe()
-	go rpcServer.ServeCodec(jsonrpc.NewServerCodec(serverConn))
+
+	// 在后台运行服务端处理循环
+	srv := &Server{router: router, stopCh: make(chan struct{})}
+	srv.wg.Add(1)
+	go srv.handleConn(serverConn)
 	t.Cleanup(func() { clientConn.Close() })
 
-	return jsonrpc.NewClient(clientConn)
+	return &testClient{conn: clientConn}
 }
 
 func TestDictAddAndSearch(t *testing.T) {
 	client := setupTestRPC(t)
+	defer client.Close()
 
 	// 添加词条
-	err := client.Call("Dict.Add", &rpcapi.DictAddArgs{
+	var empty rpcapi.Empty
+	err := client.call("Dict.Add", &rpcapi.DictAddArgs{
 		Code: "ggtt", Text: "王国", Weight: 1200,
-	}, &rpcapi.Empty{})
+	}, &empty)
 	if err != nil {
 		t.Fatalf("Dict.Add: %v", err)
 	}
 
-	err = client.Call("Dict.Add", &rpcapi.DictAddArgs{
+	err = client.call("Dict.Add", &rpcapi.DictAddArgs{
 		Code: "ggtt", Text: "国王", Weight: 600,
-	}, &rpcapi.Empty{})
+	}, &empty)
 	if err != nil {
 		t.Fatalf("Dict.Add 2: %v", err)
 	}
 
 	// 精确查询
 	var reply rpcapi.DictSearchReply
-	err = client.Call("Dict.SearchByCode", &rpcapi.DictSearchArgs{
+	err = client.call("Dict.SearchByCode", &rpcapi.DictSearchArgs{
 		Prefix: "ggtt",
 	}, &reply)
 	if err != nil {
@@ -75,15 +126,15 @@ func TestDictAddAndSearch(t *testing.T) {
 	}
 
 	// 前缀搜索
-	err = client.Call("Dict.Add", &rpcapi.DictAddArgs{
+	err = client.call("Dict.Add", &rpcapi.DictAddArgs{
 		Code: "gg", Text: "王", Weight: 800,
-	}, &rpcapi.Empty{})
+	}, &empty)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var prefixReply rpcapi.DictSearchReply
-	err = client.Call("Dict.Search", &rpcapi.DictSearchArgs{
+	err = client.call("Dict.Search", &rpcapi.DictSearchArgs{
 		Prefix: "gg", Limit: 10,
 	}, &prefixReply)
 	if err != nil {
@@ -96,32 +147,33 @@ func TestDictAddAndSearch(t *testing.T) {
 
 func TestDictRemoveAndUpdate(t *testing.T) {
 	client := setupTestRPC(t)
+	defer client.Close()
 
-	// 添加
-	client.Call("Dict.Add", &rpcapi.DictAddArgs{Code: "ab", Text: "测试", Weight: 100}, &rpcapi.Empty{})
+	var empty rpcapi.Empty
+	client.call("Dict.Add", &rpcapi.DictAddArgs{Code: "ab", Text: "测试", Weight: 100}, &empty)
 
 	// 更新权重
-	err := client.Call("Dict.Update", &rpcapi.DictUpdateArgs{
+	err := client.call("Dict.Update", &rpcapi.DictUpdateArgs{
 		Code: "ab", Text: "测试", NewWeight: 500,
-	}, &rpcapi.Empty{})
+	}, &empty)
 	if err != nil {
 		t.Fatalf("Dict.Update: %v", err)
 	}
 
 	var reply rpcapi.DictSearchReply
-	client.Call("Dict.SearchByCode", &rpcapi.DictSearchArgs{Prefix: "ab"}, &reply)
+	client.call("Dict.SearchByCode", &rpcapi.DictSearchArgs{Prefix: "ab"}, &reply)
 	if reply.Words[0].Weight != 500 {
 		t.Errorf("expected weight=500, got %d", reply.Words[0].Weight)
 	}
 
 	// 删除
-	err = client.Call("Dict.Remove", &rpcapi.DictRemoveArgs{Code: "ab", Text: "测试"}, &rpcapi.Empty{})
+	err = client.call("Dict.Remove", &rpcapi.DictRemoveArgs{Code: "ab", Text: "测试"}, &empty)
 	if err != nil {
 		t.Fatalf("Dict.Remove: %v", err)
 	}
 
 	var reply2 rpcapi.DictSearchReply
-	client.Call("Dict.SearchByCode", &rpcapi.DictSearchArgs{Prefix: "ab"}, &reply2)
+	client.call("Dict.SearchByCode", &rpcapi.DictSearchArgs{Prefix: "ab"}, &reply2)
 	if reply2.Total != 0 {
 		t.Errorf("expected 0 after remove, got %d", reply2.Total)
 	}
@@ -129,17 +181,18 @@ func TestDictRemoveAndUpdate(t *testing.T) {
 
 func TestDictSearchPagination(t *testing.T) {
 	client := setupTestRPC(t)
+	defer client.Close()
 
-	// 添加 5 个词条
+	var empty rpcapi.Empty
 	for i, text := range []string{"词一", "词二", "词三", "词四", "词五"} {
-		client.Call("Dict.Add", &rpcapi.DictAddArgs{
+		client.call("Dict.Add", &rpcapi.DictAddArgs{
 			Code: "ci", Text: text, Weight: 100 + i*10,
-		}, &rpcapi.Empty{})
+		}, &empty)
 	}
 
 	// 第一页（limit=2）
 	var page1 rpcapi.DictSearchReply
-	client.Call("Dict.Search", &rpcapi.DictSearchArgs{Prefix: "ci", Limit: 2, Offset: 0}, &page1)
+	client.call("Dict.Search", &rpcapi.DictSearchArgs{Prefix: "ci", Limit: 2, Offset: 0}, &page1)
 	if page1.Total != 5 {
 		t.Errorf("expected total=5, got %d", page1.Total)
 	}
@@ -149,14 +202,14 @@ func TestDictSearchPagination(t *testing.T) {
 
 	// 第二页
 	var page2 rpcapi.DictSearchReply
-	client.Call("Dict.Search", &rpcapi.DictSearchArgs{Prefix: "ci", Limit: 2, Offset: 2}, &page2)
+	client.call("Dict.Search", &rpcapi.DictSearchArgs{Prefix: "ci", Limit: 2, Offset: 2}, &page2)
 	if len(page2.Words) != 2 {
 		t.Errorf("expected 2 words on page 2, got %d", len(page2.Words))
 	}
 
 	// 第三页
 	var page3 rpcapi.DictSearchReply
-	client.Call("Dict.Search", &rpcapi.DictSearchArgs{Prefix: "ci", Limit: 2, Offset: 4}, &page3)
+	client.call("Dict.Search", &rpcapi.DictSearchArgs{Prefix: "ci", Limit: 2, Offset: 4}, &page3)
 	if len(page3.Words) != 1 {
 		t.Errorf("expected 1 word on page 3, got %d", len(page3.Words))
 	}
@@ -164,8 +217,10 @@ func TestDictSearchPagination(t *testing.T) {
 
 func TestSystemPing(t *testing.T) {
 	client := setupTestRPC(t)
+	defer client.Close()
 
-	err := client.Call("System.Ping", &rpcapi.Empty{}, &rpcapi.Empty{})
+	var empty rpcapi.Empty
+	err := client.call("System.Ping", &rpcapi.Empty{}, &empty)
 	if err != nil {
 		t.Fatalf("System.Ping: %v", err)
 	}
@@ -173,9 +228,10 @@ func TestSystemPing(t *testing.T) {
 
 func TestSystemGetStatus(t *testing.T) {
 	client := setupTestRPC(t)
+	defer client.Close()
 
 	var reply rpcapi.SystemStatusReply
-	err := client.Call("System.GetStatus", &rpcapi.Empty{}, &reply)
+	err := client.call("System.GetStatus", &rpcapi.Empty{}, &reply)
 	if err != nil {
 		t.Fatalf("System.GetStatus: %v", err)
 	}
@@ -186,26 +242,29 @@ func TestSystemGetStatus(t *testing.T) {
 
 func TestShadowPinAndGetRules(t *testing.T) {
 	client := setupTestRPC(t)
+	defer client.Close()
+
+	var empty rpcapi.Empty
 
 	// Pin
-	err := client.Call("Shadow.Pin", &rpcapi.ShadowPinArgs{
+	err := client.call("Shadow.Pin", &rpcapi.ShadowPinArgs{
 		Code: "gg", Word: "王", Position: 0,
-	}, &rpcapi.Empty{})
+	}, &empty)
 	if err != nil {
 		t.Fatalf("Shadow.Pin: %v", err)
 	}
 
 	// Delete
-	err = client.Call("Shadow.Delete", &rpcapi.ShadowDeleteArgs{
+	err = client.call("Shadow.Delete", &rpcapi.ShadowDeleteArgs{
 		Code: "gg", Word: "王国",
-	}, &rpcapi.Empty{})
+	}, &empty)
 	if err != nil {
 		t.Fatalf("Shadow.Delete: %v", err)
 	}
 
 	// GetRules
 	var reply rpcapi.ShadowRulesReply
-	err = client.Call("Shadow.GetRules", &rpcapi.ShadowGetRulesArgs{Code: "gg"}, &reply)
+	err = client.call("Shadow.GetRules", &rpcapi.ShadowGetRulesArgs{Code: "gg"}, &reply)
 	if err != nil {
 		t.Fatalf("Shadow.GetRules: %v", err)
 	}
@@ -217,15 +276,15 @@ func TestShadowPinAndGetRules(t *testing.T) {
 	}
 
 	// RemoveRule
-	err = client.Call("Shadow.RemoveRule", &rpcapi.ShadowDeleteArgs{
+	err = client.call("Shadow.RemoveRule", &rpcapi.ShadowDeleteArgs{
 		Code: "gg", Word: "王",
-	}, &rpcapi.Empty{})
+	}, &empty)
 	if err != nil {
 		t.Fatalf("Shadow.RemoveRule: %v", err)
 	}
 
 	var reply2 rpcapi.ShadowRulesReply
-	client.Call("Shadow.GetRules", &rpcapi.ShadowGetRulesArgs{Code: "gg"}, &reply2)
+	client.call("Shadow.GetRules", &rpcapi.ShadowGetRulesArgs{Code: "gg"}, &reply2)
 	if len(reply2.Pinned) != 0 {
 		t.Errorf("expected 0 pinned after remove, got %d", len(reply2.Pinned))
 	}
@@ -233,9 +292,10 @@ func TestShadowPinAndGetRules(t *testing.T) {
 
 func TestDictGetStats(t *testing.T) {
 	client := setupTestRPC(t)
+	defer client.Close()
 
 	var reply rpcapi.DictStatsReply
-	err := client.Call("Dict.GetStats", &rpcapi.Empty{}, &reply)
+	err := client.call("Dict.GetStats", &rpcapi.Empty{}, &reply)
 	if err != nil {
 		t.Fatalf("Dict.GetStats: %v", err)
 	}

@@ -4,21 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/rpc"
-	"net/rpc/jsonrpc"
+	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/Microsoft/go-winio"
 )
 
-// Client JSON-RPC 客户端
+var globalID atomic.Uint64
+
+// Client IPC 客户端
 // 每次调用建立新连接（短连接模式，适合设置端低频操作）
 type Client struct {
 	pipeName string
 	timeout  time.Duration
 }
 
-// NewClient 创建 RPC 客户端
+// NewClient 创建 IPC 客户端
 func NewClient() *Client {
 	return &Client{
 		pipeName: RPCPipeName,
@@ -34,26 +36,64 @@ func NewClientWithPipe(pipeName string) *Client {
 	}
 }
 
-// connect 建立连接并返回 RPC 客户端
-func (c *Client) connect() (*rpc.Client, error) {
+// connect 建立管道连接
+func (c *Client) connect() (net.Conn, error) {
 	conn, err := winio.DialPipe(c.pipeName, &c.timeout)
 	if err != nil {
 		return nil, fmt.Errorf("connect to rpc pipe: %w", err)
 	}
-	return jsonrpc.NewClient(conn), nil
+	return conn, nil
 }
 
-// call 执行单次 RPC 调用（连接→调用→关闭）
-func (c *Client) call(method string, args, reply interface{}) error {
-	client, err := c.connect()
+// call 执行单次 IPC 调用（连接→发送→接收→关闭）
+func (c *Client) call(method string, args, reply any) error {
+	conn, err := c.connect()
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	return client.Call(method, args, reply)
+	defer conn.Close()
+
+	// 序列化参数
+	params, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Errorf("marshal args: %w", err)
+	}
+
+	// 发送请求
+	req := Request{
+		ID:     globalID.Add(1),
+		Method: method,
+		Params: params,
+	}
+
+	conn.SetWriteDeadline(time.Now().Add(c.timeout))
+	if err := WriteMessage(conn, &req); err != nil {
+		return fmt.Errorf("send request: %w", err)
+	}
+
+	// 接收响应
+	conn.SetReadDeadline(time.Now().Add(c.timeout))
+	var resp Response
+	if err := ReadMessage(conn, &resp); err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+
+	// 检查错误
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+
+	// 反序列化结果
+	if reply != nil && len(resp.Result) > 0 {
+		if err := json.Unmarshal(resp.Result, reply); err != nil {
+			return fmt.Errorf("unmarshal result: %w", err)
+		}
+	}
+
+	return nil
 }
 
-// IsAvailable 检查 RPC 服务是否可用
+// IsAvailable 检查 IPC 服务是否可用
 func (c *Client) IsAvailable() bool {
 	err := c.call("System.Ping", &Empty{}, &Empty{})
 	return err == nil
@@ -360,7 +400,6 @@ func (c *Client) SubscribeEvents(ctx context.Context, handler func(EventMessage)
 	for {
 		var msg EventMessage
 		if err := dec.Decode(&msg); err != nil {
-			// Check if context was cancelled (expected shutdown)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

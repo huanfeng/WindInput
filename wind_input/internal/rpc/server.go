@@ -1,14 +1,16 @@
-// Package rpc 提供 JSON-RPC 服务端实现
+// Package rpc 提供轻量 IPC 服务端实现
 // 通过独立命名管道为 Wails 设置端提供词库管理、Shadow 规则和系统状态查询
+// 使用 length-prefix 帧协议替代 net/rpc，避免引入 net/http 等重量级依赖
 package rpc
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
-	"net/rpc"
-	"net/rpc/jsonrpc"
 	"sync"
+	"time"
 
 	"github.com/Microsoft/go-winio"
 	"github.com/huanfeng/wind_input/internal/dict"
@@ -16,12 +18,14 @@ import (
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 )
 
-// Server JSON-RPC 服务端
+const connReadTimeout = 30 * time.Second
+
+// Server IPC 服务端
 type Server struct {
 	logger      *slog.Logger
 	dictManager *dict.DictManager
 	store       *store.Store
-	rpcServer   *rpc.Server
+	router      *Router
 
 	listener    net.Listener
 	wg          sync.WaitGroup
@@ -41,14 +45,14 @@ type StatusProvider interface {
 	IsChineseMode() bool
 }
 
-// NewServer 创建 RPC 服务端
+// NewServer 创建 IPC 服务端
 func NewServer(logger *slog.Logger, dm *dict.DictManager, s *store.Store) *Server {
 	return &Server{
 		logger:      logger,
 		dictManager: dm,
 		store:       s,
 		broadcaster: NewEventBroadcaster(logger),
-		rpcServer:   rpc.NewServer(),
+		router:      NewRouter(),
 		stopCh:      make(chan struct{}),
 	}
 }
@@ -60,7 +64,7 @@ func (s *Server) SetStatusProvider(provider StatusProvider) {
 	s.statusProvider = provider
 }
 
-// Start 启动 RPC 服务
+// Start 启动 IPC 服务
 func (s *Server) Start() error {
 	s.mu.Lock()
 	if s.running {
@@ -69,25 +73,52 @@ func (s *Server) Start() error {
 	}
 	s.mu.Unlock()
 
-	// 注册服务
+	// 创建服务实例
 	dictSvc := &DictService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
 	shadowSvc := &ShadowService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
 	systemSvc := &SystemService{dm: s.dictManager, store: s.store, server: s, logger: s.logger}
-
-	if err := s.rpcServer.RegisterName("Dict", dictSvc); err != nil {
-		return fmt.Errorf("register Dict service: %w", err)
-	}
-	if err := s.rpcServer.RegisterName("Shadow", shadowSvc); err != nil {
-		return fmt.Errorf("register Shadow service: %w", err)
-	}
-	if err := s.rpcServer.RegisterName("System", systemSvc); err != nil {
-		return fmt.Errorf("register System service: %w", err)
-	}
-
 	phraseSvc := &PhraseService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
-	if err := s.rpcServer.RegisterName("Phrase", phraseSvc); err != nil {
-		return fmt.Errorf("register Phrase service: %w", err)
-	}
+
+	// 注册 Dict 方法
+	RegisterMethod(s.router, "Dict.Search", dictSvc.Search)
+	RegisterMethod(s.router, "Dict.SearchByCode", dictSvc.SearchByCode)
+	RegisterMethod(s.router, "Dict.Add", dictSvc.Add)
+	RegisterMethod(s.router, "Dict.Remove", dictSvc.Remove)
+	RegisterMethod(s.router, "Dict.Update", dictSvc.Update)
+	RegisterMethod(s.router, "Dict.GetStats", dictSvc.GetStats)
+	RegisterMethod(s.router, "Dict.GetSchemaStats", dictSvc.GetSchemaStats)
+	RegisterMethod(s.router, "Dict.BatchAdd", dictSvc.BatchAdd)
+	RegisterMethod(s.router, "Dict.GetTemp", dictSvc.GetTemp)
+	RegisterMethod(s.router, "Dict.RemoveTemp", dictSvc.RemoveTemp)
+	RegisterMethod(s.router, "Dict.ClearTemp", dictSvc.ClearTemp)
+	RegisterMethod(s.router, "Dict.PromoteTemp", dictSvc.PromoteTemp)
+	RegisterMethod(s.router, "Dict.PromoteAllTemp", dictSvc.PromoteAllTemp)
+	RegisterMethod(s.router, "Dict.GetFreqList", dictSvc.GetFreqList)
+	RegisterMethod(s.router, "Dict.DeleteFreq", dictSvc.DeleteFreq)
+	RegisterMethod(s.router, "Dict.ClearFreq", dictSvc.ClearFreq)
+
+	// 注册 Shadow 方法
+	RegisterMethod(s.router, "Shadow.Pin", shadowSvc.Pin)
+	RegisterMethod(s.router, "Shadow.Delete", shadowSvc.Delete)
+	RegisterMethod(s.router, "Shadow.RemoveRule", shadowSvc.RemoveRule)
+	RegisterMethod(s.router, "Shadow.GetRules", shadowSvc.GetRules)
+	RegisterMethod(s.router, "Shadow.GetAllRules", shadowSvc.GetAllRules)
+
+	// 注册 System 方法
+	RegisterMethod(s.router, "System.Ping", systemSvc.Ping)
+	RegisterMethod(s.router, "System.GetStatus", systemSvc.GetStatus)
+	RegisterMethod(s.router, "System.ReloadPhrases", systemSvc.ReloadPhrases)
+	RegisterMethod(s.router, "System.ReloadAll", systemSvc.ReloadAll)
+	RegisterMethod(s.router, "System.ResetDB", systemSvc.ResetDB)
+	RegisterMethod(s.router, "System.DeleteSchema", systemSvc.DeleteSchema)
+	RegisterMethod(s.router, "System.ListSchemas", systemSvc.ListSchemas)
+
+	// 注册 Phrase 方法
+	RegisterMethod(s.router, "Phrase.List", phraseSvc.List)
+	RegisterMethod(s.router, "Phrase.Add", phraseSvc.Add)
+	RegisterMethod(s.router, "Phrase.Update", phraseSvc.Update)
+	RegisterMethod(s.router, "Phrase.Remove", phraseSvc.Remove)
+	RegisterMethod(s.router, "Phrase.ResetDefaults", phraseSvc.ResetDefaults)
 
 	// 创建命名管道监听器
 	pipeConfig := &winio.PipeConfig{
@@ -109,7 +140,6 @@ func (s *Server) Start() error {
 	s.eventServer = NewEventPipeServer(s.broadcaster, s.logger)
 	if err := s.eventServer.Start(); err != nil {
 		s.logger.Error("Failed to start event pipe", "error", err)
-		// Non-fatal: RPC still works without events
 	}
 
 	s.logger.Info("RPC server started", "pipe", rpcapi.RPCPipeName)
@@ -171,5 +201,54 @@ func (s *Server) acceptLoop() {
 func (s *Server) handleConn(conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
-	s.rpcServer.ServeCodec(jsonrpc.NewServerCodec(conn))
+
+	for {
+		// 设置读超时：如果客户端长时间不发请求，释放连接
+		conn.SetReadDeadline(time.Now().Add(connReadTimeout))
+
+		var req rpcapi.Request
+		if err := rpcapi.ReadMessage(conn, &req); err != nil {
+			if err != io.EOF {
+				// 超时或其他读取错误，静默关闭
+				select {
+				case <-s.stopCh:
+				default:
+					if !isTimeoutError(err) {
+						s.logger.Debug("RPC read error", "error", err)
+					}
+				}
+			}
+			return
+		}
+
+		// 清除写超时
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
+		result, err := s.router.Dispatch(req.Method, req.Params)
+
+		var resp rpcapi.Response
+		resp.ID = req.ID
+		if err != nil {
+			resp.Error = err.Error()
+		} else {
+			data, marshalErr := json.Marshal(result)
+			if marshalErr != nil {
+				resp.Error = fmt.Sprintf("marshal result: %v", marshalErr)
+			} else {
+				resp.Result = data
+			}
+		}
+
+		if writeErr := rpcapi.WriteMessage(conn, &resp); writeErr != nil {
+			s.logger.Debug("RPC write error", "error", writeErr)
+			return
+		}
+	}
+}
+
+func isTimeoutError(err error) bool {
+	if ne, ok := err.(net.Error); ok {
+		return ne.Timeout()
+	}
+	return false
 }
