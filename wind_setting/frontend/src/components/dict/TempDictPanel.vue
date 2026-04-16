@@ -1,140 +1,8 @@
-<template>
-  <div class="dict-panel-wrap">
-    <!-- 工具栏 -->
-    <div class="dict-toolbar">
-      <label class="toolbar-checkbox-wrap">
-        <input type="checkbox" :checked="allSelected" @change="toggleAll" />
-        <span>全选</span>
-      </label>
-      <button
-        class="btn btn-primary btn-sm"
-        :disabled="tempDict.length === 0"
-        @click="handlePromoteAll"
-      >
-        全部转正
-      </button>
-      <button
-        class="btn btn-sm btn-danger-outline"
-        :disabled="selectedKeys.size === 0"
-        @click="handleBatchRemove"
-      >
-        删除{{ selectedKeys.size > 0 ? ` (${selectedKeys.size})` : "" }}
-      </button>
-      <div class="toolbar-spacer"></div>
-      <input
-        type="text"
-        v-model="searchQuery"
-        class="input input-sm toolbar-search"
-        placeholder="搜索..."
-      />
-      <span class="toolbar-total">共 {{ tempDict.length }} 条</span>
-      <button class="btn btn-sm btn-danger-outline" @click="handleClear">
-        清空
-      </button>
-    </div>
-
-    <!-- 内容区 -->
-    <div class="dict-content-area">
-      <div v-if="loading" class="content-loading-overlay">
-        <div class="spinner"></div>
-      </div>
-
-      <div class="dict-table-wrap">
-        <table class="dict-table">
-          <colgroup>
-            <col class="col-check" />
-            <col class="col-code" />
-            <col />
-            <col class="col-weight" />
-            <col class="col-count" />
-            <col class="col-actions-wide" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th></th>
-              <th>编码</th>
-              <th>词条</th>
-              <th>权重</th>
-              <th>次数</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="item in filteredTempDict"
-              :key="item.code + '|' + item.text"
-              :class="{
-                selected: selectedKeys.has(item.code + '|' + item.text),
-              }"
-            >
-              <td>
-                <input
-                  type="checkbox"
-                  class="item-checkbox"
-                  :checked="selectedKeys.has(item.code + '|' + item.text)"
-                  @change="toggleSelect(item)"
-                />
-              </td>
-              <td>
-                <span class="dict-item-code">{{ item.code }}</span>
-              </td>
-              <td>{{ item.text }}</td>
-              <td class="td-weight">{{ item.weight }}</td>
-              <td class="td-weight">{{ item.count }}</td>
-              <td>
-                <div style="display: flex; gap: 4px; align-items: center">
-                  <button
-                    class="btn btn-sm"
-                    style="font-size: 12px; padding: 2px 8px"
-                    @click="handlePromote(item)"
-                  >
-                    转正
-                  </button>
-                  <button
-                    class="btn-icon btn-delete"
-                    @click="handleRemove(item)"
-                  >
-                    ×
-                  </button>
-                </div>
-              </td>
-            </tr>
-            <tr v-if="filteredTempDict.length === 0">
-              <td :colspan="6" class="td-empty">
-                {{ searchQuery ? "未找到匹配词条" : "暂无临时词条" }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- 确认对话框 -->
-    <div
-      v-if="confirmVisible"
-      class="dialog-overlay"
-      @click.self="handleCancel"
-    >
-      <div class="dialog-box">
-        <div class="dialog-title">确认操作</div>
-        <p style="font-size: 14px; color: #374151; margin-bottom: 0">
-          {{ confirmMessage }}
-        </p>
-        <div class="dialog-actions">
-          <button class="btn btn-sm" @click="handleCancel">取消</button>
-          <button class="btn btn-primary btn-sm" @click="handleConfirm">
-            确认
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-</template>
-
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
-import { useToast } from "../../composables/useToast";
-import { useConfirm } from "../../composables/useConfirm";
+import { h, ref, onMounted } from "vue";
+import type { ColumnDef } from "@tanstack/vue-table";
+import { useToast } from "@/composables/useToast";
+import { useConfirm } from "@/composables/useConfirm";
 import {
   getTempDictBySchema,
   removeTempWordForSchema,
@@ -142,8 +10,10 @@ import {
   promoteAllTempWordsForSchema,
   clearTempDictForSchema,
   type TempWordItem,
-} from "../../api/wails";
-
+} from "@/api/wails";
+import DictDataTable from "./DictDataTable.vue";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Button } from "@/components/ui/button";
 const props = defineProps<{
   schemaId: string;
 }>();
@@ -156,54 +26,92 @@ const emit = defineEmits<{
 defineExpose({ loadData });
 
 const { toast } = useToast();
-const { confirmVisible, confirmMessage, confirm, handleConfirm, handleCancel } =
-  useConfirm();
+const { confirm } = useConfirm();
 
 const tempDict = ref<TempWordItem[]>([]);
-const searchQuery = ref("");
 const selectedKeys = ref<Set<string>>(new Set());
 const loading = ref(false);
 
-const filteredTempDict = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase();
-  if (!q) return tempDict.value;
-  return tempDict.value.filter(
-    (item) =>
-      item.code.toLowerCase().includes(q) ||
-      item.text.toLowerCase().includes(q),
-  );
-});
-
-const allSelected = computed(
-  () =>
-    filteredTempDict.value.length > 0 &&
-    filteredTempDict.value.every((item) =>
-      selectedKeys.value.has(item.code + "|" + item.text),
-    ),
-);
-
 function itemKey(item: TempWordItem) {
-  return item.code + "|" + item.text;
+  return `${item.code}|${item.text}`;
 }
 
-function toggleAll() {
-  if (allSelected.value) {
-    selectedKeys.value = new Set();
-  } else {
-    selectedKeys.value = new Set(tempDict.value.map(itemKey));
-  }
-}
-
-function toggleSelect(item: TempWordItem) {
-  const key = itemKey(item);
-  const next = new Set(selectedKeys.value);
-  if (next.has(key)) {
-    next.delete(key);
-  } else {
-    next.add(key);
-  }
-  selectedKeys.value = next;
-}
+const columns: ColumnDef<TempWordItem, any>[] = [
+  {
+    id: "select",
+    size: 32,
+    enableSorting: false,
+    header: ({ table }) =>
+      h(Checkbox, {
+        checked: table.getIsAllPageRowsSelected(),
+        "onUpdate:checked": (val: boolean) =>
+          table.toggleAllPageRowsSelected(val),
+      }),
+    cell: ({ row }) =>
+      h(Checkbox, {
+        checked: row.getIsSelected(),
+        "onUpdate:checked": (val: boolean) => row.toggleSelected(val),
+      }),
+  },
+  {
+    accessorKey: "code",
+    header: "编码",
+    size: 100,
+    cell: ({ row }) =>
+      h(
+        "span",
+        {
+          class:
+            "font-mono text-sm text-muted-foreground bg-secondary px-2 py-0.5 rounded",
+        },
+        row.getValue("code"),
+      ),
+  },
+  {
+    accessorKey: "text",
+    header: "词条",
+  },
+  {
+    accessorKey: "weight",
+    header: "权重",
+    size: 60,
+  },
+  {
+    accessorKey: "count",
+    header: "次数",
+    size: 60,
+  },
+  {
+    id: "actions",
+    size: 80,
+    enableSorting: false,
+    cell: ({ row }) =>
+      h("div", { class: "flex gap-1" }, [
+        h(
+          Button,
+          {
+            variant: "ghost",
+            size: "icon",
+            class: "h-6 w-6 text-muted-foreground hover:text-primary",
+            title: "转正",
+            onClick: () => handlePromote(row.original),
+          },
+          () => "\u2191",
+        ),
+        h(
+          Button,
+          {
+            variant: "ghost",
+            size: "icon",
+            class: "h-6 w-6 text-muted-foreground hover:text-destructive",
+            title: "删除",
+            onClick: () => handleRemove(row.original),
+          },
+          () => "\u00d7",
+        ),
+      ]),
+  },
+];
 
 async function loadData() {
   loading.value = true;
@@ -293,6 +201,42 @@ onMounted(() => {
 });
 </script>
 
-<style>
-@import "./dict-shared.css";
-</style>
+<template>
+  <DictDataTable
+    :columns="columns"
+    :data="tempDict"
+    :loading="loading"
+    :row-key="(row: TempWordItem) => `${row.code}|${row.text}`"
+    search-placeholder="搜索..."
+    empty-text="暂无临时词条"
+    search-empty-text="未找到匹配词条"
+    @update:selection="selectedKeys = $event"
+  >
+    <template #toolbar-start="{ selectedCount }">
+      <Button
+        size="sm"
+        :disabled="tempDict.length === 0"
+        @click="handlePromoteAll"
+      >
+        全部转正
+      </Button>
+      <Button
+        variant="destructive"
+        size="sm"
+        :disabled="selectedCount === 0"
+        @click="handleBatchRemove"
+      >
+        删除{{ selectedCount > 0 ? ` (${selectedCount})` : "" }}
+      </Button>
+      <Button
+        variant="destructive"
+        size="sm"
+        :disabled="tempDict.length === 0"
+        @click="handleClear"
+      >
+        清空
+      </Button>
+    </template>
+  </DictDataTable>
+
+</template>

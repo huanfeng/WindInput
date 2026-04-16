@@ -51,13 +51,10 @@
           <p class="setting-hint">中文切换为英文时，将已输入的编码直接上屏</p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.hotkeys.commit_on_switch"
-            />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.hotkeys.commit_on_switch"
+            @update:checked="formData.hotkeys.commit_on_switch = $event"
+          />
         </div>
       </div>
     </div>
@@ -75,11 +72,21 @@
           <p class="setting-hint">将候选词固定到首位</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.hotkeys.pin_candidate" class="select">
-            <option value="ctrl+number">Ctrl + 数字</option>
-            <option value="ctrl+shift+number">Ctrl + Shift + 数字</option>
-            <option value="none">不使用</option>
-          </select>
+          <Select
+            :model-value="formData.hotkeys.pin_candidate"
+            @update:model-value="formData.hotkeys.pin_candidate = $event"
+          >
+            <SelectTrigger class="w-[200px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ctrl+number">Ctrl + 数字</SelectItem>
+              <SelectItem value="ctrl+shift+number"
+                >Ctrl + Shift + 数字</SelectItem
+              >
+              <SelectItem value="none">不使用</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -88,11 +95,21 @@
           <p class="setting-hint">隐藏候选词（单字不可删除）</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.hotkeys.delete_candidate" class="select">
-            <option value="ctrl+shift+number">Ctrl + Shift + 数字</option>
-            <option value="ctrl+number">Ctrl + 数字</option>
-            <option value="none">不使用</option>
-          </select>
+          <Select
+            :model-value="formData.hotkeys.delete_candidate"
+            @update:model-value="formData.hotkeys.delete_candidate = $event"
+          >
+            <SelectTrigger class="w-[200px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ctrl+shift+number"
+                >Ctrl + Shift + 数字</SelectItem
+              >
+              <SelectItem value="ctrl+number">Ctrl + 数字</SelectItem>
+              <SelectItem value="none">不使用</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
     </div>
@@ -112,7 +129,11 @@
               v-for="group in [
                 { value: 'semicolon_quote', label: '; / \'', tip: '分号/引号' },
                 { value: 'comma_period', label: ', / .', tip: '逗号/句号' },
-                { value: 'lrshift', label: 'L / R Shift', tip: '左Shift/右Shift' },
+                {
+                  value: 'lrshift',
+                  label: 'L / R Shift',
+                  tip: '左Shift/右Shift',
+                },
                 { value: 'lrctrl', label: 'L / R Ctrl', tip: '左Ctrl/右Ctrl' },
               ]"
               :key="group.value"
@@ -144,7 +165,11 @@
               class="checkbox-item"
               v-for="hk in [
                 { value: 'arrows', label: '↑ / ↓', tip: '上/下方向键' },
-                { value: 'tab', label: 'Tab / Shift+Tab', tip: 'Tab键/Shift+Tab键' },
+                {
+                  value: 'tab',
+                  label: 'Tab / Shift+Tab',
+                  tip: 'Tab键/Shift+Tab键',
+                },
               ]"
               :key="hk.value"
               :title="hk.tip"
@@ -169,10 +194,18 @@
             <label
               class="checkbox-item"
               v-for="pk in [
-                { value: 'pageupdown', label: 'PgUp / PgDn', tip: '上翻页/下翻页' },
+                {
+                  value: 'pageupdown',
+                  label: 'PgUp / PgDn',
+                  tip: '上翻页/下翻页',
+                },
                 { value: 'minus_equal', label: '- / =', tip: '减号/等号' },
                 { value: 'brackets', label: '[ / ]', tip: '左方括号/右方括号' },
-                { value: 'shift_tab', label: 'Shift+Tab / Tab', tip: 'Shift+Tab键/Tab键' },
+                {
+                  value: 'shift_tab',
+                  label: 'Shift+Tab / Tab',
+                  tip: 'Shift+Tab键/Tab键',
+                },
               ]"
               :key="pk.value"
               :title="pk.tip"
@@ -209,9 +242,7 @@
             >
               <input
                 type="checkbox"
-                :checked="
-                  formData.input.select_char_keys.includes(sc.value)
-                "
+                :checked="formData.input.select_char_keys.includes(sc.value)"
                 @change="toggleSelectCharKey(sc.value)"
               />
               <span>{{ sc.label }}</span>
@@ -232,12 +263,22 @@
           </p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.input.pinyin_separator" class="select">
-            <option value="auto">自动（' 被选择键占用时改用 `）</option>
-            <option value="quote">' 单引号</option>
-            <option value="backtick">` 反引号</option>
-            <option value="none">不使用</option>
-          </select>
+          <Select
+            :model-value="formData.input.pinyin_separator"
+            @update:model-value="formData.input.pinyin_separator = $event"
+          >
+            <SelectTrigger class="w-[280px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto"
+                >自动（' 被选择键占用时改用 `）</SelectItem
+              >
+              <SelectItem value="quote">' 单引号</SelectItem>
+              <SelectItem value="backtick">` 反引号</SelectItem>
+              <SelectItem value="none">不使用</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -326,6 +367,14 @@ import { watch, computed } from "vue";
 import type { Config, HotkeyConfig } from "../api/settings";
 import { getDefaultConfig } from "../api/settings";
 import HotkeyComposer from "../components/HotkeyComposer.vue";
+import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from "@/components/ui/select";
 
 const props = defineProps<{
   formData: Config;

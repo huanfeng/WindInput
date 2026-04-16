@@ -20,7 +20,11 @@ const sourceLabels: Record<string, string> = {
 };
 
 function getEngineLabel(): string {
-  return engineTypeLabels[props.schema.engine_type] || props.schema.engine_type || "未知";
+  return (
+    engineTypeLabels[props.schema.engine_type] ||
+    props.schema.engine_type ||
+    "未知"
+  );
 }
 
 function getSourceLabel(): string {
@@ -80,7 +84,10 @@ function getReferencedByInfo(): string {
       <div class="schema-detail-row">
         <span class="schema-detail-label">来源</span>
         <span class="schema-detail-value">
-          <span class="schema-detail-source-badge" :class="'source-' + ((schema as any).source || 'builtin')">
+          <span
+            class="schema-detail-source-badge"
+            :class="'source-' + ((schema as any).source || 'builtin')"
+          >
             {{ getSourceLabel() }}
           </span>
         </span>
@@ -91,7 +98,11 @@ function getReferencedByInfo(): string {
       </div>
       <div class="schema-detail-row">
         <span class="schema-detail-label">词典</span>
-        <span class="schema-detail-value">{{ getDictCount() }} 个<template v-if="getDictCount() > 0"> ({{ getDictSummary() }})</template></span>
+        <span class="schema-detail-value"
+          >{{ getDictCount() }} 个<template v-if="getDictCount() > 0">
+            ({{ getDictSummary() }})</template
+          ></span
+        >
       </div>
       <div v-if="getReferenceInfo()" class="schema-detail-row">
         <span class="schema-detail-label">引用</span>
@@ -103,7 +114,9 @@ function getReferencedByInfo(): string {
       </div>
       <div v-if="schema.error" class="schema-detail-row">
         <span class="schema-detail-label">异常</span>
-        <span class="schema-detail-value schema-detail-error">{{ schema.error }}</span>
+        <span class="schema-detail-value schema-detail-error">{{
+          schema.error
+        }}</span>
       </div>
     </div>
   </div>
@@ -112,7 +125,7 @@ function getReferencedByInfo(): string {
 <style scoped>
 .schema-detail {
   padding: 12px 14px;
-  background: var(--bg-secondary, #f9fafb);
+  background: hsl(var(--muted));
   border-radius: 6px;
 }
 .schema-detail-grid {
@@ -130,15 +143,15 @@ function getReferencedByInfo(): string {
 .schema-detail-label {
   flex-shrink: 0;
   width: 60px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   text-align: right;
 }
 .schema-detail-value {
-  color: #374151;
+  color: hsl(var(--foreground));
   word-break: break-all;
 }
 .schema-detail-error {
-  color: #dc2626;
+  color: hsl(var(--destructive));
 }
 .schema-detail-source-badge {
   display: inline-block;
@@ -147,15 +160,15 @@ function getReferencedByInfo(): string {
   border-radius: 4px;
 }
 .schema-detail-source-badge.source-builtin {
-  background: #eff6ff;
-  color: #2563eb;
+  background: hsl(var(--primary) / 0.1);
+  color: hsl(var(--primary));
 }
 .schema-detail-source-badge.source-user {
-  background: #f0fdf4;
-  color: #16a34a;
+  background: hsl(var(--success) / 0.1);
+  color: hsl(var(--success));
 }
 .schema-detail-source-badge.source-online {
-  background: #fefce8;
-  color: #ca8a04;
+  background: hsl(var(--warning) / 0.1);
+  color: hsl(var(--warning));
 }
 </style>

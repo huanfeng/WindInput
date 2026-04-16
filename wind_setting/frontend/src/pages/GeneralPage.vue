@@ -5,6 +5,22 @@ import * as wailsApi from "../api/wails";
 import type { SchemaConfig, SchemaInfo, SchemaReference } from "../api/wails";
 import SchemaDetailPanel from "../components/SchemaDetailPanel.vue";
 import SchemaManagerDialog from "../components/SchemaManagerDialog.vue";
+import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
 
 const props = defineProps<{
   formData: Config;
@@ -379,11 +395,10 @@ function getSchemaDisplayName(schemaID: string): string {
   return baseName;
 }
 
-function onShuangpinLayoutChange(schemaID: string, event: Event) {
-  const target = event.target as HTMLSelectElement;
+function onShuangpinLayoutChange(schemaID: string, value: string) {
   const py = getPinyinConfig(schemaID);
   if (!py.shuangpin) py.shuangpin = {};
-  py.shuangpin.layout = target.value;
+  py.shuangpin.layout = value;
   onSchemaConfigChange(schemaID);
 }
 
@@ -443,12 +458,7 @@ onUnmounted(() => {
     <div class="settings-card schema-list-card">
       <div class="card-title schema-list-header">
         <span>输入方案</span>
-        <button
-          class="btn btn-sm btn-primary"
-          @click="showSchemaManager = true"
-        >
-          方案管理
-        </button>
+        <Button size="sm" @click="showSchemaManager = true"> 方案管理 </Button>
       </div>
 
       <p class="schema-list-hint">使用箭头调整顺序，快捷键切换时按此顺序循环</p>
@@ -542,9 +552,10 @@ onUnmounted(() => {
                   <circle cx="8" cy="5" r="0.75" fill="currentColor" />
                 </svg>
               </button>
-              <button
+              <Button
                 v-if="schemaID !== activeSchemaID"
-                class="btn btn-sm"
+                variant="outline"
+                size="sm"
                 @click.stop="setActiveSchema(schemaID)"
                 :disabled="!!getSchemaInfo(schemaID)?.error"
                 :title="
@@ -552,7 +563,7 @@ onUnmounted(() => {
                 "
               >
                 设为当前
-              </button>
+              </Button>
               <span v-else class="schema-active-badge">当前方案</span>
             </div>
           </div>
@@ -581,33 +592,29 @@ onUnmounted(() => {
     />
 
     <!-- 方案详情对话框 -->
-    <div
-      v-if="detailSchemaID"
-      class="dialog-overlay"
-      @click.self="detailSchemaID = null"
+    <Dialog
+      :open="!!detailSchemaID"
+      @update:open="
+        (v: boolean) => {
+          if (!v) detailSchemaID = null;
+        }
+      "
     >
-      <div class="dialog-box dialog-sectioned schema-detail-dialog">
-        <div class="dialog-header">
-          <h3>方案详情</h3>
-          <button class="dialog-close" @click="detailSchemaID = null">
-            &times;
-          </button>
-        </div>
-        <div class="dialog-body">
-          <SchemaDetailPanel
-            v-if="getSchemaInfo(detailSchemaID)"
-            :schema="getSchemaInfo(detailSchemaID)!"
-            :config="schemaConfigs[detailSchemaID]"
-            :references="schemaReferences[detailSchemaID]"
-          />
-        </div>
-        <div class="dialog-footer">
-          <button class="btn btn-sm btn-primary" @click="detailSchemaID = null">
-            关闭
-          </button>
-        </div>
-      </div>
-    </div>
+      <DialogContent class="schema-detail-dialog">
+        <DialogHeader>
+          <DialogTitle>方案详情</DialogTitle>
+        </DialogHeader>
+        <SchemaDetailPanel
+          v-if="detailSchemaID && getSchemaInfo(detailSchemaID)"
+          :schema="getSchemaInfo(detailSchemaID)!"
+          :config="schemaConfigs[detailSchemaID]"
+          :references="schemaReferences[detailSchemaID]"
+        />
+        <DialogFooter>
+          <Button size="sm" @click="detailSchemaID = null">关闭</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- 各方案配置 Card -->
     <template v-for="schemaID in allConfigSchemaIDs" :key="'cfg-' + schemaID">
@@ -654,14 +661,15 @@ onUnmounted(() => {
               </p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getCodetableConfig(schemaID).auto_commit_unique"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getCodetableConfig(schemaID).auto_commit_unique"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).auto_commit_unique = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -674,14 +682,15 @@ onUnmounted(() => {
               </p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getCodetableConfig(schemaID).clear_on_empty_max"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getCodetableConfig(schemaID).clear_on_empty_max"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).clear_on_empty_max = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -692,14 +701,15 @@ onUnmounted(() => {
               </p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getCodetableConfig(schemaID).top_code_commit"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getCodetableConfig(schemaID).top_code_commit"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).top_code_commit = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -708,14 +718,15 @@ onUnmounted(() => {
               <p class="setting-hint">输入标点时自动上屏首选</p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getCodetableConfig(schemaID).punct_commit"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getCodetableConfig(schemaID).punct_commit"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).punct_commit = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -724,14 +735,15 @@ onUnmounted(() => {
               <p class="setting-hint">关闭前缀匹配，仅显示精确匹配</p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getCodetableConfig(schemaID).single_code_input"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getCodetableConfig(schemaID).single_code_input"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).single_code_input = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -740,14 +752,15 @@ onUnmounted(() => {
               <p class="setting-hint">在前缀匹配的候选词旁显示剩余编码</p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getCodetableConfig(schemaID).show_code_hint"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getCodetableConfig(schemaID).show_code_hint"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).show_code_hint = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -756,13 +769,23 @@ onUnmounted(() => {
               <p class="setting-hint">候选词的排列方式</p>
             </div>
             <div class="setting-control">
-              <select
-                v-model="getCodetableConfig(schemaID).candidate_sort_mode"
-                @change="onSchemaConfigChange(schemaID)"
+              <Select
+                :model-value="getCodetableConfig(schemaID).candidate_sort_mode"
+                @update:model-value="
+                  (v: string) => {
+                    getCodetableConfig(schemaID).candidate_sort_mode = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
               >
-                <option value="frequency">词频优先</option>
-                <option value="natural">原始顺序</option>
-              </select>
+                <SelectTrigger class="w-[140px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="frequency">词频优先</SelectItem>
+                  <SelectItem value="natural">原始顺序</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div class="setting-item">
@@ -771,14 +794,15 @@ onUnmounted(() => {
               <p class="setting-hint">合并相同文字的多个候选词</p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getCodetableConfig(schemaID).dedup_candidates"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getCodetableConfig(schemaID).dedup_candidates"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).dedup_candidates = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -789,14 +813,15 @@ onUnmounted(() => {
               </p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getCodetableConfig(schemaID).skip_single_char_freq"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getCodetableConfig(schemaID).skip_single_char_freq"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).skip_single_char_freq = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -807,14 +832,15 @@ onUnmounted(() => {
               </p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getCodetableConfig(schemaID).z_key_repeat"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getCodetableConfig(schemaID).z_key_repeat"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).z_key_repeat = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -825,14 +851,15 @@ onUnmounted(() => {
               </p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getTempPinyinConfig(schemaID).enabled"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getTempPinyinConfig(schemaID).enabled"
+                @update:checked="
+                  (v: boolean) => {
+                    getTempPinyinConfig(schemaID).enabled = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
         </template>
@@ -849,17 +876,24 @@ onUnmounted(() => {
               <p class="setting-hint">选择双拼键位布局</p>
             </div>
             <div class="setting-control">
-              <select
-                :value="getShuangpinLayout(schemaID)"
-                @change="onShuangpinLayoutChange(schemaID, $event)"
+              <Select
+                :model-value="getShuangpinLayout(schemaID)"
+                @update:model-value="
+                  (v: string) => onShuangpinLayoutChange(schemaID, v)
+                "
               >
-                <option value="xiaohe">小鹤双拼</option>
-                <option value="ziranma">自然码</option>
-                <option value="mspy">微软双拼</option>
-                <option value="sogou">搜狗双拼</option>
-                <option value="abc">智能ABC</option>
-                <option value="ziguang">紫光双拼</option>
-              </select>
+                <SelectTrigger class="w-[140px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="xiaohe">小鹤双拼</SelectItem>
+                  <SelectItem value="ziranma">自然码</SelectItem>
+                  <SelectItem value="mspy">微软双拼</SelectItem>
+                  <SelectItem value="sogou">搜狗双拼</SelectItem>
+                  <SelectItem value="abc">智能ABC</SelectItem>
+                  <SelectItem value="ziguang">紫光双拼</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div class="setting-item">
@@ -868,14 +902,15 @@ onUnmounted(() => {
               <p class="setting-hint">在候选词旁显示对应的码表编码</p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getPinyinConfig(schemaID).show_code_hint"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getPinyinConfig(schemaID).show_code_hint"
+                @update:checked="
+                  (v: boolean) => {
+                    getPinyinConfig(schemaID).show_code_hint = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -884,14 +919,15 @@ onUnmounted(() => {
               <p class="setting-hint">使用语言模型优化多字词组匹配</p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getPinyinConfig(schemaID).use_smart_compose"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getPinyinConfig(schemaID).use_smart_compose"
+                @update:checked="
+                  (v: boolean) => {
+                    getPinyinConfig(schemaID).use_smart_compose = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -911,13 +947,14 @@ onUnmounted(() => {
                 />
                 启用
               </label>
-              <button
-                class="btn btn-sm"
+              <Button
+                variant="outline"
+                size="sm"
                 :disabled="!getFuzzyConfig(schemaID).enabled"
                 @click="openFuzzyDialog(schemaID)"
               >
                 配置
-              </button>
+              </Button>
             </div>
           </div>
           <div class="setting-item">
@@ -926,14 +963,24 @@ onUnmounted(() => {
               <p class="setting-hint">选择输入法如何学习你的用词习惯</p>
             </div>
             <div class="setting-control">
-              <select
-                v-model="getLearningConfig(schemaID).mode"
-                @change="onSchemaConfigChange(schemaID)"
+              <Select
+                :model-value="getLearningConfig(schemaID).mode"
+                @update:model-value="
+                  (v: string) => {
+                    getLearningConfig(schemaID).mode = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
               >
-                <option value="manual">不学习</option>
-                <option value="frequency">仅调频</option>
-                <option value="auto">自动造词</option>
-              </select>
+                <SelectTrigger class="w-[140px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="manual">不学习</SelectItem>
+                  <SelectItem value="frequency">仅调频</SelectItem>
+                  <SelectItem value="auto">自动造词</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
         </template>
@@ -971,14 +1018,15 @@ onUnmounted(() => {
                 <p class="setting-hint">在前缀匹配的候选词旁显示剩余编码</p>
               </div>
               <div class="setting-control">
-                <label class="switch">
-                  <input
-                    type="checkbox"
-                    v-model="getCodetableConfig(schemaID).show_code_hint"
-                    @change="onSchemaConfigChange(schemaID)"
-                  />
-                  <span class="slider"></span>
-                </label>
+                <Switch
+                  :checked="getCodetableConfig(schemaID).show_code_hint"
+                  @update:checked="
+                    (v: boolean) => {
+                      getCodetableConfig(schemaID).show_code_hint = v;
+                      onSchemaConfigChange(schemaID);
+                    }
+                  "
+                />
               </div>
             </div>
             <div class="setting-item">
@@ -987,14 +1035,15 @@ onUnmounted(() => {
                 <p class="setting-hint">输入标点时自动上屏首选</p>
               </div>
               <div class="setting-control">
-                <label class="switch">
-                  <input
-                    type="checkbox"
-                    v-model="getCodetableConfig(schemaID).punct_commit"
-                    @change="onSchemaConfigChange(schemaID)"
-                  />
-                  <span class="slider"></span>
-                </label>
+                <Switch
+                  :checked="getCodetableConfig(schemaID).punct_commit"
+                  @update:checked="
+                    (v: boolean) => {
+                      getCodetableConfig(schemaID).punct_commit = v;
+                      onSchemaConfigChange(schemaID);
+                    }
+                  "
+                />
               </div>
             </div>
             <div class="setting-item">
@@ -1003,13 +1052,25 @@ onUnmounted(() => {
                 <p class="setting-hint">码表候选词的排列方式</p>
               </div>
               <div class="setting-control">
-                <select
-                  v-model="getCodetableConfig(schemaID).candidate_sort_mode"
-                  @change="onSchemaConfigChange(schemaID)"
+                <Select
+                  :model-value="
+                    getCodetableConfig(schemaID).candidate_sort_mode
+                  "
+                  @update:model-value="
+                    (v: string) => {
+                      getCodetableConfig(schemaID).candidate_sort_mode = v;
+                      onSchemaConfigChange(schemaID);
+                    }
+                  "
                 >
-                  <option value="frequency">词频优先</option>
-                  <option value="natural">原始顺序</option>
-                </select>
+                  <SelectTrigger class="w-[140px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="frequency">词频优先</SelectItem>
+                    <SelectItem value="natural">原始顺序</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 
@@ -1021,14 +1082,15 @@ onUnmounted(() => {
                 <p class="setting-hint">在拼音候选词旁显示对应的码表编码</p>
               </div>
               <div class="setting-control">
-                <label class="switch">
-                  <input
-                    type="checkbox"
-                    v-model="getPinyinConfig(schemaID).show_code_hint"
-                    @change="onSchemaConfigChange(schemaID)"
-                  />
-                  <span class="slider"></span>
-                </label>
+                <Switch
+                  :checked="getPinyinConfig(schemaID).show_code_hint"
+                  @update:checked="
+                    (v: boolean) => {
+                      getPinyinConfig(schemaID).show_code_hint = v;
+                      onSchemaConfigChange(schemaID);
+                    }
+                  "
+                />
               </div>
             </div>
             <div class="setting-item">
@@ -1037,14 +1099,15 @@ onUnmounted(() => {
                 <p class="setting-hint">使用语言模型优化多字词组匹配</p>
               </div>
               <div class="setting-control">
-                <label class="switch">
-                  <input
-                    type="checkbox"
-                    v-model="getPinyinConfig(schemaID).use_smart_compose"
-                    @change="onSchemaConfigChange(schemaID)"
-                  />
-                  <span class="slider"></span>
-                </label>
+                <Switch
+                  :checked="getPinyinConfig(schemaID).use_smart_compose"
+                  @update:checked="
+                    (v: boolean) => {
+                      getPinyinConfig(schemaID).use_smart_compose = v;
+                      onSchemaConfigChange(schemaID);
+                    }
+                  "
+                />
               </div>
             </div>
             <div class="setting-item">
@@ -1084,14 +1147,24 @@ onUnmounted(() => {
               <p class="setting-hint">选择输入法如何学习你的用词习惯</p>
             </div>
             <div class="setting-control">
-              <select
-                v-model="getLearningConfig(schemaID).mode"
-                @change="onSchemaConfigChange(schemaID)"
+              <Select
+                :model-value="getLearningConfig(schemaID).mode"
+                @update:model-value="
+                  (v: string) => {
+                    getLearningConfig(schemaID).mode = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
               >
-                <option value="manual">不学习</option>
-                <option value="frequency">仅调频</option>
-                <option value="auto">自动造词</option>
-              </select>
+                <SelectTrigger class="w-[140px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="manual">不学习</SelectItem>
+                  <SelectItem value="frequency">仅调频</SelectItem>
+                  <SelectItem value="auto">自动造词</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div class="setting-item">
@@ -1102,14 +1175,26 @@ onUnmounted(() => {
               </p>
             </div>
             <div class="setting-control">
-              <select
-                v-model.number="getMixedConfig(schemaID).min_pinyin_length"
-                @change="onSchemaConfigChange(schemaID)"
+              <Select
+                :model-value="
+                  String(getMixedConfig(schemaID).min_pinyin_length)
+                "
+                @update:model-value="
+                  (v: string) => {
+                    getMixedConfig(schemaID).min_pinyin_length = Number(v);
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
               >
-                <option :value="1">1码</option>
-                <option :value="2">2码</option>
-                <option :value="3">3码</option>
-              </select>
+                <SelectTrigger class="w-[140px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1码</SelectItem>
+                  <SelectItem value="2">2码</SelectItem>
+                  <SelectItem value="3">3码</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div class="setting-item">
@@ -1118,14 +1203,15 @@ onUnmounted(() => {
               <p class="setting-hint">在拼音候选旁显示"拼"标记以区分来源</p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getMixedConfig(schemaID).show_source_hint"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getMixedConfig(schemaID).show_source_hint"
+                @update:checked="
+                  (v: boolean) => {
+                    getMixedConfig(schemaID).show_source_hint = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -1136,14 +1222,15 @@ onUnmounted(() => {
               </p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getMixedConfig(schemaID).enable_abbrev_match"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getMixedConfig(schemaID).enable_abbrev_match"
+                @update:checked="
+                  (v: boolean) => {
+                    getMixedConfig(schemaID).enable_abbrev_match = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
           <div class="setting-item">
@@ -1154,14 +1241,15 @@ onUnmounted(() => {
               </p>
             </div>
             <div class="setting-control">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="getMixedConfig(schemaID).z_key_repeat"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                <span class="slider"></span>
-              </label>
+              <Switch
+                :checked="getMixedConfig(schemaID).z_key_repeat"
+                @update:checked="
+                  (v: boolean) => {
+                    getMixedConfig(schemaID).z_key_repeat = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
         </template>
@@ -1169,51 +1257,37 @@ onUnmounted(() => {
     </template>
 
     <!-- 模糊音配置对话框 -->
-    <div
-      class="dialog-overlay"
-      v-if="showFuzzyDialog"
-      @click.self="showFuzzyDialog = false"
-    >
-      <div class="dialog-box dialog-sectioned">
-        <div class="dialog-header">
-          <h3>模糊音配置</h3>
-          <button class="dialog-close" @click="showFuzzyDialog = false">
-            ×
-          </button>
-        </div>
-        <div class="dialog-body">
-          <div class="fuzzy-pairs-grid">
-            <label
-              class="fuzzy-pair-item"
-              v-for="pair in fuzzyPairs"
-              :key="pair.field"
-            >
-              <input
-                type="checkbox"
-                v-model="(getFuzzyConfig(fuzzyEditSchemaID) as any)[pair.field]"
-                @change="onSchemaConfigChange(fuzzyEditSchemaID)"
-              />
-              <span class="fuzzy-pair-label">{{ pair.label }}</span>
-              <span class="fuzzy-pair-example">{{ pair.example }}</span>
-            </label>
-          </div>
-        </div>
-        <div class="dialog-footer">
-          <button class="btn btn-sm" @click="setAllFuzzyPairs(true)">
-            全选
-          </button>
-          <button class="btn btn-sm" @click="setAllFuzzyPairs(false)">
-            全不选
-          </button>
-          <button
-            class="btn btn-sm btn-primary"
-            @click="showFuzzyDialog = false"
+    <Dialog :open="showFuzzyDialog" @update:open="showFuzzyDialog = $event">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>模糊音配置</DialogTitle>
+        </DialogHeader>
+        <div class="fuzzy-pairs-grid">
+          <label
+            class="fuzzy-pair-item"
+            v-for="pair in fuzzyPairs"
+            :key="pair.field"
           >
-            确定
-          </button>
+            <input
+              type="checkbox"
+              v-model="(getFuzzyConfig(fuzzyEditSchemaID) as any)[pair.field]"
+              @change="onSchemaConfigChange(fuzzyEditSchemaID)"
+            />
+            <span class="fuzzy-pair-label">{{ pair.label }}</span>
+            <span class="fuzzy-pair-example">{{ pair.example }}</span>
+          </label>
         </div>
-      </div>
-    </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" @click="setAllFuzzyPairs(true)"
+            >全选</Button
+          >
+          <Button variant="outline" size="sm" @click="setAllFuzzyPairs(false)"
+            >全不选</Button
+          >
+          <Button size="sm" @click="showFuzzyDialog = false">确定</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </section>
 </template>
 
@@ -1229,7 +1303,7 @@ onUnmounted(() => {
 }
 .schema-list-hint {
   font-size: 12px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   margin-bottom: 12px;
   text-align: left;
 }
@@ -1237,19 +1311,19 @@ onUnmounted(() => {
 .schema-list-empty {
   text-align: center;
   padding: 24px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
 }
 
 /* Schema list */
 .schema-list {
-  border: 1px solid #e5e7eb;
+  border: 1px solid hsl(var(--border) / 0.5);
   border-radius: 8px;
   overflow: hidden;
 }
 
 /* Schema item */
 .schema-item {
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid hsl(var(--border) / 0.5);
 }
 .schema-item:last-child {
   border-bottom: none;
@@ -1279,7 +1353,7 @@ onUnmounted(() => {
   height: 14px;
   border: none;
   background: none;
-  color: #c0c4cc;
+  color: hsl(var(--muted-foreground));
   font-size: 9px;
   cursor: pointer;
   border-radius: 3px;
@@ -1288,8 +1362,8 @@ onUnmounted(() => {
   transition: all 0.15s;
 }
 .schema-sort-btn:hover:not(:disabled) {
-  background: #e5e7eb;
-  color: #374151;
+  background: hsl(var(--border));
+  color: hsl(var(--foreground));
 }
 .schema-sort-btn:disabled {
   opacity: 0.25;
@@ -1312,36 +1386,36 @@ onUnmounted(() => {
 .schema-row-name {
   font-size: 14px;
   font-weight: 500;
-  color: #1f2937;
+  color: hsl(var(--foreground));
 }
 .schema-row-type {
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #f3f4f6;
-  color: #6b7280;
+  background: hsl(var(--secondary));
+  color: hsl(var(--muted-foreground));
   flex-shrink: 0;
 }
 .schema-row-version {
   font-size: 11px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   flex-shrink: 0;
 }
 .schema-row-error {
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #fef2f2;
-  color: #dc2626;
+  background: hsl(var(--destructive) / 0.1);
+  color: hsl(var(--destructive));
   flex-shrink: 0;
   font-weight: 500;
 }
 .schema-error-msg {
-  color: #dc2626;
+  color: hsl(var(--destructive));
 }
 .schema-row-sub {
   font-size: 12px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1368,22 +1442,22 @@ onUnmounted(() => {
   height: 28px;
   border: none;
   background: none;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   cursor: pointer;
   border-radius: 6px;
   transition: all 0.15s;
   padding: 0;
 }
 .btn-detail:hover {
-  background: #f3f4f6;
-  color: #2563eb;
+  background: hsl(var(--secondary));
+  color: hsl(var(--primary));
 }
 .schema-active-badge {
   font-size: 12px;
   font-weight: 500;
-  color: #2563eb;
+  color: hsl(var(--primary));
   padding: 4px 10px;
-  background: #eff6ff;
+  background: hsl(var(--primary) / 0.1);
   border-radius: 6px;
 }
 
@@ -1391,9 +1465,9 @@ onUnmounted(() => {
 .setting-section-title {
   font-size: 13px;
   font-weight: 600;
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
   padding: 10px 0 4px 0;
-  border-top: 1px solid #f0f0f0;
+  border-top: 1px solid hsl(var(--secondary));
   margin-top: 4px;
 }
 .setting-section-title:first-child {

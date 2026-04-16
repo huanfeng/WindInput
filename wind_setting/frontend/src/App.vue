@@ -11,9 +11,20 @@ import * as wailsApi from "./api/wails";
 import type { Config, Status, EngineInfo, TSFLogConfig } from "./api/settings";
 import type { ThemeInfo, ThemePreview, SystemFontInfo } from "./api/wails";
 import { getDefaultConfig, getDefaultTSFLogConfig } from "./api/settings";
+import { Sonner } from "@/components/ui/sonner";
 import { provideToast } from "./composables/useToast";
 import { useConfirm } from "./composables/useConfirm";
-import ToastContainer from "./components/ToastContainer.vue";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from "./components/ui/alert-dialog";
+import { Button } from "./components/ui/button";
 
 import GeneralPage from "./pages/GeneralPage.vue";
 import InputPage from "./pages/InputPage.vue";
@@ -33,7 +44,7 @@ const isWailsEnv = computed(() => {
 });
 
 // 全局 Toast
-const { toasts, toast } = provideToast();
+const { toast } = provideToast();
 const {
   confirmVisible,
   confirmMessage,
@@ -557,8 +568,8 @@ onMounted(async () => {
 </script>
 
 <template>
+  <Sonner />
   <div class="app">
-    <ToastContainer :toasts="toasts" />
     <!-- 加词对话框（模态浮层，可在任何页面上弹出） -->
     <AddWordPage
       v-if="showAddWordDialog"
@@ -597,17 +608,18 @@ onMounted(async () => {
       </nav>
       <div class="sidebar-footer">
         <div class="sidebar-actions">
-          <button class="btn" @click="resetCurrentPageDefaults">
+          <Button variant="outline" @click="resetCurrentPageDefaults">
             恢复本页默认
-          </button>
-          <button class="btn" @click="handleReloadConfig">重新加载</button>
-          <button
-            class="btn btn-primary"
+          </Button>
+          <Button variant="outline" @click="handleReloadConfig"
+            >重新加载</Button
+          >
+          <Button
             @click="saveConfig"
             :disabled="saving || hotkeyConflicts.length > 0"
           >
             {{ saving ? "保存中..." : "保存设置" }}
-          </button>
+          </Button>
         </div>
       </div>
     </aside>
@@ -621,7 +633,7 @@ onMounted(async () => {
       <div v-else-if="error" class="error-panel">
         <div class="error-icon">⚠</div>
         <p>{{ error }}</p>
-        <button class="btn btn-primary" @click="loadData">重试</button>
+        <Button @click="loadData">重试</Button>
       </div>
 
       <div v-else class="content">
@@ -676,30 +688,19 @@ onMounted(async () => {
       </div>
     </main>
     <!-- 确认对话框 -->
-    <div
-      v-if="confirmVisible"
-      class="dialog-overlay"
-      @click.self="handleCancel"
-    >
-      <div class="dialog-box" style="max-width: 360px">
-        <div class="dialog-title">确认</div>
-        <div
-          style="
-            padding: 8px 0 16px;
-            font-size: 14px;
-            color: #374151;
-            white-space: pre-line;
-          "
-        >
-          {{ confirmMessage }}
-        </div>
-        <div class="dialog-actions">
-          <button class="btn btn-sm" @click="handleCancel">取消</button>
-          <button class="btn btn-primary btn-sm" @click="handleConfirm">
-            确定
-          </button>
-        </div>
-      </div>
-    </div>
+    <AlertDialog :open="confirmVisible">
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>确认</AlertDialogTitle>
+          <AlertDialogDescription class="whitespace-pre-line">{{
+            confirmMessage
+          }}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel @click="handleCancel">取消</AlertDialogCancel>
+          <AlertDialogAction @click="handleConfirm">确定</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </div>
 </template>

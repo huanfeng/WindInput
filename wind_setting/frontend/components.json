@@ -1,0 +1,15 @@
+{
+  "style": "default",
+  "typescript": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/app.css",
+    "baseColor": "zinc"
+  },
+  "framework": "vite",
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui"
+  }
+}

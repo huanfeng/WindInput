@@ -4,7 +4,7 @@
     <div class="selector-btn-wrap">
       <button class="selector-btn" @click="toggle">
         <span class="selector-btn-text">{{ displayLabel }}</span>
-        <span class="selector-arrow">▾</span>
+        <ChevronDown class="h-4 w-4 text-muted-foreground flex-shrink-0" />
       </button>
       <div v-if="open" class="selector-dropdown">
         <div
@@ -40,6 +40,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ChevronDown } from "lucide-vue-next";
 import type { SchemaStatusItem } from "../../api/wails";
 
 interface ModelValue {
@@ -133,7 +134,7 @@ onUnmounted(() => {
 
 .selector-label {
   font-size: 13px;
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
   font-weight: 500;
   flex-shrink: 0;
 }
@@ -148,19 +149,19 @@ onUnmounted(() => {
   width: 100%;
   padding: 6px 12px;
   font-size: 13px;
-  border: 1px solid #d1d5db;
+  border: 1px solid hsl(var(--border));
   border-radius: 6px;
-  background: white;
+  background: hsl(var(--card));
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  color: #374151;
+  color: hsl(var(--foreground));
   transition: border-color 0.15s;
 }
 
 .selector-btn:hover {
-  border-color: #9ca3af;
+  border-color: hsl(var(--muted-foreground));
 }
 
 .selector-btn-text {
@@ -181,8 +182,8 @@ onUnmounted(() => {
   top: calc(100% + 4px);
   left: 0;
   right: 0;
-  background: white;
-  border: 1px solid #e5e7eb;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   min-width: 100%;
@@ -199,16 +200,16 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #374151;
+  color: hsl(var(--foreground));
 }
 
 .selector-item:hover {
-  background: #f3f4f6;
+  background: hsl(var(--secondary));
 }
 
 .selector-item.active {
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: hsl(var(--primary) / 0.1);
+  color: hsl(var(--primary));
 }
 
 .item-name {
@@ -222,21 +223,21 @@ onUnmounted(() => {
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #f3f4f6;
-  color: #6b7280;
+  background: hsl(var(--secondary));
+  color: hsl(var(--muted-foreground));
   flex-shrink: 0;
 }
 
 .selector-divider {
   height: 1px;
-  background: #e5e7eb;
+  background: hsl(var(--border));
   margin: 4px 0;
 }
 
 .selector-empty {
   padding: 8px 14px;
   font-size: 13px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
 }
 
 .status-dot {
@@ -247,20 +248,20 @@ onUnmounted(() => {
 }
 
 .dot-enabled {
-  background: #22c55e;
+  background: hsl(var(--success));
 }
 
 .dot-disabled {
-  background: #d1d5db;
+  background: hsl(var(--border));
 }
 
 .dot-orphaned {
-  background: #f97316;
+  background: hsl(var(--warning));
 }
 
 .orphan-tag {
   font-size: 11px;
-  color: #dc2626;
+  color: hsl(var(--destructive));
   flex-shrink: 0;
 }
 
@@ -271,7 +272,7 @@ onUnmounted(() => {
   background: transparent;
 }
 .selector-dropdown::-webkit-scrollbar-thumb {
-  background: #d1d5db;
+  background: hsl(var(--border));
   border-radius: 3px;
 }
 </style>

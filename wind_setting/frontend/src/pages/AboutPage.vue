@@ -59,13 +59,12 @@ async function copyQQGroup(event: Event) {
 
       <!-- 链接卡片 -->
       <div class="about-links">
-        <button
-          class="link-card"
-          @click="$emit('openExternalLink', repoUrl)"
-        >
+        <button class="link-card" @click="$emit('openExternalLink', repoUrl)">
           <span class="link-card-icon icon-github" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path d="M12 2C6.48 2 2 6.58 2 12.26c0 4.58 2.87 8.46 6.84 9.83.5.1.68-.22.68-.49 0-.24-.01-.87-.01-1.71-2.78.62-3.37-1.39-3.37-1.39-.45-1.2-1.1-1.52-1.1-1.52-.9-.64.07-.63.07-.63 1 .07 1.52 1.06 1.52 1.06.89 1.56 2.34 1.11 2.9.85.09-.67.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.08 0-1.12.39-2.03 1.02-2.75-.1-.26-.44-1.3.1-2.71 0 0 .84-.27 2.75 1.03.8-.23 1.66-.35 2.51-.35.85 0 1.71.12 2.51.35 1.9-1.3 2.74-1.03 2.74-1.03.54 1.41.2 2.45.1 2.71.63.72 1.02 1.63 1.02 2.75 0 3.95-2.35 4.82-4.58 5.07.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.8 0 .27.18.6.69.49 3.97-1.37 6.83-5.25 6.83-9.83C22 6.58 17.52 2 12 2z" />
+              <path
+                d="M12 2C6.48 2 2 6.58 2 12.26c0 4.58 2.87 8.46 6.84 9.83.5.1.68-.22.68-.49 0-.24-.01-.87-.01-1.71-2.78.62-3.37-1.39-3.37-1.39-.45-1.2-1.1-1.52-1.1-1.52-.9-.64.07-.63.07-.63 1 .07 1.52 1.06 1.52 1.06.89 1.56 2.34 1.11 2.9.85.09-.67.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.08 0-1.12.39-2.03 1.02-2.75-.1-.26-.44-1.3.1-2.71 0 0 .84-.27 2.75 1.03.8-.23 1.66-.35 2.51-.35.85 0 1.71.12 2.51.35 1.9-1.3 2.74-1.03 2.74-1.03.54 1.41.2 2.45.1 2.71.63.72 1.02 1.63 1.02 2.75 0 3.95-2.35 4.82-4.58 5.07.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.8 0 .27.18.6.69.49 3.97-1.37 6.83-5.25 6.83-9.83C22 6.58 17.52 2 12 2z"
+              />
             </svg>
           </span>
           <div class="link-card-text">
@@ -80,7 +79,9 @@ async function copyQQGroup(event: Event) {
         >
           <span class="link-card-icon icon-issues" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z" />
+              <path
+                d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"
+              />
             </svg>
           </span>
           <div class="link-card-text">
@@ -110,7 +111,9 @@ async function copyQQGroup(event: Event) {
         >
           <span class="link-card-icon icon-qq" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path d="M21.395 15.035a40 40 0 0 0-.803-2.264l-1.079-2.695c.001-.032.014-.562.014-.836C19.526 4.632 17.351 0 12 0S4.474 4.632 4.474 9.241c0 .274.013.804.014.836l-1.08 2.695a39 39 0 0 0-.802 2.264c-1.021 3.283-.69 4.643-.438 4.673.54.065 2.103-2.472 2.103-2.472 0 1.469.756 3.387 2.394 4.771-.612.188-1.363.479-1.845.835-.434.32-.379.646-.301.778.343.578 5.883.369 7.482.189 1.6.18 7.14.389 7.483-.189.078-.132.132-.458-.301-.778-.483-.356-1.233-.646-1.846-.836 1.637-1.384 2.393-3.302 2.393-4.771 0 0 1.563 2.537 2.103 2.472.251-.03.581-1.39-.438-4.673" />
+              <path
+                d="M21.395 15.035a40 40 0 0 0-.803-2.264l-1.079-2.695c.001-.032.014-.562.014-.836C19.526 4.632 17.351 0 12 0S4.474 4.632 4.474 9.241c0 .274.013.804.014.836l-1.08 2.695a39 39 0 0 0-.802 2.264c-1.021 3.283-.69 4.643-.438 4.673.54.065 2.103-2.472 2.103-2.472 0 1.469.756 3.387 2.394 4.771-.612.188-1.363.479-1.845.835-.434.32-.379.646-.301.778.343.578 5.883.369 7.482.189 1.6.18 7.14.389 7.483-.189.078-.132.132-.458-.301-.778-.483-.356-1.233-.646-1.846-.836 1.637-1.384 2.393-3.302 2.393-4.771 0 0 1.563 2.537 2.103 2.472.251-.03.581-1.39-.438-4.673"
+              />
             </svg>
           </span>
           <div class="link-card-text">
@@ -122,13 +125,17 @@ async function copyQQGroup(event: Event) {
             :class="{ copied: qqCopied }"
             @click="copyQQGroup($event)"
             :title="qqCopied ? '已复制' : '复制群号'"
-          >{{ qqCopied ? "已复制" : "复制" }}</span>
+            >{{ qqCopied ? "已复制" : "复制" }}</span
+          >
         </button>
       </div>
 
       <!-- 版权 -->
       <div class="about-footer">
-        <span>&copy; {{ currentYear }} WindInput Contributors &middot; MIT License</span>
+        <span
+          >&copy; {{ currentYear }} WindInput Contributors &middot; MIT
+          License</span
+        >
       </div>
     </div>
   </section>
@@ -163,21 +170,21 @@ async function copyQQGroup(event: Event) {
   font-size: 22px;
   font-weight: 700;
   margin: 0;
-  color: #111827;
+  color: hsl(var(--foreground));
 }
 .about-version-badge {
   display: inline-block;
   font-size: 12px;
   font-weight: 600;
-  color: #2563eb;
-  background: #eff6ff;
+  color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.1);
   padding: 2px 10px;
   border-radius: 999px;
   width: fit-content;
   letter-spacing: 0.02em;
 }
 .about-desc {
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
   font-size: 13px;
   margin: 4px 0 0;
 }
@@ -193,9 +200,9 @@ async function copyQQGroup(event: Event) {
   align-items: center;
   gap: 12px;
   padding: 14px 16px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid hsl(var(--border));
   border-radius: 12px;
-  background: #fff;
+  background: hsl(var(--card));
   cursor: pointer;
   text-align: left;
   position: relative;
@@ -205,8 +212,8 @@ async function copyQQGroup(event: Event) {
     transform 0.15s;
 }
 .link-card:hover {
-  border-color: #cbd5f5;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08);
+  border-color: hsl(var(--ring) / 0.4);
+  box-shadow: 0 4px 12px hsl(var(--ring) / 0.08);
   transform: translateY(-1px);
 }
 .link-card-icon {
@@ -216,17 +223,17 @@ async function copyQQGroup(event: Event) {
   align-items: center;
   justify-content: center;
   border-radius: 10px;
-  color: #fff;
+  color: hsl(var(--primary-foreground));
   flex-shrink: 0;
 }
 .icon-github {
-  background: #111827;
+  background: hsl(var(--foreground));
 }
 .icon-issues {
-  background: #f59e0b;
+  background: hsl(var(--warning));
 }
 .icon-releases {
-  background: #10b981;
+  background: hsl(var(--success));
 }
 .icon-qq {
   background: #12b7f5;
@@ -241,32 +248,34 @@ async function copyQQGroup(event: Event) {
 .link-card-title {
   font-size: 14px;
   font-weight: 600;
-  color: #111827;
+  color: hsl(var(--foreground));
 }
 .link-card-desc {
   font-size: 12px;
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
 }
 
 /* QQ 卡片复制按钮 */
 .copy-btn {
   font-size: 11px;
-  color: #2563eb;
-  background: #eff6ff;
+  color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.1);
   padding: 2px 8px;
   border-radius: 4px;
   flex-shrink: 0;
   opacity: 0;
-  transition: opacity 0.15s, background 0.15s;
+  transition:
+    opacity 0.15s,
+    background 0.15s;
   cursor: pointer;
 }
 .copy-btn:hover {
-  background: #dbeafe;
+  background: hsl(var(--primary) / 0.15);
 }
 .copy-btn.copied {
   opacity: 1;
-  color: #16a34a;
-  background: #dcfce7;
+  color: hsl(var(--success));
+  background: hsl(var(--success) / 0.15);
 }
 .qq-card:hover .copy-btn {
   opacity: 1;
@@ -280,6 +289,6 @@ async function copyQQGroup(event: Event) {
 }
 .about-footer span {
   font-size: 12px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
 }
 </style>

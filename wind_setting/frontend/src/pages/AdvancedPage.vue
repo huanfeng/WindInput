@@ -13,7 +13,9 @@
           <p class="setting-hint">%APPDATA%\WindInput</p>
         </div>
         <div class="setting-control">
-          <button class="btn btn-sm" @click="$emit('openConfigFolder')">打开文件夹</button>
+          <Button variant="outline" size="sm" @click="$emit('openConfigFolder')"
+            >打开文件夹</Button
+          >
         </div>
       </div>
     </div>
@@ -26,12 +28,20 @@
           <p class="setting-hint">重启输入法服务后生效</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.advanced.log_level" class="select">
-            <option value="debug">Debug（调试）</option>
-            <option value="info">Info（信息）</option>
-            <option value="warn">Warn（警告）</option>
-            <option value="error">Error（错误）</option>
-          </select>
+          <Select
+            :model-value="formData.advanced.log_level"
+            @update:model-value="formData.advanced.log_level = $event"
+          >
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="debug">Debug（调试）</SelectItem>
+              <SelectItem value="info">Info（信息）</SelectItem>
+              <SelectItem value="warn">Warn（警告）</SelectItem>
+              <SelectItem value="error">Error（错误）</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -40,12 +50,22 @@
           <p class="setting-hint">仅对新进程生效</p>
         </div>
         <div class="setting-control">
-          <select v-model="props.tsfLogConfig.mode" class="select">
-            <option value="none">None（关闭）</option>
-            <option value="file">File（文件）</option>
-            <option value="debugstring">DebugString（调试输出）</option>
-            <option value="all">All（文件 + 调试输出）</option>
-          </select>
+          <Select
+            :model-value="props.tsfLogConfig.mode"
+            @update:model-value="props.tsfLogConfig.mode = $event"
+          >
+            <SelectTrigger class="w-[200px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">None（关闭）</SelectItem>
+              <SelectItem value="file">File（文件）</SelectItem>
+              <SelectItem value="debugstring"
+                >DebugString（调试输出）</SelectItem
+              >
+              <SelectItem value="all">All（文件 + 调试输出）</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -54,14 +74,22 @@
           <p class="setting-hint">请仅在调试问题时才使用 Debug / Trace</p>
         </div>
         <div class="setting-control">
-          <select v-model="props.tsfLogConfig.level" class="select">
-            <option value="off">Off（关闭）</option>
-            <option value="error">Error（错误）</option>
-            <option value="warn">Warn（警告）</option>
-            <option value="info">Info（信息）</option>
-            <option value="debug">Debug（调试）</option>
-            <option value="trace">Trace（详细跟踪）</option>
-          </select>
+          <Select
+            :model-value="props.tsfLogConfig.level"
+            @update:model-value="props.tsfLogConfig.level = $event"
+          >
+            <SelectTrigger class="w-[200px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="off">Off（关闭）</SelectItem>
+              <SelectItem value="error">Error（错误）</SelectItem>
+              <SelectItem value="warn">Warn（警告）</SelectItem>
+              <SelectItem value="info">Info（信息）</SelectItem>
+              <SelectItem value="debug">Debug（调试）</SelectItem>
+              <SelectItem value="trace">Trace（详细跟踪）</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div v-if="showSensitiveLogWarning" class="setting-item">
@@ -78,7 +106,9 @@
           <p class="setting-hint">{{ logPath }}</p>
         </div>
         <div class="setting-control">
-          <button class="btn btn-sm" @click="$emit('openLogFolder')">打开文件夹</button>
+          <Button variant="outline" size="sm" @click="$emit('openLogFolder')"
+            >打开文件夹</Button
+          >
         </div>
       </div>
     </div>
@@ -88,6 +118,14 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Config, TSFLogConfig } from "../api/settings";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from "@/components/ui/select";
 
 const props = defineProps<{
   formData: Config;
@@ -105,12 +143,14 @@ const tsfConfigPath = "%LOCALAPPDATA%\\WindInput\\logs\\tsf_log_config";
 const showSensitiveLogWarning = computed(() => {
   const serviceLevel = props.formData.advanced.log_level;
   const tsfLevel = props.tsfLogConfig.level;
-  return serviceLevel === "debug" || tsfLevel === "debug" || tsfLevel === "trace";
+  return (
+    serviceLevel === "debug" || tsfLevel === "debug" || tsfLevel === "trace"
+  );
 });
 </script>
 
 <style scoped>
 .warning-text {
-  color: #a84f00;
+  color: hsl(var(--warning));
 }
 </style>

@@ -14,38 +14,37 @@
           <p class="setting-hint">过滤候选词中的生僻字</p>
         </div>
         <div class="setting-control">
-          <div class="filter-dropdown" ref="filterDropdownRef">
-            <button
-              class="filter-select"
-              type="button"
-              @click="filterDropdownOpen = !filterDropdownOpen"
-            >
-              <span class="filter-select-label">{{
-                currentFilterOption.label
-              }}</span>
-              <span v-if="currentFilterOption.tag" class="filter-select-tag">{{
-                currentFilterOption.tag
-              }}</span>
-              <span class="filter-select-arrow">&#9662;</span>
-            </button>
-            <div v-if="filterDropdownOpen" class="filter-menu">
-              <div
+          <Select
+            :model-value="formData.input.filter_mode"
+            @update:model-value="selectFilterMode($event)"
+          >
+            <SelectTrigger class="w-[200px]">
+              <SelectValue :placeholder="'选择范围'">
+                {{ currentFilterOption?.label || "选择范围" }}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem
                 v-for="opt in filterModeOptions"
                 :key="opt.value"
-                class="filter-option"
-                :class="{ selected: formData.input.filter_mode === opt.value }"
-                @click="selectFilterMode(opt.value)"
+                :value="opt.value"
               >
-                <div class="filter-option-main">
-                  <span class="filter-option-name">{{ opt.label }}</span>
-                  <span v-if="opt.tag" class="filter-option-tag">{{
-                    opt.tag
+                <div class="flex flex-col gap-0.5">
+                  <div class="flex items-center gap-2">
+                    <span>{{ opt.label }}</span>
+                    <span
+                      v-if="opt.tag"
+                      class="text-[10px] px-1 rounded bg-primary/10 text-primary"
+                      >{{ opt.tag }}</span
+                    >
+                  </div>
+                  <span class="text-xs text-muted-foreground">{{
+                    opt.desc
                   }}</span>
                 </div>
-                <div class="filter-option-desc">{{ opt.desc }}</div>
-              </div>
-            </div>
-          </div>
+              </SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -54,10 +53,10 @@
           <p class="setting-hint">切换到中文模式时自动切换中文标点</p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input type="checkbox" v-model="formData.input.punct_follow_mode" />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.input.punct_follow_mode"
+            @update:checked="formData.input.punct_follow_mode = $event"
+          />
         </div>
       </div>
       <div class="setting-item">
@@ -68,13 +67,10 @@
           </p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.input.smart_punct_after_digit"
-            />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.input.smart_punct_after_digit"
+            @update:checked="formData.input.smart_punct_after_digit = $event"
+          />
         </div>
       </div>
       <div class="setting-item">
@@ -90,29 +86,32 @@
             />
             启用
           </label>
-          <button
-            class="btn btn-sm"
+          <Button
+            variant="outline"
+            size="sm"
             :disabled="!formData.input.punct_custom.enabled"
             @click="openPunctCustomDialog()"
           >
             配置
-          </button>
+          </Button>
         </div>
       </div>
     </div>
 
     <!-- 自定义标点映射对话框 -->
-    <div
-      class="dialog-overlay"
-      v-if="showPunctCustomDialog"
-      @click.self="cancelPunctCustom()"
+    <Dialog
+      :open="showPunctCustomDialog"
+      @update:open="
+        (v: boolean) => {
+          if (!v) cancelPunctCustom();
+        }
+      "
     >
-      <div class="dialog-box dialog-sectioned dialog-wide">
-        <div class="dialog-header">
-          <h3>自定义标点设置</h3>
-          <button class="dialog-close" @click="cancelPunctCustom()">×</button>
-        </div>
-        <div class="dialog-body">
+      <DialogContent class="max-w-[600px]">
+        <DialogHeader>
+          <DialogTitle>自定义标点设置</DialogTitle>
+        </DialogHeader>
+        <div>
           <p class="dialog-hint">双击单元格修改，长度 1-8</p>
           <div class="punct-table-wrap">
             <table class="punct-table">
@@ -155,18 +154,23 @@
             </table>
           </div>
         </div>
-        <div class="dialog-footer">
-          <button class="btn btn-sm" @click="resetPunctCustomDefaults()">
+        <DialogFooter class="flex !justify-between">
+          <Button
+            variant="outline"
+            size="sm"
+            @click="resetPunctCustomDefaults()"
+          >
             恢复默认
-          </button>
-          <span class="dialog-footer-spacer"></span>
-          <button class="btn btn-sm" @click="cancelPunctCustom()">取消</button>
-          <button class="btn btn-sm btn-primary" @click="confirmPunctCustom()">
-            确定
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+          <div class="flex gap-2">
+            <Button variant="outline" size="sm" @click="cancelPunctCustom()"
+              >取消</Button
+            >
+            <Button size="sm" @click="confirmPunctCustom()">确定</Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- 按键行为 -->
     <div class="settings-card">
@@ -177,10 +181,18 @@
           <p class="setting-hint">有编码时按回车键的处理方式</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.input.enter_behavior">
-            <option value="commit">上屏编码</option>
-            <option value="clear">清空编码</option>
-          </select>
+          <Select
+            :model-value="formData.input.enter_behavior"
+            @update:model-value="formData.input.enter_behavior = $event"
+          >
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="commit">上屏编码</SelectItem>
+              <SelectItem value="clear">清空编码</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -189,10 +201,20 @@
           <p class="setting-hint">无候选词时按空格键的处理方式</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.input.space_on_empty_behavior">
-            <option value="commit">上屏编码</option>
-            <option value="clear">清空编码</option>
-          </select>
+          <Select
+            :model-value="formData.input.space_on_empty_behavior"
+            @update:model-value="
+              formData.input.space_on_empty_behavior = $event
+            "
+          >
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="commit">上屏编码</SelectItem>
+              <SelectItem value="clear">清空编码</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
     </div>
@@ -206,11 +228,21 @@
           <p class="setting-hint">按的数字超出当前页候选数量时的处理方式</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.input.overflow_behavior.number_key">
-            <option value="ignore">不起作用</option>
-            <option value="commit">候选上屏</option>
-            <option value="commit_and_input">顶码上屏</option>
-          </select>
+          <Select
+            :model-value="formData.input.overflow_behavior.number_key"
+            @update:model-value="
+              formData.input.overflow_behavior.number_key = $event
+            "
+          >
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ignore">不起作用</SelectItem>
+              <SelectItem value="commit">候选上屏</SelectItem>
+              <SelectItem value="commit_and_input">顶码上屏</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -219,11 +251,21 @@
           <p class="setting-hint">候选数量不足时按次选或三选键的处理方式</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.input.overflow_behavior.select_key">
-            <option value="ignore">不起作用</option>
-            <option value="commit">候选上屏</option>
-            <option value="commit_and_input">顶码上屏</option>
-          </select>
+          <Select
+            :model-value="formData.input.overflow_behavior.select_key"
+            @update:model-value="
+              formData.input.overflow_behavior.select_key = $event
+            "
+          >
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ignore">不起作用</SelectItem>
+              <SelectItem value="commit">候选上屏</SelectItem>
+              <SelectItem value="commit_and_input">顶码上屏</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -232,11 +274,21 @@
           <p class="setting-hint">候选词长度不足时按以词定字键的处理方式</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.input.overflow_behavior.select_char_key">
-            <option value="ignore">不起作用</option>
-            <option value="commit">候选上屏</option>
-            <option value="commit_and_input">顶码上屏</option>
-          </select>
+          <Select
+            :model-value="formData.input.overflow_behavior.select_char_key"
+            @update:model-value="
+              formData.input.overflow_behavior.select_char_key = $event
+            "
+          >
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ignore">不起作用</SelectItem>
+              <SelectItem value="commit">候选上屏</SelectItem>
+              <SelectItem value="commit_and_input">顶码上屏</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
     </div>
@@ -257,13 +309,14 @@
             <input type="checkbox" v-model="formData.input.auto_pair.chinese" />
             启用
           </label>
-          <button
-            class="btn btn-sm"
+          <Button
+            variant="outline"
+            size="sm"
             :disabled="!formData.input.auto_pair.chinese"
             @click="openPairDialog('chinese')"
           >
             配置
-          </button>
+          </Button>
         </div>
       </div>
       <div class="setting-item">
@@ -279,59 +332,54 @@
             <input type="checkbox" v-model="formData.input.auto_pair.english" />
             启用
           </label>
-          <button
-            class="btn btn-sm"
+          <Button
+            variant="outline"
+            size="sm"
             :disabled="!formData.input.auto_pair.english"
             @click="openPairDialog('english')"
           >
             配置
-          </button>
+          </Button>
         </div>
       </div>
     </div>
 
     <!-- 标点配对配置对话框 -->
-    <div
-      class="dialog-overlay"
-      v-if="showPairDialog"
-      @click.self="showPairDialog = false"
-    >
-      <div class="dialog-box dialog-sectioned">
-        <div class="dialog-header">
-          <h3>{{ pairDialogType === "chinese" ? "中文" : "英文" }}配对配置</h3>
-          <button class="dialog-close" @click="showPairDialog = false">
-            ×
-          </button>
-        </div>
-        <div class="dialog-body">
-          <div class="pair-items-grid">
-            <label
-              class="pair-item"
-              v-for="item in currentPairOptions"
-              :key="item.pair"
-            >
-              <input
-                type="checkbox"
-                :checked="isPairEnabled(item.pair)"
-                @change="togglePair(item.pair)"
-              />
-              <span class="pair-symbol">{{ item.left }} {{ item.right }}</span>
-              <span class="pair-desc">{{ item.desc }}</span>
-            </label>
-          </div>
-        </div>
-        <div class="dialog-footer">
-          <button class="btn btn-sm" @click="setAllPairs(true)">全选</button>
-          <button class="btn btn-sm" @click="setAllPairs(false)">全不选</button>
-          <button
-            class="btn btn-sm btn-primary"
-            @click="showPairDialog = false"
+    <Dialog :open="showPairDialog" @update:open="showPairDialog = $event">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle
+            >{{
+              pairDialogType === "chinese" ? "中文" : "英文"
+            }}配对配置</DialogTitle
           >
-            确定
-          </button>
+        </DialogHeader>
+        <div class="pair-items-grid">
+          <label
+            class="pair-item"
+            v-for="item in currentPairOptions"
+            :key="item.pair"
+          >
+            <input
+              type="checkbox"
+              :checked="isPairEnabled(item.pair)"
+              @change="togglePair(item.pair)"
+            />
+            <span class="pair-symbol">{{ item.left }} {{ item.right }}</span>
+            <span class="pair-desc">{{ item.desc }}</span>
+          </label>
         </div>
-      </div>
-    </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" @click="setAllPairs(true)"
+            >全选</Button
+          >
+          <Button variant="outline" size="sm" @click="setAllPairs(false)"
+            >全不选</Button
+          >
+          <Button size="sm" @click="showPairDialog = false">确定</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- 快捷输入 -->
     <div class="settings-card">
@@ -344,13 +392,10 @@
           </p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.input.quick_input.enabled"
-            />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.input.quick_input.enabled"
+            @update:checked="formData.input.quick_input.enabled = $event"
+          />
         </div>
       </div>
       <div
@@ -362,20 +407,28 @@
           <p class="setting-hint">用于启动快捷输入的按键</p>
         </div>
         <div class="setting-control">
-          <select
-            v-model="formData.input.quick_input.trigger_key"
+          <Select
+            :model-value="formData.input.quick_input.trigger_key"
+            @update:model-value="
+              formData.input.quick_input.trigger_key = $event
+            "
             :disabled="!formData.input.quick_input.enabled"
           >
-            <option value="semicolon">分号 ( ; )</option>
-            <option value="backtick">反引号 ( ` )</option>
-            <option value="quote">单引号 ( ' )</option>
-            <option value="comma">逗号 ( , )</option>
-            <option value="period">句号 ( . )</option>
-            <option value="slash">斜杠 ( / )</option>
-            <option value="backslash">反斜杠 ( \ )</option>
-            <option value="open_bracket">左方括号 ( [ )</option>
-            <option value="close_bracket">右方括号 ( ] )</option>
-          </select>
+            <SelectTrigger class="w-[180px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="semicolon">分号 ( ; )</SelectItem>
+              <SelectItem value="backtick">反引号 ( ` )</SelectItem>
+              <SelectItem value="quote">单引号 ( ' )</SelectItem>
+              <SelectItem value="comma">逗号 ( , )</SelectItem>
+              <SelectItem value="period">句号 ( . )</SelectItem>
+              <SelectItem value="slash">斜杠 ( / )</SelectItem>
+              <SelectItem value="backslash">反斜杠 ( \ )</SelectItem>
+              <SelectItem value="open_bracket">左方括号 ( [ )</SelectItem>
+              <SelectItem value="close_bracket">右方括号 ( ] )</SelectItem>
+            </SelectContent>
+          </Select>
           <p v-if="triggerKeyConflicts.length > 0" class="setting-warning">
             ⚠ 与{{ triggerKeyConflicts.join("、") }}冲突，临时拼音优先
           </p>
@@ -392,14 +445,11 @@
           </p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.input.quick_input.force_vertical"
-              :disabled="!formData.input.quick_input.enabled"
-            />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.input.quick_input.force_vertical"
+            @update:checked="formData.input.quick_input.force_vertical = $event"
+            :disabled="!formData.input.quick_input.enabled"
+          />
         </div>
       </div>
       <div
@@ -432,13 +482,10 @@
           <p class="setting-hint">启用后恢复上次的中英文、全半角和标点状态</p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.startup.remember_last_state"
-            />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.startup.remember_last_state"
+            @update:checked="formData.startup.remember_last_state = $event"
+          />
         </div>
       </div>
       <div
@@ -527,15 +574,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, computed, nextTick } from "vue";
 import type { Config } from "../api/settings";
+import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
 
 const props = defineProps<{
   formData: Config;
 }>();
-
-const filterDropdownOpen = ref(false);
-const filterDropdownRef = ref<HTMLElement | null>(null);
 
 // 标点配对配置
 const showPairDialog = ref(false);
@@ -831,119 +891,10 @@ const currentFilterOption = computed(
 
 function selectFilterMode(value: string) {
   props.formData.input.filter_mode = value;
-  filterDropdownOpen.value = false;
 }
-
-function handleDocumentClick(event: MouseEvent) {
-  if (
-    filterDropdownRef.value &&
-    !filterDropdownRef.value.contains(event.target as Node)
-  ) {
-    filterDropdownOpen.value = false;
-  }
-}
-
-onMounted(() => {
-  document.addEventListener("click", handleDocumentClick);
-});
-
-onUnmounted(() => {
-  document.removeEventListener("click", handleDocumentClick);
-});
 </script>
 
 <style scoped>
-.filter-dropdown {
-  position: relative;
-}
-.filter-select {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: #fff;
-  cursor: pointer;
-  font-size: 13px;
-  color: #1f2937;
-  transition:
-    border-color 0.15s,
-    box-shadow 0.15s;
-  min-width: 160px;
-}
-.filter-select:hover {
-  border-color: #9ca3af;
-}
-.filter-select:focus {
-  outline: none;
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
-}
-.filter-select-label {
-  flex: 1;
-  text-align: left;
-}
-.filter-select-tag {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: #dcfce7;
-  color: #166534;
-  font-weight: 500;
-}
-.filter-select-arrow {
-  color: #6b7280;
-  font-size: 11px;
-}
-.filter-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 10;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
-  min-width: 280px;
-  padding: 6px;
-}
-.filter-option {
-  padding: 10px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background-color 0.15s;
-}
-.filter-option:hover {
-  background-color: #f3f4f6;
-}
-.filter-option.selected {
-  background-color: #eff6ff;
-}
-.filter-option-main {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.filter-option-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: #1f2937;
-}
-.filter-option-tag {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: #dcfce7;
-  color: #166534;
-  font-weight: 500;
-}
-.filter-option-desc {
-  font-size: 12px;
-  color: #9ca3af;
-  margin-top: 3px;
-}
-
 /* ========== 自定义标点对话框 ========== */
 .dialog-wide {
   min-width: 520px;
@@ -1030,7 +981,7 @@ onUnmounted(() => {
 /* ========== 触发键冲突提示 ========== */
 .setting-warning {
   font-size: 12px;
-  color: #d97706;
+  color: hsl(var(--warning));
   margin: 4px 0 0;
   padding: 0;
 }
@@ -1039,23 +990,23 @@ onUnmounted(() => {
 .number-input {
   width: 70px;
   padding: 6px 10px;
-  border: 1px solid #d1d5db;
+  border: 1px solid hsl(var(--border));
   border-radius: 6px;
   font-size: 13px;
-  color: #1f2937;
-  background: #fff;
+  color: hsl(var(--foreground));
+  background: hsl(var(--card));
   text-align: center;
   transition:
     border-color 0.15s,
     box-shadow 0.15s;
 }
 .number-input:hover:not(:disabled) {
-  border-color: #9ca3af;
+  border-color: hsl(var(--muted-foreground));
 }
 .number-input:focus {
   outline: none;
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.15);
 }
 .number-input:disabled {
   opacity: 0.5;

@@ -1,167 +1,13 @@
-<template>
-  <div class="freq-panel">
-    <!-- 工具栏 -->
-    <div class="dict-toolbar">
-      <label class="toolbar-checkbox-wrap">
-        <input type="checkbox" :checked="allSelected" @change="toggleAll" />
-        <span>全选</span>
-      </label>
-      <button
-        class="btn btn-sm btn-danger-outline"
-        :disabled="selectedKeys.size === 0"
-        @click="handleBatchDelete"
-      >
-        删除{{ selectedKeys.size > 0 ? ` (${selectedKeys.size})` : "" }}
-      </button>
-      <div class="toolbar-spacer"></div>
-      <input
-        type="text"
-        v-model="searchQuery"
-        class="input input-sm toolbar-search"
-        placeholder="搜索..."
-        @input="onSearchInput"
-      />
-      <span class="toolbar-total">共 {{ total }} 条</span>
-      <button class="btn btn-sm btn-danger-outline" @click="handleClear">
-        清空
-      </button>
-    </div>
-
-    <!-- 内容区域 -->
-    <div class="dict-content-area" style="position: relative">
-      <div v-if="loading" class="content-loading-overlay">
-        <div class="spinner"></div>
-      </div>
-
-      <div class="dict-table-wrap">
-        <table class="dict-table">
-          <colgroup>
-            <col class="col-check" />
-            <col class="col-code" />
-            <col />
-            <col class="col-count" />
-            <col class="col-boost" />
-            <col class="col-time" />
-            <col class="col-action" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th></th>
-              <th>编码</th>
-              <th>词条</th>
-              <th>次数</th>
-              <th>提升</th>
-              <th>最后使用</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="(item, idx) in freqList"
-              :key="idx"
-              :class="{ selected: selectedKeys.has(itemKey(item)) }"
-            >
-              <td>
-                <input
-                  type="checkbox"
-                  class="item-checkbox"
-                  :checked="selectedKeys.has(itemKey(item))"
-                  @change="toggleSelect(item)"
-                />
-              </td>
-              <td>
-                <span class="dict-item-code">{{ item.code }}</span>
-              </td>
-              <td>{{ item.text }}</td>
-              <td class="td-weight">{{ item.count }}</td>
-              <td class="td-weight">{{ item.boost }}</td>
-              <td class="td-meta">{{ formatLastUsed(item.last_used) }}</td>
-              <td>
-                <button
-                  class="btn-icon btn-delete"
-                  @click="handleDelete(item)"
-                  title="删除"
-                >
-                  &times;
-                </button>
-              </td>
-            </tr>
-            <tr v-if="freqList.length === 0">
-              <td :colspan="7" class="td-empty">
-                {{ searchQuery ? "未找到匹配词频记录" : "暂无词频记录" }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- 分页 -->
-      <div class="dict-pager" v-if="total > pageSize">
-        <button
-          class="btn btn-sm"
-          :disabled="page === 0"
-          @click="
-            page--;
-            loadData();
-          "
-        >
-          上一页
-        </button>
-        <span class="dict-pager-info">
-          {{ page * pageSize + 1 }}-{{
-            Math.min((page + 1) * pageSize, total)
-          }}
-          / {{ total }}
-        </span>
-        <button
-          class="btn btn-sm"
-          :disabled="(page + 1) * pageSize >= total"
-          @click="
-            page++;
-            loadData();
-          "
-        >
-          下一页
-        </button>
-      </div>
-    </div>
-
-    <!-- 确认对话框 -->
-    <div
-      v-if="confirmVisible"
-      class="dialog-overlay"
-      @click.self="handleCancel"
-    >
-      <div class="dialog-box" style="max-width: 360px">
-        <div class="dialog-title">确认</div>
-        <div
-          style="
-            padding: 8px 0 16px;
-            font-size: 14px;
-            color: #374151;
-            white-space: pre-line;
-          "
-        >
-          {{ confirmMessage }}
-        </div>
-        <div class="dialog-actions">
-          <button class="btn btn-sm" @click="handleCancel">取消</button>
-          <button class="btn btn-primary btn-sm" @click="handleConfirm">
-            确定
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-</template>
-
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
-import { useToast } from "../../composables/useToast";
-import { useConfirm } from "../../composables/useConfirm";
-import { getFreqList, deleteFreq, clearFreq } from "../../api/wails";
-import type { FreqItem } from "../../api/wails";
-
+import { h, ref, watch, onMounted } from "vue";
+import type { ColumnDef } from "@tanstack/vue-table";
+import { useToast } from "@/composables/useToast";
+import { useConfirm } from "@/composables/useConfirm";
+import { getFreqList, deleteFreq, clearFreq } from "@/api/wails";
+import type { FreqItem } from "@/api/wails";
+import DictDataTable from "./DictDataTable.vue";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Button } from "@/components/ui/button";
 const props = defineProps<{
   schemaId: string;
   schemaName: string;
@@ -174,56 +20,36 @@ const emit = defineEmits<{
 defineExpose({ loadData });
 
 const { toast } = useToast();
-const { confirmVisible, confirmMessage, confirm, handleConfirm, handleCancel } =
-  useConfirm();
+const { confirm } = useConfirm();
 
-// 状态
+const tableRef = ref<{
+  globalFilter: string;
+  clearSelection: () => void;
+  selectedCount: number;
+} | null>(null);
 const freqList = ref<FreqItem[]>([]);
-const searchQuery = ref("");
 const total = ref(0);
 const page = ref(0);
 const pageSize = 100;
-const selectedKeys = ref(new Set<string>());
+const selectedKeys = ref<Set<string>>(new Set());
 const loading = ref(false);
 
-// 防抖
+// Debounced server-side search
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
-function onSearchInput() {
-  if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => {
-    page.value = 0;
-    loadData();
-  }, 300);
-}
-
-const allSelected = computed(
-  () =>
-    freqList.value.length > 0 &&
-    freqList.value.every((item) => selectedKeys.value.has(itemKey(item))),
+watch(
+  () => tableRef.value?.globalFilter,
+  () => {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      page.value = 0;
+      loadData();
+    }, 300);
+  },
 );
 
 function itemKey(item: FreqItem) {
   return `${item.code}|${item.text}`;
-}
-
-function toggleAll() {
-  if (allSelected.value) {
-    selectedKeys.value = new Set();
-  } else {
-    selectedKeys.value = new Set(freqList.value.map(itemKey));
-  }
-}
-
-function toggleSelect(item: FreqItem) {
-  const k = itemKey(item);
-  const next = new Set(selectedKeys.value);
-  if (next.has(k)) {
-    next.delete(k);
-  } else {
-    next.add(k);
-  }
-  selectedKeys.value = next;
 }
 
 function formatLastUsed(ts: number): string {
@@ -233,20 +59,90 @@ function formatLastUsed(ts: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+const columns: ColumnDef<FreqItem, any>[] = [
+  {
+    id: "select",
+    size: 32,
+    enableSorting: false,
+    header: ({ table }) =>
+      h(Checkbox, {
+        checked: table.getIsAllPageRowsSelected(),
+        "onUpdate:checked": (val: boolean) =>
+          table.toggleAllPageRowsSelected(val),
+      }),
+    cell: ({ row }) =>
+      h(Checkbox, {
+        checked: row.getIsSelected(),
+        "onUpdate:checked": (val: boolean) => row.toggleSelected(val),
+      }),
+  },
+  {
+    accessorKey: "code",
+    header: "编码",
+    size: 100,
+    cell: ({ row }) =>
+      h(
+        "span",
+        {
+          class:
+            "font-mono text-sm text-muted-foreground bg-secondary px-2 py-0.5 rounded",
+        },
+        row.getValue("code"),
+      ),
+  },
+  {
+    accessorKey: "text",
+    header: "词条",
+  },
+  {
+    accessorKey: "count",
+    header: "次数",
+    size: 60,
+  },
+  {
+    accessorKey: "boost",
+    header: "提升",
+    size: 60,
+  },
+  {
+    accessorKey: "last_used",
+    header: "最后使用",
+    size: 140,
+    cell: ({ row }) => formatLastUsed(row.getValue("last_used")),
+  },
+  {
+    id: "actions",
+    size: 50,
+    enableSorting: false,
+    cell: ({ row }) =>
+      h(
+        Button,
+        {
+          variant: "ghost",
+          size: "icon",
+          class: "h-6 w-6 text-muted-foreground hover:text-destructive",
+          onClick: () => handleDelete(row.original),
+        },
+        () => "\u00d7",
+      ),
+  },
+];
+
 async function loadData() {
   loading.value = true;
   emit("loading", true);
   try {
+    const query = tableRef.value?.globalFilter ?? "";
     const result = await getFreqList(
       props.schemaId,
-      searchQuery.value.trim(),
+      query.trim(),
       pageSize,
       page.value * pageSize,
     );
     freqList.value = result.entries;
     total.value = result.total;
     selectedKeys.value = new Set();
-  } catch (e) {
+  } catch {
     toast("加载词频失败", "error");
   } finally {
     loading.value = false;
@@ -261,7 +157,7 @@ async function handleDelete(item: FreqItem) {
     await deleteFreq(props.schemaId, item.code, item.text);
     toast("已删除", "success");
     await loadData();
-  } catch (e) {
+  } catch {
     toast("删除失败", "error");
   }
 }
@@ -300,9 +196,14 @@ async function handleClear() {
     toast(`已清空 ${count} 条词频记录`, "success");
     page.value = 0;
     await loadData();
-  } catch (e) {
+  } catch {
     toast("清空失败", "error");
   }
+}
+
+function onPageChange(p: number) {
+  page.value = p;
+  loadData();
 }
 
 onMounted(() => {
@@ -310,15 +211,38 @@ onMounted(() => {
 });
 </script>
 
-<style>
-@import "./dict-shared.css";
-</style>
+<template>
+  <DictDataTable
+    ref="tableRef"
+    :columns="columns"
+    :data="freqList"
+    :loading="loading"
+    :row-key="(row: FreqItem) => `${row.code}|${row.text}`"
+    :server-pagination="{ total, pageSize, page }"
+    search-placeholder="搜索..."
+    empty-text="暂无词频记录"
+    search-empty-text="未找到匹配词频记录"
+    @update:selection="selectedKeys = $event"
+    @page-change="onPageChange"
+  >
+    <template #toolbar-start="{ selectedCount }">
+      <Button
+        variant="destructive"
+        size="sm"
+        :disabled="selectedCount === 0"
+        @click="handleBatchDelete"
+      >
+        删除{{ selectedCount > 0 ? ` (${selectedCount})` : "" }}
+      </Button>
+      <Button
+        variant="destructive"
+        size="sm"
+        :disabled="total === 0"
+        @click="handleClear"
+      >
+        清空
+      </Button>
+    </template>
+  </DictDataTable>
 
-<style scoped>
-.freq-panel {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-}
-</style>
+</template>

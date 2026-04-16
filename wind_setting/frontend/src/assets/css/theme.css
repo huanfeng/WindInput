@@ -1,0 +1,71 @@
+@layer base {
+  :root {
+    --background: 220 16% 96%;
+    --foreground: 215 28% 17%;
+    --card: 0 0% 100%;
+    --card-foreground: 215 28% 17%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 28% 17%;
+    --primary: 217 91% 53%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 215 28% 17%;
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+    --accent: 220 14% 96%;
+    --accent-foreground: 215 28% 17%;
+    --destructive: 0 84% 50%;
+    --destructive-foreground: 210 40% 98%;
+    --success: 142 72% 36%;
+    --warning: 38 92% 50%;
+    --border: 216 12% 84%;
+    --input: 216 12% 84%;
+    --ring: 217 91% 53%;
+
+    /* 圆角 */
+    --radius: 0.375rem;
+    --radius-lg: 0.5rem;
+    --radius-xl: 0.75rem;
+
+    /* 控件尺寸 */
+    --control-h: 2.25rem;
+    --control-h-sm: 1.75rem;
+    --control-h-lg: 2.5rem;
+
+    /* 字号 */
+    --text-base: 0.875rem;
+    --text-sm: 0.8125rem;
+    --text-xs: 0.75rem;
+
+    /* 间距 */
+    --spacing-card: 1.25rem;
+    --spacing-item: 0.875rem;
+
+    /* 侧边栏 */
+    --sidebar-width: 200px;
+  }
+
+  .dark {
+    --background: 222 47% 6%;
+    --foreground: 210 40% 93%;
+    --card: 222 47% 9%;
+    --card-foreground: 210 40% 93%;
+    --popover: 222 47% 9%;
+    --popover-foreground: 210 40% 93%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 47% 6%;
+    --secondary: 217 33% 14%;
+    --secondary-foreground: 210 40% 93%;
+    --muted: 217 33% 14%;
+    --muted-foreground: 215 20% 60%;
+    --accent: 217 33% 14%;
+    --accent-foreground: 210 40% 93%;
+    --destructive: 0 63% 55%;
+    --destructive-foreground: 210 40% 98%;
+    --success: 142 55% 45%;
+    --warning: 38 80% 55%;
+    --border: 217 33% 20%;
+    --input: 217 33% 20%;
+    --ring: 217 91% 60%;
+  }
+}

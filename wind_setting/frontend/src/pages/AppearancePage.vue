@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ChevronDown } from "lucide-vue-next";
 import type { Config } from "../api/settings";
 import type { ThemeInfo, ThemePreview, SystemFontInfo } from "../api/wails";
+import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from "@/components/ui/select";
 
 const props = defineProps<{
   formData: Config;
@@ -101,7 +110,9 @@ onUnmounted(() => {
                   >
                 </div>
               </div>
-              <span class="theme-select-arrow">&#9662;</span>
+              <ChevronDown
+                class="h-4 w-4 text-muted-foreground flex-shrink-0"
+              />
             </button>
             <div v-if="themeSelectOpen" class="theme-options">
               <button
@@ -139,25 +150,30 @@ onUnmounted(() => {
           <p class="setting-hint">选择亮色、暗色或跟随系统设置</p>
         </div>
         <div class="setting-control">
-          <select
-            v-model="formData.ui.theme_style"
-            class="select"
-            @change="emit('themeStyleChange', formData.ui.theme_style)"
+          <Select
+            :model-value="formData.ui.theme_style"
+            @update:model-value="
+              formData.ui.theme_style = $event;
+              emit('themeStyleChange', $event);
+            "
           >
-            <option value="system">跟随系统</option>
-            <option value="light">亮色</option>
-            <option value="dark">暗色</option>
-          </select>
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="system">跟随系统</SelectItem>
+              <SelectItem value="light">亮色</SelectItem>
+              <SelectItem value="dark">暗色</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
       <div class="setting-item align-start" v-if="themePreview">
         <div class="setting-info">
-          <label
-            >主题预览
-            <span class="preview-hint-icon" title="预览效果可能和实际有所差异"
-              >?</span
-            >
+          <label class="inline-flex items-center gap-1">
+            主题预览
+            <span class="hint-tip" data-tip="预览效果可能和实际有所差异">?</span>
           </label>
           <p class="setting-hint">候选窗口与工具栏预览</p>
         </div>
@@ -358,19 +374,26 @@ onUnmounted(() => {
           </p>
         </div>
         <div class="setting-control">
-          <select
-            v-model="formData.ui.font_family"
-            class="select font-family-select"
+          <Select
+            :model-value="formData.ui.font_family || '__default__'"
+            @update:model-value="
+              formData.ui.font_family = $event === '__default__' ? '' : $event
+            "
           >
-            <option value="">跟随系统默认</option>
-            <option
-              v-for="font in systemFontOptions"
-              :key="font.value"
-              :value="font.value"
-            >
-              {{ font.label }}
-            </option>
-          </select>
+            <SelectTrigger class="w-[200px]">
+              <SelectValue placeholder="跟随系统默认" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__default__">跟随系统默认</SelectItem>
+              <SelectItem
+                v-for="font in systemFontOptions"
+                :key="font.value"
+                :value="font.value"
+              >
+                {{ font.label }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -397,13 +420,10 @@ onUnmounted(() => {
           <p class="setting-hint">不显示候选窗口</p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.ui.hide_candidate_window"
-            />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.ui.hide_candidate_window"
+            @update:checked="formData.ui.hide_candidate_window = $event"
+          />
         </div>
       </div>
       <div class="setting-item">
@@ -412,10 +432,10 @@ onUnmounted(() => {
           <p class="setting-hint">输入码直接显示在光标处，而非候选窗上方</p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input type="checkbox" v-model="formData.ui.inline_preedit" />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.ui.inline_preedit"
+            @update:checked="formData.ui.inline_preedit = $event"
+          />
         </div>
       </div>
       <div class="setting-item" v-if="!formData.ui.inline_preedit">
@@ -424,10 +444,18 @@ onUnmounted(() => {
           <p class="setting-hint">未开启嵌入编码时，编码在候选窗中的显示位置</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.ui.preedit_mode" class="select">
-            <option value="top">独立编码行</option>
-            <option value="embedded">嵌入候选行</option>
-          </select>
+          <Select
+            :model-value="formData.ui.preedit_mode"
+            @update:model-value="formData.ui.preedit_mode = $event"
+          >
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="top">独立编码行</SelectItem>
+              <SelectItem value="embedded">嵌入候选行</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div class="setting-item">
@@ -436,10 +464,18 @@ onUnmounted(() => {
           <p class="setting-hint">候选词的排列方式</p>
         </div>
         <div class="setting-control">
-          <select v-model="formData.ui.candidate_layout" class="select">
-            <option value="horizontal">横向</option>
-            <option value="vertical">纵向</option>
-          </select>
+          <Select
+            :model-value="formData.ui.candidate_layout"
+            @update:model-value="formData.ui.candidate_layout = $event"
+          >
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="horizontal">横向</SelectItem>
+              <SelectItem value="vertical">纵向</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
     </div>
@@ -454,13 +490,10 @@ onUnmounted(() => {
           <p class="setting-hint">切换输入状态时显示提示</p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="formData.ui.status_indicator.enabled"
-            />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.ui.status_indicator.enabled"
+            @update:checked="formData.ui.status_indicator.enabled = $event"
+          />
         </div>
       </div>
 
@@ -474,13 +507,20 @@ onUnmounted(() => {
             </p>
           </div>
           <div class="setting-control">
-            <select
-              v-model="formData.ui.status_indicator.display_mode"
-              class="select"
+            <Select
+              :model-value="formData.ui.status_indicator.display_mode"
+              @update:model-value="
+                formData.ui.status_indicator.display_mode = $event
+              "
             >
-              <option value="temp">临时显示</option>
-              <option value="always">常驻显示 (beta)</option>
-            </select>
+              <SelectTrigger class="w-[180px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="temp">临时显示</SelectItem>
+                <SelectItem value="always">常驻显示 (beta)</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </div>
 
@@ -514,13 +554,20 @@ onUnmounted(() => {
             <p class="setting-hint">中文模式下显示的方案名称风格</p>
           </div>
           <div class="setting-control">
-            <select
-              v-model="formData.ui.status_indicator.schema_name_style"
-              class="select"
+            <Select
+              :model-value="formData.ui.status_indicator.schema_name_style"
+              @update:model-value="
+                formData.ui.status_indicator.schema_name_style = $event
+              "
             >
-              <option value="full">全称（五笔、全拼）</option>
-              <option value="short">简写（五、拼）</option>
-            </select>
+              <SelectTrigger class="w-[200px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="full">全称（五笔、全拼）</SelectItem>
+                <SelectItem value="short">简写（五、拼）</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </div>
 
@@ -564,13 +611,20 @@ onUnmounted(() => {
             </p>
           </div>
           <div class="setting-control">
-            <select
-              v-model="formData.ui.status_indicator.position_mode"
-              class="select"
+            <Select
+              :model-value="formData.ui.status_indicator.position_mode"
+              @update:model-value="
+                formData.ui.status_indicator.position_mode = $event
+              "
             >
-              <option value="follow_caret">跟随光标</option>
-              <option value="custom">自定义位置</option>
-            </select>
+              <SelectTrigger class="w-[160px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="follow_caret">跟随光标</SelectItem>
+                <SelectItem value="custom">自定义位置</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </div>
 
@@ -688,10 +742,10 @@ onUnmounted(() => {
           <p class="setting-hint">在屏幕上显示可拖动的输入法状态栏</p>
         </div>
         <div class="setting-control">
-          <label class="switch">
-            <input type="checkbox" v-model="formData.toolbar.visible" />
-            <span class="slider"></span>
-          </label>
+          <Switch
+            :checked="formData.toolbar.visible"
+            @update:checked="formData.toolbar.visible = $event"
+          />
         </div>
       </div>
     </div>
@@ -709,8 +763,8 @@ onUnmounted(() => {
   font-size: 10px;
   font-weight: 600;
   border-radius: 50%;
-  background: #d1d5db;
-  color: #fff;
+  background: hsl(var(--muted-foreground));
+  color: hsl(var(--card));
   margin-left: 4px;
   cursor: help;
   vertical-align: middle;
@@ -733,14 +787,14 @@ onUnmounted(() => {
 }
 .preview-section-label {
   font-size: 11px;
-  color: #888;
+  color: hsl(var(--muted-foreground));
   letter-spacing: 0.5px;
 }
 /* 候选窗口 */
 .preview-candidate-window {
   display: flex;
   flex-direction: column;
-  border: 1px solid #ccc;
+  border: 1px solid hsl(var(--border));
   border-radius: 8px;
   overflow: hidden;
 }
@@ -809,7 +863,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 3px;
   padding: 3px 6px;
-  border: 1px solid #ccc;
+  border: 1px solid hsl(var(--border));
   border-radius: 6px;
 }
 .preview-toolbar-grip {

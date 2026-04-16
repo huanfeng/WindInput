@@ -286,7 +286,7 @@ function restoreDefault() {
   gap: 4px;
   cursor: pointer;
   font-size: 13px;
-  color: #374151;
+  color: hsl(var(--foreground));
   user-select: none;
   margin-right: 8px;
   white-space: nowrap;
@@ -295,16 +295,16 @@ function restoreDefault() {
   width: 15px;
   height: 15px;
   cursor: pointer;
-  accent-color: var(--accent-color, #2563eb);
+  accent-color: hsl(var(--primary));
 }
 .hotkey-composer {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 4px 8px;
-  border: 1px solid var(--border-color, #e5e7eb);
+  border: 1px solid hsl(var(--border));
   border-radius: 8px;
-  background: var(--input-bg, #fff);
+  background: hsl(var(--card));
   transition: opacity 0.2s;
 }
 .hotkey-composer.disabled {
@@ -316,7 +316,7 @@ function restoreDefault() {
   align-items: center;
   gap: 3px;
   font-size: 12px;
-  color: #374151;
+  color: hsl(var(--foreground));
   cursor: pointer;
   padding: 2px 4px;
   border-radius: 4px;
@@ -324,51 +324,51 @@ function restoreDefault() {
   transition: background 0.15s;
 }
 .composer-modifier:hover {
-  background: #f3f4f6;
+  background: hsl(var(--secondary));
 }
 .composer-modifier input {
   width: 14px;
   height: 14px;
   cursor: pointer;
-  accent-color: var(--accent-color, #2563eb);
+  accent-color: hsl(var(--primary));
 }
 .composer-modifier input:disabled {
   cursor: not-allowed;
 }
 .composer-plus {
   font-size: 12px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   user-select: none;
 }
 .composer-plus.dimmed {
-  color: #d1d5db;
+  color: hsl(var(--border));
 }
 .composer-key-input {
   width: 48px;
   height: 28px;
   text-align: center;
   padding: 0 4px;
-  border: 1px solid #d1d5db;
+  border: 1px solid hsl(var(--border));
   border-radius: 5px;
   font-size: 13px;
   font-weight: 500;
-  color: #1f2937;
-  background: #f9fafb;
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted));
   outline: none;
   transition:
     border-color 0.2s,
     box-shadow 0.2s;
 }
 .composer-key-input:focus {
-  border-color: var(--primary-color, #2563eb);
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.18);
 }
 .composer-key-input.empty {
-  color: #d1d5db;
+  color: hsl(var(--border));
 }
 .composer-key-input:disabled {
   cursor: not-allowed;
-  background: #f3f4f6;
+  background: hsl(var(--secondary));
 }
 .composer-global {
   display: flex;
@@ -376,7 +376,7 @@ function restoreDefault() {
   gap: 4px;
   cursor: pointer;
   font-size: 12px;
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
   user-select: none;
   margin-left: 4px;
   white-space: nowrap;
@@ -385,7 +385,7 @@ function restoreDefault() {
   width: 14px;
   height: 14px;
   cursor: pointer;
-  accent-color: var(--accent-color, #2563eb);
+  accent-color: hsl(var(--primary));
 }
 .composer-global input:disabled {
   cursor: not-allowed;
@@ -401,7 +401,7 @@ function restoreDefault() {
   border: 1px solid transparent;
   border-radius: 4px;
   cursor: default;
-  color: #d1d5db;
+  color: hsl(var(--border));
   transition:
     color 0.15s,
     background 0.15s;
@@ -409,12 +409,12 @@ function restoreDefault() {
   margin-left: 4px;
 }
 .composer-reset-btn.changed {
-  color: var(--text-secondary, #9ca3af);
+  color: hsl(var(--muted-foreground));
   cursor: pointer;
 }
 .composer-reset-btn.changed:hover {
-  color: var(--accent-color, #2563eb);
-  background: rgba(37, 99, 235, 0.08);
+  color: hsl(var(--primary));
+  background: hsl(var(--ring) / 0.08);
 }
 .composer-reset-btn:disabled {
   cursor: default;

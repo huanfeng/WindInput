@@ -8,6 +8,25 @@ import type {
 } from "../api/wails";
 import * as wailsApi from "../api/wails";
 import SchemaDetailPanel from "./SchemaDetailPanel.vue";
+import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from "@/components/ui/alert-dialog";
 
 const props = defineProps<{
   visible: boolean;
@@ -265,7 +284,10 @@ function getDependentMixedIDs(schemaID: string): string[] {
     // 只找以此方案为 primary_schema 的混输方案
     if (refByRef?.primary_schema === schemaID) {
       const refBySchema = props.allSchemas.find((s) => s.id === refBy);
-      if (refBySchema?.engine_type === "mixed" && (refBySchema as any).source === "user") {
+      if (
+        refBySchema?.engine_type === "mixed" &&
+        (refBySchema as any).source === "user"
+      ) {
         result.push(refBy);
       }
     }
@@ -311,9 +333,7 @@ function getSchemaName(id: string): string {
 }
 
 function hasConflict(): boolean {
-  return (
-    importPreview.value?.schemas?.some((s) => s.conflict) ?? false
-  );
+  return importPreview.value?.schemas?.some((s) => s.conflict) ?? false;
 }
 
 function close() {
@@ -322,12 +342,18 @@ function close() {
 </script>
 
 <template>
-  <div v-if="visible" class="dialog-overlay" @click.self="close">
-    <div class="dialog-box dialog-sectioned schema-manager-dialog">
-      <div class="dialog-header">
-        <h3>方案管理</h3>
-        <button class="dialog-close" @click="close">&times;</button>
-      </div>
+  <Dialog
+    :open="visible"
+    @update:open="
+      (v: boolean) => {
+        if (!v) close();
+      }
+    "
+  >
+    <DialogContent class="schema-manager-dialog p-0">
+      <DialogHeader class="px-5 pt-5 pb-0">
+        <DialogTitle>方案管理</DialogTitle>
+      </DialogHeader>
 
       <div class="schema-mgr-tabs">
         <button
@@ -370,8 +396,7 @@ function close() {
                   <div class="schema-mgr-main">
                     <span class="schema-mgr-name">{{ schema.name }}</span>
                     <span class="schema-mgr-type">{{
-                      engineTypeLabels[schema.engine_type] ||
-                      schema.engine_type
+                      engineTypeLabels[schema.engine_type] || schema.engine_type
                     }}</span>
                     <span v-if="schema.version" class="schema-mgr-version"
                       >v{{ schema.version }}</span
@@ -397,19 +422,27 @@ function close() {
                     title="查看详情"
                   >
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                      <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5" />
-                      <path d="M8 7v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                      <circle
+                        cx="8"
+                        cy="8"
+                        r="7"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                      />
+                      <path
+                        d="M8 7v4"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                      />
                       <circle cx="8" cy="5" r="0.75" fill="currentColor" />
                     </svg>
                   </button>
-                  <label class="switch switch-sm" title="启用/禁用">
-                    <input
-                      type="checkbox"
-                      :checked="isEnabled(schema.id)"
-                      @change="handleToggleEnabled(schema.id)"
-                    />
-                    <span class="slider"></span>
-                  </label>
+                  <Switch
+                    :checked="isEnabled(schema.id)"
+                    @update:checked="handleToggleEnabled(schema.id)"
+                    class="scale-[0.8]"
+                  />
                   <button
                     v-if="(schema as any).source === 'user'"
                     class="btn-icon schema-mgr-delete-btn"
@@ -417,7 +450,12 @@ function close() {
                     title="删除方案"
                   >
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                      <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                      <path
+                        d="M4 4l8 8M12 4l-8 8"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                      />
                     </svg>
                   </button>
                 </div>
@@ -427,121 +465,162 @@ function close() {
               {{ searchQuery ? "没有匹配的方案" : "暂无可用方案" }}
             </div>
           </div>
-
         </template>
 
         <template v-if="activeTab === 'online'">
           <div class="schema-mgr-placeholder">
             <div class="schema-mgr-placeholder-icon">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="1.5">
-                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" />
-                <path d="M2 12h20M12 2c2.5 3 4 6.5 4 10s-1.5 7-4 10c-2.5-3-4-6.5-4-10s1.5-7 4-10z" />
+              <svg
+                width="40"
+                height="40"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="#9ca3af"
+                stroke-width="1.5"
+              >
+                <path
+                  d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"
+                />
+                <path
+                  d="M2 12h20M12 2c2.5 3 4 6.5 4 10s-1.5 7-4 10c-2.5-3-4-6.5-4-10s1.5-7 4-10z"
+                />
               </svg>
             </div>
             <p class="schema-mgr-placeholder-text">在线方案下载功能即将推出</p>
-            <p class="schema-mgr-placeholder-hint">届时可从方案仓库浏览和下载第三方输入方案</p>
+            <p class="schema-mgr-placeholder-hint">
+              届时可从方案仓库浏览和下载第三方输入方案
+            </p>
           </div>
         </template>
       </div>
 
-      <div class="dialog-footer schema-mgr-footer">
+      <div class="schema-mgr-footer px-5 py-3 border-t flex items-center">
         <div class="schema-mgr-footer-left">
-          <button
-            class="btn btn-sm"
+          <Button
+            variant="outline"
+            size="sm"
             :disabled="importLoading"
             @click="handleImportPreview"
           >
             {{ importLoading ? "处理中..." : "导入方案" }}
-          </button>
-          <button
-            class="btn btn-sm"
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             :disabled="exporting || !selectedID || !canExport(selectedID!)"
             @click="handleExportClick"
-            :title="selectedID && !canExport(selectedID) ? '拼音方案暂不支持导出' : ''"
+            :title="
+              selectedID && !canExport(selectedID) ? '拼音方案暂不支持导出' : ''
+            "
           >
             {{ exporting ? "导出中..." : "导出方案" }}
-          </button>
+          </Button>
         </div>
         <div class="schema-mgr-footer-center">
-          <span v-if="exportSuccess" class="schema-mgr-footer-toast">导出成功</span>
-          <span v-else-if="selectedID && !canExport(selectedID)" class="schema-mgr-footer-hint">拼音方案暂不支持导出</span>
-          <span v-else-if="selectedID" class="schema-mgr-footer-hint">已选中「{{ getSchemaName(selectedID) }}」</span>
+          <span v-if="exportSuccess" class="schema-mgr-footer-toast"
+            >导出成功</span
+          >
+          <span
+            v-else-if="selectedID && !canExport(selectedID)"
+            class="schema-mgr-footer-hint"
+            >拼音方案暂不支持导出</span
+          >
+          <span v-else-if="selectedID" class="schema-mgr-footer-hint"
+            >已选中「{{ getSchemaName(selectedID) }}」</span
+          >
         </div>
-        <button class="btn btn-sm" @click="close">关闭</button>
+        <Button variant="outline" size="sm" @click="close">关闭</Button>
       </div>
-    </div>
+    </DialogContent>
 
     <!-- 方案详情对话框 -->
-    <div
-      v-if="detailSchemaID"
-      class="dialog-overlay schema-nested-overlay"
-      @click.self="detailSchemaID = null"
+    <Dialog
+      :open="!!detailSchemaID"
+      @update:open="
+        (v: boolean) => {
+          if (!v) detailSchemaID = null;
+        }
+      "
     >
-      <div class="dialog-box dialog-sectioned schema-detail-dialog">
-        <div class="dialog-header">
-          <h3>方案详情</h3>
-          <button class="dialog-close" @click="detailSchemaID = null">&times;</button>
-        </div>
-        <div class="dialog-body">
-          <SchemaDetailPanel
-            v-if="allSchemas.find((s) => s.id === detailSchemaID)"
-            :schema="allSchemas.find((s) => s.id === detailSchemaID)!"
-            :config="getConfig(detailSchemaID)"
-            :references="getReference(detailSchemaID)"
-          />
-        </div>
-        <div class="dialog-footer">
-          <button class="btn btn-sm btn-primary" @click="detailSchemaID = null">关闭</button>
-        </div>
-      </div>
-    </div>
+      <DialogContent class="schema-detail-dialog">
+        <DialogHeader>
+          <DialogTitle>方案详情</DialogTitle>
+        </DialogHeader>
+        <SchemaDetailPanel
+          v-if="
+            detailSchemaID && allSchemas.find((s) => s.id === detailSchemaID)
+          "
+          :schema="allSchemas.find((s) => s.id === detailSchemaID)!"
+          :config="getConfig(detailSchemaID!)"
+          :references="getReference(detailSchemaID!)"
+        />
+        <DialogFooter>
+          <Button size="sm" @click="detailSchemaID = null">关闭</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- 导出确认对话框（有关联方案时） -->
-    <div
-      v-if="showExportConfirm"
-      class="dialog-overlay schema-nested-overlay"
-      @click.self="showExportConfirm = false"
-    >
-      <div class="dialog-box" style="max-width: 400px">
-        <div class="dialog-title">导出方案</div>
-        <div style="font-size: 14px; color: #374151; padding: 4px 0 12px">
-          <p style="margin-bottom: 8px">
-            方案「{{ getSchemaName(selectedID!) }}」存在关联方案：
+    <Dialog :open="showExportConfirm" @update:open="showExportConfirm = $event">
+      <DialogContent class="max-w-[400px]">
+        <DialogHeader>
+          <DialogTitle>导出方案</DialogTitle>
+        </DialogHeader>
+        <div class="text-sm text-foreground">
+          <p class="mb-2">
+            方案「{{
+              selectedID ? getSchemaName(selectedID) : ""
+            }}」存在关联方案：
           </p>
-          <ul style="margin: 0; padding-left: 20px; color: #6b7280; font-size: 13px">
+          <ul class="list-disc pl-5 text-muted-foreground text-[13px]">
             <li v-for="rid in exportRelatedIDs" :key="rid">
               {{ getSchemaName(rid) }}
-              ({{ engineTypeLabels[allSchemas.find((s) => s.id === rid)?.engine_type || ''] || '' }})
+              ({{
+                engineTypeLabels[
+                  allSchemas.find((s) => s.id === rid)?.engine_type || ""
+                ] || ""
+              }})
             </li>
           </ul>
         </div>
         <label
-          style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #374151; padding: 4px 0 12px; cursor: pointer"
+          class="flex items-center gap-2 text-[13px] text-foreground cursor-pointer py-1"
         >
-          <input type="checkbox" v-model="exportIncludeRelated" style="accent-color: #2563eb" />
+          <input
+            type="checkbox"
+            v-model="exportIncludeRelated"
+            class="accent-primary"
+          />
           一起导出关联方案
         </label>
-        <div class="dialog-actions">
-          <button class="btn" @click="showExportConfirm = false">取消</button>
-          <button class="btn btn-primary" @click="confirmExport">确认导出</button>
-        </div>
-      </div>
-    </div>
+        <DialogFooter>
+          <Button variant="outline" @click="showExportConfirm = false"
+            >取消</Button
+          >
+          <Button @click="confirmExport">确认导出</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- 导入预览对话框 -->
-    <div
-      v-if="importPreview"
-      class="dialog-overlay schema-nested-overlay"
-      @click.self="cancelImport"
+    <Dialog
+      :open="!!importPreview"
+      @update:open="
+        (v: boolean) => {
+          if (!v) cancelImport();
+        }
+      "
     >
-      <div class="dialog-box dialog-sectioned schema-import-dialog">
-        <div class="dialog-header">
-          <h3>导入方案</h3>
-          <button class="dialog-close" @click="cancelImport">&times;</button>
-        </div>
-        <div class="dialog-body">
+      <DialogContent class="schema-import-dialog">
+        <DialogHeader>
+          <DialogTitle>导入方案</DialogTitle>
+        </DialogHeader>
+        <div v-if="importPreview">
           <div class="import-file-info">
-            包含 {{ importPreview.schemas?.length || 0 }} 个方案，{{ importPreview.file_count }} 个文件
+            包含 {{ importPreview.schemas?.length || 0 }} 个方案，{{
+              importPreview.file_count
+            }}
+            个文件
           </div>
 
           <div
@@ -550,11 +629,15 @@ function close() {
             class="import-schema-card"
           >
             <div class="import-schema-header">
-              <span class="import-schema-name">{{ schema.name || schema.id }}</span>
+              <span class="import-schema-name">{{
+                schema.name || schema.id
+              }}</span>
               <span class="schema-mgr-type">{{
                 engineTypeLabels[schema.engine_type] || schema.engine_type
               }}</span>
-              <span v-if="schema.version" class="schema-mgr-version">v{{ schema.version }}</span>
+              <span v-if="schema.version" class="schema-mgr-version"
+                >v{{ schema.version }}</span
+              >
             </div>
             <div class="import-preview-grid">
               <div class="import-preview-row">
@@ -567,17 +650,22 @@ function close() {
               </div>
               <div class="import-preview-row">
                 <span class="import-preview-label">词典</span>
-                <span class="import-preview-value">{{ schema.dict_count }} 个</span>
+                <span class="import-preview-value"
+                  >{{ schema.dict_count }} 个</span
+                >
               </div>
               <div v-if="schema.description" class="import-preview-row">
                 <span class="import-preview-label">描述</span>
-                <span class="import-preview-value">{{ schema.description }}</span>
+                <span class="import-preview-value">{{
+                  schema.description
+                }}</span>
               </div>
             </div>
             <div v-if="schema.conflict" class="import-conflict-warning">
               <span class="import-conflict-icon">&#9888;</span>
               <span>
-                系统中已存在{{ schema.conflict_src === "builtin" ? "内置" : "用户"
+                系统中已存在{{
+                  schema.conflict_src === "builtin" ? "内置" : "用户"
                 }}方案「{{ schema.id }}」，导入将覆盖现有配置
               </span>
             </div>
@@ -587,62 +675,74 @@ function close() {
             ></div>
           </div>
         </div>
-        <div class="dialog-footer">
-          <button class="btn btn-sm" @click="cancelImport">取消</button>
-          <button
-            class="btn btn-sm btn-primary"
-            :disabled="importLoading"
-            @click="confirmImport"
+        <DialogFooter>
+          <Button variant="outline" size="sm" @click="cancelImport"
+            >取消</Button
           >
-            {{ hasConflict()
-              ? importLoading ? "覆盖中..." : "覆盖导入"
-              : importLoading ? "导入中..." : "确认导入"
+          <Button size="sm" :disabled="importLoading" @click="confirmImport">
+            {{
+              hasConflict()
+                ? importLoading
+                  ? "覆盖中..."
+                  : "覆盖导入"
+                : importLoading
+                  ? "导入中..."
+                  : "确认导入"
             }}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- 删除确认对话框 -->
-    <div
-      v-if="deleteConfirmID"
-      class="dialog-overlay schema-nested-overlay"
-      @click.self="cancelDelete"
+    <AlertDialog
+      :open="!!deleteConfirmID"
+      @update:open="
+        (v: boolean) => {
+          if (!v) cancelDelete();
+        }
+      "
     >
-      <div class="dialog-box" style="max-width: 400px">
-        <div class="dialog-title">确认删除</div>
-        <div style="padding: 4px 0 16px; font-size: 14px; color: #374151">
-          <p>
-            确定要删除方案「{{
-              getSchemaName(deleteConfirmID!)
-            }}」吗？此操作将删除方案文件及其词典，不可恢复。
-          </p>
-          <div v-if="deleteRelatedIDs.length > 0" class="delete-related-warning">
-            <span class="import-conflict-icon">&#9888;</span>
-            <div>
-              <p style="margin: 0 0 4px">以下混输方案依赖此方案，将一并删除：</p>
-              <ul style="margin: 0; padding-left: 18px">
-                <li v-for="rid in deleteRelatedIDs" :key="rid">
-                  {{ getSchemaName(rid) }}
-                </li>
-              </ul>
+      <AlertDialogContent class="max-w-[400px]">
+        <AlertDialogHeader>
+          <AlertDialogTitle>确认删除</AlertDialogTitle>
+          <AlertDialogDescription>
+            <p>
+              确定要删除方案「{{
+                deleteConfirmID ? getSchemaName(deleteConfirmID) : ""
+              }}」吗？此操作将删除方案文件及其词典，不可恢复。
+            </p>
+            <div
+              v-if="deleteRelatedIDs.length > 0"
+              class="delete-related-warning"
+            >
+              <span class="import-conflict-icon">&#9888;</span>
+              <div>
+                <p style="margin: 0 0 4px">
+                  以下混输方案依赖此方案，将一并删除：
+                </p>
+                <ul style="margin: 0; padding-left: 18px">
+                  <li v-for="rid in deleteRelatedIDs" :key="rid">
+                    {{ getSchemaName(rid) }}
+                  </li>
+                </ul>
+              </div>
             </div>
-          </div>
-        </div>
-        <div class="dialog-actions">
-          <button class="btn" @click="cancelDelete">取消</button>
-          <button
-            class="btn"
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel @click="cancelDelete">取消</AlertDialogCancel>
+          <AlertDialogAction
             :disabled="deleting"
-            style="background: #dc2626; color: #fff"
+            class="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             @click="confirmDelete"
           >
             {{ deleting ? "删除中..." : "删除" }}
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  </Dialog>
 </template>
 
 <style scoped>
@@ -664,7 +764,7 @@ function close() {
   padding: 10px 16px;
   font-size: 13px;
   font-weight: 500;
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
@@ -672,11 +772,11 @@ function close() {
   transition: all 0.15s;
 }
 .schema-mgr-tab:hover {
-  color: #374151;
+  color: hsl(var(--foreground));
 }
 .schema-mgr-tab.active {
-  color: #2563eb;
-  border-bottom-color: #2563eb;
+  color: hsl(var(--primary));
+  border-bottom-color: hsl(var(--primary));
 }
 
 /* Body */
@@ -684,6 +784,8 @@ function close() {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  padding: 12px 20px;
+  max-height: 50vh;
 }
 
 /* Search */
@@ -694,23 +796,23 @@ function close() {
   width: 100%;
   padding: 8px 12px;
   font-size: 13px;
-  border: 1px solid #d1d5db;
+  border: 1px solid hsl(var(--border));
   border-radius: 6px;
   outline: none;
   transition: border-color 0.15s;
 }
 .schema-mgr-search .input:focus {
-  border-color: #2563eb;
+  border-color: hsl(var(--primary));
 }
 
 /* List */
 .schema-mgr-list {
-  border: 1px solid #e5e7eb;
+  border: 1px solid hsl(var(--border));
   border-radius: 8px;
   overflow: hidden;
 }
 .schema-mgr-item {
-  border-bottom: 1px solid #f3f4f6;
+  border-bottom: 1px solid hsl(var(--secondary));
   cursor: pointer;
   transition: background-color 0.15s;
 }
@@ -718,13 +820,13 @@ function close() {
   border-bottom: none;
 }
 .schema-mgr-item:hover {
-  background: #fafafa;
+  background: hsl(var(--muted));
 }
 .schema-mgr-item-selected {
-  background: #eff6ff;
+  background: hsl(var(--primary) / 0.1);
 }
 .schema-mgr-item-selected:hover {
-  background: #dbeafe;
+  background: hsl(var(--primary) / 0.15);
 }
 
 /* Row */
@@ -749,18 +851,18 @@ function close() {
 .schema-mgr-name {
   font-size: 13px;
   font-weight: 500;
-  color: #1f2937;
+  color: hsl(var(--foreground));
 }
 .schema-mgr-type {
   font-size: 11px;
   padding: 1px 5px;
   border-radius: 3px;
-  background: #f3f4f6;
-  color: #6b7280;
+  background: hsl(var(--secondary));
+  color: hsl(var(--muted-foreground));
 }
 .schema-mgr-version {
   font-size: 11px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
 }
 .schema-mgr-source {
   font-size: 10px;
@@ -769,24 +871,24 @@ function close() {
   font-weight: 500;
 }
 .schema-mgr-source.source-builtin {
-  background: #eff6ff;
-  color: #2563eb;
+  background: hsl(var(--primary) / 0.1);
+  color: hsl(var(--primary));
 }
 .schema-mgr-source.source-user {
-  background: #f0fdf4;
-  color: #16a34a;
+  background: hsl(var(--success) / 0.1);
+  color: hsl(var(--success));
 }
 .schema-mgr-error-badge {
   font-size: 11px;
   padding: 1px 5px;
   border-radius: 3px;
-  background: #fef2f2;
-  color: #dc2626;
+  background: hsl(var(--destructive) / 0.1);
+  color: hsl(var(--destructive));
   font-weight: 500;
 }
 .schema-mgr-desc {
   font-size: 12px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -808,14 +910,14 @@ function close() {
   height: 28px;
   border: none;
   background: none;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   cursor: pointer;
   border-radius: 6px;
   transition: all 0.15s;
 }
 .schema-mgr-info-btn:hover {
-  background: #f3f4f6;
-  color: #2563eb;
+  background: hsl(var(--secondary));
+  color: hsl(var(--primary));
 }
 .schema-mgr-delete-btn {
   display: flex;
@@ -825,14 +927,14 @@ function close() {
   height: 28px;
   border: none;
   background: none;
-  color: #d1d5db;
+  color: hsl(var(--border));
   cursor: pointer;
   border-radius: 6px;
   transition: all 0.15s;
 }
 .schema-mgr-delete-btn:hover {
-  background: #fef2f2;
-  color: #dc2626;
+  background: hsl(var(--destructive) / 0.1);
+  color: hsl(var(--destructive));
 }
 .switch-sm {
   transform: scale(0.8);
@@ -852,7 +954,7 @@ function close() {
 /* Import preview */
 .import-file-info {
   font-size: 12px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   margin-bottom: 12px;
 }
 .import-schema-card {
@@ -867,11 +969,11 @@ function close() {
 .import-schema-name {
   font-size: 14px;
   font-weight: 500;
-  color: #1f2937;
+  color: hsl(var(--foreground));
 }
 .import-schema-divider {
   height: 1px;
-  background: #e5e7eb;
+  background: hsl(var(--border));
   margin: 12px 0;
 }
 .import-preview-grid {
@@ -889,20 +991,20 @@ function close() {
 .import-preview-label {
   flex-shrink: 0;
   width: 55px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   text-align: right;
 }
 .import-preview-value {
-  color: #374151;
+  color: hsl(var(--foreground));
 }
 .import-conflict-warning {
   margin-top: 8px;
   padding: 8px 10px;
-  background: #fef3c7;
-  border: 1px solid #f59e0b;
+  background: hsl(var(--warning) / 0.1);
+  border: 1px solid hsl(var(--warning));
   border-radius: 6px;
   font-size: 12px;
-  color: #92400e;
+  color: hsl(var(--warning));
   display: flex;
   align-items: flex-start;
   gap: 6px;
@@ -916,11 +1018,11 @@ function close() {
 .delete-related-warning {
   margin-top: 10px;
   padding: 8px 10px;
-  background: #fef3c7;
-  border: 1px solid #f59e0b;
+  background: hsl(var(--warning) / 0.1);
+  border: 1px solid hsl(var(--warning));
   border-radius: 6px;
   font-size: 13px;
-  color: #92400e;
+  color: hsl(var(--warning));
   display: flex;
   align-items: flex-start;
   gap: 6px;
@@ -930,7 +1032,7 @@ function close() {
 .schema-mgr-empty {
   text-align: center;
   padding: 24px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   font-size: 13px;
 }
 .schema-mgr-placeholder {
@@ -947,13 +1049,13 @@ function close() {
 }
 .schema-mgr-placeholder-text {
   font-size: 14px;
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
   font-weight: 500;
   margin-bottom: 4px;
 }
 .schema-mgr-placeholder-hint {
   font-size: 12px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
 }
 
 /* Footer */
@@ -972,11 +1074,11 @@ function close() {
 }
 .schema-mgr-footer-hint {
   font-size: 12px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
 }
 .schema-mgr-footer-toast {
   font-size: 12px;
-  color: #16a34a;
+  color: hsl(var(--success));
   font-weight: 500;
 }
 </style>

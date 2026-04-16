@@ -1,5 +1,13 @@
-import {createApp} from 'vue'
-import App from './App.vue'
-import './global.css';
+import { createApp } from "vue";
+import App from "./App.vue";
+import "./app.css";
 
-createApp(App).mount('#app')
+// Auto dark mode: follow system preference
+const mq = window.matchMedia("(prefers-color-scheme: dark)");
+function applyTheme(e: MediaQueryListEvent | MediaQueryList) {
+  document.documentElement.classList.toggle("dark", e.matches);
+}
+applyTheme(mq);
+mq.addEventListener("change", applyTheme);
+
+createApp(App).mount("#app");

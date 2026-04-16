@@ -9,13 +9,21 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "vue": "^3.2.37"
+    "@tanstack/vue-table": "^8.21.3",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-vue-next": "^1.0.0",
+    "radix-vue": "^1.9.17",
+    "tailwind-merge": "^3.5.0",
+    "vue": "^3.5.32",
+    "vue-sonner": "^2.0.9"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^3.0.3",
-    "typescript": "^4.6.4",
-    "vite": "^3.0.7",
-    "vue-tsc": "^1.8.27",
-    "@babel/types": "^7.18.10"
+    "@tailwindcss/vite": "^4.2.2",
+    "@vitejs/plugin-vue": "^6.0.6",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8",
+    "vue-tsc": "^3.2.6"
   }
 }

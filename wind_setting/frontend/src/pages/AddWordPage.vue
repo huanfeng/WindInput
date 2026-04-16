@@ -25,11 +25,19 @@
 
         <div class="addword-field">
           <label class="addword-label">方案</label>
-          <select class="addword-input addword-select" v-model="schemaID">
-            <option v-for="s in schemas" :key="s.id" :value="s.id">
-              {{ s.name }}
-            </option>
-          </select>
+          <Select
+            :model-value="schemaID"
+            @update:model-value="schemaID = $event"
+          >
+            <SelectTrigger class="w-full">
+              <SelectValue placeholder="选择方案" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="s in schemas" :key="s.id" :value="s.id">
+                {{ s.name }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
         <div class="addword-field">
@@ -50,14 +58,10 @@
       </div>
 
       <div class="addword-actions">
-        <button class="btn" @click="handleCancel">取消</button>
-        <button
-          class="btn btn-primary"
-          @click="handleAdd"
-          :disabled="!canAdd || adding"
-        >
+        <Button variant="outline" @click="handleCancel">取消</Button>
+        <Button @click="handleAdd" :disabled="!canAdd || adding">
           {{ adding ? "添加中..." : "添加" }}
-        </button>
+        </Button>
       </div>
     </div>
   </div>
@@ -67,6 +71,14 @@
 import { ref, computed, onMounted, nextTick } from "vue";
 import * as wailsApi from "../api/wails";
 import { useToast } from "../composables/useToast";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from "@/components/ui/select";
 
 interface SchemaItem {
   id: string;
@@ -179,7 +191,7 @@ onMounted(async () => {
 }
 
 .addword-dialog {
-  background: #fff;
+  background: hsl(var(--card));
   border-radius: 8px;
   padding: 24px;
   width: 340px;
@@ -190,7 +202,7 @@ onMounted(async () => {
   font-size: 16px;
   font-weight: 600;
   margin-bottom: 18px;
-  color: #1f2937;
+  color: hsl(var(--foreground));
 }
 
 .addword-form {
@@ -208,7 +220,7 @@ onMounted(async () => {
 .addword-label {
   font-size: 13px;
   font-weight: 500;
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
   display: flex;
   align-items: baseline;
   gap: 6px;
@@ -217,27 +229,27 @@ onMounted(async () => {
 .addword-hint {
   font-size: 11px;
   font-weight: 400;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
 }
 
 .addword-input {
   padding: 7px 10px;
-  border: 1px solid #d1d5db;
+  border: 1px solid hsl(var(--border));
   border-radius: 6px;
   font-size: 14px;
-  color: #1f2937;
-  background: #fff;
+  color: hsl(var(--foreground));
+  background: hsl(var(--card));
   outline: none;
   transition: border-color 0.15s;
 }
 
 .addword-input:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.1);
 }
 
 .addword-input::placeholder {
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
 }
 
 .addword-weight {

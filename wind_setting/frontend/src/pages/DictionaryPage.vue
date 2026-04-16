@@ -5,14 +5,16 @@
       <h2>词库管理</h2>
       <span class="dict-header-desc">管理您的词库数据（修改即时生效）</span>
       <span class="dict-header-spacer"></span>
-      <button
+      <Button
         v-if="isWailsEnv"
-        class="btn btn-sm dict-refresh-btn"
+        variant="outline"
+        size="sm"
+        class="dict-refresh-btn"
         @click="handleRefresh"
         title="刷新数据"
       >
         ↻
-      </button>
+      </Button>
     </div>
 
     <!-- 非 Wails 环境提示 -->
@@ -22,169 +24,137 @@
     </div>
 
     <template v-else>
-      <!-- ===== 类型选择器行 ===== -->
-      <DictTypeSelector :schemas="allSchemaStatuses" v-model="selection">
-        <template #actions>
-          <!-- 导入/导出（短语模式 或 方案非混输用户词库 或 混输候选调整） -->
-          <button
-            v-if="showImportExport"
-            class="btn btn-sm"
-            @click="handleImport"
-          >
-            导入
-          </button>
-          <button
-            v-if="showImportExport"
-            class="btn btn-sm"
-            @click="handleExport"
-          >
-            导出
-          </button>
-          <!-- 方案操作菜单 -->
-          <div
-            v-if="selection.mode === 'schema'"
-            class="toolbar-more"
-            @click="toggleSchemaMenu"
-          >
-            <button class="btn btn-sm btn-danger-outline">操作 ▾</button>
-            <div v-if="showSchemaMenu" class="toolbar-dropdown">
-              <div
-                class="dropdown-item dropdown-danger"
-                @click.stop="
-                  handleResetCurrentSchema();
-                  showSchemaMenu = false;
-                "
-              >
-                重置当前方案
-              </div>
-              <div
-                class="dropdown-item dropdown-danger"
-                @click.stop="
-                  handleResetAllSchemas();
-                  showSchemaMenu = false;
-                "
-              >
-                重置所有方案
-              </div>
-              <div
-                v-if="selectedSchemaOrphaned"
-                class="dropdown-item dropdown-danger"
-                @click.stop="
-                  handleDeleteOrphanedSchema();
-                  showSchemaMenu = false;
-                "
-              >
-                删除当前方案
-              </div>
-            </div>
-          </div>
-        </template>
-      </DictTypeSelector>
+      <!-- ===== 内容卡片（包含类型选择器 + 面板） ===== -->
+      <div class="dict-content-card">
+        <!-- ===== 类型选择器行 ===== -->
+        <DictTypeSelector :schemas="allSchemaStatuses" v-model="selection">
+          <template #actions>
+            <!-- 导入/导出（短语模式 或 方案非混输用户词库 或 混输候选调整） -->
+            <Button
+              v-if="showImportExport"
+              variant="outline"
+              size="sm"
+              @click="handleImport"
+            >
+              导入
+            </Button>
+            <Button
+              v-if="showImportExport"
+              variant="outline"
+              size="sm"
+              @click="handleExport"
+            >
+              导出
+            </Button>
+            <!-- 方案操作菜单 -->
+            <DropdownMenu v-if="selection.mode === 'schema'">
+              <DropdownMenuTrigger as-child>
+                <Button variant="destructive" size="sm">操作 ▾</Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  class="text-destructive"
+                  @click="handleResetCurrentSchema"
+                >
+                  重置当前方案
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  class="text-destructive"
+                  @click="handleResetAllSchemas"
+                >
+                  重置所有方案
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  v-if="selectedSchemaOrphaned"
+                  class="text-destructive"
+                  @click="handleDeleteOrphanedSchema"
+                >
+                  删除当前方案
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </template>
+        </DictTypeSelector>
 
-      <!-- ===== 残留方案警告 ===== -->
-      <div
-        v-if="selection.mode === 'schema' && selectedSchemaOrphaned"
-        class="orphan-banner"
-      >
-        ⚠ 此方案数据为历史残留（仅可查看和删除，不可添加）
-      </div>
-
-      <!-- ===== 快捷短语面板 ===== -->
-      <PhrasePanel
-        v-if="selection.mode === 'phrases'"
-        ref="phrasePanelRef"
-        @loading="onLoading"
-      />
-
-      <!-- ===== 方案模式 ===== -->
-      <template v-if="selection.mode === 'schema' && selection.schemaId">
-        <!-- 方案子标签页 -->
-        <div class="schema-sub-tabs">
-          <button
-            v-for="tab in schemaTabs"
-            :key="tab.key"
-            :class="['sub-tab', { active: schemaSubTab === tab.key }]"
-            @click="switchSchemaSubTab(tab.key)"
-          >
-            {{ tab.label }}
-          </button>
-        </div>
-
-        <!-- 混输方案提示（用户词库/词频/临时词库） -->
+        <!-- ===== 残留方案警告 ===== -->
         <div
-          v-if="selectedSchemaIsMixed && schemaSubTab !== 'shadow'"
-          class="mixed-hint"
+          v-if="selection.mode === 'schema' && selectedSchemaOrphaned"
+          class="orphan-banner"
         >
-          <p>此方案为混输方案，{{ schemaSubTabLabel }}继承自主方案。</p>
-          <p class="dict-note">请切换到对应的主方案进行设置。</p>
+          ⚠ 此方案数据为历史残留（仅可查看和删除，不可添加）
         </div>
 
-        <!-- 各子面板 — 用 :key 强制切换方案时重建 -->
-        <template v-if="!selectedSchemaIsMixed || schemaSubTab === 'shadow'">
-          <UserDictPanel
-            v-if="schemaSubTab === 'userdict'"
-            ref="userDictPanelRef"
-            :key="'ud-' + selection.schemaId"
-            :schema-id="selection.schemaId"
-            :readonly="selectedSchemaOrphaned"
-            @loading="onLoading"
-            @schema-changed="handleSchemaChanged"
-          />
-          <FreqPanel
-            v-if="schemaSubTab === 'freq'"
-            ref="freqPanelRef"
-            :key="'fq-' + selection.schemaId"
-            :schema-id="selection.schemaId"
-            :schema-name="selectedSchemaName"
-            @loading="onLoading"
-          />
-          <TempDictPanel
-            v-if="schemaSubTab === 'temp'"
-            ref="tempDictPanelRef"
-            :key="'tp-' + selection.schemaId"
-            :schema-id="selection.schemaId"
-            @loading="onLoading"
-            @schema-changed="handleSchemaChanged"
-          />
-          <ShadowPanel
-            v-if="schemaSubTab === 'shadow'"
-            ref="shadowPanelRef"
-            :key="'sw-' + selection.schemaId"
-            :schema-id="selection.schemaId"
-            :readonly="selectedSchemaOrphaned"
-            @loading="onLoading"
-            @schema-changed="handleSchemaChanged"
-          />
+        <!-- ===== 快捷短语面板 ===== -->
+        <PhrasePanel
+          v-if="selection.mode === 'phrases'"
+          ref="phrasePanelRef"
+          @loading="onLoading"
+        />
+
+        <!-- ===== 方案模式 ===== -->
+        <template v-if="selection.mode === 'schema' && selection.schemaId">
+          <!-- 方案子标签页 -->
+          <div class="schema-sub-tabs">
+            <button
+              v-for="tab in schemaTabs"
+              :key="tab.key"
+              :class="['sub-tab', { active: schemaSubTab === tab.key }]"
+              @click="switchSchemaSubTab(tab.key)"
+            >
+              {{ tab.label }}
+            </button>
+          </div>
+
+          <!-- 混输方案提示（用户词库/词频/临时词库） -->
+          <div
+            v-if="selectedSchemaIsMixed && schemaSubTab !== 'shadow'"
+            class="mixed-hint"
+          >
+            <p>此方案为混输方案，{{ schemaSubTabLabel }}继承自主方案。</p>
+            <p class="dict-note">请切换到对应的主方案进行设置。</p>
+          </div>
+
+          <!-- 各子面板 — 用 :key 强制切换方案时重建 -->
+          <template v-if="!selectedSchemaIsMixed || schemaSubTab === 'shadow'">
+            <UserDictPanel
+              v-if="schemaSubTab === 'userdict'"
+              ref="userDictPanelRef"
+              :key="'ud-' + selection.schemaId"
+              :schema-id="selection.schemaId"
+              :readonly="selectedSchemaOrphaned"
+              @loading="onLoading"
+              @schema-changed="handleSchemaChanged"
+            />
+            <FreqPanel
+              v-if="schemaSubTab === 'freq'"
+              ref="freqPanelRef"
+              :key="'fq-' + selection.schemaId"
+              :schema-id="selection.schemaId"
+              :schema-name="selectedSchemaName"
+              @loading="onLoading"
+            />
+            <TempDictPanel
+              v-if="schemaSubTab === 'temp'"
+              ref="tempDictPanelRef"
+              :key="'tp-' + selection.schemaId"
+              :schema-id="selection.schemaId"
+              @loading="onLoading"
+              @schema-changed="handleSchemaChanged"
+            />
+            <ShadowPanel
+              v-if="schemaSubTab === 'shadow'"
+              ref="shadowPanelRef"
+              :key="'sw-' + selection.schemaId"
+              :schema-id="selection.schemaId"
+              :readonly="selectedSchemaOrphaned"
+              @loading="onLoading"
+              @schema-changed="handleSchemaChanged"
+            />
+          </template>
         </template>
-      </template>
+      </div>
     </template>
 
-    <!-- ===== 确认对话框 ===== -->
-    <div
-      v-if="confirmVisible"
-      class="dialog-overlay"
-      @click.self="handleCancel"
-    >
-      <div class="dialog-box" style="max-width: 360px">
-        <div class="dialog-title">确认</div>
-        <div
-          style="
-            padding: 8px 0 16px;
-            font-size: 14px;
-            color: #374151;
-            white-space: pre-line;
-          "
-        >
-          {{ confirmMessage }}
-        </div>
-        <div class="dialog-actions">
-          <button class="btn btn-sm" @click="handleCancel">取消</button>
-          <button class="btn btn-primary btn-sm" @click="handleConfirm">
-            确定
-          </button>
-        </div>
-      </div>
-    </div>
   </section>
 </template>
 
@@ -194,6 +164,13 @@ import * as wailsApi from "../api/wails";
 import type { SchemaStatusItem, DictEvent } from "../api/wails";
 import { useToast } from "../composables/useToast";
 import { useConfirm } from "../composables/useConfirm";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import DictTypeSelector from "../components/dict/DictTypeSelector.vue";
 import PhrasePanel from "../components/dict/PhrasePanel.vue";
 import UserDictPanel from "../components/dict/UserDictPanel.vue";
@@ -206,8 +183,7 @@ const props = defineProps<{
 }>();
 
 const { toast } = useToast();
-const { confirmVisible, confirmMessage, confirm, handleConfirm, handleCancel } =
-  useConfirm();
+const { confirm } = useConfirm();
 
 // ===== 选择状态 =====
 const selection = ref<{ mode: "phrases" | "schema"; schemaId: string }>({
@@ -216,8 +192,6 @@ const selection = ref<{ mode: "phrases" | "schema"; schemaId: string }>({
 });
 
 const schemaSubTab = ref<"userdict" | "freq" | "temp" | "shadow">("userdict");
-const showSchemaMenu = ref(false);
-let schemaMenuOpenedAt = 0;
 
 const schemaTabs = [
   { key: "userdict" as const, label: "用户词库" },
@@ -478,39 +452,16 @@ function handleDictEvent(event: DictEvent) {
   }
 }
 
-// ===== 全局点击关闭菜单 =====
-function toggleSchemaMenu() {
-  if (showSchemaMenu.value) {
-    showSchemaMenu.value = false;
-  } else {
-    showSchemaMenu.value = true;
-    schemaMenuOpenedAt = Date.now();
-  }
-}
-
-function closeMenus() {
-  // 防止打开瞬间被自己的冒泡关闭
-  if (Date.now() - schemaMenuOpenedAt > 100) {
-    showSchemaMenu.value = false;
-  }
-}
-
 onMounted(async () => {
   if (!props.isWailsEnv) return;
   await loadSchemaStatuses();
   wailsApi.onDictEvent(handleDictEvent);
-  document.addEventListener("click", closeMenus);
 });
 
 onUnmounted(() => {
   wailsApi.offDictEvent();
-  document.removeEventListener("click", closeMenus);
 });
 </script>
-
-<style>
-@import "../components/dict/dict-shared.css";
-</style>
 
 <style scoped>
 .dict-page {
@@ -529,12 +480,12 @@ onUnmounted(() => {
 .dict-header h2 {
   font-size: 18px;
   font-weight: 600;
-  color: #1f2937;
+  color: hsl(var(--foreground));
   margin: 0;
 }
 .dict-header-desc {
   font-size: 13px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
 }
 .dict-header-spacer {
   flex: 1;
@@ -548,21 +499,21 @@ onUnmounted(() => {
 .dict-note-center-wrap {
   text-align: center;
   padding: 32px;
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
 }
 .dict-note-center-wrap code {
-  background: #f3f4f6;
+  background: hsl(var(--secondary));
   padding: 2px 6px;
   border-radius: 4px;
 }
 
 .orphan-banner {
-  background: #fef3c7;
-  border: 1px solid #fbbf24;
+  background: hsl(var(--warning) / 0.1);
+  border: 1px solid hsl(var(--warning));
   border-radius: 6px;
   padding: 6px 14px;
   font-size: 13px;
-  color: #92400e;
+  color: hsl(var(--warning));
   margin-bottom: 8px;
   flex-shrink: 0;
 }
@@ -570,8 +521,8 @@ onUnmounted(() => {
 .mixed-hint {
   text-align: center;
   padding: 36px 24px;
-  color: #6b7280;
-  background: #f9fafb;
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted));
   border-radius: 8px;
   flex: 1;
   display: flex;
@@ -584,9 +535,21 @@ onUnmounted(() => {
 }
 .mixed-hint .dict-note {
   font-size: 12px;
-  color: #9ca3af;
+  color: hsl(var(--muted-foreground));
   font-style: italic;
   margin-top: 6px;
+}
+
+.dict-content-card {
+  background: hsl(var(--card));
+  border-radius: 12px;
+  padding: 16px 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
 .schema-sub-tabs {
@@ -594,25 +557,25 @@ onUnmounted(() => {
   gap: 0;
   margin-bottom: 8px;
   flex-shrink: 0;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid hsl(var(--border));
 }
 .sub-tab {
   padding: 6px 16px;
   font-size: 13px;
   border: none;
   background: none;
-  color: #6b7280;
+  color: hsl(var(--muted-foreground));
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: all 0.15s;
   margin-bottom: -1px;
 }
 .sub-tab:hover {
-  color: #374151;
+  color: hsl(var(--foreground));
 }
 .sub-tab.active {
-  color: #2563eb;
-  border-bottom-color: #2563eb;
+  color: hsl(var(--primary));
+  border-bottom-color: hsl(var(--primary));
   font-weight: 500;
 }
 </style>
