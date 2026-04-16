@@ -199,18 +199,12 @@ func (m *Manager) UpdateLearningConfig(ls *schema.LearningSpec) {
 		return
 	}
 
-	// 构建 FreqHandler
+	// 构建 FreqHandler（使用方案自身 ID，混输方案词频独立于主方案）
 	var freqHandler *dict.FreqHandler
 	if ls.IsFreqEnabled() {
 		freqProfile := ls.GetFreqProfile()
 		dm.SetFreqProfile(freqProfile)
-		dataSchemaID := m.currentID
-		if sm := m.schemaManager; sm != nil {
-			if s := sm.GetSchema(m.currentID); s != nil {
-				dataSchemaID = s.DataSchemaID()
-			}
-		}
-		freqHandler = dict.NewFreqHandler(dm.GetStore(), dataSchemaID)
+		freqHandler = dict.NewFreqHandler(dm.GetStore(), m.currentID)
 	} else {
 		// 调频关闭时，清除 CompositeDict 上的 FreqScorer，停止应用旧的 boost
 		dm.ClearFreqScorer()

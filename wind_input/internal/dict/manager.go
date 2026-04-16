@@ -219,7 +219,7 @@ func (dm *DictManager) SeedDefaultPhrases() error {
 }
 
 // SwitchSchemaFull 切换活跃方案（包含临时词库）
-func (dm *DictManager) SwitchSchemaFull(schemaID, dataSchemaID string, tempMaxEntries, tempPromoteCount int) {
+func (dm *DictManager) SwitchSchemaFull(schemaID, dataSchemaID string, tempMaxEntries, tempPromoteCount int, opts ...string) {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
@@ -227,7 +227,13 @@ func (dm *DictManager) SwitchSchemaFull(schemaID, dataSchemaID string, tempMaxEn
 		return
 	}
 
-	dm.switchSchemaStore(schemaID, dataSchemaID, tempMaxEntries, tempPromoteCount)
+	// opts[0] = freqSchemaID（可选，默认与 dataSchemaID 相同）
+	freqSchemaID := dataSchemaID
+	if len(opts) > 0 && opts[0] != "" {
+		freqSchemaID = opts[0]
+	}
+
+	dm.switchSchemaStore(schemaID, dataSchemaID, freqSchemaID, tempMaxEntries, tempPromoteCount)
 
 	dm.activeSchemaID = schemaID
 	dm.logger.Info("切换到方案", "schemaID", schemaID)
@@ -235,9 +241,10 @@ func (dm *DictManager) SwitchSchemaFull(schemaID, dataSchemaID string, tempMaxEn
 
 // switchSchemaStore Store 后端的方案切换
 // schemaID: 活跃方案 ID（如 wubi86_pinyin）
-// dataSchemaID: 数据方案 ID（如 wubi86，用于 Store bucket key）
-func (dm *DictManager) switchSchemaStore(schemaID, dataSchemaID string, tempMaxEntries, tempPromoteCount int) {
-	dm.logger.Info("Store 方案切换", "schemaID", schemaID, "dataSchemaID", dataSchemaID)
+// dataSchemaID: 数据方案 ID（如 wubi86，用于用户词库/临时词库/Shadow 的 bucket key）
+// freqSchemaID: 词频数据方案 ID（如 wubi86_pinyin，用于词频 bucket key；混输方案独立于主方案）
+func (dm *DictManager) switchSchemaStore(schemaID, dataSchemaID, freqSchemaID string, tempMaxEntries, tempPromoteCount int) {
+	dm.logger.Info("Store 方案切换", "schemaID", schemaID, "dataSchemaID", dataSchemaID, "freqSchemaID", freqSchemaID)
 	dm.activeDataSchemaID = dataSchemaID
 
 	// 1. 移除旧的 Store 用户词库层
@@ -245,12 +252,12 @@ func (dm *DictManager) switchSchemaStore(schemaID, dataSchemaID string, tempMaxE
 		dm.compositeDict.RemoveLayer(dm.activeStoreUser.Name())
 	}
 
-	// 2. 懒加载 StoreShadowLayer（使用 dataSchemaID 作为 bucket key）
-	shadowLayer, ok := dm.storeShadowLayers[dataSchemaID]
+	// 2. 懒加载 StoreShadowLayer（使用 freqSchemaID，混输方案独立于主方案）
+	shadowLayer, ok := dm.storeShadowLayers[freqSchemaID]
 	if !ok {
-		shadowLayer = NewStoreShadowLayer(dm.store, dataSchemaID)
-		dm.storeShadowLayers[dataSchemaID] = shadowLayer
-		dm.logger.Info("Store Shadow 层已创建", "dataSchemaID", dataSchemaID)
+		shadowLayer = NewStoreShadowLayer(dm.store, freqSchemaID)
+		dm.storeShadowLayers[freqSchemaID] = shadowLayer
+		dm.logger.Info("Store Shadow 层已创建", "schemaID", freqSchemaID)
 	}
 	dm.compositeDict.SetShadowProvider(shadowLayer)
 	dm.activeStoreShadow = shadowLayer
@@ -265,11 +272,11 @@ func (dm *DictManager) switchSchemaStore(schemaID, dataSchemaID string, tempMaxE
 	dm.compositeDict.AddLayer(userLayer)
 	dm.activeStoreUser = userLayer
 
-	// 4. 设置词频评分器
-	scorer, ok := dm.freqScorers[dataSchemaID]
+	// 4. 设置词频评分器（使用 freqSchemaID，混输方案独立于主方案）
+	scorer, ok := dm.freqScorers[freqSchemaID]
 	if !ok {
-		scorer = NewStoreFreqScorer(dm.store, dataSchemaID, dm.freqProfile)
-		dm.freqScorers[dataSchemaID] = scorer
+		scorer = NewStoreFreqScorer(dm.store, freqSchemaID, dm.freqProfile)
+		dm.freqScorers[freqSchemaID] = scorer
 	}
 	dm.compositeDict.SetFreqScorer(scorer)
 

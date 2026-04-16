@@ -215,6 +215,15 @@ func (p *CodeTableAutoPhrase) flush() {
 		return
 	}
 
+	// 用户词库已有则跳过
+	if p.userLayer != nil {
+		for _, c := range p.userLayer.Search(code, 0) {
+			if c.Text == word {
+				return
+			}
+		}
+	}
+
 	p.learnWord(code, word)
 }
 

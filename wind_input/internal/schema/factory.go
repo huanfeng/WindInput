@@ -756,7 +756,7 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		if s.Learning.IsFreqEnabled() {
 			freqProfile := s.Learning.GetFreqProfile()
 			dm.SetFreqProfile(freqProfile)
-			codetableFreqHandler := dict.NewFreqHandler(dm.GetStore(), s.DataSchemaID())
+			codetableFreqHandler := dict.NewFreqHandler(dm.GetStore(), s.Schema.ID)
 			codetableEngine.SetFreqHandler(codetableFreqHandler)
 		}
 		// 混输码表子引擎：auto_learn 或 auto_phrase 启用时使用码表自动造词
@@ -899,7 +899,7 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 
 		// 注入拼音引擎的 FreqHandler 和 LearningStrategy
 		if s.Learning.IsFreqEnabled() {
-			pinyinFreqHandler := dict.NewFreqHandler(dm.GetStore(), s.DataSchemaID())
+			pinyinFreqHandler := dict.NewFreqHandler(dm.GetStore(), s.Schema.ID)
 			pinyinEngine.SetFreqHandler(pinyinFreqHandler)
 		}
 		pinyinLearning := NewLearningStrategy(&s.Learning, dm.GetStoreUserLayer())
@@ -912,7 +912,7 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 	// 加载拼音用户词频
 	if s.Learning.IsFreqEnabled() || s.Learning.IsAutoLearnEnabled() {
 		if dm != nil && dm.GetStore() != nil {
-			loadPinyinUserFreqs(pinyinEngine, dm.GetStore(), s.DataSchemaID(), logger)
+			loadPinyinUserFreqs(pinyinEngine, dm.GetStore(), s.Schema.ID, logger)
 		}
 	}
 

@@ -189,7 +189,8 @@ func (m *Manager) ToggleSchema(available []string) (*ToggleSchemaResult, error) 
 			s := sm.GetSchema(candidateID)
 			if s != nil {
 				dm.SwitchSchemaFull(candidateID, s.DataSchemaID(),
-					s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
+					s.Learning.TempMaxEntries, s.Learning.TempPromoteCount,
+					s.Schema.ID)
 			}
 		}
 
@@ -415,7 +416,8 @@ func (m *Manager) SwitchToSchemaByID(schemaID string) error {
 		s := sm.GetSchema(schemaID)
 		if s != nil {
 			dm.SwitchSchemaFull(schemaID, s.DataSchemaID(),
-				s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
+				s.Learning.TempMaxEntries, s.Learning.TempPromoteCount,
+				s.Schema.ID)
 		}
 	}
 

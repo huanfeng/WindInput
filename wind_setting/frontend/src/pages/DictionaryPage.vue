@@ -105,9 +105,12 @@
             </button>
           </div>
 
-          <!-- 混输方案提示（用户词库/词频/临时词库） -->
+          <!-- 混输方案提示（用户词库/临时词库继承自主方案） -->
           <div
-            v-if="selectedSchemaIsMixed && schemaSubTab !== 'shadow'"
+            v-if="
+              selectedSchemaIsMixed &&
+              (schemaSubTab === 'userdict' || schemaSubTab === 'temp')
+            "
             class="mixed-hint"
           >
             <p>此方案为混输方案，{{ schemaSubTabLabel }}继承自主方案。</p>
@@ -115,7 +118,13 @@
           </div>
 
           <!-- 各子面板 — 用 :key 强制切换方案时重建 -->
-          <template v-if="!selectedSchemaIsMixed || schemaSubTab === 'shadow'">
+          <template
+            v-if="
+              !selectedSchemaIsMixed ||
+              schemaSubTab === 'shadow' ||
+              schemaSubTab === 'freq'
+            "
+          >
             <UserDictPanel
               v-if="schemaSubTab === 'userdict'"
               ref="userDictPanelRef"
@@ -154,7 +163,6 @@
         </template>
       </div>
     </template>
-
   </section>
 </template>
 
@@ -195,8 +203,8 @@ const schemaSubTab = ref<"userdict" | "freq" | "temp" | "shadow">("userdict");
 
 const schemaTabs = [
   { key: "userdict" as const, label: "用户词库" },
-  { key: "freq" as const, label: "词频" },
   { key: "temp" as const, label: "临时词库" },
+  { key: "freq" as const, label: "词频" },
   { key: "shadow" as const, label: "候选调整" },
 ];
 
