@@ -22,7 +22,10 @@ engine:
 #   userfreq → 拼音方案 (pinyin)
 
 learning:
-  mode: frequency
-  protect_top_n: 3
+  auto_learn:
+    enabled: false
+  freq:
+    enabled: true
+    protect_top_n: 1
   temp_max_entries: 5000
   temp_promote_count: 3

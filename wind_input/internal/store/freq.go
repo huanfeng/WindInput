@@ -226,44 +226,73 @@ func (s *Store) GetAllFreq(schemaID string) (map[string]FreqRecord, error) {
 	return result, err
 }
 
-// CalcFreqBoost computes a priority boost score for the given FreqRecord.
+// FreqProfile 词频评分参数（每方案可配）
+type FreqProfile struct {
+	BoostMax      int     `json:"boost_max" yaml:"boost_max"`       // 加成上限（默认 2000）
+	BaseScale     float64 `json:"base_scale" yaml:"base_scale"`     // base = log2(count+1) * BaseScale（默认 100）
+	MaxRecency    float64 `json:"max_recency" yaml:"max_recency"`   // 时间衰减峰值（默认 300）
+	DecayHalfLife float64 `json:"half_life" yaml:"half_life"`       // 半衰期（小时，默认 72）
+	StreakScale   float64 `json:"streak_scale" yaml:"streak_scale"` // 连续选择系数（默认 50）
+	StreakCap     float64 `json:"streak_cap" yaml:"streak_cap"`     // 连续选择上限（默认 250）
+}
+
+// DefaultFreqProfile 返回默认词频评分参数
+// 参数设置偏保守，避免少量选择就大幅改变排序
+func DefaultFreqProfile() *FreqProfile {
+	return &FreqProfile{
+		BoostMax:      FreqBoostMax,
+		BaseScale:     50,
+		MaxRecency:    100,
+		DecayHalfLife: 72, // 3 天半衰期
+		StreakScale:   30,
+		StreakCap:     150,
+	}
+}
+
+// CalcFreqBoost computes a priority boost score using default profile.
+// Kept for backward compatibility.
+func CalcFreqBoost(rec FreqRecord, now int64) int {
+	return CalcFreqBoostWithProfile(rec, now, nil)
+}
+
+// CalcFreqBoostWithProfile computes a priority boost score for the given FreqRecord.
 //
 // Scoring:
-//   - base    = log2(count+1) * 100
-//   - recency: <1h=200, <1day=100, <1week=50, else 0
-//   - streak:  min(streak*50, 250)
-//   - total capped at FreqBoostMax (2000)
+//   - base    = log2(count+1) * BaseScale
+//   - recency = MaxRecency * exp(-λ * ageHours), λ = ln(2) / DecayHalfLife
+//   - streak  = min(streak * StreakScale, StreakCap)
+//   - total capped at BoostMax
 //   - returns 0 if Count == 0
-func CalcFreqBoost(rec FreqRecord, now int64) int {
+func CalcFreqBoostWithProfile(rec FreqRecord, now int64, p *FreqProfile) int {
 	if rec.Count == 0 {
 		return 0
 	}
-
-	base := int(math.Log2(float64(rec.Count)+1) * 100)
-
-	age := now - rec.LastUsed
-	var recency int
-	switch {
-	case age < 3600:
-		recency = 200
-	case age < 86400:
-		recency = 100
-	case age < 7*86400:
-		recency = 50
-	default:
-		recency = 0
+	if p == nil {
+		p = DefaultFreqProfile()
 	}
 
-	streak := int(rec.Streak) * 50
-	if streak > 250 {
-		streak = 250
+	// base: 对数增长，避免高频词过度主导
+	base := math.Log2(float64(rec.Count)+1) * p.BaseScale
+
+	// recency: 连续指数衰减
+	ageHours := float64(now-rec.LastUsed) / 3600.0
+	if ageHours < 0 {
+		ageHours = 0
+	}
+	lambda := math.Ln2 / p.DecayHalfLife
+	recency := p.MaxRecency * math.Exp(-lambda*ageHours)
+
+	// streak: 连续选择加成
+	streak := float64(rec.Streak) * p.StreakScale
+	if streak > p.StreakCap {
+		streak = p.StreakCap
 	}
 
 	total := base + recency + streak
-	if total > FreqBoostMax {
-		total = FreqBoostMax
+	if total > float64(p.BoostMax) {
+		total = float64(p.BoostMax)
 	}
-	return total
+	return int(total)
 }
 
 // BatchIncrementFreq enqueues a freq update via the WriteBuffer.

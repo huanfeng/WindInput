@@ -63,8 +63,11 @@ learning:
 	if s.Dicts[0].Type != "codetable" {
 		t.Errorf("期望词库类型=codetable, 实际=%s", s.Dicts[0].Type)
 	}
-	if s.Learning.Mode != LearningManual {
-		t.Errorf("期望 LearningMode=manual, 实际=%s", s.Learning.Mode)
+	if s.Learning.IsAutoLearnEnabled() {
+		t.Error("码表方案默认不应启用自动造词")
+	}
+	if s.Learning.IsFreqEnabled() {
+		t.Error("码表方案默认不应启用调频")
 	}
 }
 
@@ -115,9 +118,12 @@ user_data:
 	if s.Engine.Pinyin.Shuangpin.Layout != "ziranma" {
 		t.Errorf("期望 Layout=ziranma, 实际=%s", s.Engine.Pinyin.Shuangpin.Layout)
 	}
-	// 默认学习模式应为 auto（pinyin 类型）
-	if s.Learning.Mode != LearningAuto {
-		t.Errorf("期望 LearningMode=auto, 实际=%s", s.Learning.Mode)
+	// 拼音方案默认启用自动造词和调频
+	if !s.Learning.IsAutoLearnEnabled() {
+		t.Error("拼音方案默认应启用自动造词")
+	}
+	if !s.Learning.IsFreqEnabled() {
+		t.Error("拼音方案默认应启用调频")
 	}
 }
 
@@ -238,8 +244,8 @@ dictionaries:
     type: rime_codetable
     default: true
 learning:
-  mode: manual
-  protect_top_n: 3
+  freq:
+    protect_top_n: 3
 encoder:
   max_word_length: 10
   rules:
@@ -248,7 +254,7 @@ encoder:
 `
 	os.WriteFile(filepath.Join(exeSchemaDir, "test_merge.schema.yaml"), []byte(builtinContent), 0644)
 
-	// 用户方案：只修改部分字段（auto_commit_unique 和 protect_top_n）
+	// 用户方案：只修改部分字段（auto_commit_unique 和 freq.protect_top_n）
 	userSchemaDir := filepath.Join(dataDir, "schemas")
 	os.MkdirAll(userSchemaDir, 0755)
 	userContent := `
@@ -258,7 +264,8 @@ engine:
   codetable:
     auto_commit_unique: true
 learning:
-  protect_top_n: 5
+  freq:
+    protect_top_n: 5
 `
 	os.WriteFile(filepath.Join(userSchemaDir, "test_merge.schema.yaml"), []byte(userContent), 0644)
 
@@ -279,8 +286,12 @@ learning:
 	if !s.Engine.CodeTable.AutoCommitUnique {
 		t.Error("auto_commit_unique 应被用户覆盖为 true")
 	}
-	if s.Learning.ProtectTopN != 5 {
-		t.Errorf("protect_top_n 应被用户覆盖为 5, 实际=%d", s.Learning.ProtectTopN)
+	if s.Learning.Freq == nil || s.Learning.Freq.ProtectTopN != 5 {
+		protectN := 0
+		if s.Learning.Freq != nil {
+			protectN = s.Learning.Freq.ProtectTopN
+		}
+		t.Errorf("freq.protect_top_n 应被用户覆盖为 5, 实际=%d", protectN)
 	}
 
 	// 内置默认值应保留

@@ -663,7 +663,11 @@ func (c *Coordinator) selectCandidateInternal(index int) *bridge.KeyEventResult 
 			fullText += originalText
 			c.engineMgr.OnCandidateSelected(fullCode, fullText, cand.Source)
 		} else {
-			c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText, cand.Source)
+			selectedCode := c.inputBuffer
+			if cand.Code != "" {
+				selectedCode = cand.Code
+			}
+			c.engineMgr.OnCandidateSelected(selectedCode, originalText, cand.Source)
 		}
 	}
 

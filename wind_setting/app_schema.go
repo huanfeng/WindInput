@@ -109,13 +109,35 @@ type SchemaConfigDict struct {
 	WeightSpec interface{} `yaml:"weight_spec,omitempty" json:"weight_spec,omitempty"`
 }
 
+// SchemaConfigAutoLearn 自动造词配置
+type SchemaConfigAutoLearn struct {
+	Enabled        bool `yaml:"enabled" json:"enabled"`
+	CountThreshold int  `yaml:"count_threshold,omitempty" json:"count_threshold,omitempty"`
+	MinWordLength  int  `yaml:"min_word_length,omitempty" json:"min_word_length,omitempty"`
+	WeightDelta    int  `yaml:"weight_delta,omitempty" json:"weight_delta,omitempty"`
+	AddWeight      int  `yaml:"add_weight,omitempty" json:"add_weight,omitempty"`
+}
+
+// SchemaConfigFreq 自动调频配置
+type SchemaConfigFreq struct {
+	Enabled      bool    `yaml:"enabled" json:"enabled"`
+	ProtectTopN  int     `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty"`
+	HalfLife     float64 `yaml:"half_life,omitempty" json:"half_life,omitempty"`
+	BoostMax     int     `yaml:"boost_max,omitempty" json:"boost_max,omitempty"`
+	MaxRecency   float64 `yaml:"max_recency,omitempty" json:"max_recency,omitempty"`
+	BaseScale    float64 `yaml:"base_scale,omitempty" json:"base_scale,omitempty"`
+	StreakScale  float64 `yaml:"streak_scale,omitempty" json:"streak_scale,omitempty"`
+	StreakCap    float64 `yaml:"streak_cap,omitempty" json:"streak_cap,omitempty"`
+}
+
 // SchemaConfigLearning 学习策略配置
 type SchemaConfigLearning struct {
-	Mode             string `yaml:"mode" json:"mode"`
-	UnigramPath      string `yaml:"unigram_path,omitempty" json:"unigram_path,omitempty"`
-	ProtectTopN      int    `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty"`
-	TempMaxEntries   int    `yaml:"temp_max_entries,omitempty" json:"temp_max_entries,omitempty"`
-	TempPromoteCount int    `yaml:"temp_promote_count,omitempty" json:"temp_promote_count,omitempty"`
+	AutoLearn        *SchemaConfigAutoLearn `yaml:"auto_learn,omitempty" json:"auto_learn,omitempty"`
+	Freq             *SchemaConfigFreq      `yaml:"freq,omitempty" json:"freq,omitempty"`
+	ProtectTopN      int                    `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty"`
+	UnigramPath      string                 `yaml:"unigram_path,omitempty" json:"unigram_path,omitempty"`
+	TempMaxEntries   int                    `yaml:"temp_max_entries,omitempty" json:"temp_max_entries,omitempty"`
+	TempPromoteCount int                    `yaml:"temp_promote_count,omitempty" json:"temp_promote_count,omitempty"`
 }
 
 // SchemaConfig 完整方案配置（YAML 结构，前端可直接编辑）

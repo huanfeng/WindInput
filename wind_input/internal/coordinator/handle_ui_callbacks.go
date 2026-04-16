@@ -292,7 +292,11 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 			fullText += originalText
 			engineMgr.OnCandidateSelected(fullCode, fullText, candidateSource)
 		} else {
-			engineMgr.OnCandidateSelected(code, originalText, candidateSource)
+			selectedCode := code
+			if candidate.Code != "" {
+				selectedCode = candidate.Code
+			}
+			engineMgr.OnCandidateSelected(selectedCode, originalText, candidateSource)
 		}
 	}
 

@@ -86,11 +86,9 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 		SkipSingleCharFreq: skipSingleCharFreq,
 	}
 
-	// 码表学习配置
-	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
-		config.EnableUserFreq = true
-		config.FrequencyOnly = (s.Learning.Mode == LearningFrequency)
-		config.ProtectTopN = s.Learning.ProtectTopN
+	// ProtectTopN 从 FreqSpec 读取，传入引擎 Config
+	if s.Learning.Freq != nil {
+		config.ProtectTopN = s.Learning.Freq.ProtectTopN
 	}
 
 	engine := codetable.NewEngine(config, logger)
@@ -119,6 +117,24 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 		engine.SetDictManager(dm)
 		// 同步排序模式到 CompositeDict，避免启动时使用默认的词频排序
 		dm.SetSortMode(candidate.CandidateSortMode(spec.CandidateSortMode))
+
+		// 注入 FreqHandler（调频）
+		if s.Learning.IsFreqEnabled() {
+			freqProfile := s.Learning.GetFreqProfile()
+			dm.SetFreqProfile(freqProfile)
+			freqHandler := dict.NewFreqHandler(dm.GetStore(), s.DataSchemaID())
+			engine.SetFreqHandler(freqHandler)
+		}
+
+		// 注入 LearningStrategy（造词）
+		learningStrategy := NewLearningStrategy(&s.Learning, dm.GetStoreUserLayer())
+		if al, ok := learningStrategy.(*AutoLearning); ok {
+			if dm.GetStoreTempLayer() != nil {
+				al.SetTempLayer(dm.GetStoreTempLayer())
+			}
+			al.SetSystemChecker(dm)
+		}
+		engine.SetLearningStrategy(learningStrategy)
 	}
 
 	// 后台预生成拼音 wdb
@@ -236,15 +252,32 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 	// 设置 DictManager
 	if dm != nil {
 		engine.SetDictManager(dm)
+
+		// 注入 FreqHandler（调频）
+		if s.Learning.IsFreqEnabled() {
+			freqProfile := s.Learning.GetFreqProfile()
+			dm.SetFreqProfile(freqProfile)
+			freqHandler := dict.NewFreqHandler(dm.GetStore(), s.DataSchemaID())
+			engine.SetFreqHandler(freqHandler)
+		}
+
+		// 注入 LearningStrategy（造词）
+		learningStrategy := NewLearningStrategy(&s.Learning, dm.GetStoreUserLayer())
+		if al, ok := learningStrategy.(*AutoLearning); ok {
+			if dm.GetStoreTempLayer() != nil {
+				al.SetTempLayer(dm.GetStoreTempLayer())
+			}
+			al.SetSystemChecker(dm)
+		}
+		engine.SetLearningStrategy(learningStrategy)
 	}
 
-	// 加载用户词频（仅在 learning.mode=auto 或 frequency 时加载）
-	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
+	// 加载用户词频（调频或造词启用时加载 Unigram 用户词频）
+	if s.Learning.IsFreqEnabled() || s.Learning.IsAutoLearnEnabled() {
 		if dm != nil && dm.GetStore() != nil {
 			loadPinyinUserFreqs(engine, dm.GetStore(), s.DataSchemaID(), logger)
 		}
-		config.EnableUserFreq = true // 同步到引擎 config，控制 OnCandidateSelected
-		config.FrequencyOnly = (s.Learning.Mode == LearningFrequency)
+
 	}
 
 	return &EngineBundle{
@@ -657,11 +690,9 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		SkipSingleCharFreq: mixedSkipSingleCharFreq,
 	}
 
-	// 码表学习配置
-	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
-		codetableConfig.EnableUserFreq = true
-		codetableConfig.FrequencyOnly = (s.Learning.Mode == LearningFrequency)
-		codetableConfig.ProtectTopN = s.Learning.ProtectTopN
+	// ProtectTopN 从 FreqSpec 读取
+	if s.Learning.Freq != nil {
+		codetableConfig.ProtectTopN = s.Learning.Freq.ProtectTopN
 	}
 
 	codetableEngine := codetable.NewEngine(codetableConfig, logger)
@@ -708,6 +739,19 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		}
 		codetableEngine.SetDictManager(dm)
 		dm.SetSortMode(candidate.CandidateSortMode(codeTableSpec.CandidateSortMode))
+
+		// 注入码表引擎的 FreqHandler 和 LearningStrategy
+		if s.Learning.IsFreqEnabled() {
+			freqProfile := s.Learning.GetFreqProfile()
+			dm.SetFreqProfile(freqProfile)
+			codetableFreqHandler := dict.NewFreqHandler(dm.GetStore(), s.DataSchemaID())
+			codetableEngine.SetFreqHandler(codetableFreqHandler)
+		}
+		codetableLearning := NewLearningStrategy(&s.Learning, dm.GetStoreUserLayer())
+		if al, ok := codetableLearning.(*AutoLearning); ok && dm.GetStoreTempLayer() != nil {
+			al.SetTempLayer(dm.GetStoreTempLayer())
+		}
+		codetableEngine.SetLearningStrategy(codetableLearning)
 	}
 
 	// === 3. 创建拼音引擎（使用独立的 CompositeDict）===
@@ -823,15 +867,24 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 	// 设置拼音引擎的 DictManager（用于用户词频学习）
 	if dm != nil {
 		pinyinEngine.SetDictManager(dm)
+
+		// 注入拼音引擎的 FreqHandler 和 LearningStrategy
+		if s.Learning.IsFreqEnabled() {
+			pinyinFreqHandler := dict.NewFreqHandler(dm.GetStore(), s.DataSchemaID())
+			pinyinEngine.SetFreqHandler(pinyinFreqHandler)
+		}
+		pinyinLearning := NewLearningStrategy(&s.Learning, dm.GetStoreUserLayer())
+		if al, ok := pinyinLearning.(*AutoLearning); ok && dm.GetStoreTempLayer() != nil {
+			al.SetTempLayer(dm.GetStoreTempLayer())
+		}
+		pinyinEngine.SetLearningStrategy(pinyinLearning)
 	}
 
 	// 加载拼音用户词频
-	if s.Learning.Mode == LearningAuto || s.Learning.Mode == LearningFrequency {
+	if s.Learning.IsFreqEnabled() || s.Learning.IsAutoLearnEnabled() {
 		if dm != nil && dm.GetStore() != nil {
 			loadPinyinUserFreqs(pinyinEngine, dm.GetStore(), s.DataSchemaID(), logger)
 		}
-		pinyinConfig.EnableUserFreq = true
-		pinyinConfig.FrequencyOnly = (s.Learning.Mode == LearningFrequency)
 	}
 
 	// === 4. 创建混输引擎 ===

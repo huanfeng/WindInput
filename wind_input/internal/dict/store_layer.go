@@ -318,13 +318,15 @@ func (l *StoreShadowLayer) IsDirty() bool { return false }
 type StoreFreqScorer struct {
 	store    *store.Store
 	schemaID string
+	profile  *store.FreqProfile // 词频评分参数（nil 使用默认值）
 }
 
 // NewStoreFreqScorer 创建 StoreFreqScorer。
-func NewStoreFreqScorer(s *store.Store, schemaID string) *StoreFreqScorer {
+func NewStoreFreqScorer(s *store.Store, schemaID string, profile *store.FreqProfile) *StoreFreqScorer {
 	return &StoreFreqScorer{
 		store:    s,
 		schemaID: schemaID,
+		profile:  profile,
 	}
 }
 
@@ -334,7 +336,7 @@ func (f *StoreFreqScorer) FreqBoost(code, text string) int {
 	if err != nil {
 		return 0
 	}
-	return store.CalcFreqBoost(rec, time.Now().Unix())
+	return store.CalcFreqBoostWithProfile(rec, time.Now().Unix(), f.profile)
 }
 
 // ─────────────────────────────────────────

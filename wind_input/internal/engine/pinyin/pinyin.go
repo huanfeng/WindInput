@@ -18,26 +18,31 @@ type Config struct {
 	UseSmartCompose bool         // 启用智能组句（Viterbi）
 	CandidateOrder  string       // 候选排序模式：char_first(单字优先)/phrase_first(词组优先)/smart(智能混排)
 	Fuzzy           *FuzzyConfig // 模糊拼音配置（nil 表示不启用）
-	EnableUserFreq  bool         // 启用用户词频学习（默认 false，关闭词频文件生成）
-	FrequencyOnly   bool         // 仅调频模式：不创建新词，只调整已有词条权重
 	SkipShadow      bool         // 跳过 Shadow 规则应用（混输模式下由外层统一应用）
 	SkipAbbrev      bool         // 跳过简拼匹配（混输模式下减少噪声）
 }
 
+// LearningStrategy 造词策略接口（避免引擎直接依赖 schema 包）
+type LearningStrategy interface {
+	OnWordCommitted(code, text string)
+}
+
 // Engine 拼音引擎
 type Engine struct {
-	dict            *dict.CompositeDict
-	syllableTrie    *SyllableTrie       // 音节 Trie
-	unigram         UnigramLookup       // Unigram 语言模型（接口：支持内存模式和 mmap 模式）
-	bigram          *BigramModel        // Bigram 语言模型（可选）
-	codeHintTable   *dict.CodeTable     // 编码反查码表
-	codeHintReverse map[string][]string // 汉字 -> 编码（反向索引）
-	config          *Config
-	fuzzyPtr        atomic.Pointer[FuzzyConfig] // 线程安全的模糊音配置（热更新时原子写入，查询时原子读取）
-	dictManager     *dict.DictManager           // 词库管理器（用于用户词频学习）
-	scorer          *Scorer                     // 统一候选评分器（deprecated，保留供五笔引擎引用）
-	rimeScorer      *RimeScorer                 // Rime 风格连续评分器
-	logger          *slog.Logger
+	dict             *dict.CompositeDict
+	syllableTrie     *SyllableTrie       // 音节 Trie
+	unigram          UnigramLookup       // Unigram 语言模型（接口：支持内存模式和 mmap 模式）
+	bigram           *BigramModel        // Bigram 语言模型（可选）
+	codeHintTable    *dict.CodeTable     // 编码反查码表
+	codeHintReverse  map[string][]string // 汉字 -> 编码（反向索引）
+	config           *Config
+	fuzzyPtr         atomic.Pointer[FuzzyConfig] // 线程安全的模糊音配置（热更新时原子写入，查询时原子读取）
+	dictManager      *dict.DictManager           // 词库管理器（用于用户词频学习）
+	freqHandler      *dict.FreqHandler           // 词频记录处理器（可选，调频用）
+	learningStrategy LearningStrategy            // 造词策略（可选）
+	scorer           *Scorer                     // 统一候选评分器（deprecated，保留供五笔引擎引用）
+	rimeScorer       *RimeScorer                 // Rime 风格连续评分器
+	logger           *slog.Logger
 
 	// 双拼支持
 	spConverter *shuangpin.Converter // 双拼转换器（nil 表示全拼模式）
@@ -298,48 +303,42 @@ func (e *Engine) SetDictManager(dm *dict.DictManager) {
 	e.dictManager = dm
 }
 
+// SetFreqHandler 设置词频记录处理器
+func (e *Engine) SetFreqHandler(h *dict.FreqHandler) {
+	e.freqHandler = h
+}
+
+// SetLearningStrategy 设置造词策略
+func (e *Engine) SetLearningStrategy(ls LearningStrategy) {
+	e.learningStrategy = ls
+}
+
 // OnCandidateSelected 用户选词回调
-// 记录用户选择，用于词频学习（带误选保护）
+// 前置过滤（拼音特有） → 调频（FreqHandler） → 造词（LearningStrategy） → Unigram boost
 func (e *Engine) OnCandidateSelected(code, text string) {
-	if e.config == nil || !e.config.EnableUserFreq {
-		return
-	}
-	if e.dictManager == nil {
+	if e.freqHandler == nil && e.learningStrategy == nil {
 		return
 	}
 
-	runes := []rune(text)
-	if len(runes) < 2 {
+	// 前置过滤：单字仅 boost LM，不记录词频/造词
+	if len([]rune(text)) < 2 {
 		if e.unigram != nil {
 			e.unigram.BoostUserFreq(text, 1)
 		}
 		return
 	}
 
-	// 记录独立词频
-	if s := e.dictManager.GetStore(); s != nil {
-		s.IncrementFreq(e.dictManager.GetActiveSchemaID(), code, text)
+	// 调频
+	if e.freqHandler != nil {
+		e.freqHandler.Record(code, text)
 	}
 
-	if e.config.FrequencyOnly {
-		if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
-			userLayer.IncreaseWeight(code, text, 20)
-		}
-	} else {
-		tempLayer := e.dictManager.GetStoreTempLayer()
-		if tempLayer != nil {
-			promoted := tempLayer.LearnWord(code, text, 20)
-			if promoted {
-				tempLayer.PromoteWord(code, text)
-			}
-		} else {
-			if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
-				userLayer.OnWordSelected(code, text, 800, 20, 2)
-			}
-		}
+	// 造词
+	if e.learningStrategy != nil {
+		e.learningStrategy.OnWordCommitted(code, text)
 	}
 
-	// 更新 Unigram 用户频率
+	// 后置：更新 Unigram 用户频率（拼音特有）
 	if e.unigram != nil {
 		e.unigram.BoostUserFreq(text, 1)
 	}

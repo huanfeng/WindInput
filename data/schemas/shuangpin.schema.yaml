@@ -34,5 +34,8 @@ dictionaries:
     role: reverse_lookup
 
 learning:
-  mode: manual
+  auto_learn:
+    enabled: false
+  freq:
+    enabled: false
   unigram_path: "pinyin/unigram.txt"

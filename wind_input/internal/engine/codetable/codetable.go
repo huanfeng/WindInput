@@ -18,6 +18,11 @@ const (
 	PrefixWeightPenaltyPerKey = 1000000
 )
 
+// LearningStrategy 造词策略接口（避免引擎直接依赖 schema 包）
+type LearningStrategy interface {
+	OnWordCommitted(code, text string)
+}
+
 // Config 码表引擎配置
 type Config struct {
 	MaxCodeLength      int    // 最大码长，默认4
@@ -30,8 +35,6 @@ type Config struct {
 	SingleCodeInput    bool   // 逐字键入模式（关闭前缀匹配）
 	DedupCandidates    bool   // 候选去重（内部开关，未来可能开放给用户）
 	CandidateSortMode  string // 候选排序模式：frequency（词频）、natural（自然顺序）
-	EnableUserFreq     bool   // 启用用户词频学习
-	FrequencyOnly      bool   // 仅调频模式：不创建新词，只调整已有词条权重
 	ProtectTopN        int    // 首选保护：前 N 位锁定码表原始顺序
 	SkipShadow         bool   // 跳过 Shadow 规则应用（混输模式下由外层统一应用）
 	SkipSingleCharFreq bool   // 单字不自动调频
@@ -54,10 +57,12 @@ func DefaultConfig() *Config {
 
 // Engine 码表输入引擎
 type Engine struct {
-	codeTable   *dict.CodeTable // 主码表
-	config      *Config
-	dictManager *dict.DictManager // 词库管理器（可选，用于查询用户词和短语）
-	logger      *slog.Logger
+	codeTable        *dict.CodeTable // 主码表
+	config           *Config
+	dictManager      *dict.DictManager // 词库管理器（可选，用于查询用户词和短语）
+	freqHandler      *dict.FreqHandler // 词频记录处理器（可选，调频用）
+	learningStrategy LearningStrategy  // 造词策略（可选）
+	logger           *slog.Logger
 }
 
 // NewEngine 创建码表引擎
@@ -283,6 +288,21 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	}
 
 	// ========== Phase 5: 排序 + 过滤 + 截断 ==========
+	// 排序前记住精确匹配的原始 top-N（用于 ProtectTopN 锁定）
+	protectN := 0
+	if e.config != nil {
+		protectN = e.config.ProtectTopN
+	}
+	var protectedCandidates []candidate.Candidate
+	if protectN > 0 && len(exactCandidates) > 0 {
+		n := protectN
+		if n > len(exactCandidates) {
+			n = len(exactCandidates)
+		}
+		protectedCandidates = make([]candidate.Candidate, n)
+		copy(protectedCandidates, exactCandidates[:n])
+	}
+
 	comparator := candidate.Better
 	if e.config != nil && e.config.CandidateSortMode == string(candidate.SortByNatural) {
 		comparator = candidate.BetterNatural
@@ -290,6 +310,12 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	sort.SliceStable(allCandidates, func(i, j int) bool {
 		return comparator(allCandidates[i], allCandidates[j])
 	})
+
+	// ProtectTopN：将原始 top-N 候选回填到固定位置
+	// 记录词频但不改变它们的排序位置，保护五笔用户的肌肉记忆
+	if len(protectedCandidates) > 0 && len(allCandidates) > 0 {
+		allCandidates = applyProtectTopN(allCandidates, protectedCandidates)
+	}
 
 	// ========== Phase 6: Shadow 拦截器（pin + delete） ==========
 	// 在引擎最终排序后统一应用，不修改 weight，只做呈现层位置覆盖和过滤。
@@ -316,6 +342,30 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	// 自动上屏检查仅考虑精确匹配数量
 	e.checkAutoCommit(result, input, exactCandidates)
 
+	return result
+}
+
+// applyProtectTopN 将受保护的候选回填到排序结果的固定位置
+// protected 中的候选按原始顺序占据前 N 个位置，其余候选按排序结果填充剩余位置
+func applyProtectTopN(sorted, protected []candidate.Candidate) []candidate.Candidate {
+	// 构建受保护候选的集合（按 Text 匹配，因为同一词可能权重已变）
+	protectedSet := make(map[string]bool, len(protected))
+	for _, p := range protected {
+		protectedSet[p.Text] = true
+	}
+
+	// 从排序结果中提取非受保护的候选（保持排序后的顺序）
+	rest := make([]candidate.Candidate, 0, len(sorted))
+	for _, c := range sorted {
+		if !protectedSet[c.Text] {
+			rest = append(rest, c)
+		}
+	}
+
+	// 合并：受保护候选在前，其余按排序填充
+	result := make([]candidate.Candidate, 0, len(sorted))
+	result = append(result, protected...)
+	result = append(result, rest...)
 	return result
 }
 
@@ -394,69 +444,27 @@ func (e *Engine) Reset() {
 	// 码表引擎无状态，无需重置
 }
 
-// OnCandidateSelected 用户选词回调（词频学习）
+// OnCandidateSelected 用户选词回调
+// 前置过滤（码表特有） → 调频（FreqHandler） → 造词（LearningStrategy）
 func (e *Engine) OnCandidateSelected(code, text string) {
-	if e.config == nil || !e.config.EnableUserFreq {
-		return
-	}
-	if e.dictManager == nil {
+	if e.freqHandler == nil && e.learningStrategy == nil {
 		return
 	}
 
-	// 单字不自动调频（码表单字靠码表固定顺序）
-	if e.config.SkipSingleCharFreq && len([]rune(text)) <= 1 {
+	// 前置过滤（码表特有）：单字不调频
+	if e.config != nil && e.config.SkipSingleCharFreq && len([]rune(text)) <= 1 {
 		return
 	}
 
-	// 首选保护：检查该词在码表中的原始排名
-	if e.config.ProtectTopN > 0 && e.codeTable != nil {
-		originalRank := e.getOriginalRank(code, text)
-		if originalRank >= 0 && originalRank < e.config.ProtectTopN {
-			// 码表前 N 位，不需要调频
-			return
-		}
+	// 调频
+	if e.freqHandler != nil {
+		e.freqHandler.Record(code, text)
 	}
 
-	// 记录独立词频
-	if s := e.dictManager.GetStore(); s != nil {
-		s.IncrementFreq(e.dictManager.GetActiveSchemaID(), code, text)
+	// 造词
+	if e.learningStrategy != nil {
+		e.learningStrategy.OnWordCommitted(code, text)
 	}
-
-	if e.config.FrequencyOnly {
-		// 仅调频模式：只调整已有词条权重
-		if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
-			userLayer.IncreaseWeight(code, text, 20)
-		}
-		return
-	}
-
-	// 自动学习模式：优先使用临时词库
-	tempLayer := e.dictManager.GetStoreTempLayer()
-	if tempLayer != nil {
-		promoted := tempLayer.LearnWord(code, text, 20)
-		if promoted {
-			tempLayer.PromoteWord(code, text)
-		}
-	} else {
-		if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
-			userLayer.OnWordSelected(code, text, 800, 20, 3)
-		}
-	}
-}
-
-// getOriginalRank 获取词在码表中的原始排名（0-based）
-// 返回 -1 表示不在码表中
-func (e *Engine) getOriginalRank(code, text string) int {
-	if e.codeTable == nil {
-		return -1
-	}
-	entries := e.codeTable.Lookup(code)
-	for i, entry := range entries {
-		if entry.Text == text {
-			return i
-		}
-	}
-	return -1
 }
 
 // Type 返回引擎类型
@@ -499,4 +507,14 @@ func (e *Engine) SetDictManager(dm *dict.DictManager) {
 // GetDictManager 获取词库管理器
 func (e *Engine) GetDictManager() *dict.DictManager {
 	return e.dictManager
+}
+
+// SetFreqHandler 设置词频记录处理器
+func (e *Engine) SetFreqHandler(h *dict.FreqHandler) {
+	e.freqHandler = h
+}
+
+// SetLearningStrategy 设置造词策略
+func (e *Engine) SetLearningStrategy(ls LearningStrategy) {
+	e.learningStrategy = ls
 }

@@ -200,7 +200,7 @@ func TestStoreShadowLayer_PinAndGet(t *testing.T) {
 // TestStoreFreqScorer 验证词频加成：未知词返回 0，增加词频后返回 > 0。
 func TestStoreFreqScorer(t *testing.T) {
 	s := openTestStore(t)
-	scorer := NewStoreFreqScorer(s, testSchema)
+	scorer := NewStoreFreqScorer(s, testSchema, nil)
 
 	// 未知词返回 0
 	if boost := scorer.FreqBoost("abc", "词"); boost != 0 {

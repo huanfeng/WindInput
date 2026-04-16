@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
@@ -181,6 +182,72 @@ func (m *Manager) UpdateShuangpinLayout(layoutID string) {
 	} else {
 		m.logger.Info("更新双拼方案", "layoutID", layoutID)
 	}
+}
+
+// UpdateLearningConfig 热更新当前引擎的学习配置（调频 + 造词）
+func (m *Manager) UpdateLearningConfig(ls *schema.LearningSpec) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	dm := m.dictManager
+	if dm == nil {
+		return
+	}
+
+	engine := m.currentEngine
+	if engine == nil {
+		return
+	}
+
+	// 构建 FreqHandler
+	var freqHandler *dict.FreqHandler
+	if ls.IsFreqEnabled() {
+		freqProfile := ls.GetFreqProfile()
+		dm.SetFreqProfile(freqProfile)
+		dataSchemaID := m.currentID
+		if sm := m.schemaManager; sm != nil {
+			if s := sm.GetSchema(m.currentID); s != nil {
+				dataSchemaID = s.DataSchemaID()
+			}
+		}
+		freqHandler = dict.NewFreqHandler(dm.GetStore(), dataSchemaID)
+	} else {
+		// 调频关闭时，清除 CompositeDict 上的 FreqScorer，停止应用旧的 boost
+		dm.ClearFreqScorer()
+	}
+
+	// 构建 LearningStrategy
+	learningStrategy := schema.NewLearningStrategy(ls, dm.GetStoreUserLayer())
+	if al, ok := learningStrategy.(*schema.AutoLearning); ok {
+		if dm.GetStoreTempLayer() != nil {
+			al.SetTempLayer(dm.GetStoreTempLayer())
+		}
+		al.SetSystemChecker(dm)
+	}
+
+	// 注入到当前引擎
+	switch e := engine.(type) {
+	case *codetable.Engine:
+		e.SetFreqHandler(freqHandler)
+		e.SetLearningStrategy(learningStrategy)
+	case *pinyin.Engine:
+		e.SetFreqHandler(freqHandler)
+		e.SetLearningStrategy(learningStrategy)
+	case *mixed.Engine:
+		// 混输引擎：分别注入到码表和拼音子引擎
+		if ce := e.GetCodetableEngine(); ce != nil {
+			ce.SetFreqHandler(freqHandler)
+			ce.SetLearningStrategy(learningStrategy)
+		}
+		if pe := e.GetPinyinEngine(); pe != nil {
+			pe.SetFreqHandler(freqHandler)
+			pe.SetLearningStrategy(learningStrategy)
+		}
+	}
+
+	m.logger.Info("学习配置已热更新",
+		"freqEnabled", ls.IsFreqEnabled(),
+		"autoLearnEnabled", ls.IsAutoLearnEnabled())
 }
 
 // loadCodetableReverseForPinyin 从方案配置中查找码表反查路径并加载

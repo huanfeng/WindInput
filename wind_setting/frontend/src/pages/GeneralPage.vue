@@ -351,11 +351,14 @@ function getTempPinyinConfig(schemaID: string) {
 }
 
 // 学习配置
-function getLearningConfig(schemaID: string) {
+function getLearningConfig(schemaID: string): { auto_learn: { enabled: boolean }; freq: { enabled: boolean; protect_top_n?: number }; protect_top_n?: number } {
   const cfg = schemaConfigs.value[schemaID];
-  if (!cfg) return { mode: "frequency" };
-  if (!cfg.learning) cfg.learning = { mode: "frequency" };
-  return cfg.learning;
+  if (!cfg) return { auto_learn: { enabled: false }, freq: { enabled: false } };
+  if (!cfg.learning) (cfg as any).learning = {};
+  const learning = cfg.learning as any;
+  if (!learning.auto_learn) learning.auto_learn = { enabled: false };
+  if (!learning.freq) learning.freq = { enabled: false };
+  return learning;
 }
 
 function getFuzzyConfig(schemaID: string) {
@@ -862,6 +865,74 @@ onUnmounted(() => {
               />
             </div>
           </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>自动调频</label>
+              <p class="setting-hint">根据使用频率自动调整候选词排序</p>
+            </div>
+            <div class="setting-control">
+              <Switch
+                :checked="getLearningConfig(schemaID).freq.enabled"
+                @update:checked="
+                  (v: boolean) => {
+                    getLearningConfig(schemaID).freq.enabled = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
+            </div>
+          </div>
+          <div
+            v-if="getLearningConfig(schemaID).freq.enabled"
+            class="setting-item"
+          >
+            <div class="setting-info">
+              <label>首选保护</label>
+              <p class="setting-hint">
+                锁定前 N 位候选的排序位置，防止调频改变首选
+              </p>
+            </div>
+            <div class="setting-control">
+              <Select
+                :model-value="
+                  String(getLearningConfig(schemaID).freq.protect_top_n || 0)
+                "
+                @update:model-value="
+                  (v: string) => {
+                    getLearningConfig(schemaID).freq.protect_top_n = Number(v);
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              >
+                <SelectTrigger class="w-[140px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">不保护</SelectItem>
+                  <SelectItem value="1">保护首选</SelectItem>
+                  <SelectItem value="2">保护前2位</SelectItem>
+                  <SelectItem value="3">保护前3位</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>自动造词</label>
+              <p class="setting-hint">选词时自动学习新词组</p>
+            </div>
+            <div class="setting-control">
+              <Switch
+                :checked="getLearningConfig(schemaID).auto_learn.enabled"
+                @update:checked="
+                  (v: boolean) => {
+                    getLearningConfig(schemaID).auto_learn.enabled = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
+            </div>
+          </div>
         </template>
 
         <!-- 拼音类型 -->
@@ -959,28 +1030,36 @@ onUnmounted(() => {
           </div>
           <div class="setting-item">
             <div class="setting-info">
-              <label>词频学习</label>
-              <p class="setting-hint">选择输入法如何学习你的用词习惯</p>
+              <label>自动调频</label>
+              <p class="setting-hint">根据使用频率自动调整候选词排序</p>
             </div>
             <div class="setting-control">
-              <Select
-                :model-value="getLearningConfig(schemaID).mode"
-                @update:model-value="
-                  (v: string) => {
-                    getLearningConfig(schemaID).mode = v;
+              <Switch
+                :checked="getLearningConfig(schemaID).freq.enabled"
+                @update:checked="
+                  (v: boolean) => {
+                    getLearningConfig(schemaID).freq.enabled = v;
                     onSchemaConfigChange(schemaID);
                   }
                 "
-              >
-                <SelectTrigger class="w-[140px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="manual">不学习</SelectItem>
-                  <SelectItem value="frequency">仅调频</SelectItem>
-                  <SelectItem value="auto">自动造词</SelectItem>
-                </SelectContent>
-              </Select>
+              />
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
+              <label>自动造词</label>
+              <p class="setting-hint">选词时自动学习新词组</p>
+            </div>
+            <div class="setting-control">
+              <Switch
+                :checked="getLearningConfig(schemaID).auto_learn.enabled"
+                @update:checked="
+                  (v: boolean) => {
+                    getLearningConfig(schemaID).auto_learn.enabled = v;
+                    onSchemaConfigChange(schemaID);
+                  }
+                "
+              />
             </div>
           </div>
         </template>
@@ -1141,32 +1220,6 @@ onUnmounted(() => {
 
           <!-- 混输专属配置区（引用式和非引用式都显示） -->
           <div class="setting-section-title">混输设置</div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>词频学习</label>
-              <p class="setting-hint">选择输入法如何学习你的用词习惯</p>
-            </div>
-            <div class="setting-control">
-              <Select
-                :model-value="getLearningConfig(schemaID).mode"
-                @update:model-value="
-                  (v: string) => {
-                    getLearningConfig(schemaID).mode = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              >
-                <SelectTrigger class="w-[140px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="manual">不学习</SelectItem>
-                  <SelectItem value="frequency">仅调频</SelectItem>
-                  <SelectItem value="auto">自动造词</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
           <div class="setting-item">
             <div class="setting-info">
               <label>拼音最小触发长度</label>

@@ -35,6 +35,7 @@ type DictManager struct {
 	storeTempLayers   map[string]*StoreTempLayer   // schemaID -> StoreTempLayer
 	storeShadowLayers map[string]*StoreShadowLayer // schemaID -> StoreShadowLayer
 	freqScorers       map[string]*StoreFreqScorer  // schemaID -> StoreFreqScorer
+	freqProfile       *store.FreqProfile           // 当前方案的词频评分参数
 
 	// 当前活跃方案（Store 后端）
 	activeDataSchemaID string // 数据方案 ID（混输方案映射到主方案）
@@ -267,7 +268,7 @@ func (dm *DictManager) switchSchemaStore(schemaID, dataSchemaID string, tempMaxE
 	// 4. 设置词频评分器
 	scorer, ok := dm.freqScorers[dataSchemaID]
 	if !ok {
-		scorer = NewStoreFreqScorer(dm.store, dataSchemaID)
+		scorer = NewStoreFreqScorer(dm.store, dataSchemaID, dm.freqProfile)
 		dm.freqScorers[dataSchemaID] = scorer
 	}
 	dm.compositeDict.SetFreqScorer(scorer)
@@ -314,6 +315,38 @@ func (dm *DictManager) GetCompositeDict() *CompositeDict {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
 	return dm.compositeDict
+}
+
+// ExistsInSystemDict 检查 code+text 是否已存在于系统词库层
+func (dm *DictManager) ExistsInSystemDict(code, text string) bool {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+
+	for _, layer := range dm.compositeDict.GetLayersByType(LayerTypeSystem) {
+		results := layer.Search(code, 0)
+		for _, c := range results {
+			if c.Text == text {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ClearFreqScorer 清除 CompositeDict 上的词频评分器（调频关闭时调用）
+func (dm *DictManager) ClearFreqScorer() {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	dm.compositeDict.SetFreqScorer(nil)
+}
+
+// SetFreqProfile 设置词频评分参数（在方案加载时由 factory 调用）
+func (dm *DictManager) SetFreqProfile(profile *store.FreqProfile) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	dm.freqProfile = profile
+	// 清空已缓存的 scorer，下次 switchSchemaStore 时使用新 profile 重建
+	dm.freqScorers = make(map[string]*StoreFreqScorer)
 }
 
 // SetSortMode 设置候选排序模式

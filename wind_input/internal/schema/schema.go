@@ -1,7 +1,10 @@
 // Package schema 提供输入方案定义和管理功能
 package schema
 
-import "github.com/huanfeng/wind_input/internal/dict"
+import (
+	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/store"
+)
 
 // Schema 输入方案定义
 type Schema struct {
@@ -144,22 +147,98 @@ type WeightSpec struct {
 	Target int            `yaml:"target,omitempty"` // 中位映射目标值（默认 1000）
 }
 
-// LearningMode 学习模式
-type LearningMode string
-
-const (
-	LearningManual    LearningMode = "manual"
-	LearningAuto      LearningMode = "auto"
-	LearningFrequency LearningMode = "frequency"
-)
-
 // LearningSpec 学习策略配置
 type LearningSpec struct {
-	Mode             LearningMode `yaml:"mode"`
-	UnigramPath      string       `yaml:"unigram_path,omitempty"`
-	ProtectTopN      int          `yaml:"protect_top_n,omitempty"`      // 首选保护：前 N 位锁定码表原始顺序
-	TempMaxEntries   int          `yaml:"temp_max_entries,omitempty"`   // 临时词库最大条目数（默认 5000）
-	TempPromoteCount int          `yaml:"temp_promote_count,omitempty"` // 选择几次后晋升到用户词库（默认 5）
+	AutoLearn *AutoLearnSpec `yaml:"auto_learn,omitempty"` // 自动造词配置
+	Freq      *FreqSpec      `yaml:"freq,omitempty"`       // 自动调频配置
+
+	UnigramPath      string `yaml:"unigram_path,omitempty"`
+	TempMaxEntries   int    `yaml:"temp_max_entries,omitempty"`   // 临时词库最大条目数（默认 5000）
+	TempPromoteCount int    `yaml:"temp_promote_count,omitempty"` // 选择几次后晋升到用户词库（默认 5）
+}
+
+// AutoLearnSpec 自动造词配置
+type AutoLearnSpec struct {
+	Enabled        bool `yaml:"enabled"`                   // 是否启用自动造词
+	CountThreshold int  `yaml:"count_threshold,omitempty"` // 误选保护阈值（默认 2）
+	MinWordLength  int  `yaml:"min_word_length,omitempty"` // 最小造词字数（默认 2）
+	WeightDelta    int  `yaml:"weight_delta,omitempty"`    // 每次选词权重增量（默认 20）
+	AddWeight      int  `yaml:"add_weight,omitempty"`      // 新词初始权重（默认 800）
+}
+
+// FreqSpec 自动调频配置
+type FreqSpec struct {
+	Enabled     bool    `yaml:"enabled"`                 // 是否启用自动调频
+	ProtectTopN int     `yaml:"protect_top_n,omitempty"` // 锁定前 N 位候选的排序位置（默认 0 不锁定）
+	HalfLife    float64 `yaml:"half_life,omitempty"`     // 半衰期（小时，默认 72）
+	BoostMax    int     `yaml:"boost_max,omitempty"`     // 加成上限（默认 2000）
+	MaxRecency  float64 `yaml:"max_recency,omitempty"`   // 时间衰减峰值（默认 300）
+	BaseScale   float64 `yaml:"base_scale,omitempty"`    // base 系数（默认 100）
+	StreakScale float64 `yaml:"streak_scale,omitempty"`  // 连续选择系数（默认 50）
+	StreakCap   float64 `yaml:"streak_cap,omitempty"`    // 连续选择上限（默认 250）
+}
+
+// IsAutoLearnEnabled 是否启用自动造词
+func (ls *LearningSpec) IsAutoLearnEnabled() bool {
+	return ls.AutoLearn != nil && ls.AutoLearn.Enabled
+}
+
+// IsFreqEnabled 是否启用自动调频
+func (ls *LearningSpec) IsFreqEnabled() bool {
+	return ls.Freq != nil && ls.Freq.Enabled
+}
+
+// GetAutoLearnConfig 获取造词配置（带默认值填充）
+func (ls *LearningSpec) GetAutoLearnConfig() AutoLearnSpec {
+	cfg := AutoLearnSpec{
+		Enabled:        ls.IsAutoLearnEnabled(),
+		CountThreshold: 2,
+		MinWordLength:  2,
+		WeightDelta:    20,
+		AddWeight:      800,
+	}
+	if ls.AutoLearn != nil {
+		if ls.AutoLearn.CountThreshold > 0 {
+			cfg.CountThreshold = ls.AutoLearn.CountThreshold
+		}
+		if ls.AutoLearn.MinWordLength > 0 {
+			cfg.MinWordLength = ls.AutoLearn.MinWordLength
+		}
+		if ls.AutoLearn.WeightDelta > 0 {
+			cfg.WeightDelta = ls.AutoLearn.WeightDelta
+		}
+		if ls.AutoLearn.AddWeight > 0 {
+			cfg.AddWeight = ls.AutoLearn.AddWeight
+		}
+	}
+	return cfg
+}
+
+// GetFreqProfile 从 FreqSpec 生成 store.FreqProfile（带默认值填充）
+func (ls *LearningSpec) GetFreqProfile() *store.FreqProfile {
+	p := store.DefaultFreqProfile()
+	if ls.Freq == nil {
+		return p
+	}
+	if ls.Freq.HalfLife > 0 {
+		p.DecayHalfLife = ls.Freq.HalfLife
+	}
+	if ls.Freq.BoostMax > 0 {
+		p.BoostMax = ls.Freq.BoostMax
+	}
+	if ls.Freq.MaxRecency > 0 {
+		p.MaxRecency = ls.Freq.MaxRecency
+	}
+	if ls.Freq.BaseScale > 0 {
+		p.BaseScale = ls.Freq.BaseScale
+	}
+	if ls.Freq.StreakScale > 0 {
+		p.StreakScale = ls.Freq.StreakScale
+	}
+	if ls.Freq.StreakCap > 0 {
+		p.StreakCap = ls.Freq.StreakCap
+	}
+	return p
 }
 
 // EncoderSpec 造词编码规则配置

@@ -35,8 +35,11 @@ dictionaries:
       mode: linear
 
 learning:
-  mode: manual
-  protect_top_n: 3
+  auto_learn:
+    enabled: false
+  freq:
+    enabled: false
+    protect_top_n: 1
 
 encoder:
   max_word_length: 10

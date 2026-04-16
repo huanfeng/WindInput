@@ -187,13 +187,21 @@ func validateSchema(s *Schema, path string) error {
 			return fmt.Errorf("方案 %s: dictionaries[%d].type 不能为空", s.Schema.ID, i)
 		}
 	}
-	if s.Learning.Mode == "" {
-		// 根据引擎类型设置默认学习模式
+	// 学习配置默认值：按引擎类型设定
+	if s.Learning.AutoLearn == nil {
 		switch s.Engine.Type {
 		case EngineTypePinyin:
-			s.Learning.Mode = LearningAuto
+			s.Learning.AutoLearn = &AutoLearnSpec{Enabled: true}
 		default:
-			s.Learning.Mode = LearningManual
+			s.Learning.AutoLearn = &AutoLearnSpec{Enabled: false}
+		}
+	}
+	if s.Learning.Freq == nil {
+		switch s.Engine.Type {
+		case EngineTypePinyin:
+			s.Learning.Freq = &FreqSpec{Enabled: true}
+		default:
+			s.Learning.Freq = &FreqSpec{Enabled: false}
 		}
 	}
 	// 设置默认方案名称

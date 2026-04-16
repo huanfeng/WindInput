@@ -101,6 +101,7 @@ func TestFreq_ResetStreak(t *testing.T) {
 func TestFreq_CalcBoost(t *testing.T) {
 	now := time.Now().Unix()
 
+	// 使用默认 profile: BaseScale=50, MaxRecency=100, DecayHalfLife=72h, StreakScale=30, StreakCap=150
 	cases := []struct {
 		name     string
 		rec      FreqRecord
@@ -114,46 +115,60 @@ func TestFreq_CalcBoost(t *testing.T) {
 			maxBoost: 0,
 		},
 		{
-			name: "count=1 recent no streak",
+			name: "count=1 just now no streak",
 			rec:  FreqRecord{Count: 1, LastUsed: now - 60, Streak: 0},
-			// base=log2(2)*100=100, recency=200(<1h), streak=0 → 300
-			minBoost: 290,
-			maxBoost: 310,
+			// base=log2(2)*50=50, recency≈100, streak=0 → ~150
+			minBoost: 145,
+			maxBoost: 155,
 		},
 		{
-			name: "count=1 yesterday no streak",
+			name: "count=1 2h ago no streak",
 			rec:  FreqRecord{Count: 1, LastUsed: now - 7200, Streak: 0},
-			// base=100, recency=100(<1day), streak=0 → 200
-			minBoost: 190,
-			maxBoost: 210,
+			// base=50, recency=100*exp(-ln2/72*2)≈98, streak=0 → ~148
+			minBoost: 143,
+			maxBoost: 153,
 		},
 		{
-			name: "count=1 last week no streak",
+			name: "count=1 2days ago no streak",
 			rec:  FreqRecord{Count: 1, LastUsed: now - 2*86400, Streak: 0},
-			// base=100, recency=50(<1week), streak=0 → 150
-			minBoost: 140,
-			maxBoost: 160,
+			// base=50, recency=100*exp(-ln2/72*48)≈63, streak=0 → ~113
+			minBoost: 108,
+			maxBoost: 118,
 		},
 		{
-			name: "count=1 old no streak",
-			rec:  FreqRecord{Count: 1, LastUsed: now - 8*86400, Streak: 0},
-			// base=100, recency=0, streak=0 → 100
-			minBoost: 90,
-			maxBoost: 110,
+			name: "count=1 3days(half-life) ago no streak",
+			rec:  FreqRecord{Count: 1, LastUsed: now - 3*86400, Streak: 0},
+			// base=50, recency=100*0.5=50, streak=0 → ~100
+			minBoost: 95,
+			maxBoost: 105,
+		},
+		{
+			name: "count=1 7days ago no streak",
+			rec:  FreqRecord{Count: 1, LastUsed: now - 7*86400, Streak: 0},
+			// base=50, recency=100*exp(-ln2/72*168)≈19, streak=0 → ~69
+			minBoost: 64,
+			maxBoost: 74,
+		},
+		{
+			name: "count=1 14days ago no streak",
+			rec:  FreqRecord{Count: 1, LastUsed: now - 14*86400, Streak: 0},
+			// base=50, recency=100*exp(-ln2/72*336)≈4, streak=0 → ~54
+			minBoost: 49,
+			maxBoost: 59,
 		},
 		{
 			name: "high count with streak and recent",
 			rec:  FreqRecord{Count: 100, LastUsed: now - 30, Streak: 5},
-			// base=log2(101)*100≈669, recency=200, streak=250 → capped at 2000
-			minBoost: 1000,
-			maxBoost: FreqBoostMax,
+			// base=log2(101)*50≈334, recency≈100, streak=150 → ~584
+			minBoost: 575,
+			maxBoost: 595,
 		},
 		{
-			name: "streak capped at 250",
-			rec:  FreqRecord{Count: 1, LastUsed: now - 8*86400, Streak: 10},
-			// base=100, recency=0, streak=min(500,250)=250 → 350
-			minBoost: 340,
-			maxBoost: 360,
+			name: "streak capped at 150",
+			rec:  FreqRecord{Count: 1, LastUsed: now - 14*86400, Streak: 10},
+			// base=50, recency≈4, streak=min(300,150)=150 → ~204
+			minBoost: 195,
+			maxBoost: 210,
 		},
 	}
 
@@ -165,6 +180,55 @@ func TestFreq_CalcBoost(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFreq_CalcBoostWithProfile(t *testing.T) {
+	now := time.Now().Unix()
+
+	// 自定义 profile: 短半衰期 24h，小上限
+	p := &FreqProfile{
+		BoostMax:      1000,
+		BaseScale:     50,
+		MaxRecency:    200,
+		DecayHalfLife: 24,
+		StreakScale:   30,
+		StreakCap:     150,
+	}
+
+	t.Run("custom profile basic", func(t *testing.T) {
+		rec := FreqRecord{Count: 1, LastUsed: now - 60, Streak: 0}
+		// base=log2(2)*50=50, recency≈200, streak=0 → ~250
+		boost := CalcFreqBoostWithProfile(rec, now, p)
+		if boost < 240 || boost > 260 {
+			t.Errorf("boost=%d, want in [240, 260]", boost)
+		}
+	})
+
+	t.Run("custom profile half-life decay", func(t *testing.T) {
+		rec := FreqRecord{Count: 1, LastUsed: now - 24*3600, Streak: 0}
+		// base=50, recency=200*0.5=100, streak=0 → ~150
+		boost := CalcFreqBoostWithProfile(rec, now, p)
+		if boost < 140 || boost > 160 {
+			t.Errorf("boost=%d, want in [140, 160]", boost)
+		}
+	})
+
+	t.Run("custom profile capped", func(t *testing.T) {
+		rec := FreqRecord{Count: 1000, LastUsed: now, Streak: 10}
+		boost := CalcFreqBoostWithProfile(rec, now, p)
+		if boost > p.BoostMax {
+			t.Errorf("boost=%d exceeds BoostMax=%d", boost, p.BoostMax)
+		}
+	})
+
+	t.Run("nil profile uses default", func(t *testing.T) {
+		rec := FreqRecord{Count: 1, LastUsed: now, Streak: 0}
+		boost := CalcFreqBoostWithProfile(rec, now, nil)
+		boostDefault := CalcFreqBoost(rec, now)
+		if boost != boostDefault {
+			t.Errorf("nil profile: boost=%d != default=%d", boost, boostDefault)
+		}
+	})
 }
 
 func TestFreq_BoostMax(t *testing.T) {

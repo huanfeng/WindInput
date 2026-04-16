@@ -661,7 +661,11 @@ func (c *Coordinator) handleSelectChar(charIndex int) *bridge.KeyEventResult {
 
 	// 用户词频学习
 	if c.engineMgr != nil && !cand.IsCommand {
-		c.engineMgr.OnCandidateSelected(c.inputBuffer, cand.Text, cand.Source)
+		selectedCode := c.inputBuffer
+		if cand.Code != "" {
+			selectedCode = cand.Code
+		}
+		c.engineMgr.OnCandidateSelected(selectedCode, cand.Text, cand.Source)
 	}
 
 	c.logger.Debug("Select char from word", "charIndex", charIndex, "char", text, "word", cand.Text)
@@ -851,7 +855,12 @@ func (c *Coordinator) selectCandidate(index int) *bridge.KeyEventResult {
 			fullText += originalText
 			c.engineMgr.OnCandidateSelected(fullCode, fullText, cand.Source)
 		} else {
-			c.engineMgr.OnCandidateSelected(c.inputBuffer, originalText, cand.Source)
+			// 使用候选的完整编码（前缀匹配时 cand.Code 与 inputBuffer 不同）
+			selectedCode := c.inputBuffer
+			if cand.Code != "" {
+				selectedCode = cand.Code
+			}
+			c.engineMgr.OnCandidateSelected(selectedCode, originalText, cand.Source)
 		}
 	}
 

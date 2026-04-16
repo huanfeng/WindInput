@@ -235,11 +235,11 @@ func (m *Manager) SaveUserFreqs() {
 
 // savePinyinUserFreqsLocked 保存拼音用户词频（调用方已持有读锁）
 func (m *Manager) savePinyinUserFreqsLocked(schemaID string, pinyinEngine *pinyin.Engine) {
-	cfg := pinyinEngine.GetConfig()
-	if cfg == nil || !cfg.EnableUserFreq {
+	if m.dictManager == nil || m.dictManager.GetStore() == nil {
 		return
 	}
-	if m.dictManager == nil || m.dictManager.GetStore() == nil {
+	// FreqHandler 或 LearningStrategy 已注入时才有用户词频需要保存
+	if pinyinEngine.GetUnigram() == nil {
 		return
 	}
 	schema.SavePinyinUserFreqs(pinyinEngine, m.dictManager.GetStore(), schemaID)

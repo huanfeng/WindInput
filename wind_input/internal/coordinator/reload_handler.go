@@ -149,6 +149,9 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 		}
 	}
 
+	// 学习配置热更新（调频 + 造词）
+	h.engineMgr.UpdateLearningConfig(&s.Learning)
+
 	h.logger.Debug("Schema config reloaded", "schema", activeID, "engineType", s.Engine.Type)
 }
 
