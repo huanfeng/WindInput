@@ -21,11 +21,7 @@ const (
 // GetConfigDir returns the user configuration directory path
 // On Windows: %APPDATA%\WindInput
 func GetConfigDir() (string, error) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get user config dir: %w", err)
-	}
-	return filepath.Join(configDir, buildvariant.AppName()), nil
+	return ResolveUserDataDir()
 }
 
 // GetAppName returns the application name based on build variant

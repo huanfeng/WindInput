@@ -3,6 +3,11 @@ package buildvariant
 // variant 通过 ldflags 注入: -X github.com/huanfeng/wind_input/pkg/buildvariant.variant=debug
 var variant = ""
 
+const (
+	AppNameRelease = "WindInput"
+	AppNameDebug   = "WindInputDebug"
+)
+
 func IsDebug() bool {
 	return variant == "debug"
 }
@@ -16,9 +21,9 @@ func Suffix() string {
 
 func AppName() string {
 	if variant == "debug" {
-		return "WindInputDebug"
+		return AppNameDebug
 	}
-	return "WindInput"
+	return AppNameRelease
 }
 
 func DisplayName() string {

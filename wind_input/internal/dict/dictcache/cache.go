@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
+	"github.com/huanfeng/wind_input/pkg/config"
 )
 
 var cacheDir string
@@ -16,11 +17,12 @@ func GetCacheDir() string {
 	if cacheDir != "" {
 		return cacheDir
 	}
-	localAppData := os.Getenv("LOCALAPPDATA")
-	if localAppData == "" {
-		localAppData = os.TempDir()
+	resolved, err := config.GetCacheDir()
+	if err != nil {
+		cacheDir = filepath.Join(os.TempDir(), buildvariant.AppName(), "cache")
+	} else {
+		cacheDir = resolved
 	}
-	cacheDir = filepath.Join(localAppData, buildvariant.AppName(), "cache")
 	os.MkdirAll(cacheDir, 0755)
 	return cacheDir
 }

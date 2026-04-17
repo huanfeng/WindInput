@@ -2,11 +2,9 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 
-	"github.com/huanfeng/wind_input/pkg/buildvariant"
+	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 	"github.com/huanfeng/wind_input/pkg/systemfont"
 	"github.com/huanfeng/wind_input/pkg/theme"
@@ -259,21 +257,19 @@ func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]i
 
 // OpenLogFolder opens the log directory in the system file explorer.
 func (a *App) OpenLogFolder() error {
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
-		return fmt.Errorf("LOCALAPPDATA not set")
+	path, err := config.GetLogsDir()
+	if err != nil {
+		return err
 	}
-	path := filepath.Join(base, buildvariant.AppName(), "logs")
 	return exec.Command("explorer.exe", path).Start()
 }
 
 // OpenConfigFolder opens the config directory in the system file explorer.
 func (a *App) OpenConfigFolder() error {
-	base := os.Getenv("APPDATA")
-	if base == "" {
-		return fmt.Errorf("APPDATA not set")
+	path, err := config.GetConfigDir()
+	if err != nil {
+		return err
 	}
-	path := filepath.Join(base, buildvariant.AppName())
 	return exec.Command("explorer.exe", path).Start()
 }
 

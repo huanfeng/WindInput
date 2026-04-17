@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/huanfeng/wind_input/pkg/buildvariant"
+	"github.com/huanfeng/wind_input/pkg/config"
 )
 
 const (
@@ -53,11 +53,11 @@ func normalizeTSFLogLevel(level string) string {
 }
 
 func getTSFLogConfigPath() (string, error) {
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
-		return "", fmt.Errorf("LOCALAPPDATA not set")
+	base, err := config.GetLogsDir()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(base, buildvariant.AppName(), "logs", "tsf_log_config"), nil
+	return filepath.Join(base, "tsf_log_config"), nil
 }
 
 func loadTSFLogConfig() (mode, level string, err error) {

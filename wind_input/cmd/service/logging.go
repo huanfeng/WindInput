@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
+	"github.com/huanfeng/wind_input/pkg/config"
 )
 
 // rotatingWriter 实现日志文件轮转的 io.Writer
@@ -246,11 +247,10 @@ func setupLogger(levelStr string) *slog.Logger {
 		level = slog.LevelInfo
 	}
 
-	logBase := os.Getenv("LOCALAPPDATA")
-	if logBase == "" {
-		logBase = os.TempDir()
+	logDir, err := config.GetLogsDir()
+	if err != nil {
+		logDir = filepath.Join(os.TempDir(), buildvariant.AppName(), "logs")
 	}
-	logDir := filepath.Join(logBase, buildvariant.AppName(), "logs")
 	os.MkdirAll(logDir, 0755)
 	logFileName := "wind_input.log"
 	if buildvariant.IsDebug() {

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/huanfeng/wind_input/pkg/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -55,9 +56,8 @@ func NewManager(logger *slog.Logger) *Manager {
 func (m *Manager) initThemeDirs() {
 	m.themeDirs = []string{}
 
-	// 1. User themes directory: %APPDATA%\WindInput\themes
-	if appData := os.Getenv("APPDATA"); appData != "" {
-		userThemesDir := filepath.Join(appData, "WindInput", "themes")
+	// 1. User themes directory
+	if userThemesDir, err := config.GetThemesUserDir(); err == nil {
 		m.themeDirs = append(m.themeDirs, userThemesDir)
 	}
 
