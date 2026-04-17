@@ -339,8 +339,9 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 
 	result.Candidates = allCandidates
 
-	// 自动上屏检查仅考虑精确匹配数量
-	e.checkAutoCommit(result, input, exactCandidates)
+	// 自动上屏检查：对精确匹配也应用过滤模式，确保智能模式下生僻字不影响计数
+	filteredExact := candidate.FilterCandidates(exactCandidates, filterMode)
+	e.checkAutoCommit(result, input, filteredExact)
 
 	return result
 }
