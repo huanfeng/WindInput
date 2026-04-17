@@ -189,16 +189,19 @@ func TestWriteBuffer_Delete(t *testing.T) {
 		Value:  nil,
 	})
 
-	// Wait for flush.
+	// Poll the DB directly: Pending()==0 only means ops were dequeued,
+	// not that the DB transaction has committed.
 	deadline := time.Now().Add(2 * time.Second)
+	deleted := false
 	for time.Now().Before(deadline) {
-		if wb.Pending() == 0 {
+		if !keyExists(t, db, testBucket, "del_key") {
+			deleted = true
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if keyExists(t, db, testBucket, "del_key") {
+	if !deleted {
 		t.Error("expected key to be deleted, but it still exists")
 	}
 }
