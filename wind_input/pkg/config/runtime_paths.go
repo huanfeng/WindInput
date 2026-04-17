@@ -90,3 +90,43 @@ func GetThemesUserDir() (string, error) {
 	}
 	return filepath.Join(base, "themes"), nil
 }
+
+// IsPortableMode returns whether the application is running in portable mode.
+func IsPortableMode() bool {
+	exeDir, err := GetExeDir()
+	if err != nil {
+		return false
+	}
+	_, ok := findPortableRoot(exeDir)
+	return ok
+}
+
+// GetConfigDirDisplay returns a user-friendly display string for the config directory.
+// Standard mode: %APPDATA%\WindInput; Portable mode: <安装目录>\userdata
+func GetConfigDirDisplay() string {
+	exeDir, err := GetExeDir()
+	if err == nil {
+		if root, ok := findPortableRoot(exeDir); ok {
+			rel, err := filepath.Rel(root, filepath.Join(root, PortableDataDir))
+			if err == nil {
+				return `<安装目录>\` + rel
+			}
+		}
+	}
+	return `%APPDATA%\` + buildvariant.AppName()
+}
+
+// GetLogsDirDisplay returns a user-friendly display string for the logs directory.
+// Standard mode: %LOCALAPPDATA%\WindInput\logs; Portable mode: <安装目录>\userdata\logs
+func GetLogsDirDisplay() string {
+	exeDir, err := GetExeDir()
+	if err == nil {
+		if root, ok := findPortableRoot(exeDir); ok {
+			rel, err := filepath.Rel(root, filepath.Join(root, PortableDataDir, "logs"))
+			if err == nil {
+				return `<安装目录>\` + rel
+			}
+		}
+	}
+	return `%LOCALAPPDATA%\` + buildvariant.AppName() + `\logs`
+}

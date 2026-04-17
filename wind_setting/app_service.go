@@ -255,6 +255,34 @@ func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]i
 
 // ========== 工具方法 ==========
 
+// PathInfo contains display-friendly path information for the settings UI.
+type PathInfo struct {
+	ConfigDir    string `json:"config_dir"`
+	ConfigDirDisplay string `json:"config_dir_display"`
+	LogsDir      string `json:"logs_dir"`
+	LogsDirDisplay string `json:"logs_dir_display"`
+	IsPortable   bool   `json:"is_portable"`
+}
+
+// GetPathInfo returns the actual and display paths for config and logs directories.
+func (a *App) GetPathInfo() (*PathInfo, error) {
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	logsDir, err := config.GetLogsDir()
+	if err != nil {
+		return nil, err
+	}
+	return &PathInfo{
+		ConfigDir:        configDir,
+		ConfigDirDisplay: config.GetConfigDirDisplay(),
+		LogsDir:          logsDir,
+		LogsDirDisplay:   config.GetLogsDirDisplay(),
+		IsPortable:       config.IsPortableMode(),
+	}, nil
+}
+
 // OpenLogFolder opens the log directory in the system file explorer.
 func (a *App) OpenLogFolder() error {
 	path, err := config.GetLogsDir()

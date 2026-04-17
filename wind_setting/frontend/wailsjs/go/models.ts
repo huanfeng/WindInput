@@ -67,6 +67,7 @@ export namespace config {
 	    trigger_key: string;
 	    force_vertical: boolean;
 	    decimal_places: number;
+	    numpad_behavior: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new QuickInputConfig(source);
@@ -78,6 +79,7 @@ export namespace config {
 	        this.trigger_key = source["trigger_key"];
 	        this.force_vertical = source["force_vertical"];
 	        this.decimal_places = source["decimal_places"];
+	        this.numpad_behavior = source["numpad_behavior"];
 	    }
 	}
 	export class PunctCustomConfig {
@@ -616,6 +618,26 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+	export class PathInfo {
+	    config_dir: string;
+	    config_dir_display: string;
+	    logs_dir: string;
+	    logs_dir_display: string;
+	    is_portable: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new PathInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.config_dir = source["config_dir"];
+	        this.config_dir_display = source["config_dir_display"];
+	        this.logs_dir = source["logs_dir"];
+	        this.logs_dir_display = source["logs_dir_display"];
+	        this.is_portable = source["is_portable"];
+	    }
 	}
 	export class PhraseItem {
 	    code: string;

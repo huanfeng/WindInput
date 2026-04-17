@@ -421,7 +421,12 @@ export async function getUserDictBySchemaPage(
   limit: number,
   offset: number,
 ): Promise<PagedDictResult> {
-  return App.GetUserDictBySchemaPage(schemaID, prefix, limit, offset) as unknown as PagedDictResult;
+  return App.GetUserDictBySchemaPage(
+    schemaID,
+    prefix,
+    limit,
+    offset,
+  ) as unknown as PagedDictResult;
 }
 
 export async function addUserWordForSchema(
@@ -499,9 +504,7 @@ export interface ZipSchemaPreviewItem {
 }
 
 // 导入 - 文件选择
-export async function selectImportFile(
-  format: string,
-): Promise<string> {
+export async function selectImportFile(format: string): Promise<string> {
   return App.SelectImportFile(format);
 }
 
@@ -510,14 +513,20 @@ export async function previewImportFile(
   format: string,
   filePath: string,
 ): Promise<DictImportPreview> {
-  return App.PreviewImportFile(format, filePath) as unknown as DictImportPreview;
+  return App.PreviewImportFile(
+    format,
+    filePath,
+  ) as unknown as DictImportPreview;
 }
 
 export async function previewTextList(
   filePath: string,
   schemaID: string,
 ): Promise<TextListPreviewResult> {
-  return App.PreviewTextList(filePath, schemaID) as unknown as TextListPreviewResult;
+  return App.PreviewTextList(
+    filePath,
+    schemaID,
+  ) as unknown as TextListPreviewResult;
 }
 
 export async function previewZipImport(
@@ -535,7 +544,11 @@ export async function executeImport(
   strategies: Record<string, string>,
 ): Promise<ImportExportResult> {
   return App.ExecuteImport(
-    filePath, format, schemaID, sections, strategies,
+    filePath,
+    format,
+    schemaID,
+    sections,
+    strategies,
   ) as unknown as ImportExportResult;
 }
 
@@ -545,7 +558,9 @@ export async function executeTextListImport(
   weight: number,
 ): Promise<ImportExportResult> {
   return App.ExecuteTextListImport(
-    schemaID, words, weight,
+    schemaID,
+    words,
+    weight,
   ) as unknown as ImportExportResult;
 }
 
@@ -556,7 +571,10 @@ export async function executeZipImport(
   strategies: Record<string, string>,
 ): Promise<ImportExportResult> {
   return App.ExecuteZipImport(
-    filePath, selectedSchemas, includePhrases, strategies,
+    filePath,
+    selectedSchemas,
+    includePhrases,
+    strategies,
   ) as unknown as ImportExportResult;
 }
 
@@ -567,7 +585,9 @@ export async function exportSchemaData(
   schemaName: string,
 ): Promise<ImportExportResult> {
   return App.ExportSchemaData(
-    schemaID, sections, schemaName,
+    schemaID,
+    sections,
+    schemaName,
   ) as unknown as ImportExportResult;
 }
 
@@ -583,7 +603,9 @@ export async function exportFullBackup(
   includePhrases: boolean,
 ): Promise<ImportExportResult> {
   return App.ExportFullBackup(
-    schemaIDs, schemaNames, includePhrases,
+    schemaIDs,
+    schemaNames,
+    includePhrases,
   ) as unknown as ImportExportResult;
 }
 
@@ -691,6 +713,18 @@ export async function removeShadowRule(
 // 服务通信
 export async function notifyReload(target: string): Promise<void> {
   return App.NotifyReload(target);
+}
+
+export interface PathInfo {
+  config_dir: string;
+  config_dir_display: string;
+  logs_dir: string;
+  logs_dir_display: string;
+  is_portable: boolean;
+}
+
+export async function getPathInfo(): Promise<PathInfo> {
+  return App.GetPathInfo();
 }
 
 export async function openLogFolder(): Promise<void> {

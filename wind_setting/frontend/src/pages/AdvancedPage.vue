@@ -10,7 +10,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>配置文件目录</label>
-          <p class="setting-hint">%APPDATA%\WindInput</p>
+          <p class="setting-hint">{{ configDirDisplay }}</p>
         </div>
         <div class="setting-control">
           <Button variant="outline" size="sm" @click="$emit('openConfigFolder')"
@@ -103,7 +103,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>日志目录</label>
-          <p class="setting-hint">{{ logPath }}</p>
+          <p class="setting-hint">{{ logsDirDisplay }}</p>
         </div>
         <div class="setting-control">
           <Button variant="outline" size="sm" @click="$emit('openLogFolder')"
@@ -116,8 +116,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, onMounted } from "vue";
 import type { Config, TSFLogConfig } from "../api/settings";
+import * as wailsApi from "../api/wails";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -138,8 +139,21 @@ const emit = defineEmits<{
   openConfigFolder: [];
 }>();
 
-const logPath = "%LOCALAPPDATA%\\WindInput\\logs\\";
-const tsfConfigPath = "%LOCALAPPDATA%\\WindInput\\logs\\tsf_log_config";
+const configDirDisplay = ref("%APPDATA%\\WindInput");
+const logsDirDisplay = ref("%LOCALAPPDATA%\\WindInput\\logs\\");
+
+onMounted(async () => {
+  if (props.isWailsEnv) {
+    try {
+      const info = await wailsApi.getPathInfo();
+      configDirDisplay.value = info.config_dir_display;
+      logsDirDisplay.value = info.logs_dir_display;
+    } catch (e) {
+      console.warn("Failed to get path info:", e);
+    }
+  }
+});
+
 const showSensitiveLogWarning = computed(() => {
   const serviceLevel = props.formData.advanced.log_level;
   const tsfLevel = props.tsfLogConfig.level;
