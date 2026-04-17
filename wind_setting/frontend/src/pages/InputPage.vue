@@ -217,6 +217,28 @@
           </Select>
         </div>
       </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>数字小键盘功能</label>
+          <p class="setting-hint">
+            控制小键盘数字键的行为，选择"同主键盘区数字"后可用于候选选择和快捷输入
+          </p>
+        </div>
+        <div class="setting-control">
+          <Select
+            :model-value="formData.input.numpad_behavior || 'direct'"
+            @update:model-value="formData.input.numpad_behavior = $event"
+          >
+            <SelectTrigger class="w-[200px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="direct">直接输入数字</SelectItem>
+              <SelectItem value="follow_main">同主键盘区数字</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
     </div>
 
     <!-- 候选无效按键 -->

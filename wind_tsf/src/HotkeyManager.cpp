@@ -76,7 +76,7 @@ HotkeyType CHotkeyManager::ClassifyInputKey(WPARAM vk, uint32_t modifiers)
         return HotkeyType::Letter;
     }
 
-    // Numbers 0-9
+    // Numbers 0-9 (main keyboard)
     if (vk >= '0' && vk <= '9')
     {
         // Shift+number produces punctuation characters (!, @, #, $, etc.)
@@ -86,6 +86,18 @@ HotkeyType CHotkeyManager::ClassifyInputKey(WPARAM vk, uint32_t modifiers)
         {
             return HotkeyType::Punctuation;
         }
+        return HotkeyType::Number;
+    }
+
+    // Numpad 0-9: classify as Number so they reach Go when there's an active
+    // input session (e.g., quick input mode for number/amount/date conversion).
+    // Without input session, Number type passes through — same as before.
+    // Numpad operators (+,-,*,/,.) are also classified as Number so they can
+    // participate in quick input calculations, but only during active sessions.
+    if ((vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) ||
+        vk == VK_MULTIPLY || vk == VK_ADD || vk == VK_SUBTRACT ||
+        vk == VK_DECIMAL || vk == VK_DIVIDE)
+    {
         return HotkeyType::Number;
     }
 

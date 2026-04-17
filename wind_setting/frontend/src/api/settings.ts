@@ -147,6 +147,7 @@ export interface InputConfig {
   smart_punct_list: string;
   enter_behavior: string; // 回车键行为: "commit"(上屏编码), "clear"(清空编码)
   space_on_empty_behavior: string; // 空码时空格键行为: "commit"(上屏编码), "clear"(清空编码)
+  numpad_behavior: string; // 数字小键盘功能: "direct"(直接输入) | "follow_main"(同主键盘区)
   select_key_groups: string[];
   page_keys: string[];
   highlight_keys: string[]; // 移动高亮候选项: "arrows"(上/下方向键), "tab"(Tab/Shift+Tab)
@@ -421,6 +422,7 @@ export function getDefaultConfig(): Config {
       smart_punct_list: ".,:",
       enter_behavior: "commit",
       space_on_empty_behavior: "commit",
+      numpad_behavior: "direct",
       select_key_groups: ["semicolon_quote"],
       page_keys: ["pageupdown", "minus_equal"],
       highlight_keys: ["arrows"],

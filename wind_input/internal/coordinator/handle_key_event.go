@@ -248,29 +248,37 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		return nil
 	}
 
-	// 小键盘按键：始终直接输出字符，不参与候选选择或标点转换
+	// 小键盘按键处理
 	if numpadChar := numpadKeyToChar(data.KeyCode); numpadChar != "" {
-		if c.hasPendingInput() {
-			c.clearState()
-			c.hideUI()
-		}
-		if c.pairTracker != nil {
-			c.pairTracker.Clear()
-		}
-		if c.pairTrackerEn != nil {
-			c.pairTrackerEn.Clear()
-		}
-		text := numpadChar
-		if c.fullWidth {
-			text = transform.ToFullWidth(text)
-		}
-		// 数字后智能标点：小键盘数字也计入
-		if len(numpadChar) == 1 && numpadChar[0] >= '0' && numpadChar[0] <= '9' {
-			c.lastOutputWasDigit = true
-		}
-		return &bridge.KeyEventResult{
-			Type: bridge.ResponseTypeInsertText,
-			Text: text,
+		// "follow_main" 模式：小键盘数字键视为主键盘数字，参与 IME 处理
+		isNumpadDigit := len(numpadChar) == 1 && numpadChar[0] >= '0' && numpadChar[0] <= '9'
+		if isNumpadDigit && c.config != nil && c.config.Input.NumpadBehavior == "follow_main" {
+			// 将小键盘数字转为等效主键盘字符，继续后续 IME 流程
+			key = numpadChar
+		} else {
+			// 默认 "direct" 模式：直接输出字符，不参与候选选择或标点转换
+			if c.hasPendingInput() {
+				c.clearState()
+				c.hideUI()
+			}
+			if c.pairTracker != nil {
+				c.pairTracker.Clear()
+			}
+			if c.pairTrackerEn != nil {
+				c.pairTrackerEn.Clear()
+			}
+			text := numpadChar
+			if c.fullWidth {
+				text = transform.ToFullWidth(text)
+			}
+			// 数字后智能标点：小键盘数字也计入
+			if isNumpadDigit {
+				c.lastOutputWasDigit = true
+			}
+			return &bridge.KeyEventResult{
+				Type: bridge.ResponseTypeInsertText,
+				Text: text,
+			}
 		}
 	}
 
@@ -468,6 +476,10 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		return nil
 
 	case len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')):
+		// Z键混合模式：输入为 z 时按字母键切入临时拼音
+		if c.inputBuffer == "z" && c.isZKeyHybridMode() {
+			return c.enterTempPinyinFromZHybrid(strings.ToLower(key))
+		}
 		// Chinese mode: convert to lowercase for pinyin
 		return c.handleAlphaKey(strings.ToLower(key))
 
