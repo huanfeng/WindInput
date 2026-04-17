@@ -43,6 +43,12 @@
 
 安装完成后，按 `Win + Space` 或 `Ctrl + Shift` 切换到清风输入法。
 
+### 便携版
+
+从 [Releases](../../releases) 页面下载 `WindInput-x.x.x-Portable.zip`，解压到任意目录后运行 `wind_portable.exe` 即可使用。
+
+便携版数据保存在程序所在目录，适合 U 盘携带或多环境使用。更新时下载新版 ZIP 覆盖解压即可。
+
 ### 手动构建安装
 
 如需从源码构建，请参阅 [开发文档](docs/DEVELOPMENT.md)。

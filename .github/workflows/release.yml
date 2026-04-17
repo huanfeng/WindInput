@@ -168,12 +168,54 @@ jobs:
           [System.IO.File]::WriteAllText("release_notes.md", $body, [System.Text.UTF8Encoding]::new($false))
           Write-Host "Release notes generated ($($commits.Count) commits)"
 
+      # --- Package portable ZIP ---
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.tag }}"
+          $buildDir = "build"
+          $zipName = "WindInput-$version-Portable.zip"
+          $zipPath = "build\installer\$zipName"
+
+          # Collect portable files into a temp staging directory
+          $stageDir = "build\_portable_stage"
+          if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+
+          # Copy executables and DLLs
+          $files = @(
+            "wind_portable.exe",
+            "wind_input.exe",
+            "wind_setting.exe"
+          )
+          foreach ($f in $files) {
+            $src = Join-Path $buildDir $f
+            if (Test-Path $src) { Copy-Item $src $stageDir -Force }
+            else { Write-Host "[WARN] $f not found" -ForegroundColor Yellow }
+          }
+          Get-ChildItem -Path $buildDir -Filter "wind_tsf*.dll" | Copy-Item -Destination $stageDir -Force
+
+          # Copy data directory
+          $dataDir = Join-Path $buildDir "data"
+          if (Test-Path $dataDir) {
+            Copy-Item $dataDir (Join-Path $stageDir "data") -Recurse -Force
+          }
+
+          # Create ZIP
+          Compress-Archive -Path "$stageDir\*" -DestinationPath $zipPath -Force
+          Remove-Item $stageDir -Recurse -Force
+
+          $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
+          Write-Host "Portable ZIP: $zipPath ($sizeMB MB)"
+
       # --- Upload & Release ---
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: WindInput-${{ steps.version.outputs.tag }}
-          path: build/installer/WindInput-*-Setup.exe
+          path: |
+            build/installer/WindInput-*-Setup.exe
+            build/installer/WindInput-*-Portable.zip
 
       - name: Create GitHub Release (draft)
         shell: pwsh
@@ -183,6 +225,7 @@ jobs:
           $version = "${{ steps.version.outputs.tag }}"
           $tag = "${{ github.ref_name }}"
           $installer = "build\installer\WindInput-$version-Setup.exe"
+          $portable = "build\installer\WindInput-$version-Portable.zip"
 
           # Chinese title via Unicode code points (avoids YAML encoding issues)
           $appName = -join @([char]0x6E05, [char]0x98CE, [char]0x8F93, [char]0x5165, [char]0x6CD5)
@@ -191,4 +234,5 @@ jobs:
             --draft `
             --title "$appName v$version" `
             --notes-file release_notes.md `
-            $installer
+            $installer `
+            $portable
