@@ -429,32 +429,21 @@
           <p class="setting-hint">用于启动快捷输入的按键</p>
         </div>
         <div class="setting-control">
-          <Select
-            :model-value="formData.input.quick_input.trigger_key"
+          <TriggerKeySelect
+            :options="triggerKeyOptions"
+            :model-value="[formData.input.quick_input.trigger_key]"
             @update:model-value="
-              formData.input.quick_input.trigger_key = $event
+              formData.input.quick_input.trigger_key = $event[0] || 'semicolon'
             "
+            :single="true"
             :disabled="!formData.input.quick_input.enabled"
-          >
-            <SelectTrigger class="w-[180px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="semicolon">分号 ( ; )</SelectItem>
-              <SelectItem value="backtick">反引号 ( ` )</SelectItem>
-              <SelectItem value="quote">单引号 ( ' )</SelectItem>
-              <SelectItem value="comma">逗号 ( , )</SelectItem>
-              <SelectItem value="period">句号 ( . )</SelectItem>
-              <SelectItem value="slash">斜杠 ( / )</SelectItem>
-              <SelectItem value="backslash">反斜杠 ( \ )</SelectItem>
-              <SelectItem value="open_bracket">左方括号 ( [ )</SelectItem>
-              <SelectItem value="close_bracket">右方括号 ( ] )</SelectItem>
-            </SelectContent>
-          </Select>
-          <p v-if="triggerKeyConflicts.length > 0" class="setting-warning">
-            ⚠ 与{{ triggerKeyConflicts.join("、") }}的触发键冲突
-          </p>
+            :conflicts="quickInputConflicts"
+            placeholder="选择触发键"
+          />
         </div>
+        <p v-if="quickInputConflictMsg" class="setting-item-warning">
+          ⚠ {{ quickInputConflictMsg }}
+        </p>
       </div>
       <div
         class="setting-item"
@@ -529,60 +518,26 @@
           <label>触发键</label>
           <p class="setting-hint">码表模式下按触发键临时切换拼音输入</p>
         </div>
-        <div
-          class="setting-control"
-          style="flex-direction: column; align-items: flex-start"
-        >
-          <div class="checkbox-group">
-            <label
-              class="checkbox-item"
-              v-for="tk in triggerKeyOptions"
-              :key="'tp-' + tk.value"
-            >
-              <input
-                type="checkbox"
-                :checked="
-                  formData.input.temp_pinyin.trigger_keys.includes(tk.value)
-                "
-                @change="
-                  toggleArrayValue(
-                    formData.input.temp_pinyin.trigger_keys,
-                    tk.value,
-                  )
-                "
-              />
-              <span>{{ tk.label }}</span>
-            </label>
-          </div>
-          <div style="margin-top: 4px">
-            <div class="checkbox-group">
-              <label class="checkbox-item">
-                <input
-                  type="checkbox"
-                  :checked="
-                    formData.input.temp_pinyin.trigger_keys.includes('z')
-                  "
-                  @change="
-                    toggleArrayValue(
-                      formData.input.temp_pinyin.trigger_keys,
-                      'z',
-                    )
-                  "
-                />
-                <span>z 键</span>
-              </label>
-            </div>
-            <p
-              v-if="formData.input.temp_pinyin.trigger_keys.includes('z')"
-              class="setting-hint warning-hint"
-            >
-              z 开头的编码将无法输入
-            </p>
-          </div>
-          <p v-if="tempPinyinConflicts.length > 0" class="setting-warning">
-            ⚠ 与{{ tempPinyinConflicts.join("、") }}的触发键冲突
-          </p>
+        <div class="setting-control">
+          <TriggerKeySelect
+            :options="tempPinyinKeyOptions"
+            :model-value="formData.input.temp_pinyin.trigger_keys"
+            @update:model-value="
+              formData.input.temp_pinyin.trigger_keys = $event
+            "
+            :conflicts="tempPinyinConflictMap"
+            placeholder="选择触发键"
+          />
         </div>
+        <p
+          v-if="formData.input.temp_pinyin.trigger_keys.includes('z')"
+          class="setting-item-warning"
+        >
+          ⚠ z 键启用后，z 开头的编码将无法输入
+        </p>
+        <p v-if="tempPinyinConflictMsg" class="setting-item-warning">
+          ⚠ {{ tempPinyinConflictMsg }}
+        </p>
       </div>
     </div>
 
@@ -630,37 +585,20 @@
           <label>触发键</label>
           <p class="setting-hint">按触发键进入临时英文模式（输入全小写字母）</p>
         </div>
-        <div
-          class="setting-control"
-          style="flex-direction: column; align-items: flex-start"
-        >
-          <div class="checkbox-group">
-            <label
-              class="checkbox-item"
-              v-for="tk in triggerKeyOptions"
-              :key="'te-' + tk.value"
-            >
-              <input
-                type="checkbox"
-                :checked="
-                  formData.input.shift_temp_english.trigger_keys.includes(
-                    tk.value,
-                  )
-                "
-                @change="
-                  toggleArrayValue(
-                    formData.input.shift_temp_english.trigger_keys,
-                    tk.value,
-                  )
-                "
-              />
-              <span>{{ tk.label }}</span>
-            </label>
-          </div>
-          <p v-if="tempEnglishConflicts.length > 0" class="setting-warning">
-            ⚠ 与{{ tempEnglishConflicts.join("、") }}的触发键冲突
-          </p>
+        <div class="setting-control">
+          <TriggerKeySelect
+            :options="triggerKeyOptions"
+            :model-value="formData.input.shift_temp_english.trigger_keys"
+            @update:model-value="
+              formData.input.shift_temp_english.trigger_keys = $event
+            "
+            :conflicts="tempEnglishConflictMap"
+            placeholder="选择触发键"
+          />
         </div>
+        <p v-if="tempEnglishConflictMsg" class="setting-item-warning">
+          ⚠ {{ tempEnglishConflictMsg }}
+        </p>
       </div>
     </div>
 
@@ -768,6 +706,7 @@
 import { ref, computed, nextTick } from "vue";
 import type { Config } from "../api/settings";
 import { Switch } from "@/components/ui/switch";
+import TriggerKeySelect from "@/components/TriggerKeySelect.vue";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -1037,7 +976,7 @@ function resetPunctCustomDefaults() {
   editingCell.value = null;
 }
 
-// 触发键选项列表（临时拼音/临时英文/快捷输入共用）
+// 触发键选项列表
 const triggerKeyOptions = [
   { value: "backtick", label: "反引号 ( ` )" },
   { value: "semicolon", label: "分号 ( ; )" },
@@ -1050,79 +989,70 @@ const triggerKeyOptions = [
   { value: "close_bracket", label: "右方括号 ( ] )" },
 ];
 
-function toggleArrayValue(arr: string[], value: string) {
-  const idx = arr.indexOf(value);
-  if (idx >= 0) {
-    arr.splice(idx, 1);
-  } else {
-    arr.push(value);
-  }
-}
+// 临时拼音额外支持 z 键
+const tempPinyinKeyOptions = [
+  ...triggerKeyOptions,
+  { value: "z", label: "z 键" },
+];
 
-// 获取按键的中文标签
-function getTriggerKeyLabel(key: string): string {
-  const found = triggerKeyOptions.find((tk) => tk.value === key);
-  return found ? found.label : key;
-}
+// --- 冲突检测（Map 形式供 TriggerKeySelect 内联显示 + 汇总文案） ---
 
-// 临时拼音触发键冲突检测
-const tempPinyinConflicts = computed(() => {
-  const conflicts: string[] = [];
-  const pinyinKeys = props.formData.input.temp_pinyin?.trigger_keys || [];
-  const englishKeys =
-    props.formData.input.shift_temp_english?.trigger_keys || [];
-  const quickKey = props.formData.input.quick_input?.trigger_key;
-
-  for (const pk of pinyinKeys) {
-    if (englishKeys.includes(pk)) {
-      conflicts.push(`临时英文 ${getTriggerKeyLabel(pk)}`);
-    }
-    if (pk === quickKey) {
-      conflicts.push(`快捷输入 ${getTriggerKeyLabel(pk)}`);
-    }
-  }
-  return conflicts;
-});
-
-// 临时英文触发键冲突检测
-const tempEnglishConflicts = computed(() => {
-  const conflicts: string[] = [];
-  const englishKeys =
-    props.formData.input.shift_temp_english?.trigger_keys || [];
-  const pinyinKeys = props.formData.input.temp_pinyin?.trigger_keys || [];
-  const quickKey = props.formData.input.quick_input?.trigger_key;
-
-  for (const ek of englishKeys) {
-    if (pinyinKeys.includes(ek)) {
-      conflicts.push(`临时拼音 ${getTriggerKeyLabel(ek)}`);
-    }
-    if (ek === quickKey) {
-      conflicts.push(`快捷输入 ${getTriggerKeyLabel(ek)}`);
-    }
-  }
-  return conflicts;
-});
-
-// 触发键冲突检测（快捷输入）
-const triggerKeyConflicts = computed(() => {
+// 快捷输入冲突 Map
+const quickInputConflicts = computed(() => {
+  const map = new Map<string, string>();
   const key = props.formData.input.quick_input.trigger_key;
-  const conflicts: string[] = [];
-
-  const tempPinyinKeys = props.formData.input.temp_pinyin?.trigger_keys || [];
-  if (tempPinyinKeys.includes(key)) {
-    conflicts.push(`临时拼音 ${getTriggerKeyLabel(key)}`);
-  }
-
-  const tempEnglishKeys =
+  const pinyinKeys = props.formData.input.temp_pinyin?.trigger_keys || [];
+  const englishKeys =
     props.formData.input.shift_temp_english?.trigger_keys || [];
-  if (tempEnglishKeys.includes(key)) {
-    conflicts.push(`临时英文 ${getTriggerKeyLabel(key)}`);
+  if (pinyinKeys.includes(key)) map.set(key, "与临时拼音冲突");
+  if (englishKeys.includes(key)) map.set(key, "与临时英文冲突");
+  return map;
+});
+const quickInputConflictMsg = computed(() => {
+  const msgs = [...quickInputConflicts.value.values()];
+  return msgs.length > 0 ? msgs.join("，") : "";
+});
+
+// 临时拼音冲突 Map
+const tempPinyinConflictMap = computed(() => {
+  const map = new Map<string, string>();
+  const pinyinKeys = props.formData.input.temp_pinyin?.trigger_keys || [];
+  const englishKeys =
+    props.formData.input.shift_temp_english?.trigger_keys || [];
+  const quickKey = props.formData.input.quick_input?.trigger_key;
+  for (const pk of pinyinKeys) {
+    const conflicts: string[] = [];
+    if (englishKeys.includes(pk)) conflicts.push("临时英文");
+    if (pk === quickKey) conflicts.push("快捷输入");
+    if (conflicts.length > 0) map.set(pk, `与${conflicts.join("、")}冲突`);
   }
+  return map;
+});
+const tempPinyinConflictMsg = computed(() => {
+  const msgs = [...tempPinyinConflictMap.value.entries()].map(([, msg]) => msg);
+  return msgs.length > 0 ? msgs.join("；") : "";
+});
 
-  // 注意：候选选择键（semicolon_quote, comma_period 等）不会冲突，
-  // 因为快捷输入仅在空码（无候选）时触发，与选择键的生效时机不同。
-
-  return conflicts;
+// 临时英文冲突 Map
+const tempEnglishConflictMap = computed(() => {
+  const map = new Map<string, string>();
+  const englishKeys =
+    props.formData.input.shift_temp_english?.trigger_keys || [];
+  const pinyinKeys = props.formData.input.temp_pinyin?.trigger_keys || [];
+  const quickKey = props.formData.input.quick_input?.trigger_key;
+  for (const ek of englishKeys) {
+    const conflicts: string[] = [];
+    if (pinyinKeys.includes(ek)) conflicts.push("临时拼音");
+    if (ek === quickKey) conflicts.push("快捷输入");
+    if (conflicts.length > 0) map.set(ek, `与${conflicts.join("、")}冲突`);
+  }
+  return map;
+});
+const tempEnglishConflictMsg = computed(() => {
+  const msgs = [...tempEnglishConflictMap.value.entries()].map(
+    ([, msg]) => msg,
+  );
+  return msgs.length > 0 ? msgs.join("；") : "";
 });
 
 const filterModeOptions = [
@@ -1240,15 +1170,18 @@ function selectFilterMode(value: string) {
   flex: 1;
 }
 
-/* ========== 触发键冲突提示 ========== */
-.setting-warning {
+/* ========== 触发键冲突提示（占满整行，在 setting-item flex 布局中换行） ========== */
+.setting-item-warning {
+  width: 100%;
   font-size: 12px;
   color: hsl(var(--warning));
-  margin: 4px 0 0;
+  margin: -4px 0 0;
   padding: 0;
+  line-height: 1.5;
 }
-.warning-hint {
-  color: hsl(var(--warning));
+/* 包含 warning 的 setting-item 允许换行 */
+.setting-item:has(.setting-item-warning) {
+  flex-wrap: wrap;
 }
 
 /* ========== 数字输入框 ========== */
