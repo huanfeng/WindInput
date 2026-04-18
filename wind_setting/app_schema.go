@@ -120,14 +120,14 @@ type SchemaConfigAutoLearn struct {
 
 // SchemaConfigFreq 自动调频配置
 type SchemaConfigFreq struct {
-	Enabled      bool    `yaml:"enabled" json:"enabled"`
-	ProtectTopN  int     `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty"`
-	HalfLife     float64 `yaml:"half_life,omitempty" json:"half_life,omitempty"`
-	BoostMax     int     `yaml:"boost_max,omitempty" json:"boost_max,omitempty"`
-	MaxRecency   float64 `yaml:"max_recency,omitempty" json:"max_recency,omitempty"`
-	BaseScale    float64 `yaml:"base_scale,omitempty" json:"base_scale,omitempty"`
-	StreakScale  float64 `yaml:"streak_scale,omitempty" json:"streak_scale,omitempty"`
-	StreakCap    float64 `yaml:"streak_cap,omitempty" json:"streak_cap,omitempty"`
+	Enabled     bool    `yaml:"enabled" json:"enabled"`
+	ProtectTopN int     `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty"`
+	HalfLife    float64 `yaml:"half_life,omitempty" json:"half_life,omitempty"`
+	BoostMax    int     `yaml:"boost_max,omitempty" json:"boost_max,omitempty"`
+	MaxRecency  float64 `yaml:"max_recency,omitempty" json:"max_recency,omitempty"`
+	BaseScale   float64 `yaml:"base_scale,omitempty" json:"base_scale,omitempty"`
+	StreakScale float64 `yaml:"streak_scale,omitempty" json:"streak_scale,omitempty"`
+	StreakCap   float64 `yaml:"streak_cap,omitempty" json:"streak_cap,omitempty"`
 }
 
 // SchemaConfigLearning 学习策略配置

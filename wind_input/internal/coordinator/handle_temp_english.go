@@ -347,6 +347,28 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
+	// === 二候选选择键 ===
+	case data.Modifiers&ModShift == 0 && c.isSelectKey2(key, data.KeyCode):
+		if len(c.candidates) >= 2 {
+			pageStart := (c.currentPage - 1) * c.candidatesPerPage
+			idx := pageStart + 1
+			if idx < len(c.candidates) {
+				return c.exitTempEnglishMode(true, c.candidates[idx].Text)
+			}
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	// === 三候选选择键 ===
+	case data.Modifiers&ModShift == 0 && c.isSelectKey3(key, data.KeyCode):
+		if len(c.candidates) >= 3 {
+			pageStart := (c.currentPage - 1) * c.candidatesPerPage
+			idx := pageStart + 2
+			if idx < len(c.candidates) {
+				return c.exitTempEnglishMode(true, c.candidates[idx].Text)
+			}
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
 	// === 字母键 ===
 	case len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')):
 		var letter string

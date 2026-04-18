@@ -257,11 +257,11 @@ func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]i
 
 // PathInfo contains display-friendly path information for the settings UI.
 type PathInfo struct {
-	ConfigDir    string `json:"config_dir"`
+	ConfigDir        string `json:"config_dir"`
 	ConfigDirDisplay string `json:"config_dir_display"`
-	LogsDir      string `json:"logs_dir"`
-	LogsDirDisplay string `json:"logs_dir_display"`
-	IsPortable   bool   `json:"is_portable"`
+	LogsDir          string `json:"logs_dir"`
+	LogsDirDisplay   string `json:"logs_dir_display"`
+	IsPortable       bool   `json:"is_portable"`
 }
 
 // GetPathInfo returns the actual and display paths for config and logs directories.
