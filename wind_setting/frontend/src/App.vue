@@ -406,8 +406,11 @@ async function resetCurrentPageDefaults() {
         punct_follow_mode: defaults.input.punct_follow_mode,
         filter_mode: defaults.input.filter_mode,
         smart_punct_after_digit: defaults.input.smart_punct_after_digit,
+        pinyin_separator: defaults.input.pinyin_separator,
         auto_pair: { ...defaults.input.auto_pair },
         quick_input: { ...defaults.input.quick_input },
+        temp_pinyin: { ...defaults.input.temp_pinyin },
+        shift_temp_english: { ...defaults.input.shift_temp_english },
         overflow_behavior: { ...defaults.input.overflow_behavior },
       };
       break;
