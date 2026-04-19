@@ -391,9 +391,23 @@ async function resetCurrentPageDefaults() {
   let changed = true;
 
   switch (activeTab.value) {
-    case "general":
-      formData.value.schema.active = defaults.schema.active;
+    case "general": {
+      const ok = await customConfirm(
+        "将重置为默认的方案列表，当前的方案启用状态和排序将丢失。确定继续吗？",
+      );
+      if (!ok) {
+        changed = false;
+        break;
+      }
+      formData.value.schema.available = [...defaults.schema.available];
+      // 如果当前方案不在默认列表中，切换到默认列表的第一个
+      if (
+        !defaults.schema.available.includes(formData.value.schema.active)
+      ) {
+        formData.value.schema.active = defaults.schema.available[0];
+      }
       break;
+    }
     case "input":
       formData.value.engine = {
         ...formData.value.engine,

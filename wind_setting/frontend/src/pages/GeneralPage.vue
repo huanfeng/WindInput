@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import type { Config, EngineInfo } from "../api/settings";
 import * as wailsApi from "../api/wails";
 import type { SchemaConfig, SchemaInfo, SchemaReference } from "../api/wails";
@@ -320,6 +320,19 @@ function getSchemaDisplayName(schemaID: string): string {
 function openSchemaDetail(schemaID: string) {
   detailSchemaID.value = schemaID;
 }
+
+// 外部重置方案列表时（如恢复本页默认），同步 enabledSchemaIDs
+watch(
+  () => props.formData.schema?.available,
+  (newAvailable) => {
+    if (!newAvailable || allSchemas.value.length === 0) return;
+    const validIDs = newAvailable.filter((id: string) =>
+      allSchemas.value.some((s) => s.id === id),
+    );
+    enabledSchemaIDs.value = validIDs;
+    refreshSchemaReferences();
+  },
+);
 
 onMounted(() => {
   loadAllSchemas();
