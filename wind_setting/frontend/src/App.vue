@@ -392,7 +392,6 @@ async function resetCurrentPageDefaults() {
 
   switch (activeTab.value) {
     case "general":
-      formData.value.startup = { ...defaults.startup };
       formData.value.schema.active = defaults.schema.active;
       break;
     case "input":
@@ -406,16 +405,41 @@ async function resetCurrentPageDefaults() {
         punct_follow_mode: defaults.input.punct_follow_mode,
         filter_mode: defaults.input.filter_mode,
         smart_punct_after_digit: defaults.input.smart_punct_after_digit,
+        enter_behavior: defaults.input.enter_behavior,
+        space_on_empty_behavior: defaults.input.space_on_empty_behavior,
+        numpad_behavior: defaults.input.numpad_behavior,
         pinyin_separator: defaults.input.pinyin_separator,
-        auto_pair: { ...defaults.input.auto_pair },
+        auto_pair: {
+          ...defaults.input.auto_pair,
+          blacklist: [...(defaults.input.auto_pair.blacklist || [])],
+          chinese_pairs: [...(defaults.input.auto_pair.chinese_pairs || [])],
+          english_pairs: [...(defaults.input.auto_pair.english_pairs || [])],
+        },
+        punct_custom: {
+          enabled: defaults.input.punct_custom.enabled,
+          mappings: { ...defaults.input.punct_custom.mappings },
+        },
         quick_input: { ...defaults.input.quick_input },
-        temp_pinyin: { ...defaults.input.temp_pinyin },
-        shift_temp_english: { ...defaults.input.shift_temp_english },
+        temp_pinyin: {
+          ...defaults.input.temp_pinyin,
+          trigger_keys: [...(defaults.input.temp_pinyin.trigger_keys || [])],
+        },
+        shift_temp_english: {
+          ...defaults.input.shift_temp_english,
+          trigger_keys: [
+            ...(defaults.input.shift_temp_english.trigger_keys || []),
+          ],
+        },
         overflow_behavior: { ...defaults.input.overflow_behavior },
       };
+      formData.value.startup = { ...defaults.startup };
       break;
     case "hotkey":
-      formData.value.hotkeys = { ...defaults.hotkeys };
+      formData.value.hotkeys = {
+        ...defaults.hotkeys,
+        toggle_mode_keys: [...defaults.hotkeys.toggle_mode_keys],
+        global_hotkeys: [...defaults.hotkeys.global_hotkeys],
+      };
       formData.value.input = {
         ...formData.value.input,
         select_key_groups: [...defaults.input.select_key_groups],
@@ -436,6 +460,7 @@ async function resetCurrentPageDefaults() {
       break;
     case "advanced":
       formData.value.advanced = { ...defaults.advanced };
+      tsfLogConfig.value = getDefaultTSFLogConfig();
       break;
     default:
       changed = false;
