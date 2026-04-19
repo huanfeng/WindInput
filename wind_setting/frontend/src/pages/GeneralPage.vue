@@ -1,19 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import type { Config, EngineInfo } from "../api/settings";
 import * as wailsApi from "../api/wails";
 import type { SchemaConfig, SchemaInfo, SchemaReference } from "../api/wails";
 import SchemaDetailPanel from "../components/SchemaDetailPanel.vue";
 import SchemaManagerDialog from "../components/SchemaManagerDialog.vue";
-import { Switch } from "@/components/ui/switch";
+import SchemaSettingsDialog from "../components/SchemaSettingsDialog.vue";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -47,9 +40,14 @@ const showSchemaManager = ref(false);
 // 方案详情浮层
 const detailSchemaID = ref<string | null>(null);
 
-// 模糊音对话框
-const showFuzzyDialog = ref(false);
-const fuzzyEditSchemaID = ref("");
+// 方案设置对话框
+const settingsSchemaID = ref<string | null>(null);
+const showSchemaSettings = ref(false);
+
+function openSchemaSettings(schemaID: string) {
+  settingsSchemaID.value = schemaID;
+  showSchemaSettings.value = true;
+}
 
 // 方案引用关系
 const schemaReferences = ref<Record<string, SchemaReference>>({});
@@ -156,18 +154,19 @@ async function loadSchemaConfig(schemaID: string) {
   }
 }
 
-// 保存方案配置（防抖）
-const saveTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-function onSchemaConfigChange(schemaID: string) {
-  if (saveTimers[schemaID]) clearTimeout(saveTimers[schemaID]);
-  saveTimers[schemaID] = setTimeout(() => {
-    const cfg = schemaConfigs.value[schemaID];
-    if (cfg) {
-      wailsApi.saveSchemaConfig(schemaID, cfg).catch((e) => {
-        console.error(`保存方案配置失败: ${schemaID}`, e);
-      });
-    }
-  }, 800);
+async function onSchemaConfigSave(schemaID: string, cfg: SchemaConfig) {
+  // 更新本地缓存
+  schemaConfigs.value[schemaID] = cfg;
+  // 保存到后端
+  try {
+    await wailsApi.saveSchemaConfig(schemaID, cfg);
+  } catch (e) {
+    console.error(`保存方案配置失败: ${schemaID}`, e);
+  }
+}
+
+async function onSchemaConfigReset(schemaID: string) {
+  await loadSchemaConfig(schemaID);
 }
 
 // 启用方案
@@ -264,24 +263,6 @@ function getEngineType(schemaID: string): string {
   return schemaConfigs.value[schemaID]?.engine?.type || "";
 }
 
-// 判断方案是否为引用式混输
-function isMixedWithRef(schemaID: string): boolean {
-  const ref = schemaReferences.value[schemaID];
-  return !!(ref && (ref.primary_schema || ref.secondary_schema));
-}
-
-// 获取方案的引用信息文案
-function getReferenceNote(schemaID: string): string {
-  const ref = schemaReferences.value[schemaID];
-  if (!ref) return "";
-  const parts: string[] = [];
-  if (ref.primary_schema)
-    parts.push(`码表: ${getSchemaDisplayName(ref.primary_schema)}`);
-  if (ref.secondary_schema)
-    parts.push(`拼音: ${getSchemaDisplayName(ref.secondary_schema)}`);
-  return parts.join(", ");
-}
-
 // 获取方案被引用信息（区分引用类型）
 function getReferencedByNote(schemaID: string): string {
   const ref = schemaReferences.value[schemaID];
@@ -303,74 +284,6 @@ function getReferencedByNote(schemaID: string): string {
   return parts.join(", ");
 }
 
-// 判断方案是否仅通过引用显示（未在 available 中）
-function isReferencedOnly(schemaID: string): boolean {
-  return referencedOnlyIDs.value.includes(schemaID);
-}
-
-// 所有需要显示配置卡片的方案（启用 + 被引用）
-const allConfigSchemaIDs = computed(() => {
-  return [...enabledSchemaIDs.value, ...referencedOnlyIDs.value];
-});
-
-// 码表配置
-function getCodetableConfig(schemaID: string) {
-  const cfg = schemaConfigs.value[schemaID];
-  if (!cfg) return {};
-  if (!cfg.engine.codetable) cfg.engine.codetable = {};
-  return cfg.engine.codetable;
-}
-
-// 获取方案的最大码长（默认4）
-function getMaxCodeLength(schemaID: string): number {
-  const ct = getCodetableConfig(schemaID);
-  return (ct as any).max_code_length || 4;
-}
-
-// 拼音配置
-function getPinyinConfig(schemaID: string) {
-  const cfg = schemaConfigs.value[schemaID];
-  if (!cfg) return {};
-  if (!cfg.engine.pinyin) cfg.engine.pinyin = {};
-  return cfg.engine.pinyin;
-}
-
-// 混输配置
-function getMixedConfig(schemaID: string) {
-  const cfg = schemaConfigs.value[schemaID];
-  if (!cfg) return {};
-  if (!cfg.engine.mixed) cfg.engine.mixed = {};
-  return cfg.engine.mixed;
-}
-
-// 临时拼音配置
-function getTempPinyinConfig(schemaID: string) {
-  const ct = getCodetableConfig(schemaID);
-  if (!ct.temp_pinyin) ct.temp_pinyin = { enabled: true };
-  return ct.temp_pinyin;
-}
-
-// 学习配置
-function getLearningConfig(schemaID: string): {
-  auto_learn: { enabled: boolean };
-  freq: { enabled: boolean; protect_top_n?: number };
-  protect_top_n?: number;
-} {
-  const cfg = schemaConfigs.value[schemaID];
-  if (!cfg) return { auto_learn: { enabled: false }, freq: { enabled: false } };
-  if (!cfg.learning) (cfg as any).learning = {};
-  const learning = cfg.learning as any;
-  if (!learning.auto_learn) learning.auto_learn = { enabled: false };
-  if (!learning.freq) learning.freq = { enabled: false };
-  return learning;
-}
-
-function getFuzzyConfig(schemaID: string) {
-  const py = getPinyinConfig(schemaID);
-  if (!py.fuzzy) py.fuzzy = {};
-  return py.fuzzy;
-}
-
 // 双拼方案
 const shuangpinLayoutNames: Record<string, string> = {
   xiaohe: "小鹤双拼",
@@ -382,8 +295,9 @@ const shuangpinLayoutNames: Record<string, string> = {
 };
 
 function getShuangpinLayout(schemaID: string): string {
-  const py = getPinyinConfig(schemaID);
-  return py.shuangpin?.layout || "xiaohe";
+  const cfg = schemaConfigs.value[schemaID];
+  if (!cfg) return "xiaohe";
+  return cfg.engine?.pinyin?.shuangpin?.layout || "xiaohe";
 }
 
 function getShuangpinLayoutName(schemaID: string): string {
@@ -402,44 +316,6 @@ function getSchemaDisplayName(schemaID: string): string {
   return baseName;
 }
 
-function onShuangpinLayoutChange(schemaID: string, value: string) {
-  const py = getPinyinConfig(schemaID);
-  if (!py.shuangpin) py.shuangpin = {};
-  py.shuangpin.layout = value;
-  onSchemaConfigChange(schemaID);
-}
-
-// 模糊音
-const fuzzyPairs = [
-  { field: "zh_z", label: "zh ↔ z", example: "yi'zi → 一直" },
-  { field: "ch_c", label: "ch ↔ c", example: "ci'chang → 持常" },
-  { field: "sh_s", label: "sh ↔ s", example: "si'jian → 时间" },
-  { field: "n_l", label: "n ↔ l", example: "ni → 里" },
-  { field: "f_h", label: "f ↔ h", example: "fui → 灰" },
-  { field: "r_l", label: "r ↔ l", example: "ren → 冷" },
-  { field: "an_ang", label: "an ↔ ang", example: "shan → 上" },
-  { field: "en_eng", label: "en ↔ eng", example: "fen → 风" },
-  { field: "in_ing", label: "in ↔ ing", example: "xin → 星" },
-];
-
-function getFuzzyEnabledCount(schemaID: string) {
-  const fuzzy = getFuzzyConfig(schemaID);
-  return fuzzyPairs.filter((p) => (fuzzy as any)[p.field]).length;
-}
-
-function openFuzzyDialog(schemaID: string) {
-  fuzzyEditSchemaID.value = schemaID;
-  showFuzzyDialog.value = true;
-}
-
-function setAllFuzzyPairs(enabled: boolean) {
-  const fuzzy = getFuzzyConfig(fuzzyEditSchemaID.value);
-  fuzzyPairs.forEach((p) => {
-    (fuzzy as any)[p.field] = enabled;
-  });
-  onSchemaConfigChange(fuzzyEditSchemaID.value);
-}
-
 // 打开方案详情对话框
 function openSchemaDetail(schemaID: string) {
   detailSchemaID.value = schemaID;
@@ -447,10 +323,6 @@ function openSchemaDetail(schemaID: string) {
 
 onMounted(() => {
   loadAllSchemas();
-});
-
-onUnmounted(() => {
-  Object.values(saveTimers).forEach(clearTimeout);
 });
 </script>
 
@@ -572,6 +444,14 @@ onUnmounted(() => {
                 设为当前
               </Button>
               <span v-else class="schema-active-badge">当前方案</span>
+              <Button
+                variant="outline"
+                size="sm"
+                @click.stop="openSchemaSettings(schemaID)"
+                :disabled="!!getSchemaInfo(schemaID)?.error"
+              >
+                方案设置
+              </Button>
             </div>
           </div>
         </div>
@@ -623,732 +503,19 @@ onUnmounted(() => {
       </DialogContent>
     </Dialog>
 
-    <!-- 各方案配置 Card -->
-    <template v-for="schemaID in allConfigSchemaIDs" :key="'cfg-' + schemaID">
-      <div v-if="schemaConfigs[schemaID]" class="settings-card">
-        <div class="card-title">
-          <span>{{ getSchemaDisplayName(schemaID) }}</span>
-          <span
-            v-if="schemaID === activeSchemaID"
-            class="theme-badge active"
-            style="margin-left: 8px"
-            >当前</span
-          >
-          <span
-            v-if="isReferencedOnly(schemaID)"
-            class="theme-badge"
-            style="
-              margin-left: 8px;
-              background: var(--warning-bg, #fff3e0);
-              color: var(--warning, #e65100);
-            "
-            >仅被引用</span
-          >
-          <span
-            v-if="getReferencedByNote(schemaID)"
-            class="theme-badge"
-            style="
-              margin-left: 8px;
-              background: var(--accent-bg, #e8f0fe);
-              color: var(--accent-text, #1a73e8);
-            "
-            >被 {{ getReferencedByNote(schemaID) }} 引用</span
-          >
-        </div>
+    <!-- 方案设置对话框 -->
+    <SchemaSettingsDialog
+      :visible="showSchemaSettings"
+      :schemaID="settingsSchemaID || ''"
+      :schemaConfig="settingsSchemaID ? schemaConfigs[settingsSchemaID] : null"
+      :schemaInfo="settingsSchemaID ? getSchemaInfo(settingsSchemaID) : undefined"
+      :schemaReferences="schemaReferences"
+      :allSchemaConfigs="schemaConfigs"
+      @update:visible="showSchemaSettings = $event"
+      @configSave="onSchemaConfigSave"
+      @configReset="onSchemaConfigReset"
+    />
 
-        <!-- 码表类型 -->
-        <template v-if="getEngineType(schemaID) === 'codetable'">
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>满码唯一自动上屏</label>
-              <p class="setting-hint">
-                输入达到最大码长（{{
-                  getMaxCodeLength(schemaID)
-                }}码）且只有唯一候选时自动上屏
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getCodetableConfig(schemaID).auto_commit_unique"
-                @update:checked="
-                  (v: boolean) => {
-                    getCodetableConfig(schemaID).auto_commit_unique = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>满码空码清空</label>
-              <p class="setting-hint">
-                输入达到最大码长（{{
-                  getMaxCodeLength(schemaID)
-                }}码）无匹配时自动清空
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getCodetableConfig(schemaID).clear_on_empty_max"
-                @update:checked="
-                  (v: boolean) => {
-                    getCodetableConfig(schemaID).clear_on_empty_max = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>顶码上屏</label>
-              <p class="setting-hint">
-                超过最大码长（{{ getMaxCodeLength(schemaID) }}码）时自动上屏首选
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getCodetableConfig(schemaID).top_code_commit"
-                @update:checked="
-                  (v: boolean) => {
-                    getCodetableConfig(schemaID).top_code_commit = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>标点顶码上屏</label>
-              <p class="setting-hint">输入标点时自动上屏首选</p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getCodetableConfig(schemaID).punct_commit"
-                @update:checked="
-                  (v: boolean) => {
-                    getCodetableConfig(schemaID).punct_commit = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>逐码模式</label>
-              <p class="setting-hint">关闭前缀匹配，仅显示精确匹配</p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getCodetableConfig(schemaID).single_code_input"
-                @update:checked="
-                  (v: boolean) => {
-                    getCodetableConfig(schemaID).single_code_input = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>显示编码提示</label>
-              <p class="setting-hint">在前缀匹配的候选词旁显示剩余编码</p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getCodetableConfig(schemaID).show_code_hint"
-                @update:checked="
-                  (v: boolean) => {
-                    getCodetableConfig(schemaID).show_code_hint = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>候选排序</label>
-              <p class="setting-hint">候选词的排列方式</p>
-            </div>
-            <div class="setting-control">
-              <Select
-                :model-value="getCodetableConfig(schemaID).candidate_sort_mode"
-                @update:model-value="
-                  (v: string) => {
-                    getCodetableConfig(schemaID).candidate_sort_mode = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              >
-                <SelectTrigger class="w-[140px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="frequency">词频优先</SelectItem>
-                  <SelectItem value="natural">原始顺序</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>候选去重</label>
-              <p class="setting-hint">合并相同文字的多个候选词</p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getCodetableConfig(schemaID).dedup_candidates"
-                @update:checked="
-                  (v: boolean) => {
-                    getCodetableConfig(schemaID).dedup_candidates = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>单字不调频</label>
-              <p class="setting-hint">
-                防止高频单字打乱码表顺序（仅对词频学习模式生效）
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getCodetableConfig(schemaID).skip_single_char_freq"
-                @update:checked="
-                  (v: boolean) => {
-                    getCodetableConfig(schemaID).skip_single_char_freq = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>Z键重复上屏</label>
-              <p class="setting-hint">
-                输入z时首选为上一次上屏的内容，快速重复输入
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getCodetableConfig(schemaID).z_key_repeat"
-                @update:checked="
-                  (v: boolean) => {
-                    getCodetableConfig(schemaID).z_key_repeat = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>临时拼音</label>
-              <p class="setting-hint">
-                通过触发键临时切换拼音输入，用于查找不会打的字
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getTempPinyinConfig(schemaID).enabled"
-                @update:checked="
-                  (v: boolean) => {
-                    getTempPinyinConfig(schemaID).enabled = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>自动调频</label>
-              <p class="setting-hint">根据使用频率自动调整候选词排序</p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getLearningConfig(schemaID).freq.enabled"
-                @update:checked="
-                  (v: boolean) => {
-                    getLearningConfig(schemaID).freq.enabled = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div
-            v-if="getLearningConfig(schemaID).freq.enabled"
-            class="setting-item"
-          >
-            <div class="setting-info">
-              <label>首选保护</label>
-              <p class="setting-hint">
-                锁定前 N 位候选的排序位置，防止调频改变首选
-              </p>
-            </div>
-            <div class="setting-control">
-              <Select
-                :model-value="
-                  String(getLearningConfig(schemaID).freq.protect_top_n || 0)
-                "
-                @update:model-value="
-                  (v: string) => {
-                    getLearningConfig(schemaID).freq.protect_top_n = Number(v);
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              >
-                <SelectTrigger class="w-[140px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="0">不保护</SelectItem>
-                  <SelectItem value="1">保护首选</SelectItem>
-                  <SelectItem value="2">保护前2位</SelectItem>
-                  <SelectItem value="3">保护前3位</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>自动造词</label>
-              <p class="setting-hint">
-                连续输入单字后以标点、词组或回车结束时，自动将单字序列组词并加入临时词库
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getLearningConfig(schemaID).auto_learn.enabled"
-                @update:checked="
-                  (v: boolean) => {
-                    getLearningConfig(schemaID).auto_learn.enabled = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-        </template>
-
-        <!-- 拼音类型 -->
-        <template v-if="getEngineType(schemaID) === 'pinyin'">
-          <!-- 双拼方案选择 -->
-          <div
-            v-if="getPinyinConfig(schemaID).scheme === 'shuangpin'"
-            class="setting-item"
-          >
-            <div class="setting-info">
-              <label>双拼方案</label>
-              <p class="setting-hint">选择双拼键位布局</p>
-            </div>
-            <div class="setting-control">
-              <Select
-                :model-value="getShuangpinLayout(schemaID)"
-                @update:model-value="
-                  (v: string) => onShuangpinLayoutChange(schemaID, v)
-                "
-              >
-                <SelectTrigger class="w-[140px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="xiaohe">小鹤双拼</SelectItem>
-                  <SelectItem value="ziranma">自然码</SelectItem>
-                  <SelectItem value="mspy">微软双拼</SelectItem>
-                  <SelectItem value="sogou">搜狗双拼</SelectItem>
-                  <SelectItem value="abc">智能ABC</SelectItem>
-                  <SelectItem value="ziguang">紫光双拼</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>编码反查提示</label>
-              <p class="setting-hint">在候选词旁显示对应的码表编码</p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getPinyinConfig(schemaID).show_code_hint"
-                @update:checked="
-                  (v: boolean) => {
-                    getPinyinConfig(schemaID).show_code_hint = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>智能组句</label>
-              <p class="setting-hint">使用语言模型优化多字词组匹配</p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getPinyinConfig(schemaID).use_smart_compose"
-                @update:checked="
-                  (v: boolean) => {
-                    getPinyinConfig(schemaID).use_smart_compose = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>模糊音</label>
-              <p class="setting-hint">
-                允许近似发音输入（已启用
-                {{ getFuzzyEnabledCount(schemaID) }} 组）
-              </p>
-            </div>
-            <div class="setting-control inline-control">
-              <label class="checkbox-label">
-                <input
-                  type="checkbox"
-                  v-model="getFuzzyConfig(schemaID).enabled"
-                  @change="onSchemaConfigChange(schemaID)"
-                />
-                启用
-              </label>
-              <Button
-                variant="outline"
-                size="sm"
-                :disabled="!getFuzzyConfig(schemaID).enabled"
-                @click="openFuzzyDialog(schemaID)"
-              >
-                配置
-              </Button>
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>自动调频</label>
-              <p class="setting-hint">根据使用频率自动调整候选词排序</p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getLearningConfig(schemaID).freq.enabled"
-                @update:checked="
-                  (v: boolean) => {
-                    getLearningConfig(schemaID).freq.enabled = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>自动造词</label>
-              <p class="setting-hint">
-                选词时自动学习新词组，先加入临时词库，多次使用后晋升到用户词库
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getLearningConfig(schemaID).auto_learn.enabled"
-                @update:checked="
-                  (v: boolean) => {
-                    getLearningConfig(schemaID).auto_learn.enabled = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-        </template>
-
-        <!-- 混输类型 -->
-        <template v-if="getEngineType(schemaID) === 'mixed'">
-          <!-- 引用式混输：显示引用提示，不显示码表/拼音配置 -->
-          <div
-            v-if="isMixedWithRef(schemaID)"
-            class="setting-item"
-            style="
-              background: var(--bg-secondary, #f5f5f5);
-              border-radius: 6px;
-              padding: 10px 14px;
-              margin-bottom: 12px;
-            "
-          >
-            <div class="setting-info" style="flex: 1">
-              <label style="font-weight: 500">引用方案</label>
-              <p class="setting-hint">
-                {{
-                  getReferenceNote(schemaID)
-                }}。如需修改码表或拼音配置，请在对应方案中设置。
-              </p>
-            </div>
-          </div>
-
-          <!-- 非引用式混输：显示完整的码表和拼音配置 -->
-          <template v-if="!isMixedWithRef(schemaID)">
-            <!-- 码表配置区 -->
-            <div class="setting-section-title">码表设置</div>
-            <div class="setting-item">
-              <div class="setting-info">
-                <label>显示编码提示</label>
-                <p class="setting-hint">在前缀匹配的候选词旁显示剩余编码</p>
-              </div>
-              <div class="setting-control">
-                <Switch
-                  :checked="getCodetableConfig(schemaID).show_code_hint"
-                  @update:checked="
-                    (v: boolean) => {
-                      getCodetableConfig(schemaID).show_code_hint = v;
-                      onSchemaConfigChange(schemaID);
-                    }
-                  "
-                />
-              </div>
-            </div>
-            <div class="setting-item">
-              <div class="setting-info">
-                <label>标点顶码上屏</label>
-                <p class="setting-hint">输入标点时自动上屏首选</p>
-              </div>
-              <div class="setting-control">
-                <Switch
-                  :checked="getCodetableConfig(schemaID).punct_commit"
-                  @update:checked="
-                    (v: boolean) => {
-                      getCodetableConfig(schemaID).punct_commit = v;
-                      onSchemaConfigChange(schemaID);
-                    }
-                  "
-                />
-              </div>
-            </div>
-            <div class="setting-item">
-              <div class="setting-info">
-                <label>候选排序</label>
-                <p class="setting-hint">码表候选词的排列方式</p>
-              </div>
-              <div class="setting-control">
-                <Select
-                  :model-value="
-                    getCodetableConfig(schemaID).candidate_sort_mode
-                  "
-                  @update:model-value="
-                    (v: string) => {
-                      getCodetableConfig(schemaID).candidate_sort_mode = v;
-                      onSchemaConfigChange(schemaID);
-                    }
-                  "
-                >
-                  <SelectTrigger class="w-[140px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="frequency">词频优先</SelectItem>
-                    <SelectItem value="natural">原始顺序</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-
-            <!-- 拼音配置区 -->
-            <div class="setting-section-title">拼音设置</div>
-            <div class="setting-item">
-              <div class="setting-info">
-                <label>编码反查提示</label>
-                <p class="setting-hint">在拼音候选词旁显示对应的码表编码</p>
-              </div>
-              <div class="setting-control">
-                <Switch
-                  :checked="getPinyinConfig(schemaID).show_code_hint"
-                  @update:checked="
-                    (v: boolean) => {
-                      getPinyinConfig(schemaID).show_code_hint = v;
-                      onSchemaConfigChange(schemaID);
-                    }
-                  "
-                />
-              </div>
-            </div>
-            <div class="setting-item">
-              <div class="setting-info">
-                <label>智能组句</label>
-                <p class="setting-hint">使用语言模型优化多字词组匹配</p>
-              </div>
-              <div class="setting-control">
-                <Switch
-                  :checked="getPinyinConfig(schemaID).use_smart_compose"
-                  @update:checked="
-                    (v: boolean) => {
-                      getPinyinConfig(schemaID).use_smart_compose = v;
-                      onSchemaConfigChange(schemaID);
-                    }
-                  "
-                />
-              </div>
-            </div>
-            <div class="setting-item">
-              <div class="setting-info">
-                <label>模糊音</label>
-                <p class="setting-hint">
-                  允许近似发音输入（已启用
-                  {{ getFuzzyEnabledCount(schemaID) }} 组）
-                </p>
-              </div>
-              <div class="setting-control inline-control">
-                <label class="checkbox-label">
-                  <input
-                    type="checkbox"
-                    v-model="getFuzzyConfig(schemaID).enabled"
-                    @change="onSchemaConfigChange(schemaID)"
-                  />
-                  启用
-                </label>
-                <button
-                  class="btn btn-sm"
-                  :disabled="!getFuzzyConfig(schemaID).enabled"
-                  @click="openFuzzyDialog(schemaID)"
-                >
-                  配置
-                </button>
-              </div>
-            </div>
-          </template>
-          <!-- /非引用式混输配置 -->
-
-          <!-- 混输专属配置区（引用式和非引用式都显示） -->
-          <div class="setting-section-title">混输设置</div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>拼音最小触发长度</label>
-              <p class="setting-hint">
-                输入几码后开始查询拼音候选（1=始终查询，2=两码起查询）
-              </p>
-            </div>
-            <div class="setting-control">
-              <Select
-                :model-value="
-                  String(getMixedConfig(schemaID).min_pinyin_length)
-                "
-                @update:model-value="
-                  (v: string) => {
-                    getMixedConfig(schemaID).min_pinyin_length = Number(v);
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              >
-                <SelectTrigger class="w-[140px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1">1码</SelectItem>
-                  <SelectItem value="2">2码</SelectItem>
-                  <SelectItem value="3">3码</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>显示来源标记</label>
-              <p class="setting-hint">在拼音候选旁显示"拼"标记以区分来源</p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getMixedConfig(schemaID).show_source_hint"
-                @update:checked="
-                  (v: boolean) => {
-                    getMixedConfig(schemaID).show_source_hint = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>简拼匹配</label>
-              <p class="setting-hint">
-                允许输入声母缩写查找拼音候选（如 bg 匹配"不过"）
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getMixedConfig(schemaID).enable_abbrev_match"
-                @update:checked="
-                  (v: boolean) => {
-                    getMixedConfig(schemaID).enable_abbrev_match = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-          <div class="setting-item">
-            <div class="setting-info">
-              <label>Z键重复上屏</label>
-              <p class="setting-hint">
-                输入z时首选为上一次上屏的内容，快速重复输入
-              </p>
-            </div>
-            <div class="setting-control">
-              <Switch
-                :checked="getMixedConfig(schemaID).z_key_repeat"
-                @update:checked="
-                  (v: boolean) => {
-                    getMixedConfig(schemaID).z_key_repeat = v;
-                    onSchemaConfigChange(schemaID);
-                  }
-                "
-              />
-            </div>
-          </div>
-        </template>
-      </div>
-    </template>
-
-    <!-- 模糊音配置对话框 -->
-    <Dialog :open="showFuzzyDialog" @update:open="showFuzzyDialog = $event">
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>模糊音配置</DialogTitle>
-        </DialogHeader>
-        <div class="fuzzy-pairs-grid">
-          <label
-            class="fuzzy-pair-item"
-            v-for="pair in fuzzyPairs"
-            :key="pair.field"
-          >
-            <input
-              type="checkbox"
-              v-model="(getFuzzyConfig(fuzzyEditSchemaID) as any)[pair.field]"
-              @change="onSchemaConfigChange(fuzzyEditSchemaID)"
-            />
-            <span class="fuzzy-pair-label">{{ pair.label }}</span>
-            <span class="fuzzy-pair-example">{{ pair.example }}</span>
-          </label>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" size="sm" @click="setAllFuzzyPairs(true)"
-            >全选</Button
-          >
-          <Button variant="outline" size="sm" @click="setAllFuzzyPairs(false)"
-            >全不选</Button
-          >
-          <Button size="sm" @click="showFuzzyDialog = false">确定</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   </section>
 </template>
 
@@ -1522,17 +689,4 @@ onUnmounted(() => {
   border-radius: 6px;
 }
 
-/* 混输设置分区标题 */
-.setting-section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: hsl(var(--muted-foreground));
-  padding: 10px 0 4px 0;
-  border-top: 1px solid hsl(var(--secondary));
-  margin-top: 4px;
-}
-.setting-section-title:first-child {
-  border-top: none;
-  margin-top: 0;
-}
 </style>

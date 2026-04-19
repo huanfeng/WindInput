@@ -228,12 +228,11 @@ func (a *App) GetAvailableSchemas() ([]SchemaInfo, error) {
 	return result, nil
 }
 
-// GetSchemaConfig 获取指定方案的完整配置
-// 使用合并读取：先加载内置方案作为基础，再叠加用户方案覆盖
-func (a *App) GetSchemaConfig(schemaID string) (*SchemaConfig, error) {
+// loadSchemaBase 加载方案基础配置（Layer1 + Layer2，不含覆盖层）
+func (a *App) loadSchemaBase(schemaID string) (*SchemaConfig, error) {
 	var cfg SchemaConfig
 
-	// Layer 1: 加载内置方案作为基础
+	// Layer 1: 内置方案
 	builtinPath, builtinErr := findBuiltinSchemaFile(schemaID)
 	if builtinErr == nil {
 		data, err := os.ReadFile(builtinPath)
@@ -245,7 +244,7 @@ func (a *App) GetSchemaConfig(schemaID string) (*SchemaConfig, error) {
 		}
 	}
 
-	// Layer 2: 叠加用户方案覆盖（缺失字段保留内置值）
+	// Layer 2: 用户方案文件
 	userPath, userErr := findUserSchemaFile(schemaID)
 	if userErr == nil {
 		data, err := os.ReadFile(userPath)
@@ -257,7 +256,6 @@ func (a *App) GetSchemaConfig(schemaID string) (*SchemaConfig, error) {
 		}
 	}
 
-	// 内置和用户方案都不存在
 	if builtinErr != nil && userErr != nil {
 		return nil, fmt.Errorf("方案文件不存在: %s", schemaID)
 	}
@@ -265,55 +263,53 @@ func (a *App) GetSchemaConfig(schemaID string) (*SchemaConfig, error) {
 	return &cfg, nil
 }
 
-// SaveSchemaConfig 保存方案配置（写入用户目录的方案文件）
-// 使用 diff 保存：只将与内置方案不同的字段写入用户文件，
-// 使未修改的字段能自动跟随内置方案的更新。
-func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
-	configDir, err := config.GetConfigDir()
+// GetSchemaConfig 获取指定方案的完整配置
+// 使用三层合并读取：内置方案 → 用户方案 → schema_overrides.yaml
+func (a *App) GetSchemaConfig(schemaID string) (*SchemaConfig, error) {
+	cfg, err := a.loadSchemaBase(schemaID)
 	if err != nil {
-		return fmt.Errorf("获取配置目录失败: %w", err)
+		return nil, err
 	}
 
-	// 确保用户方案目录存在
-	userSchemaDir := filepath.Join(configDir, "schemas")
-	if err := os.MkdirAll(userSchemaDir, 0755); err != nil {
-		return fmt.Errorf("创建方案目录失败: %w", err)
-	}
-
-	path := filepath.Join(userSchemaDir, schemaID+".schema.yaml")
-
-	// 尝试加载内置方案作为 diff 基准
-	var data []byte
-	builtinPath, builtinErr := findBuiltinSchemaFile(schemaID)
-	if builtinErr == nil {
-		builtinData, err := os.ReadFile(builtinPath)
-		if err == nil {
-			var baseCfg SchemaConfig
-			if err := yaml.Unmarshal(builtinData, &baseCfg); err == nil {
-				diff, err := config.ComputeYAMLDiff(&baseCfg, cfg)
-				if err == nil {
-					// 确保 schema.id 始终存在（合并时需要用 ID 匹配内置方案）
-					ensureSchemaID(diff, schemaID)
-					data, err = yaml.Marshal(diff)
-					if err != nil {
-						data = nil // 回退到全量保存
-					}
-				}
-			}
+	// Layer 3: 叠加用户覆盖配置 (schema_overrides.yaml)
+	override, overrideErr := config.GetSchemaOverride(schemaID)
+	if overrideErr == nil && override != nil {
+		overrideData, marshalErr := yaml.Marshal(override)
+		if marshalErr == nil {
+			yaml.Unmarshal(overrideData, cfg)
 		}
 	}
 
-	// diff 失败或无内置方案（用户自定义方案）：全量保存
-	if data == nil {
-		var err error
-		data, err = yaml.Marshal(cfg)
-		if err != nil {
-			return fmt.Errorf("序列化方案配置失败: %w", err)
-		}
+	return cfg, nil
+}
+
+// SaveSchemaConfig 保存方案配置（写入 schema_overrides.yaml 覆盖层）
+// 计算 cfg 与基础配置（Layer1+Layer2）的 diff，仅将差异写入覆盖层。
+func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
+	// 加载基础配置（Layer1 + Layer2）
+	base, err := a.loadSchemaBase(schemaID)
+	if err != nil {
+		return fmt.Errorf("加载方案基础配置失败: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("写入方案文件失败: %w", err)
+	// 计算差异
+	diff, err := config.ComputeYAMLDiff(base, cfg)
+	if err != nil {
+		return fmt.Errorf("计算方案配置差异失败: %w", err)
+	}
+
+	// 移除不应覆盖的元数据字段
+	delete(diff, "schema")
+	delete(diff, "dictionaries")
+	delete(diff, "encoder")
+
+	// 如果没有差异，删除已有的覆盖配置
+	if len(diff) == 0 {
+		config.DeleteSchemaOverride(schemaID)
+	} else {
+		if err := config.SetSchemaOverride(schemaID, diff); err != nil {
+			return fmt.Errorf("保存方案覆盖配置失败: %w", err)
+		}
 	}
 
 	// 通知 wind_input 服务重新加载配置
@@ -324,14 +320,28 @@ func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
 	return nil
 }
 
-// ensureSchemaID 确保 diff map 中包含 schema.id 字段
-func ensureSchemaID(diff map[string]interface{}, schemaID string) {
-	schemaMap, ok := diff["schema"].(map[string]interface{})
-	if !ok {
-		schemaMap = make(map[string]interface{})
-		diff["schema"] = schemaMap
+// ResetSchemaConfig 恢复方案默认配置（删除用户覆盖）
+// 对于有内置基础的方案，同时删除用户 diff 文件（Layer 2），使其完全回到内置默认值。
+// 对于纯用户方案（无内置基础），仅删除覆盖层（Layer 3）。
+func (a *App) ResetSchemaConfig(schemaID string) error {
+	// 删除 Layer 3 覆盖
+	if err := config.DeleteSchemaOverride(schemaID); err != nil {
+		return fmt.Errorf("重置方案配置失败: %w", err)
 	}
-	schemaMap["id"] = schemaID
+
+	// 对有内置基础的方案，删除 Layer 2 用户 diff 文件
+	if _, builtinErr := findBuiltinSchemaFile(schemaID); builtinErr == nil {
+		if userPath, userErr := findUserSchemaFile(schemaID); userErr == nil {
+			os.Remove(userPath)
+		}
+	}
+
+	// 通知 wind_input 服务重新加载配置
+	if a.rpcClient != nil {
+		a.rpcClient.SystemNotifyReload("schema")
+	}
+
+	return nil
 }
 
 // SwitchActiveSchema 切换活跃方案
@@ -993,6 +1003,9 @@ func (a *App) DeleteSchema(schemaID string) error {
 			return fmt.Errorf("删除词典目录失败: %w", err)
 		}
 	}
+
+	// 清理方案覆盖配置
+	config.DeleteSchemaOverride(schemaID)
 
 	return nil
 }

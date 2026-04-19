@@ -82,6 +82,10 @@ export async function saveSchemaConfig(
   return App.SaveSchemaConfig(schemaID, cfg);
 }
 
+export async function resetSchemaConfig(schemaID: string): Promise<void> {
+  return (window as any).go.main.App.ResetSchemaConfig(schemaID);
+}
+
 export async function switchActiveSchema(schemaID: string): Promise<void> {
   return App.SwitchActiveSchema(schemaID);
 }
