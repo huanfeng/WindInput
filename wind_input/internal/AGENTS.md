@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-04-08 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
 
 # internal
 
@@ -11,13 +11,15 @@
 |-----------|---------|
 | `bridge/` | Named Pipe IPC 服务端，与 C++ TSF 桥接层通信；宿主进程代理渲染（共享内存位图传输） (see `bridge/AGENTS.md`) |
 | `candidate/` | 候选词数据结构和过滤/排序逻辑 (see `candidate/AGENTS.md`) |
-| `control/` | 控制管道服务端，供设置应用调用 (see `control/AGENTS.md`) |
+| `clipboard/` | Windows 剪贴板读写操作 (see `clipboard/AGENTS.md`) |
 | `coordinator/` | 核心协调器，处理按键事件、模式切换、生命周期（18 个处理器文件，支持加词和候选词操作） (see `coordinator/AGENTS.md`) |
 | `dict/` | 词库系统（Trie、CompositeDict、短语、Shadow pin+delete、用户词典、词频） (see `dict/AGENTS.md`) |
 | `engine/` | Schema 驱动的引擎管理器及拼音/五笔/混输引擎实现 |
 | `hotkey/` | 热键配置编译器（支持候选词操作热键和通用按键绑定） |
 | `ipc/` | 底层 IPC 协议和 Named Pipe 服务端基础设施 |
+| `rpc/` | JSON-RPC IPC 服务端（词库、Shadow、短语、系统管理）(see `rpc/AGENTS.md`) |
 | `schema/` | **输入方案管理**：Schema 定义、工厂、加载器、学习策略（方案驱动架构核心） |
+| `store/` | 基于 bbolt 的持久化存储层（用户词、临时词、Shadow、词频） (see `store/AGENTS.md`) |
 | `transform/` | 文本转换（全角/半角、中英文标点） |
 | `ui/` | Windows 原生 UI 渲染（候选窗口、工具栏、Tooltip、DPI 感知）；DirectWrite 由 CGO 桥接实现，弹出菜单支持键盘导航和子菜单 |
 

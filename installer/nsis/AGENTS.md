@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-04-08 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
 
 # NSIS 安装脚本目录 (installer/nsis/)
 

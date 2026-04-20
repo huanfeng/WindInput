@@ -1,15 +1,17 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-01 | Updated: 2026-04-08 -->
+<!-- Generated: 2026-04-01 | Updated: 2026-04-20 -->
 
 # components
 
 ## Purpose
-可复用 Vue 3 组件目录。目前包含全局 Toast 通知容器，由 `App.vue` 在根级挂载，通过 Vue Teleport 渲染到 `body` 顶层，供所有子组件使用。
+可复用 Vue 3 组件目录。包含全局 Toast 通知容器（由 `App.vue` 在根级挂载）、词库管理相关组件（由 `DictionaryPage.vue` 使用）、shadcn UI 库组件（auto-generated）。
 
 ## Key Files
 | 文件 | 说明 |
 |------|------|
 | `ToastContainer.vue` | 全局浮动 Toast 容器：接收 `toasts: ToastItem[]` prop，通过 `<Teleport to="body">` 渲染到页面顶层；使用 `<TransitionGroup>` 实现入场/离场动画；支持 `success`（绿色）和 `error`（红色）两种类型 |
+| `dict/` | 词库管理相关组件（DictDataTable、短语/用户词库/临时词库/Shadow 管理面板、导入导出） (see `dict/AGENTS.md`) |
+| `ui/` | shadcn UI 组件（auto-generated，勿手动编辑） |
 
 ## For AI Agents
 ### Working In This Directory

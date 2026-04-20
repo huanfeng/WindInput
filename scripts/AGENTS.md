@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-04-08 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
 
 # scripts/ - 构建辅助和工具脚本
 

@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-08 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
 
 # src
 
@@ -18,11 +18,12 @@
 ## Subdirectories
 | 目录 | 说明 |
 |------|------|
-| `api/` | API 调用层 |
-| `pages/` | 各设置页面组件（含 AddWordPage） |
-| `components/` | 可复用组件（ToastContainer） (see `components/AGENTS.md`) |
+| `api/` | API 调用层 (see `api/AGENTS.md`) |
+| `pages/` | 各设置页面组件（含 AddWordPage） (see `pages/AGENTS.md`) |
+| `components/` | 可复用组件（ToastContainer、词库管理） (see `components/AGENTS.md`) |
 | `composables/` | Vue composables（useToast） (see `composables/AGENTS.md`) |
-| `assets/` | 静态资源 |
+| `assets/` | 静态资源（字体、图片） (see `assets/AGENTS.md`) |
+| `lib/` | 工具函数库（样式类合并） (see `lib/AGENTS.md`) |
 
 ## For AI Agents
 ### Working In This Directory

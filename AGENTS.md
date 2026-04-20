@@ -1,4 +1,4 @@
-<!-- Generated: 2026-04-08 | Updated: 2026-04-08 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
 
 # WindInput - 清风输入法
 
@@ -55,6 +55,7 @@ Schema 驱动流程:
 | `dict/` | 运行时词库数据（unigram 等） |
 | `installer/` | 安装/卸载脚本 (see `installer/AGENTS.md`) |
 | `scripts/` | 构建辅助和工具脚本（版本管理、诊断工具）(see `scripts/AGENTS.md`) |
+| `wind_portable/` | 便携版启动器工具（部署、进程管理、TSF 动态注册）(see `wind_portable/AGENTS.md`) |
 | `pic/` | 项目截图和图片资源 |
 
 ## For AI Agents

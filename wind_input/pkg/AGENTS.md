@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-08 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
 
 # pkg
 
@@ -10,9 +10,11 @@
 | Directory | Purpose |
 |-----------|---------|
 | `config/` | 应用配置结构体、路径管理、运行时状态（三层加载机制） |
-| `control/` | 控制管道通信协议（客户端 + 协议定义） |
+| `dictio/` | 字典 IO 工具库（Rime YAML、TSV、ZIP 等多格式导入/导出）(see `dictio/AGENTS.md`) |
 | `encoding/` | 字符编码工具（词组编码公式解析、规则匹配、编码计算） |
 | `fileutil/` | 文件工具（原子写入、安全写入、文件变更检测） |
+| `rpcapi/` | JSON-RPC 协议定义和帧协议实现（服务端/客户端共用） (see `rpcapi/AGENTS.md`) |
+| `systemfont/` | Windows 系统字体目录扫描和信息提供 (see `systemfont/AGENTS.md`) |
 | `theme/` | 主题系统（颜色定义、主题加载、默认主题） |
 
 ## For AI Agents

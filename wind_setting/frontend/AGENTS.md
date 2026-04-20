@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-08 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
 
 # frontend
 
@@ -18,12 +18,13 @@
 ## Subdirectories
 | 目录 | 说明 |
 |------|------|
-| `src/` | 前端源码根目录 |
-| `src/api/` | API 调用层（Wails IPC + HTTP fallback） |
-| `src/pages/` | 各设置页面 Vue 组件 |
-| `src/components/` | 可复用 Vue 组件（全局 Toast 容器等） |
-| `src/composables/` | Vue composables（useToast 等） |
-| `src/assets/` | 静态资源（字体、图片） |
+| `src/` | 前端源码根目录 (see `src/AGENTS.md`) |
+| `src/api/` | API 调用层（Wails IPC + HTTP fallback） (see `src/api/AGENTS.md`) |
+| `src/pages/` | 各设置页面 Vue 组件 (see `src/pages/AGENTS.md`) |
+| `src/components/` | 可复用 Vue 组件（全局 Toast、词库管理） (see `src/components/AGENTS.md`) |
+| `src/composables/` | Vue composables（useToast 等） (see `src/composables/AGENTS.md`) |
+| `src/assets/` | 静态资源（字体、图片） (see `src/assets/AGENTS.md`) |
+| `src/lib/` | 工具函数库（样式类合并） (see `src/lib/AGENTS.md`) |
 
 ## For AI Agents
 ### Working In This Directory

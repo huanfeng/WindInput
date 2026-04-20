@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-08 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
 
 # internal
 
@@ -12,8 +12,8 @@
 ## Subdirectories
 | 目录 | 说明 |
 |------|------|
-| `editor/` | 各类数据文件的读写编辑器（配置、短语、Shadow、用户词库） |
-| `filesync/` | 文件状态快照与变化检测，用于感知外部修改 |
+| `editor/` | 各类数据文件的读写编辑器（配置、短语、Shadow、用户词库） (see `editor/AGENTS.md`) |
+| `filesync/` | 文件状态快照与变化检测，用于感知外部修改 (see `filesync/AGENTS.md`) |
 
 ## For AI Agents
 ### Working In This Directory
