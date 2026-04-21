@@ -23,6 +23,9 @@ namespace WindPortable
 
             InitializeComponent();
 
+            // 使用系统 UI 字体（Win10/11 为 Segoe UI，中文回退到微软雅黑），替代默认宋体
+            this.Font = System.Drawing.SystemFonts.MessageBoxFont;
+
             this.Text = BuildVariant.IsDebug
                 ? "清风输入法便携启动器 (Debug)"
                 : "清风输入法便携启动器";

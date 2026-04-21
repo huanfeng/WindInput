@@ -6,6 +6,7 @@
     <RootNamespace>WindPortable</RootNamespace>
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
     <LangVersion>7.3</LangVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <Configurations>Debug;Release</Configurations>
     <DefineConstants Condition="'$(Configuration)'=='Debug'">DEBUG;TRACE</DefineConstants>
     <DefineConstants Condition="'$(Configuration)'=='Release'">TRACE</DefineConstants>
