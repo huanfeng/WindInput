@@ -51,6 +51,10 @@ Win32/
 
 # Go build artifacts
 /wind_input/bin/
+
+# C# build artifacts (wind_portable)
+/wind_portable/bin/
+/wind_portable/obj/
 *.exe
 *.dll
 *.so
