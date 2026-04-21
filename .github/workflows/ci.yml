@@ -37,11 +37,7 @@ jobs:
 
       - name: Build wind_portable
         working-directory: wind_portable
-        run: go build .
-
-      - name: Vet wind_portable
-        working-directory: wind_portable
-        run: go vet .
+        run: dotnet build -c Release
 
       - name: Prepare wind_setting frontend stub
         working-directory: wind_setting
