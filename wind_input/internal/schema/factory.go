@@ -30,7 +30,8 @@ type SchemaResolver func(schemaID string) *Schema
 
 // EngineCreateOptions 引擎创建选项
 type EngineCreateOptions struct {
-	SkipReverseLookup bool // 跳过反查码表加载（临时拼音模式下由 Manager 提供反向索引）
+	SkipReverseLookup  bool // 跳过反查码表加载（临时拼音模式下由 Manager 提供反向索引）
+	UseIndependentDict bool // 使用独立的 CompositeDict，不注册到主 DictManager（临时拼音引擎避免污染混输主词库）
 }
 
 // CreateEngineFromSchema 根据 Schema 创建引擎实例并加载词库
@@ -214,13 +215,13 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 
 	// 构建 CompositeDict
 	var compositeDict *dict.CompositeDict
-	if dm != nil {
+	if dm != nil && !opt.UseIndependentDict {
 		systemLayer := dict.NewPinyinDictLayer("pinyin-system", dict.LayerTypeSystem, pinyinDict)
 		dm.RegisterSystemLayer("pinyin-system", systemLayer)
 		compositeDict = dm.GetCompositeDict()
 		logger.Info("拼音引擎使用 CompositeDict")
 	} else {
-		// 无 DictManager 时创建独立 CompositeDict
+		// 无 DictManager 或要求独立词库时创建独立 CompositeDict（避免污染混输主词库）
 		compositeDict = dict.NewCompositeDict()
 		systemLayer := dict.NewPinyinDictLayer("pinyin-system", dict.LayerTypeSystem, pinyinDict)
 		compositeDict.AddLayer(systemLayer)

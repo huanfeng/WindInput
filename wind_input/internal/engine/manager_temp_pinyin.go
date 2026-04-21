@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/schema"
 )
@@ -8,11 +9,17 @@ import (
 // --- 临时拼音支持 ---
 
 // EnsurePinyinLoaded 确保拼音引擎已加载（不切换当前引擎）
+// 混输模式下无需额外加载：直接复用混输引擎内置的拼音子引擎。
 func (m *Manager) EnsurePinyinLoaded() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 查找拼音方案的 ID
+	// 混输模式：内置拼音子引擎已就绪，无需创建独立引擎
+	if _, ok := m.currentEngine.(*mixed.Engine); ok {
+		return nil
+	}
+
+	// 码表模式：需要加载独立拼音引擎
 	pinyinID := m.findPinyinSchemaID()
 	if _, ok := m.engines[pinyinID]; ok {
 		return nil
@@ -20,7 +27,11 @@ func (m *Manager) EnsurePinyinLoaded() error {
 
 	m.logger.Info("临时拼音：加载拼音引擎")
 	// 跳过反查码表加载：临时拼音模式由 Manager.GetReverseIndex() 动态提供当前主方案的反向索引
-	return m.loadSchemaEngineLocked(pinyinID, schema.EngineCreateOptions{SkipReverseLookup: true})
+	// 使用独立 CompositeDict：避免拼音词库层泄漏到混输引擎的主 CompositeDict
+	return m.loadSchemaEngineLocked(pinyinID, schema.EngineCreateOptions{
+		SkipReverseLookup:  true,
+		UseIndependentDict: true,
+	})
 }
 
 // ActivateTempPinyin 激活临时拼音模式：交换系统词库层
@@ -93,19 +104,32 @@ func (m *Manager) DeactivateTempPinyin() {
 }
 
 // ConvertWithPinyin 使用拼音引擎转换（用于临时拼音模式）
+// 混输模式下直接复用内置拼音子引擎，避免创建独立引擎带来的词库污染和状态不一致。
 func (m *Manager) ConvertWithPinyin(input string, maxCandidates int) *ConvertResult {
 	m.mu.RLock()
-	pinyinID := m.findPinyinSchemaIDLocked()
-	pinyinEngine, ok := m.engines[pinyinID]
+	currentEngine := m.currentEngine
 	m.mu.RUnlock()
 
-	if !ok {
-		return &ConvertResult{IsEmpty: true}
+	// 混输模式：直接使用内置拼音子引擎
+	var pe *pinyin.Engine
+	if me, ok := currentEngine.(*mixed.Engine); ok {
+		pe = me.GetPinyinEngine()
 	}
 
-	pe, ok := pinyinEngine.(*pinyin.Engine)
-	if !ok {
-		return &ConvertResult{IsEmpty: true}
+	// 码表模式：使用独立加载的拼音引擎
+	if pe == nil {
+		m.mu.RLock()
+		pinyinID := m.findPinyinSchemaIDLocked()
+		pinyinEngine, ok := m.engines[pinyinID]
+		m.mu.RUnlock()
+
+		if !ok {
+			return &ConvertResult{IsEmpty: true}
+		}
+		pe, ok = pinyinEngine.(*pinyin.Engine)
+		if !ok {
+			return &ConvertResult{IsEmpty: true}
+		}
 	}
 
 	pinyinResult := pe.ConvertEx(input, maxCandidates)
