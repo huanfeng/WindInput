@@ -195,6 +195,7 @@ BOOL CIPCClient::_ShouldAttemptOperation()
         {
             _LogInfo(L"Circuit breaker half-open, attempting reconnection...");
             _circuitState = CircuitState::HalfOpen;
+            _serviceStartAttempted = FALSE;  // 允许重新尝试拉起服务
             return TRUE;
         }
         return FALSE;
@@ -207,6 +208,7 @@ void CIPCClient::ResetCircuitBreaker()
 {
     _consecutiveFailures = 0;
     _circuitState = CircuitState::Closed;
+    _serviceStartAttempted = FALSE;  // 允许重新尝试拉起服务
     _LogInfo(L"Circuit breaker manually reset");
 }
 
@@ -371,7 +373,11 @@ BOOL CIPCClient::_StartService()
 
     if (lastSlash)
     {
+#ifdef WIND_DEBUG_VARIANT
+        wcscpy_s(lastSlash + 1, MAX_PATH - (lastSlash - dllPath + 1), L"wind_input_debug.exe");
+#else
         wcscpy_s(lastSlash + 1, MAX_PATH - (lastSlash - dllPath + 1), L"wind_input.exe");
+#endif
     }
 
     _LogDebug(L"Starting service: %s", dllPath);
@@ -382,20 +388,22 @@ BOOL CIPCClient::_StartService()
 
     PROCESS_INFORMATION pi = {};
 
-    if (!CreateProcessW(
-        dllPath,
-        nullptr,
-        nullptr,
-        nullptr,
-        FALSE,
-        CREATE_NEW_CONSOLE,
-        nullptr,
-        nullptr,
-        &si,
-        &pi))
+    // CREATE_NEW_CONSOLE: 独立控制台，不继承宿主进程的控制台
+    // CREATE_BREAKAWAY_FROM_JOB: 脱离宿主进程的 Job 对象（如 UWP 沙盒）
+    // CREATE_DEFAULT_ERROR_MODE: 使用系统默认错误模式
+    DWORD flags = CREATE_NEW_CONSOLE | CREATE_DEFAULT_ERROR_MODE;
+
+    // 尝试脱离 Job 对象（某些宿主进程可能不允许，失败后回退）
+    if (!CreateProcessW(dllPath, nullptr, nullptr, nullptr, FALSE,
+        flags | CREATE_BREAKAWAY_FROM_JOB, nullptr, nullptr, &si, &pi))
     {
-        _LogError(L"Failed to start service: error=%d", GetLastError());
-        return FALSE;
+        // 回退：不使用 BREAKAWAY（部分进程可能限制此标志）
+        if (!CreateProcessW(dllPath, nullptr, nullptr, nullptr, FALSE,
+            flags, nullptr, nullptr, &si, &pi))
+        {
+            _LogError(L"Failed to start service: error=%d", GetLastError());
+            return FALSE;
+        }
     }
 
     CloseHandle(pi.hProcess);

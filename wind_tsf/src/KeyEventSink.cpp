@@ -760,6 +760,13 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::Letter,
                             isChineseMode, hasComposition, _hasCandidates, hasInputSession, TRUE, L"ipc_failed_fallback_insert");
         }
+        else
+        {
+            // 非字母按键（符号、标点等）：放行给应用程序处理
+            *pfEaten = FALSE;
+            _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::None,
+                            isChineseMode, hasComposition, _hasCandidates, hasInputSession, FALSE, L"ipc_failed_passthrough");
+        }
         return S_OK;
     }
 
