@@ -78,3 +78,91 @@ func TestDAT_Build_SingleKey(t *testing.T) {
 		t.Error("extended key 'helloo' should NOT be found")
 	}
 }
+
+func TestDAT_PrefixCollect(t *testing.T) {
+	b := NewDATBuilder()
+	keys := []string{"sa", "sai", "san", "sang", "she", "shi", "shou", "si", "song", "su"}
+	for i, k := range keys {
+		b.Add(k, uint32(i))
+	}
+	dat, err := b.Build()
+	if err != nil {
+		t.Fatalf("Build error: %v", err)
+	}
+
+	// PrefixCollect("s", 0) 应返回全部 10 个
+	results := dat.PrefixCollect("s", 0)
+	if len(results) != 10 {
+		t.Errorf("PrefixCollect(\"s\", 0): want 10, got %d", len(results))
+	}
+
+	// PrefixCollect("sh", 0) 应返回 3 个 (she, shi, shou)
+	results = dat.PrefixCollect("sh", 0)
+	if len(results) != 3 {
+		t.Errorf("PrefixCollect(\"sh\", 0): want 3, got %d", len(results))
+	}
+
+	// PrefixCollect("s", 5) 应返回 5 个
+	results = dat.PrefixCollect("s", 5)
+	if len(results) != 5 {
+		t.Errorf("PrefixCollect(\"s\", 5): want 5, got %d", len(results))
+	}
+
+	// PrefixCollect("x", 0) 应返回 0 个
+	results = dat.PrefixCollect("x", 0)
+	if len(results) != 0 {
+		t.Errorf("PrefixCollect(\"x\", 0): want 0, got %d", len(results))
+	}
+}
+
+func TestDATCursor_Incremental(t *testing.T) {
+	b := NewDATBuilder()
+	keys := []string{"sa", "sai", "san", "sang", "she", "shi", "shou", "si", "song", "su"}
+	for i, k := range keys {
+		b.Add(k, uint32(i))
+	}
+	dat, err := b.Build()
+	if err != nil {
+		t.Fatalf("Build error: %v", err)
+	}
+
+	cursor := dat.PrefixCursor("s")
+	defer cursor.Close()
+
+	var all []uint32
+
+	r1 := cursor.Next(3)
+	if len(r1) != 3 {
+		t.Errorf("Next(3): want 3, got %d", len(r1))
+	}
+	all = append(all, r1...)
+
+	r2 := cursor.Next(4)
+	if len(r2) != 4 {
+		t.Errorf("Next(4): want 4, got %d", len(r2))
+	}
+	all = append(all, r2...)
+
+	r3 := cursor.Next(100)
+	if len(r3) != 3 {
+		t.Errorf("Next(100): want 3 (remaining), got %d", len(r3))
+	}
+	all = append(all, r3...)
+
+	if cursor.HasMore() {
+		t.Error("HasMore() should be false after exhausting cursor")
+	}
+
+	if len(all) != 10 {
+		t.Errorf("total collected: want 10, got %d", len(all))
+	}
+
+	// 检查无重复
+	seen := make(map[uint32]bool)
+	for _, idx := range all {
+		if seen[idx] {
+			t.Errorf("duplicate dataIndex %d", idx)
+		}
+		seen[idx] = true
+	}
+}

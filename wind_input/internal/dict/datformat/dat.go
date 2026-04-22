@@ -106,7 +106,6 @@ func (b *DATBuilder) Build() (*DAT, error) {
 		if len(codes) == 0 {
 			return 1
 		}
-		minCode := codes[0]
 		// 从 1 开始搜索，避免 base=0 导致根节点冲突
 		for b := int32(1); ; b++ {
 			conflict := false
@@ -119,7 +118,6 @@ func (b *DATBuilder) Build() (*DAT, error) {
 				}
 			}
 			if !conflict {
-				_ = minCode
 				return b
 			}
 		}
@@ -190,4 +188,138 @@ func (b *DATBuilder) Build() (*DAT, error) {
 		Check: check[:size],
 		Size:  size,
 	}, nil
+}
+
+// walkPrefix 从根沿 prefix 路径走到目标节点，返回状态索引
+func (d *DAT) walkPrefix(prefix string) (state int, found bool) {
+	if d.Size == 0 {
+		return 0, false
+	}
+	s := int32(0)
+	for i := 0; i < len(prefix); i++ {
+		c := int32(prefix[i])
+		t := d.Base[s] + c
+		if t < 0 || int(t) >= d.Size || d.Check[t] != s {
+			return 0, false
+		}
+		s = t
+	}
+	return int(s), true
+}
+
+// collectLeaves DFS 收集叶节点的 dataIndex
+func (d *DAT) collectLeaves(state int, results *[]uint32, limit int) {
+	if limit > 0 && len(*results) >= limit {
+		return
+	}
+	s := int32(state)
+	// 检查终止符（c=0）
+	t := d.Base[s] + 0
+	if t >= 0 && int(t) < d.Size && d.Check[t] == s && d.Base[t] < 0 {
+		*results = append(*results, uint32(-d.Base[t]-1))
+		if limit > 0 && len(*results) >= limit {
+			return
+		}
+	}
+	// 遍历子字符 1-255
+	for c := int32(1); c <= 255; c++ {
+		t := d.Base[s] + c
+		if t < 0 || int(t) >= d.Size || d.Check[t] != s {
+			continue
+		}
+		d.collectLeaves(int(t), results, limit)
+		if limit > 0 && len(*results) >= limit {
+			return
+		}
+	}
+}
+
+// PrefixCollect 收集前缀下所有叶节点的 dataIndex，limit=0 不限制
+func (d *DAT) PrefixCollect(prefix string, limit int) []uint32 {
+	state, found := d.walkPrefix(prefix)
+	if !found {
+		return nil
+	}
+	var results []uint32
+	d.collectLeaves(state, &results, limit)
+	return results
+}
+
+// datStackFrame 游标栈帧
+type datStackFrame struct {
+	state int // 当前节点状态
+	nextC int // 下一个要遍历的字符 (0=终止标记, 1-255)
+}
+
+// DATCursor 前缀遍历游标，支持暂停/恢复
+type DATCursor struct {
+	dat       *DAT
+	stack     []datStackFrame
+	exhausted bool
+}
+
+// PrefixCursor 创建前缀遍历游标
+func (d *DAT) PrefixCursor(prefix string) *DATCursor {
+	state, found := d.walkPrefix(prefix)
+	if !found {
+		return &DATCursor{dat: d, exhausted: true}
+	}
+	return &DATCursor{
+		dat:   d,
+		stack: []datStackFrame{{state: state, nextC: 0}},
+	}
+}
+
+// Next 取下一批 n 个叶节点 dataIndex
+func (c *DATCursor) Next(n int) []uint32 {
+	if c.exhausted {
+		return nil
+	}
+	var results []uint32
+	for len(c.stack) > 0 && len(results) < n {
+		top := &c.stack[len(c.stack)-1]
+		s := int32(top.state)
+		advanced := false
+		for top.nextC <= 255 {
+			ch := int32(top.nextC)
+			top.nextC++
+			t := c.dat.Base[s] + ch
+			if t < 0 || int(t) >= c.dat.Size || c.dat.Check[t] != s {
+				continue
+			}
+			if ch == 0 {
+				// 终止符叶节点
+				if c.dat.Base[t] < 0 {
+					results = append(results, uint32(-c.dat.Base[t]-1))
+					if len(results) >= n {
+						return results
+					}
+				}
+			} else {
+				// 内部子节点：压栈继续深入
+				c.stack = append(c.stack, datStackFrame{state: int(t), nextC: 0})
+				advanced = true
+				break
+			}
+		}
+		if !advanced && top.nextC > 255 {
+			// 当前节点所有子字符遍历完，弹栈
+			c.stack = c.stack[:len(c.stack)-1]
+		}
+	}
+	if len(c.stack) == 0 {
+		c.exhausted = true
+	}
+	return results
+}
+
+// HasMore 是否还有更多
+func (c *DATCursor) HasMore() bool {
+	return !c.exhausted
+}
+
+// Close 释放资源
+func (c *DATCursor) Close() {
+	c.stack = nil
+	c.exhausted = true
 }
