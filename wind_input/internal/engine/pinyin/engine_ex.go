@@ -134,7 +134,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
-	// 使用连续完成音节生成候选的编码（安全范围，不跨越 partial 间隔）
+	// 使用连续完成音节���成候选的编码（安全范围，不跨越 partial 间隔）
 	completedCode := strings.Join(contiguousSyllables, "")
 
 	// ── 步骤 0b：动态规划造句（Poet） ──
@@ -409,6 +409,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 				candidatesMap[c.Text] = &c
 			}
 		}
+
 		// 按完整音节前缀查找单字：仅在纯 partial 输入时运行（如 "g" 或 "s"）。
 		// 当前面有连续完成音节时（如 "rug" = ru+g），单字展开的 ConsumedLength
 		// 只能设为 len(input)（从头消耗），会吞掉前面不属于该单字的音节。
