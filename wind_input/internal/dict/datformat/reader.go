@@ -173,7 +173,13 @@ func (r *WdatReader) Lookup(code string) []candidate.Candidate {
 // LookupPrefix 前缀查找，收集所有匹配前缀的候选词，按权重排序后截断到 limit
 func (r *WdatReader) LookupPrefix(prefix string, limit int) []candidate.Candidate {
 	dat := r.mainDAT()
-	leafIndices := dat.PrefixCollect(prefix, 0)
+	// 传递 limit 给 PrefixCollect 避免遍历整棵子树。
+	// 每个叶节点可能有多条候选，用 limit*2 确保截断后仍有足够候选。
+	leafLimit := 0
+	if limit > 0 {
+		leafLimit = limit * 2
+	}
+	leafIndices := dat.PrefixCollect(prefix, leafLimit)
 	if len(leafIndices) == 0 {
 		return nil
 	}
