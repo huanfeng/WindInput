@@ -12,6 +12,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict/binformat"
+	"github.com/huanfeng/wind_input/internal/dict/datformat"
 )
 
 // PinyinDict 拼音专用词库（基于 Trie 索引或 mmap 二进制文件）
@@ -24,6 +25,9 @@ type PinyinDict struct {
 
 	// 二进制模式（mmap）
 	binReader *binformat.DictReader
+
+	// DAT 模式（mmap）
+	datReader *datformat.WdatReader
 }
 
 // NewPinyinDict 创建拼音词库
@@ -88,8 +92,30 @@ func (d *PinyinDict) IsBinaryMode() bool {
 	return d.binReader != nil
 }
 
+// LoadDAT 从预编译的 .wdat 文件加载词库（DAT mmap 模式）
+func (d *PinyinDict) LoadDAT(wdatPath string) error {
+	reader, err := datformat.OpenWdat(wdatPath)
+	if err != nil {
+		return fmt.Errorf("打开 wdat 词库失败: %w", err)
+	}
+	d.datReader = reader
+	d.entryCount = reader.KeyCount()
+	d.trie = nil
+	d.abbrevTrie = nil
+	d.binReader = nil
+	return nil
+}
+
+// IsDATMode 检查是否为 DAT 模式
+func (d *PinyinDict) IsDATMode() bool {
+	return d.datReader != nil
+}
+
 // Close 关闭词库（释放 mmap 资源）
 func (d *PinyinDict) Close() error {
+	if d.datReader != nil {
+		return d.datReader.Close()
+	}
 	if d.binReader != nil {
 		return d.binReader.Close()
 	}
@@ -171,6 +197,9 @@ func (d *PinyinDict) loadRimeFile(path string) (int, error) {
 
 // Lookup 查找拼音对应的候选词
 func (d *PinyinDict) Lookup(pinyin string) []candidate.Candidate {
+	if d.datReader != nil {
+		return d.datReader.Lookup(pinyin)
+	}
 	if d.binReader != nil {
 		return d.binReader.Lookup(pinyin)
 	}
@@ -185,6 +214,9 @@ func (d *PinyinDict) LookupPhrase(syllables []string) []candidate.Candidate {
 	if len(syllables) == 0 {
 		return nil
 	}
+	if d.datReader != nil {
+		return d.datReader.Lookup(strings.ToLower(strings.Join(syllables, "")))
+	}
 	if d.binReader != nil {
 		return d.binReader.LookupPhrase(syllables)
 	}
@@ -197,6 +229,9 @@ func (d *PinyinDict) LookupPhrase(syllables []string) []candidate.Candidate {
 
 // LookupPrefix 前缀查找，返回所有以 prefix 开头的候选词
 func (d *PinyinDict) LookupPrefix(prefix string, limit int) []candidate.Candidate {
+	if d.datReader != nil {
+		return d.datReader.LookupPrefix(prefix, limit)
+	}
 	if d.binReader != nil {
 		return d.binReader.LookupPrefix(prefix, limit)
 	}
@@ -216,6 +251,9 @@ func (d *PinyinDict) LookupPrefix(prefix string, limit int) []candidate.Candidat
 
 // HasPrefix 检查是否有以 prefix 开头的词条
 func (d *PinyinDict) HasPrefix(prefix string) bool {
+	if d.datReader != nil {
+		return d.datReader.HasPrefix(prefix)
+	}
 	if d.binReader != nil {
 		return d.binReader.HasPrefix(prefix)
 	}
@@ -295,6 +333,9 @@ func patchPinyinIsCommon(candidates []candidate.Candidate) {
 
 // LookupAbbrev 简拼查找，返回匹配声母缩写的词条
 func (d *PinyinDict) LookupAbbrev(code string, limit int) []candidate.Candidate {
+	if d.datReader != nil {
+		return d.datReader.LookupAbbrev(code, limit)
+	}
 	if d.binReader != nil {
 		return d.binReader.LookupAbbrev(code, limit)
 	}

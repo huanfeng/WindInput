@@ -16,6 +16,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/dict/binformat"
+	"github.com/huanfeng/wind_input/internal/dict/datformat"
 )
 
 // CodeTableMeta 存储 CodeTable 的 Header 信息（sidecar 文件）
@@ -592,6 +593,93 @@ func atomicWriteWdb(wdbPath string, writeFn func(w io.Writer) error) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("原子替换失败: %w", err)
 	}
+	return nil
+}
+
+// ConvertPinyinToWdat 将 Rime 拼音词库转换为 wdat (DAT) 格式
+func ConvertPinyinToWdat(mainDictPath, wdatPath string, logger *slog.Logger, normalizer ...*dict.WeightNormalizer) error {
+	logger.Info("转换拼音词库(DAT)", "src", mainDictPath, "dst", wdatPath)
+
+	dictDir := filepath.Dir(mainDictPath)
+	codeEntries := make(map[string][]dictEntry)
+	abbrevEntries := make(map[string][]dictEntry)
+	totalCount := 0
+
+	allFiles := discoverRimePinyinFiles(mainDictPath)
+	for _, name := range allFiles {
+		path := filepath.Join(dictDir, name)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			continue
+		}
+		count, err := loadRimeFile(path, codeEntries, abbrevEntries, logger)
+		if err != nil {
+			logger.Warn("加载词库失败", "name", name, "error", err)
+			continue
+		}
+		logger.Info("加载词库", "name", name, "count", count)
+		totalCount += count
+	}
+
+	if totalCount == 0 {
+		return fmt.Errorf("未加载到任何拼音词条")
+	}
+
+	var norm *dict.WeightNormalizer
+	if len(normalizer) > 0 {
+		norm = normalizer[0]
+	}
+
+	writer := datformat.NewWdatWriter()
+
+	for code, entries := range codeEntries {
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].weight != entries[j].weight {
+				return entries[i].weight > entries[j].weight
+			}
+			return entries[i].naturalOrder < entries[j].naturalOrder
+		})
+		wdatEntries := make([]datformat.WdatEntry, len(entries))
+		for i, e := range entries {
+			w := e.weight
+			if norm != nil {
+				w = norm.Normalize(w)
+			}
+			wdatEntries[i] = datformat.WdatEntry{
+				Text:   e.text,
+				Weight: int32(w),
+			}
+		}
+		writer.AddCode(code, wdatEntries)
+	}
+
+	for abbrev, entries := range abbrevEntries {
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].weight != entries[j].weight {
+				return entries[i].weight > entries[j].weight
+			}
+			return entries[i].naturalOrder < entries[j].naturalOrder
+		})
+		wdatEntries := make([]datformat.WdatEntry, len(entries))
+		for i, e := range entries {
+			w := e.weight
+			if norm != nil {
+				w = norm.Normalize(w)
+			}
+			wdatEntries[i] = datformat.WdatEntry{
+				Text:   e.text,
+				Weight: int32(w),
+			}
+		}
+		writer.AddAbbrev(abbrev, wdatEntries)
+	}
+
+	if err := atomicWriteWdb(wdatPath, func(w io.Writer) error {
+		return writer.Write(w)
+	}); err != nil {
+		return err
+	}
+
+	logger.Info("拼音词库(DAT)转换完成", "codes", len(codeEntries), "abbrevs", len(abbrevEntries))
 	return nil
 }
 

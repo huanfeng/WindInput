@@ -32,6 +32,11 @@ func CachePath(name string) string {
 	return filepath.Join(GetCacheDir(), name+".wdb")
 }
 
+// WdatCachePath 返回 wdat 缓存文件的完整路径
+func WdatCachePath(name string) string {
+	return filepath.Join(GetCacheDir(), name+".wdat")
+}
+
 // NeedsRegenerate 判断是否需要重新生成 wdb 缓存
 // 当 wdb 不存在或任一源文件 mtime > wdb mtime 时返回 true
 func NeedsRegenerate(srcPaths []string, wdbPath string) bool {
