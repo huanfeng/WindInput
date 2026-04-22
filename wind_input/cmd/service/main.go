@@ -295,6 +295,10 @@ func main() {
 		logger.Warn("Failed to get config dir, using exe dir", "error", err)
 		dataDir = exeDir
 	}
+	// 确保用户数据目录存在（首次安装时该目录尚未创建，bbolt 等组件需要写入）
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		logger.Error("Failed to create user data dir", "path", dataDir, "error", err)
+	}
 	schemaMgr := schema.NewSchemaManager(dataRoot, dataDir, logger)
 	if err := schemaMgr.LoadSchemas(); err != nil {
 		logger.Error("Failed to load schemas", "error", err)
@@ -314,7 +318,7 @@ func main() {
 	// 启用 bbolt Store 后端（用户词库、词频、Shadow 统一存储）
 	dbPath := filepath.Join(dataDir, "user_data.db")
 	if err := dictManager.OpenStore(dbPath); err != nil {
-		logger.Error("Failed to open store, falling back to file backend", "error", err)
+		logger.Error("Failed to open bbolt store, user data features will be unavailable", "path", dbPath, "error", err)
 	}
 
 	if err := dictManager.Initialize(); err != nil {
