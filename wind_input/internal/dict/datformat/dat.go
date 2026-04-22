@@ -13,9 +13,20 @@ var byteOrder = binary.LittleEndian
 // base[t] < 0 时，-base[t]-1 为叶节点关联的数据索引
 // 字符串结束用 code=0 表示
 type DAT struct {
-	Base  []int32
-	Check []int32
-	Size  int
+	Base    []int32
+	Check   []int32
+	Size    int
+	CharMap [256]int32 // byte → compact code (-1 = unmapped)
+	MaxCode int32      // 最大 compact code 值
+}
+
+// IdentityCharMap 返回恒等映射（用于 v1 兼容）
+func IdentityCharMap() [256]int32 {
+	var m [256]int32
+	for i := range m {
+		m[i] = int32(i)
+	}
+	return m
 }
 
 // ExactMatch 精确匹配 key，返回对应的数据索引和是否找到
@@ -25,7 +36,10 @@ func (d *DAT) ExactMatch(key string) (leafIndex uint32, found bool) {
 	}
 	s := int32(0)
 	for i := 0; i < len(key); i++ {
-		c := int32(key[i])
+		c := d.CharMap[key[i]]
+		if c < 0 {
+			return 0, false
+		}
 		t := d.Base[s] + c
 		if t < 0 || int(t) >= d.Size || d.Check[t] != s {
 			return 0, false
@@ -54,6 +68,7 @@ type trieNode struct {
 // DATBuilder 构建 Double-Array Trie
 type DATBuilder struct {
 	root *trieNode
+	seen [256]bool
 }
 
 // NewDATBuilder 创建新的 Builder
@@ -68,6 +83,7 @@ func (b *DATBuilder) Add(key string, dataIndex uint32) {
 	node := b.root
 	for i := 0; i < len(key); i++ {
 		c := key[i]
+		b.seen[c] = true
 		child, ok := node.children[c]
 		if !ok {
 			child = &trieNode{children: make(map[byte]*trieNode)}
@@ -79,8 +95,28 @@ func (b *DATBuilder) Add(key string, dataIndex uint32) {
 	node.dataIndex = dataIndex
 }
 
+// codePair 紧凑码与原始字节的对应
+type codePair struct {
+	compact int32
+	orig    byte
+}
+
 // Build 将内部 trie 转换为 Double-Array 格式
 func (b *DATBuilder) Build() (*DAT, error) {
+	// 构建 charMap：0 保留给终止符，seen 的字节按序分配 1,2,...,N
+	var charMap [256]int32
+	for i := range charMap {
+		charMap[i] = -1
+	}
+	charMap[0] = 0 // 终止符
+	var maxCode int32
+	for i := 1; i < 256; i++ {
+		if b.seen[i] {
+			maxCode++
+			charMap[i] = maxCode
+		}
+	}
+
 	// 初始容量
 	capacity := 256
 	base := make([]int32, capacity)
@@ -106,8 +142,6 @@ func (b *DATBuilder) Build() (*DAT, error) {
 	}
 
 	// findBase 为给定的子字符集（codes）找到一个合法的 base 值
-	// 要求 base+c 位置的 check 均为 -1（空闲）
-	// searchStart 跟踪第一个已知��闲位置，不跳过可复用的空隙
 	searchStart := int32(1)
 	findBase := func(codes []int32) int32 {
 		if len(codes) == 0 {
@@ -133,7 +167,7 @@ func (b *DATBuilder) Build() (*DAT, error) {
 		}
 	}
 
-	// advanceSearchStart 在子节���分配后推进搜索起点，跳过已占用位置
+	// advanceSearchStart 在子节点分配后推进搜索起点
 	advanceSearchStart := func() {
 		for int(searchStart) < len(check) && check[searchStart] != -1 {
 			searchStart++
@@ -143,7 +177,7 @@ func (b *DATBuilder) Build() (*DAT, error) {
 	// 根节点占用位置 0，check[0] 设为 0 表示已占用（自指）
 	check[0] = 0
 
-	// BFS 构建 Double-Array
+	// BFS 构建 Double-Array（保持层序遍历，顺序填充利于 searchStart 推进）
 	type queueItem struct {
 		node  *trieNode
 		state int32
@@ -156,10 +190,10 @@ func (b *DATBuilder) Build() (*DAT, error) {
 		node := item.node
 		s := item.state
 
-		// 收集所有子字符 code（包含终止符 0 如果是叶节点）
-		codes := make([]int32, 0, len(node.children)+1)
+		// 收集子节点的 (compactCode, originalByte) 对
+		var pairs []codePair
 		if node.isEnd {
-			codes = append(codes, 0) // 终止符
+			pairs = append(pairs, codePair{compact: 0, orig: 0}) // 终止符
 		}
 		childBytes := make([]byte, 0, len(node.children))
 		for c := range node.children {
@@ -167,28 +201,35 @@ func (b *DATBuilder) Build() (*DAT, error) {
 		}
 		sort.Slice(childBytes, func(i, j int) bool { return childBytes[i] < childBytes[j] })
 		for _, c := range childBytes {
-			codes = append(codes, int32(c))
+			pairs = append(pairs, codePair{compact: charMap[c], orig: c})
 		}
 
-		if len(codes) == 0 {
+		if len(pairs) == 0 {
 			continue
 		}
+
+		// 提取 compact codes 用于 findBase
+		codes := make([]int32, len(pairs))
+		for i, p := range pairs {
+			codes[i] = p.compact
+		}
+		sort.Slice(codes, func(i, j int) bool { return codes[i] < codes[j] })
 
 		bv := findBase(codes)
 		base[s] = bv
 
 		// 分配各子节点
-		for _, c := range codes {
-			t := bv + c
+		for _, p := range pairs {
+			t := bv + p.compact
 			grow(int(t))
 			check[t] = s
 
-			if c == 0 {
+			if p.compact == 0 {
 				// 终止符叶节点：base 编码 dataIndex
 				base[t] = -int32(node.dataIndex) - 1
 			} else {
 				// 内部节点：入队
-				child := node.children[byte(c)]
+				child := node.children[p.orig]
 				queue = append(queue, queueItem{child, t})
 			}
 		}
@@ -202,9 +243,11 @@ func (b *DATBuilder) Build() (*DAT, error) {
 	}
 
 	return &DAT{
-		Base:  base[:size],
-		Check: check[:size],
-		Size:  size,
+		Base:    base[:size],
+		Check:   check[:size],
+		Size:    size,
+		CharMap: charMap,
+		MaxCode: maxCode,
 	}, nil
 }
 
@@ -215,7 +258,10 @@ func (d *DAT) walkPrefix(prefix string) (state int, found bool) {
 	}
 	s := int32(0)
 	for i := 0; i < len(prefix); i++ {
-		c := int32(prefix[i])
+		c := d.CharMap[prefix[i]]
+		if c < 0 {
+			return 0, false
+		}
 		t := d.Base[s] + c
 		if t < 0 || int(t) >= d.Size || d.Check[t] != s {
 			return 0, false
@@ -239,8 +285,8 @@ func (d *DAT) collectLeaves(state int, results *[]uint32, limit int) {
 			return
 		}
 	}
-	// 遍历子字符 1-255
-	for c := int32(1); c <= 255; c++ {
+	// 遍历子字符 1-MaxCode
+	for c := int32(1); c <= d.MaxCode; c++ {
 		t := d.Base[s] + c
 		if t < 0 || int(t) >= d.Size || d.Check[t] != s {
 			continue
@@ -298,7 +344,7 @@ func (c *DATCursor) Next(n int) []uint32 {
 		top := &c.stack[len(c.stack)-1]
 		s := int32(top.state)
 		advanced := false
-		for top.nextC <= 255 {
+		for top.nextC <= int(c.dat.MaxCode) {
 			ch := int32(top.nextC)
 			top.nextC++
 			t := c.dat.Base[s] + ch
@@ -320,7 +366,7 @@ func (c *DATCursor) Next(n int) []uint32 {
 				break
 			}
 		}
-		if !advanced && top.nextC > 255 {
+		if !advanced && top.nextC > int(c.dat.MaxCode) {
 			// 当前节点所有子字符遍历完，弹栈
 			c.stack = c.stack[:len(c.stack)-1]
 		}

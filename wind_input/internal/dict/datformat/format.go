@@ -6,7 +6,12 @@ import "fmt"
 var WdatMagic = [4]byte{'W', 'D', 'A', 'T'}
 
 // WdatVersion wdat 文件版本
-const WdatVersion uint32 = 1
+// v1: 原始格式，DAT 使用原始字节码
+// v2: DAT 使用紧凑字符映射，文件头后附加 CharMap 区段
+const WdatVersion uint32 = 2
+
+// WdatVersionV1 v1 版本号，用于兼容读取
+const WdatVersionV1 uint32 = 1
 
 // WdatFileHeader wdat 文件头 (48 bytes, little-endian)
 type WdatFileHeader struct {
@@ -21,7 +26,7 @@ type WdatFileHeader struct {
 	AbbrevOff  uint32  // AbbrevSection 偏移 (0=无)
 	MetaOff    uint32  // Meta 偏移 (0=无)
 	EntryCount uint32  // EntryRecords 总记录数
-	Reserved   uint32
+	CharMapOff uint32  // v2: CharMap 区段偏移 (0=无，v1 兼容)
 }
 
 // WdatFileHeaderSize WdatFileHeader 的字节大小
@@ -47,6 +52,15 @@ type EntryRecord struct {
 // EntryRecordSize EntryRecord 的字节大小
 const EntryRecordSize = 10
 
+// CharMapSection 字符映射区段 (1028 bytes)
+type CharMapSection struct {
+	MaxCode int32      // 最大 compact code 值
+	CharMap [256]int32 // byte → compact code (-1 = unmapped)
+}
+
+// CharMapSectionSize CharMapSection 的字节大小
+const CharMapSectionSize = 4 + 256*4 // 1028 bytes
+
 // AbbrevSection 简拼区段头 (16 bytes)
 type AbbrevSection struct {
 	DATSize   uint32
@@ -63,7 +77,7 @@ func (h *WdatFileHeader) Validate() error {
 	if h.Magic != WdatMagic {
 		return fmt.Errorf("invalid magic: %q", h.Magic)
 	}
-	if h.Version != WdatVersion {
+	if h.Version != WdatVersion && h.Version != WdatVersionV1 {
 		return fmt.Errorf("unsupported version: %d", h.Version)
 	}
 	if h.DATOff < WdatFileHeaderSize {

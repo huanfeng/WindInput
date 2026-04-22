@@ -170,6 +170,52 @@ func TestDATCursor_Incremental(t *testing.T) {
 	}
 }
 
+func TestDAT_Build_Compactness(t *testing.T) {
+	b := NewDATBuilder()
+	keys := []string{
+		"a", "ai", "an", "ang", "ao",
+		"ba", "bai", "ban", "bang", "bao", "bei", "ben", "beng", "bi", "bian", "biao", "bie", "bin", "bing", "bo", "bu",
+		"ca", "cai", "can", "cang", "cao", "ce", "cen", "ceng", "ci", "cong", "cou", "cu", "cuan", "cui", "cun", "cuo",
+		"da", "dai", "dan", "dang", "dao", "de", "dei", "den", "deng", "di", "dia", "dian", "diao", "die", "ding", "diu", "dong", "dou", "du", "duan", "dui", "dun", "duo",
+		"shi", "shu", "shui", "shuo", "shun", "sha", "shai", "shan", "shang", "shao", "she", "shei", "shen", "sheng", "shou",
+		"zhi", "zhu", "zhui", "zhuo", "zhun", "zha", "zhai", "zhan", "zhang", "zhao", "zhe", "zhei", "zhen", "zheng", "zhou",
+	}
+	for i, k := range keys {
+		b.Add(k, uint32(i))
+	}
+	dat, err := b.Build()
+	if err != nil {
+		t.Fatalf("Build error: %v", err)
+	}
+
+	for i, k := range keys {
+		idx, found := dat.ExactMatch(k)
+		if !found {
+			t.Errorf("key %q not found", k)
+		} else if idx != uint32(i) {
+			t.Errorf("key %q: want %d, got %d", k, i, idx)
+		}
+	}
+
+	occupied := 0
+	for i := 0; i < dat.Size; i++ {
+		if dat.Check[i] != -1 {
+			occupied++
+		}
+	}
+	hollowness := 1.0 - float64(occupied)/float64(dat.Size)
+	t.Logf("DAT size=%d, occupied=%d, hollowness=%.1f%%, MaxCode=%d",
+		dat.Size, occupied, hollowness*100, dat.MaxCode)
+
+	if hollowness > 0.5 {
+		t.Errorf("hollowness %.1f%% too high, expected <50%%", hollowness*100)
+	}
+
+	if dat.MaxCode > 26 {
+		t.Errorf("MaxCode=%d, expected <=26", dat.MaxCode)
+	}
+}
+
 func TestWdatWriter_Write(t *testing.T) {
 	w := NewWdatWriter()
 	w.AddCode("ni", []WdatEntry{{Text: "你", Weight: 100}, {Text: "尼", Weight: 50}})

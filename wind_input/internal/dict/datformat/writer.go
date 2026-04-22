@@ -198,11 +198,17 @@ func (w *WdatWriter) Write(out io.Writer) error {
 		off += uint32(len(abbrevLeaves)) * LeafRecordSize
 		// Abbrev EntryRecords
 		off += uint32(len(abbrevEntries)) * EntryRecordSize
+		// Abbrev CharMap
+		off += CharMapSectionSize
 
 		// 更新 abbrevLeaves 中的 EntryOff 已经是相对于本区块起始的字节偏移，保持不变
 		_ = abbrevDATOff
 		_ = abbrevLeafOff
 	}
+
+	// CharMap 区段（主 DAT）
+	charMapOff := off
+	off += CharMapSectionSize
 
 	// Meta
 	metaOff := uint32(0)
@@ -223,7 +229,7 @@ func (w *WdatWriter) Write(out io.Writer) error {
 		AbbrevOff:  abbrevOff,
 		MetaOff:    metaOff,
 		EntryCount: uint32(len(mainEntries)),
-		Reserved:   0,
+		CharMapOff: charMapOff,
 	}
 	if err := binary.Write(out, byteOrder, hdr); err != nil {
 		return err
@@ -304,9 +310,27 @@ func (w *WdatWriter) Write(out io.Writer) error {
 				return err
 			}
 		}
+
+		// Abbrev CharMap
+		abbrevCharMapSection := CharMapSection{
+			MaxCode: abbrevDAT.MaxCode,
+			CharMap: abbrevDAT.CharMap,
+		}
+		if err := binary.Write(out, byteOrder, abbrevCharMapSection); err != nil {
+			return err
+		}
 	}
 
-	// 13. 写入 Meta
+	// 13. 写入 CharMap 区段
+	charMapSection := CharMapSection{
+		MaxCode: mainDAT.MaxCode,
+		CharMap: mainDAT.CharMap,
+	}
+	if err := binary.Write(out, byteOrder, charMapSection); err != nil {
+		return err
+	}
+
+	// 14. 写入 Meta
 	if len(w.meta) > 0 {
 		metaLen := uint32(len(w.meta))
 		if err := binary.Write(out, byteOrder, metaLen); err != nil {

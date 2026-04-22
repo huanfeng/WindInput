@@ -23,12 +23,18 @@ type WdatReader struct {
 	entryBase uint32 // EntryRecords 在文件中的偏移
 	strBase   uint32 // StringPool 在文件中的偏移
 
+	// 字符映射
+	charMap [256]int32
+	maxCode int32
+
 	// 简拼
 	hasAbbrev       bool
 	abbrevBase      []int32
 	abbrevCheck     []int32
 	abbrevLeafBase  uint32
 	abbrevEntryBase uint32
+	abbrevCharMap   [256]int32
+	abbrevMaxCode   int32
 }
 
 // OpenWdat 打开 wdat 文件并映射到内存
@@ -61,7 +67,7 @@ func OpenWdat(path string) (*WdatReader, error) {
 	r.header.AbbrevOff = byteOrder.Uint32(data[32:36])
 	r.header.MetaOff = byteOrder.Uint32(data[36:40])
 	r.header.EntryCount = byteOrder.Uint32(data[40:44])
-	r.header.Reserved = byteOrder.Uint32(data[44:48])
+	r.header.CharMapOff = byteOrder.Uint32(data[44:48])
 
 	if err := r.header.Validate(); err != nil {
 		mf.Close()
@@ -98,6 +104,39 @@ func OpenWdat(path string) (*WdatReader, error) {
 		r.abbrevCheck = unsafe.Slice((*int32)(unsafe.Pointer(&data[abbDATOff+abbDATSize*4])), abbDATSize)
 		r.abbrevLeafBase = abbSec.LeafOff
 		r.abbrevEntryBase = abbSec.LeafOff + uint32(abbSec.LeafCount)*LeafRecordSize
+	} else {
+		r.abbrevCharMap = IdentityCharMap()
+		r.abbrevMaxCode = 255
+	}
+
+	// 读取简拼 CharMap（位于主 CharMap 之前）
+	if r.hasAbbrev && r.header.Version >= WdatVersion && r.header.CharMapOff > 0 {
+		abbCmOff := int(r.header.CharMapOff) - CharMapSectionSize
+		if abbCmOff >= 0 && abbCmOff+CharMapSectionSize <= len(data) {
+			r.abbrevMaxCode = int32(byteOrder.Uint32(data[abbCmOff : abbCmOff+4]))
+			for i := 0; i < 256; i++ {
+				off := abbCmOff + 4 + i*4
+				r.abbrevCharMap[i] = int32(byteOrder.Uint32(data[off : off+4]))
+			}
+		}
+	}
+
+	// 读取主 CharMap
+	if r.header.Version >= WdatVersion && r.header.CharMapOff > 0 {
+		cmOff := int(r.header.CharMapOff)
+		if cmOff+CharMapSectionSize > len(data) {
+			mf.Close()
+			return nil, fmt.Errorf("CharMap 区段越界")
+		}
+		r.maxCode = int32(byteOrder.Uint32(data[cmOff : cmOff+4]))
+		for i := 0; i < 256; i++ {
+			off := cmOff + 4 + i*4
+			r.charMap[i] = int32(byteOrder.Uint32(data[off : off+4]))
+		}
+	} else {
+		// v1 兼容：使用恒等映射
+		r.charMap = IdentityCharMap()
+		r.maxCode = 255
 	}
 
 	return r, nil
@@ -118,12 +157,12 @@ func (r *WdatReader) KeyCount() int {
 
 // mainDAT 构建临时主 DAT 引用
 func (r *WdatReader) mainDAT() *DAT {
-	return &DAT{Base: r.datBase, Check: r.datCheck, Size: int(r.header.DATSize)}
+	return &DAT{Base: r.datBase, Check: r.datCheck, Size: int(r.header.DATSize), CharMap: r.charMap, MaxCode: r.maxCode}
 }
 
 // abbrevDAT 构建临时简拼 DAT 引用
 func (r *WdatReader) abbrevDAT() *DAT {
-	return &DAT{Base: r.abbrevBase, Check: r.abbrevCheck, Size: len(r.abbrevBase)}
+	return &DAT{Base: r.abbrevBase, Check: r.abbrevCheck, Size: len(r.abbrevBase), CharMap: r.abbrevCharMap, MaxCode: r.abbrevMaxCode}
 }
 
 // readLeaf 从指定区域读取 LeafRecord
