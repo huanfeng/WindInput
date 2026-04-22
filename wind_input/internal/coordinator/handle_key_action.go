@@ -772,6 +772,12 @@ func (c *Coordinator) handlePageDown() *bridge.KeyEventResult {
 	if c.currentPage < c.totalPages {
 		c.currentPage++
 		c.selectedIndex = 0
+
+		// 分级加载：翻到最后 2 页时预加载更多
+		if c.hasMoreCandidates && c.currentPage >= c.totalPages-1 {
+			c.expandCandidates()
+		}
+
 		c.logger.Debug("Page down", "currentPage", c.currentPage, "totalPages", c.totalPages)
 		c.showUI()
 	}

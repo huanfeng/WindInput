@@ -104,6 +104,9 @@ func (c *Coordinator) updateCandidates() {
 func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 	if len(c.inputBuffer) == 0 {
 		c.candidates = nil
+		c.candidateLimit = 0
+		c.candidateInput = ""
+		c.hasMoreCandidates = false
 		return nil
 	}
 
@@ -115,8 +118,20 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 	// 将上一次上屏的内容作为首选候选插入到候选列表顶部。
 	zKeyRepeat := c.inputBuffer == "z" && c.engineMgr.IsZKeyRepeatEnabled()
 
+	// 分级加载：拼音/混输引擎首次加载 300 条，其他引擎不限制
+	initialLimit := 0
+	if c.engineMgr.GetCurrentType() == engine.EngineTypePinyin ||
+		c.engineMgr.GetCurrentType() == engine.EngineTypeMixed {
+		initialLimit = 300
+	}
+	c.candidateLimit = initialLimit
+	c.candidateInput = c.inputBuffer
+
 	// 使用扩展转换获取更多信息
-	result := c.engineMgr.ConvertEx(c.inputBuffer, 0)
+	result := c.engineMgr.ConvertEx(c.inputBuffer, initialLimit)
+
+	// 分级加载：判断是否还有更多候选未加载
+	c.hasMoreCandidates = initialLimit > 0 && len(result.Candidates) >= initialLimit
 
 	// 更新预编辑显示状态
 	c.preeditDisplay = result.PreeditDisplay
@@ -288,6 +303,12 @@ func (c *Coordinator) showUI() {
 		c.lastValidY = caretY
 	}
 
+	// 分级加载：负值 totalPages 表示还有更多候选未加载
+	displayTotalPages := c.totalPages
+	if c.hasMoreCandidates {
+		displayTotalPages = -c.totalPages
+	}
+
 	c.uiManager.ShowCandidates(
 		displayCandidates,
 		c.compositionText(),
@@ -296,7 +317,7 @@ func (c *Coordinator) showUI() {
 		caretY,
 		caretHeight,
 		c.currentPage,
-		c.totalPages,
+		displayTotalPages,
 		len(c.candidates),
 		c.candidatesPerPage,
 		c.selectedIndex,
@@ -381,6 +402,63 @@ func (c *Coordinator) getStatusWidthLabel() string {
 // showModeIndicator 向后兼容，转发到 updateStatusIndicator
 func (c *Coordinator) showModeIndicator() {
 	c.updateStatusIndicator()
+}
+
+// expandCandidates 扩展候选列表（翻页到边界时调用）
+func (c *Coordinator) expandCandidates() {
+	if !c.hasMoreCandidates || c.candidateInput != c.inputBuffer {
+		return
+	}
+
+	// 每次扩展翻倍，上限 5000
+	newLimit := c.candidateLimit * 2
+	if newLimit > 5000 {
+		newLimit = 5000
+	}
+	if newLimit <= c.candidateLimit {
+		c.hasMoreCandidates = false
+		return
+	}
+
+	result := c.engineMgr.ConvertEx(c.inputBuffer, newLimit)
+	if result == nil || len(result.Candidates) <= len(c.candidates) {
+		c.hasMoreCandidates = false
+		return
+	}
+
+	c.candidateLimit = newLimit
+	c.hasMoreCandidates = len(result.Candidates) >= newLimit
+
+	// 重建 UI 候选列表
+	var dictMgr *dict.DictManager
+	if c.engineMgr != nil {
+		dictMgr = c.engineMgr.GetDictManager()
+	}
+
+	c.candidates = make([]ui.Candidate, len(result.Candidates))
+	for i, cand := range result.Candidates {
+		cand.Index = i + 1
+		if cand.IsCommand && cand.PhraseTemplate != "" {
+			if dictMgr != nil {
+				phraseLayer := dictMgr.GetPhraseLayer()
+				if phraseLayer != nil {
+					cand.HasShadow = phraseLayer.HasPhraseOverride(c.inputBuffer, cand.PhraseTemplate)
+				}
+			}
+		} else if dictMgr != nil && !cand.IsCommand {
+			cand.HasShadow = dictMgr.HasShadowRule(c.inputBuffer, cand.Text)
+		}
+		c.candidates[i] = cand
+	}
+
+	// 重新计算分页（保持当前页不变）
+	c.totalPages = (len(c.candidates) + c.candidatesPerPage - 1) / c.candidatesPerPage
+	if c.totalPages == 0 {
+		c.totalPages = 1
+	}
+
+	c.logger.Debug("Expanded candidates", "count", len(c.candidates),
+		"limit", newLimit, "hasMore", c.hasMoreCandidates)
 }
 
 func (c *Coordinator) hideUI() {

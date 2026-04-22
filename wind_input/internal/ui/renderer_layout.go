@@ -111,14 +111,26 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		}
 	}
 
+	// 处理分级加载：负值 totalPages 表示还有更多候选未加载
+	absTotalPagesV := totalPages
+	if absTotalPagesV < 0 {
+		absTotalPagesV = -absTotalPagesV
+	}
+
 	// 确保页码指示器能完整显示
-	showVerticalPager := totalPages > 1 || cfg.AlwaysShowPager
+	showVerticalPager := absTotalPagesV > 1 || cfg.AlwaysShowPager
 	if showVerticalPager && cfg.ShowPageNumber {
 		pageFontSize := 12.0 * scale
 		if isTextIndex {
 			pageFontSize = 14 * scale
 		}
-		pageText := fmt.Sprintf(" %d / %d ", page, totalPages)
+		hasMoreV := totalPages < 0
+		var pageText string
+		if hasMoreV {
+			pageText = fmt.Sprintf(" %d / %d+ ", page, absTotalPagesV)
+		} else {
+			pageText = fmt.Sprintf(" %d / %d ", page, absTotalPagesV)
+		}
 		pageW := td.MeasureString(pageText, pageFontSize)
 		arrowSize := 8.0 * scale
 		arrowPad := 8.0 * scale
@@ -150,8 +162,13 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	contentHeight := float64(candidateCount) * cfg.ItemHeight
 	pageInfoHeight := 0.0
 	if showVerticalPager {
-		if totalPages < 1 {
-			totalPages = 1
+		if absTotalPagesV < 1 {
+			absTotalPagesV = 1
+			if totalPages < 0 {
+				totalPages = -1
+			} else {
+				totalPages = 1
+			}
 		}
 		if page < 1 {
 			page = 1
@@ -222,7 +239,12 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	showVerticalPageNumber := cfg.ShowPageNumber
 	if showVerticalPager {
 		if showVerticalPageNumber {
-			pageText = fmt.Sprintf(" %d / %d ", page, totalPages)
+			hasMoreV2 := totalPages < 0
+			if hasMoreV2 {
+				pageText = fmt.Sprintf(" %d / %d+ ", page, absTotalPagesV)
+			} else {
+				pageText = fmt.Sprintf(" %d / %d ", page, absTotalPagesV)
+			}
 			pageW = td.MeasureString(pageText, pageFontSize)
 		}
 	}
@@ -342,7 +364,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		}
 
 		// Page down button
-		canPageDown := page < totalPages
+		canPageDown := page < absTotalPagesV
 		pageDownBtnRect := CandidateRect{X: startX + arrowW + pageW, Y: pageY, W: arrowW, H: 20 * scale}
 		if canPageDown && hoverPageBtn == "down" {
 			dc.SetColor(cfg.HoverBgColor)
@@ -594,6 +616,12 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	}
 	candidatesWidth += bgPadR // trailing padding for last item
 
+	// 处理分级加载：负值 totalPages 表示还有更多候选未加载
+	absTotalPagesH := totalPages
+	if absTotalPagesH < 0 {
+		absTotalPagesH = -absTotalPagesH
+	}
+
 	// Page info width
 	arrowSize := 8.0 * scale
 	arrowPad := 6.0 * scale
@@ -601,17 +629,27 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	pageInfoWidth := 0.0
 	var pageText string
 	var pageW float64
-	showPager := totalPages > 1 || cfg.AlwaysShowPager
+	showPager := absTotalPagesH > 1 || cfg.AlwaysShowPager
 	showPageNumber := cfg.ShowPageNumber
 	if showPager {
-		if totalPages < 1 {
-			totalPages = 1
+		if absTotalPagesH < 1 {
+			absTotalPagesH = 1
+			if totalPages < 0 {
+				totalPages = -1
+			} else {
+				totalPages = 1
+			}
 		}
 		if page < 1 {
 			page = 1
 		}
 		if showPageNumber {
-			pageText = fmt.Sprintf(" %d/%d ", page, totalPages)
+			hasMoreH := totalPages < 0
+			if hasMoreH {
+				pageText = fmt.Sprintf(" %d/%d+ ", page, absTotalPagesH)
+			} else {
+				pageText = fmt.Sprintf(" %d/%d ", page, absTotalPagesH)
+			}
 			pageW = td.MeasureString(pageText, pageFontSize)
 			pageInfoWidth = arrowW + pageW + arrowW + 8*scale
 		} else {
@@ -864,7 +902,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		}
 
 		// Page down button
-		canPageDown := page < totalPages
+		canPageDown := page < absTotalPagesH
 		pageDownBtnRect := CandidateRect{X: startX + arrowW + pageW, Y: candStartY, W: arrowW, H: candidateRowHeight}
 		if canPageDown && hoverPageBtn == "down" {
 			dc.SetColor(cfg.HoverBgColor)
