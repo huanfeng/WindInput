@@ -1,6 +1,7 @@
 package datformat
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -164,5 +165,24 @@ func TestDATCursor_Incremental(t *testing.T) {
 			t.Errorf("duplicate dataIndex %d", idx)
 		}
 		seen[idx] = true
+	}
+}
+
+func TestWdatWriter_Write(t *testing.T) {
+	w := NewWdatWriter()
+	w.AddCode("ni", []WdatEntry{{Text: "你", Weight: 100}, {Text: "尼", Weight: 50}})
+	w.AddCode("nihao", []WdatEntry{{Text: "你好", Weight: 200}})
+	w.AddCode("shi", []WdatEntry{{Text: "是", Weight: 300}})
+	w.AddAbbrev("nh", []WdatEntry{{Text: "你好", Weight: 200}})
+
+	var buf bytes.Buffer
+	if err := w.Write(&buf); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("output is empty")
+	}
+	if string(buf.Bytes()[:4]) != "WDAT" {
+		t.Errorf("magic = %q, want WDAT", string(buf.Bytes()[:4]))
 	}
 }
