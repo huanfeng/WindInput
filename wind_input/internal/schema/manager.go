@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/huanfeng/wind_input/pkg/config"
+	"gopkg.in/yaml.v3"
 )
 
 // SchemaManager 输入方案管理器
@@ -30,13 +33,36 @@ func NewSchemaManager(exeDir, dataDir string, logger *slog.Logger) *SchemaManage
 }
 
 // LoadSchemas 扫描并加载所有方案文件
+// 加载顺序：Layer1 内置方案 → Layer2 用户方案 → Layer3 schema_overrides.yaml
 func (sm *SchemaManager) LoadSchemas() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// Layer 1 + Layer 2: 内置方案 + 用户方案
 	schemas, err := DiscoverSchemas(sm.exeDir, sm.dataDir)
 	if err != nil {
 		return err
+	}
+
+	// Layer 3: 叠加 schema_overrides.yaml 覆盖配置
+	overrides, overrideErr := config.LoadSchemaOverrides()
+	if overrideErr != nil {
+		sm.logger.Warn("加载方案覆盖配置失败，跳过 Layer3", "error", overrideErr)
+	} else {
+		for schemaID, override := range overrides {
+			s, ok := schemas[schemaID]
+			if !ok {
+				continue
+			}
+			overrideData, marshalErr := yaml.Marshal(override)
+			if marshalErr != nil {
+				sm.logger.Warn("序列化方案覆盖配置失败", "schema", schemaID, "error", marshalErr)
+				continue
+			}
+			if err := yaml.Unmarshal(overrideData, s); err != nil {
+				sm.logger.Warn("应用方案覆盖配置失败", "schema", schemaID, "error", err)
+			}
+		}
 	}
 
 	sm.schemas = schemas
