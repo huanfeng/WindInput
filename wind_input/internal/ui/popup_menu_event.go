@@ -92,7 +92,7 @@ func (m *PopupMenu) handleMouseMove(lParam uintptr) {
 }
 
 // forwardMouseMoveToSubmenu forwards a mouse move event to the submenu if the screen
-// coordinates are inside it. Returns true if forwarded.
+// coordinates are inside the submenu tree (including deeper submenus). Returns true if forwarded.
 func (m *PopupMenu) forwardMouseMoveToSubmenu(screenX, screenY int) bool {
 	m.mu.Lock()
 	sub := m.submenu
@@ -102,16 +102,19 @@ func (m *PopupMenu) forwardMouseMoveToSubmenu(screenX, screenY int) bool {
 		return false
 	}
 
-	sub.mu.Lock()
-	sx, sy, sw, sh := sub.x, sub.y, sub.width, sub.height
-	subVisible := sub.visible
-	sub.mu.Unlock()
-
-	if !subVisible || screenX < sx || screenX >= sx+sw || screenY < sy || screenY >= sy+sh {
+	// Check the entire submenu tree, not just the direct submenu bounds.
+	// This is critical for 3+ level menus: when the mouse is over a deeper
+	// submenu, we still need to forward through the chain so each level
+	// can maintain its hover state and continue forwarding.
+	if !sub.isPointInMenuTree(screenX, screenY) {
 		return false
 	}
 
-	// Convert to client coordinates relative to submenu
+	// Convert to client coordinates relative to direct submenu
+	sub.mu.Lock()
+	sx, sy := sub.x, sub.y
+	sub.mu.Unlock()
+
 	clientX := screenX - sx
 	clientY := screenY - sy
 	newLParam := uintptr(uint16(clientX)) | (uintptr(uint16(clientY)) << 16)
@@ -120,7 +123,7 @@ func (m *PopupMenu) forwardMouseMoveToSubmenu(screenX, screenY int) bool {
 }
 
 // forwardClickToSubmenu forwards a click event to the submenu if the screen
-// coordinates are inside it. Returns true if forwarded.
+// coordinates are inside the submenu tree (including deeper submenus). Returns true if forwarded.
 func (m *PopupMenu) forwardClickToSubmenu(screenX, screenY int) bool {
 	m.mu.Lock()
 	sub := m.submenu
@@ -130,16 +133,16 @@ func (m *PopupMenu) forwardClickToSubmenu(screenX, screenY int) bool {
 		return false
 	}
 
-	sub.mu.Lock()
-	sx, sy, sw, sh := sub.x, sub.y, sub.width, sub.height
-	subVisible := sub.visible
-	sub.mu.Unlock()
-
-	if !subVisible || screenX < sx || screenX >= sx+sw || screenY < sy || screenY >= sy+sh {
+	// Check the entire submenu tree, not just the direct submenu bounds.
+	if !sub.isPointInMenuTree(screenX, screenY) {
 		return false
 	}
 
-	// Convert to client coordinates relative to submenu
+	// Convert to client coordinates relative to direct submenu
+	sub.mu.Lock()
+	sx, sy := sub.x, sub.y
+	sub.mu.Unlock()
+
 	clientX := screenX - sx
 	clientY := screenY - sy
 	newLParam := uintptr(uint16(clientX)) | (uintptr(uint16(clientY)) << 16)
@@ -318,7 +321,6 @@ func (m *PopupMenu) showSubmenu(index int) {
 	menuY := m.y
 	m.mu.Unlock()
 
-	subX := menuX + menuWidth - 2 // Slight overlap
 	subY := menuY + itemY
 
 	// Create submenu sharing parent's rendering resources
@@ -331,6 +333,33 @@ func (m *PopupMenu) showSubmenu(index int) {
 		return
 	}
 
+	// Pre-calculate submenu size so we can decide left vs right placement
+	sub.mu.Lock()
+	sub.items = children
+	sub.hasChecked = false
+	sub.hasChildren = false
+	for _, item := range children {
+		if item.Checked {
+			sub.hasChecked = true
+		}
+		if len(item.Children) > 0 {
+			sub.hasChildren = true
+		}
+	}
+	sub.ensureActiveTextDrawerLocked()
+	sub.mu.Unlock()
+	sub.calculateSize()
+
+	subWidth := sub.width
+
+	// Decide submenu X position: prefer right, flip to left if no room
+	_, _, workRight, _ := GetMonitorWorkAreaFromPoint(menuX+menuWidth, subY)
+	subX := menuX + menuWidth - 2 // Slight overlap (right side)
+	if subX+subWidth > workRight {
+		// Not enough space on the right - flip to left
+		subX = menuX - subWidth + 2
+	}
+
 	m.mu.Lock()
 	m.submenu = sub
 	m.submenuIndex = index
@@ -338,6 +367,17 @@ func (m *PopupMenu) showSubmenu(index int) {
 
 	// Show submenu - callback proxies to parent's callback
 	sub.Show(children, subX, subY, func(id int) {
+		// Update checked state in parent's children so re-opening
+		// the submenu (without closing the root menu) shows the
+		// newly selected item correctly.
+		m.mu.Lock()
+		if index >= 0 && index < len(m.items) {
+			for i := range m.items[index].Children {
+				m.items[index].Children[i].Checked = (m.items[index].Children[i].ID == id)
+			}
+		}
+		m.mu.Unlock()
+
 		// Propagate to root callback and hide root menu
 		if callback != nil {
 			callback(id)

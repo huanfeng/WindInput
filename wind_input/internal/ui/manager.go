@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/theme"
 	"golang.org/x/sys/windows"
 )
@@ -20,6 +21,7 @@ const (
 	UnifiedMenuThemeBase      = 200 // 主题ID: 200+i
 	UnifiedMenuThemeStyleBase = 250 // 主题风格ID: 250+i (0=system, 1=light, 2=dark)
 	UnifiedMenuFilterModeBase = 260 // 检索范围ID: 260+i (0=smart, 1=general, 2=gb18030)
+	UnifiedMenuTestBase       = 280 // 三级菜单测试ID: 280+i
 	UnifiedMenuReloadConfig   = 299
 	UnifiedMenuRestartService = 303
 	UnifiedMenuDictionary     = 300
@@ -123,6 +125,26 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 			MenuItem{ID: UnifiedMenuThemeStyleBase + 2, Text: "暗色", Checked: themeStyle == "dark"},
 		)
 		items = append(items, MenuItem{Text: "主题", Children: themeChildren})
+	}
+
+	// Debug: 三级菜单测试
+	if buildvariant.IsDebug() {
+		testSubA := []MenuItem{
+			{ID: UnifiedMenuTestBase, Text: "选项 A-1", Checked: true},
+			{ID: UnifiedMenuTestBase + 1, Text: "选项 A-2"},
+			{ID: UnifiedMenuTestBase + 2, Text: "选项 A-3"},
+		}
+		testSubB := []MenuItem{
+			{ID: UnifiedMenuTestBase + 3, Text: "选项 B-1"},
+			{ID: UnifiedMenuTestBase + 4, Text: "选项 B-2", Checked: true},
+		}
+		testChildren := []MenuItem{
+			{Text: "子菜单 A", Children: testSubA},
+			{Text: "子菜单 B", Children: testSubB},
+			{Separator: true},
+			{ID: UnifiedMenuTestBase + 5, Text: "普通项"},
+		}
+		items = append(items, MenuItem{Text: "三级菜单测试", Children: testChildren})
 	}
 
 	items = append(items,
