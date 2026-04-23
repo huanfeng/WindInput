@@ -502,50 +502,20 @@ function Prepare-DataFiles {
         Write-Host "[警告] 未找到英文词库文件" -ForegroundColor Yellow
     }
 
-    # 复制常用字表
-    $commonChars = Join-Path $ScriptDir "data\schemas\common_chars.txt"
-    if (Test-Path $commonChars) {
-        Copy-Item -Path $commonChars -Destination (Join-Path $schemasDir "common_chars.txt") -Force
-        Write-Host "  - 已复制常用字表"
-    } else {
-        Write-Host "[警告] 未找到常用字表" -ForegroundColor Yellow
+    # 复制预制数据文件（data/ → build/data/）
+    # 黑名单方式：除排除项外的所有文件都会被复制，新增配置/补丁文件无需修改此脚本
+    $dataSourceDir = Join-Path $ScriptDir "data"
+    $excludeNames = @("AGENTS.md")
+    $dataCopied = 0
+    Get-ChildItem -Path $dataSourceDir -Recurse -File | Where-Object { $excludeNames -notcontains $_.Name } | ForEach-Object {
+        $relativePath = $_.FullName.Substring($dataSourceDir.Length + 1)
+        $destPath = Join-Path $DataDir $relativePath
+        $destDir = Split-Path $destPath -Parent
+        if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+        Copy-Item -Path $_.FullName -Destination $destPath -Force
+        $dataCopied++
     }
-
-    # 复制输入方案配置
-    $schemaFiles = Get-ChildItem -Path (Join-Path $ScriptDir "data\schemas") -Filter "*.schema.yaml" -ErrorAction SilentlyContinue
-    if ($schemaFiles) {
-        $schemaFiles | Copy-Item -Destination $schemasDir -Force
-        Write-Host "  - 已复制输入方案配置"
-    } else {
-        Write-Host "[警告] 未找到输入方案配置文件" -ForegroundColor Yellow
-    }
-
-    # 复制默认配置文件
-    $configYaml = Join-Path $ScriptDir "data\config.yaml"
-    if (Test-Path $configYaml) {
-        Copy-Item -Path $configYaml -Destination (Join-Path $DataDir "config.yaml") -Force
-        Write-Host "  - 已复制默认配置文件"
-    } else {
-        Write-Host "[警告] 未找到默认配置文件" -ForegroundColor Yellow
-    }
-
-    # 复制系统短语配置
-    $systemPhrases = Join-Path $ScriptDir "data\system.phrases.yaml"
-    if (Test-Path $systemPhrases) {
-        Copy-Item -Path $systemPhrases -Destination (Join-Path $DataDir "system.phrases.yaml") -Force
-        Write-Host "  - 已复制系统短语配置"
-    } else {
-        Write-Host "[警告] 未找到系统短语配置文件" -ForegroundColor Yellow
-    }
-
-    # 复制应用兼容性规则
-    $compatYaml = Join-Path $ScriptDir "data\compat.yaml"
-    if (Test-Path $compatYaml) {
-        Copy-Item -Path $compatYaml -Destination (Join-Path $DataDir "compat.yaml") -Force
-        Write-Host "  - 已复制应用兼容性规则"
-    } else {
-        Write-Host "[警告] 未找到应用兼容性规则文件" -ForegroundColor Yellow
-    }
+    Write-Host "  - 已复制预制数据文件 ($dataCopied 个文件)"
 
     # 复制主题文件
     Write-Host "  - 复制主题文件..."

@@ -267,8 +267,8 @@ Write-Host "$DisplayName 安装程序"
 Write-Host "======================================"
 Write-Host ""
 
-# [1/12] 检查文件
-Write-Host "[1/12] 检查文件..."
+# [1/10] 检查文件
+Write-Host "[1/10] 检查文件..."
 $requiredFiles = @($DllName, $DllNameX86, $ExeName)
 foreach ($f in $requiredFiles) {
     if (-not (Test-Path (Join-Path $BuildDir $f))) {
@@ -278,16 +278,16 @@ foreach ($f in $requiredFiles) {
     }
 }
 
-# [2/12] 停止旧进程
-Write-Host "[2/12] 停止旧进程..."
+# [2/10] 停止旧进程
+Write-Host "[2/10] 停止旧进程..."
 Get-Process -Name $SettingProcessName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Get-Process -Name $PortableProcessName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Get-Process -Name $ServiceProcessName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 
-# [3/12] 创建安装目录
-Write-Host "[3/12] 创建安装目录..."
-Write-Host "[4/12] 处理已有文件..."
+# [3/10] 创建安装目录 + 处理已有文件
+Write-Host "[3/10] 创建安装目录..."
+Write-Host "[4/10] 处理已有文件..."
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
@@ -305,8 +305,8 @@ Remove-OldFile -FilePath (Join-Path $InstallDir $ExeName) -FileName $ExeName
 Remove-OldFile -FilePath (Join-Path $InstallDir $SettingName) -FileName $SettingName
 Remove-OldFile -FilePath (Join-Path $InstallDir $PortableName) -FileName $PortableName
 
-# [5/12] 复制文件
-Write-Host "[5/12] 复制文件..."
+# [5/10] 复制文件
+Write-Host "[5/10] 复制文件..."
 foreach ($f in $requiredFiles) {
     Copy-Item -Path (Join-Path $BuildDir $f) -Destination $InstallDir -Force
 }
@@ -349,97 +349,29 @@ if (Test-Path $tsfDllPathX86) {
     }
 }
 
-# [6/12] 复制数据目录（词库、方案、短语、主题）
-Write-Host "[6/12] 复制数据目录(data/)..."
+# [6/10] 复制数据目录（词库、方案、配置、主题、补丁等）
+# 递归复制 build/data/ 下所有文件，新增数据文件无需修改此脚本
+Write-Host "[6/10] 复制数据目录(data/)..."
 $BuildDataDir = Join-Path $BuildDir "data"
 $InstallDataDir = Join-Path $InstallDir "data"
 
-$dataDirs = @("schemas", "schemas\pinyin", "schemas\pinyin\cn_dicts", "schemas\wubi86", "schemas\english")
-foreach ($d in $dataDirs) {
-    $target = Join-Path $InstallDataDir $d
-    if (-not (Test-Path $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
-}
-
-$dictFiles = @(
-    @{ Src = "schemas\pinyin\rime_ice.dict.yaml"; Desc = "拼音词库入口: rime_ice.dict.yaml" },
-    @{ Src = "schemas\pinyin\cn_dicts\8105.dict.yaml"; Desc = "拼音单字词库: cn_dicts/8105.dict.yaml" },
-    @{ Src = "schemas\pinyin\cn_dicts\base.dict.yaml"; Desc = "拼音基础词库: cn_dicts/base.dict.yaml" },
-    @{ Src = "schemas\pinyin\unigram.txt"; Desc = "语言模型: unigram.txt"; Optional = $true },
-    @{ Src = "schemas\wubi86\wubi86_jidian.dict.yaml"; Desc = "五笔主词库: wubi86_jidian.dict.yaml" },
-    @{ Src = "schemas\wubi86\wubi86_jidian_extra.dict.yaml"; Desc = "五笔扩展词库: wubi86_jidian_extra.dict.yaml"; Optional = $true },
-    @{ Src = "schemas\wubi86\wubi86_jidian_extra_district.dict.yaml"; Desc = "五笔行政区域词库: wubi86_jidian_extra_district.dict.yaml"; Optional = $true },
-    @{ Src = "schemas\wubi86\wubi86_jidian_user.dict.yaml"; Desc = "五笔用户词库模板: wubi86_jidian_user.dict.yaml"; Optional = $true },
-    @{ Src = "schemas\english\en.dict.yaml"; Desc = "英文主词库: en.dict.yaml"; Optional = $true },
-    @{ Src = "schemas\english\en_ext.dict.yaml"; Desc = "英文扩展词库: en_ext.dict.yaml"; Optional = $true },
-    @{ Src = "schemas\common_chars.txt"; Desc = "常用字表: common_chars.txt" },
-    @{ Src = "system.phrases.yaml"; Desc = "系统短语配置: system.phrases.yaml" }
-)
-
-foreach ($df in $dictFiles) {
-    $srcPath = Join-Path $BuildDataDir $df.Src
-    $dstPath = Join-Path $InstallDataDir $df.Src
-    $dstDir = Split-Path -Parent $dstPath
-    if (-not (Test-Path $dstDir)) { New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
-
-    if (Test-Path $srcPath) {
-        Copy-Item -Path $srcPath -Destination $dstPath -Force
-        Write-Host "  - $($df.Desc)"
-    } elseif ($df.Optional) {
-        Write-Host "[提示] $($df.Desc -replace ':.*', '') 不存在,智能组句功能不可用" -ForegroundColor Cyan
-    } else {
-        Write-Host "[警告] build\data 目录中未找到 $($df.Src),请先运行 build_all.ps1" -ForegroundColor Yellow
+if (Test-Path $BuildDataDir) {
+    $dataCopied = 0
+    Get-ChildItem -Path $BuildDataDir -Recurse -File | ForEach-Object {
+        $relativePath = $_.FullName.Substring($BuildDataDir.Length + 1)
+        $destPath = Join-Path $InstallDataDir $relativePath
+        $destDir = Split-Path $destPath -Parent
+        if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+        Copy-Item -Path $_.FullName -Destination $destPath -Force
+        $dataCopied++
     }
-}
-
-# [7/12] 复制输入方案配置
-Write-Host "[7/12] 复制输入方案配置..."
-$schemasDir = Join-Path $InstallDataDir "schemas"
-if (-not (Test-Path $schemasDir)) { New-Item -ItemType Directory -Path $schemasDir -Force | Out-Null }
-$schemaFiles = Get-ChildItem -Path (Join-Path $BuildDataDir "schemas") -Filter "*.schema.yaml" -ErrorAction SilentlyContinue
-if ($schemaFiles) {
-    $schemaFiles | Copy-Item -Destination $schemasDir -Force
-    Write-Host "  - 输入方案配置已复制"
+    Write-Host "  - 已复制数据文件 ($dataCopied 个文件)"
 } else {
-    Write-Host "[警告] build\data 目录中未找到输入方案配置" -ForegroundColor Yellow
+    Write-Host "[警告] build\data 目录不存在，请先运行 build_all.ps1" -ForegroundColor Yellow
 }
 
-# [7b/12] 复制默认配置文件
-$configSrc = Join-Path $BuildDataDir "config.yaml"
-if (Test-Path $configSrc) {
-    Copy-Item -Path $configSrc -Destination (Join-Path $InstallDataDir "config.yaml") -Force
-    Write-Host "  - 默认配置文件已复制"
-} else {
-    Write-Host "[警告] build\data 目录中未找到默认配置文件 config.yaml" -ForegroundColor Yellow
-}
-
-# [7c/12] 复制应用兼容性规则
-$compatSrc = Join-Path $BuildDataDir "compat.yaml"
-if (Test-Path $compatSrc) {
-    Copy-Item -Path $compatSrc -Destination (Join-Path $InstallDataDir "compat.yaml") -Force
-    Write-Host "  - 应用兼容性规则已复制"
-}
-
-# [8/12] 复制主题文件
-Write-Host "[8/12] 复制主题文件..."
-$themesSource = Join-Path $BuildDataDir "themes"
-if (Test-Path $themesSource) {
-    $themesTarget = Join-Path $InstallDataDir "themes"
-    if (-not (Test-Path $themesTarget)) { New-Item -ItemType Directory -Path $themesTarget -Force | Out-Null }
-    Get-ChildItem -Path $themesSource -Directory | ForEach-Object {
-        $themeYaml = Join-Path $_.FullName "theme.yaml"
-        if (Test-Path $themeYaml) {
-            $destThemeDir = Join-Path $themesTarget $_.Name
-            if (-not (Test-Path $destThemeDir)) { New-Item -ItemType Directory -Path $destThemeDir -Force | Out-Null }
-            Copy-Item -Path $themeYaml -Destination $destThemeDir -Force
-            Write-Host "  - 主题: $($_.Name)"
-        }
-    }
-} else {
-    Write-Host "[警告] build\data 目录中未找到主题文件" -ForegroundColor Yellow
-}
-
-# [9/12] 注册 COM 组件
-Write-Host "[9/12] 注册 COM 组件..."
+# [7/10] 注册 COM 组件
+Write-Host "[7/10] 注册 COM 组件..."
 # 注册 x64 DLL（使用默认 64 位 regsvr32）
 $regResult = & regsvr32 /s (Join-Path $InstallDir $DllName) 2>&1
 if ($LASTEXITCODE -ne 0) {
@@ -458,8 +390,8 @@ if (Test-Path $x86DllInstalled) {
     }
 }
 
-# [10/13] 调用 InstallLayoutOrTip 将输入法注册到系统输入法列表
-Write-Host "[10/13] 注册系统输入法..."
+# [8/10] 调用 InstallLayoutOrTip 将输入法注册到系统输入法列表
+Write-Host "[8/10] 注册系统输入法..."
 try {
     $inputDll = Join-Path $env:SystemRoot "System32\input.dll"
     if (Test-Path $inputDll) {
@@ -487,8 +419,8 @@ public class WindInputHelper {
     Write-Host "[警告] 系统输入法注册失败: $_" -ForegroundColor Yellow
 }
 
-# [11/13] 配置开机自启动
-Write-Host "[11/13] 配置开机自启动..."
+# [9/10] 配置开机自启动
+Write-Host "[9/10] 配置开机自启动..."
 $exePath = Join-Path $InstallDir $ExeName
 try {
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $RunKeyName -Value "`"$exePath`"" -Force
@@ -497,13 +429,13 @@ try {
     Write-Host "[警告] 添加开机自启动失败" -ForegroundColor Yellow
 }
 
-# [12/13] 预启动输入法服务
-Write-Host "[12/13] 预启动输入法服务..."
+# [10/10] 预启动输入法服务 + 创建快捷方式
+Write-Host "[10/10] 预启动输入法服务..."
 Start-Process -FilePath $exePath
 Write-Host "  - 服务已在后台启动"
 
-# [13/13] 创建快捷方式
-Write-Host "[13/13] 创建快捷方式..."
+# 创建快捷方式
+Write-Host "创建快捷方式..."
 $settingInstalled = Join-Path $InstallDir $SettingName
 $uninstallExe = Join-Path $InstallDir "uninstall.exe"
 $startMenuDir = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\$ShortcutFolder"

@@ -512,38 +512,12 @@ install_cleanup_bak_next:
 install_cleanup_bak_end:
   FindClose $0
 
-  ; --- Step 6: Dictionary files ---
-  DetailPrint "正在复制词库文件..."
-  ; --- Step 6b: Schema files and dictionaries ---
-  DetailPrint "正在复制输入方案和词库..."
-  SetOutPath "$INSTDIR\data\schemas"
-  File "${BUILD_DIR}\data\schemas\*.schema.yaml"
-  File "${BUILD_DIR}\data\schemas\common_chars.txt"
-  SetOutPath "$INSTDIR\data\schemas\pinyin"
-  File "${BUILD_DIR}\data\schemas\pinyin\rime_ice.dict.yaml"
-  File /nonfatal "${BUILD_DIR}\data\schemas\pinyin\unigram.txt"
-  SetOutPath "$INSTDIR\data\schemas\pinyin\cn_dicts"
-  File "${BUILD_DIR}\data\schemas\pinyin\cn_dicts\8105.dict.yaml"
-  File "${BUILD_DIR}\data\schemas\pinyin\cn_dicts\base.dict.yaml"
-  SetOutPath "$INSTDIR\data\schemas\wubi86"
-  File "${BUILD_DIR}\data\schemas\wubi86\wubi86_jidian.dict.yaml"
-  File /nonfatal "${BUILD_DIR}\data\schemas\wubi86\wubi86_jidian_extra.dict.yaml"
-  File /nonfatal "${BUILD_DIR}\data\schemas\wubi86\wubi86_jidian_extra_district.dict.yaml"
-  File /nonfatal "${BUILD_DIR}\data\schemas\wubi86\wubi86_jidian_user.dict.yaml"
-  SetOutPath "$INSTDIR\data\schemas\english"
-  File /nonfatal "${BUILD_DIR}\data\schemas\english\en.dict.yaml"
-  File /nonfatal "${BUILD_DIR}\data\schemas\english\en_ext.dict.yaml"
-
-  ; --- Step 6c: Default config and theme files ---
-  DetailPrint "正在复制配置和主题文件..."
+  ; --- Step 6: Data files (dict, schema, config, theme, patches) ---
+  ; 递归复制 build/data/ 下所有文件，新增数据文件无需修改此脚本
+  ; build/data/ 由 build_all.ps1 的 Prepare-DataFiles 准备（已排除 AGENTS.md 等开发文件）
+  DetailPrint "正在复制数据文件..."
   SetOutPath "$INSTDIR\data"
-  File "${BUILD_DIR}\data\config.yaml"
-  File "${BUILD_DIR}\data\system.phrases.yaml"
-  File "${BUILD_DIR}\data\compat.yaml"
-  SetOutPath "$INSTDIR\data\themes\default"
-  File "${BUILD_DIR}\data\themes\default\theme.yaml"
-  SetOutPath "$INSTDIR\data\themes\msime"
-  File "${BUILD_DIR}\data\themes\msime\theme.yaml"
+  File /r "${BUILD_DIR}\data\*.*"
   SetOutPath "$INSTDIR"
 
   ; --- Portable mode: skip registration, create marker, launch ---
