@@ -44,19 +44,19 @@ func (m *Manager) UpdateFilterMode(mode string) {
 }
 
 // UpdateCodetableOptions 更新码表引擎的选项（热更新）
-func (m *Manager) UpdateCodetableOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput bool, candidateSortMode string) {
+func (m *Manager) UpdateCodetableOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, singleCodeComplete bool, candidateSortMode string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, eng := range m.engines {
 		// 直接的码表引擎
 		if codetableEngine, ok := eng.(*codetable.Engine); ok {
-			updateCodetableConfig(codetableEngine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, candidateSortMode)
+			updateCodetableConfig(codetableEngine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, singleCodeComplete, candidateSortMode)
 		}
 		// 混输引擎的码表子引擎
 		if mixedEngine, ok := eng.(*mixed.Engine); ok {
 			if we := mixedEngine.GetCodetableEngine(); we != nil {
-				updateCodetableConfig(we, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, candidateSortMode)
+				updateCodetableConfig(we, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, singleCodeComplete, candidateSortMode)
 			}
 		}
 	}
@@ -72,11 +72,12 @@ func (m *Manager) UpdateCodetableOptions(autoCommitAt4, clearOnEmptyAt4, topCode
 		"punctCommit", punctCommit,
 		"showCodeHint", showCodeHint,
 		"singleCodeInput", singleCodeInput,
+		"singleCodeComplete", singleCodeComplete,
 		"candidateSortMode", candidateSortMode)
 }
 
 // updateCodetableConfig 更新码表引擎配置（内部辅助函数）
-func updateCodetableConfig(codetableEngine *codetable.Engine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput bool, candidateSortMode string) {
+func updateCodetableConfig(codetableEngine *codetable.Engine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, singleCodeComplete bool, candidateSortMode string) {
 	if cfg := codetableEngine.GetConfig(); cfg != nil {
 		cfg.AutoCommitAt4 = autoCommitAt4
 		cfg.ClearOnEmptyAt4 = clearOnEmptyAt4
@@ -84,6 +85,7 @@ func updateCodetableConfig(codetableEngine *codetable.Engine, autoCommitAt4, cle
 		cfg.PunctCommit = punctCommit
 		cfg.ShowCodeHint = showCodeHint
 		cfg.SingleCodeInput = singleCodeInput
+		cfg.SingleCodeComplete = singleCodeComplete
 		if candidateSortMode != "" {
 			cfg.CandidateSortMode = candidateSortMode
 		}

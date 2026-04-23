@@ -16,6 +16,7 @@ engine:
     punct_commit: true
     show_code_hint: true
     single_code_input: false
+    single_code_complete: true
     candidate_sort_mode: frequency
     z_key_repeat: true
     temp_pinyin:

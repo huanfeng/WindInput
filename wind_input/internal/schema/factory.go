@@ -81,6 +81,7 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 		PunctCommit:        spec.PunctCommit,
 		ShowCodeHint:       spec.ShowCodeHint,
 		SingleCodeInput:    spec.SingleCodeInput,
+		SingleCodeComplete: spec.SingleCodeComplete,
 		FilterMode:         s.Engine.FilterMode,
 		CandidateSortMode:  spec.CandidateSortMode,
 		DedupCandidates:    dedupCandidates,

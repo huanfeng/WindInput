@@ -111,6 +111,7 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 				spec.PunctCommit,
 				spec.ShowCodeHint,
 				spec.SingleCodeInput,
+				spec.SingleCodeComplete,
 				spec.CandidateSortMode,
 			)
 		}
@@ -142,6 +143,7 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 						spec.PunctCommit,
 						spec.ShowCodeHint,
 						spec.SingleCodeInput,
+						spec.SingleCodeComplete,
 						spec.CandidateSortMode,
 					)
 				}

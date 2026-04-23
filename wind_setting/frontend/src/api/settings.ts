@@ -57,6 +57,7 @@ export interface CodetableConfig {
   punct_commit: boolean;
   show_code_hint: boolean;
   single_code_input: boolean;
+  single_code_complete: boolean; // 逐码空码补全
   candidate_sort_mode: string; // 候选排序模式：frequency（词频）、natural（自然顺序）
 }
 
@@ -371,6 +372,7 @@ export function getDefaultConfig(): Config {
         punct_commit: true,
         show_code_hint: true,
         single_code_input: false,
+        single_code_complete: true,
         candidate_sort_mode: "frequency",
       },
     },

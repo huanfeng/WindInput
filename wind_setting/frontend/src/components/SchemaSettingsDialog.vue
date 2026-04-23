@@ -365,6 +365,23 @@ function isReferencedBy(schemaID: string): boolean {
           </div>
           <div class="setting-item">
             <div class="setting-info">
+              <label>逐码空码补全</label>
+              <p class="setting-hint">逐码模式下精确匹配无候选时，从更长编码中取首个候选</p>
+            </div>
+            <div class="setting-control">
+              <Switch
+                :checked="getCodetableConfig(schemaID).single_code_complete"
+                :disabled="!getCodetableConfig(schemaID).single_code_input"
+                @update:checked="
+                  (v: boolean) => {
+                    getCodetableConfig(schemaID).single_code_complete = v;
+                  }
+                "
+              />
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-info">
               <label>显示编码提示</label>
               <p class="setting-hint">在前缀匹配的候选词旁显示剩余编码</p>
             </div>

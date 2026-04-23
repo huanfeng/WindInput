@@ -33,6 +33,7 @@ type Config struct {
 	FilterMode         string // 候选过滤模式
 	ShowCodeHint       bool   // 是否显示编码提示
 	SingleCodeInput    bool   // 逐字键入模式（关闭前缀匹配）
+	SingleCodeComplete bool   // 逐码空码补全：逐码模式下精确匹配无候选时，从更长编码中取首个候选
 	DedupCandidates    bool   // 候选去重（内部开关，未来可能开放给用户）
 	CandidateSortMode  string // 候选排序模式：frequency（词频）、natural（自然顺序）
 	ProtectTopN        int    // 首选保护：前 N 位锁定码表原始顺序
@@ -52,6 +53,7 @@ func DefaultConfig() *Config {
 		ShowCodeHint:       true,
 		DedupCandidates:    true,
 		SkipSingleCharFreq: true,
+		SingleCodeComplete: true,
 	}
 }
 
@@ -190,6 +192,44 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 		prefixCandidates[i].Weight -= PrefixWeightPenalty
 	}
 
+	// Phase 3.5: 逐码空码补全
+	if e.config.SingleCodeInput && e.config.SingleCodeComplete && len(exactCandidates) == 0 && inputLen < e.config.MaxCodeLength {
+		var completionCandidates []candidate.Candidate
+		if e.dictManager != nil {
+			if phraseLayer := e.dictManager.GetPhraseLayer(); phraseLayer != nil {
+				for _, c := range phraseLayer.SearchPrefix(input, 1) {
+					if c.Code != input {
+						completionCandidates = append(completionCandidates, c)
+						break
+					}
+				}
+			}
+			if len(completionCandidates) == 0 {
+				if userLayer := e.dictManager.GetStoreUserLayer(); userLayer != nil {
+					for _, c := range userLayer.SearchPrefix(input, 1) {
+						if c.Code != input {
+							completionCandidates = append(completionCandidates, c)
+							break
+						}
+					}
+				}
+			}
+		}
+		if len(completionCandidates) == 0 && e.codeTable != nil {
+			completionCandidates = e.codeTable.LookupPrefixExcludeExact(input, 1)
+			if len(completionCandidates) > 1 {
+				completionCandidates = completionCandidates[:1]
+			}
+		}
+		for i := range completionCandidates {
+			if len(completionCandidates[i].Code) > inputLen {
+				completionCandidates[i].Comment = completionCandidates[i].Code[inputLen:]
+			}
+			completionCandidates[i].Weight -= PrefixWeightPenalty
+		}
+		prefixCandidates = append(prefixCandidates, completionCandidates...)
+	}
+
 	// Phase 4: 合并 + 去重
 	allCandidates := append(exactCandidates, prefixCandidates...)
 	if e.config.DedupCandidates {
@@ -270,6 +310,36 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		}
 		remaining := len(prefixCandidates[i].Code) - inputLen
 		prefixCandidates[i].Weight -= remaining * PrefixWeightPenaltyPerKey
+	}
+
+	// ========== Phase 3.5: 逐码空码补全 ==========
+	// 逐码模式下精确匹配无候选时，从更长编码中取首个候选作为补全提示
+	if e.config.SingleCodeInput && e.config.SingleCodeComplete && len(exactCandidates) == 0 && inputLen < e.config.MaxCodeLength {
+		var completionCandidates []candidate.Candidate
+		if e.dictManager != nil {
+			compositeDict := e.dictManager.GetCompositeDict()
+			for _, c := range compositeDict.SearchPrefix(input, 1) {
+				if c.Code != input {
+					completionCandidates = append(completionCandidates, c)
+					break
+				}
+			}
+		}
+		if len(completionCandidates) == 0 && e.codeTable != nil && e.dictManager == nil {
+			completionCandidates = e.codeTable.LookupPrefixExcludeExact(input, 1)
+			if len(completionCandidates) > 1 {
+				completionCandidates = completionCandidates[:1]
+			}
+		}
+		// 为补全候选添加编码提示
+		for i := range completionCandidates {
+			if len(completionCandidates[i].Code) > inputLen {
+				completionCandidates[i].Comment = completionCandidates[i].Code[inputLen:]
+			}
+			remaining := len(completionCandidates[i].Code) - inputLen
+			completionCandidates[i].Weight -= remaining * PrefixWeightPenaltyPerKey
+		}
+		prefixCandidates = append(prefixCandidates, completionCandidates...)
 	}
 
 	// ========== Phase 4: 合并 + 去重（Shadow top/delete 已由 CompositeDict 处理）==========
