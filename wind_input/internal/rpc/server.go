@@ -38,6 +38,8 @@ type Server struct {
 	statusProvider StatusProvider
 	configReloader ConfigReloader
 	batchEncoder   BatchEncoder
+
+	paused bool // 服务暂停状态
 }
 
 // StatusProvider 系统状态提供者接口
@@ -149,6 +151,9 @@ func (s *Server) Start() error {
 	RegisterMethod(s.router, "System.ReloadShadow", systemSvc.ReloadShadow)
 	RegisterMethod(s.router, "System.ReloadUserDict", systemSvc.ReloadUserDict)
 	RegisterMethod(s.router, "System.NotifyReload", systemSvc.NotifyReload)
+	RegisterMethod(s.router, "System.Pause", systemSvc.Pause)
+	RegisterMethod(s.router, "System.Resume", systemSvc.Resume)
+	RegisterMethod(s.router, "System.Shutdown", systemSvc.Shutdown)
 
 	// 注册 Phrase 方法
 	RegisterMethod(s.router, "Phrase.List", phraseSvc.List)
@@ -274,6 +279,19 @@ func (s *Server) handleConn(conn net.Conn) {
 			return
 		}
 
+		// 暂停状态下仅允许系统管理方法
+		s.mu.Lock()
+		isPaused := s.paused
+		s.mu.Unlock()
+		if isPaused && !isSystemMethod(req.Method) {
+			resp := rpcapi.Response{
+				ID:    req.ID,
+				Error: "服务已暂停，请等待操作完成",
+			}
+			rpcapi.WriteMessage(conn, &resp)
+			continue
+		}
+
 		result, err := s.router.Dispatch(req.Method, req.Params)
 
 		var resp rpcapi.Response
@@ -301,4 +319,27 @@ func isTimeoutError(err error) bool {
 		return ne.Timeout()
 	}
 	return false
+}
+
+// isSystemMethod 检查是否为系统管理方法（暂停状态下允许调用）
+func isSystemMethod(method string) bool {
+	switch method {
+	case "System.Ping", "System.GetStatus", "System.Resume", "System.Pause", "System.Shutdown":
+		return true
+	}
+	return false
+}
+
+// SetPaused 设置暂停状态
+func (s *Server) SetPaused(paused bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paused = paused
+}
+
+// IsPaused 返回暂停状态
+func (s *Server) IsPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.paused
 }

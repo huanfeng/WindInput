@@ -3,6 +3,7 @@ package rpc
 import (
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/coordinator"
@@ -169,6 +170,50 @@ func (s *SystemService) Shutdown(args *rpcapi.Empty, reply *rpcapi.SystemShutdow
 	s.logger.Info("RPC System.Shutdown: graceful shutdown requested")
 	reply.OK = true
 	go coordinator.RequestExit()
+	return nil
+}
+
+// Pause 暂停服务（关闭数据库释放文件锁，但保留进程和 RPC 通道）
+func (s *SystemService) Pause(args *rpcapi.Empty, reply *rpcapi.SystemPauseReply) error {
+	s.logger.Info("RPC System.Pause: pausing service")
+
+	// 关闭数据库
+	if s.store != nil {
+		if err := s.store.Pause(); err != nil {
+			return fmt.Errorf("pause store: %w", err)
+		}
+	}
+
+	// 设置服务暂停状态（拒绝非系统请求）
+	s.server.SetPaused(true)
+
+	reply.OK = true
+	s.logger.Info("RPC System.Pause: service paused")
+	return nil
+}
+
+// Resume 恢复服务（重新打开数据库）
+func (s *SystemService) Resume(args *rpcapi.SystemResumeArgs, reply *rpcapi.SystemResumeReply) error {
+	s.logger.Info("RPC System.Resume: resuming service", "newDataDir", args.NewDataDir)
+
+	// 如果指定了新数据目录，需要更新数据库路径
+	newDBPath := ""
+	if args.NewDataDir != "" {
+		newDBPath = filepath.Join(args.NewDataDir, "user_data.db")
+	}
+
+	// 重新打开数据库
+	if s.store != nil {
+		if err := s.store.Resume(newDBPath); err != nil {
+			return fmt.Errorf("resume store: %w", err)
+		}
+	}
+
+	// 清除暂停状态
+	s.server.SetPaused(false)
+
+	reply.OK = true
+	s.logger.Info("RPC System.Resume: service resumed")
 	return nil
 }
 

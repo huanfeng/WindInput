@@ -2,12 +2,17 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 	"github.com/huanfeng/wind_input/pkg/systemfont"
 	"github.com/huanfeng/wind_input/pkg/theme"
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // ========== 服务通信 ==========
@@ -307,4 +312,269 @@ func (a *App) OpenExternalURL(url string) error {
 		return fmt.Errorf("empty url")
 	}
 	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+}
+
+// ========== 数据目录管理 ==========
+
+// SelectDataDir 打开目录选择对话框
+func (a *App) SelectDataDir() (string, error) {
+	return wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "选择数据存储目录",
+	})
+}
+
+// DataDirInfo 数据目录信息
+type DataDirInfo struct {
+	CurrentDir string `json:"current_dir"`
+	SizeBytes  int64  `json:"size_bytes"`
+	SizeText   string `json:"size_text"`
+	FileCount  int    `json:"file_count"`
+}
+
+// GetDataDirInfo 获取当前数据目录信息（路径、大小、文件数）
+func (a *App) GetDataDirInfo() (*DataDirInfo, error) {
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return nil, err
+	}
+
+	var totalSize int64
+	var fileCount int
+	_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			totalSize += info.Size()
+			fileCount++
+		}
+		return nil
+	})
+
+	return &DataDirInfo{
+		CurrentDir: dir,
+		SizeBytes:  totalSize,
+		SizeText:   formatSize(totalSize),
+		FileCount:  fileCount,
+	}, nil
+}
+
+func formatSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(MB))
+	case bytes >= KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
+// DataDirValidation 数据目录验证结果
+type DataDirValidation struct {
+	Valid   bool   `json:"valid"`
+	Warning string `json:"warning"`
+	IsEmpty bool   `json:"is_empty"`
+	IsSame  bool   `json:"is_same"`
+}
+
+// ValidateDataDirPath 验证数据目录路径
+func (a *App) ValidateDataDirPath(path string) (*DataDirValidation, error) {
+	valid, warning := config.ValidateDataDirPath(path)
+	result := &DataDirValidation{Valid: valid, Warning: warning}
+
+	if !valid {
+		return result, nil
+	}
+
+	// 检查是否与当前目录相同
+	currentDir, err := config.GetConfigDir()
+	if err == nil {
+		cleanCurrent := filepath.Clean(currentDir)
+		cleanNew := filepath.Clean(path)
+		if strings.EqualFold(cleanCurrent, cleanNew) {
+			result.IsSame = true
+			result.Valid = false
+			result.Warning = "与当前数据目录相同"
+			return result, nil
+		}
+	}
+
+	// 检查目录是否为空
+	result.IsEmpty = true
+	if entries, err := os.ReadDir(path); err == nil && len(entries) > 0 {
+		result.IsEmpty = false
+	}
+
+	return result, nil
+}
+
+// ChangeDataDirRequest 切换数据目录请求
+type ChangeDataDirRequest struct {
+	NewPath       string `json:"new_path"`
+	Migrate       bool   `json:"migrate"`
+	Overwrite     bool   `json:"overwrite"`
+	DeleteOldData bool   `json:"delete_old_data"`
+}
+
+// ChangeDataDirResult 切换数据目录结果
+type ChangeDataDirResult struct {
+	Success  bool     `json:"success"`
+	Warnings []string `json:"warnings"`
+}
+
+// ChangeUserDataDir 切换用户数据目录
+func (a *App) ChangeUserDataDir(req ChangeDataDirRequest) (*ChangeDataDirResult, error) {
+	valid, warning := config.ValidateDataDirPath(req.NewPath)
+	if !valid {
+		return nil, fmt.Errorf("路径验证失败: %s", warning)
+	}
+
+	// 确保目标目录存在
+	if err := os.MkdirAll(req.NewPath, 0755); err != nil {
+		return nil, fmt.Errorf("无法创建目录: %w", err)
+	}
+
+	currentDir, err := config.GetConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("无法获取当前数据目录: %w", err)
+	}
+
+	result := &ChangeDataDirResult{Success: true}
+
+	// 暂停服务：释放数据库文件锁，保持进程和 RPC 通道
+	serviceRunning := a.rpcClient.IsAvailable()
+	if serviceRunning {
+		if err := a.rpcClient.SystemPause(); err != nil {
+			return nil, fmt.Errorf("无法暂停输入法服务: %w", err)
+		}
+	}
+
+	if req.Migrate {
+		if err := migrateAllData(currentDir, req.NewPath, req.Overwrite); err != nil {
+			// 迁移失败，恢复服务
+			if serviceRunning {
+				_ = a.rpcClient.SystemResume("")
+			}
+			return nil, fmt.Errorf("数据迁移失败: %w", err)
+		}
+
+		if req.DeleteOldData {
+			if err := clearDirContents(currentDir); err != nil {
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("旧目录中的文件未能完全删除，请稍后手动清理：%s", currentDir))
+			}
+		}
+	}
+
+	// 写入 datadir.conf
+	if err := config.WriteUserDataDirOverride(req.NewPath); err != nil {
+		if serviceRunning {
+			_ = a.rpcClient.SystemResume("")
+		}
+		return nil, fmt.Errorf("写入配置失败: %w", err)
+	}
+
+	// 恢复服务（使用新数据目录）
+	if serviceRunning {
+		if err := a.rpcClient.SystemResume(req.NewPath); err != nil {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("服务恢复失败: %v，请手动重启输入法", err))
+		}
+	}
+
+	return result, nil
+}
+
+// migrateAllData 迁移所有用户数据文件
+// overwrite 为 true 时覆盖目标中的同名文件
+func migrateAllData(srcDir, dstDir string, overwrite bool) error {
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return fmt.Errorf("无法读取源目录: %w", err)
+	}
+
+	for _, entry := range entries {
+		src := filepath.Join(srcDir, entry.Name())
+		dst := filepath.Join(dstDir, entry.Name())
+
+		if entry.IsDir() {
+			if err := copyDirRecursive(src, dst, overwrite); err != nil {
+				return fmt.Errorf("复制目录 %s 失败: %w", entry.Name(), err)
+			}
+		} else {
+			// 目标已存在且不覆盖，跳过
+			if !overwrite {
+				if _, err := os.Stat(dst); err == nil {
+					continue
+				}
+			}
+			if err := copyFileSimple(src, dst); err != nil {
+				return fmt.Errorf("复制文件 %s 失败: %w", entry.Name(), err)
+			}
+		}
+	}
+	return nil
+}
+
+// clearDirContents 删除目录内的所有文件和子目录，但保留目录本身
+func clearDirContents(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for _, entry := range entries {
+		p := filepath.Join(dir, entry.Name())
+		if err := os.RemoveAll(p); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+func copyFileSimple(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func copyDirRecursive(src, dst string, overwrite bool) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		if !overwrite {
+			if _, err := os.Stat(target); err == nil {
+				return nil // 目标已存在，跳过
+			}
+		}
+		return copyFileSimple(path, target)
+	})
 }

@@ -12,7 +12,14 @@
           <label>配置文件目录</label>
           <p class="setting-hint">{{ configDirDisplay }}</p>
         </div>
-        <div class="setting-control">
+        <div class="setting-control" style="display: flex; gap: 8px">
+          <Button
+            v-if="!isPortable"
+            variant="outline"
+            size="sm"
+            @click="dataDirDialogVisible = true"
+            >更改</Button
+          >
           <Button variant="outline" size="sm" @click="$emit('openConfigFolder')"
             >打开文件夹</Button
           >
@@ -112,6 +119,12 @@
         </div>
       </div>
     </div>
+
+    <DataDirDialog
+      :visible="dataDirDialogVisible"
+      @update:visible="dataDirDialogVisible = $event"
+      @changed="onDataDirChanged"
+    />
   </section>
 </template>
 
@@ -127,6 +140,7 @@ import {
   SelectContent,
   SelectItem,
 } from "@/components/ui/select";
+import DataDirDialog from "@/components/DataDirDialog.vue";
 
 const props = defineProps<{
   formData: Config;
@@ -141,6 +155,8 @@ const emit = defineEmits<{
 
 const configDirDisplay = ref("%APPDATA%\\WindInput");
 const logsDirDisplay = ref("%LOCALAPPDATA%\\WindInput\\logs\\");
+const isPortable = ref(false);
+const dataDirDialogVisible = ref(false);
 
 onMounted(async () => {
   if (props.isWailsEnv) {
@@ -148,11 +164,22 @@ onMounted(async () => {
       const info = await wailsApi.getPathInfo();
       configDirDisplay.value = info.config_dir_display;
       logsDirDisplay.value = info.logs_dir_display;
+      isPortable.value = info.is_portable;
     } catch (e) {
       console.warn("Failed to get path info:", e);
     }
   }
 });
+
+async function onDataDirChanged() {
+  // 刷新显示的路径
+  try {
+    const info = await wailsApi.getPathInfo();
+    configDirDisplay.value = info.config_dir_display;
+  } catch {
+    // ignore
+  }
+}
 
 const showSensitiveLogWarning = computed(() => {
   const serviceLevel = props.formData.advanced.log_level;

@@ -348,6 +348,21 @@ type SystemShutdownReply struct {
 	OK bool `json:"ok"`
 }
 
+// SystemPauseReply 暂停服务响应
+type SystemPauseReply struct {
+	OK bool `json:"ok"`
+}
+
+// SystemResumeArgs 恢复服务请求
+type SystemResumeArgs struct {
+	NewDataDir string `json:"new_data_dir,omitempty"` // 如果非空，使用新的数据目录恢复
+}
+
+// SystemResumeReply 恢复服务响应
+type SystemResumeReply struct {
+	OK bool `json:"ok"`
+}
+
 // ── 导入导出扩展类型 ──
 
 // BatchEncodeArgs 批量反向编码请求

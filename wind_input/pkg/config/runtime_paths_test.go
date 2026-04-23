@@ -3,7 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 )
 
 func TestFindPortableRootSameDir(t *testing.T) {
@@ -50,5 +53,19 @@ func TestFindPortableRootParentIgnored(t *testing.T) {
 	_, ok := findPortableRoot(exeDir)
 	if ok {
 		t.Fatalf("expected not found — marker in parent dir should be ignored")
+	}
+}
+
+func TestResolveUserDataDir_Default(t *testing.T) {
+	// 非便携模式下，无 datadir.conf，应返回包含 AppName 的路径
+	dir, err := ResolveUserDataDir()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dir == "" {
+		t.Fatal("expected non-empty dir")
+	}
+	if !strings.Contains(dir, buildvariant.AppName()) {
+		t.Fatalf("expected dir to contain %s, got %s", buildvariant.AppName(), dir)
 	}
 }

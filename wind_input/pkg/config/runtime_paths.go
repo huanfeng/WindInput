@@ -27,7 +27,8 @@ func findPortableRoot(exeDir string) (string, bool) {
 }
 
 // ResolveUserDataDir returns the application user data directory based on the
-// runtime mode. Portable mode uses <portableRoot>/userdata directly (no AppName subdir).
+// runtime mode.
+// Priority: portable marker > datadir.conf > default (%APPDATA%\WindInput)
 func ResolveUserDataDir() (string, error) {
 	exeDir, err := GetExeDir()
 	if err == nil {
@@ -36,6 +37,13 @@ func ResolveUserDataDir() (string, error) {
 		}
 	}
 
+	// 读取 datadir.conf 自定义路径
+	override, err := ReadUserDataDirOverride()
+	if err == nil && override != "" {
+		return override, nil
+	}
+
+	// 默认使用 %APPDATA%\WindInput
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get user config dir: %w", err)
@@ -94,7 +102,6 @@ func IsPortableMode() bool {
 }
 
 // GetConfigDirDisplay returns a user-friendly display string for the config directory.
-// Standard mode: %APPDATA%\WindInput; Portable mode: <安装目录>\userdata
 func GetConfigDirDisplay() string {
 	exeDir, err := GetExeDir()
 	if err == nil {
@@ -105,6 +112,13 @@ func GetConfigDirDisplay() string {
 			}
 		}
 	}
+
+	// 检查是否有自定义路径
+	override, err := ReadUserDataDirOverride()
+	if err == nil && override != "" {
+		return override
+	}
+
 	return `%APPDATA%\` + buildvariant.AppName()
 }
 

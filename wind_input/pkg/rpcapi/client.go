@@ -352,6 +352,19 @@ func (c *Client) SystemShutdown() error {
 	return c.call("System.Shutdown", &Empty{}, &reply)
 }
 
+// SystemPause 请求服务暂停（释放文件锁但保持进程）
+func (c *Client) SystemPause() error {
+	var reply SystemPauseReply
+	return c.call("System.Pause", &Empty{}, &reply)
+}
+
+// SystemResume 请求服务恢复
+func (c *Client) SystemResume(newDataDir string) error {
+	var reply SystemResumeReply
+	args := &SystemResumeArgs{NewDataDir: newDataDir}
+	return c.call("System.Resume", args, &reply)
+}
+
 // ── Phrase 方法 ──
 
 // PhraseList 获取所有短语

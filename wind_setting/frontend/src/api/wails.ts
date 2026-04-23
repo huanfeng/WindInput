@@ -825,3 +825,50 @@ export function getDefaultConfig(): Config {
 export function getDefaultTSFLogConfig(): TSFLogConfig {
   return getHTTPTSFLogConfig();
 }
+
+// 数据目录管理
+export interface DataDirInfo {
+  current_dir: string;
+  size_bytes: number;
+  size_text: string;
+  file_count: number;
+}
+
+export interface DataDirValidation {
+  valid: boolean;
+  warning: string;
+  is_empty: boolean;
+  is_same: boolean;
+}
+
+export interface ChangeDataDirRequest {
+  new_path: string;
+  migrate: boolean;
+  overwrite: boolean;
+  delete_old_data: boolean;
+}
+
+export async function getDataDirInfo(): Promise<DataDirInfo> {
+  return App.GetDataDirInfo() as unknown as DataDirInfo;
+}
+
+export async function validateDataDirPath(
+  path: string,
+): Promise<DataDirValidation> {
+  return App.ValidateDataDirPath(path) as unknown as DataDirValidation;
+}
+
+export async function selectDataDir(): Promise<string> {
+  return App.SelectDataDir();
+}
+
+export interface ChangeDataDirResult {
+  success: boolean;
+  warnings: string[];
+}
+
+export async function changeUserDataDir(
+  req: ChangeDataDirRequest,
+): Promise<ChangeDataDirResult> {
+  return App.ChangeUserDataDir(req) as unknown as ChangeDataDirResult;
+}

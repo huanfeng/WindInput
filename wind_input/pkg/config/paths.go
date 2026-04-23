@@ -18,8 +18,9 @@ const (
 	SystemConfigFile  = "config.yaml"         // 系统预置配置（data/ 目录）
 )
 
-// GetConfigDir returns the user configuration directory path
-// On Windows: %APPDATA%\WindInput
+// GetConfigDir returns the user configuration directory path.
+// Standard mode: %APPDATA%\WindInput (or custom via datadir.conf)
+// Portable mode: <exe_dir>\userdata
 func GetConfigDir() (string, error) {
 	return ResolveUserDataDir()
 }

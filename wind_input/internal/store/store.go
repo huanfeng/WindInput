@@ -73,6 +73,41 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// Pause 暂停存储：关闭底层数据库以释放文件锁，但保留 Store 实例。
+// 暂停期间调用任何读写方法会返回错误。
+func (s *Store) Pause() error {
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
+}
+
+// Resume 恢复存储：重新打开数据库文件。
+// 使用创建时的路径，如果传入 newPath 非空则使用新路径。
+func (s *Store) Resume(newPath string) error {
+	if s.db != nil {
+		return fmt.Errorf("store is not paused")
+	}
+	path := s.path
+	if newPath != "" {
+		path = newPath
+	}
+	db, err := bolt.Open(path, 0600, nil)
+	if err != nil {
+		return fmt.Errorf("store.Resume: %w", err)
+	}
+	s.db = db
+	s.path = path
+	return s.init()
+}
+
+// IsPaused 返回存储是否处于暂停状态
+func (s *Store) IsPaused() bool {
+	return s.db == nil
+}
+
 // DB returns the underlying *bolt.DB.
 func (s *Store) DB() *bolt.DB {
 	return s.db
