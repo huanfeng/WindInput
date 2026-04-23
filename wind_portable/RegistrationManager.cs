@@ -96,13 +96,12 @@ namespace WindPortable
                 if (!serviceRunning)
                     return false; // 残留注册，服务未运行，可安全接管
 
-                string otherDir = Path.GetDirectoryName(Path.GetFullPath(regPath));
-                reason = $"检测到另一个便携版实例正在运行（{otherDir}），请先停止该实例后再启动。";
+                reason = "检测到另一个便携版实例正在运行，请先停止该实例后再启动。";
                 return true;
             }
 
             // 来自安装版的注册
-            reason = $"系统已注册其他位置的清风输入法：{regPath}。为避免覆盖现有注册信息，便携模式已禁用。";
+            reason = "系统已注册其他位置的清风输入法，为避免覆盖现有注册信息，便携模式已禁用。";
             return true;
         }
 

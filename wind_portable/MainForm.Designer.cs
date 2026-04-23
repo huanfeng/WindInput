@@ -74,11 +74,11 @@ namespace WindPortable
 
             // lblRootHint
             this.lblRootHint.Location = new System.Drawing.Point(10, 90);
-            this.lblRootHint.Size = new System.Drawing.Size(410, 18);
+            this.lblRootHint.Size = new System.Drawing.Size(410, 36);
             this.lblRootHint.Name = "lblRootHint";
 
             // btnStart
-            this.btnStart.Location = new System.Drawing.Point(10, 118);
+            this.btnStart.Location = new System.Drawing.Point(10, 136);
             this.btnStart.Size = new System.Drawing.Size(120, 32);
             this.btnStart.Text = "启动服务";
             this.btnStart.Name = "btnStart";
@@ -86,7 +86,7 @@ namespace WindPortable
             this.btnStart.Click += new System.EventHandler(this.BtnStart_Click);
 
             // btnStop
-            this.btnStop.Location = new System.Drawing.Point(140, 118);
+            this.btnStop.Location = new System.Drawing.Point(140, 136);
             this.btnStop.Size = new System.Drawing.Size(120, 32);
             this.btnStop.Text = "停止服务";
             this.btnStop.Name = "btnStop";
@@ -94,7 +94,7 @@ namespace WindPortable
             this.btnStop.Click += new System.EventHandler(this.BtnStop_Click);
 
             // btnSetting
-            this.btnSetting.Location = new System.Drawing.Point(10, 160);
+            this.btnSetting.Location = new System.Drawing.Point(10, 178);
             this.btnSetting.Size = new System.Drawing.Size(120, 32);
             this.btnSetting.Text = "打开设置";
             this.btnSetting.Name = "btnSetting";
@@ -102,7 +102,7 @@ namespace WindPortable
             this.btnSetting.Click += new System.EventHandler(this.BtnSetting_Click);
 
             // btnData
-            this.btnData.Location = new System.Drawing.Point(140, 160);
+            this.btnData.Location = new System.Drawing.Point(140, 178);
             this.btnData.Size = new System.Drawing.Size(120, 32);
             this.btnData.Text = "打开数据目录";
             this.btnData.Name = "btnData";

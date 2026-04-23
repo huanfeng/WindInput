@@ -385,7 +385,7 @@ namespace WindPortable
                 lblStatus.Text = "便携模式不可用";
                 lblDetail.Text = conflictReason ?? "便携模式已禁用";
                 lblRootHint.Text = !string.IsNullOrEmpty(conflictPath)
-                    ? "冲突位置: " + CompactPathMax(conflictPath, 42)
+                    ? "冲突位置: " + conflictPath
                     : "";
                 btnStart.Enabled = false;
                 btnStop.Enabled = false;
