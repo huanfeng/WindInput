@@ -79,15 +79,15 @@ namespace WindPortable
 
             // btnStart
             this.btnStart.Location = new System.Drawing.Point(10, 118);
-            this.btnStart.Size = new System.Drawing.Size(100, 32);
+            this.btnStart.Size = new System.Drawing.Size(120, 32);
             this.btnStart.Text = "启动服务";
             this.btnStart.Name = "btnStart";
             this.btnStart.UseVisualStyleBackColor = true;
             this.btnStart.Click += new System.EventHandler(this.BtnStart_Click);
 
             // btnStop
-            this.btnStop.Location = new System.Drawing.Point(120, 118);
-            this.btnStop.Size = new System.Drawing.Size(100, 32);
+            this.btnStop.Location = new System.Drawing.Point(140, 118);
+            this.btnStop.Size = new System.Drawing.Size(120, 32);
             this.btnStop.Text = "停止服务";
             this.btnStop.Name = "btnStop";
             this.btnStop.UseVisualStyleBackColor = true;
@@ -95,14 +95,14 @@ namespace WindPortable
 
             // btnSetting
             this.btnSetting.Location = new System.Drawing.Point(10, 160);
-            this.btnSetting.Size = new System.Drawing.Size(100, 32);
+            this.btnSetting.Size = new System.Drawing.Size(120, 32);
             this.btnSetting.Text = "打开设置";
             this.btnSetting.Name = "btnSetting";
             this.btnSetting.UseVisualStyleBackColor = true;
             this.btnSetting.Click += new System.EventHandler(this.BtnSetting_Click);
 
             // btnData
-            this.btnData.Location = new System.Drawing.Point(120, 160);
+            this.btnData.Location = new System.Drawing.Point(140, 160);
             this.btnData.Size = new System.Drawing.Size(120, 32);
             this.btnData.Text = "打开数据目录";
             this.btnData.Name = "btnData";
