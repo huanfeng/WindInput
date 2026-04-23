@@ -161,6 +161,21 @@ func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger, norma
 		return fmt.Errorf("未加载到任何拼音词条")
 	}
 
+	// 发现并应用词库补丁
+	var importNames []string
+	for _, f := range allFiles {
+		importNames = append(importNames, strings.TrimSuffix(f, ".dict.yaml"))
+	}
+	patchFiles := FindPatchFiles(mainDictPath, importNames)
+	if len(patchFiles) > 0 {
+		patch := LoadAndMergePatchFiles(patchFiles, logger)
+		if !patch.IsEmpty() {
+			added, modified, deleted := ApplyDictPatch(codeEntries, abbrevEntries, patch, logger)
+			logger.Info("拼音词库补丁已应用", "added", added, "modified", modified, "deleted", deleted)
+			totalCount += added - deleted
+		}
+	}
+
 	writer := binformat.NewDictWriter()
 
 	// 获取归一化器（可选）
@@ -222,17 +237,27 @@ func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger, norma
 }
 
 // RimePinyinSourcePaths 返回拼音词库的所有源文件路径（用于缓存失效检测）
-// mainDictPath 为主词库文件路径，自动从 import_tables 发现关联词库
+// mainDictPath 为主词库文件路径，自动从 import_tables 发现关联词库及补丁文件
 func RimePinyinSourcePaths(mainDictPath string) []string {
 	paths := []string{mainDictPath}
 	dictDir := filepath.Dir(mainDictPath)
 
-	for _, name := range discoverRimePinyinFiles(mainDictPath) {
+	importFiles := discoverRimePinyinFiles(mainDictPath)
+	for _, name := range importFiles {
 		p := filepath.Join(dictDir, name)
 		if _, err := os.Stat(p); err == nil {
 			paths = append(paths, p)
 		}
 	}
+
+	// 包含补丁文件（补丁变更时触发缓存重建）
+	// 将 import 文件名转换回 import_tables 名称格式（去掉 .dict.yaml 后缀）
+	var importNames []string
+	for _, f := range importFiles {
+		importNames = append(importNames, strings.TrimSuffix(f, ".dict.yaml"))
+	}
+	paths = append(paths, FindPatchFiles(mainDictPath, importNames)...)
+
 	return paths
 }
 
@@ -344,6 +369,17 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 		return fmt.Errorf("未加载到任何五笔词条")
 	}
 
+	// 3. 发现并应用词库补丁
+	patchFiles := FindPatchFiles(mainDictPath, importNames)
+	if len(patchFiles) > 0 {
+		patch := LoadAndMergePatchFiles(patchFiles, logger)
+		if !patch.IsEmpty() {
+			added, modified, deleted := ApplyDictPatch(codeEntries, nil, patch, logger)
+			logger.Info("词库补丁已应用", "added", added, "modified", modified, "deleted", deleted)
+			totalCount += added - deleted
+		}
+	}
+
 	// 获取归一化器（可选）
 	var norm *dict.WeightNormalizer
 	if len(normalizer) > 0 {
@@ -403,7 +439,7 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 }
 
 // RimeCodetableSourcePaths 返回 rime 码表词库的所有源文件路径（用于缓存失效检测）
-// mainDictPath 为主词库文件路径，自动发现关联词库
+// mainDictPath 为主词库文件路径，自动发现关联词库及补丁文件
 func RimeCodetableSourcePaths(mainDictPath string) []string {
 	paths := []string{mainDictPath}
 	dictDir := filepath.Dir(mainDictPath)
@@ -415,6 +451,10 @@ func RimeCodetableSourcePaths(mainDictPath string) []string {
 			paths = append(paths, p)
 		}
 	}
+
+	// 包含补丁文件（补丁变更时触发缓存重建）
+	paths = append(paths, FindPatchFiles(mainDictPath, importNames)...)
+
 	return paths
 }
 
@@ -622,6 +662,21 @@ func ConvertPinyinToWdat(mainDictPath, wdatPath string, logger *slog.Logger, nor
 
 	if totalCount == 0 {
 		return fmt.Errorf("未加载到任何拼音词条")
+	}
+
+	// 发现并应用词库补丁
+	var wdatImportNames []string
+	for _, f := range allFiles {
+		wdatImportNames = append(wdatImportNames, strings.TrimSuffix(f, ".dict.yaml"))
+	}
+	wdatPatchFiles := FindPatchFiles(mainDictPath, wdatImportNames)
+	if len(wdatPatchFiles) > 0 {
+		patch := LoadAndMergePatchFiles(wdatPatchFiles, logger)
+		if !patch.IsEmpty() {
+			added, modified, deleted := ApplyDictPatch(codeEntries, abbrevEntries, patch, logger)
+			logger.Info("拼音词库(DAT)补丁已应用", "added", added, "modified", modified, "deleted", deleted)
+			totalCount += added - deleted
+		}
 	}
 
 	var norm *dict.WeightNormalizer
