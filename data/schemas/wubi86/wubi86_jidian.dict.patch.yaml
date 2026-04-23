@@ -1,0 +1,29 @@
+# 词库补丁: wubi86_jidian.dict.yaml
+#
+# 用于在不修改原始 rime-jidian 词库的情况下自定义词条。
+# 补丁在编译词库缓存（wdb）时自动应用。
+#
+# 补丁文件命名规则: <词库名>.dict.patch.yaml（与目标词库文件同目录）
+# 例如: wubi86_jidian_extra.dict.patch.yaml → 补丁 wubi86_jidian_extra.dict.yaml
+#
+# 字段说明 (支持全称/缩写):
+#   code/c   - 编码
+#   text/t   - 文字
+#   weight/w - 权重（数值越大优先级越高）
+#
+# entries: 新增或修改词条（code+text 已存在则更新权重，否则新增）
+# delete:  删除词条（按 code+text 精确匹配）
+#
+# 示例:
+#   entries:
+#     - {c: aaaa, t: 工工, w: 30}     # 缩写写法（推荐）
+#     - code: abcd                      # 全称写法
+#       text: 自定义词
+#       weight: 100
+#   delete:
+#     - {c: a, t: 戈}
+---
+entries:
+- { c: ruuj, t: 拼音, w: 30 }
+- { c: ruuj, t: 抖音, w: 20 }
+- { c: kkkk, t: 口, w: 70 }
