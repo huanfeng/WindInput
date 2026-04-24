@@ -10,6 +10,16 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from "@/components/ui/alert-dialog";
 
 const props = defineProps<{
   visible: boolean;
@@ -119,6 +129,26 @@ const targetWarning = computed(() => {
   }
   return "";
 });
+
+// 删除确认对话框
+const deleteConfirmVisible = ref(false);
+
+function onDeleteOldChange(checked: boolean) {
+  if (checked) {
+    deleteConfirmVisible.value = true;
+  } else {
+    deleteOld.value = false;
+  }
+}
+
+function onDeleteConfirmed() {
+  deleteConfirmVisible.value = false;
+  deleteOld.value = true;
+}
+
+function onDeleteCancelled() {
+  deleteConfirmVisible.value = false;
+}
 
 async function execute() {
   if (!canExecute.value) return;
@@ -242,14 +272,14 @@ async function execute() {
               id="deleteOld"
               :disabled="!migrate"
               :checked="deleteOld"
-              @update:checked="deleteOld = $event"
+              @update:checked="onDeleteOldChange"
             />
             <label
               for="deleteOld"
               class="option-label"
               :class="{ disabled: !migrate }"
             >
-              迁移后删除旧目录中的数据文件
+              迁移后<span class="text-destructive">删除</span>旧目录中的数据文件
             </label>
           </div>
         </div>
@@ -279,6 +309,22 @@ async function execute() {
         </template>
       </DialogFooter>
     </DialogContent>
+
+    <!-- 删除确认对话框（局部，避免被父 Dialog 遮挡） -->
+    <AlertDialog :open="deleteConfirmVisible">
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>确认删除源目录数据</AlertDialogTitle>
+          <AlertDialogDescription>
+            勾选后，迁移完成时将清空源目录中的所有文件，此操作不可撤销。请确认源目录中没有其他重要数据。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel @click="onDeleteCancelled">取消</AlertDialogCancel>
+          <AlertDialogAction @click="onDeleteConfirmed">确认</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </Dialog>
 </template>
 

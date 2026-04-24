@@ -101,5 +101,19 @@ func ValidateDataDirPath(path string) (bool, string) {
 		}
 	}
 
+	// 检查是否为应用安装目录或其 data 子目录
+	exeDir, err := GetExeDir()
+	if err == nil {
+		cleanExeDir := filepath.Clean(exeDir)
+		lowerExeDir := strings.ToLower(cleanExeDir)
+		if lower == lowerExeDir {
+			return false, "不能使用应用安装目录"
+		}
+		installDataDir := strings.ToLower(filepath.Join(cleanExeDir, "data"))
+		if lower == installDataDir || strings.HasPrefix(lower, installDataDir+string(filepath.Separator)) {
+			return false, "不能使用应用安装目录的 data 目录"
+		}
+	}
+
 	return true, ""
 }
