@@ -1461,6 +1461,11 @@ STDAPI CTextService::OnChange(REFGUID rguid)
                 EndComposition();
             _bChineseMode = bOpen;
         }
+
+        // Reset KeyEventSink composing state (clear _hasCandidates, _isComposing)
+        // Without this, apps that don't handle OnTestKeyDown(TRUE)+OnKeyDown(FALSE)
+        // flip (e.g., WPS, WindTerm) will swallow keys after Ctrl+Space mode switch
+        ResetComposingState();
     }
     else
     {
@@ -1468,6 +1473,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
         if (!bOpen)
             EndComposition();
         _bChineseMode = bOpen;
+        ResetComposingState();
     }
 
     // Update language bar
