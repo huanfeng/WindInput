@@ -65,6 +65,6 @@ try {
 Write-Host ""
 Write-Host "======================================"
 Write-Host "Installer build completed."
-Write-Host "Output: build\installer\清风输入法-${Version}-Setup.exe"
+Write-Host "Output: build\installer\WindInput-${Version}-Setup.exe"
 Write-Host "======================================"
 exit 0

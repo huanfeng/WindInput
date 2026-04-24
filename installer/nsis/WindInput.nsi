@@ -33,6 +33,15 @@ Var hBackupToDesktop
 Var InstallMode
 Var hStandard
 Var hPortable
+Var IsUpgrade
+Var KeepUserData
+Var UserDataDir
+Var CustomDataDir
+Var UseCustomDataDir
+Var hDataDirDefault
+Var hDataDirCustom
+Var hDataDirPath
+Var hDataDirBrowse
 
 !if /FileExists "${BUILD_DIR}\wind_tsf.dll"
 !else
@@ -97,6 +106,7 @@ VIAddVersionKey "LegalCopyright" "Copyright (c) WindInput Project"
 !insertmacro MUI_PAGE_WELCOME
 Page custom InstallModePageCreate InstallModePageLeave
 !insertmacro MUI_PAGE_DIRECTORY
+Page custom DataDirPageCreate DataDirPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_REBOOTLATER_DEFAULT
 !insertmacro MUI_PAGE_FINISH
@@ -124,11 +134,67 @@ Function .onInit
     SetErrorLevel 2
     Abort
   ${EndIf}
+
+  ; 初始化变量
+  StrCpy $InstallMode "standard"
+  StrCpy $IsUpgrade "0"
+  StrCpy $UseCustomDataDir "0"
+  StrCpy $CustomDataDir ""
+
+  ; 读取已有的 datadir.conf（可能是上次卸载时保留的）
+  SetShellVarContext current
+  IfFileExists "$LOCALAPPDATA\${APP_DIRNAME}\datadir.conf" 0 init_no_datadir
+    FileOpen $0 "$LOCALAPPDATA\${APP_DIRNAME}\datadir.conf" r
+    FileRead $0 $1
+    FileClose $0
+    ; 去掉可能的换行符
+    StrCpy $2 $1 1 -1
+    StrCmp $2 "$\n" 0 +2
+      StrCpy $1 $1 -1
+    StrCpy $2 $1 1 -1
+    StrCmp $2 "$\r" 0 +2
+      StrCpy $1 $1 -1
+    StrCmp $1 "" init_no_datadir
+      StrCpy $CustomDataDir $1
+      StrCpy $UseCustomDataDir "1"
+  init_no_datadir:
+  SetShellVarContext all
+
+  ; 检测已安装版本
+  ReadRegStr $0 HKLM "${UNINST_KEY}" "UninstallString"
+  StrCmp $0 "" init_done
+
+  StrCpy $IsUpgrade "1"
+
+  ; 提取卸载程序路径（去掉引号）
+  StrCpy $1 $0 1
+  StrCmp $1 '"' 0 +3
+    StrCpy $0 $0 "" 1
+    StrCpy $0 $0 -1
+
+  ; 确认卸载程序存在
+  IfFileExists "$0" 0 init_done
+
+  ; 读取旧安装目录作为默认值
+  ReadRegStr $INSTDIR HKLM "${UNINST_KEY}" "InstallLocation"
+
+  ; 静默卸载旧版（保留用户数据）
+silent_uninstall_retry:
+  ExecWait '"$0" /S /KEEP_USER_DATA' $1
+
+  ${If} $1 != 0
+    MessageBox MB_ABORTRETRYIGNORE|MB_ICONEXCLAMATION \
+      "旧版本卸载失败（错误码：$1）。$\r$\n$\r$\n中止 = 取消安装$\r$\n重试 = 重新卸载$\r$\n忽略 = 跳过继续安装" \
+      IDRETRY silent_uninstall_retry \
+      IDIGNORE init_done
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+
+init_done:
 FunctionEnd
 
 Function InstallModePageCreate
-  StrCpy $InstallMode "standard"
-
   !insertmacro MUI_HEADER_TEXT "选择安装类型" "请选择安装方式"
 
   nsDialogs::Create 1018
@@ -166,10 +232,195 @@ Function InstallModePageLeave
   ${EndIf}
 FunctionEnd
 
+; ---------- Data Directory Page (first install only) ----------
+
+Function DataDirPageCreate
+  ; 仅全新安装的标准模式才显示此页面
+  StrCmp $IsUpgrade "1" 0 +2
+    Abort
+  StrCmp $InstallMode "portable" 0 +2
+    Abort
+
+  !insertmacro MUI_HEADER_TEXT "数据存储目录" "选择数据文件的存放位置"
+
+  nsDialogs::Create 1018
+  Pop $0
+
+  ${NSD_CreateLabel} 0 0 100% 24u "请选择输入法数据文件（用户词库、配置等）的存储位置："
+  Pop $0
+
+  ${NSD_CreateRadioButton} 12u 28u 100% 12u "默认位置（推荐）—— %APPDATA%\${APP_DIRNAME}"
+  Pop $hDataDirDefault
+  ${NSD_OnClick} $hDataDirDefault OnDataDirRadioChange
+
+  ${NSD_CreateRadioButton} 12u 50u 100% 12u "自定义位置"
+  Pop $hDataDirCustom
+  ${NSD_OnClick} $hDataDirCustom OnDataDirRadioChange
+
+  ${NSD_CreateText} 24u 68u -80u 14u ""
+  Pop $hDataDirPath
+
+  ${NSD_CreateButton} -52u 68u 40u 14u "浏览..."
+  Pop $hDataDirBrowse
+  ${NSD_OnClick} $hDataDirBrowse OnBrowseDataDir
+
+  ; 如果已有自定义数据目录配置，自动选中并填入
+  StrCmp $UseCustomDataDir "1" 0 datadir_use_default
+    ${NSD_SetState} $hDataDirCustom ${BST_CHECKED}
+    ${NSD_SetText} $hDataDirPath "$CustomDataDir"
+    EnableWindow $hDataDirPath 1
+    EnableWindow $hDataDirBrowse 1
+    Goto datadir_radio_done
+  datadir_use_default:
+    ${NSD_SetState} $hDataDirDefault ${BST_CHECKED}
+    EnableWindow $hDataDirPath 0
+    EnableWindow $hDataDirBrowse 0
+  datadir_radio_done:
+
+  ${NSD_CreateLabel} 24u 88u 100% 24u "建议选择一个专用目录来存放输入法数据文件。"
+  Pop $0
+  SetCtlColors $0 808080 transparent
+
+  nsDialogs::Show
+FunctionEnd
+
+Function OnDataDirRadioChange
+  ${NSD_GetState} $hDataDirCustom $0
+  ${If} $0 == ${BST_CHECKED}
+    EnableWindow $hDataDirPath 1
+    EnableWindow $hDataDirBrowse 1
+  ${Else}
+    EnableWindow $hDataDirPath 0
+    EnableWindow $hDataDirBrowse 0
+  ${EndIf}
+FunctionEnd
+
+Function OnBrowseDataDir
+  nsDialogs::SelectFolderDialog "选择数据存储目录" ""
+  Pop $0
+  ${If} $0 != error
+    StrCpy $CustomDataDir "$0"
+    ${NSD_SetText} $hDataDirPath "$CustomDataDir"
+  ${EndIf}
+FunctionEnd
+
+Function DataDirPageLeave
+  ${NSD_GetState} $hDataDirCustom $0
+  ${If} $0 != ${BST_CHECKED}
+    StrCpy $UseCustomDataDir "0"
+    Return
+  ${EndIf}
+
+  StrCpy $UseCustomDataDir "1"
+  ${NSD_GetText} $hDataDirPath $CustomDataDir
+
+  ; 验证：路径不能为空
+  StrCmp $CustomDataDir "" 0 validate_notempty
+    MessageBox MB_OK|MB_ICONEXCLAMATION "请输入数据目录路径"
+    Abort
+  validate_notempty:
+
+  ; 验证：必须是绝对路径（含 :\）
+  StrCpy $1 $CustomDataDir 1 1
+  StrCmp $1 ":" validate_abs_ok
+    MessageBox MB_OK|MB_ICONEXCLAMATION "必须是绝对路径（如 D:\WindData）"
+    Abort
+  validate_abs_ok:
+
+  ; 验证：不能是安装目录
+  StrCmp $CustomDataDir $INSTDIR 0 validate_not_instdir
+    MessageBox MB_OK|MB_ICONEXCLAMATION "不能使用应用安装目录作为数据目录"
+    Abort
+  validate_not_instdir:
+
+  ; 验证：不能是安装目录的 data 子目录
+  StrCmp $CustomDataDir "$INSTDIR\data" 0 validate_not_instdata
+    MessageBox MB_OK|MB_ICONEXCLAMATION "不能使用应用安装目录的 data 目录"
+    Abort
+  validate_not_instdata:
+
+  ; 验证：不能是 Windows 系统目录
+  StrLen $1 $WINDIR
+  StrCpy $2 $CustomDataDir $1
+  StrCmp $2 $WINDIR 0 validate_not_windir
+    MessageBox MB_OK|MB_ICONEXCLAMATION "不能使用 Windows 系统目录"
+    Abort
+  validate_not_windir:
+
+  ; 验证：不能在 Program Files 下
+  StrLen $1 $PROGRAMFILES64
+  StrCpy $2 $CustomDataDir $1
+  StrCmp $2 $PROGRAMFILES64 0 validate_not_pf64
+    MessageBox MB_OK|MB_ICONEXCLAMATION "不能使用系统程序目录"
+    Abort
+  validate_not_pf64:
+  StrLen $1 $PROGRAMFILES32
+  StrCpy $2 $CustomDataDir $1
+  StrCmp $2 $PROGRAMFILES32 0 validate_not_pf32
+    MessageBox MB_OK|MB_ICONEXCLAMATION "不能使用系统程序目录"
+    Abort
+  validate_not_pf32:
+
+  ; 验证：写入权限（尝试创建目录）
+  ClearErrors
+  CreateDirectory "$CustomDataDir"
+  IfErrors 0 validate_writable_ok
+    MessageBox MB_OK|MB_ICONEXCLAMATION "无法创建目录，请检查路径是否正确以及是否有写入权限"
+    Abort
+  validate_writable_ok:
+
+  ; 验证：目录非空时二次确认
+  FindFirst $0 $1 "$CustomDataDir\*.*"
+validate_empty_loop:
+  StrCmp $1 "" validate_is_empty
+  StrCmp $1 "." validate_empty_next
+  StrCmp $1 ".." validate_empty_next
+  ; 发现文件或子目录
+  FindClose $0
+  MessageBox MB_YESNO|MB_ICONQUESTION \
+    "目录 $CustomDataDir 已有文件，同名文件将被跳过。$\r$\n确定使用此目录？" \
+    IDYES validate_nonempty_ok
+  Abort
+validate_empty_next:
+  FindNext $0 $1
+  Goto validate_empty_loop
+validate_is_empty:
+  FindClose $0
+validate_nonempty_ok:
+FunctionEnd
+
+; ---------- Uninstaller ----------
+
 Function un.onInit
   StrCpy $CleanRoaming ${BST_UNCHECKED}
   StrCpy $CleanLocal ${BST_CHECKED}
   StrCpy $BackupToDesktop ${BST_CHECKED}
+  StrCpy $KeepUserData "0"
+
+  ; 解析 /KEEP_USER_DATA 参数
+  ${GetParameters} $0
+  ${GetOptions} $0 "/KEEP_USER_DATA" $1
+  IfErrors +2 0
+    StrCpy $KeepUserData "1"
+
+  ; 读取 datadir.conf 确定实际用户数据目录
+  SetShellVarContext current
+  StrCpy $UserDataDir "$APPDATA\${APP_DIRNAME}"
+  IfFileExists "$LOCALAPPDATA\${APP_DIRNAME}\datadir.conf" 0 un_init_datadir_done
+    FileOpen $0 "$LOCALAPPDATA\${APP_DIRNAME}\datadir.conf" r
+    FileRead $0 $1
+    FileClose $0
+    ; 去掉可能的换行符
+    StrCpy $2 $1 1 -1
+    StrCmp $2 "$\n" 0 +2
+      StrCpy $1 $1 -1
+    StrCpy $2 $1 1 -1
+    StrCmp $2 "$\r" 0 +2
+      StrCpy $1 $1 -1
+    StrCmp $1 "" un_init_datadir_done
+      StrCpy $UserDataDir $1
+  un_init_datadir_done:
+  SetShellVarContext all
 FunctionEnd
 
 ; ---------- Shared helpers ----------
@@ -289,10 +540,14 @@ FunctionEnd
 ; ---------- Uninstall: user data cleanup page ----------
 
 Function un.UserDataPageCreate
+  ; 静默+保留数据模式下跳过此页
+  StrCmp $KeepUserData "1" 0 +2
+    Abort
+
   SetShellVarContext current
 
-  ; If neither Roaming nor Local user data exists, skip this page
-  IfFileExists "$APPDATA\${APP_DIRNAME}\*.*" un_userdata_show 0
+  ; If neither user data dir nor Local data exists, skip this page
+  IfFileExists "$UserDataDir\*.*" un_userdata_show 0
   IfFileExists "$LOCALAPPDATA\${APP_DIRNAME}\*.*" un_userdata_show 0
   Abort
 un_userdata_show:
@@ -305,13 +560,13 @@ un_userdata_show:
   ${NSD_CreateLabel} 0 0 100% 24u "卸载程序检测到以下用户数据，请选择是否清除："
   Pop $0
 
-  ; Checkbox: clean Roaming data (user config, state, phrases)
+  ; Checkbox: clean user config data (user config, state, phrases)
   ${NSD_CreateCheckbox} 0 30u 100% 12u "清除用户配置数据（用户配置、输入状态、自定义短语）"
   Pop $hCleanRoaming
   ${NSD_SetState} $hCleanRoaming ${BST_UNCHECKED}
   ${NSD_OnClick} $hCleanRoaming un.OnCleanRoamingClick
 
-  ${NSD_CreateLabel} 12u 44u 100% 12u "$APPDATA\${APP_DIRNAME}"
+  ${NSD_CreateLabel} 12u 44u 100% 12u "$UserDataDir"
   Pop $0
   SetCtlColors $0 808080 transparent
 
@@ -571,6 +826,17 @@ install_standard_mode:
   CreateShortcut "$SMPROGRAMS\清风输入法\清风输入法 设置.lnk" "$INSTDIR\wind_setting.exe" "" "$INSTDIR\wind_setting.exe" 0
   CreateShortcut "$SMPROGRAMS\清风输入法\卸载 清风输入法.lnk" "$INSTDIR\uninstall.exe"
 
+  ; --- 写入自定义数据目录配置 ---
+  StrCmp $UseCustomDataDir "1" 0 skip_write_datadir_conf
+    SetShellVarContext current
+    CreateDirectory "$LOCALAPPDATA\${APP_DIRNAME}"
+    FileOpen $0 "$LOCALAPPDATA\${APP_DIRNAME}\datadir.conf" w
+    FileWrite $0 "$CustomDataDir"
+    FileClose $0
+    CreateDirectory "$CustomDataDir"
+    SetShellVarContext all
+  skip_write_datadir_conf:
+
   DetailPrint "正在写入卸载信息..."
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -695,30 +961,38 @@ uninst_cleanup_bak_end:
   ; --- Step 6: Clean user data ---
   SetShellVarContext current
 
+  ; 如果是静默+保留数据模式，跳过所有用户数据清理
+  StrCmp $KeepUserData "1" uninst_skip_userdata
+
   ${If} $CleanRoaming == ${BST_CHECKED}
     ${If} $BackupToDesktop == ${BST_CHECKED}
       DetailPrint "正在备份用户数据到桌面..."
       CreateDirectory "$DESKTOP\${APP_DIRNAME}_Backup"
-      CopyFiles /SILENT "$APPDATA\${APP_DIRNAME}\*.*" "$DESKTOP\${APP_DIRNAME}_Backup"
+      CopyFiles /SILENT "$UserDataDir\*.*" "$DESKTOP\${APP_DIRNAME}_Backup"
     ${EndIf}
     DetailPrint "正在清除用户配置数据..."
-    RMDir /r "$APPDATA\${APP_DIRNAME}"
+    RMDir /r "$UserDataDir"
+    ; 完全清除时也删除 datadir.conf
+    Delete "$LOCALAPPDATA\${APP_DIRNAME}\datadir.conf"
   ${EndIf}
 
   ${If} $CleanLocal == ${BST_CHECKED}
     DetailPrint "正在清除本地缓存数据..."
-    RMDir /r "$LOCALAPPDATA\${APP_DIRNAME}"
+    ; 仅清理缓存和日志子目录，保留 datadir.conf（除非已在上面删除）
+    RMDir /r "$LOCALAPPDATA\${APP_DIRNAME}\cache"
+    RMDir /r "$LOCALAPPDATA\${APP_DIRNAME}\logs"
+    ; 尝试删除目录（如果 datadir.conf 已被删除则目录可移除，否则保留）
+    RMDir "$LOCALAPPDATA\${APP_DIRNAME}"
   ${Else}
     DetailPrint "正在清理缓存..."
     RMDir /r "$LOCALAPPDATA\${APP_DIRNAME}\cache"
   ${EndIf}
 
-  ; 清理旧 wind_setting WebView2 缓存数据（位于 %APPDATA%\wind_setting.exe）
+uninst_skip_userdata:
+
+  ; WebView2 缓存始终清理（即使 KEEP_USER_DATA 也会清理）
   DetailPrint "正在清理设置程序缓存..."
   RMDir /r "$APPDATA\wind_setting.exe"
-
-  ; 清理 wind_setting WebView2 缓存数据（位于 %TEMP%\wind_setting）
-  DetailPrint "正在清理设置程序缓存..."
   RMDir /r "$TEMP\wind_setting"
 
   SetShellVarContext all
