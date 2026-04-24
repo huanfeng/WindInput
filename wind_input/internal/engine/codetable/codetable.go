@@ -12,10 +12,8 @@ import (
 )
 
 const (
-	// PrefixWeightPenalty 前缀匹配固定降权值（ConvertRaw 使用）
+	// PrefixWeightPenalty 前缀匹配统一降权值
 	PrefixWeightPenalty = 2000000
-	// PrefixWeightPenaltyPerKey 前缀匹配每剩余键降权值（ConvertEx 使用）
-	PrefixWeightPenaltyPerKey = 1000000
 )
 
 // LearningStrategy 造词策略接口（避免引擎直接依赖 schema 包）
@@ -309,21 +307,19 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		}
 	}
 
-	// ========== Phase 3: 处理前缀候选（code hint + 按剩余码长分层降权）==========
-	// 参考 RIME table_translator: 前缀候选 (completion) 整体排在精确匹配之后。
-	// 在此基础上按剩余码长分层：剩余1键 > 剩余2键 > 剩余3键，
-	// 同层内保持原始 weight 排序。
-	// WeightAsOrder 模式：权重仅表示同码内排序序号，前缀候选统一设为固定降权值，
-	// 同 tier 内按 NaturalOrder（文件顺序）排序。
+	// ========== Phase 3: 处理前缀候选（code hint + 统一降权）==========
+	// 前缀候选整体排在精确匹配之后，统一降权而不按剩余码长分层。
+	// 码表类输入法中编码长度不代表「接近完成」，分层会覆盖词库原始排序信号。
+	// WeightAsOrder 模式：前缀候选统一设为固定降权值，按 NaturalOrder（文件顺序）排序。
+	// 普通模式：统一减去固定降权值，保留原始权重差异。
 	for i := range prefixCandidates {
 		if e.config.ShowCodeHint && len(prefixCandidates[i].Code) > inputLen {
 			prefixCandidates[i].Comment = prefixCandidates[i].Code[inputLen:]
 		}
-		remaining := len(prefixCandidates[i].Code) - inputLen
 		if e.config.WeightAsOrder {
-			prefixCandidates[i].Weight = -remaining * PrefixWeightPenaltyPerKey
+			prefixCandidates[i].Weight = -PrefixWeightPenalty
 		} else {
-			prefixCandidates[i].Weight -= remaining * PrefixWeightPenaltyPerKey
+			prefixCandidates[i].Weight -= PrefixWeightPenalty
 		}
 	}
 
@@ -351,11 +347,10 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 			if len(completionCandidates[i].Code) > inputLen {
 				completionCandidates[i].Comment = completionCandidates[i].Code[inputLen:]
 			}
-			remaining := len(completionCandidates[i].Code) - inputLen
 			if e.config.WeightAsOrder {
-				completionCandidates[i].Weight = -remaining * PrefixWeightPenaltyPerKey
+				completionCandidates[i].Weight = -PrefixWeightPenalty
 			} else {
-				completionCandidates[i].Weight -= remaining * PrefixWeightPenaltyPerKey
+				completionCandidates[i].Weight -= PrefixWeightPenalty
 			}
 		}
 		prefixCandidates = append(prefixCandidates, completionCandidates...)
