@@ -6,16 +6,16 @@
 phrases:
   # ===== 日期 =====
   - code: "date"
-    text: "$Y年$MM月$DD日"
+    text: "$Y年$M月$D日"
     position: 1
   - code: "date"
     text: "$Y-$MM-$DD"
     position: 2
   - code: "date"
-    text: "$Y/$MM/$DD"
+    text: "$Y.$MM.$DD"
     position: 3
   - code: "date"
-    text: "$MM/$DD/$Y"
+    text: "$Y/$MM/$DD"
     position: 4
   - code: "date"
     text: "${YC}年${MC}月${DC}日"
@@ -34,19 +34,28 @@ phrases:
 
   # ===== 日期时间 =====
   - code: "datm"
-    text: "$Y-$MM-$DD $HH:$mm:$ss"
+    text: "$Y年$M月$D日 $HH:$mm:$ss"
     position: 1
   - code: "datm"
-    text: "$Y年$MM月$DD日 $HH:$mm:$ss"
+    text: "$Y-$MM-$DD $HH:$mm:$ss"
     position: 2
+  - code: "datm"
+    text: "${YC}年${MC}月${DC}日 $HH:$mm:$ss"
+    position: 3
 
   # ===== 星期 =====
   - code: "week"
-    text: "$W"
+    text: "星期$WC"
     position: 1
   - code: "week"
-    text: "$Y年$MM月$DD日 $W"
+    text: "周$WC"
     position: 2
+  - code: "week"
+    text: "$Y年$M月$D日 星期$WC"
+    position: 3
+  - code: "week"
+    text: "$Y年$M月$D日 周$WC"
+    position: 4
 
   # ===== UUID =====
   - code: "uuid"
@@ -181,38 +190,44 @@ phrases:
 
   # ===== zz 系列：日期时间快捷输入 =====
 
-  # zzrq - 日期
+  # zzrq - 日期（与 date 统一）
   - code: "zzrq"
     text: "$Y年$M月$D日"
     position: 1
   - code: "zzrq"
-    text: "$Y.$MM.$DD"
+    text: "$Y-$MM-$DD"
     position: 2
   - code: "zzrq"
-    text: "$Y-$MM-$DD"
+    text: "$Y.$MM.$DD"
     position: 3
+  - code: "zzrq"
+    text: "$Y/$MM/$DD"
+    position: 4
   - code: "zzrq"
     text: "${YC}年${MC}月${DC}日"
+    position: 5
+
+  # zzsj - 时间（与 time 统一）
+  - code: "zzsj"
+    text: "$HH:$mm:$ss"
+    position: 1
+  - code: "zzsj"
+    text: "$HH:$mm"
+    position: 2
+  - code: "zzsj"
+    text: "$HH时$mm分$ss秒"
+    position: 3
+
+  # zzxq - 星期（与 week 统一）
+  - code: "zzxq"
+    text: "星期$WC"
+    position: 1
+  - code: "zzxq"
+    text: "周$WC"
+    position: 2
+  - code: "zzxq"
+    text: "$Y年$M月$D日 星期$WC"
+    position: 3
+  - code: "zzxq"
+    text: "$Y年$M月$D日 周$WC"
     position: 4
-
-  # zzsj - 时间
-  - code: "zzsj"
-    text: "$Y年$M月$D日 $HH:$mm:$ss"
-    position: 1
-  - code: "zzsj"
-    text: "$Y-$MM-$DD $HH:$mm:$ss"
-    position: 2
-  - code: "zzsj"
-    text: "${YC}年${MC}月${DC}日 $HH:$mm:$ss"
-    position: 3
-
-  # zzxq - 星期
-  - code: "zzxq"
-    text: "$W"
-    position: 1
-  - code: "zzxq"
-    text: "$Y年$M月$D日 $W"
-    position: 2
-  - code: "zzxq"
-    text: "${YC}年${MC}月${DC}日 $W"
-    position: 3

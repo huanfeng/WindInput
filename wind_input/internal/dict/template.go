@@ -59,6 +59,10 @@ func (te *TemplateEngine) registerBuiltinVariables() {
 		weekdays := []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
 		return weekdays[now().Weekday()]
 	})
+	te.Register("WC", func() string {
+		weekdays := []string{"日", "一", "二", "三", "四", "五", "六"}
+		return weekdays[now().Weekday()]
+	})
 	te.Register("w", func() string { return fmt.Sprintf("%d", now().Weekday()) }) // 星期数字(0=日)
 
 	// ===== 中文 =====
