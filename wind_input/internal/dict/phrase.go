@@ -9,7 +9,6 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/store"
-	"github.com/huanfeng/wind_input/pkg/fileutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,9 +19,9 @@ import (
 type PhraseLayer struct {
 	mu                 sync.RWMutex
 	name               string
-	systemFilePath     string // 系统短语文件（随程序打包，只读）
-	systemUserFilePath string // 用户目录的系统短语文件（同名覆盖，存在时替代系统文件）
-	userFilePath       string // 用户短语文件（用户可编辑）
+	systemFilePath     string       // 系统短语文件（随程序打包，只读）
+	systemUserFilePath string       // 用户目录的系统短语文件（同名覆盖，存在时替代系统文件）
+	store              *store.Store // 持久化后端（user_data.db）
 
 	// 静态短语（不含变量）: code -> []PhraseEntry，参与前缀搜索
 	staticPhrases map[string][]PhraseEntry
@@ -75,21 +74,21 @@ type PhraseFileEntry struct {
 	Disabled bool   `yaml:"disabled,omitempty"`
 }
 
-// NewPhraseLayer 创建短语层（兼容旧调用）
-func NewPhraseLayer(name string, systemPath, userPath string) *PhraseLayer {
-	return NewPhraseLayerEx(name, systemPath, "", userPath)
+// NewPhraseLayer 创建短语层（测试用简化版，不绑定 Store）
+func NewPhraseLayer(name string, systemPath string) *PhraseLayer {
+	return NewPhraseLayerEx(name, systemPath, "", nil)
 }
 
 // NewPhraseLayerEx 创建短语层
 // systemPath: 系统短语文件路径（程序目录，只读）
 // systemUserPath: 用户目录的系统短语文件（同名覆盖，存在时替代 systemPath）
-// userPath: 用户短语文件路径（可读写）
-func NewPhraseLayerEx(name string, systemPath, systemUserPath, userPath string) *PhraseLayer {
+// s: 持久化后端（user_data.db），可为 nil（测试场景）
+func NewPhraseLayerEx(name string, systemPath, systemUserPath string, s *store.Store) *PhraseLayer {
 	return &PhraseLayer{
 		name:               name,
 		systemFilePath:     systemPath,
 		systemUserFilePath: systemUserPath,
-		userFilePath:       userPath,
+		store:              s,
 		staticPhrases:      make(map[string][]PhraseEntry),
 		dynamicPhrases:     make(map[string][]PhraseEntry),
 		phraseGroups:       make(map[string]PhraseGroup),
@@ -512,19 +511,64 @@ func (pl *PhraseLayer) HasPhraseOverride(code, templateText string) bool {
 // ResetPhraseOverride 移除用户对指定短语的位置覆盖，恢复系统默认
 func (pl *PhraseLayer) ResetPhraseOverride(code, templateText string) error {
 	pl.mu.Lock()
+	defer pl.mu.Unlock()
 
 	code = strings.ToLower(code)
 
-	// 从用户文件中移除此条目
-	removed := pl.removeUserOverride(code, templateText)
-	pl.clearCmdCache(code)
-	pl.mu.Unlock()
+	// 从系统短语 YAML 中查找原始 position
+	origPos := 0
+	found := false
+	for _, path := range []string{pl.systemUserFilePath, pl.systemFilePath} {
+		if path == "" {
+			continue
+		}
+		entries, err := ParsePhraseYAMLFile(path)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if strings.ToLower(e.Code) == code && e.Text == templateText {
+				origPos = e.Position
+				if origPos <= 0 {
+					origPos = 1
+				}
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
 
-	if !removed {
+	if !found {
 		return nil
 	}
 
-	// TODO: 后续迁移短语位置覆盖到 Store 后端后，此处应重新从 Store 加载
+	// 恢复内存中的 position
+	for _, entries := range []map[string][]PhraseEntry{pl.dynamicPhrases, pl.staticPhrases} {
+		for i, e := range entries[code] {
+			if e.Text == templateText {
+				entries[code][i].Position = origPos
+			}
+		}
+	}
+	pl.clearCmdCache(code)
+
+	// 同步到 Store
+	if pl.store != nil {
+		records, err := pl.store.GetPhrasesByCode(code)
+		if err == nil {
+			for _, rec := range records {
+				if rec.Text == templateText {
+					rec.Position = origPos
+					_ = pl.store.UpdatePhrase(rec)
+					break
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -594,44 +638,10 @@ func (pl *PhraseLayer) clearCmdCache(code string) {
 	delete(pl.cmdCache, code)
 }
 
-// removeUserOverride 从用户文件配置中移除指定条目的覆盖
-func (pl *PhraseLayer) removeUserOverride(code, templateText string) bool {
-	if pl.userFilePath == "" {
-		return false
-	}
-	data, err := os.ReadFile(pl.userFilePath)
-	if err != nil {
-		return false
-	}
-	var config PhrasesFileConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return false
-	}
-	found := false
-	filtered := config.Phrases[:0]
-	for _, p := range config.Phrases {
-		if strings.ToLower(p.Code) == code && p.Text == templateText {
-			found = true
-			continue
-		}
-		filtered = append(filtered, p)
-	}
-	if !found {
-		return false
-	}
-	config.Phrases = filtered
-	out, err := yaml.Marshal(&config)
-	if err != nil {
-		return false
-	}
-	_ = fileutil.AtomicWrite(pl.userFilePath, out, 0644)
-	return true
-}
-
-// savePositionOverrides 将两个条目的当前 position 持久化到用户文件
+// savePositionOverrides 将两个条目的当前 position 持久化到 Store
 func (pl *PhraseLayer) savePositionOverrides(code, text1, text2 string) error {
-	if pl.userFilePath == "" {
-		return fmt.Errorf("no user file path configured")
+	if pl.store == nil {
+		return nil
 	}
 
 	// 查找当前 position
@@ -647,33 +657,24 @@ func (pl *PhraseLayer) savePositionOverrides(code, text1, text2 string) error {
 		}
 	}
 
-	// 加载用户文件
-	var config PhrasesFileConfig
-	data, err := os.ReadFile(pl.userFilePath)
-	if err == nil {
-		_ = yaml.Unmarshal(data, &config)
+	// 从 Store 读取并更新位置
+	records, err := pl.store.GetPhrasesByCode(code)
+	if err != nil {
+		return fmt.Errorf("get phrases by code %q: %w", code, err)
 	}
-
-	// 更新或添加条目
-	updateOrAdd := func(text string, position int) {
-		for i, p := range config.Phrases {
-			if strings.ToLower(p.Code) == code && p.Text == text {
-				config.Phrases[i].Position = position
-				return
+	for _, rec := range records {
+		if rec.Text == text1 && rec.Position != pos1 {
+			rec.Position = pos1
+			if err := pl.store.UpdatePhrase(rec); err != nil {
+				return fmt.Errorf("update phrase position: %w", err)
 			}
 		}
-		config.Phrases = append(config.Phrases, PhraseFileEntry{
-			Code:     code,
-			Text:     text,
-			Position: position,
-		})
+		if rec.Text == text2 && rec.Position != pos2 {
+			rec.Position = pos2
+			if err := pl.store.UpdatePhrase(rec); err != nil {
+				return fmt.Errorf("update phrase position: %w", err)
+			}
+		}
 	}
-	updateOrAdd(text1, pos1)
-	updateOrAdd(text2, pos2)
-
-	out, err := yaml.Marshal(&config)
-	if err != nil {
-		return fmt.Errorf("failed to marshal phrases: %w", err)
-	}
-	return fileutil.AtomicWrite(pl.userFilePath, out, 0644)
+	return nil
 }

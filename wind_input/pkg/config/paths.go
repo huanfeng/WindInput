@@ -14,7 +14,6 @@ const (
 	ConfigFileName    = "config.yaml"         // 用户配置
 	StateFileName     = "state.yaml"          // 用户状态
 	SystemPhrasesFile = "system.phrases.yaml" // 系统短语（data/ 目录 和 用户目录同名覆盖）
-	UserPhrasesFile   = "user.phrases.yaml"   // 用户短语（用户目录）
 	SystemConfigFile  = "config.yaml"         // 系统预置配置（data/ 目录）
 )
 
@@ -51,15 +50,6 @@ func GetStatePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(configDir, StateFileName), nil
-}
-
-// GetUserPhrasesPath returns the full path to the user phrases file
-func GetUserPhrasesPath() (string, error) {
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, UserPhrasesFile), nil
 }
 
 // GetSystemPhrasesUserPath returns the full path to the user's system phrases override file

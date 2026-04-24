@@ -102,8 +102,7 @@ func (dm *DictManager) Initialize() error {
 	// 系统短语：优先加载用户目录的同名文件（用户修改后的副本），不存在则加载程序目录的原始文件
 	systemPhrasePath := filepath.Join(dm.systemDir, "system.phrases.yaml")
 	systemPhraseUserPath := filepath.Join(dm.dataDir, "system.phrases.yaml")
-	userPhrasePath := filepath.Join(dm.dataDir, "user.phrases.yaml")
-	dm.phraseLayer = NewPhraseLayerEx("phrases", systemPhrasePath, systemPhraseUserPath, userPhrasePath)
+	dm.phraseLayer = NewPhraseLayerEx("phrases", systemPhrasePath, systemPhraseUserPath, dm.store)
 
 	if err := dm.SeedDefaultPhrases(); err != nil {
 		dm.logger.Error("种子默认短语失败", "error", err)
@@ -184,30 +183,6 @@ func (dm *DictManager) SeedDefaultPhrases() error {
 				}
 				records = append(records, rec)
 			}
-		}
-	}
-
-	// Load user phrases (if exist)
-	userFile := filepath.Join(dm.dataDir, "user.phrases.yaml")
-	if entries, err := ParsePhraseYAMLFile(userFile); err == nil {
-		for _, e := range entries {
-			if e.Code == "" || (e.Text == "" && e.Texts == "") {
-				continue
-			}
-			rec := store.PhraseRecord{
-				Code:     strings.ToLower(e.Code),
-				Text:     e.Text,
-				Texts:    e.Texts,
-				Name:     e.Name,
-				Type:     detectPhraseType(e),
-				Position: e.Position,
-				Enabled:  !e.Disabled,
-				IsSystem: false,
-			}
-			if rec.Position <= 0 {
-				rec.Position = 1
-			}
-			records = append(records, rec)
 		}
 	}
 

@@ -63,7 +63,7 @@ func loadPhraseLayerFromYAML(t *testing.T, systemFile, userFile string) *PhraseL
 		}
 	}
 
-	pl := NewPhraseLayerEx("phrases", systemFile, "", userFile)
+	pl := NewPhraseLayerEx("phrases", systemFile, "", s)
 	if err := pl.LoadFromStore(s); err != nil {
 		t.Fatal(err)
 	}

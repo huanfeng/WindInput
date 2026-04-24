@@ -30,7 +30,7 @@
 
 ### Common Patterns
 - 配置文件路径：`%APPDATA%\WindInput\config.yaml`
-- 数据文件路径：`%APPDATA%\WindInput\`（phrases.yaml、shadow.yaml、用户词库）
+- 数据文件路径：`%APPDATA%\WindInput\`（user_data.db 词库数据库、system.phrases.yaml 系统短语种子）
 
 ## Dependencies
 ### Internal

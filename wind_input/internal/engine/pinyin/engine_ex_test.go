@@ -1072,7 +1072,7 @@ sort: by_weight
 	// 创建 CompositeDict，添加 PhraseLayer 和 PinyinDictLayer
 	composite := dict.NewCompositeDict()
 
-	phraseLayer := dict.NewPhraseLayer("phrases", systemPhrasesPath, filepath.Join(tmpDir, "user.phrases.yaml"))
+	phraseLayer := dict.NewPhraseLayer("phrases", systemPhrasesPath)
 	// 使用 Store 加载短语
 	phraseStore, err := store.Open(filepath.Join(tmpDir, "phrase.db"))
 	if err != nil {
