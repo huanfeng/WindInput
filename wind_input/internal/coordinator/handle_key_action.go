@@ -626,6 +626,13 @@ func (c *Coordinator) handleSpace() *bridge.KeyEventResult {
 			Text: finalText,
 		}
 	}
+	// 无编码空闲状态：全角模式下输出全角空格
+	if c.fullWidth {
+		return &bridge.KeyEventResult{
+			Type: bridge.ResponseTypeInsertText,
+			Text: string(rune(0x3000)),
+		}
+	}
 	return nil
 }
 
@@ -730,6 +737,9 @@ func (c *Coordinator) handleOverflowNumberKey(num int) *bridge.KeyEventResult {
 		result := c.selectCandidate(highlightedIndex)
 		if result != nil {
 			digit := string(rune('0' + num%10))
+			if c.fullWidth {
+				digit = transform.ToFullWidth(digit)
+			}
 			result.Text += digit
 		}
 		return result

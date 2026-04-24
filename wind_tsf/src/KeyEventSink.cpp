@@ -402,6 +402,21 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
             return S_OK;
         }
     }
+    // English mode + full-width: intercept printable characters for full-width conversion
+    else if (!isChineseMode && _pTextService->IsFullWidth())
+    {
+        // Intercept printable ASCII keys (letters, numbers, punctuation, space)
+        // so Go can convert them to full-width characters
+        HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
+        if (keyType == HotkeyType::Letter || keyType == HotkeyType::Number ||
+            keyType == HotkeyType::Punctuation || keyType == HotkeyType::Space)
+        {
+            *pfEaten = TRUE;
+            _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, keyType,
+                            isChineseMode, hasComposition, _hasCandidates, hasInputSession, TRUE, L"english_fullwidth");
+            return S_OK;
+        }
+    }
     // else: not in Chinese mode and no input session — pass through
 
     // Track digit pass-through for smart punctuation fallback.
@@ -701,6 +716,16 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             {
                 isInputKey = (keyType != HotkeyType::None);
             }
+        }
+    }
+    // English mode + full-width: intercept printable characters for full-width conversion
+    else if (!isChineseMode && _pTextService->IsFullWidth())
+    {
+        HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
+        if (keyType == HotkeyType::Letter || keyType == HotkeyType::Number ||
+            keyType == HotkeyType::Punctuation || keyType == HotkeyType::Space)
+        {
+            isInputKey = TRUE;
         }
     }
 

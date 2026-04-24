@@ -112,6 +112,7 @@ public:
     void ToggleInputMode();
     void SetInputMode(BOOL bChineseMode);  // Set mode from service response (no IPC)
     BOOL IsChineseMode() { return _bChineseMode; }
+    BOOL IsFullWidth() { return _bFullWidth; }
     BOOL IsKeyboardDisabled() { return _bKeyboardDisabled; }
     ULONGLONG GetFocusSessionId() const { return _focusSessionId; }
 
@@ -151,6 +152,7 @@ private:
 
     // Input mode state
     BOOL _bChineseMode;
+    BOOL _bFullWidth;
     BOOL _bKeyboardDisabled;   // GUID_COMPARTMENT_KEYBOARD_DISABLED
     ULONGLONG _focusSessionId;
 

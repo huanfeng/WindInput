@@ -243,8 +243,41 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 	// Preserve original key for English mode (uppercase letters should stay uppercase)
 	key := data.Key
 
-	// English mode: pass through all keys directly to system
+	// English mode: pass through or full-width convert
 	if !c.chineseMode {
+		if c.fullWidth {
+			// 全角模式下，拦截可打印字符并转为全角输出
+			// 空格键特殊处理（data.Key 为 "space" 而非 " "）
+			if uint32(data.KeyCode) == ipc.VK_SPACE {
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: string(rune(0x3000)),
+				}
+			}
+			if len(key) == 1 && key[0] >= 0x21 && key[0] <= 0x7E {
+				// Shift+符号键映射（如 Shift+1 → !）
+				actualKey := key
+				capsLock := data.IsCapsLockOn()
+				if hasShift {
+					if shifted, ok := shiftedKeyMap[key[0]]; ok {
+						actualKey = string(shifted)
+					} else if key[0] >= 'a' && key[0] <= 'z' {
+						// CapsLock ON + Shift → 小写; CapsLock OFF + Shift → 大写
+						if !capsLock {
+							actualKey = strings.ToUpper(key)
+						}
+					}
+				} else if capsLock && key[0] >= 'a' && key[0] <= 'z' {
+					// CapsLock ON 无 Shift → 大写
+					actualKey = strings.ToUpper(key)
+				}
+				text := transform.ToFullWidth(actualKey)
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: text,
+				}
+			}
+		}
 		return nil
 	}
 
@@ -292,7 +325,7 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 		}
 	}
 
-	// Chinese mode with CapsLock: output letters directly (no full-width)
+	// Chinese mode with CapsLock: output letters directly, support full-width
 	// CapsLock ON: letters are uppercase, Shift+letter are lowercase
 	// This allows users to quickly type English while in Chinese mode
 	// Use the CapsLock state from C++ side (data.Toggles) as it's more accurate
@@ -310,12 +343,14 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 				c.hideUI()
 
 				// Shift+letter = lowercase, letter = uppercase (CapsLock behavior)
-				// Note: no full-width conversion for CapsLock English output
 				var outputKey string
 				if hasShift {
 					outputKey = strings.ToLower(key)
 				} else {
 					outputKey = strings.ToUpper(key)
+				}
+				if c.fullWidth {
+					outputKey = transform.ToFullWidth(outputKey)
 				}
 
 				return &bridge.KeyEventResult{
@@ -329,12 +364,14 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 			c.hideUI()
 
 			// Shift+letter = lowercase, letter = uppercase (CapsLock behavior)
-			// Note: no full-width conversion for CapsLock English output
 			var outputKey string
 			if hasShift {
 				outputKey = strings.ToLower(key)
 			} else {
 				outputKey = strings.ToUpper(key)
+			}
+			if c.fullWidth {
+				outputKey = transform.ToFullWidth(outputKey)
 			}
 
 			return &bridge.KeyEventResult{
@@ -512,6 +549,13 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 				c.pairTrackerEn.Clear()
 			}
 			c.lastOutputWasDigit = true
+			// 全角模式下输出全角数字
+			if c.fullWidth {
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: transform.ToFullWidth(key),
+				}
+			}
 		}
 		return result
 
@@ -525,6 +569,13 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) *bridge.KeyEventR
 				c.pairTrackerEn.Clear()
 			}
 			c.lastOutputWasDigit = true
+			// 全角模式下输出全角数字
+			if c.fullWidth {
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: transform.ToFullWidth(key),
+				}
+			}
 		}
 		return result
 

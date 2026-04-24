@@ -643,6 +643,7 @@ CTextService::CTextService()
     , _pHotkeyManager(nullptr)
     , _pHostWindow(nullptr)
     , _bChineseMode(TRUE)
+    , _bFullWidth(FALSE)
     , _focusSessionId(0)
     , _pComposition(nullptr)
     , _hasCachedCaretPos(FALSE)
@@ -1116,6 +1117,7 @@ void CTextService::_SyncStateFromResponse(const ServiceResponse& response)
         return;
 
     _bChineseMode = response.IsChineseMode();
+    _bFullWidth = response.IsFullWidth();
 
     // Sync compartment so system OPENCLOSE state matches our mode
     // This is critical: without it, switching apps causes compartment desync
@@ -1642,6 +1644,7 @@ BOOL CTextService::_InitIPCClient()
 
         // Update internal state (atomic operation, thread-safe)
         pThis->_bChineseMode = response.IsChineseMode();
+        pThis->_bFullWidth = response.IsFullWidth();
 
         // Update language bar button using thread-safe PostUpdateFullStatus
         // This posts a message to the UI thread instead of calling COM directly
@@ -2631,6 +2634,7 @@ void CTextService::SendShowContextMenu(int screenX, int screenY)
 void CTextService::UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock, const wchar_t* iconLabel)
 {
     _bChineseMode = bChineseMode;
+    _bFullWidth = bFullWidth;
 
     // Sync compartment state so system knows our open/close status
     _SetOpenCloseCompartment(_bChineseMode);
