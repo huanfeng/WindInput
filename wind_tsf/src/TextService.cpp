@@ -301,20 +301,37 @@ public:
         }
 
         // 3. Set text
-        hr = pRange->SetText(ec, TF_ST_CORRECTION, _text.c_str(), (LONG)_text.length());
+        // When composition text is empty (non-inline preedit mode), use a space as
+        // placeholder so GetTextExt can return a valid caret rect. Without this,
+        // apps like WPS return a degenerate rect (height=0) for zero-length ranges.
+        // The cursor is positioned before the space (step 5), so visually there's
+        // no offset. The placeholder is cleared on EndComposition/CommitText.
+        BOOL isPlaceholder = _text.empty();
+        static const wchar_t PLACEHOLDER[] = L" ";
+        const wchar_t* textPtr = isPlaceholder ? PLACEHOLDER : _text.c_str();
+        LONG textLen = isPlaceholder ? 1 : (LONG)_text.length();
+
+        hr = pRange->SetText(ec, TF_ST_CORRECTION, textPtr, textLen);
 
         if (SUCCEEDED(hr))
         {
             // 4. Apply display attribute to show underline
-            _SetDisplayAttribute(ec, pRange);
+            // Skip for placeholder text to avoid any visual artifacts
+            if (!isPlaceholder)
+                _SetDisplayAttribute(ec, pRange);
 
             // 5. Position cursor within composition
-            // If _caretPos is valid and less than text length, position cursor there;
-            // otherwise collapse to end (default behavior).
             ITfRange* pRangeForSel = nullptr;
             if (SUCCEEDED(_pTextService->_pComposition->GetRange(&pRangeForSel)))
             {
-                if (_caretPos >= 0 && _caretPos < (int)_text.length())
+                if (isPlaceholder && textLen > 0)
+                {
+                    // Placeholder mode: position cursor BEFORE the placeholder character.
+                    // This way GetTextExt returns valid coordinates at the original cursor
+                    // position, while the placeholder space appears after it (like Bingling IME).
+                    pRangeForSel->Collapse(ec, TF_ANCHOR_START);
+                }
+                else if (_caretPos >= 0 && _caretPos < (int)_text.length())
                 {
                     // Move the range start to the caret position, then collapse to start
                     // This positions the cursor at the specified offset within the composition
@@ -1985,8 +2002,15 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight)
         *py = rc.bottom;  // Position below the caret
         *pHeight = rc.bottom - rc.top;
 
+        // A zero-height rect (top == bottom) means GetTextExt returned a degenerate
+        // result — common in apps like WPS when no TSF composition is active (e.g.,
+        // non-inline-preedit mode). Return FALSE so the caller falls through to
+        // GetGUIThreadInfo which tracks the Win32 caret independently of composition.
         if (*pHeight <= 0)
-            *pHeight = 20;
+        {
+            WIND_LOG_DEBUG(L"GetCaretPositionFromTSF: Degenerate rect (height=0), falling back\n");
+            return FALSE;
+        }
 
         // Save as last known good position
         s_lastCaretX = *px;
