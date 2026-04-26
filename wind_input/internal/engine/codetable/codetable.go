@@ -14,6 +14,12 @@ import (
 const (
 	// PrefixWeightPenalty 前缀匹配统一降权值
 	PrefixWeightPenalty = 2000000
+	// shortCodePerDepthPenalty ShortCodeFirst 模式下每多 1 码追加的降权值
+	shortCodePerDepthPenalty = 1000
+	// fullCodePhraseBoost 全码词组优先模式下给词组加的权重特权
+	fullCodePhraseBoost = 5000000
+	// defaultBucketLimit BFS 分桶扫描每层默认上限
+	defaultBucketLimit = 30
 )
 
 // LearningStrategy 造词策略接口（避免引擎直接依赖 schema 包）
@@ -38,6 +44,14 @@ type Config struct {
 	SkipShadow         bool   // 跳过 Shadow 规则应用（混输模式下由外层统一应用）
 	SkipSingleCharFreq bool   // 单字不自动调频
 	WeightAsOrder      bool   // 权重仅表示同码内排序，前缀匹配时抹平权重差异
+
+	// ---------------- 新增架构字段 ---------------- //
+	LoadMode          string // 加载模式: "mmap" (默认), "memory" (全内存，高性能)
+	PrefixMode        string // 前缀查找模式: "none" (关闭), "sequential" (顺序扫描), "bfs_bucket" (分层扫描，推荐)
+	BucketLimit       int    // 分桶扫描时每层的候选上限
+	WeightMode        string // 权重语义: "global_freq" (全局权重), "inner_order" (同码内排序), "auto" (自动探测 HasWeight)
+	ShortCodeFirst    bool   // 前缀提示时，对长码施加惩罚，短码优先
+	CharsetPreference string // 字符集偏好: "none" (默认), "single_first" (单字优先), "phrase_first" (词组优先), "full_code_phrase_first" (全码词组优先)
 }
 
 // DefaultConfig 返回默认配置
@@ -53,6 +67,12 @@ func DefaultConfig() *Config {
 		DedupCandidates:    true,
 		SkipSingleCharFreq: true,
 		SingleCodeComplete: true,
+		LoadMode:           "mmap",
+		PrefixMode:         "bfs_bucket",
+		BucketLimit:        30,
+		WeightMode:         "auto",
+		ShortCodeFirst:     false,
+		CharsetPreference:  "none",
 	}
 }
 
@@ -99,7 +119,17 @@ func (e *Engine) LoadCodeTable(path string) error {
 // LoadCodeTableBinary 加载二进制格式码表（mmap 模式）
 func (e *Engine) LoadCodeTableBinary(wdbPath string) error {
 	ct := dict.NewCodeTable()
-	if err := ct.LoadBinary(wdbPath); err != nil {
+	var err error
+
+	if e.config != nil && e.config.LoadMode == "memory" {
+		e.logger.Info("使用全内存模式加载码表", "path", wdbPath)
+		err = ct.LoadBinaryMemory(wdbPath)
+	} else {
+		e.logger.Info("使用 mmap 模式加载码表", "path", wdbPath)
+		err = ct.LoadBinary(wdbPath)
+	}
+
+	if err != nil {
 		return err
 	}
 	e.codeTable = ct
@@ -162,7 +192,7 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 
 	// Phase 2: 收集前缀匹配
 	prefixCandidates := make([]candidate.Candidate, 0, 64)
-	prefixEnabled := !e.config.SingleCodeInput && inputLen >= 1 && inputLen < e.config.MaxCodeLength
+	prefixEnabled := e.config.PrefixMode != "none" && inputLen >= 1 && inputLen < e.config.MaxCodeLength
 	if prefixEnabled {
 		if e.dictManager != nil {
 			if phraseLayer := e.dictManager.GetPhraseLayer(); phraseLayer != nil {
@@ -180,20 +210,26 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 				}
 			}
 		}
-		prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixExcludeExact(input, 0)...)
+
+		// 判断使用的是旧的 sequential 还是新的 bfs_bucket
+		if e.config.PrefixMode == "sequential" {
+			prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixExcludeExact(input, 0)...)
+		} else { // 默认为 bfs_bucket
+			limit := e.config.BucketLimit
+			if limit <= 0 {
+				limit = defaultBucketLimit
+			}
+			maxDepth := e.config.MaxCodeLength - inputLen
+			prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixBFS(input, limit, maxDepth)...)
+		}
 	}
 
 	// Phase 3: 处理前缀候选
-	for i := range prefixCandidates {
-		if e.config.ShowCodeHint && len(prefixCandidates[i].Code) > inputLen {
-			prefixCandidates[i].Comment = prefixCandidates[i].Code[inputLen:]
-		}
-		if e.config.WeightAsOrder {
-			prefixCandidates[i].Weight = -PrefixWeightPenalty
-		} else {
-			prefixCandidates[i].Weight -= PrefixWeightPenalty
-		}
+	weightMode := e.resolveWeightMode()
+	if weightMode == "inner_order" {
+		reorderPrefixForInnerOrder(prefixCandidates)
 	}
+	e.applyPrefixWeights(prefixCandidates, inputLen, weightMode)
 
 	// Phase 3.5: 逐码空码补全
 	if e.config.SingleCodeInput && e.config.SingleCodeComplete && len(exactCandidates) == 0 && inputLen < e.config.MaxCodeLength {
@@ -228,7 +264,7 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 			if len(completionCandidates[i].Code) > inputLen {
 				completionCandidates[i].Comment = completionCandidates[i].Code[inputLen:]
 			}
-			if e.config.WeightAsOrder {
+			if weightMode == "inner_order" {
 				completionCandidates[i].Weight = -PrefixWeightPenalty
 			} else {
 				completionCandidates[i].Weight -= PrefixWeightPenalty
@@ -237,11 +273,12 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 		prefixCandidates = append(prefixCandidates, completionCandidates...)
 	}
 
-	// Phase 4: 合并 + 去重
+	// Phase 4: 合并 + 去重 + 字符集偏好特权
 	allCandidates := append(exactCandidates, prefixCandidates...)
 	if e.config.DedupCandidates {
 		allCandidates = dedup(allCandidates)
 	}
+	e.applyCharsetPreference(allCandidates, inputLen)
 
 	if len(allCandidates) == 0 {
 		return nil, nil
@@ -291,7 +328,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 
 	// ========== Phase 2: 收集前缀匹配 ==========
 	prefixCandidates := make([]candidate.Candidate, 0, 64)
-	prefixEnabled := !e.config.SingleCodeInput && inputLen >= 1 && inputLen < e.config.MaxCodeLength
+	prefixEnabled := e.config.PrefixMode != "none" && inputLen >= 1 && inputLen < e.config.MaxCodeLength
 	if prefixEnabled {
 		if e.dictManager != nil {
 			compositeDict := e.dictManager.GetCompositeDict()
@@ -303,25 +340,27 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		}
 		// 降级路径：仅当无 DictManager 时直接查询 codeTable（测试场景）
 		if e.codeTable != nil && e.dictManager == nil {
-			prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixExcludeExact(input, 0)...)
+			if e.config.PrefixMode == "sequential" {
+				prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixExcludeExact(input, 0)...)
+			} else { // 默认为 bfs_bucket
+				limit := e.config.BucketLimit
+				if limit <= 0 {
+					limit = defaultBucketLimit
+				}
+				maxDepth := e.config.MaxCodeLength - inputLen
+				prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixBFS(input, limit, maxDepth)...)
+			}
 		}
 	}
 
 	// ========== Phase 3: 处理前缀候选（code hint + 统一降权）==========
 	// 前缀候选整体排在精确匹配之后，统一降权而不按剩余码长分层。
 	// 码表类输入法中编码长度不代表「接近完成」，分层会覆盖词库原始排序信号。
-	// WeightAsOrder 模式：前缀候选统一设为固定降权值，按 NaturalOrder（文件顺序）排序。
-	// 普通模式：统一减去固定降权值，保留原始权重差异。
-	for i := range prefixCandidates {
-		if e.config.ShowCodeHint && len(prefixCandidates[i].Code) > inputLen {
-			prefixCandidates[i].Comment = prefixCandidates[i].Code[inputLen:]
-		}
-		if e.config.WeightAsOrder {
-			prefixCandidates[i].Weight = -PrefixWeightPenalty
-		} else {
-			prefixCandidates[i].Weight -= PrefixWeightPenalty
-		}
+	weightMode := e.resolveWeightMode()
+	if weightMode == "inner_order" {
+		reorderPrefixForInnerOrder(prefixCandidates)
 	}
+	e.applyPrefixWeights(prefixCandidates, inputLen, weightMode)
 
 	// ========== Phase 3.5: 逐码空码补全 ==========
 	// 逐码模式下精确匹配无候选时，从更长编码中取首个候选作为补全提示
@@ -347,7 +386,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 			if len(completionCandidates[i].Code) > inputLen {
 				completionCandidates[i].Comment = completionCandidates[i].Code[inputLen:]
 			}
-			if e.config.WeightAsOrder {
+			if weightMode == "inner_order" {
 				completionCandidates[i].Weight = -PrefixWeightPenalty
 			} else {
 				completionCandidates[i].Weight -= PrefixWeightPenalty
@@ -356,11 +395,12 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		prefixCandidates = append(prefixCandidates, completionCandidates...)
 	}
 
-	// ========== Phase 4: 合并 + 去重（Shadow top/delete 已由 CompositeDict 处理）==========
+	// ========== Phase 4: 合并 + 去重 + 字符集偏好特权 ==========
 	allCandidates := append(exactCandidates, prefixCandidates...)
 	if e.config.DedupCandidates {
 		allCandidates = dedup(allCandidates)
 	}
+	e.applyCharsetPreference(allCandidates, inputLen)
 
 	// 空码处理
 	if len(allCandidates) == 0 {
@@ -452,6 +492,107 @@ func applyProtectTopN(sorted, protected []candidate.Candidate) []candidate.Candi
 	result = append(result, protected...)
 	result = append(result, rest...)
 	return result
+}
+
+// resolveWeightMode 解析最终生效的 WeightMode：
+// 1. WeightAsOrder=true 视为强制 inner_order（向后兼容）。
+// 2. WeightMode="auto" 时根据词库 HasWeight 标记自动选择 inner_order 或 global_freq。
+// 3. 其它显式值（"global_freq" / "inner_order"）按字面意义返回。
+func (e *Engine) resolveWeightMode() string {
+	if e.config.WeightAsOrder {
+		return "inner_order"
+	}
+	mode := e.config.WeightMode
+	if mode == "auto" || mode == "" {
+		if e.codeTable != nil && !e.codeTable.Header.HasWeight {
+			return "inner_order"
+		}
+		return "global_freq"
+	}
+	return mode
+}
+
+// applyPrefixWeights 对前缀候选统一施加降权与可选的短码梯度惩罚。
+func (e *Engine) applyPrefixWeights(prefixCandidates []candidate.Candidate, inputLen int, weightMode string) {
+	for i := range prefixCandidates {
+		if e.config.ShowCodeHint && len(prefixCandidates[i].Code) > inputLen {
+			prefixCandidates[i].Comment = prefixCandidates[i].Code[inputLen:]
+		}
+		if weightMode == "inner_order" {
+			prefixCandidates[i].Weight = -PrefixWeightPenalty
+		} else {
+			prefixCandidates[i].Weight -= PrefixWeightPenalty
+		}
+		if e.config.ShortCodeFirst {
+			depth := len(prefixCandidates[i].Code) - inputLen
+			if depth > 0 {
+				prefixCandidates[i].Weight -= depth * shortCodePerDepthPenalty
+			}
+		}
+	}
+}
+
+// applyCharsetPreference 在最终合并候选上应用字符集偏好特权。
+// 目前实现 full_code_phrase_first：满码时把词组（多于 1 个 rune）权重抬高，确保排在单字之前。
+func (e *Engine) applyCharsetPreference(candidates []candidate.Candidate, inputLen int) {
+	if e.config.CharsetPreference != "full_code_phrase_first" || inputLen != e.config.MaxCodeLength {
+		return
+	}
+	for i := range candidates {
+		if len([]rune(candidates[i].Text)) > 1 {
+			candidates[i].Weight += fullCodePhraseBoost
+		}
+	}
+}
+
+// reorderPrefixForInnerOrder 在 inner_order 语义下原地重排前缀候选：
+// 同 code 内按 Weight desc（重码序号大者优先），跨 code 按 group 最小 NaturalOrder asc（即词库文件顺序）。
+// 同时把每个候选的 NaturalOrder 改写为递增整数，确保后续 Better/BetterNatural
+// 在 Weight 被统一降权后仍能稳定输出此顺序。
+func reorderPrefixForInnerOrder(candidates []candidate.Candidate) {
+	if len(candidates) <= 1 {
+		return
+	}
+	type groupInfo struct {
+		minNO int
+		idxs  []int
+	}
+	groupMap := make(map[string]*groupInfo, 16)
+	groups := make([]*groupInfo, 0, 16)
+	for i, c := range candidates {
+		g, ok := groupMap[c.Code]
+		if !ok {
+			g = &groupInfo{minNO: c.NaturalOrder}
+			groupMap[c.Code] = g
+			groups = append(groups, g)
+		} else if c.NaturalOrder < g.minNO {
+			g.minNO = c.NaturalOrder
+		}
+		g.idxs = append(g.idxs, i)
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		return groups[i].minNO < groups[j].minNO
+	})
+	reordered := make([]candidate.Candidate, 0, len(candidates))
+	nextNO := 0
+	for _, g := range groups {
+		items := make([]candidate.Candidate, len(g.idxs))
+		for j, idx := range g.idxs {
+			items[j] = candidates[idx]
+		}
+		sort.SliceStable(items, func(i, j int) bool {
+			if items[i].Weight != items[j].Weight {
+				return items[i].Weight > items[j].Weight
+			}
+			return items[i].NaturalOrder < items[j].NaturalOrder
+		})
+		for _, it := range items {
+			it.NaturalOrder = nextNO
+			nextNO++
+			reordered = append(reordered, it)
+		}
+	}
+	copy(candidates, reordered)
 }
 
 var seenPool = sync.Pool{New: func() any { return make(map[string]struct{}, 64) }}

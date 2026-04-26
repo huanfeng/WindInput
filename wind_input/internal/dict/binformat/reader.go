@@ -270,6 +270,103 @@ func (r *DictReader) LookupPrefixExcludeExact(prefix string, limit int) []candid
 	return results
 }
 
+// LookupPrefixBFS 广度优先（按码长分层）的前缀查找
+// limitPerBucket: 每一层长度最多返回的候选数量
+// maxDepth: 最大允许的剩余码长（如4码方案中输入2码，最大深度为2）
+// isCommonCB: 动态回调判断字符串是否为常用字/词（由引擎层提供），
+//
+//	当单个 Bucket 超限时，优先保留 isCommon=true 的候选。
+func (r *DictReader) LookupPrefixBFS(prefix string, limitPerBucket int, maxDepth int, isCommonCB func(text string) bool) []candidate.Candidate {
+	prefix = strings.ToLower(prefix)
+	if len(prefix) == 0 {
+		return nil
+	}
+
+	keyCount := int(r.header.KeyCount)
+	lo := sort.Search(keyCount, func(i int) bool {
+		return r.readKeyCode(i) >= prefix
+	})
+
+	// 按深度 (len(code) - len(prefix)) 分配候选桶
+	// depth 从 1 到 maxDepth。索引 0 对应 depth 1。
+	buckets := make([][]candidate.Candidate, maxDepth)
+
+	// 遍历以 prefix 开头的所有 code
+	for i := lo; i < keyCount; i++ {
+		code := r.readKeyCode(i)
+		if !strings.HasPrefix(code, prefix) {
+			break
+		}
+		if code == prefix {
+			continue
+		}
+
+		depth := len(code) - len(prefix)
+		if depth <= 0 || depth > maxDepth {
+			continue
+		}
+
+		bucketIdx := depth - 1
+		entries := r.readEntries(i)
+
+		// 动态应用 IsCommon 回调
+		if isCommonCB != nil {
+			for j := range entries {
+				entries[j].IsCommon = isCommonCB(entries[j].Text)
+			}
+		}
+
+		buckets[bucketIdx] = append(buckets[bucketIdx], entries...)
+	}
+
+	var results []candidate.Candidate
+
+	// 对每个 Bucket 进行截断（优先保留常用）并合并
+	for _, bucket := range buckets {
+		if len(bucket) == 0 {
+			continue
+		}
+
+		// 先按照默认的质量排序（权重或自然顺序）
+		sort.SliceStable(bucket, func(i, j int) bool {
+			return candidate.Better(bucket[i], bucket[j])
+		})
+
+		// 如果该桶候选数超过限制，进行智能截断
+		if limitPerBucket > 0 && len(bucket) > limitPerBucket {
+			var common []candidate.Candidate
+			var rare []candidate.Candidate
+
+			for _, c := range bucket {
+				if c.IsCommon {
+					common = append(common, c)
+				} else {
+					rare = append(rare, c)
+				}
+			}
+
+			var truncated []candidate.Candidate
+			if len(common) >= limitPerBucket {
+				// 常用字已经够填满或超出限制，只截取常用字
+				truncated = common[:limitPerBucket]
+			} else {
+				// 常用字不够，拿生僻字凑数
+				truncated = append(truncated, common...)
+				needed := limitPerBucket - len(common)
+				if needed > len(rare) {
+					needed = len(rare)
+				}
+				truncated = append(truncated, rare[:needed]...)
+			}
+			results = append(results, truncated...)
+		} else {
+			results = append(results, bucket...)
+		}
+	}
+
+	return results
+}
+
 // ForEachEntry 顺序遍历所有条目（供 BuildReverseIndex 等使用）
 func (r *DictReader) ForEachEntry(fn func(code string, entries []candidate.Candidate)) {
 	keyCount := int(r.header.KeyCount)

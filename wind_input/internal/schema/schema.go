@@ -77,6 +77,14 @@ type CodeTableSpec struct {
 	SkipSingleCharFreq *bool           `yaml:"skip_single_char_freq"`  // 单字不自动调频（指针以区分未设置和 false）
 	TempPinyin         *TempPinyinSpec `yaml:"temp_pinyin,omitempty"`  // 临时拼音配置
 	ZKeyRepeat         *bool           `yaml:"z_key_repeat,omitempty"` // Z键重复上屏：输入z时首选为上次上屏的内容
+
+	// 新增架构字段
+	LoadMode          string `yaml:"load_mode,omitempty"`
+	PrefixMode        string `yaml:"prefix_mode,omitempty"`
+	BucketLimit       int    `yaml:"bucket_limit,omitempty"`
+	WeightMode        string `yaml:"weight_mode,omitempty"`
+	ShortCodeFirst    *bool  `yaml:"short_code_first,omitempty"`
+	CharsetPreference string `yaml:"charset_preference,omitempty"`
 }
 
 // PinyinSpec 拼音引擎配置

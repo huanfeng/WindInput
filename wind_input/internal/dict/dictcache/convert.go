@@ -30,6 +30,7 @@ type CodeTableMeta struct {
 	SpecialPrefix string `json:"special_prefix"`
 	PhraseRule    int    `json:"phrase_rule"`
 	EntryCount    int    `json:"entry_count"`
+	HasWeight     bool   `json:"has_weight"`
 }
 
 // MetaPath 返回 wdb 文件对应的 meta.json 路径
@@ -73,6 +74,7 @@ func ConvertCodeTableToWdb(srcPath, wdbPath string, logger *slog.Logger) error {
 		SpecialPrefix: ct.Header.SpecialPrefix,
 		PhraseRule:    ct.Header.PhraseRule,
 		EntryCount:    ct.EntryCount(),
+		HasWeight:     ct.Header.HasWeight,
 	}
 	metaJSON, err := json.Marshal(&meta)
 	if err != nil {
@@ -347,10 +349,11 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 	globalOrder := 0
 
 	// 1. 加载主词库
-	count, err := loadRimeCodetableFile(mainDictPath, codeEntries, &globalOrder, logger)
+	count, mainHasWeight, err := loadRimeCodetableFile(mainDictPath, codeEntries, &globalOrder, logger)
 	if err != nil {
 		return fmt.Errorf("加载主词库失败: %w", err)
 	}
+	hasWeight := mainHasWeight
 	logger.Info("加载词库", "name", filepath.Base(mainDictPath), "count", count)
 	totalCount += count
 
@@ -361,10 +364,13 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 			continue
 		}
-		c, loadErr := loadRimeCodetableFile(path, codeEntries, &globalOrder, logger)
+		c, fileHasWeight, loadErr := loadRimeCodetableFile(path, codeEntries, &globalOrder, logger)
 		if loadErr != nil {
 			logger.Warn("加载词库失败", "name", name, "error", loadErr)
 			continue
+		}
+		if fileHasWeight {
+			hasWeight = true
 		}
 		logger.Info("加载词库", "name", name, "count", c)
 		totalCount += c
@@ -423,6 +429,7 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 		CodeScheme: "五笔字型86版",
 		CodeLength: 4,
 		EntryCount: totalCount,
+		HasWeight:  hasWeight,
 	}
 	metaJSON, err := json.Marshal(&meta)
 	if err != nil {
@@ -533,10 +540,10 @@ func parseRimeImportTables(path string) []string {
 // 权重策略基于词库自身的 sort 字段：
 //   - sort: by_weight → 使用显式权重（权威词库，如主词库）
 //   - sort: original  → 忽略显式权重，统一 weight=1（补充词库，不与主词库竞争）
-func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, globalOrder *int, logger *slog.Logger) (int, error) {
+func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, globalOrder *int, logger *slog.Logger) (int, bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer file.Close()
 
@@ -546,6 +553,7 @@ func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, glob
 	inHeader := true
 	sortMode := "" // 从 YAML header 提取
 	count := 0
+	hasWeight := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -591,6 +599,7 @@ func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, glob
 			if len(parts) >= 3 {
 				if w, err := strconv.Atoi(strings.TrimSpace(parts[2])); err == nil && w > 0 {
 					weight = w
+					hasWeight = true
 				}
 			}
 		}
@@ -604,7 +613,7 @@ func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, glob
 		count++
 	}
 
-	return count, scanner.Err()
+	return count, hasWeight, scanner.Err()
 }
 
 // atomicWriteWdb 原子写入 wdb 文件：先写入临时文件，再 rename 到目标路径

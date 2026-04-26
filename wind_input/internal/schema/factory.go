@@ -86,6 +86,14 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 		CandidateSortMode:  spec.CandidateSortMode,
 		DedupCandidates:    dedupCandidates,
 		SkipSingleCharFreq: skipSingleCharFreq,
+		LoadMode:           spec.LoadMode,
+		PrefixMode:         spec.PrefixMode,
+		BucketLimit:        spec.BucketLimit,
+		WeightMode:         spec.WeightMode,
+		CharsetPreference:  spec.CharsetPreference,
+	}
+	if spec.ShortCodeFirst != nil {
+		config.ShortCodeFirst = *spec.ShortCodeFirst
 	}
 
 	// ProtectTopN 从 FreqSpec 读取，传入引擎 Config
@@ -730,6 +738,14 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		DedupCandidates:    mixedDedupCandidates,
 		SkipShadow:         true, // 混输模式：Shadow 由 MixedEngine 合并后统一应用
 		SkipSingleCharFreq: mixedSkipSingleCharFreq,
+		LoadMode:           codeTableSpec.LoadMode,
+		PrefixMode:         codeTableSpec.PrefixMode,
+		BucketLimit:        codeTableSpec.BucketLimit,
+		WeightMode:         codeTableSpec.WeightMode,
+		CharsetPreference:  codeTableSpec.CharsetPreference,
+	}
+	if codeTableSpec.ShortCodeFirst != nil {
+		codetableConfig.ShortCodeFirst = *codeTableSpec.ShortCodeFirst
 	}
 
 	// ProtectTopN 从 FreqSpec 读取

@@ -26,6 +26,7 @@ type CodeTableHeader struct {
 	BWCodeLength  int    // 反查码长
 	SpecialPrefix string // 特殊前缀（如zz用于反查）
 	PhraseRule    int    // 短语规则
+	HasWeight     bool   // 标记是否全文件无显式权重
 }
 
 // CodeTable 码表数据结构
@@ -51,6 +52,35 @@ func (ct *CodeTable) LoadBinary(wdbPath string) error {
 	}
 	ct.binReader = reader
 	ct.entries = nil // 释放内存模式数据
+	return nil
+}
+
+// LoadBinaryMemory 加载二进制格式码表（全内存模式）
+// 读取完 mmap 数据后构建 map，然后关闭 mmap 文件，以换取极致性能
+func (ct *CodeTable) LoadBinaryMemory(wdbPath string) error {
+	reader, err := binformat.OpenDict(wdbPath)
+	if err != nil {
+		return fmt.Errorf("打开二进制码表失败: %w", err)
+	}
+	defer reader.Close()
+
+	if ct.entries == nil {
+		ct.entries = make(map[string][]candidate.Candidate)
+	}
+
+	reader.ForEachEntry(func(code string, entries []candidate.Candidate) {
+		// 完全拷贝切片数据，脱离 mmap 内存块。
+		// Text 与 Code 都是 mmap-backed 的 string，必须复制底层字节。
+		clonedCode := string([]byte(code))
+		cloned := make([]candidate.Candidate, len(entries))
+		for i, c := range entries {
+			cloned[i] = c
+			cloned[i].Text = string([]byte(c.Text))
+			cloned[i].Code = clonedCode
+		}
+		ct.entries[clonedCode] = cloned
+	})
+
 	return nil
 }
 
@@ -300,6 +330,7 @@ func (ct *CodeTable) parseEntryLine(line string) bool {
 		if w, err := strconv.Atoi(strings.TrimSpace(parts[2])); err == nil {
 			weight = w
 			hasExplicitWeight = true
+			ct.Header.HasWeight = true
 		}
 	}
 
@@ -378,6 +409,67 @@ func (ct *CodeTable) LookupPrefixExcludeExact(prefix string, limit int) []candid
 	sort.Sort(candidate.CandidateList(results))
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
+	}
+	return results
+}
+
+// LookupPrefixBFS 广度优先前缀查找
+func (ct *CodeTable) LookupPrefixBFS(prefix string, limitPerBucket int, maxDepth int) []candidate.Candidate {
+	if ct.binReader != nil {
+		// 二进制模式：使用底层的 BFS，并注入 IsCommon 检查（内存缓存的单字判断）
+		return ct.binReader.LookupPrefixBFS(prefix, limitPerBucket, maxDepth, IsStringCommon)
+	}
+
+	// 内存模式降级实现：收集后手动分桶
+	prefix = strings.ToLower(prefix)
+	var results []candidate.Candidate
+	buckets := make([][]candidate.Candidate, maxDepth)
+
+	for code, candidates := range ct.entries {
+		if code != prefix && strings.HasPrefix(code, prefix) {
+			depth := len(code) - len(prefix)
+			if depth > 0 && depth <= maxDepth {
+				bucketIdx := depth - 1
+				// 复制并补充 IsCommon
+				for _, c := range candidates {
+					c.IsCommon = IsStringCommon(c.Text)
+					buckets[bucketIdx] = append(buckets[bucketIdx], c)
+				}
+			}
+		}
+	}
+
+	for _, bucket := range buckets {
+		if len(bucket) == 0 {
+			continue
+		}
+		sort.Sort(candidate.CandidateList(bucket))
+
+		if limitPerBucket > 0 && len(bucket) > limitPerBucket {
+			var common, rare []candidate.Candidate
+			for _, c := range bucket {
+				if c.IsCommon {
+					common = append(common, c)
+				} else {
+					rare = append(rare, c)
+				}
+			}
+
+			var truncated []candidate.Candidate
+			if len(common) >= limitPerBucket {
+				truncated = common[:limitPerBucket]
+			} else {
+				truncated = append(truncated, common...)
+				needed := limitPerBucket - len(common)
+				if needed > len(rare) {
+					needed = len(rare)
+				}
+				truncated = append(truncated, rare[:needed]...)
+			}
+			results = append(results, truncated...)
+		} else {
+			results = append(results, bucket...)
+		}
 	}
 	return results
 }
