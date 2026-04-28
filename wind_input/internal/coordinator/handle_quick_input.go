@@ -153,10 +153,9 @@ func (c *Coordinator) enterQuickInputMode(triggerKey string) *bridge.KeyEventRes
 
 	// 首次进入触发 C++ 端 StartComposition，同步标记 pendingFirstShow，
 	// 让 Excel/WPS 表格 cell-select→cell-edit 的失焦能命中 replay 路径。
+	// 不立即 showUI：等 OnLayoutChange 真实坐标由 HandleCaretUpdate 触发首次显示，
+	// 否则会先用按键前的旧坐标显示再跳到正确位置（与 handleAlphaKey 首字符一致）。
 	c.armPendingFirstShow()
-
-	// 显示初始 UI
-	c.showQuickInputUI()
 
 	preedit := c.quickInputPrefix()
 	return c.modeCompositionResult(preedit, len(preedit))

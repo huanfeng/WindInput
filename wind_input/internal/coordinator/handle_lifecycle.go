@@ -47,9 +47,25 @@ func (c *Coordinator) armPendingFirstShowWithTimeout(d time.Duration) {
 			return
 		}
 		c.pendingFirstShow = false
-		if len(c.inputBuffer) > 0 && len(c.candidates) > 0 && c.uiManager != nil {
-			c.logger.Debug("pendingFirstShow timeout: forcing showUI with current caret")
-			c.showUI()
+		if c.uiManager == nil {
+			return
+		}
+		// 兜底超时：按模式派发到对应 showUI，避免主流程 showUI 覆盖模式标签 / 候选编号 / preedit。
+		switch {
+		case c.tempEnglishMode:
+			c.logger.Debug("pendingFirstShow timeout: forcing showTempEnglishUI")
+			c.showTempEnglishUI()
+		case c.tempPinyinMode:
+			c.logger.Debug("pendingFirstShow timeout: forcing showPinyinModeUI (temp pinyin)")
+			c.showPinyinModeUI(c.tempPinyinOps())
+		case c.quickInputMode:
+			c.logger.Debug("pendingFirstShow timeout: forcing showQuickInputUI")
+			c.showQuickInputUI()
+		default:
+			if len(c.inputBuffer) > 0 && len(c.candidates) > 0 {
+				c.logger.Debug("pendingFirstShow timeout: forcing showUI with current caret")
+				c.showUI()
+			}
 		}
 	}()
 }
