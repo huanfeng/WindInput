@@ -76,6 +76,12 @@ func (d *DeferredHandler) HandleCaretUpdate(data CaretData) error {
 	return nil
 }
 
+func (d *DeferredHandler) HandleCaretPending() {
+	if h := d.getHandler(); h != nil {
+		h.HandleCaretPending()
+	}
+}
+
 func (d *DeferredHandler) HandleFocusLost() {
 	if h := d.getHandler(); h != nil {
 		h.HandleFocusLost()

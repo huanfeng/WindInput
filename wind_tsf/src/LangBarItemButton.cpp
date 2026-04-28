@@ -121,9 +121,7 @@ const UINT CLangBarItemButton::WM_COMMIT_TEXT = WM_USER + 101;
 const UINT CLangBarItemButton::WM_CLEAR_COMPOSITION = WM_USER + 102;
 const UINT CLangBarItemButton::WM_UPDATE_COMPOSITION = WM_USER + 103;
 
-static const UINT_PTR TIMER_ID_CARET_RETRY_1 = 0xC401;
-static const UINT_PTR TIMER_ID_CARET_RETRY_2 = 0xC402;
-static const UINT_PTR TIMER_ID_CARET_RETRY_3 = 0xC403;
+static const UINT_PTR TIMER_ID_CARET_RETRY = 0xC401;
 
 CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     : _refCount(1)
@@ -742,14 +740,15 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
     }
     else if (msg == WM_TIMER)
     {
-        if (wParam == TIMER_ID_CARET_RETRY_1 ||
-            wParam == TIMER_ID_CARET_RETRY_2 ||
-            wParam == TIMER_ID_CARET_RETRY_3)
+        if (wParam == TIMER_ID_CARET_RETRY)
         {
             KillTimer(hwnd, wParam);
             CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
             if (pThis != nullptr && pThis->_pTextService != nullptr && pThis->_pTextService->HasActiveComposition())
             {
+                // Timer 兜底：清除 _compositionJustStarted 让 SendCaretPositionUpdate
+                // 走正常路径（消费已缓存的坐标，应对不发 OnLayoutChange 的应用）。
+                pThis->_pTextService->ClearCompositionJustStarted();
                 pThis->_pTextService->SendCaretPositionUpdate();
             }
             return 0;
@@ -838,9 +837,7 @@ void CLangBarItemButton::Uninitialize()
     // Destroy message window
     if (_hMsgWnd != NULL)
     {
-        KillTimer(_hMsgWnd, TIMER_ID_CARET_RETRY_1);
-        KillTimer(_hMsgWnd, TIMER_ID_CARET_RETRY_2);
-        KillTimer(_hMsgWnd, TIMER_ID_CARET_RETRY_3);
+        KillTimer(_hMsgWnd, TIMER_ID_CARET_RETRY);
         DestroyWindow(_hMsgWnd);
         _hMsgWnd = NULL;
     }
@@ -1098,20 +1095,21 @@ void CLangBarItemButton::PostDelayedCaretPositionUpdate()
         return;
     }
 
-    // Reset outstanding retries for the current composition update.  Multiple
-    // timers are intentional: WPS sometimes does not fire OnLayoutChange after
-    // the first composition, but a later explicit query returns the real rect.
-    KillTimer(_hMsgWnd, TIMER_ID_CARET_RETRY_1);
-    KillTimer(_hMsgWnd, TIMER_ID_CARET_RETRY_2);
-    KillTimer(_hMsgWnd, TIMER_ID_CARET_RETRY_3);
-
-    BOOL ok1 = SetTimer(_hMsgWnd, TIMER_ID_CARET_RETRY_1, 50, nullptr) != 0;
-    BOOL ok2 = SetTimer(_hMsgWnd, TIMER_ID_CARET_RETRY_2, 140, nullptr) != 0;
-    BOOL ok3 = SetTimer(_hMsgWnd, TIMER_ID_CARET_RETRY_3, 260, nullptr) != 0;
-
-    if (!ok1 && !ok2 && !ok3)
+    // Weasel 模式：StartComposition 后第一次 SendCaretPositionUpdate 推迟 50ms 兜底。
+    // OnLayoutChange 触发时会清掉 _compositionJustStarted 并取消此 timer；
+    // 若 50ms 内未收到 OnLayoutChange（如某些 CUAS 路径），timer 到期用 cache 兜底发一次。
+    KillTimer(_hMsgWnd, TIMER_ID_CARET_RETRY);
+    if (SetTimer(_hMsgWnd, TIMER_ID_CARET_RETRY, 50, nullptr) == 0)
     {
-        WIND_LOG_WARN(L"PostDelayedCaretPositionUpdate: failed to schedule timers\n");
+        WIND_LOG_WARN(L"PostDelayedCaretPositionUpdate: failed to schedule timer\n");
+    }
+}
+
+void CLangBarItemButton::CancelDelayedCaretPositionUpdate()
+{
+    if (_hMsgWnd != NULL)
+    {
+        KillTimer(_hMsgWnd, TIMER_ID_CARET_RETRY);
     }
 }
 

@@ -666,6 +666,22 @@ BOOL CIPCClient::SendFocusLost()
     return _SendBinaryMessage(CMD_FOCUS_LOST, nullptr, 0, true /* async */);
 }
 
+BOOL CIPCClient::SendCaretPending()
+{
+    if (!_ShouldAttemptOperation())
+    {
+        return FALSE;
+    }
+
+    if (!IsConnected() && !Connect())
+    {
+        return FALSE;
+    }
+
+    _LogDebug(L"Sending caret_pending (async): composition just started, awaiting reflow");
+    return _SendBinaryMessage(CMD_CARET_PENDING, nullptr, 0, true /* async */);
+}
+
 BOOL CIPCClient::SendCompositionTerminated()
 {
     if (!IsConnected())

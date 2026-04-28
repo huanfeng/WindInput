@@ -67,13 +67,6 @@ const (
 	ModeEnglishUpper                      // 英文大写模式 (CapsLock on)
 )
 
-// caretProfile 记录每个进程的光标位置行为，用于自适应首字符延迟优化。
-// 通过首次 composition 的 Position A（预按键光标）与 Position C（OnLayoutChange 后）对比，
-// 判断该进程是否可以直接使用 Position A 来显示候选框，从而跳过延迟等待。
-type caretProfile struct {
-	posAReliable bool // Position A 是否可靠（delta ≤ 4px），一旦不可靠则锁定
-}
-
 // ConfirmedSegment 代表拼音分步确认中一个已确认但未上屏的文本段。
 // 用户选词后，如果输入缓冲区未完全消费，候选文字暂存于此而非直接上屏，
 // 用户可通过退格键回退到上一个确认段重新选词。
@@ -101,18 +94,18 @@ type caretState struct {
 	lastValidX int
 	lastValidY int
 
-	// 首字符光标位置诊断：记录 Position A（预按键光标）和后续更新的差异
-	diagPreKeyCaretX      int  // Position A: 按键前的光标 X
-	diagPreKeyCaretY      int  // Position A: 按键前的光标 Y
-	diagPreKeyCaretValid  bool // Position A 是否有效
-	diagCaretUpdateCount  int  // pendingFirstShow 期间收到的 caret update 次数
-	diagRejectedCompStart bool // 首字符等待期间是否收到过明显不可信的 compositionStart
+	// 当前活跃进程信息
+	activeProcessID   uint32    // 当前活跃进程 ID
+	activeProcessName string    // 当前活跃进程名（小写）
+	lastKeyTime       time.Time // 最近一次按键处理的时间
 
-	// 自适应光标检测：按进程记录 Position A 的可靠性
-	activeProcessID   uint32                   // 当前活跃进程 ID
-	activeProcessName string                   // 当前活跃进程名（小写）
-	caretProfiles     map[uint32]*caretProfile // 每个进程的光标行为档案
-	lastKeyTime       time.Time                // 最近一次按键处理的时间，用于过滤 stale caret update
+	// 首次 show 推迟：当本次按键启动一个新的 composition 时（如 WPS 会触发文本
+	// reflow 让光标位置变化），不能用按键前的旧坐标显示候选窗，否则会先在错误
+	// 位置出现再跳到正确位置。设置 pendingFirstShow=true 后，handleAlphaKey 不
+	// 立即 showUI；待 HandleCaretUpdate 收到 reflow 后的新坐标时再 show。
+	// pendingFirstShowToken 用于超时回调比对身份。
+	pendingFirstShow      bool
+	pendingFirstShowToken uint64
 }
 
 // tempModeState 临时输入模式（临时英文/临时拼音）状态
@@ -185,11 +178,9 @@ type Coordinator struct {
 	selectedIndex      int // 当前页内选中的候选索引（0-based），用于上下箭头键选择
 
 	// 分级加载状态
-	candidateLimit       int       // 当前加载上限（0=无限制）
-	candidateInput       string    // 加载时的 inputBuffer 快照
-	hasMoreCandidates    bool      // 是否还有更多候选未加载
-	pendingFirstShow     bool      // 首字符延迟显示：等待布局更新后的准确位置再显示候选窗口
-	pendingFirstShowTime time.Time // pendingFirstShow 设置的时间，用于跳过同步调用栈内的 stale 更新
+	candidateLimit    int    // 当前加载上限（0=无限制）
+	candidateInput    string // 加载时的 inputBuffer 快照
+	hasMoreCandidates bool   // 是否还有更多候选未加载
 
 	// 光标位置与自适应检测
 	caretState
@@ -441,10 +432,9 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		totalPages:         1,
 		candidatesPerPage:  candidatesPerPage,
 		caretState: caretState{
-			caretX:        100,
-			caretY:        100,
-			caretHeight:   20,
-			caretProfiles: make(map[uint32]*caretProfile),
+			caretX:      100,
+			caretY:      100,
+			caretHeight: 20,
 		},
 		punctConverter: transform.NewPunctuationConverter(),
 		pairTracker:    transform.NewPairTracker(cfg.Input.AutoPair.ChinesePairs),
@@ -662,10 +652,6 @@ func (c *Coordinator) clearState() {
 	c.currentPage = 1
 	c.totalPages = 1
 	c.selectedIndex = 0
-	c.pendingFirstShow = false
-	c.diagPreKeyCaretValid = false
-	c.diagCaretUpdateCount = 0
-	c.diagRejectedCompStart = false
 	c.compositionStartValid = false
 	// 清理加词模式状态
 	c.addWordActive = false
@@ -696,7 +682,7 @@ func (c *Coordinator) clearState() {
 	c.quickInputPinyinDictSwapped = false
 	c.savedLayout = ""
 
-	// 注意：不清除 caretProfiles 和 activeProcessID，它们需要跨 composition 持久化
+	// 注意：不清除 activeProcessID，需要跨 composition 持久化
 
 	// 清空配对栈（输入状态重置意味着光标位置不再可预测）
 	if c.pairTracker != nil {
@@ -710,21 +696,12 @@ func (c *Coordinator) clearState() {
 	c.engineMgr.InvalidateCommandCache()
 }
 
-// updateCaretProfile 更新当前进程的光标行为档案。
-// reliable=true 表示 Position A 与最终位置一致（delta ≤ 4px）。
-// 一旦某进程被标记为不可靠，则锁定为不可靠（保守策略）。
+// resetCompositionAnchorAfterCommit 在"部分上屏但保留剩余编码"等场景下被调用：
+// 上屏会让 C++ 端结束当前 composition 并立即开启新 composition，旧的 compositionStart
+// 锁定不应继续生效，否则候选窗会停留在前一段 composition 的位置。
+// C++ 端会在新 composition 创建时通过 _compositionJustStarted 推迟首次 IPC 至
+// OnLayoutChange，因此 Go 端无需再维护"等待坐标"的状态。
 // 调用方必须持有 c.mu 锁。
-func (c *Coordinator) updateCaretProfile(reliable bool) {
-	pid := c.activeProcessID
-	if pid == 0 {
-		return
-	}
-	profile := c.caretProfiles[pid]
-	if profile == nil {
-		c.caretProfiles[pid] = &caretProfile{posAReliable: reliable}
-		c.logger.Debug("caret.diag profile created", "pid", pid, "reliable", reliable)
-	} else if !reliable && profile.posAReliable {
-		profile.posAReliable = false
-		c.logger.Debug("caret.diag profile downgraded", "pid", pid)
-	}
+func (c *Coordinator) resetCompositionAnchorAfterCommit() {
+	c.compositionStartValid = false
 }

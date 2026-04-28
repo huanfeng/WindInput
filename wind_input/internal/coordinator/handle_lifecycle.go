@@ -12,6 +12,53 @@ import (
 	"github.com/huanfeng/wind_input/internal/ui"
 )
 
+// 默认首次 show 兜底超时；C++ 端 SendCaretPending 握手会延长到 firstShowExtendedTimeout。
+const (
+	firstShowDefaultTimeout  = 150 * time.Millisecond
+	firstShowExtendedTimeout = 600 * time.Millisecond
+)
+
+// armPendingFirstShow 推迟首次 showUI（持锁状态下调用）。
+// 启动兜底 goroutine：若到时仍未收到 caret update，强制 show 防止候选窗永远不显示。
+// token 比对避免后续按键覆盖时旧定时器误触发。
+func (c *Coordinator) armPendingFirstShow() {
+	c.armPendingFirstShowWithTimeout(firstShowDefaultTimeout)
+}
+
+// armPendingFirstShowWithTimeout 用指定超时启动兜底 goroutine。
+// 总会推进 token, 因此后调用会自动作废先前 goroutine。
+func (c *Coordinator) armPendingFirstShowWithTimeout(d time.Duration) {
+	c.pendingFirstShow = true
+	c.pendingFirstShowToken++
+	token := c.pendingFirstShowToken
+	go func() {
+		time.Sleep(d)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if !c.pendingFirstShow || c.pendingFirstShowToken != token {
+			return
+		}
+		c.pendingFirstShow = false
+		if len(c.inputBuffer) > 0 && len(c.candidates) > 0 && c.uiManager != nil {
+			c.logger.Debug("pendingFirstShow timeout: forcing showUI with current caret")
+			c.showUI()
+		}
+	}()
+}
+
+// HandleCaretPending 接收 C++ 端握手：composition 刚启动, 真正 caret 会在 reflow 后到达。
+// 延长 pendingFirstShow 超时, 避免某些应用 (如 EverEdit) OnLayoutChange burst 较慢
+// 时 Go 端先回退到按键前坐标 show, 然后才被真实坐标覆盖, 造成可见跳动。
+func (c *Coordinator) HandleCaretPending() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.pendingFirstShow {
+		return
+	}
+	c.logger.Debug("CARET_PENDING handshake: extending first-show timeout")
+	c.armPendingFirstShowWithTimeout(firstShowExtendedTimeout)
+}
+
 // HandleCaretUpdate handles caret position updates from C++ Bridge
 func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	c.mu.Lock()
@@ -43,14 +90,24 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	c.caretHeight = data.Height
 	c.caretValid = true // Mark that we have received valid caret position
 
+	// 消费 pendingFirstShow：handleAlphaKey 在新 composition 启动时不会立即
+	// showUI，等到 reflow 后真实坐标到达再 show，避免先错位再跳的闪烁。
+	wasPendingFirstShow := c.pendingFirstShow
+	if wasPendingFirstShow {
+		c.pendingFirstShow = false
+	}
+
 	// Store composition start position from C++ TSF (via ITfComposition::GetRange).
 	// 锁定语义：在同一次 composition 期间只接受首次到达的有效 compositionStart，
 	// 后续 update 即便携带新值也不再覆盖。否则 WebView / 微信 / WPS 部分控件
 	// 的 GetRange 会让 START anchor 跟随 caret 漂移，导致候选窗口随输入移动。
 	// composition 终止 / 焦点切换会调用 clearState() 把 compositionStartValid 复位。
 	//
-	// 校验：若首次接收到的 compositionStart 与 caret 距离过大（>500px），
-	// 视为坐标系不一致（logical vs physical），拒绝并仅做诊断标记。
+	// C++ 端在 StartComposition 后会推迟首次 SendCaretPositionUpdate 至 OnLayoutChange，
+	// 因此首次到达的 compositionStart 已是 reflow 后的权威坐标，无需 large-gap 覆盖。
+	//
+	// 校验：若 compositionStart 与 caret 距离过大（>500px），视为坐标系不一致
+	// （logical vs physical），拒绝。
 	if (data.CompositionStartX != 0 || data.CompositionStartY != 0) && !c.compositionStartValid {
 		dx := data.CompositionStartX - data.X
 		dy := data.CompositionStartY - data.Y
@@ -65,9 +122,6 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 			c.compositionStartY = data.CompositionStartY
 			c.compositionStartValid = true
 		} else {
-			if c.pendingFirstShow {
-				c.diagRejectedCompStart = true
-			}
 			c.logger.Debug("Rejected compositionStart: too far from caret (coordinate space mismatch)",
 				"caretX", data.X, "caretY", data.Y,
 				"compStartX", data.CompositionStartX, "compStartY", data.CompositionStartY,
@@ -76,107 +130,29 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	}
 
 	// If there's active input, refresh the candidate window position.
-	// This handles the case where C++ re-sends caret update after composition
-	// start/update, providing the up-to-date position.
+	// C++ 端保证每次到达的 caret update 都是 reflow 后的权威坐标。
 	hasInput := len(c.inputBuffer) > 0
 	hasCandidates := len(c.candidates) > 0
 	hasUI := c.uiManager != nil
 	if hasInput && hasCandidates && hasUI {
-		if c.pendingFirstShow {
-			// 首字符延迟显示：跳过同步调用栈内的 stale 更新。
-			// OnKeyDown → SendCaretPositionUpdate 和 UpdateComposition → SendCaretPositionUpdate
-			// 都在同一调用栈中完成，此时 GetTextExt 可能返回旧坐标。
-			// OnLayoutChange 在应用消息循环运行后触发（通常 10-30ms），坐标才可靠。
-			// 超过 80ms 仍未收到新更新时强制显示，避免候选窗口不出现。
-			elapsed := time.Since(c.pendingFirstShowTime)
-			c.diagCaretUpdateCount++
-
-			// 计算当前位置与 Position A 的差异
-			dx := data.X - c.diagPreKeyCaretX
-			dy := data.Y - c.diagPreKeyCaretY
-			if dx < 0 {
-				dx = -dx
+		// 首次 show（pendingFirstShow 刚被消费）必须无条件 show，无视 3px 过滤；
+		// 否则若 reflow 后坐标恰好与按键前差 ≤3px，候选窗会一直不显示。
+		if !wasPendingFirstShow {
+			// 过滤小位移：候选窗口已显示后，caret 位移 ≤3px 时跳过重绘，
+			// 避免应用后期微调（如 WPS 的 2px Y 偏移）导致可见闪烁。
+			moveDx := data.X - prevCaretX
+			moveDy := data.Y - prevCaretY
+			if moveDx < 0 {
+				moveDx = -moveDx
 			}
-			if dy < 0 {
-				dy = -dy
+			if moveDy < 0 {
+				moveDy = -moveDy
 			}
-
-			// 对已知不可靠的进程，使用更长的等待阈值（20ms）以跳过两段式重排的中间值。
-			// 微信等应用在 composition 创建后会经历两段重排：
-			//   第一段 ~10ms：位置近似正确但非最终值（height=20）
-			//   第二段 ~15-20ms：位置最终确定（height 可能变为 1）
-			// 普通应用（记事本等）在 10ms 时位置已稳定，使用默认 10ms 阈值。
-			minWait := 10 * time.Millisecond
-			pendingProfile := c.caretProfiles[c.activeProcessID]
-			if pendingProfile != nil && !pendingProfile.posAReliable {
-				minWait = 20 * time.Millisecond
-			}
-
-			if elapsed < minWait {
-				// 同步调用栈或中间值更新，跳过（不逐条输出日志，仅计数）
+			if moveDx <= 3 && moveDy <= 3 && c.caretValid {
 				return nil
 			}
-			// OnLayoutChange 或超时后的更新，可信赖。
-			// WPS 等应用首次 OnLayoutChange 携带 pre-reflow 旧坐标的情况由 C++ 端
-			// 通过退化矩形（height=0）过滤 + 延迟重查解决，这里不再二次拦截。
-			c.pendingFirstShow = false
-			reliable := dx <= 4 && dy <= 4
-			c.updateCaretProfile(reliable)
-			// 一条汇总日志：posA=预按键位置, posC=最终接受位置, skipped=跳过的中间更新数
-			c.logger.Debug("caret.diag first=resolved",
-				"posA", [2]int{c.diagPreKeyCaretX, c.diagPreKeyCaretY},
-				"posC", [2]int{data.X, data.Y}, "hC", data.Height,
-				"dX", dx, "dY", dy,
-				"elapsed", elapsed.String(),
-				"skipped", c.diagCaretUpdateCount-1,
-				"reliable", reliable,
-				"pid", c.activeProcessID)
-			// 解析分支必须立即显示候选窗口，绕过下方的小位移过滤；
-			// 否则连续两次 caret update 坐标相同时（如 WPS reflow 后定格），
-			// pendingFirstShow→false 之后会被 moveDx/moveDy ≤3 的过滤吞掉。
-			c.showUI()
-			return nil
-		} else if !c.lastKeyTime.IsZero() {
-			sinceKey := time.Since(c.lastKeyTime)
-			profile := c.caretProfiles[c.activeProcessID]
-
-			if profile != nil && !profile.posAReliable {
-				// 已知不可靠进程：跳过按键后 25ms 内的 caret 更新。
-				// 微信等应用两段式重排在 ~20ms 内才最终稳定，25ms 覆盖完整周期。
-				if sinceKey < 25*time.Millisecond {
-					return nil
-				}
-			} else if sinceKey >= 10*time.Millisecond && c.diagPreKeyCaretValid {
-				// 自校验：检测 OnLayoutChange 与 Position A 的偏差，必要时降级 profile。
-				dx := data.X - c.diagPreKeyCaretX
-				dy := data.Y - c.diagPreKeyCaretY
-				if dx < 0 {
-					dx = -dx
-				}
-				if dy < 0 {
-					dy = -dy
-				}
-				if dx > 4 || dy > 4 {
-					c.updateCaretProfile(false)
-				}
-			}
-		}
-		// 过滤小位移：候选窗口已显示后，caret 位移 ≤3px 时跳过重绘，
-		// 避免应用 reflow 后期微调（如 WPS 的 2px Y 偏移）导致可见闪烁。
-		moveDx := data.X - prevCaretX
-		moveDy := data.Y - prevCaretY
-		if moveDx < 0 {
-			moveDx = -moveDx
-		}
-		if moveDy < 0 {
-			moveDy = -moveDy
-		}
-		if !c.pendingFirstShow && moveDx <= 3 && moveDy <= 3 && c.caretValid {
-			return nil
 		}
 		c.showUI()
-	} else if c.pendingFirstShow && hasInput && hasUI && !hasCandidates {
-		// 首字符但还没有候选（引擎还在处理），保持 pending
 	}
 
 	return nil
@@ -201,6 +177,12 @@ func (c *Coordinator) HandleSelectionChanged(prevChar rune) {
 		}
 	}
 	c.lastOutputWasDigit = false
+	// 鼠标点击 / 方向键等外部光标移动会触发 SelectionChanged。Composition 之间
+	// 不会再有 GetTextExt 上报，缓存的 caret 坐标已不再代表当前位置；标记陈旧后
+	// 下一次新输入会走 deferred 路径，等待 OnKeyDown→SendCaretPositionUpdate
+	// 上报真实坐标，避免候选窗显示在旧位置。
+	c.caretValid = false
+	c.compositionStartValid = false
 	c.logger.Debug("Selection changed, reset smart punct state", "prevChar", string(prevChar))
 }
 

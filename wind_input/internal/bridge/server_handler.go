@@ -14,7 +14,7 @@ func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte
 	// 快速命令直接同步执行，避免 goroutine + channel 分配
 	switch header.Command {
 	case ipc.CmdFocusGained, ipc.CmdFocusLost, ipc.CmdIMEActivated,
-		ipc.CmdCompositionTerminated, ipc.CmdCaretUpdate, ipc.CmdHostRenderRequest:
+		ipc.CmdCompositionTerminated, ipc.CmdCaretUpdate, ipc.CmdCaretPending, ipc.CmdHostRenderRequest:
 		return s.processRequest(header, payload, clientID, processID)
 	}
 
@@ -109,6 +109,11 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 
 	case ipc.CmdCaretUpdate:
 		return s.handleCaretUpdate(payload, clientID)
+
+	case ipc.CmdCaretPending:
+		s.logger.Debug("Caret pending (composition just started, awaiting reflow)", "clientID", clientID)
+		s.handler.HandleCaretPending()
+		return s.codec.EncodeAck()
 
 	case ipc.CmdSelectionChanged:
 		return s.handleSelectionChanged(payload, clientID)

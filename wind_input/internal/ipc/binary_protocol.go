@@ -23,6 +23,7 @@ const (
 	CmdShowContextMenu       uint16 = 0x020A // 请求显示右键菜单（TSF发送屏幕坐标）
 	CmdCaretUpdate           uint16 = 0x0301 // Caret position update
 	CmdSelectionChanged      uint16 = 0x0302 // Selection/caret changed without composition (from ITfTextEditSink)
+	CmdCaretPending          uint16 = 0x0303 // First-show handshake: composition just started, real caret coming after reflow
 	CmdBatchEvents           uint16 = 0x0F01 // Batch events container
 )
 

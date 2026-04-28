@@ -27,6 +27,7 @@ constexpr uint16_t CMD_SHOW_CONTEXT_MENU     = 0x020A; // Request to show contex
 constexpr uint16_t CMD_COMPOSITION_TERMINATED = 0x0209; // Composition unexpectedly terminated (e.g., user clicked in input field)
 constexpr uint16_t CMD_CARET_UPDATE     = 0x0301; // Caret position update
 constexpr uint16_t CMD_SELECTION_CHANGED = 0x0302; // Selection/caret changed without composition (from ITfTextEditSink)
+constexpr uint16_t CMD_CARET_PENDING    = 0x0303; // First-show handshake: composition just started, real caret coming after reflow
 constexpr uint16_t CMD_BATCH_EVENTS     = 0x0F01; // Batch events container
 
 // ============================================================================

@@ -291,6 +291,10 @@ public:
                 return E_FAIL;
             }
             WIND_LOG_DEBUG(L"StartComposition succeeded\n");
+            // Weasel 模式：标记 composition 刚刚创建。下一次 SendCaretPositionUpdate
+            // 不会立即发 IPC，而是等 OnLayoutChange 提供 reflow 后的权威坐标，
+            // 50ms timer 兜底（应对不发 OnLayoutChange 的应用，如某些 CUAS 路径）。
+            _pTextService->_compositionJustStarted = TRUE;
         }
 
         // 2. Get range from composition
@@ -361,7 +365,11 @@ public:
         // Cache caret position from within this valid edit session.
         // This is critical for WebView apps where a separate CCaretEditSession
         // with TF_INVALID_COOKIE would be rejected.
-        if (SUCCEEDED(hr))
+        // 但 composition 刚刚创建（_compositionJustStarted）时跳过缓存：宿主
+        // 在此刻尚未完成 reflow，GetTextExt 返回的是 pre-reflow 旧坐标，写入
+        // 缓存会让后续 timer 兜底取到陈旧值。等 timer/OnLayoutChange 路径走
+        // GetCaretPosition fresh 查询。
+        if (SUCCEEDED(hr) && !_pTextService->_compositionJustStarted)
         {
             _CacheCaretPosition(ec);
         }
@@ -389,21 +397,13 @@ private:
             {
                 // Skip degenerate rects (height=0) — apps like WPS may return
                 // an invalid rect on the first composition before layout reflow.
-                // Let SendCaretPositionUpdate fall through to GetCaretPosition
-                // which has its own fallback chain (GetGUIThreadInfo, etc.).
+                // Cache 仅作为 timer 兜底使用；OnLayoutChange 路径会清掉 cache
+                // 并重新通过 fallback 查询，因此这里不再需要标记延迟重试。
                 LONG h = caretRect.bottom - caretRect.top;
                 if (h > 0)
                 {
                     _pTextService->_cachedCaretRect = caretRect;
                     _pTextService->_hasCachedCaretPos = TRUE;
-                }
-                else
-                {
-                    // App hasn't reflowed yet — the next OnLayoutChange will also
-                    // carry pre-reflow coordinates.  Skip it so caret.diag on the
-                    // Go side doesn't accept stale data as "reliable".
-                    _pTextService->_skipNextLayoutUpdate = TRUE;
-                    _pTextService->_needsDelayedCaretRetry = TRUE;
                 }
             }
             sel[0].range->Release();
@@ -607,6 +607,8 @@ public:
             }
 
             WIND_LOG_DEBUG(L"InsertAndCompose: New composition started\n");
+            // Weasel 模式：与 CUpdateCompositionEditSession 一致，标记延迟首次 IPC。
+            _pTextService->_compositionJustStarted = TRUE;
 
             // 4. Set the composition text
             ITfRange* pCompRange = nullptr;
@@ -685,8 +687,7 @@ CTextService::CTextService()
     , _pComposition(nullptr)
     , _hasCachedCaretPos(FALSE)
     , _hasCachedCompStartPos(FALSE)
-    , _skipNextLayoutUpdate(FALSE)
-    , _needsDelayedCaretRetry(FALSE)
+    , _compositionJustStarted(FALSE)
     , _needsFocusRecovery(FALSE)
     , _lastFocusCaretX(0)
     , _lastFocusCaretY(0)
@@ -2366,6 +2367,26 @@ static void ConvertToPhysicalCoordinates(LONG& x, LONG& y, LONG& height,
 
 void CTextService::SendCaretPositionUpdate()
 {
+    // Weasel 模式：composition 刚创建后第一次调用，不立即发 IPC。
+    // 应用尚未完成 layout reflow，GetTextExt 此时返回的可能是旧坐标
+    // （WPS 中 h>0 但坐标陈旧），先发会导致候选窗显示在错误位置然后跳到正确位置。
+    // 改为等 OnLayoutChange 触发（reflow 完成的权威信号），50ms timer 兜底。
+    if (_compositionJustStarted && _pComposition != nullptr)
+    {
+        if (_pLangBarItemButton != nullptr)
+        {
+            _pLangBarItemButton->PostDelayedCaretPositionUpdate();
+        }
+        // 通知 Go 端：composition 刚启动, 真正的 caret 会在 reflow 后到达。
+        // Go 端据此延长 pendingFirstShow 超时, 避免回退到按键前的旧坐标。
+        // 适用于 OnLayoutChange burst 跨度较长的应用 (如 EverEdit ~200ms 间隔)。
+        if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
+        {
+            _pIPCClient->SendCaretPending();
+        }
+        return;
+    }
+
     LONG x = 0, y = 0, height = 0;
     LONG compStartX = 0, compStartY = 0;
     BOOL hasPosition = FALSE;
@@ -2408,7 +2429,6 @@ void CTextService::SendCaretPositionUpdate()
             }
             else
             {
-                _ScheduleDelayedCaretPositionRetry();
                 return; // No position available at all
             }
         }
@@ -2442,29 +2462,6 @@ void CTextService::SendCaretPositionUpdate()
     {
         _pIPCClient->SendCaretUpdate((int)x, (int)y, (int)height, (int)compStartX, (int)compStartY);
     }
-
-    _ScheduleDelayedCaretPositionRetry();
-}
-
-void CTextService::_ScheduleDelayedCaretPositionRetry()
-{
-    if (!_needsDelayedCaretRetry)
-        return;
-
-    _needsDelayedCaretRetry = FALSE;
-
-    if (_pComposition == nullptr)
-    {
-        return;
-    }
-
-    if (_pLangBarItemButton == nullptr)
-    {
-        WIND_LOG_WARN(L"Delayed caret retry skipped: no LangBar message window\n");
-        return;
-    }
-
-    _pLangBarItemButton->PostDelayedCaretPositionUpdate();
 }
 
 BOOL CTextService::GetCompositionStartPosition(LONG* px, LONG* py)
@@ -2764,6 +2761,7 @@ STDAPI CTextService::OnCompositionTerminated(TfEditCookie ecWrite, ITfCompositio
         WIND_LOG_DEBUG(L"OnCompositionTerminated: Releasing composition\n");
         _pComposition->Release();
         _pComposition = nullptr;
+        _compositionJustStarted = FALSE;
 
         // Notify KeyEventSink that composition was unexpectedly terminated
         // This ensures _isComposing and _hasCandidates flags are properly reset
@@ -2787,9 +2785,19 @@ STDAPI CTextService::OnLayoutChange(ITfContext* pContext, TfLayoutCode lCode, IT
 {
     if (lCode == TF_LC_CHANGE && _pComposition != nullptr)
     {
-        if (_skipNextLayoutUpdate)
+        // 首次 reflow 阶段（_compositionJustStarted）：WPS 等宿主会在 reflow 完成前
+        // 连续触发多次 OnLayoutChange，前几次 GetTextExt 仍返回旧坐标。这里改用
+        // debounce：每次 OnLayoutChange 都重置 timer，等事件 burst 结束后再 flush，
+        // 此时 reflow 已稳定。timer 兜底也覆盖了完全不发 OnLayoutChange 的应用。
+        if (_compositionJustStarted)
         {
-            _skipNextLayoutUpdate = FALSE;
+            _hasCachedCaretPos = FALSE;
+            _hasCachedCompStartPos = FALSE;
+            if (_pLangBarItemButton != nullptr)
+            {
+                _pLangBarItemButton->PostDelayedCaretPositionUpdate();
+            }
+            WIND_LOG_DEBUG(L"OnLayoutChange (first show): debouncing caret flush\n");
             return S_OK;
         }
         WIND_LOG_DEBUG(L"OnLayoutChange: TF_LC_CHANGE with active composition, updating caret position\n");
@@ -3132,6 +3140,7 @@ void CTextService::EndComposition()
     // This allows new compositions to start while the old one is being ended async
     ITfComposition* pCompToEnd = _pComposition;
     _pComposition = nullptr;  // Clear immediately - HasActiveComposition() now returns FALSE
+    _compositionJustStarted = FALSE;
 
     // Need a document manager to request edit session
     ITfDocumentMgr* pDocMgr = nullptr;

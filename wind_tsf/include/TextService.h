@@ -119,6 +119,18 @@ public:
     // Check if there's an active composition
     BOOL HasActiveComposition() { return _pComposition != nullptr; }
 
+    // Clear the "composition just started" flag (used by timer fallback path).
+    // 同时作废 EditSession 缓存：缓存是 StartComposition EditSession 内部抓的，
+    // 那一刻宿主的 reflow 还没完成，缓存坐标是陈旧的。timer 触发时（reflow 已
+    // 完成的时刻）必须强制 SendCaretPositionUpdate 走 GetCaretPosition 路径
+    // 重新做 EditSession 查询，拿到 reflow 后的真实坐标。
+    void ClearCompositionJustStarted()
+    {
+        _compositionJustStarted = FALSE;
+        _hasCachedCaretPos = FALSE;
+        _hasCachedCompStartPos = FALSE;
+    }
+
     // Check if last edit session was async (Weasel optimization)
     BOOL IsAsyncEdit() { return _asyncEdit; }
     void ClearAsyncEdit() { _asyncEdit = FALSE; }
@@ -137,8 +149,6 @@ public:
     void UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock, const wchar_t* iconLabel = nullptr);
 
 private:
-    void _ScheduleDelayedCaretPositionRetry();
-
     LONG _refCount;
     ITfThreadMgr* _pThreadMgr;
     TfClientId _tfClientId;
@@ -170,8 +180,9 @@ private:
     RECT _cachedCompStartRect;
     BOOL _hasCachedCaretPos;
     BOOL _hasCachedCompStartPos;
-    BOOL _skipNextLayoutUpdate;  // Skip one OnLayoutChange after degenerate cache
-    BOOL _needsDelayedCaretRetry; // Degenerate first-composition rect needs post-edit-session retry
+    // Weasel 模式：StartComposition 后第一次 SendCaretPositionUpdate 不立即发 IPC，
+    // 改为等 OnLayoutChange（reflow 完成的权威信号）或 50ms timer 兜底。
+    BOOL _compositionJustStarted;
     BOOL _needsFocusRecovery;
     LONG _lastFocusCaretX;
     LONG _lastFocusCaretY;

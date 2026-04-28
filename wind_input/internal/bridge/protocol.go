@@ -104,6 +104,9 @@ type ModeNotifyData struct {
 type MessageHandler interface {
 	HandleKeyEvent(data KeyEventData) *KeyEventResult
 	HandleCaretUpdate(data CaretData) error
+	// HandleCaretPending: C++ 通知 composition 刚启动, 真正 caret 会在 reflow 后到达。
+	// Go 据此延长 pendingFirstShow 兜底超时, 避免提前用按键前坐标 show。
+	HandleCaretPending()
 	HandleFocusLost()
 	HandleCompositionTerminated()
 	HandleFocusGained(processID uint32) *StatusUpdateData

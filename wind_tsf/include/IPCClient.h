@@ -114,6 +114,10 @@ public:
     // Send caret position update to Go Service
     BOOL SendCaretUpdate(int x, int y, int height, int compositionStartX = 0, int compositionStartY = 0);
 
+    // Send caret-pending handshake: composition just started, real caret coming after app reflow.
+    // Tells Go to extend its first-show fallback timeout so it doesn't fall back to pre-key cursor.
+    BOOL SendCaretPending();
+
     // Send selection changed notification (from ITfTextEditSink::OnEndEdit)
     // Async: notifies Go that the caret moved outside of composition (e.g., mouse click)
     BOOL SendSelectionChanged(uint16_t prevChar = 0);

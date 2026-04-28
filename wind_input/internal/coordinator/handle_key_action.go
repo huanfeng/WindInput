@@ -16,6 +16,11 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	startTime := time.Now()
 	c.lastKeyTime = startTime
 
+	// 在变更 inputBuffer 之前抓取"是否为本次 composition 的首字"。若是，本次
+	// 按键会让宿主（如 WPS）触发文本 reflow，光标位置会从按键前的位置漂移到
+	// reflow 后的位置；此时不能用旧坐标 showUI，否则候选窗会先错位再跳。
+	wasComposingEmpty := len(c.inputBuffer) == 0
+
 	// 输入字母时清空配对栈（光标和配对之间插入了内容）
 	if c.pairTracker != nil {
 		c.pairTracker.Clear()
@@ -27,7 +32,6 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 	}
 
-	wasEmpty := len(c.inputBuffer) == 0
 	// 在光标位置插入字符
 	c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + key + c.inputBuffer[c.inputCursorPos:]
 	c.inputCursorPos += len(key)
@@ -46,6 +50,10 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 			c.inputCursorPos = len(newInput)
 			c.logger.Debug("Top code commit", "newInputLen", len(newInput))
 
+			// 顶屏会让 C++ 端结束并重新开启 composition，复位 compositionStart 锁定
+			// 与首字符诊断，使候选窗能在新 composition 的真实位置上重新定位。
+			c.resetCompositionAnchorAfterCommit()
+
 			// Apply full-width conversion if enabled
 			if c.fullWidth {
 				commitText = transform.ToFullWidth(commitText)
@@ -54,7 +62,9 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 			// 如果还有剩余输入，继续处理并更新候选
 			if len(c.inputBuffer) > 0 {
 				c.updateCandidates()
-				c.showUI()
+				// 顶屏会让 C++ 结束当前 composition 并立即重建一个新的，
+				// 与首字符场景同样存在 reflow 漂移，先推迟 show 等真实坐标。
+				c.armPendingFirstShow()
 
 				// InlinePreedit 开启时，让 C++ 端原子地插入文字并开始新组合
 				if c.config != nil && c.config.UI.InlinePreedit {
@@ -155,79 +165,12 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	}
 
 	showStart := time.Now()
-	// 首字符自适应延迟显示候选窗口。
-	// 某些应用在 composition 创建后不会立即更新 GetTextExt 返回值（如微信 deltaY=20px），
-	// 需要等 OnLayoutChange 触发后才能获取准确坐标。但另一些应用（EverEdit、Terminal 等）
-	// OnLayoutChange 根本不触发或延迟极高（80-100ms），而 Position A（预按键光标）完全准确。
-	//
-	// 自适应策略：按进程 ID 记录 Position A 的可靠性。
-	// - 首次 composition：延迟等待 OnLayoutChange（80ms 超时），同时记录 Position A 与最终位置差异
-	// - 后续 composition：如果 Position A 可靠（delta ≤ 4px），直接显示，0 延迟
-	//
-	// HostRender 模式（开始菜单等受限环境）始终直接显示。
-	isHostRendering := c.uiManager != nil && c.uiManager.IsHostRendering()
-	if wasEmpty && !isHostRendering {
-		// 记录 Position A（预按键光标位置）用于诊断和自适应判断
-		c.diagPreKeyCaretX = c.caretX
-		c.diagPreKeyCaretY = c.caretY
-		c.diagPreKeyCaretValid = c.caretValid
-		c.diagCaretUpdateCount = 0
-		c.diagRejectedCompStart = false
-
-		// 自适应检测：查询该进程的历史光标行为
-		profile := c.caretProfiles[c.activeProcessID]
-		if profile != nil && profile.posAReliable {
-			// 已学习且 Position A 可靠：直接显示，0 延迟
-			c.pendingFirstShow = false
-			c.logger.Debug("caret.diag first=immediate posA",
-				"x", c.caretX, "y", c.caretY, "h", c.caretHeight, "pid", c.activeProcessID)
-			c.showUI()
-		} else {
-			// 未学习或 Position A 不可靠：延迟等待 OnLayoutChange
-			c.pendingFirstShow = true
-			c.pendingFirstShowTime = time.Now()
-			c.logger.Debug("caret.diag first=deferred posA",
-				"x", c.caretX, "y", c.caretY, "h", c.caretHeight,
-				"pid", c.activeProcessID, "learned", profile != nil)
-
-			// 超时回退：普通应用 80ms 内没有布局更新就显示；如果检测到 WPS
-			// 这类错位 compStart，先给 TSF 延迟重查留出时间，再最终兜底。
-			go func() {
-				time.Sleep(80 * time.Millisecond)
-				c.mu.Lock()
-				defer c.mu.Unlock()
-				if c.pendingFirstShow && len(c.inputBuffer) > 0 && len(c.candidates) > 0 {
-					if c.diagRejectedCompStart {
-						go func() {
-							time.Sleep(180 * time.Millisecond)
-							c.mu.Lock()
-							defer c.mu.Unlock()
-							if c.pendingFirstShow && len(c.inputBuffer) > 0 && len(c.candidates) > 0 {
-								c.pendingFirstShow = false
-								c.updateCaretProfile(false)
-								c.logger.Debug("caret.diag first=timeout_fallback",
-									"x", c.diagPreKeyCaretX, "y", c.diagPreKeyCaretY,
-									"pid", c.activeProcessID,
-									"reliable", false,
-									"rejectedCompStart", true)
-								c.showUI()
-							}
-						}()
-						return
-					}
-					c.pendingFirstShow = false
-					c.updateCaretProfile(true)
-					c.logger.Debug("caret.diag first=timeout",
-						"x", c.diagPreKeyCaretX, "y", c.diagPreKeyCaretY,
-						"pid", c.activeProcessID,
-						"reliable", true,
-						"rejectedCompStart", false)
-					c.showUI()
-				}
-			}()
-		}
+	// 首字符触发 composition 创建：宿主侧 reflow 会让光标显著漂移，按键前的旧
+	// 坐标不可靠。改为推迟，等 HandleCaretUpdate 收到 reflow 后的真实坐标再 show。
+	// 非首字符则 inputBuffer 已有内容、composition 已存在，可立即用现有坐标显示。
+	if wasComposingEmpty {
+		c.armPendingFirstShow()
 	} else {
-		c.pendingFirstShow = false
 		c.showUI()
 	}
 	showElapsed := time.Since(showStart)
