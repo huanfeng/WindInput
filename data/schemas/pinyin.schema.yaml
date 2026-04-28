@@ -13,7 +13,6 @@ engine:
     show_code_hint: true
     use_smart_compose: true
     candidate_order: smart
-    dict_format: "dat"
     fuzzy:
       enabled: false
   filter_mode: smart

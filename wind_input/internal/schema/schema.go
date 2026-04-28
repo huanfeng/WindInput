@@ -95,7 +95,7 @@ type PinyinSpec struct {
 	UseSmartCompose bool           `yaml:"use_smart_compose"`
 	CandidateOrder  string         `yaml:"candidate_order"`
 	Fuzzy           *FuzzySpec     `yaml:"fuzzy,omitempty"`
-	DictFormat      string         `yaml:"dict_format"` // 词库格式: ""/"wdb"(默认) 或 "dat"
+	DictFormat      string         `yaml:"dict_format"` // 词库格式: "dat"(默认) 或 "wdb"
 }
 
 // ShuangpinSpec 双拼子配置

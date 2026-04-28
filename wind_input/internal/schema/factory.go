@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
@@ -18,6 +19,32 @@ import (
 	"github.com/huanfeng/wind_input/internal/engine/pinyin/shuangpin"
 	"github.com/huanfeng/wind_input/internal/store"
 )
+
+// pinyinWdatBuildMu 保护 pinyinWdatBuilding，确保同一时刻最多一个后台 wdat 构建在运行。
+var (
+	pinyinWdatBuildMu sync.Mutex
+	pinyinWdatBuilding bool
+)
+
+// startPinyinWdatBuildAsync 以后台协程异步构建拼音 wdat 缓存，若已在构建中则直接返回。
+func startPinyinWdatBuildAsync(dictPath, wdatCachePath string, logger *slog.Logger, normalizer *dict.WeightNormalizer) {
+	pinyinWdatBuildMu.Lock()
+	defer pinyinWdatBuildMu.Unlock()
+	if pinyinWdatBuilding {
+		return
+	}
+	pinyinWdatBuilding = true
+	go func() {
+		defer func() {
+			pinyinWdatBuildMu.Lock()
+			pinyinWdatBuilding = false
+			pinyinWdatBuildMu.Unlock()
+		}()
+		if err := dictcache.ConvertPinyinToWdat(dictPath, wdatCachePath, logger, normalizer); err != nil {
+			logger.Warn("后台生成拼音 wdat 失败", "err", err)
+		}
+	}()
+}
 
 // EngineBundle 引擎创建结果（包含引擎实例和相关资源）
 type EngineBundle struct {
@@ -314,6 +341,9 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 // --- 词库加载辅助函数（从 manager_init.go 迁移） ---
 
 func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string, logger *slog.Logger, normalizer *dict.WeightNormalizer, dictFormat string) error {
+	if dictFormat == "" {
+		dictFormat = "dat"
+	}
 	dictDir := filepath.Dir(dictPath)
 	srcPaths := dictcache.RimePinyinSourcePaths(dictPath)
 
@@ -328,17 +358,15 @@ func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string, logger *slog.L
 		}
 		wdatCachePath := dictcache.WdatCachePath("pinyin")
 		if dictcache.NeedsRegenerate(srcPaths, wdatCachePath) {
-			if err := dictcache.ConvertPinyinToWdat(dictPath, wdatCachePath, logger, normalizer); err != nil {
-				logger.Warn("wdat 转换失败，回退到 wdb", "error", err)
-			} else if err := pinyinDict.LoadDAT(wdatCachePath); err == nil {
-				logger.Info("拼音词库(缓存 wdat)加载成功", "entryCount", pinyinDict.EntryCount())
-				return nil
-			}
-		} else if err := pinyinDict.LoadDAT(wdatCachePath); err == nil {
+			// 缓存尚未就绪，异步构建，不阻塞当前调用方
+			startPinyinWdatBuildAsync(dictPath, wdatCachePath, logger, normalizer)
+			return fmt.Errorf("拼音 wdat 词库正在后台生成，请稍后切换到此方案")
+		}
+		if err := pinyinDict.LoadDAT(wdatCachePath); err == nil {
 			logger.Info("拼音词库(缓存 wdat)加载成功", "entryCount", pinyinDict.EntryCount())
 			return nil
 		}
-		logger.Warn("wdat 加载失败，回退到 wdb")
+		return fmt.Errorf("拼音 wdat 词库加载失败，缓存可能已损坏")
 	}
 
 	// 原有 wdb 流程
@@ -608,12 +636,12 @@ func preGeneratePinyinWdb(s *Schema, exeDir, dataDir string, logger *slog.Logger
 	}
 
 	srcPaths := dictcache.RimePinyinSourcePaths(pinyinDictPath)
-	wdbCachePath := dictcache.CachePath("pinyin")
-	if dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
-		logger.Debug("后台预生成拼音 wdb...")
-		if err := dictcache.ConvertPinyinToWdb(pinyinDictPath, wdbCachePath, logger, norm); err != nil {
-			logger.Warn("后台预生成拼音 wdb 失败", "err", err)
-		}
+
+	// 预生成 wdat（供 dict_format=dat 的方案使用，避免首次切换时同步构建卡顿）
+	// 通过 startPinyinWdatBuildAsync 确保全局最多一个构建协程在运行
+	wdatCachePath := dictcache.WdatCachePath("pinyin")
+	if dictcache.NeedsRegenerate(srcPaths, wdatCachePath) {
+		startPinyinWdatBuildAsync(pinyinDictPath, wdatCachePath, logger, norm)
 	}
 
 	// 预生成 Unigram
