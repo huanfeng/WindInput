@@ -71,6 +71,16 @@ function formatDateLabel(key: string): string {
   return `${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
+const WEEKDAY_CN = ["日", "一", "二", "三", "四", "五", "六"];
+function weekdayLabel(key: string): string {
+  return `星期${WEEKDAY_CN[parseDateKey(key).getDay()]}`;
+}
+
+function speedOfDay(chars: number, activeSeconds: number): number {
+  if (!activeSeconds || activeSeconds <= 0 || chars <= 0) return 0;
+  return Math.round((chars / activeSeconds) * 60);
+}
+
 function showTooltip(event: MouseEvent, text: string) {
   tooltip.value = {
     visible: true,
@@ -90,18 +100,52 @@ function hideTooltip() {
   tooltip.value.visible = false;
 }
 
-function dayTooltip(day: { date: string; chars: number }): string {
-  return `${formatDateLabel(day.date)}\n${formatNum(day.chars)} 字`;
+interface HeatmapDay {
+  date: string;
+  chars: number;
+  weekday: number;
+  cc: number;
+  ec: number;
+  pc: number;
+  oc: number;
+  as: number;
+}
+
+function dayTooltip(day: HeatmapDay): string {
+  const lines = [
+    `${formatDateLabel(day.date)} ${weekdayLabel(day.date)}`,
+    `总字 ${formatNum(day.chars)}`,
+  ];
+  if (day.chars > 0) {
+    const parts: string[] = [];
+    if (day.cc) parts.push(`中 ${formatNum(day.cc)}`);
+    if (day.ec) parts.push(`英 ${formatNum(day.ec)}`);
+    if (day.pc) parts.push(`符 ${formatNum(day.pc)}`);
+    if (day.oc) parts.push(`数 ${formatNum(day.oc)}`);
+    if (parts.length) lines.push(parts.join("  "));
+    const sp = speedOfDay(day.chars, day.as);
+    if (sp > 0) lines.push(`速度 ${sp} 字/分`);
+  }
+  return lines.join("\n");
 }
 
 function hourTooltip(bar: { hour: number; value: number }): string {
   const nextHour = String(bar.hour).padStart(2, "0");
-  return `${nextHour}:00 - ${nextHour}:59\n${formatNum(bar.value)} 字`;
+  const todayTotal = summary.value?.today_chars || 0;
+  const lines = [
+    `${nextHour}:00 - ${nextHour}:59`,
+    `${formatNum(bar.value)} 字`,
+  ];
+  if (bar.value > 0 && todayTotal > 0) {
+    const pct = ((bar.value / todayTotal) * 100).toFixed(1);
+    lines.push(`占今日 ${pct}%`);
+  }
+  return lines.join("\n");
 }
 
 // 热力图相关
 const heatmapWeeks = computed(() => {
-  const weeks: { date: string; chars: number; weekday: number }[][] = [];
+  const weeks: HeatmapDay[][] = [];
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const startDate = new Date(today);
@@ -109,20 +153,26 @@ const heatmapWeeks = computed(() => {
   // 对齐到周一
   startDate.setDate(startDate.getDate() - ((startDate.getDay() + 6) % 7));
 
-  const dataMap = new Map<string, number>();
+  const dataMap = new Map<string, DailyStatItem>();
   for (const d of heatmapData.value) {
-    dataMap.set(d.d, d.tc);
+    dataMap.set(d.d, d);
   }
 
-  let currentWeek: { date: string; chars: number; weekday: number }[] = [];
+  let currentWeek: HeatmapDay[] = [];
   const current = new Date(startDate);
   while (current <= today) {
     const dateStr = dateKey(current);
     const weekday = (current.getDay() + 6) % 7; // 0=Mon, 6=Sun
+    const item = dataMap.get(dateStr);
     currentWeek.push({
       date: dateStr,
-      chars: dataMap.get(dateStr) || 0,
+      chars: item?.tc || 0,
       weekday,
+      cc: item?.cc || 0,
+      ec: item?.ec || 0,
+      pc: item?.pc || 0,
+      oc: item?.oc || 0,
+      as: item?.as || 0,
     });
     if (weekday === 6 || dateKey(current) === dateKey(today)) {
       weeks.push(currentWeek);
@@ -153,6 +203,18 @@ function heatColor(chars: number): string {
   return heatColors[4];
 }
 
+// 今日字符分类细分
+const todayBreakdown = computed(() => {
+  const todayStr = dateKey(new Date());
+  const item = heatmapData.value.find((d) => d.d === todayStr);
+  return {
+    cc: item?.cc ?? summary.value?.today_chinese ?? 0,
+    ec: item?.ec ?? summary.value?.today_english ?? 0,
+    pc: item?.pc ?? 0,
+    oc: item?.oc ?? 0,
+  };
+});
+
 // 时段柱状图（始终返回24项，无数据时显示空柱）
 const hourBars = computed(() => {
   const todayStr = dateKey(new Date());
@@ -164,6 +226,36 @@ const hourBars = computed(() => {
     value: v,
     height: v > 0 ? Math.max(Math.round((v / max) * 100), 4) : 0,
   }));
+});
+
+// 字符分类分布（中/英/标点/数字符号），统计窗口内累计
+const charCategoryBars = computed(() => {
+  if (!heatmapData.value.length) return [];
+  let cc = 0,
+    ec = 0,
+    pc = 0,
+    oc = 0;
+  for (const d of heatmapData.value) {
+    cc += d.cc || 0;
+    ec += d.ec || 0;
+    pc += d.pc || 0;
+    oc += d.oc || 0;
+  }
+  const total = cc + ec + pc + oc;
+  if (total === 0) return [];
+  const items = [
+    { label: "中文", count: cc },
+    { label: "英文", count: ec },
+    { label: "标点", count: pc },
+    { label: "数字符号", count: oc },
+  ];
+  return items
+    .filter((it) => it.count > 0)
+    .map((it) => ({
+      label: it.label,
+      count: it.count,
+      pct: Math.round((it.count / total) * 100),
+    }));
 });
 
 // 码长分布
@@ -305,7 +397,12 @@ onMounted(loadData);
 <template>
   <section class="section">
     <div class="section-header">
-      <h2>输入统计</h2>
+      <h2>
+        输入统计
+        <span class="beta-tag" title="测试版本，数据统计不一定完全准确"
+          >(beta)</span
+        >
+      </h2>
       <p class="section-desc">查看输入习惯和效率数据</p>
     </div>
 
@@ -319,11 +416,23 @@ onMounted(loadData);
           <div class="stat-label">今日输入</div>
           <div
             class="stat-detail"
-            v-if="summary.today_chinese || summary.today_english"
+            v-if="
+              todayBreakdown.cc ||
+              todayBreakdown.ec ||
+              todayBreakdown.pc ||
+              todayBreakdown.oc
+            "
           >
-            中{{ formatNum(summary.today_chinese) }} 英{{
-              formatNum(summary.today_english)
-            }}
+            <div>
+              中{{ formatNum(todayBreakdown.cc) }} 英{{
+                formatNum(todayBreakdown.ec)
+              }}
+            </div>
+            <div>
+              符{{ formatNum(todayBreakdown.pc) }} 数{{
+                formatNum(todayBreakdown.oc)
+              }}
+            </div>
           </div>
         </div>
         <div class="stat-card">
@@ -351,42 +460,41 @@ onMounted(loadData);
           <div class="heatmap-scroll">
             <div class="heatmap-body">
               <div class="weekday-labels">
-                <span></span>
                 <span>一</span>
-                <span></span>
+                <span>二</span>
                 <span>三</span>
-                <span></span>
+                <span>四</span>
                 <span>五</span>
-                <span></span>
+                <span>六</span>
+                <span>日</span>
               </div>
-              <div class="heatmap-grid">
-                <div
-                  v-for="day in heatmapCells"
-                  :key="day.date"
-                  class="heatmap-cell"
-                  :style="{
-                    backgroundColor: heatColor(day.chars),
-                    gridRow: day.weekday + 1,
-                    gridColumn: day.weekIndex + 1,
-                  }"
-                  :title="`${day.date}\n${formatNum(day.chars)} 字`"
-                  @mouseenter="showTooltip($event, dayTooltip(day))"
-                  @mousemove="moveTooltip"
-                  @mouseleave="hideTooltip"
-                ></div>
+              <div class="heatmap-right">
+                <div class="heatmap-grid">
+                  <div
+                    v-for="day in heatmapCells"
+                    :key="day.date"
+                    class="heatmap-cell"
+                    :style="{
+                      backgroundColor: heatColor(day.chars),
+                      gridRow: day.weekday + 1,
+                      gridColumn: day.weekIndex + 1,
+                    }"
+                    @mouseenter="showTooltip($event, dayTooltip(day))"
+                    @mousemove="moveTooltip"
+                    @mouseleave="hideTooltip"
+                  ></div>
+                </div>
+                <div class="heatmap-legend">
+                  <span class="legend-label">少</span>
+                  <span
+                    v-for="(c, i) in heatColors"
+                    :key="i"
+                    class="legend-box"
+                    :style="{ backgroundColor: c }"
+                  ></span>
+                  <span class="legend-label">多</span>
+                </div>
               </div>
-            </div>
-          </div>
-          <div class="heatmap-footer">
-            <div class="heatmap-legend">
-              <span class="legend-label">少</span>
-              <span
-                v-for="(c, i) in heatColors"
-                :key="i"
-                class="legend-box"
-                :style="{ backgroundColor: c }"
-              ></span>
-              <span class="legend-label">多</span>
             </div>
           </div>
         </div>
@@ -478,6 +586,27 @@ onMounted(loadData);
             <span class="detail-value">{{ summary.max_speed }} 字/分钟</span>
           </div>
         </div>
+
+        <!-- 字符分类 -->
+        <template v-if="charCategoryBars.length > 0">
+          <div class="sub-title">字符分类</div>
+          <div class="bar-chart-h">
+            <div
+              v-for="bar in charCategoryBars"
+              :key="bar.label"
+              class="bar-row"
+            >
+              <span class="bar-label">{{ bar.label }}</span>
+              <div class="bar-track">
+                <div
+                  class="bar-fill char-fill"
+                  :style="{ width: bar.pct + '%' }"
+                ></div>
+              </div>
+              <span class="bar-pct">{{ bar.pct }}%</span>
+            </div>
+          </div>
+        </template>
 
         <!-- 码长分布 -->
         <template v-if="codeLenBars.length > 0">
@@ -667,6 +796,13 @@ onMounted(loadData);
   color: var(--text-tertiary, #8b949e);
 }
 
+.heatmap-right {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
 .heatmap-grid {
   display: grid;
   grid-template-rows: repeat(7, 12px);
@@ -684,19 +820,15 @@ onMounted(loadData);
   box-sizing: border-box;
 }
 
-.heatmap-footer {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 4px;
-}
-
 .heatmap-legend {
   display: inline-flex;
   align-items: center;
+  align-self: flex-end;
   gap: 4px;
   font-size: 11px;
   color: var(--text-secondary);
   white-space: nowrap;
+  margin-top: 2px;
 }
 
 .legend-box {
@@ -823,7 +955,7 @@ onMounted(loadData);
 }
 
 .bar-label {
-  width: 40px;
+  width: 64px;
   font-size: 12px;
   color: var(--text-secondary);
   text-align: right;
@@ -847,6 +979,19 @@ onMounted(loadData);
 
 .bar-fill.schema-fill {
   background: #6366f1;
+}
+
+.bar-fill.char-fill {
+  background: #f59e0b;
+}
+
+.beta-tag {
+  font-size: 12px;
+  font-weight: 500;
+  color: #f59e0b;
+  margin-left: 4px;
+  vertical-align: middle;
+  cursor: help;
 }
 
 .bar-pct {
