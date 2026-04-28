@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 )
@@ -72,6 +73,11 @@ func WriteUserDataDirOverride(dirPath string) error {
 func ValidateDataDirPath(path string) (bool, string) {
 	if path == "" {
 		return false, "路径不能为空"
+	}
+
+	// 拒绝非 UTF-8 编码的路径（防止系统区域为 GBK 时对话框返回错误编码导致创建乱码目录）
+	if !utf8.ValidString(path) {
+		return false, "路径包含无效字符，请检查系统区域设置是否支持 Unicode（UTF-8）"
 	}
 
 	// 必须是绝对路径
