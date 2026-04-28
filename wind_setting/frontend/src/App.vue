@@ -219,20 +219,6 @@ function mergeWithDefaults(cfg: any): Config {
   return {
     startup: { ...defaults.startup, ...cfg.startup },
     schema: { ...defaults.schema, ...cfg.schema },
-    dictionary: { ...defaults.dictionary, ...cfg.dictionary },
-    engine: {
-      ...defaults.engine,
-      ...cfg.engine,
-      pinyin: {
-        ...defaults.engine.pinyin,
-        ...cfg.engine?.pinyin,
-        fuzzy: {
-          ...defaults.engine.pinyin.fuzzy,
-          ...cfg.engine?.pinyin?.fuzzy,
-        },
-      },
-      codetable: { ...defaults.engine.codetable, ...cfg.engine?.codetable },
-    },
     hotkeys: { ...defaults.hotkeys, ...cfg.hotkeys },
     ui: {
       ...defaults.ui,
@@ -452,11 +438,6 @@ async function resetCurrentPageDefaults() {
       break;
     }
     case "input":
-      formData.value.engine = {
-        ...formData.value.engine,
-        pinyin: { ...defaults.engine.pinyin },
-        codetable: { ...defaults.engine.codetable },
-      };
       formData.value.input = {
         ...formData.value.input,
         punct_follow_mode: defaults.input.punct_follow_mode,

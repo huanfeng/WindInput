@@ -17,63 +17,6 @@ export interface StartupConfig {
   default_chinese_punct: boolean;
 }
 
-// 词库配置
-export interface DictionaryConfig {
-  system_dict: string;
-  user_dict?: string;
-  pinyin_user_dict: string;
-  codetable_user_dict: string;
-  pinyin_dict: string;
-}
-
-// 模糊拼音配置
-export interface FuzzyPinyinConfig {
-  enabled: boolean;
-  zh_z: boolean;
-  ch_c: boolean;
-  sh_s: boolean;
-  n_l: boolean;
-  f_h: boolean;
-  r_l: boolean;
-  an_ang: boolean;
-  en_eng: boolean;
-  in_ing: boolean;
-  ian_iang: boolean;
-  uan_uang: boolean;
-}
-
-// 拼音配置
-export interface PinyinConfig {
-  show_code_hint: boolean;
-  fuzzy: FuzzyPinyinConfig;
-}
-
-// 码表配置
-export interface CodetableConfig {
-  max_code_length?: number; // 最大码长（来自方案定义，只读）
-  auto_commit_at_4: boolean;
-  clear_on_empty_at_4: boolean;
-  top_code_commit: boolean;
-  punct_commit: boolean;
-  show_code_hint: boolean;
-  single_code_input: boolean;
-  single_code_complete: boolean; // 逐码空码补全
-  candidate_sort_mode: string; // 候选排序模式：frequency（词频）、natural（自然顺序）
-  load_mode?: string;
-  prefix_mode?: string;
-  bucket_limit?: number;
-  weight_mode?: string;
-  short_code_first?: boolean;
-  charset_preference?: string;
-}
-
-// 引擎配置
-export interface EngineConfig {
-  type: string;
-  pinyin: PinyinConfig;
-  codetable: CodetableConfig;
-}
-
 // 快捷键配置
 export interface HotkeyConfig {
   toggle_mode_keys: string[];
@@ -216,8 +159,6 @@ export interface SchemaConfig {
 export interface Config {
   startup: StartupConfig;
   schema: SchemaConfig;
-  dictionary: DictionaryConfig;
-  engine: EngineConfig;
   hotkeys: HotkeyConfig;
   ui: UIConfig;
   toolbar: ToolbarConfig;
@@ -345,48 +286,6 @@ export function getDefaultConfig(): Config {
     schema: {
       active: "wubi86",
       available: ["wubi86", "pinyin"],
-    },
-    dictionary: {
-      system_dict: "wubi86/wubi86.txt",
-      pinyin_user_dict: "pinyin_user_words.txt",
-      codetable_user_dict: "wubi_user_words.txt",
-      pinyin_dict: "pinyin",
-    },
-    engine: {
-      type: "codetable",
-      pinyin: {
-        show_code_hint: true,
-        fuzzy: {
-          enabled: false,
-          zh_z: false,
-          ch_c: false,
-          sh_s: false,
-          n_l: false,
-          f_h: false,
-          r_l: false,
-          an_ang: false,
-          en_eng: false,
-          in_ing: false,
-          ian_iang: false,
-          uan_uang: false,
-        },
-      },
-      codetable: {
-        auto_commit_at_4: false,
-        clear_on_empty_at_4: false,
-        top_code_commit: false,
-        punct_commit: true,
-        show_code_hint: true,
-        single_code_input: false,
-        single_code_complete: true,
-        candidate_sort_mode: "frequency",
-        load_mode: "mmap",
-        prefix_mode: "bfs_bucket",
-        bucket_limit: 30,
-        weight_mode: "auto",
-        short_code_first: false,
-        charset_preference: "none",
-      },
     },
     hotkeys: {
       toggle_mode_keys: ["lshift", "rshift"],

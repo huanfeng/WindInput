@@ -344,6 +344,33 @@ function isReferencedBy(schemaID: string): boolean {
               </div>
             </div>
 
+            <div class="setting-section-title">输入模式</div>
+            <div class="setting-item">
+              <div class="setting-info">
+                <label>逐码模式</label>
+                <p class="setting-hint">关闭前缀匹配，仅显示精确匹配</p>
+              </div>
+              <div class="setting-control">
+                <Switch
+                  :checked="getCodetableConfig(schemaID).single_code_input"
+                  @update:checked="(v: boolean) => { getCodetableConfig(schemaID).single_code_input = v; }"
+                />
+              </div>
+            </div>
+            <div class="setting-item" :class="{ 'item-disabled': !getCodetableConfig(schemaID).single_code_input }">
+              <div class="setting-info">
+                <label>逐码空码补全</label>
+                <p class="setting-hint">逐码模式下精确匹配无候选时，从更长编码中取首个候选</p>
+              </div>
+              <div class="setting-control">
+                <Switch
+                  :checked="getCodetableConfig(schemaID).single_code_complete"
+                  :disabled="!getCodetableConfig(schemaID).single_code_input"
+                  @update:checked="(v: boolean) => { getCodetableConfig(schemaID).single_code_complete = v; }"
+                />
+              </div>
+            </div>
+
             <div class="setting-section-title">常用功能</div>
             <div class="setting-item">
               <div class="setting-info">
@@ -371,40 +398,14 @@ function isReferencedBy(schemaID: string): boolean {
             </div>
             <div class="setting-item">
               <div class="setting-info">
-                <label>候选排序</label>
-                <p class="setting-hint">候选词的排列方式</p>
+                <label>显示编码提示</label>
+                <p class="setting-hint">在前缀匹配的候选词旁显示剩余编码</p>
               </div>
               <div class="setting-control">
-                <Select
-                  :model-value="getCodetableConfig(schemaID).candidate_sort_mode"
-                  @update:model-value="(v: string) => { getCodetableConfig(schemaID).candidate_sort_mode = v; }"
-                >
-                  <SelectTrigger class="w-[140px]"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="frequency">词频优先</SelectItem>
-                    <SelectItem value="natural">原始顺序</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div class="setting-item">
-              <div class="setting-info">
-                <label>候选字符偏好</label>
-                <p class="setting-hint">特定情况下的候选词组或单字优先</p>
-              </div>
-              <div class="setting-control">
-                <Select
-                  :model-value="getCodetableConfig(schemaID).charset_preference || 'none'"
-                  @update:model-value="(v: string) => { getCodetableConfig(schemaID).charset_preference = v; }"
-                >
-                  <SelectTrigger class="w-[140px]"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">无偏好</SelectItem>
-                    <SelectItem value="single_first">单字绝对优先</SelectItem>
-                    <SelectItem value="phrase_first">词组绝对优先</SelectItem>
-                    <SelectItem value="full_code_phrase_first">满码词组优先</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Switch
+                  :checked="getCodetableConfig(schemaID).show_code_hint"
+                  @update:checked="(v: boolean) => { getCodetableConfig(schemaID).show_code_hint = v; }"
+                />
               </div>
             </div>
 
@@ -473,68 +474,52 @@ function isReferencedBy(schemaID: string): boolean {
 
           <!-- 高级 Tab -->
           <div v-show="codetableTab === 'advanced'">
-            <div class="setting-section-title">输入模式</div>
-            <div class="setting-item">
-              <div class="setting-info">
-                <label>逐码模式</label>
-                <p class="setting-hint">关闭前缀匹配，仅显示精确匹配</p>
-              </div>
-              <div class="setting-control">
-                <Switch
-                  :checked="getCodetableConfig(schemaID).single_code_input"
-                  @update:checked="(v: boolean) => { getCodetableConfig(schemaID).single_code_input = v; }"
-                />
-              </div>
-            </div>
-            <div class="setting-item">
-              <div class="setting-info">
-                <label>逐码空码补全</label>
-                <p class="setting-hint">逐码模式下精确匹配无候选时，从更长编码中取首个候选</p>
-              </div>
-              <div class="setting-control">
-                <Switch
-                  :checked="getCodetableConfig(schemaID).single_code_complete"
-                  :disabled="!getCodetableConfig(schemaID).single_code_input"
-                  @update:checked="(v: boolean) => { getCodetableConfig(schemaID).single_code_complete = v; }"
-                />
-              </div>
+            <div class="advanced-warning">
+              ⚠ 此页选项通常由词库作者预设。修改后可能导致候选顺序异常或词库行为不符合预期，请谨慎调整。
             </div>
 
-            <div class="setting-section-title">前缀提示</div>
+            <div class="setting-section-title">候选行为</div>
             <div class="setting-item">
               <div class="setting-info">
-                <label>前缀匹配模式</label>
-                <p class="setting-hint">输入未完成时的提示逻辑</p>
+                <label>候选排序</label>
+                <p class="setting-hint">候选词的排列方式（许多词库依赖默认顺序，请勿随意修改）</p>
               </div>
               <div class="setting-control">
                 <Select
-                  :model-value="getCodetableConfig(schemaID).prefix_mode || 'bfs_bucket'"
-                  @update:model-value="(v: string) => { getCodetableConfig(schemaID).prefix_mode = v; }"
+                  :model-value="getCodetableConfig(schemaID).candidate_sort_mode"
+                  @update:model-value="(v: string) => { getCodetableConfig(schemaID).candidate_sort_mode = v; }"
                 >
                   <SelectTrigger class="w-[140px]"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="bfs_bucket">分层扫描(推荐)</SelectItem>
-                    <SelectItem value="sequential">传统顺序</SelectItem>
-                    <SelectItem value="none">关闭</SelectItem>
+                    <SelectItem value="frequency">词频优先</SelectItem>
+                    <SelectItem value="natural">原始顺序</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             </div>
             <div class="setting-item">
               <div class="setting-info">
-                <label>显示编码提示</label>
-                <p class="setting-hint">在前缀匹配的候选词旁显示剩余编码</p>
+                <label>候选字符偏好</label>
+                <p class="setting-hint">特定情况下的候选词组或单字优先</p>
               </div>
               <div class="setting-control">
-                <Switch
-                  :checked="getCodetableConfig(schemaID).show_code_hint"
-                  @update:checked="(v: boolean) => { getCodetableConfig(schemaID).show_code_hint = v; }"
-                />
+                <Select
+                  :model-value="getCodetableConfig(schemaID).charset_preference || 'none'"
+                  @update:model-value="(v: string) => { getCodetableConfig(schemaID).charset_preference = v; }"
+                >
+                  <SelectTrigger class="w-[140px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">无偏好</SelectItem>
+                    <SelectItem value="single_first">单字绝对优先</SelectItem>
+                    <SelectItem value="phrase_first">词组绝对优先</SelectItem>
+                    <SelectItem value="full_code_phrase_first">满码词组优先</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
             <div class="setting-item">
               <div class="setting-info">
-                <label>短码优先提示</label>
+                <label>短码优先</label>
                 <p class="setting-hint">前缀匹配时对较长的候选词施加降权惩罚</p>
               </div>
               <div class="setting-control">
@@ -551,13 +536,34 @@ function isReferencedBy(schemaID: string): boolean {
               </div>
               <div class="setting-control">
                 <Switch
-                  :checked="getCodetableConfig(schemaID).dedup_candidates"
+                  :checked="getCodetableConfig(schemaID).dedup_candidates !== false"
                   @update:checked="(v: boolean) => { getCodetableConfig(schemaID).dedup_candidates = v; }"
                 />
               </div>
             </div>
 
             <div class="setting-section-title">底层设置</div>
+            <div class="setting-item">
+              <div class="setting-info">
+                <label>前缀匹配模式</label>
+                <p class="setting-hint">
+                  分层扫描：按编码长度逐层补足候选，覆盖更全；<br />
+                  传统顺序：按词库存储顺序线性扫描，行为更可预测
+                </p>
+              </div>
+              <div class="setting-control">
+                <Select
+                  :model-value="(getCodetableConfig(schemaID).prefix_mode === 'sequential') ? 'sequential' : 'bfs_bucket'"
+                  @update:model-value="(v: string) => { getCodetableConfig(schemaID).prefix_mode = v; }"
+                >
+                  <SelectTrigger class="w-[140px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="bfs_bucket">分层扫描(推荐)</SelectItem>
+                    <SelectItem value="sequential">传统顺序</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
             <div class="setting-item">
               <div class="setting-info">
                 <label>权重解释策略</label>
@@ -1085,7 +1091,7 @@ function isReferencedBy(schemaID: string): boolean {
         </Button>
         <div style="flex: 1" />
         <Button variant="outline" size="sm" @click="cancelEdit">取消</Button>
-        <Button size="sm" @click="saveConfig">保存</Button>
+        <Button size="sm" @click="saveConfig">确定</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
@@ -1268,6 +1274,25 @@ function isReferencedBy(schemaID: string): boolean {
 
 .settings-tab-btn:hover:not(.active) {
   color: hsl(var(--foreground));
+}
+
+.advanced-warning {
+  margin: 12px 0 4px 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .advanced-warning {
+    color: #fde68a;
+    background: rgba(120, 53, 15, 0.25);
+    border-color: rgba(252, 211, 77, 0.4);
+  }
 }
 
 /* Fuzzy pairs grid */

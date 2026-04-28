@@ -44,52 +44,81 @@ func (m *Manager) UpdateFilterMode(mode string) {
 }
 
 // UpdateCodetableOptions 更新码表引擎的选项（热更新）
-func (m *Manager) UpdateCodetableOptions(autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, singleCodeComplete bool, candidateSortMode string) {
+func (m *Manager) UpdateCodetableOptions(spec *schema.CodeTableSpec) {
+	if spec == nil {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, eng := range m.engines {
 		// 直接的码表引擎
 		if codetableEngine, ok := eng.(*codetable.Engine); ok {
-			updateCodetableConfig(codetableEngine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, singleCodeComplete, candidateSortMode)
+			updateCodetableConfig(codetableEngine, spec)
 		}
 		// 混输引擎的码表子引擎
 		if mixedEngine, ok := eng.(*mixed.Engine); ok {
 			if we := mixedEngine.GetCodetableEngine(); we != nil {
-				updateCodetableConfig(we, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, singleCodeComplete, candidateSortMode)
+				updateCodetableConfig(we, spec)
 			}
 		}
 	}
 
-	if m.dictManager != nil && candidateSortMode != "" {
-		m.dictManager.SetSortMode(candidate.CandidateSortMode(candidateSortMode))
+	if m.dictManager != nil && spec.CandidateSortMode != "" {
+		m.dictManager.SetSortMode(candidate.CandidateSortMode(spec.CandidateSortMode))
 	}
 
 	m.logger.Info("更新码表选项",
-		"autoCommitAt4", autoCommitAt4,
-		"clearOnEmptyAt4", clearOnEmptyAt4,
-		"topCodeCommit", topCodeCommit,
-		"punctCommit", punctCommit,
-		"showCodeHint", showCodeHint,
-		"singleCodeInput", singleCodeInput,
-		"singleCodeComplete", singleCodeComplete,
-		"candidateSortMode", candidateSortMode)
+		"autoCommitAt4", spec.AutoCommitUnique,
+		"clearOnEmptyAt4", spec.ClearOnEmptyMax,
+		"topCodeCommit", spec.TopCodeCommit,
+		"punctCommit", spec.PunctCommit,
+		"showCodeHint", spec.ShowCodeHint,
+		"singleCodeInput", spec.SingleCodeInput,
+		"singleCodeComplete", spec.SingleCodeComplete,
+		"candidateSortMode", spec.CandidateSortMode,
+		"prefixMode", spec.PrefixMode,
+		"weightMode", spec.WeightMode,
+		"loadMode", spec.LoadMode,
+		"charsetPreference", spec.CharsetPreference,
+		"shortCodeFirst", spec.ShortCodeFirst != nil && *spec.ShortCodeFirst,
+		"dedupCandidates", spec.DedupCandidates == nil || *spec.DedupCandidates)
 }
 
 // updateCodetableConfig 更新码表引擎配置（内部辅助函数）
-func updateCodetableConfig(codetableEngine *codetable.Engine, autoCommitAt4, clearOnEmptyAt4, topCodeCommit, punctCommit, showCodeHint, singleCodeInput, singleCodeComplete bool, candidateSortMode string) {
-	if cfg := codetableEngine.GetConfig(); cfg != nil {
-		cfg.AutoCommitAt4 = autoCommitAt4
-		cfg.ClearOnEmptyAt4 = clearOnEmptyAt4
-		cfg.TopCodeCommit = topCodeCommit
-		cfg.PunctCommit = punctCommit
-		cfg.ShowCodeHint = showCodeHint
-		cfg.SingleCodeInput = singleCodeInput
-		cfg.SingleCodeComplete = singleCodeComplete
-		if candidateSortMode != "" {
-			cfg.CandidateSortMode = candidateSortMode
-		}
+func updateCodetableConfig(codetableEngine *codetable.Engine, spec *schema.CodeTableSpec) {
+	cfg := codetableEngine.GetConfig()
+	if cfg == nil {
+		return
 	}
+	cfg.AutoCommitAt4 = spec.AutoCommitUnique
+	cfg.ClearOnEmptyAt4 = spec.ClearOnEmptyMax
+	cfg.TopCodeCommit = spec.TopCodeCommit
+	cfg.PunctCommit = spec.PunctCommit
+	cfg.ShowCodeHint = spec.ShowCodeHint
+	cfg.SingleCodeInput = spec.SingleCodeInput
+	cfg.SingleCodeComplete = spec.SingleCodeComplete
+	if spec.CandidateSortMode != "" {
+		cfg.CandidateSortMode = spec.CandidateSortMode
+	}
+	// 新增字段：高级选项的运行时热更新
+	if spec.PrefixMode != "" {
+		cfg.PrefixMode = spec.PrefixMode
+	}
+	if spec.WeightMode != "" {
+		cfg.WeightMode = spec.WeightMode
+	}
+	if spec.LoadMode != "" {
+		cfg.LoadMode = spec.LoadMode
+	}
+	if spec.CharsetPreference != "" {
+		cfg.CharsetPreference = spec.CharsetPreference
+	}
+	if spec.ShortCodeFirst != nil {
+		cfg.ShortCodeFirst = *spec.ShortCodeFirst
+	}
+	// DedupCandidates 默认 true：未设置或显式 true 都启用
+	cfg.DedupCandidates = spec.DedupCandidates == nil || *spec.DedupCandidates
 }
 
 // updatePinyinConfig 更新拼音引擎配置（内部辅助函数）

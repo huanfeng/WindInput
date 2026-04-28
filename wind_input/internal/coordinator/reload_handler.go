@@ -104,16 +104,7 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 	switch s.Engine.Type {
 	case schema.EngineTypeCodeTable:
 		if spec := s.Engine.CodeTable; spec != nil {
-			h.engineMgr.UpdateCodetableOptions(
-				spec.AutoCommitUnique,
-				spec.ClearOnEmptyMax,
-				spec.TopCodeCommit,
-				spec.PunctCommit,
-				spec.ShowCodeHint,
-				spec.SingleCodeInput,
-				spec.SingleCodeComplete,
-				spec.CandidateSortMode,
-			)
+			h.engineMgr.UpdateCodetableOptions(spec)
 		}
 
 	case schema.EngineTypePinyin:
@@ -136,16 +127,7 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 		if s.Engine.Mixed != nil && s.Engine.Mixed.PrimarySchema != "" {
 			if priSchema := h.schemaMgr.GetSchema(s.Engine.Mixed.PrimarySchema); priSchema != nil {
 				if spec := priSchema.Engine.CodeTable; spec != nil {
-					h.engineMgr.UpdateCodetableOptions(
-						spec.AutoCommitUnique,
-						spec.ClearOnEmptyMax,
-						spec.TopCodeCommit,
-						spec.PunctCommit,
-						spec.ShowCodeHint,
-						spec.SingleCodeInput,
-						spec.SingleCodeComplete,
-						spec.CandidateSortMode,
-					)
+					h.engineMgr.UpdateCodetableOptions(spec)
 				}
 			}
 		}

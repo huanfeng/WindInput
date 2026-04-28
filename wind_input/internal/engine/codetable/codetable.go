@@ -192,7 +192,7 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 
 	// Phase 2: 收集前缀匹配
 	prefixCandidates := make([]candidate.Candidate, 0, 64)
-	prefixEnabled := e.config.PrefixMode != "none" && inputLen >= 1 && inputLen < e.config.MaxCodeLength
+	prefixEnabled := !e.config.SingleCodeInput && e.config.PrefixMode != "none" && inputLen >= 1 && inputLen < e.config.MaxCodeLength
 	if prefixEnabled {
 		if e.dictManager != nil {
 			if phraseLayer := e.dictManager.GetPhraseLayer(); phraseLayer != nil {
@@ -328,7 +328,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 
 	// ========== Phase 2: 收集前缀匹配 ==========
 	prefixCandidates := make([]candidate.Candidate, 0, 64)
-	prefixEnabled := e.config.PrefixMode != "none" && inputLen >= 1 && inputLen < e.config.MaxCodeLength
+	prefixEnabled := !e.config.SingleCodeInput && e.config.PrefixMode != "none" && inputLen >= 1 && inputLen < e.config.MaxCodeLength
 	if prefixEnabled {
 		if e.dictManager != nil {
 			compositeDict := e.dictManager.GetCompositeDict()
