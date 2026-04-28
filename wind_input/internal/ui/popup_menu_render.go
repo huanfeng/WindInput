@@ -31,7 +31,7 @@ func (m *PopupMenu) render() *image.RGBA {
 	baseFontSize := m.getMenuFontSize()
 	m.mu.Unlock()
 
-	scale := GetDPIScale()
+	scale := m.dpiScale()
 	fontSize := baseFontSize * scale
 	itemH := int(float64(m.getMenuItemHeight()) * scale)
 	sepH := int(float64(menuSeparatorHeight) * scale)

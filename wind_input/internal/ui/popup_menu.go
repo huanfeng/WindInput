@@ -50,6 +50,18 @@ type PopupMenu struct {
 	// Flip support: when menu can't fit below Y, flip above flipRefY
 	flipRefY int // 翻转参考Y（0=禁用）
 
+	// DPI locked at Show() time. Menus do not read the global effective DPI
+	// during their lifetime — other windows (candidate / toolbar) may rewrite
+	// it asynchronously, which would suddenly resize an already-visible menu.
+	// 0 = not locked, fall back to GetEffectiveDPI().
+	lockedDPI int
+
+	// Foreground window snapshot captured at Show() time. The menu auto-hides
+	// when the foreground HWND changes (e.g., the host app opens a Save dialog
+	// in response to Ctrl+S, or the user Alt+Tabs to another window).
+	// Only used by the root menu; submenus inherit closure from the root.
+	ownerForeground uintptr
+
 	// Text rendering
 	fontCache            *fontCache
 	textRenderer         *TextRenderer
@@ -103,12 +115,24 @@ const (
 
 	WM_KEYDOWN = 0x0100
 
+	VK_BACK   = 0x08
+	VK_TAB    = 0x09
 	VK_RETURN = 0x0D
+	VK_SHIFT  = 0x10
+	VK_CTRL   = 0x11
+	VK_ALT    = 0x12
 	VK_ESCAPE = 0x1B
+	VK_SPACE  = 0x20
+	VK_PRIOR  = 0x21 // PageUp
+	VK_NEXT   = 0x22 // PageDown
+	VK_END    = 0x23
+	VK_HOME   = 0x24
 	VK_LEFT   = 0x25
 	VK_UP     = 0x26
 	VK_RIGHT  = 0x27
 	VK_DOWN   = 0x28
+	VK_LWIN   = 0x5B
+	VK_RWIN   = 0x5C
 )
 
 // Global popup menu registry
@@ -277,6 +301,7 @@ func newPopupMenuShared(parent *PopupMenu) *PopupMenu {
 	parent.mu.Lock()
 	menuFontSizeOverride := parent.menuFontSizeOverride
 	resolvedTheme := parent.resolvedTheme
+	lockedDPI := parent.lockedDPI
 	parent.mu.Unlock()
 
 	return &PopupMenu{
@@ -290,7 +315,43 @@ func newPopupMenuShared(parent *PopupMenu) *PopupMenu {
 		fontConfig:           parent.fontConfig,
 		menuFontSizeOverride: menuFontSizeOverride,
 		resolvedTheme:        resolvedTheme,
+		lockedDPI:            lockedDPI,
 	}
+}
+
+// dpiForPoint returns the effective DPI of the monitor containing the given
+// screen point. Falls back to the global system DPI when the per-monitor API
+// is unavailable.
+func dpiForPoint(x, y int) int {
+	if procGetDpiForMonitor.Find() == nil {
+		pt := uintptr(uint32(x)) | (uintptr(uint32(y)) << 32)
+		hMonitor, _, _ := procMonitorFromPoint.Call(pt, MONITOR_DEFAULTTONEAREST)
+		if hMonitor != 0 {
+			var dpiX, dpiY uint32
+			ret, _, _ := procGetDpiForMonitor.Call(
+				hMonitor,
+				MDT_EFFECTIVE_DPI,
+				uintptr(unsafe.Pointer(&dpiX)),
+				uintptr(unsafe.Pointer(&dpiY)),
+			)
+			if ret == 0 && dpiX > 0 {
+				return int(dpiX)
+			}
+		}
+	}
+	return GetSystemDPI()
+}
+
+// dpiScale returns the DPI scale factor this menu should use. The value is
+// captured at Show() time and frozen for the menu's lifetime to immunize
+// against global DPI changes triggered by sibling windows (candidate, toolbar)
+// while the menu is visible.
+func (m *PopupMenu) dpiScale() float64 {
+	dpi := m.lockedDPI
+	if dpi <= 0 {
+		dpi = GetEffectiveDPI()
+	}
+	return float64(dpi) / float64(DefaultDPI)
 }
 
 func (m *PopupMenu) resolvePrimaryFontFamilyLocked() string {
@@ -539,6 +600,19 @@ func (m *PopupMenu) Create() error {
 
 // Show displays the popup menu at the specified position
 func (m *PopupMenu) Show(items []MenuItem, x, y int, callback PopupMenuCallback) {
+	// Lock DPI for the entire visible lifetime of this menu (root only;
+	// submenus inherit via newPopupMenuShared). Determined from the monitor
+	// containing the show point, so it survives global DPI rewrites.
+	m.mu.Lock()
+	isChildEarly := m.parentMenu != nil
+	m.mu.Unlock()
+	if !isChildEarly {
+		dpi := dpiForPoint(x, y)
+		m.mu.Lock()
+		m.lockedDPI = dpi
+		m.mu.Unlock()
+	}
+
 	m.mu.Lock()
 	m.items = items
 	m.callback = callback
@@ -615,6 +689,14 @@ func (m *PopupMenu) Show(items []MenuItem, x, y int, callback PopupMenuCallback)
 
 		// Install keyboard hook for arrow keys, Enter, Escape, and shortcut keys
 		installMenuKeyboardHook(m)
+
+		// Snapshot the foreground window so the timer can auto-hide the menu
+		// when focus moves to another window (e.g., host app opens a Save
+		// dialog after Ctrl+S, or the user Alt+Tabs away).
+		fg, _, _ := procGetForegroundWindow.Call()
+		m.mu.Lock()
+		m.ownerForeground = fg
+		m.mu.Unlock()
 	}
 
 	// Start tracking mouse leave
@@ -643,6 +725,13 @@ func (m *PopupMenu) Hide() {
 		}
 		procShowWindow.Call(uintptr(m.hwnd), SW_HIDE)
 	}
+
+	// Release the locked DPI / foreground snapshot so the next Show() picks up
+	// fresh values (e.g., menu reopened on a different monitor).
+	m.mu.Lock()
+	m.lockedDPI = 0
+	m.ownerForeground = 0
+	m.mu.Unlock()
 }
 
 // IsVisible returns whether the menu is visible
@@ -670,7 +759,7 @@ func (m *PopupMenu) Destroy() {
 
 // calculateSize calculates the menu dimensions
 func (m *PopupMenu) calculateSize() {
-	scale := GetDPIScale()
+	scale := m.dpiScale()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

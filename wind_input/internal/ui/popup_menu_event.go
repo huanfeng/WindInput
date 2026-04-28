@@ -253,7 +253,7 @@ func (m *PopupMenu) handleClick(lParam uintptr) {
 
 // hitTest returns the item index at the given Y position
 func (m *PopupMenu) hitTest(mouseY int) int {
-	scale := GetDPIScale()
+	scale := m.dpiScale()
 	itemH := int(float64(m.getMenuItemHeight()) * scale)
 	sepH := int(float64(menuSeparatorHeight) * scale)
 	padY := int(float64(menuPaddingY) * scale)
@@ -301,7 +301,7 @@ func (m *PopupMenu) showSubmenu(index int) {
 	m.hideSubmenu()
 
 	// Calculate submenu position (right side of parent item)
-	scale := GetDPIScale()
+	scale := m.dpiScale()
 	itemH := int(float64(m.getMenuItemHeight()) * scale)
 	sepH := int(float64(menuSeparatorHeight) * scale)
 	padY := int(float64(menuPaddingY) * scale)
@@ -469,10 +469,36 @@ func (m *PopupMenu) getDeepestMenu() *PopupMenu {
 	return m
 }
 
+// isMenuModifierDown reports whether Ctrl/Alt/Win is currently held down.
+// Shift is NOT treated as a blocking modifier (Shift+letter is a normal letter
+// shortcut, Shift+Tab is a normal nav key). When any of Ctrl/Alt/Win is held,
+// the keystroke is treated as an application-level shortcut and passed through.
+func isMenuModifierDown() bool {
+	for _, vk := range [...]uintptr{VK_CTRL, VK_ALT, VK_LWIN, VK_RWIN} {
+		state, _, _ := procGetAsyncKeyState.Call(vk)
+		if state&0x8000 != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // handleKeyDown processes a keyboard event, routing it to the deepest active menu.
 // Returns true if the key was consumed.
+//
+// Consumption policy (see docs/menu-keyboard.md):
+//   - Ctrl/Alt/Win + anything           → pass through (app shortcut, e.g. Ctrl+S, Alt+F4)
+//   - Esc/Enter/Arrows                  → consume (menu nav)
+//   - Letters / digits                  → consume (matched → activate; otherwise eat to keep IME quiet)
+//   - Tab/Space/Home/End/PageUp/PageDown→ consume (reserved for menu actions like expand)
+//   - Everything else (F1–F12, Ins/Del, media keys, …) → pass through
 func (m *PopupMenu) handleKeyDown(vkCode uint32) bool {
-	// Enter keyboard navigation mode: record mouse position so we can detect
+	// 1. Modifier combos belong to the foreground application, never the menu.
+	if isMenuModifierDown() {
+		return false
+	}
+
+	// 2. Enter keyboard navigation mode: record mouse position so we can detect
 	// whether future mouse events are real moves or phantom events from Windows.
 	if !menuKbNavActive {
 		var pt struct{ X, Y int32 }
@@ -557,15 +583,25 @@ func (m *PopupMenu) handleKeyDown(vkCode uint32) bool {
 		target.activateCurrentItem()
 		return true
 
-	default:
-		// Check for shortcut letter key (A-Z)
-		if vkCode >= 0x41 && vkCode <= 0x5A {
-			if target.activateByShortcut(rune(vkCode)) {
-				return true
-			}
-		}
-		// Also consume all other keys to prevent them from reaching the IME input buffer
+	case VK_TAB, VK_SPACE, VK_HOME, VK_END, VK_PRIOR, VK_NEXT:
+		// Reserved for future menu actions (e.g., Tab to expand). Consume to keep
+		// the foreground app from acting on them while the menu is visible.
 		return true
+
+	default:
+		// Letter A-Z: try to activate a shortcut. Eat the key either way so it
+		// doesn't pollute the IME composition buffer.
+		if vkCode >= 0x41 && vkCode <= 0x5A {
+			target.activateByShortcut(rune(vkCode))
+			return true
+		}
+		// Digit 0-9: reserved for future numeric menu shortcuts; consume.
+		if vkCode >= 0x30 && vkCode <= 0x39 {
+			return true
+		}
+		// Everything else (F1-F12, Ins/Del, media keys, etc.) is unrelated to
+		// the menu — pass through so global app shortcuts keep working.
+		return false
 	}
 }
 
@@ -740,11 +776,33 @@ func extractShortcutKey(text string) rune {
 	return 0
 }
 
-// checkMouseState checks if mouse button is pressed outside the menu tree
-// This is a backup mechanism for cross-process click detection where SetCapture doesn't work
+// checkMouseState runs every MENU_CHECK_INTERVAL ms while the root menu is
+// visible. It performs two backup checks that SetCapture/WM_CAPTURECHANGED
+// cannot cover:
+//
+//  1. Cross-process click outside the menu tree (SetCapture doesn't reliably
+//     forward clicks from other processes' windows).
+//  2. Foreground window change. The menu does not steal focus, so when a
+//     pass-through key (F1, Ctrl+S, Alt+Tab, …) causes the host app to open
+//     a new window or switch focus, no Win32 message reaches the menu. We
+//     poll GetForegroundWindow() and hide the menu when it differs from the
+//     snapshot taken at Show() time.
 func (m *PopupMenu) checkMouseState() {
 	if !m.IsVisible() {
 		return
+	}
+
+	// Foreground change detection: if focus has moved to a window that is
+	// neither the menu nor any of its submenus, hide the menu.
+	m.mu.Lock()
+	owner := m.ownerForeground
+	m.mu.Unlock()
+	if owner != 0 {
+		curFg, _, _ := procGetForegroundWindow.Call()
+		if curFg != 0 && curFg != owner && !m.foregroundIsMenuTree(curFg) {
+			m.Hide()
+			return
+		}
 	}
 
 	// Check if left mouse button is pressed
@@ -763,4 +821,24 @@ func (m *PopupMenu) checkMouseState() {
 		// Mouse pressed outside menu tree - close it
 		m.Hide()
 	}
+}
+
+// foregroundIsMenuTree reports whether the given HWND belongs to this menu
+// or any of its submenus. Used as a safety net so a (very unlikely) self-focus
+// transition wouldn't immediately close the menu.
+func (m *PopupMenu) foregroundIsMenuTree(hwnd uintptr) bool {
+	if hwnd == 0 {
+		return false
+	}
+	cur := m
+	for cur != nil {
+		if uintptr(cur.hwnd) == hwnd {
+			return true
+		}
+		cur.mu.Lock()
+		next := cur.submenu
+		cur.mu.Unlock()
+		cur = next
+	}
+	return false
 }
