@@ -382,6 +382,16 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
                                 isChineseMode, hasComposition, _hasCandidates, hasInputSession, TRUE, L"session_select_or_page");
                 return S_OK;
             }
+            // 中文+全角：无 input session 时也需拦截 Number, 让 Go 走全角转换。
+            // 否则数字直通到应用得到半角, 仅在记事本(IMM32 兼容层)恰好正确,
+            // VS Code/Chrome/WPS/Word 等纯 TSF 应用都会出错。
+            if (isChineseMode && keyType == HotkeyType::Number && _pTextService->IsFullWidth())
+            {
+                *pfEaten = TRUE;
+                _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, keyType,
+                                isChineseMode, hasComposition, _hasCandidates, hasInputSession, TRUE, L"chinese_fullwidth_number");
+                return S_OK;
+            }
         }
         else if (keyType == HotkeyType::Letter)
         {
