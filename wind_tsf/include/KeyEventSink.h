@@ -82,7 +82,11 @@ public:
     void Uninitialize();
 
     // Reset composing state (called when focus is lost or input field changes)
-    void ResetComposingState() { _isComposing = FALSE; _hasCandidates = FALSE; _lastPassthroughDigit = 0; _skipKeyCount = 0; _pendingPairAction = {}; _englishPairEngine.Clear(); }
+    // 注意: _lastPassthroughDigit 不在此清零。它是跨 IME 会话的上下文信号，
+    // 用于 Excel/WPS cell-select(按数字直通) → cell-edit(按标点) 这种焦点切换
+    // 场景的数字后智能标点判断。残留由按键事件路径（_SendKeyToService 非智能
+    // 标点目标键清零）和光标 Y 跨行检测兜底，不应在 IME 会话状态重置时一起清。
+    void ResetComposingState() { _isComposing = FALSE; _hasCandidates = FALSE; _skipKeyCount = 0; _pendingPairAction = {}; _englishPairEngine.Clear(); }
 
     // Handle config sync from Go service (called from async reader thread)
     void OnSyncConfig(const std::string& key, const std::vector<uint8_t>& value);
