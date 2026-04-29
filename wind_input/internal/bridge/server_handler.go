@@ -170,8 +170,8 @@ func (s *Server) handleKeyEvent(payload []byte, clientID int) []byte {
 	switch result.Type {
 	case ResponseTypeInsertText:
 		s.logger.Debug("Returning CommitText response", "clientID", clientID,
-			"modeChanged", result.ModeChanged, "hasNewComposition", result.NewComposition != "")
-		return s.codec.EncodeCommitText(result.Text, result.NewComposition, result.ModeChanged, result.ChineseMode)
+			"modeChanged", result.ModeChanged, "hasNewComposition", result.HasNewComposition)
+		return s.codec.EncodeCommitText(result.Text, result.NewComposition, result.ModeChanged, result.ChineseMode, result.HasNewComposition)
 
 	case ResponseTypeUpdateComposition:
 		return s.codec.EncodeUpdateComposition(result.Text, result.CaretPos)
@@ -328,7 +328,7 @@ func (s *Server) handleToggleMode(clientID int) []byte {
 
 	// Return ModeChanged response (with optional commit text if there was pending input)
 	if commitText != "" {
-		return s.codec.EncodeCommitText(commitText, "", true, chineseMode)
+		return s.codec.EncodeCommitText(commitText, "", true, chineseMode, false)
 	}
 	return s.codec.EncodeModeChanged(chineseMode)
 }
@@ -351,7 +351,7 @@ func (s *Server) handleSystemModeSwitch(payload []byte, clientID int) []byte {
 		"chineseMode", chineseMode, "commitText", commitText)
 
 	if commitText != "" {
-		return s.codec.EncodeCommitText(commitText, "", true, chineseMode)
+		return s.codec.EncodeCommitText(commitText, "", true, chineseMode, false)
 	}
 	return s.codec.EncodeModeChanged(chineseMode)
 }

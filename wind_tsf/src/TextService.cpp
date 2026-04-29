@@ -580,7 +580,7 @@ public:
         }
 
         // 3. Now start a new composition for the new input
-        if (!_newComposition.empty())
+        // Always start composition (even when _newComposition is empty = non-inline placeholder mode)
         {
             ITfContextComposition* pContextComp = nullptr;
             if (FAILED(_pContext->QueryInterface(IID_ITfContextComposition, (void**)&pContextComp)))
@@ -611,20 +611,36 @@ public:
             _pTextService->_compositionJustStarted = TRUE;
 
             // 4. Set the composition text
+            // Non-inline preedit: _newComposition is empty → use space placeholder (same as
+            // CUpdateCompositionEditSession), cursor positioned BEFORE the placeholder so
+            // GetTextExt returns valid coordinates without showing any visible text.
+            BOOL isPlaceholder = _newComposition.empty();
+            static const wchar_t PLACEHOLDER[] = L" ";
+            const wchar_t* textPtr = isPlaceholder ? PLACEHOLDER : _newComposition.c_str();
+            LONG textLen = isPlaceholder ? 1 : (LONG)_newComposition.length();
+
             ITfRange* pCompRange = nullptr;
             if (SUCCEEDED(_pTextService->_pComposition->GetRange(&pCompRange)))
             {
-                hr = pCompRange->SetText(ec, TF_ST_CORRECTION, _newComposition.c_str(), (LONG)_newComposition.length());
+                hr = pCompRange->SetText(ec, TF_ST_CORRECTION, textPtr, textLen);
                 if (SUCCEEDED(hr))
                 {
-                    // Apply display attribute
-                    _SetDisplayAttribute(ec, pCompRange);
+                    if (!isPlaceholder)
+                        _SetDisplayAttribute(ec, pCompRange);
 
-                    // Set cursor at end of composition
                     ITfRange* pRangeForSel = nullptr;
                     if (SUCCEEDED(_pTextService->_pComposition->GetRange(&pRangeForSel)))
                     {
-                        pRangeForSel->Collapse(ec, TF_ANCHOR_END);
+                        if (isPlaceholder)
+                        {
+                            // Placeholder: position cursor BEFORE the space (same as UpdateComposition placeholder logic)
+                            pRangeForSel->Collapse(ec, TF_ANCHOR_START);
+                        }
+                        else
+                        {
+                            // Inline preedit: cursor at end of composition text
+                            pRangeForSel->Collapse(ec, TF_ANCHOR_END);
+                        }
                         TF_SELECTION sel = {};
                         sel.range = pRangeForSel;
                         sel.style.ase = TF_AE_NONE;
@@ -632,7 +648,7 @@ public:
                         _pContext->SetSelection(ec, 1, &sel);
                         pRangeForSel->Release();
                     }
-                    WIND_LOG_DEBUG(L"InsertAndCompose: Composition text set\n");
+                    WIND_LOG_DEBUG_FMT(L"InsertAndCompose: Composition text set (placeholder=%d)\n", isPlaceholder);
                 }
                 pCompRange->Release();
             }

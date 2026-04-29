@@ -977,7 +977,7 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
                 }
             }
 
-            // Extract new composition
+            // Extract new composition text (only if compositionLength > 0)
             if ((commitHeader->flags & COMMIT_FLAG_HAS_NEW_COMPOSITION) && commitHeader->compositionLength > 0)
             {
                 size_t compOffset = sizeof(CommitTextHeader) + commitHeader->textLength;
@@ -988,9 +988,12 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
                         commitHeader->compositionLength);
                 }
             }
+            // restartComposition = flag set, regardless of compositionLength
+            // (non-inline preedit sends flag=true + empty composition → placeholder restart)
+            response.restartComposition = (commitHeader->flags & COMMIT_FLAG_HAS_NEW_COMPOSITION) != 0;
 
-            _LogDebug(L"Response: CommitText textLen=%zu, modeChanged=%d, hasNewComp=%d",
-                      response.text.length(), response.modeChanged, !response.newComposition.empty());
+            _LogDebug(L"Response: CommitText textLen=%zu, modeChanged=%d, restartComp=%d, newCompLen=%zu",
+                      response.text.length(), response.modeChanged, response.restartComposition, response.newComposition.length());
         }
         break;
 

@@ -68,13 +68,14 @@ type StatusUpdateData struct {
 
 // KeyEventResult represents the result of handling a key event
 type KeyEventResult struct {
-	Type           ResponseType
-	Text           string // For InsertText
-	CaretPos       int    // For UpdateComposition
-	ChineseMode    bool   // For ModeChanged
-	ModeChanged    bool   // Whether mode was also changed (for InsertText + mode change combo)
-	NewComposition string // New composition after commit (for top code scenarios)
-	CursorOffset   int    // For InsertTextWithCursor: 光标从文本末尾向左偏移的字符数
+	Type              ResponseType
+	Text              string // For InsertText
+	CaretPos          int    // For UpdateComposition
+	ChineseMode       bool   // For ModeChanged
+	ModeChanged       bool   // Whether mode was also changed (for InsertText + mode change combo)
+	NewComposition    string // New composition text after commit (inline preedit: actual text; non-inline: empty)
+	HasNewComposition bool   // Whether to restart composition after commit (set for both inline and non-inline when there is remaining input)
+	CursorOffset      int    // For InsertTextWithCursor: 光标从文本末尾向左偏移的字符数
 }
 
 // CommitRequestData contains commit request information (barrier mechanism)

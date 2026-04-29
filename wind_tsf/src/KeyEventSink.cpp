@@ -1409,10 +1409,11 @@ BOOL CKeyEventSink::_HandleServiceResponse()
 
             WIND_LOG_DEBUG(L"Processing CommitText response\n");
 
-            // Handle new composition if present (top code commit feature)
-            if (!response.newComposition.empty())
+            // Handle new composition if needed (top code / non-inline restart)
+            // restartComposition=true: both inline (newComposition has text) and non-inline (newComposition empty, uses placeholder)
+            if (response.restartComposition)
             {
-                WIND_LOG_TRACE_FMT(L"CommitText with new composition: textLen=%zu, newCompLen=%zu\n",
+                WIND_LOG_TRACE_FMT(L"CommitText with restart composition: textLen=%zu, newCompLen=%zu\n",
                              response.text.length(), response.newComposition.length());
 
                 _pTextService->InsertTextAndStartComposition(response.text, response.newComposition);

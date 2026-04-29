@@ -42,6 +42,7 @@ struct ServiceResponse
     std::wstring newComposition;
     bool modeChanged = false;
     bool chineseMode = false;
+    bool restartComposition = false; // 提交后需重启编排（嵌入/非嵌入模式统一，非嵌入时 newComposition 为空走占位符路径）
 
     // For InsertTextWithCursor
     int cursorOffset = 0;

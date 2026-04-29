@@ -214,7 +214,8 @@ func (c *BinaryCodec) EncodeCommitResult(barrierSeq uint16, text, newComposition
 
 // EncodeCommitText encodes a commit text response
 // Format: CommitTextHeader (12 bytes) + UTF-8 text + optional UTF-8 new composition
-func (c *BinaryCodec) EncodeCommitText(text, newComposition string, modeChanged, chineseMode bool) []byte {
+// hasNewComposition: true 表示提交后需重启编排（非嵌入模式下 newComposition 为空但仍需重启占位符编排）
+func (c *BinaryCodec) EncodeCommitText(text, newComposition string, modeChanged, chineseMode, hasNewComposition bool) []byte {
 	textBytes := []byte(text)
 	compBytes := []byte(newComposition)
 
@@ -223,7 +224,7 @@ func (c *BinaryCodec) EncodeCommitText(text, newComposition string, modeChanged,
 	if modeChanged {
 		flags |= 0x0001 // COMMIT_FLAG_MODE_CHANGED
 	}
-	if len(compBytes) > 0 {
+	if len(compBytes) > 0 || hasNewComposition {
 		flags |= 0x0002 // COMMIT_FLAG_HAS_NEW_COMPOSITION
 	}
 	if chineseMode {

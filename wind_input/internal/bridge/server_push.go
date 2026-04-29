@@ -198,7 +198,7 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 	s.pushMu.RUnlock()
 
 	// Encode the commit text message using CMD_COMMIT_TEXT
-	encoded := s.codec.EncodeCommitText(text, "", false, false)
+	encoded := s.codec.EncodeCommitText(text, "", false, false, false)
 
 	if exists && writer != nil {
 		// Best case: send to the specific active client
