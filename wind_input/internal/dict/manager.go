@@ -271,23 +271,31 @@ func (dm *DictManager) switchSchemaStore(schemaID, dataSchemaID, freqSchemaID st
 }
 
 // RegisterSystemLayer 注册系统词库层
+// 同名旧层会先从 compositeDict 中移除，避免多次注册造成层的累积
+// （多个混输/拼音方案预加载时，每个 factory 都会注册同名 codetable-system / pinyin-system）。
 func (dm *DictManager) RegisterSystemLayer(name string, layer DictLayer) {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
+	// 先移除 compositeDict 中所有同名层，再添加新层（防止 append 累积）
+	for dm.compositeDict.RemoveLayer(name) {
+	}
 	dm.systemLayers[name] = layer
 	dm.compositeDict.AddLayer(layer)
 	dm.logger.Info("注册系统词库", "name", name)
 }
 
-// UnregisterSystemLayer 取消注册系统词库层
+// UnregisterSystemLayer 取消注册系统词库层（移除所有同名层，防御性清理）
 func (dm *DictManager) UnregisterSystemLayer(name string) {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	if _, ok := dm.systemLayers[name]; ok {
-		delete(dm.systemLayers, name)
-		dm.compositeDict.RemoveLayer(name)
+	delete(dm.systemLayers, name)
+	removed := false
+	for dm.compositeDict.RemoveLayer(name) {
+		removed = true
+	}
+	if removed {
 		dm.logger.Info("取消注册系统词库", "name", name)
 	}
 }
