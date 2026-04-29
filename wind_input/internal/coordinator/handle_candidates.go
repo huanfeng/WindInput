@@ -80,24 +80,32 @@ func (c *Coordinator) calcSyllableBoundaries(completedSyllables []string, partia
 	return boundaries
 }
 
-// displayCursorPos 将 inputCursorPos（基于 inputBuffer 的字节位置）映射到组合显示文本中的
-// 光标位置。返回值是 rune 计数（即 UTF-16 code unit 计数，对 BMP 字符），
-// 与 C++ TSF 侧的 wstring 偏移一致。
-//
-// 确认文本前缀是中文（每个汉字 UTF-8 3字节 = 1 rune），
-// 拼音编码部分是纯 ASCII（每字节 = 1 rune），两者用不同方式计算偏移。
+// displayCursorPos 将 inputCursorPos 映射为 TSF/UTF-16 wstring 偏移（rune 计数）。
+// 确认段中文前缀按 rune 数计算（BMP 汉字 = 1 UTF-16 code unit = 1 rune），
+// 拼音编码是纯 ASCII（字节数 == rune 数），两者累加即为 wstring 偏移。
 func (c *Coordinator) displayCursorPos() int {
-	// 确认段前缀用 rune 计数（中文字符在 UTF-16 中也是 1 code unit）
 	prefixRuneLen := 0
 	for _, seg := range c.confirmedSegments {
 		prefixRuneLen += utf8.RuneCountInString(seg.Text)
 	}
-	// inputBuffer 是纯 ASCII (a-z, ')，字节数 == rune 数
 	if c.preeditDisplay == "" {
 		return prefixRuneLen + c.inputCursorPos
 	}
-	// 使用共享的位置映射：光标在分隔符之前（而非之后）
 	return prefixRuneLen + mapBufferPosToDisplayPos(c.inputBuffer, c.preeditDisplay, c.inputCursorPos)
+}
+
+// uiCursorPos 将 inputCursorPos 映射为候选窗预编辑文本的 UTF-8 字节偏移。
+// 确认段中文前缀按 UTF-8 字节数计算（"中" = 3 字节），
+// 使候选窗光标落在正确位置而非偏前。
+func (c *Coordinator) uiCursorPos() int {
+	prefixByteLen := 0
+	for _, seg := range c.confirmedSegments {
+		prefixByteLen += len(seg.Text) // UTF-8 字节数，非 rune 数
+	}
+	if c.preeditDisplay == "" {
+		return prefixByteLen + c.inputCursorPos
+	}
+	return prefixByteLen + mapBufferPosToDisplayPos(c.inputBuffer, c.preeditDisplay, c.inputCursorPos)
 }
 
 func (c *Coordinator) updateCandidates() {
@@ -322,7 +330,7 @@ func (c *Coordinator) showUI() {
 	c.uiManager.ShowCandidates(
 		displayCandidates,
 		c.compositionText(),
-		c.displayCursorPos(),
+		c.uiCursorPos(),
 		caretX,
 		caretY,
 		caretHeight,
