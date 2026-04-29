@@ -303,7 +303,9 @@ func (m *Manager) UpdateLearningConfig(ls *schema.LearningSpec) {
 			ce.SetLearningStrategy(codetableLearning)
 		}
 		if pe := e.GetPinyinEngine(); pe != nil {
-			pinyinDataSchemaID := m.GetPrimaryPinyinID()
+			// caller 已持有 m.mu 写锁；不可调用 m.GetPrimaryPinyinID()（内部 RLock 会死锁），
+			// 直接读字段。primaryPinyinID 由 SetPrimarySchemas 写入，与本路径同锁保护。
+			pinyinDataSchemaID := m.primaryPinyinID
 			if pinyinDataSchemaID == "" {
 				pinyinDataSchemaID = "pinyin"
 			}
