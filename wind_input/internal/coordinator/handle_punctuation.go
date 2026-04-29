@@ -605,20 +605,8 @@ func (c *Coordinator) handlePinyinSeparator() *bridge.KeyEventResult {
 	c.updateCandidates()
 	c.showUI()
 
-	// Handle Inline Preedit (与 handleAlphaKey 保持一致)
-	if c.config != nil && c.config.UI.InlinePreedit {
-		return &bridge.KeyEventResult{
-			Type:     bridge.ResponseTypeUpdateComposition,
-			Text:     c.compositionText(),
-			CaretPos: c.displayCursorPos(),
-		}
-	}
-
-	return &bridge.KeyEventResult{
-		Type:     bridge.ResponseTypeUpdateComposition,
-		Text:     "",
-		CaretPos: 0,
-	}
+	// 与 handleAlphaKey 保持一致：通过统一入口构建 UpdateComposition 响应
+	return c.compositionUpdateResult()
 }
 
 // matchHotkey checks if the current key event matches the configured hotkey string

@@ -115,16 +115,5 @@ func (c *Coordinator) handleClipboardPasteCode() *bridge.KeyEventResult {
 	c.updateCandidates()
 	c.showUI()
 
-	if c.config != nil && c.config.UI.InlinePreedit {
-		return &bridge.KeyEventResult{
-			Type:     bridge.ResponseTypeUpdateComposition,
-			Text:     c.compositionText(),
-			CaretPos: c.displayCursorPos(),
-		}
-	}
-	return &bridge.KeyEventResult{
-		Type:     bridge.ResponseTypeUpdateComposition,
-		Text:     "",
-		CaretPos: 0,
-	}
+	return c.compositionUpdateResult()
 }

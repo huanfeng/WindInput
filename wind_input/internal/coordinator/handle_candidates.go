@@ -479,16 +479,34 @@ func (c *Coordinator) expandCandidates() {
 		"limit", newLimit, "hasMore", c.hasMoreCandidates)
 }
 
-// compositionUpdateResult 构建 UpdateComposition 响应，遵循 InlinePreedit 配置：
-// 关闭时发送空文本，避免编码嵌入应用与候选窗同时显示。
+// isInlinePreedit 返回是否启用嵌入编码（编码文本嵌入到宿主应用光标处）。
+// 这是 InlinePreedit 配置的唯一判定入口；config 为 nil 时按默认值（true）处理，
+// 与 config.go 默认值保持一致，避免散落判断中 nil 方向不一致的问题。
+func (c *Coordinator) isInlinePreedit() bool {
+	if c.config == nil {
+		return true
+	}
+	return c.config.UI.InlinePreedit
+}
+
+// compositionUpdateResult 构建主输入流程的 UpdateComposition 响应。
+// 等价于 compositionUpdateResultWith(c.compositionText(), c.displayCursorPos())。
 func (c *Coordinator) compositionUpdateResult() *bridge.KeyEventResult {
-	if c.config != nil && !c.config.UI.InlinePreedit {
+	return c.compositionUpdateResultWith(c.compositionText(), c.displayCursorPos())
+}
+
+// compositionUpdateResultWith 用给定的 preedit 文本和光标位置构建 UpdateComposition 响应，
+// 遵循 InlinePreedit 配置：关闭时发送空文本（避免编码嵌入应用），但仍发送 UpdateComposition
+// 以保持 TSF 端 _isComposing/_hasCandidates 激活，确保后续按键能被拦截。
+// 用于临时英文/临时拼音/快捷输入等需要自定义 preedit 文本（含触发键 prefix）的模式。
+func (c *Coordinator) compositionUpdateResultWith(text string, caretPos int) *bridge.KeyEventResult {
+	if !c.isInlinePreedit() {
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeUpdateComposition}
 	}
 	return &bridge.KeyEventResult{
 		Type:     bridge.ResponseTypeUpdateComposition,
-		Text:     c.compositionText(),
-		CaretPos: c.displayCursorPos(),
+		Text:     text,
+		CaretPos: caretPos,
 	}
 }
 

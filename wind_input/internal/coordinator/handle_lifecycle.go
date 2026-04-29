@@ -519,8 +519,7 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 			// 由 C++ 端注入占位空格并把光标定位到空格前，借此稳定上报真实 caret。
 			// Replay 路径必须遵循同样契约，否则首次重建的 composition 会嵌入真实
 			// 字符，下一个按键才切回空文本，导致 Excel 中"先嵌入字母再替换为空格"。
-			inlinePreedit := c.config == nil || c.config.UI.InlinePreedit
-			if !inlinePreedit {
+			if !c.isInlinePreedit() {
 				replayText = ""
 				replayCaretPos = 0
 			} else {

@@ -452,21 +452,10 @@ func (c *Coordinator) pinyinModeCompositionResult(ops *pinyinModeOps) *bridge.Ke
 	return c.modeCompositionResult(preedit, caretPos)
 }
 
-// modeCompositionResult 构建特殊模式的编辑区更新结果，遵循 InlinePreedit 设置
-// 当 InlinePreedit 关闭时，不在应用光标处嵌入编码（发送空 composition），仅在候选窗中显示
+// modeCompositionResult 是 compositionUpdateResultWith 的薄封装，保留旧调用点的语义。
+// 后续可逐步替换调用方为 compositionUpdateResultWith。
 func (c *Coordinator) modeCompositionResult(text string, caretPos int) *bridge.KeyEventResult {
-	if c.config != nil && !c.config.UI.InlinePreedit {
-		return &bridge.KeyEventResult{
-			Type:     bridge.ResponseTypeUpdateComposition,
-			Text:     "",
-			CaretPos: 0,
-		}
-	}
-	return &bridge.KeyEventResult{
-		Type:     bridge.ResponseTypeUpdateComposition,
-		Text:     text,
-		CaretPos: caretPos,
-	}
+	return c.compositionUpdateResultWith(text, caretPos)
 }
 
 // showPinyinModeUI 显示拼音模式 UI

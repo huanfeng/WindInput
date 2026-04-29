@@ -67,26 +67,19 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 				// 顶屏会让 C++ 结束当前 composition 并立即重建一个新的，
 				// 与首字符场景同样存在 reflow 漂移，先推迟 show 等真实坐标。
 				c.armPendingFirstShow()
-
-				// InlinePreedit 开启时，让 C++ 端原子地插入文字并开始新组合
-				if c.config != nil && c.config.UI.InlinePreedit {
-					return &bridge.KeyEventResult{
-						Type:           bridge.ResponseTypeInsertText,
-						Text:           commitText,
-						NewComposition: c.inputBuffer,
-					}
-				}
-				// InlinePreedit 关闭时，不发送 NewComposition（避免应用看到
-				// 意外的 composition 文本而终止 composition），改为通过 push
-				// pipe 发送空 UpdateComposition 来重建 composition。push pipe
-				// 使用 PostMessageW 异步投递，会在 C++ 处理完 CommitText 同步
-				// 响应后执行，时序安全。
-				if c.bridgeServer != nil {
-					c.bridgeServer.PushUpdateCompositionToActiveClient("", 0)
+				// 两种模式统一：HasNewComposition=true 告知 C++ 原子地提交并重启编排。
+				// 嵌入模式：NewComposition 携带实际编码文本，C++ 以此为编排内容显示。
+				// 非嵌入模式：NewComposition 必须为空，C++ InsertAndCompose 走占位符路径，
+				// 否则剩余编码字母会嵌入应用文本（顶屏后第一个字母会显示在宿主中）。
+				newComp := ""
+				if c.isInlinePreedit() {
+					newComp = c.compositionText()
 				}
 				return &bridge.KeyEventResult{
-					Type: bridge.ResponseTypeInsertText,
-					Text: commitText,
+					Type:              bridge.ResponseTypeInsertText,
+					Text:              commitText,
+					HasNewComposition: true,
+					NewComposition:    newComp,
 				}
 			} else {
 				c.hideUI()
@@ -184,24 +177,7 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	totalElapsed := time.Since(startTime)
 	c.logger.Debug("handleAlphaKey timing", "total", totalElapsed.String(), "updateCandidates", updateElapsed.String(), "showUI", showElapsed.String())
 
-	// Handle Inline Preedit
-	if c.config != nil && c.config.UI.InlinePreedit {
-		return &bridge.KeyEventResult{
-			Type:     bridge.ResponseTypeUpdateComposition,
-			Text:     c.compositionText(),
-			CaretPos: c.displayCursorPos(),
-		}
-	}
-
-	// When InlinePreedit is disabled, we still need to tell TSF that we have an active
-	// composition so that subsequent keys (ESC, Backspace, Enter) are intercepted.
-	// Return UpdateComposition with empty text - TSF will set _isComposing=TRUE but
-	// won't display anything in the application.
-	return &bridge.KeyEventResult{
-		Type:     bridge.ResponseTypeUpdateComposition,
-		Text:     "",
-		CaretPos: 0,
-	}
+	return c.compositionUpdateResult()
 }
 
 func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
@@ -220,18 +196,7 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 		c.updateCandidates()
 		c.showUI()
 
-		if c.config != nil && c.config.UI.InlinePreedit {
-			return &bridge.KeyEventResult{
-				Type:     bridge.ResponseTypeUpdateComposition,
-				Text:     c.compositionText(),
-				CaretPos: c.displayCursorPos(),
-			}
-		}
-		return &bridge.KeyEventResult{
-			Type:     bridge.ResponseTypeUpdateComposition,
-			Text:     "",
-			CaretPos: 0,
-		}
+		return c.compositionUpdateResult()
 	}
 
 	if len(c.inputBuffer) > 0 && c.inputCursorPos > 0 {
@@ -249,18 +214,7 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 		c.updateCandidates()
 		c.showUI()
 
-		if c.config != nil && c.config.UI.InlinePreedit {
-			return &bridge.KeyEventResult{
-				Type:     bridge.ResponseTypeUpdateComposition,
-				Text:     c.compositionText(),
-				CaretPos: c.displayCursorPos(),
-			}
-		}
-		return &bridge.KeyEventResult{
-			Type:     bridge.ResponseTypeUpdateComposition,
-			Text:     "",
-			CaretPos: 0,
-		}
+		return c.compositionUpdateResult()
 	}
 
 	if len(c.inputBuffer) == 0 {
@@ -304,18 +258,7 @@ func (c *Coordinator) handleDelete() *bridge.KeyEventResult {
 		c.updateCandidates()
 		c.showUI()
 
-		if c.config != nil && c.config.UI.InlinePreedit {
-			return &bridge.KeyEventResult{
-				Type:     bridge.ResponseTypeUpdateComposition,
-				Text:     c.compositionText(),
-				CaretPos: c.displayCursorPos(),
-			}
-		}
-		return &bridge.KeyEventResult{
-			Type:     bridge.ResponseTypeUpdateComposition,
-			Text:     "",
-			CaretPos: 0,
-		}
+		return c.compositionUpdateResult()
 	}
 	// 光标在末尾 → 吃掉，不透传给系统
 	return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
@@ -333,18 +276,7 @@ func (c *Coordinator) popConfirmedSegment() *bridge.KeyEventResult {
 	c.updateCandidates()
 	c.showUI()
 
-	if c.config != nil && c.config.UI.InlinePreedit {
-		return &bridge.KeyEventResult{
-			Type:     bridge.ResponseTypeUpdateComposition,
-			Text:     c.compositionText(),
-			CaretPos: c.displayCursorPos(),
-		}
-	}
-	return &bridge.KeyEventResult{
-		Type:     bridge.ResponseTypeUpdateComposition,
-		Text:     "",
-		CaretPos: 0,
-	}
+	return c.compositionUpdateResult()
 }
 
 func (c *Coordinator) handleCursorLeft() *bridge.KeyEventResult {
