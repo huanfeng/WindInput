@@ -528,6 +528,7 @@ func loadCodetableFromWdb(engine *codetable.Engine, wdbPath string) error {
 			BWCodeLength:  meta.BWCodeLength,
 			SpecialPrefix: meta.SpecialPrefix,
 			PhraseRule:    meta.PhraseRule,
+			HasWeight:     meta.HasWeight,
 		})
 	}
 	return nil
