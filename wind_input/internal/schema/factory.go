@@ -22,7 +22,7 @@ import (
 
 // pinyinWdatBuildMu 保护 pinyinWdatBuilding，确保同一时刻最多一个后台 wdat 构建在运行。
 var (
-	pinyinWdatBuildMu sync.Mutex
+	pinyinWdatBuildMu  sync.Mutex
 	pinyinWdatBuilding bool
 )
 
@@ -50,6 +50,10 @@ func startPinyinWdatBuildAsync(dictPath, wdatCachePath string, logger *slog.Logg
 type EngineBundle struct {
 	SchemaID string
 	Engine   interface{} // *pinyin.Engine 或 *codetable.Engine 或 *mixed.Engine
+	// SystemLayer 工厂在构建期间注册到 DictManager 的系统词库层。
+	// 由 EngineManager 缓存到 systemLayers，方案切换时按缓存重新注册，
+	// 避免依赖共享 CompositeDict 的当前状态（防止与并发切换发生竞态）。
+	SystemLayer dict.DictLayer
 }
 
 // SchemaResolver 方案解析器，用于混输引擎查找被引用的方案
@@ -148,11 +152,13 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 	}
 
 	// 注册码表为 CompositeDict 的 system layer + 设置 DictManager
+	var ctSystemLayer dict.DictLayer
 	if dm != nil {
 		codeTable := engine.GetCodeTable()
 		if codeTable != nil {
 			systemLayer := dict.NewCodeTableLayer("codetable-system", dict.LayerTypeSystem, codeTable)
 			dm.RegisterSystemLayer("codetable-system", systemLayer)
+			ctSystemLayer = systemLayer
 		}
 		engine.SetDictManager(dm)
 		// 同步排序模式到 CompositeDict，避免启动时使用默认的词频排序
@@ -199,8 +205,9 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 	}()
 
 	return &EngineBundle{
-		SchemaID: s.Schema.ID,
-		Engine:   engine,
+		SchemaID:    s.Schema.ID,
+		Engine:      engine,
+		SystemLayer: ctSystemLayer,
 	}, nil
 }
 
@@ -216,8 +223,10 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 	}
 
 	config := &pinyin.Config{
-		ShowCodeHint: spec.ShowCodeHint,
-		FilterMode:   s.Engine.FilterMode,
+		ShowCodeHint:    spec.ShowCodeHint,
+		FilterMode:      s.Engine.FilterMode,
+		UseSmartCompose: spec.UseSmartCompose,
+		CandidateOrder:  spec.CandidateOrder,
 	}
 
 	// 模糊音配置
@@ -254,10 +263,12 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 
 	// 构建 CompositeDict
 	var compositeDict *dict.CompositeDict
+	var pySystemLayer dict.DictLayer
 	if dm != nil && !opt.UseIndependentDict {
 		systemLayer := dict.NewPinyinDictLayer("pinyin-system", dict.LayerTypeSystem, pinyinDict)
 		dm.RegisterSystemLayer("pinyin-system", systemLayer)
 		compositeDict = dm.GetCompositeDict()
+		pySystemLayer = systemLayer
 		logger.Info("拼音引擎使用 CompositeDict")
 	} else {
 		// 无 DictManager 或要求独立词库时创建独立 CompositeDict（避免污染混输主词库）
@@ -287,19 +298,10 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 		}
 	}
 
-	// 加载反查词库（如五笔反查）
-	// 临时拼音模式下跳过：由 Manager.GetReverseIndex() 动态提供当前主方案的反向索引
-	if !opt.SkipReverseLookup {
-		reverseDicts := s.GetDictsByRole(DictRoleReverseLookup)
-		for _, rd := range reverseDicts {
-			rdPath := resolvePath(exeDir, dataDir, rd.Path)
-			if err := loadCodetableForPinyin(engine, rdPath, rd.Type, s.Schema.ID, logger); err != nil {
-				logger.Warn("加载反查码表失败", "err", err)
-			} else {
-				logger.Info("反查码表加载成功")
-			}
-		}
-	}
+	// 反查/编码提示已统一由 Manager.ApplyCodeHintsToCandidates 注入（数据来自主码表方案的反向索引），
+	// 拼音引擎不再加载独立的 reverse_lookup 词典（避免重复构建 *_reverse.wdb）。
+	// schema yaml 中遗留的 role: reverse_lookup 字典项会在加载阶段被忽略。
+	_ = opt.SkipReverseLookup // 保留字段供临时拼音入口使用（其他位置仍读取它）
 
 	// 设置 DictManager
 	if dm != nil {
@@ -333,8 +335,9 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 	}
 
 	return &EngineBundle{
-		SchemaID: s.Schema.ID,
-		Engine:   engine,
+		SchemaID:    s.Schema.ID,
+		Engine:      engine,
+		SystemLayer: pySystemLayer,
 	}, nil
 }
 
@@ -664,6 +667,14 @@ func preGeneratePinyinWdb(s *Schema, exeDir, dataDir string, logger *slog.Logger
 	debug.FreeOSMemory()
 }
 
+// ResolveDictPath 解析相对路径为绝对路径（包内 resolvePath 的导出别名）
+// 搜索顺序：exeDir → exeDir/schemas → dataDir → dataDir/schemas
+// 这使得方案配置中的词库路径可以简写为相对于 schemas 目录的路径，
+// 例如 "wubi86/wubi86_jidian.dict.yaml" 会从 schemas/wubi86/ 下查找。
+func ResolveDictPath(exeDir, dataDir, path string) string {
+	return resolvePath(exeDir, dataDir, path)
+}
+
 // resolvePath 解析相对路径为绝对路径
 // 搜索顺序：exeDir → exeDir/schemas → dataDir → dataDir/schemas
 // 这使得方案配置中的词库路径可以简写为相对于 schemas 目录的路径，
@@ -820,11 +831,13 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 	}
 
 	// 注册码表到 DictManager 的主 CompositeDict
+	var mixedSystemLayer dict.DictLayer
 	if dm != nil {
 		codeTable := codetableEngine.GetCodeTable()
 		if codeTable != nil {
 			systemLayer := dict.NewCodeTableLayer("codetable-system", dict.LayerTypeSystem, codeTable)
 			dm.RegisterSystemLayer("codetable-system", systemLayer)
+			mixedSystemLayer = systemLayer
 		}
 		codetableEngine.SetDictManager(dm)
 		dm.SetSortMode(candidate.CandidateSortMode(codeTableSpec.CandidateSortMode))
@@ -880,10 +893,12 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		skipAbbrev = false
 	}
 	pinyinConfig := &pinyin.Config{
-		ShowCodeHint: pinyinSpec.ShowCodeHint,
-		FilterMode:   s.Engine.FilterMode,
-		SkipShadow:   true, // 混输模式：Shadow 由 MixedEngine 合并后统一应用
-		SkipAbbrev:   skipAbbrev,
+		ShowCodeHint:    pinyinSpec.ShowCodeHint,
+		FilterMode:      s.Engine.FilterMode,
+		UseSmartCompose: pinyinSpec.UseSmartCompose,
+		CandidateOrder:  pinyinSpec.CandidateOrder,
+		SkipShadow:      true, // 混输模式：Shadow 由 MixedEngine 合并后统一应用
+		SkipAbbrev:      skipAbbrev,
 	}
 
 	// 模糊音配置
@@ -1027,8 +1042,9 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 	}()
 
 	return &EngineBundle{
-		SchemaID: s.Schema.ID,
-		Engine:   mixedEngine,
+		SchemaID:    s.Schema.ID,
+		Engine:      mixedEngine,
+		SystemLayer: mixedSystemLayer,
 	}, nil
 }
 

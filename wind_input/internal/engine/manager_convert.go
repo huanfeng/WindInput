@@ -81,6 +81,8 @@ func (m *Manager) ConvertEx(input string, maxCandidates int) *ConvertResult {
 
 	if pinyinEngine, ok := engine.(*pinyin.Engine); ok {
 		pinyinResult := pinyinEngine.ConvertEx(input, maxCandidates)
+		// 反查/编码提示：从主码表方案的反向索引派生（不再由拼音引擎自带 codeHintTable）
+		m.ApplyCodeHintsToCandidates(pinyinResult.Candidates)
 		result := &ConvertResult{
 			Candidates:      pinyinResult.Candidates,
 			IsEmpty:         pinyinResult.IsEmpty,
@@ -319,82 +321,83 @@ func (m *Manager) resolveEncoder(s *schema.Schema) *schema.EncoderSpec {
 	return nil
 }
 
-// GetReverseIndex 获取当前码表的反向索引（字 → 编码列表）
-// 首次调用时构建并缓存，切换方案后自动重建
+// GetReverseIndex 获取主码表的反向索引（字 → 编码列表）
+//
+// 数据源优先级：
+//  1. 主码表方案（primaryCodetableID）已加载的 codetable / mixed 引擎（与 currentID 解耦，
+//     从而拼音方案下也能稳定取到反向索引）；
+//  2. 当前引擎（兼容未配置主方案的旧路径）。
+//
+// 主码表未加载时返回 nil，并触发后台异步加载（不阻塞按键路径）。
+// 缓存键为 primaryCodetableID（或当前 ID 兜底），主方案切换时由 SetPrimarySchemas 清空缓存。
 func (m *Manager) GetReverseIndex() map[string][]string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 缓存命中
-	if m.cachedReverseIndex != nil && m.cachedReverseSchemaID == m.currentID {
-		return m.cachedReverseIndex
+	primaryID := m.primaryCodetableID
+	if primaryID == "" {
+		primaryID = m.currentID
+	}
+	if m.cachedReverseIndex != nil && m.cachedReverseSchemaID == primaryID {
+		idx := m.cachedReverseIndex
+		m.mu.Unlock()
+		return idx
+	}
+	// 优先用主码表方案的引擎
+	var ct *dict.CodeTable
+	if eng, ok := m.engines[primaryID]; ok {
+		ct = extractCodeTable(eng)
+	}
+	// 兜底：当前引擎
+	if ct == nil && m.currentEngine != nil {
+		ct = extractCodeTable(m.currentEngine)
+	}
+	if ct != nil {
+		idx := ct.BuildReverseIndex()
+		m.cachedReverseIndex = idx
+		m.cachedReverseSchemaID = primaryID
+		m.mu.Unlock()
+		return idx
 	}
 
-	if m.dictManager == nil {
-		return nil
-	}
-
-	composite := m.dictManager.GetCompositeDict()
-	if composite == nil {
-		return nil
-	}
-
-	// 从系统层中找到 CodeTableLayer
-	layers := composite.GetLayersByType(dict.LayerTypeSystem)
-	for _, layer := range layers {
-		if ctl, ok := layer.(*dict.CodeTableLayer); ok {
-			ct := ctl.GetCodeTable()
-			if ct != nil {
-				m.cachedReverseIndex = ct.BuildReverseIndex()
-				m.cachedReverseSchemaID = m.currentID
-				return m.cachedReverseIndex
-			}
-		}
-	}
-
-	// 备选：直接通过层名查找 codetable-system
-	if ctLayer := composite.GetLayerByName("codetable-system"); ctLayer != nil {
-		if ctl, ok := ctLayer.(*dict.CodeTableLayer); ok {
-			ct := ctl.GetCodeTable()
-			if ct != nil {
-				m.cachedReverseIndex = ct.BuildReverseIndex()
-				m.cachedReverseSchemaID = m.currentID
-				return m.cachedReverseIndex
-			}
-		}
-	}
-
-	// 回退：从 systemLayers 缓存中查找（临时拼音模式下码表层已从 CompositeDict 移除，
-	// 但 systemLayers 中仍保留引用）
-	if layer, ok := m.systemLayers[m.currentID]; ok && layer != nil {
-		if ctl, ok := layer.(*dict.CodeTableLayer); ok {
-			ct := ctl.GetCodeTable()
-			if ct != nil {
-				m.cachedReverseIndex = ct.BuildReverseIndex()
-				m.cachedReverseSchemaID = m.currentID
-				return m.cachedReverseIndex
-			}
-		}
-	}
-
-	// 最终回退：直接从当前引擎获取码表构建反向索引
-	// 当 CompositeDict 和 systemLayers 缓存都找不到 CodeTableLayer 时，
-	// 直接从当前引擎（codetable 或 mixed）获取 CodeTable
-	if engine := m.currentEngine; engine != nil {
-		var ct *dict.CodeTable
-		if codetableEngine, ok := engine.(*codetable.Engine); ok {
-			ct = codetableEngine.GetCodeTable()
-		} else if mixedEngine, ok := engine.(*mixed.Engine); ok {
-			if codetableEngine := mixedEngine.GetCodetableEngine(); codetableEngine != nil {
-				ct = codetableEngine.GetCodeTable()
-			}
-		}
-		if ct != nil {
-			m.cachedReverseIndex = ct.BuildReverseIndex()
-			m.cachedReverseSchemaID = m.currentID
-			return m.cachedReverseIndex
-		}
-	}
-
+	// 主码表未加载：返回 nil（编码提示降级为不显示）。
+	// 不在此处触发异步加载，避免在用户当前的拼音 CompositeDict 上注册 codetable 层污染候选；
+	// 主码表会在用户切换到该方案时自然加载，加载后下次查询即可命中缓存。
+	m.mu.Unlock()
 	return nil
+}
+
+// extractCodeTable 从引擎中提取 CodeTable（codetable / mixed 引擎）
+func extractCodeTable(eng Engine) *dict.CodeTable {
+	if codetableEngine, ok := eng.(*codetable.Engine); ok {
+		return codetableEngine.GetCodeTable()
+	}
+	if mixedEngine, ok := eng.(*mixed.Engine); ok {
+		if ce := mixedEngine.GetCodetableEngine(); ce != nil {
+			return ce.GetCodeTable()
+		}
+	}
+	return nil
+}
+
+// ApplyCodeHintsToCandidates 用主码表反向索引为候选填充 Comment（编码提示）。
+// 已有 Comment 时不覆盖；候选 Source 不限制（独立拼音引擎下 Source 字段未设置）。
+//
+// 混输引擎已有自己的 addCodeHintsFromCodetable（按 Source 区分拼音/码表候选），无需调用本函数；
+// 本函数面向独立拼音引擎和临时拼音模式。
+func (m *Manager) ApplyCodeHintsToCandidates(cands []candidate.Candidate) {
+	if len(cands) == 0 {
+		return
+	}
+	idx := m.GetReverseIndex()
+	if len(idx) == 0 {
+		return
+	}
+	for i := range cands {
+		if cands[i].Comment != "" {
+			continue
+		}
+		codes := idx[cands[i].Text]
+		if len(codes) > 0 {
+			cands[i].Comment = codes[0]
+		}
+	}
 }

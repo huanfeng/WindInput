@@ -163,11 +163,10 @@ func (m *Manager) UpdatePinyinOptions(pinyinCfg *config.PinyinConfig) {
 
 	for _, eng := range m.engines {
 		// 直接的拼音引擎
+		// 编码提示数据已迁移到 Manager.ApplyCodeHintsToCandidates（数据来自主码表方案的反向索引），
+		// 此处仅更新引擎配置；ShowCodeHint 开关本身不再触发反查码表加载。
 		if pinyinEngine, ok := eng.(*pinyin.Engine); ok {
 			updatePinyinConfig(pinyinEngine, pinyinCfg)
-			if pinyinCfg.ShowCodeHint && m.schemaManager != nil {
-				m.loadCodetableReverseForPinyin(pinyinEngine)
-			}
 		}
 		// 混输引擎的拼音子引擎（仅更新配置，反查由 mixed.Engine.addCodeHintsFromCodetable 处理）
 		if mixedEngine, ok := eng.(*mixed.Engine); ok {
@@ -328,31 +327,4 @@ func (m *Manager) getCodeTable() *dict.CodeTable {
 		}
 	}
 	return nil
-}
-
-// loadCodetableReverseForPinyin 从方案配置中查找码表反查路径并加载
-func (m *Manager) loadCodetableReverseForPinyin(pinyinEngine *pinyin.Engine) {
-	if m.schemaManager == nil {
-		return
-	}
-
-	// 查找拼音或混输方案中的反查词库
-	for _, info := range m.schemaManager.ListSchemas() {
-		s := m.schemaManager.GetSchema(info.ID)
-		if s == nil || (s.Engine.Type != schema.EngineTypePinyin && s.Engine.Type != schema.EngineTypeMixed) {
-			continue
-		}
-		for _, d := range s.GetDictsByRole(schema.DictRoleReverseLookup) {
-			rdPath := d.Path
-			if m.dataRoot != "" && !isAbsPath(rdPath) {
-				rdPath = m.dataRoot + "/" + rdPath
-			}
-			if err := schema.LoadCodetableForPinyinEngine(pinyinEngine, rdPath, d.Type, info.ID, m.logger); err != nil {
-				m.logger.Warn("加载码表反查失败", "error", err)
-			} else {
-				m.logger.Info("码表反查加载成功")
-			}
-			return
-		}
-	}
 }

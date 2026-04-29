@@ -308,6 +308,10 @@ func main() {
 	}
 	engineMgr.SetSchemaManager(schemaMgr)
 
+	// 设置主码表 / 主拼音方案：拼音的反查由主码表派生，码表的临时拼音指向主拼音方案。
+	// 空字符串表示自动推断（按 SchemaManager 列出顺序选第一个匹配类型）。
+	engineMgr.SetPrimarySchemas(cfg.Schema.PrimaryCodetable, cfg.Schema.PrimaryPinyin)
+
 	// Initialize DictManager (manages user dict, phrases, shadow rules)
 	dictManager := dict.NewDictManager(dataDir, dataRoot, logger)
 	defer func() {

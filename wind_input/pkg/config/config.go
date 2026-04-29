@@ -49,6 +49,14 @@ func (c *StatsConfig) IsTrackEnglish() bool {
 type SchemaConfig struct {
 	Active    string   `yaml:"active" json:"active"`       // 当前活跃方案 ID
 	Available []string `yaml:"available" json:"available"` // 可切换方案 ID 列表（顺序决定切换顺序）
+	// PrimaryCodetable 主码表方案 ID。
+	// 用于：拼音类方案的"反查/编码提示"统一从此方案的码表派生。
+	// 留空时按 Available 顺序选第一个 codetable 方案；都没有则不显示编码提示。
+	PrimaryCodetable string `yaml:"primary_codetable,omitempty" json:"primaryCodetable,omitempty"`
+	// PrimaryPinyin 主拼音方案 ID。
+	// 用于：码表方案的"临时拼音/快捷输入"统一指向此方案。
+	// 留空时按 Available 顺序选第一个 pinyin 方案；都没有则禁用临时拼音。
+	PrimaryPinyin string `yaml:"primary_pinyin,omitempty" json:"primaryPinyin,omitempty"`
 }
 
 // StartupConfig 启动/默认状态配置

@@ -173,6 +173,24 @@ func validateSchema(s *Schema, path string) error {
 	if s.Engine.Type != EngineTypeCodeTable && s.Engine.Type != EngineTypePinyin && s.Engine.Type != EngineTypeMixed {
 		return fmt.Errorf("方案 %s: engine.type 不支持的值 %q（仅支持 codetable/pinyin/mixed）", s.Schema.ID, s.Engine.Type)
 	}
+	// 兼容性：旧版方案的 reverse_lookup 字典项已无作用（编码提示统一由 Manager 注入），
+	// 加载阶段静默丢弃，避免后续误用。
+	if len(s.Dicts) > 0 {
+		filtered := s.Dicts[:0]
+		droppedCount := 0
+		for _, d := range s.Dicts {
+			if d.Role == DictRoleReverseLookup {
+				droppedCount++
+				continue
+			}
+			filtered = append(filtered, d)
+		}
+		s.Dicts = filtered
+		if droppedCount > 0 {
+			fmt.Fprintf(os.Stderr, "[schema] %s: 忽略 %d 个 reverse_lookup 字典项（已废弃，编码提示由主码表方案统一提供）\n", s.Schema.ID, droppedCount)
+		}
+	}
+
 	// 混输方案引用其他方案时允许不定义 dictionaries
 	hasMixedRef := s.Engine.Type == EngineTypeMixed && s.Engine.Mixed != nil &&
 		(s.Engine.Mixed.PrimarySchema != "" || s.Engine.Mixed.SecondarySchema != "")

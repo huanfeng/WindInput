@@ -10,25 +10,26 @@ import (
 
 // EnsurePinyinLoaded 确保拼音引擎已加载（不切换当前引擎）
 // 混输模式下无需额外加载：直接复用混输引擎内置的拼音子引擎。
+//
+// 锁策略：构建（重 IO）发生在 m.mu 之外，按键路径不被阻塞。
 func (m *Manager) EnsurePinyinLoaded() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	// 混输模式：内置拼音子引擎已就绪，无需创建独立引擎
 	if _, ok := m.currentEngine.(*mixed.Engine); ok {
+		m.mu.RUnlock()
 		return nil
 	}
-
-	// 码表模式：需要加载独立拼音引擎
 	pinyinID := m.findPinyinSchemaID()
 	if _, ok := m.engines[pinyinID]; ok {
+		m.mu.RUnlock()
 		return nil
 	}
+	m.mu.RUnlock()
 
 	m.logger.Info("临时拼音：加载拼音引擎")
 	// 跳过反查码表加载：临时拼音模式由 Manager.GetReverseIndex() 动态提供当前主方案的反向索引
 	// 使用独立 CompositeDict：避免拼音词库层泄漏到混输引擎的主 CompositeDict
-	return m.loadSchemaEngineLocked(pinyinID, schema.EngineCreateOptions{
+	return m.ensureEngineBuilt(pinyinID, schema.EngineCreateOptions{
 		SkipReverseLookup:  true,
 		UseIndependentDict: true,
 	})
@@ -134,17 +135,9 @@ func (m *Manager) ConvertWithPinyin(input string, maxCandidates int) *ConvertRes
 
 	pinyinResult := pe.ConvertEx(input, maxCandidates)
 
-	// 使用当前主方案的反向索引添加编码提示（而非拼音引擎自带的反查码表），
-	// 这样切换不同主方案（五笔/郑码等）时，临时拼音始终显示当前主编码。
-	reverseIndex := m.GetReverseIndex()
-	if len(reverseIndex) > 0 {
-		for i := range pinyinResult.Candidates {
-			codes := reverseIndex[pinyinResult.Candidates[i].Text]
-			if len(codes) > 0 {
-				pinyinResult.Candidates[i].Comment = codes[0]
-			}
-		}
-	}
+	// 使用主码表方案的反向索引添加编码提示（而非拼音引擎自带的反查码表），
+	// 这样切换不同主码表（五笔/郑码等）时，临时拼音始终显示当前主编码。
+	m.ApplyCodeHintsToCandidates(pinyinResult.Candidates)
 
 	result := &ConvertResult{
 		Candidates:     pinyinResult.Candidates,
@@ -200,8 +193,16 @@ func (m *Manager) IsZKeyRepeatEnabled() bool {
 }
 
 // findPinyinSchemaID 查找拼音方案 ID（需要持有读锁或写锁）
-// 优先从当前码表方案的 temp_pinyin.schema 配置获取，回退到遍历方案列表。
+//
+// 优先级：
+//  1. 全局 primaryPinyinID（来自 config.Schema.PrimaryPinyin）
+//  2. 当前码表方案的 temp_pinyin.schema 字段（已废弃但保留兼容读取）
+//  3. SchemaManager 中第一个 pinyin 类方案
+//  4. 兜底常量 "pinyin"
 func (m *Manager) findPinyinSchemaID() string {
+	if m.primaryPinyinID != "" {
+		return m.primaryPinyinID
+	}
 	if m.schemaManager != nil && m.currentID != "" {
 		currentSchema := m.schemaManager.GetSchema(m.currentID)
 		if currentSchema != nil && currentSchema.Engine.CodeTable != nil &&
@@ -210,7 +211,6 @@ func (m *Manager) findPinyinSchemaID() string {
 			return currentSchema.Engine.CodeTable.TempPinyin.Schema
 		}
 	}
-	// 回退：遍历方案查找拼音类型
 	if m.schemaManager != nil {
 		for _, s := range m.schemaManager.ListSchemas() {
 			sch := m.schemaManager.GetSchema(s.ID)

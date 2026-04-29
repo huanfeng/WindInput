@@ -11,7 +11,11 @@ import (
 func (m *Manager) EnsureEnglishLoaded() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.ensureEnglishLoadedLocked()
+}
 
+// ensureEnglishLoadedLocked 确保英文词库已加载（调用方必须持有 m.mu 写锁）。
+func (m *Manager) ensureEnglishLoadedLocked() error {
 	if m.englishDict != nil {
 		return nil // 已加载
 	}

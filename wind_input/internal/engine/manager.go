@@ -14,7 +14,10 @@ import (
 
 // Manager 引擎管理器
 type Manager struct {
-	mu            sync.RWMutex
+	mu sync.RWMutex
+	// engineBuildMu 串行化引擎创建过程，避免同一方案被并发构建。
+	// 与 m.mu 解耦，重 IO 期间不持 m.mu，按键路径不被阻塞。
+	engineBuildMu sync.Mutex
 	engines       map[string]Engine         // schemaID -> Engine
 	systemLayers  map[string]dict.DictLayer // schemaID -> 该方案注册的系统词库层
 	currentID     string                    // 当前活跃方案 ID
@@ -34,8 +37,16 @@ type Manager struct {
 	dictManager *dict.DictManager
 
 	// 反向索引缓存（字 → 编码列表）
+	// 缓存键由 primaryCodetableID 决定（独立于 currentID），
+	// 这样切到拼音方案时反向索引不会失效
 	cachedReverseIndex    map[string][]string
 	cachedReverseSchemaID string
+
+	// primaryCodetableID / primaryPinyinID 由 main.go / reload 路径写入
+	// 拼音/双拼引擎的"编码提示"统一从主码表方案派生；
+	// 码表方案的"临时拼音"统一指向主拼音方案。
+	primaryCodetableID string
+	primaryPinyinID    string
 
 	// 英文词库
 	englishDict  *dict.EnglishDict
@@ -68,6 +79,69 @@ func (m *Manager) SetDataRoot(dir string) {
 	m.dataRoot = dir
 }
 
+// SetPrimarySchemas 设置主码表 / 主拼音方案。空字符串表示触发自动推断。
+//
+// - 主码表：拼音/双拼方案的编码提示从此方案的码表派生（运行期反向索引）；
+// - 主拼音：码表方案的临时拼音/快捷输入指向此方案。
+//
+// 当传入空字符串时，按 SchemaManager 中的方案列表自动推断（按 engine.type 选第一个）。
+// 主码表方案变更会清空 cachedReverseIndex，下次访问时按新方案重建。
+func (m *Manager) SetPrimarySchemas(codetableID, pinyinID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if codetableID == "" {
+		codetableID = m.inferPrimaryByTypeLocked(schema.EngineTypeCodeTable)
+	}
+	if pinyinID == "" {
+		pinyinID = m.inferPrimaryByTypeLocked(schema.EngineTypePinyin)
+	}
+	if codetableID != m.primaryCodetableID {
+		m.cachedReverseIndex = nil
+		m.cachedReverseSchemaID = ""
+	}
+	m.primaryCodetableID = codetableID
+	m.primaryPinyinID = pinyinID
+	m.logger.Info("主方案设置", "primaryCodetable", codetableID, "primaryPinyin", pinyinID)
+}
+
+// GetPrimaryCodetableID 返回当前主码表方案 ID
+func (m *Manager) GetPrimaryCodetableID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.primaryCodetableID
+}
+
+// GetPrimaryPinyinID 返回当前主拼音方案 ID
+func (m *Manager) GetPrimaryPinyinID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.primaryPinyinID
+}
+
+// inferPrimaryByTypeLocked 按引擎类型从 SchemaManager 中选第一个匹配方案。
+// 调用方需持有 m.mu。
+func (m *Manager) inferPrimaryByTypeLocked(t schema.EngineType) string {
+	if m.schemaManager == nil {
+		return ""
+	}
+	for _, info := range m.schemaManager.ListSchemas() {
+		s := m.schemaManager.GetSchema(info.ID)
+		if s == nil {
+			continue
+		}
+		if s.Engine.Type == t {
+			return info.ID
+		}
+		// 混输方案：包含码表子引擎，可作为主码表回退
+		if t == schema.EngineTypeCodeTable && s.Engine.Type == schema.EngineTypeMixed {
+			if s.Engine.Mixed != nil && s.Engine.Mixed.PrimarySchema != "" {
+				return s.Engine.Mixed.PrimarySchema
+			}
+		}
+	}
+	return ""
+}
+
 // SetDictManager 设置词库管理器
 func (m *Manager) SetDictManager(dm *dict.DictManager) {
 	m.mu.Lock()
@@ -83,45 +157,52 @@ func (m *Manager) GetDictManager() *dict.DictManager {
 }
 
 // SwitchSchema 切换到指定方案（如引擎未加载则创建）
+//
+// 锁策略：引擎构建（重 IO）发生在 m.mu 之外，仅在最终提交切换时短暂持写锁，
+// 避免按键路径在 GetCurrentEngine 上排队。构建期间旧引擎仍是 currentEngine。
 func (m *Manager) SwitchSchema(schemaID string) error {
+	// Phase 1: 快路径——已加载则直接切换
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.currentID == schemaID {
+		m.mu.Unlock()
 		return nil
 	}
+	if _, ok := m.engines[schemaID]; ok {
+		m.applySwitchLocked(schemaID)
+		m.mu.Unlock()
+		m.logger.Info("切换到已加载方案", "schemaID", schemaID)
+		return nil
+	}
+	m.mu.Unlock()
 
-	// 卸载旧引擎的系统词库层
+	// Phase 2: 慢路径——构建引擎（不持 m.mu）
+	if err := m.ensureEngineBuilt(schemaID); err != nil {
+		return err
+	}
+
+	// Phase 3: 提交切换
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.engines[schemaID]; !ok {
+		return fmt.Errorf("方案 %q 构建后未注册", schemaID)
+	}
+	m.applySwitchLocked(schemaID)
+	m.logger.Info("加载并切换方案", "schemaID", schemaID)
+	return nil
+}
+
+// applySwitchLocked 执行系统词库层切换并更新 currentID/currentEngine。
+// 调用方必须持有 m.mu 写锁。
+func (m *Manager) applySwitchLocked(schemaID string) {
 	if m.dictManager != nil {
 		m.dictManager.UnregisterSystemLayer("codetable-system")
 		m.dictManager.UnregisterSystemLayer("pinyin-system")
 	}
-
-	// 检查是否已加载
-	if eng, ok := m.engines[schemaID]; ok {
-		m.currentID = schemaID
-		m.currentEngine = eng
-		// 清空反向索引缓存，切换方案后重建
-		m.cachedReverseIndex = nil
-		m.cachedReverseSchemaID = ""
-		// 重新注册缓存引擎的系统词库层
-		m.reRegisterSystemLayer(schemaID)
-		m.logger.Info("切换到已加载方案", "schemaID", schemaID)
-		return nil
-	}
-
-	// 需要创建引擎（factory 内部会注册系统词库层）
-	if err := m.loadSchemaEngineLocked(schemaID); err != nil {
-		return err
-	}
-
 	m.currentID = schemaID
 	m.currentEngine = m.engines[schemaID]
-	// 清空反向索引缓存，切换方案后重建
 	m.cachedReverseIndex = nil
 	m.cachedReverseSchemaID = ""
-	m.logger.Info("加载并切换方案", "schemaID", schemaID)
-	return nil
+	m.reRegisterSystemLayer(schemaID)
 }
 
 // ToggleSchemaResult 方案切换结果
@@ -213,26 +294,32 @@ func (m *Manager) ToggleSchema(available []string) (*ToggleSchemaResult, error) 
 
 // ActivateTempSchema 临时激活方案（如码表方案下临时用拼音）
 func (m *Manager) ActivateTempSchema(schemaID string) error {
+	// 预检：避免在 ensureEngineBuilt 之后才发现已在临时模式
+	m.mu.RLock()
+	if m.tempSchemaID != "" {
+		existing := m.tempSchemaID
+		m.mu.RUnlock()
+		return fmt.Errorf("已在临时方案模式中: %s", existing)
+	}
+	m.mu.RUnlock()
+
+	// 构建引擎（不持 m.mu）
+	if err := m.ensureEngineBuilt(schemaID); err != nil {
+		return err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.tempSchemaID != "" {
 		return fmt.Errorf("已在临时方案模式中: %s", m.tempSchemaID)
 	}
-
-	// 保存当前方案
-	m.savedSchemaID = m.currentID
-	m.tempSchemaID = schemaID
-
-	// 加载目标方案（如未加载）
 	if _, ok := m.engines[schemaID]; !ok {
-		if err := m.loadSchemaEngineLocked(schemaID); err != nil {
-			m.tempSchemaID = ""
-			m.savedSchemaID = ""
-			return err
-		}
+		return fmt.Errorf("方案 %q 构建后未注册", schemaID)
 	}
 
+	m.savedSchemaID = m.currentID
+	m.tempSchemaID = schemaID
 	m.currentID = schemaID
 	m.currentEngine = m.engines[schemaID]
 	m.logger.Info("临时激活方案", "schemaID", schemaID, "saved", m.savedSchemaID)
@@ -265,30 +352,54 @@ func (m *Manager) IsTempSchemaActive() bool {
 	return m.tempSchemaID != ""
 }
 
-// loadSchemaEngineLocked 加载方案引擎（调用方必须持有锁）
-func (m *Manager) loadSchemaEngineLocked(schemaID string, opts ...schema.EngineCreateOptions) error {
-	if m.schemaManager == nil {
+// ensureEngineBuilt 构建方案引擎（如未加载），不持 m.mu 写锁。
+//
+// 锁策略：
+//   - engineBuildMu 串行化构建，避免同方案被并发构建。
+//   - 重 IO（CreateEngineFromSchema：词典转换、mmap、unigram 加载等）在锁外执行，
+//     按键路径的 GetCurrentEngine 在此期间不会被阻塞。
+//   - 仅在最后注册引擎/系统词库层时短暂持 m.mu 写锁。
+//
+// 注意：构建期间，factory 内部的 dm.RegisterSystemLayer 会修改共享的 CompositeDict，
+// 旧引擎在此期间的查询可能短暂看到混合层；该窗口仅在 IO 期间存在，影响有限。
+func (m *Manager) ensureEngineBuilt(schemaID string, opts ...schema.EngineCreateOptions) error {
+	m.engineBuildMu.Lock()
+	defer m.engineBuildMu.Unlock()
+
+	// 在 m.mu 内快速取出构建所需的引用（不在 IO 期间持锁）
+	m.mu.RLock()
+	if _, ok := m.engines[schemaID]; ok {
+		m.mu.RUnlock()
+		return nil
+	}
+	sm := m.schemaManager
+	dataRoot := m.dataRoot
+	dictManager := m.dictManager
+	m.mu.RUnlock()
+
+	if sm == nil {
 		return fmt.Errorf("SchemaManager 未设置")
 	}
-
-	s := m.schemaManager.GetSchema(schemaID)
+	s := sm.GetSchema(schemaID)
 	if s == nil {
 		return fmt.Errorf("方案 %q 不存在", schemaID)
 	}
 
 	resolver := func(id string) *schema.Schema {
-		return m.schemaManager.GetSchema(id)
+		return sm.GetSchema(id)
 	}
-	dataDir := ""
-	if m.schemaManager != nil {
-		dataDir = m.schemaManager.GetDataDir()
-	}
-	bundle, err := schema.CreateEngineFromSchema(s, m.dataRoot, dataDir, m.dictManager, m.logger, resolver, opts...)
+	dataDir := sm.GetDataDir()
+
+	// 重 IO 在锁外执行
+	bundle, err := schema.CreateEngineFromSchema(s, dataRoot, dataDir, dictManager, m.logger, resolver, opts...)
 	if err != nil {
 		return fmt.Errorf("创建方案 %q 引擎失败: %w", schemaID, err)
 	}
 
-	// 将引擎包装为 Engine 接口
+	// 仅在注册阶段短暂持写锁
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	switch eng := bundle.Engine.(type) {
 	case *pinyin.Engine:
 		m.engines[schemaID] = eng
@@ -296,9 +407,8 @@ func (m *Manager) loadSchemaEngineLocked(schemaID string, opts ...schema.EngineC
 		m.engines[schemaID] = eng
 	case *mixed.Engine:
 		m.engines[schemaID] = eng
-		// 设置英文词库查询（如果方案启用了英文候选）
 		if s.Engine.Mixed != nil && s.Engine.Mixed.EnableEnglish != nil && *s.Engine.Mixed.EnableEnglish {
-			if err := m.EnsureEnglishLoaded(); err == nil {
+			if err := m.ensureEnglishLoadedLocked(); err == nil {
 				eng.SetEnglishSearch(m.SearchEnglish)
 			}
 		}
@@ -306,24 +416,10 @@ func (m *Manager) loadSchemaEngineLocked(schemaID string, opts ...schema.EngineC
 		return fmt.Errorf("未知引擎类型: %T", bundle.Engine)
 	}
 
-	// 缓存 factory 注册的系统词库层（用于切换回缓存引擎时重新注册）
-	// 根据引擎类型查找对应的层名，避免在 CompositeDict 中同时存在多种层时缓存错误的层
-	if m.dictManager != nil {
-		var layerName string
-		switch bundle.Engine.(type) {
-		case *pinyin.Engine:
-			layerName = "pinyin-system"
-		case *codetable.Engine:
-			layerName = "codetable-system"
-		case *mixed.Engine:
-			// 混输引擎注册的是 codetable-system 层（拼音层在独立 CompositeDict 中）
-			layerName = "codetable-system"
-		}
-		if layerName != "" {
-			if layer := m.dictManager.GetCompositeDict().GetLayerByName(layerName); layer != nil {
-				m.systemLayers[schemaID] = layer
-			}
-		}
+	// 系统词库层直接由工厂返回，避免依赖 dm.compositeDict 当前状态
+	// （并发切换可能在工厂返回与此处之间替换了 codetable-system / pinyin-system 层）。
+	if bundle.SystemLayer != nil {
+		m.systemLayers[schemaID] = bundle.SystemLayer
 	}
 
 	return nil
@@ -474,18 +570,4 @@ func (m *Manager) IsCurrentEngineType(engineType schema.EngineType) bool {
 		}
 	}
 	return false
-}
-
-// isAbsPath 判断是否为绝对路径
-func isAbsPath(path string) bool {
-	if len(path) == 0 {
-		return false
-	}
-	if len(path) >= 2 && path[1] == ':' {
-		return true
-	}
-	if len(path) >= 2 && path[0] == '\\' && path[1] == '\\' {
-		return true
-	}
-	return path[0] == '/'
 }

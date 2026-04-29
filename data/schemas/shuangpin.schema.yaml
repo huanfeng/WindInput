@@ -28,10 +28,6 @@ dictionaries:
       median: 200
       max: 19260817
       mode: log
-  - id: codetable_reverse
-    path: "wubi86/wubi86_jidian.dict.yaml"
-    type: rime_codetable
-    role: reverse_lookup
 
 learning:
   auto_learn:

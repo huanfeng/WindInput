@@ -39,6 +39,12 @@ func (h *ReloadHandler) ReloadConfig() error {
 		return err
 	}
 
+	// 主码表 / 主拼音方案变更也要同步到 EngineManager（影响反查/临时拼音）
+	if newCfg.Schema.PrimaryCodetable != h.cfg.Schema.PrimaryCodetable ||
+		newCfg.Schema.PrimaryPinyin != h.cfg.Schema.PrimaryPinyin {
+		h.engineMgr.SetPrimarySchemas(newCfg.Schema.PrimaryCodetable, newCfg.Schema.PrimaryPinyin)
+	}
+
 	// 检查活跃方案是否切换
 	oldSchemaID := h.cfg.Schema.Active
 	newSchemaID := newCfg.Schema.Active
