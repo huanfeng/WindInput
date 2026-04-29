@@ -185,6 +185,7 @@ function getLearningConfig(schemaID: string): {
   auto_learn: { enabled: boolean };
   freq: { enabled: boolean; protect_top_n?: number };
   protect_top_n?: number;
+  temp_promote_count?: number;
 } {
   const cfg = schemaID === props.schemaID ? localConfig.value : props.allSchemaConfigs?.[schemaID];
   if (!cfg) return { auto_learn: { enabled: false }, freq: { enabled: false } };
@@ -470,6 +471,27 @@ function isReferencedBy(schemaID: string): boolean {
                 />
               </div>
             </div>
+            <div class="setting-item" :class="{ 'item-disabled': !getLearningConfig(schemaID).auto_learn.enabled }">
+              <div class="setting-info">
+                <label>晋升用户词库次数</label>
+                <p class="setting-hint">
+                  临时词被选中达到该次数后晋升到用户词库；0 表示永不晋升（始终留在临时词库）
+                </p>
+              </div>
+              <div class="setting-control">
+                <Select
+                  :disabled="!getLearningConfig(schemaID).auto_learn.enabled"
+                  :model-value="String(getLearningConfig(schemaID).temp_promote_count ?? 3)"
+                  @update:model-value="(v: string) => { getLearningConfig(schemaID).temp_promote_count = Number(v); }"
+                >
+                  <SelectTrigger class="w-[140px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="0">永不晋升</SelectItem>
+                    <SelectItem v-for="n in 10" :key="n" :value="String(n)">{{ n }} 次</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
           </div>
 
           <!-- 高级 Tab -->
@@ -726,6 +748,27 @@ function isReferencedBy(schemaID: string): boolean {
                   }
                 "
               />
+            </div>
+          </div>
+          <div class="setting-item" :class="{ 'item-disabled': !getLearningConfig(schemaID).auto_learn.enabled }">
+            <div class="setting-info">
+              <label>晋升用户词库次数</label>
+              <p class="setting-hint">
+                临时词被选中达到该次数后晋升到用户词库；0 表示永不晋升（始终留在临时词库）
+              </p>
+            </div>
+            <div class="setting-control">
+              <Select
+                :disabled="!getLearningConfig(schemaID).auto_learn.enabled"
+                :model-value="String(getLearningConfig(schemaID).temp_promote_count ?? 3)"
+                @update:model-value="(v: string) => { getLearningConfig(schemaID).temp_promote_count = Number(v); }"
+              >
+                <SelectTrigger class="w-[140px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">永不晋升</SelectItem>
+                  <SelectItem v-for="n in 10" :key="n" :value="String(n)">{{ n }} 次</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
         </template>

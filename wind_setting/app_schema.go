@@ -138,7 +138,9 @@ type SchemaConfigLearning struct {
 	ProtectTopN      int                    `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty"`
 	UnigramPath      string                 `yaml:"unigram_path,omitempty" json:"unigram_path,omitempty"`
 	TempMaxEntries   int                    `yaml:"temp_max_entries,omitempty" json:"temp_max_entries,omitempty"`
-	TempPromoteCount int                    `yaml:"temp_promote_count,omitempty" json:"temp_promote_count,omitempty"`
+	// 不带 omitempty：0 表示"永不晋升"是有效值，必须能被序列化进 override 文件，
+	// 否则前端选 0 与未设置无法区分（diff 算法会丢弃 0 值，导致 override 不写入）。
+	TempPromoteCount int                    `yaml:"temp_promote_count" json:"temp_promote_count"`
 }
 
 // SchemaConfig 完整方案配置（YAML 结构，前端可直接编辑）
