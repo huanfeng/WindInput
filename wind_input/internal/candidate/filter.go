@@ -23,9 +23,12 @@ func FilterCandidates(candidates []Candidate, mode string) []Candidate {
 
 // filterSmart 智能过滤：仅在同编码内部进行生僻字过滤
 func filterSmart(candidates []Candidate) []Candidate {
-	// 1. 识别哪些编码拥有常用字或指令
+	// 1. 识别哪些编码拥有常用字或指令（短语不计入：避免短语污染同编码下的码表字过滤判定）
 	hasCommon := make(map[string]bool)
 	for _, c := range candidates {
+		if c.IsPhrase {
+			continue
+		}
 		if c.IsCommon || c.IsCommand || c.IsGroup {
 			hasCommon[c.Code] = true
 		}
@@ -35,9 +38,9 @@ func filterSmart(candidates []Candidate) []Candidate {
 	result := make([]Candidate, 0, len(candidates))
 	for _, c := range candidates {
 		// 满足以下任一条件即保留：
-		// - 自身是常用字、指令或组
+		// - 自身是常用字、短语、指令或组
 		// - 同编码下没有任何常用字/指令（孤儿词条，必须保留）
-		if c.IsCommon || c.IsCommand || c.IsGroup || !hasCommon[c.Code] {
+		if c.IsCommon || c.IsPhrase || c.IsCommand || c.IsGroup || !hasCommon[c.Code] {
 			result = append(result, c)
 		}
 	}
@@ -47,7 +50,7 @@ func filterSmart(candidates []Candidate) []Candidate {
 func filterCommonOnly(candidates []Candidate) []Candidate {
 	result := make([]Candidate, 0, len(candidates))
 	for _, c := range candidates {
-		if c.IsCommon || c.IsCommand || c.IsGroup {
+		if c.IsCommon || c.IsPhrase || c.IsCommand || c.IsGroup {
 			result = append(result, c)
 		}
 	}

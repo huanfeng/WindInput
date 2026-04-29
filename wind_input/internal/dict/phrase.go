@@ -124,7 +124,7 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 			Text:     e.Text,
 			Code:     code,
 			Weight:   positionToWeight(e.Position),
-			IsCommon: true, // 短语由用户/系统配置，不应被 smart 过滤
+			IsPhrase: true, // 短语永远保留，但不计入 hasCommon 避免污染同编码码表字过滤
 		})
 	}
 
@@ -163,7 +163,7 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 			Code:           code,
 			Weight:         positionToWeight(e.Position),
 			IsCommand:      true,
-			IsCommon:       true,   // 动态短语不应被 smart 过滤
+			IsPhrase:       true,   // 动态短语永远保留，但不计入 hasCommon
 			PhraseTemplate: e.Text, // 携带原始模板文本，用于右键菜单定位条目
 		})
 	}
@@ -198,7 +198,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 				Code:      code,
 				Weight:    positionToWeight(group.Position),
 				Comment:   code[len(prefix):], // 显示编码后缀（如 zz→zzbd 显示 "bd"）
-				IsCommon:  true,
+				IsPhrase:  true,
 				IsGroup:   true,
 				GroupCode: code,
 			})
@@ -216,7 +216,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 					Text:     e.Text,
 					Code:     code,
 					Weight:   positionToWeight(e.Position),
-					IsCommon: true,
+					IsPhrase: true,
 				})
 			}
 		}

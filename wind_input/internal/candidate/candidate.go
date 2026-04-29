@@ -19,6 +19,7 @@ type Candidate struct {
 	NaturalOrder   int             // 全局顺序（词库文件中的出现位置，跨编码递增，用于前缀匹配时保持文件原始排序）
 	Comment        string          // 注释/提示信息（如反查时显示的编码）
 	IsCommon       bool            // 是否为通用规范汉字
+	IsPhrase       bool            // 是否为短语（PhraseLayer 提供，永远保留但不计入 hasCommon 传染）
 	IsCommand      bool            // 是否为命令候选（uuid/date/time 等）
 	ConsumedLength int             // 该候选消耗的输入长度（拼音部分上屏用）
 	Source         CandidateSource // 候选来源（混输模式下区分五笔/拼音）
