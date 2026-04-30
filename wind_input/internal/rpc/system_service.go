@@ -9,7 +9,6 @@ import (
 	"github.com/huanfeng/wind_input/internal/coordinator"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/store"
-	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 )
 
@@ -229,13 +228,16 @@ func (s *SystemService) ListSchemas(args *rpcapi.Empty, reply *rpcapi.ListSchema
 		return fmt.Errorf("list schema IDs: %w", err)
 	}
 
-	// 获取配置中启用的方案
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+	// 获取配置中启用的方案（从内存中持有的活配置读取，wind_input 是 config.yaml 的唯一 owner）
+	if s.server == nil || s.server.cfg == nil {
+		return fmt.Errorf("config not available")
 	}
-	enabledSet := make(map[string]bool, len(cfg.Schema.Available))
-	for _, id := range cfg.Schema.Available {
+	s.server.cfgMu.RLock()
+	available := append([]string(nil), s.server.cfg.Schema.Available...)
+	s.server.cfgMu.RUnlock()
+
+	enabledSet := make(map[string]bool, len(available))
+	for _, id := range available {
 		enabledSet[id] = true
 	}
 
@@ -272,7 +274,7 @@ func (s *SystemService) ListSchemas(args *rpcapi.Empty, reply *rpcapi.ListSchema
 	}
 
 	// 添加配置中启用但 store 中没有数据的方案
-	for _, id := range cfg.Schema.Available {
+	for _, id := range available {
 		if processed[id] {
 			continue
 		}

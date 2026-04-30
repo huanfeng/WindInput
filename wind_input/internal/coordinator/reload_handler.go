@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine"
@@ -11,9 +12,15 @@ import (
 
 // ReloadHandler 实现 rpc.ConfigReloader 接口，负责配置热重载。
 // 协调 schema/engine/dict 等子系统的配置变更。
+//
+// 锁契约（cfgMu，由 rpc.Server 持有并跨组件共享）：
+//   - ReloadConfig：方法内部获取 cfgMu 写锁；调用方不得已持有该锁
+//   - ApplyConfigUpdate：约定调用方已持有 cfgMu 写锁；方法内部不再获取
+//     （rpc.ConfigService.Set/SetAll 与 rpc.StatsService.UpdateConfig 即按此约定）
 type ReloadHandler struct {
 	coord     *Coordinator
 	cfg       *config.Config
+	cfgMu     *sync.RWMutex
 	schemaMgr *schema.SchemaManager
 	engineMgr *engine.Manager
 	dictMgr   *dict.DictManager
@@ -21,10 +28,11 @@ type ReloadHandler struct {
 }
 
 // NewReloadHandler 创建配置重载处理器
-func NewReloadHandler(coord *Coordinator, cfg *config.Config, schemaMgr *schema.SchemaManager, engineMgr *engine.Manager, dictMgr *dict.DictManager, logger *slog.Logger) *ReloadHandler {
+func NewReloadHandler(coord *Coordinator, cfg *config.Config, cfgMu *sync.RWMutex, schemaMgr *schema.SchemaManager, engineMgr *engine.Manager, dictMgr *dict.DictManager, logger *slog.Logger) *ReloadHandler {
 	return &ReloadHandler{
 		coord:     coord,
 		cfg:       cfg,
+		cfgMu:     cfgMu,
 		schemaMgr: schemaMgr,
 		engineMgr: engineMgr,
 		dictMgr:   dictMgr,
@@ -34,11 +42,15 @@ func NewReloadHandler(coord *Coordinator, cfg *config.Config, schemaMgr *schema.
 
 // ReloadConfig 重载配置（处理 config.yaml 变更和 schema 文件变更）
 func (h *ReloadHandler) ReloadConfig() error {
-	oldCfg := *h.cfg
 	newCfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+
+	oldCfg := *h.cfg
 	allSections := map[string]bool{
 		"startup": true, "schema": true, "hotkeys": true, "ui": true,
 		"toolbar": true, "input": true, "advanced": true, "stats": true,

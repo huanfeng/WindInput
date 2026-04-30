@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 )
 
@@ -63,7 +64,11 @@ func setupTestRPC(t *testing.T) *testClient {
 
 	dictSvc := &DictService{store: s, dm: dm, logger: logger, broadcaster: broadcaster}
 	shadowSvc := &ShadowService{store: s, dm: dm, logger: logger, broadcaster: broadcaster}
-	systemSvc := &SystemService{dm: dm, store: s, server: &Server{}, logger: logger}
+	testCfg := &config.Config{}
+	testCfg.Schema.Available = []string{"test"}
+	testCfg.Schema.Active = "test"
+	testServer := &Server{cfg: testCfg}
+	systemSvc := &SystemService{dm: dm, store: s, server: testServer, logger: logger}
 	phraseSvc := &PhraseService{store: s, dm: dm, logger: logger, broadcaster: broadcaster}
 
 	// Dict

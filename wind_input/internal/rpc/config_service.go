@@ -13,8 +13,12 @@ import (
 )
 
 // ConfigService 配置管理 RPC 服务
+//
+// 锁契约：cfgMu 守护 *cfg 的读写，由 Server 持有并与 ReloadHandler / SystemService /
+// StatsService 共享。本服务的 Set/SetAll/Reset 在写锁内调用 configReloader.ApplyConfigUpdate，
+// 所以 ApplyConfigUpdate 自身不会再次获取 cfgMu，避免 RWMutex 不可重入死锁。
 type ConfigService struct {
-	mu             sync.Mutex
+	cfgMu          *sync.RWMutex
 	cfg            *config.Config
 	configReloader ConfigReloader
 	broadcaster    *EventBroadcaster
@@ -24,9 +28,9 @@ type ConfigService struct {
 
 // GetAll 获取完整配置
 func (s *ConfigService) GetAll(args *rpcapi.Empty, reply *rpcapi.ConfigGetAllReply) error {
-	s.mu.Lock()
+	s.cfgMu.RLock()
 	cfgCopy := *s.cfg
-	s.mu.Unlock()
+	s.cfgMu.RUnlock()
 
 	data, err := json.Marshal(&cfgCopy)
 	if err != nil {
@@ -38,9 +42,9 @@ func (s *ConfigService) GetAll(args *rpcapi.Empty, reply *rpcapi.ConfigGetAllRep
 
 // Get 按 key 获取配置项
 func (s *ConfigService) Get(args *rpcapi.ConfigGetArgs, reply *rpcapi.ConfigGetReply) error {
-	s.mu.Lock()
+	s.cfgMu.RLock()
 	cfgCopy := *s.cfg
-	s.mu.Unlock()
+	s.cfgMu.RUnlock()
 
 	reply.Values = make(map[string]any, len(args.Keys))
 	for _, key := range args.Keys {
@@ -63,8 +67,8 @@ func (s *ConfigService) Get(args *rpcapi.ConfigGetArgs, reply *rpcapi.ConfigGetR
 
 // Set 设置配置项（校验+持久化+热更新）
 func (s *ConfigService) Set(args *rpcapi.ConfigSetArgs, reply *rpcapi.ConfigSetReply) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 
 	newCfg := deepCopyConfig(s.cfg)
 	changedSections := map[string]bool{}
@@ -106,8 +110,8 @@ func (s *ConfigService) Set(args *rpcapi.ConfigSetArgs, reply *rpcapi.ConfigSetR
 
 // SetAll 设置完整配置（内部 diff 后走精准热更新）
 func (s *ConfigService) SetAll(args *rpcapi.ConfigSetAllArgs, reply *rpcapi.ConfigSetAllReply) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 
 	newCfg := deepCopyConfig(s.cfg)
 	if err := json.Unmarshal(args.Config, newCfg); err != nil {

@@ -280,34 +280,46 @@ func (s *StatsService) GetDaily(args *rpcapi.StatsGetDailyArgs, reply *rpcapi.St
 
 // GetConfig 获取统计配置
 func (s *StatsService) GetConfig(args *rpcapi.Empty, reply *rpcapi.StatsConfigReply) error {
-	cfg, err := config.Load()
-	if err != nil {
+	if s.server == nil || s.server.cfg == nil {
 		// 返回默认值
 		reply.Enabled = true
 		reply.RetainDays = 0
 		reply.TrackEnglish = true
 		return nil
 	}
-	reply.Enabled = cfg.Stats.IsEnabled()
-	reply.RetainDays = cfg.Stats.RetainDays
-	reply.TrackEnglish = cfg.Stats.IsTrackEnglish()
+	s.server.cfgMu.RLock()
+	stats := s.server.cfg.Stats
+	s.server.cfgMu.RUnlock()
+	reply.Enabled = stats.IsEnabled()
+	reply.RetainDays = stats.RetainDays
+	reply.TrackEnglish = stats.IsTrackEnglish()
 	return nil
 }
 
-// UpdateConfig 更新统计配置
+// UpdateConfig 更新统计配置（写锁内完成 snapshot+持久化+ApplyConfigUpdate 增量热更新）
 func (s *StatsService) UpdateConfig(args *rpcapi.StatsConfigUpdateArgs, reply *rpcapi.Empty) error {
-	cfg, err := config.Load()
-	if err != nil {
+	if s.server == nil || s.server.cfg == nil {
+		return fmt.Errorf("config not available")
+	}
+	s.server.cfgMu.Lock()
+	defer s.server.cfgMu.Unlock()
+
+	oldCfg := *s.server.cfg
+	newCfg := deepCopyConfig(s.server.cfg)
+	newCfg.Stats.Enabled = &args.Enabled
+	newCfg.Stats.RetainDays = args.RetainDays
+	newCfg.Stats.TrackEnglish = &args.TrackEnglish
+	config.ApplyConfigFallbacks(newCfg)
+
+	if err := config.Save(newCfg); err != nil {
 		return err
 	}
-	cfg.Stats.Enabled = &args.Enabled
-	cfg.Stats.RetainDays = args.RetainDays
-	cfg.Stats.TrackEnglish = &args.TrackEnglish
-	if err := config.Save(cfg); err != nil {
-		return err
-	}
-	if s.server != nil && s.server.configReloader != nil {
-		return s.server.configReloader.ReloadConfig()
+
+	if s.server.configReloader != nil {
+		// 调用方已持有 cfgMu 写锁，符合 ApplyConfigUpdate 的契约
+		if _, err := s.server.configReloader.ApplyConfigUpdate(&oldCfg, newCfg, map[string]bool{"stats": true}); err != nil {
+			s.logger.Error("ApplyConfigUpdate failed", "error", err)
+		}
 	}
 	return nil
 }

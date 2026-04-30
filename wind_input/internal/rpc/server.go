@@ -45,7 +45,13 @@ type Server struct {
 	statCollector *store.StatCollector
 
 	cfg       *config.Config         // 活配置指针，与 ReloadHandler 共享
+	cfgMu     sync.RWMutex           // 守护 *cfg 的读写，被 ReloadHandler / ConfigService / SystemService / StatsService 共享
 	schemaMgr SchemaOverrideResetter // 用于 ResetSchemaOverride 的 Layer 2 文件操作
+}
+
+// CfgMu 返回守护活配置的读写锁，供 ReloadHandler 等共享同一指针的组件使用
+func (s *Server) CfgMu() *sync.RWMutex {
+	return &s.cfgMu
 }
 
 // StatusProvider 系统状态提供者接口
@@ -210,6 +216,7 @@ func (s *Server) Start() error {
 	// 注册 Config 方法
 	configSvc := &ConfigService{
 		cfg:            s.cfg,
+		cfgMu:          &s.cfgMu,
 		configReloader: s.configReloader,
 		broadcaster:    s.broadcaster,
 		schemaMgr:      s.schemaMgr,
