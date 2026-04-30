@@ -481,6 +481,26 @@ func (c *Coordinator) isHighlightDownKey(keyCode uint32, modifiers uint32) bool 
 	return false
 }
 
+// isQuickInputPageUpKey 快捷输入模式专用翻页上键判断。
+// 排除 minus_equal（-/=）和 brackets（[/]）这些字符键，因为快捷输入模式下它们是有效输入字符。
+func (c *Coordinator) isQuickInputPageUpKey(key string, keyCode int, modifiers uint32) bool {
+	vk := uint32(keyCode)
+	if vk == ipc.VK_OEM_MINUS || vk == ipc.VK_OEM_PLUS || vk == ipc.VK_OEM_4 || vk == ipc.VK_OEM_6 {
+		return false
+	}
+	return c.isPageUpKey(key, keyCode, modifiers)
+}
+
+// isQuickInputPageDownKey 快捷输入模式专用翻页下键判断。
+// 排除 minus_equal（-/=）和 brackets（[/]）这些字符键，因为快捷输入模式下它们是有效输入字符。
+func (c *Coordinator) isQuickInputPageDownKey(key string, keyCode int, modifiers uint32) bool {
+	vk := uint32(keyCode)
+	if vk == ipc.VK_OEM_MINUS || vk == ipc.VK_OEM_PLUS || vk == ipc.VK_OEM_4 || vk == ipc.VK_OEM_6 {
+		return false
+	}
+	return c.isPageDownKey(key, keyCode, modifiers)
+}
+
 // isPageUpKey checks if the key is configured as a page up key
 func (c *Coordinator) isPageUpKey(key string, keyCode int, modifiers uint32) bool {
 	if c.config == nil {

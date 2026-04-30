@@ -220,7 +220,7 @@ func (c *Coordinator) handleQuickInputKey(key string, data *bridge.KeyEventData)
 
 	// === 导航键（使用与正常模式一致的配置键） ===
 
-	case c.isPageUpKey(key, int(vk), uint32(data.Modifiers)):
+	case c.isQuickInputPageUpKey(key, int(vk), uint32(data.Modifiers)):
 		if c.currentPage > 1 {
 			c.currentPage--
 			c.selectedIndex = 0
@@ -228,7 +228,7 @@ func (c *Coordinator) handleQuickInputKey(key string, data *bridge.KeyEventData)
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
-	case c.isPageDownKey(key, int(vk), uint32(data.Modifiers)):
+	case c.isQuickInputPageDownKey(key, int(vk), uint32(data.Modifiers)):
 		if c.currentPage < c.totalPages {
 			c.currentPage++
 			c.selectedIndex = 0
