@@ -120,13 +120,30 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// ── 步骤 0：特殊命令精确匹配（仅查命令，不查普通词条） ──
 	// 通过 CommandSearchable 接口仅查询 PhraseLayer 中的命令（uuid, date 等），
 	// 不会把普通拼音词条提升到命令权重。对所有输入无条件执行。
+	//
+	// 双拼模式：短语编码以原始键序列定义（如 "zzbd"），需用 originalInput 查询，
+	// 而非双拼转换后的全拼字符串。ConsumedLength 直接设为原始输入长度，
+	// shuangpinPostprocess 中跳过对 IsCommand 候选的长度重映射。
 	{
-		cmdResults := e.dict.LookupCommand(queryInput)
+		cmdKey := queryInput
+		cmdConsumedLen := len(input)
+		if spResult != nil {
+			cmdKey = originalInput
+			cmdConsumedLen = len(originalInput)
+		}
+		cmdResults := e.dict.LookupCommand(cmdKey)
 		for _, cand := range cmdResults {
 			c := cand
-			charCount := len([]rune(c.Text))
-			c.Weight = e.rimeScore(c.Text, float64(c.Weight), 100.0, 1.0, charCount)
-			c.ConsumedLength = len(input)
+			if c.IsGroup {
+				// 导航候选保留 SearchCommand 内的原始排序（positionToWeight + Better），
+				// 不施加 rimeScore——组名不是输出文本，LM 评分无意义且会打乱顺序。
+				// 施加固定降权因子，使其低于精确命令但可见。
+				c.Weight = c.Weight / 10
+			} else {
+				charCount := len([]rune(c.Text))
+				c.Weight = e.rimeScore(c.Text, float64(c.Weight), 100.0, 1.0, charCount)
+			}
+			c.ConsumedLength = cmdConsumedLen
 			candidatesMap[c.Text] = &c
 		}
 		if len(cmdResults) > 0 {
@@ -576,8 +593,12 @@ func (e *Engine) shuangpinPostprocess(result *PinyinConvertResult, spResult *shu
 	result.PreeditDisplay = buildShuangpinPreedit(spResult.raw, originalInput)
 	result.FullPinyinInput = spResult.fullPinyin
 
-	// 回映所有候选的 ConsumedLength（全拼位置→双拼位置）
+	// 回映所有候选的 ConsumedLength（全拼位置→双拼位置）。
+	// IsCommand 候选已在步骤 0 中直接设置为原始输入长度，无需重映射。
 	for i := range result.Candidates {
+		if result.Candidates[i].IsCommand {
+			continue
+		}
 		fpConsumed := result.Candidates[i].ConsumedLength
 		result.Candidates[i].ConsumedLength = spResult.raw.MapConsumedLength(fpConsumed)
 	}

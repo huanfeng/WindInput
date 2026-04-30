@@ -265,3 +265,92 @@ func TestPhraseLayerGroupDisabled(t *testing.T) {
 		t.Fatalf("disabled group should not have exact matches, got %d", len(exact))
 	}
 }
+
+func TestSearchCommandGroupExactMatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
+	content := `phrases:
+  - code: "zzbd"
+    name: "标点符号"
+    texts: "，。！？"
+    position: 1
+`
+	if err := os.WriteFile(systemFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
+
+	results := pl.SearchCommand("zzbd", 0)
+	if len(results) != 4 {
+		t.Fatalf("expected 4 chars for SearchCommand('zzbd'), got %d", len(results))
+	}
+	for i, c := range results {
+		if !c.IsCommand {
+			t.Fatalf("candidate[%d] should have IsCommand=true", i)
+		}
+		if !c.IsPhrase {
+			t.Fatalf("candidate[%d] should have IsPhrase=true", i)
+		}
+		if c.IsGroup {
+			t.Fatalf("candidate[%d] should NOT have IsGroup=true (exact match returns chars)", i)
+		}
+	}
+	// 第一个字符应为 "，"
+	if results[0].Text != "，" {
+		t.Fatalf("expected first char '，', got %q", results[0].Text)
+	}
+}
+
+func TestSearchCommandGroupPrefixNavigation(t *testing.T) {
+	tmpDir := t.TempDir()
+	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
+	content := `phrases:
+  - code: "zzbd"
+    name: "标点符号"
+    texts: "，。！"
+    position: 1
+  - code: "zzsz"
+    name: "数字符号"
+    texts: "①②③"
+    position: 2
+  - code: "abc"
+    text: "普通短语"
+    position: 1
+`
+	if err := os.WriteFile(systemFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
+
+	// "zz" 前缀应返回两个导航候选
+	results := pl.SearchCommand("zz", 0)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 nav candidates for SearchCommand('zz'), got %d", len(results))
+	}
+	for i, c := range results {
+		if !c.IsGroup {
+			t.Fatalf("candidate[%d] should have IsGroup=true", i)
+		}
+		if c.GroupCode == "" {
+			t.Fatalf("candidate[%d] GroupCode should not be empty", i)
+		}
+	}
+	// 确认两个组都出现了
+	codes := map[string]bool{}
+	for _, c := range results {
+		codes[c.GroupCode] = true
+	}
+	if !codes["zzbd"] || !codes["zzsz"] {
+		t.Fatalf("expected groups zzbd and zzsz, got %v", codes)
+	}
+
+	// "abc" 前缀不应触发导航（非组）
+	abcResults := pl.SearchCommand("ab", 0)
+	for _, c := range abcResults {
+		if c.IsGroup {
+			t.Fatal("non-group prefix should not return IsGroup candidates")
+		}
+	}
+}

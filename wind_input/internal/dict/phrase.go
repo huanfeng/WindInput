@@ -136,18 +136,18 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 	return results
 }
 
-// SearchCommand 查询动态短语（含变量的短语），展开模板后返回
+// SearchCommand 查询动态短语和字符组短语，展开后返回。
+// 支持三种情况：
+//  1. 精确匹配动态短语（含 $ 变量，如 date/time/uuid）
+//  2. 精确匹配字符组（texts 字段，如 zzbd → 标点字符列表）
+//  3. 字符组前缀匹配（如 zz → 返回 zzbd/zzsz... 导航候选供二级展开）
 func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candidate {
 	pl.mu.Lock()
 	defer pl.mu.Unlock()
 
 	code = strings.ToLower(code)
-	entries, ok := pl.dynamicPhrases[code]
-	if !ok {
-		return nil
-	}
 
-	// 使用缓存
+	// 缓存命中
 	if cached, hit := pl.cmdCache[code]; hit {
 		if limit > 0 && len(cached) > limit {
 			return cached[:limit]
@@ -155,26 +155,84 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 		return cached
 	}
 
-	results := make([]candidate.Candidate, 0, len(entries))
-	for _, e := range entries {
-		expanded := pl.templateEngine.Expand(e.Text)
-		results = append(results, candidate.Candidate{
-			Text:           expanded,
-			Code:           code,
-			Weight:         positionToWeight(e.Position),
-			IsCommand:      true,
-			IsPhrase:       true,   // 动态短语永远保留，但不计入 hasCommon
-			PhraseTemplate: e.Text, // 携带原始模板文本，用于右键菜单定位条目
+	// ── 情况 1：动态短语精确匹配（含 $ 变量） ──
+	if entries, ok := pl.dynamicPhrases[code]; ok {
+		results := make([]candidate.Candidate, 0, len(entries))
+		for _, e := range entries {
+			expanded := pl.templateEngine.Expand(e.Text)
+			results = append(results, candidate.Candidate{
+				Text:           expanded,
+				Code:           code,
+				Weight:         positionToWeight(e.Position),
+				IsCommand:      true,
+				IsPhrase:       true,
+				PhraseTemplate: e.Text,
+			})
+		}
+		sortByPosition(results)
+		pl.cmdCache[code] = results
+		if limit > 0 && len(results) > limit {
+			return results[:limit]
+		}
+		return results
+	}
+
+	// ── 情况 2：字符组精确匹配（texts 字段，如 zzbd → 展开为字符列表） ──
+	if group, ok := pl.phraseGroups[code]; ok && !group.Disabled {
+		entries := pl.staticPhrases[code]
+		results := make([]candidate.Candidate, 0, len(entries))
+		for _, e := range entries {
+			results = append(results, candidate.Candidate{
+				Text:      e.Text,
+				Code:      code,
+				Weight:    positionToWeight(e.Position),
+				IsCommand: true,
+				IsPhrase:  true,
+			})
+		}
+		sortByPosition(results)
+		pl.cmdCache[code] = results
+		if limit > 0 && len(results) > limit {
+			return results[:limit]
+		}
+		return results
+	}
+
+	// ── 情况 3：字符组前缀匹配（如 zz → 返回 zzbd/zzsz... 导航候选） ──
+	// 前缀长度 < 2 时不触发导航，避免单字符输入（如 "z"）引入噪音候选。
+	if len(code) < 2 {
+		return nil
+	}
+	var navResults []candidate.Candidate
+	for groupCode, group := range pl.phraseGroups {
+		if !group.Disabled && groupCode != code && strings.HasPrefix(groupCode, code) {
+			displayName := group.Name
+			if displayName == "" {
+				displayName = groupCode
+			}
+			navResults = append(navResults, candidate.Candidate{
+				Text:      displayName,
+				Code:      groupCode,
+				Weight:    positionToWeight(group.Position),
+				Comment:   groupCode[len(code):],
+				IsPhrase:  true,
+				IsGroup:   true,
+				GroupCode: groupCode,
+			})
+		}
+	}
+	if len(navResults) > 0 {
+		sort.Slice(navResults, func(i, j int) bool {
+			return candidate.Better(navResults[i], navResults[j])
 		})
+		pl.cmdCache[code] = navResults
+		if limit > 0 && len(navResults) > limit {
+			return navResults[:limit]
+		}
+		return navResults
 	}
 
-	sortByPosition(results)
-	pl.cmdCache[code] = results
-
-	if limit > 0 && len(results) > limit {
-		return results[:limit]
-	}
-	return results
+	return nil
 }
 
 // SearchPrefix 前缀查询（仅静态短语）
