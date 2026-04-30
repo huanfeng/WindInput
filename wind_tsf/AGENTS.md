@@ -1,4 +1,4 @@
-<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-05-01 -->
 
 # wind_tsf - Windows TSF Input Method Bridge
 
@@ -62,6 +62,9 @@ cmake .. -DAPP_VERSION_MAJOR=1 -DAPP_VERSION_MINOR=0 -DAPP_VERSION_PATCH=0 -DAPP
 - Header: 8 bytes (version, command, payload length)
 - Payload: variable length, UTF-8 encoded text
 - Key types: KeyEvent, CommitRequest, CaretUpdate, FocusGained/Lost, IMEActivated/Deactivated, ToggleMode, MenuCommand, etc.
+
+**跨语言协议同步（必读）：**
+本目录的 [`include/BinaryProtocol.h`](include/BinaryProtocol.h) 与 [`src/IPCClient.cpp`](src/IPCClient.cpp) 是 Go 端 [`wind_input/internal/ipc/binary_protocol.go`](../wind_input/internal/ipc/binary_protocol.go) 与 [`binary_codec.go`](../wind_input/internal/ipc/binary_codec.go) 的 C++ 镜像。**修改命令码、Header 字段、Payload 结构、状态标志位时，必须双边同步**，否则会破坏 IPC 兼容性。Go 侧实现概览见 [`/wind_input/internal/ipc/AGENTS.md`](../wind_input/internal/ipc/AGENTS.md)。
 
 **Circuit Breaker:**
 - Handles service unavailability gracefully

@@ -1,5 +1,11 @@
 #pragma once
 
+// 跨语言协议同步（必读）：本文件与 Go 端 wind_input/internal/ipc/binary_protocol.go 互为镜像。
+// 修改命令码、Header 字段、Payload 结构、状态标志位时，必须同步修改：
+//   - wind_input/internal/ipc/binary_protocol.go（常量与结构体定义）
+//   - wind_input/internal/ipc/binary_codec.go（编解码实现）
+// 否则会破坏 C++ TSF DLL 与 Go 服务的 IPC 兼容性。
+
 #include <cstdint>
 #include <vector>
 #include <string>

@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-05-01 -->
 
 # internal/ipc
 
@@ -7,6 +7,9 @@
 底层 IPC 基础设施。定义二进制通信协议（命令码、消息头、编解码器）和基础 Named Pipe 服务端框架。`bridge` 包在此之上构建业务逻辑。
 
 注意：`server.go` 中还保留了早期的 JSON 协议服务端（`\\.\pipe\tsf_ime_service`），当前主服务已迁移到 `bridge` 包的二进制协议，此文件为遗留代码。
+
+### 跨语言协议同步（必读）
+本目录的二进制协议与 C++ 侧 [`wind_tsf/include/BinaryProtocol.h`](../../../wind_tsf/include/BinaryProtocol.h) 互为镜像，由 [`wind_tsf/src/IPCClient.cpp`](../../../wind_tsf/src/IPCClient.cpp) 在 C++ 端实现编解码。**修改 `binary_protocol.go` / `binary_codec.go` 中的命令码、Header 字段、Payload 结构、状态标志位时，必须同步修改 `BinaryProtocol.h` 与 `IPCClient.cpp`，否则会破坏 IPC 兼容性。** C++ 侧的概览见 [`/wind_tsf/AGENTS.md`](../../../wind_tsf/AGENTS.md)。
 
 ## Key Files
 | File | Description |

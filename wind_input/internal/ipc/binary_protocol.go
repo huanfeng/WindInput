@@ -1,4 +1,11 @@
 // Package ipc defines the binary protocol for IPC communication between Go service and C++ TSF.
+//
+// 跨语言协议同步（必读）：本文件与 wind_tsf/include/BinaryProtocol.h 互为镜像。
+// 修改命令码、Header 字段、Payload 结构、状态标志位时，必须同步修改：
+//   - wind_tsf/include/BinaryProtocol.h
+//   - wind_tsf/src/IPCClient.cpp（编解码实现）
+//
+// 否则会破坏 Go 服务与 C++ TSF DLL 的 IPC 兼容性。
 package ipc
 
 // Protocol version (major.minor: high 4 bits = major, low 12 bits = minor)

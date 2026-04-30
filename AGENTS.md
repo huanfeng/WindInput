@@ -1,4 +1,4 @@
-<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-05-01 -->
 
 # WindInput - 清风输入法
 
@@ -69,14 +69,8 @@ Schema 驱动流程:
 - 不需要提醒输入法卸载相关事项
 
 ### 枚举与"魔法字符串"约束（强制）
-任何**有限取值**的字符串配置/参数（如 `"commit"`/`"clear"`、`"smart"`/`"general"`、`"horizontal"`/`"vertical"`、按键名 `"semicolon"`、组合键群 `"pageupdown"` 等）**必须**通过具名常量引用，禁止直接散落字面量。
-
-- **Go 端**：在 `wind_input/pkg/config/enums.go`、`wind_input/pkg/keys/`、`wind_input/internal/schema/types.go` 等位置定义 `type Foo string` + const 块，详见 `wind_input/AGENTS.md`。
-- **前端**：在 `wind_setting/frontend/src/lib/enums.ts` 定义 `as const` 对象 + 联合类型，详见 `wind_setting/frontend/src/AGENTS.md`。
-- **协议字面量必须前后端一致**：YAML/JSON 字段值是前后端协议，常量值不可单边修改；前后端常量定义互为镜像。
-- **真边界例外**：仅 syscall（如 `windows.UTF16PtrFromString`）、`cmd/link -X`、跨进程协议字段、test fixture YAML 文本可保留裸字符串。
-- **新增取值时**：先加常量定义，再写比较点；旧别名（如 `"page_up"`/`"pageup"` 这种历史并存）用 `pkg/keys.aliasToKey` 双向表统一规范化，禁止在业务代码里散落别名兼容分支。
-- **PR 自检**：grep `case "[a-z_]+":`、`== "[a-z_]+"`、`'[a-z_]+'` 不应在常量定义文件之外有命中（除上述例外）。
+**红线**：任何有限取值字符串（行为/模式/按键名/组合键群/Wails 事件名）必须通过具名常量引用，前后端互为镜像；YAML/JSON 协议字面量不可单边修改。
+完整规则、SSOT 文件清单、Go/前端样板、PR 自检命令见 [`docs/design/enum-constraint.md`](docs/design/enum-constraint.md)。
 
 ### Build Steps
 1. `[1/6]` Go 服务: `cd wind_input && go build -ldflags "-H windowsgui" -o ../build/wind_input.exe ./cmd/service`
@@ -108,5 +102,77 @@ Schema 驱动流程:
 ### Data Sources
 - 拼音词库: [雾凇拼音 rime-ice](https://github.com/iDvel/rime-ice)
 - 五笔词库: Rime 生态格式（自描述加载）
+
+## AGENTS.md 索引（ToC）
+
+> 本仓库每个有意义的目录下都放有 AGENTS.md。新增/重构模块时使用 [`docs/AGENTS-TEMPLATE.md`](docs/AGENTS-TEMPLATE.md) 模板。
+
+### 跨模块全局文档
+
+| 路径 | 用途 |
+|------|------|
+| [`docs/AGENTS-TEMPLATE.md`](docs/AGENTS-TEMPLATE.md) | AGENTS.md 写作模板与字段规范 |
+| [`docs/design/enum-constraint.md`](docs/design/enum-constraint.md) | 枚举与魔法字符串约束 SSOT |
+| [`scripts/lint_agents_md.ps1`](scripts/lint_agents_md.ps1) | AGENTS.md 引用路径有效性扫描脚本 |
+
+### wind_input/（Go 服务）
+
+| 路径 | 用途 |
+|------|------|
+| [`wind_input/AGENTS.md`](wind_input/AGENTS.md) | Go 模块根：架构分层、构建命令 |
+| [`wind_input/cmd/AGENTS.md`](wind_input/cmd/AGENTS.md) | service 主入口、词库生成工具入口 |
+| [`wind_input/internal/AGENTS.md`](wind_input/internal/AGENTS.md) | internal 包总索引 |
+| [`wind_input/internal/coordinator/AGENTS.md`](wind_input/internal/coordinator/AGENTS.md) | 输入流程编排（key action、加词、候选操作） |
+| [`wind_input/internal/engine/AGENTS.md`](wind_input/internal/engine/AGENTS.md) | Schema 驱动的引擎工厂（拼音/码表/混合） |
+| [`wind_input/internal/dict/AGENTS.md`](wind_input/internal/dict/AGENTS.md) | 词库分层架构、Shadow pin/delete、CompositeDict |
+| [`wind_input/internal/schema/AGENTS.md`](wind_input/internal/schema/AGENTS.md) | Schema 类型与 Manager |
+| [`wind_input/internal/ipc/AGENTS.md`](wind_input/internal/ipc/AGENTS.md) | Go 端二进制协议（与 wind_tsf 镜像） |
+| [`wind_input/internal/bridge/AGENTS.md`](wind_input/internal/bridge/AGENTS.md) | 命名管道桥接业务层 |
+| [`wind_input/internal/rpc/AGENTS.md`](wind_input/internal/rpc/AGENTS.md) | 控制 IPC（与 wind_setting 通信） |
+| [`wind_input/pkg/AGENTS.md`](wind_input/pkg/AGENTS.md) | pkg 子包总索引 |
+| [`wind_input/pkg/config/AGENTS.md`](wind_input/pkg/config/AGENTS.md) | 配置加载与枚举常量（SSOT） |
+| [`wind_input/pkg/keys/AGENTS.md`](wind_input/pkg/keys/AGENTS.md) | 按键名/修饰键/组合键群（SSOT） |
+| [`wind_input/pkg/rpcapi/AGENTS.md`](wind_input/pkg/rpcapi/AGENTS.md) | Wails 事件名常量 |
+| [`wind_input/themes/AGENTS.md`](wind_input/themes/AGENTS.md) | 主题 YAML |
+
+### wind_setting/（Wails 设置界面）
+
+| 路径 | 用途 |
+|------|------|
+| [`wind_setting/AGENTS.md`](wind_setting/AGENTS.md) | Wails 应用根 |
+| [`wind_setting/internal/AGENTS.md`](wind_setting/internal/AGENTS.md) | Go 后端逻辑 |
+| [`wind_setting/frontend/AGENTS.md`](wind_setting/frontend/AGENTS.md) | Vue 3 前端根 |
+| [`wind_setting/frontend/src/AGENTS.md`](wind_setting/frontend/src/AGENTS.md) | 前端源码总入口 |
+| [`wind_setting/frontend/src/lib/AGENTS.md`](wind_setting/frontend/src/lib/AGENTS.md) | 前端枚举常量清单（SSOT 镜像） |
+| [`wind_setting/frontend/src/api/AGENTS.md`](wind_setting/frontend/src/api/AGENTS.md) | HTTP/Wails 双 API 封装 |
+| [`wind_setting/frontend/src/pages/AGENTS.md`](wind_setting/frontend/src/pages/AGENTS.md) | 各设置页面组件 |
+| [`wind_setting/frontend/src/components/AGENTS.md`](wind_setting/frontend/src/components/AGENTS.md) | 可复用组件 |
+| [`wind_setting/frontend/src/components/dict/AGENTS.md`](wind_setting/frontend/src/components/dict/AGENTS.md) | 词库管理组件 |
+| [`wind_setting/frontend/src/composables/AGENTS.md`](wind_setting/frontend/src/composables/AGENTS.md) | Vue composables |
+
+### wind_tsf/（C++ TSF 桥接）
+
+| 路径 | 用途 |
+|------|------|
+| [`wind_tsf/AGENTS.md`](wind_tsf/AGENTS.md) | C++ DLL 架构与 IPC 协议（与 wind_input 镜像） |
+| [`wind_tsf/include/AGENTS.md`](wind_tsf/include/AGENTS.md) | 头文件（含 BinaryProtocol.h） |
+| [`wind_tsf/src/AGENTS.md`](wind_tsf/src/AGENTS.md) | 实现文件（TextService、IPCClient、HostWindow…） |
+| [`wind_tsf/res/AGENTS.md`](wind_tsf/res/AGENTS.md) | 图标与版本资源模板 |
+
+### docs/、data/、installer/、scripts/
+
+| 路径 | 用途 |
+|------|------|
+| [`docs/AGENTS.md`](docs/AGENTS.md) | 文档总索引 |
+| [`docs/design/AGENTS.md`](docs/design/AGENTS.md) | 设计方案文档 |
+| [`docs/requirements/AGENTS.md`](docs/requirements/AGENTS.md) | 需求规划文档 |
+| [`docs/testing/AGENTS.md`](docs/testing/AGENTS.md) | 测试指南 |
+| [`docs/release-notes/AGENTS.md`](docs/release-notes/AGENTS.md) | 发版记录 |
+| [`docs/archive/AGENTS.md`](docs/archive/AGENTS.md) | 历史文档 |
+| [`data/AGENTS.md`](data/AGENTS.md) | Schema 方案、词库源数据、默认配置 |
+| [`data/schemas/AGENTS.md`](data/schemas/AGENTS.md) | Schema YAML 定义 |
+| [`installer/AGENTS.md`](installer/AGENTS.md) | 安装器总览 |
+| [`installer/nsis/AGENTS.md`](installer/nsis/AGENTS.md) | NSIS 安装脚本 |
+| [`scripts/AGENTS.md`](scripts/AGENTS.md) | 构建辅助与工具脚本 |
 
 <!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->

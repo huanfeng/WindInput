@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-05-01 -->
 
 # src
 
@@ -55,37 +55,8 @@ toast('操作失败', 'error')
 ```
 
 ### 枚举常量规范（强制）
-有限取值的字符串配置/参数禁止散落字面量，必须从 `./lib/enums` 导入常量引用。详见根 `AGENTS.md` 的"枚举与魔法字符串约束"节。
-
-**前端实现样板**（参考 `lib/enums.ts`）：
-```typescript
-// 1. 定义：as const 对象 + 联合类型
-export const FilterMode = {
-  Smart: 'smart',
-  General: 'general',
-  GB18030: 'gb18030',
-} as const;
-export type FilterModeValue = typeof FilterMode[keyof typeof FilterMode];
-
-// 2. API 接口字段用联合类型，编译期拒绝非法值
-import type { FilterModeValue, ThemeStyleValue } from '@/lib/enums';
-export interface InputConfig {
-  filter_mode: FilterModeValue;
-  // ...
-}
-
-// 3. 模板和逻辑都用常量
-import { FilterMode, ThemeStyle } from '@/lib/enums';
-// 模板：<SelectItem :value="FilterMode.Smart">智能</SelectItem>
-// 逻辑：if (cfg.filter_mode === FilterMode.Smart) { ... }
-```
-
-要求：
-- 字面量值**必须**与 Go 端 `pkg/config/enums.go`/`pkg/keys/` 保持完全一致（YAML/JSON 协议字段）
-- 修改任一端的常量值时，另一端必须同步——前后端常量定义互为镜像
-- API 接口字段类型从 `string` 收紧为联合类型，让 TS 编译期捕获错配
-- 模板里的 `<option value="...">`、`<SelectItem value="...">` 用 `:value` 绑定常量，而非裸字面量
-- v-if/v-show/computed 的字符串比较一律用常量（`=== ThemeStyle.Dark`）
+**红线**：有限取值字符串必须从 `./lib/enums` 导入常量；API 接口字段类型用联合类型；前后端字面量必须互为镜像。
+完整规则、前端样板、`lib/enums.ts` 常量清单见 [`/docs/design/enum-constraint.md`](../../../docs/design/enum-constraint.md) 与 [`./lib/AGENTS.md`](lib/AGENTS.md)。
 
 ## Dependencies
 ### Internal

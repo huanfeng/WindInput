@@ -1,3 +1,9 @@
+// 跨语言协议同步（必读）：本文件的编解码逻辑与 wind_tsf/src/IPCClient.cpp 互为镜像。
+// 修改 Encode/Decode 任一函数的字节布局时，必须同步修改：
+//   - wind_tsf/include/BinaryProtocol.h（结构体/常量定义）
+//   - wind_tsf/src/IPCClient.cpp（编解码实现）
+// 否则会破坏 Go 服务与 C++ TSF DLL 的 IPC 兼容性。
+
 package ipc
 
 import (
