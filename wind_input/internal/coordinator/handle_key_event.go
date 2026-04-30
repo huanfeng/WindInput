@@ -563,6 +563,20 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 				c.pairTrackerEn.Clear()
 			}
 			c.lastOutputWasDigit = true
+			// 空码状态：有待处理输入但无候选，必须显式清空并上屏数字；
+			// 透传（nil）会让应用得到数字但 composition 不会结束，导致状态混乱。
+			if c.hasPendingInput() {
+				c.clearState()
+				c.hideUI()
+				digit := key
+				if c.fullWidth {
+					digit = transform.ToFullWidth(key)
+				}
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: digit,
+				}
+			}
 			// 全角模式下输出全角数字
 			if c.fullWidth {
 				return &bridge.KeyEventResult{
@@ -583,6 +597,20 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 				c.pairTrackerEn.Clear()
 			}
 			c.lastOutputWasDigit = true
+			// 空码状态：有待处理输入但无候选，必须显式清空并上屏数字；
+			// 透传（nil）会让应用得到数字但 composition 不会结束，导致状态混乱。
+			if c.hasPendingInput() {
+				c.clearState()
+				c.hideUI()
+				digit := key
+				if c.fullWidth {
+					digit = transform.ToFullWidth(key)
+				}
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: digit,
+				}
+			}
 			// 全角模式下输出全角数字
 			if c.fullWidth {
 				return &bridge.KeyEventResult{
