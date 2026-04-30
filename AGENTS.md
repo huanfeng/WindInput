@@ -68,6 +68,16 @@ Schema 驱动流程:
 - 前端代码修改完需格式化
 - 不需要提醒输入法卸载相关事项
 
+### 枚举与"魔法字符串"约束（强制）
+任何**有限取值**的字符串配置/参数（如 `"commit"`/`"clear"`、`"smart"`/`"general"`、`"horizontal"`/`"vertical"`、按键名 `"semicolon"`、组合键群 `"pageupdown"` 等）**必须**通过具名常量引用，禁止直接散落字面量。
+
+- **Go 端**：在 `wind_input/pkg/config/enums.go`、`wind_input/pkg/keys/`、`wind_input/internal/schema/types.go` 等位置定义 `type Foo string` + const 块，详见 `wind_input/AGENTS.md`。
+- **前端**：在 `wind_setting/frontend/src/lib/enums.ts` 定义 `as const` 对象 + 联合类型，详见 `wind_setting/frontend/src/AGENTS.md`。
+- **协议字面量必须前后端一致**：YAML/JSON 字段值是前后端协议，常量值不可单边修改；前后端常量定义互为镜像。
+- **真边界例外**：仅 syscall（如 `windows.UTF16PtrFromString`）、`cmd/link -X`、跨进程协议字段、test fixture YAML 文本可保留裸字符串。
+- **新增取值时**：先加常量定义，再写比较点；旧别名（如 `"page_up"`/`"pageup"` 这种历史并存）用 `pkg/keys.aliasToKey` 双向表统一规范化，禁止在业务代码里散落别名兼容分支。
+- **PR 自检**：grep `case "[a-z_]+":`、`== "[a-z_]+"`、`'[a-z_]+'` 不应在常量定义文件之外有命中（除上述例外）。
+
 ### Build Steps
 1. `[1/6]` Go 服务: `cd wind_input && go build -ldflags "-H windowsgui" -o ../build/wind_input.exe ./cmd/service`
 2. `[2/6]` C++ DLL: `cd wind_tsf/build && cmake .. && cmake --build . --config Release`（仅输出 wind_tsf.dll；wind_dwrite.dll 已移除，Go 侧通过 CGO 直接调用系统 dwrite.dll）
