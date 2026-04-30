@@ -9,19 +9,19 @@ import (
 	"strings"
 )
 
-// isCalcExpression 检查字符串是否为计算表达式（包含运算符且以数字开头）
+// isCalcExpression 检查字符串是否为计算表达式（包含运算符，以数字或左括号开头）
 func isCalcExpression(s string) bool {
 	if len(s) == 0 {
 		return false
 	}
-	if s[0] < '0' || s[0] > '9' {
+	if s[0] != '(' && (s[0] < '0' || s[0] > '9') {
 		return false
 	}
 	for _, r := range s {
 		switch r {
 		case '+', '-', '*', '/':
 			return true
-		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.':
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '(', ')':
 			continue
 		default:
 			return false
@@ -71,7 +71,7 @@ func (p *exprParser) parseExpr() (float64, error) {
 }
 
 func (p *exprParser) parseTerm() (float64, error) {
-	left, err := p.parseNumber()
+	left, err := p.parsePrimary()
 	if err != nil {
 		return 0, err
 	}
@@ -81,7 +81,7 @@ func (p *exprParser) parseTerm() (float64, error) {
 			break
 		}
 		p.pos++
-		right, err := p.parseNumber()
+		right, err := p.parsePrimary()
 		if err != nil {
 			return 0, err
 		}
@@ -95,6 +95,23 @@ func (p *exprParser) parseTerm() (float64, error) {
 		}
 	}
 	return left, nil
+}
+
+// parsePrimary 解析基本单元：括号表达式或数字
+func (p *exprParser) parsePrimary() (float64, error) {
+	if p.pos < len(p.input) && p.input[p.pos] == '(' {
+		p.pos++ // 消费 '('
+		val, err := p.parseExpr()
+		if err != nil {
+			return 0, err
+		}
+		if p.pos >= len(p.input) || p.input[p.pos] != ')' {
+			return 0, fmt.Errorf("expected ')' at position %d", p.pos)
+		}
+		p.pos++ // 消费 ')'
+		return val, nil
+	}
+	return p.parseNumber()
 }
 
 func (p *exprParser) parseNumber() (float64, error) {

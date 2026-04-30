@@ -17,6 +17,11 @@ func TestIsCalcExpression(t *testing.T) {
 		{"+123", false},
 		{"123+", true},
 		{"1+2+3+4", true},
+		{"(1+2)*3", true},
+		{"(10-2)/4", true},
+		{"2*(3+4)", true},
+		{"(3)", false}, // 只有括号无运算符，不算计算表达式
+		{"(1+2)*(3+4)", true},
 	}
 	for _, tt := range tests {
 		got := isCalcExpression(tt.input)
@@ -43,6 +48,12 @@ func TestEvaluateExpression(t *testing.T) {
 		{"10/0", 0, true},
 		{"123+456", 579, false},
 		{"0*999", 0, false},
+		{"(1+2)*3", 9, false},
+		{"2*(3+4)", 14, false},
+		{"(10-2)/4", 2, false},
+		{"(1+2)*(3+4)", 21, false},
+		{"100/(2+3)", 20, false},
+		{"(2+3)*(4-1)", 15, false},
 	}
 	for _, tt := range tests {
 		got, err := evaluateExpression(tt.expr)
