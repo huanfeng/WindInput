@@ -220,8 +220,12 @@ export async function getConfig(): Promise<Config> {
   return (await App.GetConfig()) as any;
 }
 
-export async function saveConfig(cfg: Config): Promise<void> {
-  return App.SaveConfig(cfg as any);
+export interface SaveConfigResult {
+  requires_restart: boolean;
+}
+
+export async function saveConfig(cfg: Config): Promise<SaveConfigResult> {
+  return (await App.SaveConfig(cfg as any)) as any;
 }
 
 export async function getTSFLogConfig(): Promise<TSFLogConfig> {
