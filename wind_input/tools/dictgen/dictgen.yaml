@@ -31,6 +31,20 @@ fallback:
   priority_20: 150
   priority_10: 120
 
+# 简码优先级分层（一/二/三级简码权重固定在普通词条之上）
+# 识别规则：单字 + 码长 ≤ 3，级别 = 码长；简码表直接从 jidian 原词库提取
+# 权重区间参考极爽词库比例（一简≈99.7%最大值）：简码占权重顶部，普通词条严格在下方
+shortcodes:
+  enabled: true
+  level1_weight: 9999      # 一级简码（25个，每码唯一）
+  level2_base_weight: 9950 # 二级简码基础权重，组内按 jidian 顺序递减
+  level3_base_weight: 9000 # 三级简码基础权重，组内按 jidian 顺序递减（900个槽）
+regular_weight_max: 8999   # 普通词条权重上限，须低于 level3_base_weight
+
+# 简码避让冲突报告（同一字在前缀关系的多个简码级别都占首位）
+# 留空则不输出报告
+conflict_report_path: ../../../.cache/rime-wubi/wubi86_jidian.shortcode_conflicts.tsv
+
 # 内置过滤选项
 drop_z_code: true       # 过滤 z 开头的编码（反查占位码）
 drop_dollar: true       # 过滤 $ 开头的词条

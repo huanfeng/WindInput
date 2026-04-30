@@ -14,6 +14,15 @@ type FallbackWeights struct {
 	Priority10 int `yaml:"priority_10"`
 }
 
+// ShortcodeConfig 简码权重分层配置
+// 一/二/三级简码权重固定在普通词条之上，确保简码优先级不被词频排序破坏
+type ShortcodeConfig struct {
+	Enabled          bool `yaml:"enabled"`
+	Level1Weight     int  `yaml:"level1_weight"`      // 一级简码固定权重（每码唯一）
+	Level2BaseWeight int  `yaml:"level2_base_weight"` // 二级简码基础权重（组内按 jidian 顺序递减）
+	Level3BaseWeight int  `yaml:"level3_base_weight"` // 三级简码基础权重（组内按 jidian 顺序递减）
+}
+
 type DropRule struct {
 	CodePrefix  string   `yaml:"code_prefix"`
 	Code        string   `yaml:"code"`
@@ -56,6 +65,11 @@ type Config struct {
 
 	// 生成文件中的 import_tables（引用扩展词库）
 	ImportTables []string `yaml:"import_tables"`
+
+	// 简码优先级分层
+	Shortcodes         ShortcodeConfig `yaml:"shortcodes"`
+	RegularWeightMax   int             `yaml:"regular_weight_max"`   // 普通词条权重上限，应低于最低简码权重
+	ConflictReportPath string          `yaml:"conflict_report_path"` // 简码避让冲突报告路径，空则不输出
 }
 
 func defaultConfig() Config {
@@ -74,6 +88,13 @@ func defaultConfig() Config {
 		RequireCJK:      false,
 		MaxCodeLen:      4,
 		MaxTextLen:      16,
+		Shortcodes: ShortcodeConfig{
+			Enabled:          true,
+			Level1Weight:     9999,
+			Level2BaseWeight: 9950,
+			Level3BaseWeight: 9000,
+		},
+		RegularWeightMax: 8999,
 	}
 }
 
@@ -100,6 +121,7 @@ func loadConfig(path string) (*Config, error) {
 	cfg.OutputPath = resolve(cfg.OutputPath)
 	cfg.CustomWordsPath = resolve(cfg.CustomWordsPath)
 	cfg.DroppedPath = resolve(cfg.DroppedPath)
+	cfg.ConflictReportPath = resolve(cfg.ConflictReportPath)
 
 	return &cfg, nil
 }

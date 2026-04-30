@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,9 +14,11 @@ import (
 
 // Entry 词典条目
 type Entry struct {
-	Text       string
-	Code       string
-	OrigWeight int // jidian 原始优先级(10/20/30)；权重赋值后存放最终权重
+	Text           string
+	Code           string
+	OrigWeight     int // jidian 原始优先级(10/20/30)；权重赋值后存放最终权重
+	shortcodeLevel int // 0=普通词条, 1/2/3=简码级别（单字且码长≤3）
+	origPos        int // 在 jidian 中的原始顺序，用于简码组内排序
 }
 
 // ── Unicode 过滤辅助 ───────────────────────────────────
@@ -159,6 +162,132 @@ func shouldKeep(e Entry, cfg *Config) (bool, string) {
 		}
 	}
 	return true, ""
+}
+
+// ── 简码权重分层 ──────────────────────────────────────
+
+// assignShortcodeWeights 识别简码词条（单字且码长1-3），按分层配置赋予固定高权重。
+// 同码同级的多个词条按 jidian 原始顺序递减，以保留原词库中的候选排列。
+func assignShortcodeWeights(entries []Entry, cfg *Config) {
+	if !cfg.Shortcodes.Enabled {
+		return
+	}
+	for i, e := range entries {
+		if len([]rune(e.Text)) == 1 && len(e.Code) >= 1 && len(e.Code) <= 3 {
+			entries[i].shortcodeLevel = len(e.Code)
+		}
+	}
+
+	type groupKey struct {
+		level int
+		code  string
+	}
+	groups := make(map[groupKey][]int)
+	for i, e := range entries {
+		if e.shortcodeLevel == 0 {
+			continue
+		}
+		k := groupKey{e.shortcodeLevel, e.Code}
+		groups[k] = append(groups[k], i)
+	}
+
+	for k, idxs := range groups {
+		sort.Slice(idxs, func(a, b int) bool {
+			return entries[idxs[a]].origPos < entries[idxs[b]].origPos
+		})
+		var base int
+		switch k.level {
+		case 1:
+			base = cfg.Shortcodes.Level1Weight
+		case 2:
+			base = cfg.Shortcodes.Level2BaseWeight
+		case 3:
+			base = cfg.Shortcodes.Level3BaseWeight
+		}
+		for rank, idx := range idxs {
+			entries[idx].OrigWeight = base - rank
+		}
+	}
+}
+
+func countShortcodeLevel(entries []Entry, level int) int {
+	n := 0
+	for _, e := range entries {
+		if e.shortcodeLevel == level {
+			n++
+		}
+	}
+	return n
+}
+
+// ── 简码避让冲突分析 ───────────────────────────────────
+
+type conflictEntry struct {
+	ConflictType string // "level1_level2" / "level2_level3" / "level1_level3"
+	Char         string
+	ShortCode    string // 已能打出该字的较短编码
+	LongCode     string // 同字占据首位的较长编码
+}
+
+// analyzeShortcodeConflicts 找出同一字在前缀关系的两个简码层级都占据首位的情况。
+// 这类冲突意味着用户可以用更短的码打出该字，却同时也占据了较长码的首选位。
+func analyzeShortcodeConflicts(entries []Entry) []conflictEntry {
+	type best struct {
+		text   string
+		weight int
+	}
+	topByCode := make(map[string]best)
+	for _, e := range entries {
+		if e.shortcodeLevel == 0 {
+			continue
+		}
+		if b, ok := topByCode[e.Code]; !ok || e.OrigWeight > b.weight {
+			topByCode[e.Code] = best{e.Text, e.OrigWeight}
+		}
+	}
+
+	var conflicts []conflictEntry
+	for code, sc := range topByCode {
+		clen := len(code)
+		if clen < 2 {
+			continue
+		}
+		for l := 1; l < clen; l++ {
+			prefix := code[:l]
+			if shorter, ok := topByCode[prefix]; ok && shorter.text == sc.text {
+				conflicts = append(conflicts, conflictEntry{
+					ConflictType: fmt.Sprintf("level%d_level%d", l, clen),
+					Char:         sc.text,
+					ShortCode:    prefix,
+					LongCode:     code,
+				})
+			}
+		}
+	}
+	sort.Slice(conflicts, func(i, j int) bool {
+		if conflicts[i].ConflictType != conflicts[j].ConflictType {
+			return conflicts[i].ConflictType < conflicts[j].ConflictType
+		}
+		return conflicts[i].LongCode < conflicts[j].LongCode
+	})
+	return conflicts
+}
+
+func writeConflictReport(path string, conflicts []conflictEntry) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	bw := bufio.NewWriter(f)
+	fmt.Fprintf(bw, "conflict_type\tchar\tshort_code\tlong_code\n")
+	for _, c := range conflicts {
+		fmt.Fprintf(bw, "%s\t%s\t%s\t%s\n", c.ConflictType, c.Char, c.ShortCode, c.LongCode)
+	}
+	return bw.Flush()
 }
 
 // ── 词频与权重 ────────────────────────────────────────
@@ -323,7 +452,7 @@ func parseJidian(path string) ([]Entry, error) {
 				weight = w
 			}
 		}
-		entries = append(entries, Entry{Text: text, Code: code, OrigWeight: weight})
+		entries = append(entries, Entry{Text: text, Code: code, OrigWeight: weight, origPos: len(entries)})
 	}
 	return entries, scanner.Err()
 }
@@ -385,6 +514,13 @@ func enrich(cfg *Config) error {
 		fmt.Printf("        - %s: %d\n", kv.k, kv.v)
 	}
 
+	// 识别简码并赋予分层权重（必须在 unigram 赋权之前完成）
+	if cfg.Shortcodes.Enabled {
+		assignShortcodeWeights(kept, cfg)
+		fmt.Printf("      简码分层: 一级=%d  二级=%d  三级=%d\n",
+			countShortcodeLevel(kept, 1), countShortcodeLevel(kept, 2), countShortcodeLevel(kept, 3))
+	}
+
 	// 计算归一化基准（仅基于 jidian 过滤后的词条）
 	medianRaw := computeMedianRawFreq(kept, unigram)
 	logMedian := math.Log10(medianRaw + 1)
@@ -412,14 +548,27 @@ func enrich(cfg *Config) error {
 		}
 	}
 
-	// 赋权重
+	// 普通词条权重上限：若启用简码分层则不能超过最低简码权重
+	regularMax := cfg.WeightMax
+	if cfg.Shortcodes.Enabled && cfg.RegularWeightMax > 0 && cfg.RegularWeightMax < regularMax {
+		regularMax = cfg.RegularWeightMax
+	}
+
+	// 赋权重（简码词条已在 assignShortcodeWeights 中赋值，此处跳过）
 	weightBuckets := make(map[string]int)
 	for i, e := range kept {
+		if e.shortcodeLevel > 0 {
+			weightBuckets["简码"]++
+			continue
+		}
 		isChar := len([]rune(e.Text)) == 1
 		if freq, ok := unigram[e.Text]; ok {
 			w := computeWeight(freq, logMedian, cfg)
 			if isChar && cfg.CharBoostFactor != 1.0 {
 				w = clampWeight(int(math.Round(float64(w)*cfg.CharBoostFactor)), cfg)
+			}
+			if w > regularMax {
+				w = regularMax
 			}
 			kept[i].OrigWeight = w
 			bucket := (w / 500) * 500
@@ -473,6 +622,19 @@ func enrich(cfg *Config) error {
 		sizeKB = stat2.Size() / 1024
 	}
 	fmt.Printf("      完成: %d 条，%d KB\n", len(kept), sizeKB)
+
+	// 简码避让冲突分析
+	if cfg.Shortcodes.Enabled {
+		conflicts := analyzeShortcodeConflicts(kept)
+		fmt.Printf("      简码避让冲突: 共 %d 处\n", len(conflicts))
+		if cfg.ConflictReportPath != "" {
+			if err := writeConflictReport(cfg.ConflictReportPath, conflicts); err != nil {
+				fmt.Printf("      [警告] 冲突报告写出失败: %v\n", err)
+			} else {
+				fmt.Printf("      冲突报告: %s\n", cfg.ConflictReportPath)
+			}
+		}
+	}
 
 	// 写过滤条目
 	if len(dropped) > 0 {

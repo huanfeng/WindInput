@@ -36,6 +36,11 @@ func main() {
 		cfg.TargetMedian, cfg.WeightMax, cfg.WeightMin, cfg.CharBoostFactor)
 	fmt.Printf("  生僻保底 : p30→%d  p20→%d  p10→%d\n",
 		cfg.Fallback.Priority30, cfg.Fallback.Priority20, cfg.Fallback.Priority10)
+	if cfg.Shortcodes.Enabled {
+		fmt.Printf("  简码分层 : 一级=%d  二级基=%d  三级基=%d  普通上限=%d\n",
+			cfg.Shortcodes.Level1Weight, cfg.Shortcodes.Level2BaseWeight,
+			cfg.Shortcodes.Level3BaseWeight, cfg.RegularWeightMax)
+	}
 	fmt.Printf("\n")
 
 	if err := enrich(cfg); err != nil {
