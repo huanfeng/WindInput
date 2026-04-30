@@ -1,5 +1,21 @@
 // Settings API 调用层
 
+import type {
+  EnterBehaviorValue,
+  SpaceOnEmptyBehaviorValue,
+  OverflowBehaviorValue,
+  FilterModeValue,
+  ThemeStyleValue,
+  CandidateLayoutValue,
+  PreeditModeValue,
+  PinyinSeparatorModeValue,
+  StatusDisplayModeValue,
+  SchemaNameStyleValue,
+  StatusPositionModeValue,
+  NumpadBehaviorValue,
+  ShiftBehaviorValue,
+} from "../lib/enums";
+
 const API_BASE = "http://127.0.0.1:18923";
 
 // API 响应类型
@@ -36,12 +52,12 @@ export interface HotkeyConfig {
 export interface StatusIndicatorConfig {
   enabled: boolean;
   duration: number;
-  display_mode: string; // "temp" | "always"
-  schema_name_style: string; // "short" | "full"
+  display_mode: StatusDisplayModeValue;
+  schema_name_style: SchemaNameStyleValue;
   show_mode: boolean;
   show_punct: boolean;
   show_full_width: boolean;
-  position_mode: string; // "follow_caret" | "custom"
+  position_mode: StatusPositionModeValue;
   offset_x: number;
   offset_y: number;
   custom_x: number;
@@ -60,12 +76,12 @@ export interface UIConfig {
   font_family: string;
   font_path: string;
   inline_preedit: boolean;
-  preedit_mode: string; // "top" | "embedded"
+  preedit_mode: PreeditModeValue;
   hide_candidate_window: boolean;
-  candidate_layout: string;
+  candidate_layout: CandidateLayoutValue;
   status_indicator: StatusIndicatorConfig;
   theme: string;
-  theme_style: string; // "system" | "light" | "dark"
+  theme_style: ThemeStyleValue;
 }
 
 // 工具栏配置
@@ -77,7 +93,7 @@ export interface ToolbarConfig {
 export interface ShiftTempEnglishConfig {
   enabled: boolean;
   show_english_candidates: boolean;
-  shift_behavior: string; // "temp_english" | "direct_commit"
+  shift_behavior: ShiftBehaviorValue;
   trigger_keys: string[];
 }
 
@@ -100,17 +116,17 @@ export interface InputConfig {
   full_width: boolean;
   chinese_punctuation: boolean;
   punct_follow_mode: boolean;
-  filter_mode: string; // 候选过滤模式: "smart", "general", "gb18030"
+  filter_mode: FilterModeValue;
   smart_punct_after_digit: boolean;
   smart_punct_list: string;
-  enter_behavior: string; // 回车键行为: "commit"(上屏编码), "clear"(清空编码)
-  space_on_empty_behavior: string; // 空码时空格键行为: "commit"(上屏编码), "clear"(清空编码)
-  numpad_behavior: string; // 数字小键盘功能: "direct"(直接输入) | "follow_main"(同主键盘区)
-  select_key_groups: string[];
-  page_keys: string[];
-  highlight_keys: string[]; // 移动高亮候选项: "arrows"(上/下方向键), "tab"(Tab/Shift+Tab)
-  select_char_keys: string[]; // 以词定字按键: "comma_period"(,.), "minus_equal"(-=), "brackets"([])
-  pinyin_separator: string; // 拼音分隔符: "auto", "quote", "backtick", "none"
+  enter_behavior: EnterBehaviorValue;
+  space_on_empty_behavior: SpaceOnEmptyBehaviorValue;
+  numpad_behavior: NumpadBehaviorValue;
+  select_key_groups: string[]; // PairGroupValue 子集
+  page_keys: string[]; // PairGroupValue 子集
+  highlight_keys: string[]; // PairGroupValue 子集（"arrows" | "tab"）
+  select_char_keys: string[]; // PairGroupValue 子集（"comma_period" | "minus_equal" | "brackets"）
+  pinyin_separator: PinyinSeparatorModeValue;
   shift_temp_english: ShiftTempEnglishConfig;
   temp_pinyin: TempPinyinConfig;
   auto_pair: AutoPairConfig;
@@ -121,9 +137,9 @@ export interface InputConfig {
 
 // 候选按键无效时的处理策略
 export interface OverflowBehaviorConfig {
-  number_key: string; // "ignore" | "commit" | "commit_and_input"
-  select_key: string; // "ignore" | "commit" | "commit_and_input"
-  select_char_key: string; // "ignore" | "commit" | "commit_and_input"
+  number_key: OverflowBehaviorValue;
+  select_key: OverflowBehaviorValue;
+  select_char_key: OverflowBehaviorValue;
 }
 
 // 快捷输入配置

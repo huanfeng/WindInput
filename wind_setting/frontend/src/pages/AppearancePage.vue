@@ -3,6 +3,20 @@ import { ref, computed, onMounted, onUnmounted } from "vue";
 import { ChevronDown } from "lucide-vue-next";
 import type { Config } from "../api/settings";
 import type { ThemeInfo, ThemePreview, SystemFontInfo } from "../api/wails";
+import {
+  ThemeStyle,
+  PreeditMode,
+  CandidateLayout,
+  StatusDisplayMode,
+  SchemaNameStyle,
+  StatusPositionMode,
+  type ThemeStyleValue,
+  type PreeditModeValue,
+  type CandidateLayoutValue,
+  type StatusDisplayModeValue,
+  type SchemaNameStyleValue,
+  type StatusPositionModeValue,
+} from "@/lib/enums";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -153,17 +167,17 @@ onUnmounted(() => {
           <Select
             :model-value="formData.ui.theme_style"
             @update:model-value="
-              formData.ui.theme_style = $event;
-              emit('themeStyleChange', $event);
+              formData.ui.theme_style = $event as ThemeStyleValue;
+              emit('themeStyleChange', $event as string);
             "
           >
             <SelectTrigger class="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="system">跟随系统</SelectItem>
-              <SelectItem value="light">亮色</SelectItem>
-              <SelectItem value="dark">暗色</SelectItem>
+              <SelectItem :value="ThemeStyle.System">跟随系统</SelectItem>
+              <SelectItem :value="ThemeStyle.Light">亮色</SelectItem>
+              <SelectItem :value="ThemeStyle.Dark">暗色</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -452,14 +466,14 @@ onUnmounted(() => {
           <Select
             :model-value="formData.ui.preedit_mode"
             :disabled="formData.ui.inline_preedit"
-            @update:model-value="formData.ui.preedit_mode = $event"
+            @update:model-value="formData.ui.preedit_mode = $event as PreeditModeValue"
           >
             <SelectTrigger class="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="top">独立编码行</SelectItem>
-              <SelectItem value="embedded">嵌入候选行</SelectItem>
+              <SelectItem :value="PreeditMode.Top">独立编码行</SelectItem>
+              <SelectItem :value="PreeditMode.Embedded">嵌入候选行</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -472,14 +486,14 @@ onUnmounted(() => {
         <div class="setting-control">
           <Select
             :model-value="formData.ui.candidate_layout"
-            @update:model-value="formData.ui.candidate_layout = $event"
+            @update:model-value="formData.ui.candidate_layout = $event as CandidateLayoutValue"
           >
             <SelectTrigger class="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="horizontal">横向</SelectItem>
-              <SelectItem value="vertical">纵向</SelectItem>
+              <SelectItem :value="CandidateLayout.Horizontal">横向</SelectItem>
+              <SelectItem :value="CandidateLayout.Vertical">纵向</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -516,15 +530,15 @@ onUnmounted(() => {
             <Select
               :model-value="formData.ui.status_indicator.display_mode"
               @update:model-value="
-                formData.ui.status_indicator.display_mode = $event
+                formData.ui.status_indicator.display_mode = $event as StatusDisplayModeValue
               "
             >
               <SelectTrigger class="w-[180px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="temp">临时显示</SelectItem>
-                <SelectItem value="always">常驻显示 (beta)</SelectItem>
+                <SelectItem :value="StatusDisplayMode.Temp">临时显示</SelectItem>
+                <SelectItem :value="StatusDisplayMode.Always">常驻显示 (beta)</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -533,7 +547,7 @@ onUnmounted(() => {
         <!-- 临时显示时长（仅临时模式） -->
         <div
           class="setting-item"
-          v-if="formData.ui.status_indicator.display_mode === 'temp'"
+          v-if="formData.ui.status_indicator.display_mode === StatusDisplayMode.Temp"
         >
           <div class="setting-info">
             <label>显示时长</label>
@@ -563,15 +577,15 @@ onUnmounted(() => {
             <Select
               :model-value="formData.ui.status_indicator.schema_name_style"
               @update:model-value="
-                formData.ui.status_indicator.schema_name_style = $event
+                formData.ui.status_indicator.schema_name_style = $event as SchemaNameStyleValue
               "
             >
               <SelectTrigger class="w-[200px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="full">全称（五笔、全拼）</SelectItem>
-                <SelectItem value="short">简写（五、拼）</SelectItem>
+                <SelectItem :value="SchemaNameStyle.Full">全称（五笔、全拼）</SelectItem>
+                <SelectItem :value="SchemaNameStyle.Short">简写（五、拼）</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -620,15 +634,15 @@ onUnmounted(() => {
             <Select
               :model-value="formData.ui.status_indicator.position_mode"
               @update:model-value="
-                formData.ui.status_indicator.position_mode = $event
+                formData.ui.status_indicator.position_mode = $event as StatusPositionModeValue
               "
             >
               <SelectTrigger class="w-[160px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="follow_caret">跟随光标</SelectItem>
-                <SelectItem value="custom">自定义位置</SelectItem>
+                <SelectItem :value="StatusPositionMode.FollowCaret">跟随光标</SelectItem>
+                <SelectItem :value="StatusPositionMode.Custom">自定义位置</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -636,7 +650,7 @@ onUnmounted(() => {
 
         <!-- 跟随模式偏移 -->
         <template
-          v-if="formData.ui.status_indicator.position_mode === 'follow_caret'"
+          v-if="formData.ui.status_indicator.position_mode === StatusPositionMode.FollowCaret"
         >
           <div class="setting-item">
             <div class="setting-info">

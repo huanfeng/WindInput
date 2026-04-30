@@ -30,7 +30,7 @@
           <div class="checkbox-group two-columns">
             <label
               class="checkbox-item"
-              v-for="key in ['lshift', 'rshift', 'lctrl', 'rctrl', 'capslock']"
+              v-for="key in [Key.LShift, Key.RShift, Key.LCtrl, Key.RCtrl, Key.CapsLock]"
               :key="key"
             >
               <input
@@ -127,14 +127,14 @@
             <label
               class="checkbox-item"
               v-for="group in [
-                { value: 'semicolon_quote', label: '; / \'', tip: '分号/引号' },
-                { value: 'comma_period', label: ', / .', tip: '逗号/句号' },
+                { value: PairGroup.SemicolonQuote, label: '; / \'', tip: '分号/引号' },
+                { value: PairGroup.CommaPeriod, label: ', / .', tip: '逗号/句号' },
                 {
-                  value: 'lrshift',
+                  value: PairGroup.LRShift,
                   label: 'L / R Shift',
                   tip: '左Shift/右Shift',
                 },
-                { value: 'lrctrl', label: 'L / R Ctrl', tip: '左Ctrl/右Ctrl' },
+                { value: PairGroup.LRCtrl, label: 'L / R Ctrl', tip: '左Ctrl/右Ctrl' },
               ]"
               :key="group.value"
               :title="group.tip"
@@ -164,9 +164,9 @@
             <label
               class="checkbox-item"
               v-for="hk in [
-                { value: 'arrows', label: '↑ / ↓', tip: '上/下方向键' },
+                { value: PairGroup.Arrows, label: '↑ / ↓', tip: '上/下方向键' },
                 {
-                  value: 'tab',
+                  value: PairGroup.Tab,
                   label: 'Tab / Shift+Tab',
                   tip: 'Tab键/Shift+Tab键',
                 },
@@ -195,14 +195,14 @@
               class="checkbox-item"
               v-for="pk in [
                 {
-                  value: 'pageupdown',
+                  value: PairGroup.PageUpDown,
                   label: 'PgUp / PgDn',
                   tip: '上翻页/下翻页',
                 },
-                { value: 'minus_equal', label: '- / =', tip: '减号/等号' },
-                { value: 'brackets', label: '[ / ]', tip: '左方括号/右方括号' },
+                { value: PairGroup.MinusEqual, label: '- / =', tip: '减号/等号' },
+                { value: PairGroup.Brackets, label: '[ / ]', tip: '左方括号/右方括号' },
                 {
-                  value: 'shift_tab',
+                  value: PairGroup.ShiftTab,
                   label: 'Shift+Tab / Tab',
                   tip: 'Shift+Tab键/Tab键',
                 },
@@ -233,9 +233,9 @@
             <label
               class="checkbox-item"
               v-for="sc in [
-                { value: 'comma_period', label: ', / .', tip: '逗号/句号' },
-                { value: 'minus_equal', label: '- / =', tip: '减号/等号' },
-                { value: 'brackets', label: '[ / ]', tip: '左方括号/右方括号' },
+                { value: PairGroup.CommaPeriod, label: ', / .', tip: '逗号/句号' },
+                { value: PairGroup.MinusEqual, label: '- / =', tip: '减号/等号' },
+                { value: PairGroup.Brackets, label: '[ / ]', tip: '左方括号/右方括号' },
               ]"
               :key="sc.value"
               :title="sc.tip"
@@ -276,6 +276,7 @@ import { watch, computed } from "vue";
 import type { Config, HotkeyConfig } from "../api/settings";
 import { getDefaultConfig } from "../api/settings";
 import HotkeyComposer from "../components/HotkeyComposer.vue";
+import { Key, PairGroup } from "@/lib/enums";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -407,14 +408,14 @@ function checkConflicts() {
 
 function getGroupKeys(group: string): string[] {
   switch (group) {
-    case "semicolon_quote":
-      return ["semicolon", "quote"];
-    case "comma_period":
-      return ["comma", "period"];
-    case "lrshift":
-      return ["lshift", "rshift"];
-    case "lrctrl":
-      return ["lctrl", "rctrl"];
+    case PairGroup.SemicolonQuote:
+      return [Key.Semicolon, Key.Quote];
+    case PairGroup.CommaPeriod:
+      return [Key.Comma, Key.Period];
+    case PairGroup.LRShift:
+      return [Key.LShift, Key.RShift];
+    case PairGroup.LRCtrl:
+      return [Key.LCtrl, Key.RCtrl];
     default:
       return [];
   }
@@ -422,15 +423,15 @@ function getGroupKeys(group: string): string[] {
 
 function getKeyLabel(key: string): string {
   const labels: Record<string, string> = {
-    lshift: "左Shift",
-    rshift: "右Shift",
-    lctrl: "左Ctrl",
-    rctrl: "右Ctrl",
-    capslock: "CapsLock",
-    semicolon: ";",
-    quote: "'",
-    comma: ",",
-    period: ".",
+    [Key.LShift]: "左Shift",
+    [Key.RShift]: "右Shift",
+    [Key.LCtrl]: "左Ctrl",
+    [Key.RCtrl]: "右Ctrl",
+    [Key.CapsLock]: "CapsLock",
+    [Key.Semicolon]: ";",
+    [Key.Quote]: "'",
+    [Key.Comma]: ",",
+    [Key.Period]: ".",
   };
   return labels[key] || key;
 }
@@ -449,17 +450,17 @@ function toggleSelectKeyGroup(value: string) {
   toggleArrayValue(props.formData.input.select_key_groups, value);
   // 二三候选键 comma_period 与以词定字 comma_period 互斥
   if (
-    value === "comma_period" &&
-    props.formData.input.select_key_groups.includes("comma_period")
+    value === PairGroup.CommaPeriod &&
+    props.formData.input.select_key_groups.includes(PairGroup.CommaPeriod)
   ) {
-    removeFromArray(props.formData.input.select_char_keys, "comma_period");
+    removeFromArray(props.formData.input.select_char_keys, PairGroup.CommaPeriod);
   }
 }
 
 function toggleHighlightKey(value: string) {
   toggleArrayValue(props.formData.input.highlight_keys, value);
-  if (value === "tab" && props.formData.input.highlight_keys.includes("tab")) {
-    const idx = props.formData.input.page_keys.indexOf("shift_tab");
+  if (value === PairGroup.Tab && props.formData.input.highlight_keys.includes(PairGroup.Tab)) {
+    const idx = props.formData.input.page_keys.indexOf(PairGroup.ShiftTab);
     if (idx >= 0) {
       props.formData.input.page_keys.splice(idx, 1);
     }
@@ -469,17 +470,17 @@ function toggleHighlightKey(value: string) {
 function togglePageKey(value: string) {
   toggleArrayValue(props.formData.input.page_keys, value);
   if (
-    value === "shift_tab" &&
-    props.formData.input.page_keys.includes("shift_tab")
+    value === PairGroup.ShiftTab &&
+    props.formData.input.page_keys.includes(PairGroup.ShiftTab)
   ) {
-    const idx = props.formData.input.highlight_keys.indexOf("tab");
+    const idx = props.formData.input.highlight_keys.indexOf(PairGroup.Tab);
     if (idx >= 0) {
       props.formData.input.highlight_keys.splice(idx, 1);
     }
   }
   // 翻页键与以词定字互斥: minus_equal / brackets
   if (
-    (value === "minus_equal" || value === "brackets") &&
+    (value === PairGroup.MinusEqual || value === PairGroup.Brackets) &&
     props.formData.input.page_keys.includes(value)
   ) {
     removeFromArray(props.formData.input.select_char_keys, value);
@@ -494,15 +495,15 @@ function toggleSelectCharKey(value: string) {
     return;
   }
   // 启用以词定字时，自动移除冲突的按键绑定
-  if (value === "comma_period") {
+  if (value === PairGroup.CommaPeriod) {
     // 与二三候选键 comma_period 冲突
-    removeFromArray(props.formData.input.select_key_groups, "comma_period");
-  } else if (value === "minus_equal") {
+    removeFromArray(props.formData.input.select_key_groups, PairGroup.CommaPeriod);
+  } else if (value === PairGroup.MinusEqual) {
     // 与翻页键 minus_equal 冲突
-    removeFromArray(props.formData.input.page_keys, "minus_equal");
-  } else if (value === "brackets") {
+    removeFromArray(props.formData.input.page_keys, PairGroup.MinusEqual);
+  } else if (value === PairGroup.Brackets) {
     // 与翻页键 brackets 冲突
-    removeFromArray(props.formData.input.page_keys, "brackets");
+    removeFromArray(props.formData.input.page_keys, PairGroup.Brackets);
   }
   checkConflicts();
 }

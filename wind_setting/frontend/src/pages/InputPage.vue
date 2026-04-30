@@ -183,14 +183,14 @@
         <div class="setting-control">
           <Select
             :model-value="formData.input.enter_behavior"
-            @update:model-value="formData.input.enter_behavior = $event"
+            @update:model-value="formData.input.enter_behavior = $event as EnterBehaviorValue"
           >
             <SelectTrigger class="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="commit">上屏编码</SelectItem>
-              <SelectItem value="clear">清空编码</SelectItem>
+              <SelectItem :value="EnterBehavior.Commit">上屏编码</SelectItem>
+              <SelectItem :value="EnterBehavior.Clear">清空编码</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -204,15 +204,15 @@
           <Select
             :model-value="formData.input.space_on_empty_behavior"
             @update:model-value="
-              formData.input.space_on_empty_behavior = $event
+              formData.input.space_on_empty_behavior = $event as SpaceOnEmptyBehaviorValue
             "
           >
             <SelectTrigger class="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="commit">上屏编码</SelectItem>
-              <SelectItem value="clear">清空编码</SelectItem>
+              <SelectItem :value="SpaceOnEmptyBehavior.Commit">上屏编码</SelectItem>
+              <SelectItem :value="SpaceOnEmptyBehavior.Clear">清空编码</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -226,15 +226,15 @@
         </div>
         <div class="setting-control">
           <Select
-            :model-value="formData.input.numpad_behavior || 'direct'"
-            @update:model-value="formData.input.numpad_behavior = $event"
+            :model-value="formData.input.numpad_behavior || NumpadBehavior.Direct"
+            @update:model-value="formData.input.numpad_behavior = $event as NumpadBehaviorValue"
           >
             <SelectTrigger class="w-[200px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="direct">直接输入数字</SelectItem>
-              <SelectItem value="follow_main">同主键盘区数字</SelectItem>
+              <SelectItem :value="NumpadBehavior.Direct">直接输入数字</SelectItem>
+              <SelectItem :value="NumpadBehavior.FollowMain">同主键盘区数字</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -253,16 +253,16 @@
           <Select
             :model-value="formData.input.overflow_behavior.number_key"
             @update:model-value="
-              formData.input.overflow_behavior.number_key = $event
+              formData.input.overflow_behavior.number_key = $event as OverflowBehaviorValue
             "
           >
             <SelectTrigger class="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="ignore">不起作用</SelectItem>
-              <SelectItem value="commit">候选上屏</SelectItem>
-              <SelectItem value="commit_and_input">顶码上屏</SelectItem>
+              <SelectItem :value="OverflowBehavior.Ignore">不起作用</SelectItem>
+              <SelectItem :value="OverflowBehavior.Commit">候选上屏</SelectItem>
+              <SelectItem :value="OverflowBehavior.CommitAndInput">顶码上屏</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -276,16 +276,16 @@
           <Select
             :model-value="formData.input.overflow_behavior.select_key"
             @update:model-value="
-              formData.input.overflow_behavior.select_key = $event
+              formData.input.overflow_behavior.select_key = $event as OverflowBehaviorValue
             "
           >
             <SelectTrigger class="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="ignore">不起作用</SelectItem>
-              <SelectItem value="commit">候选上屏</SelectItem>
-              <SelectItem value="commit_and_input">顶码上屏</SelectItem>
+              <SelectItem :value="OverflowBehavior.Ignore">不起作用</SelectItem>
+              <SelectItem :value="OverflowBehavior.Commit">候选上屏</SelectItem>
+              <SelectItem :value="OverflowBehavior.CommitAndInput">顶码上屏</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -299,16 +299,16 @@
           <Select
             :model-value="formData.input.overflow_behavior.select_char_key"
             @update:model-value="
-              formData.input.overflow_behavior.select_char_key = $event
+              formData.input.overflow_behavior.select_char_key = $event as OverflowBehaviorValue
             "
           >
             <SelectTrigger class="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="ignore">不起作用</SelectItem>
-              <SelectItem value="commit">候选上屏</SelectItem>
-              <SelectItem value="commit_and_input">顶码上屏</SelectItem>
+              <SelectItem :value="OverflowBehavior.Ignore">不起作用</SelectItem>
+              <SelectItem :value="OverflowBehavior.Commit">候选上屏</SelectItem>
+              <SelectItem :value="OverflowBehavior.CommitAndInput">顶码上屏</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -480,18 +480,18 @@
         <div class="setting-control">
           <Select
             :model-value="formData.input.pinyin_separator"
-            @update:model-value="formData.input.pinyin_separator = $event"
+            @update:model-value="formData.input.pinyin_separator = $event as PinyinSeparatorModeValue"
           >
             <SelectTrigger class="w-[280px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="auto"
+              <SelectItem :value="PinyinSeparatorMode.Auto"
                 >自动（' 被选择键占用时改用 `）</SelectItem
               >
-              <SelectItem value="quote">单引号 ( ' )</SelectItem>
-              <SelectItem value="backtick">反引号 ( ` )</SelectItem>
-              <SelectItem value="none">不使用</SelectItem>
+              <SelectItem :value="PinyinSeparatorMode.Quote">单引号 ( ' )</SelectItem>
+              <SelectItem :value="PinyinSeparatorMode.Backtick">反引号 ( ` )</SelectItem>
+              <SelectItem :value="PinyinSeparatorMode.None">不使用</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -513,7 +513,7 @@
           />
         </div>
         <p
-          v-if="formData.input.temp_pinyin.trigger_keys.includes('z')"
+          v-if="formData.input.temp_pinyin.trigger_keys.includes(Key.Z)"
           class="setting-item-warning"
         >
           ⚠ z 键启用后，z 开头的编码将无法输入
@@ -536,15 +536,15 @@
           <Select
             :model-value="formData.input.shift_temp_english.shift_behavior"
             @update:model-value="
-              formData.input.shift_temp_english.shift_behavior = $event
+              formData.input.shift_temp_english.shift_behavior = $event as ShiftBehaviorValue
             "
           >
             <SelectTrigger class="w-[240px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="temp_english">进入临时英文模式</SelectItem>
-              <SelectItem value="direct_commit">直接上屏大写字母</SelectItem>
+              <SelectItem :value="ShiftBehavior.TempEnglish">进入临时英文模式</SelectItem>
+              <SelectItem :value="ShiftBehavior.DirectCommit">直接上屏大写字母</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -688,6 +688,23 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from "vue";
 import type { Config } from "../api/settings";
+import {
+  EnterBehavior,
+  SpaceOnEmptyBehavior,
+  OverflowBehavior,
+  FilterMode,
+  PinyinSeparatorMode,
+  NumpadBehavior,
+  ShiftBehavior,
+  Key,
+  type EnterBehaviorValue,
+  type SpaceOnEmptyBehaviorValue,
+  type OverflowBehaviorValue,
+  type FilterModeValue,
+  type PinyinSeparatorModeValue,
+  type NumpadBehaviorValue,
+  type ShiftBehaviorValue,
+} from "@/lib/enums";
 import { Switch } from "@/components/ui/switch";
 import TriggerKeySelect from "@/components/TriggerKeySelect.vue";
 import { Button } from "@/components/ui/button";
@@ -1042,20 +1059,25 @@ const tempEnglishConflictMsg = computed(() => {
   return msgs.length > 0 ? msgs.join("；") : "";
 });
 
-const filterModeOptions = [
+const filterModeOptions: ReadonlyArray<{
+  value: FilterModeValue;
+  label: string;
+  desc: string;
+  tag?: string;
+}> = [
   {
-    value: "smart",
+    value: FilterMode.Smart,
     label: "智能模式",
     desc: "优先常用字，无结果时自动扩展到全部字符",
     tag: "推荐",
   },
   {
-    value: "general",
+    value: FilterMode.General,
     label: "仅常用字",
     desc: "只显示通用规范汉字表中的常用汉字",
   },
   {
-    value: "gb18030",
+    value: FilterMode.GB18030,
     label: "全部字符",
     desc: "不限制字符范围，包含生僻字",
   },
@@ -1069,7 +1091,7 @@ const currentFilterOption = computed(
 );
 
 function selectFilterMode(value: string) {
-  props.formData.input.filter_mode = value;
+  props.formData.input.filter_mode = value as FilterModeValue;
 }
 </script>
 
