@@ -114,6 +114,7 @@ public:
     // Input mode control
     void ToggleInputMode();
     void SetInputMode(BOOL bChineseMode);  // Set mode from service response (no IPC)
+    void HandleCtrlSpaceToggle();          // Handle Ctrl+Space internally (bypasses system compartment toggle)
     BOOL IsChineseMode() { return _bChineseMode; }
     BOOL IsFullWidth() { return _bFullWidth; }
     BOOL IsKeyboardDisabled() { return _bKeyboardDisabled; }

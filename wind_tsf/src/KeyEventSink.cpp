@@ -291,6 +291,20 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         return S_OK;
     }
 
+    // Intercept Ctrl+Space before the system can toggle the OPENCLOSE compartment.
+    // If we let the system handle it, it sets compartment=0, we re-open to 1, then the
+    // system's internal toggle state desyncs: next press tries to set 1 (already 1) ->
+    // no notification -> every-other-press bug. By eating it here, the compartment stays
+    // at 1 permanently and we handle the toggle ourselves in OnKeyDown.
+    if (wParam == VK_SPACE && (modifiers & KEYMOD_CTRL) && !(modifiers & (KEYMOD_ALT | KEYMOD_SHIFT)))
+    {
+        *pfEaten = TRUE;
+        _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::None,
+                        _pTextService->IsChineseMode(), _pTextService->HasActiveComposition(), _hasCandidates,
+                        _pTextService->HasActiveComposition() || _hasCandidates, TRUE, L"ctrl_space_intercept");
+        return S_OK;
+    }
+
     // Any non-toggle-mode key cancels pending toggle.
     // IMPORTANT: Must clear here because OnKeyDown may NOT be called
     // if this key is not eaten (e.g., Shift+Enter in English mode).
@@ -677,6 +691,18 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::None,
                         _pTextService->IsChineseMode(), _pTextService->HasActiveComposition(), _hasCandidates,
                         _pTextService->HasActiveComposition() || _hasCandidates, FALSE, L"context_readonly");
+        return S_OK;
+    }
+
+    // Ctrl+Space: handle mode toggle ourselves to keep compartment stable.
+    // OnTestKeyDown already ate this key, so we own it completely here.
+    if (wParam == VK_SPACE && (modifiers & KEYMOD_CTRL) && !(modifiers & (KEYMOD_ALT | KEYMOD_SHIFT)))
+    {
+        _pTextService->HandleCtrlSpaceToggle();
+        *pfEaten = TRUE;
+        _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::None,
+                        _pTextService->IsChineseMode(), _pTextService->HasActiveComposition(), _hasCandidates,
+                        _pTextService->HasActiveComposition() || _hasCandidates, TRUE, L"ctrl_space_toggle");
         return S_OK;
     }
 
