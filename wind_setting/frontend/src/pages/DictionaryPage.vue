@@ -359,7 +359,6 @@ async function reloadCurrentPanel() {
 // ===== 重置/删除 =====
 async function handleResetCurrentSchema() {
   const name = selectedSchemaName.value;
-  await new Promise((r) => setTimeout(r, 100));
   if (
     !(await confirm(
       `确定重置「${name}」的所有用户数据吗？\n\n将清除：用户词库、临时词库、候选调整、词频数据\n\n此操作不可恢复！`,
@@ -377,7 +376,6 @@ async function handleResetCurrentSchema() {
 }
 
 async function handleResetAllSchemas() {
-  await new Promise((r) => setTimeout(r, 100));
   if (
     !(await confirm(
       "确定重置所有方案的用户数据吗？\n\n将清除所有方案的：用户词库、临时词库、候选调整、词频数据\n\n此操作不可恢复！",
@@ -396,7 +394,6 @@ async function handleResetAllSchemas() {
 
 async function handleDeleteOrphanedSchema() {
   const name = selectedSchemaName.value;
-  await new Promise((r) => setTimeout(r, 100));
   if (!(await confirm(`确定删除「${name}」的残留数据吗？\n\n此操作不可恢复！`)))
     return;
   try {

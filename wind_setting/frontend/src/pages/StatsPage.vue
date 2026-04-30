@@ -13,24 +13,13 @@ import {
 } from "@/components/ui/select";
 import { provideToast } from "../composables/useToast";
 import { useConfirm } from "../composables/useConfirm";
-import {
-  AlertDialog,
-  AlertDialogContent,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogCancel,
-  AlertDialogAction,
-} from "../components/ui/alert-dialog";
 
 defineProps<{
   isWailsEnv: boolean;
 }>();
 
 const { toast } = provideToast();
-const { confirmVisible, confirmMessage, confirm, handleConfirm, handleCancel } =
-  useConfirm();
+const { confirm } = useConfirm();
 
 const loading = ref(true);
 const summary = ref<StatsSummary | null>(null);
@@ -329,10 +318,7 @@ async function loadData() {
     const today = new Date();
     const from = new Date(today);
     from.setDate(from.getDate() - 180);
-    const days = await wailsApi.getDailyStats(
-      dateKey(from),
-      dateKey(today),
-    );
+    const days = await wailsApi.getDailyStats(dateKey(from), dateKey(today));
     heatmapData.value = days || [];
   } catch (e) {
     console.error("加载统计数据失败", e);
@@ -380,7 +366,9 @@ async function handleClearStats() {
 
 async function handleClearOldStats() {
   const days = parseInt(clearBeforeDays.value);
-  const ok = await confirm(`确定要清理 ${days} 天前的统计数据吗？此操作不可恢复。`);
+  const ok = await confirm(
+    `确定要清理 ${days} 天前的统计数据吗？此操作不可恢复。`,
+  );
   if (!ok) return;
   try {
     const result = await wailsApi.clearStatsBefore(days);
@@ -705,20 +693,6 @@ onMounted(loadData);
         {{ tooltip.text }}
       </div>
     </Teleport>
-
-    <!-- 确认对话框 -->
-    <AlertDialog :open="confirmVisible">
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>确认</AlertDialogTitle>
-          <AlertDialogDescription>{{ confirmMessage }}</AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel @click="handleCancel">取消</AlertDialogCancel>
-          <AlertDialogAction @click="handleConfirm">确定</AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
   </section>
 </template>
 
