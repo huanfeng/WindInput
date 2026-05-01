@@ -195,6 +195,7 @@ type Coordinator struct {
 	candidateLimit    int    // 当前加载上限（0=无限制）
 	candidateInput    string // 加载时的 inputBuffer 快照
 	hasMoreCandidates bool   // 是否还有更多候选未加载
+	pendingFirstKey   bool   // 下一次 updateCandidatesEx 视为首键（由 handleAlphaKey 设置）
 
 	// 光标位置与自适应检测
 	caretState

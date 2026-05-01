@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
@@ -160,6 +161,28 @@ type ConvertResult struct {
 	IsEmpty      bool   // 是否空码
 	ShouldClear  bool   // 是否应该清空
 	ToEnglish    bool   // 是否转为英文
+
+	// 性能埋点（详见 engine.EngineTiming，由 ConvertEx 各 Phase 填充）
+	Timing *engineTiming
+}
+
+// engineTiming 与 engine.EngineTiming 对齐（codetable 包定义本地副本以避免反向依赖）
+type engineTiming struct {
+	Convert time.Duration
+	Exact   time.Duration
+	Prefix  time.Duration
+	Weight  time.Duration
+	Sort    time.Duration
+	Shadow  time.Duration
+	Filter  time.Duration
+}
+
+// TimingFields 暴露 timing 字段给上层（manager 用于回填到 engine.EngineTiming）。
+func (t *engineTiming) TimingFields() (convert, exact, prefix, weight, sortDur, shadow, filter time.Duration) {
+	if t == nil {
+		return
+	}
+	return t.Convert, t.Exact, t.Prefix, t.Weight, t.Sort, t.Shadow, t.Filter
 }
 
 // Convert 转换输入为候选词
@@ -302,6 +325,10 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 // ConvertEx 扩展转换，返回更多信息
 func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	result := &ConvertResult{}
+	timing := &engineTiming{}
+	result.Timing = timing
+	convertStart := time.Now()
+	defer func() { timing.Convert = time.Since(convertStart) }()
 
 	if input == "" {
 		return result
@@ -311,6 +338,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	inputLen := len(input)
 
 	// ========== Phase 1: 收集精确匹配 ==========
+	phaseStart := time.Now()
 	exactCandidates := make([]candidate.Candidate, 0, 32)
 
 	if e.dictManager != nil {
@@ -325,8 +353,10 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	if e.codeTable != nil && e.dictManager == nil {
 		exactCandidates = append(exactCandidates, e.codeTable.Lookup(input)...)
 	}
+	timing.Exact = time.Since(phaseStart)
 
 	// ========== Phase 2: 收集前缀匹配 ==========
+	phaseStart = time.Now()
 	prefixCandidates := make([]candidate.Candidate, 0, 64)
 	prefixEnabled := !e.config.SingleCodeInput && e.config.PrefixMode != "none" && inputLen >= 1 && inputLen < e.config.MaxCodeLength
 	if prefixEnabled {
@@ -352,10 +382,12 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 			}
 		}
 	}
+	timing.Prefix = time.Since(phaseStart)
 
 	// ========== Phase 3: 处理前缀候选（code hint + 统一降权）==========
 	// 前缀候选整体排在精确匹配之后，统一降权而不按剩余码长分层。
 	// 码表类输入法中编码长度不代表「接近完成」，分层会覆盖词库原始排序信号。
+	phaseStart = time.Now()
 	weightMode := e.resolveWeightMode()
 	if weightMode == "inner_order" {
 		reorderPrefixForInnerOrder(prefixCandidates)
@@ -394,6 +426,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		}
 		prefixCandidates = append(prefixCandidates, completionCandidates...)
 	}
+	timing.Weight = time.Since(phaseStart)
 
 	// ========== Phase 4: 合并 + 去重 + 字符集偏好特权 ==========
 	allCandidates := append(exactCandidates, prefixCandidates...)
@@ -412,6 +445,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	}
 
 	// ========== Phase 5: 排序 + 过滤 + 截断 ==========
+	phaseStart = time.Now()
 	// 排序前记住精确匹配的原始 top-N（用于 ProtectTopN 锁定）
 	protectN := 0
 	if e.config != nil {
@@ -440,17 +474,21 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	if len(protectedCandidates) > 0 && len(allCandidates) > 0 {
 		allCandidates = applyProtectTopN(allCandidates, protectedCandidates)
 	}
+	timing.Sort = time.Since(phaseStart)
 
 	// ========== Phase 6: Shadow 拦截器（pin + delete） ==========
 	// 在引擎最终排序后统一应用，不修改 weight，只做呈现层位置覆盖和过滤。
 	// 混输模式下由外层 MixedEngine 统一应用，此处跳过避免干扰。
+	phaseStart = time.Now()
 	if !e.config.SkipShadow && e.dictManager != nil {
 		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			allCandidates = dict.ApplyShadowPins(allCandidates, rules)
 		}
 	}
+	timing.Shadow = time.Since(phaseStart)
 
+	phaseStart = time.Now()
 	filterMode := "smart"
 	if e.config != nil && e.config.FilterMode != "" {
 		filterMode = e.config.FilterMode
@@ -460,6 +498,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	if maxCandidates > 0 && len(allCandidates) > maxCandidates {
 		allCandidates = allCandidates[:maxCandidates]
 	}
+	timing.Filter = time.Since(phaseStart)
 
 	result.Candidates = allCandidates
 

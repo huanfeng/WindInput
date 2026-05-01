@@ -63,6 +63,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	_ = originalInput // 在后处理中使用
 
 	convertStart := time.Now()
+	timing := &engineTiming{}
 
 	// 去除显式分隔符，得到纯拼音字符串用于词库查询
 	queryInput := strings.ReplaceAll(input, "'", "")
@@ -281,6 +282,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 			}
 		}
 	}
+	timing.Exact = time.Since(convertStart) // 步骤 0~1b：精确匹配 + viterbi + 多切分
 
 	// 步骤 3 已移除：原逻辑对完整音节做 LookupPrefix，会产生超出输入音节的候选
 	// （如 "ruguo" → "如果爱"），不符合主流拼音输入法行为。
@@ -515,6 +517,8 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 	}
 
+	timing.Prefix = time.Since(convertStart) - timing.Exact // 步骤 2~6：子词组/单字/前缀/简拼
+
 	// 4. 转换为列表
 	result.Candidates = make([]candidate.Candidate, 0, len(candidatesMap))
 	for _, cand := range candidatesMap {
@@ -522,6 +526,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	}
 
 	// 5. 排序（根据排序模式）
+	sortStart := time.Now()
 	e.sortCandidates(result.Candidates, candidateOrder, syllableCount)
 
 	// 5.5 应用 Shadow 规则（置顶/删除/调权）
@@ -530,8 +535,10 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	if e.config == nil || !e.config.SkipShadow {
 		result.Candidates = e.applyShadowRules(input, result.Candidates)
 	}
+	timing.Sort = time.Since(sortStart)
 
 	// 6. 应用过滤
+	filterStart := time.Now()
 	if !skipFilter {
 		filterMode := "smart"
 		if e.config != nil && e.config.FilterMode != "" {
@@ -539,6 +546,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		}
 		result.Candidates = candidate.FilterCandidates(result.Candidates, filterMode)
 	}
+	timing.Filter = time.Since(filterStart)
 
 	// 7. 检查是否空码
 	if len(result.Candidates) == 0 {
@@ -562,7 +570,9 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 		e.shuangpinPostprocess(result, spResult, originalInput)
 	}
 
-	e.logger.Debug("final", "candidates", len(result.Candidates), "isEmpty", result.IsEmpty, "elapsed", time.Since(convertStart))
+	timing.Convert = time.Since(convertStart)
+	result.Timing = timing
+	e.logger.Debug("final", "candidates", len(result.Candidates), "isEmpty", result.IsEmpty, "elapsed", timing.Convert)
 
 	return result
 }

@@ -17,7 +17,7 @@
 | `dict_service.go` | `DictService`：词库 RPC 实现（Search、SearchByCode、Add、Remove、Update、BatchEncode、GetStats 等） |
 | `shadow_service.go` | `ShadowService`：Shadow pin/delete 规则 RPC 实现 |
 | `phrase_service.go` | `PhraseService`：短语管理 RPC 实现 |
-| `system_service.go` | `SystemService`：系统操作 RPC 实现（Ping、GetStatus、ReloadConfig、ReloadShadow、ReloadUserDict、ListSchemas、DeleteSchema 等） |
+| `system_service.go` | `SystemService`：系统操作 RPC 实现（Ping、GetStatus、ReloadConfig、ReloadShadow、ReloadUserDict、ListSchemas、DeleteSchema、DumpPerf、GetPerfStats 等） |
 | `server_test.go` | Server 集成测试（协议、方法分发、事件广播） |
 
 ## For AI Agents

@@ -365,6 +365,20 @@ func (c *Client) SystemResume(newDataDir string) error {
 	return c.call("System.Resume", args, &reply)
 }
 
+// SystemDumpPerf 导出按键链路性能样本到 JSONL 文件
+func (c *Client) SystemDumpPerf(path string, clear bool) (*SystemDumpPerfReply, error) {
+	var reply SystemDumpPerfReply
+	err := c.call("System.DumpPerf", &SystemDumpPerfArgs{Path: path, Clear: clear}, &reply)
+	return &reply, err
+}
+
+// SystemGetPerfStats 获取当前性能采样统计摘要（不落盘）
+func (c *Client) SystemGetPerfStats() (*SystemPerfStatsReply, error) {
+	var reply SystemPerfStatsReply
+	err := c.call("System.GetPerfStats", &Empty{}, &reply)
+	return &reply, err
+}
+
 // ── Phrase 方法 ──
 
 // PhraseList 获取所有短语

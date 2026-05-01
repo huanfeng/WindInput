@@ -64,12 +64,16 @@ func (m *Manager) ConvertEx(input string, maxCandidates int) *ConvertResult {
 			result.HasPartial = mixedResult.HasPartial
 			result.FullPinyinInput = mixedResult.FullPinyinInput
 		}
+		if mixedResult.Timing != nil {
+			c, ex, pf, w, sd, sh, ft := mixedResult.Timing.TimingFields()
+			result.Timing = &EngineTiming{Convert: c, Exact: ex, Prefix: pf, Weight: w, Sort: sd, Shadow: sh, Filter: ft}
+		}
 		return result
 	}
 
 	if codetableEngine, ok := engine.(*codetable.Engine); ok {
 		codetableResult := codetableEngine.ConvertEx(input, maxCandidates)
-		return &ConvertResult{
+		out := &ConvertResult{
 			Candidates:   codetableResult.Candidates,
 			ShouldCommit: codetableResult.ShouldCommit,
 			CommitText:   codetableResult.CommitText,
@@ -77,6 +81,11 @@ func (m *Manager) ConvertEx(input string, maxCandidates int) *ConvertResult {
 			ShouldClear:  codetableResult.ShouldClear,
 			ToEnglish:    codetableResult.ToEnglish,
 		}
+		if codetableResult.Timing != nil {
+			c, ex, pf, w, sd, sh, ft := codetableResult.Timing.TimingFields()
+			out.Timing = &EngineTiming{Convert: c, Exact: ex, Prefix: pf, Weight: w, Sort: sd, Shadow: sh, Filter: ft}
+		}
+		return out
 	}
 
 	if pinyinEngine, ok := engine.(*pinyin.Engine); ok {
@@ -93,6 +102,10 @@ func (m *Manager) ConvertEx(input string, maxCandidates int) *ConvertResult {
 			result.CompletedSyllables = pinyinResult.Composition.CompletedSyllables
 			result.PartialSyllable = pinyinResult.Composition.PartialSyllable
 			result.HasPartial = pinyinResult.Composition.HasPartial()
+		}
+		if pinyinResult.Timing != nil {
+			c, ex, pf, w, sd, sh, ft := pinyinResult.Timing.TimingFields()
+			result.Timing = &EngineTiming{Convert: c, Exact: ex, Prefix: pf, Weight: w, Sort: sd, Shadow: sh, Filter: ft}
 		}
 		return result
 	}

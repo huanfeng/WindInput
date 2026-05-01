@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"time"
+
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/schema"
 )
@@ -60,4 +62,19 @@ type ConvertResult struct {
 	PartialSyllable    string   // 未完成的音节（如 "zh"）
 	HasPartial         bool     // 是否有未完成音节
 	FullPinyinInput    string   // 双拼模式下的全拼字符串（用于 preedit 校验，全拼模式为空）
+
+	// 性能埋点：引擎层各阶段耗时（可选，nil 表示该引擎未填充）
+	Timing *EngineTiming
+}
+
+// EngineTiming 引擎层各阶段细分耗时（与 internal/perf 的同名结构对齐，
+// 此处定义在 engine 包以避免反向依赖）。
+type EngineTiming struct {
+	Convert time.Duration // ConvertEx 总耗时
+	Exact   time.Duration // 精确匹配查询
+	Prefix  time.Duration // 前缀匹配查询
+	Weight  time.Duration // 权重处理
+	Sort    time.Duration // 排序 + ProtectTopN
+	Shadow  time.Duration // Shadow 拦截
+	Filter  time.Duration // 过滤 + 截断
 }

@@ -693,9 +693,11 @@ type SystemDumpPerfArgs struct {
 }
 
 type SystemDumpPerfReply struct {
-	Path    string `json:"path"`
-	Count   int    `json:"count"`
-	Summary string `json:"summary"` // 单行可读统计摘要
+	Path      string `json:"path"`
+	Count     int    `json:"count"`
+	Summary   string `json:"summary"`             // 单行可读统计摘要
+	Content   string `json:"content,omitempty"`   // 完整 JSONL 内容（仅 ReadPerfFile 填充）
+	Cancelled bool   `json:"cancelled,omitempty"` // 用户取消保存对话框
 }
 
 // SystemPerfStatsReply 不落盘，直接返回当前的统计摘要。

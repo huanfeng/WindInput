@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
@@ -40,6 +41,25 @@ func DefaultConfig() *Config {
 	}
 }
 
+// mixedTiming 混输引擎各阶段耗时。
+// 并行子引擎记录墙钟时间，而非内部细分——并行执行时总耗时 ≈ max(码表, 拼音)。
+type mixedTiming struct {
+	Convert   time.Duration // ConvertEx 总耗时
+	Codetable time.Duration // 码表子引擎墙钟
+	Pinyin    time.Duration // 拼音子引擎墙钟
+	Merge     time.Duration // 合并 + 去重 + 排序
+	Shadow    time.Duration // Shadow 规则应用
+}
+
+// TimingFields 暴露 timing 字段给上层（manager 用于回填到 engine.EngineTiming）。
+// 混输引擎将 Codetable→Exact、Pinyin→Prefix 映射，方便前端横向对比。
+func (t *mixedTiming) TimingFields() (convert, exact, prefix, weight, sortDur, shadow, filter time.Duration) {
+	if t == nil {
+		return
+	}
+	return t.Convert, t.Codetable, t.Pinyin, 0, t.Merge, t.Shadow, 0
+}
+
 // ConvertResult 混输转换结果
 type ConvertResult struct {
 	Candidates   []candidate.Candidate
@@ -57,6 +77,9 @@ type ConvertResult struct {
 	HasPartial         bool     // 是否有未完成音节
 	IsPinyinFallback   bool     // 是否为拼音降级模式（>maxCodeLen 时）
 	FullPinyinInput    string   // 双拼模式下的全拼字符串（用于 preedit 校验）
+
+	// 性能埋点（详见 mixedTiming，由 ConvertEx 各阶段填充）
+	Timing *mixedTiming
 }
 
 // Engine 码表拼音混合输入引擎
@@ -236,6 +259,7 @@ func (e *Engine) isPossiblePinyinSequence(prefix string) bool {
 //   - 2~maxCodeLen码：并行查码表+拼音，码表优先
 //   - >maxCodeLen码：码表用前 maxCodeLen 码查询 + 拼音用完整输入查询
 func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
+	convertStart := time.Now()
 	result := &ConvertResult{}
 
 	if input == "" {
@@ -250,19 +274,25 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	if inputLen > e.maxCodeLen {
 		if e.config.PinyinOnlyOverflow {
 			// 超过最大码长：仅查拼音（主流混输行为）
-			return e.convertPinyinOnly(input, maxCandidates)
+			result = e.convertPinyinOnly(input, maxCandidates)
+		} else {
+			// 超过最大码长：码表取前 maxCodeLen 码 + 拼音取完整输入
+			result = e.convertMixedOverflow(input, maxCandidates)
 		}
-		// 超过最大码长：码表取前 maxCodeLen 码 + 拼音取完整输入
-		return e.convertMixedOverflow(input, maxCandidates)
-	}
-
-	if inputLen < e.config.MinPinyinLength {
+	} else if inputLen < e.config.MinPinyinLength {
 		// 低于拼音触发长度：仅查五笔
-		return e.convertCodetableOnly(input, maxCandidates)
+		result = e.convertCodetableOnly(input, maxCandidates)
+	} else {
+		// 2~maxCodeLen码：并行查码表+拼音
+		result = e.convertMixed(input, maxCandidates)
 	}
 
-	// 2~maxCodeLen码：并行查码表+拼音
-	return e.convertMixed(input, maxCandidates)
+	if result.Timing != nil {
+		result.Timing.Convert = time.Since(convertStart)
+	} else {
+		result.Timing = &mixedTiming{Convert: time.Since(convertStart)}
+	}
+	return result
 }
 
 // convertCodetableOnly 仅查码表引擎
@@ -271,7 +301,9 @@ func (e *Engine) convertCodetableOnly(input string, maxCandidates int) *ConvertR
 		return &ConvertResult{IsEmpty: true}
 	}
 
+	ctStart := time.Now()
 	codetableResult := e.codetableEngine.ConvertEx(input, maxCandidates)
+	ctElapsed := time.Since(ctStart)
 
 	// 标记来源
 	for i := range codetableResult.Candidates {
@@ -290,12 +322,14 @@ func (e *Engine) convertCodetableOnly(input string, maxCandidates int) *ConvertR
 	}
 
 	// 应用 Shadow 规则（置顶/删除）
+	shadowStart := time.Now()
 	if e.dictManager != nil {
 		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			candidates = dict.ApplyShadowPins(candidates, rules)
 		}
 	}
+	shadowElapsed := time.Since(shadowStart)
 
 	return &ConvertResult{
 		Candidates:   candidates,
@@ -304,6 +338,7 @@ func (e *Engine) convertCodetableOnly(input string, maxCandidates int) *ConvertR
 		IsEmpty:      codetableResult.IsEmpty,
 		ShouldClear:  codetableResult.ShouldClear,
 		ToEnglish:    codetableResult.ToEnglish,
+		Timing:       &mixedTiming{Codetable: ctElapsed, Shadow: shadowElapsed},
 	}
 }
 
@@ -313,7 +348,9 @@ func (e *Engine) convertPinyinOnly(input string, maxCandidates int) *ConvertResu
 		return &ConvertResult{IsEmpty: true}
 	}
 
+	pyStart := time.Now()
 	pinyinResult := e.pinyinEngine.ConvertEx(input, maxCandidates)
+	pyElapsed := time.Since(pyStart)
 
 	for i := range pinyinResult.Candidates {
 		pinyinResult.Candidates[i].Source = candidate.SourcePinyin
@@ -321,18 +358,21 @@ func (e *Engine) convertPinyinOnly(input string, maxCandidates int) *ConvertResu
 
 	candidates := pinyinResult.Candidates
 
+	shadowStart := time.Now()
 	if e.dictManager != nil {
 		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			candidates = dict.ApplyShadowPins(candidates, rules)
 		}
 	}
+	shadowElapsed := time.Since(shadowStart)
 
 	result := &ConvertResult{
 		Candidates:       candidates,
 		IsEmpty:          pinyinResult.IsEmpty,
 		IsPinyinFallback: true,
 		PreeditDisplay:   pinyinResult.PreeditDisplay,
+		Timing:           &mixedTiming{Pinyin: pyElapsed, Shadow: shadowElapsed},
 	}
 	if pinyinResult.Composition != nil {
 		result.CompletedSyllables = pinyinResult.Composition.CompletedSyllables
@@ -355,6 +395,7 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 	var codetableCandidates []candidate.Candidate
 	var pinyinCandidates []candidate.Candidate
 	var pinyinResult *pinyin.PinyinConvertResult
+	var ctElapsed, pyElapsed time.Duration
 
 	var wg sync.WaitGroup
 
@@ -363,9 +404,11 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			ctStart := time.Now()
 			prefix := input[:e.maxCodeLen]
 			codetableResult := e.codetableEngine.ConvertEx(prefix, maxCandidates)
 			codetableCandidates = codetableResult.Candidates
+			ctElapsed = time.Since(ctStart)
 		}()
 	}
 
@@ -374,8 +417,10 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			pyStart := time.Now()
 			pinyinResult = e.pinyinEngine.ConvertEx(input, maxCandidates)
 			pinyinCandidates = pinyinResult.Candidates
+			pyElapsed = time.Since(pyStart)
 		}()
 	}
 
@@ -398,6 +443,7 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 	}
 
 	// 合并
+	mergeStart := time.Now()
 	merged := make([]candidate.Candidate, 0, len(codetableCandidates)+len(pinyinCandidates))
 	merged = append(merged, codetableCandidates...)
 	merged = append(merged, pinyinCandidates...)
@@ -406,14 +452,17 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 		return candidate.Better(merged[i], merged[j])
 	})
 	merged = dedupByText(merged)
+	mergeElapsed := time.Since(mergeStart)
 
 	// 应用 Shadow 规则
+	shadowStart := time.Now()
 	if e.dictManager != nil {
 		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			merged = dict.ApplyShadowPins(merged, rules)
 		}
 	}
+	shadowElapsed := time.Since(shadowStart)
 
 	if maxCandidates > 0 && len(merged) > maxCandidates {
 		merged = merged[:maxCandidates]
@@ -422,6 +471,7 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 	result := &ConvertResult{
 		Candidates: merged,
 		IsEmpty:    len(merged) == 0,
+		Timing:     &mixedTiming{Codetable: ctElapsed, Pinyin: pyElapsed, Merge: mergeElapsed, Shadow: shadowElapsed},
 	}
 
 	// 如果拼音有完整音节，标记为拼音降级模式（预编辑区显示拼音分词）
@@ -451,6 +501,7 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 	var codetableCandidates []candidate.Candidate
 	var pinyinCandidates []candidate.Candidate
 	var codetableResult *codetable.ConvertResult
+	var ctElapsed, pyElapsed time.Duration
 
 	var wg sync.WaitGroup
 
@@ -459,8 +510,10 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			ctStart := time.Now()
 			codetableResult = e.codetableEngine.ConvertEx(input, maxCandidates)
 			codetableCandidates = codetableResult.Candidates
+			ctElapsed = time.Since(ctStart)
 		}()
 	}
 
@@ -470,9 +523,11 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			pyStart := time.Now()
 			pinyinResult := e.pinyinEngine.ConvertEx(input, maxCandidates)
 			pinyinCandidates = pinyinResult.Candidates
 			pinyinHasFullSyllable = pinyinResult.HasFullSyllable
+			pyElapsed = time.Since(pyStart)
 		}()
 	}
 
@@ -531,6 +586,7 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 	}
 
 	// 合并：码表在前，拼音在后，英文在最后
+	mergeStart := time.Now()
 	merged := make([]candidate.Candidate, 0, len(codetableCandidates)+len(pinyinCandidates)+len(englishCandidates))
 	merged = append(merged, codetableCandidates...)
 	merged = append(merged, pinyinCandidates...)
@@ -543,16 +599,19 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 
 	// 按文本去重（保留先出现的，即权重高的）
 	merged = dedupByText(merged)
+	mergeElapsed := time.Since(mergeStart)
 
 	// 统一应用 Shadow 规则（置顶/删除）
 	// 子引擎内部各自应用了 Shadow，但合并+重排序后位置被打乱，需要在最终列表上重新应用。
 	// ApplyShadowPins 是幂等的：先移除 deleted 词，再按 pin position 分配槽位。
+	shadowStart := time.Now()
 	if e.dictManager != nil {
 		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
 			rules := shadowLayer.GetShadowRules(input)
 			merged = dict.ApplyShadowPins(merged, rules)
 		}
 	}
+	shadowElapsed := time.Since(shadowStart)
 
 	// 截断
 	if maxCandidates > 0 && len(merged) > maxCandidates {
@@ -563,6 +622,7 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 	result := &ConvertResult{
 		Candidates: merged,
 		IsEmpty:    len(merged) == 0,
+		Timing:     &mixedTiming{Codetable: ctElapsed, Pinyin: pyElapsed, Merge: mergeElapsed, Shadow: shadowElapsed},
 	}
 
 	// 继承码表侧的自动上屏状态

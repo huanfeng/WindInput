@@ -1,6 +1,30 @@
 package pinyin
 
-import "github.com/huanfeng/wind_input/internal/candidate"
+import (
+	"time"
+
+	"github.com/huanfeng/wind_input/internal/candidate"
+)
+
+// engineTiming 拼音引擎各阶段细分耗时（与 engine.EngineTiming 对齐，
+// 此处定义在 pinyin 包以避免反向依赖）。
+type engineTiming struct {
+	Convert time.Duration // convertCore 总耗时
+	Exact   time.Duration // 步骤 0+0b+1+1b：精确匹配与 viterbi
+	Prefix  time.Duration // 步骤 2+4+4a+4b+5+6：子词组/单字/前缀/简拼
+	Weight  time.Duration // 未使用（拼音无权重处理阶段）
+	Sort    time.Duration // 排序
+	Shadow  time.Duration // Shadow 拦截
+	Filter  time.Duration // 过滤 + 截断
+}
+
+// TimingFields 暴露 timing 字段给上层（manager 用于回填到 engine.EngineTiming）。
+func (t *engineTiming) TimingFields() (convert, exact, prefix, weight, sortDur, shadow, filter time.Duration) {
+	if t == nil {
+		return
+	}
+	return t.Convert, t.Exact, t.Prefix, t.Weight, t.Sort, t.Shadow, t.Filter
+}
 
 // ============================================================
 // 音节类型与解析结果
@@ -306,4 +330,7 @@ type PinyinConvertResult struct {
 
 	// 双拼模式下的全拼字符串（用于 preedit 校验，全拼模式为空）
 	FullPinyinInput string
+
+	// 性能埋点：引擎层各阶段耗时（可选，nil 表示未填充）
+	Timing *engineTiming
 }

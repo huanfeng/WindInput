@@ -158,6 +158,7 @@ export interface PunctCustomConfig {
 // 高级配置
 export interface AdvancedConfig {
   log_level: string;
+  perf_sampling: boolean | null; // *bool: null 表示未设置（视为 false）
 }
 
 export interface TSFLogConfig {
@@ -398,6 +399,7 @@ export function getDefaultConfig(): Config {
     },
     advanced: {
       log_level: "info",
+      perf_sampling: false,
     },
   };
 }

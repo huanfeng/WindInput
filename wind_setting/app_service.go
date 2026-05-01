@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
@@ -30,6 +31,73 @@ func (a *App) NotifyReload(target string) error {
 // GetServiceStatus 获取服务状态
 func (a *App) GetServiceStatus() (*rpcapi.SystemStatusReply, error) {
 	return a.rpcClient.SystemGetStatus()
+}
+
+// DumpPerf 导出按键链路性能样本到 JSONL 文件
+func (a *App) DumpPerf(path string, clear bool) (*rpcapi.SystemDumpPerfReply, error) {
+	if a.rpcClient == nil {
+		return nil, fmt.Errorf("RPC 客户端未初始化")
+	}
+	return a.rpcClient.SystemDumpPerf(path, clear)
+}
+
+// GetPerfStats 获取当前性能采样统计摘要（不落盘）
+func (a *App) GetPerfStats() (*rpcapi.SystemPerfStatsReply, error) {
+	if a.rpcClient == nil {
+		return nil, fmt.Errorf("RPC 客户端未初始化")
+	}
+	return a.rpcClient.SystemGetPerfStats()
+}
+
+// ReadPerfFile 将性能样本导出到临时文件并读取内容，随后删除临时文件。
+// 返回的 Path 仅用于前端判断数据是否可用。
+func (a *App) ReadPerfFile() (*rpcapi.SystemDumpPerfReply, error) {
+	if a.rpcClient == nil {
+		return nil, fmt.Errorf("RPC 客户端未初始化")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "windinput-perf-*")
+	if err != nil {
+		return nil, fmt.Errorf("创建临时目录失败: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpPath := filepath.Join(tmpDir, "perf.jsonl")
+	reply, err := a.rpcClient.SystemDumpPerf(tmpPath, false)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取临时文件失败: %w", err)
+	}
+	reply.Content = string(data)
+	return reply, nil
+}
+
+// ExportPerfData 弹出系统保存对话框，让用户选择路径后导出性能样本。
+func (a *App) ExportPerfData() (*rpcapi.SystemDumpPerfReply, error) {
+	if a.rpcClient == nil {
+		return nil, fmt.Errorf("RPC 客户端未初始化")
+	}
+
+	defaultFilename := fmt.Sprintf("perf_%s.jsonl", time.Now().Format("20060102_150405"))
+	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		Title:           "导出性能诊断数据",
+		DefaultFilename: defaultFilename,
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "JSONL 文件 (*.jsonl)", Pattern: "*.jsonl"},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("打开保存对话框失败: %w", err)
+	}
+	if path == "" {
+		return &rpcapi.SystemDumpPerfReply{Cancelled: true}, nil
+	}
+
+	return a.rpcClient.SystemDumpPerf(path, false)
 }
 
 // ResetUserData 重置用户数据（清除用户词库、临时词库、Shadow 规则、词频）

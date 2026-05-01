@@ -256,9 +256,22 @@ type CapsLockBehaviorConfig struct {
 // AdvancedConfig 高级配置
 type AdvancedConfig struct {
 	LogLevel string `yaml:"log_level" json:"log_level"`
+	// PerfSampling 启用按键链路性能采样（默认关闭）。
+	// 开启后会记录每次按键的输入编码、引擎耗时等数据到内存环形缓冲区，
+	// 可通过设置页导出 JSONL 文件用于性能分析。
+	// 注意：采样数据包含用户输入内容，仅建议在排障或性能调优时临时开启。
+	PerfSampling *bool `yaml:"perf_sampling,omitempty" json:"perf_sampling"`
 	// HostRenderProcesses 启用宿主进程代理渲染的进程白名单（进程名，不区分大小写）
 	// 在这些进程中，候选窗口将通过 DLL 内 CreateWindowInBand 创建，以解决 z-order 问题
 	HostRenderProcesses []string `yaml:"host_render_processes,omitempty" json:"host_render_processes,omitempty"`
+}
+
+// IsPerfSampling 返回性能采样是否启用（nil 指针视为 false）
+func (c *AdvancedConfig) IsPerfSampling() bool {
+	if c.PerfSampling == nil {
+		return false
+	}
+	return *c.PerfSampling
 }
 
 // DefaultConfig returns the default configuration

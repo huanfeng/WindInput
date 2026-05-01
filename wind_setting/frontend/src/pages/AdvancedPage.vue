@@ -120,6 +120,83 @@
       </div>
     </div>
 
+    <div class="settings-card">
+      <div class="card-title">性能诊断</div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>按键链路采样</label>
+          <p class="setting-hint">
+            开启后记录每次按键的引擎耗时等数据，用于性能分析
+          </p>
+        </div>
+        <div class="setting-control">
+          <Switch
+            :checked="formData.advanced.perf_sampling ?? false"
+            @update:checked="formData.advanced.perf_sampling = $event"
+          />
+        </div>
+      </div>
+      <div v-if="formData.advanced.perf_sampling" class="setting-item">
+        <div class="setting-info">
+          <label>隐私提示</label>
+          <p class="setting-hint warning-text">
+            采样数据包含用户输入内容（按键编码、候选词等），仅建议在排障或性能调优时临时开启。关闭后不再记录新数据，已有数据可通过导出保留。
+          </p>
+        </div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>采样状态</label>
+          <p class="setting-hint">
+            <template v-if="perfStats">
+              已收集 {{ perfStats.count }}/{{ perfStats.capacity }} 条样本
+            </template>
+            <template v-else>加载中…</template>
+          </p>
+        </div>
+        <div class="setting-control" style="display: flex; gap: 8px">
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="!perfStats || perfStats.count === 0"
+            @click="handleViewPerf"
+          >
+            查看
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="!perfStats || perfStats.count === 0"
+            @click="handleExportPerf"
+          >
+            导出
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="!perfStats || perfStats.count === 0"
+            @click="handleClearPerf"
+          >
+            清空
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <Dialog v-model:open="viewDialogOpen">
+      <DialogContent class="max-w-3xl max-h-[80vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle>性能诊断数据</DialogTitle>
+        </DialogHeader>
+        <pre class="perf-content">{{ viewContent }}</pre>
+        <DialogFooter>
+          <Button variant="outline" size="sm" @click="viewDialogOpen = false"
+            >关闭</Button
+          >
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <DataDirDialog
       :visible="dataDirDialogVisible"
       @update:visible="dataDirDialogVisible = $event"
@@ -132,7 +209,10 @@
 import { computed, ref, onMounted } from "vue";
 import type { Config, TSFLogConfig } from "../api/settings";
 import * as wailsApi from "../api/wails";
+import type { PerfStatsResult } from "../api/wails";
+import { useToast } from "../composables/useToast";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectTrigger,
@@ -140,6 +220,13 @@ import {
   SelectContent,
   SelectItem,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import DataDirDialog from "@/components/DataDirDialog.vue";
 
 const props = defineProps<{
@@ -158,6 +245,56 @@ const logsDirDisplay = ref("%LOCALAPPDATA%\\WindInput\\logs\\");
 const isPortable = ref(false);
 const dataDirDialogVisible = ref(false);
 
+// ── 性能诊断 ──
+const perfStats = ref<PerfStatsResult | null>(null);
+const viewDialogOpen = ref(false);
+const viewContent = ref("");
+const { toast } = useToast();
+
+async function refreshPerfStats() {
+  if (!props.isWailsEnv) return;
+  try {
+    perfStats.value = await wailsApi.getPerfStats();
+  } catch {
+    // 服务未运行时静默忽略
+  }
+}
+
+async function handleViewPerf() {
+  try {
+    const result = await wailsApi.readPerfFile();
+    if (result.count === 0) {
+      toast("暂无性能数据", "error");
+      return;
+    }
+    viewContent.value = result.content;
+    viewDialogOpen.value = true;
+  } catch (e: any) {
+    toast("读取失败: " + (e.message || e), "error");
+  }
+}
+
+async function handleExportPerf() {
+  try {
+    const result = await wailsApi.exportPerfData();
+    if (result.cancelled) return;
+    toast(`已导出 ${result.count} 条样本`);
+    await refreshPerfStats();
+  } catch (e: any) {
+    toast("导出失败: " + (e.message || e), "error");
+  }
+}
+
+async function handleClearPerf() {
+  try {
+    await wailsApi.dumpPerf("", true);
+    toast("已清空性能数据");
+    await refreshPerfStats();
+  } catch (e: any) {
+    toast("清空失败: " + (e.message || e), "error");
+  }
+}
+
 onMounted(async () => {
   if (props.isWailsEnv) {
     try {
@@ -168,6 +305,7 @@ onMounted(async () => {
     } catch (e) {
       console.warn("Failed to get path info:", e);
     }
+    await refreshPerfStats();
   }
 });
 
@@ -193,5 +331,17 @@ const showSensitiveLogWarning = computed(() => {
 <style scoped>
 .warning-text {
   color: hsl(var(--warning));
+}
+.perf-content {
+  font-family: monospace;
+  font-size: 0.8em;
+  line-height: 1.4;
+  overflow: auto;
+  background: hsl(var(--muted));
+  border-radius: 6px;
+  padding: 12px;
+  max-height: 50vh;
+  white-space: pre;
+  word-break: normal;
 }
 </style>

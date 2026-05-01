@@ -795,6 +795,39 @@ export async function getServiceStatus(): Promise<ServiceStatus | null> {
   return App.GetServiceStatus();
 }
 
+// ── 性能诊断 API ──
+
+export interface PerfDumpResult {
+  path: string;
+  count: number;
+  summary: string;
+}
+
+export interface PerfStatsResult {
+  count: number;
+  capacity: number;
+  summary: string;
+}
+
+export async function dumpPerf(
+  path: string = "",
+  clear: boolean = false,
+): Promise<PerfDumpResult> {
+  return App.DumpPerf(path, clear) as unknown as PerfDumpResult;
+}
+
+export async function getPerfStats(): Promise<PerfStatsResult> {
+  return App.GetPerfStats() as unknown as PerfStatsResult;
+}
+
+export async function readPerfFile(): Promise<PerfDumpResult & { content: string }> {
+  return App.ReadPerfFile() as unknown as PerfDumpResult & { content: string };
+}
+
+export async function exportPerfData(): Promise<PerfDumpResult & { cancelled: boolean }> {
+  return App.ExportPerfData() as unknown as PerfDumpResult & { cancelled: boolean };
+}
+
 // 重置用户数据
 export async function resetUserData(schemaID: string = ""): Promise<void> {
   return App.ResetUserData(schemaID);

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/engine"
+	"github.com/huanfeng/wind_input/internal/perf"
 	"github.com/huanfeng/wind_input/internal/store"
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/pkg/config"
@@ -94,6 +96,7 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 
 	// 更新候选词
 	updateStart := time.Now()
+	c.pendingFirstKey = wasComposingEmpty
 	result := c.updateCandidatesEx()
 	updateElapsed := time.Since(updateStart)
 
@@ -178,7 +181,39 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	totalElapsed := time.Since(startTime)
 	c.logger.Debug("handleAlphaKey timing", "total", totalElapsed.String(), "updateCandidates", updateElapsed.String(), "showUI", showElapsed.String())
 
+	c.recordPerfSample(wasComposingEmpty, result, totalElapsed, updateElapsed, showElapsed)
+
 	return c.compositionUpdateResult()
+}
+
+// recordPerfSample 把按键链路细分耗时写入内存环形缓冲（供 perf.ExportJSONL 主动导出）。
+// result 可为 nil（无引擎或空输入），此时仍记录 total/update/show 与 inputLen 用于趋势观察。
+// 仅当配置中 perf_sampling=true 时才实际记录（默认关闭，因采样数据含用户输入内容）。
+func (c *Coordinator) recordPerfSample(firstKey bool, result *engine.ConvertResult, total, update, show time.Duration) {
+	if c.config == nil || !c.config.Advanced.IsPerfSampling() {
+		return
+	}
+	sample := perf.Sample{
+		Time:      time.Now(),
+		Input:     c.inputBuffer,
+		InputLen:  len(c.inputBuffer),
+		FirstKey:  firstKey,
+		CandCount: len(c.candidates),
+		Total:     total,
+		Update:    update,
+		ShowUI:    show,
+	}
+	if c.engineMgr != nil {
+		sample.EngineType = string(c.engineMgr.GetCurrentType())
+	}
+	if result != nil && result.Timing != nil {
+		t := result.Timing
+		sample.Engine = perf.EngineTiming{
+			Convert: t.Convert, Exact: t.Exact, Prefix: t.Prefix,
+			Weight: t.Weight, Sort: t.Sort, Shadow: t.Shadow, Filter: t.Filter,
+		}
+	}
+	perf.Record(sample)
 }
 
 func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
