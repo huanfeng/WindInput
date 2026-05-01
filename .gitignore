@@ -96,3 +96,5 @@ Desktop.ini
 .omx
 
 package.json.md5
+# Git worktrees
+/.worktrees/
