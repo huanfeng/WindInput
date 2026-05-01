@@ -111,9 +111,23 @@ func (c *Coordinator) handleGlobalSwitchEngine() {
 		c.logger.Warn("Schema skipped due to error", "schemaID", id, "error", errMsg)
 	}
 
+	// 保存到用户配置 + 同步 RPC 层内存配置 + 通知设置端订阅者
+	notifier := c.eventNotifier
 	go func() {
-		if err := config.UpdateSchemaActive(result.NewSchemaID); err != nil {
-			c.logger.Error("Failed to save schema to config", "error", err)
+		if c.cfgMu != nil && c.config != nil {
+			c.cfgMu.Lock()
+			c.config.Schema.Active = result.NewSchemaID
+			cfgCopy := *c.config
+			c.cfgMu.Unlock()
+
+			if err := config.Save(&cfgCopy); err != nil {
+				c.logger.Error("Failed to save schema to config", "error", err)
+			} else {
+				c.logger.Debug("Schema saved to config", "schema", result.NewSchemaID)
+			}
+		}
+		if notifier != nil {
+			notifier.NotifyConfigUpdate()
 		}
 	}()
 
@@ -883,8 +897,19 @@ func (c *Coordinator) handleSchemaMenuSelection(index int) {
 		if err := c.engineMgr.SwitchToSchemaByID(targetSchemaID); err != nil {
 			c.logger.Error("Failed to switch schema from menu", "error", err)
 		} else {
-			if err := config.UpdateSchemaActive(targetSchemaID); err != nil {
-				c.logger.Error("Failed to save schema to config", "error", err)
+			// 同步 RPC 层内存配置 + 写盘 + 通知设置端订阅者
+			if c.cfgMu != nil && c.config != nil {
+				c.cfgMu.Lock()
+				c.config.Schema.Active = targetSchemaID
+				cfgCopy := *c.config
+				c.cfgMu.Unlock()
+
+				if err := config.Save(&cfgCopy); err != nil {
+					c.logger.Error("Failed to save schema to config", "error", err)
+				}
+			}
+			if c.eventNotifier != nil {
+				c.eventNotifier.NotifyConfigUpdate()
 			}
 		}
 	}

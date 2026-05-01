@@ -11,6 +11,7 @@ import (
 func (c *Coordinator) saveToolbarConfig() {
 	// 调用者持有锁，安全读取
 	visible := c.toolbarVisible
+	notifier := c.eventNotifier
 
 	go func() {
 		c.cfgMu.Lock()
@@ -23,11 +24,15 @@ func (c *Coordinator) saveToolbarConfig() {
 		} else {
 			c.logger.Debug("Toolbar config saved")
 		}
+		if notifier != nil {
+			notifier.NotifyConfigUpdate()
+		}
 	}()
 }
 
 // saveThemeConfig saves the theme name to config
 func (c *Coordinator) saveThemeConfig(themeName string) {
+	notifier := c.eventNotifier
 	go func() {
 		c.cfgMu.Lock()
 		c.config.UI.Theme = themeName
@@ -39,11 +44,15 @@ func (c *Coordinator) saveThemeConfig(themeName string) {
 		} else {
 			c.logger.Debug("Theme config saved", "theme", themeName)
 		}
+		if notifier != nil {
+			notifier.NotifyConfigUpdate()
+		}
 	}()
 }
 
 // saveThemeStyleConfig saves the theme style to config
 func (c *Coordinator) saveThemeStyleConfig(themeStyle config.ThemeStyle) {
+	notifier := c.eventNotifier
 	go func() {
 		c.cfgMu.Lock()
 		c.config.UI.ThemeStyle = themeStyle
@@ -55,11 +64,15 @@ func (c *Coordinator) saveThemeStyleConfig(themeStyle config.ThemeStyle) {
 		} else {
 			c.logger.Debug("Theme style config saved", "themeStyle", themeStyle)
 		}
+		if notifier != nil {
+			notifier.NotifyConfigUpdate()
+		}
 	}()
 }
 
 // saveFilterModeConfig saves the filter mode to config
 func (c *Coordinator) saveFilterModeConfig(filterMode config.FilterMode) {
+	notifier := c.eventNotifier
 	go func() {
 		c.cfgMu.Lock()
 		c.config.Input.FilterMode = filterMode
@@ -70,6 +83,9 @@ func (c *Coordinator) saveFilterModeConfig(filterMode config.FilterMode) {
 			c.logger.Error("Failed to save filter mode config", "error", err)
 		} else {
 			c.logger.Debug("Filter mode config saved", "filterMode", filterMode)
+		}
+		if notifier != nil {
+			notifier.NotifyConfigUpdate()
 		}
 	}()
 }
@@ -143,6 +159,7 @@ func (c *Coordinator) applyStatusIndicatorConfig() {
 func (c *Coordinator) saveStatusIndicatorConfig() {
 	// 调用者持有 cfgMu + c.mu，安全读取
 	siCfg := c.config.UI.StatusIndicator
+	notifier := c.eventNotifier
 
 	go func() {
 		c.cfgMu.Lock()
@@ -154,6 +171,9 @@ func (c *Coordinator) saveStatusIndicatorConfig() {
 			c.logger.Error("Failed to save status indicator config", "error", err)
 		} else {
 			c.logger.Debug("Status indicator config saved")
+		}
+		if notifier != nil {
+			notifier.NotifyConfigUpdate()
 		}
 	}()
 }

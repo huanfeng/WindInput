@@ -198,12 +198,24 @@ func (c *Coordinator) handleEngineSwitchKey() *bridge.KeyEventResult {
 		c.logger.Warn("Schema skipped due to error", "schemaID", id, "error", errMsg)
 	}
 
-	// 保存到用户配置
+	// 保存到用户配置 + 同步 RPC 层内存配置 + 通知设置端订阅者
+	// 用 goroutine 是因为当前持有 c.mu，而锁顺序要求 cfgMu → c.mu，必须放到锁外完成
+	notifier := c.eventNotifier
 	go func() {
-		if err := config.UpdateSchemaActive(result.NewSchemaID); err != nil {
-			c.logger.Error("Failed to save schema to config", "error", err)
-		} else {
-			c.logger.Debug("Schema saved to config", "schema", result.NewSchemaID)
+		if c.cfgMu != nil && c.config != nil {
+			c.cfgMu.Lock()
+			c.config.Schema.Active = result.NewSchemaID
+			cfgCopy := *c.config
+			c.cfgMu.Unlock()
+
+			if err := config.Save(&cfgCopy); err != nil {
+				c.logger.Error("Failed to save schema to config", "error", err)
+			} else {
+				c.logger.Debug("Schema saved to config", "schema", result.NewSchemaID)
+			}
+		}
+		if notifier != nil {
+			notifier.NotifyConfigUpdate()
 		}
 	}()
 

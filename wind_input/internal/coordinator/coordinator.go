@@ -242,6 +242,16 @@ type Coordinator struct {
 	statCollector *store.StatCollector
 	statRecorded  bool // 当前按键处理中是否已记录统计
 
+	// 事件通知器（旁路 RPC 路径变更时用于广播给设置端订阅者，nil-safe）
+	eventNotifier EventNotifier
+}
+
+// EventNotifier 由外部（rpc.Server 适配器）注入。当 coordinator 旁路 RPC 路径
+// 直接修改状态（如热键切换方案、快捷加词）时，通过本接口广播事件，使设置端等
+// 订阅者能感知变化。允许为 nil（无副作用）。
+type EventNotifier interface {
+	NotifyConfigUpdate()               // 配置层变更（schema.active 切换等）
+	NotifyUserDictAdd(schemaID string) // 用户词库新增条目
 }
 
 // BridgeServer interface for broadcasting state to TSF clients
@@ -268,6 +278,13 @@ func (c *Coordinator) SetBridgeServer(server BridgeServer) {
 // SetVersion sets the app version for display in the menu
 func (c *Coordinator) SetVersion(v string) {
 	c.version = v
+}
+
+// SetEventNotifier 注入事件通知器（典型由 main.go 在 rpc.Server 创建后调用）
+func (c *Coordinator) SetEventNotifier(n EventNotifier) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.eventNotifier = n
 }
 
 // GetEffectiveMode returns the effective input mode considering CapsLock

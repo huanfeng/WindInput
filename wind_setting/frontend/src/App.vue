@@ -1,15 +1,22 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import {
   EventsOn,
+  EventsOff,
   Quit,
   Show,
   WindowSetAlwaysOnTop,
 } from "../wailsjs/runtime/runtime";
 import * as api from "./api/settings";
 import * as wailsApi from "./api/wails";
+import { onConfigEvent, offConfigEvent } from "./api/wails";
 import type { Config, Status, EngineInfo, TSFLogConfig } from "./api/settings";
-import type { ThemeInfo, ThemePreview, SystemFontInfo } from "./api/wails";
+import type {
+  ThemeInfo,
+  ThemePreview,
+  SystemFontInfo,
+  ConfigEvent,
+} from "./api/wails";
 import { getDefaultConfig, getDefaultTSFLogConfig } from "./api/settings";
 import { Sonner } from "@/components/ui/sonner";
 import { provideToast } from "./composables/useToast";
@@ -166,19 +173,7 @@ async function loadDataFromWails() {
     tsfLogConfig.value = JSON.parse(JSON.stringify(currentTSFLogConfig));
     savedTSFLogConfig.value = JSON.parse(JSON.stringify(currentTSFLogConfig));
 
-    // 从 schema.available 动态构建方案列表
-    const schemaDisplayMap: Record<string, { name: string; desc: string }> = {
-      wubi86: { name: "五笔输入", desc: "86版五笔" },
-      pinyin: { name: "拼音输入", desc: "全拼输入法" },
-    };
-    const available = config.value?.schema?.available || ["wubi86", "pinyin"];
-    const activeSchema = config.value?.schema?.active || "wubi86";
-    engines.value = available.map((id: string) => ({
-      type: id,
-      displayName: schemaDisplayMap[id]?.name || id,
-      description: schemaDisplayMap[id]?.desc || "",
-      isActive: id === activeSchema,
-    }));
+    if (config.value) rebuildEngines(config.value);
 
     await loadThemes();
     try {
@@ -257,6 +252,46 @@ function mergeWithDefaults(cfg: any): Config {
   };
 }
 
+// 根据配置重建方案列表（保持与 loadDataFromWails 中相同的 displayMap 逻辑）
+function rebuildEngines(cfg: Config) {
+  const schemaDisplayMap: Record<string, { name: string; desc: string }> = {
+    wubi86: { name: "五笔输入", desc: "86版五笔" },
+    pinyin: { name: "拼音输入", desc: "全拼输入法" },
+  };
+  const available = cfg.schema?.available || ["wubi86", "pinyin"];
+  const activeSchema = cfg.schema?.active || "wubi86";
+  engines.value = available.map((id: string) => ({
+    type: id,
+    displayName: schemaDisplayMap[id]?.name || id,
+    description: schemaDisplayMap[id]?.desc || "",
+    isActive: id === activeSchema,
+  }));
+}
+
+// 从服务端静默刷新配置和方案列表（不触发 loading 状态，用于事件驱动刷新）
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+function refreshConfigAndEngines() {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    if (!isWailsEnv.value) return;
+    try {
+      const cfg = await wailsApi.getConfig();
+      if (cfg) {
+        const mergedCfg = mergeWithDefaults(cfg);
+        const hadUnsavedChanges = hasUnsavedChanges();
+        config.value = mergedCfg;
+        if (!hadUnsavedChanges) {
+          formData.value = JSON.parse(JSON.stringify(mergedCfg));
+        }
+        rebuildEngines(mergedCfg);
+        await loadThemes();
+      }
+    } catch (e) {
+      console.error("刷新配置失败", e);
+    }
+  }, 150);
+}
+
 // 保存配置
 async function saveConfig() {
   if (hotkeyConflicts.value.length > 0) {
@@ -273,6 +308,7 @@ async function saveConfig() {
       toast("保存成功");
       config.value = JSON.parse(JSON.stringify(formData.value));
       savedTSFLogConfig.value = JSON.parse(JSON.stringify(tsfLogConfig.value));
+      rebuildEngines(formData.value);
     } else {
       const res = await api.updateConfig(formData.value);
       if (res.success && res.data) {
@@ -615,6 +651,11 @@ onMounted(async () => {
       // 忽略错误，使用默认页面
     }
 
+    // 监听配置变更事件，静默刷新方案列表和配置（处理外部切换方案等情形）
+    onConfigEvent((_event: ConfigEvent) => {
+      refreshConfigAndEngines();
+    });
+
     // 监听其他实例发来的页面切换请求
     EventsOn("navigate", (page: string) => {
       if (page) {
@@ -636,6 +677,12 @@ onMounted(async () => {
       } catch {}
     });
   }
+});
+
+onUnmounted(() => {
+  offConfigEvent();
+  EventsOff("navigate");
+  EventsOff("navigate-addword");
 });
 </script>
 

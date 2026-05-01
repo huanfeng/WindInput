@@ -39,6 +39,20 @@ func (a *statusAdapter) IsChineseMode() bool   { return a.coord.GetChineseMode()
 func (a *statusAdapter) IsFullWidth() bool     { return a.coord.GetFullWidth() }
 func (a *statusAdapter) IsChinesePunct() bool  { return a.coord.GetChinesePunctuation() }
 
+// rpcEventNotifier 把 coordinator.EventNotifier 调用转发到 RPC 事件广播器，
+// 让 coordinator 旁路 RPC 路径（热键切换方案、快捷加词等）也能广播事件给设置端订阅者
+type rpcEventNotifier struct {
+	broadcaster *imrpc.EventBroadcaster
+}
+
+func (n *rpcEventNotifier) NotifyConfigUpdate() {
+	n.broadcaster.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeConfig, Action: rpcapi.EventActionUpdate})
+}
+
+func (n *rpcEventNotifier) NotifyUserDictAdd(schemaID string) {
+	n.broadcaster.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeUserDict, SchemaID: schemaID, Action: rpcapi.EventActionAdd})
+}
+
 // batchEncoderAdapter 适配 engine.Manager 为 rpc.BatchEncoder 接口
 type batchEncoderAdapter struct {
 	engineMgr *engine.Manager
@@ -375,6 +389,7 @@ func main() {
 				if err2 := engineMgr.SwitchSchema(s.ID); err2 == nil {
 					activeSchemaID = s.ID
 					schemaMgr.SetActive(s.ID)
+					cfg.Schema.Active = s.ID // 同步到内存配置，使 RPC ConfigGetAll 返回正确的活跃方案
 					fallbackOK = true
 					break
 				}
@@ -432,6 +447,8 @@ func main() {
 	rpcServer.SetConfigReloader(coordinator.NewReloadHandler(coord, cfg, rpcServer.CfgMu(), schemaMgr, engineMgr, dictManager, logger))
 	// 注入共享 cfgMu，使 coordinator 的 save* goroutine 与 RPC 路径使用同一把锁
 	coord.SetCfgMu(rpcServer.CfgMu())
+	// 注入事件通知器：热键切换方案、快捷加词等旁路 RPC 路径需主动广播事件给设置端订阅者
+	coord.SetEventNotifier(&rpcEventNotifier{broadcaster: rpcServer.Broadcaster()})
 	rpcServer.SetSchemaOverrideResetter(schemaMgr)
 	rpcServer.SetStatusProvider(&statusAdapter{coord: coord, dm: dictManager})
 	rpcServer.SetBatchEncoder(&batchEncoderAdapter{engineMgr: engineMgr})

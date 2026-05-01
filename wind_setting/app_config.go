@@ -60,7 +60,7 @@ func (a *App) GetDefaultConfig() (*config.Config, error) {
 	return &cfg, nil
 }
 
-// ReloadConfig 重新加载配置（从服务端重新获取，验证连接可用）
+// ReloadConfig 重新从服务端拉取一次配置以验证连接（服务内存即为权威状态，无需触发磁盘重读）
 func (a *App) ReloadConfig() error {
 	if a.rpcClient == nil {
 		return fmt.Errorf("RPC client not initialized")

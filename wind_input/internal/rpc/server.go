@@ -54,6 +54,12 @@ func (s *Server) CfgMu() *sync.RWMutex {
 	return &s.cfgMu
 }
 
+// Broadcaster 返回事件广播器，供需要旁路 RPC 路径直接广播事件的组件使用
+// （如 coordinator 在热键切换方案、快捷加词后通知设置端订阅者）
+func (s *Server) Broadcaster() *EventBroadcaster {
+	return s.broadcaster
+}
+
 // StatusProvider 系统状态提供者接口
 type StatusProvider interface {
 	GetSchemaID() string

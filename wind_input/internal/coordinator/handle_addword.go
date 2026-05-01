@@ -132,6 +132,14 @@ func (c *Coordinator) confirmAddWord() *bridge.KeyEventResult {
 		c.logger.Warn("addword: failed to add word", "error", err)
 	} else {
 		c.logger.Info("addword: word added successfully", "wordLen", len([]rune(word)), "codeLen", len(code))
+		// 旁路 RPC 直接写库后需手动广播 dict-event，否则设置端用户词库视图不刷新
+		if c.eventNotifier != nil {
+			schemaID := ""
+			if c.engineMgr != nil {
+				schemaID = c.engineMgr.GetCurrentSchemaID()
+			}
+			c.eventNotifier.NotifyUserDictAdd(schemaID)
+		}
 	}
 
 	c.exitAddWordMode()

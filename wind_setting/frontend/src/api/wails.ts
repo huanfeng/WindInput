@@ -337,6 +337,19 @@ export async function getAllSchemaStatuses(): Promise<SchemaStatusItem[]> {
 }
 
 // ── 事件监听 ──
+export interface ConfigEvent {
+  type: string;
+  action: string;
+}
+
+export function onConfigEvent(callback: (event: ConfigEvent) => void): void {
+  (window as any).runtime.EventsOn(WailsEvent.Config, callback);
+}
+
+export function offConfigEvent(): void {
+  (window as any).runtime.EventsOff(WailsEvent.Config);
+}
+
 export function onDictEvent(callback: (event: DictEvent) => void): void {
   (window as any).runtime.EventsOn(WailsEvent.Dict, callback);
 }

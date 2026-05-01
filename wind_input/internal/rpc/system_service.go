@@ -5,10 +5,13 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/huanfeng/wind_input/internal/coordinator"
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/perf"
 	"github.com/huanfeng/wind_input/internal/store"
+	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 )
 
@@ -188,6 +191,7 @@ func (s *SystemService) Pause(args *rpcapi.Empty, reply *rpcapi.SystemPauseReply
 
 	reply.OK = true
 	s.logger.Info("RPC System.Pause: service paused")
+	s.server.broadcaster.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeSystem, Action: rpcapi.EventActionPaused})
 	return nil
 }
 
@@ -213,6 +217,41 @@ func (s *SystemService) Resume(args *rpcapi.SystemResumeArgs, reply *rpcapi.Syst
 
 	reply.OK = true
 	s.logger.Info("RPC System.Resume: service resumed")
+	s.server.broadcaster.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeSystem, Action: rpcapi.EventActionResumed})
+	return nil
+}
+
+// DumpPerf 主动导出按键链路性能样本到文件。
+// Path 留空时写到日志目录下的 perf_<timestamp>.jsonl。
+func (s *SystemService) DumpPerf(args *rpcapi.SystemDumpPerfArgs, reply *rpcapi.SystemDumpPerfReply) error {
+	path := args.Path
+	if path == "" {
+		dir, err := config.GetLogsDir()
+		if err != nil || dir == "" {
+			return fmt.Errorf("logs dir unavailable: %v", err)
+		}
+		path = filepath.Join(dir, fmt.Sprintf("perf_%s.jsonl", time.Now().Format("20060102_150405")))
+	}
+	count, err := perf.ExportJSONL(path)
+	if err != nil {
+		return fmt.Errorf("export perf jsonl: %w", err)
+	}
+	if args.Clear {
+		perf.Clear()
+	}
+	reply.Path = path
+	reply.Count = count
+	reply.Summary = perf.FormatStats(perf.ComputeStats())
+	s.logger.Info("RPC System.DumpPerf", "path", path, "count", count, "cleared", args.Clear)
+	return nil
+}
+
+// GetPerfStats 返回当前内存性能样本的统计摘要（不落盘）。
+func (s *SystemService) GetPerfStats(args *rpcapi.Empty, reply *rpcapi.SystemPerfStatsReply) error {
+	stats := perf.ComputeStats()
+	reply.Count = stats.Count
+	reply.Capacity = perf.Capacity()
+	reply.Summary = perf.FormatStats(stats)
 	return nil
 }
 
