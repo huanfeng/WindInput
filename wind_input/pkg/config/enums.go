@@ -168,3 +168,22 @@ func (e FontEngine) Valid() bool {
 	}
 	return false
 }
+
+// PagerDisplayMode 页码显示方式（用户级覆盖，优先级高于主题配置）
+type PagerDisplayMode string
+
+const (
+	PagerDisplayDefault PagerDisplayMode = ""       // 使用主题配置（默认）
+	PagerDisplayNever   PagerDisplayMode = "never"  // 不显示页码文字
+	PagerDisplayAuto    PagerDisplayMode = "auto"   // 仅在多页时显示
+	PagerDisplayAlways  PagerDisplayMode = "always" // 总是显示
+)
+
+// Valid 校验取值
+func (m PagerDisplayMode) Valid() bool {
+	switch m {
+	case PagerDisplayDefault, PagerDisplayNever, PagerDisplayAuto, PagerDisplayAlways:
+		return true
+	}
+	return false
+}

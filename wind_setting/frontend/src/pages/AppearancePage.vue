@@ -10,12 +10,14 @@ import {
   StatusDisplayMode,
   SchemaNameStyle,
   StatusPositionMode,
+  PagerDisplayMode,
   type ThemeStyleValue,
   type PreeditModeValue,
   type CandidateLayoutValue,
   type StatusDisplayModeValue,
   type SchemaNameStyleValue,
   type StatusPositionModeValue,
+  type PagerDisplayModeValue,
 } from "@/lib/enums";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -178,6 +180,31 @@ onUnmounted(() => {
               <SelectItem :value="ThemeStyle.System">跟随系统</SelectItem>
               <SelectItem :value="ThemeStyle.Light">亮色</SelectItem>
               <SelectItem :value="ThemeStyle.Dark">暗色</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>页码显示方式</label>
+          <p class="setting-hint">覆盖主题配置中的页码显示行为</p>
+        </div>
+        <div class="setting-control">
+          <Select
+            :model-value="formData.ui.pager_display_mode"
+            @update:model-value="
+              formData.ui.pager_display_mode = $event as PagerDisplayModeValue
+            "
+          >
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="PagerDisplayMode.Default">默认（主题配置）</SelectItem>
+              <SelectItem :value="PagerDisplayMode.Never">不显示</SelectItem>
+              <SelectItem :value="PagerDisplayMode.Auto">大于一页时显示</SelectItem>
+              <SelectItem :value="PagerDisplayMode.Always">总是显示</SelectItem>
             </SelectContent>
           </Select>
         </div>

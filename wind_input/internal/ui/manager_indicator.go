@@ -221,6 +221,7 @@ func (m *Manager) applyTheme(resolved *theme.ResolvedTheme) {
 	// Apply to candidate window renderer
 	if m.renderer != nil {
 		m.renderer.SetTheme(resolved)
+		m.applyPagerOverride()
 	}
 
 	// Apply to toolbar (this also handles popup menu in toolbar)

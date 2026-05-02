@@ -54,6 +54,7 @@ Windows 原生 UI 渲染层。使用 Win32 API 实现输入法的所有可见界
 - 工具栏支持拖拽移动，位置持久化到配置（`cfg.Toolbar.X`/`Y`）
 - 主题颜色通过 `pkg/theme.Theme` 注入到渲染器
 - `UnifiedMenuState` 用于构建统一的右键菜单（`BuildUnifiedMenuItems`）
+- `Manager.SetPagerDisplayMode(mode)` 设置页码显示方式覆盖，调用后立即生效；`applyPagerOverride()` 在每次 `applyTheme()` 后也会被调用，确保主题切换不丢失覆盖
 
 ### Testing Requirements
 - UI 代码高度依赖 Windows GDI/Win32，无法做纯 Go 单元测试

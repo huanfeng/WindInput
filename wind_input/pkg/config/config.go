@@ -132,19 +132,20 @@ type StatusIndicatorConfig struct {
 
 // UIConfig contains UI settings
 type UIConfig struct {
-	FontSize                float64         `yaml:"font_size" json:"font_size"`
-	CandidatesPerPage       int             `yaml:"candidates_per_page" json:"candidates_per_page"`
-	FontFamily              string          `yaml:"font_family" json:"font_family"`
-	FontPath                string          `yaml:"font_path" json:"font_path"`
-	InlinePreedit           bool            `yaml:"inline_preedit" json:"inline_preedit"`
-	HideCandidateWindow     bool            `yaml:"hide_candidate_window" json:"hide_candidate_window"`
-	CandidateLayout         CandidateLayout `yaml:"candidate_layout" json:"candidate_layout"`                   // 候选布局：horizontal 或 vertical
-	StatusIndicatorDuration int             `yaml:"status_indicator_duration" json:"status_indicator_duration"` // 状态提示显示时长（毫秒）
-	StatusIndicatorOffsetX  int             `yaml:"status_indicator_offset_x" json:"status_indicator_offset_x"` // 状态提示 X 偏移量
-	StatusIndicatorOffsetY  int             `yaml:"status_indicator_offset_y" json:"status_indicator_offset_y"` // 状态提示 Y 偏移量
-	Theme                   string          `yaml:"theme" json:"theme"`                                         // 主题名称：default, msime 或自定义主题名
-	ThemeStyle              ThemeStyle      `yaml:"theme_style" json:"theme_style"`                             // 主题风格：system(跟随系统), light(亮色), dark(暗色)
-	TooltipDelay            int             `yaml:"tooltip_delay" json:"tooltip_delay"`                         // 编码提示延迟显示时间（毫秒），0 表示立即显示
+	FontSize                float64          `yaml:"font_size" json:"font_size"`
+	CandidatesPerPage       int              `yaml:"candidates_per_page" json:"candidates_per_page"`
+	FontFamily              string           `yaml:"font_family" json:"font_family"`
+	FontPath                string           `yaml:"font_path" json:"font_path"`
+	InlinePreedit           bool             `yaml:"inline_preedit" json:"inline_preedit"`
+	HideCandidateWindow     bool             `yaml:"hide_candidate_window" json:"hide_candidate_window"`
+	CandidateLayout         CandidateLayout  `yaml:"candidate_layout" json:"candidate_layout"`                   // 候选布局：horizontal 或 vertical
+	StatusIndicatorDuration int              `yaml:"status_indicator_duration" json:"status_indicator_duration"` // 状态提示显示时长（毫秒）
+	StatusIndicatorOffsetX  int              `yaml:"status_indicator_offset_x" json:"status_indicator_offset_x"` // 状态提示 X 偏移量
+	StatusIndicatorOffsetY  int              `yaml:"status_indicator_offset_y" json:"status_indicator_offset_y"` // 状态提示 Y 偏移量
+	Theme                   string           `yaml:"theme" json:"theme"`                                         // 主题名称：default, msime 或自定义主题名
+	ThemeStyle              ThemeStyle       `yaml:"theme_style" json:"theme_style"`                             // 主题风格：system(跟随系统), light(亮色), dark(暗色)
+	PagerDisplayMode        PagerDisplayMode `yaml:"pager_display_mode" json:"pager_display_mode"`               // 页码显示方式：空=使用主题配置, never=不显示, auto=多页时显示, always=总是显示
+	TooltipDelay            int              `yaml:"tooltip_delay" json:"tooltip_delay"`                         // 编码提示延迟显示时间（毫秒），0 表示立即显示
 
 	PreeditMode PreeditMode `yaml:"preedit_mode" json:"preedit_mode"` // 编码显示模式："top"（默认，编码在上方独立行）, "embedded"（嵌入候选行前）；仅 InlinePreedit=false 时生效
 

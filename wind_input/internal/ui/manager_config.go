@@ -165,6 +165,32 @@ func (m *Manager) SetPreeditMode(mode config.PreeditMode) {
 	}
 }
 
+// SetPagerDisplayMode 设置页码显示方式（覆盖主题配置）
+func (m *Manager) SetPagerDisplayMode(mode config.PagerDisplayMode) {
+	m.pagerDisplayMode = mode
+	m.applyPagerOverride()
+}
+
+// applyPagerOverride 根据 pagerDisplayMode 覆盖渲染器的翻页显示设置。
+// 必须在 renderer.SetTheme() 之后调用，以确保主题值已写入。
+func (m *Manager) applyPagerOverride() {
+	if m.renderer == nil {
+		return
+	}
+	switch m.pagerDisplayMode {
+	case config.PagerDisplayNever:
+		m.renderer.SetAlwaysShowPager(false)
+		m.renderer.SetShowPageNumber(false)
+	case config.PagerDisplayAuto:
+		m.renderer.SetAlwaysShowPager(false)
+		m.renderer.SetShowPageNumber(true)
+	case config.PagerDisplayAlways:
+		m.renderer.SetAlwaysShowPager(true)
+		m.renderer.SetShowPageNumber(true)
+		// PagerDisplayDefault（空字符串）：不覆盖，保留主题值
+	}
+}
+
 // OpenSettings opens the settings window
 func (m *Manager) OpenSettings() {
 	m.OpenSettingsWithPage("")

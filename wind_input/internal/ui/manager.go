@@ -253,6 +253,9 @@ type Manager struct {
 	// Debug: hide candidate window (for performance testing)
 	hideCandidateWindow bool
 
+	// 页码显示方式覆盖（空=使用主题配置）
+	pagerDisplayMode config.PagerDisplayMode
+
 	// Mode indicator version: incremented on each mode indicator show
 	// Used to cancel previous hide timers when a new indicator is shown
 	modeIndicatorVersion uint64

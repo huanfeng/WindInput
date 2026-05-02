@@ -85,6 +85,15 @@ export const FontEngine = {
 } as const;
 export type FontEngineValue = (typeof FontEngine)[keyof typeof FontEngine];
 
+export const PagerDisplayMode = {
+  Default: "",       // 使用主题配置
+  Never: "never",    // 不显示页码文字
+  Auto: "auto",      // 仅在多页时显示
+  Always: "always",  // 总是显示
+} as const;
+export type PagerDisplayModeValue =
+  (typeof PagerDisplayMode)[keyof typeof PagerDisplayMode];
+
 // ============================================================
 // 修饰键 / 按键名（对应 pkg/keys/keys.go）
 // ============================================================

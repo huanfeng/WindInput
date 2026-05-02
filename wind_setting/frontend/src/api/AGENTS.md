@@ -58,6 +58,7 @@
 - `HotkeyConfig` 新增字段：`delete_candidate`、`pin_candidate`、`toggle_toolbar`、`open_settings`
 - `InputConfig` 新增字段：`highlight_keys`（候选移动键）、`pinyin_separator`（拼音分隔符）、`temp_pinyin`（临时拼音配置，含 `trigger_keys`）
 - `UIConfig` 新增字段：`theme_style`（`"system" | "light" | "dark"`）、`status_indicator_offset_x/y`
+- `UIConfig` 新增字段：`pager_display_mode`（`"" | "never" | "auto" | "always"`），对应后端 `PagerDisplayMode` 枚举
 - `WubiConfig` 新增字段：`single_code_input`、`candidate_sort_mode`
 - 新增接口：`TSFLogConfig`（`mode`、`level`）、`TempPinyinConfig`（`trigger_keys`）、`ToolbarConfig`（`visible`）
 - 新增 `getDefaultTSFLogConfig()` 工厂函数

@@ -296,6 +296,16 @@ func (r *Renderer) SetPreeditMode(mode config.PreeditMode) {
 	r.config.PreeditMode = mode
 }
 
+// SetAlwaysShowPager 设置是否在单页时也显示翻页区域
+func (r *Renderer) SetAlwaysShowPager(v bool) {
+	r.config.AlwaysShowPager = v
+}
+
+// SetShowPageNumber 设置是否在翻页区域显示页码文字（如 "1/3"）
+func (r *Renderer) SetShowPageNumber(v bool) {
+	r.config.ShowPageNumber = v
+}
+
 // SetModeLabel sets the temporary mode label for display
 func (r *Renderer) SetModeLabel(label string) {
 	r.config.ModeLabel = label

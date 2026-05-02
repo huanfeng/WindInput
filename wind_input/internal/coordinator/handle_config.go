@@ -50,6 +50,8 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 		c.uiManager.SetHidePreedit(uiConfig.InlinePreedit)
 		// Update preedit display mode
 		c.uiManager.SetPreeditMode(uiConfig.PreeditMode)
+		// Update pager display mode override
+		c.uiManager.SetPagerDisplayMode(uiConfig.PagerDisplayMode)
 		// Update status indicator config (旧字段兼容)
 		c.uiManager.UpdateStatusIndicatorConfig(
 			uiConfig.StatusIndicatorDuration,

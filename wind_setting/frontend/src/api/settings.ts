@@ -14,6 +14,7 @@ import type {
   StatusPositionModeValue,
   NumpadBehaviorValue,
   ShiftBehaviorValue,
+  PagerDisplayModeValue,
 } from "../lib/enums";
 
 const API_BASE = "http://127.0.0.1:18923";
@@ -82,6 +83,7 @@ export interface UIConfig {
   status_indicator: StatusIndicatorConfig;
   theme: string;
   theme_style: ThemeStyleValue;
+  pager_display_mode: PagerDisplayModeValue;
 }
 
 // 工具栏配置
@@ -347,6 +349,7 @@ export function getDefaultConfig(): Config {
       },
       theme: "default",
       theme_style: "system",
+      pager_display_mode: "",
     },
     toolbar: {
       visible: true,

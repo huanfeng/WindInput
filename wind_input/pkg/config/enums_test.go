@@ -52,6 +52,11 @@ func TestEnumYAMLRoundTrip(t *testing.T) {
 		{"FontEngineDirectWrite", FontEngineDirectWrite, "directwrite"},
 		{"FontEngineGDI", FontEngineGDI, "gdi"},
 		{"FontEngineFreetype", FontEngineFreetype, "freetype"},
+
+		{"PagerDisplayDefault", PagerDisplayDefault, "\"\""},
+		{"PagerDisplayNever", PagerDisplayNever, "never"},
+		{"PagerDisplayAuto", PagerDisplayAuto, "auto"},
+		{"PagerDisplayAlways", PagerDisplayAlways, "always"},
 	}
 
 	for _, c := range cases {
@@ -222,6 +227,13 @@ func TestEnumValidRejectsInvalid(t *testing.T) {
 		}
 		if FontEngine("").Valid() {
 			t.Error("empty FontEngine should be invalid")
+		}
+	})
+
+	// PagerDisplayMode 特例：空字符串有效，表示"使用主题配置"
+	t.Run("PagerDisplayMode empty string is valid", func(t *testing.T) {
+		if !PagerDisplayMode("").Valid() {
+			t.Error("empty PagerDisplayMode should be valid (use theme config)")
 		}
 	})
 

@@ -25,6 +25,8 @@
 - **Schema 方案系统**：`SchemaConfig`（`Active` + `Available` 字段），用于多方案切换（`wubi86`/`pinyin`）
 - **新增 HotkeyConfig 字段**：`DeleteCandidate`（删除候选）、`PinCandidate`（置顶候选）、`ToggleToolbar`（切换工具栏）、`OpenSettings`（打开设置）、`AddWord`（快捷加词，默认 `ctrl+equal`）
 - **新增 UIConfig 字段**：`TextRenderMode`（`directwrite`/`gdi`/`freetype`）、`GDIFontWeight`、`GDIFontScale`、`MenuFontWeight`、`MenuFontSize`
+- **新增枚举**：`PagerDisplayMode`（`"" | "never" | "auto" | "always"`），控制页码显示方式的用户级覆盖；空字符串（`PagerDisplayDefault`）表示使用主题配置
+- **新增 UIConfig 字段**：`PagerDisplayMode`（`pager_display_mode`），空值=使用主题配置，never=不显示页码文字，auto=多页时显示，always=总是显示
 - **新增 AdvancedConfig 字段**：`HostRenderProcesses`（Band 窗口宿主进程白名单，默认 `["SearchHost.exe"]`）
 - 新增配置项时：在对应子结构体添加字段，设置 YAML 标签，在 `DefaultConfig()` 中提供默认值，在 `applyConfigFallbacks()` 中处理兜底
 - `RuntimeState` 与 `Config` 分开存储（`state.yaml`），避免用户编辑配置时覆盖运行时状态
