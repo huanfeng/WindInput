@@ -231,6 +231,11 @@ func (s *Server) Start() error {
 	RegisterMethod(s.router, "System.Shutdown", systemSvc.Shutdown)
 	RegisterMethod(s.router, "System.DumpPerf", systemSvc.DumpPerf)
 	RegisterMethod(s.router, "System.GetPerfStats", systemSvc.GetPerfStats)
+	RegisterMethod(s.router, "System.PreviewBackup", systemSvc.PreviewBackup)
+	RegisterMethod(s.router, "System.Backup", systemSvc.Backup)
+	RegisterMethod(s.router, "System.PreviewRestore", systemSvc.PreviewRestore)
+	RegisterMethod(s.router, "System.Restore", systemSvc.Restore)
+	RegisterMethod(s.router, "System.Reset", systemSvc.Reset)
 
 	// 注册 Stats 方法
 	statsSvc := &StatsService{store: s.store, logger: s.logger, statCollector: s.statCollector, server: s, broadcaster: s.broadcaster}
