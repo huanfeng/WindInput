@@ -7,6 +7,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/ipc"
+	"github.com/huanfeng/wind_input/internal/store"
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 )
@@ -584,6 +585,8 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 					Text: transform.ToFullWidth(key),
 				}
 			}
+			// 透传路径：result 为 nil，defer fallback 不会触发，需主动记录
+			c.recordCommit(key, 0, -1, store.SourcePunctuation)
 		}
 		return result
 
@@ -618,6 +621,8 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 					Text: transform.ToFullWidth(key),
 				}
 			}
+			// 透传路径：result 为 nil，defer fallback 不会触发，需主动记录
+			c.recordCommit(key, 0, -1, store.SourcePunctuation)
 		}
 		return result
 
