@@ -1,0 +1,10 @@
+# 自定义词序提升表（dictgen 在权重计算 + 简码降权后应用）
+#
+# 格式（TAB 分隔）：code  text  [adjust]
+#   adjust 留空      → 顶置（设为该 code 当前最高权重 +1）
+#   adjust = +N/-N  → 相对位置：上移 / 下移 N 位（超界自动钳到首/末）
+#   adjust = N      → 绝对权重（直接覆盖 OrigWeight）
+#
+# 注：仅修改已存在的 (code, text) 条目；新增条目请用 custom_words.txt
+ggtt	五笔
+rjfi	提示

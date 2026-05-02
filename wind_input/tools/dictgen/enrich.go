@@ -854,6 +854,20 @@ func enrich(cfg *Config) error {
 		}
 	}
 
+	// 词序提升：在权重计算 + 简码降权之后，按 boost 文件调整指定 (code, text) 的权重
+	if cfg.BoostsPath != "" {
+		if _, statErr := os.Stat(cfg.BoostsPath); statErr == nil {
+			fmt.Printf("\n      加载词序提升表: %s\n", cfg.BoostsPath)
+			rules, berr := loadBoostRules(cfg.BoostsPath)
+			if berr != nil {
+				fmt.Printf("      [警告] boost 解析失败: %v\n", berr)
+			} else if len(rules) > 0 {
+				applied, missing := applyBoostRules(kept, rules)
+				fmt.Printf("      词序提升: %d 条生效，%d 条未匹配\n", applied, missing)
+			}
+		}
+	}
+
 	// 按编码升序、同码按权重降序排列
 	sort.SliceStable(kept, func(i, j int) bool {
 		if kept[i].Code != kept[j].Code {

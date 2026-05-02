@@ -49,6 +49,9 @@ type Config struct {
 	// 自定义词表（可选，不存在则跳过）
 	CustomWordsPath string `yaml:"custom_words_path"`
 
+	// 词序提升表（可选，不存在则跳过）：调整已有 (code, text) 条目的权重
+	BoostsPath string `yaml:"boosts_path"`
+
 	// 输出
 	OutputPath  string `yaml:"output_path"`
 	OutputName  string `yaml:"output_name"`
@@ -143,6 +146,7 @@ func loadConfig(path string) (*Config, error) {
 	cfg.UnigramPath = resolve(cfg.UnigramPath)
 	cfg.OutputPath = resolve(cfg.OutputPath)
 	cfg.CustomWordsPath = resolve(cfg.CustomWordsPath)
+	cfg.BoostsPath = resolve(cfg.BoostsPath)
 	cfg.DroppedPath = resolve(cfg.DroppedPath)
 	cfg.ConflictReportPath = resolve(cfg.ConflictReportPath)
 	cfg.DemotionReportPath = resolve(cfg.DemotionReportPath)

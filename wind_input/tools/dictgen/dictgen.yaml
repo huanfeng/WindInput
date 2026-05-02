@@ -8,6 +8,10 @@ unigram_path: ../../../.cache/pinyin/unigram.txt
 # 自定义补充词表（不存在则跳过）
 custom_words_path: custom_words.txt
 
+# 词序提升表（可选，不存在则跳过）
+# 调整已有 (code, text) 条目的权重：顶置 / 相对位置 / 绝对权重，详见文件头部注释
+boosts_path: boost_words.txt
+
 # 输出
 # output_path 仅作为独立运行时的默认值；build_all.ps1 通过 -output 参数覆盖，直接输出到 build/data/
 output_path: ../../../.cache/rime-wubi/wubi86_jidian.dict.out.yaml
