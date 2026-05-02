@@ -211,6 +211,22 @@ func (w *ToolbarWindow) handleMouseMove(hwnd uintptr, lParam uintptr) uintptr {
 	newX := int(pt.X) - w.dragOffsetX
 	newY := int(pt.Y) - w.dragOffsetY
 
+	// Clamp to the work area of the monitor under the cursor, preventing the
+	// toolbar from being dragged off-screen or behind the taskbar.
+	monLeft, monTop, monRight, monBottom := GetMonitorWorkAreaFromPoint(int(pt.X), int(pt.Y))
+	if newX < monLeft {
+		newX = monLeft
+	}
+	if newX+w.width > monRight {
+		newX = monRight - w.width
+	}
+	if newY < monTop {
+		newY = monTop
+	}
+	if newY+w.height > monBottom {
+		newY = monBottom - w.height
+	}
+
 	w.x = newX
 	w.y = newY
 	w.mu.Unlock()

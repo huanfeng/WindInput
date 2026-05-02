@@ -46,27 +46,38 @@ func (c *Coordinator) SetIMEActivated(activated bool) {
 
 		// IME activated - show toolbar if enabled
 		if c.toolbarVisible {
-			// Always recalculate toolbar position based on current caret/focus position
-			// This ensures toolbar follows the active screen when switching between apps
-			toolbarWidth, toolbarHeight := 140, 30 // Base size, will be scaled by DPI
-			var posX, posY int
+			toolbarWidth, toolbarHeight := 140, 30 // base size, scaled by DPI below
+			scaledW := ui.ScaleIntForDPI(toolbarWidth)
+			scaledH := ui.ScaleIntForDPI(toolbarHeight)
 
-			// Use caret position to determine which monitor to show toolbar on
-			// Note: coordinates can be negative in multi-monitor setups, use caretValid flag
+			// Calculate default position for the target monitor (caret → mouse fallback).
+			var posX, posY int
 			if c.caretValid {
-				posX, posY = ui.GetToolbarPositionForCaret(
-					c.caretX, c.caretY,
-					ui.ScaleIntForDPI(toolbarWidth),
-					ui.ScaleIntForDPI(toolbarHeight),
-				)
+				posX, posY = ui.GetToolbarPositionForCaret(c.caretX, c.caretY, scaledW, scaledH)
 			} else {
-				// No valid caret position yet, use mouse position as fallback
-				posX, posY = ui.GetDefaultToolbarPosition(
-					ui.ScaleIntForDPI(toolbarWidth),
-					ui.ScaleIntForDPI(toolbarHeight),
-				)
+				posX, posY = ui.GetDefaultToolbarPosition(scaledW, scaledH)
 			}
-			c.logger.Debug("Toolbar position calculated", "x", posX, "y", posY, "caretX", c.caretX, "caretY", c.caretY)
+
+			// Identify the target monitor by its work-area edges.
+			// posX/posY is already in the right-bottom corner of that monitor, so
+			// querying by it gives us the authoritative work-area bounds.
+			monLeft, monTop, monRight, monBottom := ui.GetMonitorWorkAreaFromPoint(posX, posY)
+			key := ui.MonitorKey(monRight, monBottom)
+
+			// If the user previously dragged the toolbar on this monitor, restore that
+			// position (after validating it still fits within the current work area).
+			if saved, ok := c.toolbarUserPos[key]; ok {
+				if saved.X >= monLeft && saved.X+scaledW <= monRight &&
+					saved.Y >= monTop && saved.Y+scaledH <= monBottom {
+					posX, posY = saved.X, saved.Y
+				} else {
+					// Work area shrunk (e.g. resolution change) — discard stale record.
+					delete(c.toolbarUserPos, key)
+				}
+			}
+
+			c.logger.Debug("Toolbar position resolved", "x", posX, "y", posY,
+				"caretX", c.caretX, "caretY", c.caretY, "monitorKey", key)
 
 			// Show toolbar with position and state in one atomic operation
 			c.uiManager.ShowToolbarWithState(posX, posY, c.buildToolbarState())

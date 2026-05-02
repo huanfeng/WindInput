@@ -245,6 +245,11 @@ type Coordinator struct {
 
 	// 事件通知器（旁路 RPC 路径变更时用于广播给设置端订阅者，nil-safe）
 	eventNotifier EventNotifier
+
+	// toolbarUserPos 保存用户拖动后的工具栏位置，按显示器分别记录。
+	// key = ui.MonitorKey(workRight, workBottom)，value = 工具栏左上角屏幕坐标。
+	// 焦点切换时优先使用该值；切换到没有记录的显示器时回退到右下角默认位置。
+	toolbarUserPos map[uint64]image.Point
 }
 
 // EventNotifier 由外部（rpc.Server 适配器）注入。当 coordinator 旁路 RPC 路径

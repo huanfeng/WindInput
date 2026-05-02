@@ -2,6 +2,8 @@
 package coordinator
 
 import (
+	"image"
+
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/ui"
@@ -653,11 +655,22 @@ func (c *Coordinator) handleToolbarOpenSettings() {
 	}
 }
 
-// handleToolbarPositionChanged handles toolbar position change (after dragging)
-// Toolbar position is temporary and not persisted to config.
-// On IME reload, toolbar will return to its default calculated position.
+// handleToolbarPositionChanged handles toolbar position change (after dragging).
+// Saves the position per monitor so it can be restored on next focus gain.
 func (c *Coordinator) handleToolbarPositionChanged(x, y int) {
-	c.logger.Debug("Toolbar position changed (temporary)", "x", x, "y", y)
+	// Identify the monitor by its work-area right/bottom edges.
+	// This call is safe outside the coordinator lock (pure Win32 query).
+	_, _, monRight, monBottom := ui.GetMonitorWorkAreaFromPoint(x, y)
+	key := ui.MonitorKey(monRight, monBottom)
+
+	c.mu.Lock()
+	if c.toolbarUserPos == nil {
+		c.toolbarUserPos = make(map[uint64]image.Point)
+	}
+	c.toolbarUserPos[key] = image.Point{X: x, Y: y}
+	c.mu.Unlock()
+
+	c.logger.Debug("Toolbar user position saved", "monitorKey", key, "x", x, "y", y)
 }
 
 // handleToolbarContextMenu handles toolbar right-click context menu action

@@ -112,6 +112,12 @@ func GetToolbarPositionForCaret(caretX, caretY, toolbarWidth, toolbarHeight int)
 	return x, y
 }
 
+// MonitorKey returns a stable uint64 identifier for the monitor whose work area
+// ends at (workRight, workBottom). Used to key per-monitor toolbar positions.
+func MonitorKey(workRight, workBottom int) uint64 {
+	return uint64(uint32(workRight))<<32 | uint64(uint32(workBottom))
+}
+
 // GetCapsLockState returns the current state of CapsLock key
 // Returns true if CapsLock is ON, false otherwise
 func GetCapsLockState() bool {
