@@ -75,6 +75,7 @@ type PinyinConfig struct {
 	UseSmartCompose bool              `yaml:"use_smart_compose" json:"use_smart_compose"`
 	CandidateOrder  string            `yaml:"candidate_order" json:"candidate_order"` // 候选排序：char_first/phrase_first/smart
 	Fuzzy           FuzzyPinyinConfig `yaml:"fuzzy" json:"fuzzy"`
+	SkipAbbrev      bool              `yaml:"skip_abbrev" json:"skip_abbrev"` // 跳过简拼匹配（混输模式专用）
 }
 
 // FuzzyPinyinConfig 模糊拼音配置

@@ -129,6 +129,7 @@ func updatePinyinConfig(pinyinEngine *pinyin.Engine, pinyinCfg *config.PinyinCon
 	if cfg := pinyinEngine.GetConfig(); cfg != nil {
 		oldShowCodeHint := cfg.ShowCodeHint
 		cfg.ShowCodeHint = showCodeHint
+		cfg.SkipAbbrev = pinyinCfg.SkipAbbrev
 
 		if pinyinCfg.Fuzzy.Enabled {
 			pinyinEngine.SetFuzzyConfig(&pinyin.FuzzyConfig{

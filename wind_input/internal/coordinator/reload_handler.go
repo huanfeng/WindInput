@@ -150,7 +150,7 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 
 	case schema.EngineTypePinyin:
 		if spec := s.Engine.Pinyin; spec != nil {
-			h.applyPinyinSpec(spec)
+			h.applyPinyinSpec(spec, false) // 纯拼音模式：简拼始终开启
 		}
 
 	case schema.EngineTypeMixed:
@@ -161,8 +161,15 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 				pinyinSpec = secSchema.Engine.Pinyin
 			}
 		}
+		// enable_abbrev_match 在 MixedSpec 中，默认关闭（skipAbbrev=true）
+		skipAbbrev := true
+		if s.Engine.Mixed != nil && s.Engine.Mixed.EnableAbbrevMatch != nil && *s.Engine.Mixed.EnableAbbrevMatch {
+			skipAbbrev = false
+		}
 		if pinyinSpec != nil {
-			h.applyPinyinSpec(pinyinSpec)
+			h.applyPinyinSpec(pinyinSpec, skipAbbrev)
+		} else {
+			h.applyPinyinSpec(&schema.PinyinSpec{}, skipAbbrev)
 		}
 		// 码表子引擎配置
 		if s.Engine.Mixed != nil && s.Engine.Mixed.PrimarySchema != "" {
@@ -180,12 +187,14 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 	h.logger.Debug("Schema config reloaded", "schema", activeID, "engineType", s.Engine.Type)
 }
 
-// applyPinyinSpec 将 PinyinSpec 转换为 PinyinConfig 并更新引擎
-func (h *ReloadHandler) applyPinyinSpec(spec *schema.PinyinSpec) {
+// applyPinyinSpec 将 PinyinSpec 转换为 PinyinConfig 并更新引擎。
+// skipAbbrev：混输模式专用，true 表示关闭简拼匹配；纯拼音模式传 false。
+func (h *ReloadHandler) applyPinyinSpec(spec *schema.PinyinSpec, skipAbbrev bool) {
 	pinyinCfg := &config.PinyinConfig{
 		ShowCodeHint:    spec.ShowCodeHint,
 		UseSmartCompose: spec.UseSmartCompose,
 		CandidateOrder:  spec.CandidateOrder,
+		SkipAbbrev:      skipAbbrev,
 	}
 	if spec.Fuzzy != nil {
 		pinyinCfg.Fuzzy = config.FuzzyPinyinConfig{

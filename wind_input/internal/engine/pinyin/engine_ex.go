@@ -102,9 +102,18 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// allCompletedEnd: 连续完成音节在原始输入中的结束位置（安全消耗范围）
 	allCompletedEnd := contiguousEnd
 
+	// skipContiguousMatch：简拼关闭时，若 contiguous 块后还有大量游离音节（≥2），
+	// 输入更像五笔编码而非拼音（如 "asdf" = "a"完整 + "sdf" 3个游离），
+	// 跳过基于 contiguous 的候选生成，避免按首字母提示。
+	// "nihaoz" = contiguous[ni,hao] + 1个游离 → 不跳过（正常 trailing partial）。
+	straySyllableCount := len(allSyllables) - contiguousCount
+	skipContiguousMatch := e.config != nil && e.config.SkipAbbrev && straySyllableCount >= 2
+
 	e.logger.Debug("convertCore", "input", input, "preedit", result.PreeditDisplay,
 		"completed", completedSyllables, "contiguous", contiguousSyllables,
-		"partial", partial, "allSyllables", allSyllables, "parseElapsed", time.Since(convertStart))
+		"partial", partial, "allSyllables", allSyllables,
+		"skipAbbrev", e.config != nil && e.config.SkipAbbrev, "skipContiguousMatch", skipContiguousMatch,
+		"parseElapsed", time.Since(convertStart))
 
 	// 检查首个 completed syllable 是否也是输入的第一个段
 	firstCompletedIsLeading := contiguousCount > 0
@@ -160,7 +169,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 触发条件：≥2 连续完成音节 + 有 unigram 模型。
 	// ConsumedLength = allCompletedEnd（仅消耗连续完成音节，不跨越 partial 间隔）。
 	// 造句结果作为普通候选参与排序，不享有绝对优先——Rime 中造句和精确匹配同级。
-	if contiguousCount >= 2 && e.unigram != nil && len(completedCode) >= 4 {
+	if contiguousCount >= 2 && !skipContiguousMatch && e.unigram != nil && len(completedCode) >= 4 {
 		lattice := BuildLattice(completedCode, e.syllableTrie, e.dict, e.unigram)
 		if !lattice.IsEmpty() {
 			vResults := ViterbiTopK(lattice, e.bigram, 1)
@@ -221,7 +230,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 当有 partial 后缀时，仍对已完成音节部分执行精确匹配，
 	// 这样 "wobuzhidaog" 中的 "wobuzhidao" 仍能精确匹配 "我不知道"。
 	hasExplicitSep := strings.Contains(input, "'")
-	if contiguousCount > 0 {
+	if contiguousCount > 0 && !skipContiguousMatch {
 		exactInput := completedCode
 		if partial == "" {
 			exactInput = queryInput // 无 partial 时用完整输入
@@ -252,7 +261,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// ── 步骤 1b：多切分并行打分 ──
 	// 对无显式分隔符的输入，获取备选切分路径的候选
 	// 即使有 partial 后缀（如 "xianr"），也对完整音节部分做多切分
-	if contiguousCount > 0 && !strings.Contains(input, "'") {
+	if contiguousCount > 0 && !skipContiguousMatch && !strings.Contains(input, "'") {
 		detail := parser.ParseWithDetail(queryInput, 4)
 		for _, alt := range detail.Alternatives {
 			altSyllables := alt.CompletedSyllables()
@@ -291,7 +300,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// ── 步骤 2：子词组查找（如 "nihaoshijie" → 查找 "你好"、"世界" 等子词组） ──
 	// 直接使用 Parser 已解析的 completedSyllables，不再冗余重建 DAG。
 	// 枚举所有从首位开始的连续子序列，支持部分上屏。
-	if contiguousCount > 1 {
+	if contiguousCount > 1 && !skipContiguousMatch {
 		e.lookupSubPhrasesEx(contiguousSyllables, parsed, totalSyllableCount, candidatesMap)
 	}
 
@@ -299,8 +308,10 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 
 	// ── 4a. 首段 partial 音节的单字候选 ──
 	// 当首个 completed 不是输入首段时（如 sdem → "s" 在 "de" 前），
-	// 为首段 partial 音节生成候选，权重高于首 completed 音节的候选
-	if contiguousCount == 0 && syllableCount > 0 {
+	// 为首段 partial 音节生成候选，权重高于首 completed 音节的候选。
+	// 简拼关闭时：contiguous=0 && syllableCount>0 的场景（如 skce = s+k+ce）游离音节≥2，
+	// skipContiguousMatch 始终为 true，即简拼关闭时步骤 4a 不运行。
+	if contiguousCount == 0 && syllableCount > 0 && !skipContiguousMatch {
 		leadingPartial := allSyllables[0]
 		possibles := e.syllableTrie.GetPossibleSyllables(leadingPartial)
 		const maxLeadingPerSyllable = 5
@@ -333,7 +344,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 当首段是 partial 时（如 lwai 中 "l" 在 "wai" 前），首个完成音节的单字候选
 	// 的 ConsumedLength 会包含前面的 partial，选中后导致 partial 被丢弃。
 	// 用户应先通过步骤 4a 处理 leading partial。
-	if contiguousCount > 0 {
+	if contiguousCount > 0 && !skipContiguousMatch {
 		firstSyllable := contiguousSyllables[0]
 		charResults := e.lookupWithFuzzy(firstSyllable, []string{firstSyllable})
 
@@ -362,8 +373,11 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	}
 
 	// ── 4b. 多 partial 音节时的首音节单字候选 ──
-	// 例如 "bzd" → ["b","z","d"] 都是 partial，为首音节 "b" 生成单字候选
-	if contiguousCount == 0 && len(allSyllables) > 1 {
+	// 例如 "bzd" → ["b","z","d"] 都是 partial，为首音节 "b" 生成单字候选。
+	// 仅在 syllableCount==0（纯 partial 输入，无完整音节）时运行；有完整音节的 leading partial 由步骤 4a 处理。
+	// 纯 partial 输入本质上是简拼行为，当 SkipAbbrev=true（简拼关闭）时跳过，避免 "asdf" 等编码按 "a" 提示。
+	skipAbbrev := e.config != nil && e.config.SkipAbbrev
+	if contiguousCount == 0 && len(allSyllables) > 1 && syllableCount == 0 && !skipAbbrev {
 		firstPartial := allSyllables[0]
 		possibles := e.syllableTrie.GetPossibleSyllables(firstPartial)
 		const maxMultiPartialPerSyllable = 5
