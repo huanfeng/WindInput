@@ -59,23 +59,28 @@ func (t *Trie) Search(code string) []candidate.Candidate {
 	return node.candidates
 }
 
-// SearchPrefix 前缀查找，返回所有以 prefix 为前缀的词条
+// SearchPrefix 前缀查找，返回所有以 prefix 为前缀的词条。
+//
+// 跨子树叶节点权重无序，按 DFS 字典序提前 break 会盲选导致召回退化。
+// limit > 0 时遍历整棵子树并用 min-heap top-K 选取最优；limit == 0 时
+// 完整收集后排序，保留"无限制"语义。
 func (t *Trie) SearchPrefix(prefix string, limit int) []candidate.Candidate {
 	node := t.findNode(prefix)
 	if node == nil {
 		return nil
 	}
 
-	var results []candidate.Candidate
-	t.collectAll(node, &results, limit)
+	if limit > 0 {
+		picker := newMemTopKPicker(limit)
+		t.streamAll(node, picker.offer)
+		return picker.sorted()
+	}
 
+	var results []candidate.Candidate
+	t.collectAll(node, &results, 0)
 	sort.SliceStable(results, func(i, j int) bool {
 		return candidate.Better(results[i], results[j])
 	})
-
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
 	return results
 }
 
@@ -100,6 +105,19 @@ func (t *Trie) findNode(code string) *TrieNode {
 		node = child
 	}
 	return node
+}
+
+// streamAll 遍历节点及其所有子节点的候选词，逐个传给 fn。
+// 不应用任何 limit，由调用方自行裁剪（top-K picker 等）。
+func (t *Trie) streamAll(node *TrieNode, fn func(candidate.Candidate)) {
+	if node.isEnd {
+		for _, c := range node.candidates {
+			fn(c)
+		}
+	}
+	for _, child := range node.children {
+		t.streamAll(child, fn)
+	}
 }
 
 // collectAll 收集节点及其所有子节点的候选词

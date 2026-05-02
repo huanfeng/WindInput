@@ -14,7 +14,13 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict/binformat"
+	"github.com/huanfeng/wind_input/internal/dict/hotcache"
 )
+
+// codetableHotPrefixIndexN 内存模式 CodeTable 的 hot index 容量。
+// 与 binformat.HotPrefixIndexN 保持一致，多份 reader（mmap / 内存模式）
+// 指向同一 wdb 文件时通过 hotcache 共享。
+const codetableHotPrefixIndexN = 500
 
 // CodeTableHeader 码表头信息
 type CodeTableHeader struct {
@@ -35,6 +41,9 @@ type CodeTable struct {
 	entries    map[string][]candidate.Candidate // code -> candidates
 	entryOrder int                              // 用于跟踪词条顺序，作为默认权重
 	binReader  *binformat.DictReader            // 二进制模式读取器（mmap）
+	// hotKey：内存模式（LoadBinaryMemory）下 hot index 的缓存键
+	// LoadBinary 模式不需要——查询直接路由到 binReader 自身的 hotcache 路径
+	hotKey hotcache.FileKey
 }
 
 // NewCodeTable 创建新的码表
@@ -81,6 +90,8 @@ func (ct *CodeTable) LoadBinaryMemory(wdbPath string) error {
 		ct.entries[clonedCode] = cloned
 	})
 
+	// hot index 共享键：与同文件 binformat.DictReader 一致，可跨 reader 共享
+	ct.hotKey = hotcache.MakeFileKey(wdbPath)
 	return nil
 }
 
@@ -375,21 +386,54 @@ func (ct *CodeTable) Lookup(code string) []candidate.Candidate {
 	return ct.entries[code]
 }
 
-// LookupPrefix 前缀匹配查找
-func (ct *CodeTable) LookupPrefix(prefix string) []candidate.Candidate {
+// LookupPrefix 前缀匹配查找。
+//
+// 二进制模式：路由到 binReader.LookupPrefix（自带 hot index 与 top-K 优化）。
+// 内存模式：单字母前缀走 hotcache 共享缓存（与同文件 binReader 共享条目）；
+// 多字母前缀用 min-heap top-K，避免对全量候选做 O(N log N) 排序；
+// limit == 0 返回未排序全量（由调用方排序）。
+func (ct *CodeTable) LookupPrefix(prefix string, limit int) []candidate.Candidate {
 	if ct.binReader != nil {
-		return patchIsCommon(ct.binReader.LookupPrefix(prefix, 0))
+		return patchIsCommon(ct.binReader.LookupPrefix(prefix, limit))
 	}
 	prefix = strings.ToLower(prefix)
-	var results []candidate.Candidate
 
+	if len(prefix) == 1 && limit > 0 && limit <= codetableHotPrefixIndexN && ct.hotKey != "" {
+		cached := hotcache.GetOrBuild(ct.hotKey, prefix[0], func() []candidate.Candidate {
+			return ct.scanPrefixMem(prefix, codetableHotPrefixIndexN)
+		})
+		if limit > len(cached) {
+			limit = len(cached)
+		}
+		out := make([]candidate.Candidate, limit)
+		copy(out, cached[:limit])
+		return out
+	}
+
+	if limit > 0 {
+		return ct.scanPrefixMem(prefix, limit)
+	}
+
+	var results []candidate.Candidate
 	for code, candidates := range ct.entries {
 		if strings.HasPrefix(code, prefix) {
 			results = append(results, candidates...)
 		}
 	}
-
 	return results
+}
+
+// scanPrefixMem 遍历 entries map 并通过 min-heap 选 top-K（仅内存模式）。
+func (ct *CodeTable) scanPrefixMem(prefix string, limit int) []candidate.Candidate {
+	picker := newMemTopKPicker(limit)
+	for code, candidates := range ct.entries {
+		if strings.HasPrefix(code, prefix) {
+			for _, c := range candidates {
+				picker.offer(c)
+			}
+		}
+	}
+	return picker.sorted()
 }
 
 // LookupPrefixExcludeExact 前缀匹配查找（排除精确匹配）

@@ -55,11 +55,15 @@ func (l *CodeTableLayer) Search(code string, limit int) []candidate.Candidate {
 	return sorted
 }
 
-// SearchPrefix 前缀查询
+// SearchPrefix 前缀查询。limit 透传到底层 LookupPrefix，复用 binReader 的 top-K
+// 与内存模式的 top-K，避免上层重复全量排序。
 func (l *CodeTableLayer) SearchPrefix(prefix string, limit int) []candidate.Candidate {
-	results := l.codeTable.LookupPrefix(prefix)
-
-	// 排序
+	results := l.codeTable.LookupPrefix(prefix, limit)
+	if limit > 0 {
+		// 底层已用 top-K 排序好，直接返回。
+		return results
+	}
+	// limit == 0：底层未排序，按层契约排序后返回。
 	sorted := make([]candidate.Candidate, len(results))
 	copy(sorted, results)
 	sort.SliceStable(sorted, func(i, j int) bool {
@@ -68,12 +72,6 @@ func (l *CodeTableLayer) SearchPrefix(prefix string, limit int) []candidate.Cand
 		}
 		return sorted[i].NaturalOrder < sorted[j].NaturalOrder
 	})
-
-	// 限制数量
-	if limit > 0 && len(sorted) > limit {
-		sorted = sorted[:limit]
-	}
-
 	return sorted
 }
 
@@ -131,31 +129,34 @@ func (l *SimpleDictLayer) Search(code string, limit int) []candidate.Candidate {
 }
 
 // SearchPrefix 前缀查询
-// SimpleDict 主要用于拼音，前缀匹配需要遍历
+// SimpleDict 主要用于拼音，前缀匹配需要遍历整张表；limit > 0 时用 min-heap
+// top-K 避免对全量做 O(N log N) 排序。
 func (l *SimpleDictLayer) SearchPrefix(prefix string, limit int) []candidate.Candidate {
 	prefix = strings.ToLower(prefix)
-	var results []candidate.Candidate
+	if limit > 0 {
+		picker := newMemTopKPicker(limit)
+		for key, candidates := range l.simpleDict.GetEntries() {
+			if strings.HasPrefix(key, prefix) {
+				for _, c := range candidates {
+					picker.offer(c)
+				}
+			}
+		}
+		return picker.sorted()
+	}
 
-	// 遍历 entries 查找前缀匹配
+	var results []candidate.Candidate
 	for key, candidates := range l.simpleDict.GetEntries() {
 		if strings.HasPrefix(key, prefix) {
 			results = append(results, candidates...)
 		}
 	}
-
-	// 排序
 	sort.SliceStable(results, func(i, j int) bool {
 		if results[i].Weight != results[j].Weight {
 			return results[i].Weight > results[j].Weight
 		}
 		return results[i].NaturalOrder < results[j].NaturalOrder
 	})
-
-	// 限制数量
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
-
 	return results
 }
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/dict/hotcache"
 )
 
 // DictReader 基于 mmap 的词库读取器
@@ -26,7 +27,14 @@ type DictReader struct {
 	hasAbbrev    bool
 	abbrevCount  uint32
 	abbrevIdxOff uint32
+
+	// 进程级 hot index 缓存键（按 path+size+mtime 聚合，多 reader 共享同一份）
+	hotKey hotcache.FileKey
 }
+
+// HotPrefixIndexN 是单字母前缀 hot index 缓存的容量。
+// 取 500 比生产 prefixSafeLimit (200) 留余量，覆盖少量翻页扩展场景。
+const HotPrefixIndexN = 500
 
 // OpenDict 打开二进制词库
 func OpenDict(path string) (*DictReader, error) {
@@ -42,8 +50,9 @@ func OpenDict(path string) (*DictReader, error) {
 	}
 
 	r := &DictReader{
-		mmap: mf,
-		data: data,
+		mmap:   mf,
+		data:   data,
+		hotKey: hotcache.MakeFileKey(path),
 	}
 
 	// 解析文件头
@@ -156,18 +165,48 @@ func (r *DictReader) LookupPhrase(syllables []string) []candidate.Candidate {
 }
 
 // LookupPrefix 前缀查找
+//
+// 单字母前缀走 hot index 快速路径——每首字母对应的 top-N 候选预聚合到进程级
+// hotcache 中，多个 reader 指向同一文件时共享。
+//
+// 多字母前缀走 scanPrefix：跨 key 候选权重无序，提前 break 会盲选字典序前若干
+// key、丢失高权重候选；因此扫描整个子树。limit > 0 时用 min-heap top-K，
+// limit == 0 时完整排序保持"无限制"语义。
 func (r *DictReader) LookupPrefix(prefix string, limit int) []candidate.Candidate {
 	prefix = strings.ToLower(prefix)
 	if len(prefix) == 0 {
 		return nil
 	}
+	if len(prefix) == 1 && limit > 0 && limit <= HotPrefixIndexN {
+		return r.hotPrefixSlice(prefix[0], limit)
+	}
+	return r.scanPrefix(prefix, limit, false)
+}
 
-	// 二分查找第一个 >= prefix 的 key
+// scanPrefix 扫描整个 prefix 子树并返回候选；excludeExact=true 时跳过 code==prefix。
+func (r *DictReader) scanPrefix(prefix string, limit int, excludeExact bool) []candidate.Candidate {
 	keyCount := int(r.header.KeyCount)
 	lo := sort.Search(keyCount, func(i int) bool {
 		code := r.readKeyCode(i)
 		return code >= prefix
 	})
+
+	if limit > 0 {
+		picker := newTopKPicker(limit)
+		for i := lo; i < keyCount; i++ {
+			code := r.readKeyCode(i)
+			if !strings.HasPrefix(code, prefix) {
+				break
+			}
+			if excludeExact && code == prefix {
+				continue
+			}
+			for _, e := range r.readEntries(i) {
+				picker.offer(e)
+			}
+		}
+		return picker.sorted()
+	}
 
 	var results []candidate.Candidate
 	for i := lo; i < keyCount; i++ {
@@ -175,20 +214,29 @@ func (r *DictReader) LookupPrefix(prefix string, limit int) []candidate.Candidat
 		if !strings.HasPrefix(code, prefix) {
 			break
 		}
-		entries := r.readEntries(i)
-		results = append(results, entries...)
-		if limit > 0 && len(results) >= limit*2 {
-			break
+		if excludeExact && code == prefix {
+			continue
 		}
+		results = append(results, r.readEntries(i)...)
 	}
-
 	sort.SliceStable(results, func(i, j int) bool {
 		return candidate.Better(results[i], results[j])
 	})
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
 	return results
+}
+
+// hotPrefixSlice 从 hotcache 取 hot index 并截取前 limit 条返回。
+// 缓存内的切片视为只读——拷贝一份返回，避免上层修改污染缓存。
+func (r *DictReader) hotPrefixSlice(b byte, limit int) []candidate.Candidate {
+	cached := hotcache.GetOrBuild(r.hotKey, b, func() []candidate.Candidate {
+		return r.scanPrefix(string([]byte{b}), HotPrefixIndexN, false)
+	})
+	if limit > len(cached) {
+		limit = len(cached)
+	}
+	out := make([]candidate.Candidate, limit)
+	copy(out, cached[:limit])
+	return out
 }
 
 // HasPrefix 检查是否有以 prefix 开头的词条
@@ -233,41 +281,14 @@ func (r *DictReader) EntryCount() int {
 }
 
 // LookupPrefixExcludeExact 前缀查找（跳过 code == prefix 的精确匹配）
+//
+// 与 LookupPrefix 共享 scanPrefix；不走 hot index（hot index 不区分 exact/非 exact）。
 func (r *DictReader) LookupPrefixExcludeExact(prefix string, limit int) []candidate.Candidate {
 	prefix = strings.ToLower(prefix)
 	if len(prefix) == 0 {
 		return nil
 	}
-
-	keyCount := int(r.header.KeyCount)
-	lo := sort.Search(keyCount, func(i int) bool {
-		code := r.readKeyCode(i)
-		return code >= prefix
-	})
-
-	var results []candidate.Candidate
-	for i := lo; i < keyCount; i++ {
-		code := r.readKeyCode(i)
-		if !strings.HasPrefix(code, prefix) {
-			break
-		}
-		if code == prefix {
-			continue
-		}
-		entries := r.readEntries(i)
-		results = append(results, entries...)
-		if limit > 0 && len(results) >= limit*2 {
-			break
-		}
-	}
-
-	sort.SliceStable(results, func(i, j int) bool {
-		return candidate.Better(results[i], results[j])
-	})
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
-	return results
+	return r.scanPrefix(prefix, limit, true)
 }
 
 // LookupPrefixBFS 广度优先（按码长分层）的前缀查找

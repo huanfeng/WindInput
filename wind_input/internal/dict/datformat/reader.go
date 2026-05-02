@@ -8,7 +8,11 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict/binformat"
+	"github.com/huanfeng/wind_input/internal/dict/hotcache"
 )
+
+// HotPrefixIndexN 单字母 prefix hot index 的容量。详见 binformat.HotPrefixIndexN。
+const HotPrefixIndexN = 500
 
 // WdatReader 通过 mmap 打开 wdat 文件，零反序列化读取 DAT 数组
 type WdatReader struct {
@@ -35,6 +39,9 @@ type WdatReader struct {
 	abbrevEntryBase uint32
 	abbrevCharMap   [256]int32
 	abbrevMaxCode   int32
+
+	// 进程级 hot index 缓存键（按 path+size+mtime 聚合，多 reader 共享同一份）
+	hotKey hotcache.FileKey
 }
 
 // OpenWdat 打开 wdat 文件并映射到内存
@@ -51,8 +58,9 @@ func OpenWdat(path string) (*WdatReader, error) {
 	}
 
 	r := &WdatReader{
-		mmap: mf,
-		data: data,
+		mmap:   mf,
+		data:   data,
+		hotKey: hotcache.MakeFileKey(path),
 	}
 
 	// 解析文件头
@@ -210,34 +218,60 @@ func (r *WdatReader) Lookup(code string) []candidate.Candidate {
 }
 
 // LookupPrefix 前缀查找，收集所有匹配前缀的候选词，按权重排序后截断到 limit
+//
+// 单字母 prefix 走 hot index 快速路径——每首字母对应的 top-N 预聚合结果存于
+// 进程级 hotcache，多个指向同一 wdat 文件的 reader 共享。
+//
+// 多字母 prefix 走 scanPrefix：跨叶节点权重无序，必须遍历整棵子树。
+// limit > 0 用 min-heap top-K，limit == 0 完整排序保留"无限制"语义。
 func (r *WdatReader) LookupPrefix(prefix string, limit int) []candidate.Candidate {
-	dat := r.mainDAT()
-	// 传递 limit 给 PrefixCollect 避免遍历整棵子树。
-	// 每个叶节点可能有多条候选，用 limit*2 确保截断后仍有足够候选。
-	leafLimit := 0
-	if limit > 0 {
-		leafLimit = limit * 2
+	if len(prefix) == 1 && limit > 0 && limit <= HotPrefixIndexN {
+		return r.hotPrefixSlice(prefix[0], limit)
 	}
-	leafIndices := dat.PrefixCollect(prefix, leafLimit)
+	return r.scanPrefix(prefix, limit)
+}
+
+// scanPrefix 扫描整个 prefix 子树并按 limit 选取 top-K（或完整排序）。
+func (r *WdatReader) scanPrefix(prefix string, limit int) []candidate.Candidate {
+	dat := r.mainDAT()
+	leafIndices := dat.PrefixCollect(prefix, 0)
 	if len(leafIndices) == 0 {
 		return nil
+	}
+
+	if limit > 0 {
+		picker := newTopKPicker(limit)
+		for _, leafIdx := range leafIndices {
+			leaf := r.readLeaf(r.leafBase, leafIdx)
+			for _, e := range r.readEntries(r.entryBase, leaf, "") {
+				picker.offer(e)
+			}
+		}
+		return picker.sorted()
 	}
 
 	var all []candidate.Candidate
 	for _, leafIdx := range leafIndices {
 		leaf := r.readLeaf(r.leafBase, leafIdx)
-		entries := r.readEntries(r.entryBase, leaf, "")
-		all = append(all, entries...)
+		all = append(all, r.readEntries(r.entryBase, leaf, "")...)
 	}
-
 	sort.Slice(all, func(i, j int) bool {
 		return candidate.Better(all[i], all[j])
 	})
-
-	if limit > 0 && len(all) > limit {
-		all = all[:limit]
-	}
 	return all
+}
+
+// hotPrefixSlice 从 hotcache 取 hot index 并截取前 limit 条。返回深拷贝。
+func (r *WdatReader) hotPrefixSlice(b byte, limit int) []candidate.Candidate {
+	cached := hotcache.GetOrBuild(r.hotKey, b, func() []candidate.Candidate {
+		return r.scanPrefix(string([]byte{b}), HotPrefixIndexN)
+	})
+	if limit > len(cached) {
+		limit = len(cached)
+	}
+	out := make([]candidate.Candidate, limit)
+	copy(out, cached[:limit])
+	return out
 }
 
 // LookupAbbrev 简拼查找
