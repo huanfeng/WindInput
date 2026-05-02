@@ -1,12 +1,15 @@
 package rpc
 
 import (
+	"archive/zip"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/huanfeng/wind_input/internal/backup"
 	"github.com/huanfeng/wind_input/internal/coordinator"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/perf"
@@ -252,6 +255,298 @@ func (s *SystemService) GetPerfStats(args *rpcapi.Empty, reply *rpcapi.SystemPer
 	reply.Count = stats.Count
 	reply.Capacity = perf.Capacity()
 	reply.Summary = perf.FormatStats(stats)
+	return nil
+}
+
+// PreviewBackup 返回当前数据统计（只读，无需 Pause）
+func (s *SystemService) PreviewBackup(args *rpcapi.Empty, reply *rpcapi.BackupPreview) error {
+	if s.store == nil {
+		return fmt.Errorf("store not available")
+	}
+	schemaIDs, err := s.store.ListSchemaIDs()
+	if err != nil {
+		return err
+	}
+	for _, id := range schemaIDs {
+		uw, err := s.store.AllUserWords(id)
+		if err != nil {
+			s.logger.Debug("PreviewBackup: AllUserWords", "schema", id, "err", err)
+		}
+		tw, err := s.store.AllTempWords(id)
+		if err != nil {
+			s.logger.Debug("PreviewBackup: AllTempWords", "schema", id, "err", err)
+		}
+		freq, err := s.store.AllFreq(id)
+		if err != nil {
+			s.logger.Debug("PreviewBackup: AllFreq", "schema", id, "err", err)
+		}
+		phrases, err := s.store.AllSchemaPhrases(id)
+		if err != nil {
+			s.logger.Debug("PreviewBackup: AllSchemaPhrases", "schema", id, "err", err)
+		}
+		reply.Schemas = append(reply.Schemas, rpcapi.SchemaBackupStats{
+			SchemaID:      id,
+			UserWordCount: len(uw),
+			TempWordCount: len(tw),
+			FreqCount:     len(freq),
+			PhraseCount:   len(phrases),
+		})
+	}
+	gp, err := s.store.AllGlobalPhrases()
+	if err != nil {
+		s.logger.Debug("PreviewBackup: AllGlobalPhrases", "err", err)
+	}
+	reply.GlobalPhrases = len(gp)
+	stats, err := s.store.AllStats()
+	if err != nil {
+		s.logger.Debug("PreviewBackup: AllStats", "err", err)
+	}
+	reply.StatsDays = len(stats)
+	dataDir := filepath.Dir(s.store.Path())
+	reply.ThemeCount = backup.CountThemes(filepath.Join(dataDir, "themes"))
+	var total int64
+	for _, sc := range reply.Schemas {
+		total += int64(sc.UserWordCount*100 + sc.TempWordCount*80 + sc.FreqCount*30)
+	}
+	reply.EstimatedSize = total + int64(reply.StatsDays*500) + 10*1024
+	return nil
+}
+
+// PreviewRestore 读取 ZIP manifest 和统计（只读，无需 Pause）
+func (s *SystemService) PreviewRestore(args *rpcapi.SystemRestoreArgs, reply *rpcapi.RestorePreview) error {
+	m, err := backup.ReadManifestFromZip(args.ZipPath)
+	if err != nil {
+		return fmt.Errorf("invalid backup file: %w", err)
+	}
+	reply.CreatedAt = m.CreatedAt
+	reply.AppVersion = m.AppVersion
+	reply.DataDirMode = m.DataDirMode
+
+	r, err := zip.OpenReader(args.ZipPath)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		reply.TotalSize += int64(f.UncompressedSize64)
+	}
+	for _, id := range backup.ExtractSchemaIDsFromZip(&r.Reader) {
+		reply.Schemas = append(reply.Schemas, rpcapi.SchemaBackupStats{SchemaID: id})
+	}
+	themePrefix := "files/themes/"
+	for _, f := range r.File {
+		if strings.HasPrefix(f.Name, themePrefix) && !strings.HasSuffix(f.Name, "/") {
+			reply.ThemeCount++
+		}
+	}
+	for _, f := range r.File {
+		if f.Name == "db/stats.yaml" {
+			reply.StatsDays = int(f.UncompressedSize64 / 80)
+			break
+		}
+	}
+	return nil
+}
+
+// Backup 将所有用户数据备份到 ZIP 文件
+func (s *SystemService) Backup(args *rpcapi.SystemBackupArgs, reply *rpcapi.SystemBackupReply) error {
+	if s.store == nil {
+		return fmt.Errorf("store not available")
+	}
+	dbPath := s.store.Path()
+	dataDir := filepath.Dir(dbPath)
+
+	if err := s.store.Pause(); err != nil {
+		return fmt.Errorf("pause store: %w", err)
+	}
+	defer func() {
+		if err := s.store.Resume(""); err != nil {
+			s.logger.Error("backup: resume failed", "err", err)
+		}
+	}()
+
+	tmpPath := args.ZipPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("create zip: %w", err)
+	}
+
+	zw := zip.NewWriter(f)
+	m := &backup.Manifest{
+		Version:     "1.0",
+		AppVersion:  "",
+		CreatedAt:   time.Now().Format(time.RFC3339),
+		DataDirMode: "standard",
+	}
+
+	writeErr := func() error {
+		if err := backup.WriteManifestToZip(zw, m); err != nil {
+			return fmt.Errorf("write manifest: %w", err)
+		}
+		if err := backup.CopyDirToZip(zw, dataDir, "files/", []string{"user_data.db"}); err != nil {
+			return fmt.Errorf("copy files: %w", err)
+		}
+		// Pause 后重新打开 DB 读取（db 已关闭，可重新打开）
+		tmpStore, err := store.Open(dbPath)
+		if err != nil {
+			return fmt.Errorf("open db for read: %w", err)
+		}
+		exportErr := backup.ExportDBToZip(zw, tmpStore)
+		closeErr := tmpStore.Close()
+		if exportErr == nil {
+			exportErr = closeErr
+		}
+		if exportErr != nil {
+			return fmt.Errorf("export db: %w", exportErr)
+		}
+		return nil
+	}()
+
+	zw.Close()
+	if err := f.Close(); err != nil && writeErr == nil {
+		writeErr = err
+	}
+
+	if writeErr != nil {
+		os.Remove(tmpPath)
+		return writeErr
+	}
+	if err := os.Rename(tmpPath, args.ZipPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("finalize zip: %w", err)
+	}
+	reply.Path = args.ZipPath
+	s.logger.Info("backup completed", "path", args.ZipPath)
+	return nil
+}
+
+// Restore 从 ZIP 文件还原所有用户数据，完成后触发全量重载
+func (s *SystemService) Restore(args *rpcapi.SystemRestoreArgs, reply *rpcapi.SystemRestoreReply) error {
+	if s.store == nil {
+		return fmt.Errorf("store not available")
+	}
+	// 校验 ZIP（Pause 前拦截）
+	if _, err := backup.ReadManifestFromZip(args.ZipPath); err != nil {
+		return fmt.Errorf("invalid backup file: %w", err)
+	}
+	dataDir := filepath.Dir(s.store.Path())
+
+	if err := s.store.Pause(); err != nil {
+		return fmt.Errorf("pause: %w", err)
+	}
+
+	r, err := zip.OpenReader(args.ZipPath)
+	if err != nil {
+		_ = s.store.Resume("")
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer r.Close()
+
+	tmpDir, err := os.MkdirTemp(filepath.Dir(dataDir), "wind_restore_*")
+	if err != nil {
+		_ = s.store.Resume("")
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+
+	restoreOK := false
+	defer func() {
+		os.RemoveAll(tmpDir)
+		if !restoreOK {
+			_ = s.store.Resume("")
+		}
+	}()
+
+	if err := backup.ExtractZipPrefix(&r.Reader, "files/", tmpDir); err != nil {
+		return fmt.Errorf("extract files: %w", err)
+	}
+
+	newDBPath := filepath.Join(tmpDir, "user_data.db")
+	os.Remove(newDBPath) // 确保从空 DB 开始，忽略不存在错误
+	newStore, err := store.Open(newDBPath)
+	if err != nil {
+		return fmt.Errorf("create restore db: %w", err)
+	}
+	if err := backup.ImportDBFromZip(&r.Reader, newStore); err != nil {
+		newStore.Close()
+		return fmt.Errorf("import db: %w", err)
+	}
+	newStore.Close()
+
+	if err := backup.AtomicReplaceDir(tmpDir, dataDir); err != nil {
+		return fmt.Errorf("replace data dir: %w", err)
+	}
+	restoreOK = true
+
+	if err := s.store.Resume(""); err != nil {
+		restoreOK = false // 让 defer 再试一次
+		return fmt.Errorf("resume after restore: %w", err)
+	}
+
+	// 全量重载
+	if s.configReloader != nil {
+		if err := s.configReloader.ReloadConfig(); err != nil {
+			s.logger.Warn("restore: reload config failed", "err", err)
+		}
+	}
+	if s.dm != nil {
+		if err := s.dm.ReloadPhrases(); err != nil {
+			s.logger.Warn("restore: reload phrases failed", "err", err)
+		}
+	}
+
+	reply.OK = true
+	s.logger.Info("restore completed", "zip", args.ZipPath)
+	return nil
+}
+
+// Reset 清除所有用户数据，恢复出厂设置，完成后触发全量重载
+func (s *SystemService) Reset(args *rpcapi.Empty, reply *rpcapi.SystemResetReply) error {
+	if s.store == nil {
+		return fmt.Errorf("store not available")
+	}
+	dataDir := filepath.Dir(s.store.Path())
+
+	if err := s.store.Pause(); err != nil {
+		return fmt.Errorf("pause: %w", err)
+	}
+	resumeDeferred := false
+	defer func() {
+		if !resumeDeferred {
+			if err := s.store.Resume(""); err != nil {
+				s.logger.Error("reset: deferred resume failed", "err", err)
+			}
+		}
+	}()
+
+	entries, _ := os.ReadDir(dataDir)
+	var lastErr error
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dataDir, e.Name())); err != nil {
+			s.logger.Error("reset: remove failed", "name", e.Name(), "err", err)
+			lastErr = err
+		}
+	}
+
+	resumeDeferred = true
+	if err := s.store.Resume(""); err != nil {
+		s.logger.Error("reset: resume failed, will retry in defer", "err", err)
+		resumeDeferred = false // 让 defer 重试
+		return fmt.Errorf("resume after reset: %w", err)
+	}
+
+	if s.configReloader != nil {
+		_ = s.configReloader.ReloadConfig()
+	}
+	if s.dm != nil {
+		_ = s.dm.ReloadPhrases()
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("some files could not be deleted: %w", lastErr)
+	}
+	reply.OK = true
+	s.logger.Info("reset completed")
 	return nil
 }
 

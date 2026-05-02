@@ -585,6 +585,36 @@ func (c *Client) ConfigSetActiveSchema(schemaID string) error {
 	return c.call("Config.SetActiveSchema", &SetActiveSchemaArgs{SchemaID: schemaID}, &Empty{})
 }
 
+// ── 备份/还原/重置方法 ──
+
+func (c *Client) SystemPreviewBackup() (*BackupPreview, error) {
+	var reply BackupPreview
+	err := c.call("System.PreviewBackup", &Empty{}, &reply)
+	return &reply, err
+}
+
+func (c *Client) SystemPreviewRestore(zipPath string) (*RestorePreview, error) {
+	var reply RestorePreview
+	err := c.call("System.PreviewRestore", &SystemRestoreArgs{ZipPath: zipPath}, &reply)
+	return &reply, err
+}
+
+func (c *Client) SystemBackup(zipPath string) (*SystemBackupReply, error) {
+	var reply SystemBackupReply
+	err := c.call("System.Backup", &SystemBackupArgs{ZipPath: zipPath}, &reply)
+	return &reply, err
+}
+
+func (c *Client) SystemRestore(zipPath string) error {
+	var reply SystemRestoreReply
+	return c.call("System.Restore", &SystemRestoreArgs{ZipPath: zipPath}, &reply)
+}
+
+func (c *Client) SystemReset() error {
+	var reply SystemResetReply
+	return c.call("System.Reset", &Empty{}, &reply)
+}
+
 // ── Event 方法 ──
 
 // SubscribeEvents connects to the event pipe and calls handler for each event.

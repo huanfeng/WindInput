@@ -719,3 +719,52 @@ type DictGeneratePinyinCodeArgs struct {
 type DictGeneratePinyinCodeReply struct {
 	Code string `json:"code"` // 全拼编码，如 "nihao"；空串表示无法生成
 }
+
+// ── 备份/还原/重置 ──
+
+type SchemaBackupStats struct {
+	SchemaID      string `json:"schema_id"`
+	UserWordCount int    `json:"user_word_count"`
+	TempWordCount int    `json:"temp_word_count"`
+	FreqCount     int    `json:"freq_count"`
+	PhraseCount   int    `json:"phrase_count"`
+}
+
+type BackupPreview struct {
+	Schemas       []SchemaBackupStats `json:"schemas"`
+	GlobalPhrases int                 `json:"global_phrases"`
+	ThemeCount    int                 `json:"theme_count"`
+	StatsDays     int                 `json:"stats_days"`
+	EstimatedSize int64               `json:"estimated_size"`
+}
+
+type RestorePreview struct {
+	CreatedAt     string              `json:"created_at"`
+	AppVersion    string              `json:"app_version"`
+	DataDirMode   string              `json:"data_dir_mode"`
+	Schemas       []SchemaBackupStats `json:"schemas"`
+	GlobalPhrases int                 `json:"global_phrases"`
+	ThemeCount    int                 `json:"theme_count"`
+	StatsDays     int                 `json:"stats_days"`
+	TotalSize     int64               `json:"total_size"`
+}
+
+type SystemBackupArgs struct {
+	ZipPath string `json:"zip_path"`
+}
+
+type SystemBackupReply struct {
+	Path string `json:"path"`
+}
+
+type SystemRestoreArgs struct {
+	ZipPath string `json:"zip_path"`
+}
+
+type SystemRestoreReply struct {
+	OK bool `json:"ok"`
+}
+
+type SystemResetReply struct {
+	OK bool `json:"ok"`
+}

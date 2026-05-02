@@ -1055,3 +1055,69 @@ export async function clearStatsBefore(
     days,
   ) as Promise<StatsPruneResult>;
 }
+
+// ===== 数据备份/还原/重置 =====
+
+export interface SchemaBackupStats {
+  schema_id: string;
+  user_word_count: number;
+  temp_word_count: number;
+  freq_count: number;
+  phrase_count: number;
+}
+
+export interface BackupPreview {
+  schemas: SchemaBackupStats[];
+  global_phrases: number;
+  theme_count: number;
+  stats_days: number;
+  estimated_size: number;
+}
+
+export interface RestorePreview {
+  created_at: string;
+  app_version: string;
+  data_dir_mode: string;
+  schemas: SchemaBackupStats[];
+  global_phrases: number;
+  theme_count: number;
+  stats_days: number;
+  total_size: number;
+}
+
+export interface BackupPreviewResult {
+  preview?: BackupPreview;
+  error?: string;
+}
+
+export interface RestorePreviewResult {
+  cancelled: boolean;
+  zip_path?: string;
+  preview?: RestorePreview;
+  error?: string;
+}
+
+export interface BackupResult {
+  cancelled: boolean;
+  error?: string;
+}
+
+export async function getBackupPreview(): Promise<BackupPreviewResult> {
+  return App.GetBackupPreview() as unknown as BackupPreviewResult;
+}
+
+export async function backupData(): Promise<BackupResult> {
+  return App.BackupData() as unknown as BackupResult;
+}
+
+export async function getRestorePreview(): Promise<RestorePreviewResult> {
+  return App.GetRestorePreview() as unknown as RestorePreviewResult;
+}
+
+export async function restoreData(zipPath: string): Promise<string> {
+  return App.RestoreData(zipPath) as unknown as string;
+}
+
+export async function resetData(): Promise<string> {
+  return App.ResetData() as unknown as string;
+}

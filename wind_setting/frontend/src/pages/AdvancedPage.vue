@@ -25,6 +25,23 @@
           >
         </div>
       </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>数据备份与还原</label>
+          <p class="setting-hint">备份用户词库、词频、短语及统计数据</p>
+        </div>
+        <div class="setting-control" style="display: flex; gap: 8px">
+          <Button variant="outline" size="sm" @click="handleBackupPreview"
+            >备份数据</Button
+          >
+          <Button variant="outline" size="sm" @click="handleRestorePreview"
+            >还原数据</Button
+          >
+          <Button variant="outline" size="sm" @click="resetConfirmOpen = true"
+            >重置数据</Button
+          >
+        </div>
+      </div>
     </div>
 
     <div class="settings-card">
@@ -197,6 +214,134 @@
       </DialogContent>
     </Dialog>
 
+    <!-- 备份预览确认弹窗 -->
+    <Dialog v-model:open="backupPreviewOpen">
+      <DialogContent class="max-w-md">
+        <DialogHeader>
+          <DialogTitle>备份数据</DialogTitle>
+        </DialogHeader>
+        <div v-if="backupPreview" class="backup-stats">
+          <div class="stat-row">
+            <span class="stat-label">包含方案数</span>
+            <span class="stat-value">{{ backupPreview.schemas.length }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">用户词条</span>
+            <span class="stat-value">{{
+              backupPreview.schemas.reduce((s, r) => s + r.user_word_count, 0)
+            }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">全局短语</span>
+            <span class="stat-value">{{ backupPreview.global_phrases }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">统计天数</span>
+            <span class="stat-value">{{ backupPreview.stats_days }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">主题数量</span>
+            <span class="stat-value">{{ backupPreview.theme_count }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">预估大小</span>
+            <span class="stat-value">{{
+              formatBytes(backupPreview.estimated_size)
+            }}</span>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" @click="backupPreviewOpen = false"
+            >取消</Button
+          >
+          <Button size="sm" :disabled="backupLoading" @click="handleDoBackup">
+            {{ backupLoading ? "备份中…" : "选择位置并备份" }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 还原预览确认弹窗 -->
+    <Dialog v-model:open="restorePreviewOpen">
+      <DialogContent class="max-w-md">
+        <DialogHeader>
+          <DialogTitle>还原数据</DialogTitle>
+        </DialogHeader>
+        <div v-if="restorePending" class="backup-stats">
+          <p class="restore-warning">
+            还原后将覆盖当前所有用户数据，操作不可撤销。
+          </p>
+          <div class="stat-row">
+            <span class="stat-label">备份时间</span>
+            <span class="stat-value">{{
+              restorePending.preview.created_at
+            }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">程序版本</span>
+            <span class="stat-value">{{
+              restorePending.preview.app_version
+            }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">包含方案数</span>
+            <span class="stat-value">{{
+              restorePending.preview.schemas.length
+            }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">全局短语</span>
+            <span class="stat-value">{{
+              restorePending.preview.global_phrases
+            }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">统计天数</span>
+            <span class="stat-value">{{
+              restorePending.preview.stats_days
+            }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">文件大小</span>
+            <span class="stat-value">{{
+              formatBytes(restorePending.preview.total_size)
+            }}</span>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            size="sm"
+            @click="restorePreviewOpen = false"
+            >取消</Button
+          >
+          <Button size="sm" :disabled="restoreLoading" @click="handleDoRestore">
+            {{ restoreLoading ? "还原中…" : "确认还原" }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 重置确认弹窗 -->
+    <Dialog v-model:open="resetConfirmOpen">
+      <DialogContent class="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>重置所有用户数据</DialogTitle>
+        </DialogHeader>
+        <p class="restore-warning">
+          此操作将清除所有用户词库、词频、短语及统计数据，且无法撤销。建议先备份数据。
+        </p>
+        <DialogFooter>
+          <Button variant="outline" size="sm" @click="resetConfirmOpen = false"
+            >取消</Button
+          >
+          <Button size="sm" :disabled="resetLoading" @click="handleDoReset">
+            {{ resetLoading ? "重置中…" : "确认重置" }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <DataDirDialog
       :visible="dataDirDialogVisible"
       @update:visible="dataDirDialogVisible = $event"
@@ -209,7 +354,11 @@
 import { computed, ref, onMounted } from "vue";
 import type { Config, TSFLogConfig } from "../api/settings";
 import * as wailsApi from "../api/wails";
-import type { PerfStatsResult } from "../api/wails";
+import type {
+  PerfStatsResult,
+  BackupPreview,
+  RestorePreview,
+} from "../api/wails";
 import { useToast } from "../composables/useToast";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -319,6 +468,112 @@ async function onDataDirChanged() {
   }
 }
 
+// ── 备份/还原/重置 ──
+const backupPreviewOpen = ref(false);
+const backupPreview = ref<BackupPreview | null>(null);
+const backupLoading = ref(false);
+
+const restorePreviewOpen = ref(false);
+const restorePending = ref<{
+  zipPath: string;
+  preview: RestorePreview;
+} | null>(null);
+const restoreLoading = ref(false);
+
+const resetConfirmOpen = ref(false);
+const resetLoading = ref(false);
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+async function handleBackupPreview() {
+  try {
+    const result = await wailsApi.getBackupPreview();
+    if (result.error) {
+      toast("获取备份信息失败: " + result.error, "error");
+      return;
+    }
+    backupPreview.value = result.preview!;
+    backupPreviewOpen.value = true;
+  } catch (e: any) {
+    toast("获取备份信息失败: " + (e.message || e), "error");
+  }
+}
+
+async function handleDoBackup() {
+  backupLoading.value = true;
+  try {
+    const result = await wailsApi.backupData();
+    backupPreviewOpen.value = false;
+    if (result.cancelled) return;
+    if (result.error) {
+      toast("备份失败: " + result.error, "error");
+      return;
+    }
+    toast("备份成功");
+  } catch (e: any) {
+    toast("备份失败: " + (e.message || e), "error");
+  } finally {
+    backupLoading.value = false;
+  }
+}
+
+async function handleRestorePreview() {
+  try {
+    const result = await wailsApi.getRestorePreview();
+    if (result.cancelled) return;
+    if (result.error) {
+      toast("读取备份文件失败: " + result.error, "error");
+      return;
+    }
+    restorePending.value = {
+      zipPath: result.zip_path!,
+      preview: result.preview!,
+    };
+    restorePreviewOpen.value = true;
+  } catch (e: any) {
+    toast("读取备份文件失败: " + (e.message || e), "error");
+  }
+}
+
+async function handleDoRestore() {
+  if (!restorePending.value) return;
+  restoreLoading.value = true;
+  try {
+    const errMsg = await wailsApi.restoreData(restorePending.value.zipPath);
+    restorePreviewOpen.value = false;
+    if (errMsg) {
+      toast("还原失败: " + errMsg, "error");
+      return;
+    }
+    toast("还原成功，配置已重新加载");
+  } catch (e: any) {
+    toast("还原失败: " + (e.message || e), "error");
+  } finally {
+    restoreLoading.value = false;
+  }
+}
+
+async function handleDoReset() {
+  resetLoading.value = true;
+  try {
+    const errMsg = await wailsApi.resetData();
+    resetConfirmOpen.value = false;
+    if (errMsg) {
+      toast("重置失败: " + errMsg, "error");
+      return;
+    }
+    toast("已重置所有用户数据");
+  } catch (e: any) {
+    toast("重置失败: " + (e.message || e), "error");
+  } finally {
+    resetLoading.value = false;
+  }
+}
+
 const showSensitiveLogWarning = computed(() => {
   const serviceLevel = props.formData.advanced.log_level;
   const tsfLevel = props.tsfLogConfig.level;
@@ -343,5 +598,27 @@ const showSensitiveLogWarning = computed(() => {
   max-height: 50vh;
   white-space: pre;
   word-break: normal;
+}
+.backup-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.9em;
+}
+.stat-label {
+  color: hsl(var(--muted-foreground));
+}
+.stat-value {
+  font-weight: 500;
+}
+.restore-warning {
+  font-size: 0.875em;
+  color: hsl(var(--warning));
+  margin-bottom: 8px;
 }
 </style>
