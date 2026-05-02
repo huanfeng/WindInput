@@ -334,11 +334,21 @@ func (s *Schema) GetDefaultDictSpec() *DictSpec {
 	return nil
 }
 
+// PinyinSharedDictID 拼音方案共享的用户词库方案 ID。
+// 全拼、双拼等所有拼音类方案的用户词库均存储在此 bucket 下，
+// 以便共用同一份词库（仅含词和权重，编码由引擎自动生成）。
+const PinyinSharedDictID = "pinyin"
+
 // DataSchemaID 返回数据方案 ID
-// 混输方案返回主方案 ID（与主方案共享用户数据），其他返回自身 ID
+// 混输方案返回主方案 ID（与主方案共享用户数据）；
+// 拼音方案统一返回 PinyinSharedDictID（全拼/双拼共用一份词库）；
+// 其他返回自身 ID。
 func (s *Schema) DataSchemaID() string {
 	if s.Engine.Type == EngineTypeMixed && s.Engine.Mixed != nil && s.Engine.Mixed.PrimarySchema != "" {
 		return s.Engine.Mixed.PrimarySchema
+	}
+	if s.Engine.Type == EngineTypePinyin {
+		return PinyinSharedDictID
 	}
 	return s.Schema.ID
 }

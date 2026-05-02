@@ -173,6 +173,9 @@ export interface SchemaDictStatsItem {
   schema_id: string;
   schema_name: string;
   icon_label: string;
+  engine_type: string;
+  data_schema_id: string;
+  alias_ids: string[];
   word_count: number;
   shadow_count: number;
   temp_word_count: number;
@@ -450,6 +453,17 @@ export async function clearUserDictForSchema(
   schemaID: string,
 ): Promise<number> {
   return App.ClearUserDictForSchema(schemaID);
+}
+
+export async function generatePinyinCode(text: string): Promise<string> {
+  return App.GeneratePinyinCode(text);
+}
+
+export async function encodeWordForSchema(
+  schemaID: string,
+  text: string,
+): Promise<string> {
+  return App.EncodeWordForSchema(schemaID, text);
 }
 
 export async function getUserDictBySchema(
@@ -820,12 +834,18 @@ export async function getPerfStats(): Promise<PerfStatsResult> {
   return App.GetPerfStats() as unknown as PerfStatsResult;
 }
 
-export async function readPerfFile(): Promise<PerfDumpResult & { content: string }> {
+export async function readPerfFile(): Promise<
+  PerfDumpResult & { content: string }
+> {
   return App.ReadPerfFile() as unknown as PerfDumpResult & { content: string };
 }
 
-export async function exportPerfData(): Promise<PerfDumpResult & { cancelled: boolean }> {
-  return App.ExportPerfData() as unknown as PerfDumpResult & { cancelled: boolean };
+export async function exportPerfData(): Promise<
+  PerfDumpResult & { cancelled: boolean }
+> {
+  return App.ExportPerfData() as unknown as PerfDumpResult & {
+    cancelled: boolean;
+  };
 }
 
 // 重置用户数据

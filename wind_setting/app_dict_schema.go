@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/huanfeng/wind_input/pkg/config"
@@ -11,12 +12,15 @@ import (
 
 // SchemaDictStats 方案词库统计信息
 type SchemaDictStats struct {
-	SchemaID      string `json:"schema_id"`
-	SchemaName    string `json:"schema_name"`
-	IconLabel     string `json:"icon_label"`
-	WordCount     int    `json:"word_count"`
-	ShadowCount   int    `json:"shadow_count"`
-	TempWordCount int    `json:"temp_word_count"`
+	SchemaID      string   `json:"schema_id"`
+	SchemaName    string   `json:"schema_name"`
+	IconLabel     string   `json:"icon_label"`
+	EngineType    string   `json:"engine_type"`
+	DataSchemaID  string   `json:"data_schema_id"` // 实际存储桶 ID（用于分组合并）
+	AliasIDs      []string `json:"alias_ids"`      // 合并前各子方案的原始 ID
+	WordCount     int      `json:"word_count"`
+	ShadowCount   int      `json:"shadow_count"`
+	TempWordCount int      `json:"temp_word_count"`
 }
 
 // TempWordItem 临时词条（前端展示用）
@@ -64,9 +68,11 @@ func (a *App) GetEnabledSchemasWithDictStats() ([]SchemaDictStats, error) {
 			SchemaID:   schemaID,
 			SchemaName: info.Name,
 			IconLabel:  info.IconLabel,
+			EngineType: info.EngineType,
 		}
 
 		if schemaStats, err := a.rpcClient.DictGetSchemaStats(schemaID); err == nil {
+			stats.DataSchemaID = schemaStats.DataSchemaID
 			stats.WordCount = schemaStats.WordCount
 			stats.ShadowCount = schemaStats.ShadowCount
 			stats.TempWordCount = schemaStats.TempWordCount
@@ -93,8 +99,10 @@ func (a *App) GetEnabledSchemasWithDictStats() ([]SchemaDictStats, error) {
 			SchemaID:   refID,
 			SchemaName: info.Name,
 			IconLabel:  info.IconLabel,
+			EngineType: info.EngineType,
 		}
 		if schemaStats, err := a.rpcClient.DictGetSchemaStats(refID); err == nil {
+			stats.DataSchemaID = schemaStats.DataSchemaID
 			stats.WordCount = schemaStats.WordCount
 			stats.ShadowCount = schemaStats.ShadowCount
 			stats.TempWordCount = schemaStats.TempWordCount
@@ -102,7 +110,77 @@ func (a *App) GetEnabledSchemasWithDictStats() ([]SchemaDictStats, error) {
 		result = append(result, stats)
 	}
 
+	// 将指向同一数据存储桶的方案合并为单条记录（如全拼/双拼共享 "pinyin" 桶）
+	result = mergeSharedSchemas(result)
+
 	return result, nil
+}
+
+// mergeSharedSchemas 按 DataSchemaID 分组，将共享同一存储桶的方案合并为单条记录
+func mergeSharedSchemas(items []SchemaDictStats) []SchemaDictStats {
+	type group struct{ items []SchemaDictStats }
+	groups := make(map[string]*group)
+	order := make([]string, 0, len(items))
+
+	for _, s := range items {
+		dataID := s.DataSchemaID
+		if dataID == "" {
+			dataID = s.SchemaID
+		}
+		if _, ok := groups[dataID]; !ok {
+			groups[dataID] = &group{}
+			order = append(order, dataID)
+		}
+		groups[dataID].items = append(groups[dataID].items, s)
+	}
+
+	result := make([]SchemaDictStats, 0, len(order))
+	for _, dataID := range order {
+		g := groups[dataID]
+		if len(g.items) == 1 && g.items[0].SchemaID == dataID {
+			result = append(result, g.items[0])
+			continue
+		}
+		// 多个方案或 SchemaID 与数据桶不同：合并为一条，SchemaID 使用数据桶 ID
+		merged := g.items[0]
+		merged.SchemaID = dataID
+		merged.DataSchemaID = dataID
+		// 收集所有原始方案 ID 作为别名，供前端匹配 initialSchema
+		aliasIDs := make([]string, len(g.items))
+		for i, it := range g.items {
+			aliasIDs[i] = it.SchemaID
+		}
+		merged.AliasIDs = aliasIDs
+		if len(g.items) > 1 {
+			names := make([]string, len(g.items))
+			for i, it := range g.items {
+				names[i] = it.SchemaName
+			}
+			merged.SchemaName = strings.Join(names, " / ") + "（共享词库）"
+		}
+		result = append(result, merged)
+	}
+	return result
+}
+
+// EncodeWordForSchema 使用码表方案的反向编码为词语生成编码（用于加词时自动填充）
+func (a *App) EncodeWordForSchema(schemaID, text string) (string, error) {
+	if text == "" {
+		return "", nil
+	}
+	reply, err := a.rpcClient.DictBatchEncode(schemaID, []string{text})
+	if err != nil {
+		return "", fmt.Errorf("编码失败: %w", err)
+	}
+	if len(reply.Results) > 0 && reply.Results[0].Code != "" {
+		return reply.Results[0].Code, nil
+	}
+	return "", nil
+}
+
+// GeneratePinyinCode 为文字生成全拼编码（用于拼音方案加词时自动填充）
+func (a *App) GeneratePinyinCode(text string) (string, error) {
+	return a.rpcClient.DictGeneratePinyinCode(text)
 }
 
 // GetUserDictBySchema 获取指定方案的用户词库

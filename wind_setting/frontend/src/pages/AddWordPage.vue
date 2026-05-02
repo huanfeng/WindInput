@@ -11,10 +11,37 @@
             class="addword-input"
             v-model="wordText"
             placeholder="输入要添加的词语"
+            @input="onTextInput"
           />
         </div>
 
-        <div class="addword-field">
+        <!-- 有自动编码支持的方案（拼音/码表）：显示可编辑编码字段 + 刷新按钮 -->
+        <div v-if="hasAutoEncode" class="addword-field">
+          <label class="addword-label">
+            {{ codeLabel }}
+            <span class="addword-hint">{{ codeHint }}</span>
+          </label>
+          <div class="addword-code-row">
+            <input
+              class="addword-input addword-input-grow"
+              v-model="wordCode"
+              :placeholder="codePlaceholder"
+              :class="{ 'addword-input-generating': generatingCode }"
+            />
+            <button
+              class="addword-gen-btn"
+              type="button"
+              @click="autoGenerateCode"
+              :disabled="!wordText.trim() || generatingCode"
+              title="重新生成编码"
+            >
+              ↺
+            </button>
+          </div>
+        </div>
+
+        <!-- 其他方案：编码纯手动必填 -->
+        <div v-else class="addword-field">
           <label class="addword-label">编码</label>
           <input
             class="addword-input"
@@ -68,7 +95,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from "vue";
+import { ref, computed, onMounted, nextTick, watch } from "vue";
 import * as wailsApi from "../api/wails";
 import { useToast } from "../composables/useToast";
 import { Button } from "@/components/ui/button";
@@ -83,6 +110,8 @@ import {
 interface SchemaItem {
   id: string;
   name: string;
+  engineType: string;
+  aliasIds: string[];
 }
 
 const props = defineProps<{
@@ -103,14 +132,77 @@ const wordWeight = ref(1200);
 const schemas = ref<SchemaItem[]>([]);
 const { toast } = useToast();
 const adding = ref(false);
+const generatingCode = ref(false);
 const textInput = ref<HTMLInputElement | null>(null);
 
+const currentSchema = computed(() =>
+  schemas.value.find((s) => s.id === schemaID.value),
+);
+const isPinyin = computed(() => currentSchema.value?.engineType === "pinyin");
+const isCodetable = computed(
+  () => currentSchema.value?.engineType === "codetable",
+);
+
+// 有自动编码支持的方案
+const hasAutoEncode = computed(() => isPinyin.value || isCodetable.value);
+
+const codeLabel = computed(() => (isPinyin.value ? "拼音" : "编码"));
+const codeHint = computed(() =>
+  isPinyin.value ? "自动生成，多音字可手动修改" : "自动生成，可手动修改",
+);
+const codePlaceholder = computed(() =>
+  isPinyin.value ? "全拼（如 nihao）" : "编码（如 abcd）",
+);
+
 const canAdd = computed(() => {
-  return (
-    wordText.value.trim().length >= 1 &&
-    wordCode.value.trim().length > 0 &&
-    wordWeight.value > 0
-  );
+  const hasText = wordText.value.trim().length >= 1;
+  const hasWeight = wordWeight.value > 0;
+  if (isPinyin.value) {
+    // 拼音方案：编码可空（服务端自动生成）
+    return hasText && hasWeight;
+  }
+  // 码表及其他方案：编码必填
+  return hasText && wordCode.value.trim().length > 0 && hasWeight;
+});
+
+async function autoGenerateCode() {
+  const text = wordText.value.trim();
+  if (!text) return;
+  generatingCode.value = true;
+  try {
+    let code = "";
+    if (isPinyin.value) {
+      code = await wailsApi.generatePinyinCode(text);
+    } else if (isCodetable.value) {
+      code = await wailsApi.encodeWordForSchema(schemaID.value, text);
+    }
+    wordCode.value = code;
+  } catch {
+    // 生成失败时保留用户输入，不强制清空
+  } finally {
+    generatingCode.value = false;
+  }
+}
+
+let autoGenTimer: ReturnType<typeof setTimeout> | null = null;
+
+function onTextInput() {
+  if (!hasAutoEncode.value) return;
+  if (autoGenTimer) clearTimeout(autoGenTimer);
+  autoGenTimer = setTimeout(() => {
+    autoGenerateCode();
+  }, 300);
+}
+
+// 切换方案时重新生成编码
+watch(schemaID, () => {
+  if (hasAutoEncode.value && wordText.value.trim()) {
+    autoGenerateCode();
+  } else if (!hasAutoEncode.value) {
+    if (wordCode.value && !props.initialCode) {
+      wordCode.value = "";
+    }
+  }
 });
 
 async function handleAdd() {
@@ -122,13 +214,11 @@ async function handleAdd() {
 
   adding.value = true;
   try {
-    // 先检查是否已存在（通过搜索用户词库）
     if (schemaID.value) {
       const existing = await wailsApi.getUserDictBySchema(schemaID.value);
       const found = existing.find((w) => w.code === code && w.text === text);
       if (found) {
         toast(`该词已存在 (${text}: ${code})，已更新权重`);
-        // 更新权重（AddUserWord 内部会覆盖已有条目）
         await wailsApi.addUserWordForSchema(schemaID.value, code, text, weight);
         await wailsApi.notifyReload("userdict");
         adding.value = false;
@@ -139,9 +229,9 @@ async function handleAdd() {
       await wailsApi.addUserWord(code, text, weight);
     }
     await wailsApi.notifyReload("userdict");
-    toast(`已添加: ${text} (${code})`);
+    const displayCode = code || "(自动生成)";
+    toast(`已添加: ${text} (${displayCode})`);
 
-    // 添加成功后清空输入，方便继续加词
     wordText.value = "";
     wordCode.value = "";
     await nextTick();
@@ -160,7 +250,12 @@ function handleCancel() {
 onMounted(async () => {
   try {
     const list = await wailsApi.getEnabledSchemasWithDictStats();
-    schemas.value = list.map((s) => ({ id: s.schema_id, name: s.schema_name }));
+    schemas.value = list.map((s) => ({
+      id: s.schema_id,
+      name: s.schema_name,
+      engineType: s.engine_type,
+      aliasIds: s.alias_ids || [],
+    }));
   } catch {
     schemas.value = [];
   }
@@ -168,9 +263,18 @@ onMounted(async () => {
   if (props.initialText) wordText.value = props.initialText;
   if (props.initialCode) wordCode.value = props.initialCode;
   if (props.initialSchema) {
-    schemaID.value = props.initialSchema;
+    // 先精确匹配，再按 aliasIds 匹配（双拼方案合并到 pinyin 桶后 id 变为 "pinyin"）
+    const matched =
+      schemas.value.find((s) => s.id === props.initialSchema) ||
+      schemas.value.find((s) => s.aliasIds.includes(props.initialSchema!));
+    schemaID.value = matched ? matched.id : schemas.value[0]?.id || "";
   } else if (schemas.value.length > 0) {
     schemaID.value = schemas.value[0].id;
+  }
+
+  // 初始化时若有词语但无编码，自动生成
+  if (hasAutoEncode.value && wordText.value.trim() && !wordCode.value) {
+    await autoGenerateCode();
   }
 
   await nextTick();
@@ -252,12 +356,43 @@ onMounted(async () => {
   color: hsl(var(--muted-foreground));
 }
 
+.addword-input-generating {
+  opacity: 0.6;
+}
+
 .addword-weight {
   width: 120px;
 }
 
-.addword-select {
+.addword-code-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.addword-input-grow {
+  flex: 1;
+}
+
+.addword-gen-btn {
+  padding: 7px 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  font-size: 14px;
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
   cursor: pointer;
+  transition: background 0.15s;
+  line-height: 1;
+}
+
+.addword-gen-btn:hover:not(:disabled) {
+  background: hsl(var(--accent));
+}
+
+.addword-gen-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .addword-actions {

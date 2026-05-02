@@ -39,6 +39,8 @@ type Server struct {
 	statusProvider StatusProvider
 	configReloader ConfigReloader
 	batchEncoder   BatchEncoder
+	pinyinCodeGen  PinyinCodeGenerator
+	schemaIDMapper SchemaIDMapper
 
 	paused bool // 服务暂停状态
 
@@ -88,6 +90,17 @@ type BatchEncoder interface {
 	BatchEncode(words []string) []rpcapi.EncodeResultItem
 }
 
+// PinyinCodeGenerator 拼音编码生成接口（由 engine.Manager 实现）
+type PinyinCodeGenerator interface {
+	GeneratePinyinCode(word string) string
+}
+
+// SchemaIDMapper 方案 ID → 数据存储 ID 的映射接口（由 engine.Manager 实现）
+// 用于将双拼等方案 ID 映射到共享的 "pinyin" 存储桶
+type SchemaIDMapper interface {
+	DataSchemaID(schemaID string) string
+}
+
 // NewServer 创建 IPC 服务端
 func NewServer(logger *slog.Logger, dm *dict.DictManager, s *store.Store) *Server {
 	return &Server{
@@ -121,6 +134,20 @@ func (s *Server) SetBatchEncoder(encoder BatchEncoder) {
 	s.batchEncoder = encoder
 }
 
+// SetPinyinCodeGenerator 设置拼音编码生成器
+func (s *Server) SetPinyinCodeGenerator(gen PinyinCodeGenerator) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pinyinCodeGen = gen
+}
+
+// SetSchemaIDMapper 设置方案 ID 映射器（用于双拼等方案共享拼音词库）
+func (s *Server) SetSchemaIDMapper(mapper SchemaIDMapper) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.schemaIDMapper = mapper
+}
+
 // SetStatCollector 设置统计采集器
 func (s *Server) SetStatCollector(sc *store.StatCollector) {
 	s.mu.Lock()
@@ -152,7 +179,7 @@ func (s *Server) Start() error {
 	s.mu.Unlock()
 
 	// 创建服务实例
-	dictSvc := &DictService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster, batchEncoder: s.batchEncoder}
+	dictSvc := &DictService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster, batchEncoder: s.batchEncoder, pinyinCodeGen: s.pinyinCodeGen, schemaIDMapper: s.schemaIDMapper}
 	shadowSvc := &ShadowService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
 	systemSvc := &SystemService{dm: s.dictManager, store: s.store, server: s, logger: s.logger, configReloader: s.configReloader}
 	phraseSvc := &PhraseService{store: s.store, dm: s.dictManager, logger: s.logger, broadcaster: s.broadcaster}
@@ -177,6 +204,7 @@ func (s *Server) Start() error {
 	RegisterMethod(s.router, "Dict.ClearFreq", dictSvc.ClearFreq)
 	RegisterMethod(s.router, "Dict.BatchEncode", dictSvc.BatchEncode)
 	RegisterMethod(s.router, "Dict.FreqBatchPut", dictSvc.FreqBatchPut)
+	RegisterMethod(s.router, "Dict.GeneratePinyinCode", dictSvc.GeneratePinyinCode)
 
 	// 注册 Shadow 方法
 	RegisterMethod(s.router, "Shadow.Pin", shadowSvc.Pin)

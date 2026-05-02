@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-20 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-20 | Updated: 2026-05-02 -->
 
 # pkg/rpcapi
 

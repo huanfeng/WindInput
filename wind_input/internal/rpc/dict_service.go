@@ -13,18 +13,23 @@ import (
 
 // DictService 词库管理 RPC 服务
 type DictService struct {
-	store        *store.Store
-	dm           *dict.DictManager
-	logger       *slog.Logger
-	broadcaster  *EventBroadcaster
-	batchEncoder BatchEncoder
+	store          *store.Store
+	dm             *dict.DictManager
+	logger         *slog.Logger
+	broadcaster    *EventBroadcaster
+	batchEncoder   BatchEncoder
+	pinyinCodeGen  PinyinCodeGenerator
+	schemaIDMapper SchemaIDMapper
 }
 
 func (d *DictService) resolveSchemaID(id string) string {
-	if id != "" {
-		return id
+	if id == "" {
+		id = d.dm.GetActiveSchemaID()
 	}
-	return d.dm.GetActiveSchemaID()
+	if d.schemaIDMapper != nil {
+		return d.schemaIDMapper.DataSchemaID(id)
+	}
+	return id
 }
 
 // Search 搜索用户词库（前缀匹配，支持分页）
@@ -116,25 +121,45 @@ func (d *DictService) SearchByCode(args *rpcapi.DictSearchArgs, reply *rpcapi.Di
 }
 
 // Add 添加用户词条
+// 对于拼音方案（schemaID == "pinyin"），允许 code 为空，自动生成拼音编码
 func (d *DictService) Add(args *rpcapi.DictAddArgs, reply *rpcapi.Empty) error {
 	if d.store == nil {
 		return fmt.Errorf("store not available")
 	}
-	if args.Code == "" || args.Text == "" {
-		return fmt.Errorf("code and text are required")
+	if args.Text == "" {
+		return fmt.Errorf("text is required")
 	}
 
 	schemaID := d.resolveSchemaID(args.SchemaID)
+	code := args.Code
+
+	// 拼音方案：code 为空时自动生成
+	if code == "" && d.pinyinCodeGen != nil {
+		code = d.pinyinCodeGen.GeneratePinyinCode(args.Text)
+	}
+	if code == "" {
+		return fmt.Errorf("code is required (auto-generation failed or not supported for this schema)")
+	}
+
 	weight := args.Weight
 	if weight <= 0 {
 		weight = 1200
 	}
 
-	d.logger.Info("RPC Dict.Add", "schemaID", schemaID, "codeLen", len(args.Code), "textLen", len([]rune(args.Text)))
-	if err := d.store.AddUserWord(schemaID, args.Code, args.Text, weight); err != nil {
+	d.logger.Info("RPC Dict.Add", "schemaID", schemaID, "codeLen", len(code), "textLen", len([]rune(args.Text)))
+	if err := d.store.AddUserWord(schemaID, code, args.Text, weight); err != nil {
 		return err
 	}
 	d.broadcaster.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeUserDict, SchemaID: schemaID, Action: rpcapi.EventActionAdd})
+	return nil
+}
+
+// GeneratePinyinCode 生成词语的全拼编码
+func (d *DictService) GeneratePinyinCode(args *rpcapi.DictGeneratePinyinCodeArgs, reply *rpcapi.DictGeneratePinyinCodeReply) error {
+	if d.pinyinCodeGen == nil {
+		return fmt.Errorf("拼音编码生成器未初始化")
+	}
+	reply.Code = d.pinyinCodeGen.GeneratePinyinCode(args.Text)
 	return nil
 }
 
@@ -190,6 +215,7 @@ func (d *DictService) GetSchemaStats(args *rpcapi.DictSchemaStatsArgs, reply *rp
 	shadowCount, _ := d.store.ShadowRuleCount(schemaID)
 	tempCount, _ := d.store.TempWordCount(schemaID)
 
+	reply.DataSchemaID = schemaID
 	reply.WordCount = wordCount
 	reply.ShadowCount = shadowCount
 	reply.TempWordCount = tempCount

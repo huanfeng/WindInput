@@ -243,9 +243,10 @@ type DictSchemaStatsArgs struct {
 
 // DictSchemaStatsReply 方案统计响应
 type DictSchemaStatsReply struct {
-	WordCount     int `json:"word_count"`
-	ShadowCount   int `json:"shadow_count"`
-	TempWordCount int `json:"temp_word_count"`
+	DataSchemaID  string `json:"data_schema_id"` // 实际存储桶 ID（经 SchemaIDMapper 解析后）
+	WordCount     int    `json:"word_count"`
+	ShadowCount   int    `json:"shadow_count"`
+	TempWordCount int    `json:"temp_word_count"`
 }
 
 // DictClearUserWordsArgs 清空用户词库请求
@@ -705,4 +706,16 @@ type SystemPerfStatsReply struct {
 	Count    int    `json:"count"`
 	Capacity int    `json:"capacity"`
 	Summary  string `json:"summary"`
+}
+
+// ── Dict 拼音编码生成 ──
+
+// DictGeneratePinyinCodeArgs 生成拼音编码请求
+type DictGeneratePinyinCodeArgs struct {
+	Text string `json:"text"`
+}
+
+// DictGeneratePinyinCodeReply 生成拼音编码响应
+type DictGeneratePinyinCodeReply struct {
+	Code string `json:"code"` // 全拼编码，如 "nihao"；空串表示无法生成
 }

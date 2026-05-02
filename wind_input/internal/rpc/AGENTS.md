@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-20 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-20 | Updated: 2026-05-02 -->
 
 # internal/rpc
 
@@ -11,7 +11,7 @@
 ## Key Files
 | File | Description |
 |------|-------------|
-| `server.go` | `Server`：IPC 服务端主体；`Start()`/`Stop()` 生命周期；`StatusProvider`/`ConfigReloader`/`BatchEncoder` 接口定义；注册四个服务的所有 RPC 方法 |
+| `server.go` | `Server`：IPC 服务端主体；`Start()`/`Stop()` 生命周期；`StatusProvider`/`ConfigReloader`/`BatchEncoder`/`PinyinCodeGenerator` 接口定义；注册四个服务的所有 RPC 方法 |
 | `router.go` | `Router`：方法注册和分发（`RegisterMethod`、`Dispatch`），支持同步和异步请求 |
 | `event.go` | `EventMessage`：数据变化事件定义；`EventBroadcaster`：事件广播管理 |
 | `dict_service.go` | `DictService`：词库 RPC 实现（Search、SearchByCode、Add、Remove、Update、BatchEncode、GetStats 等） |
@@ -31,7 +31,8 @@
   3. **Phrase**：用户定义短语
   4. **System**：系统重置、配置重载、方案管理
 - **事件推送**：通过独立的 `EventPipeServer` 异步推送数据变化事件到监听的客户端
-- **接口注入**：`SetStatusProvider`、`SetConfigReloader`、`SetBatchEncoder` 供 main.go 注入依赖
+- **接口注入**：`SetStatusProvider`、`SetConfigReloader`、`SetBatchEncoder`、`SetPinyinCodeGenerator` 供 main.go 注入依赖
+- **拼音编码生成**：`DictService.Add` 当 `code` 为空且注入了 `PinyinCodeGenerator` 时自动生成全拼编码；`Dict.GeneratePinyinCode` RPC 方法供前端查询
 - **线程安全**：Server 持有 `sync.Mutex`，确保状态变更原子性
 
 ### Testing Requirements

@@ -53,6 +53,19 @@ func (n *rpcEventNotifier) NotifyUserDictAdd(schemaID string) {
 	n.broadcaster.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeUserDict, SchemaID: schemaID, Action: rpcapi.EventActionAdd})
 }
 
+// pinyinCodeGenAdapter 适配 engine.Manager 为 rpc.PinyinCodeGenerator 和 rpc.SchemaIDMapper 接口
+type pinyinCodeGenAdapter struct {
+	engineMgr *engine.Manager
+}
+
+func (a *pinyinCodeGenAdapter) GeneratePinyinCode(word string) string {
+	return a.engineMgr.GeneratePinyinCode(word)
+}
+
+func (a *pinyinCodeGenAdapter) DataSchemaID(schemaID string) string {
+	return a.engineMgr.DataSchemaID(schemaID)
+}
+
 // batchEncoderAdapter 适配 engine.Manager 为 rpc.BatchEncoder 接口
 type batchEncoderAdapter struct {
 	engineMgr *engine.Manager
@@ -452,6 +465,9 @@ func main() {
 	rpcServer.SetSchemaOverrideResetter(schemaMgr)
 	rpcServer.SetStatusProvider(&statusAdapter{coord: coord, dm: dictManager})
 	rpcServer.SetBatchEncoder(&batchEncoderAdapter{engineMgr: engineMgr})
+	pinyinAdapter := &pinyinCodeGenAdapter{engineMgr: engineMgr}
+	rpcServer.SetPinyinCodeGenerator(pinyinAdapter)
+	rpcServer.SetSchemaIDMapper(pinyinAdapter)
 	if sc := coord.GetStatCollector(); sc != nil {
 		rpcServer.SetStatCollector(sc)
 	}

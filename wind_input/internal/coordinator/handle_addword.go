@@ -156,7 +156,7 @@ func (c *Coordinator) openAddWordDialog() *bridge.KeyEventResult {
 		code = c.addWordCode
 	}
 	if c.engineMgr != nil {
-		schemaID = c.engineMgr.GetCurrentSchemaID()
+		schemaID = c.engineMgr.DataSchemaID(c.engineMgr.GetCurrentSchemaID())
 	}
 
 	c.exitAddWordMode()
@@ -186,7 +186,11 @@ func (c *Coordinator) updateAddWordCode() {
 		return
 	}
 	word := string(c.addWordChars[len(c.addWordChars)-c.addWordLen:])
-	c.addWordCode = c.calcWordCodeForCurrentSchema(word)
+	if c.engineMgr.IsPinyinSchema() {
+		c.addWordCode = c.engineMgr.GeneratePinyinCode(word)
+	} else {
+		c.addWordCode = c.calcWordCodeForCurrentSchema(word)
+	}
 }
 
 // calcWordCodeForCurrentSchema 根据当前方案计算词的编码

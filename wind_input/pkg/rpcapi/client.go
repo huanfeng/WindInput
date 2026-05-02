@@ -134,6 +134,14 @@ func (c *Client) DictAdd(schemaID, code, text string, weight int) error {
 	}, &Empty{})
 }
 
+// DictGeneratePinyinCode 为词语生成全拼编码（拼音方案专用）
+// 返回空串表示无法生成（含未知字符或无拼音引擎）
+func (c *Client) DictGeneratePinyinCode(text string) (string, error) {
+	var reply DictGeneratePinyinCodeReply
+	err := c.call("Dict.GeneratePinyinCode", &DictGeneratePinyinCodeArgs{Text: text}, &reply)
+	return reply.Code, err
+}
+
 // DictRemove 删除用户词条
 func (c *Client) DictRemove(schemaID, code, text string) error {
 	return c.call("Dict.Remove", &DictRemoveArgs{

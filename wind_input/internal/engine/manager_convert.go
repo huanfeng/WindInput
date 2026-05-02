@@ -394,6 +394,51 @@ func extractCodeTable(eng Engine) *dict.CodeTable {
 // ApplyCodeHintsToCandidates 用主码表反向索引为候选填充 Comment（编码提示）。
 // 已有 Comment 时不覆盖；候选 Source 不限制（独立拼音引擎下 Source 字段未设置）。
 //
+// IsPinyinSchema 判断当前活跃方案是否为拼音类型（全拼或双拼）。
+func (m *Manager) IsPinyinSchema() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.schemaManager == nil {
+		return false
+	}
+	s := m.schemaManager.GetSchema(m.currentID)
+	return s != nil && s.Engine.Type == schema.EngineTypePinyin
+}
+
+// DataSchemaID 返回给定方案 ID 的数据存储 ID（即 bbolt bucket 键）。
+// 拼音方案统一返回 "pinyin"，使全拼与双拼共享同一用户词库。
+func (m *Manager) DataSchemaID(schemaID string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.schemaManager == nil {
+		return schemaID
+	}
+	s := m.schemaManager.GetSchema(schemaID)
+	if s == nil {
+		return schemaID
+	}
+	return s.DataSchemaID()
+}
+
+// GeneratePinyinCode 为词语生成全拼编码（如"你好" → "nihao"）。
+// 在所有已加载的引擎中寻找第一个拼音引擎来生成编码。
+// 若无拼音引擎或词语含未知字符，返回空串。
+func (m *Manager) GeneratePinyinCode(word string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, eng := range m.engines {
+		if pe, ok := eng.(*pinyin.Engine); ok {
+			return pe.GenerateWordPinyin(word)
+		}
+		if me, ok := eng.(*mixed.Engine); ok {
+			if pe := me.GetPinyinEngine(); pe != nil {
+				return pe.GenerateWordPinyin(word)
+			}
+		}
+	}
+	return ""
+}
+
 // 混输引擎已有自己的 addCodeHintsFromCodetable（按 Source 区分拼音/码表候选），无需调用本函数；
 // 本函数面向独立拼音引擎和临时拼音模式。
 func (m *Manager) ApplyCodeHintsToCandidates(cands []candidate.Candidate) {

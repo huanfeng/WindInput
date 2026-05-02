@@ -46,6 +46,9 @@ type Engine struct {
 
 	// 双拼支持
 	spConverter *shuangpin.Converter // 双拼转换器（nil 表示全拼模式）
+
+	// 造词辅助
+	charPinyinIdx map[rune]string // 懒构建：汉字 → 全拼音节，用于自动生成用户词编码
 }
 
 // NewEngine 创建拼音引擎
@@ -352,4 +355,46 @@ func (e *Engine) Reset() {
 // Type 返回引擎类型
 func (e *Engine) Type() string {
 	return "pinyin"
+}
+
+// buildCharPinyinIndex 构建汉字→全拼音节的反向索引。
+// 遍历全部 ~400 个标准拼音音节，对每个音节做单字精确查询，
+// 将首次出现的音节作为该字的代表读音（通常为最常用读音）。
+// 结果缓存于 e.charPinyinIdx，仅在首次调用时执行。
+func (e *Engine) buildCharPinyinIndex() {
+	idx := make(map[rune]string, 6000)
+	for _, syl := range allSyllables {
+		cands := e.dict.Lookup(syl)
+		for _, c := range cands {
+			runes := []rune(c.Text)
+			if len(runes) == 1 {
+				if _, exists := idx[runes[0]]; !exists {
+					idx[runes[0]] = syl
+				}
+			}
+		}
+	}
+	e.charPinyinIdx = idx
+}
+
+// GenerateWordPinyin 为词语生成全拼编码（如"你好" → "nihao"）。
+// 用于用户手动添加词库时自动生成拼音编码，无需手动输入。
+// 若词语中含无法确定读音的字符，返回空串。
+func (e *Engine) GenerateWordPinyin(word string) string {
+	if e.charPinyinIdx == nil {
+		e.buildCharPinyinIndex()
+	}
+	runes := []rune(word)
+	if len(runes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range runes {
+		syl, ok := e.charPinyinIdx[r]
+		if !ok {
+			return ""
+		}
+		b.WriteString(syl)
+	}
+	return b.String()
 }
