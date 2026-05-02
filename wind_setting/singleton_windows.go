@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -31,6 +32,7 @@ var (
 	procGetWindowThreadProcessId = moduser32.NewProc("GetWindowThreadProcessId")
 	procAttachThreadInput        = moduser32.NewProc("AttachThreadInput")
 	procGetCurrentThreadId       = modkernel32.NewProc("GetCurrentThreadId")
+	procMessageBoxW              = moduser32.NewProc("MessageBoxW")
 )
 
 const swRestore = 9
@@ -59,10 +61,24 @@ func ensureSingleInstance(startPage string, addWordParams AddWordParams) (window
 				sendPageToExisting(startPage)
 			}
 		}
-		activateExistingWindow()
+		if !activateExistingWindow() {
+			// 互斥锁存在说明进程还活着，但窗口始终找不到（可能正在启动或已挂起）
+			showNativeMessageBox(
+				windowTitle,
+				"设置程序已在运行中，但窗口无法显示。\n\n请在任务管理器中找到 wind_setting.exe 进程并手动关闭后重试。",
+			)
+		}
 		return 0, false
 	}
 	return handle, true
+}
+
+// showNativeMessageBox 使用 Win32 MessageBoxW 显示原生对话框，不依赖 WebView2。
+func showNativeMessageBox(title, message string) {
+	t, _ := windows.UTF16PtrFromString(title)
+	m, _ := windows.UTF16PtrFromString(message)
+	// MB_OK | MB_ICONINFORMATION = 0x40
+	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(m)), uintptr(unsafe.Pointer(t)), 0x40)
 }
 
 // sendPageToExisting writes the target page to a temp file and signals the
@@ -155,11 +171,21 @@ func startIPCListener(ctx context.Context) {
 	}()
 }
 
-func activateExistingWindow() {
+// activateExistingWindow 查找并激活已有实例的窗口，返回是否成功。
+// 对启动竞争（窗口尚未创建）进行最多 2 秒的重试，避免误报。
+func activateExistingWindow() bool {
 	titlePtr, _ := windows.UTF16PtrFromString(windowTitle)
-	hwnd, _, _ := procFindWindowW.Call(0, uintptr(unsafe.Pointer(titlePtr)))
+
+	var hwnd uintptr
+	for range 10 {
+		hwnd, _, _ = procFindWindowW.Call(0, uintptr(unsafe.Pointer(titlePtr)))
+		if hwnd != 0 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	if hwnd == 0 {
-		return
+		return false
 	}
 
 	// If the window is minimized, restore it
@@ -181,4 +207,5 @@ func activateExistingWindow() {
 	} else {
 		procSetForegroundWindow.Call(hwnd)
 	}
+	return true
 }

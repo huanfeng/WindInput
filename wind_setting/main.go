@@ -145,6 +145,6 @@ func main() {
 	})
 
 	if err != nil {
-		println("Error:", err.Error())
+		showNativeMessageBox(buildvariant.DisplayName()+" 设置 - 启动失败", err.Error())
 	}
 }
