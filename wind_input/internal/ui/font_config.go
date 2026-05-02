@@ -262,6 +262,12 @@ func (fc *FontConfig) ResolvePrimaryFont() string {
 func (fc *FontConfig) ResolvePrimaryFontFamily() string {
 	if family := strings.TrimSpace(fc.PrimaryFont); family != "" {
 		if systemfont.HasFamily(family) {
+			// DirectWrite uses nameID-1 for font lookup, which may differ from
+			// the Windows registry key (derived from nameID-4). Resolve to the
+			// nameID-1 name so DirectWrite can actually find the font.
+			if dwName := systemfont.ResolveDWFamily(family); dwName != "" {
+				return dwName
+			}
 			return family
 		}
 		if path := resolveConfiguredFontPath(family, false); path != "" {
