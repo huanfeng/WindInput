@@ -54,6 +54,7 @@ type RenderConfig struct {
 	TextRenderMode     TextRenderMode         // "gdi" (Windows native) or "freetype" (original)
 	ModeLabel          string                 // Temporary mode label (e.g. "临时拼音", "快捷输入"), empty = no label
 	PreeditMode        config.PreeditMode     // "top" (default) or "embedded" (inline before candidates); only effective when HidePreedit=false
+	IndexLabels        string                 // 10 custom label chars replacing default 1-9,0; empty = default
 }
 
 // DefaultRenderConfig returns default rendering configuration with DPI scaling
@@ -205,8 +206,9 @@ type Renderer struct {
 	TextBackendManager
 
 	// Base (unscaled) values for DPI recalculation
-	baseFontSize float64
-	lastDPI      int // Last DPI used for scaling; 0 means not yet set
+	baseFontSize   float64
+	themeRowHeight float64 // unscaled row height from theme; 0 = auto-compute from font size
+	lastDPI        int     // Last DPI used for scaling; 0 means not yet set
 }
 
 // NewRenderer creates a new renderer
@@ -239,6 +241,9 @@ func (r *Renderer) UpdateFont(fontSize float64, fontFamily string) {
 		r.baseFontSize = fontSize
 		r.config.FontSize = fontSize * scale
 		r.config.IndexFontSize = (fontSize - 4) * scale
+		if r.themeRowHeight == 0 {
+			r.config.ItemHeight = math.Max(32, fontSize*1.8) * scale
+		}
 	}
 
 	if fontFamily != r.FontFamily() {
@@ -266,8 +271,12 @@ func (r *Renderer) RefreshDPIScale() {
 	r.config.FontSize = baseFontSize * scale
 	r.config.IndexFontSize = (baseFontSize - 4) * scale
 	r.config.Padding = 10 * scale
-	r.config.ItemHeight = 32 * scale
 	r.config.CornerRadius = 8 * scale
+	if r.themeRowHeight > 0 {
+		r.config.ItemHeight = r.themeRowHeight * scale
+	} else {
+		r.config.ItemHeight = math.Max(32, baseFontSize*1.8) * scale
+	}
 }
 
 // SetLayout sets the candidate layout mode
@@ -330,7 +339,15 @@ func (r *Renderer) SetTheme(resolved *theme.ResolvedTheme) {
 		r.config.CornerRadius = resolved.Style.CornerRadius * scale
 	}
 	if resolved.Style.RowHeight > 0 {
+		r.themeRowHeight = resolved.Style.RowHeight
 		r.config.ItemHeight = resolved.Style.RowHeight * scale
+	} else {
+		r.themeRowHeight = 0
+		baseFontSize := r.baseFontSize
+		if baseFontSize <= 0 {
+			baseFontSize = 18
+		}
+		r.config.ItemHeight = math.Max(32, baseFontSize*1.8) * scale
 	}
 	// Apply element spacing from theme
 	if resolved.Style.IndexMarginRight > 0 {
@@ -366,6 +383,7 @@ func (r *Renderer) SetTheme(resolved *theme.ResolvedTheme) {
 	if resolved.Style.HorizontalMaxWidth > 0 {
 		r.config.HorizontalMaxWidth = resolved.Style.HorizontalMaxWidth * scale
 	}
+	r.config.IndexLabels = resolved.Style.IndexLabels
 }
 
 // getCommentColor returns the comment color from theme or default

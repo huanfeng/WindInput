@@ -3,10 +3,30 @@ package ui
 import (
 	"fmt"
 	"image"
+	"math"
 
 	"github.com/gogpu/gg"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
+
+// indexLabel returns the display string for a candidate index.
+// Priority: overrideLabel > IndexLabels config > default 1-9,0
+func indexLabel(indexLabels string, index int, overrideLabel string) string {
+	if overrideLabel != "" {
+		return overrideLabel
+	}
+	if indexLabels != "" {
+		labels := []rune(indexLabels)
+		pos := index - 1
+		if index == 0 {
+			pos = 9
+		}
+		if pos >= 0 && pos < len(labels) {
+			return string(labels[pos])
+		}
+	}
+	return string(rune('0' + index))
+}
 
 // RenderCandidates renders candidates to an image
 // hoverIndex: index of the hovered candidate (-1 for none)
@@ -72,7 +92,10 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 
 	// Index area width + text start position
 	isTextIndex := cfg.IndexStyle == "text"
-	indexAreaWidth := 28.0 * scale // circle style: center(14) + radius(11) + gap(3)
+	// Circle radius scales with IndexFontSize so the number always fits inside.
+	// diameter = max(22, IndexFontSize+8); layout: 3px left gap + diameter + 3px right gap
+	indexRadius := math.Max(11*scale, (cfg.IndexFontSize+8*scale)/2)
+	indexAreaWidth := 2*indexRadius + 6*scale // circle style
 	if isTextIndex {
 		indexAreaWidth = 20.0 * scale // text style: narrower
 	}
@@ -156,7 +179,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		}
 	}
 
-	inputHeight := 30.0 * scale
+	inputHeight := math.Max(30*scale, cfg.FontSize*1.5)
 	if cfg.HidePreedit {
 		inputHeight = 0
 	}
@@ -320,10 +343,11 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		itemY := candStartY + float64(i)*cfg.ItemHeight
 
 		if cfg.IndexStyle != "text" && candidates[i].Index >= 0 {
-			indexX := padX + 14*scale
+			vIndexRadius := math.Max(11*scale, (cfg.IndexFontSize+8*scale)/2)
+			vIndexCenterX := padX + vIndexRadius + 3*scale
 			indexY := itemY + cfg.ItemHeight/2
 			dc.SetColor(cfg.IndexBgColor)
-			dc.DrawCircle(indexX, indexY, 11*scale)
+			dc.DrawCircle(vIndexCenterX, indexY, vIndexRadius)
 			dc.Fill()
 		}
 
@@ -422,10 +446,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 		if cand.Index < 0 {
 			continue // 负索引跳过绘制（如加词模式）
 		}
-		indexStr := cand.IndexLabel
-		if indexStr == "" {
-			indexStr = string(rune('0' + cand.Index))
-		}
+		indexStr := indexLabel(cfg.IndexLabels, cand.Index, cand.IndexLabel)
 
 		if isTextIndex {
 			if vertIndexWeight > 0 {
@@ -434,13 +455,14 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 				td.DrawString(indexStr, padX+4*scale, itemY+cfg.ItemHeight/2+indexTextSize/3, indexTextSize, cfg.IndexColor)
 			}
 		} else {
-			indexX := padX + 14*scale
+			vIndexRadius := math.Max(11*scale, (cfg.IndexFontSize+8*scale)/2)
+			vIndexCenterX := padX + vIndexRadius + 3*scale
 			indexY := itemY + cfg.ItemHeight/2
 			tw := td.MeasureString(indexStr, cfg.IndexFontSize)
 			if vertIndexWeight > 0 {
-				td.DrawStringWithWeight(indexStr, indexX-tw/2, indexY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor, vertIndexWeight)
+				td.DrawStringWithWeight(indexStr, vIndexCenterX-tw/2, indexY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor, vertIndexWeight)
 			} else {
-				td.DrawString(indexStr, indexX-tw/2, indexY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor)
+				td.DrawString(indexStr, vIndexCenterX-tw/2, indexY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor)
 			}
 		}
 	}
@@ -540,7 +562,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	}
 	measures := make([]candMeasure, len(candidates))
 
-	indexSize := 18.0 * scale
+	indexSize := math.Max(18*scale, cfg.IndexFontSize+4*scale)
 	indexMargin := cfg.IndexMarginRight // 从主题配置获取
 	itemSpacing := 12.0 * scale
 
@@ -557,10 +579,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 				indexTextWidths[i] = 0
 				continue
 			}
-			indexStr := cand.IndexLabel
-			if indexStr == "" {
-				indexStr = string(rune('0' + cand.Index))
-			}
+			indexStr := indexLabel(cfg.IndexLabels, cand.Index, cand.IndexLabel)
 			indexTextWidths[i] = td.MeasureString(indexStr, indexTextSize)
 		}
 	}
@@ -671,11 +690,11 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	if !cfg.HidePreedit && !isEmbedded && input != "" {
 		inputWidth = td.MeasureString(input, cfg.FontSize)
 		inputWidth += 16*scale + modeLabelWidth
-		inputHeight = 24 * scale
+		inputHeight = math.Max(24*scale, cfg.FontSize*1.3)
 	} else if !cfg.HidePreedit && !isEmbedded && modeLabelWidth > 0 {
 		// 无输入但有 ModeLabel（如临时英文初始状态）
 		inputWidth = modeLabelWidth + 16*scale
-		inputHeight = 24 * scale
+		inputHeight = math.Max(24*scale, cfg.FontSize*1.3)
 	}
 
 	// embedded 模式下，编码文本嵌入候选行前的宽度
@@ -979,10 +998,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		// Index（负索引跳过绘制，如加词模式）
 		if cand.Index >= 0 {
 			if isTextIndex {
-				indexStr := cand.IndexLabel
-				if indexStr == "" {
-					indexStr = string(rune('0' + cand.Index))
-				}
+				indexStr := indexLabel(cfg.IndexLabels, cand.Index, cand.IndexLabel)
 				if indexWeight > 0 {
 					td.DrawStringWithWeight(indexStr, px, candY+indexTextSize/3, indexTextSize, cfg.IndexColor, indexWeight)
 				} else {
@@ -990,10 +1006,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 				}
 			} else {
 				indexX := px + indexSize/2
-				indexStr := cand.IndexLabel
-				if indexStr == "" {
-					indexStr = string(rune('0' + cand.Index))
-				}
+				indexStr := indexLabel(cfg.IndexLabels, cand.Index, cand.IndexLabel)
 				tw := td.MeasureString(indexStr, cfg.IndexFontSize)
 				if indexWeight > 0 {
 					td.DrawStringWithWeight(indexStr, indexX-tw/2, candY+cfg.IndexFontSize/3, cfg.IndexFontSize, cfg.IndexColor, indexWeight)

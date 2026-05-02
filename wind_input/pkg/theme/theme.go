@@ -78,6 +78,7 @@ type ModeIndicatorColors struct {
 // CandidateWindowStyle defines rendering style options for the candidate window
 type CandidateWindowStyle struct {
 	IndexStyle         string  `yaml:"index_style" json:"index_style"`                   // "circle" (default) or "text"
+	IndexLabels        string  `yaml:"index_labels" json:"index_labels"`                 // 10 custom label chars replacing default 1-9,0 (e.g. "①②③④⑤⑥⑦⑧⑨⑩")
 	AccentBarColor     string  `yaml:"accent_bar_color" json:"accent_bar_color"`         // Left accent bar color, empty = no bar
 	IndexFontWeight    int     `yaml:"index_font_weight" json:"index_font_weight"`       // Index number font weight (100-900), 0 = use global weight
 	ItemPaddingLeft    float64 `yaml:"item_padding_left" json:"item_padding_left"`       // Left padding of each candidate item (px, 0 = default 8)
@@ -225,6 +226,7 @@ type ResolvedModeIndicatorColors struct {
 // ResolvedCandidateWindowStyle contains parsed style options
 type ResolvedCandidateWindowStyle struct {
 	IndexStyle         string      // "circle" or "text"
+	IndexLabels        string      // 10 custom label chars; empty = default 1-9,0
 	AccentBarColor     color.Color // nil if no accent bar
 	HasAccentBar       bool
 	IndexFontWeight    int     // Index number font weight (100-900), 0 = use global weight
@@ -266,6 +268,7 @@ func (t *Theme) resolveStyle() ResolvedCandidateWindowStyle {
 	}
 	style := ResolvedCandidateWindowStyle{
 		IndexStyle:         "circle", // default
+		IndexLabels:        t.Style.IndexLabels,
 		IndexFontWeight:    t.Style.IndexFontWeight,
 		ItemPaddingLeft:    t.Style.ItemPaddingLeft,
 		ItemPaddingRight:   t.Style.ItemPaddingRight,
