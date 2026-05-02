@@ -204,7 +204,14 @@ func ImportDBFromZip(zr *zip.Reader, s *store.Store) error {
 	if err := importGlobalPhrases(zr, s); err != nil {
 		return fmt.Errorf("import global phrases: %w", err)
 	}
-	return importStats(zr, s)
+	if err := importStats(zr, s); err != nil {
+		return fmt.Errorf("import stats: %w", err)
+	}
+	// 重建统计聚合索引（Stats/Meta），否则 GetSummary 读不到总量
+	if _, err := s.RecalculateStatsMeta(); err != nil {
+		return fmt.Errorf("recalculate stats meta: %w", err)
+	}
+	return nil
 }
 
 func findInZip(zr *zip.Reader, name string) *zip.File {

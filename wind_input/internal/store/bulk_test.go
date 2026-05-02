@@ -179,3 +179,138 @@ func TestBulkUserWordsFieldsRoundTrip(t *testing.T) {
 		t.Errorf("fields mismatch: got %+v", w)
 	}
 }
+
+func TestBulkTempWordsRoundTrip(t *testing.T) {
+	s, cleanup := openTempStore(t)
+	defer cleanup()
+
+	input := []store.UserWordBulkEntry{
+		{Code: "tmp1", Text: "临时词", Weight: 50, Count: 2, CreatedAt: 9999},
+		{Code: "tmp2", Text: "暂存词", Weight: 10, Count: 1, CreatedAt: 8888},
+	}
+	if err := s.BulkPutTempWords("wubi86", input); err != nil {
+		t.Fatalf("BulkPutTempWords: %v", err)
+	}
+	got, err := s.AllTempWords("wubi86")
+	if err != nil {
+		t.Fatalf("AllTempWords: %v", err)
+	}
+	if len(got) != len(input) {
+		t.Fatalf("expected %d temp words, got %d", len(input), len(got))
+	}
+	byCode := map[string]store.UserWordBulkEntry{}
+	for _, e := range got {
+		byCode[e.Code] = e
+	}
+	for _, want := range input {
+		e, ok := byCode[want.Code]
+		if !ok {
+			t.Errorf("missing code %q", want.Code)
+			continue
+		}
+		if e.Text != want.Text || e.Weight != want.Weight || e.Count != want.Count || e.CreatedAt != want.CreatedAt {
+			t.Errorf("code %q: got %+v, want %+v", want.Code, e, want)
+		}
+	}
+}
+
+func TestBulkTempWordsIsolatedFromUserWords(t *testing.T) {
+	s, cleanup := openTempStore(t)
+	defer cleanup()
+
+	if err := s.BulkPutUserWords("wubi86", []store.UserWordBulkEntry{
+		{Code: "abcd", Text: "用户词"},
+	}); err != nil {
+		t.Fatalf("BulkPutUserWords: %v", err)
+	}
+	if err := s.BulkPutTempWords("wubi86", []store.UserWordBulkEntry{
+		{Code: "abcd", Text: "临时词"},
+	}); err != nil {
+		t.Fatalf("BulkPutTempWords: %v", err)
+	}
+
+	userWords, _ := s.AllUserWords("wubi86")
+	tempWords, _ := s.AllTempWords("wubi86")
+	if len(userWords) != 1 || userWords[0].Text != "用户词" {
+		t.Errorf("UserWords corrupted: %+v", userWords)
+	}
+	if len(tempWords) != 1 || tempWords[0].Text != "临时词" {
+		t.Errorf("TempWords corrupted: %+v", tempWords)
+	}
+}
+
+func TestBulkGlobalPhrasesRoundTrip(t *testing.T) {
+	s, cleanup := openTempStore(t)
+	defer cleanup()
+
+	// RawKey 含 \x00 分隔符（phrase key 格式：code\x00text）
+	input := []store.PhraseBulkEntry{
+		{
+			Code:     "nide",
+			RawKey:   []byte("nide\x00你的"),
+			RawValue: []byte(`{"text":"你的","type":"static","pos":0,"on":true}`),
+		},
+		{
+			Code:     "wode",
+			RawKey:   []byte("wode\x00我的"),
+			RawValue: []byte(`{"text":"我的","type":"static","pos":1,"on":true}`),
+		},
+	}
+	if err := s.BulkPutGlobalPhrases(input); err != nil {
+		t.Fatalf("BulkPutGlobalPhrases: %v", err)
+	}
+	got, err := s.AllGlobalPhrases()
+	if err != nil {
+		t.Fatalf("AllGlobalPhrases: %v", err)
+	}
+	if len(got) != len(input) {
+		t.Fatalf("expected %d phrases, got %d", len(input), len(got))
+	}
+	byCode := map[string]store.PhraseBulkEntry{}
+	for _, e := range got {
+		byCode[e.Code] = e
+	}
+	for _, want := range input {
+		e, ok := byCode[want.Code]
+		if !ok {
+			t.Errorf("missing code %q", want.Code)
+			continue
+		}
+		if string(e.RawKey) != string(want.RawKey) {
+			t.Errorf("code %q RawKey: got %q, want %q", want.Code, e.RawKey, want.RawKey)
+		}
+		if string(e.RawValue) != string(want.RawValue) {
+			t.Errorf("code %q RawValue: got %q, want %q", want.Code, e.RawValue, want.RawValue)
+		}
+	}
+}
+
+func TestBulkMultiSchemaIsolation(t *testing.T) {
+	s, cleanup := openTempStore(t)
+	defer cleanup()
+
+	if err := s.BulkPutUserWords("schema_a", []store.UserWordBulkEntry{
+		{Code: "aa", Text: "词A"},
+	}); err != nil {
+		t.Fatalf("schema_a put: %v", err)
+	}
+	if err := s.BulkPutUserWords("schema_b", []store.UserWordBulkEntry{
+		{Code: "bb", Text: "词B"},
+		{Code: "bc", Text: "词C"},
+	}); err != nil {
+		t.Fatalf("schema_b put: %v", err)
+	}
+
+	wordsA, _ := s.AllUserWords("schema_a")
+	wordsB, _ := s.AllUserWords("schema_b")
+	if len(wordsA) != 1 {
+		t.Errorf("schema_a: expected 1 word, got %d", len(wordsA))
+	}
+	if len(wordsB) != 2 {
+		t.Errorf("schema_b: expected 2 words, got %d", len(wordsB))
+	}
+	wordsC, _ := s.AllUserWords("schema_c")
+	if len(wordsC) != 0 {
+		t.Errorf("schema_c: expected 0 words, got %d", len(wordsC))
+	}
+}
