@@ -8,3 +8,7 @@
 # 注：仅修改已存在的 (code, text) 条目；新增条目请用 custom_words.txt
 ggtt	五笔
 rjfi	提示
+yysg	文本
+gidr	还原
+xwtm	纵向
+xwtm	纵身	+1
