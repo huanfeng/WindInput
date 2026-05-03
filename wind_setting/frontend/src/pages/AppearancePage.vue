@@ -192,16 +192,16 @@ onUnmounted(() => {
         </div>
         <div class="setting-control">
           <Select
-            :model-value="formData.ui.pager_display_mode"
+            :model-value="formData.ui.pager_display_mode || '__default__'"
             @update:model-value="
-              formData.ui.pager_display_mode = $event as PagerDisplayModeValue
+              formData.ui.pager_display_mode = ($event === '__default__' ? '' : $event) as PagerDisplayModeValue
             "
           >
             <SelectTrigger class="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem :value="PagerDisplayMode.Default">默认（主题配置）</SelectItem>
+              <SelectItem value="__default__">默认（主题配置）</SelectItem>
               <SelectItem :value="PagerDisplayMode.Never">不显示</SelectItem>
               <SelectItem :value="PagerDisplayMode.Auto">大于一页时显示</SelectItem>
               <SelectItem :value="PagerDisplayMode.Always">总是显示</SelectItem>
