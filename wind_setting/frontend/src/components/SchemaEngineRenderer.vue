@@ -46,9 +46,27 @@ function setValue(key: string, v: any): void {
   }
 }
 
-function selectVal(key: string): string {
+const EMPTY_SENTINEL = '__empty_select_value__'
+
+function optVal(v: string | number): string {
+  return v === '' ? EMPTY_SENTINEL : String(v)
+}
+
+function selectVal(field: { options: { value: string | number }[] }, key: string): string {
   const v = getValue(key)
-  return v == null ? '' : String(v)
+  // null/undefined 或空字符串：若选项中无空字符串值，回退到第一个选项
+  const s = v == null ? '' : String(v)
+  if (s === '') {
+    const hasEmptyOpt = field.options.some((o) => o.value === '')
+    if (hasEmptyOpt) return EMPTY_SENTINEL
+    return field.options.length > 0 ? optVal(field.options[0].value) : EMPTY_SENTINEL
+  }
+  return s
+}
+
+function onSelectChange(key: string, raw: string): void {
+  const actual = raw === EMPTY_SENTINEL ? '' : raw
+  setValue(key, actual)
 }
 
 function isDisabled(field: SchemaFieldDef): boolean {
@@ -100,18 +118,18 @@ function resolveHint(field: SchemaFieldDef): string {
       </div>
       <div class="setting-control">
         <Select
-          :model-value="selectVal(field.key)"
+          :model-value="selectVal(field, field.key)"
           :disabled="isDisabled(field)"
-          @update:model-value="setValue(field.key, $event)"
+          @update:model-value="onSelectChange(field.key, $event)"
         >
-          <SelectTrigger :class="`w-[${field.width || '140px'}]`">
+          <SelectTrigger :style="{ width: field.width || '140px' }">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             <SelectItem
               v-for="opt in field.options"
               :key="opt.value"
-              :value="opt.value"
+              :value="optVal(opt.value)"
             >
               {{ opt.label }}
             </SelectItem>
