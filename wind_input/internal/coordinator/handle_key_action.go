@@ -168,10 +168,12 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	}
 
 	showStart := time.Now()
-	// 首字符触发 composition 创建：宿主侧 reflow 会让光标显著漂移，按键前的旧
-	// 坐标不可靠。改为推迟，等 HandleCaretUpdate 收到 reflow 后的真实坐标再 show。
-	// 非首字符则 inputBuffer 已有内容、composition 已存在，可立即用现有坐标显示。
-	if wasComposingEmpty {
+	// 首字符触发 composition 创建时，若 caretValid=false（焦点刚到达或用户点击移动
+	// 过光标），宿主侧 reflow 会让坐标漂移，需推迟等待真实坐标。
+	// 若 caretValid=true（同一焦点会话内已有可靠坐标，且未发生选区变化），
+	// 例如退格清空后重新输入，光标未移动、无 reflow，可直接用现有坐标显示。
+	// 非首字符（composition 已存在）同样立即显示。
+	if wasComposingEmpty && !c.caretValid {
 		c.armPendingFirstShow()
 	} else {
 		c.showUI()
@@ -221,6 +223,7 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 	// 退格应回退上一步确认（恢复"womende"），而非删除缓冲末字符。
 	// 这与主流拼音输入法（搜狗、百度、微软拼音）行为一致。
 	if len(c.confirmedSegments) > 0 {
+		bsStart := time.Now()
 		lastSeg := c.confirmedSegments[len(c.confirmedSegments)-1]
 		c.confirmedSegments = c.confirmedSegments[:len(c.confirmedSegments)-1]
 		c.inputBuffer = lastSeg.ConsumedCode + c.inputBuffer
@@ -229,13 +232,22 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 			"restored", lastSeg.ConsumedCode, "buffer", c.inputBuffer,
 			"remainingSegments", len(c.confirmedSegments))
 
+		updateStart := time.Now()
 		c.updateCandidates()
+		updateElapsed := time.Since(updateStart)
+		showStart := time.Now()
 		c.showUI()
+		showElapsed := time.Since(showStart)
+		c.logger.Debug("handleBackspace timing", "path", "undoSegment",
+			"total", time.Since(bsStart).String(),
+			"updateCandidates", updateElapsed.String(),
+			"showUI", showElapsed.String())
 
 		return c.compositionUpdateResult()
 	}
 
 	if len(c.inputBuffer) > 0 && c.inputCursorPos > 0 {
+		bsStart := time.Now()
 		// 无确认段时，在光标位置删除前一个字符
 		c.inputBuffer = c.inputBuffer[:c.inputCursorPos-1] + c.inputBuffer[c.inputCursorPos:]
 		c.inputCursorPos--
@@ -247,8 +259,16 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 			return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
 		}
 
+		updateStart := time.Now()
 		c.updateCandidates()
+		updateElapsed := time.Since(updateStart)
+		showStart := time.Now()
 		c.showUI()
+		showElapsed := time.Since(showStart)
+		c.logger.Debug("handleBackspace timing", "path", "deleteChar",
+			"total", time.Since(bsStart).String(),
+			"updateCandidates", updateElapsed.String(),
+			"showUI", showElapsed.String())
 
 		return c.compositionUpdateResult()
 	}

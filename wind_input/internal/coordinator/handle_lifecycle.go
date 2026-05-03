@@ -323,6 +323,7 @@ func (c *Coordinator) HandleFocusLost() {
 	}
 
 	c.pendingReplay = false
+	c.caretValid = false // 焦点切换后坐标失效，下次新 composition 需重新等待真实坐标
 	c.clearState()
 }
 
