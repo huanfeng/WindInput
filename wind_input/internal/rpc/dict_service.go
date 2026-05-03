@@ -496,7 +496,7 @@ func (d *DictService) BatchEncode(args *rpcapi.BatchEncodeArgs, reply *rpcapi.Ba
 	if len(args.Words) == 0 {
 		return nil
 	}
-	reply.Results = d.batchEncoder.BatchEncode(args.Words)
+	reply.Results = d.batchEncoder.BatchEncode(args.SchemaID, args.Words)
 	return nil
 }
 

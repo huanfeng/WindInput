@@ -71,9 +71,24 @@ type batchEncoderAdapter struct {
 	engineMgr *engine.Manager
 }
 
-func (a *batchEncoderAdapter) BatchEncode(words []string) []rpcapi.EncodeResultItem {
+func (a *batchEncoderAdapter) BatchEncode(schemaID string, words []string) []rpcapi.EncodeResultItem {
+	if a.engineMgr.IsSchemaTypePinyin(schemaID) {
+		// 用户可能正在使用码表方案，拼音引擎尚未加载，先确保加载
+		_ = a.engineMgr.EnsurePinyinLoaded()
+		items := make([]rpcapi.EncodeResultItem, len(words))
+		for i, w := range words {
+			code := a.engineMgr.GeneratePinyinCode(w)
+			if code == "" {
+				items[i] = rpcapi.EncodeResultItem{Word: w, Status: "error", Error: "无法生成拼音编码"}
+			} else {
+				items[i] = rpcapi.EncodeResultItem{Word: w, Code: code, Status: "ok"}
+			}
+		}
+		return items
+	}
+
 	reverseIndex := a.engineMgr.GetReverseIndex()
-	schemaRules := a.engineMgr.GetEncoderRules()
+	schemaRules := a.engineMgr.GetEncoderRulesForSchema(schemaID)
 
 	encRules := make([]encoding.SchemaEncoderRule, len(schemaRules))
 	for i, sr := range schemaRules {

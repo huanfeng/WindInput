@@ -86,8 +86,8 @@ type SchemaOverrideResetter interface {
 
 // BatchEncoder 批量反向编码接口（由 engine.Manager 通过适配器实现）
 type BatchEncoder interface {
-	// BatchEncode 将词语列表批量编码为 (word, code) 对
-	BatchEncode(words []string) []rpcapi.EncodeResultItem
+	// BatchEncode 将词语列表批量编码为 (word, code) 对，按目标 schemaID 选择编码路径
+	BatchEncode(schemaID string, words []string) []rpcapi.EncodeResultItem
 }
 
 // PinyinCodeGenerator 拼音编码生成接口（由 engine.Manager 实现）

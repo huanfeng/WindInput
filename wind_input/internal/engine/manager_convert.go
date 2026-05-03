@@ -405,6 +405,35 @@ func (m *Manager) IsPinyinSchema() bool {
 	return s != nil && s.Engine.Type == schema.EngineTypePinyin
 }
 
+// IsSchemaTypePinyin 判断指定 schemaID 是否为拼音类型（全拼或双拼）。
+func (m *Manager) IsSchemaTypePinyin(schemaID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.schemaManager == nil {
+		return false
+	}
+	s := m.schemaManager.GetSchema(schemaID)
+	return s != nil && s.Engine.Type == schema.EngineTypePinyin
+}
+
+// GetEncoderRulesForSchema 获取指定 schemaID 的编码规则（用于导入时自动计算编码）。
+func (m *Manager) GetEncoderRulesForSchema(schemaID string) []schema.EncoderRule {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.schemaManager == nil {
+		return nil
+	}
+	s := m.schemaManager.GetSchema(schemaID)
+	if s == nil {
+		return nil
+	}
+	encoder := m.resolveEncoder(s)
+	if encoder == nil {
+		return nil
+	}
+	return encoder.Rules
+}
+
 // DataSchemaID 返回给定方案 ID 的数据存储 ID（即 bbolt bucket 键）。
 // 拼音方案统一返回 "pinyin"，使全拼与双拼共享同一用户词库。
 func (m *Manager) DataSchemaID(schemaID string) string {
