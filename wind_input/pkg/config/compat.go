@@ -13,9 +13,10 @@ const CompatFileName = "compat.yaml"
 
 // AppCompatRule 定义单个应用的兼容性规则。
 type AppCompatRule struct {
-	Process     string `yaml:"process"`                 // 进程名（不区分大小写），如 "Weixin.exe"
-	Comment     string `yaml:"comment,omitempty"`       // 说明（仅文档用途）
-	CaretUseTop bool   `yaml:"caret_use_top,omitempty"` // 使用 rect.top 而非 rect.bottom 定位候选框
+	Process          string `yaml:"process"`                      // 进程名（不区分大小写），如 "Weixin.exe"
+	Comment          string `yaml:"comment,omitempty"`            // 说明（仅文档用途）
+	CaretUseTop      bool   `yaml:"caret_use_top,omitempty"`      // 使用 rect.top 而非 rect.bottom 定位候选框
+	SkipCaretPending bool   `yaml:"skip_caret_pending,omitempty"` // 跳过首次 composition 的 CARET_PENDING 等待（光标稳定的应用）
 }
 
 // AppCompat 包含所有应用兼容性规则。
@@ -82,6 +83,51 @@ func loadCompatFile(path string) (*AppCompat, error) {
 		return nil, err
 	}
 	return &compat, nil
+}
+
+// ToggleUserSkipCaretPending 切换用户层 compat.yaml 中指定进程的 skip_caret_pending
+// 标志，并返回新值。文件不存在时自动创建。
+func ToggleUserSkipCaretPending(processName string) (bool, error) {
+	configDir, err := GetConfigDir()
+	if err != nil {
+		return false, err
+	}
+	userPath := filepath.Join(configDir, CompatFileName)
+
+	var userCompat AppCompat
+	if data, err := os.ReadFile(userPath); err == nil {
+		_ = yaml.Unmarshal(data, &userCompat)
+	}
+
+	key := strings.ToLower(processName)
+	newValue := true
+	found := false
+	for i, r := range userCompat.Apps {
+		if strings.ToLower(r.Process) == key {
+			userCompat.Apps[i].SkipCaretPending = !r.SkipCaretPending
+			newValue = userCompat.Apps[i].SkipCaretPending
+			found = true
+			break
+		}
+	}
+	if !found {
+		userCompat.Apps = append(userCompat.Apps, AppCompatRule{
+			Process:          processName,
+			SkipCaretPending: true,
+		})
+	}
+
+	data, err := yaml.Marshal(&userCompat)
+	if err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(userPath, data, 0644); err != nil {
+		return false, err
+	}
+	return newValue, nil
 }
 
 // mergeCompatRules 合并两组规则，user 中的同名进程规则覆盖 base 中的。

@@ -490,7 +490,7 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 		c.activeProcessName = bridge.GetProcessName(processID)
 		c.activeCompatRule = c.appCompat.GetRule(c.activeProcessName)
 		if c.activeCompatRule != nil {
-			c.logger.Debug("Compat rule matched", "process", c.activeProcessName, "caretUseTop", c.activeCompatRule.CaretUseTop)
+			c.logger.Debug("Compat rule matched", "process", c.activeProcessName, "caretUseTop", c.activeCompatRule.CaretUseTop, "skipCaretPending", c.activeCompatRule.SkipCaretPending)
 		}
 	}
 	c.logger.Debug("Focus gained", "processID", processID, "process", c.activeProcessName)

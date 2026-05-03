@@ -14,20 +14,21 @@ import (
 
 // Unified menu ID constants
 const (
-	UnifiedMenuToggleWidth    = 101
-	UnifiedMenuTogglePunct    = 102
-	UnifiedMenuToggleToolbar  = 103
-	UnifiedMenuSchemaEnglish  = 140 // 英文模式
-	UnifiedMenuSchemaBase     = 150 // 方案ID: 150+i
-	UnifiedMenuThemeBase      = 200 // 主题ID: 200+i
-	UnifiedMenuThemeStyleBase = 250 // 主题风格ID: 250+i (0=system, 1=light, 2=dark)
-	UnifiedMenuFilterModeBase = 260 // 检索范围ID: 260+i (0=smart, 1=general, 2=gb18030)
-	UnifiedMenuTestBase       = 280 // 三级菜单测试ID: 280+i
-	UnifiedMenuReloadConfig   = 299
-	UnifiedMenuRestartService = 303
-	UnifiedMenuDictionary     = 300
-	UnifiedMenuSettings       = 301
-	UnifiedMenuAbout          = 302
+	UnifiedMenuToggleWidth      = 101
+	UnifiedMenuTogglePunct      = 102
+	UnifiedMenuToggleToolbar    = 103
+	UnifiedMenuSchemaEnglish    = 140 // 英文模式
+	UnifiedMenuSchemaBase       = 150 // 方案ID: 150+i
+	UnifiedMenuThemeBase        = 200 // 主题ID: 200+i
+	UnifiedMenuThemeStyleBase   = 250 // 主题风格ID: 250+i (0=system, 1=light, 2=dark)
+	UnifiedMenuFilterModeBase   = 260 // 检索范围ID: 260+i (0=smart, 1=general, 2=gb18030)
+	UnifiedMenuTestBase         = 280 // 三级菜单测试ID: 280+i
+	UnifiedMenuReloadConfig     = 299
+	UnifiedMenuRestartService   = 303
+	UnifiedMenuDictionary       = 300
+	UnifiedMenuSettings         = 301
+	UnifiedMenuAbout            = 302
+	UnifiedMenuSkipCaretPending = 304 // 为当前应用启用即时候选
 )
 
 // ThemeMenuItem holds theme ID and display name for menu rendering
@@ -55,6 +56,8 @@ type UnifiedMenuState struct {
 	CurrentThemeID    string            // Current theme ID for checked state
 	CurrentThemeStyle config.ThemeStyle // Current theme style
 	Version           string            // App version for display in "About" menu item
+	ActiveProcessName string            // 当前焦点应用进程名（用于即时候选菜单项标签）
+	SkipCaretPending  bool              // 当前应用是否已启用即时候选
 }
 
 func aboutText(version string) string {
@@ -148,10 +151,19 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 		items = append(items, MenuItem{Text: "三级菜单测试", Children: testChildren})
 	}
 
+	processLabel := state.ActiveProcessName
+	if processLabel == "" {
+		processLabel = "当前应用"
+	}
+	advancedChildren := []MenuItem{
+		{ID: UnifiedMenuSkipCaretPending, Text: "为 " + processLabel + " 启用即时候选", Checked: state.SkipCaretPending},
+	}
 	items = append(items,
 		MenuItem{Separator: true},
 		MenuItem{ID: UnifiedMenuReloadConfig, Text: "重载配置"},
 		MenuItem{ID: UnifiedMenuRestartService, Text: "重启服务"},
+		MenuItem{Separator: true},
+		MenuItem{Text: "高级", Children: advancedChildren},
 		MenuItem{Separator: true},
 		MenuItem{ID: UnifiedMenuDictionary, Text: "词库管理..."},
 		MenuItem{ID: UnifiedMenuSettings, Text: "设置..."},

@@ -732,6 +732,8 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 	if c.config != nil && c.config.Input.FilterMode != "" {
 		currentFilterMode = c.config.Input.FilterMode
 	}
+	activeProcessName := c.activeProcessName
+	skipCaretPending := c.activeCompatRule != nil && c.activeCompatRule.SkipCaretPending
 	state := ui.UnifiedMenuState{
 		ChineseMode:       c.chineseMode,
 		FullWidth:         c.fullWidth,
@@ -744,16 +746,20 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 		CurrentThemeID:    c.uiManager.GetCurrentThemeID(),
 		CurrentThemeStyle: currentThemeStyle,
 		Version:           c.version,
+		ActiveProcessName: activeProcessName,
+		SkipCaretPending:  skipCaretPending,
 	}
 	c.mu.Unlock()
 
+	capturedProcess := activeProcessName
 	c.uiManager.ShowUnifiedMenu(screenX, screenY, flipRefY, state, func(id int) {
-		go c.handleUnifiedMenuAction(id)
+		go c.handleUnifiedMenuAction(id, capturedProcess)
 	})
 }
 
-// handleUnifiedMenuAction handles a menu item selection from the unified menu
-func (c *Coordinator) handleUnifiedMenuAction(id int) {
+// handleUnifiedMenuAction handles a menu item selection from the unified menu.
+// capturedProcess 是菜单弹出时记录的进程名，避免菜单关闭期间 FocusLost 清空 activeProcessName。
+func (c *Coordinator) handleUnifiedMenuAction(id int, capturedProcess string) {
 	switch {
 	case id == ui.UnifiedMenuSchemaEnglish:
 		c.handleSwitchToEnglish()
@@ -771,6 +777,8 @@ func (c *Coordinator) handleUnifiedMenuAction(id int) {
 	case id == ui.UnifiedMenuRestartService:
 		c.logger.Info("Restart service requested from unified menu")
 		c.resetAndResync()
+	case id == ui.UnifiedMenuSkipCaretPending:
+		go c.handleToggleSkipCaretPending(capturedProcess)
 	case id == ui.UnifiedMenuDictionary:
 		if c.uiManager != nil {
 			c.uiManager.OpenSettingsWithPage("dictionary")
@@ -976,6 +984,30 @@ func (c *Coordinator) resetAndResync() {
 // Note: This should be called with lock held, or use broadcastState() instead
 func (c *Coordinator) syncToolbarState() {
 	c.syncToolbarStateNoLock()
+}
+
+// handleToggleSkipCaretPending 切换指定应用的"即时候选"标志，写入用户 compat.yaml
+// 并重新加载兼容性规则，使改动立即生效。
+// processName 在菜单弹出时捕获，避免菜单关闭期间 FocusLost 清空 activeProcessName 导致操作失效。
+func (c *Coordinator) handleToggleSkipCaretPending(processName string) {
+	if processName == "" {
+		return
+	}
+
+	newValue, err := config.ToggleUserSkipCaretPending(processName)
+	if err != nil {
+		c.logger.Error("Failed to toggle skip_caret_pending", "process", processName, "error", err)
+		return
+	}
+	c.logger.Info("Toggled skip_caret_pending", "process", processName, "enabled", newValue)
+
+	// 重新加载 compat 规则，使本次改动对当前会话立即生效
+	newCompat := config.LoadAppCompat()
+	c.mu.Lock()
+	c.appCompat = newCompat
+	// 用捕获的进程名更新规则，不依赖可能已被 FocusLost 清空的 activeProcessName
+	c.activeCompatRule = newCompat.GetRule(processName)
+	c.mu.Unlock()
 }
 
 // pushKeyEventResult 将 KeyEventResult 通过 bridge push 管道发送给活跃 TSF 客户端。

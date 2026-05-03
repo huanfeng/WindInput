@@ -168,12 +168,17 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	}
 
 	showStart := time.Now()
-	// 首字符触发 composition 创建时，若 caretValid=false（焦点刚到达或用户点击移动
-	// 过光标），宿主侧 reflow 会让坐标漂移，需推迟等待真实坐标。
-	// 若 caretValid=true（同一焦点会话内已有可靠坐标，且未发生选区变化），
-	// 例如退格清空后重新输入，光标未移动、无 reflow，可直接用现有坐标显示。
-	// 非首字符（composition 已存在）同样立即显示。
-	if wasComposingEmpty && !c.caretValid {
+	// 首字符触发 composition 创建时，宿主侧 reflow 会让坐标从 idle 位置漂移到
+	// composition 位置，需推迟等待真实坐标，否则候选窗会先在错位置出现再跳动。
+	// 需要推迟的条件（满足任一即需等待真实坐标）：
+	//   - caretValid=false：焦点刚到达，尚无任何 caret 坐标
+	//   - compositionStartValid=false：有 caret 但来自 idle 更新（compStartX=0），
+	//     尚未收到本轮 composition reflow 后的真实坐标
+	// 以下情况跳过等待，直接显示：
+	//   - SkipCaretPending=true：应用已标记为光标稳定，无 reflow 漂移
+	//   - 非首字符（composition 已存在）：坐标已稳定，无需等待
+	skipPending := c.activeCompatRule != nil && c.activeCompatRule.SkipCaretPending
+	if wasComposingEmpty && !skipPending && (!c.caretValid || !c.compositionStartValid) {
 		c.armPendingFirstShow()
 	} else {
 		c.showUI()
