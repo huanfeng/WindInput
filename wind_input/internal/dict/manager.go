@@ -309,14 +309,19 @@ func (dm *DictManager) GetCompositeDict() *CompositeDict {
 	return dm.compositeDict
 }
 
-// ExistsInSystemDict 检查 code+text 是否已存在于系统词库层
+// ExistsInSystemDict 检查 code+text 是否已存在于系统词库层。
+// 先做精确匹配，若未找到再做前缀匹配，以覆盖前缀输入时词条来自更长编码的情况。
 func (dm *DictManager) ExistsInSystemDict(code, text string) bool {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
 
 	for _, layer := range dm.compositeDict.GetLayersByType(LayerTypeSystem) {
-		results := layer.Search(code, 0)
-		for _, c := range results {
+		for _, c := range layer.Search(code, 0) {
+			if c.Text == text {
+				return true
+			}
+		}
+		for _, c := range layer.SearchPrefix(code, 0) {
 			if c.Text == text {
 				return true
 			}
