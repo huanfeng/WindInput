@@ -140,10 +140,17 @@ function Build-GoService {
         Pop-Location
 
         $goLdflags = "-H windowsgui -X main.version=$AppVersion"
+        $goBuildTags = @()
         if ($DebugVariant) {
             $goLdflags += " -X github.com/huanfeng/wind_input/pkg/buildvariant.variant=debug"
+            $goBuildTags += "debugvariant"
         }
-        & go build -ldflags $goLdflags -o (Join-Path $BuildDir $goExeName) ./cmd/service
+        $goBuildArgs = @("build", "-ldflags", $goLdflags)
+        if ($goBuildTags.Count -gt 0) {
+            $goBuildArgs += "-tags", ($goBuildTags -join ",")
+        }
+        $goBuildArgs += "-o", (Join-Path $BuildDir $goExeName), "./cmd/service"
+        & go @goBuildArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[错误] Go 构建失败" -ForegroundColor Red
             exit 1
