@@ -304,11 +304,16 @@ func (s *SystemService) PreviewBackup(args *rpcapi.Empty, reply *rpcapi.BackupPr
 	reply.StatsDays = len(stats)
 	dataDir := filepath.Dir(s.store.Path())
 	reply.ThemeCount = backup.CountThemes(filepath.Join(dataDir, "themes"))
-	var total int64
+	// files/ 部分：实测 dataDir 下除 user_data.db 外的总字节数（themes、config 等占大头）
+	filesSize := backup.EstimateFilesSize(dataDir, []string{"user_data.db"})
+	// db/ 部分：按词条数估算 YAML 字节
+	var dbSize int64
 	for _, sc := range reply.Schemas {
-		total += int64(sc.UserWordCount*100 + sc.TempWordCount*80 + sc.FreqCount*30)
+		dbSize += int64(sc.UserWordCount*100 + sc.TempWordCount*80 + sc.FreqCount*60)
 	}
-	reply.EstimatedSize = total + int64(reply.StatsDays*500) + 10*1024
+	dbSize += int64(reply.GlobalPhrases*80) + int64(reply.StatsDays*500)
+	// ZIP 头/manifest 余量 10KB；ZIP 对 YAML/文本压缩约 0.7
+	reply.EstimatedSize = int64(float64(filesSize+dbSize)*0.85) + 10*1024
 	return nil
 }
 
@@ -349,22 +354,13 @@ func (s *SystemService) PreviewRestore(args *rpcapi.SystemRestoreArgs, reply *rp
 	return nil
 }
 
-// Backup 将所有用户数据备份到 ZIP 文件
+// Backup 将所有用户数据备份到 ZIP 文件。
+// 不需要 Pause：bbolt 的 db.View 事务本身就是一致快照，CopyDirToZip 已排除 user_data.db。
 func (s *SystemService) Backup(args *rpcapi.SystemBackupArgs, reply *rpcapi.SystemBackupReply) error {
 	if s.store == nil {
 		return fmt.Errorf("store not available")
 	}
-	dbPath := s.store.Path()
-	dataDir := filepath.Dir(dbPath)
-
-	if err := s.store.Pause(); err != nil {
-		return fmt.Errorf("pause store: %w", err)
-	}
-	defer func() {
-		if err := s.store.Resume(""); err != nil {
-			s.logger.Error("backup: resume failed", "err", err)
-		}
-	}()
+	dataDir := filepath.Dir(s.store.Path())
 
 	tmpPath := args.ZipPath + ".tmp"
 	f, err := os.Create(tmpPath)
@@ -387,18 +383,8 @@ func (s *SystemService) Backup(args *rpcapi.SystemBackupArgs, reply *rpcapi.Syst
 		if err := backup.CopyDirToZip(zw, dataDir, "files/", []string{"user_data.db"}); err != nil {
 			return fmt.Errorf("copy files: %w", err)
 		}
-		// Pause 后重新打开 DB 读取（db 已关闭，可重新打开）
-		tmpStore, err := store.Open(dbPath)
-		if err != nil {
-			return fmt.Errorf("open db for read: %w", err)
-		}
-		exportErr := backup.ExportDBToZip(zw, tmpStore)
-		closeErr := tmpStore.Close()
-		if exportErr == nil {
-			exportErr = closeErr
-		}
-		if exportErr != nil {
-			return fmt.Errorf("export db: %w", exportErr)
+		if err := backup.ExportDBToZip(zw, s.store); err != nil {
+			return fmt.Errorf("export db: %w", err)
 		}
 		return nil
 	}()
@@ -449,10 +435,12 @@ func (s *SystemService) Restore(args *rpcapi.SystemRestoreArgs, reply *rpcapi.Sy
 		return fmt.Errorf("create temp dir: %w", err)
 	}
 
-	restoreOK := false
+	resumed := false
 	defer func() {
-		os.RemoveAll(tmpDir)
-		if !restoreOK {
+		_ = os.RemoveAll(tmpDir) // 成功 swap 后 tmpDir 已不存在，RemoveAll 容错
+		if !resumed {
+			// 失败路径：尝试恢复原始 store。AtomicReplaceDir 失败时 dataDir 未动；
+			// 成功 swap 但 Resume 失败时 dataDir 已是新内容，再试一次 Resume。
 			_ = s.store.Resume("")
 		}
 	}()
@@ -474,13 +462,29 @@ func (s *SystemService) Restore(args *rpcapi.SystemRestoreArgs, reply *rpcapi.Sy
 	newStore.Close()
 
 	if err := backup.AtomicReplaceDir(tmpDir, dataDir); err != nil {
+		// dataDir 仍是原始内容（AtomicReplaceDir 内部已回滚），defer 会 Resume 原始 DB
 		return fmt.Errorf("replace data dir: %w", err)
 	}
-	restoreOK = true
 
 	if err := s.store.Resume(""); err != nil {
-		restoreOK = false // 让 defer 再试一次
 		return fmt.Errorf("resume after restore: %w", err)
+	}
+	resumed = true
+
+	// 同步内存统计采集器：丢弃当前会话内计数，从新 DB 重新加载。
+	if s.server != nil && s.server.statCollector != nil {
+		s.server.statCollector.Reset()
+		s.server.statCollector.Resume()
+	}
+
+	// 广播事件，让前端刷新缓存（方案列表 / 统计 / 配置 / 短语）
+	if s.server != nil && s.server.broadcaster != nil {
+		b := s.server.broadcaster
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeConfig, Action: rpcapi.EventActionUpdate})
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeStats, Action: rpcapi.EventActionUpdated})
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeUserDict, Action: rpcapi.EventActionUpdated})
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypePhrase, Action: rpcapi.EventActionUpdated})
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeSystem, Action: rpcapi.EventActionUpdated})
 	}
 
 	// 全量重载
@@ -535,11 +539,26 @@ func (s *SystemService) Reset(args *rpcapi.Empty, reply *rpcapi.SystemResetReply
 		return fmt.Errorf("resume after reset: %w", err)
 	}
 
+	// 清空内存统计采集器，避免 flush 时把旧会话计数写回新 DB。
+	if s.server != nil && s.server.statCollector != nil {
+		s.server.statCollector.Reset()
+	}
+
 	if s.configReloader != nil {
 		_ = s.configReloader.ReloadConfig()
 	}
 	if s.dm != nil {
 		_ = s.dm.ReloadPhrases()
+	}
+
+	// 广播事件，让前端刷新缓存（方案列表 / 统计 / 配置 / 短语）
+	if s.server != nil && s.server.broadcaster != nil {
+		b := s.server.broadcaster
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeConfig, Action: rpcapi.EventActionUpdate})
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeStats, Action: rpcapi.EventActionClear})
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeUserDict, Action: rpcapi.EventActionClear})
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypePhrase, Action: rpcapi.EventActionUpdated})
+		b.Broadcast(rpcapi.EventMessage{Type: rpcapi.EventTypeSystem, Action: rpcapi.EventActionReset})
 	}
 
 	if lastErr != nil {

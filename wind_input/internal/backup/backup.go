@@ -194,6 +194,37 @@ func ExtractSchemaIDsFromZip(r *zip.Reader) []string {
 	return ids
 }
 
+// EstimateFilesSize 递归累加 dataDir 下所有文件的字节数，跳过 excludeTopNames 中的顶层条目。
+// 用于备份大小预估，错误尽量忽略。
+func EstimateFilesSize(dataDir string, excludeTopNames []string) int64 {
+	excludeSet := make(map[string]bool, len(excludeTopNames))
+	for _, n := range excludeTopNames {
+		excludeSet[n] = true
+	}
+	var total int64
+	_ = filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || path == dataDir {
+			return nil
+		}
+		rel, _ := filepath.Rel(dataDir, path)
+		top := strings.SplitN(rel, string(filepath.Separator), 2)[0]
+		if excludeSet[top] {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
 // CountThemes 统计主题目录下的文件数量
 func CountThemes(themesDir string) int {
 	entries, err := os.ReadDir(themesDir)
@@ -214,57 +245,44 @@ func DefaultBackupFilename() string {
 	return "WindInput_backup_" + time.Now().Format("2006-01-02_150405") + ".zip"
 }
 
-// AtomicReplaceDir 将 srcDir 的所有内容覆盖到 destDir
-// srcDir 中不存在的 destDir 顶层条目会被删除
+// AtomicReplaceDir 用 srcDir 的内容原子地替换 destDir：
+//  1. destDir → destDir+".bak"（保留旧数据）
+//  2. srcDir  → destDir       （生效新数据）
+//  3. 删除 .bak（任意失败可忽略）
+//
+// 任一阶段失败都会尝试回滚到原始状态，dataDir 始终处于一致状态。
+// srcDir 与 destDir 必须位于同一文件系统（同一卷）。
 func AtomicReplaceDir(srcDir, destDir string) error {
-	destEntries, err := os.ReadDir(destDir)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	srcNames := make(map[string]bool)
-	if srcEntries, err := os.ReadDir(srcDir); err == nil {
-		for _, e := range srcEntries {
-			srcNames[e.Name()] = true
-		}
-	}
-	for _, e := range destEntries {
-		if !srcNames[e.Name()] {
-			_ = os.RemoveAll(filepath.Join(destDir, e.Name()))
-		}
-	}
-	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(srcDir, path)
-		dest := filepath.Join(destDir, rel)
-		if d.IsDir() {
-			return os.MkdirAll(dest, 0755)
-		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-			return err
-		}
-		if err := copyFile(path, dest); err != nil {
-			return err
-		}
-		return os.Remove(path)
-	})
-}
+	backupDir := destDir + ".bak"
+	// 清理上一次失败遗留的 .bak（若存在）
+	_ = os.RemoveAll(backupDir)
 
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
+	destExists := true
+	if _, err := os.Stat(destDir); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("stat dest: %w", err)
+		}
+		destExists = false
 	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
+
+	if destExists {
+		if err := os.Rename(destDir, backupDir); err != nil {
+			return fmt.Errorf("backup current dir: %w", err)
+		}
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(dst)
-		return err
+
+	if err := os.Rename(srcDir, destDir); err != nil {
+		// 安装失败：回滚到原始状态
+		if destExists {
+			if rbErr := os.Rename(backupDir, destDir); rbErr != nil {
+				return fmt.Errorf("install new dir: %w (rollback failed: %v)", err, rbErr)
+			}
+		}
+		return fmt.Errorf("install new dir: %w", err)
 	}
-	return out.Close()
+
+	if destExists {
+		_ = os.RemoveAll(backupDir)
+	}
+	return nil
 }
