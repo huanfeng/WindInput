@@ -62,6 +62,9 @@ type PopupMenu struct {
 	// Only used by the root menu; submenus inherit closure from the root.
 	ownerForeground uintptr
 
+	// onHide is called once when the root menu finishes hiding (selection or dismiss).
+	onHide func()
+
 	// Text rendering
 	fontCache            *fontCache
 	textRenderer         *TextRenderer
@@ -703,6 +706,14 @@ func (m *PopupMenu) Show(items []MenuItem, x, y int, callback PopupMenuCallback)
 	m.trackMouseLeave()
 }
 
+// SetOnHide registers a callback that fires once when the root menu finishes hiding,
+// whether by item selection or by clicking outside. Replaces any prior callback.
+func (m *PopupMenu) SetOnHide(cb func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onHide = cb
+}
+
 // Hide hides the popup menu
 func (m *PopupMenu) Hide() {
 	// Hide submenu first
@@ -731,7 +742,14 @@ func (m *PopupMenu) Hide() {
 	m.mu.Lock()
 	m.lockedDPI = 0
 	m.ownerForeground = 0
+	cb := m.onHide
+	m.onHide = nil
 	m.mu.Unlock()
+
+	// Notify caller that the root menu has closed (both selection and dismiss paths).
+	if wasVisible && !isChild && cb != nil {
+		cb()
+	}
 }
 
 // IsVisible returns whether the menu is visible

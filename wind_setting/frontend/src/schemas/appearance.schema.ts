@@ -220,8 +220,7 @@ export const candidateTooltipSchema: PageSchema = [
     type: "toggle",
     key: "ui.tooltip.chaizi.enabled",
     label: "拆字反查",
-    hint: "悬停候选词时显示拆字信息（功能预留，待数据接入）",
-    dependsOn: () => false,
+    hint: "悬停候选词时显示字根拆字信息（需方案支持）",
   },
   {
     type: "toggle",

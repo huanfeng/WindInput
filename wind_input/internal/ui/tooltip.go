@@ -5,9 +5,11 @@ import (
 	"image"
 	"image/color"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
+	"unsafe"
 
 	"github.com/gogpu/gg"
 	"github.com/huanfeng/wind_input/pkg/theme"
@@ -21,8 +23,12 @@ type TooltipWindow struct {
 
 	mu            sync.Mutex
 	visible       bool
+	mouseOver     bool
+	trackingMouse bool
+	leaveBlocked  bool // 右键菜单显示期间抑制 WM_MOUSELEAVE 隐藏
 	text          string
 	resolvedTheme *theme.ResolvedTheme
+	onRightClick  func(text string, x, y int)
 
 	TextBackendManager
 }
@@ -51,11 +57,49 @@ func (w *TooltipWindow) SetFontFamily(fontSpec string) {
 	w.TextBackendManager.SetFontFamily(fontSpec)
 }
 
-// SetTextRenderMode switches between GDI, FreeType, and DirectWrite text rendering
+// SetTextRenderMode switches between GDI, FreeType, and DirectWrite text rendering.
+// If custom fallback fonts are configured (UserFonts non-empty), FreeType mode is
+// preserved regardless of the requested mode, because DirectWrite/GDI cannot load
+// arbitrary TTF files (e.g., PUA radical fonts) that are not system-registered.
 func (w *TooltipWindow) SetTextRenderMode(mode TextRenderMode) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if mode != TextRenderModeFreetype && len(w.TextBackendManager.FontConfig().UserFonts) > 0 {
+		mode = TextRenderModeFreetype
+	}
 	w.TextBackendManager.SetTextRenderMode(mode)
+}
+
+// AddFallbackFont 注册额外的回退字体路径（TTF/OTF）并切换到 FreeType 渲染模式。
+// 用于在 tooltip 中显示需要专用字体的字符（如五笔字根 PUA 字符）。
+func (w *TooltipWindow) AddFallbackFont(fontPath string) {
+	if fontPath == "" {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	fc := w.TextBackendManager.FontConfig()
+	if slices.Contains(fc.UserFonts, fontPath) {
+		return
+	}
+	fc.UserFonts = append(fc.UserFonts, fontPath)
+	w.TextBackendManager.SetTextRenderMode(TextRenderModeFreetype)
+}
+
+// SetOnRightClick registers a callback invoked when the user right-clicks the tooltip.
+// The callback receives the tooltip text and the screen cursor position.
+func (w *TooltipWindow) SetOnRightClick(cb func(text string, x, y int)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onRightClick = cb
+}
+
+// SuppressLeave controls whether WM_MOUSELEAVE is allowed to hide the tooltip.
+// Set true before showing a popup menu triggered by the tooltip, false when it closes.
+func (w *TooltipWindow) SuppressLeave(suppress bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.leaveBlocked = suppress
 }
 
 // SetTheme sets the theme for the tooltip window
@@ -84,9 +128,55 @@ func tooltipWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	case WM_DESTROY:
 		tooltipWindows.Unregister(windows.HWND(hwnd))
 		return 0
-	case WM_NCHITTEST:
-		// Return HTTRANSPARENT so mouse events pass through
-		return ^uintptr(0) // -1 as uintptr
+	case WM_MOUSEMOVE:
+		if w := tooltipWindows.Get(windows.HWND(hwnd)); w != nil {
+			w.mu.Lock()
+			needTrack := !w.trackingMouse
+			w.mouseOver = true
+			w.trackingMouse = true
+			w.mu.Unlock()
+			if needTrack {
+				tme := TRACKMOUSEEVENT{
+					CbSize:    uint32(unsafe.Sizeof(TRACKMOUSEEVENT{})),
+					DwFlags:   TME_LEAVE,
+					HwndTrack: uintptr(hwnd),
+				}
+				procTrackMouseEvent.Call(uintptr(unsafe.Pointer(&tme)))
+			}
+		}
+		return 0
+	case WM_MOUSELEAVE:
+		if w := tooltipWindows.Get(windows.HWND(hwnd)); w != nil {
+			w.mu.Lock()
+			w.mouseOver = false
+			w.trackingMouse = false
+			blocked := w.leaveBlocked
+			w.mu.Unlock()
+			if !blocked {
+				procShowWindow.Call(hwnd, SW_HIDE)
+				w.mu.Lock()
+				w.visible = false
+				w.mu.Unlock()
+			}
+		}
+		return 0
+	case WM_RBUTTONUP:
+		if w := tooltipWindows.Get(windows.HWND(hwnd)); w != nil {
+			w.mu.Lock()
+			text := w.text
+			cb := w.onRightClick
+			w.mu.Unlock()
+			if text != "" && cb != nil {
+				// 阻止 SetCapture（弹出菜单）触发的 WM_MOUSELEAVE 隐藏 tooltip
+				w.mu.Lock()
+				w.leaveBlocked = true
+				w.mu.Unlock()
+				var pt POINT
+				procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+				cb(text, int(pt.X), int(pt.Y))
+			}
+		}
+		return 0
 	}
 	ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
 	return ret
@@ -95,9 +185,8 @@ func tooltipWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 // Create creates the tooltip window (must be called from the UI thread)
 func (w *TooltipWindow) Create() error {
 	hwnd, err := CreateLayeredWindow(LayeredWindowConfig{
-		ClassName:  "IMETooltipWindow",
-		WndProc:    syscall.NewCallback(tooltipWndProc),
-		ExtraStyle: WS_EX_TRANSPARENT,
+		ClassName: "IMETooltipWindow",
+		WndProc:   syscall.NewCallback(tooltipWndProc),
 	})
 	if err != nil {
 		return err
@@ -136,9 +225,16 @@ func (w *TooltipWindow) Show(text string, centerX, y int) {
 	procShowWindow.Call(uintptr(w.hwnd), SW_SHOW)
 }
 
-// Hide hides the tooltip
+// Hide hides the tooltip. If the mouse is currently over the tooltip, hiding is
+// deferred until the mouse leaves (WM_MOUSELEAVE fires and calls Hide again).
 func (w *TooltipWindow) Hide() {
 	if w.hwnd == 0 {
+		return
+	}
+	w.mu.Lock()
+	over := w.mouseOver
+	w.mu.Unlock()
+	if over {
 		return
 	}
 	procShowWindow.Call(uintptr(w.hwnd), SW_HIDE)

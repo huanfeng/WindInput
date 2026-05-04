@@ -381,6 +381,11 @@ func (m *Manager) Start() error {
 		m.logger.Error("Failed to create unified popup menu", "error", err)
 	}
 
+	// Wire tooltip right-click to the custom popup menu
+	m.tooltip.SetOnRightClick(func(text string, x, y int) {
+		m.showTooltipContextMenu(text, x, y)
+	})
+
 	m.mu.Lock()
 	m.ready = true
 	m.mu.Unlock()

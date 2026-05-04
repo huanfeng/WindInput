@@ -11,14 +11,14 @@ import (
 )
 
 // buildTooltipService 根据配置和方案拆字路径创建 TooltipService
-func buildTooltipService(cfg *config.Config, chaiziDBPath string) *tooltip.Service {
+func buildTooltipService(cfg *config.Config, chaiziDBPath, chaiziFont string) *tooltip.Service {
 	if cfg == nil {
 		return tooltip.NewService()
 	}
 	tcfg := &cfg.UI.Tooltip
 	return tooltip.NewService(
 		tooltip.NewPinyinProvider(&tcfg.Pinyin),
-		tooltip.NewChaiziProvider(&tcfg.Chaizi, chaiziDBPath, ""),
+		tooltip.NewChaiziProvider(&tcfg.Chaizi, chaiziDBPath, chaiziFont),
 		tooltip.NewDebugProvider(&tcfg.Debug),
 	)
 }
@@ -26,18 +26,24 @@ func buildTooltipService(cfg *config.Config, chaiziDBPath string) *tooltip.Servi
 // rebuildTooltipServiceLocked 在持有 c.mu 时重建 tooltip service
 func (c *Coordinator) rebuildTooltipServiceLocked() {
 	c.cancelTooltipQuery() // 取消旧查询，防止旧 goroutine 继续使用过期 service
-	chaiziPath := c.getChaiziDBPath()
-	svc := buildTooltipService(c.config, chaiziPath)
+	dbPath, fontPath := c.getChaiziSpec()
+	c.logger.Debug("Rebuild tooltip service", "hasDB", dbPath != "", "hasFont", fontPath != "")
+	svc := buildTooltipService(c.config, dbPath, fontPath)
 	c.tooltipMu.Lock()
 	c.tooltipService = svc
 	c.tooltipMu.Unlock()
+	// 字体路径变化时通知 UIManager 更新 tooltip 回退字体
+	if fontPath != "" && c.uiManager != nil {
+		c.uiManager.SetTooltipChaiziFont(fontPath)
+	}
 }
 
-// getChaiziDBPath 返回当前活跃方案的拆字数据库路径（需持有 c.mu）
-func (c *Coordinator) getChaiziDBPath() string {
-	// 预留：从 engineMgr 获取当前方案的 Chaizi.DBPath
-	// 目前方案级 chaizi 路径尚未接入，先返回空字符串
-	return ""
+// getChaiziSpec 返回当前活跃方案的拆字数据库路径和字体路径（需持有 c.mu）
+func (c *Coordinator) getChaiziSpec() (dbPath, fontPath string) {
+	if c.engineMgr == nil {
+		return "", ""
+	}
+	return c.engineMgr.GetChaiziSpec()
 }
 
 // cancelTooltipQuery 取消当前待执行的 tooltip 查询

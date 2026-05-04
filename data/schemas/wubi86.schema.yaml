@@ -8,6 +8,9 @@ schema:
 
 engine:
   type: codetable
+  chaizi:
+    db_path: "wubi86/wubi86_chaizi.txt"
+    font_family: "wubi86/HeiTiZiGen.ttf"
   codetable:
     max_code_length: 4
     auto_commit_unique: false

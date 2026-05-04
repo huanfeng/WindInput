@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"github.com/huanfeng/wind_input/internal/clipboard"
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
@@ -269,4 +270,42 @@ func (m *Manager) GetAvailableThemeInfos() []theme.ThemeDisplayInfo {
 		}
 	}
 	return m.themeManager.ListAvailableThemeInfos()
+}
+
+// showTooltipContextMenu 在指定屏幕坐标显示 tooltip 右键自定义菜单。
+// 必须从 UI 线程调用（在 tooltip 的 WM_RBUTTONUP 回调中触发）。
+func (m *Manager) showTooltipContextMenu(text string, x, y int) {
+	if m.unifiedPopupMenu == nil {
+		return
+	}
+	items := []MenuItem{
+		{ID: 1, Text: "复制提示内容"},
+	}
+	// 菜单关闭后解除对 WM_MOUSELEAVE 的抑制，使 tooltip 可以正常隐藏
+	tt := m.tooltip
+	m.unifiedPopupMenu.SetOnHide(func() {
+		if tt != nil {
+			tt.SuppressLeave(false)
+		}
+	})
+	m.unifiedPopupMenu.Show(items, x, y, func(id int) {
+		if id == 1 {
+			_ = clipboard.SetText(text)
+		}
+	})
+}
+
+// SetTooltipChaiziFont 为 tooltip 窗口注册拆字专用字体（用于渲染 PUA 字根字符）。
+// 该方法可在任意 goroutine 调用；tooltip 未就绪时静默忽略。
+func (m *Manager) SetTooltipChaiziFont(fontPath string) {
+	if fontPath == "" {
+		return
+	}
+	m.mu.Lock()
+	tt := m.tooltip
+	m.mu.Unlock()
+	if tt == nil {
+		return
+	}
+	tt.AddFallbackFont(fontPath)
 }

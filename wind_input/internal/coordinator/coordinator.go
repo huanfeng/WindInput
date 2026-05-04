@@ -583,10 +583,8 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		c.initThemeMode(cfg)
 	}
 
-	// 初始化 tooltip service（providers 按配置自动启用/禁用）
-	if cfg != nil {
-		c.tooltipService = buildTooltipService(cfg, "")
-	}
+	// 初始化 tooltip service（含拆字数据库路径和字体）
+	c.rebuildTooltipServiceLocked()
 
 	return c
 }

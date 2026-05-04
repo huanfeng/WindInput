@@ -53,13 +53,6 @@ var (
 	procDeleteObject       = gdi32.NewProc("DeleteObject")
 	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
 	procGetDeviceCaps      = gdi32.NewProc("GetDeviceCaps")
-
-	// Popup menu APIs
-	procCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
-	procDestroyMenu         = user32.NewProc("DestroyMenu")
-	procAppendMenuW         = user32.NewProc("AppendMenuW")
-	procTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
-	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 )
 
 const (
