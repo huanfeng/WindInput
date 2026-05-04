@@ -14,6 +14,13 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 const props = defineProps<{
   formData: Config;
@@ -121,6 +128,20 @@ async function loadAllSchemas() {
 
     for (const id of enabledSchemaIDs.value) {
       await loadSchemaConfig(id);
+    }
+
+    // 确保主方案有显式值，避免保存时后端依赖列表顺序自动选取
+    if (!props.formData.schema.primaryCodetable) {
+      const firstCodetable = enabledSchemaIDs.value.find((id) => {
+        const info = allSchemas.value.find((s) => s.id === id);
+        return info?.engine_type === "codetable";
+      });
+      if (firstCodetable) {
+        props.formData.schema.primaryCodetable = firstCodetable;
+      }
+    }
+    if (!props.formData.schema.primaryPinyin) {
+      props.formData.schema.primaryPinyin = "pinyin";
     }
 
     // 加载方案引用关系
@@ -337,6 +358,51 @@ watch(
 onMounted(() => {
   loadAllSchemas();
 });
+
+// 已开启的码表方案（用于主码表方案选择）
+const enabledCodetableSchemas = computed(() =>
+  enabledSchemaIDs.value.filter((id) => {
+    const info = allSchemas.value.find((s) => s.id === id);
+    return info?.engine_type === "codetable";
+  }),
+);
+
+// 主拼音方案选项：全拼必然排第一，然后是其他已开启的拼音方案
+const pinyinSchemaOptions = computed(() => {
+  const options: { id: string; label: string }[] = [
+    { id: "pinyin", label: "全拼" },
+  ];
+  for (const id of enabledSchemaIDs.value) {
+    if (id === "pinyin") continue;
+    const info = allSchemas.value.find((s) => s.id === id);
+    if (info?.engine_type === "pinyin") {
+      options.push({
+        id,
+        label: getSchemaDisplayName(id) || info.name || id,
+      });
+    }
+  }
+  return options;
+});
+
+// 主码表方案：无"自动"选项，默认第一个已启用的码表方案
+const primaryCodetable = computed({
+  get: () =>
+    props.formData.schema?.primaryCodetable ||
+    enabledCodetableSchemas.value[0] ||
+    "",
+  set: (val: string) => {
+    props.formData.schema.primaryCodetable = val;
+  },
+});
+
+// 主拼音方案：无"自动"选项，默认全拼（"pinyin"）
+const primaryPinyin = computed({
+  get: () => props.formData.schema?.primaryPinyin || "pinyin",
+  set: (val: string) => {
+    props.formData.schema.primaryPinyin = val;
+  },
+});
 </script>
 
 <template>
@@ -478,6 +544,57 @@ onMounted(() => {
       </div>
     </div>
 
+    <!-- 主方案设置卡片 -->
+    <div class="settings-card primary-schema-card">
+      <div class="card-title">主方案设置</div>
+
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>主码表方案</label>
+          <p class="setting-hint">拼音方案"反查/编码提示"从此方案的码表派生</p>
+        </div>
+        <div class="setting-control">
+          <Select v-model="primaryCodetable">
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem
+                v-for="id in enabledCodetableSchemas"
+                :key="id"
+                :value="id"
+              >
+                {{ getSchemaDisplayName(id) || getSchemaInfo(id)?.name || id }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>主拼音方案</label>
+          <p class="setting-hint">码表方案"临时拼音"使用此方案</p>
+        </div>
+        <div class="setting-control">
+          <Select v-model="primaryPinyin">
+            <SelectTrigger class="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem
+                v-for="opt in pinyinSchemaOptions"
+                :key="opt.id"
+                :value="opt.id"
+              >
+                {{ opt.label }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+    </div>
+
     <!-- 方案管理对话框 -->
     <SchemaManagerDialog
       :visible="showSchemaManager"
@@ -533,6 +650,11 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* Primary schema card */
+.primary-schema-card {
+  margin-top: 12px;
+}
+
 /* Schema list card */
 .schema-list-card {
   padding-bottom: 8px;

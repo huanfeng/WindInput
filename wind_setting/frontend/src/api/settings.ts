@@ -172,6 +172,8 @@ export interface TSFLogConfig {
 export interface SchemaConfig {
   active: string;
   available: string[];
+  primaryCodetable?: string; // 主码表方案 ID
+  primaryPinyin?: string;    // 主拼音方案 ID
 }
 
 // 完整配置

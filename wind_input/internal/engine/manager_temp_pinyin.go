@@ -226,3 +226,38 @@ func (m *Manager) findPinyinSchemaID() string {
 func (m *Manager) findPinyinSchemaIDLocked() string {
 	return m.findPinyinSchemaID()
 }
+
+// shuangpinLayoutDisplayNames 双拼方案布局的中文简称
+var shuangpinLayoutDisplayNames = map[string]string{
+	"xiaohe":  "小鹤",
+	"ziranma": "自然码",
+	"mspy":    "微软",
+	"sogou":   "搜狗",
+	"abc":     "智能ABC",
+	"ziguang": "紫光",
+}
+
+// GetTempPinyinModeLabel 返回临时拼音模式的显示标签。
+// 全拼方案返回"临时全拼"，双拼方案返回"临时双拼（小鹤）"等。
+func (m *Manager) GetTempPinyinModeLabel() string {
+	m.mu.RLock()
+	pinyinID := m.findPinyinSchemaIDLocked()
+	m.mu.RUnlock()
+
+	if m.schemaManager == nil {
+		return "临时拼音"
+	}
+	s := m.schemaManager.GetSchema(pinyinID)
+	if s == nil || s.Engine.Pinyin == nil {
+		return "临时拼音"
+	}
+	if s.Engine.Pinyin.Scheme == schema.PinyinSchemeShuangpin {
+		if s.Engine.Pinyin.Shuangpin != nil {
+			if name, ok := shuangpinLayoutDisplayNames[s.Engine.Pinyin.Shuangpin.Layout]; ok {
+				return "临时双拼（" + name + "）"
+			}
+		}
+		return "临时双拼"
+	}
+	return "临时全拼"
+}

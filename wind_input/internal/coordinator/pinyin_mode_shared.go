@@ -584,7 +584,11 @@ func (c *Coordinator) showPinyinModeUI(ops *pinyinModeOps) {
 		}
 	}
 
-	c.uiManager.SetModeLabel("临时拼音")
+	modeLabel := "临时拼音"
+	if c.engineMgr != nil {
+		modeLabel = c.engineMgr.GetTempPinyinModeLabel()
+	}
+	c.uiManager.SetModeLabel(modeLabel)
 	c.uiManager.ShowCandidates(
 		displayCandidates,
 		preedit,

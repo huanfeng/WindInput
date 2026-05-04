@@ -79,12 +79,13 @@ func (m *Manager) SetDataRoot(dir string) {
 	m.dataRoot = dir
 }
 
-// SetPrimarySchemas 设置主码表 / 主拼音方案。空字符串表示触发自动推断。
+// SetPrimarySchemas 设置主码表 / 主拼音方案。
 //
 // - 主码表：拼音/双拼方案的编码提示从此方案的码表派生（运行期反向索引）；
 // - 主拼音：码表方案的临时拼音/快捷输入指向此方案。
 //
-// 当传入空字符串时，按 SchemaManager 中的方案列表自动推断（按 engine.type 选第一个）。
+// 正常情况下两个 ID 均来自配置文件的显式设置（设置界面保证始终写入非空值）。
+// 仅在首次启动、配置文件尚未写入时才触发兜底推断（码表取第一个，拼音优先全拼）。
 // 主码表方案变更会清空 cachedReverseIndex，下次访问时按新方案重建。
 func (m *Manager) SetPrimarySchemas(codetableID, pinyinID string) {
 	m.mu.Lock()
@@ -118,19 +119,28 @@ func (m *Manager) GetPrimaryPinyinID() string {
 	return m.primaryPinyinID
 }
 
-// inferPrimaryByTypeLocked 按引擎类型从 SchemaManager 中选第一个匹配方案。
+// inferPrimaryByTypeLocked 按引擎类型从 SchemaManager 中选合适的主方案。
+// 对拼音类型：优先选全拼方案，再选双拼，避免因列表顺序随机选中双拼作为默认。
 // 调用方需持有 m.mu。
 func (m *Manager) inferPrimaryByTypeLocked(t schema.EngineType) string {
 	if m.schemaManager == nil {
 		return ""
 	}
+	var firstMatch string
 	for _, info := range m.schemaManager.ListSchemas() {
 		s := m.schemaManager.GetSchema(info.ID)
 		if s == nil {
 			continue
 		}
 		if s.Engine.Type == t {
-			return info.ID
+			if firstMatch == "" {
+				firstMatch = info.ID
+			}
+			// 拼音类：优先选全拼，避免双拼因排序靠前而成为默认
+			if t == schema.EngineTypePinyin && s.Engine.Pinyin != nil &&
+				s.Engine.Pinyin.Scheme == schema.PinyinSchemeFull {
+				return info.ID
+			}
 		}
 		// 混输方案：包含码表子引擎，可作为主码表回退
 		if t == schema.EngineTypeCodeTable && s.Engine.Type == schema.EngineTypeMixed {
@@ -139,7 +149,7 @@ func (m *Manager) inferPrimaryByTypeLocked(t schema.EngineType) string {
 			}
 		}
 	}
-	return ""
+	return firstMatch
 }
 
 // SetDictManager 设置词库管理器
