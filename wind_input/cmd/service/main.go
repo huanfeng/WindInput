@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -122,6 +123,18 @@ func showErrorMessageBox(message string) {
 	title, _ := windows.UTF16PtrFromString(buildvariant.DisplayName())
 	msg, _ := windows.UTF16PtrFromString(message)
 	messageBox.Call(0, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x10) // MB_ICONERROR
+}
+
+// recoverPanic 捕获 goroutine 中未处理的 panic，将其写入日志后以非零码退出。
+// 用于替代默认行为（panic 信息仅输出到 stderr，当进程由 TSF DLL 启动时 stderr 通常被丢弃）。
+func recoverPanic(logger *slog.Logger, component string) {
+	if r := recover(); r != nil {
+		logger.Error("goroutine panic",
+			"component", component,
+			"panic", r,
+			"stack", string(debug.Stack()))
+		os.Exit(1)
+	}
 }
 
 // DPI awareness constants
@@ -321,6 +334,7 @@ func main() {
 	bridgeServer.SetHostRenderManager(hostRenderMgr)
 
 	go func() {
+		defer recoverPanic(logger, "bridge-server")
 		logger.Info("Starting Bridge IPC server (early)...")
 		if err := bridgeServer.Start(); err != nil {
 			logger.Error("Bridge server failed", "error", err)
@@ -442,6 +456,7 @@ func main() {
 
 	// Start UI Manager in a separate goroutine (it has its own message loop)
 	go func() {
+		defer recoverPanic(logger, "ui-manager")
 		logger.Info("Starting UI Manager...")
 		if err := uiManager.Start(); err != nil {
 			logger.Error("UI Manager failed", "error", err)
@@ -501,6 +516,7 @@ func main() {
 
 	// Listen for exit requests in a separate goroutine
 	go func() {
+		defer recoverPanic(logger, "exit-handler")
 		<-coordinator.ExitRequested()
 		logger.Info("Exit requested, shutting down...")
 		os.Exit(0)
@@ -508,6 +524,7 @@ func main() {
 
 	// Listen for restart requests in a separate goroutine
 	go func() {
+		defer recoverPanic(logger, "restart-handler")
 		<-coordinator.RestartRequested()
 		logger.Info("Restart requested, starting new process...")
 
