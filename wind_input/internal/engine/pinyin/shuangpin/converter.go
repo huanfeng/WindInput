@@ -214,9 +214,16 @@ func (c *Converter) convertPair(key1, key2 byte) []string {
 		}
 		// 也检查零声母音节列表中是否有匹配的
 		for _, syllable := range zeroSyllables {
-			// 零声母音节的第二键=韵母键
-			// 如 "ai": a+d(ai的韵母键) 在小鹤方案下
-			if c.matchesFinal(syllable, key2) {
+			matched := false
+			// 直接表音匹配：key1+key2 本身拼成零声母音节
+			// 如 "ai": a+i，双拼规则就是直接用表音字母输入
+			if syllable == string(key1)+string(key2) {
+				matched = true
+			} else if c.matchesFinal(syllable, key2) {
+				// 通过 FinalMap 反查：如 "ai": a+d(ai的韵母键) 在小鹤方案下
+				matched = true
+			}
+			if matched {
 				found := false
 				for _, r := range results {
 					if r == syllable {

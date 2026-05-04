@@ -109,6 +109,15 @@ func TestXiaoheZeroInitial(t *testing.T) {
 		{"aa", "a", "aa→a（单韵母重复键）"},
 		{"oo", "o", "oo→o"},
 		{"ee", "e", "ee→e"},
+		// 直接表音匹配：双拼零声母规则——直接用拼音字母输入
+		// ai/an/ei/en/ou 的第二键在 FinalMap 中不映射为这些零声母音节，需直接表音匹配
+		{"ai", "ai", "ai→ai（直接表音）"},
+		{"an", "an", "an→an（直接表音）"},
+		{"ei", "ei", "ei→ei（直接表音）"},
+		{"en", "en", "en→en（直接表音）"},
+		{"ou", "ou", "ou→ou（直接表音）"},
+		// ao 不在此列：'a'+'o' 中 FinalMap['o']=["uo","o"]，validPinyins["o"]=true 先命中，
+		// 结果为 "o"（正确），"ao" 的双拼编码是 'a'+'c'
 	}
 
 	for _, tt := range tests {
