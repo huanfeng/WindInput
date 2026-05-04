@@ -331,6 +331,16 @@ func (e *Engine) OnCandidateSelected(code, text string) {
 		return
 	}
 
+	// 双拼模式：将 code 统一归一化为全拼，确保临时词库/用户词库/调频记录的索引
+	// 与 PinyinDict 查询时使用的全拼 key 保持一致。
+	// 不归一化时，拆分输入产生的 code 为原始双拼键序列（如 "nihk"），
+	// 而引擎查询始终使用全拼（"nihao"），导致写入的临时词条永远无法被检索到。
+	if e.spConverter != nil {
+		if fp := e.GenerateWordPinyin(text); fp != "" {
+			code = fp
+		}
+	}
+
 	// 调频
 	if e.freqHandler != nil {
 		e.freqHandler.Record(code, text)
