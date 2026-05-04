@@ -12,3 +12,4 @@ yysg	文本
 gidr	还原
 xwtm	纵向
 xwtm	纵身	+1
+thny	延迟
