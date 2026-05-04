@@ -91,7 +91,9 @@ func (m *Manager) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	if pinyinEngine, ok := engine.(*pinyin.Engine); ok {
 		pinyinResult := pinyinEngine.ConvertEx(input, maxCandidates)
 		// 反查/编码提示：从主码表方案的反向索引派生（不再由拼音引擎自带 codeHintTable）
-		m.ApplyCodeHintsToCandidates(pinyinResult.Candidates)
+		if cfg := pinyinEngine.GetConfig(); cfg != nil && cfg.ShowCodeHint {
+			m.ApplyCodeHintsToCandidates(pinyinResult.Candidates)
+		}
 		result := &ConvertResult{
 			Candidates:      pinyinResult.Candidates,
 			IsEmpty:         pinyinResult.IsEmpty,

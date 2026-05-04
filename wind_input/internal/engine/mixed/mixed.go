@@ -676,6 +676,11 @@ func (e *Engine) addCodeHintsFromCodetable(candidates []candidate.Candidate) {
 	if e.codetableEngine == nil {
 		return
 	}
+	if pe := e.pinyinEngine; pe != nil {
+		if cfg := pe.GetConfig(); cfg != nil && !cfg.ShowCodeHint {
+			return
+		}
+	}
 	// 懒构建反向索引
 	if e.reverseIndex == nil {
 		ct := e.codetableEngine.GetCodeTable()
