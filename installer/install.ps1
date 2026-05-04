@@ -188,7 +188,9 @@ if (-not $DeployAll) {
 
         # 启动新服务
         Write-Host "  - 启动新服务..."
+        if ($DebugVariant) { $env:GODEBUG = "gctrace=1" }
         Start-Process -FilePath (Join-Path $InstallDir $ExeName)
+        if ($DebugVariant) { Remove-Item Env:\GODEBUG -ErrorAction SilentlyContinue }
 
         Write-Host "[完成] GO 服务部署成功" -ForegroundColor Green
         Write-Host ""
@@ -431,7 +433,9 @@ try {
 
 # [10/10] 预启动输入法服务 + 创建快捷方式
 Write-Host "[10/10] 预启动输入法服务..."
+if ($DebugVariant) { $env:GODEBUG = "gctrace=1" }
 Start-Process -FilePath $exePath
+if ($DebugVariant) { Remove-Item Env:\GODEBUG -ErrorAction SilentlyContinue }
 Write-Host "  - 服务已在后台启动"
 
 # 创建快捷方式
