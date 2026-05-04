@@ -70,6 +70,36 @@ export interface StatusIndicatorConfig {
   border_radius: number;
 }
 
+// 候选悬停提示 - 编码
+export interface TooltipCodeConfig {
+  enabled: boolean;
+}
+
+// 候选悬停提示 - 拼音
+export interface TooltipPinyinConfig {
+  enabled: boolean;
+  heteronyms: boolean;
+  max_readings: number;
+}
+
+// 候选悬停提示 - 拆字（预留）
+export interface TooltipChaiziConfig {
+  enabled: boolean;
+}
+
+// 候选悬停提示 - 调试
+export interface TooltipDebugConfig {
+  enabled: boolean;
+}
+
+// 候选悬停提示总配置
+export interface TooltipConfig {
+  code: TooltipCodeConfig;
+  pinyin: TooltipPinyinConfig;
+  chaizi: TooltipChaiziConfig;
+  debug: TooltipDebugConfig;
+}
+
 // UI配置
 export interface UIConfig {
   font_size: number;
@@ -84,6 +114,7 @@ export interface UIConfig {
   theme: string;
   theme_style: ThemeStyleValue;
   pager_display_mode: PagerDisplayModeValue;
+  tooltip: TooltipConfig;
 }
 
 // 工具栏配置
@@ -173,7 +204,7 @@ export interface SchemaConfig {
   active: string;
   available: string[];
   primaryCodetable?: string; // 主码表方案 ID
-  primaryPinyin?: string;    // 主拼音方案 ID
+  primaryPinyin?: string; // 主拼音方案 ID
 }
 
 // 完整配置
@@ -352,6 +383,12 @@ export function getDefaultConfig(): Config {
       theme: "default",
       theme_style: "system",
       pager_display_mode: "",
+      tooltip: {
+        code: { enabled: true },
+        pinyin: { enabled: false, heteronyms: false, max_readings: 0 },
+        chaizi: { enabled: false },
+        debug: { enabled: false },
+      },
     },
     toolbar: {
       visible: true,

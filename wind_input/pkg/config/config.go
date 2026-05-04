@@ -111,9 +111,23 @@ type HotkeyConfig struct {
 
 // TooltipConfig 候选悬停增强提示配置
 type TooltipConfig struct {
+	Code   TooltipCodeConfig   `yaml:"code" json:"code"`     // 编码显示
 	Pinyin TooltipPinyinConfig `yaml:"pinyin" json:"pinyin"` // 拼音提示
 	Chaizi TooltipChaiziConfig `yaml:"chaizi" json:"chaizi"` // 拆字提示
 	Debug  TooltipDebugConfig  `yaml:"debug" json:"debug"`   // 调试信息
+}
+
+// TooltipCodeConfig 编码显示配置
+type TooltipCodeConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"` // nil=默认 true（向后兼容）
+}
+
+// IsEnabled 返回是否显示编码（nil 视作 true）
+func (c *TooltipCodeConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 // TooltipPinyinConfig 拼音提示配置

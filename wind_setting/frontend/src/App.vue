@@ -230,6 +230,14 @@ function mergeWithDefaults(cfg: any): Config {
         ...defaults.ui.status_indicator,
         ...cfg.ui?.status_indicator,
       },
+      tooltip: {
+        ...defaults.ui.tooltip,
+        ...cfg.ui?.tooltip,
+        code: { ...defaults.ui.tooltip.code, ...cfg.ui?.tooltip?.code },
+        pinyin: { ...defaults.ui.tooltip.pinyin, ...cfg.ui?.tooltip?.pinyin },
+        chaizi: { ...defaults.ui.tooltip.chaizi, ...cfg.ui?.tooltip?.chaizi },
+        debug: { ...defaults.ui.tooltip.debug, ...cfg.ui?.tooltip?.debug },
+      },
     },
     toolbar: { ...defaults.toolbar, ...cfg.toolbar },
     input: {

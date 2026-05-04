@@ -1,83 +1,84 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { FieldDef } from '@/schemas/types'
-import { getPath, setPath } from '@/schemas/types'
-import { Switch } from '@/components/ui/switch'
+import { computed } from "vue";
+import type { FieldDef } from "@/schemas/types";
+import { getPath, setPath } from "@/schemas/types";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select'
+} from "@/components/ui/select";
 
 const props = defineProps<{
-  field: Exclude<FieldDef, { type: 'card' } | { type: 'section' }>
-  formData: Record<string, any>
-}>()
+  field: Exclude<FieldDef, { type: "card" } | { type: "section" }>;
+  formData: Record<string, any>;
+}>();
 
-const value = computed(() => getPath(props.formData, props.field.key))
+const value = computed(() => getPath(props.formData, props.field.key));
 
 const isDisabled = computed(() => {
-  const f = props.field as any
-  if (!f.dependsOn) return false
-  return !f.dependsOn(props.formData)
-})
+  const f = props.field as any;
+  if (!f.dependsOn) return false;
+  return !f.dependsOn(props.formData);
+});
 
 const resolvedHint = computed(() => {
-  const hint = (props.field as any).hint
-  if (!hint) return ''
-  return typeof hint === 'function' ? hint(props.formData) : hint
-})
+  const hint = (props.field as any).hint;
+  if (!hint) return "";
+  return typeof hint === "function" ? hint(props.formData) : hint;
+});
 
 function setValue(v: any) {
-  setPath(props.formData, props.field.key, v)
+  setPath(props.formData, props.field.key, v);
 }
 
 // Slider 显示值
 const sliderDisplay = computed(() => {
-  if (props.field.type !== 'slider') return ''
-  const f = props.field
-  const v = value.value as number
-  if (f.displayValue) return f.displayValue(v)
-  return f.unit ? `${v}${f.unit}` : String(v)
-})
+  if (props.field.type !== "slider") return "";
+  const f = props.field;
+  const v = value.value as number;
+  if (f.displayValue) return f.displayValue(v);
+  return f.unit ? `${v}${f.unit}` : String(v);
+});
 
 // Radix Select 不支持 value=""（空字符串表示"未选中"），用哨兵替代
-const EMPTY_SENTINEL = '__empty_select_value__'
+const EMPTY_SENTINEL = "__empty_select_value__";
 
 function selectValue(v: any): string {
   const fallbackFirst = (): string => {
-    if (props.field.type === 'select' && props.field.options.length > 0) {
-      return optValue(props.field.options[0].value)
+    if (props.field.type === "select" && props.field.options.length > 0) {
+      return optValue(props.field.options[0].value);
     }
-    return EMPTY_SENTINEL
-  }
+    return EMPTY_SENTINEL;
+  };
 
-  if (v == null) return fallbackFirst()
+  if (v == null) return fallbackFirst();
 
-  const s = String(v)
-  if (s === '') {
+  const s = String(v);
+  if (s === "") {
     // 只有选项中存在 value="" 时才使用哨兵（如 pager_display_mode Default 选项）
     // 否则空字符串视为"未配置"，回退到第一个选项作为视觉默认
     const hasEmptyOpt =
-      props.field.type === 'select' && props.field.options.some((o) => o.value === '')
-    return hasEmptyOpt ? EMPTY_SENTINEL : fallbackFirst()
+      props.field.type === "select" &&
+      props.field.options.some((o) => o.value === "");
+    return hasEmptyOpt ? EMPTY_SENTINEL : fallbackFirst();
   }
-  return s
+  return s;
 }
 
 function optValue(v: string | number): string {
-  return v === '' ? EMPTY_SENTINEL : String(v)
+  return v === "" ? EMPTY_SENTINEL : String(v);
 }
 
 function onSelectChange(raw: string) {
-  const actual = raw === EMPTY_SENTINEL ? '' : raw
-  const orig = getPath(props.formData, props.field.key)
-  if (typeof orig === 'number') {
-    setValue(Number(actual))
+  const actual = raw === EMPTY_SENTINEL ? "" : raw;
+  const orig = getPath(props.formData, props.field.key);
+  if (typeof orig === "number") {
+    setValue(Number(actual));
   } else {
-    setValue(actual)
+    setValue(actual);
   }
 }
 </script>
@@ -132,9 +133,14 @@ function onSelectChange(raw: string) {
                   <span
                     v-if="opt.tag"
                     class="text-[10px] px-1 rounded bg-primary/10 text-primary"
-                  >{{ opt.tag }}</span>
+                    >{{ opt.tag }}</span
+                  >
                 </div>
-                <span v-if="opt.description" class="text-xs text-muted-foreground">{{ opt.description }}</span>
+                <span
+                  v-if="opt.description"
+                  class="text-xs text-muted-foreground"
+                  >{{ opt.description }}</span
+                >
               </div>
             </template>
             <template v-else>{{ opt.label }}</template>

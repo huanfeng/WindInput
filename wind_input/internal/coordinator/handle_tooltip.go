@@ -77,7 +77,10 @@ func (c *Coordinator) runTooltipQuery(
 
 	// 查询所有 provider
 	var sections []tooltip.Section
-	if cand.Code != "" {
+	c.mu.Lock()
+	codeEnabled := c.config != nil && c.config.UI.Tooltip.Code.IsEnabled()
+	c.mu.Unlock()
+	if codeEnabled && cand.Code != "" {
 		sections = append(sections, tooltip.Section{
 			Label: "编码",
 			Lines: []string{cand.Code},

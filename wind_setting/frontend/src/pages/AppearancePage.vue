@@ -15,6 +15,7 @@ import {
   themeExtraSchema,
   candidateWindowSchema,
   statusIndicatorSchema,
+  candidateTooltipSchema,
   toolbarSchema,
 } from "@/schemas/appearance.schema";
 
@@ -66,7 +67,7 @@ function onThemeSelect(themeName: string) {
 watch(
   () => props.formData.ui.theme_style,
   (val) => emit("themeStyleChange", val),
-)
+);
 
 function handleDocumentClick(event: MouseEvent) {
   const target = event.target as Node;
@@ -155,7 +156,11 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <SchemaRenderer :schema="themeExtraSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="themeExtraSchema"
+        :form-data="formData"
+        mode="bare"
+      />
 
       <div class="setting-item align-start" v-if="themePreview">
         <div class="setting-info">
@@ -386,12 +391,20 @@ onUnmounted(() => {
           </Select>
         </div>
       </div>
-      <SchemaRenderer :schema="candidateWindowSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="candidateWindowSchema"
+        :form-data="formData"
+        mode="bare"
+      />
     </div>
 
     <div class="settings-card">
       <div class="card-title">状态提示</div>
-      <SchemaRenderer :schema="statusIndicatorSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="statusIndicatorSchema"
+        :form-data="formData"
+        mode="bare"
+      />
       <!-- 显示内容（复选框组，无对应 schema 类型） -->
       <div class="setting-item" v-if="formData.ui.status_indicator.enabled">
         <div class="setting-info">
@@ -400,15 +413,24 @@ onUnmounted(() => {
         </div>
         <div class="setting-control inline-control">
           <label class="checkbox-label">
-            <input type="checkbox" v-model="formData.ui.status_indicator.show_mode" />
+            <input
+              type="checkbox"
+              v-model="formData.ui.status_indicator.show_mode"
+            />
             模式
           </label>
           <label class="checkbox-label">
-            <input type="checkbox" v-model="formData.ui.status_indicator.show_punct" />
+            <input
+              type="checkbox"
+              v-model="formData.ui.status_indicator.show_punct"
+            />
             标点
           </label>
           <label class="checkbox-label">
-            <input type="checkbox" v-model="formData.ui.status_indicator.show_full_width" />
+            <input
+              type="checkbox"
+              v-model="formData.ui.status_indicator.show_full_width"
+            />
             全半角
           </label>
         </div>
@@ -416,8 +438,21 @@ onUnmounted(() => {
     </div>
 
     <div class="settings-card">
+      <div class="card-title">候选项提示信息</div>
+      <SchemaRenderer
+        :schema="candidateTooltipSchema"
+        :form-data="formData"
+        mode="bare"
+      />
+    </div>
+
+    <div class="settings-card">
       <div class="card-title">工具栏</div>
-      <SchemaRenderer :schema="toolbarSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="toolbarSchema"
+        :form-data="formData"
+        mode="bare"
+      />
     </div>
   </section>
 </template>
