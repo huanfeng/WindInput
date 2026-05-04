@@ -39,11 +39,14 @@ func TestChaiziProvider_Query(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query error: %v", err)
 	}
-	if len(sec.Lines) == 0 {
-		t.Fatal("expected non-empty lines")
+	if len(sec.Lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d: %v", len(sec.Lines), sec.Lines)
 	}
-	if sec.Lines[0] != "氵廿口 宀子" {
-		t.Errorf("unexpected chaizi result: %q", sec.Lines[0])
+	if sec.Lines[0] != "汉：氵廿口" {
+		t.Errorf("unexpected chaizi result for 汉: %q", sec.Lines[0])
+	}
+	if sec.Lines[1] != "字：宀子" {
+		t.Errorf("unexpected chaizi result for 字: %q", sec.Lines[1])
 	}
 	if !sec.Copyable {
 		t.Error("expected Copyable=true")
