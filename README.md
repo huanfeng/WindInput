@@ -100,13 +100,16 @@ ui:
 
 ## 第三方资源
 
-本项目的词库数据使用了以下开源项目：
+本项目使用了以下第三方数据资源：
 
 | 资源 | 用途 | 许可证 |
 |------|------|--------|
 | [雾凇拼音 (rime-ice)](https://github.com/iDvel/rime-ice) | 拼音词库数据源 | GPL-3.0 |
 | [极点五笔 for Rime](https://github.com/KyleBing/rime-wubi86-jidian) | 五笔 86 码表数据源 | Apache-2.0 |
+| [pinyin-data](https://github.com/mozillazg/pinyin-data) | 汉字拼音注音数据（悬停提示） | MIT |
 | 腾讯词向量 | 词频权重参考 | — |
+| 五笔86拆字数据库 (`wubi86_chaizi.txt`) | 五笔字根拆字提示 | 来源不详，未附版权说明 |
+| 黑体字根字体 (`HeiTiZiGen.ttf`) | 拆字提示中的 PUA 字根字符渲染 | 来源不详，未附版权说明 |
 
 详细的第三方资源声明请参阅 [NOTICE.md](NOTICE.md)。
 

@@ -24,6 +24,31 @@
   - `wubi86_jidian_extra.dict.yaml` — 扩展词库
   - `wubi86_jidian_extra_district.dict.yaml` — 行政区域词库
 
+### pinyin-data
+
+- **用途**: 汉字现代普通话读音数据，用于悬停提示中的拼音显示
+- **仓库**: https://github.com/mozillazg/pinyin-data
+- **许可证**: MIT
+- **使用的文件**:
+  - `kXHC1983.txt` — 现代新华字典多音字读音
+  - `kTGHZ2013.txt` — 通用规范汉字多音字读音
+  - `kMandarin_8105.txt` — 8105 标准汉字首音
+- **说明**: 数据通过 `cmd/gen_pinyin_data` 工具生成为 `internal/tooltip/pinyin_data_generated.go`，已排除 kHanyuPinyin（汉语大字典古音）
+
+### 五笔86拆字数据库 (wubi86_chaizi.txt)
+
+- **用途**: 五笔字根拆字数据，用于悬停提示中显示候选字的拆字信息
+- **文件**: `data/schemas/wubi86/wubi86_chaizi.txt`
+- **来源**: 来自五笔输入法资源网盘，原始来源及作者不详
+- **许可证**: 未附带任何版权声明或许可证信息
+
+### 黑体字根字体 (HeiTiZiGen.ttf)
+
+- **用途**: 渲染拆字提示中 PUA 私用区的五笔字根字符
+- **文件**: `data/schemas/wubi86/HeiTiZiGen.ttf`
+- **来源**: 来自五笔输入法资源网盘，原始来源及作者不详
+- **许可证**: 未附带任何版权声明或许可证信息
+
 ### 腾讯词向量
 
 - **用途**: 词频数据参考，用于 unigram 语言模型的词频权重
