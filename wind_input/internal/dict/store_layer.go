@@ -389,6 +389,7 @@ func userRecordsToCandidates(recs []store.UserWordRecord, code string, limit int
 			Code:     candCode,
 			Weight:   rec.Weight,
 			IsCommon: true, // 用户词不应被 smart 过滤
+			Meta:     candidate.CandidateMeta{IsUserDict: true},
 		}
 		results = append(results, c)
 	}

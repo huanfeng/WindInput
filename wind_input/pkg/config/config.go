@@ -109,6 +109,30 @@ type HotkeyConfig struct {
 	GlobalHotkeys   []string `yaml:"global_hotkeys" json:"global_hotkeys"`     // 注册为全局热键的快捷键名称列表
 }
 
+// TooltipConfig 候选悬停增强提示配置
+type TooltipConfig struct {
+	Pinyin TooltipPinyinConfig `yaml:"pinyin" json:"pinyin"` // 拼音提示
+	Chaizi TooltipChaiziConfig `yaml:"chaizi" json:"chaizi"` // 拆字提示
+	Debug  TooltipDebugConfig  `yaml:"debug" json:"debug"`   // 调试信息
+}
+
+// TooltipPinyinConfig 拼音提示配置
+type TooltipPinyinConfig struct {
+	Enabled     bool `yaml:"enabled" json:"enabled"`           // 是否显示拼音
+	Heteronyms  bool `yaml:"heteronyms" json:"heteronyms"`     // 是否显示多音字所有读音
+	MaxReadings int  `yaml:"max_readings" json:"max_readings"` // 每字最多显示读音数，0 表示不限
+}
+
+// TooltipChaiziConfig 拆字提示配置
+type TooltipChaiziConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"` // 是否显示拆字（默认 false）
+}
+
+// TooltipDebugConfig 调试信息配置
+type TooltipDebugConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"` // 是否显示调试信息（默认 false）
+}
+
 // StatusIndicatorConfig 状态提示配置
 type StatusIndicatorConfig struct {
 	Enabled         bool    `yaml:"enabled" json:"enabled"`
@@ -148,6 +172,8 @@ type UIConfig struct {
 	TooltipDelay            int              `yaml:"tooltip_delay" json:"tooltip_delay"`                         // 编码提示延迟显示时间（毫秒），0 表示立即显示
 
 	PreeditMode PreeditMode `yaml:"preedit_mode" json:"preedit_mode"` // 编码显示模式："top"（默认，编码在上方独立行）, "embedded"（嵌入候选行前）；仅 InlinePreedit=false 时生效
+
+	Tooltip TooltipConfig `yaml:"tooltip" json:"tooltip"` // 候选悬停提示配置
 
 	// 文本渲染设置
 	TextRenderMode FontEngine `yaml:"text_render_mode,omitempty" json:"text_render_mode,omitempty"` // 文本渲染引擎："directwrite"（默认，DirectWrite渲染）、"gdi"（Windows原生GDI渲染）或 "freetype"（FreeType渲染）
@@ -312,7 +338,7 @@ func DefaultConfig() *Config {
 			StatusIndicatorDuration: 800,
 			StatusIndicatorOffsetX:  0,
 			StatusIndicatorOffsetY:  0,
-			TooltipDelay:            200,
+			TooltipDelay:            100,
 			Theme:                   "default",
 			ThemeStyle:              ThemeStyleSystem,
 			TextRenderMode:          FontEngineDirectWrite,
@@ -320,6 +346,11 @@ func DefaultConfig() *Config {
 			GDIFontScale:            1.0,
 			MenuFontWeight:          500,
 			MenuFontSize:            12.0,
+			Tooltip: TooltipConfig{
+				Pinyin: TooltipPinyinConfig{Enabled: true, Heteronyms: true, MaxReadings: 0},
+				Chaizi: TooltipChaiziConfig{Enabled: false},
+				Debug:  TooltipDebugConfig{Enabled: false},
+			},
 			StatusIndicator: StatusIndicatorConfig{
 				Enabled:         true,
 				Duration:        800,

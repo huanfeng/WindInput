@@ -19,6 +19,7 @@
 | `gen_codetable_wdb/` | 将五笔 Rime `.dict.yaml` 码表转换为 `codetable.wdb` 二进制格式 (see `gen_codetable_wdb/AGENTS.md`) |
 | `gen_unigram/` | 从 Rime `.dict.yaml` 提取词频，输出 `unigram.txt` (see `gen_unigram/AGENTS.md`) |
 | `test_codetable/` | 码表调试工具，测试码表查询和顶码行为 (see `test_codetable/AGENTS.md`) |
+| `gen_pinyin_data/` | 从 pinyin-data 原始数据生成拼音提示嵌入数据 `internal/tooltip/pinyin_data_generated.go` (see `gen_pinyin_data/AGENTS.md`) |
 
 ## For AI Agents
 

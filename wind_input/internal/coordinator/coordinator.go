@@ -2,6 +2,7 @@
 package coordinator
 
 import (
+	"context"
 	"image"
 	"log/slog"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/hotkey"
 	"github.com/huanfeng/wind_input/internal/store"
+	"github.com/huanfeng/wind_input/internal/tooltip"
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/internal/ui"
 	"github.com/huanfeng/wind_input/pkg/config"
@@ -250,6 +252,12 @@ type Coordinator struct {
 	// key = ui.MonitorKeyStr(workRight, workBottom)，value = 工具栏左上角屏幕坐标。
 	// 焦点切换时优先使用该值；切换到没有记录的显示器时回退到右下角默认位置。
 	toolbarUserPos map[string]image.Point
+
+	// tooltip 异步查询（独立锁，避免与主锁形成死锁）
+	tooltipService  *tooltip.Service
+	tooltipCancel   context.CancelFunc
+	tooltipHoverIdx int
+	tooltipMu       sync.Mutex
 }
 
 // EventNotifier 由外部（rpc.Server 适配器）注入。当 coordinator 旁路 RPC 路径
@@ -573,6 +581,11 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		}
 		// 初始化主题暗色模式并加载主题
 		c.initThemeMode(cfg)
+	}
+
+	// 初始化 tooltip service（providers 按配置自动启用/禁用）
+	if cfg != nil {
+		c.tooltipService = buildTooltipService(cfg, "")
 	}
 
 	return c

@@ -101,6 +101,9 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 		c.updateThemeStyle(uiConfig)
 	}
 
+	// 重建 tooltip service（配置可能已更新）
+	c.rebuildTooltipServiceLocked()
+
 	c.logger.Debug("UI config updated", "candidatesPerPage", c.candidatesPerPage)
 }
 

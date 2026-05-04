@@ -29,6 +29,16 @@ type Candidate struct {
 	Index          int             // 显示序号（UI 渲染用，1-9/0）
 	HasShadow      bool            // 是否存在 Shadow 层修改（UI 右键菜单"恢复默认"用）
 	IndexLabel     string          // 自定义序号标签（如 "a"/"b"），非空时覆盖 Index 的数字显示
+	Meta           CandidateMeta   // 调试/提示元数据（可选，引擎层按需填充）
+}
+
+// CandidateMeta 候选调试与提示元数据（引擎层按需填充，空值表示未记录）
+type CandidateMeta struct {
+	LexiconName string // 来源词库名（如词库 ID 或 "用户词库"/"临时词库"）
+	IsUserDict  bool   // 是否来自用户词库
+	IsTempDict  bool   // 是否来自临时词库
+	RawWeight   int    // 归一化前的原始权重（0 = 未记录）
+	FreqBoost   int    // 词频加成量（0 = 未记录）
 }
 
 // CandidateList 候选词列表

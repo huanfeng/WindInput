@@ -361,6 +361,7 @@ func (ct *CodeTable) parseEntryLine(line string) bool {
 		Weight:       weight,
 		NaturalOrder: ct.entryOrder, // 全局顺序（文件中的出现位置，跨编码递增）
 		IsCommon:     IsStringCommon(text),
+		Meta:         candidate.CandidateMeta{LexiconName: ct.Header.Name},
 	}
 
 	ct.entries[code] = append(ct.entries[code], cand)

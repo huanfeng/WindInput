@@ -2,6 +2,7 @@
 package coordinator
 
 import (
+	"context"
 	"image"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
@@ -235,21 +236,58 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 	pushKeyEventResult(bridgeServer, result)
 }
 
-// handleCandidateHoverChange handles hover state change
+// handleCandidateHoverChange handles hover state change（异步 tooltip 查询）
 func (c *Coordinator) handleCandidateHoverChange(index, tooltipX, tooltipY int) {
 	c.logger.Debug("Candidate hover changed", "index", index, "tooltipX", tooltipX, "tooltipY", tooltipY)
 
-	// Refresh the candidate window to show/hide hover highlight
+	// 取消上一次查询并立即更新 hoverIdx，防止旧 goroutine 通过中间检查
+	c.cancelTooltipQuery()
+	c.tooltipMu.Lock()
+	c.tooltipHoverIdx = index
+	c.tooltipMu.Unlock()
+
 	if c.uiManager != nil {
 		c.uiManager.RefreshCandidates()
+	}
 
-		// Show/hide tooltip for encoding lookup
-		if index >= 0 {
-			c.uiManager.ShowTooltipForCandidate(index, tooltipX, tooltipY)
-		} else {
+	if index < 0 {
+		if c.uiManager != nil {
 			c.uiManager.HideTooltip()
 		}
+		return
 	}
+
+	// 在持有锁时获取候选数据
+	c.mu.Lock()
+	actualIndex := (c.currentPage-1)*c.candidatesPerPage + index
+	if actualIndex < 0 || actualIndex >= len(c.candidates) {
+		c.mu.Unlock()
+		return
+	}
+	cand := c.candidates[actualIndex]
+	delay := 100
+	if c.config != nil && c.config.UI.TooltipDelay >= 0 {
+		delay = c.config.UI.TooltipDelay
+	}
+	c.mu.Unlock()
+
+	// 获取 tooltip service 引用
+	c.tooltipMu.Lock()
+	svc := c.tooltipService
+	c.tooltipMu.Unlock()
+
+	hasProviders := svc != nil && svc.HasEnabledProviders()
+	if !hasProviders && cand.Code == "" {
+		return
+	}
+
+	// 启动异步查询 goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+	c.tooltipMu.Lock()
+	c.tooltipCancel = cancel
+	c.tooltipMu.Unlock()
+
+	go c.runTooltipQuery(ctx, index, cand, svc, tooltipX, tooltipY, delay)
 }
 
 // handleCandidateMoveUp handles move up action from context menu.

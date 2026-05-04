@@ -41,6 +41,7 @@ type EngineSpec struct {
 	Pinyin     *PinyinSpec    `yaml:"pinyin,omitempty"`
 	Mixed      *MixedSpec     `yaml:"mixed,omitempty"`
 	FilterMode string         `yaml:"filter_mode"`
+	Chaizi     *ChaiziSpec    `yaml:"chaizi,omitempty"` // 拆字提示配置（可选）
 }
 
 // MixedSpec 混输引擎配置
@@ -351,6 +352,12 @@ func (s *Schema) DataSchemaID() string {
 		return PinyinSharedDictID
 	}
 	return s.Schema.ID
+}
+
+// ChaiziSpec 拆字提示配置（方案级，与词库文件放一起）
+type ChaiziSpec struct {
+	DBPath     string `yaml:"db_path"`               // 拆字数据库文件路径（相对词库目录或绝对路径）
+	FontFamily string `yaml:"font_family,omitempty"` // 显示拆字所用的字体（空=使用默认字体）
 }
 
 // GetDictsByRole 按角色筛选词库规格

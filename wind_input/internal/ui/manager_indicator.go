@@ -1,8 +1,6 @@
 package ui
 
 import (
-	"time"
-
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
@@ -123,61 +121,6 @@ func (m *Manager) doHideStatus() {
 	m.status.Hide()
 }
 
-// ShowTooltipForCandidate shows a tooltip for the candidate at the given page-local index
-// TODO: 反查功能待实现 - 需要以下数据支持：
-//  1. 拼音反查：根据汉字查询拼音（需要拼音字典数据）
-//  2. 五笔编码反查：显示汉字的完整五笔编码（需要编码反查表）
-//  3. 可选：五笔拆字方法展示
-//
-// 目前 candidate.Comment 字段为空，因为引擎未返回 Hint 信息
-func (m *Manager) ShowTooltipForCandidate(pageIndex int, tooltipX, tooltipY int) {
-	m.mu.Lock()
-	if !m.ready || m.tooltip == nil {
-		m.mu.Unlock()
-		return
-	}
-
-	// Get the candidate at the page-local index
-	if pageIndex < 0 || pageIndex >= len(m.candidates) {
-		m.mu.Unlock()
-		m.HideTooltip()
-		return
-	}
-
-	candidate := m.candidates[pageIndex]
-	comment := candidate.Comment
-	delay := m.tooltipDelay
-
-	// Increment version to cancel any pending tooltip show
-	m.tooltipVersion++
-	version := m.tooltipVersion
-	m.mu.Unlock()
-
-	// Hide any currently visible tooltip immediately when switching candidates
-	m.tooltip.Hide()
-
-	// Only show tooltip if there's a comment (encoding info)
-	if comment == "" {
-		return
-	}
-
-	// Show tooltip with delay
-	if delay <= 0 {
-		m.tooltip.Show(comment, tooltipX, tooltipY)
-		return
-	}
-	go func() {
-		time.Sleep(time.Duration(delay) * time.Millisecond)
-		m.mu.Lock()
-		if m.tooltipVersion != version {
-			m.mu.Unlock()
-			return // Cancelled: hover changed before delay elapsed
-		}
-		m.mu.Unlock()
-		m.tooltip.Show(comment, tooltipX, tooltipY)
-	}()
-}
-
 // HideTooltip hides the tooltip and cancels any pending delayed show
 func (m *Manager) HideTooltip() {
 	m.mu.Lock()
@@ -186,6 +129,24 @@ func (m *Manager) HideTooltip() {
 	if m.tooltip != nil {
 		m.tooltip.Hide()
 	}
+}
+
+// ShowTooltipText 直接显示 tooltip 文本（无延迟，由调用方管理延迟和取消逻辑）
+func (m *Manager) ShowTooltipText(text string, centerX, y int) {
+	if text == "" {
+		return
+	}
+	m.mu.Lock()
+	if !m.ready || m.tooltip == nil {
+		m.mu.Unlock()
+		return
+	}
+	// 取消任何待显示的延迟 tooltip（通过递增版本号）
+	m.tooltipVersion++
+	m.mu.Unlock()
+
+	m.tooltip.Hide()
+	m.tooltip.Show(text, centerX, y)
 }
 
 // LoadTheme loads a theme by name and applies it to all renderers

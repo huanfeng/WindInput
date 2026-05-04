@@ -380,6 +380,26 @@ function Parse-Modules([string]$Digits) {
     return ,$mods
 }
 
+# ============ 数据维护 ============
+
+function Do-GenPinyinData {
+    param(
+        [string]$Src = ""  # 本地 pinyin-data 目录（留空时从 GitHub 下载）
+    )
+    $windInputDir = Join-Path $ScriptDir "wind_input"
+    Push-Location $windInputDir
+    try {
+        $genArgs = @("run", "./cmd/gen_pinyin_data", "-out", "internal/tooltip/pinyin_data_generated.go")
+        if ($Src) { $genArgs += @("-src", $Src) }
+        & go @genArgs
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        go fmt ./internal/tooltip/pinyin_data_generated.go
+        Write-Host "[OK] 拼音数据已更新" -ForegroundColor Green
+    } finally {
+        Pop-Location
+    }
+}
+
 # ---- 路由 ----
 
 if ($isPortable -and $cmd -eq '') {
@@ -451,11 +471,16 @@ if ($isPortable -and $cmd -eq '') {
     # 8 / 8s: 生成安装包
     if ($Matches[1] -eq 's') { Do-BuildInstallerSkip } else { Do-BuildInstaller }
 
+} elseif ($cmd -eq 'gen') {
+    # gen: 重新生成拼音数据（需要 pinyin-data 仓库与主仓库同级）
+    Do-GenPinyinData
+
 } else {
     Write-Host "[ERROR] 无效选项: $Choice" -ForegroundColor Red
     Write-Host ""
     Write-Host "格式: [d]<操作>"
     Write-Host "  操作: 1[d|s], 2[d], 3, 4, 8[s], m[1234][d], p, pm[1234][d]"
     Write-Host "  前缀 d = 调试版"
+    Write-Host "  数据: gen (重新生成拼音数据)"
     exit 1
 }

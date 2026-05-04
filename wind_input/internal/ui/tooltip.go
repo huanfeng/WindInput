@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"log/slog"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -164,7 +165,7 @@ func (w *TooltipWindow) Destroy() {
 	w.mu.Unlock()
 }
 
-// render renders the tooltip text to an image
+// render 将 tooltip 文本渲染到图像（支持 \n 换行）
 func (w *TooltipWindow) render(text string) *image.RGBA {
 	scale := GetDPIScale()
 	bgColor, textColor := w.getTooltipColors()
@@ -175,26 +176,56 @@ func (w *TooltipWindow) render(text string) *image.RGBA {
 
 	fontSize := 14.0 * scale
 	padding := 6.0 * scale
+	lineSpacing := 2.0 * scale
 
-	// Measure text width using TextDrawer
-	tw := td.MeasureString(text, fontSize)
-	width := tw + padding*2
-	height := fontSize + padding*2
+	lines := splitLines(text)
+	if len(lines) == 0 {
+		return nil
+	}
 
-	// Phase 1: Draw shapes with gg
+	// 计算各行宽度，取最大值
+	var maxLineWidth float64
+	for _, line := range lines {
+		lw := td.MeasureString(line, fontSize)
+		if lw > maxLineWidth {
+			maxLineWidth = lw
+		}
+	}
+
+	lineH := fontSize + lineSpacing
+	width := maxLineWidth + padding*2
+	height := lineH*float64(len(lines)) - lineSpacing + padding*2
+
+	// Phase 1: 绘制背景
 	dc := gg.NewContext(int(width), int(height))
 	dc.SetColor(bgColor)
 	dc.DrawRoundedRectangle(0, 0, width, height, 4*scale)
 	dc.Fill()
 
-	// Phase 2: Draw text with TextDrawer
+	// Phase 2: 逐行绘制文字
 	img := dc.Image().(*image.RGBA)
 	td.BeginDraw(img)
-	td.DrawString(text, padding, padding+fontSize*0.8, fontSize, textColor)
+	for i, line := range lines {
+		y := padding + fontSize*0.8 + float64(i)*lineH
+		td.DrawString(line, padding, y, fontSize, textColor)
+	}
 	td.EndDraw()
 
 	DrawDebugBanner(img)
 	return img
+}
+
+// splitLines 按 \n 拆分文本为行列表，过滤空行
+func splitLines(text string) []string {
+	raw := strings.Split(text, "\n")
+	var lines []string
+	for _, l := range raw {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return lines
 }
 
 // updateLayeredWindow updates the tooltip's layered window
