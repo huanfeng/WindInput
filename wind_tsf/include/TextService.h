@@ -119,6 +119,14 @@ public:
     BOOL IsFullWidth() { return _bFullWidth; }
     BOOL IsKeyboardDisabled() { return _bKeyboardDisabled; }
     ULONGLONG GetFocusSessionId() const { return _focusSessionId; }
+    // TRUE when the focused document manager has an editable (non-readonly,
+    // non-transitory) context. FALSE when e.g. Chrome passes a doc manager
+    // with no active text field (its context is TF_SD_READONLY).
+    BOOL HasTextInputContext() const { return _hasTextInputContext; }
+    // Lazy re-check via GetFocus() + _DocMgrHasEditableContext(). Updates and
+    // returns _hasTextInputContext. Called from KeyEventSink when the cached
+    // value is FALSE to handle late-arriving focus changes.
+    BOOL RefreshTextInputContext();
 
     // Check if there's an active composition
     BOOL HasActiveComposition() { return _pComposition != nullptr; }
@@ -171,6 +179,7 @@ private:
     BOOL _bFullWidth;
     BOOL _bKeyboardDisabled;   // GUID_COMPARTMENT_KEYBOARD_DISABLED
     ULONGLONG _focusSessionId;
+    BOOL _hasTextInputContext;  // TRUE when focused doc mgr has a real text-editing context (GetTextExt succeeds)
 
     // Composition
     ITfComposition* _pComposition;
@@ -204,6 +213,10 @@ private:
     ITfContext* _pLayoutSinkContext;  // Context we registered the sink on
     void _AdviseTextLayoutSink(ITfContext* pContext);
     void _UnadviseTextLayoutSink();
+
+    // Returns TRUE if pDocMgr has a non-null, writable, non-transitory top context.
+    // Used to set _hasTextInputContext in OnSetFocus and RefreshTextInputContext.
+    BOOL _DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr);
 
     // ITfTextEditSink registration
     DWORD _dwTextEditSinkCookie;

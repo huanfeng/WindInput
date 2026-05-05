@@ -700,6 +700,7 @@ CTextService::CTextService()
     , _bChineseMode(TRUE)
     , _bFullWidth(FALSE)
     , _focusSessionId(0)
+    , _hasTextInputContext(FALSE)
     , _pComposition(nullptr)
     , _hasCachedCaretPos(FALSE)
     , _hasCachedCompStartPos(FALSE)
@@ -1061,7 +1062,15 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             _pKeyEventSink->ResetComposingState();
         }
 
-        // Get caret position for toolbar placement
+        // Detect whether the focused doc manager has a real editable context.
+        // Use TSF context status flags (TF_SD_READONLY / TF_SS_TRANSITORY) rather than
+        // GetTextExt: GetTextExt is a layout API and is not implemented by many frameworks
+        // (JetBrains/Java Swing). Chrome marks its "no text field" context as TF_SD_READONLY,
+        // which is the correct TSF-standard signal for "no writable text input".
+        _hasTextInputContext = _DocMgrHasEditableContext(pDocMgrFocus);
+        WIND_LOG_DEBUG_FMT(L"OnSetFocus: hasTextCtx=%d focusSession=%llu", _hasTextInputContext, _focusSessionId);
+
+        // Get caret position for toolbar placement (separate concern from _hasTextInputContext)
         LONG caretX = 0, caretY = 0, caretHeight = 0;
         if (!GetCaretPosition(&caretX, &caretY, &caretHeight) && _hasLastKnownCaretPos)
         {
@@ -1810,6 +1819,14 @@ BOOL CTextService::_InitIPCClient()
         WIND_LOG_INFO(L"Async reader thread started for state push\n");
     }
 
+    // Service-ready callback: Go sends CMD_SERVICE_READY when push pipe connects.
+    // Route through LangBarItemButton's proven message window (same TSF thread,
+    // known-working cross-thread channel used by PostUpdateFullStatus et al.).
+    _pIPCClient->SetServiceReadyCallback([pThis]() {
+        if (pThis->_pLangBarItemButton != nullptr)
+            pThis->_pLangBarItemButton->PostServiceReady();
+    });
+
     return TRUE;
 }
 
@@ -2079,6 +2096,59 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight)
     }
 
     return FALSE;
+}
+
+BOOL CTextService::RefreshTextInputContext()
+{
+    if (!_hasTextInputContext && _pThreadMgr != nullptr)
+    {
+        ITfDocumentMgr* pDocMgr = nullptr;
+        if (SUCCEEDED(_pThreadMgr->GetFocus(&pDocMgr)) && pDocMgr != nullptr)
+        {
+            _hasTextInputContext = _DocMgrHasEditableContext(pDocMgr);
+            pDocMgr->Release();
+            if (_hasTextInputContext)
+                WIND_LOG_DEBUG_FMT(L"RefreshTextInputContext: late editable context focusSession=%llu", _focusSessionId);
+        }
+    }
+    return _hasTextInputContext;
+}
+
+BOOL CTextService::_DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr)
+{
+    if (pDocMgr == nullptr)
+        return FALSE;
+
+    ITfContext* pCtx = nullptr;
+    HRESULT hr = pDocMgr->GetTop(&pCtx);
+    if (FAILED(hr) || pCtx == nullptr)
+    {
+        WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: GetTop hr=0x%08X ctx=%p -> FALSE", hr, pCtx);
+        if (pCtx) pCtx->Release();
+        return FALSE;
+    }
+
+    TF_STATUS status = {};
+    BOOL result = TRUE;
+    HRESULT hrStatus = pCtx->GetStatus(&status);
+    if (SUCCEEDED(hrStatus))
+    {
+        // Only TF_SD_READONLY (bit 0 of dwDynamicFlags) reliably means "no writable text
+        // input". Chrome dynamically sets/clears this bit when text fields gain/lose focus.
+        // TF_SS_TRANSITORY (0x4 of dwStaticFlags) is NOT a reliable signal — Chrome and
+        // JetBrains both set it on contexts that do have real text input.
+        WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: dynFlags=0x%X statFlags=0x%X", status.dwDynamicFlags, status.dwStaticFlags);
+        if (status.dwDynamicFlags & TF_SD_READONLY)
+            result = FALSE;
+    }
+    else
+    {
+        WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: GetStatus hr=0x%08X -> default TRUE", hrStatus);
+    }
+
+    WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: -> %d", result);
+    pCtx->Release();
+    return result;
 }
 
 // Helper function to check if a window is a console/terminal window

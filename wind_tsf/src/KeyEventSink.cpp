@@ -284,10 +284,20 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
 
     if (isToggleModeKey)
     {
+        BOOL hasSession = _pTextService->HasActiveComposition() || _hasCandidates;
+        BOOL hasTextCtx = _pTextService->RefreshTextInputContext();
+        if (!hasSession && !hasTextCtx)
+        {
+            *pfEaten = FALSE;
+            _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::ToggleMode,
+                            _pTextService->IsChineseMode(), FALSE, _hasCandidates,
+                            FALSE, FALSE, L"toggle_no_text_ctx");
+            return S_OK;
+        }
         *pfEaten = TRUE;
         _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::ToggleMode,
                         _pTextService->IsChineseMode(), _pTextService->HasActiveComposition(), _hasCandidates,
-                        _pTextService->HasActiveComposition() || _hasCandidates, TRUE, L"toggle_mode_key");
+                        hasSession || hasTextCtx, TRUE, L"toggle_mode_key");
         return S_OK;
     }
 
@@ -639,6 +649,21 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             _pendingKeyUpKey = 0;
             _pendingKeyUpModifiers = 0;
             return S_OK;  // Let system handle it
+        }
+
+        // Block toggle when there is no real text input context and no active input session.
+        // Chrome calls OnKeyDown even when OnTestKeyDown returned pfEaten=FALSE, so this
+        // guard must be repeated here to prevent _pendingKeyUpKey from being set.
+        {
+            BOOL hasSession = _pTextService->HasActiveComposition() || _hasCandidates;
+            if (!hasSession && !_pTextService->RefreshTextInputContext())
+            {
+                *pfEaten = FALSE;
+                _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::ToggleMode,
+                                _pTextService->IsChineseMode(), FALSE, _hasCandidates,
+                                FALSE, FALSE, L"toggle_no_text_ctx");
+                return S_OK;
+            }
         }
 
         // Mark key as pending for KeyUp toggle (Shift/Ctrl only, not CapsLock)
