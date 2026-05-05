@@ -98,3 +98,6 @@ Desktop.ini
 package.json.md5
 # Git worktrees
 /.worktrees/
+
+# SuperPowers
+docs/superpowers
