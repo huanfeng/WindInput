@@ -49,6 +49,7 @@ constexpr uint16_t CMD_COMMIT_RESULT      = 0x0105; // Commit result (response t
 constexpr uint16_t CMD_MODE_CHANGED       = 0x0201; // Mode changed
 constexpr uint16_t CMD_STATUS_UPDATE      = 0x0202; // Full status update
 constexpr uint16_t CMD_STATE_PUSH         = 0x0206; // State push (broadcast to all clients)
+constexpr uint16_t CMD_SERVICE_READY      = 0x0207; // Go service connected push pipe, TSF should sync state
 constexpr uint16_t CMD_SYNC_HOTKEYS       = 0x0301; // Sync hotkey whitelist
 constexpr uint16_t CMD_SYNC_CONFIG        = 0x0303; // Sync config key/value (generic)
 constexpr uint16_t CMD_CONSUMED           = 0x0401; // Key consumed

@@ -46,6 +46,7 @@ const (
 	CmdModeChanged          uint16 = 0x0201 // Mode changed
 	CmdStatusUpdate         uint16 = 0x0202 // Full status update
 	CmdStatePush            uint16 = 0x0206 // State push (broadcast to all clients)
+	CmdServiceReady         uint16 = 0x0207 // Go service connected push pipe, TSF should sync state
 	CmdSyncHotkeys          uint16 = 0x0301 // Sync hotkey whitelist
 	CmdSyncConfig           uint16 = 0x0303 // Sync config key/value (generic)
 	CmdCommitTextWithCursor uint16 = 0x0106 // Commit text with cursor offset

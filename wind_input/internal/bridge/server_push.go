@@ -84,6 +84,18 @@ func (s *Server) startPushPipeListener() {
 
 		s.logger.Info("Push pipe client connected", "clientID", clientID, "processID", pushProcessID)
 
+		// Notify the newly-connected TSF client that the service is ready.
+		// This triggers _DoFullStateSync() on the TSF thread so the toolbar
+		// appears immediately after service restart, without waiting for a
+		// focus-change or key event.
+		encoded := s.codec.EncodeServiceReady()
+		if err := s.codec.WriteMessage(writer, encoded); err != nil {
+			s.logger.Warn("Failed to send CMD_SERVICE_READY to new push client",
+				"clientID", clientID, "error", err)
+		} else {
+			s.logger.Debug("CMD_SERVICE_READY sent to new push client", "clientID", clientID)
+		}
+
 		// Note: We don't actively monitor disconnection here.
 		// Client disconnection is detected when write fails in PushCommitTextToActiveClient
 		// or PushStateToAllClients. This avoids false positives from GetNamedPipeHandleState

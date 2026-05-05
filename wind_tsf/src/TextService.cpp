@@ -1638,8 +1638,15 @@ void CTextService::_UninitKeyboardDisabledCompartment()
 
 void CTextService::_DoFullStateSync()
 {
-    if (_pIPCClient == nullptr || !_pIPCClient->IsConnected())
+    if (_pIPCClient == nullptr)
         return;
+
+    // Lazy connect: push pipe may reconnect before main pipe is established (service restart).
+    if (!_pIPCClient->IsConnected() && !_pIPCClient->Connect())
+    {
+        WIND_LOG_WARN(L"_DoFullStateSync: main pipe not connected, skipping\n");
+        return;
+    }
 
     WIND_LOG_INFO(L"Performing full state sync with Go service\n");
 
@@ -1652,9 +1659,23 @@ void CTextService::_DoFullStateSync()
             _EnsureHostRenderSetup(response, TRUE);
         }
     }
+    else if (_pIPCClient->Connect() && _pIPCClient->SendIMEActivated())
+    {
+        // Stale pipe: write failed and Disconnect() was called; retry after fresh connect.
+        ServiceResponse response;
+        if (_pIPCClient->ReceiveResponse(response))
+        {
+            _SyncStateFromResponse(response);
+            _EnsureHostRenderSetup(response, TRUE);
+        }
+    }
+    else
+    {
+        WIND_LOG_WARN(L"_DoFullStateSync: SendIMEActivated failed, toolbar may not show\n");
+    }
 
     _pIPCClient->ClearNeedsSyncFlag();
-    _needsFocusRecovery = FALSE; // Full sync covers focus recovery
+    _needsFocusRecovery = FALSE;
 }
 
 void CTextService::TryRecoverFocusState()

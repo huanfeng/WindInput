@@ -198,6 +198,9 @@ public:
     // Callback type for config sync from Go (generic key/value push)
     using SyncConfigCallback = std::function<void(const std::string& key, const std::vector<uint8_t>& value)>;
 
+    // Callback type for service-ready notification (Go service connected push pipe)
+    using ServiceReadyCallback = std::function<void()>;
+
     // Set callback for receiving state push from Go
     void SetStatePushCallback(StatePushCallback callback);
 
@@ -212,6 +215,9 @@ public:
 
     // Set callback for receiving config sync from Go (generic key/value push)
     void SetSyncConfigCallback(SyncConfigCallback callback);
+
+    // Set callback for service-ready notification (Go service connected push pipe)
+    void SetServiceReadyCallback(ServiceReadyCallback callback);
 
     // Start async reader thread (call after successful connection)
     BOOL StartAsyncReader();
@@ -303,6 +309,7 @@ private:
     ClearCompositionCallback _clearCompositionCallback;
     UpdateCompositionCallback _updateCompositionCallback;
     SyncConfigCallback _syncConfigCallback;
+    ServiceReadyCallback _serviceReadyCallback;
     CRITICAL_SECTION _asyncLock;         // Lock for thread-safe access
     volatile BOOL _asyncReaderRunning = FALSE;
 

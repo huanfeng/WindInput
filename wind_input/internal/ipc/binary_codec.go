@@ -172,6 +172,12 @@ func (c *BinaryCodec) EncodeConsumed() []byte {
 	return c.EncodeHeader(CmdConsumed, 0)
 }
 
+// EncodeServiceReady encodes a service-ready notification (no payload).
+// Sent to a newly-connected push client so it triggers _DoFullStateSync on the TSF side.
+func (c *BinaryCodec) EncodeServiceReady() []byte {
+	return c.EncodeHeader(CmdServiceReady, 0)
+}
+
 // EncodeClearComposition encodes a clear composition response
 func (c *BinaryCodec) EncodeClearComposition() []byte {
 	return c.EncodeHeader(CmdClearComposition, 0)

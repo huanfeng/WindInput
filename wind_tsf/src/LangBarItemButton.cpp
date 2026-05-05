@@ -120,8 +120,10 @@ const UINT CLangBarItemButton::WM_UPDATE_STATUS = WM_USER + 100;
 const UINT CLangBarItemButton::WM_COMMIT_TEXT = WM_USER + 101;
 const UINT CLangBarItemButton::WM_CLEAR_COMPOSITION = WM_USER + 102;
 const UINT CLangBarItemButton::WM_UPDATE_COMPOSITION = WM_USER + 103;
+const UINT CLangBarItemButton::WM_SERVICE_READY = WM_USER + 104;
 
-static const UINT_PTR TIMER_ID_CARET_RETRY = 0xC401;
+static const UINT_PTR TIMER_ID_CARET_RETRY    = 0xC401;
+static const UINT_PTR TIMER_ID_SERVICE_READY  = 0xC402;
 
 CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     : _refCount(1)
@@ -738,8 +740,50 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         delete pData;
         return 0;
     }
+    else if (msg == WM_SERVICE_READY)
+    {
+        CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (pThis != nullptr && pThis->_pTextService != nullptr)
+        {
+            if (!pThis->_pTextService->HasActiveComposition())
+            {
+                WIND_LOG_INFO(L"MsgWndProc: WM_SERVICE_READY — running full state sync\n");
+                KillTimer(hwnd, TIMER_ID_SERVICE_READY);
+                pThis->_pTextService->_DoFullStateSync();
+            }
+            else
+            {
+                // Composition active — defer sync to avoid clearing Go's input buffer.
+                // Retry after composition likely ends (200ms).
+                WIND_LOG_DEBUG(L"MsgWndProc: WM_SERVICE_READY deferred (composition active), scheduling retry\n");
+                SetTimer(hwnd, TIMER_ID_SERVICE_READY, 200, nullptr);
+            }
+        }
+        return 0;
+    }
     else if (msg == WM_TIMER)
     {
+        if (wParam == TIMER_ID_SERVICE_READY)
+        {
+            KillTimer(hwnd, wParam);
+            CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (pThis != nullptr && pThis->_pTextService != nullptr)
+            {
+                if (!pThis->_pTextService->HasActiveComposition())
+                {
+                    WIND_LOG_INFO(L"MsgWndProc: SERVICE_READY retry — running full state sync\n");
+                    pThis->_pTextService->_DoFullStateSync();
+                }
+                else
+                {
+                    // Still composing — keep retrying until composition ends
+                    // (TSF composition is always finite: user commits, cancels, or focus changes).
+                    WIND_LOG_DEBUG(L"MsgWndProc: SERVICE_READY retry deferred (composition still active)\n");
+                    SetTimer(hwnd, TIMER_ID_SERVICE_READY, 500, nullptr);
+                }
+            }
+            return 0;
+        }
         if (wParam == TIMER_ID_CARET_RETRY)
         {
             KillTimer(hwnd, wParam);
@@ -1085,6 +1129,19 @@ void CLangBarItemButton::PostUpdateComposition(const std::wstring& text, int car
         WIND_LOG_DEBUG_FMT(L"PostUpdateComposition: Message posted to UI thread, textLen=%zu, caret=%d\n",
                            text.length(), caretPos);
     }
+}
+
+void CLangBarItemButton::PostServiceReady()
+{
+    if (_hMsgWnd == NULL)
+    {
+        WIND_LOG_WARN(L"PostServiceReady: No message window, skipping\n");
+        return;
+    }
+    if (!PostMessageW(_hMsgWnd, WM_SERVICE_READY, 0, 0))
+        WIND_LOG_WARN(L"PostServiceReady: PostMessage failed\n");
+    else
+        WIND_LOG_DEBUG(L"PostServiceReady: Message posted to TSF thread\n");
 }
 
 void CLangBarItemButton::PostDelayedCaretPositionUpdate()

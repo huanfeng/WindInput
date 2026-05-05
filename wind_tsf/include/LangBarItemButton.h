@@ -81,6 +81,11 @@ public:
     // Used for mouse click partial confirm in pinyin mode
     void PostUpdateComposition(const std::wstring& text, int caretPos);
 
+    // Thread-safe service-ready notification from async reader thread.
+    // Triggers _DoFullStateSync() on the TSF thread so the toolbar appears
+    // after service restart without waiting for a focus/key event.
+    void PostServiceReady();
+
     // Schedule a 50ms fallback caret retry on the TSF thread.
     // Used as a safety net when an app does not fire OnLayoutChange promptly.
     void PostDelayedCaretPositionUpdate();
@@ -103,6 +108,7 @@ private:
     static const UINT WM_COMMIT_TEXT;
     static const UINT WM_CLEAR_COMPOSITION;
     static const UINT WM_UPDATE_COMPOSITION;
+    static const UINT WM_SERVICE_READY;
 
     // Packed status for message passing
     struct StatusUpdateData {

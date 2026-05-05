@@ -1334,11 +1334,23 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
             return FALSE;
         }
 
-        _pTextService->_DoFullStateSync();
+        if (_pTextService->HasActiveComposition())
+        {
+            // Composition is active — do NOT send CMD_IME_ACTIVATED here.
+            // HandleIMEActivated on the Go side clears inputBuffer if non-empty,
+            // which would destroy the in-progress composition.
+            // WM_SERVICE_READY will handle the sync after composition ends.
+            WIND_LOG_INFO(L"NeedsStateSync: composition active, clearing flag without sync\n");
+            pIPCClient->ClearNeedsSyncFlag();
+        }
+        else
+        {
+            _pTextService->_DoFullStateSync();
 
-        // Re-send caret position after reconnection/state sync so the Go side has
-        // a valid anchor before it processes the first post-restart key event.
-        _pTextService->SendCaretPositionUpdate();
+            // Re-send caret position after reconnection/state sync so the Go side has
+            // a valid anchor before it processes the first post-restart key event.
+            _pTextService->SendCaretPositionUpdate();
+        }
     }
 
     _pTextService->TryRecoverFocusState();

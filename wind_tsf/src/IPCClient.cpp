@@ -1538,6 +1538,13 @@ void CIPCClient::SetSyncConfigCallback(SyncConfigCallback callback)
     LeaveCriticalSection(&_asyncLock);
 }
 
+void CIPCClient::SetServiceReadyCallback(ServiceReadyCallback callback)
+{
+    EnterCriticalSection(&_asyncLock);
+    _serviceReadyCallback = callback;
+    LeaveCriticalSection(&_asyncLock);
+}
+
 BOOL CIPCClient::StartAsyncReader()
 {
     if (_asyncReaderRunning)
@@ -1734,12 +1741,6 @@ void CIPCClient::_AsyncReaderLoop()
                         DWORD mode = PIPE_READMODE_MESSAGE;
                         SetNamedPipeHandleState(_hReadPipe, &mode, nullptr, nullptr);
                         _LogInfo(L"Async reader: reconnected to push pipe");
-
-                        // After reconnecting, notify that IME is still active
-                        // This will make Go service show toolbar if needed
-                        _LogInfo(L"Async reader: sending ime_activated after reconnect");
-                        // Note: We can't call SendIMEActivated here as it uses the main pipe
-                        // The toolbar will be shown when user next gains focus or types
                         break;
                     }
                 }
@@ -1844,6 +1845,18 @@ void CIPCClient::_AsyncReaderLoop()
                         callback(response);
                     }
                 }
+            }
+            else if (header.command == CMD_SERVICE_READY)
+            {
+                // Go service connected push pipe — fire callback so TextService
+                // posts to LangBarItemButton's message window and calls
+                // _DoFullStateSync() on the TSF thread.
+                _LogInfo(L"Async reader: CMD_SERVICE_READY received");
+                EnterCriticalSection(&_asyncLock);
+                ServiceReadyCallback srCallback = _serviceReadyCallback;
+                LeaveCriticalSection(&_asyncLock);
+                if (srCallback)
+                    srCallback();
             }
             else if (header.command == CMD_COMMIT_TEXT)
             {
