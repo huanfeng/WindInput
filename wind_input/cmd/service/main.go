@@ -241,11 +241,13 @@ func isPipeAlreadyExists() bool {
 }
 
 func main() {
-	// 内存管理策略：降低内存波动
-	// 软限制 150MB，超过后 GC 更频繁运行
-	debug.SetMemoryLimit(150 * 1024 * 1024)
-	// 降低 GOGC：默认 100 表示堆翻倍才 GC，改为 50 更频繁回收
-	debug.SetGCPercent(50)
+	// 内存管理策略：
+	// SetMemoryLimit 只管理 Go heap（Private Bytes），不影响 mmap 词典文件（OS 文件缓存页）。
+	// 随着 tooltip/拆字等功能新增常驻数据结构，Go heap 需求从 ~130MB 增长到 ~160MB+，
+	// 150MB 软限制已使 GC 持续满负荷运行但无法压降，调整为 300MB 提供合理余量。
+	debug.SetMemoryLimit(300 * 1024 * 1024)
+	// GOGC 恢复默认值 100：堆增长翻倍才触发 GC，避免过于频繁的 GC 造成 CPU 持续占用。
+	debug.SetGCPercent(100)
 
 	// Set DPI awareness BEFORE any UI operations
 	setDPIAwareness()
