@@ -11,9 +11,11 @@ import (
 
 // processRequestWithTimeout wraps processRequest with a timeout
 func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte, clientID int, processID uint32) []byte {
-	// 快速命令直接同步执行，避免 goroutine + channel 分配
+	// 快速命令直接同步执行，避免 goroutine + channel 分配。
+	// CmdKeyEvent/CmdCommitRequest 是最高频命令，词典查询几乎全走 mmap，耗时远低于 200ms 超时。
 	switch header.Command {
-	case ipc.CmdFocusGained, ipc.CmdFocusLost, ipc.CmdIMEActivated,
+	case ipc.CmdKeyEvent, ipc.CmdCommitRequest,
+		ipc.CmdFocusGained, ipc.CmdFocusLost, ipc.CmdIMEActivated,
 		ipc.CmdCompositionTerminated, ipc.CmdCaretUpdate, ipc.CmdCaretPending, ipc.CmdHostRenderRequest:
 		return s.processRequest(header, payload, clientID, processID)
 	}

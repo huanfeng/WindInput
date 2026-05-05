@@ -15,6 +15,14 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// readBufPool 复用 64KB 管道读取缓冲区，避免每次消息读取都 make([]byte, 64KB)。
+var readBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, PipeBufferSize)
+		return &buf
+	},
+}
+
 var (
 	kernel32                        = windows.NewLazySystemDLL("kernel32.dll")
 	procGetNamedPipeClientProcessId = kernel32.NewProc("GetNamedPipeClientProcessId")
@@ -228,6 +236,7 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 
 	// Create a pipe reader wrapper
 	reader := &pipeReader{handle: handle}
+	defer reader.release()
 	writer := &pipeWriter{handle: handle}
 
 	for {
@@ -280,8 +289,9 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 // In MESSAGE mode, each ReadFile returns a complete message
 type pipeReader struct {
 	handle    windows.Handle
-	msgBuffer []byte // Buffer for current message
-	msgOffset int    // Current read offset in msgBuffer
+	msgBuffer []byte  // Buffer for current message (slice of poolBuf or heap)
+	msgOffset int     // Current read offset in msgBuffer
+	poolBuf   *[]byte // Pool buffer held until current message is fully consumed
 }
 
 func (r *pipeReader) Read(p []byte) (int, error) {
@@ -292,52 +302,71 @@ func (r *pipeReader) Read(p []byte) (int, error) {
 		return n, nil
 	}
 
-	// Read a new message from the pipe
-	// In MESSAGE mode, we need a buffer large enough for the entire message
-	readBuf := make([]byte, PipeBufferSize)
+	// Current message fully consumed; return pool buffer before acquiring a new one
+	if r.poolBuf != nil {
+		readBufPool.Put(r.poolBuf)
+		r.poolBuf = nil
+		r.msgBuffer = nil
+	}
+
+	// Acquire a reusable 64KB buffer from the pool
+	bufPtr := readBufPool.Get().(*[]byte)
+	readBuf := *bufPtr
 	var bytesRead uint32
 
 	err := windows.ReadFile(r.handle, readBuf, &bytesRead, nil)
 	if err != nil {
-		// Handle ERROR_MORE_DATA - message is larger than buffer
+		// Handle ERROR_MORE_DATA - message is larger than 64KB (should not happen in practice)
 		if err == windows.ERROR_MORE_DATA {
-			// This shouldn't happen with our 64KB buffer, but handle it anyway
-			r.msgBuffer = make([]byte, bytesRead)
-			copy(r.msgBuffer, readBuf[:bytesRead])
-			r.msgOffset = 0
-
-			// Read remaining data
+			// Copy partial data out BEFORE returning pool buffer to avoid race with other goroutines.
+			accum := make([]byte, bytesRead)
+			copy(accum, readBuf[:bytesRead])
+			readBufPool.Put(bufPtr)
 			for {
-				err = windows.ReadFile(r.handle, readBuf, &bytesRead, nil)
+				tmpPtr := readBufPool.Get().(*[]byte)
+				tmp := *tmpPtr
+				err = windows.ReadFile(r.handle, tmp, &bytesRead, nil)
+				accum = append(accum, tmp[:bytesRead]...)
+				readBufPool.Put(tmpPtr)
 				if err == nil {
-					r.msgBuffer = append(r.msgBuffer, readBuf[:bytesRead]...)
 					break
-				} else if err == windows.ERROR_MORE_DATA {
-					r.msgBuffer = append(r.msgBuffer, readBuf[:bytesRead]...)
-					continue
-				} else {
+				}
+				if err != windows.ERROR_MORE_DATA {
 					return 0, err
 				}
 			}
-
-			n := copy(p, r.msgBuffer[r.msgOffset:])
-			r.msgOffset += n
+			r.msgBuffer = accum
+			r.msgOffset = 0
+			n := copy(p, r.msgBuffer)
+			r.msgOffset = n
 			return n, nil
 		}
+		readBufPool.Put(bufPtr)
 		return 0, err
 	}
 
 	if bytesRead == 0 {
+		readBufPool.Put(bufPtr)
 		return 0, io.EOF
 	}
 
-	// Store the message in buffer for subsequent reads
+	// Hold the pool buffer until this entire message is consumed
+	r.poolBuf = bufPtr
 	r.msgBuffer = readBuf[:bytesRead]
 	r.msgOffset = 0
 
 	n := copy(p, r.msgBuffer)
 	r.msgOffset = n
 	return n, nil
+}
+
+// release returns any held pool buffer back to the pool. Must be called when the reader is done.
+func (r *pipeReader) release() {
+	if r.poolBuf != nil {
+		readBufPool.Put(r.poolBuf)
+		r.poolBuf = nil
+	}
+	r.msgBuffer = nil
 }
 
 // pipeWriter wraps windows.Handle for io.Writer
