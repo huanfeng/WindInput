@@ -2,6 +2,7 @@ package pinyin
 
 import (
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 
@@ -70,13 +71,23 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 
 	// 单字惩罚参数：
 	// - 普通单字施加完整惩罚，确保多字词路径优于单字拼凑
-	// - 虚词（了/的/和/我 等）施加轻微惩罚，因为它们天然以单字出现
+	// - 虚词（了/的/和/我 等）给予正加成：unigram 模型中 P(虚词)×P(实词) 天然偏低，
+	//   若不补偿，填鸭式(3字) 会因消除了"是"节点而碾压 天涯(2字)+是(1字)
 	const singleCharPenalty = -3.0
-	const functionWordPenalty = -0.5
+	const functionWordPenalty = 1.0
 	// 多字词加成参数：
-	// - unigram 中的实体词（不以助词结尾）获得长度加分，反映语义确定性
+	// - unigram 中的实体词（不以助词结尾）获得词频挂钩的加分，高频词和长词获得更多加成
+	//   公式：baseContentWordBonus × sqrt(charCount) × freqFactor
+	//   freqFactor 基于 unigram LogProb 映射到 [0, 1]：(LogProb - logProbMin) / logProbRange
+	//   使用 LogProb 而非 cand.Weight，因为 Weight 在文本词库下是原始值（可达数十万），
+	//   在 WDB 词库下才是归一化值 [0, 10000]，不一致；而 LogProb 始终来自同一个 unigram 模型。
+	//   乘以 sqrt(charCount) 使 3 字词（如"目的地"）比 2 字词（如"弟弟"）获得适度加成，
+	//   补偿 Viterbi 中多节点路径的累加劣势，同时避免线性 charCount 导致低频长词
+	//   反超高频短词（如"填鸭式"3字反超"天涯"2字）。
 	// - 以助词结尾的多字词（如"接了""看的"）为 V+助词语法组合，施加惩罚
-	const contentWordBonus = 1.5
+	const baseContentWordBonus = 3.0
+	const logProbMin = -15.0  // 低频词 LogProb 下界（极罕见词约 -15）
+	const logProbRange = 12.0 // LogProb 跨度（[-15, -3] → 12）
 	const verbParticlePenalty = -1.0
 
 	// CompositeDict 始终支持前缀搜索
@@ -132,8 +143,14 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 						// "接了""看的" 等 V+助词组合：降权
 						logProb += verbParticlePenalty
 					} else if unigram != nil && unigram.Contains(cand.Text) {
-						// unigram 中的实体词（如"和解""今天"）：加分
-						logProb += contentWordBonus
+						freqFactor := (logProb - logProbMin) / logProbRange
+						if freqFactor < 0 {
+							freqFactor = 0
+						} else if freqFactor > 1 {
+							freqFactor = 1
+						}
+						bonus := baseContentWordBonus * math.Sqrt(float64(charCount)) * freqFactor
+						logProb += bonus
 					}
 				}
 				if traceEnabled && len([]rune(cand.Text)) > 1 {
