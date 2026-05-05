@@ -337,6 +337,9 @@ func (sc *StatCollector) loadTodayLocked() {
 	}
 	if stat != nil {
 		sc.today = stat
+		if sc.today.BySchema == nil {
+			sc.today.BySchema = make(map[string]*SchemaStats)
+		}
 	} else {
 		sc.today = NewDailyStat(today)
 	}
