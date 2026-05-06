@@ -4,6 +4,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/ui"
+	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/encoding"
 )
 
@@ -41,6 +42,12 @@ func (c *Coordinator) enterAddWordMode() *bridge.KeyEventResult {
 	c.addWordActive = true
 	c.addWordChars = chars
 
+	// 加词模式强制纵排，退出时恢复
+	if c.config != nil && c.uiManager != nil {
+		c.savedLayout = c.config.UI.CandidateLayout
+		c.uiManager.SetCandidateLayout(config.LayoutVertical)
+	}
+
 	if len(chars) < addWordMinLen {
 		c.addWordLen = 0
 		c.addWordCode = ""
@@ -75,6 +82,10 @@ func (c *Coordinator) exitAddWordMode() {
 	c.addWordCode = ""
 	c.inputBuffer = ""
 	c.inputCursorPos = 0
+	if c.savedLayout != "" && c.uiManager != nil {
+		c.uiManager.SetCandidateLayout(c.savedLayout)
+		c.savedLayout = ""
+	}
 	c.hideUI()
 }
 
@@ -237,18 +248,18 @@ func (c *Coordinator) showAddWordPreview() {
 
 	if len(c.addWordChars) < addWordMinLen || c.addWordLen < addWordMinLen {
 		candidates = []ui.Candidate{
-			{Text: "[快捷加词] 无最近输入", Index: -1},
-			{Index: -1, Comment: "请先输入文字后再使用  Esc关闭"},
+			{Text: "快捷加词", Index: -1, Comment: "Esc关闭"},
+			{Text: "无最近输入", Index: -1, Comment: "请先输入文字后再使用"},
 		}
 	} else {
 		word := string(c.addWordChars[len(c.addWordChars)-c.addWordLen:])
-		comment := "无法计算编码"
+		codeComment := "无法计算编码"
 		if c.addWordCode != "" {
-			comment = "编码: " + c.addWordCode
+			codeComment = c.addWordCode
 		}
 		candidates = []ui.Candidate{
-			{Text: "[快捷加词] " + word, Index: -1, Comment: comment},
-			{Index: -1, Comment: "↑↓调整长度  Enter添加  Ctrl+Enter编辑  Esc取消"},
+			{Text: "快捷加词", Index: -1, Comment: "↑↓调整长度  Enter添加  Ctrl+Enter编辑  Esc取消"},
+			{Text: word, Index: -1, Comment: codeComment},
 		}
 	}
 
