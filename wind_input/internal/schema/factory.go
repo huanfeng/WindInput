@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,25 +21,68 @@ import (
 	"github.com/huanfeng/wind_input/internal/store"
 )
 
-// pinyinWdatBuildMu 保护 pinyinWdatBuilding，确保同一时刻最多一个后台 wdat 构建在运行。
+// ErrAssetBuilding 表示方案所需的资源（如拼音 wdat 缓存）正在后台生成。
+// 区别于"真正的加载失败"——上层可借此选择"显示准备中并等待"而非
+// "切换到 fallback 方案"。所有 wrapping 都通过 fmt.Errorf("%w: ...", ErrAssetBuilding)
+// 完成，调用方用 errors.Is(err, schema.ErrAssetBuilding) 判定。
+var ErrAssetBuilding = errors.New("schema asset is being built")
+
+// pinyinWdatBuildMu 保护以下三个共享状态：
+//   - pinyinWdatBuilding：确保同一时刻最多一个后台 wdat 构建在运行
+//   - pinyinWdatReadyCallbacks：等待构建完成的回调列表
 var (
-	pinyinWdatBuildMu  sync.Mutex
-	pinyinWdatBuilding bool
+	pinyinWdatBuildMu        sync.Mutex
+	pinyinWdatBuilding       bool
+	pinyinWdatReadyCallbacks []func()
 )
+
+// IsPinyinWdatBuilding 报告拼音 wdat 是否正在后台生成。
+func IsPinyinWdatBuilding() bool {
+	pinyinWdatBuildMu.Lock()
+	defer pinyinWdatBuildMu.Unlock()
+	return pinyinWdatBuilding
+}
+
+// OnPinyinWdatReady 注册"拼音 wdat 后台生成完成"回调。
+//   - 当前不在构建中：cb 同步立即调用（视作已就绪）；
+//   - 正在构建：cb 加入队列，构建完成时（无论成功或失败）按注册顺序触发。
+//
+// 回调在构建 goroutine 中执行，调用方需自行处理与主流程的同步。
+// 这一语义让"先查询状态再注册回调"的常见 race 自然消失：
+// 调用方只需 OnPinyinWdatReady(reload)，无论当前状态如何都能拿到一次唤醒。
+func OnPinyinWdatReady(cb func()) {
+	if cb == nil {
+		return
+	}
+	pinyinWdatBuildMu.Lock()
+	if !pinyinWdatBuilding {
+		pinyinWdatBuildMu.Unlock()
+		cb()
+		return
+	}
+	pinyinWdatReadyCallbacks = append(pinyinWdatReadyCallbacks, cb)
+	pinyinWdatBuildMu.Unlock()
+}
 
 // startPinyinWdatBuildAsync 以后台协程异步构建拼音 wdat 缓存，若已在构建中则直接返回。
 func startPinyinWdatBuildAsync(dictPath, wdatCachePath string, logger *slog.Logger, normalizer *dict.WeightNormalizer) {
 	pinyinWdatBuildMu.Lock()
-	defer pinyinWdatBuildMu.Unlock()
 	if pinyinWdatBuilding {
+		pinyinWdatBuildMu.Unlock()
 		return
 	}
 	pinyinWdatBuilding = true
+	pinyinWdatBuildMu.Unlock()
 	go func() {
 		defer func() {
 			pinyinWdatBuildMu.Lock()
 			pinyinWdatBuilding = false
+			cbs := pinyinWdatReadyCallbacks
+			pinyinWdatReadyCallbacks = nil
 			pinyinWdatBuildMu.Unlock()
+			for _, cb := range cbs {
+				cb()
+			}
 		}()
 		if err := dictcache.ConvertPinyinToWdat(dictPath, wdatCachePath, logger, normalizer); err != nil {
 			logger.Warn("后台生成拼音 wdat 失败", "err", err)
@@ -366,7 +410,7 @@ func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string, logger *slog.L
 		if dictcache.NeedsRegenerate(srcPaths, wdatCachePath) {
 			// 缓存尚未就绪，异步构建，不阻塞当前调用方
 			startPinyinWdatBuildAsync(dictPath, wdatCachePath, logger, normalizer)
-			return fmt.Errorf("拼音 wdat 词库正在后台生成，请稍后切换到此方案")
+			return fmt.Errorf("%w: 拼音 wdat 词库正在后台生成，请稍后切换到此方案", ErrAssetBuilding)
 		}
 		if err := pinyinDict.LoadDAT(wdatCachePath); err == nil {
 			logger.Info("拼音词库(缓存 wdat)加载成功", "entryCount", pinyinDict.EntryCount())
