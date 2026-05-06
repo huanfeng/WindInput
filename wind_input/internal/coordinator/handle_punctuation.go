@@ -202,6 +202,12 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 				c.inputHistory.Record(commitText, "", "", 0)
 			}
 
+			// 标点顶字上屏需通知造词策略，否则自动造词的 charBuffer 会漏掉此字
+			// OnPhraseTerminated 已在上方 flush 旧序列，此处将候选加入新序列
+			if c.engineMgr != nil && !candidate.IsCommand {
+				c.engineMgr.OnCandidateSelected(c.inputBuffer, candidate.Text, candidate.Source)
+			}
+
 			c.clearState()
 			c.hideUI()
 

@@ -46,8 +46,8 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 		if shouldCommit {
 			// 记录输入历史（用于z键重复上屏），需在修改 inputBuffer 之前记录
 			topCodeLen := len(c.inputBuffer) - len(newInput)
+			commitCode := c.inputBuffer[:topCodeLen]
 			if c.inputHistory != nil {
-				commitCode := c.inputBuffer[:topCodeLen]
 				c.inputHistory.Record(commitText, commitCode, "", 0)
 			}
 			c.inputBuffer = newInput
@@ -59,10 +59,14 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 			c.resetCompositionAnchorAfterCommit()
 
 			// Apply full-width conversion if enabled
+			commitTextOriginal := commitText
 			if c.fullWidth {
 				commitText = transform.ToFullWidth(commitText)
 			}
 			c.recordCommit(commitText, topCodeLen, 0, store.SourceCandidate)
+
+			// 顶码上屏需通知造词策略，否则自动造词的 charBuffer 会漏掉此字
+			c.engineMgr.OnCandidateSelected(commitCode, commitTextOriginal)
 
 			// 如果还有剩余输入，继续处理并更新候选
 			if len(c.inputBuffer) > 0 {
@@ -107,6 +111,10 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 		// 记录输入历史（用于z键重复上屏），需在 clearState 之前记录
 		if c.inputHistory != nil {
 			c.inputHistory.Record(result.CommitText, c.inputBuffer, "", 0)
+		}
+		// 自动上屏需通知造词策略，否则自动造词的 charBuffer 会漏掉此字
+		if c.engineMgr != nil {
+			c.engineMgr.OnCandidateSelected(c.inputBuffer, result.CommitText)
 		}
 		// Apply full-width conversion if enabled
 		if c.fullWidth {
@@ -637,13 +645,15 @@ func (c *Coordinator) handleSelectChar(charIndex int) *bridge.KeyEventResult {
 		c.inputHistory.Record(text, c.inputBuffer, "", 0)
 	}
 
-	// 用户词频学习
+	// 用户词频学习 & 造词回调
+	// 注意：以词定字应传实际选的单字，而非完整词，否则造词策略会误判为多字词
 	if c.engineMgr != nil && !cand.IsCommand {
 		selectedCode := c.inputBuffer
 		if cand.Code != "" {
 			selectedCode = cand.Code
 		}
-		c.engineMgr.OnCandidateSelected(selectedCode, cand.Text, cand.Source)
+		selectedChar := string(runes[charIndex])
+		c.engineMgr.OnCandidateSelected(selectedCode, selectedChar, cand.Source)
 	}
 
 	c.logger.Debug("Select char from word", "charIndex", charIndex, "char", text, "word", cand.Text)
