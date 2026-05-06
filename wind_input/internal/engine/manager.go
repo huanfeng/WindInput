@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -217,10 +218,16 @@ func (m *Manager) applySwitchLocked(schemaID string) {
 
 // ToggleSchemaResult 方案切换结果
 type ToggleSchemaResult struct {
-	// NewSchemaID 成功切换到的方案 ID
+	// NewSchemaID 成功切换到的方案 ID；若一圈下来未找到可切换方案，
+	// 该字段保持当前方案 ID 不变（调用方据此决定是否要更新 UI / 持久化配置）。
 	NewSchemaID string
-	// SkippedSchemas 因加载失败而跳过的方案（ID → 错误信息）
+	// SkippedSchemas 因真正的加载失败而跳过的方案（ID → 错误信息）。
+	// 应展示为"<方案>异常"。
 	SkippedSchemas map[string]string
+	// PendingSchemas 因资源（如拼音 wdat 缓存）尚在后台生成而暂时不可用的方案。
+	// 区别于 SkippedSchemas：这些方案预期很快会就绪，UI 应展示"<方案>准备中"
+	// 而不是"<方案>异常"，避免误导用户去排查。
+	PendingSchemas map[string]string
 }
 
 // ToggleSchema 按 available 列表循环切换方案
@@ -261,13 +268,22 @@ func (m *Manager) ToggleSchema(available []string) (*ToggleSchemaResult, error) 
 		}
 	}
 
-	// 从下一个方案开始，逐个尝试切换，跳过失败的方案
-	var skipped map[string]string
+	// 从下一个方案开始，逐个尝试切换，跳过失败/构建中的方案
+	var skipped, pending map[string]string
 	n := len(idList)
 	for offset := 1; offset < n; offset++ {
 		candidateID := idList[(startIdx+offset)%n]
 
 		if err := m.SwitchSchema(candidateID); err != nil {
+			if errors.Is(err, schema.ErrAssetBuilding) {
+				// 资源还在后台生成，不算"加载失败"，避免上层报"方案异常"
+				m.logger.Info("方案资源准备中，暂跳过", "schemaID", candidateID)
+				if pending == nil {
+					pending = make(map[string]string)
+				}
+				pending[candidateID] = err.Error()
+				continue
+			}
 			m.logger.Warn("方案加载失败，跳过", "schemaID", candidateID, "error", err)
 			if skipped == nil {
 				skipped = make(map[string]string)
@@ -295,11 +311,20 @@ func (m *Manager) ToggleSchema(available []string) (*ToggleSchemaResult, error) 
 		return &ToggleSchemaResult{
 			NewSchemaID:    candidateID,
 			SkippedSchemas: skipped,
+			PendingSchemas: pending,
 		}, nil
 	}
 
-	// 所有方案都失败了
-	return nil, fmt.Errorf("所有可用方案均加载失败")
+	// 一圈未成功：若全是真失败则返回 error；若仅为"准备中"或混合，
+	// 保留当前方案不动并把状态返回给上层做友好提示。
+	if len(skipped) > 0 && len(pending) == 0 {
+		return nil, fmt.Errorf("所有可用方案均加载失败")
+	}
+	return &ToggleSchemaResult{
+		NewSchemaID:    currentID,
+		SkippedSchemas: skipped,
+		PendingSchemas: pending,
+	}, nil
 }
 
 // ActivateTempSchema 临时激活方案（如码表方案下临时用拼音）

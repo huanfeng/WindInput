@@ -219,9 +219,9 @@ func (c *Coordinator) handleEngineSwitchKey() *bridge.KeyEventResult {
 		}
 	}()
 
-	// 显示引擎指示器（如果有跳过的方案，显示带异常提示的指示器）
-	if len(result.SkippedSchemas) > 0 {
-		c.showEngineIndicatorWithSkipped(result.SkippedSchemas)
+	// 显示引擎指示器（带异常 / 准备中状态后缀）
+	if len(result.SkippedSchemas) > 0 || len(result.PendingSchemas) > 0 {
+		c.showEngineIndicatorWithStatus(result.SkippedSchemas, result.PendingSchemas)
 	} else {
 		c.showEngineIndicator()
 	}
@@ -242,9 +242,11 @@ func (c *Coordinator) showEngineIndicator() {
 	c.showModeIndicator()
 }
 
-// showEngineIndicatorWithSkipped 显示带异常方案提示的引擎指示器
-// 当有方案因配置错误被跳过时，指示器文本中附加提示信息
-func (c *Coordinator) showEngineIndicatorWithSkipped(skipped map[string]string) {
+// showEngineIndicatorWithStatus 显示带状态后缀的引擎指示器。
+// skipped: 真正加载失败的方案（提示"X 异常"，请用户排查）
+// pending: 资源后台生成中的方案（提示"X 准备中"，不需要用户介入）
+// 两个 map 都为空时与 showEngineIndicator 等价。
+func (c *Coordinator) showEngineIndicatorWithStatus(skipped, pending map[string]string) {
 	if c.uiManager == nil || !c.uiManager.IsReady() {
 		return
 	}
@@ -260,28 +262,33 @@ func (c *Coordinator) showEngineIndicatorWithSkipped(skipped map[string]string) 
 		}
 	}
 
-	// 收集跳过的方案名称
-	var skippedNames []string
-	for id := range skipped {
-		displayName := id
+	resolveName := func(id string) string {
 		if c.engineMgr != nil {
 			if sm := c.engineMgr.GetSchemaManager(); sm != nil {
 				if s := sm.GetSchema(id); s != nil && s.Schema.Name != "" {
-					displayName = s.Schema.Name
+					return s.Schema.Name
 				}
 			}
 		}
-		skippedNames = append(skippedNames, displayName)
+		return id
 	}
 
-	// 构建提示文本：「全拼（五笔异常）」
-	if len(skippedNames) > 0 {
+	// 拼装片段："五笔异常"、"全拼准备中"
+	var parts []string
+	for id := range pending {
+		parts = append(parts, resolveName(id)+"准备中")
+	}
+	for id := range skipped {
+		parts = append(parts, resolveName(id)+"异常")
+	}
+
+	if len(parts) > 0 {
 		modeText += "（"
-		for i, name := range skippedNames {
+		for i, p := range parts {
 			if i > 0 {
 				modeText += "、"
 			}
-			modeText += name + "异常"
+			modeText += p
 		}
 		modeText += "）"
 	}

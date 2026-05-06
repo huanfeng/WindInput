@@ -135,8 +135,8 @@ func (c *Coordinator) handleGlobalSwitchEngine() {
 	}()
 
 	c.mu.Lock()
-	if len(result.SkippedSchemas) > 0 {
-		c.showEngineIndicatorWithSkipped(result.SkippedSchemas)
+	if len(result.SkippedSchemas) > 0 || len(result.PendingSchemas) > 0 {
+		c.showEngineIndicatorWithStatus(result.SkippedSchemas, result.PendingSchemas)
 	} else {
 		c.showEngineIndicator()
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"log/slog"
 	"os"
@@ -425,24 +426,48 @@ func main() {
 
 	// 创建并激活引擎
 	if err := engineMgr.SwitchSchema(activeSchemaID); err != nil {
-		logger.Warn("Failed to initialize engine, trying fallback", "schema", activeSchemaID, "error", err)
-		// 尝试回退到其他方案
-		fallbackOK := false
-		for _, s := range schemaMgr.ListSchemas() {
-			if s.ID != activeSchemaID {
-				if err2 := engineMgr.SwitchSchema(s.ID); err2 == nil {
-					activeSchemaID = s.ID
-					schemaMgr.SetActive(s.ID)
-					cfg.Schema.Active = s.ID // 同步到内存配置，使 RPC ConfigGetAll 返回正确的活跃方案
-					fallbackOK = true
-					break
+		if errors.Is(err, schema.ErrAssetBuilding) {
+			// 资源后台生成中：不切换到其它方案（用户的方案才是其习惯所在），
+			// 仅注册回调等就绪后激活；期间引擎为 nil，按键路径在
+			// engineMgr.ConvertEx 中走 nil 引擎短路返回空候选——不影响稳定性。
+			logger.Info("活跃方案资源准备中，等待后台生成完成后激活，期间不可输入",
+				"schema", activeSchemaID, "reason", err.Error())
+			desiredActiveID := activeSchemaID
+			schema.OnPinyinWdatReady(func() {
+				defer recoverPanic(logger, "wdat-ready-retry")
+				if err := engineMgr.SwitchSchema(desiredActiveID); err != nil {
+					logger.Warn("拼音 wdat 就绪后激活用户方案失败",
+						"schema", desiredActiveID, "error", err)
+					return
+				}
+				schemaMgr.SetActive(desiredActiveID)
+				if s := schemaMgr.GetSchema(desiredActiveID); s != nil {
+					dictManager.SwitchSchemaFull(desiredActiveID, s.DataSchemaID(),
+						s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
+				}
+				logger.Info("拼音 wdat 就绪，用户方案已激活", "schema", desiredActiveID)
+			})
+		} else {
+			logger.Warn("Failed to initialize engine, trying fallback",
+				"schema", activeSchemaID, "error", err)
+			// 真正的加载失败：保留原 fallback 行为，避免服务空跑
+			fallbackOK := false
+			for _, s := range schemaMgr.ListSchemas() {
+				if s.ID != activeSchemaID {
+					if err2 := engineMgr.SwitchSchema(s.ID); err2 == nil {
+						activeSchemaID = s.ID
+						schemaMgr.SetActive(s.ID)
+						cfg.Schema.Active = s.ID // 同步到内存配置，使 RPC ConfigGetAll 返回正确的活跃方案
+						fallbackOK = true
+						break
+					}
 				}
 			}
-		}
-		if !fallbackOK {
-			logger.Error("All engines failed to initialize")
-			showErrorMessageBox("输入法引擎初始化失败，服务无法启动。\n\n原因：" + err.Error())
-			os.Exit(1)
+			if !fallbackOK {
+				logger.Error("All engines failed to initialize")
+				showErrorMessageBox("输入法引擎初始化失败，服务无法启动。\n\n原因：" + err.Error())
+				os.Exit(1)
+			}
 		}
 	}
 
