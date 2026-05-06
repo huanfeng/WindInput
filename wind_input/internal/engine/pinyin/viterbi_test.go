@@ -8,7 +8,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/dict"
 )
 
-func createTestDictForViterbi(t *testing.T) *dict.CompositeDict {
+func createTestDictForViterbi(t testing.TB) *dict.CompositeDict {
 	t.Helper()
 	tmpDir := t.TempDir()
 
@@ -51,7 +51,7 @@ sort: by_weight
 	return wrapInCompositeDict(d)
 }
 
-func createTestUnigram(t *testing.T) *UnigramModel {
+func createTestUnigram(t testing.TB) *UnigramModel {
 	t.Helper()
 	m := NewUnigramModel()
 	freqs := map[string]float64{

@@ -5,10 +5,41 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
 )
+
+// seenKey 是 BuildLattice 内部去重用的复合键。
+// 直接用 struct 作为 map key，避免每次调用 latticeKey 拼接 string。
+type seenKey struct {
+	start int32
+	end   int32
+	word  string
+}
+
+// seenSetPool 复用 BuildLattice 的去重 map，避免每次按键都 make 一个 ~128 桶的 map。
+// 池中元素是 *map 以便归还时直接清空原 map（mapclear 编译优化）后放回。
+var seenSetPool = sync.Pool{
+	New: func() any {
+		m := make(map[seenKey]struct{}, 256)
+		return &m
+	},
+}
+
+func acquireSeenSet() *map[seenKey]struct{} {
+	return seenSetPool.Get().(*map[seenKey]struct{})
+}
+
+func releaseSeenSet(mp *map[seenKey]struct{}) {
+	// Go 编译器会把 for k := range m { delete(m, k) } 优化为 runtime.mapclear，
+	// 比重新 make 更快、更省 GC。
+	for k := range *mp {
+		delete(*mp, k)
+	}
+	seenSetPool.Put(mp)
+}
 
 // ============================================================
 // 虚词白名单与词性启发式
@@ -106,8 +137,11 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 		}
 	}
 
-	// 边收集边查找：递归遍历 DAG，直接查词库，避免无效段
-	seen := make(map[string]bool, 128)
+	// 边收集边查找：递归遍历 DAG，直接查词库，避免无效段。
+	// seen map 从 sync.Pool 复用，避免每次 BuildLattice 调用都新建 ~128 桶 map。
+	seenPtr := acquireSeenSet()
+	defer releaseSeenSet(seenPtr)
+	seen := *seenPtr
 	maxWordLen := 6 // 中文词语最长约 6 音节（成语/固定短语）
 	maxNodes := 2000
 
@@ -121,11 +155,11 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 			code := strings.Join(syllables, "")
 			results := d.Lookup(code)
 			for _, cand := range results {
-				key := latticeKey(startPos, pos, cand.Text)
-				if seen[key] {
+				key := seenKey{start: int32(startPos), end: int32(pos), word: cand.Text}
+				if _, ok := seen[key]; ok {
 					continue
 				}
-				seen[key] = true
+				seen[key] = struct{}{}
 
 				logProb := calcLogProb(cand, unigram)
 				runes := []rune(cand.Text)
@@ -205,11 +239,11 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 			}
 
 			for _, cand := range results {
-				key := latticeKey(startPos, endPos, cand.Text)
-				if seen[key] {
+				key := seenKey{start: int32(startPos), end: int32(endPos), word: cand.Text}
+				if _, ok := seen[key]; ok {
 					continue
 				}
-				seen[key] = true
+				seen[key] = struct{}{}
 
 				logProb := calcLogProb(cand, unigram)
 				// 单字回退节点惩罚：虚词轻罚，其他重罚
