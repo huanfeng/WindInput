@@ -443,7 +443,7 @@ func (m *Manager) reRegisterSystemLayer(schemaID string) {
 	// 从缓存的 systemLayers 中取出该方案的系统词库层并重新注册
 	if layer, ok := m.systemLayers[schemaID]; ok && layer != nil {
 		m.dictManager.RegisterSystemLayer(layer.Name(), layer)
-		m.logger.Info("重新注册系统词库层", "layer", layer.Name(), "schemaID", schemaID)
+		m.logger.Debug("重新注册系统词库层", "layer", layer.Name(), "schemaID", schemaID)
 	}
 }
 

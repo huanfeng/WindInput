@@ -134,7 +134,7 @@ func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
 		return
 	}
 
-	s.logger.Info("Pushing state to TSF clients via push pipe",
+	s.logger.Debug("Pushing state to TSF clients via push pipe",
 		"count", clientCount,
 		"chineseMode", status.ChineseMode,
 		"fullWidth", status.FullWidth,
@@ -166,7 +166,7 @@ func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
 		s.pushMu.Unlock()
 	}
 
-	s.logger.Info("State push completed", "success", successCount, "total", clientCount)
+	s.logger.Debug("State push completed", "success", successCount, "total", clientCount)
 }
 
 // encodeStatePush encodes a state push message (CMD_STATE_PUSH)

@@ -284,7 +284,7 @@ func (dm *DictManager) RegisterSystemLayer(name string, layer DictLayer) {
 	}
 	dm.systemLayers[name] = layer
 	dm.compositeDict.AddLayer(layer)
-	dm.logger.Info("注册系统词库", "name", name)
+	dm.logger.Debug("注册系统词库", "name", name)
 }
 
 // UnregisterSystemLayer 取消注册系统词库层（移除所有同名层，防御性清理）
@@ -298,7 +298,7 @@ func (dm *DictManager) UnregisterSystemLayer(name string) {
 		removed = true
 	}
 	if removed {
-		dm.logger.Info("取消注册系统词库", "name", name)
+		dm.logger.Debug("取消注册系统词库", "name", name)
 	}
 }
 

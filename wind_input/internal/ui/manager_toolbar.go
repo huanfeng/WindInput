@@ -114,14 +114,14 @@ func (m *Manager) doShowToolbar(cmd UICommand) {
 	}
 
 	m.toolbar.Show()
-	m.logger.Info("Toolbar shown", "x", cmd.ToolbarX, "y", cmd.ToolbarY)
+	m.logger.Debug("Toolbar shown", "x", cmd.ToolbarX, "y", cmd.ToolbarY)
 }
 
 // doHideToolbar hides the toolbar (called from UI thread)
 func (m *Manager) doHideToolbar() {
 	if m.toolbar != nil {
 		m.toolbar.Hide()
-		m.logger.Info("Toolbar hidden")
+		m.logger.Debug("Toolbar hidden")
 	} else {
 		m.logger.Warn("doHideToolbar: toolbar is nil")
 	}

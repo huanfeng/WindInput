@@ -2,6 +2,7 @@
 package bridge
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"io"
@@ -14,6 +15,21 @@ import (
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"golang.org/x/sys/windows"
 )
+
+// isPipeClosed 判断 err 是否为对端正常关闭命名管道时的预期错误。
+// 这些错误在 TSF 宿主（Chrome/WPS/Excel 等）退出或切换 IME 时频繁出现，
+// 不应记为 ERROR 级别——会污染日志、淹没真正的异常。
+func isPipeClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return errors.Is(err, windows.ERROR_BROKEN_PIPE) ||
+		errors.Is(err, windows.ERROR_NO_DATA) ||
+		errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED)
+}
 
 // readBufPool 复用 64KB 管道读取缓冲区，避免每次消息读取都 make([]byte, 64KB)。
 var readBufPool = sync.Pool{
@@ -243,7 +259,9 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 		// Read header
 		header, err := s.codec.ReadHeader(reader)
 		if err != nil {
-			if err != io.EOF {
+			if isPipeClosed(err) {
+				s.logger.Debug("Bridge pipe closed by peer", "clientID", clientID, "error", err)
+			} else {
 				s.logger.Error("Failed to read header from Bridge", "clientID", clientID, "error", err)
 			}
 			break
@@ -252,7 +270,11 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 		// Read payload
 		payload, err := s.codec.ReadPayload(reader, header.Length)
 		if err != nil {
-			s.logger.Error("Failed to read payload from Bridge", "clientID", clientID, "error", err)
+			if isPipeClosed(err) {
+				s.logger.Debug("Bridge pipe closed by peer during payload read", "clientID", clientID, "error", err)
+			} else {
+				s.logger.Error("Failed to read payload from Bridge", "clientID", clientID, "error", err)
+			}
 			break
 		}
 
@@ -276,7 +298,11 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 
 		// Write response
 		if err := s.codec.WriteMessage(writer, response); err != nil {
-			s.logger.Error("Failed to write response to Bridge", "clientID", clientID, "error", err)
+			if isPipeClosed(err) {
+				s.logger.Debug("Bridge pipe closed by peer during response write", "clientID", clientID, "error", err)
+			} else {
+				s.logger.Error("Failed to write response to Bridge", "clientID", clientID, "error", err)
+			}
 			break
 		}
 	}
