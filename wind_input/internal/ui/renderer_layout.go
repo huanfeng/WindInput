@@ -754,6 +754,14 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	if cfg.HorizontalMaxWidth > 0 && width > cfg.HorizontalMaxWidth {
 		width = cfg.HorizontalMaxWidth
 	}
+	// HidePreedit 模式无候选时 ModeLabel 右对齐在候选行，需确保宽度足够显示
+	if cfg.HidePreedit && cfg.ModeLabel != "" && len(candidates) == 0 {
+		rawLabelWidth := td.MeasureString(cfg.ModeLabel, cfg.IndexFontSize)
+		minLabelW := padX*2 + accentBarExtra + rawLabelWidth + 4*scale
+		if width < minLabelW {
+			width = minLabelW
+		}
+	}
 
 	// Height calculation
 	candidateRowHeight := cfg.ItemHeight
