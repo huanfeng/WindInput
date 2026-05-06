@@ -50,7 +50,7 @@ func (p *ChaiziProvider) Query(_ context.Context, c candidate.Candidate) (Sectio
 	}
 
 	p.once.Do(func() {
-		p.data = loadChaiziDB(p.dbPath)
+		p.data = getOrLoadChaiziDB(p.dbPath)
 	})
 
 	if len(p.data) == 0 {
@@ -82,6 +82,31 @@ func (p *ChaiziProvider) Query(_ context.Context, c candidate.Candidate) (Sectio
 		Copyable:     true,
 		AlwaysExpand: true,
 	}, nil
+}
+
+// chaiziDBCache 按 dbPath 缓存已加载的拆字数据，使所有 ChaiziProvider
+// 实例共用同一份 map。方案切换时会反复构造新 Provider（见
+// coordinator.rebuildTooltipServiceLocked），但拆字数据本身仅依赖文件路径，
+// 没必要每次都重新解析 27000+ 行文本。加载失败的 path 同样会缓存（值为 nil），
+// 避免反复打开不存在的文件。
+var (
+	chaiziDBCacheMu sync.Mutex
+	chaiziDBCache   = make(map[string]map[rune]chaiziEntry)
+)
+
+// getOrLoadChaiziDB 进程级单例：首次按 path 调用 loadChaiziDB，后续直接命中缓存。
+func getOrLoadChaiziDB(path string) map[rune]chaiziEntry {
+	if path == "" {
+		return nil
+	}
+	chaiziDBCacheMu.Lock()
+	defer chaiziDBCacheMu.Unlock()
+	if data, ok := chaiziDBCache[path]; ok {
+		return data
+	}
+	data := loadChaiziDB(path)
+	chaiziDBCache[path] = data
+	return data
 }
 
 // loadChaiziDB 从文件加载拆字数据库

@@ -3,6 +3,7 @@ package tooltip
 import (
 	"context"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
@@ -50,6 +51,38 @@ func TestChaiziProvider_Query(t *testing.T) {
 	}
 	if !sec.Copyable {
 		t.Error("expected Copyable=true")
+	}
+}
+
+// TestChaiziProvider_DBCacheShared 验证多个 Provider 实例共用进程级 db 缓存：
+// 方案切换时反复构造的 Provider，对同一 path 应只解析一次文件，
+// 内部 data map 应指向同一份底层 hmap。
+func TestChaiziProvider_DBCacheShared(t *testing.T) {
+	f, err := os.CreateTemp("", "chaizi_cache_test_*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+	f.WriteString("汉\t氵廿口\n")
+	f.Close()
+
+	cfg := &config.TooltipChaiziConfig{Enabled: true}
+	p1 := NewChaiziProvider(cfg, f.Name(), "")
+	p2 := NewChaiziProvider(cfg, f.Name(), "")
+
+	// 触发 sync.Once 加载
+	if _, err := p1.Query(context.Background(), candidate.Candidate{Text: "汉"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p2.Query(context.Background(), candidate.Candidate{Text: "汉"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if p1.data == nil || p2.data == nil {
+		t.Fatal("expected data loaded for both providers")
+	}
+	if reflect.ValueOf(p1.data).Pointer() != reflect.ValueOf(p2.data).Pointer() {
+		t.Error("expected p1.data and p2.data to share the same backing map (process-level cache)")
 	}
 }
 
