@@ -110,6 +110,7 @@ export interface UIConfig {
   preedit_mode: PreeditModeValue;
   hide_candidate_window: boolean;
   candidate_layout: CandidateLayoutValue;
+  mode_accent_border: boolean;
   status_indicator: StatusIndicatorConfig;
   theme: string;
   theme_style: ThemeStyleValue;
@@ -361,6 +362,7 @@ export function getDefaultConfig(): Config {
       preedit_mode: "top",
       hide_candidate_window: false,
       candidate_layout: "horizontal",
+      mode_accent_border: false,
       status_indicator: {
         enabled: true,
         duration: 800,

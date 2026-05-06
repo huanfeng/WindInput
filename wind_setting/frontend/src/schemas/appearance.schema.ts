@@ -82,6 +82,12 @@ export const candidateWindowSchema: PageSchema = [
       { value: CandidateLayout.Vertical, label: "纵向" },
     ],
   },
+  {
+    type: "toggle",
+    key: "ui.mode_accent_border",
+    label: "模式彩色边框",
+    hint: "临时拼音、快捷输入等特殊模式下，候选窗口显示彩色边框指示",
+  },
 ];
 
 // ── 状态提示卡片（show_mode/show_punct/show_full_width 复选框组手写）──
