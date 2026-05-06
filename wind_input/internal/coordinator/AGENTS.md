@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-05-06 -->
 
 # internal/coordinator
 
@@ -9,7 +9,7 @@
 ## Key Files
 | File | Description |
 |------|-------------|
-| `coordinator.go` | `Coordinator` 结构体定义、构造函数、状态广播、信号通道（退出/重启） |
+| `coordinator.go` | `Coordinator` 结构体定义、构造函数、状态广播、信号通道（退出/重启）；`NotifySchemaActivated(displayName)` 供外部异步资源就绪后调用，触发 toolbar/TSF 状态同步并显示"<方案>已就绪"指示器 |
 | `handle_key_event.go` | 按键事件主入口，根据模式分发处理 |
 | `handle_key_action.go` | 具体按键动作处理（退格、确认、翻页、数字选词等） |
 | `handle_candidate_action.go` | 候选词快捷键操作：`matchCandidateActionKey` 匹配 Ctrl+数字/Ctrl+Shift+数字热键；`handleDeleteCandidateByKey` 删除指定候选词（写入 ShadowLayer.Delete）；`handlePinCandidateByKey` 置顶指定候选词（写入 ShadowLayer.Pin 或 PhraseLayer.MoveToTop） |

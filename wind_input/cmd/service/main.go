@@ -425,28 +425,18 @@ func main() {
 		"shadow_rules", stats["shadow_rules"])
 
 	// 创建并激活引擎
+	// pendingWdatActiveID 非空表示活跃方案因 wdat 后台生成中而暂未激活，
+	// 等 coord 创建之后再注册 OnPinyinWdatReady，让回调能拿到 coord 引用
+	// 调用 NotifySchemaActivated 触发 toolbar / TSF 状态同步与就绪提示。
+	var pendingWdatActiveID string
 	if err := engineMgr.SwitchSchema(activeSchemaID); err != nil {
 		if errors.Is(err, schema.ErrAssetBuilding) {
 			// 资源后台生成中：不切换到其它方案（用户的方案才是其习惯所在），
-			// 仅注册回调等就绪后激活；期间引擎为 nil，按键路径在
-			// engineMgr.ConvertEx 中走 nil 引擎短路返回空候选——不影响稳定性。
+			// 期间引擎为 nil，按键路径在 engineMgr.ConvertEx 中对 nil 引擎
+			// 短路返回空候选——不影响进程稳定性。
 			logger.Info("活跃方案资源准备中，等待后台生成完成后激活，期间不可输入",
 				"schema", activeSchemaID, "reason", err.Error())
-			desiredActiveID := activeSchemaID
-			schema.OnPinyinWdatReady(func() {
-				defer recoverPanic(logger, "wdat-ready-retry")
-				if err := engineMgr.SwitchSchema(desiredActiveID); err != nil {
-					logger.Warn("拼音 wdat 就绪后激活用户方案失败",
-						"schema", desiredActiveID, "error", err)
-					return
-				}
-				schemaMgr.SetActive(desiredActiveID)
-				if s := schemaMgr.GetSchema(desiredActiveID); s != nil {
-					dictManager.SwitchSchemaFull(desiredActiveID, s.DataSchemaID(),
-						s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
-				}
-				logger.Info("拼音 wdat 就绪，用户方案已激活", "schema", desiredActiveID)
-			})
+			pendingWdatActiveID = activeSchemaID
 		} else {
 			logger.Warn("Failed to initialize engine, trying fallback",
 				"schema", activeSchemaID, "error", err)
@@ -502,6 +492,29 @@ func main() {
 	// Create coordinator with Engine Manager, UI Manager and config
 	coord := coordinator.NewCoordinator(engineMgr, uiManager, cfg, appCompat, logger)
 	coord.SetVersion(version)
+
+	// 启动期若活跃方案因 wdat 后台生成而未激活，等就绪回调触发后再激活，
+	// 并通过 coord 推送状态到 toolbar/TSF 客户端、显示"<方案>已就绪"指示器。
+	if pendingWdatActiveID != "" {
+		desiredActiveID := pendingWdatActiveID
+		schema.OnPinyinWdatReady(func() {
+			defer recoverPanic(logger, "wdat-ready-retry")
+			if err := engineMgr.SwitchSchema(desiredActiveID); err != nil {
+				logger.Warn("拼音 wdat 就绪后激活用户方案失败",
+					"schema", desiredActiveID, "error", err)
+				return
+			}
+			schemaMgr.SetActive(desiredActiveID)
+			var displayName string
+			if s := schemaMgr.GetSchema(desiredActiveID); s != nil {
+				displayName = s.Schema.Name
+				dictManager.SwitchSchemaFull(desiredActiveID, s.DataSchemaID(),
+					s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
+			}
+			coord.NotifySchemaActivated(displayName)
+			logger.Info("拼音 wdat 就绪，用户方案已激活", "schema", desiredActiveID)
+		})
+	}
 
 	// 初始化输入统计采集器（配置存储在 bbolt 中，始终创建）
 	if st := dictManager.GetStore(); st != nil {
