@@ -373,7 +373,7 @@ var validPinyinSyllables = []string{
 
 	// l
 	"la", "le", "li", "lu", "lv", "lai", "lei", "lao", "lou", "lan", "lin",
-	"lang", "leng", "ling", "lie", "liao", "lian", "liang", "liu",
+	"lang", "leng", "ling", "lia", "lie", "liao", "lian", "liang", "liu",
 	"luo", "luan", "lun", "long", "lve",
 
 	// g
