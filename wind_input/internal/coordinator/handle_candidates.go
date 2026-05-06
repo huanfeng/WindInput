@@ -269,7 +269,8 @@ func (c *Coordinator) showUI() {
 	// 设置拼音模式标记（影响右键菜单前移/后移启用状态）
 	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
 	c.uiManager.SetPinyinMode(isPinyin)
-	c.uiManager.SetModeLabel("") // 正常模式不显示模式标签
+	c.uiManager.SetModeLabel("")        // 正常模式不显示模式标签
+	c.uiManager.SetModeAccentColor(nil) // 正常模式无光效
 
 	// When InlinePreedit is enabled and there are no candidates,
 	// hide the candidate window (only show the inline preedit in the application)

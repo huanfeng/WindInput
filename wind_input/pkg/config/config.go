@@ -197,6 +197,12 @@ type UIConfig struct {
 	MenuFontSize   float64    `yaml:"menu_font_size,omitempty" json:"menu_font_size,omitempty"`     // 菜单字体大小：默认12.0（DPI缩放前基础值）
 
 	StatusIndicator StatusIndicatorConfig `yaml:"status_indicator" json:"status_indicator"` // 状态提示配置
+
+	// 特殊模式内发光边框开关：nil=开启（默认），false=关闭
+	ModeAccentBorder *bool `yaml:"mode_accent_border,omitempty" json:"mode_accent_border,omitempty"`
+	// 特殊模式内发光边框颜色（十六进制，如 "#3C78AFD2"），空=使用内置默认色
+	TempPinyinAccentColor string `yaml:"temp_pinyin_accent_color,omitempty" json:"temp_pinyin_accent_color,omitempty"`
+	QuickInputAccentColor string `yaml:"quick_input_accent_color,omitempty" json:"quick_input_accent_color,omitempty"`
 }
 
 // ToolbarConfig contains toolbar settings

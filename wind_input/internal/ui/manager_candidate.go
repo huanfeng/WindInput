@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/huanfeng/wind_input/pkg/config"
+import (
+	"image/color"
+
+	"github.com/huanfeng/wind_input/pkg/config"
+)
 
 // ShowCandidates shows candidates at the given caret position (async, non-blocking)
 // The position will be automatically adjusted to stay within screen bounds.
@@ -96,14 +100,16 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	}
 	currentStickyAbove := m.stickyAbove
 	modeLabel := m.modeLabel
+	modeAccentColor := m.modeAccentColor
 	// Get current hover index and page button hover for rendering
 	hoverIndex := m.window.GetHoverIndex()
 	hoverPageBtn := m.window.GetHoverPageBtn()
 	m.mu.Unlock()
 
-	// Set mode label on renderer before rendering
+	// Set mode label and accent color on renderer before rendering
 	if m.renderer != nil {
 		m.renderer.SetModeLabel(modeLabel)
+		m.renderer.SetModeAccentColor(modeAccentColor)
 	}
 
 	// Update effective DPI based on caret position before rendering.
@@ -460,5 +466,12 @@ func (m *Manager) SetQuickInputMode(isQuickInput bool) {
 func (m *Manager) SetModeLabel(label string) {
 	m.mu.Lock()
 	m.modeLabel = label
+	m.mu.Unlock()
+}
+
+// SetModeAccentColor 设置特殊模式内发光边框颜色，nil 表示不显示
+func (m *Manager) SetModeAccentColor(c color.Color) {
+	m.mu.Lock()
+	m.modeAccentColor = c
 	m.mu.Unlock()
 }

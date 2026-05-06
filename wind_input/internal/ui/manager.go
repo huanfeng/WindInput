@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image"
+	"image/color"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -230,10 +231,11 @@ type Manager struct {
 	totalPages          int
 	totalCandidateCount int
 	candidatesPerPage   int
-	selectedIndex       int    // 当前页内选中的候选索引
-	isPinyinMode        bool   // 是否拼音模式（控制右键菜单前移/后移禁用）
-	isQuickInputMode    bool   // 是否快捷输入模式（右键菜单只保留复制）
-	modeLabel           string // 临时模式标签（如"临时拼音"、"快捷输入"），空=不显示
+	selectedIndex       int         // 当前页内选中的候选索引
+	isPinyinMode        bool        // 是否拼音模式（控制右键菜单前移/后移禁用）
+	isQuickInputMode    bool        // 是否快捷输入模式（右键菜单只保留复制）
+	modeLabel           string      // 临时模式标签（如"临时拼音"、"快捷输入"），空=不显示
+	modeAccentColor     color.Color // 特殊模式内发光边框颜色，nil=不显示
 	caretX              int
 	caretY              int
 	caretHeight         int

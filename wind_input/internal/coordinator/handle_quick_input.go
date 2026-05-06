@@ -491,6 +491,7 @@ func (c *Coordinator) exitQuickInputMode(commit bool, text string) *bridge.KeyEv
 	if c.uiManager != nil {
 		c.uiManager.SetQuickInputMode(false)
 		c.uiManager.SetModeLabel("")
+		c.uiManager.SetModeAccentColor(nil)
 	}
 
 	c.quickInputMode = false
@@ -569,6 +570,7 @@ func (c *Coordinator) showQuickInputUI() {
 
 	c.uiManager.SetQuickInputMode(true)
 	c.uiManager.SetModeLabel("快捷输入")
+	c.uiManager.SetModeAccentColor(c.modeAccentColor("quick_input"))
 	c.uiManager.ShowCandidates(
 		displayCandidates,
 		preedit,

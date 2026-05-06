@@ -222,6 +222,7 @@ func (c *Coordinator) exitTempPinyinMode(commit bool, text string) *bridge.KeyEv
 	c.totalPages = 1
 	if c.uiManager != nil {
 		c.uiManager.SetModeLabel("")
+		c.uiManager.SetModeAccentColor(nil)
 	}
 	c.hideUI()
 

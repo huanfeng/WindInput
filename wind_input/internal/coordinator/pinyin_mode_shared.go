@@ -589,6 +589,7 @@ func (c *Coordinator) showPinyinModeUI(ops *pinyinModeOps) {
 		modeLabel = c.engineMgr.GetTempPinyinModeLabel()
 	}
 	c.uiManager.SetModeLabel(modeLabel)
+	c.uiManager.SetModeAccentColor(c.modeAccentColor("temp_pinyin"))
 	c.uiManager.ShowCandidates(
 		displayCandidates,
 		preedit,

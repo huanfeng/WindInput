@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"math"
 
 	"github.com/gogpu/gg"
@@ -303,17 +304,32 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	r.drawRoundedRect(dc, 0, 0, width-2, height-2, cfg.CornerRadius)
 	dc.Fill()
 
-	// Border
-	dc.SetColor(cfg.BorderColor)
-	dc.SetLineWidth(1)
-	r.drawRoundedRect(dc, 0.5, 0.5, width-3, height-3, cfg.CornerRadius)
-	dc.Stroke()
+	// Border — accent 模式下用 accent 颜色替换默认边框
+	if cfg.ModeAccentColor != nil {
+		base := color.RGBAModel.Convert(cfg.ModeAccentColor).(color.RGBA)
+		dc.SetColor(base)
+		dc.SetLineWidth(2.5 * scale)
+		r.drawRoundedRect(dc, 1, 1, width-4, height-4, cfg.CornerRadius)
+		dc.Stroke()
+	} else {
+		dc.SetColor(cfg.BorderColor)
+		dc.SetLineWidth(1)
+		r.drawRoundedRect(dc, 0.5, 0.5, width-3, height-3, cfg.CornerRadius)
+		dc.Stroke()
+	}
 
 	// Input area background and cursor line
 	if !cfg.HidePreedit {
 		dc.SetColor(cfg.InputBgColor)
 		r.drawRoundedRect(dc, padX, padY, width-padX*2-2, inputHeight, 4*scale)
 		dc.Fill()
+
+		if cfg.ModeAccentColor != nil {
+			base := color.RGBAModel.Convert(cfg.ModeAccentColor).(color.RGBA)
+			dc.SetColor(color.RGBA{base.R, base.G, base.B, 35})
+			r.drawRoundedRect(dc, padX, padY, width-padX*2-2, inputHeight, 4*scale)
+			dc.Fill()
+		}
 
 		if hasCursor {
 			cursorTopY := padY + 4*scale
@@ -833,11 +849,19 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	r.drawRoundedRect(dc, 0, 0, width-2, height-2, cfg.CornerRadius)
 	dc.Fill()
 
-	// Border
-	dc.SetColor(cfg.BorderColor)
-	dc.SetLineWidth(1)
-	r.drawRoundedRect(dc, 0.5, 0.5, width-3, height-3, cfg.CornerRadius)
-	dc.Stroke()
+	// Border — accent 模式下用 accent 颜色替换默认边框
+	if cfg.ModeAccentColor != nil {
+		base := color.RGBAModel.Convert(cfg.ModeAccentColor).(color.RGBA)
+		dc.SetColor(base)
+		dc.SetLineWidth(2.5 * scale)
+		r.drawRoundedRect(dc, 1, 1, width-4, height-4, cfg.CornerRadius)
+		dc.Stroke()
+	} else {
+		dc.SetColor(cfg.BorderColor)
+		dc.SetLineWidth(1)
+		r.drawRoundedRect(dc, 0.5, 0.5, width-3, height-3, cfg.CornerRadius)
+		dc.Stroke()
+	}
 
 	y := padY
 
@@ -847,6 +871,13 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		dc.SetColor(cfg.InputBgColor)
 		r.drawRoundedRect(dc, preeditX, y, width-preeditX-padX-2, inputHeight, 4*scale)
 		dc.Fill()
+
+		if cfg.ModeAccentColor != nil {
+			base := color.RGBAModel.Convert(cfg.ModeAccentColor).(color.RGBA)
+			dc.SetColor(color.RGBA{base.R, base.G, base.B, 35})
+			r.drawRoundedRect(dc, preeditX, y, width-preeditX-padX-2, inputHeight, 4*scale)
+			dc.Fill()
+		}
 
 		if hasCursor {
 			cursorTopY := y + 3*scale

@@ -3,8 +3,11 @@ package coordinator
 
 import (
 	"context"
+	"encoding/hex"
 	"image"
+	"image/color"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -749,6 +752,7 @@ func (c *Coordinator) clearState() {
 	}
 	if c.uiManager != nil {
 		c.uiManager.SetModeLabel("")
+		c.uiManager.SetModeAccentColor(nil)
 	}
 	c.quickInputMode = false
 	c.quickInputBuffer = ""
@@ -770,6 +774,51 @@ func (c *Coordinator) clearState() {
 
 	// 清除命令结果缓存，确保 uuid/date/time 等下次生成新值
 	c.engineMgr.InvalidateCommandCache()
+}
+
+// modeAccentColor 返回指定模式的内发光颜色，优先读配置，空则用内置默认色。
+// modeName: "temp_pinyin" | "quick_input"
+// 默认关闭；需在配置中将 mode_accent_border 设为 true 才启用。
+func (c *Coordinator) modeAccentColor(modeName string) color.Color {
+	if c.config == nil || c.config.UI.ModeAccentBorder == nil || !*c.config.UI.ModeAccentBorder {
+		return nil
+	}
+	var hexStr string
+	var def color.RGBA
+	switch modeName {
+	case "temp_pinyin":
+		if c.config != nil {
+			hexStr = c.config.UI.TempPinyinAccentColor
+		}
+		def = color.RGBA{66, 165, 245, 255}
+	case "quick_input":
+		if c.config != nil {
+			hexStr = c.config.UI.QuickInputAccentColor
+		}
+		def = color.RGBA{102, 187, 106, 255}
+	default:
+		return nil
+	}
+	if parsed, ok := parseHexColor(hexStr); ok {
+		return parsed
+	}
+	return def
+}
+
+// parseHexColor 解析 "#RRGGBB" 或 "#RRGGBBAA" 十六进制颜色字符串。
+func parseHexColor(s string) (color.RGBA, bool) {
+	s = strings.TrimPrefix(s, "#")
+	if len(s) != 6 && len(s) != 8 {
+		return color.RGBA{}, false
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return color.RGBA{}, false
+	}
+	if len(b) == 3 {
+		return color.RGBA{R: b[0], G: b[1], B: b[2], A: 255}, true
+	}
+	return color.RGBA{R: b[0], G: b[1], B: b[2], A: b[3]}, true
 }
 
 // resetCompositionAnchorAfterCommit 在"部分上屏但保留剩余编码"等场景下被调用：

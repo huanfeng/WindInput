@@ -53,6 +53,7 @@ type RenderConfig struct {
 	ShowPageNumber     bool                   // Show page number text (e.g. "1/3")
 	TextRenderMode     TextRenderMode         // "gdi" (Windows native) or "freetype" (original)
 	ModeLabel          string                 // Temporary mode label (e.g. "临时拼音", "快捷输入"), empty = no label
+	ModeAccentColor    color.Color            // Inner glow border color for special modes, nil = no glow
 	PreeditMode        config.PreeditMode     // "top" (default) or "embedded" (inline before candidates); only effective when HidePreedit=false
 	IndexLabels        string                 // 10 custom label chars replacing default 1-9,0; empty = default
 }
@@ -309,6 +310,11 @@ func (r *Renderer) SetShowPageNumber(v bool) {
 // SetModeLabel sets the temporary mode label for display
 func (r *Renderer) SetModeLabel(label string) {
 	r.config.ModeLabel = label
+}
+
+// SetModeAccentColor sets the inner glow border color for the current mode, nil = no glow
+func (r *Renderer) SetModeAccentColor(c color.Color) {
+	r.config.ModeAccentColor = c
 }
 
 // SetTheme sets the theme for the renderer and updates colors
