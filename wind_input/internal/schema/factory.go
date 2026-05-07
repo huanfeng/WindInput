@@ -75,6 +75,11 @@ func startPinyinWdatBuildAsync(dictPath, wdatCachePath string, logger *slog.Logg
 	pinyinWdatBuildMu.Unlock()
 	go func() {
 		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("拼音 wdat 后台生成 goroutine 崩溃",
+					"panic", r,
+					"stack", string(debug.Stack()))
+			}
 			pinyinWdatBuildMu.Lock()
 			pinyinWdatBuilding = false
 			cbs := pinyinWdatReadyCallbacks
@@ -240,8 +245,17 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 		}
 	}
 
-	// 后台预生成拼音 wdb
-	go preGeneratePinyinWdb(s, exeDir, dataDir, logger)
+	// 后台预生成拼音 wdat/unigram
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("拼音预生成后台任务 goroutine 崩溃",
+					"panic", r,
+					"stack", string(debug.Stack()))
+			}
+		}()
+		preGeneratePinyinWdb(s, exeDir, dataDir, logger)
+	}()
 
 	// GC 释放临时内存
 	go func() {
