@@ -86,6 +86,7 @@ func (ct *CodeTable) LoadBinaryMemory(wdbPath string) error {
 			cloned[i] = c
 			cloned[i].Text = string([]byte(c.Text))
 			cloned[i].Code = clonedCode
+			cloned[i].IsCommon = isWordCommon(c.Text) // binformat 不存储 IsCommon，需在此补充
 		}
 		ct.entries[clonedCode] = cloned
 	})
@@ -360,7 +361,7 @@ func (ct *CodeTable) parseEntryLine(line string) bool {
 		Code:         code,
 		Weight:       weight,
 		NaturalOrder: ct.entryOrder, // 全局顺序（文件中的出现位置，跨编码递增）
-		IsCommon:     IsStringCommon(text),
+		IsCommon:     isWordCommon(text),
 		Meta:         candidate.CandidateMeta{LexiconName: ct.Header.Name},
 	}
 
@@ -369,11 +370,21 @@ func (ct *CodeTable) parseEntryLine(line string) bool {
 	return true
 }
 
+// isWordCommon 判断码表候选词是否视为"通用"：
+// 多字词（词组）是词典收录的词条，无条件保留；单字按通用字表判断。
+// 与 patchPinyinIsCommon 的多字词逻辑保持一致，避免生僻字"一票否决"。
+func isWordCommon(text string) bool {
+	if len([]rune(text)) > 1 {
+		return true
+	}
+	return IsStringCommon(text)
+}
+
 // patchIsCommon 为二进制模式返回的候选补充 IsCommon 标记
 // 二进制格式不存储 IsCommon，需要在 CodeTable 层补充
 func patchIsCommon(candidates []candidate.Candidate) []candidate.Candidate {
 	for i := range candidates {
-		candidates[i].IsCommon = IsStringCommon(candidates[i].Text)
+		candidates[i].IsCommon = isWordCommon(candidates[i].Text)
 	}
 	return candidates
 }
@@ -461,8 +472,8 @@ func (ct *CodeTable) LookupPrefixExcludeExact(prefix string, limit int) []candid
 // LookupPrefixBFS 广度优先前缀查找
 func (ct *CodeTable) LookupPrefixBFS(prefix string, limitPerBucket int, maxDepth int) []candidate.Candidate {
 	if ct.binReader != nil {
-		// 二进制模式：使用底层的 BFS，并注入 IsCommon 检查（内存缓存的单字判断）
-		return ct.binReader.LookupPrefixBFS(prefix, limitPerBucket, maxDepth, IsStringCommon)
+		// 二进制模式：使用底层的 BFS，并注入 IsCommon 检查（多字词无条件保留，单字按字表判断）
+		return ct.binReader.LookupPrefixBFS(prefix, limitPerBucket, maxDepth, isWordCommon)
 	}
 
 	// 内存模式降级实现：收集后手动分桶
@@ -477,7 +488,7 @@ func (ct *CodeTable) LookupPrefixBFS(prefix string, limitPerBucket int, maxDepth
 				bucketIdx := depth - 1
 				// 复制并补充 IsCommon
 				for _, c := range candidates {
-					c.IsCommon = IsStringCommon(c.Text)
+					c.IsCommon = isWordCommon(c.Text)
 					buckets[bucketIdx] = append(buckets[bucketIdx], c)
 				}
 			}
