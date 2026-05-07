@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
@@ -231,6 +233,29 @@ func (discardHandler) WithGroup(string) slog.Handler             { return discar
 // 确保编译器检查接口实现
 var _ slog.Handler = (*formattedHandler)(nil)
 var _ slog.Handler = discardHandler{}
+
+// redirectStderrToCrashLog 将 stderr（fd 2）重定向到 logs 目录下的 crash.log。
+// 必须在 main() 最开始调用，以便捕获 Go runtime fatal（如 OOM）写到 stderr 的完整 stack trace。
+// Go runtime 的 fatal 输出直接写底层 Windows STD_ERROR_HANDLE，不经过 os.Stderr 变量，
+// 因此需同时调用 windows.SetStdHandle 和更新 os.Stderr。
+// 正常运行时不向文件写入任何内容；发生崩溃时由 runtime 直接写入原始信息。
+// 文件以 O_APPEND 打开，不持有排他锁，外部工具可并发读取。
+func redirectStderrToCrashLog() {
+	logDir, err := config.GetLogsDir()
+	if err != nil {
+		logDir = filepath.Join(os.TempDir(), buildvariant.AppName(), "logs")
+	}
+	os.MkdirAll(logDir, 0755)
+
+	crashLogPath := filepath.Join(logDir, "crash.log")
+	f, err := os.OpenFile(crashLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+
+	windows.SetStdHandle(windows.STD_ERROR_HANDLE, windows.Handle(f.Fd()))
+	os.Stderr = f
+}
 
 // setupLogger 初始化日志系统，返回配置好的 logger
 // 日志文件位于 %LOCALAPPDATA%\WindInput\logs\wind_input.log

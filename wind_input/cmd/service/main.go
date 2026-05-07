@@ -243,6 +243,8 @@ func isPipeAlreadyExists() bool {
 }
 
 func main() {
+	redirectStderrToCrashLog()
+
 	// 内存管理策略：
 	// 启动阶段不设内存上限：wdat 等大型词库的首次构建（~650K 条目排序+二进制写入）
 	// 峰值内存可达 300-400MB，若此时 SetMemoryLimit 已生效会触发 Go 运行时
@@ -263,7 +265,13 @@ func main() {
 	logLevel := flag.String("log", "", "Log level: debug, info, warn, error (overrides config)")
 	saveDefaultConfig := flag.Bool("save-config", false, "Save default configuration and exit")
 	isRestart := flag.Bool("restart", false, "Internal flag: wait for previous instance to exit before starting")
+	testCrash := flag.Bool("test-crash", false, "触发测试 panic，验证 crash.log 重定向是否生效（测试用途）")
 	flag.Parse()
+
+	// 测试 crash.log：触发 panic，其 stack trace 应写入 crash.log
+	if *testCrash {
+		panic("test crash: verifying crash.log redirect")
+	}
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -307,7 +315,7 @@ func main() {
 	// 初始化日志系统
 	logger := setupLogger(cfg.Advanced.LogLevel)
 
-	logger.Info(buildvariant.DisplayName() + " IME Service starting...")
+	logger.Info(buildvariant.DisplayName()+" IME Service starting", "version", version)
 
 	// Log config location
 	if configPath, err := config.GetConfigPath(); err == nil {
