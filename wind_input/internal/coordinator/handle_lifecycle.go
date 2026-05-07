@@ -58,6 +58,9 @@ func (c *Coordinator) armPendingFirstShowWithTimeout(d time.Duration) {
 		case c.tempPinyinMode:
 			c.logger.Debug("pendingFirstShow timeout: forcing showPinyinModeUI (temp pinyin)")
 			c.showPinyinModeUI(c.tempPinyinOps())
+		case c.quickInputPinyinMode:
+			c.logger.Debug("pendingFirstShow timeout: forcing showPinyinModeUI (quick input pinyin)")
+			c.showPinyinModeUI(c.quickInputPinyinOps())
 		case c.quickInputMode:
 			c.logger.Debug("pendingFirstShow timeout: forcing showQuickInputUI")
 			c.showQuickInputUI()
@@ -173,6 +176,7 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	hasMainInput := len(c.inputBuffer) > 0
 	hasTempEnglish := len(c.tempEnglishBuffer) > 0
 	hasTempPinyin := c.tempPinyinMode
+	hasQuickInputPinyin := c.quickInputPinyinMode
 	hasQuickInput := c.quickInputMode
 	hasInput := hasMainInput || hasTempEnglish || hasTempPinyin || hasQuickInput
 	hasCandidates := len(c.candidates) > 0
@@ -206,6 +210,8 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 			c.showTempEnglishUI()
 		case hasTempPinyin:
 			c.showPinyinModeUI(c.tempPinyinOps())
+		case hasQuickInputPinyin:
+			c.showPinyinModeUI(c.quickInputPinyinOps())
 		case hasQuickInput:
 			c.showQuickInputUI()
 		default:
