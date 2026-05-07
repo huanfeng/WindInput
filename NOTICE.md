@@ -4,15 +4,19 @@
 
 ## 词库资源
 
-### 雾凇拼音 (rime-ice)
+### 白霜拼音 (rime-frost)
 
-- **用途**: 拼音词库数据源（单字词库、基础词库），用于生成拼音 unigram 语言模型
-- **仓库**: https://github.com/iDvel/rime-ice
+- **用途**: 拼音词库数据源（单字词库、基础词库、扩展词库），用于生成拼音 unigram 语言模型
+- **仓库**: https://github.com/gaboolic/rime-frost
 - **许可证**: GPL-3.0
 - **使用的文件**:
   - `cn_dicts/8105.dict.yaml` — 通用规范汉字单字词库
+  - `cn_dicts/41448.dict.yaml` — 大字表（生僻字扩展）
   - `cn_dicts/base.dict.yaml` — 基础词库
-  - `rime_ice.dict.yaml` — 词库入口描述文件
+  - `cn_dicts/ext.dict.yaml` — 扩展词库
+  - `cn_dicts/others.dict.yaml` — 容错词（多音字异读）
+  - `cn_dicts/corrections.dict.yaml` — 错音词（weight=0，可查但不影响排序）
+  - `rime_frost.dict.yaml` — 词库入口描述文件
 
 ### 极点五笔 for Rime (rime-wubi86-jidian)
 

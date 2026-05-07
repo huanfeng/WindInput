@@ -2,13 +2,17 @@
 
 ## 1. 数据源概览
 
-WindInput 拼音引擎使用三个核心数据源，均来自 [雾凇拼音 (rime-ice)](https://github.com/iDvel/rime-ice) 项目。
+WindInput 拼音引擎使用以下核心数据源，均来自 [白霜拼音 (rime-frost)](https://github.com/gaboolic/rime-frost) 项目。
+rime-frost 基于雾凇拼音 (rime-ice) 衍生，使用 745MB 语料重新计算词频，字词频率分布更贴近真实语料。
 
-| 数据源 | 文件 | 规模 | 来源 | 用途 |
-|--------|------|------|------|------|
-| 8105 | `8105.dict.yaml` | ~8105 字 | 《通用规范汉字表》+ 25 亿字语料字频 | 单字候选 + Unigram |
-| base | `base.dict.yaml` | ~16.5 MB | 华宇野风 + 清华 THUOCL + 现代汉语常用词表 + 腾讯词向量补充 | 词组候选 + Unigram |
-| tencent | `tencent.dict.yaml` | ~98 万条 | 腾讯 AI Lab 词向量 | 仅用于 Unigram 语言模型 |
+| 数据源 | 文件 | 规模 | 用途 |
+|--------|------|------|------|
+| 8105 | `cn_dicts/8105.dict.yaml` | ~8105 字 | 单字候选 + Unigram |
+| 41448 | `cn_dicts/41448.dict.yaml` | ~41448 字 | 生僻字扩展候选 |
+| base | `cn_dicts/base.dict.yaml` | ~36 万条 | 基础词组候选 + Unigram |
+| ext | `cn_dicts/ext.dict.yaml` | ~23 万条 | 扩展词组候选 |
+| others | `cn_dicts/others.dict.yaml` | 容错词 | 多音字异读容错 |
+| corrections | `cn_dicts/corrections.dict.yaml` | 错音词 | weight=0，可查但不参与 Viterbi 路径 |
 
 ## 2. 数据使用方式
 

@@ -23,7 +23,7 @@
 |---------|---------|
 | `wubi86_jidian.dict.yaml` | `wubi86_jidian.dict.patch.yaml` |
 | `wubi86_jidian_extra.dict.yaml` | `wubi86_jidian_extra.dict.patch.yaml` |
-| `rime_ice.dict.yaml` | `rime_ice.dict.patch.yaml` |
+| `rime_frost.dict.yaml` | `rime_frost.dict.patch.yaml` |
 
 每个词库文件可以有独立的补丁，互不干扰。主词库和 `import_tables` 中声明的关联词库都支持补丁。
 

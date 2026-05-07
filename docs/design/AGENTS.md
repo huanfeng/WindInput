@@ -73,6 +73,6 @@
 ### 外部
 - 项目 CLAUDE.md 中的约束
 - Windows API 文档
-- 拼音词库源（雾凇拼音）
+- 拼音词库源（白霜拼音 rime-frost）
 
 <!-- MANUAL: -->

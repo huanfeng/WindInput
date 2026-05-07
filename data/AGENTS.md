@@ -57,7 +57,7 @@
 - `wind_input/cmd/gen_*` — 词库生成工具
 
 ### External
-- 拼音词库源: [雾凇拼音 rime-ice](https://github.com/iDvel/rime-ice)
+- 拼音词库源: [白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)
 - 五笔词库源: Rime 生态五笔86词库
 
 <!-- MANUAL: -->

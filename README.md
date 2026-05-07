@@ -104,7 +104,7 @@ ui:
 
 | 资源 | 用途 | 许可证 |
 |------|------|--------|
-| [雾凇拼音 (rime-ice)](https://github.com/iDvel/rime-ice) | 拼音词库数据源 | GPL-3.0 |
+| [白霜拼音 (rime-frost)](https://github.com/gaboolic/rime-frost) | 拼音词库数据源 | GPL-3.0 |
 | [极点五笔 for Rime](https://github.com/KyleBing/rime-wubi86-jidian) | 五笔 86 码表数据源 | Apache-2.0 |
 | [pinyin-data](https://github.com/mozillazg/pinyin-data) | 汉字拼音注音数据（悬停提示） | MIT |
 | 腾讯词向量 | 词频权重参考 | — |

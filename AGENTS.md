@@ -76,7 +76,7 @@ Schema 驱动流程:
 1. `[1/6]` Go 服务: `cd wind_input && go build -ldflags "-H windowsgui" -o ../build/wind_input.exe ./cmd/service`
 2. `[2/6]` C++ DLL: `cd wind_tsf/build && cmake .. && cmake --build . --config Release`（仅输出 wind_tsf.dll；wind_dwrite.dll 已移除，Go 侧通过 CGO 直接调用系统 dwrite.dll）
 3. `[3/6]` 设置界面: `cd wind_setting && wails build [-debug]`
-4. `[4/6]` 下载 rime-ice 拼音词库到 `.cache/rime/`
+4. `[4/6]` 下载白霜拼音 rime-frost 词库到 `.cache/rime-frost/`
 5. `[5/6]` 复制词库、Schema 配置和默认配置（config.yaml）到 `build/`
 6. `[6/6]` 验证构建产物
 
@@ -100,7 +100,7 @@ Schema 驱动流程:
 - PowerShell (构建脚本)
 
 ### Data Sources
-- 拼音词库: [雾凇拼音 rime-ice](https://github.com/iDvel/rime-ice)
+- 拼音词库: [白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)
 - 五笔词库: Rime 生态格式（自描述加载）
 
 ## AGENTS.md 索引（ToC）
