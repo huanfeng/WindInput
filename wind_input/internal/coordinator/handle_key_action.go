@@ -58,8 +58,11 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 			// 与首字符诊断，使候选窗能在新 composition 的真实位置上重新定位。
 			c.resetCompositionAnchorAfterCommit()
 
-			// Apply full-width conversion if enabled
+			// Apply S2T and full-width conversions if enabled
 			commitTextOriginal := commitText
+			if c.s2tManager != nil && c.s2tManager.IsEnabled() {
+				commitText = c.s2tManager.Convert(commitText)
+			}
 			if c.fullWidth {
 				commitText = transform.ToFullWidth(commitText)
 			}
@@ -116,7 +119,10 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 		if c.engineMgr != nil {
 			c.engineMgr.OnCandidateSelected(c.inputBuffer, result.CommitText)
 		}
-		// Apply full-width conversion if enabled
+		// Apply S2T and full-width conversions if enabled
+		if c.s2tManager != nil && c.s2tManager.IsEnabled() {
+			text = c.s2tManager.Convert(text)
+		}
 		if c.fullWidth {
 			text = transform.ToFullWidth(text)
 		}
