@@ -80,6 +80,15 @@ func GetSystemConfigPath() (string, error) {
 	return filepath.Join(GetDataDir(exeDir), SystemConfigFile), nil
 }
 
+// GetOpenCCDir returns the directory path where OpenCC .octrie dictionaries live (data/opencc).
+func GetOpenCCDir() (string, error) {
+	exeDir, err := GetExeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(GetDataDir(exeDir), "opencc"), nil
+}
+
 // EnsureConfigDir ensures the config directory exists
 func EnsureConfigDir() error {
 	configDir, err := GetConfigDir()

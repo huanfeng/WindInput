@@ -111,6 +111,11 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		return c.handleOpenSettingsKey()
 	}
 
+	// Handle simplified->traditional toggle hotkey
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.ToggleS2T, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+		return c.handleToggleS2T()
+	}
+
 	// 候选词操作快捷键（仅在输入态且有候选时生效）
 	if c.config != nil && hasCtrl && len(c.candidates) > 0 && len(c.inputBuffer) > 0 {
 		if num := c.matchCandidateActionKey(c.config.Hotkeys.DeleteCandidate, hasCtrl, hasShift, data.KeyCode); num > 0 {

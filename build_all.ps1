@@ -421,6 +421,22 @@ function Download-Dictionaries {
     Download-RemoteFile $RimeWubiUrl "wubi86_jidian_extra.dict.yaml" $RimeWubiDir "扩展词库"
     Download-RemoteFile $RimeWubiUrl "wubi86_jidian_extra_district.dict.yaml" $RimeWubiDir "行政区域词库"
     # Download-RemoteFile $RimeWubiUrl "wubi86_jidian_user.dict.yaml" $RimeWubiDir "用户词库模板"
+
+    # OpenCC 简繁词典 (BYVoid/OpenCC)
+    Write-Detail "  OpenCC 简繁词典:"
+    $OpenCCDir = Join-Path $ScriptDir ".cache\opencc\dictionaries"
+    if (-not (Test-Path $OpenCCDir)) { New-Item -ItemType Directory -Path $OpenCCDir -Force | Out-Null }
+    $OpenCCBaseUrl = "https://raw.githubusercontent.com/BYVoid/OpenCC/master/data/dictionary"
+    $OpenCCFiles = @(
+        @{Name="STCharacters.txt"; Desc="简->繁 字级"},
+        @{Name="STPhrases.txt";    Desc="简->繁 词级"},
+        @{Name="TWVariants.txt";   Desc="台湾正体字形"},
+        @{Name="TWPhrases.txt";    Desc="台湾词汇（含 IT/姓名/其它，OpenCC 合并）"},
+        @{Name="HKVariants.txt";   Desc="香港繁体字形"}
+    )
+    foreach ($f in $OpenCCFiles) {
+        Download-RemoteFile $OpenCCBaseUrl $f.Name $OpenCCDir $f.Desc
+    }
     Write-DetailLine
 }
 
@@ -551,6 +567,27 @@ function Prepare-DataFiles {
         Write-Detail "  - 已复制英文词库 ($englishCopied 个文件)"
     } else {
         Write-Host "[警告] 未找到英文词库文件" -ForegroundColor Yellow
+    }
+
+    # 编译 OpenCC 简繁词典为 .octrie
+    $OpenCCSrcDir = Join-Path $ScriptDir ".cache\opencc\dictionaries"
+    if (Test-Path $OpenCCSrcDir) {
+        $openccDstDir = Join-Path $DataDir "opencc"
+        if (-not (Test-Path $openccDstDir)) { New-Item -ItemType Directory -Path $openccDstDir -Force | Out-Null }
+        Write-Detail "  - 编译 OpenCC 简繁词典 (.octrie)..."
+        Push-Location (Join-Path $ScriptDir "wind_input")
+        try {
+            & go run ./cmd/gen_opencc_dict -src $OpenCCSrcDir -out $openccDstDir
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[警告] OpenCC 词典编译失败，简繁转换功能将不可用" -ForegroundColor Yellow
+            } else {
+                Write-Detail "  - OpenCC 词典编译完成"
+            }
+        } finally {
+            Pop-Location
+        }
+    } else {
+        Write-Host "[提示] 未找到 OpenCC 词典源，跳过简繁词典编译" -ForegroundColor Cyan
     }
 
     # 复制预制数据文件（data/ → build/data/）

@@ -18,11 +18,13 @@ const (
 	UnifiedMenuToggleWidth      = 101
 	UnifiedMenuTogglePunct      = 102
 	UnifiedMenuToggleToolbar    = 103
+	UnifiedMenuToggleS2T        = 104 // 简入繁出 总开关
 	UnifiedMenuSchemaEnglish    = 140 // 英文模式
 	UnifiedMenuSchemaBase       = 150 // 方案ID: 150+i
 	UnifiedMenuThemeBase        = 200 // 主题ID: 200+i
 	UnifiedMenuThemeStyleBase   = 250 // 主题风格ID: 250+i (0=system, 1=light, 2=dark)
 	UnifiedMenuFilterModeBase   = 260 // 检索范围ID: 260+i (0=smart, 1=general, 2=gb18030)
+	UnifiedMenuS2TVariantBase   = 270 // 简入繁出 变体ID: 270+i (0=s2t, 1=s2tw, 2=s2twp, 3=s2hk)
 	UnifiedMenuTestBase         = 280 // 三级菜单测试ID: 280+i
 	UnifiedMenuReloadConfig     = 299
 	UnifiedMenuRestartService   = 303
@@ -59,6 +61,10 @@ type UnifiedMenuState struct {
 	Version           string            // App version for display in "About" menu item
 	ActiveProcessName string            // 当前焦点应用进程名（用于即时候选菜单项标签）
 	SkipCaretPending  bool              // 当前应用是否已启用即时候选
+
+	// 简入繁出（S2T）状态
+	S2TEnabled bool              // 总开关
+	S2TVariant config.S2TVariant // 当前变体
 }
 
 func aboutText(version string) string {
@@ -99,11 +105,26 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 		{ID: UnifiedMenuFilterModeBase + 2, Text: "全部字符", Checked: filterMode == config.FilterGB18030},
 	}
 
+	// 简入繁出子菜单
+	s2tVariant := state.S2TVariant
+	if s2tVariant == "" {
+		s2tVariant = config.S2TStandard
+	}
+	s2tChildren := []MenuItem{
+		{ID: UnifiedMenuToggleS2T, Text: "启用", Checked: state.S2TEnabled},
+		{Separator: true},
+		{ID: UnifiedMenuS2TVariantBase, Text: "标准繁体", Checked: s2tVariant == config.S2TStandard},
+		{ID: UnifiedMenuS2TVariantBase + 1, Text: "台湾繁体", Checked: s2tVariant == config.S2TTaiwan},
+		{ID: UnifiedMenuS2TVariantBase + 2, Text: "台湾繁体（含词汇）", Checked: s2tVariant == config.S2TTaiwanPhrase},
+		{ID: UnifiedMenuS2TVariantBase + 3, Text: "香港繁体", Checked: s2tVariant == config.S2THongKong},
+	}
+
 	items := []MenuItem{
 		{Text: "输入方案", Children: schemaChildren},
 		{Text: "检索范围", Children: filterChildren},
 		{ID: UnifiedMenuToggleWidth, Text: "全角", Checked: state.FullWidth},
 		{ID: UnifiedMenuTogglePunct, Text: "中文标点", Checked: state.ChinesePunct},
+		{Text: "简入繁出", Children: s2tChildren},
 		{Separator: true},
 		{ID: UnifiedMenuToggleToolbar, Text: "显示工具栏", Checked: state.ToolbarVisible},
 	}

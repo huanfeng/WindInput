@@ -786,6 +786,13 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 		Version:           c.version,
 		ActiveProcessName: activeProcessName,
 		SkipCaretPending:  skipCaretPending,
+		S2TEnabled:        c.config != nil && c.config.S2T.Enabled,
+		S2TVariant: func() config.S2TVariant {
+			if c.config == nil {
+				return config.S2TStandard
+			}
+			return c.config.S2T.Variant
+		}(),
 	}
 	c.mu.Unlock()
 
@@ -809,6 +816,23 @@ func (c *Coordinator) handleUnifiedMenuAction(id int, capturedProcess string) {
 		c.handleToolbarTogglePunct()
 	case id == ui.UnifiedMenuToggleToolbar:
 		c.HandleMenuCommand("toggle_toolbar")
+	case id == ui.UnifiedMenuToggleS2T:
+		c.mu.Lock()
+		c.handleToggleS2T()
+		c.mu.Unlock()
+	case id >= ui.UnifiedMenuS2TVariantBase && id < ui.UnifiedMenuS2TVariantBase+10:
+		variantIndex := id - ui.UnifiedMenuS2TVariantBase
+		variants := []config.S2TVariant{
+			config.S2TStandard,
+			config.S2TTaiwan,
+			config.S2TTaiwanPhrase,
+			config.S2THongKong,
+		}
+		if variantIndex >= 0 && variantIndex < len(variants) {
+			c.mu.Lock()
+			c.handleSetS2TVariant(variants[variantIndex])
+			c.mu.Unlock()
+		}
 	case id == ui.UnifiedMenuReloadConfig:
 		c.logger.Info("Reload config from unified menu")
 		c.HandleMenuCommand("reload_config")

@@ -94,13 +94,15 @@ const (
 	ConfigSectionInput    ConfigSection = "input"
 	ConfigSectionAdvanced ConfigSection = "advanced"
 	ConfigSectionStats    ConfigSection = "stats"
+	ConfigSectionS2T      ConfigSection = "s2t"
 )
 
 // Valid 校验 ConfigSection 是否为已知值
 func (s ConfigSection) Valid() bool {
 	switch s {
 	case ConfigSectionStartup, ConfigSectionSchema, ConfigSectionHotkeys, ConfigSectionUI,
-		ConfigSectionToolbar, ConfigSectionInput, ConfigSectionAdvanced, ConfigSectionStats:
+		ConfigSectionToolbar, ConfigSectionInput, ConfigSectionAdvanced, ConfigSectionStats,
+		ConfigSectionS2T:
 		return true
 	}
 	return false

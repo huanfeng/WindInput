@@ -215,6 +215,25 @@ func (c *Coordinator) UpdateStatsConfig(statsConfig *config.StatsConfig) {
 	c.logger.Debug("Stats config updated", "enabled", enabled, "trackEnglish", trackEnglish)
 }
 
+// UpdateS2TConfig 更新简入繁出配置（来自设置界面）。
+func (c *Coordinator) UpdateS2TConfig(s2tConfig *config.S2TConfig) {
+	if s2tConfig == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.config != nil {
+		c.config.S2T = *s2tConfig
+	}
+	c.reconfigureS2T(*s2tConfig)
+	if c.hasPendingInput() {
+		c.updateCandidates()
+		c.showUI()
+	}
+	c.logger.Debug("S2T config updated", "enabled", s2tConfig.Enabled, "variant", string(s2tConfig.Variant))
+}
+
 // UpdateHotkeyConfig 更新快捷键配置
 func (c *Coordinator) UpdateHotkeyConfig(hotkeyConfig *config.HotkeyConfig) {
 	c.mu.Lock()

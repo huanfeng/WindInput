@@ -169,6 +169,31 @@ func (e FontEngine) Valid() bool {
 	return false
 }
 
+// S2TVariant 简入繁出（简体→繁体）变体。
+//
+// 对应 OpenCC 配置链：
+//   - s2t   ：标准繁体（不做地区词替换）
+//   - s2tw  ：台湾正体（字形替换）
+//   - s2twp ：台湾正体 + 词汇替换（如「软件」→「軟體」）
+//   - s2hk  ：香港繁体（字形替换）
+type S2TVariant string
+
+const (
+	S2TStandard     S2TVariant = "s2t"
+	S2TTaiwan       S2TVariant = "s2tw"
+	S2TTaiwanPhrase S2TVariant = "s2twp"
+	S2THongKong     S2TVariant = "s2hk"
+)
+
+// Valid 校验取值
+func (v S2TVariant) Valid() bool {
+	switch v {
+	case S2TStandard, S2TTaiwan, S2TTaiwanPhrase, S2THongKong:
+		return true
+	}
+	return false
+}
+
 // PagerDisplayMode 页码显示方式（用户级覆盖，优先级高于主题配置）
 type PagerDisplayMode string
 

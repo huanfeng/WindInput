@@ -22,6 +22,7 @@
 - `Coordinator` 缓存编译结果（`cachedKeyDownHotkeys`），配置变更时置 `hotkeysDirty=true` 触发重新编译
 - 按键组类型——选词键：`semicolon_quote`、`comma_period`、`lrshift`、`lrctrl`；翻页键：`pageupdown`、`minus_equal`、`brackets`、`shift_tab`；高亮键：`tab`、`arrows`（arrows 由 C++ 侧原生处理，无需编译）
 - `AddWord` 热键（`config.Hotkeys.AddWord`）为新增字段，触发快捷加词模式
+- `ToggleS2T` 热键（`config.Hotkeys.ToggleS2T`，默认 `ctrl+shift+j`）切换简入繁出总开关
 
 ### Testing Requirements
 - 热键编译结果可通过与 C++ 侧对照验证

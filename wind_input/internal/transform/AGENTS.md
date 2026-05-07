@@ -4,10 +4,11 @@
 # internal/transform
 
 ## Purpose
-文本转换工具包。提供两类转换：
+文本转换工具包。提供三类转换：
 
 1. **全角/半角转换**（`fullwidth.go`）：ASCII 字符与全角 Unicode 字符互转
 2. **中英文标点转换**（`punctuation.go`）：英文标点与中文标点互转，处理成对标点（引号）的交替状态
+3. **简入繁出**（`s2t/`）：基于 OpenCC 词典的简体→繁体输出（详见 [`s2t/AGENTS.md`](s2t/AGENTS.md)）
 
 ## Key Files
 | File | Description |

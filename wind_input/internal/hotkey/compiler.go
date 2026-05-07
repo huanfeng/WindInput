@@ -56,6 +56,9 @@ func (c *Compiler) Compile() (keyDownList, keyUpList []uint32) {
 	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.OpenSettings); ok {
 		keyDownList = append(keyDownList, hash)
 	}
+	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.ToggleS2T); ok {
+		keyDownList = append(keyDownList, hash)
+	}
 
 	// Debug: Ctrl+Shift+R for clipboard paste code (hardcoded, debug only)
 	if buildvariant.IsDebug() {

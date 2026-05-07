@@ -235,6 +235,9 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 		}
 	}
 
+	// 简入繁出：候选词文本转换（仅 S2T 启用时生效）
+	c.applyS2TToCandidates()
+
 	c.logger.Debug("Got candidates", "count", len(c.candidates), "empty", result.IsEmpty,
 		"input", c.inputBuffer, "preedit", c.preeditDisplay)
 	// Debug: log top 3 candidates for ranking investigation (use engine result for NaturalOrder)

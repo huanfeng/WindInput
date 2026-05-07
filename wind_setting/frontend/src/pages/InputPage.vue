@@ -120,6 +120,39 @@
       <SchemaRenderer :schema="overflowSchema" :form-data="formData" mode="bare" />
     </div>
 
+    <!-- 简入繁出（简体输入 → 繁体输出） -->
+    <div class="settings-card">
+      <div class="card-title">简入繁出</div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>启用简入繁出</label>
+          <p class="setting-hint">
+            输入简体拼音/五笔，候选窗与上屏均显示繁体（基于 OpenCC 词典）
+          </p>
+        </div>
+        <div class="setting-control">
+          <label class="checkbox-label">
+            <input type="checkbox" v-model="s2tEnabled" />
+            启用
+          </label>
+        </div>
+      </div>
+      <div class="setting-item" :class="{ 'item-disabled': !s2tEnabled }">
+        <div class="setting-info">
+          <label>转换变体</label>
+          <p class="setting-hint">选择目标繁体字形与词汇风格</p>
+        </div>
+        <div class="setting-control">
+          <select v-model="s2tVariant" :disabled="!s2tEnabled">
+            <option :value="S2TVariant.Standard">标准繁体</option>
+            <option :value="S2TVariant.Taiwan">台湾繁体</option>
+            <option :value="S2TVariant.TaiwanPhrase">台湾繁体（含词汇）</option>
+            <option :value="S2TVariant.HongKong">香港繁体</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
     <!-- 标点配对 -->
     <div class="settings-card">
       <div class="card-title">标点配对</div>
@@ -386,7 +419,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from "vue";
 import type { Config } from "../api/settings";
-import { Key } from "@/lib/enums";
+import { Key, S2TVariant } from "@/lib/enums";
 import TriggerKeySelect from "@/components/TriggerKeySelect.vue";
 import { Button } from "@/components/ui/button";
 import {
@@ -410,6 +443,31 @@ import {
 const props = defineProps<{
   formData: Config;
 }>();
+
+// 简入繁出（S2T）：通过 v-model 直接读写 formData.s2t（默认值兜底）
+const s2tEnabled = computed<boolean>({
+  get() {
+    return !!props.formData.s2t?.enabled;
+  },
+  set(value: boolean) {
+    if (!props.formData.s2t) {
+      props.formData.s2t = { enabled: false, variant: S2TVariant.Standard };
+    }
+    props.formData.s2t.enabled = value;
+  },
+});
+
+const s2tVariant = computed<string>({
+  get() {
+    return props.formData.s2t?.variant || S2TVariant.Standard;
+  },
+  set(value: string) {
+    if (!props.formData.s2t) {
+      props.formData.s2t = { enabled: false, variant: S2TVariant.Standard };
+    }
+    props.formData.s2t.variant = value;
+  },
+});
 
 // 标点配对配置
 const showPairDialog = ref(false);

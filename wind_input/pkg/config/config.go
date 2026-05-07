@@ -19,6 +19,7 @@ type Config struct {
 	Input    InputConfig    `yaml:"input" json:"input"`
 	Advanced AdvancedConfig `yaml:"advanced" json:"advanced"`
 	Stats    StatsConfig    `yaml:"stats" json:"stats"`
+	S2T      S2TConfig      `yaml:"s2t" json:"s2t"`
 }
 
 // StatsConfig 输入统计配置
@@ -106,7 +107,14 @@ type HotkeyConfig struct {
 	ToggleToolbar   string   `yaml:"toggle_toolbar" json:"toggle_toolbar"`     // 显示/隐藏状态栏: 通用按键组合或 "none"
 	OpenSettings    string   `yaml:"open_settings" json:"open_settings"`       // 打开设置: 通用按键组合或 "none"
 	AddWord         string   `yaml:"add_word" json:"add_word"`                 // 快捷加词: 通用按键组合或 "none"
+	ToggleS2T       string   `yaml:"toggle_s2t" json:"toggle_s2t"`             // 简入繁出开关切换: 通用按键组合或 "none"
 	GlobalHotkeys   []string `yaml:"global_hotkeys" json:"global_hotkeys"`     // 注册为全局热键的快捷键名称列表
+}
+
+// S2TConfig 简入繁出（简体->繁体）配置
+type S2TConfig struct {
+	Enabled bool       `yaml:"enabled" json:"enabled"` // 总开关
+	Variant S2TVariant `yaml:"variant" json:"variant"` // 变体: s2t / s2tw / s2twp / s2hk
 }
 
 // TooltipConfig 候选悬停增强提示配置
@@ -346,6 +354,7 @@ func DefaultConfig() *Config {
 			ToggleToolbar:   "none",
 			OpenSettings:    "none",
 			AddWord:         "ctrl+equal",
+			ToggleS2T:       "ctrl+shift+j",
 		},
 		UI: UIConfig{
 			FontSize:                18,
@@ -441,6 +450,10 @@ func DefaultConfig() *Config {
 			RetainDays:   0,
 			TrackEnglish: boolPtr(true),
 		},
+		S2T: S2TConfig{
+			Enabled: false,
+			Variant: S2TStandard,
+		},
 	}
 }
 
@@ -522,6 +535,11 @@ func ApplyConfigFallbacks(cfg *Config) {
 
 	// 迁移旧的快捷输入配置（enabled+trigger_key → trigger_keys）
 	migrateQuickInputConfig(cfg)
+
+	// S2T variant 兜底
+	if !cfg.S2T.Variant.Valid() {
+		cfg.S2T.Variant = S2TStandard
+	}
 
 	// 迁移旧的状态提示字段到新的 StatusIndicator 结构
 	migrateStatusIndicatorConfig(cfg)

@@ -54,6 +54,7 @@ func (h *ReloadHandler) ReloadConfig() error {
 	allSections := map[string]bool{
 		"startup": true, "schema": true, "hotkeys": true, "ui": true,
 		"toolbar": true, "input": true, "advanced": true, "stats": true,
+		"s2t": true,
 	}
 	_, err = h.ApplyConfigUpdate(&oldCfg, newCfg, allSections)
 	if err == nil {
@@ -113,6 +114,9 @@ func (h *ReloadHandler) ApplyConfigUpdate(oldCfg, newCfg *config.Config, changed
 		}
 		if changedSections["stats"] {
 			h.coord.UpdateStatsConfig(&newCfg.Stats)
+		}
+		if changedSections["s2t"] {
+			h.coord.UpdateS2TConfig(&newCfg.S2T)
 		}
 	}
 

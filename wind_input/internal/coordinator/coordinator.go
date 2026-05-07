@@ -18,6 +18,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/store"
 	"github.com/huanfeng/wind_input/internal/tooltip"
 	"github.com/huanfeng/wind_input/internal/transform"
+	"github.com/huanfeng/wind_input/internal/transform/s2t"
 	"github.com/huanfeng/wind_input/internal/ui"
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/theme"
@@ -219,6 +220,9 @@ type Coordinator struct {
 	pairTracker    *transform.PairTracker
 	pairTrackerEn  *transform.PairTracker // 英文配对追踪器
 	pairInsertTime time.Time              // 最近一次自动配对插入的时间，用于抑制 SelectionChanged 清栈
+
+	// 简入繁出（S->T）转换管理器（lazy 加载，单例）
+	s2tManager *s2t.Manager
 
 	// Hotkey compiler for binary protocol
 	hotkeyCompiler *hotkey.Compiler
@@ -515,6 +519,7 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		pairTrackerEn:  transform.NewPairTracker(cfg.Input.AutoPair.EnglishPairs),
 		hotkeyCompiler: hotkey.NewCompiler(cfg),
 		hotkeysDirty:   true, // 首次使用时需要编译
+		s2tManager:     newS2TManager(logger),
 		inputHistory:   NewInputHistory(20),
 		appCompat:      appCompat,
 		cfgMu:          new(sync.RWMutex),
@@ -526,6 +531,9 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 
 	// 加载自定义标点映射
 	c.punctConverter.SetCustomMappings(cfg.Input.PunctCustom.Enabled, cfg.Input.PunctCustom.Mappings)
+
+	// 初始化简入繁出（按需加载，未启用时不读盘）
+	c.reconfigureS2T(cfg.S2T)
 
 	// Set up toolbar callbacks
 	c.setupToolbarCallbacks()

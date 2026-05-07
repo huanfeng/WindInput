@@ -46,7 +46,14 @@ export interface HotkeyConfig {
   toggle_toolbar: string; // 通用按键组合或 "none"
   open_settings: string; // 通用按键组合或 "none"
   add_word: string; // 快捷加词: 通用按键组合或 "none"
+  toggle_s2t: string; // 简入繁出开关: 通用按键组合或 "none"
   global_hotkeys: string[]; // 注册为全局热键的快捷键名称列表
+}
+
+// 简入繁出（S->T）配置
+export interface S2TConfig {
+  enabled: boolean;
+  variant: string; // "s2t" / "s2tw" / "s2twp" / "s2hk"
 }
 
 // 状态提示配置
@@ -217,6 +224,7 @@ export interface Config {
   toolbar: ToolbarConfig;
   input: InputConfig;
   advanced: AdvancedConfig;
+  s2t?: S2TConfig;
 }
 
 // 状态类型
@@ -351,6 +359,7 @@ export function getDefaultConfig(): Config {
       toggle_toolbar: "none",
       open_settings: "none",
       add_word: "ctrl+=",
+      toggle_s2t: "ctrl+shift+j",
       global_hotkeys: [],
     },
     ui: {
@@ -444,6 +453,10 @@ export function getDefaultConfig(): Config {
     advanced: {
       log_level: "info",
       perf_sampling: false,
+    },
+    s2t: {
+      enabled: false,
+      variant: "s2t",
     },
   };
 }

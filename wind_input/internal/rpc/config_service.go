@@ -268,6 +268,8 @@ func getSectionMap(cfg *config.Config, section string) (map[string]any, error) {
 		sectionVal = cfg.Advanced
 	case rpcapi.ConfigSectionStats:
 		sectionVal = cfg.Stats
+	case rpcapi.ConfigSectionS2T:
+		sectionVal = cfg.S2T
 	default:
 		return nil, fmt.Errorf("unknown config section %q", section)
 	}
@@ -306,6 +308,8 @@ func setSectionFromMap(cfg *config.Config, section string, m map[string]any) err
 		return json.Unmarshal(data, &cfg.Advanced)
 	case rpcapi.ConfigSectionStats:
 		return json.Unmarshal(data, &cfg.Stats)
+	case rpcapi.ConfigSectionS2T:
+		return json.Unmarshal(data, &cfg.S2T)
 	default:
 		return fmt.Errorf("unknown config section %q", section)
 	}
@@ -374,6 +378,7 @@ func diffSections(oldCfg, newCfg *config.Config) map[string]bool {
 		{string(rpcapi.ConfigSectionInput), oldCfg.Input, newCfg.Input},
 		{string(rpcapi.ConfigSectionAdvanced), oldCfg.Advanced, newCfg.Advanced},
 		{string(rpcapi.ConfigSectionStats), oldCfg.Stats, newCfg.Stats},
+		{string(rpcapi.ConfigSectionS2T), oldCfg.S2T, newCfg.S2T},
 	}
 	for _, p := range pairs {
 		oldData, _ := json.Marshal(p.old)

@@ -85,6 +85,14 @@ export const FontEngine = {
 } as const;
 export type FontEngineValue = (typeof FontEngine)[keyof typeof FontEngine];
 
+export const S2TVariant = {
+  Standard: "s2t",       // 标准繁体
+  Taiwan: "s2tw",        // 台湾繁体
+  TaiwanPhrase: "s2twp", // 台湾繁体（含词汇）
+  HongKong: "s2hk",      // 香港繁体
+} as const;
+export type S2TVariantValue = (typeof S2TVariant)[keyof typeof S2TVariant];
+
 export const PagerDisplayMode = {
   Default: "",       // 使用主题配置
   Never: "never",    // 不显示页码文字
