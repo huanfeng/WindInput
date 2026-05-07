@@ -42,6 +42,10 @@ Var hDataDirDefault
 Var hDataDirCustom
 Var hDataDirPath
 Var hDataDirBrowse
+Var SavedStandardDir
+Var OldUninstallString
+Var DoUninstallOld
+Var QuietMode
 
 !if /FileExists "${BUILD_DIR}\wind_tsf.dll"
 !else
@@ -103,11 +107,21 @@ VIAddVersionKey "LegalCopyright" "Copyright (c) WindInput Project"
 !define MUI_FINISHPAGE_TITLE "${APP_NAME} ${APP_VERSION} 安装完成"
 !define MUI_FINISHPAGE_TEXT "${APP_NAME} ${APP_VERSION} 已成功安装到您的计算机。$\r$\n$\r$\n点击「完成」关闭安装向导。"
 
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageIfQuiet
 !insertmacro MUI_PAGE_WELCOME
 Page custom InstallModePageCreate InstallModePageLeave
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageIfQuiet
 !insertmacro MUI_PAGE_DIRECTORY
+!undef MUI_PAGE_CUSTOMFUNCTION_PRE
 Page custom DataDirPageCreate DataDirPageLeave
 !insertmacro MUI_PAGE_INSTFILES
+; 完成页：便携模式提供启动器运行选项（标准模式通过 FinishPage_Show 隐藏此选项）
+; 安静模式通过 FinishPage_Pre 跳过此页，安装完成后自动关闭
+!define MUI_FINISHPAGE_RUN "placeholder"
+!define MUI_FINISHPAGE_RUN_TEXT "启动便携启动器"
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchPortableStarter
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageIfQuiet
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW FinishPage_Show
 !define MUI_FINISHPAGE_REBOOTLATER_DEFAULT
 !insertmacro MUI_PAGE_FINISH
 
@@ -140,6 +154,16 @@ Function .onInit
   StrCpy $IsUpgrade "0"
   StrCpy $UseCustomDataDir "0"
   StrCpy $CustomDataDir ""
+  StrCpy $OldUninstallString ""
+  StrCpy $SavedStandardDir ""
+  StrCpy $DoUninstallOld "0"
+  StrCpy $QuietMode "0"
+
+  ; 解析 /QUIET 参数（显示进度窗口但跳过所有向导页面，用于应用内自动更新）
+  ${GetParameters} $0
+  ${GetOptions} $0 "/QUIET" $1
+  IfErrors +2 0
+    StrCpy $QuietMode "1"
 
   ; 读取已有的 datadir.conf（可能是上次卸载时保留的）
   SetShellVarContext current
@@ -162,7 +186,7 @@ Function .onInit
 
   ; 检测已安装版本
   ReadRegStr $0 HKLM "${UNINST_KEY}" "UninstallString"
-  StrCmp $0 "" init_done
+  StrCmp $0 "" init_no_prev_install
 
   StrCpy $IsUpgrade "1"
 
@@ -172,29 +196,71 @@ Function .onInit
     StrCpy $0 $0 "" 1
     StrCpy $0 $0 -1
 
-  ; 确认卸载程序存在
-  IfFileExists "$0" 0 init_done
+  ; 确认卸载程序存在，并保存路径（卸载将在确认安装类型后执行）
+  IfFileExists "$0" 0 init_no_prev_install
+  StrCpy $OldUninstallString "$0"
 
   ; 读取旧安装目录作为默认值
   ReadRegStr $INSTDIR HKLM "${UNINST_KEY}" "InstallLocation"
 
-  ; 静默卸载旧版（保留用户数据）
-silent_uninstall_retry:
-  ExecWait '"$0" /S /KEEP_USER_DATA' $1
+init_no_prev_install:
+  ; 保存标准模式默认安装目录（供切换安装类型时恢复使用）
+  StrCpy $SavedStandardDir $INSTDIR
+FunctionEnd
 
-  ${If} $1 != 0
-    MessageBox MB_ABORTRETRYIGNORE|MB_ICONEXCLAMATION \
-      "旧版本卸载失败（错误码：$1）。$\r$\n$\r$\n中止 = 取消安装$\r$\n重试 = 重新卸载$\r$\n忽略 = 跳过继续安装" \
-      IDRETRY silent_uninstall_retry \
-      IDIGNORE init_done
-    SetErrorLevel 1
+; 完成页：运行便携启动器（仅便携模式执行，标准模式不应到达此处）
+Function LaunchPortableStarter
+  StrCmp $InstallMode "portable" 0 +2
+    Exec '"$INSTDIR\wind_portable.exe"'
+FunctionEnd
+
+
+; 安静模式（/QUIET）：跳过当前向导页，用于应用内自动更新场景
+Function SkipPageIfQuiet
+  StrCmp $QuietMode "1" 0 +2
     Abort
-  ${EndIf}
+FunctionEnd
 
-init_done:
+; 完成页：标准模式隐藏并取消勾选"启动便携启动器"复选框
+; MUI2 在完成页 Leave 时读取控件状态（不论是否可见），必须取消勾选才能阻止调用 LaunchPortableStarter
+Function FinishPage_Show
+  StrCmp $InstallMode "portable" finish_show_done
+  ShowWindow $mui.FinishPage.Run 0
+  SendMessage $mui.FinishPage.Run 0x00F1 0 0  ; BM_SETCHECK, BST_UNCHECKED
+finish_show_done:
+FunctionEnd
+
+; OnClick 处理器：用户点击单选按钮时立即更新状态变量，不依赖 Leave 时读取
+Function OnStandardRadioClicked
+  StrCpy $InstallMode "standard"
+  StrCpy $INSTDIR $SavedStandardDir
+  ${If} $OldUninstallString != ""
+    StrCpy $DoUninstallOld "1"
+  ${Else}
+    StrCpy $DoUninstallOld "0"
+  ${EndIf}
+FunctionEnd
+
+Function OnPortableRadioClicked
+  StrCpy $InstallMode "portable"
+  StrCpy $INSTDIR "$DESKTOP\WindInput_Portable"
+  StrCpy $DoUninstallOld "0"
 FunctionEnd
 
 Function InstallModePageCreate
+  ; 初始化默认选项（标准安装）的状态，确保用户不点击单选按钮直接 Next 时状态也正确
+  StrCpy $InstallMode "standard"
+  StrCpy $INSTDIR $SavedStandardDir
+  ${If} $OldUninstallString != ""
+    StrCpy $DoUninstallOld "1"
+  ${Else}
+    StrCpy $DoUninstallOld "0"
+  ${EndIf}
+
+  ; 安静模式：默认值已设置，跳过此页
+  StrCmp $QuietMode "1" 0 +2
+    Abort
+
   !insertmacro MUI_HEADER_TEXT "选择安装类型" "请选择安装方式"
 
   nsDialogs::Create 1018
@@ -206,6 +272,7 @@ Function InstallModePageCreate
   ${NSD_CreateRadioButton} 12u 30u 100% 12u "标准安装（推荐）—— 注册输入法到系统，开机自动启动"
   Pop $hStandard
   ${NSD_SetState} $hStandard ${BST_CHECKED}
+  ${NSD_OnClick} $hStandard OnStandardRadioClicked
 
   ${NSD_CreateLabel} 24u 44u 100% 12u "安装到 Program Files，注册为系统输入法，适合日常使用"
   Pop $0
@@ -213,6 +280,7 @@ Function InstallModePageCreate
 
   ${NSD_CreateRadioButton} 12u 66u 100% 12u "便携模式 —— 仅解压文件到指定目录，不修改系统"
   Pop $hPortable
+  ${NSD_OnClick} $hPortable OnPortableRadioClicked
 
   ${NSD_CreateLabel} 24u 80u 100% 24u "适合 U 盘携带或临时使用，需通过便携启动器手动启动"
   Pop $0
@@ -222,20 +290,15 @@ Function InstallModePageCreate
 FunctionEnd
 
 Function InstallModePageLeave
-  ${NSD_GetState} $hPortable $0
-  ${If} $0 == ${BST_CHECKED}
-    StrCpy $InstallMode "portable"
-    StrCpy $INSTDIR "$DESKTOP\WindInput_Portable"
-  ${Else}
-    StrCpy $InstallMode "standard"
-    StrCpy $INSTDIR "$PROGRAMFILES64\${APP_DIRNAME}"
-  ${EndIf}
+  ; $InstallMode / $INSTDIR / $DoUninstallOld 已由 OnClick 处理器实时更新，此处无需再读取状态
 FunctionEnd
 
 ; ---------- Data Directory Page (first install only) ----------
 
 Function DataDirPageCreate
-  ; 仅全新安装的标准模式才显示此页面
+  ; 安静模式 / 升级安装 / 便携模式：跳过此页
+  StrCmp $QuietMode "1" 0 +2
+    Abort
   StrCmp $IsUpgrade "1" 0 +2
     Abort
   StrCmp $InstallMode "portable" 0 +2
@@ -609,19 +672,56 @@ FunctionEnd
 
 Section "Install"
   SetShellVarContext all
+  ; 安静模式自动关闭（完成页已跳过）；正常模式让用户查看日志后手动点击 Next
+  ${If} $QuietMode == "1"
+    SetAutoClose true
+  ${Else}
+    SetAutoClose false
+  ${EndIf}
+
+  ; --- 仅标准安装升级时静默卸载旧版（便携模式不卸载已有系统安装）---
+  ; DoUninstallOld 由 InstallModePageLeave 在用户确认安装类型时设置
+  StrCmp $DoUninstallOld "1" 0 install_skip_old_uninstall
+
+install_silent_uninstall_retry:
+  ExecWait '"$OldUninstallString" /S /KEEP_USER_DATA' $1
+  ${If} $1 != 0
+    MessageBox MB_ABORTRETRYIGNORE|MB_ICONEXCLAMATION \
+      "旧版本卸载失败（错误码：$1）。$\r$\n$\r$\n中止 = 取消安装$\r$\n重试 = 重新卸载$\r$\n忽略 = 跳过继续安装" \
+      IDRETRY install_silent_uninstall_retry \
+      IDIGNORE install_skip_old_uninstall
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+
+install_skip_old_uninstall:
   SetOutPath "$INSTDIR"
 
   ; --- Step 1: Stop processes ---
+  StrCmp $InstallMode "portable" install_stop_portable_only
+  ; 标准模式：停止所有相关进程
   DetailPrint "正在停止旧进程..."
   nsExec::ExecToLog 'cmd /c taskkill /F /IM wind_setting.exe >nul 2>&1'
-  Pop $0 ; discard nsExec exit code
+  Pop $0
   nsExec::ExecToLog 'cmd /c taskkill /F /IM wind_portable.exe >nul 2>&1'
-  Pop $0 ; discard nsExec exit code
+  Pop $0
   nsExec::ExecToLog 'cmd /c taskkill /F /IM wind_input.exe >nul 2>&1'
-  Pop $0 ; discard nsExec exit code
+  Pop $0
   Sleep 1000
+  Goto install_stop_procs_done
 
-  ; --- Step 2: Unregister old DLLs ---
+install_stop_portable_only:
+  ; 便携模式：只停旧便携进程，不触碰系统安装的服务进程
+  DetailPrint "正在停止旧便携进程..."
+  nsExec::ExecToLog 'cmd /c taskkill /F /IM wind_portable.exe >nul 2>&1'
+  Pop $0
+  Sleep 500
+
+install_stop_procs_done:
+
+  ; --- Step 2: Unregister old DLLs (standard mode only) ---
+  ; 便携模式跳过：不能清除系统安装的 COM 注册信息，否则已有标准版输入法将无法切换
+  StrCmp $InstallMode "portable" install_unreg_done
   IfFileExists "$INSTDIR\wind_tsf.dll" install_has_old_dll install_unreg_x64_done
 install_has_old_dll:
   ExecWait '"$SYSDIR\regsvr32.exe" /u /s "$INSTDIR\wind_tsf.dll"'
@@ -783,8 +883,7 @@ install_cleanup_bak_end:
   FileWrite $0 "wind_portable=1$\n"
   FileClose $0
 
-  DetailPrint "便携模式部署完成"
-  Exec '"$INSTDIR\wind_portable.exe"'
+  DetailPrint "便携模式部署完成，可手动运行 wind_portable.exe 启动"
   Goto install_done
 
 install_standard_mode:
