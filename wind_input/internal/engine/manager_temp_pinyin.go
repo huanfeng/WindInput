@@ -192,6 +192,21 @@ func (m *Manager) IsZKeyRepeatEnabled() bool {
 	return false
 }
 
+// HasCommandPrefix 检查是否存在指定前缀的快捷短语（用于 zz 快捷短语与临时拼音的优先判断）
+func (m *Manager) HasCommandPrefix(prefix string) bool {
+	m.mu.RLock()
+	dm := m.dictManager
+	m.mu.RUnlock()
+	if dm == nil {
+		return false
+	}
+	phraseLayer := dm.GetPhraseLayer()
+	if phraseLayer == nil {
+		return false
+	}
+	return len(phraseLayer.SearchCommand(prefix, 1)) > 0
+}
+
 // findPinyinSchemaID 查找拼音方案 ID（需要持有读锁或写锁）
 //
 // 优先级：

@@ -74,6 +74,8 @@ func (c *Coordinator) getTempPinyinTriggerKey(key string, keyCode int) string {
 			// z 键触发：仅在无候选时触发，z 同时作为拼音首字母
 			// 当 z 键重复上屏也启用时，z 先进入正常输入流程显示重复候选，
 			// 后续字母键再切入临时拼音（兼容模式）
+			// 当存在 zz 前缀快捷短语时，同样让 z 先走正常输入流程，
+			// 第二键再决定走短语路径还是切入临时拼音
 			if parsedKey == keys.KeyZ && len(c.candidates) == 0 {
 				if c.engineMgr != nil && c.engineMgr.IsZKeyRepeatEnabled() {
 					// 有历史记录可重复时，让 z 走正常输入流程显示重复候选
@@ -84,6 +86,9 @@ func (c *Coordinator) getTempPinyinTriggerKey(key string, keyCode int) string {
 						}
 					}
 					// 无历史记录，直接触发临时拼音
+				}
+				if c.engineMgr != nil && c.engineMgr.HasCommandPrefix("zz") {
+					return ""
 				}
 				return "z"
 			}
@@ -246,6 +251,22 @@ func (c *Coordinator) exitTempPinyinMode(commit bool, text string) *bridge.KeyEv
 	c.tempPinyinCommitted = ""
 
 	return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+}
+
+// isTempPinyinZTrigger 检查 z 是否配置为临时拼音触发键
+func (c *Coordinator) isTempPinyinZTrigger() bool {
+	if c.engineMgr == nil || !c.engineMgr.IsTempPinyinEnabled() {
+		return false
+	}
+	if c.config == nil {
+		return false
+	}
+	for _, tk := range c.config.Input.TempPinyin.TriggerKeys {
+		if tk == "z" {
+			return true
+		}
+	}
+	return false
 }
 
 // isZKeyHybridMode 检查是否处于 Z 键混合模式（重复上屏 + 临时拼音同时启用）
