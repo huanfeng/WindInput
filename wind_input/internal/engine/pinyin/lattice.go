@@ -105,7 +105,7 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 	// - 虚词（了/的/和/我 等）给予正加成：unigram 模型中 P(虚词)×P(实词) 天然偏低，
 	//   若不补偿，填鸭式(3字) 会因消除了"是"节点而碾压 天涯(2字)+是(1字)
 	const singleCharPenalty = -3.0
-	const functionWordPenalty = 1.0
+	const functionWordPenalty = 2.0
 	// 多字词加成参数：
 	// - unigram 中的实体词（不以助词结尾）获得词频挂钩的加分，高频词和长词获得更多加成
 	//   公式：baseContentWordBonus × sqrt(charCount) × freqFactor
@@ -155,6 +155,12 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 			code := strings.Join(syllables, "")
 			results := d.Lookup(code)
 			for _, cand := range results {
+				// weight=0 为容错/错音词（corrections.dict.yaml），不参与 Viterbi 路径评分，
+				// 与 YAML trie 行为一致（loadRimeFile 过滤了 weight<=0）。
+				// 这些词仍可通过精确查找路径（ConvertEx 步骤 2-4）返回给用户。
+				if cand.Weight == 0 {
+					continue
+				}
 				key := seenKey{start: int32(startPos), end: int32(pos), word: cand.Text}
 				if _, ok := seen[key]; ok {
 					continue
@@ -239,6 +245,9 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 			}
 
 			for _, cand := range results {
+				if cand.Weight == 0 {
+					continue
+				}
 				key := seenKey{start: int32(startPos), end: int32(endPos), word: cand.Text}
 				if _, ok := seen[key]; ok {
 					continue

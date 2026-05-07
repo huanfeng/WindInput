@@ -328,10 +328,16 @@ func (l *PinyinDictLayer) SearchAbbrev(code string, limit int) []candidate.Candi
 }
 
 // patchPinyinIsCommon 为拼音词库候选补充 IsCommon 标记
-// 拼音词库中的词条均来自标准词库文件，应视为通用词，不应被 smart filter 过滤
+// 多字词视为通用词（词典收录的词组）；单字按 common_chars 表决定，
+// 使 41448 生僻单字在智能过滤模式下不压占候选位。
 func patchPinyinIsCommon(candidates []candidate.Candidate) {
 	for i := range candidates {
-		candidates[i].IsCommon = true
+		runes := []rune(candidates[i].Text)
+		if len(runes) > 1 {
+			candidates[i].IsCommon = true
+		} else if len(runes) == 1 {
+			candidates[i].IsCommon = IsCommonChar(runes[0])
+		}
 	}
 }
 

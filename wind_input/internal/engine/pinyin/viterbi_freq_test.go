@@ -10,6 +10,22 @@ import (
 	"github.com/huanfeng/wind_input/internal/dict"
 )
 
+// getCachedWdatPath 返回运行时缓存的 pinyin.wdat 路径（生产路径）
+func getCachedWdatPath(t *testing.T) string {
+	t.Helper()
+	candidates := []string{
+		filepath.Join(os.Getenv("LOCALAPPDATA"), "WindInputDebug", "cache", "pinyin.wdat"),
+		filepath.Join(os.Getenv("LOCALAPPDATA"), "WindInput", "cache", "pinyin.wdat"),
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	t.Skipf("生产 wdat 缓存不存在，跳过")
+	return ""
+}
+
 // getRealDictDirForTest 返回真实词库目录路径
 func getRealDictDirForTest(t *testing.T) string {
 	t.Helper()
@@ -20,6 +36,7 @@ func getRealDictDirForTest(t *testing.T) string {
 	// 尝试多个可能的路径
 	candidates := []string{
 		filepath.Join(projectRoot, "build", "data", "schemas", "pinyin", "cn_dicts"),
+		filepath.Join(projectRoot, "build_debug", "data", "schemas", "pinyin", "cn_dicts"),
 		filepath.Join(projectRoot, "build", "dict", "pinyin"),
 	}
 	for _, dir := range candidates {
@@ -245,6 +262,79 @@ func TestViterbiFreq_CangMangFull(t *testing.T) {
 				t.Logf("首候选: %s", first)
 				if strings.Contains(first, tt.bad) {
 					t.Errorf("首候选'%s'包含'%s'", first, tt.bad)
+				}
+			}
+		})
+	}
+}
+
+// TestViterbiFreq_WdatLongSentence 使用生产 wdat 文件验证长句 Viterbi 分词
+// 用于排查单测（YAML dict）与生产（wdat）行为不一致的问题
+func TestViterbiFreq_WdatLongSentence(t *testing.T) {
+	wdatPath := getCachedWdatPath(t)
+	unigramPath := getRealUnigramPath(t)
+
+	d := dict.NewPinyinDict(nil)
+	if err := d.LoadDAT(wdatPath); err != nil {
+		t.Fatalf("加载 wdat 失败: %v", err)
+	}
+	t.Logf("wdat: %s, entries=%d", wdatPath, d.EntryCount())
+
+	// 验证关键词在 wdat 中是否存在
+	for _, kv := range []struct{ code, word string }{
+		{"bashe", "跋涉"},
+		{"daoda", "到达"},
+		{"mudidi", "目的地"},
+		{"tianyashi", "天涯"},
+	} {
+		results := d.Lookup(kv.code)
+		found := false
+		for _, c := range results {
+			if c.Text == kv.word {
+				found = true
+				t.Logf("  wdat Lookup(%q) → %q weight=%d", kv.code, c.Text, c.Weight)
+				break
+			}
+		}
+		if !found {
+			t.Logf("  WARNING: wdat Lookup(%q) 未找到 %q（共 %d 个结果）", kv.code, kv.word, len(results))
+		}
+	}
+
+	cd := wrapInCompositeDict(d)
+	engine := NewEngineWithConfig(cd, &Config{
+		UseSmartCompose: true,
+		CandidateOrder:  "smart",
+	}, nil)
+	if err := engine.LoadUnigram(unigramPath); err != nil {
+		t.Fatalf("加载 unigram 失败: %v", err)
+	}
+
+	tests := []struct {
+		input    string
+		expected string
+		bad      string
+	}{
+		{"cangmangdetianyashiwode", "天涯", "填鸭式"},
+		{"chongmanxiwangdebashebilequgengnengdaodamudidi", "目的地", "弟弟"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := engine.ConvertEx(tt.input, 10)
+			if len(result.Candidates) > 0 {
+				t.Logf("首候选: %s", result.Candidates[0].Text)
+			}
+			for i, c := range result.Candidates {
+				if i >= 5 {
+					break
+				}
+				t.Logf("  [%d] %s (consumed=%d)", i, c.Text, c.ConsumedLength)
+			}
+			if len(result.Candidates) > 0 {
+				first := result.Candidates[0].Text
+				if strings.Contains(first, tt.bad) {
+					t.Errorf("wdat首候选 %q 包含 %q，期望包含 %q", first, tt.bad, tt.expected)
 				}
 			}
 		})

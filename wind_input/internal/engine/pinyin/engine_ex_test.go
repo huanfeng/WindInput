@@ -873,7 +873,8 @@ func TestEngineConvertExMultiSyllableShowsSingleChars(t *testing.T) {
 	d := createTestDictForEx(t)
 	engine := NewEngine(d, nil)
 
-	// 输入 "nihao"（2 音节），应同时包含词组"你好"和首音节单字"你"、"妮"
+	// 输入 "nihao"（2 音节），应同时包含词组"你好"和首音节常用单字"你"
+	// 注：smart 过滤模式下，"妮"（非常用字）因同编码有常用字"你"而被正确过滤
 	result := engine.ConvertEx("nihao", 30)
 
 	for i, c := range result.Candidates {
@@ -888,11 +889,11 @@ func TestEngineConvertExMultiSyllableShowsSingleChars(t *testing.T) {
 		t.Errorf("First candidate should be '你好'")
 	}
 
-	// 首音节单字"妮"应在候选列表中（"你"可能已被精确匹配包含）
+	// 首音节单字"你"应在候选列表中
 	found := false
 	foundIdx := -1
 	for i, c := range result.Candidates {
-		if c.Text == "妮" {
+		if c.Text == "你" {
 			found = true
 			foundIdx = i
 			break
@@ -903,18 +904,18 @@ func TestEngineConvertExMultiSyllableShowsSingleChars(t *testing.T) {
 		for _, c := range result.Candidates {
 			texts = append(texts, c.Text)
 		}
-		t.Fatalf("nihao should contain '妮' as first syllable char, got %v", texts)
+		t.Fatalf("nihao should contain '你' as first syllable char, got %v", texts)
 	}
 
-	// "妮"应排在前 10 名内（不应被推到很远的位置）
+	// "你"应排在前 10 名内
 	if foundIdx > 10 {
-		t.Errorf("'妮' at position %d, should be within top 10", foundIdx)
+		t.Errorf("'你' at position %d, should be within top 10", foundIdx)
 	}
 
-	// "妮"的 ConsumedLength 应为 2（只消耗 "ni"）
+	// "你"的 ConsumedLength 应为 2（只消耗 "ni"）
 	for _, c := range result.Candidates {
-		if c.Text == "妮" && c.ConsumedLength != 2 {
-			t.Errorf("'妮' ConsumedLength = %d, want 2", c.ConsumedLength)
+		if c.Text == "你" && c.ConsumedLength != 2 {
+			t.Errorf("'你' ConsumedLength = %d, want 2", c.ConsumedLength)
 		}
 	}
 }
