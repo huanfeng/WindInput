@@ -6,10 +6,16 @@
 #   adjust = N      → 绝对权重（直接覆盖 OrigWeight）
 #
 # 注：仅修改已存在的 (code, text) 条目；新增条目请用 custom_words.txt
+
+# 以下第一批是对 ice 的词频做的调整，现在使用 frost 的词库时不需要调整了
+#ggtt	五笔
+#rjfi	提示
+#yysg	文本
+#gidr	还原
+#xwtm	纵向
+#xwtm	纵身	+1
+#thny	延迟
+
+# 以下是对 frost 词库的调整
 ggtt	五笔
-rjfi	提示
-yysg	文本
-gidr	还原
-xwtm	纵向
-xwtm	纵身	+1
-thny	延迟
+ruuj	拼音
