@@ -4,17 +4,48 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 	"github.com/huanfeng/wind_input/pkg/systemfont"
 	"github.com/huanfeng/wind_input/pkg/theme"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"golang.org/x/sys/windows"
 )
+
+var (
+	modShell32        = windows.NewLazySystemDLL("shell32.dll")
+	procShellExecuteW = modShell32.NewProc("ShellExecuteW")
+)
+
+// shellOpen 通过 ShellExecuteW 打开文件、目录或 URL。
+// 相比 explorer.exe / rundll32，ShellExecuteW 直接调用系统 shell，
+// 对所有默认浏览器均兼容，且不存在 cmd shell 注入风险。
+func shellOpen(path string) error {
+	verbPtr, err := windows.UTF16PtrFromString("open")
+	if err != nil {
+		return err
+	}
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	ret, _, _ := procShellExecuteW.Call(
+		0,
+		uintptr(unsafe.Pointer(verbPtr)),
+		uintptr(unsafe.Pointer(pathPtr)),
+		0, 0,
+		uintptr(windows.SW_SHOWNORMAL),
+	)
+	if ret <= 32 {
+		return fmt.Errorf("ShellExecuteW 失败，错误码: %d", ret)
+	}
+	return nil
+}
 
 // ========== 服务通信 ==========
 
@@ -361,18 +392,35 @@ func (a *App) GetPathInfo() (*PathInfo, error) {
 func (a *App) OpenLogFolder() error {
 	path, err := config.GetLogsDir()
 	if err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "[setting] 获取日志目录失败: %v", err)
 		return err
 	}
-	return exec.Command("explorer.exe", path).Start()
+	// 日志目录在首次写入前可能尚未创建，提前确保其存在
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "[setting] 创建日志目录失败: %v", err)
+		return err
+	}
+	wailsRuntime.LogInfof(a.ctx, "[setting] 打开日志目录 len=%d", len(path))
+	if err := shellOpen(path); err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "[setting] 打开日志目录失败: %v", err)
+		return err
+	}
+	return nil
 }
 
 // OpenConfigFolder opens the config directory in the system file explorer.
 func (a *App) OpenConfigFolder() error {
 	path, err := config.GetConfigDir()
 	if err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "[setting] 获取配置目录失败: %v", err)
 		return err
 	}
-	return exec.Command("explorer.exe", path).Start()
+	wailsRuntime.LogInfof(a.ctx, "[setting] 打开配置目录 len=%d", len(path))
+	if err := shellOpen(path); err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "[setting] 打开配置目录失败: %v", err)
+		return err
+	}
+	return nil
 }
 
 // OpenExternalURL opens an external URL in the default browser.
@@ -380,7 +428,12 @@ func (a *App) OpenExternalURL(url string) error {
 	if url == "" {
 		return fmt.Errorf("empty url")
 	}
-	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	wailsRuntime.LogInfof(a.ctx, "[setting] 打开外部链接 len=%d", len(url))
+	if err := shellOpen(url); err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "[setting] 打开外部链接失败: %v", err)
+		return err
+	}
+	return nil
 }
 
 // ========== 数据目录管理 ==========
