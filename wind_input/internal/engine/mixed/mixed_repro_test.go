@@ -18,7 +18,7 @@ func getBuiltDictRoot(t *testing.T) string {
 	projectRoot := filepath.Join(filepath.Dir(filename), "..", "..", "..", "..")
 	dictRoot := filepath.Join(projectRoot, "build", "data", "dict")
 
-	if _, err := os.Stat(filepath.Join(dictRoot, "pinyin", "rime_ice.dict.yaml")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dictRoot, "pinyin", "rime_frost.dict.yaml")); os.IsNotExist(err) {
 		t.Skipf("built dict root not found at %s", dictRoot)
 	}
 	return dictRoot

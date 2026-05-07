@@ -132,7 +132,7 @@ func writeMetaJSON(path string, meta *CodeTableMeta) error {
 }
 
 // ConvertPinyinToWdb 将拼音 YAML 词库转换为 wdb 二进制格式
-// mainDictPath 为主词库 .dict.yaml 文件路径（如 rime_ice.dict.yaml），
+// mainDictPath 为主词库 .dict.yaml 文件路径（如 rime_frost.dict.yaml），
 // 自动从其 import_tables 发现关联词库（如 cn_dicts/8105.dict.yaml）。
 // normalizer 可选，非 nil 时对权重做归一化映射。
 func ConvertPinyinToWdb(mainDictPath, wdbPath string, logger *slog.Logger, normalizer ...*dict.WeightNormalizer) error {
@@ -840,7 +840,7 @@ func loadRimeFile(path string, codeEntries map[string][]dictEntry, abbrevEntries
 		text := parts[0]
 		pinyin := parts[1]
 		weight, err := strconv.Atoi(strings.TrimSpace(parts[2]))
-		if err != nil || weight <= 0 {
+		if err != nil {
 			continue
 		}
 

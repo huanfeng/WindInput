@@ -3,7 +3,7 @@
 
 # 输入
 jidian_path: ../../../.cache/rime-wubi/wubi86_jidian.dict.yaml
-unigram_path: ../../../.cache/pinyin/unigram.txt
+unigram_path: ../../../.cache/pinyin-frost/unigram.txt
 
 # 自定义补充词表（不存在则跳过）
 custom_words_path: custom_words.txt

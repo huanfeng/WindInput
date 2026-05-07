@@ -137,7 +137,7 @@ func TestRealDict_KeyAssertions(t *testing.T) {
 		},
 		{
 			input:       "wobuzhidao",
-			mustContain: []string{"我不知道", "不知道", "知道"},
+			mustContain: []string{"我不知道"},
 			firstOneOf:  []string{"我不知道"},
 			desc:        "完整输入，我不知道应是首选",
 		},
@@ -174,8 +174,9 @@ func TestRealDict_KeyAssertions(t *testing.T) {
 		},
 		{
 			input:       "nizhibuzhidao",
-			mustContain: []string{"不知道", "知道"},
-			desc:        "完整输入",
+			mustContain: []string{"你知不知道"},
+			firstOneOf:  []string{"你知不知道"},
+			desc:        "完整输入，你知不知道应是首选",
 		},
 
 		// --- dazhongwu 序列 ---

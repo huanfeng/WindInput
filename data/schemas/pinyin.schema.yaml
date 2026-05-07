@@ -19,7 +19,7 @@ engine:
 
 dictionaries:
   - id: pinyin_main
-    path: "pinyin/rime_ice.dict.yaml"
+    path: "pinyin/rime_frost.dict.yaml"
     type: rime_pinyin
     default: true
     weight_spec:

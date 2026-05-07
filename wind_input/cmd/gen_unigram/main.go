@@ -4,7 +4,7 @@
 //
 //	gen_unigram -rime <rime词库目录> -output <输出文件>
 //
-// 从雾凇拼音 (rime-ice) 的 .dict.yaml 文件提取真实词频。
+// 从白霜拼音 (rime-frost) 的 .dict.yaml 文件提取真实词频。
 // 词库目录下应包含 8105.dict.yaml、base.dict.yaml 等文件。
 //
 // 输出格式: 文字\t频次
@@ -62,7 +62,7 @@ func main() {
 	writer := bufio.NewWriter(file)
 	writer.WriteString("# WindInput Unigram 语言模型\n")
 	writer.WriteString("# 格式: 词语\\t频次\n")
-	writer.WriteString("# 词频来源: 雾凇拼音 (rime-ice) + 腾讯词向量\n")
+	writer.WriteString("# 词频来源: 白霜拼音 (rime-frost) + 腾讯词向量\n")
 	writer.WriteString(strings.Repeat("#", 40) + "\n")
 
 	for _, wf := range words {
@@ -79,10 +79,13 @@ func loadFromRime(dirPath string) map[string]float64 {
 
 	// 按优先级加载词库文件（后加载的同名词条不会覆盖高频值）
 	files := []string{
-		"8105.dict.yaml",    // 单字（含真实词频）
-		"base.dict.yaml",    // 基础词组
-		"ext.dict.yaml",     // 扩展词组（rime-ice 补充）
-		"tencent.dict.yaml", // 腾讯词向量补充
+		"8105.dict.yaml",        // 单字（含真实词频）
+		"41448.dict.yaml",       // 扩展字表（生僻字）
+		"base.dict.yaml",        // 基础词组
+		"ext.dict.yaml",         // 扩展词组
+		"others.dict.yaml",      // 容错词（多音字异读）
+		"corrections.dict.yaml", // 错音词（weight=0，被过滤，不进入 unigram）
+		"tencent.dict.yaml",     // 腾讯词向量补充
 	}
 
 	for _, name := range files {

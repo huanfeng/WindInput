@@ -697,7 +697,7 @@ func preGeneratePinyinWdb(s *Schema, exeDir, dataDir string, logger *slog.Logger
 
 	// 如果当前方案没有拼音词库，尝试默认路径
 	if pinyinDictPath == "" {
-		pinyinDictPath = resolvePath(exeDir, dataDir, "pinyin/rime_ice.dict.yaml")
+		pinyinDictPath = resolvePath(exeDir, dataDir, "pinyin/rime_frost.dict.yaml")
 	}
 
 	srcPaths := dictcache.RimePinyinSourcePaths(pinyinDictPath)
