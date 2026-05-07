@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -243,10 +244,12 @@ func isPipeAlreadyExists() bool {
 
 func main() {
 	// 内存管理策略：
+	// 启动阶段不设内存上限：wdat 等大型词库的首次构建（~650K 条目排序+二进制写入）
+	// 峰值内存可达 300-400MB，若此时 SetMemoryLimit 已生效会触发 Go 运行时
+	// "runtime: out of memory" fatal error（无法被 recover 捕获），导致服务静默崩溃。
+	// 待大型数据处理完成后，由 applyMemoryConstraints 强制 GC 并恢复 300MB 软限制。
+	//
 	// SetMemoryLimit 只管理 Go heap（Private Bytes），不影响 mmap 词典文件（OS 文件缓存页）。
-	// 随着 tooltip/拆字等功能新增常驻数据结构，Go heap 需求从 ~130MB 增长到 ~160MB+，
-	// 150MB 软限制已使 GC 持续满负荷运行但无法压降，调整为 300MB 提供合理余量。
-	debug.SetMemoryLimit(300 * 1024 * 1024)
 	// GOGC 恢复默认值 100：堆增长翻倍才触发 GC，避免过于频繁的 GC 造成 CPU 持续占用。
 	debug.SetGCPercent(100)
 
@@ -493,6 +496,15 @@ func main() {
 	coord := coordinator.NewCoordinator(engineMgr, uiManager, cfg, appCompat, logger)
 	coord.SetVersion(version)
 
+	// applyMemoryConstraints 在大型数据处理完成后调用：强制 GC 释放构建期临时内存，
+	// 然后设置 300MB 运行时软限制。
+	applyMemoryConstraints := func() {
+		runtime.GC()
+		debug.FreeOSMemory()
+		debug.SetMemoryLimit(300 * 1024 * 1024)
+		logger.Info("运行时内存限制已生效", "heapLimit", "300MB")
+	}
+
 	// 启动期若活跃方案因 wdat 后台生成而未激活，等就绪回调触发后再激活，
 	// 并通过 coord 推送状态到 toolbar/TSF 客户端、显示"<方案>已就绪"指示器。
 	if pendingWdatActiveID != "" {
@@ -502,6 +514,7 @@ func main() {
 			if err := engineMgr.SwitchSchema(desiredActiveID); err != nil {
 				logger.Warn("拼音 wdat 就绪后激活用户方案失败",
 					"schema", desiredActiveID, "error", err)
+				applyMemoryConstraints()
 				return
 			}
 			schemaMgr.SetActive(desiredActiveID)
@@ -513,6 +526,13 @@ func main() {
 			}
 			coord.NotifySchemaActivated(displayName)
 			logger.Info("拼音 wdat 就绪，用户方案已激活", "schema", desiredActiveID)
+			applyMemoryConstraints()
+		})
+	} else {
+		// 无 wdat 等待（方案已正常激活）：若有后台 preGeneratePinyinWdb 任务在构建
+		// wdat，等其完成后收紧内存；若无后台构建，OnPinyinWdatReady 立即触发。
+		schema.OnPinyinWdatReady(func() {
+			applyMemoryConstraints()
 		})
 	}
 
