@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/huanfeng/wind_input/internal/dict/binformat"
 	"github.com/huanfeng/wind_input/internal/store"
@@ -27,6 +28,7 @@ type UnigramModel struct {
 	total     float64            // 总频次
 	minProb   float64            // 最小概率（用于未知词）
 	userFreqs map[string]int     // 用户选词频次（运行时累积）
+	mu        sync.RWMutex       // 保护 userFreqs 的并发读写
 }
 
 // NewUnigramModel 创建空的 Unigram 模型
@@ -122,14 +124,15 @@ func (m *UnigramModel) LogProb(word string) float64 {
 	}
 
 	// 用户频率提升：每次选词增加约 0.5 的 logprob 提升
-	if m.userFreqs != nil {
-		if freq, ok := m.userFreqs[word]; ok && freq > 0 {
-			boost := float64(freq) * 0.5
-			if boost > 5.0 {
-				boost = 5.0 // 封顶，避免单词过度主导
-			}
-			return baseProb + boost
+	m.mu.RLock()
+	freq := m.userFreqs[word]
+	m.mu.RUnlock()
+	if freq > 0 {
+		boost := float64(freq) * 0.5
+		if boost > 5.0 {
+			boost = 5.0 // 封顶，避免单词过度主导
 		}
+		return baseProb + boost
 	}
 
 	return baseProb
@@ -148,6 +151,8 @@ func (m *UnigramModel) Size() int {
 
 // BoostUserFreq 增加用户选词频次
 func (m *UnigramModel) BoostUserFreq(word string, delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.userFreqs == nil {
 		m.userFreqs = make(map[string]int)
 	}
@@ -309,6 +314,7 @@ func logSumExp(a, b float64) float64 {
 type BinaryUnigramModel struct {
 	reader    *binformat.UnigramReader
 	userFreqs map[string]int // 用户选词频次（运行时累积，在内存中）
+	mu        sync.RWMutex   // 保护 userFreqs 的并发读写
 }
 
 // NewBinaryUnigramModel 从二进制文件加载 Unigram 模型
@@ -327,14 +333,15 @@ func (m *BinaryUnigramModel) LogProb(word string) float64 {
 	if !m.reader.Contains(word) && len([]rune(word)) > 1 {
 		baseProb = m.CharBasedScore(word)
 	}
-	if m.userFreqs != nil {
-		if freq, ok := m.userFreqs[word]; ok && freq > 0 {
-			boost := float64(freq) * 0.5
-			if boost > 5.0 {
-				boost = 5.0
-			}
-			return baseProb + boost
+	m.mu.RLock()
+	freq := m.userFreqs[word]
+	m.mu.RUnlock()
+	if freq > 0 {
+		boost := float64(freq) * 0.5
+		if boost > 5.0 {
+			boost = 5.0
 		}
+		return baseProb + boost
 	}
 	return baseProb
 }
@@ -351,6 +358,8 @@ func (m *BinaryUnigramModel) CharBasedScore(word string) float64 {
 
 // BoostUserFreq 增加用户选词频次
 func (m *BinaryUnigramModel) BoostUserFreq(word string, delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.userFreqs == nil {
 		m.userFreqs = make(map[string]int)
 	}

@@ -601,17 +601,22 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 		segText = textBuilder.String()
 	}
 
-	// ── 完全消费：学习回调 ────────────────────────────────────────────────
+	// ── 完全消费：学习回调（异步执行，不阻塞键事件响应路径）──────────────
 	if c.engineMgr != nil && !cand.IsCommand {
+		var learnCode, learnText string
 		if (isPinyin || isMixed) && len(c.confirmedSegments) > 0 {
-			c.engineMgr.OnCandidateSelected(segCode+c.inputBuffer, segText+originalText, cand.Source)
+			learnCode = segCode + c.inputBuffer
+			learnText = segText + originalText
 		} else {
-			selectedCode := c.inputBuffer
+			learnCode = c.inputBuffer
 			if cand.Code != "" {
-				selectedCode = cand.Code
+				learnCode = cand.Code
 			}
-			c.engineMgr.OnCandidateSelected(selectedCode, originalText, cand.Source)
+			learnText = originalText
 		}
+		learnSource := cand.Source
+		mgr := c.engineMgr
+		go mgr.OnCandidateSelected(learnCode, learnText, learnSource)
 	}
 
 	// ── 输入历史记录（用于加词推荐）────────────────────────────────────────
