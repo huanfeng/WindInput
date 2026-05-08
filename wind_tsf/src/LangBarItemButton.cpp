@@ -745,7 +745,14 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (pThis != nullptr && pThis->_pTextService != nullptr)
         {
-            if (!pThis->_pTextService->HasActiveComposition())
+            if (!pThis->_pTextService->HasFocus())
+            {
+                // 当前实例无输入焦点，跳过同步以避免在无文本焦点时弹出工具栏。
+                // 待焦点到来时 OnSetFocus → SendFocusGained 会完整建立服务端状态。
+                WIND_LOG_INFO(L"MsgWndProc: WM_SERVICE_READY — no focus, skipping state sync\n");
+                KillTimer(hwnd, TIMER_ID_SERVICE_READY);
+            }
+            else if (!pThis->_pTextService->HasActiveComposition())
             {
                 WIND_LOG_INFO(L"MsgWndProc: WM_SERVICE_READY — running full state sync\n");
                 KillTimer(hwnd, TIMER_ID_SERVICE_READY);
@@ -769,7 +776,12 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
             CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
             if (pThis != nullptr && pThis->_pTextService != nullptr)
             {
-                if (!pThis->_pTextService->HasActiveComposition())
+                if (!pThis->_pTextService->HasFocus())
+                {
+                    // 同上：无焦点时跳过，避免工具栏在无输入上下文时显示。
+                    WIND_LOG_INFO(L"MsgWndProc: SERVICE_READY retry — no focus, skipping state sync\n");
+                }
+                else if (!pThis->_pTextService->HasActiveComposition())
                 {
                     WIND_LOG_INFO(L"MsgWndProc: SERVICE_READY retry — running full state sync\n");
                     pThis->_pTextService->_DoFullStateSync();

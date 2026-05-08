@@ -119,6 +119,9 @@ public:
     BOOL IsFullWidth() { return _bFullWidth; }
     BOOL IsKeyboardDisabled() { return _bKeyboardDisabled; }
     ULONGLONG GetFocusSessionId() const { return _focusSessionId; }
+    // 当前实例是否持有输入焦点（OnSetFocus 最后一次收到非 null 的 pDocMgrFocus）。
+    // 用于服务重启时避免对无焦点实例触发工具栏显示。
+    BOOL HasFocus() const { return _hasFocus; }
     // TRUE when the focused document manager has an editable (non-readonly,
     // non-transitory) context. FALSE when e.g. Chrome passes a doc manager
     // with no active text field (its context is TF_SD_READONLY).
@@ -179,6 +182,7 @@ private:
     BOOL _bFullWidth;
     BOOL _bKeyboardDisabled;   // GUID_COMPARTMENT_KEYBOARD_DISABLED
     ULONGLONG _focusSessionId;
+    BOOL _hasFocus;             // 当前实例持有 TSF 输入焦点时为 TRUE（OnSetFocus 最后收到非 null pDocMgrFocus）
     BOOL _hasTextInputContext;  // TRUE when focused doc mgr has a real text-editing context (GetTextExt succeeds)
 
     // Composition

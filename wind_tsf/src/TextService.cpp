@@ -700,6 +700,7 @@ CTextService::CTextService()
     , _bChineseMode(TRUE)
     , _bFullWidth(FALSE)
     , _focusSessionId(0)
+    , _hasFocus(FALSE)
     , _hasTextInputContext(FALSE)
     , _pComposition(nullptr)
     , _hasCachedCaretPos(FALSE)
@@ -1026,6 +1027,8 @@ STDAPI CTextService::OnUninitDocumentMgr(ITfDocumentMgr* pDocMgr)
 STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pDocMgrPrevFocus)
 {
     WIND_LOG_DEBUG_FMT(L"OnSetFocus called focus=0x%p prev=0x%p", pDocMgrFocus, pDocMgrPrevFocus);
+
+    _hasFocus = (pDocMgrFocus != nullptr);
 
     // If gaining focus (pDocMgrFocus is not null)
     if (pDocMgrFocus != nullptr)
