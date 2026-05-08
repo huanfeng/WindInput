@@ -21,6 +21,7 @@ import { getDefaultConfig, getDefaultTSFLogConfig } from "./api/settings";
 import { Sonner } from "@/components/ui/sonner";
 import { provideToast } from "./composables/useToast";
 import { useConfirm } from "./composables/useConfirm";
+import { initUpdateListener } from "./composables/useUpdate";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -658,6 +659,9 @@ onMounted(async () => {
     } catch (e) {
       // 忽略错误，使用默认页面
     }
+
+    // 注册更新监听（处理启动时后台自动检查的结果）
+    initUpdateListener();
 
     // 监听配置变更事件，静默刷新方案列表和配置（处理外部切换方案等情形）
     onConfigEvent((_event: ConfigEvent) => {

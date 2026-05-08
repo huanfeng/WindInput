@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
+	"wind_setting/updater"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -22,6 +24,10 @@ type App struct {
 
 	// RPC 客户端（所有 IPC 操作统一走 RPC）
 	rpcClient *rpcapi.Client
+
+	// 启动时自动检查到的更新结果，供前端主动拉取（避免 emit 比 EventsOn 注册更早）
+	startupUpdateMu     sync.Mutex
+	startupUpdateResult *updater.CheckResult
 }
 
 // NewApp creates a new App application struct
@@ -64,10 +70,30 @@ func (a *App) startup(ctx context.Context) {
 
 	// 启动事件监听
 	go a.startEventListener()
+
+	// 若用户已同意联网且开启了自动检查，后台静默检查更新
+	updateCfg := updater.LoadConfig()
+	if updateCfg.NetworkConsent && updateCfg.AutoCheck {
+		go a.runStartupUpdateCheck()
+	}
 }
 
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {}
+
+// runStartupUpdateCheck 后台静默检查更新，有新版本时：
+// 1. 存入 startupUpdateResult 供前端主动拉取（GetPendingUpdate）
+// 2. 同时 emit 事件（若前端已注册则直接触发，否则依赖拉取兜底）
+func (a *App) runStartupUpdateCheck() {
+	result, err := updater.CheckUpdate(version)
+	if err != nil || !result.HasUpdate {
+		return
+	}
+	a.startupUpdateMu.Lock()
+	a.startupUpdateResult = result
+	a.startupUpdateMu.Unlock()
+	wailsRuntime.EventsEmit(a.ctx, "update:available", result)
+}
 
 // startEventListener 启动事件监听，将 RPC 事件转发为 Wails 前端事件
 func (a *App) startEventListener() {

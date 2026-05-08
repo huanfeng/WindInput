@@ -1,6 +1,9 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted, watch } from "vue";
 import type { Status } from "../api/settings";
+import { useUpdate } from "@/composables/useUpdate";
+import UpdateDialog from "@/components/UpdateDialog.vue";
+import type { CheckResult } from "@/api/updater";
 
 defineProps<{
   status: Status | null;
@@ -35,6 +38,35 @@ async function copyQQGroup(event: Event) {
     qqCopied.value = false;
   }, 2000);
 }
+
+// 检查更新对话框
+const { pendingUpdate } = useUpdate();
+const updateDialogOpen = ref(false);
+const updateInitialResult = ref<CheckResult | null>(null);
+
+function applyPendingUpdate() {
+  if (pendingUpdate.value && !updateDialogOpen.value) {
+    updateInitialResult.value = pendingUpdate.value;
+    pendingUpdate.value = null;
+    updateDialogOpen.value = true;
+  }
+}
+
+// onMounted 处理启动前已有结果的情况
+onMounted(applyPendingUpdate);
+
+// watch 处理 Go 网络检查在挂载后才完成的情况
+watch(pendingUpdate, applyPendingUpdate);
+
+function openUpdateDialog() {
+  updateInitialResult.value = null;
+  updateDialogOpen.value = true;
+}
+
+function onUpdateDialogClose() {
+  updateDialogOpen.value = false;
+  updateInitialResult.value = null;
+}
 </script>
 
 <template>
@@ -52,7 +84,10 @@ async function copyQQGroup(event: Event) {
         </div>
         <div class="about-info">
           <h3 class="about-name">{{ status.service.name }}</h3>
-          <span class="about-version-badge">v{{ status.service.version }}</span>
+          <div class="about-version-row">
+            <span class="about-version-badge">v{{ status.service.version }}</span>
+            <button class="update-trigger-btn" @click="openUpdateDialog">检查更新</button>
+          </div>
           <p class="about-desc">轻量、快速、可定制的开源中文输入法</p>
         </div>
       </div>
@@ -138,6 +173,12 @@ async function copyQQGroup(event: Event) {
         >
       </div>
     </div>
+
+    <UpdateDialog
+      :open="updateDialogOpen"
+      :initial-result="updateInitialResult"
+      @close="onUpdateDialogClose"
+    />
   </section>
 </template>
 
@@ -172,6 +213,11 @@ async function copyQQGroup(event: Event) {
   margin: 0;
   color: hsl(var(--foreground));
 }
+.about-version-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .about-version-badge {
   display: inline-block;
   font-size: 12px;
@@ -180,8 +226,24 @@ async function copyQQGroup(event: Event) {
   background: hsl(var(--primary) / 0.1);
   padding: 2px 10px;
   border-radius: 999px;
-  width: fit-content;
   letter-spacing: 0.02em;
+}
+.update-trigger-btn {
+  font-size: 11px;
+  font-weight: 500;
+  color: hsl(var(--primary));
+  background: transparent;
+  border: 1px solid hsl(var(--primary) / 0.45);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 1px 8px;
+  line-height: 1.6;
+  transition: border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+.update-trigger-btn:hover {
+  border-color: hsl(var(--primary) / 0.75);
+  background: hsl(var(--primary) / 0.06);
 }
 .about-desc {
   color: hsl(var(--muted-foreground));
