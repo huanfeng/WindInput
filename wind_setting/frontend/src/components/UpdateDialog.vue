@@ -163,10 +163,14 @@ function onCancelClick() {
 }
 
 async function onInstallClick() {
-  if (installerPath.value) {
+  if (!installerPath.value) return
+  try {
     await installRelease(installerPath.value, autoInstall.value)
+    emit('close')
+  } catch (e: unknown) {
+    errorMsg.value = '启动安装程序失败：' + (e instanceof Error ? e.message : String(e))
+    phase.value = 'error'
   }
-  emit('close')
 }
 
 async function onAutoCheckChange() {
@@ -208,7 +212,11 @@ onMounted(() => {
     installerPath.value = path
     if (autoInstall.value) {
       installRelease(path, true)
-      emit('close')
+        .then(() => emit('close'))
+        .catch((e: unknown) => {
+          errorMsg.value = '启动安装程序失败：' + (e instanceof Error ? e.message : String(e))
+          phase.value = 'error'
+        })
     } else {
       phase.value = 'done'
     }
