@@ -21,7 +21,7 @@
 | `layer.go` | `DictLayer` 接口（`Name`/`Type`/`Search`），`LayerType` 常量，`ShadowProvider` 接口 |
 | `composite.go` | `CompositeDict`：按 LayerType 优先级聚合多层查询结果，持有 `ShadowProvider` 在搜索后应用 pin/delete 规则；`SetSortMode` 控制候选排序模式 |
 | `pinyin_dict.go` | 拼音词库实现（基于 binformat 的 mmap 读取） |
-| `codetable.go` | 五笔码表加载（文本格式和二进制 wdb 格式），含 `BuildReverseIndex`；支持 Rime 词库合并结果 |
+| `codetable.go` | 五笔码表加载（文本格式和二进制 wdb 格式），含 `BuildReverseIndex`（全量）和 `BuildSingleCharReverseIndex`（仅单字，过滤权重 < maxWeight/10 的低频简码）；支持 Rime 词库合并结果 |
 | `phrase.go` | `PhraseLayer`：短语和命令处理，支持模板变量 |
 | `shadow.go` | `ShadowLayer`：pin(position)+delete 架构——`pinned` 列表按位置固定词条，`deleted` 列表隐藏词条；YAML 序列化 |
 | `user_dict.go` | `UserDict`：用户词频学习，按权重排序，持久化为 JSON |
@@ -48,7 +48,7 @@
 - `DictManager.RegisterSystemLayer`/`UnregisterSystemLayer` 在引擎切换时由 `engine.Manager` 调用，保证 CompositeDict 中只有当前方案的系统词库层
 - `ShadowLayer` 实现 `ShadowProvider`，通过 `CompositeDict.SetShadowProvider` 注入；呈现层覆盖在搜索返回后执行
 - `UserDict` 的 `Add`/`IncreaseWeight`/`Search` 方法线程安全
-- `CodeTable.BuildReverseIndex()` 为懒加载（首次五笔反查时构建）
+- `CodeTable.BuildReverseIndex()` 为懒加载（首次五笔反查时构建）；`BuildSingleCharReverseIndex()` 只索引单字条目并过滤权重 < maxWeight/10 的低频简码（如 cccc→晶），内存占用从 ~20-50MB 降至 ~2-3MB，为反查/代码提示的推荐路径
 - 通用字符表路径：`<exeDir>/dict/common_chars.txt`
 
 ### Testing Requirements

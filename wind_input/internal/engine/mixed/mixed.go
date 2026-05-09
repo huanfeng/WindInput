@@ -12,6 +12,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
+	"github.com/huanfeng/wind_input/pkg/encoding"
 )
 
 const (
@@ -97,8 +98,11 @@ type Engine struct {
 	enableEnglish   bool
 	englishSearchFn func(prefix string, limit int) []candidate.Candidate
 
-	// 编码反查：从主码表懒构建的反向索引（汉字→编码），用于给拼音候选添加主编码提示
-	reverseIndex map[string][]string
+	// 编码反查：从主码表懒构建的单字反向索引（汉字→编码），用于给拼音候选添加主编码提示。
+	// reverseIndex 只存单字，多字词编码通过 encoderRules 在线推导并经词库验证后使用。
+	reverseIndex    map[string][]string
+	encoderRules    []encoding.Rule          // 主码表编码规则，由 manager 在引擎创建后注入
+	codeHintEncoder *encoding.ReverseEncoder // 懒构建：首次使用反查时创建
 }
 
 // NewEngine 创建混输引擎
@@ -670,8 +674,18 @@ func dedupByText(candidates []candidate.Candidate) []candidate.Candidate {
 	return result
 }
 
-// addCodeHintsFromCodetable 使用主码表的反向索引为拼音候选添加主编码提示
-// 懒构建反向索引，避免在引擎创建时额外加载反查码表
+// SetEncoderRules 注入主码表编码规则，供多字词编码提示推导使用。
+// 由 engine.Manager 在创建混输引擎后调用。
+func (e *Engine) SetEncoderRules(rules []encoding.Rule) {
+	e.encoderRules = rules
+	e.codeHintEncoder = nil // 下次使用时重建
+}
+
+// addCodeHintsFromCodetable 使用主码表的单字反向索引为拼音候选添加主编码提示。
+//
+// 单字候选：直接查单字反查表。
+// 多字候选：通过编码规则在线推导编码，再经 CodeTable.Lookup 验证存在后填充。
+// 懒构建反向索引和编码器，避免在引擎创建时额外加载反查码表。
 func (e *Engine) addCodeHintsFromCodetable(candidates []candidate.Candidate) {
 	if e.codetableEngine == nil {
 		return
@@ -681,23 +695,47 @@ func (e *Engine) addCodeHintsFromCodetable(candidates []candidate.Candidate) {
 			return
 		}
 	}
-	// 懒构建反向索引
-	if e.reverseIndex == nil {
-		ct := e.codetableEngine.GetCodeTable()
-		if ct == nil {
-			return
-		}
-		e.reverseIndex = ct.BuildReverseIndex()
+
+	ct := e.codetableEngine.GetCodeTable()
+	if ct == nil {
+		return
 	}
+
+	// 懒构建单字反向索引（仅首次调用时执行）
+	if e.reverseIndex == nil {
+		e.reverseIndex = ct.BuildSingleCharReverseIndex()
+		if len(e.encoderRules) > 0 {
+			e.codeHintEncoder = encoding.NewReverseEncoder(e.reverseIndex, e.encoderRules)
+		}
+	}
+
 	for i := range candidates {
-		if candidates[i].Source != candidate.SourcePinyin {
+		if candidates[i].Source != candidate.SourcePinyin || candidates[i].Comment != "" {
 			continue
 		}
-		codes := e.reverseIndex[candidates[i].Text]
-		if len(codes) > 0 {
-			candidates[i].Comment = codes[0]
+		text := candidates[i].Text
+		if len([]rune(text)) == 1 {
+			if codes := e.reverseIndex[text]; len(codes) > 0 {
+				candidates[i].Comment = codes[0]
+			}
+		} else if e.codeHintEncoder != nil {
+			if code, err := e.codeHintEncoder.Encode(text); err == nil {
+				if mixedCodeTableContainsText(ct, code, text) {
+					candidates[i].Comment = code
+				}
+			}
 		}
 	}
+}
+
+// mixedCodeTableContainsText 检查码表中指定编码下是否包含目标文本的词条
+func mixedCodeTableContainsText(ct *dict.CodeTable, code, text string) bool {
+	for _, e := range ct.Lookup(code) {
+		if e.Text == text {
+			return true
+		}
+	}
+	return false
 }
 
 // addSourceHints 为混输候选添加来源标记提示

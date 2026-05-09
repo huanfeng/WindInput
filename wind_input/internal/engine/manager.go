@@ -11,6 +11,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/schema"
+	"github.com/huanfeng/wind_input/pkg/encoding"
 )
 
 // Manager 引擎管理器
@@ -442,6 +443,13 @@ func (m *Manager) ensureEngineBuilt(schemaID string, opts ...schema.EngineCreate
 		m.engines[schemaID] = eng
 	case *mixed.Engine:
 		m.engines[schemaID] = eng
+		if encoderSpec := m.resolveEncoder(s); encoderSpec != nil && len(encoderSpec.Rules) > 0 {
+			schemaRules := make([]encoding.SchemaEncoderRule, len(encoderSpec.Rules))
+			for i, sr := range encoderSpec.Rules {
+				schemaRules[i] = encoding.SchemaEncoderRule{LengthEqual: sr.LengthEqual, LengthInRange: sr.LengthInRange, Formula: sr.Formula}
+			}
+			eng.SetEncoderRules(encoding.ConvertSchemaRules(schemaRules))
+		}
 		if s.Engine.Mixed != nil && s.Engine.Mixed.EnableEnglish != nil && *s.Engine.Mixed.EnableEnglish {
 			if err := m.ensureEnglishLoadedLocked(); err == nil {
 				eng.SetEnglishSearch(m.SearchEnglish)

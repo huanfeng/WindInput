@@ -298,7 +298,7 @@ func (c *EncoderWordCodeCalc) CalcWordCode(word string) string {
 
 	// 惰性构建反向索引
 	if c.reverseIndex == nil {
-		c.reverseIndex = c.codeTable.BuildReverseIndex()
+		c.reverseIndex = c.codeTable.BuildSingleCharReverseIndex()
 	}
 
 	// 为每个字查找全码（取最长编码）

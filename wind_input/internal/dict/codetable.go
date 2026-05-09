@@ -639,6 +639,83 @@ func (ct *CodeTable) BuildReverseIndex() map[string][]string {
 	return reverseIndex
 }
 
+// BuildSingleCharReverseIndex 构建单字反查索引（单字 → 编码列表）
+//
+// 与 BuildReverseIndex 的区别：
+//   - 只收录单字词条（len([]rune(text)) == 1），跳过词组；词组编码由调用方通过
+//     encoding.ReverseEncoder + 编码规则在线推导，并经 CodeTable.Lookup 验证后使用
+//   - 通过相对权重阈值过滤便捷辅助码：若某编码权重低于该字最高权重的 1/10，
+//     则视为类似 "cccc→晶" 的特殊便捷码，不纳入反查索引
+//
+// codes[0] 为最高权重/最长的编码，即显示编码提示时的首选码。
+// 排序优先级：weight 降序 → code 长度降序 → code 字典序升序（与 BuildReverseIndex 一致）。
+func (ct *CodeTable) BuildSingleCharReverseIndex() map[string][]string {
+	type codeRef struct {
+		code   string
+		weight int
+	}
+	collect := make(map[string][]codeRef)
+
+	forEach := func(code string, entries []candidate.Candidate) {
+		for _, cand := range entries {
+			if len([]rune(cand.Text)) != 1 {
+				continue
+			}
+			collect[cand.Text] = append(collect[cand.Text], codeRef{code: code, weight: cand.Weight})
+		}
+	}
+
+	if ct.binReader != nil {
+		ct.binReader.ForEachEntry(forEach)
+	} else {
+		for code, candidates := range ct.entries {
+			forEach(code, candidates)
+		}
+	}
+
+	reverseIndex := make(map[string][]string, len(collect))
+	for text, refs := range collect {
+		// 找当前字的最高权重
+		maxWeight := 0
+		for _, r := range refs {
+			if r.weight > maxWeight {
+				maxWeight = r.weight
+			}
+		}
+
+		// 过滤低权重编码：权重低于最高权重 1/10 的视为便捷辅助码
+		threshold := max(maxWeight/10, 1)
+		var filtered []codeRef
+		for _, r := range refs {
+			if r.weight >= threshold {
+				filtered = append(filtered, r)
+			}
+		}
+		if len(filtered) == 0 {
+			// 极罕见：全部被过滤，保底使用原始集合
+			filtered = refs
+		}
+
+		// 排序：weight 降序 → code 长度降序 → code 字典序升序
+		sort.Slice(filtered, func(i, j int) bool {
+			if filtered[i].weight != filtered[j].weight {
+				return filtered[i].weight > filtered[j].weight
+			}
+			if len(filtered[i].code) != len(filtered[j].code) {
+				return len(filtered[i].code) > len(filtered[j].code)
+			}
+			return filtered[i].code < filtered[j].code
+		})
+
+		codes := make([]string, len(filtered))
+		for i, r := range filtered {
+			codes[i] = r.code
+		}
+		reverseIndex[text] = codes
+	}
+	return reverseIndex
+}
+
 // ExportTo 将码表写入 writer（用于导出）
 func (ct *CodeTable) ExportTo(w io.Writer) error {
 	buf := &bytes.Buffer{}

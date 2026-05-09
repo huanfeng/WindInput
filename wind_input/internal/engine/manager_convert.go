@@ -9,6 +9,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/schema"
+	"github.com/huanfeng/wind_input/pkg/encoding"
 )
 
 // --- 转换方法 ---
@@ -366,7 +367,7 @@ func (m *Manager) GetReverseIndex() map[string][]string {
 		ct = extractCodeTable(m.currentEngine)
 	}
 	if ct != nil {
-		idx := ct.BuildReverseIndex()
+		idx := ct.BuildSingleCharReverseIndex()
 		m.cachedReverseIndex = idx
 		m.cachedReverseSchemaID = primaryID
 		m.mu.Unlock()
@@ -472,6 +473,9 @@ func (m *Manager) GeneratePinyinCode(word string) string {
 
 // 混输引擎已有自己的 addCodeHintsFromCodetable（按 Source 区分拼音/码表候选），无需调用本函数；
 // 本函数面向独立拼音引擎和临时拼音模式。
+//
+// 单字候选：直接查单字反查表（O(1)）。
+// 多字候选：通过编码规则在线推导编码，再经 CodeTable.Lookup 验证词库中确实存在该词条后才填充。
 func (m *Manager) ApplyCodeHintsToCandidates(cands []candidate.Candidate) {
 	if len(cands) == 0 {
 		return
@@ -480,13 +484,85 @@ func (m *Manager) ApplyCodeHintsToCandidates(cands []candidate.Candidate) {
 	if len(idx) == 0 {
 		return
 	}
+
+	// 获取主码表引擎，用于验证推导出的多字词编码确实在词库中存在
+	m.mu.RLock()
+	var ct *dict.CodeTable
+	primaryID := m.primaryCodetableID
+	if primaryID == "" {
+		primaryID = m.currentID
+	}
+	if eng, ok := m.engines[primaryID]; ok {
+		ct = extractCodeTable(eng)
+	}
+	if ct == nil && m.currentEngine != nil {
+		ct = extractCodeTable(m.currentEngine)
+	}
+	m.mu.RUnlock()
+
+	// 获取编码规则，用于多字词编码推导
+	rules := m.getCodetableEncoderRules()
+	var enc *encoding.ReverseEncoder
+	if ct != nil && len(rules) > 0 {
+		enc = encoding.NewReverseEncoder(idx, rules)
+	}
+
 	for i := range cands {
 		if cands[i].Comment != "" {
 			continue
 		}
-		codes := idx[cands[i].Text]
-		if len(codes) > 0 {
-			cands[i].Comment = codes[0]
+		text := cands[i].Text
+		if len([]rune(text)) == 1 {
+			// 单字：直接查反查表
+			if codes := idx[text]; len(codes) > 0 {
+				cands[i].Comment = codes[0]
+			}
+		} else if enc != nil {
+			// 多字词：用编码规则推导，再验证词库中存在
+			if code, err := enc.Encode(text); err == nil {
+				if codeTableContainsText(ct, code, text) {
+					cands[i].Comment = code
+				}
+			}
 		}
 	}
+}
+
+// codeTableContainsText 检查码表中指定编码下是否存在目标文本的词条
+func codeTableContainsText(ct *dict.CodeTable, code, text string) bool {
+	for _, e := range ct.Lookup(code) {
+		if e.Text == text {
+			return true
+		}
+	}
+	return false
+}
+
+// getCodetableEncoderRules 获取主码表方案的编码规则（转换为 encoding.Rule 格式）
+func (m *Manager) getCodetableEncoderRules() []encoding.Rule {
+	m.mu.RLock()
+	primaryID := m.primaryCodetableID
+	sm := m.schemaManager
+	m.mu.RUnlock()
+
+	if sm == nil || primaryID == "" {
+		return nil
+	}
+	s := sm.GetSchema(primaryID)
+	if s == nil {
+		return nil
+	}
+	encoderSpec := m.resolveEncoder(s)
+	if encoderSpec == nil || len(encoderSpec.Rules) == 0 {
+		return nil
+	}
+	schemaRules := make([]encoding.SchemaEncoderRule, len(encoderSpec.Rules))
+	for i, sr := range encoderSpec.Rules {
+		schemaRules[i] = encoding.SchemaEncoderRule{
+			LengthEqual:   sr.LengthEqual,
+			LengthInRange: sr.LengthInRange,
+			Formula:       sr.Formula,
+		}
+	}
+	return encoding.ConvertSchemaRules(schemaRules)
 }
