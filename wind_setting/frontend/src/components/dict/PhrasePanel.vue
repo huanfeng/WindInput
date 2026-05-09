@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { h, ref, onMounted } from "vue";
+import { h, ref, onMounted, onUnmounted, computed } from "vue";
 import type { ColumnDef } from "@tanstack/vue-table";
 import {
   getPhraseList,
@@ -43,8 +43,29 @@ const editingPhrase = ref<PhraseItem | null>(null);
 const phraseIsArray = ref(false);
 const newPhrase = ref({ code: "", text: "", texts: "", name: "", position: 1 });
 
+// ── 右键菜单 ──
+const ctxMenu = ref({
+  visible: false,
+  x: 0,
+  y: 0,
+  item: null as PhraseItem | null,
+  canMoveUp: false,
+  canMoveDown: false,
+});
+
 function phraseKey(item: PhraseItem): string {
   return `${item.code}||${item.text || ""}||${item.name || ""}`;
+}
+
+function itemContent(item: PhraseItem): string {
+  return item.type === "array" ? (item.name || item.code) : (item.text || "");
+}
+
+// 同一 code 的条目，按 position 升序
+function sameCodeGroup(code: string): PhraseItem[] {
+  return allPhrases.value
+    .filter((p) => p.code === code)
+    .sort((a, b) => a.position - b.position);
 }
 
 // ── Columns ──
@@ -94,6 +115,8 @@ const columns: ColumnDef<PhraseItem, any>[] = [
   {
     id: "content",
     header: "内容",
+    // accessorFn 使 globalFilter 能搜索此列
+    accessorFn: (row) => itemContent(row),
     cell: ({ row }) =>
       row.original.type === "array"
         ? h("span", {}, row.original.name || row.original.code)
@@ -156,7 +179,7 @@ const columns: ColumnDef<PhraseItem, any>[] = [
             title: "编辑",
             onClick: () => openEditDialog(row.original),
           },
-          () => "\u270e",
+          () => "✎",
         ),
         h(
           Button,
@@ -167,7 +190,7 @@ const columns: ColumnDef<PhraseItem, any>[] = [
             title: "删除",
             onClick: () => handleRemove(row.original),
           },
-          () => "\u00d7",
+          () => "×",
         ),
       ]),
   },
@@ -178,7 +201,14 @@ async function loadData() {
   loading.value = true;
   emit("loading", true);
   try {
-    allPhrases.value = await getPhraseList();
+    const list = await getPhraseList();
+    // 先按编码字典序，再按位置升序
+    list.sort((a, b) => {
+      if (a.code < b.code) return -1;
+      if (a.code > b.code) return 1;
+      return a.position - b.position;
+    });
+    allPhrases.value = list;
     selectedKeys.value = new Set();
   } catch (e) {
     toast(`加载短语失败: ${e}`, "error");
@@ -218,10 +248,12 @@ async function handleSave() {
   const type = phraseIsArray.value ? "array" : "static";
   try {
     if (editingPhrase.value) {
+      const oldCode = editingPhrase.value.code;
       const oldText = editingPhrase.value.text || "";
       const oldName = editingPhrase.value.name || "";
+      const newCode = code !== oldCode ? code : "";
       const newText = phraseIsArray.value ? texts : text;
-      await updatePhrase(code, oldText, oldName, newText, position, null);
+      await updatePhrase(oldCode, oldText, oldName, newCode, newText, position, null);
       toast("短语已更新");
     } else {
       await addPhrase(code, text, texts, name, type, position);
@@ -251,7 +283,8 @@ async function handleToggleEnabled(item: PhraseItem) {
 
 // ── Delete single ──
 async function handleRemove(item: PhraseItem) {
-  const ok = await confirm(`确定删除短语「${item.code}」吗？`);
+  const content = itemContent(item);
+  const ok = await confirm(`确定删除短语「${item.code}」（${content}）吗？`);
   if (!ok) return;
   try {
     await removePhrase(item.code, item.text || "", item.name || "");
@@ -297,8 +330,72 @@ async function handleReset() {
   }
 }
 
+// ── 右键菜单 ──
+function handleRowContextmenu(item: PhraseItem, event: MouseEvent) {
+  const group = sameCodeGroup(item.code);
+  const idx = group.findIndex((p) => phraseKey(p) === phraseKey(item));
+  ctxMenu.value = {
+    visible: true,
+    x: event.clientX,
+    y: event.clientY,
+    item,
+    canMoveUp: idx > 0,
+    canMoveDown: idx < group.length - 1,
+  };
+}
+
+function closeCtxMenu() {
+  ctxMenu.value.visible = false;
+}
+
+async function handleMoveUp() {
+  const item = ctxMenu.value.item;
+  closeCtxMenu();
+  if (!item) return;
+  const group = sameCodeGroup(item.code);
+  const idx = group.findIndex((p) => phraseKey(p) === phraseKey(item));
+  if (idx <= 0) return;
+  const prev = group[idx - 1];
+  const posA = item.position;
+  const posB = prev.position;
+  try {
+    await updatePhrase(item.code, item.text || "", item.name || "", "", "", posB, null);
+    await updatePhrase(prev.code, prev.text || "", prev.name || "", "", "", posA, null);
+    await loadData();
+  } catch (e) {
+    toast(`操作失败: ${e}`, "error");
+  }
+}
+
+async function handleMoveDown() {
+  const item = ctxMenu.value.item;
+  closeCtxMenu();
+  if (!item) return;
+  const group = sameCodeGroup(item.code);
+  const idx = group.findIndex((p) => phraseKey(p) === phraseKey(item));
+  if (idx >= group.length - 1) return;
+  const next = group[idx + 1];
+  const posA = item.position;
+  const posB = next.position;
+  try {
+    await updatePhrase(item.code, item.text || "", item.name || "", "", "", posB, null);
+    await updatePhrase(next.code, next.text || "", next.name || "", "", "", posA, null);
+    await loadData();
+  } catch (e) {
+    toast(`操作失败: ${e}`, "error");
+  }
+}
+
 onMounted(() => {
   loadData();
+  document.addEventListener("click", closeCtxMenu);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeCtxMenu();
+  });
+});
+
+onUnmounted(() => {
+  document.removeEventListener("click", closeCtxMenu);
 });
 
 defineExpose({ loadData });
@@ -313,6 +410,8 @@ defineExpose({ loadData });
     search-placeholder="搜索..."
     empty-text="暂无短语"
     search-empty-text="未找到匹配短语"
+    :on-row-dblclick="openEditDialog"
+    :on-row-contextmenu="handleRowContextmenu"
     @update:selection="selectedKeys = $event"
   >
     <template #toolbar-start="{ selectedCount }">
@@ -331,6 +430,35 @@ defineExpose({ loadData });
     </template>
   </DictDataTable>
 
+  <!-- 右键上下文菜单 -->
+  <Teleport to="body">
+    <div
+      v-if="ctxMenu.visible"
+      class="fixed z-50 min-w-[140px] rounded-md border border-border bg-popover shadow-md py-1 text-sm"
+      :style="{ left: `${ctxMenu.x}px`, top: `${ctxMenu.y}px` }"
+      @click.stop
+    >
+      <div class="px-3 py-1 text-xs text-muted-foreground font-mono truncate max-w-[200px]">
+        {{ ctxMenu.item?.code }}
+      </div>
+      <div class="border-t border-border my-1" />
+      <button
+        class="w-full text-left px-3 py-1.5 hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed"
+        :disabled="!ctxMenu.canMoveUp"
+        @click="handleMoveUp"
+      >
+        ↑ 上移
+      </button>
+      <button
+        class="w-full text-left px-3 py-1.5 hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed"
+        :disabled="!ctxMenu.canMoveDown"
+        @click="handleMoveDown"
+      >
+        ↓ 下移
+      </button>
+    </div>
+  </Teleport>
+
   <!-- 添加/编辑对话框 -->
   <Dialog v-model:open="dialogVisible">
     <DialogContent class="sm:max-w-[450px]">
@@ -344,7 +472,6 @@ defineExpose({ loadData });
           <label class="text-sm font-medium text-right">编码</label>
           <Input
             v-model="newPhrase.code"
-            :disabled="!!editingPhrase"
             placeholder="如: zdy"
           />
         </div>

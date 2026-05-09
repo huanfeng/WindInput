@@ -178,7 +178,7 @@ func (a *App) collectExportData(schemaID string, sections []string) (*dictio.Exp
 
 	// 用户词库（limit=-1 表示全部返回，不分页）
 	if opts.ShouldExport(dictio.SectionUserWords) {
-		reply, err := a.rpcClient.DictSearch(schemaID, "", -1, 0)
+		reply, err := a.rpcClient.DictSearch(schemaID, "", "", -1, 0)
 		if err == nil {
 			for _, w := range reply.Words {
 				data.UserWords = append(data.UserWords, dictio.UserWordEntry{

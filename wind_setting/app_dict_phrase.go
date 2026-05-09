@@ -51,9 +51,9 @@ func (a *App) AddPhrase(code, text, texts, name, pType string, position int) err
 }
 
 // UpdatePhrase 更新短语
-func (a *App) UpdatePhrase(code, text, name, newText string, newPosition int, enabled *bool) error {
+func (a *App) UpdatePhrase(code, text, name, newCode, newText string, newPosition int, enabled *bool) error {
 	return a.rpcClient.PhraseUpdate(rpcapi.PhraseUpdateArgs{
-		Code: code, Text: text, Name: name, NewText: newText, NewPosition: newPosition, Enabled: enabled,
+		Code: code, Text: text, Name: name, NewCode: newCode, NewText: newText, NewPosition: newPosition, Enabled: enabled,
 	})
 }
 

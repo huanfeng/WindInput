@@ -110,8 +110,8 @@ func (p *PhraseService) Update(args *rpcapi.PhraseUpdateArgs, reply *rpcapi.Empt
 		p.logger.Info("RPC Phrase.Update enabled", "codeLen", len(args.Code), "enabled", *args.Enabled)
 	}
 
-	// 处理文本或位置更新
-	if args.NewText != "" || args.NewPosition != 0 {
+	// 处理文本、编码或位置更新
+	if args.NewText != "" || args.NewPosition != 0 || args.NewCode != "" {
 		// 读取现有记录
 		records, err := p.store.GetPhrasesByCode(args.Code)
 		if err != nil {
@@ -136,19 +136,31 @@ func (p *PhraseService) Update(args *rpcapi.PhraseUpdateArgs, reply *rpcapi.Empt
 			return fmt.Errorf("phrase not found")
 		}
 
+		needDelete := false
 		if args.NewText != "" {
-			// 删除旧记录，用新文本写入
-			if err := p.store.RemovePhrase(args.Code, args.Text, args.Name); err != nil {
-				return fmt.Errorf("remove old phrase: %w", err)
-			}
 			found.Text = args.NewText
+			needDelete = true
+		}
+		if args.NewCode != "" && args.NewCode != args.Code {
+			found.Code = args.NewCode
+			needDelete = true
 		}
 		if args.NewPosition != 0 {
 			found.Position = args.NewPosition
 		}
 
-		if err := p.store.UpdatePhrase(*found); err != nil {
-			return fmt.Errorf("update phrase: %w", err)
+		if needDelete {
+			// 删除旧记录后以新 code/text 写入
+			if err := p.store.RemovePhrase(args.Code, args.Text, args.Name); err != nil {
+				return fmt.Errorf("remove old phrase: %w", err)
+			}
+			if err := p.store.AddPhrase(*found); err != nil {
+				return fmt.Errorf("add updated phrase: %w", err)
+			}
+		} else {
+			if err := p.store.UpdatePhrase(*found); err != nil {
+				return fmt.Errorf("update phrase: %w", err)
+			}
 		}
 		p.logger.Info("RPC Phrase.Update", "codeLen", len(args.Code))
 	}

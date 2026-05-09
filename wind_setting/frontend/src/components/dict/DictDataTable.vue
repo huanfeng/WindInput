@@ -38,6 +38,8 @@ interface Props {
   rowKey: (row: TData) => string;
   emptyText?: string;
   searchEmptyText?: string;
+  onRowDblclick?: (row: TData) => void;
+  onRowContextmenu?: (row: TData, event: MouseEvent) => void;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -244,6 +246,8 @@ defineExpose({ table, globalFilter, clearSelection, selectedCount });
                 v-for="row in table.getRowModel().rows"
                 :key="row.id"
                 :class="{ 'bg-primary/5': row.getIsSelected() }"
+                @dblclick="props.onRowDblclick?.(row.original as TData)"
+                @contextmenu.prevent="props.onRowContextmenu?.(row.original as TData, $event)"
               >
                 <TableCell v-for="cell in row.getVisibleCells()" :key="cell.id">
                   <FlexRender

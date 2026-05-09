@@ -112,10 +112,11 @@ func (s ConfigSection) Valid() bool {
 
 // DictSearchArgs 词库搜索请求
 type DictSearchArgs struct {
-	SchemaID string `json:"schema_id,omitempty"` // 方案 ID（空=当前活跃方案）
-	Prefix   string `json:"prefix"`              // 编码前缀
-	Limit    int    `json:"limit,omitempty"`     // 每页数量（默认 50）
-	Offset   int    `json:"offset,omitempty"`    // 偏移量
+	SchemaID  string `json:"schema_id,omitempty"`  // 方案 ID（空=当前活跃方案）
+	Prefix    string `json:"prefix"`               // 编码前缀
+	TextQuery string `json:"text_query,omitempty"` // 词条内容包含匹配（与 Prefix 取并集）
+	Limit     int    `json:"limit,omitempty"`      // 每页数量（默认 50）
+	Offset    int    `json:"offset,omitempty"`     // 偏移量
 }
 
 // DictSearchReply 词库搜索响应
@@ -348,6 +349,7 @@ type PhraseUpdateArgs struct {
 	Code        string `json:"code"`
 	Text        string `json:"text,omitempty"`
 	Name        string `json:"name,omitempty"`
+	NewCode     string `json:"new_code,omitempty"`
 	NewText     string `json:"new_text,omitempty"`
 	NewPosition int    `json:"new_position,omitempty"`
 	Enabled     *bool  `json:"enabled,omitempty"`

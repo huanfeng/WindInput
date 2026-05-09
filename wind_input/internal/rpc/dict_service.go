@@ -32,7 +32,7 @@ func (d *DictService) resolveSchemaID(id string) string {
 	return id
 }
 
-// Search 搜索用户词库（前缀匹配，支持分页）
+// Search 搜索用户词库（编码前缀 OR 内容包含，支持分页）
 func (d *DictService) Search(args *rpcapi.DictSearchArgs, reply *rpcapi.DictSearchReply) error {
 	if d.store == nil {
 		return fmt.Errorf("store not available")
@@ -40,10 +40,32 @@ func (d *DictService) Search(args *rpcapi.DictSearchArgs, reply *rpcapi.DictSear
 
 	schemaID := d.resolveSchemaID(args.SchemaID)
 	prefix := strings.ToLower(args.Prefix)
+	textQuery := strings.ToLower(args.TextQuery)
 
 	allWords, err := d.store.SearchUserWordsPrefix(schemaID, prefix, 0)
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
+	}
+
+	// 若有 textQuery，追加内容包含匹配（全量扫描，与前缀结果合并去重）
+	if textQuery != "" {
+		seen := make(map[string]struct{}, len(allWords))
+		for _, w := range allWords {
+			seen[w.Code+"\x00"+w.Text] = struct{}{}
+		}
+		allText, err := d.store.SearchUserWordsPrefix(schemaID, "", 0)
+		if err != nil {
+			return fmt.Errorf("search text: %w", err)
+		}
+		for _, w := range allText {
+			if strings.Contains(strings.ToLower(w.Text), textQuery) {
+				k := w.Code + "\x00" + w.Text
+				if _, exists := seen[k]; !exists {
+					seen[k] = struct{}{}
+					allWords = append(allWords, w)
+				}
+			}
+		}
 	}
 
 	reply.Total = len(allWords)

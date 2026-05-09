@@ -273,11 +273,12 @@ export async function updatePhrase(
   code: string,
   text: string,
   name: string,
+  newCode: string,
   newText: string,
   newPosition: number,
   enabled: boolean | null,
 ): Promise<void> {
-  return App.UpdatePhrase(code, text, name, newText, newPosition, enabled);
+  return App.UpdatePhrase(code, text, name, newCode, newText, newPosition, enabled);
 }
 
 export async function removePhrase(
@@ -480,12 +481,14 @@ export interface PagedDictResult {
 export async function getUserDictBySchemaPage(
   schemaID: string,
   prefix: string,
+  textQuery: string,
   limit: number,
   offset: number,
 ): Promise<PagedDictResult> {
   return App.GetUserDictBySchemaPage(
     schemaID,
     prefix,
+    textQuery,
     limit,
     offset,
   ) as unknown as PagedDictResult;

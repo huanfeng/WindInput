@@ -40,7 +40,7 @@ const editText = ref("");
 const editCode = ref("");
 const currentPage = ref(0);
 const totalCount = ref(0);
-const searchPrefix = ref("");
+const searchQuery = ref("");
 
 function itemKey(item: UserWordItem) {
   return `${item.code}|${item.text}`;
@@ -128,7 +128,8 @@ async function loadData() {
   try {
     const result: PagedDictResult = await getUserDictBySchemaPage(
       props.schemaId,
-      searchPrefix.value,
+      searchQuery.value,
+      searchQuery.value,
       PAGE_SIZE,
       currentPage.value * PAGE_SIZE,
     );
@@ -151,7 +152,7 @@ function handlePageChange(page: number) {
 // DictDataTable 的搜索框由我们接管，通过 prefix 服务端搜索
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 function handleSearchInput(val: string) {
-  searchPrefix.value = val;
+  searchQuery.value = val;
   currentPage.value = 0;
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => loadData(), 300);
@@ -241,7 +242,7 @@ onMounted(() => {
     :loading="loading"
     :row-key="(row: UserWordItem) => `${row.code}|${row.text}`"
     :searchable="true"
-    search-placeholder="搜索编码..."
+    search-placeholder="搜索..."
     empty-text="暂无用户词条"
     search-empty-text="未找到匹配词条"
     :server-pagination="{ total: totalCount, pageSize: PAGE_SIZE, page: currentPage }"

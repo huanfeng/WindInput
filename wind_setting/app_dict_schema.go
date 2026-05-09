@@ -185,7 +185,7 @@ func (a *App) GeneratePinyinCode(text string) (string, error) {
 
 // GetUserDictBySchema 获取指定方案的用户词库
 func (a *App) GetUserDictBySchema(schemaID string) ([]UserWordItem, error) {
-	reply, err := a.rpcClient.DictSearch(schemaID, "", 0, 0)
+	reply, err := a.rpcClient.DictSearch(schemaID, "", "", 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("获取用户词库失败: %w", err)
 	}
@@ -209,8 +209,8 @@ type PagedDictResult struct {
 }
 
 // GetUserDictBySchemaPage 分页获取指定方案的用户词库
-func (a *App) GetUserDictBySchemaPage(schemaID, prefix string, limit, offset int) (*PagedDictResult, error) {
-	reply, err := a.rpcClient.DictSearch(schemaID, prefix, limit, offset)
+func (a *App) GetUserDictBySchemaPage(schemaID, prefix, textQuery string, limit, offset int) (*PagedDictResult, error) {
+	reply, err := a.rpcClient.DictSearch(schemaID, prefix, textQuery, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("获取用户词库失败: %w", err)
 	}
@@ -227,7 +227,7 @@ func (a *App) ClearUserDictForSchema(schemaID string) (int, error) {
 
 // SearchUserDictBySchema 搜索指定方案的用户词库
 func (a *App) SearchUserDictBySchema(schemaID, query string, limit int) ([]UserWordItem, error) {
-	reply, err := a.rpcClient.DictSearch(schemaID, query, limit, 0)
+	reply, err := a.rpcClient.DictSearch(schemaID, query, "", limit, 0)
 	if err != nil {
 		return nil, fmt.Errorf("搜索用户词库失败: %w", err)
 	}

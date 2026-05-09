@@ -102,14 +102,15 @@ func (c *Client) IsAvailable() bool {
 
 // ── Dict 方法 ──
 
-// DictSearch 前缀搜索用户词库
-func (c *Client) DictSearch(schemaID, prefix string, limit, offset int) (*DictSearchReply, error) {
+// DictSearch 搜索用户词库（编码前缀 OR 内容包含）
+func (c *Client) DictSearch(schemaID, prefix, textQuery string, limit, offset int) (*DictSearchReply, error) {
 	var reply DictSearchReply
 	err := c.call("Dict.Search", &DictSearchArgs{
-		SchemaID: schemaID,
-		Prefix:   prefix,
-		Limit:    limit,
-		Offset:   offset,
+		SchemaID:  schemaID,
+		Prefix:    prefix,
+		TextQuery: textQuery,
+		Limit:     limit,
+		Offset:    offset,
 	}, &reply)
 	return &reply, err
 }

@@ -52,7 +52,7 @@ func convertWordEntries(words []rpcapi.WordEntry) []UserWordItem {
 
 // GetUserDict 获取用户词库
 func (a *App) GetUserDict() ([]UserWordItem, error) {
-	reply, err := a.rpcClient.DictSearch("", "", 0, 0)
+	reply, err := a.rpcClient.DictSearch("", "", "", 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("获取用户词库失败: %w", err)
 	}
@@ -71,7 +71,7 @@ func (a *App) RemoveUserWord(code, text string) error {
 
 // SearchUserDict 搜索用户词库
 func (a *App) SearchUserDict(query string, limit int) ([]UserWordItem, error) {
-	reply, err := a.rpcClient.DictSearch("", query, limit, 0)
+	reply, err := a.rpcClient.DictSearch("", query, "", limit, 0)
 	if err != nil {
 		return nil, fmt.Errorf("搜索用户词库失败: %w", err)
 	}
@@ -186,7 +186,7 @@ func (a *App) ExportUserDict() (*ImportExportResult, error) {
 		return &ImportExportResult{Cancelled: true}, nil
 	}
 
-	reply, err := a.rpcClient.DictSearch("", "", 0, 0)
+	reply, err := a.rpcClient.DictSearch("", "", "", 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("获取词库失败: %w", err)
 	}
@@ -251,7 +251,7 @@ func (a *App) ExportUserDictForSchema(schemaID string) (*ImportExportResult, err
 		return &ImportExportResult{Cancelled: true}, nil
 	}
 
-	reply, err := a.rpcClient.DictSearch(schemaID, "", 0, 0)
+	reply, err := a.rpcClient.DictSearch(schemaID, "", "", 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("获取词库失败: %w", err)
 	}
