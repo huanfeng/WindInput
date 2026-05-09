@@ -137,12 +137,10 @@ func (c *Coordinator) isPunctuation(r rune) bool {
 func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) *bridge.KeyEventResult {
 	c.logger.Debug("handlePunctuation", "char", string(r), "buffer", c.inputBuffer)
 
-	// 标点 = 短语终止符，通知造词策略（码表自动造词）
-	if c.engineMgr != nil {
-		c.engineMgr.OnPhraseTerminated()
-	}
-
 	// Check if punct_commit is enabled
+	// 注：OnPhraseTerminated 在下方按分支处理：
+	//   - punct_commit 路径：与 OnCandidateSelected 合并为单一 goroutine 顺序执行，保证先 flush 旧序列再追加新词
+	//   - 其他路径：独立 goroutine，在外层 if 块结束后触发
 	// 码表/Mixed 受 PunctCommit 开关控制；全拼引擎沿用传统行为，标点恒触发顶字上屏
 	punctCommitEnabled := false
 	if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
@@ -202,10 +200,17 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 				c.inputHistory.Record(commitText, "", "", 0)
 			}
 
-			// 标点顶字上屏需通知造词策略，否则自动造词的 charBuffer 会漏掉此字
-			// OnPhraseTerminated 已在上方 flush 旧序列，此处将候选加入新序列
+			// 标点顶字上屏：先 flush 旧序列，再将候选追加到新序列
+			// 两步必须顺序执行，合并到同一 goroutine 避免并发乱序
 			if c.engineMgr != nil && !candidate.IsCommand {
-				c.engineMgr.OnCandidateSelected(c.inputBuffer, candidate.Text, candidate.Source)
+				learnCode := c.inputBuffer
+				learnText := candidate.Text
+				learnSource := candidate.Source
+				mgr := c.engineMgr
+				go func() {
+					mgr.OnPhraseTerminated()
+					mgr.OnCandidateSelected(learnCode, learnText, learnSource)
+				}()
 			}
 
 			c.clearState()
@@ -234,6 +239,12 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 				Text: commitText + punctText,
 			}
 		}
+	}
+
+	// 非 punct_commit 路径（无候选、或 punct_commit 未启用）：单独触发短语终止
+	if c.engineMgr != nil {
+		mgr := c.engineMgr
+		go mgr.OnPhraseTerminated()
 	}
 
 	// punct_commit 启用但无候选（空码）：丢弃编码，清空缓冲区，直接输出标点

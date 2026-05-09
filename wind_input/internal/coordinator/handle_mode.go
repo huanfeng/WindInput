@@ -54,7 +54,8 @@ func (c *Coordinator) HandleSystemModeSwitch(chineseMode bool) (commitText strin
 
 	// 切换模式 = 短语终止符，通知造词策略（码表自动造词）
 	if c.chineseMode && c.engineMgr != nil {
-		c.engineMgr.OnPhraseTerminated()
+		mgr := c.engineMgr
+		go mgr.OnPhraseTerminated()
 	}
 
 	// Check CommitOnSwitch: when switching FROM Chinese, commit pending input code
@@ -100,7 +101,8 @@ func (c *Coordinator) HandleToggleMode() (commitText string, chineseMode bool) {
 
 	// 切换模式 = 短语终止符，通知造词策略（码表自动造词）
 	if c.chineseMode && c.engineMgr != nil {
-		c.engineMgr.OnPhraseTerminated()
+		mgr := c.engineMgr
+		go mgr.OnPhraseTerminated()
 	}
 
 	// Check if CommitOnSwitch is enabled and there's pending input

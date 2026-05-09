@@ -413,13 +413,11 @@ func (c *Coordinator) broadcastState() {
 	// 1. Update Go toolbar
 	c.syncToolbarStateNoLock()
 
-	// 2. Push state to all TSF clients
+	// 2. Push state to all TSF clients (async to avoid blocking on pipe writes)
 	if c.bridgeServer != nil {
 		status := c.buildStatusUpdate()
-		// Release lock before network I/O to avoid blocking
-		c.mu.Unlock()
-		c.bridgeServer.PushStateToAllClients(status)
-		c.mu.Lock()
+		server := c.bridgeServer
+		go server.PushStateToAllClients(status)
 	}
 }
 

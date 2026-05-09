@@ -19,4 +19,5 @@ const (
 	cmdDPIChanged        managerCommand = "dpi_changed"
 	cmdRegisterHotkeys   managerCommand = "register_hotkeys"
 	cmdUnregisterHotkeys managerCommand = "unregister_hotkeys"
+	cmdHideTooltip       managerCommand = "hide_tooltip"
 )

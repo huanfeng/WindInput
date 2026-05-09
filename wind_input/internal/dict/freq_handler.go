@@ -23,12 +23,12 @@ func NewFreqHandler(s *store.Store, schemaID string) *FreqHandler {
 	}
 }
 
-// Record 记录一次选词（写入 Store 的词频 bucket）
+// Record 记录一次选词（异步批量写入词频 bucket，减少 BoltDB 写锁竞争）
 func (h *FreqHandler) Record(code, text string) {
 	if h == nil || h.store == nil {
 		return
 	}
-	h.store.IncrementFreq(h.schemaID, code, text)
+	h.store.IncrementFreqAsync(h.schemaID, code, text)
 }
 
 // GetSchemaID 获取方案 ID

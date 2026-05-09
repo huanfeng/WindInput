@@ -283,7 +283,8 @@ func (c *Coordinator) HandleFocusLost() {
 
 	// 焦点丢失 = 短语终止符，通知造词策略（码表自动造词）
 	if c.engineMgr != nil {
-		c.engineMgr.OnPhraseTerminated()
+		mgr := c.engineMgr
+		go mgr.OnPhraseTerminated()
 	}
 
 	// 焦点变化后异步释放内存（非阻塞，不影响响应速度）
@@ -435,7 +436,8 @@ func (c *Coordinator) HandleIMEDeactivated() {
 
 	// IME 停用 = 短语终止符，通知造词策略（码表自动造词）
 	if c.engineMgr != nil {
-		c.engineMgr.OnPhraseTerminated()
+		mgr := c.engineMgr
+		go mgr.OnPhraseTerminated()
 	}
 
 	c.mu.Lock()

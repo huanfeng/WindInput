@@ -11,6 +11,11 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+const (
+	freqFlushSize     = 50
+	freqFlushInterval = 30 * time.Second
+)
+
 const FreqBoostMax = 2000
 
 var bucketFreq = []byte("Freq")
@@ -312,5 +317,91 @@ func BatchIncrementFreq(wb *WriteBuffer, schemaID, code, text string, rec FreqRe
 		Bucket: [][]byte{bucketSchemas, []byte(schemaID), bucketFreq},
 		Key:    freqKey(code, text),
 		Value:  data,
+	})
+}
+
+// IncrementFreqAsync 异步增加词频计数（内存累积，批量写入）。
+// 与 IncrementFreq 的区别：不立即写 BoltDB，大幅减少写锁竞争。
+// 崩溃时最多丢失最近一个 flush 周期内的增量，对词频排序可接受。
+func (s *Store) IncrementFreqAsync(schemaID, code, text string) {
+	key := freqDeltaKey{schemaID: schemaID, code: code, text: text}
+	s.freqMu.Lock()
+	s.freqDeltas[key]++
+	trigger := len(s.freqDeltas) >= freqFlushSize
+	s.freqMu.Unlock()
+	if trigger {
+		select {
+		case s.freqFlushCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// freqFlushLoop 后台定时或按量 flush 词频增量
+func (s *Store) freqFlushLoop() {
+	defer s.freqWg.Done()
+	ticker := time.NewTicker(freqFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.freqDone:
+			_ = s.flushFreqDeltas()
+			return
+		case <-s.freqFlushCh:
+			_ = s.flushFreqDeltas()
+		case <-ticker.C:
+			_ = s.flushFreqDeltas()
+		}
+	}
+}
+
+// flushFreqDeltas 将内存中的词频增量写入 BoltDB（一次事务）
+func (s *Store) flushFreqDeltas() error {
+	s.freqMu.Lock()
+	if len(s.freqDeltas) == 0 {
+		s.freqMu.Unlock()
+		return nil
+	}
+	deltas := s.freqDeltas
+	s.freqDeltas = make(map[freqDeltaKey]int)
+	s.freqMu.Unlock()
+
+	if s.db == nil {
+		// 暂停状态：将增量放回，等 Resume 后下次 flush 再处理
+		s.freqMu.Lock()
+		for k, v := range deltas {
+			s.freqDeltas[k] += v
+		}
+		s.freqMu.Unlock()
+		return nil
+	}
+
+	return s.db.Update(func(tx *bolt.Tx) error {
+		for key, delta := range deltas {
+			b, err := schemaSubBucket(tx, key.schemaID, string(bucketFreq), true)
+			if err != nil {
+				return err
+			}
+			dbKey := []byte(freqKey(key.code, key.text))
+			var rec FreqRecord
+			if v := b.Get(dbKey); v != nil {
+				_ = json.Unmarshal(v, &rec)
+			}
+			rec.Count += uint32(delta)
+			rec.LastUsed = time.Now().Unix()
+			newStreak := int(rec.Streak) + delta
+			if newStreak > 255 {
+				newStreak = 255
+			}
+			rec.Streak = uint8(newStreak)
+			data, err := json.Marshal(rec)
+			if err != nil {
+				return err
+			}
+			if err := b.Put(dbKey, data); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }

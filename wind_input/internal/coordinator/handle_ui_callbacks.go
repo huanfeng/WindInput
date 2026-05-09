@@ -144,7 +144,8 @@ func (c *Coordinator) handleGlobalSwitchEngine() {
 	c.mu.Unlock()
 
 	if hadInput && c.bridgeServer != nil {
-		c.bridgeServer.PushClearCompositionToActiveClient()
+		server := c.bridgeServer
+		go server.PushClearCompositionToActiveClient()
 	}
 }
 
@@ -639,7 +640,8 @@ func (c *Coordinator) handleToolbarToggleMode() {
 
 	// Notify TSF side to clear inline composition if there was active input
 	if hadInput && c.bridgeServer != nil {
-		go c.bridgeServer.PushClearCompositionToActiveClient()
+		server := c.bridgeServer
+		go server.PushClearCompositionToActiveClient()
 	}
 
 	// Sync punctuation with mode if enabled
@@ -920,7 +922,8 @@ func (c *Coordinator) handleSwitchToEnglish() {
 
 	// Notify TSF to clear composition
 	if hadInput && c.bridgeServer != nil {
-		go c.bridgeServer.PushClearCompositionToActiveClient()
+		server := c.bridgeServer
+		go server.PushClearCompositionToActiveClient()
 	}
 
 	// Sync punctuation with mode if enabled
@@ -1006,7 +1009,8 @@ func (c *Coordinator) handleSchemaMenuSelection(index int) {
 
 	// Notify TSF to clear composition if there was active input
 	if hadInput && c.bridgeServer != nil {
-		c.bridgeServer.PushClearCompositionToActiveClient()
+		server := c.bridgeServer
+		go server.PushClearCompositionToActiveClient()
 	}
 }
 

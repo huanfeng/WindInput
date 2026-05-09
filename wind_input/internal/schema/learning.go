@@ -2,6 +2,7 @@ package schema
 
 import (
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/huanfeng/wind_input/internal/dict"
@@ -118,8 +119,9 @@ type WordCodeCalculator interface {
 // 追踪连续上屏的单字序列，遇到终止符时将序列中所有 minLen~maxLen
 // 长度的连续子序列组词并写入临时词库，由晋升机制过滤低频组合。
 type CodeTableAutoPhrase struct {
-	charBuffer    []rune    // 连续单字缓冲区
-	lastCharTime  time.Time // 上一个单字上屏的时间
+	mu            sync.Mutex // 保护 charBuffer 和 lastCharTime 的并发访问
+	charBuffer    []rune     // 连续单字缓冲区
+	lastCharTime  time.Time  // 上一个单字上屏的时间
 	config        AutoPhraseSpec
 	wordCodeCalc  WordCodeCalculator
 	userLayer     *dict.StoreUserLayer
@@ -162,6 +164,9 @@ func (p *CodeTableAutoPhrase) OnWordCommitted(code, text string) {
 	runes := []rune(text)
 	now := time.Now()
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if len(runes) == 1 {
 		// 距上一个单字间隔超过阈值，先清空旧序列再开始新序列
 		if len(p.charBuffer) > 0 && now.Sub(p.lastCharTime) > autoPhraseTimeout {
@@ -183,11 +188,15 @@ func (p *CodeTableAutoPhrase) OnWordCommitted(code, text string) {
 
 // OnPhraseTerminated 终止信号（标点、回车、焦点切换）
 func (p *CodeTableAutoPhrase) OnPhraseTerminated() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.flush()
 }
 
 // Reset 重置状态
 func (p *CodeTableAutoPhrase) Reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.charBuffer = p.charBuffer[:0]
 }
 

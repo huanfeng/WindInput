@@ -568,7 +568,8 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 
 		consumedCode := c.inputBuffer[:cand.ConsumedLength]
 		if !cand.IsCommand {
-			c.engineMgr.OnCandidateSelected(consumedCode, originalText, cand.Source)
+			mgr := c.engineMgr
+			go mgr.OnCandidateSelected(consumedCode, originalText, cand.Source)
 		}
 
 		remaining := c.inputBuffer[cand.ConsumedLength:]

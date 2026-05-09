@@ -127,8 +127,12 @@ func (m *Manager) HideTooltip() {
 	m.mu.Lock()
 	m.tooltipVersion++
 	m.mu.Unlock()
-	if m.tooltip != nil {
-		m.tooltip.Hide()
+	select {
+	case m.cmdCh <- UICommand{Type: cmdHideTooltip}:
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
+	default:
 	}
 }
 

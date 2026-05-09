@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/google/uuid"
 	bolt "go.etcd.io/bbolt"
@@ -14,10 +15,21 @@ var (
 	bucketPhrases = []byte("Phrases")
 )
 
+// freqDeltaKey 词频增量的 map 键
+type freqDeltaKey struct {
+	schemaID, code, text string
+}
+
 // Store wraps a bbolt database with helpers for the wind_input schema.
 type Store struct {
 	db   *bolt.DB
 	path string
+
+	freqDeltas  map[freqDeltaKey]int
+	freqMu      sync.Mutex
+	freqFlushCh chan struct{}
+	freqDone    chan struct{}
+	freqWg      sync.WaitGroup
 }
 
 // Open opens (or creates) the bbolt database at path and initialises top-level
@@ -27,11 +39,19 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: %w", err)
 	}
-	s := &Store{db: db, path: path}
+	s := &Store{
+		db:          db,
+		path:        path,
+		freqDeltas:  make(map[freqDeltaKey]int),
+		freqFlushCh: make(chan struct{}, 1),
+		freqDone:    make(chan struct{}),
+	}
 	if err := s.init(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	s.freqWg.Add(1)
+	go s.freqFlushLoop()
 	return s, nil
 }
 
@@ -80,8 +100,12 @@ func (s *Store) init() error {
 	})
 }
 
-// Close closes the underlying bbolt database.
+// Close flushes pending freq deltas, stops background goroutines, and closes the database.
 func (s *Store) Close() error {
+	if s.freqDone != nil {
+		close(s.freqDone)
+		s.freqWg.Wait()
+	}
 	return s.db.Close()
 }
 
