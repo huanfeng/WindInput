@@ -15,7 +15,7 @@ import DictDataTable from "./DictDataTable.vue";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 100;
 
 const props = defineProps<{
   schemaId: string;
@@ -191,18 +191,21 @@ async function handleDelete(item: UserWordItem) {
 
 async function handleBatchDelete() {
   if (selectedKeys.value.size === 0) return;
+  // 首个 await 前同步快照：Wails 事件可能在 await 间触发 loadData() 清空 selectedKeys
+  const itemsToDelete = userDict.value.filter((item) =>
+    selectedKeys.value.has(itemKey(item)),
+  );
+  if (itemsToDelete.length === 0) return;
   const ok = await confirm(
-    `确定删除选中的 ${selectedKeys.value.size} 个词条？`,
+    `确定删除选中的 ${itemsToDelete.length} 个词条？`,
   );
   if (!ok) return;
   let failed = 0;
-  for (const item of userDict.value) {
-    if (selectedKeys.value.has(itemKey(item))) {
-      try {
-        await removeUserWordForSchema(props.schemaId, item.code, item.text);
-      } catch {
-        failed++;
-      }
+  for (const item of itemsToDelete) {
+    try {
+      await removeUserWordForSchema(props.schemaId, item.code, item.text);
+    } catch {
+      failed++;
     }
   }
   if (failed > 0) {
@@ -246,6 +249,7 @@ onMounted(() => {
     empty-text="暂无用户词条"
     search-empty-text="未找到匹配词条"
     :server-pagination="{ total: totalCount, pageSize: PAGE_SIZE, page: currentPage }"
+    :on-row-dblclick="(item: UserWordItem) => openEditDialog(item)"
     @update:selection="selectedKeys = $event"
     @page-change="handlePageChange"
     @search="handleSearchInput"

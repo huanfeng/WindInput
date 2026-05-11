@@ -11,6 +11,7 @@ import {
   type SortingState,
   type RowSelectionState,
 } from "@tanstack/vue-table";
+import { ChevronDown } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -154,11 +155,30 @@ function jumpToPage(val: string) {
   }
 }
 
+const clientCurrentPage = computed(() => table.getState().pagination.pageIndex);
+const clientTotalPages = computed(() => table.getPageCount());
+
+function jumpClientPage(val: string) {
+  const p = parseInt(val, 10);
+  if (isNaN(p)) return;
+  table.setPageIndex(Math.max(0, Math.min(p - 1, clientTotalPages.value - 1)));
+}
+
+function rowGlobalIndex(index: number): number {
+  if (props.serverPagination) {
+    return props.serverPagination.page * props.serverPagination.pageSize + index + 1;
+  }
+  if (props.pageSize > 0) {
+    return table.getState().pagination.pageIndex * props.pageSize + index + 1;
+  }
+  return index + 1;
+}
+
 defineExpose({ table, globalFilter, clearSelection, selectedCount });
 </script>
 
 <template>
-  <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+  <div class="flex flex-col flex-1 min-h-0 overflow-hidden pb-1">
     <!-- Toolbar -->
     <div class="flex items-center gap-2 pt-1 mb-2 shrink-0 flex-nowrap">
       <slot
@@ -243,9 +263,10 @@ defineExpose({ table, globalFilter, clearSelection, selectedCount });
           <TableBody>
             <template v-if="table.getRowModel().rows.length > 0">
               <TableRow
-                v-for="row in table.getRowModel().rows"
+                v-for="(row, rowIndex) in table.getRowModel().rows"
                 :key="row.id"
                 :class="{ 'bg-primary/5': row.getIsSelected() }"
+                :title="`序号 ${rowGlobalIndex(rowIndex)}`"
                 @dblclick="props.onRowDblclick?.(row.original as TData)"
                 @contextmenu.prevent="props.onRowContextmenu?.(row.original as TData, $event)"
               >
@@ -274,76 +295,64 @@ defineExpose({ table, globalFilter, clearSelection, selectedCount });
 
     <!-- Server-side pagination -->
     <div
-      v-if="
-        serverPagination && serverPagination.total > serverPagination.pageSize
-      "
-      class="flex items-center justify-center gap-2 pt-2 shrink-0"
+      v-if="serverPagination && serverPagination.total > serverPagination.pageSize"
+      class="flex items-center justify-center gap-1 py-1.5 shrink-0"
     >
-      <Button
-        variant="outline"
-        size="sm"
+      <Button variant="outline" size="icon" class="h-7 w-7 text-xs"
         :disabled="serverPagination.page === 0"
-        @click="emit('page-change', serverPagination.page - 1)"
-      >
-        上一页
-      </Button>
-      <span class="text-xs text-muted-foreground whitespace-nowrap">
-        {{ serverPagination.page * serverPagination.pageSize + 1 }}-{{
-          Math.min(
-            (serverPagination.page + 1) * serverPagination.pageSize,
-            serverPagination.total,
-          )
-        }}
-        / {{ serverPagination.total }}
-      </span>
-      <Input
-        type="number"
-        :model-value="serverPagination.page + 1"
-        :min="1"
-        :max="serverTotalPages"
-        class="w-[52px] h-[var(--control-h-sm)] text-center text-xs"
-        @keydown.enter="jumpToPage(($event.target as HTMLInputElement).value)"
-        @blur="jumpToPage(($event.target as HTMLInputElement).value)"
-      />
-      <span class="text-xs text-muted-foreground">/ {{ serverTotalPages }}</span>
-      <Button
-        variant="outline"
-        size="sm"
-        :disabled="
-          (serverPagination.page + 1) * serverPagination.pageSize >=
-          serverPagination.total
-        "
-        @click="emit('page-change', serverPagination.page + 1)"
-      >
-        下一页
-      </Button>
+        @click="emit('page-change', 0)" title="第一页">«</Button>
+      <Button variant="outline" size="icon" class="h-7 w-7 text-xs"
+        :disabled="serverPagination.page === 0"
+        @click="emit('page-change', serverPagination.page - 1)" title="上一页">‹</Button>
+      <div class="relative inline-flex items-center">
+        <select
+          :value="serverPagination.page + 1"
+          class="h-7 w-16 appearance-none rounded-md border border-input bg-background pl-2 pr-5 text-xs ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 cursor-pointer"
+          @change="jumpToPage(($event.target as HTMLSelectElement).value)"
+        >
+          <option v-for="p in serverTotalPages" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <ChevronDown class="pointer-events-none absolute right-1 h-3 w-3 text-muted-foreground" />
+      </div>
+      <span class="text-xs text-muted-foreground whitespace-nowrap">/ {{ serverTotalPages }}</span>
+      <Button variant="outline" size="icon" class="h-7 w-7 text-xs"
+        :disabled="(serverPagination.page + 1) * serverPagination.pageSize >= serverPagination.total"
+        @click="emit('page-change', serverPagination.page + 1)" title="下一页">›</Button>
+      <Button variant="outline" size="icon" class="h-7 w-7 text-xs"
+        :disabled="serverPagination.page === serverTotalPages - 1"
+        @click="emit('page-change', serverTotalPages - 1)" title="最后页">»</Button>
+      <span class="text-xs text-muted-foreground ml-1">{{ serverPagination.pageSize }}/页</span>
     </div>
 
     <!-- Client-side pagination -->
     <div
       v-else-if="pageSize > 0 && data.length > pageSize"
-      class="flex items-center justify-center gap-3 pt-2 shrink-0"
+      class="flex items-center justify-center gap-1 py-1.5 shrink-0"
     >
-      <Button
-        variant="outline"
-        size="sm"
+      <Button variant="outline" size="icon" class="h-7 w-7 text-xs"
         :disabled="!table.getCanPreviousPage()"
-        @click="table.previousPage()"
-      >
-        上一页
-      </Button>
-      <span class="text-xs text-muted-foreground">
-        第 {{ table.getState().pagination.pageIndex + 1 }} /
-        {{ table.getPageCount() }} 页
-      </span>
-      <Button
-        variant="outline"
-        size="sm"
+        @click="table.setPageIndex(0)" title="第一页">«</Button>
+      <Button variant="outline" size="icon" class="h-7 w-7 text-xs"
+        :disabled="!table.getCanPreviousPage()"
+        @click="table.previousPage()" title="上一页">‹</Button>
+      <div class="relative inline-flex items-center">
+        <select
+          :value="clientCurrentPage + 1"
+          class="h-7 w-16 appearance-none rounded-md border border-input bg-background pl-2 pr-5 text-xs ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 cursor-pointer"
+          @change="jumpClientPage(($event.target as HTMLSelectElement).value)"
+        >
+          <option v-for="p in clientTotalPages" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <ChevronDown class="pointer-events-none absolute right-1 h-3 w-3 text-muted-foreground" />
+      </div>
+      <span class="text-xs text-muted-foreground whitespace-nowrap">/ {{ clientTotalPages }}</span>
+      <Button variant="outline" size="icon" class="h-7 w-7 text-xs"
         :disabled="!table.getCanNextPage()"
-        @click="table.nextPage()"
-      >
-        下一页
-      </Button>
+        @click="table.nextPage()" title="下一页">›</Button>
+      <Button variant="outline" size="icon" class="h-7 w-7 text-xs"
+        :disabled="!table.getCanNextPage()"
+        @click="table.setPageIndex(clientTotalPages - 1)" title="最后页">»</Button>
+      <span class="text-xs text-muted-foreground ml-1">{{ pageSize }}/页</span>
     </div>
   </div>
 </template>

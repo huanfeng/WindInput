@@ -125,9 +125,9 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const wordText = ref("");
-const wordCode = ref("");
-const schemaID = ref("");
+const wordText = ref(props.initialText ?? "");
+const wordCode = ref(props.initialCode ?? "");
+const schemaID = ref(props.initialSchema ?? "");
 const wordWeight = ref(1200);
 const schemas = ref<SchemaItem[]>([]);
 const { toast } = useToast();
@@ -260,15 +260,13 @@ onMounted(async () => {
     schemas.value = [];
   }
 
-  if (props.initialText) wordText.value = props.initialText;
-  if (props.initialCode) wordCode.value = props.initialCode;
+  // 用 schemas 列表做别名匹配，修正 schemaID（双拼方案合并后 id 可能变为 "pinyin"）
   if (props.initialSchema) {
-    // 先精确匹配，再按 aliasIds 匹配（双拼方案合并到 pinyin 桶后 id 变为 "pinyin"）
     const matched =
       schemas.value.find((s) => s.id === props.initialSchema) ||
       schemas.value.find((s) => s.aliasIds.includes(props.initialSchema!));
     schemaID.value = matched ? matched.id : schemas.value[0]?.id || "";
-  } else if (schemas.value.length > 0) {
+  } else if (schemas.value.length > 0 && !schemaID.value) {
     schemaID.value = schemas.value[0].id;
   }
 

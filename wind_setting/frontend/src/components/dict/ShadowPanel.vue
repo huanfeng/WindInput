@@ -230,17 +230,18 @@ async function handleRemove(item: ShadowRuleItem) {
 }
 
 async function handleBatchRemove() {
-  const count = selectedKeys.value.size;
-  const ok = await confirm(`确定删除选中的 ${count} 条调整规则？`);
+  // 首个 await 前同步快照：Wails 事件可能在 await 间触发 loadData() 清空 selectedKeys
+  const itemsToDelete = shadowRules.value.filter((item) =>
+    selectedKeys.value.has(itemKey(item)),
+  );
+  if (itemsToDelete.length === 0) return;
+  const ok = await confirm(`确定删除选中的 ${itemsToDelete.length} 条调整规则？`);
   if (!ok) return;
   try {
-    const items = shadowRules.value.filter((item) =>
-      selectedKeys.value.has(itemKey(item)),
-    );
-    for (const item of items) {
+    for (const item of itemsToDelete) {
       await removeShadowRuleForSchema(props.schemaId, item.code, item.word);
     }
-    toast(`已删除 ${count} 条规则`);
+    toast(`已删除 ${itemsToDelete.length} 条规则`);
     await loadData();
     emit("schema-changed");
   } catch (e) {
@@ -254,11 +255,12 @@ async function handleClearAll() {
     "确定清空当前方案的所有候选调整规则吗？此操作不可撤销。",
   );
   if (!ok) return;
+  const allItems = [...shadowRules.value];
   try {
-    for (const item of shadowRules.value) {
+    for (const item of allItems) {
       await removeShadowRuleForSchema(props.schemaId, item.code, item.word);
     }
-    toast(`已清空 ${shadowRules.value.length} 条规则`, "success");
+    toast(`已清空 ${allItems.length} 条规则`, "success");
     await loadData();
     emit("schema-changed");
   } catch (e) {
@@ -280,6 +282,7 @@ onMounted(() => {
     search-placeholder="搜索..."
     empty-text="暂无调整规则"
     search-empty-text="未找到匹配规则"
+    :on-row-dblclick="(item: ShadowRuleItem) => openDialog(item)"
     @update:selection="selectedKeys = $event"
   >
     <template #toolbar-start="{ selectedCount }">

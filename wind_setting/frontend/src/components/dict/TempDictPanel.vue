@@ -178,17 +178,18 @@ async function handleRemove(item: TempWordItem) {
 }
 
 async function handleBatchRemove() {
-  const count = selectedKeys.value.size;
-  const ok = await confirm(`确定删除选中的 ${count} 条临时词条？`);
+  // 首个 await 前同步快照：Wails 事件可能在 await 间触发 loadData() 清空 selectedKeys
+  const itemsToDelete = tempDict.value.filter((item) =>
+    selectedKeys.value.has(itemKey(item)),
+  );
+  if (itemsToDelete.length === 0) return;
+  const ok = await confirm(`确定删除选中的 ${itemsToDelete.length} 条临时词条？`);
   if (!ok) return;
   try {
-    const items = tempDict.value.filter((item) =>
-      selectedKeys.value.has(itemKey(item)),
-    );
-    for (const item of items) {
+    for (const item of itemsToDelete) {
       await removeTempWordForSchema(props.schemaId, item.code, item.text);
     }
-    toast(`已删除 ${count} 条词条`);
+    toast(`已删除 ${itemsToDelete.length} 条词条`);
     await loadData();
     emit("schema-changed");
   } catch (e) {
@@ -206,6 +207,7 @@ onMounted(() => {
     :columns="columns"
     :data="tempDict"
     :loading="loading"
+    :page-size="100"
     :row-key="(row: TempWordItem) => `${row.code}|${row.text}`"
     search-placeholder="搜索..."
     empty-text="暂无临时词条"

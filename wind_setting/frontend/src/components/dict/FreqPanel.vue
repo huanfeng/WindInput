@@ -164,18 +164,21 @@ async function handleDelete(item: FreqItem) {
 
 async function handleBatchDelete() {
   if (selectedKeys.value.size === 0) return;
+  // 首个 await 前同步快照：Wails 事件可能在 await 间触发 loadData() 清空 selectedKeys
+  const itemsToDelete = freqList.value.filter((item) =>
+    selectedKeys.value.has(itemKey(item)),
+  );
+  if (itemsToDelete.length === 0) return;
   const ok = await confirm(
-    `确定删除选中的 ${selectedKeys.value.size} 条词频记录？`,
+    `确定删除选中的 ${itemsToDelete.length} 条词频记录？`,
   );
   if (!ok) return;
   let failed = 0;
-  for (const item of freqList.value) {
-    if (selectedKeys.value.has(itemKey(item))) {
-      try {
-        await deleteFreq(props.schemaId, item.code, item.text);
-      } catch {
-        failed++;
-      }
+  for (const item of itemsToDelete) {
+    try {
+      await deleteFreq(props.schemaId, item.code, item.text);
+    } catch {
+      failed++;
     }
   }
   if (failed > 0) {
