@@ -615,9 +615,9 @@ func (m *Manager) IsCurrentEngineType(engineType schema.EngineType) bool {
 	return false
 }
 
-// GetChaiziSpec 返回当前活跃方案的拆字数据库路径和字体路径（均为绝对路径）。
-// 方案未配置拆字或文件不存在时返回空字符串对。
-func (m *Manager) GetChaiziSpec() (dbPath, fontPath string) {
+// GetChaiziSpec 返回当前活跃方案的拆字数据库路径、字体文件路径（均为绝对路径）和 DirectWrite 字体族名称。
+// 方案未配置拆字或文件不存在时返回空字符串。
+func (m *Manager) GetChaiziSpec() (dbPath, fontPath, fontDWName string) {
 	m.mu.RLock()
 	sm := m.schemaManager
 	id := m.currentID
@@ -625,27 +625,28 @@ func (m *Manager) GetChaiziSpec() (dbPath, fontPath string) {
 	m.mu.RUnlock()
 
 	if sm == nil {
-		return "", ""
+		return "", "", ""
 	}
 	if id == "" {
 		id = sm.GetActiveID()
 	}
 	s := sm.GetSchema(id)
 	if s == nil {
-		return "", ""
+		return "", "", ""
 	}
 	// 混输方案自身不配置拆字，继承主码表方案的拆字配置
 	if s.Engine.Chaizi == nil && s.Engine.Type == schema.EngineTypeMixed && s.Engine.Mixed != nil {
 		s = sm.GetSchema(s.Engine.Mixed.PrimarySchema)
 		if s == nil {
-			return "", ""
+			return "", "", ""
 		}
 	}
 	if s.Engine.Chaizi == nil {
-		return "", ""
+		return "", "", ""
 	}
 	dataDir := sm.GetDataDir()
 	dbPath = schema.ResolveDictPath(dataRoot, dataDir, s.Engine.Chaizi.DBPath)
 	fontPath = schema.ResolveDictPath(dataRoot, dataDir, s.Engine.Chaizi.FontFamily)
-	return dbPath, fontPath
+	fontDWName = s.Engine.Chaizi.FontDWName
+	return dbPath, fontPath, fontDWName
 }

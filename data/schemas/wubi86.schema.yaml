@@ -11,6 +11,7 @@ engine:
   chaizi:
     db_path: "wubi86/wubi86_chaizi.txt"
     font_family: "wubi86/HeiTiZiGen.ttf"
+    font_dw_name: "黑体字根"
   codetable:
     max_code_length: 4
     auto_commit_unique: false

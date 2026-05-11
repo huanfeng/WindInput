@@ -356,8 +356,9 @@ func (s *Schema) DataSchemaID() string {
 
 // ChaiziSpec 拆字提示配置（方案级，与词库文件放一起）
 type ChaiziSpec struct {
-	DBPath     string `yaml:"db_path"`               // 拆字数据库文件路径（相对词库目录或绝对路径）
-	FontFamily string `yaml:"font_family,omitempty"` // 显示拆字所用的字体（空=使用默认字体）
+	DBPath     string `yaml:"db_path"`                // 拆字数据库文件路径（相对词库目录或绝对路径）
+	FontFamily string `yaml:"font_family,omitempty"`  // 显示拆字所用的字体（空=使用默认字体）
+	FontDWName string `yaml:"font_dw_name,omitempty"` // DirectWrite 字体族名称（字体已安装到系统时使用，优先于 font_family 路径加载）
 }
 
 // GetDictsByRole 按角色筛选词库规格

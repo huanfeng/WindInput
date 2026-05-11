@@ -651,10 +651,6 @@ func dwCreateTextLayout(factory unsafe.Pointer, textFormat unsafe.Pointer, text 
 		return nil, err
 	}
 
-	// Set system font fallback on the layout for rare character support
-	// (CJK Extended B-H, etc.). Requires IDWriteTextLayout2 (Windows 8.1+).
-	dwSetSystemFontFallback(layout)
-
 	return layout, nil
 }
 
@@ -731,38 +727,83 @@ func dwBuildCustomFontFallback(factory2 unsafe.Pointer) unsafe.Pointer {
 	return fallback
 }
 
-// dwSetSystemFontFallback sets the system font fallback on a text layout
-// so that characters missing from the primary font fall back to system fonts.
-var dwFontFallbackLogOnce sync.Once
-
-func dwSetSystemFontFallback(layout unsafe.Pointer) {
-	if dwriteSystemFontFallback == nil || layout == nil {
+// dwApplyFontFallback applies a font fallback object to a text layout.
+// Requires IDWriteTextLayout2 (Windows 8.1+). No-op if fallback or layout is nil.
+func dwApplyFontFallback(layout unsafe.Pointer, fallback unsafe.Pointer) {
+	if fallback == nil || layout == nil {
 		return
 	}
-	// QueryInterface for IDWriteTextLayout2
 	var layout2 unsafe.Pointer
 	if ret, _ := dwComCall(layout, 0, // IUnknown::QueryInterface
 		uintptr(unsafe.Pointer(&dwIIDTextLayout2)),
 		uintptr(unsafe.Pointer(&layout2)),
 	); ret != 0 || layout2 == nil {
-		dwFontFallbackLogOnce.Do(func() {
-			slog.Warn("DirectWrite font fallback: IDWriteTextLayout2 not available", "hr", fmt.Sprintf("0x%08X", ret))
-		})
 		return
 	}
 	defer dwComRelease(layout2)
+	dwComCall(layout2, dwLayout2VtSetFontFallback, uintptr(fallback))
+}
 
-	// IDWriteTextLayout2::SetFontFallback(IDWriteFontFallback*)
-	ret, _ := dwComCall(layout2, dwLayout2VtSetFontFallback,
-		uintptr(dwriteSystemFontFallback),
+var dwFallbackInitLogOnce sync.Once
+
+// dwBuildFallbackWithPUAFont creates a font fallback that maps the PUA range (E000–F8FF)
+// to puaFamilyName (highest priority), then appends baseFallback as the base for all other
+// characters. Pass dwriteSystemFontFallback as baseFallback to inherit the full CJK coverage
+// already built during initialisation; pass nil to use the OS system fallback only.
+func dwBuildFallbackWithPUAFont(factory2 unsafe.Pointer, puaFamilyName string, baseFallback unsafe.Pointer) unsafe.Pointer {
+	var builder unsafe.Pointer
+	if ret, _ := dwComCall(factory2, dwFactory2VtCreateFontFallbackBuilder,
+		uintptr(unsafe.Pointer(&builder)),
+	); int32(ret) < 0 || builder == nil {
+		slog.Warn("DirectWrite: CreateFontFallbackBuilder failed for PUA font", "hr", fmt.Sprintf("0x%08X", ret))
+		return nil
+	}
+	defer dwComRelease(builder)
+
+	puaRange := [1]dwUnicodeRange{{0xE000, 0xF8FF}}
+	puaFamilyPtr, _ := syscall.UTF16PtrFromString(puaFamilyName)
+	puaFamilyPtrs := [1]*uint16{puaFamilyPtr}
+
+	ret, _ := dwComCall(builder, dwFallbackBuilderVtAddMapping,
+		uintptr(unsafe.Pointer(&puaRange[0])),
+		uintptr(uint32(1)),
+		uintptr(unsafe.Pointer(&puaFamilyPtrs[0])),
+		uintptr(uint32(1)),
+		0,                              // fontCollection = NULL (system)
+		0,                              // localeName = NULL
+		0,                              // baseFamilyName = NULL
+		uintptr(math.Float32bits(1.0)), // scale = 1.0
 	)
-	dwFontFallbackLogOnce.Do(func() {
-		if int32(ret) < 0 {
-			slog.Warn("DirectWrite SetFontFallback failed", "hr", fmt.Sprintf("0x%08X", ret))
-		} else {
-			slog.Info("DirectWrite system font fallback applied to text layout")
+	runtime.KeepAlive(puaRange)
+	runtime.KeepAlive(puaFamilyPtr)
+	runtime.KeepAlive(puaFamilyPtrs)
+	if int32(ret) < 0 {
+		slog.Warn("DirectWrite: AddMapping for PUA font failed", "hr", fmt.Sprintf("0x%08X", ret))
+		return nil
+	}
+
+	// Append base fallback for all other characters.
+	// Prefer the pre-built custom CJK fallback (covers Extension B-G); fall back to OS system.
+	if baseFallback != nil {
+		dwComCall(builder, dwFallbackBuilderVtAddMappings, uintptr(baseFallback))
+	} else {
+		var sysFallback unsafe.Pointer
+		if ret2, _ := dwComCall(factory2, dwFactory2VtGetSystemFontFallback,
+			uintptr(unsafe.Pointer(&sysFallback)),
+		); ret2 == 0 && sysFallback != nil {
+			dwComCall(builder, dwFallbackBuilderVtAddMappings, uintptr(sysFallback))
+			dwComRelease(sysFallback)
 		}
-	})
+	}
+
+	var fallback unsafe.Pointer
+	if ret3, _ := dwComCall(builder, dwFallbackBuilderVtCreateFontFallback,
+		uintptr(unsafe.Pointer(&fallback)),
+	); int32(ret3) < 0 || fallback == nil {
+		slog.Warn("DirectWrite: CreateFontFallback failed for PUA font", "hr", fmt.Sprintf("0x%08X", ret3))
+		return nil
+	}
+	return fallback
 }
 
 func dwGetTextMetrics(layout unsafe.Pointer) (dwTextMetrics, error) {
@@ -840,6 +881,9 @@ type DWriteRenderer struct {
 	cachedFormatFamily string
 	cachedFormatWeight int
 	cachedFormatSize   float64
+
+	// Per-renderer font fallback; nil means use the global dwriteSystemFontFallback.
+	customFallback unsafe.Pointer
 
 	loaded         bool
 	loadFailed     bool
@@ -951,6 +995,47 @@ func (r *DWriteRenderer) SetFont(font string) {
 	r.fontName = name
 }
 
+// SetFontFallbackForPUA builds a custom font fallback that maps the PUA range to familyName
+// (for chaizi radical characters) and stores it on this renderer instance.
+// Calling with empty familyName clears the custom fallback (reverts to global system fallback).
+func (r *DWriteRenderer) SetFontFallbackForPUA(familyName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if familyName == "" {
+		if r.customFallback != nil {
+			dwComRelease(r.customFallback)
+			r.customFallback = nil
+		}
+		return
+	}
+
+	if err := initDWriteShared(); err != nil || dwriteSharedFactory2 == nil {
+		slog.Warn("DirectWrite: Factory2 not available, cannot configure PUA font fallback", "family", familyName)
+		return
+	}
+
+	fb := dwBuildFallbackWithPUAFont(dwriteSharedFactory2, familyName, dwriteSystemFontFallback)
+	if fb == nil {
+		return
+	}
+	if r.customFallback != nil {
+		dwComRelease(r.customFallback)
+	}
+	r.customFallback = fb
+	dwFallbackInitLogOnce.Do(func() {
+		slog.Info("DirectWrite: PUA font fallback configured", "family", familyName)
+	})
+}
+
+// effectiveFallback returns the fallback to use for layouts: custom if set, else global.
+func (r *DWriteRenderer) effectiveFallback() unsafe.Pointer {
+	if r.customFallback != nil {
+		return r.customFallback
+	}
+	return dwriteSystemFontFallback
+}
+
 // SetGDIParams updates font weight and scale.
 func (r *DWriteRenderer) SetGDIParams(weight int, scale float64) {
 	r.mu.Lock()
@@ -992,6 +1077,7 @@ func (r *DWriteRenderer) MeasureString(text string, fontSize float64) float64 {
 		return 0
 	}
 	defer dwComRelease(layout)
+	dwApplyFontFallback(layout, r.effectiveFallback())
 
 	metrics, err := dwGetTextMetrics(layout)
 	if err != nil {
@@ -1072,6 +1158,7 @@ func (r *DWriteRenderer) drawStringLocked(text string, x, y float64, fontSize fl
 		return
 	}
 	defer dwComRelease(layout)
+	dwApplyFontFallback(layout, r.effectiveFallback())
 
 	metrics, err := dwGetTextMetrics(layout)
 	if err != nil {
@@ -1140,6 +1227,10 @@ func (r *DWriteRenderer) Close() {
 	if r.cachedFormat != nil {
 		dwComRelease(r.cachedFormat)
 		r.cachedFormat = nil
+	}
+	if r.customFallback != nil {
+		dwComRelease(r.customFallback)
+		r.customFallback = nil
 	}
 	if r.backend != nil {
 		r.backend.close()

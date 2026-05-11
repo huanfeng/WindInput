@@ -58,20 +58,14 @@ func (w *TooltipWindow) SetFontFamily(fontSpec string) {
 }
 
 // SetTextRenderMode switches between GDI, FreeType, and DirectWrite text rendering.
-// If custom fallback fonts are configured (UserFonts non-empty), FreeType mode is
-// preserved regardless of the requested mode, because DirectWrite/GDI cannot load
-// arbitrary TTF files (e.g., PUA radical fonts) that are not system-registered.
 func (w *TooltipWindow) SetTextRenderMode(mode TextRenderMode) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if mode != TextRenderModeFreetype && len(w.TextBackendManager.FontConfig().UserFonts) > 0 {
-		mode = TextRenderModeFreetype
-	}
 	w.TextBackendManager.SetTextRenderMode(mode)
 }
 
 // AddFallbackFont 注册额外的回退字体路径（TTF/OTF）并切换到 FreeType 渲染模式。
-// 用于在 tooltip 中显示需要专用字体的字符（如五笔字根 PUA 字符）。
+// 仅在字体未系统安装时使用；系统已安装字体请使用 SetChaiziFont 配置 DirectWrite fallback。
 func (w *TooltipWindow) AddFallbackFont(fontPath string) {
 	if fontPath == "" {
 		return
@@ -84,6 +78,22 @@ func (w *TooltipWindow) AddFallbackFont(fontPath string) {
 	}
 	fc.UserFonts = append(fc.UserFonts, fontPath)
 	w.TextBackendManager.SetTextRenderMode(TextRenderModeFreetype)
+}
+
+// SetChaiziFont 配置拆字 PUA 字符的渲染字体。
+// 若 dwFamilyName 非空（字体已安装到系统），则配置 DirectWrite PUA fallback 并切换到 DW 模式。
+// 否则回退到 FreeType 模式加载 fontPath 文件。
+func (w *TooltipWindow) SetChaiziFont(fontPath, dwFamilyName string) {
+	if dwFamilyName != "" {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.TextBackendManager.SetDWriteFontFallbackForPUA(dwFamilyName)
+		w.TextBackendManager.SetTextRenderMode(TextRenderModeDirectWrite)
+		return
+	}
+	if fontPath != "" {
+		w.AddFallbackFont(fontPath)
+	}
 }
 
 // SetOnRightClick registers a callback invoked when the user right-clicks the tooltip.

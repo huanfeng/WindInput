@@ -875,6 +875,13 @@ install_cleanup_bak_end:
   File /r "${BUILD_DIR}\data\*.*"
   SetOutPath "$INSTDIR"
 
+  ; --- Step 6.5: Install PUA font to system (for DirectWrite fallback) ---
+  DetailPrint "正在安装字体到系统..."
+  CopyFiles /SILENT "$INSTDIR\data\schemas\wubi86\HeiTiZiGen.ttf" "$WINDIR\Fonts\HeiTiZiGen.ttf"
+  WriteRegStr HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts" "黑体字根 (TrueType)" "HeiTiZiGen.ttf"
+  WriteRegStr HKLM "SOFTWARE\WindInput" "InstalledFont_HeiTiZiGen" "1"
+  System::Call 'user32::SendMessage(i 65535, i 29, i 0, i 0)'
+
   ; --- Portable mode: skip registration, create marker, launch ---
   StrCmp $InstallMode "portable" 0 install_standard_mode
 
@@ -987,6 +994,16 @@ uninstall_has_x86_dll:
   DetailPrint "正在注销 COM x86 组件..."
   ExecWait '"$WINDIR\SysWOW64\regsvr32.exe" /u /s "$INSTDIR\wind_tsf_x86.dll"'
 uninstall_unreg_done:
+
+  ; --- Step 2.5: Remove system font if we installed it ---
+  DetailPrint "正在卸载系统字体..."
+  ReadRegStr $0 HKLM "SOFTWARE\WindInput" "InstalledFont_HeiTiZiGen"
+  StrCmp $0 "1" 0 uninst_font_skip
+    Delete "$WINDIR\Fonts\HeiTiZiGen.ttf"
+    DeleteRegValue HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts" "黑体字根 (TrueType)"
+    DeleteRegValue HKLM "SOFTWARE\WindInput" "InstalledFont_HeiTiZiGen"
+    System::Call 'user32::SendMessage(i 65535, i 29, i 0, i 0)'
+  uninst_font_skip:
 
   ; --- Step 3: Remove binaries (rename if locked, schedule reboot cleanup) ---
   DetailPrint "正在删除已安装文件..."

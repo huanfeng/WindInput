@@ -372,6 +372,40 @@ if (Test-Path $BuildDataDir) {
     Write-Host "[警告] build\data 目录不存在，请先运行 build_all.ps1" -ForegroundColor Yellow
 }
 
+# 安装 PUA 字体到系统（供 DirectWrite fallback 使用）
+$FontFile    = "HeiTiZiGen.ttf"
+$FontDName   = "黑体字根 (TrueType)"
+$FontSrc     = Join-Path $InstallDataDir "schemas\wubi86\$FontFile"
+$FontDest    = Join-Path $env:SystemRoot "Fonts\$FontFile"
+$FontRegKey  = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+$TrackingKey = "HKLM:\SOFTWARE\WindInput"
+
+if (Test-Path $FontSrc) {
+    try {
+        Copy-Item -Path $FontSrc -Destination $FontDest -Force
+        Set-ItemProperty -Path $FontRegKey -Name $FontDName -Value $FontFile -Force
+        # 记录本次安装的字体，卸载时用于区分是否我们安装的
+        if (-not (Test-Path $TrackingKey)) {
+            New-Item -Path $TrackingKey -Force | Out-Null
+        }
+        Set-ItemProperty -Path $TrackingKey -Name "InstalledFont_HeiTiZiGen" -Value "1" -Force
+        # 广播 WM_FONTCHANGE (0x001D) 通知所有应用字体列表已变化
+        $code = @"
+using System;using System.Runtime.InteropServices;
+public class WinFont {
+    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
+}
+"@
+        Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
+        [WinFont]::SendMessage([IntPtr]([int]0xFFFF), 0x001D, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+        Write-Host "  - 已安装字体: $FontDName" -ForegroundColor Green
+    } catch {
+        Write-Host "[警告] 安装字体失败: $_" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "[警告] 未找到字体文件: $FontSrc" -ForegroundColor Yellow
+}
+
 # [7/10] 注册 COM 组件
 Write-Host "[7/10] 注册 COM 组件..."
 # 注册 x64 DLL（使用默认 64 位 regsvr32）

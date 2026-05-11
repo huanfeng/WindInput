@@ -185,6 +185,16 @@ func (m *TextBackendManager) SetFontFamily(fontSpec string) {
 	}
 }
 
+// SetDWriteFontFallbackForPUA configures a per-renderer font fallback that maps
+// the PUA Unicode range (E000–F8FF) to familyName for this backend's DWrite renderer.
+// The font must be installed in the system for DirectWrite to locate it by name.
+func (m *TextBackendManager) SetDWriteFontFallbackForPUA(familyName string) {
+	dwr := m.EnsureDWriteRenderer()
+	if dwr != nil {
+		dwr.SetFontFallbackForPUA(familyName)
+	}
+}
+
 // Close releases all backends.
 func (m *TextBackendManager) Close() {
 	m.ReleaseFreeTypeBackend()

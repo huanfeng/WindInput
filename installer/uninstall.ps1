@@ -88,6 +88,37 @@ Get-ChildItem -Path $InstallDir -Filter $dllPattern -ErrorAction SilentlyContinu
     & regsvr32 /u /s $_.FullName 2>$null
 }
 
+# [3.5/8] 卸载我们安装的系统字体
+Write-Host "[3.5/8] 卸载系统字体..."
+$TrackingKey = "HKLM:\SOFTWARE\WindInput"
+$FontRegKey  = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+$tracked = (Get-ItemProperty -Path $TrackingKey -Name "InstalledFont_HeiTiZiGen" -ErrorAction SilentlyContinue)?.InstalledFont_HeiTiZiGen
+if ($tracked -eq "1") {
+    $FontFile  = "HeiTiZiGen.ttf"
+    $FontDName = "黑体字根 (TrueType)"
+    $FontPath  = Join-Path $env:SystemRoot "Fonts\$FontFile"
+    if (Test-Path $FontPath) {
+        Remove-Item -Path $FontPath -Force -ErrorAction SilentlyContinue
+        Write-Host "  - 已删除字体文件: $FontFile"
+    }
+    Remove-ItemProperty -Path $FontRegKey -Name $FontDName -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $TrackingKey -Name "InstalledFont_HeiTiZiGen" -ErrorAction SilentlyContinue
+    # 广播 WM_FONTCHANGE 通知所有应用
+    try {
+        $code = @"
+using System;using System.Runtime.InteropServices;
+public class WinFontU {
+    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
+}
+"@
+        Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
+        [WinFontU]::SendMessage([IntPtr]([int]0xFFFF), 0x001D, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    } catch {}
+    Write-Host "  - 已从系统移除字体: $FontDName"
+} else {
+    Write-Host "  - 无需卸载字体（非本程序安装）"
+}
+
 # [4/8] 删除文件
 Write-Host "[4/8] 删除文件..."
 $RandomSuffix = Get-Random -Maximum 99999999

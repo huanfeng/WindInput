@@ -299,10 +299,11 @@ func (m *Manager) showTooltipContextMenu(text string, x, y int) {
 	})
 }
 
-// SetTooltipChaiziFont 为 tooltip 窗口注册拆字专用字体（用于渲染 PUA 字根字符）。
+// SetTooltipChaiziFont 配置 tooltip 窗口的拆字字体（用于渲染 PUA 字根字符）。
+// dwFamilyName 非空时使用 DirectWrite 系统字体 fallback；否则以 FreeType 加载 fontPath 文件。
 // 该方法可在任意 goroutine 调用；tooltip 未就绪时静默忽略。
-func (m *Manager) SetTooltipChaiziFont(fontPath string) {
-	if fontPath == "" {
+func (m *Manager) SetTooltipChaiziFont(fontPath, dwFamilyName string) {
+	if fontPath == "" && dwFamilyName == "" {
 		return
 	}
 	m.mu.Lock()
@@ -311,5 +312,5 @@ func (m *Manager) SetTooltipChaiziFont(fontPath string) {
 	if tt == nil {
 		return
 	}
-	tt.AddFallbackFont(fontPath)
+	tt.SetChaiziFont(fontPath, dwFamilyName)
 }
