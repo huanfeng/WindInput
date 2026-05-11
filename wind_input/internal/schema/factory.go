@@ -13,6 +13,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/dict/binformat"
 	"github.com/huanfeng/wind_input/internal/dict/dictcache"
 	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
@@ -575,8 +576,15 @@ func loadCodetableFromWdb(engine *codetable.Engine, wdbPath string) error {
 		return err
 	}
 
-	// 从 sidecar meta.json 恢复 Header 信息
-	meta, err := dictcache.LoadCodeTableMeta(wdbPath)
+	// 从 wdb 内嵌 meta 段恢复 Header 信息
+	reader, err := binformat.OpenDict(wdbPath)
+	if err != nil {
+		slog.Default().Warn("打开 wdb 读取 meta 失败", "err", err)
+		return nil
+	}
+	defer reader.Close()
+
+	meta, err := dictcache.LoadCodeTableMetaFromWdb(reader)
 	if err != nil {
 		slog.Default().Warn("加载码表 meta 失败", "err", err)
 	} else {

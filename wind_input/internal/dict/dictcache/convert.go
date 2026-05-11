@@ -33,11 +33,6 @@ type CodeTableMeta struct {
 	HasWeight     bool   `json:"has_weight"`
 }
 
-// MetaPath 返回 wdb 文件对应的 meta.json 路径
-func MetaPath(wdbPath string) string {
-	return wdbPath + ".meta.json"
-}
-
 // ConvertCodeTableToWdb 将文本码表转换为 wdb 二进制格式
 func ConvertCodeTableToWdb(srcPath, wdbPath string, logger *slog.Logger) error {
 	logger.Info("转换码表", "src", srcPath, "dst", wdbPath)
@@ -88,26 +83,8 @@ func ConvertCodeTableToWdb(srcPath, wdbPath string, logger *slog.Logger) error {
 		return err
 	}
 
-	// Deprecated: 写入 meta.json sidecar（Phase 3 移除，manager_init.go 仍在使用）
-	if err := writeMetaJSON(MetaPath(wdbPath), &meta); err != nil {
-		logger.Warn("写入 sidecar meta.json 失败", "error", err)
-	}
-
 	logger.Info("码表转换完成", "codes", len(entries))
 	return nil
-}
-
-// LoadCodeTableMeta 加载 meta.json（Deprecated: Phase 3 移除，改用 LoadCodeTableMetaFromWdb）
-func LoadCodeTableMeta(wdbPath string) (*CodeTableMeta, error) {
-	data, err := os.ReadFile(MetaPath(wdbPath))
-	if err != nil {
-		return nil, err
-	}
-	var meta CodeTableMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, err
-	}
-	return &meta, nil
 }
 
 // LoadCodeTableMetaFromWdb 从 wdb 文件嵌入的 meta 段读取元数据
@@ -121,14 +98,6 @@ func LoadCodeTableMetaFromWdb(reader *binformat.DictReader) (*CodeTableMeta, err
 		return nil, fmt.Errorf("解析 wdb 元数据失败: %w", err)
 	}
 	return &meta, nil
-}
-
-func writeMetaJSON(path string, meta *CodeTableMeta) error {
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
 }
 
 // ConvertPinyinToWdb 将拼音 YAML 词库转换为 wdb 二进制格式
@@ -442,10 +411,6 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 		return writer.Write(w)
 	}); err != nil {
 		return err
-	}
-
-	if err := writeMetaJSON(MetaPath(wdbPath), &meta); err != nil {
-		logger.Warn("写入 sidecar meta.json 失败", "error", err)
 	}
 
 	logger.Info("rime 码表词库转换完成", "codes", len(codeEntries), "count", totalCount)
