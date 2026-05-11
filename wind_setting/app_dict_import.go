@@ -264,7 +264,7 @@ func (a *App) ExecuteTextListImport(schemaID string, words []rpcapi.EncodeResult
 		return &ImportExportResult{Count: 0}, nil
 	}
 
-	count, err := a.rpcClient.DictBatchAdd(schemaID, entries)
+	count, err := a.dictBatchAddChunked(schemaID, entries)
 	if err != nil {
 		return nil, fmt.Errorf("写入失败: %w", err)
 	}
@@ -321,6 +321,25 @@ func (a *App) ExecuteZipImport(filePath string, selectedSchemas []string, includ
 	return &ImportExportResult{Count: totalCount}, nil
 }
 
+const dictBatchChunkSize = 5000
+
+// dictBatchAddChunked 将 entries 分片后逐批发送，避免单次 RPC 超时
+func (a *App) dictBatchAddChunked(schemaID string, entries []rpcapi.WordEntry) (int, error) {
+	total := 0
+	for i := 0; i < len(entries); i += dictBatchChunkSize {
+		end := i + dictBatchChunkSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		n, err := a.rpcClient.DictBatchAdd(schemaID, entries[i:end])
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
 // writeImportResult 将 ImportResult 写入 Store（通过 RPC）
 func (a *App) writeImportResult(schemaID string, result *dictio.ImportResult, strategies map[string]string) (int, error) {
 	count := 0
@@ -334,7 +353,7 @@ func (a *App) writeImportResult(schemaID string, result *dictio.ImportResult, st
 				Count: w.Count, CreatedAt: w.CreatedAt,
 			}
 		}
-		n, err := a.rpcClient.DictBatchAdd(schemaID, entries)
+		n, err := a.dictBatchAddChunked(schemaID, entries)
 		if err != nil {
 			return count, fmt.Errorf("写入用户词库失败: %w", err)
 		}
@@ -350,7 +369,7 @@ func (a *App) writeImportResult(schemaID string, result *dictio.ImportResult, st
 				Count: w.Count, CreatedAt: w.CreatedAt,
 			}
 		}
-		n, err := a.rpcClient.DictBatchAdd(schemaID, entries)
+		n, err := a.dictBatchAddChunked(schemaID, entries)
 		if err != nil {
 			return count, fmt.Errorf("写入临时词库失败: %w", err)
 		}

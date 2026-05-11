@@ -251,16 +251,26 @@ func (d *DictService) BatchAdd(args *rpcapi.DictBatchAddArgs, reply *rpcapi.Dict
 	}
 	schemaID := d.resolveSchemaID(args.SchemaID)
 
+	records := make([]store.UserWordRecord, 0, len(args.Words))
 	for _, w := range args.Words {
 		weight := w.Weight
 		if weight <= 0 {
 			weight = 1200
 		}
-		if err := d.store.AddUserWord(schemaID, w.Code, w.Text, weight); err != nil {
-			return fmt.Errorf("batch add: %w", err)
-		}
-		reply.Count++
+		records = append(records, store.UserWordRecord{
+			Code:      w.Code,
+			Text:      w.Text,
+			Weight:    weight,
+			Count:     w.Count,
+			CreatedAt: w.CreatedAt,
+		})
 	}
+
+	n, err := d.store.BatchAddUserWords(schemaID, records)
+	if err != nil {
+		return fmt.Errorf("batch add: %w", err)
+	}
+	reply.Count = n
 
 	d.logger.Info("RPC Dict.BatchAdd", "schemaID", schemaID, "count", reply.Count)
 	if reply.Count > 0 {

@@ -80,6 +80,48 @@ func (s *Store) AddUserWord(schemaID, code, text string, weight int) error {
 	})
 }
 
+// BatchAddUserWords inserts or updates multiple user words in a single transaction.
+func (s *Store) BatchAddUserWords(schemaID string, words []UserWordRecord) (int, error) {
+	count := 0
+	now := time.Now().Unix()
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b, err := schemaSubBucket(tx, schemaID, string(bucketUserWords), true)
+		if err != nil {
+			return err
+		}
+		for _, w := range words {
+			code := strings.ToLower(w.Code)
+			k := userWordsKey(code, w.Text)
+			var rec UserWordRecord
+			if existing := b.Get(k); existing != nil {
+				if jsonErr := json.Unmarshal(existing, &rec); jsonErr == nil {
+					if w.Weight > rec.Weight {
+						rec.Weight = w.Weight
+					}
+				} else {
+					rec = UserWordRecord{Text: w.Text, Weight: w.Weight, CreatedAt: now}
+				}
+			} else {
+				createdAt := w.CreatedAt
+				if createdAt == 0 {
+					createdAt = now
+				}
+				rec = UserWordRecord{Text: w.Text, Weight: w.Weight, Count: w.Count, CreatedAt: createdAt}
+			}
+			data, err := json.Marshal(rec)
+			if err != nil {
+				return fmt.Errorf("marshal UserWordRecord: %w", err)
+			}
+			if err := b.Put(k, data); err != nil {
+				return err
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
 // RemoveUserWord deletes a user word entry from the given schema.
 func (s *Store) RemoveUserWord(schemaID, code, text string) error {
 	code = strings.ToLower(code)

@@ -10,7 +10,7 @@
 | File | Description |
 |------|-------------|
 | `store.go` | `Store`：bbolt 数据库包装；`Open()`/`Close()` 生命周期；bucket 初始化（Meta、Schemas、Phrases）；`schemaBucket`/`schemaSubBucket` 导航辅助函数；`ClearSchema`/`DeleteSchema`/`ClearAllSchemas` 数据清理；Meta 键值（版本、设备 ID）管理 |
-| `user_words.go` | `UserDict`：用户造词存储，按 schema 隔离；`PutWord`/`GetWord`/`DeleteWord` 原子操作；`ListWords` 分页查询；权重排序 |
+| `user_words.go` | `UserDict`：用户造词存储，按 schema 隔离；`AddUserWord` 单条原子写入；`BatchAddUserWords` 单事务批量写入（批量导入必用，避免逐条 fsync 超时）；`RemoveUserWord`/`UpdateUserWordWeight`；`SearchUserWordsPrefix`/`CountUserWords` 分页查询；权重排序 |
 | `temp_words.go` | `TempDict`：临时词存储（加词过程中的暂存），生命周期短；独立 bucket |
 | `phrases.go` | `PhraseStorage`：短语管理存储；`Put`/`Get`/`List`/`Remove`/`ResetDefaults` |
 | `shadow.go` | `ShadowStorage`：Shadow 规则（pin/delete）存储；YAML 序列化/反序列化 |
