@@ -11,14 +11,15 @@ import (
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/dict/binformat"
 )
 
-// EnglishDict 英文词库（基于 Trie 索引）
-// 支持从 Rime dict.yaml 格式加载英文单词表
+// EnglishDict 英文词库（优先使用 mmap wdb，首次自动从 Rime 文本构建）
 type EnglishDict struct {
 	logger     *slog.Logger
-	trie       *Trie
-	seen       map[string]bool // 加载时去重（小写 → 是否已加载）
+	wdbReader  *binformat.DictReader // 主路径：mmap 加载，不占堆内存
+	trie       *Trie                 // 回退路径：wdb 不可用时使用
+	seen       map[string]bool       // 仅在 Trie 加载时使用
 	entryCount int
 }
 
@@ -30,44 +31,48 @@ func NewEnglishDict(logger *slog.Logger) *EnglishDict {
 	return &EnglishDict{logger: logger}
 }
 
-// LoadRimeDir 从目录加载 Rime dict.yaml 格式英文词库
-// 自动查找并加载 en.dict.yaml 和 en_ext.dict.yaml
-func (d *EnglishDict) LoadRimeDir(dirPath string) error {
-	d.trie = NewTrie()
-	d.seen = make(map[string]bool)
-	d.entryCount = 0
-
-	files := []string{
-		"en.dict.yaml",     // 主词库
-		"en_ext.dict.yaml", // 扩展词库
+// LoadRimeDir 从目录加载英文词库
+// wdbCachePath 指定 wdb 缓存文件路径（由调用方通过 dictcache.CachePath 提供）；
+// 优先使用缓存的 wdb（mmap，不占堆），wdb 不存在或源文件更新时自动重建。
+func (d *EnglishDict) LoadRimeDir(dirPath, wdbCachePath string) error {
+	wdbPath := wdbCachePath
+	candidateFiles := []string{
+		filepath.Join(dirPath, "en.dict.yaml"),
+		filepath.Join(dirPath, "en_ext.dict.yaml"),
 	}
 
-	loaded := 0
-	for _, name := range files {
-		path := filepath.Join(dirPath, name)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			d.logger.Info("跳过不存在的英文词库文件", "name", name)
-			continue
+	var sourceFiles []string
+	for _, f := range candidateFiles {
+		if _, err := os.Stat(f); err == nil {
+			sourceFiles = append(sourceFiles, f)
 		}
-		count, err := d.loadRimeFile(path)
-		if err != nil {
-			d.logger.Warn("加载英文词库文件失败", "name", name, "error", err)
-			continue
-		}
-		d.logger.Info("加载英文词库文件", "name", name, "count", count)
-		loaded++
 	}
-
-	if loaded == 0 {
+	if len(sourceFiles) == 0 {
 		return fmt.Errorf("未找到任何英文词库文件（目录: %s）", dirPath)
 	}
 
-	d.entryCount = d.trie.EntryCount()
+	if !isWdbFresh(wdbPath, sourceFiles) {
+		count, err := d.buildWdb(sourceFiles, wdbPath)
+		if err != nil {
+			d.logger.Warn("构建英文 wdb 失败，回退到 Trie 加载", "error", err)
+			return d.loadViaTrie(sourceFiles)
+		}
+		d.logger.Info("构建英文词库 wdb 完成", "path", wdbPath, "count", count)
+	}
+
+	reader, err := binformat.OpenDict(wdbPath)
+	if err != nil {
+		d.logger.Warn("打开英文 wdb 失败，回退到 Trie 加载", "path", wdbPath, "error", err)
+		return d.loadViaTrie(sourceFiles)
+	}
+
+	d.wdbReader = reader
+	d.entryCount = reader.EntryCount()
+	d.logger.Info("加载英文词库 wdb", "path", wdbPath, "count", d.entryCount)
 	return nil
 }
 
-// LoadRimeFile 加载单个 Rime dict.yaml 格式英文词库文件
-// 如果 trie 未初始化，会自动创建
+// LoadRimeFile 加载单个 Rime dict.yaml 格式英文词库文件（使用 Trie，无 wdb 缓存）
 func (d *EnglishDict) LoadRimeFile(path string) error {
 	if d.trie == nil {
 		d.trie = NewTrie()
@@ -86,11 +91,164 @@ func (d *EnglishDict) LoadRimeFile(path string) error {
 	return nil
 }
 
-// loadRimeFile 解析单个 Rime dict.yaml 文件
-// 支持三种格式：
-//   - 单列：word（默认权重 1）
-//   - 两列：word\tweight 或 word\tcode
-//   - 三列：word\tcode\tweight（标准 rime 格式）
+// isWdbFresh 检查 wdb 是否比所有源文件都新
+func isWdbFresh(wdbPath string, sources []string) bool {
+	wdbInfo, err := os.Stat(wdbPath)
+	if err != nil {
+		return false
+	}
+	wdbMtime := wdbInfo.ModTime()
+	for _, src := range sources {
+		info, err := os.Stat(src)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(wdbMtime) {
+			return false
+		}
+	}
+	return true
+}
+
+// buildWdb 将 Rime 源文件解析并写出为 wdb 格式（原子写入）
+func (d *EnglishDict) buildWdb(files []string, outputPath string) (int, error) {
+	seen := make(map[string]bool)
+	writer := binformat.NewDictWriter()
+	total := 0
+
+	for _, path := range files {
+		count, err := collectRimeFileToWriter(path, seen, writer)
+		if err != nil {
+			d.logger.Warn("解析英文词库文件失败", "path", path, "error", err)
+			continue
+		}
+		d.logger.Info("解析英文词库文件", "path", filepath.Base(path), "count", count)
+		total += count
+	}
+
+	if total == 0 {
+		return 0, fmt.Errorf("英文词库文件为空")
+	}
+
+	tmp := outputPath + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return 0, fmt.Errorf("创建 wdb 临时文件失败: %w", err)
+	}
+
+	bw := bufio.NewWriterSize(f, 256*1024)
+	if err := writer.Write(bw); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return 0, fmt.Errorf("写入 wdb 失败: %w", err)
+	}
+	if err := bw.Flush(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return 0, fmt.Errorf("刷新 wdb 缓冲失败: %w", err)
+	}
+	f.Close()
+
+	if err := os.Rename(tmp, outputPath); err != nil {
+		os.Remove(tmp)
+		return 0, fmt.Errorf("重命名 wdb 失败: %w", err)
+	}
+	return total, nil
+}
+
+// collectRimeFileToWriter 解析单个 Rime 文件并将词条写入 DictWriter
+// seen 跨文件共享，保证去重行为与 loadRimeFile 一致
+func collectRimeFileToWriter(path string, seen map[string]bool, writer *binformat.DictWriter) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	inHeader := true
+	count := 0
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if inHeader {
+			if strings.TrimSpace(line) == "..." {
+				inHeader = false
+			}
+			continue
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.Split(line, "\t")
+		var word string
+		weight := 1
+
+		switch len(parts) {
+		case 1:
+			word = strings.TrimSpace(parts[0])
+		case 2:
+			word = strings.TrimSpace(parts[0])
+			if w, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil && w > 0 {
+				weight = w
+			}
+		default:
+			word = strings.TrimSpace(parts[0])
+			if w, err := strconv.Atoi(strings.TrimSpace(parts[len(parts)-1])); err == nil && w > 0 {
+				weight = w
+			}
+		}
+
+		if word == "" {
+			continue
+		}
+
+		code := strings.ToLower(word)
+		if seen[code] {
+			continue
+		}
+		seen[code] = true
+
+		writer.AddCode(code, []binformat.DictEntry{
+			{Text: word, Weight: int32(weight)},
+		})
+		count++
+	}
+
+	return count, scanner.Err()
+}
+
+// loadViaTrie 回退路径：从源文件加载到 Trie（wdb 构建或打开失败时使用）
+func (d *EnglishDict) loadViaTrie(files []string) error {
+	d.trie = NewTrie()
+	d.seen = make(map[string]bool)
+	d.entryCount = 0
+
+	loaded := 0
+	for _, path := range files {
+		count, err := d.loadRimeFile(path)
+		if err != nil {
+			d.logger.Warn("Trie 加载英文词库文件失败", "path", path, "error", err)
+			continue
+		}
+		d.logger.Info("Trie 加载英文词库文件", "path", filepath.Base(path), "count", count)
+		loaded++
+		_ = count
+	}
+
+	if loaded == 0 {
+		return fmt.Errorf("所有英文词库文件加载失败")
+	}
+	d.entryCount = d.trie.EntryCount()
+	return nil
+}
+
+// loadRimeFile 解析单个 Rime dict.yaml 并插入 Trie（仅回退路径使用）
 func (d *EnglishDict) loadRimeFile(path string) (int, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -106,8 +264,6 @@ func (d *EnglishDict) loadRimeFile(path string) (int, error) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-
-		// 跳过 YAML 头部（--- 到 ... 之间）
 		if inHeader {
 			if strings.TrimSpace(line) == "..." {
 				inHeader = false
@@ -115,29 +271,24 @@ func (d *EnglishDict) loadRimeFile(path string) (int, error) {
 			continue
 		}
 
-		// 跳过空行和注释
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
 		parts := strings.Split(line, "\t")
-
 		var word string
 		weight := 1
 
 		switch len(parts) {
 		case 1:
-			// 单列：word
 			word = strings.TrimSpace(parts[0])
 		case 2:
-			// 两列：word\tweight
 			word = strings.TrimSpace(parts[0])
 			if w, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil && w > 0 {
 				weight = w
 			}
 		default:
-			// 三列及以上：word\tcode\tweight（标准 rime 格式）
 			word = strings.TrimSpace(parts[0])
 			if w, err := strconv.Atoi(strings.TrimSpace(parts[len(parts)-1])); err == nil && w > 0 {
 				weight = w
@@ -149,8 +300,6 @@ func (d *EnglishDict) loadRimeFile(path string) (int, error) {
 		}
 
 		code := strings.ToLower(word)
-
-		// 去重：同一小写形式只保留第一次出现的
 		if d.seen[code] {
 			continue
 		}
@@ -165,11 +314,7 @@ func (d *EnglishDict) loadRimeFile(path string) (int, error) {
 		count++
 	}
 
-	if err := scanner.Err(); err != nil {
-		return count, err
-	}
-
-	return count, nil
+	return count, scanner.Err()
 }
 
 // EntryCount 返回词条数量
@@ -179,35 +324,42 @@ func (d *EnglishDict) EntryCount() int {
 
 // Lookup 精确查询（大小写不敏感）
 func (d *EnglishDict) Lookup(word string) []candidate.Candidate {
+	code := strings.ToLower(word)
+	if d.wdbReader != nil {
+		return d.wdbReader.Lookup(code)
+	}
 	if d.trie == nil {
 		return nil
 	}
-	return d.trie.Search(strings.ToLower(word))
+	return d.trie.Search(code)
 }
 
 // LookupPrefix 前缀查询（大小写不敏感）
-// 排序：精确匹配 > 词库自然顺序（文件中的出现顺序）
+// 排序：精确匹配 > 短词优先 > 字母序
 func (d *EnglishDict) LookupPrefix(prefix string, limit int) []candidate.Candidate {
-	if d.trie == nil {
-		return nil
-	}
 	prefixLower := strings.ToLower(prefix)
-	results := d.trie.SearchPrefix(prefixLower, 0)
 
-	// 排序：精确匹配 > 短词优先 > 自然顺序
+	var results []candidate.Candidate
+	if d.wdbReader != nil {
+		// limit=0 取全量后自行排序，保证英文排序语义（短词优先）
+		results = d.wdbReader.LookupPrefix(prefixLower, 0)
+	} else {
+		if d.trie == nil {
+			return nil
+		}
+		results = d.trie.SearchPrefix(prefixLower, 0)
+	}
+
 	sort.SliceStable(results, func(i, j int) bool {
 		ci, cj := results[i], results[j]
-		// 精确匹配优先
 		exactI := ci.Code == prefixLower
 		exactJ := cj.Code == prefixLower
 		if exactI != exactJ {
 			return exactI
 		}
-		// 短词优先（更常用/更相关）
 		if len(ci.Code) != len(cj.Code) {
 			return len(ci.Code) < len(cj.Code)
 		}
-		// 同长度按自然顺序（词库中的位置）
 		return ci.NaturalOrder < cj.NaturalOrder
 	})
 
@@ -217,8 +369,13 @@ func (d *EnglishDict) LookupPrefix(prefix string, limit int) []candidate.Candida
 	return results
 }
 
-// Close 释放 trie
+// Close 释放资源
 func (d *EnglishDict) Close() error {
+	if d.wdbReader != nil {
+		err := d.wdbReader.Close()
+		d.wdbReader = nil
+		return err
+	}
 	d.trie = nil
 	return nil
 }

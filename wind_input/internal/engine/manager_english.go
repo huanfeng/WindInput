@@ -5,6 +5,7 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
+	"github.com/huanfeng/wind_input/internal/dict/dictcache"
 )
 
 // EnsureEnglishLoaded 确保英文词库已加载到内存
@@ -24,8 +25,9 @@ func (m *Manager) ensureEnglishLoadedLocked() error {
 	// 注意：m.dataRoot 实际是 dataRoot（已包含 data 目录）
 	dictDir := filepath.Join(m.dataRoot, "schemas", "english")
 
+	wdbCachePath := dictcache.CachePath("english")
 	d := dict.NewEnglishDict(m.logger)
-	if err := d.LoadRimeDir(dictDir); err != nil {
+	if err := d.LoadRimeDir(dictDir, wdbCachePath); err != nil {
 		m.logger.Warn("加载英文词库失败", "dir", dictDir, "error", err)
 		return err
 	}

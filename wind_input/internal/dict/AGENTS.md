@@ -29,7 +29,8 @@
 | `common_chars.go` | 通用规范汉字表加载：`InitCommonChars`（从默认路径加载）、`InitCommonCharsWithPath`（指定路径）；内置约 2500 个核心常用字作为 fallback；`IsCommonChar`/`IsStringCommon` 判断字符/字符串是否全部为通用规范汉字；`AddCommonChars` 运行时扩展；`ResetCommonCharsForTesting` 测试专用重置 |
 | `loader.go` | 词库加载工具函数 |
 | `dict.go` | 保留文件（原 Dict 接口定义，部分接口已迁移，修改前先确认引用） |
-| `trie.go` | 前缀 Trie 数据结构，供拼音词库使用 |
+| `english_dict.go` | 英文词库：`LoadRimeDir` 自动构建/加载 `en.wdb`（mmap，不占堆），wdb 过期时从 Rime 源文件重建；`Lookup`/`LookupPrefix` 优先走 wdbReader，失败时回退 Trie |
+| `trie.go` | 前缀 Trie 数据结构，供英文词库回退路径和其他组件使用 |
 | `temp_dict.go` | 临时词库实现，用于临时拼音模式 |
 | `template.go` | 短语模板变量处理 |
 | `weight_norm.go` | 权重规范化处理 |
