@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -638,5 +640,55 @@ func (s *SystemService) ListSchemas(args *rpcapi.Empty, reply *rpcapi.ListSchema
 	}
 
 	s.logger.Info("RPC System.ListSchemas", "count", len(reply.Schemas))
+	return nil
+}
+
+// GetMemStats 返回 Go runtime 堆内存统计快照（会触发短暂 STW，仅供诊断使用）
+func (s *SystemService) GetMemStats(args *rpcapi.Empty, reply *rpcapi.GoMemStatsReply) error {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	reply.HeapAlloc = m.HeapAlloc
+	reply.HeapSys = m.HeapSys
+	reply.HeapIdle = m.HeapIdle
+	reply.HeapInuse = m.HeapInuse
+	reply.HeapReleased = m.HeapReleased
+	reply.HeapObjects = m.HeapObjects
+	reply.StackInuse = m.StackInuse
+	reply.StackSys = m.StackSys
+	reply.Sys = m.Sys
+	reply.NumGC = m.NumGC
+	reply.PauseTotalNs = m.PauseTotalNs
+	reply.GCSys = m.GCSys
+	reply.OtherSys = m.OtherSys
+	return nil
+}
+
+// DumpHeapProfile 触发 GC 后将堆内存 profile 写入文件（路径为 datadir/diag/heap_<时间>.pprof）
+func (s *SystemService) DumpHeapProfile(args *rpcapi.DumpHeapProfileArgs, reply *rpcapi.DumpHeapProfileReply) error {
+	path := args.Path
+	if path == "" {
+		if s.store == nil {
+			return fmt.Errorf("store not available, cannot determine output path")
+		}
+		diagDir := filepath.Join(filepath.Dir(s.store.Path()), "diag")
+		if err := os.MkdirAll(diagDir, 0o755); err != nil {
+			return fmt.Errorf("create diag dir: %w", err)
+		}
+		path = filepath.Join(diagDir, "heap_"+time.Now().Format("20060102_150405")+".pprof")
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create profile file: %w", err)
+	}
+	defer f.Close()
+
+	runtime.GC()
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		return fmt.Errorf("write heap profile: %w", err)
+	}
+
+	reply.Path = path
+	s.logger.Info("heap profile dumped", "path", path)
 	return nil
 }

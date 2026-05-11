@@ -388,6 +388,21 @@ func (c *Client) SystemGetPerfStats() (*SystemPerfStatsReply, error) {
 	return &reply, err
 }
 
+// SystemGetMemStats 获取 Go runtime 内存统计快照
+func (c *Client) SystemGetMemStats() (*GoMemStatsReply, error) {
+	var reply GoMemStatsReply
+	err := c.call("System.GetMemStats", &Empty{}, &reply)
+	return &reply, err
+}
+
+// SystemDumpHeapProfile 触发 GC 并将堆内存 profile 写入文件
+// path 为空时由服务端选择默认路径（datadir/diag/heap_<时间>.pprof）
+func (c *Client) SystemDumpHeapProfile(path string) (*DumpHeapProfileReply, error) {
+	var reply DumpHeapProfileReply
+	err := c.call("System.DumpHeapProfile", &DumpHeapProfileArgs{Path: path}, &reply)
+	return &reply, err
+}
+
 // ── Phrase 方法 ──
 
 // PhraseList 获取所有短语

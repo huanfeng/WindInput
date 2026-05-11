@@ -166,6 +166,19 @@
       </div>
     </div>
 
+    <div class="settings-card">
+      <div class="card-title">内存诊断</div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>Go 运行时内存</label>
+          <p class="setting-hint">查看堆内存、GC 统计，并导出 heap pprof 文件</p>
+        </div>
+        <div class="setting-control">
+          <Button variant="outline" size="sm" @click="handleOpenMemDialog">查看</Button>
+        </div>
+      </div>
+    </div>
+
     <Dialog v-model:open="viewDialogOpen">
       <DialogContent class="max-w-3xl max-h-[80vh] flex flex-col">
         <DialogHeader>
@@ -176,6 +189,35 @@
           <Button variant="outline" size="sm" @click="viewDialogOpen = false"
             >关闭</Button
           >
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 内存诊断对话框 -->
+    <Dialog v-model:open="memDialogOpen">
+      <DialogContent class="max-w-lg flex flex-col">
+        <DialogHeader>
+          <DialogTitle>内存诊断</DialogTitle>
+        </DialogHeader>
+        <textarea class="mem-stats-text" readonly :value="memStatsText" />
+        <DialogFooter>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="memLoading"
+            @click="handleRefreshMemStats"
+          >
+            {{ memLoading ? "读取中…" : "刷新" }}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="memDumping"
+            @click="handleDumpHeapProfile"
+          >
+            {{ memDumping ? "导出中…" : "导出 pprof" }}
+          </Button>
+          <Button variant="outline" size="sm" @click="memDialogOpen = false">关闭</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -324,6 +366,7 @@ import type {
   PerfStatsResult,
   BackupPreview,
   RestorePreview,
+  MemStatsResult,
 } from "../api/wails";
 import { useToast } from "../composables/useToast";
 import { Button } from "@/components/ui/button";
@@ -541,6 +584,76 @@ async function handleDoReset() {
   }
 }
 
+// ── 内存诊断 ──
+const memStats = ref<MemStatsResult | null>(null);
+const memLoading = ref(false);
+const memDumping = ref(false);
+const memDialogOpen = ref(false);
+
+const memStatsText = computed(() => {
+  const s = memStats.value;
+  if (!s) return '点击"刷新"获取数据';
+  const pad = (label: string) => label.padEnd(12, " ");
+  return [
+    "堆内存",
+    `  ${pad("活跃对象:")} ${formatBytes(s.heap_alloc)}`,
+    `  ${pad("使用中:")}   ${formatBytes(s.heap_inuse)}`,
+    `  ${pad("系统申请:")} ${formatBytes(s.heap_sys)}`,
+    `  ${pad("空闲:")}     ${formatBytes(s.heap_idle)}`,
+    `  ${pad("已归还 OS:")}${formatBytes(s.heap_released)}`,
+    `  ${pad("对象数:")}   ${s.heap_objects.toLocaleString()}`,
+    "",
+    "协程栈",
+    `  ${pad("使用中:")}   ${formatBytes(s.stack_inuse)}`,
+    `  ${pad("系统申请:")} ${formatBytes(s.stack_sys)}`,
+    "",
+    "GC 相关",
+    `  ${pad("GC 元数据:")}${formatBytes(s.gc_sys)}`,
+    `  ${pad("其他系统:")} ${formatBytes(s.other_sys)}`,
+    "",
+    "GC 统计",
+    `  ${pad("已执行:")}   ${s.num_gc} 次`,
+    `  ${pad("累计暂停:")} ${(s.pause_total_ns / 1e6).toFixed(1)} ms`,
+  ].join("\n");
+});
+
+async function handleOpenMemDialog() {
+  memDialogOpen.value = true;
+  if (!memStats.value) {
+    await handleRefreshMemStats();
+  }
+}
+
+async function handleRefreshMemStats() {
+  if (!props.isWailsEnv) return;
+  memLoading.value = true;
+  try {
+    memStats.value = await wailsApi.getMemStats();
+  } catch (e: any) {
+    toast("获取内存统计失败: " + (e.message || e), "error");
+  } finally {
+    memLoading.value = false;
+  }
+}
+
+async function handleDumpHeapProfile() {
+  if (!props.isWailsEnv) return;
+  memDumping.value = true;
+  try {
+    const result = await wailsApi.dumpHeapProfile();
+    if (result.error) {
+      toast("导出失败: " + result.error, "error");
+      return;
+    }
+    toast("已导出到: " + result.path);
+    await handleRefreshMemStats();
+  } catch (e: any) {
+    toast("导出失败: " + (e.message || e), "error");
+  } finally {
+    memDumping.value = false;
+  }
+}
+
 const showSensitiveLogWarning = computed(() => {
   const serviceLevel = props.formData.advanced.log_level;
   const tsfLevel = props.tsfLogConfig.level;
@@ -587,5 +700,20 @@ const showSensitiveLogWarning = computed(() => {
   font-size: 0.875em;
   color: hsl(var(--warning));
   margin-bottom: 8px;
+}
+.mem-stats-text {
+  font-family: monospace;
+  font-size: 0.85em;
+  line-height: 1.6;
+  width: 100%;
+  min-height: 240px;
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+  resize: none;
+  outline: none;
+  white-space: pre;
 }
 </style>

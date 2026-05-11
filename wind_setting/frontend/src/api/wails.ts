@@ -851,6 +851,37 @@ export async function exportPerfData(): Promise<
   };
 }
 
+// ── 内存诊断 ──
+
+export interface MemStatsResult {
+  heap_alloc: number;
+  heap_sys: number;
+  heap_idle: number;
+  heap_inuse: number;
+  heap_released: number;
+  heap_objects: number;
+  stack_inuse: number;
+  stack_sys: number;
+  sys: number;
+  num_gc: number;
+  pause_total_ns: number;
+  gc_sys: number;
+  other_sys: number;
+}
+
+export interface DumpHeapProfileResult {
+  path: string;
+  error?: string;
+}
+
+export async function getMemStats(): Promise<MemStatsResult> {
+  return App.GetMemStats() as unknown as MemStatsResult;
+}
+
+export async function dumpHeapProfile(): Promise<DumpHeapProfileResult> {
+  return App.DumpHeapProfile() as unknown as DumpHeapProfileResult;
+}
+
 // 重置用户数据
 export async function resetUserData(schemaID: string = ""): Promise<void> {
   return App.ResetUserData(schemaID);

@@ -772,3 +772,32 @@ type SystemRestoreReply struct {
 type SystemResetReply struct {
 	OK bool `json:"ok"`
 }
+
+// ── 内存诊断 ──
+
+// GoMemStatsReply Go runtime 内存统计响应
+type GoMemStatsReply struct {
+	HeapAlloc    uint64 `json:"heap_alloc"`     // 当前堆上活跃对象占用字节
+	HeapSys      uint64 `json:"heap_sys"`       // 向 OS 申请的堆虚拟内存总量
+	HeapIdle     uint64 `json:"heap_idle"`      // 空闲但未归还 OS 的 span 字节
+	HeapInuse    uint64 `json:"heap_inuse"`     // 正在使用的 span 字节
+	HeapReleased uint64 `json:"heap_released"`  // 已归还 OS 的空闲 span 字节
+	HeapObjects  uint64 `json:"heap_objects"`   // 当前堆上活跃对象数量
+	StackInuse   uint64 `json:"stack_inuse"`    // 栈 span 占用字节
+	StackSys     uint64 `json:"stack_sys"`      // 向 OS 申请的栈字节
+	Sys          uint64 `json:"sys"`            // 向 OS 申请的虚拟内存总量（含堆、栈、元数据等）
+	NumGC        uint32 `json:"num_gc"`         // 累计 GC 次数
+	PauseTotalNs uint64 `json:"pause_total_ns"` // GC 累计暂停时间（纳秒）
+	GCSys        uint64 `json:"gc_sys"`         // GC 元数据字节
+	OtherSys     uint64 `json:"other_sys"`      // 其他系统字节（mspan、mcache 等）
+}
+
+// DumpHeapProfileArgs 导出堆内存 profile 请求
+type DumpHeapProfileArgs struct {
+	Path string `json:"path,omitempty"` // 输出路径；空串表示由服务端选择默认路径（datadir/diag/）
+}
+
+// DumpHeapProfileReply 导出堆内存 profile 响应
+type DumpHeapProfileReply struct {
+	Path string `json:"path"` // 实际写入的文件路径
+}
