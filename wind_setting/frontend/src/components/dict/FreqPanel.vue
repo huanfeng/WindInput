@@ -79,13 +79,13 @@ const columns: ColumnDef<FreqItem, any>[] = [
   {
     accessorKey: "code",
     header: "编码",
-    size: 100,
+    size: 140,
     cell: ({ row }) =>
       h(
         "span",
         {
           class:
-            "font-mono text-sm text-muted-foreground bg-secondary px-2 py-0.5 rounded",
+            "font-mono text-sm text-muted-foreground bg-secondary px-2 py-0.5 rounded inline-block break-all align-middle",
         },
         row.getValue("code"),
       ),

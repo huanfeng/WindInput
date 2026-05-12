@@ -164,6 +164,16 @@ function jumpClientPage(val: string) {
   table.setPageIndex(Math.max(0, Math.min(p - 1, clientTotalPages.value - 1)));
 }
 
+// cellSizeStyle 根据 column.size 生成稳定列宽样式：
+// 同时设置 width 与 max-width，让列内容（如过长编码）不再撑开列、挤压相邻列；
+// 单元格高度允许随内容换行而增长（cell 渲染时用 break-all 等让长串可换行）。
+// size === 150 是 tanstack-vue-table 的默认值，视为"未指定"，不强制限宽。
+function cellSizeStyle(size: number): Record<string, string> | undefined {
+  if (size === 150) return undefined;
+  const w = `${size}px`;
+  return { width: w, maxWidth: w };
+}
+
 function rowGlobalIndex(index: number): number {
   if (props.serverPagination) {
     return props.serverPagination.page * props.serverPagination.pageSize + index + 1;
@@ -234,12 +244,7 @@ defineExpose({ table, globalFilter, clearSelection, selectedCount });
                     ? 'cursor-pointer select-none hover:text-foreground'
                     : '',
                 ]"
-                :style="{
-                  width:
-                    header.getSize() !== 150
-                      ? `${header.getSize()}px`
-                      : undefined,
-                }"
+                :style="cellSizeStyle(header.getSize())"
                 @click="header.column.getToggleSortingHandler()?.($event)"
               >
                 <FlexRender
@@ -270,7 +275,12 @@ defineExpose({ table, globalFilter, clearSelection, selectedCount });
                 @dblclick="props.onRowDblclick?.(row.original as TData)"
                 @contextmenu.prevent="props.onRowContextmenu?.(row.original as TData, $event)"
               >
-                <TableCell v-for="cell in row.getVisibleCells()" :key="cell.id">
+                <TableCell
+                  v-for="cell in row.getVisibleCells()"
+                  :key="cell.id"
+                  :style="cellSizeStyle(cell.column.getSize())"
+                  class="align-top"
+                >
                   <FlexRender
                     :render="cell.column.columnDef.cell"
                     :props="cell.getContext()"
