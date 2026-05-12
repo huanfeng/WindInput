@@ -382,23 +382,34 @@ $TrackingKey = "HKLM:\SOFTWARE\WindInput"
 
 if (Test-Path $FontSrc) {
     try {
-        Copy-Item -Path $FontSrc -Destination $FontDest -Force
+        $needCopy = $true
+        if (Test-Path $FontDest) {
+            try {
+                $srcHash = (Get-FileHash -Path $FontSrc  -Algorithm SHA1 -ErrorAction Stop).Hash
+                $dstHash = (Get-FileHash -Path $FontDest -Algorithm SHA1 -ErrorAction Stop).Hash
+                if ($srcHash -eq $dstHash) { $needCopy = $false }
+            } catch {
+                # 目标被占用导致 hash 失败时，按需复制；若复制也失败由外层 catch 处理
+                $needCopy = $true
+            }
+        }
+        if ($needCopy) {
+            Copy-Item -Path $FontSrc -Destination $FontDest -Force
+        }
         Set-ItemProperty -Path $FontRegKey -Name $FontDName -Value $FontFile -Force
         # 记录本次安装的字体，卸载时用于区分是否我们安装的
         if (-not (Test-Path $TrackingKey)) {
             New-Item -Path $TrackingKey -Force | Out-Null
         }
         Set-ItemProperty -Path $TrackingKey -Name "InstalledFont_HeiTiZiGen" -Value "1" -Force
-        # 广播 WM_FONTCHANGE (0x001D) 通知所有应用字体列表已变化
-        $code = @"
-using System;using System.Runtime.InteropServices;
-public class WinFont {
-    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
-}
-"@
-        Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
-        [WinFont]::SendMessage([IntPtr]([int]0xFFFF), 0x001D, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
-        Write-Host "  - 已安装字体: $FontDName" -ForegroundColor Green
+        # 不广播 WM_FONTCHANGE：该字体仅供本输入法 DirectWrite fallback 使用，
+        # 服务进程在启动时会重新枚举系统字体集合，无需通知其他应用。
+        # 避免同步广播在系统中存在挂起窗口时无限阻塞安装流程。
+        if ($needCopy) {
+            Write-Host "  - 已安装字体: $FontDName" -ForegroundColor Green
+        } else {
+            Write-Host "  - 字体已存在且一致，跳过复制" -ForegroundColor Green
+        }
     } catch {
         Write-Host "[警告] 安装字体失败: $_" -ForegroundColor Yellow
     }

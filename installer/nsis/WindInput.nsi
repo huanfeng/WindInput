@@ -112,7 +112,7 @@ VIAddVersionKey "LegalCopyright" "Copyright (c) WindInput Project"
 Page custom InstallModePageCreate InstallModePageLeave
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageIfQuiet
 !insertmacro MUI_PAGE_DIRECTORY
-!undef MUI_PAGE_CUSTOMFUNCTION_PRE
+; MUI2 在 MUI_PAGE_DIRECTORY 内部已自动 !undef MUI_PAGE_CUSTOMFUNCTION_PRE
 Page custom DataDirPageCreate DataDirPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 ; 完成页：便携模式提供启动器运行选项（标准模式通过 FinishPage_Show 隐藏此选项）
@@ -876,11 +876,24 @@ install_cleanup_bak_end:
   SetOutPath "$INSTDIR"
 
   ; --- Step 6.5: Install PUA font to system (for DirectWrite fallback) ---
+  ; 该字体仅供本输入法 DirectWrite fallback 使用：
+  ; - 已存在且大小一致则跳过复制，避免触发文件锁定/杀软审查导致的卡顿
+  ; - 不广播 WM_FONTCHANGE：服务进程启动时会重新枚举系统字体集合，
+  ;   同步广播在系统中存在挂起窗口时会无限阻塞安装流程
   DetailPrint "正在安装字体到系统..."
-  CopyFiles /SILENT "$INSTDIR\data\schemas\wubi86\HeiTiZiGen.ttf" "$WINDIR\Fonts\HeiTiZiGen.ttf"
+  StrCpy $0 "1" ; $0 = needCopy
+  IfFileExists "$WINDIR\Fonts\HeiTiZiGen.ttf" 0 install_font_do_copy
+    ${GetSize} "$INSTDIR\data\schemas\wubi86" "/M=HeiTiZiGen.ttf /S=0B /G=0" $1 $2 $3
+    ${GetSize} "$WINDIR\Fonts" "/M=HeiTiZiGen.ttf /S=0B /G=0" $4 $2 $3
+    StrCmp $1 $4 0 install_font_do_copy
+      StrCpy $0 "0"
+      DetailPrint "  字体已存在且一致，跳过复制"
+install_font_do_copy:
+  StrCmp $0 "0" install_font_reg
+    CopyFiles /SILENT "$INSTDIR\data\schemas\wubi86\HeiTiZiGen.ttf" "$WINDIR\Fonts\HeiTiZiGen.ttf"
+install_font_reg:
   WriteRegStr HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts" "黑体字根 (TrueType)" "HeiTiZiGen.ttf"
   WriteRegStr HKLM "SOFTWARE\WindInput" "InstalledFont_HeiTiZiGen" "1"
-  System::Call 'user32::SendMessage(i 65535, i 29, i 0, i 0)'
 
   ; --- Portable mode: skip registration, create marker, launch ---
   StrCmp $InstallMode "portable" 0 install_standard_mode
@@ -1002,7 +1015,7 @@ uninstall_unreg_done:
     Delete "$WINDIR\Fonts\HeiTiZiGen.ttf"
     DeleteRegValue HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts" "黑体字根 (TrueType)"
     DeleteRegValue HKLM "SOFTWARE\WindInput" "InstalledFont_HeiTiZiGen"
-    System::Call 'user32::SendMessage(i 65535, i 29, i 0, i 0)'
+    ; 不广播 WM_FONTCHANGE：避免同步广播在系统挂起窗口时阻塞卸载流程
   uninst_font_skip:
 
   ; --- Step 3: Remove binaries (rename if locked, schedule reboot cleanup) ---

@@ -103,17 +103,8 @@ if ($tracked -eq "1") {
     }
     Remove-ItemProperty -Path $FontRegKey -Name $FontDName -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path $TrackingKey -Name "InstalledFont_HeiTiZiGen" -ErrorAction SilentlyContinue
-    # 广播 WM_FONTCHANGE 通知所有应用
-    try {
-        $code = @"
-using System;using System.Runtime.InteropServices;
-public class WinFontU {
-    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
-}
-"@
-        Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
-        [WinFontU]::SendMessage([IntPtr]([int]0xFFFF), 0x001D, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
-    } catch {}
+    # 不广播 WM_FONTCHANGE：该字体仅供本输入法使用，服务已停止，
+    # 同步广播在系统中存在挂起窗口时会无限阻塞卸载流程
     Write-Host "  - 已从系统移除字体: $FontDName"
 } else {
     Write-Host "  - 无需卸载字体（非本程序安装）"
