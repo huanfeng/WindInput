@@ -598,6 +598,8 @@ const maxReadingCombos = 64
 //
 // 用于：手动加词页自动填编码、词库批量导入、双拼学习路径 fallback。
 // 若词语中含无法确定读音的字符，返回空串。
+//
+// DEBUG 级别会记录推断路径与结果，方便排查坏 case。
 func (e *Engine) GenerateWordPinyin(word string) string {
 	if e.charPinyinIdx == nil {
 		e.buildCharPinyinIndex()
@@ -609,10 +611,12 @@ func (e *Engine) GenerateWordPinyin(word string) string {
 
 	// 1) 整词命中
 	if code, ok := e.inferWholeWordCode(word, runes); ok {
+		e.logger.Debug("GenerateWordPinyin", "path", "whole", "word", word, "code", code)
 		return code
 	}
 	// 2) 子词切分 + 整体读音继承
 	if code, ok := e.inferBySubwordSegmentation(runes); ok {
+		e.logger.Debug("GenerateWordPinyin", "path", "subword", "word", word, "code", code)
 		return code
 	}
 	// 3) 兜底：逐字按代表读音
@@ -621,11 +625,14 @@ func (e *Engine) GenerateWordPinyin(word string) string {
 	for _, r := range runes {
 		id, ok := e.charPinyinIdx.char[r]
 		if !ok {
+			e.logger.Debug("GenerateWordPinyin", "path", "unknown_char", "word", word, "missing", string(r))
 			return ""
 		}
 		b.WriteString(e.charPinyinIdx.syllable(id))
 	}
-	return b.String()
+	code := b.String()
+	e.logger.Debug("GenerateWordPinyin", "path", "fallback", "word", word, "code", code)
+	return code
 }
 
 // inferWholeWordCode 用 dict 真值表为整个 word 推断读音：

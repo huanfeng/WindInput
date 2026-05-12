@@ -20,12 +20,19 @@ func getRealDictDir(t *testing.T) string {
 	// filename = .../wind_input/internal/engine/pinyin/realdict_test.go
 	pinyinDir := filepath.Dir(filename)
 	projectRoot := filepath.Join(pinyinDir, "..", "..", "..", "..")
-	dictDir := filepath.Join(projectRoot, "build", "dict", "pinyin")
 
-	if _, err := os.Stat(filepath.Join(dictDir, "8105.dict.yaml")); os.IsNotExist(err) {
-		t.Skipf("Real dictionary not found at %s, skipping", dictDir)
+	// 候选目录：优先 build 产物，回退到 .cache（开发环境）
+	candidates := []string{
+		filepath.Join(projectRoot, "build", "dict", "pinyin"),
+		filepath.Join(projectRoot, ".cache", "rime-frost", "cn_dicts"),
 	}
-	return dictDir
+	for _, dir := range candidates {
+		if _, err := os.Stat(filepath.Join(dir, "8105.dict.yaml")); err == nil {
+			return dir
+		}
+	}
+	t.Skipf("Real dictionary not found in any of %v, skipping", candidates)
+	return ""
 }
 
 // loadRealDict 加载完整生产词库
