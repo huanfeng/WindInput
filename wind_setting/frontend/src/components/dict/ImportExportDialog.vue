@@ -122,7 +122,11 @@
                 <SelectValue placeholder="选择方案" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem v-for="sid in allSchemaIds" :key="sid" :value="sid">
+                <SelectItem
+                  v-for="sid in (exportableSchemaIds ?? allSchemaIds)"
+                  :key="sid"
+                  :value="sid"
+                >
                   {{ allSchemaNames[sid] || sid }}
                 </SelectItem>
               </SelectContent>
@@ -218,6 +222,9 @@ const props = defineProps<{
   allSchemaIds: string[];
   allSchemaNames: Record<string, string>;
   nonMixedSchemaIds: string[];
+  /** 可作为"导出"目标的方案 ID 列表（已排除双拼方案）。
+   *  与 allSchemaIds 区别：导出下拉不显示双拼方案，避免与全拼共享数据导致重复导出。 */
+  exportableSchemaIds?: string[];
   /** 进入对话框时的模式：phrases 或 schema */
   initialMode?: string;
   /** 初始 Tab：import 或 export */
@@ -278,9 +285,9 @@ aa\t式\t200`,
     value: "tsv",
     label: "纯文本 TSV (.txt)",
     desc: "Tab 分隔，每行: 编码<Tab>词条<Tab>权重",
-    example: `# code\ttext\tweight\ttimestamp\tcount
+    example: `# code\ttext\tweight
 a\t工\t100
-aa\t式\t200\t1713234567\t5
+aa\t式\t200
 abcf\t输入法\t150`,
   },
   {
@@ -447,9 +454,19 @@ const exportableSections = computed(() => {
   return all.map((s) => ({ ...s, disabled: false }));
 });
 
+// 导出按钮可用条件：选中的内容里至少有一项是非空的
+//   - 方案数据：选中的 section 中至少一项 count > 0
+//   - 快捷短语：phrases 数量 > 0
+//   - 全部备份：始终允许（备份本身可能包含至少一类数据）
 const canExport = computed(() => {
   if (exportType.value === "schema") {
-    return exportSections.value.length > 0 && exportSchemaId.value;
+    if (!exportSchemaId.value || exportSections.value.length === 0) return false;
+    return exportSections.value.some(
+      (k) => (exportCounts.value[k] ?? 0) > 0,
+    );
+  }
+  if (exportType.value === "phrases") {
+    return (exportCounts.value.phrases ?? 0) > 0;
   }
   return true;
 });
@@ -489,6 +506,8 @@ async function loadExportCounts() {
 // 切换导出方案时重新加载统计
 watch(exportSchemaId, () => {
   loadExportCounts();
+  // 切换方案 → 上一次"导出成功"消息已无效，清除以避免误导
+  exportMessage.value = "";
   // 混输方案自动去掉 user_words/temp_words
   if (exportSchemaIsMixed.value) {
     exportSections.value = exportSections.value.filter(
@@ -497,26 +516,51 @@ watch(exportSchemaId, () => {
   }
 });
 
-watch(() => props.open, (val) => {
-  if (val) {
-    // 设置初始 Tab
-    activeTab.value = props.initialTab || "import";
-    // 根据进入模式设置默认选中
-    if (props.initialMode === "phrases") {
-      exportType.value = "phrases";
-    } else {
-      exportType.value = "schema";
-    }
-    exportSchemaId.value = props.currentSchemaId;
-    if (props.currentSchemaMixed && props.nonMixedSchemaIds.length > 0) {
-      importTargetSchema.value = props.nonMixedSchemaIds[0];
-    } else {
-      importTargetSchema.value = props.currentSchemaId;
-    }
-    exportMessage.value = "";
-    loadExportCounts();
-  }
+// 切换导出类型/调整选中内容 → 清除旧消息
+watch(exportType, () => {
+  exportMessage.value = "";
 });
+watch(
+  exportSections,
+  () => {
+    exportMessage.value = "";
+  },
+  { deep: true },
+);
+
+watch(
+  () => props.open,
+  (val) => {
+    if (val) {
+      // 设置初始 Tab
+      activeTab.value = props.initialTab || "import";
+      // 根据进入模式设置默认选中
+      if (props.initialMode === "phrases") {
+        exportType.value = "phrases";
+      } else {
+        exportType.value = "schema";
+      }
+      // 默认导出目标：当前方案；若当前方案不可导出（如双拼），回退到首个可导出方案
+      const exportable = props.exportableSchemaIds ?? props.allSchemaIds;
+      if (exportable.includes(props.currentSchemaId)) {
+        exportSchemaId.value = props.currentSchemaId;
+      } else if (exportable.length > 0) {
+        exportSchemaId.value = exportable[0];
+      } else {
+        exportSchemaId.value = props.currentSchemaId;
+      }
+      if (props.currentSchemaMixed && props.nonMixedSchemaIds.length > 0) {
+        importTargetSchema.value = props.nonMixedSchemaIds[0];
+      } else {
+        importTargetSchema.value = props.currentSchemaId;
+      }
+      // 每次打开对话框都重置一次性状态：避免上次"导入成功/导出成功"残留
+      resetImport();
+      exportMessage.value = "";
+      loadExportCounts();
+    }
+  },
+);
 
 async function doExport() {
   exporting.value = true;
@@ -620,6 +664,16 @@ async function doExport() {
 
 .ie-select-trigger {
   width: 100%;
+}
+
+/* Select 触发器在 .ie-body (overflow-y: auto) 内部时，
+   focus ring 默认是 outset（box-shadow 在 border 外侧），会被横向 overflow 裁切。
+   改为 inset shadow，让高亮边框始终完整可见。 */
+.ie-body :deep(.ie-select-trigger:focus),
+.ie-body :deep(.ie-select-trigger:focus-visible) {
+  outline: none;
+  box-shadow: inset 0 0 0 1px hsl(var(--ring));
+  --tw-ring-shadow: 0 0 #0000;
 }
 
 /* ===== Radio 组 ===== */
