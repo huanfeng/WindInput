@@ -364,23 +364,22 @@ func (e *Engine) OnCandidateSelected(code, text string) {
 
 	// 双拼模式：将 code 统一归一化为全拼，确保临时词库/用户词库/调频记录的索引
 	// 与 PinyinDict 查询时使用的全拼 key 保持一致。
-	// 不归一化时，拆分输入产生的 code 为原始双拼键序列（如 "nihk"），
-	// 而引擎查询始终使用全拼（"nihao"），导致写入的临时词条永远无法被检索到。
+	//
+	// 上游传入的 code 有两种形态需要兼容：
+	//   a) 双拼按键序列（如 "fwxnql"）—— 来自用户首次造词的活跃输入
+	//   b) 已是全拼（如 "feixiaoqiang"）—— 来自候选词的 code 字段
+	//      （如临时词库/用户词库/系统词典 中读出的候选）
+	// 必须按 (a) 还是 (b) 分别处理：
+	//   - 若把 (b) 当 (a) 再过一遍 spConverter，会把全拼字符两两当双拼键
+	//     解析，得到错乱串（feixiaoqiang → fechuachaoqchaneng），
+	//     导致已存在的临时词条选中后无法增加计数升级。
 	//
 	// 优先级：
-	//  1) 用 spConverter 切分用户的实际按键（与本次输入完全一致，多音字天然正确）
-	//  2) 兜底：从 text 反查代表读音（已按词典权重择优，多音字也尽量选常用读音）
+	//  1) 原 code 已经能反查到 text → 直接用（已是全拼且合法）
+	//  2) 用 spConverter 把 code 当双拼按键切分；切出的全拼能反查到 text → 用
+	//  3) 兜底：从 text 反查代表读音（多音字按词典权重择优）
 	if e.spConverter != nil {
-		converted := false
-		if r := e.spConverter.Convert(code); r != nil && !r.HasPartial && r.FullPinyin != "" {
-			code = r.FullPinyin
-			converted = true
-		}
-		if !converted {
-			if fp := e.GenerateWordPinyin(text); fp != "" {
-				code = fp
-			}
-		}
+		code = e.normalizeShuangpinCode(code, text)
 	}
 
 	// 写入前反查校验：生成的 code 必须能回查到 text，否则放弃学习。
@@ -416,6 +415,32 @@ func (e *Engine) Reset() {
 // Type 返回引擎类型
 func (e *Engine) Type() string {
 	return "pinyin"
+}
+
+// normalizeShuangpinCode 在双拼模式下把 code 归一化为合法全拼。
+//
+// 优先级：
+//  1. 原 code 已能反查到 text → 直接返回（候选词读出来时 code 已是全拼，
+//     不应再被当双拼键解析）
+//  2. spConverter 把 code 当双拼按键切分，结果能反查到 text → 返回切分结果
+//  3. 从 text 用反向索引反查（GenerateWordPinyin，按词典权重择优）
+//  4. 都不行：返回原 code，让后续 codeMatchesText 校验把它拦截
+func (e *Engine) normalizeShuangpinCode(code, text string) string {
+	// 1) 原 code 已合法
+	if e.codeMatchesText(code, text) {
+		return code
+	}
+	// 2) 双拼按键切分
+	if r := e.spConverter.Convert(code); r != nil && !r.HasPartial && r.FullPinyin != "" {
+		if e.codeMatchesText(r.FullPinyin, text) {
+			return r.FullPinyin
+		}
+	}
+	// 3) 从 text 反查
+	if fp := e.GenerateWordPinyin(text); fp != "" && e.codeMatchesText(fp, text) {
+		return fp
+	}
+	return code
 }
 
 // codeMatchesText 检查 code 与 text 是否在"逐字段"层面合理匹配。

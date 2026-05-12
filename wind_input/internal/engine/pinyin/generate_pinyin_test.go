@@ -196,6 +196,54 @@ sort: by_weight
 	}
 }
 
+// TestOnCandidateSelected_ShuangpinFullPinyinCodeUntouched 验证已经是全拼形态的 code
+// 在双拼模式下不被 spConverter 重复二次解析。
+//
+// 场景：用户首次用双拼造词"费晓强"后，临时词库里存的 code 已是全拼 "feixiaoqiang"。
+// 当用户**再次选中**这条临时词条时，传入 OnCandidateSelected 的 code 就是
+// "feixiaoqiang"（来自候选词字段），不是双拼按键 "fwxnql"。
+// 旧实现会把 "feixiaoqiang" 当双拼按键再切一遍 → 得到错乱串
+// "fechuachaoqchaneng"，导致 codeMatchesText 失败、学习被跳过，
+// 进而临时词库计数无法增加、永远无法升级到用户词库。
+func TestOnCandidateSelected_ShuangpinFullPinyinCodeUntouched(t *testing.T) {
+	tmpDir := t.TempDir()
+	content := `# already-fullpinyin test
+---
+name: fp
+version: "1.0"
+sort: by_weight
+...
+费	fei	1000
+晓	xiao	1000
+强	qiang	1000
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "8105.dict.yaml"), []byte(content), 0644); err != nil {
+		t.Fatalf("写词典失败: %v", err)
+	}
+	d := dict.NewPinyinDict(nil)
+	if err := d.LoadRimeDir(tmpDir); err != nil {
+		t.Fatalf("加载词典失败: %v", err)
+	}
+	engine := NewEngine(wrapInCompositeDict(d), nil)
+	scheme := shuangpin.Get("xiaohe")
+	if scheme == nil {
+		t.Fatal("小鹤双拼方案未注册")
+	}
+	engine.SetShuangpinConverter(shuangpin.NewConverter(scheme))
+	stub := &stubLearning{}
+	engine.SetLearningStrategy(stub)
+
+	// 模拟从临时词库读出候选后再次选中：code 已经是全拼形态
+	engine.OnCandidateSelected("feixiaoqiang", "费晓强")
+
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 learn call, got %d: %+v", len(stub.calls), stub.calls)
+	}
+	if got := stub.calls[0].code; got != "feixiaoqiang" {
+		t.Errorf("learn code = %q, want feixiaoqiang", got)
+	}
+}
+
 // TestOnCandidateSelected_NewWordPassesPerCharCheck 验证逐字段校验放行"造新词"。
 //
 // 场景：用户造"费晓强"——词典里有"费/晓/强"单字，
