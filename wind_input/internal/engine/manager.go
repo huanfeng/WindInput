@@ -171,6 +171,27 @@ func (m *Manager) SetCurrentIDForTest(id string) {
 	m.currentID = id
 }
 
+// RegisterSystemLayerForTest 仅供测试使用: 直接往 Manager.systemLayers 写一条
+// schemaID -> DictLayer 映射, 模拟 reRegisterSystemLayer 的副作用.
+// 这是 ActivateTempPinyin/DeactivateTempPinyin 在恢复层时使用的查找表.
+// 生产代码不应触碰; 该方法不会同步到 DictManager 的 CompositeDict.
+func (m *Manager) RegisterSystemLayerForTest(schemaID string, layer dict.DictLayer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.systemLayers == nil {
+		m.systemLayers = make(map[string]dict.DictLayer)
+	}
+	m.systemLayers[schemaID] = layer
+}
+
+// SetPrimaryPinyinIDForTest 仅供测试使用: 直接设置 primaryPinyinID,
+// 让 findPinyinSchemaID 能在不依赖 SchemaManager 的情况下解析出拼音方案 ID.
+func (m *Manager) SetPrimaryPinyinIDForTest(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.primaryPinyinID = id
+}
+
 // GetDictManager 获取词库管理器
 func (m *Manager) GetDictManager() *dict.DictManager {
 	m.mu.RLock()

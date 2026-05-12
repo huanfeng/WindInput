@@ -35,13 +35,37 @@ func (m *Manager) EnsurePinyinLoaded() error {
 	})
 }
 
+// isMixedEngineLocked 判断当前引擎是否为混输引擎.
+// 优先看 currentEngine 类型 (运行时), 兜底看当前 schema 的 EngineType (测试 / 启动早期).
+// 调用方必须持有 m.mu (R 或 W).
+func (m *Manager) isMixedEngineLocked() bool {
+	if _, ok := m.currentEngine.(*mixed.Engine); ok {
+		return true
+	}
+	if m.schemaManager != nil && m.currentID != "" {
+		if s := m.schemaManager.GetSchema(m.currentID); s != nil {
+			return s.Engine.Type == schema.EngineTypeMixed
+		}
+	}
+	return false
+}
+
 // ActivateTempPinyin 激活临时拼音模式：交换系统词库层
 // 临时移除码表层 + 注册拼音词库层，避免码表候选污染拼音查询结果。
 // 调用方（coordinator）在进入临时拼音模式时调用。
+//
+// 混输引擎短路: 混输 CompositeDict 已同时含码表+拼音层, 交换反而会破坏
+// 主路径; 此时 Activate/Deactivate 均为 no-op.
 func (m *Manager) ActivateTempPinyin() {
 	m.mu.RLock()
+	isMixed := m.isMixedEngineLocked()
 	pinyinID := m.findPinyinSchemaID()
 	m.mu.RUnlock()
+
+	if isMixed {
+		m.logger.Debug("临时拼音: 混输引擎已内置拼音层, Activate 跳过层交换")
+		return
+	}
 
 	if m.dictManager == nil {
 		return
@@ -77,7 +101,18 @@ func (m *Manager) ActivateTempPinyin() {
 
 // DeactivateTempPinyin 退出临时拼音模式：恢复系统词库层
 // 卸载拼音词库层 + 恢复码表层。
+//
+// 混输引擎短路: 与 ActivateTempPinyin 配对, Activate 未做事 Deactivate 也不能动.
 func (m *Manager) DeactivateTempPinyin() {
+	m.mu.RLock()
+	isMixed := m.isMixedEngineLocked()
+	m.mu.RUnlock()
+
+	if isMixed {
+		m.logger.Debug("临时拼音: 混输引擎, Deactivate 跳过层交换")
+		return
+	}
+
 	if m.dictManager == nil {
 		return
 	}
