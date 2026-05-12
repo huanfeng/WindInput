@@ -48,7 +48,24 @@ type Engine struct {
 	spConverter *shuangpin.Converter // 双拼转换器（nil 表示全拼模式）
 
 	// 造词辅助
-	charPinyinIdx map[rune]string // 懒构建：汉字 → 全拼音节，用于自动生成用户词编码
+	charPinyinIdx *pinyinIndex // 懒构建：汉字 → 全拼音节（池化存储），用于自动生成用户词编码
+}
+
+// pinyinIndex 池化的"汉字 → 代表读音"反向索引。
+// 拼音音节是封闭集（标准约 410 个），用 uint16 索引 + 共享音节池
+// 替代每个 rune 各存一份 string，可显著降低重复 string 头部开销，
+// 并为后续扩展为"多读音列表"（map[rune][]uint16）铺路。
+type pinyinIndex struct {
+	pool []string        // 池中索引即音节 ID（构建后不可变）
+	char map[rune]uint16 // 汉字 → 代表读音的池索引（按词典权重择优）
+}
+
+// syllable 返回池中索引对应的音节字符串，越界返回空串。
+func (p *pinyinIndex) syllable(id uint16) string {
+	if int(id) >= len(p.pool) {
+		return ""
+	}
+	return p.pool[id]
 }
 
 // NewEngine 创建拼音引擎
@@ -335,10 +352,30 @@ func (e *Engine) OnCandidateSelected(code, text string) {
 	// 与 PinyinDict 查询时使用的全拼 key 保持一致。
 	// 不归一化时，拆分输入产生的 code 为原始双拼键序列（如 "nihk"），
 	// 而引擎查询始终使用全拼（"nihao"），导致写入的临时词条永远无法被检索到。
+	//
+	// 优先级：
+	//  1) 用 spConverter 切分用户的实际按键（与本次输入完全一致，多音字天然正确）
+	//  2) 兜底：从 text 反查代表读音（已按词典权重择优，多音字也尽量选常用读音）
 	if e.spConverter != nil {
-		if fp := e.GenerateWordPinyin(text); fp != "" {
-			code = fp
+		converted := false
+		if r := e.spConverter.Convert(code); r != nil && !r.HasPartial && r.FullPinyin != "" {
+			code = r.FullPinyin
+			converted = true
 		}
+		if !converted {
+			if fp := e.GenerateWordPinyin(text); fp != "" {
+				code = fp
+			}
+		}
+	}
+
+	// 写入前反查校验：生成的 code 必须能回查到 text，否则放弃学习。
+	// 这能拦截"双拼多义切分错位/反向索引猜错读音"等边界 case，
+	// 避免产生"写得进、查不出"的幽灵词条。
+	if !e.codeMatchesText(code, text) {
+		e.logger.Debug("learning skipped: code cannot reverse-lookup text",
+			"code", code, "textLen", len([]rune(text)))
+		return
 	}
 
 	// 调频
@@ -367,22 +404,142 @@ func (e *Engine) Type() string {
 	return "pinyin"
 }
 
-// buildCharPinyinIndex 构建汉字→全拼音节的反向索引。
-// 遍历全部 ~400 个标准拼音音节，对每个音节做单字精确查询，
-// 将首次出现的音节作为该字的代表读音（通常为最常用读音）。
-// 结果缓存于 e.charPinyinIdx，仅在首次调用时执行。
-func (e *Engine) buildCharPinyinIndex() {
-	idx := make(map[rune]string, 6000)
-	for _, syl := range allSyllables {
-		cands := e.dict.Lookup(syl)
-		for _, c := range cands {
-			runes := []rune(c.Text)
-			if len(runes) == 1 {
-				if _, exists := idx[runes[0]]; !exists {
-					idx[runes[0]] = syl
+// codeMatchesText 检查 code 与 text 是否在"逐字段"层面合理匹配。
+//
+// 不要求整词反查（用户造的新词本来就不在词典里），而是：
+//  1. 把 code 切成 N 个音节，要求 N == len([]rune(text))
+//  2. 每个 (音节, 字) 配对必须在词典中存在（该音节下能查到该字）
+//
+// 这样既能放行"用户造新词"的合法路径（每个字-音节单独都合理），
+// 又能拦截"切分错位 / 反向索引猜错读音"（如 费→bi）的幽灵词条。
+//
+// 切分用 SyllableTrie 做带回溯的 DP，因此 "xian" 可被切为 ["xian"] 或 ["xi","an"]，
+// 选择能与 text 字数匹配的那个切分。
+func (e *Engine) codeMatchesText(code, text string) bool {
+	if code == "" || text == "" {
+		return false
+	}
+	if e.dict == nil || e.syllableTrie == nil {
+		// 无词典/无 trie（测试等）：放行，避免阻塞合法路径
+		return true
+	}
+	runes := []rune(text)
+	if syls, ok := e.splitCodeToN(code, len(runes)); ok {
+		for i, syl := range syls {
+			matched := false
+			for _, c := range e.dict.Lookup(syl) {
+				cr := []rune(c.Text)
+				if len(cr) == 1 && cr[0] == runes[i] {
+					matched = true
+					break
 				}
 			}
+			if !matched {
+				return false
+			}
 		}
+		return true
+	}
+	// 切不出与字数匹配的音节序列：再做一次整词反查兜底（
+	// 覆盖 code 含残留字符或词典里整词已存在的场景）
+	for _, c := range e.dict.Lookup(code) {
+		if c.Text == text {
+			return true
+		}
+	}
+	return false
+}
+
+// splitCodeToN 把 code 切分成恰好 n 个音节。返回切分结果与是否成功。
+// 用回溯：每个位置尝试 MatchAt 给出的所有音节（已按长到短排序），
+// 找到第一个能切出 n 段的方案即返回。
+func (e *Engine) splitCodeToN(code string, n int) ([]string, bool) {
+	if n <= 0 || code == "" {
+		return nil, false
+	}
+	buf := make([]string, 0, n)
+	var dfs func(pos int) bool
+	dfs = func(pos int) bool {
+		if pos == len(code) {
+			return len(buf) == n
+		}
+		if len(buf) >= n {
+			return false
+		}
+		for _, syl := range e.syllableTrie.MatchAt(code, pos) {
+			buf = append(buf, syl)
+			if dfs(pos + len(syl)) {
+				return true
+			}
+			buf = buf[:len(buf)-1]
+		}
+		return false
+	}
+	if dfs(0) {
+		out := make([]string, len(buf))
+		copy(out, buf)
+		return out, true
+	}
+	return nil, false
+}
+
+// buildCharPinyinIndex 构建汉字→代表读音的反向索引（池化存储）。
+//
+// 遍历全部 ~400 个标准拼音音节，对每个音节做单字精确查询，
+// 为每个汉字保留**权重最高**的读音作为代表读音。
+// 这样可正确处理多音字：例如"费"在 "fei" 下权重远高于 "bi"，
+// 选 fei 作为代表读音；"强" 在 "qiang" 下高于 "jiang"，选 qiang。
+//
+// 历史问题：旧实现按 allSyllables 顺序"先到先得"，对多音字会被
+// 字母序较前的生僻读音"占位"（如 费→bi、强→jiang），导致
+// 自动生成的用户词编码与查询时 key 不一致，词条进得去出不来。
+//
+// 结果缓存于 e.charPinyinIdx，仅在首次调用时执行。
+func (e *Engine) buildCharPinyinIndex() {
+	// pool: 池索引即音节 ID，0 保留为"未填充"哨兵以简化判定
+	pool := make([]string, 0, len(allSyllables)+1)
+	pool = append(pool, "") // index 0 占位
+	sylID := make(map[string]uint16, len(allSyllables))
+
+	type best struct {
+		id     uint16
+		weight int
+	}
+	pick := make(map[rune]best, 6000)
+
+	for _, syl := range allSyllables {
+		cands := e.dict.Lookup(syl)
+		if len(cands) == 0 {
+			continue
+		}
+		id, ok := sylID[syl]
+		if !ok {
+			if len(pool) >= 1<<16 {
+				// 理论上不会发生（标准音节远少于 65535），保护性跳过
+				continue
+			}
+			id = uint16(len(pool))
+			pool = append(pool, syl)
+			sylID[syl] = id
+		}
+		for _, c := range cands {
+			runes := []rune(c.Text)
+			if len(runes) != 1 {
+				continue
+			}
+			r := runes[0]
+			if cur, exists := pick[r]; !exists || c.Weight > cur.weight {
+				pick[r] = best{id: id, weight: c.Weight}
+			}
+		}
+	}
+
+	idx := &pinyinIndex{
+		pool: pool,
+		char: make(map[rune]uint16, len(pick)),
+	}
+	for r, b := range pick {
+		idx.char[r] = b.id
 	}
 	e.charPinyinIdx = idx
 }
@@ -399,12 +556,13 @@ func (e *Engine) GenerateWordPinyin(word string) string {
 		return ""
 	}
 	var b strings.Builder
+	b.Grow(len(runes) * 4)
 	for _, r := range runes {
-		syl, ok := e.charPinyinIdx[r]
+		id, ok := e.charPinyinIdx.char[r]
 		if !ok {
 			return ""
 		}
-		b.WriteString(syl)
+		b.WriteString(e.charPinyinIdx.syllable(id))
 	}
 	return b.String()
 }
