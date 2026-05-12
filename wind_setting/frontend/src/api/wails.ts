@@ -52,6 +52,9 @@ export interface SchemaStatusItem {
   schema_name: string;
   engine_type: string; // codetable | pinyin | mixed
   is_mixed: boolean;
+  is_shuangpin: boolean; // 双拼方案：用户词库的 code 仍以全拼存储
+  shuangpin_layout?: string; // 双拼布局 ID（xiaohe / ziranma / mspy / sogou / abc / ziguang）
+  data_schema_id?: string; // 实际存储桶 ID（与 schema_id 不同时表示该方案共享其它方案的数据桶）
   status: "enabled" | "disabled" | "orphaned";
   user_words: number;
   temp_words: number;

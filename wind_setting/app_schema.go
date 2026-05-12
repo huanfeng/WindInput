@@ -70,14 +70,36 @@ func openArchive(path string) ([]archiveEntry, io.Closer, error) {
 
 // SchemaInfo 方案基本信息（前端展示用）
 type SchemaInfo struct {
-	ID          string `json:"id" yaml:"id"`
-	Name        string `json:"name" yaml:"name"`
-	IconLabel   string `json:"icon_label" yaml:"icon_label"`
-	Version     string `json:"version" yaml:"version"`
-	Description string `json:"description" yaml:"description"`
-	EngineType  string `json:"engine_type"`     // codetable | pinyin | mixed（从 engine.type 读取）
-	Source      string `json:"source"`          // builtin | user（方案来源）
-	Error       string `json:"error,omitempty"` // 验证错误信息，非空表示方案异常
+	ID              string `json:"id" yaml:"id"`
+	Name            string `json:"name" yaml:"name"`
+	IconLabel       string `json:"icon_label" yaml:"icon_label"`
+	Version         string `json:"version" yaml:"version"`
+	Description     string `json:"description" yaml:"description"`
+	EngineType      string `json:"engine_type"`                // codetable | pinyin | mixed（从 engine.type 读取）
+	IsShuangpin     bool   `json:"is_shuangpin"`               // 拼音引擎且 scheme=shuangpin
+	ShuangpinLayout string `json:"shuangpin_layout,omitempty"` // 双拼布局：xiaohe / ziranma / mspy / sogou / abc / ziguang
+	Source          string `json:"source"`                     // builtin | user（方案来源）
+	Error           string `json:"error,omitempty"`            // 验证错误信息，非空表示方案异常
+}
+
+// extractShuangpinInfo 从 engine.pinyin 配置 map 中提取双拼信息。
+// 返回 (是否双拼, 双拼布局 ID)。
+// engine.type 必须是 pinyin（mixed 不在此处判断），engine.pinyin.scheme == "shuangpin"
+// 且 engine.pinyin.shuangpin.layout 非空时才视为有效双拼方案。
+func extractShuangpinInfo(engineType string, pinyinSpec map[string]interface{}) (bool, string) {
+	if engineType != "pinyin" || pinyinSpec == nil {
+		return false, ""
+	}
+	scheme, _ := pinyinSpec["scheme"].(string)
+	if scheme != "shuangpin" {
+		return false, ""
+	}
+	if sp, ok := pinyinSpec["shuangpin"].(map[string]interface{}); ok {
+		if layout, ok := sp["layout"].(string); ok {
+			return true, layout
+		}
+	}
+	return true, "" // scheme=shuangpin 但 layout 缺失：仍标记为双拼
 }
 
 // SchemaConfigMeta 方案元信息
@@ -186,14 +208,17 @@ func (a *App) GetAvailableSchemas() ([]SchemaInfo, error) {
 			source = "builtin"
 		}
 
+		isSp, spLayout := extractShuangpinInfo(cfg.Engine.Type, cfg.Engine.Pinyin)
 		info := SchemaInfo{
-			ID:          cfg.Schema.ID,
-			Name:        cfg.Schema.Name,
-			IconLabel:   cfg.Schema.IconLabel,
-			Version:     cfg.Schema.Version,
-			Description: cfg.Schema.Description,
-			EngineType:  cfg.Engine.Type,
-			Source:      source,
+			ID:              cfg.Schema.ID,
+			Name:            cfg.Schema.Name,
+			IconLabel:       cfg.Schema.IconLabel,
+			Version:         cfg.Schema.Version,
+			Description:     cfg.Schema.Description,
+			EngineType:      cfg.Engine.Type,
+			IsShuangpin:     isSp,
+			ShuangpinLayout: spLayout,
+			Source:          source,
 		}
 
 		// 结构验证：引擎类型

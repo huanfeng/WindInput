@@ -112,19 +112,27 @@ func (a *App) ClearFreq(schemaID string) (int, error) {
 	return a.rpcClient.FreqClear(schemaID)
 }
 
+// pinyinSharedDictID 拼音共享词库桶 ID（与 wind_input/internal/schema.PinyinSharedDictID 一致）。
+// 全拼/双拼以及码表方案的临时拼音、混输方案的拼音辅助均使用此桶存储用户词库，
+// 因此即使没有启用任何拼音/双拼方案，该桶仍是有效的存储入口。
+const pinyinSharedDictID = "pinyin"
+
 // ========== 方案列表 ==========
 
 // SchemaStatusItem 方案状态信息
 type SchemaStatusItem struct {
-	SchemaID    string `json:"schema_id"`
-	SchemaName  string `json:"schema_name"`
-	EngineType  string `json:"engine_type"` // codetable | pinyin | mixed
-	IsMixed     bool   `json:"is_mixed"`    // 是否为混输方案（用户词库等继承自主方案）
-	Status      string `json:"status"`
-	UserWords   int    `json:"user_words"`
-	TempWords   int    `json:"temp_words"`
-	ShadowRules int    `json:"shadow_rules"`
-	FreqRecords int    `json:"freq_records"`
+	SchemaID        string `json:"schema_id"`
+	SchemaName      string `json:"schema_name"`
+	EngineType      string `json:"engine_type"`                // codetable | pinyin | mixed
+	IsMixed         bool   `json:"is_mixed"`                   // 是否为混输方案（用户词库等继承自主方案）
+	IsShuangpin     bool   `json:"is_shuangpin"`               // 是否为双拼方案（用户词库的 code 仍以全拼存储）
+	ShuangpinLayout string `json:"shuangpin_layout,omitempty"` // 双拼布局 ID
+	DataSchemaID    string `json:"data_schema_id,omitempty"`   // 实际存储桶 ID（多个方案可共享同一桶）
+	Status          string `json:"status"`
+	UserWords       int    `json:"user_words"`
+	TempWords       int    `json:"temp_words"`
+	ShadowRules     int    `json:"shadow_rules"`
+	FreqRecords     int    `json:"freq_records"`
 }
 
 // GetAllSchemaStatuses 获取所有方案状态
@@ -135,13 +143,17 @@ func (a *App) GetAllSchemaStatuses() ([]SchemaStatusItem, error) {
 		return nil, err
 	}
 
-	// 从 GetAvailableSchemas 构建完整 nameMap 和 engineTypeMap
+	// 从 GetAvailableSchemas 构建完整 nameMap、engineTypeMap、双拼信息映射
 	nameMap := make(map[string]string)
 	engineTypeMap := make(map[string]string)
+	shuangpinMap := make(map[string]bool)
+	shuangpinLayoutMap := make(map[string]string)
 	if schemas, err := a.GetAvailableSchemas(); err == nil {
 		for _, s := range schemas {
 			nameMap[s.ID] = s.Name
 			engineTypeMap[s.ID] = s.EngineType
+			shuangpinMap[s.ID] = s.IsShuangpin
+			shuangpinLayoutMap[s.ID] = s.ShuangpinLayout
 		}
 	}
 
@@ -170,16 +182,85 @@ func (a *App) GetAllSchemaStatuses() ([]SchemaStatusItem, error) {
 		if name == "" {
 			name = s.SchemaID
 		}
+		// 查询数据存储桶 ID（多个方案可能共享同一桶，如全拼/双拼共享 "pinyin" 桶）
+		var dataSchemaID string
+		if stats, err := a.rpcClient.DictGetSchemaStats(s.SchemaID); err == nil {
+			dataSchemaID = stats.DataSchemaID
+		}
 		items[i] = SchemaStatusItem{
 			SchemaID: s.SchemaID, SchemaName: name,
-			EngineType: engineTypeMap[s.SchemaID], IsMixed: mixedSet[s.SchemaID],
-			Status:    s.Status,
-			UserWords: s.UserWords, TempWords: s.TempWords,
+			EngineType:      engineTypeMap[s.SchemaID],
+			IsMixed:         mixedSet[s.SchemaID],
+			IsShuangpin:     shuangpinMap[s.SchemaID],
+			ShuangpinLayout: shuangpinLayoutMap[s.SchemaID],
+			DataSchemaID:    dataSchemaID,
+			Status:          s.Status,
+			UserWords:       s.UserWords, TempWords: s.TempWords,
 			ShadowRules: s.ShadowRules, FreqRecords: s.FreqRecords,
 		}
 	}
 
+	// 处理"被启用方案依赖的主方案"：
+	// 双拼/混输/临时拼音都依赖全拼方案存储用户词库。用户可能未启用全拼方案
+	// （如只用五笔+双拼）。此时全拼方案对应的数据桶（"pinyin"）实际上**仍被用着**，
+	// 不应被当作"残留"。
+	//
+	// 处理两种状态：
+	//   1) 主方案已在 reply.Schemas 中（因为桶有数据），但 status="orphaned"
+	//      → 提升为 "enabled" 以允许在 UI 中编辑（不显示残留警告）
+	//   2) 主方案完全不在 reply.Schemas 中（桶尚未创建）
+	//      → 补一个虚拟条目，让用户能进入管理
+	//
+	// 识别"被依赖"的标准：任何 enabled 方案的 data_schema_id 指向它
+	dependedIDs := make(map[string]bool)
+	for _, it := range items {
+		if it.Status != "enabled" || it.DataSchemaID == "" || it.DataSchemaID == it.SchemaID {
+			continue
+		}
+		dependedIDs[it.DataSchemaID] = true
+	}
+	// "pinyin" 是拼音共享桶（PinyinSharedDictID），即使当前没有任何启用的
+	// 拼音/双拼方案，五笔的临时拼音、混输的辅助拼音也可能使用其中的词库数据。
+	// 因此始终视为"被依赖"，不显示为残留、始终允许编辑。
+	dependedIDs[pinyinSharedDictID] = true
+
+	existingIDs := make(map[string]bool, len(items))
+	for i := range items {
+		existingIDs[items[i].SchemaID] = true
+		// 状态提升：被启用方案依赖的方案不应被视为残留
+		if dependedIDs[items[i].SchemaID] && items[i].Status == "orphaned" {
+			items[i].Status = "enabled"
+		}
+	}
+	for depID := range dependedIDs {
+		if existingIDs[depID] {
+			continue
+		}
+		// 主方案完全不存在：补虚拟条目
+		name := nameMap[depID]
+		if name == "" {
+			name = depID
+		}
+		stats, _ := a.rpcClient.DictGetSchemaStats(depID)
+		entry := SchemaStatusItem{
+			SchemaID:     depID,
+			SchemaName:   name,
+			EngineType:   engineTypeMap[depID],
+			DataSchemaID: depID,
+			Status:       "enabled",
+		}
+		if stats != nil {
+			entry.UserWords = stats.WordCount
+			entry.TempWords = stats.TempWordCount
+			entry.ShadowRules = stats.ShadowCount
+		}
+		items = append(items, entry)
+		existingIDs[depID] = true
+	}
+
 	// 排序：enabled(按配置顺序) → disabled → orphaned
+	// enabled 组内：用户明确启用的按 enabledOrder 排，未在启用列表里的
+	// 隐式方案（如未启用但被依赖的 "pinyin"）排到该组末尾
 	sort.SliceStable(items, func(i, j int) bool {
 		si, sj := items[i], items[j]
 		ri := statusRank(si.Status)
@@ -187,13 +268,18 @@ func (a *App) GetAllSchemaStatuses() ([]SchemaStatusItem, error) {
 		if ri != rj {
 			return ri < rj
 		}
-		// 同一 status 组内，enabled 按配置顺序排
 		if si.Status == "enabled" {
 			oi, oki := enabledOrder[si.SchemaID]
 			oj, okj := enabledOrder[sj.SchemaID]
+			// 一个在启用列表里、另一个不在 → 在的优先
+			if oki != okj {
+				return oki
+			}
 			if oki && okj {
 				return oi < oj
 			}
+			// 都不在启用列表（如隐式 "pinyin" 加上其它边界 case）
+			return si.SchemaID < sj.SchemaID
 		}
 		return si.SchemaID < sj.SchemaID
 	})
