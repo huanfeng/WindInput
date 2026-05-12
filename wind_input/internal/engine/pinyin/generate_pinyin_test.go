@@ -126,6 +126,76 @@ sort: by_weight
 	}
 }
 
+// TestGenerateWordPinyin_WholeWordOverridesPerCharByWeight 验证整词命中
+// 比按代表读音更准确——即"重庆"在词典里整体读 chongqing，
+// 即使"重"的代表读音是 zhong（"重要"等更常见），也应优先 chongqing。
+func TestGenerateWordPinyin_WholeWordOverridesPerCharByWeight(t *testing.T) {
+	tmpDir := t.TempDir()
+	// 构造场景：
+	// - "重" 单字下 zhong 权重 1000 > chong 80（代表读音是 zhong）
+	// - 但整词 "重庆"=chongqing 在词典里存在
+	// - "庆" 只有 qing
+	// 期望：GenerateWordPinyin("重庆") = "chongqing"（整词命中），不是 "zhongqing"
+	content := `# whole-word test
+---
+name: ww
+version: "1.0"
+sort: by_weight
+...
+重	zhong	1000
+重	chong	80
+庆	qing	1000
+重庆	chong qing	500
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "8105.dict.yaml"), []byte(content), 0644); err != nil {
+		t.Fatalf("写词典失败: %v", err)
+	}
+	d := dict.NewPinyinDict(nil)
+	if err := d.LoadRimeDir(tmpDir); err != nil {
+		t.Fatalf("加载词典失败: %v", err)
+	}
+	engine := NewEngine(wrapInCompositeDict(d), nil)
+
+	if got := engine.GenerateWordPinyin("重庆"); got != "chongqing" {
+		t.Errorf("GenerateWordPinyin(\"重庆\") = %q, want %q", got, "chongqing")
+	}
+}
+
+// TestGenerateWordPinyin_SubwordSegmentation 验证长词通过子词切分继承读音——
+// "长江三角洲"：词典里有"长江"=changjiang 和"三角洲"=sanjiaozhou，
+// 单字"长"代表读音可能是 zhang（如"长大"），但用子词切分应得到 changjiangsanjiaozhou。
+func TestGenerateWordPinyin_SubwordSegmentation(t *testing.T) {
+	tmpDir := t.TempDir()
+	content := `# subword test
+---
+name: sw
+version: "1.0"
+sort: by_weight
+...
+长	zhang	1000
+长	chang	500
+江	jiang	1000
+三	san	1000
+角	jiao	1000
+洲	zhou	1000
+长江	chang jiang	600
+三角洲	san jiao zhou	500
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "8105.dict.yaml"), []byte(content), 0644); err != nil {
+		t.Fatalf("写词典失败: %v", err)
+	}
+	d := dict.NewPinyinDict(nil)
+	if err := d.LoadRimeDir(tmpDir); err != nil {
+		t.Fatalf("加载词典失败: %v", err)
+	}
+	engine := NewEngine(wrapInCompositeDict(d), nil)
+
+	if got := engine.GenerateWordPinyin("长江三角洲"); got != "changjiangsanjiaozhou" {
+		t.Errorf("GenerateWordPinyin(\"长江三角洲\") = %q, want %q",
+			got, "changjiangsanjiaozhou")
+	}
+}
+
 // TestOnCandidateSelected_NewWordPassesPerCharCheck 验证逐字段校验放行"造新词"。
 //
 // 场景：用户造"费晓强"——词典里有"费/晓/强"单字，

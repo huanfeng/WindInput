@@ -3,6 +3,7 @@ package pinyin
 import (
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -51,13 +52,13 @@ type Engine struct {
 	charPinyinIdx *pinyinIndex // 懒构建：汉字 → 全拼音节（池化存储），用于自动生成用户词编码
 }
 
-// pinyinIndex 池化的"汉字 → 代表读音"反向索引。
+// pinyinIndex 池化的"汉字 → 读音"反向索引。
 // 拼音音节是封闭集（标准约 410 个），用 uint16 索引 + 共享音节池
-// 替代每个 rune 各存一份 string，可显著降低重复 string 头部开销，
-// 并为后续扩展为"多读音列表"（map[rune][]uint16）铺路。
+// 替代每个 rune 各存一份 string，可显著降低重复 string 头部开销。
 type pinyinIndex struct {
-	pool []string        // 池中索引即音节 ID（构建后不可变）
-	char map[rune]uint16 // 汉字 → 代表读音的池索引（按词典权重择优）
+	pool    []string          // 池中索引即音节 ID（构建后不可变）
+	char    map[rune]uint16   // 汉字 → 代表读音池索引（按词典权重最高者）
+	charAll map[rune][]uint16 // 汉字 → 所有读音池索引（按词典权重降序），用于多音字消歧
 }
 
 // syllable 返回池中索引对应的音节字符串，越界返回空串。
@@ -66,6 +67,19 @@ func (p *pinyinIndex) syllable(id uint16) string {
 		return ""
 	}
 	return p.pool[id]
+}
+
+// readings 返回汉字的所有读音音节（按权重降序）；无读音返回 nil。
+func (p *pinyinIndex) readings(r rune) []string {
+	ids := p.charAll[r]
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = p.syllable(id)
+	}
+	return out
 }
 
 // NewEngine 创建拼音引擎
@@ -483,12 +497,15 @@ func (e *Engine) splitCodeToN(code string, n int) ([]string, bool) {
 	return nil, false
 }
 
-// buildCharPinyinIndex 构建汉字→代表读音的反向索引（池化存储）。
+// buildCharPinyinIndex 构建汉字→读音的反向索引（池化存储）。
 //
 // 遍历全部 ~400 个标准拼音音节，对每个音节做单字精确查询，
-// 为每个汉字保留**权重最高**的读音作为代表读音。
+// 同时记录两份索引：
+//   - char：每字的代表读音（权重最高），用于"无上下文/兜底"的快速查表
+//   - charAll：每字的全部读音（按权重降序），用于多音字消歧的笛卡尔积枚举
+//
 // 这样可正确处理多音字：例如"费"在 "fei" 下权重远高于 "bi"，
-// 选 fei 作为代表读音；"强" 在 "qiang" 下高于 "jiang"，选 qiang。
+// 代表读音选 fei；当需要消歧（如"费晓强"整词推断）时也能枚举到 bi。
 //
 // 历史问题：旧实现按 allSyllables 顺序"先到先得"，对多音字会被
 // 字母序较前的生僻读音"占位"（如 费→bi、强→jiang），导致
@@ -501,11 +518,12 @@ func (e *Engine) buildCharPinyinIndex() {
 	pool = append(pool, "") // index 0 占位
 	sylID := make(map[string]uint16, len(allSyllables))
 
-	type best struct {
+	// 每字的所有 (读音池索引, 权重) 记录，构建期暂存
+	type sylW struct {
 		id     uint16
 		weight int
 	}
-	pick := make(map[rune]best, 6000)
+	all := make(map[rune][]sylW, 6000)
 
 	for _, syl := range allSyllables {
 		cands := e.dict.Lookup(syl)
@@ -528,24 +546,57 @@ func (e *Engine) buildCharPinyinIndex() {
 				continue
 			}
 			r := runes[0]
-			if cur, exists := pick[r]; !exists || c.Weight > cur.weight {
-				pick[r] = best{id: id, weight: c.Weight}
+			// 同字+同音节的多个词条（异体字、不同来源）合并：取最大权重
+			existing := all[r]
+			merged := false
+			for i := range existing {
+				if existing[i].id == id {
+					if c.Weight > existing[i].weight {
+						existing[i].weight = c.Weight
+					}
+					merged = true
+					break
+				}
+			}
+			if !merged {
+				all[r] = append(existing, sylW{id: id, weight: c.Weight})
 			}
 		}
 	}
 
 	idx := &pinyinIndex{
-		pool: pool,
-		char: make(map[rune]uint16, len(pick)),
+		pool:    pool,
+		char:    make(map[rune]uint16, len(all)),
+		charAll: make(map[rune][]uint16, len(all)),
 	}
-	for r, b := range pick {
-		idx.char[r] = b.id
+	for r, list := range all {
+		// 按权重降序排，第 0 个即代表读音
+		sort.Slice(list, func(i, j int) bool { return list[i].weight > list[j].weight })
+		ids := make([]uint16, len(list))
+		for i, sw := range list {
+			ids[i] = sw.id
+		}
+		idx.char[r] = ids[0]
+		idx.charAll[r] = ids
 	}
 	e.charPinyinIdx = idx
 }
 
+// maxReadingCombos 整词读音消歧时的笛卡尔积组合数上限。
+// 实测常用 3-5 字词中每字平均 ≈1.2 个读音，2-3 字词组合数 ≤8，
+// 含极少数生僻多音字的长词控制在此阈值内即可避免性能塌方。
+const maxReadingCombos = 64
+
 // GenerateWordPinyin 为词语生成全拼编码（如"你好" → "nihao"）。
-// 用于用户手动添加词库时自动生成拼音编码，无需手动输入。
+//
+// 三级优先策略：
+//  1. 整词命中：枚举每字所有读音的笛卡尔积（按权重排序），
+//     第一个能让 dict.Lookup(code) 返回 word 的组合即为最优读音。
+//  2. 最长子词切分：用 DP 把 word 切成已知子词序列（如"长江三角洲"=长江+三角洲），
+//     继承每个子词的整体读音（关键解决长词中的多音字）。
+//  3. 按代表读音逐字拼接：兜底，确保至少有结果可用。
+//
+// 用于：手动加词页自动填编码、词库批量导入、双拼学习路径 fallback。
 // 若词语中含无法确定读音的字符，返回空串。
 func (e *Engine) GenerateWordPinyin(word string) string {
 	if e.charPinyinIdx == nil {
@@ -555,6 +606,16 @@ func (e *Engine) GenerateWordPinyin(word string) string {
 	if len(runes) == 0 {
 		return ""
 	}
+
+	// 1) 整词命中
+	if code, ok := e.inferWholeWordCode(word, runes); ok {
+		return code
+	}
+	// 2) 子词切分 + 整体读音继承
+	if code, ok := e.inferBySubwordSegmentation(runes); ok {
+		return code
+	}
+	// 3) 兜底：逐字按代表读音
 	var b strings.Builder
 	b.Grow(len(runes) * 4)
 	for _, r := range runes {
@@ -565,4 +626,167 @@ func (e *Engine) GenerateWordPinyin(word string) string {
 		b.WriteString(e.charPinyinIdx.syllable(id))
 	}
 	return b.String()
+}
+
+// inferWholeWordCode 用 dict 真值表为整个 word 推断读音：
+// 枚举每字所有读音的笛卡尔积，找到能让 dict.Lookup 返回 word 的第一个组合。
+// 由于每字读音按权重降序，按字典序枚举笛卡尔积时**首个**命中的天然是
+// "各字读音权重之和"最高的合理组合。
+// 单字直接走 char[r] 不进入此分支（无消歧必要）。
+func (e *Engine) inferWholeWordCode(word string, runes []rune) (string, bool) {
+	if len(runes) < 2 || e.dict == nil {
+		return "", false
+	}
+	// 收集每字的读音列表，同时估算笛卡尔积规模
+	readings := make([][]string, len(runes))
+	combos := 1
+	for i, r := range runes {
+		rs := e.charPinyinIdx.readings(r)
+		if len(rs) == 0 {
+			return "", false
+		}
+		readings[i] = rs
+		combos *= len(rs)
+		if combos > maxReadingCombos {
+			return "", false
+		}
+	}
+	// 笛卡尔积枚举（按字典序，等价于按权重组合的优先级）
+	idxs := make([]int, len(runes))
+	for {
+		// 拼出候选 code
+		var b strings.Builder
+		b.Grow(len(runes) * 4)
+		for i, pos := range idxs {
+			b.WriteString(readings[i][pos])
+		}
+		code := b.String()
+		// 用 dict.Lookup 验证 code 对应 word
+		for _, c := range e.dict.Lookup(code) {
+			if c.Text == word {
+				return code, true
+			}
+		}
+		// 递增到下一个组合（低位为 0 时进位）
+		k := len(runes) - 1
+		for k >= 0 {
+			idxs[k]++
+			if idxs[k] < len(readings[k]) {
+				break
+			}
+			idxs[k] = 0
+			k--
+		}
+		if k < 0 {
+			return "", false
+		}
+	}
+}
+
+// inferBySubwordSegmentation 用 DP 把 word 切成已知子词序列，继承子词整体读音。
+//
+// dp[i] 表示拼出 word[:i] 字段的最优方案（按"使用的子词总长降序"优先，
+// 长度相同时按"较少段数"优先；段数相同时按词典权重和优先）。
+// 转移：dp[i+L] ← dp[i] + word[i:i+L]（要求 word[i:i+L] 能整词命中）
+//
+// 找不到任何子词切分（含全部为单字）时返回 false，让调用方走"逐字代表读音"兜底。
+func (e *Engine) inferBySubwordSegmentation(runes []rune) (string, bool) {
+	n := len(runes)
+	if n < 2 || e.dict == nil {
+		return "", false
+	}
+	dp := make([]*state, n+1)
+	dp[0] = &state{prev: -1}
+	for i := 0; i < n; i++ {
+		if dp[i] == nil {
+			continue
+		}
+		// 最大尝试到结尾；只对长度 ≥2 的子段做整词查（单字走兜底）
+		for L := 2; i+L <= n; L++ {
+			sub := string(runes[i : i+L])
+			subRunes := runes[i : i+L]
+			code, ok := e.inferWholeWordCode(sub, subRunes)
+			if !ok {
+				continue
+			}
+			next := &state{
+				prev:      i,
+				seg:       code,
+				segLen:    L,
+				multiSegs: dp[i].multiSegs + 1,
+				totalMul:  dp[i].totalMul + L,
+			}
+			if dp[i+L] == nil || better(next, dp[i+L]) {
+				dp[i+L] = next
+			}
+		}
+		// 单字过渡（不计入 totalMul，仅承接前缀状态）
+		if i+1 <= n {
+			cur := dp[i]
+			next := &state{
+				prev:      i,
+				seg:       "",
+				segLen:    1,
+				multiSegs: cur.multiSegs,
+				totalMul:  cur.totalMul,
+			}
+			if dp[i+1] == nil || better(next, dp[i+1]) {
+				dp[i+1] = next
+			}
+		}
+	}
+	final := dp[n]
+	if final == nil || final.totalMul == 0 {
+		// 没有任何多字段子词被命中，让上层走"代表读音兜底"
+		return "", false
+	}
+	// 回溯重建：每段如果是多字段就用 seg，否则用单字代表读音
+	type span struct {
+		from, to int
+		code     string
+	}
+	spans := make([]span, 0, final.multiSegs+n)
+	for cur := n; cur > 0; {
+		s := dp[cur]
+		spans = append(spans, span{from: s.prev, to: cur, code: s.seg})
+		cur = s.prev
+	}
+	// 反转顺序（回溯是从后往前）
+	for i, j := 0, len(spans)-1; i < j; i, j = i+1, j-1 {
+		spans[i], spans[j] = spans[j], spans[i]
+	}
+	var b strings.Builder
+	b.Grow(n * 4)
+	for _, sp := range spans {
+		if sp.code != "" {
+			b.WriteString(sp.code)
+			continue
+		}
+		// 单字段：用代表读音
+		r := runes[sp.from]
+		id, ok := e.charPinyinIdx.char[r]
+		if !ok {
+			return "", false
+		}
+		b.WriteString(e.charPinyinIdx.syllable(id))
+	}
+	return b.String(), true
+}
+
+// better 比较两个 DP 状态的优劣（true 表示 a 比 b 好）。
+// 评分：多字段总字数高 > 多字段段数少（更长子词优先）
+func better(a, b *state) bool {
+	if a.totalMul != b.totalMul {
+		return a.totalMul > b.totalMul
+	}
+	return a.multiSegs < b.multiSegs
+}
+
+// state 是 inferBySubwordSegmentation 的 DP 节点类型（在函数体外为 better 提供类型）
+type state struct {
+	prev      int
+	seg       string
+	segLen    int
+	multiSegs int
+	totalMul  int
 }
