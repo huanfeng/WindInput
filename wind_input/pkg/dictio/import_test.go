@@ -172,7 +172,7 @@ func TestPreviewWindDict(t *testing.T) {
 // ---- TSV 导入器 ----
 
 func TestTSVImporter(t *testing.T) {
-	input := "# header\na\t工\t100\naa\t式\t200\t1713234567\t5\n"
+	input := "# header\na\t工\t100\naa\t式\t200"
 	result, err := (&TSVImporter{}).Import(strings.NewReader(input), ImportOptions{})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -183,9 +183,6 @@ func TestTSVImporter(t *testing.T) {
 	}
 	if result.UserWords[0].Code != "a" || result.UserWords[0].Weight != 100 {
 		t.Errorf("first = %+v", result.UserWords[0])
-	}
-	if result.UserWords[1].CreatedAt != 1713234567 || result.UserWords[1].Count != 5 {
-		t.Errorf("second = %+v", result.UserWords[1])
 	}
 }
 

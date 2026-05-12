@@ -8,13 +8,16 @@ import (
 	"strings"
 )
 
-// TSVImporter 解析旧版 TSV 格式（code\ttext\tweight\ttimestamp\tcount）。
+// TSVImporter 解析纯文本 TSV 格式（code\ttext\tweight）。
+// 仅支持 3 列：编码 / 词条 / 权重。
+// 时间戳与使用次数等元数据不在 TSV 范围内（如需完整元数据请用 WindDict 格式）。
 type TSVImporter struct{}
 
 func (p *TSVImporter) Name() string         { return "纯文本TSV" }
 func (p *TSVImporter) Extensions() []string { return []string{".txt"} }
 
 // Import 从 reader 中解析 TSV 格式数据，输出为 UserWords。
+// 仅解析前 3 列（code / text / weight），额外的列被忽略。
 func (p *TSVImporter) Import(r io.Reader, opts ImportOptions) (*ImportResult, error) {
 	result := &ImportResult{}
 	lineNum := 0
@@ -59,16 +62,6 @@ func (p *TSVImporter) Import(r io.Reader, opts ImportOptions) (*ImportResult, er
 		if len(parts) >= 3 {
 			if w, err := strconv.Atoi(parts[2]); err == nil {
 				entry.Weight = w
-			}
-		}
-		if len(parts) >= 4 {
-			if ts, err := strconv.ParseInt(parts[3], 10, 64); err == nil {
-				entry.CreatedAt = ts
-			}
-		}
-		if len(parts) >= 5 {
-			if c, err := strconv.Atoi(parts[4]); err == nil {
-				entry.Count = c
 			}
 		}
 
