@@ -206,6 +206,7 @@
                   label: 'Shift+Tab / Tab',
                   tip: 'Shift+Tab键/Tab键',
                 },
+                { value: PairGroup.CommaPeriod, label: ', / .', tip: '逗号/句号' },
               ]"
               :key="pk.value"
               :title="pk.tip"
@@ -453,12 +454,13 @@ function toggleArrayValue(arr: string[], value: string) {
 
 function toggleSelectKeyGroup(value: string) {
   toggleArrayValue(props.formData.input.select_key_groups, value);
-  // 二三候选键 comma_period 与以词定字 comma_period 互斥
+  // 二三候选键 comma_period 与以词定字/翻页 comma_period 互斥
   if (
     value === PairGroup.CommaPeriod &&
     props.formData.input.select_key_groups.includes(PairGroup.CommaPeriod)
   ) {
     removeFromArray(props.formData.input.select_char_keys, PairGroup.CommaPeriod);
+    removeFromArray(props.formData.input.page_keys, PairGroup.CommaPeriod);
   }
 }
 
@@ -490,6 +492,14 @@ function togglePageKey(value: string) {
   ) {
     removeFromArray(props.formData.input.select_char_keys, value);
   }
+  // 翻页键 comma_period 与次/三选键、以词定字互斥
+  if (
+    value === PairGroup.CommaPeriod &&
+    props.formData.input.page_keys.includes(PairGroup.CommaPeriod)
+  ) {
+    removeFromArray(props.formData.input.select_key_groups, PairGroup.CommaPeriod);
+    removeFromArray(props.formData.input.select_char_keys, PairGroup.CommaPeriod);
+  }
 }
 
 function toggleSelectCharKey(value: string) {
@@ -501,8 +511,9 @@ function toggleSelectCharKey(value: string) {
   }
   // 启用以词定字时，自动移除冲突的按键绑定
   if (value === PairGroup.CommaPeriod) {
-    // 与二三候选键 comma_period 冲突
+    // 与二三候选键 / 翻页键 comma_period 冲突
     removeFromArray(props.formData.input.select_key_groups, PairGroup.CommaPeriod);
+    removeFromArray(props.formData.input.page_keys, PairGroup.CommaPeriod);
   } else if (value === PairGroup.MinusEqual) {
     // 与翻页键 minus_equal 冲突
     removeFromArray(props.formData.input.page_keys, PairGroup.MinusEqual);

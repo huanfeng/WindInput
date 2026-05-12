@@ -67,10 +67,11 @@ var (
 		keys.PairLRCtrl:         {},
 	}
 	pageKeyAllowedGroups = map[keys.PairGroup]struct{}{
-		keys.PairPageUpDown: {},
-		keys.PairMinusEqual: {},
-		keys.PairBrackets:   {},
-		keys.PairShiftTab:   {},
+		keys.PairPageUpDown:  {},
+		keys.PairMinusEqual:  {},
+		keys.PairBrackets:    {},
+		keys.PairShiftTab:    {},
+		keys.PairCommaPeriod: {},
 	}
 	selectCharAllowedGroups = map[keys.PairGroup]struct{}{
 		keys.PairCommaPeriod: {},

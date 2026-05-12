@@ -214,6 +214,9 @@ func (c *Compiler) compilePageKeyGroup(group keys.PairGroup) []uint32 {
 		// Shift+Tab for page up, Tab alone for page down
 		hashes = append(hashes, ipc.CalcKeyHash(ipc.ModShift, ipc.VK_TAB)) // Shift+Tab
 		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_TAB))            // Tab
+	case keys.PairCommaPeriod:
+		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_OEM_COMMA))  // ,
+		hashes = append(hashes, ipc.CalcKeyHash(0, ipc.VK_OEM_PERIOD)) // .
 	}
 
 	return hashes

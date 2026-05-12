@@ -563,6 +563,17 @@ func pageKeyMatch(groups []keys.PairGroup, idx int, key string, keyCode int, has
 			if idx == 1 && !hasShift {
 				return true
 			}
+		case keys.PairCommaPeriod:
+			// Shift+, = <、Shift+. = >，按下 Shift 时不触发翻页
+			if hasShift {
+				continue
+			}
+			if idx == 0 && vk == ipc.VK_OEM_COMMA {
+				return true
+			}
+			if idx == 1 && vk == ipc.VK_OEM_PERIOD {
+				return true
+			}
 		}
 	}
 	return false
