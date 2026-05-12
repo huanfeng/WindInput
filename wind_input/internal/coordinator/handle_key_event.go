@@ -553,7 +553,7 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 	case len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')):
 		lowerKey := strings.ToLower(key)
 		if buf, ok := c.zHybridFallback(lowerKey); ok {
-			return c.enterTempPinyinFromZBuffer(buf)
+			return c.enterTempPinyinFromZBuffer(buf, c.inputBuffer, lowerKey)
 		}
 		// Chinese mode: convert to lowercase for pinyin
 		return c.handleAlphaKey(lowerKey)

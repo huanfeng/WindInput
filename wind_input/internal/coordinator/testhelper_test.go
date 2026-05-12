@@ -217,6 +217,12 @@ func withZHybridSchema(zRepeat bool) testOption {
 	}
 }
 
+// pressKeyCode 直接以 VK 码触发一次按键 (用于 backspace / 方向键等没有 ASCII 字面值的键).
+func (h *testCoordinator) pressKeyCode(keyCode int) *bridge.KeyEventResult {
+	h.t.Helper()
+	return h.HandleKeyEvent(bridge.KeyEventData{KeyCode: keyCode})
+}
+
 // pressKey 用最常见参数构造 KeyEventData 并调用 HandleKeyEvent.
 // key 应为单字符（如 "a"）或 keys.Key* 字符串.
 // 对单字符字母, KeyCode 自动取 ASCII 大写值（与 Win32 VK_A..VK_Z 对齐）.

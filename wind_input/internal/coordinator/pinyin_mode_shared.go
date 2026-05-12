@@ -34,6 +34,9 @@ func (c *Coordinator) handlePinyinModeKey(ops *pinyinModeOps, key string, data *
 	switch {
 	// === 字母 a-z ===
 	case len(key) == 1 && key[0] >= 'a' && key[0] <= 'z':
+		// 任何新字符插入都会作废 z 混合切入的回退缓存
+		c.tempPinyinRewindBuffer = ""
+		c.tempPinyinRewindKey = ""
 		c.pinyinModeInsertChar(ops, key)
 		c.currentPage = 1
 		c.selectedIndex = 0
@@ -43,6 +46,8 @@ func (c *Coordinator) handlePinyinModeKey(ops *pinyinModeOps, key string, data *
 
 	// === 大写字母转小写 ===
 	case len(key) == 1 && key[0] >= 'A' && key[0] <= 'Z':
+		c.tempPinyinRewindBuffer = ""
+		c.tempPinyinRewindKey = ""
 		c.pinyinModeInsertChar(ops, strings.ToLower(key))
 		c.currentPage = 1
 		c.selectedIndex = 0
@@ -93,6 +98,17 @@ func (c *Coordinator) handlePinyinModeKey(ops *pinyinModeOps, key string, data *
 
 	// === 退格 ===
 	case vk == ipc.VK_BACK:
+		// z 键混合切入后的"原子回退": 若用户切入后未做任何编辑, 第一次 backspace
+		// 应回到正常输入流而非删除拼音 buffer. 校验 buffer 仍是切入瞬间的样子.
+		if c.tempPinyinMode && c.tempPinyinRewindBuffer != "" {
+			expected := c.tempPinyinRewindBuffer[1:] + c.tempPinyinRewindKey
+			if *ops.buffer == expected {
+				return c.rewindTempPinyinToNormal()
+			}
+			// buffer 已被改过 (光标移动 + 删/打), 回退路径作废
+			c.tempPinyinRewindBuffer = ""
+			c.tempPinyinRewindKey = ""
+		}
 		if len(*ops.buffer) > 0 {
 			if ops.cursorPos != nil && *ops.cursorPos > 0 {
 				// 在光标位置删除
@@ -212,6 +228,9 @@ func (c *Coordinator) handlePinyinModeKey(ops *pinyinModeOps, key string, data *
 				insertPos = *ops.cursorPos
 			}
 			if insertPos > 0 && (*ops.buffer)[insertPos-1] != '\'' {
+				// 分隔符也是新字符插入, 作废 z 混合回退缓存
+				c.tempPinyinRewindBuffer = ""
+				c.tempPinyinRewindKey = ""
 				c.pinyinModeInsertChar(ops, "'")
 				c.updatePinyinModeCandidates(ops)
 				c.showPinyinModeUI(ops)

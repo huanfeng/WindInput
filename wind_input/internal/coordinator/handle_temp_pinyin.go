@@ -218,6 +218,8 @@ func (c *Coordinator) exitTempPinyinMode(commit bool, text string) *bridge.KeyEv
 	c.tempPinyinMode = false
 	c.tempPinyinBuffer = ""
 	c.tempPinyinTriggerKey = ""
+	c.tempPinyinRewindBuffer = ""
+	c.tempPinyinRewindKey = ""
 	c.preeditDisplay = ""
 	c.candidates = nil
 	c.currentPage = 1
@@ -311,8 +313,9 @@ func (c *Coordinator) zHybridFallback(lowerKey string) (pinyinBuffer string, ok 
 
 // enterTempPinyinFromZBuffer 从 z 键正常输入路径回退到临时拼音模式。
 // initialBuffer 为剩余作为拼音 buffer 的字符（即 inputBuffer 去掉首 z 后再追加新键）。
-// 在 inputBuffer="z" + 新键 k 的情况下，initialBuffer == k（兼容旧 Hybrid 行为）。
-func (c *Coordinator) enterTempPinyinFromZBuffer(initialBuffer string) *bridge.KeyEventResult {
+// rewindBuffer / rewindKey 是切入瞬间被抛弃的 inputBuffer 和触发键, 用于让用户
+// 在切入后未做任何编辑时通过 backspace 一键回退到正常输入流.
+func (c *Coordinator) enterTempPinyinFromZBuffer(initialBuffer, rewindBuffer, rewindKey string) *bridge.KeyEventResult {
 	// 清除当前 z 前缀的输入状态
 	c.clearState()
 	c.hideUI()
@@ -331,6 +334,9 @@ func (c *Coordinator) enterTempPinyinFromZBuffer(initialBuffer string) *bridge.K
 	c.tempPinyinBuffer = initialBuffer
 	c.tempPinyinCursorPos = len(initialBuffer)
 	c.tempPinyinCommitted = ""
+	// 记录回退缓存; 任何新字符插入都会在 pinyin_mode_shared.go 里清掉
+	c.tempPinyinRewindBuffer = rewindBuffer
+	c.tempPinyinRewindKey = rewindKey
 
 	c.logger.Debug("Entered temp pinyin from z fallback", "bufferLen", len(initialBuffer))
 
@@ -342,6 +348,43 @@ func (c *Coordinator) enterTempPinyinFromZBuffer(initialBuffer string) *bridge.K
 	prefix := c.tempPinyinPrefix()
 	preedit := prefix + initialBuffer
 	return c.modeCompositionResult(preedit, len(preedit))
+}
+
+// rewindTempPinyinToNormal 在 z 键混合切入后第一次 backspace 时被调用,
+// 把状态精确还原到切入前的"正常输入路径", 让用户感觉切入与回退是对称的.
+//
+// 调用前提: c.tempPinyinMode==true 且 c.tempPinyinRewindBuffer 非空且
+// c.tempPinyinBuffer 仍是切入瞬间的样子 (即 == rewindBuffer[1:] + rewindKey).
+// 调用方 (pinyin_mode_shared.go) 已校验, 此处不再判断.
+func (c *Coordinator) rewindTempPinyinToNormal() *bridge.KeyEventResult {
+	pre := c.tempPinyinRewindBuffer
+
+	// 拆掉临时拼音状态, 不上屏任何内容
+	c.tempPinyinMode = false
+	c.tempPinyinBuffer = ""
+	c.tempPinyinCursorPos = 0
+	c.tempPinyinCommitted = ""
+	c.tempPinyinTriggerKey = ""
+	c.tempPinyinRewindBuffer = ""
+	c.tempPinyinRewindKey = ""
+	if c.engineMgr != nil {
+		c.engineMgr.DeactivateTempPinyin()
+	}
+	if c.uiManager != nil {
+		c.uiManager.SetModeLabel("")
+		c.uiManager.SetModeAccentColor(nil)
+	}
+
+	// 还原正常输入路径: inputBuffer = 切入前的内容, 刷新候选 + UI
+	c.inputBuffer = pre
+	c.inputCursorPos = len(pre)
+	c.preeditDisplay = ""
+	c.updateCandidates()
+	c.showUI()
+
+	c.logger.Debug("Rewound from temp pinyin back to normal input", "buffer", pre)
+
+	return c.compositionUpdateResult()
 }
 
 // tempPinyinOps 创建临时拼音模式的操作回调
