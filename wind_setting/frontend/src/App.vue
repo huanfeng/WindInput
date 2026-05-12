@@ -798,6 +798,7 @@ onUnmounted(() => {
         <DictionaryPage
           v-show="activeTab === 'dictionary'"
           :isWailsEnv="isWailsEnv"
+          :activeTab="activeTab"
         />
 
         <StatsPage v-show="activeTab === 'stats'" :isWailsEnv="isWailsEnv" />

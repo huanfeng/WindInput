@@ -105,7 +105,7 @@
             </button>
           </div>
 
-          <!-- 混输方案提示（用户词库/临时词库继承自主方案） -->
+          <!-- 混输方案提示（用户词库/临时词库继承自主方案 + 拼音共享桶） -->
           <div
             v-if="
               selectedSchemaIsMixed &&
@@ -114,15 +114,47 @@
             class="mixed-hint"
           >
             <p>此方案为混输方案，{{ schemaSubTabLabel }}继承自主方案。</p>
-            <p class="dict-note">请切换到对应的主方案进行设置。</p>
+            <p class="dict-note">
+              请在主方案<a
+                v-if="selectedSchemaPrimaryAvailable"
+                class="primary-link"
+                href="#"
+                @click.prevent="switchToPrimary"
+                >「{{ selectedSchemaPrimaryName }}」</a
+              ><strong v-else>「{{ selectedSchemaPrimaryName }}」</strong
+              >中管理。拼音部分在<a
+                v-if="mixedPinyinAvailable"
+                class="primary-link"
+                href="#"
+                @click.prevent="switchToMixedPinyin"
+                >「{{ mixedPinyinName }}」</a
+              ><strong v-else>「{{ mixedPinyinName }}」</strong
+              >中管理。
+            </p>
+          </div>
+
+          <!-- 双拼方案：所有 4 个子面板都共享全拼方案的"pinyin"桶，引导用户切换 -->
+          <div v-if="selectedSchemaIsShuangpinOnly" class="mixed-hint">
+            <p>
+              当前为双拼方案，所有词库数据与<a
+                v-if="selectedSchemaPrimaryAvailable"
+                class="primary-link"
+                href="#"
+                @click.prevent="switchToPrimary"
+                >「{{ selectedSchemaPrimaryName }}」</a
+              ><strong v-else>「{{ selectedSchemaPrimaryName }}」</strong
+              >共享，请在主方案中统一管理。
+            </p>
           </div>
 
           <!-- 各子面板 — 用 :key 强制切换方案时重建 -->
+          <!-- 双拼方案：所有 4 个 tab 都隐藏，统一在主方案管理 -->
           <template
             v-if="
-              !selectedSchemaIsMixed ||
-              schemaSubTab === 'shadow' ||
-              schemaSubTab === 'freq'
+              !selectedSchemaIsShuangpinOnly &&
+              (!selectedSchemaIsMixed ||
+                schemaSubTab === 'shadow' ||
+                schemaSubTab === 'freq')
             "
           >
             <UserDictPanel
@@ -173,6 +205,7 @@
       :all-schema-ids="allSchemaIds"
       :all-schema-names="allSchemaNames"
       :non-mixed-schema-ids="nonMixedSchemaIds"
+      :exportable-schema-ids="exportableSchemaIds"
       :initial-mode="selection.mode"
       :initial-tab="ieInitialTab"
       @imported="handleRefresh"
@@ -203,6 +236,9 @@ import ImportExportDialog from "../components/dict/ImportExportDialog.vue";
 
 const props = defineProps<{
   isWailsEnv: boolean;
+  /** 全局当前激活 tab。从 App.vue 传入，用于检测重新进入词库 tab 时刷新方案列表。
+   *  方案启用/禁用是在"通用设置"页修改的，回到词库 tab 时需要重新加载。 */
+  activeTab?: string;
 }>();
 
 const { toast } = useToast();
@@ -242,6 +278,69 @@ const selectedSchemaIsMixed = computed(
   () => selectedSchema.value?.is_mixed === true,
 );
 
+// 双拼方案（非混输）：所有 4 个 tab（userdict/temp/freq/shadow）都共享全拼方案的
+// "pinyin" 桶，统一引导到主方案设置，避免双入口编辑同一份数据。
+// 混输方案的 freq/shadow 是独立的（用混输自己的 schema_id 存），不在此处隐藏，
+// 仍由 mixed-hint 单独处理 userdict/temp。
+const selectedSchemaIsShuangpinOnly = computed(() => {
+  const s = selectedSchema.value;
+  return !!s?.is_shuangpin && !s.is_mixed;
+});
+
+// 主方案（数据存储桶对应的方案）的展示名
+const selectedSchemaPrimaryName = computed(() => {
+  const dataID = selectedSchema.value?.data_schema_id || "";
+  if (!dataID) return "";
+  const primary = allSchemaStatuses.value.find((s) => s.schema_id === dataID);
+  if (!primary) return dataID;
+  // 去掉"（隐式主方案）"后缀，文案上更自然
+  return primary.schema_name.replace(/（隐式主方案）$/, "");
+});
+
+// 主方案是否能直接切换（在方案列表里且不是 orphaned）
+const selectedSchemaPrimaryAvailable = computed(() => {
+  const dataID = selectedSchema.value?.data_schema_id || "";
+  if (!dataID) return false;
+  return allSchemaStatuses.value.some(
+    (s) =>
+      s.schema_id === dataID &&
+      (s.status === "enabled" || s.status === "disabled"),
+  );
+});
+
+// 一键切换到主方案
+function switchToPrimary() {
+  const dataID = selectedSchema.value?.data_schema_id || "";
+  if (!dataID) return;
+  selection.value = { mode: "schema", schemaId: dataID };
+}
+
+// 混输方案的拼音部分（用户词库/临时词库的拼音子集）实际存储在共享的 "pinyin" 桶里。
+// 在混输方案提示中也提供"切换到拼音方案"链接，让用户能直接跳过去管理拼音部分。
+const PINYIN_SHARED_SCHEMA_ID = "pinyin";
+
+const mixedPinyinAvailable = computed(() => {
+  if (!selectedSchemaIsMixed.value) return false;
+  return allSchemaStatuses.value.some(
+    (s) =>
+      s.schema_id === PINYIN_SHARED_SCHEMA_ID &&
+      (s.status === "enabled" || s.status === "disabled"),
+  );
+});
+
+const mixedPinyinName = computed(() => {
+  const item = allSchemaStatuses.value.find(
+    (s) => s.schema_id === PINYIN_SHARED_SCHEMA_ID,
+  );
+  if (!item) return "全拼";
+  // 去掉"（双拼共享）"后缀，hint 文案里链接直接显示"全拼"更自然
+  return item.schema_name.replace(/（双拼共享）$/, "");
+});
+
+function switchToMixedPinyin() {
+  selection.value = { mode: "schema", schemaId: PINYIN_SHARED_SCHEMA_ID };
+}
+
 const schemaSubTabLabel = computed(() => {
   const tab = schemaTabs.find((t) => t.key === schemaSubTab.value);
   return tab?.label || "";
@@ -274,17 +373,45 @@ function openIeDialog(tab: "import" | "export") {
 const allSchemaIds = computed(() =>
   allSchemaStatuses.value.map((s) => s.schema_id),
 );
+
+// 被双拼方案依赖的主方案 ID 集合：用于把"全拼"等显示为"全拼（双拼共享）"
+const shuangpinDependedIDs = computed(() => {
+  const set = new Set<string>();
+  for (const s of allSchemaStatuses.value) {
+    if (s.is_shuangpin && !s.is_mixed && s.data_schema_id) {
+      set.add(s.data_schema_id);
+    }
+  }
+  return set;
+});
+
 const allSchemaNames = computed(() => {
   const map: Record<string, string> = {};
   for (const s of allSchemaStatuses.value) {
-    map[s.schema_id] = s.schema_name;
+    let name = s.schema_name;
+    // 被双拼方案依赖的主方案：加"（双拼共享）"后缀，避免用户误以为是独立词库
+    if (shuangpinDependedIDs.value.has(s.schema_id) && !s.is_shuangpin) {
+      name = name + "（双拼共享）";
+    }
+    map[s.schema_id] = name;
   }
   return map;
 });
 
-// 非混输方案 ID 列表（用于导入目标选择，词库不能导入到混输方案）
+// 可作为导入目标的方案 ID：排除混输方案（数据继承自主方案）和双拼方案
+// （数据共享自全拼方案），避免双入口导入到同一份数据导致混淆
 const nonMixedSchemaIds = computed(() =>
-  allSchemaStatuses.value.filter((s) => !s.is_mixed).map((s) => s.schema_id),
+  allSchemaStatuses.value
+    .filter((s) => !s.is_mixed && !s.is_shuangpin)
+    .map((s) => s.schema_id),
+);
+
+// 可作为"导出"目标的方案 ID：排除双拼方案（与全拼共享一份数据，单独导出无意义）。
+// 混输方案保留：它的 shadow/freq 是独立的，仍可单独导出。
+const exportableSchemaIds = computed(() =>
+  allSchemaStatuses.value
+    .filter((s) => !s.is_shuangpin)
+    .map((s) => s.schema_id),
 );
 
 function onLoading(_loading: boolean) {}
@@ -462,6 +589,18 @@ onMounted(async () => {
   wailsApi.onDictEvent(handleDictEvent);
 });
 
+// 重新进入词库 tab 时刷新方案列表：方案启用/禁用是在其它 tab 修改的，
+// 返回词库 tab 时若不重新拉取，会看到陈旧的列表。
+watch(
+  () => props.activeTab,
+  (val, oldVal) => {
+    if (!props.isWailsEnv) return;
+    if (val === "dictionary" && oldVal !== "dictionary") {
+      loadSchemaStatuses();
+    }
+  },
+);
+
 onUnmounted(() => {
   wailsApi.offDictEvent();
 });
@@ -543,6 +682,19 @@ onUnmounted(() => {
   font-style: italic;
   margin-top: 6px;
 }
+
+/* 行内可点击链接：用于双拼提示中跳转到主方案 */
+.primary-link {
+  color: hsl(var(--primary));
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.primary-link:hover {
+  filter: brightness(1.2);
+}
+
 
 .dict-content-card {
   background: hsl(var(--card));
