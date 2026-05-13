@@ -207,6 +207,34 @@ func (m *Manager) HasCommandPrefix(prefix string) bool {
 	return len(phraseLayer.SearchCommand(prefix, 1)) > 0
 }
 
+// HasPrefix 检查码表/用户词/快捷短语中是否存在以 prefix 开头的任何条目。
+// 用于 z 键混合模式下的渐进决策：当 inputBuffer 仍能扩展出码表或短语候选时
+// 继续走正常输入流程；否则把首 z 视作临时拼音触发键回退。
+func (m *Manager) HasPrefix(prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	m.mu.RLock()
+	dm := m.dictManager
+	m.mu.RUnlock()
+	if dm == nil {
+		return false
+	}
+	// 快捷短语前缀（含字符组导航前缀，与 HasCommandPrefix 同源）
+	if phraseLayer := dm.GetPhraseLayer(); phraseLayer != nil {
+		if len(phraseLayer.SearchCommand(prefix, 1)) > 0 {
+			return true
+		}
+	}
+	// 码表/用户词/静态短语前缀（聚合所有词库层）
+	if composite := dm.GetCompositeDict(); composite != nil {
+		if len(composite.SearchPrefix(prefix, 1)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // findPinyinSchemaID 查找拼音方案 ID（需要持有读锁或写锁）
 //
 // 优先级：

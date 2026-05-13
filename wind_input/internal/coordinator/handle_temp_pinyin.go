@@ -71,23 +71,20 @@ func (c *Coordinator) getTempPinyinTriggerKey(key string, keyCode int) string {
 				return tk
 			}
 		case keys.KeyZ:
-			// z 键触发：仅在无候选时触发，z 同时作为拼音首字母
-			// 当 z 键重复上屏也启用时，z 先进入正常输入流程显示重复候选，
-			// 后续字母键再切入临时拼音（兼容模式）
-			// 当存在 zz 前缀快捷短语时，同样让 z 先走正常输入流程，
-			// 第二键再决定走短语路径还是切入临时拼音
+			// z 键触发：仅在无候选时触发，z 同时作为拼音首字母。
+			// 渐进决策：只要 z 还可能扩展为码表/短语候选，就先走正常输入流程，
+			// 后续字母再依据"新 buffer 是否仍有前缀匹配"决定是否回退到临时拼音。
+			// 这里检查 z 前缀是否存在任何码表/短语；以及 z 键重复是否有历史。
 			if parsedKey == keys.KeyZ && len(c.candidates) == 0 {
 				if c.engineMgr != nil && c.engineMgr.IsZKeyRepeatEnabled() {
-					// 有历史记录可重复时，让 z 走正常输入流程显示重复候选
 					if c.inputHistory != nil {
 						records := c.inputHistory.GetRecentRecords(1, 0)
 						if len(records) > 0 && records[0].Text != "" {
 							return ""
 						}
 					}
-					// 无历史记录，直接触发临时拼音
 				}
-				if c.engineMgr != nil && c.engineMgr.HasCommandPrefix("zz") {
+				if c.engineMgr != nil && c.engineMgr.HasPrefix("z") {
 					return ""
 				}
 				return "z"
@@ -285,16 +282,45 @@ func (c *Coordinator) isZKeyHybridMode() bool {
 	return false
 }
 
-// enterTempPinyinFromZHybrid 从 Z 键混合模式切入临时拼音，initialKey 为用户按下的字母
-func (c *Coordinator) enterTempPinyinFromZHybrid(initialKey string) *bridge.KeyEventResult {
-	// 清除当前 z 的输入状态
+// zHybridFallback 判定 z 键混合模式下当前按键是否应该回退到临时拼音.
+// 返回 ok=true 时 pinyinBuffer 是切入临时拼音时的初始 buffer
+// (即 inputBuffer 去掉首 z 后再追加新键).
+//
+// 触发条件 (全部满足):
+//   - inputBuffer 非空且以 'z' 开头
+//   - z 键被配置为临时拼音触发键或处于 Z 键混合模式
+//   - engineMgr 非空
+//   - inputBuffer + 新键 在码表/短语层中已无前缀匹配
+//
+// 抽出独立方法是为了让 z 决策核心可单测, 不必构造完整的 HandleKeyEvent 链路.
+func (c *Coordinator) zHybridFallback(lowerKey string) (pinyinBuffer string, ok bool) {
+	if len(c.inputBuffer) == 0 || c.inputBuffer[0] != 'z' {
+		return "", false
+	}
+	if !c.isZKeyHybridMode() && !c.isTempPinyinZTrigger() {
+		return "", false
+	}
+	if c.engineMgr == nil {
+		return "", false
+	}
+	if c.engineMgr.HasPrefix(c.inputBuffer + lowerKey) {
+		return "", false
+	}
+	return c.inputBuffer[1:] + lowerKey, true
+}
+
+// enterTempPinyinFromZBuffer 从 z 键正常输入路径回退到临时拼音模式。
+// initialBuffer 为剩余作为拼音 buffer 的字符（即 inputBuffer 去掉首 z 后再追加新键）。
+// 在 inputBuffer="z" + 新键 k 的情况下，initialBuffer == k（兼容旧 Hybrid 行为）。
+func (c *Coordinator) enterTempPinyinFromZBuffer(initialBuffer string) *bridge.KeyEventResult {
+	// 清除当前 z 前缀的输入状态
 	c.clearState()
 	c.hideUI()
 
 	// 进入临时拼音模式
 	if c.engineMgr != nil {
 		if err := c.engineMgr.EnsurePinyinLoaded(); err != nil {
-			c.logger.Warn("Failed to load pinyin engine for z hybrid", "error", err)
+			c.logger.Warn("Failed to load pinyin engine for z fallback", "error", err)
 			return nil
 		}
 		c.engineMgr.ActivateTempPinyin()
@@ -302,11 +328,11 @@ func (c *Coordinator) enterTempPinyinFromZHybrid(initialKey string) *bridge.KeyE
 
 	c.tempPinyinMode = true
 	c.tempPinyinTriggerKey = "z"
-	c.tempPinyinBuffer = initialKey
-	c.tempPinyinCursorPos = len(initialKey)
+	c.tempPinyinBuffer = initialBuffer
+	c.tempPinyinCursorPos = len(initialBuffer)
 	c.tempPinyinCommitted = ""
 
-	c.logger.Debug("Entered temp pinyin from z hybrid mode", "initialKey", initialKey)
+	c.logger.Debug("Entered temp pinyin from z fallback", "bufferLen", len(initialBuffer))
 
 	// 更新拼音候选并显示 UI
 	ops := c.tempPinyinOps()
@@ -314,7 +340,7 @@ func (c *Coordinator) enterTempPinyinFromZHybrid(initialKey string) *bridge.KeyE
 	c.showPinyinModeUI(ops)
 
 	prefix := c.tempPinyinPrefix()
-	preedit := prefix + initialKey
+	preedit := prefix + initialBuffer
 	return c.modeCompositionResult(preedit, len(preedit))
 }
 

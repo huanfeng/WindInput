@@ -551,18 +551,12 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		return nil
 
 	case len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')):
-		// Z键混合模式或临时拼音 z 触发：inputBuffer 为 z 时按第二键决策
-		// - 第二键也是 z 且存在 zz 快捷短语 → 走正常输入路径显示短语导航候选
-		// - 其他字母 → 切入临时拼音（以该字母为初始键）
-		if c.inputBuffer == "z" && (c.isZKeyHybridMode() || c.isTempPinyinZTrigger()) {
-			lowerKey := strings.ToLower(key)
-			if lowerKey == "z" && c.engineMgr != nil && c.engineMgr.HasCommandPrefix("zz") {
-				return c.handleAlphaKey(lowerKey)
-			}
-			return c.enterTempPinyinFromZHybrid(lowerKey)
+		lowerKey := strings.ToLower(key)
+		if buf, ok := c.zHybridFallback(lowerKey); ok {
+			return c.enterTempPinyinFromZBuffer(buf)
 		}
 		// Chinese mode: convert to lowercase for pinyin
-		return c.handleAlphaKey(strings.ToLower(key))
+		return c.handleAlphaKey(lowerKey)
 
 	case len(key) == 1 && key[0] >= '1' && key[0] <= '9':
 		result := c.handleNumberKey(int(key[0] - '0'))
