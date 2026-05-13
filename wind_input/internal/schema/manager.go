@@ -83,6 +83,25 @@ func (sm *SchemaManager) GetSchema(id string) *Schema {
 	return sm.schemas[id]
 }
 
+// InjectSchemaForTest 仅供测试使用: 跳过磁盘扫描直接注入一个方案.
+// 生产代码请走 LoadSchemas. 该方法不做任何 schema 合法性校验.
+func (sm *SchemaManager) InjectSchemaForTest(id string, s *Schema) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.schemas == nil {
+		sm.schemas = make(map[string]*Schema)
+	}
+	sm.schemas[id] = s
+}
+
+// SetActiveForTest 仅供测试使用: 直接设置 activeID, 不校验目标方案是否存在.
+// 生产代码请走 SetActive.
+func (sm *SchemaManager) SetActiveForTest(id string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.activeID = id
+}
+
 // GetActiveSchema 获取当前活跃方案
 func (sm *SchemaManager) GetActiveSchema() *Schema {
 	sm.mu.RLock()

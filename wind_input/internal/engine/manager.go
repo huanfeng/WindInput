@@ -161,6 +161,16 @@ func (m *Manager) SetDictManager(dm *dict.DictManager) {
 	m.dictManager = dm
 }
 
+// SetCurrentIDForTest 仅供测试使用: 直接设置 currentID, 不触发引擎构建 /
+// 词库层注册. 让 IsTempPinyinEnabled / IsZKeyRepeatEnabled 等纯查询能基于
+// 注入的 schema 工作.
+// 生产代码请走 SwitchSchema.
+func (m *Manager) SetCurrentIDForTest(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentID = id
+}
+
 // GetDictManager 获取词库管理器
 func (m *Manager) GetDictManager() *dict.DictManager {
 	m.mu.RLock()
