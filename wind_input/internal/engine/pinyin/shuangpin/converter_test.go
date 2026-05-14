@@ -235,8 +235,52 @@ func TestSogouVKey(t *testing.T) {
 	}{
 		{"dv", "dui", "d=d, v=ui → dui"},
 		{"gv", "gui", "g=g, v=ui → gui"},
-		{"nv", "nv", "n=n, v=v(ü) → nv（女）"},
-		{"lv", "lv", "l=l, v=v(ü) → lv（绿）"},
+		// 搜狗双拼中 ü 通过 y 键输入（y=uai/v），v 键仅映射 ui
+		{"ny", "nv", "n=n, y=v(ü) → nv（女）"},
+		{"ly", "lv", "l=l, y=v(ü) → lv（绿）"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			result := conv.Convert(tt.input)
+			if result.FullPinyin != tt.want {
+				t.Errorf("Convert(%q) = %q, want %q", tt.input, result.FullPinyin, tt.want)
+			}
+		})
+	}
+}
+
+func TestZiguangScheme(t *testing.T) {
+	scheme := Get("ziguang")
+	if scheme == nil {
+		t.Fatal("紫光方案未注册")
+	}
+	conv := NewConverter(scheme)
+
+	tests := []struct {
+		input string
+		want  string
+		desc  string
+	}{
+		// 声母：u=zh, i=sh, a=ch
+		{"ut", "zheng", "u=zh, t=eng → zheng"},
+		{"ux", "zhua", "u=zh, x=ua → zhua"},
+		{"ir", "shan", "i=sh, r=an → shan"},
+		{"ik", "shei", "i=sh, k=ei → shei"},
+		{"aq", "chao", "a=ch, q=ao → chao"},
+		// 韵母键
+		{"nb", "niao", "n=n, b=iao → niao"},
+		{"mw", "men", "m=m, w=en → men"},
+		{"ds", "dang", "d=d, s=ang → dang"},
+		{"gh", "gong", "g=g, h=ong → gong"},
+		{"jj", "jiu", "j=j, j=iu → jiu"},
+		{"lk", "lei", "l=l, k=ei → lei"},
+		{"ll", "luan", "l=l, l=uan → luan"},
+		{"xy", "xin", "x=x, y=in → xin"},
+		{"gz", "gou", "g=g, z=ou → gou"},
+		// nv/lv 通过 n 键（n键=ue/ui/ve）
+		{"nn", "nve", "n=n, n=ve → nve（女）"},
+		{"ln", "lve", "l=l, n=ve → lve（绿）"},
 	}
 
 	for _, tt := range tests {

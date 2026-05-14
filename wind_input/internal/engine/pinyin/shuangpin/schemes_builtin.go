@@ -134,6 +134,7 @@ func ziranmaScheme() *Scheme {
 }
 
 // mspyScheme 微软双拼
+// 键位来源：RIME double_pinyin_mspy.schema.yaml（iDvel/rime-ice）
 func mspyScheme() *Scheme {
 	initials := defaultInitialMap()
 	initials['v'] = "zh"
@@ -146,7 +147,7 @@ func mspyScheme() *Scheme {
 		'e': {"e"},
 		'i': {"i"},
 		'u': {"u"},
-		'v': {"ve", "ui"},
+		'v': {"ui"},
 		'b': {"ou"},
 		'c': {"iao"},
 		'd': {"uang", "iang"},
@@ -162,10 +163,10 @@ func mspyScheme() *Scheme {
 		'q': {"iu"},
 		'r': {"uan", "er"},
 		's': {"ong", "iong"},
-		't': {"ue"},
+		't': {"ue", "ve"},
 		'w': {"ia", "ua"},
 		'x': {"ie"},
-		'y': {"uai", "ing"},
+		'y': {"uai", "v"},
 		'z': {"ei"},
 		';': {"ing"},
 	}
@@ -186,6 +187,7 @@ func mspyScheme() *Scheme {
 }
 
 // sogouScheme 搜狗双拼
+// 键位来源：RIME double_pinyin_sogou.schema.yaml（iDvel/rime-ice）
 func sogouScheme() *Scheme {
 	initials := defaultInitialMap()
 	initials['v'] = "zh"
@@ -198,7 +200,7 @@ func sogouScheme() *Scheme {
 		'e': {"e"},
 		'i': {"i"},
 		'u': {"u"},
-		'v': {"ui", "v"},
+		'v': {"ui"},
 		'b': {"ou"},
 		'c': {"iao"},
 		'd': {"uang", "iang"},
@@ -217,8 +219,9 @@ func sogouScheme() *Scheme {
 		't': {"ue", "ve"},
 		'w': {"ia", "ua"},
 		'x': {"ie"},
-		'y': {"uai", "ing"},
+		'y': {"uai", "v"},
 		'z': {"ei"},
+		';': {"ing"},
 	}
 
 	zeroInitials := map[byte][]string{
@@ -237,6 +240,7 @@ func sogouScheme() *Scheme {
 }
 
 // abcScheme 智能ABC双拼
+// 键位来源：RIME double_pinyin_abc.schema.yaml（iDvel/rime-ice）
 func abcScheme() *Scheme {
 	initials := defaultInitialMap()
 	initials['a'] = "zh"
@@ -245,13 +249,13 @@ func abcScheme() *Scheme {
 
 	finals := map[byte][]string{
 		'a': {"a"},
-		'o': {"o"},
+		'o': {"uo", "o"},
 		'e': {"e"},
 		'i': {"i"},
 		'u': {"u"},
 		'v': {"v"},
 		'b': {"ou"},
-		'c': {"in"},
+		'c': {"in", "uai"},
 		'd': {"ia", "ua"},
 		'f': {"en"},
 		'g': {"eng"},
@@ -259,17 +263,17 @@ func abcScheme() *Scheme {
 		'j': {"an"},
 		'k': {"ao"},
 		'l': {"ai"},
-		'm': {"iu"},
-		'n': {"iao"},
+		'm': {"ui", "ue", "ve"},
+		'n': {"un"},
 		'p': {"uan"},
 		'q': {"ei"},
-		'r': {"uan", "er"},
+		'r': {"er", "iu"},
 		's': {"ong", "iong"},
 		't': {"iang", "uang"},
 		'w': {"ian"},
 		'x': {"ie"},
 		'y': {"ing"},
-		'z': {"un"},
+		'z': {"iao"},
 	}
 
 	zeroInitials := map[byte][]string{
@@ -286,11 +290,12 @@ func abcScheme() *Scheme {
 }
 
 // ziguangScheme 紫光双拼（华宇双拼）
+// 键位来源：RIME double_pinyin_ziguang.schema.yaml（iDvel/rime-ice）
 func ziguangScheme() *Scheme {
 	initials := defaultInitialMap()
-	initials['v'] = "zh"
-	initials['i'] = "ch"
-	initials['u'] = "sh"
+	initials['u'] = "zh"
+	initials['i'] = "sh"
+	initials['a'] = "ch"
 
 	finals := map[byte][]string{
 		'a': {"a"},
@@ -298,31 +303,31 @@ func ziguangScheme() *Scheme {
 		'e': {"e"},
 		'i': {"i"},
 		'u': {"u"},
-		'v': {"v"},
 		'b': {"iao"},
-		'c': {"ing"},
-		'd': {"ai"},
-		'f': {"en"},
-		'g': {"eng"},
-		'h': {"ang"},
-		'j': {"an"},
-		'k': {"ao"},
-		'l': {"uang", "iang"},
-		'm': {"ian"},
-		'n': {"in"},
-		'p': {"ou"},
-		'q': {"er", "iu"},
-		'r': {"uan"},
-		's': {"ong", "iong"},
-		't': {"ue", "ve"},
-		'w': {"ei"},
+		'd': {"ie"},
+		'f': {"ian"},
+		'g': {"iang", "uang"},
+		'h': {"iong", "ong"},
+		'j': {"er", "iu"},
+		'k': {"ei"},
+		'l': {"uan"},
+		';': {"ing"},
+		'm': {"un"},
+		'n': {"ue", "ui", "ve"},
+		'p': {"ai"},
+		'q': {"ao"},
+		'r': {"an"},
+		's': {"ang"},
+		't': {"eng"},
+		'w': {"en"},
 		'x': {"ia", "ua"},
-		'y': {"un"},
-		'z': {"uai", "ui"},
+		'y': {"in", "uai"},
+		'z': {"ou"},
 	}
 
+	// 'a' 是声母 ch 的键，不能同时作零声母前缀（参考 abcScheme 中 a=zh 的处理）
+	// 零声母 a/ai/an/ang/ao 通过重复键(aa)或直接拼音输入
 	zeroInitials := map[byte][]string{
-		'a': {"a", "ai", "an", "ang", "ao"},
 		'o': {"o", "ou"},
 		'e': {"e", "ei", "en", "eng", "er"},
 	}
