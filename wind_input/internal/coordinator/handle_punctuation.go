@@ -173,6 +173,29 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 				highlightedIndex = 0
 			}
 			candidate := c.candidates[highlightedIndex]
+
+			// 命令直通车候选: 先让 commitCmdbarCandidate 跑动作 (text/effect),
+			// 把它返回的 text (可能为空) 与标点合并后一并 InsertText。
+			// 注意 commitCmdbarCandidate 已经 clearState + hideUI, 不再走下方
+			// 的常规 punct_commit 分支。
+			if candidate.IsCommand && len(candidate.Actions) > 0 {
+				punctText := c.convertPunct(r, afterDigit, prevChar)
+				res := c.commitCmdbarCandidate(candidate, len(c.inputBuffer), 0)
+				if res == nil {
+					return nil
+				}
+				// 把标点接在 cmdbar text 之后 (即便 text 为空也要保留标点)
+				if res.Type == bridge.ResponseTypeInsertText {
+					res.Text += punctText
+					return res
+				}
+				// 纯 effect (ClearComposition): 仍需把标点送出去
+				return &bridge.KeyEventResult{
+					Type: bridge.ResponseTypeInsertText,
+					Text: punctText,
+				}
+			}
+
 			text := candidate.Text
 
 			// Apply full-width conversion if enabled

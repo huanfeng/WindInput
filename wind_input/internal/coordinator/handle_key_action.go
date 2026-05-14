@@ -110,6 +110,14 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 
 	// 检查自动上屏
 	if result != nil && result.ShouldCommit {
+		// 命令直通车候选触发自动上屏 (例如配置首选 cmdbar 命令): 走专用方法,
+		// 跳过造词学习 / 全角 / s2t 等普通候选后处理。
+		if len(c.candidates) > 0 {
+			top := c.candidates[0]
+			if top.IsCommand && len(top.Actions) > 0 {
+				return c.commitCmdbarCandidate(top, len(c.inputBuffer), 0)
+			}
+		}
 		text := result.CommitText
 		codeLen := len(c.inputBuffer)
 		// 记录输入历史（用于z键重复上屏），需在 clearState 之前记录

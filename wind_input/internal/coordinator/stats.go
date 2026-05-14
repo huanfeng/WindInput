@@ -65,6 +65,11 @@ func (c *Coordinator) recordCommit(text string, codeLen int, candidatePos int, s
 		Source:       source,
 	})
 	c.statRecorded = true
+
+	// cmdbar 的 last() 从 c.inputHistory 取最近上屏, 不再维护独立历史;
+	// inputHistory.Record 由各 commit 路径在调用 recordCommit 前后按规则
+	// 写入 (普通候选 / cmdbar text 上屏 → 记录; 纯 effect 不记录, 见
+	// commitCmdbarCandidate 注释)。
 }
 
 // recordCommitFallback 在 HandleKeyEvent/HandleCommitRequest 返回 InsertText 时，

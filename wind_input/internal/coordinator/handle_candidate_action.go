@@ -82,6 +82,13 @@ func (c *Coordinator) handlePinCandidateByKey(num int) *bridge.KeyEventResult {
 	cand := c.candidates[actualIndex]
 	code := c.inputBuffer
 
+	// 命令直通车候选 (cmdbar) 不允许通过热键置顶: display 只是渲染,
+	// 真正的"短语顺序"由 PhraseLayer 的 position 字段管, 与热键置顶语义无关。
+	if len(cand.Actions) > 0 {
+		c.logger.Debug("Cannot pin cmdbar action candidate via hotkey")
+		return consumed
+	}
+
 	// 命令候选（短语）：通过 PhraseLayer 置顶
 	if cand.IsCommand && cand.PhraseTemplate != "" {
 		c.mu.Unlock()

@@ -13,6 +13,11 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/cmdbar"
+	cmdbareval "github.com/huanfeng/wind_input/internal/cmdbar/eval"
+	cmdbarfuncs "github.com/huanfeng/wind_input/internal/cmdbar/funcs"
+	cmdbarparser "github.com/huanfeng/wind_input/internal/cmdbar/parser"
+	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/hotkey"
 	"github.com/huanfeng/wind_input/internal/store"
@@ -271,6 +276,17 @@ type Coordinator struct {
 	tooltipCancel   context.CancelFunc
 	tooltipHoverIdx int
 	tooltipMu       sync.Mutex
+
+	// 命令直通车 (cmdbar) 集成。
+	// last() 与 z 键重复上屏共用 inputHistory (上面 c.inputHistory 字段),
+	// 不再维护独立的 cmdbarHistory。Services 提供 clipboard/key/process/
+	// dict/ime 等动作后端, 由 cmdbar.EvalContext 暴露给求值器使用。
+	// cmdbarServices 在 NewCoordinator 中初始化, 之后只读, 不需要额外加锁。
+	cmdbarServices *cmdbar.Services
+	// cmdbarValueExpander 共享 hook + 全局 templateEngine, 供候选后处理统一展开
+	// 含 "$CC(" 或 "$X" 的任意候选 (码表/用户词库/拼音), 不只局限于短语。
+	// 不持有锁, Expand 是纯函数 + hook 闭包内不再回环 c.mu。
+	cmdbarValueExpander *dict.ValueExpander
 }
 
 // EventNotifier 由外部（rpc.Server 适配器）注入。当 coordinator 旁路 RPC 路径
@@ -620,7 +636,62 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 
 	c.startGoroutineWatchdog()
 
+	// 初始化命令直通车 (cmdbar): Services 装配 + 动作函数注册 + 短语 hook 注入。
+	// last() 复用 c.inputHistory, 不再单独维护 cmdbar 历史缓冲。
+	// 见 docs/design/2026-05-12-command-bar-design.md §7。
+	c.cmdbarServices = c.buildCmdbarServices()
+	// RegisterActions 是幂等的: 覆盖 DefaultRegistry 中的 stubs 为真实实现。
+	cmdbarfuncs.RegisterActions(cmdbar.DefaultRegistry)
+	c.installCmdbarPhraseHook()
+
 	return c
+}
+
+// installCmdbarPhraseHook 把命令直通车 hook 注入到当前 schema 的 PhraseLayer。
+// 短语 value 含 "$CC(" 时由该 hook 解析并返回 (display, actions) 给候选构造,
+// 不含时仍走旧的 templateEngine 路径 (双路径策略, design §7.2)。
+//
+// 解析或求值出错时返回 err 让 PhraseLayer 退化为字面量短语并记 WARN, 不阻断输入。
+func (c *Coordinator) installCmdbarPhraseHook() {
+	if c.engineMgr == nil {
+		return
+	}
+	dm := c.engineMgr.GetDictManager()
+	if dm == nil {
+		return
+	}
+	pl := dm.GetPhraseLayer()
+	if pl == nil {
+		return
+	}
+	hook := func(value string) (string, []cmdbar.ResolvedAction, bool, error) {
+		phrase, err := cmdbarparser.Parse(value)
+		if err != nil {
+			return "", nil, true, err
+		}
+		// hook 是从 phrase.SearchCommand 调用的, 而 SearchCommand 在
+		// HandleKeyEvent → handleAlphaKey → convert 链路中, c.mu 已被
+		// 调用方持有。**禁止**在此处再次 c.mu.Lock(), 否则 sync.Mutex
+		// 自死锁, 表现为输入完全卡死 (但 UI 线程因不走此锁仍可拖动)。
+		//
+		// 关键: 把 inputBuffer 拷贝到 evalCtx.input 作为**快照**, 让
+		// action thunks 异步触发时 (此时 c.inputBuffer 已被 clearState
+		// 清空) 仍能拿到触发候选时的编码。否则 code()/tail(code,n) 在
+		// 异步执行点永远返回空。
+		evalCtx := c.newCmdbarEvalContextLocked(c.inputBuffer)
+		display, actions, err := cmdbareval.Evaluate(phrase, evalCtx, cmdbar.DefaultRegistry)
+		if err != nil {
+			return "", nil, true, err
+		}
+		return display, actions, true, nil
+	}
+	pl.SetCmdbarHook(dict.CmdbarPhraseHook(hook))
+
+	// 装配 ValueExpander, 给候选后处理使用。hook 与 PhraseLayer 共享同一闭包。
+	c.cmdbarValueExpander = &dict.ValueExpander{
+		Hook:           dict.CmdbarPhraseHook(hook),
+		TemplateEngine: dict.GetTemplateEngine(),
+	}
 }
 
 // initThemeMode initializes the dark mode state and starts the system theme watcher if needed

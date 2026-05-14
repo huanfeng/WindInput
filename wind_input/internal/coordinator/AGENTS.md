@@ -25,6 +25,9 @@
 | `handle_ui_callbacks.go` | UI 回调（工具栏按钮点击、候选窗口鼠标事件） |
 | `handle_addword.go` | 快捷加词功能：`enterAddWordMode`/`exitAddWordMode` 管理加词模式进出；`handleAddWordKey` 在加词模式下处理 ↑↓/Enter/Esc/Ctrl+Enter；`confirmAddWord` 将词条写入 UserDict；`openAddWordDialog` 打开设置页加词对话框；`calcWordCodeForCurrentSchema` 根据编码规则和反向索引自动计算词的编码 |
 | `input_history.go` | `InputHistory`：按客户端 ID 隔离的上屏记录器；`Record` 追加记录并裁剪至 maxChars；`GetRecentChars` 提取最近 N 个字符（正序），用于加词推荐；`GetRecentRecords` 返回最近记录（最新在前）；仅内存存储，不持久化（有测试文件 `input_history_test.go`） |
+| `cmdbar_services.go` | 命令直通车 (cmdbar) 的 Services 适配层：把 `internal/clipboard` / `internal/keyinject` / `internal/proc` / `engineMgr.GetDictManager().AddUserWord` / `uiManager.OpenSettingsWithPage` 封装成 cmdbar 期望的接口；`buildCmdbarServices` 在 `NewCoordinator` 中装配并写入 `c.cmdbarServices`; `cmdbarProcService.ShellEx` 透传 `proc.ShellEx` 支持 shell flag (`term`/`pwsh`) |
+| `cmdbar_postprocess_test.go` | `applyValueExpansion` 单测: 验证 `$CC` 命令、`$X` 模板、普通候选三类分流, 以及 PhraseLayer 来源候选 (PhraseTemplate != "") 跳过避免双重展开 |
+| `cmdbar_context.go` | `cmdbarEvalContext` 实现 `cmdbar.EvalContext`，给求值器提供 input/history/clip/env/services 取值；Sel/App/Title 暂为占位空串（P5 接 Win32）；Clip(n>1) 暂返回空（P5 接剪贴板栈） |
 | `reload_handler.go` | `ReloadHandler` 接口实现，供 `internal/control` 调用配置热重载 |
 | `confirmed_segments_test.go` | 已确认分段逻辑测试 |
 
@@ -38,6 +41,9 @@
 - 热键编译结果缓存（`cachedKeyDownHotkeys`），配置变更时置 `hotkeysDirty=true` 触发重新编译
 - 运行时状态（中英文、全角、中文标点）在 `startup.remember_last_state=true` 时从 `config.RuntimeState` 恢复
 - 临时拼音模式（`handle_temp_pinyin.go`）通过 `engine.Manager.ActivateTempPinyin` 向 `CompositeDict` 注入拼音词库层，退出时 `DeactivateTempPinyin` 卸载，防止拼音词库污染五笔查询
+- 命令直通车 (cmdbar) 接入：`NewCoordinator` 末尾构造 `cmdbarHistory`/`cmdbarServices` 并通过 `installCmdbarPhraseHook` 把解析+求值闭包注入到当前 schema 的 `PhraseLayer.SetCmdbarHook`, 并构造 `c.cmdbarValueExpander` 用于候选后处理。`recordCommit` 同步 `cmdbarHistory.Push(text)` 让 `last()` 可见上一次上屏；`doSelectCandidate` 检测候选 `Actions` 非空时返回 `ResponseTypeClearComposition` 并在 goroutine 内顺序执行动作（错误只记 WARN 元数据，不带内容）。`handlePinCandidateByKey` 拒绝对 cmdbar 动作候选置顶。短语 value **不含** cmdbar marker (`$CC(`/`$CC1(`) 时仍走旧 `templateEngine.Expand` 路径，零行为变更。
+- 命令前缀可见性: `$CC(...)` 短语仅在精确编码匹配时出现; `$CC1(...)` 同时参与前缀匹配。该语义由 `dict.IsCmdbarExactOnly` + 各 `SearchPrefix` 尾部 `filterCmdbarExactOnly` 共同实现, coordinator 侧无需配置/热更新入口 (旧 `Phrase.CmdbarPrefixNav` 已彻底删除)。
+- 候选后处理: `updateCandidatesEx` 在把 engine 返回的候选转 UI 候选之前, 调 `applyValueExpansion(*candidate)` 用同一个 `ValueExpander` 统一展开 `$CC(`/`$CC1(`/`$X`; PhraseLayer 出口候选 (`PhraseTemplate != ""`) 跳过, 普通候选用 `strings.IndexByte(text, '$') < 0` 早跳。
 - 临时英文模式（`handle_temp_english.go`）独立维护一个缓冲区，不影响五笔输入缓冲区
 - **加词模式**（`handle_addword.go`）：激活时设置占位 `inputBuffer = "\x00"` 让 C++ 侧进入 composition 状态以转发后续按键，加词完成/取消后调用 `exitAddWordMode` 清理
 - **候选词操作**（`handle_candidate_action.go`）：`handleDeleteCandidateByKey`/`handlePinCandidateByKey` 内部会 `c.mu.Unlock()` 后执行词库 IO，再 `c.mu.Lock()` 重新获取锁；调用方须在持有锁时调用

@@ -3,9 +3,12 @@ package coordinator
 
 import (
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/candidate"
+	"github.com/huanfeng/wind_input/internal/cmdbar"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/store"
@@ -112,6 +115,101 @@ func (c *Coordinator) updateCandidates() {
 	c.updateCandidatesEx()
 }
 
+// expandAACandidates 把候选切片里所有 text 含 "$AA(" marker 的条目按场景处理:
+//
+//   - exact match (cand.Code == inputBuffer): 展开为 N 个独立字符候选 (1→N),
+//     与 PhraseLayer 字符组精确匹配出口的行为一致。
+//   - prefix match (cand.Code != inputBuffer 且 HasPrefix(cand.Code, inputBuffer)):
+//     替换为 1 条"分类导航"候选 (IsGroup=true, Text=group name, Comment=编码后缀),
+//     模拟 PhraseLayer SearchCommand 的 navResults 行为, 选中后展开二级。
+//
+// 适用场景: 用户词库 / 系统词库把 $AA(name, chars) 作为字面 text 存储,
+// 引擎不识别该 marker, 候选汇聚阶段在此处统一展开。PhraseLayer 出口的
+// 字符组候选 (PhraseTemplate != "") 在 yaml 加载时已展开, 跳过避免重复。
+//
+// 解析失败 (非合法 $AA marker) 时保留原候选不变。
+func expandAACandidates(in []candidate.Candidate, inputBuffer string) []candidate.Candidate {
+	out := make([]candidate.Candidate, 0, len(in))
+	for _, cand := range in {
+		if cand.PhraseTemplate != "" {
+			out = append(out, cand)
+			continue
+		}
+		if !strings.Contains(cand.Text, "$AA(") {
+			out = append(out, cand)
+			continue
+		}
+		name, chars, ok := dict.ParseAAMarker(cand.Text)
+		if !ok {
+			out = append(out, cand)
+			continue
+		}
+		// exact match → 展开 N 字符
+		if cand.Code == inputBuffer {
+			runes := []rune(chars)
+			for i, r := range runes {
+				c := cand
+				c.Text = string(r)
+				c.NaturalOrder = i
+				out = append(out, c)
+			}
+			continue
+		}
+		// prefix match → 单条导航候选
+		if inputBuffer != "" && strings.HasPrefix(cand.Code, inputBuffer) {
+			displayName := name
+			if displayName == "" {
+				displayName = cand.Code
+			}
+			nav := cand
+			nav.Text = displayName
+			nav.Comment = cand.Code[len(inputBuffer):]
+			nav.IsGroup = true
+			nav.GroupCode = cand.Code
+			out = append(out, nav)
+			continue
+		}
+		// 兜底: 既非 exact 也非 prefix (理论上不应发生), 原样保留
+		out = append(out, cand)
+	}
+	return out
+}
+
+// applyValueExpansion 把候选 text 中的 "$CC(" 命令直通车标记 + "$Y/$M/$WC/$uuid"
+// 模板变量展开为最终文本+动作。供任意 dict 来源候选 (码表/用户词库/拼音) 使用。
+//
+// 设计要点:
+//   - PhraseLayer 出来的命令候选 (cand.PhraseTemplate != "") 已经展开过, 跳过避免双重处理
+//   - 大部分候选 text 不含 '$', 用 strings.IndexByte 早跳;
+//     仅命中后才调 ValueExpander
+//   - 调用栈位于 updateCandidatesEx 内, c.mu 已被持有, 函数体内不再加锁,
+//     仅读 cand 的字段 + 调纯函数 (ValueExpander.Expand 内部 hook 闭包也不会
+//     回环 c.mu, 见 installCmdbarPhraseHook 中的注释)
+func (c *Coordinator) applyValueExpansion(cand *candidate.Candidate) {
+	if c.cmdbarValueExpander == nil {
+		return
+	}
+	if cand.PhraseTemplate != "" {
+		return // PhraseLayer 出口已展开, 不重复处理
+	}
+	if strings.IndexByte(cand.Text, '$') < 0 {
+		return // 快路径: 绝大多数候选走这里
+	}
+	if !dict.HasExpandable(cand.Text) {
+		return
+	}
+	res := c.cmdbarValueExpander.Expand(cand.Text)
+	if !res.Changed {
+		return
+	}
+	cand.Text = res.Text
+	if res.IsCommand {
+		cand.DisplayText = res.DisplayText
+		cand.Actions = res.Actions
+		cand.IsCommand = true
+	}
+}
+
 func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 	if len(c.inputBuffer) == 0 {
 		c.candidates = nil
@@ -191,9 +289,19 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 		dictMgr = c.engineMgr.GetDictManager()
 	}
 
+	// 预处理: $AA 字符组展开 (1→N), 在 applyValueExpansion (1→1) 之前。
+	// PhraseLayer 出口已经把字符组按 yaml 加载时展开为 N 个 PhraseEntry,
+	// 这里只针对用户词库 / 系统词库这类把 $AA(...) 当字面 text 存的来源。
+	result.Candidates = expandAACandidates(result.Candidates, c.inputBuffer)
+
 	c.candidates = make([]ui.Candidate, len(result.Candidates))
 	for i, cand := range result.Candidates {
 		cand.Index = i + 1
+		// 候选后处理 (任务 4): 非 PhraseLayer 来源的候选, 若 text 含 "$CC(" 或
+		// "$X" 模板, 用 ValueExpander 重算 (Text/DisplayText/Actions)。
+		// 性能: 大部分候选 text 不含 '$', IndexByte 早跳避免每条都走 hook。
+		// 已是 PhraseLayer 命令候选 (PhraseTemplate != "") 时跳过, 它已展开过。
+		c.applyValueExpansion(&cand)
 		// HasShadow 统一用 inputBuffer 查询（Shadow 规则按当前输入编码存储）
 		if cand.IsCommand && cand.PhraseTemplate != "" {
 			// 命令候选：检查 PhraseLayer 是否有用户覆盖
@@ -649,6 +757,14 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 		"original", originalText, "output", finalText,
 		"fullWidth", c.fullWidth, "confirmedSegments", len(c.confirmedSegments))
 
+	// ── 命令直通车候选 (cmdbar): 委托给 commitCmdbarCandidate 处理 ────────
+	// 自动 commit 路径 (标点顶屏 / 五笔顶码 / 空格选词 / 临时英文 / 拼音模式
+	// 等) 也会走同一方法, 保证 InsertText 路径之外的"取首候选直接上屏"场景
+	// 也能正确触发动作。
+	if len(cand.Actions) > 0 {
+		return c.commitCmdbarCandidate(cand, len(c.inputBuffer), index%c.candidatesPerPage)
+	}
+
 	c.recordCommit(finalText, len(c.inputBuffer), index%c.candidatesPerPage, store.SourceCandidate)
 	c.clearState()
 	c.hideUI()
@@ -656,5 +772,94 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 	return &bridge.KeyEventResult{
 		Type: bridge.ResponseTypeInsertText,
 		Text: finalText,
+	}
+}
+
+// commitCmdbarCandidate 上屏一个命令直通车候选 (cand.IsCommand && len(cand.Actions)>0)。
+//
+// 语义见 docs/design/2026-05-12-command-bar-design.md §3.4 / §5:
+//  1. ActionText 是纯值求值, 在锁内同步聚合成 textBuf, 经
+//     ResponseTypeInsertText 走 TSF 上屏 (不再 Clip+Ctrl+V)。
+//  2. ActionEffect (open/run/key.tap/clip.copy/ime.toggle/...) 全部
+//     丢进单一 goroutine 异步执行。调用方持有 c.mu, effect 内可能 re-lock
+//     (如 ime.toggle 的 c.mu.Lock) 或调用慢系统 API (ShellExecute 冷启动
+//     可达数秒) —— 一律不能放在锁内, 否则输入卡死。
+//  3. textBuf 非空时 effect 延迟 30ms 启动, 给 TSF 把文本落到目标应用
+//     的时间窗 (如 type("「」") 之后 key.tap("Left") 才能停在中间)。
+//     textBuf 为空时无需延迟。
+//
+// 历史规则 (P5 修订, 解决 cozd "汉典 · X" 循环引用):
+//   - textBuf 非空 → 走与"普通候选"相同的记录路径 (recordCommit +
+//     inputHistory.Record), 这样 last() 仍能取到 cmdbar 上屏文本;
+//   - textBuf 空 (纯 effect, 如 cobd 打开百度 / coen 切中英) → **不**
+//     记录, 这样 last() 不会被 cmdbar 的 display 文本污染。
+//
+// 调用方需持有 c.mu。codeLen 是触发时编码长度 (统计用);
+// candidateSlot 是页内偏移 (统计用, 自动 commit 时传 0)。
+func (c *Coordinator) commitCmdbarCandidate(cand candidate.Candidate, codeLen, candidateSlot int) *bridge.KeyEventResult {
+	actions := cand.Actions
+
+	var textBuf strings.Builder
+	effects := make([]cmdbar.ResolvedAction, 0, len(actions))
+	for i, a := range actions {
+		switch a.Kind {
+		case cmdbar.ActionText:
+			txt, err := a.Run()
+			if err != nil {
+				c.logger.Warn("cmdbar: action text error",
+					"actionIndex", i, "error", err)
+				continue
+			}
+			textBuf.WriteString(txt)
+		case cmdbar.ActionEffect:
+			effects = append(effects, a)
+		}
+	}
+
+	committed := textBuf.String()
+
+	if len(effects) > 0 {
+		delay := time.Duration(0)
+		if committed != "" {
+			delay = 30 * time.Millisecond
+		}
+		effectsCopy := make([]cmdbar.ResolvedAction, len(effects))
+		copy(effectsCopy, effects)
+		go func(acts []cmdbar.ResolvedAction, d time.Duration) {
+			if d > 0 {
+				time.Sleep(d)
+			}
+			for i, a := range acts {
+				if _, err := a.Run(); err != nil {
+					c.logger.Warn("cmdbar: action effect error",
+						"actionIndex", i, "error", err)
+				}
+			}
+		}(effectsCopy, delay)
+	}
+
+	// 只有 text 上屏才记录历史 + 统计, 纯 effect 不污染 last()。
+	if committed != "" {
+		c.recordCommit(committed, codeLen, candidateSlot, store.SourceCandidate)
+		if c.inputHistory != nil {
+			histCode := c.inputBuffer
+			if cand.Code != "" {
+				histCode = cand.Code
+			}
+			c.inputHistory.Record(committed, histCode, "", 0)
+		}
+	}
+
+	c.clearState()
+	c.hideUI()
+
+	if committed != "" {
+		return &bridge.KeyEventResult{
+			Type: bridge.ResponseTypeInsertText,
+			Text: committed,
+		}
+	}
+	return &bridge.KeyEventResult{
+		Type: bridge.ResponseTypeClearComposition,
 	}
 }
