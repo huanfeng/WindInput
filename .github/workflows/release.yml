@@ -249,16 +249,3 @@ $changelog
             --notes-file release_notes.md `
             $installer `
             $portable
-
-      # --- Notify docs repo to sync changelog (requires DOCS_REPO_PAT secret) ---
-      - name: Notify docs repo
-        if: ${{ secrets.DOCS_REPO_PAT != '' }}
-        shell: bash
-        env:
-          PAT: ${{ secrets.DOCS_REPO_PAT }}
-        run: |
-          curl -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $PAT" \
-            https://api.github.com/repos/huanfeng/WindInputDocs/dispatches \
-            -d '{"event_type":"changelog-updated","client_payload":{"tag":"${{ github.ref_name }}"}}'

@@ -1,0 +1,20 @@
+name: Notify Docs on Release Published
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  notify-docs:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.DOCS_REPO_PAT != '' }}
+    steps:
+      - name: Notify docs repo to sync changelog
+        env:
+          PAT: ${{ secrets.DOCS_REPO_PAT }}
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $PAT" \
+            https://api.github.com/repos/huanfeng/WindInputDocs/dispatches \
+            -d '{"event_type":"changelog-updated","client_payload":{"tag":"${{ github.event.release.tag_name }}"}}'
