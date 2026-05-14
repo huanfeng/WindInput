@@ -72,7 +72,7 @@ type CodeTableSpec struct {
 	PunctCommit        bool            `yaml:"punct_commit"`
 	ShowCodeHint       bool            `yaml:"show_code_hint"`
 	SingleCodeInput    bool            `yaml:"single_code_input"`
-	SingleCodeComplete bool            `yaml:"single_code_complete"` // 逐码空码补全
+	SingleCodeComplete bool            `yaml:"single_code_complete"` // 精确匹配空码补全
 	CandidateSortMode  string          `yaml:"candidate_sort_mode"`
 	DedupCandidates    *bool           `yaml:"dedup_candidates,omitempty"`
 	SkipSingleCharFreq *bool           `yaml:"skip_single_char_freq"`  // 单字不自动调频（指针以区分未设置和 false）

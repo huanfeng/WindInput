@@ -67,7 +67,7 @@ export const engineSchema: EngineSchema = [
   {
     type: 'toggle',
     key: 'engine.codetable.single_code_input',
-    label: '逐码模式',
+    label: '精确匹配',
     hint: '关闭前缀匹配，仅显示精确匹配',
     engines: ['codetable'],
     tab: 'basic',
@@ -75,8 +75,8 @@ export const engineSchema: EngineSchema = [
   {
     type: 'toggle',
     key: 'engine.codetable.single_code_complete',
-    label: '逐码空码补全',
-    hint: '逐码模式下精确匹配无候选时，从更长编码中取首个候选',
+    label: '精确匹配时空码补全',
+    hint: '精确匹配下无候选时，从更长编码中取首个候选',
     engines: ['codetable'],
     tab: 'basic',
     dependsOn: (cfg) => !!(cfg?.engine?.codetable?.single_code_input),

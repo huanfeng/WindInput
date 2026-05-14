@@ -22,18 +22,18 @@ type Config struct {
 
 	// 前缀匹配与联想
 	PrefixMode     string // "none" (关闭), "sequential" (旧版), "bfs_bucket" (默认，广度优先分桶)
-	AutoComplete   bool   // 逐码模式下空码时是否自动补全1码 (原 SingleCodeComplete)
+	AutoComplete   bool   // 精确匹配模式下空码时是否自动补全1码 (原 SingleCodeComplete)
 	BucketLimit    int    // 分桶扫描时每层的候选上限，结合 IsCommon 保证不漏常用字
 
 	// 权重与排序语义
 	WeightMode        string // "global_freq" (全局权重), "inner_order" (同码内排序), "auto" (自动探测 HasWeight)
 	CandidateSortMode string // "frequency" (按计算后权重排), "natural" (按文件行号排)
-	
+
 	// 高级修饰与特权 (默认均不开启，遵循词库作者意图)
 	ProtectTopN          int    // 保护精确匹配的前 N 个词
 	ShortCodeFirst       bool   // 前缀提示时，对长码施加惩罚，短码优先
 	CharsetPreference    string // 字符集偏好: "none" (默认), "single_first" (单字优先), "phrase_first" (词组优先), "full_code_phrase_first" (全码词组优先)
-	
+
 	// 现有兼容配置...
 }
 ```
