@@ -604,24 +604,14 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 	// Return current status so TSF can sync state (including compiled hotkeys)
 	keyDownHotkeys, keyUpHotkeys := c.getCompiledHotkeys()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Sync CapsLock state from system on focus gain
 	c.capsLockOn = ui.GetCapsLockState()
 
-	// Push English auto-pair config to C++ side
-	if c.bridgeServer != nil && c.config != nil {
-		c.bridgeServer.PushEnglishPairConfigToAllClients(
-			c.config.Input.AutoPair.English,
-			c.config.Input.AutoPair.EnglishPairs,
-		)
-		c.bridgeServer.PushStatsConfigToAllClients(
-			c.config.Stats.IsEnabled(),
-			c.config.Stats.IsTrackEnglish(),
-		)
-	}
-
-	return &bridge.StatusUpdateData{
+	// 在锁内读取返回值及 push 所需字段，然后立即解锁。
+	// push 调用内部做阻塞式 named pipe 写入，若对端缓冲区满则会长时间阻塞；
+	// 若在持锁期间执行，会导致 c.mu 被长时间占用，使所有后续命令超时。
+	status := &bridge.StatusUpdateData{
 		ChineseMode:        c.chineseMode,
 		FullWidth:          c.fullWidth,
 		ChinesePunctuation: c.chinesePunctuation,
@@ -631,6 +621,29 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 		KeyDownHotkeys:     keyDownHotkeys,
 		KeyUpHotkeys:       keyUpHotkeys,
 	}
+	var (
+		bridgeServer    = c.bridgeServer
+		shouldPush      bool
+		autoPairEnabled bool
+		autoPairs       []string
+		statsEnabled    bool
+		statsTrackEng   bool
+	)
+	if c.bridgeServer != nil && c.config != nil {
+		shouldPush = true
+		autoPairEnabled = c.config.Input.AutoPair.English
+		autoPairs = c.config.Input.AutoPair.EnglishPairs
+		statsEnabled = c.config.Stats.IsEnabled()
+		statsTrackEng = c.config.Stats.IsTrackEnglish()
+	}
+	c.mu.Unlock()
+
+	if shouldPush {
+		bridgeServer.PushEnglishPairConfigToAllClients(autoPairEnabled, autoPairs)
+		bridgeServer.PushStatsConfigToAllClients(statsEnabled, statsTrackEng)
+	}
+
+	return status
 }
 
 // HandleIMEActivated handles IME being switched back (user selected this IME again)

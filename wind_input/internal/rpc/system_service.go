@@ -692,3 +692,33 @@ func (s *SystemService) DumpHeapProfile(args *rpcapi.DumpHeapProfileArgs, reply 
 	s.logger.Info("heap profile dumped", "path", path)
 	return nil
 }
+
+// DumpGoroutineProfile 将当前所有 goroutine 堆栈转储写入文件（datadir/diag/goroutine_<时间>.txt）。
+// 此方法不依赖 coordinator 锁，即使发生死锁时仍可通过 RPC 管道调用。
+func (s *SystemService) DumpGoroutineProfile(args *rpcapi.DumpHeapProfileArgs, reply *rpcapi.DumpHeapProfileReply) error {
+	path := args.Path
+	if path == "" {
+		if s.store == nil {
+			return fmt.Errorf("store not available, cannot determine output path")
+		}
+		diagDir := filepath.Join(filepath.Dir(s.store.Path()), "diag")
+		if err := os.MkdirAll(diagDir, 0o755); err != nil {
+			return fmt.Errorf("create diag dir: %w", err)
+		}
+		path = filepath.Join(diagDir, "goroutine_"+time.Now().Format("20060102_150405")+".txt")
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create goroutine dump file: %w", err)
+	}
+	defer f.Close()
+
+	if err := pprof.Lookup("goroutine").WriteTo(f, 2); err != nil {
+		return fmt.Errorf("write goroutine profile: %w", err)
+	}
+
+	reply.Path = path
+	s.logger.Info("goroutine profile dumped", "path", path, "goroutines", runtime.NumGoroutine())
+	return nil
+}

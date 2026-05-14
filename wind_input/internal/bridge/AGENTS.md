@@ -28,7 +28,7 @@ Named Pipe IPC 服务端，负责与 C++ TSF（文本服务框架）桥接层进
 - 缓冲区大小 64KB（与 Weasel 一致）
 - 安全描述符允许 Everyone/SYSTEM/Administrators 访问（SDDL: `D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)`）
 - 推送管道按进程 ID（PID）跟踪客户端，`activeProcessID` 标识当前有焦点的进程，安全推送只发给活跃客户端
-- 请求处理带 200ms 超时（`RequestProcessTimeout`）
+- 请求处理带 1000ms 超时（`RequestProcessTimeout`），覆盖高负载下的调度抖动
 - 异步请求（`IsAsyncRequest`）不发送响应
 - **Host Render 流程**：C++ DLL 看到 `StatusHostRenderAvail` 标志后发送 `CmdHostRenderRequest`；Go 侧 `HostRenderManager.SetupHostRender` 为该进程创建共享内存并返回 `CmdHostRenderSetup` 响应，随后每次候选词更新通过 `SHM.WriteFrame` 推送位图
 - 共享内存命名规则：`Local\WindInput_SHM_<PID>`，事件命名：`Local\WindInput_EVT_<PID>`

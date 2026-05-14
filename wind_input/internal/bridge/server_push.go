@@ -74,8 +74,17 @@ func (s *Server) startPushPipeListener() {
 		s.pushMu.Lock()
 		s.pushClientCount++
 		clientID := s.pushClientCount
+		// 若该 PID 已有旧句柄（同一进程重连），先清理旧句柄，避免 pushClients 泄漏。
+		// 正常断开时旧句柄已由 WriteFile 失败路径清除；此处兜底处理异常重连。
+		if pushProcessID != 0 {
+			if oldHandle, ok := s.pushClientsByPID[pushProcessID]; ok && oldHandle != handle {
+				delete(s.pushClients, oldHandle)
+				delete(s.pushHandleToPID, oldHandle)
+				windows.CloseHandle(oldHandle)
+				s.logger.Debug("Push pipe: closed stale handle for reconnecting PID", "processID", pushProcessID)
+			}
+		}
 		s.pushClients[handle] = writer
-		// Store mapping from process ID to push pipe handle
 		if pushProcessID != 0 {
 			s.pushClientsByPID[pushProcessID] = handle
 			s.pushHandleToPID[handle] = pushProcessID

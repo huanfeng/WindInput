@@ -618,6 +618,8 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 	// 初始化 tooltip service（含拆字数据库路径和字体）
 	c.rebuildTooltipServiceLocked()
 
+	c.startGoroutineWatchdog()
+
 	return c
 }
 

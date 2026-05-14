@@ -66,8 +66,10 @@ const (
 	// Buffer size for named pipe (64KB like Weasel)
 	PipeBufferSize = 64 * 1024
 
-	// Timeout for processing a single request
-	RequestProcessTimeout = 200 * time.Millisecond
+	// Timeout for processing a single request.
+	// 慢路径（菜单、模式切换等）在 CPU 高负载时调度延迟可达数百毫秒，
+	// 1000ms 既能覆盖正常抖动，又能在真实死锁时快速暴露。
+	RequestProcessTimeout = 1000 * time.Millisecond
 )
 
 // Server handles IPC communication with C++ TSF Bridge
