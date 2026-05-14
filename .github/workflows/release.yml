@@ -91,11 +91,11 @@ jobs:
 
           # Categorize
           $categories = [ordered]@{
-            "feat"     = @{ title = "## ✨ 新功能"; items = @() }
-            "fix"      = @{ title = "## 🐛 Bug 修复"; items = @() }
-            "refactor" = @{ title = "## 🔨 重构"; items = @() }
-            "perf"     = @{ title = "## ⚡ 性能优化"; items = @() }
-            "other"    = @{ title = "## 🔧 其他变更"; items = @() }
+            "feat"     = @{ title = "#### 新功能"; items = @() }
+            "fix"      = @{ title = "#### Bug 修复"; items = @() }
+            "refactor" = @{ title = "#### 重构"; items = @() }
+            "perf"     = @{ title = "#### 性能优化"; items = @() }
+            "other"    = @{ title = "#### 其他变更"; items = @() }
           }
 
           foreach ($msg in $commits) {
@@ -158,9 +158,9 @@ jobs:
           $body += "## ✏️ 更新说明`n`n"
           $body += "<!-- user-facing:start -->`n"
           $body += "> 请在发布前编辑此区域。`n"
-          $body += "<!-- user-facing:end -->`n`n"
+          $body += "<!-- user-facing:end -->`n`n<br>`n`n"
           $body += "<details>`n"
-          $body += "<summary>📋 变更记录</summary>`n`n"
+          $body += "<summary>变更记录</summary>`n`n"
           $body += $changelog
           $body += "</details>`n`n"
 
