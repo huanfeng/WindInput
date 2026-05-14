@@ -811,10 +811,16 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 	}
 
 	// === 2. 创建码表引擎 ===
-	// 优先使用混输方案自身的码表配置，其次从主方案继承
+	// 以主方案的码表配置为 base，再将混输方案自身的覆盖字段叠加其上。
+	// 这样用户在 schema_overrides.yaml 中只写部分字段时，未写的字段沿用主方案值，
+	// 而不会因 yaml.Unmarshal 的零值语义导致关键字段（如 MaxCodeLength）丢失。
 	codeTableSpec := s.Engine.CodeTable
-	if codeTableSpec == nil && primarySchema != nil {
-		codeTableSpec = primarySchema.Engine.CodeTable
+	if primarySchema != nil && primarySchema.Engine.CodeTable != nil {
+		if codeTableSpec == nil {
+			codeTableSpec = primarySchema.Engine.CodeTable
+		} else {
+			codeTableSpec = mergeCodeTableSpec(primarySchema.Engine.CodeTable, codeTableSpec)
+		}
 	}
 	if codeTableSpec == nil {
 		codeTableSpec = &CodeTableSpec{
@@ -1141,4 +1147,48 @@ func isAbsPath(path string) bool {
 		return true
 	}
 	return path[0] == '/'
+}
+
+// mergeCodeTableSpec 以 base 为基础，将 override 中的非零字段叠加其上，返回合并副本。
+// 用于混输引擎：base 来自主方案（如 wubi86），override 来自混输方案的部分覆盖配置。
+// 限制：plain bool 字段无法区分"显式 false"与"零值未设置"，始终沿用 base 的值。
+func mergeCodeTableSpec(base, override *CodeTableSpec) *CodeTableSpec {
+	merged := *base
+	if override.MaxCodeLength > 0 {
+		merged.MaxCodeLength = override.MaxCodeLength
+	}
+	if override.BucketLimit > 0 {
+		merged.BucketLimit = override.BucketLimit
+	}
+	if override.CandidateSortMode != "" {
+		merged.CandidateSortMode = override.CandidateSortMode
+	}
+	if override.LoadMode != "" {
+		merged.LoadMode = override.LoadMode
+	}
+	if override.PrefixMode != "" {
+		merged.PrefixMode = override.PrefixMode
+	}
+	if override.WeightMode != "" {
+		merged.WeightMode = override.WeightMode
+	}
+	if override.CharsetPreference != "" {
+		merged.CharsetPreference = override.CharsetPreference
+	}
+	if override.DedupCandidates != nil {
+		merged.DedupCandidates = override.DedupCandidates
+	}
+	if override.ShortCodeFirst != nil {
+		merged.ShortCodeFirst = override.ShortCodeFirst
+	}
+	if override.SkipSingleCharFreq != nil {
+		merged.SkipSingleCharFreq = override.SkipSingleCharFreq
+	}
+	if override.TempPinyin != nil {
+		merged.TempPinyin = override.TempPinyin
+	}
+	if override.ZKeyRepeat != nil {
+		merged.ZKeyRepeat = override.ZKeyRepeat
+	}
+	return &merged
 }

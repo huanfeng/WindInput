@@ -114,7 +114,8 @@ func NewEngine(codetableEng *codetable.Engine, pinyinEng *pinyin.Engine, config 
 		logger = slog.Default()
 	}
 	maxCodeLen := 4
-	if codetableEng != nil && codetableEng.GetConfig() != nil {
+	if codetableEng != nil && codetableEng.GetConfig() != nil &&
+		codetableEng.GetConfig().MaxCodeLength > 0 {
 		maxCodeLen = codetableEng.GetConfig().MaxCodeLength
 	}
 	return &Engine{
