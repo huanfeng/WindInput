@@ -67,6 +67,31 @@ func (m *Manager) SetCandidateLayout(layout config.CandidateLayout) {
 	}
 }
 
+// GetCandidateLayout 返回当前候选框布局; renderer 未初始化时返回零值。
+// 由 cmdbar ime.toggle("layout") 读取以便横/纵互切。
+func (m *Manager) GetCandidateLayout() config.CandidateLayout {
+	if m.renderer == nil {
+		return ""
+	}
+	return m.renderer.GetLayout()
+}
+
+// SetHideCandidateWindow 在运行时切换候选窗隐藏开关 (cmdbar
+// ime.toggle("candwin") 用)。与初始 UpdateConfig 的同名参数共用一个标志位。
+func (m *Manager) SetHideCandidateWindow(hide bool) {
+	m.mu.Lock()
+	m.hideCandidateWindow = hide
+	m.mu.Unlock()
+	m.logger.Info("Candidate window visibility toggled", "hidden", hide)
+}
+
+// IsHideCandidateWindow 返回当前候选窗是否被强制隐藏。
+func (m *Manager) IsHideCandidateWindow() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hideCandidateWindow
+}
+
 // SetGDIFontParams 设置候选框、工具栏和编码提示的GDI字体粗细和缩放
 func (m *Manager) SetGDIFontParams(weight int, scale float64) {
 	if m.renderer != nil {

@@ -1085,13 +1085,13 @@ sort: by_weight
 		var records []store.PhraseRecord
 		for _, e := range entries {
 			rec := store.PhraseRecord{
-				Code: e.Code, Text: e.Text, Texts: e.Texts, Name: e.Name,
+				Code: e.Code, Text: e.Text,
 				Position: e.Position, Enabled: true, IsSystem: true,
 			}
-			if rec.Text != "" && strings.Contains(rec.Text, "$") {
-				rec.Type = "dynamic"
-			} else if rec.Texts != "" {
+			if _, _, ok := dict.ParseAAMarker(e.Text); ok {
 				rec.Type = "array"
+			} else if strings.Contains(rec.Text, "$") {
+				rec.Type = "dynamic"
 			} else {
 				rec.Type = "static"
 			}

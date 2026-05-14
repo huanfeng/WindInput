@@ -19,6 +19,7 @@
 | `2026-04-08-auto-punctuation-pairing-design.md` | 自动配对标点设计方案（括号、引号等） |
 | `2026-04-08-english-auto-pair-design.md` | 英文自动配对设计（括号、引号、代码块） |
 | `2026-04-11-status-indicator-window-design.md` | 输入法状态指示窗口设计（UI、样式、显示策略） |
+| `2026-05-12-command-bar-design.md` | 命令直通车（Command Bar）：在快捷短语之上的小型表达式语言，支持 `$CC(display, action...)` 组合时间/打开/按键/剪贴板/加词等动作 |
 
 ## 文件分类
 

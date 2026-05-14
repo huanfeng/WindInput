@@ -1,5 +1,12 @@
 package candidate
 
+import "github.com/huanfeng/wind_input/internal/cmdbar"
+
+// Action 是 candidate 包对 cmdbar.ResolvedAction 的本地别名, 避免外部调用方
+// 必须直接 import cmdbar; 同时保持类型完全等价 (字段、方法一致), 可直接互相
+// 赋值。Candidate.Actions 用此别名。
+type Action = cmdbar.ResolvedAction
+
 // CandidateSource 候选词来源（混输模式下区分）
 type CandidateSource string
 
@@ -30,6 +37,19 @@ type Candidate struct {
 	HasShadow      bool            // 是否存在 Shadow 层修改（UI 右键菜单"恢复默认"用）
 	IndexLabel     string          // 自定义序号标签（如 "a"/"b"），非空时覆盖 Index 的数字显示
 	Meta           CandidateMeta   // 调试/提示元数据（可选，引擎层按需填充）
+
+	// 命令直通车 (cmdbar) 候选扩展：
+	// 当短语 value 含 $CC(...) 时, PhraseLayer 会通过宿主 hook 求值得到
+	// 一个"显示文本 + 动作列表"对; display 仅用于候选框显示, 选中时执行
+	// 闭包 Actions 而不再把候选文本上屏 (语义见 design §2.2)。
+	//
+	// 约定:
+	//   - DisplayText 为空时回落到 Text。
+	//   - Actions 为空时按普通候选处理 (走 InsertText 路径)。
+	//   - 非空时 doSelectCandidate 走 ClearComposition + 异步执行 actions 的分支,
+	//     仍然记一次 recordCommit(DisplayText) 以推入 history (供 last() 使用)。
+	DisplayText string   // 用于候选框显示的文本; 空回落到 Text
+	Actions     []Action // 选中时按顺序执行; 空则按普通候选处理
 }
 
 // CandidateMeta 候选调试与提示元数据（引擎层按需填充，空值表示未记录）

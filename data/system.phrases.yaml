@@ -2,6 +2,11 @@
 # 随程序打包发布，用户不应直接修改此文件
 # 文本中的 $变量 会在运行时自动展开
 # 支持 $var 和 ${var} 两种语法，$$ 转义为 $
+#
+# 权重字段 (可选):
+#   weight: 0~10000, 优先级高于 position; 未设置时走 position fallback (10000 - position)
+#   档位参考: 必置顶 8000~10000 / 高频 4000~7000 / 中位 1000 (默认) / 罕用 200~500 / 禁用 0
+# 详见 docs/design/2026-05-12-command-bar-design.md §3.8
 
 phrases:
   # ===== 日期 =====
@@ -71,121 +76,100 @@ phrases:
     position: 3
 
   # ===== zz 系列：特殊符号快捷输入 =====
-  # texts 字段：每个字符自动展开为独立候选项
+  # 字符组短语用 $AA("groupName", "charList") marker 表达, 每个 rune 自动
+  # 展开为独立候选项。前缀 (如 "zz") 显示导航候选, 精确码 (如 "zzbd")
+  # 展开字符列表。详见 docs/design/2026-05-12-command-bar-design.md §3.7。
 
   - code: "zzbd"
-    name: "标点"
-    texts: '、。·ˉˇ¨〃々—～‖…‘’“”〔〕〈〉《》「」『』〖〗【】±×÷∶∧∨∑∏∪∩∈∷√⊥∥∠⌒⊙∫∮≡≌≈∽∝≠≮≯≤≥∞∵∴♂♀°′″℃＄¤￠￡‰§№☆★○●◎◇◆□■△▲※→←↑↓〓'
+    text: '$AA("标点", "、。·ˉˇ¨〃々—～‖…‘’“”〔〕〈〉《》「」『』〖〗【】±×÷∶∧∨∑∏∪∩∈∷√⊥∥∠⌒⊙∫∮≡≌≈∽∝≠≮≯≤≥∞∵∴♂♀°′″℃＄¤￠￡‰§№☆★○●◎◇◆□■△▲※→←↑↓〓")'
     position: 1
 
   - code: "zzsz"
-    name: "数字"
-    texts: "❶❷❸❹❺❻❼❽❾❿"
+    text: '$AA("数字", "❶❷❸❹❺❻❼❽❾❿")'
     position: 2
 
   - code: "zzzm"
-    name: "字母"
-    texts: "ⓐⓑⓒⓓⓔⓕⓖⓗⓘⓙⓚⓛⓜⓝⓞⓟⓠⓡⓢⓣⓤⓥⓦⓧⓨⓩ"
+    text: '$AA("字母", "ⓐⓑⓒⓓⓔⓕⓖⓗⓘⓙⓚⓛⓜⓝⓞⓟⓠⓡⓢⓣⓤⓥⓦⓧⓨⓩ")'
     position: 3
 
   - code: "zzpp"
-    name: "偏旁"
-    texts: "亻彳讠饣艹丶乛亠冖宀冫丷扌氵灬丨亅丿乚勹匚冂凵爫忄丬纟疒阝刂卩犭辶廴钅礻衤罒覀夂癶耂牜虍歺糹釒飠"
+    text: '$AA("偏旁", "亻彳讠饣艹丶乛亠冖宀冫丷扌氵灬丨亅丿乚勹匚冂凵爫忄丬纟疒阝刂卩犭辶廴钅礻衤罒覀夂癶耂牜虍歺糹釒飠")'
     position: 4
 
   - code: "zzdw"
-    name: "单位"
-    texts: "㎎㎏㎜㎝㎞㎡㏄㏎㏑㏒㏕"
+    text: '$AA("单位", "㎎㎏㎜㎝㎞㎡㏄㏎㏑㏒㏕")'
     position: 5
 
   - code: "zzpy"
-    name: "拼音"
-    texts: "āáǎàōóǒòêēéěèīíǐìǖǘǚǜüūúǔù"
+    text: '$AA("拼音", "āáǎàōóǒòêēéěèīíǐìǖǘǚǜüūúǔù")'
     position: 6
 
   - code: "zzds"
-    name: "点号数字"
-    texts: "⒈⒉⒊⒋⒌⒍⒎⒏⒐⒑⒒⒓⒔⒕⒖⒗⒘⒙⒚⒛"
+    text: '$AA("点号数字", "⒈⒉⒊⒋⒌⒍⒎⒏⒐⒑⒒⒓⒔⒕⒖⒗⒘⒙⒚⒛")'
     position: 7
 
   - code: "zzks"
-    name: "括号数字"
-    texts: "⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇"
+    text: '$AA("括号数字", "⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇")'
     position: 8
 
   - code: "zzys"
-    name: "圆圈数字"
-    texts: "①②③④⑤⑥⑦⑧⑨⑩"
+    text: '$AA("圆圈数字", "①②③④⑤⑥⑦⑧⑨⑩")'
     position: 9
 
   - code: "zzzs"
-    name: "中文数字"
-    texts: "㈠㈡㈢㈣㈤㈥㈦㈧㈨㈩"
+    text: '$AA("中文数字", "㈠㈡㈢㈣㈤㈥㈦㈧㈨㈩")'
     position: 10
 
   - code: "zzhb"
-    name: "货币符号"
-    texts: "＄￠￡￥¤"
+    text: '$AA("货币符号", "＄￠￡￥¤")'
     position: 11
 
   - code: "zzjt"
-    name: "箭头符号"
-    texts: "→↑←↓↖↗↘↙"
+    text: '$AA("箭头符号", "→↑←↓↖↗↘↙")'
     position: 12
 
   - code: "zzde"
-    name: "大写俄文"
-    texts: "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯЁ"
+    text: '$AA("大写俄文", "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯЁ")'
     position: 13
 
   - code: "zzxe"
-    name: "小写俄文"
-    texts: "абвгдежзийклмнопрстуфхцчшщъыьэюяё"
+    text: '$AA("小写俄文", "абвгдежзийклмнопрстуфхцчшщъыьэюяё")'
     position: 14
 
   - code: "zzdl"
-    name: "大写罗马"
-    texts: "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ"
+    text: '$AA("大写罗马", "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ")'
     position: 15
 
   - code: "zzxl"
-    name: "小写罗马"
-    texts: "ⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ"
+    text: '$AA("小写罗马", "ⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ")'
     position: 16
 
   - code: "zzdx"
-    name: "大写希腊"
-    texts: "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ"
+    text: '$AA("大写希腊", "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ")'
     position: 17
 
   - code: "zzxx"
-    name: "小写希腊"
-    texts: "αβγδεζηθικλμνξοπρστυφχψω"
+    text: '$AA("小写希腊", "αβγδεζηθικλμνξοπρστυφχψω")'
     position: 18
 
   - code: "zzpj"
-    name: "平假名"
-    texts: "ぁあぃいぅうぇえぉおかがきぎぱくぐけげこごさざしじすずせぜそぞただちぢっつづてでとどなにぬねのはばひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろゎわゐゑをん゛゜ゝゞ"
+    text: '$AA("平假名", "ぁあぃいぅうぇえぉおかがきぎぱくぐけげこごさざしじすずせぜそぞただちぢっつづてでとどなにぬねのはばひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろゎわゐゑをん゛゜ゝゞ")'
     position: 19
 
   - code: "zzjp"
-    name: "片假名"
-    texts: "ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴヵヶーヽヾ"
+    text: '$AA("片假名", "ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴヵヶーヽヾ")'
     position: 20
 
   - code: "zzsx"
-    name: "数学符号"
-    texts: "＋－＜＝＞±×÷∈∏∑∕√∝∞∟∠∣∥∧∨∩∪∫∮∴∵∶∷∽≈≌≒≠≡≤≥≦≧≮≯⊕⊙⊥⊿"
+    text: '$AA("数学符号", "＋－＜＝＞±×÷∈∏∑∕√∝∞∟∠∣∥∧∨∩∪∫∮∴∵∶∷∽≈≌≒≠≡≤≥≦≧≮≯⊕⊙⊥⊿")'
     position: 21
 
   - code: "zzts"
-    name: "特殊符号"
-    texts: "℃°‰♂♀§№☆★○●◎◇◆□■△▲※〓＃＆＠＼＾＿￣"
+    text: '$AA("特殊符号", "℃°‰♂♀§№☆★○●◎◇◆□■△▲※〓＃＆＠＼＾＿￣")'
     position: 22
 
   - code: "zzzy"
-    name: "注音符号"
-    texts: "ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ"
+    text: '$AA("注音符号", "ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ")'
     position: 23
 
   # ===== zz 系列：日期时间快捷输入 =====
@@ -231,3 +215,84 @@ phrases:
   - code: "zzxq"
     text: "$Y年$M月$D日 周$WC"
     position: 4
+
+  # ===== 命令直通车 (Command Bar) 测试用例 =====
+  # 触发码统一用 co 前缀, 后续字母全部用字母 (不含数字), 因为五笔/拼音
+  # 输入数字会立刻选词, 数字键到不了 phrase 查询。
+  # 文档: docs/design/2026-05-12-command-bar-design.md
+
+  # --- 打开 URL / 运行程序 / shell ---
+  - code: "cobd"
+    text: '$CC1("打开百度", open("https://baidu.com"))'
+    position: 1
+  - code: "cobs"
+    text: '$CC1("百度搜 {tail(code,5)}", open("https://www.baidu.com/s?wd={url(tail(code,5))}"))'
+    position: 1
+  - code: "cozd"
+    text: '$CC1("汉典 · {last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))'
+    position: 1
+  - code: "cono"
+    text: '$CC("打开记事本", run("notepad.exe"))'
+    position: 1
+  - code: "cosh"
+    text: '$CC("ping baidu", shell("ping -n 1 baidu.com"))'
+    position: 1
+  - code: "cobu"
+    text: '$CC("baidu 搜 {tail(code,5)}", search("baidu", tail(code,5)))'
+    position: 1
+
+  # --- 文本上屏: type() 走 TSF, 含 last/calc/env 取值 ---
+  - code: "coll"
+    text: '$CC(last(), type(last()))'
+    position: 1
+  - code: "coca"
+    text: '$CC("={calc(tail(code,5))}", type(calc(tail(code,5))))'
+    position: 1
+  - code: "conw"
+    text: '$CC("现在 {now()}", type(now()))'
+    position: 1
+  - code: "coev"
+    text: '$CC("USER={upper(env("USERNAME"))}", type(upper(env("USERNAME"))))'
+    position: 1
+  - code: "coap"
+    text: '$CC("当前: {app()}", type(app()))'
+    position: 1
+  - code: "coti"
+    text: '$CC("标题: {title()}", type(title()))'
+    position: 1
+
+  # --- type + key.tap/seq 组合: 配对符号 + 删行 ---
+  - code: "cojk"
+    text: '$CC("「」", type("「」"), key.tap("Left"))'
+    position: 1
+  - code: "cojb"
+    text: '$CC("()", type("()"), key.tap("Left"))'
+    position: 1
+  - code: "codl"
+    text: '$CC("[删行]", key.seq("Home", "Shift+End", "Backspace"))'
+    position: 1
+
+  # --- 剪贴板 / 加词 ---
+  - code: "cocp"
+    text: '$CC("复制时间", clip.copy(now()))'
+    position: 1
+  - code: "coaw"
+    text: '$CC("加词 · {clip()}", dict.addword(clip()))'
+    position: 1
+
+  # --- IME 自身切换 ---
+  - code: "coen"
+    text: '$CC("切中英", ime.toggle("cn-en"))'
+    position: 1
+  - code: "cofs"
+    text: '$CC("切全半角", ime.toggle("fullshape"))'
+    position: 1
+  - code: "coly"
+    text: '$CC("切横纵候选", ime.toggle("layout"))'
+    position: 1
+  - code: "cocw"
+    text: '$CC("切候选窗", ime.toggle("candwin"))'
+    position: 1
+  - code: "coss"
+    text: '$CC("打开设置", ime.setting(""))'
+    position: 1

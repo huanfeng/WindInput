@@ -22,6 +22,7 @@
 - `IsCommon` 字段由 `dict.InitCommonCharsWithPath` 初始化的通用字符表决定
 - `IsCommand` 标识 uuid/date/time 等命令候选，UI 渲染时可能有特殊样式
 - `ConsumedLength` 用于拼音部分上屏场景（选词后剩余拼音继续输入）
+- `DisplayText` / `Actions`（命令直通车）：当短语 value 含 `$CC(...)` 时由 PhraseLayer 通过 coordinator 注入的 hook 生成。`DisplayText` 仅做候选显示（空则回落 `Text`）；`Actions` 是闭包列表，由 `doSelectCandidate` 在选中时按序异步执行，**不**走 InsertText 路径。该类候选不允许被热键 pin，见 `handle_candidate_action.go::handlePinCandidateByKey`。
 
 ### Testing Requirements
 - 排序逻辑可通过简单的单元测试覆盖
