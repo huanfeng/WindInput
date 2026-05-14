@@ -336,10 +336,13 @@ func (e *Engine) convertCodetableOnly(input string, maxCandidates int) *ConvertR
 	}
 	shadowElapsed := time.Since(shadowStart)
 
+	// Shadow 可能删词，需在应用后重新评估自动上屏条件
+	shouldCommit, commitText := e.recheckAutoCommit(input, candidates)
+
 	return &ConvertResult{
 		Candidates:   candidates,
-		ShouldCommit: codetableResult.ShouldCommit,
-		CommitText:   codetableResult.CommitText,
+		ShouldCommit: shouldCommit,
+		CommitText:   commitText,
 		IsEmpty:      codetableResult.IsEmpty,
 		ShouldClear:  codetableResult.ShouldClear,
 		ToEnglish:    codetableResult.ToEnglish,
@@ -630,10 +633,9 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 		Timing:     &mixedTiming{Codetable: ctElapsed, Pinyin: pyElapsed, Merge: mergeElapsed, Shadow: shadowElapsed},
 	}
 
-	// 继承码表侧的自动上屏状态
+	// Shadow 可能删词，需在应用后重新评估自动上屏条件（不能直接继承子引擎的 ShouldCommit）
 	if codetableResult != nil {
-		result.ShouldCommit = codetableResult.ShouldCommit
-		result.CommitText = codetableResult.CommitText
+		result.ShouldCommit, result.CommitText = e.recheckAutoCommit(input, merged)
 	}
 
 	// 如果码表空码但拼音有结果，不标记为空码
@@ -655,6 +657,30 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 }
 
 // --- 辅助函数 ---
+
+// recheckAutoCommit 在外层 Shadow 应用后重新评估自动上屏条件。
+// 混输模式下 Shadow 由 MixedEngine 统一应用，子引擎的 ShouldCommit 不可直接继承，
+// 需在合并候选上重新统计精确匹配的码表候选数量。
+func (e *Engine) recheckAutoCommit(input string, candidates []candidate.Candidate) (shouldCommit bool, commitText string) {
+	if e.codetableEngine == nil {
+		return false, ""
+	}
+	cfg := e.codetableEngine.GetConfig()
+	if !cfg.AutoCommitAt4 || len(input) < cfg.MaxCodeLength {
+		return false, ""
+	}
+	exactCount := 0
+	for _, c := range candidates {
+		if c.Source == candidate.SourceCodetable && c.Code == input {
+			exactCount++
+			commitText = c.Text
+		}
+	}
+	if exactCount == 1 {
+		return true, commitText
+	}
+	return false, ""
+}
 
 var seenPool = sync.Pool{New: func() any { return make(map[string]struct{}, 64) }}
 
