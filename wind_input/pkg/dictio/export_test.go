@@ -28,9 +28,9 @@ func testExportData() *ExportData {
 			},
 		},
 		Phrases: []PhraseEntry{
-			{Code: "sj", Type: "static", Text: "$time_now", Position: 1, Enabled: true},
-			{Code: "qm", Type: "static", Text: "张三\n手机: 138", Position: 1, Enabled: true},
-			{Code: "yx", Type: "array", Text: "a@b.com\nc@d.com", Position: 1, Enabled: true, Name: "邮箱"},
+			{Code: "sj", Text: "$time_now", Weight: 5000, Position: 1, Enabled: true},
+			{Code: "qm", Text: "张三\n手机: 138", Weight: 1000, Position: 1, Enabled: true},
+			{Code: "yx", Text: `$AA("邮箱", "a@b.com\nc@d.com")`, Weight: 800, Position: 1, Enabled: true},
 		},
 	}
 }
@@ -103,11 +103,11 @@ func TestWindDictExporterBasic(t *testing.T) {
 		t.Error("missing shadow del line")
 	}
 
-	// 验证短语
-	if !strings.Contains(output, "sj\tstatic\t$time_now\t1\t1") {
+	// 验证短语 (新列序: code, text, weight, position, enabled)
+	if !strings.Contains(output, "sj\t$time_now\t5000\t1\t1") {
 		t.Error("missing phrase line")
 	}
-	if !strings.Contains(output, `qm`+"\t"+`static`+"\t"+`张三\n手机: 138`) {
+	if !strings.Contains(output, `qm`+"\t"+`张三\n手机: 138`) {
 		t.Error("multiline phrase should be escaped")
 	}
 }
@@ -180,7 +180,7 @@ func TestExportZip(t *testing.T) {
 		},
 	}
 	phrases := []PhraseEntry{
-		{Code: "sj", Type: "static", Text: "$time_now", Position: 1, Enabled: true},
+		{Code: "sj", Text: "$time_now", Weight: 1000, Position: 1, Enabled: true},
 	}
 
 	var buf bytes.Buffer

@@ -248,7 +248,6 @@ func parsePhraseEntries(body []byte, cols *ColumnDef) ([]PhraseEntry, []string) 
 
 		fields := strings.Split(line, "\t")
 		code := cols.GetUnescaped(fields, "code")
-		pType := cols.Get(fields, "type")
 		text := cols.GetUnescaped(fields, "text")
 
 		if code == "" {
@@ -256,17 +255,12 @@ func parsePhraseEntries(body []byte, cols *ColumnDef) ([]PhraseEntry, []string) 
 			continue
 		}
 
-		if pType == "" {
-			pType = "static"
-		}
-
 		entry := PhraseEntry{
 			Code:     code,
-			Type:     pType,
 			Text:     text,
+			Weight:   cols.GetInt(fields, "weight", 0),
 			Position: cols.GetInt(fields, "position", 1),
 			Enabled:  cols.GetBool(fields, "enabled", true),
-			Name:     cols.GetUnescaped(fields, "name"),
 		}
 		entries = append(entries, entry)
 	}

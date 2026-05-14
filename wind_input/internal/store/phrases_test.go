@@ -1,6 +1,11 @@
 package store
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	bolt "go.etcd.io/bbolt"
+)
 
 func TestPhrase_AddAndGetAll(t *testing.T) {
 	s := openTestStore(t)
@@ -194,6 +199,121 @@ func TestPhrase_ArrayKey(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected 0 after removing array phrase, got %d", count)
+	}
+}
+
+// 注入 raw key+value, 模拟 legacy/marker 化前的残留记录
+func putRawPhrase(t *testing.T, s *Store, key []byte, rec PhraseRecord) {
+	t.Helper()
+	if err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketPhrases)
+		data, err := json.Marshal(rec)
+		if err != nil {
+			return err
+		}
+		return b.Put(key, data)
+	}); err != nil {
+		t.Fatalf("putRawPhrase: %v", err)
+	}
+}
+
+// 覆盖各种 legacy / 混合 key 形态, 验证 RemovePhrase 都能命中。
+func TestPhrase_RemoveLegacyKeyForms(t *testing.T) {
+	cases := []struct {
+		name    string
+		key     []byte
+		rec     PhraseRecord
+		argText string
+		argName string
+	}{
+		{
+			name:    "legacy_array_name_key",
+			key:     []byte("dz\x00\x01地址"),
+			rec:     PhraseRecord{Name: "地址", Texts: "北京|上海", Type: "array", Enabled: true},
+			argText: "",
+			argName: "地址",
+		},
+		{
+			name:    "marker_text_key_with_array_arg",
+			key:     []byte(`dz` + "\x00" + `$AA("地址", "北京|上海")`),
+			rec:     PhraseRecord{Text: `$AA("地址", "北京|上海")`, Type: "array", Enabled: true},
+			argText: `$AA("地址", "北京|上海")`,
+			argName: "",
+		},
+		{
+			name:    "marker_text_key_remove_by_legacy_name",
+			key:     []byte(`dz` + "\x00" + `$AA("地址", "北京|上海")`),
+			rec:     PhraseRecord{Text: `$AA("地址", "北京|上海")`, Type: "array", Enabled: true},
+			argText: "",
+			argName: "地址",
+		},
+		{
+			name:    "legacy_array_key_remove_with_marker_text",
+			key:     []byte("dz\x00\x01地址"),
+			rec:     PhraseRecord{Name: "地址", Texts: "北京|上海", Type: "array", Enabled: true},
+			argText: `$AA("地址", "北京|上海")`,
+			argName: "",
+		},
+		{
+			name:    "normal_text_key",
+			key:     []byte("rq\x00日期"),
+			rec:     PhraseRecord{Text: "日期", Type: "static", Enabled: true},
+			argText: "日期",
+			argName: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			putRawPhrase(t, s, tc.key, tc.rec)
+
+			// 推断 code: 取 key 的 \x00 前部分
+			code := ""
+			for i, b := range tc.key {
+				if b == 0 {
+					code = string(tc.key[:i])
+					break
+				}
+			}
+			if err := s.RemovePhrase(code, tc.argText, tc.argName); err != nil {
+				t.Fatalf("RemovePhrase: %v", err)
+			}
+			count, err := s.PhraseCount()
+			if err != nil {
+				t.Fatalf("PhraseCount: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("expected 0 after remove (%s), got %d", tc.name, count)
+			}
+		})
+	}
+}
+
+// 批量删除也走 ForEach 兜底
+func TestPhrase_BatchRemoveLegacyMixed(t *testing.T) {
+	s := openTestStore(t)
+	putRawPhrase(t, s, []byte("dz\x00\x01地址"),
+		PhraseRecord{Name: "地址", Texts: "北京|上海", Type: "array", Enabled: true})
+	putRawPhrase(t, s, []byte("rq\x00日期"),
+		PhraseRecord{Text: "日期", Type: "static", Enabled: true})
+	putRawPhrase(t, s, []byte("kp\x00"+`$AA("快捷", "A|B")`),
+		PhraseRecord{Text: `$AA("快捷", "A|B")`, Type: "array", Enabled: true})
+
+	items := []PhraseRecord{
+		{Code: "dz", Text: "", Name: "地址"},
+		{Code: "rq", Text: "日期"},
+		{Code: "kp", Text: `$AA("快捷", "A|B")`},
+	}
+	if err := s.RemovePhrasesBatch(items); err != nil {
+		t.Fatalf("RemovePhrasesBatch: %v", err)
+	}
+	count, err := s.PhraseCount()
+	if err != nil {
+		t.Fatalf("PhraseCount: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 after batch remove, got %d", count)
 	}
 }
 

@@ -82,8 +82,10 @@ func TestWindDictImportExportRoundtrip(t *testing.T) {
 			}
 		}
 		if p.Code == "yx" {
-			if p.Type != "array" || p.Name != "邮箱" {
-				t.Errorf("array phrase = type=%q name=%q", p.Type, p.Name)
+			// 字符组现在通过 Text 中的 $AA(...) marker 自描述,
+			// 不再依赖 Type/Name 字段; 仅校验文本透传。
+			if p.Text != `$AA("邮箱", "a@b.com\nc@d.com")` {
+				t.Errorf("array phrase text = %q", p.Text)
 			}
 		}
 	}
@@ -248,10 +250,10 @@ func TestPhraseYAMLImporter(t *testing.T) {
 	input := `phrases:
   - code: sj
     text: "$time_now"
-    position: 1
+    weight: 5000
   - code: yx
-    texts: "a@b.com\nc@d.com"
-    name: 邮箱
+    text: '$AA("邮箱", "a@b.com\nc@d.com")'
+    weight: 3000
     position: 1
   - code: off
     text: "test"
@@ -266,11 +268,11 @@ func TestPhraseYAMLImporter(t *testing.T) {
 		t.Fatalf("count = %d, want 3", len(result.Phrases))
 	}
 
-	if result.Phrases[0].Type != "dynamic" {
-		t.Errorf("sj type = %q, want dynamic", result.Phrases[0].Type)
+	if result.Phrases[0].Weight != 5000 {
+		t.Errorf("sj weight = %d, want 5000", result.Phrases[0].Weight)
 	}
-	if result.Phrases[1].Type != "array" || result.Phrases[1].Name != "邮箱" {
-		t.Errorf("yx = type=%q name=%q", result.Phrases[1].Type, result.Phrases[1].Name)
+	if result.Phrases[1].Weight != 3000 {
+		t.Errorf("yx weight = %d, want 3000", result.Phrases[1].Weight)
 	}
 	if result.Phrases[2].Enabled {
 		t.Error("off phrase should be disabled")
@@ -365,7 +367,7 @@ func TestZipImportExportRoundtrip(t *testing.T) {
 		},
 	}
 	phrases := []PhraseEntry{
-		{Code: "sj", Type: "static", Text: "$time_now", Position: 1, Enabled: true},
+		{Code: "sj", Text: "$time_now", Weight: 1000, Position: 1, Enabled: true},
 	}
 
 	// 导出

@@ -79,13 +79,19 @@ type ShadowDelEntry struct {
 }
 
 // PhraseEntry 短语条目。
+//
+// 短语类型 (static/dynamic/array) 由 Text 字段内容自描述:
+// 含 $AA(...) marker 视为字符组 (array), 含 $X / $CC 等模板视为
+// dynamic, 其余为 static, 不再单独存 Type 字段。
+//
+// Weight 为显式权重 (0~10000); 为 0 时调用方回退到 Position
+// 推导的兼容权重 (见 internal/dict.resolvePhraseWeight)。
 type PhraseEntry struct {
 	Code     string
-	Type     string // static, dynamic, array
-	Text     string // 对 array 类型，多项用 \n 分隔
+	Text     string
+	Weight   int
 	Position int
 	Enabled  bool
-	Name     string
 }
 
 // ---- 导入结果 ----

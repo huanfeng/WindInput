@@ -311,14 +311,17 @@ type SystemResetDBReply struct {
 
 // PhraseEntry 短语条目
 type PhraseEntry struct {
-	Code     string `json:"code"`
-	Text     string `json:"text,omitempty"`
-	Texts    string `json:"texts,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Type     string `json:"type"`
-	Position int    `json:"position"`
-	Enabled  bool   `json:"enabled"`
-	IsSystem bool   `json:"is_system"`
+	Code  string `json:"code"`
+	Text  string `json:"text,omitempty"`
+	Texts string `json:"texts,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Type  string `json:"type"`
+	// Weight 是显式权重 (0~10000, 与码表/拼音范化后同区间),
+	// 0 表示未设置, 后端走 Position fallback。
+	Weight   int  `json:"weight,omitempty"`
+	Position int  `json:"position"`
+	Enabled  bool `json:"enabled"`
+	IsSystem bool `json:"is_system"`
 }
 
 // PhraseListReply 短语列表响应
@@ -329,12 +332,14 @@ type PhraseListReply struct {
 
 // PhraseAddArgs 添加短语请求
 type PhraseAddArgs struct {
-	Code     string `json:"code"`
-	Text     string `json:"text,omitempty"`
-	Texts    string `json:"texts,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Type     string `json:"type"`
-	Position int    `json:"position"`
+	Code  string `json:"code"`
+	Text  string `json:"text,omitempty"`
+	Texts string `json:"texts,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Type  string `json:"type"`
+	// Weight 显式权重 (0~10000), 优先于 Position; 0 表示未设置。
+	Weight   int `json:"weight,omitempty"`
+	Position int `json:"position"`
 }
 
 // PhraseRemoveArgs 删除短语请求
@@ -352,7 +357,10 @@ type PhraseUpdateArgs struct {
 	NewCode     string `json:"new_code,omitempty"`
 	NewText     string `json:"new_text,omitempty"`
 	NewPosition int    `json:"new_position,omitempty"`
-	Enabled     *bool  `json:"enabled,omitempty"`
+	// NewWeight 是新的显式权重 (0~10000), 0 表示不修改;
+	// 用 *int 区分"显式设为 0" (清空) 与 "不修改"。
+	NewWeight *int  `json:"new_weight,omitempty"`
+	Enabled   *bool `json:"enabled,omitempty"`
 }
 
 // ── Freq 服务类型 ──
@@ -522,6 +530,29 @@ type ShadowBatchSetReply struct {
 	DelCount int `json:"del_count"`
 }
 
+// ── Phrase: cmdbar 值校验 ──
+
+// PhraseValidateValueArgs 校验短语 value 的请求 (无方案/上下文依赖, 纯解析)。
+type PhraseValidateValueArgs struct {
+	Value string `json:"value"`
+}
+
+// PhraseValidateValueReply 校验响应。
+// Kind 取值:
+//   - "array"          含 $AA("name","chars") 字符组 marker
+//     (Display="<name> · N 字", ActionsCount = 字符数)
+//   - "command"        含 $CC(  且解析成功 (仅精确匹配)
+//   - "command-prefix" 含 $CC1( 且解析成功 (精确 + 前缀都匹配)
+//   - "template"       含已知 $X 模板变量 (date/uuid 等)
+//   - "literal"        纯字面量
+//   - "error"          解析失败 (ErrorMsg 给出原因)
+type PhraseValidateValueReply struct {
+	Kind         string `json:"kind"`
+	Display      string `json:"display,omitempty"`       // command/template 展开后的显示文本
+	ActionsCount int    `json:"actions_count,omitempty"` // command 类型的 action 数
+	ErrorMsg     string `json:"error_msg,omitempty"`     // error 类型的错误描述
+}
+
 // PhraseBatchAddArgs 批量添加短语请求
 type PhraseBatchAddArgs struct {
 	Phrases []PhraseAddArgs `json:"phrases"`
@@ -529,6 +560,16 @@ type PhraseBatchAddArgs struct {
 
 // PhraseBatchAddReply 批量添加短语响应
 type PhraseBatchAddReply struct {
+	Count int `json:"count"`
+}
+
+// PhraseBatchRemoveArgs 批量删除短语请求 (单事务执行, 减少 reload 次数)
+type PhraseBatchRemoveArgs struct {
+	Items []PhraseRemoveArgs `json:"items"`
+}
+
+// PhraseBatchRemoveReply 批量删除短语响应
+type PhraseBatchRemoveReply struct {
 	Count int `json:"count"`
 }
 

@@ -9,7 +9,7 @@ var DefaultColumns = map[string][]string{
 	SectionTempWords: {"code", "text", "weight", "count", "created_at"},
 	SectionFreq:      {"code", "text", "count", "last_used", "streak"},
 	SectionShadow:    {"action", "code", "word", "position"},
-	SectionPhrases:   {"code", "type", "text", "position", "enabled", "name"},
+	SectionPhrases:   {"code", "text", "weight", "position", "enabled"},
 }
 
 // ColumnDef 列定义，提供列名到位置索引的映射。

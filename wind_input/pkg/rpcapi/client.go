@@ -436,6 +436,13 @@ func (c *Client) PhraseRemove(code, text, name string) error {
 	return c.call("Phrase.Remove", &PhraseRemoveArgs{Code: code, Text: text, Name: name}, &Empty{})
 }
 
+// PhraseBatchRemove 批量删除短语
+func (c *Client) PhraseBatchRemove(items []PhraseRemoveArgs) (*PhraseBatchRemoveReply, error) {
+	var reply PhraseBatchRemoveReply
+	err := c.call("Phrase.BatchRemove", &PhraseBatchRemoveArgs{Items: items}, &reply)
+	return &reply, err
+}
+
 // PhraseResetDefaults 重置短语为默认值
 func (c *Client) PhraseResetDefaults() error {
 	return c.call("Phrase.ResetDefaults", &Empty{}, &Empty{})
@@ -502,6 +509,13 @@ func (c *Client) ShadowBatchSet(schemaID string, pins []ShadowPinItem, deletes [
 func (c *Client) PhraseBatchAdd(phrases []PhraseAddArgs) (*PhraseBatchAddReply, error) {
 	var reply PhraseBatchAddReply
 	err := c.call("Phrase.BatchAdd", &PhraseBatchAddArgs{Phrases: phrases}, &reply)
+	return &reply, err
+}
+
+// PhraseValidateValue 校验短语 value (cmdbar 解析预览), 返回 kind/display/actions_count/error_msg。
+func (c *Client) PhraseValidateValue(value string) (*PhraseValidateValueReply, error) {
+	var reply PhraseValidateValueReply
+	err := c.call("Phrase.ValidateCmdbarValue", &PhraseValidateValueArgs{Value: value}, &reply)
 	return &reply, err
 }
 

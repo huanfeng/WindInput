@@ -62,6 +62,9 @@ type pinyinCodeGenAdapter struct {
 }
 
 func (a *pinyinCodeGenAdapter) GeneratePinyinCode(word string) string {
+	// 当前 active 方案可能是码表（PinyinEngine 未加载），需 lazy init 后再生成。
+	// 与 BatchEncode 路径保持一致：拼音 user dict 加词不依赖当前 active 引擎类型。
+	_ = a.engineMgr.EnsurePinyinLoaded()
 	return a.engineMgr.GeneratePinyinCode(word)
 }
 

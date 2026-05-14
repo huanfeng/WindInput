@@ -225,16 +225,14 @@ func (e *WindDictExporter) writePhrases(w *bufio.Writer, phrases []PhraseEntry, 
 			switch name {
 			case "code":
 				_, _ = w.WriteString(EscapeField(entry.Code))
-			case "type":
-				_, _ = w.WriteString(entry.Type)
 			case "text":
 				_, _ = w.WriteString(EscapeField(entry.Text))
+			case "weight":
+				_, _ = w.WriteString(strconv.Itoa(entry.Weight))
 			case "position":
 				_, _ = w.WriteString(strconv.Itoa(entry.Position))
 			case "enabled":
 				_, _ = w.WriteString(FormatBool(entry.Enabled))
-			case "name":
-				_, _ = w.WriteString(EscapeField(entry.Name))
 			default:
 			}
 		}

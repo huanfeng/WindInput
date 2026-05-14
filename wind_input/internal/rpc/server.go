@@ -256,6 +256,8 @@ func (s *Server) Start() error {
 	RegisterMethod(s.router, "Phrase.Remove", phraseSvc.Remove)
 	RegisterMethod(s.router, "Phrase.ResetDefaults", phraseSvc.ResetDefaults)
 	RegisterMethod(s.router, "Phrase.BatchAdd", phraseSvc.BatchAdd)
+	RegisterMethod(s.router, "Phrase.BatchRemove", phraseSvc.BatchRemove)
+	RegisterMethod(s.router, "Phrase.ValidateCmdbarValue", phraseSvc.ValidateCmdbarValue)
 
 	// 注册 Config 方法
 	configSvc := &ConfigService{
