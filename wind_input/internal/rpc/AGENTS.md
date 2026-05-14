@@ -45,6 +45,20 @@
 - 错误响应：`Response.Error` 填充错误信息，`Response.Result` 为 nil
 - 成功响应：`Response.Result` 填充 JSON 序列化结果，`Response.Error` 为空
 
+### ⚠️ 新增 RPC 方法必须手动注册
+本包**不使用反射自动注册**，每个方法必须在 `server.go` 的 `Start()` 内用 `RegisterMethod` 显式注册，否则运行时报 `method not found: Xxx.YyyMethod`。
+
+```go
+// server.go — 在对应服务的注册块内添加一行：
+RegisterMethod(s.router, "System.DumpGoroutineProfile", systemSvc.DumpGoroutineProfile)
+```
+
+**检查清单**（新增方法时必做）：
+1. 在 `*_service.go` 中实现方法（签名：`func (s *XxxService) Method(args *T, reply *R) error`）
+2. 在 `server.go` `Start()` 对应服务块内调用 `RegisterMethod`
+3. 在 `pkg/rpcapi/client.go` 中添加客户端调用包装
+4. 如需在设置 UI 暴露：`wind_setting/app_*.go` 添加 Wails 方法 → `frontend/src/api/wails.ts` 添加包装 → Vue 组件调用
+
 ## Dependencies
 ### Internal
 - `internal/dict` — DictManager（词库管理）

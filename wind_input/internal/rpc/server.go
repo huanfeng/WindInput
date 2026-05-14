@@ -238,6 +238,7 @@ func (s *Server) Start() error {
 	RegisterMethod(s.router, "System.Reset", systemSvc.Reset)
 	RegisterMethod(s.router, "System.GetMemStats", systemSvc.GetMemStats)
 	RegisterMethod(s.router, "System.DumpHeapProfile", systemSvc.DumpHeapProfile)
+	RegisterMethod(s.router, "System.DumpGoroutineProfile", systemSvc.DumpGoroutineProfile)
 
 	// 注册 Stats 方法
 	statsSvc := &StatsService{store: s.store, logger: s.logger, statCollector: s.statCollector, server: s, broadcaster: s.broadcaster}
