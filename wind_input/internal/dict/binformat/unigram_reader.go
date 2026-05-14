@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 )
 
 // UnigramReader 基于 mmap 的 unigram 读取器
@@ -17,6 +18,10 @@ type UnigramReader struct {
 
 	// 缓存的统计信息
 	minProb float64
+
+	// path 用于在 Close 时反注册；closeOnce 保证幂等
+	path      string
+	closeOnce sync.Once
 }
 
 // OpenUnigram 打开二进制 unigram 文件
@@ -35,6 +40,7 @@ func OpenUnigram(path string) (*UnigramReader, error) {
 	r := &UnigramReader{
 		mmap: mf,
 		data: data,
+		path: path,
 	}
 
 	// 解析文件头
@@ -64,15 +70,44 @@ func OpenUnigram(path string) (*UnigramReader, error) {
 	// 未登录词使用固定最小概率
 	r.minProb = -20.0
 
+	registerReader(path, r)
 	return r, nil
 }
 
-// Close 关闭读取器
+// Close 关闭读取器（幂等）。
+// 同时从进程级注册表移除自身；data/mmap 置 nil，后续查询安全返回 minProb。
 func (r *UnigramReader) Close() error {
-	if r.mmap != nil {
-		return r.mmap.Close()
+	var err error
+	r.closeOnce.Do(func() {
+		err = r.releaseLocked()
+		unregisterReader(r.path, r)
+	})
+	return err
+}
+
+// closeFromRegistry 由注册表强制关闭时调用：释放 mmap 但跳过注销。
+func (r *UnigramReader) closeFromRegistry() error {
+	var err error
+	r.closeOnce.Do(func() {
+		err = r.releaseLocked()
+	})
+	return err
+}
+
+// releaseLocked 释放 mmap 并把内部指针置 nil。
+func (r *UnigramReader) releaseLocked() error {
+	mf := r.mmap
+	r.mmap = nil
+	r.data = nil
+	if mf != nil {
+		return mf.Close()
 	}
 	return nil
+}
+
+// isClosed 报告 reader 是否已被释放。
+func (r *UnigramReader) isClosed() bool {
+	return r.data == nil
 }
 
 // Size 返回词汇量
@@ -121,6 +156,9 @@ func (r *UnigramReader) MinProb() float64 {
 
 // searchKey 二分搜索，返回 index 或 -1
 func (r *UnigramReader) searchKey(word string) int {
+	if r.isClosed() {
+		return -1
+	}
 	keyCount := int(r.header.KeyCount)
 	idx := sort.Search(keyCount, func(i int) bool {
 		return r.readKey(i) >= word
@@ -133,6 +171,9 @@ func (r *UnigramReader) searchKey(word string) int {
 
 // readKey 读取第 i 个 key
 func (r *UnigramReader) readKey(i int) string {
+	if r.isClosed() {
+		return ""
+	}
 	off := r.keyIndexBase + uint32(i)*UnigramKeyIndexSize
 	keyOff := byteOrder.Uint32(r.data[off : off+4])
 	keyLen := byteOrder.Uint16(r.data[off+4 : off+6])
@@ -146,6 +187,9 @@ func (r *UnigramReader) readKey(i int) string {
 
 // readLogProb 读取第 i 个 key 的 logProb
 func (r *UnigramReader) readLogProb(i int) float64 {
+	if r.isClosed() {
+		return r.minProb
+	}
 	off := r.keyIndexBase + uint32(i)*UnigramKeyIndexSize + 6
 	bits := byteOrder.Uint32(r.data[off : off+4])
 	return float64(math.Float32frombits(bits))

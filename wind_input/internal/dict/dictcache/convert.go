@@ -623,7 +623,12 @@ func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, glob
 }
 
 // atomicWriteWdb 原子写入 wdb 文件：先写入临时文件，再 rename 到目标路径
-// 防止进程被杀或并发写入导致目标文件被截断
+// 防止进程被杀或并发写入导致目标文件被截断。
+//
+// Windows 上若目标文件正被本进程 mmap 持有（典型场景：切换方案触发重建，
+// 但旧引擎仍缓存在 engine.Manager 中持锁），rename 会以 "Access is denied" 失败。
+// 替换前调用 binformat.CloseReadersForPath 强制释放本进程内所有同路径 reader，
+// 让 rename 得以成功；被强制关闭的 reader 在查询时安全返回空结果（见 binformat/registry.go）。
 func atomicWriteWdb(wdbPath string, writeFn func(w io.Writer) error) error {
 	os.MkdirAll(filepath.Dir(wdbPath), 0755)
 
@@ -649,8 +654,13 @@ func atomicWriteWdb(wdbPath string, writeFn func(w io.Writer) error) error {
 		return fmt.Errorf("关闭临时文件失败: %w", err)
 	}
 
-	// Windows 上 rename 目标文件已存在时会失败，需先删除
-	os.Remove(wdbPath)
+	// 释放本进程内对目标路径的 mmap，避免 Windows 上 rename 因自身持锁失败。
+	if closed := binformat.CloseReadersForPath(wdbPath); closed > 0 {
+		slog.Info("替换 wdb 前已释放本进程内 mmap reader", "path", wdbPath, "closed", closed)
+	}
+
+	// os.Rename 在 Windows 上等价于 MoveFileEx(MOVEFILE_REPLACE_EXISTING)，
+	// 目标存在时直接覆盖；无需先 Remove（先 Remove 反而会引入 pending-delete 竞态）。
 	if err := os.Rename(tmpPath, wdbPath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("原子替换失败: %w", err)

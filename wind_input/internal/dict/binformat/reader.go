@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict/hotcache"
@@ -30,6 +31,10 @@ type DictReader struct {
 
 	// 进程级 hot index 缓存键（按 path+size+mtime 聚合，多 reader 共享同一份）
 	hotKey hotcache.FileKey
+
+	// path 用于在 Close 时反注册；closeOnce 保证幂等
+	path      string
+	closeOnce sync.Once
 }
 
 // HotPrefixIndexN 是单字母前缀 hot index 缓存的容量。
@@ -53,6 +58,7 @@ func OpenDict(path string) (*DictReader, error) {
 		mmap:   mf,
 		data:   data,
 		hotKey: hotcache.MakeFileKey(path),
+		path:   path,
 	}
 
 	// 解析文件头
@@ -105,15 +111,46 @@ func OpenDict(path string) (*DictReader, error) {
 		r.hasAbbrev = r.abbrevCount > 0
 	}
 
+	registerReader(path, r)
 	return r, nil
 }
 
-// Close 关闭读取器
+// Close 关闭读取器（幂等）。
+// 同时从进程级注册表移除自身；data/mmap 字段被置 nil，后续查询路径全部短路返回空。
 func (r *DictReader) Close() error {
-	if r.mmap != nil {
-		return r.mmap.Close()
+	var err error
+	r.closeOnce.Do(func() {
+		err = r.releaseLocked()
+		unregisterReader(r.path, r)
+	})
+	return err
+}
+
+// closeFromRegistry 由注册表强制关闭时调用：释放 mmap 但跳过注销
+// （注册表本身已经把条目摘出 map 了，重复 unregister 是 no-op，但避免再走一遍）。
+func (r *DictReader) closeFromRegistry() error {
+	var err error
+	r.closeOnce.Do(func() {
+		err = r.releaseLocked()
+	})
+	return err
+}
+
+// releaseLocked 真正释放 mmap 并把内部指针置 nil，使后续查询安全返回空。
+// 仅在 closeOnce 内部调用，外部应通过 Close/closeFromRegistry 间接触发。
+func (r *DictReader) releaseLocked() error {
+	mf := r.mmap
+	r.mmap = nil
+	r.data = nil
+	if mf != nil {
+		return mf.Close()
 	}
 	return nil
+}
+
+// isClosed 报告 reader 是否已被释放。查询路径据此短路，避免访问已释放的 mmap 内存。
+func (r *DictReader) isClosed() bool {
+	return r.data == nil
 }
 
 // ReadMeta 读取嵌入的元数据（JSON 格式）
@@ -390,6 +427,9 @@ func (r *DictReader) LookupPrefixBFS(prefix string, limitPerBucket int, maxDepth
 
 // ForEachEntry 顺序遍历所有条目（供 BuildReverseIndex 等使用）
 func (r *DictReader) ForEachEntry(fn func(code string, entries []candidate.Candidate)) {
+	if r.isClosed() {
+		return
+	}
 	keyCount := int(r.header.KeyCount)
 	for i := 0; i < keyCount; i++ {
 		code := r.readKeyCode(i)
@@ -412,6 +452,9 @@ func (r *DictReader) readString(off uint32, length uint16) string {
 
 // searchKey 二分搜索主索引，返回 index 或 -1
 func (r *DictReader) searchKey(code string) int {
+	if r.isClosed() {
+		return -1
+	}
 	keyCount := int(r.header.KeyCount)
 	idx := sort.Search(keyCount, func(i int) bool {
 		return r.readKeyCode(i) >= code
@@ -424,6 +467,9 @@ func (r *DictReader) searchKey(code string) int {
 
 // readKeyCode 读取第 i 个 key 的 code 字符串
 func (r *DictReader) readKeyCode(i int) string {
+	if r.isClosed() {
+		return ""
+	}
 	off := r.keyIndexBase + uint32(i)*DictKeyIndexSize
 	codeOff := byteOrder.Uint32(r.data[off : off+4])
 	codeLen := byteOrder.Uint16(r.data[off+4 : off+6])
@@ -432,6 +478,9 @@ func (r *DictReader) readKeyCode(i int) string {
 
 // readKeyIndex 读取第 i 个 key 的索引信息
 func (r *DictReader) readKeyIndex(i int) (entryOff uint32, entryLen uint16) {
+	if r.isClosed() {
+		return 0, 0
+	}
 	off := r.keyIndexBase + uint32(i)*DictKeyIndexSize
 	entryOff = byteOrder.Uint32(r.data[off+6 : off+10])
 	entryLen = byteOrder.Uint16(r.data[off+10 : off+12])
@@ -440,6 +489,9 @@ func (r *DictReader) readKeyIndex(i int) (entryOff uint32, entryLen uint16) {
 
 // readEntries 读取第 i 个 key 的所有候选词
 func (r *DictReader) readEntries(i int) []candidate.Candidate {
+	if r.isClosed() {
+		return nil
+	}
 	code := r.readKeyCode(i)
 	entryOff, entryLen := r.readKeyIndex(i)
 	results := make([]candidate.Candidate, 0, entryLen)
@@ -473,6 +525,9 @@ func (r *DictReader) readEntries(i int) []candidate.Candidate {
 
 // searchAbbrev 二分搜索简拼索引，返回 index 或 -1
 func (r *DictReader) searchAbbrev(code string) int {
+	if r.isClosed() {
+		return -1
+	}
 	count := int(r.abbrevCount)
 	idx := sort.Search(count, func(i int) bool {
 		return r.readAbbrevCode(i) >= code
@@ -485,6 +540,9 @@ func (r *DictReader) searchAbbrev(code string) int {
 
 // readAbbrevCode 读取第 i 个简拼的编码字符串
 func (r *DictReader) readAbbrevCode(i int) string {
+	if r.isClosed() {
+		return ""
+	}
 	off := r.abbrevIdxOff + uint32(i)*AbbrevIndexSize
 	abbrevOff := byteOrder.Uint32(r.data[off : off+4])
 	abbrevLen := byteOrder.Uint16(r.data[off+4 : off+6])
@@ -493,6 +551,9 @@ func (r *DictReader) readAbbrevCode(i int) string {
 
 // readAbbrevEntries 读取第 i 个简拼的所有候选词
 func (r *DictReader) readAbbrevEntries(i int) []candidate.Candidate {
+	if r.isClosed() {
+		return nil
+	}
 	off := r.abbrevIdxOff + uint32(i)*AbbrevIndexSize
 	entryOff := byteOrder.Uint32(r.data[off+6 : off+10])
 	entryLen := byteOrder.Uint16(r.data[off+10 : off+12])

@@ -3,6 +3,7 @@
 package dictcache
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -39,9 +40,13 @@ func WdatCachePath(name string) string {
 
 // NeedsRegenerate 判断是否需要重新生成 wdb 缓存
 // 当 wdb 不存在或任一源文件 mtime > wdb mtime 时返回 true
+//
+// 命中"过期"分支时记 INFO 日志，附带触发源文件、源/目标 mtime 与差值，
+// 便于排查"刚生成又判定为过期"的重建死循环问题。
 func NeedsRegenerate(srcPaths []string, wdbPath string) bool {
 	wdbInfo, err := os.Stat(wdbPath)
 	if err != nil {
+		slog.Info("wdb 缓存需要生成", "wdb", wdbPath, "reason", "wdb 不存在或不可访问", "err", err)
 		return true
 	}
 	wdbMtime := wdbInfo.ModTime()
@@ -51,7 +56,15 @@ func NeedsRegenerate(srcPaths []string, wdbPath string) bool {
 		if err != nil {
 			continue
 		}
-		if srcInfo.ModTime().After(wdbMtime) {
+		srcMtime := srcInfo.ModTime()
+		if srcMtime.After(wdbMtime) {
+			slog.Info("wdb 缓存需要重建",
+				"wdb", wdbPath,
+				"wdbMtime", wdbMtime,
+				"trigger", src,
+				"srcMtime", srcMtime,
+				"ahead", srcMtime.Sub(wdbMtime),
+			)
 			return true
 		}
 	}
