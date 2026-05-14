@@ -403,6 +403,15 @@ func (c *Client) SystemDumpHeapProfile(path string) (*DumpHeapProfileReply, erro
 	return &reply, err
 }
 
+// SystemDumpGoroutineProfile 将所有 goroutine 堆栈转储写入文件
+// path 为空时由服务端选择默认路径（datadir/diag/goroutine_<时间>.txt）
+// 此方法不依赖 coordinator 锁，死锁时仍可调用
+func (c *Client) SystemDumpGoroutineProfile(path string) (*DumpHeapProfileReply, error) {
+	var reply DumpHeapProfileReply
+	err := c.call("System.DumpGoroutineProfile", &DumpHeapProfileArgs{Path: path}, &reply)
+	return &reply, err
+}
+
 // ── Phrase 方法 ──
 
 // PhraseList 获取所有短语

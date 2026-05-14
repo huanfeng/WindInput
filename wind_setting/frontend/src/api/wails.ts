@@ -885,6 +885,10 @@ export async function dumpHeapProfile(): Promise<DumpHeapProfileResult> {
   return App.DumpHeapProfile() as unknown as DumpHeapProfileResult;
 }
 
+export async function dumpGoroutineProfile(): Promise<DumpHeapProfileResult> {
+  return App.DumpGoroutineProfile() as unknown as DumpHeapProfileResult;
+}
+
 // 重置用户数据
 export async function resetUserData(schemaID: string = ""): Promise<void> {
   return App.ResetUserData(schemaID);

@@ -215,7 +215,15 @@
             :disabled="memDumping"
             @click="handleDumpHeapProfile"
           >
-            {{ memDumping ? "导出中…" : "导出 pprof" }}
+            {{ memDumping ? "导出中…" : "导出 heap pprof" }}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="goroutineDumping"
+            @click="handleDumpGoroutineProfile"
+          >
+            {{ goroutineDumping ? "导出中…" : "导出 goroutine" }}
           </Button>
           <Button variant="outline" size="sm" @click="memDialogOpen = false">关闭</Button>
         </DialogFooter>
@@ -588,6 +596,7 @@ async function handleDoReset() {
 const memStats = ref<MemStatsResult | null>(null);
 const memLoading = ref(false);
 const memDumping = ref(false);
+const goroutineDumping = ref(false);
 const memDialogOpen = ref(false);
 
 const memStatsText = computed(() => {
@@ -651,6 +660,23 @@ async function handleDumpHeapProfile() {
     toast("导出失败: " + (e.message || e), "error");
   } finally {
     memDumping.value = false;
+  }
+}
+
+async function handleDumpGoroutineProfile() {
+  if (!props.isWailsEnv) return;
+  goroutineDumping.value = true;
+  try {
+    const result = await wailsApi.dumpGoroutineProfile();
+    if (result.error) {
+      toast("导出失败: " + result.error, "error");
+      return;
+    }
+    toast("已导出到: " + result.path);
+  } catch (e: any) {
+    toast("导出失败: " + (e.message || e), "error");
+  } finally {
+    goroutineDumping.value = false;
   }
 }
 

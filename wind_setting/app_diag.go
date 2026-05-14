@@ -63,3 +63,16 @@ func (a *App) DumpHeapProfile() DumpHeapProfileResult {
 	}
 	return DumpHeapProfileResult{Path: reply.Path}
 }
+
+// DumpGoroutineProfile 将所有 goroutine 堆栈转储写入服务端 datadir/diag/ 目录
+// 不依赖 coordinator 锁，发生死锁时仍可调用；Path 为实际写入路径
+func (a *App) DumpGoroutineProfile() DumpHeapProfileResult {
+	if a.rpcClient == nil {
+		return DumpHeapProfileResult{Error: "RPC 客户端未初始化"}
+	}
+	reply, err := a.rpcClient.SystemDumpGoroutineProfile("")
+	if err != nil {
+		return DumpHeapProfileResult{Error: err.Error()}
+	}
+	return DumpHeapProfileResult{Path: reply.Path}
+}
