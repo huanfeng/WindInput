@@ -503,7 +503,14 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	result.Candidates = allCandidates
 
 	// 自动上屏检查：对精确匹配也应用过滤模式，确保智能模式下生僻字不影响计数
+	// 同时应用 Shadow 删除规则，确保候选调整（用户删词）后剩余唯一时能正确触发顶码
 	filteredExact := candidate.FilterCandidates(exactCandidates, filterMode)
+	if !e.config.SkipShadow && e.dictManager != nil {
+		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
+			rules := shadowLayer.GetShadowRules(input)
+			filteredExact = dict.ApplyShadowPins(filteredExact, rules)
+		}
+	}
 	e.checkAutoCommit(result, input, filteredExact)
 
 	return result
