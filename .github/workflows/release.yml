@@ -154,8 +154,21 @@ jobs:
             Write-Host "Included version note: $noteFile"
           }
 
-          # 3) Changelog (what users care about most)
-          $body += "## 更新记录`n`n" + $changelog
+          # 3) User-facing section (editable in draft release) + technical changelog (collapsed)
+          $body += @"
+## ✏️ 更新说明
+
+<!-- user-facing:start -->
+> 请在发布前编辑此区域。
+<!-- user-facing:end -->
+
+<details>
+<summary>📋 变更记录</summary>
+
+$changelog
+</details>
+
+"@
 
           # 4) Common footer (installation, feedback, etc.)
           $footerFile = "docs/release-notes/footer.md"
@@ -236,3 +249,16 @@ jobs:
             --notes-file release_notes.md `
             $installer `
             $portable
+
+      # --- Notify docs repo to sync changelog (requires DOCS_REPO_PAT secret) ---
+      - name: Notify docs repo
+        if: ${{ secrets.DOCS_REPO_PAT != '' }}
+        shell: bash
+        env:
+          PAT: ${{ secrets.DOCS_REPO_PAT }}
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $PAT" \
+            https://api.github.com/repos/huanfeng/WindInputDocs/dispatches \
+            -d '{"event_type":"changelog-updated","client_payload":{"tag":"${{ github.ref_name }}"}}'

@@ -51,19 +51,29 @@ const dialogTitle = computed(() => {
   return '检查更新'
 })
 
-// 清理 release body。
-// 项目 CI 生成格式：[header] → --- → [版本说明(可选)] → ## 更新记录 → ... → --- → [footer]
-// 优先提取 ## 更新记录 段（去掉标题本身）；找不到时兜底处理 GitHub 自动生成格式。
+// 清理 release body，提取用户向更新说明。
+// 新格式：## ✏️ 更新说明 + <!-- user-facing:start/end --> 标记
+// 旧格式兼容：## 更新记录 到 --- 分隔符
 function cleanReleaseNotes(body: string): string {
   const normalized = body.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
 
-  // 主路径：提取 ## 更新记录 到下一个 --- 分隔符（或末尾）
-  const m = normalized.match(/\n## 更新记录\n([\s\S]*?)(?:\n---(?:\n|$)|$)/)
-  if (m) {
-    return m[1].replace(/\n{3,}/g, '\n\n').trim()
+  // 1) 新格式：提取 <!-- user-facing:start --> 到 <!-- user-facing:end --> 之间的内容
+  const m1 = normalized.match(/<!-- user-facing:start -->\n([\s\S]*?)\n<!-- user-facing:end -->/)
+  if (m1) {
+    const content = m1[1].replace(/\n{3,}/g, '\n\n').trim()
+    if (content && !/^\s*>?\s*暂未填写/.test(content)) {
+      return content
+    }
+    // 占位文本，继续 fallback
   }
 
-  // 兜底：按 --- 分段，取中间部分；再过滤 GitHub 自动生成内容
+  // 2) 旧格式：## 更新记录 到下一个 --- 分隔符
+  const m2 = normalized.match(/\n## 更新记录\n([\s\S]*?)(?:\n---(?:\n|$)|$)/)
+  if (m2) {
+    return m2[1].replace(/\n{3,}/g, '\n\n').trim()
+  }
+
+  // 3) 通用兜底：按 --- 分段，取中间部分；过滤 GitHub 自动生成内容
   const parts = normalized.split(/\n---\n/)
   let content = parts.length >= 3
     ? parts.slice(1, -1).join('\n---\n')
