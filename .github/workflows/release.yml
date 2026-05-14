@@ -155,20 +155,14 @@ jobs:
           }
 
           # 3) User-facing section (editable in draft release) + technical changelog (collapsed)
-          $body += @"
-## ✏️ 更新说明
-
-<!-- user-facing:start -->
-> 请在发布前编辑此区域。
-<!-- user-facing:end -->
-
-<details>
-<summary>📋 变更记录</summary>
-
-$changelog
-</details>
-
-"@
+          $body += "## ✏️ 更新说明`n`n"
+          $body += "<!-- user-facing:start -->`n"
+          $body += "> 请在发布前编辑此区域。`n"
+          $body += "<!-- user-facing:end -->`n`n"
+          $body += "<details>`n"
+          $body += "<summary>📋 变更记录</summary>`n`n"
+          $body += $changelog
+          $body += "</details>`n`n"
 
           # 4) Common footer (installation, feedback, etc.)
           $footerFile = "docs/release-notes/footer.md"

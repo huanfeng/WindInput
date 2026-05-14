@@ -7,14 +7,18 @@ on:
 jobs:
   notify-docs:
     runs-on: ubuntu-latest
-    if: ${{ secrets.DOCS_REPO_PAT != '' }}
     steps:
       - name: Notify docs repo to sync changelog
         env:
           PAT: ${{ secrets.DOCS_REPO_PAT }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
+          if [ -z "$PAT" ]; then
+            echo "DOCS_REPO_PAT not configured, skipping notification"
+            exit 0
+          fi
           curl -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $PAT" \
             https://api.github.com/repos/huanfeng/WindInputDocs/dispatches \
-            -d '{"event_type":"changelog-updated","client_payload":{"tag":"${{ github.event.release.tag_name }}"}}'
+            -d "{\"event_type\":\"changelog-updated\",\"client_payload\":{\"tag\":\"$TAG\"}}"
