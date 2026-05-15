@@ -76,7 +76,7 @@ jobs:
         run: |
           # Find previous tag
           $currentTag = "${{ github.ref_name }}"
-          $allTags = git tag --sort=-version:refname | Where-Object { $_ -ne $currentTag }
+          $allTags = git tag --sort=-version:refname | Where-Object { $_ -ne $currentTag -and $_ -match '^v\d+\.\d+' }
           $prevTag = if ($allTags) { ($allTags | Select-Object -First 1) } else { $null }
 
           if ($prevTag) {
