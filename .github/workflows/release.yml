@@ -157,7 +157,10 @@ jobs:
           # 3) User-facing section (editable in draft release) + technical changelog (collapsed)
           $body += "## ✏️ 更新说明`n`n"
           $body += "<!-- user-facing:start -->`n"
-          $body += "> 请在发布前编辑此区域。`n"
+          $body += "### ✨ 新增`n`n`n`n"
+          $body += "### 🔧 优化`n`n`n`n"
+          $body += "### 🐛 修正`n`n`n`n"
+          $body += "### 🔩 其他`n`n`n`n"
           $body += "<!-- user-facing:end -->`n`n<br>`n`n"
           $body += "<details>`n"
           $body += "<summary>变更记录</summary>`n`n"
