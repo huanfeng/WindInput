@@ -256,9 +256,19 @@ func (m *Manager) UpdateLearningConfig(ls *schema.LearningSpec) {
 		hasCodetable = true
 	}
 
+	// 混输方案始终使用主方案的学习配置（混输本质是主码表 + 辅助拼音，不维护独立学习配置）
+	codetableLS := ls
+	if _, isMixed := engine.(*mixed.Engine); isMixed && m.schemaManager != nil {
+		if s := m.schemaManager.GetSchema(m.currentID); s != nil && s.Engine.Mixed != nil && s.Engine.Mixed.PrimarySchema != "" {
+			if ps := m.schemaManager.GetSchema(s.Engine.Mixed.PrimarySchema); ps != nil {
+				codetableLS = &ps.Learning
+			}
+		}
+	}
+
 	// 码表引擎：auto_learn 或 auto_phrase 启用时使用码表自动造词
-	if hasCodetable && (ls.IsAutoPhraseEnabled() || ls.IsAutoLearnEnabled()) {
-		autoPhrase := schema.NewCodeTableLearningStrategy(ls, m.logger)
+	if hasCodetable && (codetableLS.IsAutoPhraseEnabled() || codetableLS.IsAutoLearnEnabled()) {
+		autoPhrase := schema.NewCodeTableLearningStrategy(codetableLS, m.logger)
 		if dm.GetStoreUserLayer() != nil {
 			autoPhrase.SetUserLayer(dm.GetStoreUserLayer())
 		}
@@ -293,6 +303,11 @@ func (m *Manager) UpdateLearningConfig(ls *schema.LearningSpec) {
 	// 注入到当前引擎
 	switch e := engine.(type) {
 	case *codetable.Engine:
+		if old := e.GetLearningStrategy(); old != nil {
+			if pt, ok := old.(schema.PhraseTerminator); ok {
+				pt.OnPhraseTerminated()
+			}
+		}
 		e.SetFreqHandler(freqHandler)
 		e.SetLearningStrategy(codetableLearning)
 	case *pinyin.Engine:
@@ -302,6 +317,11 @@ func (m *Manager) UpdateLearningConfig(ls *schema.LearningSpec) {
 		// 混输引擎：码表子引擎用码表策略，拼音子引擎用独立 dataSchemaID 的拼音策略
 		// 避免拼音学到的词污染主码表用户词库
 		if ce := e.GetCodetableEngine(); ce != nil {
+			if old := ce.GetLearningStrategy(); old != nil {
+				if pt, ok := old.(schema.PhraseTerminator); ok {
+					pt.OnPhraseTerminated()
+				}
+			}
 			ce.SetFreqHandler(freqHandler)
 			ce.SetLearningStrategy(codetableLearning)
 		}
@@ -320,6 +340,10 @@ func (m *Manager) UpdateLearningConfig(ls *schema.LearningSpec) {
 			mixedPinyinLearning := schema.NewLearningStrategy(ls, pinyinUserLayer)
 			if al, ok := mixedPinyinLearning.(*schema.AutoLearning); ok {
 				if tl := dm.GetOrCreateStoreTempLayer(pinyinDataSchemaID); tl != nil {
+					// 拼音 temp layer 不是 activeStoreTemp，UpdateActiveTempLimits 不会覆盖它，
+					// 必须在此显式 SetLimits；用 codetableLS（已继承主方案 TempPromoteCount），
+					// 避免混输方案未配置时 promoteCount=0，LearnWord 永远返回 false。
+					tl.SetLimits(codetableLS.TempMaxEntries, codetableLS.TempPromoteCount)
 					al.SetTempLayer(tl)
 				}
 				al.SetSystemChecker(dm)
@@ -330,13 +354,14 @@ func (m *Manager) UpdateLearningConfig(ls *schema.LearningSpec) {
 	}
 
 	// 同步临时词库 limits（temp_promote_count / temp_max_entries 修改后立即生效）
-	dm.UpdateActiveTempLimits(ls.TempMaxEntries, ls.TempPromoteCount)
+	// 用 codetableLS（已继承主方案值），避免混输方案未配置 temp_promote_count 时 promoteCount=0
+	dm.UpdateActiveTempLimits(codetableLS.TempMaxEntries, codetableLS.TempPromoteCount)
 
 	m.logger.Info("学习配置已热更新",
 		"freqEnabled", ls.IsFreqEnabled(),
 		"autoLearnEnabled", ls.IsAutoLearnEnabled(),
 		"autoPhraseEnabled", ls.IsAutoPhraseEnabled(),
-		"codetableAutoPhrase", codetableLearning != nil,
+		"codetableAutoPhrase", func() bool { _, ok := codetableLearning.(*schema.CodeTableAutoPhrase); return ok }(),
 		"tempPromoteCount", ls.TempPromoteCount,
 		"tempMaxEntries", ls.TempMaxEntries)
 }

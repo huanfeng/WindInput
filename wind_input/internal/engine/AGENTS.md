@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-05-06 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-05-15 -->
 
 # internal/engine
 
@@ -33,6 +33,25 @@
 - `SaveUserFreqs` 遍历所有已加载引擎，仅对开启了 `EnableUserFreq` 的拼音引擎保存词频；混输引擎通过 `GetPinyinEngine()` 取内部拼音引擎
 - `GetReverseIndex()` 首次调用时从系统码表层构建 `map[string][]string`（字→编码列表）并缓存，切换方案后自动失效
 - `GetCurrentType()` 通过 SchemaManager 读取实际 `engine.type`，不再返回 `EngineType(currentID)`
+
+### ⚠️ 学习/造词/晋升系统注意事项（历史高频回退区域）
+
+以下逻辑历史上多次因不相关改动意外失效，修改时必须关注：
+
+**学习配置（UpdateLearningConfig）**
+- 混输方案**始终**使用主方案（`PrimarySchema`）的学习配置，不维护独立学习配置（混输本质是主码表 + 辅助拼音）
+- `codetableLS` 在 `isMixed` 分支无条件切换为 `&ps.Learning`（ps = primary schema）
+- `resolveEncoder` 有相同的继承机制可作参考，**两者须保持对称**
+- `codetableLS` 用于构建 `CodeTableAutoPhrase`、设置 temp limits；`ls`（原始混输方案）仅用于拼音策略
+
+**Temp Layer limits 必须全部显式设置**
+- `UpdateActiveTempLimits` 只更新 `activeStoreTemp`（当前方案的 dataSchemaID 对应的 temp layer）
+- 混输模式下拼音子引擎使用独立 temp layer（`schemaID="pinyin"`），**不是** activeStoreTemp
+- 凡创建/替换拼音 temp layer 的代码路径（factory init + hot-update）必须显式调用 `tl.SetLimits`
+- 遗漏 `SetLimits` 时 `promoteCount=0`，`LearnWord` 永远返回 false，临时词永不晋升到用户词库，且无任何错误日志
+
+**日志字段命名**
+- `codetableAutoPhrase` 日志字段用类型断言 `codetableLearning.(*schema.CodeTableAutoPhrase)` 判断，而非 `!= nil`（`ManualLearning{}` 也非 nil，会误报 true）
 
 ### Testing Requirements
 - `go test ./internal/engine/...`（会递归测试 pinyin/、wubi/、mixed/ 子目录）

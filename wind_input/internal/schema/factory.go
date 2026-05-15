@@ -927,8 +927,13 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		}
 		// 混输码表子引擎：auto_learn 或 auto_phrase 启用时使用码表自动造词
 		// 按混输的 dataSchemaID（= 主方案 ID）绑定层，避免预加载时被绑到错误的活跃方案
-		if s.Learning.IsAutoPhraseEnabled() || s.Learning.IsAutoLearnEnabled() {
-			autoPhrase := NewCodeTableLearningStrategy(&s.Learning, logger)
+		// 混输方案始终使用主方案的学习配置（混输本质是主码表 + 辅助拼音，不维护独立学习配置）
+		codetableLearningSpec := &s.Learning
+		if primarySchema != nil {
+			codetableLearningSpec = &primarySchema.Learning
+		}
+		if codetableLearningSpec.IsAutoPhraseEnabled() || codetableLearningSpec.IsAutoLearnEnabled() {
+			autoPhrase := NewCodeTableLearningStrategy(codetableLearningSpec, logger)
 			if ul := dm.GetOrCreateStoreUserLayer(s.DataSchemaID()); ul != nil {
 				autoPhrase.SetUserLayer(ul)
 			}
@@ -1083,6 +1088,14 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		pinyinLearning := NewLearningStrategy(&s.Learning, pinyinUserLayer)
 		if al, ok := pinyinLearning.(*AutoLearning); ok {
 			if tl := dm.GetOrCreateStoreTempLayer(pinyinDataSchemaID); tl != nil {
+				// 拼音 temp layer 不是 activeStoreTemp，switchSchemaStore 不会覆盖它，
+				// 必须显式 SetLimits，否则 promoteCount=0，LearnWord 永远返回 false。
+				// 混输方案始终使用主方案的 temp limits（与 codetableLearningSpec 保持一致）。
+				pinyinTempSpec := &s.Learning
+				if primarySchema != nil {
+					pinyinTempSpec = &primarySchema.Learning
+				}
+				tl.SetLimits(pinyinTempSpec.TempMaxEntries, pinyinTempSpec.TempPromoteCount)
 				al.SetTempLayer(tl)
 			}
 		}

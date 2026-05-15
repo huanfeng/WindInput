@@ -821,3 +821,8 @@ func (e *Engine) SetFreqHandler(h *dict.FreqHandler) {
 func (e *Engine) SetLearningStrategy(ls LearningStrategy) {
 	e.learningStrategy = ls
 }
+
+// GetLearningStrategy 返回当前造词策略
+func (e *Engine) GetLearningStrategy() LearningStrategy {
+	return e.learningStrategy
+}

@@ -331,9 +331,15 @@ func (m *Manager) ToggleSchema(available []string) (*ToggleSchemaResult, error) 
 		if dm != nil {
 			s := sm.GetSchema(candidateID)
 			if s != nil {
-				dm.SwitchSchemaFull(candidateID, s.DataSchemaID(),
-					s.Learning.TempMaxEntries, s.Learning.TempPromoteCount,
-					s.Schema.ID)
+				tempMax, tempPromote := s.Learning.TempMaxEntries, s.Learning.TempPromoteCount
+				if s.Engine.Mixed != nil && s.Engine.Mixed.PrimarySchema != "" {
+					if ps := sm.GetSchema(s.Engine.Mixed.PrimarySchema); ps != nil {
+						tempMax = ps.Learning.TempMaxEntries
+						tempPromote = ps.Learning.TempPromoteCount
+					}
+				}
+				dm.SwitchSchemaFull(candidateID, s.DataSchemaID(), tempMax, tempPromote, s.Schema.ID)
+				m.UpdateLearningConfig(&s.Learning)
 			}
 		}
 
@@ -595,9 +601,15 @@ func (m *Manager) SwitchToSchemaByID(schemaID string) error {
 	if dm != nil {
 		s := sm.GetSchema(schemaID)
 		if s != nil {
-			dm.SwitchSchemaFull(schemaID, s.DataSchemaID(),
-				s.Learning.TempMaxEntries, s.Learning.TempPromoteCount,
-				s.Schema.ID)
+			tempMax, tempPromote := s.Learning.TempMaxEntries, s.Learning.TempPromoteCount
+			if s.Engine.Mixed != nil && s.Engine.Mixed.PrimarySchema != "" {
+				if ps := sm.GetSchema(s.Engine.Mixed.PrimarySchema); ps != nil {
+					tempMax = ps.Learning.TempMaxEntries
+					tempPromote = ps.Learning.TempPromoteCount
+				}
+			}
+			dm.SwitchSchemaFull(schemaID, s.DataSchemaID(), tempMax, tempPromote, s.Schema.ID)
+			m.UpdateLearningConfig(&s.Learning)
 		}
 	}
 

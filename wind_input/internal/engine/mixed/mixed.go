@@ -792,6 +792,18 @@ func (e *Engine) OnCandidateSelected(code, text string, source candidate.Candida
 		if e.pinyinEngine != nil {
 			e.pinyinEngine.OnCandidateSelected(code, text)
 		}
+		// 同步通知码表造词策略，维持跨来源的 charBuffer 连续性：
+		// 拼音单字 → 追加到 charBuffer（code 由 CalcWordCode 在 flush 时重算）
+		// 拼音多字词 → 终止当前序列，触发 flush
+		if e.codetableEngine != nil {
+			if ls := e.codetableEngine.GetLearningStrategy(); ls != nil {
+				if len([]rune(text)) == 1 {
+					ls.OnWordCommitted("", text)
+				} else {
+					e.codetableEngine.OnPhraseTerminated()
+				}
+			}
+		}
 	default:
 		// 未标记来源时，默认路由到码表
 		if e.codetableEngine != nil {

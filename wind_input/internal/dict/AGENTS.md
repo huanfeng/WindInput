@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-05-15 -->
 
 # internal/dict
 
@@ -51,6 +51,16 @@
 - `UserDict` 的 `Add`/`IncreaseWeight`/`Search` 方法线程安全
 - `CodeTable.BuildReverseIndex()` 为懒加载（首次五笔反查时构建）；`BuildSingleCharReverseIndex()` 只索引单字条目并过滤权重 < maxWeight/10 的低频简码（如 cccc→晶），内存占用从 ~20-50MB 降至 ~2-3MB，为反查/代码提示的推荐路径
 - 通用字符表路径：`<exeDir>/dict/common_chars.txt`
+
+### ⚠️ StoreTempLayer.SetLimits 必须显式调用
+
+`StoreTempLayer` 创建后 `promoteCount` 默认为 0。**`promoteCount=0` 会使 `LearnWord` 永远返回 false**（代码中有 `if l.promoteCount > 0` 守卫），导致临时词永远不会晋升到用户词库，且无任何错误或警告。
+
+凡是通过 `NewStoreTempLayer` 或 `GetOrCreateStoreTempLayer` 获取 temp layer 并将其交给学习策略（`AutoLearning.SetTempLayer` / `CodeTableAutoPhrase.SetTempLayer`）的代码，都必须在交出前调用 `tl.SetLimits(maxEntries, promoteCount)`。
+
+以下两条 `UpdateActiveTempLimits` **不覆盖**所有 temp layer：
+- 它只更新 `activeStoreTemp`（当前方案的 dataSchemaID 对应的层）
+- 混输模式下的拼音 temp layer（schemaID="pinyin"）是独立的，不是 activeStoreTemp，必须单独 SetLimits
 
 ### Testing Requirements
 - 运行：`go test ./internal/dict/...`

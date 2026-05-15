@@ -474,6 +474,11 @@ func main() {
 
 	logger.Info("Engine initialized", "schema", activeSchemaID, "info", engineMgr.GetEngineInfo())
 
+	// 注入学习策略（造词 + 调频），必须在 DictManager 和引擎均就绪后执行
+	if activeSchema != nil {
+		engineMgr.UpdateLearningConfig(&activeSchema.Learning)
+	}
+
 	// 从全局配置应用候选过滤模式（覆盖 schema 默认值）
 	if cfg.Input.FilterMode != "" {
 		engineMgr.UpdateFilterMode(cfg.Input.FilterMode)
@@ -531,6 +536,7 @@ func main() {
 				displayName = s.Schema.Name
 				dictManager.SwitchSchemaFull(desiredActiveID, s.DataSchemaID(),
 					s.Learning.TempMaxEntries, s.Learning.TempPromoteCount)
+				engineMgr.UpdateLearningConfig(&s.Learning)
 			}
 			coord.NotifySchemaActivated(displayName)
 			logger.Info("拼音 wdat 就绪，用户方案已激活", "schema", desiredActiveID)

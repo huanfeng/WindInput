@@ -207,9 +207,11 @@ func (p *CodeTableAutoPhrase) flush() {
 
 	bufLen := len(p.charBuffer)
 	if bufLen < p.config.MinPhraseLen {
+		p.logger.Debug("AutoPhrase flush skipped: buffer too short", "bufLen", bufLen, "minPhraseLen", p.config.MinPhraseLen)
 		return
 	}
 	if p.wordCodeCalc == nil {
+		p.logger.Debug("AutoPhrase flush skipped: wordCodeCalc is nil")
 		return
 	}
 
@@ -222,11 +224,13 @@ func (p *CodeTableAutoPhrase) flush() {
 	word := string(p.charBuffer[start:])
 	code := p.wordCodeCalc.CalcWordCode(word)
 	if code == "" {
+		p.logger.Debug("AutoPhrase flush skipped: CalcWordCode returned empty", "wordLen", len([]rune(word)))
 		return
 	}
 
 	// 系统词库已有则跳过
 	if p.systemChecker != nil && p.systemChecker.ExistsInSystemDict(code, word) {
+		p.logger.Debug("AutoPhrase flush skipped: exists in system dict", "code", code)
 		return
 	}
 
@@ -234,19 +238,24 @@ func (p *CodeTableAutoPhrase) flush() {
 	if p.userLayer != nil {
 		for _, c := range p.userLayer.Search(code, 0) {
 			if c.Text == word {
+				p.logger.Debug("AutoPhrase flush skipped: exists in user dict", "code", code)
 				return
 			}
 		}
 	}
 
+	p.logger.Debug("AutoPhrase learnWord", "code", code, "wordLen", len([]rune(word)))
 	p.learnWord(code, word)
 }
 
-// learnWord 将词写入临时词库
-// 暂不自动晋升到用户词库，后续增加配置选项后再处理
+// learnWord 将词写入临时词库，达到晋升阈值时自动晋升到用户词库
 func (p *CodeTableAutoPhrase) learnWord(code, word string) {
 	if p.tempLayer != nil {
-		p.tempLayer.LearnWord(code, word, p.config.WeightDelta)
+		promoted := p.tempLayer.LearnWord(code, word, p.config.WeightDelta)
+		if promoted {
+			p.logger.Debug("AutoPhrase word promoted to user layer", "code", code)
+			p.tempLayer.PromoteWord(code, word)
+		}
 		return
 	}
 	// 无临时词库时回退到用户词库（带误选保护）

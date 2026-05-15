@@ -1,20 +1,20 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-01 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-01 | Updated: 2026-05-15 -->
 
 # internal/engine/mixed
 
 ## Purpose
-五笔拼音混合输入引擎。内部持有独立的五笔引擎（`*wubi.Engine`）和拼音引擎（`*pinyin.Engine`），根据输入长度选择查询策略，并行查询后按权重合并候选词列表。
+五笔拼音混合输入引擎。内部持有独立的码表引擎（`*codetable.Engine`）和拼音引擎（`*pinyin.Engine`），根据输入长度选择查询策略，并行查询后按权重合并候选词列表。
 
-查询策略（以五笔最大码长 maxCodeLen=4 为例）：
-- 1 码：仅查五笔
-- 2~4 码：并行查五笔+拼音，五笔优先（双向夹击权重）
+查询策略（以最大码长 maxCodeLen=4 为例）：
+- 1 码：仅查码表
+- 2~4 码：并行查码表+拼音，码表优先（双向夹击权重）
 - >4 码：降级为纯拼音（`IsPinyinFallback=true`）
 
 ## Key Files
 | File | Description |
 |------|-------------|
-| `mixed.go` | `Engine`：混输引擎主体；`Config`（`MinPinyinLength`/`WubiWeightBoost`/`ShowSourceHint`）；`ConvertEx` 核心转换逻辑（`convertWubiOnly`/`convertMixed`/`convertPinyinFallback`）；`OnCandidateSelected` 按 `CandidateSource` 路由学习回调；`ConvertResult` 结构体（含 `IsPinyinFallback` 和拼音降级字段） |
+| `mixed.go` | `Engine`：混输引擎主体；`Config`（`MinPinyinLength`/`CodetableWeightBoost`/`ShowSourceHint`）；`ConvertEx` 核心转换逻辑（`convertCodetableOnly`/`convertMixed`/`convertPinyinOnly`）；`OnCandidateSelected` 按 `CandidateSource` 路由学习回调；`ConvertResult` 结构体（含 `IsPinyinFallback` 和拼音降级字段） |
 
 ## For AI Agents
 
@@ -36,21 +36,66 @@
 - `recheckAutoCommit` 判定条件：`AutoCommitAt4=true` && `len(input) >= MaxCodeLength` && 最终列表中 `Source==SourceCodetable && Code==input` 的候选恰好为 1 个
 - `convertCodetableOnly` 和 `convertMixed` 均须遵守此规则；`convertPinyinOnly` 无码表自动上屏，无需处理
 
+#### ⚠️ 学习路由（OnCandidateSelected）与 charBuffer 连续性
+
+`OnCandidateSelected` 按 `CandidateSource` 路由到不同子引擎，但码表的自动造词（`CodeTableAutoPhrase`）依赖连续单字 `charBuffer`，必须感知拼音输入的存在：
+
+- **SourceCodetable**：直接路由到 `codetableEngine.OnCandidateSelected`，单字进 charBuffer，多字词触发 flush
+- **SourcePinyin**：路由到 `pinyinEngine.OnCandidateSelected`；**同时**通知码表的造词策略：
+  - 拼音单字 → `ls.OnWordCommitted("", text)`（code="" 可为空，flush 时由 `CalcWordCode` 重算）
+  - 拼音多字词 → `codetableEngine.OnPhraseTerminated()`，终止当前单字序列触发 flush
+- **default（无来源标记，如顶码/自动上屏）**：默认路由到码表，符合预期（顶码只由码表触发）
+
+**如果不遵守上述规则**，拼音输入的字不会进入 charBuffer，导致五笔+拼音交替输入时自动造词只能看到纯五笔子序列，无法正确感知拼音边界。
+
+#### ⚠️ 自动造词功能的历史回退原因及防范
+
+以下问题曾多次因修改其他功能而意外回退，提交前必须验证：
+
+1. **混输方案学习配置**：混输方案**始终**使用主方案（`PrimarySchema`）的学习配置，不维护独立配置（混输本质是主码表 + 辅助拼音）。入口在 `factory.go:createMixedEngine`（`codetableLearningSpec`）和 `manager_config.go:UpdateLearningConfig`（`codetableLS`），两处逻辑对称。**不得删除或改为条件判断**。
+
+2. **拼音 temp layer 的 SetLimits**：混输拼音子引擎使用独立 temp layer（`schemaID="pinyin"`），它不是 `DictManager.activeStoreTemp`，`UpdateActiveTempLimits` **不会**覆盖它。凡是创建/替换拼音 temp layer 的代码路径（factory 初始化 + 热更新），都必须显式调用 `tl.SetLimits`。否则 `promoteCount=0`，`LearnWord` 永远返回 false，临时词永不晋升。
+
+3. **日志字段 `codetableAutoPhrase`**：该字段用类型断言判断 `codetableLearning` 是否为 `*schema.CodeTableAutoPhrase`（而非 `!= nil`）。`ManualLearning{}` 也是 non-nil，若改回 `!= nil` 判断会误报 true。
+
 ### Testing Requirements
 - `go test ./internal/engine/mixed/`
 - `mixed_repro_test.go` 包含复现测试用例
+- 新增的学习路由行为建议在 `mixed_repro_test.go` 中补充集成测试（见下文自动化测试建议）
+
+### ⚠️ 自动化测试建议（防止学习/造词/晋升回退）
+
+该模块的学习、造词、晋升逻辑历史上多次因其他改动意外失效，且往往不产生编译错误或崩溃，只在运行时静默失效。推荐以下测试策略：
+
+**集成测试层**（优先，可覆盖多个组件交互）：
+- 在 `mixed_repro_test.go` 中构造完整的 `Engine + DictManager + StoreTempLayer`，模拟多次 `OnCandidateSelected`，断言：
+  - 达到 `promoteCount` 次后，临时词库条目消失，用户词库中出现对应词
+  - 拼音来源单字上屏后，码表 charBuffer 中确实追加了该字（可通过验证最终 flush 结果来验证）
+  - 拼音多字词上屏后，charBuffer 被清空（flush 结果为空）
+
+**单元测试层**（作为补充）：
+- `StoreTempLayer.LearnWord` + `PromoteWord` 的 promoteCount 边界（已有 `store_layer_test.go`）
+- `CodeTableAutoPhrase.OnWordCommitted` 对单字 vs 多字词的路由
+- `mixed.Engine.OnCandidateSelected` 对 SourcePinyin 的路由（验证 charBuffer 通知）
+
+**检查清单**（每次修改学习相关代码后运行）：
+```
+go test ./internal/engine/mixed/...
+go test ./internal/dict/...
+go test ./internal/schema/...
+```
 
 ### Common Patterns
 - `Engine` 实现 `engine.Engine` 和 `engine.ExtendedEngine` 接口
-- `GetWubiEngine()`/`GetPinyinEngine()` 供 `engine.Manager` 访问内部引擎（用于用户词频保存、引擎信息展示）
-- `candidate.SourceWubi`/`candidate.SourcePinyin` 标记候选来源，供 `OnCandidateSelected` 路由
+- `GetCodetableEngine()`/`GetPinyinEngine()` 供 `engine.Manager` 访问内部引擎（用于配置热更新、学习策略注入）
+- `candidate.SourceCodetable`/`candidate.SourcePinyin` 标记候选来源，供 `OnCandidateSelected` 路由
 
 ## Dependencies
 ### Internal
-- `internal/candidate` — `Candidate`、`CandidateSource`（`SourceWubi`/`SourcePinyin`）、`Better`
+- `internal/candidate` — `Candidate`、`CandidateSource`（`SourceCodetable`/`SourcePinyin`）、`Better`
 - `internal/dict` — `DictManager`、`ApplyShadowPins`
 - `internal/engine/pinyin` — 拼音引擎
-- `internal/engine/wubi` — 五笔引擎
+- `internal/engine/codetable` — 码表引擎
 
 ### External
 - 无
