@@ -634,11 +634,13 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 	case !hasShift && c.isSelectKey2(key, data.KeyCode):
 		// Handle 2nd candidate selection key (e.g., semicolon)
 		// Shift 时不触发选择（Shift+; 应输出 : 而非选候选）
-		if len(c.candidates) >= 2 && len(c.inputBuffer) > 0 {
-			return c.selectCandidate(1) // Select 2nd candidate (index 1)
-		}
-		// 候选不足时（含无候选），按 overflow 策略处理
 		if len(c.inputBuffer) > 0 {
+			pageStart := (c.currentPage - 1) * c.candidatesPerPage
+			idx := pageStart + 1
+			if idx < len(c.candidates) {
+				return c.selectCandidate(idx)
+			}
+			// 候选不足时（含无候选），按 overflow 策略处理
 			if result := c.handleOverflowSelectKey(key); result != nil {
 				return result
 			}
@@ -655,11 +657,13 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 	case !hasShift && c.isSelectKey3(key, data.KeyCode):
 		// Handle 3rd candidate selection key (e.g., quote)
 		// Shift 时不触发选择（Shift+' 应输出 " 而非选候选）
-		if len(c.candidates) >= 3 && len(c.inputBuffer) > 0 {
-			return c.selectCandidate(2) // Select 3rd candidate (index 2)
-		}
-		// 候选不足时（含无候选），按 overflow 策略处理
 		if len(c.inputBuffer) > 0 {
+			pageStart := (c.currentPage - 1) * c.candidatesPerPage
+			idx := pageStart + 2
+			if idx < len(c.candidates) {
+				return c.selectCandidate(idx)
+			}
+			// 候选不足时（含无候选），按 overflow 策略处理
 			if result := c.handleOverflowSelectKey(key); result != nil {
 				return result
 			}
