@@ -17,7 +17,7 @@
 | `handle_config.go` | 配置更新处理（引擎切换、热键、UI、工具栏等） |
 | `handle_config_menu.go` | 右键菜单命令处理 |
 | `handle_config_state.go` | 状态查询方法（`GetChineseMode`、`GetCurrentEngineName` 等） |
-| `handle_lifecycle.go` | 焦点获得/失去、IME 激活/停用、客户端断连 |
+| `handle_lifecycle.go` | 焦点获得/失去、IME 激活/停用、客户端断连；含 `HandleCommitRequest`（barrier 机制，见下方说明） |
 | `handle_mode.go` | 中英文模式切换、CapsLock 状态处理 |
 | `handle_punctuation.go` | 中英文标点转换处理 |
 | `handle_temp_english.go` | 临时英文模式：五笔输入态下按特定键（如 Z）触发，输入英文后恢复；维护临时英文缓冲区和上屏逻辑 |
@@ -69,3 +69,21 @@
 - 无
 
 <!-- MANUAL: -->
+
+## Barrier 机制（`HandleCommitRequest`）
+
+**当前状态：Go 侧已实现，C++ 侧尚未接入，代码路径不可达。**
+
+`handle_lifecycle.go` 中的 `HandleCommitRequest` 及其内部辅助函数（`handleSpaceInternal`、`handleEnterInternal`、`handleNumberKeyInternal`）是为 TSF barrier 机制预留的专用路径，设计用于在 WPS、Excel 等特殊宿主应用中以原子方式处理 Space/Enter/数字键上屏。
+
+C++ 侧（`KeyEventSink.cpp`）已实现完整基础设施：
+- `_SendCommitRequest()` — 构造并发送 `CmdCommitRequest`（0x0104）命令
+- `_HandleCommitResult()` — 接收并处理 Go 返回的上屏结果
+- `_CheckBarrierTimeout()` — 500ms 超时兜底（每次 `OnKeyDown` 检查）
+
+但 `_SendCommitRequest` **从未被调用**，因此 Go 侧的 `HandleCommitRequest` 永远不会收到消息。
+
+**接入时注意事项：**
+- `handleSpaceInternal` 已使用 `c.selectedIndex` 正确处理高亮候选（2026-05-15 修复，修复前固定选当前页第一个候选）
+- `handleNumberKeyInternal` 使用 `(c.currentPage-1)*c.candidatesPerPage + (num-1)` 计算正确页偏移
+- 接入后需覆盖"翻页后按 Space/数字"的回归测试
