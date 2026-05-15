@@ -791,10 +791,9 @@ func (c *Coordinator) HandleCommitRequest(data bridge.CommitRequestData) *bridge
 
 // handleSpaceInternal is the internal implementation of handleSpace (without lock)
 func (c *Coordinator) handleSpaceInternal() *bridge.KeyEventResult {
-	// Select first candidate of current page
+	// Select the highlighted candidate on the current page
 	if len(c.candidates) > 0 {
-		// Calculate index of first candidate on current page
-		index := (c.currentPage - 1) * c.candidatesPerPage
+		index := (c.currentPage-1)*c.candidatesPerPage + c.selectedIndex
 		if index < len(c.candidates) {
 			return c.doSelectCandidate(index)
 		}
