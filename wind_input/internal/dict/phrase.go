@@ -69,24 +69,29 @@ func (pl *PhraseLayer) SetCmdbarHook(h CmdbarPhraseHook) {
 
 // PhraseEntry 短语条目
 //
-// Weight 是 resolve 后的最终权重 (0~10000), 由 resolvePhraseWeight 计算:
-// 显式 weight > position fallback (10000-position) > 默认 1000。
-// Position 保留是为了 yaml/store 旧记录兼容以及上下移动等顺序操作。
+// 2026-05-16 后权重模型 (docs/design/2026-05-16-cmdbar-followup.md §2):
+//   - Weight: 跨编码全局优先级 (0~10000); resolvePhraseWeight 把 0 / 负数
+//     都映射为 1000 (短语 tier 中位); 显式 0 由 file entry 层 (Weight=*0)
+//     表达"禁用排序权重"。
+//   - Position: 同编码组内的 tie-break (升序; 0 = 未手动调整, 已调整优先于
+//     未调整); 不再被 fallback 映射为 weight。也用于 MovePhraseUp/Down/ToTop。
 type PhraseEntry struct {
 	Text     string // 输出文本（可含 $变量模板）
-	Weight   int    // 候选权重 (0~10000, 与码表/拼音范化后同一区间)
-	Position int    // 候选位置（兼容字段, 仅在缺 weight 时回退用）
+	Weight   int    // 候选权重 (0~10000)
+	Position int    // 同 code 内手动调整后的相对顺序 (升序; 0 = 未调整)
 	IsSystem bool   // 是否来自系统短语
 	Disabled bool   // 是否被禁用
 }
 
-// PhraseGroup 数组类型短语组的元数据（texts 字段的条目）
+// PhraseGroup 数组类型短语组的元数据（texts 字段的条目）。
+// Weight / Position 的语义与 PhraseEntry 一致 (参见其 doc); 字符组内
+// 各字符共享 Weight, NaturalOrder 由展开位置决定。
 type PhraseGroup struct {
 	Code     string // 完整编码（如 "zzbd"）
 	Name     string // 显示名称（如 "标点符号"）
 	Texts    string // 原始字符列表
 	Weight   int    // 排序权重 (0~10000)
-	Position int    // 排序位置（兼容字段）
+	Position int    // 同 code 内手动调整后的顺序 (与 PhraseEntry.Position 一致语义)
 	IsSystem bool   // 是否来自系统短语
 	Disabled bool   // 是否被禁用
 }
@@ -157,16 +162,18 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 	}
 
 	results := make([]candidate.Candidate, 0, len(entries))
+	positions := make([]int, 0, len(entries))
 	for _, e := range entries {
 		results = append(results, candidate.Candidate{
 			Text:     e.Text,
 			Code:     code,
-			Weight:   resolvePhraseWeight(e.Weight, e.Position),
+			Weight:   resolvePhraseWeight(e.Weight),
 			IsPhrase: true, // 短语永远保留，但不计入 hasCommon 避免污染同编码码表字过滤
 		})
+		positions = append(positions, e.Position)
 	}
 
-	sortByPosition(results)
+	sortPhraseCandidates(results, positions)
 
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
@@ -196,11 +203,13 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 	// ── 情况 1：动态短语精确匹配（含 $ 变量） ──
 	if entries, ok := pl.dynamicPhrases[code]; ok {
 		results := make([]candidate.Candidate, 0, len(entries))
+		positions := make([]int, 0, len(entries))
 		for _, e := range entries {
 			cand := pl.expandDynamicEntry(code, e)
 			results = append(results, cand)
+			positions = append(positions, e.Position)
 		}
-		sortByPosition(results)
+		sortPhraseCandidates(results, positions)
 		pl.cmdCache[code] = results
 		if limit > 0 && len(results) > limit {
 			return results[:limit]
@@ -214,7 +223,7 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 		// 字符组内所有字符共享 group 的 weight, 用 NaturalOrder = 字符在
 		// chars 字符串中的下标做 tie-break, 保证按数组顺序排列。
 		// 权重统一取自 group 字段, 不再用每个 char entry 的 e.Position。
-		groupWeight := resolvePhraseWeight(group.Weight, group.Position)
+		groupWeight := resolvePhraseWeight(group.Weight)
 		results := make([]candidate.Candidate, 0, len(entries))
 		for i, e := range entries {
 			_ = e.Position // 字符级 entry 的 position 仅记录展开顺序, 不参与权重计算
@@ -253,7 +262,7 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 			navResults = append(navResults, candidate.Candidate{
 				Text:      displayName,
 				Code:      groupCode,
-				Weight:    resolvePhraseWeight(group.Weight, group.Position),
+				Weight:    resolvePhraseWeight(group.Weight),
 				Comment:   groupCode[len(code):],
 				IsPhrase:  true,
 				IsGroup:   true,
@@ -301,7 +310,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 			results = append(results, candidate.Candidate{
 				Text:      displayName,
 				Code:      code,
-				Weight:    resolvePhraseWeight(group.Weight, group.Position),
+				Weight:    resolvePhraseWeight(group.Weight),
 				Comment:   code[len(prefix):], // 显示编码后缀（如 zz→zzbd 显示 "bd"）
 				IsPhrase:  true,
 				IsGroup:   true,
@@ -320,7 +329,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 				results = append(results, candidate.Candidate{
 					Text:     e.Text,
 					Code:     code,
-					Weight:   resolvePhraseWeight(e.Weight, e.Position),
+					Weight:   resolvePhraseWeight(e.Weight),
 					IsPhrase: true,
 				})
 			}
@@ -533,7 +542,7 @@ func (pl *PhraseLayer) expandDynamicEntry(code string, e PhraseEntry) candidate.
 	out := candidate.Candidate{
 		Text:           res.Text,
 		Code:           code,
-		Weight:         resolvePhraseWeight(e.Weight, e.Position),
+		Weight:         resolvePhraseWeight(e.Weight),
 		IsCommand:      true,
 		IsPhrase:       true,
 		PhraseTemplate: e.Text,
@@ -548,58 +557,85 @@ func (pl *PhraseLayer) expandDynamicEntry(code string, e PhraseEntry) candidate.
 // ===== 辅助函数 =====
 
 // resolvePhraseWeight 计算短语候选的最终权重 (0~10000)。
+//
+// 设计 (docs/design/2026-05-16-cmdbar-followup.md §2):
+//   - weight 与 position 各司其职: weight 表跨编码全局优先级,
+//     position 表同编码组内的手动调整顺序; position 不再被换算为 weight。
+//   - 旧 `10000 - position` fallback 公式被删除 — 那是导致旧 yaml 中
+//     `position: 1` 被放大为 weight=9999 的根因 (短语过度靠前)。
+//
 // 优先级:
 //  1. 显式 weight > 0 → 直接使用 (clamp 到 NormalizedWeightMax)
-//  2. position > 0     → fallback 为 10000 - position (维持旧 yaml 行为)
-//  3. 两者都缺         → 默认 1000 (中位)
+//  2. weight <= 0     → 默认 1000 (短语 tier 的中位)
 //
-// 这与 WeightNormalizer 的目标值保持一致, 让短语 / 用户词库 / 范化后的
-// 码表+拼音权重都在同一 0~10000 区间比较。
-func resolvePhraseWeight(weight, position int) int {
-	if weight > 0 {
-		if weight > NormalizedWeightMax {
-			return NormalizedWeightMax
-		}
-		return weight
-	}
-	if weight == 0 && position > 0 {
-		w := 10000 - position
-		if w < 0 {
-			w = 0
-		}
-		return w
-	}
-	// weight 显式为 0 (用户禁用排序) 或两者都缺 → 用 0 表达"基本不出",
-	// 但只有"显式 0"才能命中这里 (position<=0 时), 否则走 position fallback。
-	// 实际"未设置"路径会走默认值 1000:
-	if weight == 0 && position == 0 {
+// position 由 sortPhraseCandidates 作为同 code tie-break 使用, 不影响 weight。
+func resolvePhraseWeight(weight int) int {
+	if weight <= 0 {
 		return 1000
 	}
-	if weight < 0 {
-		return 0
+	if weight > NormalizedWeightMax {
+		return NormalizedWeightMax
 	}
-	return 1000
+	return weight
 }
 
 // resolveWeightFromFileEntry 把 yaml 解析出的 PhraseFileEntry 转成
 // 最终生效的权重整数 (0~10000)。
+//
+// PhraseFileEntry.Weight 是 *int 以区分"未在 yaml 写"和"显式 weight: 0":
+//   - nil          → 默认 1000
+//   - *Weight == 0 → 0 (用户主动禁用排序权重)
+//   - *Weight  > 0 → resolvePhraseWeight 处理 (clamp)
+//   - *Weight  < 0 → 0
 func resolveWeightFromFileEntry(e PhraseFileEntry) int {
-	weight := 0
-	if e.Weight != nil {
-		weight = *e.Weight
-		// 显式设置为 0 也尊重 (用户主动禁用排序权重)
-		if weight <= 0 {
-			return 0
-		}
+	if e.Weight == nil {
+		return 1000
 	}
-	return resolvePhraseWeight(weight, e.Position)
+	if *e.Weight <= 0 {
+		return 0
+	}
+	return resolvePhraseWeight(*e.Weight)
 }
 
-// sortByPosition 按位置排序候选
-func sortByPosition(candidates []candidate.Candidate) {
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Weight > candidates[j].Weight
+// sortPhraseCandidates 按短语 tier 内部规则排序:
+//   - 主键: Weight 降序
+//   - 同 weight: position 升序; 但 position == 0 视为"未手动调整",
+//     已调整 (position > 0) 优先于未调整, 多个已调整按 position 升序。
+//
+// 旧名 sortByPosition 保留为本函数的别名供已有调用点透明替换。
+func sortPhraseCandidates(candidates []candidate.Candidate, positions []int) {
+	if len(positions) != len(candidates) {
+		// 长度不一致时退化为纯 weight 排序 (调用方未传 positions)。
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return candidates[i].Weight > candidates[j].Weight
+		})
+		return
+	}
+	type pair struct {
+		cand candidate.Candidate
+		pos  int
+	}
+	pairs := make([]pair, len(candidates))
+	for i := range candidates {
+		pairs[i] = pair{cand: candidates[i], pos: positions[i]}
+	}
+	sort.SliceStable(pairs, func(i, j int) bool {
+		if pairs[i].cand.Weight != pairs[j].cand.Weight {
+			return pairs[i].cand.Weight > pairs[j].cand.Weight
+		}
+		// position == 0 视为未调整, 排在已调整之后。
+		iAdj, jAdj := pairs[i].pos > 0, pairs[j].pos > 0
+		if iAdj != jAdj {
+			return iAdj
+		}
+		if iAdj { // 都已调整
+			return pairs[i].pos < pairs[j].pos
+		}
+		return false // 都未调整, 保持稳定
 	})
+	for i := range pairs {
+		candidates[i] = pairs[i].cand
+	}
 }
 
 // ===== 右键菜单：短语位置调整 =====

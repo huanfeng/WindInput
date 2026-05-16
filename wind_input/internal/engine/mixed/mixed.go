@@ -22,6 +22,18 @@ const (
 	AbbrevPenalty4Plus = 3500000
 	// CodetablePrefixBoostRatio 码表前缀匹配提权比例（相对于 CodetableWeightBoost）
 	CodetablePrefixBoostRatio = 6 // 即 60%
+	// PhraseWeightBoost 短语候选独立 tier 的 boost 基线。
+	//
+	// 设计 (docs/design/2026-05-16-cmdbar-followup.md §2.2):
+	//   Codetable tier  +10,000,000  码表词
+	//   Phrase tier     + 1,000,000  短语 / cmdbar 命令 (本常量)
+	//   Pinyin tier              0  拼音候选
+	//
+	// PhraseLayer 候选会被 compositeDict 混入 codetableCandidates 切片;
+	// mixed engine 在应用 codetable boost 之前按 IsPhrase 把它们分离, 仅加
+	// PhraseWeightBoost, 让短语永远 > 拼音、永远 < 码表词。这样 phrase
+	// weight 本身 (默认 1000) 只决定短语 tier 内部的相对顺序, 不参与跨 tier 比较。
+	PhraseWeightBoost = 1000000
 )
 
 // Config 混输引擎配置
@@ -434,9 +446,16 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 
 	wg.Wait()
 
-	// 码表候选提权（与 convertMixed 相同的策略）
+	// 码表候选提权（与 convertMixed 相同的策略）。
+	// 短语候选 (IsPhrase) 走独立 phrase tier, 仅 +PhraseWeightBoost (1M),
+	// 让它永远 < 码表词且 > 拼音, 详见 docs/design/2026-05-16-cmdbar-followup.md §2.2。
 	codetablePrefixBoost := e.config.CodetableWeightBoost * CodetablePrefixBoostRatio / 10
 	for i := range codetableCandidates {
+		if codetableCandidates[i].IsPhrase {
+			codetableCandidates[i].Source = candidate.SourcePhrase
+			codetableCandidates[i].Weight += PhraseWeightBoost
+			continue
+		}
 		codetableCandidates[i].Source = candidate.SourceCodetable
 		if codetableCandidates[i].Code == input[:e.maxCodeLen] {
 			codetableCandidates[i].Weight += e.config.CodetableWeightBoost
@@ -569,8 +588,17 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 	//     2码: 保持原值 — 高频救急场景（bg→不过, ds→但是）
 	//     3码: -2M     — 码表意图远大于拼音（sfg 降为 ~2.5M）
 	//     4码: -3.5M   — 纯噪声压制（wfht 降为 ~1M）
+	// 短语候选 (IsPhrase) 走独立 phrase tier, 仅 +PhraseWeightBoost (1M),
+	// 让它永远 > 拼音、永远 < 码表词 (含简拼降权后), 详见
+	// docs/design/2026-05-16-cmdbar-followup.md §2.2。短码场景下短语
+	// 自然让位给码表常用词, 不再霸占首位。
 	codetablePrefixBoost := e.config.CodetableWeightBoost * CodetablePrefixBoostRatio / 10 // 6M
 	for i := range codetableCandidates {
+		if codetableCandidates[i].IsPhrase {
+			codetableCandidates[i].Source = candidate.SourcePhrase
+			codetableCandidates[i].Weight += PhraseWeightBoost // +1M
+			continue
+		}
 		codetableCandidates[i].Source = candidate.SourceCodetable
 		if codetableCandidates[i].Code == input {
 			codetableCandidates[i].Weight += e.config.CodetableWeightBoost // +10M

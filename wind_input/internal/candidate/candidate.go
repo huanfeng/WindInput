@@ -15,6 +15,7 @@ const (
 	SourceCodetable CandidateSource = "codetable" // 来自码表引擎
 	SourcePinyin    CandidateSource = "pinyin"    // 来自拼音引擎
 	SourceEnglish   CandidateSource = "english"   // 来自英文词库
+	SourcePhrase    CandidateSource = "phrase"    // 来自短语层 (PhraseLayer / cmdbar 命令); 独立 tier 介于码表与拼音之间
 )
 
 // Candidate 候选词

@@ -18,6 +18,7 @@
 - `Candidate` 是跨包的核心数据类型，修改字段需检查所有引用方（engine/pinyin、engine/wubi、dict、coordinator、ui）
 - 排序规则（`Better`）：权重降序 → 文本升序 → 编码升序 → 消耗长度降序
 - `BetterNatural`：自然顺序排序（不调整词频权重，按码表原始顺序为主）
+- `CandidateSource` 枚举: `None / Codetable / Pinyin / English / Phrase`; `SourcePhrase` (2026-05-16 引入) 标记 PhraseLayer 候选, 在混输引擎中走 `mixed.PhraseWeightBoost` 独立 tier (1M), 不与码表词 (10M) 抢首位
 - `CandidateSortMode` 常量由 Schema 的 `candidate_sort_mode` 字段设置，传递给 `CompositeDict.SetSortMode`
 - `IsCommon` 字段由 `dict.InitCommonCharsWithPath` 初始化的通用字符表决定
 - `IsCommand` 标识 uuid/date/time 等命令候选，UI 渲染时可能有特殊样式

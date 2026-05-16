@@ -20,6 +20,7 @@
 
 ### Working In This Directory
 - **权重策略**（双向夹击）：码表精确匹配 +10M、前缀匹配 +6M；拼音纯辅音简拼按长度递减（3码 -2M，4码 -3.5M），含元音输入保持原值
+- **Phrase 独立 tier** (2026-05-16 引入, `PhraseWeightBoost = 1_000_000`): codetableCandidates 切片里 `IsPhrase=true` 的候选在 boost 阶段被分离, 改打 `SourcePhrase` 并仅 +1M, 永远 > 拼音、永远 < 码表词; 详见 docs/design/2026-05-16-cmdbar-followup.md §2.2
 - 混输模式**禁用码表顶字**（`HandleTopCode` 合法拼音序列时返回 false），超码长输入由拼音降级处理而非顶字上屏
 - `SetDictManager(dm)` 在引擎创建后由 factory 调用，用于 Shadow 规则访问
 - Shadow 规则在各 convert 路径末尾统一应用（幂等操作），防止合并+重排后位置偏移
