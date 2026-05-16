@@ -314,12 +314,12 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	// 前移: 首位禁用 | 单候选禁用 | 拼音非命令禁用
 	// 后移: 末位禁用 | 单候选禁用 | 拼音非命令禁用
 	// 置顶: 首位禁用
-	// 删除: 单字禁用 | 命令候选禁用
+	// 删除: 单字+非命令禁用 (命令候选 / 短语 ID 候选允许删除走 Shadow CandID)
 	// 恢复默认: 无 Shadow/短语覆盖时禁用
 	disableMoveUp := isGlobalFirst || isSingleCandidate || (isPinyin && !isCommand) || w.isQuickInputMode
 	disableMoveDown := isGlobalLast || isSingleCandidate || (isPinyin && !isCommand) || w.isQuickInputMode
 	disableTop := isGlobalFirst || w.isQuickInputMode
-	disableDelete := isSingleChar || isCommand || w.isQuickInputMode
+	disableDelete := (isSingleChar && !isCommand) || w.isQuickInputMode
 
 	// Build menu items
 	items := []MenuItem{

@@ -347,6 +347,111 @@ func TestSearchCommandGroupPrefixNavigation(t *testing.T) {
 	}
 }
 
+// TestPhraseCandidateIDStatic 验证静态短语候选填充 ID = phrase:<code>:<text>。
+func TestPhraseCandidateIDStatic(t *testing.T) {
+	tmpDir := t.TempDir()
+	userFile := filepath.Join(tmpDir, "user.phrases.yaml")
+	content := `phrases:
+  - code: "dz"
+    text: "我的地址"
+    position: 1
+`
+	if err := os.WriteFile(userFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pl := loadPhraseLayerFromYAML(t, "", userFile)
+
+	got := pl.Search("dz", 10)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(got))
+	}
+	wantID := "phrase:dz:我的地址"
+	if got[0].ID != wantID {
+		t.Fatalf("ID = %q, want %q", got[0].ID, wantID)
+	}
+	if got[0].PhraseTemplate != "我的地址" {
+		t.Fatalf("PhraseTemplate = %q, want %q", got[0].PhraseTemplate, "我的地址")
+	}
+}
+
+// TestPhraseCandidateIDDynamic 验证动态短语候选 ID 用模板 (而非展开后 Text)。
+func TestPhraseCandidateIDDynamic(t *testing.T) {
+	tmpDir := t.TempDir()
+	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
+	content := `phrases:
+  - code: "rq"
+    text: "$Y-$MM-$DD"
+    position: 1
+`
+	if err := os.WriteFile(systemFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
+
+	got := pl.SearchCommand("rq", 10)
+	if len(got) == 0 {
+		t.Fatal("expected dynamic candidate")
+	}
+	wantID := "phrase:rq:$Y-$MM-$DD"
+	if got[0].ID != wantID {
+		t.Fatalf("ID = %q, want %q (must use template, not expanded text)", got[0].ID, wantID)
+	}
+}
+
+// TestPhraseCandidateIDAAGroupChars 验证 $AA 字符组精确码命中后, 每个字符
+// 候选都填上独立 ID = phrase:<code>:<char>。
+func TestPhraseCandidateIDAAGroupChars(t *testing.T) {
+	tmpDir := t.TempDir()
+	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
+	content := `phrases:
+  - code: "zzbd"
+    text: '$AA("标点符号", "，。！")'
+    position: 1
+`
+	if err := os.WriteFile(systemFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
+
+	got := pl.SearchCommand("zzbd", 0)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 chars, got %d", len(got))
+	}
+	wantIDs := []string{"phrase:zzbd:，", "phrase:zzbd:。", "phrase:zzbd:！"}
+	for i, want := range wantIDs {
+		if got[i].ID != want {
+			t.Fatalf("char[%d] ID = %q, want %q", i, got[i].ID, want)
+		}
+	}
+}
+
+// TestPhraseCandidateIDGroupNavEmpty 验证 group nav 候选不附 ID
+// (用户不会 pin 一个 nav 入口, 没有 id 也不会被 Shadow 误匹)。
+func TestPhraseCandidateIDGroupNavEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
+	content := `phrases:
+  - code: "zzbd"
+    text: '$AA("标点符号", "，。")'
+    position: 1
+`
+	if err := os.WriteFile(systemFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
+
+	got := pl.SearchCommand("zz", 0)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 nav candidate, got %d", len(got))
+	}
+	if !got[0].IsGroup {
+		t.Fatal("nav candidate should be IsGroup=true")
+	}
+	if got[0].ID != "" {
+		t.Fatalf("nav candidate ID should be empty, got %q", got[0].ID)
+	}
+}
+
 // TestResolvePhraseWeight 覆盖 resolvePhraseWeight 的优先级与边界
 // (2026-05-16 后: position 不再参与 weight 计算, 仅作为同 code tie-break):
 //   - weight > 0 → 直接用 (clamp 到 10000)

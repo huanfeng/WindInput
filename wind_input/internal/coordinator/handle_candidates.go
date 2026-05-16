@@ -151,6 +151,11 @@ func expandAACandidates(in []candidate.Candidate, inputBuffer string) []candidat
 				c := cand
 				c.Text = string(r)
 				c.NaturalOrder = i
+				// $AA 字符级候选 id: phrase:<code>:<char>。
+				// 与 PhraseLayer.SearchCommand 出口的字符级 entry id 保持一致,
+				// 确保 Shadow 规则跨展开源 (用户/系统词库 vs PhraseLayer) 都能命中。
+				c.PhraseTemplate = string(r)
+				c.ID = dict.PhraseCandidateID(cand.Code, string(r))
 				out = append(out, c)
 			}
 			continue
@@ -302,17 +307,10 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 		// 性能: 大部分候选 text 不含 '$', IndexByte 早跳避免每条都走 hook。
 		// 已是 PhraseLayer 命令候选 (PhraseTemplate != "") 时跳过, 它已展开过。
 		c.applyValueExpansion(&cand)
-		// HasShadow 统一用 inputBuffer 查询（Shadow 规则按当前输入编码存储）
-		if cand.IsCommand && cand.PhraseTemplate != "" {
-			// 命令候选：检查 PhraseLayer 是否有用户覆盖
-			if dictMgr != nil {
-				phraseLayer := dictMgr.GetPhraseLayer()
-				if phraseLayer != nil {
-					cand.HasShadow = phraseLayer.HasPhraseOverride(c.inputBuffer, cand.PhraseTemplate)
-				}
-			}
-		} else if dictMgr != nil && !cand.IsCommand {
-			cand.HasShadow = dictMgr.HasShadowRule(c.inputBuffer, cand.Text)
+		// HasShadow 统一用 inputBuffer 查询 Shadow (R2 后短语/普通词条共用);
+		// cand.ID 非空时走 id 匹配 (动态短语场景), 否则按 text。
+		if dictMgr != nil && !cand.IsGroup {
+			cand.HasShadow = dictMgr.HasShadowRule(c.inputBuffer, cand.Text, cand.ID)
 		}
 		c.candidates[i] = cand
 	}
@@ -579,15 +577,8 @@ func (c *Coordinator) expandCandidates() {
 	c.candidates = make([]ui.Candidate, len(result.Candidates))
 	for i, cand := range result.Candidates {
 		cand.Index = i + 1
-		if cand.IsCommand && cand.PhraseTemplate != "" {
-			if dictMgr != nil {
-				phraseLayer := dictMgr.GetPhraseLayer()
-				if phraseLayer != nil {
-					cand.HasShadow = phraseLayer.HasPhraseOverride(c.inputBuffer, cand.PhraseTemplate)
-				}
-			}
-		} else if dictMgr != nil && !cand.IsCommand {
-			cand.HasShadow = dictMgr.HasShadowRule(c.inputBuffer, cand.Text)
+		if dictMgr != nil && !cand.IsGroup {
+			cand.HasShadow = dictMgr.HasShadowRule(c.inputBuffer, cand.Text, cand.ID)
 		}
 		c.candidates[i] = cand
 	}

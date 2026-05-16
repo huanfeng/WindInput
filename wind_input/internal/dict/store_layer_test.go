@@ -154,7 +154,7 @@ func TestStoreShadowLayer_PinAndGet(t *testing.T) {
 	}
 
 	// 固定一个词
-	shadow.Pin("abc", "词A", 0)
+	shadow.Pin("abc", "词A", "", 0)
 
 	rules := shadow.GetShadowRules("abc")
 	if rules == nil {
@@ -171,14 +171,14 @@ func TestStoreShadowLayer_PinAndGet(t *testing.T) {
 	}
 
 	// 删除一个词并验证转换
-	shadow.Delete("abc", "词B")
+	shadow.Delete("abc", "词B", "")
 	rules = shadow.GetShadowRules("abc")
 	if rules == nil {
 		t.Fatal("GetShadowRules after Delete: expected non-nil")
 	}
 	found := false
 	for _, d := range rules.Deleted {
-		if d == "词B" {
+		if d.Word == "词B" {
 			found = true
 		}
 	}

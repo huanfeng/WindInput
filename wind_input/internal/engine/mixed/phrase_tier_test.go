@@ -52,11 +52,11 @@ func TestPhraseTier_BoostSeparation(t *testing.T) {
 
 	// 模拟 codetable engine 返回的混合候选 (含 phrase via compositeDict 路径)
 	cands := []candidate.Candidate{
-		{Text: "码表低频", Code: "bd", Weight: 100},                    // codetable, 极低 weight
-		{Text: "短语高优", Code: "bd", Weight: 9000, IsPhrase: true},   // phrase 标"必置顶"
-		{Text: "短语默认", Code: "bd", Weight: 1000, IsPhrase: true},   // phrase 默认 weight
-		{Text: "码表精确", Code: "bd", Weight: 5000},                   // codetable 中频
-		{Text: "码表前缀", Code: "bdx", Weight: 3000},                  // codetable 前缀匹配
+		{Text: "码表低频", Code: "bd", Weight: 100},                  // codetable, 极低 weight
+		{Text: "短语高优", Code: "bd", Weight: 9000, IsPhrase: true}, // phrase 标"必置顶"
+		{Text: "短语默认", Code: "bd", Weight: 1000, IsPhrase: true}, // phrase 默认 weight
+		{Text: "码表精确", Code: "bd", Weight: 5000},                 // codetable 中频
+		{Text: "码表前缀", Code: "bdx", Weight: 3000},                // codetable 前缀匹配
 	}
 
 	// 等效 mixed.convertMixed 的 boost 循环
@@ -112,8 +112,8 @@ func TestPhraseTier_ShortInputDoesNotPromote(t *testing.T) {
 	// 模拟用户输入 "z" (单字符), 码表返回一个高频常用字, phrase 也有 entry
 	// (用户标了 weight=9000 的"必置顶"短语)
 	cands := []candidate.Candidate{
-		{Text: "之", Code: "z", Weight: 8000},                       // 码表高频常用单字
-		{Text: "签名块", Code: "z", Weight: 9000, IsPhrase: true},     // 短语标"必置顶"
+		{Text: "之", Code: "z", Weight: 8000},                   // 码表高频常用单字
+		{Text: "签名块", Code: "z", Weight: 9000, IsPhrase: true}, // 短语标"必置顶"
 	}
 
 	// 应用 boost (input="z" 精确匹配)

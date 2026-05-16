@@ -444,17 +444,27 @@ func (dm *DictManager) AddUserWord(code, text string, weight int) error {
 }
 
 // PinWord 固定词到指定位置（置顶 = position 0）
-func (dm *DictManager) PinWord(code, word string, position int) {
+// candID 非空时按候选 id 匹配 (短语场景), 空时按 word 匹配 Text。
+func (dm *DictManager) PinWord(code, word, candID string, position int) {
 	if dm.activeStoreShadow != nil {
-		dm.activeStoreShadow.Pin(code, word, position)
+		dm.activeStoreShadow.Pin(code, word, candID, position)
 	}
 }
 
-// DeleteWord 删除词条。
-// 若词条存在于系统词库，则通过 Shadow 隐藏；
-// 若词条仅存在于用户/临时词库，则直接删除源记录（不污染 Shadow）。
-func (dm *DictManager) DeleteWord(code, word string) {
-	// 无论是否存在于系统词库，都先清理用户/临时词库中的同名记录
+// DeleteWord 删除词条/候选。
+// 若 candID 非空（短语候选），直接走 Shadow 隐藏；
+// 若 candID 空 (普通词条): 仅存在于用户/临时词库时直接删源记录;
+// 存在于系统词库时通过 Shadow 隐藏。
+func (dm *DictManager) DeleteWord(code, word, candID string) {
+	if candID != "" {
+		// 短语 / 命令候选: 走 Shadow, 不动用户/临时词库
+		if dm.activeStoreShadow != nil {
+			dm.activeStoreShadow.Delete(code, word, candID)
+		}
+		return
+	}
+
+	// 普通词条: 无论是否存在于系统词库，都先清理用户/临时词库中的同名记录
 	if dm.activeStoreUser != nil {
 		_ = dm.activeStoreUser.Remove(code, word)
 	}
@@ -465,32 +475,45 @@ func (dm *DictManager) DeleteWord(code, word string) {
 	if dm.ExistsInSystemDict(code, word) {
 		// 系统词库中存在：还需要通过 Shadow 隐藏
 		if dm.activeStoreShadow != nil {
-			dm.activeStoreShadow.Delete(code, word)
+			dm.activeStoreShadow.Delete(code, word, "")
 		}
 	}
 }
 
-// RemoveShadowRule 移除词的所有 Shadow 规则
-func (dm *DictManager) RemoveShadowRule(code, word string) {
+// RemoveShadowRule 移除词/候选的所有 Shadow 规则
+func (dm *DictManager) RemoveShadowRule(code, word, candID string) {
 	if dm.activeStoreShadow != nil {
-		dm.activeStoreShadow.RemoveRule(code, word)
+		dm.activeStoreShadow.RemoveRule(code, word, candID)
 	}
 }
 
-// HasShadowRule 检查指定编码和词是否有 Shadow 规则
-func (dm *DictManager) HasShadowRule(code, word string) bool {
+// HasShadowRule 检查指定编码和词/候选是否有 Shadow 规则。
+// candID 非空时按 id 匹配, 否则按 word 匹配。
+func (dm *DictManager) HasShadowRule(code, word, candID string) bool {
 	if dm.activeStoreShadow != nil {
 		rules := dm.activeStoreShadow.GetShadowRules(code)
 		if rules == nil {
 			return false
 		}
 		for _, p := range rules.Pinned {
+			if candID != "" || p.CandID != "" {
+				if p.CandID == candID {
+					return true
+				}
+				continue
+			}
 			if p.Word == word {
 				return true
 			}
 		}
 		for _, d := range rules.Deleted {
-			if d == word {
+			if candID != "" || d.CandID != "" {
+				if d.CandID == candID {
+					return true
+				}
+				continue
+			}
+			if d.Word == word {
 				return true
 			}
 		}

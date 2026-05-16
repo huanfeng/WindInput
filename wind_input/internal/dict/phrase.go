@@ -205,6 +205,13 @@ func (pl *PhraseLayer) Type() LayerType {
 	return LayerTypeLogic
 }
 
+// PhraseCandidateID 为短语候选生成稳定 id (deterministic)。template 通常是
+// PhraseEntry.Text (静态/动态短语模板) 或展开后的元素 (单字符/单元素),
+// 详见 Candidate.ID 字段说明。
+func PhraseCandidateID(code, template string) string {
+	return "phrase:" + code + ":" + template
+}
+
 // Search 精确查询静态短语（不含变量的短语）
 func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 	pl.mu.RLock()
@@ -220,10 +227,12 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 	positions := make([]int, 0, len(entries))
 	for _, e := range entries {
 		results = append(results, candidate.Candidate{
-			Text:     e.Text,
-			Code:     code,
-			Weight:   resolvePhraseWeight(e.Weight),
-			IsPhrase: true, // 短语永远保留，但不计入 hasCommon 避免污染同编码码表字过滤
+			Text:           e.Text,
+			Code:           code,
+			Weight:         resolvePhraseWeight(e.Weight),
+			IsPhrase:       true, // 短语永远保留，但不计入 hasCommon 避免污染同编码码表字过滤
+			PhraseTemplate: e.Text,
+			ID:             PhraseCandidateID(code, e.Text),
 		})
 		positions = append(positions, e.Position)
 	}
@@ -302,12 +311,14 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 		for i, e := range entries {
 			_ = e.Position // 字符级 entry 的 position 仅记录展开顺序, 不参与权重计算
 			results = append(results, candidate.Candidate{
-				Text:         e.Text,
-				Code:         code,
-				Weight:       groupWeight,
-				NaturalOrder: i,
-				IsCommand:    true,
-				IsPhrase:     true,
+				Text:           e.Text,
+				Code:           code,
+				Weight:         groupWeight,
+				NaturalOrder:   i,
+				IsCommand:      true,
+				IsPhrase:       true,
+				PhraseTemplate: e.Text,
+				ID:             PhraseCandidateID(code, e.Text),
 			})
 		}
 		// 同权重场景下用 NaturalOrder 做 tie-break, 保证字符按 chars 数组顺序。
@@ -333,6 +344,7 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 			if displayName == "" {
 				displayName = groupCode
 			}
+			// nav 候选不附 ID: 用户不会 pin 一个 group 入口
 			navResults = append(navResults, candidate.Candidate{
 				Text:      displayName,
 				Code:      groupCode,
@@ -374,7 +386,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 	prefix = strings.ToLower(prefix)
 	var results []candidate.Candidate
 
-	// 1. 处理 phraseGroups：返回组名候选
+	// 1. 处理 phraseGroups：返回组名候选 (nav 不附 ID)
 	for code, group := range pl.phraseGroups {
 		if code != prefix && strings.HasPrefix(code, prefix) && !group.Disabled {
 			displayName := group.Name
@@ -401,10 +413,12 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 			}
 			for _, e := range entries {
 				results = append(results, candidate.Candidate{
-					Text:     e.Text,
-					Code:     code,
-					Weight:   resolvePhraseWeight(e.Weight),
-					IsPhrase: true,
+					Text:           e.Text,
+					Code:           code,
+					Weight:         resolvePhraseWeight(e.Weight),
+					IsPhrase:       true,
+					PhraseTemplate: e.Text,
+					ID:             PhraseCandidateID(code, e.Text),
 				})
 			}
 		}
@@ -648,6 +662,8 @@ func (pl *PhraseLayer) expandSSGroup(code string) []candidate.Candidate {
 		}
 		entryWeight := resolvePhraseWeight(entry.Weight)
 		for i, elem := range elements {
+			// $SS 每个元素 (string lit 或嵌入 $CC) 用其 raw display 作为 id 后缀,
+			// 保证按元素粒度 pin / shadow。同 group 多元素的 id 互不冲突。
 			cand := candidate.Candidate{
 				Text:           elem.Display,
 				Code:           code,
@@ -656,6 +672,7 @@ func (pl *PhraseLayer) expandSSGroup(code string) []candidate.Candidate {
 				IsCommand:      true,
 				IsPhrase:       true,
 				PhraseTemplate: entry.Text,
+				ID:             PhraseCandidateID(code, elem.Display),
 				DisplayText:    elem.Display,
 				Actions:        elem.Actions,
 				Modifiers:      modifiers, // group-level modifiers
@@ -695,6 +712,7 @@ func (pl *PhraseLayer) expandDynamicEntry(code string, e PhraseEntry) candidate.
 		IsCommand:      true,
 		IsPhrase:       true,
 		PhraseTemplate: e.Text,
+		ID:             PhraseCandidateID(code, e.Text),
 	}
 	if res.IsCommand {
 		out.DisplayText = res.DisplayText
@@ -788,294 +806,17 @@ func sortPhraseCandidates(candidates []candidate.Candidate, positions []int) {
 	}
 }
 
-// ===== 右键菜单：短语位置调整 =====
-
-// MovePhraseUp 在同一编码组内将短语前移一位（position 减小）
-// templateText 为原始模板文本（如 "$Y-$MM-$DD"），用于精确定位条目
-func (pl *PhraseLayer) MovePhraseUp(code, templateText string) error {
-	pl.mu.Lock()
-	defer pl.mu.Unlock()
-
-	code = strings.ToLower(code)
-	entries := pl.getDynEntriesSorted(code)
-	if entries == nil {
-		entries = pl.getStatEntriesSorted(code)
-	}
-	if len(entries) < 2 {
-		return nil
-	}
-
-	// 找到目标条目及其上方的条目
-	targetIdx := -1
-	for i, e := range entries {
-		if e.Text == templateText {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx <= 0 { // 已在首位或未找到
-		return nil
-	}
-
-	// 交换相邻两个条目的 position
-	pl.swapEntryPositions(code, entries[targetIdx].Text, entries[targetIdx-1].Text)
-	pl.clearCmdCache(code)
-
-	return pl.savePositionOverrides(code, entries[targetIdx].Text, entries[targetIdx-1].Text)
-}
-
-// MovePhraseDown 在同一编码组内将短语后移一位（position 增大）
-func (pl *PhraseLayer) MovePhraseDown(code, templateText string) error {
-	pl.mu.Lock()
-	defer pl.mu.Unlock()
-
-	code = strings.ToLower(code)
-	entries := pl.getDynEntriesSorted(code)
-	if entries == nil {
-		entries = pl.getStatEntriesSorted(code)
-	}
-	if len(entries) < 2 {
-		return nil
-	}
-
-	targetIdx := -1
-	for i, e := range entries {
-		if e.Text == templateText {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(entries)-1 { // 已在末位或未找到
-		return nil
-	}
-
-	pl.swapEntryPositions(code, entries[targetIdx].Text, entries[targetIdx+1].Text)
-	pl.clearCmdCache(code)
-
-	return pl.savePositionOverrides(code, entries[targetIdx].Text, entries[targetIdx+1].Text)
-}
-
-// MovePhraseToTop 将短语移动到同一编码组的首位
-func (pl *PhraseLayer) MovePhraseToTop(code, templateText string) error {
-	pl.mu.Lock()
-	defer pl.mu.Unlock()
-
-	code = strings.ToLower(code)
-	entries := pl.getDynEntriesSorted(code)
-	if entries == nil {
-		entries = pl.getStatEntriesSorted(code)
-	}
-	if len(entries) < 2 {
-		return nil
-	}
-
-	targetIdx := -1
-	for i, e := range entries {
-		if e.Text == templateText {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx <= 0 { // 已在首位或未找到
-		return nil
-	}
-
-	// 与首位交换
-	pl.swapEntryPositions(code, entries[targetIdx].Text, entries[0].Text)
-	pl.clearCmdCache(code)
-
-	return pl.savePositionOverrides(code, entries[targetIdx].Text, entries[0].Text)
-}
-
-// HasPhraseOverride 检查用户是否覆盖了指定短语的位置
-func (pl *PhraseLayer) HasPhraseOverride(code, templateText string) bool {
-	pl.mu.RLock()
-	defer pl.mu.RUnlock()
-
-	code = strings.ToLower(code)
-
-	// 检查动态短语
-	for _, e := range pl.dynamicPhrases[code] {
-		if e.Text == templateText && !e.IsSystem {
-			return true
-		}
-	}
-	// 检查静态短语
-	for _, e := range pl.staticPhrases[code] {
-		if e.Text == templateText && !e.IsSystem {
-			return true
-		}
-	}
-	return false
-}
-
-// ResetPhraseOverride 移除用户对指定短语的位置覆盖，恢复系统默认
-func (pl *PhraseLayer) ResetPhraseOverride(code, templateText string) error {
-	pl.mu.Lock()
-	defer pl.mu.Unlock()
-
-	code = strings.ToLower(code)
-
-	// 从系统短语 YAML 中查找原始 position
-	origPos := 0
-	found := false
-	for _, path := range []string{pl.systemUserFilePath, pl.systemFilePath} {
-		if path == "" {
-			continue
-		}
-		entries, err := ParsePhraseYAMLFile(path)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if strings.ToLower(e.Code) == code && e.Text == templateText {
-				origPos = e.Position
-				if origPos <= 0 {
-					origPos = 1
-				}
-				found = true
-				break
-			}
-		}
-		if found {
-			break
-		}
-	}
-
-	if !found {
-		return nil
-	}
-
-	// 恢复内存中的 position
-	for _, entries := range []map[string][]PhraseEntry{pl.dynamicPhrases, pl.staticPhrases} {
-		for i, e := range entries[code] {
-			if e.Text == templateText {
-				entries[code][i].Position = origPos
-			}
-		}
-	}
-	pl.clearCmdCache(code)
-
-	// 同步到 Store
-	if pl.store != nil {
-		records, err := pl.store.GetPhrasesByCode(code)
-		if err == nil {
-			for _, rec := range records {
-				if rec.Text == templateText {
-					rec.Position = origPos
-					_ = pl.store.UpdatePhrase(rec)
-					break
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// ===== 内部辅助方法 =====
-
-// getDynEntriesSorted 获取动态短语条目（按 position 升序）
-func (pl *PhraseLayer) getDynEntriesSorted(code string) []PhraseEntry {
-	entries, ok := pl.dynamicPhrases[code]
-	if !ok || len(entries) == 0 {
-		return nil
-	}
-	sorted := make([]PhraseEntry, len(entries))
-	copy(sorted, entries)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Position < sorted[j].Position
-	})
-	return sorted
-}
-
-// getStatEntriesSorted 获取静态短语条目（按 position 升序）
-func (pl *PhraseLayer) getStatEntriesSorted(code string) []PhraseEntry {
-	entries, ok := pl.staticPhrases[code]
-	if !ok || len(entries) == 0 {
-		return nil
-	}
-	sorted := make([]PhraseEntry, len(entries))
-	copy(sorted, entries)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Position < sorted[j].Position
-	})
-	return sorted
-}
-
-// swapEntryPositions 交换同一编码下两个条目的 position（内存中）
-func (pl *PhraseLayer) swapEntryPositions(code, text1, text2 string) {
-	// 先尝试动态短语
-	if pl.swapInMap(pl.dynamicPhrases, code, text1, text2) {
-		return
-	}
-	// 再尝试静态短语
-	pl.swapInMap(pl.staticPhrases, code, text1, text2)
-}
-
-func (pl *PhraseLayer) swapInMap(m map[string][]PhraseEntry, code, text1, text2 string) bool {
-	entries, ok := m[code]
-	if !ok {
-		return false
-	}
-	idx1, idx2 := -1, -1
-	for i, e := range entries {
-		if e.Text == text1 {
-			idx1 = i
-		}
-		if e.Text == text2 {
-			idx2 = i
-		}
-	}
-	if idx1 < 0 || idx2 < 0 {
-		return false
-	}
-	entries[idx1].Position, entries[idx2].Position = entries[idx2].Position, entries[idx1].Position
-	return true
-}
+// ===== 短语位置调整已统一到 Shadow (R2, 2026-05-17) =====
+//
+// 旧 MovePhraseUp/MovePhraseDown/MovePhraseToTop/HasPhraseOverride/
+// ResetPhraseOverride 已删除, 改由 coordinator 走 dm.PinWord / dm.DeleteWord
+// 等 Shadow API, 短语候选 ID = PhraseCandidateID(code, template) 在
+// ApplyShadowPins 内匹配 (动态短语跨日子稳定生效)。
+//
+// 这里不再保留 position swap / yaml fallback 路径 — 同一套机制 (Shadow)
+// 覆盖码表 / 拼音 / 短语 / 命令直通车候选, 减少分支与状态不一致风险。
 
 // clearCmdCache 清除指定编码的命令缓存
 func (pl *PhraseLayer) clearCmdCache(code string) {
 	delete(pl.cmdCache, code)
-}
-
-// savePositionOverrides 将两个条目的当前 position 持久化到 Store
-func (pl *PhraseLayer) savePositionOverrides(code, text1, text2 string) error {
-	if pl.store == nil {
-		return nil
-	}
-
-	// 查找当前 position
-	pos1, pos2 := 0, 0
-	for _, entries := range []map[string][]PhraseEntry{pl.dynamicPhrases, pl.staticPhrases} {
-		for _, e := range entries[code] {
-			if e.Text == text1 {
-				pos1 = e.Position
-			}
-			if e.Text == text2 {
-				pos2 = e.Position
-			}
-		}
-	}
-
-	// 从 Store 读取并更新位置
-	records, err := pl.store.GetPhrasesByCode(code)
-	if err != nil {
-		return fmt.Errorf("get phrases by code %q: %w", code, err)
-	}
-	for _, rec := range records {
-		if rec.Text == text1 && rec.Position != pos1 {
-			rec.Position = pos1
-			if err := pl.store.UpdatePhrase(rec); err != nil {
-				return fmt.Errorf("update phrase position: %w", err)
-			}
-		}
-		if rec.Text == text2 && rec.Position != pos2 {
-			rec.Position = pos2
-			if err := pl.store.UpdatePhrase(rec); err != nil {
-				return fmt.Errorf("update phrase position: %w", err)
-			}
-		}
-	}
-	return nil
 }

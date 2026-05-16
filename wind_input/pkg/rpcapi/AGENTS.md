@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-20 | Updated: 2026-05-16 -->
+<!-- Generated: 2026-04-20 | Updated: 2026-05-17 -->
 
 # pkg/rpcapi
 
@@ -33,6 +33,15 @@ JSON-RPC 协议的请求/响应类型定义及帧协议实现。供 `internal/rp
 | `batch_put` `batch_add` `batch_set` | 批量操作 |
 | `updated` | 聚合"有数据更新"信令（stats 心跳） |
 | `paused` `resumed` | 服务暂停/恢复 |
+
+### Shadow schema (2026-05-17 R2 CandID)
+
+`ShadowPinArgs`/`ShadowDeleteArgs`/`PinnedEntry`/`ShadowPinItem`/`ShadowDelItem` 均新增
+`CandID string (json:"cand_id,omitempty")` 字段。
+- `CandID` 非空时按候选稳定 id 精准匹配（动态短语场景，Text 每次展开不同）；
+- `CandID` 空时按 `Word` 匹配 `cand.Text`（兼容旧手输文本规则）。
+- 客户端调用：`ShadowPin(schemaID, code, word, candID, position)`，`ShadowDelete/RemoveRule` 类同。
+- GetAllRules/GetRules 的 `Deleted` 字段仍返回 `[]string`（word 列表）供 UI 显示，CandID 不暴露到旧接口。
 
 ### Phrase schema (2026-05-16 简化)
 

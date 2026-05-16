@@ -235,6 +235,14 @@ func (a *App) SearchUserDictBySchema(schemaID, query string, limit int) ([]UserW
 }
 
 // GetShadowBySchema 获取指定方案的 Shadow 规则
+//
+// 2026-05-17 R2 续修复: Pinned 循环补回 CandID 字段 (与 GetShadowRules 对齐),
+// 否则前端拿到 item.cand_id = undefined, 删除时按 word 匹配, 而 word 是
+// 短语模板运行时展开值 (如 "2026-05-17"), 第二天就失效。
+//
+// Deleted 循环 — reply.Rules.Deleted 当前仍为 []string (见 shadow_service.go
+// GetAllRules 注释: RPC schema 升级排在 Bug 1 全局桶改造里), 因此 delete
+// 规则的 CandID 留空, 待后续接口升级后再补。
 func (a *App) GetShadowBySchema(schemaID string) ([]ShadowRuleItem, error) {
 	reply, err := a.rpcClient.ShadowGetAllRules(schemaID)
 	if err != nil {
@@ -247,11 +255,14 @@ func (a *App) GetShadowBySchema(schemaID string) ([]ShadowRuleItem, error) {
 			items = append(items, ShadowRuleItem{
 				Code:     cr.Code,
 				Word:     p.Word,
+				CandID:   p.CandID,
 				Type:     "pin",
 				Position: p.Position,
 			})
 		}
 		for _, d := range cr.Deleted {
+			// TODO(Bug 1): RPC GetAllRules.Deleted 升级为 []ShadowDeletedEntry
+			// 后, 这里同步补 CandID。当前 delete 规则只能按 word 匹配。
 			items = append(items, ShadowRuleItem{
 				Code: cr.Code,
 				Word: d,
@@ -263,19 +274,20 @@ func (a *App) GetShadowBySchema(schemaID string) ([]ShadowRuleItem, error) {
 	return items, nil
 }
 
-// PinShadowWordForSchema 在指定方案中固定词到指定位置
-func (a *App) PinShadowWordForSchema(schemaID, code, word string, position int) error {
-	return a.rpcClient.ShadowPin(schemaID, code, word, position)
+// PinShadowWordForSchema 在指定方案中固定词到指定位置。
+// candID 非空时按候选 id 匹配 (短语场景), 空时按 word 匹配 (普通词条)。
+func (a *App) PinShadowWordForSchema(schemaID, code, word, candID string, position int) error {
+	return a.rpcClient.ShadowPin(schemaID, code, word, candID, position)
 }
 
-// DeleteShadowWordForSchema 在指定方案中隐藏词条
-func (a *App) DeleteShadowWordForSchema(schemaID, code, word string) error {
-	return a.rpcClient.ShadowDelete(schemaID, code, word)
+// DeleteShadowWordForSchema 在指定方案中隐藏词条/候选。
+func (a *App) DeleteShadowWordForSchema(schemaID, code, word, candID string) error {
+	return a.rpcClient.ShadowDelete(schemaID, code, word, candID)
 }
 
-// RemoveShadowRuleForSchema 在指定方案中删除规则
-func (a *App) RemoveShadowRuleForSchema(schemaID, code, word string) error {
-	return a.rpcClient.ShadowRemoveRule(schemaID, code, word)
+// RemoveShadowRuleForSchema 在指定方案中删除规则。
+func (a *App) RemoveShadowRuleForSchema(schemaID, code, word, candID string) error {
+	return a.rpcClient.ShadowRemoveRule(schemaID, code, word, candID)
 }
 
 // GetTempDictBySchema 获取指定方案的临时词库

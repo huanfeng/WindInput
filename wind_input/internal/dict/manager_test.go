@@ -64,7 +64,7 @@ func TestDictManager_ShadowIsolation(t *testing.T) {
 	dm := setupTestManager(t)
 
 	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
-	dm.PinWord("abc", "测试", 0)
+	dm.PinWord("abc", "测试", "", 0)
 
 	rules := dm.GetStoreShadowLayer().GetShadowRules("abc")
 	if rules == nil || len(rules.Pinned) != 1 {
@@ -146,11 +146,11 @@ func TestDictManager_DeleteUserWord_NoShadow(t *testing.T) {
 		t.Fatal("should have 1 user word")
 	}
 
-	dm.DeleteWord("abc", "测试")
+	dm.DeleteWord("abc", "测试", "")
 	if dm.GetStoreUserLayer().EntryCount() != 0 {
 		t.Error("user word should be deleted")
 	}
-	if dm.HasShadowRule("abc", "测试") {
+	if dm.HasShadowRule("abc", "测试", "") {
 		t.Error("should NOT have shadow rule for non-system word")
 	}
 }
@@ -160,13 +160,13 @@ func TestDictManager_ShadowPinAndRemove(t *testing.T) {
 	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
 
 	// Pin + RemoveRule 流程仍正常
-	dm.PinWord("abc", "测试", 0)
-	if !dm.HasShadowRule("abc", "测试") {
+	dm.PinWord("abc", "测试", "", 0)
+	if !dm.HasShadowRule("abc", "测试", "") {
 		t.Error("should have shadow rule after PinWord")
 	}
 
-	dm.RemoveShadowRule("abc", "测试")
-	if dm.HasShadowRule("abc", "测试") {
+	dm.RemoveShadowRule("abc", "测试", "")
+	if dm.HasShadowRule("abc", "测试", "") {
 		t.Error("should not have shadow rule after RemoveShadowRule")
 	}
 }

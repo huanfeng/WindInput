@@ -39,6 +39,24 @@ type Candidate struct {
 	IndexLabel     string          // 自定义序号标签（如 "a"/"b"），非空时覆盖 Index 的数字显示
 	Meta           CandidateMeta   // 调试/提示元数据（可选，引擎层按需填充）
 
+	// ID 候选的稳定标识 (deterministic), 用于 Shadow 规则按候选 id 匹配。
+	//
+	// 主要解决场景: 动态短语 (如 $Y年$M月$D日) 每天展开出来的 Text 不一样,
+	// 旧 Shadow 按 cand.Text 匹配会失效。引入候选 id 后, Shadow 规则可以
+	// 持久化 (code, candID) 二元组, 跨日子稳定生效。
+	//
+	// ID 命名规则 (统一前缀, 便于解析与扩展):
+	//   - 用户词 / 系统词:        空 (按 word 匹配等价, 不附 id)
+	//   - 静态短语 / 动态短语 / $CC 命令: "phrase:<code>:<PhraseTemplate>"
+	//   - $AA 字符候选 (展开后单字符):    "phrase:<code>:<char>"
+	//   - $SS 元素 (展开后单元素):        "phrase:<code>:<rawElement>"
+	//   - group nav 候选 (IsGroup=true):  空 (用户不会 pin nav 项)
+	//
+	// 详见 docs/design/2026-05-16-cmdbar-followup.md (R2 方案) 与
+	// PhraseLayer 各候选构造点 (phrase.go ~ Search/SearchCommand/expandSSGroup
+	// /expandDynamicEntry) 中的 ID 赋值。
+	ID string
+
 	// 命令直通车 (cmdbar) 候选扩展：
 	// 当短语 value 含 $CC(...) 时, PhraseLayer 会通过宿主 hook 求值得到
 	// 一个"显示文本 + 动作列表"对; display 仅用于候选框显示, 选中时执行

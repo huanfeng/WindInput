@@ -11,15 +11,54 @@ import (
 var bucketShadow = []byte("Shadow")
 
 // ShadowPin records a pinned word and its target position in the candidate list.
+//
+// 2026-05-17 R2: 新增 CandID 字段, 用于按候选稳定 id 精准定位 (动态短语
+// 每天展开 Text 不一样, 旧 Word 匹配失效)。CandID 非空时取代 Word 做匹配,
+// 否则按 Word 兼容旧行为 (含 alpha 阶段持久化的手输文本规则)。
 type ShadowPin struct {
 	Word     string `json:"w"`
+	CandID   string `json:"id,omitempty"`
 	Position int    `json:"pos"`
+}
+
+// ShadowDelete records a deleted (hidden) candidate.
+//
+// 2026-05-17 R2: 把原先纯 string 的 Deleted slice 升级为结构体,
+// 引入 CandID 字段 (同 ShadowPin)。UnmarshalJSON 兼容旧版纯字符串
+// 格式 — 旧 db 里的 `"d":["词A","词B"]` 仍能读为新结构 (Word=旧字符串,
+// CandID="")。
+type ShadowDelete struct {
+	Word   string `json:"w"`
+	CandID string `json:"id,omitempty"`
+}
+
+// UnmarshalJSON 兼容两种格式:
+//   - 新版对象 {"w":"...","id":"..."}
+//   - 旧版纯字符串 "..."  (此时填入 Word, CandID 留空)
+func (d *ShadowDelete) UnmarshalJSON(data []byte) error {
+	// 优先尝试旧版字符串 (典型 1~30 字节, 比对象短得多, 快速分支)
+	if len(data) > 0 && data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err == nil {
+			d.Word = s
+			d.CandID = ""
+			return nil
+		}
+	}
+	// 否则按新版对象解析 (避免无限递归: 用 alias 摆脱 UnmarshalJSON 方法)
+	type alias ShadowDelete
+	var v alias
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*d = ShadowDelete(v)
+	return nil
 }
 
 // ShadowRecord holds the pin and delete rules for a single code.
 type ShadowRecord struct {
-	Pinned  []ShadowPin `json:"p,omitempty"`
-	Deleted []string    `json:"d,omitempty"`
+	Pinned  []ShadowPin    `json:"p,omitempty"`
+	Deleted []ShadowDelete `json:"d,omitempty"`
 }
 
 // GetShadowRules returns the shadow rules stored for the given code (lowercased).
@@ -42,12 +81,30 @@ func (s *Store) GetShadowRules(schemaID, code string) (ShadowRecord, error) {
 	return rec, err
 }
 
-// PinShadow inserts a pin rule for word at position under the given code.
+// shadowMatch 判定一条 pin/delete 规则是否匹配目标。
+// CandID 非空时按 id 精准匹配; 否则按 word 兼容旧行为。
+func shadowMatchPin(p ShadowPin, word, candID string) bool {
+	if candID != "" || p.CandID != "" {
+		return p.CandID == candID
+	}
+	return p.Word == word
+}
+
+func shadowMatchDel(d ShadowDelete, word, candID string) bool {
+	if candID != "" || d.CandID != "" {
+		return d.CandID == candID
+	}
+	return d.Word == word
+}
+
+// PinShadow inserts a pin rule under the given code.
 // Behaviour:
-//   - Any existing pin for the same word is removed first.
+//   - Existing pin for the same (Word, CandID) target is removed first.
 //   - The new pin is prepended to the Pinned slice (LIFO / most-recent-first).
-//   - The word is removed from Deleted if present.
-func (s *Store) PinShadow(schemaID, code, word string, position int) error {
+//   - Matching entry in Deleted is removed (if present).
+//
+// candID 非空时按 id 匹配, 否则按 word; word 仍持久化以便手输规则 / UI 显示。
+func (s *Store) PinShadow(schemaID, code, word, candID string, position int) error {
 	code = strings.ToLower(code)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b, err := schemaSubBucket(tx, schemaID, string(bucketShadow), true)
@@ -61,26 +118,32 @@ func (s *Store) PinShadow(schemaID, code, word string, position int) error {
 			}
 		}
 
-		// Remove old pin for the same word.
+		// Remove old pin for the same target.
 		filtered := rec.Pinned[:0]
 		for _, p := range rec.Pinned {
-			if p.Word != word {
+			if !shadowMatchPin(p, word, candID) {
 				filtered = append(filtered, p)
 			}
 		}
 		// Prepend new pin (LIFO).
-		rec.Pinned = append([]ShadowPin{{Word: word, Position: position}}, filtered...)
+		rec.Pinned = append([]ShadowPin{{Word: word, CandID: candID, Position: position}}, filtered...)
 
 		// Remove from Deleted.
-		rec.Deleted = removeStr(rec.Deleted, word)
+		deleted := rec.Deleted[:0]
+		for _, d := range rec.Deleted {
+			if !shadowMatchDel(d, word, candID) {
+				deleted = append(deleted, d)
+			}
+		}
+		rec.Deleted = deleted
 
 		return putShadow(b, code, &rec)
 	})
 }
 
-// DeleteShadow adds word to the Deleted list for the given code (deduped)
-// and removes any existing pin for that word.
-func (s *Store) DeleteShadow(schemaID, code, word string) error {
+// DeleteShadow adds a delete rule for the given target (deduped by word/candID)
+// and removes any matching pin.
+func (s *Store) DeleteShadow(schemaID, code, word, candID string) error {
 	code = strings.ToLower(code)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b, err := schemaSubBucket(tx, schemaID, string(bucketShadow), true)
@@ -94,34 +157,34 @@ func (s *Store) DeleteShadow(schemaID, code, word string) error {
 			}
 		}
 
-		// Remove from Pinned.
+		// Remove matching pins.
 		filtered := rec.Pinned[:0]
 		for _, p := range rec.Pinned {
-			if p.Word != word {
+			if !shadowMatchPin(p, word, candID) {
 				filtered = append(filtered, p)
 			}
 		}
 		rec.Pinned = filtered
 
-		// Add to Deleted (dedup).
+		// Add to Deleted (dedup by target).
 		found := false
 		for _, d := range rec.Deleted {
-			if d == word {
+			if shadowMatchDel(d, word, candID) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			rec.Deleted = append(rec.Deleted, word)
+			rec.Deleted = append(rec.Deleted, ShadowDelete{Word: word, CandID: candID})
 		}
 
 		return putShadow(b, code, &rec)
 	})
 }
 
-// RemoveShadowRule removes word from both Pinned and Deleted for the given code.
+// RemoveShadowRule removes both pin and delete rules for the given target.
 // If the resulting record is empty the key is deleted entirely.
-func (s *Store) RemoveShadowRule(schemaID, code, word string) error {
+func (s *Store) RemoveShadowRule(schemaID, code, word, candID string) error {
 	code = strings.ToLower(code)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b, err := schemaSubBucket(tx, schemaID, string(bucketShadow), false)
@@ -139,17 +202,23 @@ func (s *Store) RemoveShadowRule(schemaID, code, word string) error {
 			return fmt.Errorf("shadow unmarshal: %w", err)
 		}
 
-		// Remove from Pinned.
+		// Remove matching pins.
 		filtered := rec.Pinned[:0]
 		for _, p := range rec.Pinned {
-			if p.Word != word {
+			if !shadowMatchPin(p, word, candID) {
 				filtered = append(filtered, p)
 			}
 		}
 		rec.Pinned = filtered
 
-		// Remove from Deleted.
-		rec.Deleted = removeStr(rec.Deleted, word)
+		// Remove matching deletes.
+		deleted := rec.Deleted[:0]
+		for _, d := range rec.Deleted {
+			if !shadowMatchDel(d, word, candID) {
+				deleted = append(deleted, d)
+			}
+		}
+		rec.Deleted = deleted
 
 		// If record is empty, delete the key.
 		if len(rec.Pinned) == 0 && len(rec.Deleted) == 0 {
@@ -202,14 +271,4 @@ func putShadow(b *bolt.Bucket, code string, rec *ShadowRecord) error {
 		return fmt.Errorf("shadow marshal: %w", err)
 	}
 	return b.Put([]byte(code), data)
-}
-
-// removeStr removes the first occurrence of s from slice and returns the result.
-func removeStr(slice []string, s string) []string {
-	for i, v := range slice {
-		if v == s {
-			return append(slice[:i], slice[i+1:]...)
-		}
-	}
-	return slice
 }

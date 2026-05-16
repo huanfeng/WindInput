@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-20 | Updated: 2026-05-16 -->
+<!-- Generated: 2026-04-20 | Updated: 2026-05-17 -->
 
 # internal/store
 
@@ -14,7 +14,7 @@
 | `temp_words.go` | `TempDict`：临时词存储（加词过程中的暂存），生命周期短；独立 bucket |
 | `phrases.go` | `PhraseStorage`：短语管理存储；`Put`/`Get`/`List`/`Remove`/`ResetDefaults`。**2026-05-16 schema 简化**: `PhraseRecord` 字段精简为 `(Code, Text, Weight, Position, Enabled, IsSystem)`, 删除原 `Texts`/`Name`/`Type` 派生字段, **text 是分类的唯一信任源** (`$AA(...)` 字符组 / `$SS(...)` 字符串数组 / `$CC(...)` 命令 / 普通); 包内 `legacyPhraseRecord` 仅供 migration 反序列化旧数据用; `phraseKey` 统一为 `code\x00text`; `RemovePhrase(code, text)` / `SetPhraseEnabled(code, text, enabled)` 删除 name 参数 |
 | `migration.go` | `MigratePhraseRecordsToAA()`: 一次性扫描 Phrases bucket, 把旧的 `Texts`+`Name` 字符组记录重写为 `Text` 字段中的 `$AA(...)` marker, 幂等 (`$AA(` 开头跳过); 用内部 `legacyPhraseRecord` 读旧字段, 写新 `PhraseRecord`。`dict.DictManager.OpenStore` 后立即调用 |
-| `shadow.go` | `ShadowStorage`：Shadow 规则（pin/delete）存储；YAML 序列化/反序列化 |
+| `shadow.go` | `ShadowStorage`：Shadow 规则（pin/delete）存储。**2026-05-17 R2**: `ShadowPin`/`ShadowDelete` 新增 `candID` 参数；`ShadowDelete` 的 `Deleted` 字段从 `[]string` 升级为 `[]ShadowDelete{Word, CandID}`；新增 `shadowMatchPin`/`shadowMatchDel` 内部匹配函数（CandID 优先，空时按 Word）；`RemoveShadowRule` 同步升级签名 |
 | `freq.go` | `FreqStorage`：词频统计存储；`Update`/`Get`/`GetTop`/`Delete` |
 | `write_buffer.go` | `WriteBuffer`：构建模式的原子事务写入缓冲，用于批量操作；`Put`/`Delete`/`Commit` |
 | `write_buffer_test.go` | WriteBuffer 单元测试 |

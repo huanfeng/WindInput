@@ -200,6 +200,10 @@ func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []
 // ApplyShadowPins 在已排序的候选列表上应用 Shadow 的 pin（位置固定）和 delete（隐藏）规则。
 // 这是引擎 Phase 6 的统一拦截器，五笔和拼音共用。
 //
+// 匹配优先级 (2026-05-17 R2): rule.CandID 非空时按 cand.ID 精准匹配
+// (动态短语场景, id 跨日子稳定); CandID 空时按 rule.Word 匹配 cand.Text
+// (兼容手输文本规则)。详见 docs/design/2026-05-16-cmdbar-followup.md R2。
+//
 // 处理逻辑：
 //  1. 移除 deleted 中的词（单字跳过）
 //  2. 提取有 pin 规则的候选
@@ -210,42 +214,67 @@ func ApplyShadowPins(candidates []candidate.Candidate, rules *ShadowRules) []can
 		return candidates
 	}
 
-	// 1. 构建 deleted 集合（单字不删）
-	deletedSet := make(map[string]bool, len(rules.Deleted))
-	for _, word := range rules.Deleted {
-		if len([]rune(word)) > 1 {
-			deletedSet[word] = true
+	// candMatchesDel/Pin: 统一的双字段匹配逻辑
+	candMatchesDel := func(c candidate.Candidate, d DeletedWord) bool {
+		if d.CandID != "" {
+			return c.ID == d.CandID
 		}
+		return c.Text == d.Word
+	}
+	candMatchesPin := func(c candidate.Candidate, p PinnedWord) bool {
+		if p.CandID != "" {
+			return c.ID == p.CandID
+		}
+		return c.Text == p.Word
 	}
 
-	// 2. 过滤 deleted，同时记录 pinned 候选的原始信息
-	pinnedWords := make(map[string]bool, len(rules.Pinned))
-	for _, p := range rules.Pinned {
-		pinnedWords[p.Word] = true
+	// 1. 过滤 deleted (单字按 Word 跳过, 短语 / cand 带 id 时不受单字保护)
+	isDeleted := func(c candidate.Candidate) bool {
+		for _, d := range rules.Deleted {
+			// 单字保护: 仅当 Word 是单字且无 CandID 时跳过 (旧"单字不删"语义)
+			if d.CandID == "" && len([]rune(d.Word)) <= 1 {
+				continue
+			}
+			if candMatchesDel(c, d) {
+				return true
+			}
+		}
+		return false
 	}
 
-	var unpinned []candidate.Candidate                  // 未被 pin 的候选
-	pinnedCands := make(map[string]candidate.Candidate) // word → 候选信息
+	// 2. 拆分 unpinned / pinnedCands
+	// pinnedCands 键: rules.Pinned 的索引 → 命中的候选
+	var unpinned []candidate.Candidate
+	pinnedCands := make(map[int]candidate.Candidate, len(rules.Pinned))
 	for _, c := range candidates {
-		if deletedSet[c.Text] {
+		if isDeleted(c) {
 			continue
 		}
-		if pinnedWords[c.Text] {
-			pinnedCands[c.Text] = c
+		hit := -1
+		for i, p := range rules.Pinned {
+			if _, taken := pinnedCands[i]; taken {
+				continue // 同一 pin 规则只匹配一个候选
+			}
+			if candMatchesPin(c, p) {
+				hit = i
+				break
+			}
+		}
+		if hit >= 0 {
+			pinnedCands[hit] = c
 		} else {
 			unpinned = append(unpinned, c)
 		}
 	}
 
-	// 3. 按 pin 规则分配槽位（LIFO：数组前面的优先级高）
-	// slots[position] = candidate
+	// 3. 按 pin 规则分配槽位 (LIFO: 数组前面优先级高)
 	slots := make(map[int]candidate.Candidate)
 	usedPositions := make(map[int]bool)
 
-	for _, pin := range rules.Pinned {
-		cand, exists := pinnedCands[pin.Word]
+	for i, pin := range rules.Pinned {
+		cand, exists := pinnedCands[i]
 		if !exists {
-			continue // pin 的词不在候选列表中（词库变更后自然失效）
+			continue // pin 的目标不在候选列表中（词库 / 短语模板变更后自然失效）
 		}
 
 		pos := pin.Position
@@ -253,7 +282,7 @@ func ApplyShadowPins(candidates []candidate.Candidate, rules *ShadowRules) []can
 			pos = 0
 		}
 
-		// 碰撞顺延：找到最近的空槽位
+		// 碰撞顺延: 找到最近的空槽位
 		for usedPositions[pos] {
 			pos++
 		}
@@ -261,7 +290,7 @@ func ApplyShadowPins(candidates []candidate.Candidate, rules *ShadowRules) []can
 		usedPositions[pos] = true
 	}
 
-	// 4. 合并：pin 词插入指定位置，unpinned 填充剩余
+	// 4. 合并: pin 词插入指定位置, unpinned 填充剩余
 	totalLen := len(slots) + len(unpinned)
 	result := make([]candidate.Candidate, 0, totalLen)
 	unpinnedIdx := 0
@@ -274,7 +303,7 @@ func ApplyShadowPins(candidates []candidate.Candidate, rules *ShadowRules) []can
 			unpinnedIdx++
 		}
 	}
-	// 追加剩余 unpinned（pin position 超出范围时）
+	// 追加剩余 unpinned (pin position 超出范围时)
 	for unpinnedIdx < len(unpinned) {
 		result = append(result, unpinned[unpinnedIdx])
 		unpinnedIdx++

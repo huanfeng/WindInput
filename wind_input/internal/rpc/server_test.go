@@ -439,6 +439,52 @@ func TestShadowGetAllRules(t *testing.T) {
 	}
 }
 
+// TestShadowGetAllRules_PinnedCandID 验证 Pin 带 candID 写入后, GetAllRules
+// 返回的 PinnedEntry 仍含 CandID — 修复 wind_setting/GetShadowBySchema 此前
+// 漏读 CandID 导致 UI 删除短语规则按 word 匹配 (动态展开值) 第二天失效。
+func TestShadowGetAllRules_PinnedCandID(t *testing.T) {
+	client := setupTestRPC(t)
+	defer client.Close()
+
+	var empty rpcapi.Empty
+
+	// Pin 一条短语规则 (CandID 非空, word 为运行时展开值)
+	const candID = "phrase:rq:$Y-$MM-$DD"
+	err := client.call("Shadow.Pin", &rpcapi.ShadowPinArgs{
+		Code:     "rq",
+		Word:     "2026-05-17",
+		CandID:   candID,
+		Position: 0,
+	}, &empty)
+	if err != nil {
+		t.Fatalf("Shadow.Pin: %v", err)
+	}
+
+	var reply rpcapi.ShadowGetAllRulesReply
+	err = client.call("Shadow.GetAllRules", &rpcapi.ShadowGetAllRulesArgs{}, &reply)
+	if err != nil {
+		t.Fatalf("Shadow.GetAllRules: %v", err)
+	}
+
+	var found bool
+	for _, cr := range reply.Rules {
+		if cr.Code != "rq" {
+			continue
+		}
+		for _, p := range cr.Pinned {
+			if p.CandID == candID {
+				found = true
+				if p.Word != "2026-05-17" || p.Position != 0 {
+					t.Errorf("unexpected pin: %+v", p)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected pinned entry with CandID=%q in GetAllRules reply, got %+v", candID, reply.Rules)
+	}
+}
+
 // ── System 操作 ──
 
 func TestSystemPing(t *testing.T) {

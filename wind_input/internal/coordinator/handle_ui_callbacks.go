@@ -292,155 +292,75 @@ func (c *Coordinator) handleCandidateHoverChange(index, tooltipX, tooltipY int) 
 }
 
 // handleCandidateMoveUp handles move up action from context menu.
-// 五笔：所有可见候选（含前缀匹配）都可前移，规则按当前 inputBuffer 存储。
-// 拼音普通候选：不支持前移。命令候选（短语）：通过 PhraseLayer 调整 position。
+// 五笔/短语: 走 dm.PinWord(targetPosition-1), 短语候选附 ID 走 id 匹配。
+// 拼音普通候选: 不支持前移 (没有稳定的目标位置语义)。
 func (c *Coordinator) handleCandidateMoveUp(index int) {
-	c.mu.Lock()
-
-	c.logger.Debug("Candidate move up requested", "index", index)
-
-	actualIndex := (c.currentPage-1)*c.candidatesPerPage + index
-	if actualIndex <= 0 || actualIndex >= len(c.candidates) {
-		c.mu.Unlock()
-		return
-	}
-
-	if len(c.candidates) <= 1 {
-		c.mu.Unlock()
-		return
-	}
-	cand := c.candidates[actualIndex]
-
-	// 命令候选（短语）：通过 PhraseLayer 调整位置
-	if cand.IsCommand && cand.PhraseTemplate != "" {
-		code := c.inputBuffer
-		c.mu.Unlock()
-		c.handlePhraseMoveUp(code, cand.PhraseTemplate)
-		c.mu.Lock()
-		c.updateCandidates()
-		c.showUI()
-		c.mu.Unlock()
-		return
-	}
-
-	// 拼音引擎普通候选不支持前移/后移
-	if c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin {
-		c.mu.Unlock()
-		return
-	}
-
-	// 前移 = pin(当前位置 - 1)
-	code := c.inputBuffer
-	targetPosition := actualIndex - 1
-	c.mu.Unlock()
-
-	if c.engineMgr != nil {
-		dm := c.engineMgr.GetDictManager()
-		dm.PinWord(code, cand.Text, targetPosition)
-		if err := dm.SaveShadow(); err != nil {
-			c.logger.Error("Failed to save shadow layer", "error", err)
-		}
-	}
-
-	c.mu.Lock()
-	c.updateCandidates()
-	c.showUI()
-	c.mu.Unlock()
+	c.handleCandidateMove(index, -1, false)
 }
 
 // handleCandidateMoveDown handles move down action from context menu.
-// 五笔：所有可见候选都可后移。拼音普通候选：不支持。命令候选（短语）：通过 PhraseLayer 调整。
 func (c *Coordinator) handleCandidateMoveDown(index int) {
+	c.handleCandidateMove(index, +1, false)
+}
+
+// handleCandidateMoveTop handles move to top action from context menu.
+func (c *Coordinator) handleCandidateMoveTop(index int) {
+	c.handleCandidateMove(index, 0, true)
+}
+
+// handleCandidateMove 统一处理前移/后移/置顶。
+//   - top=true: 目标位置 0
+//   - top=false: 目标位置 = actualIndex + delta (clamp >= 0)
+//
+// 普通候选(无 ID): 拼音引擎不支持; 短语候选(有 ID): 所有引擎都支持。
+func (c *Coordinator) handleCandidateMove(index, delta int, top bool) {
 	c.mu.Lock()
 
-	c.logger.Debug("Candidate move down requested", "index", index)
-
 	actualIndex := (c.currentPage-1)*c.candidatesPerPage + index
-	if actualIndex < 0 || actualIndex >= len(c.candidates)-1 {
+	if actualIndex < 0 || actualIndex >= len(c.candidates) {
 		c.mu.Unlock()
 		return
 	}
-
 	if len(c.candidates) <= 1 {
 		c.mu.Unlock()
 		return
 	}
 	cand := c.candidates[actualIndex]
 
-	// 命令候选（短语）：通过 PhraseLayer 调整位置
-	if cand.IsCommand && cand.PhraseTemplate != "" {
-		code := c.inputBuffer
-		c.mu.Unlock()
-		c.handlePhraseMoveDown(code, cand.PhraseTemplate)
-		c.mu.Lock()
-		c.updateCandidates()
-		c.showUI()
+	// 拼音引擎普通候选不支持调位; 短语候选 (cand.ID 非空) 仍允许
+	if cand.ID == "" && c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin {
 		c.mu.Unlock()
 		return
 	}
 
-	// 拼音引擎普通候选不支持后移
-	if c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin {
-		c.mu.Unlock()
-		return
-	}
-
-	// 后移 = pin(当前位置 + 1)
-	code := c.inputBuffer
-	targetPosition := actualIndex + 1
-	c.mu.Unlock()
-
-	if c.engineMgr != nil {
-		dm := c.engineMgr.GetDictManager()
-		dm.PinWord(code, cand.Text, targetPosition)
-		if err := dm.SaveShadow(); err != nil {
-			c.logger.Error("Failed to save shadow layer", "error", err)
+	var targetPosition int
+	switch {
+	case top:
+		if actualIndex == 0 {
+			c.mu.Unlock()
+			return // 已在首位
 		}
+		targetPosition = 0
+	case delta < 0:
+		if actualIndex == 0 {
+			c.mu.Unlock()
+			return
+		}
+		targetPosition = actualIndex - 1
+	default:
+		if actualIndex >= len(c.candidates)-1 {
+			c.mu.Unlock()
+			return
+		}
+		targetPosition = actualIndex + 1
 	}
 
-	c.mu.Lock()
-	c.updateCandidates()
-	c.showUI()
-	c.mu.Unlock()
-}
-
-// handleCandidateMoveTop handles move to top action from context menu
-func (c *Coordinator) handleCandidateMoveTop(index int) {
-	c.mu.Lock()
-
-	c.logger.Debug("Candidate move to top requested", "index", index)
-
-	// Convert page-local index to actual candidate index
-	actualIndex := (c.currentPage-1)*c.candidatesPerPage + index
-
-	if actualIndex <= 0 || actualIndex >= len(c.candidates) {
-		c.logger.Warn("Invalid candidate index for move to top", "actualIndex", actualIndex)
-		c.mu.Unlock()
-		return
-	}
-
-	cand := c.candidates[actualIndex]
-
-	// 命令候选（短语）：通过 PhraseLayer 置顶
-	if cand.IsCommand && cand.PhraseTemplate != "" {
-		code := c.inputBuffer
-		c.mu.Unlock()
-		c.handlePhraseMoveToTop(code, cand.PhraseTemplate)
-		c.mu.Lock()
-		c.updateCandidates()
-		c.showUI()
-		c.mu.Unlock()
-		return
-	}
-
-	// 统一用 inputBuffer 作为 code（规则只在当前输入编码下生效）
 	code := c.inputBuffer
-
 	c.mu.Unlock()
 
 	if c.engineMgr != nil {
 		dm := c.engineMgr.GetDictManager()
-		dm.PinWord(code, cand.Text, 0)
+		dm.PinWord(code, cand.Text, cand.ID, targetPosition)
 		if err := dm.SaveShadow(); err != nil {
 			c.logger.Error("Failed to save shadow layer", "error", err)
 		}
@@ -453,8 +373,7 @@ func (c *Coordinator) handleCandidateMoveTop(index int) {
 }
 
 // handleCandidateDelete handles delete action from context menu.
-// 单字不允许删除（防止某个字永远打不出来）。
-// 所有可见的多字词候选都可删除，规则按当前 inputBuffer 存储。
+// 单字不允许删除（防止某个字永远打不出来）。短语候选 (cand.ID 非空) 一律允许。
 func (c *Coordinator) handleCandidateDelete(index int) {
 	c.mu.Lock()
 
@@ -467,14 +386,10 @@ func (c *Coordinator) handleCandidateDelete(index int) {
 	}
 
 	cand := c.candidates[actualIndex]
-	if cand.IsCommand {
-		c.mu.Unlock()
-		return
-	}
 
-	// 单字不允许删除
-	if len([]rune(cand.Text)) <= 1 {
-		c.logger.Debug("Cannot delete single character", "text", cand.Text)
+	// 单字不允许删除 (短语 ID 例外, 用户主动挑了具体单字候选)
+	if cand.ID == "" && len([]rune(cand.Text)) <= 1 {
+		c.logger.Debug("Cannot delete single character")
 		c.mu.Unlock()
 		return
 	}
@@ -486,7 +401,7 @@ func (c *Coordinator) handleCandidateDelete(index int) {
 
 	if c.engineMgr != nil {
 		dm := c.engineMgr.GetDictManager()
-		dm.DeleteWord(code, cand.Text)
+		dm.DeleteWord(code, cand.Text, cand.ID)
 		if err := dm.SaveShadow(); err != nil {
 			c.logger.Error("Failed to save shadow layer", "error", err)
 		}
@@ -498,16 +413,14 @@ func (c *Coordinator) handleCandidateDelete(index int) {
 	c.mu.Unlock()
 }
 
-// handleCandidateResetDefault handles reset to default action from context menu
-// Removes all shadow rules for the candidate, restoring its original dictionary state
+// handleCandidateResetDefault handles reset to default action from context menu.
+// Removes all shadow rules for the candidate (id 优先, 否则 word)。
 func (c *Coordinator) handleCandidateResetDefault(index int) {
 	c.mu.Lock()
 
 	c.logger.Debug("Candidate reset default requested", "index", index)
 
-	// Convert page-local index to actual candidate index
 	actualIndex := (c.currentPage-1)*c.candidatesPerPage + index
-
 	if actualIndex < 0 || actualIndex >= len(c.candidates) {
 		c.logger.Warn("Invalid candidate index for reset default", "actualIndex", actualIndex)
 		c.mu.Unlock()
@@ -515,34 +428,18 @@ func (c *Coordinator) handleCandidateResetDefault(index int) {
 	}
 
 	cand := c.candidates[actualIndex]
-
-	// 命令候选（短语）：移除用户位置覆盖，恢复系统默认
-	if cand.IsCommand && cand.PhraseTemplate != "" {
-		code := c.inputBuffer
-		c.mu.Unlock()
-		c.handlePhraseReset(code, cand.PhraseTemplate)
-		c.mu.Lock()
-		c.updateCandidates()
-		c.showUI()
-		c.mu.Unlock()
-		return
-	}
-
-	// 统一用 inputBuffer 作为 code
 	code := c.inputBuffer
 
 	c.mu.Unlock()
 
-	// Remove shadow rule without lock
 	if c.engineMgr != nil {
 		dm := c.engineMgr.GetDictManager()
-		dm.RemoveShadowRule(code, cand.Text)
+		dm.RemoveShadowRule(code, cand.Text, cand.ID)
 		if err := dm.SaveShadow(); err != nil {
 			c.logger.Error("Failed to save shadow layer", "error", err)
 		}
 	}
 
-	// Re-acquire lock to refresh UI
 	c.mu.Lock()
 	c.updateCandidates()
 	c.showUI()
@@ -557,63 +454,9 @@ func (c *Coordinator) handleCandidateOpenSettings() {
 	}
 }
 
-// ===== 短语位置调整辅助方法 =====
-
-// handlePhraseMoveUp 通过 PhraseLayer 将短语前移一位
-func (c *Coordinator) handlePhraseMoveUp(code, templateText string) {
-	if c.engineMgr == nil {
-		return
-	}
-	phraseLayer := c.engineMgr.GetDictManager().GetPhraseLayer()
-	if phraseLayer == nil {
-		return
-	}
-	if err := phraseLayer.MovePhraseUp(code, templateText); err != nil {
-		c.logger.Error("Failed to move phrase up", "error", err, "code", code)
-	}
-}
-
-// handlePhraseMoveDown 通过 PhraseLayer 将短语后移一位
-func (c *Coordinator) handlePhraseMoveDown(code, templateText string) {
-	if c.engineMgr == nil {
-		return
-	}
-	phraseLayer := c.engineMgr.GetDictManager().GetPhraseLayer()
-	if phraseLayer == nil {
-		return
-	}
-	if err := phraseLayer.MovePhraseDown(code, templateText); err != nil {
-		c.logger.Error("Failed to move phrase down", "error", err, "code", code)
-	}
-}
-
-// handlePhraseMoveToTop 通过 PhraseLayer 将短语置顶
-func (c *Coordinator) handlePhraseMoveToTop(code, templateText string) {
-	if c.engineMgr == nil {
-		return
-	}
-	phraseLayer := c.engineMgr.GetDictManager().GetPhraseLayer()
-	if phraseLayer == nil {
-		return
-	}
-	if err := phraseLayer.MovePhraseToTop(code, templateText); err != nil {
-		c.logger.Error("Failed to move phrase to top", "error", err, "code", code)
-	}
-}
-
-// handlePhraseReset 移除短语的用户位置覆盖，恢复系统默认
-func (c *Coordinator) handlePhraseReset(code, templateText string) {
-	if c.engineMgr == nil {
-		return
-	}
-	phraseLayer := c.engineMgr.GetDictManager().GetPhraseLayer()
-	if phraseLayer == nil {
-		return
-	}
-	if err := phraseLayer.ResetPhraseOverride(code, templateText); err != nil {
-		c.logger.Error("Failed to reset phrase override", "error", err, "code", code)
-	}
-}
+// 短语位置调整辅助方法 (handlePhraseMoveUp/Down/ToTop/Reset) 已删除,
+// 改由 handleCandidateMove* / handleCandidateDelete / handleCandidateResetDefault
+// 统一走 Shadow API (按候选 ID 匹配), 见 R2 方案。
 
 // handleCandidateAbout handles about action from context menu
 func (c *Coordinator) handleCandidateAbout() {

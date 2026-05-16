@@ -60,15 +60,26 @@ type DictLayer interface {
 }
 
 // PinnedWord 固定位置的词条（呈现层位置覆盖）
+//
+// 2026-05-17 R2: 新增 CandID 字段。匹配优先级 (ApplyShadowPins):
+//   - CandID 非空: 按 cand.ID 匹配 (动态短语场景, id 跨日子稳定)
+//   - CandID 空 : 按 Word 匹配 cand.Text (兼容手输文本规则)
 type PinnedWord struct {
-	Word     string // 词语
+	Word     string // 词语 (展开后的 text, 用于 UI 显示 / 兼容匹配)
+	CandID   string // 候选稳定 id (PhraseLayer 生成的 "phrase:<code>:<template>")
 	Position int    // 目标位置（0=首位，1=第二位...）
+}
+
+// DeletedWord 被隐藏的候选, 与 PinnedWord 同语义新增 CandID。
+type DeletedWord struct {
+	Word   string
+	CandID string
 }
 
 // ShadowRules 一个编码下的所有 Shadow 规则
 type ShadowRules struct {
-	Pinned  []PinnedWord // 固定位置的词（数组顺序=时间戳，前面的优先级高）
-	Deleted []string     // 被隐藏的词（仅多字词）
+	Pinned  []PinnedWord  // 固定位置的词（数组顺序=时间戳，前面的优先级高）
+	Deleted []DeletedWord // 被隐藏的候选 (单字过滤仍在 ApplyShadowPins 内)
 }
 
 // ShadowProvider Shadow 规则提供者接口

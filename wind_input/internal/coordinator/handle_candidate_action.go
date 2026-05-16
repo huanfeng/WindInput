@@ -34,14 +34,14 @@ func (c *Coordinator) handleDeleteCandidateByKey(num int) *bridge.KeyEventResult
 
 	cand := c.candidates[actualIndex]
 
-	// 命令候选不允许删除
-	if cand.IsCommand {
+	// 命令直通车候选不允许通过热键删除 (action 候选只渲染, 不参与 Shadow)
+	if len(cand.Actions) > 0 {
 		return consumed
 	}
 
-	// 单字不允许删除
-	if len([]rune(cand.Text)) <= 1 {
-		c.logger.Debug("Cannot delete single character via hotkey", "text", cand.Text)
+	// 单字不允许删除 (短语 ID 例外, 用户主动挑了具体单字候选)
+	if cand.ID == "" && len([]rune(cand.Text)) <= 1 {
+		c.logger.Debug("Cannot delete single character via hotkey")
 		return consumed
 	}
 
@@ -51,7 +51,7 @@ func (c *Coordinator) handleDeleteCandidateByKey(num int) *bridge.KeyEventResult
 
 	if c.engineMgr != nil {
 		dm := c.engineMgr.GetDictManager()
-		dm.DeleteWord(code, cand.Text)
+		dm.DeleteWord(code, cand.Text, cand.ID)
 		if err := dm.SaveShadow(); err != nil {
 			c.logger.Error("Failed to save shadow layer after hotkey delete", "error", err)
 		}
@@ -83,19 +83,9 @@ func (c *Coordinator) handlePinCandidateByKey(num int) *bridge.KeyEventResult {
 	code := c.inputBuffer
 
 	// 命令直通车候选 (cmdbar) 不允许通过热键置顶: display 只是渲染,
-	// 真正的"短语顺序"由 PhraseLayer 的 position 字段管, 与热键置顶语义无关。
+	// 真正的"短语顺序"由 Shadow pin 管, 与 action 渲染无关。
 	if len(cand.Actions) > 0 {
 		c.logger.Debug("Cannot pin cmdbar action candidate via hotkey")
-		return consumed
-	}
-
-	// 命令候选（短语）：通过 PhraseLayer 置顶
-	if cand.IsCommand && cand.PhraseTemplate != "" {
-		c.mu.Unlock()
-		c.handlePhraseMoveToTop(code, cand.PhraseTemplate)
-		c.mu.Lock()
-		c.updateCandidates()
-		c.showUI()
 		return consumed
 	}
 
@@ -103,7 +93,7 @@ func (c *Coordinator) handlePinCandidateByKey(num int) *bridge.KeyEventResult {
 
 	if c.engineMgr != nil {
 		dm := c.engineMgr.GetDictManager()
-		dm.PinWord(code, cand.Text, 0)
+		dm.PinWord(code, cand.Text, cand.ID, 0)
 		if err := dm.SaveShadow(); err != nil {
 			c.logger.Error("Failed to save shadow layer after hotkey pin", "error", err)
 		}

@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-05-06 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-05-17 -->
 
 # internal/coordinator
 
@@ -12,7 +12,7 @@
 | `coordinator.go` | `Coordinator` 结构体定义、构造函数、状态广播、信号通道（退出/重启）；`NotifySchemaActivated(displayName)` 供外部异步资源就绪后调用，触发 toolbar/TSF 状态同步并显示"<方案>已就绪"指示器 |
 | `handle_key_event.go` | 按键事件主入口，根据模式分发处理 |
 | `handle_key_action.go` | 具体按键动作处理（退格、确认、翻页、数字选词等） |
-| `handle_candidate_action.go` | 候选词快捷键操作：`matchCandidateActionKey` 匹配 Ctrl+数字/Ctrl+Shift+数字热键；`handleDeleteCandidateByKey` 删除指定候选词（写入 ShadowLayer.Delete）；`handlePinCandidateByKey` 置顶指定候选词（写入 ShadowLayer.Pin 或 PhraseLayer.MoveToTop） |
+| `handle_candidate_action.go` | 候选词快捷键操作：`matchCandidateActionKey` 匹配 Ctrl+数字/Ctrl+Shift+数字热键；`handleDeleteCandidateByKey` 删除指定候选词（走 `dm.DeleteWord(code, text, cand.ID)`）；`handlePinCandidateByKey` 置顶指定候选词（走 `dm.PinWord(code, text, cand.ID, 0)`）；**R2**: 短语候选统一走 Shadow（不再走 PhraseLayer.MoveToTop） |
 | `handle_candidates.go` | 候选词请求引擎计算、分页管理、UI 更新 |
 | `handle_config.go` | 配置更新处理（引擎切换、热键、UI、工具栏等） |
 | `handle_config_menu.go` | 右键菜单命令处理 |
@@ -22,7 +22,7 @@
 | `handle_punctuation.go` | 中英文标点转换处理 |
 | `handle_temp_english.go` | 临时英文模式：五笔输入态下按特定键（如 Z）触发，输入英文后恢复；维护临时英文缓冲区和上屏逻辑 |
 | `handle_temp_pinyin.go` | 临时拼音模式：五笔方案下临时切换到拼音输入；通过 `engine.Manager.ActivateTempPinyin`/`DeactivateTempPinyin` 管理拼音词库层的注入与退出 |
-| `handle_ui_callbacks.go` | UI 回调（工具栏按钮点击、候选窗口鼠标事件） |
+| `handle_ui_callbacks.go` | UI 回调（工具栏按钮点击、候选窗口鼠标事件）；**R2**: `handleCandidateMove(index, delta, top)` 统一前移/后移/置顶，Pin/Delete/Reset 均传 `cand.ID`；旧短语辅助方法 `handlePhraseMoveUp/Down/ToTop/Reset` 已删除 |
 | `handle_addword.go` | 快捷加词功能：`enterAddWordMode`/`exitAddWordMode` 管理加词模式进出；`handleAddWordKey` 在加词模式下处理 ↑↓/Enter/Esc/Ctrl+Enter；`confirmAddWord` 将词条写入 UserDict；`openAddWordDialog` 打开设置页加词对话框；`calcWordCodeForCurrentSchema` 根据编码规则和反向索引自动计算词的编码 |
 | `input_history.go` | `InputHistory`：按客户端 ID 隔离的上屏记录器；`Record` 追加记录并裁剪至 maxChars；`GetRecentChars` 提取最近 N 个字符（正序），用于加词推荐；`GetRecentRecords` 返回最近记录（最新在前）；仅内存存储，不持久化（有测试文件 `input_history_test.go`） |
 | `cmdbar_services.go` | 命令直通车 (cmdbar) 的 Services 适配层：把 `internal/clipboard` / `internal/keyinject` / `internal/proc` / `engineMgr.GetDictManager().AddUserWord` / `uiManager.OpenSettingsWithPage` 封装成 cmdbar 期望的接口；`buildCmdbarServices` 在 `NewCoordinator` 中装配并写入 `c.cmdbarServices`; `cmdbarProcService.ShellEx` 透传 `proc.ShellEx` 支持 shell flag (`term`/`pwsh`) |

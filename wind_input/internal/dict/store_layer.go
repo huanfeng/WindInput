@@ -302,31 +302,36 @@ func (l *StoreShadowLayer) GetShadowRules(code string) *ShadowRules {
 	if len(rec.Pinned) == 0 && len(rec.Deleted) == 0 {
 		return nil
 	}
-	rules := &ShadowRules{
-		Deleted: rec.Deleted,
-	}
+	rules := &ShadowRules{}
 	for _, p := range rec.Pinned {
 		rules.Pinned = append(rules.Pinned, PinnedWord{
 			Word:     p.Word,
+			CandID:   p.CandID,
 			Position: p.Position,
+		})
+	}
+	for _, d := range rec.Deleted {
+		rules.Deleted = append(rules.Deleted, DeletedWord{
+			Word:   d.Word,
+			CandID: d.CandID,
 		})
 	}
 	return rules
 }
 
-// Pin 固定词在指定位置。
-func (l *StoreShadowLayer) Pin(code, word string, position int) {
-	_ = l.store.PinShadow(l.schemaID, strings.ToLower(code), word, position)
+// Pin 固定词/候选在指定位置。candID 非空时按候选 id 匹配 (动态短语用)。
+func (l *StoreShadowLayer) Pin(code, word, candID string, position int) {
+	_ = l.store.PinShadow(l.schemaID, strings.ToLower(code), word, candID, position)
 }
 
-// Delete 隐藏指定词。
-func (l *StoreShadowLayer) Delete(code, word string) {
-	_ = l.store.DeleteShadow(l.schemaID, strings.ToLower(code), word)
+// Delete 隐藏指定词/候选。
+func (l *StoreShadowLayer) Delete(code, word, candID string) {
+	_ = l.store.DeleteShadow(l.schemaID, strings.ToLower(code), word, candID)
 }
 
-// RemoveRule 从 Pinned 和 Deleted 中移除指定词的所有规则。
-func (l *StoreShadowLayer) RemoveRule(code, word string) {
-	_ = l.store.RemoveShadowRule(l.schemaID, strings.ToLower(code), word)
+// RemoveRule 从 Pinned 和 Deleted 中移除指定词/候选的所有规则。
+func (l *StoreShadowLayer) RemoveRule(code, word, candID string) {
+	_ = l.store.RemoveShadowRule(l.schemaID, strings.ToLower(code), word, candID)
 }
 
 // GetRuleCount 返回有规则的编码总数。

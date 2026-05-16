@@ -801,25 +801,28 @@ export async function pinShadowWordForSchema(
   schemaID: string,
   code: string,
   word: string,
+  candID: string,
   position: number,
 ): Promise<void> {
-  return App.PinShadowWordForSchema(schemaID, code, word, position);
+  return App.PinShadowWordForSchema(schemaID, code, word, candID, position);
 }
 
 export async function deleteShadowWordForSchema(
   schemaID: string,
   code: string,
   word: string,
+  candID: string,
 ): Promise<void> {
-  return App.DeleteShadowWordForSchema(schemaID, code, word);
+  return App.DeleteShadowWordForSchema(schemaID, code, word, candID);
 }
 
 export async function removeShadowRuleForSchema(
   schemaID: string,
   code: string,
   word: string,
+  candID: string,
 ): Promise<void> {
-  return App.RemoveShadowRuleForSchema(schemaID, code, word);
+  return App.RemoveShadowRuleForSchema(schemaID, code, word, candID);
 }
 
 // Shadow 管理（旧接口保留）
@@ -830,23 +833,26 @@ export async function getShadowRules(): Promise<ShadowRuleItem[]> {
 export async function pinShadowWord(
   code: string,
   word: string,
+  candID: string,
   position: number,
 ): Promise<void> {
-  return App.PinShadowWord(code, word, position);
+  return App.PinShadowWord(code, word, candID, position);
 }
 
 export async function deleteShadowWord(
   code: string,
   word: string,
+  candID: string,
 ): Promise<void> {
-  return App.DeleteShadowWord(code, word);
+  return App.DeleteShadowWord(code, word, candID);
 }
 
 export async function removeShadowRule(
   code: string,
   word: string,
+  candID: string,
 ): Promise<void> {
-  return App.RemoveShadowRule(code, word);
+  return App.RemoveShadowRule(code, word, candID);
 }
 
 // 服务通信

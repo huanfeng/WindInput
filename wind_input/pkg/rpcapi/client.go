@@ -246,32 +246,38 @@ func (c *Client) DictPromoteAllTemp(schemaID string) (int, error) {
 }
 
 // ── Shadow 方法 ──
+//
+// 2026-05-17 R2: 新增 candID 入参 (空串表示按 word 匹配, 旧行为)。
+// 详见 docs/design/2026-05-16-cmdbar-followup.md R2 方案。
 
-// ShadowPin 固定词到指定位置
-func (c *Client) ShadowPin(schemaID, code, word string, position int) error {
+// ShadowPin 固定词到指定位置。candID 非空时优先按候选 id 匹配 (动态短语场景)。
+func (c *Client) ShadowPin(schemaID, code, word, candID string, position int) error {
 	return c.call("Shadow.Pin", &ShadowPinArgs{
 		SchemaID: schemaID,
 		Code:     code,
 		Word:     word,
+		CandID:   candID,
 		Position: position,
 	}, &Empty{})
 }
 
-// ShadowDelete 隐藏词条
-func (c *Client) ShadowDelete(schemaID, code, word string) error {
+// ShadowDelete 隐藏词条。candID 非空时优先按候选 id 匹配。
+func (c *Client) ShadowDelete(schemaID, code, word, candID string) error {
 	return c.call("Shadow.Delete", &ShadowDeleteArgs{
 		SchemaID: schemaID,
 		Code:     code,
 		Word:     word,
+		CandID:   candID,
 	}, &Empty{})
 }
 
-// ShadowRemoveRule 移除所有规则
-func (c *Client) ShadowRemoveRule(schemaID, code, word string) error {
+// ShadowRemoveRule 移除所有规则。candID 非空时按 id 匹配, 否则按 word。
+func (c *Client) ShadowRemoveRule(schemaID, code, word, candID string) error {
 	return c.call("Shadow.RemoveRule", &ShadowDeleteArgs{
 		SchemaID: schemaID,
 		Code:     code,
 		Word:     word,
+		CandID:   candID,
 	}, &Empty{})
 }
 

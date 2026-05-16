@@ -96,6 +96,26 @@ const columns: ColumnDef<ShadowRuleItem, any>[] = [
   {
     accessorKey: "word",
     header: "词条",
+    cell: ({ row }) => {
+      const item = row.original;
+      // cand_id 非空 = 短语模板候选 (id 形如 phrase:<code>:<template>),
+      // word 列实际是某次运行时展开值 (如 "2026-05-17"), 加 Badge 提示
+      // 用户这是短语规则, 删除走 id 匹配而非 word 匹配。
+      const isPhrase = !!item.cand_id;
+      return h("div", { class: "flex items-center gap-1.5" }, [
+        h("span", item.word),
+        isPhrase
+          ? h(
+              Badge,
+              {
+                variant: "secondary",
+                class: "text-[10px] px-1.5 py-0 h-4",
+              },
+              () => "短语",
+            )
+          : null,
+      ]);
+    },
   },
   {
     id: "type",
@@ -179,6 +199,7 @@ async function handleSave() {
         props.schemaId,
         form.value.code,
         form.value.word,
+        "",
       );
     }
     if (form.value.action === "pin") {
@@ -186,6 +207,7 @@ async function handleSave() {
         props.schemaId,
         form.value.code,
         form.value.word,
+        "",
         form.value.position,
       );
     } else {
@@ -193,6 +215,7 @@ async function handleSave() {
         props.schemaId,
         form.value.code,
         form.value.word,
+        "",
       );
     }
     toast(dialogEditing.value ? "规则已保存" : "规则已添加");
@@ -220,7 +243,7 @@ async function handleRemove(item: ShadowRuleItem) {
   const ok = await confirm(`确定删除「${item.word}」的调整规则？`);
   if (!ok) return;
   try {
-    await removeShadowRuleForSchema(props.schemaId, item.code, item.word);
+    await removeShadowRuleForSchema(props.schemaId, item.code, item.word, item.cand_id ?? "");
     toast(`已删除「${item.word}」的规则`);
     await loadData();
     emit("schema-changed");
@@ -239,7 +262,7 @@ async function handleBatchRemove() {
   if (!ok) return;
   try {
     for (const item of itemsToDelete) {
-      await removeShadowRuleForSchema(props.schemaId, item.code, item.word);
+      await removeShadowRuleForSchema(props.schemaId, item.code, item.word, item.cand_id ?? "");
     }
     toast(`已删除 ${itemsToDelete.length} 条规则`);
     await loadData();
@@ -258,7 +281,7 @@ async function handleClearAll() {
   const allItems = [...shadowRules.value];
   try {
     for (const item of allItems) {
-      await removeShadowRuleForSchema(props.schemaId, item.code, item.word);
+      await removeShadowRuleForSchema(props.schemaId, item.code, item.word, item.cand_id ?? "");
     }
     toast(`已清空 ${allItems.length} 条规则`, "success");
     await loadData();

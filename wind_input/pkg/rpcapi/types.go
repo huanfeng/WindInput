@@ -163,12 +163,20 @@ type DictStatsReply struct {
 }
 
 // ── Shadow 服务类型 ──
+//
+// 2026-05-17 R2: 新增 CandID 字段以匹配动态候选 (短语模板每次展开 Text 不同)。
+// 匹配优先级见 ApplyShadowPins: rule.CandID 非空 → 按 cand.ID 匹配;
+// 否则按 rule.Word 匹配 cand.Text (向后兼容手输文本规则)。
+// 详见 docs/design/2026-05-16-cmdbar-followup.md R2 方案 Step 2。
 
 // ShadowPinArgs 置顶请求
 type ShadowPinArgs struct {
 	SchemaID string `json:"schema_id,omitempty"`
 	Code     string `json:"code"`
 	Word     string `json:"word"`
+	// CandID 候选稳定 id (deterministic, 通常 "phrase:<code>:<template>"),
+	// 优先于 Word 匹配; 空字符串表示按 Word 匹配 cand.Text (旧行为)。
+	CandID   string `json:"cand_id,omitempty"`
 	Position int    `json:"position"`
 }
 
@@ -177,6 +185,8 @@ type ShadowDeleteArgs struct {
 	SchemaID string `json:"schema_id,omitempty"`
 	Code     string `json:"code"`
 	Word     string `json:"word"`
+	// CandID 候选稳定 id, 与 ShadowPinArgs.CandID 同语义。
+	CandID string `json:"cand_id,omitempty"`
 }
 
 // ShadowGetRulesArgs 获取规则请求
@@ -194,6 +204,7 @@ type ShadowRulesReply struct {
 // PinnedEntry 置顶条目
 type PinnedEntry struct {
 	Word     string `json:"word"`
+	CandID   string `json:"cand_id,omitempty"` // 候选稳定 id, 优先于 Word 匹配 (见 ShadowPinArgs)
 	Position int    `json:"position"`
 }
 
@@ -511,13 +522,15 @@ type ShadowBatchSetArgs struct {
 type ShadowPinItem struct {
 	Code     string `json:"code"`
 	Word     string `json:"word"`
+	CandID   string `json:"cand_id,omitempty"` // 候选稳定 id (见 ShadowPinArgs)
 	Position int    `json:"position"`
 }
 
 // ShadowDelItem 批量 Delete 条目
 type ShadowDelItem struct {
-	Code string `json:"code"`
-	Word string `json:"word"`
+	Code   string `json:"code"`
+	Word   string `json:"word"`
+	CandID string `json:"cand_id,omitempty"` // 候选稳定 id (见 ShadowDeleteArgs)
 }
 
 // ShadowBatchSetReply 批量写入 Shadow 响应
