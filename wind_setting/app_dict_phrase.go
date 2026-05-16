@@ -22,8 +22,8 @@ import (
 //
 // Weight 为存储的显式权重 (0 表示未设置);
 // EffectiveWeight 为最终生效权重 (resolvePhraseWeightForUI 计算: weight>0 → 自身;
-// weight==0 && position>0 → 10000-position; 否则默认 1000), 仅供 UI 展示用,
-// 不应被当作显式 weight 回写。
+// 否则默认 1000), 仅供 UI 展示用, 不应被当作显式 weight 回写。
+// (2026-05-16: 不再 fallback 为 10000-position)
 type PhraseItem struct {
 	Code            string `json:"code"`
 	Text            string `json:"text,omitempty"`
@@ -35,26 +35,27 @@ type PhraseItem struct {
 }
 
 // resolvePhraseWeightForUI 计算 UI 展示用的生效权重 (0~10000)。
-// 与 wind_input/internal/dict.resolvePhraseWeight 语义保持一致, 这里冗余实现
-// 避免跨 module 依赖; 若该常量/逻辑后续调整, 两处需同步。
+//
+// 与 wind_input/internal/dict.resolvePhraseWeight 语义对齐 (2026-05-16):
+//
+//	weight > 10000 → 10000 (clamp)
+//	weight > 0     → 自身
+//	weight <= 0    → 1000 (默认中位)
+//
+// **不再** fallback 为 10000 - position; position 仅在同 code 多条短语
+// sort 时做 tie-break, 不参与 weight 数字本身。
+//
+// 这里冗余实现一份是为了避免 wind_setting 跨 module 依赖 internal/dict;
+// 若 dict.resolvePhraseWeight 后续调整, 两处需同步。
 const phraseWeightUIMax = 10000
 
 func resolvePhraseWeightForUI(weight, position int) int {
+	_ = position // 保留参数签名, 兼容已有调用点
+	if weight > phraseWeightUIMax {
+		return phraseWeightUIMax
+	}
 	if weight > 0 {
-		if weight > phraseWeightUIMax {
-			return phraseWeightUIMax
-		}
 		return weight
-	}
-	if weight == 0 && position > 0 {
-		w := 10000 - position
-		if w < 0 {
-			w = 0
-		}
-		return w
-	}
-	if weight < 0 {
-		return 0
 	}
 	return 1000
 }

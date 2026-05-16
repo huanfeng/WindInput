@@ -116,6 +116,9 @@ func (dm *DictManager) Initialize() error {
 	if err := dm.SeedDefaultPhrases(); err != nil {
 		dm.logger.Error("种子默认短语失败", "error", err)
 	}
+	if err := dm.refreshSystemPhraseWeights(); err != nil {
+		dm.logger.Warn("刷新系统短语 weight 失败", "error", err)
+	}
 	if err := dm.phraseLayer.LoadFromStore(dm.store); err != nil {
 		dm.logger.Warn("从 Store 加载短语失败", "error", err)
 	} else {
@@ -178,6 +181,7 @@ func (dm *DictManager) SeedDefaultPhrases() error {
 				rec := store.PhraseRecord{
 					Code:     strings.ToLower(e.Code),
 					Text:     e.Text,
+					Weight:   resolveWeightFromFileEntry(e),
 					Position: e.Position,
 					Enabled:  !e.Disabled,
 					IsSystem: true,
@@ -193,6 +197,55 @@ func (dm *DictManager) SeedDefaultPhrases() error {
 	if len(records) > 0 {
 		dm.logger.Info("种子默认短语", "count", len(records))
 		return dm.store.SeedPhrases(records)
+	}
+	return nil
+}
+
+// refreshSystemPhraseWeights 按最新 system.phrases.yaml 刷新 db 中
+// IsSystem=true 且 Weight=0 的内置短语 weight 字段。
+//
+// 解决场景: 旧版 db 升级到 2026-05-16 weight schema 后, 老内置短语的
+// weight 字段还是 0, UI effective_weight 走 fallback 显示 9999 类的怪异
+// 数字。这里在 SeedDefaultPhrases 之后总是跑一次, 把 (code, text) 在
+// yaml 里能匹配到的 IsSystem 短语 weight 刷新到 yaml 值。
+//
+// 只刷新 Weight==0 的记录 — 用户主动改过 weight 的内置短语不会被覆盖。
+func (dm *DictManager) refreshSystemPhraseWeights() error {
+	if dm.store == nil {
+		return nil
+	}
+
+	systemFile := filepath.Join(dm.systemDir, "system.phrases.yaml")
+	systemUserFile := filepath.Join(dm.dataDir, "system.phrases.yaml")
+
+	var entries []PhraseFileEntry
+	if e, err := ParsePhraseYAMLFile(systemUserFile); err == nil {
+		entries = e
+	} else if e, err := ParsePhraseYAMLFile(systemFile); err == nil {
+		entries = e
+	} else {
+		return nil // 没有 yaml 可读, 跳过 (不视为错误)
+	}
+
+	yamlMap := make(map[string]int, len(entries))
+	for _, e := range entries {
+		if e.Code == "" || e.Text == "" {
+			continue
+		}
+		w := resolveWeightFromFileEntry(e)
+		if w == 0 {
+			continue
+		}
+		key := strings.ToLower(e.Code) + "\x00" + e.Text
+		yamlMap[key] = w
+	}
+
+	n, err := dm.store.RefreshSystemPhraseWeights(yamlMap)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		dm.logger.Info("刷新系统短语 weight", "count", n)
 	}
 	return nil
 }

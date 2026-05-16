@@ -86,3 +86,63 @@ func (s *Store) MigratePhraseRecordsToAA() (migrated int, err error) {
 	})
 	return migrated, err
 }
+
+// RefreshSystemPhraseWeights 把 db 中 IsSystem=true 且 Weight=0 的内置短语
+// 刷新到 yamlMap 提供的 weight 值。
+//
+// yamlMap 的 key 格式: "code\x00text" (与 phraseKey 一致), value 是目标 weight。
+//
+// 触发场景: 旧版 db 升级后 system 短语 weight 字段空缺 (UI 上显示 9999 类),
+// 启动期一次性按最新 system.phrases.yaml 的 weight 字段刷新到合理值。
+// 只刷新 Weight==0 的记录, 避免覆盖用户主动改过的权重。
+//
+// 调用时机: SeedDefaultPhrases (创建路径) 与 MigratePhraseRecordsToAA (迁移路径)
+// 之后, LoadFromStore 之前。
+func (s *Store) RefreshSystemPhraseWeights(yamlMap map[string]int) (refreshed int, err error) {
+	if len(yamlMap) == 0 {
+		return 0, nil
+	}
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketPhrases)
+		if b == nil {
+			return nil
+		}
+		type pending struct {
+			key   []byte
+			value []byte
+		}
+		var updates []pending
+
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var rec PhraseRecord
+			if uerr := json.Unmarshal(v, &rec); uerr != nil {
+				continue
+			}
+			if !rec.IsSystem || rec.Weight != 0 {
+				continue
+			}
+			newWeight, ok := yamlMap[string(k)]
+			if !ok || newWeight == 0 {
+				continue
+			}
+			rec.Weight = newWeight
+			newData, mErr := json.Marshal(rec)
+			if mErr != nil {
+				return fmt.Errorf("refresh system weight: marshal: %w", mErr)
+			}
+			keyCopy := make([]byte, len(k))
+			copy(keyCopy, k)
+			updates = append(updates, pending{key: keyCopy, value: newData})
+		}
+
+		for _, u := range updates {
+			if pErr := b.Put(u.key, u.value); pErr != nil {
+				return fmt.Errorf("refresh system weight: put: %w", pErr)
+			}
+		}
+		refreshed = len(updates)
+		return nil
+	})
+	return refreshed, err
+}
