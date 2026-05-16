@@ -488,42 +488,35 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 			position = 1
 		}
 
-		switch rec.Type {
-		case "array":
-			// $SS 字符串数组优先识别 (元素粒度是字符串, 含嵌入 $CC, 走 ArrayHook)
-			if HasSSMarker(rec.Text) {
-				ssName, ok := ParseSSGroupName(rec.Text)
-				if !ok {
-					// 静态扫描失败 (语法错误等), 用 code 兜底, 运行时 hook 再判断
-					ssName = code
-				}
-				pg := PhraseGroup{
-					Code:     code,
-					Name:     ssName,
-					Kind:     PhraseGroupKindSS,
-					Weight:   rec.Weight,
-					Position: position,
-					IsSystem: rec.IsSystem,
-				}
-				pl.phraseGroups[code] = pg
-				// $SS 元素运行时展开, 把原 marker text 放进 dynamicPhrases 备用
-				entry := PhraseEntry{
-					Text:     rec.Text,
-					Weight:   rec.Weight,
-					Position: position,
-					IsSystem: rec.IsSystem,
-				}
-				pl.dynamicPhrases[code] = append(pl.dynamicPhrases[code], entry)
-				break
-			}
-			// 字符组短语 ($AA): 优先解析 Text 字段中的 $AA("name", "chars") marker,
-			// 兼容回退到旧的 Texts/Name 字段 (migration 已把 bbolt 中旧记录改写,
-			// 这里的回退仅服务于尚未走过 migration 的内存路径如测试种子)。
-			name, chars, ok := ParseAAMarker(rec.Text)
+		// 2026-05-16 简化: 不再 switch on rec.Type, 完全由 rec.Text 推断分类。
+		// store 已删 Type/Texts/Name 字段, text 是单一信任源。
+		switch {
+		case HasSSMarker(rec.Text):
+			// $SS 字符串数组: 元素 (含嵌入 $CC) 运行时通过 cmdbarArrayHook 展开
+			ssName, ok := ParseSSGroupName(rec.Text)
 			if !ok {
-				name = rec.Name
-				chars = rec.Texts
+				ssName = code // 静态扫描失败时用 code 兜底, 运行时 hook 再判断
 			}
+			pg := PhraseGroup{
+				Code:     code,
+				Name:     ssName,
+				Kind:     PhraseGroupKindSS,
+				Weight:   rec.Weight,
+				Position: position,
+				IsSystem: rec.IsSystem,
+			}
+			pl.phraseGroups[code] = pg
+			entry := PhraseEntry{
+				Text:     rec.Text,
+				Weight:   rec.Weight,
+				Position: position,
+				IsSystem: rec.IsSystem,
+			}
+			pl.dynamicPhrases[code] = append(pl.dynamicPhrases[code], entry)
+
+		case isAAMarker(rec.Text):
+			// $AA 字符组: 解析 marker 得到 name + chars, 静态展开为字符级 entry
+			name, chars, _ := ParseAAMarker(rec.Text)
 			pg := PhraseGroup{
 				Code:     code,
 				Name:     name,
@@ -534,8 +527,6 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 				IsSystem: rec.IsSystem,
 			}
 			pl.phraseGroups[code] = pg
-			// 字符级 entry 共享 group 的权重, 字符内 NaturalOrder 由 SearchCommand
-			// 在展开时按数组下标分配, 这里 Position 仅记录原始展开顺序。
 			runes := []rune(chars)
 			for idx, r := range runes {
 				arrEntry := PhraseEntry{
@@ -547,7 +538,8 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 				pl.staticPhrases[code] = append(pl.staticPhrases[code], arrEntry)
 			}
 
-		case "dynamic":
+		case HasVariable(rec.Text):
+			// 含 $ 的动态短语 ($CC marker / $Y/$M/$D 等模板变量)
 			entry := PhraseEntry{
 				Text:     rec.Text,
 				Weight:   rec.Weight,
@@ -556,7 +548,8 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 			}
 			pl.dynamicPhrases[code] = append(pl.dynamicPhrases[code], entry)
 
-		default: // "static"
+		default:
+			// 普通字面量短语
 			entry := PhraseEntry{
 				Text:     rec.Text,
 				Weight:   rec.Weight,
@@ -568,6 +561,14 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 	}
 
 	return nil
+}
+
+// isAAMarker 判定 text 是否为合法 $AA marker (能完整解析)。
+// ParseAAMarker 已存在但返回三元组 (name, chars, ok); 这里包一个 bool 版本
+// 用于 switch case 条件分支保持代码紧凑。
+func isAAMarker(text string) bool {
+	_, _, ok := ParseAAMarker(text)
+	return ok
 }
 
 // ParsePhraseYAMLFile reads a phrases YAML file and returns PhraseFileEntry slice.
@@ -585,21 +586,8 @@ func ParsePhraseYAMLFile(path string) ([]PhraseFileEntry, error) {
 	return config.Phrases, nil
 }
 
-// detectPhraseType determines the type string from a PhraseFileEntry.
-// 字符组短语通过 Text 字段的 $AA / $SS marker 识别 (统一为 "array" 类型,
-// 子类 (aa/ss) 在 LoadFromStore 阶段根据 marker 再细分)。
-func detectPhraseType(e PhraseFileEntry) string {
-	if _, _, ok := ParseAAMarker(e.Text); ok {
-		return "array"
-	}
-	if HasSSMarker(e.Text) {
-		return "array"
-	}
-	if HasVariable(e.Text) {
-		return "dynamic"
-	}
-	return "static"
-}
+// (detectPhraseType 已删除, 2026-05-16: store 不再保存 type 字段, 分类
+//  完全由 PhraseLayer.LoadFromStore 解析 Text 推断。)
 
 // GetPhraseCount 获取静态短语数量
 func (pl *PhraseLayer) GetPhraseCount() int {

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/huanfeng/wind_input/pkg/config"
@@ -17,16 +16,17 @@ import (
 
 // PhraseItem 短语条目（前端用）
 //
-// Weight 为存储的显式权重 (0 表示未设置, 与 wind_input 的 PhraseEntry.Weight 语义一致);
+// 2026-05-16 schema 简化: 与 wind_input/internal/store.PhraseRecord +
+// rpcapi.PhraseEntry 保持一致, 短语由 (code, text, weight) 三元组定义;
+// 分类 (普通 / $AA / $SS / $CC) 完全由 text 内容自描述。
+//
+// Weight 为存储的显式权重 (0 表示未设置);
 // EffectiveWeight 为最终生效权重 (resolvePhraseWeightForUI 计算: weight>0 → 自身;
 // weight==0 && position>0 → 10000-position; 否则默认 1000), 仅供 UI 展示用,
 // 不应被当作显式 weight 回写。
 type PhraseItem struct {
 	Code            string `json:"code"`
 	Text            string `json:"text,omitempty"`
-	Texts           string `json:"texts,omitempty"`
-	Name            string `json:"name,omitempty"`
-	Type            string `json:"type"`
 	Position        int    `json:"position"`
 	Weight          int    `json:"weight,omitempty"`
 	EffectiveWeight int    `json:"effective_weight"`
@@ -76,8 +76,8 @@ func (a *App) GetPhrases() ([]PhraseItem, error) {
 	items := make([]PhraseItem, len(reply.Phrases))
 	for i, p := range reply.Phrases {
 		items[i] = PhraseItem{
-			Code: p.Code, Text: p.Text, Texts: p.Texts, Name: p.Name,
-			Type: p.Type, Position: p.Position, Weight: p.Weight,
+			Code: p.Code, Text: p.Text,
+			Position: p.Position, Weight: p.Weight,
 			EffectiveWeight: resolvePhraseWeightForUI(p.Weight, p.Position),
 			Enabled:         p.Enabled, IsSystem: p.IsSystem,
 		}
@@ -86,17 +86,17 @@ func (a *App) GetPhrases() ([]PhraseItem, error) {
 }
 
 // AddPhrase 添加短语 (weight 为显式权重 0~10000, 0 表示未设置走 position fallback)
-func (a *App) AddPhrase(code, text, texts, name, pType string, position, weight int) error {
+func (a *App) AddPhrase(code, text string, position, weight int) error {
 	return a.rpcClient.PhraseAdd(rpcapi.PhraseAddArgs{
-		Code: code, Text: text, Texts: texts, Name: name, Type: pType,
+		Code: code, Text: text,
 		Position: position, Weight: weight,
 	})
 }
 
 // UpdatePhrase 更新短语 (newWeight 传 nil 表示不修改, 否则按 0~10000 写入)
-func (a *App) UpdatePhrase(code, text, name, newCode, newText string, newPosition int, newWeight *int, enabled *bool) error {
+func (a *App) UpdatePhrase(code, text, newCode, newText string, newPosition int, newWeight *int, enabled *bool) error {
 	return a.rpcClient.PhraseUpdate(rpcapi.PhraseUpdateArgs{
-		Code: code, Text: text, Name: name,
+		Code: code, Text: text,
 		NewCode: newCode, NewText: newText, NewPosition: newPosition,
 		NewWeight: newWeight, Enabled: enabled,
 	})
@@ -117,15 +117,14 @@ func (a *App) ValidatePhraseValue(value string) (*PhraseValidateValueResult, err
 }
 
 // RemovePhrase 删除短语
-func (a *App) RemovePhrase(code, text, name string) error {
-	return a.rpcClient.PhraseRemove(code, text, name)
+func (a *App) RemovePhrase(code, text string) error {
+	return a.rpcClient.PhraseRemove(code, text)
 }
 
 // PhraseDeleteArg 批量删除短语的单条参数 (导出给 wails 前端使用)
 type PhraseDeleteArg struct {
 	Code string `json:"code"`
 	Text string `json:"text"`
-	Name string `json:"name"`
 }
 
 // RemovePhrases 批量删除短语 (单事务, 单次 reload, 单次事件)
@@ -135,7 +134,7 @@ func (a *App) RemovePhrases(items []PhraseDeleteArg) (int, error) {
 	}
 	args := make([]rpcapi.PhraseRemoveArgs, 0, len(items))
 	for _, it := range items {
-		args = append(args, rpcapi.PhraseRemoveArgs{Code: it.Code, Text: it.Text, Name: it.Name})
+		args = append(args, rpcapi.PhraseRemoveArgs{Code: it.Code, Text: it.Text})
 	}
 	reply, err := a.rpcClient.PhraseBatchRemove(args)
 	if err != nil {
@@ -148,9 +147,9 @@ func (a *App) RemovePhrases(items []PhraseDeleteArg) (int, error) {
 }
 
 // SetPhraseEnabled 设置短语启用/禁用状态
-func (a *App) SetPhraseEnabled(code, text, name string, enabled bool) error {
+func (a *App) SetPhraseEnabled(code, text string, enabled bool) error {
 	return a.rpcClient.PhraseUpdate(rpcapi.PhraseUpdateArgs{
-		Code: code, Text: text, Name: name, Enabled: &enabled,
+		Code: code, Text: text, Enabled: &enabled,
 	})
 }
 
@@ -387,13 +386,22 @@ func statusRank(status string) int {
 // ========== 短语导入导出 ==========
 
 // phraseYAMLEntry 简化 YAML 格式的短语条目
+//
+// 2026-05-16 schema 简化: text 是短语的唯一信任源, 字符组用 $AA(name, chars)
+// marker 直接编码在 text 里, 不再单独存 texts/name 字段。
+//
+// legacyTexts/legacyName 仅用于反序列化旧格式 (升级期间还会读到老 yaml 文件
+// 含 texts/name 双字段, 导入时把它们重组为 $AA marker)。
 type phraseYAMLEntry struct {
 	Code     string `yaml:"code"`
 	Text     string `yaml:"text,omitempty"`
-	Texts    string `yaml:"texts,omitempty"`
-	Name     string `yaml:"name,omitempty"`
+	Weight   int    `yaml:"weight,omitempty"`
 	Position int    `yaml:"position,omitempty"`
 	Disabled bool   `yaml:"disabled,omitempty"`
+
+	// 兼容旧格式: 读 texts/name 字段, 写入时不输出 (omitempty + 写时不填)
+	LegacyTexts string `yaml:"texts,omitempty"`
+	LegacyName  string `yaml:"name,omitempty"`
 }
 
 type phraseYAMLFile struct {
@@ -428,22 +436,22 @@ func (a *App) ImportPhrases() (*ImportExportResult, error) {
 
 	count := 0
 	for _, e := range file.Phrases {
-		if e.Code == "" || (e.Text == "" && e.Texts == "") {
-			continue
+		text := e.Text
+		// 兼容旧 yaml: 含 texts/name → 重组为 $AA marker
+		if text == "" && e.LegacyTexts != "" {
+			text = fmt.Sprintf(`$AA(%q, %q)`, e.LegacyName, e.LegacyTexts)
 		}
-		pType := "static"
-		if e.Texts != "" {
-			pType = "array"
-		} else if strings.Contains(e.Text, "$") {
-			pType = "dynamic"
+		if e.Code == "" || text == "" {
+			continue
 		}
 		pos := e.Position
 		if pos <= 0 {
 			pos = 1
 		}
 		if err := a.rpcClient.PhraseAdd(rpcapi.PhraseAddArgs{
-			Code: e.Code, Text: e.Text, Texts: e.Texts, Name: e.Name,
-			Type: pType, Position: pos,
+			Code: e.Code, Text: text,
+			Weight:   e.Weight,
+			Position: pos,
 		}); err == nil {
 			count++
 		}
@@ -476,15 +484,13 @@ func (a *App) ExportPhrases() (*ImportExportResult, error) {
 
 	entries := make([]phraseYAMLEntry, 0, len(reply.Phrases))
 	for _, p := range reply.Phrases {
-		e := phraseYAMLEntry{
+		entries = append(entries, phraseYAMLEntry{
 			Code:     p.Code,
 			Text:     p.Text,
-			Texts:    p.Texts,
-			Name:     p.Name,
+			Weight:   p.Weight,
 			Position: p.Position,
 			Disabled: !p.Enabled,
-		}
-		entries = append(entries, e)
+		})
 	}
 
 	data, err := yaml.Marshal(phraseYAMLFile{Phrases: entries})

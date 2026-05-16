@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-20 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-20 | Updated: 2026-05-16 -->
 
 # internal/store
 
@@ -12,8 +12,8 @@
 | `store.go` | `Store`：bbolt 数据库包装；`Open()`/`Close()` 生命周期；bucket 初始化（Meta、Schemas、Phrases）；`schemaBucket`/`schemaSubBucket` 导航辅助函数；`ClearSchema`/`DeleteSchema`/`ClearAllSchemas` 数据清理；Meta 键值（版本、设备 ID）管理 |
 | `user_words.go` | `UserDict`：用户造词存储，按 schema 隔离；`AddUserWord` 单条原子写入；`BatchAddUserWords` 单事务批量写入（批量导入必用，避免逐条 fsync 超时）；`RemoveUserWord`/`UpdateUserWordWeight`；`SearchUserWordsPrefix`/`CountUserWords` 分页查询；权重排序 |
 | `temp_words.go` | `TempDict`：临时词存储（加词过程中的暂存），生命周期短；独立 bucket |
-| `phrases.go` | `PhraseStorage`：短语管理存储；`Put`/`Get`/`List`/`Remove`/`ResetDefaults`；`PhraseRecord.Texts` 和 `PhraseRecord.Name` **已 Deprecated**, 字符组短语改用 `Text` 字段携带 `$AA("name", "chars")` marker, 这两个字段下一版彻底删除 |
-| `migration.go` | `MigratePhraseRecordsToAA()`: 一次性扫描 Phrases bucket, 把旧的 `Texts`+`Name` 字符组记录重写为 `Text` 字段中的 `$AA(...)` marker, 幂等 (`$AA(` 开头跳过)。`dict.DictManager.OpenStore` 后立即调用 |
+| `phrases.go` | `PhraseStorage`：短语管理存储；`Put`/`Get`/`List`/`Remove`/`ResetDefaults`。**2026-05-16 schema 简化**: `PhraseRecord` 字段精简为 `(Code, Text, Weight, Position, Enabled, IsSystem)`, 删除原 `Texts`/`Name`/`Type` 派生字段, **text 是分类的唯一信任源** (`$AA(...)` 字符组 / `$SS(...)` 字符串数组 / `$CC(...)` 命令 / 普通); 包内 `legacyPhraseRecord` 仅供 migration 反序列化旧数据用; `phraseKey` 统一为 `code\x00text`; `RemovePhrase(code, text)` / `SetPhraseEnabled(code, text, enabled)` 删除 name 参数 |
+| `migration.go` | `MigratePhraseRecordsToAA()`: 一次性扫描 Phrases bucket, 把旧的 `Texts`+`Name` 字符组记录重写为 `Text` 字段中的 `$AA(...)` marker, 幂等 (`$AA(` 开头跳过); 用内部 `legacyPhraseRecord` 读旧字段, 写新 `PhraseRecord`。`dict.DictManager.OpenStore` 后立即调用 |
 | `shadow.go` | `ShadowStorage`：Shadow 规则（pin/delete）存储；YAML 序列化/反序列化 |
 | `freq.go` | `FreqStorage`：词频统计存储；`Update`/`Get`/`GetTop`/`Delete` |
 | `write_buffer.go` | `WriteBuffer`：构建模式的原子事务写入缓冲，用于批量操作；`Put`/`Delete`/`Commit` |

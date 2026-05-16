@@ -25,12 +25,12 @@ export interface SystemFontInfo {
 }
 
 // ── 短语类型 ──
+//
+// 2026-05-16 schema 简化: 短语统一为 (code, text, weight) 三元组,
+// text 自描述分类 (含 $AA / $SS / $CC marker → 对应类型, 否则普通短语)。
 export interface PhraseItem {
   code: string;
   text?: string;
-  texts?: string;
-  name?: string;
-  type: "static" | "dynamic" | "array";
   position: number;
   weight?: number;
   // 后端计算的生效权重 (weight>0 → 自身; weight==0 && position>0 → 10000-position; 否则默认 1000)
@@ -284,19 +284,15 @@ export async function getPhraseList(): Promise<PhraseItem[]> {
 export async function addPhrase(
   code: string,
   text: string,
-  texts: string,
-  name: string,
-  type: string,
   position: number,
   weight: number = 0,
 ): Promise<void> {
-  return App.AddPhrase(code, text, texts, name, type, position, weight);
+  return App.AddPhrase(code, text, position, weight);
 }
 
 export async function updatePhrase(
   code: string,
   text: string,
-  name: string,
   newCode: string,
   newText: string,
   newPosition: number,
@@ -306,7 +302,6 @@ export async function updatePhrase(
   return App.UpdatePhrase(
     code,
     text,
-    name,
     newCode,
     newText,
     newPosition,
@@ -327,15 +322,13 @@ export async function validatePhraseValue(
 export async function removePhrase(
   code: string,
   text: string,
-  name: string,
 ): Promise<void> {
-  return App.RemovePhrase(code, text, name);
+  return App.RemovePhrase(code, text);
 }
 
 export interface PhraseDeleteArg {
   code: string;
   text: string;
-  name: string;
 }
 
 // 批量删除短语 (单事务 + 单次 reload, 显著优于循环单删)
@@ -346,10 +339,9 @@ export async function removePhrases(items: PhraseDeleteArg[]): Promise<number> {
 export async function setPhraseEnabled(
   code: string,
   text: string,
-  name: string,
   enabled: boolean,
 ): Promise<void> {
-  return App.SetPhraseEnabled(code, text, name, enabled);
+  return App.SetPhraseEnabled(code, text, enabled);
 }
 
 export async function resetPhrasesToDefault(): Promise<void> {

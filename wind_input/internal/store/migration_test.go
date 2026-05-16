@@ -1,38 +1,49 @@
 package store
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	bolt "go.etcd.io/bbolt"
 )
+
+// seedLegacyPhrase 直接以 bbolt KV 写入旧版 (Texts/Name/Type) 字段格式,
+// 模拟用户从旧版本升级后 db 仍有未迁移的字符组记录。
+func seedLegacyPhrase(t *testing.T, s *Store, key string, legacy legacyPhraseRecord) {
+	t.Helper()
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketPhrases).Put([]byte(key), data)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestMigratePhraseRecordsToAA(t *testing.T) {
 	s := openTestStore(t)
 
-	// 旧格式记录: Texts + Name 非空
-	old := PhraseRecord{
-		Code:     "zzbd",
+	// 旧字符组记录 (Texts + Name 双字段, key 形式 code\x00\x01name)
+	seedLegacyPhrase(t, s, "zzbd\x00\x01标点", legacyPhraseRecord{
 		Name:     "标点",
 		Texts:    "、。·",
 		Type:     "array",
 		Position: 1,
 		Enabled:  true,
 		IsSystem: true,
-	}
-	if err := s.AddPhrase(old); err != nil {
-		t.Fatal(err)
-	}
-	// 普通短语: 不该被改
-	normal := PhraseRecord{Code: "rq", Text: "日期", Type: "static", Enabled: true}
+	})
+
+	// 普通短语 (不应被改)
+	normal := PhraseRecord{Code: "rq", Text: "日期", Enabled: true}
 	if err := s.AddPhrase(normal); err != nil {
 		t.Fatal(err)
 	}
-	// 已是 $AA 形式: 跳过 (幂等)
-	already := PhraseRecord{
-		Code:    "zzsz",
-		Text:    `$AA("数字", "①②")`,
-		Type:    "array",
-		Enabled: true,
-	}
+
+	// 已是 $AA 形式 (幂等, 不应被重写)
+	already := PhraseRecord{Code: "zzsz", Text: `$AA("数字", "①②")`, Enabled: true}
 	if err := s.AddPhrase(already); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +56,7 @@ func TestMigratePhraseRecordsToAA(t *testing.T) {
 		t.Fatalf("expected 1 migrated record, got %d", n)
 	}
 
-	// 校验旧字符组被改写
+	// 校验旧字符组被改写: text 变为 $AA marker
 	recs, err := s.GetPhrasesByCode("zzbd")
 	if err != nil {
 		t.Fatal(err)
@@ -54,12 +65,6 @@ func TestMigratePhraseRecordsToAA(t *testing.T) {
 		t.Fatalf("expected 1 record for zzbd, got %d", len(recs))
 	}
 	got := recs[0]
-	if got.Texts != "" {
-		t.Errorf("Texts should be cleared, got %q", got.Texts)
-	}
-	if got.Name != "" {
-		t.Errorf("Name should be cleared, got %q", got.Name)
-	}
 	if !strings.HasPrefix(got.Text, "$AA(") {
 		t.Errorf("Text should start with $AA(, got %q", got.Text)
 	}

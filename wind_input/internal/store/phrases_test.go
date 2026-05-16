@@ -11,9 +11,9 @@ func TestPhrase_AddAndGetAll(t *testing.T) {
 	s := openTestStore(t)
 
 	phrases := []PhraseRecord{
-		{Code: "rq", Text: "日期", Type: "static", Position: 1, Enabled: true},
-		{Code: "sj", Text: "{time}", Type: "dynamic", Position: 2, Enabled: true},
-		{Code: "dz", Name: "地址", Texts: "北京市|海淀区|中关村", Type: "array", Position: 3, Enabled: true},
+		{Code: "rq", Text: "日期", Position: 1, Enabled: true},
+		{Code: "sj", Text: "{time}", Position: 2, Enabled: true},
+		{Code: "dz", Text: `$AA("地址", "北京市|海淀区|中关村")`, Position: 3, Enabled: true},
 	}
 	for _, p := range phrases {
 		if err := s.AddPhrase(p); err != nil {
@@ -29,13 +29,13 @@ func TestPhrase_AddAndGetAll(t *testing.T) {
 		t.Fatalf("expected 3 phrases, got %d", len(all))
 	}
 
-	// Verify fields are populated correctly.
+	// Verify Code is populated from key, Text is preserved.
 	for _, rec := range all {
 		if rec.Code == "" {
 			t.Error("Code should be populated from key")
 		}
-		if rec.Type == "" {
-			t.Error("Type should be set")
+		if rec.Text == "" {
+			t.Errorf("Text should not be empty for %q", rec.Code)
 		}
 	}
 }
@@ -43,9 +43,9 @@ func TestPhrase_AddAndGetAll(t *testing.T) {
 func TestPhrase_GetByCode(t *testing.T) {
 	s := openTestStore(t)
 
-	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期", Type: "static", Enabled: true})
-	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期2", Type: "static", Enabled: true})
-	_ = s.AddPhrase(PhraseRecord{Code: "sj", Text: "{time}", Type: "dynamic", Enabled: true})
+	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期", Enabled: true})
+	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期2", Enabled: true})
+	_ = s.AddPhrase(PhraseRecord{Code: "sj", Text: "{time}", Enabled: true})
 
 	results, err := s.GetPhrasesByCode("rq")
 	if err != nil {
@@ -64,7 +64,7 @@ func TestPhrase_GetByCode(t *testing.T) {
 func TestPhrase_AddDuplicate(t *testing.T) {
 	s := openTestStore(t)
 
-	rec := PhraseRecord{Code: "rq", Text: "日期", Type: "static", Position: 1, Enabled: true}
+	rec := PhraseRecord{Code: "rq", Text: "日期", Position: 1, Enabled: true}
 	_ = s.AddPhrase(rec)
 	rec.Position = 5
 	_ = s.AddPhrase(rec)
@@ -81,8 +81,8 @@ func TestPhrase_AddDuplicate(t *testing.T) {
 func TestPhrase_Remove(t *testing.T) {
 	s := openTestStore(t)
 
-	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期", Type: "static", Enabled: true})
-	if err := s.RemovePhrase("rq", "日期", ""); err != nil {
+	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期", Enabled: true})
+	if err := s.RemovePhrase("rq", "日期"); err != nil {
 		t.Fatalf("RemovePhrase: %v", err)
 	}
 
@@ -98,8 +98,8 @@ func TestPhrase_Remove(t *testing.T) {
 func TestPhrase_SetEnabled(t *testing.T) {
 	s := openTestStore(t)
 
-	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期", Type: "static", Enabled: true})
-	if err := s.SetPhraseEnabled("rq", "日期", "", false); err != nil {
+	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期", Enabled: true})
+	if err := s.SetPhraseEnabled("rq", "日期", false); err != nil {
 		t.Fatalf("SetPhraseEnabled: %v", err)
 	}
 
@@ -119,19 +119,19 @@ func TestPhrase_SeedNoOverwrite(t *testing.T) {
 	s := openTestStore(t)
 
 	seeds := []PhraseRecord{
-		{Code: "rq", Text: "日期", Type: "static", Position: 1, Enabled: true, IsSystem: true},
-		{Code: "sj", Text: "{time}", Type: "dynamic", Position: 2, Enabled: true, IsSystem: true},
+		{Code: "rq", Text: "日期", Position: 1, Enabled: true, IsSystem: true},
+		{Code: "sj", Text: "{time}", Position: 2, Enabled: true, IsSystem: true},
 	}
 	if err := s.SeedPhrases(seeds); err != nil {
 		t.Fatalf("SeedPhrases (first): %v", err)
 	}
 
 	// Add a custom phrase.
-	_ = s.AddPhrase(PhraseRecord{Code: "custom", Text: "自定义", Type: "static", Enabled: true})
+	_ = s.AddPhrase(PhraseRecord{Code: "custom", Text: "自定义", Enabled: true})
 
 	// Seed again — should be a no-op.
 	newSeeds := []PhraseRecord{
-		{Code: "xx", Text: "新的", Type: "static", Position: 1, Enabled: true, IsSystem: true},
+		{Code: "xx", Text: "新的", Position: 1, Enabled: true, IsSystem: true},
 	}
 	if err := s.SeedPhrases(newSeeds); err != nil {
 		t.Fatalf("SeedPhrases (second): %v", err)
@@ -150,8 +150,8 @@ func TestPhrase_SeedNoOverwrite(t *testing.T) {
 func TestPhrase_ClearAll(t *testing.T) {
 	s := openTestStore(t)
 
-	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期", Type: "static", Enabled: true})
-	_ = s.AddPhrase(PhraseRecord{Code: "sj", Text: "{time}", Type: "dynamic", Enabled: true})
+	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期", Enabled: true})
+	_ = s.AddPhrase(PhraseRecord{Code: "sj", Text: "{time}", Enabled: true})
 
 	if err := s.ClearAllPhrases(); err != nil {
 		t.Fatalf("ClearAllPhrases: %v", err)
@@ -166,17 +166,19 @@ func TestPhrase_ClearAll(t *testing.T) {
 	}
 }
 
-func TestPhrase_ArrayKey(t *testing.T) {
+// TestPhrase_AAMarkerStorage 验证 $AA 字符组短语在新 schema 下用单一 Text
+// 字段存储, 不再有 Name/Texts 双字段。
+func TestPhrase_AAMarkerStorage(t *testing.T) {
 	s := openTestStore(t)
 
 	rec := PhraseRecord{
 		Code:    "dz",
-		Name:    "地址",
-		Texts:   "北京市|海淀区|中关村",
-		Type:    "array",
+		Text:    `$AA("地址", "北京市|海淀区|中关村")`,
 		Enabled: true,
 	}
-	_ = s.AddPhrase(rec)
+	if err := s.AddPhrase(rec); err != nil {
+		t.Fatalf("AddPhrase: %v", err)
+	}
 
 	results, err := s.GetPhrasesByCode("dz")
 	if err != nil {
@@ -185,24 +187,24 @@ func TestPhrase_ArrayKey(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("expected 1, got %d", len(results))
 	}
-	if results[0].Name != "地址" {
-		t.Errorf("expected Name '地址', got %q", results[0].Name)
+	if results[0].Text != `$AA("地址", "北京市|海淀区|中关村")` {
+		t.Errorf("Text mismatch: %q", results[0].Text)
 	}
 
-	// Remove by name.
-	if err := s.RemovePhrase("dz", "", "地址"); err != nil {
-		t.Fatalf("RemovePhrase (array): %v", err)
+	// Remove by text.
+	if err := s.RemovePhrase("dz", `$AA("地址", "北京市|海淀区|中关村")`); err != nil {
+		t.Fatalf("RemovePhrase: %v", err)
 	}
 	count, err := s.PhraseCount()
 	if err != nil {
 		t.Fatalf("PhraseCount: %v", err)
 	}
 	if count != 0 {
-		t.Fatalf("expected 0 after removing array phrase, got %d", count)
+		t.Fatalf("expected 0 after removing $AA phrase, got %d", count)
 	}
 }
 
-// 注入 raw key+value, 模拟 legacy/marker 化前的残留记录
+// putRawPhrase 注入 raw key+value, 模拟 legacy/marker 化前的残留记录
 func putRawPhrase(t *testing.T, s *Store, key []byte, rec PhraseRecord) {
 	t.Helper()
 	if err := s.db.Update(func(tx *bolt.Tx) error {
@@ -217,49 +219,29 @@ func putRawPhrase(t *testing.T, s *Store, key []byte, rec PhraseRecord) {
 	}
 }
 
-// 覆盖各种 legacy / 混合 key 形态, 验证 RemovePhrase 都能命中。
+// TestPhrase_RemoveLegacyKeyForms 验证 RemovePhrase 能命中各种 legacy key
+// 形态 (包括迁移前的 code\x00\x01name 残留)。
+//
+// 2026-05-16 简化后, 删除接口只接受 (code, text), 但内部 ForEach 扫描
+// 兜底匹配 rec.Text, 所以历史 key 形式只要 rec.Text 字段对应即可命中。
 func TestPhrase_RemoveLegacyKeyForms(t *testing.T) {
 	cases := []struct {
 		name    string
 		key     []byte
 		rec     PhraseRecord
 		argText string
-		argName string
 	}{
 		{
-			name:    "legacy_array_name_key",
-			key:     []byte("dz\x00\x01地址"),
-			rec:     PhraseRecord{Name: "地址", Texts: "北京|上海", Type: "array", Enabled: true},
-			argText: "",
-			argName: "地址",
-		},
-		{
-			name:    "marker_text_key_with_array_arg",
+			name:    "marker_text_normal_key",
 			key:     []byte(`dz` + "\x00" + `$AA("地址", "北京|上海")`),
-			rec:     PhraseRecord{Text: `$AA("地址", "北京|上海")`, Type: "array", Enabled: true},
+			rec:     PhraseRecord{Text: `$AA("地址", "北京|上海")`, Enabled: true},
 			argText: `$AA("地址", "北京|上海")`,
-			argName: "",
-		},
-		{
-			name:    "marker_text_key_remove_by_legacy_name",
-			key:     []byte(`dz` + "\x00" + `$AA("地址", "北京|上海")`),
-			rec:     PhraseRecord{Text: `$AA("地址", "北京|上海")`, Type: "array", Enabled: true},
-			argText: "",
-			argName: "地址",
-		},
-		{
-			name:    "legacy_array_key_remove_with_marker_text",
-			key:     []byte("dz\x00\x01地址"),
-			rec:     PhraseRecord{Name: "地址", Texts: "北京|上海", Type: "array", Enabled: true},
-			argText: `$AA("地址", "北京|上海")`,
-			argName: "",
 		},
 		{
 			name:    "normal_text_key",
 			key:     []byte("rq\x00日期"),
-			rec:     PhraseRecord{Text: "日期", Type: "static", Enabled: true},
+			rec:     PhraseRecord{Text: "日期", Enabled: true},
 			argText: "日期",
-			argName: "",
 		},
 	}
 
@@ -276,7 +258,7 @@ func TestPhrase_RemoveLegacyKeyForms(t *testing.T) {
 					break
 				}
 			}
-			if err := s.RemovePhrase(code, tc.argText, tc.argName); err != nil {
+			if err := s.RemovePhrase(code, tc.argText); err != nil {
 				t.Fatalf("RemovePhrase: %v", err)
 			}
 			count, err := s.PhraseCount()
@@ -290,18 +272,15 @@ func TestPhrase_RemoveLegacyKeyForms(t *testing.T) {
 	}
 }
 
-// 批量删除也走 ForEach 兜底
-func TestPhrase_BatchRemoveLegacyMixed(t *testing.T) {
+// TestPhrase_BatchRemove 验证批量删除接口。
+func TestPhrase_BatchRemove(t *testing.T) {
 	s := openTestStore(t)
-	putRawPhrase(t, s, []byte("dz\x00\x01地址"),
-		PhraseRecord{Name: "地址", Texts: "北京|上海", Type: "array", Enabled: true})
-	putRawPhrase(t, s, []byte("rq\x00日期"),
-		PhraseRecord{Text: "日期", Type: "static", Enabled: true})
-	putRawPhrase(t, s, []byte("kp\x00"+`$AA("快捷", "A|B")`),
-		PhraseRecord{Text: `$AA("快捷", "A|B")`, Type: "array", Enabled: true})
+	_ = s.AddPhrase(PhraseRecord{Code: "dz", Text: `$AA("地址", "北京|上海")`, Enabled: true})
+	_ = s.AddPhrase(PhraseRecord{Code: "rq", Text: "日期", Enabled: true})
+	_ = s.AddPhrase(PhraseRecord{Code: "kp", Text: `$AA("快捷", "A|B")`, Enabled: true})
 
 	items := []PhraseRecord{
-		{Code: "dz", Text: "", Name: "地址"},
+		{Code: "dz", Text: `$AA("地址", "北京|上海")`},
 		{Code: "rq", Text: "日期"},
 		{Code: "kp", Text: `$AA("快捷", "A|B")`},
 	}

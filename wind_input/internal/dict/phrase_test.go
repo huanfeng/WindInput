@@ -44,7 +44,6 @@ func loadPhraseLayerFromYAML(t *testing.T, systemFile, userFile string) *PhraseL
 			rec := store.PhraseRecord{
 				Code:     strings.ToLower(e.Code),
 				Text:     e.Text,
-				Type:     detectPhraseType(e),
 				Weight:   resolveWeightFromFileEntry(e),
 				Position: e.Position,
 				Enabled:  !e.Disabled,
@@ -491,8 +490,8 @@ func TestPhraseLayerLegacyPositionStillWorks(t *testing.T) {
 
 	// 直接种子旧记录: Weight 字段缺失 (零值), 仅有 Position
 	if err := s.SeedPhrases([]store.PhraseRecord{
-		{Code: "leg", Text: "旧条目1", Type: "static", Position: 1, Enabled: true, IsSystem: true},
-		{Code: "leg", Text: "旧条目2", Type: "static", Position: 5, Enabled: true, IsSystem: true},
+		{Code: "leg", Text: "旧条目1", Position: 1, Enabled: true, IsSystem: true},
+		{Code: "leg", Text: "旧条目2", Position: 5, Enabled: true, IsSystem: true},
 	}); err != nil {
 		t.Fatal(err)
 	}

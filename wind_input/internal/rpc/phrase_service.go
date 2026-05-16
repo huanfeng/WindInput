@@ -31,6 +31,10 @@ func (p *PhraseService) reloadPhrases() {
 	}
 }
 
+// (detectPhraseStoreFields 已删除, 2026-05-16: PhraseRecord 不再有 Type/Texts/Name
+//  字段, 短语分类完全由 PhraseLayer 在 LoadFromStore 解析 Text 推断, 不需要在
+//  RPC 入口预先推断 type。)
+
 // List 获取所有短语
 func (p *PhraseService) List(args *rpcapi.Empty, reply *rpcapi.PhraseListReply) error {
 	if p.store == nil {
@@ -48,9 +52,6 @@ func (p *PhraseService) List(args *rpcapi.Empty, reply *rpcapi.PhraseListReply) 
 		reply.Phrases[i] = rpcapi.PhraseEntry{
 			Code:     rec.Code,
 			Text:     rec.Text,
-			Texts:    rec.Texts,
-			Name:     rec.Name,
-			Type:     rec.Type,
 			Weight:   rec.Weight,
 			Position: rec.Position,
 			Enabled:  rec.Enabled,
@@ -62,7 +63,9 @@ func (p *PhraseService) List(args *rpcapi.Empty, reply *rpcapi.PhraseListReply) 
 	return nil
 }
 
-// Add 添加短语
+// Add 添加短语. 2026-05-16 简化: PhraseRecord 只有 (Code, Text, Weight,
+// Position, Enabled, IsSystem) 6 个字段。短语分类 (普通 / $AA / $SS / $CC)
+// 完全由 PhraseLayer 在 LoadFromStore 解析 Text 推断, RPC 入口无需 type 字段。
 func (p *PhraseService) Add(args *rpcapi.PhraseAddArgs, reply *rpcapi.Empty) error {
 	if p.store == nil {
 		return fmt.Errorf("store not available")
@@ -70,56 +73,19 @@ func (p *PhraseService) Add(args *rpcapi.PhraseAddArgs, reply *rpcapi.Empty) err
 	if args.Code == "" {
 		return fmt.Errorf("code is required")
 	}
-	// "array" 类型有两种子类:
-	//   - $AA 字符组: Text 留空, Texts+Name 必填 (旧路径)
-	//   - $SS 字符串数组: Text 含 marker, Texts/Name 留空 (2026-05-16)
-	// 因此 array 类型的校验是: 满足任意一种形态即可。
-	if args.Type == "array" {
-		hasAA := args.Texts != "" && args.Name != ""
-		hasSS := dict.HasSSMarker(args.Text)
-		if !hasAA && !hasSS {
-			return fmt.Errorf("array type requires either texts+name ($AA) or text with $SS marker")
-		}
-	} else {
-		if args.Text == "" {
-			return fmt.Errorf("text is required")
-		}
-	}
-
-	// 自动从 Text 推断 Type / 拆出字符组 marker, 供新版 yaml 导入路径
-	// (该路径只填 Code/Text/Weight, Type/Texts/Name 留空)。
-	pType := args.Type
-	pText := args.Text
-	pTexts := args.Texts
-	pName := args.Name
-	if pType == "" {
-		if name, chars, ok := dict.ParseAAMarker(pText); ok {
-			pType = "array"
-			pTexts = chars
-			pName = name
-			pText = "" // $AA store 不再保存原始 marker 字符串
-		} else if dict.HasSSMarker(pText) {
-			// $SS 字符串数组: 保留原 marker 文本 (含嵌套 $CC 元素), Texts/Name 留空
-			pType = "array"
-		} else if dict.HasVariable(pText) {
-			pType = "dynamic"
-		} else {
-			pType = "static"
-		}
+	if args.Text == "" {
+		return fmt.Errorf("text is required")
 	}
 
 	rec := store.PhraseRecord{
 		Code:     args.Code,
-		Text:     pText,
-		Texts:    pTexts,
-		Name:     pName,
-		Type:     pType,
+		Text:     args.Text,
 		Weight:   args.Weight,
 		Position: args.Position,
 		Enabled:  true,
 	}
 
-	p.logger.Info("RPC Phrase.Add", "type", pType, "codeLen", len(args.Code))
+	p.logger.Info("RPC Phrase.Add", "codeLen", len(args.Code))
 	if err := p.store.AddPhrase(rec); err != nil {
 		return err
 	}
@@ -139,7 +105,7 @@ func (p *PhraseService) Update(args *rpcapi.PhraseUpdateArgs, reply *rpcapi.Empt
 
 	// 处理启用/禁用切换
 	if args.Enabled != nil {
-		if err := p.store.SetPhraseEnabled(args.Code, args.Text, args.Name, *args.Enabled); err != nil {
+		if err := p.store.SetPhraseEnabled(args.Code, args.Text, *args.Enabled); err != nil {
 			return fmt.Errorf("set phrase enabled: %w", err)
 		}
 		p.logger.Info("RPC Phrase.Update enabled", "codeLen", len(args.Code), "enabled", *args.Enabled)
@@ -153,16 +119,11 @@ func (p *PhraseService) Update(args *rpcapi.PhraseUpdateArgs, reply *rpcapi.Empt
 			return fmt.Errorf("get phrases by code: %w", err)
 		}
 
-		// 找到匹配的记录
+		// 找到匹配的记录: 按 (code, text) 唯一定位
 		var found *store.PhraseRecord
 		for i := range records {
 			rec := &records[i]
-			if args.Name != "" {
-				if rec.Name == args.Name {
-					found = rec
-					break
-				}
-			} else if rec.Text == args.Text {
+			if rec.Text == args.Text {
 				found = rec
 				break
 			}
@@ -197,7 +158,7 @@ func (p *PhraseService) Update(args *rpcapi.PhraseUpdateArgs, reply *rpcapi.Empt
 
 		if needDelete {
 			// 删除旧记录后以新 code/text 写入
-			if err := p.store.RemovePhrase(args.Code, args.Text, args.Name); err != nil {
+			if err := p.store.RemovePhrase(args.Code, args.Text); err != nil {
 				return fmt.Errorf("remove old phrase: %w", err)
 			}
 			if err := p.store.AddPhrase(*found); err != nil {
@@ -226,7 +187,7 @@ func (p *PhraseService) Remove(args *rpcapi.PhraseRemoveArgs, reply *rpcapi.Empt
 	}
 
 	p.logger.Info("RPC Phrase.Remove", "codeLen", len(args.Code))
-	if err := p.store.RemovePhrase(args.Code, args.Text, args.Name); err != nil {
+	if err := p.store.RemovePhrase(args.Code, args.Text); err != nil {
 		return err
 	}
 	p.reloadPhrases()
@@ -271,7 +232,6 @@ func (p *PhraseService) BatchRemove(args *rpcapi.PhraseBatchRemoveArgs, reply *r
 		records = append(records, store.PhraseRecord{
 			Code: it.Code,
 			Text: it.Text,
-			Name: it.Name,
 		})
 	}
 	if err := p.store.RemovePhrasesBatch(records); err != nil {
@@ -286,16 +246,12 @@ func (p *PhraseService) BatchRemove(args *rpcapi.PhraseBatchRemoveArgs, reply *r
 	return nil
 }
 
-// BatchAdd 批量添加短语
+// BatchAdd 批量添加短语. 2026-05-16 简化: 只看 (Code, Text, Weight, Position)。
 func (p *PhraseService) BatchAdd(args *rpcapi.PhraseBatchAddArgs, reply *rpcapi.PhraseBatchAddReply) error {
 	count := 0
 	for _, a := range args.Phrases {
-		if a.Code == "" || (a.Text == "" && a.Texts == "") {
+		if a.Code == "" || a.Text == "" {
 			continue
-		}
-		pType := a.Type
-		if pType == "" {
-			pType = "static"
 		}
 		pos := a.Position
 		if pos <= 0 {
@@ -304,9 +260,6 @@ func (p *PhraseService) BatchAdd(args *rpcapi.PhraseBatchAddArgs, reply *rpcapi.
 		rec := store.PhraseRecord{
 			Code:     a.Code,
 			Text:     a.Text,
-			Texts:    a.Texts,
-			Name:     a.Name,
-			Type:     pType,
 			Weight:   a.Weight,
 			Position: pos,
 			Enabled:  true,

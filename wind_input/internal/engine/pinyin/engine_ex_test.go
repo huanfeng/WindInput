@@ -1088,13 +1088,6 @@ sort: by_weight
 				Code: e.Code, Text: e.Text,
 				Position: e.Position, Enabled: true, IsSystem: true,
 			}
-			if _, _, ok := dict.ParseAAMarker(e.Text); ok {
-				rec.Type = "array"
-			} else if strings.Contains(rec.Text, "$") {
-				rec.Type = "dynamic"
-			} else {
-				rec.Type = "static"
-			}
 			if rec.Position <= 0 {
 				rec.Position = 1
 			}

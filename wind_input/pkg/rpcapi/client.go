@@ -432,8 +432,8 @@ func (c *Client) PhraseUpdate(args PhraseUpdateArgs) error {
 }
 
 // PhraseRemove 删除短语
-func (c *Client) PhraseRemove(code, text, name string) error {
-	return c.call("Phrase.Remove", &PhraseRemoveArgs{Code: code, Text: text, Name: name}, &Empty{})
+func (c *Client) PhraseRemove(code, text string) error {
+	return c.call("Phrase.Remove", &PhraseRemoveArgs{Code: code, Text: text}, &Empty{})
 }
 
 // PhraseBatchRemove 批量删除短语

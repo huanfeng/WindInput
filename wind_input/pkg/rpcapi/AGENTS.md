@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-20 | Updated: 2026-05-02 -->
+<!-- Generated: 2026-04-20 | Updated: 2026-05-16 -->
 
 # pkg/rpcapi
 
@@ -33,6 +33,14 @@ JSON-RPC 协议的请求/响应类型定义及帧协议实现。供 `internal/rp
 | `batch_put` `batch_add` `batch_set` | 批量操作 |
 | `updated` | 聚合"有数据更新"信令（stats 心跳） |
 | `paused` `resumed` | 服务暂停/恢复 |
+
+### Phrase schema (2026-05-16 简化)
+
+`PhraseEntry` / `PhraseAddArgs` / `PhraseUpdateArgs` / `PhraseRemoveArgs` 字段统一为
+`(code, text, weight, position, enabled, is_system)`, 删除 `Type` / `Texts` / `Name` 派生字段。
+短语分类完全由 `text` 内容自描述 (`$AA(...)` 字符组 / `$SS(...)` 字符串数组 / `$CC(...)` 命令),
+后端 PhraseLayer 在 LoadFromStore 时解析推断。`PhraseRemove` 客户端方法签名
+`PhraseRemove(code, text)` (无 name)。
 
 ### Working In This Directory
 - **管道名称**：`\\.\pipe\wind_input{Suffix}_rpc`（Suffix 通过 `buildvariant.Suffix()` 获取，用于多版本共存）

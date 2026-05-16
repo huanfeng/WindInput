@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-05-16 -->
 
 # api
 
@@ -30,7 +30,7 @@
 |------|------|
 | Schema 方案管理 | `getAvailableSchemas`、`getSchemaConfig`、`saveSchemaConfig`、`switchActiveSchema`、`getEnabledSchemasWithDictStats` |
 | 配置管理 | `getConfig`、`saveConfig`、`reloadConfig`、`getTSFLogConfig`、`saveTSFLogConfig` |
-| 短语管理 | `getPhrases`、`getSystemPhrases`、`savePhrases`、`addPhrase`、`removePhrase`、`updatePhrase`、`overrideSystemPhrase`、`removeSystemPhraseOverride` |
+| 短语管理 | `getPhraseList`、`addPhrase(code, text, position, weight)`、`updatePhrase`、`removePhrase(code, text)`、`removePhrases`、`setPhraseEnabled(code, text, enabled)`、`resetPhrasesToDefault`、`validatePhraseValue`、`importPhrases`、`exportPhrases`、`pickExePath`、`pickAnyPath` (2026-05-16 schema 简化: 系统/用户短语合并为单一 `PhraseItem`, 删除原 `name`/`texts`/`type` 字段, `text` 自描述分类) |
 | 用户词库（当前方案） | `getUserDict`、`addUserWord`、`removeUserWord`、`searchUserDict`、`getUserDictStats`、`reloadUserDict`、`getUserDictSchemaID`、`switchUserDictSchema`、`importUserDict`、`exportUserDict` |
 | 用户词库（按方案） | `getUserDictBySchema`、`addUserWordForSchema`、`removeUserWordForSchema`、`searchUserDictBySchema`、`importUserDictForSchema`、`exportUserDictForSchema` |
 | 临时词库 | `getTempDictBySchema`、`clearTempDictForSchema`、`promoteTempWordForSchema`、`promoteAllTempWordsForSchema`、`removeTempWordForSchema` |

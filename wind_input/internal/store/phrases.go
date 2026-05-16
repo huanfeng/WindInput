@@ -12,33 +12,46 @@ import (
 // Code is not stored in JSON (it's part of the bbolt key), but populated by
 // read methods.
 //
-// Deprecated 字段:
-//   - Texts / Name: 字符组短语已统一改用 Text 字段携带 $AA("name", "chars")
-//     marker (见 internal/dict/aa_marker.go)。MigratePhraseRecordsToAA 会把
-//     旧记录改写到 Text 字段并清空这两个字段。本轮保留是为了让 migration 自己
-//     还能读到旧字段; 下一轮可彻底删除。
+// 2026-05-16 简化: 删除 Type / Texts / Name 字段, marker 信息完全由 Text
+// 携带 (与用户词库 (code, text, weight) 三元组一致)。旧 db 数据中的
+// Texts/Name/Type 字段在 JSON unmarshal 时被丢弃; 旧 $AA 字符组记录由
+// MigratePhraseRecordsToAA 在 store.Open 后自动重组为 Text 中的
+// $AA("name", "chars") marker 形式 (内部用 legacyPhraseRecord 读旧字段)。
+//
+// 短语分类 (普通 / cmdbar / 字符组 / 字符串数组) 完全由 PhraseLayer 在
+// LoadFromStore 阶段通过解析 Text 推断, 不再依赖存储字段。
 type PhraseRecord struct {
-	Code  string `json:"-"`               // 从 key 解析，不序列化
-	Text  string `json:"text,omitempty"`  // 普通/动态/字符组($AA) 短语的文本
-	Texts string `json:"texts,omitempty"` // Deprecated: 用 Text 的 $AA marker 替代
-	Name  string `json:"name,omitempty"`  // Deprecated: 用 Text 的 $AA marker 替代
-	Type  string `json:"type"`
+	Code string `json:"-"`              // 从 key 解析，不序列化
+	Text string `json:"text,omitempty"` // 短语原文 (含 $AA / $SS / $CC marker 时由 PhraseLayer 解析)
 	// Weight 是显式权重 (0~10000), 优先于 Position。
-	// 0 (默认零值) 表示"未设置", 由 PhraseLayer 走 Position fallback。
+	// 0 (默认零值) 表示"未设置", 由 PhraseLayer 走默认值 1000。
 	Weight   int  `json:"w,omitempty"`
 	Position int  `json:"pos"`
 	Enabled  bool `json:"on"`
 	IsSystem bool `json:"sys,omitempty"`
 }
 
+// legacyPhraseRecord 仅在 MigratePhraseRecordsToAA 内部使用, 用于反序列化
+// 旧版 store 中带 Texts/Name/Type 字段的字符组记录, 将其重组为新版 PhraseRecord
+// (Text 含 $AA marker)。
+//
+// 调用方: store/migration.go 唯一引用点; 其他包不应使用此类型。
+type legacyPhraseRecord struct {
+	Text     string `json:"text,omitempty"`
+	Texts    string `json:"texts,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Weight   int    `json:"w,omitempty"`
+	Position int    `json:"pos"`
+	Enabled  bool   `json:"on"`
+	IsSystem bool   `json:"sys,omitempty"`
+}
+
 // phraseKey returns the composite key for a PhraseRecord.
-// Array phrases use "code\x00\x01name" only when Name 仍非空 (旧格式兼容);
-// 字符组 marker 化后 Name 已被清空, 用 Text ($AA marker) 作为 key 主体,
-// 走与普通短语相同的 "code\x00text" 路径, 避免出现孤儿 "code\x00\x01" 坏 key。
+// 简化后 (2026-05-16): 所有 PhraseRecord 统一用 "code\x00text" 作为 key。
+// 旧版字符组的 "code\x00\x01name" 形式由 MigratePhraseRecordsToAA 在 store.Open
+// 后转换为新格式 (Text 含 $AA marker, key 走默认路径)。
 func phraseKey(rec PhraseRecord) []byte {
-	if rec.Type == "array" && rec.Name != "" {
-		return []byte(rec.Code + "\x00\x01" + rec.Name)
-	}
 	return []byte(rec.Code + "\x00" + rec.Text)
 }
 
@@ -116,30 +129,25 @@ func (s *Store) UpdatePhrase(rec PhraseRecord) error {
 	return s.AddPhrase(rec)
 }
 
-// RemovePhrase deletes a phrase by its code and either text (regular/dynamic)
-// or name (array). If name is non-empty, the array key format is used.
+// RemovePhrase deletes a phrase by (code, text). 2026-05-16 简化: 不再有
+// name 参数, 字符组短语的 name 已嵌入 text 的 $AA marker, key 也统一为
+// "code\x00text"。
 //
-// 兼容性: 数组类条目历史上可能存在多种 key 形式:
-//   - 旧种子/旧 Name 字段: "code\x00\x01name"
-//   - marker 化后: "code\x00$AA(name, chars)" (Name 已清空)
-//   - 其它 legacy 形态 (旧迁移残留)
-//
-// 删除策略:
-//  1. 先尝试已知精确 key (快速路径)
-//  2. 再扫描 bucket 内所有 code 前缀匹配的记录, 按身份 (Text/Name/Texts/$AA)
-//     做容忍匹配兜底, 覆盖任意历史 key 形态。
-func (s *Store) RemovePhrase(code, text, name string) error {
+// 兼容性: 历史上 array 短语用 "code\x00\x01name" 作为 key, 该形式由
+// MigratePhraseRecordsToAA 在 store.Open 后自动改写为新格式。但若用户的
+// db 由极旧版本升级、migration 未跑过, 可能仍有 legacy key 残留 —— 由
+// ForEach 扫描兜底删除匹配的 rec.Text 即可。
+func (s *Store) RemovePhrase(code, text string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketPhrases)
 		if b == nil {
 			return nil
 		}
-		return removePhraseInBucket(b, code, text, name)
+		return removePhraseInBucket(b, code, text)
 	})
 }
 
 // RemovePhrasesBatch deletes multiple phrases in a single transaction.
-// 每项 (code,text,name) 都按 RemovePhrase 同样的兼容性策略 (精确 key + ForEach 扫描兜底)。
 func (s *Store) RemovePhrasesBatch(items []PhraseRecord) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketPhrases)
@@ -147,7 +155,7 @@ func (s *Store) RemovePhrasesBatch(items []PhraseRecord) error {
 			return nil
 		}
 		for _, rec := range items {
-			if err := removePhraseInBucket(b, rec.Code, rec.Text, rec.Name); err != nil {
+			if err := removePhraseInBucket(b, rec.Code, rec.Text); err != nil {
 				return err
 			}
 		}
@@ -155,16 +163,15 @@ func (s *Store) RemovePhrasesBatch(items []PhraseRecord) error {
 	})
 }
 
-// removePhraseInBucket: 先按已知 key 形态精确删, 再扫描 bucket 用 matchesIdentity
-// 兜底匹配所有 legacy key。删除是低频操作, O(N) 扫描成本可接受。
-func removePhraseInBucket(b *bolt.Bucket, code, text, name string) error {
+// removePhraseInBucket: 先按精确 key (code\x00text) 删, 再扫描 bucket 找
+// rec.Text 等于目标 text 的记录兜底 (覆盖 legacy key 形态)。删除是低频操作,
+// O(N) 扫描成本可接受。
+func removePhraseInBucket(b *bolt.Bucket, code, text string) error {
 	// 1) 精确 key 快速路径
-	for _, k := range phraseDeletionKeys(code, text, name) {
-		if err := b.Delete(k); err != nil {
-			return err
-		}
+	if err := b.Delete([]byte(code + "\x00" + text)); err != nil {
+		return err
 	}
-	// 2) ForEach 扫描兜底: 收集匹配 key, 在 ForEach 结束后再删除
+	// 2) ForEach 扫描兜底: 收集 rec.Text 匹配的 key 删除 (legacy key 兼容)
 	codePrefix := []byte(code + "\x00")
 	var toDelete [][]byte
 	err := b.ForEach(func(k, v []byte) error {
@@ -173,16 +180,9 @@ func removePhraseInBucket(b *bolt.Bucket, code, text, name string) error {
 		}
 		var rec PhraseRecord
 		if uerr := json.Unmarshal(v, &rec); uerr != nil {
-			// 无法解析: 若 key 后半段恰好等于目标 identity 也删除
-			_, ident := parsePhraseKey(k)
-			if ident == text || (name != "" && ident == "\x01"+name) {
-				kc := make([]byte, len(k))
-				copy(kc, k)
-				toDelete = append(toDelete, kc)
-			}
 			return nil
 		}
-		if matchesPhraseIdentity(rec, text, name) {
+		if text != "" && rec.Text == text {
 			kc := make([]byte, len(k))
 			copy(kc, k)
 			toDelete = append(toDelete, kc)
@@ -200,105 +200,15 @@ func removePhraseInBucket(b *bolt.Bucket, code, text, name string) error {
 	return nil
 }
 
-// matchesPhraseIdentity 容忍历史 Text/Name/Texts 字段任一组合,
-// 判断一条 PhraseRecord 是否对应外部传入的 (text, name) 身份。
-//
-// 匹配规则 (任一命中即视为匹配):
-//   - Text 完全相等 (普通短语 / $AA marker 化后)
-//   - Name 完全相等且非空 (旧 array 残留)
-//   - 旧 array: 传入 name 与 rec.Name 一致 (rec.Texts 不参与匹配, 因为 UI 侧
-//     可能只传 name)
-//   - 传入 text 是 $AA marker, 且其内含 name 与 rec.Name 一致 (marker 化前残留)
-//   - rec.Text 是 $AA marker, 且其 name 与传入 name 一致 (反向)
-func matchesPhraseIdentity(rec PhraseRecord, text, name string) bool {
-	if text != "" && rec.Text == text {
-		return true
-	}
-	if name != "" && rec.Name == name {
-		return true
-	}
-	// 传入是 $AA marker, rec 是旧 array 残留
-	if extraName, ok := extractAANameForKey(text); ok && extraName != "" {
-		if rec.Name == extraName {
-			return true
-		}
-	}
-	// rec 是 $AA marker, 传入是旧 name
-	if name != "" {
-		if recName, ok := extractAANameForKey(rec.Text); ok && recName == name {
-			return true
-		}
-	}
-	// 兜底: 传入 text 为空 + name 为空时不匹配任何记录, 避免误删
-	return false
-}
-
-// phraseDeletionKeys 返回某条短语可能对应的所有历史 key 形式,
-// 删除时依次尝试以兼容 marker 化前后产生的混合数据。
-func phraseDeletionKeys(code, text, name string) [][]byte {
-	keys := make([][]byte, 0, 2)
-	keys = append(keys, []byte(code+"\x00"+text))
-	if name != "" {
-		keys = append(keys, []byte(code+"\x00\x01"+name))
-	}
-	// 若 text 是 $AA marker, 尝试解析出旧 name 作为额外候选 key
-	if extraName, ok := extractAANameForKey(text); ok && extraName != name {
-		keys = append(keys, []byte(code+"\x00\x01"+extraName))
-	}
-	return keys
-}
-
-// extractAANameForKey 粗略提取 $AA("name", ...) 中的 name 字段,
-// 用于构造兼容的旧 "code\x00\x01name" 删除 key。
-// 仅做最小解析: 找首个双引号到下一个双引号之间的内容, 不处理转义。
-// 设计意图: 删除路径要尽量宽容, 解析失败时返回 false 即可。
-func extractAANameForKey(text string) (string, bool) {
-	const prefix = "$AA("
-	t := text
-	// 跳过首尾空白
-	for len(t) > 0 && (t[0] == ' ' || t[0] == '\t') {
-		t = t[1:]
-	}
-	if len(t) < len(prefix)+2 || t[:len(prefix)] != prefix {
-		return "", false
-	}
-	body := t[len(prefix):]
-	// 查找第一个 "
-	i := 0
-	for i < len(body) && body[i] != '"' {
-		i++
-	}
-	if i >= len(body) {
-		return "", false
-	}
-	start := i + 1
-	j := start
-	for j < len(body) {
-		if body[j] == '\\' && j+1 < len(body) {
-			j += 2
-			continue
-		}
-		if body[j] == '"' {
-			return body[start:j], true
-		}
-		j++
-	}
-	return "", false
-}
-
-// SetPhraseEnabled toggles the Enabled flag of an existing phrase.
-func (s *Store) SetPhraseEnabled(code, text, name string, enabled bool) error {
+// SetPhraseEnabled toggles the Enabled flag of an existing phrase, identified
+// by (code, text)。
+func (s *Store) SetPhraseEnabled(code, text string, enabled bool) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketPhrases)
 		if b == nil {
 			return fmt.Errorf("Phrases bucket not found")
 		}
-		var key []byte
-		if name != "" {
-			key = []byte(code + "\x00\x01" + name)
-		} else {
-			key = []byte(code + "\x00" + text)
-		}
+		key := []byte(code + "\x00" + text)
 		raw := b.Get(key)
 		if raw == nil {
 			return fmt.Errorf("SetPhraseEnabled: entry %q not found", string(key))

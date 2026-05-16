@@ -580,14 +580,14 @@ func TestPhraseAddAndList(t *testing.T) {
 
 	var empty rpcapi.Empty
 	err := client.call("Phrase.Add", &rpcapi.PhraseAddArgs{
-		Code: "dh", Text: "电话", Type: "text", Position: 0,
+		Code: "dh", Text: "电话", Position: 0,
 	}, &empty)
 	if err != nil {
 		t.Fatalf("Phrase.Add: %v", err)
 	}
 
 	err = client.call("Phrase.Add", &rpcapi.PhraseAddArgs{
-		Code: "dz", Text: "地址", Type: "text", Position: 1,
+		Code: "dz", Text: "地址", Position: 1,
 	}, &empty)
 	if err != nil {
 		t.Fatalf("Phrase.Add 2: %v", err)
@@ -609,7 +609,7 @@ func TestPhraseUpdate(t *testing.T) {
 
 	var empty rpcapi.Empty
 	client.call("Phrase.Add", &rpcapi.PhraseAddArgs{
-		Code: "sj", Text: "时间", Type: "text", Position: 0,
+		Code: "sj", Text: "时间", Position: 0,
 	}, &empty)
 
 	// 更新文本
@@ -641,7 +641,7 @@ func TestPhraseUpdateEnabled(t *testing.T) {
 
 	var empty rpcapi.Empty
 	client.call("Phrase.Add", &rpcapi.PhraseAddArgs{
-		Code: "xx", Text: "测试", Type: "text", Position: 0,
+		Code: "xx", Text: "测试", Position: 0,
 	}, &empty)
 
 	// 禁用
@@ -668,7 +668,7 @@ func TestPhraseRemove(t *testing.T) {
 
 	var empty rpcapi.Empty
 	client.call("Phrase.Add", &rpcapi.PhraseAddArgs{
-		Code: "rm", Text: "待删除", Type: "text", Position: 0,
+		Code: "rm", Text: "待删除", Position: 0,
 	}, &empty)
 
 	err := client.call("Phrase.Remove", &rpcapi.PhraseRemoveArgs{Code: "rm", Text: "待删除"}, &empty)
@@ -692,7 +692,7 @@ func TestPhraseResetDefaults(t *testing.T) {
 	var empty rpcapi.Empty
 	// 添加自定义短语
 	client.call("Phrase.Add", &rpcapi.PhraseAddArgs{
-		Code: "custom", Text: "自定义", Type: "text", Position: 0,
+		Code: "custom", Text: "自定义", Position: 0,
 	}, &empty)
 
 	// 重置
@@ -719,26 +719,18 @@ func TestPhraseAddValidation(t *testing.T) {
 
 	// 缺少 code
 	err := client.call("Phrase.Add", &rpcapi.PhraseAddArgs{
-		Text: "无编码", Type: "text",
+		Text: "无编码",
 	}, &empty)
 	if err == nil {
 		t.Error("expected error when code is empty")
 	}
 
-	// array 类型缺少 texts 和 name
+	// 缺少 text (2026-05-16 schema 简化后, text 是唯一信任源)
 	err = client.call("Phrase.Add", &rpcapi.PhraseAddArgs{
-		Code: "arr", Type: "array",
+		Code: "tt",
 	}, &empty)
 	if err == nil {
-		t.Error("expected error for array type without texts/name")
-	}
-
-	// text 类型缺少 text
-	err = client.call("Phrase.Add", &rpcapi.PhraseAddArgs{
-		Code: "tt", Type: "text",
-	}, &empty)
-	if err == nil {
-		t.Error("expected error for text type without text")
+		t.Error("expected error when text is empty")
 	}
 }
 

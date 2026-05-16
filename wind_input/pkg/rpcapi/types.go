@@ -308,14 +308,15 @@ type SystemResetDBReply struct {
 }
 
 // ── Phrase 服务类型 ──
+//
+// 2026-05-16 schema 简化: 短语统一为 (code, text, weight) 三元组,
+// 不再保留派生字段 Type/Texts/Name。短语分类 (普通 / $AA / $SS / $CC)
+// 完全由 PhraseLayer 在 LoadFromStore 时从 Text 内容推断。
 
 // PhraseEntry 短语条目
 type PhraseEntry struct {
-	Code  string `json:"code"`
-	Text  string `json:"text,omitempty"`
-	Texts string `json:"texts,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Type  string `json:"type"`
+	Code string `json:"code"`
+	Text string `json:"text,omitempty"`
 	// Weight 是显式权重 (0~10000, 与码表/拼音范化后同区间),
 	// 0 表示未设置, 后端走 Position fallback。
 	Weight   int  `json:"weight,omitempty"`
@@ -332,11 +333,8 @@ type PhraseListReply struct {
 
 // PhraseAddArgs 添加短语请求
 type PhraseAddArgs struct {
-	Code  string `json:"code"`
-	Text  string `json:"text,omitempty"`
-	Texts string `json:"texts,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Type  string `json:"type"`
+	Code string `json:"code"`
+	Text string `json:"text,omitempty"`
 	// Weight 显式权重 (0~10000), 优先于 Position; 0 表示未设置。
 	Weight   int `json:"weight,omitempty"`
 	Position int `json:"position"`
@@ -346,14 +344,12 @@ type PhraseAddArgs struct {
 type PhraseRemoveArgs struct {
 	Code string `json:"code"`
 	Text string `json:"text,omitempty"`
-	Name string `json:"name,omitempty"`
 }
 
 // PhraseUpdateArgs 更新短语请求
 type PhraseUpdateArgs struct {
 	Code        string `json:"code"`
 	Text        string `json:"text,omitempty"`
-	Name        string `json:"name,omitempty"`
 	NewCode     string `json:"new_code,omitempty"`
 	NewText     string `json:"new_text,omitempty"`
 	NewPosition int    `json:"new_position,omitempty"`

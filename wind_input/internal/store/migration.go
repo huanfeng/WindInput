@@ -11,13 +11,13 @@ import (
 
 // MigratePhraseRecordsToAA 将 bbolt Phrases bucket 内旧格式的字符组短语
 // (Texts + Name 双字段) 一次性重写为 $AA("name", "chars") marker 形式,
-// 写回到 Text 字段并清空 Texts/Name。
+// 写入新版 PhraseRecord.Text 字段并删除多余字段。
 //
-// 幂等性: 已经是 $AA( 开头的 Text 字段跳过, 因此多次启动安全。
-// 调用时机: store.Open 后、dict manager LoadFromStore 前。
+// 幂等性: 已经是 $AA( 开头的 Text 字段跳过, 多次启动安全。
+// 调用时机: store.Open 后、dict manager LoadFromStore 前 (manager.go::OpenStore)。
 //
-// 本轮 PhraseRecord 保留 Texts/Name 字段 (标 deprecated), 下一版才彻底删除。
-// 这一保留是必要的, 因为 migration 自身需要读这两个字段。
+// 实现: 用 legacyPhraseRecord 读旧字段 (新 PhraseRecord 已删 Texts/Name/Type),
+// 重组完成后写新 PhraseRecord (只含 Code/Text/Weight/Position/Enabled/IsSystem)。
 func (s *Store) MigratePhraseRecordsToAA() (migrated int, err error) {
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketPhrases)
@@ -33,37 +33,35 @@ func (s *Store) MigratePhraseRecordsToAA() (migrated int, err error) {
 
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var rec PhraseRecord
-			if uerr := json.Unmarshal(v, &rec); uerr != nil {
+			var legacy legacyPhraseRecord
+			if uerr := json.Unmarshal(v, &legacy); uerr != nil {
 				continue
 			}
 			// 已是 $AA marker, 幂等跳过
-			if strings.HasPrefix(strings.TrimSpace(rec.Text), "$AA(") {
+			if strings.HasPrefix(strings.TrimSpace(legacy.Text), "$AA(") {
 				continue
 			}
-			// 没有 Texts/Name 的不是字符组, 跳过
-			if rec.Texts == "" {
+			// 没有 Texts/Name 的不是旧字符组, 跳过 (普通 / dynamic / $SS / $CC 等)
+			if legacy.Texts == "" {
 				continue
 			}
-			// 旧字符组: 重写 Text 为 $AA(name, chars)
-			rec.Text = fmt.Sprintf("$AA(%s, %s)",
-				strconv.Quote(rec.Name), strconv.Quote(rec.Texts))
-			rec.Texts = ""
-			rec.Name = ""
-			// 类型也归一化为 array (保持下游 LoadFromStore 行为不变)
-			if rec.Type == "" {
-				rec.Type = "array"
-			}
-			// 从 key 提取 code (key 形式: code\x00\x01name)
+			// 重组为 $AA marker
+			markerText := fmt.Sprintf("$AA(%s, %s)",
+				strconv.Quote(legacy.Name), strconv.Quote(legacy.Texts))
 			code, _ := parsePhraseKey(k)
-			rec.Code = code
+			rec := PhraseRecord{
+				Code:     code,
+				Text:     markerText,
+				Weight:   legacy.Weight,
+				Position: legacy.Position,
+				Enabled:  legacy.Enabled,
+				IsSystem: legacy.IsSystem,
+			}
 
 			newData, mErr := json.Marshal(rec)
 			if mErr != nil {
 				return fmt.Errorf("migrate phrase: marshal: %w", mErr)
 			}
-			// 新 key: array 类型用 code\x00text (因为 Name 已清空, phraseKey
-			// 走非 array 分支会用 Text=$AA(...))
 			newKey := []byte(code + "\x00" + rec.Text)
 
 			oldKeyCopy := make([]byte, len(k))

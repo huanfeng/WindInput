@@ -157,7 +157,6 @@ func (dm *DictManager) SeedDefaultPhrases() error {
 			rec := store.PhraseRecord{
 				Code:     strings.ToLower(e.Code),
 				Text:     e.Text,
-				Type:     detectPhraseType(e),
 				Weight:   resolveWeightFromFileEntry(e),
 				Position: e.Position,
 				Enabled:  !e.Disabled,
@@ -179,7 +178,6 @@ func (dm *DictManager) SeedDefaultPhrases() error {
 				rec := store.PhraseRecord{
 					Code:     strings.ToLower(e.Code),
 					Text:     e.Text,
-					Type:     detectPhraseType(e),
 					Position: e.Position,
 					Enabled:  !e.Disabled,
 					IsSystem: true,

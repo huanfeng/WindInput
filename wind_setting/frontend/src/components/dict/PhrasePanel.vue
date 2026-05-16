@@ -47,7 +47,7 @@ const hasValidationError = ref(false);
 const continuousAdd = ref(false);
 
 function phraseKey(item: PhraseItem): string {
-  return `${item.code}||${item.text || ""}||${item.name || ""}`;
+  return `${item.code}||${item.text || ""}`;
 }
 
 function itemContent(item: PhraseItem): string {
@@ -300,22 +300,14 @@ async function handleSave() {
     if (editingPhrase.value) {
       const oldCode = editingPhrase.value.code;
       const oldText = editingPhrase.value.text || "";
-      const oldName = editingPhrase.value.name || "";
       const newCode = code !== oldCode ? code : "";
       const newText = text;
-      await updatePhrase(
-        oldCode,
-        oldText,
-        oldName,
-        newCode,
-        newText,
-        0,
-        w,
-        null,
-      );
+      await updatePhrase(oldCode, oldText, newCode, newText, 0, w, null);
       toast("短语已更新");
     } else {
-      await addPhrase(code, text, "", "", "static", 0, w);
+      // 2026-05-16 schema 简化后, 短语类型完全由 text 内容自描述
+      // ($AA/$SS/$CC marker), 后端不需要 type 入参。
+      await addPhrase(code, text, 0, w);
       toast("短语已添加");
     }
     // 编辑模式 / 非连续添加: 保存后关闭。
@@ -336,12 +328,7 @@ async function handleSave() {
 // ── Toggle enabled ──
 async function handleToggleEnabled(item: PhraseItem) {
   try {
-    await setPhraseEnabled(
-      item.code,
-      item.text || "",
-      item.name || "",
-      !item.enabled,
-    );
+    await setPhraseEnabled(item.code, item.text || "", !item.enabled);
     await loadData();
   } catch (e) {
     toast(`操作失败: ${e}`, "error");
@@ -354,7 +341,7 @@ async function handleRemove(item: PhraseItem) {
   const ok = await confirm(`确定删除短语「${item.code}」（${content}）吗？`);
   if (!ok) return;
   try {
-    await removePhrase(item.code, item.text || "", item.name || "");
+    await removePhrase(item.code, item.text || "");
     toast("短语已删除");
     await loadData();
   } catch (e) {
@@ -376,7 +363,6 @@ async function handleBatchRemove() {
       toDelete.map((item) => ({
         code: item.code,
         text: item.text || "",
-        name: item.name || "",
       })),
     );
     toast(`已删除 ${toDelete.length} 条短语`);

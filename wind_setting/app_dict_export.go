@@ -227,8 +227,8 @@ func (a *App) collectExportData(schemaID string, sections []string) (*dictio.Exp
 
 // collectPhrases 通过 RPC 收集全局短语
 //
-// 字符组短语 (Type=="array") store 里仍按 Texts/Name 分字段存放, 导出时
-// 重新拼回 $AA("name", "chars") marker 形式, 与新版 yaml 自描述格式一致。
+// 2026-05-16 schema 简化后, 字符组短语的 $AA("name", "chars") marker 已经
+// 直接编码在 store.PhraseRecord.Text 字段里, 这里不再需要 reassemble。
 //
 // Weight 处理: 始终导出 effective weight (resolvePhraseWeightForUI 计算结果),
 // 不再单独导出 position 字段。这样保证"用户显式设的 weight 原样导出, 未设
@@ -242,13 +242,9 @@ func (a *App) collectPhrases() ([]dictio.PhraseEntry, error) {
 
 	var phrases []dictio.PhraseEntry
 	for _, p := range reply.Phrases {
-		text := p.Text
-		if p.Type == "array" && p.Texts != "" {
-			text = fmt.Sprintf("$AA(%q, %q)", p.Name, p.Texts)
-		}
 		phrases = append(phrases, dictio.PhraseEntry{
 			Code:    p.Code,
-			Text:    text,
+			Text:    p.Text,
 			Weight:  resolvePhraseWeightForUI(p.Weight, p.Position),
 			Enabled: p.Enabled,
 		})

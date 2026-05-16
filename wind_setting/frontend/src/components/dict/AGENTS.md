@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-20 | Updated: 2026-05-12 -->
+<!-- Generated: 2026-04-20 | Updated: 2026-05-16 -->
 
 # dict
 
@@ -14,7 +14,7 @@
 | `DictDataTable.vue`         | 通用数据表格组件（通用、可复用）：基于 TanStack Vue Table，支持搜索、排序、分页、行选择、loading 状态、自定义工具栏插槽                                                                                                                                                                  |
 | `DictTypeSelector.vue`      | 词库类型选择器：用于在「短语」和「用户词库」等多个数据源间切换（已集成在 DictionaryPage 的标签页切换中）                                                                                                                                                                                 |
 | `FreqPanel.vue`             | 词频面板：展示临时词库和用户词库的频率统计，支持查看和调整词频权重                                                                                                                                                                                                                       |
-| `PhrasePanel.vue`           | 短语管理面板：用户短语（CRUD）+ 系统短语（只读 + 覆盖/恢复）；支持添加/编辑/删除对话框、批量操作、导入导出                                                                                                                                                                               |
+| `PhrasePanel.vue`           | 短语管理面板：用户/系统短语统一列表 (2026-05-16 schema 简化后)；支持添加/编辑/删除/启用切换、批量删除、恢复默认、导入导出；列：启用 / 编码 / 内容 / 权重 / 操作                                                                                                                          |
 | `ShadowPanel.vue`           | Shadow 候选调整面板：按方案管理 pin（固定位置）和 delete（隐藏）规则；支持编辑对话框（新增/修改）、列表操作、方案切换                                                                                                                                                                    |
 | `TempDictPanel.vue`         | 临时词库面板：展示输入法学习的临时词条；支持提升到用户词库、批量提升、删除、清空操作                                                                                                                                                                                                     |
 | `UserDictPanel.vue`         | 用户词库面板：按方案管理用户输入的词条；支持添加/编辑/删除对话框、分页搜索、方案切换、导入导出                                                                                                                                                                                           |
@@ -26,6 +26,7 @@
 | `editors/CmdOpenEditor.vue` | 「命令·打开」子编辑器：结构化输入单 action 的 `$CC` / `$CC1`(URL / 程序 / 文件), 调用 `pickExePath` / `pickAnyPath` 打开原生文件选择对话框                                                                                                                                               |
 | `editors/CmdRawEditor.vue`  | 「命令·手动」子编辑器：textarea 直接书写 `$CC(...)` 多 action 串联表达式                                                                                                                                                                                                                 |
 | `editors/ArrayEditor.vue`   | 「字符组」子编辑器：结构化输入 `$AA(name, chars)`                                                                                                                                                                                                                                        |
+| `editors/ArraySSEditor.vue` | 「字符串组」子编辑器 (2026-05-16)：结构化输入 `$SS(name, elem, ...)`, 每个 element 可以是字符串字面量或 `$CC(...)` 命令 (CmdOpen 子集)                                                                                                                                                  |
 
 ## For AI Agents
 
@@ -51,11 +52,10 @@
 
 #### PhrasePanel（短语管理）
 
-- 分为「用户短语」和「系统短语」两个子区间
-- 用户短语支持完整 CRUD（编辑对话框）
-- 系统短语只读，但支持「覆盖」（创建用户短语覆盖）和「恢复」（删除用户短语覆盖）
-- 支持批量操作（删除选中、批量导入）
-- 支持全量导入导出
+- 2026-05-16 schema 简化后, 用户/系统短语统一为单一 `PhraseItem` 列表 (`code, text, weight, position, enabled, is_system`), 不再区分两栏。系统短语通过 `is_system` 字段标识 (UI 可据此弱化样式), 但 CRUD 行为与用户短语一致
+- 支持完整 CRUD (编辑对话框含分类子编辑器 - 普通 / cmd-open / cmd-raw / array / array-ss)
+- 支持启用/禁用切换、批量删除、恢复默认
+- 支持全量导入导出 (yaml 格式, 单一 text 字段; 兼容旧 texts/name 字段读入)
 
 #### UserDictPanel（用户词库）
 
