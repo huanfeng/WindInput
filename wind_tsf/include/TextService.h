@@ -220,7 +220,8 @@ private:
 
     // Returns TRUE if pDocMgr has a non-null, writable, non-transitory top context.
     // Used to set _hasTextInputContext in OnSetFocus and RefreshTextInputContext.
-    BOOL _DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr);
+    // Optional pDynFlagsOut receives dwDynamicFlags from TF_STATUS (0 if unavailable).
+    BOOL _DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr, DWORD* pDynFlagsOut = nullptr);
 
     // ITfTextEditSink registration
     DWORD _dwTextEditSinkCookie;

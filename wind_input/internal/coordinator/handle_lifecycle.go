@@ -493,6 +493,8 @@ func (c *Coordinator) getCompiledHotkeys() (keyDownHotkeys, keyUpHotkeys []uint3
 
 // HandleFocusGained handles focus gained events and returns current status
 func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateData {
+	// 保存变更前的 PID，用于后续检测同 PID 内部 DocMgr 切换（如 Explorer XamlIsland）。
+	prevActiveProcessID := c.activeProcessID
 	if processID != 0 {
 		c.activeProcessID = processID
 		c.activeProcessName = bridge.GetProcessName(processID)
@@ -572,12 +574,32 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 	}
 
 	if !doReplay && len(c.inputBuffer) > 0 {
-		c.inputBuffer = ""
-		c.inputCursorPos = 0
-		c.candidates = nil
-		c.currentPage = 1
-		c.totalPages = 1
-		c.logger.Debug("Cleared input buffer on focus gained")
+		// Explorer/XamlIsland 兼容：TSF 在 composition 进行中会对同一 DocMgr 重复触发
+		// OnSetFocus（focus==prev，无中间 focus_lost），C++ 端照常发 focus_gained。
+		// 若是同 PID 且最近有按键，视为宿主内部状态刷新而非真正的焦点切换，保留
+		// buffer 并走 replay 路径重建 composition，避免候选框消失。
+		samePIDWithRecentKey := processID != 0 && processID == prevActiveProcessID &&
+			!c.lastKeyTime.IsZero() && time.Since(c.lastKeyTime) < 3*time.Second
+		if samePIDWithRecentKey {
+			if !c.isInlinePreedit() {
+				replayText = ""
+				replayCaretPos = 0
+			} else {
+				replayText = c.compositionText()
+				replayCaretPos = c.displayCursorPos()
+			}
+			doReplay = true
+			c.armPendingFirstShowWithTimeout(firstShowExtendedTimeout)
+			c.logger.Debug("Same-PID focus gained with active input, replaying composition",
+				"bufferLen", len(c.inputBuffer), "sinceLastKey", time.Since(c.lastKeyTime).String())
+		} else {
+			c.inputBuffer = ""
+			c.inputCursorPos = 0
+			c.candidates = nil
+			c.currentPage = 1
+			c.totalPages = 1
+			c.logger.Debug("Cleared input buffer on focus gained")
+		}
 	}
 	c.mu.Unlock()
 
@@ -638,9 +660,12 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 	}
 	c.mu.Unlock()
 
+	// Push 在独立 goroutine 中执行：既不持有 c.mu，也不阻塞响应返回。
+	// 同步写入 push pipe 可能因对端缓冲区满而阻塞超过 C++ 端 200ms 读超时，
+	// 导致 C++ 断连并丢失此次状态同步。
 	if shouldPush {
-		bridgeServer.PushEnglishPairConfigToAllClients(autoPairEnabled, autoPairs)
-		bridgeServer.PushStatsConfigToAllClients(statsEnabled, statsTrackEng)
+		go bridgeServer.PushEnglishPairConfigToAllClients(autoPairEnabled, autoPairs)
+		go bridgeServer.PushStatsConfigToAllClients(statsEnabled, statsTrackEng)
 	}
 
 	return status
@@ -720,10 +745,12 @@ func (c *Coordinator) HandleIMEActivated(processID uint32) *bridge.StatusUpdateD
 	}
 	c.mu.Unlock()
 
-	// Push 在锁外执行：即使 pipe 写入阻塞，也不会持有 c.mu 影响其他请求处理
+	// Push 在独立 goroutine 中执行：既不持有 c.mu，也不阻塞响应返回。
+	// 同步写入 push pipe 可能因对端缓冲区满而阻塞超过 C++ 端 200ms 读超时，
+	// 导致 C++ 断连并丢失此次状态同步。
 	if shouldPush {
-		bridgeServer.PushEnglishPairConfigToAllClients(autoPairEnabled, autoPairs)
-		bridgeServer.PushStatsConfigToAllClients(statsEnabled, statsTrackEng)
+		go bridgeServer.PushEnglishPairConfigToAllClients(autoPairEnabled, autoPairs)
+		go bridgeServer.PushStatsConfigToAllClients(statsEnabled, statsTrackEng)
 	}
 
 	return status

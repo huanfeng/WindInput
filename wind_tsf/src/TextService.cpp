@@ -1070,7 +1070,8 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         // GetTextExt: GetTextExt is a layout API and is not implemented by many frameworks
         // (JetBrains/Java Swing). Chrome marks its "no text field" context as TF_SD_READONLY,
         // which is the correct TSF-standard signal for "no writable text input".
-        _hasTextInputContext = _DocMgrHasEditableContext(pDocMgrFocus);
+        DWORD docMgrDynFlags = 0;
+        _hasTextInputContext = _DocMgrHasEditableContext(pDocMgrFocus, &docMgrDynFlags);
         WIND_LOG_DEBUG_FMT(L"OnSetFocus: hasTextCtx=%d focusSession=%llu", _hasTextInputContext, _focusSessionId);
 
         // Get caret position for toolbar placement (separate concern from _hasTextInputContext)
@@ -1090,11 +1091,27 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         _lastFocusCaretY = caretY;
         _lastFocusCaretHeight = caretHeight > 0 ? caretHeight : DEFAULT_CARET_HEIGHT;
 
+        // XamlIsland/transient locked DocMgr guard: dynFlags=0x20 consistently
+        // marks Explorer's XamlIsland container DocMgrs where RequestEditSession
+        // returns TF_E_NOLOCK. Sending focus_gained would cause Go to replay
+        // composition into this unstable DocMgr; when the user then clicks away
+        // the composition text is committed at screen position (0,0).
+        // Skip focus_gained for these DocMgrs — the subsequent stable DocMgr
+        // focus_gained will arrive and handle composition replay correctly.
+        const DWORD kXamlIslandLockedFlag = 0x20;
+        if (docMgrDynFlags & kXamlIslandLockedFlag)
+        {
+            WIND_LOG_INFO_FMT(
+                L"OnSetFocus: skipping focus_gained for locked/transient DocMgr dynFlags=0x%X focusSession=%llu",
+                docMgrDynFlags, _focusSessionId);
+            // Fall through — sinks and LangBar are already set up above.
+            // Do not send focus_gained IPC.
+        }
         // Send focus_gained to service and receive response synchronously.
         // This ensures state is properly synced before user starts typing.
         // Note: SendFocusGained does lazy connect internally, so this also
         // handles the case where the service started after TSF was loaded.
-        if (_pIPCClient != nullptr)
+        else if (_pIPCClient != nullptr)
         {
             if (_pIPCClient->SendFocusGained(caretX, caretY, caretHeight))
             {
@@ -2138,8 +2155,11 @@ BOOL CTextService::RefreshTextInputContext()
     return _hasTextInputContext;
 }
 
-BOOL CTextService::_DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr)
+BOOL CTextService::_DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr, DWORD* pDynFlagsOut)
 {
+    if (pDynFlagsOut)
+        *pDynFlagsOut = 0;
+
     if (pDocMgr == nullptr)
         return FALSE;
 
@@ -2164,6 +2184,8 @@ BOOL CTextService::_DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr)
         WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: dynFlags=0x%X statFlags=0x%X", status.dwDynamicFlags, status.dwStaticFlags);
         if (status.dwDynamicFlags & TF_SD_READONLY)
             result = FALSE;
+        if (pDynFlagsOut)
+            *pDynFlagsOut = status.dwDynamicFlags;
     }
     else
     {
