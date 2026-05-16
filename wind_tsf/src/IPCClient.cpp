@@ -8,6 +8,7 @@
 
 // Static member initialization
 IPCLogLevel CIPCClient::s_logLevel = IPCLogLevel::Info;
+std::atomic<uint32_t> CIPCClient::s_instanceCounter{0};
 
 CIPCClient::CIPCClient()
     : _hPipe(INVALID_HANDLE_VALUE)
@@ -17,6 +18,7 @@ CIPCClient::CIPCClient()
     , _circuitState(CircuitState::Closed)
     , _consecutiveFailures(0)
     , _lastFailureTime(0)
+    , _clientToken(((uint64_t)GetCurrentProcessId() << 32) | (uint32_t)(++s_instanceCounter))
     , _hAsyncThread(NULL)
     , _hStopEvent(NULL)
     , _hReadPipe(INVALID_HANDLE_VALUE)
@@ -706,12 +708,13 @@ BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight)
         return FALSE;
     }
 
-    _LogDebug(L"Sending focus_gained with caret: x=%d, y=%d, h=%d", caretX, caretY, caretHeight);
+    _LogDebug(L"Sending focus_gained with caret: x=%d, y=%d, h=%d, token=0x%016llX", caretX, caretY, caretHeight, (unsigned long long)_clientToken);
 
-    CaretPayload payload = {};  // Zero-initialize to avoid garbage in compositionStartX/Y
-    payload.x = caretX;
-    payload.y = caretY;
-    payload.height = caretHeight;
+    FocusGainedPayload payload = {};
+    payload.caret.x = caretX;
+    payload.caret.y = caretY;
+    payload.caret.height = caretHeight;
+    payload.clientToken = _clientToken;
 
     return _SendBinaryMessage(CMD_FOCUS_GAINED, &payload, sizeof(payload));
 }
@@ -740,8 +743,10 @@ BOOL CIPCClient::SendIMEActivated()
         return FALSE;
     }
 
-    _LogInfo(L"Sending ime_activated");
-    return _SendBinaryMessage(CMD_IME_ACTIVATED, nullptr, 0);
+    IMEActivatedPayload payload = {};
+    payload.clientToken = _clientToken;
+    _LogInfo(L"Sending ime_activated: token=0x%016llX", (unsigned long long)_clientToken);
+    return _SendBinaryMessage(CMD_IME_ACTIVATED, &payload, sizeof(payload));
 }
 
 BOOL CIPCClient::SendHostRenderRequest(ServiceResponse& response)
@@ -1579,7 +1584,7 @@ BOOL CIPCClient::StartAsyncReader()
 
         _hReadPipe = CreateFileW(
             PUSH_PIPE_NAME,
-            GENERIC_READ,
+            GENERIC_READ | GENERIC_WRITE,
             0,
             nullptr,
             OPEN_EXISTING,
@@ -1590,7 +1595,34 @@ BOOL CIPCClient::StartAsyncReader()
         {
             DWORD mode = PIPE_READMODE_MESSAGE;
             SetNamedPipeHandleState(_hReadPipe, &mode, nullptr, nullptr);
-            _LogInfo(L"Connected to push pipe");
+
+            // Send token handshake so Go can map this push handle to our instance
+            {
+                uint8_t tokenBuf[8] = {
+                    (uint8_t)(_clientToken & 0xFF),
+                    (uint8_t)((_clientToken >> 8) & 0xFF),
+                    (uint8_t)((_clientToken >> 16) & 0xFF),
+                    (uint8_t)((_clientToken >> 24) & 0xFF),
+                    (uint8_t)((_clientToken >> 32) & 0xFF),
+                    (uint8_t)((_clientToken >> 40) & 0xFF),
+                    (uint8_t)((_clientToken >> 48) & 0xFF),
+                    (uint8_t)((_clientToken >> 56) & 0xFF)
+                };
+                HANDLE hEv = CreateEventW(NULL, TRUE, FALSE, NULL);
+                if (hEv != NULL)
+                {
+                    OVERLAPPED ov = {};
+                    ov.hEvent = hEv;
+                    DWORD written = 0;
+                    if (!WriteFile(_hReadPipe, tokenBuf, 8, &written, &ov) && GetLastError() == ERROR_IO_PENDING)
+                    {
+                        WaitForSingleObject(hEv, 500);
+                        GetOverlappedResult(_hReadPipe, &ov, &written, FALSE);
+                    }
+                    CloseHandle(hEv);
+                }
+                _LogInfo(L"Connected to push pipe, sent token 0x%016llX", (unsigned long long)_clientToken);
+            }
             break;
         }
 
@@ -1729,7 +1761,7 @@ void CIPCClient::_AsyncReaderLoop()
                 {
                     _hReadPipe = CreateFileW(
                         PUSH_PIPE_NAME,
-                        GENERIC_READ,
+                        GENERIC_READ | GENERIC_WRITE,
                         0,
                         nullptr,
                         OPEN_EXISTING,
@@ -1740,7 +1772,34 @@ void CIPCClient::_AsyncReaderLoop()
                     {
                         DWORD mode = PIPE_READMODE_MESSAGE;
                         SetNamedPipeHandleState(_hReadPipe, &mode, nullptr, nullptr);
-                        _LogInfo(L"Async reader: reconnected to push pipe");
+
+                        // Re-send token handshake after reconnect
+                        {
+                            uint8_t tokenBuf[8] = {
+                                (uint8_t)(_clientToken & 0xFF),
+                                (uint8_t)((_clientToken >> 8) & 0xFF),
+                                (uint8_t)((_clientToken >> 16) & 0xFF),
+                                (uint8_t)((_clientToken >> 24) & 0xFF),
+                                (uint8_t)((_clientToken >> 32) & 0xFF),
+                                (uint8_t)((_clientToken >> 40) & 0xFF),
+                                (uint8_t)((_clientToken >> 48) & 0xFF),
+                                (uint8_t)((_clientToken >> 56) & 0xFF)
+                            };
+                            HANDLE hEv = CreateEventW(NULL, TRUE, FALSE, NULL);
+                            if (hEv != NULL)
+                            {
+                                OVERLAPPED ov = {};
+                                ov.hEvent = hEv;
+                                DWORD written = 0;
+                                if (!WriteFile(_hReadPipe, tokenBuf, 8, &written, &ov) && GetLastError() == ERROR_IO_PENDING)
+                                {
+                                    WaitForSingleObject(hEv, 500);
+                                    GetOverlappedResult(_hReadPipe, &ov, &written, FALSE);
+                                }
+                                CloseHandle(hEv);
+                            }
+                        }
+                        _LogInfo(L"Async reader: reconnected to push pipe, sent token 0x%016llX", (unsigned long long)_clientToken);
                         break;
                     }
                 }

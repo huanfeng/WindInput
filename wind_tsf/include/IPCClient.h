@@ -2,6 +2,7 @@
 
 #include "Globals.h"
 #include "BinaryProtocol.h"
+#include <atomic>
 #include <string>
 #include <vector>
 #include <functional>
@@ -263,6 +264,13 @@ private:
 
     // Static log level
     static IPCLogLevel s_logLevel;
+
+    // Per-instance token: (uint64_t)PID << 32 | per-process-counter (uint32)
+    // Used to correlate push pipe connection with request/response commands.
+    // 64-bit form preserves the full PID — Windows 10/11 PIDs routinely exceed
+    // 65535, so truncating to 16 bits would cause cross-process collisions.
+    uint64_t _clientToken;
+    static std::atomic<uint32_t> s_instanceCounter;
 
     // Start the Go service if not running
     BOOL _StartService();

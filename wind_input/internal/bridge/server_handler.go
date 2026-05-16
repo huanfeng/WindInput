@@ -48,8 +48,10 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 	}()
 	s.logger.Debug("Processing Bridge request", "clientID", clientID, "command", fmt.Sprintf("0x%04X", header.Command))
 
-	// Update active process ID for events that indicate this client is active
-	// This ensures activeProcessID is always current, even if FocusGained wasn't received yet
+	// Update active process ID for events that indicate this client is active.
+	// CMD_IME_ACTIVATED / CMD_FOCUS_GAINED also carry a per-instance token that
+	// allows precise push targeting within multi-instance hosts (e.g. explorer).
+	// Token format: (PID & 0xFFFF) << 16 | per-process-instance-counter
 	switch header.Command {
 	case ipc.CmdKeyEvent, ipc.CmdCommitRequest, ipc.CmdFocusGained, ipc.CmdIMEActivated, ipc.CmdCaretUpdate:
 		if processID != 0 {
@@ -57,6 +59,19 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 			if s.activeProcessID != processID {
 				s.logger.Info("Active process updated", "clientID", clientID, "oldProcessID", s.activeProcessID, "newProcessID", processID)
 				s.activeProcessID = processID
+			}
+			// Extract client token only from IME_ACTIVATED (payload = 8-byte token).
+			// FOCUS_GAINED intentionally excluded: two-process TSF apps (e.g. EverEdit)
+			// use Process A for key events (FOCUS_GAINED) and Process B for push pipe
+			// (IME_ACTIVATED). Overwriting activeToken with Process A's token would break
+			// push-pipe targeting since Process A never connects to the push pipe.
+			var token uint64
+			if header.Command == ipc.CmdIMEActivated && len(payload) >= 8 {
+				token = binary.LittleEndian.Uint64(payload[:8])
+			}
+			if token != 0 && token != s.activeToken {
+				s.logger.Debug("Active token updated", "clientID", clientID, "token", token)
+				s.activeToken = token
 			}
 			s.activeMu.Unlock()
 		}

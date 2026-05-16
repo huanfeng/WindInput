@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"encoding/binary"
 	"time"
 	"unsafe"
 
@@ -39,11 +40,11 @@ func (s *Server) startPushPipeListener() {
 
 		handle, err := windows.CreateNamedPipe(
 			pipePath,
-			windows.PIPE_ACCESS_OUTBOUND, // Write-only for push
+			windows.PIPE_ACCESS_DUPLEX, // 双向：服务端写状态推送，客户端写 token 握手
 			windows.PIPE_TYPE_MESSAGE|windows.PIPE_WAIT,
 			windows.PIPE_UNLIMITED_INSTANCES,
 			PipeBufferSize,
-			0, // No input buffer needed
+			16, // 输入缓冲：仅用于接收 4 字节 token 握手
 			0,
 			sa,
 		)
@@ -71,19 +72,13 @@ func (s *Server) startPushPipeListener() {
 			pushProcessID = 0
 		}
 
+		// 立即注册客户端并写 CMD_SERVICE_READY，不等待 token 握手。
+		// token 在独立 goroutine 中异步读取，完成后再更新 tokenToPushHandle。
+		// 这样主循环可以立刻回到 CreateNamedPipe 等待下一个客户端，
+		// 避免 500ms 阻塞导致 EverEdit/Notepad 等应用在此窗口内连接失败。
 		s.pushMu.Lock()
 		s.pushClientCount++
 		clientID := s.pushClientCount
-		// 若该 PID 已有旧句柄（同一进程重连），先清理旧句柄，避免 pushClients 泄漏。
-		// 正常断开时旧句柄已由 WriteFile 失败路径清除；此处兜底处理异常重连。
-		if pushProcessID != 0 {
-			if oldHandle, ok := s.pushClientsByPID[pushProcessID]; ok && oldHandle != handle {
-				delete(s.pushClients, oldHandle)
-				delete(s.pushHandleToPID, oldHandle)
-				windows.CloseHandle(oldHandle)
-				s.logger.Debug("Push pipe: closed stale handle for reconnecting PID", "processID", pushProcessID)
-			}
-		}
 		s.pushClients[handle] = writer
 		if pushProcessID != 0 {
 			s.pushClientsByPID[pushProcessID] = handle
@@ -94,9 +89,6 @@ func (s *Server) startPushPipeListener() {
 		s.logger.Info("Push pipe client connected", "clientID", clientID, "processID", pushProcessID)
 
 		// Notify the newly-connected TSF client that the service is ready.
-		// This triggers _DoFullStateSync() on the TSF thread so the toolbar
-		// appears immediately after service restart, without waiting for a
-		// focus-change or key event.
 		encoded := s.codec.EncodeServiceReady()
 		if err := s.codec.WriteMessage(writer, encoded); err != nil {
 			s.logger.Warn("Failed to send CMD_SERVICE_READY to new push client",
@@ -105,11 +97,78 @@ func (s *Server) startPushPipeListener() {
 			s.logger.Debug("CMD_SERVICE_READY sent to new push client", "clientID", clientID)
 		}
 
+		// 异步读取 token 握手（8 字节），不阻塞主循环。
+		// 内层 goroutine 做实际 ReadFile（可能永久阻塞于旧版客户端），
+		// 外层 goroutine 持有 500ms 超时并在超时后退出（内层 goroutine 在 handle 关闭时自然退出）。
+		go func(h windows.Handle, pid uint32, cid int) {
+			tokenCh := make(chan uint64, 1)
+			go func() {
+				var buf [8]byte
+				var n uint32
+				if err := windows.ReadFile(h, buf[:], &n, nil); err == nil && n == 8 {
+					tokenCh <- binary.LittleEndian.Uint64(buf[:])
+				}
+			}()
+			select {
+			case token := <-tokenCh:
+				if token == 0 {
+					return
+				}
+				s.pushMu.Lock()
+				if _, exists := s.pushClients[h]; exists {
+					s.tokenToPushHandle[token] = h
+					s.pushHandleToToken[h] = token
+				}
+				s.pushMu.Unlock()
+				s.logger.Debug("Push pipe: token registered", "clientID", cid, "processID", pid, "token", token)
+			case <-time.After(500 * time.Millisecond):
+				s.logger.Debug("Push pipe: token handshake timed out (old client?)", "clientID", cid, "processID", pid)
+			}
+		}(handle, pushProcessID, clientID)
+
 		// Note: We don't actively monitor disconnection here.
 		// Client disconnection is detected when write fails in PushCommitTextToActiveClient
 		// or PushStateToAllClients. This avoids false positives from GetNamedPipeHandleState
 		// which can return "Access is denied" on valid pipes.
 	}
+}
+
+// removePushHandleFromPIDIndex 在写失败清理时维护 pushClientsByPID 的一致性。
+// 当被移除的 handle 恰好是该 PID 的最新记录时，尝试从 pushHandleToPID 中为同 PID
+// 找另一个存活 handle 作替代；若无其他 handle 则删除该条目。
+// 调用时必须持有 pushMu 写锁。
+func (s *Server) removePushHandleFromPIDIndex(pid uint32, removedHandle windows.Handle) {
+	if pid == 0 || s.pushClientsByPID[pid] != removedHandle {
+		return
+	}
+	for h, p := range s.pushHandleToPID {
+		if p == pid && h != removedHandle {
+			s.pushClientsByPID[pid] = h
+			return
+		}
+	}
+	delete(s.pushClientsByPID, pid)
+}
+
+// cleanupPushHandle 从所有内部映射中移除一个 push handle。
+// 调用时必须持有 pushMu 写锁，且必须在 windows.CloseHandle(handle) 之前调用。
+// 返回 true 表示 handle 确实在 map 中并被移除；返回 false 表示已被其他
+// goroutine 先行清理，调用方不应再调用 windows.CloseHandle(handle)。
+// （removePushHandleFromPIDIndex 需要先读 pushHandleToPID 找替代 handle，
+// 因此 pushHandleToPID 的实际删除放在最后。）
+func (s *Server) cleanupPushHandle(handle windows.Handle) bool {
+	if _, exists := s.pushClients[handle]; !exists {
+		return false
+	}
+	pid := s.pushHandleToPID[handle]
+	s.removePushHandleFromPIDIndex(pid, handle) // 必须在 delete(pushHandleToPID) 之前
+	delete(s.pushClients, handle)
+	delete(s.pushHandleToPID, handle)
+	if token := s.pushHandleToToken[handle]; token != 0 {
+		delete(s.tokenToPushHandle, token)
+		delete(s.pushHandleToToken, handle)
+	}
+	return true
 }
 
 // PushStateToAllClients broadcasts state update to all connected TSF clients
@@ -149,33 +208,23 @@ func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
 		"fullWidth", status.FullWidth,
 		"capsLock", status.CapsLock)
 
-	// Send to all clients
-	var failedClients []clientInfo
-	successCount := 0
+	// 每个客户端独立 goroutine 写入，避免某个 client 的 pipe buffer 满/阻塞
+	// 导致后续 client（如 Notepad 第二个 CLangBar 实例）永远收不到推送。
+	// Go map 随机迭代顺序会使阻塞点前后的 client 每次不同，造成状态同步时好时坏。
 	for _, client := range clients {
-		if err := s.codec.WriteMessage(client.writer, encoded); err != nil {
-			s.logger.Warn("Failed to push state to client", "processID", client.processID, "error", err)
-			failedClients = append(failedClients, client)
-		} else {
-			successCount++
-		}
-	}
-
-	// Remove failed clients
-	if len(failedClients) > 0 {
-		s.pushMu.Lock()
-		for _, client := range failedClients {
-			delete(s.pushClients, client.handle)
-			delete(s.pushHandleToPID, client.handle)
-			if client.processID != 0 {
-				delete(s.pushClientsByPID, client.processID)
+		c := client
+		go func() {
+			if err := s.codec.WriteMessage(c.writer, encoded); err != nil {
+				s.logger.Warn("Failed to push state to client", "processID", c.processID, "error", err)
+				s.pushMu.Lock()
+				removed := s.cleanupPushHandle(c.handle)
+				s.pushMu.Unlock()
+				if removed {
+					windows.CloseHandle(c.handle)
+				}
 			}
-			windows.CloseHandle(client.handle)
-		}
-		s.pushMu.Unlock()
+		}()
 	}
-
-	s.logger.Debug("State push completed", "success", successCount, "total", clientCount)
 }
 
 // encodeStatePush encodes a state push message (CMD_STATE_PUSH)
@@ -209,34 +258,51 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 		return
 	}
 
-	// Find the push pipe handle for the active process
+	// 对于 CommitText，必须精确定位持有活跃 composition 的 TextService 实例：
+	// 1. 优先用 activeToken（C++ 在 CMD_IME_ACTIVATED/CMD_FOCUS_GAINED 中携带）
+	// 2. 回退到 pushClientsByPID（最新连接的 handle，适用于单实例进程）
+	// 不能广播给同 PID 所有 handle，否则多实例宿主（如 explorer）会重复上屏。
+	s.activeMu.RLock()
+	activeToken := s.activeToken
+	s.activeMu.RUnlock()
+
 	s.pushMu.RLock()
-	handle, exists := s.pushClientsByPID[activeProcessID]
+	var handle windows.Handle
 	var writer *pipeWriter
-	if exists {
-		writer = s.pushClients[handle]
+	// Primary: token-based exact targeting
+	if activeToken != 0 {
+		if h, ok := s.tokenToPushHandle[activeToken]; ok {
+			if w := s.pushClients[h]; w != nil {
+				handle, writer = h, w
+			}
+		}
+	}
+	// Fallback: PID-based (token not yet registered or handle already cleaned)
+	if writer == nil && activeProcessID != 0 {
+		if h, ok := s.pushClientsByPID[activeProcessID]; ok {
+			if w := s.pushClients[h]; w != nil {
+				handle, writer = h, w
+			}
+		}
 	}
 	s.pushMu.RUnlock()
 
 	// Encode the commit text message using CMD_COMMIT_TEXT
 	encoded := s.codec.EncodeCommitText(text, "", false, false, false)
 
-	if exists && writer != nil {
-		// Best case: send to the specific active client
+	if writer != nil {
 		s.logger.Debug("Pushing commit text to active TSF client via push pipe",
-			"processID", activeProcessID)
+			"processID", activeProcessID, "token", activeToken)
 
 		if err := s.codec.WriteMessage(writer, encoded); err != nil {
 			s.logger.Warn("Failed to push commit text to active client",
 				"processID", activeProcessID, "error", err)
-
-			// Remove the failed client
 			s.pushMu.Lock()
-			delete(s.pushClients, handle)
-			delete(s.pushHandleToPID, handle)
-			delete(s.pushClientsByPID, activeProcessID)
+			removed := s.cleanupPushHandle(handle)
 			s.pushMu.Unlock()
-			windows.CloseHandle(handle)
+			if removed {
+				windows.CloseHandle(handle)
+			}
 			return
 		}
 
@@ -265,14 +331,11 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 		if err := s.codec.WriteMessage(fallbackWriter, encoded); err != nil {
 			s.logger.Warn("Failed to push commit text via fallback", "error", err)
 			s.pushMu.Lock()
-			pid := s.pushHandleToPID[fallbackHandle]
-			delete(s.pushClients, fallbackHandle)
-			delete(s.pushHandleToPID, fallbackHandle)
-			if pid != 0 {
-				delete(s.pushClientsByPID, pid)
-			}
+			removed := s.cleanupPushHandle(fallbackHandle)
 			s.pushMu.Unlock()
-			windows.CloseHandle(fallbackHandle)
+			if removed {
+				windows.CloseHandle(fallbackHandle)
+			}
 		} else {
 			s.logger.Info("Commit text push completed via single-client fallback")
 		}
@@ -321,14 +384,12 @@ func (s *Server) PushClearCompositionToActiveClient() {
 	if err := s.codec.WriteMessage(writer, encoded); err != nil {
 		s.logger.Warn("Failed to push clear composition to active client",
 			"processID", activeProcessID, "error", err)
-
-		// Remove the failed client
 		s.pushMu.Lock()
-		delete(s.pushClients, handle)
-		delete(s.pushHandleToPID, handle)
-		delete(s.pushClientsByPID, activeProcessID)
+		removed := s.cleanupPushHandle(handle)
 		s.pushMu.Unlock()
-		windows.CloseHandle(handle)
+		if removed {
+			windows.CloseHandle(handle)
+		}
 		return
 	}
 
@@ -372,14 +433,12 @@ func (s *Server) PushUpdateCompositionToActiveClient(text string, caretPos int) 
 	if err := s.codec.WriteMessage(writer, encoded); err != nil {
 		s.logger.Warn("Failed to push update composition to active client",
 			"processID", activeProcessID, "error", err)
-
-		// Remove the failed client
 		s.pushMu.Lock()
-		delete(s.pushClients, handle)
-		delete(s.pushHandleToPID, handle)
-		delete(s.pushClientsByPID, activeProcessID)
+		removed := s.cleanupPushHandle(handle)
 		s.pushMu.Unlock()
-		windows.CloseHandle(handle)
+		if removed {
+			windows.CloseHandle(handle)
+		}
 		return
 	}
 
@@ -404,26 +463,19 @@ func (s *Server) pushSyncConfigToAllClients(key string, value []byte, logName st
 		return
 	}
 
-	var failedHandles []windows.Handle
 	for _, client := range clients {
-		if err := s.codec.WriteMessage(client.writer, encoded); err != nil {
-			s.logger.Debug("Failed to push config", "config", logName, "error", err)
-			failedHandles = append(failedHandles, client.handle)
-		}
-	}
-
-	if len(failedHandles) > 0 {
-		s.pushMu.Lock()
-		for _, h := range failedHandles {
-			pid := s.pushHandleToPID[h]
-			delete(s.pushClients, h)
-			delete(s.pushHandleToPID, h)
-			if pid != 0 {
-				delete(s.pushClientsByPID, pid)
+		c := client
+		go func() {
+			if err := s.codec.WriteMessage(c.writer, encoded); err != nil {
+				s.logger.Debug("Failed to push config", "config", logName, "error", err)
+				s.pushMu.Lock()
+				removed := s.cleanupPushHandle(c.handle)
+				s.pushMu.Unlock()
+				if removed {
+					windows.CloseHandle(c.handle)
+				}
 			}
-			windows.CloseHandle(h)
-		}
-		s.pushMu.Unlock()
+		}()
 	}
 }
 
@@ -457,18 +509,18 @@ func (s *Server) GetActiveClientCount() int {
 func (s *Server) RestartService() {
 	s.logger.Info("RestartService: Disconnecting all clients to force reconnection")
 
-	// Close all push pipe clients and clear process ID mappings
+	// Close all push pipe clients and clear all mappings
 	s.pushMu.Lock()
 	pushClientCount := len(s.pushClients)
 	for h := range s.pushClients {
 		windows.CloseHandle(h)
-		delete(s.pushClients, h)
-		delete(s.pushHandleToPID, h)
 	}
-	// Clear all process ID mappings
-	for pid := range s.pushClientsByPID {
-		delete(s.pushClientsByPID, pid)
-	}
+	// 重置所有 map（比逐条 delete 更高效）
+	s.pushClients = make(map[windows.Handle]*pipeWriter)
+	s.pushHandleToPID = make(map[windows.Handle]uint32)
+	s.pushClientsByPID = make(map[uint32]windows.Handle)
+	s.tokenToPushHandle = make(map[uint64]windows.Handle)
+	s.pushHandleToToken = make(map[windows.Handle]uint64)
 	s.pushMu.Unlock()
 
 	// Clear active process ID

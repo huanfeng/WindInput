@@ -279,6 +279,32 @@ struct HostRenderSetupHeader
 };
 static_assert(sizeof(HostRenderSetupHeader) == 12, "HostRenderSetupHeader must be 12 bytes");
 
+// Push pipe token handshake payload (client → server, 8 bytes written immediately after connecting)
+// Token format: (uint64_t)GetCurrentProcessId() << 32 | per-process-instance-counter (uint32)
+// 64-bit form avoids collisions when two processes share the low 16 bits of their PID
+// (Windows 10/11 allocates PIDs that easily exceed 65535).
+// Allows Go to build a precise token→push-handle mapping for multi-instance hosts (e.g. explorer).
+struct PushTokenHandshake
+{
+    uint64_t clientToken;
+};
+static_assert(sizeof(PushTokenHandshake) == 8, "PushTokenHandshake must be 8 bytes");
+
+// CMD_IME_ACTIVATED payload (8 bytes, carries client token)
+struct IMEActivatedPayload
+{
+    uint64_t clientToken;
+};
+static_assert(sizeof(IMEActivatedPayload) == 8, "IMEActivatedPayload must be 8 bytes");
+
+// CMD_FOCUS_GAINED extended payload (28 bytes = CaretPayload + clientToken)
+struct FocusGainedPayload
+{
+    CaretPayload caret;       // 20 bytes: caret position
+    uint64_t     clientToken; // 8 bytes: per-instance token
+};
+static_assert(sizeof(FocusGainedPayload) == 28, "FocusGainedPayload must be 28 bytes");
+
 // Input stats payload (from C++ to Go, async)
 // Counts of characters typed in English mode (not intercepted by Go)
 struct InputStatsPayload

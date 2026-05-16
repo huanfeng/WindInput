@@ -86,12 +86,21 @@ type Server struct {
 	pushMu           sync.RWMutex
 	pushClientCount  int
 	pushClients      map[windows.Handle]*pipeWriter
-	pushClientsByPID map[uint32]windows.Handle // Map process ID to push pipe handle
-	pushHandleToPID  map[windows.Handle]uint32 // 反向映射：handle → PID，避免 O(n²) 查找
+	pushClientsByPID map[uint32]windows.Handle // PID → 最新 push handle（同 PID 多实例时的兜底）
+	pushHandleToPID  map[windows.Handle]uint32 // 反向映射：handle → PID
+
+	// Push pipe client token tracking (per-instance precise targeting)
+	// C++ 每个 CIPCClient 实例在连接 push pipe 时写入一个进程内唯一 token，
+	// 同时在 CMD_IME_ACTIVATED / CMD_FOCUS_GAINED 中携带该 token。
+	// 通过 token 可精确定位多实例宿主（如 explorer）中持有活跃 composition 的那个实例。
+	// Token 采用 64 位避免 Windows PID 超过 16 位时与 instance counter 编码冲突。
+	tokenToPushHandle map[uint64]windows.Handle // client token → push handle
+	pushHandleToToken map[windows.Handle]uint64 // push handle → client token
 
 	// Active client tracking (for secure, targeted push)
 	activeMu        sync.RWMutex
 	activeProcessID uint32 // Process ID of the client that has focus
+	activeToken     uint64 // Per-instance token of the active TextService (0 if unknown)
 
 	// Host render manager (for Band window proxy rendering)
 	hostRender *HostRenderManager
@@ -100,13 +109,15 @@ type Server struct {
 // NewServer creates a new Bridge IPC server
 func NewServer(handler MessageHandler, logger *slog.Logger) *Server {
 	return &Server{
-		handler:          handler,
-		logger:           logger,
-		codec:            ipc.NewBinaryCodec(),
-		activeHandles:    make(map[windows.Handle]*pipeWriter),
-		pushClients:      make(map[windows.Handle]*pipeWriter),
-		pushClientsByPID: make(map[uint32]windows.Handle),
-		pushHandleToPID:  make(map[windows.Handle]uint32),
+		handler:           handler,
+		logger:            logger,
+		codec:             ipc.NewBinaryCodec(),
+		activeHandles:     make(map[windows.Handle]*pipeWriter),
+		pushClients:       make(map[windows.Handle]*pipeWriter),
+		pushClientsByPID:  make(map[uint32]windows.Handle),
+		pushHandleToPID:   make(map[windows.Handle]uint32),
+		tokenToPushHandle: make(map[uint64]windows.Handle),
+		pushHandleToToken: make(map[windows.Handle]uint64),
 	}
 }
 
@@ -397,12 +408,19 @@ func (r *pipeReader) release() {
 	r.msgBuffer = nil
 }
 
-// pipeWriter wraps windows.Handle for io.Writer
+// pipeWriter wraps windows.Handle for io.Writer.
+// mu serializes concurrent WriteFile calls on the same handle:
+// broadcast goroutines (PushStateToAllClients) may write to the
+// same client handle in parallel, and Windows named-pipe writes
+// are not guaranteed to be thread-safe without serialization.
 type pipeWriter struct {
 	handle windows.Handle
+	mu     sync.Mutex
 }
 
 func (w *pipeWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	var bytesWritten uint32
 	err := windows.WriteFile(w.handle, p, &bytesWritten, nil)
 	if err != nil {
