@@ -25,8 +25,9 @@ const (
 	// PhraseWeightBoost 短语候选独立 tier 的 boost 基线。
 	//
 	// 设计 (docs/design/2026-05-16-cmdbar-followup.md §2.2):
-	//   Codetable tier  +10,000,000  码表词
+	//   Codetable tier  +10,000,000  码表词 (Code==input 的精确匹配)
 	//   Phrase tier     + 1,000,000  短语 / cmdbar 命令 (本常量)
+	//   Partial tier    +   500,000  拆分组合候选 (Code!=input, 见 PartialMatchBoost)
 	//   Pinyin tier              0  拼音候选
 	//
 	// PhraseLayer 候选会被 compositeDict 混入 codetableCandidates 切片;
@@ -34,6 +35,39 @@ const (
 	// PhraseWeightBoost, 让短语永远 > 拼音、永远 < 码表词。这样 phrase
 	// weight 本身 (默认 1000) 只决定短语 tier 内部的相对顺序, 不参与跨 tier 比较。
 	PhraseWeightBoost = 1000000
+
+	// PartialMatchBoost 拆分组合候选 (Code!=input 的码表前缀匹配) 的 boost。
+	//
+	// 设计 (2026-05-17 引入, fix(mixed) 拆分组合 tier):
+	//
+	//   原则: 拆分组合可信度 < 原生候选。
+	//   "Code==input" 的精确匹配是用户最确定意图, 走 Codetable tier (+10M);
+	//   "Code!=input" 即输入需要再拆分才能命中码表前缀的候选 (典型场景:
+	//   用户输入 "date" 没有完整码表 / 短语命中, 引擎拿"d→大"作为前缀
+	//   补全), 这类候选可信度低于 phrase 精确命中, 因此独立到一个介于
+	//   pinyin 与 phrase 之间的 tier (+500K), 让 phrase tier (+1M) 优先。
+	//
+	// 兼容性: 原来这个分支用 codetablePrefixBoost (≈6M) 把它送进 codetable
+	// tier 顶部, 导致 "date" 输入下 phrase 永远抢不过拆分出来的 "大"。
+	// 改为独立低 tier 后短语全码匹配自然优先。
+	PartialMatchBoost = 500000
+
+	// PinyinTierScale 拼音候选 weight 归一化系数 (2026-05-17 fix Bug 3)。
+	//
+	// 拼音引擎内部 weight = rimeScore × 1_000_000 (0~10M), scale 跟混输
+	// tier 设计冲突 — 直接合并会让拼音 partial (典型 3M) 远超 phrase tier
+	// (1M+) 和 partial tier (500K+), 短语全码匹配永远抢不过拼音 partial。
+	//
+	// mixed engine 在合并前 ÷ PinyinTierScale, 把拼音 weight 归一化到 0~100K
+	// (pinyin tier), 与 phrase / codetable tier 严格隔离, 同时保留拼音内部
+	// 相对排序 (精度损失仅最低两位)。
+	//
+	// 完整 tier 设计:
+	//   Codetable tier  +10,000,000 ~ +10,010,000
+	//   Phrase tier     + 1,000,000 ~ + 1,010,000
+	//   Partial tier    +   500,000 ~ +   510,000
+	//   Pinyin tier              0 ~     100,000  (拼音 weight / 100)
+	PinyinTierScale = 100
 )
 
 // Config 混输引擎配置
@@ -449,7 +483,10 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 	// 码表候选提权（与 convertMixed 相同的策略）。
 	// 短语候选 (IsPhrase) 走独立 phrase tier, 仅 +PhraseWeightBoost (1M),
 	// 让它永远 < 码表词且 > 拼音, 详见 docs/design/2026-05-16-cmdbar-followup.md §2.2。
-	codetablePrefixBoost := e.config.CodetableWeightBoost * CodetablePrefixBoostRatio / 10
+	//
+	// 拆分组合可信度 < 原生候选 (2026-05-17): Code!=input[:maxCodeLen] 的
+	// 前缀补全候选独立到 PartialMatchBoost (500K) tier, 让 phrase (+1M)
+	// 与 codetable 精确 (+10M) 都优先于拆分组合。
 	for i := range codetableCandidates {
 		if codetableCandidates[i].IsPhrase {
 			codetableCandidates[i].Source = candidate.SourcePhrase
@@ -460,13 +497,23 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 		if codetableCandidates[i].Code == input[:e.maxCodeLen] {
 			codetableCandidates[i].Weight += e.config.CodetableWeightBoost
 		} else {
-			codetableCandidates[i].Weight += codetablePrefixBoost
+			codetableCandidates[i].Weight += PartialMatchBoost
 		}
 	}
 
-	// 拼音候选标记来源
+	// 拼音候选标记来源 + tier 归一化 (2026-05-17 fix)。
+	//
+	// 拼音引擎内部 weight = rimeScore × 1_000_000 (0~10M), 直接合入会跟
+	// codetable tier (10M+) 重叠且远超 phrase tier (1M+), 让短语全码匹配
+	// 永远抢不过拼音 partial。这里 ÷ PinyinTierScale (100) 把拼音 weight
+	// 归一化到 0~100K (pinyin tier), 与 phrase tier 1M+ 严格隔离, 同时
+	// /100 保留拼音内部相对顺序 (精度损失仅最低两位)。
 	for i := range pinyinCandidates {
 		pinyinCandidates[i].Source = candidate.SourcePinyin
+		pinyinCandidates[i].Weight /= PinyinTierScale
+		if pinyinCandidates[i].Weight < 0 {
+			pinyinCandidates[i].Weight = 0
+		}
 	}
 
 	// 合并
@@ -592,7 +639,10 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 	// 让它永远 > 拼音、永远 < 码表词 (含简拼降权后), 详见
 	// docs/design/2026-05-16-cmdbar-followup.md §2.2。短码场景下短语
 	// 自然让位给码表常用词, 不再霸占首位。
-	codetablePrefixBoost := e.config.CodetableWeightBoost * CodetablePrefixBoostRatio / 10 // 6M
+	//
+	// 拆分组合可信度 < 原生候选 (2026-05-17): Code!=input 的码表前缀补全
+	// (典型场景: 用户输入 "date" 没有精确命中, 码表用 "d→大" 提示) 独立到
+	// Partial tier (+500K), 让 phrase 全码命中 (+1M) 排在拆分组合之前。
 	for i := range codetableCandidates {
 		if codetableCandidates[i].IsPhrase {
 			codetableCandidates[i].Source = candidate.SourcePhrase
@@ -603,14 +653,14 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 		if codetableCandidates[i].Code == input {
 			codetableCandidates[i].Weight += e.config.CodetableWeightBoost // +10M
 		} else {
-			codetableCandidates[i].Weight += codetablePrefixBoost // +6M
+			codetableCandidates[i].Weight += PartialMatchBoost // +500K
 		}
 	}
 
 	inputLen := len(input)
 	for i := range pinyinCandidates {
 		pinyinCandidates[i].Source = candidate.SourcePinyin
-		// 拼音无完整音节时（纯简拼），按长度递减降权
+		// 拼音无完整音节时（纯简拼），按长度递减降权 (原始 scale, 归一化前完成)
 		if !pinyinHasFullSyllable && inputLen >= 3 {
 			switch {
 			case inputLen == 3:
@@ -618,6 +668,13 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 			default:
 				pinyinCandidates[i].Weight -= AbbrevPenalty4Plus // 4码简拼 ~4.5M→~1M
 			}
+		}
+		// 归一化到 pinyin tier (0~100K), 与 phrase tier (1M+) / codetable tier
+		// (10M+) 严格隔离。详见 PinyinTierScale 注释及 convertMixedOverflow 中的
+		// 同款处理。
+		pinyinCandidates[i].Weight /= PinyinTierScale
+		if pinyinCandidates[i].Weight < 0 {
+			pinyinCandidates[i].Weight = 0
 		}
 	}
 

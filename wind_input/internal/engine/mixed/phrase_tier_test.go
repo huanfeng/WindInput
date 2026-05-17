@@ -59,8 +59,7 @@ func TestPhraseTier_BoostSeparation(t *testing.T) {
 		{Text: "码表前缀", Code: "bdx", Weight: 3000},                // codetable 前缀匹配
 	}
 
-	// 等效 mixed.convertMixed 的 boost 循环
-	codetablePrefixBoost := cfg.CodetableWeightBoost * CodetablePrefixBoostRatio / 10
+	// 等效 mixed.convertMixed 的 boost 循环 (2026-05-17 起拆分组合 tier 独立到 PartialMatchBoost)
 	for i := range cands {
 		if cands[i].IsPhrase {
 			cands[i].Source = candidate.SourcePhrase
@@ -71,32 +70,40 @@ func TestPhraseTier_BoostSeparation(t *testing.T) {
 		if cands[i].Code == "bd" {
 			cands[i].Weight += cfg.CodetableWeightBoost
 		} else {
-			cands[i].Weight += codetablePrefixBoost
+			cands[i].Weight += PartialMatchBoost
 		}
 	}
 
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Weight > cands[j].Weight })
 
-	// 任何码表词必须排在任何短语之前。验证遍历: 见到第一个短语后, 不能再
-	// 出现码表词。
-	seenPhrase := false
+	// 精确匹配码表词 (Code==input) 必须排在短语之前; 短语必须排在拆分组合
+	// (Code!=input, 即 partial tier) 之前。验证: 见到第一个 partial 后不能
+	// 再出现 phrase, 见到第一个 phrase 后不能再出现 codetable exact。
+	var seenPhrase, seenPartial bool
 	for _, c := range cands {
-		if c.IsPhrase {
-			seenPhrase = true
-			continue
+		isPartial := !c.IsPhrase && c.Code != "bd"
+		isExact := !c.IsPhrase && c.Code == "bd"
+		if isExact && (seenPhrase || seenPartial) {
+			t.Errorf("codetable exact %q (weight=%d) appears AFTER phrase/partial — tier order broken", c.Text, c.Weight)
 		}
-		if seenPhrase {
-			t.Errorf("codetable candidate %q (weight=%d) appears AFTER a phrase — tier separation broken", c.Text, c.Weight)
+		if c.IsPhrase {
+			if seenPartial {
+				t.Errorf("phrase %q (weight=%d) appears AFTER a partial candidate — tier order broken", c.Text, c.Weight)
+			}
+			seenPhrase = true
+		}
+		if isPartial {
+			seenPartial = true
 		}
 	}
 
-	// 短语 weight 应当严格 < 任何码表 tier 边界
+	// 短语 weight 应当严格 < 任何码表 tier 边界 且 > partial tier 上限
 	for _, c := range cands {
 		if c.IsPhrase && c.Weight >= cfg.CodetableWeightBoost {
 			t.Errorf("phrase %q got weight %d (>= codetable boost %d)", c.Text, c.Weight, cfg.CodetableWeightBoost)
 		}
-		if c.IsPhrase && c.Weight <= 10000 {
-			t.Errorf("phrase %q got weight %d (<= pinyin tier upper 10000)", c.Text, c.Weight)
+		if c.IsPhrase && c.Weight <= PartialMatchBoost+10000 {
+			t.Errorf("phrase %q got weight %d (<= partial tier upper %d)", c.Text, c.Weight, PartialMatchBoost+10000)
 		}
 	}
 }
@@ -136,5 +143,100 @@ func TestPhraseTier_ShortInputDoesNotPromote(t *testing.T) {
 	}
 	if cands[1].Text != "签名块" {
 		t.Errorf("second candidate should be phrase '签名块', got %q (weight=%d)", cands[1].Text, cands[1].Weight)
+	}
+}
+
+// TestPartialMatchBoost_TierConstants 锁住 PartialMatchBoost 与上下 tier 边界:
+// pinyin (10000) < partial (PartialMatchBoost) < phrase (PhraseWeightBoost)
+//
+// 这是 2026-05-17 修复 (拆分组合候选低于短语全码匹配) 的核心架构承诺,
+// 任何后续调整这些常量时本测试会先报错提示。
+func TestPartialMatchBoost_TierConstants(t *testing.T) {
+	if PartialMatchBoost != 500_000 {
+		t.Errorf("PartialMatchBoost = %d, want 500_000", PartialMatchBoost)
+	}
+	// partial 必须 < phrase, 否则拆分候选会盖过短语全码匹配
+	if PartialMatchBoost >= PhraseWeightBoost {
+		t.Errorf("partial boost (%d) must be < phrase boost (%d) — 拆分组合不得超过短语全码", PartialMatchBoost, PhraseWeightBoost)
+	}
+	// partial tier 上限 (boost + 10000) 仍 < phrase boost, 即使 partial 候选
+	// weight 顶到 10000 也不应越界
+	if PartialMatchBoost+10000 >= PhraseWeightBoost {
+		t.Errorf("partial tier upper (%d) overlaps phrase tier lower (%d)", PartialMatchBoost+10000, PhraseWeightBoost)
+	}
+	// partial 必须 > 拼音 tier 上限 (10000) — 拆分候选仍优先于普通拼音
+	if PartialMatchBoost <= 10000 {
+		t.Errorf("partial boost (%d) must > pinyin tier upper (10000)", PartialMatchBoost)
+	}
+}
+
+// TestPartialMatchBoost_PhraseBeatsPartial 模拟 mixed.convertMixed 的 boost 循环,
+// 验证用户输入 "date" 时短语全码命中排在拆分组合 "d→大" 之前。
+//
+// 场景: 用户输入 "date"。
+//   - 短语 "date" (cmdbar 命令) 全码命中, IsPhrase=true。
+//   - 码表层把 "d → 大" 作为前缀补全送进来 (Code="d", Text="大"), 不是 IsPhrase。
+//
+// 期望: 短语 "date" 候选首位; 拆分组合 "大" 退到 partial tier (排在 phrase 之后)。
+//
+// 拆分组合可信度 < 原生候选 (2026-05-17): 这是本测试锁定的核心不变量。
+func TestPartialMatchBoost_PhraseBeatsPartial(t *testing.T) {
+	cfg := DefaultConfig()
+	input := "date"
+
+	cands := []candidate.Candidate{
+		{Text: "大", Code: "d", Weight: 9000},                      // 码表拆分组合: Code "d" != input "date"
+		{Text: "今天", Code: "date", Weight: 1000, IsPhrase: true},  // 短语 cmdbar 全码命中
+		{Text: "日期", Code: "date", Weight: 5000, IsPhrase: false}, // 码表精确命中 (Code==input), 应进 codetable tier
+	}
+
+	for i := range cands {
+		if cands[i].IsPhrase {
+			cands[i].Source = candidate.SourcePhrase
+			cands[i].Weight += PhraseWeightBoost
+			continue
+		}
+		cands[i].Source = candidate.SourceCodetable
+		if cands[i].Code == input {
+			cands[i].Weight += cfg.CodetableWeightBoost
+		} else {
+			cands[i].Weight += PartialMatchBoost
+		}
+	}
+
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Weight > cands[j].Weight })
+
+	// 期望顺序: codetable exact (10M+) → phrase (1M+) → partial (500K+)
+	if cands[0].Text != "日期" {
+		t.Errorf("first candidate should be codetable exact '日期', got %q (weight=%d)", cands[0].Text, cands[0].Weight)
+	}
+	if cands[1].Text != "今天" {
+		t.Errorf("second candidate should be phrase '今天', got %q (weight=%d) — 拆分组合不得抢在短语全码之前", cands[1].Text, cands[1].Weight)
+	}
+	if cands[2].Text != "大" {
+		t.Errorf("third candidate should be partial '大', got %q (weight=%d)", cands[2].Text, cands[2].Weight)
+	}
+}
+
+// TestPartialMatchBoost_PartialBeatsPinyin 回归测试: 没有短语命中时, 拆分组合
+// 仍应优先于普通拼音候选 (不能把 partial 降到 0)。
+//
+// 场景: 用户输入 "dat" (无对应短语 / 精确码表词命中), 但码表 "d→大" 作为
+// 前缀补全可见。拼音引擎也返回 "大" (从音节 "da" 拆出)。
+//
+// 期望: 码表拆分 "大" weight > 拼音 "大" weight。
+func TestPartialMatchBoost_PartialBeatsPinyin(t *testing.T) {
+	cands := []candidate.Candidate{
+		{Text: "大", Code: "d", Weight: 8000, Source: candidate.SourceCodetable}, // 码表拆分组合
+		{Text: "答", Code: "da", Weight: 9500, Source: candidate.SourcePinyin},   // 拼音候选 (顶到 tier 上限 10000)
+	}
+
+	// 仅码表拆分加 PartialMatchBoost, 拼音不加
+	cands[0].Weight += PartialMatchBoost
+
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Weight > cands[j].Weight })
+
+	if cands[0].Text != "大" {
+		t.Errorf("first candidate should be partial-tier '大', got %q (weight=%d) — partial 必须优先于拼音", cands[0].Text, cands[0].Weight)
 	}
 }
