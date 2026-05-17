@@ -171,5 +171,55 @@ func TestDictManager_ShadowPinAndRemove(t *testing.T) {
 	}
 }
 
+// TestDictManager_DisablePhrase 验证短语候选的"删除"走 PhraseRecord.Enabled
+// 软删除路径: 短语条目仍在 db, 但不再参与候选生成; 重新启用后又能匹配。
+func TestDictManager_DisablePhrase(t *testing.T) {
+	dm := setupTestManager(t)
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
+
+	const (
+		code = "qm"
+		text = "我的签名"
+	)
+
+	// 种入一条用户短语 (Enabled=true)
+	s := dm.GetStore()
+	if err := s.AddPhrase(store.PhraseRecord{
+		Code:    code,
+		Text:    text,
+		Weight:  1000,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddPhrase: %v", err)
+	}
+	if err := dm.ReloadPhrases(); err != nil {
+		t.Fatalf("ReloadPhrases: %v", err)
+	}
+
+	// disable 前: candidate 能匹配到
+	if got := dm.GetPhraseLayer().Search(code, 10); len(got) == 0 {
+		t.Fatalf("phrase should be searchable before DisablePhrase")
+	}
+
+	// DisablePhrase 后: candidate 不再匹配
+	if err := dm.DisablePhrase(code, text); err != nil {
+		t.Fatalf("DisablePhrase: %v", err)
+	}
+	if got := dm.GetPhraseLayer().Search(code, 10); len(got) != 0 {
+		t.Errorf("phrase should be filtered out after DisablePhrase, got %d candidates", len(got))
+	}
+
+	// 重新 Enable 后: candidate 又能匹配
+	if err := s.SetPhraseEnabled(code, text, true); err != nil {
+		t.Fatalf("SetPhraseEnabled true: %v", err)
+	}
+	if err := dm.ReloadPhrases(); err != nil {
+		t.Fatalf("ReloadPhrases 2: %v", err)
+	}
+	if got := dm.GetPhraseLayer().Search(code, 10); len(got) == 0 {
+		t.Errorf("phrase should be searchable again after SetPhraseEnabled(true)")
+	}
+}
+
 // 确保 store 包被使用（setupTestManager 间接使用）
 var _ = store.FreqRecord{}

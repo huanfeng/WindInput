@@ -4,6 +4,7 @@ package coordinator
 import (
 	"context"
 	"image"
+	"strings"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/engine"
@@ -401,9 +402,20 @@ func (c *Coordinator) handleCandidateDelete(index int) {
 
 	if c.engineMgr != nil {
 		dm := c.engineMgr.GetDictManager()
-		dm.DeleteWord(code, cand.Text, cand.ID)
-		if err := dm.SaveShadow(); err != nil {
-			c.logger.Error("Failed to save shadow layer", "error", err)
+		// 短语候选 (cand.ID 以 "phrase:" 开头, cand.PhraseTemplate 是 PhraseRecord.Text)
+		// 走 PhraseRecord.Enabled = false (软删除), 不写 Shadow。
+		// 这样设置 UI 的"启用" Switch 能反映该状态, 用户可恢复。
+		// 字符组单字符候选 (IsGroupMember=true) UI 已 disable, 这里不到。
+		if strings.HasPrefix(cand.ID, "phrase:") && cand.PhraseTemplate != "" {
+			if err := dm.DisablePhrase(code, cand.PhraseTemplate); err != nil {
+				c.logger.Error("Failed to disable phrase", "error", err, "code", code)
+			}
+		} else {
+			// 普通候选: 走 Shadow delete (按方案桶)
+			dm.DeleteWord(code, cand.Text, cand.ID)
+			if err := dm.SaveShadow(); err != nil {
+				c.logger.Error("Failed to save shadow layer", "error", err)
+			}
 		}
 	}
 

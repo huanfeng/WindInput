@@ -35,9 +35,10 @@ func (a *App) GetShadowRules() ([]ShadowRuleItem, error) {
 		}
 		for _, d := range cr.Deleted {
 			items = append(items, ShadowRuleItem{
-				Code: cr.Code,
-				Word: d,
-				Type: "delete",
+				Code:   cr.Code,
+				Word:   d.Word,
+				CandID: d.CandID,
+				Type:   "delete",
 			})
 		}
 	}

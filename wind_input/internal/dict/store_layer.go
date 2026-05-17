@@ -324,7 +324,8 @@ func (l *StoreShadowLayer) Pin(code, word, candID string, position int) {
 	_ = l.store.PinShadow(l.schemaID, strings.ToLower(code), word, candID, position)
 }
 
-// Delete 隐藏指定词/候选。
+// Delete 隐藏指定词/候选。写当前 layer 的方案桶 (短语 delete 已改走
+// PhraseRecord.Enabled = false, 不经过 Shadow)。
 func (l *StoreShadowLayer) Delete(code, word, candID string) {
 	_ = l.store.DeleteShadow(l.schemaID, strings.ToLower(code), word, candID)
 }

@@ -10,6 +10,28 @@ import (
 
 var bucketShadow = []byte("Shadow")
 
+// Shadow 方案桶设计:
+//
+// 所有 Shadow 规则 (pin + delete) 按方案隔离, 存入 schema sub-bucket "Shadow"。
+// pin 自带位置语义, 同 code 候选竞争, 不同方案下意义不同。delete 表达
+// "在该方案下不想看到 X" 的意图, 也按方案隔离 — 短语候选的"删除"已经
+// 改走 PhraseRecord.Enabled = false (跨方案的"禁用"语义), 因此 Shadow
+// delete 不再需要全局桶。
+//
+// 2026-05-17 一度引入过 ShadowGlobal 全局桶承载"跨方案 delete", 但用户
+// 澄清: "短语 delete 才需要全局, 但短语已有 Enabled 字段做该事; 普通词
+// delete 仍应按方案"。所以全局桶被撤销, 回归纯方案桶设计。
+//
+// 接口层面:
+//   - PinShadow(schemaID, code, word, candID, position) → 写方案桶
+//   - DeleteShadow(schemaID, code, word, candID)         → 写方案桶
+//   - RemoveShadowRule(schemaID, code, word, candID)     → 清方案桶
+//   - GetShadowRules / GetAllShadowRules                 → 读方案桶
+//
+// 兼容性: 旧 db 里方案桶里的 Deleted 字段格式可能是 []string (R2 之前),
+// 由 ShadowDelete.UnmarshalJSON 兼容; 旧 db 里残留的 ShadowGlobal 桶
+// 数据会被忽略 (alpha 阶段, 用户允许丢弃)。
+
 // ShadowPin records a pinned word and its target position in the candidate list.
 //
 // 2026-05-17 R2: 新增 CandID 字段, 用于按候选稳定 id 精准定位 (动态短语
@@ -69,14 +91,14 @@ func (s *Store) GetShadowRules(schemaID, code string) (ShadowRecord, error) {
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b, err := schemaSubBucket(tx, schemaID, string(bucketShadow), false)
 		if err != nil {
-			// bucket absent means no rules
 			return nil
 		}
-		v := b.Get([]byte(code))
-		if v == nil {
-			return nil
+		if v := b.Get([]byte(code)); v != nil {
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return fmt.Errorf("shadow unmarshal: %w", err)
+			}
 		}
-		return json.Unmarshal(v, &rec)
+		return nil
 	})
 	return rec, err
 }
@@ -97,11 +119,12 @@ func shadowMatchDel(d ShadowDelete, word, candID string) bool {
 	return d.Word == word
 }
 
-// PinShadow inserts a pin rule under the given code.
+// PinShadow inserts a pin rule under the given code in the schema bucket.
 // Behaviour:
 //   - Existing pin for the same (Word, CandID) target is removed first.
 //   - The new pin is prepended to the Pinned slice (LIFO / most-recent-first).
-//   - Matching entry in Deleted is removed (if present).
+//   - Matching entry in Deleted (same record) is removed (if present).
+//     这样用户对"被删词"二次 pin 时仍能立即可见, 不必先解删。
 //
 // candID 非空时按 id 匹配, 否则按 word; word 仍持久化以便手输规则 / UI 显示。
 func (s *Store) PinShadow(schemaID, code, word, candID string, position int) error {
@@ -117,32 +140,33 @@ func (s *Store) PinShadow(schemaID, code, word, candID string, position int) err
 				return fmt.Errorf("shadow unmarshal: %w", err)
 			}
 		}
-
-		// Remove old pin for the same target.
 		filtered := rec.Pinned[:0]
 		for _, p := range rec.Pinned {
 			if !shadowMatchPin(p, word, candID) {
 				filtered = append(filtered, p)
 			}
 		}
-		// Prepend new pin (LIFO).
 		rec.Pinned = append([]ShadowPin{{Word: word, CandID: candID, Position: position}}, filtered...)
 
-		// Remove from Deleted.
-		deleted := rec.Deleted[:0]
-		for _, d := range rec.Deleted {
-			if !shadowMatchDel(d, word, candID) {
-				deleted = append(deleted, d)
+		// 同 record 里若有同 target 的 Deleted, 清掉 (pin 优先于 delete)
+		if len(rec.Deleted) > 0 {
+			deleted := rec.Deleted[:0]
+			for _, d := range rec.Deleted {
+				if !shadowMatchDel(d, word, candID) {
+					deleted = append(deleted, d)
+				}
 			}
+			rec.Deleted = deleted
 		}
-		rec.Deleted = deleted
 
 		return putShadow(b, code, &rec)
 	})
 }
 
-// DeleteShadow adds a delete rule for the given target (deduped by word/candID)
-// and removes any matching pin.
+// DeleteShadow adds a delete rule for the given target in the schema bucket.
+// Existing pin for the same target is removed (delete 与 pin 互斥)。
+//
+// candID 非空时按 id 匹配, 否则按 word。
 func (s *Store) DeleteShadow(schemaID, code, word, candID string) error {
 	code = strings.ToLower(code)
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -157,16 +181,18 @@ func (s *Store) DeleteShadow(schemaID, code, word, candID string) error {
 			}
 		}
 
-		// Remove matching pins.
-		filtered := rec.Pinned[:0]
-		for _, p := range rec.Pinned {
-			if !shadowMatchPin(p, word, candID) {
-				filtered = append(filtered, p)
+		// 1) 清掉同 target 的 pin (delete 与 pin 互斥)
+		if len(rec.Pinned) > 0 {
+			filtered := rec.Pinned[:0]
+			for _, p := range rec.Pinned {
+				if !shadowMatchPin(p, word, candID) {
+					filtered = append(filtered, p)
+				}
 			}
+			rec.Pinned = filtered
 		}
-		rec.Pinned = filtered
 
-		// Add to Deleted (dedup by target).
+		// 2) 追加 delete (dedup)
 		found := false
 		for _, d := range rec.Deleted {
 			if shadowMatchDel(d, word, candID) {
@@ -183,13 +209,12 @@ func (s *Store) DeleteShadow(schemaID, code, word, candID string) error {
 }
 
 // RemoveShadowRule removes both pin and delete rules for the given target.
-// If the resulting record is empty the key is deleted entirely.
+// If a record becomes empty the key is deleted entirely.
 func (s *Store) RemoveShadowRule(schemaID, code, word, candID string) error {
 	code = strings.ToLower(code)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b, err := schemaSubBucket(tx, schemaID, string(bucketShadow), false)
 		if err != nil {
-			// Bucket absent — nothing to remove.
 			return nil
 		}
 		key := []byte(code)
@@ -201,17 +226,13 @@ func (s *Store) RemoveShadowRule(schemaID, code, word, candID string) error {
 		if err := json.Unmarshal(v, &rec); err != nil {
 			return fmt.Errorf("shadow unmarshal: %w", err)
 		}
-
-		// Remove matching pins.
-		filtered := rec.Pinned[:0]
+		pinned := rec.Pinned[:0]
 		for _, p := range rec.Pinned {
 			if !shadowMatchPin(p, word, candID) {
-				filtered = append(filtered, p)
+				pinned = append(pinned, p)
 			}
 		}
-		rec.Pinned = filtered
-
-		// Remove matching deletes.
+		rec.Pinned = pinned
 		deleted := rec.Deleted[:0]
 		for _, d := range rec.Deleted {
 			if !shadowMatchDel(d, word, candID) {
@@ -219,8 +240,6 @@ func (s *Store) RemoveShadowRule(schemaID, code, word, candID string) error {
 			}
 		}
 		rec.Deleted = deleted
-
-		// If record is empty, delete the key.
 		if len(rec.Pinned) == 0 && len(rec.Deleted) == 0 {
 			return b.Delete(key)
 		}
@@ -228,14 +247,13 @@ func (s *Store) RemoveShadowRule(schemaID, code, word, candID string) error {
 	})
 }
 
-// ShadowRuleCount returns the number of codes that have at least one rule
-// stored in the Shadow sub-bucket for the given schema.
+// ShadowRuleCount returns the total number of codes with at least one rule
+// in the given schema. 用于 UI 统计显示。
 func (s *Store) ShadowRuleCount(schemaID string) (int, error) {
 	var count int
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b, err := schemaSubBucket(tx, schemaID, string(bucketShadow), false)
 		if err != nil {
-			// Bucket absent means zero rules.
 			return nil
 		}
 		count = b.Stats().KeyN
@@ -244,7 +262,7 @@ func (s *Store) ShadowRuleCount(schemaID string) (int, error) {
 	return count, err
 }
 
-// GetAllShadowRules returns all code→ShadowRecord entries for the given schema.
+// GetAllShadowRules returns all code→ShadowRecord entries in the schema bucket.
 func (s *Store) GetAllShadowRules(schemaID string) (map[string]ShadowRecord, error) {
 	result := make(map[string]ShadowRecord)
 	err := s.db.View(func(tx *bolt.Tx) error {

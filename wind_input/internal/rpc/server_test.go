@@ -399,7 +399,7 @@ func TestShadowPinAndGetRules(t *testing.T) {
 	if len(reply.Pinned) != 1 || reply.Pinned[0].Word != "王" {
 		t.Errorf("unexpected pinned: %+v", reply.Pinned)
 	}
-	if len(reply.Deleted) != 1 || reply.Deleted[0] != "王国" {
+	if len(reply.Deleted) != 1 || reply.Deleted[0].Word != "王国" {
 		t.Errorf("unexpected deleted: %+v", reply.Deleted)
 	}
 
@@ -482,6 +482,49 @@ func TestShadowGetAllRules_PinnedCandID(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected pinned entry with CandID=%q in GetAllRules reply, got %+v", candID, reply.Rules)
+	}
+}
+
+// TestShadowDelete_SameSchema 验证 Shadow.Delete 写入方案桶后, 同方案
+// GetAllRules 能读到该 delete 规则 (回归方案桶设计后的契约)。
+func TestShadowDelete_SameSchema(t *testing.T) {
+	client := setupTestRPC(t)
+	defer client.Close()
+
+	var empty rpcapi.Empty
+	const candID = "phrase:dd:Demo"
+
+	// 用 active schema 写 delete (SchemaID 空 → 解析为 active)
+	if err := client.call("Shadow.Delete", &rpcapi.ShadowDeleteArgs{
+		SchemaID: "",
+		Code:     "dd",
+		Word:     "示例",
+		CandID:   candID,
+	}, &empty); err != nil {
+		t.Fatalf("Shadow.Delete: %v", err)
+	}
+
+	// 用 active schema (SchemaID 空) 读取, 应能看到该 delete
+	var reply rpcapi.ShadowGetAllRulesReply
+	if err := client.call("Shadow.GetAllRules", &rpcapi.ShadowGetAllRulesArgs{
+		SchemaID: "",
+	}, &reply); err != nil {
+		t.Fatalf("Shadow.GetAllRules: %v", err)
+	}
+
+	var foundCandID bool
+	for _, cr := range reply.Rules {
+		if cr.Code != "dd" {
+			continue
+		}
+		for _, d := range cr.Deleted {
+			if d.CandID == candID && d.Word == "示例" {
+				foundCandID = true
+			}
+		}
+	}
+	if !foundCandID {
+		t.Errorf("expected deleted entry with CandID=%q in same schema, got %+v", candID, reply.Rules)
 	}
 }
 

@@ -211,7 +211,13 @@ func (a *App) collectExportData(schemaID string, sections []string) (*dictio.Exp
 		if err == nil {
 			data.Shadow = make(map[string]dictio.ShadowRecord)
 			for _, cr := range reply.Rules {
-				rec := dictio.ShadowRecord{Deleted: cr.Deleted}
+				// 导出格式仍保留 []string Deleted, 仅取 word; CandID 在 yaml
+				// 持久化中没有展示价值, 短语规则可通过 word 反向定位。
+				deletedWords := make([]string, 0, len(cr.Deleted))
+				for _, d := range cr.Deleted {
+					deletedWords = append(deletedWords, d.Word)
+				}
+				rec := dictio.ShadowRecord{Deleted: deletedWords}
 				for _, p := range cr.Pinned {
 					rec.Pinned = append(rec.Pinned, dictio.ShadowPinEntry{
 						Code: cr.Code, Word: p.Word, Position: p.Position,

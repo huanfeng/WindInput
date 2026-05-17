@@ -261,12 +261,11 @@ func (a *App) GetShadowBySchema(schemaID string) ([]ShadowRuleItem, error) {
 			})
 		}
 		for _, d := range cr.Deleted {
-			// TODO(Bug 1): RPC GetAllRules.Deleted 升级为 []ShadowDeletedEntry
-			// 后, 这里同步补 CandID。当前 delete 规则只能按 word 匹配。
 			items = append(items, ShadowRuleItem{
-				Code: cr.Code,
-				Word: d,
-				Type: "delete",
+				Code:   cr.Code,
+				Word:   d.Word,
+				CandID: d.CandID,
+				Type:   "delete",
 			})
 		}
 	}

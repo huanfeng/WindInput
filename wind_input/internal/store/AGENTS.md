@@ -14,7 +14,7 @@
 | `temp_words.go` | `TempDict`：临时词存储（加词过程中的暂存），生命周期短；独立 bucket |
 | `phrases.go` | `PhraseStorage`：短语管理存储；`Put`/`Get`/`List`/`Remove`/`ResetDefaults`。**2026-05-16 schema 简化**: `PhraseRecord` 字段精简为 `(Code, Text, Weight, Position, Enabled, IsSystem)`, 删除原 `Texts`/`Name`/`Type` 派生字段, **text 是分类的唯一信任源** (`$AA(...)` 字符组 / `$SS(...)` 字符串数组 / `$CC(...)` 命令 / 普通); 包内 `legacyPhraseRecord` 仅供 migration 反序列化旧数据用; `phraseKey` 统一为 `code\x00text`; `RemovePhrase(code, text)` / `SetPhraseEnabled(code, text, enabled)` 删除 name 参数 |
 | `migration.go` | `MigratePhraseRecordsToAA()`: 一次性扫描 Phrases bucket, 把旧的 `Texts`+`Name` 字符组记录重写为 `Text` 字段中的 `$AA(...)` marker, 幂等 (`$AA(` 开头跳过); 用内部 `legacyPhraseRecord` 读旧字段, 写新 `PhraseRecord`。`dict.DictManager.OpenStore` 后立即调用 |
-| `shadow.go` | `ShadowStorage`：Shadow 规则（pin/delete）存储。**2026-05-17 R2**: `ShadowPin`/`ShadowDelete` 新增 `candID` 参数；`ShadowDelete` 的 `Deleted` 字段从 `[]string` 升级为 `[]ShadowDelete{Word, CandID}`；新增 `shadowMatchPin`/`shadowMatchDel` 内部匹配函数（CandID 优先，空时按 Word）；`RemoveShadowRule` 同步升级签名 |
+| `shadow.go` | `ShadowStorage`：Shadow 规则（pin/delete）存储。**方案桶设计**: pin / delete 都按方案隔离, 写 `Schemas/{schemaID}/Shadow` 子桶。`DeleteShadow(schemaID, code, word, candID)` 写方案桶; `RemoveShadowRule` 清方案桶; `GetShadowRules` / `GetAllShadowRules` 读方案桶。**短语候选 delete 不走 Shadow**, 改写 `PhraseRecord.Enabled = false` (见 `dict.DictManager.DisablePhrase`), 因此 Shadow delete 自然按方案隔离即可。**R2 (2026-05-17)**: `ShadowPin`/`ShadowDelete` 含 `CandID` 字段, `Deleted` 从 `[]string` 升级为 `[]ShadowDelete{Word, CandID}`; `shadowMatchPin`/`shadowMatchDel` 优先 CandID 匹配; ShadowDelete.UnmarshalJSON 兼容旧版纯字符串格式。**注释历史**: 2026-05-17 一度引入 ShadowGlobal 全局桶承载"跨方案 delete", 后撤销 — 详见 shadow.go 顶部注释 |
 | `freq.go` | `FreqStorage`：词频统计存储；`Update`/`Get`/`GetTop`/`Delete` |
 | `write_buffer.go` | `WriteBuffer`：构建模式的原子事务写入缓冲，用于批量操作；`Put`/`Delete`/`Commit` |
 | `write_buffer_test.go` | WriteBuffer 单元测试 |
@@ -23,7 +23,10 @@
 ## For AI Agents
 
 ### Working In This Directory
-- **Bucket 结构**：Meta（全局 kv）→ Schemas（schema 子 bucket）→ {schemaID}（各 schema 数据）→ UserWords/TempWords/Shadow/Freq（子 bucket）
+- **Bucket 结构**：
+  - 顶层桶: `Meta`（全局 kv）/ `Schemas` / `Phrases`
+  - `Schemas` → `{schemaID}` (各方案数据) → `UserWords` / `TempWords` / `Shadow` / `Freq` (子桶)
+  - **Shadow 按方案桶**: pin 和 delete 都写 `Schemas/{schemaID}/Shadow`。短语候选的"删除"已改走 `PhraseRecord.Enabled = false` (跨方案的"禁用"语义), Shadow 不再需要全局桶。详见 `shadow.go` 顶部注释
 - **初始化**：`Store.init()` 创建必要 bucket 并初始化 Meta 默认值（版本=1、设备 ID=UUID）
 - **事务语义**：所有写操作通过 `db.Update()`、读操作通过 `db.View()` 保证原子性
 - **schema 隔离**：不同方案的词典、频率、规则独立存储在各自的 bucket 下，切换方案时通过 `schemaBucket(schemaID, create=true)` 导航

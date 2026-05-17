@@ -695,6 +695,21 @@ func (dm *DictManager) ReloadPhrases() error {
 	return dm.phraseLayer.LoadFromStore(dm.store)
 }
 
+// DisablePhrase 把指定短语的 Enabled 字段设为 false (软删除),
+// 让该 PhraseRecord 仍保留在 db 中但不参与候选生成。
+// 调用方需是 phrase 候选场景 (cand.ID 以 "phrase:" 开头)。
+// 完成后重新加载 phraseLayer 让 disable 立即生效。
+func (dm *DictManager) DisablePhrase(code, text string) error {
+	if dm.store == nil {
+		return nil
+	}
+	if err := dm.store.SetPhraseEnabled(code, text, false); err != nil {
+		return err
+	}
+	// 复用现有 reload 路径让 phraseLayer 重新加载 (只读 Enabled=true 的记录)
+	return dm.ReloadPhrases()
+}
+
 // GetStats 获取统计信息
 func (dm *DictManager) GetStats() map[string]int {
 	dm.mu.RLock()

@@ -50,6 +50,7 @@
 ### Working In This Directory
 - **Shadow 架构已改为 pin(position)+delete**：`pin` 操作将词条固定到指定位置（position=0 即首位），`delete` 将词条标记为隐藏；旧的 `top`/`hide` 字段不再使用
 - **Shadow R2 (2026-05-17) CandID 匹配**：`PinnedWord`/`DeletedWord` 新增 `CandID` 字段；`ApplyShadowPins` 匹配优先级：`rule.CandID` 非空时按 `cand.ID` 精准匹配（动态短语跨日子稳定），否则按 `rule.Word` 匹配 `cand.Text`（兼容旧规则）；`DictManager.PinWord/DeleteWord/RemoveShadowRule/HasShadowRule` 均增加 `candID string` 入参；**旧 PhraseLayer.MovePhraseUp/Down/ToTop/HasPhraseOverride/ResetPhraseOverride 已删除**，短语调位统一走 Shadow
+- **Shadow 按方案桶**：pin 和 delete 都写 `Schemas/{schemaID}/Shadow`。`StoreShadowLayer.Delete(code, word, candID)` 走 `store.DeleteShadow(schemaID, ...)`。**短语候选 delete 不走 Shadow**, 改走 `DictManager.DisablePhrase(code, text)` → `Store.SetPhraseEnabled(false)` + `ReloadPhrases()` 软删除路径; 这样设置 UI 的"启用" Switch 能反映该状态, 用户可恢复。2026-05-17 一度引入过 ShadowGlobal 全局桶承载"跨方案 delete", 后撤销 — 详见 `internal/store/shadow.go` 顶部注释
 - `CompositeDict` 是引擎唯一的词库查询入口，不再有独立的 `Dict` 接口；引擎持有 `*CompositeDict` 引用
 - `DictManager.RegisterSystemLayer`/`UnregisterSystemLayer` 在引擎切换时由 `engine.Manager` 调用，保证 CompositeDict 中只有当前方案的系统词库层
 - `ShadowLayer` 实现 `ShadowProvider`，通过 `CompositeDict.SetShadowProvider` 注入；呈现层覆盖在搜索返回后执行

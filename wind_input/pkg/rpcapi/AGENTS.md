@@ -34,14 +34,26 @@ JSON-RPC 协议的请求/响应类型定义及帧协议实现。供 `internal/rp
 | `updated` | 聚合"有数据更新"信令（stats 心跳） |
 | `paused` `resumed` | 服务暂停/恢复 |
 
-### Shadow schema (2026-05-17 R2 CandID)
+### Shadow schema (2026-05-17 R2 CandID + 方案桶设计)
 
 `ShadowPinArgs`/`ShadowDeleteArgs`/`PinnedEntry`/`ShadowPinItem`/`ShadowDelItem` 均新增
 `CandID string (json:"cand_id,omitempty")` 字段。
 - `CandID` 非空时按候选稳定 id 精准匹配（动态短语场景，Text 每次展开不同）；
 - `CandID` 空时按 `Word` 匹配 `cand.Text`（兼容旧手输文本规则）。
 - 客户端调用：`ShadowPin(schemaID, code, word, candID, position)`，`ShadowDelete/RemoveRule` 类同。
-- GetAllRules/GetRules 的 `Deleted` 字段仍返回 `[]string`（word 列表）供 UI 显示，CandID 不暴露到旧接口。
+
+**方案桶设计**:
+- `Shadow.Delete` / `Shadow.RemoveRule` 接受 `SchemaID` 字段, pin / delete 都写**方案桶** (`Schemas/{schemaID}/Shadow`)。
+- 短语候选的"删除"已分流到 `PhraseRecord.Enabled = false` (跨方案的"禁用"语义), 因此 Shadow 不需要全局桶。
+- `ShadowRulesReply.Deleted` 和 `ShadowCodeRules.Deleted` 从 `[]string` 升级为 `[]ShadowDeletedEntry{Word, CandID}` (替代 R2 当时遗留的 TODO), UI 端可按 id 删除短语 delete 规则。
+
+#### ShadowDeletedEntry
+```go
+type ShadowDeletedEntry struct {
+    Word   string `json:"word"`
+    CandID string `json:"cand_id,omitempty"`
+}
+```
 
 ### Phrase schema (2026-05-16 简化)
 

@@ -2,6 +2,8 @@
 package coordinator
 
 import (
+	"strings"
+
 	"github.com/huanfeng/wind_input/internal/bridge"
 )
 
@@ -51,9 +53,17 @@ func (c *Coordinator) handleDeleteCandidateByKey(num int) *bridge.KeyEventResult
 
 	if c.engineMgr != nil {
 		dm := c.engineMgr.GetDictManager()
-		dm.DeleteWord(code, cand.Text, cand.ID)
-		if err := dm.SaveShadow(); err != nil {
-			c.logger.Error("Failed to save shadow layer after hotkey delete", "error", err)
+		// 短语候选 (cand.ID 以 "phrase:" 开头) 走 PhraseRecord.Enabled = false
+		// (软删除), 不写 Shadow。与右键菜单 handleCandidateDelete 同步分发逻辑。
+		if strings.HasPrefix(cand.ID, "phrase:") && cand.PhraseTemplate != "" {
+			if err := dm.DisablePhrase(code, cand.PhraseTemplate); err != nil {
+				c.logger.Error("Failed to disable phrase via hotkey", "error", err, "code", code)
+			}
+		} else {
+			dm.DeleteWord(code, cand.Text, cand.ID)
+			if err := dm.SaveShadow(); err != nil {
+				c.logger.Error("Failed to save shadow layer after hotkey delete", "error", err)
+			}
 		}
 	}
 

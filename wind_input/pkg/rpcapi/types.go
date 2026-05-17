@@ -197,8 +197,8 @@ type ShadowGetRulesArgs struct {
 
 // ShadowRulesReply 规则响应
 type ShadowRulesReply struct {
-	Pinned  []PinnedEntry `json:"pinned,omitempty"`
-	Deleted []string      `json:"deleted,omitempty"`
+	Pinned  []PinnedEntry        `json:"pinned,omitempty"`
+	Deleted []ShadowDeletedEntry `json:"deleted,omitempty"`
 }
 
 // PinnedEntry 置顶条目
@@ -206,6 +206,17 @@ type PinnedEntry struct {
 	Word     string `json:"word"`
 	CandID   string `json:"cand_id,omitempty"` // 候选稳定 id, 优先于 Word 匹配 (见 ShadowPinArgs)
 	Position int    `json:"position"`
+}
+
+// ShadowDeletedEntry 删除规则条目 (2026-05-17 升级, 替代 []string)。
+//
+// 2026-05-17 R2 后续: Bug 2 修复时 ShadowDelete 结构已带 CandID, 但
+// RPC GetAllRules.Deleted / GetRules.Deleted 当时只暴露 word 字段, 导致
+// 设置 UI 无法定位短语候选规则。本结构补齐 CandID, 让 UI 端能按 id
+// 删除短语 delete 规则。
+type ShadowDeletedEntry struct {
+	Word   string `json:"word"`
+	CandID string `json:"cand_id,omitempty"` // 候选稳定 id, 同 PinnedEntry.CandID 语义
 }
 
 // DictGetTempArgs 临时词库查询请求
@@ -298,9 +309,9 @@ type ShadowGetAllRulesReply struct {
 
 // ShadowCodeRules 单个编码下的规则
 type ShadowCodeRules struct {
-	Code    string        `json:"code"`
-	Pinned  []PinnedEntry `json:"pinned,omitempty"`
-	Deleted []string      `json:"deleted,omitempty"`
+	Code    string               `json:"code"`
+	Pinned  []PinnedEntry        `json:"pinned,omitempty"`
+	Deleted []ShadowDeletedEntry `json:"deleted,omitempty"` // 2026-05-17 从 []string 升级以承载 CandID
 }
 
 // ── System 服务类型 ──

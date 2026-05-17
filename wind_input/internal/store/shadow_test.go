@@ -1,7 +1,6 @@
 package store
 
 import (
-	"encoding/json"
 	"testing"
 
 	bolt "go.etcd.io/bbolt"
@@ -75,6 +74,27 @@ func TestShadow_PinOverridesDelete(t *testing.T) {
 	}
 }
 
+func TestShadow_DeleteOverridesPin(t *testing.T) {
+	s := openTestStore(t)
+
+	// Pin first
+	if err := s.PinShadow(testSchema, "ni", "你", "", 0); err != nil {
+		t.Fatalf("PinShadow: %v", err)
+	}
+	// Then delete: pin should be removed (互斥)
+	if err := s.DeleteShadow(testSchema, "ni", "你", ""); err != nil {
+		t.Fatalf("DeleteShadow: %v", err)
+	}
+
+	rec, _ := s.GetShadowRules(testSchema, "ni")
+	if len(rec.Pinned) != 0 {
+		t.Errorf("expected pin cleared by delete, got %+v", rec.Pinned)
+	}
+	if len(rec.Deleted) != 1 || rec.Deleted[0].Word != "你" {
+		t.Errorf("expected 1 delete, got %+v", rec.Deleted)
+	}
+}
+
 func TestShadow_RemoveRule(t *testing.T) {
 	s := openTestStore(t)
 
@@ -123,7 +143,7 @@ func TestShadow_GetRuleCount(t *testing.T) {
 		t.Fatalf("ShadowRuleCount: %v", err)
 	}
 	if count != 2 {
-		t.Errorf("expected count=2, got %d", count)
+		t.Errorf("expected count=2 (1 pin + 1 delete), got %d", count)
 	}
 }
 
@@ -187,13 +207,11 @@ func TestShadow_RemoveByCandID(t *testing.T) {
 
 // TestShadow_LegacyDeletedFormat 验证 ShadowDelete.UnmarshalJSON 兼容
 // 旧版 db 写入的 `"d":["词A","词B"]` 纯字符串格式 (2026-05-17 之前)。
-// 修复 root cause: bug 引入时 Deleted 从 []string 升级为 []ShadowDelete,
-// 旧数据反序列化失败导致整条 record (包括 pin) 一起丢, 修复后旧字符串
-// 应转换为 ShadowDelete{Word: 旧值, CandID: ""}。
+// 旧格式的 delete 写入了方案桶, 当前方案桶设计直接复用兼容路径。
 func TestShadow_LegacyDeletedFormat(t *testing.T) {
 	s := openTestStore(t)
 
-	// 直接以旧格式 (Deleted 为 []string) 注入 db
+	// 直接以旧格式 (Deleted 为 []string) 注入方案桶
 	legacy := []byte(`{"p":[{"w":"词A","pos":0}],"d":["旧词1","旧词2"]}`)
 	if err := s.db.Update(func(tx *bolt.Tx) error {
 		b, err := schemaSubBucket(tx, testSchema, string(bucketShadow), true)
@@ -221,28 +239,36 @@ func TestShadow_LegacyDeletedFormat(t *testing.T) {
 	if rec.Deleted[1].Word != "旧词2" || rec.Deleted[1].CandID != "" {
 		t.Errorf("legacy[1] mismatch: %+v", rec.Deleted[1])
 	}
+}
 
-	// 验证新写入后旧记录被正确升级为对象格式 (写回 db 是新格式)
-	if err := s.DeleteShadow(testSchema, "zz", "新词", "phrase:zz:new"); err != nil {
-		t.Fatalf("DeleteShadow new: %v", err)
-	}
-	rec2, _ := s.GetShadowRules(testSchema, "zz")
-	if len(rec2.Deleted) != 3 {
-		t.Fatalf("expected 3 deleted after new add, got %d", len(rec2.Deleted))
+// TestShadow_DeleteSameSchema 验证 delete 写方案桶后, 同方案 Get 能读到,
+// 不同方案 Get 读不到 (回归方案桶设计)。
+func TestShadow_DeleteSameSchema(t *testing.T) {
+	s := openTestStore(t)
+
+	const schemaA = "schemaA"
+	const schemaB = "schemaB"
+
+	// schemaA 下 delete
+	if err := s.DeleteShadow(schemaA, "n", "拟", "phrase:n:T"); err != nil {
+		t.Fatalf("DeleteShadow A: %v", err)
 	}
 
-	// 再次序列化, 确认存盘格式不再是旧字符串
-	var raw struct {
-		Deleted []json.RawMessage `json:"d"`
+	// schemaA 下 Get 应能读到
+	recA, err := s.GetShadowRules(schemaA, "n")
+	if err != nil {
+		t.Fatalf("GetShadowRules A: %v", err)
 	}
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		b, _ := schemaSubBucket(tx, testSchema, string(bucketShadow), false)
-		_ = json.Unmarshal(b.Get([]byte("zz")), &raw)
-		return nil
-	})
-	for i, item := range raw.Deleted {
-		if len(item) > 0 && item[0] == '"' {
-			t.Errorf("Deleted[%d] still stored as raw string: %s (expected object)", i, string(item))
-		}
+	if len(recA.Deleted) != 1 || recA.Deleted[0].Word != "拟" || recA.Deleted[0].CandID != "phrase:n:T" {
+		t.Errorf("expected delete in schemaA, got %v", recA.Deleted)
+	}
+
+	// schemaB 下 Get 不应读到 (方案桶隔离)
+	recB, err := s.GetShadowRules(schemaB, "n")
+	if err != nil {
+		t.Fatalf("GetShadowRules B: %v", err)
+	}
+	if len(recB.Deleted) != 0 {
+		t.Errorf("expected no delete in schemaB (按方案隔离), got %v", recB.Deleted)
 	}
 }

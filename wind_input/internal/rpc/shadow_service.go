@@ -38,7 +38,7 @@ func (s *ShadowService) Pin(args *rpcapi.ShadowPinArgs, reply *rpcapi.Empty) err
 	return nil
 }
 
-// Delete 隐藏词条/候选
+// Delete 隐藏词条/候选 (按方案桶)。
 func (s *ShadowService) Delete(args *rpcapi.ShadowDeleteArgs, reply *rpcapi.Empty) error {
 	if s.store == nil {
 		return fmt.Errorf("store not available")
@@ -86,9 +86,11 @@ func (s *ShadowService) GetAllRules(args *rpcapi.ShadowGetAllRulesArgs, reply *r
 			})
 		}
 		for _, d := range rec.Deleted {
-			// 兼容旧字段语义: RPC 仍只暴露 word 列表 (UI 端 ShadowPanel 显示用),
-			// CandID 在新接口走 GetAllRulesV2 (本期暂未引入, 见 R2 后续)。
-			cr.Deleted = append(cr.Deleted, d.Word)
+			// 2026-05-17 升级: Deleted 携带 CandID, UI 端可按 id 定位短语规则。
+			cr.Deleted = append(cr.Deleted, rpcapi.ShadowDeletedEntry{
+				Word:   d.Word,
+				CandID: d.CandID,
+			})
 		}
 		reply.Rules = append(reply.Rules, cr)
 	}
@@ -114,7 +116,10 @@ func (s *ShadowService) GetRules(args *rpcapi.ShadowGetRulesArgs, reply *rpcapi.
 		})
 	}
 	for _, d := range rec.Deleted {
-		reply.Deleted = append(reply.Deleted, d.Word)
+		reply.Deleted = append(reply.Deleted, rpcapi.ShadowDeletedEntry{
+			Word:   d.Word,
+			CandID: d.CandID,
+		})
 	}
 
 	return nil
