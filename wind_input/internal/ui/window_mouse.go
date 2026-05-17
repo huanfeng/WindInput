@@ -310,16 +310,22 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	// 检查是否为命令候选（短语），命令候选在拼音模式下也允许前移/后移
 	isCommand := hitIndex >= 0 && hitIndex < len(w.isCommandFlags) && w.isCommandFlags[hitIndex]
 
+	// 检查是否为 $AA/$SS 字符组/字符串组展开后的子项: 右键菜单 pin/delete/前移/后移
+	// /置顶/恢复默认 全 disable — 顺序由 $AA(chars) / $SS(...) 决定, 走"编辑短语"
+	// 路径修改 yaml, 不允许 Shadow 双轨漂移。导航候选 (IsGroup=true) 本身**不**标。
+	isGroupMember := hitIndex >= 0 && hitIndex < len(w.isGroupMemberFlags) && w.isGroupMemberFlags[hitIndex]
+
 	// 菜单状态规则：
-	// 前移: 首位禁用 | 单候选禁用 | 拼音非命令禁用
-	// 后移: 末位禁用 | 单候选禁用 | 拼音非命令禁用
-	// 置顶: 首位禁用
-	// 删除: 单字+非命令禁用 (命令候选 / 短语 ID 候选允许删除走 Shadow CandID)
-	// 恢复默认: 无 Shadow/短语覆盖时禁用
-	disableMoveUp := isGlobalFirst || isSingleCandidate || (isPinyin && !isCommand) || w.isQuickInputMode
-	disableMoveDown := isGlobalLast || isSingleCandidate || (isPinyin && !isCommand) || w.isQuickInputMode
-	disableTop := isGlobalFirst || w.isQuickInputMode
-	disableDelete := (isSingleChar && !isCommand) || w.isQuickInputMode
+	// 前移: 首位禁用 | 单候选禁用 | 拼音非命令禁用 | 字符组子项禁用
+	// 后移: 末位禁用 | 单候选禁用 | 拼音非命令禁用 | 字符组子项禁用
+	// 置顶: 首位禁用 | 字符组子项禁用
+	// 删除: 单字+非命令禁用 | 字符组子项禁用 (命令候选 / 短语 ID 候选允许删除走 Shadow CandID)
+	// 恢复默认: 无 Shadow/短语覆盖时禁用 | 字符组子项禁用
+	disableMoveUp := isGlobalFirst || isSingleCandidate || (isPinyin && !isCommand) || w.isQuickInputMode || isGroupMember
+	disableMoveDown := isGlobalLast || isSingleCandidate || (isPinyin && !isCommand) || w.isQuickInputMode || isGroupMember
+	disableTop := isGlobalFirst || w.isQuickInputMode || isGroupMember
+	disableDelete := (isSingleChar && !isCommand) || w.isQuickInputMode || isGroupMember
+	disableReset := !hasShadow || isGroupMember
 
 	// Build menu items
 	items := []MenuItem{
@@ -327,7 +333,7 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 		{ID: IDM_CANDIDATE_MOVEDOWN, Text: "后移(D)", Disabled: disableMoveDown},
 		{ID: IDM_CANDIDATE_MOVETOP, Text: "置顶(T)", Disabled: disableTop},
 		{Separator: true},
-		{ID: IDM_CANDIDATE_RESET, Text: "恢复默认(R)", Disabled: !hasShadow},
+		{ID: IDM_CANDIDATE_RESET, Text: "恢复默认(R)", Disabled: disableReset},
 		{Separator: true},
 		{ID: IDM_CANDIDATE_DELETE, Text: "删除词条(X)", Disabled: disableDelete},
 		{Separator: true},

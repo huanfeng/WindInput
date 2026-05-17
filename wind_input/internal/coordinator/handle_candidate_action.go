@@ -41,6 +41,11 @@ func (c *Coordinator) handleDeleteCandidateByKey(num int) *bridge.KeyEventResult
 		return consumed
 	}
 
+	// 字符组 / 字符串组子项: 不允许任何 pin/delete (defensive 与 UI 菜单同步)
+	if cand.IsGroupMember {
+		return consumed
+	}
+
 	// 单字不允许删除 (短语 ID 例外, 用户主动挑了具体单字候选)
 	if cand.ID == "" && len([]rune(cand.Text)) <= 1 {
 		c.logger.Debug("Cannot delete single character via hotkey")
@@ -96,6 +101,11 @@ func (c *Coordinator) handlePinCandidateByKey(num int) *bridge.KeyEventResult {
 	// 真正的"短语顺序"由 Shadow pin 管, 与 action 渲染无关。
 	if len(cand.Actions) > 0 {
 		c.logger.Debug("Cannot pin cmdbar action candidate via hotkey")
+		return consumed
+	}
+
+	// 字符组 / 字符串组子项: 不允许任何 pin (defensive 与 UI 菜单同步)
+	if cand.IsGroupMember {
 		return consumed
 	}
 

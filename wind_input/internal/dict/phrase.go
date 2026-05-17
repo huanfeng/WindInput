@@ -212,7 +212,15 @@ func PhraseCandidateID(code, template string) string {
 	return "phrase:" + code + ":" + template
 }
 
-// Search 精确查询静态短语（不含变量的短语）
+// Search 精确查询静态短语（不含变量的短语）。
+//
+// staticPhrases 同时承载两类 entry:
+//   - 普通静态短语 (text=字面文本): IsCommand 由调用方按需标记, IsGroupMember=false
+//   - $AA 字符组**展开后**的字符级 entry (text=单字符): IsCommand=true,
+//     IsGroupMember=true — 因为 staticPhrases[code] 同时被 SearchCommand 路径
+//     (情况 2b) 用于字符组精确匹配, 字段必须一致。
+//
+// 判断依据: code 在 pl.phraseGroups 里登记为 PhraseGroupKindAA → 字符组路径。
 func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 	pl.mu.RLock()
 	defer pl.mu.RUnlock()
@@ -223,17 +231,30 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 		return nil
 	}
 
+	// 判断是否字符组: phraseGroups[code].Kind == PhraseGroupKindAA
+	isAAGroupMember := false
+	if group, gok := pl.phraseGroups[code]; gok && group.Kind == PhraseGroupKindAA {
+		isAAGroupMember = true
+	}
+
 	results := make([]candidate.Candidate, 0, len(entries))
 	positions := make([]int, 0, len(entries))
 	for _, e := range entries {
-		results = append(results, candidate.Candidate{
+		cand := candidate.Candidate{
 			Text:           e.Text,
 			Code:           code,
 			Weight:         resolvePhraseWeight(e.Weight),
 			IsPhrase:       true, // 短语永远保留，但不计入 hasCommon 避免污染同编码码表字过滤
 			PhraseTemplate: e.Text,
 			ID:             PhraseCandidateID(code, e.Text),
-		})
+		}
+		if isAAGroupMember {
+			// $AA 字符组展开后的字符级候选: 与 SearchCommand 情况 2b 路径标记一致,
+			// 右键菜单 pin/delete/前移/后移/置顶/恢复默认 全 disable。
+			cand.IsCommand = true
+			cand.IsGroupMember = true
+		}
+		results = append(results, cand)
 		positions = append(positions, e.Position)
 	}
 
@@ -305,6 +326,8 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 		// 2b: $AA 字符组 (Kind=aa) — 用 staticPhrases 中的字符级 entry 展开。
 		// 字符组内所有字符共享 group 的 weight, 用 NaturalOrder = 字符在
 		// chars 字符串中的下标做 tie-break, 保证按数组顺序排列。
+		// IsGroupMember=true: 顺序由 $AA(chars) 决定, 走"编辑短语"修改 chars 串,
+		// 右键菜单 pin/delete/前移/置顶/恢复默认 全 disable。
 		groupWeight := resolvePhraseWeight(group.Weight)
 		entries := pl.staticPhrases[code]
 		results := make([]candidate.Candidate, 0, len(entries))
@@ -317,6 +340,7 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 				NaturalOrder:   i,
 				IsCommand:      true,
 				IsPhrase:       true,
+				IsGroupMember:  true,
 				PhraseTemplate: e.Text,
 				ID:             PhraseCandidateID(code, e.Text),
 			})
@@ -664,6 +688,8 @@ func (pl *PhraseLayer) expandSSGroup(code string) []candidate.Candidate {
 		for i, elem := range elements {
 			// $SS 每个元素 (string lit 或嵌入 $CC) 用其 raw display 作为 id 后缀,
 			// 保证按元素粒度 pin / shadow。同 group 多元素的 id 互不冲突。
+			// IsGroupMember=true: 顺序由 $SS marker 内的参数列表决定, 走"编辑短语"
+			// 修改 yaml; 右键菜单 pin/delete/前移/置顶/恢复默认 全 disable。
 			cand := candidate.Candidate{
 				Text:           elem.Display,
 				Code:           code,
@@ -671,6 +697,7 @@ func (pl *PhraseLayer) expandSSGroup(code string) []candidate.Candidate {
 				NaturalOrder:   i,
 				IsCommand:      true,
 				IsPhrase:       true,
+				IsGroupMember:  true,
 				PhraseTemplate: entry.Text,
 				ID:             PhraseCandidateID(code, elem.Display),
 				DisplayText:    elem.Display,

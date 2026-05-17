@@ -328,6 +328,13 @@ func (c *Coordinator) handleCandidateMove(index, delta int, top bool) {
 	}
 	cand := c.candidates[actualIndex]
 
+	// 字符组 / 字符串组子项: 顺序由 $AA(chars) / $SS(...) marker 定义,
+	// 不允许走 Shadow pin 双轨漂移 (UI 菜单也 disable, 这里 defensive)
+	if cand.IsGroupMember {
+		c.mu.Unlock()
+		return
+	}
+
 	// 拼音引擎普通候选不支持调位; 短语候选 (cand.ID 非空) 仍允许
 	if cand.ID == "" && c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin {
 		c.mu.Unlock()
@@ -387,6 +394,12 @@ func (c *Coordinator) handleCandidateDelete(index int) {
 	}
 
 	cand := c.candidates[actualIndex]
+
+	// 字符组 / 字符串组子项: 不允许任何 pin/delete (UI 菜单 disable, 这里 defensive)
+	if cand.IsGroupMember {
+		c.mu.Unlock()
+		return
+	}
 
 	// 单字不允许删除 (短语 ID 例外, 用户主动挑了具体单字候选)
 	if cand.ID == "" && len([]rune(cand.Text)) <= 1 {

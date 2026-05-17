@@ -50,6 +50,10 @@ func TestPhraseLayerSSGroup_ExactExpands(t *testing.T) {
 		if !results[i].IsCommand || !results[i].IsPhrase {
 			t.Errorf("idx %d: should be marked IsCommand & IsPhrase", i)
 		}
+		// IsGroupMember=true: $SS 元素候选右键菜单全 disable (2026-05-17)
+		if !results[i].IsGroupMember {
+			t.Errorf("idx %d: $SS expanded element should have IsGroupMember=true", i)
+		}
 	}
 }
 

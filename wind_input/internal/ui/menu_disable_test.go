@@ -105,3 +105,57 @@ func TestMenuDisable_SingleCandidate(t *testing.T) {
 		t.Error("expected isGlobalLast=true for single candidate")
 	}
 }
+
+// computeMenuDisableForGroupMember 复制 handleRightClick 中针对 IsGroupMember
+// 的 disable 规则, 验证 $AA/$SS 字符组/字符串组子项所有可编辑菜单都被屏蔽。
+// 入参分别对应 window_mouse.go 内的 isGlobalFirst / isGlobalLast / 单候选 /
+// pinyin / command / quickInput / hasShadow / isSingleChar / isGroupMember。
+func computeMenuDisableForGroupMember(
+	isGlobalFirst, isGlobalLast, isSingleCandidate,
+	isPinyin, isCommand, isQuickInput, hasShadow, isSingleChar, isGroupMember bool,
+) (disableMoveUp, disableMoveDown, disableTop, disableDelete, disableReset bool) {
+	disableMoveUp = isGlobalFirst || isSingleCandidate || (isPinyin && !isCommand) || isQuickInput || isGroupMember
+	disableMoveDown = isGlobalLast || isSingleCandidate || (isPinyin && !isCommand) || isQuickInput || isGroupMember
+	disableTop = isGlobalFirst || isQuickInput || isGroupMember
+	disableDelete = (isSingleChar && !isCommand) || isQuickInput || isGroupMember
+	disableReset = !hasShadow || isGroupMember
+	return
+}
+
+// TestMenuDisable_GroupMemberAllDisabled 验证 $AA/$SS 字符组/字符串组的子项候选
+// 右键菜单 pin/delete/前移/后移/置顶/恢复默认 全 disable, 即使其它条件都允许。
+//
+// 引入: 2026-05-17 R2 follow-up (字符组顺序在源短语中已完整定义,
+// 走"编辑短语"路径而非 Shadow 双轨漂移)。
+func TestMenuDisable_GroupMemberAllDisabled(t *testing.T) {
+	// 中段、命令候选、有 Shadow、非快捷输入 — 所有 ungated 条件都允许操作,
+	// 但 isGroupMember=true 应让所有可编辑项 disable。
+	up, down, top, del, reset := computeMenuDisableForGroupMember(
+		false, // isGlobalFirst
+		false, // isGlobalLast
+		false, // isSingleCandidate
+		false, // isPinyin
+		true,  // isCommand
+		false, // isQuickInput
+		true,  // hasShadow
+		false, // isSingleChar
+		true,  // isGroupMember
+	)
+	if !up || !down || !top || !del || !reset {
+		t.Errorf("$AA/$SS group member: all menu actions must be disabled, got up=%v down=%v top=%v del=%v reset=%v",
+			up, down, top, del, reset)
+	}
+}
+
+// TestMenuDisable_NonGroupMemberHonorsOtherRules 回归测试: IsGroupMember=false
+// 的命令候选仍按现有规则启用 (不被新逻辑无意中卡住)。
+func TestMenuDisable_NonGroupMemberHonorsOtherRules(t *testing.T) {
+	// 中段、命令候选、有 Shadow — 期望全部启用
+	up, down, top, del, reset := computeMenuDisableForGroupMember(
+		false, false, false, false, true, false, true, false, false,
+	)
+	if up || down || top || del || reset {
+		t.Errorf("non-group-member: middle command with shadow should enable all, got up=%v down=%v top=%v del=%v reset=%v",
+			up, down, top, del, reset)
+	}
+}

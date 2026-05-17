@@ -221,6 +221,7 @@ type CandidateWindow struct {
 	totalCandidateCount int             // 候选总数（所有页）
 	hasShadowFlags      []bool          // 当前页各候选是否有 Shadow 修改或短语覆盖
 	isCommandFlags      []bool          // 当前页各候选是否为命令候选（短语）
+	isGroupMemberFlags  []bool          // 当前页各候选是否为 $AA/$SS 字符组/字符串组的子项 (右键菜单全 disable)
 	candidateTexts      []string        // 当前页各候选的文本（用于菜单状态判断）
 	isPinyinMode        bool            // 是否拼音模式（拼音禁用前移/后移）
 	isQuickInputMode    bool            // 是否快捷输入模式（右键菜单只保留复制）
@@ -509,12 +510,14 @@ func (w *CandidateWindow) SetCandidateHasShadow(flags []bool) {
 	w.mu.Unlock()
 }
 
-// SetCandidateMenuState 设置右键菜单所需的额外状态
-func (w *CandidateWindow) SetCandidateMenuState(texts []string, isPinyin bool, isCommandFlags []bool) {
+// SetCandidateMenuState 设置右键菜单所需的额外状态。
+// isGroupMemberFlags 为 nil 时视为全部 false (兼容旧调用方)。
+func (w *CandidateWindow) SetCandidateMenuState(texts []string, isPinyin bool, isCommandFlags []bool, isGroupMemberFlags []bool) {
 	w.mu.Lock()
 	w.candidateTexts = texts
 	w.isPinyinMode = isPinyin
 	w.isCommandFlags = isCommandFlags
+	w.isGroupMemberFlags = isGroupMemberFlags
 	w.mu.Unlock()
 }
 

@@ -450,6 +450,43 @@ func TestPhraseCandidateIDGroupNavEmpty(t *testing.T) {
 	if got[0].ID != "" {
 		t.Fatalf("nav candidate ID should be empty, got %q", got[0].ID)
 	}
+	// 导航候选不**标** IsGroupMember (它本身是组入口, 不展开):
+	if got[0].IsGroupMember {
+		t.Fatal("nav candidate must NOT have IsGroupMember=true (组入口 不展开)")
+	}
+}
+
+// TestPhraseAAGroupCharsAreGroupMembers 验证 $AA 字符组精确码命中后,
+// 每个字符候选都标 IsGroupMember=true, 让右键菜单全 disable。
+//
+// 引入: 2026-05-17 R2 follow-up (字符组顺序在 $AA(chars) 中已完整定义,
+// 不允许通过 Shadow 双轨漂移)。
+func TestPhraseAAGroupCharsAreGroupMembers(t *testing.T) {
+	tmpDir := t.TempDir()
+	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
+	content := `phrases:
+  - code: "zzbd"
+    text: '$AA("标点符号", "，。！")'
+    position: 1
+`
+	if err := os.WriteFile(systemFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
+
+	got := pl.SearchCommand("zzbd", 0)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 chars, got %d", len(got))
+	}
+	for i, c := range got {
+		if !c.IsGroupMember {
+			t.Errorf("char[%d]=%q: expected IsGroupMember=true, got false", i, c.Text)
+		}
+		// IsGroup 仍是 false (导航才是 IsGroup=true)
+		if c.IsGroup {
+			t.Errorf("char[%d]=%q: IsGroup should be false on expanded char", i, c.Text)
+		}
+	}
 }
 
 // TestResolvePhraseWeight 覆盖 resolvePhraseWeight 的优先级与边界

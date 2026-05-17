@@ -156,6 +156,10 @@ func expandAACandidates(in []candidate.Candidate, inputBuffer string) []candidat
 				// 确保 Shadow 规则跨展开源 (用户/系统词库 vs PhraseLayer) 都能命中。
 				c.PhraseTemplate = string(r)
 				c.ID = dict.PhraseCandidateID(cand.Code, string(r))
+				// IsGroupMember=true: 字符组单字符候选, 右键菜单 pin/delete/前移/置顶
+				// 全 disable, 让用户改字符组顺序走"编辑短语"路径而非 Shadow 双轨漂移。
+				// 与 PhraseLayer 直接生成的字符级 candidate 标记保持一致 (phrase.go)。
+				c.IsGroupMember = true
 				out = append(out, c)
 			}
 			continue

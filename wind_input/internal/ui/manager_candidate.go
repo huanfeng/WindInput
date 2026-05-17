@@ -141,13 +141,15 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	hasShadowFlags := make([]bool, len(candidates))
 	candidateTexts := make([]string, len(candidates))
 	isCommandFlags := make([]bool, len(candidates))
+	isGroupMemberFlags := make([]bool, len(candidates))
 	for i, c := range candidates {
 		hasShadowFlags[i] = c.HasShadow
 		candidateTexts[i] = c.Text
 		isCommandFlags[i] = c.IsCommand
+		isGroupMemberFlags[i] = c.IsGroupMember
 	}
 	m.window.SetCandidateHasShadow(hasShadowFlags)
-	m.window.SetCandidateMenuState(candidateTexts, m.isPinyinMode, isCommandFlags)
+	m.window.SetCandidateMenuState(candidateTexts, m.isPinyinMode, isCommandFlags, isGroupMemberFlags)
 	m.window.SetQuickInputMode(m.isQuickInputMode)
 
 	// If user has dragged the window, keep the current position (skip auto-positioning)

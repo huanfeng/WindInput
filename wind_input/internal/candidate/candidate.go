@@ -33,11 +33,18 @@ type Candidate struct {
 	Source         CandidateSource // 候选来源（混输模式下区分五笔/拼音）
 	PhraseTemplate string          // 动态短语的原始模板文本（如 "$Y-$MM-$DD"），用于定位 PhraseLayer 条目
 	IsGroup        bool            // 是否为组候选（选中后展开二级列表而非上屏）
-	GroupCode      string          // 组的完整编码（选中后替换 inputBuffer，如 "zzbd"）
-	Index          int             // 显示序号（UI 渲染用，1-9/0）
-	HasShadow      bool            // 是否存在 Shadow 层修改（UI 右键菜单"恢复默认"用）
-	IndexLabel     string          // 自定义序号标签（如 "a"/"b"），非空时覆盖 Index 的数字显示
-	Meta           CandidateMeta   // 调试/提示元数据（可选，引擎层按需填充）
+	IsGroupMember  bool            // 是否为字符组/字符串组展开后的子项 ($AA 字符候选、$SS 元素候选)
+	// IsGroupMember=true 时右键菜单 pin/delete/前移/后移/置顶/恢复默认 全 disable —
+	// 字符组顺序在源短语 ($AA(chars) / $SS(elem...)) 中已完整定义,
+	// 走"编辑短语"路径管理顺序, 不允许 Shadow 双轨漂移。
+	// IsGroup=true 的导航候选**不**标 IsGroupMember (导航本身是组入口, 不展开)。
+	// 普通短语 / 用户词 / 系统词 / cmdbar 命令亦不标。
+	// 引入: 2026-05-17 R2 follow-up (字符组/字符串组 menu disable)。
+	GroupCode  string        // 组的完整编码（选中后替换 inputBuffer，如 "zzbd"）
+	Index      int           // 显示序号（UI 渲染用，1-9/0）
+	HasShadow  bool          // 是否存在 Shadow 层修改（UI 右键菜单"恢复默认"用）
+	IndexLabel string        // 自定义序号标签（如 "a"/"b"），非空时覆盖 Index 的数字显示
+	Meta       CandidateMeta // 调试/提示元数据（可选，引擎层按需填充）
 
 	// ID 候选的稳定标识 (deterministic), 用于 Shadow 规则按候选 id 匹配。
 	//
