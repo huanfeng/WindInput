@@ -10,6 +10,22 @@ import (
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
+// CmdbarCandidatePrefix 副作用候选 (cand.Actions 非空) 在候选框中渲染时的前缀符号。
+// 让用户在候选列表里一眼分辨"普通文本候选"和"命令直通车候选"(选中后执行动作)。
+// 当前用闪电符号; 不同字体渲染效果可能差异较大, 后续根据实测可调整 (例如改用
+// ▶ / · / *)。candidate 自身的 Text 字段保持原状, 仅渲染时拼字符串, 避免污染
+// 历史记录和右键菜单文案。
+const CmdbarCandidatePrefix = "⚡"
+
+// candidateDisplayText 返回候选实际渲染到候选框的文本。命令直通车候选 (Actions
+// 非空) 在 Text 前加 CmdbarCandidatePrefix 作为视觉标识。
+func candidateDisplayText(cand Candidate) string {
+	if len(cand.Actions) > 0 {
+		return CmdbarCandidatePrefix + cand.Text
+	}
+	return cand.Text
+}
+
 // pagerFontSize returns the font size for the pager indicator (e.g. "1/3").
 // Scales with cfg.IndexFontSize so the pager grows together with the candidate
 // font, while keeping historical 12/14 (* scale) values as a lower bound so
@@ -147,7 +163,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	commentMarginRight := cfg.CommentMarginRight // 编码提示右间距
 
 	for _, cand := range candidates {
-		candTextWidth := td.MeasureString(cand.Text, cfg.FontSize) + textMarginRight
+		candTextWidth := td.MeasureString(candidateDisplayText(cand), cfg.FontSize) + textMarginRight
 		if cand.Comment != "" {
 			candTextWidth += commentMarginLeft + td.MeasureString(cand.Comment, commentSizeForWidth) + commentMarginRight
 		}
@@ -262,7 +278,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	for i, cand := range candidates {
 		if cand.Comment != "" {
 			itemY := candStartY + float64(i)*cfg.ItemHeight
-			candWidth := td.MeasureString(cand.Text, cfg.FontSize)
+			candWidth := td.MeasureString(candidateDisplayText(cand), cfg.FontSize)
 			tx := textStartX
 			if cand.Index < 0 {
 				tx = padX + 8*scale
@@ -513,7 +529,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 			tx = padX + 8*scale // 无序号时文本靠左
 		}
 		maxTextWidth := width - tx - borderPadding
-		drawText := cand.Text
+		drawText := candidateDisplayText(cand)
 		if maxTextWidth > 0 {
 			textW := td.MeasureString(drawText, cfg.FontSize)
 			if textW > maxTextWidth {
@@ -619,7 +635,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 	// Measure candidate text widths
 	for i, cand := range candidates {
-		measures[i].textWidth = td.MeasureString(cand.Text, cfg.FontSize)
+		measures[i].textWidth = td.MeasureString(candidateDisplayText(cand), cfg.FontSize)
 	}
 
 	// Measure comment widths
@@ -1073,7 +1089,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		}
 
 		// Candidate text
-		td.DrawString(cand.Text, positions[i].textX, candY+cfg.FontSize/3, cfg.FontSize, cfg.TextColor)
+		td.DrawString(candidateDisplayText(cand), positions[i].textX, candY+cfg.FontSize/3, cfg.FontSize, cfg.TextColor)
 
 		// Comment
 		if cand.Comment != "" {

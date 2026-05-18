@@ -1,6 +1,6 @@
 // Package eval walks parsed phrases against an EvalContext to produce
 // the display string and a list of resolved actions. See
-// docs/design/2026-05-12-command-bar-design.md §3 and §5.
+// docs/design/command-bar-design.md §3 and §5.
 package eval
 
 import (
@@ -34,7 +34,7 @@ type ArrayElement struct {
 // 返回的 (name, elements, groupModifiers) 直接对应 ArrayPhrase 的字段;
 // 调用方 (dict layer / coordinator) 据此生成 N 个 candidate.Candidate。
 //
-// 设计 docs/design/2026-05-16-cmdbar-followup.md §4.3 / §4.4.5。
+// 设计 docs/design/command-bar-followup.md §4.3 / §4.4.5。
 func ExpandArray(phrase ast.ArrayPhrase, ctx cmdbar.EvalContext, reg *cmdbar.Registry) (name string, elements []ArrayElement, groupModifiers map[string]any, err error) {
 	if reg == nil {
 		reg = cmdbar.DefaultRegistry

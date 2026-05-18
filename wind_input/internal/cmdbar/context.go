@@ -1,5 +1,5 @@
 // Package cmdbar wires together the command-bar parser, evaluator and
-// function registry. See docs/design/2026-05-12-command-bar-design.md.
+// function registry. See docs/design/command-bar-design.md.
 package cmdbar
 
 import (

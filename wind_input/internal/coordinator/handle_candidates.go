@@ -944,7 +944,7 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 
 // commitCmdbarCandidate 上屏一个命令直通车候选 (cand.IsCommand && len(cand.Actions)>0)。
 //
-// 语义见 docs/design/2026-05-12-command-bar-design.md §3.4 / §5:
+// 语义见 docs/design/command-bar-design.md §3.4 / §5:
 //  1. ActionText 是纯值求值, 在锁内同步聚合成 textBuf, 经
 //     ResponseTypeInsertText 走 TSF 上屏 (不再 Clip+Ctrl+V)。
 //  2. ActionEffect (open/run/key.tap/clip.copy/ime.toggle/...) 全部

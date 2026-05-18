@@ -4,7 +4,7 @@
 //
 // 这些函数与 action.go 的 P3 MVP 9 个动作共用同一份 Services 取值约定
 // (见 svcs); 缺失对应 service 时返回 cmdbar.ErrServiceUnavailable 以便
-// 调用方降级。设计参考 docs/design/2026-05-12-command-bar-design.md §3.4。
+// 调用方降级。设计参考 docs/design/command-bar-design.md §3.4。
 package funcs
 
 import (
@@ -47,8 +47,6 @@ func dictIMEActionFuncs() []cmdbar.FuncSpec {
 	}
 	return []cmdbar.FuncSpec{
 		dictAdd, imeToggle, settingOpen,
-		aliasOf(dictAdd, "dict.addword"),
-		aliasOf(settingOpen, "ime.setting"),
 	}
 }
 

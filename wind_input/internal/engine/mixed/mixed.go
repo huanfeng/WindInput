@@ -24,7 +24,7 @@ const (
 	CodetablePrefixBoostRatio = 6 // 即 60%
 	// PhraseWeightBoost 短语候选独立 tier 的 boost 基线。
 	//
-	// 设计 (docs/design/2026-05-16-cmdbar-followup.md §2.2):
+	// 设计 (docs/design/command-bar-followup.md §2.2):
 	//   Codetable tier  +10,000,000  码表词 (Code==input 的精确匹配)
 	//   Phrase tier     + 1,000,000  短语 / cmdbar 命令 (本常量)
 	//   Partial tier    +   500,000  拆分组合候选 (Code!=input, 见 PartialMatchBoost)
@@ -482,7 +482,7 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 
 	// 码表候选提权（与 convertMixed 相同的策略）。
 	// 短语候选 (IsPhrase) 走独立 phrase tier, 仅 +PhraseWeightBoost (1M),
-	// 让它永远 < 码表词且 > 拼音, 详见 docs/design/2026-05-16-cmdbar-followup.md §2.2。
+	// 让它永远 < 码表词且 > 拼音, 详见 docs/design/command-bar-followup.md §2.2。
 	//
 	// 拆分组合可信度 < 原生候选 (2026-05-17): Code!=input[:maxCodeLen] 的
 	// 前缀补全候选独立到 PartialMatchBoost (500K) tier, 让 phrase (+1M)
@@ -637,7 +637,7 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 	//     4码: -3.5M   — 纯噪声压制（wfht 降为 ~1M）
 	// 短语候选 (IsPhrase) 走独立 phrase tier, 仅 +PhraseWeightBoost (1M),
 	// 让它永远 > 拼音、永远 < 码表词 (含简拼降权后), 详见
-	// docs/design/2026-05-16-cmdbar-followup.md §2.2。短码场景下短语
+	// docs/design/command-bar-followup.md §2.2。短码场景下短语
 	// 自然让位给码表常用词, 不再霸占首位。
 	//
 	// 拆分组合可信度 < 原生候选 (2026-05-17): Code!=input 的码表前缀补全

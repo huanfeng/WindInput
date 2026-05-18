@@ -1,5 +1,5 @@
 // Package parser implements the command bar lexer and recursive-descent
-// parser. See docs/design/2026-05-12-command-bar-design.md §2.
+// parser. See docs/design/command-bar-design.md §2.
 package parser
 
 import (

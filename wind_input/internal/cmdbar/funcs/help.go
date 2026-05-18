@@ -4,7 +4,7 @@ package funcs
 // 主要给 cmdbar-repl 与 wind_setting UI 浏览函数手册使用; 短语里偶尔
 // 用 `help("...")` 当占位也合理。
 //
-// 设计 docs/design/2026-05-16-cmdbar-followup.md §1.5。
+// 设计 docs/design/command-bar-followup.md §1.5。
 
 import (
 	"fmt"

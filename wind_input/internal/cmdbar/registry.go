@@ -17,7 +17,7 @@ type EvalFunc func(ctx EvalContext, args []string) (string, error)
 
 // FuncCategory 函数语义分组, 用于 wind_setting UI 函数浏览面板分类显示。
 //
-// 设计 (docs/design/2026-05-16-cmdbar-followup.md §1.3 / §1.4):
+// 设计 (docs/design/command-bar-followup.md §1.3 / §1.4):
 //   - value:   取值, 无 namespace (code/last/clip/sel/app/...)
 //   - text:    文本处理 (len/upper/sub/replace/...)
 //   - calc:    计算 (calc/num)
@@ -241,27 +241,9 @@ func registerSideEffectStubs(r *Registry) {
 			Description: "弹下拉列表选择 (未实现)",
 			Eval:        stub("pick")},
 
-		// ── 旧名 alias (向后兼容; UI 默认隐藏 Deprecated 函数) ──
-		{Name: "run", AliasOf: "proc.run", Deprecated: true,
-			Category: CategoryProc, MinArgs: 1, MaxArgs: -1, Pure: false,
-			Description: "(deprecated) 改用 proc.run",
-			Eval:        stub("run")},
-		{Name: "shell", AliasOf: "proc.shell", Deprecated: true,
-			Category: CategoryProc, MinArgs: 1, MaxArgs: 2, Pure: false,
-			Description: "(deprecated) 改用 proc.shell",
-			Eval:        stub("shell")},
-		{Name: "dict.addword", AliasOf: "dict.add", Deprecated: true,
-			Category: CategoryDict, MinArgs: 1, MaxArgs: 2, Pure: false,
-			Description: "(deprecated) 改用 dict.add",
-			Eval:        stub("dict.addword")},
-		{Name: "ime.setting", AliasOf: "setting.open", Deprecated: true,
-			Category: CategorySetting, MinArgs: 1, MaxArgs: 1, Pure: false,
-			Description: "(deprecated) 改用 setting.open",
-			Eval:        stub("ime.setting")},
-		{Name: "search", AliasOf: "web.search", Deprecated: true,
-			Category: CategoryWeb, MinArgs: 2, MaxArgs: 2, Pure: false,
-			Description: "(deprecated) 改用 web.search",
-			Eval:        stub("search")},
+		// 函数命名宪法 (command-bar-followup.md §1) 已切换到 canonical 新名,
+		// 旧名 alias (run / shell / dict.addword / ime.setting / search) 已删除。
+		// FuncSpec.Deprecated / AliasOf 字段保留, 供未来潜在 alias 使用。
 	}
 	for _, s := range stubs {
 		r.Register(s)

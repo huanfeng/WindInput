@@ -13,7 +13,7 @@ import (
 //
 // 设计意图: 短语 yaml 用 `text: '$AA("标点", "、。")'` 形式表达字符组,
 // 取代旧的 `texts` + `name` 双字段, 让 yaml 入口统一只用 `text:`。
-// 详见 docs/design/2026-05-12-command-bar-design.md §3.7。
+// 详见 docs/design/command-bar-design.md §3.7。
 func ParseAAMarker(value string) (name, chars string, ok bool) {
 	v := strings.TrimSpace(value)
 	if !strings.HasPrefix(v, "$AA(") || !strings.HasSuffix(v, ")") {

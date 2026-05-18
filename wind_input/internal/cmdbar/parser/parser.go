@@ -175,7 +175,7 @@ func parseCommandPhrase(src string, idx, open int) (ast.Phrase, error) {
 }
 
 // markerDefaults returns the default modifier values implicit in a marker
-// name. 表对应 docs/design/2026-05-16-cmdbar-followup.md §4.2 marker 登记表:
+// name. 表对应 docs/design/command-bar-followup.md §4.2 marker 登记表:
 //   - `$CC`  → 无默认 (prefix=false 是隐式默认, 在 dict 层兜底)
 //   - `$CC1` → {prefix: true} (`$CC + prefix:true` 简写)
 //   - `$SS`  → {prefix: true, expand: "exact", nav: true} (字符串数组默认前缀展开)
@@ -263,7 +263,7 @@ func evalModifierLiteral(e ast.Expr) (any, error) {
 
 // parseArrayPhrase 解析 `$SS("name", elem1, elem2, ..., {options})`。
 //
-// 设计 (docs/design/2026-05-16-cmdbar-followup.md §4.3 / §4.4):
+// 设计 (docs/design/command-bar-followup.md §4.3 / §4.4):
 //   - 第一参数必须是无 interp 的 string lit, 作为 group display name
 //   - 后续参数每个是 string lit 或嵌入 $CC(...) / $CC1(...) CommandPhrase
 //   - 末尾可选 ObjectLit 作为 group-level Modifiers (与 marker syntax sugar 合并)
@@ -745,7 +745,7 @@ func (p *parser) parseExpr() (ast.Expr, error) {
 // (where ident is interpreted as "true" / "false" / a named symbol).
 // Trailing comma allowed. Empty `{}` allowed.
 //
-// See docs/design/2026-05-16-cmdbar-followup.md §3.1.
+// See docs/design/command-bar-followup.md §3.1.
 func (p *parser) parseObjectLit() (ast.Expr, error) {
 	openTok := p.bump() // consume '{'
 	pairs := []ast.Pair{}

@@ -1,6 +1,6 @@
 // Package funcs registers the built-in command-bar functions. Each
 // registration kind lives in its own file. See
-// docs/design/2026-05-12-command-bar-design.md §3.
+// docs/design/command-bar-design.md §3.
 package funcs
 
 import (

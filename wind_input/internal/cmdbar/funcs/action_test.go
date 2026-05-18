@@ -124,7 +124,7 @@ func TestAction_Open_NoServicesAtAll(t *testing.T) {
 func TestAction_Run(t *testing.T) {
 	mp := &mockProc{}
 	r := newReg(t)
-	spec, _ := r.Lookup("run")
+	spec, _ := r.Lookup("proc.run")
 	ctx := newCtx(&cmdbar.Services{Proc: mp})
 	if _, err := spec.Eval(ctx, []string{"notepad", "a.txt"}); err != nil {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func TestAction_Run(t *testing.T) {
 func TestAction_Shell(t *testing.T) {
 	mp := &mockProc{}
 	r := newReg(t)
-	spec, _ := r.Lookup("shell")
+	spec, _ := r.Lookup("proc.shell")
 	ctx := newCtx(&cmdbar.Services{Proc: mp})
 	if _, err := spec.Eval(ctx, []string{"echo hi"}); err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestAction_ShellWithFlags(t *testing.T) {
 	for _, c := range cases {
 		mp := &mockProc{}
 		r := newReg(t)
-		spec, _ := r.Lookup("shell")
+		spec, _ := r.Lookup("proc.shell")
 		ctx := newCtx(&cmdbar.Services{Proc: mp})
 		if _, err := spec.Eval(ctx, []string{"echo hi", c.flagStr}); err != nil {
 			t.Fatalf("flag %q: %v", c.flagStr, err)
@@ -245,7 +245,7 @@ func TestAction_Search_DefaultUsesOpen(t *testing.T) {
 	mo := &mockOpen{}
 	r := newReg(t)
 	ctx := newCtx(&cmdbar.Services{Open: mo})
-	sp, _ := r.Lookup("search")
+	sp, _ := r.Lookup("web.search")
 	if _, err := sp.Eval(ctx, []string{"baidu", "你好 世界"}); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestAction_Search_UnknownEngine(t *testing.T) {
 	mo := &mockOpen{}
 	r := newReg(t)
 	ctx := newCtx(&cmdbar.Services{Open: mo})
-	sp, _ := r.Lookup("search")
+	sp, _ := r.Lookup("web.search")
 	if _, err := sp.Eval(ctx, []string{"yahoo", "q"}); err == nil {
 		t.Error("want error for unknown engine")
 	}
@@ -275,7 +275,7 @@ func TestAction_Search_CustomEngine(t *testing.T) {
 	ms := &mockSearch{}
 	r := newReg(t)
 	ctx := newCtx(&cmdbar.Services{Search: ms})
-	sp, _ := r.Lookup("search")
+	sp, _ := r.Lookup("web.search")
 	if _, err := sp.Eval(ctx, []string{"bing", "go"}); err != nil {
 		t.Fatal(err)
 	}

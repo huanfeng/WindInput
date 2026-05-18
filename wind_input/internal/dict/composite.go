@@ -202,7 +202,7 @@ func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []
 //
 // 匹配优先级 (2026-05-17 R2): rule.CandID 非空时按 cand.ID 精准匹配
 // (动态短语场景, id 跨日子稳定); CandID 空时按 rule.Word 匹配 cand.Text
-// (兼容手输文本规则)。详见 docs/design/2026-05-16-cmdbar-followup.md R2。
+// (兼容手输文本规则)。详见 docs/design/command-bar-followup.md R2。
 //
 // 处理逻辑：
 //  1. 移除 deleted 中的词（单字跳过）

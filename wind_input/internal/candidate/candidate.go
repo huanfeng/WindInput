@@ -41,7 +41,7 @@ type Candidate struct {
 	// 普通短语 / 用户词 / 系统词 / cmdbar 命令亦不标。
 	// 引入: 2026-05-17 R2 follow-up (字符组/字符串组 menu disable)。
 	GroupCode string // 组的完整编码（选中后替换 inputBuffer，如 "zzbd"）
-	GroupName string // 字符组/字符串组的显示名 (IsGroupMember=true 时填充, 用于 collapse 后 nav 候选展示, 详见 docs/design/2026-05-16-cmdbar-followup.md collapse-on-mixed 规则)
+	GroupName string // 字符组/字符串组的显示名 (IsGroupMember=true 时填充, 用于 collapse 后 nav 候选展示, 详见 docs/design/command-bar-followup.md collapse-on-mixed 规则)
 	// GroupTemplate 组的原始 PhraseRecord.Text (含 $AA/$SS marker),
 	// 用于 D (group member) / E (nav) 候选的 stable id 推导。
 	// 详见 docs/design/candidate-actions.md §5。
@@ -64,7 +64,7 @@ type Candidate struct {
 	//   - $SS 元素 (展开后单元素):        "phrase:<code>:<rawElement>"
 	//   - group nav 候选 (IsGroup=true):  空 (用户不会 pin nav 项)
 	//
-	// 详见 docs/design/2026-05-16-cmdbar-followup.md (R2 方案) 与
+	// 详见 docs/design/command-bar-followup.md (R2 方案) 与
 	// PhraseLayer 各候选构造点 (phrase.go ~ Search/SearchCommand/expandSSGroup
 	// /expandDynamicEntry) 中的 ID 赋值。
 	ID string
@@ -89,7 +89,7 @@ type Candidate struct {
 	//   - "expand"  string $AA/$SS 字符/字符串数组的展开策略
 	//   - "nav"     bool   字符/字符串数组前缀时是否出导航候选
 	//   - "async"   bool   动作是否异步执行
-	// 详见 docs/design/2026-05-16-cmdbar-followup.md §3.2 / §4.1。
+	// 详见 docs/design/command-bar-followup.md §3.2 / §4.1。
 	// 当 candidate 不来自 cmdbar 命令时为 nil。
 	Modifiers map[string]any
 }

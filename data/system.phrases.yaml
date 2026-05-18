@@ -14,7 +14,7 @@
 #   zz* (字符组首选)         → 1000  字符组主入口 (position=1)
 #   zz* (字符组备选)         →  800  同 code 备选 (position>=2)
 #
-# 详见 docs/design/2026-05-12-command-bar-design.md §3.8
+# 详见 docs/design/command-bar-design.md §3.8
 
 phrases:
   # ===== 日期 =====
@@ -104,7 +104,7 @@ phrases:
   # ===== zz 系列：特殊符号快捷输入 =====
   # 字符组短语用 $AA("groupName", "charList") marker 表达, 每个 rune 自动
   # 展开为独立候选项。前缀 (如 "zz") 显示导航候选, 精确码 (如 "zzbd")
-  # 展开字符列表。详见 docs/design/2026-05-12-command-bar-design.md §3.7。
+  # 展开字符列表。详见 docs/design/command-bar-design.md §3.7。
 
   - code: "zzbd"
     text: '$AA("标点", "、。·ˉˇ¨〃々—～‖…‘’“”〔〕〈〉《》「」『』〖〗【】±×÷∶∧∨∑∏∪∩∈∷√⊥∥∠⌒⊙∫∮≡≌≈∽∝≠≮≯≤≥∞∵∴♂♀°′″℃＄¤￠￡‰§№☆★○●◎◇◆□■△▲※→←↑↓〓")'
@@ -277,70 +277,51 @@ phrases:
     weight: 800
     position: 4
 
-  # ===== 命令直通车 (Command Bar) 测试用例 =====
+  # ===== 命令直通车 (Command Bar) 示例 =====
   # 触发码统一用 co 前缀, 后续字母全部用字母 (不含数字), 因为五笔/拼音
   # 输入数字会立刻选词, 数字键到不了 phrase 查询。
-  # 文档: docs/design/2026-05-12-command-bar-design.md
+  # 文档: docs/design/command-bar-design.md
+  #
+  # ⚠️ 短语精确码触发, 输入码偏移即脱离命中, 不存在"prefix 命中后追加输入"。
+  # 所以 code() / tail(code, n) / calc(tail(code, n)) 等"依赖动态输入"的函数
+  # 在短语场景实际无意义 — 已从示例中移除。需要"算式"功能请用 cohj 打开计算器,
+  # 需要"取上次上屏"用 last(n)。
 
-  # --- 打开 URL / 运行程序 / shell ---
+  # --- 打开 URL / 运行程序 ---
   - code: "cobd"
-    text: '$CC1("打开百度", open("https://baidu.com"))'
-    weight: 2000
-    position: 1
-  - code: "cobs"
-    text: '$CC1("百度搜 {tail(code,5)}", open("https://www.baidu.com/s?wd={url(tail(code,5))}"))'
+    text: '$CC("打开百度", open("https://baidu.com"))'
     weight: 2000
     position: 1
   - code: "cozd"
-    text: '$CC1("汉典 · {last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))'
+    text: '$CC("汉典:{last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))'
     weight: 2000
     position: 1
   - code: "cono"
-    text: '$CC("打开记事本", run("notepad.exe"))'
+    text: '$CC("打开记事本", proc.run("notepad.exe"))'
     weight: 2000
     position: 1
-  - code: "cosh"
-    text: '$CC("ping baidu", shell("ping -n 1 baidu.com"))'
+  - code: "coca"
+    text: '$CC("打开计算器", proc.run("calc.exe"))'
     weight: 2000
     position: 1
-  - code: "cobu"
-    text: '$CC("baidu 搜 {tail(code,5)}", search("baidu", tail(code,5)))'
+  - code: "cohm"
+    text: '$CC("打开用户主目录", open(env("USERPROFILE")))'
     weight: 2000
     position: 1
 
-  # --- 文本上屏: type() 走 TSF, 含 last/calc/env 取值 ---
+  # --- 文本上屏 ---
   - code: "coll"
     text: '$CC(last(), type(last()))'
     weight: 2000
     position: 1
-  - code: "coca"
-    text: '$CC("={calc(tail(code,5))}", type(calc(tail(code,5))))'
-    weight: 2000
-    position: 1
-  - code: "conw"
-    text: '$CC("现在 {now()}", type(now()))'
-    weight: 2000
-    position: 1
-  - code: "coev"
-    text: '$CC("USER={upper(env("USERNAME"))}", type(upper(env("USERNAME"))))'
-    weight: 2000
-    position: 1
-  - code: "coap"
-    text: '$CC("当前: {app()}", type(app()))'
-    weight: 2000
-    position: 1
-  - code: "coti"
-    text: '$CC("标题: {title()}", type(title()))'
+  - code: "copa"
+    text: '$CC("粘贴", clip.paste())'
     weight: 2000
     position: 1
 
   # --- type + key.tap/seq 组合: 配对符号 + 删行 ---
   - code: "cojk"
     text: '$CC("「」", type("「」"), key.tap("Left"))'
-    weight: 2000
-    position: 1
-  - code: "cojb"
-    text: '$CC("()", type("()"), key.tap("Left"))'
     weight: 2000
     position: 1
   - code: "codl"
@@ -353,12 +334,12 @@ phrases:
     text: '$CC("复制时间", clip.copy(now()))'
     weight: 2000
     position: 1
-  - code: "coaw"
-    text: '$CC("加词 · {clip()}", dict.addword(clip()))'
+  - code: "coad"
+    text: '$CC("剪贴板加词:{clip()}", dict.add(clip()))'
     weight: 2000
     position: 1
 
-  # --- IME 自身切换 ---
+  # --- IME 自身切换 (工具栏可能隐藏时的高效切换方式, 无焦点切换) ---
   - code: "coen"
     text: '$CC("切中英", ime.toggle("cn-en"))'
     weight: 2000
@@ -376,6 +357,6 @@ phrases:
     weight: 2000
     position: 1
   - code: "coss"
-    text: '$CC("打开设置", ime.setting(""))'
+    text: '$CC("打开设置", setting.open(""))'
     weight: 2000
     position: 1

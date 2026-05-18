@@ -213,8 +213,8 @@ nav.GroupTemplate  = groupTemplate
 
 ## 相关文档
 
-- `docs/design/2026-05-12-command-bar-design.md` — cmdbar 整体架构 ($CC/$AA/$SS marker)
-- `docs/design/2026-05-16-cmdbar-followup.md` — R2 Candidate.ID + Shadow CandID, weight tier 设计
+- `docs/design/command-bar-design.md` — cmdbar 整体架构 ($CC/$AA/$SS marker)
+- `docs/design/command-bar-followup.md` — R2 Candidate.ID + Shadow CandID, weight tier 设计
 - `internal/candidate/AGENTS.md` — Candidate 字段速查
 - `internal/dict/AGENTS.md` — Shadow / PhraseLayer 接口
 - `internal/coordinator/AGENTS.md` — collapse 状态机 + expandedGroupCode

@@ -21,23 +21,8 @@ func init() {
 	}
 }
 
-// aliasOf 把 canonical 拷贝一份, 改名为 oldName 并标 Deprecated, AliasOf
-// 指向 canonical.Name; Eval / arity / Pure 等运行时字段保持不变, 保证行为
-// 完全等价 (用户已存的 yaml 短语调旧名时仍能正确执行)。
-//
-// 设计 docs/design/2026-05-16-cmdbar-followup.md §1.2 命名宪法迁移表。
-func aliasOf(canonical cmdbar.FuncSpec, oldName string) cmdbar.FuncSpec {
-	aliased := canonical
-	aliased.Name = oldName
-	aliased.AliasOf = canonical.Name
-	aliased.Deprecated = true
-	aliased.Description = "(deprecated) 改用 " + canonical.Name
-	aliased.ExampleSrc = "" // 不引导新用户用旧名
-	return aliased
-}
-
-// RegisterActions installs the P3 action MVP (type / open / run /
-// shell / key.tap / key.seq / clip.copy / clip.paste / search) onto
+// RegisterActions installs the P3 action MVP (type / open / proc.run /
+// proc.shell / key.tap / key.seq / clip.copy / clip.paste / web.search) onto
 // reg, overwriting the package's pre-registered stubs (Pure=false,
 // Eval returns ErrNotImplemented). After this call, evaluating the
 // action expressions will dispatch to the real implementations, which
@@ -49,8 +34,8 @@ func RegisterActions(reg *cmdbar.Registry) {
 	for _, spec := range actionFuncs() {
 		reg.Register(spec)
 	}
-	// P4 新增 dict.addword / ime.toggle / ime.setting 真实实现,
-	// 覆盖 registerSideEffectStubs 的 ErrNotImplemented 占位。
+	// dict.add / ime.toggle / setting.open 真实实现, 覆盖
+	// registerSideEffectStubs 的 ErrNotImplemented 占位。
 	for _, spec := range dictIMEActionFuncs() {
 		reg.Register(spec)
 	}

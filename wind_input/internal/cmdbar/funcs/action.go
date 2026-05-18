@@ -24,7 +24,7 @@ import (
 // 落字, 不再经过 registry.Lookup; registry 中的 type stub 仅供 arity 元信息,
 // 不会真正被 Evaluate 调用。
 //
-// 2026-05-16 (PR-3) 命名宪法 (docs/design/2026-05-16-cmdbar-followup.md §1):
+// 2026-05-16 (PR-3) 命名宪法 (docs/design/command-bar-followup.md §1):
 //   - run → proc.run, shell → proc.shell, search → web.search 改 namespace
 //   - open / key.* / clip.* 保留 (符合规范或例外)
 //   - 旧名通过 aliasOf 注册为 Deprecated, Eval 仍指向同一实现, 保证用户
@@ -88,10 +88,6 @@ func actionFuncs() []cmdbar.FuncSpec {
 	}
 	return []cmdbar.FuncSpec{
 		openSpec, procRun, procShell, keyTap, keySeq, clipCopy, clipPaste, webSearch,
-		// 旧名 alias (向后兼容):
-		aliasOf(procRun, "run"),
-		aliasOf(procShell, "shell"),
-		aliasOf(webSearch, "search"),
 	}
 }
 

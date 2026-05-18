@@ -292,7 +292,7 @@ func (p *PhraseService) BatchAdd(args *rpcapi.PhraseBatchAddArgs, reply *rpcapi.
 // 字符串供前端预览; 动作真正调用需要的 services 在此处不可得, 所以 ActionsCount
 // 取自 AST.Actions 长度而非求值后的 ResolvedAction (后者依赖 services)。
 //
-// 设计意图见 docs/design/2026-05-12-command-bar-design.md §UI 短语编辑器。
+// 设计意图见 docs/design/command-bar-design.md §UI 短语编辑器。
 func (p *PhraseService) ValidateCmdbarValue(args *rpcapi.PhraseValidateValueArgs, reply *rpcapi.PhraseValidateValueReply) error {
 	value := args.Value
 

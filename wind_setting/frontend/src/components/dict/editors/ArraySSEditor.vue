@@ -3,7 +3,7 @@
 // 元素可为字符串字面量或 $CC 命令 (CmdOpen 子集, 无 prefixVisible — 组级
 // prefix 由外层 $SS modifier 控制)。
 //
-// 设计参考 docs/design/2026-05-16-cmdbar-followup.md §4.3。
+// 设计参考 docs/design/command-bar-followup.md §4.3。
 
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";

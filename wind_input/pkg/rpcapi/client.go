@@ -248,7 +248,7 @@ func (c *Client) DictPromoteAllTemp(schemaID string) (int, error) {
 // ── Shadow 方法 ──
 //
 // 2026-05-17 R2: 新增 candID 入参 (空串表示按 word 匹配, 旧行为)。
-// 详见 docs/design/2026-05-16-cmdbar-followup.md R2 方案。
+// 详见 docs/design/command-bar-followup.md R2 方案。
 
 // ShadowPin 固定词到指定位置。candID 非空时优先按候选 id 匹配 (动态短语场景)。
 func (c *Client) ShadowPin(schemaID, code, word, candID string, position int) error {

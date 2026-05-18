@@ -1,6 +1,6 @@
 // Package ast defines the abstract syntax tree node types used by the
 // command bar parser. The grammar is documented in
-// docs/design/2026-05-12-command-bar-design.md §2.
+// docs/design/command-bar-design.md §2.
 package ast
 
 import (
@@ -118,7 +118,7 @@ func (c Call) String() string {
 // literal expressions (StringLit / NumberLit / Ident bool-or-name). The
 // restriction is enforced by the parser, not by the type system.
 //
-// 设计 (docs/design/2026-05-16-cmdbar-followup.md §3.1):
+// 设计 (docs/design/command-bar-followup.md §3.1):
 //
 //	pair = ident ":" value
 //	value = string | number | "true" | "false" | ident
@@ -193,7 +193,7 @@ func (p TemplatePhrase) String() string {
 //
 // Modifiers carries the trailing options-bag values + marker syntax-sugar
 // defaults (e.g. `$CC1(...)` injects `{prefix: true}` here at parse time);
-// see docs/design/2026-05-16-cmdbar-followup.md §3.2 / §4.1. Nil when the
+// see docs/design/command-bar-followup.md §3.2 / §4.1. Nil when the
 // caller wrote neither marker suffix nor options bag. Values are typed
 // (string / float64 / bool) per the parser's literal-coercion rules.
 type CommandPhrase struct {
@@ -243,7 +243,7 @@ func (p CommandPhrase) String() string {
 // ArrayPhrase represents a `$SS("name", elem1, elem2, ..., {options})`
 // invocation —— 字符串数组短语 (含命令嵌套)。
 //
-// 设计 (docs/design/2026-05-16-cmdbar-followup.md §4.3):
+// 设计 (docs/design/command-bar-followup.md §4.3):
 //   - Name 是第一个参数 string lit, 用作前缀导航候选的显示名
 //   - Elements 是其余参数, 每个元素是 StringLit 或 embedded CommandPhrase
 //     (字符串字面量当作"上屏文本"候选, 嵌入的 CommandPhrase 当作"动作"候选)

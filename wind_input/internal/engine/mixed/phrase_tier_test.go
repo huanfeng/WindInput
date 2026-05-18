@@ -10,7 +10,7 @@ import (
 // TestPhraseWeightBoost_TierConstants 锁住 PhraseWeightBoost 与 CodetableWeightBoost
 // 的相对关系: phrase tier 严格夹在拼音 (0~10000) 与码表 (10M+) 之间。
 //
-// 这是 PR1 (docs/design/2026-05-16-cmdbar-followup.md §2.2) 的核心架构承诺,
+// 这是 PR1 (docs/design/command-bar-followup.md §2.2) 的核心架构承诺,
 // 必须由常量值层面就保证, 任何后续调整 boost 数值时本测试会先报错提示。
 func TestPhraseWeightBoost_TierConstants(t *testing.T) {
 	cfgDefault := DefaultConfig().CodetableWeightBoost

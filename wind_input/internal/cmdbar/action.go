@@ -1,6 +1,6 @@
 // action.go — P5 引入的 ResolvedAction 模型, 用于把 cmdbar 的副作用区分为
 // "纯效果" (effect, 调一下就完事) 与 "文本插入" (text, 需要走 TSF CommitText
-// 通路落字)。设计见 docs/design/2026-05-12-command-bar-design.md §3.4 / §5。
+// 通路落字)。设计见 docs/design/command-bar-design.md §3.4 / §5。
 //
 // 由 eval.Evaluate 在解析 CommandPhrase.Actions 时构造, 由 coordinator
 // 在 doSelectCandidate 阶段消费: 把所有 ActionText 的字符串拼成一段

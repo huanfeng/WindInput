@@ -93,7 +93,7 @@ func (pl *PhraseLayer) SetCmdbarArrayHook(h CmdbarArrayHook) {
 //   - actions: 选中触发的已解析动作列表 (含 Effect/Text 两种 Kind, 见 cmdbar.ResolvedAction)
 //   - modifiers: options bag + marker syntax sugar 合并后的 modifier map
 //     (含 prefix/expand/nav/async/scope 等键; 详见
-//     docs/design/2026-05-16-cmdbar-followup.md §3.2)。candidate 进一步透传到
+//     docs/design/command-bar-followup.md §3.2)。candidate 进一步透传到
 //     dict 层的前缀过滤 (替代旧 IsExactOnly 字符串扫描)。
 //   - ok: 该 value 是否真的被 cmdbar 处理 (false 时调用方退回旧模板路径)
 //   - err: 解析或求值失败 (调用方应记 WARN 后退化为字面量)
@@ -110,7 +110,7 @@ func (pl *PhraseLayer) SetCmdbarHook(h CmdbarPhraseHook) {
 
 // PhraseEntry 短语条目
 //
-// 2026-05-16 后权重模型 (docs/design/2026-05-16-cmdbar-followup.md §2):
+// 2026-05-16 后权重模型 (docs/design/command-bar-followup.md §2):
 //   - Weight: 跨编码全局优先级 (0~10000); resolvePhraseWeight 把 0 / 负数
 //     都映射为 1000 (短语 tier 中位); 显式 0 由 file entry 层 (Weight=*0)
 //     表达"禁用排序权重"。
@@ -133,7 +133,7 @@ type PhraseEntry struct {
 //   - PhraseGroupKindAA: $AA marker, 每元素是一个 rune (单字符候选)
 //   - PhraseGroupKindSS: $SS marker, 每元素是一个字符串或嵌入的 $CC 命令
 //
-// 详见 docs/design/2026-05-16-cmdbar-followup.md §4.2 / §4.3。
+// 详见 docs/design/command-bar-followup.md §4.2 / §4.3。
 type PhraseGroupKind string
 
 const (
@@ -173,7 +173,7 @@ type PhrasesFileConfig struct {
 // 字符组短语 (一编码展开为 N 个独立字符候选) 改用 Text 字段携带
 // $AA("name", "chars") marker 表达, 不再使用 yaml 端的 texts/name 双字段。
 // 详见 internal/dict/aa_marker.go 与
-// docs/design/2026-05-12-command-bar-design.md §3.7。
+// docs/design/command-bar-design.md §3.7。
 type PhraseFileEntry struct {
 	Code string `yaml:"code"`
 	Text string `yaml:"text"`
@@ -830,7 +830,7 @@ func (pl *PhraseLayer) expandDynamicEntry(code string, e PhraseEntry) candidate.
 
 // resolvePhraseWeight 计算短语候选的最终权重 (0~10000)。
 //
-// 设计 (docs/design/2026-05-16-cmdbar-followup.md §2):
+// 设计 (docs/design/command-bar-followup.md §2):
 //   - weight 与 position 各司其职: weight 表跨编码全局优先级,
 //     position 表同编码组内的手动调整顺序; position 不再被换算为 weight。
 //   - 旧 `10000 - position` fallback 公式被删除 — 那是导致旧 yaml 中

@@ -1,7 +1,7 @@
 // cmdbar_services.go — 命令直通车 (cmdbar) 的 Services 适配层。
 // 把 wind_input 现有的 clipboard / keyinject / proc / dict / ui 模块封装成
 // cmdbar 期望的细粒度接口, 由 coordinator 在创建时装配并注入到 EvalContext。
-// 设计文档参考 docs/design/2026-05-12-command-bar-design.md §3.4 / §7.4。
+// 设计文档参考 docs/design/command-bar-design.md §3.4 / §7.4。
 package coordinator
 
 import (

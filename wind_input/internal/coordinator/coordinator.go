@@ -646,7 +646,7 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 
 	// 初始化命令直通车 (cmdbar): Services 装配 + 动作函数注册 + 短语 hook 注入。
 	// last() 复用 c.inputHistory, 不再单独维护 cmdbar 历史缓冲。
-	// 见 docs/design/2026-05-12-command-bar-design.md §7。
+	// 见 docs/design/command-bar-design.md §7。
 	c.cmdbarServices = c.buildCmdbarServices()
 	// RegisterActions 是幂等的: 覆盖 DefaultRegistry 中的 stubs 为真实实现。
 	cmdbarfuncs.RegisterActions(cmdbar.DefaultRegistry)

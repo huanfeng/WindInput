@@ -167,7 +167,7 @@ type DictStatsReply struct {
 // 2026-05-17 R2: 新增 CandID 字段以匹配动态候选 (短语模板每次展开 Text 不同)。
 // 匹配优先级见 ApplyShadowPins: rule.CandID 非空 → 按 cand.ID 匹配;
 // 否则按 rule.Word 匹配 cand.Text (向后兼容手输文本规则)。
-// 详见 docs/design/2026-05-16-cmdbar-followup.md R2 方案 Step 2。
+// 详见 docs/design/command-bar-followup.md R2 方案 Step 2。
 
 // ShadowPinArgs 置顶请求
 type ShadowPinArgs struct {

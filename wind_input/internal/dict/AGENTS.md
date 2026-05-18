@@ -24,8 +24,8 @@
 | `codetable.go` | 五笔码表加载（文本格式和二进制 wdb 格式），含 `BuildReverseIndex`（全量）和 `BuildSingleCharReverseIndex`（仅单字，过滤权重 < maxWeight/10 的低频简码）；支持 Rime 词库合并结果 |
 | `phrase.go` | `PhraseLayer`：短语和命令处理，支持模板变量；`SetCmdbarHook(CmdbarPhraseHook)` 装配命令直通车 hook (`$CC`/`$CC1`), `SetCmdbarArrayHook(CmdbarArrayHook)` 装配字符串数组 hook (`$SS`); 含 cmdbar marker 的动态短语在 `SearchCommand` 改走 hook 求值得到 `(display, actions, modifiers)`; `SearchPrefix` 同时扫 `dynamicPhrases` 带 marker 的条目, 末尾用 `filterCmdbarExactOnly` (走 `candidateIsExactOnly` 综合 `Modifiers["prefix"]` 与字符串扫描); hook 报错时退化为字面量记 WARN (不带 value 内容)。**权重 (2026-05-16 修订)**: 候选 `Weight` 由 `resolvePhraseWeight(weight)` 计算 (单参), `weight<=0 → 1000` (默认), 否则 clamp 到 `NormalizedWeightMax`; `position` 仅作 `sortPhraseCandidates` 同 code 内 tie-break (升序, 0=未调整, 已调整优先)。**字符组 (2026-05-16)**: `PhraseGroup.Kind` 区分 `aa` (字符) / `ss` (字符串), Kind=ss 时 SearchCommand 精确码命中走 `expandSSGroup` 调 ArrayHook 运行时展开; Kind=aa 走 staticPhrases 字符级 entry; 两类共享前缀 nav 候选路径。**字符组双路径 `GroupName` 一致性约束 (2026-05-17)**: `Search` (静态精确, staticPhrases 命中且 PhraseGroup.Kind==aa) 与 `SearchCommand` (情况 2a 字符串数组 / 情况 2b 字符组精确) 两条出口的字符级 / 元素级候选都必须填 `Candidate.GroupCode + GroupName`, 否则 coordinator 的 `collapseGroupMembersIfMixed` 无法在混合场景下展示组名 nav。**SearchCommand 锁升级 (2026-05-17)**: 改 double-checked locking — 1st pass `pl.mu.RLock()` 读 cmdCache 命中即返回 (并发读不互相阻塞); 未命中升级到 `pl.mu.Lock()` + double-check + 计算 + 写 cache。`expandSSGroup` / `expandDynamicEntry` 仍要求调用方持有 W-Lock, 由 2nd pass 保证。 |
 | `cmdbar_filter.go` | `HasCmdbarMarker(value)` 检测 `$CC(`/`$CC1(`; `IsExactOnly(value)` 字符串扫描语义; `candidateIsExactOnly(c)` 优先看 `c.Modifiers["prefix"]` (2026-05-16 新增, 由 cmdbar parser 在解析期填充, 含 marker syntax sugar 默认值合并), 缺失时回退字符串扫描; `filterCmdbarExactOnly(cs)` 给各 layer 的 `SearchPrefix` 收尾共享 |
-| `aa_marker.go` | `ParseAAMarker(value)` 解析 `$AA("name", "chars")` 字符组 marker, 返回 (groupName, chars, ok); `HasAAMarker(value)` 快速旁路判断。yaml 短语统一只用 `text` 字段表达字符组, 取代旧的 `texts`+`name` 双字段; 精确码展开为 N 个独立字符候选, 前缀显示导航候选, 语义不变。详见 docs/design/2026-05-12-command-bar-design.md §3.7 |
-| `ss_marker.go` | `HasSSMarker(value)` / `ParseSSGroupName(value)` 处理 `$SS("name", elem, ...)` 字符串数组 marker。LoadFromStore 阶段用 ParseSSGroupName 静态提取 group name 注入 PhraseGroup; 元素 (含嵌入 `$CC`) 留待 SearchCommand 通过 `CmdbarArrayHook` 动态展开 (走 cmdbar parser/eval)。详见 docs/design/2026-05-16-cmdbar-followup.md §4.3 |
+| `aa_marker.go` | `ParseAAMarker(value)` 解析 `$AA("name", "chars")` 字符组 marker, 返回 (groupName, chars, ok); `HasAAMarker(value)` 快速旁路判断。yaml 短语统一只用 `text` 字段表达字符组, 取代旧的 `texts`+`name` 双字段; 精确码展开为 N 个独立字符候选, 前缀显示导航候选, 语义不变。详见 docs/design/command-bar-design.md §3.7 |
+| `ss_marker.go` | `HasSSMarker(value)` / `ParseSSGroupName(value)` 处理 `$SS("name", elem, ...)` 字符串数组 marker。LoadFromStore 阶段用 ParseSSGroupName 静态提取 group name 注入 PhraseGroup; 元素 (含嵌入 `$CC`) 留待 SearchCommand 通过 `CmdbarArrayHook` 动态展开 (走 cmdbar parser/eval)。详见 docs/design/command-bar-followup.md §4.3 |
 | `value_expand.go` | `ValueExpander` (`Hook` + `TemplateEngine`) + `ExpandResult` 统一展开任意候选 value: cmdbar marker (`$CC(`/`$CC1(`) → hook, `$X` 模板 → templateEngine, 其它 → 原样; 暴露 `HasExpandable(value)` 快速判断, 供 coordinator 候选后处理使用 |
 | `shadow.go` | `ShadowLayer`：pin(position)+delete 架构——`pinned` 列表按位置固定词条，`deleted` 列表隐藏词条；YAML 序列化 |
 | `user_dict.go` | `UserDict`：用户词频学习，按权重排序，持久化为 JSON |
@@ -98,7 +98,7 @@
 
 yaml 优先级 (新): `weight > 0` 显式 (clamp) | `weight <= 0` 默认 1000;
 `position` 仅在同 code 多条短语 sort 时做 tie-break (升序, 0=未调整, 已调整优先于未调整),
-**不再** fallback 为 `10000-position`。详见 docs/design/2026-05-16-cmdbar-followup.md §2。
+**不再** fallback 为 `10000-position`。详见 docs/design/command-bar-followup.md §2。
 
 混输引擎下 phrase 候选走独立 phrase tier (+1M boost), 永远 > 拼音 / < 码表词 —
 短码 (1~2 字符) 输入时短语天然让位给码表常用词, 不再霸占首位。

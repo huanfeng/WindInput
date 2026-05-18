@@ -17,7 +17,7 @@ func HasSSMarker(value string) bool {
 // 词库加载时依赖 cmdbar parser/eval 求值。元素 (含嵌入 $CC) 仍在运行时
 // 通过 CmdbarArrayHook 解析展开。
 //
-// 设计 docs/design/2026-05-16-cmdbar-followup.md §4.3。
+// 设计 docs/design/command-bar-followup.md §4.3。
 func ParseSSGroupName(value string) (name string, ok bool) {
 	v := strings.TrimSpace(value)
 	if !strings.HasPrefix(v, "$SS(") || !strings.HasSuffix(v, ")") {

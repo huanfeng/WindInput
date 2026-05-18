@@ -2,5 +2,5 @@
 // process basename and title via Win32 APIs. Non-Windows builds return
 // empty strings so callers (cmdbar app() / title()) degrade gracefully.
 //
-// Design context: docs/design/2026-05-12-command-bar-design.md §4.3.
+// Design context: docs/design/command-bar-design.md §4.3.
 package foreground
