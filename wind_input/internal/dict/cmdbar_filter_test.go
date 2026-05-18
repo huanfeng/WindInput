@@ -2,6 +2,38 @@ package dict
 
 import "testing"
 
+// TestHasCmdbarMarker_SSValueExcluded 验证顶层 $SS marker 的 value 不会因为
+// 内嵌 $CC 元素而被误识别为 cmdbar 命令短语 (历史 bug: SearchPrefix +
+// ValueExpander.Expand 子串扫描漏判, 让 $SS 整段流入 cmdbarPhraseHook,
+// Evaluate(ArrayPhrase) 立即报错, 产生错误候选 + 噪音日志)。
+func TestHasCmdbarMarker_SSValueExcluded(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		// 纯 $CC / $CC1 → cmdbar marker
+		{"plain CC", `$CC("打开", open("https://x"))`, true},
+		{"plain CC1", `$CC1("打开", open("https://x"))`, true},
+
+		// $SS 内含 $CC → 仍是 SS, 不应识别为 cmdbar marker
+		{"SS with embedded CC", `$SS("百度", $CC("打开", open("https://x")), "https://x")`, false},
+		{"SS with multi CC1", `$SS("g", $CC1("a", open("a")), $CC1("b", open("b")))`, false},
+		{"SS leading whitespace", `  $SS("g", $CC("x", open("y")))`, false},
+
+		// 字面量
+		{"plain literal", "你好", false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := HasCmdbarMarker(c.value); got != c.want {
+				t.Errorf("HasCmdbarMarker(%q) = %v, want %v", c.value, got, c.want)
+			}
+		})
+	}
+}
+
 // TestIsExactOnly_TemplateVars 验证含已知 $X 模板变量的动态短语被识别为
 // "仅精确匹配", 不污染前缀候选; 不含变量的字面量短语允许前缀展开。
 func TestIsExactOnly_TemplateVars(t *testing.T) {

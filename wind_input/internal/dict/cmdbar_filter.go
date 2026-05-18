@@ -21,7 +21,15 @@ import (
 
 // HasCmdbarMarker 检测 value 是否带 cmdbar 命令 marker ($CC( 或 $CC1()。
 // 上层 ValueExpander.Expand 用本函数决定是否走 hook。
+//
+// 例外: 顶层是 $SS marker 的 value (字符串数组短语) 内部允许嵌入 $CC 元素,
+// 子串扫描会把 $SS("...", $CC(...)) 整段也识别为命令短语, 让 cmdbarPhraseHook
+// 拿到整段 $SS marker 后 Parse 出 ArrayPhrase, Evaluate 又拒绝处理 ArrayPhrase
+// → 错误候选 / 噪音日志。$SS 应统一走 ArrayHook, 这里在源头排除。
 func HasCmdbarMarker(value string) bool {
+	if HasSSMarker(value) {
+		return false
+	}
 	return strings.Contains(value, "$CC(") || strings.Contains(value, "$CC1(")
 }
 
