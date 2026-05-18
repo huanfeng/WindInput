@@ -22,6 +22,41 @@ func TestInputHistory_RecordAndGet(t *testing.T) {
 	}
 }
 
+// TestInputHistory_OversizedSingleRecord 验证单条记录长度超过 maxChars 时
+// 不会把自己裁掉 — 否则 UUID (36 字符) / 长短语上屏后 z / ; 重复立刻取不到。
+// 修复点见用户反馈 #1 (2026-05-18)。
+func TestInputHistory_OversizedSingleRecord(t *testing.T) {
+	h := NewInputHistory(20) // 默认 maxChars
+	uuid := "8c82c7b0-7cb9-4e4c-8859-d878f6616d31"
+	h.Record(uuid, "uuid", "pinyin", 0)
+
+	records := h.GetRecentRecords(1, 0)
+	if len(records) != 1 {
+		t.Fatalf("oversized single record should NOT trim itself away, got %d records", len(records))
+	}
+	if records[0].Text != uuid {
+		t.Errorf("records[0].Text = %q, want UUID", records[0].Text)
+	}
+}
+
+// TestInputHistory_OversizedThenShortKeepsLatest 验证连续两条超长记录时,
+// 仍只保留最新一条 (旧的被裁), 而非全部裁光。
+func TestInputHistory_OversizedThenShortKeepsLatest(t *testing.T) {
+	h := NewInputHistory(20)
+	long1 := "aaaaaaaaaaaaaaaaaaaaaaaaaaaa" // 28 chars
+	long2 := "bbbbbbbbbbbbbbbbbbbbbbbbbbbb" // 28 chars
+	h.Record(long1, "x", "pinyin", 0)
+	h.Record(long2, "y", "pinyin", 0)
+
+	records := h.GetRecentRecords(10, 0)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record (oldest trimmed), got %d", len(records))
+	}
+	if records[0].Text != long2 {
+		t.Errorf("latest record should be kept, got %q", records[0].Text)
+	}
+}
+
 func TestInputHistory_MaxCharsLimit(t *testing.T) {
 	h := NewInputHistory(4)
 	// 记录 5 个单字，最早的应被淘汰

@@ -42,10 +42,12 @@ func (h *InputHistory) Record(text, code, schemaID string, clientID uint32) {
 	h.trimClient(clientID)
 }
 
-// trimClient 从最早记录开始移除，直到总 rune 数 <= maxChars
+// trimClient 从最早记录开始移除，直到总 rune 数 <= maxChars。
+// 至少保留最新一条 —— 否则单条超长记录 (如 UUID 字符串 36 字符 > 默认
+// maxChars=20) 会被自己裁掉, 让 z / ; 重复立刻取不到刚上屏的内容。
 func (h *InputHistory) trimClient(clientID uint32) {
 	records := h.clients[clientID]
-	for h.charCountOf(records) > h.maxChars && len(records) > 0 {
+	for h.charCountOf(records) > h.maxChars && len(records) > 1 {
 		records = records[1:]
 	}
 	h.clients[clientID] = records
