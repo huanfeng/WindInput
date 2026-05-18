@@ -47,7 +47,7 @@ func (l *StoreUserLayer) Search(code string, limit int) []candidate.Candidate {
 		slog.Debug("StoreUserLayer.Search error", "code", code, "error", err)
 		return nil
 	}
-	return userRecordsToCandidates(recs, code, limit)
+	return userRecordsToCandidates(recs, code, limit, false)
 }
 
 // SearchPrefix 前缀查询用户词。
@@ -59,7 +59,7 @@ func (l *StoreUserLayer) SearchPrefix(prefix string, limit int) []candidate.Cand
 		slog.Debug("StoreUserLayer.SearchPrefix error", "prefix", prefix, "error", err)
 		return nil
 	}
-	return filterCmdbarExactOnly(userRecordsToCandidates(recs, "", limit))
+	return filterCmdbarExactOnly(userRecordsToCandidates(recs, "", limit, false))
 }
 
 // Add 添加词条。
@@ -167,7 +167,7 @@ func (l *StoreTempLayer) Search(code string, limit int) []candidate.Candidate {
 		slog.Debug("StoreTempLayer.Search error", "code", code, "error", err)
 		return nil
 	}
-	return userRecordsToCandidates(recs, code, limit)
+	return userRecordsToCandidates(recs, code, limit, true)
 }
 
 // SearchPrefix 前缀查询临时词。
@@ -179,7 +179,7 @@ func (l *StoreTempLayer) SearchPrefix(prefix string, limit int) []candidate.Cand
 		slog.Debug("StoreTempLayer.SearchPrefix error", "prefix", prefix, "error", err)
 		return nil
 	}
-	return filterCmdbarExactOnly(userRecordsToCandidates(recs, "", limit))
+	return filterCmdbarExactOnly(userRecordsToCandidates(recs, "", limit, true))
 }
 
 // Remove 删除临时词条。
@@ -382,7 +382,9 @@ func (f *StoreFreqScorer) FreqBoost(code, text string) int {
 
 // userRecordsToCandidates 将 store.UserWordRecord 切片转换为已排序的 candidate.Candidate 切片。
 // code 参数用于精确查询（非空时覆盖 rec.Code），前缀查询时传空串则使用 rec.Code。
-func userRecordsToCandidates(recs []store.UserWordRecord, code string, limit int) []candidate.Candidate {
+// isTemp 为 true 时填 Meta.IsTempDict (临时词库调用方), 否则填 Meta.IsUserDict (用户词库)。
+// 用于右键菜单"删除"文案动态化, 详见 docs/design/candidate-actions.md §2.1。
+func userRecordsToCandidates(recs []store.UserWordRecord, code string, limit int, isTemp bool) []candidate.Candidate {
 	if len(recs) == 0 {
 		return nil
 	}
@@ -392,12 +394,18 @@ func userRecordsToCandidates(recs []store.UserWordRecord, code string, limit int
 		if candCode == "" {
 			candCode = rec.Code // 前缀查询时从记录中获取
 		}
+		meta := candidate.CandidateMeta{}
+		if isTemp {
+			meta.IsTempDict = true
+		} else {
+			meta.IsUserDict = true
+		}
 		c := candidate.Candidate{
 			Text:     rec.Text,
 			Code:     candCode,
 			Weight:   rec.Weight,
 			IsCommon: true, // 用户词不应被 smart 过滤
-			Meta:     candidate.CandidateMeta{IsUserDict: true},
+			Meta:     meta,
 		}
 		results = append(results, c)
 	}

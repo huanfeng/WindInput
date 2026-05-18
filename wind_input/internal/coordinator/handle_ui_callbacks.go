@@ -424,8 +424,16 @@ func (c *Coordinator) handleCandidateDelete(index int) {
 				c.logger.Error("Failed to disable phrase", "error", err, "code", code)
 			}
 		} else {
-			// 普通候选: 走 Shadow delete (按方案桶)
-			dm.DeleteWord(code, cand.Text, cand.ID)
+			// 普通候选: 走 DeleteWord。
+			// word 优先用 PhraseTemplate (原 marker), 否则用 cand.Text:
+			// user/temp dict 存的字面 $AA / $CC marker, applyValueExpansion 或
+			// expandAACandidates 把 cand.Text 改写成了展开后显示文本, 直接用
+			// cand.Text 无法在源词库 Remove 命中。详见 docs/design/candidate-actions.md §2.1。
+			word := cand.Text
+			if cand.PhraseTemplate != "" {
+				word = cand.PhraseTemplate
+			}
+			dm.DeleteWord(code, word, cand.ID)
 			if err := dm.SaveShadow(); err != nil {
 				c.logger.Error("Failed to save shadow layer", "error", err)
 			}
@@ -440,6 +448,9 @@ func (c *Coordinator) handleCandidateDelete(index int) {
 
 // handleCandidateResetDefault handles reset to default action from context menu.
 // Removes all shadow rules for the candidate (id 优先, 否则 word)。
+//
+// 语义: 仅恢复位置调整 (Shadow Pinned), 不恢复删除 (DisablePhrase / Shadow Deleted)。
+// 删除恢复走设置 UI, 详见 docs/design/candidate-actions.md §2 / §4。
 func (c *Coordinator) handleCandidateResetDefault(index int) {
 	c.mu.Lock()
 
@@ -453,6 +464,14 @@ func (c *Coordinator) handleCandidateResetDefault(index int) {
 	}
 
 	cand := c.candidates[actualIndex]
+
+	// 字符组 / 字符串组子项 (D 类): 不允许任何调整 (defensive 与 UI 菜单同步)。
+	// TODO: 未来支持组内成员原地编辑 (允许在 IME 内改 chars 数组顺序)
+	if cand.IsGroupMember {
+		c.mu.Unlock()
+		return
+	}
+
 	code := c.inputBuffer
 
 	c.mu.Unlock()

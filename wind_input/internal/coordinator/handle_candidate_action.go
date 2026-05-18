@@ -36,12 +36,8 @@ func (c *Coordinator) handleDeleteCandidateByKey(num int) *bridge.KeyEventResult
 
 	cand := c.candidates[actualIndex]
 
-	// 命令直通车候选不允许通过热键删除 (action 候选只渲染, 不参与 Shadow)
-	if len(cand.Actions) > 0 {
-		return consumed
-	}
-
-	// 字符组 / 字符串组子项: 不允许任何 pin/delete (defensive 与 UI 菜单同步)
+	// 字符组 / 字符串组子项 (D 类): 不允许任何 pin/delete (defensive 与 UI 菜单同步)。
+	// TODO: 未来支持组内成员原地编辑 (允许在 IME 内改 chars 数组顺序)
 	if cand.IsGroupMember {
 		return consumed
 	}
@@ -65,7 +61,12 @@ func (c *Coordinator) handleDeleteCandidateByKey(num int) *bridge.KeyEventResult
 				c.logger.Error("Failed to disable phrase via hotkey", "error", err, "code", code)
 			}
 		} else {
-			dm.DeleteWord(code, cand.Text, cand.ID)
+			// word fallback 同 handleCandidateDelete (右键菜单), 详见那里注释。
+			word := cand.Text
+			if cand.PhraseTemplate != "" {
+				word = cand.PhraseTemplate
+			}
+			dm.DeleteWord(code, word, cand.ID)
 			if err := dm.SaveShadow(); err != nil {
 				c.logger.Error("Failed to save shadow layer after hotkey delete", "error", err)
 			}
@@ -97,17 +98,14 @@ func (c *Coordinator) handlePinCandidateByKey(num int) *bridge.KeyEventResult {
 	cand := c.candidates[actualIndex]
 	code := c.inputBuffer
 
-	// 命令直通车候选 (cmdbar) 不允许通过热键置顶: display 只是渲染,
-	// 真正的"短语顺序"由 Shadow pin 管, 与 action 渲染无关。
-	if len(cand.Actions) > 0 {
-		c.logger.Debug("Cannot pin cmdbar action candidate via hotkey")
-		return consumed
-	}
-
-	// 字符组 / 字符串组子项: 不允许任何 pin (defensive 与 UI 菜单同步)
+	// 字符组 / 字符串组子项 (D 类): 不允许任何 pin (defensive 与 UI 菜单同步)。
+	// TODO: 未来支持组内成员原地编辑 (允许在 IME 内改 chars 数组顺序)
 	if cand.IsGroupMember {
 		return consumed
 	}
+
+	// F (cmdbar Actions 非空) 跟 C 一致, 允许 pin (走 phrase id 路径)。
+	// 详见 docs/design/candidate-actions.md §6.4。
 
 	c.mu.Unlock()
 

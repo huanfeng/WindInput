@@ -93,3 +93,39 @@ func TestApplyValueExpansion_NilExpander(t *testing.T) {
 		t.Fatalf("nil expander 应是 no-op, got %+v", *cand)
 	}
 }
+
+// TestApplyValueExpansion_PreservesOriginalAsPhraseTemplate 验证展开后原 marker
+// 被保存到 cand.PhraseTemplate, 让 handleCandidateDelete 能用原 marker 在源词库
+// (user/temp dict) Remove 命中。bug 修复: user dict 存的 $CC 删除失败 (问题 3)。
+// 详见 docs/design/candidate-actions.md §2.1。
+func TestApplyValueExpansion_PreservesOriginalAsPhraseTemplate(t *testing.T) {
+	hook := dict.CmdbarPhraseHook(func(value string) (string, []cmdbar.ResolvedAction, map[string]any, bool, error) {
+		return "汉典 · X", []cmdbar.ResolvedAction{
+			{Kind: cmdbar.ActionEffect, Run: func() (string, error) { return "", nil }},
+		}, nil, true, nil
+	})
+	c := &Coordinator{
+		cmdbarValueExpander: &dict.ValueExpander{
+			Hook:           hook,
+			TemplateEngine: dict.GetTemplateEngine(),
+		},
+	}
+
+	originalMarker := `$CC("汉典 · {last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))`
+	cand := &candidate.Candidate{
+		Text: originalMarker,
+		Meta: candidate.CandidateMeta{IsUserDict: true},
+	}
+	c.applyValueExpansion(cand)
+
+	if cand.PhraseTemplate != originalMarker {
+		t.Fatalf("展开后 PhraseTemplate 应保留原 marker, got %q, want %q",
+			cand.PhraseTemplate, originalMarker)
+	}
+	if cand.Text == originalMarker {
+		t.Fatalf("展开后 cand.Text 应被改写为显示文本, 仍是原 marker: %q", cand.Text)
+	}
+	if !cand.Meta.IsUserDict {
+		t.Fatalf("Meta.IsUserDict 应被保留, got %+v", cand.Meta)
+	}
+}

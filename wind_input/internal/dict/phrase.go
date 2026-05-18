@@ -31,9 +31,13 @@ type PhraseLayer struct {
 	// 动态短语（含 $ 变量）: code -> []PhraseEntry，仅精确匹配
 	dynamicPhrases map[string][]PhraseEntry
 
-	// 数组组信息（texts 字段）: code -> PhraseGroup
-	// 前缀搜索时返回组名候选而非展开字符
-	phraseGroups map[string]PhraseGroup
+	// 数组组信息: code -> [PhraseGroup,...]
+	// 同 code 可以有多个 group ($AA / $SS / 混合), 用户输入精确码命中时:
+	//   - len==1: 直接展开为成员
+	//   - len>=2: 经 coordinator collapse 路径展示为多 nav 让用户选
+	// 前缀搜索时, 每个 group 都出 1 个 nav 候选。
+	// 详见 docs/design/candidate-actions.md §5。
+	phraseGroups map[string][]PhraseGroup
 
 	// 模板引擎
 	templateEngine *TemplateEngine
@@ -118,6 +122,11 @@ type PhraseEntry struct {
 	Position int    // 同 code 内手动调整后的相对顺序 (升序; 0 = 未调整)
 	IsSystem bool   // 是否来自系统短语
 	Disabled bool   // 是否被禁用
+	// GroupRawText 该 entry 所属 group 的原 PhraseRecord.Text (含 $AA/$SS marker)。
+	// 空 = 该 entry 不属于任何 group (普通短语)。同 code 多 group 时, staticPhrases
+	// 和 dynamicPhrases 把所有 group 的成员 append 在同一 slice 里, 用 GroupRawText
+	// 反查归属 group, 让 collapse 能按 group 区分 nav。详见 docs/design/candidate-actions.md §5。
+	GroupRawText string
 }
 
 // PhraseGroupKind 区分数组短语的元素粒度。
@@ -149,6 +158,9 @@ type PhraseGroup struct {
 	Position int             // 同 code 内手动调整后的顺序 (与 PhraseEntry.Position 一致语义)
 	IsSystem bool            // 是否来自系统短语
 	Disabled bool            // 是否被禁用
+	// RawText group 原始 PhraseRecord.Text (含 $AA/$SS marker), nav/member 的
+	// stable id 模板, Shadow pin / DisablePhrase 按 (code, RawText) 唯一定位。
+	RawText string
 }
 
 // PhrasesFileConfig 短语文件的 YAML 结构
@@ -189,7 +201,7 @@ func NewPhraseLayerEx(name string, systemPath, systemUserPath string, s *store.S
 		store:              s,
 		staticPhrases:      make(map[string][]PhraseEntry),
 		dynamicPhrases:     make(map[string][]PhraseEntry),
-		phraseGroups:       make(map[string]PhraseGroup),
+		phraseGroups:       make(map[string][]PhraseGroup),
 		templateEngine:     GetTemplateEngine(),
 		cmdCache:           make(map[string][]candidate.Candidate),
 	}
@@ -231,10 +243,14 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 		return nil
 	}
 
-	// 判断是否字符组: phraseGroups[code].Kind == PhraseGroupKindAA
-	isAAGroupMember := false
-	if group, gok := pl.phraseGroups[code]; gok && group.Kind == PhraseGroupKindAA {
-		isAAGroupMember = true
+	// 同 code 可能有多个 $AA group, 用 GroupRawText 反查归属 group。
+	// 用 map 缓存避免每条 entry 都线性扫一次 groups slice。
+	groups := pl.phraseGroups[code]
+	groupByRaw := make(map[string]*PhraseGroup, len(groups))
+	for i := range groups {
+		if groups[i].Kind == PhraseGroupKindAA {
+			groupByRaw[groups[i].RawText] = &groups[i]
+		}
 	}
 
 	results := make([]candidate.Candidate, 0, len(entries))
@@ -248,11 +264,15 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 			PhraseTemplate: e.Text,
 			ID:             PhraseCandidateID(code, e.Text),
 		}
-		if isAAGroupMember {
-			// $AA 字符组展开后的字符级候选: 与 SearchCommand 情况 2b 路径标记一致,
-			// 右键菜单 pin/delete/前移/后移/置顶/恢复默认 全 disable。
+		// entry 属于某 AA group 时, 反查 group 取名字 + RawText 填到 candidate 上。
+		// 让 coordinator collapse 路径能按 GroupTemplate 区分多 group。
+		// TODO: 未来支持组内成员原地编辑 (允许在 IME 内改 chars 数组顺序)
+		if g, ok := groupByRaw[e.GroupRawText]; ok {
 			cand.IsCommand = true
 			cand.IsGroupMember = true
+			cand.GroupCode = code
+			cand.GroupName = g.Name
+			cand.GroupTemplate = g.RawText
 		}
 		results = append(results, cand)
 		positions = append(positions, e.Position)
@@ -271,13 +291,32 @@ func (pl *PhraseLayer) Search(code string, limit int) []candidate.Candidate {
 //  1. 精确匹配动态短语（含 $ 变量，如 date/time/uuid）
 //  2. 精确匹配字符组（texts 字段，如 zzbd → 标点字符列表）
 //  3. 字符组前缀匹配（如 zz → 返回 zzbd/zzsz... 导航候选供二级展开）
+//
+// 锁策略 (double-checked locking, 2026-05-17 升级):
+//   - 1st pass: 用 RLock 读 cmdCache, 命中直接返回, 让多个并发查询共享读路径不阻塞;
+//   - 2nd pass: 缓存未命中, 升级到 Lock 执行展开 + 写 cache, 入锁后做 double-check
+//     (避免 R→W 之间另一 goroutine 已写入, 重复展开);
+//   - 内部辅助 (expandSSGroup/expandDynamicEntry) 注释要求"必须持有 pl.mu (Lock)"
+//     的语义在此处仍然满足: 我们在 W-Lock 阶段调用它们。
 func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candidate {
+	code = strings.ToLower(code)
+
+	// 1st pass: R-Lock 读 cache, 让并发查询共享。
+	pl.mu.RLock()
+	if cached, hit := pl.cmdCache[code]; hit {
+		pl.mu.RUnlock()
+		if limit > 0 && len(cached) > limit {
+			return cached[:limit]
+		}
+		return cached
+	}
+	pl.mu.RUnlock()
+
+	// 2nd pass: W-Lock 计算并写 cache。
 	pl.mu.Lock()
 	defer pl.mu.Unlock()
 
-	code = strings.ToLower(code)
-
-	// 缓存命中
+	// double-check: R→W 间隙另一 goroutine 可能已经写入。
 	if cached, hit := pl.cmdCache[code]; hit {
 		if limit > 0 && len(cached) > limit {
 			return cached[:limit]
@@ -310,50 +349,61 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 		// 全部都是 $SS entry: 落到情况 2 由 ss 分支处理。
 	}
 
-	// ── 情况 2：字符组精确匹配 → Kind 分流 ──
-	if group, ok := pl.phraseGroups[code]; ok && !group.Disabled {
-		// 2a: $SS 字符串数组 (Kind=ss) — 通过 ArrayHook 运行时展开;
-		// 每条 entry 用自身 weight (expandSSGroup 内部取 entry.Weight)。
-		if group.Kind == PhraseGroupKindSS {
-			results := pl.expandSSGroup(code)
+	// ── 情况 2：字符组精确匹配 → 多 group 时返回所有成员让 coordinator collapse ──
+	// 同 code 多 group ($AA/$SS 任意组合):
+	//   - 全部成员候选 append 在一起返回, 每条 candidate 带自己的 GroupTemplate;
+	//   - coordinator collapseGroupMembersIfMixed 自动按 GroupTemplate 区分各 group,
+	//     生成多 nav (单 group 则直接展示成员)。
+	// 单 group 行为不变 (直接展开成员)。
+	groupsForCode := pl.phraseGroups[code]
+	if len(groupsForCode) > 0 {
+		var results []candidate.Candidate
+		for _, group := range groupsForCode {
+			if group.Disabled {
+				continue
+			}
+			switch group.Kind {
+			case PhraseGroupKindSS:
+				// $SS: 通过 ArrayHook 运行时展开该 group
+				results = append(results, pl.expandSSGroupSingle(group)...)
+			case PhraseGroupKindAA:
+				// $AA: 从 staticPhrases[code] 中按 GroupRawText 过滤出该 group 的字符
+				// TODO: 未来支持组内成员原地编辑 (允许在 IME 内改 chars 数组顺序)
+				groupWeight := resolvePhraseWeight(group.Weight)
+				idx := 0
+				for _, e := range pl.staticPhrases[code] {
+					if e.GroupRawText != group.RawText {
+						continue
+					}
+					results = append(results, candidate.Candidate{
+						Text:           e.Text,
+						Code:           code,
+						Weight:         groupWeight,
+						NaturalOrder:   idx,
+						IsCommand:      true,
+						IsPhrase:       true,
+						IsGroupMember:  true,
+						GroupCode:      code,
+						GroupName:      group.Name,
+						GroupTemplate:  group.RawText,
+						PhraseTemplate: e.Text,
+						ID:             PhraseCandidateID(code, e.Text),
+					})
+					idx++
+				}
+			}
+		}
+		if len(results) > 0 {
+			// 同权重场景下用 NaturalOrder 做 tie-break, 保证字符按 chars 数组顺序。
+			sort.Slice(results, func(i, j int) bool {
+				return candidate.Better(results[i], results[j])
+			})
 			pl.cmdCache[code] = results
 			if limit > 0 && len(results) > limit {
 				return results[:limit]
 			}
 			return results
 		}
-
-		// 2b: $AA 字符组 (Kind=aa) — 用 staticPhrases 中的字符级 entry 展开。
-		// 字符组内所有字符共享 group 的 weight, 用 NaturalOrder = 字符在
-		// chars 字符串中的下标做 tie-break, 保证按数组顺序排列。
-		// IsGroupMember=true: 顺序由 $AA(chars) 决定, 走"编辑短语"修改 chars 串,
-		// 右键菜单 pin/delete/前移/置顶/恢复默认 全 disable。
-		groupWeight := resolvePhraseWeight(group.Weight)
-		entries := pl.staticPhrases[code]
-		results := make([]candidate.Candidate, 0, len(entries))
-		for i, e := range entries {
-			_ = e.Position // 字符级 entry 的 position 仅记录展开顺序, 不参与权重计算
-			results = append(results, candidate.Candidate{
-				Text:           e.Text,
-				Code:           code,
-				Weight:         groupWeight,
-				NaturalOrder:   i,
-				IsCommand:      true,
-				IsPhrase:       true,
-				IsGroupMember:  true,
-				PhraseTemplate: e.Text,
-				ID:             PhraseCandidateID(code, e.Text),
-			})
-		}
-		// 同权重场景下用 NaturalOrder 做 tie-break, 保证字符按 chars 数组顺序。
-		sort.Slice(results, func(i, j int) bool {
-			return candidate.Better(results[i], results[j])
-		})
-		pl.cmdCache[code] = results
-		if limit > 0 && len(results) > limit {
-			return results[:limit]
-		}
-		return results
 	}
 
 	// ── 情况 3：字符组前缀匹配（如 zz → 返回 zzbd/zzsz... 导航候选） ──
@@ -362,21 +412,32 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 		return nil
 	}
 	var navResults []candidate.Candidate
-	for groupCode, group := range pl.phraseGroups {
-		if !group.Disabled && groupCode != code && strings.HasPrefix(groupCode, code) {
+	for groupCode, groupSlice := range pl.phraseGroups {
+		if groupCode == code || !strings.HasPrefix(groupCode, code) {
+			continue
+		}
+		// 同 code 下每个 group 各出 1 个 nav
+		for _, group := range groupSlice {
+			if group.Disabled {
+				continue
+			}
 			displayName := group.Name
 			if displayName == "" {
 				displayName = groupCode
 			}
-			// nav 候选不附 ID: 用户不会 pin 一个 group 入口
+			// nav id = phrase:<groupCode>:<group.RawText>, 详见 PhraseGroup.RawText 注释。
 			navResults = append(navResults, candidate.Candidate{
-				Text:      displayName,
-				Code:      groupCode,
-				Weight:    resolvePhraseWeight(group.Weight),
-				Comment:   groupCode[len(code):],
-				IsPhrase:  true,
-				IsGroup:   true,
-				GroupCode: groupCode,
+				Text:           displayName,
+				Code:           groupCode,
+				Weight:         resolvePhraseWeight(group.Weight),
+				Comment:        groupCode[len(code):],
+				IsPhrase:       true,
+				IsGroup:        true,
+				GroupCode:      groupCode,
+				GroupName:      displayName,
+				GroupTemplate:  group.RawText,
+				PhraseTemplate: group.RawText,
+				ID:             PhraseCandidateID(groupCode, group.RawText),
 			})
 		}
 	}
@@ -410,21 +471,32 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 	prefix = strings.ToLower(prefix)
 	var results []candidate.Candidate
 
-	// 1. 处理 phraseGroups：返回组名候选 (nav 不附 ID)
-	for code, group := range pl.phraseGroups {
-		if code != prefix && strings.HasPrefix(code, prefix) && !group.Disabled {
+	// 1. phraseGroups: 每个 group 出 1 个 nav 候选 (同 code 多 group 多 nav)。
+	//    id 见 PhraseGroup.RawText 注释。
+	for code, groupSlice := range pl.phraseGroups {
+		if code == prefix || !strings.HasPrefix(code, prefix) {
+			continue
+		}
+		for _, group := range groupSlice {
+			if group.Disabled {
+				continue
+			}
 			displayName := group.Name
 			if displayName == "" {
 				displayName = code
 			}
 			results = append(results, candidate.Candidate{
-				Text:      displayName,
-				Code:      code,
-				Weight:    resolvePhraseWeight(group.Weight),
-				Comment:   code[len(prefix):], // 显示编码后缀（如 zz→zzbd 显示 "bd"）
-				IsPhrase:  true,
-				IsGroup:   true,
-				GroupCode: code,
+				Text:           displayName,
+				Code:           code,
+				Weight:         resolvePhraseWeight(group.Weight),
+				Comment:        code[len(prefix):], // 显示编码后缀（如 zz→zzbd 显示 "bd"）
+				IsPhrase:       true,
+				IsGroup:        true,
+				GroupCode:      code,
+				GroupName:      displayName,
+				GroupTemplate:  group.RawText,
+				PhraseTemplate: group.RawText,
+				ID:             PhraseCandidateID(code, group.RawText),
 			})
 		}
 	}
@@ -506,7 +578,7 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 	// Clear existing data
 	pl.staticPhrases = make(map[string][]PhraseEntry)
 	pl.dynamicPhrases = make(map[string][]PhraseEntry)
-	pl.phraseGroups = make(map[string]PhraseGroup)
+	pl.phraseGroups = make(map[string][]PhraseGroup)
 	pl.cmdCache = make(map[string][]candidate.Candidate)
 	pl.cmdCacheKey = ""
 
@@ -542,13 +614,15 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 				Weight:   rec.Weight,
 				Position: position,
 				IsSystem: rec.IsSystem,
+				RawText:  rec.Text,
 			}
-			pl.phraseGroups[code] = pg
+			pl.phraseGroups[code] = append(pl.phraseGroups[code], pg)
 			entry := PhraseEntry{
-				Text:     rec.Text,
-				Weight:   rec.Weight,
-				Position: position,
-				IsSystem: rec.IsSystem,
+				Text:         rec.Text,
+				Weight:       rec.Weight,
+				Position:     position,
+				IsSystem:     rec.IsSystem,
+				GroupRawText: rec.Text, // 反查归属 group 用
 			}
 			pl.dynamicPhrases[code] = append(pl.dynamicPhrases[code], entry)
 
@@ -563,15 +637,17 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 				Weight:   rec.Weight,
 				Position: position,
 				IsSystem: rec.IsSystem,
+				RawText:  rec.Text,
 			}
-			pl.phraseGroups[code] = pg
+			pl.phraseGroups[code] = append(pl.phraseGroups[code], pg)
 			runes := []rune(chars)
 			for idx, r := range runes {
 				arrEntry := PhraseEntry{
-					Text:     string(r),
-					Weight:   rec.Weight,
-					Position: position + idx,
-					IsSystem: rec.IsSystem,
+					Text:         string(r),
+					Weight:       rec.Weight,
+					Position:     position + idx,
+					IsSystem:     rec.IsSystem,
+					GroupRawText: rec.Text, // 反查归属 group 用
 				}
 				pl.staticPhrases[code] = append(pl.staticPhrases[code], arrEntry)
 			}
@@ -663,53 +739,54 @@ func (pl *PhraseLayer) GetCommandCount() int {
 //     entry 继续展开。完全失败时返回空 slice (调用方上层会回退到模板/字面量)。
 //   - PhraseTemplate 字段保留原 $SS marker text, 给 candidate adjustments
 //     (右键 pin 等) 提供原始 entry 定位。
-func (pl *PhraseLayer) expandSSGroup(code string) []candidate.Candidate {
+func (pl *PhraseLayer) expandSSGroupSingle(group PhraseGroup) []candidate.Candidate {
 	if pl.cmdbarArrayHook == nil {
 		slog.Warn("phrase: $SS group hit but no cmdbarArrayHook installed; group has 0 candidates",
-			"code", code)
+			"code", group.Code)
 		return nil
 	}
-	entries := pl.dynamicPhrases[code]
-	var results []candidate.Candidate
-	for _, entry := range entries {
-		if !HasSSMarker(entry.Text) {
-			continue
-		}
-		_, elements, modifiers, ok, err := pl.cmdbarArrayHook(entry.Text)
-		if err != nil {
-			slog.Warn("phrase: $SS array hook returned error, skipping entry",
-				"code", code, "valueLen", len(entry.Text))
-			continue
-		}
-		if !ok {
-			continue
-		}
-		entryWeight := resolvePhraseWeight(entry.Weight)
-		for i, elem := range elements {
-			// $SS 每个元素 (string lit 或嵌入 $CC) 用其 raw display 作为 id 后缀,
-			// 保证按元素粒度 pin / shadow。同 group 多元素的 id 互不冲突。
-			// IsGroupMember=true: 顺序由 $SS marker 内的参数列表决定, 走"编辑短语"
-			// 修改 yaml; 右键菜单 pin/delete/前移/置顶/恢复默认 全 disable。
-			cand := candidate.Candidate{
-				Text:           elem.Display,
-				Code:           code,
-				Weight:         entryWeight,
-				NaturalOrder:   i,
-				IsCommand:      true,
-				IsPhrase:       true,
-				IsGroupMember:  true,
-				PhraseTemplate: entry.Text,
-				ID:             PhraseCandidateID(code, elem.Display),
-				DisplayText:    elem.Display,
-				Actions:        elem.Actions,
-				Modifiers:      modifiers, // group-level modifiers
-			}
-			results = append(results, cand)
-		}
+	hookName, elements, modifiers, ok, err := pl.cmdbarArrayHook(group.RawText)
+	if err != nil {
+		slog.Warn("phrase: $SS array hook returned error, skipping entry",
+			"code", group.Code, "valueLen", len(group.RawText))
+		return nil
 	}
-	sort.Slice(results, func(i, j int) bool {
-		return candidate.Better(results[i], results[j])
-	})
+	if !ok {
+		return nil
+	}
+	// ArrayHook 返回的 name 与 PhraseGroup.Name (LoadFromStore 用 ParseSSGroupName 注入)
+	// 等价, 静态字段更稳定。空时回落 hookName。
+	effectiveName := group.Name
+	if effectiveName == "" {
+		effectiveName = hookName
+	}
+	entryWeight := resolvePhraseWeight(group.Weight)
+	results := make([]candidate.Candidate, 0, len(elements))
+	for i, elem := range elements {
+		// $SS 每个元素 (string lit 或嵌入 $CC) 用其 raw display 作为 id 后缀,
+		// 保证按元素粒度 pin / shadow。同 group 多元素的 id 互不冲突。
+		// IsGroupMember=true: 顺序由 $SS marker 内的参数列表决定, 走"编辑短语"
+		// 修改 yaml; 右键菜单 pin/delete/前移/置顶/恢复默认 全 disable。
+		// TODO: 未来支持组内成员原地编辑 (允许在 IME 内改 $SS 数组顺序)
+		cand := candidate.Candidate{
+			Text:           elem.Display,
+			Code:           group.Code,
+			Weight:         entryWeight,
+			NaturalOrder:   i,
+			IsCommand:      true,
+			IsPhrase:       true,
+			IsGroupMember:  true,
+			GroupCode:      group.Code,
+			GroupName:      effectiveName,
+			GroupTemplate:  group.RawText,
+			PhraseTemplate: group.RawText,
+			ID:             PhraseCandidateID(group.Code, elem.Display),
+			DisplayText:    elem.Display,
+			Actions:        elem.Actions,
+			Modifiers:      modifiers, // group-level modifiers
+		}
+		results = append(results, cand)
+	}
 	return results
 }
 

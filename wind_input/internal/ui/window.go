@@ -222,6 +222,9 @@ type CandidateWindow struct {
 	hasShadowFlags      []bool          // 当前页各候选是否有 Shadow 修改或短语覆盖
 	isCommandFlags      []bool          // 当前页各候选是否为命令候选（短语）
 	isGroupMemberFlags  []bool          // 当前页各候选是否为 $AA/$SS 字符组/字符串组的子项 (右键菜单全 disable)
+	isPhraseFlags       []bool          // 当前页各候选是否为短语 (PhraseLayer 来源); 决定"禁用短语" vs "删除/隐藏" 文案
+	isUserDictFlags     []bool          // 当前页各候选是否来自用户词库 (Meta.IsUserDict); "删除用户词" 文案
+	isTempDictFlags     []bool          // 当前页各候选是否来自临时词库 (Meta.IsTempDict); "删除临时词" 文案
 	candidateTexts      []string        // 当前页各候选的文本（用于菜单状态判断）
 	isPinyinMode        bool            // 是否拼音模式（拼音禁用前移/后移）
 	isQuickInputMode    bool            // 是否快捷输入模式（右键菜单只保留复制）
@@ -511,13 +514,18 @@ func (w *CandidateWindow) SetCandidateHasShadow(flags []bool) {
 }
 
 // SetCandidateMenuState 设置右键菜单所需的额外状态。
-// isGroupMemberFlags 为 nil 时视为全部 false (兼容旧调用方)。
-func (w *CandidateWindow) SetCandidateMenuState(texts []string, isPinyin bool, isCommandFlags []bool, isGroupMemberFlags []bool) {
+// 后三个 flag 切片为 nil 时视为全部 false (兼容旧调用方)。
+// isPhraseFlags / isUserDictFlags / isTempDictFlags 用于右键"删除"菜单文案动态化,
+// 详见 docs/design/candidate-actions.md §2 / window_mouse.go::handleRightClick 内 computeDeleteMenuLabel。
+func (w *CandidateWindow) SetCandidateMenuState(texts []string, isPinyin bool, isCommandFlags, isGroupMemberFlags, isPhraseFlags, isUserDictFlags, isTempDictFlags []bool) {
 	w.mu.Lock()
 	w.candidateTexts = texts
 	w.isPinyinMode = isPinyin
 	w.isCommandFlags = isCommandFlags
 	w.isGroupMemberFlags = isGroupMemberFlags
+	w.isPhraseFlags = isPhraseFlags
+	w.isUserDictFlags = isUserDictFlags
+	w.isTempDictFlags = isTempDictFlags
 	w.mu.Unlock()
 }
 

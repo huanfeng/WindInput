@@ -288,6 +288,13 @@ type Coordinator struct {
 	// 含 "$CC(" 或 "$X" 的任意候选 (码表/用户词库/拼音), 不只局限于短语。
 	// 不持有锁, Expand 是纯函数 + hook 闭包内不再回环 c.mu。
 	cmdbarValueExpander *dict.ValueExpander
+
+	// expandedGroupTemplate 用户主动选中 collapsed group nav 后, 标记"这个 code 的组保持展开"。
+	// 由 doSelectCandidate 内 IsGroup 分支在 cand.GroupCode == c.inputBuffer 时设值,
+	// 在 inputBuffer 发生任何变化时清零 (handleAlphaKey / handleBackspace / handleDelete /
+	// handleCursorXxx / clearState 等入口), 确保用户重新输入后回到默认 collapse 行为。
+	// 详见 collapseGroupMembersIfMixed 文档。
+	expandedGroupTemplate string
 }
 
 // EventNotifier 由外部（rpc.Server 适配器）注入。当 coordinator 旁路 RPC 路径
@@ -839,6 +846,9 @@ func (c *Coordinator) clearState() {
 	c.preeditDisplay = ""
 	c.syllableBoundaries = nil
 	c.confirmedSegments = nil
+	// 输入流重置, 用户主动展开 collapse 组的标记必须清零, 否则下次复用旧 group code
+	// 时会跳过 collapse, 行为不一致。
+	c.expandedGroupTemplate = ""
 	c.tempEnglishMode = false
 	c.tempEnglishBuffer = ""
 	// 清除临时拼音状态时，同步卸载引擎层的拼音词库层，避免污染五笔查询

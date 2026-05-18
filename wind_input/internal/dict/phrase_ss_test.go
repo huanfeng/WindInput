@@ -182,10 +182,11 @@ func TestPhraseLayerSSGroup_PhraseGroupKind(t *testing.T) {
 	}
 	pl := loadPhraseLayerFromYAML(t, systemFile, "")
 
-	ss, ok := pl.phraseGroups["ssgrp"]
-	if !ok {
-		t.Fatal("ssgrp not in phraseGroups")
+	ssSlice, ok := pl.phraseGroups["ssgrp"]
+	if !ok || len(ssSlice) != 1 {
+		t.Fatalf("ssgrp not in phraseGroups or wrong length: %v", ssSlice)
 	}
+	ss := ssSlice[0]
 	if ss.Kind != PhraseGroupKindSS {
 		t.Errorf("ssgrp Kind = %q, want %q", ss.Kind, PhraseGroupKindSS)
 	}
@@ -193,10 +194,11 @@ func TestPhraseLayerSSGroup_PhraseGroupKind(t *testing.T) {
 		t.Errorf("ssgrp Name = %q, want %q", ss.Name, "ss-name")
 	}
 
-	aa, ok := pl.phraseGroups["aagrp"]
-	if !ok {
-		t.Fatal("aagrp not in phraseGroups")
+	aaSlice, ok := pl.phraseGroups["aagrp"]
+	if !ok || len(aaSlice) != 1 {
+		t.Fatalf("aagrp not in phraseGroups or wrong length: %v", aaSlice)
 	}
+	aa := aaSlice[0]
 	if aa.Kind != PhraseGroupKindAA {
 		t.Errorf("aagrp Kind = %q, want %q", aa.Kind, PhraseGroupKindAA)
 	}

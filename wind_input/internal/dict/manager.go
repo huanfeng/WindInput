@@ -410,10 +410,15 @@ func (dm *DictManager) SetSortMode(mode candidate.CandidateSortMode) {
 	dm.compositeDict.SetSortMode(mode)
 }
 
-// GetShadowProvider 获取当前活跃的 ShadowProvider
+// GetShadowProvider 获取当前活跃的 ShadowProvider。
+// 当 activeStoreShadow 是 nil 指针时显式返回 untyped nil, 避免接口 typed-nil
+// 陷阱 (调方法时 panic, 即使 `if p != nil { p.X() }` 也无效)。
 func (dm *DictManager) GetShadowProvider() ShadowProvider {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
+	if dm.activeStoreShadow == nil {
+		return nil
+	}
 	return dm.activeStoreShadow
 }
 
@@ -487,35 +492,64 @@ func (dm *DictManager) RemoveShadowRule(code, word, candID string) {
 	}
 }
 
-// HasShadowRule 检查指定编码和词/候选是否有 Shadow 规则。
+// HasShadowRule 检查指定编码和词/候选是否有任意 Shadow 规则 (Pinned 或 Deleted)。
 // candID 非空时按 id 匹配, 否则按 word 匹配。
+//
+// 用途: 设置 UI / debug 工具的"是否有覆盖"通用判断。**不**用于右键菜单"恢复默认"
+// 启用条件 — 那里只关心位置调整 (Pinned), 用 HasShadowPin。
 func (dm *DictManager) HasShadowRule(code, word, candID string) bool {
-	if dm.activeStoreShadow != nil {
-		rules := dm.activeStoreShadow.GetShadowRules(code)
-		if rules == nil {
-			return false
-		}
-		for _, p := range rules.Pinned {
-			if candID != "" || p.CandID != "" {
-				if p.CandID == candID {
-					return true
-				}
-				continue
-			}
-			if p.Word == word {
+	if dm.activeStoreShadow == nil {
+		return false
+	}
+	rules := dm.activeStoreShadow.GetShadowRules(code)
+	if rules == nil {
+		return false
+	}
+	if hasShadowPinMatch(rules, word, candID) {
+		return true
+	}
+	for _, d := range rules.Deleted {
+		if candID != "" || d.CandID != "" {
+			if d.CandID == candID {
 				return true
 			}
+			continue
 		}
-		for _, d := range rules.Deleted {
-			if candID != "" || d.CandID != "" {
-				if d.CandID == candID {
-					return true
-				}
-				continue
-			}
-			if d.Word == word {
+		if d.Word == word {
+			return true
+		}
+	}
+	return false
+}
+
+// HasShadowPin 检查指定编码和词/候选是否有 Shadow Pinned 规则 (不查 Deleted)。
+// candID 非空时按 id 匹配, 否则按 word 匹配。
+//
+// 用途: 右键菜单"恢复默认"启用条件 — 仅恢复位置调整, 删除的候选用户在 IME 里
+// 触达不到右键菜单, 删除恢复走设置 UI。详见 docs/design/candidate-actions.md §4。
+func (dm *DictManager) HasShadowPin(code, word, candID string) bool {
+	if dm.activeStoreShadow == nil {
+		return false
+	}
+	rules := dm.activeStoreShadow.GetShadowRules(code)
+	if rules == nil {
+		return false
+	}
+	return hasShadowPinMatch(rules, word, candID)
+}
+
+// hasShadowPinMatch 内部辅助: 在 rules.Pinned 中匹配 (word, candID)。
+// 复用给 HasShadowRule 和 HasShadowPin, 保持匹配逻辑单源。
+func hasShadowPinMatch(rules *ShadowRules, word, candID string) bool {
+	for _, p := range rules.Pinned {
+		if candID != "" || p.CandID != "" {
+			if p.CandID == candID {
 				return true
 			}
+			continue
+		}
+		if p.Word == word {
+			return true
 		}
 	}
 	return false

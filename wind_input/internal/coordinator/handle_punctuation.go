@@ -680,6 +680,7 @@ func (c *Coordinator) handlePinyinSeparator() *bridge.KeyEventResult {
 	}
 	c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + "'" + c.inputBuffer[c.inputCursorPos:]
 	c.inputCursorPos++
+	c.expandedGroupTemplate = "" // buffer 变化, 清除二级展开标记
 	c.logger.Debug("Pinyin separator inserted", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
 
 	c.updateCandidates()

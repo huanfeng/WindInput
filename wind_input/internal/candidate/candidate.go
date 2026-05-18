@@ -40,11 +40,16 @@ type Candidate struct {
 	// IsGroup=true 的导航候选**不**标 IsGroupMember (导航本身是组入口, 不展开)。
 	// 普通短语 / 用户词 / 系统词 / cmdbar 命令亦不标。
 	// 引入: 2026-05-17 R2 follow-up (字符组/字符串组 menu disable)。
-	GroupCode  string        // 组的完整编码（选中后替换 inputBuffer，如 "zzbd"）
-	Index      int           // 显示序号（UI 渲染用，1-9/0）
-	HasShadow  bool          // 是否存在 Shadow 层修改（UI 右键菜单"恢复默认"用）
-	IndexLabel string        // 自定义序号标签（如 "a"/"b"），非空时覆盖 Index 的数字显示
-	Meta       CandidateMeta // 调试/提示元数据（可选，引擎层按需填充）
+	GroupCode string // 组的完整编码（选中后替换 inputBuffer，如 "zzbd"）
+	GroupName string // 字符组/字符串组的显示名 (IsGroupMember=true 时填充, 用于 collapse 后 nav 候选展示, 详见 docs/design/2026-05-16-cmdbar-followup.md collapse-on-mixed 规则)
+	// GroupTemplate 组的原始 PhraseRecord.Text (含 $AA/$SS marker),
+	// 用于 D (group member) / E (nav) 候选的 stable id 推导。
+	// 详见 docs/design/candidate-actions.md §5。
+	GroupTemplate string
+	Index         int           // 显示序号（UI 渲染用，1-9/0）
+	HasShadow     bool          // 是否存在 Shadow 层修改（UI 右键菜单"恢复默认"用）
+	IndexLabel    string        // 自定义序号标签（如 "a"/"b"），非空时覆盖 Index 的数字显示
+	Meta          CandidateMeta // 调试/提示元数据（可选，引擎层按需填充）
 
 	// ID 候选的稳定标识 (deterministic), 用于 Shadow 规则按候选 id 匹配。
 	//

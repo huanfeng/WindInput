@@ -171,6 +171,50 @@ func TestDictManager_ShadowPinAndRemove(t *testing.T) {
 	}
 }
 
+// TestDictManager_HasShadowPin_OnlyPinned 验证 HasShadowPin 仅查 Pinned, 不查 Deleted。
+// 用于右键菜单"恢复默认"启用条件 — 被 delete 的候选不应触发"恢复默认", 那是设置 UI 的职责。
+// 详见 docs/design/candidate-actions.md §4。
+func TestDictManager_HasShadowPin_OnlyPinned(t *testing.T) {
+	dm := setupTestManager(t)
+	dm.SwitchSchemaFull("wubi86", "wubi86", 5000, 5)
+
+	// 场景 1: 仅 Pinned → HasShadowPin=true, HasShadowRule=true
+	dm.PinWord("abc", "甲", "", 0)
+	if !dm.HasShadowPin("abc", "甲", "") {
+		t.Error("HasShadowPin should be true when word is Pinned")
+	}
+	if !dm.HasShadowRule("abc", "甲", "") {
+		t.Error("HasShadowRule should be true when word is Pinned")
+	}
+
+	// 场景 2: 仅 Deleted (没有 pin) → HasShadowPin=false, HasShadowRule=true
+	dm.DeleteWord("abc", "乙", "phrase:abc:乙")
+	if dm.HasShadowPin("abc", "乙", "phrase:abc:乙") {
+		t.Error("HasShadowPin should be false when only Deleted")
+	}
+	if !dm.HasShadowRule("abc", "乙", "phrase:abc:乙") {
+		t.Error("HasShadowRule should be true when only Deleted")
+	}
+
+	// 场景 3: 完全无规则 → 两者都 false
+	if dm.HasShadowPin("abc", "丙", "") {
+		t.Error("HasShadowPin should be false for unset word")
+	}
+	if dm.HasShadowRule("abc", "丙", "") {
+		t.Error("HasShadowRule should be false for unset word")
+	}
+
+	// 场景 4: 按 candID 匹配 (R2 路径)
+	dm.PinWord("xyz", "命令", "phrase:xyz:cmd", 1)
+	if !dm.HasShadowPin("xyz", "命令", "phrase:xyz:cmd") {
+		t.Error("HasShadowPin should match by candID")
+	}
+	// 同 code 不同 candID 不应命中
+	if dm.HasShadowPin("xyz", "命令", "phrase:xyz:other") {
+		t.Error("HasShadowPin should NOT match different candID")
+	}
+}
+
 // TestDictManager_DisablePhrase 验证短语候选的"删除"走 PhraseRecord.Enabled
 // 软删除路径: 短语条目仍在 db, 但不再参与候选生成; 重新启用后又能匹配。
 func TestDictManager_DisablePhrase(t *testing.T) {

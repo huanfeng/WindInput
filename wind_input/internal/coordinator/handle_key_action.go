@@ -38,6 +38,7 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	// 在光标位置插入字符
 	c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + key + c.inputBuffer[c.inputCursorPos:]
 	c.inputCursorPos += len(key)
+	c.expandedGroupTemplate = "" // 用户继续输入新字符: 默认收起被展开的 group
 	c.logger.Debug("Input buffer updated", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
 
 	// 处理顶码（如五笔的五码顶字）
@@ -259,6 +260,7 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 		c.confirmedSegments = c.confirmedSegments[:len(c.confirmedSegments)-1]
 		c.inputBuffer = lastSeg.ConsumedCode + c.inputBuffer
 		c.inputCursorPos = len(c.inputBuffer) // 光标移到末尾
+		c.expandedGroupTemplate = ""          // buffer 变化, 清除二级展开标记
 		c.logger.Debug("Backspace: undo confirmed segment",
 			"restored", lastSeg.ConsumedCode, "buffer", c.inputBuffer,
 			"remainingSegments", len(c.confirmedSegments))
@@ -282,6 +284,7 @@ func (c *Coordinator) handleBackspace() *bridge.KeyEventResult {
 		// 无确认段时，在光标位置删除前一个字符
 		c.inputBuffer = c.inputBuffer[:c.inputCursorPos-1] + c.inputBuffer[c.inputCursorPos:]
 		c.inputCursorPos--
+		c.expandedGroupTemplate = "" // buffer 变化, 清除二级展开标记
 		c.logger.Debug("Input buffer after backspace", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
 
 		if len(c.inputBuffer) == 0 {
@@ -329,6 +332,7 @@ func (c *Coordinator) handleDelete() *bridge.KeyEventResult {
 	if c.inputCursorPos < len(c.inputBuffer) {
 		// 前删：删除光标位置的字符
 		c.inputBuffer = c.inputBuffer[:c.inputCursorPos] + c.inputBuffer[c.inputCursorPos+1:]
+		c.expandedGroupTemplate = "" // buffer 变化, 清除二级展开标记
 		c.logger.Debug("Delete key", "buffer", c.inputBuffer, "cursor", c.inputCursorPos)
 
 		if len(c.inputBuffer) == 0 && len(c.confirmedSegments) == 0 {
@@ -357,6 +361,7 @@ func (c *Coordinator) popConfirmedSegment() *bridge.KeyEventResult {
 	c.confirmedSegments = c.confirmedSegments[:len(c.confirmedSegments)-1]
 	c.inputBuffer = lastSeg.ConsumedCode
 	c.inputCursorPos = len(lastSeg.ConsumedCode)
+	c.expandedGroupTemplate = "" // buffer 变化, 清除二级展开标记
 	c.logger.Debug("Pop confirmed segment", "restored", lastSeg.ConsumedCode,
 		"remainingSegments", len(c.confirmedSegments))
 

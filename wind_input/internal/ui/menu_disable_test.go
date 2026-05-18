@@ -159,3 +159,35 @@ func TestMenuDisable_NonGroupMemberHonorsOtherRules(t *testing.T) {
 			up, down, top, del, reset)
 	}
 }
+
+// TestComputeDeleteMenuLabel 验证右键"删除"菜单文案按候选类型动态化。
+// 详见 docs/design/candidate-actions.md §2 操作权能矩阵。
+func TestComputeDeleteMenuLabel(t *testing.T) {
+	cases := []struct {
+		name        string
+		phrase      bool
+		userDict    bool
+		tempDict    bool
+		groupMember bool
+		wantLabel   string
+	}{
+		{"短语 → 禁用短语", true, false, false, false, "禁用短语(X)"},
+		{"短语 + UserDict 标记 (短语优先)", true, true, false, false, "禁用短语(X)"},
+		{"nav (IsPhrase=true, IsGroupMember=false)", true, false, false, false, "禁用短语(X)"},
+		{"用户词 → 删除用户词", false, true, false, false, "删除用户词(X)"},
+		{"临时词 → 删除临时词", false, false, true, false, "删除临时词(X)"},
+		{"用户词 + 临时词 (用户词优先)", false, true, true, false, "删除用户词(X)"},
+		{"系统码表/拼音默认 → 隐藏候选", false, false, false, false, "隐藏候选(X)"},
+		{"字符组成员 → 兜底文案 (disabled 不影响 UX)", false, false, false, true, "删除词条(X)"},
+		{"字符组成员 + 短语标记 (groupMember 优先)", true, false, false, true, "删除词条(X)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeDeleteMenuLabel(tc.phrase, tc.userDict, tc.tempDict, tc.groupMember)
+			if got != tc.wantLabel {
+				t.Errorf("computeDeleteMenuLabel(phrase=%v, userDict=%v, tempDict=%v, groupMember=%v) = %q, want %q",
+					tc.phrase, tc.userDict, tc.tempDict, tc.groupMember, got, tc.wantLabel)
+			}
+		})
+	}
+}

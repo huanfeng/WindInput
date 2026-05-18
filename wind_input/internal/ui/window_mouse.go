@@ -313,7 +313,20 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	// 检查是否为 $AA/$SS 字符组/字符串组展开后的子项: 右键菜单 pin/delete/前移/后移
 	// /置顶/恢复默认 全 disable — 顺序由 $AA(chars) / $SS(...) 决定, 走"编辑短语"
 	// 路径修改 yaml, 不允许 Shadow 双轨漂移。导航候选 (IsGroup=true) 本身**不**标。
+	// TODO: 未来支持组内成员原地编辑 (允许在 IME 内改 chars 数组顺序, 详见
+	// docs/design/candidate-actions.md §7.2)
 	isGroupMember := hitIndex >= 0 && hitIndex < len(w.isGroupMemberFlags) && w.isGroupMemberFlags[hitIndex]
+
+	// "删除"菜单文案按候选类型动态化, 让用户明确即将发生的操作:
+	//   短语 / nav / cmdbar → 禁用短语(X)     (DisablePhrase, 软删可恢复)
+	//   用户词                → 删除用户词(X)   (真删, 不可恢复)
+	//   临时词                → 删除临时词(X)   (真删, 不可恢复)
+	//   系统码表 / 拼音       → 隐藏候选(X)     (Shadow.delete, 可在设置 UI 恢复)
+	// 详见 docs/design/candidate-actions.md §2。
+	isPhrase := hitIndex >= 0 && hitIndex < len(w.isPhraseFlags) && w.isPhraseFlags[hitIndex]
+	isUserDict := hitIndex >= 0 && hitIndex < len(w.isUserDictFlags) && w.isUserDictFlags[hitIndex]
+	isTempDict := hitIndex >= 0 && hitIndex < len(w.isTempDictFlags) && w.isTempDictFlags[hitIndex]
+	deleteLabel := computeDeleteMenuLabel(isPhrase, isUserDict, isTempDict, isGroupMember)
 
 	// 菜单状态规则：
 	// 前移: 首位禁用 | 单候选禁用 | 拼音非命令禁用 | 字符组子项禁用
@@ -335,7 +348,7 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 		{Separator: true},
 		{ID: IDM_CANDIDATE_RESET, Text: "恢复默认(R)", Disabled: disableReset},
 		{Separator: true},
-		{ID: IDM_CANDIDATE_DELETE, Text: "删除词条(X)", Disabled: disableDelete},
+		{ID: IDM_CANDIDATE_DELETE, Text: deleteLabel, Disabled: disableDelete},
 		{Separator: true},
 		{ID: IDM_CANDIDATE_COPY, Text: "复制(C)"},
 	}
@@ -468,6 +481,25 @@ func (w *CandidateWindow) HideMenu() {
 	if wasOpen && popupMenu != nil {
 		popupMenu.Hide()
 	}
+}
+
+// computeDeleteMenuLabel 按候选类型返回右键"删除"菜单的动态文案。
+// 优先级 (从高到低): 字符组成员 (用 fallback, 反正 disabled) → 短语 → 用户词 → 临时词 → 默认隐藏。
+// 详见 docs/design/candidate-actions.md §2。
+func computeDeleteMenuLabel(isPhrase, isUserDict, isTempDict, isGroupMember bool) string {
+	if isGroupMember {
+		return "删除词条(X)" // disabled item, 文案落兜底
+	}
+	if isPhrase {
+		return "禁用短语(X)"
+	}
+	if isUserDict {
+		return "删除用户词(X)"
+	}
+	if isTempDict {
+		return "删除临时词(X)"
+	}
+	return "隐藏候选(X)"
 }
 
 // MenuContainsPoint checks if the given screen coordinates are within the popup menu

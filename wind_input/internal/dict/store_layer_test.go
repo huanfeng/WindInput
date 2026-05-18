@@ -80,6 +80,49 @@ func TestStoreUserLayer_SearchAndAdd(t *testing.T) {
 	}
 }
 
+// TestStoreUserLayer_MetaIsUserDict 用户词库返回的候选 Meta.IsUserDict=true,
+// IsTempDict=false。让 UI 右键菜单文案能区分"删除用户词" vs "删除临时词"。
+// 详见 docs/design/candidate-actions.md §2.1。
+func TestStoreUserLayer_MetaIsUserDict(t *testing.T) {
+	s := openTestStore(t)
+	layer := NewStoreUserLayer(s, testSchema)
+	if err := layer.Add("abc", "用户词", 100); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	results := layer.Search("abc", 0)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].Meta.IsUserDict {
+		t.Errorf("Meta.IsUserDict should be true for user dict candidate")
+	}
+	if results[0].Meta.IsTempDict {
+		t.Errorf("Meta.IsTempDict should be false for user dict candidate")
+	}
+}
+
+// TestStoreTempLayer_MetaIsTempDict 临时词库返回的候选 Meta.IsTempDict=true,
+// IsUserDict=false。修复前两个共用 userRecordsToCandidates 函数让临时词被
+// 误标为用户词, 让 UI 文案不准 (问题 1)。
+// 详见 docs/design/candidate-actions.md §2.1。
+func TestStoreTempLayer_MetaIsTempDict(t *testing.T) {
+	s := openTestStore(t)
+	temp := NewStoreTempLayer(s, testSchema)
+	temp.SetLimits(100, 3)
+	// 直接 LearnWord 注入一条临时词
+	temp.LearnWord("xyz", "临时词", 0)
+	results := temp.Search("xyz", 0)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].Meta.IsTempDict {
+		t.Errorf("Meta.IsTempDict should be true for temp dict candidate")
+	}
+	if results[0].Meta.IsUserDict {
+		t.Errorf("Meta.IsUserDict should be false for temp dict candidate")
+	}
+}
+
 // TestStoreUserLayer_Remove 添加词条后删除，验证已不存在。
 func TestStoreUserLayer_Remove(t *testing.T) {
 	s := openTestStore(t)

@@ -425,14 +425,17 @@ func TestPhraseCandidateIDAAGroupChars(t *testing.T) {
 	}
 }
 
-// TestPhraseCandidateIDGroupNavEmpty 验证 group nav 候选不附 ID
-// (用户不会 pin 一个 nav 入口, 没有 id 也不会被 Shadow 误匹)。
-func TestPhraseCandidateIDGroupNavEmpty(t *testing.T) {
+// TestPhraseCandidateIDGroupNavStable 验证 group nav 候选附稳定 ID
+// = PhraseCandidateID(code, group 原始 PhraseRecord.Text), 让 Shadow pin /
+// DisablePhrase 按 candID 跨 collapse 状态稳定命中。
+// 详见 docs/design/candidate-actions.md §5。
+func TestPhraseCandidateIDGroupNavStable(t *testing.T) {
 	tmpDir := t.TempDir()
 	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
+	const groupTpl = `$AA("标点符号", "，。")`
 	content := `phrases:
   - code: "zzbd"
-    text: '$AA("标点符号", "，。")'
+    text: '` + groupTpl + `'
     position: 1
 `
 	if err := os.WriteFile(systemFile, []byte(content), 0644); err != nil {
@@ -447,8 +450,15 @@ func TestPhraseCandidateIDGroupNavEmpty(t *testing.T) {
 	if !got[0].IsGroup {
 		t.Fatal("nav candidate should be IsGroup=true")
 	}
-	if got[0].ID != "" {
-		t.Fatalf("nav candidate ID should be empty, got %q", got[0].ID)
+	wantID := PhraseCandidateID("zzbd", groupTpl)
+	if got[0].ID != wantID {
+		t.Fatalf("nav candidate ID = %q, want %q", got[0].ID, wantID)
+	}
+	if got[0].PhraseTemplate != groupTpl {
+		t.Fatalf("nav PhraseTemplate = %q, want %q", got[0].PhraseTemplate, groupTpl)
+	}
+	if got[0].GroupTemplate != groupTpl {
+		t.Fatalf("nav GroupTemplate = %q, want %q", got[0].GroupTemplate, groupTpl)
 	}
 	// 导航候选不**标** IsGroupMember (它本身是组入口, 不展开):
 	if got[0].IsGroupMember {
@@ -485,6 +495,57 @@ func TestPhraseAAGroupCharsAreGroupMembers(t *testing.T) {
 		// IsGroup 仍是 false (导航才是 IsGroup=true)
 		if c.IsGroup {
 			t.Errorf("char[%d]=%q: IsGroup should be false on expanded char", i, c.Text)
+		}
+	}
+}
+
+// TestPhraseAAGroupCharsCarryGroupName 验证 $AA 字符组成员候选填了
+// GroupName + GroupCode, 供 collapseGroupMembersIfMixed 在混合场景下
+// collapse 出 nav 候选展示用。
+//
+// 同时覆盖 PhraseLayer.Search (静态精确路径) 和 SearchCommand (字符组精确
+// 命中路径) 两条入口, 保证两条路径的标记一致。
+func TestPhraseAAGroupCharsCarryGroupName(t *testing.T) {
+	tmpDir := t.TempDir()
+	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
+	content := `phrases:
+  - code: "zzbd"
+    text: '$AA("标点符号", "，。！")'
+    weight: 3000
+`
+	if err := os.WriteFile(systemFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
+
+	// 路径 1: SearchCommand 字符组精确命中
+	cmdGot := pl.SearchCommand("zzbd", 0)
+	if len(cmdGot) != 3 {
+		t.Fatalf("SearchCommand: expected 3 chars, got %d", len(cmdGot))
+	}
+	for i, c := range cmdGot {
+		if c.GroupCode != "zzbd" {
+			t.Errorf("SearchCommand char[%d]=%q: GroupCode want zzbd, got %q", i, c.Text, c.GroupCode)
+		}
+		if c.GroupName != "标点符号" {
+			t.Errorf("SearchCommand char[%d]=%q: GroupName want '标点符号', got %q", i, c.Text, c.GroupName)
+		}
+	}
+
+	// 路径 2: Search 静态精确 (staticPhrases 字符级 entry, 命中后同样标 IsGroupMember)
+	searchGot := pl.Search("zzbd", 0)
+	if len(searchGot) != 3 {
+		t.Fatalf("Search: expected 3 chars, got %d", len(searchGot))
+	}
+	for i, c := range searchGot {
+		if !c.IsGroupMember {
+			t.Errorf("Search char[%d]=%q: IsGroupMember want true", i, c.Text)
+		}
+		if c.GroupCode != "zzbd" {
+			t.Errorf("Search char[%d]=%q: GroupCode want zzbd, got %q", i, c.Text, c.GroupCode)
+		}
+		if c.GroupName != "标点符号" {
+			t.Errorf("Search char[%d]=%q: GroupName want '标点符号', got %q", i, c.Text, c.GroupName)
 		}
 	}
 }

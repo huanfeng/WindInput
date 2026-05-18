@@ -2,6 +2,7 @@
 package coordinator
 
 import (
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -144,6 +145,8 @@ func expandAACandidates(in []candidate.Candidate, inputBuffer string) []candidat
 			out = append(out, cand)
 			continue
 		}
+		// 在改写 cand.Text 前捕获原始 marker, 用作 GroupTemplate (id 见 phrase.PhraseGroup.RawText)
+		groupRawText := cand.Text
 		// exact match → 展开 N 字符
 		if cand.Code == inputBuffer {
 			runes := []rune(chars)
@@ -159,7 +162,12 @@ func expandAACandidates(in []candidate.Candidate, inputBuffer string) []candidat
 				// IsGroupMember=true: 字符组单字符候选, 右键菜单 pin/delete/前移/置顶
 				// 全 disable, 让用户改字符组顺序走"编辑短语"路径而非 Shadow 双轨漂移。
 				// 与 PhraseLayer 直接生成的字符级 candidate 标记保持一致 (phrase.go)。
+				// TODO: 未来支持组内成员原地编辑 (允许在 IME 内改 chars 数组顺序)
 				c.IsGroupMember = true
+				c.IsPhrase = true
+				c.GroupCode = cand.Code
+				c.GroupName = name
+				c.GroupTemplate = groupRawText
 				out = append(out, c)
 			}
 			continue
@@ -175,11 +183,137 @@ func expandAACandidates(in []candidate.Candidate, inputBuffer string) []candidat
 			nav.Comment = cand.Code[len(inputBuffer):]
 			nav.IsGroup = true
 			nav.GroupCode = cand.Code
+			nav.GroupName = displayName
+			nav.GroupTemplate = groupRawText
+			// PhraseTemplate 始终保留原 marker, 用于删除时定位 (user/temp dict
+			// 来源走 Remove(code, marker), PhraseLayer 来源走 DisablePhrase)。
+			nav.PhraseTemplate = groupRawText
+			// 仅当原 cand 来自 PhraseLayer (IsPhrase=true) 时附 phrase: 命名空间 ID;
+			// user/temp dict 来源保留原 Meta (IsUserDict/IsTempDict), 让 UI 文案
+			// 走"删除用户词/临时词"分支, 删除时走源词库 Remove。
+			// 详见 docs/design/candidate-actions.md §2.1。
+			if cand.IsPhrase {
+				nav.ID = dict.PhraseCandidateID(cand.Code, groupRawText)
+			}
 			out = append(out, nav)
 			continue
 		}
 		// 兜底: 既非 exact 也非 prefix (理论上不应发生), 原样保留
 		out = append(out, cand)
+	}
+	return out
+}
+
+// collapseGroupMembersIfMixed 实施 "$AA/$SS 多候选时不展开"规则:
+//
+//  1. 单一 group 唯一占据列表 (无其它来源候选, 且只有一个 GroupTemplate 出现 group member) →
+//     保持展开 (用户直接看到字符级候选);
+//  2. expandedGroupTemplate 非空且该 group 在结果里有 member → 仅保留该 group 的成员候选
+//     (用户主动选过 nav 进入二级展开, 状态机记忆);
+//  3. 其它场景 (混入码表/拼音/普通短语候选, 或同时出现多个 group, 含同 code 多 group) →
+//     把每个 GroupTemplate 的所有 member 替换成一条 nav 候选 (IsGroup=true), nav 接力
+//     到 doSelectCandidate 的 IsGroup 分支去触发二级展开。
+//
+// 分组 key 用 GroupTemplate (= group 原 PhraseRecord.Text), 让同 code 多 $AA/$SS 也能
+// 各自 collapse 为独立 nav。GroupCode 仍保留在 nav 上 (doSelectCandidate 用它判定是否
+// 需要替换 buffer)。详见 docs/design/candidate-actions.md §5。
+func collapseGroupMembersIfMixed(in []candidate.Candidate, expandedGroupTemplate string) []candidate.Candidate {
+	if len(in) == 0 {
+		return in
+	}
+
+	// 统计阶段: 按 GroupTemplate 区分 (同 code 多 group 时不冲突)
+	nonGroupCount := 0
+	memberCountByGroup := make(map[string]int)
+	firstMemberByGroup := make(map[string]candidate.Candidate)
+	for _, c := range in {
+		if c.IsGroup {
+			// nav 候选本身不算 member, 也不算"其它来源"
+			continue
+		}
+		if !c.IsGroupMember || c.GroupTemplate == "" {
+			nonGroupCount++
+			continue
+		}
+		memberCountByGroup[c.GroupTemplate]++
+		if _, seen := firstMemberByGroup[c.GroupTemplate]; !seen {
+			firstMemberByGroup[c.GroupTemplate] = c
+		}
+	}
+
+	if len(memberCountByGroup) == 0 {
+		return in // 没有任何 group member, 无需 collapse
+	}
+
+	// 用户主动展开模式: 二级展开后**仅保留该 group 的 member 候选**, 过滤其它一切候选,
+	// 实现"此时展开，只有这个数组自己"的语义 (用户对话敲定)。
+	if expandedGroupTemplate != "" && memberCountByGroup[expandedGroupTemplate] > 0 {
+		out := make([]candidate.Candidate, 0, memberCountByGroup[expandedGroupTemplate])
+		for _, c := range in {
+			if c.IsGroupMember && c.GroupTemplate == expandedGroupTemplate {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+
+	// 决策: 哪些 group 需要 collapse?
+	// - nonGroupCount == 0 && 唯一 group → 保持展开
+	// - 否则: 所有 group 默认 collapse
+	collapseAll := !(nonGroupCount == 0 && len(memberCountByGroup) == 1)
+	if !collapseAll {
+		return in
+	}
+
+	shouldCollapse := func(gt string) bool {
+		if gt == "" {
+			return false
+		}
+		return memberCountByGroup[gt] > 0
+	}
+
+	out := make([]candidate.Candidate, 0, len(in))
+	emittedNav := make(map[string]bool)
+	for _, c := range in {
+		// 非 member / nav 候选: 原样保留
+		if !c.IsGroupMember || c.GroupTemplate == "" {
+			out = append(out, c)
+			continue
+		}
+		gt := c.GroupTemplate
+		if !shouldCollapse(gt) {
+			out = append(out, c)
+			continue
+		}
+		if emittedNav[gt] {
+			// 同 group 后续 member 全部丢弃, nav 已在首次位置生成
+			continue
+		}
+		first := firstMemberByGroup[gt]
+		displayName := first.GroupName
+		if displayName == "" {
+			displayName = first.GroupCode
+		}
+		// nav id 复用 PhraseLayer 出口的命名空间 (见 PhraseGroup.RawText), 从 first member 继承。
+		// Code 用 first.GroupCode (= 用户输入精确码); GroupTemplate 区分多 group 同 code。
+		// Comment "(N 项)" 统一 $AA (字符) 和 $SS (字符串) 数组的展示风格。
+		nav := candidate.Candidate{
+			Text:           displayName,
+			Code:           first.GroupCode,
+			Comment:        fmt.Sprintf("(%d 项)", memberCountByGroup[gt]),
+			Weight:         first.Weight, // 用 group weight 让 nav 排序合理 (与 member 一致)
+			IsGroup:        true,
+			GroupCode:      first.GroupCode,
+			GroupName:      displayName,
+			GroupTemplate:  gt,
+			PhraseTemplate: gt,
+			IsPhrase:       first.IsPhrase, // 保留 phrase tier 标记, 与 PhraseLayer 出口 nav 一致
+		}
+		if gt != "" {
+			nav.ID = dict.PhraseCandidateID(first.GroupCode, gt)
+		}
+		out = append(out, nav)
+		emittedNav[gt] = true
 	}
 	return out
 }
@@ -207,10 +341,15 @@ func (c *Coordinator) applyValueExpansion(cand *candidate.Candidate) {
 	if !dict.HasExpandable(cand.Text) {
 		return
 	}
+	originalText := cand.Text
 	res := c.cmdbarValueExpander.Expand(cand.Text)
 	if !res.Changed {
 		return
 	}
+	// 保留原 marker 文本到 PhraseTemplate, 让 handleCandidateDelete 等下游能用原
+	// marker 在源词库 (user/temp dict) Remove 命中 — cand.Text 已被改写为展开后
+	// 的显示文本, 不再能匹配 db 中的 entry。详见 docs/design/candidate-actions.md §2.1。
+	cand.PhraseTemplate = originalText
 	cand.Text = res.Text
 	if res.IsCommand {
 		cand.DisplayText = res.DisplayText
@@ -298,10 +437,7 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 		dictMgr = c.engineMgr.GetDictManager()
 	}
 
-	// 预处理: $AA 字符组展开 (1→N), 在 applyValueExpansion (1→1) 之前。
-	// PhraseLayer 出口已经把字符组按 yaml 加载时展开为 N 个 PhraseEntry,
-	// 这里只针对用户词库 / 系统词库这类把 $AA(...) 当字面 text 存的来源。
-	result.Candidates = expandAACandidates(result.Candidates, c.inputBuffer)
+	result.Candidates = c.finalizeMixedCandidates(result.Candidates, dictMgr)
 
 	c.candidates = make([]ui.Candidate, len(result.Candidates))
 	for i, cand := range result.Candidates {
@@ -311,10 +447,10 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 		// 性能: 大部分候选 text 不含 '$', IndexByte 早跳避免每条都走 hook。
 		// 已是 PhraseLayer 命令候选 (PhraseTemplate != "") 时跳过, 它已展开过。
 		c.applyValueExpansion(&cand)
-		// HasShadow 统一用 inputBuffer 查询 Shadow (R2 后短语/普通词条共用);
-		// cand.ID 非空时走 id 匹配 (动态短语场景), 否则按 text。
-		if dictMgr != nil && !cand.IsGroup {
-			cand.HasShadow = dictMgr.HasShadowRule(c.inputBuffer, cand.Text, cand.ID)
+		// HasShadow 仅查 Pinned (右键"恢复默认"启用条件), 跳过 D 类型 (菜单全 disable)。
+		// 详见 docs/design/candidate-actions.md §4。
+		if dictMgr != nil && !cand.IsGroupMember {
+			cand.HasShadow = dictMgr.HasShadowPin(c.inputBuffer, cand.Text, cand.ID)
 		}
 		c.candidates[i] = cand
 	}
@@ -547,6 +683,23 @@ func (c *Coordinator) showModeIndicator() {
 	c.updateStatusIndicator()
 }
 
+// finalizeMixedCandidates 引擎 Phase 6 之后的 coordinator 收尾: 展开字面 $AA
+// marker → 混合候选 collapse 为 nav → 二次 ApplyShadowPins 让 nav 的 pin 生效。
+// updateCandidatesEx / expandCandidates 共用以避免分页时 nav 顺序漂移。
+// 详见 docs/design/candidate-actions.md §3.2。
+func (c *Coordinator) finalizeMixedCandidates(cands []candidate.Candidate, dictMgr *dict.DictManager) []candidate.Candidate {
+	cands = expandAACandidates(cands, c.inputBuffer)
+	cands = collapseGroupMembersIfMixed(cands, c.expandedGroupTemplate)
+	if dictMgr != nil {
+		if shadowProvider := dictMgr.GetShadowProvider(); shadowProvider != nil {
+			if rules := shadowProvider.GetShadowRules(c.inputBuffer); rules != nil {
+				cands = dict.ApplyShadowPins(cands, rules)
+			}
+		}
+	}
+	return cands
+}
+
 // expandCandidates 扩展候选列表（翻页到边界时调用）
 func (c *Coordinator) expandCandidates() {
 	if !c.hasMoreCandidates || c.candidateInput != c.inputBuffer {
@@ -578,11 +731,15 @@ func (c *Coordinator) expandCandidates() {
 		dictMgr = c.engineMgr.GetDictManager()
 	}
 
+	// 走与 updateCandidatesEx 相同的 finalize 序列, 保证分页扩展后 nav 位置一致。
+	result.Candidates = c.finalizeMixedCandidates(result.Candidates, dictMgr)
+
 	c.candidates = make([]ui.Candidate, len(result.Candidates))
 	for i, cand := range result.Candidates {
 		cand.Index = i + 1
-		if dictMgr != nil && !cand.IsGroup {
-			cand.HasShadow = dictMgr.HasShadowRule(c.inputBuffer, cand.Text, cand.ID)
+		// HasShadow 与 updateCandidatesEx 内查询规则一致 (仅 Pinned, 跳过 D 类型)。
+		if dictMgr != nil && !cand.IsGroupMember {
+			cand.HasShadow = dictMgr.HasShadowPin(c.inputBuffer, cand.Text, cand.ID)
 		}
 		c.candidates[i] = cand
 	}
@@ -647,8 +804,22 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 
 	// ── 组候选：替换 inputBuffer 为组的完整编码，触发二级展开 ──────────────
 	if cand.IsGroup && cand.GroupCode != "" {
-		c.inputBuffer = cand.GroupCode
-		c.inputCursorPos = len(c.inputBuffer)
+		// "collapsed group nav" 场景: nav.Code 等于当前 inputBuffer (混合候选
+		// collapse 出的导航条目, 见 collapseGroupMembersIfMixed)。此时 inputBuffer
+		// 已经是 group 的完整编码, 仅需标记 expandedGroupTemplate 让下一次 collapse
+		// 跳过该 group, 重新生成的候选会保持展开为字符成员。
+		//
+		// "前缀 nav" 场景: nav.Code 是某 group code, 但 inputBuffer 是其严格前缀
+		// (例如 inputBuffer="zz", nav.GroupCode="zzbd")。此时按旧路径替换 buffer
+		// 后再 update, 走二级展开。expandedGroupTemplate 也置位是为了避免 update 后
+		// 又因混合 collapse 把字符组收起来。
+		if cand.GroupCode == c.inputBuffer {
+			c.expandedGroupTemplate = cand.GroupTemplate
+		} else {
+			c.inputBuffer = cand.GroupCode
+			c.inputCursorPos = len(c.inputBuffer)
+			c.expandedGroupTemplate = cand.GroupTemplate
+		}
 		c.currentPage = 1
 		c.selectedIndex = 0
 		c.updateCandidates()
@@ -686,6 +857,7 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 		})
 		c.inputBuffer = remaining
 		c.inputCursorPos = len(remaining)
+		c.expandedGroupTemplate = "" // buffer 已变化, 清除二级展开标记
 		c.currentPage = 1
 		c.updateCandidates()
 		c.showUI()

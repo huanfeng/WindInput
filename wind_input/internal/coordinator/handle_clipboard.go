@@ -112,6 +112,7 @@ func (c *Coordinator) handleClipboardPasteCode() *bridge.KeyEventResult {
 	c.preeditDisplay = ""
 	c.syllableBoundaries = nil
 	c.confirmedSegments = nil
+	c.expandedGroupTemplate = "" // buffer 变化, 清除二级展开标记
 	c.updateCandidates()
 	c.showUI()
 

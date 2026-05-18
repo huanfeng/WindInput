@@ -598,6 +598,7 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 			c.candidates = nil
 			c.currentPage = 1
 			c.totalPages = 1
+			c.expandedGroupTemplate = "" // buffer 重置, 清除二级展开标记
 			c.logger.Debug("Cleared input buffer on focus gained")
 		}
 	}
@@ -690,6 +691,7 @@ func (c *Coordinator) HandleIMEActivated(processID uint32) *bridge.StatusUpdateD
 		c.candidates = nil
 		c.currentPage = 1
 		c.totalPages = 1
+		c.expandedGroupTemplate = "" // buffer 重置, 清除二级展开标记
 		c.logger.Debug("Cleared input buffer on IME activated")
 	}
 	c.mu.Unlock()

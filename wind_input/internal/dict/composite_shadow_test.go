@@ -84,7 +84,7 @@ func TestApplyShadowPins_SingleCharProtectedByWordOnly(t *testing.T) {
 	}
 	rules := &ShadowRules{
 		Deleted: []DeletedWord{
-			{Word: "你"},                      // 按 word 匹配, 单字应被忽略
+			{Word: "你"},                       // 按 word 匹配, 单字应被忽略
 			{Word: "中", CandID: "phrase:n:中"}, // 按 id 匹配, 单字可删
 		},
 	}
