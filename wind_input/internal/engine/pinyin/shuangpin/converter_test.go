@@ -293,6 +293,86 @@ func TestZiguangScheme(t *testing.T) {
 	}
 }
 
+// TestZeroInitialAo 验证各方案零声母 "ao" 的正确解析（Bug 复现）
+// 用户反馈：自然码打不出 ao（应输入 ak），小鹤打 ao/aa 有问题
+// 各方案零声母规则：
+//   - 小鹤：a+c=ao，a+a=a，a+i=ai，a+n=an，a+h=ang
+//   - 自然码/mspy/搜狗：a+k=ao，a+a=a，a+l=ai，a+j=an，a+h=ang
+func TestZeroInitialAo(t *testing.T) {
+	cases := []struct {
+		schemeID string
+		input    string
+		want     string
+		desc     string
+	}{
+		// 小鹤：ao 的韵母键是 c
+		{"xiaohe", "ac", "ao", "小鹤 a+c→ao"},
+		{"xiaohe", "aa", "a", "小鹤 a+a→a（零声母双击）"},
+		{"xiaohe", "ai", "ai", "小鹤 a+i→ai"},
+		{"xiaohe", "an", "an", "小鹤 a+n→an"},
+		{"xiaohe", "ah", "ang", "小鹤 a+h→ang"},
+		// 自然码：ao 的韵母键是 k
+		{"ziranma", "ak", "ao", "自然码 a+k→ao"},
+		{"ziranma", "aa", "a", "自然码 a+a→a"},
+		{"ziranma", "al", "ai", "自然码 a+l→ai"},
+		{"ziranma", "aj", "an", "自然码 a+j→an"},
+		{"ziranma", "ah", "ang", "自然码 a+h→ang"},
+		// mspy：ao 的韵母键是 k
+		{"mspy", "ak", "ao", "mspy a+k→ao"},
+		{"mspy", "aa", "a", "mspy a+a→a"},
+		{"mspy", "al", "ai", "mspy a+l→ai"},
+		{"mspy", "aj", "an", "mspy a+j→an"},
+		{"mspy", "ah", "ang", "mspy a+h→ang"},
+		// 搜狗：ao 的韵母键是 k
+		{"sogou", "ak", "ao", "搜狗 a+k→ao"},
+		{"sogou", "aa", "a", "搜狗 a+a→a"},
+		{"sogou", "al", "ai", "搜狗 a+l→ai"},
+		{"sogou", "aj", "an", "搜狗 a+j→an"},
+		{"sogou", "ah", "ang", "搜狗 a+h→ang"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.desc, func(t *testing.T) {
+			scheme := Get(tc.schemeID)
+			if scheme == nil {
+				t.Fatalf("方案 %q 未注册", tc.schemeID)
+			}
+			conv := NewConverter(scheme)
+			result := conv.Convert(tc.input)
+			if result.FullPinyin != tc.want {
+				t.Errorf("Convert(%q) = %q, want %q", tc.input, result.FullPinyin, tc.want)
+			}
+		})
+	}
+}
+
+// TestZeroInitialLiteralAo 用户实际输入 'a'+'o' 字面键（与方案规定的韵母键无关）
+// 应当 fallback 到字面匹配产出 "ao"，而不是 FinalMap['o']=["uo","o"] 路径产出 "uo"/"o"。
+// 复现：自然码/小鹤用户习惯性敲 ao 字面，不知道 ao 在方案里对应的韵母键。
+func TestZeroInitialLiteralAo(t *testing.T) {
+	cases := []struct {
+		schemeID string
+		input    string
+		want     string
+	}{
+		{"xiaohe", "ao", "ao"},
+		{"ziranma", "ao", "ao"},
+		{"mspy", "ao", "ao"},
+		{"sogou", "ao", "ao"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.schemeID+"_"+tc.input, func(t *testing.T) {
+			conv := NewConverter(Get(tc.schemeID))
+			r := conv.Convert(tc.input)
+			if r.FullPinyin != tc.want {
+				t.Errorf("Convert(%q) under %s = %q, want %q", tc.input, tc.schemeID, r.FullPinyin, tc.want)
+			}
+		})
+	}
+}
+
 func TestAllSchemesRegistered(t *testing.T) {
 	expectedIDs := []string{"xiaohe", "ziranma", "mspy", "sogou", "abc", "ziguang"}
 	for _, id := range expectedIDs {

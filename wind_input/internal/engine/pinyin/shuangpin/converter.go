@@ -204,36 +204,74 @@ func (c *Converter) convertPair(key1, key2 byte) []string {
 
 	// 1. 检查零声母
 	if zeroSyllables, ok := c.scheme.ZeroInitialKeys[key1]; ok {
-		// key1 是零声母的伪声母键
+		// key1 是零声母的伪声母键，key2 是韵母键
+		//
+		// 策略（按优先级）：
+		//   a) FinalMap 路径：查 FinalMap[key2]，将命中的合法韵母作为零声母音节加入
+		//      例：小鹤 a+c，FinalMap['c']=["ao"]，"ao" 合法 → 产出 "ao"
+		//      例：各方案 a+o，FinalMap['o']=["uo","o"]，"o" 合法 → 产出 "o"
+		//      FinalMap 路径反映方案定义的正式键位，优先级最高
+		//   b) 字面匹配：仅在 FinalMap 路径无任何命中时，检查 key1+key2 是否
+		//      直接构成 zeroSyllables 中的音节（如 a+i→"ai"、a+n→"an"）
+		//      这些音节在方案里直接用拼音字母输入，其韵母键不在 FinalMap 里
+		//   c) matchesFinal 路径：兜底，通过韵母部分反查
+
+		// a) FinalMap 路径：仅接受同时在 zeroSyllables 中允许的音节
+		// 例：小鹤 a+c → FinalMap['c']=["ao"]，"ao" 在 zeroSyllables['a'] 内 → 产出 "ao"
+		// 反例：a+o → FinalMap['o']=["uo","o"]，均不在 zeroSyllables['a']
+		// → 不在此路径产出，留给 path (b) 字面匹配处理 "ao"
 		finals := c.scheme.FinalMap[key2]
 		for _, f := range finals {
-			// 零声母+韵母
-			if c.validPinyins[f] {
+			if !c.validPinyins[f] {
+				continue
+			}
+			inZero := false
+			for _, zs := range zeroSyllables {
+				if zs == f {
+					inZero = true
+					break
+				}
+			}
+			if !inZero {
+				continue
+			}
+			found := false
+			for _, r := range results {
+				if r == f {
+					found = true
+					break
+				}
+			}
+			if !found {
 				results = append(results, f)
 			}
 		}
-		// 也检查零声母音节列表中是否有匹配的
-		for _, syllable := range zeroSyllables {
-			matched := false
-			// 直接表音匹配：key1+key2 本身拼成零声母音节
-			// 如 "ai": a+i，双拼规则就是直接用表音字母输入
-			if syllable == string(key1)+string(key2) {
-				matched = true
-			} else if c.matchesFinal(syllable, key2) {
-				// 通过 FinalMap 反查：如 "ai": a+d(ai的韵母键) 在小鹤方案下
-				matched = true
-			}
-			if matched {
-				found := false
-				for _, r := range results {
-					if r == syllable {
-						found = true
-						break
-					}
-				}
-				if !found {
+
+		// b) 字面匹配：仅在 FinalMap 路径无命中时生效
+		if len(results) == 0 {
+			literal := string(key1) + string(key2)
+			for _, syllable := range zeroSyllables {
+				if syllable == literal && c.validPinyins[syllable] {
 					results = append(results, syllable)
+					break
 				}
+			}
+		}
+
+		// c) matchesFinal 路径：兜底，处理方案特殊映射
+		for _, syllable := range zeroSyllables {
+			alreadyFound := false
+			for _, r := range results {
+				if r == syllable {
+					alreadyFound = true
+					break
+				}
+			}
+			if alreadyFound {
+				continue
+			}
+			if c.matchesFinal(syllable, key2) {
+				results = append(results, syllable)
 			}
 		}
 	}
