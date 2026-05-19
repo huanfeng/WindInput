@@ -318,6 +318,9 @@ type Manager struct {
 	// Used for Band window proxy rendering in high-Band processes (e.g. Start Menu).
 	hostRenderFunc func(img *image.RGBA, x, y int) error
 	hostHideFunc   func()
+
+	// maxCandidateChars 候选文本最大显示 rune 数（0 表示不限制）
+	maxCandidateChars int
 }
 
 // NewManager creates a new UI manager

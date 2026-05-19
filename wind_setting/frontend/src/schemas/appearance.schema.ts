@@ -88,6 +88,16 @@ export const candidateWindowSchema: PageSchema = [
     label: "模式彩色边框",
     hint: "临时拼音、快捷输入等特殊模式下，候选窗口显示彩色边框指示",
   },
+  {
+    type: "slider",
+    key: "ui.max_candidate_chars",
+    label: "候选最大显示字符数",
+    hint: "候选文本超过此 rune 数时截断并追加省略号，范围 8-64",
+    min: 8,
+    max: 64,
+    step: 1,
+    displayValue: (v) => `${v} 字`,
+  },
 ];
 
 // ── 状态提示卡片（show_mode/show_punct/show_full_width 复选框组手写）──

@@ -216,6 +216,14 @@ func (m *Manager) applyPagerOverride() {
 	}
 }
 
+// SetMaxCandidateChars 设置候选文本最大显示 rune 数（0 表示不限制）
+func (m *Manager) SetMaxCandidateChars(n int) {
+	m.mu.Lock()
+	m.maxCandidateChars = n
+	m.mu.Unlock()
+	m.logger.Info("Max candidate chars updated", "maxChars", n)
+}
+
 // OpenSettings opens the settings window
 func (m *Manager) OpenSettings() {
 	m.OpenSettingsWithPage("")

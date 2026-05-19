@@ -111,6 +111,7 @@ export interface TooltipConfig {
 export interface UIConfig {
   font_size: number;
   candidates_per_page: number;
+  max_candidate_chars: number;
   font_family: string;
   font_path: string;
   inline_preedit: boolean;
@@ -365,6 +366,7 @@ export function getDefaultConfig(): Config {
     ui: {
       font_size: 18,
       candidates_per_page: 7,
+      max_candidate_chars: 16,
       font_family: "",
       font_path: "",
       inline_preedit: true,

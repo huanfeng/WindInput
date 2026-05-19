@@ -75,6 +75,19 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 
 	m.logger.Debug("doShowCandidates start", "input", input, "count", len(candidates), "caretX", caretX, "caretY", caretY, "caretHeight", caretHeight)
 
+	// 候选文本 rune 数截断：超过 maxCandidateChars 时追加"…"
+	m.mu.Lock()
+	maxChars := m.maxCandidateChars
+	m.mu.Unlock()
+	if maxChars > 0 {
+		for i := range candidates {
+			runes := []rune(candidates[i].Text)
+			if len(runes) > maxChars {
+				candidates[i].Text = string(runes[:maxChars]) + "…"
+			}
+		}
+	}
+
 	// Cancel any pending mode indicator hide timer
 	// (mode indicator's goroutine checks modeIndicatorVersion before calling Hide)
 	m.mu.Lock()

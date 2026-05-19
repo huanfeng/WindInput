@@ -211,6 +211,10 @@ type UIConfig struct {
 	// 特殊模式内发光边框颜色（十六进制，如 "#3C78AFD2"），空=使用内置默认色
 	TempPinyinAccentColor string `yaml:"temp_pinyin_accent_color,omitempty" json:"temp_pinyin_accent_color,omitempty"`
 	QuickInputAccentColor string `yaml:"quick_input_accent_color,omitempty" json:"quick_input_accent_color,omitempty"`
+
+	// MaxCandidateChars 候选文本最大显示 rune 数，超出后截断并追加"…"。
+	// 合法范围 8-64，0 或越界时回退到默认值 16。
+	MaxCandidateChars int `yaml:"max_candidate_chars,omitempty" json:"max_candidate_chars,omitempty"`
 }
 
 // ToolbarConfig contains toolbar settings
@@ -359,6 +363,7 @@ func DefaultConfig() *Config {
 		UI: UIConfig{
 			FontSize:                18,
 			CandidatesPerPage:       7,
+			MaxCandidateChars:       16,
 			FontFamily:              "",
 			FontPath:                "",
 			InlinePreedit:           true,
@@ -520,6 +525,11 @@ func ApplyConfigFallbacks(cfg *Config) {
 	// Schema 兜底：如果 active 为空，取 available 的第一个
 	if cfg.Schema.Active == "" && len(cfg.Schema.Available) > 0 {
 		cfg.Schema.Active = cfg.Schema.Available[0]
+	}
+
+	// MaxCandidateChars 兜底：0 或越界时回退到 16，合法范围 8-64
+	if cfg.UI.MaxCandidateChars < 8 || cfg.UI.MaxCandidateChars > 64 {
+		cfg.UI.MaxCandidateChars = 16
 	}
 
 	// 迁移旧的 theme:"dark" 配置到新格式

@@ -635,6 +635,8 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		if cfg.UI.MenuFontSize > 0 {
 			c.uiManager.SetMenuFontSize(cfg.UI.MenuFontSize)
 		}
+		// 设置候选文本最大显示字符数
+		c.uiManager.SetMaxCandidateChars(cfg.UI.MaxCandidateChars)
 		// 初始化主题暗色模式并加载主题
 		c.initThemeMode(cfg)
 	}
