@@ -1107,6 +1107,22 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             // Fall through — sinks and LangBar are already set up above.
             // Do not send focus_gained IPC.
         }
+        // No editable context (QQ Ctrl+1 切会话场景等)：新 DocMgr 没有任何可输入的
+        // 文本控件 (_DocMgrHasEditableCtx -> 0)。发 focus_gained 会让 Go 把上一次
+        // composition 状态 replay 回来 (UpdateComposition with residual buffer)，
+        // 而 QQ 这边根本没地方接，结果是 IME 候选框残留、Go 内部 buffer 滞留。
+        // 显式发 focus_lost 让 Go 强制清空 (clearState + hideUI)。
+        else if (!_hasTextInputContext)
+        {
+            WIND_LOG_INFO_FMT(
+                L"OnSetFocus: new DocMgr has no editable context, sending focus_lost focusSession=%llu",
+                _focusSessionId);
+            if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
+            {
+                _pIPCClient->SendFocusLost();
+            }
+            _needsFocusRecovery = FALSE;
+        }
         // Send focus_gained to service and receive response synchronously.
         // This ensures state is properly synced before user starts typing.
         // Note: SendFocusGained does lazy connect internally, so this also
