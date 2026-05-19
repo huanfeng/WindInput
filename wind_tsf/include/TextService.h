@@ -15,11 +15,15 @@ struct ServiceResponse;
 
 class CTextService : public ITfTextInputProcessorEx,
                      public ITfThreadMgrEventSink,
+                     public ITfThreadFocusSink,
                      public ITfCompositionSink,
                      public ITfDisplayAttributeProvider,
                      public ITfTextLayoutSink,
                      public ITfTextEditSink,
-                     public ITfCompartmentEventSink
+                     public ITfCompartmentEventSink,
+                     // ITfCandidateListUIElementBehavior 已继承 ITfCandidateListUIElement (已继承 ITfUIElement)，
+                     // 只列一个最派生的即可。
+                     public ITfCandidateListUIElementBehavior
 {
     friend class CUpdateCompositionEditSession;
     friend class CEndCompositionEditSession;
@@ -48,6 +52,41 @@ public:
     STDMETHODIMP OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pDocMgrPrevFocus);
     STDMETHODIMP OnPushContext(ITfContext* pContext);
     STDMETHODIMP OnPopContext(ITfContext* pContext);
+
+    // ITfThreadFocusSink — 线程级焦点通知（应用进程 foreground 变化）。
+    // 与 ITfThreadMgrEventSink::OnSetFocus（文档级别）不同。
+    // 实现这个接口让我们在 TSF 注册表上看起来像"现代 IME"，让 Chromium / QQNT 等
+    // 宿主走完整 IME-first 调度路径而非 fallback。
+    STDMETHODIMP OnSetThreadFocus();
+    STDMETHODIMP OnKillThreadFocus();
+
+    // ITfUIElement — 候选 UI 元素基础接口。
+    // 与 ITfCandidateListUIElement 一起使 IME 在 TSF 中表现为"现代 IME"，让
+    // Chromium 类宿主走完整 IME-first 调度。当前用 stub 数据验证 Begin/EndUIElement
+    // 注册本身是否影响调度。
+    STDMETHODIMP GetDescription(BSTR* pbstrDescription);
+    STDMETHODIMP GetGUID(GUID* pguid);
+    STDMETHODIMP Show(BOOL bShow);
+    STDMETHODIMP IsShown(BOOL* pbShow);
+
+    // ITfCandidateListUIElement — 候选列表元数据（stub）。
+    STDMETHODIMP GetUpdatedFlags(DWORD* pdwFlags);
+    STDMETHODIMP GetDocumentMgr(ITfDocumentMgr** ppdim);
+    STDMETHODIMP GetCount(UINT* puCount);
+    STDMETHODIMP GetSelection(UINT* puIndex);
+    STDMETHODIMP GetString(UINT uIndex, BSTR* pstr);
+    STDMETHODIMP GetPageIndex(UINT* pIndex, UINT uSize, UINT* puPageCnt);
+    STDMETHODIMP SetPageIndex(UINT* pIndex, UINT uPageCnt);
+    STDMETHODIMP GetCurrentPage(UINT* puPage);
+
+    // ITfCandidateListUIElementBehavior — 接收 TSF 对候选的操作（stub no-op）。
+    STDMETHODIMP SetSelection(UINT nIndex);
+    STDMETHODIMP Finalize(void);
+    STDMETHODIMP Abort(void);
+
+    // 候选可见状态变化时调用，控制 BeginUIElement / EndUIElement / UpdateUIElement.
+    // hasCandidates: 新的候选可见状态。线程：与 KeyEventSink 状态变更同一线程。
+    void NotifyCandidatesVisibilityChanged(BOOL hasCandidates);
 
     // ITfCompositionSink
     STDMETHODIMP OnCompositionTerminated(TfEditCookie ecWrite, ITfComposition* pComposition);
@@ -168,6 +207,10 @@ private:
     ITfThreadMgr* _pThreadMgr;
     TfClientId _tfClientId;
     DWORD _dwThreadMgrEventSinkCookie;
+    DWORD _dwThreadFocusSinkCookie;
+    DWORD _uiElementId;     // ITfUIElementMgr::BeginUIElement 返回的 ID；TF_INVALID_UIELEMENTID 表示未注册
+    BOOL  _uiElementShown;  // 当前 IsShown 返回值
+    ITfUIElementMgr* _pUIElementMgr;  // 缓存的 UI element 管理器引用，避免每次候选变化都 QI
     DWORD _activateFlags;  // ActivateEx flags (TF_TMAE_SECUREMODE, etc.)
 
     // Components

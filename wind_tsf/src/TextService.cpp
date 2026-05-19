@@ -691,6 +691,10 @@ CTextService::CTextService()
     , _pThreadMgr(nullptr)
     , _tfClientId(TF_CLIENTID_NULL)
     , _dwThreadMgrEventSinkCookie(TF_INVALID_COOKIE)
+    , _dwThreadFocusSinkCookie(TF_INVALID_COOKIE)
+    , _uiElementId((DWORD)-1)
+    , _uiElementShown(FALSE)
+    , _pUIElementMgr(nullptr)
     , _activateFlags(0)
     , _pKeyEventSink(nullptr)
     , _pIPCClient(nullptr)
@@ -773,6 +777,22 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
     else if (IsEqualIID(riid, IID_ITfCompartmentEventSink))
     {
         *ppvObj = (ITfCompartmentEventSink*)this;
+    }
+    else if (IsEqualIID(riid, IID_ITfThreadFocusSink))
+    {
+        *ppvObj = (ITfThreadFocusSink*)this;
+    }
+    else if (IsEqualIID(riid, IID_ITfUIElement))
+    {
+        *ppvObj = (ITfUIElement*)(ITfCandidateListUIElementBehavior*)this;
+    }
+    else if (IsEqualIID(riid, IID_ITfCandidateListUIElement))
+    {
+        *ppvObj = (ITfCandidateListUIElement*)(ITfCandidateListUIElementBehavior*)this;
+    }
+    else if (IsEqualIID(riid, IID_ITfCandidateListUIElementBehavior))
+    {
+        *ppvObj = (ITfCandidateListUIElementBehavior*)this;
     }
 
     if (*ppvObj)
@@ -927,6 +947,9 @@ STDAPI CTextService::Deactivate()
     // End any active composition before deactivating
     EndComposition();
 
+    // 清理候选 UI 元素（必须在 ThreadMgr 释放之前）
+    NotifyCandidatesVisibilityChanged(FALSE);
+
     // Unregister layout sink and edit sink
     _UnadviseTextLayoutSink();
     _UnadviseTextEditSink();
@@ -993,7 +1016,34 @@ BOOL CTextService::_InitThreadMgrEventSink()
         hr = pSource->AdviseSink(IID_ITfThreadMgrEventSink,
                                  (ITfThreadMgrEventSink*)this,
                                  &_dwThreadMgrEventSinkCookie);
+
+        // 并行 advise ITfThreadFocusSink — 线程级（进程 foreground）焦点通知。
+        // 实现此接口让我们在 TSF 注册上看起来像"现代 IME"，让 Chromium / QQNT
+        // 等宿主走完整 IME-first 调度路径而非 fallback，规避 Ctrl+数字 被双处理。
+        HRESULT hrTf = pSource->AdviseSink(IID_ITfThreadFocusSink,
+                                          (ITfThreadFocusSink*)this,
+                                          &_dwThreadFocusSinkCookie);
+        if (FAILED(hrTf))
+        {
+            WIND_LOG_WARN_FMT(L"AdviseSink(ITfThreadFocusSink) failed hr=0x%08X\n", (uint32_t)hrTf);
+            _dwThreadFocusSinkCookie = TF_INVALID_COOKIE;
+        }
+        else
+        {
+            WIND_LOG_INFO(L"ITfThreadFocusSink advised\n");
+        }
+
         pSource->Release();
+    }
+
+    // 缓存 ITfUIElementMgr，避免每次候选变化都 QueryInterface（NotifyCandidatesVisibilityChanged 使用）。
+    if (_pUIElementMgr == nullptr)
+    {
+        HRESULT hrUI = _pThreadMgr->QueryInterface(IID_ITfUIElementMgr, (void**)&_pUIElementMgr);
+        if (FAILED(hrUI))
+        {
+            _pUIElementMgr = nullptr;
+        }
     }
 
     return SUCCEEDED(hr);
@@ -1001,16 +1051,199 @@ BOOL CTextService::_InitThreadMgrEventSink()
 
 void CTextService::_UninitThreadMgrEventSink()
 {
-    if (_dwThreadMgrEventSinkCookie != TF_INVALID_COOKIE)
+    if (_dwThreadMgrEventSinkCookie != TF_INVALID_COOKIE || _dwThreadFocusSinkCookie != TF_INVALID_COOKIE)
     {
         ITfSource* pSource = nullptr;
         if (SUCCEEDED(_pThreadMgr->QueryInterface(IID_ITfSource, (void**)&pSource)))
         {
-            pSource->UnadviseSink(_dwThreadMgrEventSinkCookie);
+            if (_dwThreadMgrEventSinkCookie != TF_INVALID_COOKIE)
+            {
+                pSource->UnadviseSink(_dwThreadMgrEventSinkCookie);
+            }
+            if (_dwThreadFocusSinkCookie != TF_INVALID_COOKIE)
+            {
+                pSource->UnadviseSink(_dwThreadFocusSinkCookie);
+            }
             pSource->Release();
         }
-
         _dwThreadMgrEventSinkCookie = TF_INVALID_COOKIE;
+        _dwThreadFocusSinkCookie = TF_INVALID_COOKIE;
+    }
+
+    if (_pUIElementMgr != nullptr)
+    {
+        _pUIElementMgr->Release();
+        _pUIElementMgr = nullptr;
+    }
+}
+
+// ITfThreadFocusSink — 线程进入 foreground（应用窗口被激活）。
+STDAPI CTextService::OnSetThreadFocus()
+{
+    WIND_LOG_DEBUG(L"OnSetThreadFocus called\n");
+    return S_OK;
+}
+
+// ITfThreadFocusSink — 线程退出 foreground。
+STDAPI CTextService::OnKillThreadFocus()
+{
+    WIND_LOG_DEBUG(L"OnKillThreadFocus called\n");
+    return S_OK;
+}
+
+// ============================================================================
+// ITfUIElement / ITfCandidateListUIElement / ITfCandidateListUIElementBehavior
+// 当前阶段：用 stub 数据验证 ITfUIElementMgr::BeginUIElement 注册本身能否让
+// Chromium / QQNT 走完整 IME-first 调度路径，规避 Ctrl+数字 被宿主同时处理。
+// 候选数据由 Go-side UI 渲染，C++ 这里返回占位数据即可。
+// ============================================================================
+
+static const GUID kWindCandidateUIElementGuid =
+    { 0xb3e54a91, 0x7c20, 0x4b6a, { 0xa1, 0x5e, 0x82, 0x09, 0x77, 0x55, 0x44, 0x33 } };
+
+STDAPI CTextService::GetDescription(BSTR* pbstrDescription)
+{
+    if (pbstrDescription == nullptr) return E_INVALIDARG;
+    *pbstrDescription = SysAllocString(L"WindInput Candidate List");
+    return *pbstrDescription ? S_OK : E_OUTOFMEMORY;
+}
+
+STDAPI CTextService::GetGUID(GUID* pguid)
+{
+    if (pguid == nullptr) return E_INVALIDARG;
+    *pguid = kWindCandidateUIElementGuid;
+    return S_OK;
+}
+
+STDAPI CTextService::Show(BOOL bShow)
+{
+    WIND_LOG_DEBUG_FMT(L"ITfUIElement::Show(%d)\n", (int)bShow);
+    _uiElementShown = bShow;
+    return S_OK;
+}
+
+STDAPI CTextService::IsShown(BOOL* pbShow)
+{
+    if (pbShow == nullptr) return E_INVALIDARG;
+    *pbShow = _uiElementShown;
+    return S_OK;
+}
+
+STDAPI CTextService::GetUpdatedFlags(DWORD* pdwFlags)
+{
+    if (pdwFlags == nullptr) return E_INVALIDARG;
+    *pdwFlags = TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION
+              | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE;
+    return S_OK;
+}
+
+STDAPI CTextService::GetDocumentMgr(ITfDocumentMgr** ppdim)
+{
+    if (ppdim == nullptr) return E_INVALIDARG;
+    *ppdim = nullptr;
+    if (_pThreadMgr)
+    {
+        _pThreadMgr->GetFocus(ppdim); // may set null when no focus; that's OK
+    }
+    return S_OK;
+}
+
+STDAPI CTextService::GetCount(UINT* puCount)
+{
+    if (puCount == nullptr) return E_INVALIDARG;
+    *puCount = 1; // stub: 至少 1 个候选才能让 TSF 认为候选 UI "有意义"
+    return S_OK;
+}
+
+STDAPI CTextService::GetSelection(UINT* puIndex)
+{
+    if (puIndex == nullptr) return E_INVALIDARG;
+    *puIndex = 0;
+    return S_OK;
+}
+
+STDAPI CTextService::GetString(UINT uIndex, BSTR* pstr)
+{
+    if (pstr == nullptr) return E_INVALIDARG;
+    *pstr = SysAllocString(L"…"); // 占位
+    return *pstr ? S_OK : E_OUTOFMEMORY;
+}
+
+STDAPI CTextService::GetPageIndex(UINT* pIndex, UINT uSize, UINT* puPageCnt)
+{
+    if (puPageCnt == nullptr) return E_INVALIDARG;
+    *puPageCnt = 1;
+    if (pIndex && uSize >= 1)
+    {
+        pIndex[0] = 0;
+    }
+    return S_OK;
+}
+
+STDAPI CTextService::SetPageIndex(UINT* pIndex, UINT uPageCnt)
+{
+    // no-op (read-only stub)
+    return S_OK;
+}
+
+STDAPI CTextService::GetCurrentPage(UINT* puPage)
+{
+    if (puPage == nullptr) return E_INVALIDARG;
+    *puPage = 0;
+    return S_OK;
+}
+
+STDAPI CTextService::SetSelection(UINT nIndex)
+{
+    WIND_LOG_DEBUG_FMT(L"ITfCandidateListUIElementBehavior::SetSelection(%u)\n", nIndex);
+    return S_OK; // no-op: TSF 不参与候选选择，Go 端处理
+}
+
+STDAPI CTextService::Finalize(void)
+{
+    WIND_LOG_DEBUG(L"ITfCandidateListUIElementBehavior::Finalize\n");
+    return S_OK;
+}
+
+STDAPI CTextService::Abort(void)
+{
+    WIND_LOG_DEBUG(L"ITfCandidateListUIElementBehavior::Abort\n");
+    return S_OK;
+}
+
+void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
+{
+    if (_pUIElementMgr == nullptr) return;
+
+    if (hasCandidates && _uiElementId == (DWORD)-1)
+    {
+        BOOL bShow = TRUE;
+        // 通过 Behavior 路径解决菱形继承
+        HRESULT hr = _pUIElementMgr->BeginUIElement(
+            static_cast<ITfUIElement*>(static_cast<ITfCandidateListUIElementBehavior*>(this)),
+            &bShow, &_uiElementId);
+        if (SUCCEEDED(hr))
+        {
+            _uiElementShown = bShow;
+            WIND_LOG_DEBUG_FMT(L"BeginUIElement ok id=%u show=%d\n", _uiElementId, (int)bShow);
+        }
+        else
+        {
+            WIND_LOG_WARN_FMT(L"BeginUIElement failed hr=0x%08X\n", (uint32_t)hr);
+            _uiElementId = (DWORD)-1;
+        }
+    }
+    else if (!hasCandidates && _uiElementId != (DWORD)-1)
+    {
+        HRESULT hr = _pUIElementMgr->EndUIElement(_uiElementId);
+        WIND_LOG_DEBUG_FMT(L"EndUIElement id=%u hr=0x%08X\n", _uiElementId, (uint32_t)hr);
+        _uiElementId = (DWORD)-1;
+        _uiElementShown = FALSE;
+    }
+    else if (hasCandidates && _uiElementId != (DWORD)-1)
+    {
+        // 已注册，仅触发 update
+        _pUIElementMgr->UpdateUIElement(_uiElementId);
     }
 }
 

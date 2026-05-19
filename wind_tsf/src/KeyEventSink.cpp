@@ -1556,6 +1556,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
                 _pTextService->InsertTextAndStartComposition(response.text, response.newComposition);
                 _isComposing = TRUE;
                 _hasCandidates = TRUE;
+                _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
 
                 // Re-send caret position after composition change
                 _pTextService->SendCaretPositionUpdate();
@@ -1568,6 +1569,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
 
                 _isComposing = FALSE;
                 _hasCandidates = FALSE;
+                _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
 
                 int commitMs = (int)((ctMid1.QuadPart - ctStart.QuadPart) * 1000 / freq.QuadPart);
                 WIND_LOG_TRACE_FMT(L"CommitText: atomic commit=%dms\n", commitMs);
@@ -1593,6 +1595,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
             WIND_LOG_TRACE(L"Received UpdateComposition from service\n");
             _isComposing = TRUE;
             _hasCandidates = TRUE;
+            _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
             _pTextService->UpdateComposition(response.composition, response.caretPos);
 
             // Re-send caret position after composition update so Go can
@@ -1609,6 +1612,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         WIND_LOG_DEBUG(L"Received ClearComposition from service\n");
         _isComposing = FALSE;
         _hasCandidates = FALSE;
+        _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
         _pTextService->EndComposition();
         return TRUE;
 
@@ -1616,6 +1620,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         WIND_LOG_DEBUG(L"Received ModeChanged from service\n");
         _isComposing = FALSE;
         _hasCandidates = FALSE;
+        _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
         _pTextService->EndComposition();
         _pTextService->SetInputMode(response.chineseMode);
         return TRUE;
