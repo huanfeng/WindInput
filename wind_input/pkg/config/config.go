@@ -284,6 +284,17 @@ type PunctCustomConfig struct {
 // TempPinyinConfig 临时拼音模式配置
 type TempPinyinConfig struct {
 	TriggerKeys []string `yaml:"trigger_keys" json:"trigger_keys"` // 触发键: "backtick", "semicolon", "z"
+	// ZIncludeOnCommit 控制 z 触发临时拼音后，按 Enter 上屏编码时是否包含触发键 z 本身。
+	// 默认 true（保留 z），仅对 z 触发键生效，不影响符号触发键。暂不暴露 UI，作为内部预留开关。
+	ZIncludeOnCommit *bool `yaml:"z_include_on_commit,omitempty" json:"z_include_on_commit,omitempty"`
+}
+
+// ZIncludeOnCommitEnabled 返回 z 触发临时拼音按 Enter 上屏时是否包含 z（默认 true）
+func (t TempPinyinConfig) ZIncludeOnCommitEnabled() bool {
+	if t.ZIncludeOnCommit == nil {
+		return true
+	}
+	return *t.ZIncludeOnCommit
 }
 
 // AutoPairConfig 自动标点配对配置

@@ -92,7 +92,13 @@ func (c *Coordinator) handlePinyinModeKey(ops *pinyinModeOps, key string, data *
 			if c.inputHistory != nil && ops.committed != nil && *ops.committed != "" {
 				c.inputHistory.Record(*ops.committed, "", "", 0)
 			}
-			return ops.exitMode(true, *ops.buffer)
+			commitText := *ops.buffer
+			// z 触发的临时拼音：buffer 不含触发键 z，按配置决定 Enter 上屏时是否带回 z 前缀
+			if c.tempPinyinMode && c.tempPinyinTriggerKey == "z" &&
+				c.config != nil && c.config.Input.TempPinyin.ZIncludeOnCommitEnabled() {
+				commitText = "z" + commitText
+			}
+			return ops.exitMode(true, commitText)
 		}
 		return ops.exitMode(true, ops.prefix())
 
