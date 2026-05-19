@@ -130,6 +130,10 @@ func updatePinyinConfig(pinyinEngine *pinyin.Engine, pinyinCfg *config.PinyinCon
 		oldShowCodeHint := cfg.ShowCodeHint
 		cfg.ShowCodeHint = showCodeHint
 		cfg.SkipAbbrev = pinyinCfg.SkipAbbrev
+		cfg.UseSmartCompose = pinyinCfg.UseSmartCompose
+		if pinyinCfg.CandidateOrder != "" {
+			cfg.CandidateOrder = pinyinCfg.CandidateOrder
+		}
 
 		if pinyinCfg.Fuzzy.Enabled {
 			pinyinEngine.SetFuzzyConfig(&pinyin.FuzzyConfig{

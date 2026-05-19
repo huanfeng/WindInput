@@ -222,4 +222,14 @@ func (h *ReloadHandler) applyPinyinSpec(spec *schema.PinyinSpec, skipAbbrev bool
 		}
 	}
 	h.engineMgr.UpdatePinyinOptions(pinyinCfg)
+
+	// 双拼方案布局热更新：factory 只在引擎构造时设置一次双拼转换器，
+	// 这里必须显式驱动一次热更新，否则在 UI 切换双拼方案后必须重启才能生效。
+	// 传空串表示"非双拼"，UpdateShuangpinLayout 内部会调用 SetShuangpinConverter(nil)
+	// 恢复全拼模式，覆盖"双拼 → 全拼"反向切换。
+	layout := ""
+	if spec.Scheme == schema.PinyinSchemeShuangpin && spec.Shuangpin != nil {
+		layout = spec.Shuangpin.Layout
+	}
+	h.engineMgr.UpdateShuangpinLayout(layout)
 }
