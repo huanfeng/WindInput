@@ -164,7 +164,7 @@ func TestStoreTempLayer_MetaIsTempDict(t *testing.T) {
 	temp := NewStoreTempLayer(s, testSchema)
 	temp.SetLimits(100, 3)
 	// 直接 LearnWord 注入一条临时词
-	temp.LearnWord("xyz", "临时词", 0)
+	temp.LearnWord("xyz", "临时词", 0, 0)
 	results := temp.Search("xyz", 0)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
@@ -204,17 +204,17 @@ func TestStoreTempLayer_LearnAndPromote(t *testing.T) {
 	temp.SetLimits(100, 3) // 选 3 次即可晋升
 
 	// 学习同一词条 2 次，尚未达到晋升条件
-	shouldPromote := temp.LearnWord("ab", "词", 10)
+	shouldPromote := temp.LearnWord("ab", "词", 10, 10)
 	if shouldPromote {
 		t.Error("LearnWord 1st: should not promote yet")
 	}
-	shouldPromote = temp.LearnWord("ab", "词", 10)
+	shouldPromote = temp.LearnWord("ab", "词", 10, 10)
 	if shouldPromote {
 		t.Error("LearnWord 2nd: should not promote yet")
 	}
 
 	// 第 3 次应返回 true（达到晋升条件）
-	shouldPromote = temp.LearnWord("ab", "词", 10)
+	shouldPromote = temp.LearnWord("ab", "词", 10, 10)
 	if !shouldPromote {
 		t.Error("LearnWord 3rd: should indicate promote condition met")
 	}

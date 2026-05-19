@@ -176,7 +176,7 @@ type AutoLearnSpec struct {
 	Enabled        bool `yaml:"enabled"`                   // 是否启用自动造词
 	CountThreshold int  `yaml:"count_threshold,omitempty"` // 误选保护阈值（默认 2）
 	MinWordLength  int  `yaml:"min_word_length,omitempty"` // 最小造词字数（默认 2）
-	WeightDelta    int  `yaml:"weight_delta,omitempty"`    // 每次选词权重增量（默认 20）
+	WeightDelta    int  `yaml:"weight_delta,omitempty"`    // 每次选词权重增量（默认 40）
 	AddWeight      int  `yaml:"add_weight,omitempty"`      // 新词初始权重（默认 800）
 }
 
@@ -186,7 +186,7 @@ type AutoPhraseSpec struct {
 	MinPhraseLen   int  `yaml:"min_phrase_len,omitempty"`  // 最小造词字数（默认 2）
 	MaxPhraseLen   int  `yaml:"max_phrase_len,omitempty"`  // 最大造词字数（默认 5）
 	AddWeight      int  `yaml:"add_weight,omitempty"`      // 新词初始权重（默认 800）
-	WeightDelta    int  `yaml:"weight_delta,omitempty"`    // 每次命中权重增量（默认 20）
+	WeightDelta    int  `yaml:"weight_delta,omitempty"`    // 每次命中权重增量（默认 40）
 	CountThreshold int  `yaml:"count_threshold,omitempty"` // 误选保护阈值（默认 2）
 }
 
@@ -223,7 +223,7 @@ func (ls *LearningSpec) GetAutoLearnConfig() AutoLearnSpec {
 		Enabled:        ls.IsAutoLearnEnabled(),
 		CountThreshold: 2,
 		MinWordLength:  2,
-		WeightDelta:    20,
+		WeightDelta:    40,
 		AddWeight:      800,
 	}
 	if ls.AutoLearn != nil {
@@ -250,7 +250,7 @@ func (ls *LearningSpec) GetAutoPhraseConfig() AutoPhraseSpec {
 		MinPhraseLen:   2,
 		MaxPhraseLen:   5,
 		AddWeight:      800,
-		WeightDelta:    20,
+		WeightDelta:    40,
 		CountThreshold: 2,
 	}
 	if ls.AutoPhrase != nil {

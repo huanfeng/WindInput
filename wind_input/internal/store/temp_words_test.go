@@ -10,12 +10,12 @@ func TestTempWords_LearnAndPromote(t *testing.T) {
 	code := "abc"
 	text := "测试"
 
-	// Learn once.
-	if err := s.LearnTempWord(schema, code, text, 5); err != nil {
+	// Learn once: 新词以 addWeight=5 创建。
+	if err := s.LearnTempWord(schema, code, text, 5, 3); err != nil {
 		t.Fatalf("LearnTempWord #1: %v", err)
 	}
-	// Learn again — weight should accumulate, count should be 2.
-	if err := s.LearnTempWord(schema, code, text, 3); err != nil {
+	// Learn again — 已存在词条按 weightDelta=3 累加，count 应为 2。
+	if err := s.LearnTempWord(schema, code, text, 5, 3); err != nil {
 		t.Fatalf("LearnTempWord #2: %v", err)
 	}
 
@@ -76,7 +76,7 @@ func TestTempWords_Evict(t *testing.T) {
 		{"e", "w5", 20},
 	}
 	for _, w := range words {
-		if err := s.LearnTempWord(schema, w.code, w.text, w.weight); err != nil {
+		if err := s.LearnTempWord(schema, w.code, w.text, w.weight, 0); err != nil {
 			t.Fatalf("LearnTempWord(%q): %v", w.text, err)
 		}
 	}
@@ -139,7 +139,7 @@ func TestTempWords_ClearAll(t *testing.T) {
 	schema := "wubi86"
 
 	for i, pair := range [][2]string{{"a", "w1"}, {"b", "w2"}, {"c", "w3"}} {
-		if err := s.LearnTempWord(schema, pair[0], pair[1], (i+1)*10); err != nil {
+		if err := s.LearnTempWord(schema, pair[0], pair[1], (i+1)*10, 0); err != nil {
 			t.Fatalf("LearnTempWord: %v", err)
 		}
 	}

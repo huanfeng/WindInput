@@ -41,6 +41,7 @@ func newMinimalPinyinEngine() *pinyin.Engine {
 type tempPromoteLearning struct {
 	tempLayer   *dict.StoreTempLayer
 	userLayer   *dict.StoreUserLayer
+	addWeight   int
 	weightDelta int
 }
 
@@ -48,7 +49,7 @@ func (l *tempPromoteLearning) OnWordCommitted(code, text string) {
 	if l.tempLayer == nil {
 		return
 	}
-	promoted := l.tempLayer.LearnWord(code, text, l.weightDelta)
+	promoted := l.tempLayer.LearnWord(code, text, l.addWeight, l.weightDelta)
 	if promoted {
 		l.tempLayer.PromoteWord(code, text)
 	}

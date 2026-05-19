@@ -15,10 +15,10 @@ var bucketTempWords = []byte("TempWords")
 const tempWordMaxWeight = 10000
 
 // LearnTempWord adds or updates a temporary word entry for the given schema.
+// If the entry is new it is created with weight=addWeight and count=1.
 // If the entry exists its weight is incremented by weightDelta (capped at
 // tempWordMaxWeight) and its count is incremented by 1.
-// If the entry is new it is created with weight=weightDelta and count=1.
-func (s *Store) LearnTempWord(schemaID, code, text string, weightDelta int) error {
+func (s *Store) LearnTempWord(schemaID, code, text string, addWeight, weightDelta int) error {
 	code = strings.ToLower(code)
 	text = strings.ToLower(text)
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -38,9 +38,13 @@ func (s *Store) LearnTempWord(schemaID, code, text string, weightDelta int) erro
 			}
 			rec.Count++
 		} else {
+			w := addWeight
+			if w > tempWordMaxWeight {
+				w = tempWordMaxWeight
+			}
 			rec = UserWordRecord{
 				Text:      text,
-				Weight:    weightDelta,
+				Weight:    w,
 				Count:     1,
 				CreatedAt: time.Now().UnixMilli(),
 			}

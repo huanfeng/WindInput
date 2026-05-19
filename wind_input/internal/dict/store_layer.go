@@ -10,8 +10,10 @@ import (
 	"github.com/huanfeng/wind_input/internal/store"
 )
 
-// MaxDynamicWeight 用户词库动态权重硬上限
-const MaxDynamicWeight = 2000
+// MaxDynamicWeight 用户词库动态权重硬上限。
+// 对齐 store.tempWordMaxWeight 与归一化设计的 0~10000 区间，
+// 让自动学习词最终能爬到高频系统词的量级。
+const MaxDynamicWeight = 10000
 
 // ─────────────────────────────────────────
 // StoreUserLayer — implements MutableLayer
@@ -222,9 +224,10 @@ func (l *StoreTempLayer) Remove(code string, text string) error {
 }
 
 // LearnWord 学习新词。返回 true 表示词条已达到晋升条件。
-func (l *StoreTempLayer) LearnWord(code, text string, weightDelta int) bool {
+// addWeight 用于新建词条的初始权重，weightDelta 用于已有词条的权重增量。
+func (l *StoreTempLayer) LearnWord(code, text string, addWeight, weightDelta int) bool {
 	code = strings.ToLower(code)
-	if err := l.store.LearnTempWord(l.schemaID, code, text, weightDelta); err != nil {
+	if err := l.store.LearnTempWord(l.schemaID, code, text, addWeight, weightDelta); err != nil {
 		slog.Debug("StoreTempLayer.LearnWord error", "error", err)
 		return false
 	}
@@ -268,7 +271,10 @@ func (l *StoreTempLayer) IncrementIfExists(code, text string, weightDelta int) (
 	if !exists {
 		return false, false
 	}
-	promoted := l.LearnWord(code, text, weightDelta)
+	// IncrementIfExists 仅对已存在词条加计数，addWeight 不会被使用；
+	// 但为防御 TOCTOU 边界（词条恰好在 GetTempWords 后被 evict），
+	// 仍传 weightDelta 作为兜底种子，避免出现 weight=0 的孤儿条目。
+	promoted := l.LearnWord(code, text, weightDelta, weightDelta)
 	return true, promoted
 }
 

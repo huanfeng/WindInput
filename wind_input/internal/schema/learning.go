@@ -78,7 +78,7 @@ func (a *AutoLearning) OnWordCommitted(code, text string) {
 
 	// 优先写入临时词库
 	if a.tempLayer != nil {
-		promoted := a.tempLayer.LearnWord(code, text, a.config.WeightDelta)
+		promoted := a.tempLayer.LearnWord(code, text, a.config.AddWeight, a.config.WeightDelta)
 		if promoted {
 			a.tempLayer.PromoteWord(code, text)
 		}
@@ -251,7 +251,7 @@ func (p *CodeTableAutoPhrase) flush() {
 // learnWord 将词写入临时词库，达到晋升阈值时自动晋升到用户词库
 func (p *CodeTableAutoPhrase) learnWord(code, word string) {
 	if p.tempLayer != nil {
-		promoted := p.tempLayer.LearnWord(code, word, p.config.WeightDelta)
+		promoted := p.tempLayer.LearnWord(code, word, p.config.AddWeight, p.config.WeightDelta)
 		if promoted {
 			p.logger.Debug("AutoPhrase word promoted to user layer", "code", code)
 			p.tempLayer.PromoteWord(code, word)

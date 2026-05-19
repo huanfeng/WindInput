@@ -115,8 +115,8 @@ func TestLearningSpec_GetAutoLearnConfig_Defaults(t *testing.T) {
 	if config.MinWordLength != 2 {
 		t.Errorf("默认 MinWordLength 应为 2, 实际=%d", config.MinWordLength)
 	}
-	if config.WeightDelta != 20 {
-		t.Errorf("默认 WeightDelta 应为 20, 实际=%d", config.WeightDelta)
+	if config.WeightDelta != 40 {
+		t.Errorf("默认 WeightDelta 应为 40, 实际=%d", config.WeightDelta)
 	}
 	if config.AddWeight != 800 {
 		t.Errorf("默认 AddWeight 应为 800, 实际=%d", config.AddWeight)
