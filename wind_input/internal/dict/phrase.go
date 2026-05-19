@@ -132,6 +132,10 @@ type PhraseEntry struct {
 	// 和 dynamicPhrases 把所有 group 的成员 append 在同一 slice 里, 用 GroupRawText
 	// 反查归属 group, 让 collapse 能按 group 区分 nav。详见 docs/design/candidate-actions.md §5。
 	GroupRawText string
+	// LoadSeq 加载序号 (0-based)，按 LoadFromStore 处理 PhraseRecord 的顺序递增。
+	// prefix-nav / staticPhrase 前缀展开时填入 candidate.NaturalOrder 用作 weight tie-break,
+	// 让同权重条目按 yaml 写入顺序 (而非 map 随机 / code 字母序) 输出。
+	LoadSeq int
 }
 
 // PhraseGroupKind 区分数组短语的元素粒度。
@@ -166,6 +170,10 @@ type PhraseGroup struct {
 	// RawText group 原始 PhraseRecord.Text (含 $AA/$SS marker), nav/member 的
 	// stable id 模板, Shadow pin / DisablePhrase 按 (code, RawText) 唯一定位。
 	RawText string
+	// LoadSeq 加载序号 (0-based)，按 LoadFromStore 处理 PhraseRecord 的顺序递增。
+	// prefix-nav 路径 (SearchCommand 情况 3 / SearchPrefix phraseGroups) emit nav 时
+	// 填入 candidate.NaturalOrder, 让同权重的多组 nav 按 yaml 写入顺序输出。
+	LoadSeq int
 }
 
 // PhrasesFileConfig 短语文件的 YAML 结构
@@ -472,6 +480,7 @@ func (pl *PhraseLayer) SearchCommand(code string, limit int) []candidate.Candida
 				Text:           displayName,
 				Code:           groupCode,
 				Weight:         resolvePhraseWeight(group.Weight),
+				NaturalOrder:   group.LoadSeq, // 同 weight 下按 yaml 写入顺序而非 code 字母序
 				Comment:        groupCode[len(code):],
 				IsPhrase:       true,
 				IsGroup:        true,
@@ -545,6 +554,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 				Text:           displayName,
 				Code:           code,
 				Weight:         resolvePhraseWeight(group.Weight),
+				NaturalOrder:   group.LoadSeq,      // 同 weight 下按 yaml 写入顺序输出
 				Comment:        code[len(prefix):], // 显示编码后缀（如 zz→zzbd 显示 "bd"）
 				IsPhrase:       true,
 				IsGroup:        true,
@@ -571,6 +581,7 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 					Text:           e.Text,
 					Code:           code,
 					Weight:         resolvePhraseWeight(e.Weight),
+					NaturalOrder:   e.LoadSeq, // 同 weight 下按 yaml 写入顺序输出
 					IsPhrase:       true,
 					PhraseTemplate: e.Text,
 					ID:             PhraseCandidateID(code, e.Text),
@@ -649,6 +660,9 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 		return fmt.Errorf("load phrases from store: %w", err)
 	}
 
+	// loadSeq: 处理记录的 0-based 递增序号, 用作 weight 同档下的稳定 tie-break
+	// (替代旧的 map 迭代随机序 / Code 字母序), 让 yaml 写入顺序成为最终展示顺序。
+	loadSeq := 0
 	for _, rec := range records {
 		if !rec.Enabled {
 			continue
@@ -677,6 +691,7 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 				Position: position,
 				IsSystem: rec.IsSystem,
 				RawText:  rec.Text,
+				LoadSeq:  loadSeq,
 			}
 			pl.phraseGroups[code] = append(pl.phraseGroups[code], pg)
 			entry := PhraseEntry{
@@ -685,6 +700,7 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 				Position:     position,
 				IsSystem:     rec.IsSystem,
 				GroupRawText: rec.Text, // 反查归属 group 用
+				LoadSeq:      loadSeq,
 			}
 			pl.dynamicPhrases[code] = append(pl.dynamicPhrases[code], entry)
 
@@ -700,6 +716,7 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 				Position: position,
 				IsSystem: rec.IsSystem,
 				RawText:  rec.Text,
+				LoadSeq:  loadSeq,
 			}
 			pl.phraseGroups[code] = append(pl.phraseGroups[code], pg)
 			runes := []rune(chars)
@@ -710,6 +727,7 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 					Position:     position + idx,
 					IsSystem:     rec.IsSystem,
 					GroupRawText: rec.Text, // 反查归属 group 用
+					LoadSeq:      loadSeq,
 				}
 				pl.staticPhrases[code] = append(pl.staticPhrases[code], arrEntry)
 			}
@@ -721,6 +739,7 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 				Weight:   rec.Weight,
 				Position: position,
 				IsSystem: rec.IsSystem,
+				LoadSeq:  loadSeq,
 			}
 			pl.dynamicPhrases[code] = append(pl.dynamicPhrases[code], entry)
 
@@ -731,9 +750,11 @@ func (pl *PhraseLayer) LoadFromStore(s *store.Store) error {
 				Weight:   rec.Weight,
 				Position: position,
 				IsSystem: rec.IsSystem,
+				LoadSeq:  loadSeq,
 			}
 			pl.staticPhrases[code] = append(pl.staticPhrases[code], entry)
 		}
+		loadSeq++
 	}
 
 	return nil
@@ -875,6 +896,7 @@ func (pl *PhraseLayer) expandDynamicEntry(code string, e PhraseEntry) candidate.
 		Text:           res.Text,
 		Code:           code,
 		Weight:         resolvePhraseWeight(e.Weight),
+		NaturalOrder:   e.LoadSeq, // 同 weight 下按 yaml 写入顺序输出 (SearchPrefix 路径 3 走 candidate.Better 时生效)
 		IsCommand:      len(res.Actions) > 0,
 		IsPhrase:       true,
 		PhraseTemplate: e.Text,

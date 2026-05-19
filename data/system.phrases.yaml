@@ -10,9 +10,12 @@
 #
 # 本文件内置权重分级 (按用户主动触发度排序):
 #   co* (命令直通车)        → 2000  用户记忆触发码主动调用
-#   date/time/zzrq/zzsj/... → 1000  日期时间常用快捷
-#   zz* (字符组首选)         → 1000  字符组主入口 (position=1)
-#   zz* (字符组备选)         →  800  同 code 备选 (position>=2)
+#   date/time/zzrq/zzsj/... → 1000  日期时间常用快捷 (同 code 多条用 position tie-break)
+#   zz* (字符组首选)         → 1010~1230 区间, 每组独占一档 10 递减, 决定 prefix-nav (输入 zz)
+#                              时的顺序; 同 code 备选保持 800 (position>=2)。
+#   position 字段:
+#     - 仅在同 code 多条短语下做 tie-break (例如 date 的 5 条不同模板);
+#     - 跨 code 单条短语不写 position, 排序由 weight + LoadSeq 决定。
 #
 # 详见 docs/design/command-bar-design.md §3.8
 
@@ -89,7 +92,6 @@ phrases:
   - code: "uuid"
     text: "$uuid"
     weight: 1000
-    position: 1
 
   # ===== 时间戳 =====
   - code: "tmts"
@@ -108,118 +110,95 @@ phrases:
 
   - code: "zzbd"
     text: '$AA("标点", "、。·ˉˇ¨〃々—～‖…‘’“”〔〕〈〉《》「」『』〖〗【】±×÷∶∧∨∑∏∪∩∈∷√⊥∥∠⌒⊙∫∮≡≌≈∽∝≠≮≯≤≥∞∵∴♂♀°′″℃＄¤￠￡‰§№☆★○●◎◇◆□■△▲※→←↑↓〓")'
-    weight: 1000
-    position: 1
+    weight: 1230
 
   - code: "zzsz"
     text: '$AA("数字", "❶❷❸❹❺❻❼❽❾❿")'
-    weight: 1000
-    position: 2
+    weight: 1220
 
   - code: "zzzm"
     text: '$AA("字母", "ⓐⓑⓒⓓⓔⓕⓖⓗⓘⓙⓚⓛⓜⓝⓞⓟⓠⓡⓢⓣⓤⓥⓦⓧⓨⓩ")'
-    weight: 1000
-    position: 3
+    weight: 1210
 
   - code: "zzpp"
     text: '$AA("偏旁", "亻彳讠饣艹丶乛亠冖宀冫丷扌氵灬丨亅丿乚勹匚冂凵爫忄丬纟疒阝刂卩犭辶廴钅礻衤罒覀夂癶耂牜虍歺糹釒飠")'
-    weight: 1000
-    position: 4
+    weight: 1200
 
   - code: "zzdw"
     text: '$AA("单位", "㎎㎏㎜㎝㎞㎡㏄㏎㏑㏒㏕")'
-    weight: 1000
-    position: 5
+    weight: 1190
 
   - code: "zzpy"
     text: '$AA("拼音", "āáǎàōóǒòêēéěèīíǐìǖǘǚǜüūúǔù")'
-    weight: 1000
-    position: 6
+    weight: 1180
 
   - code: "zzds"
     text: '$AA("点号数字", "⒈⒉⒊⒋⒌⒍⒎⒏⒐⒑⒒⒓⒔⒕⒖⒗⒘⒙⒚⒛")'
-    weight: 1000
-    position: 7
+    weight: 1170
 
   - code: "zzks"
     text: '$AA("括号数字", "⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇")'
-    weight: 1000
-    position: 8
+    weight: 1160
 
   - code: "zzys"
     text: '$AA("圆圈数字", "①②③④⑤⑥⑦⑧⑨⑩")'
-    weight: 1000
-    position: 9
+    weight: 1150
 
   - code: "zzzs"
     text: '$AA("中文数字", "㈠㈡㈢㈣㈤㈥㈦㈧㈨㈩")'
-    weight: 1000
-    position: 10
+    weight: 1140
 
   - code: "zzhb"
     text: '$AA("货币符号", "＄￠￡￥¤")'
-    weight: 1000
-    position: 11
+    weight: 1130
 
   - code: "zzjt"
     text: '$AA("箭头符号", "→↑←↓↖↗↘↙")'
-    weight: 1000
-    position: 12
+    weight: 1120
 
   - code: "zzde"
     text: '$AA("大写俄文", "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯЁ")'
-    weight: 1000
-    position: 13
+    weight: 1110
 
   - code: "zzxe"
     text: '$AA("小写俄文", "абвгдежзийклмнопрстуфхцчшщъыьэюяё")'
-    weight: 1000
-    position: 14
+    weight: 1100
 
   - code: "zzdl"
     text: '$AA("大写罗马", "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ")'
-    weight: 1000
-    position: 15
+    weight: 1090
 
   - code: "zzxl"
     text: '$AA("小写罗马", "ⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ")'
-    weight: 1000
-    position: 16
+    weight: 1080
 
   - code: "zzdx"
     text: '$AA("大写希腊", "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ")'
-    weight: 1000
-    position: 17
+    weight: 1070
 
   - code: "zzxx"
     text: '$AA("小写希腊", "αβγδεζηθικλμνξοπρστυφχψω")'
-    weight: 1000
-    position: 18
+    weight: 1060
 
   - code: "zzpj"
     text: '$AA("平假名", "ぁあぃいぅうぇえぉおかがきぎぱくぐけげこごさざしじすずせぜそぞただちぢっつづてでとどなにぬねのはばひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろゎわゐゑをん゛゜ゝゞ")'
-    weight: 1000
-    position: 19
+    weight: 1050
 
   - code: "zzjp"
     text: '$AA("片假名", "ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴヵヶーヽヾ")'
-    weight: 1000
-    position: 20
+    weight: 1040
 
   - code: "zzsx"
     text: '$AA("数学符号", "＋－＜＝＞±×÷∈∏∑∕√∝∞∟∠∣∥∧∨∩∪∫∮∴∵∶∷∽≈≌≒≠≡≤≥≦≧≮≯⊕⊙⊥⊿")'
-    weight: 1000
-    position: 21
+    weight: 1030
 
   - code: "zzts"
     text: '$AA("特殊符号", "℃°‰♂♀§№☆★○●◎◇◆□■△▲※〓＃＆＠＼＾＿￣")'
-    weight: 1000
-    position: 22
+    weight: 1020
 
   - code: "zzzy"
     text: '$AA("注音符号", "ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ")'
-    weight: 1000
-    position: 23
+    weight: 1010
 
   # ===== zz 系列：日期时间快捷输入 =====
 
@@ -291,71 +270,56 @@ phrases:
   - code: "cobd"
     text: '$CC("打开百度", open("https://baidu.com"))'
     weight: 2000
-    position: 1
   - code: "cozd"
     text: '$CC("汉典:{last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))'
     weight: 2000
-    position: 1
   - code: "cono"
     text: '$CC("打开记事本", proc.run("notepad.exe"))'
     weight: 2000
-    position: 1
   - code: "coca"
     text: '$CC("打开计算器", proc.run("calc.exe"))'
     weight: 2000
-    position: 1
   - code: "cohm"
     text: '$CC("打开用户主目录", open(env("USERPROFILE")))'
     weight: 2000
-    position: 1
 
   # --- 文本上屏 ---
   - code: "coll"
     text: '$CC(last(), type(last()))'
     weight: 2000
-    position: 1
   - code: "copa"
     text: '$CC("粘贴", clip.paste())'
     weight: 2000
-    position: 1
 
   # --- type + key.tap/seq 组合: 配对符号 + 删行 ---
   - code: "cojk"
     text: '$CC("「」", type("「」"), key.tap("Left"))'
     weight: 2000
-    position: 1
   - code: "codl"
     text: '$CC("[删行]", key.seq("Home", "Shift+End", "Backspace"))'
     weight: 2000
-    position: 1
 
   # --- 剪贴板 / 加词 ---
   - code: "cocp"
     text: '$CC("复制时间", clip.copy(now()))'
     weight: 2000
-    position: 1
   - code: "coad"
     text: '$CC("剪贴板加词:{clip()}", dict.add(clip()))'
     weight: 2000
-    position: 1
 
   # --- IME 自身切换 (工具栏可能隐藏时的高效切换方式, 无焦点切换) ---
   - code: "coen"
     text: '$CC("切中英", ime.toggle("cn-en"))'
     weight: 2000
-    position: 1
   - code: "cofs"
     text: '$CC("切全半角", ime.toggle("fullshape"))'
     weight: 2000
-    position: 1
   - code: "coly"
     text: '$CC("切横纵候选", ime.toggle("layout"))'
     weight: 2000
-    position: 1
   - code: "cocw"
     text: '$CC("切候选窗", ime.toggle("candwin"))'
     weight: 2000
-    position: 1
   - code: "coss"
     text: '$CC("打开设置", setting.open(""))'
     weight: 2000
