@@ -995,9 +995,33 @@ func (c *Coordinator) commitCmdbarCandidate(cand candidate.Candidate, codeLen, c
 
 	committed := textBuf.String()
 
+	// 拼音分步: 已累积的 confirmedSegments 必须连同命令一起上屏, 否则
+	// clearState 会丢掉它们 — 用户感受为"前面选中无效"(#6b, 2026-05-19)。
+	//
+	// 三种组合:
+	//   - committed 非空 + 有确认段: prefix + committed 一并上屏, 历史记
+	//     prefix+committed (cmdbar 与确认段都被认为是"用户产出")。
+	//   - committed 空 (纯 effect, 如 cobd 打开浏览器) + 有确认段:
+	//     仅 prefix 上屏, effects 异步跑。历史**只**记 prefix, 不记 cmdbar
+	//     的 display 文本 — 保留原设计"纯 effect 不污染 last()"。
+	//   - committed 空 + 无确认段: 不上屏, 维持旧语义。
+	var prefix string
+	if len(c.confirmedSegments) > 0 {
+		var sb strings.Builder
+		for _, seg := range c.confirmedSegments {
+			t := seg.Text
+			if c.fullWidth {
+				t = transform.ToFullWidth(t)
+			}
+			sb.WriteString(t)
+		}
+		prefix = sb.String()
+	}
+	displayText := prefix + committed
+
 	if len(effects) > 0 {
 		delay := time.Duration(0)
-		if committed != "" {
+		if displayText != "" {
 			delay = 30 * time.Millisecond
 		}
 		effectsCopy := make([]cmdbar.ResolvedAction, len(effects))
@@ -1015,25 +1039,30 @@ func (c *Coordinator) commitCmdbarCandidate(cand candidate.Candidate, codeLen, c
 		}(effectsCopy, delay)
 	}
 
-	// 只有 text 上屏才记录历史 + 统计, 纯 effect 不污染 last()。
-	if committed != "" {
-		c.recordCommit(committed, codeLen, candidateSlot, store.SourceCandidate)
+	// 历史 / 统计记录 displayText (= prefix + committed):
+	//   - 纯 effect + 无确认段: displayText="" → 不上屏不入历史 (维持旧语义,
+	//     cmdbar display 文本不污染 last())。
+	//   - 纯 effect + 有确认段: displayText=prefix → 上屏确认段, 历史记
+	//     prefix。cmdbar display 仍未入历史, 保留原设计意图。
+	//   - committed 非空: 历史记 displayText, 完整反映用户实际产出。
+	if displayText != "" {
+		c.recordCommit(displayText, codeLen, candidateSlot, store.SourceCandidate)
 		if c.inputHistory != nil {
 			histCode := c.inputBuffer
 			if cand.Code != "" {
 				histCode = cand.Code
 			}
-			c.inputHistory.Record(committed, histCode, "", 0)
+			c.inputHistory.Record(displayText, histCode, "", 0)
 		}
 	}
 
 	c.clearState()
 	c.hideUI()
 
-	if committed != "" {
+	if displayText != "" {
 		return &bridge.KeyEventResult{
 			Type: bridge.ResponseTypeInsertText,
-			Text: committed,
+			Text: displayText,
 		}
 	}
 	return &bridge.KeyEventResult{
