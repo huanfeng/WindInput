@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
@@ -57,7 +58,11 @@ func getTSFLogConfigPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "tsf_log_config"), nil
+	name := "tsf_log_config"
+	if buildvariant.IsDebug() {
+		name = "tsf_debug_log_config"
+	}
+	return filepath.Join(base, name), nil
 }
 
 func loadTSFLogConfig() (mode, level string, err error) {
