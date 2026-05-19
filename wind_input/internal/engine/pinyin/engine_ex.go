@@ -25,15 +25,39 @@ func (e *Engine) rimeScore(text string, dictWeight float64, initialQuality float
 // 使用新的 Parser → Lexicon → Ranker 流水线
 // ============================================================
 
+// ConvertExOptions 调用时附加的运行时开关 (per-call), 不污染 EngineConfig。
+//
+// 用途场景: 临时拼音模式 (handle_temp_pinyin / handle_quick_input_pinyin)
+// 想要"纯拼音输入" — 不要被短语码 (zzbd → 字符数组) / 简拼 (zg → 中国)
+// 拦截。临时拼音是一次性调用, 不适合改 EngineConfig.SkipAbbrev 这种"方案
+// 静态配置"; 用 per-call 开关一进一出更干净。
+type ConvertExOptions struct {
+	// SkipCommand 跳过步骤 0 LookupCommand: 不调 PhraseLayer.SearchCommand
+	// 之类的命令短语查询入口。临时拼音模式开启, 让用户输 "zzbd" 看到的
+	// 是 "祖祖辈辈/字字保保" 等拼音候选, 而非"标点 / 字符数组" 短语 nav。
+	SkipCommand bool
+	// SkipAbbrev 跳过简拼匹配 (与 EngineConfig.SkipAbbrev 取 OR; engine
+	// 级已设 true 仍保持 true)。临时拼音里 "zg" 应被当作 zh 双字母键序,
+	// 而非"中国" 简拼候选。
+	SkipAbbrev bool
+}
+
 // ConvertEx 扩展版转换方法
 // 返回包含组合态的完整转换结果
 func (e *Engine) ConvertEx(input string, maxCandidates int) *PinyinConvertResult {
-	return e.convertCore(input, maxCandidates, false)
+	return e.convertCore(input, maxCandidates, false, ConvertExOptions{})
+}
+
+// ConvertExWithOpts 等价 ConvertEx + 附加 per-call 选项。
+// 详见 ConvertExOptions 文档。
+func (e *Engine) ConvertExWithOpts(input string, maxCandidates int, opts ConvertExOptions) *PinyinConvertResult {
+	return e.convertCore(input, maxCandidates, false, opts)
 }
 
 // convertCore 核心转换逻辑（统一的候选生成流水线）
 // skipFilter=true 时跳过候选过滤（用于 ConvertRaw 测试场景）
-func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *PinyinConvertResult {
+// opts 携带 per-call 运行时开关 (SkipCommand / SkipAbbrev)。
+func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool, opts ConvertExOptions) *PinyinConvertResult {
 	result := &PinyinConvertResult{
 		Candidates: make([]candidate.Candidate, 0),
 	}
@@ -107,12 +131,12 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 跳过基于 contiguous 的候选生成，避免按首字母提示。
 	// "nihaoz" = contiguous[ni,hao] + 1个游离 → 不跳过（正常 trailing partial）。
 	straySyllableCount := len(allSyllables) - contiguousCount
-	skipContiguousMatch := e.config != nil && e.config.SkipAbbrev && straySyllableCount >= 2
+	skipContiguousMatch := ((e.config != nil && e.config.SkipAbbrev) || opts.SkipAbbrev) && straySyllableCount >= 2
 
 	e.logger.Debug("convertCore", "input", input, "preedit", result.PreeditDisplay,
 		"completed", completedSyllables, "contiguous", contiguousSyllables,
 		"partial", partial, "allSyllables", allSyllables,
-		"skipAbbrev", e.config != nil && e.config.SkipAbbrev, "skipContiguousMatch", skipContiguousMatch,
+		"skipAbbrev", ((e.config != nil && e.config.SkipAbbrev) || opts.SkipAbbrev), "skipContiguousMatch", skipContiguousMatch,
 		"parseElapsed", time.Since(convertStart))
 
 	// 检查首个 completed syllable 是否也是输入的第一个段
@@ -134,7 +158,10 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 双拼模式：短语编码以原始键序列定义（如 "zzbd"），需用 originalInput 查询，
 	// 而非双拼转换后的全拼字符串。ConsumedLength 直接设为原始输入长度，
 	// shuangpinPostprocess 中跳过对 IsPhrase 候选的长度重映射。
-	{
+	//
+	// 临时拼音模式 (opts.SkipCommand): 整段跳过, 让 "zzbd" 等短语码不再
+	// 命中 PhraseLayer.SearchCommand, 输入流回归纯拼音语义。
+	if !opts.SkipCommand {
 		cmdKey := queryInput
 		cmdConsumedLen := len(input)
 		if spResult != nil {
@@ -376,7 +403,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 例如 "bzd" → ["b","z","d"] 都是 partial，为首音节 "b" 生成单字候选。
 	// 仅在 syllableCount==0（纯 partial 输入，无完整音节）时运行；有完整音节的 leading partial 由步骤 4a 处理。
 	// 纯 partial 输入本质上是简拼行为，当 SkipAbbrev=true（简拼关闭）时跳过，避免 "asdf" 等编码按 "a" 提示。
-	skipAbbrev := e.config != nil && e.config.SkipAbbrev
+	skipAbbrev := ((e.config != nil && e.config.SkipAbbrev) || opts.SkipAbbrev)
 	if contiguousCount == 0 && len(allSyllables) > 1 && syllableCount == 0 && !skipAbbrev {
 		firstPartial := allSyllables[0]
 		possibles := e.syllableTrie.GetPossibleSyllables(firstPartial)
@@ -491,7 +518,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool) *
 	// 否则 "lw" 会匹配"龙王"(long+wang) 但实际输入的 "wai" ≠ "w"，导致 "ai" 丢弃。
 	// TODO: 实现简拼+全拼混合匹配策略（如 "ldao" → 匹配第二音节为 "dao" 的词组）
 	isPureAbbrev := syllableCount == 0 && len(allSyllables) >= 2
-	if isPureAbbrev && !(e.config != nil && e.config.SkipAbbrev) {
+	if isPureAbbrev && !((e.config != nil && e.config.SkipAbbrev) || opts.SkipAbbrev) {
 		var abbrevBuilder strings.Builder
 		for _, s := range allSyllables {
 			abbrevBuilder.WriteByte(s[0])

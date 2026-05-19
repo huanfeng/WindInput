@@ -168,7 +168,13 @@ func (m *Manager) ConvertWithPinyin(input string, maxCandidates int) *ConvertRes
 		}
 	}
 
-	pinyinResult := pe.ConvertEx(input, maxCandidates)
+	// 临时拼音模式: 仅跳过 PhraseLayer 命令短语查询 (zzbd → 字符数组 这类
+	// 短语码不应在临时拼音里出现)。简拼 (zzbd → 祖祖辈辈 等) 必须保留 —
+	// 临时拼音的用户场景大量依赖简拼把无法切音节的字母串匹配到候选, 关掉
+	// 会让 "zzbd" 这类全 partial 输入 0 候选 (实测后回退, 见反馈 2026-05-18)。
+	pinyinResult := pe.ConvertExWithOpts(input, maxCandidates, pinyin.ConvertExOptions{
+		SkipCommand: true,
+	})
 
 	// 使用主码表方案的反向索引添加编码提示（而非拼音引擎自带的反查码表），
 	// 这样切换不同主码表（五笔/郑码等）时，临时拼音始终显示当前主编码。

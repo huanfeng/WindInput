@@ -280,13 +280,13 @@ func (e *Engine) lookupCodeHint(text string) string {
 
 // Convert 转换拼音为候选词（实现 Engine 接口）
 func (e *Engine) Convert(input string, maxCandidates int) ([]candidate.Candidate, error) {
-	result := e.convertCore(input, maxCandidates, false)
+	result := e.convertCore(input, maxCandidates, false, ConvertExOptions{})
 	return result.Candidates, nil
 }
 
 // ConvertRaw 转换拼音为候选词（不应用过滤，用于测试）
 func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candidate, error) {
-	result := e.convertCore(input, maxCandidates, true)
+	result := e.convertCore(input, maxCandidates, true, ConvertExOptions{})
 	return result.Candidates, nil
 }
 
