@@ -24,18 +24,18 @@ type RenderResult struct {
 
 // CandidateCallback defines callbacks for candidate window interactions
 type CandidateCallback struct {
-	OnSelect          func(index int)                     // Called when user clicks a candidate (index is 0-based within page)
-	OnHoverChange     func(index, tooltipX, tooltipY int) // Called when hover state changes (-1 for no hover, with tooltip position below candidate)
-	OnPageUp          func()                              // Called when user clicks the page up button
-	OnPageDown        func()                              // Called when user clicks the page down button
-	OnMoveUp          func(index int)                     // Called when user selects "Move Up" from context menu
-	OnMoveDown        func(index int)                     // Called when user selects "Move Down" from context menu
-	OnMoveTop         func(index int)                     // Called when user selects "Move to Top" from context menu
-	OnDelete          func(index int)                     // Called when user selects "Delete" from context menu
-	OnResetDefault    func(index int)                     // Called when user selects "Reset to Default" from context menu
-	OnCopy            func(index int)                     // Called when user selects "Copy" from context menu
-	OnCopyDebugBatch  func(maxPages int)                  // Debug: copy candidates (0=all, N=first N pages)
-	OnOpenSettings    func()                              // Called when user selects "Settings" from context menu
-	OnAbout           func()                              // Called when user selects "About" from context menu
-	OnShowUnifiedMenu func(screenX, screenY int)          // Called when user right-clicks blank area to show unified menu
+	OnSelect          func(index int)                                         // Called when user clicks a candidate (index is 0-based within page)
+	OnHoverChange     func(index, tooltipX, tooltipBelowY, tooltipAboveY int) // tooltipBelowY=候选下沿（首选 tip 顶端贴此处）; tooltipAboveY=候选上沿（下方空间不够时 tip 底端贴此处）; index=-1 表示离开 hover
+	OnPageUp          func()                                                  // Called when user clicks the page up button
+	OnPageDown        func()                                                  // Called when user clicks the page down button
+	OnMoveUp          func(index int)                                         // Called when user selects "Move Up" from context menu
+	OnMoveDown        func(index int)                                         // Called when user selects "Move Down" from context menu
+	OnMoveTop         func(index int)                                         // Called when user selects "Move to Top" from context menu
+	OnDelete          func(index int)                                         // Called when user selects "Delete" from context menu
+	OnResetDefault    func(index int)                                         // Called when user selects "Reset to Default" from context menu
+	OnCopy            func(index int)                                         // Called when user selects "Copy" from context menu
+	OnCopyDebugBatch  func(maxPages int)                                      // Debug: copy candidates (0=all, N=first N pages)
+	OnOpenSettings    func()                                                  // Called when user selects "Settings" from context menu
+	OnAbout           func()                                                  // Called when user selects "About" from context menu
+	OnShowUnifiedMenu func(screenX, screenY int)                              // Called when user right-clicks blank area to show unified menu
 }

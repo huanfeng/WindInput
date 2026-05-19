@@ -163,9 +163,9 @@ func (c *Coordinator) setupCandidateCallbacks() {
 			// Run in goroutine to avoid blocking UI thread
 			go c.handleCandidateSelect(index)
 		},
-		OnHoverChange: func(index, tooltipX, tooltipY int) {
+		OnHoverChange: func(index, tooltipX, tooltipBelowY, tooltipAboveY int) {
 			// Run in goroutine to avoid blocking UI thread
-			go c.handleCandidateHoverChange(index, tooltipX, tooltipY)
+			go c.handleCandidateHoverChange(index, tooltipX, tooltipBelowY, tooltipAboveY)
 		},
 		OnPageUp: func() {
 			// Run in goroutine to avoid blocking UI thread
@@ -238,9 +238,11 @@ func (c *Coordinator) handleCandidateSelect(index int) {
 	pushKeyEventResult(bridgeServer, result)
 }
 
-// handleCandidateHoverChange handles hover state change（异步 tooltip 查询）
-func (c *Coordinator) handleCandidateHoverChange(index, tooltipX, tooltipY int) {
-	c.logger.Debug("Candidate hover changed", "index", index, "tooltipX", tooltipX, "tooltipY", tooltipY)
+// handleCandidateHoverChange handles hover state change（异步 tooltip 查询）。
+// tooltipBelowY 是候选下沿（首选 tooltip 顶端位置），tooltipAboveY 是候选上沿
+// （下方空间不足时 tooltip 底端贴此处，tooltip 子系统在 Show 时根据屏幕工作区自动选择）。
+func (c *Coordinator) handleCandidateHoverChange(index, tooltipX, tooltipBelowY, tooltipAboveY int) {
+	c.logger.Debug("Candidate hover changed", "index", index, "tooltipX", tooltipX, "belowY", tooltipBelowY, "aboveY", tooltipAboveY)
 
 	// 取消上一次查询并立即更新 hoverIdx，防止旧 goroutine 通过中间检查
 	c.cancelTooltipQuery()
@@ -289,7 +291,7 @@ func (c *Coordinator) handleCandidateHoverChange(index, tooltipX, tooltipY int) 
 	c.tooltipCancel = cancel
 	c.tooltipMu.Unlock()
 
-	go c.runTooltipQuery(ctx, index, cand, svc, tooltipX, tooltipY, delay)
+	go c.runTooltipQuery(ctx, index, cand, svc, tooltipX, tooltipBelowY, tooltipAboveY, delay)
 }
 
 // handleCandidateMoveUp handles move up action from context menu.

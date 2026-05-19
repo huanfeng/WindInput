@@ -136,8 +136,9 @@ func (m *Manager) HideTooltip() {
 	}
 }
 
-// ShowTooltipText 直接显示 tooltip 文本（无延迟，由调用方管理延迟和取消逻辑）
-func (m *Manager) ShowTooltipText(text string, centerX, y int) {
+// ShowTooltipText 直接显示 tooltip 文本（无延迟，由调用方管理延迟和取消逻辑）。
+// belowY 为候选项下沿（首选位置），aboveY 为候选项上沿（下方放不下时使用）。
+func (m *Manager) ShowTooltipText(text string, centerX, belowY, aboveY int) {
 	if text == "" {
 		return
 	}
@@ -150,8 +151,8 @@ func (m *Manager) ShowTooltipText(text string, centerX, y int) {
 	m.tooltipVersion++
 	m.mu.Unlock()
 
-	m.tooltip.Hide()
-	m.tooltip.Show(text, centerX, y)
+	m.tooltip.ForceHide()
+	m.tooltip.Show(text, centerX, belowY, aboveY)
 }
 
 // LoadTheme loads a theme by name and applies it to all renderers

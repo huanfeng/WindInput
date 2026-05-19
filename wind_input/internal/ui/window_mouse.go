@@ -93,22 +93,25 @@ func (w *CandidateWindow) handleMouseMove(lParam uintptr) {
 		w.hoverPageBtn = newHoverPageBtn
 		w.mu.Unlock()
 
-		// Calculate tooltip position: centered below the candidate item
+		// Calculate tooltip anchor: tooltipBelowY 是候选下沿+2（首选下方显示），
+		// tooltipAboveY 是候选上沿-2（备用上方显示，由 tooltip 在空间不足时启用）
 		tooltipX := windowX
-		tooltipY := windowY
+		tooltipBelowY := windowY
+		tooltipAboveY := 0
 		if newHoverIndex >= 0 {
 			for _, rect := range hitRects {
 				if rect.Index == newHoverIndex {
 					tooltipX = windowX + int(rect.X+rect.W/2)
-					tooltipY = windowY + int(rect.Y+rect.H) + 2
+					tooltipBelowY = windowY + int(rect.Y+rect.H) + 2
+					tooltipAboveY = windowY + int(rect.Y) - 2
 					break
 				}
 			}
 		}
 
-		// Notify callback with tooltip position
+		// Notify callback with tooltip anchor positions
 		if callbacks != nil && callbacks.OnHoverChange != nil {
-			callbacks.OnHoverChange(newHoverIndex, tooltipX, tooltipY)
+			callbacks.OnHoverChange(newHoverIndex, tooltipX, tooltipBelowY, tooltipAboveY)
 		}
 	}
 }
@@ -254,7 +257,19 @@ func (w *CandidateWindow) handleRightClick(lParam uintptr) {
 	pageStartIndex := w.pageStartIndex
 	totalCandidateCount := w.totalCandidateCount
 	hasShadowFlags := w.hasShadowFlags
+	prevHoverIndex := w.hoverIndex
+	hoverCb := w.callbacks
 	w.mu.Unlock()
+
+	// 右键弹菜单前，先模拟 hover 离开，确保 tooltip 不会与菜单同时显示。
+	// 取消任何待显示的延迟 tooltip 并隐藏当前已显示的 tooltip。
+	if prevHoverIndex != -1 && hoverCb != nil && hoverCb.OnHoverChange != nil {
+		hoverCb.OnHoverChange(-1, 0, 0, 0)
+		w.mu.Lock()
+		w.hoverIndex = -1
+		w.hoverPageBtn = ""
+		w.mu.Unlock()
+	}
 
 	// Hit test against candidate rectangles
 	var hitIndex int = -1
@@ -447,7 +462,7 @@ func (w *CandidateWindow) handleMouseLeave() {
 
 	// Notify callback if hover state changed
 	if (prevHoverIndex != -1 || prevHoverPageBtn != "") && callbacks != nil && callbacks.OnHoverChange != nil {
-		callbacks.OnHoverChange(-1, 0, 0)
+		callbacks.OnHoverChange(-1, 0, 0, 0)
 	}
 }
 

@@ -209,10 +209,57 @@ func (w *TooltipWindow) Create() error {
 	return nil
 }
 
-// Show shows the tooltip centered horizontally at centerX, below y
-func (w *TooltipWindow) Show(text string, centerX, y int) {
+// Show shows the tooltip centered horizontally at centerX.
+// belowY 为候选项下沿（首选位置：tooltip 顶端贴 belowY）。
+// aboveY 为候选项上沿（备用位置：下方不够时 tooltip 底端贴 aboveY）。
+// 若 aboveY <= 0，则不启用反向显示，只在下方钳制于工作区。
+func (w *TooltipWindow) Show(text string, centerX, belowY, aboveY int) {
 	if w.hwnd == 0 || text == "" {
 		return
+	}
+
+	// 获取候选位置所在显示器工作区，用于宽度/行数裁剪与位置钳制
+	workLeft, workTop, workRight, workBottom := GetMonitorWorkAreaFromPoint(centerX, belowY)
+	scale := GetDPIScale()
+	margin := int(8 * scale)
+	maxWidth := workRight - workLeft - margin*2
+	if maxWidth < int(80*scale) {
+		maxWidth = int(80 * scale) // 极端情况下兜底
+	}
+
+	// Render tooltip（render 会按 maxWidth 做单行截断与行数限制）
+	img := w.render(text, float64(maxWidth))
+	if img == nil {
+		return
+	}
+	tooltipWidth := img.Bounds().Dx()
+	tooltipHeight := img.Bounds().Dy()
+
+	// 水平居中并钳制到工作区
+	x := centerX - tooltipWidth/2
+	if x+tooltipWidth > workRight-margin {
+		x = workRight - margin - tooltipWidth
+	}
+	if x < workLeft+margin {
+		x = workLeft + margin
+	}
+
+	// 垂直：默认下方，下方放不下且上方有空间则改放上方
+	y := belowY
+	if y+tooltipHeight > workBottom-margin {
+		if aboveY > 0 {
+			candidate := aboveY - tooltipHeight - 2
+			if candidate >= workTop+margin {
+				y = candidate
+			} else {
+				y = workBottom - margin - tooltipHeight
+			}
+		} else {
+			y = workBottom - margin - tooltipHeight
+		}
+	}
+	if y < workTop+margin {
+		y = workTop + margin
 	}
 
 	w.mu.Lock()
@@ -220,17 +267,6 @@ func (w *TooltipWindow) Show(text string, centerX, y int) {
 	w.visible = true
 	w.mu.Unlock()
 
-	// Render tooltip
-	img := w.render(text)
-	if img == nil {
-		return
-	}
-
-	// Center tooltip horizontally relative to the candidate
-	tooltipWidth := img.Bounds().Dx()
-	x := centerX - tooltipWidth/2
-
-	// Update and show
 	w.updateLayeredWindow(img, x, y)
 	procShowWindow.Call(uintptr(w.hwnd), SW_SHOW)
 }
@@ -253,6 +289,21 @@ func (w *TooltipWindow) Hide() {
 	w.mu.Unlock()
 }
 
+// ForceHide 强制隐藏 tooltip，绕过 mouseOver 保护。用于候选窗关闭、菜单弹出、
+// 输入会话结束等"必须立即消失"的场景（避免 tip 残留在屏幕上）。
+func (w *TooltipWindow) ForceHide() {
+	if w.hwnd == 0 {
+		return
+	}
+	procShowWindow.Call(uintptr(w.hwnd), SW_HIDE)
+	w.mu.Lock()
+	w.visible = false
+	w.mouseOver = false
+	w.trackingMouse = false
+	w.leaveBlocked = false
+	w.mu.Unlock()
+}
+
 // IsVisible returns whether the tooltip is visible
 func (w *TooltipWindow) IsVisible() bool {
 	w.mu.Lock()
@@ -271,8 +322,10 @@ func (w *TooltipWindow) Destroy() {
 	w.mu.Unlock()
 }
 
-// render 将 tooltip 文本渲染到图像（支持 \n 换行）
-func (w *TooltipWindow) render(text string) *image.RGBA {
+// render 将 tooltip 文本渲染到图像（支持 \n 换行）。
+// maxContentWidth 为可用内容区最大像素宽度（不含 padding）；<=0 表示不限制。
+// 超长行会以"…"截断尾部，行数过多则汇总成"… (+N)"。
+func (w *TooltipWindow) render(text string, maxContentWidth float64) *image.RGBA {
 	scale := GetDPIScale()
 	bgColor, textColor := w.getTooltipColors()
 
@@ -284,9 +337,31 @@ func (w *TooltipWindow) render(text string) *image.RGBA {
 	padding := 6.0 * scale
 	lineSpacing := 2.0 * scale
 
+	const maxLines = 20
+
 	lines := splitLines(text)
 	if len(lines) == 0 {
 		return nil
+	}
+
+	// 限制最大行数：保留前 maxLines-1 行，最后一行汇总剩余
+	if len(lines) > maxLines {
+		hidden := len(lines) - (maxLines - 1)
+		kept := append([]string{}, lines[:maxLines-1]...)
+		kept = append(kept, "… (+"+itoaCompact(hidden)+")")
+		lines = kept
+	}
+
+	// 单行宽度限制：超过 maxContentWidth 则尾部截断为 "…"
+	innerMax := maxContentWidth - padding*2
+	if innerMax > 0 {
+		for i, line := range lines {
+			lw := td.MeasureString(line, fontSize)
+			if lw <= innerMax {
+				continue
+			}
+			lines[i] = truncateLineToWidth(td, line, fontSize, innerMax)
+		}
 	}
 
 	// 计算各行宽度，取最大值
@@ -319,6 +394,57 @@ func (w *TooltipWindow) render(text string) *image.RGBA {
 
 	DrawDebugBanner(img)
 	return img
+}
+
+// itoaCompact 简单 int → 十进制字符串，避免引入 strconv 仅用于一处。
+func itoaCompact(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+// truncateLineToWidth 将单行裁剪到 ≤ maxWidth 宽度，尾部加 "…"。
+// 二分查找最长可放入前缀（按 rune 切，避免破坏多字节字符）。
+func truncateLineToWidth(td TextDrawer, line string, fontSize, maxWidth float64) string {
+	const ellipsis = "…"
+	runes := []rune(line)
+	if len(runes) == 0 {
+		return line
+	}
+	ellipsisW := td.MeasureString(ellipsis, fontSize)
+	if ellipsisW >= maxWidth {
+		return ellipsis // 极端情况下连 "…" 都放不下
+	}
+	budget := maxWidth - ellipsisW
+	lo, hi := 0, len(runes)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if td.MeasureString(string(runes[:mid]), fontSize) <= budget {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if lo <= 0 {
+		return ellipsis
+	}
+	return string(runes[:lo]) + ellipsis
 }
 
 // splitLines 按 \n 拆分文本为行列表，过滤空行

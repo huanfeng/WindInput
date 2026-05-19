@@ -536,7 +536,7 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 		m.globalHotkeys.unregister()
 	case cmdHideTooltip:
 		if m.tooltip != nil {
-			m.tooltip.Hide()
+			m.tooltip.ForceHide()
 		}
 	}
 }

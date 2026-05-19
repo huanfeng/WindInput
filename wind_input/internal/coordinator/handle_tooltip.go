@@ -56,13 +56,15 @@ func (c *Coordinator) cancelTooltipQuery() {
 	c.tooltipMu.Unlock()
 }
 
-// runTooltipQuery 在 goroutine 中执行延迟 + 异步 tooltip 查询
+// runTooltipQuery 在 goroutine 中执行延迟 + 异步 tooltip 查询。
+// belowY 为候选下沿（首选 tooltip 顶端位置），aboveY 为候选上沿
+// （tooltip 子系统在下方空间不足时改贴 aboveY 上方显示）。
 func (c *Coordinator) runTooltipQuery(
 	ctx context.Context,
 	hoverIdx int,
 	cand candidate.Candidate,
 	svc *tooltip.Service,
-	centerX, y, delayMs int,
+	centerX, belowY, aboveY, delayMs int,
 ) {
 	// 等待延迟
 	if delayMs > 0 {
@@ -114,6 +116,6 @@ func (c *Coordinator) runTooltipQuery(
 	c.tooltipMu.Unlock()
 
 	if c.uiManager != nil {
-		c.uiManager.ShowTooltipText(content, centerX, y)
+		c.uiManager.ShowTooltipText(content, centerX, belowY, aboveY)
 	}
 }

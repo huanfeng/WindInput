@@ -43,35 +43,22 @@ func (p *PinyinProvider) readingsFor(r rune) []string {
 }
 
 // Query 逐字查询拼音，统一以 "字：读音" 格式逐行展开（AlwaysExpand=true）。
+// 非汉字（标点/英文/数字/PUA 等无读音数据的 rune）直接忽略，避免 tooltip 被无意义内容撑大。
 func (p *PinyinProvider) Query(_ context.Context, c candidate.Candidate) (Section, error) {
 	if c.Text == "" {
 		return Section{}, nil
 	}
 
 	var lines []string
-	var hasHan bool
-	var nonHanBuf strings.Builder
-
-	flushNonHan := func() {
-		if nonHanBuf.Len() > 0 {
-			lines = append(lines, nonHanBuf.String())
-			nonHanBuf.Reset()
-		}
-	}
-
 	for _, r := range []rune(c.Text) {
 		readings := p.readingsFor(r)
 		if len(readings) == 0 {
-			nonHanBuf.WriteRune(r)
 			continue
 		}
-		flushNonHan()
-		hasHan = true
 		lines = append(lines, string(r)+"："+strings.Join(readings, "/"))
 	}
-	flushNonHan()
 
-	if !hasHan {
+	if len(lines) == 0 {
 		return Section{}, nil
 	}
 	return Section{
