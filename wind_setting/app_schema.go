@@ -143,8 +143,11 @@ type SchemaConfigAutoLearn struct {
 
 // SchemaConfigFreq 自动调频配置
 type SchemaConfigFreq struct {
-	Enabled     bool    `yaml:"enabled" json:"enabled"`
-	ProtectTopN int     `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// ProtectTopN 不带 omitempty：0 表示"不保护"是有效值，必须能被序列化进 override
+	// 文件，否则前端选 0 与未设置无法区分（ComputeYAMLDiff 会丢弃 0 值导致 override 不写入，
+	// 下次打开恢复基础配置的默认值）。同 TempPromoteCount 的处理逻辑。
+	ProtectTopN int     `yaml:"protect_top_n" json:"protect_top_n"`
 	HalfLife    float64 `yaml:"half_life,omitempty" json:"half_life,omitempty"`
 	BoostMax    int     `yaml:"boost_max,omitempty" json:"boost_max,omitempty"`
 	MaxRecency  float64 `yaml:"max_recency,omitempty" json:"max_recency,omitempty"`
