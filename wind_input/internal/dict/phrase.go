@@ -58,6 +58,11 @@ type PhraseLayer struct {
 	// SearchCommand 精确码命中时被调用, 把 marker text 展开成 N 个元素
 	// (含嵌入 $CC 元素的 display/actions 求值)。设计 §4.3。
 	cmdbarArrayHook CmdbarArrayHook
+
+	// minPrefixLength 短语前缀展开的最小输入长度门控 (input.phrase.min_prefix_length)。
+	// SearchPrefix 时若 len(prefix) < minPrefixLength 且 < 短语自身 code 长度则该条目跳过。
+	// 0 / 负值视为 1 (即不门控, 保持旧行为)。
+	minPrefixLength int
 }
 
 // CmdbarArrayHook 由 coordinator 装配, 解析 $SS 字符串数组短语:
@@ -210,6 +215,32 @@ func NewPhraseLayerEx(name string, systemPath, systemUserPath string, s *store.S
 // Name 返回层名称
 func (pl *PhraseLayer) Name() string {
 	return pl.name
+}
+
+// SetMinPrefixLength 配置短语前缀展开的最小输入长度。
+// <=0 视为 1 (不门控)。运行时热更新, 调用者无需重启。
+func (pl *PhraseLayer) SetMinPrefixLength(n int) {
+	if n < 1 {
+		n = 1
+	}
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	if pl.minPrefixLength != n {
+		pl.minPrefixLength = n
+		// 前缀展开结果与门控值耦合, cmdCache 清空避免历史缓存被沿用
+		pl.cmdCache = make(map[string][]candidate.Candidate)
+		pl.cmdCacheKey = ""
+	}
+}
+
+// MinPrefixLength 当前生效的最小前缀长度 (诊断 / 测试)。
+func (pl *PhraseLayer) MinPrefixLength() int {
+	pl.mu.RLock()
+	defer pl.mu.RUnlock()
+	if pl.minPrefixLength < 1 {
+		return 1
+	}
+	return pl.minPrefixLength
 }
 
 // Type 返回层类型
@@ -482,10 +513,24 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 	prefix = strings.ToLower(prefix)
 	var results []candidate.Candidate
 
+	// 最小前缀长度门控 (input.phrase.min_prefix_length)。
+	// 规则: 仅当 len(prefix) >= minPrefixLength || len(prefix) >= len(code) 时, 该条目参与前缀展开。
+	// 第二个分支保证用户配置的 code 长度 == prefix 长度的短码短语仍可显示
+	// (此处该分支等价于精确码命中, 上层 SearchPrefix 调用方通常已过滤精确码; 但保留语义对齐用户预期)。
+	minPrefix := max(pl.minPrefixLength, 1)
+	prefixLen := len(prefix)
+	allowByMinLen := prefixLen >= minPrefix
+	canEmit := func(codeLen int) bool {
+		return allowByMinLen || prefixLen >= codeLen
+	}
+
 	// 1. phraseGroups: 每个 group 出 1 个 nav 候选 (同 code 多 group 多 nav)。
 	//    id 见 PhraseGroup.RawText 注释。
 	for code, groupSlice := range pl.phraseGroups {
 		if code == prefix || !strings.HasPrefix(code, prefix) {
+			continue
+		}
+		if !canEmit(len(code)) {
 			continue
 		}
 		for _, group := range groupSlice {
@@ -518,6 +563,9 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 			if _, isGroup := pl.phraseGroups[code]; isGroup {
 				continue // 此编码的字符级候选不参与前缀搜索
 			}
+			if !canEmit(len(code)) {
+				continue
+			}
 			for _, e := range entries {
 				results = append(results, candidate.Candidate{
 					Text:           e.Text,
@@ -536,6 +584,9 @@ func (pl *PhraseLayer) SearchPrefix(prefix string, limit int) []candidate.Candid
 	//    会把 $CC( 过滤掉, 只留 $CC1( 实际参与前缀展开。
 	for dynCode, entries := range pl.dynamicPhrases {
 		if dynCode == prefix || !strings.HasPrefix(dynCode, prefix) {
+			continue
+		}
+		if !canEmit(len(dynCode)) {
 			continue
 		}
 		for _, e := range entries {

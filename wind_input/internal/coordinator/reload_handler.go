@@ -111,6 +111,11 @@ func (h *ReloadHandler) ApplyConfigUpdate(oldCfg, newCfg *config.Config, changed
 			if newCfg.Input.FilterMode != "" {
 				h.engineMgr.UpdateFilterMode(newCfg.Input.FilterMode)
 			}
+			if h.dictMgr != nil {
+				if pl := h.dictMgr.GetPhraseLayer(); pl != nil {
+					pl.SetMinPrefixLength(newCfg.Input.Phrase.MinPrefixLength)
+				}
+			}
 		}
 		if changedSections["stats"] {
 			h.coord.UpdateStatsConfig(&newCfg.Stats)

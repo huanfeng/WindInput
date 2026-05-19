@@ -402,6 +402,9 @@ func main() {
 	if err := dictManager.Initialize(); err != nil {
 		logger.Warn("Failed to initialize dict manager", "error", err)
 	}
+	if pl := dictManager.GetPhraseLayer(); pl != nil {
+		pl.SetMinPrefixLength(cfg.Input.Phrase.MinPrefixLength)
+	}
 	engineMgr.SetDictManager(dictManager)
 
 	// 确定活跃方案 ID

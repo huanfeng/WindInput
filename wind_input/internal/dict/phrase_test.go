@@ -741,3 +741,82 @@ func TestPhraseLayerLegacyPositionStillWorks(t *testing.T) {
 		t.Fatalf("旧条目2 weight want 1000 (默认), got %d", results[1].Weight)
 	}
 }
+
+// TestPhraseLayerSearchPrefixMinLength 验证 input.phrase.min_prefix_length 门控:
+// 默认 2 时单字符 "z" 不展开 zz** 短语; 调到 1 时恢复旧行为; 码长 == prefix 长度的短语始终可见。
+func TestPhraseLayerSearchPrefixMinLength(t *testing.T) {
+	tmpDir := t.TempDir()
+	systemFile := filepath.Join(tmpDir, "system.phrases.yaml")
+	content := `phrases:
+  - code: "zzys"
+    text: '$AA("圈数字", "①②③④⑤")'
+    position: 1
+  - code: "zzab"
+    text: "TEST"
+    position: 1
+  - code: "z"
+    text: "短码1"
+    position: 1
+`
+	if err := os.WriteFile(systemFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pl := loadPhraseLayerFromYAML(t, systemFile, "")
+
+	// 默认未配置时, 行为应当与旧版本一致 (不门控)。
+	if got := pl.MinPrefixLength(); got != 1 {
+		t.Fatalf("default MinPrefixLength want 1 (no gating), got %d", got)
+	}
+	if r := pl.SearchPrefix("z", 0); len(r) == 0 {
+		t.Fatal("ungated state: prefix 'z' should still expand zz** entries")
+	}
+
+	// 启用 min=2: 单字符 "z" 不应再前缀展开 zzab / zzys。
+	pl.SetMinPrefixLength(2)
+	r := pl.SearchPrefix("z", 0)
+	for _, c := range r {
+		if c.Code == "zzys" || c.Code == "zzab" {
+			t.Fatalf("min=2: prefix 'z' should not surface multi-char codes, got code=%q text=%q", c.Code, c.Text)
+		}
+	}
+	// 同时码长 == prefix 长度 (code="z") 的短码短语仍可命中 (per-entry rule)。
+	foundShort := false
+	for _, c := range r {
+		if c.Code == "z" {
+			foundShort = true
+			break
+		}
+	}
+	if !foundShort {
+		t.Fatal("min=2: code-len-1 phrase 'z' should still appear via per-entry exception (len(prefix) >= len(code))")
+	}
+
+	// 长前缀 "zz" 不再被门控, zzab / zzys 应回归。
+	r = pl.SearchPrefix("zz", 0)
+	hasZzab := false
+	hasZzys := false
+	for _, c := range r {
+		if c.Code == "zzab" {
+			hasZzab = true
+		}
+		if c.Code == "zzys" && c.IsGroup {
+			hasZzys = true
+		}
+	}
+	if !hasZzab || !hasZzys {
+		t.Fatalf("min=2: prefix 'zz' should still surface zzab(static) and zzys(group), got hasZzab=%v hasZzys=%v", hasZzab, hasZzys)
+	}
+
+	// 调到 1 → 恢复旧行为。
+	pl.SetMinPrefixLength(1)
+	r = pl.SearchPrefix("z", 0)
+	hasZzab = false
+	for _, c := range r {
+		if c.Code == "zzab" {
+			hasZzab = true
+		}
+	}
+	if !hasZzab {
+		t.Fatal("min=1: prefix 'z' should expand zzab again")
+	}
+}

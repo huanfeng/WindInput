@@ -243,6 +243,16 @@ type InputConfig struct {
 	PunctCustom          PunctCustomConfig      `yaml:"punct_custom" json:"punct_custom"`
 	QuickInput           QuickInputConfig       `yaml:"quick_input" json:"quick_input"`
 	OverflowBehavior     OverflowBehaviorConfig `yaml:"overflow_behavior" json:"overflow_behavior"` // 候选按键无效时的处理策略
+	Phrase               PhraseConfig           `yaml:"phrase" json:"phrase"`                       // 短语相关行为
+}
+
+// PhraseConfig 短语相关行为配置（暂无 UI，文件配置）
+type PhraseConfig struct {
+	// MinPrefixLength 短语前缀匹配触发的最小输入长度（默认 2）。
+	// 当输入码长 < MinPrefixLength 且 < 短语自身码长时，该短语不参与前缀展开；
+	// 等价规则: 短语条目仅在 len(input) >= MinPrefixLength || len(input) >= len(code) 时出现。
+	// 例如默认 2 时, 单字符 "z" 不会前缀展开 zzbd / zzaa, 但用户配置的码长为 1 的短语 (input="z" code="z") 仍按精确匹配走 SearchCommand。
+	MinPrefixLength int `yaml:"min_prefix_length,omitempty" json:"min_prefix_length,omitempty"`
 }
 
 // OverflowBehaviorConfig 候选按键无效时的处理策略
@@ -445,6 +455,9 @@ func DefaultConfig() *Config {
 				SelectKey:     OverflowIgnore,
 				SelectCharKey: OverflowIgnore,
 			},
+			Phrase: PhraseConfig{
+				MinPrefixLength: 2,
+			},
 		},
 		Advanced: AdvancedConfig{
 			LogLevel:            "info",
@@ -530,6 +543,11 @@ func ApplyConfigFallbacks(cfg *Config) {
 	// MaxCandidateChars 兜底：0 或越界时回退到 16，合法范围 8-64
 	if cfg.UI.MaxCandidateChars < 8 || cfg.UI.MaxCandidateChars > 64 {
 		cfg.UI.MaxCandidateChars = 16
+	}
+
+	// Phrase.MinPrefixLength 兜底：未配置 (0) 或负值时回退到 2
+	if cfg.Input.Phrase.MinPrefixLength <= 0 {
+		cfg.Input.Phrase.MinPrefixLength = 2
 	}
 
 	// 迁移旧的 theme:"dark" 配置到新格式
