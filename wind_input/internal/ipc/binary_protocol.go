@@ -280,6 +280,20 @@ func CalcKeyHash(modifiers, keyCode uint32) uint32 {
 	return (modifiers << 16) | (keyCode & 0xFFFF)
 }
 
+// Hotkey policy bits — 在 keyDown 哈希高 2 位编码 "何时该吃键" 策略。
+// 这些位不参与 incoming key 的 CalcKeyHash 计算（modifier 仅占低 9 位），
+// 仅由 hotkey.Compile() 在产出 keyDown 列表时按热键分类 OR 进去。
+// C++ HotkeyManager 收到后剥离 policy 位、按 bit 分流到 3 个独立 set。
+//
+// 默认（无 policy 位）= 两模式都吃；命中即 pfEaten = TRUE。
+// ChineseOnly = 仅中文模式吃。
+// Session     = 仅中文模式 + 有 composition/候选时吃。
+const (
+	HotkeyPolicyChineseOnly uint32 = 0x40000000
+	HotkeyPolicySession     uint32 = 0x80000000
+	HotkeyPolicyMask        uint32 = HotkeyPolicyChineseOnly | HotkeyPolicySession
+)
+
 // ParseKeyHash extracts modifiers and keyCode from a key hash
 func ParseKeyHash(hash uint32) (modifiers, keyCode uint32) {
 	return hash >> 16, hash & 0xFFFF

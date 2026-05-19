@@ -35,7 +35,14 @@ public:
 
     // Check if a KeyDown should be intercepted (O(1) lookup)
     // Returns true if the key matches a KeyDown hotkey in the whitelist
+    // 语义：两模式都吃（始终 pfEaten=TRUE）
     BOOL IsKeyDownHotkey(uint32_t keyHash) const;
+
+    // 仅中文模式吃。命中后中文 → 吃；英文 → 透传。
+    BOOL IsKeyDownChineseOnlyHotkey(uint32_t keyHash) const;
+
+    // 仅中文模式 + 有 composition / 候选时吃。其它情形透传。
+    BOOL IsKeyDownSessionHotkey(uint32_t keyHash) const;
 
     // Check if a KeyUp should be intercepted (O(1) lookup)
     // Returns true if the key matches a KeyUp hotkey in the whitelist
@@ -72,9 +79,22 @@ public:
     // Log current configuration (for debugging)
     void LogConfig() const;
 
+    // Hotkey policy bits (与 Go 侧 ipc.HotkeyPolicy* 对齐).
+    // Go 在 keyDown 哈希高 2 位编码该热键的"何时吃"策略；C++ 收到后剥离 policy 位、
+    // 按 bit 把哈希分流到 _keyDownHotkeys / _keyDownChineseOnly / _keyDownSession.
+    static constexpr uint32_t HOTKEY_POLICY_CHINESE_ONLY = 0x40000000;
+    static constexpr uint32_t HOTKEY_POLICY_SESSION      = 0x80000000;
+    static constexpr uint32_t HOTKEY_POLICY_MASK         = HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_SESSION;
+
 private:
-    // Hotkey whitelist (KeyDown triggered)
+    // Hotkey whitelist (KeyDown triggered) — 两模式都吃
     std::unordered_set<uint32_t> _keyDownHotkeys;
+
+    // 仅中文模式吃
+    std::unordered_set<uint32_t> _keyDownChineseOnly;
+
+    // 仅中文模式 + 有 session 吃
+    std::unordered_set<uint32_t> _keyDownSession;
 
     // Hotkey whitelist (KeyUp triggered - for toggle mode keys)
     std::unordered_set<uint32_t> _keyUpHotkeys;

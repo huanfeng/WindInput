@@ -15,12 +15,26 @@ void CHotkeyManager::UpdateHotkeys(const std::vector<uint32_t>& keyDownHotkeys,
 
     // Clear existing hotkeys
     _keyDownHotkeys.clear();
+    _keyDownChineseOnly.clear();
+    _keyDownSession.clear();
     _keyUpHotkeys.clear();
 
-    // Add KeyDown hotkeys
+    // Add KeyDown hotkeys — 按 policy 位分流到三个 set
     for (uint32_t hash : keyDownHotkeys)
     {
-        _keyDownHotkeys.insert(hash);
+        uint32_t rawHash = hash & ~HOTKEY_POLICY_MASK;
+        if (hash & HOTKEY_POLICY_SESSION)
+        {
+            _keyDownSession.insert(rawHash);
+        }
+        else if (hash & HOTKEY_POLICY_CHINESE_ONLY)
+        {
+            _keyDownChineseOnly.insert(rawHash);
+        }
+        else
+        {
+            _keyDownHotkeys.insert(rawHash);
+        }
     }
 
     // Add KeyUp hotkeys (for toggle mode keys like Shift, Ctrl, CapsLock)
@@ -35,6 +49,16 @@ void CHotkeyManager::UpdateHotkeys(const std::vector<uint32_t>& keyDownHotkeys,
 BOOL CHotkeyManager::IsKeyDownHotkey(uint32_t keyHash) const
 {
     return _keyDownHotkeys.find(keyHash) != _keyDownHotkeys.end();
+}
+
+BOOL CHotkeyManager::IsKeyDownChineseOnlyHotkey(uint32_t keyHash) const
+{
+    return _keyDownChineseOnly.find(keyHash) != _keyDownChineseOnly.end();
+}
+
+BOOL CHotkeyManager::IsKeyDownSessionHotkey(uint32_t keyHash) const
+{
+    return _keyDownSession.find(keyHash) != _keyDownSession.end();
 }
 
 BOOL CHotkeyManager::IsKeyUpHotkey(uint32_t keyHash) const
@@ -232,8 +256,9 @@ uint32_t CHotkeyManager::NormalizeModifiers(uint32_t modifiers)
 
 void CHotkeyManager::LogConfig() const
 {
-    WIND_LOG_DEBUG_FMT(L"HotkeyManager: keyDownHotkeys=%d, keyUpHotkeys=%d\n",
-              (int)_keyDownHotkeys.size(), (int)_keyUpHotkeys.size());
+    WIND_LOG_DEBUG_FMT(L"HotkeyManager: keyDownHotkeys=%d, chineseOnly=%d, session=%d, keyUpHotkeys=%d\n",
+              (int)_keyDownHotkeys.size(), (int)_keyDownChineseOnly.size(),
+              (int)_keyDownSession.size(), (int)_keyUpHotkeys.size());
 
     // Log some hotkey hashes for debugging
     if (!_keyDownHotkeys.empty())

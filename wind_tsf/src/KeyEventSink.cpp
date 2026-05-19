@@ -244,6 +244,48 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         }
     }
 
+    // Policy: 仅中文模式吃（AddWord / TogglePunct / ToggleS2T）
+    if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownChineseOnlyHotkey(normalizedKeyHash))
+    {
+        if (_pTextService->IsChineseMode())
+        {
+            WIND_LOG_DEBUG_FMT(L"KeyDown chinese-only hotkey matched: vk=0x%02X, hash=0x%08X\n",
+                               (uint32_t)wParam, normalizedKeyHash);
+            *pfEaten = TRUE;
+            _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::Hotkey,
+                            TRUE, _pTextService->HasActiveComposition(), _hasCandidates,
+                            _pTextService->HasActiveComposition() || _hasCandidates, TRUE, L"chineseonly_hotkey");
+            return S_OK;
+        }
+        // 英文模式 → 透传给宿主，避免干扰宿主原生快捷键 (如 Ctrl+= 放大)
+        WIND_LOG_DEBUG_FMT(L"KeyDown chinese-only hotkey skipped (english mode): vk=0x%02X, hash=0x%08X\n",
+                           (uint32_t)wParam, normalizedKeyHash);
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+
+    // Policy: 仅中文模式 + session 时吃（PinCandidate / DeleteCandidate Ctrl+0..9）
+    if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownSessionHotkey(normalizedKeyHash))
+    {
+        BOOL chineseMode = _pTextService->IsChineseMode();
+        BOOL hasSession  = _pTextService->HasActiveComposition() || _hasCandidates;
+        if (chineseMode && hasSession)
+        {
+            WIND_LOG_DEBUG_FMT(L"KeyDown session hotkey matched: vk=0x%02X, hash=0x%08X\n",
+                               (uint32_t)wParam, normalizedKeyHash);
+            *pfEaten = TRUE;
+            _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::Hotkey,
+                            TRUE, _pTextService->HasActiveComposition(), _hasCandidates,
+                            TRUE, TRUE, L"session_hotkey");
+            return S_OK;
+        }
+        // 无 session 或英文模式 → 透传 (e.g., QQ 在无候选时 Ctrl+1 切 tab)
+        WIND_LOG_DEBUG_FMT(L"KeyDown session hotkey skipped (chinese=%d session=%d): vk=0x%02X\n",
+                           (int)chineseMode, (int)hasSession, (uint32_t)wParam);
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+
     // Check for KeyUp triggered keys (toggle mode keys) - we still need to intercept KeyDown
     // First try hash-based lookup, then fallback to VK-based detection
     BOOL isToggleModeKey = FALSE;
@@ -731,9 +773,41 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         return S_OK;
     }
 
+    // Policy 早期闸门：Chrome / QQ 等宿主会无视 OnTestKeyDown 的 pfEaten=FALSE 仍调用
+    // OnKeyDown。这里对不满足 policy 的 chineseOnly / session 热键直接 return FALSE，
+    // 否则下方 isKeyDownHotkey 命中会把键发给 Go，触发 Go HandleKeyEvent 顶部的 AddWord
+    // 匹配（该匹配位于 mode 判定之前）造成英文模式误进 AddWord。
+    if (pHotkeyMgr != nullptr)
+    {
+        BOOL chineseMode = _pTextService->IsChineseMode();
+        if (pHotkeyMgr->IsKeyDownChineseOnlyHotkey(normalizedKeyHash) && !chineseMode)
+        {
+            WIND_LOG_DEBUG_FMT(L"OnKeyDown chinese-only hotkey skipped (english mode): vk=0x%02X\n",
+                               (uint32_t)wParam);
+            *pfEaten = FALSE;
+            return S_OK;
+        }
+        if (pHotkeyMgr->IsKeyDownSessionHotkey(normalizedKeyHash))
+        {
+            BOOL hasSession = _pTextService->HasActiveComposition() || _hasCandidates;
+            if (!chineseMode || !hasSession)
+            {
+                WIND_LOG_DEBUG_FMT(L"OnKeyDown session hotkey skipped (chinese=%d session=%d): vk=0x%02X\n",
+                                   (int)chineseMode, (int)hasSession, (uint32_t)wParam);
+                *pfEaten = FALSE;
+                return S_OK;
+            }
+        }
+    }
+
     // Check if this is a KeyDown hotkey from whitelist
     // Use normalized hash for function hotkeys (Ctrl+`, Shift+Space, etc.)
-    BOOL isKeyDownHotkey = (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownHotkey(normalizedKeyHash));
+    // 三个列表统一识别，避免 Ctrl/Alt cleanup 路径把 chinese-only / session 热键当成
+    // 无关的 Ctrl 组合键去吃掉。
+    BOOL isKeyDownHotkey = (pHotkeyMgr != nullptr && (
+                                pHotkeyMgr->IsKeyDownHotkey(normalizedKeyHash) ||
+                                pHotkeyMgr->IsKeyDownChineseOnlyHotkey(normalizedKeyHash) ||
+                                pHotkeyMgr->IsKeyDownSessionHotkey(normalizedKeyHash)));
 
     // Check for basic input keys
     // IMPORTANT: Different handling based on key type:

@@ -37,17 +37,12 @@ func (c *Compiler) Compile() (keyDownList, keyUpList []uint32) {
 	// KeyDown triggered hotkeys
 	// =========================================================================
 
-	// 1. Function hotkeys (Ctrl+`, Shift+Space, Ctrl+., etc.)
+	// 1. Function hotkeys 按 policy 分类（详见 docs/superpowers/specs/2026-05-19-ime-hotkey-eating-design.md）
+	// 两模式都吃（无 policy 位）
 	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.SwitchEngine); ok {
 		keyDownList = append(keyDownList, hash)
 	}
 	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.ToggleFullWidth); ok {
-		keyDownList = append(keyDownList, hash)
-	}
-	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.TogglePunct); ok {
-		keyDownList = append(keyDownList, hash)
-	}
-	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.AddWord); ok {
 		keyDownList = append(keyDownList, hash)
 	}
 	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.ToggleToolbar); ok {
@@ -56,13 +51,25 @@ func (c *Compiler) Compile() (keyDownList, keyUpList []uint32) {
 	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.OpenSettings); ok {
 		keyDownList = append(keyDownList, hash)
 	}
-	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.ToggleS2T); ok {
-		keyDownList = append(keyDownList, hash)
+
+	// 仅中文模式吃
+	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.TogglePunct); ok {
+		keyDownList = append(keyDownList, hash|ipc.HotkeyPolicyChineseOnly)
 	}
+	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.AddWord); ok {
+		keyDownList = append(keyDownList, hash|ipc.HotkeyPolicyChineseOnly)
+	}
+	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.ToggleS2T); ok {
+		keyDownList = append(keyDownList, hash|ipc.HotkeyPolicyChineseOnly)
+	}
+
+	// 仅中文模式 + 有 session 吃：PinCandidate / DeleteCandidate 模板展开为 0-9 共 10 个键
+	keyDownList = append(keyDownList, c.compileNumberHotkey(c.config.Hotkeys.PinCandidate)...)
+	keyDownList = append(keyDownList, c.compileNumberHotkey(c.config.Hotkeys.DeleteCandidate)...)
 
 	// Debug: Ctrl+Shift+R for clipboard paste code (hardcoded, debug only)
 	if buildvariant.IsDebug() {
-		keyDownList = append(keyDownList, ipc.CalcKeyHash(ipc.ModCtrl|ipc.ModShift, 0x52))
+		keyDownList = append(keyDownList, ipc.CalcKeyHash(ipc.ModCtrl|ipc.ModShift, 0x52)|ipc.HotkeyPolicyChineseOnly)
 	}
 
 	// 2. Select key groups (semicolon_quote, comma_period, lrshift, lrctrl)
@@ -138,6 +145,32 @@ func (c *Compiler) parseHotkeyString(hotkeyStr string) (uint32, bool) {
 	}
 
 	return ipc.CalcKeyHash(mods, keyCode), true
+}
+
+// compileNumberHotkey expands a "ctrl+number" / "ctrl+shift+number" template
+// into 10 hashes (digit 0-9), each tagged with HotkeyPolicySession because
+// PinCandidate / DeleteCandidate 只在有候选可见时才生效。
+//
+// 支持的模板：
+//   - "ctrl+number"        → Ctrl+0..9
+//   - "ctrl+shift+number"  → Ctrl+Shift+0..9
+//   - 其它（含 "none" / 空串）→ 不产出
+func (c *Compiler) compileNumberHotkey(template string) []uint32 {
+	template = strings.ToLower(strings.TrimSpace(template))
+	var mods uint32
+	switch template {
+	case "ctrl+number":
+		mods = ipc.ModCtrl
+	case "ctrl+shift+number":
+		mods = ipc.ModCtrl | ipc.ModShift
+	default:
+		return nil
+	}
+	hashes := make([]uint32, 0, 10)
+	for d := uint32(0); d <= 9; d++ {
+		hashes = append(hashes, ipc.CalcKeyHash(mods, 0x30+d)|ipc.HotkeyPolicySession)
+	}
+	return hashes
 }
 
 // compileToggleModeKey compiles a toggle mode key name to KeyHash
