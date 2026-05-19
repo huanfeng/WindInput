@@ -221,10 +221,20 @@ export const statusIndicatorSchema: PageSchema = [
 // ── 候选项提示信息卡片 ────────────────────────────────────────
 export const candidateTooltipSchema: PageSchema = [
   {
+    type: "slider",
+    key: "ui.tooltip_delay",
+    label: "悬停延时",
+    hint: "鼠标停留在候选上多久后弹出提示框（毫秒）；越大越不易误触",
+    min: 0,
+    max: 1500,
+    step: 50,
+    unit: "ms",
+  },
+  {
     type: "toggle",
     key: "ui.tooltip.code.enabled",
-    label: "编码显示",
-    hint: "悬停候选词时在提示框中显示对应的编码",
+    label: "编码反查",
+    hint: "悬停候选时在主码表中反查该词的标准编码并显示",
   },
   {
     type: "toggle",

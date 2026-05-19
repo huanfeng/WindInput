@@ -87,12 +87,16 @@ func (c *Coordinator) runTooltipQuery(
 	var sections []tooltip.Section
 	c.mu.Lock()
 	codeEnabled := c.config != nil && c.config.UI.Tooltip.Code.IsEnabled()
+	engineMgr := c.engineMgr
 	c.mu.Unlock()
-	if codeEnabled && cand.Code != "" {
-		sections = append(sections, tooltip.Section{
-			Label: "编码",
-			Lines: []string{cand.Code},
-		})
+	if codeEnabled && engineMgr != nil {
+		// 编码反查：在主码表中查 cand.Text 的标准编码（不是用户当前输入串）
+		if code := engineMgr.LookupCodeForText(cand.Text); code != "" {
+			sections = append(sections, tooltip.Section{
+				Label: "编码",
+				Lines: []string{code},
+			})
+		}
 	}
 	if svc != nil && svc.HasEnabledProviders() {
 		sections = append(sections, svc.Query(ctx, cand)...)

@@ -124,6 +124,7 @@ export interface UIConfig {
   theme_style: ThemeStyleValue;
   pager_display_mode: PagerDisplayModeValue;
   tooltip: TooltipConfig;
+  tooltip_delay: number; // 悬停候选触发 tooltip 的延迟（毫秒）
 }
 
 // 工具栏配置
@@ -402,6 +403,7 @@ export function getDefaultConfig(): Config {
         chaizi: { enabled: false },
         debug: { enabled: false },
       },
+      tooltip_delay: 200,
     },
     toolbar: {
       visible: true,

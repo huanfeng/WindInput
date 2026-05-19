@@ -528,6 +528,59 @@ func (m *Manager) ApplyCodeHintsToCandidates(cands []candidate.Candidate) {
 	}
 }
 
+// LookupCodeForText 在主码表中反查 text 对应的编码（用于候选 tooltip "编码"行）。
+// 与 ApplyCodeHintsToCandidates 同源逻辑：单字命中反向索引；多字词通过编码规则
+// 推导出编码并用 CodeTable.Lookup 校验该词条确实存在。未命中返回空串。
+//
+// 与 cand.Code 的区别：cand.Code 是触发该候选的用户输入串（可能为拼音/部分编码），
+// 本方法返回主码表中"打出该词的标准编码"，用于反查展示。
+func (m *Manager) LookupCodeForText(text string) string {
+	if text == "" {
+		return ""
+	}
+	idx := m.GetReverseIndex()
+	if len(idx) == 0 {
+		return ""
+	}
+	if len([]rune(text)) == 1 {
+		if codes := idx[text]; len(codes) > 0 {
+			return codes[0]
+		}
+		return ""
+	}
+
+	m.mu.RLock()
+	primaryID := m.primaryCodetableID
+	if primaryID == "" {
+		primaryID = m.currentID
+	}
+	var ct *dict.CodeTable
+	if eng, ok := m.engines[primaryID]; ok {
+		ct = extractCodeTable(eng)
+	}
+	if ct == nil && m.currentEngine != nil {
+		ct = extractCodeTable(m.currentEngine)
+	}
+	m.mu.RUnlock()
+	if ct == nil {
+		return ""
+	}
+
+	rules := m.getCodetableEncoderRules()
+	if len(rules) == 0 {
+		return ""
+	}
+	enc := encoding.NewReverseEncoder(idx, rules)
+	code, err := enc.Encode(text)
+	if err != nil || code == "" {
+		return ""
+	}
+	if !codeTableContainsText(ct, code, text) {
+		return ""
+	}
+	return code
+}
+
 // codeTableContainsText 检查码表中指定编码下是否存在目标文本的词条
 func codeTableContainsText(ct *dict.CodeTable, code, text string) bool {
 	for _, e := range ct.Lookup(code) {
