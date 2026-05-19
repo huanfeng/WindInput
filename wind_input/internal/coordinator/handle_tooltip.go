@@ -102,6 +102,9 @@ func (c *Coordinator) runTooltipQuery(
 		return
 	}
 
+	// 拆字 + 拼音同时启用时合并为单 section，每字一行（拆字列在前，拼音列在后）
+	sections = tooltip.MergeChaiziPinyin(sections)
+
 	content := tooltip.FormatContent("", sections)
 	if content == "" {
 		return

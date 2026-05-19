@@ -352,19 +352,105 @@ func (w *TooltipWindow) render(text string, maxContentWidth float64) *image.RGBA
 		lines = kept
 	}
 
-	// 单行宽度限制：超过 maxContentWidth 则尾部截断为 "…"
+	// 将每行按 \t 拆成 cells，支持列对齐渲染（用于"拆字 / 拼音"合并显示等场景）
 	innerMax := maxContentWidth - padding*2
-	if innerMax > 0 {
-		for i, line := range lines {
-			lw := td.MeasureString(line, fontSize)
-			if lw <= innerMax {
-				continue
-			}
-			lines[i] = truncateLineToWidth(td, line, fontSize, innerMax)
+	colGap := 16.0 * scale
+
+	rows := make([][]string, len(lines))
+	numCols := 1
+	for i, line := range lines {
+		cells := strings.Split(line, "\t")
+		rows[i] = cells
+		if len(cells) > numCols {
+			numCols = len(cells)
 		}
 	}
 
-	// 计算各行宽度，取最大值
+	// 单列路径：保持原有简单行截断
+	if numCols == 1 {
+		if innerMax > 0 {
+			for i, line := range lines {
+				if td.MeasureString(line, fontSize) > innerMax {
+					lines[i] = truncateLineToWidth(td, line, fontSize, innerMax)
+				}
+			}
+		}
+	} else {
+		// 多列路径：每列取最大宽度对齐；若总宽超 innerMax，截断最后一列
+		colWidth := make([]float64, numCols)
+		for _, cells := range rows {
+			for k := 0; k < numCols; k++ {
+				if k >= len(cells) {
+					break
+				}
+				lw := td.MeasureString(cells[k], fontSize)
+				if lw > colWidth[k] {
+					colWidth[k] = lw
+				}
+			}
+		}
+		if innerMax > 0 {
+			var fixed float64
+			for k := 0; k < numCols-1; k++ {
+				fixed += colWidth[k]
+			}
+			fixed += float64(numCols-1) * colGap
+			lastBudget := innerMax - fixed
+			if lastBudget < 0 {
+				lastBudget = 0
+			}
+			if colWidth[numCols-1] > lastBudget {
+				colWidth[numCols-1] = 0
+				for i, cells := range rows {
+					if len(cells) < numCols {
+						continue
+					}
+					if td.MeasureString(cells[numCols-1], fontSize) > lastBudget {
+						rows[i][numCols-1] = truncateLineToWidth(td, cells[numCols-1], fontSize, lastBudget)
+					}
+					lw := td.MeasureString(rows[i][numCols-1], fontSize)
+					if lw > colWidth[numCols-1] {
+						colWidth[numCols-1] = lw
+					}
+				}
+			}
+		}
+
+		// 依列宽重组行用于宽度计算（保留 rows 给绘制阶段）
+		var totalW float64
+		for k := 0; k < numCols; k++ {
+			totalW += colWidth[k]
+		}
+		totalW += float64(numCols-1) * colGap
+
+		lineH := fontSize + lineSpacing
+		width := totalW + padding*2
+		height := lineH*float64(len(rows)) - lineSpacing + padding*2
+
+		dc := gg.NewContext(int(width), int(height))
+		dc.SetColor(bgColor)
+		dc.DrawRoundedRectangle(0, 0, width, height, 4*scale)
+		dc.Fill()
+
+		img := dc.Image().(*image.RGBA)
+		td.BeginDraw(img)
+		for i, cells := range rows {
+			y := padding + fontSize*0.8 + float64(i)*lineH
+			x := padding
+			for k := 0; k < numCols; k++ {
+				if k < len(cells) {
+					td.DrawString(cells[k], x, y, fontSize, textColor)
+				}
+				x += colWidth[k] + colGap
+			}
+		}
+		td.EndDraw()
+
+		DrawDebugBanner(img)
+		return img
+	}
+
+	// 计算各行宽度，取最大值（单列路径）
 	var maxLineWidth float64
 	for _, line := range lines {
 		lw := td.MeasureString(line, fontSize)
@@ -377,13 +463,11 @@ func (w *TooltipWindow) render(text string, maxContentWidth float64) *image.RGBA
 	width := maxLineWidth + padding*2
 	height := lineH*float64(len(lines)) - lineSpacing + padding*2
 
-	// Phase 1: 绘制背景
 	dc := gg.NewContext(int(width), int(height))
 	dc.SetColor(bgColor)
 	dc.DrawRoundedRectangle(0, 0, width, height, 4*scale)
 	dc.Fill()
 
-	// Phase 2: 逐行绘制文字
 	img := dc.Image().(*image.RGBA)
 	td.BeginDraw(img)
 	for i, line := range lines {
