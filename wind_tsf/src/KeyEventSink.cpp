@@ -293,17 +293,27 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     // TSF sends generic VK_SHIFT/VK_CONTROL as wParam, but the hotkey whitelist
     // registers specific VK_LSHIFT/VK_RSHIFT/VK_LCONTROL/VK_RCONTROL.
     // Resolve the generic VK to specific left/right variant for proper hash matching.
+    // 优先用 modifiers 参数（GetCurrentModifiers 双源），降级 GetAsyncKeyState；
+    // WebView2 / Wails / 部分 Chromium 宿主下 GetAsyncKeyState 拿不到 L/R Shift。
     uint32_t resolvedVK = (uint32_t)wParam;
     if (wParam == VK_SHIFT)
     {
-        if (GetAsyncKeyState(VK_LSHIFT) & 0x8000)
+        if (modifiers & KEYMOD_LSHIFT)
+            resolvedVK = VK_LSHIFT;
+        else if (modifiers & KEYMOD_RSHIFT)
+            resolvedVK = VK_RSHIFT;
+        else if (GetAsyncKeyState(VK_LSHIFT) & 0x8000)
             resolvedVK = VK_LSHIFT;
         else if (GetAsyncKeyState(VK_RSHIFT) & 0x8000)
             resolvedVK = VK_RSHIFT;
     }
     else if (wParam == VK_CONTROL)
     {
-        if (GetAsyncKeyState(VK_LCONTROL) & 0x8000)
+        if (modifiers & KEYMOD_LCTRL)
+            resolvedVK = VK_LCONTROL;
+        else if (modifiers & KEYMOD_RCTRL)
+            resolvedVK = VK_RCONTROL;
+        else if (GetAsyncKeyState(VK_LCONTROL) & 0x8000)
             resolvedVK = VK_LCONTROL;
         else if (GetAsyncKeyState(VK_RCONTROL) & 0x8000)
             resolvedVK = VK_RCONTROL;
@@ -631,16 +641,28 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // Resolve the generic VK to specific left/right variant for proper hash matching.
     BOOL isToggleModeKey = FALSE;
     uint32_t resolvedVK = (uint32_t)wParam;
+    // 优先用 modifiers 参数解析左右键。modifiers 由 GetCurrentModifiers 计算（使用
+    // GetAsyncKeyState OR GetKeyState 双源），更可靠。
+    // GetAsyncKeyState 在 WebView2 / Wails / 部分 Chromium 宿主进程里对 VK_LSHIFT/RSHIFT
+    // 返回 0，导致解析失败 → Shift 切换中英文无效。modifiers fallback 解决该兼容性问题。
     if (wParam == VK_SHIFT)
     {
-        if (GetAsyncKeyState(VK_LSHIFT) & 0x8000)
+        if (modifiers & KEYMOD_LSHIFT)
+            resolvedVK = VK_LSHIFT;
+        else if (modifiers & KEYMOD_RSHIFT)
+            resolvedVK = VK_RSHIFT;
+        else if (GetAsyncKeyState(VK_LSHIFT) & 0x8000)
             resolvedVK = VK_LSHIFT;
         else if (GetAsyncKeyState(VK_RSHIFT) & 0x8000)
             resolvedVK = VK_RSHIFT;
     }
     else if (wParam == VK_CONTROL)
     {
-        if (GetAsyncKeyState(VK_LCONTROL) & 0x8000)
+        if (modifiers & KEYMOD_LCTRL)
+            resolvedVK = VK_LCONTROL;
+        else if (modifiers & KEYMOD_RCTRL)
+            resolvedVK = VK_RCONTROL;
+        else if (GetAsyncKeyState(VK_LCONTROL) & 0x8000)
             resolvedVK = VK_LCONTROL;
         else if (GetAsyncKeyState(VK_RCONTROL) & 0x8000)
             resolvedVK = VK_RCONTROL;
@@ -676,14 +698,20 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         }
 
         // Check if other modifiers are pressed (e.g., Ctrl+Shift is a system shortcut)
+        // 用 modifiers 双源参数为主，GetAsyncKeyState 降级；WebView2 等宿主下 GetAsyncKeyState
+        // 不可靠，会误判"无其它修饰"，导致 Ctrl+Shift 等系统组合被吞作切换。
         BOOL hasOtherModifier = FALSE;
         if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT)
         {
-            hasOtherModifier = (GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000);
+            hasOtherModifier = (modifiers & (KEYMOD_CTRL | KEYMOD_ALT))
+                            || (GetAsyncKeyState(VK_CONTROL) & 0x8000)
+                            || (GetAsyncKeyState(VK_MENU) & 0x8000);
         }
         else if (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL)
         {
-            hasOtherModifier = (GetAsyncKeyState(VK_SHIFT) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000);
+            hasOtherModifier = (modifiers & (KEYMOD_SHIFT | KEYMOD_ALT))
+                            || (GetAsyncKeyState(VK_SHIFT) & 0x8000)
+                            || (GetAsyncKeyState(VK_MENU) & 0x8000);
         }
 
         if (hasOtherModifier)
@@ -712,28 +740,29 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         // IMPORTANT: Determine the specific left/right key for proper config matching
         // wParam might be generic VK_SHIFT, but we need to know if it's LShift or RShift
         uint32_t specificKey = (uint32_t)wParam;
+        // 同 keyUpHash 解析：优先用 modifiers（双源），降级 GetAsyncKeyState。
+        // 修复 WebView2 / Wails 等 Chromium 宿主下 GetAsyncKeyState 拿不到具体 L/R Shift 的兼容问题。
         if (wParam == VK_SHIFT)
         {
-            // Determine which shift is actually pressed using GetAsyncKeyState
-            if (GetAsyncKeyState(VK_LSHIFT) & 0x8000)
-            {
+            if (modifiers & KEYMOD_LSHIFT)
                 specificKey = VK_LSHIFT;
-            }
-            else if (GetAsyncKeyState(VK_RSHIFT) & 0x8000)
-            {
+            else if (modifiers & KEYMOD_RSHIFT)
                 specificKey = VK_RSHIFT;
-            }
+            else if (GetAsyncKeyState(VK_LSHIFT) & 0x8000)
+                specificKey = VK_LSHIFT;
+            else if (GetAsyncKeyState(VK_RSHIFT) & 0x8000)
+                specificKey = VK_RSHIFT;
         }
         else if (wParam == VK_CONTROL)
         {
-            if (GetAsyncKeyState(VK_LCONTROL) & 0x8000)
-            {
+            if (modifiers & KEYMOD_LCTRL)
                 specificKey = VK_LCONTROL;
-            }
-            else if (GetAsyncKeyState(VK_RCONTROL) & 0x8000)
-            {
+            else if (modifiers & KEYMOD_RCTRL)
                 specificKey = VK_RCONTROL;
-            }
+            else if (GetAsyncKeyState(VK_LCONTROL) & 0x8000)
+                specificKey = VK_LCONTROL;
+            else if (GetAsyncKeyState(VK_RCONTROL) & 0x8000)
+                specificKey = VK_RCONTROL;
         }
         _pendingKeyUpKey = specificKey;
         _pendingKeyUpModifiers = modifiers;
