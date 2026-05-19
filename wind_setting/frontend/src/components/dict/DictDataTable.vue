@@ -81,6 +81,11 @@ const table = useVueTable({
   get columns() {
     return props.columns;
   },
+  initialState: {
+    pagination: {
+      pageSize: props.pageSize > 0 ? props.pageSize : 10,
+    },
+  },
   state: {
     get globalFilter() {
       return globalFilter.value;
