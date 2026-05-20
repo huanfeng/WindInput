@@ -9,8 +9,9 @@ import (
 	"github.com/huanfeng/wind_input/pkg/encoding"
 )
 
-// autoPhraseTimeout 连续单字之间的最大间隔，超过则重置缓冲区
-const autoPhraseTimeout = 10 * time.Second
+// defaultAutoPhraseIdleTimeout 兜底默认值：AutoPhraseSpec.IdleTimeoutMs <= 0 时使用。
+// 与 schema.GetAutoPhraseConfig 的默认值保持一致（5000ms）。
+const defaultAutoPhraseIdleTimeout = 5 * time.Second
 
 // LearningStrategy 学习策略接口（只负责造词）
 // 调频由 dict.FreqHandler 独立处理
@@ -158,8 +159,21 @@ func (p *CodeTableAutoPhrase) SetSystemChecker(checker SystemWordChecker) {
 	p.systemChecker = checker
 }
 
+// idleTimeout 返回当前配置下的连续单字最大间隔；未配置或非正数时回退到默认 5s。
+func (p *CodeTableAutoPhrase) idleTimeout() time.Duration {
+	if p.config.IdleTimeoutMs > 0 {
+		return time.Duration(p.config.IdleTimeoutMs) * time.Millisecond
+	}
+	return defaultAutoPhraseIdleTimeout
+}
+
 // OnWordCommitted 用户上屏回调
 // 单字 → 追加到缓冲区；多字词 → 终止当前序列；若多字词已在临时词库中, 增加其计数
+//
+// 关键设计（2026-05-20 修订）：
+// 单字到达时若距上一字间隔超过 IdleTimeoutMs，先 flush 旧序列（写词+清空），再追加新字。
+// 这样即使 Enter/Space 等终止键在 buffer 为空时未被 IME 捕获（Go 端收不到事件），
+// 下一次单字到达时也能补救——避免跨句拼接成 "加好加好" 这类乱词。
 func (p *CodeTableAutoPhrase) OnWordCommitted(code, text string) {
 	runes := []rune(text)
 	now := time.Now()
@@ -168,19 +182,34 @@ func (p *CodeTableAutoPhrase) OnWordCommitted(code, text string) {
 	defer p.mu.Unlock()
 
 	if len(runes) == 1 {
-		// 距上一个单字间隔超过阈值，先清空旧序列再开始新序列
-		if len(p.charBuffer) > 0 && now.Sub(p.lastCharTime) > autoPhraseTimeout {
-			p.charBuffer = p.charBuffer[:0]
+		// idle flush: 距上一字间隔过久 → 把已累积的单字序列作为终止信号 flush，
+		// 然后开始新序列。flush() 内部 defer 清空 buffer，无需在此手动清。
+		if len(p.charBuffer) > 0 {
+			elapsed := now.Sub(p.lastCharTime)
+			if elapsed > p.idleTimeout() {
+				p.logger.Debug("AutoPhrase idle flush triggered",
+					"bufLen", len(p.charBuffer),
+					"elapsedMs", elapsed.Milliseconds(),
+					"timeoutMs", p.idleTimeout().Milliseconds())
+				p.flush()
+			}
 		}
 		p.charBuffer = append(p.charBuffer, runes[0])
 		p.lastCharTime = now
+		p.logger.Debug("AutoPhrase append char",
+			"char", string(runes[0]),
+			"bufLen", len(p.charBuffer))
 		return
 	}
 	// 多字词上屏 = 终止符: 先 flush 已累积的单字序列
+	p.logger.Debug("AutoPhrase multi-char commit, flush buffer",
+		"bufLen", len(p.charBuffer),
+		"committedLen", len(runes))
 	p.flush()
 	// 如果该多字词已在临时词库中, 增加计数（达到阈值则晋升）
 	if p.tempLayer != nil && code != "" {
 		if exists, promoted := p.tempLayer.IncrementIfExists(code, text, p.config.WeightDelta); exists && promoted {
+			p.logger.Debug("AutoPhrase existing temp word promoted", "code", code, "textLen", len(runes))
 			p.tempLayer.PromoteWord(code, text)
 		}
 	}
@@ -224,7 +253,12 @@ func (p *CodeTableAutoPhrase) flush() {
 	word := string(p.charBuffer[start:])
 	code := p.wordCodeCalc.CalcWordCode(word)
 	if code == "" {
-		p.logger.Debug("AutoPhrase flush skipped: CalcWordCode returned empty", "wordLen", len([]rune(word)))
+		// DEBUG 级允许带具体字符（CLAUDE.md 隐私规则：INFO 及以下不得带，DEBUG 可带）。
+		// 这条日志是排查"自动造词不生效"最关键的线索——通常表示某个字没有可用全码
+		// （扩展字、码表里只有简码、或字根本不在码表里）。
+		p.logger.Debug("AutoPhrase flush skipped: CalcWordCode returned empty",
+			"word", word,
+			"wordLen", len([]rune(word)))
 		return
 	}
 
@@ -244,7 +278,7 @@ func (p *CodeTableAutoPhrase) flush() {
 		}
 	}
 
-	p.logger.Debug("AutoPhrase learnWord", "code", code, "wordLen", len([]rune(word)))
+	p.logger.Debug("AutoPhrase learnWord", "code", code, "word", word, "wordLen", len([]rune(word)))
 	p.learnWord(code, word)
 }
 
@@ -253,13 +287,16 @@ func (p *CodeTableAutoPhrase) learnWord(code, word string) {
 	if p.tempLayer != nil {
 		promoted := p.tempLayer.LearnWord(code, word, p.config.AddWeight, p.config.WeightDelta)
 		if promoted {
-			p.logger.Debug("AutoPhrase word promoted to user layer", "code", code)
+			p.logger.Debug("AutoPhrase word promoted to user layer", "code", code, "word", word)
 			p.tempLayer.PromoteWord(code, word)
+		} else {
+			p.logger.Debug("AutoPhrase learnWord written to temp layer", "code", code, "word", word)
 		}
 		return
 	}
 	// 无临时词库时回退到用户词库（带误选保护）
 	if p.userLayer != nil {
+		p.logger.Debug("AutoPhrase learnWord written direct to user layer", "code", code, "word", word)
 		p.userLayer.OnWordSelected(code, word,
 			p.config.AddWeight, p.config.WeightDelta, p.config.CountThreshold)
 	}
@@ -273,12 +310,22 @@ func NewCodeTableLearningStrategy(ls *LearningSpec, logger *slog.Logger) *CodeTa
 
 // --- WordCodeCalculator 实现 ---
 
-// EncoderWordCodeCalc 基于反向索引和编码规则计算词编码
-// 反向索引在首次调用 CalcWordCode 时惰性构建，避免未使用时的额外开销
+// EncoderWordCodeCalc 自动造词的编码计算器。
+//
+// 设计（2026-05-20 修订）：直接复用 encoding.ReverseEncoder，与手动加词
+// （coordinator/handle_addword.go 的 calcWordCodeForCurrentSchema）走同一条
+// 编码路径。两条路径的唯一差异仅在反查索引来源——都是码表的单字反查索引，
+// 由 ReverseEncoder.encodeMultiChar 对每个字"取最长码"，因此对
+// "中"=k(简码) / khkg(全码) 这种简码权重高于全码的常见 case，能正确选用全码。
+//
+// 历史 bug（2026-05-20 之前）：自动加词曾自己实现编码循环，对每个字取
+// reverseIndex codes[0]（按 weight 排序首位 = 简码），简码长度不足以支撑
+// 拆字公式取第 2 位码元（如 wubi86 2 字词 AaAbBaBb 的 Ab/Bb），
+// 导致 CalcWordCode 永远返回空、自动造词不生效。
 type EncoderWordCodeCalc struct {
-	rules        []encoding.Rule
-	codeTable    *dict.CodeTable
-	reverseIndex map[string][]string // 惰性构建
+	rules     []encoding.Rule
+	codeTable *dict.CodeTable
+	encoder   *encoding.ReverseEncoder // 惰性构建，与 handle_addword 共享同一编码路径
 }
 
 // NewEncoderWordCodeCalc 创建编码计算器
@@ -299,34 +346,17 @@ func NewEncoderWordCodeCalc(schemaRules []EncoderRule, codeTable *dict.CodeTable
 	}
 }
 
-// CalcWordCode 计算词的编码
+// CalcWordCode 计算词的编码。失败时返回空串。
+// 与手动加词共享 encoding.ReverseEncoder：单字取最短码（简码优先），
+// 多字词每个字取最长码（全码，确保拆字公式不越界）。
 func (c *EncoderWordCodeCalc) CalcWordCode(word string) string {
 	if len(c.rules) == 0 || c.codeTable == nil {
 		return ""
 	}
-
-	// 惰性构建反向索引
-	if c.reverseIndex == nil {
-		c.reverseIndex = c.codeTable.BuildSingleCharReverseIndex()
+	if c.encoder == nil {
+		c.encoder = encoding.NewReverseEncoder(c.codeTable.BuildSingleCharReverseIndex(), c.rules)
 	}
-
-	// 为每个字查找全码（取最长编码）
-	charCodes := make(map[string]string)
-	for _, ch := range word {
-		charStr := string(ch)
-		if _, ok := charCodes[charStr]; ok {
-			continue
-		}
-		codes, found := c.reverseIndex[charStr]
-		if !found || len(codes) == 0 {
-			return ""
-		}
-		// reverseIndex 已按 weight 降序 → 长度降序排序，codes[0] 即最常用的全码。
-		// 不再使用"取最长"的策略，避免被异体字代码（如四叠字 cccc）干扰。
-		charCodes[charStr] = codes[0]
-	}
-
-	code, err := encoding.CalcWordCode(word, charCodes, c.rules)
+	code, err := c.encoder.Encode(word)
 	if err != nil {
 		return ""
 	}

@@ -191,6 +191,10 @@ type AutoPhraseSpec struct {
 	AddWeight      int  `yaml:"add_weight,omitempty"`      // 新词初始权重（默认 800）
 	WeightDelta    int  `yaml:"weight_delta,omitempty"`    // 每次命中权重增量（默认 40）
 	CountThreshold int  `yaml:"count_threshold,omitempty"` // 误选保护阈值（默认 2）
+	// IdleTimeoutMs 连续单字之间的最大空闲间隔（毫秒），超过则把已累积的序列作为终止信号 flush（写词）。
+	// 兜底场景：Enter/Space 在 buffer 为空时不会被 IME 捕获，无法触发常规 OnPhraseTerminated；
+	// 下一次单字到达时 idle 检测会先 flush 旧序列再开始新序列，避免跨句拼接出 "加好加好" 这种乱词。
+	IdleTimeoutMs int `yaml:"idle_timeout_ms,omitempty"` // 默认 5000
 }
 
 // FreqSpec 自动调频配置
@@ -255,6 +259,7 @@ func (ls *LearningSpec) GetAutoPhraseConfig() AutoPhraseSpec {
 		AddWeight:      800,
 		WeightDelta:    40,
 		CountThreshold: 2,
+		IdleTimeoutMs:  5000,
 	}
 	if ls.AutoPhrase != nil {
 		if ls.AutoPhrase.MinPhraseLen > 0 {
@@ -271,6 +276,9 @@ func (ls *LearningSpec) GetAutoPhraseConfig() AutoPhraseSpec {
 		}
 		if ls.AutoPhrase.CountThreshold > 0 {
 			cfg.CountThreshold = ls.AutoPhrase.CountThreshold
+		}
+		if ls.AutoPhrase.IdleTimeoutMs > 0 {
+			cfg.IdleTimeoutMs = ls.AutoPhrase.IdleTimeoutMs
 		}
 	}
 	return cfg

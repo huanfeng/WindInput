@@ -146,7 +146,7 @@ export const engineSchema: EngineSchema = [
     type: 'toggle',
     key: 'learning.auto_learn.enabled',
     label: '自动造词',
-    hint: '连续输入单字后以标点、词组或回车结束时，自动将单字序列组词并加入临时词库',
+    hint: '连续输入 2-5 个单字后，遇到标点 / 词组 / 回车 / 空格 / 焦点切换，或两次输入间隔超过 5 秒时，自动将单字序列组词并加入临时词库',
     engines: ['codetable'],
     tab: 'basic',
   },
