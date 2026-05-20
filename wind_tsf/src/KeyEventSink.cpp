@@ -1418,7 +1418,9 @@ BOOL CKeyEventSink::_IsMatchingKeyUp(WPARAM wParam, uint32_t pendingKey)
 BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
 {
     // 走与 OnKeyDown 同一通路：send + handle response。
-    // 不需要走 OnTestKeyDown 因为 RegisterHotKey 已经消费了按键，TSF 不会再回调。
+    // 仅用于 Pin/Delete 候选热键（Ctrl+0..9 / Ctrl+Shift+0..9），它们操作的是
+    // 已经显示的候选，不依赖 caret / composition 状态。AddWord (Ctrl+=) 走
+    // OnKeyDown 通路以确保 TSF composition 能正常建立。
     if (!_SendKeyToService(vk, mods, KEY_EVENT_DOWN))
     {
         WIND_LOG_ERROR_FMT(L"DispatchHotkey: _SendKeyToService failed vk=0x%02X mods=0x%04X\n", vk, mods);

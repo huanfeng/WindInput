@@ -700,7 +700,7 @@ CTextService::CTextService()
     , _hHotkeyWnd(nullptr)
     , _hotkeyWndClass(0)
     , _hotkeysActive(FALSE)
-    , _addWordHotkeyActive(FALSE)
+    , _hasThreadFocus(FALSE)
     , _activateFlags(0)
     , _pKeyEventSink(nullptr)
     , _pIPCClient(nullptr)
@@ -1151,9 +1151,41 @@ void CTextService::_UninitThreadMgrEventSink()
 }
 
 // ITfThreadFocusSink — 线程进入 foreground（应用窗口被激活）。
+// 跨进程协调：当某个进程通过 race check 让出热键时，PostMessage 给当前前台
+// 进程的 IME hidden window，让对方立即重试注册（避免对方等到下次 IME 事件
+// 才发现热键空出来）。消息 ID 用 RegisterWindowMessage 全局注册，所有进程
+// 取到相同 ID。
+static UINT GetRetryHotkeyMessageId()
+{
+    static UINT s_msg = RegisterWindowMessageW(L"WindInputHotkeyRetry_v1");
+    return s_msg;
+}
+
+// Foreground self-check timer：兜底 OnKillThreadFocus 在 Chromium / Wails 类
+// 宿主里可能不触发的问题。只要本进程持有任何热键就需要定期校验，500ms 间隔
+// 既能尽快让出（用户切走半秒内），开销又可忽略。
+static constexpr UINT_PTR kFocusCheckTimerId = 0x57494E44; // 'WIND'
+static constexpr UINT     kFocusCheckIntervalMs = 500;
+
+// Win32 RegisterHotKey 热键 ID（前置声明给 OnKillThreadFocus 使用）
+// 窗口类名按 Debug / Release 区分（class name 是 per-process 不会跨进程冲突，但
+// 命名约定与 pipe / CLSID 等其他跨进程资源保持一致，便于 Spy++ 等工具区分两版本）。
+#ifdef WIND_DEBUG_VARIANT
+static const wchar_t* kHotkeyWndClassName = L"WindInputHotkeyWndDebug";
+static const wchar_t* kHotkeyWndTitle     = L"WindInputHotkeyDebug";
+#else
+static const wchar_t* kHotkeyWndClassName = L"WindInputHotkeyWnd";
+static const wchar_t* kHotkeyWndTitle     = L"WindInputHotkey";
+#endif
+static constexpr int  kHotkeyIdPinBase    = 0x4000; // Pin: Ctrl+N → id = kHotkeyIdPinBase + N
+static constexpr int  kHotkeyIdDelBase    = 0x4010; // Delete: Ctrl+Shift+N → id = kHotkeyIdDelBase + N
+
 STDAPI CTextService::OnSetThreadFocus()
 {
     WIND_LOG_DEBUG(L"OnSetThreadFocus called\n");
+    _hasThreadFocus = TRUE;
+    // 拿回 thread focus：候选可见性热键由 NotifyCandidatesVisibilityChanged 驱动，
+    // 这里不主动补——切焦点时候选窗通常已经消失。
     return S_OK;
 }
 
@@ -1161,6 +1193,12 @@ STDAPI CTextService::OnSetThreadFocus()
 STDAPI CTextService::OnKillThreadFocus()
 {
     WIND_LOG_DEBUG(L"OnKillThreadFocus called\n");
+    _hasThreadFocus = FALSE;
+    // 立即让出所有热键，让前台应用的 IME 实例能注册成功。
+    if (_hotkeysActive)
+    {
+        _UnregisterCandidateHotkeys();
+    }
     return S_OK;
 }
 
@@ -1170,11 +1208,6 @@ STDAPI CTextService::OnKillThreadFocus()
 // 派发之前直接消费，规避 QQNT 等 Chromium 类宿主的加速键双处理。无候选时立即
 // UnregisterHotKey 让宿主重获这些键。机制来自第三方输入法的实测验证。
 // ============================================================================
-
-static const wchar_t* kHotkeyWndClassName = L"WindInputHotkeyWnd";
-static constexpr int  kHotkeyIdPinBase    = 0x4000; // Pin: Ctrl+N → id = kHotkeyIdPinBase + N
-static constexpr int  kHotkeyIdDelBase    = 0x4010; // Delete: Ctrl+Shift+N → id = kHotkeyIdDelBase + N
-static constexpr int  kHotkeyIdAddWord    = 0x4020; // AddWord: Ctrl+= (VK_OEM_PLUS)
 
 BOOL CTextService::_InitHotkeyWindow()
 {
@@ -1200,7 +1233,7 @@ BOOL CTextService::_InitHotkeyWindow()
     }
 
     // 消息专用窗口（HWND_MESSAGE 父窗口），不可见、不占桌面位置。
-    _hHotkeyWnd = CreateWindowExW(0, kHotkeyWndClassName, L"WindInputHotkey",
+    _hHotkeyWnd = CreateWindowExW(0, kHotkeyWndClassName, kHotkeyWndTitle,
                                    0, 0, 0, 0, 0,
                                    HWND_MESSAGE, nullptr, hInst, nullptr);
     if (_hHotkeyWnd == nullptr)
@@ -1211,6 +1244,21 @@ BOOL CTextService::_InitHotkeyWindow()
     // 把 this 存到窗口数据，WndProc 用来取回 CTextService 实例
     SetWindowLongPtrW(_hHotkeyWnd, GWLP_USERDATA, (LONG_PTR)this);
     WIND_LOG_INFO_FMT(L"Hotkey window created hwnd=0x%p\n", _hHotkeyWnd);
+
+    // 初始化 thread focus 状态：TSF 的 OnSetThreadFocus 仅在焦点 transition 时触发，
+    // 若 IME 激活时本进程恰好已经是前台（典型场景：用户刚点中输入框），不能等
+    // 它的通知。用 GetForegroundWindow 的进程 ID 做自检种子。
+    HWND hFg = GetForegroundWindow();
+    if (hFg != nullptr)
+    {
+        DWORD fgPid = 0;
+        GetWindowThreadProcessId(hFg, &fgPid);
+        _hasThreadFocus = (fgPid == GetCurrentProcessId());
+        WIND_LOG_DEBUG_FMT(L"_InitHotkeyWindow: initial thread focus seed=%d (fgPid=%u ownPid=%u)\n",
+                           (int)_hasThreadFocus, fgPid, GetCurrentProcessId());
+    }
+    // 启动前台自检 timer：兜底 OnKillThreadFocus 不可靠的宿主（Wails/Chromium 等）
+    SetTimer(_hHotkeyWnd, kFocusCheckTimerId, kFocusCheckIntervalMs, nullptr);
     return TRUE;
 }
 
@@ -1219,11 +1267,6 @@ void CTextService::_UninitHotkeyWindow()
     if (_hotkeysActive)
     {
         _UnregisterCandidateHotkeys();
-    }
-    if (_addWordHotkeyActive && _hHotkeyWnd != nullptr)
-    {
-        UnregisterHotKey(_hHotkeyWnd, kHotkeyIdAddWord);
-        _addWordHotkeyActive = FALSE;
     }
     if (_hHotkeyWnd != nullptr)
     {
@@ -1240,6 +1283,9 @@ void CTextService::_UninitHotkeyWindow()
 void CTextService::_RegisterCandidateHotkeys()
 {
     if (_hHotkeyWnd == nullptr || _hotkeysActive) return;
+    // 没拿到 thread focus 时绝不注册 — 多进程 IME 实例竞争同一组热键会引发
+    // ERROR_HOTKEY_ALREADY_REGISTERED (1409)，让前台应用 IME 实例反而注册不上。
+    if (!_hasThreadFocus) return;
 
     int registered = 0;
     // Ctrl+0..9 (Pin)
@@ -1275,41 +1321,119 @@ void CTextService::_UnregisterCandidateHotkeys()
     WIND_LOG_DEBUG(L"UnregisterCandidateHotkeys\n");
 }
 
-// AddWord (Ctrl+=) 注册/卸载 — 跟随中文模式状态，幂等。
-// 中文模式：注册（候选窗口不需要可见，因为 AddWord 也能从光标前取词）
-// 英文模式：卸载，让 Ctrl+= 透传给宿主（QQ 中是图片放大等功能）
-void CTextService::_UpdateAddWordHotkeyState()
-{
-    if (_hHotkeyWnd == nullptr) return;
-
-    BOOL shouldActive = _bChineseMode;
-    if (shouldActive && !_addWordHotkeyActive)
-    {
-        if (RegisterHotKey(_hHotkeyWnd, kHotkeyIdAddWord, MOD_CONTROL | MOD_NOREPEAT, VK_OEM_PLUS))
-        {
-            _addWordHotkeyActive = TRUE;
-            WIND_LOG_DEBUG(L"RegisterAddWordHotkey(Ctrl+=) ok\n");
-        }
-        else
-        {
-            WIND_LOG_WARN_FMT(L"RegisterHotKey(Ctrl+=) failed err=%u\n", (uint32_t)GetLastError());
-        }
-    }
-    else if (!shouldActive && _addWordHotkeyActive)
-    {
-        UnregisterHotKey(_hHotkeyWnd, kHotkeyIdAddWord);
-        _addWordHotkeyActive = FALSE;
-        WIND_LOG_DEBUG(L"UnregisterAddWordHotkey\n");
-    }
-}
-
 LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    // 跨进程"热键已释放，请重试"通知：其他进程的 race check 让出热键时投递。
+    // 我们立即重新评估并尝试注册。注意 msg ID 是动态分配的，必须用 if 而非 case。
+    static UINT s_retryMsg = GetRetryHotkeyMessageId();
+    if (msg == s_retryMsg)
+    {
+        CTextService* self = reinterpret_cast<CTextService*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+        if (self != nullptr)
+        {
+            // 复核自己确实是前台再注册（这条消息可能来得稍晚，焦点已经又变了）。
+            HWND hFg = GetForegroundWindow();
+            DWORD fgPid = 0;
+            if (hFg != nullptr) GetWindowThreadProcessId(hFg, &fgPid);
+            if (fgPid == GetCurrentProcessId())
+            {
+                self->_hasThreadFocus = TRUE;
+                // 候选可见性热键由 NotifyCandidatesVisibilityChanged 驱动；
+                // 候选下一次出现时自然会重新注册。
+                WIND_LOG_DEBUG(L"Received hotkey retry signal, marked thread focus\n");
+            }
+        }
+        return 0;
+    }
+    // 定时自检：兜底 OnKillThreadFocus 不可靠的宿主。每 500ms 跑一次，
+    // 如果发现本进程不再前台但仍持有热键，主动释放并通知前台进程重试。
+    if (msg == WM_TIMER && wParam == kFocusCheckTimerId)
+    {
+        CTextService* self = reinterpret_cast<CTextService*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+        if (self != nullptr)
+        {
+            HWND hFg = GetForegroundWindow();
+            DWORD fgPid = 0;
+            if (hFg != nullptr) GetWindowThreadProcessId(hFg, &fgPid);
+            BOOL nowForeground = (fgPid == GetCurrentProcessId());
+            BOOL holdsAnyHotkey = self->_hotkeysActive;
+            if (!nowForeground && holdsAnyHotkey)
+            {
+                WIND_LOG_DEBUG_FMT(L"FocusCheck timer: not foreground (fgPid=%u ownPid=%u), releasing\n",
+                                   fgPid, GetCurrentProcessId());
+                self->_hasThreadFocus = FALSE;
+                if (self->_hotkeysActive) self->_UnregisterCandidateHotkeys();
+                // 通知前台 IME 立即重试
+                const wchar_t* classNames[] = { L"WindInputHotkeyWnd", L"WindInputHotkeyWndDebug" };
+                UINT retryMsg = GetRetryHotkeyMessageId();
+                for (auto cls : classNames)
+                {
+                    HWND target = nullptr;
+                    while ((target = FindWindowExW(HWND_MESSAGE, target, cls, nullptr)) != nullptr)
+                    {
+                        DWORD targetPid = 0;
+                        GetWindowThreadProcessId(target, &targetPid);
+                        if (targetPid == fgPid)
+                        {
+                            PostMessageW(target, retryMsg, 0, 0);
+                            break;
+                        }
+                    }
+                }
+            }
+            else if (nowForeground && !self->_hasThreadFocus)
+            {
+                // 反向：成为前台但 _hasThreadFocus 还没更新（OnSetThreadFocus 也可能漏），
+                // 标记一下；候选可见性热键由 NotifyCandidatesVisibilityChanged 驱动。
+                self->_hasThreadFocus = TRUE;
+            }
+        }
+        return 0;
+    }
     if (msg == WM_HOTKEY)
     {
         CTextService* self = reinterpret_cast<CTextService*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
         if (self != nullptr && self->_pKeyEventSink != nullptr)
         {
+            // 焦点切换竞态防护：用户按下 Ctrl+= 的瞬间焦点可能正从 App A 切到 App B，
+            // 此时 A 的 OnKillThreadFocus 还没来得及 unregister，WM_HOTKEY 会落到
+            // A 的 hidden window；如果直接处理，会把加词动作下发到已经失焦的 IME
+            // 实例（错的 PID / 错的光标位置）。
+            // 实时复核当前前台进程是否是自己，不是就主动 unregister 让出热键，
+            // 这一次按键丢弃（用户下一次按时新前台已经注册好）。
+            HWND hFg = GetForegroundWindow();
+            DWORD fgPid = 0;
+            if (hFg != nullptr)
+            {
+                GetWindowThreadProcessId(hFg, &fgPid);
+            }
+            if (fgPid != GetCurrentProcessId())
+            {
+                WIND_LOG_DEBUG_FMT(L"WM_HOTKEY race: not foreground (fgPid=%u ownPid=%u), releasing hotkeys\n",
+                                   fgPid, GetCurrentProcessId());
+                self->_hasThreadFocus = FALSE;
+                if (self->_hotkeysActive) self->_UnregisterCandidateHotkeys();
+                // 通知前台进程的 IME hidden window 立即重试注册（避免它要等下次
+                // 候选变化才发现热键空了）。两个变体的 class name 都搜。
+                const wchar_t* classNames[] = { L"WindInputHotkeyWnd", L"WindInputHotkeyWndDebug" };
+                UINT retryMsg = GetRetryHotkeyMessageId();
+                for (auto cls : classNames)
+                {
+                    HWND target = nullptr;
+                    while ((target = FindWindowExW(HWND_MESSAGE, target, cls, nullptr)) != nullptr)
+                    {
+                        DWORD targetPid = 0;
+                        GetWindowThreadProcessId(target, &targetPid);
+                        if (targetPid == fgPid)
+                        {
+                            PostMessageW(target, retryMsg, 0, 0);
+                            WIND_LOG_DEBUG_FMT(L"Posted retry to foreground IME hwnd=0x%p pid=%u\n", target, fgPid);
+                            break;
+                        }
+                    }
+                }
+                return 0;
+            }
             int id = (int)wParam;
             uint32_t vk = 0;
             uint32_t mods = 0;
@@ -1322,11 +1446,6 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
             {
                 vk = '0' + (id - kHotkeyIdDelBase);
                 mods = KEYMOD_CTRL | KEYMOD_SHIFT;
-            }
-            else if (id == kHotkeyIdAddWord)
-            {
-                vk = VK_OEM_PLUS;
-                mods = KEYMOD_CTRL;
             }
             if (vk != 0)
             {
@@ -1750,7 +1869,6 @@ void CTextService::_SyncStateFromResponse(const ServiceResponse& response)
         return;
 
     _bChineseMode = response.IsChineseMode();
-    _UpdateAddWordHotkeyState();
     _bFullWidth = response.IsFullWidth();
 
     // Keep compartment always OPEN so TSF calls OnTestKeyDown even in English mode.
@@ -2086,8 +2204,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
         }
 
         _bChineseMode = newChineseMode;
-        _UpdateAddWordHotkeyState();
-
+    
         if (_pLangBarItemButton != nullptr)
             _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
 
@@ -2180,7 +2297,6 @@ STDAPI CTextService::OnChange(REFGUID rguid)
     }
 
     _bChineseMode = newChineseMode;
-    _UpdateAddWordHotkeyState();
 
     if (_pLangBarItemButton != nullptr)
         _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
@@ -3458,7 +3574,6 @@ void CTextService::HandleCtrlSpaceToggle()
     }
 
     _bChineseMode = newChineseMode;
-    _UpdateAddWordHotkeyState();
 
     if (_pLangBarItemButton != nullptr)
         _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
@@ -3485,7 +3600,6 @@ void CTextService::ToggleInputMode()
     // The actual mode toggle is handled via KeyUp event -> Go service -> ModeChanged response
     EndComposition();
     _bChineseMode = !_bChineseMode;
-    _UpdateAddWordHotkeyState();
 
     WIND_LOG_INFO_FMT(L"Switched to %s mode\n", _bChineseMode ? L"Chinese" : L"English");
 
@@ -3511,7 +3625,6 @@ void CTextService::SetInputMode(BOOL bChineseMode)
     }
 
     _bChineseMode = bChineseMode;
-    _UpdateAddWordHotkeyState();
 
     WIND_LOG_INFO_FMT(L"Mode set to %s (from service)\n", _bChineseMode ? L"Chinese" : L"English");
 
@@ -3667,7 +3780,6 @@ void CTextService::UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bCh
 {
     _bChineseMode = bChineseMode;
     _bFullWidth = bFullWidth;
-    _UpdateAddWordHotkeyState();
 
     // Keep compartment always OPEN so TSF calls OnTestKeyDown even in English mode.
     _SetOpenCloseCompartment(TRUE);

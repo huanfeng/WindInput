@@ -231,15 +231,17 @@ private:
     HWND  _hHotkeyWnd;                // 隐藏消息窗口，接收 WM_HOTKEY
     ATOM  _hotkeyWndClass;            // RegisterClassEx 返回的窗口类原子
     BOOL  _hotkeysActive;             // 当前是否已 RegisterHotKey 候选热键（Ctrl+0..9 / Ctrl+Shift+0..9）
-    BOOL  _addWordHotkeyActive;       // 当前是否已 RegisterHotKey AddWord (Ctrl+=)
+    // 线程焦点门控：RegisterHotKey 在每个进程内对同一组合键独占。
+    // 多进程 IME 实例同时尝试注册会导致 ERROR_HOTKEY_ALREADY_REGISTERED (1409)，
+    // 让前台应用拿不到 WM_HOTKEY，反而让残留的后台进程吃掉。
+    // 必须把所有 RegisterHotKey 与 thread focus 绑定：只有获得 thread focus 的
+    // IME 实例才能注册，失去时立即全部卸载。
+    BOOL  _hasThreadFocus;
 
     BOOL _InitHotkeyWindow();         // 创建窗口类 + 隐藏窗口
     void _UninitHotkeyWindow();       // 反向清理
     void _RegisterCandidateHotkeys(); // 注册 Ctrl+0..9 + Ctrl+Shift+0..9（候选可见时）
     void _UnregisterCandidateHotkeys();
-    // AddWord (Ctrl+=) 在中文模式注册、英文模式卸载。无需 composition。
-    // 调用方应在 _bChineseMode 变化后调一次，幂等。
-    void _UpdateAddWordHotkeyState();
     static LRESULT CALLBACK _HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     DWORD _activateFlags;  // ActivateEx flags (TF_TMAE_SECUREMODE, etc.)
 
