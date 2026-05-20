@@ -248,7 +248,7 @@ func TestCodetableAutoCommit(t *testing.T) {
 	dictPath := getTestDictPath(t)
 
 	config := DefaultConfig()
-	config.AutoCommitAt4 = true
+	config.AutoCommitAtFull = true
 
 	engine := NewEngine(config, nil)
 	if err := engine.LoadCodeTable(dictPath); err != nil {
@@ -260,7 +260,7 @@ func TestCodetableAutoCommit(t *testing.T) {
 	result := engine.ConvertEx("gggg", 10)
 	t.Logf("gggg: %d 候选, ShouldCommit=%v", len(result.Candidates), result.ShouldCommit)
 
-	// 如果只有一个候选且开启了 AutoCommitAt4，应该自动上屏
+	// 如果只有一个候选且开启了 AutoCommitAtFull，应该自动上屏
 	if len(result.Candidates) == 1 && !result.ShouldCommit {
 		t.Error("达到最大码长且唯一时应该自动上屏")
 	}
@@ -296,4 +296,276 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// writeFixtureCodeTable 在临时目录写一个最小码表文件。
+// entries 为 "code\ttext" 序列，按出现顺序作为递减权重。
+func writeFixtureCodeTable(t *testing.T, codeLen int, entries ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.txt")
+	var b []byte
+	b = append(b, "[CodeTableHeader]\n"...)
+	b = append(b, "Name=fixture\n"...)
+	b = append(b, "CodeScheme=wubi86\n"...)
+	b = append(b, ("CodeLength=" + itoa(codeLen) + "\n")...)
+	b = append(b, "[CodeTable]\n"...)
+	for _, e := range entries {
+		b = append(b, e...)
+		b = append(b, '\n')
+	}
+	if err := os.WriteFile(path, b, 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return path
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [16]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+// TestAutoCommitAtFull_ShortCodeUniqueNoSuffix 短码精确唯一且无更长后继时触发顶屏。
+func TestAutoCommitAtFull_ShortCodeUniqueNoSuffix(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "aaa\t甲")
+	cfg := DefaultConfig()
+	cfg.AutoCommitAtFull = true
+	cfg.MinAutoCommitLen = 2
+	cfg.MaxCodeLength = 4
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	result := engine.ConvertEx("aaa", 10)
+	if !result.ShouldCommit {
+		t.Fatalf("应该触发全码自动上屏, candidates=%d", len(result.Candidates))
+	}
+	if result.CommitText != "甲" {
+		t.Errorf("CommitText 应为 '甲'，实际 '%s'", result.CommitText)
+	}
+}
+
+// TestAutoCommitAtFull_HasLongerCodeBlocked 存在更长后继编码时不应顶屏。
+func TestAutoCommitAtFull_HasLongerCodeBlocked(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "aaa\t甲", "aaab\t乙")
+	cfg := DefaultConfig()
+	cfg.AutoCommitAtFull = true
+	cfg.MinAutoCommitLen = 2
+	cfg.MaxCodeLength = 4
+	// 关闭前缀候选以保证候选列表里只有 "aaa→甲" 一个精确匹配
+	cfg.PrefixMode = "none"
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	result := engine.ConvertEx("aaa", 10)
+	if result.ShouldCommit {
+		t.Fatalf("存在更长后继 aaab，不应顶屏；candidates=%d, commit=%q", len(result.Candidates), result.CommitText)
+	}
+}
+
+// TestHandleTopCode_SuppressedByFullMatch 完整 input 自身有精确匹配时，不顶字。
+// 场景：码表 abcd→甲、abcde→乙；输入 abcde 应让 ConvertEx 走完整流水线返回乙，
+// 而不是被 HandleTopCode 直接顶 abcd→甲。
+func TestHandleTopCode_SuppressedByFullMatch(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "abcd\t甲", "abcde\t乙")
+	cfg := DefaultConfig()
+	cfg.TopCodeCommit = true
+	cfg.MaxCodeLength = 4
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	commitText, newInput, shouldCommit := engine.HandleTopCode("abcde")
+	if shouldCommit {
+		t.Fatalf("abcde 有精确匹配（乙），不应顶字；commit=%q, newInput=%q", commitText, newInput)
+	}
+	if newInput != "abcde" {
+		t.Errorf("newInput 应保持 'abcde'，实际 %q", newInput)
+	}
+}
+
+// TestHandleTopCode_SuppressedByLongerCode 输入虽无精确匹配但有更长后继时，不顶字。
+func TestHandleTopCode_SuppressedByLongerCode(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "abcd\t甲", "abcdef\t丙")
+	cfg := DefaultConfig()
+	cfg.TopCodeCommit = true
+	cfg.MaxCodeLength = 4
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	commitText, newInput, shouldCommit := engine.HandleTopCode("abcde")
+	if shouldCommit {
+		t.Fatalf("abcde 有更长后继 abcdef，不应顶字；commit=%q, newInput=%q", commitText, newInput)
+	}
+	if newInput != "abcde" {
+		t.Errorf("newInput 应保持 'abcde'，实际 %q", newInput)
+	}
+}
+
+// TestHandleTopCode_StillCommitsWhenNoLonger 既无精确匹配也无更长后继时，仍正常顶字（原行为回归）。
+func TestHandleTopCode_StillCommitsWhenNoLonger(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "abcd\t甲")
+	cfg := DefaultConfig()
+	cfg.TopCodeCommit = true
+	cfg.MaxCodeLength = 4
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	commitText, newInput, shouldCommit := engine.HandleTopCode("abcde")
+	if !shouldCommit {
+		t.Fatalf("无精确匹配且无更长后继，应顶字 abcd→甲；shouldCommit=%v", shouldCommit)
+	}
+	if commitText != "甲" {
+		t.Errorf("commitText 应为 '甲'，实际 %q", commitText)
+	}
+	if newInput != "e" {
+		t.Errorf("newInput 应为 'e'，实际 %q", newInput)
+	}
+}
+
+// TestClearOnEmpty_SuppressedByLongerCode 4 码无精确匹配但有更长后继时，应返回前缀候选，
+// 既不空码、也不清空（不再走原"空码-清空"分支）。
+// 场景：码表只有 abcde→乙，无 abcd；输入 abcd，期望候选含 abcde→乙。
+func TestClearOnEmpty_SuppressedByLongerCode(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "abcde\t乙")
+	cfg := DefaultConfig()
+	cfg.ClearOnEmptyAt4 = true
+	cfg.AutoCommitAtFull = false
+	cfg.MaxCodeLength = 4
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	result := engine.ConvertEx("abcd", 10)
+	if result.IsEmpty {
+		t.Fatalf("abcd 有更长后继 abcde，不应为空码；candidates=%d", len(result.Candidates))
+	}
+	if result.ShouldClear {
+		t.Errorf("abcd 有更长后继 abcde，不应清空")
+	}
+	found := false
+	for _, c := range result.Candidates {
+		if c.Text == "乙" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("候选中应包含长码 abcde→乙；实际候选 %d 个", len(result.Candidates))
+	}
+}
+
+// TestClearOnEmpty_StillClearsWhenNoLonger 无更长后继时，全码空仍清空（原行为回归）。
+func TestClearOnEmpty_StillClearsWhenNoLonger(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "wxyz\t甲")
+	cfg := DefaultConfig()
+	cfg.ClearOnEmptyAt4 = true
+	cfg.AutoCommitAtFull = false
+	cfg.MaxCodeLength = 4
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	result := engine.ConvertEx("abcd", 10)
+	if !result.IsEmpty {
+		t.Fatalf("abcd 在该码表下应为空码")
+	}
+	if !result.ShouldClear {
+		t.Errorf("abcd 无候选无后继，应清空；ShouldClear=%v", result.ShouldClear)
+	}
+}
+
+// TestAutoCommitAtFull_BelowMinLen 输入长度未达到 MinAutoCommitLen 不应顶屏。
+func TestAutoCommitAtFull_BelowMinLen(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "abc\t丙")
+	cfg := DefaultConfig()
+	cfg.AutoCommitAtFull = true
+	cfg.MinAutoCommitLen = 4
+	cfg.MaxCodeLength = 4
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	result := engine.ConvertEx("abc", 10)
+	if result.ShouldCommit {
+		t.Fatalf("输入长度 3 < MinAutoCommitLen 4，不应顶屏；commit=%q", result.CommitText)
+	}
+}
+
+// TestAutoCommitAtFull_Disabled_DoesNotCommit 当 AutoCommitAtFull=false 时，
+// 即便精确唯一且无更长后继，也不应顶屏。防止开关被绕过。
+func TestAutoCommitAtFull_Disabled_DoesNotCommit(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "abcd\t甲")
+	cfg := DefaultConfig()
+	cfg.AutoCommitAtFull = false // 关闭开关
+	cfg.MaxCodeLength = 4
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	result := engine.ConvertEx("abcd", 10)
+	if result.ShouldCommit {
+		t.Fatalf("AutoCommitAtFull=false 时不应顶屏；commit=%q", result.CommitText)
+	}
+	if len(result.Candidates) == 0 || result.Candidates[0].Text != "甲" {
+		t.Errorf("候选应正常返回 '甲'；得到 %d 个候选", len(result.Candidates))
+	}
+}
+
+// TestPrefixEnabledAtMaxLen_WithLongerCode 输入长度恰好 == MaxCodeLength 且无精确匹配但
+// 存在更长后继时，前缀查询应启用并返回长码候选（保护本轮 Phase 2 prefixEnabled 边界放宽）。
+func TestPrefixEnabledAtMaxLen_WithLongerCode(t *testing.T) {
+	path := writeFixtureCodeTable(t, 4, "abcde\t乙")
+	cfg := DefaultConfig()
+	cfg.AutoCommitAtFull = false
+	cfg.MaxCodeLength = 4
+	engine := NewEngine(cfg, nil)
+	if err := engine.LoadCodeTable(path); err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	result := engine.ConvertEx("abcd", 10)
+	if result.IsEmpty {
+		t.Fatalf("inputLen==MaxCodeLength 且有 abcde 后继时不应空码；candidates=%d", len(result.Candidates))
+	}
+	found := false
+	for _, c := range result.Candidates {
+		if c.Code == "abcde" && c.Text == "乙" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("候选中应包含长码 abcde→乙；实际 %d 个候选", len(result.Candidates))
+	}
+}
+
+// TestAutoCommitAtFull_AfterShadowDelete Shadow 删词后剩余唯一时应触发顶屏。
+// 防止"Shadow 删词后精确唯一性"链路被未来改动破坏。
+// 注意：纯码表方案下 checkAutoCommit 使用的 filteredExact 已应用 Shadow 删除规则
+// （codetable.go:507~514），此测试验证该路径。
+func TestAutoCommitAtFull_AfterShadowDelete(t *testing.T) {
+	// 该测试需要构造 ShadowProvider 注入 DictManager，超出 fixture 工具的能力范围。
+	// codetable.go:507~514 已经在 filteredExact 上调用 ApplyShadowPins，逻辑正确。
+	// 这里以注释形式记录测试意图，待后续补 DictManager fixture 工具后启用。
+	t.Skip("Shadow 删词测试需要 DictManager fixture，待 dict 包测试工具完善后启用；逻辑路径已在 codetable.go:507~514 通过手工 review 验证")
 }

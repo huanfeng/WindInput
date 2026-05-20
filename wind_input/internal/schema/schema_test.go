@@ -424,3 +424,56 @@ func containsSubstr(s, sub string) bool {
 	}
 	return false
 }
+
+// TestAutoCommitAtFull_BackwardCompat 验证旧 YAML 只设置 auto_commit_unique=true 时，
+// 加载后 CodeTableSpec.AutoCommitUnique 为 true 且 AutoCommitAtFull 为 nil（让 factory 回退）。
+func TestAutoCommitAtFull_BackwardCompat(t *testing.T) {
+	tmpDir := t.TempDir()
+	content := `
+schema:
+  id: test_compat
+  name: "兼容测试"
+  version: "1.0"
+engine:
+  type: codetable
+  codetable:
+    max_code_length: 4
+    auto_commit_unique: true
+  filter_mode: smart
+dictionaries:
+  - id: main
+    path: "dict/x.txt"
+    type: codetable
+    default: true
+learning:
+  mode: manual
+`
+	path := filepath.Join(tmpDir, "compat.schema.yaml")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadSchemaFile(path)
+	if err != nil {
+		t.Fatalf("LoadSchemaFile: %v", err)
+	}
+	spec := s.Engine.CodeTable
+	if spec == nil {
+		t.Fatalf("CodeTable spec 为 nil")
+	}
+	if !spec.AutoCommitUnique {
+		t.Errorf("AutoCommitUnique 应为 true")
+	}
+	if spec.AutoCommitAtFull != nil {
+		t.Errorf("AutoCommitAtFull 应为 nil（未设置），实际 %v", *spec.AutoCommitAtFull)
+	}
+	// 模拟 factory 回退逻辑
+	effective := func() bool {
+		if spec.AutoCommitAtFull != nil {
+			return *spec.AutoCommitAtFull
+		}
+		return spec.AutoCommitUnique
+	}()
+	if !effective {
+		t.Errorf("回退后 AutoCommitAtFull 等价值应为 true")
+	}
+}

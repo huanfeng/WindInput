@@ -17,7 +17,9 @@
 
 ### Working In This Directory
 - `Config` 字段说明：
-  - `AutoCommitAt4`：四码且唯一候选时自动上屏
+  - `AutoCommitAtFull`：全码自动上屏（精确唯一 + 无更长后继 + `len(input) >= MinAutoCommitLen`）。旧字段 `AutoCommitAt4` 已重命名为此。
+  - `MinAutoCommitLen`：触发全码顶屏的最小输入长度；0 时 `LoadCodeTable` 末尾自动设为 `MaxCodeLength`
+  - `AutoCommitBlockOnPinyin`：混输模式下若输入是完整音节且存在拼音候选则否决全码顶屏（默认 true）
   - `ClearOnEmptyAt4`：四码无候选时清空输入
   - `TopCodeCommit`：第五码输入时顶掉第一候选上屏（顶码）
   - `PunctCommit`：标点符号触发顶码上屏
@@ -32,14 +34,23 @@
 - `OnCandidateSelected` 调用 `FreqHandler` 调频，并通过 `LearningStrategy` 触发造词
 - `RestoreCodeTableHeader` 供 factory 从 sidecar meta.json 恢复码表元数据
 
-#### ⚠️ 顶码上屏（AutoCommitAt4）与 Shadow 的交互
+#### ⚠️ 全码自动上屏（AutoCommitAtFull）与 Shadow 的交互
 `ConvertEx` 流水线中 Shadow 是**呈现层**过滤（Phase 6），`checkAutoCommit` 在其后执行。
+新判定逻辑：**精确唯一 + 无更长后继 + `len(input) >= MinAutoCommitLen`** 三者同时满足才触发顶屏。
+`MinAutoCommitLen=0` 时由 `LoadCodeTable` 末尾兜底为 `MaxCodeLength`，与旧"四码顶屏"行为等价。
 修改顶码或 Shadow 相关逻辑时必须注意：
 
 - `checkAutoCommit` 使用的是 `filteredExact`（精确匹配候选），**不含前缀候选**，确保唯一性判断不被前缀干扰
-- 当 `SkipShadow=false`（纯码表模式）：`filteredExact` 在传入 `checkAutoCommit` 前已应用 Shadow 删除规则，用户通过候选调整删词后剩余唯一时可正确触发顶码
+- 通过 `hasLongerCode(input)` 同时检查主码表 (`CodeTable.HasLongerCode`) 与 `CompositeDict.HasLongerCode`（短语/用户/temp 层）；任一存在更长后继即否决顶屏
+- 当 `SkipShadow=false`（纯码表模式）：`filteredExact` 在传入 `checkAutoCommit` 前已应用 Shadow 删除规则，用户通过候选调整删词后剩余唯一时可正确触发顶屏
 - 当 `SkipShadow=true`（混输模式）：Shadow 由外层 `MixedEngine` 应用，`checkAutoCommit` **不**在此处应用 Shadow；外层须在 Shadow 后调用 `recheckAutoCommit` 重新评估（见 `internal/engine/mixed/AGENTS.md`）
 - 不要在 `checkAutoCommit` 之前修改 `exactCandidates` 的内容，否则会影响计数准确性
+- `Engine.HasLongerCode(input)` 是 `hasLongerCode` 的公共导出版本，供 `mixed.Engine` 复用
+- `Engine.HasFullInputMatch(input)` 检查完整 input 是否在主码表 / CompositeDict 中有精确匹配，供 `mixed.Engine` 在长码场景判断是否值得用完整 input 查询
+- `HandleTopCode` 入口含守护：若完整 input 自身命中精确匹配或存在更长后继，**不**截取前 N 码顶字，而是交还给 `ConvertEx` 走完整流水线（避免吞掉如 `abcde→乙` 这类长码精确匹配）
+  - **注意**：此守护**与 `AutoCommitAtFull` 解耦**，对所有方案生效。即便用户关闭了全码自动上屏，自定义长码（如 `abcde→乙`）也不会被截断顶字
+- `ClearOnEmptyAt4` 空码清空亦受 `hasLongerCode` 守护：存在更长后继时不清空，等待用户继续输入
+- `Phase 2` 前缀查询的 `prefixEnabled` 在 `inputLen >= MaxCodeLength` 时**仅在 `hasLongerCode(input)==true` 时启用**；保证 4 码恰好无精确匹配但存在 5 码长词时仍能返回前缀候选。BFS 的 `maxDepth` 在 `inputLen >= MaxCodeLength` 时兜底 4，确保能探到长码
 
 ### Testing Requirements
 - `go test ./internal/engine/wubi/`

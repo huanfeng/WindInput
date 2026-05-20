@@ -65,19 +65,22 @@ type TempPinyinSpec struct {
 
 // CodeTableSpec 码表引擎配置
 type CodeTableSpec struct {
-	MaxCodeLength      int             `yaml:"max_code_length"`
-	AutoCommitUnique   bool            `yaml:"auto_commit_unique"`
-	ClearOnEmptyMax    bool            `yaml:"clear_on_empty_max"`
-	TopCodeCommit      bool            `yaml:"top_code_commit"`
-	PunctCommit        bool            `yaml:"punct_commit"`
-	ShowCodeHint       bool            `yaml:"show_code_hint"`
-	SingleCodeInput    bool            `yaml:"single_code_input"`
-	SingleCodeComplete bool            `yaml:"single_code_complete"` // 精确匹配空码补全
-	CandidateSortMode  string          `yaml:"candidate_sort_mode"`
-	DedupCandidates    *bool           `yaml:"dedup_candidates,omitempty"`
-	SkipSingleCharFreq *bool           `yaml:"skip_single_char_freq"`  // 单字不自动调频（指针以区分未设置和 false）
-	TempPinyin         *TempPinyinSpec `yaml:"temp_pinyin,omitempty"`  // 临时拼音配置
-	ZKeyRepeat         *bool           `yaml:"z_key_repeat,omitempty"` // Z键重复上屏：输入z时首选为上次上屏的内容
+	MaxCodeLength           int             `yaml:"max_code_length"`
+	AutoCommitUnique        bool            `yaml:"auto_commit_unique"`
+	AutoCommitAtFull        *bool           `yaml:"auto_commit_at_full,omitempty"`         // 新字段，未设置时回退 auto_commit_unique
+	AutoCommitMinLen        int             `yaml:"auto_commit_min_len,omitempty"`         // 0 = 跟随 MaxCodeLength
+	AutoCommitBlockOnPinyin *bool           `yaml:"auto_commit_block_on_pinyin,omitempty"` // 默认 true
+	ClearOnEmptyMax         bool            `yaml:"clear_on_empty_max"`
+	TopCodeCommit           bool            `yaml:"top_code_commit"`
+	PunctCommit             bool            `yaml:"punct_commit"`
+	ShowCodeHint            bool            `yaml:"show_code_hint"`
+	SingleCodeInput         bool            `yaml:"single_code_input"`
+	SingleCodeComplete      bool            `yaml:"single_code_complete"` // 精确匹配空码补全
+	CandidateSortMode       string          `yaml:"candidate_sort_mode"`
+	DedupCandidates         *bool           `yaml:"dedup_candidates,omitempty"`
+	SkipSingleCharFreq      *bool           `yaml:"skip_single_char_freq"`  // 单字不自动调频（指针以区分未设置和 false）
+	TempPinyin              *TempPinyinSpec `yaml:"temp_pinyin,omitempty"`  // 临时拼音配置
+	ZKeyRepeat              *bool           `yaml:"z_key_repeat,omitempty"` // Z键重复上屏：输入z时首选为上次上屏的内容
 
 	// 新增架构字段
 	LoadMode          string `yaml:"load_mode,omitempty"`

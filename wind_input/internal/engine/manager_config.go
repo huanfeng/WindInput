@@ -71,7 +71,9 @@ func (m *Manager) UpdateCodetableOptions(spec *schema.CodeTableSpec) {
 	}
 
 	m.logger.Info("更新码表选项",
-		"autoCommitAt4", spec.AutoCommitUnique,
+		"autoCommitAtFull", spec.AutoCommitAtFull != nil && *spec.AutoCommitAtFull || (spec.AutoCommitAtFull == nil && spec.AutoCommitUnique),
+		"autoCommitMinLen", spec.AutoCommitMinLen,
+		"autoCommitBlockOnPinyin", spec.AutoCommitBlockOnPinyin == nil || *spec.AutoCommitBlockOnPinyin,
 		"clearOnEmptyAt4", spec.ClearOnEmptyMax,
 		"topCodeCommit", spec.TopCodeCommit,
 		"punctCommit", spec.PunctCommit,
@@ -93,7 +95,17 @@ func updateCodetableConfig(codetableEngine *codetable.Engine, spec *schema.CodeT
 	if cfg == nil {
 		return
 	}
-	cfg.AutoCommitAt4 = spec.AutoCommitUnique
+	if spec.AutoCommitAtFull != nil {
+		cfg.AutoCommitAtFull = *spec.AutoCommitAtFull
+	} else {
+		cfg.AutoCommitAtFull = spec.AutoCommitUnique
+	}
+	if spec.AutoCommitMinLen > 0 {
+		cfg.MinAutoCommitLen = spec.AutoCommitMinLen
+	}
+	if spec.AutoCommitBlockOnPinyin != nil {
+		cfg.AutoCommitBlockOnPinyin = *spec.AutoCommitBlockOnPinyin
+	}
 	cfg.ClearOnEmptyAt4 = spec.ClearOnEmptyMax
 	cfg.TopCodeCommit = spec.TopCodeCommit
 	cfg.PunctCommit = spec.PunctCommit

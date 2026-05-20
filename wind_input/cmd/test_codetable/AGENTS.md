@@ -27,7 +27,7 @@
   - 五笔：`a aa aaa aaaa aaaaa`
   - 其他：`a ai wo ni nihao`
 - 路径支持相对和绝对两种格式（相对路径相对于 exe 目录）
-- 引擎配置：`MaxCodeLength`、`AutoCommitAt4`、`ClearOnEmptyAt4`、`TopCodeCommit`、`PunctCommit` 等
+- 引擎配置：`MaxCodeLength`、`AutoCommitAtFull`、`ClearOnEmptyAt4`、`TopCodeCommit`、`PunctCommit` 等
 
 ### Testing Requirements
 - 手动执行验证码表加载和查询功能

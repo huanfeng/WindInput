@@ -81,6 +81,15 @@ func (l *CodeTableLayer) GetCodeTable() *CodeTable {
 	return l.codeTable
 }
 
+// HasLongerCode 实现 HasLongerCodeProvider：直接转发给底层 CodeTable，
+// 避免上层走 LookupPrefix 拉候选的兜底路径。
+func (l *CodeTableLayer) HasLongerCode(input string) bool {
+	if l.codeTable == nil {
+		return false
+	}
+	return l.codeTable.HasLongerCode(input)
+}
+
 // SimpleDictLayer 将 SimpleDict 适配为 DictLayer
 type SimpleDictLayer struct {
 	name       string

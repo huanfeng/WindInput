@@ -30,21 +30,23 @@ type LearningStrategy interface {
 
 // Config 码表引擎配置
 type Config struct {
-	MaxCodeLength      int    // 最大码长，默认4
-	AutoCommitAt4      bool   // 四码唯一时自动上屏
-	ClearOnEmptyAt4    bool   // 四码为空时清空
-	TopCodeCommit      bool   // 五码顶字上屏
-	PunctCommit        bool   // 标点顶字上屏
-	FilterMode         string // 候选过滤模式
-	ShowCodeHint       bool   // 是否显示编码提示
-	SingleCodeInput    bool   // 精确匹配模式（关闭前缀匹配）
-	SingleCodeComplete bool   // 精确匹配空码补全：精确匹配模式下无候选时，从更长编码中取首个候选
-	DedupCandidates    bool   // 候选去重（内部开关，未来可能开放给用户）
-	CandidateSortMode  string // 候选排序模式：frequency（词频）、natural（自然顺序）
-	ProtectTopN        int    // 首选保护：前 N 位锁定码表原始顺序
-	SkipShadow         bool   // 跳过 Shadow 规则应用（混输模式下由外层统一应用）
-	SkipSingleCharFreq bool   // 单字不自动调频
-	WeightAsOrder      bool   // 权重仅表示同码内排序，前缀匹配时抹平权重差异
+	MaxCodeLength           int    // 最大码长，默认4
+	AutoCommitAtFull        bool   // 达到全码且精确唯一且无更长后继时自动上屏
+	MinAutoCommitLen        int    // 全码自动上屏的最小输入长度（0 时自动跟随 MaxCodeLength）
+	AutoCommitBlockOnPinyin bool   // 混输模式下：完整音节存在拼音候选时否决全码自动上屏（默认 true）
+	ClearOnEmptyAt4         bool   // 四码为空时清空
+	TopCodeCommit           bool   // 五码顶字上屏
+	PunctCommit             bool   // 标点顶字上屏
+	FilterMode              string // 候选过滤模式
+	ShowCodeHint            bool   // 是否显示编码提示
+	SingleCodeInput         bool   // 精确匹配模式（关闭前缀匹配）
+	SingleCodeComplete      bool   // 精确匹配空码补全：精确匹配模式下无候选时，从更长编码中取首个候选
+	DedupCandidates         bool   // 候选去重（内部开关，未来可能开放给用户）
+	CandidateSortMode       string // 候选排序模式：frequency（词频）、natural（自然顺序）
+	ProtectTopN             int    // 首选保护：前 N 位锁定码表原始顺序
+	SkipShadow              bool   // 跳过 Shadow 规则应用（混输模式下由外层统一应用）
+	SkipSingleCharFreq      bool   // 单字不自动调频
+	WeightAsOrder           bool   // 权重仅表示同码内排序，前缀匹配时抹平权重差异
 
 	// ---------------- 新增架构字段 ---------------- //
 	LoadMode          string // 加载模式: "mmap" (默认), "memory" (全内存，高性能)
@@ -58,22 +60,23 @@ type Config struct {
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
-		MaxCodeLength:      4,
-		AutoCommitAt4:      false,
-		ClearOnEmptyAt4:    false,
-		TopCodeCommit:      true,
-		PunctCommit:        true,
-		FilterMode:         "smart",
-		ShowCodeHint:       true,
-		DedupCandidates:    true,
-		SkipSingleCharFreq: true,
-		SingleCodeComplete: true,
-		LoadMode:           "mmap",
-		PrefixMode:         "bfs_bucket",
-		BucketLimit:        30,
-		WeightMode:         "auto",
-		ShortCodeFirst:     false,
-		CharsetPreference:  "none",
+		MaxCodeLength:           4,
+		AutoCommitAtFull:        false,
+		AutoCommitBlockOnPinyin: true,
+		ClearOnEmptyAt4:         false,
+		TopCodeCommit:           true,
+		PunctCommit:             true,
+		FilterMode:              "smart",
+		ShowCodeHint:            true,
+		DedupCandidates:         true,
+		SkipSingleCharFreq:      true,
+		SingleCodeComplete:      true,
+		LoadMode:                "mmap",
+		PrefixMode:              "bfs_bucket",
+		BucketLimit:             30,
+		WeightMode:              "auto",
+		ShortCodeFirst:          false,
+		CharsetPreference:       "none",
 	}
 }
 
@@ -112,6 +115,10 @@ func (e *Engine) LoadCodeTable(path string) error {
 	// 如果码表指定了最大码长，使用码表的设置
 	if ct.GetMaxCodeLength() > 0 && ct.GetMaxCodeLength() < e.config.MaxCodeLength {
 		e.config.MaxCodeLength = ct.GetMaxCodeLength()
+	}
+
+	if e.config.MinAutoCommitLen == 0 {
+		e.config.MinAutoCommitLen = e.config.MaxCodeLength
 	}
 
 	return nil
@@ -214,8 +221,12 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 	exactCandidates = append(exactCandidates, e.codeTable.Lookup(input)...)
 
 	// Phase 2: 收集前缀匹配
+	// inputLen >= MaxCodeLength 时仅在存在更长后继时启用（保证 4 码无精确匹配但有 5 码长词时能查到候选）
 	prefixCandidates := make([]candidate.Candidate, 0, 64)
-	prefixEnabled := !e.config.SingleCodeInput && e.config.PrefixMode != "none" && inputLen >= 1 && inputLen < e.config.MaxCodeLength
+	prefixEnabled := !e.config.SingleCodeInput && e.config.PrefixMode != "none" && inputLen >= 1
+	if prefixEnabled && inputLen >= e.config.MaxCodeLength {
+		prefixEnabled = e.hasLongerCode(input)
+	}
 	if prefixEnabled {
 		if e.dictManager != nil {
 			if phraseLayer := e.dictManager.GetPhraseLayer(); phraseLayer != nil {
@@ -243,6 +254,10 @@ func (e *Engine) ConvertRaw(input string, maxCandidates int) ([]candidate.Candid
 				limit = defaultBucketLimit
 			}
 			maxDepth := e.config.MaxCodeLength - inputLen
+			if maxDepth < 1 {
+				// inputLen >= MaxCodeLength 时（如有 5+ 码长词），仍探索 4 层深度
+				maxDepth = 4
+			}
 			prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixBFS(input, limit, maxDepth)...)
 		}
 	}
@@ -356,9 +371,13 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	timing.Exact = time.Since(phaseStart)
 
 	// ========== Phase 2: 收集前缀匹配 ==========
+	// inputLen >= MaxCodeLength 时仅在存在更长后继时启用（保证 4 码无精确匹配但有 5 码长词时能查到候选）
 	phaseStart = time.Now()
 	prefixCandidates := make([]candidate.Candidate, 0, 64)
-	prefixEnabled := !e.config.SingleCodeInput && e.config.PrefixMode != "none" && inputLen >= 1 && inputLen < e.config.MaxCodeLength
+	prefixEnabled := !e.config.SingleCodeInput && e.config.PrefixMode != "none" && inputLen >= 1
+	if prefixEnabled && inputLen >= e.config.MaxCodeLength {
+		prefixEnabled = e.hasLongerCode(input)
+	}
 	if prefixEnabled {
 		if e.dictManager != nil {
 			compositeDict := e.dictManager.GetCompositeDict()
@@ -378,6 +397,10 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 					limit = defaultBucketLimit
 				}
 				maxDepth := e.config.MaxCodeLength - inputLen
+				if maxDepth < 1 {
+					// inputLen >= MaxCodeLength 时（如有 5+ 码长词），仍探索 4 层深度
+					maxDepth = 4
+				}
 				prefixCandidates = append(prefixCandidates, e.codeTable.LookupPrefixBFS(input, limit, maxDepth)...)
 			}
 		}
@@ -438,7 +461,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	// 空码处理
 	if len(allCandidates) == 0 {
 		result.IsEmpty = true
-		if e.config.ClearOnEmptyAt4 && inputLen >= e.config.MaxCodeLength {
+		if e.config.ClearOnEmptyAt4 && inputLen >= e.config.MaxCodeLength && !e.hasLongerCode(input) {
 			result.ShouldClear = true
 		}
 		return result
@@ -682,23 +705,77 @@ func dedup(candidates []candidate.Candidate) []candidate.Candidate {
 	return result
 }
 
-// checkAutoCommit 检查是否满足自动上屏条件
+// checkAutoCommit 检查是否满足全码自动上屏条件：
+// 精确匹配唯一 + 无更长后继 + 输入长度 >= MinAutoCommitLen
 func (e *Engine) checkAutoCommit(result *ConvertResult, input string, candidates []candidate.Candidate) {
 	if len(candidates) == 0 {
 		return
 	}
-
+	cfg := e.config
 	inputLen := len(input)
-	e.logger.Debug("checkAutoCommit", "input", input, "len", inputLen, "candidates", len(candidates), "autoCommitAt4", e.config.AutoCommitAt4, "maxCode", e.config.MaxCodeLength)
-
-	// 达到最大码长且唯一时自动上屏
-	if e.config.AutoCommitAt4 && inputLen >= e.config.MaxCodeLength && len(candidates) == 1 {
-		result.ShouldCommit = true
-		result.CommitText = candidates[0].Text
-		e.logger.Debug("AutoCommitAt4 triggered", "text", result.CommitText)
-	} else if e.config.AutoCommitAt4 {
-		e.logger.Debug("AutoCommitAt4 NOT triggered", "inputLen", inputLen, "maxCode", e.config.MaxCodeLength, "lenGEmax", inputLen >= e.config.MaxCodeLength, "candidates", len(candidates))
+	if !cfg.AutoCommitAtFull || inputLen < cfg.MinAutoCommitLen {
+		return
 	}
+	var hit candidate.Candidate
+	n := 0
+	for _, c := range candidates {
+		if c.Code == input {
+			n++
+			hit = c
+		}
+	}
+	if n != 1 {
+		return
+	}
+	if e.hasLongerCode(input) {
+		return
+	}
+	result.ShouldCommit = true
+	result.CommitText = hit.Text
+	e.logger.Debug("AutoCommitAtFull triggered", "inputLen", inputLen, "minLen", cfg.MinAutoCommitLen)
+}
+
+// hasLongerCode 检查主码表/短语/用户/temp 层中是否存在 code != input 且以 input 为前缀的条目
+func (e *Engine) hasLongerCode(input string) bool {
+	if e.codeTable != nil && e.codeTable.HasLongerCode(input) {
+		return true
+	}
+	if e.dictManager != nil {
+		if cd := e.dictManager.GetCompositeDict(); cd != nil {
+			if cd.HasLongerCode(input) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasLongerCode 公共版本，供 mixed.Engine 复用
+func (e *Engine) HasLongerCode(input string) bool {
+	return e.hasLongerCode(input)
+}
+
+// hasFullInputMatch 检查 input 本身在主码表/短语/用户层是否有精确匹配条目。
+// 用于 HandleTopCode 等场景判断"完整 input 是否值得走完整查询流水线"。
+func (e *Engine) hasFullInputMatch(input string) bool {
+	if e.codeTable != nil {
+		if len(e.codeTable.Lookup(input)) > 0 {
+			return true
+		}
+	}
+	if e.dictManager != nil {
+		if cd := e.dictManager.GetCompositeDict(); cd != nil {
+			if len(cd.Search(input, 1)) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasFullInputMatch 公共版本，供 mixed.Engine 复用。
+func (e *Engine) HasFullInputMatch(input string) bool {
+	return e.hasFullInputMatch(input)
 }
 
 // HandleTopCode 处理顶码（超过最大码长时顶字）
@@ -714,6 +791,13 @@ func (e *Engine) HandleTopCode(input string) (commitText string, newInput string
 
 	if len(input) <= e.config.MaxCodeLength {
 		e.logger.Debug("HandleTopCode: input too short, skipping", "inputLen", len(input), "maxCodeLength", e.config.MaxCodeLength)
+		return "", input, false
+	}
+
+	// 完整 input 可能命中精确匹配或有更长后继 → 不顶字，让 ConvertEx 走完整流水线
+	if e.hasFullInputMatch(input) || e.hasLongerCode(input) {
+		e.logger.Debug("HandleTopCode: input has full/longer match, suppress topcode",
+			"inputLen", len(input))
 		return "", input, false
 	}
 

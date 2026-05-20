@@ -448,6 +448,24 @@ func (ct *CodeTable) scanPrefixMem(prefix string, limit int) []candidate.Candida
 	return picker.sorted()
 }
 
+// HasLongerCode 判断是否存在严格长于 input 的同前缀编码（即 code != input 且 strings.HasPrefix(code, input)）。
+// 用于"全码自动顶屏"判定：唯一精确匹配且无更长后继时才可顶屏。
+func (ct *CodeTable) HasLongerCode(input string) bool {
+	if input == "" {
+		return false
+	}
+	if ct.binReader != nil {
+		return len(ct.binReader.LookupPrefixExcludeExact(input, 1)) > 0
+	}
+	input = strings.ToLower(input)
+	for code := range ct.entries {
+		if code != input && strings.HasPrefix(code, input) {
+			return true
+		}
+	}
+	return false
+}
+
 // LookupPrefixExcludeExact 前缀匹配查找（排除精确匹配）
 func (ct *CodeTable) LookupPrefixExcludeExact(prefix string, limit int) []candidate.Candidate {
 	if ct.binReader != nil {

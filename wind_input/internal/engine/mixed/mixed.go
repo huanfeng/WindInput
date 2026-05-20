@@ -219,10 +219,11 @@ func (e *Engine) HandleEmptyCode(input string) (shouldClear bool, toEnglish bool
 	if len(input) >= e.config.MinPinyinLength {
 		return false, false, ""
 	}
-	// 短编码时委托给码表的空码处理逻辑
+	// 短编码时委托给码表的空码处理逻辑（带 HasLongerCode 守护，避免吞掉长码精确匹配）
 	if e.codetableEngine != nil && e.codetableEngine.GetConfig() != nil {
 		cfg := e.codetableEngine.GetConfig()
-		if cfg.ClearOnEmptyAt4 && len(input) >= cfg.MaxCodeLength {
+		if cfg.ClearOnEmptyAt4 && len(input) >= cfg.MaxCodeLength &&
+			!e.codetableEngine.HasLongerCode(input) {
 			return true, false, ""
 		}
 	}
@@ -382,8 +383,8 @@ func (e *Engine) convertCodetableOnly(input string, maxCandidates int) *ConvertR
 	}
 	shadowElapsed := time.Since(shadowStart)
 
-	// Shadow 可能删词，需在应用后重新评估自动上屏条件
-	shouldCommit, commitText := e.recheckAutoCommit(input, candidates)
+	// Shadow 可能删词，需在应用后重新评估自动上屏条件（纯码表路径无拼音候选）
+	shouldCommit, commitText := e.recheckAutoCommit(input, candidates, false)
 
 	return &ConvertResult{
 		Candidates:   candidates,
@@ -396,7 +397,9 @@ func (e *Engine) convertCodetableOnly(input string, maxCandidates int) *ConvertR
 	}
 }
 
-// convertPinyinOnly 超过最大码长时仅查拼音（主流混输行为）
+// convertPinyinOnly 超过最大码长时仅查拼音（主流混输行为）。
+// 长码场景特例：若完整 input 在码表中有精确匹配或更长后继（如 abcde→乙），
+// 仍用完整 input 查码表并合并，避免长码候选被吞掉。
 func (e *Engine) convertPinyinOnly(input string, maxCandidates int) *ConvertResult {
 	if e.pinyinEngine == nil {
 		return &ConvertResult{IsEmpty: true}
@@ -412,6 +415,39 @@ func (e *Engine) convertPinyinOnly(input string, maxCandidates int) *ConvertResu
 
 	candidates := pinyinResult.Candidates
 
+	// 长码场景：完整 input 在码表中有精确匹配或更长后继时，追加码表候选。
+	// 此时需要把拼音 weight 归一化到 pinyin tier，避免与码表 tier 重叠。
+	if e.codetableEngine != nil &&
+		(e.codetableEngine.HasFullInputMatch(input) || e.codetableEngine.HasLongerCode(input)) {
+		for i := range candidates {
+			candidates[i].Weight /= PinyinTierScale
+			if candidates[i].Weight < 0 {
+				candidates[i].Weight = 0
+			}
+		}
+		if ctResult := e.codetableEngine.ConvertEx(input, maxCandidates); ctResult != nil {
+			for i := range ctResult.Candidates {
+				if ctResult.Candidates[i].IsPhrase {
+					ctResult.Candidates[i].Source = candidate.SourcePhrase
+					ctResult.Candidates[i].Weight += PhraseWeightBoost
+				} else {
+					ctResult.Candidates[i].Source = candidate.SourceCodetable
+					if ctResult.Candidates[i].Code == input {
+						ctResult.Candidates[i].Weight += e.config.CodetableWeightBoost
+					} else {
+						ctResult.Candidates[i].Weight += PartialMatchBoost
+					}
+				}
+			}
+			// 码表候选并入，后续 sort 会按 weight 归位
+			candidates = append(ctResult.Candidates, candidates...)
+			sort.SliceStable(candidates, func(i, j int) bool {
+				return candidate.Better(candidates[i], candidates[j])
+			})
+			candidates = dedupByText(candidates)
+		}
+	}
+
 	shadowStart := time.Now()
 	if e.dictManager != nil {
 		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
@@ -423,7 +459,7 @@ func (e *Engine) convertPinyinOnly(input string, maxCandidates int) *ConvertResu
 
 	result := &ConvertResult{
 		Candidates:       candidates,
-		IsEmpty:          pinyinResult.IsEmpty,
+		IsEmpty:          len(candidates) == 0,
 		IsPinyinFallback: true,
 		PreeditDisplay:   pinyinResult.PreeditDisplay,
 		Timing:           &mixedTiming{Pinyin: pyElapsed, Shadow: shadowElapsed},
@@ -433,6 +469,9 @@ func (e *Engine) convertPinyinOnly(input string, maxCandidates int) *ConvertResu
 		result.PartialSyllable = pinyinResult.Composition.PartialSyllable
 		result.HasPartial = pinyinResult.Composition.HasPartial()
 	}
+
+	// 超长输入也需要全码自动顶屏判定（长码精确唯一无后继时上屏）
+	result.ShouldCommit, result.CommitText = e.recheckAutoCommit(input, candidates, len(pinyinResult.Candidates) > 0)
 
 	e.addCodeHintsFromCodetable(result.Candidates)
 	if e.config.ShowSourceHint {
@@ -453,7 +492,9 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 
 	var wg sync.WaitGroup
 
-	// 码表引擎：用前 maxCodeLen 码查询
+	// 码表引擎：默认用前 maxCodeLen 码查询；
+	// 若完整 input 存在精确匹配或更长后继（长码场景，如 abcde→乙），
+	// 额外用完整 input 查询并合并，避免长码候选被前 N 码截断吞掉。
 	if e.codetableEngine != nil {
 		wg.Add(1)
 		go func() {
@@ -462,6 +503,13 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 			prefix := input[:e.maxCodeLen]
 			codetableResult := e.codetableEngine.ConvertEx(prefix, maxCandidates)
 			codetableCandidates = codetableResult.Candidates
+
+			// 长码场景：完整 input 在码表中有精确匹配或更长后继时，追加用完整 input 查询
+			if e.codetableEngine.HasFullInputMatch(input) || e.codetableEngine.HasLongerCode(input) {
+				if fullResult := e.codetableEngine.ConvertEx(input, maxCandidates); fullResult != nil {
+					codetableCandidates = append(codetableCandidates, fullResult.Candidates...)
+				}
+			}
 			ctElapsed = time.Since(ctStart)
 		}()
 	}
@@ -487,6 +535,7 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 	// 拆分组合可信度 < 原生候选 (2026-05-17): Code!=input[:maxCodeLen] 的
 	// 前缀补全候选独立到 PartialMatchBoost (500K) tier, 让 phrase (+1M)
 	// 与 codetable 精确 (+10M) 都优先于拆分组合。
+	prefixKey := input[:e.maxCodeLen]
 	for i := range codetableCandidates {
 		if codetableCandidates[i].IsPhrase {
 			codetableCandidates[i].Source = candidate.SourcePhrase
@@ -494,7 +543,8 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 			continue
 		}
 		codetableCandidates[i].Source = candidate.SourceCodetable
-		if codetableCandidates[i].Code == input[:e.maxCodeLen] {
+		// 完整 input 精确命中（长码场景）或前 N 码精确命中都视为 Codetable tier
+		if codetableCandidates[i].Code == input || codetableCandidates[i].Code == prefixKey {
 			codetableCandidates[i].Weight += e.config.CodetableWeightBoost
 		} else {
 			codetableCandidates[i].Weight += PartialMatchBoost
@@ -559,6 +609,9 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 			result.HasPartial = pinyinResult.Composition.HasPartial()
 		}
 	}
+
+	// 超长输入也需要全码自动顶屏判定（长码精确唯一无后继时上屏）
+	result.ShouldCommit, result.CommitText = e.recheckAutoCommit(input, merged, len(pinyinCandidates) > 0)
 
 	e.addCodeHintsFromCodetable(result.Candidates)
 	if e.config.ShowSourceHint {
@@ -720,7 +773,7 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 
 	// Shadow 可能删词，需在应用后重新评估自动上屏条件（不能直接继承子引擎的 ShouldCommit）
 	if codetableResult != nil {
-		result.ShouldCommit, result.CommitText = e.recheckAutoCommit(input, merged)
+		result.ShouldCommit, result.CommitText = e.recheckAutoCommit(input, merged, len(pinyinCandidates) > 0)
 	}
 
 	// 如果码表空码但拼音有结果，不标记为空码
@@ -743,28 +796,46 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 
 // --- 辅助函数 ---
 
-// recheckAutoCommit 在外层 Shadow 应用后重新评估自动上屏条件。
+// recheckAutoCommit 在外层 Shadow 应用后重新评估全码自动上屏条件。
 // 混输模式下 Shadow 由 MixedEngine 统一应用，子引擎的 ShouldCommit 不可直接继承，
-// 需在合并候选上重新统计精确匹配的码表候选数量。
-func (e *Engine) recheckAutoCommit(input string, candidates []candidate.Candidate) (shouldCommit bool, commitText string) {
-	if e.codetableEngine == nil {
+// 需在合并候选上重新判定：精确唯一 + 无更长后继 + len >= MinAutoCommitLen。
+// 当 hasPinyinCandidate=true 且输入是完整音节时，否决全码顶屏，避免与拼音冲突。
+func (e *Engine) recheckAutoCommit(input string, candidates []candidate.Candidate, hasPinyinCandidate bool) (shouldCommit bool, commitText string) {
+	ct := e.codetableEngine
+	if ct == nil {
 		return false, ""
 	}
-	cfg := e.codetableEngine.GetConfig()
-	if !cfg.AutoCommitAt4 || len(input) < cfg.MaxCodeLength {
+	cfg := ct.GetConfig()
+	if !cfg.AutoCommitAtFull || len(input) < cfg.MinAutoCommitLen {
 		return false, ""
 	}
-	exactCount := 0
+	// 混输守护：输入构成合法拼音序列（含多音节/合法尾部前缀） + 拼音有候选 → 否决。
+	// 使用 isPossiblePinyinSequence 覆盖 "woai" 这种多音节场景；旧版 trie.Contains
+	// 只判单音节，对 "woai"/"nizh" 等失效。
+	if cfg.AutoCommitBlockOnPinyin && hasPinyinCandidate && e.isPossiblePinyinSequence(input) {
+		return false, ""
+	}
+	// 来源白名单：只有码表 / 短语来源的精确命中才允许触发全码顶屏。
+	// 拼音来源即便 Code==input 也不算（拼音引擎的码格式偶尔与 input 一致不应触发码表顶屏行为）。
+	var hit candidate.Candidate
+	n := 0
 	for _, c := range candidates {
-		if c.Source == candidate.SourceCodetable && c.Code == input {
-			exactCount++
-			commitText = c.Text
+		if c.Code != input {
+			continue
 		}
+		if c.Source != candidate.SourceCodetable && c.Source != candidate.SourcePhrase {
+			continue
+		}
+		n++
+		hit = c
 	}
-	if exactCount == 1 {
-		return true, commitText
+	if n != 1 {
+		return false, ""
 	}
-	return false, ""
+	if ct.HasLongerCode(input) {
+		return false, ""
+	}
+	return true, hit.Text
 }
 
 var seenPool = sync.Pool{New: func() any { return make(map[string]struct{}, 64) }}

@@ -29,14 +29,21 @@
 - `dedupByText` 去重时保留先出现的（权重较高的）；使用 `sync.Pool` 复用 seen 映射避免 GC 压力
 - `convertMixed` 内部使用 `sync.WaitGroup` 并行查询两个引擎
 
-#### ⚠️ 顶码上屏（AutoCommitAt4）与 Shadow 的交互
+#### ⚠️ 全码顶屏（AutoCommitAtFull）与 Shadow 交互、完整音节守护
 混输模式下，码表子引擎设置了 `SkipShadow=true`，Shadow 由 MixedEngine 在合并后统一应用。
+新判定逻辑为"全码顶屏：精确唯一 + 无更长后继 + 长度 >= MinAutoCommitLen"，并新增混输守护规则。
 修改顶码或 Shadow 相关逻辑时必须注意：
 
 - **不得直接继承** `codetableResult.ShouldCommit`：子引擎的 `checkAutoCommit` 在 Shadow 前执行，若用户通过候选调整删词，子引擎看到的候选数量仍是 Shadow 前的值，会漏判
-- 应在 Shadow 应用**之后**调用 `recheckAutoCommit(input, candidates)`，从最终候选列表重新统计精确匹配数量
-- `recheckAutoCommit` 判定条件：`AutoCommitAt4=true` && `len(input) >= MaxCodeLength` && 最终列表中 `Source==SourceCodetable && Code==input` 的候选恰好为 1 个
-- `convertCodetableOnly` 和 `convertMixed` 均须遵守此规则；`convertPinyinOnly` 无码表自动上屏，无需处理
+- 应在 Shadow 应用**之后**调用 `recheckAutoCommit(input, candidates, hasPinyinCandidate)`，从最终候选列表重新评估
+- `recheckAutoCommit` 判定条件（**全部满足**才顶屏）：
+  1. `AutoCommitAtFull=true` && `len(input) >= MinAutoCommitLen`
+  2. 拼音序列守护未否决：当 `AutoCommitBlockOnPinyin=true`（默认）且 `hasPinyinCandidate=true` 时，若 `e.isPossiblePinyinSequence(input)` 为 true（覆盖多音节如 `woai`、单音节、合法尾部前缀如 `nizh`；旧版只用 `trie.Contains` 单音节判定对多音节失效）则否决
+  3. 合并候选中 `Code==input` 且 `Source ∈ {SourceCodetable, SourcePhrase}` 的候选恰好 1 个（**来源白名单**：拼音候选即便 Code==input 也不计入，全码顶屏是码表/短语特性，不应被拼音命中触发）
+  4. `codetableEngine.HasLongerCode(input) == false`（主码表 + 短语/用户/temp 层任一存在更长后继即否决）
+- 调用点（4 条全部）：`convertCodetableOnly` / `convertMixed` / `convertMixedOverflow` / `convertPinyinOnly` 末端均调用 `recheckAutoCommit`，分别按各自路径传 `hasPinyinCandidate`（纯码表 false，其余按拼音候选数 > 0）
+- **长码场景**（`len(input) > maxCodeLen`）：`convertMixedOverflow` 与 `convertPinyinOnly` 在 `codetableEngine.HasFullInputMatch(input) || HasLongerCode(input)` 为真时，额外用完整 input 查码表并合并，避免 `abcde→乙` 类长码精确匹配被前 N 码截断吞掉；拼音候选在 `convertPinyinOnly` 此分支同步走 `PinyinTierScale` 归一化以维持 tier 分层
+- `HandleEmptyCode` 在 `ClearOnEmptyAt4` 触发清空前调用 `codetableEngine.HasLongerCode(input)` 守护，存在更长后继时不清空
 
 #### ⚠️ 学习路由（OnCandidateSelected）与 charBuffer 连续性
 

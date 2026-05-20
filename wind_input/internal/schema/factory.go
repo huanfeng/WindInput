@@ -155,8 +155,20 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 		skipSingleCharFreq = *spec.SkipSingleCharFreq
 	}
 	config := &codetable.Config{
-		MaxCodeLength:      spec.MaxCodeLength,
-		AutoCommitAt4:      spec.AutoCommitUnique,
+		MaxCodeLength: spec.MaxCodeLength,
+		AutoCommitAtFull: func() bool {
+			if spec.AutoCommitAtFull != nil {
+				return *spec.AutoCommitAtFull
+			}
+			return spec.AutoCommitUnique
+		}(),
+		MinAutoCommitLen: spec.AutoCommitMinLen, // 0 由 LoadCodeTable 末尾兜底
+		AutoCommitBlockOnPinyin: func() bool {
+			if spec.AutoCommitBlockOnPinyin != nil {
+				return *spec.AutoCommitBlockOnPinyin
+			}
+			return true
+		}(),
 		ClearOnEmptyAt4:    spec.ClearOnEmptyMax,
 		TopCodeCommit:      spec.TopCodeCommit,
 		PunctCommit:        spec.PunctCommit,
@@ -841,8 +853,20 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		mixedSkipSingleCharFreq = *codeTableSpec.SkipSingleCharFreq
 	}
 	codetableConfig := &codetable.Config{
-		MaxCodeLength:      codeTableSpec.MaxCodeLength,
-		AutoCommitAt4:      codeTableSpec.AutoCommitUnique,
+		MaxCodeLength: codeTableSpec.MaxCodeLength,
+		AutoCommitAtFull: func() bool {
+			if codeTableSpec.AutoCommitAtFull != nil {
+				return *codeTableSpec.AutoCommitAtFull
+			}
+			return codeTableSpec.AutoCommitUnique
+		}(),
+		MinAutoCommitLen: codeTableSpec.AutoCommitMinLen, // 0 由 LoadCodeTable 末尾兜底
+		AutoCommitBlockOnPinyin: func() bool {
+			if codeTableSpec.AutoCommitBlockOnPinyin != nil {
+				return *codeTableSpec.AutoCommitBlockOnPinyin
+			}
+			return true
+		}(),
 		ClearOnEmptyAt4:    codeTableSpec.ClearOnEmptyMax,
 		TopCodeCommit:      codeTableSpec.TopCodeCommit,
 		PunctCommit:        codeTableSpec.PunctCommit,

@@ -347,6 +347,51 @@ func ApplyShadowPins(candidates []candidate.Candidate, rules *ShadowRules) []can
 	return result
 }
 
+// HasLongerCodeProvider 由 layer 选择性实现的"是否存在更长后继 code"探针接口。
+// 实现该接口的 layer 可直接返回判定结果，避免 fallback 路径调 LookupPrefix 拉候选。
+type HasLongerCodeProvider interface {
+	HasLongerCode(input string) bool
+}
+
+// HasLongerCode 跨所有 layer 探测：是否存在 code != input && strings.HasPrefix(code, input) 的条目。
+// 任一 layer 命中即短路返回 true。
+//
+// 探测策略：
+//  1. 若 layer 实现 HasLongerCodeProvider，直接调；
+//  2. 否则若 layer 实现 LookupPrefix(prefix, limit)，调 LookupPrefix(input, 1) 扫返回的候选看 Code != input。
+func (c *CompositeDict) HasLongerCode(input string) bool {
+	if input == "" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, layer := range c.layers {
+		if prov, ok := layer.(HasLongerCodeProvider); ok {
+			if prov.HasLongerCode(input) {
+				return true
+			}
+			continue
+		}
+		if pl, ok := layer.(interface {
+			LookupPrefix(prefix string, limit int) []candidate.Candidate
+		}); ok {
+			for _, cand := range pl.LookupPrefix(input, 4) {
+				if cand.Code != input {
+					return true
+				}
+			}
+			continue
+		}
+		// 兜底：用 SearchPrefix 拉少量结果探测
+		for _, cand := range layer.SearchPrefix(input, 4) {
+			if cand.Code != input {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // GetLayers 获取所有层（用于调试）
 func (c *CompositeDict) GetLayers() []DictLayer {
 	c.mu.RLock()

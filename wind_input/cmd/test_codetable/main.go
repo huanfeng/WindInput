@@ -57,11 +57,11 @@ func main() {
 
 	// 创建五笔引擎
 	engine := codetable.NewEngine(&codetable.Config{
-		MaxCodeLength:   ct.GetMaxCodeLength(),
-		AutoCommitAt4:   true,
-		ClearOnEmptyAt4: true,
-		TopCodeCommit:   true, // 启用顶码
-		PunctCommit:     true,
+		MaxCodeLength:    ct.GetMaxCodeLength(),
+		AutoCommitAtFull: true,
+		ClearOnEmptyAt4:  true,
+		TopCodeCommit:    true, // 启用顶码
+		PunctCommit:      true,
 	}, slog.Default())
 	engine.LoadCodeTable(dictPath)
 
