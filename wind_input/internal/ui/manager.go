@@ -15,23 +15,24 @@ import (
 
 // Unified menu ID constants
 const (
-	UnifiedMenuToggleWidth      = 101
-	UnifiedMenuTogglePunct      = 102
-	UnifiedMenuToggleToolbar    = 103
-	UnifiedMenuToggleS2T        = 104 // 简入繁出 总开关
-	UnifiedMenuSchemaEnglish    = 140 // 英文模式
-	UnifiedMenuSchemaBase       = 150 // 方案ID: 150+i
-	UnifiedMenuThemeBase        = 200 // 主题ID: 200+i
-	UnifiedMenuThemeStyleBase   = 250 // 主题风格ID: 250+i (0=system, 1=light, 2=dark)
-	UnifiedMenuFilterModeBase   = 260 // 检索范围ID: 260+i (0=smart, 1=general, 2=gb18030)
-	UnifiedMenuS2TVariantBase   = 270 // 简入繁出 变体ID: 270+i (0=s2t, 1=s2tw, 2=s2twp, 3=s2hk)
-	UnifiedMenuTestBase         = 280 // 三级菜单测试ID: 280+i
-	UnifiedMenuReloadConfig     = 299
-	UnifiedMenuRestartService   = 303
-	UnifiedMenuDictionary       = 300
-	UnifiedMenuSettings         = 301
-	UnifiedMenuAbout            = 302
-	UnifiedMenuSkipCaretPending = 304 // 为当前应用启用即时候选
+	UnifiedMenuToggleWidth          = 101
+	UnifiedMenuTogglePunct          = 102
+	UnifiedMenuToggleToolbar        = 103
+	UnifiedMenuToggleS2T            = 104 // 简入繁出 总开关
+	UnifiedMenuSchemaEnglish        = 140 // 英文模式
+	UnifiedMenuSchemaBase           = 150 // 方案ID: 150+i
+	UnifiedMenuThemeBase            = 200 // 主题ID: 200+i
+	UnifiedMenuThemeStyleBase       = 250 // 主题风格ID: 250+i (0=system, 1=light, 2=dark)
+	UnifiedMenuFilterModeBase       = 260 // 检索范围ID: 260+i (0=smart, 1=general, 2=gb18030)
+	UnifiedMenuS2TVariantBase       = 270 // 简入繁出 变体ID: 270+i (0=s2t, 1=s2tw, 2=s2twp, 3=s2hk)
+	UnifiedMenuTestBase             = 280 // 三级菜单测试ID: 280+i
+	UnifiedMenuReloadConfig         = 299
+	UnifiedMenuRestartService       = 303
+	UnifiedMenuDictionary           = 300
+	UnifiedMenuSettings             = 301
+	UnifiedMenuAbout                = 302
+	UnifiedMenuSkipCaretPending     = 304 // 为当前应用启用即时候选
+	UnifiedMenuPinCandidatePosition = 305 // 为当前应用启用固定候选位置
 )
 
 // ThemeMenuItem holds theme ID and display name for menu rendering
@@ -48,19 +49,20 @@ type SchemaMenuItem struct {
 
 // UnifiedMenuState holds the current state for building the unified menu
 type UnifiedMenuState struct {
-	ChineseMode       bool
-	FullWidth         bool
-	ChinesePunct      bool
-	ToolbarVisible    bool
-	Schemas           []SchemaMenuItem  // Available schemas in order
-	CurrentSchemaID   string            // Current active schema ID
-	CurrentFilterMode config.FilterMode // Current filter mode
-	Themes            []ThemeMenuItem
-	CurrentThemeID    string            // Current theme ID for checked state
-	CurrentThemeStyle config.ThemeStyle // Current theme style
-	Version           string            // App version for display in "About" menu item
-	ActiveProcessName string            // 当前焦点应用进程名（用于即时候选菜单项标签）
-	SkipCaretPending  bool              // 当前应用是否已启用即时候选
+	ChineseMode          bool
+	FullWidth            bool
+	ChinesePunct         bool
+	ToolbarVisible       bool
+	Schemas              []SchemaMenuItem  // Available schemas in order
+	CurrentSchemaID      string            // Current active schema ID
+	CurrentFilterMode    config.FilterMode // Current filter mode
+	Themes               []ThemeMenuItem
+	CurrentThemeID       string            // Current theme ID for checked state
+	CurrentThemeStyle    config.ThemeStyle // Current theme style
+	Version              string            // App version for display in "About" menu item
+	ActiveProcessName    string            // 当前焦点应用进程名（用于"即时候选"/"固定候选位置"等菜单项标签）
+	SkipCaretPending     bool              // 当前应用是否已启用即时候选
+	PinCandidatePosition bool              // 当前应用是否已启用固定候选位置
 
 	// 简入繁出（S2T）状态
 	S2TEnabled bool              // 总开关
@@ -179,6 +181,7 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 	}
 	advancedChildren := []MenuItem{
 		{ID: UnifiedMenuSkipCaretPending, Text: "为 " + processLabel + " 启用即时候选", Checked: state.SkipCaretPending},
+		{ID: UnifiedMenuPinCandidatePosition, Text: "为 " + processLabel + " 启用固定候选位置", Checked: state.PinCandidatePosition},
 	}
 	items = append(items,
 		MenuItem{Separator: true},
@@ -284,6 +287,12 @@ type Manager struct {
 
 	// Candidate window callbacks (for mouse interaction)
 	candidateCallbacks *CandidateCallback
+
+	// 「固定候选位置」规则的运行态：由 coordinator 在焦点切换、菜单 toggle、拖动落盘后推送。
+	// appPinEnabled=false 时 doShowCandidates 走常规路径；true 时按 caret 所在显示器从 map 取位置。
+	// appPinPositions: key = MonitorKeyStr(workRight, workBottom)，value = [x, y]。
+	appPinEnabled   bool
+	appPinPositions map[string][2]int
 
 	// Debug: hide candidate window (for performance testing)
 	hideCandidateWindow bool
@@ -649,6 +658,21 @@ func (m *Manager) SetCandidateCallbacks(callbacks *CandidateCallback) {
 	m.candidateCallbacks = callbacks
 	if m.window != nil {
 		m.window.SetCallbacks(callbacks)
+	}
+	m.mu.Unlock()
+}
+
+// SetActiveAppPinState 由 coordinator 在焦点切换 / 菜单 toggle / 拖动落盘后推送：
+// enabled=false 时 doShowCandidates 走常规自动定位 + 会话内 drag pin；
+// enabled=true 且 positionsByMonitor 含 caret 所在显示器 key 时使用其坐标（显示前再 clamp 到工作区）。
+// positionsByMonitor 由调用方拷贝传入，本方法不再共享其底层数组。
+func (m *Manager) SetActiveAppPinState(enabled bool, positionsByMonitor map[string][2]int) {
+	m.mu.Lock()
+	m.appPinEnabled = enabled
+	if enabled {
+		m.appPinPositions = positionsByMonitor
+	} else {
+		m.appPinPositions = nil
 	}
 	m.mu.Unlock()
 }

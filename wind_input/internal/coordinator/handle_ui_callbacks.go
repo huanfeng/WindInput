@@ -221,6 +221,10 @@ func (c *Coordinator) setupCandidateCallbacks() {
 		OnShowUnifiedMenu: func(screenX, screenY int) {
 			go c.handleShowUnifiedMenu(screenX, screenY, 0)
 		},
+		OnDragEnd: func(x, y int) {
+			// 回调已在 window_mouse 中通过 goroutine 调用，这里不再嵌套 goroutine
+			c.handleCandidateWindowDragEnd(x, y)
+		},
 	})
 }
 
@@ -663,21 +667,23 @@ func (c *Coordinator) handleShowUnifiedMenu(screenX, screenY, flipRefY int) {
 	}
 	activeProcessName := c.activeProcessName
 	skipCaretPending := c.activeCompatRule != nil && c.activeCompatRule.SkipCaretPending
+	pinCandidatePosition := c.activeCompatRule != nil && c.activeCompatRule.PinCandidatePosition
 	state := ui.UnifiedMenuState{
-		ChineseMode:       c.chineseMode,
-		FullWidth:         c.fullWidth,
-		ChinesePunct:      c.chinesePunctuation,
-		ToolbarVisible:    c.toolbarVisible,
-		Schemas:           schemaMenuItems,
-		CurrentSchemaID:   currentSchemaID,
-		CurrentFilterMode: currentFilterMode,
-		Themes:            themeMenuItems,
-		CurrentThemeID:    c.uiManager.GetCurrentThemeID(),
-		CurrentThemeStyle: currentThemeStyle,
-		Version:           c.version,
-		ActiveProcessName: activeProcessName,
-		SkipCaretPending:  skipCaretPending,
-		S2TEnabled:        c.config != nil && c.config.S2T.Enabled,
+		ChineseMode:          c.chineseMode,
+		FullWidth:            c.fullWidth,
+		ChinesePunct:         c.chinesePunctuation,
+		ToolbarVisible:       c.toolbarVisible,
+		Schemas:              schemaMenuItems,
+		CurrentSchemaID:      currentSchemaID,
+		CurrentFilterMode:    currentFilterMode,
+		Themes:               themeMenuItems,
+		CurrentThemeID:       c.uiManager.GetCurrentThemeID(),
+		CurrentThemeStyle:    currentThemeStyle,
+		Version:              c.version,
+		ActiveProcessName:    activeProcessName,
+		SkipCaretPending:     skipCaretPending,
+		PinCandidatePosition: pinCandidatePosition,
+		S2TEnabled:           c.config != nil && c.config.S2T.Enabled,
 		S2TVariant: func() config.S2TVariant {
 			if c.config == nil {
 				return config.S2TStandard
@@ -732,6 +738,8 @@ func (c *Coordinator) handleUnifiedMenuAction(id int, capturedProcess string) {
 		c.resetAndResync()
 	case id == ui.UnifiedMenuSkipCaretPending:
 		go c.handleToggleSkipCaretPending(capturedProcess)
+	case id == ui.UnifiedMenuPinCandidatePosition:
+		go c.handleTogglePinCandidatePosition(capturedProcess)
 	case id == ui.UnifiedMenuDictionary:
 		if c.uiManager != nil {
 			c.uiManager.OpenSettingsWithPage("dictionary")
@@ -963,6 +971,101 @@ func (c *Coordinator) handleToggleSkipCaretPending(processName string) {
 	// 用捕获的进程名更新规则，不依赖可能已被 FocusLost 清空的 activeProcessName
 	c.activeCompatRule = newCompat.GetRule(processName)
 	c.mu.Unlock()
+}
+
+// handleTogglePinCandidatePosition 切换指定应用的「固定候选位置」标志，写入用户 compat.yaml
+// 并重新加载兼容性规则、推送 pin 状态到 uiManager，使改动立即生效。
+// 关闭时同步清空该应用在 state.yaml 中已记忆的所有显示器位置。
+// processName 在菜单弹出时捕获，避免菜单关闭期间 FocusLost 清空 activeProcessName 导致操作失效。
+func (c *Coordinator) handleTogglePinCandidatePosition(processName string) {
+	if processName == "" {
+		return
+	}
+
+	newValue, err := config.ToggleUserPinCandidatePosition(processName)
+	if err != nil {
+		c.logger.Error("Failed to toggle pin_candidate_position", "process", processName, "error", err)
+		return
+	}
+	c.logger.Info("Toggled pin_candidate_position", "process", processName, "enabled", newValue)
+
+	newCompat := config.LoadAppCompat()
+	procKey := strings.ToLower(processName)
+	clearedMemory := false
+	c.mu.Lock()
+	c.appCompat = newCompat
+	c.activeCompatRule = newCompat.GetRule(processName)
+	if !newValue {
+		// 关闭即清记忆：删掉该进程在 state.yaml 中的所有显示器位置
+		if _, ok := c.candidatePinPositions[procKey]; ok {
+			delete(c.candidatePinPositions, procKey)
+			clearedMemory = true
+		}
+	}
+	c.mu.Unlock()
+
+	c.syncCandidatePinStateToUI(processName)
+	if clearedMemory {
+		c.saveCandidatePinPositions()
+	}
+}
+
+// handleCandidateWindowDragEnd 是候选窗拖动结束的回调：
+// 仅当当前活跃应用启用了「固定候选位置」规则时，把新位置按 caret-所在显示器写入 state 并持久化。
+// 未启用规则的应用拖动行为保持现状（仅会话内 dragPinned 有效，Hide 后自动重置）。
+func (c *Coordinator) handleCandidateWindowDragEnd(x, y int) {
+	c.mu.Lock()
+	process := c.activeProcessName
+	rule := c.activeCompatRule
+	c.mu.Unlock()
+
+	if rule == nil || !rule.PinCandidatePosition || process == "" {
+		return
+	}
+
+	// 用拖动结束时窗口左上角所在显示器作为 key，与显示路径里的 caret 显示器查表对称
+	_, _, workRight, workBottom := ui.GetMonitorWorkAreaFromPoint(x, y)
+	monitorKey := ui.MonitorKeyStr(workRight, workBottom)
+
+	procKey := strings.ToLower(process)
+	c.mu.Lock()
+	if c.candidatePinPositions == nil {
+		c.candidatePinPositions = make(map[string]map[string][2]int)
+	}
+	if c.candidatePinPositions[procKey] == nil {
+		c.candidatePinPositions[procKey] = make(map[string][2]int)
+	}
+	c.candidatePinPositions[procKey][monitorKey] = [2]int{x, y}
+	c.mu.Unlock()
+
+	c.syncCandidatePinStateToUI(process)
+	c.saveCandidatePinPositions()
+	c.logger.Debug("Candidate pin position recorded", "process", procKey, "monitor", monitorKey, "x", x, "y", y)
+}
+
+// syncCandidatePinStateToUI 拷贝指定应用的 pin 位置 map（按显示器键）推给 uiManager，
+// 作为 doShowCandidates 决定候选窗坐标的依据。enabled 自动跟随当前 activeCompatRule 状态。
+// 在焦点切换 / 菜单 toggle / 拖动落盘三处调用。
+func (c *Coordinator) syncCandidatePinStateToUI(processName string) {
+	if c.uiManager == nil {
+		return
+	}
+	procKey := strings.ToLower(processName)
+
+	c.mu.Lock()
+	enabled := c.activeCompatRule != nil && c.activeCompatRule.PinCandidatePosition
+	var positions map[string][2]int
+	if enabled {
+		if existing, ok := c.candidatePinPositions[procKey]; ok && len(existing) > 0 {
+			positions = make(map[string][2]int, len(existing))
+			for k, v := range existing {
+				positions[k] = v
+			}
+		}
+	}
+	c.mu.Unlock()
+
+	c.uiManager.SetActiveAppPinState(enabled, positions)
 }
 
 // pushKeyEventResult 将 KeyEventResult 通过 bridge push 管道发送给活跃 TSF 客户端。

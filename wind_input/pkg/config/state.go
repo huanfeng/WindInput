@@ -18,6 +18,11 @@ type RuntimeState struct {
 	// key = "workRight,workBottom"（显示器工作区右下角坐标），value = [x, y]。
 	// 与 remember_last_state 无关，始终持久化。
 	ToolbarPositions map[string][2]int `yaml:"toolbar_positions,omitempty" json:"toolbar_positions,omitempty"`
+
+	// CandidatePinPositions 保存启用了 pin_candidate_position 的应用候选窗拖动后的位置。
+	// 外层 key = 小写进程名；内层 key = "workRight,workBottom"（显示器工作区右下角），value = [x, y]。
+	// 与 remember_last_state 无关，始终持久化。关闭 pin 时该应用的条目会被清空。
+	CandidatePinPositions map[string]map[string][2]int `yaml:"candidate_pin_positions,omitempty" json:"candidate_pin_positions,omitempty"`
 }
 
 // DefaultRuntimeState 返回默认运行时状态

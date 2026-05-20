@@ -12,7 +12,8 @@
 | `config.go` | `Config` 结构体（含所有子配置）、`Load()`/`LoadFrom()`/`Save()`/`SaveTo()`/`DefaultConfig()`，三层加载逻辑，YAML 序列化标签 |
 | `paths.go` | 路径常量（`AppName`、`DataSubDir`、`ConfigFileName` 等）和辅助函数（`GetConfigDir`、`GetDataDir`、`GetSystemConfigPath`、`EnsureConfigDir` 等） |
 | `config_hotkey.go` | `HotkeyConfig`：热键字符串配置（`ToggleModeKeys`、`SwitchEngine`、`DeleteCandidate`、`PinCandidate`、`ToggleToolbar`、`OpenSettings`、`AddWord` 等） |
-| `state.go` | `RuntimeState`：运行时状态持久化（中英文模式、全角、标点），`LoadRuntimeState`/`SaveRuntimeState` |
+| `state.go` | `RuntimeState`：运行时状态持久化（中英文模式、全角、标点、工具栏位置 `ToolbarPositions`、候选窗固定位置 `CandidatePinPositions`），`LoadRuntimeState`/`SaveRuntimeState` |
+| `compat.go` | `AppCompat`/`AppCompatRule`：按进程名匹配的兼容性规则（`caret_use_top`、`skip_caret_pending`、`pin_candidate_position`）；`LoadAppCompat`（系统预置 + 用户层合并）、`ToggleUserSkipCaretPending`、`ToggleUserPinCandidatePosition` |
 
 ## For AI Agents
 

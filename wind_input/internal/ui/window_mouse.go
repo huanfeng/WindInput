@@ -237,9 +237,17 @@ func (w *CandidateWindow) handleDragEnd() {
 
 		w.mu.Lock()
 		w.dragPinned = true
+		x, y := w.x, w.y
+		cb := w.callbacks
 		w.mu.Unlock()
 
 		w.logger.Debug("候选框拖动完成，位置已锁定")
+
+		// 通知上层（coordinator）：用于「固定候选位置」规则将位置持久化到 state.yaml。
+		// 未启用该规则时回调内部会直接返回，本地 dragPinned 会话内 pin 行为不受影响。
+		if cb != nil && cb.OnDragEnd != nil {
+			go cb.OnDragEnd(x, y)
+		}
 	}
 }
 

@@ -38,4 +38,5 @@ type CandidateCallback struct {
 	OnOpenSettings    func()                                                  // Called when user selects "Settings" from context menu
 	OnAbout           func()                                                  // Called when user selects "About" from context menu
 	OnShowUnifiedMenu func(screenX, screenY int)                              // Called when user right-clicks blank area to show unified menu
+	OnDragEnd         func(x, y int)                                          // Called after user finishes dragging the candidate window (x, y = window left-top in screen coords)
 }

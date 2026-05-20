@@ -240,12 +240,24 @@ func (c *Coordinator) buildRuntimeStateNoLock() *config.RuntimeState {
 	for k, pt := range c.toolbarUserPos {
 		positions[k] = [2]int{pt.X, pt.Y}
 	}
+	var candidatePinPositions map[string]map[string][2]int
+	if len(c.candidatePinPositions) > 0 {
+		candidatePinPositions = make(map[string]map[string][2]int, len(c.candidatePinPositions))
+		for proc, byMonitor := range c.candidatePinPositions {
+			inner := make(map[string][2]int, len(byMonitor))
+			for k, v := range byMonitor {
+				inner[k] = v
+			}
+			candidatePinPositions[proc] = inner
+		}
+	}
 	return &config.RuntimeState{
-		ChineseMode:      c.chineseMode,
-		FullWidth:        c.fullWidth,
-		ChinesePunct:     c.chinesePunctuation,
-		EngineType:       c.getCurrentEngineNameNoLock(),
-		ToolbarPositions: positions,
+		ChineseMode:           c.chineseMode,
+		FullWidth:             c.fullWidth,
+		ChinesePunct:          c.chinesePunctuation,
+		EngineType:            c.getCurrentEngineNameNoLock(),
+		ToolbarPositions:      positions,
+		CandidatePinPositions: candidatePinPositions,
 	}
 }
 
@@ -280,6 +292,23 @@ func (c *Coordinator) saveToolbarPositions() {
 			c.logger.Error("Failed to save toolbar positions", "error", err)
 		} else {
 			c.logger.Debug("Toolbar positions saved", "count", len(state.ToolbarPositions))
+		}
+	}()
+}
+
+// saveCandidatePinPositions 与 saveToolbarPositions 同样始终持久化（不受 remember_last_state 控制）。
+// 在「固定候选位置」规则的拖动落盘、菜单关闭清空时调用。
+// 调用者不需要持有 c.mu 锁。
+func (c *Coordinator) saveCandidatePinPositions() {
+	c.mu.Lock()
+	state := c.buildRuntimeStateNoLock()
+	c.mu.Unlock()
+
+	go func() {
+		if err := config.SaveRuntimeState(state); err != nil {
+			c.logger.Error("Failed to save candidate pin positions", "error", err)
+		} else {
+			c.logger.Debug("Candidate pin positions saved", "appCount", len(state.CandidatePinPositions))
 		}
 	}()
 }

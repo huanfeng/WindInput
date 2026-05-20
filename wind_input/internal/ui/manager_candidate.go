@@ -171,9 +171,15 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	m.window.SetCandidateMenuState(candidateTexts, m.isPinyinMode, isCommandFlags, isGroupMemberFlags, isPhraseFlags, isUserDictFlags, isTempDictFlags)
 	m.window.SetQuickInputMode(m.isQuickInputMode)
 
-	// If user has dragged the window, keep the current position (skip auto-positioning)
+	// 位置决策优先级：
+	//   1. 「固定候选位置」规则（per-app 持久化，按 caret 所在显示器查表，clamp 到工作区）
+	//   2. 会话内 drag pin（用户当前会话拖动后）
+	//   3. caret 自动定位
 	var windowX, windowY int
-	if m.window.IsDragPinned() {
+	if pinX, pinY, ok := m.resolveAppPinnedPosition(caretX, caretY, windowWidth, windowHeight); ok {
+		windowX, windowY = pinX, pinY
+		m.logger.Debug("Position pinned by app rule", "windowX", windowX, "windowY", windowY)
+	} else if m.window.IsDragPinned() {
 		windowX, windowY = m.window.GetPosition()
 		m.logger.Debug("Position pinned by drag", "windowX", windowX, "windowY", windowY)
 	} else {
@@ -498,4 +504,74 @@ func (m *Manager) SetModeAccentColor(c color.Color) {
 	m.mu.Lock()
 	m.modeAccentColor = c
 	m.mu.Unlock()
+}
+
+// resolveAppPinnedPosition 返回「固定候选位置」规则对应的候选窗左上角坐标。
+// 决策三档（与用户在设计阶段确认的语义保持一致）：
+//  1. 规则未启用 / 无任何记忆 → ok=false 走常规自动定位；
+//  2. caret 所在显示器有记录 → 使用该记录，并 clamp 到该显示器工作区（处理分辨率变化）；
+//  3. caret 所在显示器无记录：
+//     a) 若任一记录仍落在某有效显示器工作区内（用户多屏轮换中、只是当前在另一屏）
+//     → ok=false 走常规自动定位，避免拿别屏坐标贴到当前屏；
+//     b) 否则所有记录都已"孤儿化"（保存的显示器已拔/分辨率已变）
+//     → 任选一条 clamp 到 caret 所在显示器工作区，保证 pin 行为不"失效"。
+func (m *Manager) resolveAppPinnedPosition(caretX, caretY, windowWidth, windowHeight int) (int, int, bool) {
+	m.mu.Lock()
+	enabled := m.appPinEnabled
+	positions := m.appPinPositions
+	m.mu.Unlock()
+
+	if !enabled || len(positions) == 0 {
+		return 0, 0, false
+	}
+
+	workLeft, workTop, workRight, workBottom := GetMonitorWorkAreaFromPoint(caretX, caretY)
+	caretMonitorKey := MonitorKeyStr(workRight, workBottom)
+
+	var x, y int
+	var found bool
+	if pos, ok := positions[caretMonitorKey]; ok {
+		x, y, found = pos[0], pos[1], true
+	} else {
+		// 当前显示器无记录：检查是否存在任何"仍在有效显示器内"的旧记录
+		anyOnValidMonitor := false
+		var orphanX, orphanY int
+		haveOrphan := false
+		for _, pos := range positions {
+			ml, mt, mr, mb := GetMonitorWorkAreaFromPoint(pos[0], pos[1])
+			if pos[0] >= ml && pos[0] < mr && pos[1] >= mt && pos[1] < mb {
+				anyOnValidMonitor = true
+				break
+			}
+			if !haveOrphan {
+				orphanX, orphanY = pos[0], pos[1]
+				haveOrphan = true
+			}
+		}
+		if anyOnValidMonitor {
+			// 多屏轮换：另一屏的记录有效，不应用到当前屏，让其走常规自动定位
+			return 0, 0, false
+		}
+		if haveOrphan {
+			x, y, found = orphanX, orphanY, true
+		}
+	}
+	if !found {
+		return 0, 0, false
+	}
+
+	// Clamp 到 caret 所在显示器工作区（不回写 map，避免 clamp 后的临时安全位置污染用户原意）
+	if x+windowWidth > workRight {
+		x = workRight - windowWidth
+	}
+	if x < workLeft {
+		x = workLeft
+	}
+	if y+windowHeight > workBottom {
+		y = workBottom - windowHeight
+	}
+	if y < workTop {
+		y = workTop
+	}
+	return x, y, true
 }
