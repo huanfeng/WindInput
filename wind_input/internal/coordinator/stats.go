@@ -38,6 +38,13 @@ func (c *Coordinator) SetStatCollector(sc *store.StatCollector) {
 // candidatePos: 候选位置（0=首选, -1=非候选）
 // source: 上屏来源
 func (c *Coordinator) recordCommit(text string, codeLen int, candidatePos int, source store.CommitSource) {
+	// 标记 IME 自家提交时间：HandleSelectionChanged 在 grace 窗口内会跳过 OnPhraseTerminated，
+	// 避免自家 InsertText 触发的回响 SelectionChanged 把刚 append 的单字立即 flush 掉。
+	// 即便统计关闭也要更新该时间戳（造词依赖它，与 stats 解耦）。
+	if text != "" {
+		c.lastSelfCommitTime = time.Now()
+	}
+
 	if c.statCollector == nil || text == "" {
 		return
 	}

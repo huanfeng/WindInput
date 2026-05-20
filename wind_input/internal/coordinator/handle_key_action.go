@@ -588,6 +588,10 @@ func (c *Coordinator) handleSpace() *bridge.KeyEventResult {
 			return c.selectCandidate(index)
 		}
 	} else if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
+		// 空码空格 = 短语终止符（用户敲空格中断当前序列，应触发自动造词 flush）
+		if c.engineMgr != nil {
+			c.engineMgr.OnPhraseTerminated()
+		}
 		// No candidates (空码), check space_on_empty_behavior config
 		if c.config != nil && c.config.Input.SpaceOnEmptyBehavior == config.SpaceOnEmptyClear {
 			c.clearState()

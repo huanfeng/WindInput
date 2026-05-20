@@ -233,6 +233,12 @@ type Coordinator struct {
 	pairTrackerEn  *transform.PairTracker // 英文配对追踪器
 	pairInsertTime time.Time              // 最近一次自动配对插入的时间，用于抑制 SelectionChanged 清栈
 
+	// lastSelfCommitTime 最近一次 IME 主动向宿主提交文本的时间。
+	// 用于在 HandleSelectionChanged 里区分"用户主动操作"和"IME 自家提交导致的回响"：
+	// 我们提交候选词后宿主插入文本，会立即触发一次 OnEndEdit → HandleSelectionChanged，
+	// 若不加 grace window 会让自动造词把刚 append 的字立刻 flush 掉（bufLen=1 不足 → 清空）。
+	lastSelfCommitTime time.Time
+
 	// 简入繁出（S->T）转换管理器（lazy 加载，单例）
 	s2tManager *s2t.Manager
 
@@ -271,6 +277,11 @@ type Coordinator struct {
 	// key = ui.MonitorKeyStr(workRight, workBottom)，value = 工具栏左上角屏幕坐标。
 	// 焦点切换时优先使用该值；切换到没有记录的显示器时回退到右下角默认位置。
 	toolbarUserPos map[string]image.Point
+
+	// candidatePinPositions 保存启用了「固定候选位置」的应用候选窗拖动后的位置。
+	// 外层 key = 小写进程名；内层 key = ui.MonitorKeyStr(workRight, workBottom)，value = [x, y]。
+	// 焦点切换 / 菜单 toggle / 拖动落盘后同步推送到 uiManager.SetActiveAppPinState。
+	candidatePinPositions map[string]map[string][2]int
 
 	// tooltip 异步查询（独立锁，避免与主锁形成死锁）
 	tooltipService  *tooltip.Service
@@ -506,6 +517,19 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		}
 	}
 
+	// 加载「固定候选位置」记忆（与 toolbar 同样无条件持久化）
+	var candidatePinPositions map[string]map[string][2]int
+	if runtimeStateErr == nil && len(runtimeState.CandidatePinPositions) > 0 {
+		candidatePinPositions = make(map[string]map[string][2]int, len(runtimeState.CandidatePinPositions))
+		for proc, byMonitor := range runtimeState.CandidatePinPositions {
+			inner := make(map[string][2]int, len(byMonitor))
+			for k, v := range byMonitor {
+				inner[k] = v
+			}
+			candidatePinPositions[proc] = inner
+		}
+	}
+
 	if cfg != nil {
 		if cfg.Startup.RememberLastState && runtimeStateErr == nil {
 			startInChineseMode = runtimeState.ChineseMode
@@ -542,16 +566,17 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 			caretY:      100,
 			caretHeight: 20,
 		},
-		punctConverter: transform.NewPunctuationConverter(),
-		pairTracker:    transform.NewPairTracker(cfg.Input.AutoPair.ChinesePairs),
-		pairTrackerEn:  transform.NewPairTracker(cfg.Input.AutoPair.EnglishPairs),
-		hotkeyCompiler: hotkey.NewCompiler(cfg),
-		hotkeysDirty:   true, // 首次使用时需要编译
-		s2tManager:     newS2TManager(logger),
-		inputHistory:   NewInputHistory(20),
-		appCompat:      appCompat,
-		cfgMu:          new(sync.RWMutex),
-		toolbarUserPos: toolbarUserPos,
+		punctConverter:        transform.NewPunctuationConverter(),
+		pairTracker:           transform.NewPairTracker(cfg.Input.AutoPair.ChinesePairs),
+		pairTrackerEn:         transform.NewPairTracker(cfg.Input.AutoPair.EnglishPairs),
+		hotkeyCompiler:        hotkey.NewCompiler(cfg),
+		hotkeysDirty:          true, // 首次使用时需要编译
+		s2tManager:            newS2TManager(logger),
+		inputHistory:          NewInputHistory(20),
+		appCompat:             appCompat,
+		cfgMu:                 new(sync.RWMutex),
+		toolbarUserPos:        toolbarUserPos,
+		candidatePinPositions: candidatePinPositions,
 	}
 
 	// 根据配对表设置引号配对状态

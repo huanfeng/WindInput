@@ -251,6 +251,28 @@ func (c *Coordinator) HandleSelectionChanged(prevChar rune) {
 	c.caretValid = false
 	c.compositionStartValid = false
 	c.logger.Debug("Selection changed, reset smart punct state", "prevChar", string(prevChar))
+
+	// 自动造词关键补救（2026-05-20）：
+	// composition 关闭后，用户敲 Space/Enter 由 TSF 直接透传给宿主，Go 端不会被调用，
+	// 因此 handleSpace/handleEnter 的 OnPhraseTerminated 永远不会触发。但宿主接收
+	// Space/Enter 时光标会移动 → ITfTextEditSink::OnEndEdit → 本函数。借此补回
+	// "句子结束"信号，让自动造词在用户预期的时机（敲完空格/回车）就写词，
+	// 而不必等焦点切换或 5s idle 兜底。
+	//
+	// 关键 grace window：IME 自己提交候选时宿主也会发 SelectionChanged，
+	// 若不过滤会让刚 append 的单字立即被 flush 掉（bufLen=1 不足 → 清空 buffer），
+	// 实测延迟通常 < 50ms（见 wind_input_debug.log 中"select 中→Selection changed"约 16ms）。
+	// 200ms 留出余量；之后到来的 SelectionChanged 视为真正的用户操作（敲空格/回车/点击）。
+	if c.engineMgr != nil {
+		const selfCommitGracePeriod = 200 * time.Millisecond
+		if c.lastSelfCommitTime.IsZero() || time.Since(c.lastSelfCommitTime) > selfCommitGracePeriod {
+			c.logger.Debug("SelectionChanged → OnPhraseTerminated (likely Space/Enter/click outside composition)")
+			c.engineMgr.OnPhraseTerminated()
+		} else {
+			c.logger.Debug("SelectionChanged within self-commit grace, skipping OnPhraseTerminated",
+				"sinceCommitMs", time.Since(c.lastSelfCommitTime).Milliseconds())
+		}
+	}
 }
 
 // HandleHostRenderReady is called when host render shared memory is set up for the active client.

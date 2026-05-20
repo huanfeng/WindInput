@@ -137,10 +137,15 @@ func (c *Coordinator) isPunctuation(r rune) bool {
 func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) *bridge.KeyEventResult {
 	c.logger.Debug("handlePunctuation", "char", string(r), "buffer", c.inputBuffer)
 
+	// 任意标点 = 短语终止符，**无关** punct_commit 开关与是否有候选/buffer。
+	// 这是码表自动造词的强约束：标点出现即视为一句结束，flush 当前 charBuffer。
+	// 后续若再触发 OnCandidateSelected（punct_commit 顶字上屏路径），Manager 内部
+	// channel 保证 terminated 先于 selected 执行（FIFO）。
+	if c.engineMgr != nil {
+		c.engineMgr.OnPhraseTerminated()
+	}
+
 	// Check if punct_commit is enabled
-	// 注：OnPhraseTerminated 在下方按分支处理：
-	//   - punct_commit 路径：与 OnCandidateSelected 顺序调用，Manager channel 保证 FIFO
-	//   - 其他路径：在外层 if 块结束后触发
 	// 码表/Mixed 受 PunctCommit 开关控制；全拼引擎沿用传统行为，标点恒触发顶字上屏。
 	punctCommitEnabled := false
 	if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
@@ -231,12 +236,11 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 				c.inputHistory.Record(commitText, "", "", 0)
 			}
 
-			// 标点顶字上屏：先 flush 旧序列，再将候选追加到新序列。
-			// Manager channel 内部 FIFO 保证 terminated 先于 selected 执行。
+			// 标点顶字上屏：terminator 已在函数入口统一触发；这里只追加 CandidateSelected。
+			// Manager 内部 channel FIFO 保证 terminated 先于 selected 执行。
 			// 跳过条件用 Actions 而非 IsCommand: 短语 / $AA / $SS 等都应学习,
 			// 只有有副作用的 cmdbar 命令 (Actions 非空) 才跳过 (上方 L181 已分发)。
 			if c.engineMgr != nil && len(candidate.Actions) == 0 {
-				c.engineMgr.OnPhraseTerminated()
 				c.engineMgr.OnCandidateSelected(c.inputBuffer, candidate.Text, candidate.Source)
 			}
 
@@ -268,10 +272,7 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 		}
 	}
 
-	// 非 punct_commit 路径（无候选、或 punct_commit 未启用）：单独触发短语终止
-	if c.engineMgr != nil {
-		c.engineMgr.OnPhraseTerminated()
-	}
+	// 函数入口已统一触发 OnPhraseTerminated（任意标点 = 终止符），此处无需重复。
 
 	// punct_commit 启用但无候选（空码）：丢弃编码，清空缓冲区，直接输出标点
 	if punctCommitEnabled && (len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0) && len(c.candidates) == 0 {
