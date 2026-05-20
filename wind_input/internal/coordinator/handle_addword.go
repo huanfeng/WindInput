@@ -279,7 +279,7 @@ func (c *Coordinator) handleAddWordKey(data bridge.KeyEventData) *bridge.KeyEven
 	vk := uint32(data.KeyCode)
 
 	switch {
-	case vk == ipc.VK_ESCAPE:
+	case vk == ipc.VK_ESCAPE, vk == ipc.VK_BACK:
 		c.exitAddWordMode()
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
 
