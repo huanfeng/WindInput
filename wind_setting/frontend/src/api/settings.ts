@@ -138,6 +138,8 @@ export interface ShiftTempEnglishConfig {
   show_english_candidates: boolean;
   shift_behavior: ShiftBehaviorValue;
   trigger_keys: string[];
+  allow_symbols: boolean;
+  space_as_input: boolean;
 }
 
 // 临时拼音配置
@@ -428,6 +430,8 @@ export function getDefaultConfig(): Config {
         show_english_candidates: true,
         shift_behavior: "temp_english",
         trigger_keys: [],
+        allow_symbols: false,
+        space_as_input: false,
       },
       temp_pinyin: {
         trigger_keys: ["backtick"],

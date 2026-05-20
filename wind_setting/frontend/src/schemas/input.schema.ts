@@ -163,6 +163,18 @@ export const inputSchema: PageSchema = [
     label: '显示英文候选',
     hint: '临时英文模式下查询英文词库显示候选词',
   },
+  {
+    type: 'toggle',
+    key: 'input.shift_temp_english.allow_symbols',
+    label: '允许输入符号与数字',
+    hint: '可输入下划线、点号等符号，便于书写标识符或代码',
+  },
+  {
+    type: 'toggle',
+    key: 'input.shift_temp_english.space_as_input',
+    label: '空格作为输入字符',
+    hint: '空格不再上屏，可连续输入多个单词，回车上屏',
+  },
 
   // ── 默认状态（segmented controls 手写，记忆状态 schema 驱动）──
   { type: 'card', label: '__startup_extra__' }, // 占位符，不实际使用
@@ -193,7 +205,7 @@ export const quickInputExtraSchema: PageSchema = inputSchema.slice(13, 15)
 export const pinyinSeparatorSchema: PageSchema = inputSchema.slice(16, 17)
 
 /** 临时英文卡片内的额外字段（bare 模式） */
-export const shiftExtraSchema: PageSchema = inputSchema.slice(18, 20)
+export const shiftExtraSchema: PageSchema = inputSchema.slice(18, 22)
 
 /** 默认状态卡片内的记忆字段（bare 模式） */
-export const startupExtraSchema: PageSchema = inputSchema.slice(21, 22)
+export const startupExtraSchema: PageSchema = inputSchema.slice(23, 24)

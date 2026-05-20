@@ -174,18 +174,21 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	// 覆盖所有模式（主输入 / 临时英文 / 临时拼音 / 快捷输入），否则 replay 后
 	// 候选窗在新焦点首个 caret 到达时不会重新 show。
 	hasMainInput := len(c.inputBuffer) > 0
-	hasTempEnglish := len(c.tempEnglishBuffer) > 0
+	// tempEnglish 用 mode 标记而非 buffer 长度：触发键进入时 buffer 为空，
+	// 但 preedit 含触发键 prefix，仍需 show 候选窗。
+	hasTempEnglish := c.tempEnglishMode
 	hasTempPinyin := c.tempPinyinMode
 	hasQuickInputPinyin := c.quickInputPinyinMode
 	hasQuickInput := c.quickInputMode
 	hasInput := hasMainInput || hasTempEnglish || hasTempPinyin || hasQuickInput
 	hasCandidates := len(c.candidates) > 0
 	hasUI := c.uiManager != nil
-	// 主输入流程必须有候选才 show；模式入口（quickInput / tempPinyin）允许空候选，
-	// 因为 preedit 中含触发键 prefix，仍需把候选窗（即便只有 prefix）渲染出来。
+	// 主输入流程必须有候选才 show；模式入口（quickInput / tempPinyin / tempEnglish）
+	// 允许空候选，因为 preedit 中含触发键 prefix 或用户已输入的字母，
+	// 仍需把候选窗（即便只有 preedit）渲染出来。
 	// 非嵌入模式：主输入也允许空候选 show，让用户看到 inputBuffer（如 v/i/u/o
 	// 等无对应候选的拼音字母），避免编码既不嵌入宿主又看不到候选窗的死角。
-	canShow := hasUI && (hasCandidates || hasTempPinyin || hasQuickInput || (hasMainInput && !c.isInlinePreedit()))
+	canShow := hasUI && (hasCandidates || hasTempEnglish || hasTempPinyin || hasQuickInput || (hasMainInput && !c.isInlinePreedit()))
 	if hasInput && canShow {
 		// 首次 show（pendingFirstShow 刚被消费）必须无条件 show，无视 3px 过滤；
 		// 否则若 reflow 后坐标恰好与按键前差 ≤3px，候选窗会一直不显示。

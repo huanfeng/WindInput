@@ -72,6 +72,8 @@ input:
   shift_temp_english:
     enabled: true
     show_english_candidates: true
+    allow_symbols: false
+    space_as_input: false
   capslock_behavior:
     cancel_on_mode_switch: false
   temp_pinyin:

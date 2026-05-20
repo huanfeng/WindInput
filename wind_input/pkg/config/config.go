@@ -327,6 +327,12 @@ type ShiftTempEnglishConfig struct {
 	ShiftBehavior string `yaml:"shift_behavior" json:"shift_behavior"`
 	// 触发键（符号键进入临时英文模式，类似临时拼音触发键）
 	TriggerKeys []string `yaml:"trigger_keys" json:"trigger_keys"`
+	// 允许输入符号与数字：开启后，符号/数字键不强制上屏，而是追加到 buffer，
+	// buffer 中含非字母字符时进入"无候选"状态（不查词库、不显示候选列表，但保留 preedit）；
+	// 数字键 1-9 仅在对应索引超出当前页可见候选数时进 buffer，否则继续作选候选用。
+	AllowSymbols bool `yaml:"allow_symbols" json:"allow_symbols"`
+	// 空格作为输入字符：开启后空格不再上屏，而是追加到 buffer，仅回车上屏。
+	SpaceAsInput bool `yaml:"space_as_input" json:"space_as_input"`
 }
 
 // CapsLockBehaviorConfig CapsLock 行为配置
@@ -442,6 +448,8 @@ func DefaultConfig() *Config {
 				ShowEnglishCandidates: true,
 				ShiftBehavior:         "temp_english",
 				TriggerKeys:           []string{},
+				AllowSymbols:          false,
+				SpaceAsInput:          false,
 			},
 			CapsLockBehavior: CapsLockBehaviorConfig{
 				CancelOnModeSwitch: false,

@@ -191,9 +191,75 @@ func (c *Coordinator) exitTempEnglishMode(commit bool, text string) *bridge.KeyE
 
 // ─── 按键处理 ───
 
+// isTempEnglishSymbolChar 判断字节是否为 ASCII 可见、非字母、非数字、非空格字符
+// （用于 allow_symbols 开启时把 -=,./;'[]\ 等符号直接入 buffer，避免被翻页/选键截走）
+func isTempEnglishSymbolChar(b byte) bool {
+	if b <= 0x20 || b >= 0x7F {
+		return false
+	}
+	if b >= '0' && b <= '9' {
+		return false
+	}
+	if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') {
+		return false
+	}
+	return true
+}
+
+// tempEnglishAllowSymbols 返回是否启用"允许输入符号与数字"选项
+func (c *Coordinator) tempEnglishAllowSymbols() bool {
+	return c.config != nil && c.config.Input.ShiftTempEnglish.AllowSymbols
+}
+
+// tempEnglishSpaceAsInput 返回是否启用"空格作为输入字符"选项
+func (c *Coordinator) tempEnglishSpaceAsInput() bool {
+	return c.config != nil && c.config.Input.ShiftTempEnglish.SpaceAsInput
+}
+
+// tempEnglishBufferAllAlpha 判断 buffer 是否纯字母（决定是否处于"有候选"状态）
+func (c *Coordinator) tempEnglishBufferAllAlpha() bool {
+	if c.tempEnglishBuffer == "" {
+		return true
+	}
+	for _, r := range c.tempEnglishBuffer {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// tempEnglishInsertAt 在光标位置插入字符串到 buffer
+func (c *Coordinator) tempEnglishInsertAt(s string) {
+	if s == "" {
+		return
+	}
+	runes := []rune(c.tempEnglishBuffer)
+	pos := c.tempEnglishCursorPos
+	if pos > len(runes) {
+		pos = len(runes)
+	}
+	insert := []rune(s)
+	newRunes := make([]rune, 0, len(runes)+len(insert))
+	newRunes = append(newRunes, runes[:pos]...)
+	newRunes = append(newRunes, insert...)
+	newRunes = append(newRunes, runes[pos:]...)
+	c.tempEnglishBuffer = string(newRunes)
+	c.tempEnglishCursorPos = pos + len(insert)
+}
+
+// tempEnglishAfterInsert 插入后刷新候选与 UI
+func (c *Coordinator) tempEnglishAfterInsert() *bridge.KeyEventResult {
+	c.updateTempEnglishCandidates()
+	c.showTempEnglishUI()
+	return c.tempEnglishCompositionResult()
+}
+
 func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData) *bridge.KeyEventResult {
 	hasShift := data.Modifiers&ModShift != 0
 	vk := uint32(data.KeyCode)
+	allowSymbols := c.tempEnglishAllowSymbols()
+	spaceAsInput := c.tempEnglishSpaceAsInput()
 
 	switch {
 	case vk == ipc.VK_BACK:
@@ -237,6 +303,11 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		return c.exitTempEnglishMode(false, "")
 
 	case vk == ipc.VK_SPACE:
+		// space_as_input：空格作为输入字符进入 buffer，仅回车上屏
+		if spaceAsInput {
+			c.tempEnglishInsertAt(" ")
+			return c.tempEnglishAfterInsert()
+		}
 		// 有候选时选择当前高亮候选（首候选=用户输入本身）
 		if len(c.candidates) > 0 {
 			pageStart := (c.currentPage - 1) * c.candidatesPerPage
@@ -280,6 +351,12 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		c.tempEnglishCursorPos = len(c.tempEnglishBuffer)
 		c.showTempEnglishUI()
 		return c.tempEnglishCompositionResult()
+
+	// === allow_symbols 开启：可见非字母非数字字符直接入 buffer，
+	// 优先于翻页/高亮/选键的判定（避免 -= ,. ;' [] /\ 等被相关 case 截走） ===
+	case allowSymbols && len(key) == 1 && isTempEnglishSymbolChar(key[0]):
+		c.tempEnglishInsertAt(key)
+		return c.tempEnglishAfterInsert()
 
 	// === 翻页（使用与正常模式一致的配置键） ===
 	case c.isPageUpKey(key, int(vk), uint32(data.Modifiers)):
@@ -328,8 +405,8 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
-	// === 二候选选择键（仅有候选时匹配） ===
-	case data.Modifiers&ModShift == 0 && c.isSelectKey2(key, data.KeyCode) && len(c.candidates) > 0:
+	// === 二候选选择键（仅有候选时匹配；allow_symbols 开启时禁用，让其落到符号 fallback） ===
+	case !allowSymbols && data.Modifiers&ModShift == 0 && c.isSelectKey2(key, data.KeyCode) && len(c.candidates) > 0:
 		if len(c.candidates) >= 2 {
 			pageStart := (c.currentPage - 1) * c.candidatesPerPage
 			idx := pageStart + 1
@@ -339,8 +416,8 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
-	// === 三候选选择键（仅有候选时匹配） ===
-	case data.Modifiers&ModShift == 0 && c.isSelectKey3(key, data.KeyCode) && len(c.candidates) > 0:
+	// === 三候选选择键（仅有候选时匹配；allow_symbols 开启时禁用） ===
+	case !allowSymbols && data.Modifiers&ModShift == 0 && c.isSelectKey3(key, data.KeyCode) && len(c.candidates) > 0:
 		if len(c.candidates) >= 3 {
 			pageStart := (c.currentPage - 1) * c.candidatesPerPage
 			idx := pageStart + 2
@@ -350,8 +427,9 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
-	// === 触发键二次输入：按当前标点/全半角状态上屏符号 ===
-	case c.tempEnglishTriggerKey != "" && c.isTempEnglishTriggerKeyMatch(key, data.KeyCode):
+	// === 触发键二次输入：按当前标点/全半角状态上屏符号
+	// allow_symbols 开启时不再退出，触发键当作普通符号入 buffer ===
+	case !allowSymbols && c.tempEnglishTriggerKey != "" && c.isTempEnglishTriggerKeyMatch(key, data.KeyCode):
 		if len(c.tempEnglishBuffer) == 0 {
 			// 缓冲区为空时，直接按标点状态输出触发键字符
 			punctText := c.tempEnglishTriggerPrefix()
@@ -415,10 +493,17 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		idx := int(key[0] - '1')
 		pageStart := (c.currentPage - 1) * c.candidatesPerPage
 		absIdx := pageStart + idx
-		if absIdx < len(c.candidates) {
+		// 索引在可见候选范围内 → 选候选
+		if idx < c.candidatesPerPage && absIdx < len(c.candidates) {
 			return c.exitTempEnglishMode(true, c.candidates[absIdx].Text)
 		}
-		// 无对应候选，上屏缓冲+数字
+		// 索引超出可见候选数：
+		// - allow_symbols 开启 → 数字入 buffer，切到无候选状态
+		// - 否则保留原"上屏 buffer + 数字"逻辑
+		if allowSymbols {
+			c.tempEnglishInsertAt(key)
+			return c.tempEnglishAfterInsert()
+		}
 		if len(c.tempEnglishBuffer) > 0 {
 			text := c.tempEnglishBuffer
 			if c.fullWidth {
@@ -438,8 +523,18 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		c.exitTempEnglishMode(false, "")
 		return nil
 
-	// === 数字键 0 ===
+	// === 数字键 0：视作"第 10 候选"，超出可见候选数则按符号处理 ===
 	case len(key) == 1 && key[0] == '0':
+		// 0 对应索引 9，仅当 candidatesPerPage == 10 时才可能命中候选
+		pageStart := (c.currentPage - 1) * c.candidatesPerPage
+		absIdx := pageStart + 9
+		if c.candidatesPerPage >= 10 && absIdx < len(c.candidates) {
+			return c.exitTempEnglishMode(true, c.candidates[absIdx].Text)
+		}
+		if allowSymbols {
+			c.tempEnglishInsertAt(key)
+			return c.tempEnglishAfterInsert()
+		}
 		if len(c.tempEnglishBuffer) > 0 {
 			text := c.tempEnglishBuffer
 			if c.fullWidth {
@@ -458,6 +553,12 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		}
 		c.exitTempEnglishMode(false, "")
 		return nil
+	}
+
+	// allow_symbols 开启：任意单字符按键（含标点、二三候选键、触发键二次输入）追加到 buffer
+	if allowSymbols && len(key) == 1 {
+		c.tempEnglishInsertAt(key)
+		return c.tempEnglishAfterInsert()
 	}
 
 	// 其他按键（如标点）：上屏当前高亮候选+标点
@@ -506,7 +607,29 @@ func (c *Coordinator) updateTempEnglishCandidates() {
 		return
 	}
 
+	// allow_symbols 开启且 buffer 含非字母字符 → 无候选状态：仅显示 preedit，候选列表清空
+	if c.tempEnglishAllowSymbols() && !c.tempEnglishBufferAllAlpha() {
+		c.tempEnglishCandidates = nil
+		c.candidates = nil
+		c.currentPage = 1
+		c.totalPages = 1
+		c.selectedIndex = 0
+		return
+	}
+
 	showCandidates := c.config != nil && c.config.Input.ShiftTempEnglish.ShowEnglishCandidates
+
+	// 关闭"显示英文候选"时：候选列表为空，仅显示 preedit。
+	// 空格/回车上屏 fallback 到 buffer，数字键不再被首候选占用（可正常输入数字）。
+	if !showCandidates {
+		c.tempEnglishCandidates = nil
+		c.candidates = nil
+		c.currentPage = 1
+		c.totalPages = 1
+		c.selectedIndex = 0
+		return
+	}
+
 	casePattern := detectCasePattern(buf)
 	bufLower := strings.ToLower(buf)
 
