@@ -286,8 +286,7 @@ func (c *Coordinator) HandleFocusLost() {
 
 	// 焦点丢失 = 短语终止符，通知造词策略（码表自动造词）
 	if c.engineMgr != nil {
-		mgr := c.engineMgr
-		go mgr.OnPhraseTerminated()
+		c.engineMgr.OnPhraseTerminated()
 	}
 
 	// 焦点变化后异步释放内存（非阻塞，不影响响应速度）
@@ -439,8 +438,7 @@ func (c *Coordinator) HandleIMEDeactivated() {
 
 	// IME 停用 = 短语终止符，通知造词策略（码表自动造词）
 	if c.engineMgr != nil {
-		mgr := c.engineMgr
-		go mgr.OnPhraseTerminated()
+		c.engineMgr.OnPhraseTerminated()
 	}
 
 	c.mu.Lock()
@@ -503,8 +501,10 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 		c.activeProcessName = bridge.GetProcessName(processID)
 		c.activeCompatRule = c.appCompat.GetRule(c.activeProcessName)
 		if c.activeCompatRule != nil {
-			c.logger.Debug("Compat rule matched", "process", c.activeProcessName, "caretUseTop", c.activeCompatRule.CaretUseTop, "skipCaretPending", c.activeCompatRule.SkipCaretPending)
+			c.logger.Debug("Compat rule matched", "process", c.activeProcessName, "caretUseTop", c.activeCompatRule.CaretUseTop, "skipCaretPending", c.activeCompatRule.SkipCaretPending, "pinCandidatePosition", c.activeCompatRule.PinCandidatePosition)
 		}
+		// 同步「固定候选位置」状态：让 doShowCandidates 在新焦点应用上使用对应的 pin 位置
+		c.syncCandidatePinStateToUI(c.activeProcessName)
 	}
 	c.logger.Debug("Focus gained", "processID", processID, "process", c.activeProcessName)
 
@@ -682,6 +682,7 @@ func (c *Coordinator) HandleIMEActivated(processID uint32) *bridge.StatusUpdateD
 		c.activeProcessID = processID
 		c.activeProcessName = bridge.GetProcessName(processID)
 		c.activeCompatRule = c.appCompat.GetRule(c.activeProcessName)
+		c.syncCandidatePinStateToUI(c.activeProcessName)
 	}
 	c.logger.Info("IME activated (user switched back to this IME)", "processID", processID)
 

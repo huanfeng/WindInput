@@ -204,20 +204,63 @@ func (m *Manager) GetEngineInfo() string {
 	return schemaID
 }
 
-// OnCandidateSelected 选词回调（拼音 + 码表 + 混输统一路由）
-// source 为可选参数，混输模式下传入候选来源（"codetable"/"pinyin"）以路由到正确的子引擎
+// OnCandidateSelected 选词回调（拼音 + 码表 + 混输统一路由）。
+// source 为可选参数，混输模式下传入候选来源（"codetable"/"pinyin"）以路由到正确的子引擎。
+//
+// 实现说明：本方法只把事件 send 到 learningCh，真正的引擎调用由 learningWorker 串行执行，
+// 保证多次 coordinator 调用的执行顺序严格等于 send 顺序。coordinator 端应**同步**调用
+// 本方法（不要再裹 `go`），否则 goroutine 调度会破坏顺序保证。
 func (m *Manager) OnCandidateSelected(code, text string, source ...candidate.CandidateSource) {
+	if m.learningCh == nil {
+		// 兜底：极端情况（未通过 NewManager 构造的 Manager）走同步实现，
+		// 单元测试或 mock 场景使用。
+		src := candidate.SourceNone
+		if len(source) > 0 {
+			src = source[0]
+		}
+		m.onCandidateSelectedSync(code, text, src)
+		return
+	}
+	src := candidate.SourceNone
+	if len(source) > 0 {
+		src = source[0]
+	}
+	ev := learningEvent{kind: learningEventCandidateSelected, code: code, text: text, source: src}
+	select {
+	case m.learningCh <- ev:
+	default:
+		// 缓冲极不太可能满（256 容量 + worker 仅做 dict 写入）。满 = worker 长时间卡住，
+		// 丢弃该事件而非阻塞按键路径。
+		m.logger.Warn("learning channel full, dropping CandidateSelected event")
+	}
+}
+
+// OnPhraseTerminated 短语终止信号（标点、回车、焦点切换等）。
+// 通知造词策略当前的连续单字序列已结束，触发自动组词。
+// 与 OnCandidateSelected 共用同一 channel，保证 terminator 永远不会被同序列的
+// CandidateSelected 反超执行。
+func (m *Manager) OnPhraseTerminated() {
+	if m.learningCh == nil {
+		m.onPhraseTerminatedSync()
+		return
+	}
+	ev := learningEvent{kind: learningEventPhraseTerminated}
+	select {
+	case m.learningCh <- ev:
+	default:
+		m.logger.Warn("learning channel full, dropping PhraseTerminated event")
+	}
+}
+
+// onCandidateSelectedSync 是 OnCandidateSelected 的同步实现，仅供 learningWorker 调用。
+func (m *Manager) onCandidateSelectedSync(code, text string, source candidate.CandidateSource) {
 	engine := m.GetCurrentEngine()
 	if engine == nil {
 		return
 	}
 	// 混输引擎：按来源路由到对应子引擎
 	if mixedEngine, ok := engine.(*mixed.Engine); ok {
-		src := candidate.SourceNone
-		if len(source) > 0 {
-			src = source[0]
-		}
-		mixedEngine.OnCandidateSelected(code, text, src)
+		mixedEngine.OnCandidateSelected(code, text, source)
 		return
 	}
 	if pinyinEngine, ok := engine.(*pinyin.Engine); ok {
@@ -230,9 +273,8 @@ func (m *Manager) OnCandidateSelected(code, text string, source ...candidate.Can
 	}
 }
 
-// OnPhraseTerminated 短语终止信号（标点、回车、焦点切换等）
-// 通知造词策略当前的连续单字序列已结束，触发自动组词
-func (m *Manager) OnPhraseTerminated() {
+// onPhraseTerminatedSync 是 OnPhraseTerminated 的同步实现，仅供 learningWorker 调用。
+func (m *Manager) onPhraseTerminatedSync() {
 	engine := m.GetCurrentEngine()
 	if engine == nil {
 		return

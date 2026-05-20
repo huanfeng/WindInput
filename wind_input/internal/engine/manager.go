@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
@@ -13,6 +14,30 @@ import (
 	"github.com/huanfeng/wind_input/internal/schema"
 	"github.com/huanfeng/wind_input/pkg/encoding"
 )
+
+// learningEventKind 标识 learning 事件类型
+type learningEventKind int
+
+const (
+	learningEventCandidateSelected learningEventKind = iota
+	learningEventPhraseTerminated
+)
+
+// learningEvent 是 Manager learning channel 上传递的事件单元。
+// coordinator 端按按键顺序 send（同步，O(μs)），worker 串行消费，
+// 保证选词回调与短语终止信号的执行顺序与按键顺序严格一致，避免
+// "用户输入序列 A→B→C 但 charBuffer 写成 B→A→C 或 flush 比 append 先跑"。
+type learningEvent struct {
+	kind   learningEventKind
+	code   string
+	text   string
+	source candidate.CandidateSource
+}
+
+// learningChanCapacity learning channel 缓冲容量。
+// 256 远超任何合理打字速度，正常使用永远不会满；用 buffered 是为了
+// 在词库写入瞬间慢（如 bbolt 事务）时按键路径仍 O(μs) 完成 send。
+const learningChanCapacity = 256
 
 // Manager 引擎管理器
 type Manager struct {
@@ -56,14 +81,38 @@ type Manager struct {
 
 	// 日志
 	logger *slog.Logger
+
+	// learningCh 串行化所有 learning 事件（OnCandidateSelected / OnPhraseTerminated）。
+	// 公共方法只 send 到此 channel，单一 worker goroutine 消费并按 FIFO 顺序调用
+	// 子引擎的同步实现。这样：
+	//   - coordinator 端无需 `go mgr.OnXxx(...)`，按键路径用同步 send（O(μs)）；
+	//   - 事件顺序 = send 顺序 = 按键顺序，不再依赖 goroutine 调度；
+	//   - 词库 I/O 完全发生在 worker，不阻塞按键。
+	learningCh chan learningEvent
 }
 
 // NewManager 创建引擎管理器
 func NewManager(logger *slog.Logger) *Manager {
-	return &Manager{
+	m := &Manager{
 		engines:      make(map[string]Engine),
 		systemLayers: make(map[string]dict.DictLayer),
 		logger:       logger,
+		learningCh:   make(chan learningEvent, learningChanCapacity),
+	}
+	go m.learningWorker()
+	return m
+}
+
+// learningWorker 串行消费 learningCh，调用同步实现。
+// 进程生命周期常驻；当 channel 被 close（Manager 销毁场景）时退出。
+func (m *Manager) learningWorker() {
+	for ev := range m.learningCh {
+		switch ev.kind {
+		case learningEventCandidateSelected:
+			m.onCandidateSelectedSync(ev.code, ev.text, ev.source)
+		case learningEventPhraseTerminated:
+			m.onPhraseTerminatedSync()
+		}
 	}
 }
 

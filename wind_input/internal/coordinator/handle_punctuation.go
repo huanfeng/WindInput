@@ -139,9 +139,9 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 
 	// Check if punct_commit is enabled
 	// 注：OnPhraseTerminated 在下方按分支处理：
-	//   - punct_commit 路径：与 OnCandidateSelected 合并为单一 goroutine 顺序执行，保证先 flush 旧序列再追加新词
-	//   - 其他路径：独立 goroutine，在外层 if 块结束后触发
-	// 码表/Mixed 受 PunctCommit 开关控制；全拼引擎沿用传统行为，标点恒触发顶字上屏
+	//   - punct_commit 路径：与 OnCandidateSelected 顺序调用，Manager channel 保证 FIFO
+	//   - 其他路径：在外层 if 块结束后触发
+	// 码表/Mixed 受 PunctCommit 开关控制；全拼引擎沿用传统行为，标点恒触发顶字上屏。
 	punctCommitEnabled := false
 	if len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 {
 		if c.engineMgr != nil {
@@ -231,19 +231,13 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 				c.inputHistory.Record(commitText, "", "", 0)
 			}
 
-			// 标点顶字上屏：先 flush 旧序列，再将候选追加到新序列
-			// 两步必须顺序执行，合并到同一 goroutine 避免并发乱序
+			// 标点顶字上屏：先 flush 旧序列，再将候选追加到新序列。
+			// Manager channel 内部 FIFO 保证 terminated 先于 selected 执行。
 			// 跳过条件用 Actions 而非 IsCommand: 短语 / $AA / $SS 等都应学习,
 			// 只有有副作用的 cmdbar 命令 (Actions 非空) 才跳过 (上方 L181 已分发)。
 			if c.engineMgr != nil && len(candidate.Actions) == 0 {
-				learnCode := c.inputBuffer
-				learnText := candidate.Text
-				learnSource := candidate.Source
-				mgr := c.engineMgr
-				go func() {
-					mgr.OnPhraseTerminated()
-					mgr.OnCandidateSelected(learnCode, learnText, learnSource)
-				}()
+				c.engineMgr.OnPhraseTerminated()
+				c.engineMgr.OnCandidateSelected(c.inputBuffer, candidate.Text, candidate.Source)
 			}
 
 			c.clearState()
@@ -276,8 +270,7 @@ func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) 
 
 	// 非 punct_commit 路径（无候选、或 punct_commit 未启用）：单独触发短语终止
 	if c.engineMgr != nil {
-		mgr := c.engineMgr
-		go mgr.OnPhraseTerminated()
+		c.engineMgr.OnPhraseTerminated()
 	}
 
 	// punct_commit 启用但无候选（空码）：丢弃编码，清空缓冲区，直接输出标点

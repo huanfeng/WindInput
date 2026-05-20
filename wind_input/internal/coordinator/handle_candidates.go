@@ -853,8 +853,8 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 		// 仅纯文本候选触发学习；带副作用 Actions 的命令候选不走学习路径
 		// (L931 会把它分发到 commitCmdbarCandidate)。
 		if len(cand.Actions) == 0 {
-			mgr := c.engineMgr
-			go mgr.OnCandidateSelected(consumedCode, originalText, cand.Source)
+			// Manager 内部已用 channel 串行化，按序同步调用即可（O(μs) send）。
+			c.engineMgr.OnCandidateSelected(consumedCode, originalText, cand.Source)
 		}
 
 		remaining := c.inputBuffer[cand.ConsumedLength:]
@@ -904,9 +904,7 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 			}
 			learnText = originalText
 		}
-		learnSource := cand.Source
-		mgr := c.engineMgr
-		go mgr.OnCandidateSelected(learnCode, learnText, learnSource)
+		c.engineMgr.OnCandidateSelected(learnCode, learnText, cand.Source)
 	}
 
 	// ── 输入历史记录（用于加词推荐 / z 键重复上屏 / 快捷输入重复）──────────

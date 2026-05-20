@@ -69,9 +69,9 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 			}
 			c.recordCommit(commitText, topCodeLen, 0, store.SourceCandidate)
 
-			// 顶码上屏需通知造词策略，否则自动造词的 charBuffer 会漏掉此字
-			mgr := c.engineMgr
-			go mgr.OnCandidateSelected(commitCode, commitTextOriginal)
+			// 顶码上屏需通知造词策略，否则自动造词的 charBuffer 会漏掉此字。
+			// Manager 内部串行化，同步调用即可（O(μs) channel send，不阻塞按键）。
+			c.engineMgr.OnCandidateSelected(commitCode, commitTextOriginal)
 
 			// 如果还有剩余输入，继续处理并更新候选
 			if len(c.inputBuffer) > 0 {
@@ -127,10 +127,7 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 		}
 		// 自动上屏需通知造词策略，否则自动造词的 charBuffer 会漏掉此字
 		if c.engineMgr != nil {
-			learnCode := c.inputBuffer
-			learnText := result.CommitText
-			mgr := c.engineMgr
-			go mgr.OnCandidateSelected(learnCode, learnText)
+			c.engineMgr.OnCandidateSelected(c.inputBuffer, result.CommitText)
 		}
 		// Apply S2T and full-width conversions if enabled
 		if c.s2tManager != nil && c.s2tManager.IsEnabled() {
@@ -516,8 +513,7 @@ func (c *Coordinator) handleArrowDown() *bridge.KeyEventResult {
 func (c *Coordinator) handleEnter() *bridge.KeyEventResult {
 	// 回车 = 短语终止符，通知造词策略（码表自动造词）
 	if c.engineMgr != nil {
-		mgr := c.engineMgr
-		go mgr.OnPhraseTerminated()
+		c.engineMgr.OnPhraseTerminated()
 	}
 
 	// Commit all confirmed segments + raw input as text
@@ -683,8 +679,7 @@ func (c *Coordinator) handleSelectChar(charIndex int) *bridge.KeyEventResult {
 			selectedCode = cand.Code
 		}
 		selectedChar := string(runes[charIndex])
-		mgr := c.engineMgr
-		go mgr.OnCandidateSelected(selectedCode, selectedChar, cand.Source)
+		c.engineMgr.OnCandidateSelected(selectedCode, selectedChar, cand.Source)
 	}
 
 	c.logger.Debug("Select char from word", "charIndex", charIndex, "char", text, "word", cand.Text)
