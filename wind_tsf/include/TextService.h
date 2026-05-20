@@ -23,7 +23,11 @@ class CTextService : public ITfTextInputProcessorEx,
                      public ITfCompartmentEventSink,
                      // ITfCandidateListUIElementBehavior 已继承 ITfCandidateListUIElement (已继承 ITfUIElement)，
                      // 只列一个最派生的即可。
-                     public ITfCandidateListUIElementBehavior
+                     public ITfCandidateListUIElementBehavior,
+                     // ITfFunctionProvider — 通过 ITfSourceSingle::AdviseSingleSink 注册自己为
+                     // 该 IME 实例的 Function Provider。这是其它成熟 TSF IME 都做的事，
+                     // 让 Chromium / QQNT 等宿主将我们识别为"完整 IME"，走 IME-first 调度。
+                     public ITfFunctionProvider
 {
     friend class CUpdateCompositionEditSession;
     friend class CEndCompositionEditSession;
@@ -87,6 +91,13 @@ public:
     // 候选可见状态变化时调用，控制 BeginUIElement / EndUIElement / UpdateUIElement.
     // hasCandidates: 新的候选可见状态。线程：与 KeyEventSink 状态变更同一线程。
     void NotifyCandidatesVisibilityChanged(BOOL hasCandidates);
+
+    // ITfFunctionProvider — 把自己以 IID_ITfFunctionProvider 形式注册到 TSF 的
+    // ITfSourceSingle（每个 IME 实例只有一个 function provider）。
+    // 注意 GetDescription 与 ITfUIElement::GetDescription 同签名 (BSTR*)，
+    // C++ 多继承合并为单一 vtable entry，复用同一实现即可（都是给宿主显示的字符串）。
+    STDMETHODIMP GetType(GUID* pguid);
+    STDMETHODIMP GetFunction(REFGUID rguid, REFIID riid, IUnknown** ppunk);
 
     // ITfCompositionSink
     STDMETHODIMP OnCompositionTerminated(TfEditCookie ecWrite, ITfComposition* pComposition);
@@ -211,6 +222,25 @@ private:
     DWORD _uiElementId;     // ITfUIElementMgr::BeginUIElement 返回的 ID；TF_INVALID_UIELEMENTID 表示未注册
     BOOL  _uiElementShown;  // 当前 IsShown 返回值
     ITfUIElementMgr* _pUIElementMgr;  // 缓存的 UI element 管理器引用，避免每次候选变化都 QI
+    ITfSourceSingle* _pSourceSingle;  // 缓存的 ITfSourceSingle 引用（Function Provider 注册用）
+    BOOL  _funcProviderRegistered;    // 是否已通过 AdviseSingleSink 注册
+
+    // Win32 RegisterHotKey 支持 — 在候选可见时把 Ctrl+0..9 / Ctrl+Shift+0..9 注册为
+    // 系统级热键，由 OS 在 WM_KEYDOWN 派发之前直接消费，规避 QQNT 类 Chromium 宿主的
+    // 加速键双处理。无候选时立即 UnregisterHotKey 让宿主使用这些热键。
+    HWND  _hHotkeyWnd;                // 隐藏消息窗口，接收 WM_HOTKEY
+    ATOM  _hotkeyWndClass;            // RegisterClassEx 返回的窗口类原子
+    BOOL  _hotkeysActive;             // 当前是否已 RegisterHotKey 候选热键（Ctrl+0..9 / Ctrl+Shift+0..9）
+    BOOL  _addWordHotkeyActive;       // 当前是否已 RegisterHotKey AddWord (Ctrl+=)
+
+    BOOL _InitHotkeyWindow();         // 创建窗口类 + 隐藏窗口
+    void _UninitHotkeyWindow();       // 反向清理
+    void _RegisterCandidateHotkeys(); // 注册 Ctrl+0..9 + Ctrl+Shift+0..9（候选可见时）
+    void _UnregisterCandidateHotkeys();
+    // AddWord (Ctrl+=) 在中文模式注册、英文模式卸载。无需 composition。
+    // 调用方应在 _bChineseMode 变化后调一次，幂等。
+    void _UpdateAddWordHotkeyState();
+    static LRESULT CALLBACK _HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     DWORD _activateFlags;  // ActivateEx flags (TF_TMAE_SECUREMODE, etc.)
 
     // Components

@@ -695,6 +695,12 @@ CTextService::CTextService()
     , _uiElementId((DWORD)-1)
     , _uiElementShown(FALSE)
     , _pUIElementMgr(nullptr)
+    , _pSourceSingle(nullptr)
+    , _funcProviderRegistered(FALSE)
+    , _hHotkeyWnd(nullptr)
+    , _hotkeyWndClass(0)
+    , _hotkeysActive(FALSE)
+    , _addWordHotkeyActive(FALSE)
     , _activateFlags(0)
     , _pKeyEventSink(nullptr)
     , _pIPCClient(nullptr)
@@ -794,6 +800,10 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
     {
         *ppvObj = (ITfCandidateListUIElementBehavior*)this;
     }
+    else if (IsEqualIID(riid, IID_ITfFunctionProvider))
+    {
+        *ppvObj = (ITfFunctionProvider*)this;
+    }
 
     if (*ppvObj)
     {
@@ -873,6 +883,12 @@ STDAPI CTextService::ActivateEx(ITfThreadMgr* pThreadMgr, TfClientId tfClientId,
         return E_FAIL;
     }
     WIND_LOG_INFO(L"KeyEventSink initialized\n");
+
+    // 初始化 RegisterHotKey 用的隐藏消息窗口（候选可见时动态注册系统级热键）
+    if (!_InitHotkeyWindow())
+    {
+        WIND_LOG_WARN(L"_InitHotkeyWindow failed (non-fatal, Ctrl+digit may double-process in Chromium hosts)\n");
+    }
 
     // Initialize display attribute
     if (!_InitDisplayAttribute())
@@ -964,6 +980,10 @@ STDAPI CTextService::Deactivate()
     _UninitOpenCloseCompartment();
     _UninitKeyboardDisabledCompartment();
 
+    // 卸载 RegisterHotKey 隐藏窗口（必须在 KeyEventSink 释放之前，因为 WM_HOTKEY
+    // 路径会回调 KeyEventSink）
+    _UninitHotkeyWindow();
+
     // Release key event sink
     _UninitKeyEventSink();
 
@@ -1046,6 +1066,33 @@ BOOL CTextService::_InitThreadMgrEventSink()
         }
     }
 
+    // 通过 ITfSourceSingle::AdviseSingleSink 把自己注册为该 IME 实例的 Function Provider。
+    // 这是其它成熟 TSF IME 的标准做法，让 Chromium / QQNT 把我们识别为"现代 IME"，
+    // 规避 Ctrl+数字 等热键被宿主同时处理。
+    if (_pSourceSingle == nullptr)
+    {
+        HRESULT hrSS = _pThreadMgr->QueryInterface(IID_ITfSourceSingle, (void**)&_pSourceSingle);
+        if (SUCCEEDED(hrSS) && _pSourceSingle != nullptr)
+        {
+            ITfFunctionProvider* pFP = static_cast<ITfFunctionProvider*>(this);
+            HRESULT hrAdv = _pSourceSingle->AdviseSingleSink(_tfClientId, IID_ITfFunctionProvider, pFP);
+            if (SUCCEEDED(hrAdv))
+            {
+                _funcProviderRegistered = TRUE;
+                WIND_LOG_INFO(L"ITfFunctionProvider advised via ITfSourceSingle\n");
+            }
+            else
+            {
+                WIND_LOG_WARN_FMT(L"AdviseSingleSink(ITfFunctionProvider) failed hr=0x%08X\n", (uint32_t)hrAdv);
+            }
+        }
+        else
+        {
+            WIND_LOG_WARN_FMT(L"QueryInterface(ITfSourceSingle) failed hr=0x%08X\n", (uint32_t)hrSS);
+            _pSourceSingle = nullptr;
+        }
+    }
+
     return SUCCEEDED(hr);
 }
 
@@ -1075,6 +1122,17 @@ void CTextService::_UninitThreadMgrEventSink()
         _pUIElementMgr->Release();
         _pUIElementMgr = nullptr;
     }
+
+    if (_pSourceSingle != nullptr)
+    {
+        if (_funcProviderRegistered)
+        {
+            _pSourceSingle->UnadviseSingleSink(_tfClientId, IID_ITfFunctionProvider);
+            _funcProviderRegistered = FALSE;
+        }
+        _pSourceSingle->Release();
+        _pSourceSingle = nullptr;
+    }
 }
 
 // ITfThreadFocusSink — 线程进入 foreground（应用窗口被激活）。
@@ -1089,6 +1147,208 @@ STDAPI CTextService::OnKillThreadFocus()
 {
     WIND_LOG_DEBUG(L"OnKillThreadFocus called\n");
     return S_OK;
+}
+
+// ============================================================================
+// Win32 RegisterHotKey 支持
+// 候选可见时把 Ctrl+0..9 + Ctrl+Shift+0..9 注册为系统级热键，OS 在 WM_KEYDOWN
+// 派发之前直接消费，规避 QQNT 等 Chromium 类宿主的加速键双处理。无候选时立即
+// UnregisterHotKey 让宿主重获这些键。机制来自第三方输入法的实测验证。
+// ============================================================================
+
+static const wchar_t* kHotkeyWndClassName = L"WindInputHotkeyWnd";
+static constexpr int  kHotkeyIdPinBase    = 0x4000; // Pin: Ctrl+N → id = kHotkeyIdPinBase + N
+static constexpr int  kHotkeyIdDelBase    = 0x4010; // Delete: Ctrl+Shift+N → id = kHotkeyIdDelBase + N
+static constexpr int  kHotkeyIdAddWord    = 0x4020; // AddWord: Ctrl+= (VK_OEM_PLUS)
+
+BOOL CTextService::_InitHotkeyWindow()
+{
+    if (_hHotkeyWnd != nullptr) return TRUE;
+
+    HINSTANCE hInst = g_hInstance; // DLL 实例句柄（dllmain 设置）
+
+    WNDCLASSEXW wc = {};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = _HotkeyWndProc;
+    wc.hInstance     = hInst;
+    wc.lpszClassName = kHotkeyWndClassName;
+    _hotkeyWndClass = RegisterClassExW(&wc);
+    if (_hotkeyWndClass == 0)
+    {
+        DWORD err = GetLastError();
+        // ERROR_CLASS_ALREADY_EXISTS (1410) 是正常情况（同进程多次激活）
+        if (err != 1410)
+        {
+            WIND_LOG_WARN_FMT(L"RegisterClassExW(hotkey) failed err=%u\n", err);
+            return FALSE;
+        }
+    }
+
+    // 消息专用窗口（HWND_MESSAGE 父窗口），不可见、不占桌面位置。
+    _hHotkeyWnd = CreateWindowExW(0, kHotkeyWndClassName, L"WindInputHotkey",
+                                   0, 0, 0, 0, 0,
+                                   HWND_MESSAGE, nullptr, hInst, nullptr);
+    if (_hHotkeyWnd == nullptr)
+    {
+        WIND_LOG_WARN_FMT(L"CreateWindowEx(hotkey) failed err=%u\n", (uint32_t)GetLastError());
+        return FALSE;
+    }
+    // 把 this 存到窗口数据，WndProc 用来取回 CTextService 实例
+    SetWindowLongPtrW(_hHotkeyWnd, GWLP_USERDATA, (LONG_PTR)this);
+    WIND_LOG_INFO_FMT(L"Hotkey window created hwnd=0x%p\n", _hHotkeyWnd);
+    return TRUE;
+}
+
+void CTextService::_UninitHotkeyWindow()
+{
+    if (_hotkeysActive)
+    {
+        _UnregisterCandidateHotkeys();
+    }
+    if (_addWordHotkeyActive && _hHotkeyWnd != nullptr)
+    {
+        UnregisterHotKey(_hHotkeyWnd, kHotkeyIdAddWord);
+        _addWordHotkeyActive = FALSE;
+    }
+    if (_hHotkeyWnd != nullptr)
+    {
+        DestroyWindow(_hHotkeyWnd);
+        _hHotkeyWnd = nullptr;
+    }
+    if (_hotkeyWndClass != 0)
+    {
+        UnregisterClassW(kHotkeyWndClassName, g_hInstance);
+        _hotkeyWndClass = 0;
+    }
+}
+
+void CTextService::_RegisterCandidateHotkeys()
+{
+    if (_hHotkeyWnd == nullptr || _hotkeysActive) return;
+
+    int registered = 0;
+    // Ctrl+0..9 (Pin)
+    for (int n = 0; n <= 9; ++n)
+    {
+        if (RegisterHotKey(_hHotkeyWnd, kHotkeyIdPinBase + n, MOD_CONTROL | MOD_NOREPEAT, '0' + n))
+        {
+            registered++;
+        }
+    }
+    // Ctrl+Shift+0..9 (Delete)
+    for (int n = 0; n <= 9; ++n)
+    {
+        if (RegisterHotKey(_hHotkeyWnd, kHotkeyIdDelBase + n, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, '0' + n))
+        {
+            registered++;
+        }
+    }
+    _hotkeysActive = TRUE;
+    WIND_LOG_DEBUG_FMT(L"RegisterCandidateHotkeys: registered=%d/20\n", registered);
+}
+
+void CTextService::_UnregisterCandidateHotkeys()
+{
+    if (_hHotkeyWnd == nullptr || !_hotkeysActive) return;
+
+    for (int n = 0; n <= 9; ++n)
+    {
+        UnregisterHotKey(_hHotkeyWnd, kHotkeyIdPinBase + n);
+        UnregisterHotKey(_hHotkeyWnd, kHotkeyIdDelBase + n);
+    }
+    _hotkeysActive = FALSE;
+    WIND_LOG_DEBUG(L"UnregisterCandidateHotkeys\n");
+}
+
+// AddWord (Ctrl+=) 注册/卸载 — 跟随中文模式状态，幂等。
+// 中文模式：注册（候选窗口不需要可见，因为 AddWord 也能从光标前取词）
+// 英文模式：卸载，让 Ctrl+= 透传给宿主（QQ 中是图片放大等功能）
+void CTextService::_UpdateAddWordHotkeyState()
+{
+    if (_hHotkeyWnd == nullptr) return;
+
+    BOOL shouldActive = _bChineseMode;
+    if (shouldActive && !_addWordHotkeyActive)
+    {
+        if (RegisterHotKey(_hHotkeyWnd, kHotkeyIdAddWord, MOD_CONTROL | MOD_NOREPEAT, VK_OEM_PLUS))
+        {
+            _addWordHotkeyActive = TRUE;
+            WIND_LOG_DEBUG(L"RegisterAddWordHotkey(Ctrl+=) ok\n");
+        }
+        else
+        {
+            WIND_LOG_WARN_FMT(L"RegisterHotKey(Ctrl+=) failed err=%u\n", (uint32_t)GetLastError());
+        }
+    }
+    else if (!shouldActive && _addWordHotkeyActive)
+    {
+        UnregisterHotKey(_hHotkeyWnd, kHotkeyIdAddWord);
+        _addWordHotkeyActive = FALSE;
+        WIND_LOG_DEBUG(L"UnregisterAddWordHotkey\n");
+    }
+}
+
+LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_HOTKEY)
+    {
+        CTextService* self = reinterpret_cast<CTextService*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+        if (self != nullptr && self->_pKeyEventSink != nullptr)
+        {
+            int id = (int)wParam;
+            uint32_t vk = 0;
+            uint32_t mods = 0;
+            if (id >= kHotkeyIdPinBase && id < kHotkeyIdPinBase + 10)
+            {
+                vk = '0' + (id - kHotkeyIdPinBase);
+                mods = KEYMOD_CTRL;
+            }
+            else if (id >= kHotkeyIdDelBase && id < kHotkeyIdDelBase + 10)
+            {
+                vk = '0' + (id - kHotkeyIdDelBase);
+                mods = KEYMOD_CTRL | KEYMOD_SHIFT;
+            }
+            else if (id == kHotkeyIdAddWord)
+            {
+                vk = VK_OEM_PLUS;
+                mods = KEYMOD_CTRL;
+            }
+            if (vk != 0)
+            {
+                WIND_LOG_DEBUG_FMT(L"WM_HOTKEY id=0x%04X vk=0x%02X mods=0x%04X\n", id, vk, mods);
+                self->_pKeyEventSink->DispatchHotkey(vk, mods);
+            }
+        }
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+// ============================================================================
+// ITfFunctionProvider
+// 通过 ITfSourceSingle::AdviseSingleSink 把自己注册为该 IME 的 Function Provider。
+// 其它成熟 TSF IME 都这么做，让 Chromium / QQNT 识别为完整 IME。
+// 当前 stub 实现：GetFunction 一律返回 E_NOINTERFACE，不提供任何具体函数。
+// 仅"注册存在"本身就足以达到识别效果。
+// 注意 ITfFunctionProvider::GetDescription 与 ITfUIElement::GetDescription 同签名，
+// C++ 多继承合并为单一实现，复用 ITfUIElement 那一份即可。
+// ============================================================================
+
+STDAPI CTextService::GetType(GUID* pguid)
+{
+    if (pguid == nullptr) return E_INVALIDARG;
+    // 用 IME 本身的 CLSID 作为 function provider 类型标识
+    *pguid = c_clsidTextService;
+    return S_OK;
+}
+
+STDAPI CTextService::GetFunction(REFGUID rguid, REFIID riid, IUnknown** ppunk)
+{
+    if (ppunk == nullptr) return E_INVALIDARG;
+    *ppunk = nullptr;
+    // 不提供任何具体 function。如果未来需要支持 ITfFnSearchCandidateProvider /
+    // ITfFnReverseConversion 等，在此处分发。
+    return E_NOINTERFACE;
 }
 
 // ============================================================================
@@ -1213,6 +1473,18 @@ STDAPI CTextService::Abort(void)
 
 void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
 {
+    // 候选可见 → 注册系统级热键拦截 Ctrl+0..9/Ctrl+Shift+0..9；候选消失 → 卸载，
+    // 让宿主重新获得这些键。这是第三方输入法使用的成熟机制，规避 Chromium 类宿主
+    // 的加速键双处理。
+    if (hasCandidates && !_hotkeysActive)
+    {
+        _RegisterCandidateHotkeys();
+    }
+    else if (!hasCandidates && _hotkeysActive)
+    {
+        _UnregisterCandidateHotkeys();
+    }
+
     if (_pUIElementMgr == nullptr) return;
 
     if (hasCandidates && _uiElementId == (DWORD)-1)
@@ -1463,6 +1735,7 @@ void CTextService::_SyncStateFromResponse(const ServiceResponse& response)
         return;
 
     _bChineseMode = response.IsChineseMode();
+    _UpdateAddWordHotkeyState();
     _bFullWidth = response.IsFullWidth();
 
     // Keep compartment always OPEN so TSF calls OnTestKeyDown even in English mode.
@@ -1818,6 +2091,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
     }
 
     _bChineseMode = newChineseMode;
+    _UpdateAddWordHotkeyState();
 
     if (_pLangBarItemButton != nullptr)
         _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
@@ -2963,6 +3237,7 @@ void CTextService::HandleCtrlSpaceToggle()
     }
 
     _bChineseMode = newChineseMode;
+    _UpdateAddWordHotkeyState();
 
     if (_pLangBarItemButton != nullptr)
         _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
@@ -2986,6 +3261,7 @@ void CTextService::ToggleInputMode()
     // The actual mode toggle is handled via KeyUp event -> Go service -> ModeChanged response
     EndComposition();
     _bChineseMode = !_bChineseMode;
+    _UpdateAddWordHotkeyState();
 
     WIND_LOG_INFO_FMT(L"Switched to %s mode\n", _bChineseMode ? L"Chinese" : L"English");
 
@@ -3010,6 +3286,7 @@ void CTextService::SetInputMode(BOOL bChineseMode)
     }
 
     _bChineseMode = bChineseMode;
+    _UpdateAddWordHotkeyState();
 
     WIND_LOG_INFO_FMT(L"Mode set to %s (from service)\n", _bChineseMode ? L"Chinese" : L"English");
 
@@ -3164,6 +3441,7 @@ void CTextService::UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bCh
 {
     _bChineseMode = bChineseMode;
     _bFullWidth = bFullWidth;
+    _UpdateAddWordHotkeyState();
 
     // Keep compartment always OPEN so TSF calls OnTestKeyDown even in English mode.
     _SetOpenCloseCompartment(TRUE);

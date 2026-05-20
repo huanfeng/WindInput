@@ -1415,6 +1415,18 @@ BOOL CKeyEventSink::_IsMatchingKeyUp(WPARAM wParam, uint32_t pendingKey)
 }
 
 // Send key to Go Service using binary protocol
+BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
+{
+    // 走与 OnKeyDown 同一通路：send + handle response。
+    // 不需要走 OnTestKeyDown 因为 RegisterHotKey 已经消费了按键，TSF 不会再回调。
+    if (!_SendKeyToService(vk, mods, KEY_EVENT_DOWN))
+    {
+        WIND_LOG_ERROR_FMT(L"DispatchHotkey: _SendKeyToService failed vk=0x%02X mods=0x%04X\n", vk, mods);
+        return FALSE;
+    }
+    return _HandleServiceResponse();
+}
+
 BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType)
 {
     DWORD startTime = GetTickCount();

@@ -107,6 +107,11 @@ public:
     // This resets state and notifies Go service to clear input buffer
     void OnCompositionUnexpectedlyTerminated();
 
+    // 从 RegisterHotKey/WM_HOTKEY 路径派发一个键事件给 Go 服务。
+    // 用于 Pin/Delete 候选热键被系统级 RegisterHotKey 拦截后，转发给我们的常规处理流程。
+    // vk: 虚拟键码（Win32 VK_*）；mods: 内部 KEYMOD_* 修饰位（不是 TSF MOD_*）。
+    BOOL DispatchHotkey(uint32_t vk, uint32_t mods);
+
 private:
     static constexpr uint32_t ENGLISH_STATS_REPORT_COUNT = 5;
     static constexpr ULONGLONG ENGLISH_STATS_REPORT_INTERVAL_MS = 5000;
