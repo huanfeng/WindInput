@@ -1,5 +1,15 @@
 name: Notify Docs on Release Published
 
+# Configuration (Settings → Secrets and variables → Actions):
+#   Variables (vars.*):
+#     DOCS_REPO    docs 仓库 owner/name，例如 huanfeng/WindInputDocs，未配置则跳过文档通知
+#     R2_BUCKET    Cloudflare R2 bucket 名（未配置则跳过 R2 同步）
+#     R2_BASE_URL  R2 自定义域名，例如 https://dl.example.com（未配置则跳过 R2 同步）
+#   Secrets:
+#     DOCS_REPO_PAT           触发 docs 仓库 dispatch 的 PAT
+#     CLOUDFLARE_API_TOKEN    具备 R2 Edit 权限的 Token
+#     CLOUDFLARE_ACCOUNT_ID   Cloudflare 账户 ID
+
 on:
   release:
     types: [published]
@@ -7,18 +17,122 @@ on:
 jobs:
   notify-docs:
     runs-on: ubuntu-latest
+    env:
+      DOCS_REPO: ${{ vars.DOCS_REPO }}
+      PAT: ${{ secrets.DOCS_REPO_PAT }}
+      TAG: ${{ github.event.release.tag_name }}
     steps:
       - name: Notify docs repo to sync changelog
-        env:
-          PAT: ${{ secrets.DOCS_REPO_PAT }}
-          TAG: ${{ github.event.release.tag_name }}
         run: |
-          if [ -z "$PAT" ]; then
-            echo "DOCS_REPO_PAT not configured, skipping notification"
+          if [ -z "$DOCS_REPO" ] || [ -z "$PAT" ]; then
+            echo "DOCS_REPO or DOCS_REPO_PAT not configured, skipping notification"
             exit 0
           fi
           curl -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $PAT" \
-            https://api.github.com/repos/huanfeng/WindInputDocs/dispatches \
+            "https://api.github.com/repos/${DOCS_REPO}/dispatches" \
             -d "{\"event_type\":\"changelog-updated\",\"client_payload\":{\"tag\":\"$TAG\"}}"
+
+  sync-to-r2:
+    name: Sync installer + release notes to Cloudflare R2
+    runs-on: ubuntu-latest
+    env:
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_BASE_URL: ${{ vars.R2_BASE_URL }}
+      TAG: ${{ github.event.release.tag_name }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Skip if R2 configuration is incomplete
+        id: gate
+        run: |
+          if [ -z "$R2_BUCKET" ] || [ -z "$R2_BASE_URL" ] \
+             || [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "R2 configuration incomplete (vars.R2_BUCKET / vars.R2_BASE_URL / CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID), skipping R2 sync"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install wrangler
+        if: steps.gate.outputs.skip != 'true'
+        run: npm install -g wrangler@3
+
+      - name: Download installer + release notes from GitHub Release
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${TAG#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p dl
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "WindInput-${VERSION}-Setup.exe" \
+            --dir ./dl
+          gh release view "$TAG" --repo "${{ github.repository }}" --json body -q .body \
+            > "./dl/WindInput-${VERSION}-Release.md"
+          ls -lh ./dl
+
+      - name: Delete previous version's objects in R2
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          PREV_JSON=$(curl -fsSL "${R2_BASE_URL}/latest.json" || echo "")
+          if [ -z "$PREV_JSON" ]; then
+            echo "No previous latest.json found, skipping delete"
+            exit 0
+          fi
+          PREV_VERSION=$(echo "$PREV_JSON" | jq -r .version)
+          if [ -z "$PREV_VERSION" ] || [ "$PREV_VERSION" = "null" ]; then
+            echo "Previous version not parseable, skipping delete"
+            exit 0
+          fi
+          if [ "$PREV_VERSION" = "$VERSION" ]; then
+            echo "Same version as previous ($VERSION), nothing to delete"
+            exit 0
+          fi
+          echo "Purging previous version: $PREV_VERSION"
+          wrangler r2 object delete "$R2_BUCKET/WindInput-${PREV_VERSION}-Setup.exe" --remote || true
+          wrangler r2 object delete "$R2_BUCKET/WindInput-${PREV_VERSION}-Release.md" --remote || true
+
+      - name: Upload installer to R2
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          wrangler r2 object put "$R2_BUCKET/WindInput-${VERSION}-Setup.exe" \
+            --file "./dl/WindInput-${VERSION}-Setup.exe" \
+            --content-type "application/octet-stream" \
+            --remote
+
+      - name: Upload release notes to R2
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          wrangler r2 object put "$R2_BUCKET/WindInput-${VERSION}-Release.md" \
+            --file "./dl/WindInput-${VERSION}-Release.md" \
+            --content-type "text/markdown; charset=utf-8" \
+            --remote
+
+      - name: Update latest.json on R2
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          PUBLISHED_AT='${{ github.event.release.published_at }}'
+          cat > latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "tag": "${TAG}",
+            "exeUrl": "${R2_BASE_URL}/WindInput-${VERSION}-Setup.exe",
+            "releaseNotesUrl": "${R2_BASE_URL}/WindInput-${VERSION}-Release.md",
+            "publishedAt": "${PUBLISHED_AT}"
+          }
+          EOF
+          cat latest.json
+          wrangler r2 object put "$R2_BUCKET/latest.json" \
+            --file latest.json \
+            --content-type "application/json; charset=utf-8" \
+            --remote
