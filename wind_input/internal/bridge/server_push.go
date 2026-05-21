@@ -97,39 +97,71 @@ func (s *Server) startPushPipeListener() {
 			s.logger.Debug("CMD_SERVICE_READY sent to new push client", "clientID", clientID)
 		}
 
-		// 异步读取 token 握手（8 字节），不阻塞主循环。
-		// 内层 goroutine 做实际 ReadFile（可能永久阻塞于旧版客户端），
-		// 外层 goroutine 持有 500ms 超时并在超时后退出（内层 goroutine 在 handle 关闭时自然退出）。
+		// 单 goroutine 完成两件事：
+		//   1) 阻塞读 8 字节 token 握手
+		//   2) 握手后继续阻塞 ReadFile，专门用于检测对端关闭（死链监听）
+		// 协议规定客户端发完 token 后不再发任何消息，所以 ReadFile 在握手后会
+		// 永久 park 在内核等待，不消耗 CPU；客户端 close pipe 时 OS 立即唤醒
+		// 并返回错误，我们走 defer 路径清理 handle —— 不再等到下一次广播写失败
+		// 才"惰性发现"死链。
+		//
+		// 同 token 重连：旧 handle 必然失效，必须按 token 主动清理。
+		// 不能按 PID 清理：同 PID 可能有多个合法实例（如 explorer.exe 的多个
+		// CLangBar 宿主），它们各自持有不同 token，按 PID 误清会破坏正常推送。
 		go func(h windows.Handle, pid uint32, cid int) {
-			tokenCh := make(chan uint64, 1)
-			go func() {
-				var buf [8]byte
-				var n uint32
-				if err := windows.ReadFile(h, buf[:], &n, nil); err == nil && n == 8 {
-					tokenCh <- binary.LittleEndian.Uint64(buf[:])
+			defer func() {
+				s.pushMu.Lock()
+				removed := s.cleanupPushHandle(h)
+				s.pushMu.Unlock()
+				if removed {
+					windows.CloseHandle(h)
 				}
 			}()
-			select {
-			case token := <-tokenCh:
-				if token == 0 {
+
+			// Phase 1: token 握手
+			var buf [8]byte
+			var n uint32
+			if err := windows.ReadFile(h, buf[:], &n, nil); err != nil || n == 0 {
+				s.logger.Info("Push pipe disconnected before token handshake",
+					"clientID", cid, "processID", pid, "error", err)
+				return
+			}
+
+			var registeredToken uint64
+			if n >= 8 {
+				token := binary.LittleEndian.Uint64(buf[:])
+				if token != 0 {
+					s.pushMu.Lock()
+					if oldH, ok := s.tokenToPushHandle[token]; ok && oldH != h {
+						if s.cleanupPushHandle(oldH) {
+							windows.CloseHandle(oldH)
+							s.logger.Info("Push pipe: stale handle replaced by token reconnect",
+								"clientID", cid, "processID", pid, "token", token)
+						}
+					}
+					if _, exists := s.pushClients[h]; exists {
+						s.tokenToPushHandle[token] = h
+						s.pushHandleToToken[h] = token
+						registeredToken = token
+					}
+					s.pushMu.Unlock()
+					s.logger.Debug("Push pipe: token registered",
+						"clientID", cid, "processID", pid, "token", token)
+				}
+			}
+
+			// Phase 2: 死链监听 —— ReadFile 在客户端 close pipe 时立刻返回错误
+			var probe [16]byte
+			for {
+				err := windows.ReadFile(h, probe[:], &n, nil)
+				if err != nil || n == 0 {
+					s.logger.Info("Push pipe client disconnected",
+						"clientID", cid, "processID", pid, "token", registeredToken, "error", err)
 					return
 				}
-				s.pushMu.Lock()
-				if _, exists := s.pushClients[h]; exists {
-					s.tokenToPushHandle[token] = h
-					s.pushHandleToToken[h] = token
-				}
-				s.pushMu.Unlock()
-				s.logger.Debug("Push pipe: token registered", "clientID", cid, "processID", pid, "token", token)
-			case <-time.After(500 * time.Millisecond):
-				s.logger.Debug("Push pipe: token handshake timed out (old client?)", "clientID", cid, "processID", pid)
+				// 协议不允许 token 之后再有数据，但万一发生只丢弃并继续监听。
 			}
 		}(handle, pushProcessID, clientID)
-
-		// Note: We don't actively monitor disconnection here.
-		// Client disconnection is detected when write fails in PushCommitTextToActiveClient
-		// or PushStateToAllClients. This avoids false positives from GetNamedPipeHandleState
-		// which can return "Access is denied" on valid pipes.
 	}
 }
 
