@@ -13,7 +13,7 @@
 |------|-------------|
 | `bump-version.ps1` | 版本号管理脚本：读取 VERSION 文件，按 major/minor/patch/prerelease 规则递增版本号，同步更新所有版本号引用文件（VERSION、go.mod、CMakeLists.txt 等） |
 | `check_band.ps1` | DWM Window Band 诊断工具：枚举系统窗口并显示各窗口的 Band 等级，用于调试 Win11 开始菜单候选框 z-order 问题和验证 HostWindow 机制 |
-| `probe_ime_mode.ps1` | TSF 中/英文模式探针：用 `WM_IME_CONTROL/IMC_GETCONVERSIONMODE` 跨线程查询前台窗口当前 IME 状态，实时输出 `CN/EN`，用于验证 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION` 是否正确暴露给 KBLSwitch / Win11 任务栏等外部观察者 |
+| `probe_ime_mode.ps1` | IME 中/英文模式外部探针（IMM32 视角）：模拟 KBLSwitch 等第三方工具的探测路径，用 `WM_IME_CONTROL/IMC_GETCONVERSIONMODE` 跨线程查询前台窗口的 IMM32 桥接状态。`NO-IMEWND` 表示前台是 TSF-only 客户端（Win11 新版记事本 / Edge / 部分 UWP），CUAS 未建 IMM HIMC，物理上无法外部读取，需要靠功能行为验证 |
 
 ## Usage
 
@@ -52,20 +52,29 @@ scripts\check_band.ps1 -All
 ### probe_ime_mode.ps1
 
 ```powershell
-# 在另一个终端运行；保持本脚本窗口不获焦，用鼠标点击想观察的应用（cmd / Notepad++ / WPS / 浏览器等）
+# 默认 200ms 轮询，状态变化时输出
 pwsh -File scripts\probe_ime_mode.ps1
+
+# 自定义轮询间隔
+pwsh -File scripts\probe_ime_mode.ps1 -IntervalMs 100
 ```
 
-每 200ms 输出一行，例如：
+输出形如：
 
 ```
-13:45:01.234  CN  open=1 conv=0x0001  imeWnd=0x000A0188  win=[xxx.txt - Notepad++]
-13:45:02.451  EN  open=1 conv=0x0000  imeWnd=0x000A0188  win=[xxx.txt - Notepad++]
+13:45:01.234  CN        open=1 conv=0x0001 imeWnd=0x000A0188 pid=12345  proc=notepad++          win=[xxx.txt - Notepad++]
+13:45:02.451  EN        open=1 conv=0x0000 imeWnd=0x000A0188 pid=12345  proc=notepad++          win=[xxx.txt - Notepad++]
+13:45:05.012  NO-IMEWND open=0 conv=0x0000 imeWnd=0x0       pid=23456  proc=Notepad             win=[文档 1 - 记事本]
 ```
 
-- `CN/EN` 由 `IME_CMODE_NATIVE` 位决定，即我们写入的 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION`。
-- 模式切换瞬间应翻转；若超过 1 秒未变或始终为同一值，说明 compartment 未正确暴露。
-- 注意：Win11 新版 Notepad / 部分 WinUI 应用不使用 IMM 桥，会显示 `EN/conv=0x0000` 与实际状态无关；改用 cmd、Notepad++、Chrome 等传统 IMM 应用做验证窗口。
+- `Mode` 取值：
+  - `CN`：IME_CMODE_NATIVE 置位（中文）
+  - `EN`：NATIVE 清零（英文）
+  - `OFF`：IME 未打开
+  - `NO-IMEWND`：`ImmGetDefaultIMEWnd` 返回 0，前台是 TSF-only 客户端
+- 验证方法：
+  - 传统 IMM32 应用（cmd / Notepad++ / WPS / Chrome）：切换中英文时 `Mode` 应立即翻转，外部第三方工具（KBLSwitch）也能正确读到。
+  - TSF-only 应用（Win11 新版记事本 / Edge / 部分 UWP）：通常显示 `NO-IMEWND`，**任何外部 probe 都读不到**（compartment 是进程内状态，CUAS 也没建 IMM HIMC），这种应用 KBLSwitch 的锁定功能受系统限制无法工作 —— 此时只能靠功能行为（实际锁定是否生效）验证。
 
 ## For AI Agents
 
