@@ -15,8 +15,12 @@ require (
 
 require (
 	github.com/go-text/typesetting v0.3.4 // indirect
-	github.com/gogpu/gpucontext v0.16.0 // indirect
+	github.com/gogpu/gpucontext v0.18.0 // indirect
 	github.com/gogpu/gputypes v0.5.0 // indirect
-	golang.org/x/image v0.39.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
+	golang.org/x/image v0.40.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )
+
+// 临时指向 fork (feat/external-buffer-and-image-view), 增加 NewPixmapFromBuffer
+// 与 (*Pixmap).ImageView 用于零拷贝缓冲复用。待 upstream gogpu/gg PR 合并后撤销。
+replace github.com/gogpu/gg => github.com/huanfeng/gg v0.47.3-0.20260521041445-29e9f420335f

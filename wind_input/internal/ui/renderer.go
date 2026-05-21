@@ -210,6 +210,26 @@ type Renderer struct {
 	baseFontSize   float64
 	themeRowHeight float64 // unscaled row height from theme; 0 = auto-compute from font size
 	lastDPI        int     // Last DPI used for scaling; 0 means not yet set
+
+	// 候选框绘制缓冲. 跨帧复用以避免 gg.NewPixmap + dc.Image() 的双倍分配
+	// (旧 pprof 中合计 ~2.3 GB 累计). RenderCandidates 在 UI 单线程调用,
+	// UpdateLayeredWindow 同步消费 img, 之后下一帧才会写入 — 无并发竞争.
+	scratchPix []byte
+}
+
+// acquireDrawContext 返回一个 gg.Context 与对应的 *image.RGBA, 二者共享
+// Renderer.scratchPix 底层数组. 容量不足时一次性扩张, 内容预清零 (gg 期望
+// 透明背景起步). 调用方拿到的 img 在下一次 acquireDrawContext 前都有效.
+func (r *Renderer) acquireDrawContext(w, h int) (*gg.Context, *image.RGBA) {
+	need := w * h * 4
+	if cap(r.scratchPix) < need {
+		r.scratchPix = make([]byte, need)
+	} else {
+		r.scratchPix = r.scratchPix[:need]
+		clear(r.scratchPix)
+	}
+	pm := gg.NewPixmapFromBuffer(r.scratchPix, w, h)
+	return gg.NewContextForPixmap(pm), pm.ImageView()
 }
 
 // NewRenderer creates a new renderer

@@ -6,7 +6,6 @@ import (
 	"image/color"
 	"math"
 
-	"github.com/gogpu/gg"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
@@ -308,7 +307,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	}
 
 	// ===== PHASE 1: Draw all shapes with gg =====
-	dc := gg.NewContext(int(width), int(height))
+	dc, img := r.acquireDrawContext(int(width), int(height))
 
 	// Shadow (same size as background, offset 2px to bottom-right)
 	dc.SetColor(r.getShadowColor())
@@ -460,7 +459,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	}
 
 	// ===== PHASE 2: Draw all text =====
-	img := dc.Image().(*image.RGBA)
+	// img 已由 acquireDrawContext 与 dc 一起返回, 二者共享底层像素缓冲。
 	td.BeginDraw(img)
 
 	// Input text
@@ -853,7 +852,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	}
 
 	// ===== PHASE 1: Draw all shapes with gg =====
-	dc := gg.NewContext(int(width), int(height))
+	dc, img := r.acquireDrawContext(int(width), int(height))
 
 	// Shadow (same size as background, offset 2px to bottom-right)
 	dc.SetColor(r.getShadowColor())
@@ -1014,7 +1013,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 	}
 
 	// ===== PHASE 2: Draw all text =====
-	img := dc.Image().(*image.RGBA)
+	// img 已由 acquireDrawContext 与 dc 一起返回, 二者共享底层像素缓冲。
 	td.BeginDraw(img)
 
 	// Input text
