@@ -561,7 +561,7 @@ func (s *Server) PushStatsConfigToActiveClient(enabled bool, trackEnglish bool) 
 func (s *Server) GetActiveClientCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.activeHandles)
+	return len(s.activeConns)
 }
 
 // RestartService disconnects all clients to force reconnection
@@ -592,10 +592,10 @@ func (s *Server) RestartService() {
 
 	// Close all request-response clients
 	s.mu.Lock()
-	reqClientCount := len(s.activeHandles)
-	for h := range s.activeHandles {
-		windows.CloseHandle(h)
-		delete(s.activeHandles, h)
+	reqClientCount := len(s.activeConns)
+	for c := range s.activeConns {
+		_ = c.Close()
+		delete(s.activeConns, c)
 	}
 	s.mu.Unlock()
 

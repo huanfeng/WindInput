@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"runtime/debug"
 
 	"github.com/huanfeng/wind_input/internal/ipc"
@@ -422,7 +423,7 @@ func (s *Server) handleModeNotify(payload []byte, clientID int) []byte {
 }
 
 // handleBatchEvents processes a batch of events and sends responses for sync events only
-func (s *Server) handleBatchEvents(header *ipc.IpcHeader, payload []byte, writer *pipeWriter, clientID int, processID uint32) {
+func (s *Server) handleBatchEvents(header *ipc.IpcHeader, payload []byte, w io.Writer, clientID int, processID uint32) {
 	events, err := s.codec.DecodeBatchEvents(payload)
 	if err != nil {
 		s.logger.Error("Failed to decode batch events", "clientID", clientID, "error", err)
@@ -450,7 +451,7 @@ func (s *Server) handleBatchEvents(header *ipc.IpcHeader, payload []byte, writer
 	// Send batch response if there are any sync events
 	if len(responses) > 0 {
 		batchResponse := s.codec.EncodeBatchResponse(responses)
-		if err := s.codec.WriteMessage(writer, batchResponse); err != nil {
+		if err := s.codec.WriteMessage(w, batchResponse); err != nil {
 			s.logger.Error("Failed to write batch response to Bridge", "clientID", clientID, "error", err)
 		}
 	}

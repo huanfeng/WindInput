@@ -15,18 +15,21 @@ Named Pipe IPC 服务端，负责与 C++ TSF（文本服务框架）桥接层进
 | File | Description |
 |------|-------------|
 | `protocol.go` | 协议类型定义（ResponseType、KeyEventData、StatusUpdateData 等） |
-| `server.go` | Named Pipe 服务端主体（连接管理、消息读写、pipeReader/pipeWriter） |
+| `server.go` | Named Pipe 服务端主体（基于 go-winio overlapped I/O；bridge pipe 走请求-响应 RPC，push pipe 走单向广播；net.Conn 接口统一读写） |
 | `server_handler.go` | 消息分发：解码二进制消息并路由到 MessageHandler 各方法 |
-| `server_push.go` | 推送管道管理（per-client outbound channel + 单 writer goroutine；所有 push 仅触达 active client，`pushToActiveClient` 是统一入口） |
+| `server_push.go` | 推送管道管理（per-client outbound channel + 单 writer goroutine + phase-2 死链监听；所有 push 仅触达 active client，`pushToActiveClient` 是统一入口） |
 | `host_render.go` | `HostRenderManager`：管理白名单进程的宿主渲染状态；`HostRenderState` 持有每个进程的共享内存引用；通过 `OpenProcess`/`QueryFullProcessImageNameW` 识别进程名称 |
 | `shared_memory.go` | `SharedMemory`：命名共享内存 + 命名事件对；`WriteFrame` 将 RGBA→BGRA 转换后写入位图并信令通知；`WriteHide` 发送隐藏命令；安全描述符包含 AppContainer 低完整性标记（`S:(ML;;NW;;;LW)`）以支持 UWP 进程访问 |
 
 ## For AI Agents
 
 ### Working In This Directory
-- 管道使用 MESSAGE 模式（`PIPE_TYPE_MESSAGE|PIPE_READMODE_MESSAGE`），每次 ReadFile 返回完整消息
+- 管道用 `github.com/Microsoft/go-winio` 起 listener (`winio.ListenPipe`)，配置 `MessageMode: true` 保证消息边界
 - 缓冲区大小 64KB（与 Weasel 一致）
-- 安全描述符允许 Everyone/SYSTEM/Administrators 访问（SDDL: `D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)`）
+- 安全描述符允许 Everyone/SYSTEM/Administrators 访问（SDDL: `D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)`），含 `S:(ML;;NW;;;LW)` 支持 UWP/AppContainer
+- **关键：不要回到自写的同步 `windows.ReadFile` + `WriteFile`**——同一 handle 上 sync read park + sync write 会被内核串行化，writer 会被永久卡住。go-winio 内部用 overlapped I/O + IOCP 避免这个问题
+- 客户端 PID 通过 `conn.(fdGetter).Fd()` 拿到底层 HANDLE 后调 `GetNamedPipeClientProcessId`
+- Push pipe `pushClient` 用 `Disconnect()` + `Close()` 主动断开 client；只用 `Close()` 不会通知 client 端
 - 推送管道按进程 ID（PID）跟踪客户端，`activeProcessID` 标识当前有焦点的进程，安全推送只发给活跃客户端
 - 请求处理带 1000ms 超时（`RequestProcessTimeout`），覆盖高负载下的调度抖动
 - 异步请求（`IsAsyncRequest`）不发送响应

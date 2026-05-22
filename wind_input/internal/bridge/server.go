@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/Microsoft/go-winio"
 	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"golang.org/x/sys/windows"
@@ -30,14 +31,6 @@ func isPipeClosed(err error) bool {
 	return errors.Is(err, windows.ERROR_BROKEN_PIPE) ||
 		errors.Is(err, windows.ERROR_NO_DATA) ||
 		errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED)
-}
-
-// readBufPool 复用 64KB 管道读取缓冲区，避免每次消息读取都 make([]byte, 64KB)。
-var readBufPool = sync.Pool{
-	New: func() any {
-		buf := make([]byte, PipeBufferSize)
-		return &buf
-	},
 }
 
 var (
@@ -79,9 +72,11 @@ type Server struct {
 	handler MessageHandler
 	codec   *ipc.BinaryCodec
 
-	mu            sync.RWMutex
-	clientCount   int
-	activeHandles map[windows.Handle]*pipeWriter // Map handle to writer for broadcasting
+	mu          sync.RWMutex
+	clientCount int
+	// activeConns 跟踪当前活跃的 bridge pipe 连接（请求-响应通道）。
+	// 仅作为"集合 + 计数"使用——RestartService 时遍历 Close。
+	activeConns map[net.Conn]struct{}
 
 	// Push pipe clients (for proactive state push)
 	pushMu           sync.RWMutex
@@ -113,7 +108,7 @@ func NewServer(handler MessageHandler, logger *slog.Logger) *Server {
 		handler:           handler,
 		logger:            logger,
 		codec:             ipc.NewBinaryCodec(),
-		activeHandles:     make(map[windows.Handle]*pipeWriter),
+		activeConns:       make(map[net.Conn]struct{}),
 		pushClients:       make(map[windows.Handle]*pushClient),
 		pushClientsByPID:  make(map[uint32]windows.Handle),
 		pushHandleToPID:   make(map[windows.Handle]uint32),
@@ -156,7 +151,11 @@ func (s *Server) GetActiveHostRender() (writeFrame func(img *image.RGBA, x, y in
 	return shm.WriteFrame, shm.WriteHide
 }
 
-// Start begins listening for connections from C++ Bridge
+// Start begins listening for connections from C++ Bridge.
+//
+// Bridge pipe（请求-响应 RPC 通道）也迁移到 go-winio overlapped I/O，统一架构。
+// 与 push pipe 同样用 winio.ListenPipe + listener.Accept，conn 是 net.Conn，
+// 读写走 codec.ReadHeader / WriteMessage（已经是 io.Reader/Writer 接口）。
 func (s *Server) Start() error {
 	s.logger.Info("Starting Bridge IPC server (binary protocol)", "pipe", BridgePipeName)
 
@@ -166,112 +165,81 @@ func (s *Server) Start() error {
 	// Allow desktop clients plus AppContainer/modern hosts (e.g. Start menu search).
 	// S:(ML;;NW;;;LW) = Mandatory Label: Low integrity — required for UWP/AppContainer
 	//   processes (Microsoft Store, Start Menu) which run at low integrity level.
-	//   Without this, the mandatory integrity check blocks access before DACL evaluation.
-	// D: = DACL: WD=Everyone, SY=SYSTEM, BA=Administrators, AC=ALL APPLICATION PACKAGES
-	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)"
-	sd, err := windows.SecurityDescriptorFromString(sddl)
-	if err != nil {
-		s.logger.Error("Failed to create security descriptor", "error", err)
-		sd = nil
+	pipeConfig := &winio.PipeConfig{
+		SecurityDescriptor: "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)",
+		MessageMode:        true,
+		InputBufferSize:    int32(PipeBufferSize),
+		OutputBufferSize:   int32(PipeBufferSize),
 	}
-
-	var sa *windows.SecurityAttributes
-	if sd != nil {
-		sa = &windows.SecurityAttributes{
-			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-			SecurityDescriptor: sd,
-		}
+	listener, err := winio.ListenPipe(BridgePipeName, pipeConfig)
+	if err != nil {
+		return fmt.Errorf("failed to listen bridge pipe: %w", err)
 	}
 
 	for {
-		pipePath, err := windows.UTF16PtrFromString(BridgePipeName)
+		conn, err := listener.Accept()
 		if err != nil {
-			return fmt.Errorf("failed to convert pipe path: %w", err)
-		}
-
-		handle, err := windows.CreateNamedPipe(
-			pipePath,
-			windows.PIPE_ACCESS_DUPLEX,
-			// Use MESSAGE mode like Weasel for more reliable message boundaries
-			windows.PIPE_TYPE_MESSAGE|windows.PIPE_READMODE_MESSAGE|windows.PIPE_WAIT,
-			windows.PIPE_UNLIMITED_INSTANCES,
-			PipeBufferSize, // 64KB like Weasel
-			PipeBufferSize,
-			0,
-			sa,
-		)
-
-		if err != nil {
-			return fmt.Errorf("failed to create named pipe: %w", err)
-		}
-
-		s.logger.Debug("Waiting for C++ Bridge connection...")
-
-		err = windows.ConnectNamedPipe(handle, nil)
-		if err != nil && err != windows.ERROR_PIPE_CONNECTED {
-			windows.CloseHandle(handle)
+			if errors.Is(err, net.ErrClosed) {
+				s.logger.Info("Bridge pipe listener closed")
+				return nil
+			}
+			s.logger.Error("Bridge pipe accept error", "error", err)
+			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-
-		// Create pipe writer for this client
-		writer := &pipeWriter{handle: handle}
 
 		s.mu.Lock()
 		s.clientCount++
 		clientID := s.clientCount
-		s.activeHandles[handle] = writer
+		s.activeConns[conn] = struct{}{}
 		s.mu.Unlock()
 
 		s.logger.Info("C++ Bridge connected", "clientID", clientID)
 
-		// Handle client in a separate goroutine to allow concurrent connections
-		go func(h windows.Handle, id int) {
-			pid := s.handleClient(h, id)
+		go func(c net.Conn, id int) {
+			pid := s.handleClient(c, id)
 
 			// Capture the current setup sequence BEFORE acquiring the main lock.
-			// This prevents a race where the old connection's cleanup goroutine
-			// destroys a newer connection's SharedMemory for the same PID.
+			// 防止旧连接的 cleanup goroutine 销毁同 PID 新连接的 SharedMemory。
 			var setupSeq uint64
 			if s.hostRender != nil && pid != 0 {
 				setupSeq = s.hostRender.GetSetupSeq(pid)
 			}
 
 			s.mu.Lock()
-			delete(s.activeHandles, h)
-			activeCount := len(s.activeHandles)
+			delete(s.activeConns, c)
+			activeCount := len(s.activeConns)
 			s.mu.Unlock()
 
-			// Clean up host render resources only if the generation matches
 			if s.hostRender != nil && pid != 0 && setupSeq != 0 {
 				s.hostRender.CleanupClient(pid, setupSeq)
 			}
 
-			// Notify handler that a client disconnected
 			s.handler.HandleClientDisconnected(activeCount)
-		}(handle, clientID)
+		}(conn, clientID)
 	}
 }
 
-func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
-	defer windows.CloseHandle(handle)
+func (s *Server) handleClient(conn net.Conn, clientID int) uint32 {
+	defer conn.Close()
 
-	// Get the client's process ID for tracking active client
-	processID, err := getNamedPipeClientProcessId(handle)
-	if err != nil {
-		s.logger.Warn("Failed to get client process ID", "clientID", clientID, "error", err)
-		processID = 0 // Continue without process ID tracking
-	} else {
-		s.logger.Debug("Handling client", "clientID", clientID, "processID", processID)
+	// Get the client's process ID for tracking active client.
+	// winio 的 net.Conn 底层 win32File 暴露 Fd()——取出 handle 调用 GetNamedPipeClientProcessId。
+	var processID uint32
+	if g, ok := conn.(fdGetter); ok {
+		var err error
+		processID, err = getNamedPipeClientProcessId(windows.Handle(g.Fd()))
+		if err != nil {
+			s.logger.Warn("Failed to get client process ID", "clientID", clientID, "error", err)
+			processID = 0
+		} else {
+			s.logger.Debug("Handling client", "clientID", clientID, "processID", processID)
+		}
 	}
 
-	// Create a pipe reader wrapper
-	reader := &pipeReader{handle: handle}
-	defer reader.release()
-	writer := &pipeWriter{handle: handle}
-
 	for {
-		// Read header
-		header, err := s.codec.ReadHeader(reader)
+		// Read header (winio 在 MessageMode 下 conn.Read 自带消息边界 + ERROR_MORE_DATA 处理)
+		header, err := s.codec.ReadHeader(conn)
 		if err != nil {
 			if isPipeClosed(err) {
 				s.logger.Debug("Bridge pipe closed by peer", "clientID", clientID, "error", err)
@@ -282,7 +250,7 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 		}
 
 		// Read payload
-		payload, err := s.codec.ReadPayload(reader, header.Length)
+		payload, err := s.codec.ReadPayload(conn, header.Length)
 		if err != nil {
 			if isPipeClosed(err) {
 				s.logger.Debug("Bridge pipe closed by peer during payload read", "clientID", clientID, "error", err)
@@ -297,7 +265,7 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 
 		// Handle batch events
 		if header.Command == ipc.CmdBatchEvents {
-			s.handleBatchEvents(header, payload, writer, clientID, processID)
+			s.handleBatchEvents(header, payload, conn, clientID, processID)
 			continue
 		}
 
@@ -311,7 +279,7 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 		}
 
 		// Write response
-		if err := s.codec.WriteMessage(writer, response); err != nil {
+		if err := s.codec.WriteMessage(conn, response); err != nil {
 			if isPipeClosed(err) {
 				s.logger.Debug("Bridge pipe closed by peer during response write", "clientID", clientID, "error", err)
 			} else {
@@ -323,109 +291,6 @@ func (s *Server) handleClient(handle windows.Handle, clientID int) uint32 {
 
 	s.logger.Info("C++ Bridge disconnected", "clientID", clientID)
 	return processID
-}
-
-// pipeReader wraps windows.Handle for io.Reader
-// In MESSAGE mode, each ReadFile returns a complete message
-type pipeReader struct {
-	handle    windows.Handle
-	msgBuffer []byte  // Buffer for current message (slice of poolBuf or heap)
-	msgOffset int     // Current read offset in msgBuffer
-	poolBuf   *[]byte // Pool buffer held until current message is fully consumed
-}
-
-func (r *pipeReader) Read(p []byte) (int, error) {
-	// If we have buffered data from a previous message read, return that first
-	if r.msgOffset < len(r.msgBuffer) {
-		n := copy(p, r.msgBuffer[r.msgOffset:])
-		r.msgOffset += n
-		return n, nil
-	}
-
-	// Current message fully consumed; return pool buffer before acquiring a new one
-	if r.poolBuf != nil {
-		readBufPool.Put(r.poolBuf)
-		r.poolBuf = nil
-		r.msgBuffer = nil
-	}
-
-	// Acquire a reusable 64KB buffer from the pool
-	bufPtr := readBufPool.Get().(*[]byte)
-	readBuf := *bufPtr
-	var bytesRead uint32
-
-	err := windows.ReadFile(r.handle, readBuf, &bytesRead, nil)
-	if err != nil {
-		// Handle ERROR_MORE_DATA - message is larger than 64KB (should not happen in practice)
-		if err == windows.ERROR_MORE_DATA {
-			// Copy partial data out BEFORE returning pool buffer to avoid race with other goroutines.
-			accum := make([]byte, bytesRead)
-			copy(accum, readBuf[:bytesRead])
-			readBufPool.Put(bufPtr)
-			for {
-				tmpPtr := readBufPool.Get().(*[]byte)
-				tmp := *tmpPtr
-				err = windows.ReadFile(r.handle, tmp, &bytesRead, nil)
-				accum = append(accum, tmp[:bytesRead]...)
-				readBufPool.Put(tmpPtr)
-				if err == nil {
-					break
-				}
-				if err != windows.ERROR_MORE_DATA {
-					return 0, err
-				}
-			}
-			r.msgBuffer = accum
-			r.msgOffset = 0
-			n := copy(p, r.msgBuffer)
-			r.msgOffset = n
-			return n, nil
-		}
-		readBufPool.Put(bufPtr)
-		return 0, err
-	}
-
-	if bytesRead == 0 {
-		readBufPool.Put(bufPtr)
-		return 0, io.EOF
-	}
-
-	// Hold the pool buffer until this entire message is consumed
-	r.poolBuf = bufPtr
-	r.msgBuffer = readBuf[:bytesRead]
-	r.msgOffset = 0
-
-	n := copy(p, r.msgBuffer)
-	r.msgOffset = n
-	return n, nil
-}
-
-// release returns any held pool buffer back to the pool. Must be called when the reader is done.
-func (r *pipeReader) release() {
-	if r.poolBuf != nil {
-		readBufPool.Put(r.poolBuf)
-		r.poolBuf = nil
-	}
-	r.msgBuffer = nil
-}
-
-// pipeWriter is the synchronous bridge-pipe writer (request-response RPC).
-// 仅用于 bridge pipe；push pipe 已迁移到 net.Conn 基于 winio 的 pushClient。
-// mu 串行化并发 WriteFile（Windows 命名管道未保证 thread-safe）。
-type pipeWriter struct {
-	handle windows.Handle
-	mu     sync.Mutex
-}
-
-func (w *pipeWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	var bytesWritten uint32
-	err := windows.WriteFile(w.handle, p, &bytesWritten, nil)
-	if err != nil {
-		return 0, err
-	}
-	return int(bytesWritten), nil
 }
 
 // pushOutboundBufferSize: per-client push 广播队列容量。
