@@ -197,10 +197,6 @@ func (s *Server) handleKeyEvent(payload []byte, clientID int) []byte {
 	case ResponseTypeClearComposition:
 		return s.codec.EncodeClearComposition()
 
-	case ResponseTypeModeChanged:
-		s.logger.Debug("Returning ModeChanged response", "clientID", clientID, "chineseMode", result.ChineseMode)
-		return s.codec.EncodeModeChanged(result.ChineseMode)
-
 	case ResponseTypeStatusUpdate:
 		// 模式切换走这条：自包含 iconLabel，C++ 端 StatusUpdate handler 立刻
 		// UpdateFullStatus → 刷新任务栏图标，不依赖 push pipe。
@@ -349,40 +345,53 @@ func (s *Server) handleCommitRequest(payload []byte, clientID int) []byte {
 func (s *Server) handleToggleMode(clientID int) []byte {
 	s.logger.Info("Toggle mode request from UI", "clientID", clientID)
 
-	// Call handler to toggle mode
-	commitText, chineseMode := s.handler.HandleToggleMode()
+	// 统一架构：Go 决定最终状态后以 StatusUpdate 回应，C++ 端走 UpdateFullStatus
+	// 一并同步内部 mirror + TSF compartments + LangBar UI。
+	status, commitText := s.handler.HandleToggleMode()
 
 	s.logger.Debug("Toggle mode result", "clientID", clientID,
-		"chineseMode", chineseMode, "commitText", commitText)
+		"hasCommit", commitText != "", "hasStatus", status != nil)
 
-	// Return ModeChanged response (with optional commit text if there was pending input)
+	// commitText 路径仍走 CommitText（带 ModeChanged bit）；后续 push pipe 会推送
+	// 完整 status，C++ 端 LangBar 一致性由 push 路径保障。
 	if commitText != "" {
+		chineseMode := false
+		if status != nil {
+			chineseMode = status.ChineseMode
+		}
 		return s.codec.EncodeCommitText(commitText, "", true, chineseMode, false)
 	}
-	return s.codec.EncodeModeChanged(chineseMode)
+	if status == nil {
+		return s.codec.EncodeAck()
+	}
+	return s.encodeStatusUpdate(status)
 }
 
 func (s *Server) handleSystemModeSwitch(payload []byte, clientID int) []byte {
 	if len(payload) < 4 {
 		s.logger.Error("System mode switch payload too short", "clientID", clientID)
-		return s.codec.EncodeModeChanged(false)
+		return s.codec.EncodeAck()
 	}
 
-	// Parse flags (same format as StatusFlags)
+	// Parse flags (same format as StatusFlags). 注意：这是系统已经决定好的目标模式，
+	// Go 必须 follow 而非 toggle。
 	flags := binary.LittleEndian.Uint32(payload[0:4])
 	chineseMode := (flags & ipc.StatusChineseMode) != 0
 
 	s.logger.Info("System mode switch", "clientID", clientID, "targetMode", chineseMode)
 
-	commitText := s.handler.HandleSystemModeSwitch(chineseMode)
+	status, commitText := s.handler.HandleSystemModeSwitch(chineseMode)
 
 	s.logger.Debug("System mode switch result", "clientID", clientID,
-		"chineseMode", chineseMode, "commitText", commitText)
+		"chineseMode", chineseMode, "hasCommit", commitText != "")
 
 	if commitText != "" {
 		return s.codec.EncodeCommitText(commitText, "", true, chineseMode, false)
 	}
-	return s.codec.EncodeModeChanged(chineseMode)
+	if status == nil {
+		return s.codec.EncodeAck()
+	}
+	return s.encodeStatusUpdate(status)
 }
 
 func (s *Server) handleMenuCommand(payload []byte, clientID int) []byte {

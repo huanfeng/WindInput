@@ -42,14 +42,15 @@ func (c *Coordinator) HandleModeNotify(data bridge.ModeNotifyData) {
 // HandleSystemModeSwitch handles system-initiated mode switch (e.g., Ctrl+Space).
 // Unlike HandleToggleMode, the target mode is decided by the system — Go must follow.
 // Returns commitText if CommitOnSwitch is enabled and there's pending input.
-func (c *Coordinator) HandleSystemModeSwitch(chineseMode bool) (commitText string) {
+func (c *Coordinator) HandleSystemModeSwitch(chineseMode bool) (status *bridge.StatusUpdateData, commitText string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// If mode is already the same, nothing to do
+	// If mode is already the same, nothing to do — still return current full status
+	// so caller can echo it back to C++ for any drift recovery.
 	if c.chineseMode == chineseMode {
 		c.logger.Debug("System mode switch: already in target mode", "chineseMode", chineseMode)
-		return ""
+		return c.buildStatusUpdate(), ""
 	}
 
 	// 切换模式 = 短语终止符，通知造词策略（码表自动造词）
@@ -90,11 +91,11 @@ func (c *Coordinator) HandleSystemModeSwitch(chineseMode bool) (commitText strin
 	// Broadcast state to toolbar and all TSF clients
 	c.broadcastState()
 
-	return commitText
+	return c.buildStatusUpdate(), commitText
 }
 
-// HandleToggleMode toggles the input mode and returns the new state
-func (c *Coordinator) HandleToggleMode() (commitText string, chineseMode bool) {
+// HandleToggleMode toggles the input mode and returns the resulting full status.
+func (c *Coordinator) HandleToggleMode() (status *bridge.StatusUpdateData, commitText string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -137,7 +138,7 @@ func (c *Coordinator) HandleToggleMode() (commitText string, chineseMode bool) {
 	// Broadcast state to toolbar and all TSF clients
 	c.broadcastState()
 
-	return commitText, c.chineseMode
+	return c.buildStatusUpdate(), commitText
 }
 
 // HandleCapsLockState shows Caps Lock indicator (A/a) and updates toolbar

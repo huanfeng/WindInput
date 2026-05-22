@@ -43,7 +43,6 @@ const (
 	CmdUpdateComposition    uint16 = 0x0102 // Update composition (preedit)
 	CmdClearComposition     uint16 = 0x0103 // Clear composition
 	CmdCommitResult         uint16 = 0x0105 // Commit result (response to COMMIT_REQUEST)
-	CmdModeChanged          uint16 = 0x0201 // Mode changed
 	CmdStatusUpdate         uint16 = 0x0202 // Full status update
 	CmdStatePush            uint16 = 0x0206 // State push (broadcast to all clients)
 	CmdServiceReady         uint16 = 0x0207 // Go service connected push pipe, TSF should sync state

@@ -326,27 +326,6 @@ func (c *BinaryCodec) EncodeUpdateComposition(text string, caretPos int) []byte 
 	return result
 }
 
-// EncodeModeChanged encodes a mode changed response
-// Format: StatusFlags (4 bytes)
-func (c *BinaryCodec) EncodeModeChanged(chineseMode bool) []byte {
-	var flags uint32
-	if chineseMode {
-		flags |= StatusChineseMode
-	}
-	flags |= StatusModeChanged
-
-	header := c.EncodeHeader(CmdModeChanged, 4)
-
-	payload := make([]byte, 4)
-	binary.LittleEndian.PutUint32(payload[0:4], flags)
-
-	result := make([]byte, 0, HeaderSize+4)
-	result = append(result, header...)
-	result = append(result, payload...)
-
-	return result
-}
-
 // EncodeStatusUpdate encodes a full status update response
 // Format: StatusHeader (12 bytes) + keyHash values + trailing UTF-8 icon label
 func (c *BinaryCodec) EncodeStatusUpdate(chineseMode, fullWidth, chinesePunct, toolbarVisible, capsLock bool,

@@ -2198,7 +2198,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
             {
                 if (response.type == ResponseType::CommitText && !response.text.empty())
                     CommitText(response.text);
-                if (response.type == ResponseType::ModeChanged || response.type == ResponseType::CommitText)
+                if (response.type == ResponseType::StatusUpdate || response.type == ResponseType::CommitText)
                     newChineseMode = response.IsChineseMode() ? TRUE : FALSE;
             }
         }
@@ -2285,7 +2285,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
                 CommitText(response.text);
                 WIND_LOG_INFO_FMT(L"SystemModeSwitch: committed pending text (len=%zu)\n", response.text.size());
             }
-            if (response.type == ResponseType::ModeChanged || response.type == ResponseType::CommitText)
+            if (response.type == ResponseType::StatusUpdate || response.type == ResponseType::CommitText)
             {
                 newChineseMode = response.IsChineseMode() ? TRUE : FALSE;
             }
@@ -3564,7 +3564,7 @@ void CTextService::HandleCtrlSpaceToggle()
                 CommitText(response.text);
                 WIND_LOG_INFO_FMT(L"HandleCtrlSpaceToggle: committed pending text (len=%zu)\n", response.text.size());
             }
-            if (response.type == ResponseType::ModeChanged || response.type == ResponseType::CommitText)
+            if (response.type == ResponseType::StatusUpdate || response.type == ResponseType::CommitText)
                 newChineseMode = response.IsChineseMode() ? TRUE : FALSE;
         }
         else
@@ -3597,7 +3597,7 @@ void CTextService::ToggleInputMode()
     }
 
     // Toggle mode locally (this is used as a fallback when Go service is unavailable)
-    // The actual mode toggle is handled via KeyUp event -> Go service -> ModeChanged response
+    // The actual mode toggle is handled via KeyUp event -> Go service -> StatusUpdate response
     EndComposition();
     _bChineseMode = !_bChineseMode;
 

@@ -10,7 +10,6 @@ const (
 	ResponseTypeClearComposition     ResponseType = "clear_composition"
 	ResponseTypeAck                  ResponseType = "ack"
 	ResponseTypePassThrough          ResponseType = "pass_through" // Key not handled, pass to system
-	ResponseTypeModeChanged          ResponseType = "mode_changed"
 	ResponseTypeStatusUpdate         ResponseType = "status_update"
 	ResponseTypeConsumed             ResponseType = "consumed"
 	ResponseTypeInsertTextWithCursor ResponseType = "insert_text_with_cursor" // 插入文本并定位光标
@@ -71,7 +70,7 @@ type KeyEventResult struct {
 	Type              ResponseType
 	Text              string // For InsertText
 	CaretPos          int    // For UpdateComposition
-	ChineseMode       bool   // For ModeChanged
+	ChineseMode       bool   // New mode (used with InsertText + ModeChanged combo)
 	ModeChanged       bool   // Whether mode was also changed (for InsertText + mode change combo)
 	NewComposition    string // New composition text after commit (inline preedit: actual text; non-inline: empty)
 	HasNewComposition bool   // Whether to restart composition after commit (set for both inline and non-inline when there is remaining input)
@@ -118,7 +117,10 @@ type MessageHandler interface {
 	HandleFocusGained(processID uint32) *StatusUpdateData
 	HandleIMEDeactivated()
 	HandleIMEActivated(processID uint32) *StatusUpdateData
-	HandleToggleMode() (commitText string, chineseMode bool)
+	// HandleToggleMode toggles the input mode. Returns the resulting full status
+	// (含 iconLabel) so the response can be self-contained. commitText carries
+	// pending input when CommitOnSwitch is enabled and we switch out of Chinese.
+	HandleToggleMode() (status *StatusUpdateData, commitText string)
 	HandleCapsLockState(on bool)
 	HandleMenuCommand(command string) *StatusUpdateData
 	HandleClientDisconnected(activeClients int)
@@ -126,8 +128,11 @@ type MessageHandler interface {
 	HandleCommitRequest(data CommitRequestData) *CommitResultData
 	// Mode notification from TSF (local toggle)
 	HandleModeNotify(data ModeNotifyData)
-	// System mode switch (Ctrl+Space): system has decided the target mode, must follow
-	HandleSystemModeSwitch(chineseMode bool) (commitText string)
+	// HandleSystemModeSwitch handles a TSF-driven mode switch where the system
+	// has *already decided* the target mode (e.g. Ctrl+Space). Go must follow,
+	// not toggle. Returns the resulting full status; commitText set when
+	// CommitOnSwitch fires.
+	HandleSystemModeSwitch(chineseMode bool) (status *StatusUpdateData, commitText string)
 	// Context menu request from TSF (screen coordinates)
 	HandleShowContextMenu(screenX, screenY int)
 	// Selection changed outside of composition (from ITfTextEditSink::OnEndEdit)

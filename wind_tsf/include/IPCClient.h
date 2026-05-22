@@ -52,7 +52,7 @@ struct ServiceResponse
     std::wstring composition;
     int caretPos = 0;
 
-    // For StatusUpdate / ModeChanged
+    // For StatusUpdate
     uint32_t statusFlags = 0;
 
     // Icon label for taskbar display (from Go service, e.g., "中", "英", "A", "拼", "五")
@@ -149,7 +149,7 @@ public:
     BOOL SendModeNotify(bool chineseMode, bool clearInput);
 
     // Send toggle mode request (sync, from UI click)
-    // Go service will toggle mode and return ModeChanged response
+    // Go service will toggle mode and return StatusUpdate response (full state + iconLabel)
     BOOL SendToggleMode(ServiceResponse& response);
 
     // System mode switch (Ctrl+Space): sync request to Go with target mode

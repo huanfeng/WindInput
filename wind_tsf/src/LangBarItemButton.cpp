@@ -289,7 +289,9 @@ STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcAr
     if (_bKeyboardDisabled)
         return S_OK;
 
-    // Left click: Toggle mode via Go service (all state changes go through Go)
+    // Left click: Toggle mode via Go service (all state changes go through Go).
+    // Go 端以 StatusUpdate 回应（含 iconLabel 完整状态），C++ 端走 UpdateFullStatus
+    // 一并同步 _bChineseMode/_bFullWidth 等 mirror + TSF compartments + LangBar UI。
     if (_pTextService != nullptr)
     {
         CIPCClient* pIPCClient = _pTextService->GetIPCClient();
@@ -298,10 +300,22 @@ STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcAr
             ServiceResponse response;
             if (pIPCClient->SendToggleMode(response))
             {
-                // Apply mode change from Go service response
-                if (response.type == ResponseType::ModeChanged)
+                if (response.type == ResponseType::StatusUpdate)
                 {
-                    _pTextService->SetInputMode(response.chineseMode);
+                    _pTextService->UpdateFullStatus(
+                        response.IsChineseMode(),
+                        response.IsFullWidth(),
+                        response.IsChinesePunct(),
+                        response.IsToolbarVisible(),
+                        response.IsCapsLock(),
+                        response.iconLabel.empty() ? nullptr : response.iconLabel.c_str()
+                    );
+                }
+                else if (response.type == ResponseType::CommitText && !response.text.empty())
+                {
+                    // CommitOnSwitch 边路: 先把 pending 输入 commit，状态由随后到达的 push pipe 同步
+                    _pTextService->CommitText(response.text);
+                    _pTextService->SetInputMode(response.IsChineseMode());
                 }
             }
             // If IPC fails, don't toggle locally - keep state consistent with Go
@@ -679,10 +693,26 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         if (pThis != nullptr && pData != nullptr)
         {
             WIND_LOG_DEBUG(L"MsgWndProc: Processing WM_UPDATE_STATUS\n");
-            // Call UpdateFullStatus on the UI thread (with icon label from Go service)
-            pThis->UpdateFullStatus(pData->bChineseMode, pData->bFullWidth,
-                                     pData->bChinesePunct, pData->bToolbarVisible, pData->bCapsLock,
-                                     pData->iconLabel[0] != L'\0' ? pData->iconLabel : nullptr);
+            // 走 TextService::UpdateFullStatus 而非本类的 UpdateFullStatus —— 前者会
+            // 顺带 _SetOpenCloseCompartment + _SetConversionMode 同步 TSF 全局 compartments,
+            // 否则 push pipe 推过来的状态变更会让 _bChineseMode 与 TSF 系统 compartment
+            // 出现 drift, 表现为 Ctrl+Space 失效 / 任务栏图标不刷新。
+            // TextService::UpdateFullStatus 内部会 cascade 调本类的 UpdateFullStatus，
+            // 因此 LangBar UI 仍然会被刷新。
+            if (pThis->_pTextService != nullptr)
+            {
+                pThis->_pTextService->UpdateFullStatus(
+                    pData->bChineseMode, pData->bFullWidth,
+                    pData->bChinesePunct, pData->bToolbarVisible, pData->bCapsLock,
+                    pData->iconLabel[0] != L'\0' ? pData->iconLabel : nullptr);
+            }
+            else
+            {
+                // Fallback: 没有 TextService 时只刷新 LangBar UI
+                pThis->UpdateFullStatus(pData->bChineseMode, pData->bFullWidth,
+                                         pData->bChinesePunct, pData->bToolbarVisible, pData->bCapsLock,
+                                         pData->iconLabel[0] != L'\0' ? pData->iconLabel : nullptr);
+            }
         }
 
         // Free the data allocated by sender

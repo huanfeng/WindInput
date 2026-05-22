@@ -116,11 +116,11 @@ func (d *DeferredHandler) HandleIMEActivated(processID uint32) *StatusUpdateData
 	return d.loadingStatus()
 }
 
-func (d *DeferredHandler) HandleToggleMode() (commitText string, chineseMode bool) {
+func (d *DeferredHandler) HandleToggleMode() (status *StatusUpdateData, commitText string) {
 	if h := d.getHandler(); h != nil {
 		return h.HandleToggleMode()
 	}
-	return "", false
+	return d.loadingStatus(), ""
 }
 
 func (d *DeferredHandler) HandleCapsLockState(on bool) {
@@ -155,11 +155,11 @@ func (d *DeferredHandler) HandleModeNotify(data ModeNotifyData) {
 	}
 }
 
-func (d *DeferredHandler) HandleSystemModeSwitch(chineseMode bool) (commitText string) {
+func (d *DeferredHandler) HandleSystemModeSwitch(chineseMode bool) (status *StatusUpdateData, commitText string) {
 	if h := d.getHandler(); h != nil {
 		return h.HandleSystemModeSwitch(chineseMode)
 	}
-	return ""
+	return d.loadingStatus(), ""
 }
 
 func (d *DeferredHandler) HandleShowContextMenu(screenX, screenY int) {

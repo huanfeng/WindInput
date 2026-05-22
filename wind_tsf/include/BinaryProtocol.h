@@ -46,7 +46,7 @@ constexpr uint16_t CMD_COMMIT_TEXT        = 0x0101; // Commit text
 constexpr uint16_t CMD_UPDATE_COMPOSITION = 0x0102; // Update composition
 constexpr uint16_t CMD_CLEAR_COMPOSITION  = 0x0103; // Clear composition
 constexpr uint16_t CMD_COMMIT_RESULT      = 0x0105; // Commit result (response to COMMIT_REQUEST)
-constexpr uint16_t CMD_MODE_CHANGED       = 0x0201; // Mode changed
+// 0x0201 (CMD_MODE_CHANGED) removed: 所有模式切换响应统一走 CMD_STATUS_UPDATE
 constexpr uint16_t CMD_STATUS_UPDATE      = 0x0202; // Full status update
 constexpr uint16_t CMD_STATE_PUSH         = 0x0206; // State push (broadcast to all clients)
 constexpr uint16_t CMD_SERVICE_READY      = 0x0207; // Go service connected push pipe, TSF should sync state
@@ -372,7 +372,6 @@ enum class ResponseType
     CommitText,
     UpdateComposition,
     ClearComposition,
-    ModeChanged,
     StatusUpdate,
     SyncHotkeys,
     Consumed,
@@ -398,7 +397,7 @@ struct ParsedResponse
     int caretPos = 0;
     int cursorOffset = 0;  // For InsertTextWithCursor: chars to move left from end
 
-    // For StatusUpdate / ModeChanged
+    // For StatusUpdate
     uint32_t statusFlags = 0;
 
     // Icon label for taskbar display (from Go service, e.g., "中", "英", "A", "拼", "五")

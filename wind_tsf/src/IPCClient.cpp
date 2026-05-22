@@ -811,7 +811,7 @@ BOOL CIPCClient::SendSystemModeSwitch(bool chineseMode, ServiceResponse& respons
 
     _LogInfo(L"Sending system_mode_switch (sync): chineseMode=%d", chineseMode);
 
-    // Send sync - wait for response (CommitText or ModeChanged)
+    // Send sync - wait for response (CommitText or StatusUpdate)
     if (!_SendBinaryMessage(CMD_SYSTEM_MODE_SWITCH, &flags, sizeof(flags)))
     {
         return FALSE;
@@ -834,7 +834,7 @@ BOOL CIPCClient::SendToggleMode(ServiceResponse& response)
 
     _LogInfo(L"Sending toggle_mode (sync)");
 
-    // Send sync - wait for ModeChanged response
+    // Send sync - wait for StatusUpdate response (carries full state + iconLabel)
     if (!_SendBinaryMessage(CMD_TOGGLE_MODE, nullptr, 0))
     {
         return FALSE;
@@ -1026,20 +1026,6 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
 
             _LogDebug(L"Response: UpdateComposition textLen=%zu, caret=%d",
                       response.composition.length(), response.caretPos);
-        }
-        break;
-
-    case CMD_MODE_CHANGED:
-        {
-            response.type = ResponseType::ModeChanged;
-
-            if (payload.size() >= 4)
-            {
-                response.statusFlags = *reinterpret_cast<const uint32_t*>(payload.data());
-                response.chineseMode = (response.statusFlags & STATUS_CHINESE_MODE) != 0;
-            }
-
-            _LogDebug(L"Response: ModeChanged chineseMode=%d", response.chineseMode);
         }
         break;
 
