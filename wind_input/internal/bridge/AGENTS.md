@@ -17,7 +17,7 @@ Named Pipe IPC 服务端，负责与 C++ TSF（文本服务框架）桥接层进
 | `protocol.go` | 协议类型定义（ResponseType、KeyEventData、StatusUpdateData 等） |
 | `server.go` | Named Pipe 服务端主体（连接管理、消息读写、pipeReader/pipeWriter） |
 | `server_handler.go` | 消息分发：解码二进制消息并路由到 MessageHandler 各方法 |
-| `server_push.go` | 推送管道管理（`PushStateToAllClients`、`PushCommitTextToActiveClient`） |
+| `server_push.go` | 推送管道管理（per-client outbound channel + 单 writer goroutine；所有 push 仅触达 active client，`pushToActiveClient` 是统一入口） |
 | `host_render.go` | `HostRenderManager`：管理白名单进程的宿主渲染状态；`HostRenderState` 持有每个进程的共享内存引用；通过 `OpenProcess`/`QueryFullProcessImageNameW` 识别进程名称 |
 | `shared_memory.go` | `SharedMemory`：命名共享内存 + 命名事件对；`WriteFrame` 将 RGBA→BGRA 转换后写入位图并信令通知；`WriteHide` 发送隐藏命令；安全描述符包含 AppContainer 低完整性标记（`S:(ML;;NW;;;LW)`）以支持 UWP 进程访问 |
 

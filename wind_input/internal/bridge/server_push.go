@@ -2,202 +2,204 @@ package bridge
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"time"
-	"unsafe"
 
+	"github.com/Microsoft/go-winio"
 	"github.com/huanfeng/wind_input/internal/ipc"
 	"golang.org/x/sys/windows"
 )
 
-// startPushPipeListener starts the push pipe listener for state push
+// startPushPipeListener 用 go-winio 起 push pipe listener。
+//
+// 关键架构变更（从手工 CreateNamedPipe+sync I/O 迁移到 winio overlapped I/O）：
+//   - 同 conn 上的 Read/Write 不再被内核串行化（旧设计中 phase-2 reader 的
+//     sync ReadFile park 会阻塞 writer 的 sync WriteFile，导致 push 永远卡住）。
+//   - Phase-2 死链监听**重新启用**——overlapped read 可以与 write 并发。
+//   - Disconnect+Close 由 winio PipeConn 接口提供（conn.Disconnect()+conn.Close()），
+//     不再需要手工 DisconnectNamedPipe+CancelIoEx+CloseHandle 三联。
+//   - 不再需要 watchdog——overlapped Write 不会被 sync read park 卡住，
+//     真死的 client 会让 conn.Write 返回 broken pipe，自然走 cleanup。
 func (s *Server) startPushPipeListener() {
 	s.logger.Info("Starting Push pipe listener", "pipe", PushPipeName)
 
 	// Allow desktop clients plus AppContainer/modern hosts (e.g. Start menu search).
 	// S:(ML;;NW;;;LW) = Mandatory Label: Low integrity — required for UWP/AppContainer
-	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)"
-	sd, err := windows.SecurityDescriptorFromString(sddl)
-	if err != nil {
-		s.logger.Error("Failed to create security descriptor for push pipe", "error", err)
-		sd = nil
+	// 处于低完整性（如 UWP/AppContainer）的客户端需要 AC + LW 才能连接。
+	pipeConfig := &winio.PipeConfig{
+		SecurityDescriptor: "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)",
+		MessageMode:        true,
+		InputBufferSize:    16, // 仅用于接收 8 字节 token 握手
+		OutputBufferSize:   int32(PipeBufferSize),
 	}
-
-	var sa *windows.SecurityAttributes
-	if sd != nil {
-		sa = &windows.SecurityAttributes{
-			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-			SecurityDescriptor: sd,
-		}
+	listener, err := winio.ListenPipe(PushPipeName, pipeConfig)
+	if err != nil {
+		s.logger.Error("Failed to listen push pipe", "error", err)
+		return
 	}
 
 	for {
-		pipePath, err := windows.UTF16PtrFromString(PushPipeName)
+		conn, err := listener.Accept()
 		if err != nil {
-			s.logger.Error("Failed to convert push pipe path", "error", err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		handle, err := windows.CreateNamedPipe(
-			pipePath,
-			windows.PIPE_ACCESS_DUPLEX, // 双向：服务端写状态推送，客户端写 token 握手
-			windows.PIPE_TYPE_MESSAGE|windows.PIPE_WAIT,
-			windows.PIPE_UNLIMITED_INSTANCES,
-			PipeBufferSize,
-			16, // 输入缓冲：仅用于接收 4 字节 token 握手
-			0,
-			sa,
-		)
-
-		if err != nil {
-			s.logger.Error("Failed to create push pipe", "error", err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		s.logger.Debug("Waiting for push pipe connection...")
-
-		err = windows.ConnectNamedPipe(handle, nil)
-		if err != nil && err != windows.ERROR_PIPE_CONNECTED {
-			windows.CloseHandle(handle)
-			continue
-		}
-
-		writer := newPushPipeWriter(handle)
-
-		// Get the client's process ID for targeted push
-		pushProcessID, err := getNamedPipeClientProcessId(handle)
-		if err != nil {
-			s.logger.Warn("Failed to get push pipe client process ID", "error", err)
-			pushProcessID = 0
-		}
-
-		// 立即注册客户端并写 CMD_SERVICE_READY，不等待 token 握手。
-		// token 在独立 goroutine 中异步读取，完成后再更新 tokenToPushHandle。
-		// 这样主循环可以立刻回到 CreateNamedPipe 等待下一个客户端，
-		// 避免 500ms 阻塞导致 EverEdit/Notepad 等应用在此窗口内连接失败。
-		s.pushMu.Lock()
-		s.pushClientCount++
-		clientID := s.pushClientCount
-		s.pushClients[handle] = writer
-		if pushProcessID != 0 {
-			s.pushClientsByPID[pushProcessID] = handle
-			s.pushHandleToPID[handle] = pushProcessID
-		}
-		s.pushMu.Unlock()
-
-		s.logger.Info("Push pipe client connected", "clientID", clientID, "processID", pushProcessID)
-
-		// Notify the newly-connected TSF client that the service is ready.
-		// 在启动 writer goroutine 之前同步发送，确保 SERVICE_READY 是该 client
-		// 收到的第一条消息（不会被后续 enqueueBroadcast 抢前面去）。
-		encoded := s.codec.EncodeServiceReady()
-		if err := s.codec.WriteMessage(writer, encoded); err != nil {
-			s.logger.Warn("Failed to send CMD_SERVICE_READY to new push client",
-				"clientID", clientID, "error", err)
-		} else {
-			s.logger.Debug("CMD_SERVICE_READY sent to new push client", "clientID", clientID)
-		}
-
-		// Per-client writer goroutine：消费 outbound 队列，把广播路径从
-		// "每次都 go func()"改成"单 worker 串行"。slow client 不会再让
-		// goroutine 堆积。outbound 关闭后 range 退出，writer 自然终止。
-		go s.pushWriterLoop(handle, writer, clientID, pushProcessID)
-
-		// 单 goroutine 完成两件事：
-		//   1) 阻塞读 8 字节 token 握手
-		//   2) 握手后继续阻塞 ReadFile，专门用于检测对端关闭（死链监听）
-		// 协议规定客户端发完 token 后不再发任何消息，所以 ReadFile 在握手后会
-		// 永久 park 在内核等待，不消耗 CPU；客户端 close pipe 时 OS 立即唤醒
-		// 并返回错误，我们走 defer 路径清理 handle —— 不再等到下一次广播写失败
-		// 才"惰性发现"死链。
-		//
-		// 同 token 重连：旧 handle 必然失效，必须按 token 主动清理。
-		// 不能按 PID 清理：同 PID 可能有多个合法实例（如 explorer.exe 的多个
-		// CLangBar 宿主），它们各自持有不同 token，按 PID 误清会破坏正常推送。
-		go func(h windows.Handle, pid uint32, cid int) {
-			defer func() {
-				s.pushMu.Lock()
-				removed := s.cleanupPushHandle(h)
-				s.pushMu.Unlock()
-				if removed {
-					windows.CloseHandle(h)
-				}
-			}()
-
-			// Phase 1: token 握手
-			var buf [8]byte
-			var n uint32
-			if err := windows.ReadFile(h, buf[:], &n, nil); err != nil || n == 0 {
-				s.logger.Info("Push pipe disconnected before token handshake",
-					"clientID", cid, "processID", pid, "error", err)
+			// listener.Close 会让 Accept 返回 net.ErrClosed；当作正常退出。
+			if errors.Is(err, net.ErrClosed) {
+				s.logger.Info("Push pipe listener closed")
 				return
 			}
-
-			var registeredToken uint64
-			if n >= 8 {
-				token := binary.LittleEndian.Uint64(buf[:])
-				if token != 0 {
-					s.pushMu.Lock()
-					if oldH, ok := s.tokenToPushHandle[token]; ok && oldH != h {
-						if s.cleanupPushHandle(oldH) {
-							windows.CloseHandle(oldH)
-							s.logger.Info("Push pipe: stale handle replaced by token reconnect",
-								"clientID", cid, "processID", pid, "token", token)
-						}
-					}
-					if _, exists := s.pushClients[h]; exists {
-						s.tokenToPushHandle[token] = h
-						s.pushHandleToToken[h] = token
-						registeredToken = token
-					}
-					s.pushMu.Unlock()
-					s.logger.Debug("Push pipe: token registered",
-						"clientID", cid, "processID", pid, "token", token)
-				}
-			}
-
-			// Phase 2: 死链监听 —— ReadFile 在客户端 close pipe 时立刻返回错误
-			var probe [16]byte
-			for {
-				err := windows.ReadFile(h, probe[:], &n, nil)
-				if err != nil || n == 0 {
-					s.logger.Info("Push pipe client disconnected",
-						"clientID", cid, "processID", pid, "token", registeredToken, "error", err)
-					return
-				}
-				// 协议不允许 token 之后再有数据，但万一发生只丢弃并继续监听。
-			}
-		}(handle, pushProcessID, clientID)
+			s.logger.Error("Push pipe accept error", "error", err)
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		s.acceptPushClient(conn)
 	}
 }
 
-// pushWriterLoop 是 per-client 广播 worker。范围迭代 outbound，串行写入；
-// 写失败时清理 handle 并退出。outbound 被 shutdown() 关闭后 range 自然退出。
+// acceptPushClient 处理新接入的 push pipe 连接。
 //
-// 不再像旧设计那样"每次广播都 go func()"——pprof 曾观测到 725 个 goroutine
-// 堵在 sync.Mutex.Lock 上，slow/dead client 把广播 goroutine 无限堆积。
-// 新设计下每个 client 至多 1 个 writer goroutine。
-func (s *Server) pushWriterLoop(h windows.Handle, writer *pipeWriter, cid int, pid uint32) {
-	for msg := range writer.outbound {
-		if err := s.codec.WriteMessage(writer, msg); err != nil {
-			if isPipeClosed(err) {
-				s.logger.Debug("Push pipe writer exiting on peer close",
-					"clientID", cid, "processID", pid, "error", err)
-			} else {
-				s.logger.Warn("Push pipe writer aborting on write error",
-					"clientID", cid, "processID", pid, "error", err)
+// 流程（vs 旧版的差异）：
+//  1. 从 net.Conn 提取 windows.Handle 作为各 map 的稳定 key；
+//  2. 调 GetNamedPipeClientProcessId 获取 client PID（与旧版一致）；
+//  3. 同步写出 CMD_SERVICE_READY；
+//  4. 启动 writer goroutine 消费 outbound；
+//  5. 启动 reader goroutine 做 Phase-1 token + Phase-2 dead-link
+//     —— Phase-2 现在安全了（winio overlapped 不串行化 read/write）。
+func (s *Server) acceptPushClient(conn net.Conn) {
+	client, err := newPushClient(conn)
+	if err != nil {
+		s.logger.Error("Failed to wrap push pipe connection", "error", err)
+		_ = conn.Close()
+		return
+	}
+
+	pushProcessID, err := getNamedPipeClientProcessId(client.handle)
+	if err != nil {
+		s.logger.Warn("Failed to get push pipe client process ID", "error", err)
+		pushProcessID = 0
+	}
+
+	s.pushMu.Lock()
+	s.pushClientCount++
+	clientID := s.pushClientCount
+	s.pushClients[client.handle] = client
+	if pushProcessID != 0 {
+		s.pushClientsByPID[pushProcessID] = client.handle
+		s.pushHandleToPID[client.handle] = pushProcessID
+	}
+	s.pushMu.Unlock()
+
+	s.logger.Info("Push pipe client connected", "clientID", clientID, "processID", pushProcessID)
+
+	// 同步发送 SERVICE_READY，确保它是 client 收到的第一条消息。
+	encoded := s.codec.EncodeServiceReady()
+	if err := s.codec.WriteMessage(client, encoded); err != nil {
+		s.logger.Warn("Failed to send CMD_SERVICE_READY to new push client",
+			"clientID", clientID, "error", err)
+	} else {
+		s.logger.Debug("CMD_SERVICE_READY sent to new push client", "clientID", clientID)
+	}
+
+	// Writer：串行消费 outbound 队列。
+	go s.pushWriterLoop(client, clientID, pushProcessID)
+	// Reader：phase-1 token 握手 + phase-2 死链监听（overlapped 安全并发）。
+	go s.pushReaderLoop(client, clientID, pushProcessID)
+}
+
+// pushReaderLoop 处理 token 握手并持续监听 client 端断开。
+//
+// Phase-1：阻塞读 8 字节 token，注册到 token→handle 映射。
+// Phase-2：继续阻塞 Read 等 client 关闭；任何错误/EOF 即触发 cleanup。
+//
+//	winio 的 overlapped Read 不会阻塞同 conn 上的 Write。
+func (s *Server) pushReaderLoop(client *pushClient, cid int, pid uint32) {
+	defer s.cleanupPushClient(client)
+
+	// Phase 1: token 握手
+	var buf [8]byte
+	if _, err := io.ReadFull(client.conn, buf[:]); err != nil {
+		s.logger.Info("Push pipe disconnected before token handshake",
+			"clientID", cid, "processID", pid, "error", err)
+		return
+	}
+	token := binary.LittleEndian.Uint64(buf[:])
+	if token != 0 {
+		s.pushMu.Lock()
+		// 同 token 重连：旧 handle 必失效，主动清旧。按 token 不按 PID——同
+		// PID 可能有多个合法实例（explorer.exe 的多个 CLangBar 宿主）。
+		if oldH, ok := s.tokenToPushHandle[token]; ok && oldH != client.handle {
+			if oldC, exists := s.pushClients[oldH]; exists {
+				_ = s.cleanupPushHandle(oldH) // 已持锁，仅维护 map
+				oldC.shutdown()
+				s.logger.Info("Push pipe: stale handle replaced by token reconnect",
+					"clientID", cid, "processID", pid, "token", token)
 			}
-			// Phase-2 reader 多数情况下已经清理过了；cleanupPushHandle 用返回值
-			// 做并发安全的"二选一"，CloseHandle 不会被双关。
-			s.pushMu.Lock()
-			removed := s.cleanupPushHandle(h)
-			s.pushMu.Unlock()
-			if removed {
-				windows.CloseHandle(h)
-			}
+		}
+		if _, exists := s.pushClients[client.handle]; exists {
+			s.tokenToPushHandle[token] = client.handle
+			s.pushHandleToToken[client.handle] = token
+		}
+		s.pushMu.Unlock()
+		s.logger.Debug("Push pipe: token registered",
+			"clientID", cid, "processID", pid, "token", token)
+	}
+
+	// Phase 2: 死链监听——任何 Read 错误（包括 io.EOF / broken pipe）即对端断开。
+	// 协议规定 token 后客户端不再写任何数据；此 Read 会一直 park 在内核 wait，
+	// 但**不会**阻塞 writer goroutine（winio overlapped 设计）。
+	var probe [16]byte
+	for {
+		if _, err := client.conn.Read(probe[:]); err != nil {
+			s.logger.Info("Push pipe client disconnected",
+				"clientID", cid, "processID", pid, "token", token, "error", err)
 			return
 		}
+		// 协议不允许 token 后还有数据，丢弃并继续监听。
+	}
+}
+
+// cleanupPushClient 是 reader/writer goroutine 退出时统一调用的清理。
+// 从所有 map 中移除 handle 并 shutdown client（关 outbound + Disconnect + Close）。
+func (s *Server) cleanupPushClient(client *pushClient) {
+	s.pushMu.Lock()
+	_ = s.cleanupPushHandle(client.handle)
+	s.pushMu.Unlock()
+	client.shutdown()
+}
+
+// pushWriterLoop 是 per-client 广播 worker——单 goroutine 串行消费 outbound。
+// 写失败时退出；cleanup 由 reader goroutine 的 defer 完成（统一入口），避免
+// 重复 cleanup。range over outbound 在 client.shutdown() 关闭后自然退出。
+func (s *Server) pushWriterLoop(client *pushClient, cid int, pid uint32) {
+	for msg := range client.outbound {
+		var cmd uint16
+		if len(msg) >= 4 {
+			cmd = uint16(msg[2]) | (uint16(msg[3]) << 8)
+		}
+		writeStart := time.Now()
+		err := s.codec.WriteMessage(client, msg)
+		writeDuration := time.Since(writeStart)
+		if err == nil {
+			s.logger.Debug("Push pipe write completed",
+				"clientID", cid, "processID", pid,
+				"cmd", fmt.Sprintf("0x%04X", cmd), "size", len(msg),
+				"duration", writeDuration.String())
+			continue
+		}
+		if isPipeClosed(err) {
+			s.logger.Debug("Push pipe writer exiting on peer close",
+				"clientID", cid, "processID", pid, "error", err,
+				"cmd", fmt.Sprintf("0x%04X", cmd), "duration", writeDuration.String())
+		} else {
+			s.logger.Warn("Push pipe writer aborting on write error",
+				"clientID", cid, "processID", pid, "error", err,
+				"cmd", fmt.Sprintf("0x%04X", cmd), "duration", writeDuration.String())
+		}
+		// shutdown 关 outbound + Disconnect+Close conn → reader goroutine 也会
+		// 在下次 Read 时返回 error 并走 defer cleanup。
+		client.shutdown()
+		return
 	}
 }
 
@@ -245,53 +247,71 @@ func (s *Server) cleanupPushHandle(handle windows.Handle) bool {
 	return true
 }
 
-// PushStateToAllClients broadcasts state update to all connected TSF clients
-// This is used for proactive state push (e.g., when mode changes via toolbar click)
-func (s *Server) PushStateToAllClients(status *StatusUpdateData) {
+// pushToActiveClient 是所有状态/配置 push 的统一入口：解析当前 active client
+// 并把消息丢到该 client 的 outbound 队列。
+//
+// 为什么不广播给所有 push client？
+//   - C++ TSF DLL 注入到每个 TSF 宿主，宿主进程不退出就一直占用 push 连接；
+//     长期运行下连接数可达 20+。
+//   - 但 English pair / Stats 配置以及状态（中英模式、全半角等）只在该 TSF
+//     实例**处理用户按键**时才用到，背景实例缓存的值用不到。
+//   - HandleFocusGained / HandleIMEActivated 会在焦点切到背景实例时主动调
+//     push（此时它正好成为 active），刚好赶在第一次按键之前——天然的
+//     "焦点切换补推"语义。
+//
+// 定位策略与 PushCommitTextToActiveClient 一致：优先 token（多实例宿主精确
+// 区分），回退 PID（旧 token 还没注册时兜底）。
+func (s *Server) pushToActiveClient(encoded []byte, kind string) {
+	s.activeMu.RLock()
+	activeProcessID := s.activeProcessID
+	activeToken := s.activeToken
+	s.activeMu.RUnlock()
+
+	if activeProcessID == 0 && activeToken == 0 {
+		s.logger.Debug("Push skipped: no active client", "kind", kind)
+		return
+	}
+
+	s.pushMu.RLock()
+	var writer *pushClient
+	if activeToken != 0 {
+		if h, ok := s.tokenToPushHandle[activeToken]; ok {
+			writer = s.pushClients[h]
+		}
+	}
+	if writer == nil && activeProcessID != 0 {
+		if h, ok := s.pushClientsByPID[activeProcessID]; ok {
+			writer = s.pushClients[h]
+		}
+	}
+	s.pushMu.RUnlock()
+
+	if writer == nil {
+		s.logger.Debug("Push skipped: active client has no push pipe",
+			"kind", kind, "processID", activeProcessID, "token", activeToken)
+		return
+	}
+
+	if !writer.enqueueBroadcast(encoded) {
+		s.logger.Warn("Push dropped: active client queue full",
+			"kind", kind, "processID", activeProcessID)
+		return
+	}
+	// 诊断：状态/配置推送是否真的进了队列。配合 pushWriterLoop 的写入日志可以
+	// 看到完整的 enqueue → WriteFile → C++ 收到 的链路在哪一环掉链子。
+	s.logger.Debug("Push enqueued",
+		"kind", kind, "processID", activeProcessID, "size", len(encoded), "queueLen", len(writer.outbound))
+}
+
+// PushStateToActiveClient sends a state update to the currently active TSF client.
+// 用于焦点不变时的状态变化（如点击工具栏切换中英模式）。背景 client 不需要——
+// 它们处理不到按键，状态不会被使用；下次焦点切到它们时 HandleFocusGained
+// 的响应自带最新 status，C++ 侧从那里同步。
+func (s *Server) PushStateToActiveClient(status *StatusUpdateData) {
 	if status == nil {
 		return
 	}
-
-	// Encode the state push message using CMD_STATE_PUSH
-	encoded := s.encodeStatePush(status)
-
-	// Get all push clients with their process IDs
-	s.pushMu.RLock()
-	type clientInfo struct {
-		handle    windows.Handle
-		writer    *pipeWriter
-		processID uint32
-	}
-	clients := make([]clientInfo, 0, len(s.pushClients))
-	for h, writer := range s.pushClients {
-		// 使用反向映射 O(1) 查找 PID
-		pid := s.pushHandleToPID[h]
-		clients = append(clients, clientInfo{handle: h, writer: writer, processID: pid})
-	}
-	clientCount := len(clients)
-	s.pushMu.RUnlock()
-
-	if clientCount == 0 {
-		s.logger.Debug("No push pipe clients to send state to")
-		return
-	}
-
-	s.logger.Debug("Pushing state to TSF clients via push pipe",
-		"count", clientCount,
-		"chineseMode", status.ChineseMode,
-		"fullWidth", status.FullWidth,
-		"capsLock", status.CapsLock)
-
-	// 把消息丢到每个 client 的 outbound 队列；per-client writer goroutine 串行消费。
-	// 队列满表示该 client 卡顿——状态推送语义幂等，丢弃即可（下次推就是最新值）。
-	// 旧设计每次广播都 go func()，slow client 让 goroutine 堆到数百个；新设计下
-	// 每个 client 仅一个 writer goroutine，不会无限增长。
-	for _, client := range clients {
-		if !client.writer.enqueueBroadcast(encoded) {
-			s.logger.Warn("Push state dropped: outbound queue full",
-				"processID", client.processID)
-		}
-	}
+	s.pushToActiveClient(s.encodeStatePush(status), "state")
 }
 
 // encodeStatePush encodes a state push message (CMD_STATE_PUSH)
@@ -335,7 +355,7 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 
 	s.pushMu.RLock()
 	var handle windows.Handle
-	var writer *pipeWriter
+	var writer *pushClient
 	// Primary: token-based exact targeting
 	if activeToken != 0 {
 		if h, ok := s.tokenToPushHandle[activeToken]; ok {
@@ -368,7 +388,7 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 			removed := s.cleanupPushHandle(handle)
 			s.pushMu.Unlock()
 			if removed {
-				windows.CloseHandle(handle)
+				writer.shutdown()
 			}
 			return
 		}
@@ -383,7 +403,7 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 	s.pushMu.RLock()
 	clientCount := len(s.pushClients)
 	var fallbackHandle windows.Handle
-	var fallbackWriter *pipeWriter
+	var fallbackWriter *pushClient
 	if clientCount == 1 {
 		for h, w := range s.pushClients {
 			fallbackHandle = h
@@ -401,7 +421,7 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 			removed := s.cleanupPushHandle(fallbackHandle)
 			s.pushMu.Unlock()
 			if removed {
-				windows.CloseHandle(fallbackHandle)
+				fallbackWriter.shutdown()
 			}
 		} else {
 			s.logger.Info("Commit text push completed via single-client fallback")
@@ -429,7 +449,7 @@ func (s *Server) PushClearCompositionToActiveClient() {
 	// Find the push pipe handle for the active process
 	s.pushMu.RLock()
 	handle, exists := s.pushClientsByPID[activeProcessID]
-	var writer *pipeWriter
+	var writer *pushClient
 	if exists {
 		writer = s.pushClients[handle]
 	}
@@ -455,7 +475,7 @@ func (s *Server) PushClearCompositionToActiveClient() {
 		removed := s.cleanupPushHandle(handle)
 		s.pushMu.Unlock()
 		if removed {
-			windows.CloseHandle(handle)
+			writer.shutdown()
 		}
 		return
 	}
@@ -479,7 +499,7 @@ func (s *Server) PushUpdateCompositionToActiveClient(text string, caretPos int) 
 	// Find the push pipe handle for the active process
 	s.pushMu.RLock()
 	handle, exists := s.pushClientsByPID[activeProcessID]
-	var writer *pipeWriter
+	var writer *pushClient
 	if exists {
 		writer = s.pushClients[handle]
 	}
@@ -504,7 +524,7 @@ func (s *Server) PushUpdateCompositionToActiveClient(text string, caretPos int) 
 		removed := s.cleanupPushHandle(handle)
 		s.pushMu.Unlock()
 		if removed {
-			windows.CloseHandle(handle)
+			writer.shutdown()
 		}
 		return
 	}
@@ -512,42 +532,21 @@ func (s *Server) PushUpdateCompositionToActiveClient(text string, caretPos int) 
 	s.logger.Debug("Update composition push completed to active client", "processID", activeProcessID)
 }
 
-func (s *Server) pushSyncConfigToAllClients(key string, value []byte, logName string) {
-	encoded := s.codec.EncodeSyncConfig(key, value)
-	s.pushMu.RLock()
-	type clientInfo struct {
-		handle windows.Handle
-		writer *pipeWriter
-	}
-	clients := make([]clientInfo, 0, len(s.pushClients))
-	for h, w := range s.pushClients {
-		clients = append(clients, clientInfo{handle: h, writer: w})
-	}
-	s.pushMu.RUnlock()
-
-	if len(clients) == 0 {
-		s.logger.Debug("No push pipe clients to send config to", "config", logName)
-		return
-	}
-
-	// 同 PushStateToAllClients：丢到 per-client outbound 队列，满则 drop。
-	// 配置同步幂等——下次 push 自带最新 value。
-	for _, client := range clients {
-		if !client.writer.enqueueBroadcast(encoded) {
-			s.logger.Warn("Push config dropped: outbound queue full",
-				"config", logName)
-		}
-	}
+// pushSyncConfigToActiveClient pushes a SyncConfig message to the active TSF client only.
+// C++ 侧每个 CKeyEventSink 本地缓存配置，背景实例缓存值用不到；焦点切到背景
+// 实例时 HandleFocusGained 会再补推一次（参见 [[pushToActiveClient]] 注释）。
+func (s *Server) pushSyncConfigToActiveClient(key string, value []byte, logName string) {
+	s.pushToActiveClient(s.codec.EncodeSyncConfig(key, value), logName)
 }
 
-// PushEnglishPairConfigToAllClients pushes English auto-pair config to all TSF clients
-func (s *Server) PushEnglishPairConfigToAllClients(enabled bool, pairs []string) {
+// PushEnglishPairConfigToActiveClient pushes English auto-pair config to the active TSF client.
+func (s *Server) PushEnglishPairConfigToActiveClient(enabled bool, pairs []string) {
 	value := ipc.EncodeEnglishPairsValue(enabled, pairs)
-	s.pushSyncConfigToAllClients(ipc.ConfigKeyEnglishPairs, value, "English pair config")
+	s.pushSyncConfigToActiveClient(ipc.ConfigKeyEnglishPairs, value, "English pair config")
 }
 
-// PushStatsConfigToAllClients pushes input stats config to all TSF clients.
-func (s *Server) PushStatsConfigToAllClients(enabled bool, trackEnglish bool) {
+// PushStatsConfigToActiveClient pushes input stats config to the active TSF client.
+func (s *Server) PushStatsConfigToActiveClient(enabled bool, trackEnglish bool) {
 	value := []byte{0, 0}
 	if enabled {
 		value[0] = 1
@@ -555,7 +554,7 @@ func (s *Server) PushStatsConfigToAllClients(enabled bool, trackEnglish bool) {
 	if trackEnglish {
 		value[1] = 1
 	}
-	s.pushSyncConfigToAllClients(ipc.ConfigKeyStats, value, "stats config")
+	s.pushSyncConfigToActiveClient(ipc.ConfigKeyStats, value, "stats config")
 }
 
 // GetActiveClientCount returns the number of active TSF clients
@@ -573,14 +572,13 @@ func (s *Server) RestartService() {
 	// Close all push pipe clients and clear all mappings
 	s.pushMu.Lock()
 	pushClientCount := len(s.pushClients)
-	for h, w := range s.pushClients {
+	for _, w := range s.pushClients {
 		if w != nil {
-			w.shutdown() // 关 outbound 让 writer goroutine 退出
+			w.shutdown() // shutdown 内含 Disconnect + Close + 关 outbound
 		}
-		windows.CloseHandle(h)
 	}
 	// 重置所有 map（比逐条 delete 更高效）
-	s.pushClients = make(map[windows.Handle]*pipeWriter)
+	s.pushClients = make(map[windows.Handle]*pushClient)
 	s.pushHandleToPID = make(map[windows.Handle]uint32)
 	s.pushClientsByPID = make(map[uint32]windows.Handle)
 	s.tokenToPushHandle = make(map[uint64]windows.Handle)

@@ -690,8 +690,8 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 	// 同步写入 push pipe 可能因对端缓冲区满而阻塞超过 C++ 端 200ms 读超时，
 	// 导致 C++ 断连并丢失此次状态同步。
 	if shouldPush {
-		go bridgeServer.PushEnglishPairConfigToAllClients(autoPairEnabled, autoPairs)
-		go bridgeServer.PushStatsConfigToAllClients(statsEnabled, statsTrackEng)
+		go bridgeServer.PushEnglishPairConfigToActiveClient(autoPairEnabled, autoPairs)
+		go bridgeServer.PushStatsConfigToActiveClient(statsEnabled, statsTrackEng)
 	}
 
 	return status
@@ -743,7 +743,7 @@ func (c *Coordinator) HandleIMEActivated(processID uint32) *bridge.StatusUpdateD
 	c.capsLockOn = ui.GetCapsLockState()
 
 	// 在锁内读取返回值及 push 所需字段，然后立即解锁。
-	// push 调用（PushEnglishPairConfigToAllClients / PushStatsConfigToAllClients）
+	// push 调用（PushEnglishPairConfigToActiveClient / PushStatsConfigToActiveClient）
 	// 内部做阻塞式 named pipe 写入，若对端缓冲区满则会长时间阻塞；
 	// 若在持锁期间执行，会导致 c.mu 被长时间占用，使所有慢路径命令超时。
 	status := &bridge.StatusUpdateData{
@@ -777,8 +777,8 @@ func (c *Coordinator) HandleIMEActivated(processID uint32) *bridge.StatusUpdateD
 	// 同步写入 push pipe 可能因对端缓冲区满而阻塞超过 C++ 端 200ms 读超时，
 	// 导致 C++ 断连并丢失此次状态同步。
 	if shouldPush {
-		go bridgeServer.PushEnglishPairConfigToAllClients(autoPairEnabled, autoPairs)
-		go bridgeServer.PushStatsConfigToAllClients(statsEnabled, statsTrackEng)
+		go bridgeServer.PushEnglishPairConfigToActiveClient(autoPairEnabled, autoPairs)
+		go bridgeServer.PushStatsConfigToActiveClient(statsEnabled, statsTrackEng)
 	}
 
 	return status

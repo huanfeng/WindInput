@@ -76,6 +76,11 @@ type KeyEventResult struct {
 	NewComposition    string // New composition text after commit (inline preedit: actual text; non-inline: empty)
 	HasNewComposition bool   // Whether to restart composition after commit (set for both inline and non-inline when there is remaining input)
 	CursorOffset      int    // For InsertTextWithCursor: 光标从文本末尾向左偏移的字符数
+
+	// Status: 当 Type 为 ResponseTypeStatusUpdate 时携带完整状态（含 IconLabel）。
+	// 用于模式切换响应——bridge 响应自包含 iconLabel，C++ 端的 CLangBar 立刻通过
+	// UpdateFullStatus 刷新任务栏图标，不再依赖 CMD_STATE_PUSH 的稳定送达。
+	Status *StatusUpdateData
 }
 
 // CommitRequestData contains commit request information (barrier mechanism)

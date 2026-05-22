@@ -592,7 +592,7 @@ func main() {
 
 	// Push current state to any TSF clients that connected during initialization.
 	// Without this, clients would show "…" until the next focus change.
-	bridgeServer.PushStateToAllClients(coord.BuildCurrentStatus())
+	bridgeServer.PushStateToActiveClient(coord.BuildCurrentStatus())
 
 	// Listen for exit requests in a separate goroutine
 	go func() {

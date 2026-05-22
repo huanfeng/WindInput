@@ -192,9 +192,14 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 				}
 			}
 
+			// 返回 StatusUpdate 而非 ModeChanged：bridge 响应自带 iconLabel，
+			// C++ 端 KeyEventSink::ProcessResponse 走 StatusUpdate 分支调
+			// UpdateFullStatus，直接刷新 _inputTypeLabel + 触发 OnUpdate，
+			// 任务栏图标立即更新。不再依赖 CMD_STATE_PUSH 的稳定送达。
 			return &bridge.KeyEventResult{
-				Type:        bridge.ResponseTypeModeChanged,
+				Type:        bridge.ResponseTypeStatusUpdate,
 				ChineseMode: c.chineseMode,
+				Status:      c.buildStatusUpdate(),
 			}
 		} else if toggleKey == "capslock" {
 			// CapsLock is not configured as mode toggle key, but we still need to show indicator

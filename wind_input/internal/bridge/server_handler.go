@@ -200,6 +200,17 @@ func (s *Server) handleKeyEvent(payload []byte, clientID int) []byte {
 		s.logger.Debug("Returning ModeChanged response", "clientID", clientID, "chineseMode", result.ChineseMode)
 		return s.codec.EncodeModeChanged(result.ChineseMode)
 
+	case ResponseTypeStatusUpdate:
+		// 模式切换走这条：自包含 iconLabel，C++ 端 StatusUpdate handler 立刻
+		// UpdateFullStatus → 刷新任务栏图标，不依赖 push pipe。
+		if result.Status == nil {
+			s.logger.Error("StatusUpdate response missing Status payload", "clientID", clientID)
+			return s.codec.EncodeAck()
+		}
+		s.logger.Debug("Returning StatusUpdate response", "clientID", clientID,
+			"chineseMode", result.Status.ChineseMode, "iconLabel", result.Status.IconLabel)
+		return s.encodeStatusUpdate(result.Status)
+
 	case ResponseTypeConsumed:
 		s.logger.Debug("Key consumed by hotkey", "clientID", clientID)
 		return s.codec.EncodeConsumed()

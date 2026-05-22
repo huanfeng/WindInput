@@ -185,7 +185,7 @@ func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 
 	// 推送英文配对配置到 C++ 侧
 	if c.bridgeServer != nil {
-		go c.bridgeServer.PushEnglishPairConfigToAllClients(
+		go c.bridgeServer.PushEnglishPairConfigToActiveClient(
 			inputConfig.AutoPair.English,
 			inputConfig.AutoPair.EnglishPairs,
 		)
@@ -211,7 +211,7 @@ func (c *Coordinator) UpdateStatsConfig(statsConfig *config.StatsConfig) {
 	c.mu.Unlock()
 
 	if c.bridgeServer != nil {
-		go c.bridgeServer.PushStatsConfigToAllClients(enabled, trackEnglish)
+		go c.bridgeServer.PushStatsConfigToActiveClient(enabled, trackEnglish)
 	}
 
 	c.logger.Debug("Stats config updated", "enabled", enabled, "trackEnglish", trackEnglish)

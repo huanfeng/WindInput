@@ -18,7 +18,7 @@ type mockBridgeServer struct {
 	clearCalled    bool
 }
 
-func (m *mockBridgeServer) PushStateToAllClients(_ *bridge.StatusUpdateData) {}
+func (m *mockBridgeServer) PushStateToActiveClient(_ *bridge.StatusUpdateData) {}
 func (m *mockBridgeServer) PushCommitTextToActiveClient(text string) {
 	m.commitCalled = true
 	m.commitText = text
@@ -29,9 +29,9 @@ func (m *mockBridgeServer) PushUpdateCompositionToActiveClient(text string, care
 	m.updateText = text
 	m.updateCaretPos = caretPos
 }
-func (m *mockBridgeServer) PushEnglishPairConfigToAllClients(_ bool, _ []string) {}
-func (m *mockBridgeServer) PushStatsConfigToAllClients(_ bool, _ bool)           {}
-func (m *mockBridgeServer) RestartService()                                      {}
+func (m *mockBridgeServer) PushEnglishPairConfigToActiveClient(_ bool, _ []string) {}
+func (m *mockBridgeServer) PushStatsConfigToActiveClient(_ bool, _ bool)           {}
+func (m *mockBridgeServer) RestartService()                                        {}
 func (m *mockBridgeServer) GetActiveHostRender() (func(*image.RGBA, int, int) error, func()) {
 	return nil, nil
 }

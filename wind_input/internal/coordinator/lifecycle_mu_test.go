@@ -3,7 +3,7 @@
 // 回归场景：
 //
 //	HandleIMEActivated（快路径，不含 200ms 超时保护）曾在 c.mu 持有期间
-//	调用 PushEnglishPairConfigToAllClients，而该调用内部做阻塞式 named pipe
+//	调用 PushEnglishPairConfigToActiveClient，而该调用内部做阻塞式 named pipe
 //	写入。若对端缓冲区满，c.mu 会被长时间占用，导致所有依赖 c.mu 的慢路径
 //	命令（ShowContextMenu / ToggleMode / IMEDeactivated）全部超时。
 //
@@ -20,7 +20,7 @@ import (
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
-// slowPushBridgeServer 包装 mockBridgeServer，覆盖 PushEnglishPairConfigToAllClients
+// slowPushBridgeServer 包装 mockBridgeServer，覆盖 PushEnglishPairConfigToActiveClient
 // 使其阻塞 pushDelay，并在开始阻塞前关闭 pushStarted channel 通知测试。
 type slowPushBridgeServer struct {
 	mockBridgeServer
@@ -29,7 +29,7 @@ type slowPushBridgeServer struct {
 	once        sync.Once
 }
 
-func (s *slowPushBridgeServer) PushEnglishPairConfigToAllClients(_ bool, _ []string) {
+func (s *slowPushBridgeServer) PushEnglishPairConfigToActiveClient(_ bool, _ []string) {
 	s.once.Do(func() { close(s.pushStarted) }) // 通知测试：push 已开始
 	time.Sleep(s.pushDelay)
 }
@@ -66,7 +66,7 @@ func TestHandleIMEActivated_MuReleasedBeforePush(t *testing.T) {
 	select {
 	case <-pushStarted:
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("PushEnglishPairConfigToAllClients 未在超时内被调用，检查 bridgeServer/config 初始化")
+		t.Fatal("PushEnglishPairConfigToActiveClient 未在超时内被调用，检查 bridgeServer/config 初始化")
 	}
 
 	// push 仍在阻塞中，验证 c.mu 可以被立即获取
@@ -120,7 +120,7 @@ func TestHandleFocusGained_MuReleasedBeforePush(t *testing.T) {
 	select {
 	case <-pushStarted:
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("PushEnglishPairConfigToAllClients 未在超时内被调用，检查 bridgeServer/config 初始化")
+		t.Fatal("PushEnglishPairConfigToActiveClient 未在超时内被调用，检查 bridgeServer/config 初始化")
 	}
 
 	// push 仍在阻塞中，验证 c.mu 可以被立即获取

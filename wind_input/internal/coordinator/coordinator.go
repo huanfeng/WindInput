@@ -316,14 +316,16 @@ type EventNotifier interface {
 	NotifyUserDictAdd(schemaID string) // 用户词库新增条目
 }
 
-// BridgeServer interface for broadcasting state to TSF clients
+// BridgeServer interface for pushing state/config/composition events to TSF clients.
+// 所有 push 仅触达 active client——背景 TSF 实例处理不到按键，状态/配置缓存
+// 用不到；下次焦点切换到它们时由 HandleFocusGained 响应或随后的 push 补齐。
 type BridgeServer interface {
-	PushStateToAllClients(status *bridge.StatusUpdateData)
-	PushCommitTextToActiveClient(text string)                      // Only send to active client for security
-	PushClearCompositionToActiveClient()                           // Clear inline composition on active client
-	PushUpdateCompositionToActiveClient(text string, caretPos int) // Update inline composition on active client (mouse partial confirm)
-	PushEnglishPairConfigToAllClients(enabled bool, pairs []string)
-	PushStatsConfigToAllClients(enabled bool, trackEnglish bool)
+	PushStateToActiveClient(status *bridge.StatusUpdateData)
+	PushCommitTextToActiveClient(text string)                      // Mouse-click candidate commit text
+	PushClearCompositionToActiveClient()                           // Clear inline composition
+	PushUpdateCompositionToActiveClient(text string, caretPos int) // Mouse partial-confirm composition update
+	PushEnglishPairConfigToActiveClient(enabled bool, pairs []string)
+	PushStatsConfigToActiveClient(enabled bool, trackEnglish bool)
 	RestartService()
 	// GetActiveHostRender returns write/hide functions if the active process has host rendering.
 	// Returns nil functions if host rendering is not active for the current process.
@@ -458,7 +460,7 @@ func (c *Coordinator) broadcastState() {
 	if c.bridgeServer != nil {
 		status := c.buildStatusUpdate()
 		server := c.bridgeServer
-		go server.PushStateToAllClients(status)
+		go server.PushStateToActiveClient(status)
 	}
 }
 

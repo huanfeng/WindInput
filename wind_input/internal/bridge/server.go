@@ -7,6 +7,7 @@ import (
 	"image"
 	"io"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 	"unsafe"
@@ -85,7 +86,7 @@ type Server struct {
 	// Push pipe clients (for proactive state push)
 	pushMu           sync.RWMutex
 	pushClientCount  int
-	pushClients      map[windows.Handle]*pipeWriter
+	pushClients      map[windows.Handle]*pushClient
 	pushClientsByPID map[uint32]windows.Handle // PID → 最新 push handle（同 PID 多实例时的兜底）
 	pushHandleToPID  map[windows.Handle]uint32 // 反向映射：handle → PID
 
@@ -113,7 +114,7 @@ func NewServer(handler MessageHandler, logger *slog.Logger) *Server {
 		logger:            logger,
 		codec:             ipc.NewBinaryCodec(),
 		activeHandles:     make(map[windows.Handle]*pipeWriter),
-		pushClients:       make(map[windows.Handle]*pipeWriter),
+		pushClients:       make(map[windows.Handle]*pushClient),
 		pushClientsByPID:  make(map[uint32]windows.Handle),
 		pushHandleToPID:   make(map[windows.Handle]uint32),
 		tokenToPushHandle: make(map[uint64]windows.Handle),
@@ -408,41 +409,12 @@ func (r *pipeReader) release() {
 	r.msgBuffer = nil
 }
 
-// pipeWriter wraps windows.Handle for io.Writer.
-// mu serializes concurrent WriteFile calls on the same handle:
-// the per-client push writer goroutine (drains outbound) and targeted
-// sync sends (PushCommitText 等) can both write to the same handle.
-// Windows 命名管道写入未保证线程安全，必须 Mutex 互斥。
-//
-// outbound 仅 push pipe 客户端非 nil。它把"广播"路径变成
-// per-client 单 writer goroutine：
-//   - 旧设计每次广播都 go func()，slow client 会导致 goroutine 堆到数百个
-//     （历史 pprof 见 725 个 stuck），且无法 drop。
-//   - 新设计每个 push client 仅一个 writer goroutine。enqueueBroadcast 满则丢弃
-//     （状态/配置同步语义幂等，下次推就是最新值，丢一条无害）。
-//
-// TODO(隐患1): WriteFile 当前仍是同步阻塞。slow client（活着但读得慢）会让
-// 该 client 的 writer goroutine 卡死在内核里。后续需改成 overlapped I/O +
-// GetOverlappedResultEx 超时 + CancelIoEx，前提是 push pipe 改用
-// FILE_FLAG_OVERLAPPED。
+// pipeWriter is the synchronous bridge-pipe writer (request-response RPC).
+// 仅用于 bridge pipe；push pipe 已迁移到 net.Conn 基于 winio 的 pushClient。
+// mu 串行化并发 WriteFile（Windows 命名管道未保证 thread-safe）。
 type pipeWriter struct {
-	handle    windows.Handle
-	mu        sync.Mutex
-	outbound  chan []byte
-	closeOnce sync.Once
-}
-
-// pushOutboundBufferSize: per-client 广播队列容量。
-// 状态推送/配置同步在快速 toggle 场景下可能短时连发；16 给一个不易满的窗口，
-// 真挂 client 时也能快速识别为"持续 drop"并丢弃，不会无限制堆积。
-const pushOutboundBufferSize = 16
-
-// newPushPipeWriter creates a pipeWriter for push pipe clients with an outbound queue.
-func newPushPipeWriter(h windows.Handle) *pipeWriter {
-	return &pipeWriter{
-		handle:   h,
-		outbound: make(chan []byte, pushOutboundBufferSize),
-	}
+	handle windows.Handle
+	mu     sync.Mutex
 }
 
 func (w *pipeWriter) Write(p []byte) (int, error) {
@@ -456,26 +428,89 @@ func (w *pipeWriter) Write(p []byte) (int, error) {
 	return int(bytesWritten), nil
 }
 
-// enqueueBroadcast 非阻塞地把一条广播消息丢到该 client 的 outbound 队列。
-// 返回 false 表示该 client 队列已满（client 卡顿或已死），调用方应当 drop+log。
-// 调用方不需要持有任何锁。
-func (w *pipeWriter) enqueueBroadcast(msg []byte) bool {
-	if w == nil || w.outbound == nil {
+// pushOutboundBufferSize: per-client push 广播队列容量。
+// 状态/配置推送 idempotent，队列满则 drop 最新（下次 push 自带最新 value）。
+const pushOutboundBufferSize = 16
+
+// pushClient wraps a winio-backed net.Conn for push pipe (Go→C++ broadcasts).
+//
+// 关键设计：
+//   - 底层 conn 是 winio 的 overlapped I/O 包装，Read/Write 不互相串行化
+//     （这是从旧 windows.Handle sync I/O 迁移过来的根本动力——旧设计中
+//     同 handle 上 sync Read park 会阻塞 sync Write，导致 push 永远卡住）。
+//   - outbound 提供 per-client 非阻塞入队；writer goroutine 单独消费。
+//   - mu 串行化"writer goroutine 的 drain"与"PushCommitText 等同步直写"，
+//     保证 message 顺序在同 client 上一致。
+//   - handle 缓存 conn.Fd()——用作所有 push 路径上的 stable identifier
+//     （PID/token 反向映射的 key），避免每次都做 type assertion。
+//   - closeOnce 保护 conn.Close() / outbound channel 关闭幂等。
+type pushClient struct {
+	conn      net.Conn
+	handle    windows.Handle
+	mu        sync.Mutex
+	outbound  chan []byte
+	closeOnce sync.Once
+}
+
+// fdGetter 是 winio 内部 win32File 暴露的 Fd 接口（未导出但通过 interface
+// 断言可访问）。conn 走的是 net.Conn 标准接口，但 underlying 类型是
+// winio 的 win32MessageBytePipe → win32Pipe → *win32File（具备 Fd()）。
+type fdGetter interface {
+	Fd() uintptr
+}
+
+// newPushClient 从一个新 Accept 的 winio.PipeConn 构造 pushClient。
+// 提取底层 handle 用作 key；不持有也不修改 handle 生命周期（conn.Close
+// 负责释放）。
+func newPushClient(conn net.Conn) (*pushClient, error) {
+	g, ok := conn.(fdGetter)
+	if !ok {
+		return nil, fmt.Errorf("push pipe conn does not expose Fd()")
+	}
+	return &pushClient{
+		conn:     conn,
+		handle:   windows.Handle(g.Fd()),
+		outbound: make(chan []byte, pushOutboundBufferSize),
+	}, nil
+}
+
+// Write 通过 mu 串行化写入；底层 net.Conn.Write 走 winio overlapped。
+func (c *pushClient) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.Write(p)
+}
+
+// enqueueBroadcast 非阻塞地把消息塞进 outbound；满则返回 false。
+func (c *pushClient) enqueueBroadcast(msg []byte) bool {
+	if c == nil || c.outbound == nil {
 		return false
 	}
 	select {
-	case w.outbound <- msg:
+	case c.outbound <- msg:
 		return true
 	default:
 		return false
 	}
 }
 
-// shutdown 关闭 outbound 队列，writer goroutine 在 drain 完后 range 退出。
-// 多次调用安全（closeOnce）。bridge pipe 写入器（outbound 为 nil）调用为 no-op。
-func (w *pipeWriter) shutdown() {
-	if w == nil || w.outbound == nil {
+// shutdown 关闭 outbound 让 writer goroutine 在 drain 后退出；
+// 同时主动 Disconnect + Close conn 让 C++ 端立即感知 broken pipe。
+// 多次调用安全（closeOnce）。
+func (c *pushClient) shutdown() {
+	if c == nil {
 		return
 	}
-	w.closeOnce.Do(func() { close(w.outbound) })
+	c.closeOnce.Do(func() {
+		if c.outbound != nil {
+			close(c.outbound)
+		}
+		// PipeConn.Disconnect() 调用 DisconnectNamedPipe 强制 client 端
+		// 收到 broken pipe；Close() 再释放 server handle。
+		// 单独 Close 在 client 持有 handle 时不会通知 client（内核引用计数）。
+		if pc, ok := c.conn.(interface{ Disconnect() error }); ok {
+			_ = pc.Disconnect()
+		}
+		_ = c.conn.Close()
+	})
 }
