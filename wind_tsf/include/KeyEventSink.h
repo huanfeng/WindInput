@@ -135,15 +135,6 @@ private:
     // Long presses beyond this threshold will NOT trigger mode toggle
     static constexpr DWORD TOGGLE_TAP_THRESHOLD_MS = 500;
 
-    // Guard against accidental re-toggle when modifier is used as combination key
-    // (e.g., Shift tap to toggle, then immediately Shift+A for uppercase)
-    // After a toggle, subsequent toggles are ignored until a non-modifier key is pressed
-    // or TOGGLE_GUARD_MS has elapsed.
-    static constexpr DWORD TOGGLE_GUARD_MS = 300;
-
-    DWORD _lastToggleExecuteTime;   // GetTickCount() when last toggle was executed
-    BOOL  _anyKeyAfterToggle;       // TRUE if any non-modifier key was pressed after last toggle
-
     // ========================================================================
     // Modifier key state machine (replaces GetAsyncKeyState for consistency)
     // ========================================================================
