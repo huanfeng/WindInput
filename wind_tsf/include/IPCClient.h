@@ -11,9 +11,13 @@
 namespace IPCConfig
 {
     // Timeout settings (milliseconds)
-    constexpr DWORD CONNECT_TIMEOUT_MS = 200;      // Connection timeout
-    constexpr DWORD WRITE_TIMEOUT_MS = 50;         // Write operation timeout
-    constexpr DWORD READ_TIMEOUT_MS = 200;         // Read operation timeout
+    // 这些超时是"防止把宿主进程卡死"的保险丝，不是正常延迟预算。系统繁忙
+    // （CPU 被抢占）时正常按键也可能偶发数百毫秒，超时过短会把"偶发慢"误判为
+    // "服务挂死"而断连。取较宽松的值：真卡死时用户感知是顿一下，可接受；
+    // 正常的慢查询不会误断 IPC。
+    constexpr DWORD CONNECT_TIMEOUT_MS = 500;      // Connection timeout
+    constexpr DWORD WRITE_TIMEOUT_MS = 300;        // Write operation timeout
+    constexpr DWORD READ_TIMEOUT_MS = 1500;        // Read operation timeout
 
     // Circuit breaker settings
     constexpr int MAX_CONSECUTIVE_FAILURES = 3;    // Failures before circuit opens
