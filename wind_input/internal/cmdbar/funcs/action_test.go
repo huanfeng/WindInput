@@ -35,6 +35,9 @@ func (m *mockKeys) Sequence(cs ...string) error {
 	m.seqs = append(m.seqs, cp)
 	return nil
 }
+func (m *mockKeys) Hold(c string) error     { return nil }
+func (m *mockKeys) Release(c string) error  { return nil }
+func (m *mockKeys) TypeText(s string) error { return nil }
 
 type mockOpen struct {
 	got []string

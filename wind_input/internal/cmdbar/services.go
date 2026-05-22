@@ -15,11 +15,14 @@ type ClipboardService interface {
 	GetText() (string, error)
 }
 
-// KeyInjector backs `key.tap` / `key.seq`. Production wiring will adapt
-// internal/keyinject in P4.
+// KeyInjector backs `key.tap` / `key.seq` / `key.hold` / `key.release` /
+// `key.type`. Production wiring will adapt internal/keyinject in P4.
 type KeyInjector interface {
 	Tap(combo string) error
 	Sequence(combos ...string) error
+	Hold(combo string) error
+	Release(combo string) error
+	TypeText(text string) error
 }
 
 // URLOpener backs `open` (and indirectly `search`). Production wiring

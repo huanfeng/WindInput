@@ -32,6 +32,11 @@ func TestParse_HappyPaths(t *testing.T) {
 		{"  Ctrl + Shift + End  ", Combo{Key: "end", Modifiers: []string{"ctrl", "shift"}}},
 		{"1", Combo{Key: "1"}},
 		{"A", Combo{Key: "a"}},
+		// vk: 数值码
+		{"vk:0x5D", Combo{Key: "vk:5d"}},
+		{"vk:93", Combo{Key: "vk:5d"}},
+		{"vk:0xFF", Combo{Key: "vk:ff"}},
+		{"Ctrl+vk:0x5D", Combo{Key: "vk:5d", Modifiers: []string{"ctrl"}}},
 	}
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {
@@ -57,6 +62,10 @@ func TestParse_Errors(t *testing.T) {
 		"Bogus+A",
 		"f0",
 		"f25",
+		"vk:",
+		"vk:0x00",
+		"vk:0x100",
+		"vk:xyz",
 	}
 	for _, c := range cases {
 		t.Run(c, func(t *testing.T) {

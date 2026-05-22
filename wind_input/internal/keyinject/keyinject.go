@@ -11,6 +11,7 @@ package keyinject
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -150,9 +151,26 @@ var keyAliases = map[string]string{
 //   - digits 0..9
 //   - f1..f24
 //   - aliases from keyAliases above
+//   - vk:<hex|dec> — raw Windows virtual-key code, e.g. "vk:0x5D" or "vk:93"
 func normalizeKey(s string) (string, bool) {
 	if s == "" {
 		return "", false
+	}
+	// vk:<number> — raw Virtual Key code passthrough.
+	// "vk:0x5D" 按 16 进制解析; 其它形式按 10 进制解析 (如 "vk:93")。
+	if strings.HasPrefix(s, "vk:") {
+		rest := s[3:]
+		var num uint64
+		var err error
+		if strings.HasPrefix(rest, "0x") || strings.HasPrefix(rest, "0X") {
+			num, err = strconv.ParseUint(rest[2:], 16, 16)
+		} else {
+			num, err = strconv.ParseUint(rest, 10, 16)
+		}
+		if err != nil || num == 0 || num > 0xFF {
+			return "", false
+		}
+		return fmt.Sprintf("vk:%02x", num), true
 	}
 	// f1..f24
 	if (len(s) == 2 || len(s) == 3) && (s[0] == 'f' || s[0] == 'F') {

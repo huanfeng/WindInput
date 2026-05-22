@@ -54,7 +54,7 @@ func actionFuncs() []cmdbar.FuncSpec {
 	keyTap := cmdbar.FuncSpec{
 		Name: "key.tap", Category: cmdbar.CategoryKey,
 		MinArgs: 1, MaxArgs: 1, Pure: false,
-		Description: "模拟单次按键组合, 形如 Ctrl+C / Shift+End / Enter",
+		Description: "模拟单次按键组合, 形如 Ctrl+C / Shift+End / Enter / vk:0x5D",
 		ExampleSrc:  `key.tap("Ctrl+C")`,
 		Eval:        fnKeyTap,
 	}
@@ -64,6 +64,27 @@ func actionFuncs() []cmdbar.FuncSpec {
 		Description: "顺序模拟多个按键组合",
 		ExampleSrc:  `key.seq("Home", "Shift+End", "Delete")`,
 		Eval:        fnKeySeq,
+	}
+	keyHold := cmdbar.FuncSpec{
+		Name: "key.hold", Category: cmdbar.CategoryKey,
+		MinArgs: 1, MaxArgs: 1, Pure: false,
+		Description: "按下并保持按键组合（不抬起）, 需与 key.release 成对使用",
+		ExampleSrc:  `key.hold("Shift")`,
+		Eval:        fnKeyHold,
+	}
+	keyRelease := cmdbar.FuncSpec{
+		Name: "key.release", Category: cmdbar.CategoryKey,
+		MinArgs: 1, MaxArgs: 1, Pure: false,
+		Description: "抬起之前由 key.hold 按下的按键组合",
+		ExampleSrc:  `key.release("Shift")`,
+		Eval:        fnKeyRelease,
+	}
+	keyType := cmdbar.FuncSpec{
+		Name: "key.type", Category: cmdbar.CategoryKey,
+		MinArgs: 1, MaxArgs: 1, Pure: false,
+		Description: "以 Unicode 扫描码方式直接输入文本, 不依赖键盘布局",
+		ExampleSrc:  `key.type("hello")`,
+		Eval:        fnKeyType,
 	}
 	clipCopy := cmdbar.FuncSpec{
 		Name: "clip.copy", Category: cmdbar.CategoryClip,
@@ -87,7 +108,9 @@ func actionFuncs() []cmdbar.FuncSpec {
 		Eval:        fnSearch,
 	}
 	return []cmdbar.FuncSpec{
-		openSpec, procRun, procShell, keyTap, keySeq, clipCopy, clipPaste, webSearch,
+		openSpec, procRun, procShell,
+		keyTap, keySeq, keyHold, keyRelease, keyType,
+		clipCopy, clipPaste, webSearch,
 	}
 }
 
@@ -186,6 +209,48 @@ func fnKeySeq(ctx cmdbar.EvalContext, args []string) (string, error) {
 	}
 	if err := s.Keys.Sequence(args...); err != nil {
 		return "", fmt.Errorf("key.seq: %w", err)
+	}
+	return "", nil
+}
+
+func fnKeyHold(ctx cmdbar.EvalContext, args []string) (string, error) {
+	s, err := svcs(ctx)
+	if err != nil {
+		return "", err
+	}
+	if s.Keys == nil {
+		return "", fmt.Errorf("key.hold: %w", cmdbar.ErrServiceUnavailable)
+	}
+	if err := s.Keys.Hold(args[0]); err != nil {
+		return "", fmt.Errorf("key.hold: %w", err)
+	}
+	return "", nil
+}
+
+func fnKeyRelease(ctx cmdbar.EvalContext, args []string) (string, error) {
+	s, err := svcs(ctx)
+	if err != nil {
+		return "", err
+	}
+	if s.Keys == nil {
+		return "", fmt.Errorf("key.release: %w", cmdbar.ErrServiceUnavailable)
+	}
+	if err := s.Keys.Release(args[0]); err != nil {
+		return "", fmt.Errorf("key.release: %w", err)
+	}
+	return "", nil
+}
+
+func fnKeyType(ctx cmdbar.EvalContext, args []string) (string, error) {
+	s, err := svcs(ctx)
+	if err != nil {
+		return "", err
+	}
+	if s.Keys == nil {
+		return "", fmt.Errorf("key.type: %w", cmdbar.ErrServiceUnavailable)
+	}
+	if err := s.Keys.TypeText(args[0]); err != nil {
+		return "", fmt.Errorf("key.type: %w", err)
 	}
 	return "", nil
 }

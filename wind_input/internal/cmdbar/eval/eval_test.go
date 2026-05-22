@@ -179,6 +179,9 @@ func (f *fakeKeys) Sequence(cs ...string) error {
 	f.seqs = append(f.seqs, append([]string(nil), cs...))
 	return nil
 }
+func (f *fakeKeys) Hold(c string) error     { return nil }
+func (f *fakeKeys) Release(c string) error  { return nil }
+func (f *fakeKeys) TypeText(s string) error { return nil }
 
 type fakeClip struct{ set string }
 

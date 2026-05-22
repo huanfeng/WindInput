@@ -70,6 +70,24 @@ func (keysSvc) Sequence(combos ...string) error {
 	return keyinject.Sequence(cs...)
 }
 
+func (keysSvc) Hold(combo string) error {
+	c, err := keyinject.Parse(combo)
+	if err != nil {
+		return err
+	}
+	return keyinject.Hold(c)
+}
+
+func (keysSvc) Release(combo string) error {
+	c, err := keyinject.Parse(combo)
+	if err != nil {
+		return err
+	}
+	return keyinject.Release(c)
+}
+
+func (keysSvc) TypeText(text string) error { return keyinject.TypeText(text) }
+
 type openSvc struct{}
 
 func (openSvc) Open(target string) error { return proc.Open(target) }

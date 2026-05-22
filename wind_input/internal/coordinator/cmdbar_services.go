@@ -44,6 +44,26 @@ func (cmdbarKeysService) Sequence(combos ...string) error {
 	return keyinject.Sequence(cs...)
 }
 
+func (cmdbarKeysService) Hold(combo string) error {
+	c, err := keyinject.Parse(combo)
+	if err != nil {
+		return err
+	}
+	return keyinject.Hold(c)
+}
+
+func (cmdbarKeysService) Release(combo string) error {
+	c, err := keyinject.Parse(combo)
+	if err != nil {
+		return err
+	}
+	return keyinject.Release(c)
+}
+
+func (cmdbarKeysService) TypeText(text string) error {
+	return keyinject.TypeText(text)
+}
+
 // cmdbarOpenService 实现 cmdbar.URLOpener。
 type cmdbarOpenService struct{}
 

@@ -4,6 +4,8 @@ package keyinject
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -20,7 +22,8 @@ var (
 const (
 	inputKeyboard = 1
 
-	keyeventfKeyUp = 0x0002
+	keyeventfKeyUp   = 0x0002
+	keyeventfUnicode = 0x0004
 )
 
 // keyboardInput mirrors the KEYBDINPUT layout. The outer INPUT union is
@@ -83,6 +86,14 @@ func init() {
 }
 
 func vkFor(key string) (uint16, bool) {
+	// vk:<hex|dec> — raw VK code passthrough, e.g. "vk:5d" or "vk:93"
+	if strings.HasPrefix(key, "vk:") {
+		n, err := strconv.ParseUint(key[3:], 16, 16)
+		if err == nil && n > 0 && n <= 0xFF {
+			return uint16(n), true
+		}
+		return 0, false
+	}
 	if v, ok := vkTable[key]; ok {
 		return v, true
 	}
@@ -174,4 +185,73 @@ func Sequence(combos ...Combo) error {
 		}
 	}
 	return nil
+}
+
+// Hold presses modifiers then the primary key down without releasing.
+// Caller must call Release with the same Combo to avoid stuck keys.
+func Hold(c Combo) error {
+	vk, ok := vkFor(c.Key)
+	if !ok {
+		return fmt.Errorf("keyinject: no VK for %q", c.Key)
+	}
+	var events []keyboardInput
+	for _, m := range c.Modifiers {
+		mv := modVK(m)
+		if mv == 0 {
+			return fmt.Errorf("keyinject: bad modifier %q", m)
+		}
+		events = append(events, keydown(mv))
+	}
+	events = append(events, keydown(vk))
+	return sendKeys(events)
+}
+
+// Release lifts the primary key then modifiers in reverse order.
+func Release(c Combo) error {
+	vk, ok := vkFor(c.Key)
+	if !ok {
+		return fmt.Errorf("keyinject: no VK for %q", c.Key)
+	}
+	var modVKs []uint16
+	for _, m := range c.Modifiers {
+		mv := modVK(m)
+		if mv == 0 {
+			return fmt.Errorf("keyinject: bad modifier %q", m)
+		}
+		modVKs = append(modVKs, mv)
+	}
+	events := []keyboardInput{keyup(vk)}
+	for i := len(modVKs) - 1; i >= 0; i-- {
+		events = append(events, keyup(modVKs[i]))
+	}
+	return sendKeys(events)
+}
+
+// TypeText sends each Unicode character in s as a synthetic key event,
+// bypassing the keyboard layout. Suitable for inserting arbitrary text
+// into applications that accept WM_KEYDOWN with KEYEVENTF_UNICODE.
+// Surrogate pairs (codepoints > U+FFFF) are sent as two UTF-16 units.
+func TypeText(s string) error {
+	var events []keyboardInput
+	for _, r := range s {
+		if r <= 0xFFFF {
+			scan := uint16(r)
+			events = append(events,
+				keyboardInput{Scan: scan, Flags: keyeventfUnicode},
+				keyboardInput{Scan: scan, Flags: keyeventfUnicode | keyeventfKeyUp},
+			)
+		} else {
+			// Encode as UTF-16 surrogate pair.
+			r -= 0x10000
+			high := uint16(0xD800 + (r>>10)&0x3FF)
+			low := uint16(0xDC00 + r&0x3FF)
+			events = append(events,
+				keyboardInput{Scan: high, Flags: keyeventfUnicode},
+				keyboardInput{Scan: low, Flags: keyeventfUnicode},
+				keyboardInput{Scan: low, Flags: keyeventfUnicode | keyeventfKeyUp},
+				keyboardInput{Scan: high, Flags: keyeventfUnicode | keyeventfKeyUp},
+			)
+		}
+	}
+	return sendKeys(events)
 }
