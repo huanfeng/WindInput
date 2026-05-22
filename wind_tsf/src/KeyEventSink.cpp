@@ -1110,7 +1110,7 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
 
             // For Shift/Ctrl toggle: Send KeyUp event to Go service
             // Go side will check config (e.g., only LShift vs both L/R Shift)
-            // and return ModeChanged response if the key is configured as toggle key
+            // and return StatusUpdate response if the key is configured as toggle key
             if (pendingKey != VK_CAPITAL)
             {
                 WIND_LOG_DEBUG_FMT(L"Sending toggle key KeyUp to Go: vk=0x%02X\n", pendingKey);
@@ -1140,7 +1140,7 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
                 _pTextService->SendCaretPositionUpdate();
 
                 // Send KeyUp event to Go service (SYNC mode, wait for response)
-                // Go will check config and return ModeChanged if key is configured as toggle
+                // Go will check config and return StatusUpdate if key is configured as toggle
                 // All state changes go through Go service - no local fallback
                 if (_SendKeyToService(pendingKey, mods, KEY_EVENT_UP))
                 {
@@ -1526,44 +1526,17 @@ BOOL CKeyEventSink::_HandleServiceResponse()
 
     ServiceResponse response;
 
-    // Loop to handle any StatusUpdate (state push) messages that may precede the actual response
-    // This is necessary because Go service may push state updates before the operation response
-    while (true)
+    // Bridge pipe 上的响应直接读一次即可。state push 已迁到独立 push pipe (由 async
+    // reader 处理), 不会再夹在 bridge response 之前; 而 StatusUpdate 现在是 lshift/
+    // OnClick/SystemModeSwitch 等同步操作的正式响应类型, 必须返回给外层 switch 走
+    // case StatusUpdate 分支 (UpdateFullStatus + 同步 TSF compartments)。
+    // 旧版本这里有一个吃掉 StatusUpdate 并 continue 的 loop, 是历史遗留: 早期
+    // state push 借 bridge pipe 道, 现在已废弃。继续保留会导致 lshift 响应被吃掉,
+    // 后续 ReceiveResponse 等不到下一条而 200ms timeout 断连 (Ctrl+Space 失效根因)。
+    if (!pIPCClient->ReceiveResponse(response))
     {
-        if (!pIPCClient->ReceiveResponse(response))
-        {
-            WIND_LOG_ERROR(L"Failed to receive response from service");
-            return TRUE; // Default to eating the key on error
-        }
-
-        // If this is a StatusUpdate (state push), process it and continue reading
-        if (response.type == ResponseType::StatusUpdate)
-        {
-            WIND_LOG_DEBUG(L"Received StatusUpdate (state push), processing and reading next response\n");
-
-            // Update input mode from state push (with icon label from Go service)
-            _pTextService->UpdateFullStatus(
-                response.IsChineseMode(),
-                response.IsFullWidth(),
-                response.IsChinesePunct(),
-                response.IsToolbarVisible(),
-                response.IsCapsLock(),
-                response.iconLabel.empty() ? nullptr : response.iconLabel.c_str()
-            );
-
-            // Update hotkey whitelist if present
-            CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
-            if (pHotkeyMgr != nullptr && response.HasHotkeys())
-            {
-                pHotkeyMgr->UpdateHotkeys(response.keyDownHotkeys, response.keyUpHotkeys);
-            }
-
-            // Continue reading to get the actual operation response
-            continue;
-        }
-
-        // Got a non-StatusUpdate response, break out of loop to process it
-        break;
+        WIND_LOG_ERROR(L"Failed to receive response from service");
+        return TRUE; // Default to eating the key on error
     }
 
     QueryPerformanceCounter(&midTime);
@@ -1659,18 +1632,10 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         _pTextService->EndComposition();
         return TRUE;
 
-    case ResponseType::ModeChanged:
-        WIND_LOG_DEBUG(L"Received ModeChanged from service\n");
-        _isComposing = FALSE;
-        _hasCandidates = FALSE;
-        _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
-        _pTextService->EndComposition();
-        _pTextService->SetInputMode(response.chineseMode);
-        return TRUE;
-
     case ResponseType::StatusUpdate:
-        // StatusUpdate is normally handled in the loop above, but if we get here
-        // it means we received a StatusUpdate as the final response (e.g., from FocusGained)
+        // StatusUpdate 是 lshift/SystemModeSwitch/FocusGained/IMEActivated 等同步操作
+        // 的标准响应类型 (自包含 mode + iconLabel + hotkeys), 走 UpdateFullStatus 一并
+        // 同步 _bChineseMode mirror + TSF compartments + LangBar UI。
         WIND_LOG_DEBUG(L"Received StatusUpdate as final response\n");
         _pTextService->UpdateFullStatus(
             response.IsChineseMode(),
