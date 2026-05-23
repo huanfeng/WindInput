@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"strings"
 
 	"github.com/huanfeng/wind_input/pkg/config"
 )
@@ -16,13 +17,32 @@ import (
 // 历史记录和右键菜单文案。
 const CmdbarCandidatePrefix = "⚡"
 
-// candidateDisplayText 返回候选实际渲染到候选框的文本。命令直通车候选 (Actions
-// 非空) 在 Text 前加 CmdbarCandidatePrefix 作为视觉标识。
+// CandidateNewlineGlyph 候选标签中换行符 (\r / \n) 的占位渲染符号。
+// 候选框是单行控件, 候选文本含真实换行会撑破布局或与相邻候选重叠,
+// 故渲染前统一替换为该符号。candidate.Text 本身不受影响 (上屏仍多行)。
+// 不同字体渲染效果可能有差异, 后续可调 (如改用 ⏎ / ¶)。
+const CandidateNewlineGlyph = "↵"
+
+// candidateNewlineReplacer 把候选文本里的换行符折叠为 CandidateNewlineGlyph。
+// \r\n 列在最前, NewReplacer 按参数顺序优先匹配, 保证 CRLF 折叠为单个符号。
+var candidateNewlineReplacer = strings.NewReplacer(
+	"\r\n", CandidateNewlineGlyph,
+	"\r", CandidateNewlineGlyph,
+	"\n", CandidateNewlineGlyph,
+)
+
+// candidateDisplayText 返回候选实际渲染到候选框的文本。
+//   - 换行符 (\r / \n) 替换为 CandidateNewlineGlyph, 保证单行渲染;
+//   - 命令直通车候选 (Actions 非空) 在文本前加 CmdbarCandidatePrefix。
+//
+// candidate 自身的 Text 字段保持原状, 仅渲染时变换, 避免污染历史记录与
+// 右键菜单文案。
 func candidateDisplayText(cand Candidate) string {
+	text := candidateNewlineReplacer.Replace(cand.Text)
 	if len(cand.Actions) > 0 {
-		return CmdbarCandidatePrefix + cand.Text
+		return CmdbarCandidatePrefix + text
 	}
-	return cand.Text
+	return text
 }
 
 // pagerFontSize returns the font size for the pager indicator (e.g. "1/3").
