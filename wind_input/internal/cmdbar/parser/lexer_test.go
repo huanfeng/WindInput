@@ -138,3 +138,50 @@ func TestLexer_Errors(t *testing.T) {
 		})
 	}
 }
+
+func TestScanString_UnknownEscapeLenient(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			// 未知转义 \p 不再报错, 原样保留为反斜杠 + p。
+			name: "unknown_escape_preserved",
+			src:  `"C:\path"`,
+			want: `C:\path`,
+		},
+		{
+			// \n 是已知转义, 宽松策略下路径里的 \n 会被解释为换行符 (已接受行为)。
+			name: "known_escape_newline_in_path",
+			src:  `"C:\new"`,
+			want: "C:\new",
+		},
+		{
+			// 已知转义 \t 正常解析为 TAB。
+			name: "known_escape_tab",
+			src:  `"a\tb"`,
+			want: "a\tb",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			toks, err := NewLexer(c.src).Tokenize()
+			if err != nil {
+				t.Fatalf("Tokenize returned error: %v", err)
+			}
+			if toks[0].Kind != tkString {
+				t.Fatalf("token 0 kind = %v, want tkString", toks[0].Kind)
+			}
+			var lit string
+			for _, p := range toks[0].Parts {
+				if !p.IsInterp {
+					lit += p.Lit
+				}
+			}
+			if lit != c.want {
+				t.Fatalf("decoded literal = %q, want %q", lit, c.want)
+			}
+		})
+	}
+}

@@ -234,7 +234,10 @@ func (l *Lexer) scanString(quote byte) (Token, error) {
 			case 'r':
 				lit = append(lit, '\r')
 			default:
-				return Token{}, fmt.Errorf("unknown escape \\%c at offset %d", next, l.pos)
+				// 未知转义: 原样保留反斜杠与后续字符 (宽松白名单策略,
+				// 与 cmdbar.DecodeEscapes 一致, 见
+				// docs/design/command-bar-escape-support.md §2)。
+				lit = append(lit, '\\', next)
 			}
 			l.pos += 2
 			continue

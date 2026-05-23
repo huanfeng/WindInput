@@ -213,3 +213,28 @@ func TestParse_CC1Precedence(t *testing.T) {
 		t.Errorf("want 1 action, got %d", len(cp.Actions))
 	}
 }
+
+func TestParseTemplatePhrase_UnknownEscapeLenient(t *testing.T) {
+	// 模板短语 (含 {expr}) 里的未知转义 \p 不再报错。
+	ph, err := Parse(`路径 C:\path 时间 {now}`)
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	tp, ok := ph.(ast.TemplatePhrase)
+	if !ok {
+		t.Fatalf("Parse returned %T, want ast.TemplatePhrase", ph)
+	}
+	sl, ok := tp.Expr.(ast.StringLit)
+	if !ok {
+		t.Fatalf("template expr is %T, want ast.StringLit", tp.Expr)
+	}
+	var lit string
+	for _, part := range sl.Parts {
+		if lp, ok := part.(ast.LiteralPart); ok {
+			lit += lp.Text
+		}
+	}
+	if lit != `路径 C:\path 时间 ` {
+		t.Fatalf("decoded literal parts = %q, want %q", lit, `路径 C:\path 时间 `)
+	}
+}

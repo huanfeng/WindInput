@@ -542,7 +542,10 @@ func parseTemplatePhrase(src string) (ast.Phrase, error) {
 			case 'r':
 				lit = append(lit, '\r')
 			default:
-				return nil, fmt.Errorf("unknown escape \\%c at offset %d", next, i)
+				// 未知转义: 原样保留反斜杠与后续字符 (宽松白名单策略,
+				// 与 cmdbar.DecodeEscapes 一致, 见
+				// docs/design/command-bar-escape-support.md §2)。
+				lit = append(lit, '\\', next)
 			}
 			i += 2
 			continue
