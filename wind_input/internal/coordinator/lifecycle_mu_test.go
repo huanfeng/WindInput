@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
@@ -48,11 +49,12 @@ func TestHandleIMEActivated_MuReleasedBeforePush(t *testing.T) {
 
 	cfg := &config.Config{}
 	c := &Coordinator{
-		logger:       slog.New(slog.DiscardHandler),
-		config:       cfg,
-		cfgMu:        new(sync.RWMutex),
-		bridgeServer: slow,
-		chineseMode:  true,
+		logger:         slog.New(slog.DiscardHandler),
+		config:         cfg,
+		cfgMu:          new(sync.RWMutex),
+		bridgeServer:   slow,
+		chineseMode:    true,
+		punctConverter: transform.NewPunctuationConverter(), // HandleIMEActivated 的 !RememberLastState 分支会 Reset 它
 	}
 
 	// 在后台调用 HandleIMEActivated；processID=0 跳过 Win32 进程名查询
@@ -102,11 +104,12 @@ func TestHandleFocusGained_MuReleasedBeforePush(t *testing.T) {
 
 	cfg := &config.Config{}
 	c := &Coordinator{
-		logger:       slog.New(slog.DiscardHandler),
-		config:       cfg,
-		cfgMu:        new(sync.RWMutex),
-		bridgeServer: slow,
-		chineseMode:  true,
+		logger:         slog.New(slog.DiscardHandler),
+		config:         cfg,
+		cfgMu:          new(sync.RWMutex),
+		bridgeServer:   slow,
+		chineseMode:    true,
+		punctConverter: transform.NewPunctuationConverter(), // HandleIMEActivated 的 !RememberLastState 分支会 Reset 它
 	}
 
 	// processID=0 跳过 appCompat.GetRule 和 Win32 进程名查询
