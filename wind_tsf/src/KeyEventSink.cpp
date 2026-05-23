@@ -88,6 +88,7 @@ CKeyEventSink::CKeyEventSink(CTextService* pTextService)
     , _dwKeyTraceSinkCookie(TF_INVALID_COOKIE)
     , _isComposing(FALSE)
     , _hasCandidates(FALSE)
+    , _needsCompositionResync(FALSE)
     , _lastPassthroughDigit(0)
     , _pendingKeyUpKey(0)
     , _pendingKeyUpModifiers(0)
@@ -266,7 +267,9 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     if (pHotkeyMgr != nullptr && pHotkeyMgr->IsKeyDownSessionHotkey(normalizedKeyHash))
     {
         BOOL chineseMode = _pTextService->IsChineseMode();
-        BOOL hasSession  = _pTextService->HasActiveComposition() || _hasCandidates;
+        // resync 期 (上次 IPC 失败后) 视作有会话, 让 ENTER/ESC/Backspace 等 session 热键
+        // 也走 Go 重握手, 由 Go 权威响应清旗 + 重建状态。
+        BOOL hasSession  = _pTextService->HasActiveComposition() || _hasCandidates || _needsCompositionResync;
         if (chineseMode && hasSession)
         {
             WIND_LOG_DEBUG_FMT(L"KeyDown session hotkey matched: vk=0x%02X, hash=0x%08X\n",
@@ -385,7 +388,8 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     BOOL hasComposition = _pTextService->HasActiveComposition();
     // Also check _hasCandidates for cases where InlinePreedit is disabled
     // (Go sends UpdateComposition with empty text, _hasCandidates is TRUE but HasActiveComposition is FALSE)
-    BOOL hasInputSession = hasComposition || _hasCandidates;
+    // _needsCompositionResync: 上次 IPC 失败后强行视作有会话, 让 ENTER/ESC 也能发给 Go 重握手。
+    BOOL hasInputSession = hasComposition || _hasCandidates || _needsCompositionResync;
 
     // English auto-pair: intercept bracket keys in English mode
     if (!isChineseMode && _englishPairEngine.IsEnabled())
@@ -841,8 +845,9 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     BOOL isChineseMode = _pTextService->IsChineseMode();
     // Use TextService's composition state - this is the source of truth in async architecture
     BOOL hasComposition = _pTextService->HasActiveComposition();
-    // Also check _hasCandidates for cases where InlinePreedit is disabled
-    BOOL hasInputSession = hasComposition || _hasCandidates;
+    // Also check _hasCandidates for cases where InlinePreedit is disabled.
+    // _needsCompositionResync: 上次 IPC 失败后强行视作有会话, 让 ENTER/ESC 也能发给 Go 重握手。
+    BOOL hasInputSession = hasComposition || _hasCandidates || _needsCompositionResync;
 
     // Track whether this is a Ctrl/Alt combo that needs cleanup-then-passthrough
     BOOL isCtrlAltCleanup = FALSE;
@@ -1513,9 +1518,25 @@ BOOL CKeyEventSink::_HandleServiceResponse()
     // 后续 ReceiveResponse 等不到下一条而 200ms timeout 断连 (Ctrl+Space 失效根因)。
     if (!pIPCClient->ReceiveResponse(response))
     {
-        WIND_LOG_ERROR(L"Failed to receive response from service");
+        // 本地 composition 强制复位 + 置 resync 标志：
+        // 失败丢响应后 C++ 与 Go 状态会失同步 (例如 Shift+字母 起合成响应丢失 →
+        // _isComposing 一直为 FALSE → 后续 ENTER/ESC 被判 hasInputSession=FALSE
+        // 而直接放行给宿主, 候选窗失控)。本地清干净 + 置 resync, 让下一次按键
+        // 强行走"有会话"路径发给 Go, 由 Go 权威响应自然重建状态。
+        WIND_LOG_ERROR(L"Failed to receive response from service, performing local composition reset");
+        if (_pTextService->HasActiveComposition())
+        {
+            _pTextService->EndComposition();
+        }
+        _isComposing = FALSE;
+        _hasCandidates = FALSE;
+        _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
+        _needsCompositionResync = TRUE;
         return TRUE; // Default to eating the key on error
     }
+
+    // 响应成功 → 状态由下方 switch 各分支按权威重建, 清 resync 旗。
+    _needsCompositionResync = FALSE;
 
     QueryPerformanceCounter(&midTime);
     int ipcMs = (int)((midTime.QuadPart - startTime.QuadPart) * 1000 / freq.QuadPart);

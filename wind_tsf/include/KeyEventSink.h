@@ -91,7 +91,7 @@ public:
     // 用于 Excel/WPS cell-select(按数字直通) → cell-edit(按标点) 这种焦点切换
     // 场景的数字后智能标点判断。残留由按键事件路径（_SendKeyToService 非智能
     // 标点目标键清零）和光标 Y 跨行检测兜底，不应在 IME 会话状态重置时一起清。
-    void ResetComposingState() { _isComposing = FALSE; _hasCandidates = FALSE; _skipKeyCount = 0; _pendingPairAction = {}; _englishPairEngine.Clear(); }
+    void ResetComposingState() { _isComposing = FALSE; _hasCandidates = FALSE; _needsCompositionResync = FALSE; _skipKeyCount = 0; _pendingPairAction = {}; _englishPairEngine.Clear(); }
 
     // Flush pending English pass-through stats before focus/mode teardown.
     void FlushEnglishStats();
@@ -126,6 +126,10 @@ private:
     // State
     BOOL _isComposing;
     BOOL _hasCandidates;         // True if there are candidates to select
+    // IPC 失败后置位：本地 composition 已强制复位，但 Go 侧可能仍持有活跃会话状态。
+    // 下一次按键前提下视作"有会话"，让 ENTER/ESC 也能发给 Go 走重握手；
+    // 任何一次成功 ReceiveResponse 之后清旗，状态由响应处理路径自然重建。
+    BOOL _needsCompositionResync;
     WCHAR _lastPassthroughDigit; // Last digit key that passed through (for smart punct fallback in apps where TSF can't read text)
     uint32_t _pendingKeyUpKey;   // Key code of pending KeyUp toggle key
     uint32_t _pendingKeyUpModifiers; // Modifiers when KeyDown was pressed
