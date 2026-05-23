@@ -543,15 +543,27 @@ func loadCodetable(engine *codetable.Engine, srcPath string, dictType DictType, 
 		srcPaths = []string{srcPath}
 	}
 
+	// 在加载入口列出所有发现的源文件，便于排查"应有的词库未被合并"问题
+	logger.Info("码表源文件清单", "schemaID", schemaID, "type", dictType, "count", len(srcPaths), "files", srcPaths)
+
 	wdbInDir := filepath.Join(srcDir, schemaID+".wdb")
 	if len(srcPaths) > 0 && !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
-		if err := loadCodetableFromWdb(engine, wdbInDir); err == nil {
+		if changed, recorded := dictcache.SourceListChanged(wdbInDir, srcPaths); changed {
+			logger.Info("wdb 源文件清单已变化, 强制重建", "wdb", wdbInDir, "recorded", recorded, "current", srcPaths)
+		} else if err := loadCodetableFromWdb(engine, wdbInDir); err == nil {
 			return nil
 		}
 	}
 
 	wdbCachePath := dictcache.CachePath(schemaID)
-	if len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
+	regen := len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath)
+	if !regen {
+		if changed, recorded := dictcache.SourceListChanged(wdbCachePath, srcPaths); changed {
+			logger.Info("wdb 缓存源文件清单已变化, 强制重建", "wdb", wdbCachePath, "recorded", recorded, "current", srcPaths)
+			regen = true
+		}
+	}
+	if regen {
 		var convertErr error
 		if dictType == DictTypeRimeCodetable {
 			convertErr = dictcache.ConvertRimeCodetableToWdb(srcPath, wdbCachePath, logger, normalizer)
