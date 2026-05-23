@@ -1,9 +1,9 @@
 <template>
   <section class="section dict-page">
-    <!-- ===== 紧凑标题 ===== -->
-    <div class="dict-header">
+    <!-- ===== 标题（与全局样式一致：单行布局） ===== -->
+    <div class="section-header dict-header">
       <h2>词库管理</h2>
-      <span class="dict-header-desc">管理您的词库数据（修改即时生效）</span>
+      <p class="section-desc">管理词条、词频与候选调整（修改即时生效）</p>
       <span class="dict-header-spacer"></span>
       <Button
         v-if="isWailsEnv"
@@ -128,8 +128,7 @@
                 href="#"
                 @click.prevent="switchToMixedPinyin"
                 >「{{ mixedPinyinName }}」</a
-              ><strong v-else>「{{ mixedPinyinName }}」</strong
-              >中管理。
+              ><strong v-else>「{{ mixedPinyinName }}」</strong>中管理。
             </p>
           </div>
 
@@ -614,22 +613,6 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.dict-header {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 12px 0 8px;
-}
-.dict-header h2 {
-  font-size: 18px;
-  font-weight: 600;
-  color: hsl(var(--foreground));
-  margin: 0;
-}
-.dict-header-desc {
-  font-size: 13px;
-  color: hsl(var(--muted-foreground));
-}
 .dict-header-spacer {
   flex: 1;
 }
@@ -694,7 +677,6 @@ onUnmounted(() => {
 .primary-link:hover {
   filter: brightness(1.2);
 }
-
 
 .dict-content-card {
   background: hsl(var(--card));

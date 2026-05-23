@@ -409,7 +409,7 @@ const primaryPinyin = computed({
   <section class="section">
     <div class="section-header">
       <h2>方案设置</h2>
-      <p class="section-desc">管理输入方案和方案专属设置</p>
+      <p class="section-desc">启用、排序与方案专属设置</p>
     </div>
 
     <!-- 方案列表 -->
@@ -551,7 +551,7 @@ const primaryPinyin = computed({
       <div class="setting-item">
         <div class="setting-info">
           <label>主码表方案</label>
-          <p class="setting-hint">拼音方案"反查/编码提示"从此方案的码表派生</p>
+          <p class="setting-hint">拼音方案的"反查/编码提示"基于此方案的码表</p>
         </div>
         <div class="setting-control">
           <Select v-model="primaryCodetable">
@@ -574,7 +574,7 @@ const primaryPinyin = computed({
       <div class="setting-item">
         <div class="setting-info">
           <label>主拼音方案</label>
-          <p class="setting-hint">码表方案"临时拼音"使用此方案</p>
+          <p class="setting-hint">码表方案的"临时拼音"使用此方案</p>
         </div>
         <div class="setting-control">
           <Select v-model="primaryPinyin">
@@ -638,14 +638,15 @@ const primaryPinyin = computed({
       :visible="showSchemaSettings"
       :schemaID="settingsSchemaID || ''"
       :schemaConfig="settingsSchemaID ? schemaConfigs[settingsSchemaID] : null"
-      :schemaInfo="settingsSchemaID ? getSchemaInfo(settingsSchemaID) : undefined"
+      :schemaInfo="
+        settingsSchemaID ? getSchemaInfo(settingsSchemaID) : undefined
+      "
       :schemaReferences="schemaReferences"
       :allSchemaConfigs="schemaConfigs"
       @update:visible="showSchemaSettings = $event"
       @configSave="onSchemaConfigSave"
       @configReset="onSchemaConfigReset"
     />
-
   </section>
 </template>
 
@@ -823,5 +824,4 @@ const primaryPinyin = computed({
   background: hsl(var(--primary) / 0.1);
   border-radius: 6px;
 }
-
 </style>

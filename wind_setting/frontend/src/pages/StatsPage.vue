@@ -420,7 +420,7 @@ onUnmounted(() => {
           >(beta)</span
         >
       </h2>
-      <p class="section-desc">查看输入习惯和效率数据</p>
+      <p class="section-desc">输入习惯与效率指标</p>
     </div>
 
     <div v-if="loading" class="loading-hint">加载中...</div>
@@ -685,7 +685,7 @@ onUnmounted(() => {
         <div class="setting-item">
           <div class="setting-info">
             <label>数据清理</label>
-            <p class="setting-hint">手动删除指定范围的历史统计数据</p>
+            <p class="setting-hint">删除指定范围前的历史数据</p>
           </div>
           <div class="setting-control control-row">
             <Select v-model="clearBeforeDays">

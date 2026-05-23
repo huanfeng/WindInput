@@ -1,8 +1,8 @@
 <template>
   <section class="section">
     <div class="section-header">
-      <h2>输入习惯</h2>
-      <p class="section-desc">定制您的打字体验</p>
+      <h2>输入设置</h2>
+      <p class="section-desc">字符、按键、标点与启动行为</p>
     </div>
 
     <!-- 字符与标点 -->
@@ -12,7 +12,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>自定义标点映射</label>
-          <p class="setting-hint">自定义英文标点对应的中文标点、全角符号</p>
+          <p class="setting-hint">自定义英文标点的中文/全角替换</p>
         </div>
         <div class="setting-control inline-control">
           <label class="checkbox-label">
@@ -48,7 +48,7 @@
           <DialogTitle>自定义标点设置</DialogTitle>
         </DialogHeader>
         <div>
-          <p class="dialog-hint">双击单元格修改，长度 1-8</p>
+          <p class="dialog-hint">双击单元格编辑，长度 1–8 个字符</p>
           <div class="punct-table-wrap">
             <table class="punct-table">
               <thead>
@@ -111,13 +111,21 @@
     <!-- 按键行为 -->
     <div class="settings-card">
       <div class="card-title">按键行为</div>
-      <SchemaRenderer :schema="keyBehaviorSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="keyBehaviorSchema"
+        :form-data="formData"
+        mode="bare"
+      />
     </div>
 
     <!-- 候选无效按键 -->
     <div class="settings-card">
       <div class="card-title">候选无效按键</div>
-      <SchemaRenderer :schema="overflowSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="overflowSchema"
+        :form-data="formData"
+        mode="bare"
+      />
     </div>
 
     <!-- 简入繁出（简体输入 → 繁体输出） -->
@@ -126,9 +134,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>启用简入繁出</label>
-          <p class="setting-hint">
-            输入简体拼音/五笔，候选窗与上屏均显示繁体（基于 OpenCC 词典）
-          </p>
+          <p class="setting-hint">候选与上屏均输出繁体（基于 OpenCC 词典）</p>
         </div>
         <div class="setting-control">
           <label class="checkbox-label">
@@ -266,17 +272,25 @@
           ⚠ {{ quickInputConflictMsg }}
         </p>
       </div>
-      <SchemaRenderer :schema="quickInputExtraSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="quickInputExtraSchema"
+        :form-data="formData"
+        mode="bare"
+      />
     </div>
 
     <!-- 临时拼音 -->
     <div class="settings-card">
       <div class="card-title">临时拼音</div>
-      <SchemaRenderer :schema="pinyinSeparatorSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="pinyinSeparatorSchema"
+        :form-data="formData"
+        mode="bare"
+      />
       <div class="setting-item">
         <div class="setting-info">
           <label>触发键</label>
-          <p class="setting-hint">码表模式下按触发键临时切换拼音输入</p>
+          <p class="setting-hint">按触发键临时切换拼音输入</p>
         </div>
         <div class="setting-control">
           <TriggerKeySelect
@@ -304,7 +318,11 @@
     <!-- 临时英文 -->
     <div class="settings-card">
       <div class="card-title">临时英文</div>
-      <SchemaRenderer :schema="shiftExtraSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="shiftExtraSchema"
+        :form-data="formData"
+        mode="bare"
+      />
       <div class="setting-item">
         <div class="setting-info">
           <label>触发键</label>
@@ -330,7 +348,11 @@
     <!-- 默认状态 -->
     <div class="settings-card">
       <div class="card-title">默认状态</div>
-      <SchemaRenderer :schema="startupExtraSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="startupExtraSchema"
+        :form-data="formData"
+        mode="bare"
+      />
       <div
         class="setting-item"
         :class="{ 'item-disabled': formData.startup.remember_last_state }"
@@ -800,7 +822,6 @@ const tempEnglishConflictMsg = computed(() => {
   );
   return msgs.length > 0 ? msgs.join("；") : "";
 });
-
 </script>
 
 <style scoped>

@@ -2,7 +2,7 @@
   <section class="section">
     <div class="section-header">
       <h2>高级设置</h2>
-      <p class="section-desc">故障排查与调试工具</p>
+      <p class="section-desc">配置、日志与诊断工具</p>
     </div>
 
     <div class="settings-card">
@@ -46,7 +46,11 @@
 
     <div class="settings-card">
       <div class="card-title">日志设置</div>
-      <SchemaRenderer :schema="advancedLogSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="advancedLogSchema"
+        :form-data="formData"
+        mode="bare"
+      />
       <div class="setting-item">
         <div class="setting-info">
           <label>TSF 日志输出方式</label>
@@ -74,7 +78,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>TSF 日志级别</label>
-          <p class="setting-hint">请仅在调试问题时才使用 Debug / Trace</p>
+          <p class="setting-hint">仅在排障时临时启用 Debug / Trace</p>
         </div>
         <div class="setting-control">
           <Select
@@ -118,7 +122,11 @@
 
     <div class="settings-card">
       <div class="card-title">性能诊断</div>
-      <SchemaRenderer :schema="advancedPerfSchema" :form-data="formData" mode="bare" />
+      <SchemaRenderer
+        :schema="advancedPerfSchema"
+        :form-data="formData"
+        mode="bare"
+      />
       <div v-if="formData.advanced.perf_sampling" class="setting-item">
         <div class="setting-info">
           <label>隐私提示</label>
@@ -171,10 +179,12 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>Go 运行时内存</label>
-          <p class="setting-hint">查看堆内存、GC 统计，并导出 heap pprof 文件</p>
+          <p class="setting-hint">查看堆内存与 GC 统计，可导出 pprof 文件</p>
         </div>
         <div class="setting-control">
-          <Button variant="outline" size="sm" @click="handleOpenMemDialog">查看</Button>
+          <Button variant="outline" size="sm" @click="handleOpenMemDialog"
+            >查看</Button
+          >
         </div>
       </div>
     </div>
@@ -225,7 +235,9 @@
           >
             {{ goroutineDumping ? "导出中…" : "导出 goroutine" }}
           </Button>
-          <Button variant="outline" size="sm" @click="memDialogOpen = false">关闭</Button>
+          <Button variant="outline" size="sm" @click="memDialogOpen = false"
+            >关闭</Button
+          >
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -394,7 +406,10 @@ import {
 } from "@/components/ui/dialog";
 import DataDirDialog from "@/components/DataDirDialog.vue";
 import SchemaRenderer from "@/components/SchemaRenderer.vue";
-import { advancedLogSchema, advancedPerfSchema } from "@/schemas/advanced.schema";
+import {
+  advancedLogSchema,
+  advancedPerfSchema,
+} from "@/schemas/advanced.schema";
 
 const props = defineProps<{
   formData: Config;

@@ -89,7 +89,7 @@ onUnmounted(() => {
   <section class="section">
     <div class="section-header">
       <h2>外观设置</h2>
-      <p class="section-desc">定制候选窗口的视觉呈现</p>
+      <p class="section-desc">主题、候选窗与状态显示</p>
     </div>
 
     <!-- 主题选择 -->
@@ -98,7 +98,7 @@ onUnmounted(() => {
       <div class="setting-item align-start">
         <div class="setting-info">
           <label>主题选择</label>
-          <p class="setting-hint">显示主题作者与版本信息</p>
+          <p class="setting-hint">候选窗与工具栏的主题样式</p>
         </div>
         <div class="setting-control">
           <div class="theme-dropdown" ref="themeDropdownRef">
@@ -170,7 +170,7 @@ onUnmounted(() => {
               >?</span
             >
           </label>
-          <p class="setting-hint">候选窗口与工具栏预览</p>
+          <p class="setting-hint">候选窗与工具栏的实时预览</p>
         </div>
         <div class="setting-control">
           <div
@@ -348,7 +348,7 @@ onUnmounted(() => {
       <div class="setting-item">
         <div class="setting-info">
           <label>字体大小</label>
-          <p class="setting-hint">候选词的显示大小</p>
+          <p class="setting-hint">候选词字体大小</p>
         </div>
         <div class="setting-control range-control">
           <input
@@ -364,9 +364,7 @@ onUnmounted(() => {
       <div class="setting-item" v-if="isWailsEnv">
         <div class="setting-info">
           <label>候选字体</label>
-          <p class="setting-hint">
-            设置候选词的显示字体，从系统已安装字体中选择并自动回退
-          </p>
+          <p class="setting-hint">自定义字体，留空跟随系统默认</p>
         </div>
         <div class="setting-control">
           <Select
@@ -409,7 +407,7 @@ onUnmounted(() => {
       <div class="setting-item" v-if="formData.ui.status_indicator.enabled">
         <div class="setting-info">
           <label>显示内容</label>
-          <p class="setting-hint">选择状态提示中显示的信息</p>
+          <p class="setting-hint">状态提示中要显示的图标</p>
         </div>
         <div class="setting-control inline-control">
           <label class="checkbox-label">

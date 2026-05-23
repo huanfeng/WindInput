@@ -72,8 +72,8 @@ function onUpdateDialogClose() {
 <template>
   <section class="section">
     <div class="section-header">
-      <h2>关于</h2>
-      <p class="section-desc">清风输入法 信息</p>
+      <h2>关于应用</h2>
+      <p class="section-desc">版本、反馈与项目信息</p>
     </div>
 
     <div class="settings-card about-card" v-if="status">
@@ -85,8 +85,12 @@ function onUpdateDialogClose() {
         <div class="about-info">
           <h3 class="about-name">{{ status.service.name }}</h3>
           <div class="about-version-row">
-            <span class="about-version-badge">v{{ status.service.version }}</span>
-            <button class="update-trigger-btn" @click="openUpdateDialog">检查更新</button>
+            <span class="about-version-badge"
+              >v{{ status.service.version }}</span
+            >
+            <button class="update-trigger-btn" @click="openUpdateDialog">
+              检查更新
+            </button>
           </div>
           <p class="about-desc">轻量、快速、可定制的开源中文输入法</p>
         </div>
@@ -238,7 +242,9 @@ function onUpdateDialogClose() {
   cursor: pointer;
   padding: 1px 8px;
   line-height: 1.6;
-  transition: border-color 0.15s, background 0.15s;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
   white-space: nowrap;
 }
 .update-trigger-btn:hover {

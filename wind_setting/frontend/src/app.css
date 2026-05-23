@@ -101,7 +101,9 @@
     cursor: help;
     position: relative;
     flex-shrink: 0;
-    transition: background 0.15s, color 0.15s;
+    transition:
+      background 0.15s,
+      color 0.15s;
   }
   .hint-tip:hover {
     background: hsl(var(--primary) / 0.1);
@@ -140,16 +142,16 @@
   }
 
   .logo {
-    padding: 20px;
+    padding: 14px 16px;
     display: flex;
     align-items: center;
     gap: 10px;
     border-bottom: 1px solid hsl(var(--border));
   }
   .logo-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 8px;
+    width: 36px;
+    height: 36px;
+    border-radius: 7px;
     object-fit: contain;
   }
   .logo-title {
@@ -218,21 +220,21 @@
   }
 
   .sidebar-footer {
-    padding: 16px;
+    padding: 12px 14px;
     border-top: 1px solid hsl(var(--border));
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .sidebar-actions {
     display: flex;
     flex-direction: column;
     gap: 8px;
   }
+  .sidebar-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
   .sidebar-actions .btn {
     width: 100%;
     justify-content: center;
-    padding: 6px 12px;
+    padding: 5px 11px;
     font-size: 13px;
   }
 
@@ -256,40 +258,47 @@
     max-width: none;
     width: 100%;
   }
+  /* 标题：标题与说明同行排布，节省顶部空间 */
   .section-header {
-    margin-bottom: 20px;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 14px;
   }
   .section-header h2 {
     font-size: 20px;
     font-weight: 600;
     color: hsl(var(--foreground));
-    margin-bottom: 4px;
+    margin: 0;
     text-align: left;
   }
   .section-desc {
     font-size: 13px;
     color: hsl(var(--muted-foreground));
+    margin: 0;
     text-align: left;
   }
 
   /* ========== Settings Card ========== */
   .settings-card {
     background: hsl(var(--card));
-    border-radius: 12px;
-    padding: 20px;
-    margin-bottom: 16px;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 12px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   }
   .card-title {
     font-size: 14px;
     font-weight: 700;
     color: hsl(var(--foreground));
-    margin-bottom: 16px;
+    margin-bottom: 10px;
     text-align: left;
-    padding: 4px 8px;
+    padding: 2px 8px;
     border-left: 3px solid hsl(var(--primary));
     border-radius: 0;
     background: transparent;
+    line-height: 1.4;
   }
 
   /* ========== Setting Item ========== */
@@ -297,9 +306,9 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 14px 0;
+    padding: 11px 0;
     border-bottom: 1px solid hsl(var(--secondary));
-    gap: 16px;
+    gap: 14px;
   }
   .setting-item.align-start {
     align-items: flex-start;
@@ -324,12 +333,14 @@
     color: hsl(var(--foreground));
     display: block;
     text-align: left;
+    line-height: 1.4;
   }
   .setting-hint {
     font-size: 12px;
     color: hsl(var(--muted-foreground));
     margin-top: 2px;
     text-align: left;
+    line-height: 1.45;
   }
   .setting-hint.warning-hint {
     color: hsl(var(--warning));
