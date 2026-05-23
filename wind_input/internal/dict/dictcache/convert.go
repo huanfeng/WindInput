@@ -31,6 +31,10 @@ type CodeTableMeta struct {
 	PhraseRule    int    `json:"phrase_rule"`
 	EntryCount    int    `json:"entry_count"`
 	HasWeight     bool   `json:"has_weight"`
+	// Sources 记录生成此 wdb 时实际使用的源文件路径列表（已排序、绝对路径）。
+	// 用于 NeedsRegenerateBySources 检测：源文件清单变化（例如新增/删除 import_tables）
+	// 即使每个文件 mtime 都早于 wdb，也需重建缓存。
+	Sources []string `json:"sources,omitempty"`
 }
 
 // ConvertCodeTableToWdb 将文本码表转换为 wdb 二进制格式
@@ -85,6 +89,57 @@ func ConvertCodeTableToWdb(srcPath, wdbPath string, logger *slog.Logger) error {
 
 	logger.Info("码表转换完成", "codes", len(entries))
 	return nil
+}
+
+// normalizeSources 返回排序、去重后的绝对路径列表，作为 wdb meta 的 Sources 字段
+// 与 NeedsRegenerateBySources 检测的稳定基线。无法 Abs 的路径保留原样。
+func normalizeSources(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		abs = filepath.Clean(abs)
+		if _, ok := seen[abs]; ok {
+			continue
+		}
+		seen[abs] = struct{}{}
+		out = append(out, abs)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SourceListChanged 比较当前发现的源文件列表与 wdb meta 中记录的列表，
+// 若不同则返回 true 并指明差异。对于不携带 Sources 字段的旧 wdb 视为未变化（兼容）。
+func SourceListChanged(wdbPath string, currentSources []string) (changed bool, recorded []string) {
+	reader, err := binformat.OpenDict(wdbPath)
+	if err != nil {
+		return false, nil
+	}
+	defer reader.Close()
+	meta, err := LoadCodeTableMetaFromWdb(reader)
+	if err != nil || meta == nil || len(meta.Sources) == 0 {
+		return false, nil
+	}
+	want := normalizeSources(currentSources)
+	if len(want) != len(meta.Sources) {
+		return true, meta.Sources
+	}
+	for i := range want {
+		if want[i] != meta.Sources[i] {
+			return true, meta.Sources
+		}
+	}
+	return false, meta.Sources
 }
 
 // LoadCodeTableMetaFromWdb 从 wdb 文件嵌入的 meta 段读取元数据
@@ -400,6 +455,7 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 		CodeLength: 4,
 		EntryCount: totalCount,
 		HasWeight:  hasWeight,
+		Sources:    normalizeSources(RimeCodetableSourcePaths(mainDictPath)),
 	}
 	metaJSON, err := json.Marshal(&meta)
 	if err != nil {
@@ -452,7 +508,10 @@ func parseRimeImportTables(path string) []string {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-	inHeader := false
+	// Rime/YAML 习惯以 `---` 起、`...` 止包裹 header；但 `---` 是可选的，
+	// 用户写的 dict.yaml 常直接从 `name:` 开始。默认认为文件开头即处于 header，
+	// 仅以 `...` 作为 header 结束标记。
+	inHeader := true
 	inImportTables := false
 	var tables []string
 
