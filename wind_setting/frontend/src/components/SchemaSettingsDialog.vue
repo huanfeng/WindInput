@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ref, watch, computed } from "vue";
 import type { SchemaConfig, SchemaInfo, SchemaReference } from "../api/wails";
 import * as wailsApi from "../api/wails";
 import { Switch } from "@/components/ui/switch";
@@ -34,6 +34,7 @@ const emit = defineEmits<{
   "update:visible": [value: boolean];
   configSave: [schemaID: string, config: SchemaConfig];
   configReset: [schemaID: string];
+  dictChanged: [];
 }>();
 
 // 本地编辑副本（不直接修改 props）
@@ -42,10 +43,42 @@ const localConfig = ref<SchemaConfig | null>(null);
 // 码表设置 Tab（基础 / 高级）
 const codetableTab = ref<'basic' | 'advanced'>('basic');
 
+// 附加词库开关相关
+const togglingDict = ref<string | null>(null);
+const dictWasToggled = ref(false);
+
+const extraDicts = computed(
+  () => localConfig.value?.dictionaries?.filter((d) => !d.default) ?? [],
+);
+
+function isDictEnabled(d: NonNullable<SchemaConfig['dictionaries']>[number]): boolean {
+  if (d.enabled !== undefined && d.enabled !== null) return d.enabled;
+  if (d.default_enabled !== undefined && d.default_enabled !== null) return d.default_enabled;
+  return true;
+}
+
+function dictDisplayLabel(d: NonNullable<SchemaConfig['dictionaries']>[number]): string {
+  return d.label || d.id;
+}
+
+async function toggleDict(dictID: string, currentEnabled: boolean): Promise<void> {
+  if (togglingDict.value) return;
+  togglingDict.value = dictID;
+  try {
+    await wailsApi.setDictEnabled(props.schemaID, dictID, !currentEnabled);
+    const dict = localConfig.value?.dictionaries?.find((d) => d.id === dictID);
+    if (dict) dict.enabled = !currentEnabled;
+    dictWasToggled.value = true;
+  } finally {
+    togglingDict.value = null;
+  }
+}
+
 // 对话框打开时深拷贝配置
 watch(() => props.visible, (val) => {
   if (val && props.schemaConfig) {
     localConfig.value = JSON.parse(JSON.stringify(props.schemaConfig));
+    dictWasToggled.value = false;
   }
 });
 
@@ -81,6 +114,9 @@ function saveConfig() {
 
 function cancelEdit() {
   emit("update:visible", false);
+  if (dictWasToggled.value) {
+    emit("dictChanged");
+  }
 }
 
 // 模糊音对话框
@@ -291,6 +327,26 @@ function isReferencedBy(schemaID: string): boolean {
               engine-type="codetable"
               active-tab="basic"
             />
+            <!-- 附加词库开关（仅有附加词库时显示） -->
+            <template v-if="extraDicts.length > 0">
+              <div class="setting-section-title">附加词库</div>
+              <div
+                v-for="d in extraDicts"
+                :key="d.id"
+                class="setting-item"
+              >
+                <div class="setting-info">
+                  <label>{{ dictDisplayLabel(d) }}</label>
+                </div>
+                <div class="setting-control">
+                  <Switch
+                    :checked="isDictEnabled(d)"
+                    :disabled="!!togglingDict"
+                    @update:checked="toggleDict(d.id, isDictEnabled(d))"
+                  />
+                </div>
+              </div>
+            </template>
           </div>
           <div v-show="codetableTab === 'advanced'">
             <div class="advanced-warning">

@@ -119,6 +119,7 @@ function getReferencedByInfo(): string {
         }}</span>
       </div>
     </div>
+
   </div>
 </template>
 
@@ -171,4 +172,5 @@ function getReferencedByInfo(): string {
   background: hsl(var(--warning) / 0.1);
   color: hsl(var(--warning));
 }
+
 </style>

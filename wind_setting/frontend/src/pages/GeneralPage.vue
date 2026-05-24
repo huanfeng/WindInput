@@ -190,6 +190,12 @@ async function onSchemaConfigReset(schemaID: string) {
   await loadSchemaConfig(schemaID);
 }
 
+async function onSchemaSettingsDictChanged() {
+  if (settingsSchemaID.value) {
+    await loadSchemaConfig(settingsSchemaID.value);
+  }
+}
+
 // 启用方案
 function enableSchema(schemaID: string) {
   if (enabledSchemaIDs.value.includes(schemaID)) return;
@@ -646,6 +652,7 @@ const primaryPinyin = computed({
       @update:visible="showSchemaSettings = $event"
       @configSave="onSchemaConfigSave"
       @configReset="onSchemaConfigReset"
+      @dictChanged="onSchemaSettingsDictChanged"
     />
   </section>
 </template>

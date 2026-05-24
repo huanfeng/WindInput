@@ -123,13 +123,16 @@ type SchemaConfigEngine struct {
 
 // SchemaConfigDict 词库配置项
 type SchemaConfigDict struct {
-	ID            string      `yaml:"id" json:"id"`
-	Path          string      `yaml:"path" json:"path"`
-	Type          string      `yaml:"type" json:"type"`
-	Default       bool        `yaml:"default" json:"default"`
-	Role          string      `yaml:"role,omitempty" json:"role,omitempty"`
-	WeightAsOrder bool        `yaml:"weight_as_order,omitempty" json:"weight_as_order,omitempty"`
-	WeightSpec    interface{} `yaml:"weight_spec,omitempty" json:"weight_spec,omitempty"`
+	ID             string      `yaml:"id" json:"id"`
+	Label          string      `yaml:"label,omitempty" json:"label,omitempty"`
+	Path           string      `yaml:"path" json:"path"`
+	Type           string      `yaml:"type" json:"type"`
+	Default        bool        `yaml:"default" json:"default"`
+	DefaultEnabled *bool       `yaml:"default_enabled,omitempty" json:"default_enabled,omitempty"`
+	Enabled        *bool       `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Role           string      `yaml:"role,omitempty" json:"role,omitempty"`
+	WeightAsOrder  bool        `yaml:"weight_as_order,omitempty" json:"weight_as_order,omitempty"`
+	WeightSpec     interface{} `yaml:"weight_spec,omitempty" json:"weight_spec,omitempty"`
 }
 
 // SchemaConfigAutoLearn 自动造词配置
@@ -275,7 +278,11 @@ func (a *App) loadSchemaBase(schemaID string) (*SchemaConfig, error) {
 		}
 	}
 
-	// Layer 2: 用户方案文件
+	// 保存 Layer 1 的完整 dict 列表（有序），用于后续按 ID 合并
+	layer1Dicts := make([]SchemaConfigDict, len(cfg.Dicts))
+	copy(layer1Dicts, cfg.Dicts)
+
+	// Layer 2: 用户方案文件（稀疏 diff，dictionaries 按 ID 合并而非整体替换）
 	userPath, userErr := findUserSchemaFile(schemaID)
 	if userErr == nil {
 		data, err := os.ReadFile(userPath)
@@ -285,6 +292,8 @@ func (a *App) loadSchemaBase(schemaID string) (*SchemaConfig, error) {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("解析用户方案文件失败: %w", err)
 		}
+		// Layer 2 的 Dicts 是稀疏列表，按 ID 合并确保 Layer 1 新增词库不丢失
+		cfg.Dicts = mergeSchemaConfigDicts(layer1Dicts, cfg.Dicts)
 	}
 
 	if builtinErr != nil && userErr != nil {
@@ -382,6 +391,84 @@ func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
 				return fmt.Errorf("保存方案覆盖配置失败: %w", err)
 			}
 		}
+	}
+
+	return nil
+}
+
+// SetDictEnabled 切换指定方案下某个附加词库的启用状态。
+// 写入用户方案文件（configDir/schemas/{schemaID}.schema.yaml，Layer 2），
+// 然后通过 RPC 触发 wind_input 重载。
+func (a *App) SetDictEnabled(schemaID, dictID string, enabled bool) error {
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return fmt.Errorf("获取配置目录失败: %w", err)
+	}
+
+	schemasDir := filepath.Join(configDir, "schemas")
+	userSchemaPath := filepath.Join(schemasDir, schemaID+".schema.yaml")
+
+	// 读取现有用户方案文件（如有），保留其他字段
+	var rawDoc map[string]interface{}
+	if data, err := os.ReadFile(userSchemaPath); err == nil {
+		_ = yaml.Unmarshal(data, &rawDoc)
+	}
+	if rawDoc == nil {
+		rawDoc = make(map[string]interface{})
+	}
+
+	// 确保 schema.id 存在
+	schemaSection, _ := rawDoc["schema"].(map[string]interface{})
+	if schemaSection == nil {
+		schemaSection = map[string]interface{}{"id": schemaID}
+	} else if _, ok := schemaSection["id"]; !ok {
+		schemaSection["id"] = schemaID
+	}
+	rawDoc["schema"] = schemaSection
+
+	// 更新 dictionaries 中对应条目的 enabled 字段
+	var dicts []interface{}
+	if existing, ok := rawDoc["dictionaries"].([]interface{}); ok {
+		dicts = existing
+	}
+	found := false
+	for i, d := range dicts {
+		if dm, ok := d.(map[string]interface{}); ok && dm["id"] == dictID {
+			dm["enabled"] = enabled
+			dicts[i] = dm
+			found = true
+			break
+		}
+	}
+	if !found {
+		dicts = append(dicts, map[string]interface{}{
+			"id":      dictID,
+			"enabled": enabled,
+		})
+	}
+	rawDoc["dictionaries"] = dicts
+
+	// 写回文件
+	if err := os.MkdirAll(schemasDir, 0755); err != nil {
+		return fmt.Errorf("创建方案目录失败: %w", err)
+	}
+	data, err := yaml.Marshal(rawDoc)
+	if err != nil {
+		return fmt.Errorf("序列化方案配置失败: %w", err)
+	}
+	if err := os.WriteFile(userSchemaPath, data, 0644); err != nil {
+		return fmt.Errorf("写入方案文件失败: %w", err)
+	}
+
+	// 触发 wind_input 重载：读取现有 Layer 3 override 后重设（触发 ReloadConfig）
+	if a.rpcClient != nil {
+		var overrideData map[string]any
+		if reply, rpcErr := a.rpcClient.ConfigGetSchemaOverride(schemaID); rpcErr == nil && reply != nil && len(reply.Data) > 0 {
+			overrideData = reply.Data
+		} else {
+			overrideData = map[string]any{}
+		}
+		_ = a.rpcClient.ConfigSetSchemaOverride(schemaID, overrideData)
 	}
 
 	return nil
@@ -1165,6 +1252,30 @@ func (a *App) ExportSchemas(schemaIDs []string) (string, error) {
 	}
 
 	return savePath, nil
+}
+
+// mergeSchemaConfigDicts 以 base 为底，将 overrides 按 id 匹配后 patch 进去。
+// 匹配到的条目：只覆盖用户显式设置的字段（目前主要是 Enabled），保留 base 的元数据。
+// 未匹配且字段完整的 override 条目：作为新词库追加。
+func mergeSchemaConfigDicts(base, overrides []SchemaConfigDict) []SchemaConfigDict {
+	result := make([]SchemaConfigDict, len(base))
+	copy(result, base)
+
+	baseIndex := make(map[string]int, len(base))
+	for i, d := range result {
+		baseIndex[d.ID] = i
+	}
+
+	for _, ov := range overrides {
+		if idx, ok := baseIndex[ov.ID]; ok {
+			if ov.Enabled != nil {
+				result[idx].Enabled = ov.Enabled
+			}
+		} else if ov.ID != "" && ov.Path != "" && ov.Type != "" {
+			result = append(result, ov)
+		}
+	}
+	return result
 }
 
 // resolveDictFilePath 查找词典文件的绝对路径（找到第一个存在的）

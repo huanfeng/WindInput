@@ -160,6 +160,7 @@ function openDetail(schemaID: string) {
   }
 }
 
+
 function handleToggleEnabled(schemaID: string) {
   if (isEnabled(schemaID)) {
     emit("disableSchema", schemaID);

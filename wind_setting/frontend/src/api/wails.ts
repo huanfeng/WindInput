@@ -120,6 +120,14 @@ export async function resetSchemaConfig(schemaID: string): Promise<void> {
   return (window as any).go.main.App.ResetSchemaConfig(schemaID);
 }
 
+export async function setDictEnabled(
+  schemaID: string,
+  dictID: string,
+  enabled: boolean,
+): Promise<void> {
+  return App.SetDictEnabled(schemaID, dictID, enabled);
+}
+
 export async function switchActiveSchema(schemaID: string): Promise<void> {
   return App.SwitchActiveSchema(schemaID);
 }
