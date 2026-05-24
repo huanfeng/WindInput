@@ -190,6 +190,12 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 		}
 	}
 
+	// 附加词库热重载（根据 enabled 字段动态加载/卸载 dict layer）
+	if h.dictMgr != nil && s.Engine.Type == schema.EngineTypeCodeTable {
+		exeDir, dataDir := h.schemaMgr.GetDirs()
+		schema.ReloadExtraDicts(h.dictMgr, s, exeDir, dataDir, h.logger)
+	}
+
 	// 学习配置热更新（调频 + 造词）
 	h.engineMgr.UpdateLearningConfig(&s.Learning)
 

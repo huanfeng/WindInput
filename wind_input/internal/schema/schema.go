@@ -133,13 +133,36 @@ const (
 
 // DictSpec 词库规格
 type DictSpec struct {
-	ID            string      `yaml:"id"`
-	Path          string      `yaml:"path"`
-	Type          DictType    `yaml:"type"`
-	Default       bool        `yaml:"default"`
-	Role          DictRole    `yaml:"role,omitempty"`
-	WeightSpec    *WeightSpec `yaml:"weight_spec,omitempty"`     // 权重归一化参数
-	WeightAsOrder bool        `yaml:"weight_as_order,omitempty"` // 权重仅表示同码内排序序号，不参与跨码比较
+	ID             string      `yaml:"id"`
+	Label          string      `yaml:"label,omitempty"` // UI 显示名称；空时回退为 id
+	Path           string      `yaml:"path"`
+	Type           DictType    `yaml:"type"`
+	Default        bool        `yaml:"default"`
+	DefaultEnabled *bool       `yaml:"default_enabled,omitempty"` // nil = true（默认启用）
+	Enabled        *bool       `yaml:"enabled,omitempty"`         // 用户覆盖；nil = 继承 DefaultEnabled
+	Role           DictRole    `yaml:"role,omitempty"`
+	WeightSpec     *WeightSpec `yaml:"weight_spec,omitempty"`     // 权重归一化参数
+	WeightAsOrder  bool        `yaml:"weight_as_order,omitempty"` // 权重仅表示同码内排序序号，不参与跨码比较
+}
+
+// IsEnabled 返回该词库是否启用
+// 优先级：Enabled > DefaultEnabled > 默认 true
+func (d *DictSpec) IsEnabled() bool {
+	if d.Enabled != nil {
+		return *d.Enabled
+	}
+	if d.DefaultEnabled != nil {
+		return *d.DefaultEnabled
+	}
+	return true
+}
+
+// DisplayLabel 返回 UI 显示名称，Label 为空时回退为 id
+func (d *DictSpec) DisplayLabel() string {
+	if d.Label != "" {
+		return d.Label
+	}
+	return d.ID
 }
 
 // WeightNormMode 权重归一化算法

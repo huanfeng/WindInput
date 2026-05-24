@@ -119,6 +119,11 @@ func (sm *SchemaManager) GetActiveID() string {
 	return sm.activeID
 }
 
+// GetDirs 返回方案管理器使用的目录路径
+func (sm *SchemaManager) GetDirs() (exeDir, dataDir string) {
+	return sm.exeDir, sm.dataDir
+}
+
 // SetActive 设置活跃方案
 func (sm *SchemaManager) SetActive(id string) error {
 	sm.mu.Lock()

@@ -477,3 +477,93 @@ learning:
 		t.Errorf("回退后 AutoCommitAtFull 等价值应为 true")
 	}
 }
+
+func TestDictSpec_IsEnabled(t *testing.T) {
+	boolPtr := func(b bool) *bool { return &b }
+
+	tests := []struct {
+		name           string
+		defaultEnabled *bool
+		enabled        *bool
+		want           bool
+	}{
+		{"两者均 nil → 默认 true", nil, nil, true},
+		{"defaultEnabled=false, enabled=nil → false", boolPtr(false), nil, false},
+		{"defaultEnabled=false, enabled=true → true（用户覆盖）", boolPtr(false), boolPtr(true), true},
+		{"defaultEnabled=true, enabled=false → false（用户覆盖）", boolPtr(true), boolPtr(false), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DictSpec{DefaultEnabled: tc.defaultEnabled, Enabled: tc.enabled}
+			if got := d.IsEnabled(); got != tc.want {
+				t.Errorf("IsEnabled()=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDictSpec_DisplayLabel(t *testing.T) {
+	d1 := DictSpec{ID: "wubi86_main", Label: "极点主词库"}
+	if d1.DisplayLabel() != "极点主词库" {
+		t.Errorf("有 Label 时应返回 Label, got %s", d1.DisplayLabel())
+	}
+	d2 := DictSpec{ID: "wubi86_extra"}
+	if d2.DisplayLabel() != "wubi86_extra" {
+		t.Errorf("无 Label 时应回退为 id, got %s", d2.DisplayLabel())
+	}
+}
+
+func TestMergeDictsByID(t *testing.T) {
+	boolPtr := func(b bool) *bool { return &b }
+
+	base := []DictSpec{
+		{ID: "main", Path: "main.yaml", Type: "rime_codetable", Default: true},
+		{ID: "extra", Path: "extra.yaml", Type: "rime_codetable", DefaultEnabled: boolPtr(false)},
+	}
+
+	t.Run("用户只覆盖 enabled 字段", func(t *testing.T) {
+		overrides := []DictSpec{
+			{ID: "extra", Enabled: boolPtr(true)},
+		}
+		result := mergeDictsByID(base, overrides)
+		if len(result) != 2 {
+			t.Fatalf("期望 2 条，实际 %d", len(result))
+		}
+		if result[1].Path != "extra.yaml" {
+			t.Errorf("Path 应从 base 继承，got %s", result[1].Path)
+		}
+		if result[1].Enabled == nil || !*result[1].Enabled {
+			t.Error("Enabled 应被设为 true")
+		}
+	})
+
+	t.Run("用户新增第三方词库", func(t *testing.T) {
+		overrides := []DictSpec{
+			{ID: "custom", Path: "custom.yaml", Type: "rime_codetable"},
+		}
+		result := mergeDictsByID(base, overrides)
+		if len(result) != 3 {
+			t.Fatalf("期望 3 条，实际 %d", len(result))
+		}
+		if result[2].ID != "custom" {
+			t.Errorf("新增词库应追加到末尾，got %s", result[2].ID)
+		}
+	})
+
+	t.Run("用户新增词库缺少 Path 或 Type 时不追加", func(t *testing.T) {
+		overrides := []DictSpec{
+			{ID: "bad", Path: "", Type: "rime_codetable"},
+		}
+		result := mergeDictsByID(base, overrides)
+		if len(result) != 2 {
+			t.Fatalf("不完整的新增词库不应追加，实际 %d", len(result))
+		}
+	})
+
+	t.Run("overrides 为空时返回 base 副本", func(t *testing.T) {
+		result := mergeDictsByID(base, nil)
+		if len(result) != len(base) {
+			t.Fatalf("期望 %d，实际 %d", len(base), len(result))
+		}
+	})
+}

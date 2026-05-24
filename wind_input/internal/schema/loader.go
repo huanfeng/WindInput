@@ -127,10 +127,14 @@ func loadAndMergeUserSchemas(dir string, schemas map[string]*Schema) error {
 		if builtin, ok := schemas[peek.Schema.ID]; ok && peek.Schema.ID != "" {
 			// 存在同 ID 内置方案：深拷贝内置方案作为基础，用户配置覆盖其上
 			s = deepCopySchema(builtin)
+			// 记录内置词库列表，用于后续按 id 合并（yaml.Unmarshal 会全量替换数组）
+			baseDicts := s.Dicts
 			if err := yaml.Unmarshal(data, s); err != nil {
 				fmt.Fprintf(os.Stderr, "[schema] 合并方案文件失败 %s: %v\n", path, err)
 				continue
 			}
+			// 修复 dictionaries 数组合并：按 id patch，不全量替换
+			s.Dicts = mergeDictsByID(baseDicts, s.Dicts)
 		} else {
 			// 无内置方案：作为全新方案加载
 			s = &Schema{}
@@ -149,6 +153,35 @@ func loadAndMergeUserSchemas(dir string, schemas map[string]*Schema) error {
 	}
 
 	return nil
+}
+
+// mergeDictsByID 以 base 为底，将 overrides 按 id 匹配后 patch 进去。
+// 匹配到的条目：只覆盖用户显式设置的字段（目前主要是 Enabled）。
+// 未匹配且字段完整的 override 条目：作为新词库追加。
+//
+// 注：这是"按 id 合并数组"的通用模式。
+// 若未来其他数组字段有相同需求，可参考此函数提取为泛型工具。
+func mergeDictsByID(base, overrides []DictSpec) []DictSpec {
+	result := make([]DictSpec, len(base))
+	copy(result, base)
+
+	baseIndex := make(map[string]int, len(base))
+	for i, d := range result {
+		baseIndex[d.ID] = i
+	}
+
+	for _, ov := range overrides {
+		if idx, ok := baseIndex[ov.ID]; ok {
+			// 只覆盖用户显式设置的字段
+			if ov.Enabled != nil {
+				result[idx].Enabled = ov.Enabled
+			}
+		} else if ov.ID != "" && ov.Path != "" && ov.Type != "" {
+			// 用户新增的第三方词库（需完整字段才允许追加）
+			result = append(result, ov)
+		}
+	}
+	return result
 }
 
 // deepCopySchema 通过 YAML 序列化/反序列化实现方案的深拷贝

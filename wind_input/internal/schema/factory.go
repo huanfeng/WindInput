@@ -196,21 +196,27 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 
 	engine := codetable.NewEngine(config, logger)
 
-	// 加载主码表
-	dictSpec := s.GetDefaultDictSpec()
-	if dictSpec != nil {
-		srcPath := resolvePath(exeDir, dataDir, dictSpec.Path)
+	// 加载词库（主词库 + 所有已启用的附加词库）
+	// dm 在此处尚未完成注册，附加词库需等主码表注册完成后再注册 system layer，
+	// 故此处只加载主码表；附加词库在 dm 注册块之后处理。
+	mainDictSpec := s.GetDefaultDictSpec()
+	if mainDictSpec == nil {
+		return nil, fmt.Errorf("方案 %s: 没有 default:true 的主词库", s.Schema.ID)
+	}
+	{
+		srcPath := resolvePath(exeDir, dataDir, mainDictSpec.Path)
+		cacheKey := s.Schema.ID + "_" + mainDictSpec.ID
 		var norm *dict.WeightNormalizer
-		if dictSpec.WeightSpec != nil {
-			norm = dictSpec.WeightSpec.NewWeightNormalizer()
+		if mainDictSpec.WeightSpec != nil {
+			norm = mainDictSpec.WeightSpec.NewWeightNormalizer()
 		}
-		if dictSpec.WeightAsOrder {
+		if mainDictSpec.WeightAsOrder {
 			config.WeightAsOrder = true
 		}
-		if err := loadCodetable(engine, srcPath, dictSpec.Type, s.Schema.ID, logger, norm); err != nil {
-			return nil, fmt.Errorf("加载码表失败: %w", err)
+		if err := loadCodetable(engine, srcPath, mainDictSpec.Type, cacheKey, logger, norm); err != nil {
+			return nil, fmt.Errorf("加载主码表失败: %w", err)
 		}
-		logger.Info("码表加载成功", "schemaID", s.Schema.ID, "entryCount", engine.GetEntryCount())
+		logger.Info("主码表加载成功", "schemaID", s.Schema.ID, "dictID", mainDictSpec.ID, "entryCount", engine.GetEntryCount())
 	}
 
 	// 注册码表为 CompositeDict 的 system layer + 设置 DictManager
@@ -255,6 +261,20 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 			engine.SetLearningStrategy(autoPhrase)
 		} else {
 			engine.SetLearningStrategy(&ManualLearning{})
+		}
+	}
+
+	// 加载附加词库（非 default 且 enabled 的词库条目）
+	if dm != nil {
+		for _, dictSpec := range s.Dicts {
+			if dictSpec.Default || !dictSpec.IsEnabled() {
+				continue
+			}
+			srcPath := resolvePath(exeDir, dataDir, dictSpec.Path)
+			cacheKey := s.Schema.ID + "_" + dictSpec.ID
+			if err := loadExtraCodetable(dm, srcPath, dictSpec, cacheKey, logger); err != nil {
+				logger.Warn("附加词库加载失败，跳过", "dictID", dictSpec.ID, "error", err)
+			}
 		}
 	}
 
@@ -529,7 +549,7 @@ func loadUnigramModel(engine *pinyin.Engine, txtPath string, logger *slog.Logger
 	return fmt.Errorf("Unigram 模型 wdb 不可用，智能组句功能将不可用")
 }
 
-func loadCodetable(engine *codetable.Engine, srcPath string, dictType DictType, schemaID string, logger *slog.Logger, normalizer *dict.WeightNormalizer) error {
+func loadCodetable(engine *codetable.Engine, srcPath string, dictType DictType, cacheKey string, logger *slog.Logger, normalizer *dict.WeightNormalizer) error {
 	var srcDir string
 	var srcPaths []string
 
@@ -544,9 +564,9 @@ func loadCodetable(engine *codetable.Engine, srcPath string, dictType DictType, 
 	}
 
 	// 在加载入口列出所有发现的源文件，便于排查"应有的词库未被合并"问题
-	logger.Info("码表源文件清单", "schemaID", schemaID, "type", dictType, "count", len(srcPaths), "files", srcPaths)
+	logger.Info("码表源文件清单", "cacheKey", cacheKey, "type", dictType, "count", len(srcPaths), "files", srcPaths)
 
-	wdbInDir := filepath.Join(srcDir, schemaID+".wdb")
+	wdbInDir := filepath.Join(srcDir, cacheKey+".wdb")
 	if len(srcPaths) > 0 && !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
 		if changed, recorded := dictcache.SourceListChanged(wdbInDir, srcPaths); changed {
 			logger.Info("wdb 源文件清单已变化, 强制重建", "wdb", wdbInDir, "recorded", recorded, "current", srcPaths)
@@ -555,7 +575,7 @@ func loadCodetable(engine *codetable.Engine, srcPath string, dictType DictType, 
 		}
 	}
 
-	wdbCachePath := dictcache.CachePath(schemaID)
+	wdbCachePath := dictcache.CachePath(cacheKey)
 	regen := len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath)
 	if !regen {
 		if changed, recorded := dictcache.SourceListChanged(wdbCachePath, srcPaths); changed {
@@ -589,9 +609,97 @@ func loadCodetable(engine *codetable.Engine, srcPath string, dictType DictType, 
 			return fmt.Errorf("重新生成码表失败: %w", convertErr)
 		}
 		if err := loadCodetableFromWdb(engine, wdbCachePath); err != nil {
-			return fmt.Errorf("加载重新生成的 %s.wdb 失败: %w", schemaID, err)
+			return fmt.Errorf("加载重新生成的 %s.wdb 失败: %w", cacheKey, err)
 		}
 	}
+	return nil
+}
+
+// loadExtraCodetable 加载附加词库为独立 CodeTable，注册为 DictManager 额外 system layer。
+// 附加词库加载失败为非致命错误：调用方记录警告后跳过，不影响主词库工作。
+func loadExtraCodetable(dm *dict.DictManager, srcPath string, spec DictSpec, cacheKey string, logger *slog.Logger) error {
+	if dm == nil {
+		return nil
+	}
+
+	srcDir := filepath.Dir(srcPath)
+	var srcPaths []string
+	if spec.Type == DictTypeRimeCodetable {
+		srcPaths = dictcache.RimeCodetableSourcePaths(srcPath)
+	} else {
+		srcPaths = []string{srcPath}
+	}
+
+	logger.Info("附加词库源文件清单", "cacheKey", cacheKey, "type", spec.Type, "count", len(srcPaths))
+
+	// 快捷路径：尝试加载源目录中的预编译 wdb（与 loadCodetable 行为对齐）
+	wdbInDir := filepath.Join(srcDir, cacheKey+".wdb")
+	if len(srcPaths) > 0 && !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
+		if changed, recorded := dictcache.SourceListChanged(wdbInDir, srcPaths); changed {
+			logger.Info("附加词库预编译 wdb 源文件清单已变化，跳过快捷路径", "wdb", wdbInDir, "recorded", recorded, "current", srcPaths)
+		} else {
+			ct := dict.NewCodeTable()
+			if err := ct.LoadBinary(wdbInDir); err == nil {
+				layerName := "codetable-extra-" + spec.ID
+				layer := dict.NewCodeTableLayer(layerName, dict.LayerTypeSystem, ct)
+				dm.RegisterSystemLayer(layerName, layer)
+				logger.Info("附加词库已注册(预编译 wdb)", "layer", layerName, "entryCount", ct.EntryCount())
+				return nil
+			}
+		}
+	}
+
+	wdbCachePath := dictcache.CachePath(cacheKey)
+	regen := len(srcPaths) == 0 || dictcache.NeedsRegenerate(srcPaths, wdbCachePath)
+	if !regen {
+		if changed, recorded := dictcache.SourceListChanged(wdbCachePath, srcPaths); changed {
+			logger.Info("附加词库缓存源文件清单已变化，强制重建", "cacheKey", cacheKey, "recorded", recorded, "current", srcPaths)
+			regen = true
+		}
+	}
+	if regen {
+		var norm *dict.WeightNormalizer
+		if spec.WeightSpec != nil {
+			norm = spec.WeightSpec.NewWeightNormalizer()
+		}
+		var convertErr error
+		if spec.Type == DictTypeRimeCodetable {
+			convertErr = dictcache.ConvertRimeCodetableToWdb(srcPath, wdbCachePath, logger, norm)
+		} else {
+			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath, logger)
+		}
+		if convertErr != nil {
+			return fmt.Errorf("转换附加词库 %s 到 wdb 失败: %w", cacheKey, convertErr)
+		}
+	}
+
+	ct := dict.NewCodeTable()
+	if err := ct.LoadBinary(wdbCachePath); err != nil {
+		// 缓存文件可能损坏，删除后重新生成
+		logger.Warn("缓存附加词库损坏，删除后重新生成", "path", wdbCachePath, "error", err)
+		os.Remove(wdbCachePath)
+		var norm *dict.WeightNormalizer
+		if spec.WeightSpec != nil {
+			norm = spec.WeightSpec.NewWeightNormalizer()
+		}
+		var convertErr error
+		if spec.Type == DictTypeRimeCodetable {
+			convertErr = dictcache.ConvertRimeCodetableToWdb(srcPath, wdbCachePath, logger, norm)
+		} else {
+			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath, logger)
+		}
+		if convertErr != nil {
+			return fmt.Errorf("重新生成附加词库失败: %w", convertErr)
+		}
+		if err := ct.LoadBinary(wdbCachePath); err != nil {
+			return fmt.Errorf("加载重新生成的附加词库 %s 失败: %w", cacheKey, err)
+		}
+	}
+
+	layerName := "codetable-extra-" + spec.ID
+	layer := dict.NewCodeTableLayer(layerName, dict.LayerTypeSystem, ct)
+	dm.RegisterSystemLayer(layerName, layer)
+	logger.Info("附加词库已注册", "layer", layerName, "entryCount", ct.EntryCount())
 	return nil
 }
 
@@ -801,6 +909,26 @@ func resolvePath(exeDir, dataDir, path string) string {
 	return path
 }
 
+// ReloadExtraDicts 根据方案 Dicts 配置动态加载/卸载附加词库层。
+// 用于 dict enabled 状态变更后的热重载，不重建主词库。
+func ReloadExtraDicts(dm *dict.DictManager, s *Schema, exeDir, dataDir string, logger *slog.Logger) {
+	for _, dictSpec := range s.Dicts {
+		if dictSpec.Default {
+			continue
+		}
+		layerName := "codetable-extra-" + dictSpec.ID
+		if !dictSpec.IsEnabled() {
+			dm.UnregisterSystemLayer(layerName)
+			continue
+		}
+		srcPath := resolvePath(exeDir, dataDir, dictSpec.Path)
+		cacheKey := s.Schema.ID + "_" + dictSpec.ID
+		if err := loadExtraCodetable(dm, srcPath, dictSpec, cacheKey, logger); err != nil {
+			logger.Warn("附加词库热重载失败", "dictID", dictSpec.ID, "error", err)
+		}
+	}
+}
+
 // createMixedEngine 创建混输引擎（五笔+拼音并行查询）
 // 五笔引擎使用 DictManager 的主 CompositeDict（含 codetable-system 层），
 // 拼音引擎使用独立的 CompositeDict（含 pinyin-system 层），避免交叉污染。
@@ -926,6 +1054,12 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 	codetableCacheID := s.Schema.ID
 	if primarySchema != nil {
 		codetableCacheID = primarySchema.Schema.ID
+	}
+	// 与多词库命名约定对齐：cacheKey = schemaID_dictID
+	if codetableDictSpec != nil && codetableDictSpec.ID != "" {
+		codetableCacheID = codetableCacheID + "_" + codetableDictSpec.ID
+	} else if codetableDictSpec != nil {
+		logger.Warn("混输：码表 DictSpec.ID 为空，cacheKey 未追加 dictID，可能与主码表引擎缓存冲突", "schemaID", s.Schema.ID, "cacheKey", codetableCacheID)
 	}
 	if codetableDictSpec != nil {
 		srcPath := resolvePath(exeDir, dataDir, codetableDictSpec.Path)
