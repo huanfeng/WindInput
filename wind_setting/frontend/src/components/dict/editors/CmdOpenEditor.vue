@@ -2,7 +2,7 @@
 // 命令·打开 编辑器: 结构化输入单 action 的 $CC / $CC1 命令。
 // 子类型:
 //   url  → open("https://...")
-//   app  → run("path"[, "args"])
+//   app  → proc.run("path"[, "args"])
 //   file → open("path")
 
 import { Input } from "@/components/ui/input";

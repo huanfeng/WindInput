@@ -60,7 +60,7 @@ function inferEditorTypeForLoad(text: string): PhraseFormState["editorType"] {
   if (t.startsWith("$AA(")) return "array";
   if (t.startsWith("$CC1(") || t.startsWith("$CC(")) {
     const re =
-      /^\$CC(1)?\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*(open|run)\(\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*"((?:[^"\\]|\\.)*)")?\s*\)\s*\)$/;
+      /^\$CC(1)?\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*(open|proc\.run)\(\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*"((?:[^"\\]|\\.)*)")?\s*\)\s*\)$/;
     if (re.test(t)) return "cmd-open";
     return "cmd-raw";
   }
@@ -82,12 +82,12 @@ function loadFormFromText(state: PhraseFormState, text: string) {
   state.buffers.normal.text = text;
   if (kind === "cmd-open") {
     const re =
-      /^\$CC(1)?\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*(open|run)\(\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*"((?:[^"\\]|\\.)*)")?\s*\)\s*\)$/;
+      /^\$CC(1)?\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*(open|proc\.run)\(\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*"((?:[^"\\]|\\.)*)")?\s*\)\s*\)$/;
     const m = t.match(re);
     if (m) {
       const prefix1 = !!m[1];
       const display = unquote(m[2] ?? "");
-      const verb = m[3] as "open" | "run";
+      const verb = m[3] as "open" | "proc.run";
       const target = unquote(m[4] ?? "");
       const args = m[5] !== undefined ? unquote(m[5]) : "";
       state.buffers.cmdOpen.display = display;
@@ -96,7 +96,7 @@ function loadFormFromText(state: PhraseFormState, text: string) {
       state.buffers.cmdOpen.prefixVisible = prefix1;
       if (/^https?:\/\//i.test(target)) {
         state.buffers.cmdOpen.subKind = "url";
-      } else if (verb === "run") {
+      } else if (verb === "proc.run") {
         state.buffers.cmdOpen.subKind = "app";
       } else {
         state.buffers.cmdOpen.subKind = "file";

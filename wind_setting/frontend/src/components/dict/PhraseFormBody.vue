@@ -105,8 +105,8 @@ function composeCmdOpen(b: CmdOpenBuffer): string {
     action = `open(${escapeStr(b.target)})`;
   } else {
     action = b.args.trim()
-      ? `run(${escapeStr(b.target)}, ${escapeStr(b.args)})`
-      : `run(${escapeStr(b.target)})`;
+      ? `proc.run(${escapeStr(b.target)}, ${escapeStr(b.args)})`
+      : `proc.run(${escapeStr(b.target)})`;
   }
   return `${marker}(${disp}, ${action})`;
 }
@@ -127,8 +127,8 @@ function composeArraySS(b: ArraySSBuffer): string {
         action = `open(${escapeStr(e.target)})`;
       } else {
         action = e.args.trim()
-          ? `run(${escapeStr(e.target)}, ${escapeStr(e.args)})`
-          : `run(${escapeStr(e.target)})`;
+          ? `proc.run(${escapeStr(e.target)}, ${escapeStr(e.args)})`
+          : `proc.run(${escapeStr(e.target)})`;
       }
       args.push(`$CC(${disp}, ${action})`);
     }
@@ -190,7 +190,7 @@ watch(
 
 // ── 反向解析 ──
 const cmdOpenRE =
-  /^\$CC(1)?\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*(open|run)\(\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*"((?:[^"\\]|\\.)*)")?\s*\)\s*\)$/;
+  /^\$CC(1)?\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*(open|proc\.run)\(\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*"((?:[^"\\]|\\.)*)")?\s*\)\s*\)$/;
 
 function matchesCmdOpen(text: string): RegExpMatchArray | null {
   return text.trim().match(cmdOpenRE);
@@ -220,13 +220,13 @@ function parseCmdOpenInto(text: string, buf: CmdOpenBuffer): boolean {
   if (!m) return false;
   const prefix1 = !!m[1];
   const display = unquote(m[2] ?? "");
-  const verb = m[3] as "open" | "run";
+  const verb = m[3] as "open" | "proc.run";
   const target = unquote(m[4] ?? "");
   const args = m[5] !== undefined ? unquote(m[5]) : "";
   let subKind: CmdOpenSubKind;
   if (/^https?:\/\//i.test(target)) {
     subKind = "url";
-  } else if (verb === "run") {
+  } else if (verb === "proc.run") {
     subKind = "app";
   } else {
     subKind = "file";
