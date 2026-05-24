@@ -31,14 +31,31 @@ engine:
 dictionaries:
   - id: wubi86_main
     label: "极点五笔主词库"
+    description: "极点五笔基础词库，含单字与高频词组"
     path: "wubi86/wubi86_jidian.dict.yaml"
     type: rime_codetable
     default: true
-    # 此文件内部 import_tables 所引用文件视为此条目整体
 
   - id: wubi86_extra
-    label: "极点五笔扩展词库"
+    label: "扩展词库"
+    description: "新词、网络用语、生僻词等非常用词条"
     path: "wubi86/wubi86_jidian_extra.dict.yaml"
+    type: rime_codetable
+    default_enabled: true
+    weight_as_order: true
+
+  - id: wubi86_emoji
+    label: "Emoji 表情"
+    description: "按五笔编码检索 emoji；输入 emoj 可查看常用表情"
+    path: "wubi86/wubi86_jidian_emoji.dict.yaml"
+    type: rime_codetable
+    default_enabled: true
+    weight_as_order: true
+
+  - id: wubi86_xzqy
+    label: "行政区域"
+    description: "省市县区等地名词条"
+    path: "wubi86/wubi86_jidian_extra_district.dict.yaml"
     type: rime_codetable
     default_enabled: false
     weight_as_order: true
