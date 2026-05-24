@@ -134,7 +134,8 @@ const (
 // DictSpec 词库规格
 type DictSpec struct {
 	ID             string      `yaml:"id"`
-	Label          string      `yaml:"label,omitempty"` // UI 显示名称；空时回退为 id
+	Label          string      `yaml:"label,omitempty"`       // UI 显示名称；空时回退为 id
+	Description    string      `yaml:"description,omitempty"` // 备注说明，显示在 UI 开关下方
 	Path           string      `yaml:"path"`
 	Type           DictType    `yaml:"type"`
 	Default        bool        `yaml:"default"`

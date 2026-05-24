@@ -337,6 +337,7 @@ function isReferencedBy(schemaID: string): boolean {
               >
                 <div class="setting-info">
                   <label>{{ dictDisplayLabel(d) }}</label>
+                  <span v-if="d.description" class="setting-hint">{{ d.description }}</span>
                 </div>
                 <div class="setting-control">
                   <Switch

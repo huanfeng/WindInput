@@ -125,6 +125,7 @@ type SchemaConfigEngine struct {
 type SchemaConfigDict struct {
 	ID             string      `yaml:"id" json:"id"`
 	Label          string      `yaml:"label,omitempty" json:"label,omitempty"`
+	Description    string      `yaml:"description,omitempty" json:"description,omitempty"`
 	Path           string      `yaml:"path" json:"path"`
 	Type           string      `yaml:"type" json:"type"`
 	Default        bool        `yaml:"default" json:"default"`

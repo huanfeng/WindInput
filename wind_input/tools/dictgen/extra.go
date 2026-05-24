@@ -181,6 +181,14 @@ func processExtra(cfg *Config, unigram map[string]int64, logMedian float64) erro
 		buckets[cat] = list
 	}
 
+	// 合并自定义 emoj 编码 emoji（手动维护的常用 emoji 快捷入口）
+	if customEmoji, cerr := loadCustomEmoji(cfg.CustomEmojiPath); cerr != nil {
+		fmt.Printf("      [custom_emoji] 加载失败，跳过: %v\n", cerr)
+	} else if len(customEmoji) > 0 {
+		buckets[catEmoji] = append(customEmoji, buckets[catEmoji]...)
+		fmt.Printf("      [custom_emoji] 注入 %d 条 emoj 编码条目\n", len(customEmoji))
+	}
+
 	for _, cat := range []extraCategory{catCJK, catEmoji, catEnglish, catSymbol} {
 		list := buckets[cat]
 		name := fmt.Sprintf("%s_%s", cfg.OutputName, cat.suffix())
@@ -211,6 +219,51 @@ func extraOutputPath(mainPath, outputName, suffix string) string {
 	base := filepath.Base(mainPath)
 	newBase := strings.Replace(base, outputName, outputName+"_"+suffix, 1)
 	return filepath.Join(dir, newBase)
+}
+
+// loadCustomEmoji 从文件加载自定义 emoji 列表，每行一个 emoji，
+// 按行序从高到低分配权重（起始 200），code 固定为 "emoj"。
+// 文件不存在时返回空列表（非错误）。
+func loadCustomEmoji(path string) ([]Entry, error) {
+	if path == "" {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	var emojis []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		emojis = append(emojis, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	const baseWeight = 200
+	entries := make([]Entry, 0, len(emojis))
+	for i, emoji := range emojis {
+		w := baseWeight - i
+		if w < 1 {
+			w = 1
+		}
+		entries = append(entries, Entry{
+			Text:       emoji,
+			Code:       "emoj",
+			OrigWeight: w,
+		})
+	}
+	return entries, nil
 }
 
 func writeExtraYAML(path string, entries []Entry, name string, cat extraCategory) error {

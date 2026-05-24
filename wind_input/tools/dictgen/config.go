@@ -57,6 +57,10 @@ type Config struct {
 	// 自定义词表（可选，不存在则跳过）
 	CustomWordsPath string `yaml:"custom_words_path"`
 
+	// 自定义 emoji 列表（可选，每行一个 emoji，按行序分配 emoj 编码权重）
+	// 这些条目会合并到 extra 处理输出的 emoji bucket 中
+	CustomEmojiPath string `yaml:"custom_emoji_path"`
+
 	// 词序提升表（可选，不存在则跳过）：调整已有 (code, text) 条目的权重
 	BoostsPath string `yaml:"boosts_path"`
 
@@ -157,6 +161,7 @@ func loadConfig(path string) (*Config, error) {
 	cfg.UnigramPath = resolve(cfg.UnigramPath)
 	cfg.OutputPath = resolve(cfg.OutputPath)
 	cfg.CustomWordsPath = resolve(cfg.CustomWordsPath)
+	cfg.CustomEmojiPath = resolve(cfg.CustomEmojiPath)
 	cfg.BoostsPath = resolve(cfg.BoostsPath)
 	cfg.DroppedPath = resolve(cfg.DroppedPath)
 	cfg.ConflictReportPath = resolve(cfg.ConflictReportPath)

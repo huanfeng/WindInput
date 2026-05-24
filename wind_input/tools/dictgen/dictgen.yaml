@@ -8,6 +8,9 @@ unigram_path: ../../../.cache/pinyin-frost/unigram.txt
 # 自定义补充词表（不存在则跳过）
 custom_words_path: custom_words.txt
 
+# 自定义 emoj 编码 emoji 列表（每行一个，按行序分配权重，合并到 emoji bucket）
+custom_emoji_path: custom_emoji.txt
+
 # 词序提升表（可选，不存在则跳过）
 # 调整已有 (code, text) 条目的权重：顶置 / 相对位置 / 绝对权重，详见文件头部注释
 boosts_path: boost_words.txt
@@ -19,12 +22,8 @@ output_name: wubi86_jidian
 dropped_path: ../../../.cache/rime-wubi/wubi86_jidian.dict.filtered.tsv
 
 # 生成文件中引用的扩展词库（写入 import_tables 段）
-import_tables:
-  - wubi86_jidian_extra      # 由 dictgen 拆分后的中文条目
-  - wubi86_jidian_emoji      # emoji 条目
-  # - wubi86_jidian_english  # 英文/品牌（默认不引入，需要时取消注释）
-  # - wubi86_jidian_symbols  # 特殊字符（默认不引入）
-  #- wubi86_jidian_extra_district
+# emoji/extra/xzqy 均已作为独立 dictionaries 条目在 schema.yaml 中声明，不再通过 import_tables 内联
+import_tables: []
 
 # 扩展词库处理：把 jidian_extra.dict.yaml 按字符类型拆分为 4 个独立文件
 # 中文条目（CJK 桶）按 unigram 加权；emoji/english/symbols 桶保留原权重
