@@ -10,6 +10,15 @@ import {
   SelectContent,
   SelectItem,
 } from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import SchemaRenderer from "@/components/SchemaRenderer.vue";
 import {
   themeExtraSchema,
@@ -57,6 +66,54 @@ const systemFontOptions = computed(() => {
     label: font.display_name || font.family,
   }));
 });
+
+// 命令直通车标注模式: 把 cmdbar_candidate_prefix 单字段映射成 3 种模式。
+// undefined / "⚡" → default, "" → none, 其他 → custom。
+type CmdbarPrefixMode = "default" | "none" | "custom";
+const cmdbarPrefixMode = computed<CmdbarPrefixMode>(() => {
+  const v = props.formData.ui.cmdbar_candidate_prefix;
+  if (v == null || v === "⚡") return "default";
+  if (v === "") return "none";
+  return "custom";
+});
+function setCmdbarPrefixMode(mode: CmdbarPrefixMode) {
+  if (mode === "default") {
+    props.formData.ui.cmdbar_candidate_prefix = "⚡";
+  } else if (mode === "none") {
+    props.formData.ui.cmdbar_candidate_prefix = "";
+  } else {
+    // custom: 已有自定义值直接保留 + 打开弹框给用户改;
+    // 没有自定义值时先记住旧值, 打开弹框等用户输入, 取消或空输入回退到旧值。
+    openCmdbarPrefixDialog();
+  }
+}
+
+// 自定义符号编辑弹框: 用临时草稿避免在弹框输入时直接 mutate 主表单引发布局抖动。
+const cmdbarPrefixDialogOpen = ref(false);
+const cmdbarPrefixDraft = ref("");
+// 打开弹框前的原值, 用于取消或空提交时回退
+const cmdbarPrefixFallback = ref<string | null | undefined>(undefined);
+function openCmdbarPrefixDialog() {
+  const cur = props.formData.ui.cmdbar_candidate_prefix;
+  cmdbarPrefixFallback.value = cur;
+  // 已经是自定义符号 (非空且非默认 ⚡) 时, 用现值作为草稿; 否则草稿留空
+  cmdbarPrefixDraft.value = cur && cur !== "⚡" ? cur : "";
+  cmdbarPrefixDialogOpen.value = true;
+}
+function confirmCmdbarPrefixDialog() {
+  const v = cmdbarPrefixDraft.value.trim();
+  if (v === "") {
+    cancelCmdbarPrefixDialog();
+    return;
+  }
+  props.formData.ui.cmdbar_candidate_prefix = v;
+  cmdbarPrefixDialogOpen.value = false;
+}
+function cancelCmdbarPrefixDialog() {
+  // 把字段恢复到打开弹框前的值, 让 cmdbarPrefixMode 计算属性切回正确的下拉项
+  props.formData.ui.cmdbar_candidate_prefix = cmdbarPrefixFallback.value;
+  cmdbarPrefixDialogOpen.value = false;
+}
 
 function onThemeSelect(themeName: string) {
   props.formData.ui.theme = themeName;
@@ -394,6 +451,39 @@ onUnmounted(() => {
         :form-data="formData"
         mode="bare"
       />
+      <div class="setting-item">
+        <div class="setting-info">
+          <label>命令直通车标注</label>
+          <p class="setting-hint">命令候选前的提示符号</p>
+        </div>
+        <div class="setting-control inline-control">
+          <Select
+            :model-value="cmdbarPrefixMode"
+            @update:model-value="setCmdbarPrefixMode($event as any)"
+          >
+            <SelectTrigger class="w-[140px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="default">默认 ⚡</SelectItem>
+              <SelectItem value="none">不显示</SelectItem>
+              <SelectItem value="custom">自定义</SelectItem>
+            </SelectContent>
+          </Select>
+          <template v-if="cmdbarPrefixMode === 'custom'">
+            <span class="cmdbar-prefix-chip">{{
+              formData.ui.cmdbar_candidate_prefix
+            }}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              @click="openCmdbarPrefixDialog"
+            >
+              编辑
+            </Button>
+          </template>
+        </div>
+      </div>
     </div>
 
     <div class="settings-card">
@@ -452,10 +542,71 @@ onUnmounted(() => {
         mode="bare"
       />
     </div>
+
+    <Dialog
+      :open="cmdbarPrefixDialogOpen"
+      @update:open="(v: boolean) => !v && cancelCmdbarPrefixDialog()"
+    >
+      <DialogContent class="sm:max-w-[360px]">
+        <DialogHeader>
+          <DialogTitle>命令直通车标注符号</DialogTitle>
+          <DialogDescription>
+            输入 1-4 个字符作为命令候选前的提示符号
+          </DialogDescription>
+        </DialogHeader>
+        <input
+          type="text"
+          class="cmdbar-prefix-input"
+          maxlength="4"
+          v-model="cmdbarPrefixDraft"
+          @keydown.enter="confirmCmdbarPrefixDialog"
+        />
+        <DialogFooter>
+          <Button
+            variant="outline"
+            size="sm"
+            @click="cancelCmdbarPrefixDialog"
+          >
+            取消
+          </Button>
+          <Button size="sm" @click="confirmCmdbarPrefixDialog">确定</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </section>
 </template>
 
 <style scoped>
+/* 命令直通车标注 — 当前符号 chip + 弹框输入框 */
+.cmdbar-prefix-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  padding: 0 8px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--muted, #f1f5f9);
+  border: 1px solid var(--border, #e2e8f0);
+  font-size: 14px;
+  line-height: 1;
+}
+.cmdbar-prefix-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #e2e8f0);
+  background: var(--background, #fff);
+  color: inherit;
+  font-size: 18px;
+  text-align: center;
+  outline: none;
+}
+.cmdbar-prefix-input:focus {
+  border-color: var(--primary, #3b82f6);
+}
+
 /* 问号提示图标 */
 .preview-hint-icon {
   display: inline-flex;

@@ -99,6 +99,8 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 		}
 		// 设置候选文本最大显示字符数
 		c.uiManager.SetMaxCandidateChars(uiConfig.MaxCandidateChars)
+		// 更新副作用 cmdbar 候选的渲染前缀
+		c.uiManager.SetCmdbarCandidatePrefix(uiConfig.GetCmdbarCandidatePrefix())
 		// 更新主题风格和主题
 		c.updateThemeStyle(uiConfig)
 	}

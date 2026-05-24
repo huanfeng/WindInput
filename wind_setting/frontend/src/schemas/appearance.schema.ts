@@ -98,6 +98,8 @@ export const candidateWindowSchema: PageSchema = [
     step: 1,
     displayValue: (v) => `${v} 字`,
   },
+  // 命令直通车标注 (cmdbar_candidate_prefix): 手写, 模式选择 + 自定义符号联动,
+  // 见 AppearancePage.vue "候选窗口" 卡片。
 ];
 
 // ── 状态提示卡片（show_mode/show_punct/show_full_width 复选框组手写）──

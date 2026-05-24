@@ -216,6 +216,15 @@ func (m *Manager) applyPagerOverride() {
 	}
 }
 
+// SetCmdbarCandidatePrefix 设置副作用 cmdbar 候选 (Actions 含 ActionEffect) 的渲染前缀。
+// 空字符串表示完全不显示前缀。
+func (m *Manager) SetCmdbarCandidatePrefix(prefix string) {
+	if m.renderer != nil {
+		m.renderer.SetCmdbarPrefix(prefix)
+		m.logger.Info("Cmdbar candidate prefix updated", "prefixLen", len(prefix))
+	}
+}
+
 // SetMaxCandidateChars 设置候选文本最大显示 rune 数（0 表示不限制）
 func (m *Manager) SetMaxCandidateChars(n int) {
 	m.mu.Lock()

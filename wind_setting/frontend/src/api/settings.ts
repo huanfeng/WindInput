@@ -125,6 +125,10 @@ export interface UIConfig {
   pager_display_mode: PagerDisplayModeValue;
   tooltip: TooltipConfig;
   tooltip_delay: number; // 悬停候选触发 tooltip 的延迟（毫秒）
+  // 副作用命令直通车候选 (Actions 含 ActionEffect) 的渲染前缀符号。
+  // 未设置 (undefined / 字段缺省) 时使用默认 "⚡"; 设为空串完全关闭; 可填自定义符号如 "▶"。
+  // 仅 type(...) 上屏的命令视觉上与普通候选无差, 不会加前缀。
+  cmdbar_candidate_prefix?: string | null;
 }
 
 // 工具栏配置

@@ -29,6 +29,7 @@
 - **新增枚举**：`PagerDisplayMode`（`"" | "never" | "auto" | "always"`），控制页码显示方式的用户级覆盖；空字符串（`PagerDisplayDefault`）表示使用主题配置
 - **新增 UIConfig 字段**：`PagerDisplayMode`（`pager_display_mode`），空值=使用主题配置，never=不显示页码文字，auto=多页时显示，always=总是显示
 - **新增 AdvancedConfig 字段**：`HostRenderProcesses`（Band 窗口宿主进程白名单，默认 `["SearchHost.exe"]`）
+- **新增 UIConfig 字段**：`CmdbarCandidatePrefix *string`（`cmdbar_candidate_prefix`），副作用命令直通车候选的渲染前缀；nil=默认 "⚡"，""=完全不显示，其他字符串=自定义符号。使用 `UIConfig.GetCmdbarCandidatePrefix()` 取值。
 - 新增配置项时：在对应子结构体添加字段，设置 YAML 标签，在 `DefaultConfig()` 中提供默认值，在 `applyConfigFallbacks()` 中处理兜底
 - `RuntimeState` 与 `Config` 分开存储（`state.yaml`），避免用户编辑配置时覆盖运行时状态
 - 数据根目录通过 `GetDataDir(exeDir)` 获取（`exeDir/data`），词库和 Schema 文件均位于此目录下

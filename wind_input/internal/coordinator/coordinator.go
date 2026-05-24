@@ -671,6 +671,8 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		}
 		// 设置候选文本最大显示字符数
 		c.uiManager.SetMaxCandidateChars(cfg.UI.MaxCandidateChars)
+		// 设置副作用 cmdbar 候选的渲染前缀
+		c.uiManager.SetCmdbarCandidatePrefix(cfg.UI.GetCmdbarCandidatePrefix())
 		// 初始化主题暗色模式并加载主题
 		c.initThemeMode(cfg)
 	}

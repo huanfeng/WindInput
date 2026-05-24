@@ -59,6 +59,7 @@ Windows 原生 UI 渲染层。使用 Win32 API 实现输入法的所有可见界
 - `Manager.SetActiveAppPinState(enabled, positionsByMonitor)` 推送当前应用「固定候选位置」状态（compat 规则 `pin_candidate_position`）；coordinator 在焦点切换 / 菜单 toggle / 拖动落盘后调用；`doShowCandidates` 中 `resolveAppPinnedPosition` 按 caret 所在显示器查表，clamp 到工作区后作为候选窗位置（优先级高于会话内 drag pin）
 - `CandidateCallback.OnDragEnd(x, y)` 在候选窗拖动结束时回调，coordinator 用于将位置持久化到 `state.yaml`（仅当当前应用启用了 pin 规则时落盘）
 - 统一菜单常量：`UnifiedMenuSkipCaretPending=304`（即时候选）、`UnifiedMenuPinCandidatePosition=305`（固定候选位置）；菜单文案中的 `<进程名>` 来自 `UnifiedMenuState.ActiveProcessName`，菜单弹出时由 coordinator 捕获快照传入
+- 候选渲染常量 `DefaultCmdbarCandidatePrefix="⚡"`：副作用 cmdbar 候选 (`Actions` 含 `cmdbar.ActionEffect`) 的默认前缀；运行时值存 `RenderConfig.CmdbarPrefix`，通过 `Renderer.SetCmdbarPrefix(prefix)` 或 `Manager.SetCmdbarCandidatePrefix(prefix)` 注入，空串表示完全不显示。仅含 `ActionText`（`type(...)` 上屏）的候选与普通文本候选视觉上等价, 不会加前缀。
 
 ### Testing Requirements
 - UI 代码高度依赖 Windows GDI/Win32，无法做纯 Go 单元测试

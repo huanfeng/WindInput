@@ -7,15 +7,28 @@ import (
 	"math"
 	"strings"
 
+	"github.com/huanfeng/wind_input/internal/cmdbar"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
-// CmdbarCandidatePrefix 副作用候选 (cand.Actions 非空) 在候选框中渲染时的前缀符号。
-// 让用户在候选列表里一眼分辨"普通文本候选"和"命令直通车候选"(选中后执行动作)。
-// 当前用闪电符号; 不同字体渲染效果可能差异较大, 后续根据实测可调整 (例如改用
-// ▶ / · / *)。candidate 自身的 Text 字段保持原状, 仅渲染时拼字符串, 避免污染
-// 历史记录和右键菜单文案。
-const CmdbarCandidatePrefix = "⚡"
+// DefaultCmdbarCandidatePrefix 副作用候选在候选框中渲染时的默认前缀符号。
+// 让用户在候选列表里一眼分辨"普通文本候选"和"会跑副作用的命令直通车候选"。
+// 用户可在 UI 配置中改成空串 (完全不显示) 或自定义符号 (如 ▶ / · / *)。
+// candidate 自身的 Text 字段保持原状, 仅渲染时拼字符串, 避免污染历史记录与
+// 右键菜单文案。
+const DefaultCmdbarCandidatePrefix = "⚡"
+
+// hasSideEffectAction 判定候选的 Actions 是否包含至少一个 ActionEffect (真副作用)。
+// 仅含 ActionText (即 type(...) 纯文本上屏) 的 cmdbar 候选视觉上与普通候选无差,
+// 不需要 ⚡ 标注。
+func hasSideEffectAction(actions []cmdbar.ResolvedAction) bool {
+	for _, a := range actions {
+		if a.Kind == cmdbar.ActionEffect {
+			return true
+		}
+	}
+	return false
+}
 
 // CandidateNewlineGlyph 候选标签中换行符 (\r / \n) 的占位渲染符号。
 // 候选框是单行控件, 候选文本含真实换行会撑破布局或与相邻候选重叠,
@@ -33,14 +46,16 @@ var candidateNewlineReplacer = strings.NewReplacer(
 
 // candidateDisplayText 返回候选实际渲染到候选框的文本。
 //   - 换行符 (\r / \n) 替换为 CandidateNewlineGlyph, 保证单行渲染;
-//   - 命令直通车候选 (Actions 非空) 在文本前加 CmdbarCandidatePrefix。
+//   - 命令直通车候选 (Actions 含 ActionEffect) 在文本前加 cmdbarPrefix; 当
+//     cmdbarPrefix 为空时永远不加; 候选所有 Action 均为 ActionText (即仅
+//     type(...) 上屏) 时也不加, 因为视觉上跟普通候选无差。
 //
 // candidate 自身的 Text 字段保持原状, 仅渲染时变换, 避免污染历史记录与
 // 右键菜单文案。
-func candidateDisplayText(cand Candidate) string {
+func candidateDisplayText(cand Candidate, cmdbarPrefix string) string {
 	text := candidateNewlineReplacer.Replace(cand.Text)
-	if len(cand.Actions) > 0 {
-		return CmdbarCandidatePrefix + text
+	if cmdbarPrefix != "" && hasSideEffectAction(cand.Actions) {
+		return cmdbarPrefix + text
 	}
 	return text
 }
@@ -182,7 +197,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	commentMarginRight := cfg.CommentMarginRight // 编码提示右间距
 
 	for _, cand := range candidates {
-		candTextWidth := td.MeasureString(candidateDisplayText(cand), cfg.FontSize) + textMarginRight
+		candTextWidth := td.MeasureString(candidateDisplayText(cand, cfg.CmdbarPrefix), cfg.FontSize) + textMarginRight
 		if cand.Comment != "" {
 			candTextWidth += commentMarginLeft + td.MeasureString(cand.Comment, commentSizeForWidth) + commentMarginRight
 		}
@@ -297,7 +312,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 	for i, cand := range candidates {
 		if cand.Comment != "" {
 			itemY := candStartY + float64(i)*cfg.ItemHeight
-			candWidth := td.MeasureString(candidateDisplayText(cand), cfg.FontSize)
+			candWidth := td.MeasureString(candidateDisplayText(cand, cfg.CmdbarPrefix), cfg.FontSize)
 			tx := textStartX
 			if cand.Index < 0 {
 				tx = padX + 8*scale
@@ -548,7 +563,7 @@ func (r *Renderer) renderVerticalCandidates(candidates []Candidate, input string
 			tx = padX + 8*scale // 无序号时文本靠左
 		}
 		maxTextWidth := width - tx - borderPadding
-		drawText := candidateDisplayText(cand)
+		drawText := candidateDisplayText(cand, cfg.CmdbarPrefix)
 		if maxTextWidth > 0 {
 			textW := td.MeasureString(drawText, cfg.FontSize)
 			if textW > maxTextWidth {
@@ -654,7 +669,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 
 	// Measure candidate text widths
 	for i, cand := range candidates {
-		measures[i].textWidth = td.MeasureString(candidateDisplayText(cand), cfg.FontSize)
+		measures[i].textWidth = td.MeasureString(candidateDisplayText(cand, cfg.CmdbarPrefix), cfg.FontSize)
 	}
 
 	// Measure comment widths
@@ -1108,7 +1123,7 @@ func (r *Renderer) renderHorizontalCandidates(candidates []Candidate, input stri
 		}
 
 		// Candidate text
-		td.DrawString(candidateDisplayText(cand), positions[i].textX, candY+cfg.FontSize/3, cfg.FontSize, cfg.TextColor)
+		td.DrawString(candidateDisplayText(cand, cfg.CmdbarPrefix), positions[i].textX, candY+cfg.FontSize/3, cfg.FontSize, cfg.TextColor)
 
 		// Comment
 		if cand.Comment != "" {

@@ -215,6 +215,24 @@ type UIConfig struct {
 	// MaxCandidateChars 候选文本最大显示 rune 数，超出后截断并追加"…"。
 	// 合法范围 8-64，0 或越界时回退到默认值 16。
 	MaxCandidateChars int `yaml:"max_candidate_chars,omitempty" json:"max_candidate_chars,omitempty"`
+
+	// CmdbarCandidatePrefix 副作用命令直通车候选 (Actions 含 ActionEffect) 在候选框
+	// 渲染时的前缀符号, 让用户一眼分辨"会跑副作用的命令"和普通文本候选。
+	// 仅 type(...) 上屏的命令视觉上与普通候选无差, 不会加前缀。
+	// 用 *string 区分三态:
+	//   - nil           未设置, 使用默认 "⚡"
+	//   - 指向空字符串  完全不显示
+	//   - 指向非空字符串 使用该符号 (如 "▶")
+	CmdbarCandidatePrefix *string `yaml:"cmdbar_candidate_prefix,omitempty" json:"cmdbar_candidate_prefix,omitempty"`
+}
+
+// GetCmdbarCandidatePrefix 返回 cmdbar 副作用候选的渲染前缀。
+// 未设置 (nil) 时返回默认 "⚡"; 显式设为空串时返回空串 (调用方据此关闭前缀)。
+func (u *UIConfig) GetCmdbarCandidatePrefix() string {
+	if u.CmdbarCandidatePrefix == nil {
+		return "⚡"
+	}
+	return *u.CmdbarCandidatePrefix
 }
 
 // ToolbarConfig contains toolbar settings

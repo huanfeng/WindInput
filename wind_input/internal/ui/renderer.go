@@ -56,6 +56,7 @@ type RenderConfig struct {
 	ModeAccentColor    color.Color            // Inner glow border color for special modes, nil = no glow
 	PreeditMode        config.PreeditMode     // "top" (default) or "embedded" (inline before candidates); only effective when HidePreedit=false
 	IndexLabels        string                 // 10 custom label chars replacing default 1-9,0; empty = default
+	CmdbarPrefix       string                 // 副作用 cmdbar 候选 (Actions 含 ActionEffect) 的前缀符号; 空 = 不显示前缀
 }
 
 // DefaultRenderConfig returns default rendering configuration with DPI scaling
@@ -81,6 +82,7 @@ func DefaultRenderConfig() RenderConfig {
 		Layout:          config.LayoutHorizontal,        // Default to horizontal layout
 		HidePreedit:     false,
 		ShowPageNumber:  true,
+		CmdbarPrefix:    DefaultCmdbarCandidatePrefix,
 	}
 }
 
@@ -315,6 +317,11 @@ func (r *Renderer) SetHidePreedit(hide bool) {
 // SetPreeditMode sets the preedit display mode ("top" or "embedded")
 func (r *Renderer) SetPreeditMode(mode config.PreeditMode) {
 	r.config.PreeditMode = mode
+}
+
+// SetCmdbarPrefix 设置副作用 cmdbar 候选的渲染前缀符号。空字符串=不显示前缀。
+func (r *Renderer) SetCmdbarPrefix(prefix string) {
+	r.config.CmdbarPrefix = prefix
 }
 
 // SetAlwaysShowPager 设置是否在单页时也显示翻页区域
