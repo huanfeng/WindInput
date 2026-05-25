@@ -89,6 +89,8 @@ CKeyEventSink::CKeyEventSink(CTextService* pTextService)
     , _isComposing(FALSE)
     , _hasCandidates(FALSE)
     , _needsCompositionResync(FALSE)
+    , _resyncDeadline(0)
+    , _resyncFailStreak(0)
     , _lastPassthroughDigit(0)
     , _pendingKeyUpKey(0)
     , _pendingKeyUpModifiers(0)
@@ -269,7 +271,7 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         BOOL chineseMode = _pTextService->IsChineseMode();
         // resync 期 (上次 IPC 失败后) 视作有会话, 让 ENTER/ESC/Backspace 等 session 热键
         // 也走 Go 重握手, 由 Go 权威响应清旗 + 重建状态。
-        BOOL hasSession  = _pTextService->HasActiveComposition() || _hasCandidates || _needsCompositionResync;
+        BOOL hasSession  = _pTextService->HasActiveComposition() || _hasCandidates || _IsResyncActive();
         if (chineseMode && hasSession)
         {
             WIND_LOG_DEBUG_FMT(L"KeyDown session hotkey matched: vk=0x%02X, hash=0x%08X\n",
@@ -389,7 +391,7 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     // Also check _hasCandidates for cases where InlinePreedit is disabled
     // (Go sends UpdateComposition with empty text, _hasCandidates is TRUE but HasActiveComposition is FALSE)
     // _needsCompositionResync: 上次 IPC 失败后强行视作有会话, 让 ENTER/ESC 也能发给 Go 重握手。
-    BOOL hasInputSession = hasComposition || _hasCandidates || _needsCompositionResync;
+    BOOL hasInputSession = hasComposition || _hasCandidates || _IsResyncActive();
 
     // English auto-pair: intercept bracket keys in English mode
     if (!isChineseMode && _englishPairEngine.IsEnabled())
@@ -847,7 +849,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     BOOL hasComposition = _pTextService->HasActiveComposition();
     // Also check _hasCandidates for cases where InlinePreedit is disabled.
     // _needsCompositionResync: 上次 IPC 失败后强行视作有会话, 让 ENTER/ESC 也能发给 Go 重握手。
-    BOOL hasInputSession = hasComposition || _hasCandidates || _needsCompositionResync;
+    BOOL hasInputSession = hasComposition || _hasCandidates || _IsResyncActive();
 
     // Track whether this is a Ctrl/Alt combo that needs cleanup-then-passthrough
     BOOL isCtrlAltCleanup = FALSE;
@@ -1531,12 +1533,30 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         _isComposing = FALSE;
         _hasCandidates = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
-        _needsCompositionResync = TRUE;
+
+        // resync 自愈：累计连续失败，到上限就放弃自愈、走 passthrough，
+        // 避免 Go 服务长时间挂掉时 ENTER/ESC/Ctrl+Alt 被永久吃。
+        // 任一次响应成功 (下方 _resyncFailStreak=0) 即清零计数。
+        _resyncFailStreak++;
+        if (_resyncFailStreak >= RESYNC_MAX_RETRIES)
+        {
+            WIND_LOG_WARN_FMT(L"Resync fail streak=%d reached limit, dropping to passthrough mode",
+                              _resyncFailStreak);
+            _needsCompositionResync = FALSE;
+            _resyncDeadline = 0;
+        }
+        else
+        {
+            _needsCompositionResync = TRUE;
+            _resyncDeadline = GetTickCount() + RESYNC_WINDOW_MS;
+        }
         return TRUE; // Default to eating the key on error
     }
 
-    // 响应成功 → 状态由下方 switch 各分支按权威重建, 清 resync 旗。
+    // 响应成功 → 状态由下方 switch 各分支按权威重建, 清 resync 旗 + 失败计数。
     _needsCompositionResync = FALSE;
+    _resyncDeadline = 0;
+    _resyncFailStreak = 0;
 
     QueryPerformanceCounter(&midTime);
     int ipcMs = (int)((midTime.QuadPart - startTime.QuadPart) * 1000 / freq.QuadPart);
@@ -1979,6 +1999,24 @@ void CKeyEventSink::_HandleCommitResult(uint16_t barrierSeq, const std::wstring&
     {
         _pTextService->SetInputMode(chineseMode);
     }
+}
+
+// 读 resync 旗 + 过期检查。deadline 到期立即清旗，保证只读处不需要关心时间窗口。
+// 注意：_resyncFailStreak 在此不清零——streak 仅由"响应成功"清零，否则失败计数被
+// 时间衰减抹掉就失去了"连续失败 → 降级"的语义。
+BOOL CKeyEventSink::_IsResyncActive()
+{
+    if (!_needsCompositionResync)
+        return FALSE;
+    if (GetTickCount() >= _resyncDeadline)
+    {
+        WIND_LOG_DEBUG_FMT(L"Resync window expired (streak=%d), auto-clearing flag",
+                           _resyncFailStreak);
+        _needsCompositionResync = FALSE;
+        _resyncDeadline = 0;
+        return FALSE;
+    }
+    return TRUE;
 }
 
 void CKeyEventSink::_CheckBarrierTimeout()

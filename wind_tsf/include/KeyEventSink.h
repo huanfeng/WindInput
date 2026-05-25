@@ -91,7 +91,7 @@ public:
     // 用于 Excel/WPS cell-select(按数字直通) → cell-edit(按标点) 这种焦点切换
     // 场景的数字后智能标点判断。残留由按键事件路径（_SendKeyToService 非智能
     // 标点目标键清零）和光标 Y 跨行检测兜底，不应在 IME 会话状态重置时一起清。
-    void ResetComposingState() { _isComposing = FALSE; _hasCandidates = FALSE; _needsCompositionResync = FALSE; _skipKeyCount = 0; _pendingPairAction = {}; _englishPairEngine.Clear(); }
+    void ResetComposingState() { _isComposing = FALSE; _hasCandidates = FALSE; _needsCompositionResync = FALSE; _resyncDeadline = 0; _resyncFailStreak = 0; _skipKeyCount = 0; _pendingPairAction = {}; _englishPairEngine.Clear(); }
 
     // Flush pending English pass-through stats before focus/mode teardown.
     void FlushEnglishStats();
@@ -130,6 +130,14 @@ private:
     // 下一次按键前提下视作"有会话"，让 ENTER/ESC 也能发给 Go 走重握手；
     // 任何一次成功 ReceiveResponse 之后清旗，状态由响应处理路径自然重建。
     BOOL _needsCompositionResync;
+    // resync 自愈窗口：deadline 到期或连续失败超限后自动放弃，避免 Go/IPC 长时间不可用
+    // 时把 ENTER/ESC/Ctrl+Alt 等键永久吃掉。失败 streak 在响应成功后清零。
+    DWORD _resyncDeadline;        // GetTickCount() 时间戳，0 表示无 deadline
+    int   _resyncFailStreak;      // 连续 IPC 失败次数，超过 RESYNC_MAX_RETRIES 强制降级 passthrough
+    static constexpr DWORD RESYNC_WINDOW_MS = 3000;
+    static constexpr int   RESYNC_MAX_RETRIES = 3;
+    BOOL _IsResyncActive();       // 读旗+过期检查；过期会自动清旗
+
     WCHAR _lastPassthroughDigit; // Last digit key that passed through (for smart punct fallback in apps where TSF can't read text)
     uint32_t _pendingKeyUpKey;   // Key code of pending KeyUp toggle key
     uint32_t _pendingKeyUpModifiers; // Modifiers when KeyDown was pressed
