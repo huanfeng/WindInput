@@ -101,6 +101,14 @@ type StatusWindow struct {
 	mouseHovering bool // 鼠标是否悬停在窗口上
 	trackingMouse bool // 是否已启用鼠标追踪
 
+	// 鼠标"真实移动"防抖：避免 Show 后鼠标恰好压在窗口区域内但用户并未主动移动
+	// 时, 第一次 WM_MOUSEMOVE 就把 mouseHovering 置为 true 抑制自动隐藏。
+	// 行为同 CandidateWindow.handleMouseMove(window_mouse.go:37)。
+	hasLastMousePos bool
+	lastMouseX      int
+	lastMouseY      int
+	mouseHasMoved   bool
+
 	// 拖动状态
 	dragging    bool
 	dragStartX  int
@@ -172,7 +180,7 @@ func statusWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			if w.isDragging() {
 				w.handleDragMove(lParam)
 			} else {
-				w.handleMouseMove()
+				w.handleMouseMove(lParam)
 			}
 		}
 		return 0
@@ -284,6 +292,11 @@ func (w *StatusWindow) Show(x, y int) {
 	w.visible = true
 	w.x = x
 	w.y = y
+	// 每次重新 Show 都视为"全新一次"展示: 清掉鼠标移动状态, 必须再次真实移动
+	// 才会被认为是用户 hover, 否则 scheduleHide 倒计时正常走。
+	w.mouseHovering = false
+	w.mouseHasMoved = false
+	w.hasLastMousePos = false
 	w.mu.Unlock()
 
 	// 渲染状态图像
@@ -457,12 +470,30 @@ func (w *StatusWindow) Destroy() {
 	}
 }
 
-// handleMouseMove 处理鼠标移动事件（暂停自动隐藏）
-func (w *StatusWindow) handleMouseMove() {
+// handleMouseMove 处理鼠标移动事件（暂停自动隐藏）。
+// 注意: 首次 WM_MOUSEMOVE 只记录坐标, 不视为"用户真的在动鼠标"; 当后续 WM_MOUSEMOVE
+// 上报到与上次不同的坐标时, 才确认是用户操作并将 mouseHovering 置 true 抑制自动隐藏。
+// 这样可以避免 Show 后鼠标恰好压在窗口区域内, 导致状态窗赖着不消失。
+func (w *StatusWindow) handleMouseMove(lParam uintptr) {
+	mouseX := int(int16(lParam & 0xFFFF))
+	mouseY := int(int16((lParam >> 16) & 0xFFFF))
+
 	w.mu.Lock()
-	w.mouseHovering = true
 	needTrack := !w.trackingMouse
 	w.trackingMouse = true
+
+	if w.hasLastMousePos {
+		if mouseX != w.lastMouseX || mouseY != w.lastMouseY {
+			w.mouseHasMoved = true
+		}
+	}
+	w.lastMouseX = mouseX
+	w.lastMouseY = mouseY
+	w.hasLastMousePos = true
+
+	if w.mouseHasMoved {
+		w.mouseHovering = true
+	}
 	w.mu.Unlock()
 
 	if needTrack {
@@ -480,6 +511,8 @@ func (w *StatusWindow) handleMouseLeave() {
 	w.mu.Lock()
 	w.mouseHovering = false
 	w.trackingMouse = false
+	w.mouseHasMoved = false
+	w.hasLastMousePos = false
 	mode := w.config.DisplayMode
 	w.mu.Unlock()
 
