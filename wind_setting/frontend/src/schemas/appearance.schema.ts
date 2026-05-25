@@ -44,7 +44,7 @@ export const candidateWindowSchema: PageSchema = [
     key: "ui.candidates_per_page",
     label: "每页候选数",
     hint: "每页显示的候选词数量",
-    min: 3,
+    min: 2,
     max: 10,
     step: 1,
     displayValue: (v) => `${v} 个`,

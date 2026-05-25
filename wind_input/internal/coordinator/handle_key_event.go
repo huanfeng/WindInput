@@ -646,7 +646,7 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		if len(c.inputBuffer) > 0 {
 			pageStart := (c.currentPage - 1) * c.candidatesPerPage
 			idx := pageStart + 1
-			if idx < len(c.candidates) {
+			if idx < len(c.candidates) && idx-pageStart < c.candidatesPerPage {
 				return c.selectCandidate(idx)
 			}
 			// 候选不足时（含无候选），按 overflow 策略处理
@@ -673,7 +673,7 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		if len(c.inputBuffer) > 0 {
 			pageStart := (c.currentPage - 1) * c.candidatesPerPage
 			idx := pageStart + 2
-			if idx < len(c.candidates) {
+			if idx < len(c.candidates) && idx-pageStart < c.candidatesPerPage {
 				return c.selectCandidate(idx)
 			}
 			// 候选不足时（含无候选），按 overflow 策略处理
