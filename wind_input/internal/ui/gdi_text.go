@@ -90,14 +90,24 @@ func FontSpecToName(fontSpec string) string {
 	return "Microsoft YaHei"
 }
 
-// containsSymbolChars returns true if text contains characters from the
-// Geometric Shapes Unicode block (U+25A0–U+25FF) or Dingbats (U+2700–U+27BF)
-// that are typically missing from CJK fonts like Microsoft YaHei.
-// These characters need a symbol font (Segoe UI Symbol) for reliable rendering.
+// containsSymbolChars returns true if text contains UI-chrome symbol characters
+// that CJK fonts (like Microsoft YaHei) cover poorly and that we want to render
+// via Segoe UI Symbol for consistent metrics.
+//
+// Scope is deliberately narrow:
+//   - Geometric Shapes (U+25A0–U+25FF): UI uses ▶ ▸ ● ◑ ■ etc. These are
+//     monochrome shapes by nature, so forcing a symbol font is safe.
+//   - Dingbats (U+2700–U+27BF) whitelist: only ✓ (U+2713) and ✗ (U+2717),
+//     the menu check/cross marks. The rest of the Dingbats block contains
+//     emoji base characters (✂ ✈ ✉ ✊✋✌ ✏ ✨ ❄ ❤ …) that should be left
+//     to the normal emoji font-fallback chain so they can render in color
+//     and participate in ZWJ sequences (e.g. ❤️‍🔥).
 func containsSymbolChars(text string) bool {
 	for _, r := range text {
-		if (r >= 0x25A0 && r <= 0x25FF) || // Geometric Shapes (▸, ▶, ■, etc.)
-			(r >= 0x2700 && r <= 0x27BF) { // Dingbats (✓ is U+2713, in this range)
+		if r >= 0x25A0 && r <= 0x25FF {
+			return true
+		}
+		if r == 0x2713 || r == 0x2717 {
 			return true
 		}
 	}
