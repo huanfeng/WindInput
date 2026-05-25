@@ -441,20 +441,25 @@ func (c *Coordinator) buildStatusUpdate() *bridge.StatusUpdateData {
 }
 
 // NotifySchemaActivated 由外部（如 main 的异步资源就绪回调）在切换/激活方案后调用。
-// 它会同步工具栏 + Push 状态到所有 TSF 客户端，并显示一次"<方案名>已就绪"指示器，
+// 它会同步工具栏 + Push 状态到所有 TSF 客户端，并在屏幕右下角弹出一次 toast 通知，
 // 让用户在等待 wdat 等异步资源就绪后明确感知"现在可以正常输入了"。
-// displayName 为空时只 broadcast、不弹指示器。
+// displayName 为空时只 broadcast、不弹通知。
 func (c *Coordinator) NotifySchemaActivated(displayName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.broadcastState()
 
-	if displayName == "" || c.uiManager == nil || !c.uiManager.IsReady() {
+	uiReady := c.uiManager != nil && c.uiManager.IsReady()
+	c.logger.Info("NotifySchemaActivated",
+		"displayName", displayName,
+		"uiReady", uiReady,
+	)
+
+	if displayName == "" || !uiReady {
 		return
 	}
-	x, y := c.getIndicatorPosition()
-	c.uiManager.ShowModeIndicator(displayName+" 已就绪", x, y)
+	c.uiManager.ShowToastSuccess(displayName + " 词库加载完成。")
 }
 
 // broadcastState broadcasts the current state to toolbar and all TSF clients

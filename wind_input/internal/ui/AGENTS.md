@@ -32,6 +32,8 @@ Windows 原生 UI 渲染层。使用 Win32 API 实现输入法的所有可见界
 | `popup_menu_render.go` | 弹出菜单 GDI 渲染 |
 | `global_hotkey.go` | `GlobalHotkeyEntry`：全局热键定义；`ParseHotkeyString` 将配置字符串（如 `"ctrl+\`"`）解析为 `GlobalHotkeyEntry`；`globalHotkeyState`：通过 `RegisterHotKey`/`UnregisterHotKey` 管理线程级全局热键注册，`handleWMHotkey` 响应 `WM_HOTKEY` 消息并异步调用 callback；`resolveVK` 通用虚拟键码解析 |
 | `tooltip.go` | Tooltip（编码提示）窗口渲染 |
+| `toast_window.go` | `ToastWindow`：独立 layered 通知窗口，用于错误提示 / 词库就绪等一次性 toast；支持 4 个 Level（Info/Success/Warn/Error）× 4 个 Position（Center/BottomRight/TopRight/Top）+ 自动隐藏（版本号取消）+ 左键点击关闭 + 右键回调预留；目标显示器以鼠标光标定位，避免跨屏错位 |
+| `toast_renderer.go` | `ToastRenderer`：toast 图像渲染（标题 + 多行正文 + 圆角矩形 + Level accent 边框），复用 `TextBackendManager`（DirectWrite） |
 | `monitor.go` | 多显示器支持：获取目标显示器工作区，用于窗口位置计算 |
 | `dpi.go` | DPI 缩放工具函数 |
 | `gdi_text.go` | GDI 文字渲染实现 |

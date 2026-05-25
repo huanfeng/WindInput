@@ -791,6 +791,34 @@ func (c *Coordinator) handleUnifiedMenuAction(id int, capturedProcess string) {
 			c.mu.Unlock()
 			c.saveFilterModeConfig(newMode)
 		}
+	case id == ui.UnifiedMenuTestToastInfo:
+		c.uiManager.ShowToast(ui.ToastOptions{
+			Title:    "Info Toast",
+			Message:  "这是一条 Info 级通知。",
+			Level:    ui.ToastInfo,
+			Position: ui.ToastBottomRight,
+			Duration: 3500,
+		})
+	case id == ui.UnifiedMenuTestToastSuccess:
+		c.uiManager.ShowToastSuccess("操作成功完成。")
+	case id == ui.UnifiedMenuTestToastWarn:
+		c.uiManager.ShowToast(ui.ToastOptions{
+			Title:    "警告",
+			Message:  "这是一条 Warn 级通知，居中显示。",
+			Level:    ui.ToastWarn,
+			Position: ui.ToastCenter,
+			Duration: 4000,
+		})
+	case id == ui.UnifiedMenuTestToastError:
+		c.uiManager.ShowToastError("错误", "这是一条 Error 级通知, 用于测试居中 5s 显示。")
+	case id == ui.UnifiedMenuTestToastLongMessage:
+		c.uiManager.ShowToast(ui.ToastOptions{
+			Title:    "长文本测试",
+			Message:  "第一行: 用于验证多行渲染与最大宽度。\n第二行: 中文与 English mixed text 一起看会不会换行不齐。\n第三行: 这一行故意写得比较长, 看看截断和省略号会不会按预期工作。",
+			Level:    ui.ToastInfo,
+			Position: ui.ToastBottomRight,
+			Duration: 6000,
+		})
 	case id >= ui.UnifiedMenuThemeBase && id < ui.UnifiedMenuThemeBase+100:
 		// Theme selection
 		themeIndex := id - ui.UnifiedMenuThemeBase

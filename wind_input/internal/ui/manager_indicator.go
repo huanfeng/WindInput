@@ -215,6 +215,81 @@ func (m *Manager) applyTheme(resolved *theme.ResolvedTheme) {
 	if m.status != nil {
 		m.status.SetTheme(resolved)
 	}
+
+	// 应用到 Toast 通知窗口
+	if m.toast != nil {
+		m.toast.SetTheme(resolved)
+	}
+}
+
+// ShowToast 发送一次 toast 通知（异步，非阻塞）。会绕过 UI 配置（不可被禁用）。
+func (m *Manager) ShowToast(opts ToastOptions) {
+	m.mu.Lock()
+	if !m.ready {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
+	optsCopy := opts
+	select {
+	case m.cmdCh <- UICommand{Type: cmdToast, ToastOpts: &optsCopy}:
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
+	default:
+		m.logger.Warn("UI command channel full, dropping toast command")
+	}
+}
+
+// HideToast 立即隐藏当前 toast（异步）。
+func (m *Manager) HideToast() {
+	select {
+	case m.cmdCh <- UICommand{Type: cmdToastHide}:
+		if m.cmdEvent != 0 {
+			SetEvent(m.cmdEvent)
+		}
+	default:
+	}
+}
+
+// ShowToastError 快捷封装：屏幕居中 / 错误配色 / 5s 自动隐藏。
+// 用于"设置打不开""引擎初始化失败"等需要立刻引起注意的场景。
+func (m *Manager) ShowToastError(title, message string) {
+	m.ShowToast(ToastOptions{
+		Title:    title,
+		Message:  message,
+		Level:    ToastError,
+		Position: ToastCenter,
+		Duration: 5000,
+	})
+}
+
+// ShowToastSuccess 快捷封装：右下角 / 成功配色 / 3.5s 自动隐藏。
+// 用于"词库加载完成"等正向反馈，不打扰用户当前焦点。
+func (m *Manager) ShowToastSuccess(message string) {
+	m.ShowToast(ToastOptions{
+		Message:  message,
+		Level:    ToastSuccess,
+		Position: ToastBottomRight,
+		Duration: 3500,
+	})
+}
+
+// doShowToast 在 UI 线程实际执行 Show（由命令分发调用）。
+func (m *Manager) doShowToast(opts ToastOptions) {
+	if m.toast == nil {
+		return
+	}
+	m.toast.Show(opts)
+}
+
+// doHideToast 在 UI 线程实际执行 Hide（由命令分发调用）。
+func (m *Manager) doHideToast() {
+	if m.toast == nil {
+		return
+	}
+	m.toast.Hide()
 }
 
 // SetDarkMode sets the dark mode state on the theme manager

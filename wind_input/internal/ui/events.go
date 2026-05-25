@@ -20,4 +20,6 @@ const (
 	cmdRegisterHotkeys   managerCommand = "register_hotkeys"
 	cmdUnregisterHotkeys managerCommand = "unregister_hotkeys"
 	cmdHideTooltip       managerCommand = "hide_tooltip"
+	cmdToast             managerCommand = "toast"
+	cmdToastHide         managerCommand = "toast_hide"
 )

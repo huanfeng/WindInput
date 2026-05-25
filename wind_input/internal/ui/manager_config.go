@@ -333,6 +333,7 @@ func (m *Manager) doOpenSettings(page string) {
 	// 全部路径失败：记录详细信息，便于排查（不再回退到浏览器，因为 127.0.0.1:18923
 	// 由 wind_setting.exe 自身提供服务，进程都没起来时浏览器 fallback 必然连不上）。
 	last := attempts[len(attempts)-1]
+	meaning := shellExecuteErrorMeaning(last.ret)
 	m.logger.Error("Failed to launch settings application",
 		"page", page,
 		"settingExe", settingExe,
@@ -340,9 +341,13 @@ func (m *Manager) doOpenSettings(page string) {
 		"lastPath", last.path,
 		"lastPathExists", last.exists,
 		"ret", last.ret,
-		"retMeaning", shellExecuteErrorMeaning(last.ret),
+		"retMeaning", meaning,
 		"error", last.err,
 	)
+
+	// 向用户展示错误：屏幕居中 toast，便于第一时间看到。
+	// 不包含原始路径（用户视角不需要），但保留 retMeaning 让用户能初步判断原因。
+	m.ShowToastError("无法打开设置", "原因: "+meaning+"\n详细日志已记录, 请查看 wind_input.log")
 }
 
 // formatAttemptPaths 将多次启动尝试格式化为 "path1(exists)|path2(missing)" 形式，

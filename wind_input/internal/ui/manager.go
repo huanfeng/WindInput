@@ -26,6 +26,11 @@ const (
 	UnifiedMenuFilterModeBase       = 260 // 检索范围ID: 260+i (0=smart, 1=general, 2=gb18030)
 	UnifiedMenuS2TVariantBase       = 270 // 简入繁出 变体ID: 270+i (0=s2t, 1=s2tw, 2=s2twp, 3=s2hk)
 	UnifiedMenuTestBase             = 280 // 三级菜单测试ID: 280+i
+	UnifiedMenuTestToastInfo        = 290 // Debug: 弹 Info Toast（右下）
+	UnifiedMenuTestToastSuccess     = 291 // Debug: 弹 Success Toast（右下）
+	UnifiedMenuTestToastWarn        = 292 // Debug: 弹 Warn Toast（居中）
+	UnifiedMenuTestToastError       = 293 // Debug: 弹 Error Toast（居中）
+	UnifiedMenuTestToastLongMessage = 294 // Debug: 弹长文本 Toast 测试换行
 	UnifiedMenuReloadConfig         = 299
 	UnifiedMenuRestartService       = 303
 	UnifiedMenuDictionary           = 300
@@ -166,11 +171,21 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 			{ID: UnifiedMenuTestBase + 3, Text: "选项 B-1"},
 			{ID: UnifiedMenuTestBase + 4, Text: "选项 B-2", Checked: true},
 		}
+		toastChildren := []MenuItem{
+			{ID: UnifiedMenuTestToastInfo, Text: "Info（右下）"},
+			{ID: UnifiedMenuTestToastSuccess, Text: "Success（右下）"},
+			{ID: UnifiedMenuTestToastWarn, Text: "Warn（居中）"},
+			{ID: UnifiedMenuTestToastError, Text: "Error（居中）"},
+			{Separator: true},
+			{ID: UnifiedMenuTestToastLongMessage, Text: "长文本 / 换行测试"},
+		}
 		testChildren := []MenuItem{
 			{Text: "子菜单 A", Children: testSubA},
 			{Text: "子菜单 B", Children: testSubB},
 			{Separator: true},
 			{ID: UnifiedMenuTestBase + 5, Text: "普通项"},
+			{Separator: true},
+			{Text: "Toast 通知", Children: toastChildren},
 		}
 		items = append(items, MenuItem{Text: "三级菜单测试", Children: testChildren})
 	}
@@ -227,6 +242,8 @@ type UICommand struct {
 	FlipRefY     int // 翻转参考Y（下方放不下时翻转到此Y上方，0=禁用）
 	// 状态提示
 	StatusState *StatusState
+	// Toast 通知
+	ToastOpts *ToastOptions
 	// Global hotkey registration
 	HotkeyEntries []GlobalHotkeyEntry
 }
@@ -246,6 +263,9 @@ type Manager struct {
 
 	// 独立的状态提示窗口
 	status *StatusWindow
+
+	// 独立的 Toast 通知窗口（错误、词库就绪等一次性通知）
+	toast *ToastWindow
 
 	mu                  sync.Mutex
 	candidates          []Candidate
@@ -349,6 +369,7 @@ func NewManager(logger *slog.Logger) *Manager {
 		toolbar:       NewToolbarWindow(logger),
 		tooltip:       NewTooltipWindow(logger),
 		status:        NewStatusWindow(logger),
+		toast:         NewToastWindow(logger),
 		themeManager:  themeManager,
 		logger:        logger,
 		readyCh:       make(chan struct{}),
@@ -408,6 +429,11 @@ func (m *Manager) Start() error {
 	// 创建独立状态提示窗口
 	if err := m.status.Create(); err != nil {
 		m.logger.Error("Failed to create status window", "error", err)
+	}
+
+	// 创建 Toast 通知窗口（非关键，失败不致命）
+	if err := m.toast.Create(); err != nil {
+		m.logger.Error("Failed to create toast window", "error", err)
 	}
 
 	// Create unified popup menu
@@ -547,6 +573,12 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 		if m.tooltip != nil {
 			m.tooltip.ForceHide()
 		}
+	case cmdToast:
+		if cmd.ToastOpts != nil {
+			m.doShowToast(*cmd.ToastOpts)
+		}
+	case cmdToastHide:
+		m.doHideToast()
 	}
 }
 
@@ -580,6 +612,10 @@ func (m *Manager) Destroy() {
 	if m.status != nil {
 		m.status.Destroy()
 		m.status = nil
+	}
+	if m.toast != nil {
+		m.toast.Destroy()
+		m.toast = nil
 	}
 	if m.unifiedPopupMenu != nil {
 		m.unifiedPopupMenu.Destroy()
