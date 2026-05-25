@@ -182,14 +182,14 @@ const heatmapCells = computed(() =>
   ),
 );
 
-const heatColors = ["#ebedf0", "#9be9a8", "#40c463", "#30a14e", "#216e39"];
+const heatLevels = [0, 1, 2, 3, 4] as const;
 
-function heatColor(chars: number): string {
-  if (chars === 0) return heatColors[0];
-  if (chars < 500) return heatColors[1];
-  if (chars < 2000) return heatColors[2];
-  if (chars < 5000) return heatColors[3];
-  return heatColors[4];
+function heatLevel(chars: number): number {
+  if (chars === 0) return 0;
+  if (chars < 500) return 1;
+  if (chars < 2000) return 2;
+  if (chars < 5000) return 3;
+  return 4;
 }
 
 // 今日字符分类细分
@@ -491,8 +491,8 @@ onUnmounted(() => {
                     v-for="day in heatmapCells"
                     :key="day.date"
                     class="heatmap-cell"
+                    :class="`heat-${heatLevel(day.chars)}`"
                     :style="{
-                      backgroundColor: heatColor(day.chars),
                       gridRow: day.weekday + 1,
                       gridColumn: day.weekIndex + 1,
                     }"
@@ -504,10 +504,10 @@ onUnmounted(() => {
                 <div class="heatmap-legend">
                   <span class="legend-label">少</span>
                   <span
-                    v-for="(c, i) in heatColors"
+                    v-for="i in heatLevels"
                     :key="i"
                     class="legend-box"
-                    :style="{ backgroundColor: c }"
+                    :class="`heat-${i}`"
                   ></span>
                   <span class="legend-label">多</span>
                 </div>
@@ -730,7 +730,7 @@ onUnmounted(() => {
 .loading-hint {
   text-align: center;
   padding: 40px;
-  color: var(--text-secondary);
+  color: hsl(var(--muted-foreground));
 }
 
 /* 数字卡片 */
@@ -742,8 +742,8 @@ onUnmounted(() => {
 }
 
 .stat-card {
-  background: var(--card-bg, #fff);
-  border: 1px solid var(--border-color, #e5e7eb);
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
   border-radius: 8px;
   padding: 16px;
   text-align: center;
@@ -752,19 +752,19 @@ onUnmounted(() => {
 .stat-value {
   font-size: 24px;
   font-weight: 700;
-  color: var(--text-primary);
+  color: hsl(var(--foreground));
   line-height: 1.2;
 }
 
 .stat-label {
   font-size: 12px;
-  color: var(--text-secondary);
+  color: hsl(var(--muted-foreground));
   margin-top: 4px;
 }
 
 .stat-detail {
   font-size: 11px;
-  color: var(--text-tertiary, #999);
+  color: hsl(var(--muted-foreground) / 0.8);
   margin-top: 2px;
 }
 
@@ -797,7 +797,7 @@ onUnmounted(() => {
 .weekday-labels span {
   font-size: 10px;
   line-height: 12px;
-  color: var(--text-tertiary, #8b949e);
+  color: hsl(var(--muted-foreground));
 }
 
 .heatmap-right {
@@ -824,13 +824,37 @@ onUnmounted(() => {
   box-sizing: border-box;
 }
 
+/* GitHub-style 热力图色阶（浅色） */
+.heatmap-cell.heat-0,
+.legend-box.heat-0 {
+  background: #ebedf0;
+}
+.heatmap-cell.heat-1,
+.legend-box.heat-1 {
+  background: #9be9a8;
+}
+.heatmap-cell.heat-2,
+.legend-box.heat-2 {
+  background: #40c463;
+}
+.heatmap-cell.heat-3,
+.legend-box.heat-3 {
+  background: #30a14e;
+}
+.heatmap-cell.heat-4,
+.legend-box.heat-4 {
+  background: #216e39;
+}
+
+/* 暗色色阶（GitHub dark） — 用 :deep 父级匹配 .dark 不行，改在下方非 scoped 块定义 */
+
 .heatmap-legend {
   display: inline-flex;
   align-items: center;
   align-self: flex-end;
   gap: 4px;
   font-size: 11px;
-  color: var(--text-secondary);
+  color: hsl(var(--muted-foreground));
   white-space: nowrap;
   margin-top: 2px;
 }
@@ -857,7 +881,7 @@ onUnmounted(() => {
   left: 50%;
   transform: translate(-50%, -50%);
   font-size: 13px;
-  color: var(--text-tertiary, #bbb);
+  color: hsl(var(--muted-foreground));
   pointer-events: none;
   z-index: 1;
 }
@@ -886,7 +910,7 @@ onUnmounted(() => {
 }
 
 .hour-bar-zero {
-  background: var(--border-color, #e5e7eb);
+  background: hsl(var(--border));
   opacity: 0.5;
 }
 
@@ -898,14 +922,14 @@ onUnmounted(() => {
 
 .hour-label {
   font-size: 10px;
-  color: var(--text-secondary);
+  color: hsl(var(--muted-foreground));
   width: calc(100% / 8);
   text-align: left;
 }
 
 .hour-label {
   font-size: 10px;
-  color: var(--text-secondary);
+  color: hsl(var(--muted-foreground));
   margin-top: 2px;
 }
 
@@ -922,26 +946,26 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 6px 8px;
-  background: var(--bg-secondary, #f9fafb);
+  background: hsl(var(--secondary));
   border-radius: 6px;
 }
 
 .detail-label {
   font-size: 13px;
-  color: var(--text-secondary);
+  color: hsl(var(--muted-foreground));
 }
 
 .detail-value {
   font-size: 13px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: hsl(var(--foreground));
 }
 
 /* 水平条形图 */
 .sub-title {
   font-size: 13px;
   font-weight: 600;
-  color: var(--text-secondary);
+  color: hsl(var(--muted-foreground));
   margin-top: 12px;
   margin-bottom: 6px;
 }
@@ -961,7 +985,7 @@ onUnmounted(() => {
 .bar-label {
   width: 64px;
   font-size: 12px;
-  color: var(--text-secondary);
+  color: hsl(var(--muted-foreground));
   text-align: right;
   flex-shrink: 0;
 }
@@ -969,7 +993,7 @@ onUnmounted(() => {
 .bar-track {
   flex: 1;
   height: 16px;
-  background: var(--bg-secondary, #f3f4f6);
+  background: hsl(var(--secondary));
   border-radius: 4px;
   overflow: hidden;
 }
@@ -1001,7 +1025,7 @@ onUnmounted(() => {
 .bar-pct {
   width: 36px;
   font-size: 12px;
-  color: var(--text-secondary);
+  color: hsl(var(--muted-foreground));
   text-align: right;
   flex-shrink: 0;
 }
@@ -1038,5 +1062,34 @@ onUnmounted(() => {
   height: 10px;
   background: #24292f;
   transform: translateX(-50%) rotate(45deg);
+}
+</style>
+
+<style>
+/* 暗色模式下热力图色阶（GitHub Dark）—— 放在非 scoped 块，
+   因为 scoped 编译器会错误折叠 :global(.dark) ... 链式选择器。
+   选择器加 html. 提高特异性，确保稳定覆盖。 */
+html.dark .heatmap-cell {
+  border-color: rgba(255, 255, 255, 0.05);
+}
+html.dark .heatmap-cell.heat-0,
+html.dark .legend-box.heat-0 {
+  background: #161b22;
+}
+html.dark .heatmap-cell.heat-1,
+html.dark .legend-box.heat-1 {
+  background: #0e4429;
+}
+html.dark .heatmap-cell.heat-2,
+html.dark .legend-box.heat-2 {
+  background: #006d32;
+}
+html.dark .heatmap-cell.heat-3,
+html.dark .legend-box.heat-3 {
+  background: #26a641;
+}
+html.dark .heatmap-cell.heat-4,
+html.dark .legend-box.heat-4 {
+  background: #39d353;
 }
 </style>
