@@ -103,6 +103,10 @@ type EngineBundle struct {
 	// 由 EngineManager 缓存到 systemLayers，方案切换时按缓存重新注册，
 	// 避免依赖共享 CompositeDict 的当前状态（防止与并发切换发生竞态）。
 	SystemLayer dict.DictLayer
+	// ExtraLayers 该方案加载的所有附加码表层（codetable-extra-<schemaID>__<dictID>）。
+	// 由 EngineManager 缓存到 systemExtras，方案切换时按缓存清理上一个方案的 extras，
+	// 重新注册当前方案的 extras，确保不同方案的扩展词库相互隔离。
+	ExtraLayers []dict.DictLayer
 }
 
 // SchemaResolver 方案解析器，用于混输引擎查找被引用的方案
@@ -263,6 +267,7 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 	}
 
 	// 加载附加词库（非 default 且 enabled 的词库条目）
+	var extraLayers []dict.DictLayer
 	if dm != nil {
 		for _, dictSpec := range s.Dicts {
 			if dictSpec.Default || !dictSpec.IsEnabled() {
@@ -270,8 +275,13 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 			}
 			srcPath := resolvePath(exeDir, dataDir, dictSpec.Path)
 			cacheKey := s.Schema.ID + "_" + dictSpec.ID
-			if err := loadExtraCodetable(dm, srcPath, dictSpec, cacheKey, logger); err != nil {
+			layer, err := loadExtraCodetable(dm, s.Schema.ID, srcPath, dictSpec, cacheKey, logger)
+			if err != nil {
 				logger.Warn("附加词库加载失败，跳过", "dictID", dictSpec.ID, "error", err)
+				continue
+			}
+			if layer != nil {
+				extraLayers = append(extraLayers, layer)
 			}
 		}
 	}
@@ -298,6 +308,7 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 		SchemaID:    s.Schema.ID,
 		Engine:      engine,
 		SystemLayer: ctSystemLayer,
+		ExtraLayers: extraLayers,
 	}, nil
 }
 
@@ -613,11 +624,19 @@ func loadCodetable(engine *codetable.Engine, srcPath string, dictType DictType, 
 	return nil
 }
 
-// loadExtraCodetable 加载附加词库为独立 CodeTable，注册为 DictManager 额外 system layer。
+// ExtraLayerName 生成附加词库层名，使用 schemaID 前缀确保不同方案的扩展词库互相隔离。
+// 形式：codetable-extra-<schemaID>__<dictID>
+// 注意：分隔符使用 "__"，避免与 schemaID/dictID 内可能出现的单下划线发生歧义。
+func ExtraLayerName(schemaID, dictID string) string {
+	return "codetable-extra-" + schemaID + "__" + dictID
+}
+
+// loadExtraCodetable 加载附加词库为独立 CodeTable，注册为 DictManager 额外 system layer，
+// 并返回注册到 CompositeDict 的 layer，供调用方缓存以便方案切换时清理/重挂。
 // 附加词库加载失败为非致命错误：调用方记录警告后跳过，不影响主词库工作。
-func loadExtraCodetable(dm *dict.DictManager, srcPath string, spec DictSpec, cacheKey string, logger *slog.Logger) error {
+func loadExtraCodetable(dm *dict.DictManager, schemaID, srcPath string, spec DictSpec, cacheKey string, logger *slog.Logger) (dict.DictLayer, error) {
 	if dm == nil {
-		return nil
+		return nil, nil
 	}
 
 	srcDir := filepath.Dir(srcPath)
@@ -630,6 +649,8 @@ func loadExtraCodetable(dm *dict.DictManager, srcPath string, spec DictSpec, cac
 
 	logger.Info("附加词库源文件清单", "cacheKey", cacheKey, "type", spec.Type, "count", len(srcPaths))
 
+	layerName := ExtraLayerName(schemaID, spec.ID)
+
 	// 快捷路径：尝试加载源目录中的预编译 wdb（与 loadCodetable 行为对齐）
 	wdbInDir := filepath.Join(srcDir, cacheKey+".wdb")
 	if len(srcPaths) > 0 && !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
@@ -638,11 +659,10 @@ func loadExtraCodetable(dm *dict.DictManager, srcPath string, spec DictSpec, cac
 		} else {
 			ct := dict.NewCodeTable()
 			if err := ct.LoadBinary(wdbInDir); err == nil {
-				layerName := "codetable-extra-" + spec.ID
 				layer := dict.NewCodeTableLayer(layerName, dict.LayerTypeSystem, ct)
 				dm.RegisterSystemLayer(layerName, layer)
 				logger.Info("附加词库已注册(预编译 wdb)", "layer", layerName, "entryCount", ct.EntryCount())
-				return nil
+				return layer, nil
 			}
 		}
 	}
@@ -667,7 +687,7 @@ func loadExtraCodetable(dm *dict.DictManager, srcPath string, spec DictSpec, cac
 			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath, logger)
 		}
 		if convertErr != nil {
-			return fmt.Errorf("转换附加词库 %s 到 wdb 失败: %w", cacheKey, convertErr)
+			return nil, fmt.Errorf("转换附加词库 %s 到 wdb 失败: %w", cacheKey, convertErr)
 		}
 	}
 
@@ -687,18 +707,17 @@ func loadExtraCodetable(dm *dict.DictManager, srcPath string, spec DictSpec, cac
 			convertErr = dictcache.ConvertCodeTableToWdb(srcPath, wdbCachePath, logger)
 		}
 		if convertErr != nil {
-			return fmt.Errorf("重新生成附加词库失败: %w", convertErr)
+			return nil, fmt.Errorf("重新生成附加词库失败: %w", convertErr)
 		}
 		if err := ct.LoadBinary(wdbCachePath); err != nil {
-			return fmt.Errorf("加载重新生成的附加词库 %s 失败: %w", cacheKey, err)
+			return nil, fmt.Errorf("加载重新生成的附加词库 %s 失败: %w", cacheKey, err)
 		}
 	}
 
-	layerName := "codetable-extra-" + spec.ID
 	layer := dict.NewCodeTableLayer(layerName, dict.LayerTypeSystem, ct)
 	dm.RegisterSystemLayer(layerName, layer)
 	logger.Info("附加词库已注册", "layer", layerName, "entryCount", ct.EntryCount())
-	return nil
+	return layer, nil
 }
 
 func loadCodetableFromWdb(engine *codetable.Engine, wdbPath string) error {
@@ -909,22 +928,31 @@ func resolvePath(exeDir, dataDir, path string) string {
 
 // ReloadExtraDicts 根据方案 Dicts 配置动态加载/卸载附加词库层。
 // 用于 dict enabled 状态变更后的热重载，不重建主词库。
-func ReloadExtraDicts(dm *dict.DictManager, s *Schema, exeDir, dataDir string, logger *slog.Logger) {
+// 返回该方案当前已启用并成功加载的所有附加层，调用方负责把这份列表同步回
+// EngineManager.systemExtras，使得"切走 → 切回"路径仍能正确恢复 extras。
+func ReloadExtraDicts(dm *dict.DictManager, s *Schema, exeDir, dataDir string, logger *slog.Logger) []dict.DictLayer {
+	var layers []dict.DictLayer
 	for _, dictSpec := range s.Dicts {
 		if dictSpec.Default {
 			continue
 		}
-		layerName := "codetable-extra-" + dictSpec.ID
+		layerName := ExtraLayerName(s.Schema.ID, dictSpec.ID)
 		if !dictSpec.IsEnabled() {
 			dm.UnregisterSystemLayer(layerName)
 			continue
 		}
 		srcPath := resolvePath(exeDir, dataDir, dictSpec.Path)
 		cacheKey := s.Schema.ID + "_" + dictSpec.ID
-		if err := loadExtraCodetable(dm, srcPath, dictSpec, cacheKey, logger); err != nil {
+		layer, err := loadExtraCodetable(dm, s.Schema.ID, srcPath, dictSpec, cacheKey, logger)
+		if err != nil {
 			logger.Warn("附加词库热重载失败", "dictID", dictSpec.ID, "error", err)
+			continue
+		}
+		if layer != nil {
+			layers = append(layers, layer)
 		}
 	}
+	return layers
 }
 
 // createMixedEngine 创建混输引擎（五笔+拼音并行查询）

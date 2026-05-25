@@ -45,9 +45,10 @@ type Manager struct {
 	// engineBuildMu 串行化引擎创建过程，避免同一方案被并发构建。
 	// 与 m.mu 解耦，重 IO 期间不持 m.mu，按键路径不被阻塞。
 	engineBuildMu sync.Mutex
-	engines       map[string]Engine         // schemaID -> Engine
-	systemLayers  map[string]dict.DictLayer // schemaID -> 该方案注册的系统词库层
-	currentID     string                    // 当前活跃方案 ID
+	engines       map[string]Engine           // schemaID -> Engine
+	systemLayers  map[string]dict.DictLayer   // schemaID -> 该方案注册的主系统词库层
+	systemExtras  map[string][]dict.DictLayer // schemaID -> 该方案注册的附加词库层（codetable-extra-*）
+	currentID     string                      // 当前活跃方案 ID
 	currentEngine Engine
 
 	// 临时方案切换
@@ -96,6 +97,7 @@ func NewManager(logger *slog.Logger) *Manager {
 	m := &Manager{
 		engines:      make(map[string]Engine),
 		systemLayers: make(map[string]dict.DictLayer),
+		systemExtras: make(map[string][]dict.DictLayer),
 		logger:       logger,
 		learningCh:   make(chan learningEvent, learningChanCapacity),
 	}
@@ -285,10 +287,24 @@ func (m *Manager) SwitchSchema(schemaID string) error {
 
 // applySwitchLocked 执行系统词库层切换并更新 currentID/currentEngine。
 // 调用方必须持有 m.mu 写锁。
+//
+// 隔离策略：
+//   - 主层（codetable-system / pinyin-system）固定按名清理。
+//   - 附加层（codetable-extra-*）按缓存的 systemExtras 列表逐个清理"所有方案"的注册，
+//     再仅重挂当前方案的，确保切到方案 A 时不会看到方案 B 注册的扩展词库。
+//     这是修复"切到虎码后再切回五笔，wq 出"寒"而不是"你""问题的关键。
 func (m *Manager) applySwitchLocked(schemaID string) {
 	if m.dictManager != nil {
 		m.dictManager.UnregisterSystemLayer("codetable-system")
 		m.dictManager.UnregisterSystemLayer("pinyin-system")
+		// 清理所有方案已注册的附加层；reRegisterSystemLayer 再按需重挂当前方案的。
+		for _, layers := range m.systemExtras {
+			for _, layer := range layers {
+				if layer != nil {
+					m.dictManager.UnregisterSystemLayer(layer.Name())
+				}
+			}
+		}
 	}
 	m.currentID = schemaID
 	m.currentEngine = m.engines[schemaID]
@@ -550,8 +566,25 @@ func (m *Manager) ensureEngineBuilt(schemaID string, opts ...schema.EngineCreate
 	if bundle.SystemLayer != nil {
 		m.systemLayers[schemaID] = bundle.SystemLayer
 	}
+	// 缓存方案的附加层列表，供 applySwitchLocked 在切换时做"按方案隔离"。
+	if len(bundle.ExtraLayers) > 0 {
+		m.systemExtras[schemaID] = bundle.ExtraLayers
+	}
 
 	return nil
+}
+
+// SetSystemExtras 设置某方案的附加词库层缓存。
+// 由 ReloadExtraDicts 等热更新路径调用，保证后续"切走再切回"能恢复正确的 extras。
+// 传 nil 或空切片将清空该方案的缓存。
+func (m *Manager) SetSystemExtras(schemaID string, layers []dict.DictLayer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(layers) == 0 {
+		delete(m.systemExtras, schemaID)
+		return
+	}
+	m.systemExtras[schemaID] = layers
 }
 
 // reRegisterSystemLayer 为缓存引擎重新注册系统词库层到 CompositeDict
@@ -559,10 +592,20 @@ func (m *Manager) reRegisterSystemLayer(schemaID string) {
 	if m.dictManager == nil {
 		return
 	}
-	// 从缓存的 systemLayers 中取出该方案的系统词库层并重新注册
+	// 从缓存的 systemLayers 中取出该方案的主系统词库层并重新注册
 	if layer, ok := m.systemLayers[schemaID]; ok && layer != nil {
 		m.dictManager.RegisterSystemLayer(layer.Name(), layer)
 		m.logger.Debug("重新注册系统词库层", "layer", layer.Name(), "schemaID", schemaID)
+	}
+	// 重新挂上该方案的所有附加层（与 applySwitchLocked 的清理配对，确保隔离）
+	if extras, ok := m.systemExtras[schemaID]; ok {
+		for _, layer := range extras {
+			if layer == nil {
+				continue
+			}
+			m.dictManager.RegisterSystemLayer(layer.Name(), layer)
+			m.logger.Debug("重新注册附加词库层", "layer", layer.Name(), "schemaID", schemaID)
+		}
 	}
 }
 

@@ -190,10 +190,15 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 		}
 	}
 
-	// 附加词库热重载（根据 enabled 字段动态加载/卸载 dict layer）
+	// 附加词库热重载（根据 enabled 字段动态加载/卸载 dict layer）。
+	// 同步结果到 engineMgr.systemExtras，保证后续"切走再切回该方案"时仍能恢复附加层；
+	// 否则 applySwitchLocked 会按旧缓存清理 / 重挂，热重载后的状态会被覆盖。
 	if h.dictMgr != nil && s.Engine.Type == schema.EngineTypeCodeTable {
 		exeDir, dataDir := h.schemaMgr.GetDirs()
-		schema.ReloadExtraDicts(h.dictMgr, s, exeDir, dataDir, h.logger)
+		layers := schema.ReloadExtraDicts(h.dictMgr, s, exeDir, dataDir, h.logger)
+		if h.engineMgr != nil {
+			h.engineMgr.SetSystemExtras(s.Schema.ID, layers)
+		}
 	}
 
 	// 学习配置热更新（调频 + 造词）
