@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/dict/binformat"
 	"github.com/huanfeng/wind_input/internal/dict/dictcache"
@@ -229,8 +228,7 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 			ctSystemLayer = systemLayer
 		}
 		engine.SetDictManager(dm)
-		// 同步排序模式到 CompositeDict，避免启动时使用默认的词频排序
-		dm.SetSortMode(candidate.CandidateSortMode(spec.CandidateSortMode))
+		// 排序模式不再由 dm 持有；引擎每次调用 composite.Search 时通过 SearchOptions 显式传入。
 
 		// 注入 FreqHandler（调频）
 		if s.Learning.IsFreqEnabled() {
@@ -1086,7 +1084,7 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 			mixedSystemLayer = systemLayer
 		}
 		codetableEngine.SetDictManager(dm)
-		dm.SetSortMode(candidate.CandidateSortMode(codeTableSpec.CandidateSortMode))
+		// 排序模式不再由 dm 持有；引擎每次调用 composite.Search 时通过 SearchOptions 显式传入。
 
 		// 注入码表引擎的 FreqHandler 和 LearningStrategy
 		if s.Learning.IsFreqEnabled() {

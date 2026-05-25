@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
 	"github.com/huanfeng/wind_input/internal/engine/pinyin"
 	"github.com/huanfeng/wind_input/internal/schema"
@@ -269,7 +270,8 @@ func (m *Manager) HasPrefix(prefix string) bool {
 	}
 	// 码表/用户词/静态短语前缀（聚合所有词库层）
 	if composite := dm.GetCompositeDict(); composite != nil {
-		if len(composite.SearchPrefix(prefix, 1)) > 0 {
+		// 仅判断是否存在命中，排序模式不影响结果数量
+		if len(composite.SearchPrefix(prefix, dict.SearchOptions{Limit: 1})) > 0 {
 			return true
 		}
 	}

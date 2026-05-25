@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine/codetable"
 	"github.com/huanfeng/wind_input/internal/engine/mixed"
@@ -66,9 +65,7 @@ func (m *Manager) UpdateCodetableOptions(spec *schema.CodeTableSpec) {
 		}
 	}
 
-	if m.dictManager != nil && spec.CandidateSortMode != "" {
-		m.dictManager.SetSortMode(candidate.CandidateSortMode(spec.CandidateSortMode))
-	}
+	// 排序模式不再由 dm 持有；引擎自己的 Config.CandidateSortMode 已在 updateCodetableConfig 中更新。
 
 	m.logger.Info("更新码表选项",
 		"autoCommitAtFull", spec.AutoCommitAtFull != nil && *spec.AutoCommitAtFull || (spec.AutoCommitAtFull == nil && spec.AutoCommitUnique),

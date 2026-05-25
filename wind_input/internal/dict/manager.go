@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/store"
 )
 
@@ -403,13 +402,6 @@ func (dm *DictManager) SetFreqProfile(profile *store.FreqProfile) {
 	dm.freqScorers = make(map[string]*StoreFreqScorer)
 }
 
-// SetSortMode 设置候选排序模式
-func (dm *DictManager) SetSortMode(mode candidate.CandidateSortMode) {
-	dm.mu.Lock()
-	defer dm.mu.Unlock()
-	dm.compositeDict.SetSortMode(mode)
-}
-
 // GetShadowProvider 获取当前活跃的 ShadowProvider。
 // 当 activeStoreShadow 是 nil 指针时显式返回 untyped nil, 避免接口 typed-nil
 // 陷阱 (调方法时 panic, 即使 `if p != nil { p.X() }` 也无效)。
@@ -706,16 +698,6 @@ func (dm *DictManager) Close() error {
 	}
 
 	return nil
-}
-
-// Search 搜索候选词（便捷方法）
-func (dm *DictManager) Search(code string, limit int) []candidate.Candidate {
-	return dm.compositeDict.Search(code, limit)
-}
-
-// SearchPrefix 前缀搜索（便捷方法）
-func (dm *DictManager) SearchPrefix(prefix string, limit int) []candidate.Candidate {
-	return dm.compositeDict.SearchPrefix(prefix, limit)
 }
 
 // ReloadPhrases 重新加载短语配置

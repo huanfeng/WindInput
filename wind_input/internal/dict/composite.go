@@ -44,6 +44,10 @@ func formatLayerTrace(trace []layerHit) string {
 
 // CompositeDict 聚合词库
 // 按优先级组合多个词库层，实现分层叠加查询
+//
+// 排序模式不由 CompositeDict 持有 —— 它属于当前活跃方案，
+// 由调用方（引擎）通过 SearchOptions.SortMode 每次显式传入。
+// 这样设计避免多方案共享同一 dm 时 sortMode 跨方案污染。
 type CompositeDict struct {
 	mu     sync.RWMutex
 	layers []DictLayer // 按优先级排序（LayerType 小的在前）
@@ -53,9 +57,14 @@ type CompositeDict struct {
 
 	// 词频评分器（可选）
 	freqScorer FreqScorer
+}
 
-	// 排序模式
-	sortMode candidate.CandidateSortMode
+// SearchOptions 查询选项。
+// 引入 struct 是为后续扩展（如 IncludeLayers、FilterMode 等查询级配置）留口子，
+// 当前仅有 Limit / SortMode 两个字段。零值（SortMode == ""）等价于按词频排序（Better）。
+type SearchOptions struct {
+	Limit    int                         // 最大返回数量，0 表示不限制
+	SortMode candidate.CandidateSortMode // 排序模式，空值默认为词频排序
 }
 
 // seenIdxPool 复用 searchInternal 中的去重 map。每次按键都会触发一轮 search，
@@ -133,44 +142,70 @@ func (c *CompositeDict) SetFreqScorer(scorer FreqScorer) {
 	c.freqScorer = scorer
 }
 
-// SetSortMode 设置候选排序模式
-func (c *CompositeDict) SetSortMode(mode candidate.CandidateSortMode) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sortMode = mode
-}
-
-// GetSortMode 获取当前排序模式
-func (c *CompositeDict) GetSortMode() candidate.CandidateSortMode {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.sortMode == "" {
-		return candidate.SortByFrequency
-	}
-	return c.sortMode
-}
-
 // Search 聚合查询
-// 按优先级遍历所有层，合并结果，应用 Shadow 规则
-func (c *CompositeDict) Search(code string, limit int) []candidate.Candidate {
+// 按优先级遍历所有层，合并结果。
+// opt.SortMode 由调用方传入；空值视为词频排序。
+func (c *CompositeDict) Search(code string, opt SearchOptions) []candidate.Candidate {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	return c.searchInternal(code, limit, false)
+	return c.searchInternal(code, opt, false)
 }
 
 // SearchPrefix 聚合前缀查询
-func (c *CompositeDict) SearchPrefix(prefix string, limit int) []candidate.Candidate {
+func (c *CompositeDict) SearchPrefix(prefix string, opt SearchOptions) []candidate.Candidate {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	return c.searchInternal(prefix, limit, true)
+	return c.searchInternal(prefix, opt, true)
+}
+
+// SearchSystemOnly 仅查询系统码表 / 细胞词库层（LayerTypeCell + LayerTypeSystem），
+// 跳过 user/temp/shadow/phrase 等层。
+// 用于 ProtectTopN: "锁定码表原始顺序"语义只看系统层，避免被用户词/临时词污染。
+// 不应用 freqScorer——保护的是码表静态权重序，而不是当前调频后的实时顺序。
+func (c *CompositeDict) SearchSystemOnly(code string, opt SearchOptions) []candidate.Candidate {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	results := make([]candidate.Candidate, 0, 32)
+	seen := make(map[string]int, 16)
+	for _, layer := range c.layers {
+		t := layer.Type()
+		if t != LayerTypeSystem && t != LayerTypeCell {
+			continue
+		}
+		for _, cand := range layer.Search(code, 0) {
+			if idx, exists := seen[cand.Text]; exists {
+				if cand.Weight > results[idx].Weight {
+					results[idx].Weight = cand.Weight
+				}
+				continue
+			}
+			seen[cand.Text] = len(results)
+			results = append(results, cand)
+		}
+	}
+
+	comparator := candidate.Better
+	if opt.SortMode == candidate.SortByNatural {
+		comparator = candidate.BetterNatural
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		return comparator(results[i], results[j])
+	})
+
+	if opt.Limit > 0 && len(results) > opt.Limit {
+		results = results[:opt.Limit]
+	}
+	return results
 }
 
 // searchInternal 内部查询逻辑
 // Shadow 的 pin/delete 不在此处处理——统一由引擎层 Phase 6（ApplyShadowPins）在最终排序后应用。
 // CompositeDict 只负责层级合并、去重和基础排序。
-func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []candidate.Candidate {
+func (c *CompositeDict) searchInternal(code string, opt SearchOptions, isPrefix bool) []candidate.Candidate {
+	limit := opt.Limit
 	// 1. 遍历所有层收集候选词
 	// 去重策略：保留高优先级层（先出现）的词条信息，但继承后续层中同 Text 词条的更高权重。
 	// 这确保用户词不会因为低权重而丢失码表词的自然排序位置。
@@ -243,7 +278,7 @@ func (c *CompositeDict) searchInternal(code string, limit int, isPrefix bool) []
 
 	// 3. 排序
 	comparator := candidate.Better
-	if c.sortMode == candidate.SortByNatural {
+	if opt.SortMode == candidate.SortByNatural {
 		comparator = candidate.BetterNatural
 	}
 	sort.SliceStable(results, func(i, j int) bool {
@@ -459,11 +494,9 @@ func (c *CompositeDict) GetLayersByType(layerType LayerType) []DictLayer {
 // 查询便捷方法
 // ============================================================
 
-// Lookup 按编码查询候选词
+// Lookup 按编码查询候选词（便捷方法，使用默认排序模式）
 func (c *CompositeDict) Lookup(pinyin string) []candidate.Candidate {
-	results := c.Search(pinyin, 0)
-	// log.Printf("[CompositeDict] Lookup: pinyin=%q results=%d", pinyin, len(results))
-	return results
+	return c.Search(pinyin, SearchOptions{})
 }
 
 // LookupPhrase 将音节列表拼接后查询
@@ -478,12 +511,12 @@ func (c *CompositeDict) LookupPhrase(syllables []string) []candidate.Candidate {
 		code += s
 	}
 
-	return c.Search(code, 0)
+	return c.Search(code, SearchOptions{})
 }
 
 // LookupPrefix 实现 dict.PrefixSearchable 接口
 func (c *CompositeDict) LookupPrefix(prefix string, limit int) []candidate.Candidate {
-	return c.SearchPrefix(prefix, limit)
+	return c.SearchPrefix(prefix, SearchOptions{Limit: limit})
 }
 
 // LookupCommand 实现 dict.CommandSearchable 接口

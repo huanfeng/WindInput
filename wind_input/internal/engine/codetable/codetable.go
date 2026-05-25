@@ -359,10 +359,12 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	phaseStart := time.Now()
 	exactCandidates := make([]candidate.Candidate, 0, 32)
 
+	sortMode := candidate.CandidateSortMode(e.config.CandidateSortMode)
 	if e.dictManager != nil {
 		// 通过 CompositeDict 查询（包含短语、用户词、系统码表，Shadow 已自动应用）
+		// SortMode 由本引擎 Config 驱动，确保 composite 与 Phase 5 一致。
 		compositeDict := e.dictManager.GetCompositeDict()
-		exactCandidates = append(exactCandidates, compositeDict.Search(input, 0)...)
+		exactCandidates = append(exactCandidates, compositeDict.Search(input, dict.SearchOptions{SortMode: sortMode})...)
 		exactCandidates = append(exactCandidates, compositeDict.LookupCommand(input)...)
 	}
 
@@ -384,7 +386,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 	if prefixEnabled {
 		if e.dictManager != nil {
 			compositeDict := e.dictManager.GetCompositeDict()
-			for _, c := range compositeDict.SearchPrefix(input, 0) {
+			for _, c := range compositeDict.SearchPrefix(input, dict.SearchOptions{SortMode: sortMode}) {
 				if c.Code != input {
 					prefixCandidates = append(prefixCandidates, c)
 				}
@@ -426,7 +428,7 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 		var completionCandidates []candidate.Candidate
 		if e.dictManager != nil {
 			compositeDict := e.dictManager.GetCompositeDict()
-			for _, c := range compositeDict.SearchPrefix(input, 1) {
+			for _, c := range compositeDict.SearchPrefix(input, dict.SearchOptions{Limit: 1, SortMode: sortMode}) {
 				if c.Code != input {
 					completionCandidates = append(completionCandidates, c)
 					break
@@ -472,19 +474,36 @@ func (e *Engine) ConvertEx(input string, maxCandidates int) *ConvertResult {
 
 	// ========== Phase 5: 排序 + 过滤 + 截断 ==========
 	phaseStart = time.Now()
-	// 排序前记住精确匹配的原始 top-N（用于 ProtectTopN 锁定）
+	// 排序前记住码表原始 top-N（用于 ProtectTopN 锁定）。
+	// 只取系统码表 / 细胞词库层，跳过 user/temp/phrase ——
+	// "锁定码表原始顺序"的本意是保护用户对系统码表的肌肉记忆，
+	// 不应被临时词 / 用户造词的高排位污染。
 	protectN := 0
 	if e.config != nil {
 		protectN = e.config.ProtectTopN
 	}
 	var protectedCandidates []candidate.Candidate
-	if protectN > 0 && len(exactCandidates) > 0 {
+	if protectN > 0 && e.dictManager != nil {
+		if cd := e.dictManager.GetCompositeDict(); cd != nil {
+			protectedCandidates = cd.SearchSystemOnly(input, dict.SearchOptions{Limit: protectN, SortMode: sortMode})
+		}
+	}
+	// 降级路径：测试场景无 DictManager 时直接查 e.codeTable
+	if protectN > 0 && len(protectedCandidates) == 0 && e.codeTable != nil && e.dictManager == nil {
+		raw := e.codeTable.Lookup(input)
+		fallbackComparator := candidate.Better
+		if sortMode == candidate.SortByNatural {
+			fallbackComparator = candidate.BetterNatural
+		}
+		sort.SliceStable(raw, func(i, j int) bool {
+			return fallbackComparator(raw[i], raw[j])
+		})
 		n := protectN
-		if n > len(exactCandidates) {
-			n = len(exactCandidates)
+		if n > len(raw) {
+			n = len(raw)
 		}
 		protectedCandidates = make([]candidate.Candidate, n)
-		copy(protectedCandidates, exactCandidates[:n])
+		copy(protectedCandidates, raw[:n])
 	}
 
 	comparator := candidate.Better
@@ -766,7 +785,8 @@ func (e *Engine) hasFullInputMatch(input string) bool {
 	}
 	if e.dictManager != nil {
 		if cd := e.dictManager.GetCompositeDict(); cd != nil {
-			if len(cd.Search(input, 1)) > 0 {
+			// 仅判断是否存在命中，排序模式不影响结果数量
+			if len(cd.Search(input, dict.SearchOptions{Limit: 1})) > 0 {
 				return true
 			}
 		}

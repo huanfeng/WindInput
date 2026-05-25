@@ -19,7 +19,7 @@
 - 排序规则（`Better`）：权重降序 → 文本升序 → 编码升序 → 消耗长度降序
 - `BetterNatural`：自然顺序排序（不调整词频权重，按码表原始顺序为主）
 - `CandidateSource` 枚举: `None / Codetable / Pinyin / English / Phrase`; `SourcePhrase` (2026-05-16 引入) 标记 PhraseLayer 候选, 在混输引擎中走 `mixed.PhraseWeightBoost` 独立 tier (1M), 不与码表词 (10M) 抢首位
-- `CandidateSortMode` 常量由 Schema 的 `candidate_sort_mode` 字段设置，传递给 `CompositeDict.SetSortMode`
+- `CandidateSortMode` 常量由 Schema 的 `candidate_sort_mode` 字段设置；引擎在每次 `CompositeDict.Search/SearchPrefix` 调用时通过 `dict.SearchOptions.SortMode` 显式传入，**不再**经由 `CompositeDict.SetSortMode` 全局缓存（避免多方案共享 dm 时跨方案污染）
 - `IsCommon` 字段由 `dict.InitCommonCharsWithPath` 初始化的通用字符表决定
 - `IsCommand` 标识 uuid/date/time 等命令候选，UI 渲染时可能有特殊样式
 - `IsGroupMember` (2026-05-17 引入) 标识 `$AA` 字符组、`$SS` 字符串数组**展开后**的子项候选; 右键菜单 pin/delete/前移/后移/置顶/恢复默认 全 disable —— 顺序由源 marker (`$AA(chars)` / `$SS(elem...)`) 完整定义, 走"编辑短语"路径修改 yaml, 不允许 Shadow 双轨漂移。导航候选 (`IsGroup=true`) 本身**不**标 (组入口不展开), 普通短语 / 用户词 / 系统词 / 单 `$CC` 命令亦不标
