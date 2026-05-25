@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -10,6 +11,14 @@ import (
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
+
+// settingsLaunchAttempt 记录单次 wind_setting.exe 启动尝试的结果，仅用于日志聚合。
+type settingsLaunchAttempt struct {
+	path   string
+	ret    uintptr
+	err    error
+	exists bool
+}
 
 // UpdateConfig 更新 UI 配置（热更新）
 // fontFamily 仅作用于候选窗口渲染器，菜单/工具栏/提示等组件使用系统默认字体。
@@ -287,8 +296,7 @@ func (m *Manager) doOpenSettings(page string) {
 		paramsPtr, _ = windows.UTF16PtrFromString(params)
 	}
 
-	var lastRet uintptr
-	var lastErr error
+	var attempts []settingsLaunchAttempt
 
 	for _, path := range paths {
 		pathPtr, _ := windows.UTF16PtrFromString(path)
@@ -307,38 +315,81 @@ func (m *Manager) doOpenSettings(page string) {
 			1,                                // nShowCmd (SW_SHOWNORMAL)
 		)
 
-		lastRet = ret
-		lastErr = err
-
 		// ShellExecuteW returns >32 on success
 		if ret > 32 {
 			m.logger.Info("Settings application launched successfully", "path", path, "page", page)
 			return
 		}
+
+		_, statErr := os.Stat(path)
+		attempts = append(attempts, settingsLaunchAttempt{
+			path:   path,
+			ret:    ret,
+			err:    err,
+			exists: statErr == nil,
+		})
 	}
 
-	// All paths failed, fall back to opening the web URL
-	m.logger.Warn("Failed to launch wind_setting.exe, falling back to web URL", "ret", lastRet, "error", lastErr)
-
-	// Build URL with page parameter
-	url := "http://127.0.0.1:18923"
-	if page != "" {
-		url += "/#/" + page
-	}
-	urlPtr, _ := windows.UTF16PtrFromString(url)
-
-	ret, _, err := procShellExecuteW.Call(
-		0,                                // hwnd
-		uintptr(unsafe.Pointer(openPtr)), // lpOperation ("open")
-		uintptr(unsafe.Pointer(urlPtr)),  // lpFile (URL)
-		0,                                // lpParameters
-		0,                                // lpDirectory
-		1,                                // nShowCmd (SW_SHOWNORMAL)
+	// 全部路径失败：记录详细信息，便于排查（不再回退到浏览器，因为 127.0.0.1:18923
+	// 由 wind_setting.exe 自身提供服务，进程都没起来时浏览器 fallback 必然连不上）。
+	last := attempts[len(attempts)-1]
+	m.logger.Error("Failed to launch settings application",
+		"page", page,
+		"settingExe", settingExe,
+		"triedPaths", formatAttemptPaths(attempts),
+		"lastPath", last.path,
+		"lastPathExists", last.exists,
+		"ret", last.ret,
+		"retMeaning", shellExecuteErrorMeaning(last.ret),
+		"error", last.err,
 	)
+}
 
-	if ret <= 32 {
-		m.logger.Error("Failed to open settings URL", "error", err, "ret", ret)
-	} else {
-		m.logger.Info("Settings URL opened successfully (fallback)", "url", url)
+// formatAttemptPaths 将多次启动尝试格式化为 "path1(exists)|path2(missing)" 形式，
+// 便于在日志中一行内看到所有候选路径及其存在性。
+func formatAttemptPaths(attempts []settingsLaunchAttempt) string {
+	parts := make([]string, 0, len(attempts))
+	for _, a := range attempts {
+		state := "missing"
+		if a.exists {
+			state = "exists"
+		}
+		parts = append(parts, a.path+"("+state+")")
+	}
+	return strings.Join(parts, " | ")
+}
+
+// shellExecuteErrorMeaning 将 ShellExecuteW 的小于等于 32 的返回值映射为可读说明，
+// 便于诊断设置程序无法启动的具体原因。错误码定义见 Win32 ShellExecuteW 文档。
+func shellExecuteErrorMeaning(ret uintptr) string {
+	switch ret {
+	case 0:
+		return "out of memory or resources"
+	case 2: // ERROR_FILE_NOT_FOUND / SE_ERR_FNF
+		return "file not found"
+	case 3: // ERROR_PATH_NOT_FOUND / SE_ERR_PNF
+		return "path not found"
+	case 5: // SE_ERR_ACCESSDENIED
+		return "access denied (UAC/SmartScreen/AV blocked or user cancelled)"
+	case 8: // SE_ERR_OOM
+		return "out of memory"
+	case 11: // ERROR_BAD_FORMAT
+		return "invalid exe format"
+	case 26: // SE_ERR_SHARE
+		return "sharing violation"
+	case 27: // SE_ERR_ASSOCINCOMPLETE
+		return "file association information incomplete"
+	case 28: // SE_ERR_DDETIMEOUT
+		return "DDE transaction timed out"
+	case 29: // SE_ERR_DDEFAIL
+		return "DDE transaction failed"
+	case 30: // SE_ERR_DDEBUSY
+		return "DDE transaction busy"
+	case 31: // SE_ERR_NOASSOC
+		return "no application associated with the file"
+	case 32: // SE_ERR_DLLNOTFOUND
+		return "required DLL not found"
+	default:
+		return "unknown shell execute error"
 	}
 }
