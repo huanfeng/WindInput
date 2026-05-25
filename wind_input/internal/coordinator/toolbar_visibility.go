@@ -1,7 +1,6 @@
 package coordinator
 
 import (
-	"github.com/huanfeng/wind_input/internal/foreground"
 	"github.com/huanfeng/wind_input/internal/ui"
 )
 
@@ -32,12 +31,24 @@ func (c *Coordinator) showToolbarRespectingFullscreen(posX, posY int) {
 }
 
 // shouldHideToolbarDueToFullscreen 返回是否应因「前台全屏」抑制工具栏显示。
-// 调用方必须持有 c.mu（用于安全访问 c.config）。
+// 调用方必须持有 c.mu（用于安全访问 c.config 与 c.toolbarSuppressedByFullscreen）。
+//
+// 注意：此处不再同步调用 foreground.IsForegroundFullscreen()。该调用在 IME activate /
+// focus gained 同步响应路径上执行时，会触发 SHQueryUserNotificationState 等跨进程
+// shell 查询；而此时发起 IME activate 的 host 通常是 explorer.exe，其 UI 线程正被
+// C++ DLL 的 1500ms 同步 ReadFile 阻塞 → 形成 Go ↔ explorer 环形等待，直到 C++
+// 端 READ_TIMEOUT_MS 超时切断 pipe 才解开，外在表现为「点任务栏 / 任务管理器 /
+// 托盘小箭头都卡顿 ~1.5s」。
+//
+// 改为只读 ShellHook (HSHELL_WINDOWENTERFULLSCREEN/EXIT) 维护的缓存状态：全屏进/出
+// 转换由 OnShellFullscreenChange 推送，与按键 / IME activate 完全解耦。
+// 已知边界：启动时若前台已处于全屏（未触发 enter 通知），首次 IME activate 会按
+// 「非全屏」决策；后续任意一次全屏进/出会自动纠正。
 func (c *Coordinator) shouldHideToolbarDueToFullscreen() bool {
 	if c.config == nil || !c.config.Toolbar.IsHideInFullscreen() {
 		return false
 	}
-	return foreground.IsForegroundFullscreen()
+	return c.toolbarSuppressedByFullscreen
 }
 
 // OnShellFullscreenChange 由 UI 层在收到系统 Shell 全屏通知

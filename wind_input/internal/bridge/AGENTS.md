@@ -37,6 +37,25 @@ Named Pipe IPC 服务端，负责与 C++ TSF（文本服务框架）桥接层进
 - 共享内存命名规则：`Local\WindInput_SHM_<PID>`，事件命名：`Local\WindInput_EVT_<PID>`
 - `HostRenderManager.UpdateWhitelist` 在配置重载时调用
 
+### 红线：bridge handler 同步路径禁止「跨进程 Win32 / Shell 调用」
+
+bridge handler goroutine 处理 `CmdIMEActivated` / `CmdFocusGained` / `CmdCaretUpdate` / `CmdHostRenderRequest` 等同步命令时，**调用方（C++ TSF DLL）正阻塞在宿主进程的 UI 线程上等响应**（`READ_TIMEOUT_MS = 1500ms`，见 `wind_tsf/include/IPCClient.h`）。在这条路径上 Go 端**严禁**做以下调用：
+
+- `SHQueryUserNotificationState`、`SHGetKnownFolderPath` 等 shell32 跨进程 API
+- 对 `GetForegroundWindow()` 返回的 hwnd 再做 `SendMessage` / `SendMessageTimeout`
+- `BroadcastSystemMessage`、`AttachThreadInput`
+- 任何 `OpenProcess` + 同步等待结果（除非命中本地缓存）
+- 任何持锁等待 UI 线程的同步原语（包括 `Manager.cmdCh` 阻塞发送，必须用 `default` 分支降级）
+
+**原因**：这些调用会反向 RPC 到 explorer / dwm / 其它 shell 服务，而那些服务此刻可能正被本 IME DLL 阻塞 → 形成环形等待，直到 C++ 端 1500ms 超时切断管道才解开，外在表现为「点任务栏 / 任务管理器 / 托盘小箭头都卡顿 ~1.5s」。已有事故：`coordinator/toolbar_visibility.go` 早期版本在 IME activate 同步路径里调用 `foreground.IsForegroundFullscreen()` → `SHQueryUserNotificationState`，全量复现该模式。
+
+**正确做法**：
+- 事件驱动缓存：用 ShellHook (`HSHELL_WINDOWENTERFULLSCREEN/EXIT`) 或 WinEventHook 在 UI 线程被动收事件，同步路径只读 cache。
+- 把工作丢到独立 goroutine：`go func() { ... }()` 异步执行，立即返回 ACK。
+- 已有正例：`HandleIMEActivated` 中 push pipe 写入用 `go bridgeServer.PushEnglishPairConfigToActiveClient(...)`，注释见 `coordinator/handle_lifecycle.go:786-792`。
+
+**自动检测**：`processRequestWithTimeout` 内置 `slowRequestThreshold = 50ms` 慢请求 WARN。新增同步路径调用后看到 `Slow bridge request` 日志 = 命中此红线，立刻回查。
+
 ### Testing Requirements
 - 需要在 Windows 环境测试（依赖 Named Pipe）
 - 协议变更需同步修改 C++ TSF Bridge 侧代码

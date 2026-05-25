@@ -6,12 +6,31 @@ import (
 	"fmt"
 	"io"
 	"runtime/debug"
+	"time"
 
 	"github.com/huanfeng/wind_input/internal/ipc"
 )
 
+// slowRequestThreshold 是同步 bridge 请求处理时长的警戒线。
+// 超过即写 WARN，便于排查「宿主 UI 线程被同步 IPC 阻塞」这类问题
+// （例如 IME activate 同步路径误调用了跨进程 shell API，导致 C++ 端
+// READ_TIMEOUT_MS=1500ms 命中超时、host explorer 卡 1.5s）。
+// 50ms 是经验值：bridge 命令绝大多数走 mmap 查询，正常 <5ms；50ms 已是异常的下限。
+const slowRequestThreshold = 50 * time.Millisecond
+
 // processRequestWithTimeout wraps processRequest with a timeout
 func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte, clientID int, processID uint32) []byte {
+	t0 := time.Now()
+	defer func() {
+		if d := time.Since(t0); d > slowRequestThreshold {
+			s.logger.Warn("Slow bridge request",
+				"command", fmt.Sprintf("0x%04X", header.Command),
+				"duration", d,
+				"clientID", clientID,
+				"processID", processID)
+		}
+	}()
+
 	// 快速命令直接同步执行，避免 goroutine + channel 分配。
 	// CmdKeyEvent/CmdCommitRequest 是最高频命令，词典查询几乎全走 mmap，耗时远低于 200ms 超时。
 	switch header.Command {
