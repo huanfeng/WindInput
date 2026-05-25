@@ -600,6 +600,19 @@ async function onThemeStyleChange(_themeStyle: string) {
   }
 }
 
+// 系统外观变化时, 若用户选择"跟随系统", 同步刷新主题预览
+// (后端 GetThemePreview 在 themeStyle="system" 时按调用时刻的系统色读取)
+const systemDarkMql =
+  typeof window !== "undefined"
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
+async function handleSystemThemeChange() {
+  const style = formData.value.ui.theme_style || "system";
+  if (style !== "system") return;
+  if (!formData.value.ui.theme) return;
+  await loadThemePreview(formData.value.ui.theme);
+}
+
 // 外部链接和工具
 async function handleOpenLogFolder() {
   try {
@@ -688,6 +701,9 @@ onMounted(async () => {
         Show();
       } catch {}
     });
+
+    // 监听系统外观变化, 跟随系统模式下刷新主题预览
+    systemDarkMql?.addEventListener("change", handleSystemThemeChange);
   }
 });
 
@@ -695,6 +711,7 @@ onUnmounted(() => {
   offConfigEvent();
   EventsOff("navigate");
   EventsOff("navigate-addword");
+  systemDarkMql?.removeEventListener("change", handleSystemThemeChange);
 });
 </script>
 
