@@ -3,6 +3,7 @@ package ui
 import (
 	"image/color"
 
+	"github.com/huanfeng/wind_input/internal/uicmd"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
@@ -37,22 +38,24 @@ func (m *Manager) ShowCandidates(candidates []Candidate, input string, cursorPos
 	m.logger.Debug("Queuing ShowCandidates", "input", input, "cursorPos", cursorPos, "count", len(candidates), "caretX", caretX, "caretY", caretY, "caretHeight", caretHeight, "selectedIndex", selectedIndex, "session", currentSession)
 
 	// Send command to UI thread (non-blocking due to buffered channel)
+	item := uicmdItem{
+		Cmd: uicmd.NewCommand(uicmd.CmdCandidatesShow, currentSession, uicmd.CandidatesShowPayload{
+			Candidates:          toUICandidates(candidates),
+			Input:               input,
+			CursorPos:           cursorPos,
+			CaretX:              caretX,
+			CaretY:              caretY,
+			CaretHeight:         caretHeight,
+			Page:                page,
+			TotalPages:          totalPages,
+			TotalCandidateCount: totalCandidateCount,
+			CandidatesPerPage:   candidatesPerPage,
+			SelectedIndex:       selectedIndex,
+		}),
+		Candidates: candidates,
+	}
 	select {
-	case m.cmdCh <- UICommand{
-		Type:                cmdShow,
-		Candidates:          candidates,
-		Input:               input,
-		CursorPos:           cursorPos,
-		X:                   caretX,
-		Y:                   caretY,
-		CaretHeight:         caretHeight,
-		Page:                page,
-		TotalPages:          totalPages,
-		TotalCandidateCount: totalCandidateCount,
-		CandidatesPerPage:   candidatesPerPage,
-		SelectedIndex:       selectedIndex,
-		InputSession:        currentSession,
-	}:
+	case m.cmdCh <- item:
 		// Signal the event to wake up the message loop
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
@@ -288,8 +291,9 @@ func (m *Manager) Hide() {
 	// Note: We always send hide command even if window appears hidden,
 	// because the window visibility check is not thread-safe and there might
 	// be pending show commands in the channel
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdCandidatesHide, newSession, uicmd.CandidatesHidePayload{})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdHide, InputSession: newSession}:
+	case m.cmdCh <- item:
 		// Signal the event to wake up the message loop
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
@@ -319,14 +323,15 @@ func (m *Manager) doHide() {
 	m.window.ResetMouseTracking()
 }
 
-// UpdatePosition updates the window position
+// UpdatePosition 投递 CmdCandidatesPosition 命令到 UI 线程更新候选框位置。
+// 历史上为 sync 直接 m.window.SetPosition; PR-3 改为 async 投递, 集中线程与跨进程兼容。
 func (m *Manager) UpdatePosition(x, y int) {
 	m.mu.Lock()
 	m.caretX = x
 	m.caretY = y
 	m.mu.Unlock()
 
-	m.window.SetPosition(x, y)
+	m.postCmd(uicmd.NewCommand(uicmd.CmdCandidatesPosition, 0, uicmd.CandidatesPositionPayload{X: x, Y: y}))
 }
 
 // IsVisible returns whether the window is visible
@@ -357,22 +362,24 @@ func (m *Manager) RefreshCandidates() {
 	m.mu.Unlock()
 
 	// Re-queue a show command with current data
+	item := uicmdItem{
+		Cmd: uicmd.NewCommand(uicmd.CmdCandidatesShow, currentSession, uicmd.CandidatesShowPayload{
+			Candidates:          toUICandidates(candidates),
+			Input:               input,
+			CursorPos:           cursorPos,
+			CaretX:              caretX,
+			CaretY:              caretY,
+			CaretHeight:         caretHeight,
+			Page:                page,
+			TotalPages:          totalPages,
+			TotalCandidateCount: totalCandidateCount,
+			CandidatesPerPage:   candidatesPerPage,
+			SelectedIndex:       selectedIndex,
+		}),
+		Candidates: candidates,
+	}
 	select {
-	case m.cmdCh <- UICommand{
-		Type:                cmdShow,
-		Candidates:          candidates,
-		Input:               input,
-		CursorPos:           cursorPos,
-		X:                   caretX,
-		Y:                   caretY,
-		CaretHeight:         caretHeight,
-		Page:                page,
-		TotalPages:          totalPages,
-		TotalCandidateCount: totalCandidateCount,
-		CandidatesPerPage:   candidatesPerPage,
-		SelectedIndex:       selectedIndex,
-		InputSession:        currentSession,
-	}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -391,8 +398,9 @@ func (m *Manager) NotifyDPIChanged() {
 	}
 	m.mu.Unlock()
 
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdDPIChanged, 0, uicmd.DPIChangedPayload{})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdDPIChanged}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -453,8 +461,9 @@ func (m *Manager) HideCandidateMenu() {
 	m.mu.Unlock()
 
 	// Send command to UI thread (don't call HideMenu directly - it has Win32 calls)
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdCandidateMenuHide, 0, uicmd.CandidateMenuHidePayload{})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdHideMenu}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -478,32 +487,37 @@ func (m *Manager) CandidateMenuContainsPoint(screenX, screenY int) bool {
 	return false
 }
 
-// SetPinyinMode 设置是否为拼音模式（影响右键菜单前移/后移启用状态）
+// SetPinyinMode 设置是否为拼音模式（影响右键菜单前移/后移启用状态）。
+// PR-3: 末尾投递 CmdCandidatesMarkers 全量快照, 供跨进程同步。
 func (m *Manager) SetPinyinMode(isPinyin bool) {
 	m.mu.Lock()
 	m.isPinyinMode = isPinyin
 	m.mu.Unlock()
+	m.postCmd(m.snapshotCandidatesMarkers())
 }
 
-// SetQuickInputMode 设置是否为快捷输入模式（右键菜单只保留复制）
+// SetQuickInputMode 设置是否为快捷输入模式（右键菜单只保留复制）。
 func (m *Manager) SetQuickInputMode(isQuickInput bool) {
 	m.mu.Lock()
 	m.isQuickInputMode = isQuickInput
 	m.mu.Unlock()
+	m.postCmd(m.snapshotCandidatesMarkers())
 }
 
-// SetModeLabel 设置临时模式标签（如"临时拼音"、"快捷输入"），空字符串表示不显示
+// SetModeLabel 设置临时模式标签（如"临时拼音"、"快捷输入"），空字符串表示不显示。
 func (m *Manager) SetModeLabel(label string) {
 	m.mu.Lock()
 	m.modeLabel = label
 	m.mu.Unlock()
+	m.postCmd(m.snapshotCandidatesMarkers())
 }
 
-// SetModeAccentColor 设置特殊模式内发光边框颜色，nil 表示不显示
+// SetModeAccentColor 设置特殊模式内发光边框颜色，nil 表示不显示。
 func (m *Manager) SetModeAccentColor(c color.Color) {
 	m.mu.Lock()
 	m.modeAccentColor = c
 	m.mu.Unlock()
+	m.postCmd(m.snapshotCandidatesMarkers())
 }
 
 // resolveAppPinnedPosition 返回「固定候选位置」规则对应的候选窗左上角坐标。

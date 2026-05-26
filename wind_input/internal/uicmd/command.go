@@ -50,6 +50,7 @@ const (
 	// --- 设置/其他 UI 杂项 (0x0680 ~ 0x068F) ---
 	CmdSettingsOpen CommandType = 0x0680 // 打开设置窗口 (可选指定页面)
 	CmdDPIChanged   CommandType = 0x0681 // DPI 变更通知 (Windows 专有; darwin 端忽略)
+	CmdScreenshot   CommandType = 0x0682 // 截图所有可见 UI 窗口 (Windows 本地动作; darwin 端忽略)
 )
 
 // Payload 是所有命令 payload 的标记接口。
@@ -116,4 +117,5 @@ var commandNames = map[CommandType]string{
 	CmdHotkeysUnregister:  "hotkeys.unregister",
 	CmdSettingsOpen:       "settings.open",
 	CmdDPIChanged:         "dpi.changed",
+	CmdScreenshot:         "ui.screenshot",
 }

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/huanfeng/wind_input/internal/uicmd"
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/theme"
@@ -214,39 +215,8 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 	return items
 }
 
-// UICommand represents a command to the UI thread
-type UICommand struct {
-	Type                managerCommand // 见 events.go 中的 cmd* 常量
-	Candidates          []Candidate
-	Input               string
-	CursorPos           int // Cursor position within Input (display position, for rendering cursor indicator)
-	X, Y                int // Caret position (original, not adjusted)
-	CaretHeight         int // Height of the caret for position adjustment
-	Page                int
-	TotalPages          int
-	TotalCandidateCount int // 候选总数（所有页）
-	CandidatesPerPage   int // 每页候选数
-	SelectedIndex       int // 当前页内选中的候选索引（0-based）
-	ModeText            string
-	// Toolbar state and position
-	ToolbarState *ToolbarState
-	ToolbarX     int
-	ToolbarY     int
-	// Input session version for preventing stale show commands
-	InputSession uint64
-	// Settings page to open (e.g., "about")
-	SettingsPage string
-	// Unified menu
-	MenuState    *UnifiedMenuState
-	MenuCallback func(id int)
-	FlipRefY     int // 翻转参考Y（下方放不下时翻转到此Y上方，0=禁用）
-	// 状态提示
-	StatusState *StatusState
-	// Toast 通知
-	ToastOpts *ToastOptions
-	// Global hotkey registration
-	HotkeyEntries []GlobalHotkeyEntry
-}
+// (UICommand 大 struct 已迁移到 internal/uicmd 包的按命令类型拆分 Payload;
+//  channel 元素类型见 events.go 的 uicmdItem。)
 
 // Manager manages the candidate window UI
 type Manager struct {
@@ -297,7 +267,7 @@ type Manager struct {
 	readyCh chan struct{}
 
 	// Command channel for async UI updates
-	cmdCh chan UICommand
+	cmdCh chan uicmdItem
 
 	// Event to wake up the message loop when commands are available
 	cmdEvent windows.Handle
@@ -350,6 +320,17 @@ type Manager struct {
 
 	// maxCandidateChars 候选文本最大显示 rune 数（0 表示不限制）
 	maxCandidateChars int
+
+	// snapshot 追踪字段: 用于 setter 在末尾构造 CmdCandidatesConfig 等"全量快照"
+	// 命令时读取当前完整状态。Win 端这些命令为 no-op (state 已被 sync setter 应用);
+	// macOS forwarder 在 PR-5 接入时会消费这些命令做跨进程同步。
+	//
+	// 注: appPinEnabled / appPinPositions / hideCandidateWindow / maxCandidateChars /
+	// pagerDisplayMode / isPinyinMode / isQuickInputMode / modeLabel / modeAccentColor
+	// 已在上面定义, 这里只补 renderer 不暴露 getter 的几个状态镜像。
+	hidePreedit  bool
+	preeditMode  config.PreeditMode
+	cmdbarPrefix string
 }
 
 // NewManager creates a new UI manager
@@ -373,7 +354,7 @@ func NewManager(logger *slog.Logger) *Manager {
 		themeManager:  themeManager,
 		logger:        logger,
 		readyCh:       make(chan struct{}),
-		cmdCh:         make(chan UICommand, 100), // Buffered channel to avoid blocking IPC
+		cmdCh:         make(chan uicmdItem, 100), // Buffered channel to avoid blocking IPC
 		cmdEvent:      event,
 		globalHotkeys: &globalHotkeyState{logger: logger},
 		// 注意：statusIndicator* 和 tooltipDelay 的默认值统一由 config.DefaultConfig() 提供，
@@ -514,8 +495,13 @@ func (m *Manager) processPendingCommands() {
 	}
 }
 
-// processOneCommand processes a single UI command
-func (m *Manager) processOneCommand(cmd UICommand) {
+// processOneCommand processes a single UI command.
+//
+// 输入 uicmdItem 由外观方法投递, 内含平台无关的 uicmd.Command + Windows 端的旁路字段
+// (完整 candidate 切片、菜单回调函数指针等)。本函数按 uicmd.CommandType 分发到各 do* 方法,
+// 用 type assertion 取出对应 payload, 与旁路字段一同传给 do*。
+func (m *Manager) processOneCommand(item uicmdItem) {
+	cmd := item.Cmd
 	// Recover from any panics to keep the loop alive
 	defer func() {
 		if r := recover(); r != nil {
@@ -524,63 +510,101 @@ func (m *Manager) processOneCommand(cmd UICommand) {
 	}()
 
 	switch cmd.Type {
-	case cmdShow:
-		// Check if this show command is from the current input session
-		// If the session has been incremented (by a hide command), ignore stale show commands
+	case uicmd.CmdCandidatesShow:
+		p := cmd.Payload.(uicmd.CandidatesShowPayload)
+		// Stale 检测: 若 inputSession 已被推进 (e.g. 用户键入新内容触发 hide),
+		// 旧的 show 命令直接丢弃, 避免候选框闪现已经过期的内容。
 		m.mu.Lock()
 		currentSession := m.inputSession
 		m.mu.Unlock()
-
-		if cmd.InputSession < currentSession {
-			m.logger.Debug("Ignoring stale show command", "cmdSession", cmd.InputSession, "currentSession", currentSession)
+		if cmd.Session < currentSession {
+			m.logger.Debug("Ignoring stale show command", "cmdSession", cmd.Session, "currentSession", currentSession)
 			return
 		}
-		m.currentInputSession = cmd.InputSession
-		m.doShowCandidates(cmd.Candidates, cmd.Input, cmd.CursorPos, cmd.X, cmd.Y, cmd.CaretHeight, cmd.Page, cmd.TotalPages, cmd.TotalCandidateCount, cmd.CandidatesPerPage, cmd.SelectedIndex)
-	case cmdHide:
-		// Update current session to the hide command's session
-		m.currentInputSession = cmd.InputSession
+		m.currentInputSession = cmd.Session
+		m.doShowCandidates(item.Candidates, p.Input, p.CursorPos, p.CaretX, p.CaretY, p.CaretHeight,
+			p.Page, p.TotalPages, p.TotalCandidateCount, p.CandidatesPerPage, p.SelectedIndex)
+	case uicmd.CmdCandidatesHide:
+		m.currentInputSession = cmd.Session
 		m.doHide()
-	case cmdMode:
-		m.doShowModeIndicator(cmd.ModeText, cmd.X, cmd.Y)
-	case cmdStatus:
-		if cmd.StatusState != nil {
-			m.doShowStatus(*cmd.StatusState, cmd.X, cmd.Y)
-		}
-	case cmdStatusHide:
+	case uicmd.CmdModeShow:
+		p := cmd.Payload.(uicmd.ModeShowPayload)
+		m.doShowModeIndicator(p.Mode, p.X, p.Y)
+	case uicmd.CmdStatusShow:
+		p := cmd.Payload.(uicmd.StatusShowPayload)
+		m.doShowStatus(StatusState{
+			ModeLabel:  p.State.ModeLabel,
+			PunctLabel: p.State.PunctLabel,
+			WidthLabel: p.State.WidthLabel,
+		}, p.X, p.Y)
+	case uicmd.CmdStatusHide:
 		m.doHideStatus()
-	case cmdToolbarShow:
-		m.doShowToolbar(cmd)
-	case cmdToolbarHide:
+	case uicmd.CmdToolbarShow:
+		p := cmd.Payload.(uicmd.ToolbarShowPayload)
+		m.doShowToolbar(p.X, p.Y, fromUIToolbarState(p.State))
+	case uicmd.CmdToolbarHide:
 		m.doHideToolbar()
-	case cmdToolbarUpdate:
-		m.doUpdateToolbar(cmd.ToolbarState)
-	case cmdSettings:
-		m.doOpenSettings(cmd.SettingsPage)
-	case cmdHideMenu:
+	case uicmd.CmdToolbarUpdate:
+		p := cmd.Payload.(uicmd.ToolbarUpdatePayload)
+		s := fromUIToolbarState(p.State)
+		m.doUpdateToolbar(&s)
+	case uicmd.CmdCandidateMenuHide:
 		m.doHideCandidateMenu()
-	case cmdHideToolbarMenu:
+	case uicmd.CmdToolbarMenuHide:
 		m.doHideToolbarMenu()
-	case cmdShowUnifiedMenu:
-		m.doShowUnifiedMenu(cmd)
-	case cmdDPIChanged:
-		m.doDPIChanged()
-	case cmdRegisterHotkeys:
-		m.globalHotkeys.register(cmd.HotkeyEntries)
-	case cmdUnregisterHotkeys:
+	case uicmd.CmdMenuShow:
+		p := cmd.Payload.(uicmd.MenuShowPayload)
+		m.doShowUnifiedMenuFromPayload(p, item.MenuState, item.Callback)
+	case uicmd.CmdHotkeysRegister:
+		p := cmd.Payload.(uicmd.HotkeysRegisterPayload)
+		m.globalHotkeys.register(fromUIHotkeyEntries(p.Entries))
+	case uicmd.CmdHotkeysUnregister:
 		m.globalHotkeys.unregister()
-	case cmdHideTooltip:
+	case uicmd.CmdTooltipShow:
+		p := cmd.Payload.(uicmd.TooltipShowPayload)
+		if m.tooltip != nil {
+			m.tooltip.ForceHide()
+			m.tooltip.Show(p.Text, p.CenterX, p.BelowY, p.AboveY)
+		}
+	case uicmd.CmdTooltipHide:
 		if m.tooltip != nil {
 			m.tooltip.ForceHide()
 		}
-	case cmdToast:
-		if cmd.ToastOpts != nil {
-			m.doShowToast(*cmd.ToastOpts)
+	case uicmd.CmdCandidatesPosition:
+		p := cmd.Payload.(uicmd.CandidatesPositionPayload)
+		if m.window != nil {
+			m.window.SetPosition(p.X, p.Y)
 		}
-	case cmdToastHide:
+	case uicmd.CmdToastShow:
+		p := cmd.Payload.(uicmd.ToastShowPayload)
+		m.doShowToast(ToastOptions{
+			Title:    p.Title,
+			Message:  p.Message,
+			Level:    fromUIToastLevel(p.Level),
+			Position: fromUIToastPosition(p.Position),
+			Duration: int(p.Duration),
+			MaxWidth: int(p.MaxWidth),
+		})
+	case uicmd.CmdToastHide:
 		m.doHideToast()
-	case cmdScreenshot:
+	case uicmd.CmdScreenshot:
 		m.doTakeScreenshot()
+	case uicmd.CmdSettingsOpen:
+		p := cmd.Payload.(uicmd.SettingsOpenPayload)
+		m.doOpenSettings(p.Page)
+	case uicmd.CmdDPIChanged:
+		m.doDPIChanged()
+	case uicmd.CmdCandidatesConfig,
+		uicmd.CmdCandidatesMarkers,
+		uicmd.CmdCandidatesPinState,
+		uicmd.CmdStatusConfig,
+		uicmd.CmdConfigUpdate,
+		uicmd.CmdThemeApply:
+		// PR-3: 这些 "snapshot" 命令的 state 已被 sync setter 在调用线程直接应用,
+		// Windows 端 processOneCommand 不需要重复处理。
+		// 命令仍通过 cmdCh 流转, 是为了 PR-5 中 macOS forwarder 能拦截转发到 IMKit。
+	default:
+		m.logger.Warn("Unknown UI command type", "type", cmd.Type.String())
 	}
 }
 
@@ -640,8 +664,10 @@ func (m *Manager) SetGlobalHotkeyCallback(cb func(command string)) {
 // RegisterGlobalHotkeys registers combination hotkeys via Windows RegisterHotKey API.
 // Must be called from coordinator; actual registration happens on the UI thread.
 func (m *Manager) RegisterGlobalHotkeys(entries []GlobalHotkeyEntry) {
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdHotkeysRegister, 0,
+		uicmd.HotkeysRegisterPayload{Entries: toUIHotkeyEntries(entries)})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdRegisterHotkeys, HotkeyEntries: entries}:
+	case m.cmdCh <- item:
 		SetEvent(m.cmdEvent)
 	default:
 		m.logger.Warn("Command channel full, dropping register_hotkeys")
@@ -651,8 +677,9 @@ func (m *Manager) RegisterGlobalHotkeys(entries []GlobalHotkeyEntry) {
 // TakeUIScreenshots 触发所有当前可见 UI 窗口的截图，保存到用户数据目录的 screenshots/ 子目录。
 // 可从任意 goroutine 调用，实际截图在 UI 线程执行。
 func (m *Manager) TakeUIScreenshots() {
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdScreenshot, 0, nil)}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdScreenshot}:
+	case m.cmdCh <- item:
 		SetEvent(m.cmdEvent)
 	default:
 		m.logger.Warn("Command channel full, dropping screenshot command")
@@ -661,8 +688,10 @@ func (m *Manager) TakeUIScreenshots() {
 
 // UnregisterGlobalHotkeys unregisters all previously registered global hotkeys.
 func (m *Manager) UnregisterGlobalHotkeys() {
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdHotkeysUnregister, 0,
+		uicmd.HotkeysUnregisterPayload{})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdUnregisterHotkeys}:
+	case m.cmdCh <- item:
 		SetEvent(m.cmdEvent)
 	default:
 		m.logger.Warn("Command channel full, dropping unregister_hotkeys")
@@ -724,4 +753,5 @@ func (m *Manager) SetActiveAppPinState(enabled bool, positionsByMonitor map[stri
 		m.appPinPositions = nil
 	}
 	m.mu.Unlock()
+	m.postCmd(m.snapshotCandidatesPinState())
 }

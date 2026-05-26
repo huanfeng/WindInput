@@ -2,6 +2,7 @@ package ui
 
 import (
 	"github.com/huanfeng/wind_input/internal/clipboard"
+	"github.com/huanfeng/wind_input/internal/uicmd"
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
@@ -19,13 +20,13 @@ func (m *Manager) ShowStatusIndicator(state StatusState, x, y int) {
 	}
 	m.mu.Unlock()
 
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdStatusShow, 0, uicmd.StatusShowPayload{
+		State: toUIStatusState(state),
+		X:     x,
+		Y:     y,
+	})}
 	select {
-	case m.cmdCh <- UICommand{
-		Type:        cmdStatus,
-		StatusState: &state,
-		X:           x,
-		Y:           y,
-	}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -36,8 +37,9 @@ func (m *Manager) ShowStatusIndicator(state StatusState, x, y int) {
 
 // HideStatusIndicator 隐藏状态提示窗口（异步）
 func (m *Manager) HideStatusIndicator() {
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdStatusHide, 0, uicmd.StatusHidePayload{})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdStatusHide}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -127,8 +129,9 @@ func (m *Manager) HideTooltip() {
 	m.mu.Lock()
 	m.tooltipVersion++
 	m.mu.Unlock()
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdTooltipHide, 0, uicmd.TooltipHidePayload{})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdHideTooltip}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -136,8 +139,13 @@ func (m *Manager) HideTooltip() {
 	}
 }
 
-// ShowTooltipText 直接显示 tooltip 文本（无延迟，由调用方管理延迟和取消逻辑）。
+// ShowTooltipText 投递 CmdTooltipShow 命令到 UI 线程显示 tooltip 文本（无延迟）。
 // belowY 为候选项下沿（首选位置），aboveY 为候选项上沿（下方放不下时使用）。
+//
+// 历史上为 sync 直接 m.tooltip.ForceHide+Show, PR-3 改为 async 投递, 1 个 UI tick
+// 的延迟肉眼无感, 但带来两个好处:
+//   - 跨进程兼容: macOS forwarder 可消费该命令转发到 IMKit
+//   - 线程隔离: tooltip.ForceHide/Show 都集中在 UI 线程执行
 func (m *Manager) ShowTooltipText(text string, centerX, belowY, aboveY int) {
 	if text == "" {
 		return
@@ -151,8 +159,12 @@ func (m *Manager) ShowTooltipText(text string, centerX, belowY, aboveY int) {
 	m.tooltipVersion++
 	m.mu.Unlock()
 
-	m.tooltip.ForceHide()
-	m.tooltip.Show(text, centerX, belowY, aboveY)
+	m.postCmd(uicmd.NewCommand(uicmd.CmdTooltipShow, 0, uicmd.TooltipShowPayload{
+		Text:    text,
+		CenterX: centerX,
+		BelowY:  belowY,
+		AboveY:  aboveY,
+	}))
 }
 
 // LoadTheme loads a theme by name and applies it to all renderers
@@ -231,9 +243,16 @@ func (m *Manager) ShowToast(opts ToastOptions) {
 	}
 	m.mu.Unlock()
 
-	optsCopy := opts
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdToastShow, 0, uicmd.ToastShowPayload{
+		Title:    opts.Title,
+		Message:  opts.Message,
+		Level:    toUIToastLevel(opts.Level),
+		Position: toUIToastPosition(opts.Position),
+		Duration: int32(opts.Duration),
+		MaxWidth: int32(opts.MaxWidth),
+	})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdToast, ToastOpts: &optsCopy}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -244,8 +263,9 @@ func (m *Manager) ShowToast(opts ToastOptions) {
 
 // HideToast 立即隐藏当前 toast（异步）。
 func (m *Manager) HideToast() {
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdToastHide, 0, uicmd.ToastHidePayload{})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdToastHide}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}

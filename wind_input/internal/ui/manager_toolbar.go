@@ -1,5 +1,7 @@
 package ui
 
+import "github.com/huanfeng/wind_input/internal/uicmd"
+
 // SetToolbarVisible shows or hides the toolbar
 func (m *Manager) SetToolbarVisible(visible bool) {
 	m.mu.Lock()
@@ -10,8 +12,9 @@ func (m *Manager) SetToolbarVisible(visible bool) {
 	m.mu.Unlock()
 
 	if !visible {
+		item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdToolbarHide, 0, uicmd.ToolbarHidePayload{})}
 		select {
-		case m.cmdCh <- UICommand{Type: cmdToolbarHide}:
+		case m.cmdCh <- item:
 			if m.cmdEvent != 0 {
 				SetEvent(m.cmdEvent)
 			}
@@ -31,13 +34,13 @@ func (m *Manager) ShowToolbarWithState(x, y int, state ToolbarState) {
 	}
 	m.mu.Unlock()
 
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdToolbarShow, 0, uicmd.ToolbarShowPayload{
+		X:     x,
+		Y:     y,
+		State: toUIToolbarState(state),
+	})}
 	select {
-	case m.cmdCh <- UICommand{
-		Type:         cmdToolbarShow,
-		ToolbarX:     x,
-		ToolbarY:     y,
-		ToolbarState: &state,
-	}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -55,8 +58,11 @@ func (m *Manager) UpdateToolbarState(state ToolbarState) {
 	}
 	m.mu.Unlock()
 
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdToolbarUpdate, 0, uicmd.ToolbarUpdatePayload{
+		State: toUIToolbarState(state),
+	})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdToolbarUpdate, ToolbarState: &state}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -83,38 +89,29 @@ func (m *Manager) GetToolbarPosition() (int, int) {
 }
 
 // doShowToolbar shows the toolbar with optional position and state (called from UI thread)
-func (m *Manager) doShowToolbar(cmd UICommand) {
+func (m *Manager) doShowToolbar(x, y int, state ToolbarState) {
 	if m.toolbar == nil {
 		m.logger.Warn("doShowToolbar: toolbar is nil")
 		return
 	}
 
-	m.logger.Debug("doShowToolbar called",
-		"x", cmd.ToolbarX,
-		"y", cmd.ToolbarY,
-		"hasState", cmd.ToolbarState != nil)
+	m.logger.Debug("doShowToolbar called", "x", x, "y", y)
 
-	// Set position if provided
-	if cmd.ToolbarX != 0 || cmd.ToolbarY != 0 {
-		m.toolbar.SetPosition(cmd.ToolbarX, cmd.ToolbarY)
-		m.logger.Debug("Toolbar position set", "x", cmd.ToolbarX, "y", cmd.ToolbarY)
+	// Set position if provided (0,0 视为未指定, 沿用原语义)
+	if x != 0 || y != 0 {
+		m.toolbar.SetPosition(x, y)
+		m.logger.Debug("Toolbar position set", "x", x, "y", y)
 	}
 
-	// Set state if provided (before rendering)
-	if cmd.ToolbarState != nil {
-		m.logger.Debug("Toolbar state set",
-			"chineseMode", cmd.ToolbarState.ChineseMode,
-			"fullWidth", cmd.ToolbarState.FullWidth,
-			"chinesePunct", cmd.ToolbarState.ChinesePunct,
-			"capsLock", cmd.ToolbarState.CapsLock)
-		m.toolbar.SetState(*cmd.ToolbarState)
-	} else {
-		// Just render with current state
-		m.toolbar.Render()
-	}
+	m.logger.Debug("Toolbar state set",
+		"chineseMode", state.ChineseMode,
+		"fullWidth", state.FullWidth,
+		"chinesePunct", state.ChinesePunct,
+		"capsLock", state.CapsLock)
+	m.toolbar.SetState(state)
 
 	m.toolbar.Show()
-	m.logger.Debug("Toolbar shown", "x", cmd.ToolbarX, "y", cmd.ToolbarY)
+	m.logger.Debug("Toolbar shown", "x", x, "y", y)
 }
 
 // doHideToolbar hides the toolbar (called from UI thread)
@@ -161,8 +158,9 @@ func (m *Manager) HideToolbarMenu() {
 	m.mu.Unlock()
 
 	// Send command to UI thread (don't call HideMenu directly - it has Win32 calls)
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdToolbarMenuHide, 0, uicmd.ToolbarMenuHidePayload{})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdHideToolbarMenu}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -186,7 +184,11 @@ func (m *Manager) ToolbarMenuContainsPoint(screenX, screenY int) bool {
 	return false
 }
 
-// ShowUnifiedMenu shows the unified right-click menu at the specified position (async, thread-safe)
+// ShowUnifiedMenu shows the unified right-click menu at the specified position (async, thread-safe).
+//
+// 跨进程兼容设计: 投递时 uicmd.MenuShowPayload.Items 暂时留空, Win 端通过 uicmdItem.MenuState
+// 旁路字段直接消费 UnifiedMenuState; macOS forwarder 接入时再补转换填充 Items, 让 IMKit 端
+// 渲染原生 NSMenu。Callback 通过 SessionID 路由替代 (PR-1 AGENTS.md 已说明)。
 func (m *Manager) ShowUnifiedMenu(screenX, screenY, flipRefY int, state UnifiedMenuState, callback func(id int)) {
 	m.mu.Lock()
 	if !m.ready {
@@ -195,15 +197,18 @@ func (m *Manager) ShowUnifiedMenu(screenX, screenY, flipRefY int, state UnifiedM
 	}
 	m.mu.Unlock()
 
+	item := uicmdItem{
+		Cmd: uicmd.NewCommand(uicmd.CmdMenuShow, 0, uicmd.MenuShowPayload{
+			ScreenX:  screenX,
+			ScreenY:  screenY,
+			FlipRefY: flipRefY,
+			// Items: 留待 macOS forwarder 转换填充
+		}),
+		MenuState: &state,
+		Callback:  callback,
+	}
 	select {
-	case m.cmdCh <- UICommand{
-		Type:         cmdShowUnifiedMenu,
-		X:            screenX,
-		Y:            screenY,
-		FlipRefY:     flipRefY,
-		MenuState:    &state,
-		MenuCallback: callback,
-	}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
@@ -212,9 +217,10 @@ func (m *Manager) ShowUnifiedMenu(screenX, screenY, flipRefY int, state UnifiedM
 	}
 }
 
-// doShowUnifiedMenu shows the unified menu (called from UI thread)
-func (m *Manager) doShowUnifiedMenu(cmd UICommand) {
-	if m.unifiedPopupMenu == nil || cmd.MenuState == nil {
+// doShowUnifiedMenuFromPayload shows the unified menu (called from UI thread).
+// 接受平台无关的 payload 与旁路 MenuState/Callback, 走 Win 端 BuildUnifiedMenuItems 路径。
+func (m *Manager) doShowUnifiedMenuFromPayload(p uicmd.MenuShowPayload, menuState *UnifiedMenuState, callback func(id int)) {
+	if m.unifiedPopupMenu == nil || menuState == nil {
 		return
 	}
 
@@ -223,14 +229,14 @@ func (m *Manager) doShowUnifiedMenu(cmd UICommand) {
 	m.doHideToolbarMenu()
 
 	// Set flip reference Y for screen edge handling
-	if cmd.FlipRefY > 0 {
-		m.unifiedPopupMenu.SetFlipRefY(cmd.FlipRefY)
+	if p.FlipRefY > 0 {
+		m.unifiedPopupMenu.SetFlipRefY(p.FlipRefY)
 	}
 
-	items := BuildUnifiedMenuItems(*cmd.MenuState)
-	m.unifiedPopupMenu.Show(items, cmd.X, cmd.Y, func(id int) {
-		if cmd.MenuCallback != nil {
-			cmd.MenuCallback(id)
+	items := BuildUnifiedMenuItems(*menuState)
+	m.unifiedPopupMenu.Show(items, p.ScreenX, p.ScreenY, func(id int) {
+		if callback != nil {
+			callback(id)
 		}
 	})
 }

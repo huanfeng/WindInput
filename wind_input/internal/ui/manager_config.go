@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/huanfeng/wind_input/internal/uicmd"
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
@@ -58,6 +59,25 @@ func (m *Manager) UpdateStatusIndicatorFullConfig(cfg StatusWindowConfig) {
 	m.statusIndicatorOffsetY = cfg.OffsetY
 	m.mu.Unlock()
 	m.logger.Info("Status indicator full config updated", "displayMode", string(cfg.DisplayMode), "duration", cfg.Duration)
+	m.postCmd(uicmd.NewCommand(uicmd.CmdStatusConfig, 0, uicmd.StatusConfigPayload{
+		Enabled:         cfg.Enabled,
+		DisplayMode:     uicmd.StatusDisplayMode(cfg.DisplayMode),
+		Duration:        int32(cfg.Duration),
+		SchemaNameStyle: cfg.SchemaNameStyle,
+		ShowMode:        cfg.ShowMode,
+		ShowPunct:       cfg.ShowPunct,
+		ShowFullWidth:   cfg.ShowFullWidth,
+		PositionMode:    uicmd.StatusPositionMode(cfg.PositionMode),
+		OffsetX:         int32(cfg.OffsetX),
+		OffsetY:         int32(cfg.OffsetY),
+		CustomX:         int32(cfg.CustomX),
+		CustomY:         int32(cfg.CustomY),
+		FontSize:        cfg.FontSize,
+		Opacity:         cfg.Opacity,
+		BackgroundColor: cfg.BackgroundColor,
+		TextColor:       cfg.TextColor,
+		BorderRadius:    cfg.BorderRadius,
+	}))
 }
 
 // SetTooltipDelay 设置编码提示延迟显示时间（毫秒）
@@ -74,6 +94,7 @@ func (m *Manager) SetCandidateLayout(layout config.CandidateLayout) {
 		m.renderer.SetLayout(layout)
 		m.logger.Info("Candidate layout updated", "layout", layout)
 	}
+	m.postCmd(m.snapshotCandidatesConfig())
 }
 
 // GetCandidateLayout 返回当前候选框布局; renderer 未初始化时返回零值。
@@ -92,6 +113,7 @@ func (m *Manager) SetHideCandidateWindow(hide bool) {
 	m.hideCandidateWindow = hide
 	m.mu.Unlock()
 	m.logger.Info("Candidate window visibility toggled", "hidden", hide)
+	m.postCmd(m.snapshotCandidatesConfig())
 }
 
 // IsHideCandidateWindow 返回当前候选窗是否被强制隐藏。
@@ -194,6 +216,10 @@ func (m *Manager) SetHidePreedit(hide bool) {
 		m.renderer.SetHidePreedit(hide)
 		m.logger.Info("Hide preedit updated", "hide", hide)
 	}
+	m.mu.Lock()
+	m.hidePreedit = hide
+	m.mu.Unlock()
+	m.postCmd(m.snapshotCandidatesConfig())
 }
 
 // SetPreeditMode 设置编码显示模式（"top" 或 "embedded"）
@@ -201,12 +227,17 @@ func (m *Manager) SetPreeditMode(mode config.PreeditMode) {
 	if m.renderer != nil {
 		m.renderer.SetPreeditMode(mode)
 	}
+	m.mu.Lock()
+	m.preeditMode = mode
+	m.mu.Unlock()
+	m.postCmd(m.snapshotCandidatesConfig())
 }
 
 // SetPagerDisplayMode 设置页码显示方式（覆盖主题配置）
 func (m *Manager) SetPagerDisplayMode(mode config.PagerDisplayMode) {
 	m.pagerDisplayMode = mode
 	m.applyPagerOverride()
+	m.postCmd(m.snapshotCandidatesConfig())
 }
 
 // applyPagerOverride 根据 pagerDisplayMode 覆盖渲染器的翻页显示设置。
@@ -236,6 +267,10 @@ func (m *Manager) SetCmdbarCandidatePrefix(prefix string) {
 		m.renderer.SetCmdbarPrefix(prefix)
 		m.logger.Info("Cmdbar candidate prefix updated", "prefixLen", len(prefix))
 	}
+	m.mu.Lock()
+	m.cmdbarPrefix = prefix
+	m.mu.Unlock()
+	m.postCmd(m.snapshotCandidatesConfig())
 }
 
 // SetMaxCandidateChars 设置候选文本最大显示 rune 数（0 表示不限制）
@@ -244,6 +279,7 @@ func (m *Manager) SetMaxCandidateChars(n int) {
 	m.maxCandidateChars = n
 	m.mu.Unlock()
 	m.logger.Info("Max candidate chars updated", "maxChars", n)
+	m.postCmd(m.snapshotCandidatesConfig())
 }
 
 // OpenSettings opens the settings window
@@ -260,8 +296,9 @@ func (m *Manager) OpenSettingsWithPage(page string) {
 	}
 	m.mu.Unlock()
 
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdSettingsOpen, 0, uicmd.SettingsOpenPayload{Page: page})}
 	select {
-	case m.cmdCh <- UICommand{Type: cmdSettings, SettingsPage: page}:
+	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
 			SetEvent(m.cmdEvent)
 		}
