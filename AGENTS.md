@@ -121,6 +121,8 @@ Schema 驱动流程:
 | [`docs/AGENTS-TEMPLATE.md`](docs/AGENTS-TEMPLATE.md) | AGENTS.md 写作模板与字段规范 |
 | [`docs/design/enum-constraint.md`](docs/design/enum-constraint.md) | 枚举与魔法字符串约束 SSOT |
 | [`docs/design/macos-port.md`](docs/design/macos-port.md) | macOS 移植设计 (架构、协议、目录约定、stub 边界) |
+| [`docs/design/macos-imkit-plan.md`](docs/design/macos-imkit-plan.md) | macOS IMKit `.app` 工程详细开发计划 (PR-A 实战手册) |
+| [`docs/wire-protocol-reference.md`](docs/wire-protocol-reference.md) | bridge + uicmd 协议字节布局速查 |
 | [`docs/macos-build.md`](docs/macos-build.md) | macOS 构建/调试指南 (实用文档) |
 | [`scripts/lint_agents_md.ps1`](scripts/lint_agents_md.ps1) | AGENTS.md 引用路径有效性扫描脚本 |
 

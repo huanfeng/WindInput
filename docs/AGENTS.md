@@ -14,6 +14,7 @@
 | `architecture.md` | 系统架构设计：C++ TSF 层 + Go 服务层 + Named Pipe 通信 + Schema 方案架构 |
 | `DEVELOPMENT.md` | 开发指南：环境搭建、构建流程、代码规范 |
 | `macos-build.md` | macOS 构建与调试指南 (面向开发者的实用文档) |
+| `wire-protocol-reference.md` | bridge + uicmd 协议字节布局速查 (Swift/Obj-C 解码器实现参考) |
 
 ## 子目录
 

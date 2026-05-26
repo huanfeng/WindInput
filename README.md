@@ -11,6 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/github/v/release/huanfeng/WindInput?include_prereleases&label=version&color=blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-brightgreen" alt="Platform">
+  <img src="https://img.shields.io/badge/macOS-in--progress-yellow" alt="macOS in progress">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
@@ -87,10 +88,26 @@ ui:
 | 组件 | 技术 | 职责 |
 |------|------|------|
 | `wind_tsf` | C++ | Windows TSF 框架接口，键盘事件捕获 |
-| `wind_input` | Go | 输入引擎、候选词管理、UI 渲染 |
-| `wind_setting` | Go + Vue 3 | 图形化设置工具 |
+| `wind_input` | Go | 输入引擎、候选词管理、UI 渲染（**跨平台**：Win 全功能 + macOS 服务端可运行） |
+| `wind_setting` | Go + Vue 3 | 图形化设置工具（Win） |
+| `wind_macos`（规划中） | Swift / Obj-C | macOS IMKit `.app` 客户端，对位 `wind_tsf` |
 
 架构详情和开发指南请参阅 [开发文档](docs/DEVELOPMENT.md)。
+
+### macOS 移植 (进行中)
+
+Go 服务端已完成 darwin 全包编译，可在 macOS 上独立运行（产出 ~11.5MB Mach-O 二进制）。但 **macOS IMKit `.app` 客户端工程尚未启动**，当前服务可作为 IPC server 运行但**无法实际输入**。
+
+macOS 开发者入口文档：
+
+| 文档 | 用途 |
+|------|------|
+| [`docs/design/macos-port.md`](docs/design/macos-port.md) | 整体架构 (IMKit + Go 双进程模型) 与设计决策 |
+| [`docs/design/macos-imkit-plan.md`](docs/design/macos-imkit-plan.md) | **PR-A 工程详细开发计划** (目录结构 / 类骨架 / 6 个里程碑 / 验证步骤) |
+| [`docs/wire-protocol-reference.md`](docs/wire-protocol-reference.md) | bridge + uicmd 协议速查 (Swift 解码器实现参考) |
+| [`docs/macos-build.md`](docs/macos-build.md) | macOS 上构建/调试 Go 服务的实用指南 |
+
+参考实现 (鼠须管 Squirrel): <https://github.com/rime/squirrel>
 
 ## 参与贡献
 
