@@ -26,71 +26,53 @@ type inputStateSnapshot struct {
 	compositionStartValid bool
 }
 
-// SetIMEActivated sets the IME activation state
-// When activated, show toolbar if enabled; when deactivated, hide toolbar
+// SetIMEActivated 设置 IME 激活状态。
+//
+// 工具栏显隐决策不在本函数内做 —— 改由 toolbarReducer 在收到 tevIMEActivated/
+// tevIMEDeactivated 事件后单点决策（包含全屏判定、用户偏好、debounce 合并）。
+// 本函数只负责：
+//   - 维护 c.imeActivated 字段
+//   - 注册 / 反注册全局热键（与工具栏可见性正交）
+//   - IME 失活时同步 hide 候选窗（与工具栏正交）
+//   - 投递事件给 reducer
 func (c *Coordinator) SetIMEActivated(activated bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	wasActivated := c.imeActivated
 	c.imeActivated = activated
 	c.logger.Debug("IME activation", "activated", activated, "wasActivated", wasActivated)
 
 	if c.uiManager == nil {
+		c.mu.Unlock()
 		return
 	}
 
 	if activated {
-		// IME activated - register global hotkeys for combination keys
-		c.uiManager.RegisterGlobalHotkeys(c.buildGlobalHotkeyEntries())
-
-		// IME activated - show toolbar if enabled
-		if c.toolbarVisible {
-			toolbarWidth, toolbarHeight := 140, 30 // base size, scaled by DPI below
-			scaledW := ui.ScaleIntForDPI(toolbarWidth)
-			scaledH := ui.ScaleIntForDPI(toolbarHeight)
-
-			// Calculate default position for the target monitor (caret → mouse fallback).
-			var posX, posY int
-			if c.caretValid {
-				posX, posY = ui.GetToolbarPositionForCaret(c.caretX, c.caretY, scaledW, scaledH)
-			} else {
-				posX, posY = ui.GetDefaultToolbarPosition(scaledW, scaledH)
-			}
-
-			// Identify the target monitor by its work-area edges.
-			// posX/posY is already in the right-bottom corner of that monitor, so
-			// querying by it gives us the authoritative work-area bounds.
-			_, _, monRight, monBottom := ui.GetMonitorWorkAreaFromPoint(posX, posY)
-			key := ui.MonitorKeyStr(monRight, monBottom)
-
-			// If the user previously dragged the toolbar on this monitor, restore that
-			// position unconditionally. Drag bounds are already enforced in handleMouseMove,
-			// so saved positions are always within the work area at the time of saving.
-			if saved, ok := c.toolbarUserPos[key]; ok {
-				posX, posY = saved.X, saved.Y
-			}
-
-			c.logger.Debug("Toolbar position resolved", "x", posX, "y", posY,
-				"caretX", c.caretX, "caretY", c.caretY, "monitorKey", key)
-
-			// Show toolbar (auto-hidden if foreground app is fullscreen)
-			c.showToolbarRespectingFullscreen(posX, posY)
-		}
+		// 注册组合键热键（与工具栏可见性正交，留在此处）
+		entries := c.buildGlobalHotkeyEntries()
+		c.mu.Unlock()
+		c.uiManager.RegisterGlobalHotkeys(entries)
 	} else {
-		// IME deactivated - re-register only global_hotkeys list items (if any),
-		// unregister all if the list is empty
-		globalEntries := c.buildGlobalHotkeyEntries()
-		if len(globalEntries) > 0 {
-			c.uiManager.RegisterGlobalHotkeys(globalEntries)
+		// 失活：仅保留 global_hotkeys 列表中的热键，其余反注册
+		entries := c.buildGlobalHotkeyEntries()
+		c.mu.Unlock()
+		if len(entries) > 0 {
+			c.uiManager.RegisterGlobalHotkeys(entries)
 		} else {
 			c.uiManager.UnregisterGlobalHotkeys()
 		}
-
-		// IME deactivated - always hide toolbar
-		c.uiManager.SetToolbarVisible(false)
-		// Also hide candidate window
+		// 失活：同步隐藏候选窗（与工具栏正交，单独调用）
+		c.mu.Lock()
 		c.hideUI()
+		c.mu.Unlock()
+	}
+
+	// 投递工具栏可见性事件给 reducer（critical：保证 deactivate 不丢）
+	if c.toolbarReducer != nil {
+		kind := tevIMEDeactivated
+		if activated {
+			kind = tevIMEActivated
+		}
+		c.toolbarReducer.sendCritical(toolbarEvent{kind: kind})
 	}
 }
 
@@ -144,29 +126,15 @@ func (c *Coordinator) HandleMenuCommand(command string) *bridge.StatusUpdateData
 		c.toolbarVisible = !c.toolbarVisible
 		c.logger.Debug("Toolbar visibility toggled via menu", "toolbarVisible", c.toolbarVisible)
 
-		// Update UI
-		if c.uiManager != nil {
-			if c.toolbarVisible && c.imeActivated {
-				// Calculate position based on current caret
-				// Note: coordinates can be negative in multi-monitor setups, use caretValid flag
-				toolbarWidth, toolbarHeight := 140, 30
-				var posX, posY int
-				if c.caretValid {
-					posX, posY = ui.GetToolbarPositionForCaret(
-						c.caretX, c.caretY,
-						ui.ScaleIntForDPI(toolbarWidth),
-						ui.ScaleIntForDPI(toolbarHeight),
-					)
-				} else {
-					posX, posY = ui.GetDefaultToolbarPosition(
-						ui.ScaleIntForDPI(toolbarWidth),
-						ui.ScaleIntForDPI(toolbarHeight),
-					)
-				}
-				c.showToolbarRespectingFullscreen(posX, posY)
-			} else {
-				c.uiManager.SetToolbarVisible(false)
-			}
+		// 显隐决策交给 reducer：本路径只更新用户偏好字段并投递事件。
+		// HandleMenuCommand 整函数持有 c.mu，而 sendCritical 最坏阻塞 100ms ——
+		// 与 reducer goroutine 在 snapshotToolbarShowParams 等 c.mu 形成对峙。
+		// 用 goroutine 包装投递解耦：reducer 不依赖严格顺序（debounce 50ms 窗口
+		// 内同 burst 事件会被合并），异步投不会丢动作。
+		if c.toolbarReducer != nil {
+			reducer := c.toolbarReducer
+			visible := c.toolbarVisible
+			go reducer.sendCritical(toolbarEvent{kind: tevUserPreferenceChanged, visible: visible})
 		}
 
 		// Save to config
@@ -293,26 +261,12 @@ func (c *Coordinator) handleToggleToolbarKey() *bridge.KeyEventResult {
 	c.toolbarVisible = !c.toolbarVisible
 	c.logger.Debug("Toolbar visibility toggled via hotkey", "toolbarVisible", c.toolbarVisible)
 
-	if c.uiManager != nil {
-		if c.toolbarVisible && c.imeActivated {
-			toolbarWidth, toolbarHeight := 140, 30
-			var posX, posY int
-			if c.caretValid {
-				posX, posY = ui.GetToolbarPositionForCaret(
-					c.caretX, c.caretY,
-					ui.ScaleIntForDPI(toolbarWidth),
-					ui.ScaleIntForDPI(toolbarHeight),
-				)
-			} else {
-				posX, posY = ui.GetDefaultToolbarPosition(
-					ui.ScaleIntForDPI(toolbarWidth),
-					ui.ScaleIntForDPI(toolbarHeight),
-				)
-			}
-			c.showToolbarRespectingFullscreen(posX, posY)
-		} else {
-			c.uiManager.SetToolbarVisible(false)
-		}
+	// 与菜单 toggle 共享语义：仅更新用户偏好 + 投递事件给 reducer 单点决策。
+	// 调用者持有 c.mu，因此用 goroutine 包装投递避免持锁期间阻塞 sendCritical。
+	if c.toolbarReducer != nil {
+		reducer := c.toolbarReducer
+		visible := c.toolbarVisible
+		go reducer.sendCritical(toolbarEvent{kind: tevUserPreferenceChanged, visible: visible})
 	}
 
 	c.saveToolbarConfig()

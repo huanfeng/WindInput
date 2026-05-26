@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-05-17 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-05-26 -->
 
 # internal/coordinator
 
@@ -18,6 +18,8 @@
 | `handle_config_menu.go` | 右键菜单命令处理 |
 | `handle_config_state.go` | 状态查询方法（`GetChineseMode`、`GetCurrentEngineName` 等） |
 | `handle_lifecycle.go` | 焦点获得/失去、IME 激活/停用、客户端断连；含 `HandleCommitRequest`（barrier 机制，见下方说明） |
+| `toolbar_visibility.go` | 工具栏位置计算 (`computeToolbarPositionLocked`) + ShellHook 全屏事件转发 (`OnShellFullscreenChange`)；显隐决策已迁出，本文件仅做位置算子与事件适配 |
+| `toolbar_reducer.go` | **工具栏显隐单点决策器**：`toolbarReducer` goroutine 接收 7 类事件（IME activate/deactivate、AllClientsDisconnected、user preference、fullscreen、config、caret、content refresh），50ms debounce 合并 burst，按公式 `imeActivated && userWantsVisible && !(fullscreen && hideInFullscreen)` 决策；`sendCritical` (阻塞 100ms) / `sendNonBlocking` (drop) 两种投递；状态机字段仅 reducer goroutine 访问；`snapshotToolbarShowParams` 在 Coordinator 上短临锁取位置 + ToolbarState |
 | `handle_mode.go` | 中英文模式切换、CapsLock 状态处理 |
 | `handle_punctuation.go` | 中英文标点转换处理 |
 | `handle_temp_english.go` | 临时英文模式：五笔输入态下按特定键（如 Z）触发，输入英文后恢复；维护临时英文缓冲区和上屏逻辑 |
@@ -37,7 +39,8 @@
 
 ### Working In This Directory
 - `Coordinator` 用单个 `sync.Mutex`（`c.mu`）保护所有状态，所有公开方法都加锁
-- 状态广播（`broadcastState`）：先更新工具栏 → 再 Push 到所有 TSF 客户端；广播前释放锁避免死锁
+- 状态广播（`broadcastState`）：仅刷新工具栏内容（mode/punct/fullwidth 等）+ Push 到所有 TSF 客户端，**不**参与显隐决策
+- **工具栏显隐**统一走 `c.toolbarReducer`：任何想 Show/Hide 工具栏的入口（IME activate/deactivate、AllClientsDisconnected、user toggle、fullscreen、config reload）都只更新自己的状态字段 + 投递事件（`sendCritical` 关键事件 / `sendNonBlocking` 高频事件），**禁止**直接调 `uiManager.SetToolbarVisible` / `ShowToolbarWithState`。这是 2026-05-26 把"决策公式被复制 4 份"重构为单点决策的核心契约
 - 有效模式（`EffectiveMode`）：CapsLock 开启时无论中英文模式均为英文大写
 - 退出/重启通过包级 channel 信号（`ExitRequested()`/`RestartRequested()`），`main.go` 监听
 - 热键编译结果缓存（`cachedKeyDownHotkeys`），配置变更时置 `hotkeysDirty=true` 触发重新编译

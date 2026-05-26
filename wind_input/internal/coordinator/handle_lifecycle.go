@@ -130,6 +130,17 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	c.caretHeight = data.Height
 	c.caretValid = true // Mark that we have received valid caret position
 
+	// 同步 caret 缓存到 reducer：非阻塞（按键热路径不应被工具栏 reducer 阻塞）。
+	// 不参与 show/hide 决策——reducer 只把它存起来用于下一次真正的 Show 时定位。
+	if c.toolbarReducer != nil {
+		c.toolbarReducer.sendNonBlocking(toolbarEvent{
+			kind:  tevCaretChanged,
+			x:     data.X,
+			y:     data.Y,
+			valid: true,
+		})
+	}
+
 	// 消费 pendingFirstShow：handleAlphaKey 在新 composition 启动时不会立即
 	// showUI，等到 reflow 后真实坐标到达再 show，避免先错位再跳的闪烁。
 	wasPendingFirstShow := c.pendingFirstShow
@@ -302,8 +313,34 @@ func (c *Coordinator) updateHostRenderState() {
 	// 当前状态窗口使用本地窗口渲染。后续可通过 sw.SetHostRenderFunc 接入。
 }
 
-// HandleFocusLost handles focus lost events (real focus change, e.g., user clicked another window)
+// HandleFocusLost handles focus lost events (real focus change, e.g., user clicked another window).
+//
+// 兄弟实例守护：同 HandleIMEDeactivated 注释，关 tab 场景下 server 已 markUnfocused
+// 当前 clientID，但同 PID 兄弟实例（另一 tab）仍在 focusedClients 中。此时跳过
+// IME 失活，工具栏与输入状态保留；待用户在兄弟实例上继续输入即可无缝衔接。
 func (c *Coordinator) HandleFocusLost() {
+	if c.bridgeServer != nil {
+		c.mu.Lock()
+		pid := c.activeProcessID
+		c.mu.Unlock()
+		if c.bridgeServer.IsActivelyFocusedPID(pid) {
+			// 兄弟实例存活：清候选/输入状态，跳过 IME 翻转和重放路径。
+			// 不走 shouldDeferClearForReplay 的原因：replay 是为"打字驱动焦点
+			// 切换到新文档"设计的，关 tab 场景下用户的下一次输入会在兄弟实例
+			// 上启动新的 composition，没有重建必要。
+			c.logger.Debug("FocusLost: sibling client still focused, keeping IME active but clearing input",
+				"pid", pid)
+			if c.engineMgr != nil {
+				c.engineMgr.OnPhraseTerminated()
+			}
+			c.mu.Lock()
+			c.clearState()
+			c.hideUI()
+			c.mu.Unlock()
+			return
+		}
+	}
+
 	c.logger.Debug("Focus lost, clearing state and hiding toolbar")
 
 	// 焦点丢失 = 短语终止符，通知造词策略（码表自动造词）
@@ -454,8 +491,40 @@ func (c *Coordinator) HandleCompositionTerminated() {
 }
 
 // HandleIMEDeactivated handles IME being switched away (user selected another IME)
-// This is called from TSF's Deactivate method, before the client disconnects
+// This is called from TSF's Deactivate method, before the client disconnects.
+//
+// 兄弟实例守护：当 Notepad11 这种多 tab 应用关闭其中一个 tab 时，被关的
+// TextService 实例会发 CmdIMEDeactivated；但同 PID 内的其它 tab 仍持有焦点。
+// 若此处无条件翻转 imeActivated → 工具栏会被错误隐藏，而 Notepad11 不会为
+// 已存在的剩余 DocMgr 重发 FOCUS_GAINED/IME_ACTIVATED（Win11 XamlIsland
+// 行为）→ 工具栏永远不再恢复。bridge.IsActivelyFocusedPID(activeProcessID)
+// 报告同 PID 是否还有其它 clientID 在 focusedClients 中：true 即兄弟存活，
+// 跳过整个 deactivate 流程（不清输入、不动 IME 状态、不投递 reducer 事件）。
+//
+// 真正失活路径（用户切换 IME / 最后一个实例销毁）下，server 端 markUnfocused
+// 后 focusedClients 必然不含该 PID，守护放行，走原逻辑。
 func (c *Coordinator) HandleIMEDeactivated() {
+	if c.bridgeServer != nil {
+		c.mu.Lock()
+		pid := c.activeProcessID
+		c.mu.Unlock()
+		if c.bridgeServer.IsActivelyFocusedPID(pid) {
+			// 兄弟实例存活：跳过 IME 翻转和 reducer 事件，但仍要清当前实例的
+			// 候选/输入状态 —— 否则用户在被销毁实例上未选词的 inputBuffer 会
+			// 浮到兄弟实例上。OnPhraseTerminated 同步通知造词策略本段输入终止。
+			c.logger.Debug("IMEDeactivated: sibling client still focused, keeping IME active but clearing input",
+				"pid", pid)
+			if c.engineMgr != nil {
+				c.engineMgr.OnPhraseTerminated()
+			}
+			c.mu.Lock()
+			c.clearState()
+			c.hideUI()
+			c.mu.Unlock()
+			return
+		}
+	}
+
 	c.logger.Info("IME deactivated (user switched to another IME), hiding toolbar")
 
 	// IME 停用 = 短语终止符，通知造词策略（码表自动造词）
@@ -470,16 +539,18 @@ func (c *Coordinator) HandleIMEDeactivated() {
 	c.clearState()
 	c.mu.Unlock()
 
-	// Immediately hide the toolbar and status indicator
+	// 候选窗与状态指示器与工具栏正交，直接 hide。工具栏走 reducer。
 	if c.uiManager != nil {
-		c.uiManager.SetToolbarVisible(false)
 		c.uiManager.Hide()
 		c.uiManager.HideStatusIndicator()
 	}
+	if c.toolbarReducer != nil {
+		c.toolbarReducer.sendCritical(toolbarEvent{kind: tevIMEDeactivated})
+	}
 }
 
-// HandleClientDisconnected handles TSF client disconnection
-// When all clients disconnect (activeClients == 0), hide the toolbar
+// HandleClientDisconnected handles TSF client disconnection.
+// When all clients disconnect (activeClients == 0), hide the toolbar via reducer.
 func (c *Coordinator) HandleClientDisconnected(activeClients int) {
 	c.logger.Debug("Client disconnected", "activeClients", activeClients)
 
@@ -489,10 +560,12 @@ func (c *Coordinator) HandleClientDisconnected(activeClients int) {
 		c.imeActivated = false
 		c.mu.Unlock()
 
-		// Hide toolbar and candidate window
+		// 候选窗与工具栏正交，候选窗直接 hide；工具栏由 reducer 单点决策。
 		if c.uiManager != nil {
-			c.uiManager.SetToolbarVisible(false)
 			c.uiManager.Hide()
+		}
+		if c.toolbarReducer != nil {
+			c.toolbarReducer.sendCritical(toolbarEvent{kind: tevAllClientsDisconnected})
 		}
 	}
 }

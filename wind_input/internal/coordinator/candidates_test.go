@@ -35,6 +35,7 @@ func (m *mockBridgeServer) RestartService()                                     
 func (m *mockBridgeServer) GetActiveHostRender() (func(*image.RGBA, int, int) error, func()) {
 	return nil, nil
 }
+func (m *mockBridgeServer) IsActivelyFocusedPID(_ uint32) bool { return false }
 
 // ── uiCursorPos ──────────────────────────────────────────────────────────────
 

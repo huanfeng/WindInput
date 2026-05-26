@@ -198,11 +198,14 @@ type Coordinator struct {
 	fullWidth          bool // true = full-width, false = half-width
 	chinesePunctuation bool // true = Chinese punctuation, false = English punctuation
 	punctFollowMode    bool // true = punctuation follows Chinese/English mode
-	toolbarVisible     bool // true = toolbar visible
-	imeActivated       bool // true = IME is activated (has focus)
-	// toolbarSuppressedByFullscreen 记录上一次决策时是否因「前台全屏」抑制了工具栏，
-	// 供 ShellHook 通知路径比较状态翻转 —— 仅当此标志值变化时才向 UI 发命令。
-	toolbarSuppressedByFullscreen bool
+	toolbarVisible     bool // true = 用户偏好显示工具栏（菜单 toggle / config）
+	imeActivated       bool // true = IME 已激活（持有焦点），由 SetIMEActivated 维护
+	// 历史字段 toolbarSuppressedByFullscreen 已迁入 toolbarReducer.fullscreen，
+	// 不再在 coordinator 层维护；ShellHook / IME 入口统一向 reducer 投递事件。
+
+	// toolbarReducer 工具栏可见性单点决策器，详见 toolbar_reducer.go。
+	// 在 NewCoordinator 末尾初始化；之后所有显隐变化通过事件投递触达。
+	toolbarReducer *toolbarReducer
 
 	// Input state
 	inputBuffer        string
@@ -337,6 +340,15 @@ type BridgeServer interface {
 	// GetActiveHostRender returns write/hide functions if the active process has host rendering.
 	// Returns nil functions if host rendering is not active for the current process.
 	GetActiveHostRender() (writeFrame func(img *image.RGBA, x, y int) error, hideFunc func())
+
+	// IsActivelyFocusedPID 报告指定 PID 当下是否仍有任一 TSF clientID 持有可编辑焦点。
+	// 用于 HandleIMEDeactivated / HandleFocusLost 区分两种场景：
+	//   - 单实例销毁 (如 Notepad 关一个 tab): 同 PID 仍有兄弟实例 focused
+	//     → 应跳过 IME 失活, 保留工具栏和输入状态
+	//   - 真正失焦 / IME 切换: 同 PID 无其它 focused client → 正常 deactivate
+	// 调用方传当前 activeProcessID. 0 → false. server.markUnfocused 必须先于
+	// 本接口被调用（server_handler 已保证顺序）。
+	IsActivelyFocusedPID(pid uint32) bool
 }
 
 // SetBridgeServer sets the bridge server for state broadcasting
@@ -694,6 +706,10 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 	// RegisterActions 是幂等的: 覆盖 DefaultRegistry 中的 stubs 为真实实现。
 	cmdbarfuncs.RegisterActions(cmdbar.DefaultRegistry)
 	c.installCmdbarPhraseHook()
+
+	// 工具栏可见性 reducer：所有显隐决策的单一裁判，详见 toolbar_reducer.go。
+	// 必须在 setupToolbarCallbacks 之后启动也仍然安全 —— callback 到达时 reducer 已就绪。
+	c.toolbarReducer = newToolbarReducer(c)
 
 	return c
 }

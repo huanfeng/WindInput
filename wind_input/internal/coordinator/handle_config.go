@@ -113,45 +113,29 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 
 // UpdateToolbarConfig 更新工具栏配置（热更新）
 func (c *Coordinator) UpdateToolbarConfig(toolbarConfig *config.ToolbarConfig) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if toolbarConfig == nil {
 		return
 	}
 
+	c.mu.Lock()
 	c.toolbarVisible = toolbarConfig.Visible
-
-	// 更新配置引用
 	if c.config != nil {
 		c.config.Toolbar = *toolbarConfig
 	}
+	visible := c.toolbarVisible
+	hideInFS := toolbarConfig.IsHideInFullscreen()
+	reducer := c.toolbarReducer
+	c.mu.Unlock()
 
-	// 通知 UI Manager 更新工具栏状态
-	if c.uiManager != nil {
-		if c.toolbarVisible && c.imeActivated {
-			// 动态计算工具栏位置，不使用保存的坐标
-			toolbarWidth, toolbarHeight := 140, 30
-			var posX, posY int
-			if c.caretValid {
-				posX, posY = ui.GetToolbarPositionForCaret(
-					c.caretX, c.caretY,
-					ui.ScaleIntForDPI(toolbarWidth),
-					ui.ScaleIntForDPI(toolbarHeight),
-				)
-			} else {
-				posX, posY = ui.GetDefaultToolbarPosition(
-					ui.ScaleIntForDPI(toolbarWidth),
-					ui.ScaleIntForDPI(toolbarHeight),
-				)
-			}
-			c.showToolbarRespectingFullscreen(posX, posY)
-		} else {
-			c.uiManager.SetToolbarVisible(false)
-		}
+	// 事件投递必须在 mu 解锁后：sendCritical 最坏阻塞 100ms，若在持锁期间投，
+	// 会与 reducer goroutine 在 snapshotToolbarShowParams 中等待 c.mu 形成对峙 ——
+	// 不至于死锁（sendCritical 有超时），但每次最坏 100ms 延迟 + 事件 drop。
+	if reducer != nil {
+		reducer.sendCritical(toolbarEvent{kind: tevUserPreferenceChanged, visible: visible})
+		reducer.sendCritical(toolbarEvent{kind: tevConfigChanged, visible: hideInFS})
 	}
 
-	c.logger.Debug("Toolbar config updated", "visible", c.toolbarVisible)
+	c.logger.Debug("Toolbar config updated", "visible", visible)
 }
 
 // UpdateInputConfig 更新输入配置（热更新）

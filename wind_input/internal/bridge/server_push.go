@@ -105,6 +105,12 @@ func (s *Server) acceptPushClient(conn net.Conn) {
 	go s.pushWriterLoop(client, clientID, pushProcessID)
 	// Reader：phase-1 token 握手 + phase-2 死链监听（overlapped 安全并发）。
 	go s.pushReaderLoop(client, clientID, pushProcessID)
+
+	// 历史：曾在此处给 coordinator 投递 HandlePushClientConnected 做"启动期
+	// 补一拍"，但因 hook gate 已收紧为 IsActivelyFocusedPID（需要 FOCUS_GAINED/
+	// IME_ACTIVATED 才进集合），新连接瞬间 focusedPIDs 必为空，kick 已无效。
+	// DLL 端的 _DoFullStateSync(WM_SERVICE_READY) → CMD_IME_ACTIVATED 才是
+	// 让宿主重获焦点的正路。删除冗余 kick 减少混淆。
 }
 
 // pushReaderLoop 处理 token 握手并持续监听 client 端断开。
@@ -244,6 +250,9 @@ func (s *Server) cleanupPushHandle(handle windows.Handle) bool {
 	if w != nil {
 		w.shutdown()
 	}
+	// 注：focusedClients 是按 bridge clientID 索引的，与 push pipe 解耦。
+	// 客户端整体断连时的 focus 清理放在 handleClient 的 defer（按 clientID 删），
+	// 这里不再触碰，避免双管道生命周期错位导致的清理错乱。
 	return true
 }
 

@@ -98,6 +98,21 @@ type Server struct {
 	activeProcessID uint32 // Process ID of the client that has focus
 	activeToken     uint64 // Per-instance token of the active TextService (0 if unknown)
 
+	// focusedClients 记录"当下持有可编辑 TSF 焦点"的客户端（bridge clientID → PID）。
+	// 由 CmdFocusGained / CmdIMEActivated 写入，由 CmdFocusLost / CmdIMEDeactivated
+	// / bridge 连接整体断开删除。
+	//
+	// 为什么是 per-clientID 而不是 per-PID：同一进程可能持有多个 TextService 实例
+	// （典型如 Notepad11 多 tab、Explorer 多 XamlIsland），每个实例对应独立的 bridge
+	// 连接 & clientID。如果只按 PID 维护集合，关闭其中一个实例时的 IME_DEACTIVATED
+	// 会把整个 PID 从集合摘掉，连带把仍在前台的另一个实例的"有焦点"状态也擦掉，
+	// 导致工具栏在 tab 关闭后误隐藏。
+	//
+	// PID 是否"有焦点"的判定 → 遍历 map 查是否有任意 value 等于该 PID。
+	// 该集合**仅供前台 hook 门槛使用**，不参与 push 路由 / activeProcessID 等流程。
+	focusMu        sync.RWMutex
+	focusedClients map[int]uint32
+
 	// Host render manager (for Band window proxy rendering)
 	hostRender *HostRenderManager
 }
@@ -114,6 +129,7 @@ func NewServer(handler MessageHandler, logger *slog.Logger) *Server {
 		pushHandleToPID:   make(map[windows.Handle]uint32),
 		tokenToPushHandle: make(map[uint64]windows.Handle),
 		pushHandleToToken: make(map[windows.Handle]uint64),
+		focusedClients:    make(map[int]uint32),
 	}
 }
 
@@ -125,6 +141,49 @@ func (s *Server) SetHostRenderManager(hrm *HostRenderManager) {
 // GetHostRenderManager returns the host render manager.
 func (s *Server) GetHostRenderManager() *HostRenderManager {
 	return s.hostRender
+}
+
+// IsActivelyFocusedPID 返回该 PID 当下是否有任意 TextService 实例持有可编辑的
+// TSF 焦点（即对应的 bridge clientID 已发 CmdFocusGained 或 CmdIMEActivated 且
+// 尚未对应地丢失）。比"是不是连接过的 push 客户端"严格：explorer.exe 因为承载
+// 开始菜单搜索框等控件，全天候在 pushClientsByPID 里，但只有用户真正点进搜索
+// 框时才有 clientID 在 focusedClients 里指向它。
+//
+// 用途：工具栏前台 hook 的激活门槛，避免用户点任务栏 / 桌面 / 通知区时
+// 误以为 explorer 是"输入焦点"而显示工具栏。
+func (s *Server) IsActivelyFocusedPID(pid uint32) bool {
+	if pid == 0 {
+		return false
+	}
+	s.focusMu.RLock()
+	defer s.focusMu.RUnlock()
+	for _, p := range s.focusedClients {
+		if p == pid {
+			return true
+		}
+	}
+	return false
+}
+
+// markFocused 把 clientID→PID 写入 focusedClients。幂等：重复添加覆盖即可。
+// 由 server_handler 在 CmdFocusGained / CmdIMEActivated 成功路径上调用，
+// 必须传 clientID 才能精确撤销（同 PID 多实例时只摘掉本实例那一条）。
+func (s *Server) markFocused(clientID int, pid uint32) {
+	if pid == 0 {
+		return
+	}
+	s.focusMu.Lock()
+	s.focusedClients[clientID] = pid
+	s.focusMu.Unlock()
+}
+
+// markUnfocused 仅摘除指定 clientID 的焦点记录，不会影响同 PID 其它 clientID。
+// 由 server_handler 在 CmdFocusLost / CmdIMEDeactivated 路径上调用，以及
+// handleClient 退出时（bridge 连接整体断开）调用兜底。
+func (s *Server) markUnfocused(clientID int) {
+	s.focusMu.Lock()
+	delete(s.focusedClients, clientID)
+	s.focusMu.Unlock()
 }
 
 // GetActiveHostRender returns write/hide functions if the active process has host rendering.
@@ -198,6 +257,12 @@ func (s *Server) Start() error {
 
 		go func(c net.Conn, id int) {
 			pid := s.handleClient(c, id)
+
+			// Bridge 连接整体断开 → 摘掉该 clientID 在 focusedClients 的记录。
+			// 兜底处理：万一 DLL 进程崩溃没来得及发 FOCUS_LOST / IME_DEACTIVATED，
+			// 这里保证 focusedClients 不会留下死掉的 clientID。同 PID 其它存活
+			// clientID 不受影响。
+			s.markUnfocused(id)
 
 			// Capture the current setup sequence BEFORE acquiring the main lock.
 			// 防止旧连接的 cleanup goroutine 销毁同 PID 新连接的 SharedMemory。

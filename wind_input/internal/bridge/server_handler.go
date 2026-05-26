@@ -105,9 +105,14 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 		return s.handleCommitRequest(payload, clientID)
 
 	case ipc.CmdFocusGained:
+		// 仅当 DLL 真正向 Go 投递 FOCUS_GAINED 时才把 (clientID,PID) 标为"有焦点"。
+		// DLL 在 OnSetFocus 里已经过 _hasTextInputContext / XamlIsland gate
+		// 过滤掉无文本输入上下文的 DocMgr，所以这里到达即可信。
+		s.markFocused(clientID, processID)
 		return s.handleFocusGained(payload, clientID, processID)
 
 	case ipc.CmdFocusLost:
+		s.markUnfocused(clientID)
 		s.handler.HandleFocusLost()
 		return s.codec.EncodeAck()
 
@@ -118,6 +123,7 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 
 	case ipc.CmdIMEActivated:
 		s.logger.Info("IME activated (user switched back to this IME)", "clientID", clientID, "processID", processID)
+		s.markFocused(clientID, processID)
 		statusUpdate := s.handler.HandleIMEActivated(processID)
 		if statusUpdate != nil {
 			return s.encodeStatusUpdateWithHostRender(statusUpdate, processID)
@@ -126,6 +132,12 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 
 	case ipc.CmdIMEDeactivated:
 		s.logger.Info("IME deactivated (user switched to another IME)", "clientID", clientID)
+		// 用户切到别的输入法时，本实例进入 Deactivated 状态。仅摘掉本 clientID
+		// 那一条记录；同 PID 的其它实例（如 Notepad11 多 tab 的另一条 TextService）
+		// 不受影响。这条记录的删除保证了：若所有实例都 Deactivate（用户全局切
+		// 走我们的 IME），focusedClients 中该 PID 自然清空，hook 不再激活；
+		// 若只是单实例退出（如关 tab），其它实例的记录会保留 PID 在 hook 视角的活跃性。
+		s.markUnfocused(clientID)
 		s.handler.HandleIMEDeactivated()
 		return s.codec.EncodeAck()
 
