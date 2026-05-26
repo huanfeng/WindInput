@@ -128,6 +128,7 @@ Schema 驱动流程:
 | [`wind_input/internal/schema/AGENTS.md`](wind_input/internal/schema/AGENTS.md) | Schema 类型与 Manager |
 | [`wind_input/internal/ipc/AGENTS.md`](wind_input/internal/ipc/AGENTS.md) | Go 端二进制协议（与 wind_tsf 镜像） |
 | [`wind_input/internal/bridge/AGENTS.md`](wind_input/internal/bridge/AGENTS.md) | 命名管道桥接业务层 |
+| [`wind_input/internal/uicmd/AGENTS.md`](wind_input/internal/uicmd/AGENTS.md) | 平台无关的 UI 命令/事件数据模型（Win/macOS 共享） |
 | [`wind_input/internal/rpc/AGENTS.md`](wind_input/internal/rpc/AGENTS.md) | 控制 IPC（与 wind_setting 通信） |
 | [`wind_input/pkg/AGENTS.md`](wind_input/pkg/AGENTS.md) | pkg 子包总索引 |
 | [`wind_input/pkg/config/AGENTS.md`](wind_input/pkg/config/AGENTS.md) | 配置加载与枚举常量（SSOT） |

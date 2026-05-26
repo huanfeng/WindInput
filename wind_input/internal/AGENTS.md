@@ -23,6 +23,7 @@
 | `store/` | 基于 bbolt 的持久化存储层（用户词、临时词、Shadow、词频） (see `store/AGENTS.md`) |
 | `transform/` | 文本转换（全角/半角、中英文标点） |
 | `ui/` | Windows 原生 UI 渲染（候选窗口、工具栏、Tooltip、DPI 感知）；DirectWrite 由 CGO 桥接实现，弹出菜单支持键盘导航和子菜单 |
+| `uicmd/` | 平台无关的 UI 命令/事件数据模型（Win/macOS 共享），含二进制 wire codec (see `uicmd/AGENTS.md`) |
 
 ## For AI Agents
 
