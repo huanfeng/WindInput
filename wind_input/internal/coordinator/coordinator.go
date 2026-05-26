@@ -351,6 +351,30 @@ type BridgeServer interface {
 	IsActivelyFocusedPID(pid uint32) bool
 }
 
+// muWaitThreshold 是 c.mu 等锁时长的诊断警戒线。
+// 超过即写 WARN，便于定位 coordinator 跨 client 锁竞争。
+// 5ms 阈值的依据：健康路径下 c.mu 应该几乎无等待 (μs 级)，5ms 已是异常的下限。
+const muWaitThreshold = 5 * time.Millisecond
+
+// muLockTraceWait 给 c.mu.Lock() 加 wait 时长仪表化。在热点入口替换裸 c.mu.Lock()
+// 即可暴露「谁等谁久」。caller 字符串作为日志关键字, 用于定位等锁的入口方法。
+//
+// 不测 hold time: coordinator 多数方法都是 Lock() + defer Unlock() 全段持锁,
+// 持锁时长可由调用方 (如 bridge 的 slowRequestThreshold WARN) 间接推断;
+// wait time 才是判断「锁是否成为瓶颈」的关键信号。
+//
+// 调用约定 (替代 c.mu.Lock()):
+//
+//	c.muLockTraceWait("HandleKeyEvent")
+//	defer c.mu.Unlock()
+func (c *Coordinator) muLockTraceWait(caller string) {
+	t0 := time.Now()
+	c.mu.Lock()
+	if waited := time.Since(t0); waited > muWaitThreshold {
+		c.logger.Warn("coordinator.mu wait", "caller", caller, "duration", waited)
+	}
+}
+
 // SetBridgeServer sets the bridge server for state broadcasting
 func (c *Coordinator) SetBridgeServer(server BridgeServer) {
 	c.mu.Lock()

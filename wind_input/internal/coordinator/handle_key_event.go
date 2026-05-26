@@ -54,6 +54,12 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 
 	c.mu.Lock()
 	lockTime := time.Since(startTime)
+	// 与 coordinator.muLockTraceWait 同口径的 wait WARN, 直接在原有 lockTime 上加阈值检查,
+	// 避免重复测时。命中说明 c.mu 在 KeyEvent 路径上有竞争 (典型来源: 跨 client 的
+	// HandleIMEActivated/HandleFocusGained 持锁状态机更新)。
+	if lockTime > muWaitThreshold {
+		c.logger.Warn("coordinator.mu wait", "caller", "HandleKeyEvent", "duration", lockTime)
+	}
 
 	// 重置统计标记，用于 fallback 采集
 	c.statRecorded = false

@@ -79,7 +79,7 @@ func (c *Coordinator) armPendingFirstShowWithTimeout(d time.Duration) {
 // 延长 pendingFirstShow 超时, 避免某些应用 (如 EverEdit) OnLayoutChange burst 较慢
 // 时 Go 端先回退到按键前坐标 show, 然后才被真实坐标覆盖, 造成可见跳动。
 func (c *Coordinator) HandleCaretPending() {
-	c.mu.Lock()
+	c.muLockTraceWait("HandleCaretPending")
 	defer c.mu.Unlock()
 	if !c.pendingFirstShow {
 		return
@@ -90,7 +90,7 @@ func (c *Coordinator) HandleCaretPending() {
 
 // HandleCaretUpdate handles caret position updates from C++ Bridge
 func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
-	c.mu.Lock()
+	c.muLockTraceWait("HandleCaretUpdate")
 	defer c.mu.Unlock()
 
 	// C++ 端传递原始 height：h=0 表示退化矩形（应用尚未 reflow，坐标不可靠），
@@ -320,7 +320,7 @@ func (c *Coordinator) updateHostRenderState() {
 // IME 失活，工具栏与输入状态保留；待用户在兄弟实例上继续输入即可无缝衔接。
 func (c *Coordinator) HandleFocusLost() {
 	if c.bridgeServer != nil {
-		c.mu.Lock()
+		c.muLockTraceWait("HandleFocusLost/peek")
 		pid := c.activeProcessID
 		c.mu.Unlock()
 		if c.bridgeServer.IsActivelyFocusedPID(pid) {
@@ -505,7 +505,7 @@ func (c *Coordinator) HandleCompositionTerminated() {
 // 后 focusedClients 必然不含该 PID，守护放行，走原逻辑。
 func (c *Coordinator) HandleIMEDeactivated() {
 	if c.bridgeServer != nil {
-		c.mu.Lock()
+		c.muLockTraceWait("HandleIMEDeactivated/peek")
 		pid := c.activeProcessID
 		c.mu.Unlock()
 		if c.bridgeServer.IsActivelyFocusedPID(pid) {
@@ -616,7 +616,7 @@ func (c *Coordinator) HandleFocusGained(processID uint32) *bridge.StatusUpdateDa
 
 	// Clear any pending input state when focus changes
 	// This ensures composition state is consistent
-	c.mu.Lock()
+	c.muLockTraceWait("HandleFocusGained")
 	c.lastOutputWasDigit = false
 
 	// Excel/WPS 重放：满足"同 PID + 时间窗 + 仍有 buffer"时，保留状态并向新文档
@@ -783,7 +783,7 @@ func (c *Coordinator) HandleIMEActivated(processID uint32) *bridge.StatusUpdateD
 
 	// Clear any pending input state when IME is reactivated
 	// This ensures composition state is consistent
-	c.mu.Lock()
+	c.muLockTraceWait("HandleIMEActivated")
 	if len(c.inputBuffer) > 0 {
 		c.inputBuffer = ""
 		c.inputCursorPos = 0
