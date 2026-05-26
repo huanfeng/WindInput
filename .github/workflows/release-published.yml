@@ -99,20 +99,20 @@ jobs:
             exit 0
           fi
           echo "Purging previous version: $PREV_VERSION"
-          wrangler r2 object delete "$R2_BUCKET/WindInput-${PREV_VERSION}-Setup.exe" || true
-          wrangler r2 object delete "$R2_BUCKET/WindInput-${PREV_VERSION}-Release.md" || true
+          wrangler r2 object delete --remote "$R2_BUCKET/WindInput-${PREV_VERSION}-Setup.exe" || true
+          wrangler r2 object delete --remote "$R2_BUCKET/WindInput-${PREV_VERSION}-Release.md" || true
 
       - name: Upload installer to R2
         if: steps.gate.outputs.skip != 'true'
         run: |
-          wrangler r2 object put "$R2_BUCKET/WindInput-${VERSION}-Setup.exe" \
+          wrangler r2 object put --remote "$R2_BUCKET/WindInput-${VERSION}-Setup.exe" \
             --file "./dl/WindInput-${VERSION}-Setup.exe" \
             --content-type "application/octet-stream"
 
       - name: Upload release notes to R2
         if: steps.gate.outputs.skip != 'true'
         run: |
-          wrangler r2 object put "$R2_BUCKET/WindInput-${VERSION}-Release.md" \
+          wrangler r2 object put --remote "$R2_BUCKET/WindInput-${VERSION}-Release.md" \
             --file "./dl/WindInput-${VERSION}-Release.md" \
             --content-type "text/markdown; charset=utf-8"
 
@@ -130,6 +130,46 @@ jobs:
           }
           EOF
           cat latest.json
-          wrangler r2 object put "$R2_BUCKET/latest.json" \
+          wrangler r2 object put --remote "$R2_BUCKET/latest.json" \
             --file latest.json \
             --content-type "application/json; charset=utf-8"
+
+      - name: Verify objects are reachable on R2 public URL
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          set -e
+          EXPECTED_EXE_SIZE=$(stat -c %s "./dl/WindInput-${VERSION}-Setup.exe")
+          check() {
+            local url="$1"
+            local expected_size="$2"
+            echo "Verifying: $url"
+            local attempt=0
+            while [ $attempt -lt 6 ]; do
+              attempt=$((attempt + 1))
+              local headers
+              if headers=$(curl -fsSL -I "$url" 2>&1); then
+                echo "$headers"
+                if [ -n "$expected_size" ]; then
+                  local actual
+                  actual=$(printf '%s\n' "$headers" | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {gsub(/\r/,""); print $2}' | tail -n1)
+                  if [ "$actual" = "$expected_size" ]; then
+                    echo "OK: size matches ($actual bytes)"
+                    return 0
+                  fi
+                  echo "Size mismatch: expected=$expected_size actual=$actual, retrying..."
+                else
+                  echo "OK: reachable"
+                  return 0
+                fi
+              else
+                echo "HEAD failed (attempt $attempt/6), retrying in 5s..."
+              fi
+              sleep 5
+            done
+            echo "ERROR: $url not reachable or size mismatch after 6 attempts" >&2
+            return 1
+          }
+          check "${R2_BASE_URL}/WindInput-${VERSION}-Setup.exe" "$EXPECTED_EXE_SIZE"
+          check "${R2_BASE_URL}/WindInput-${VERSION}-Release.md" ""
+          check "${R2_BASE_URL}/latest.json" ""
+          echo "All R2 objects verified."
