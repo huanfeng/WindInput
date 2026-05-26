@@ -12,6 +12,13 @@
 4. **darwin 渲染消费** — `text_backend_darwin.go` 只走 freetype; `manager_darwin.go` 保留 cmdCh/eventCh, macOS forwarder 订阅 cmdCh 把 gg 出的位图经 SHM+push 交给 IMKit `.app` 贴 NSPanel
 
 `Manager` 在两个平台同名 struct + 同名方法集 (60+); `TextBackendManager` 两平台同公开 API (darwin 仅 freetype 分支); coordinator 调用面零变化.
+跨平台 UI 层. 历史上仅 Windows 原生渲染, PR-1 ~ PR-5 重构后拆为三层:
+
+1. **平台无关数据/命令模型** — 类型定义 (`types_neutral.go`) + `uicmd.Command` 投递 (`events.go` / `uicmd_convert.go` / `protocol.go`)
+2. **Windows 原生渲染** — 候选词窗口/工具栏/Tooltip/Toast/弹出菜单 (Win32 + GDI + DirectWrite + CGO; 21+ 文件 `//go:build windows`)
+3. **darwin 占位 stub** — `manager_darwin.go` 仅保留 cmdCh/eventCh 通道, 实际 UI 由 macOS IMKit `.app` 自绘 NSPanel
+
+`Manager` 在两个平台同名 struct + 同名方法集 (60+), 但字段实现完全不同; coordinator 调用面零变化.
 
 ## Key Files
 
@@ -74,6 +81,18 @@
 |------|-------------|
 | `manager_darwin.go` | `Manager` darwin stub: 保留 cmdCh/eventCh; 60+ method 投递 uicmd.Command; `SubscribeCommands(handler)` 启 goroutine 把 cmdCh 推给 macOS forwarder; Win 渲染/窗口/钩子 no-op; 含 `StatusWindow`/`GetCapsLockState`/`ParseHotkeyString` 等 stub |
 | `text_backend_darwin.go` | `TextBackendManager` darwin 版: 仅 freetype (gg/text) 后端, 公开 API 与 Win 版对齐; `SetTextRenderMode` 忽略 mode 恒走 freetype; `SetGDIFontParams`/`SetDWriteFontFallbackForPUA` 为 no-op 兼容占位 |
+| `dpi.go` | DPI 缩放工具函数 |
+| `gdi_text.go` | GDI 文字渲染实现 |
+| `font_config.go` | `FontConfig`：字体路径/大小/样式配置 |
+| `text_drawer.go` | `TextDrawer` 接口：统一 GDI/DirectWrite 绘制 API |
+| `uicmd_post.go` | `postCmd` 投递 helper + `snapshotCandidatesMarkers/Config/PinState` 全量快照构造器 (供 setter 末尾投递 snapshot 命令到 cmdCh) |
+| `uicmd_events.go` | 反向事件通道: `Events() <-chan uicmd.Event` + `wrapCandidateCallbacks/wrapToolbarCallbacks/wrapHotkeyCallback` 双流并行包装 (原 callback + 推一份 uicmd.Event) |
+| `uicmd_post_test.go` | snapshot helper + wrap callback 双流行为 + 背压测试 |
+
+### darwin-only (`//go:build darwin`)
+| File | Description |
+|------|-------------|
+| `manager_darwin.go` | `Manager` darwin stub: 保留 cmdCh/eventCh; 60+ method 投递 uicmd.Command (供 macOS forwarder 订阅); Win 渲染/窗口/钩子全部 no-op; 含 `StatusWindow` / `GetCapsLockState` / `ParseHotkeyString` 等独立函数 stub |
 | `manager_darwin_test.go` | 18 个 darwin Manager 命令投递测试 (ShowCandidates/SetXxx/Hide/Toast/Toolbar/Hotkeys/Menu 等) |
 
 ## For AI Agents
@@ -136,6 +155,8 @@
 - 共用: `github.com/gogpu/gg` + `gg/text` (2D 渲染 + freetype 文本, 跨平台渲染核心)
 - Win: `golang.org/x/sys/windows` (Win32 API), CGO 桥接 DirectWrite
 - darwin: gg + 标准库 (image, log/slog, sync); 字体定位走 `pkg/systemfont` darwin catalog
+- Win: `golang.org/x/sys/windows` (Win32 API), `github.com/gogpu/gg` (2D 渲染), CGO 桥接 DirectWrite
+- darwin: 仅标准库 (image, log/slog, sync, syscall via os)
 
 ## 全局约束
 - 枚举与魔法字符串约束: 见 [`/docs/design/enum-constraint.md`](../../../docs/design/enum-constraint.md)

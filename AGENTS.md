@@ -4,10 +4,17 @@
 
 ## Purpose
 
-Windows 中文输入法，支持拼音和五笔双模式。采用 C++ TSF 框架 + Go 输入引擎 + Vue 3 设置界面的混合架构。核心采用 **Schema（输入方案）驱动架构**，通过 YAML 方案文件定义引擎类型、词库配置和学习策略。本项目包含三个主要模块：
-- **wind_tsf**：C++ TSF 桥接层 DLL
-- **wind_input**：Go 输入引擎服务
-- **wind_setting**：Wails 设置界面应用
+中文输入法，支持拼音和五笔双模式。采用平台特定 IME 框架 + Go 输入引擎 + Vue 3 设置界面的混合架构。核心采用 **Schema（输入方案）驱动架构**，通过 YAML 方案文件定义引擎类型、词库配置和学习策略。
+
+### 平台支持
+- **Windows** (主线, 全功能): C++ TSF DLL + Go 服务 + Wails 设置端
+- **macOS** (推进中, Go 服务端可编译): Go 服务端已完成 darwin 全包编译, 产出 Mach-O 二进制; **macOS IMKit `.app` 工程未启动**, 当前仅可作为 IPC server 运行, 不能实际输入. 详见 [`docs/design/macos-port.md`](docs/design/macos-port.md) 与 [`docs/macos-build.md`](docs/macos-build.md).
+
+### 三大模块
+- **wind_tsf** (Windows 专属): C++ TSF 桥接层 DLL
+- **wind_input** (跨平台): Go 输入引擎服务 (Win/macOS 共用代码 + 平台分支文件)
+- **wind_setting** (Windows 主, macOS 未做): Wails 设置界面应用
+- **(规划中) WindInput.app**: macOS IMKit `.app` 客户端, 对应 `wind_tsf` 的 macOS 等价物 (PR-A 未启动)
 
 ## Architecture
 
@@ -113,6 +120,8 @@ Schema 驱动流程:
 |------|------|
 | [`docs/AGENTS-TEMPLATE.md`](docs/AGENTS-TEMPLATE.md) | AGENTS.md 写作模板与字段规范 |
 | [`docs/design/enum-constraint.md`](docs/design/enum-constraint.md) | 枚举与魔法字符串约束 SSOT |
+| [`docs/design/macos-port.md`](docs/design/macos-port.md) | macOS 移植设计 (架构、协议、目录约定、stub 边界) |
+| [`docs/macos-build.md`](docs/macos-build.md) | macOS 构建/调试指南 (实用文档) |
 | [`scripts/lint_agents_md.ps1`](scripts/lint_agents_md.ps1) | AGENTS.md 引用路径有效性扫描脚本 |
 
 ### wind_input/（Go 服务）

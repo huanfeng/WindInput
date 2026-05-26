@@ -9,10 +9,12 @@ JSON-RPC 协议的请求/响应类型定义及帧协议实现。供 `internal/rp
 ## Key Files
 | File | Description |
 |------|-------------|
-| `protocol.go` | 帧协议实现：`Request`/`Response` 结构体；`ReadMessage`/`WriteMessage` 函数；length-prefix 编码（4 字节大端序整数 + JSON payload） |
-| `types.go` | RPC 方法的参数和返回值类型定义：DictSearchArgs、DictAddArgs、ShadowPinArgs 等；EventMessage 事件类型 |
-| `client.go` | RPC 客户端实现：Named Pipe 连接、请求发送、响应接收、超时控制 |
-| `protocol_test.go` | 帧协议单元测试（读写往返、边界条件） |
+| `protocol.go` | 帧协议实现: `Request`/`Response` 结构体; `ReadMessage`/`WriteMessage`; length-prefix 编码 (4 字节大端序 + JSON payload) |
+| `types.go` | RPC 方法参数与返回值类型 (DictSearchArgs / DictAddArgs / ShadowPinArgs 等), `EventMessage` 事件类型 |
+| `client.go` | 跨平台 RPC 客户端: `connect()` 走 `dialEndpoint` helper (平台分支), 短连接每次发送+接收+关闭 |
+| `endpoint_windows.go` (`//go:build windows`) | `RPCPipeName` / `RPCEventPipeName` Named Pipe 路径常量 + `dialEndpoint` 走 `winio.DialPipe` |
+| `endpoint_darwin.go` (`//go:build darwin`) | UDS 路径常量 (`rpc.sock` / `rpc_events.sock`); `dialEndpoint` 走 `net.Dial("unix", ...)`; 支持 `WIND_INPUT_RUNTIME_DIR` 环境变量覆盖 |
+| `protocol_test.go` | 帧协议单元测试 (读写 roundtrip、边界条件) |
 
 ## For AI Agents
 
@@ -64,8 +66,9 @@ type ShadowDeletedEntry struct {
 `PhraseRemove(code, text)` (无 name)。
 
 ### Working In This Directory
-- **管道名称**：`\\.\pipe\wind_input{Suffix}_rpc`（Suffix 通过 `buildvariant.Suffix()` 获取，用于多版本共存）
-- **事件管道**：`\\.\pipe\wind_input{Suffix}_events`（用于推送变化事件）
+- **端点路径** (平台分支):
+  - Win: `\\.\pipe\wind_input{Suffix}_rpc` / `_events` (Suffix 通过 `buildvariant.Suffix()` 获取)
+  - darwin: `~/Library/Application Support/WindInput{Suffix}/rpc.sock` / `rpc_events.sock` (可由 `WIND_INPUT_RUNTIME_DIR` 覆盖)
 - **帧格式**：4 字节大端序长度 + JSON payload；长度不含 4 字节头本身
 - **协议版本**：`ProtocolVersion` 常量，服务端和客户端需匹配
 - **请求格式**：`{ "version": int, "id": string, "method": "Service.Method", "params": {...} }`
@@ -86,7 +89,11 @@ type ShadowDeletedEntry struct {
 - `pkg/buildvariant` — Suffix() 获取版本后缀
 
 ### External
-- `encoding/json` — 标准库
-- `io` — 标准库（ReadWriter）
+- Win: `github.com/Microsoft/go-winio` (overlapped Named Pipe)
+- darwin: 仅标准库 `net` (Dial unix)
+- `encoding/json` (跨平台)
+
+## 全局约束
+- macOS 移植: 见 [`/docs/design/macos-port.md`](../../../docs/design/macos-port.md)
 
 <!-- MANUAL: -->

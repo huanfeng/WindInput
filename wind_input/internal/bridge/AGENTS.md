@@ -1,17 +1,27 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-05-26 -->
 
 # internal/bridge
 
 ## Purpose
-Named Pipe IPC 服务端，负责与 C++ TSF（文本服务框架）桥接层进行双向通信。维护两条管道：
+跨平台 IPC 服务端，与 IME 客户端进行双向通信。两个端点：
 
-- `\\.\pipe\wind_input`（BridgePipeName）：双向请求/响应管道（MESSAGE 模式）
-- `\\.\pipe\wind_input_push`（PushPipeName）：单向推送管道，用于主动向 TSF 推送状态变更
+- **主请求/响应通道** (`BridgePipeName`)
+  - Win: `\\.\pipe\wind_input<suffix>` Named Pipe (MESSAGE 模式)
+  - darwin: `~/Library/Application Support/WindInput<suffix>/bridge.sock` UDS
+- **推送通道** (`PushPipeName`)
+  - Win: `\\.\pipe\wind_input<suffix>_push` Named Pipe
+  - darwin: `~/Library/Application Support/WindInput<suffix>/bridge_push.sock` UDS
 
-新增宿主进程代理渲染功能（Host Render），通过共享内存将候选词位图传递给白名单进程（如 Windows 开始菜单宿主进程 SearchHost.exe）的 DLL 注入代码渲染。
+平台特定能力:
+- **Win**: Host Render（通过共享内存把候选词位图传给白名单宿主进程，绕过 Win11 开始菜单 Band 层级）
+- **darwin**: NSPanel 自绘 (IMKit `.app` 端实现, Go 服务不参与渲染); host_render / shared_memory 在 darwin 上为 no-op stub
+
+二进制协议 (`internal/ipc.BinaryCodec`) 跨平台一致, IMKit `.app` 端写一份解码器同时服务 Win+macOS.
 
 ## Key Files
+
+### 平台无关
 | File | Description |
 |------|-------------|
 | `protocol.go` | 协议类型定义（ResponseType、KeyEventData、StatusUpdateData 等） |
@@ -20,6 +30,26 @@ Named Pipe IPC 服务端，负责与 C++ TSF（文本服务框架）桥接层进
 | `server_push.go` | 推送管道管理（per-client outbound channel + 单 writer goroutine + phase-2 死链监听；所有 push 仅触达 active client，`pushToActiveClient` 是统一入口）；`PushActivationStatusToActiveClient` 用于 IMEActivated/FocusGained 异步化的状态回包（含 hotkeys + hostRenderAvail） |
 | `host_render.go` | `HostRenderManager`：管理白名单进程的宿主渲染状态；`HostRenderState` 持有每个进程的共享内存引用；通过 `OpenProcess`/`QueryFullProcessImageNameW` 识别进程名称 |
 | `shared_memory.go` | `SharedMemory`：命名共享内存 + 命名事件对；`WriteFrame` 将 RGBA→BGRA 转换后写入位图并信令通知；`WriteHide` 发送隐藏命令；安全描述符包含 AppContainer 低完整性标记（`S:(ML;;NW;;;LW)`）以支持 UWP 进程访问 |
+| `protocol.go` | 协议类型定义 (ResponseType、KeyEventData、StatusUpdateData 等) + `MessageHandler` 接口 |
+| `deferred_handler.go` | `DeferredHandler`: coordinator 还未就绪时返回安全默认值的代理 |
+
+### Windows-only (`//go:build windows`)
+| File | Description |
+|------|-------------|
+| `endpoint_windows.go` | `BridgePipeName` / `PushPipeName` Named Pipe 路径常量 |
+| `server.go` | Named Pipe 服务端 (go-winio overlapped I/O; net.Conn 接口统一读写); Server struct 含 windows.Handle / push handle map / focus token 等 Win 特有字段 |
+| `server_handler.go` | 消息分发: 解码二进制消息并路由到 MessageHandler 各方法 (Win 端 Server method) |
+| `server_push.go` | Push 管道管理 (per-client outbound channel + 单 writer goroutine + 死链监听; 所有 push 仅触达 active client) |
+| `host_render.go` | `HostRenderManager`: 白名单进程的宿主渲染状态; 通过 `OpenProcess`/`QueryFullProcessImageNameW` 识别进程名称 |
+| `shared_memory.go` | `SharedMemory`: 命名共享内存 + 命名事件; `WriteFrame` RGBA→BGRA 转换写入; AppContainer 低完整性标记 (`S:(ML;;NW;;;LW)`) 支持 UWP |
+
+### darwin-only (`//go:build darwin`)
+| File | Description |
+|------|-------------|
+| `endpoint_darwin.go` | UDS 路径常量 (`bridge.sock` / `bridge_push.sock`); `WIND_INPUT_RUNTIME_DIR` 环境变量覆盖支持 |
+| `server_darwin.go` | UDS server: 双 socket 监听, accept loop 每连接 goroutine, 帧 dispatch 覆盖 KeyEvent/Caret/Focus/IME/ToggleMode; client ID 用 `connID` 替代 Win PID; Push API 与 Win 接口对齐 (fanout 写所有 push client) |
+| `host_render_darwin.go` | HostRenderManager / SharedMemory / GetProcessName 全部 no-op (macOS IMKit `.app` 自绘 NSPanel, 不需要 bitmap 跨进程传输) |
+| `server_darwin_test.go` | 7 个端到端测试 (KeyEvent roundtrip / FocusGained / 多 client / 断线 / Push fanout / stale socket 清理 / endpoint 路径派生) |
 
 ## For AI Agents
 
@@ -70,11 +100,24 @@ bridge handler goroutine 处理仍走同步响应的命令（`CmdHostRenderReque
 - `BridgeServer` 接口由 `bridge.Server` 实现，供 coordinator 回调推送状态
 - `SharedMemory.WriteFrame` 执行 RGBA→BGRA 内联转换（像素格式：B/G/R/A 顺序写入）
 
+### darwin 端注意事项
+- UDS 不支持 SDDL; 改用 `MkdirAll(dir, 0o700)` 把端点目录权限限定到当前用户
+- 启动时清理 stale socket 文件 (上次进程未优雅退出残留)
+- `IsActivelyFocusedPID` 始终返回 false: PID 概念在 darwin 不适用, macOS 端通过 IMKit 自报 bundleID 替代 (待 PR-A 接入)
+- 帧 dispatch 仅覆盖核心命令 (KeyEvent/Caret/Focus/IME/Toggle), 其他帧 Ack 兼容; 完整路径在 IMKit `.app` 接入时按需补
+- 多客户端用 `connID` (accept 自增) 替代 Win 的 PID 索引; macOS 单 IMKit `.app` 进程多 IMKInputController 实例各自独立 socket 连接, 见 [`docs/design/macos-port.md`](../../../docs/design/macos-port.md)
+
 ## Dependencies
 ### Internal
-- `internal/ipc` — BinaryCodec（二进制消息编解码）、`HostRenderSetupPayload`、`MaxSharedRenderSize`、共享内存协议常量
+- `internal/ipc` — BinaryCodec (二进制消息编解码)、`HostRenderSetupPayload`、`MaxSharedRenderSize`、共享内存协议常量
+- `pkg/buildvariant` — 端点路径 suffix
 
 ### External
-- `golang.org/x/sys/windows` — Named Pipe API、`CreateFileMappingW`、`MapViewOfFile`、`CreateEventW`
+- Win: `golang.org/x/sys/windows` (Named Pipe API)、`github.com/Microsoft/go-winio` (overlapped I/O)
+- darwin: 仅标准库 `net.Listen("unix", ...)` + `os` / `path/filepath` / `syscall`
+
+## 全局约束
+- 协议跨语言镜像约束: 修改帧布局必须同步 `wind_tsf/include/BinaryProtocol.h` (C++) + 未来 macOS IMKit `.app` 的 Swift/Obj-C 解码器
+- 日志隐私: bridge 收到的用户文本 (commit text / preedit) 不进 INFO
 
 <!-- MANUAL: -->

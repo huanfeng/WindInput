@@ -11,8 +11,9 @@
 
 | 文件 | 描述 |
 |------|------|
-| `ARCHITECTURE.md` | 系统架构设计：C++ TSF 层 + Go 服务层 + Named Pipe 通信 + Schema 方案架构 |
+| `architecture.md` | 系统架构设计：C++ TSF 层 + Go 服务层 + Named Pipe 通信 + Schema 方案架构 |
 | `DEVELOPMENT.md` | 开发指南：环境搭建、构建流程、代码规范 |
+| `macos-build.md` | macOS 构建与调试指南 (面向开发者的实用文档) |
 
 ## 子目录
 
@@ -27,6 +28,9 @@
 
 | 文件 | 描述 |
 |------|------|
+| `enum-constraint.md` | 枚举与魔法字符串约束 SSOT (跨模块红线) |
+| `macos-port.md` | macOS 移植总体设计 (IMKit + Go 双进程, UDS 协议, 命令模型) |
+| `command-bar-design.md` | 命令直通车设计 |
 | `startmenu-zorder-solution.md` | Win11 开始菜单候选框 z-order 解决方案 |
 | `pinyin-data-analysis.md` | 拼音数据分析：数据来源、候选排序、优化方向 |
 

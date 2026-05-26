@@ -10,8 +10,8 @@
 | File | Description |
 |------|-------------|
 | `keyinject.go` | `Combo` 结构 + `Parse(s)` 解析器, 跨平台 |
-| `sendinput_windows.go` | Windows 下 `Tap` / `Sequence` 的 SendInput 实现, VK 表与 KEYBDINPUT 结构 |
-| `sendinput_other.go` | 非 Windows 占位, `Tap` / `Sequence` 返回 `ErrUnsupportedPlatform` |
+| `sendinput_windows.go` | Windows 下 `Tap` / `Sequence` / `Hold` / `Release` / `TypeText` 的 SendInput 实现, VK 表与 KEYBDINPUT 结构 |
+| `sendinput_other.go` | 非 Windows 占位; `Tap` / `Sequence` / `Hold` / `Release` / `TypeText` 全部返回 `ErrUnsupportedPlatform`. macOS 真实键注入路径走 IMKit `.app` 内 `CGEventCreateKeyboardEvent` 或 NSPasteboard+Cmd+V, Go 服务侧不直接合成键, 见 [`docs/design/macos-port.md`](../../../docs/design/macos-port.md). |
 
 ## For AI Agents
 
