@@ -15,8 +15,21 @@ import (
 // 超过即写 WARN，便于排查「宿主 UI 线程被同步 IPC 阻塞」这类问题
 // （例如 IME activate 同步路径误调用了跨进程 shell API，导致 C++ 端
 // READ_TIMEOUT_MS=1500ms 命中超时、host explorer 卡 1.5s）。
-// 50ms 是经验值：bridge 命令绝大多数走 mmap 查询，正常 <5ms；50ms 已是异常的下限。
-const slowRequestThreshold = 50 * time.Millisecond
+//
+// 20ms 是异步化后的金丝雀：IMEActivated/FocusGained 异步化后 processRequest 只做
+// 字段更新 + 立即回 Ack，正常 <1ms；剩余的 KeyEvent/CommitRequest 也几乎全走 mmap
+// 查询，正常 <5ms。20ms 命中说明引入了不该有的慢调用，必须排查。
+// 历史阈值 50ms 在异步化前能稳定不误报，但异步化后偏松。
+const slowRequestThreshold = 20 * time.Millisecond
+
+// slowActivationThreshold 是 activation 第二段 (handler + push 入队) 时长的警戒线。
+// 触发 WARN 暴露两类问题:
+//  1. HandleIMEActivated / HandleFocusGained 自身变慢 (新引入的耗时调用、锁竞争);
+//  2. push pipe outbound 队列堆积导致 enqueue 退化为非 O(1) 路径。
+//
+// 100ms 是体感门槛: activation 拖到 100ms 以上, 用户切应用 / Ctrl+Space 的
+// 工具栏出现会肉眼可见地延迟。设这条警戒线让"切应用就慢"提前被发现。
+const slowActivationThreshold = 100 * time.Millisecond
 
 // processRequestWithTimeout wraps processRequest with a timeout
 func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte, clientID int, processID uint32) []byte {
@@ -297,11 +310,20 @@ func (s *Server) applyFocusGainedCaret(payload []byte, clientID int) {
 //  2. C++ 端已经收到 Ack 后可继续派发新命令；它们会在 handleClient 下一轮 ReadHeader
 //     时排队读取，对 C++ 端体感无影响。
 func (s *Server) runActivationHandlerAndPush(header *ipc.IpcHeader, clientID int, processID uint32) {
+	t0 := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger.Error("PANIC in runActivationHandlerAndPush",
 				"clientID", clientID, "command", fmt.Sprintf("0x%04X", header.Command),
 				"panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
+			return
+		}
+		if d := time.Since(t0); d > slowActivationThreshold {
+			s.logger.Warn("Slow activation handler",
+				"command", fmt.Sprintf("0x%04X", header.Command),
+				"duration", d,
+				"clientID", clientID,
+				"processID", processID)
 		}
 	}()
 
