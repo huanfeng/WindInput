@@ -48,8 +48,16 @@ constexpr uint16_t CMD_CLEAR_COMPOSITION  = 0x0103; // Clear composition
 constexpr uint16_t CMD_COMMIT_RESULT      = 0x0105; // Commit result (response to COMMIT_REQUEST)
 // 0x0201 (CMD_MODE_CHANGED) removed: 所有模式切换响应统一走 CMD_STATUS_UPDATE
 constexpr uint16_t CMD_STATUS_UPDATE      = 0x0202; // Full status update
-constexpr uint16_t CMD_STATE_PUSH         = 0x0206; // State push (broadcast to all clients)
+constexpr uint16_t CMD_STATE_PUSH         = 0x0206; // State push (broadcast to all clients, hotkeys-less)
 constexpr uint16_t CMD_SERVICE_READY      = 0x0207; // Go service connected push pipe, TSF should sync state
+// CMD_ACTIVATION_STATUS_PUSH 是 CMD_IME_ACTIVATED / CMD_FOCUS_GAINED 异步化后的「状态回包」：
+// Go 端 bridge handler 立即对原同步命令回 ACK 解除宿主 UI 线程同步等待，HandleIMEActivated /
+// HandleFocusGained 在 ACK 之后才执行；完成后通过 push pipe 推送本命令。载荷格式与
+// CMD_STATUS_UPDATE 一致（含 hotkeys + hostRenderAvail + iconLabel）。
+// AsyncReader 收到后 Post 到 TSF 线程做 _SyncStateFromResponse + _EnsureHostRenderSetup。
+// 区别于 CMD_STATE_PUSH：本命令是 activation 握手的回包，必须携带完整状态；
+// CMD_STATE_PUSH 是状态变更广播，hotkeys 不变所以不带。
+constexpr uint16_t CMD_ACTIVATION_STATUS_PUSH = 0x020C;
 constexpr uint16_t CMD_SYNC_HOTKEYS       = 0x0301; // Sync hotkey whitelist
 constexpr uint16_t CMD_SYNC_CONFIG        = 0x0303; // Sync config key/value (generic)
 constexpr uint16_t CMD_CONSUMED           = 0x0401; // Key consumed

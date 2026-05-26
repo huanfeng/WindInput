@@ -5,6 +5,7 @@
 #include <string>
 
 class CTextService;
+struct ServiceResponse;
 
 // Menu item IDs for language bar right-click menu
 #define MENU_ID_TOGGLE_MODE      1
@@ -86,6 +87,13 @@ public:
     // after service restart without waiting for a focus/key event.
     void PostServiceReady();
 
+    // Thread-safe activation status from async reader thread.
+    // 触发时机：Go 收到异步化后的 CmdIMEActivated / CmdFocusGained 完成 handler 后通过
+    // push pipe 推送的 CMD_ACTIVATION_STATUS_PUSH。TSF 线程上调用 TextService 的
+    // ApplyActivationStatusResponse, 等价于原同步 ReceiveResponse 路径的
+    // _SyncStateFromResponse + _EnsureHostRenderSetup。
+    void PostActivationStatus(const ServiceResponse& response);
+
     // Schedule a 50ms fallback caret retry on the TSF thread.
     // Used as a safety net when an app does not fire OnLayoutChange promptly.
     void PostDelayedCaretPositionUpdate();
@@ -109,6 +117,7 @@ private:
     static const UINT WM_CLEAR_COMPOSITION;
     static const UINT WM_UPDATE_COMPOSITION;
     static const UINT WM_SERVICE_READY;
+    static const UINT WM_ACTIVATION_STATUS;
 
     // Packed status for message passing
     struct StatusUpdateData {

@@ -708,7 +708,7 @@ BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight)
         return FALSE;
     }
 
-    _LogDebug(L"Sending focus_gained with caret: x=%d, y=%d, h=%d, token=0x%016llX", caretX, caretY, caretHeight, (unsigned long long)_clientToken);
+    _LogDebug(L"Sending focus_gained (async) with caret: x=%d, y=%d, h=%d, token=0x%016llX", caretX, caretY, caretHeight, (unsigned long long)_clientToken);
 
     FocusGainedPayload payload = {};
     payload.caret.x = caretX;
@@ -716,7 +716,11 @@ BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight)
     payload.caret.height = caretHeight;
     payload.clientToken = _clientToken;
 
-    return _SendBinaryMessage(CMD_FOCUS_GAINED, &payload, sizeof(payload));
+    // 异步化（见 BinaryProtocol.h::CMD_ACTIVATION_STATUS_PUSH 注释）：
+    // Go 端 server.go::handleClient 收到 FOCUS_GAINED 立即回 Ack，HandleFocusGained
+    // 在 Ack 之后才执行，结果通过 push pipe 回送 CMD_ACTIVATION_STATUS_PUSH。
+    // 本端写完即返回，宿主 UI 线程不再阻塞等响应。
+    return _SendBinaryMessage(CMD_FOCUS_GAINED, &payload, sizeof(payload), true /* async */);
 }
 
 BOOL CIPCClient::SendIMEDeactivated()
@@ -745,8 +749,11 @@ BOOL CIPCClient::SendIMEActivated()
 
     IMEActivatedPayload payload = {};
     payload.clientToken = _clientToken;
-    _LogInfo(L"Sending ime_activated: token=0x%016llX", (unsigned long long)_clientToken);
-    return _SendBinaryMessage(CMD_IME_ACTIVATED, &payload, sizeof(payload));
+    _LogInfo(L"Sending ime_activated (async): token=0x%016llX", (unsigned long long)_clientToken);
+    // 异步化（见 BinaryProtocol.h::CMD_ACTIVATION_STATUS_PUSH 注释）：
+    // Go 端 server.go::handleClient 收到 IME_ACTIVATED 立即回 Ack，HandleIMEActivated
+    // 在 Ack 之后才执行，结果通过 push pipe 回送 CMD_ACTIVATION_STATUS_PUSH。
+    return _SendBinaryMessage(CMD_IME_ACTIVATED, &payload, sizeof(payload), true /* async */);
 }
 
 BOOL CIPCClient::SendHostRenderRequest(ServiceResponse& response)
@@ -1115,6 +1122,62 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
 
             _LogInfo(L"Response: SyncHotkeys keyDown=%d, keyUp=%d",
                      (int)response.keyDownHotkeys.size(), (int)response.keyUpHotkeys.size());
+        }
+        break;
+
+    case CMD_ACTIVATION_STATUS_PUSH:
+        {
+            // Activation status push: IMEActivated / FocusGained 异步化后的状态回包,
+            // 载荷格式与 CMD_STATUS_UPDATE 一致(含 hotkeys + hostRenderAvail + iconLabel)。
+            response.type = ResponseType::StatusUpdate;
+
+            if (payload.size() < sizeof(StatusHeader))
+            {
+                _LogError(L"ActivationStatusPush payload too short");
+                return FALSE;
+            }
+
+            const StatusHeader* statusHeader = reinterpret_cast<const StatusHeader*>(payload.data());
+            response.statusFlags = statusHeader->flags;
+            response.chineseMode = (statusHeader->flags & STATUS_CHINESE_MODE) != 0;
+
+            // Extract hotkeys
+            size_t hotkeysOffset = sizeof(StatusHeader);
+            uint32_t totalHotkeys = statusHeader->keyDownCount + statusHeader->keyUpCount;
+
+            if (payload.size() >= hotkeysOffset + totalHotkeys * sizeof(uint32_t))
+            {
+                const uint32_t* hotkeys = reinterpret_cast<const uint32_t*>(payload.data() + hotkeysOffset);
+
+                for (uint32_t i = 0; i < statusHeader->keyDownCount; i++)
+                {
+                    response.keyDownHotkeys.push_back(hotkeys[i]);
+                }
+
+                for (uint32_t i = 0; i < statusHeader->keyUpCount; i++)
+                {
+                    response.keyUpHotkeys.push_back(hotkeys[statusHeader->keyDownCount + i]);
+                }
+            }
+
+            // Extract trailing icon label (UTF-8, after StatusHeader + hotkeys)
+            size_t structuredSize = hotkeysOffset + totalHotkeys * sizeof(uint32_t);
+            if (payload.size() > structuredSize)
+            {
+                std::string utf8Label(payload.begin() + structuredSize, payload.end());
+                int wideLen = MultiByteToWideChar(CP_UTF8, 0, utf8Label.c_str(), (int)utf8Label.size(), NULL, 0);
+                if (wideLen > 0)
+                {
+                    response.iconLabel.resize(wideLen);
+                    MultiByteToWideChar(CP_UTF8, 0, utf8Label.c_str(), (int)utf8Label.size(), &response.iconLabel[0], wideLen);
+                }
+            }
+
+            _LogInfo(L"Response: ActivationStatusPush mode=%d, width=%d, punct=%d, toolbar=%d, hostRender=%d, keyDown=%d, keyUp=%d, label=%ls",
+                     response.IsChineseMode(), response.IsFullWidth(), response.IsChinesePunct(),
+                     response.IsToolbarVisible(), response.IsHostRenderAvailable(),
+                     (int)response.keyDownHotkeys.size(), (int)response.keyUpHotkeys.size(),
+                     response.iconLabel.empty() ? L"(none)" : response.iconLabel.c_str());
         }
         break;
 
@@ -1501,6 +1564,13 @@ void CIPCClient::SetStatePushCallback(StatePushCallback callback)
     LeaveCriticalSection(&_asyncLock);
 }
 
+void CIPCClient::SetActivationPushCallback(ActivationPushCallback callback)
+{
+    EnterCriticalSection(&_asyncLock);
+    _activationPushCallback = callback;
+    LeaveCriticalSection(&_asyncLock);
+}
+
 void CIPCClient::SetCommitTextCallback(CommitTextCallback callback)
 {
     EnterCriticalSection(&_asyncLock);
@@ -1883,6 +1953,34 @@ void CIPCClient::_AsyncReaderLoop()
                     // Call callback
                     EnterCriticalSection(&_asyncLock);
                     StatePushCallback callback = _statePushCallback;
+                    LeaveCriticalSection(&_asyncLock);
+
+                    if (callback)
+                    {
+                        callback(response);
+                    }
+                }
+            }
+            else if (header.command == CMD_ACTIVATION_STATUS_PUSH)
+            {
+                // Activation status push: IMEActivated / FocusGained 异步化后的回包，
+                // 载荷与 CMD_STATUS_UPDATE 同格式，含 hotkeys + hostRenderAvail。
+                // TextService 在回调里 Post 到 TSF 线程做 _SyncStateFromResponse + _EnsureHostRenderSetup。
+                std::vector<uint8_t> payload;
+                if (header.length > 0 && bytesRead >= sizeof(IpcHeader) + header.length)
+                {
+                    payload.assign(buffer.begin() + sizeof(IpcHeader),
+                                   buffer.begin() + sizeof(IpcHeader) + header.length);
+                }
+
+                ServiceResponse response;
+                if (_ParseResponse(header, payload, response))
+                {
+                    _LogInfo(L"Async reader: activation status push received - mode=%d, hostRender=%d",
+                             response.IsChineseMode(), response.IsHostRenderAvailable());
+
+                    EnterCriticalSection(&_asyncLock);
+                    ActivationPushCallback callback = _activationPushCallback;
                     LeaveCriticalSection(&_asyncLock);
 
                     if (callback)

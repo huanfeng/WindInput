@@ -121,6 +121,7 @@ const UINT CLangBarItemButton::WM_COMMIT_TEXT = WM_USER + 101;
 const UINT CLangBarItemButton::WM_CLEAR_COMPOSITION = WM_USER + 102;
 const UINT CLangBarItemButton::WM_UPDATE_COMPOSITION = WM_USER + 103;
 const UINT CLangBarItemButton::WM_SERVICE_READY = WM_USER + 104;
+const UINT CLangBarItemButton::WM_ACTIVATION_STATUS = WM_USER + 105;
 
 static const UINT_PTR TIMER_ID_CARET_RETRY    = 0xC401;
 static const UINT_PTR TIMER_ID_SERVICE_READY  = 0xC402;
@@ -770,6 +771,23 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         delete pData;
         return 0;
     }
+    else if (msg == WM_ACTIVATION_STATUS)
+    {
+        // lParam = heap-allocated ServiceResponse* (拥有权移交本 handler, 由本 handler delete)。
+        // 触发链：Go push pipe → CIPCClient::_AsyncReaderLoop → _activationPushCallback
+        //         → CTextService 的 lambda 调 PostActivationStatus → 本 handler。
+        // 等价于原同步路径 _DoFullStateSync 收到 ReceiveResponse 后调
+        // _SyncStateFromResponse + _EnsureHostRenderSetup。
+        ServiceResponse* pResp = reinterpret_cast<ServiceResponse*>(lParam);
+        CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (pThis != nullptr && pResp != nullptr && pThis->_pTextService != nullptr)
+        {
+            WIND_LOG_DEBUG(L"MsgWndProc: Processing WM_ACTIVATION_STATUS\n");
+            pThis->_pTextService->ApplyActivationStatusResponse(*pResp);
+        }
+        delete pResp;
+        return 0;
+    }
     else if (msg == WM_SERVICE_READY)
     {
         CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -1184,6 +1202,27 @@ void CLangBarItemButton::PostServiceReady()
         WIND_LOG_WARN(L"PostServiceReady: PostMessage failed\n");
     else
         WIND_LOG_DEBUG(L"PostServiceReady: Message posted to TSF thread\n");
+}
+
+void CLangBarItemButton::PostActivationStatus(const ServiceResponse& response)
+{
+    if (_hMsgWnd == NULL)
+    {
+        WIND_LOG_WARN(L"PostActivationStatus: No message window, skipping\n");
+        return;
+    }
+    // 拷贝一份 ServiceResponse 到堆上, 让 TSF 线程的 handler 取走 ownership 后 delete。
+    // 不能用栈对象——PostMessageW 是异步的, 调用栈解开后 response 引用会悬空。
+    ServiceResponse* pCopy = new ServiceResponse(response);
+    if (!PostMessageW(_hMsgWnd, WM_ACTIVATION_STATUS, 0, reinterpret_cast<LPARAM>(pCopy)))
+    {
+        delete pCopy;
+        WIND_LOG_WARN(L"PostActivationStatus: PostMessage failed\n");
+    }
+    else
+    {
+        WIND_LOG_DEBUG(L"PostActivationStatus: Message posted to TSF thread\n");
+    }
 }
 
 void CLangBarItemButton::PostDelayedCaretPositionUpdate()

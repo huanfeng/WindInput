@@ -76,8 +76,8 @@ C++ implementation files for the TSF DLL。所有文件编译链接进唯一目�
 - `SendKeyEvent()` - Send key event with binary protocol
 - `SendCommitRequest()` - Send commit request with barrier
 - `SendCaretUpdate()` - Send caret position to Go service
-- `SendFocusGained()` / `SendFocusLost()` - Focus notifications
-- `SendIMEActivated()` / `SendIMEDeactivated()` - IME state notifications
+- `SendFocusGained()` / `SendFocusLost()` - Focus notifications（FocusGained 已改 async；状态由 push pipe CMD_ACTIVATION_STATUS_PUSH 回送）
+- `SendIMEActivated()` / `SendIMEDeactivated()` - IME state notifications（IMEActivated 已改 async；同上）
 - `SendModeNotify()` - Notify mode change (TSF local toggle, async)
 - `SendToggleMode()` - Toggle mode request from UI (sync)
 - `SendCompositionTerminated()` - Notify composition unexpectedly terminated
@@ -117,6 +117,7 @@ C++ implementation files for the TSF DLL。所有文件编译链接进唯一目�
 - `PostUpdateFullStatus()` - Thread-safe status update via WM_UPDATE_STATUS
 - `PostCommitText()` - Thread-safe commit via WM_COMMIT_TEXT
 - `PostClearComposition()` - Thread-safe clear composition via WM_CLEAR_COMPOSITION
+- `PostActivationStatus()` - Thread-safe activation status delivery via WM_ACTIVATION_STATUS (IMEActivated/FocusGained 异步化后由 AsyncReader 调用，TSF 线程 handler 触发 `CTextService::ApplyActivationStatusResponse`)
 
 ### CaretEditSession.cpp
 - `CCaretEditSession::DoEditSession()` - TSF edit session callback

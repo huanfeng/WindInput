@@ -191,6 +191,13 @@ public:
     // Callback type for state push notifications
     using StatePushCallback = std::function<void(const ServiceResponse&)>;
 
+    // Callback type for activation status push notifications (CMD_ACTIVATION_STATUS_PUSH).
+    // 触发时机：Go 端 HandleIMEActivated / HandleFocusGained 完成后通过 push pipe 推送的
+    // 完整 activation 状态回包（含 hotkeys + hostRenderAvail + iconLabel）。
+    // 回调在 AsyncReader 线程上调用，TextService 据此 Post 到 TSF 线程做 _SyncStateFromResponse
+    // + _EnsureHostRenderSetup（等价于原同步 ReceiveResponse → _DoFullStateSync 路径）。
+    using ActivationPushCallback = std::function<void(const ServiceResponse&)>;
+
     // Callback type for commit text from Go (mouse click on candidate)
     using CommitTextCallback = std::function<void(const std::wstring&)>;
 
@@ -208,6 +215,9 @@ public:
 
     // Set callback for receiving state push from Go
     void SetStatePushCallback(StatePushCallback callback);
+
+    // Set callback for receiving activation status push from Go
+    void SetActivationPushCallback(ActivationPushCallback callback);
 
     // Set callback for receiving commit text from Go (mouse click on candidate)
     void SetCommitTextCallback(CommitTextCallback callback);
@@ -317,6 +327,7 @@ private:
     HANDLE _hStopEvent = NULL;           // Event to signal thread to stop
     HANDLE _hReadPipe = INVALID_HANDLE_VALUE;  // Separate pipe for async reading
     StatePushCallback _statePushCallback;
+    ActivationPushCallback _activationPushCallback;
     CommitTextCallback _commitTextCallback;
     ClearCompositionCallback _clearCompositionCallback;
     UpdateCompositionCallback _updateCompositionCallback;

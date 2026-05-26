@@ -1801,28 +1801,17 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             }
             _needsFocusRecovery = FALSE;
         }
-        // Send focus_gained to service and receive response synchronously.
-        // This ensures state is properly synced before user starts typing.
-        // Note: SendFocusGained does lazy connect internally, so this also
-        // handles the case where the service started after TSF was loaded.
+        // 异步化：SendFocusGained 是 fire-and-forget。Go 端立即回 Ack 解除本调用阻塞,
+        // HandleFocusGained 完成后通过 push pipe 推 CMD_ACTIVATION_STATUS_PUSH,
+        // AsyncReader → WM_ACTIVATION_STATUS → ApplyActivationStatusResponse 完成同步。
+        // Lazy connect: 服务在 TSF 加载之后才启动也能覆盖（SendFocusGained 内部已处理）。
         else if (_pIPCClient != nullptr)
         {
             if (_pIPCClient->SendFocusGained(caretX, caretY, caretHeight))
             {
-                ServiceResponse response;
-                if (_pIPCClient->ReceiveResponse(response))
-                {
-                    BOOL needsStateSync = _pIPCClient->NeedsStateSync();
-                    WIND_LOG_DEBUG_FMT(L"FocusGained response received focusSession=%llu", _focusSessionId);
-                    _SyncStateFromResponse(response);
-                    _EnsureHostRenderSetup(response, needsStateSync);
-                    _needsFocusRecovery = FALSE;
-                    _pIPCClient->ClearNeedsSyncFlag();
-                }
-                else
-                {
-                    WIND_LOG_WARN_FMT(L"FocusGained response missing focusSession=%llu", _focusSessionId);
-                }
+                WIND_LOG_DEBUG_FMT(L"FocusGained sent (async) focusSession=%llu", _focusSessionId);
+                _needsFocusRecovery = FALSE;
+                _pIPCClient->ClearNeedsSyncFlag();
             }
             else
             {
@@ -2567,34 +2556,44 @@ void CTextService::_DoFullStateSync()
         return;
     }
 
-    WIND_LOG_INFO(L"Performing full state sync with Go service\n");
+    // 异步化（Go 端 server.go::handleClient 走"先 Ack 后处理"）：本调用仅发 fire-and-forget
+    // CMD_IME_ACTIVATED。Go 端收到立即回 Ack 解除本同步调用，HandleIMEActivated 在 Go
+    // 端的 handler goroutine 中完成后通过 push pipe 推 CMD_ACTIVATION_STATUS_PUSH，
+    // AsyncReader 线程上的回调 PostMessage 到 TSF 线程触发 ApplyActivationStatusResponse,
+    // 完成 _SyncStateFromResponse + _EnsureHostRenderSetup 的全套状态同步动作。
+    //
+    // 这条路径消除了原同步 ReceiveResponse 在宿主 UI 线程上的 1500ms 阻塞窗口——
+    // explorer.exe 等 shell 宿主进程不再因任何 Go 端 handler 内的跨进程调用形成环形等待。
+    WIND_LOG_INFO(L"Sending IMEActivated (async); state will arrive via CMD_ACTIVATION_STATUS_PUSH\n");
 
-    if (_pIPCClient->SendIMEActivated())
-    {
-        ServiceResponse response;
-        if (_pIPCClient->ReceiveResponse(response))
-        {
-            _SyncStateFromResponse(response);
-            _EnsureHostRenderSetup(response, TRUE);
-        }
-    }
-    else if (_pIPCClient->Connect() && _pIPCClient->SendIMEActivated())
+    if (!_pIPCClient->SendIMEActivated())
     {
         // Stale pipe: write failed and Disconnect() was called; retry after fresh connect.
-        ServiceResponse response;
-        if (_pIPCClient->ReceiveResponse(response))
+        if (_pIPCClient->Connect())
         {
-            _SyncStateFromResponse(response);
-            _EnsureHostRenderSetup(response, TRUE);
+            _pIPCClient->SendIMEActivated();
+        }
+        else
+        {
+            WIND_LOG_WARN(L"_DoFullStateSync: SendIMEActivated failed, toolbar may not show until next focus event\n");
         }
     }
-    else
-    {
-        WIND_LOG_WARN(L"_DoFullStateSync: SendIMEActivated failed, toolbar may not show\n");
-    }
 
+    // 注：清除 _needsStateSync / _needsFocusRecovery 提前到此处，让后续 KeyEventSink 路径
+    // 不再触发重复 state sync。即便 push 暂时未到，下一次焦点切换会重新拉起 activation 流程。
     _pIPCClient->ClearNeedsSyncFlag();
     _needsFocusRecovery = FALSE;
+}
+
+// ApplyActivationStatusResponse 在 TSF 线程上把 push pipe 接收到的 activation status 落地。
+// 等价于原同步路径 ReceiveResponse → _SyncStateFromResponse + _EnsureHostRenderSetup。
+// 调用点：CLangBarItemButton::_MsgWndProc 处理 WM_ACTIVATION_STATUS 时。
+void CTextService::ApplyActivationStatusResponse(const ServiceResponse& response)
+{
+    _SyncStateFromResponse(response);
+    // 与原 _DoFullStateSync 一致使用 forceRefresh=TRUE：activation 是新建/重建状态机的时刻,
+    // 需要主动 (re)setup HostRender, 而不是惰性等下次窗口变化触发。
+    _EnsureHostRenderSetup(response, TRUE);
 }
 
 void CTextService::TryRecoverFocusState()
@@ -2623,24 +2622,15 @@ void CTextService::TryRecoverFocusState()
     WIND_LOG_INFO_FMT(L"Attempting deferred focus recovery focusSession=%llu x=%ld y=%ld h=%ld",
         _focusSessionId, caretX, caretY, caretHeight);
 
+    // 异步化：SendFocusGained 现在是 fire-and-forget。状态由 push pipe 经
+    // CMD_ACTIVATION_STATUS_PUSH 异步送达，AsyncReader 线程的回调走 PostMessage
+    // 到 TSF 线程的 WM_ACTIVATION_STATUS, 最终触发 ApplyActivationStatusResponse。
     if (_pIPCClient->SendFocusGained((int)caretX, (int)caretY, (int)caretHeight))
     {
-        ServiceResponse response;
-        if (_pIPCClient->ReceiveResponse(response))
-        {
-            BOOL needsStateSync = _pIPCClient->NeedsStateSync();
-            _SyncStateFromResponse(response);
-            _EnsureHostRenderSetup(response, needsStateSync);
-            _needsFocusRecovery = FALSE;
-            _pIPCClient->ClearNeedsSyncFlag();
-            SendCaretPositionUpdate();
-            WIND_LOG_INFO(L"Deferred focus recovery succeeded\n");
-        }
-        else
-        {
-            WIND_LOG_WARN_FMT(L"Deferred focus recovery response missing focusSession=%llu", _focusSessionId);
-            _needsFocusRecovery = FALSE;
-        }
+        _needsFocusRecovery = FALSE;
+        _pIPCClient->ClearNeedsSyncFlag();
+        SendCaretPositionUpdate();
+        WIND_LOG_INFO(L"Deferred focus recovery sent (async), state will arrive via push\n");
     }
     else
     {
@@ -2661,8 +2651,19 @@ BOOL CTextService::_InitIPCClient()
         WIND_LOG_WARN(L"Failed to connect to Go Service, will retry later\n");
     }
 
-    // Set up state push callback
+    // Set up activation status push callback (CMD_ACTIVATION_STATUS_PUSH)
+    // 触发链：Go HandleIMEActivated / HandleFocusGained 异步完成 → push pipe → 本回调。
+    // 必须 Post 到 TSF 线程：_SyncStateFromResponse / _EnsureHostRenderSetup 会触碰 TSF
+    // COM 对象（compartment、LangBar 等），它们都是 STA-bound。
     CTextService* pThis = this;
+    _pIPCClient->SetActivationPushCallback([pThis](const ServiceResponse& response) {
+        if (pThis->_pLangBarItemButton != nullptr)
+        {
+            pThis->_pLangBarItemButton->PostActivationStatus(response);
+        }
+    });
+
+    // Set up state push callback
     _pIPCClient->SetStatePushCallback([pThis](const ServiceResponse& response) {
         // This callback is called from the async reader thread
         // We need to update our state and notify the language bar

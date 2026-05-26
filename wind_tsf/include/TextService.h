@@ -357,6 +357,12 @@ public:
     void _DoFullStateSync();
     void TryRecoverFocusState();
 
+    // ApplyActivationStatusResponse 应用一份从 push pipe 接收到的 activation status,
+    // 等价于原同步路径 (_DoFullStateSync / TryRecoverFocusState) 收到 ReceiveResponse 后
+    // 调 _SyncStateFromResponse + _EnsureHostRenderSetup 的组合动作。
+    // 由 CLangBarItemButton::_MsgWndProc 在 WM_ACTIVATION_STATUS 上调用, 保证在 TSF 线程。
+    void ApplyActivationStatusResponse(const ServiceResponse& response);
+
     // Get display attribute GUID atom for composition
     TfGuidAtom GetDisplayAttributeInputAtom() { return _gaDisplayAttributeInput; }
 };
