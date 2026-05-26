@@ -202,10 +202,13 @@ func (c *Coordinator) handleAlphaKey(key string) *bridge.KeyEventResult {
 	//   - SkipCaretPending=true：应用已标记为光标稳定，无 reflow 漂移
 	//   - 非首字符（composition 已存在）：坐标已稳定，无需等待
 	skipPending := c.activeCompatRule != nil && c.activeCompatRule.SkipCaretPending
+	c.markKeyPhase("post_update")
 	if wasComposingEmpty && !skipPending && (!c.caretValid || !c.compositionStartValid) {
 		c.armPendingFirstShow()
+		c.markKeyPhase("arm_pending")
 	} else {
 		c.showUI()
+		c.markKeyPhase("show_ui")
 	}
 	showElapsed := time.Since(showStart)
 

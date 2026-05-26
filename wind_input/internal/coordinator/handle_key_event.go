@@ -61,6 +61,11 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		c.logger.Warn("coordinator.mu wait", "caller", "HandleKeyEvent", "duration", lockTime)
 	}
 
+	// phaseTimer: 排查 KeyEvent 慢请求时定位耗时 phase。
+	// HandleKeyEvent 在多分支中 mark 关键边界, 子函数 (updateCandidates / expandCandidates 等)
+	// 通过 c.markKeyPhase 暗道贡献自己的 phase。阈值 20ms 与 bridge slowRequestThreshold 一致。
+	c.keyPhaseTimer = newPhaseTimer()
+
 	// 重置统计标记，用于 fallback 采集
 	c.statRecorded = false
 	defer func() {
@@ -69,6 +74,22 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 			(result.Type == bridge.ResponseTypeInsertText || result.Type == bridge.ResponseTypeInsertTextWithCursor) {
 			c.recordCommitFallback(result.Text)
 		}
+		// dump phase breakdown if slow; rich context lets us correlate with input shape。
+		c.markKeyPhase("teardown")
+		resultType := ""
+		if result != nil {
+			resultType = string(result.Type)
+		}
+		c.keyPhaseTimer.dumpIfSlow(20*time.Millisecond, c.logger, "Slow KeyEvent phases",
+			"keyCode", data.KeyCode,
+			"modifiers", data.Modifiers,
+			"lockWait", lockTime,
+			"chineseMode", c.chineseMode,
+			"bufferLen", len(c.inputBuffer),
+			"candidates", len(c.candidates),
+			"resultType", resultType,
+		)
+		c.keyPhaseTimer = nil
 		c.mu.Unlock()
 	}()
 

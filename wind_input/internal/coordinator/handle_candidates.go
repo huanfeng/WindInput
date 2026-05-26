@@ -405,7 +405,18 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 	c.candidateInput = c.inputBuffer
 
 	// 使用扩展转换获取更多信息
+	c.markKeyPhase("pre_convert")
 	result := c.engineMgr.ConvertEx(c.inputBuffer, initialLimit)
+	c.markKeyPhase("convert")
+	if result != nil && result.Timing != nil {
+		// engine 内部各阶段补充到 phase breakdown, 定位 convert 内部瓶颈
+		c.markKeyPhaseDuration("eng_exact", result.Timing.Exact)
+		c.markKeyPhaseDuration("eng_prefix", result.Timing.Prefix)
+		c.markKeyPhaseDuration("eng_weight", result.Timing.Weight)
+		c.markKeyPhaseDuration("eng_sort", result.Timing.Sort)
+		c.markKeyPhaseDuration("eng_shadow", result.Timing.Shadow)
+		c.markKeyPhaseDuration("eng_filter", result.Timing.Filter)
+	}
 
 	// 分级加载：判断是否还有更多候选未加载
 	c.hasMoreCandidates = initialLimit > 0 && len(result.Candidates) >= initialLimit
@@ -440,6 +451,7 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 	}
 
 	result.Candidates = c.finalizeMixedCandidates(result.Candidates, dictMgr)
+	c.markKeyPhase("finalize")
 
 	c.candidates = make([]ui.Candidate, len(result.Candidates))
 	for i, cand := range result.Candidates {
@@ -718,7 +730,14 @@ func (c *Coordinator) expandCandidates() {
 		return
 	}
 
+	c.markKeyPhase("pre_convert_expand")
 	result := c.engineMgr.ConvertEx(c.inputBuffer, newLimit)
+	c.markKeyPhase("convert_expand")
+	if result != nil && result.Timing != nil {
+		c.markKeyPhaseDuration("eng_exact_x", result.Timing.Exact)
+		c.markKeyPhaseDuration("eng_prefix_x", result.Timing.Prefix)
+		c.markKeyPhaseDuration("eng_sort_x", result.Timing.Sort)
+	}
 	if result == nil || len(result.Candidates) <= len(c.candidates) {
 		c.hasMoreCandidates = false
 		return
@@ -735,6 +754,7 @@ func (c *Coordinator) expandCandidates() {
 
 	// 走与 updateCandidatesEx 相同的 finalize 序列, 保证分页扩展后 nav 位置一致。
 	result.Candidates = c.finalizeMixedCandidates(result.Candidates, dictMgr)
+	c.markKeyPhase("finalize_expand")
 
 	c.candidates = make([]ui.Candidate, len(result.Candidates))
 	for i, cand := range result.Candidates {
@@ -905,6 +925,7 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 			learnText = originalText
 		}
 		c.engineMgr.OnCandidateSelected(learnCode, learnText, cand.Source)
+		c.markKeyPhase("learn_callback")
 	}
 
 	// ── 输入历史记录（用于加词推荐 / z 键重复上屏 / 快捷输入重复）──────────
@@ -948,8 +969,11 @@ func (c *Coordinator) doSelectCandidate(index int) *bridge.KeyEventResult {
 	}
 
 	c.recordCommit(finalText, len(c.inputBuffer), index%c.candidatesPerPage, store.SourceCandidate)
+	c.markKeyPhase("record_commit")
 	c.clearState()
+	c.markKeyPhase("clear_state")
 	c.hideUI()
+	c.markKeyPhase("hide_ui")
 
 	return &bridge.KeyEventResult{
 		Type: bridge.ResponseTypeInsertText,

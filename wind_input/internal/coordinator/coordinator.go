@@ -280,6 +280,11 @@ type Coordinator struct {
 	statCollector *store.StatCollector
 	statRecorded  bool // 当前按键处理中是否已记录统计
 
+	// keyPhaseTimer 在 HandleKeyEvent 单次调用范围内累积各 phase 耗时, defer 时若超阈
+	// 输出 breakdown WARN。nil 在 HandleKeyEvent 之外, markKeyPhase 调用静默忽略。
+	// 持有 c.mu 期间访问, 不需要额外锁。
+	keyPhaseTimer *phaseTimer
+
 	// 事件通知器（旁路 RPC 路径变更时用于广播给设置端订阅者，nil-safe）
 	eventNotifier EventNotifier
 
