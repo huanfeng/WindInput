@@ -1,3 +1,5 @@
+//go:build windows
+
 // Package bridge handles IPC communication with C++ TSF Bridge
 package bridge
 
@@ -14,7 +16,6 @@ import (
 
 	"github.com/Microsoft/go-winio"
 	"github.com/huanfeng/wind_input/internal/ipc"
-	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"golang.org/x/sys/windows"
 )
 
@@ -51,10 +52,8 @@ func getNamedPipeClientProcessId(handle windows.Handle) (uint32, error) {
 	return processID, nil
 }
 
-var (
-	BridgePipeName = `\\.\pipe\wind_input` + buildvariant.Suffix()
-	PushPipeName   = `\\.\pipe\wind_input` + buildvariant.Suffix() + `_push`
-)
+// BridgePipeName / PushPipeName 已迁至 endpoint_windows.go (Win) /
+// endpoint_darwin.go (darwin), 让两个平台用同一变量名指向不同形态的端点。
 
 const (
 	// Buffer size for named pipe (64KB like Weasel)
