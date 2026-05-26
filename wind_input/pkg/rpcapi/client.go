@@ -7,8 +7,6 @@ import (
 	"net"
 	"sync/atomic"
 	"time"
-
-	"github.com/Microsoft/go-winio"
 )
 
 var globalID atomic.Uint64
@@ -36,11 +34,13 @@ func NewClientWithPipe(pipeName string) *Client {
 	}
 }
 
-// connect 建立管道连接
+// connect 建立 IPC 端点连接。
+// Win 走 winio.DialPipe (Named Pipe); darwin 走 net.Dial("unix", ...) (UDS)。
+// 实际实现见 endpoint_{windows,darwin}.go 的 dialEndpoint。
 func (c *Client) connect() (net.Conn, error) {
-	conn, err := winio.DialPipe(c.pipeName, &c.timeout)
+	conn, err := dialEndpoint(c.pipeName, c.timeout)
 	if err != nil {
-		return nil, fmt.Errorf("connect to rpc pipe: %w", err)
+		return nil, fmt.Errorf("connect to rpc endpoint: %w", err)
 	}
 	return conn, nil
 }
@@ -665,9 +665,9 @@ func (c *Client) SystemReset() error {
 // SubscribeEvents connects to the event pipe and calls handler for each event.
 // Blocks until context is cancelled or connection error.
 func (c *Client) SubscribeEvents(ctx context.Context, handler func(EventMessage)) error {
-	conn, err := winio.DialPipe(RPCEventPipeName, &c.timeout)
+	conn, err := dialEndpoint(RPCEventPipeName, c.timeout)
 	if err != nil {
-		return fmt.Errorf("connect to event pipe: %w", err)
+		return fmt.Errorf("connect to event endpoint: %w", err)
 	}
 
 	// Close connection when context is done

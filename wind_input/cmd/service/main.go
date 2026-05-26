@@ -8,11 +8,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"syscall"
-	"time"
-	"unsafe"
-
-	"golang.org/x/sys/windows"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
 	"github.com/huanfeng/wind_input/internal/coordinator"
@@ -28,7 +23,9 @@ import (
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 )
 
-var mutexName = "Global\\WindInput" + buildvariant.Suffix() + "IMEService"
+// mutexName / showErrorMessageBox / setDPIAwareness / checkSingleton /
+// waitForPreviousExit / isPipeAlreadyExists 已迁至 main_{windows,darwin}.go,
+// 接口签名跨平台对齐 (checkSingleton 改为返回 release func() 而非平台特定句柄)。
 
 // statusAdapter 将 coordinator 和 dictManager 适配为 rpc.StatusProvider 接口
 type statusAdapter struct {
@@ -121,14 +118,11 @@ func (a *batchEncoderAdapter) BatchEncode(schemaID string, words []string) []rpc
 	return items
 }
 
-// showErrorMessageBox 显示错误弹框（MB_ICONERROR）
-func showErrorMessageBox(message string) {
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	messageBox := user32.NewProc("MessageBoxW")
-	title, _ := windows.UTF16PtrFromString(buildvariant.DisplayName())
-	msg, _ := windows.UTF16PtrFromString(message)
-	messageBox.Call(0, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x10) // MB_ICONERROR
-}
+// showErrorMessageBox / setDPIAwareness / checkSingleton / waitForPreviousExit /
+// isPipeAlreadyExists 已迁至 main_{windows,darwin}.go。
+//
+// checkSingleton 签名跨平台对齐为 (release func(), ok bool), 让 main() 用
+// `defer release()` 释放平台特定资源 (Win mutex / darwin flock-on-pidfile)。
 
 // recoverPanic 捕获 goroutine 中未处理的 panic，将其写入日志后以非零码退出。
 // 用于替代默认行为（panic 信息仅输出到 stderr，当进程由 TSF DLL 启动时 stderr 通常被丢弃）。
@@ -140,109 +134,6 @@ func recoverPanic(logger *slog.Logger, component string) {
 			"stack", string(debug.Stack()))
 		os.Exit(1)
 	}
-}
-
-// DPI awareness constants
-const (
-	PROCESS_DPI_UNAWARE           = 0
-	PROCESS_SYSTEM_DPI_AWARE      = 1
-	PROCESS_PER_MONITOR_DPI_AWARE = 2
-)
-
-// setDPIAwareness sets the process DPI awareness to prevent UI blur
-func setDPIAwareness() {
-	// Try Windows 8.1+ API first (shcore.dll)
-	shcore := syscall.NewLazyDLL("shcore.dll")
-	setProcessDpiAwareness := shcore.NewProc("SetProcessDpiAwareness")
-	if setProcessDpiAwareness.Find() == nil {
-		setProcessDpiAwareness.Call(uintptr(PROCESS_PER_MONITOR_DPI_AWARE))
-		return
-	}
-
-	// Fallback to Windows Vista+ API (user32.dll)
-	user32 := syscall.NewLazyDLL("user32.dll")
-	setProcessDPIAware := user32.NewProc("SetProcessDPIAware")
-	if setProcessDPIAware.Find() == nil {
-		setProcessDPIAware.Call()
-	}
-}
-
-func checkSingleton() (windows.Handle, bool) {
-	name, _ := windows.UTF16PtrFromString(mutexName)
-
-	// Try to create a named mutex
-	handle, err := windows.CreateMutex(nil, false, name)
-	if err != nil {
-		if err == windows.ERROR_ALREADY_EXISTS {
-			// Another instance is already running
-			if handle != 0 {
-				windows.CloseHandle(handle)
-			}
-			return 0, false
-		}
-	}
-
-	// Check if mutex already existed
-	if handle != 0 {
-		// Try to get ownership - if we can't, another instance has it
-		event, _ := windows.WaitForSingleObject(handle, 0)
-		if event == uint32(windows.WAIT_OBJECT_0) || event == uint32(windows.WAIT_ABANDONED) {
-			// We got the mutex
-			return handle, true
-		}
-		windows.CloseHandle(handle)
-		return 0, false
-	}
-
-	return 0, false
-}
-
-// waitForPreviousExit waits for the previous instance to fully exit (pipe and mutex released)
-// Used during restart to avoid "another instance already running" detection
-func waitForPreviousExit() {
-	const maxWait = 10 * time.Second
-	const pollInterval = 100 * time.Millisecond
-
-	deadline := time.Now().Add(maxWait)
-	for time.Now().Before(deadline) {
-		if !isPipeAlreadyExists() {
-			// Pipe is gone, previous instance has exited
-			// Wait a bit more for mutex to be released
-			time.Sleep(pollInterval)
-			return
-		}
-		time.Sleep(pollInterval)
-	}
-	// Timeout: proceed anyway, singleton check will handle it
-}
-
-// Also check if our pipe already exists (another way to detect running instance)
-func isPipeAlreadyExists() bool {
-	pipePath, _ := windows.UTF16PtrFromString(bridge.BridgePipeName)
-
-	handle, err := windows.CreateFile(
-		pipePath,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		0,
-		nil,
-		windows.OPEN_EXISTING,
-		0,
-		0,
-	)
-
-	if err == nil {
-		// Pipe exists and we connected, another instance is running
-		windows.CloseHandle(handle)
-		return true
-	}
-
-	// ERROR_FILE_NOT_FOUND means pipe doesn't exist (no server running)
-	// ERROR_PIPE_BUSY means pipe exists but busy (server running)
-	if err == windows.ERROR_PIPE_BUSY {
-		return true
-	}
-
-	return false
 }
 
 func main() {
@@ -308,12 +199,12 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Create singleton mutex
-	mutexHandle, ok := checkSingleton()
+	// Create singleton mutex / pidfile lock (平台特定)
+	releaseSingleton, ok := checkSingleton()
 	if !ok {
 		os.Exit(0)
 	}
-	defer windows.CloseHandle(mutexHandle)
+	defer releaseSingleton()
 
 	// 初始化日志系统
 	logger := setupLogger(cfg.Advanced.LogLevel)

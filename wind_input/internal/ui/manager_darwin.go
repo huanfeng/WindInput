@@ -527,8 +527,15 @@ func (m *Manager) SetCandidateCallbacks(cb *CandidateCallback) {
 // 独立函数 stub
 // ============================================================================
 
-// StatusWindow 占位类型 (darwin 不实例化此结构, GetStatusWindow 返回 nil)
+// StatusWindow 占位类型 (darwin 不实例化此结构, GetStatusWindow 返回 nil)。
+// 保留几个 coordinator 调用面要求的方法 stub, 防止 nil pointer 时 darwin 编译失败。
 type StatusWindow struct{}
+
+// CancelPendingHide darwin 上空实现 (没有 host render hide 定时器)。
+func (w *StatusWindow) CancelPendingHide() {}
+
+// SetMenuCallback darwin 上空实现 (状态指示器菜单由 IMKit `.app` 内自绘 NSMenu)。
+func (w *StatusWindow) SetMenuCallback(cb func(action StatusMenuAction)) {}
 
 func GetCapsLockState() bool   { return false }
 func GetSystemDPI() int        { return 96 }

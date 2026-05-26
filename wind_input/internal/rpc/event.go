@@ -6,7 +6,6 @@ import (
 	"net"
 	"sync"
 
-	"github.com/Microsoft/go-winio"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
 )
 
@@ -88,15 +87,11 @@ func NewEventPipeServer(broadcaster *EventBroadcaster, logger *slog.Logger) *Eve
 }
 
 // Start begins listening on the event pipe.
+// 实际 listen 实现见 listen_{windows,darwin}.go。
 func (e *EventPipeServer) Start() error {
-	pipeConfig := &winio.PipeConfig{
-		SecurityDescriptor: "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)",
-		InputBufferSize:    4096,
-		OutputBufferSize:   65536,
-	}
-	listener, err := winio.ListenPipe(rpcapi.RPCEventPipeName, pipeConfig)
+	listener, err := listenRPCEndpoint(rpcapi.RPCEventPipeName, 4096, 65536)
 	if err != nil {
-		return fmt.Errorf("listen event pipe: %w", err)
+		return fmt.Errorf("listen event endpoint: %w", err)
 	}
 	e.listener = listener
 	e.logger.Info("Event pipe started", "pipe", rpcapi.RPCEventPipeName)

@@ -2,15 +2,10 @@
 // 供服务端和客户端（Wails 设置端）共用
 package rpcapi
 
-import "github.com/huanfeng/wind_input/pkg/buildvariant"
-
-// RPC 管道名称
-var RPCPipeName = `\\.\pipe\wind_input` + buildvariant.Suffix() + `_rpc`
+// RPCPipeName / RPCEventPipeName 已迁至 endpoint_windows.go / endpoint_darwin.go,
+// 让两个平台用同一变量名指向不同形态的端点 (Win Named Pipe / darwin Unix Socket)。
 
 // ── Event 类型 ──
-
-// RPCEventPipeName 事件推送管道名称
-var RPCEventPipeName = `\\.\pipe\wind_input` + buildvariant.Suffix() + `_events`
 
 // EventType 数据变化事件的类型
 type EventType string

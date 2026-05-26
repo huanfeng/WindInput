@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Microsoft/go-winio"
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/store"
 	"github.com/huanfeng/wind_input/pkg/config"
@@ -281,17 +280,12 @@ func (s *Server) Start() error {
 	RegisterMethod(s.router, "Config.ResetSchemaOverride", configSvc.ResetSchemaOverride)
 	RegisterMethod(s.router, "Config.SetActiveSchema", configSvc.SetActiveSchema)
 
-	// 创建命名管道监听器
-	// SDDL: 允许 SYSTEM(SY)、管理员(BA)和所有已认证用户(AU)完全访问
-	// 解决提升权限进程创建的管道默认 DACL 阻止非提升进程连接的问题
-	pipeConfig := &winio.PipeConfig{
-		SecurityDescriptor: "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)",
-		InputBufferSize:    65536,
-		OutputBufferSize:   65536,
-	}
-	listener, err := winio.ListenPipe(rpcapi.RPCPipeName, pipeConfig)
+	// 创建 RPC 端点监听器, 实际 listen 实现见 listen_{windows,darwin}.go。
+	// Windows: Named Pipe (SDDL 允许 SY/BA/AU 完全访问, 64KB IO buffer);
+	// darwin:  Unix Domain Socket (~/Library/Application Support/WindInput.../rpc.sock)。
+	listener, err := listenRPCEndpoint(rpcapi.RPCPipeName, 65536, 65536)
 	if err != nil {
-		return fmt.Errorf("listen rpc pipe: %w", err)
+		return fmt.Errorf("listen rpc endpoint: %w", err)
 	}
 	s.listener = listener
 

@@ -1,3 +1,5 @@
+//go:build windows
+
 // Package clipboard provides Windows clipboard read/write operations.
 package clipboard
 

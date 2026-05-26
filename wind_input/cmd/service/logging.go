@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/sys/windows"
-
 	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
@@ -236,10 +234,9 @@ var _ slog.Handler = discardHandler{}
 
 // redirectStderrToCrashLog 将 stderr（fd 2）重定向到 logs 目录下的 crash.log。
 // 必须在 main() 最开始调用，以便捕获 Go runtime fatal（如 OOM）写到 stderr 的完整 stack trace。
-// Go runtime 的 fatal 输出直接写底层 Windows STD_ERROR_HANDLE，不经过 os.Stderr 变量，
-// 因此需同时调用 windows.SetStdHandle 和更新 os.Stderr。
+// Go runtime 的 fatal 输出直接写底层 OS std_error handle，不经过 os.Stderr 变量，
+// 因此需调用 redirectStderrFD 把 fd 重新指向 f, 平台分支实现 (Win: SetStdHandle; darwin: dup2)。
 // 正常运行时不向文件写入任何内容；发生崩溃时由 runtime 直接写入原始信息。
-// 文件以 O_APPEND 打开，不持有排他锁，外部工具可并发读取。
 func redirectStderrToCrashLog() {
 	logDir, err := config.GetLogsDir()
 	if err != nil {
@@ -253,7 +250,7 @@ func redirectStderrToCrashLog() {
 		return
 	}
 
-	windows.SetStdHandle(windows.STD_ERROR_HANDLE, windows.Handle(f.Fd()))
+	redirectStderrFD(f) // 平台分支: logging_{windows,darwin}.go
 	os.Stderr = f
 }
 
