@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/dict"
@@ -90,6 +91,11 @@ type Manager struct {
 	//   - 事件顺序 = send 顺序 = 按键顺序，不再依赖 goroutine 调度；
 	//   - 词库 I/O 完全发生在 worker，不阻塞按键。
 	learningCh chan learningEvent
+
+	// warmedSchemas 记录已经做过 a-z 预热的 schema, 避免 toggle (A→B→A) 时重复预热。
+	// 仅记录"本 Manager 生命周期内 OS 页缓存是否还热"的代理信号; 长时间不用后 OS
+	// 自然 evict 不在这里追踪 (用户切回时下次按键自然会重新冷加载, 是少数派场景)。
+	warmedSchemas sync.Map
 }
 
 // NewManager 创建引擎管理器
@@ -265,6 +271,7 @@ func (m *Manager) SwitchSchema(schemaID string) error {
 		m.applySwitchLocked(schemaID)
 		m.mu.Unlock()
 		m.logger.Info("切换到已加载方案", "schemaID", schemaID)
+		m.warmupSchemaAsync(schemaID)
 		return nil
 	}
 	m.mu.Unlock()
@@ -276,13 +283,48 @@ func (m *Manager) SwitchSchema(schemaID string) error {
 
 	// Phase 3: 提交切换
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if _, ok := m.engines[schemaID]; !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("方案 %q 构建后未注册", schemaID)
 	}
 	m.applySwitchLocked(schemaID)
+	m.mu.Unlock()
 	m.logger.Info("加载并切换方案", "schemaID", schemaID)
+	m.warmupSchemaAsync(schemaID)
 	return nil
+}
+
+// warmupSchemaAsync 在后台对该 schema 的引擎跑 a-z 单字符查询, 预加载 mmap 页 +
+// 懒构建的索引。每个 schema 只在 Manager 生命周期内预热一次 (warmedSchemas
+// LoadOrStore)。
+//
+// 解决的实际问题: 用户报告"切到新方案后第一次按 D 卡 ~1 秒"。诊断数据显示这是
+// codetable Phase 1 Exact 匹配里 compositeDict.Search 首次访问系统码表 layer 时
+// 加载 mmap 页 + 懒初始化反向索引引起的, 后续同字母按键稳定在 5-25ms。
+// 26 个单字母查询基本覆盖所有 single-letter prefix 桶, 后台跑完后用户按任意首字母
+// 都是 warm 状态。
+//
+// 后台 goroutine: 不阻塞 SwitchSchema 返回 (schema 切换 UI 不会因预热卡顿);
+// 并发安全: engine.Convert 走 composite.RLock, 与用户按键 (也是 RLock) 不串行。
+// 预热查询的内容不进 candidate / learning 路径, 副作用仅限于"OS 页缓存被加热"。
+func (m *Manager) warmupSchemaAsync(schemaID string) {
+	if _, loaded := m.warmedSchemas.LoadOrStore(schemaID, struct{}{}); loaded {
+		return
+	}
+	m.mu.RLock()
+	eng := m.engines[schemaID]
+	m.mu.RUnlock()
+	if eng == nil {
+		return
+	}
+	go func() {
+		start := time.Now()
+		for c := 'a'; c <= 'z'; c++ {
+			// limit=1: 走完查询路径 + 加载 mmap 即可, 不需要展开候选。
+			_, _ = eng.Convert(string(c), 1)
+		}
+		m.logger.Info("Schema warmup completed", "schemaID", schemaID, "elapsed", time.Since(start))
+	}()
 }
 
 // applySwitchLocked 执行系统词库层切换并更新 currentID/currentEngine。
@@ -461,6 +503,8 @@ func (m *Manager) ActivateTempSchema(schemaID string) error {
 	m.currentID = schemaID
 	m.currentEngine = m.engines[schemaID]
 	m.logger.Info("临时激活方案", "schemaID", schemaID, "saved", m.savedSchemaID)
+	// 临时方案 (典型: 码表 → 临时拼音) 也走预热, 避免首次按键卡顿。
+	go m.warmupSchemaAsync(schemaID)
 	return nil
 }
 
