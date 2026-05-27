@@ -195,39 +195,81 @@ func (m *Manager) UpdatePinyinOptions(pinyinCfg *config.PinyinConfig) {
 	m.logger.Info("更新拼音选项", "showCodeHint", pinyinCfg.ShowCodeHint, "fuzzyEnabled", pinyinCfg.Fuzzy.Enabled)
 }
 
-// UpdateShuangpinLayout 热更新双拼方案布局
-// layoutID: 方案 ID（如 "xiaohe", "ziranma", "mspy" 等），空字符串表示切回全拼
-func (m *Manager) UpdateShuangpinLayout(layoutID string) {
+// UpdateShuangpinLayout 热更新指定方案的双拼布局。
+//
+// 仅作用于 schemaID 对应的引擎，不再"通杀所有 engine"。这是修复
+// "全拼/双拼方案 reload 时把另一方案的 spConverter 错误覆盖"问题的关键：
+//   - 全拼方案 reload (layoutID="") 不应当清空双拼方案缓存里的 spConverter；
+//   - 双拼方案 reload (layoutID!=) 也不应给全拼方案的 engine 套上 converter。
+//
+// schemaID: 被 reload 的方案 ID（拼音类或混输类）。
+// layoutID: 双拼布局 ID（如 "xiaohe"），空串表示该方案不是双拼。
+//
+// 若 schema 实际类型与 layoutID 不匹配（例如 spec.Scheme=quanpin 但传 layoutID=xiaohe），
+// 以 schema 声明的 Scheme 为准，避免错误状态被写入。
+func (m *Manager) UpdateShuangpinLayout(schemaID, layoutID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, eng := range m.engines {
-		var pe *pinyin.Engine
-		switch e := eng.(type) {
-		case *pinyin.Engine:
-			pe = e
-		case *mixed.Engine:
-			pe = e.GetPinyinEngine()
-		}
-		if pe == nil {
-			continue
-		}
-		if layoutID == "" {
-			// 切回全拼
-			pe.SetShuangpinConverter(nil)
-		} else {
-			scheme := shuangpin.Get(layoutID)
-			if scheme != nil {
-				pe.SetShuangpinConverter(shuangpin.NewConverter(scheme))
+	eng, ok := m.engines[schemaID]
+	if !ok {
+		return
+	}
+
+	var pe *pinyin.Engine
+	switch e := eng.(type) {
+	case *pinyin.Engine:
+		pe = e
+	case *mixed.Engine:
+		pe = e.GetPinyinEngine()
+	}
+	if pe == nil {
+		return
+	}
+
+	// 以 schema 的 Engine.Pinyin.Scheme 为最终权威：避免上层传入与配置不一致的状态。
+	wantShuangpin := layoutID != ""
+	if m.schemaManager != nil {
+		if pinyinSpec := resolvePinyinSpecLocked(m.schemaManager, schemaID); pinyinSpec != nil {
+			wantShuangpin = pinyinSpec.Scheme == schema.PinyinSchemeShuangpin
+			if wantShuangpin && pinyinSpec.Shuangpin != nil && layoutID == "" {
+				layoutID = pinyinSpec.Shuangpin.Layout
 			}
 		}
 	}
 
-	if layoutID == "" {
-		m.logger.Info("切换到全拼模式")
-	} else {
-		m.logger.Info("更新双拼方案", "layoutID", layoutID)
+	if !wantShuangpin {
+		pe.SetShuangpinConverter(nil)
+		m.logger.Info("切换到全拼模式", "schemaID", schemaID)
+		return
 	}
+
+	scheme := shuangpin.Get(layoutID)
+	if scheme == nil {
+		m.logger.Warn("未知的双拼方案，保持原状", "schemaID", schemaID, "layoutID", layoutID)
+		return
+	}
+	pe.SetShuangpinConverter(shuangpin.NewConverter(scheme))
+	m.logger.Info("更新双拼方案", "schemaID", schemaID, "layoutID", layoutID)
+}
+
+// resolvePinyinSpecLocked 解析 schemaID 对应的 PinyinSpec。
+// 拼音类方案直接读 Engine.Pinyin；混输方案回落到 SecondarySchema.Engine.Pinyin。
+// 调用方须持有 m.mu。
+func resolvePinyinSpecLocked(sm *schema.SchemaManager, schemaID string) *schema.PinyinSpec {
+	s := sm.GetSchema(schemaID)
+	if s == nil {
+		return nil
+	}
+	if s.Engine.Pinyin != nil {
+		return s.Engine.Pinyin
+	}
+	if s.Engine.Mixed != nil && s.Engine.Mixed.SecondarySchema != "" {
+		if sec := sm.GetSchema(s.Engine.Mixed.SecondarySchema); sec != nil {
+			return sec.Engine.Pinyin
+		}
+	}
+	return nil
 }
 
 // UpdateLearningConfig 热更新当前引擎的学习配置（调频 + 造词）

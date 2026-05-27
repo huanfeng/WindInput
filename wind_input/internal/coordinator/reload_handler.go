@@ -159,7 +159,7 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 
 	case schema.EngineTypePinyin:
 		if spec := s.Engine.Pinyin; spec != nil {
-			h.applyPinyinSpec(spec, false) // 纯拼音模式：简拼始终开启
+			h.applyPinyinSpec(activeID, spec, false) // 纯拼音模式：简拼始终开启
 		}
 
 	case schema.EngineTypeMixed:
@@ -176,9 +176,9 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 			skipAbbrev = false
 		}
 		if pinyinSpec != nil {
-			h.applyPinyinSpec(pinyinSpec, skipAbbrev)
+			h.applyPinyinSpec(activeID, pinyinSpec, skipAbbrev)
 		} else {
-			h.applyPinyinSpec(&schema.PinyinSpec{}, skipAbbrev)
+			h.applyPinyinSpec(activeID, &schema.PinyinSpec{}, skipAbbrev)
 		}
 		// 码表子引擎配置
 		if s.Engine.Mixed != nil && s.Engine.Mixed.PrimarySchema != "" {
@@ -208,8 +208,10 @@ func (h *ReloadHandler) reloadActiveSchemaConfig() {
 }
 
 // applyPinyinSpec 将 PinyinSpec 转换为 PinyinConfig 并更新引擎。
+// schemaID：被 reload 的方案 ID；双拼布局只会作用于此方案对应的引擎，
+// 避免误改其它已缓存的拼音/双拼方案 spConverter（双拼/全拼互相覆盖 BUG）。
 // skipAbbrev：混输模式专用，true 表示关闭简拼匹配；纯拼音模式传 false。
-func (h *ReloadHandler) applyPinyinSpec(spec *schema.PinyinSpec, skipAbbrev bool) {
+func (h *ReloadHandler) applyPinyinSpec(schemaID string, spec *schema.PinyinSpec, skipAbbrev bool) {
 	pinyinCfg := &config.PinyinConfig{
 		ShowCodeHint:    spec.ShowCodeHint,
 		UseSmartCompose: spec.UseSmartCompose,
@@ -242,5 +244,5 @@ func (h *ReloadHandler) applyPinyinSpec(spec *schema.PinyinSpec, skipAbbrev bool
 	if spec.Scheme == schema.PinyinSchemeShuangpin && spec.Shuangpin != nil {
 		layout = spec.Shuangpin.Layout
 	}
-	h.engineMgr.UpdateShuangpinLayout(layout)
+	h.engineMgr.UpdateShuangpinLayout(schemaID, layout)
 }
