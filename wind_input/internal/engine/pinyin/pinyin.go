@@ -129,11 +129,20 @@ func (e *Engine) SetConfig(config *Config) {
 	}
 }
 
-// SetFuzzyConfig 原子更新模糊拼音配置（线程安全，供热更新调用）
+// SetFuzzyConfig 原子更新模糊拼音配置（线程安全，供热更新调用）。
+// 同步把声母模糊（z/zh, c/ch, s/sh）推到双拼 Converter，让双拼层在键对
+// 无合法音节时也能用对偶声母补救（如 s+l → shuang）。
 func (e *Engine) SetFuzzyConfig(fc *FuzzyConfig) {
 	e.fuzzyPtr.Store(fc)
 	if e.config != nil {
 		e.config.Fuzzy = fc
+	}
+	if e.spConverter != nil {
+		if fc == nil {
+			e.spConverter.SetFuzzyInitials(false, false, false)
+		} else {
+			e.spConverter.SetFuzzyInitials(fc.ZhZ, fc.ChC, fc.ShS)
+		}
 	}
 }
 
@@ -317,9 +326,17 @@ func (e *Engine) AddCodeHintsForced(candidates []candidate.Candidate) {
 	}
 }
 
-// SetShuangpinConverter 设置双拼转换器（nil 表示全拼模式）
+// SetShuangpinConverter 设置双拼转换器（nil 表示全拼模式）。
+// 若引擎已有 fuzzy 配置，立即同步到新 converter，避免出现"先 SetFuzzyConfig
+// 再 SetShuangpinConverter"时新 converter 拿不到模糊声母开关。
 func (e *Engine) SetShuangpinConverter(conv *shuangpin.Converter) {
 	e.spConverter = conv
+	if conv == nil {
+		return
+	}
+	if fc := e.fuzzyPtr.Load(); fc != nil {
+		conv.SetFuzzyInitials(fc.ZhZ, fc.ChC, fc.ShS)
+	}
 }
 
 // GetShuangpinConverter 获取双拼转换器

@@ -40,6 +40,17 @@ type ConvertedSyllable struct {
 type Converter struct {
 	scheme       *Scheme
 	validPinyins map[string]bool // 合法拼音音节集合
+
+	// 声母模糊音开关：与全拼层 FuzzyConfig 的 ZhZ/ChC/ShS 对偶。
+	// 当原始声母键无法拼出合法音节（如小鹤 s+l → siang/suang 皆非法）时，
+	// 用模糊对偶声母补救（s→sh → shuang）。开启后双向有效：
+	//   - z 键也可解析为 zh 声母（zs+fuzzy → 命中 zhs* 音节）
+	//   - 小鹤 v 键（=zh）也可解析为 z 声母（vs+fuzzy → 命中 zs* 音节）
+	// 模糊变体始终并入候选末尾；优先级低于原始合法音节，因此对
+	// "原始合法" 输入（如 zi）无副作用——zhi 由全拼层 fuzzy 兜底命中。
+	fuzzyZS bool
+	fuzzyCC bool
+	fuzzySS bool
 }
 
 // NewConverter 创建双拼转换器
@@ -59,6 +70,47 @@ func (c *Converter) GetScheme() *Scheme {
 // SetScheme 切换方案
 func (c *Converter) SetScheme(scheme *Scheme) {
 	c.scheme = scheme
+}
+
+// SetFuzzyInitials 配置声母模糊音开关（双向）。
+// zs: z ↔ zh；cc: c ↔ ch；ss: s ↔ sh。
+// 由 pinyin.Engine.SetFuzzyConfig 同步过来，确保双拼层与全拼层一致。
+func (c *Converter) SetFuzzyInitials(zs, cc, ss bool) {
+	c.fuzzyZS = zs
+	c.fuzzyCC = cc
+	c.fuzzySS = ss
+}
+
+// fuzzyInitialPartners 返回 initial 在当前模糊音开关下的对偶变体（不含 initial 自身）。
+// 仅 z/zh、c/ch、s/sh 三对参与。
+func (c *Converter) fuzzyInitialPartners(initial string) []string {
+	switch initial {
+	case "z":
+		if c.fuzzyZS {
+			return []string{"zh"}
+		}
+	case "zh":
+		if c.fuzzyZS {
+			return []string{"z"}
+		}
+	case "c":
+		if c.fuzzyCC {
+			return []string{"ch"}
+		}
+	case "ch":
+		if c.fuzzyCC {
+			return []string{"c"}
+		}
+	case "s":
+		if c.fuzzySS {
+			return []string{"sh"}
+		}
+	case "sh":
+		if c.fuzzySS {
+			return []string{"s"}
+		}
+	}
+	return nil
 }
 
 // Convert 将双拼键序列转换为全拼
@@ -280,20 +332,25 @@ func (c *Converter) convertPair(key1, key2 byte) []string {
 	initial, hasInitial := c.scheme.InitialMap[key1]
 	if hasInitial {
 		finals := c.scheme.FinalMap[key2]
-		for _, f := range finals {
-			syllable := initial + f
-			// 特殊处理：ü 相关
-			syllable = normalizePinyin(syllable)
-			if c.validPinyins[syllable] {
-				found := false
-				for _, r := range results {
-					if r == syllable {
-						found = true
-						break
+		// 声母候选：原始声母在前，模糊对偶声母在后（变体优先级低于原始）。
+		// 这样 zi → [zi]（不并 zhi），sl → []（原始无合法）→ 进入模糊兜底 → [shuang]。
+		initialCandidates := append([]string{initial}, c.fuzzyInitialPartners(initial)...)
+		for _, init := range initialCandidates {
+			for _, f := range finals {
+				syllable := init + f
+				// 特殊处理：ü 相关
+				syllable = normalizePinyin(syllable)
+				if c.validPinyins[syllable] {
+					found := false
+					for _, r := range results {
+						if r == syllable {
+							found = true
+							break
+						}
 					}
-				}
-				if !found {
-					results = append(results, syllable)
+					if !found {
+						results = append(results, syllable)
+					}
 				}
 			}
 		}
