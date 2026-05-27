@@ -57,7 +57,17 @@ if args.count > 1 {
         }
         let st = TISRegisterInputSource(bundleURL)
         print("TISRegisterInputSource bundleURL=\(bundleURL) OSStatus=\(st)")
-        exit(st == noErr ? 0 : 2)
+        if st != noErr {
+            exit(2)
+        }
+        // 重大 (实测教训): TIS 注册是进程级 lifecycle, 调完 API 后如果进程立刻
+        // exit, TIS DB 里的条目会在几秒内被系统清掉. 必须保持进程常驻让注册维持.
+        // 退出靠外部 SIGTERM, 这样安装流程可以 fork 一份本 binary 在背景, 不卡住
+        // installer.
+        print("注册成功, 进程保持运行以维持 TIS 注册 (后台等待 SIGTERM 退出)...")
+        // 进入 RunLoop 永久等待信号
+        RunLoop.current.run()
+        exit(0)
 
     case "--enable-input-source":
         let modeID = args.count > 2 ? args[2] : "to.feng.inputmethod.WindInput.mode"
@@ -84,7 +94,7 @@ if args.count > 1 {
         WindInput.app 子命令:
           (no args)                   作为 IME 服务跑 (系统 imklaunchagent 拉起的默认路径)
           --register-input-source     调 TISRegisterInputSource 把本 .app 注册到 TIS
-          --enable-input-source [id]  调 TISEnableInputSource 启用 mode (默认 to.feng.inputmethod.WindInput.mode)
+          --enable-input-source [id]  调 TISEnableInputSource 启用 mode (默认 to.feng.inputmethod.WindInput)
           --select-input-source [id]  调 TISSelectInputSource 选中 mode
         """)
         exit(0)

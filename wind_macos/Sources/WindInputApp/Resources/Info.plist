@@ -2,6 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!--
+        WithoutModes 结构 (镜像 ensan-hcl/macOS_IMKitSample_2021):
+        macOS 26 周期性 watchdog 只对"含 ComponentInputModeDict sub-mode 的 IME"
+        强制 Notarization 校验, 非 Notarized 会被静默清掉. WithoutModes (整个 IME
+        作为单一输入源) 放行 self-signed / ad-hoc / Personal Team Apple Development.
+        PR-A M2 只需一个输入模式, 中英切换在 IME 进程内部状态机做, 不用 IMK sub-mode.
+    -->
+
     <key>CFBundleIdentifier</key>
     <string>to.feng.inputmethod.WindInput</string>
 
@@ -11,24 +19,12 @@
     <key>CFBundleDisplayName</key>
     <string>清风输入法</string>
 
-    <!-- 默认语言: 让 macOS 在中文系统上首选 zh-Hans.lproj 的本地化字符串. -->
-    <key>CFBundleDevelopmentRegion</key>
-    <string>zh-Hans</string>
-
-    <key>CFBundleLocalizations</key>
-    <array>
-        <string>zh-Hans</string>
-        <string>en</string>
-    </array>
-
     <key>CFBundleExecutable</key>
     <string>WindInput</string>
 
     <key>CFBundlePackageType</key>
     <string>APPL</string>
 
-    <!-- macOS 老约定: 缺这一项部分 LaunchServices/TextInputSources 索引环节会跳过.
-         "????" 是占位, Apple 推荐用 4 字节的 creator code; 第三方 IME 普遍 ????. -->
     <key>CFBundleSignature</key>
     <string>????</string>
 
@@ -41,17 +37,19 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
 
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh-Hans</string>
+
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>zh-Hans</string>
+        <string>en</string>
+    </array>
+
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
 
-    <!--
-        IMKit `.app` 同时设两个 key (Qingg / 多数主流第三方 IME 都这么做):
-        - LSUIElement=true       : 不在 Dock 显示, 不抢菜单焦点, 允许开 NSPanel/NSWindow
-        - LSBackgroundOnly=true  : 标记为后台 IME 进程, 让系统在用户激活输入法时
-                                   通过 imklaunchagent 拉起本 .app, 而不是普通 GUI 启动
-        早先版本曾以为 LSBackgroundOnly 会让系统拒绝注册而删掉, 实测对比 Qingg.app
-        必须同时存在; 单独 LSUIElement 在某些机器上注册流程会卡在 imklaunchagent.
-    -->
+    <!-- IMKit 后台 IME, 不显示 Dock 图标, 但能开 NSPanel (候选框). -->
     <key>LSUIElement</key>
     <true/>
 
@@ -61,19 +59,15 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 
-    <!-- IMKit 通过 NSAppleEventsUsageDescription / appleEvents 派发 attach 信号,
-         加上避免 Catalina+ 弹"允许控制其它应用"询问框. -->
-    <key>NSAppleEventsUsageDescription</key>
-    <string>WindInput 需要与系统输入服务通信</string>
-
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 huanfeng</string>
 
     <!--
-        InputMethodConnectionName 必须等于 "$(CFBundleIdentifier)_Connection".
-        Big Sur+ 的 XPC handshake 用这个名字校验 sandboxed 3rd-party IME,
-        任意自定义字符串会被静默拒绝, 导致设置面板看不到本输入法 (踩过的坑).
-        参考: Apple QA1810 + ensan-hcl/macOS_IMKitSample_2021 README.
+        IMKit 三必备字段:
+        - InputMethodConnectionName 必须等于 "$(CFBundleIdentifier)_Connection"
+          (Big Sur+ XPC handshake 强制约定)
+        - InputMethodServerControllerClass 是 IMKInputController 子类的 @objc 名
+        - tsInputMethodCharacterRepertoireKey 必须用 ISO 15924 四字母脚本码
     -->
     <key>InputMethodConnectionName</key>
     <string>to.feng.inputmethod.WindInput_Connection</string>
@@ -81,18 +75,17 @@
     <key>InputMethodServerControllerClass</key>
     <string>WindInputController</string>
 
-    <!--
-        ★ tsInputMethodCharacterRepertoireKey 必须用 ISO 15924 四字母脚本码
-        ("Hans"/"Hant"/"Latn"/"Cyrl"/...), 不是 BCP-47 语言码 ("zh-Hans"/"en").
-        用错值会让系统视为本输入法没声明任何 repertoire, 直接不在系统设置 → 键盘
-        → 输入法列表里显示 (与 Qingg.app 对比后定位).
-    -->
     <key>tsInputMethodCharacterRepertoireKey</key>
     <array>
         <string>Hans</string>
         <string>Latn</string>
     </array>
 
+    <!--
+        加回 ComponentInputModeDict (sub-mode) 结构, 因为系统设置 UI 不显示
+        WithoutModes 类型 (Apple 自带 + 所有第三方主流 IME 都是 ModeEnabled+Mode).
+        组合: mode dict + register 进程常驻, 应该能让 mode 持久不被清.
+    -->
     <key>ComponentInputModeDict</key>
     <dict>
         <key>tsInputModeListKey</key>
@@ -103,32 +96,25 @@
                 <string>to.feng.inputmethod.WindInput.mode</string>
                 <key>TISIntendedLanguage</key>
                 <string>zh-Hans</string>
-                <!-- 同样必须是 ISO 15924 脚本码. -->
                 <key>tsInputModeCharacterRepertoireKey</key>
                 <array>
                     <string>Hans</string>
                     <string>Latn</string>
                 </array>
-                <!-- Carbon 老脚本类型常量, IMK 仍然要求设置; smUnicodeScript = -1
-                     (Carbon constant). Qingg / Squirrel 都用这个值. -->
                 <key>tsInputModeScriptKey</key>
                 <string>smUnicodeScript</string>
-                <!-- 默认勾选这个 mode; 没这一项时用户加完 IME 后还要手动启用. -->
                 <key>tsInputModeDefaultStateKey</key>
                 <true/>
-                <!-- 标记为脚本下的主输入模式 (Hans 脚本只有我们一个时一定要 true). -->
                 <key>tsInputModePrimaryInScriptKey</key>
                 <true/>
                 <key>tsInputModeKeyEquivalentModifiersKey</key>
                 <integer>0</integer>
                 <key>tsInputModeIsVisibleKey</key>
                 <true/>
-                <!-- 默认菜单图标缺失时系统用空白方块; 后续 M4 放真 icon.tiff 进 Resources/. -->
                 <key>tsInputModeMenuIconFileKey</key>
                 <string>WindInputMode</string>
                 <key>tsInputModeAlternateMenuIconFileKey</key>
                 <string>WindInputMode</string>
-                <!-- IME 切换菜单里显示的本地化名. -->
                 <key>TISIconLabels</key>
                 <dict>
                     <key>Primary</key>
@@ -136,8 +122,6 @@
                 </dict>
             </dict>
         </dict>
-        <!-- 这个数组决定可见 mode 的顺序; 没有它的话即使 mode 注册了, 在切换菜单
-             里也不一定出现 (Qingg.app 有这一项). -->
         <key>tsVisibleInputModeOrderedArrayKey</key>
         <array>
             <string>to.feng.inputmethod.WindInput.mode</string>

@@ -119,17 +119,14 @@ if [[ -x "$APP_EXEC" ]]; then
         RUN_AS=(sudo -u "$SUDO_USER")
     fi
 
-    info "$APP_EXEC --register-input-source"
-    REG_OUT=$("${RUN_AS[@]}" "$APP_EXEC" --register-input-source 2>&1)
-    echo "$REG_OUT" | sed 's/^/    /'
-
-    # 给 TIS 1 秒刷新 cache (上面 register 后立刻 enable 拿 cached list 找不到)
-    sleep 1
-
-    info "$APP_EXEC --enable-input-source"
-    "${RUN_AS[@]}" "$APP_EXEC" --enable-input-source 2>&1 | sed 's/^/    /'
-else
-    info "(WindInput binary 不可执行, 跳过自注册)"
+    # 重要: register 进程必须**持续运行**才能让 TIS 注册维持 (踩过的坑: register
+    # 完立刻 exit 后 mode 会被系统在几秒内清掉). 后台 fork, 主流程不阻塞.
+    info "$APP_EXEC --register-input-source (后台常驻维持注册)"
+    "${RUN_AS[@]}" "$APP_EXEC" --register-input-source > /tmp/wind_register.log 2>&1 &
+    REGISTER_PID=$!
+    sleep 1  # 等 TIS DB 写完
+    info "    PID=$REGISTER_PID (要停止后台 register: kill $REGISTER_PID)"
+    head -2 /tmp/wind_register.log 2>/dev/null | sed 's/^/    /'
 fi
 
 bold "==> Done"
