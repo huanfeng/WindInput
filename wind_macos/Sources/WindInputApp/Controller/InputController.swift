@@ -4,21 +4,36 @@ import WindInputKit
 
 // InputController — IMKit 为每个文本框/会话实例化一个本类对象 (PR-1 设计 方案 A).
 //
-// M2.1 范围 (本提交):
+// M2.2-C/D 实装范围:
 //   - init 时连 bridge.sock (BridgeClient.connect, 失败仅 log 不抛)
-//   - handle(_:client:) 把 NSEvent 翻译成 KeyEvent 帧, 同步发送, 等响应,
-//     按 Consumed/PassThrough 决定是否吃键
-//   - Composition / Commit / Candidates push 等 M2.2+ 再做; 收到非 PassThrough/
-//     Consumed 的响应一律打 NSLog 后吃键 (避免重复出字符)
+//   - handle(_:client:) 把 NSEvent 翻译成 KeyEvent 帧, 同步发送, 等响应
+//   - applyResponse 路由 Go 返回的 cmd, 真调 IMKTextInput 协议方法:
+//       * CmdCommitText (0x0101)        → client.insertText
+//       * CmdUpdateComposition (0x0102) → client.setMarkedText
+//       * CmdClearComposition (0x0103)  → setMarkedText("") + 状态清零
+//       * CmdCommitTextWithCursor (0x0106) → insertText + 光标偏移
+//       * CmdConsumed / CmdPassThrough / CmdAck → 控制流路由
+//   - CompositionState 跟踪本端最新 marked text + caret
 //
-// 线程模型: IMKit 在主线程调用 handle, BridgeClient 是阻塞 socket I/O.
-//   M2.1 用同步发送 + 同步读响应; 一次 round-trip 实测 < 1ms (UDS), 用户感知不到.
-//   未来如出现卡顿, M2.2+ 改成 async + barrier seq 匹配.
+// Commit 触发键路径 (M2.2-D, 与 Win 端 barrier 设计不同):
+//   Win TSF DLL 用 CmdCommitRequest (0x0104) 异步 barrier 解决 TSF race condition
+//   (用户在 IME 处理中快速按 commit 键导致 commit 文本与下一键错位).
+//   darwin IMKit handle 是同步的, 没有 race, **不需要 barrier 机制**, server_darwin.go
+//   dispatch 也没处理 CmdCommitRequest. 所以 darwin 上 Space/Enter/数字 1-9 选词
+//   直接走 CmdKeyEvent: Go HandleKeyEvent 识别 VK_SPACE/VK_RETURN/0x31-0x39 时
+//   直接返 CmdCommitText, 由 applyResponse 调 insertText. KeyHandler 已覆盖这些键
+//   的翻译 (NSEvent.keyCode 0x12-0x19 / 0x1D → VK 0x30-0x39, 0x24 → VK_RETURN,
+//   0x31 → VK_SPACE, 0x35 → VK_ESCAPE).
+//
+// 线程模型: IMKit 在主线程调用 handle, BridgeClient 阻塞 socket I/O.
+//   UDS roundtrip < 1ms, 用户感知不到. 未来改 async + barrier seq.
 @objc(WindInputController)
 public class InputController: IMKInputController {
 
     private var bridge: BridgeClient?
     private var keySeq: UInt16 = 0
+    private let router = BridgeResponseRouter()
+    private var composition: CompositionState { router.composition }
 
     public override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
         super.init(server: server, delegate: delegate, client: inputClient)
@@ -41,7 +56,6 @@ public class InputController: IMKInputController {
 
     public override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         guard let event = event else { return false }
-        // 只关心 keyDown; keyUp / flagsChanged 在 M2.1 不处理.
         guard event.type == .keyDown else { return false }
         guard let bridge = bridge, bridge.isConnected else {
             NSLog("WindInput[handle] bridge not connected, pass through")
@@ -50,46 +64,79 @@ public class InputController: IMKInputController {
 
         keySeq &+= 1
         guard let frame = KeyHandler.encodeKeyEvent(event, seq: keySeq) else {
-            // 未映射的键 (空 VK), 让系统自己处理
             return false
         }
 
         do {
             try bridge.send(frame)
             let resp = try bridge.readFrame()
-            return applyResponse(resp, sender: sender)
+            let consumed = applyResponse(resp, sender: sender)
+
+            // M2.2-E: composition 启动/更新后, 上报当前 caret 屏幕位置给 Go,
+            // 让候选框/Toast/光标跟随有正确锚点. 仅在 marked text 非空时发,
+            // 避免无 composition 时浪费带宽.
+            if !composition.isEmpty {
+                sendCaretUpdateIfAvailable(client: sender as? IMKTextInput)
+            }
+            return consumed
         } catch {
             NSLog("WindInput[handle] bridge io error: \(error)")
-            // I/O 错误: 尝试重连一次, 这次按键 PassThrough
             reconnect()
             return false
         }
     }
 
+    // MARK: - Caret update (M2.2-E)
+
+    /// 从 IMKTextInput 拿 caret 屏幕坐标, 转换为 wire top-left 坐标后发 CmdCaretUpdate.
+    /// 不抛错, 失败仅 log.
+    internal func sendCaretUpdateIfAvailable(client: IMKTextInput?) {
+        guard let client = client, let bridge = bridge, bridge.isConnected else { return }
+
+        // IMKTextInput.attributes(forCharacterIndex:lineHeightRectangle:) 把 caret
+        // 所在那一行的矩形写到 lineHeightRectangle (out 参数).
+        // 注: 返回值是 attribute dict (NSColor / font 等), 这里我们只关心 rect.
+        var rect = NSRect.zero
+        _ = client.attributes(forCharacterIndex: 0, lineHeightRectangle: &rect)
+        guard rect.size.height > 0 else { return }
+
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let screenHeight = screen?.frame.height ?? 0
+        guard screenHeight > 0 else { return }
+
+        let (x, y, h) = CaretCoords.caretRectToWire(rect, screenHeight: screenHeight)
+        let frame = BinaryCodec.encodeCaretUpdateFrame(x: x, y: y, height: h)
+        do {
+            try bridge.send(frame)
+            _ = try bridge.readFrame()   // Go server_darwin.go 一律返 ack, 必须读掉避免堆积
+        } catch {
+            NSLog("WindInput[caretUpdate] send/read error: \(error)")
+        }
+    }
+
     // MARK: - Response routing
 
-    private func applyResponse(_ frame: Frame, sender: Any?) -> Bool {
-        switch frame.cmd {
-        case DownstreamCmd.passThrough:
-            return false
-        case DownstreamCmd.consumed:
-            return true
-        case DownstreamCmd.ack:
-            // M2.1: Ack 单独到 handle 路径不常见; 当作消费处理避免重复出字符
-            return true
-        case DownstreamCmd.commitText:
-            // M2.2 才做完整解码 + insertText; 这一阶段仅 log 文本字节数
-            NSLog("WindInput[handle] commitText payload=\(frame.payload.count) bytes (M2.2 待实装 insertText)")
-            return true
-        case DownstreamCmd.updateComposition:
-            NSLog("WindInput[handle] updateComposition payload=\(frame.payload.count) bytes (M2.2 待实装 setMarkedText)")
-            return true
-        case DownstreamCmd.clearComposition:
-            NSLog("WindInput[handle] clearComposition")
-            return true
-        default:
-            NSLog(String(format: "WindInput[handle] unhandled cmd=0x%04x len=%d", frame.cmd, frame.payload.count))
-            return true
+    /// 把 Go 返回的 bridge 帧路由到 IMKTextInput 协议方法. 委托给 BridgeResponseRouter
+    /// (在 WindInputKit 里, 不依赖 IMKit, 便于 swift test 用 mock 驱动).
+    internal func applyResponse(_ frame: Frame, sender: Any?) -> Bool {
+        let imkClient = sender as? IMKTextInput
+        let adapter = imkClient.map { IMKClientAdapter(imkClient: $0) }
+        return router.apply(frame, to: adapter)
+    }
+
+    // MARK: - IMKit Adapter (把 IMKTextInput 桥接到 TextInputClient)
+
+    /// IMKTextInput → TextInputClient 的适配器, 让 BridgeResponseRouter (在
+    /// WindInputKit 不依赖 IMKit 的子库里) 也能调到 IMKit 真客户端.
+    private final class IMKClientAdapter: TextInputClient {
+        let imkClient: IMKTextInput
+        init(imkClient: IMKTextInput) { self.imkClient = imkClient }
+
+        func insertText(_ text: String, replacementRange: NSRange) {
+            imkClient.insertText(text, replacementRange: replacementRange)
+        }
+        func setMarkedText(_ text: String, selectionRange: NSRange, replacementRange: NSRange) {
+            imkClient.setMarkedText(text, selectionRange: selectionRange, replacementRange: replacementRange)
         }
     }
 

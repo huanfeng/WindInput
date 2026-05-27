@@ -47,6 +47,34 @@ public enum BinaryCodec {
         return (cmd, length, isAsync)
     }
 
+    // MARK: - CaretUpdate payload (upstream)
+
+    /// 编码 CmdCaretUpdate (0x0301 upstream) 帧.
+    /// 布局: header(8) + payload {
+    ///   x:i32 (4) + y:i32 (4) + height:i32 (4)
+    ///   [+ compositionStartX:i32 (4) + compositionStartY:i32 (4)]   // 可选 20 字节版
+    /// }
+    /// 坐标系: top-left 原点 (与 Go/Win 端一致, 与 Cocoa NSRect 的 bottom-left 不同,
+    /// 调用方必须先转换好再传入).
+    public static func encodeCaretUpdateFrame(x: Int32, y: Int32, height: Int32,
+                                              compositionStartX: Int32? = nil,
+                                              compositionStartY: Int32? = nil) -> Data {
+        let withExt = (compositionStartX != nil && compositionStartY != nil)
+        let payloadLen = withExt ? 20 : 12
+        var payload = Data(count: payloadLen)
+        payload.writeUInt32LE(UInt32(bitPattern: x), at: 0)
+        payload.writeUInt32LE(UInt32(bitPattern: y), at: 4)
+        payload.writeUInt32LE(UInt32(bitPattern: height), at: 8)
+        if withExt {
+            payload.writeUInt32LE(UInt32(bitPattern: compositionStartX!), at: 12)
+            payload.writeUInt32LE(UInt32(bitPattern: compositionStartY!), at: 16)
+        }
+
+        var out = encodeHeader(cmd: UpstreamCmd.caretUpdate, payloadLen: UInt32(payloadLen))
+        out.append(payload)
+        return out
+    }
+
     // MARK: - KeyEvent payload
 
     public static func encodeKeyEventFrame(_ p: KeyEventPayload) -> Data {
@@ -91,6 +119,115 @@ public enum BinaryCodec {
 
     public static func encodeEmptyFrame(cmd: UInt16, async: Bool = false) -> Data {
         return encodeHeader(cmd: cmd, payloadLen: 0, async: async)
+    }
+
+    // MARK: - Downstream payload decoders (Go → IME)
+
+    // CommitText flags (与 ipc/binary_codec.go: CommitFlagXxx 对齐)
+    public static let commitFlagModeChanged: UInt32       = 0x0001
+    public static let commitFlagHasNewComposition: UInt32 = 0x0002
+    public static let commitFlagChineseMode: UInt32       = 0x0004
+
+    public struct CommitTextPayload: Equatable {
+        public let flags: UInt32
+        public let text: String              // 要插入的文本
+        public let newComposition: String    // 可选: commit 后新的 preedit (内联模式才非空)
+        public var modeChanged: Bool       { (flags & BinaryCodec.commitFlagModeChanged)       != 0 }
+        public var hasNewComposition: Bool { (flags & BinaryCodec.commitFlagHasNewComposition) != 0 }
+        public var chineseMode: Bool       { (flags & BinaryCodec.commitFlagChineseMode)       != 0 }
+    }
+
+    /// 解 CmdCommitText payload (0x0101 downstream).
+    /// 布局: flags:u32 + textLen:u32 + compLen:u32 + text:bytes + composition:bytes
+    public static func decodeCommitTextPayload(_ buf: Data) throws -> CommitTextPayload {
+        guard buf.count >= 12 else {
+            throw IPCError.payloadTooShort(expected: 12, got: buf.count)
+        }
+        let flags    = buf.readUInt32LE(at: 0)
+        let textLen  = Int(buf.readUInt32LE(at: 4))
+        let compLen  = Int(buf.readUInt32LE(at: 8))
+        guard buf.count >= 12 + textLen + compLen else {
+            throw IPCError.payloadTooShort(expected: 12 + textLen + compLen, got: buf.count)
+        }
+        let textStart = buf.startIndex + 12
+        let compStart = textStart + textLen
+        let text = String(data: buf.subdata(in: textStart..<compStart), encoding: .utf8) ?? ""
+        let comp = String(data: buf.subdata(in: compStart..<(compStart + compLen)), encoding: .utf8) ?? ""
+        return CommitTextPayload(flags: flags, text: text, newComposition: comp)
+    }
+
+    public struct UpdateCompositionPayload: Equatable {
+        public let caretPos: UInt32   // preedit 内光标位置 (UTF-16 unit 还是 rune, 看 Go 端约定; M2.2 阶段照 Go 端原样上送)
+        public let text: String       // preedit 文本
+    }
+
+    /// 解 CmdUpdateComposition payload (0x0102 downstream).
+    /// 布局: caretPos:u32 + text:bytes(剩余)
+    public static func decodeUpdateCompositionPayload(_ buf: Data) throws -> UpdateCompositionPayload {
+        guard buf.count >= 4 else {
+            throw IPCError.payloadTooShort(expected: 4, got: buf.count)
+        }
+        let caret = buf.readUInt32LE(at: 0)
+        let textStart = buf.startIndex + 4
+        let text = String(data: buf.subdata(in: textStart..<buf.endIndex), encoding: .utf8) ?? ""
+        return UpdateCompositionPayload(caretPos: caret, text: text)
+    }
+
+    public struct CommitTextWithCursorPayload: Equatable {
+        public let text: String
+        public let cursorOffset: UInt32   // 从文本末尾向左偏移的字符数
+    }
+
+    /// 解 CmdCommitTextWithCursor payload (0x0106 downstream).
+    /// 布局: textLen:u32 + cursorOffset:u32 + text:bytes
+    public static func decodeCommitTextWithCursorPayload(_ buf: Data) throws -> CommitTextWithCursorPayload {
+        guard buf.count >= 8 else {
+            throw IPCError.payloadTooShort(expected: 8, got: buf.count)
+        }
+        let textLen = Int(buf.readUInt32LE(at: 0))
+        let cursor  = buf.readUInt32LE(at: 4)
+        guard buf.count >= 8 + textLen else {
+            throw IPCError.payloadTooShort(expected: 8 + textLen, got: buf.count)
+        }
+        let textStart = buf.startIndex + 8
+        let text = String(data: buf.subdata(in: textStart..<(textStart + textLen)), encoding: .utf8) ?? ""
+        return CommitTextWithCursorPayload(text: text, cursorOffset: cursor)
+    }
+
+    public struct MoveCursorPayload: Equatable {
+        public let direction: UInt32   // 1 = right, ...
+    }
+
+    /// 解 CmdMoveCursor payload (0x0107 downstream).
+    /// 布局: direction:u32 (1=right)
+    public static func decodeMoveCursorPayload(_ buf: Data) throws -> MoveCursorPayload {
+        guard buf.count >= 4 else {
+            throw IPCError.payloadTooShort(expected: 4, got: buf.count)
+        }
+        return MoveCursorPayload(direction: buf.readUInt32LE(at: 0))
+    }
+
+    public struct StatePushPayload: Equatable {
+        public let flags: UInt32
+        public let iconLabel: String
+
+        public var chineseMode: Bool       { (flags & 0x0001) != 0 }   // StatusChineseMode
+        public var fullWidth: Bool         { (flags & 0x0002) != 0 }
+        public var chinesePunct: Bool      { (flags & 0x0004) != 0 }
+        public var toolbarVisible: Bool    { (flags & 0x0008) != 0 }
+        public var capsLock: Bool          { (flags & 0x0020) != 0 }
+    }
+
+    /// 解 CmdStatePush payload (0x0206 push). 布局:
+    /// flags:u32 + keyDownCount:u32 + keyUpCount:u32 + iconLabel:bytes(剩余)
+    public static func decodeStatePushPayload(_ buf: Data) throws -> StatePushPayload {
+        guard buf.count >= 12 else {
+            throw IPCError.payloadTooShort(expected: 12, got: buf.count)
+        }
+        let flags = buf.readUInt32LE(at: 0)
+        let labelStart = buf.startIndex + 12
+        let label = String(data: buf.subdata(in: labelStart..<buf.endIndex), encoding: .utf8) ?? ""
+        return StatePushPayload(flags: flags, iconLabel: label)
     }
 }
 
