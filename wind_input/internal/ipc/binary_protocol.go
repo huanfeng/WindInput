@@ -60,8 +60,21 @@ const (
 	CmdDeletePair           uint16 = 0x0108 // Delete pair (smart backspace)
 	CmdConsumed             uint16 = 0x0401 // Key consumed (no output)
 	CmdHostRenderSetup      uint16 = 0x0501 // Host render setup (shared memory + event names)
+	CmdHostRenderFrame      uint16 = 0x0502 // Host render frame ready notification (darwin: SHM seq + geometry)
 	CmdBatchResponse        uint16 = 0x0F02 // Batch response container
 )
+
+// HostRenderFramePayload — darwin push 通道 "shm 新帧就绪" 通知。
+// Win 端 hostrender 用命名 Event 同步, darwin 没有等价 API, 改走 push 通道。
+// 客户端收到后从 SHM (header.sequence == Seq) 读取并 blit。
+type HostRenderFramePayload struct {
+	Seq    uint32 // 与 SHM header.sequence 对齐
+	X      int32  // 屏幕左上角 X (wire 坐标系, top-left)
+	Y      int32  // 屏幕左上角 Y
+	Width  uint32 // 位图宽 (像素)
+	Height uint32 // 位图高 (像素)
+	Flags  uint32 // bit0=Visible, bit1=ContentReady (与 SharedFlag* 对应)
+}
 
 // Config sync keys (used with CmdSyncConfig)
 const ConfigKeyEnglishPairs = "en_pairs"

@@ -302,6 +302,7 @@ func (s *Server) dispatchFrame(conn net.Conn, id connID, header *ipc.IpcHeader, 
 			event = "up"
 		}
 		res := s.handler.HandleKeyEvent(KeyEventData{
+			Key:       keyCodeToKeyName(p.KeyCode),
 			KeyCode:   int(p.KeyCode),
 			Modifiers: int(p.Modifiers),
 			Event:     event,
@@ -381,6 +382,19 @@ func (s *Server) writeKeyResult(conn net.Conn, r *KeyEventResult) {
 		_, _ = conn.Write(s.codec.EncodeConsumed())
 	case ResponseTypeClearComposition:
 		_, _ = conn.Write(s.codec.EncodeClearComposition())
+	case ResponseTypeInsertText:
+		// 选词上屏 / 直接提交: 把 commit 文本作为 KeyEvent 同步响应返回,
+		// IMKit InputController.applyResponse → insertText 上屏。
+		_, _ = conn.Write(s.codec.EncodeCommitText(
+			r.Text, r.NewComposition, r.ModeChanged, r.ChineseMode, r.HasNewComposition))
+	case ResponseTypeUpdateComposition:
+		_, _ = conn.Write(s.codec.EncodeUpdateComposition(r.Text, r.CaretPos))
+	case ResponseTypeInsertTextWithCursor:
+		_, _ = conn.Write(s.codec.EncodeCommitTextWithCursor(r.Text, r.CursorOffset))
+	case ResponseTypeMoveCursorRight:
+		_, _ = conn.Write(s.codec.EncodeMoveCursor(1))
+	case ResponseTypeDeletePair:
+		_, _ = conn.Write(s.codec.EncodeDeletePair())
 	default:
 		_, _ = conn.Write(s.codec.EncodeAck())
 	}
@@ -452,6 +466,12 @@ func (s *Server) broadcastPush(frame []byte) {
 			_ = c.conn.Close()
 		}
 	}
+}
+
+// BroadcastFrame 把一帧广播到所有 push client (darwin 端 forwarder 用)。
+// 仅是 broadcastPush 的 exported 包装, 给 cmd/service 调用。
+func (s *Server) BroadcastFrame(frame []byte) {
+	s.broadcastPush(frame)
 }
 
 // GetActiveClientCount 返回当前主连接数。

@@ -402,6 +402,10 @@ func main() {
 	uiManager.WaitReady()
 	logger.Info("UI Manager is ready")
 
+	// 平台 forwarder (darwin: 把 ui.Manager 的 uicmd → bitmap → SHM + push;
+	// windows: no-op, Win 渲染走 LayeredWindow 路径不需要转发)
+	startPlatformForwarder(bridgeServer, uiManager, hostRenderMgr, logger)
+
 	// Load app compatibility rules
 	appCompat := config.LoadAppCompat()
 	logger.Info("App compatibility rules loaded", "count", len(appCompat.Apps))

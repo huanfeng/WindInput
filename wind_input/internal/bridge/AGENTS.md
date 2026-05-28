@@ -14,8 +14,8 @@
   - darwin: `~/Library/Application Support/WindInput<suffix>/bridge_push.sock` UDS
 
 平台特定能力:
-- **Win**: Host Render（通过共享内存把候选词位图传给白名单宿主进程，绕过 Win11 开始菜单 Band 层级）
-- **darwin**: NSPanel 自绘 (IMKit `.app` 端实现, Go 服务不参与渲染); host_render / shared_memory 在 darwin 上为 no-op stub
+- **Win**: Host Render（命名共享内存 + 命名 Event 把候选词位图传给白名单宿主进程，绕过 Win11 开始菜单 Band 层级）
+- **darwin**: Host Render（POSIX SHM `shm_open`+`mmap` 单段 `/WindInput_SHM`, Go 服务用 `gg` 渲染 `*image.RGBA` 写入, 经 push 通道 `CmdHostRenderFrame` 通知唯一消费者 IMKit `.app` mmap 同段贴 NSPanel）。Go 端是渲染源, IMKit `.app` 只 blit。
 
 二进制协议 (`internal/ipc.BinaryCodec`) 跨平台一致, IMKit `.app` 端写一份解码器同时服务 Win+macOS.
 
@@ -32,6 +32,7 @@
 | `shared_memory.go` | `SharedMemory`：命名共享内存 + 命名事件对；`WriteFrame` 将 RGBA→BGRA 转换后写入位图并信令通知；`WriteHide` 发送隐藏命令；安全描述符包含 AppContainer 低完整性标记（`S:(ML;;NW;;;LW)`）以支持 UWP 进程访问 |
 | `protocol.go` | 协议类型定义 (ResponseType、KeyEventData、StatusUpdateData 等) + `MessageHandler` 接口 |
 | `deferred_handler.go` | `DeferredHandler`: coordinator 还未就绪时返回安全默认值的代理 |
+| `keycode_name.go` | `keyCodeToKeyName(keyCode)`: VK 码 → 引擎 key 名字符串 (a-z/0-9/标点/功能键); Win+darwin server 共用 (原仅在 server_handler.go) |
 
 ### Windows-only (`//go:build windows`)
 | File | Description |
@@ -47,8 +48,8 @@
 | File | Description |
 |------|-------------|
 | `endpoint_darwin.go` | UDS 路径常量 (`bridge.sock` / `bridge_push.sock`); `WIND_INPUT_RUNTIME_DIR` 环境变量覆盖支持 |
-| `server_darwin.go` | UDS server: 双 socket 监听, accept loop 每连接 goroutine, 帧 dispatch 覆盖 KeyEvent/Caret/Focus/IME/ToggleMode; client ID 用 `connID` 替代 Win PID; Push API 与 Win 接口对齐 (fanout 写所有 push client) |
-| `host_render_darwin.go` | HostRenderManager / SharedMemory / GetProcessName 全部 no-op (macOS IMKit `.app` 自绘 NSPanel, 不需要 bitmap 跨进程传输) |
+| `server_darwin.go` | UDS server: 双 socket 监听, accept loop 每连接 goroutine, 帧 dispatch 覆盖 KeyEvent/Caret/Focus/IME/ToggleMode; `writeKeyResult` 完整编码 commit/composition 响应 (InsertText/UpdateComposition/InsertTextWithCursor/MoveCursor/DeletePair); `KeyEventData.Key` 用 `keyCodeToKeyName` 填充 (否则 engine "Unhandled key"); `BroadcastFrame` exported 供 forwarder 推帧; client ID 用 `connID` 替代 Win PID |
+| `host_render_darwin.go` | darwin POSIX SHM 实装: `shmOpen`/`shmUnlink` (raw `SYS_SHM_OPEN`=266 syscall, x/sys/unix 未导出) + `mmap`; `SharedMemory.WriteFrame(img,x,y) (seq,err)` RGBA→BGRA 写单段 `/WindInput_SHM`; `WriteHide`; `HostRenderManager` 单消费者模型 (无 PID 分桶, processNames 白名单忽略, `IsProcessWhitelisted` 恒 true) |
 | `server_darwin_test.go` | 7 个端到端测试 (KeyEvent roundtrip / FocusGained / 多 client / 断线 / Push fanout / stale socket 清理 / endpoint 路径派生) |
 
 ## For AI Agents
@@ -104,7 +105,9 @@ bridge handler goroutine 处理仍走同步响应的命令（`CmdHostRenderReque
 - UDS 不支持 SDDL; 改用 `MkdirAll(dir, 0o700)` 把端点目录权限限定到当前用户
 - 启动时清理 stale socket 文件 (上次进程未优雅退出残留)
 - `IsActivelyFocusedPID` 始终返回 false: PID 概念在 darwin 不适用, macOS 端通过 IMKit 自报 bundleID 替代 (待 PR-A 接入)
-- 帧 dispatch 仅覆盖核心命令 (KeyEvent/Caret/Focus/IME/Toggle), 其他帧 Ack 兼容; 完整路径在 IMKit `.app` 接入时按需补
+- KeyEvent 同步响应已完整: `writeKeyResult` 把 commit/composition 编回响应帧 (IMKit `InputController.handle` 同步读取后 insertText/setMarkedText); **不要回退到 default→Ack**, 否则选词文本被吞 → "输了字不上屏"
+- host render: forwarder (`cmd/service/forwarder_darwin.go`) 订阅 `ui.Manager` cmdCh, 收 CandidatesShow → gg 渲染 → `SharedMemory.WriteFrame` → `BroadcastFrame(EncodeHostRenderFrame)`; SHM 在 `SetupHostRender(0)` 懒分配, `CleanupAll` 时 munmap+unlink
+- POSIX SHM 名 `/WindInput_SHM` ≤30 字符 (macOS PSHMNAMLEN=31); 进程异常退出残留段在 `NewSharedMemory` 起手 `shmUnlink` 清掉
 - 多客户端用 `connID` (accept 自增) 替代 Win 的 PID 索引; macOS 单 IMKit `.app` 进程多 IMKInputController 实例各自独立 socket 连接, 见 [`docs/design/macos-port.md`](../../../docs/design/macos-port.md)
 
 ## Dependencies
@@ -114,7 +117,7 @@ bridge handler goroutine 处理仍走同步响应的命令（`CmdHostRenderReque
 
 ### External
 - Win: `golang.org/x/sys/windows` (Named Pipe API)、`github.com/Microsoft/go-winio` (overlapped I/O)
-- darwin: 仅标准库 `net.Listen("unix", ...)` + `os` / `path/filepath` / `syscall`
+- darwin: `net.Listen("unix", ...)` + `os`/`path/filepath`/`syscall` + `golang.org/x/sys/unix` (mmap/ftruncate; shm_open 走 raw SYS_SHM_OPEN syscall)
 
 ## 全局约束
 - 协议跨语言镜像约束: 修改帧布局必须同步 `wind_tsf/include/BinaryProtocol.h` (C++) + 未来 macOS IMKit `.app` 的 Swift/Obj-C 解码器

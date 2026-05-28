@@ -790,3 +790,18 @@ func (c *BinaryCodec) EncodeBatchResponse(responses [][]byte) []byte {
 
 	return result
 }
+
+// EncodeHostRenderFrame 编 CmdHostRenderFrame push 帧 (darwin SHM 新帧就绪通知)。
+// payload 布局 24 字节: seq(u32) + x(i32) + y(i32) + w(u32) + h(u32) + flags(u32) LE。
+func (c *BinaryCodec) EncodeHostRenderFrame(p HostRenderFramePayload) []byte {
+	const payloadLen = 24
+	header := c.EncodeHeader(CmdHostRenderFrame, payloadLen)
+	buf := make([]byte, payloadLen)
+	binary.LittleEndian.PutUint32(buf[0:4], p.Seq)
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(p.X))
+	binary.LittleEndian.PutUint32(buf[8:12], uint32(p.Y))
+	binary.LittleEndian.PutUint32(buf[12:16], p.Width)
+	binary.LittleEndian.PutUint32(buf[16:20], p.Height)
+	binary.LittleEndian.PutUint32(buf[20:24], p.Flags)
+	return append(header, buf...)
+}
