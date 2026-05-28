@@ -267,6 +267,31 @@ public enum BinaryCodec {
         return out
     }
 
+    /// 解 CmdModeStatus (0x0504): flags(u32)+effectiveMode(u32)+labelLen(u32)+label(UTF-8)。
+    /// flags 位: 0x01 中文模式, 0x02 全角, 0x04 中文标点, 0x08 指示器可见, 0x20 CapsLock。
+    public static func decodeModeStatusPayload(_ buf: Data) throws -> ModeStatusPayload {
+        guard buf.count >= 12 else {
+            throw IPCError.payloadTooShort(expected: 12, got: buf.count)
+        }
+        let flags = buf.readUInt32LE(at: 0)
+        let effectiveMode = buf.readUInt32LE(at: 4)
+        let labelLen = Int(buf.readUInt32LE(at: 8))
+        guard buf.count >= 12 + labelLen else {
+            throw IPCError.payloadTooShort(expected: 12 + labelLen, got: buf.count)
+        }
+        let label = labelLen > 0
+            ? (String(data: buf.subdata(in: 12..<(12 + labelLen)), encoding: .utf8) ?? "")
+            : ""
+        return ModeStatusPayload(
+            chineseMode: (flags & 0x0001) != 0,
+            fullWidth: (flags & 0x0002) != 0,
+            chinesePunct: (flags & 0x0004) != 0,
+            capsLock: (flags & 0x0020) != 0,
+            visible: (flags & 0x0008) != 0,
+            effectiveMode: effectiveMode,
+            modeLabel: label)
+    }
+
     /// 解 CmdCandidateRects (0x0503 push): count(u32) + count×(index,x,y,w,h 各 i32 LE)。
     public static func decodeCandidateRectsPayload(_ buf: Data) throws -> [CandidateHitRect] {
         guard buf.count >= 4 else {

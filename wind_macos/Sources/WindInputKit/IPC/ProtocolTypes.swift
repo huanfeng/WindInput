@@ -55,7 +55,30 @@ public enum DownstreamCmd {
     public static let hostRenderSetup: UInt16  = 0x0501
     public static let hostRenderFrame: UInt16  = 0x0502   // SHM 新帧就绪通知 (darwin)
     public static let candidateRects: UInt16   = 0x0503   // 当前帧候选命中矩形 (panel-local)
+    public static let modeStatus: UInt16       = 0x0504   // 输入模式状态 (中英/全半角/标点/方案), 供菜单栏指示器
     public static let batchResponse: UInt16    = 0x0F02
+}
+
+/// 输入模式状态 (CmdModeStatus 0x0504 解码结果)。供菜单栏指示器显示。
+public struct ModeStatusPayload {
+    public let chineseMode: Bool
+    public let fullWidth: Bool
+    public let chinesePunct: Bool
+    public let capsLock: Bool
+    public let visible: Bool        // false = 隐藏指示器 (IME 失活/失焦)
+    public let effectiveMode: UInt32 // 0=中文 1=英文小写 2=英文大写
+    public let modeLabel: String    // 方案标签 ("拼"/"五"/"双"/"混")
+
+    public init(chineseMode: Bool, fullWidth: Bool, chinesePunct: Bool, capsLock: Bool,
+                visible: Bool, effectiveMode: UInt32, modeLabel: String) {
+        self.chineseMode = chineseMode
+        self.fullWidth = fullWidth
+        self.chinesePunct = chinesePunct
+        self.capsLock = capsLock
+        self.visible = visible
+        self.effectiveMode = effectiveMode
+        self.modeLabel = modeLabel
+    }
 }
 
 // CandidateHitRect — 单个候选在候选框 bitmap 内的命中矩形 (panel-local 像素).

@@ -64,6 +64,7 @@ const (
 	CmdHostRenderSetup      uint16 = 0x0501 // Host render setup (shared memory + event names)
 	CmdHostRenderFrame      uint16 = 0x0502 // Host render frame ready notification (darwin: SHM seq + geometry)
 	CmdCandidateRects       uint16 = 0x0503 // darwin: 当前帧候选命中矩形 (panel-local), 供 .app 鼠标 hit-test
+	CmdModeStatus           uint16 = 0x0504 // darwin: 输入模式状态推送 (中英/全半角/标点/方案标签), 供 .app 菜单栏指示器
 	CmdBatchResponse        uint16 = 0x0F02 // Batch response container
 )
 

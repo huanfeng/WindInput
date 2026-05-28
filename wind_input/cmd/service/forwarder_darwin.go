@@ -107,9 +107,41 @@ func (f *darwinForwarder) handle(cmd uicmd.Command, candidates []ui.Candidate) {
 		f.showCandidates(p, candidates)
 	case uicmd.CmdCandidatesHide:
 		f.hideCandidates()
+	case uicmd.CmdToolbarShow:
+		if p, ok := cmd.Payload.(uicmd.ToolbarShowPayload); ok {
+			f.pushModeStatus(p.State, true)
+		}
+	case uicmd.CmdToolbarUpdate:
+		if p, ok := cmd.Payload.(uicmd.ToolbarUpdatePayload); ok {
+			f.pushModeStatus(p.State, true)
+		}
+	case uicmd.CmdToolbarHide:
+		f.pushModeStatus(uicmd.ToolbarState{}, false)
 	default:
-		// 其它命令 (Toolbar / Toast / Mode 等) 后续 PR 接入
+		// 其它命令 (Toast / Menu 等) 后续 PR 接入
 	}
+}
+
+// pushModeStatus 把输入模式状态经 push 通道发给 .app 菜单栏指示器 (CmdModeStatus)。
+// visible=false 时通知客户端隐藏指示器 (IME 失活/失焦)。
+func (f *darwinForwarder) pushModeStatus(st uicmd.ToolbarState, visible bool) {
+	var flags uint32
+	if st.ChineseMode {
+		flags |= ipc.StatusChineseMode
+	}
+	if st.FullWidth {
+		flags |= ipc.StatusFullWidth
+	}
+	if st.ChinesePunct {
+		flags |= ipc.StatusChinesePunct
+	}
+	if st.CapsLock {
+		flags |= ipc.StatusCapsLock
+	}
+	if visible {
+		flags |= ipc.StatusToolbarVisible
+	}
+	f.srv.BroadcastFrame(f.codec.EncodeModeStatus(flags, uint32(st.EffectiveMode), st.ModeLabel))
 }
 
 func (f *darwinForwarder) showCandidates(p uicmd.CandidatesShowPayload, candidates []ui.Candidate) {

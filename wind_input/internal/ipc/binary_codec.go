@@ -829,3 +829,19 @@ func (c *BinaryCodec) EncodeCandidateRects(rects []CandidateHitRect) []byte {
 	}
 	return append(header, buf...)
 }
+
+// EncodeModeStatus 编 CmdModeStatus push 帧 (darwin 输入模式状态指示器)。
+// Payload: flags(u32) + effectiveMode(u32) + labelLen(u32) + label(UTF-8)。
+// flags 复用 StatusChineseMode/StatusFullWidth/StatusChinesePunct/StatusCapsLock/
+// StatusToolbarVisible 位; effectiveMode: 0=中文 1=英文小写 2=英文大写。
+func (c *BinaryCodec) EncodeModeStatus(flags, effectiveMode uint32, label string) []byte {
+	lb := []byte(label)
+	payloadLen := 12 + len(lb)
+	header := c.EncodeHeader(CmdModeStatus, uint32(payloadLen))
+	buf := make([]byte, payloadLen)
+	binary.LittleEndian.PutUint32(buf[0:4], flags)
+	binary.LittleEndian.PutUint32(buf[4:8], effectiveMode)
+	binary.LittleEndian.PutUint32(buf[8:12], uint32(len(lb)))
+	copy(buf[12:], lb)
+	return append(header, buf...)
+}

@@ -130,6 +130,10 @@ public final class CandidatePanelHost {
                 let logical = Self.scaleRects(rects, by: s)
                 DispatchQueue.main.async { [weak self] in self?.panel.updateRects(logical) }
             }
+        case DownstreamCmd.modeStatus:
+            if let st = try? BinaryCodec.decodeModeStatusPayload(frame.payload) {
+                ModeStatusController.shared.apply(st)
+            }
         case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition:
             // 鼠标选词的 commit / composition 经 push 通道异步到达, 路由到当前焦点 controller。
             let responder = activeResponder

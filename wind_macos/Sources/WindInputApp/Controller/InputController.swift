@@ -54,6 +54,36 @@ public class InputController: IMKInputController {
         bridge?.close()
     }
 
+    // MARK: - IMKit 生命周期 (激活/失活)
+
+    /// IME 获得某 client 焦点时由系统调用。发 FocusGained 让 Go 端置 imeActivated=true,
+    /// 从而驱动工具栏 reducer 显示模式指示器 (CmdModeStatus → 菜单栏)。
+    public override func activateServer(_ sender: Any!) {
+        super.activateServer(sender)
+        currentClient = sender as? (IMKTextInput & NSObjectProtocol)
+        CandidatePanelHost.shared.activeResponder = self
+        sendEmpty(UpstreamCmd.focusGained)
+    }
+
+    /// IME 失去焦点 (切到别的输入法/应用) 时由系统调用。发 FocusLost 让 Go 端
+    /// 置 imeActivated=false, reducer 隐藏指示器。
+    public override func deactivateServer(_ sender: Any!) {
+        sendEmpty(UpstreamCmd.focusLost)
+        super.deactivateServer(sender)
+    }
+
+    /// 发一个无 payload 的上行帧 (focusGained/focusLost 等), 读掉 ack。失败仅 log。
+    private func sendEmpty(_ cmd: UInt16) {
+        guard let bridge = bridge, bridge.isConnected else { return }
+        do {
+            try bridge.send(BinaryCodec.encodeEmptyFrame(cmd: cmd))
+            _ = try bridge.readFrame()
+        } catch {
+            NSLog("WindInput[sendEmpty] cmd=\(cmd) io error: \(error)")
+            reconnect()
+        }
+    }
+
     // MARK: - IMKit hook
 
     public override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {

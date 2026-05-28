@@ -36,6 +36,7 @@
 - `CmdCandidateSelect`（上行 0x020D）darwin 专用：NSPanel 鼠标点中候选, payload=pageLocalIndex u32; Go 选词结果走 push 通道 (`PushCommitTextToActiveClient`) 异步交付
 - `CmdCandidateHover`（上行 0x020E）darwin 专用：NSPanel 鼠标悬停候选, payload=pageLocalIndex i32 (-1=无); forwarder 缓存候选按 hoverIndex 重渲染高亮
 - `CmdCandidateRects` 中 index<0 为翻页按钮 (-1=上页 -2=下页), 客户端点中合成 PgUp/PgDn 键
+- `CmdModeStatus`（下行 0x0504, push）darwin 专用：输入模式状态指示器, `EncodeModeStatus(flags, effectiveMode, label)`; payload=flags(u32)+effectiveMode(u32)+labelLen(u32)+label(UTF-8); flags 复用 `StatusChineseMode/StatusFullWidth/StatusChinesePunct/StatusCapsLock/StatusToolbarVisible` 位; forwarder 收 `CmdToolbarShow/Update/Hide` 转译为此帧, .app 据此更新菜单栏 NSStatusItem
 - `SharedRenderHeader` 固定 64 字节：前 40 字节有效字段，后 24 字节保留；后跟 BGRA 像素数据
 - `CmdBatchEvents` 是批量事件命令，`bridge` 对其有特殊处理路径
 - `IsAsyncRequest(header)` 判断是否为不需要响应的异步请求（版本字段高位为 `AsyncFlag=0x8000`）
