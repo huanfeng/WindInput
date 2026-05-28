@@ -382,7 +382,10 @@ func (s *Server) writeAck(conn net.Conn) {
 // 后续 PR 在 macOS forwarder 端补完整响应。
 func (s *Server) writeKeyResult(conn net.Conn, r *KeyEventResult) {
 	if r == nil {
-		_, _ = conn.Write(s.codec.EncodeConsumed())
+		// nil = IME 不处理此键, 透传给系统 (与 Win server_handler.go 语义一致)。
+		// 关键: 不能返 Consumed, 否则空 buffer 下 backspace/enter 等被吞,
+		// 宿主文本框收不到 → 无法删字/换行。
+		_, _ = conn.Write(s.codec.EncodePassThrough())
 		return
 	}
 	switch r.Type {
