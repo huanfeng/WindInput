@@ -267,6 +267,31 @@ public enum BinaryCodec {
         return out
     }
 
+    /// 编码 CmdCandidateContextMenu (0x020F upstream): index i32 + actionLen u32 + action UTF-8。
+    public static func encodeCandidateContextMenuFrame(index: Int, action: String) -> Data {
+        let actionBytes = Array(action.utf8)
+        var payload = Data(count: 8)
+        payload.writeUInt32LE(UInt32(bitPattern: Int32(index)), at: 0)
+        payload.writeUInt32LE(UInt32(actionBytes.count), at: 4)
+        payload.append(contentsOf: actionBytes)
+        var out = encodeHeader(cmd: UpstreamCmd.candidateContextMenu, payloadLen: UInt32(payload.count))
+        out.append(payload)
+        return out
+    }
+
+    /// 解 CmdCandidateMenuFlags (0x0505): count(u32) + count×(1 字节禁用位)。
+    /// 禁用位: 0x01 上移, 0x02 下移, 0x04 置顶, 0x08 删除, 0x10 恢复默认。
+    public static func decodeCandidateMenuFlagsPayload(_ buf: Data) throws -> [UInt8] {
+        guard buf.count >= 4 else {
+            throw IPCError.payloadTooShort(expected: 4, got: buf.count)
+        }
+        let n = Int(buf.readUInt32LE(at: 0))
+        guard buf.count >= 4 + n else {
+            throw IPCError.payloadTooShort(expected: 4 + n, got: buf.count)
+        }
+        return [UInt8](buf.subdata(in: 4..<(4 + n)))
+    }
+
     /// 解 CmdModeStatus (0x0504): flags(u32)+effectiveMode(u32)+labelLen(u32)+label(UTF-8)。
     /// flags 位: 0x01 中文模式, 0x02 全角, 0x04 中文标点, 0x08 指示器可见, 0x20 CapsLock。
     public static func decodeModeStatusPayload(_ buf: Data) throws -> ModeStatusPayload {

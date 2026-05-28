@@ -150,3 +150,10 @@ type MessageHandler interface {
 type candidateSelector interface {
 	HandleCandidateSelect(index int)
 }
+
+// candidateContextMenuHandler 是可选扩展接口: darwin bridge 收到 CmdCandidateContextMenu
+// (NSPanel 右键菜单动作) 时类型断言调用。index 为页内索引, action 为动作字符串
+// (move_up/move_down/move_top/delete/reset_default/copy)。Coordinator 实现, DeferredHandler 转发。
+type candidateContextMenuHandler interface {
+	HandleCandidateContextMenu(index int, action string)
+}

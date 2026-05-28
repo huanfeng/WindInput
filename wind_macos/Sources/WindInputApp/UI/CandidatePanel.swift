@@ -19,8 +19,11 @@ final class CandidateContentView: NSView {
     private var image: NSImage?
     private var hitRects: [CandidateHitRect] = []
     private var lastHover: Int = -1
+    private var ctxIndex: Int = -1     // 当前右键菜单针对的候选页内索引
+    private var menuFlags: [UInt8] = [] // 每候选右键菜单禁用位 (0x01上移 0x02下移 0x04置顶 0x08删除 0x10恢复默认)
     var onSelect: ((Int) -> Void)?
     var onHover: ((Int) -> Void)?
+    var onContextAction: ((Int, String) -> Void)? // (pageLocalIndex, action)
 
     override var isFlipped: Bool { true } // top-left 原点, 与 wire/rects 坐标系一致
 
@@ -33,6 +36,11 @@ final class CandidateContentView: NSView {
     /// 仅更新命中矩形 (rects 帧晚于 render 帧到达时用)。
     func setRects(_ rects: [CandidateHitRect]) {
         self.hitRects = rects
+    }
+
+    /// 更新右键菜单禁用位 (每候选 1 字节)。
+    func setMenuFlags(_ flags: [UInt8]) {
+        self.menuFlags = flags
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -60,6 +68,38 @@ final class CandidateContentView: NSView {
         if let idx = hitIndex(event) { onSelect?(idx) }
     }
 
+    override func rightMouseDown(with event: NSEvent) {
+        // 仅对候选 (index>=0) 弹右键菜单; 翻页按钮 (index<0) 与空白忽略。
+        guard let idx = hitIndex(event), idx >= 0 else { return }
+        ctxIndex = idx
+        let f: UInt8 = idx < menuFlags.count ? menuFlags[idx] : 0
+        let menu = NSMenu()
+        menu.autoenablesItems = false // 用我们显式的 isEnabled (按候选禁用位), 不让 AppKit 自动判定
+        addContextItem(menu, "置顶", "move_top", disabled: f & 0x04 != 0)
+        addContextItem(menu, "上移", "move_up", disabled: f & 0x01 != 0)
+        addContextItem(menu, "下移", "move_down", disabled: f & 0x02 != 0)
+        menu.addItem(.separator())
+        addContextItem(menu, "删除", "delete", disabled: f & 0x08 != 0)
+        addContextItem(menu, "恢复默认", "reset_default", disabled: f & 0x10 != 0)
+        menu.addItem(.separator())
+        addContextItem(menu, "复制", "copy", disabled: false)
+        menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
+    }
+
+    private func addContextItem(_ menu: NSMenu, _ title: String, _ action: String, disabled: Bool) {
+        let item = NSMenuItem(title: title, action: #selector(contextMenuAction(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = action
+        item.isEnabled = !disabled
+        menu.addItem(item)
+    }
+
+    @objc private func contextMenuAction(_ sender: NSMenuItem) {
+        if let action = sender.representedObject as? String {
+            onContextAction?(ctxIndex, action)
+        }
+    }
+
     override func mouseMoved(with event: NSEvent) {
         // 仅对候选 (index>=0) 报悬停; 翻页按钮 (index<0) 与空白都视为无悬停。
         let idx = hitIndex(event) ?? -1
@@ -84,6 +124,11 @@ final class CandidatePanel: NSPanel {
     var onHover: ((Int) -> Void)? {
         get { content.onHover }
         set { content.onHover = newValue }
+    }
+    /// 右键菜单动作回调 (pageLocalIndex, action)。
+    var onContextAction: ((Int, String) -> Void)? {
+        get { content.onContextAction }
+        set { content.onContextAction = newValue }
     }
 
     init() {
@@ -121,6 +166,11 @@ final class CandidatePanel: NSPanel {
     /// 更新命中矩形 (CmdCandidateRects 帧晚于 render 帧到达)。
     func updateRects(_ rects: [CandidateHitRect]) {
         content.setRects(rects)
+    }
+
+    /// 更新右键菜单禁用位 (CmdCandidateMenuFlags)。
+    func updateMenuFlags(_ flags: [UInt8]) {
+        content.setMenuFlags(flags)
     }
 
     func hidePanel() {

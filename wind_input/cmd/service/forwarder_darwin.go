@@ -54,6 +54,7 @@ type darwinForwarder struct {
 	lastTheme     string
 	cfgTheme      string            // 最近一次从 config 读到的主题名
 	cfgStyle      config.ThemeStyle // 最近一次从 config 读到的 theme_style
+	cfgSchema     string            // 最近一次从 config 读到的 schema.active (右键禁用判定用)
 	cfgPath       string
 	lastCfgMod    time.Time
 	lastDark      bool
@@ -86,13 +87,13 @@ func (f *darwinForwarder) refreshThemeIfNeeded() {
 		if st, err := os.Stat(f.cfgPath); err == nil && st.ModTime().After(f.lastCfgMod) {
 			f.lastCfgMod = st.ModTime()
 			if cfg, err := config.Load(); err == nil {
-				f.cfgTheme, f.cfgStyle = cfg.UI.Theme, cfg.UI.ThemeStyle
+				f.cfgTheme, f.cfgStyle, f.cfgSchema = cfg.UI.Theme, cfg.UI.ThemeStyle, cfg.Schema.Active
 			}
 		}
 	}
 	if f.cfgTheme == "" {
 		if cfg, err := config.Load(); err == nil {
-			f.cfgTheme, f.cfgStyle = cfg.UI.Theme, cfg.UI.ThemeStyle
+			f.cfgTheme, f.cfgStyle, f.cfgSchema = cfg.UI.Theme, cfg.UI.ThemeStyle, cfg.Schema.Active
 		}
 		if f.cfgTheme == "" {
 			return
@@ -257,6 +258,51 @@ func (f *darwinForwarder) onHover(idx int) {
 	f.renderAndPush()
 }
 
+// computeMenuFlags 算当前页每个候选的右键菜单禁用位 (镜像 Win window_mouse.go 规则)。
+// page 为 1-based 页码, perPage 每页数, total 总候选数; 用全局位置判定首/末/单。
+func (f *darwinForwarder) computeMenuFlags(candidates []ui.Candidate, page, perPage, total int) []byte {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if perPage <= 0 {
+		perPage = len(candidates)
+	}
+	if page < 1 {
+		page = 1
+	}
+	pinyinSchema := f.cfgSchema == "pinyin"
+	out := make([]byte, len(candidates))
+	for i := range candidates {
+		c := candidates[i]
+		global := (page-1)*perPage + i
+		isFirst := global == 0
+		isLast := total > 0 && global == total-1
+		single := total <= 1
+		isGroupMember := c.IsGroupMember
+		isSingleChar := len([]rune(c.Text)) <= 1
+		// 拼音引擎的普通候选无稳定 ID, 不能移动 (Win: isPinyin && !isCommand);
+		// 纯拼音方案按 schema 判, 混输按候选 Source 判。
+		isPinyin := pinyinSchema || string(c.Source) == "pinyin"
+		moveBlocked := isPinyin && !c.IsCommand
+
+		var b uint8
+		if isFirst || single || moveBlocked || isGroupMember {
+			b |= ipc.MenuFlagDisableMoveUp | ipc.MenuFlagDisableMoveTop
+		}
+		if isLast || single || moveBlocked || isGroupMember {
+			b |= ipc.MenuFlagDisableMoveDown
+		}
+		if (isSingleChar && !c.IsCommand) || isGroupMember {
+			b |= ipc.MenuFlagDisableDelete
+		}
+		if !c.HasShadow || isGroupMember {
+			b |= ipc.MenuFlagDisableReset
+		}
+		out[i] = b
+	}
+	return out
+}
+
 // renderAndPush 用当前缓存的候选 + hoverIndex 渲染并推帧 (含命中矩形)。
 func (f *darwinForwarder) renderAndPush() {
 	f.refreshThemeIfNeeded() // 渲染前检测主题变化 (config mtime 变了才重载)
@@ -314,6 +360,11 @@ func (f *darwinForwarder) renderAndPush() {
 		if len(rects) > 0 {
 			f.srv.BroadcastFrame(f.codec.EncodeCandidateRects(rects))
 		}
+	}
+
+	// 右键菜单禁用位 (每候选 1 字节), 供 .app NSMenu 按候选状态禁用项。
+	if flags := f.computeMenuFlags(candidates, p.Page, p.CandidatesPerPage, p.TotalCandidateCount); len(flags) > 0 {
+		f.srv.BroadcastFrame(f.codec.EncodeCandidateMenuFlags(flags))
 	}
 
 	f.logger.Debug("darwin forwarder pushed frame",

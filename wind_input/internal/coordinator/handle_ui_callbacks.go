@@ -246,6 +246,31 @@ func (c *Coordinator) HandleCandidateSelect(index int) {
 	go c.handleCandidateSelect(index)
 }
 
+// HandleCandidateContextMenu 处理 darwin NSPanel 右键菜单动作 (页内索引 → 全局索引)。
+// action: move_up/move_down/move_top/delete/reset_default/copy。各 handle* 期望全局索引
+// (与 Win window_mouse.go 一致), 而鼠标传来的是页内索引, 故此处换算。
+func (c *Coordinator) HandleCandidateContextMenu(index int, action string) {
+	c.mu.Lock()
+	global := (c.currentPage-1)*c.candidatesPerPage + index
+	c.mu.Unlock()
+	switch action {
+	case "move_up":
+		go c.handleCandidateMoveUp(global)
+	case "move_down":
+		go c.handleCandidateMoveDown(global)
+	case "move_top":
+		go c.handleCandidateMoveTop(global)
+	case "delete":
+		go c.handleCandidateDelete(global)
+	case "reset_default":
+		go c.handleCandidateResetDefault(global)
+	case "copy":
+		go c.handleCandidateCopy(global)
+	default:
+		c.logger.Debug("Unknown candidate context menu action", "action", action)
+	}
+}
+
 // handleCandidateSelect 处理鼠标点击选词（在独立 goroutine 中调用，通过 push 管道交付结果）
 func (c *Coordinator) handleCandidateSelect(index int) {
 	c.mu.Lock()

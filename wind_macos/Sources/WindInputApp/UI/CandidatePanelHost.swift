@@ -43,6 +43,9 @@ public final class CandidatePanelHost {
         }
         panel.onSelect = { [weak self] index in self?.handlePanelClick(index) }
         panel.onHover = { [weak self] index in self?.sendFrame(BinaryCodec.encodeCandidateHoverFrame(index: index)) }
+        panel.onContextAction = { [weak self] index, action in
+            self?.sendFrame(BinaryCodec.encodeCandidateContextMenuFrame(index: index, action: action))
+        }
     }
 
     public func start() {
@@ -133,6 +136,10 @@ public final class CandidatePanelHost {
         case DownstreamCmd.modeStatus:
             if let st = try? BinaryCodec.decodeModeStatusPayload(frame.payload) {
                 ModeStatusController.shared.apply(st)
+            }
+        case DownstreamCmd.candidateMenuFlags:
+            if let flags = try? BinaryCodec.decodeCandidateMenuFlagsPayload(frame.payload) {
+                DispatchQueue.main.async { [weak self] in self?.panel.updateMenuFlags(flags) }
             }
         case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition:
             // 鼠标选词的 commit / composition 经 push 通道异步到达, 路由到当前焦点 controller。

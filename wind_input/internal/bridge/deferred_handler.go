@@ -193,3 +193,10 @@ func (d *DeferredHandler) HandleCandidateSelect(index int) {
 		cs.HandleCandidateSelect(index)
 	}
 }
+
+// HandleCandidateContextMenu 转发右键菜单动作给底层 handler (Coordinator 实现)。
+func (d *DeferredHandler) HandleCandidateContextMenu(index int, action string) {
+	if h, ok := d.getHandler().(candidateContextMenuHandler); ok {
+		h.HandleCandidateContextMenu(index, action)
+	}
+}

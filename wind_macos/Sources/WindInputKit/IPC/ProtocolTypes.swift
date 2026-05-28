@@ -28,6 +28,7 @@ public enum UpstreamCmd {
     public static let systemModeSwitch: UInt16 = 0x020B
     public static let candidateSelect: UInt16  = 0x020D   // NSPanel 鼠标点击命中候选 (payload: pageLocalIndex u32)
     public static let candidateHover: UInt16   = 0x020E   // NSPanel 鼠标悬停候选 (payload: pageLocalIndex i32, -1=无)
+    public static let candidateContextMenu: UInt16 = 0x020F // NSPanel 右键菜单动作 (payload: index i32 + actionLen u32 + action UTF-8)
     public static let caretUpdate: UInt16     = 0x0301
     public static let selectionChanged: UInt16 = 0x0302
     public static let caretPending: UInt16    = 0x0303
@@ -56,6 +57,7 @@ public enum DownstreamCmd {
     public static let hostRenderFrame: UInt16  = 0x0502   // SHM 新帧就绪通知 (darwin)
     public static let candidateRects: UInt16   = 0x0503   // 当前帧候选命中矩形 (panel-local)
     public static let modeStatus: UInt16       = 0x0504   // 输入模式状态 (中英/全半角/标点/方案), 供菜单栏指示器
+    public static let candidateMenuFlags: UInt16 = 0x0505 // 当前页候选右键菜单禁用位 (每候选 1 字节)
     public static let batchResponse: UInt16    = 0x0F02
 }
 

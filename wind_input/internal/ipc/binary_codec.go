@@ -834,6 +834,26 @@ func (c *BinaryCodec) EncodeCandidateRects(rects []CandidateHitRect) []byte {
 // Payload: flags(u32) + effectiveMode(u32) + labelLen(u32) + label(UTF-8)。
 // flags 复用 StatusChineseMode/StatusFullWidth/StatusChinesePunct/StatusCapsLock/
 // StatusToolbarVisible 位; effectiveMode: 0=中文 1=英文小写 2=英文大写。
+// 候选右键菜单禁用位 (CmdCandidateMenuFlags 每候选 1 字节)。
+const (
+	MenuFlagDisableMoveUp   uint8 = 0x01
+	MenuFlagDisableMoveDown uint8 = 0x02
+	MenuFlagDisableMoveTop  uint8 = 0x04
+	MenuFlagDisableDelete   uint8 = 0x08
+	MenuFlagDisableReset    uint8 = 0x10
+)
+
+// EncodeCandidateMenuFlags 编 CmdCandidateMenuFlags push 帧: count(u32) + count×(1 字节禁用位)。
+// 顺序与当前页候选一致, 客户端按页内 index 取对应字节判定 NSMenu 各项是否禁用。
+func (c *BinaryCodec) EncodeCandidateMenuFlags(flags []byte) []byte {
+	payloadLen := 4 + len(flags)
+	header := c.EncodeHeader(CmdCandidateMenuFlags, uint32(payloadLen))
+	buf := make([]byte, payloadLen)
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(flags)))
+	copy(buf[4:], flags)
+	return append(header, buf...)
+}
+
 func (c *BinaryCodec) EncodeModeStatus(flags, effectiveMode uint32, label string) []byte {
 	lb := []byte(label)
 	payloadLen := 12 + len(lb)

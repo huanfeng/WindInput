@@ -379,6 +379,20 @@ func (s *Server) dispatchFrame(conn net.Conn, id connID, header *ipc.IpcHeader, 
 			s.onCandidateHover(idx)
 		}
 		s.writeAck(conn)
+	case ipc.CmdCandidateContextMenu:
+		// NSPanel 右键菜单动作, payload = index i32 + actionLen u32 + action UTF-8。
+		// 动作经 Coordinator 执行 (删词/置顶/恢复等), 候选更新走 push 通道, 此处仅 Ack。
+		if len(payload) >= 8 {
+			idx := int(int32(binary.LittleEndian.Uint32(payload[0:4])))
+			alen := int(binary.LittleEndian.Uint32(payload[4:8]))
+			if len(payload) >= 8+alen {
+				action := string(payload[8 : 8+alen])
+				if h, ok := s.handler.(candidateContextMenuHandler); ok {
+					h.HandleCandidateContextMenu(idx, action)
+				}
+			}
+		}
+		s.writeAck(conn)
 	default:
 		// 未覆盖的帧 (HostRender setup / token 等 Win-only 概念) 直接 Ack,
 		// macOS forwarder 在自己的 PR 内按需扩展 dispatch。
