@@ -915,6 +915,9 @@ func (c *Coordinator) getPendingBufferText() string {
 		text = c.tempEnglishBuffer
 	case len(c.tempPinyinBuffer) > 0:
 		text = c.tempPinyinBuffer
+		if c.tempPinyinTriggerKey == "z" && c.config != nil && c.config.Input.TempPinyin.ZIncludeOnCommitEnabled() {
+			text = "z" + text
+		}
 	case c.quickInputMode && len(c.quickInputPinyinBuffer) > 0:
 		text = c.quickInputPinyinBuffer
 	case c.quickInputMode && len(c.quickInputBuffer) > 0:

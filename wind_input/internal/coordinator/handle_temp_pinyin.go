@@ -316,9 +316,9 @@ func (c *Coordinator) zHybridFallback(lowerKey string) (pinyinBuffer string, ok 
 // rewindBuffer / rewindKey 是切入瞬间被抛弃的 inputBuffer 和触发键, 用于让用户
 // 在切入后未做任何编辑时通过 backspace 一键回退到正常输入流.
 func (c *Coordinator) enterTempPinyinFromZBuffer(initialBuffer, rewindBuffer, rewindKey string) *bridge.KeyEventResult {
-	// 清除当前 z 前缀的输入状态
+	// 清除当前 z 前缀的输入状态；不调用 hideUI，避免候选窗在切换瞬间闪烁——
+	// showPinyinModeUI 会原地更新候选窗内容。
 	c.clearState()
-	c.hideUI()
 
 	// 进入临时拼音模式
 	if c.engineMgr != nil {
