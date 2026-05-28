@@ -24,6 +24,9 @@ import (
 //
 // 处理 CmdCandidatesShow / CmdCandidatesHide; Toolbar/Toast/Mode 等后续 PR 接入。
 
+// darwinRenderScale: 候选框位图 HiDPI 渲染倍率 (2=Retina)。
+const darwinRenderScale = 2
+
 type darwinForwarder struct {
 	mu       sync.Mutex
 	logger   *slog.Logger
@@ -38,6 +41,12 @@ type darwinForwarder struct {
 func startCandidateForwarder(srv *bridge.Server, mgr *ui.Manager,
 	hrm *bridge.HostRenderManager, codec *ipc.BinaryCodec,
 	logger *slog.Logger) {
+
+	// HiDPI: 按 2x 渲染候选框位图 (现代 Mac 多为 Retina), 客户端按 logical 尺寸
+	// (像素/scale) 显示 → Retina 上 1 device px : 1 image px, 清晰不糊。
+	// 必须在 NewRenderer/DefaultRenderConfig 前注入, 因为它们读 GetDPIScale 算字号/尺寸。
+	// TODO: 后续可由客户端上报 backingScaleFactor 动态决定 (非 Retina 屏用 1x)。
+	ui.SetDPIScaleProvider(func() float64 { return float64(darwinRenderScale) })
 
 	renderer := ui.NewRenderer(ui.DefaultRenderConfig())
 	// darwin 仅 freetype 后端 (text_backend_darwin.go 忽略 mode 恒走 freetype)
@@ -122,6 +131,7 @@ func (f *darwinForwarder) showCandidates(p uicmd.CandidatesShowPayload, candidat
 		Width:  uint32(img.Bounds().Dx()),
 		Height: uint32(img.Bounds().Dy()),
 		Flags:  0x3, // Visible | ContentReady
+		Scale:  darwinRenderScale,
 	}
 	f.srv.BroadcastFrame(f.codec.EncodeHostRenderFrame(payload))
 

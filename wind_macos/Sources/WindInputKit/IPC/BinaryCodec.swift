@@ -236,13 +236,16 @@ public enum BinaryCodec {
         guard buf.count >= 24 else {
             throw IPCError.payloadTooShort(expected: 24, got: buf.count)
         }
+        // scale 是 28 字节版的扩展字段; 旧 24 字节帧默认 scale=1。
+        let scale = buf.count >= 28 ? buf.readUInt32LE(at: 24) : 1
         return HostRenderFramePayload(
             seq: buf.readUInt32LE(at: 0),
             x: Int32(bitPattern: buf.readUInt32LE(at: 4)),
             y: Int32(bitPattern: buf.readUInt32LE(at: 8)),
             width: buf.readUInt32LE(at: 12),
             height: buf.readUInt32LE(at: 16),
-            flags: buf.readUInt32LE(at: 20)
+            flags: buf.readUInt32LE(at: 20),
+            scale: scale
         )
     }
 

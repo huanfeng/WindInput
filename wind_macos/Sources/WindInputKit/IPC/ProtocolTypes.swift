@@ -78,15 +78,18 @@ public struct CandidateHitRect: Equatable {
 // 与 Go internal/ipc/binary_protocol.go HostRenderFramePayload 镜像。
 public struct HostRenderFramePayload: Equatable {
     public let seq: UInt32
-    public let x: Int32
+    public let x: Int32           // logical 点 (top-left)
     public let y: Int32
-    public let width: UInt32
+    public let width: UInt32      // device 像素 (= logical × scale)
     public let height: UInt32
     public let flags: UInt32
+    public let scale: UInt32      // HiDPI 渲染倍率; logical 尺寸 = 像素/scale (1=非 Retina, 2=Retina)
 
-    public init(seq: UInt32, x: Int32, y: Int32, width: UInt32, height: UInt32, flags: UInt32) {
+    public init(seq: UInt32, x: Int32, y: Int32, width: UInt32, height: UInt32,
+                flags: UInt32, scale: UInt32 = 1) {
         self.seq = seq; self.x = x; self.y = y
         self.width = width; self.height = height; self.flags = flags
+        self.scale = max(1, scale)
     }
 }
 

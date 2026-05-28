@@ -27,6 +27,7 @@ public final class CandidatePanelHost {
     private var push: PushClient?
     private var sendClient: BridgeClient?       // 发 CmdCandidateSelect 用 (request 连接)
     private var latestRects: [CandidateHitRect] = []
+    private var currentScale: CGFloat = 1
     private let lock = NSLock()
 
     /// 当前焦点 InputController, push 通道 commit 路由目标。weak 避免保活已销毁的 controller。
@@ -110,8 +111,9 @@ public final class CandidatePanelHost {
             applyHostRenderFrame(p)
         case DownstreamCmd.candidateRects:
             if let rects = try? BinaryCodec.decodeCandidateRectsPayload(frame.payload) {
-                lock.lock(); latestRects = rects; lock.unlock()
-                DispatchQueue.main.async { [weak self] in self?.panel.updateRects(rects) }
+                lock.lock(); latestRects = rects; let s = currentScale; lock.unlock()
+                let logical = Self.scaleRects(rects, by: s)
+                DispatchQueue.main.async { [weak self] in self?.panel.updateRects(logical) }
             }
         case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition:
             // 鼠标选词的 commit / composition 经 push 通道异步到达, 路由到当前焦点 controller。
@@ -128,17 +130,27 @@ public final class CandidatePanelHost {
             DispatchQueue.main.async { [weak self] in self?.panel.hidePanel() }
             return
         }
+        let scale = max(1, CGFloat(p.scale))
         if reader == nil { lock.lock(); openSHMIfNeeded(); lock.unlock() }
         guard let r = reader, let frame = r.snapshot() else { return }
-        guard let img = makeNSImage(from: frame) else { return }
+        guard let img = Self.makeNSImage(from: frame, scale: scale) else { return }
         let pt = NSPoint(x: CGFloat(p.x), y: CGFloat(p.y))
-        lock.lock(); let rects = latestRects; lock.unlock()
+        lock.lock(); currentScale = scale; let rects = Self.scaleRects(latestRects, by: scale); lock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.panel.show(image: img, atScreenPoint: pt, rects: rects)
         }
     }
 
-    private func makeNSImage(from f: SharedFrame) -> NSImage? {
+    /// 把 device-px 命中矩形除以 scale → logical 点 (与 NSView 坐标系一致)。
+    static func scaleRects(_ rects: [CandidateHitRect], by scale: CGFloat) -> [CandidateHitRect] {
+        if scale == 1 { return rects }
+        let s = Int32(scale)
+        return rects.map { CandidateHitRect(index: $0.index, x: $0.x / s, y: $0.y / s, w: $0.w / s, h: $0.h / s) }
+    }
+
+    /// BGRA device 像素 → NSImage, size 设为 logical (像素/scale)。Retina 上高分辨率
+    /// 位图贴 logical 框 = 1 device px : 1 image px, 清晰。
+    static func makeNSImage(from f: SharedFrame, scale: CGFloat) -> NSImage? {
         guard let provider = CGDataProvider(data: f.bgra as CFData) else { return nil }
         let bitmapInfo: CGBitmapInfo = [
             CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue),
@@ -153,6 +165,7 @@ public final class CandidatePanelHost {
             provider: provider, decode: nil,
             shouldInterpolate: false, intent: .defaultIntent
         ) else { return nil }
-        return NSImage(cgImage: cg, size: NSSize(width: f.width, height: f.height))
+        let logical = NSSize(width: CGFloat(f.width) / scale, height: CGFloat(f.height) / scale)
+        return NSImage(cgImage: cg, size: logical)
     }
 }
