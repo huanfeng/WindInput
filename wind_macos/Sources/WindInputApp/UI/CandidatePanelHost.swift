@@ -46,6 +46,7 @@ public final class CandidatePanelHost {
         panel.onContextAction = { [weak self] index, action in
             self?.sendFrame(BinaryCodec.encodeCandidateContextMenuFrame(index: index, action: action))
         }
+        panel.mainMenuProvider = { ModeStatusController.shared.mainMenu() }
     }
 
     public func start() {

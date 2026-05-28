@@ -14,8 +14,17 @@ public final class ModeStatusController {
     public static let shared = ModeStatusController()
 
     private var statusItem: NSStatusItem?
+    private var latest: ModeStatusPayload?
 
     private init() {}
+
+    /// 供候选框空白处右键复用的主菜单 (当前模式状态只读 + 设置入口)。
+    public func mainMenu() -> NSMenu {
+        let p = latest ?? ModeStatusPayload(
+            chineseMode: true, fullWidth: false, chinesePunct: true,
+            capsLock: false, visible: true, effectiveMode: 0, modeLabel: "")
+        return buildMenu(p)
+    }
 
     /// 应用一帧模式状态 (线程安全, 内部切回主线程操作 AppKit)。
     public func apply(_ p: ModeStatusPayload) {
@@ -27,6 +36,7 @@ public final class ModeStatusController {
     }
 
     private func applyMain(_ p: ModeStatusPayload) {
+        latest = p
         guard p.visible else {
             statusItem?.isVisible = false
             return

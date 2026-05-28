@@ -24,6 +24,7 @@ final class CandidateContentView: NSView {
     var onSelect: ((Int) -> Void)?
     var onHover: ((Int) -> Void)?
     var onContextAction: ((Int, String) -> Void)? // (pageLocalIndex, action)
+    var mainMenuProvider: (() -> NSMenu?)?         // 空白处右键弹主菜单 (设置/模式状态)
 
     override var isFlipped: Bool { true } // top-left 原点, 与 wire/rects 坐标系一致
 
@@ -69,8 +70,13 @@ final class CandidateContentView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        // 仅对候选 (index>=0) 弹右键菜单; 翻页按钮 (index<0) 与空白忽略。
-        guard let idx = hitIndex(event), idx >= 0 else { return }
+        // 候选 (index>=0): 候选上下文菜单; 空白/翻页区: 主菜单 (设置/模式)。
+        guard let idx = hitIndex(event), idx >= 0 else {
+            if let menu = mainMenuProvider?() {
+                menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
+            }
+            return
+        }
         ctxIndex = idx
         let f: UInt8 = idx < menuFlags.count ? menuFlags[idx] : 0
         let menu = NSMenu()
@@ -129,6 +135,11 @@ final class CandidatePanel: NSPanel {
     var onContextAction: ((Int, String) -> Void)? {
         get { content.onContextAction }
         set { content.onContextAction = newValue }
+    }
+    /// 空白处右键的主菜单提供者。
+    var mainMenuProvider: (() -> NSMenu?)? {
+        get { content.mainMenuProvider }
+        set { content.mainMenuProvider = newValue }
     }
 
     init() {
