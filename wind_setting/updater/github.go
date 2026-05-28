@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -45,11 +46,27 @@ type ReleaseInfo struct {
 	PreRelease bool           `json:"prerelease"`
 }
 
-// SetupAsset 返回第一个以 "-Setup.exe" 结尾的 Asset，找不到则返回 nil。
+// platformAssetSuffixes 返回当前平台安装包的候选文件名后缀 (按优先级)。
+// Windows: -Setup.exe; macOS: .dmg / -mac.zip / -macos.zip; 其它平台无。
+func platformAssetSuffixes() []string {
+	switch runtime.GOOS {
+	case "windows":
+		return []string{"-Setup.exe"}
+	case "darwin":
+		return []string{".dmg", "-mac.zip", "-macos.zip", "-arm64.dmg"}
+	default:
+		return nil
+	}
+}
+
+// SetupAsset 返回匹配当前平台后缀的第一个 Asset，找不到则返回 nil。
+// 按平台选择, 避免在 macOS 上误下载 Windows 的 -Setup.exe (无 macOS 发布资源时返回 nil)。
 func (r *ReleaseInfo) SetupAsset() *ReleaseAsset {
-	for i := range r.Assets {
-		if strings.HasSuffix(r.Assets[i].Name, "-Setup.exe") {
-			return &r.Assets[i]
+	for _, suffix := range platformAssetSuffixes() {
+		for i := range r.Assets {
+			if strings.HasSuffix(r.Assets[i].Name, suffix) {
+				return &r.Assets[i]
+			}
 		}
 	}
 	return nil
