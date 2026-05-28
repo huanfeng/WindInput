@@ -82,6 +82,14 @@
     </array>
 
     <!--
+        顶层菜单栏图标 (Big Sur+). 单色 PDF 模板, 系统按浅/深色菜单栏自动反色.
+        Resources/ 同时提供 menu_icon_15.pdf (15pt 主), menu_icon_26.pdf (26pt Retina),
+        menu_icon.pdf (升级兼容, 等于 15pt). 参考 fcitx5-macos assets/CMakeLists.txt.
+    -->
+    <key>tsInputMethodIconFileKey</key>
+    <string>menu_icon.pdf</string>
+
+    <!--
         加回 ComponentInputModeDict (sub-mode) 结构, 因为系统设置 UI 不显示
         WithoutModes 类型 (Apple 自带 + 所有第三方主流 IME 都是 ModeEnabled+Mode).
         组合: mode dict + register 进程常驻, 应该能让 mode 持久不被清.
@@ -112,9 +120,9 @@
                 <key>tsInputModeIsVisibleKey</key>
                 <true/>
                 <key>tsInputModeMenuIconFileKey</key>
-                <string>WindInputMode</string>
+                <string>menu_icon.pdf</string>
                 <key>tsInputModeAlternateMenuIconFileKey</key>
-                <string>WindInputMode</string>
+                <string>menu_icon.pdf</string>
                 <key>TISIconLabels</key>
                 <dict>
                     <key>Primary</key>

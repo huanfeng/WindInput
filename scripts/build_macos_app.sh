@@ -73,8 +73,18 @@ for lproj in "$MACOS_DIR/Sources/WindInputApp/Resources"/*.lproj; do
     info "lproj: $lang"
 done
 
-# (可选) 图标, 当前无 .icns; M4 加 menu icon 时把 AppIcon.icns / WindInputMode.tiff 放 Resources/
-# cp "$MACOS_DIR/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/" 2>/dev/null || true
+# 菜单栏图标 (单色 PDF 模板). plist 引用 menu_icon.pdf, 另带 _15 / _26 应对 Retina.
+# 源 SVG 在 Resources/wind-{15,26}.svg, 重新生成: rsvg-convert -f pdf -o menu_icon_15.pdf wind-15.svg
+for icon in menu_icon.pdf menu_icon_15.pdf menu_icon_26.pdf; do
+    src="$MACOS_DIR/Sources/WindInputApp/Resources/$icon"
+    if [[ -f "$src" ]]; then
+        cp "$src" "$APP_BUNDLE/Contents/Resources/$icon"
+        info "icon: $icon"
+    else
+        err "icon missing: $src (re-generate via rsvg-convert)"
+        exit 1
+    fi
+done
 
 # 写一个空的 PkgInfo (传统 macOS 期望)
 printf "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"

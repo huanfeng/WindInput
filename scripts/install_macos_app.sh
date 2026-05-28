@@ -35,19 +35,105 @@ bold() { printf "\033[1m%s\033[0m\n" "$*"; }
 info() { printf "  %s\n" "$*"; }
 err()  { printf "\033[31m[错误] %s\033[0m\n" "$*" >&2; }
 
-# -------- uninstall --------
+# -------- uninstall (完整清理) --------
+# 仅 rm .app 是不够的: register 守护进程残留 / HIToolbox plist 启用项 / TIS LS DB
+# 缓存 / Caches & Application Support 都可能残留, 导致系统设置里出现幽灵条目.
+# 这里一次清干净.
+BUNDLE_ID="to.feng.inputmethod.WindInput"
 if [[ $DO_UNINSTALL -eq 1 ]]; then
-    bold "==> Uninstall $INSTALL_APP"
-    sudo killall "$APP_NAME" 2>/dev/null || true
-    sudo rm -rf "$INSTALL_APP"
-    info "已删除 $INSTALL_APP"
-    info "注: 系统设置里需手动移除 WindInput 输入法项 (键盘 → 输入法 → -)"
+    bold "==> Uninstall WindInput (full purge)"
+
+    # 1. 杀所有 WindInput 进程 (含 --register-input-source 后台守护)
+    info "kill WindInput processes"
+    sudo pkill -9 -f "WindInput.app/Contents/MacOS/WindInput" 2>/dev/null || true
+    sudo pkill -9 -x "$APP_NAME" 2>/dev/null || true
+    rm -f /tmp/wind_register.log
+
+    # 2. 删 .app
+    if [[ -d "$INSTALL_APP" ]]; then
+        sudo rm -rf "$INSTALL_APP"
+        info "removed $INSTALL_APP"
+    else
+        info "(no $INSTALL_APP)"
+    fi
+
+    # 3. 清 HIToolbox plist 内启用项 / 选中项 (本 bundleID 相关)
+    #    显式走 /usr/bin/python3 (Apple framework, plistlib 稳定);
+    #    用户 PATH 上的 Homebrew python3.14 可能 libexpat ABI 不匹配, plistlib 起不来.
+    info "clean HIToolbox enabled/selected entries"
+    /usr/bin/python3 - <<PY
+import plistlib, os, sys
+path = os.path.expanduser('~/Library/Preferences/com.apple.HIToolbox.plist')
+bid = "$BUNDLE_ID"
+try:
+    with open(path, 'rb') as f: plist = plistlib.load(f)
+except FileNotFoundError:
+    sys.exit(0)
+changed = False
+for key in ('AppleEnabledInputSources', 'AppleSelectedInputSources', 'AppleInputSourceHistory'):
+    if key in plist and isinstance(plist[key], list):
+        before = len(plist[key])
+        plist[key] = [s for s in plist[key] if (s.get('Bundle ID') if isinstance(s, dict) else None) != bid]
+        if len(plist[key]) != before:
+            print(f"    {key}: {before} -> {len(plist[key])}")
+            changed = True
+if changed:
+    with open(path, 'wb') as f: plistlib.dump(plist, f)
+    print("    HIToolbox plist updated")
+else:
+    print("    (no HIToolbox entries matched)")
+PY
+
+    # 4. 清缓存 / state
+    for d in "$HOME/Library/Caches/WindInput" "$HOME/Library/Application Support/WindInput"; do
+        if [[ -d "$d" ]]; then
+            rm -rf "$d"
+            info "removed $d"
+        fi
+    done
+
+    # 4b. 撤销 install 阶段写入的 Gatekeeper 白名单条目 (与 install 步骤 3a 配对).
+    #     spctl --add 会往 /var/db/SystemPolicy 写持久规则, 不撤会无限累积.
+    if command -v spctl >/dev/null; then
+        sudo spctl --remove --label "WindInputDev" 2>/dev/null || true
+        info "removed Gatekeeper label WindInputDev"
+    fi
+
+    # 5. *绝不* 跑 lsregister -u / -kill (血泪教训).
+    #    - lsregister -u <已删除路径>: 行为未定义, 会污染 LaunchServices DB, 导致系统设置
+    #      "添加输入法" picker 对所有用户(含全新账户)报 "键盘布局不可用". 实测后果严重.
+    #    - lsregister -kill -r: 新版 macOS 已移除该选项 (官方说法: dangerous & no longer useful).
+    #    安全做法: .app 已删 + HIToolbox plist 已清 + cfprefsd reload, 足以让 TIS 失忆;
+    #    残留 LS 索引在下次扫描自然失效. 若仍需强制刷新, 只用 `lsregister -f -R <现存路径>`
+    #    (-f 重新登记, 非破坏性), 绝不对已删除路径操作.
+
+    # 6. 重启 input source UI agents (让菜单栏 / 系统设置面板重扫).
+    #    踩过的坑: killall -9 (SIGKILL) 这些 LaunchAgent 在 macOS 26 SIP 下不能
+    #    用 launchctl kickstart 手动重启; 必须只发 SIGTERM, 靠 launchd 自动 respawn.
+    info "restart text input agents (SIGTERM, launchd auto-respawn)"
+    sudo killall -HUP cfprefsd 2>/dev/null || true
+    sudo killall TextInputMenuAgent 2>/dev/null || true
+    sudo killall TextInputSwitcher 2>/dev/null || true
+    killall imklaunchagent 2>/dev/null || true
+
+    # 7. 验证
+    sleep 0.5
+    info "verify (TIS 内 WindInput 条目):"
+    if [[ -f "$SCRIPT_DIR/list_input_sources.swift" ]]; then
+        local_count=$(swift "$SCRIPT_DIR/list_input_sources.swift" 2>/dev/null | grep -c "$BUNDLE_ID" || true)
+        info "    $local_count 条 (期望 0)"
+    fi
+
+    bold "==> Done"
+    info "如果系统设置里还残留, 注销重登一次系统让 TextInputSources 全量重扫"
     exit 0
 fi
 
 # -------- build (可选) --------
 if [[ $DO_BUILD -eq 1 ]]; then
-    "$SCRIPT_DIR/build_macos_app.sh" "${BUILD_ARGS[@]}"
+    # 空数组 + set -u 在 bash 5 之前展开会报 unbound; 用 ${arr[@]+"${arr[@]}"} 形式
+    # 在数组未设/空时整体不展开任何参数, 非空时正常按数组逐项展开.
+    "$SCRIPT_DIR/build_macos_app.sh" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
 fi
 
 [[ -d "$APP_BUNDLE" ]] || { err "未找到 $APP_BUNDLE, 先跑 scripts/build_macos_app.sh"; exit 1; }
@@ -78,6 +164,7 @@ codesign -dv --verbose=2 "$INSTALL_APP" 2>&1 | grep -E "Authority|flags|Signatur
 # 3a. 把 .app 加入 Gatekeeper 白名单. ad-hoc 签名默认被 spctl reject, 而新版
 #     macOS 的 IMK 注册流程会拒绝 spctl rejected 的第三方 IME (踩过的坑: spctl
 #     -a 显示 rejected → TIS 列表无本 IME). spctl --add 给本 .app 单独通行证.
+#     注意: 该规则写入 /var/db/SystemPolicy 持久存在, uninstall 用同名 label --remove 撤销.
 if command -v spctl >/dev/null; then
     sudo spctl --add --label "WindInputDev" "$INSTALL_APP" 2>&1 | sed 's/^/    /' || true
 fi
@@ -103,7 +190,9 @@ fi
 sudo killall -HUP cfprefsd 2>/dev/null || true
 sudo killall TextInputMenuAgent 2>/dev/null || true
 sudo killall TextInputSwitcher  2>/dev/null || true
-killall -9 imklaunchagent 2>/dev/null || true   # 当前用户 IMK 调度器, 不需 sudo
+# 只发 SIGTERM (不要 -9): SIP 下这些 LaunchAgent 不能 launchctl kickstart 手动重启,
+# 必须靠 launchd 在收到 SIGTERM 后自动 respawn; SIGKILL 可能让它不被重启.
+killall imklaunchagent 2>/dev/null || true   # 当前用户 IMK 调度器, 不需 sudo
 
 # 4c. 触发一次 input sources 重读
 defaults read com.apple.HIToolbox AppleEnabledInputSources >/dev/null 2>&1 || true
