@@ -206,9 +206,26 @@ final class CandidatePanel: NSPanel {
             self.orderFrontRegardless()
             return
         }
-        // wire top-left → Cocoa bottom-left (窗口原点, 考虑 panel 自身高度)
-        let cocoaY = screen.frame.height - p.y - image.size.height
-        self.setFrameOrigin(NSPoint(x: p.x, y: cocoaY))
+        let size = image.size
+        let vf = screen.visibleFrame
+        // wire top-left → Cocoa bottom-left。caretBottomLine = panel 默认贴在 caret 下方时的顶边。
+        let caretBottomLine = screen.frame.height - p.y
+        var originX = p.x
+        var originY = caretBottomLine - size.height
+
+        // 水平: 过长候选框右溢/左溢时回拉, 保证整框可见。
+        if originX + size.width > vf.maxX { originX = vf.maxX - size.width }
+        if originX < vf.minX { originX = vf.minX }
+
+        // 垂直: 下方放不下 → 翻转到 caret 上方 (估算 caret 高 18pt, 避免遮住光标)。
+        if originY < vf.minY {
+            originY = caretBottomLine + 18
+        }
+        // 兜底夹进可见区 (翻转后仍越界, 或屏幕极小)。
+        if originY + size.height > vf.maxY { originY = vf.maxY - size.height }
+        if originY < vf.minY { originY = vf.minY }
+
+        self.setFrameOrigin(NSPoint(x: originX, y: originY))
         self.orderFrontRegardless()
     }
 
