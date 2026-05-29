@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/huanfeng/wind_input/internal/clipboard"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
@@ -39,6 +40,7 @@ func (m *Manager) doTakeScreenshot() {
 
 	ts := time.Now().Format("20060102_150405")
 	saved := 0
+	copiedToClipboard := false
 
 	// 候选窗口：用当前存储的候选数据重新渲染，直接保存，不推送到 HWND
 	m.window.mu.Lock()
@@ -57,6 +59,13 @@ func (m *Manager) doTakeScreenshot() {
 			} else {
 				saved++
 				m.logger.Info("Screenshot saved", "path", path)
+			}
+			// 同时复制候选窗口截图到剪贴板，便于粘贴到聊天软件
+			if err := clipboard.SetImage(img); err != nil {
+				m.logger.Warn("Screenshot: failed to copy candidate to clipboard", "error", err)
+			} else {
+				copiedToClipboard = true
+				m.logger.Info("Screenshot copied to clipboard")
 			}
 		}
 	}
@@ -119,8 +128,12 @@ func (m *Manager) doTakeScreenshot() {
 	m.logger.Info("UI screenshots taken", "count", saved, "dir", dir)
 
 	if saved > 0 {
+		msg := fmt.Sprintf("已保存 %d 张截图\n%s", saved, dir)
+		if copiedToClipboard {
+			msg = fmt.Sprintf("已保存 %d 张截图（候选窗口已复制到剪贴板）\n%s", saved, dir)
+		}
 		m.doShowToast(ToastOptions{
-			Message:  fmt.Sprintf("已保存 %d 张截图\n%s", saved, dir),
+			Message:  msg,
 			Level:    ToastSuccess,
 			Position: ToastBottomRight,
 			Duration: 4000,

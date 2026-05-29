@@ -1,15 +1,15 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-20 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-20 | Updated: 2026-05-29 -->
 
 # internal/clipboard
 
 ## Purpose
-Windows 剪贴板操作封装。提供文本读写接口，通过 Windows API（user32.dll、kernel32.dll）实现剪贴板数据的获取和设置。
+Windows 剪贴板操作封装。提供文本与图像读写接口，通过 Windows API（user32.dll、kernel32.dll）实现剪贴板数据的获取和设置。
 
 ## Key Files
 | File | Description |
 |------|-------------|
-| `clipboard.go` | `SetText()`/`GetText()` 函数；直接调用 Win32 API 的原生实现（`OpenClipboard`、`GetClipboardData` 等） |
+| `clipboard.go` | `SetText()`/`GetText()`/`SetImage()` 函数；直接调用 Win32 API 的原生实现（`OpenClipboard`、`GetClipboardData` 等） |
 
 ## For AI Agents
 
@@ -17,7 +17,8 @@ Windows 剪贴板操作封装。提供文本读写接口，通过 Windows API（
 - 直接操作 Windows API：通过 `syscall` 和 `golang.org/x/sys/windows` 调用 user32.dll、kernel32.dll
 - 内存管理：`GlobalAlloc`/`GlobalLock`/`GlobalUnlock`/`GlobalFree` 手动管理全局内存块
 - UTF-16 编码：所有文本经 `syscall.UTF16FromString`/`UTF16ToString` 转换
-- 剪贴板数据格式：`CF_UNICODETEXT`（格式 ID = 13）
+- 剪贴板数据格式：文本用 `CF_UNICODETEXT`（13）；图像用 `CF_DIBV5`（17，`BITMAPV5HEADER` + 32 位 BGRA，含 alpha 掩码，保留透明度）
+- `SetImage` 输入为预乘 alpha 的 `*image.RGBA`（与 UI 渲染器一致），写入前还原为 straight alpha；DIB 为 bottom-up（正高度）
 
 ### Testing Requirements
 - 依赖 Windows 环境测试
