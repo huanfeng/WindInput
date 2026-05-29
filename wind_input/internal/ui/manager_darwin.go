@@ -95,7 +95,7 @@ func (m *Manager) Destroy() {}
 func (m *Manager) Events() <-chan uicmd.Event { return m.eventCh }
 
 // SubscribeCommands 启一个 goroutine 把 darwin Manager 内部 cmdCh 推给 handler。
-// darwin forwarder 用此把命令转成 SHM bitmap + bridge push 帧 (PR-A.5)。
+// darwin forwarder 用此把命令转成 SHM bitmap + bridge push 帧。
 // 同时透传旁路 candidates ([]Candidate, 含 Weight/Source/Index/flags 等完整字段),
 // 供 forwarder 直接喂 ui.Renderer.RenderCandidates (CandidatesShowPayload.Candidates
 // 是精简 wire 版, 字段不全)。命令无候选旁路时 candidates 为 nil。

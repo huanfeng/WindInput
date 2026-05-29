@@ -21,7 +21,7 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// forwarder_darwin.go — PR-A M4: 把 ui.Manager 的 uicmd 命令转成 SHM bitmap +
+// forwarder_darwin.go — 把 ui.Manager 的 uicmd 命令转成 SHM bitmap +
 // bridge push CmdHostRenderFrame 帧, 让 macOS IMKit `.app` 端 CandidatePanelHost
 // 收到并贴出 NSPanel。
 //
