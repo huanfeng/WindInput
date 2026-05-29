@@ -212,9 +212,29 @@ func (f *darwinForwarder) handle(cmd uicmd.Command, candidates []ui.Candidate) {
 			page = p.Page
 		}
 		f.srv.BroadcastFrame(f.codec.EncodeOpenSettings(page))
+	case uicmd.CmdTooltipShow:
+		if p, ok := cmd.Payload.(uicmd.TooltipShowPayload); ok {
+			bg, fg := f.tooltipColors()
+			f.srv.BroadcastFrame(f.codec.EncodeTooltipShow(p.Text, bg, fg, p.FontPath))
+		}
+	case uicmd.CmdTooltipHide:
+		f.srv.BroadcastFrame(f.codec.EncodeTooltipHide())
 	default:
 		// 其它命令 (Toast / Menu 等) 后续 PR 接入
 	}
+}
+
+// tooltipColors 取当前已解析主题的 tooltip 配色 (#RRGGBBAA), 供 .app 应用。
+// 主题缺省时退到 nil → 用 .app 内置深色默认。
+func (f *darwinForwarder) tooltipColors() (bg, fg string) {
+	if f.themeMgr == nil {
+		return "", ""
+	}
+	rt := f.themeMgr.GetResolvedTheme()
+	if rt == nil {
+		return "", ""
+	}
+	return theme.ColorToHex(rt.Tooltip.BackgroundColor), theme.ColorToHex(rt.Tooltip.TextColor)
 }
 
 // pushModeStatus 把输入模式状态经 push 通道发给 .app 菜单栏指示器 (CmdModeStatus)。

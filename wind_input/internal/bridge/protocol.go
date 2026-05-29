@@ -157,3 +157,11 @@ type candidateSelector interface {
 type candidateContextMenuHandler interface {
 	HandleCandidateContextMenu(index int, action string)
 }
+
+// candidateHoverHandler 是可选扩展接口: darwin bridge 收到 CmdCandidateHover 时,
+// 除了让 forwarder 重绘高亮, 还派发给 Coordinator 触发 tooltip 查询。index 为页内
+// 索引 (-1=无悬停)。tooltip 文本经 push 通道下发, 位置由 .app 据悬停候选矩形自定。
+// Coordinator 实现, DeferredHandler 转发。
+type candidateHoverHandler interface {
+	HandleCandidateHover(index int)
+}

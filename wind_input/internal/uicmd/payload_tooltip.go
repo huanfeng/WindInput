@@ -10,6 +10,9 @@ type TooltipShowPayload struct {
 	CenterX int
 	BelowY  int
 	AboveY  int
+	// FontPath 为拆字字根字体文件 (TTF/OTF) 的绝对路径, 空表示无需特殊字体。
+	// macOS .app 用它注册字体并以级联回退渲染 PUA 字根字符。
+	FontPath string
 }
 
 func (TooltipShowPayload) isPayload()               {}
@@ -28,7 +31,7 @@ func (p TooltipShowPayload) marshal(w *binWriter) error {
 	w.writeI32(int32(p.CenterX))
 	w.writeI32(int32(p.BelowY))
 	w.writeI32(int32(p.AboveY))
-	return nil
+	return w.writeString(p.FontPath)
 }
 
 func (p *TooltipShowPayload) unmarshal(r *binReader) error {
@@ -42,6 +45,9 @@ func (p *TooltipShowPayload) unmarshal(r *binReader) error {
 			return err
 		}
 		*dst = int(v)
+	}
+	if p.FontPath, err = r.readString(); err != nil {
+		return err
 	}
 	return nil
 }

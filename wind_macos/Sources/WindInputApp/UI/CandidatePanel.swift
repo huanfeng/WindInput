@@ -57,6 +57,15 @@ final class CandidateContentView: NSView {
                                        owner: self, userInfo: nil))
     }
 
+    /// 返回页内 index 候选在屏幕坐标系下的矩形 (供 tooltip 定位)。
+    /// hitRects 是 flipped view-local 逻辑坐标 (top-left), 经 view→window→screen 转换。
+    func screenRect(forIndex index: Int, in window: NSWindow) -> NSRect? {
+        guard let r = hitRects.first(where: { Int($0.index) == index }) else { return nil }
+        let viewRect = NSRect(x: CGFloat(r.x), y: CGFloat(r.y), width: CGFloat(r.w), height: CGFloat(r.h))
+        let winRect = convert(viewRect, to: nil)
+        return window.convertToScreen(winRect)
+    }
+
     /// 命中候选 (index>=0) / 翻页按钮 (index<0) / 空白 (nil)。
     private func hitIndex(_ event: NSEvent) -> Int? {
         let p = convert(event.locationInWindow, from: nil) // isFlipped, top-left
@@ -232,6 +241,12 @@ final class CandidatePanel: NSPanel {
     /// 更新命中矩形 (CmdCandidateRects 帧晚于 render 帧到达)。
     func updateRects(_ rects: [CandidateHitRect]) {
         content.setRects(rects)
+    }
+
+    /// 页内 index 候选的屏幕矩形 (供 tooltip 定位); 不可见或找不到返回 nil。
+    func candidateScreenRect(index: Int) -> NSRect? {
+        guard isVisible else { return nil }
+        return content.screenRect(forIndex: index, in: self)
     }
 
     /// 更新右键菜单禁用位 (CmdCandidateMenuFlags)。

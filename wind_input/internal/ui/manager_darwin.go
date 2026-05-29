@@ -54,6 +54,7 @@ type Manager struct {
 	candidateLayout     config.CandidateLayout
 	statusIndicatorCfg  StatusWindowConfig
 	tooltipDelay        int
+	chaiziFontPath      string // 拆字字根字体文件绝对路径 (随 tooltip 下发给 .app 注册)
 
 	// callback 引用 (darwin 上 forwarder 直接订阅 Events(), 这些回调暂留兼容)
 	candidateCallbacks *CandidateCallback
@@ -303,11 +304,22 @@ func (m *Manager) ShowTooltipText(text string, centerX, belowY, aboveY int) {
 	if text == "" {
 		return
 	}
+	m.mu.Lock()
+	fontPath := m.chaiziFontPath
+	m.mu.Unlock()
 	m.postCmd(uicmd.NewCommand(uicmd.CmdTooltipShow, 0, uicmd.TooltipShowPayload{
-		Text: text, CenterX: centerX, BelowY: belowY, AboveY: aboveY,
+		Text: text, CenterX: centerX, BelowY: belowY, AboveY: aboveY, FontPath: fontPath,
 	}))
 }
-func (m *Manager) SetTooltipChaiziFont(string, string) {}
+
+// SetTooltipChaiziFont 记录拆字字根字体文件路径, 随后续 tooltip 一并下发给 .app
+// 注册并级联回退渲染 PUA 字根。dwFamilyName (Windows DirectWrite 系统字体名) 在
+// macOS 不适用, 忽略。
+func (m *Manager) SetTooltipChaiziFont(fontPath, _ string) {
+	m.mu.Lock()
+	m.chaiziFontPath = fontPath
+	m.mu.Unlock()
+}
 func (m *Manager) SetTooltipDelay(delay int) {
 	m.mu.Lock()
 	m.tooltipDelay = delay

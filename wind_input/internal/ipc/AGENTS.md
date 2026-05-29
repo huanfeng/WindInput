@@ -34,12 +34,14 @@
 - `CmdHostRenderFrame`（下行 0x0502, push）darwin 专用：Win 用命名 Event 通知 host render 新帧, darwin 无等价 API 改走 push 通道发 `HostRenderFramePayload`(seq+几何), 客户端据 seq 从 SHM 取帧 blit
 - `CmdCandidateRects`（下行 0x0503, push）darwin 专用：候选命中矩形 `[]CandidateHitRect` (panel-local), `EncodeCandidateRects`; 供 IMKit `.app` NSPanel 鼠标 hit-test
 - `CmdCandidateSelect`（上行 0x020D）darwin 专用：NSPanel 鼠标点中候选, payload=pageLocalIndex u32; Go 选词结果走 push 通道 (`PushCommitTextToActiveClient`) 异步交付
-- `CmdCandidateHover`（上行 0x020E）darwin 专用：NSPanel 鼠标悬停候选, payload=pageLocalIndex i32 (-1=无); forwarder 缓存候选按 hoverIndex 重渲染高亮
+- `CmdCandidateHover`（上行 0x020E）darwin 专用：NSPanel 鼠标悬停候选, payload=pageLocalIndex i32 (-1=无); server_darwin 双派发——forwarder 回调缓存候选按 hoverIndex 重渲染高亮, 同时 `Coordinator.HandleCandidateHover` 触发 tooltip 异步查询
 - `CmdCandidateRects` 中 index<0 为翻页按钮 (-1=上页 -2=下页), 客户端点中合成 PgUp/PgDn 键
 - `CmdModeStatus`（下行 0x0504, push）darwin 专用：输入模式状态指示器, `EncodeModeStatus(flags, effectiveMode, label)`; payload=flags(u32)+effectiveMode(u32)+labelLen(u32)+label(UTF-8); flags 复用 `StatusChineseMode/StatusFullWidth/StatusChinesePunct/StatusCapsLock/StatusToolbarVisible` 位; forwarder 收 `CmdToolbarShow/Update/Hide` 转译为此帧, .app 据此更新菜单栏 NSStatusItem
 - `CmdCandidateMenuFlags`（下行 0x0505, push）darwin 专用：当前页候选右键菜单禁用位, `EncodeCandidateMenuFlags(flags []byte)`; 每候选 1 字节, 位 `MenuFlagDisableTop/Move/Delete/Reset/Copy`(0x01..0x10); .app 据此 disable 候选右键 NSMenuItem
 - `CmdMenuShow`（下行 0x0506）darwin 专用：统一菜单树, 是上行 `CmdShowContextMenu`(0x020A) 的请求-响应回包 (经 request 连接 conn.Write, 非 push); payload 见 `bridge.encodeUnifiedMenuPayload` (count u32 + 递归 item: id i32 + flags u8[0x01 sep/0x02 checked/0x04 disabled] + labelLen u32 + label + childCount u32 + children)
 - `CmdOpenSettings`（下行 0x0507, push）darwin 专用：请求 .app 打开设置应用, `EncodeOpenSettings(page string)`; payload=page(UTF-8); forwarder 收 `uicmd.CmdSettingsOpen` 转译为此帧, .app 经 NSWorkspace 带 `--page=` 启动/激活设置 app
+- `CmdTooltipShow`（下行 0x0508, push）darwin 专用：候选悬停 tooltip, `EncodeTooltipShow(text, bgColor, fgColor, fontPath string)`; payload 四段长度前缀字符串 text+bg+fg+fontPath; bg/fg 为 `#RRGGBB[AA]` 主题色, fontPath 为拆字字根字体文件绝对路径 (空=无需特殊字体, .app 注册后级联回退渲染 PUA 字根); 位置由 .app 据悬停候选屏幕矩形自定
+- `CmdTooltipHide`（下行 0x0509, push）darwin 专用：隐藏 tooltip, `EncodeTooltipHide()` 空 payload
 - `CmdCandidateContextMenu`（上行 0x020F）darwin 专用：候选右键菜单动作, payload=index i32 + actionLen u32 + action(UTF-8); Coordinator.HandleCandidateContextMenu 按 action 派发 move/delete/reset/copy
 - `CmdMenuAction`（上行 0x0210）darwin 专用：统一菜单项被选中, payload=id i32; Coordinator.HandleUnifiedMenuAction 按 id 派发
 - `SharedRenderHeader` 固定 64 字节：前 40 字节有效字段，后 24 字节保留；后跟 BGRA 像素数据

@@ -111,7 +111,7 @@ bridge handler goroutine 处理仍走同步响应的命令（`CmdHostRenderReque
 - KeyEvent 同步响应已完整: `writeKeyResult` 把 commit/composition 编回响应帧 (IMKit `InputController.handle` 同步读取后 insertText/setMarkedText); **不要回退到 default→Ack**, 否则选词文本被吞 → "输了字不上屏"
 - host render: forwarder (`cmd/service/forwarder_darwin.go`) 订阅 `ui.Manager` cmdCh, 收 CandidatesShow → gg 渲染 → `SharedMemory.WriteFrame` → `BroadcastFrame(EncodeHostRenderFrame)` + `BroadcastFrame(EncodeCandidateRects)`; SHM 在 `SetupHostRender(0)` 懒分配, `CleanupAll` 时 munmap+unlink
 - 鼠标选词: `.app` NSPanel 点中候选 → 发 `CmdCandidateSelect`(pageLocalIndex) → server_darwin dispatch 类型断言 `candidateSelector` → `Coordinator.HandleCandidateSelect` → doSelectCandidate → `PushCommitTextToActiveClient` (commit 走 push 通道, `.app` 路由到 active InputController)
-- 鼠标悬停: 发 `CmdCandidateHover` → server_darwin 调 `SetCandidateHoverHandler` 注入的 forwarder 回调 (按 hoverIndex 重渲染高亮, 纯渲染层状态不经 coordinator)
+- 鼠标悬停: 发 `CmdCandidateHover` → server_darwin 双派发: (1) `SetCandidateHoverHandler` 注入的 forwarder 回调按 hoverIndex 重渲染高亮; (2) 类型断言 `candidateHoverHandler` → `Coordinator.HandleCandidateHover` 触发 tooltip 异步查询 (结果经 push `CmdTooltipShow` 下发, .app 据悬停候选矩形定位)
 - 候选右键: 发 `CmdCandidateContextMenu`(index+action) → 类型断言 `candidateContextMenuHandler` → `Coordinator.HandleCandidateContextMenu`
 - 统一菜单 (候选框空白处右键): .app 发上行 `CmdShowContextMenu` → server_darwin 调 `unifiedMenuHandler.UnifiedMenuItems()` 建树 → `encodeUnifiedMenuPayload` 经 conn.Write 回 `CmdMenuShow` (请求-响应, 非 Ack/非 push); .app 据树建 NSMenu, 点中发上行 `CmdMenuAction`(id) → `Coordinator.HandleUnifiedMenuAction`
 - POSIX SHM 名 `/WindInput_SHM` ≤30 字符 (macOS PSHMNAMLEN=31); 进程异常退出残留段在 `NewSharedMemory` 起手 `shmUnlink` 清掉

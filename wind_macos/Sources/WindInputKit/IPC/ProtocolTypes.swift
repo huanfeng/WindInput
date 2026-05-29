@@ -61,6 +61,8 @@ public enum DownstreamCmd {
     public static let candidateMenuFlags: UInt16 = 0x0505 // 当前页候选右键菜单禁用位 (每候选 1 字节)
     public static let menuShow: UInt16         = 0x0506   // 统一菜单树 (CmdShowContextMenu 请求的响应)
     public static let openSettings: UInt16     = 0x0507   // 请求打开设置应用 (payload: page UTF-8)
+    public static let tooltipShow: UInt16      = 0x0508   // 候选悬停 tooltip 文本 + 主题色; .app 据悬停候选矩形定位
+    public static let tooltipHide: UInt16      = 0x0509   // 隐藏 tooltip (空 payload)
     public static let batchResponse: UInt16    = 0x0F02
 }
 
@@ -81,6 +83,22 @@ public struct MenuItemData {
         self.checked = checked
         self.disabled = disabled
         self.children = children
+    }
+}
+
+/// 候选悬停 tooltip (CmdTooltipShow 0x0508 解码结果)。text 可含 \n 多行、\t 分列。
+/// bgColor/fgColor 为 #RRGGBBAA, 空串表示用 .app 内置深色默认。位置由 .app 定。
+public struct TooltipPayload {
+    public let text: String
+    public let bgColor: String
+    public let fgColor: String
+    public let fontPath: String   // 拆字字根字体文件绝对路径, 空=无需特殊字体
+
+    public init(text: String, bgColor: String, fgColor: String, fontPath: String = "") {
+        self.text = text
+        self.bgColor = bgColor
+        self.fgColor = fgColor
+        self.fontPath = fontPath
     }
 }
 

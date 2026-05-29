@@ -70,6 +70,8 @@ const (
 	CmdCandidateMenuFlags   uint16 = 0x0505 // darwin: 当前页候选右键菜单禁用位 (每候选 1 字节), 供 NSMenu 按候选状态禁用项
 	CmdMenuShow             uint16 = 0x0506 // darwin: 统一菜单树 (CmdShowContextMenu 请求的响应), 供 .app 建 NSMenu
 	CmdOpenSettings         uint16 = 0x0507 // darwin: 请求 .app 打开设置应用 (payload: page UTF-8, 空=默认页)
+	CmdTooltipShow          uint16 = 0x0508 // darwin: 候选悬停 tooltip 文本 (text + 主题色); .app 据悬停候选矩形自行定位
+	CmdTooltipHide          uint16 = 0x0509 // darwin: 隐藏 tooltip (空 payload)
 	CmdBatchResponse        uint16 = 0x0F02 // Batch response container
 )
 

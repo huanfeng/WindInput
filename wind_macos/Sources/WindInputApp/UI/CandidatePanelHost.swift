@@ -23,6 +23,8 @@ public final class CandidatePanelHost {
     public static let shared = CandidatePanelHost()
 
     private let panel: CandidatePanel
+    private let tooltip: TooltipPanel
+    private var lastHoverIndex = -1   // 仅主线程访问 (onHover/tooltipShow 都切主线程)
     private var reader: SharedMemoryReader?
     private var push: PushClient?
     private var sendClient: BridgeClient?       // 发 CmdCandidateSelect 用 (request 连接)
@@ -37,13 +39,21 @@ public final class CandidatePanelHost {
     private init() {
         if Thread.isMainThread {
             panel = CandidatePanel()
+            tooltip = TooltipPanel()
         } else {
             var p: CandidatePanel?
-            DispatchQueue.main.sync { p = CandidatePanel() }
+            var t: TooltipPanel?
+            DispatchQueue.main.sync { p = CandidatePanel(); t = TooltipPanel() }
             panel = p!
+            tooltip = t!
         }
         panel.onSelect = { [weak self] index in self?.handlePanelClick(index) }
-        panel.onHover = { [weak self] index in self?.sendFrame(BinaryCodec.encodeCandidateHoverFrame(index: index)) }
+        panel.onHover = { [weak self] index in
+            guard let self = self else { return }
+            self.lastHoverIndex = index               // 主线程 (mouseMoved)
+            if index < 0 { self.tooltip.hidePanel() }  // 离开候选立即收起, 文本到达前先隐
+            self.sendFrame(BinaryCodec.encodeCandidateHoverFrame(index: index))
+        }
         panel.onContextAction = { [weak self] index, action in
             self?.sendFrame(BinaryCodec.encodeCandidateContextMenuFrame(index: index, action: action))
         }
@@ -117,7 +127,22 @@ public final class CandidatePanelHost {
         push?.stop(); push = nil
         sendClient?.close(); sendClient = nil
         reader?.closeReader(); reader = nil
-        DispatchQueue.main.async { [weak self] in self?.panel.hidePanel() }
+        DispatchQueue.main.async { [weak self] in
+            self?.panel.hidePanel()
+            self?.tooltip.hidePanel()
+        }
+    }
+
+    /// 显示候选悬停 tooltip: 定位到当前悬停候选的屏幕矩形 (主线程调用)。
+    /// 文本异步到达, 期间用户可能已移开 → lastHoverIndex<0 或取不到矩形则不显示。
+    private func showTooltip(_ p: TooltipPayload) {
+        let idx = lastHoverIndex
+        guard idx >= 0, let rect = panel.candidateScreenRect(index: idx) else {
+            tooltip.hidePanel()
+            return
+        }
+        tooltip.show(text: p.text, bgHex: p.bgColor, fgHex: p.fgColor,
+                     fontPath: p.fontPath, anchorScreenRect: rect)
     }
 
     private func openSHMIfNeeded() {
@@ -213,6 +238,12 @@ public final class CandidatePanelHost {
         case DownstreamCmd.openSettings:
             let page = String(data: frame.payload, encoding: .utf8) ?? ""
             ModeStatusController.shared.openSettings(page: page)
+        case DownstreamCmd.tooltipShow:
+            if let p = try? BinaryCodec.decodeTooltipPayload(frame.payload) {
+                DispatchQueue.main.async { [weak self] in self?.showTooltip(p) }
+            }
+        case DownstreamCmd.tooltipHide:
+            DispatchQueue.main.async { [weak self] in self?.tooltip.hidePanel() }
         case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition:
             // 鼠标选词的 commit / composition 经 push 通道异步到达, 路由到当前焦点 controller。
             let responder = activeResponder
@@ -225,7 +256,11 @@ public final class CandidatePanelHost {
     private func applyHostRenderFrame(_ p: HostRenderFramePayload) {
         let visible = (p.flags & 0x1) != 0
         if !visible || p.width == 0 || p.height == 0 {
-            DispatchQueue.main.async { [weak self] in self?.panel.hidePanel() }
+            DispatchQueue.main.async { [weak self] in
+                self?.lastHoverIndex = -1
+                self?.panel.hidePanel()
+                self?.tooltip.hidePanel()
+            }
             return
         }
         let scale = max(1, CGFloat(p.scale))

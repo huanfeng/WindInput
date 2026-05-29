@@ -278,6 +278,31 @@ public enum BinaryCodec {
 
     /// 解 CmdMenuShow (0x0506): count(u32) + count×item; item = id(i32)+flags(u8)
     /// +labelLen(u32)+label+childCount(u32)+children(递归)。flags: 0x01 分隔/0x02 勾选/0x04 禁用。
+    /// 解码 CmdTooltipShow (0x0508): textLen+text + bgLen+bg + fgLen+fg, 均 UTF-8。
+    public static func decodeTooltipPayload(_ buf: Data) throws -> TooltipPayload {
+        var off = 0
+        func readStr() throws -> String {
+            guard buf.count >= off + 4 else {
+                throw IPCError.payloadTooShort(expected: off + 4, got: buf.count)
+            }
+            let n = Int(buf.readUInt32LE(at: off)); off += 4
+            guard buf.count >= off + n else {
+                throw IPCError.payloadTooShort(expected: off + n, got: buf.count)
+            }
+            let s = n > 0
+                ? (String(data: buf.subdata(in: (buf.startIndex + off)..<(buf.startIndex + off + n)), encoding: .utf8) ?? "")
+                : ""
+            off += n
+            return s
+        }
+        let text = try readStr()
+        let bg = try readStr()
+        let fg = try readStr()
+        // fontPath 为后加字段; off 已到末尾 (旧服务无此段) 时容忍缺省为空。
+        let fontPath = off < buf.count ? try readStr() : ""
+        return TooltipPayload(text: text, bgColor: bg, fgColor: fg, fontPath: fontPath)
+    }
+
     public static func decodeUnifiedMenuPayload(_ buf: Data) throws -> [MenuItemData] {
         var off = 0
         let items = try decodeMenuItems(buf, &off)

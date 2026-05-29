@@ -374,9 +374,14 @@ func (s *Server) dispatchFrame(conn net.Conn, id connID, header *ipc.IpcHeader, 
 	case ipc.CmdCandidateHover:
 		// NSPanel 鼠标悬停候选, payload = pageLocalIndex i32 (-1=无)。
 		// forwarder 按 hoverIndex 重渲染高亮, 此处仅 Ack。
-		if s.onCandidateHover != nil && len(payload) >= 4 {
+		if len(payload) >= 4 {
 			idx := int(int32(binary.LittleEndian.Uint32(payload[0:4])))
-			s.onCandidateHover(idx)
+			if s.onCandidateHover != nil {
+				s.onCandidateHover(idx) // forwarder 重绘高亮
+			}
+			if h, ok := s.handler.(candidateHoverHandler); ok {
+				h.HandleCandidateHover(idx) // coordinator 触发 tooltip 查询
+			}
 		}
 		s.writeAck(conn)
 	case ipc.CmdShowContextMenu:

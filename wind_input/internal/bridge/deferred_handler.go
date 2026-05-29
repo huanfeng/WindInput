@@ -201,6 +201,13 @@ func (d *DeferredHandler) HandleCandidateContextMenu(index int, action string) {
 	}
 }
 
+// HandleCandidateHover 转发候选悬停给底层 handler 触发 tooltip 查询 (Coordinator 实现)。
+func (d *DeferredHandler) HandleCandidateHover(index int) {
+	if h, ok := d.getHandler().(candidateHoverHandler); ok {
+		h.HandleCandidateHover(index)
+	}
+}
+
 // UnifiedMenuItems 转发: 取底层 handler 构建的统一菜单树 (Coordinator 实现)。
 func (d *DeferredHandler) UnifiedMenuItems() []MenuItem {
 	if h, ok := d.getHandler().(unifiedMenuHandler); ok {

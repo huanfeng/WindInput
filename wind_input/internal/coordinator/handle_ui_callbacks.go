@@ -246,6 +246,14 @@ func (c *Coordinator) HandleCandidateSelect(index int) {
 	go c.handleCandidateSelect(index)
 }
 
+// HandleCandidateHover 是 handleCandidateHoverChange 的导出包装, 供 darwin bridge
+// 在收到 IMKit `.app` 的 CmdCandidateHover 帧 (NSPanel 鼠标悬停候选) 时调用, 触发
+// 异步 tooltip 查询。index 为页内 0-based 索引 (-1=无悬停)。位置参数传 0: macOS 端
+// tooltip 由 .app 据悬停候选矩形自行定位, 不依赖 Go 计算屏幕坐标。
+func (c *Coordinator) HandleCandidateHover(index int) {
+	c.handleCandidateHoverChange(index, 0, 0, 0)
+}
+
 // HandleCandidateContextMenu 处理 darwin NSPanel 右键菜单动作 (页内索引 → 全局索引)。
 // action: move_up/move_down/move_top/delete/reset_default/copy。各 handle* 期望全局索引
 // (与 Win window_mouse.go 一致), 而鼠标传来的是页内索引, 故此处换算。

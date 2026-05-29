@@ -837,6 +837,30 @@ func (c *BinaryCodec) EncodeOpenSettings(page string) []byte {
 	return append(header, pb...)
 }
 
+// EncodeTooltipShow 编 CmdTooltipShow push 帧 (darwin 候选悬停 tooltip)。
+// Payload: textLen(u32)+text + bgLen+bg + fgLen+fg + fontLen+fontPath。
+// 颜色为 #RRGGBB[AA] (取自已解析主题 Tooltip 配色); fontPath 为拆字字根字体文件
+// 绝对路径 (空=无需特殊字体), .app 据此注册并级联回退渲染 PUA 字根。
+// 位置由 .app 据悬停候选矩形自行定位, 不编位置。
+func (c *BinaryCodec) EncodeTooltipShow(text, bgColor, fgColor, fontPath string) []byte {
+	tb, bb, fb, pb := []byte(text), []byte(bgColor), []byte(fgColor), []byte(fontPath)
+	payloadLen := 16 + len(tb) + len(bb) + len(fb) + len(pb)
+	header := c.EncodeHeader(CmdTooltipShow, uint32(payloadLen))
+	buf := make([]byte, payloadLen)
+	off := 0
+	for _, s := range [][]byte{tb, bb, fb, pb} {
+		binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(s)))
+		off += 4
+		off += copy(buf[off:], s)
+	}
+	return append(header, buf...)
+}
+
+// EncodeTooltipHide 编 CmdTooltipHide push 帧 (空 payload)。
+func (c *BinaryCodec) EncodeTooltipHide() []byte {
+	return c.EncodeHeader(CmdTooltipHide, 0)
+}
+
 // EncodeModeStatus 编 CmdModeStatus push 帧 (darwin 输入模式状态指示器)。
 // Payload: flags(u32) + effectiveMode(u32) + labelLen(u32) + label(UTF-8)。
 // flags 复用 StatusChineseMode/StatusFullWidth/StatusChinesePunct/StatusCapsLock/
