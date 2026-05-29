@@ -182,7 +182,7 @@ func TestDarwin_Toolbar(t *testing.T) {
 
 func TestDarwin_StatusIndicator(t *testing.T) {
 	m := newDarwinTestManager()
-	m.ShowStatusIndicator(StatusState{ModeLabel: "中", PunctLabel: "，"}, 500, 600)
+	m.ShowStatusIndicator(StatusState{ModeLabel: "中", PunctLabel: "，"}, 500, 600, 20)
 	cmd := expectCmd(t, m)
 	p := cmd.Payload.(uicmd.StatusShowPayload)
 	if p.State.ModeLabel != "中" || p.State.PunctLabel != "，" {

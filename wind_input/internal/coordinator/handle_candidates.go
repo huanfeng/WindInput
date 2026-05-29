@@ -651,7 +651,7 @@ func (c *Coordinator) updateStatusIndicator() {
 	}
 
 	x, y := c.getIndicatorPosition()
-	c.uiManager.ShowStatusIndicator(state, x, y)
+	c.uiManager.ShowStatusIndicator(state, x, y, c.caretHeight)
 }
 
 // getStatusModeLabel 获取模式标签（支持简写/全称，CapsLock 时返回 "A"）

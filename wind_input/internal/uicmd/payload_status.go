@@ -9,9 +9,10 @@ type StatusState struct {
 
 // StatusShowPayload 显示状态指示器。
 type StatusShowPayload struct {
-	State StatusState
-	X     int
-	Y     int
+	State  StatusState
+	X      int
+	Y      int
+	Height int // caret 高度, 用于把气泡锚到 caret 底部下方 (随字体大小自适应, 不遮文字)
 }
 
 func (StatusShowPayload) isPayload()               {}
@@ -91,6 +92,7 @@ func (p StatusShowPayload) marshal(w *binWriter) error {
 	}
 	w.writeI32(int32(p.X))
 	w.writeI32(int32(p.Y))
+	w.writeI32(int32(p.Height))
 	return nil
 }
 
@@ -106,7 +108,11 @@ func (p *StatusShowPayload) unmarshal(r *binReader) error {
 	if err != nil {
 		return err
 	}
-	p.X, p.Y = int(x), int(y)
+	h, err := r.readI32()
+	if err != nil {
+		return err
+	}
+	p.X, p.Y, p.Height = int(x), int(y), int(h)
 	return nil
 }
 

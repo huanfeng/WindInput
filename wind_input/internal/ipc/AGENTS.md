@@ -42,6 +42,8 @@
 - `CmdOpenSettings`（下行 0x0507, push）darwin 专用：请求 .app 打开设置应用, `EncodeOpenSettings(page string)`; payload=page(UTF-8); forwarder 收 `uicmd.CmdSettingsOpen` 转译为此帧, .app 经 NSWorkspace 带 `--page=` 启动/激活设置 app
 - `CmdTooltipShow`（下行 0x0508, push）darwin 专用：候选悬停 tooltip, `EncodeTooltipShow(text, bgColor, fgColor, fontPath string)`; payload 四段长度前缀字符串 text+bg+fg+fontPath; bg/fg 为 `#RRGGBB[AA]` 主题色, fontPath 为拆字字根字体文件绝对路径 (空=无需特殊字体, .app 注册后级联回退渲染 PUA 字根); 位置由 .app 据悬停候选屏幕矩形自定
 - `CmdTooltipHide`（下行 0x0509, push）darwin 专用：隐藏 tooltip, `EncodeTooltipHide()` 空 payload
+- `CmdStatusShow`（下行 0x050A, push）darwin 专用：模式切换状态气泡, `EncodeStatusShow(text, bgColor, fgColor string, x, y, durationMs int32)`; payload 三段长度前缀字符串 text+bg+fg + x(i32)+y(i32)+durationMs(i32); text 为合并短文 (如 "中 ，"), bg/fg 为 #RRGGBB[AA] (主题 ModeIndicator 配色叠加 opacity), x/y 为 caret 底部下方锚点 (与候选窗口同位置), durationMs>0 到点自动隐藏 (temp 模式) / ==0 常驻 (always); forwarder 收 `uicmd.CmdStatusShow` 据 config 合成
+- `CmdStatusHide`（下行 0x050B, push）darwin 专用：隐藏状态气泡, `EncodeStatusHide()` 空 payload
 - `CmdCandidateContextMenu`（上行 0x020F）darwin 专用：候选右键菜单动作, payload=index i32 + actionLen u32 + action(UTF-8); Coordinator.HandleCandidateContextMenu 按 action 派发 move/delete/reset/copy
 - `CmdMenuAction`（上行 0x0210）darwin 专用：统一菜单项被选中, payload=id i32; Coordinator.HandleUnifiedMenuAction 按 id 派发
 - `SharedRenderHeader` 固定 64 字节：前 40 字节有效字段，后 24 字节保留；后跟 BGRA 像素数据

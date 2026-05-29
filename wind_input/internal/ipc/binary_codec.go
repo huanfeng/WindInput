@@ -861,6 +861,33 @@ func (c *BinaryCodec) EncodeTooltipHide() []byte {
 	return c.EncodeHeader(CmdTooltipHide, 0)
 }
 
+// EncodeStatusShow 编 CmdStatusShow push 帧 (darwin 状态提示气泡)。
+// Payload: textLen(u32)+text + bgLen+bg + fgLen+fg + x(i32) + y(i32) + durationMs(i32)。
+// text 为合并后的模式/标点/全半角短文 (如 "中 ，"); bg/fg 为 #RRGGBB[AA] (取自主题
+// ModeIndicator 或 config 自定义, 已叠加 opacity); x/y 为 caret 屏幕坐标 (wire top-left);
+// durationMs>0 时 .app 到点自动隐藏 (temp 模式), ==0 常驻 (always 模式)。
+func (c *BinaryCodec) EncodeStatusShow(text, bgColor, fgColor string, x, y, durationMs int32) []byte {
+	tb, bb, fb := []byte(text), []byte(bgColor), []byte(fgColor)
+	payloadLen := 12 + len(tb) + len(bb) + len(fb) + 12
+	header := c.EncodeHeader(CmdStatusShow, uint32(payloadLen))
+	buf := make([]byte, payloadLen)
+	off := 0
+	for _, s := range [][]byte{tb, bb, fb} {
+		binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(s)))
+		off += 4
+		off += copy(buf[off:], s)
+	}
+	binary.LittleEndian.PutUint32(buf[off:off+4], uint32(x))
+	binary.LittleEndian.PutUint32(buf[off+4:off+8], uint32(y))
+	binary.LittleEndian.PutUint32(buf[off+8:off+12], uint32(durationMs))
+	return append(header, buf...)
+}
+
+// EncodeStatusHide 编 CmdStatusHide push 帧 (空 payload)。
+func (c *BinaryCodec) EncodeStatusHide() []byte {
+	return c.EncodeHeader(CmdStatusHide, 0)
+}
+
 // EncodeModeStatus 编 CmdModeStatus push 帧 (darwin 输入模式状态指示器)。
 // Payload: flags(u32) + effectiveMode(u32) + labelLen(u32) + label(UTF-8)。
 // flags 复用 StatusChineseMode/StatusFullWidth/StatusChinesePunct/StatusCapsLock/

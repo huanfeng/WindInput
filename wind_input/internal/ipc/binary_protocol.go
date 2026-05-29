@@ -72,6 +72,8 @@ const (
 	CmdOpenSettings         uint16 = 0x0507 // darwin: 请求 .app 打开设置应用 (payload: page UTF-8, 空=默认页)
 	CmdTooltipShow          uint16 = 0x0508 // darwin: 候选悬停 tooltip 文本 (text + 主题色); .app 据悬停候选矩形自行定位
 	CmdTooltipHide          uint16 = 0x0509 // darwin: 隐藏 tooltip (空 payload)
+	CmdStatusShow           uint16 = 0x050A // darwin: 状态提示气泡 (模式/标点/全半角文本 + 主题色 + 位置 + 时长)
+	CmdStatusHide           uint16 = 0x050B // darwin: 隐藏状态提示气泡 (空 payload)
 	CmdBatchResponse        uint16 = 0x0F02 // Batch response container
 )
 

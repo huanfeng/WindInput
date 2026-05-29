@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -52,9 +53,10 @@ type darwinForwarder struct {
 	// theme_style=system 时跟随 macOS 外观 (检测 AppleInterfaceStyle)。
 	themeMgr      *theme.Manager
 	lastTheme     string
-	cfgTheme      string            // 最近一次从 config 读到的主题名
-	cfgStyle      config.ThemeStyle // 最近一次从 config 读到的 theme_style
-	cfgSchema     string            // 最近一次从 config 读到的 schema.active (右键禁用判定用)
+	cfgTheme      string                       // 最近一次从 config 读到的主题名
+	cfgStyle      config.ThemeStyle            // 最近一次从 config 读到的 theme_style
+	cfgSchema     string                       // 最近一次从 config 读到的 schema.active (右键禁用判定用)
+	cfgStatus     config.StatusIndicatorConfig // 状态提示气泡配置 (开关/内容/时长/配色)
 	cfgPath       string
 	lastCfgMod    time.Time
 	lastDark      bool
@@ -88,12 +90,14 @@ func (f *darwinForwarder) refreshThemeIfNeeded() {
 			f.lastCfgMod = st.ModTime()
 			if cfg, err := config.Load(); err == nil {
 				f.cfgTheme, f.cfgStyle, f.cfgSchema = cfg.UI.Theme, cfg.UI.ThemeStyle, cfg.Schema.Active
+				f.cfgStatus = cfg.UI.StatusIndicator
 			}
 		}
 	}
 	if f.cfgTheme == "" {
 		if cfg, err := config.Load(); err == nil {
 			f.cfgTheme, f.cfgStyle, f.cfgSchema = cfg.UI.Theme, cfg.UI.ThemeStyle, cfg.Schema.Active
+			f.cfgStatus = cfg.UI.StatusIndicator
 		}
 		if f.cfgTheme == "" {
 			return
@@ -219,6 +223,12 @@ func (f *darwinForwarder) handle(cmd uicmd.Command, candidates []ui.Candidate) {
 		}
 	case uicmd.CmdTooltipHide:
 		f.srv.BroadcastFrame(f.codec.EncodeTooltipHide())
+	case uicmd.CmdStatusShow:
+		if p, ok := cmd.Payload.(uicmd.StatusShowPayload); ok {
+			f.showStatusBubble(p)
+		}
+	case uicmd.CmdStatusHide:
+		f.srv.BroadcastFrame(f.codec.EncodeStatusHide())
 	default:
 		// 其它命令 (Toast / Menu 等) 后续 PR 接入
 	}
@@ -235,6 +245,77 @@ func (f *darwinForwarder) tooltipColors() (bg, fg string) {
 		return "", ""
 	}
 	return theme.ColorToHex(rt.Tooltip.BackgroundColor), theme.ColorToHex(rt.Tooltip.TextColor)
+}
+
+// showStatusBubble 按 config 把 ShowStatusIndicator 投递的状态合成最终气泡帧推给 .app。
+// 关停 (Enabled=false) 或文本为空时不推; temp 模式带 Duration 让 .app 到点自动隐藏。
+func (f *darwinForwarder) showStatusBubble(p uicmd.StatusShowPayload) {
+	f.refreshThemeIfNeeded() // 取最新 config (开关/内容/时长/配色) 与主题
+	cfg := f.cfgStatus
+	if !cfg.Enabled {
+		return
+	}
+	text := buildStatusText(p.State, cfg.ShowMode, cfg.ShowPunct, cfg.ShowFullWidth)
+	if text == "" {
+		return
+	}
+	bg, fg := f.statusColors()
+	duration := int32(0) // always 模式常驻 (duration=0)
+	if cfg.DisplayMode != "always" {
+		duration = int32(cfg.Duration)
+	}
+	// 锚到 caret 底部下方 (与候选窗口同位置: CaretY+CaretHeight+4), 随字体大小自适应,
+	// 不遮挡文字。OffsetX/OffsetY 为 config 微调。
+	x := int32(p.X + cfg.OffsetX)
+	y := int32(p.Y + p.Height + 4 + cfg.OffsetY)
+	f.srv.BroadcastFrame(f.codec.EncodeStatusShow(text, bg, fg, x, y, duration))
+}
+
+// buildStatusText 合并模式/标点/全半角标签 (空格分隔), 镜像 Win ui.BuildStatusText。
+func buildStatusText(s uicmd.StatusState, showMode, showPunct, showFullWidth bool) string {
+	var parts []string
+	if showMode && s.ModeLabel != "" {
+		parts = append(parts, s.ModeLabel)
+	}
+	if showPunct && s.PunctLabel != "" {
+		parts = append(parts, s.PunctLabel)
+	}
+	if showFullWidth && s.WidthLabel != "" {
+		parts = append(parts, s.WidthLabel)
+	}
+	return strings.Join(parts, " ")
+}
+
+// statusColors 取状态气泡配色 (#RRGGBBAA): config 自定义 > 主题 ModeIndicator > 内置默认;
+// bg 叠加 config.Opacity 到 alpha。镜像 Win StatusRenderer.getColors + applyOpacity。
+func (f *darwinForwarder) statusColors() (bg, fg string) {
+	var bgC color.Color = color.RGBA{60, 60, 60, 240}
+	var fgC color.Color = color.RGBA{255, 255, 255, 255}
+	if f.themeMgr != nil {
+		if rt := f.themeMgr.GetResolvedTheme(); rt != nil {
+			bgC = rt.ModeIndicator.BackgroundColor
+			fgC = rt.ModeIndicator.TextColor
+		}
+	}
+	if c, err := theme.ParseHexColor(f.cfgStatus.BackgroundColor); err == nil {
+		bgC = c
+	}
+	if c, err := theme.ParseHexColor(f.cfgStatus.TextColor); err == nil {
+		fgC = c
+	}
+	bgC = applyStatusOpacity(bgC, f.cfgStatus.Opacity)
+	return theme.ColorToHex(bgC), theme.ColorToHex(fgC)
+}
+
+// applyStatusOpacity 把 opacity (0..1) 叠加到颜色 alpha 通道。
+func applyStatusOpacity(c color.Color, opacity float64) color.Color {
+	if opacity <= 0 {
+		opacity = 0
+	} else if opacity > 1 {
+		opacity = 1
+	}
+	r, g, b, a := c.RGBA()
+	return color.RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), uint8(float64(a>>8) * opacity)}
 }
 
 // pushModeStatus 把输入模式状态经 push 通道发给 .app 菜单栏指示器 (CmdModeStatus)。

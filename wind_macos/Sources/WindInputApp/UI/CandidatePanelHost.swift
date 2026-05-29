@@ -24,6 +24,7 @@ public final class CandidatePanelHost {
 
     private let panel: CandidatePanel
     private let tooltip: TooltipPanel
+    private let statusBubble: StatusBubblePanel
     private var lastHoverIndex = -1   // 仅主线程访问 (onHover/tooltipShow 都切主线程)
     private var reader: SharedMemoryReader?
     private var push: PushClient?
@@ -40,12 +41,15 @@ public final class CandidatePanelHost {
         if Thread.isMainThread {
             panel = CandidatePanel()
             tooltip = TooltipPanel()
+            statusBubble = StatusBubblePanel()
         } else {
             var p: CandidatePanel?
             var t: TooltipPanel?
-            DispatchQueue.main.sync { p = CandidatePanel(); t = TooltipPanel() }
+            var s: StatusBubblePanel?
+            DispatchQueue.main.sync { p = CandidatePanel(); t = TooltipPanel(); s = StatusBubblePanel() }
             panel = p!
             tooltip = t!
+            statusBubble = s!
         }
         panel.onSelect = { [weak self] index in self?.handlePanelClick(index) }
         panel.onHover = { [weak self] index in
@@ -130,6 +134,7 @@ public final class CandidatePanelHost {
         DispatchQueue.main.async { [weak self] in
             self?.panel.hidePanel()
             self?.tooltip.hidePanel()
+            self?.statusBubble.hidePanel()
         }
     }
 
@@ -244,6 +249,15 @@ public final class CandidatePanelHost {
             }
         case DownstreamCmd.tooltipHide:
             DispatchQueue.main.async { [weak self] in self?.tooltip.hidePanel() }
+        case DownstreamCmd.statusShow:
+            if let p = try? BinaryCodec.decodeStatusBubblePayload(frame.payload) {
+                DispatchQueue.main.async { [weak self] in
+                    self?.statusBubble.show(text: p.text, bgHex: p.bgColor, fgHex: p.fgColor,
+                                            wireX: p.x, wireY: p.y, durationMs: p.durationMs)
+                }
+            }
+        case DownstreamCmd.statusHide:
+            DispatchQueue.main.async { [weak self] in self?.statusBubble.hidePanel() }
         case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition:
             // 鼠标选词的 commit / composition 经 push 通道异步到达, 路由到当前焦点 controller。
             let responder = activeResponder

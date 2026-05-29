@@ -63,6 +63,8 @@ public enum DownstreamCmd {
     public static let openSettings: UInt16     = 0x0507   // 请求打开设置应用 (payload: page UTF-8)
     public static let tooltipShow: UInt16      = 0x0508   // 候选悬停 tooltip 文本 + 主题色; .app 据悬停候选矩形定位
     public static let tooltipHide: UInt16      = 0x0509   // 隐藏 tooltip (空 payload)
+    public static let statusShow: UInt16       = 0x050A   // 状态提示气泡 (模式/标点/全半角文本 + 主题色 + 位置 + 时长)
+    public static let statusHide: UInt16       = 0x050B   // 隐藏状态提示气泡 (空 payload)
     public static let batchResponse: UInt16    = 0x0F02
 }
 
@@ -99,6 +101,27 @@ public struct TooltipPayload {
         self.bgColor = bgColor
         self.fgColor = fgColor
         self.fontPath = fontPath
+    }
+}
+
+/// 状态提示气泡 (CmdStatusShow 0x050A 解码结果)。模式切换时近 caret 弹出的瞬态气泡。
+/// text 为合并短文 (如 "中 ，"); bgColor/fgColor 为 #RRGGBBAA; x/y 为 caret 屏幕坐标
+/// (wire top-left); durationMs>0 时到点自动隐藏 (temp), ==0 常驻 (always)。
+public struct StatusBubblePayload {
+    public let text: String
+    public let bgColor: String
+    public let fgColor: String
+    public let x: Int32
+    public let y: Int32
+    public let durationMs: Int32
+
+    public init(text: String, bgColor: String, fgColor: String, x: Int32, y: Int32, durationMs: Int32) {
+        self.text = text
+        self.bgColor = bgColor
+        self.fgColor = fgColor
+        self.x = x
+        self.y = y
+        self.durationMs = durationMs
     }
 }
 

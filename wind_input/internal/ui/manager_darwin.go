@@ -282,10 +282,12 @@ func (m *Manager) ShowModeIndicator(mode string, x, y int) {
 	m.postCmd(uicmd.NewCommand(uicmd.CmdModeShow, 0,
 		uicmd.ModeShowPayload{Mode: mode, X: x, Y: y}))
 }
-func (m *Manager) ShowStatusIndicator(state StatusState, x, y int) {
+func (m *Manager) ShowStatusIndicator(state StatusState, x, y, height int) {
 	m.postCmd(uicmd.NewCommand(uicmd.CmdStatusShow, 0, uicmd.StatusShowPayload{
-		State: uicmd.StatusState{ModeLabel: state.ModeLabel, PunctLabel: state.PunctLabel, WidthLabel: state.WidthLabel},
-		X:     x, Y: y,
+		State:  uicmd.StatusState{ModeLabel: state.ModeLabel, PunctLabel: state.PunctLabel, WidthLabel: state.WidthLabel},
+		X:      x,
+		Y:      y,
+		Height: height,
 	}))
 }
 func (m *Manager) HideStatusIndicator() {

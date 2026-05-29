@@ -123,6 +123,9 @@ public class InputController: IMKInputController {
     /// 发一个修饰键 VK 的 KeyEvent (eventType=down) 给 Go, 触发模式切换; 应用其响应。
     private func sendModifierTap(_ vk: UInt32, sender: Any!) {
         guard let bridge = bridge, bridge.isConnected else { return }
+        // 模式切换 (Shift/Ctrl tap) 通常无 composition, 先刷新 caret 让状态气泡锚到当前
+        // 插入点 (否则会显示在上一次组字的旧位置)。
+        sendCaretUpdateIfAvailable(client: sender as? IMKTextInput)
         keySeq &+= 1
         let frame = BinaryCodec.encodeKeyEventFrame(KeyEventPayload(
             keyCode: vk, scanCode: 0, modifiers: 0, eventType: .down, eventSeq: keySeq, prevChar: 0))
@@ -168,6 +171,13 @@ public class InputController: IMKInputController {
         keySeq &+= 1
         guard let frame = KeyHandler.encodeKeyEvent(event, seq: keySeq) else {
             return false
+        }
+
+        // 无 composition 时本端 caret 可能是上一次组字的旧位置 (换行/移动光标后未更新)。
+        // 处理本键前先刷新一次, 让 Go 的状态气泡/首帧候选锚到当前真实插入点。
+        // 组字中 caret 由下方 (composition 非空) 分支持续更新, 无需在此重复。
+        if composition.isEmpty {
+            sendCaretUpdateIfAvailable(client: sender as? IMKTextInput)
         }
 
         do {

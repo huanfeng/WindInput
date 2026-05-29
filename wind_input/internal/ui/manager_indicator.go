@@ -10,11 +10,12 @@ import (
 
 // ShowModeIndicator 向后兼容：单模式文本显示，内部转发到 ShowStatusIndicator
 func (m *Manager) ShowModeIndicator(mode string, x, y int) {
-	m.ShowStatusIndicator(StatusState{ModeLabel: mode}, x, y)
+	m.ShowStatusIndicator(StatusState{ModeLabel: mode}, x, y, 0)
 }
 
-// ShowStatusIndicator 显示合并状态提示（异步，非阻塞）
-func (m *Manager) ShowStatusIndicator(state StatusState, x, y int) {
+// ShowStatusIndicator 显示合并状态提示（异步，非阻塞）。height 为 caret 高度，
+// 供 darwin 端把气泡锚到 caret 底部；Win 端按原有 caret 顶部定位，忽略此参数。
+func (m *Manager) ShowStatusIndicator(state StatusState, x, y, _ int) {
 	m.mu.Lock()
 	if !m.ready {
 		m.mu.Unlock()
