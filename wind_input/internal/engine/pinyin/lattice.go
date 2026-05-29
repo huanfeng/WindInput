@@ -154,7 +154,7 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 
 		if len(syllables) > 0 {
 			code := strings.Join(syllables, "")
-			results := d.Lookup(code)
+			results := d.Lookup(normalizeLookupCode(code))
 			for _, cand := range results {
 				// weight=0 为容错/错音词（corrections.dict.yaml），不参与 Viterbi 路径评分，
 				// 与 YAML trie 行为一致（loadRimeFile 过滤了 weight<=0）。
@@ -240,9 +240,9 @@ func BuildLattice(input string, st *SyllableTrie, d *dict.CompositeDict, unigram
 			syllable := dagNode.Syllables[0]
 			endPos := dagNode.End
 
-			results := d.Lookup(syllable)
+			results := d.Lookup(normalizeLookupCode(syllable))
 			if len(results) == 0 && hasPrefixSearch {
-				results = ps.LookupPrefix(syllable, 5)
+				results = ps.LookupPrefix(normalizeLookupCode(syllable), 5)
 			}
 
 			for _, cand := range results {

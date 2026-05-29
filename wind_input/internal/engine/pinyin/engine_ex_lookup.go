@@ -64,10 +64,39 @@ func (e *Engine) lookupSubPhrasesEx(syllables []string, parsed *ParseResult, tot
 	}
 }
 
+// normalizeLookupCode 将"u 形式"的 ü 韵母（nue/lue）归一化为词库使用的"v 形式"（nve/lve），
+// 用于查询词库前的编码归一化。
+//
+// 词库中 ü 韵母统一用 v 表示（虐=nve、略=lve），但主流拼音输入法约定 nüe/lüe 既可输入
+// nve/lve 也可输入 nue/lue（二者无歧义：nu+e、lu+e 不构成合法连续音节）。因此查询前把
+// nue/lue 归一化到 nve/lve 以命中词库。
+//
+// 仅 n/l 声母需要此处理：j/q/x/y 后的 ü 在词库中本就写作 u（jue/que/xue/yue），不归一化。
+// code 级子串替换是安全的——合法拼音编码中 "nue"/"lue" 子串只可能来自 nüe/lüe 音节。
+func normalizeLookupCode(code string) string {
+	if strings.Contains(code, "nue") {
+		code = strings.ReplaceAll(code, "nue", "nve")
+	}
+	if strings.Contains(code, "lue") {
+		code = strings.ReplaceAll(code, "lue", "lve")
+	}
+	return code
+}
+
+// dictLookup 归一化编码后查询词库（统一处理 nue/lue → nve/lve）。
+func (e *Engine) dictLookup(code string) []candidate.Candidate {
+	return e.dict.Lookup(normalizeLookupCode(code))
+}
+
+// dictLookupPrefix 归一化编码后前缀查询词库。
+func (e *Engine) dictLookupPrefix(prefix string, limit int) []candidate.Candidate {
+	return e.dict.LookupPrefix(normalizeLookupCode(prefix), limit)
+}
+
 // lookupWithFuzzy 带模糊拼音的词库查找
 // syllables 为已切分的音节列表（用于生成模糊变体），可为 nil 表示不做模糊扩展
 func (e *Engine) lookupWithFuzzy(code string, syllables []string) []candidate.Candidate {
-	results := e.dict.Lookup(code)
+	results := e.dictLookup(code)
 
 	fuzzy := e.getFuzzyConfig()
 	if fuzzy == nil || !fuzzy.Enabled() {
@@ -86,7 +115,7 @@ func (e *Engine) lookupWithFuzzy(code string, syllables []string) []candidate.Ca
 			syllable = syllables[0]
 		}
 		for _, v := range fuzzy.Variants(syllable) {
-			for _, c := range e.dict.Lookup(v) {
+			for _, c := range e.dictLookup(v) {
 				if !seen[c.Text] {
 					seen[c.Text] = true
 					results = append(results, c)
@@ -98,7 +127,7 @@ func (e *Engine) lookupWithFuzzy(code string, syllables []string) []candidate.Ca
 
 	// 多音节：展开所有组合
 	for _, altCode := range fuzzy.ExpandCode(syllables) {
-		for _, c := range e.dict.Lookup(altCode) {
+		for _, c := range e.dictLookup(altCode) {
 			if !seen[c.Text] {
 				seen[c.Text] = true
 				results = append(results, c)

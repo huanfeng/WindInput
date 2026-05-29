@@ -56,12 +56,12 @@ var allSyllables = []string{
 	// n
 	"na", "ne", "ni", "nu", "nv", "nai", "nei", "nao", "nou", "nan", "nen", "nin",
 	"nang", "neng", "ning", "nie", "niao", "nian", "niang", "niu",
-	"nuo", "nuan", "nun", "nong", "nve",
+	"nuo", "nuan", "nun", "nong", "nve", "nue",
 
 	// l
 	"la", "le", "li", "lu", "lv", "lai", "lei", "lao", "lou", "lan", "lin",
 	"lang", "leng", "ling", "lie", "liao", "lian", "liang", "liu",
-	"luo", "luan", "lun", "long", "lve",
+	"luo", "luan", "lun", "long", "lve", "lue",
 
 	// g
 	"ga", "ge", "gu", "gai", "gei", "gao", "gou", "gan", "gen",

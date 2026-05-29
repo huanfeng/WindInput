@@ -343,7 +343,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool, o
 		possibles := e.syllableTrie.GetPossibleSyllables(leadingPartial)
 		const maxLeadingPerSyllable = 5
 		for _, syllable := range possibles {
-			charResults := e.dict.Lookup(syllable)
+			charResults := e.dictLookup(syllable)
 			added := 0
 			for _, cand := range charResults {
 				if added >= maxLeadingPerSyllable {
@@ -409,7 +409,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool, o
 		possibles := e.syllableTrie.GetPossibleSyllables(firstPartial)
 		const maxMultiPartialPerSyllable = 5
 		for _, syllable := range possibles {
-			charResults := e.dict.Lookup(syllable)
+			charResults := e.dictLookup(syllable)
 			added := 0
 			for _, cand := range charResults {
 				if added >= maxMultiPartialPerSyllable {
@@ -437,7 +437,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool, o
 	// 步骤 5 安全条件：trailing partial 紧跟在连续完成音节之后，或是单独的 partial 输入
 	if partial != "" && (contiguousCount > 0 || len(allSyllables) == 1) {
 		{
-			prefixResults := e.dict.LookupPrefix(queryInput, 30)
+			prefixResults := e.dictLookupPrefix(queryInput, 30)
 			for _, cand := range prefixResults {
 				if _, exists := candidatesMap[cand.Text]; exists {
 					continue
@@ -478,7 +478,7 @@ func (e *Engine) convertCore(input string, maxCandidates int, skipFilter bool, o
 			const maxPerSyllable = 5
 			possibles := e.syllableTrie.GetPossibleSyllables(partial)
 			for _, syllable := range possibles {
-				charResults := e.dict.Lookup(syllable)
+				charResults := e.dictLookup(syllable)
 				added := 0
 				for _, cand := range charResults {
 					if added >= maxPerSyllable {
