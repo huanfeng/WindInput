@@ -47,6 +47,7 @@ export interface HotkeyConfig {
   open_settings: string; // 通用按键组合或 "none"
   add_word: string; // 快捷加词: 通用按键组合或 "none"
   toggle_s2t: string; // 简入繁出开关: 通用按键组合或 "none"
+  take_screenshot: string; // UI 截图: 通用按键组合或 "none"
   global_hotkeys: string[]; // 注册为全局热键的快捷键名称列表
 }
 
@@ -369,6 +370,7 @@ export function getDefaultConfig(): Config {
       open_settings: "none",
       add_word: "ctrl+=",
       toggle_s2t: "ctrl+shift+j",
+      take_screenshot: "ctrl+shift+f11",
       global_hotkeys: [],
     },
     ui: {

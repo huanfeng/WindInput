@@ -305,7 +305,9 @@
         :hint="item.hint"
         :model-value="getHotkeyValue(item.field)"
         :default-value="getDefaultValue(item.field)"
-        :show-global="item.field === 'open_settings'"
+        :show-global="
+          item.field === 'open_settings' || item.field === 'take_screenshot'
+        "
         :is-global="isGlobalHotkey(item.field)"
         @update:model-value="setHotkeyValue(item.field, $event)"
         @update:global="setGlobalHotkey(item.field, $event)"
@@ -371,6 +373,11 @@ const composerItems = [
     field: "toggle_s2t",
     label: "切换简入繁出",
     hint: "开关简体输入→繁体输出（变体在「输入 → 简入繁出」中选择）",
+  },
+  {
+    field: "take_screenshot",
+    label: "输入法界面截图",
+    hint: "保存当前可见的候选窗、工具栏、菜单等界面为图片文件",
   },
 ];
 
