@@ -258,6 +258,7 @@ function mergeWithDefaults(cfg: any): Config {
       },
     },
     advanced: { ...defaults.advanced, ...cfg.advanced },
+    s2t: { ...defaults.s2t, ...cfg.s2t },
   };
 }
 
