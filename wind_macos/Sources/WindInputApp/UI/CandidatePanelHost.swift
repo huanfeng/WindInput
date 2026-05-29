@@ -28,6 +28,7 @@ public final class CandidatePanelHost {
     private var sendClient: BridgeClient?       // 发 CmdCandidateSelect 用 (request 连接)
     private var latestRects: [CandidateHitRect] = []
     private var currentScale: CGFloat = 1
+    private var reconnecting = false            // push 重连排程中, 防重复
     private let lock = NSLock()
 
     /// 当前焦点 InputController, push 通道 commit 路由目标。weak 避免保活已销毁的 controller。
@@ -53,19 +54,61 @@ public final class CandidatePanelHost {
     }
 
     public func start() {
-        lock.lock(); defer { lock.unlock() }
-        if push != nil { return }
-        openSHMIfNeeded()
+        attemptPushConnect()
+    }
 
+    /// 连接 push 通道 + 开 SHM。连不上 (服务尚未起 socket) 或后续断开 (服务重启)
+    /// 都会经 `scheduleReconnect` 定时重试, 直到连上。
+    /// 登录时系统拉起 IME `.app` 可能早于 LaunchAgent 起服务建 socket, 必须重试。
+    private func attemptPushConnect() {
+        lock.lock()
+        if push != nil { lock.unlock(); return }
+        openSHMIfNeeded()
         let pc = PushClient(socketPath: BridgeEndpoints.pushSocket)
         pc.onFrame = { [weak self] frame in self?.handlePushFrame(frame) }
-        pc.onError = { err in NSLog("CandidatePanelHost: push error: \(err)") }
+        pc.onError = { [weak self] err in
+            guard let self = self else { return }
+            self.lock.lock()
+            if self.push === pc { self.push = nil }
+            self.lock.unlock()
+            NSLog("CandidatePanelHost: push error: \(err) — 安排重连")
+            self.scheduleReconnect()
+        }
+        var connected = false
         do {
             try pc.start()
             push = pc
-            NSLog("CandidatePanelHost: push subscribed \(BridgeEndpoints.pushSocket)")
+            connected = true
         } catch {
-            NSLog("CandidatePanelHost: push start failed: \(error)")
+            push = nil
+        }
+        lock.unlock()
+
+        if connected {
+            NSLog("CandidatePanelHost: push subscribed \(BridgeEndpoints.pushSocket)")
+        } else {
+            NSLog("CandidatePanelHost: push start failed (服务未就绪?) — 安排重连")
+            scheduleReconnect()
+        }
+    }
+
+    /// 1s 后重试 push 连接 (幂等, 同时只排一个)。重连前丢弃旧 SHM mmap:
+    /// 服务重启会 shm_unlink 重建段, 旧映射会读到失效内存, 必须重开。
+    private func scheduleReconnect() {
+        lock.lock()
+        if reconnecting || push != nil { lock.unlock(); return }
+        reconnecting = true
+        reader?.closeReader(); reader = nil
+        lock.unlock()
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock()
+            self.reconnecting = false
+            let alreadyUp = self.push != nil
+            self.lock.unlock()
+            if alreadyUp { return }
+            self.attemptPushConnect()
         }
     }
 

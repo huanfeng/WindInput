@@ -102,7 +102,11 @@ public final class PushClient {
                 let frame = try c.readFrame()
                 onFrame?(frame)
             } catch IPCError.eof {
-                // server 关 socket 或 stop() 主动 close, 正常退出
+                // server 关 socket 或 stop() 主动 close。若非主动 stop (如服务重启),
+                // 也回调 onError 让上层重连; stop() 已置位则静默退出。
+                if !stopRequested {
+                    onError?(.eof)
+                }
                 return
             } catch let e as IPCError {
                 if !stopRequested {
