@@ -1027,6 +1027,24 @@ export async function getVersion(): Promise<string> {
   return App.GetVersion();
 }
 
+// 运行平台（runtime.GOOS，如 "windows" / "darwin"）
+// Wails 环境走 Go 绑定；非 Wails（HTTP 开发模式）回退到 navigator 推断。
+export async function getPlatform(): Promise<string> {
+  const app = (window as any).go?.main?.App;
+  if (app?.GetPlatform) {
+    return (await app.GetPlatform()) as string;
+  }
+  const ua = (
+    (navigator as any).userAgentData?.platform ||
+    navigator.platform ||
+    ""
+  ).toLowerCase();
+  if (ua.includes("mac")) return "darwin";
+  if (ua.includes("win")) return "windows";
+  if (ua.includes("linux")) return "linux";
+  return "";
+}
+
 // 默认配置（从后端获取系统默认值：代码默认 + data/config.yaml 合并）
 // Go Config 不含 dictionary/engine（由方案单独管理），前端用硬编码默认值补齐
 export async function fetchSystemDefaultConfig(): Promise<Config> {

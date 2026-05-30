@@ -27,10 +27,13 @@ import {
   candidateTooltipSchema,
   toolbarSchema,
 } from "@/schemas/appearance.schema";
+import type { PageSchema } from "@/schemas/types";
 
 const props = defineProps<{
   formData: Config;
   isWailsEnv: boolean;
+  // macOS 无悬浮可拖动工具栏（Toolbar 命令在 darwin 被重定向为菜单栏指示器），隐藏工具栏卡片
+  isMac?: boolean;
   availableThemes: ThemeInfo[];
   themePreview: ThemePreview | null;
   systemFonts: SystemFontInfo[];
@@ -65,6 +68,30 @@ const systemFontOptions = computed(() => {
     value: font.family,
     label: font.display_name || font.family,
   }));
+});
+
+// 状态提示 schema：macOS 上气泡始终锚定光标，position_mode 无效 → 移除「位置模式」项；
+// 水平/垂直偏移仍生效，放开对 position_mode 的依赖，使其在启用时始终可调。
+const statusSchema = computed<PageSchema>(() => {
+  if (!props.isMac) return statusIndicatorSchema;
+  return statusIndicatorSchema
+    .filter(
+      (item) =>
+        !("key" in item && item.key === "ui.status_indicator.position_mode"),
+    )
+    .map((item) => {
+      if (
+        "key" in item &&
+        (item.key === "ui.status_indicator.offset_x" ||
+          item.key === "ui.status_indicator.offset_y")
+      ) {
+        return {
+          ...item,
+          dependsOn: (cfg: Config) => cfg.ui.status_indicator.enabled,
+        };
+      }
+      return item;
+    });
 });
 
 // 命令直通车标注模式: 把 cmdbar_candidate_prefix 单字段映射成 3 种模式。
@@ -489,7 +516,7 @@ onUnmounted(() => {
     <div class="settings-card">
       <div class="card-title">状态提示</div>
       <SchemaRenderer
-        :schema="statusIndicatorSchema"
+        :schema="statusSchema"
         :form-data="formData"
         mode="bare"
       />
@@ -534,7 +561,7 @@ onUnmounted(() => {
       />
     </div>
 
-    <div class="settings-card">
+    <div class="settings-card" v-if="!isMac">
       <div class="card-title">工具栏</div>
       <SchemaRenderer
         :schema="toolbarSchema"

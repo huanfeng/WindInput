@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"time"
 
@@ -54,6 +55,12 @@ func (a *App) GetVersion() string {
 		return version + " (Debug)"
 	}
 	return version
+}
+
+// GetPlatform 返回运行平台（runtime.GOOS，如 "windows" / "darwin"，供前端调用）
+// 前端据此隐藏平台专属设置项（如 Windows 的 TSF 日志、悬浮工具栏）。
+func (a *App) GetPlatform() string {
+	return runtime.GOOS
 }
 
 // IsDebugVariant 返回是否为调试版构建（供前端调用）

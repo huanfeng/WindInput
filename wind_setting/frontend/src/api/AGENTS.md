@@ -39,7 +39,14 @@
 | 服务控制 | `notifyReload`、`openLogFolder`、`openConfigFolder`、`openExternalURL`、`getServiceStatus` |
 | 主题管理 | `getAvailableThemes`、`getThemePreview` |
 | 加词参数 | `getAddWordParams` |
-| 其他 | `getStartPage`、`getVersion`、`getDefaultConfig`、`getDefaultTSFLogConfig` |
+| 其他 | `getStartPage`、`getVersion`、`getPlatform`、`getDefaultConfig`、`getDefaultTSFLogConfig` |
+
+> `getPlatform()` 返回 `runtime.GOOS`（Go 绑定 `App.GetPlatform`；非 Wails 环境回退到 navigator 推断）。App.vue 据此派生 `isMac`（prop 下发给 Advanced/Appearance/Hotkey 页），隐藏 macOS 上无意义的 Windows 专属设置：
+> - **TSF 日志**输出方式/级别（AdvancedPage）— macOS 用 IMKit，无 TSF
+> - **悬浮工具栏**卡片（AppearancePage）— macOS 用菜单栏指示器（darwin 把 Toolbar 命令重定向为 `CmdModeStatus`）
+> - 状态提示**「位置模式」**项（AppearancePage）— darwin 气泡恒锚光标，仅 OffsetX/Y 生效（偏移项放开依赖常驻可调）
+> - 功能快捷键**「全局」开关** + **「界面截图」项**（HotkeyPage）— macOS 无低级键盘钩子；截图在 darwin 为 no-op（`Manager.TakeUIScreenshots`）
+> - 高级 → **「更改数据目录」按钮**（AdvancedPage）— macOS 约定固定用 `~/Library/Application Support`，不提供改目录；`ChangeUserDataDir` 在 darwin 服务端兜底拒绝，`config.ReadUserDataDirOverride` 在 darwin 忽略残留 `datadir.conf`
 
 ### Shadow API 说明（2026-03-13 架构重构）
 旧的 `topShadowWord`/`reweightShadowWord` 已移除，替换为：

@@ -52,6 +52,22 @@ const isWailsEnv = computed(() => {
   );
 });
 
+// 运行平台（runtime.GOOS）。先用 navigator 同步推断作初值避免闪烁，
+// 挂载后再用 Go 绑定确认。前端据此隐藏平台专属设置（如 Windows 的 TSF 日志、悬浮工具栏）。
+function inferPlatformSync(): string {
+  const ua = (
+    (navigator as any).userAgentData?.platform ||
+    navigator.platform ||
+    ""
+  ).toLowerCase();
+  if (ua.includes("mac")) return "darwin";
+  if (ua.includes("win")) return "windows";
+  if (ua.includes("linux")) return "linux";
+  return "";
+}
+const platform = ref(inferPlatformSync());
+const isMac = computed(() => platform.value === "darwin");
+
 // 全局 Toast
 const { toast } = provideToast();
 const {
@@ -647,6 +663,12 @@ async function handleOpenExternalLink(url: string) {
 
 onMounted(async () => {
   await loadData();
+  // 用 Go 绑定确认运行平台（覆盖 navigator 同步初值）
+  try {
+    platform.value = await wailsApi.getPlatform();
+  } catch {
+    // 保留同步推断值
+  }
   if (isWailsEnv.value) {
     await refreshStatus();
 
@@ -799,6 +821,7 @@ onUnmounted(() => {
           :formData="formData"
           :hotkeyConflicts="hotkeyConflicts"
           :systemDefaults="systemDefaults"
+          :isMac="isMac"
           @update:hotkeyConflicts="hotkeyConflicts = $event"
         />
 
@@ -806,6 +829,7 @@ onUnmounted(() => {
           v-show="activeTab === 'appearance'"
           :formData="formData"
           :isWailsEnv="isWailsEnv"
+          :isMac="isMac"
           :availableThemes="availableThemes"
           :themePreview="themePreview"
           :systemFonts="systemFonts"
@@ -826,6 +850,7 @@ onUnmounted(() => {
           :formData="formData"
           :tsfLogConfig="tsfLogConfig"
           :isWailsEnv="isWailsEnv"
+          :isMac="isMac"
           @openLogFolder="handleOpenLogFolder"
           @openConfigFolder="handleOpenConfigFolder"
         />

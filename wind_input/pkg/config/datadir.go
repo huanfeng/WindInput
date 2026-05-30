@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode/utf8"
 
@@ -50,7 +51,14 @@ func writeDataDirConf(confPath string, dirPath string) error {
 
 // ReadUserDataDirOverride 读取用户自定义数据目录。
 // 返回空字符串表示使用默认目录。
+//
+// macOS 不提供「更改数据目录」功能（约定固定使用 ~/Library/Application Support），
+// 故忽略任何可能残留的 datadir.conf（如旧版本写入或被 iCloud 同步带入的脏文件），
+// 始终回退默认目录。
 func ReadUserDataDirOverride() (string, error) {
+	if runtime.GOOS == "darwin" {
+		return "", nil
+	}
 	confPath, err := dataDirConfPath()
 	if err != nil {
 		return "", err

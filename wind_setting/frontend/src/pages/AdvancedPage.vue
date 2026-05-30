@@ -14,7 +14,7 @@
         </div>
         <div class="setting-control" style="display: flex; gap: 8px">
           <Button
-            v-if="!isPortable"
+            v-if="!isPortable && !isMac"
             variant="outline"
             size="sm"
             @click="dataDirDialogVisible = true"
@@ -51,54 +51,57 @@
         :form-data="formData"
         mode="bare"
       />
-      <div class="setting-item">
-        <div class="setting-info">
-          <label>TSF 日志输出方式</label>
-          <p class="setting-hint">仅对新进程生效</p>
+      <!-- TSF（Windows 文本服务框架）日志：macOS 用 IMKit，无 TSF，隐藏 -->
+      <template v-if="!isMac">
+        <div class="setting-item">
+          <div class="setting-info">
+            <label>TSF 日志输出方式</label>
+            <p class="setting-hint">仅对新进程生效</p>
+          </div>
+          <div class="setting-control">
+            <Select
+              :model-value="props.tsfLogConfig.mode"
+              @update:model-value="props.tsfLogConfig.mode = $event"
+            >
+              <SelectTrigger class="w-[200px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">None（关闭）</SelectItem>
+                <SelectItem value="file">File（文件）</SelectItem>
+                <SelectItem value="debugstring"
+                  >DebugString（调试输出）</SelectItem
+                >
+                <SelectItem value="all">All（文件 + 调试输出）</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
-        <div class="setting-control">
-          <Select
-            :model-value="props.tsfLogConfig.mode"
-            @update:model-value="props.tsfLogConfig.mode = $event"
-          >
-            <SelectTrigger class="w-[200px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="none">None（关闭）</SelectItem>
-              <SelectItem value="file">File（文件）</SelectItem>
-              <SelectItem value="debugstring"
-                >DebugString（调试输出）</SelectItem
-              >
-              <SelectItem value="all">All（文件 + 调试输出）</SelectItem>
-            </SelectContent>
-          </Select>
+        <div class="setting-item">
+          <div class="setting-info">
+            <label>TSF 日志级别</label>
+            <p class="setting-hint">仅在排障时临时启用 Debug / Trace</p>
+          </div>
+          <div class="setting-control">
+            <Select
+              :model-value="props.tsfLogConfig.level"
+              @update:model-value="props.tsfLogConfig.level = $event"
+            >
+              <SelectTrigger class="w-[200px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="off">Off（关闭）</SelectItem>
+                <SelectItem value="error">Error（错误）</SelectItem>
+                <SelectItem value="warn">Warn（警告）</SelectItem>
+                <SelectItem value="info">Info（信息）</SelectItem>
+                <SelectItem value="debug">Debug（调试）</SelectItem>
+                <SelectItem value="trace">Trace（详细跟踪）</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
-      </div>
-      <div class="setting-item">
-        <div class="setting-info">
-          <label>TSF 日志级别</label>
-          <p class="setting-hint">仅在排障时临时启用 Debug / Trace</p>
-        </div>
-        <div class="setting-control">
-          <Select
-            :model-value="props.tsfLogConfig.level"
-            @update:model-value="props.tsfLogConfig.level = $event"
-          >
-            <SelectTrigger class="w-[200px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="off">Off（关闭）</SelectItem>
-              <SelectItem value="error">Error（错误）</SelectItem>
-              <SelectItem value="warn">Warn（警告）</SelectItem>
-              <SelectItem value="info">Info（信息）</SelectItem>
-              <SelectItem value="debug">Debug（调试）</SelectItem>
-              <SelectItem value="trace">Trace（详细跟踪）</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
+      </template>
       <div v-if="showSensitiveLogWarning" class="setting-item">
         <div class="setting-info">
           <label>调试提示</label>
@@ -415,6 +418,8 @@ const props = defineProps<{
   formData: Config;
   tsfLogConfig: TSFLogConfig;
   isWailsEnv: boolean;
+  // macOS 不存在 TSF（Windows 文本服务框架），相关日志项隐藏
+  isMac?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -422,8 +427,17 @@ const emit = defineEmits<{
   openConfigFolder: [];
 }>();
 
-const configDirDisplay = ref("%APPDATA%\\WindInput");
-const logsDirDisplay = ref("%LOCALAPPDATA%\\WindInput\\logs\\");
+// fallback 文案按平台显示（getPathInfo 成功后会被真实路径覆盖，仅用于加载前/非 Wails 环境）
+const configDirDisplay = ref(
+  props.isMac
+    ? "~/Library/Application Support/WindInput"
+    : "%APPDATA%\\WindInput",
+);
+const logsDirDisplay = ref(
+  props.isMac
+    ? "~/Library/Logs/WindInput"
+    : "%LOCALAPPDATA%\\WindInput\\logs\\",
+);
 const isPortable = ref(false);
 const dataDirDialogVisible = ref(false);
 

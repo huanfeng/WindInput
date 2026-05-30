@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -524,6 +525,12 @@ type ChangeDataDirResult struct {
 
 // ChangeUserDataDir 切换用户数据目录
 func (a *App) ChangeUserDataDir(req ChangeDataDirRequest) (*ChangeDataDirResult, error) {
+	// macOS 不提供「更改数据目录」功能（前端已隐藏入口），服务端再兜底拒绝，
+	// 避免被直接调用导致 datadir.conf 与固定 socket 目录解耦等问题。
+	if runtime.GOOS == "darwin" {
+		return nil, fmt.Errorf("macOS 不支持更改数据目录")
+	}
+
 	valid, warning := config.ValidateDataDirPath(req.NewPath)
 	if !valid {
 		return nil, fmt.Errorf("路径验证失败: %s", warning)
