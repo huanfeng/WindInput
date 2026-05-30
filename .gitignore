@@ -115,6 +115,7 @@ wind_macos/.build/
 wind_macos/.swiftpm/
 wind_macos/Package.resolved
 wind_macos/build/
+wind_macos/dist/
 
 # 临时诊断 log
 log*.txt

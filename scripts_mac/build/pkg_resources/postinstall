@@ -1,0 +1,119 @@
+#!/bin/bash
+# WindInput .pkg postinstall — 以登录 GUI 用户身份装三件套 (IME + Go 服务 + 设置 app),
+# 复用 deploy/install_*.sh 的踩坑成熟逻辑, 再清系统暂存并留下卸载器.
+#
+# 背景: .pkg payload 把三件套 + 三个安装脚本铺到系统暂存
+# /Library/Application Support/WindInputInstaller/ (root 拥有). 本脚本由 installer 以
+# root 运行, 但 IME 注册 (TIS) / LaunchAgent (gui/$UID) / per-user 安装都必须以登录
+# 用户身份在其 GUI 会话里跑 → 用 `launchctl asuser $UID sudo -H -u $USER` 双重下沉.
+set -u
+
+# $3 = 安装目标卷 (用户若在向导改了安装位置, payload 落到该卷; 默认 "/"). 用它定位暂存,
+# 使"安装位置"选择只影响临时暂存、**不影响**最终 per-user 落点 (始终 ~/Library / ~/Applications).
+TARGET_VOL="${3:-/}"
+STAGE="${TARGET_VOL%/}/Library/Application Support/WindInputInstaller"
+LOG="/tmp/windinput_pkg_postinstall.log"
+exec > >(tee -a "$LOG") 2>&1
+echo "== WindInput postinstall $(date) =="
+
+# 登录 GUI 用户 (TIS / launchctl gui domain 必须在其会话里操作).
+CUID=$(stat -f%u /dev/console 2>/dev/null || echo 0)
+CUSER=$(stat -f%Su /dev/console 2>/dev/null || echo root)
+echo "console user: $CUSER ($CUID)"
+if [[ "$CUSER" == "root" || "$CUID" == "0" || -z "$CUSER" ]]; then
+    echo "[错误] 无登录 GUI 用户 (console=root)。请在登录的图形会话中安装。"
+    exit 1
+fi
+USERHOME=$(dscl . -read /Users/"$CUSER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+[[ -n "$USERHOME" ]] || USERHOME="/Users/$CUSER"
+
+# launchctl asuser → 进入用户 GUI bootstrap 域; sudo -H -u → 切到用户 uid 并设 HOME.
+asuser() { launchctl asuser "$CUID" sudo -H -u "$CUSER" "$@"; }
+
+# 1. Go 服务 (含 LaunchAgent 开机自启). --from 指向 service/{wind_input,data}.
+echo "-- install_service.sh --"
+asuser /bin/bash "$STAGE/install_service.sh" --from "$STAGE/service" || echo "[warn] 服务安装非零退出"
+
+# 2. 设置 app → ~/Applications. --from 指向含 wind_setting.app 的目录.
+echo "-- install_setting.sh --"
+asuser /bin/bash "$STAGE/install_setting.sh" --from "$STAGE" || echo "[warn] 设置安装非零退出"
+
+# 3. IME → ~/Library/Input Methods/ + TIS 注册. --from 指向含 WindInput.app 的目录.
+echo "-- install_app.sh --"
+asuser /bin/bash "$STAGE/install_app.sh" --from "$STAGE" || echo "[warn] IME 安装非零退出"
+
+# 4. 在 ~/Applications 放卸载器 **.app** (双击弹对话框, 不露终端).
+#    用 osacompile 生成 AppleScript applet —— 主程序是 Apple 的**通用二进制**, 避免"脚本当
+#    .app 主程序"在 Apple Silicon 上触发 Rosetta 误报 (macOS 无法判定脚本架构 → 误以为需 Rosetta).
+#    bash 卸载逻辑放 Resources, applet 经 do shell script 调. 自带三组件卸载, 保留用户词库/配置.
+APPS="$USERHOME/Applications"
+asuser /bin/mkdir -p "$APPS"
+UNINST_APP="$APPS/卸载清风输入法.app"
+rm -rf "$UNINST_APP"
+
+ASRC="/tmp/windinput_uninst.$$.applescript"
+cat > "$ASRC" <<'ASCRIPT'
+on run
+	try
+		display dialog "确定要卸载「清风输入法」吗？" & return & return & "输入法、后台服务、设置程序都会移除；你的用户词库 / 配置会保留。" with title "卸载清风输入法" buttons {"取消", "卸载"} default button "卸载" cancel button "取消" with icon caution
+	on error
+		return
+	end try
+	do shell script "/bin/bash " & quoted form of (POSIX path of (path to resource "do_uninstall.sh"))
+	display dialog "「清风输入法」已卸载。" & return & return & "如需重新安装，请先注销或重启，让系统彻底清除输入法注册缓存——否则可能出现「设置里已添加、但切换列表没有」。" & return & return & "用户词库 / 配置保留在 ~/Library/Application Support/WindInput/。" with title "卸载完成" buttons {"好"} default button "好"
+	do shell script "/bin/rm -rf " & quoted form of (POSIX path of (path to me))
+end run
+ASCRIPT
+osacompile -o "$UNINST_APP" "$ASRC"
+rm -f "$ASRC"
+
+# bash 卸载逻辑 → applet 的 Resources (applet 经 path to resource 调它).
+cat > "$UNINST_APP/Contents/Resources/do_uninstall.sh" <<'BASH'
+#!/bin/bash
+set +e
+# 1. Go 服务 (bootout + 删 LaunchAgent + 删 service 子目录; 保留用户数据).
+launchctl bootout "gui/$(id -u)/to.feng.windinput.service" 2>/dev/null
+rm -f "$HOME/Library/LaunchAgents/to.feng.windinput.service.plist"
+pkill -f "Application Support/WindInput/service/" 2>/dev/null
+rm -rf "$HOME/Library/Application Support/WindInput/service"
+# 2. 设置 app.
+pkill -f "Contents/MacOS/wind_setting" 2>/dev/null
+rm -rf "$HOME/Applications/清风输入法设置.app" "$HOME/Applications/wind_setting.app"
+# 3. IME + TIS/HIToolbox 清理.
+killall WindInput 2>/dev/null
+rm -rf "$HOME/Library/Input Methods/WindInput.app" "$HOME/Library/Caches/WindInput"
+/usr/bin/python3 - <<'PYEOF'
+import plistlib, os
+p = os.path.expanduser('~/Library/Preferences/com.apple.HIToolbox.plist')
+bid = 'to.feng.inputmethod.WindInput'
+try:
+    d = plistlib.load(open(p, 'rb'))
+except Exception:
+    raise SystemExit
+changed = False
+for k in ('AppleEnabledInputSources', 'AppleSelectedInputSources', 'AppleInputSourceHistory'):
+    v = d.get(k)
+    if isinstance(v, list):
+        n = len(v)
+        d[k] = [s for s in v if not (isinstance(s, dict) and s.get('Bundle ID') == bid)]
+        if len(d[k]) != n:
+            changed = True
+if changed:
+    plistlib.dump(d, open(p, 'wb'))
+PYEOF
+killall -HUP cfprefsd 2>/dev/null
+killall TextInputMenuAgent TextInputSwitcher imklaunchagent 2>/dev/null
+BASH
+chmod +x "$UNINST_APP/Contents/Resources/do_uninstall.sh"
+
+# 隐藏 Dock 图标 + ad-hoc 签名 (含新加的 Resources) + 去 quarantine.
+/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$UNINST_APP/Contents/Info.plist" 2>/dev/null || true
+codesign --force -s - "$UNINST_APP" 2>/dev/null || true
+xattr -dr com.apple.quarantine "$UNINST_APP" 2>/dev/null || true
+chown -R "$CUSER" "$UNINST_APP"
+echo "卸载器: $UNINST_APP"
+
+# 5. 清系统暂存 (payload 副本不再需要).
+rm -rf "$STAGE"
+echo "== postinstall done =="
+exit 0

@@ -26,13 +26,17 @@ INSTALL_APP="$INSTALL_DIR/$APP_NAME.app"
 DO_BUILD=0
 DO_UNINSTALL=0
 BUILD_ARGS=()
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --build) DO_BUILD=1 ;;
         --debug) BUILD_ARGS+=("--debug") ;;
         --uninstall) DO_UNINSTALL=1 ;;
-        *) echo "[错误] 未知参数: $arg" >&2; exit 1 ;;
+        # --from <dir>: 从指定目录装 (内含 WindInput.app), 供 .pkg postinstall 等离仓库场景.
+        --from) shift; SRC_DIR="${1:-}"; [[ -n "$SRC_DIR" ]] || { echo "[错误] --from 缺目录参数" >&2; exit 1; }
+                APP_BUNDLE="$SRC_DIR/$APP_NAME.app" ;;
+        *) echo "[错误] 未知参数: $1" >&2; exit 1 ;;
     esac
+    shift
 done
 
 bold() { printf "\033[1m%s\033[0m\n" "$*"; }
