@@ -12,7 +12,7 @@
 | File | Description |
 |------|-------------|
 | `main.go` | 服务入口，组件初始化、生命周期管理、热重载；`startPlatformForwarder` hook 在 UI 就绪后调用 |
-| `forwarder_darwin.go` | (`//go:build darwin`) `darwinForwarder`: 订阅 `ui.Manager.SubscribeCommands(cmd, candidates)`, 收 `CmdCandidatesShow`/`Hide` → 真 `ui.Renderer.RenderCandidates` (跨平台 gg 核心, freetype + PingFang, 与 Win 视觉一致) → `SharedMemory.WriteFrame` → `BroadcastFrame(EncodeHostRenderFrame)` + 推 `EncodeCandidateRects` (candidate 命中矩形供 .app 鼠标 hit-test); `startPlatformForwarder` darwin 实现 |
+| `forwarder_darwin.go` | (`//go:build darwin`) `darwinForwarder`: 订阅 `ui.Manager.SubscribeCommands(cmd, candidates)`, 收 `CmdCandidatesShow`/`Hide` → 真 `ui.Renderer.RenderCandidates` (跨平台 gg 核心, freetype + PingFang, 与 Win 视觉一致) → `SharedMemory.WriteFrame` → `BroadcastFrame(EncodeHostRenderFrame)` + 推 `EncodeCandidateRects` (candidate 命中矩形供 .app 鼠标 hit-test); 收 `CmdCandidatesConfig` → `applyCandidatesConfig` 把 `HidePreedit`/`PreeditMode`/`Layout`/`CmdbarPrefix` 应用到 renderer (启动时另按 `config.Load()` 播种, 确保 `inline_preedit` 生效不画独立编码栏); `startPlatformForwarder` darwin 实现 |
 | `forwarder_windows.go` | (`//go:build windows`) `startPlatformForwarder` no-op (Win 候选框走 LayeredWindow 直绘) |
 | `logging.go` | 日志轮转（`rotatingWriter`）和多路 slog Handler（`multiHandler`），5MB × 3 轮转 |
 | `version.go` | 版本号变量，通过 ldflags 在构建时注入（`-X main.version=x.y.z`） |

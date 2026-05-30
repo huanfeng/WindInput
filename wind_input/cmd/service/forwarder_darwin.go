@@ -182,6 +182,15 @@ func startCandidateForwarder(srv *bridge.Server, mgr *ui.Manager,
 	}
 	f.refreshThemeIfNeeded() // 启动时应用 config 里的 active 主题
 
+	// 启动时按 config 播种 renderer 的 preedit 相关配置。Manager 会在 applyConfig
+	// 时投递一次 CmdCandidatesConfig (cmdCh 缓冲 100, 通常不丢), 但订阅前若被消费时序
+	// 错过, renderer 会停留在 DefaultRenderConfig 的 HidePreedit=false。提前 seed 一次,
+	// 确保首屏候选框就遵循 InlinePreedit (嵌入编码时不画独立编码栏)。
+	if cfg, err := config.Load(); err == nil {
+		f.renderer.SetHidePreedit(cfg.UI.InlinePreedit)
+		f.renderer.SetPreeditMode(cfg.UI.PreeditMode)
+	}
+
 	mgr.SubscribeCommands(func(cmd uicmd.Command, candidates []ui.Candidate) {
 		f.handle(cmd, candidates)
 	})
@@ -199,6 +208,10 @@ func (f *darwinForwarder) handle(cmd uicmd.Command, candidates []ui.Candidate) {
 		f.showCandidates(p, candidates)
 	case uicmd.CmdCandidatesHide:
 		f.hideCandidates()
+	case uicmd.CmdCandidatesConfig:
+		if p, ok := cmd.Payload.(uicmd.CandidatesConfigPayload); ok {
+			f.applyCandidatesConfig(p)
+		}
 	case uicmd.CmdToolbarShow:
 		if p, ok := cmd.Payload.(uicmd.ToolbarShowPayload); ok {
 			f.pushModeStatus(p.State, true)
@@ -479,6 +492,25 @@ func (f *darwinForwarder) renderAndPush() {
 		"seq", seq, "n", len(candidates), "hover", hover,
 		"size", fmt.Sprintf("%dx%d", img.Bounds().Dx(), img.Bounds().Dy()),
 		"at", fmt.Sprintf("(%d,%d)", x, y))
+}
+
+// applyCandidatesConfig 把 Go 端 ui.Manager 下发的候选框配置 (CmdCandidatesConfig)
+// 应用到本地 renderer。最关键的是 HidePreedit：InlinePreedit=true 时编码已嵌入宿主
+// 应用, 候选框不应再画独立编码行。在此之前 forwarder 不处理该命令, renderer 的
+// HidePreedit 恒为 DefaultRenderConfig 的 false, 导致编码栏无视配置始终显示。
+// PreeditMode (top/embedded) 同理影响编码行的画法。
+func (f *darwinForwarder) applyCandidatesConfig(p uicmd.CandidatesConfigPayload) {
+	f.renderer.SetHidePreedit(p.HidePreedit)
+	f.renderer.SetPreeditMode(config.PreeditMode(p.PreeditMode))
+	f.renderer.SetLayout(config.CandidateLayout(p.Layout))
+	f.renderer.SetCmdbarPrefix(p.CmdbarPrefix)
+	// 配置可能在候选框已显示时变更 (设置界面实时改), 立即重渲染当前帧。
+	f.mu.Lock()
+	visible := f.visible
+	f.mu.Unlock()
+	if visible {
+		f.renderAndPush()
+	}
 }
 
 func (f *darwinForwarder) hideCandidates() {

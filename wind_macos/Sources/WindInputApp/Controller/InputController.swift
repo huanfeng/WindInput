@@ -73,6 +73,16 @@ public class InputController: IMKInputController {
     /// IME 失去焦点 (切到别的输入法/应用) 时由系统调用。发 FocusLost 让 Go 端
     /// 置 imeActivated=false, reducer 隐藏指示器。
     public override func deactivateServer(_ sender: Any!) {
+        // 失焦即清干净: 若仍有嵌入编码 (marked text) 未提交, 主动抹掉残留并清本端
+        // composition 状态。否则切到别的文本框时旧 marked text 会残留 (macOS 不会
+        // 像 Win TSF 那样自动收回), 且与 Go 端不一致 (HandleFocusLost 对普通焦点切换
+        // 已 clearState 清空 inputBuffer)。两端一致后, 切回该文本框是全新一轮输入。
+        // 必须在 super.deactivateServer 之前做: 此时 sender client 仍可接收 setMarkedText。
+        if !composition.isEmpty {
+            let imkClient = sender as? IMKTextInput
+            let adapter = imkClient.map { IMKClientAdapter(imkClient: $0) }
+            router.applyClearComposition(client: adapter)
+        }
         sendEmpty(UpstreamCmd.focusLost)
         super.deactivateServer(sender)
     }
