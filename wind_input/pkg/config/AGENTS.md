@@ -4,7 +4,7 @@
 # pkg/config
 
 ## Purpose
-应用配置的完整定义、加载/保存逻辑、路径管理和运行时状态持久化。配置文件为 YAML 格式，存储在 `%APPDATA%\WindInput\config.yaml`。支持三层配置合并机制。
+应用配置的完整定义、加载/保存逻辑、路径管理和运行时状态持久化。配置文件为 YAML 格式，存储在用户数据目录（Windows `%APPDATA%\WindInput\`、macOS `~/Library/Application Support/WindInput/`，由 `os.UserConfigDir()` 解析）下的 `config.yaml`。`GetConfigDirDisplay`/`GetLogsDirDisplay` 返回平台友好的显示串（Windows 用 `%APPDATA%`/`%LOCALAPPDATA%` 占位串，其余平台显示真实路径并把 home 缩写为 `~`）。支持三层配置合并机制。**自定义数据目录（`datadir.conf` / `ReadUserDataDirOverride`）仅 Windows 支持；macOS 约定固定用 `~/Library/Application Support/WindInput`，`ReadUserDataDirOverride` 在 darwin 始终返回空（忽略残留 conf），设置端也禁用「更改数据目录」入口。**
 
 ## Key Files
 | File | Description |
