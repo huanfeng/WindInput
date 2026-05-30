@@ -13,14 +13,23 @@
     <key>CFBundleIdentifier</key>
     <string>to.feng.inputmethod.WindInput</string>
 
+    <!-- CFBundleName 用中文「清风输入法」: 也是 .pkg 装包器向导标题的来源
+         (component pkg 标题取自主 bundle 的 CFBundleName + 版本). 不影响 IMK 注册
+         (连接名走 InputMethodConnectionName, 输入源名走 mode 的 TISIconLabels). -->
     <key>CFBundleName</key>
-    <string>WindInput</string>
+    <string>清风输入法</string>
 
     <key>CFBundleDisplayName</key>
     <string>清风输入法</string>
 
     <key>CFBundleExecutable</key>
     <string>WindInput</string>
+
+    <!-- 应用图标 (Finder / 安装器 / 关于面板). 由 wind_setting/build/appicon.png 经
+         sips+iconutil 生成 Resources/AppIcon.icns; 重生成命令见 scripts_mac/build/app.sh.
+         注: 菜单栏输入法图标另走 tsInputMethodIconFileKey (单色 PDF), 与此无关. -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
 
     <key>CFBundlePackageType</key>
     <string>APPL</string>

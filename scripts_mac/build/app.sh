@@ -86,6 +86,21 @@ for icon in menu_icon.pdf menu_icon_15.pdf menu_icon_26.pdf; do
     fi
 done
 
+# 应用图标 (.icns, Finder/安装器/关于面板). plist 经 CFBundleIconFile=AppIcon 引用.
+# 源 wind_setting/build/appicon.png (1024²), 重新生成 Resources/AppIcon.icns:
+#   ICONSET=$(mktemp -d)/AppIcon.iconset; mkdir -p "$ICONSET"
+#   for s in 16 32 128 256 512; do sips -z $s $s appicon.png --out "$ICONSET/icon_${s}x${s}.png"; \
+#     sips -z $((s*2)) $((s*2)) appicon.png --out "$ICONSET/icon_${s}x${s}@2x.png"; done
+#   iconutil -c icns "$ICONSET" -o wind_macos/Sources/WindInputApp/Resources/AppIcon.icns
+APPICON="$MACOS_DIR/Sources/WindInputApp/Resources/AppIcon.icns"
+if [[ -f "$APPICON" ]]; then
+    cp "$APPICON" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    info "icon: AppIcon.icns"
+else
+    err "AppIcon.icns missing: $APPICON (从 appicon.png 经 sips+iconutil 生成)"
+    exit 1
+fi
+
 # 写一个空的 PkgInfo (传统 macOS 期望)
 printf "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
