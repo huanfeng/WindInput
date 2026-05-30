@@ -299,16 +299,15 @@
     <div class="settings-card">
       <div class="card-title">功能快捷键</div>
       <HotkeyComposer
-        v-for="item in composerItems"
+        v-for="item in visibleComposerItems"
         :key="item.field"
         :label="item.label"
         :hint="item.hint"
         :model-value="getHotkeyValue(item.field)"
         :default-value="getDefaultValue(item.field)"
-        :show-global="
-          item.field === 'open_settings' || item.field === 'take_screenshot'
-        "
+        :show-global="showGlobalFor(item.field)"
         :is-global="isGlobalHotkey(item.field)"
+        :is-mac="isMac"
         @update:model-value="setHotkeyValue(item.field, $event)"
         @update:global="setGlobalHotkey(item.field, $event)"
       />
@@ -335,6 +334,8 @@ const props = defineProps<{
   formData: Config;
   hotkeyConflicts: string[];
   systemDefaults?: Config;
+  // macOS：截图为 no-op、无全局键盘钩子，隐藏「界面截图」项与「全局」开关
+  isMac?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -380,6 +381,19 @@ const composerItems = [
     hint: "保存当前可见的候选窗、工具栏、菜单等界面为图片文件",
   },
 ];
+
+// macOS 上截图为 no-op（界面由 IMKit .app 渲染，Go 端无可截窗口），隐藏该项
+const visibleComposerItems = computed(() =>
+  props.isMac
+    ? composerItems.filter((item) => item.field !== "take_screenshot")
+    : composerItems,
+);
+
+// macOS 无 Windows 低级键盘钩子，「全局」热键不生效，隐藏该开关
+function showGlobalFor(field: string): boolean {
+  if (props.isMac) return false;
+  return field === "open_settings" || field === "take_screenshot";
+}
 
 // 默认值缓存（优先使用系统默认配置）
 const defaults = computed<HotkeyConfig>(
@@ -477,17 +491,30 @@ function getGroupKeys(group: string): string[] {
 }
 
 function getKeyLabel(key: string): string {
-  const labels: Record<string, string> = {
-    [Key.LShift]: "左Shift",
-    [Key.RShift]: "右Shift",
-    [Key.LCtrl]: "左Ctrl",
-    [Key.RCtrl]: "右Ctrl",
-    [Key.CapsLock]: "CapsLock",
-    [Key.Semicolon]: ";",
-    [Key.Quote]: "'",
-    [Key.Comma]: ",",
-    [Key.Period]: ".",
-  };
+  // macOS 用系统惯用符号显示修饰键，Windows 保留英文键名
+  const labels: Record<string, string> = props.isMac
+    ? {
+        [Key.LShift]: "⇧ 左",
+        [Key.RShift]: "⇧ 右",
+        [Key.LCtrl]: "⌃ 左",
+        [Key.RCtrl]: "⌃ 右",
+        [Key.CapsLock]: "⇪ Caps",
+        [Key.Semicolon]: ";",
+        [Key.Quote]: "'",
+        [Key.Comma]: ",",
+        [Key.Period]: ".",
+      }
+    : {
+        [Key.LShift]: "左Shift",
+        [Key.RShift]: "右Shift",
+        [Key.LCtrl]: "左Ctrl",
+        [Key.RCtrl]: "右Ctrl",
+        [Key.CapsLock]: "CapsLock",
+        [Key.Semicolon]: ";",
+        [Key.Quote]: "'",
+        [Key.Comma]: ",",
+        [Key.Period]: ".",
+      };
   return labels[key] || key;
 }
 

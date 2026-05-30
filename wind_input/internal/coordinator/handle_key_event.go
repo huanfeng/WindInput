@@ -112,39 +112,40 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 	hasCtrl := data.Modifiers&ModCtrl != 0
 	hasAlt := data.Modifiers&ModAlt != 0
 	hasShift := data.Modifiers&ModShift != 0
+	hasWin := data.Modifiers&ModWin != 0 // Command 键（macOS ⌘）
 
 	// Handle switch engine hotkey
-	if c.config != nil && c.matchHotkey(c.config.Hotkeys.SwitchEngine, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.SwitchEngine, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
 		return c.handleEngineSwitchKey()
 	}
 
 	// Handle full-width toggle hotkey
-	if c.config != nil && c.matchHotkey(c.config.Hotkeys.ToggleFullWidth, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.ToggleFullWidth, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
 		return c.handleToggleFullWidth()
 	}
 
 	// Handle punctuation toggle hotkey
-	if c.config != nil && c.matchHotkey(c.config.Hotkeys.TogglePunct, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.TogglePunct, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
 		return c.handleTogglePunct()
 	}
 
 	// Handle toggle toolbar hotkey
-	if c.config != nil && c.matchHotkey(c.config.Hotkeys.ToggleToolbar, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.ToggleToolbar, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
 		return c.handleToggleToolbarKey()
 	}
 
 	// Handle open settings hotkey
-	if c.config != nil && c.matchHotkey(c.config.Hotkeys.OpenSettings, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.OpenSettings, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
 		return c.handleOpenSettingsKey()
 	}
 
 	// Handle simplified->traditional toggle hotkey
-	if c.config != nil && c.matchHotkey(c.config.Hotkeys.ToggleS2T, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.ToggleS2T, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
 		return c.handleToggleS2T()
 	}
 
 	// UI 截图快捷键：仅在输入法激活（正在处理按键）时生效，非全局热键
-	if c.config != nil && c.matchHotkey(c.config.Hotkeys.TakeScreenshot, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.TakeScreenshot, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
 		if c.uiManager != nil {
 			c.uiManager.TakeUIScreenshots()
 		}
@@ -172,7 +173,7 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 	}
 
 	// 加词快捷键
-	if c.config != nil && c.matchHotkey(c.config.Hotkeys.AddWord, hasCtrl, hasShift, hasAlt, data.KeyCode) {
+	if c.config != nil && c.matchHotkey(c.config.Hotkeys.AddWord, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
 		return c.enterAddWordMode()
 	}
 

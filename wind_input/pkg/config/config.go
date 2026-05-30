@@ -407,7 +407,7 @@ func DefaultConfig() *Config {
 		Hotkeys: HotkeyConfig{
 			ToggleModeKeys:  []string{"lshift", "rshift"},
 			CommitOnSwitch:  true,
-			SwitchEngine:    "ctrl+`",
+			SwitchEngine:    "ctrl+shift+e",
 			ToggleFullWidth: "shift+space",
 			TogglePunct:     "ctrl+.",
 			DeleteCandidate: "ctrl+shift+number",

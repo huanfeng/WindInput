@@ -361,7 +361,7 @@ export function getDefaultConfig(): Config {
     hotkeys: {
       toggle_mode_keys: ["lshift", "rshift"],
       commit_on_switch: true,
-      switch_engine: "ctrl+`",
+      switch_engine: "ctrl+shift+e",
       toggle_full_width: "shift+space",
       toggle_punct: "ctrl+.",
       delete_candidate: "ctrl+shift+number",

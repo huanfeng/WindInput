@@ -10,36 +10,23 @@
         <span>启用</span>
       </label>
       <div class="hotkey-composer" :class="{ disabled: !enabled }">
-        <label class="composer-modifier">
-          <input
-            type="checkbox"
-            :checked="parsed.ctrl"
-            :disabled="!enabled"
-            @change="
-              updateModifier(
-                'ctrl',
-                ($event.target as HTMLInputElement).checked,
-              )
-            "
-          />
-          <span>Ctrl</span>
-        </label>
-        <span class="composer-plus" :class="{ dimmed: !enabled }">+</span>
-        <label class="composer-modifier">
-          <input
-            type="checkbox"
-            :checked="parsed.shift"
-            :disabled="!enabled"
-            @change="
-              updateModifier(
-                'shift',
-                ($event.target as HTMLInputElement).checked,
-              )
-            "
-          />
-          <span>Shift</span>
-        </label>
-        <span class="composer-plus" :class="{ dimmed: !enabled }">+</span>
+        <template v-for="mod in modifierDefs" :key="mod.key">
+          <label class="composer-modifier">
+            <input
+              type="checkbox"
+              :checked="isModOn(mod.key)"
+              :disabled="!enabled"
+              @change="
+                updateModifier(
+                  mod.key,
+                  ($event.target as HTMLInputElement).checked,
+                )
+              "
+            />
+            <span>{{ mod.label }}</span>
+          </label>
+          <span class="composer-plus" :class="{ dimmed: !enabled }">+</span>
+        </template>
         <input
           class="composer-key-input"
           :class="{ empty: !parsed.key }"
@@ -99,11 +86,14 @@ const props = withDefaults(
     showGlobal?: boolean;
     isGlobal?: boolean;
     globalHint?: string;
+    // macOS：暴露 ⌘/⌥ 修饰键并用符号显示；Windows 仅 Ctrl/Shift
+    isMac?: boolean;
   }>(),
   {
     showGlobal: false,
     isGlobal: false,
     globalHint: "启用后即使未激活输入法也能触发此快捷键",
+    isMac: false,
   },
 );
 
@@ -112,9 +102,13 @@ const emit = defineEmits<{
   "update:global": [value: boolean];
 }>();
 
+type ModKey = "ctrl" | "shift" | "alt" | "win";
+
 interface ParsedHotkey {
   ctrl: boolean;
   shift: boolean;
+  alt: boolean;
+  win: boolean;
   key: string;
 }
 
@@ -127,15 +121,24 @@ function parseHotkey(value: string): ParsedHotkey {
 }
 
 function parseHotkeyStr(value: string): ParsedHotkey {
+  const empty: ParsedHotkey = {
+    ctrl: false,
+    shift: false,
+    alt: false,
+    win: false,
+    key: "",
+  };
   if (!value || value === "none") {
-    return { ctrl: false, shift: false, key: "" };
+    return empty;
   }
   const parts = value.split("+");
-  const result: ParsedHotkey = { ctrl: false, shift: false, key: "" };
+  const result: ParsedHotkey = { ...empty };
   for (const part of parts) {
     const p = part.trim().toLowerCase();
     if (p === "ctrl") result.ctrl = true;
     else if (p === "shift") result.shift = true;
+    else if (p === "alt") result.alt = true;
+    else if (p === "win" || p === "cmd" || p === "meta") result.win = true;
     else result.key = p;
   }
   return result;
@@ -144,6 +147,25 @@ function parseHotkeyStr(value: string): ParsedHotkey {
 const enabled = computed(() => props.modelValue !== "none");
 
 const parsed = computed(() => parseHotkey(props.modelValue));
+
+// 修饰键复选框定义：macOS 暴露 ⌘/⌥ 并用符号，Windows 仅 Ctrl/Shift
+const modifierDefs = computed<{ key: ModKey; label: string }[]>(() =>
+  props.isMac
+    ? [
+        { key: "win", label: "⌘" },
+        { key: "ctrl", label: "⌃" },
+        { key: "alt", label: "⌥" },
+        { key: "shift", label: "⇧" },
+      ]
+    : [
+        { key: "ctrl", label: "Ctrl" },
+        { key: "shift", label: "Shift" },
+      ],
+);
+
+function isModOn(mod: ModKey): boolean {
+  return parsed.value[mod];
+}
 
 const hasChanged = computed(() => props.modelValue !== props.defaultValue);
 
@@ -179,9 +201,12 @@ const keyDisplay = computed(() => {
 
 function buildHotkeyString(p: ParsedHotkey): string {
   if (!p.key) return "none";
-  if (!p.ctrl && !p.shift) return "none";
+  if (!p.ctrl && !p.shift && !p.alt && !p.win) return "none";
+  // 固定输出顺序，保证 Windows 既有串（如 "ctrl+shift+e"）不变
   const parts: string[] = [];
+  if (p.win) parts.push("win");
   if (p.ctrl) parts.push("ctrl");
+  if (p.alt) parts.push("alt");
   if (p.shift) parts.push("shift");
   parts.push(p.key);
   return parts.join("+");
@@ -195,7 +220,7 @@ function toggleEnabled() {
   }
 }
 
-function updateModifier(mod: "ctrl" | "shift", checked: boolean) {
+function updateModifier(mod: ModKey, checked: boolean) {
   const p = { ...parsed.value, [mod]: checked };
   emit("update:modelValue", buildHotkeyString(p));
 }

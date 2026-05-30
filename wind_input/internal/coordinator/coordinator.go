@@ -69,6 +69,7 @@ const (
 	ModShift = 0x01
 	ModCtrl  = 0x02
 	ModAlt   = 0x04
+	ModWin   = 0x08 // Command 键（macOS ⌘，Swift 已映射 .command→0x08）
 )
 
 // EffectiveMode represents the effective input mode considering CapsLock

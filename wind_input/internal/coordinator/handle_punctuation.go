@@ -2,6 +2,7 @@
 package coordinator
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -696,7 +697,7 @@ func (c *Coordinator) handlePinyinSeparator() *bridge.KeyEventResult {
 
 // matchHotkey checks if the current key event matches the configured hotkey string
 // Supported formats: "ctrl+`", "shift+space", "ctrl+.", "ctrl+shift+e", "none", ""
-func (c *Coordinator) matchHotkey(hotkeyStr string, hasCtrl, hasShift, hasAlt bool, keyCode int) bool {
+func (c *Coordinator) matchHotkey(hotkeyStr string, hasCtrl, hasShift, hasAlt, hasWin bool, keyCode int) bool {
 	if hotkeyStr == "" || hotkeyStr == "none" {
 		return false
 	}
@@ -705,6 +706,7 @@ func (c *Coordinator) matchHotkey(hotkeyStr string, hasCtrl, hasShift, hasAlt bo
 	needCtrl := false
 	needShift := false
 	needAlt := false
+	needWin := false
 	var targetKeyCode int
 
 	// Parse modifiers and key
@@ -740,6 +742,8 @@ func (c *Coordinator) matchHotkey(hotkeyStr string, hasCtrl, hasShift, hasAlt bo
 				needShift = true
 			case keys.ModAlt:
 				needAlt = true
+			case keys.ModWin:
+				needWin = true
 			default:
 				// Last non-modifier part is the key name
 				// Only treat the last part as the key (or any unrecognized part)
@@ -755,7 +759,7 @@ func (c *Coordinator) matchHotkey(hotkeyStr string, hasCtrl, hasShift, hasAlt bo
 	}
 
 	// Check if all modifiers match
-	if needCtrl != hasCtrl || needShift != hasShift || needAlt != hasAlt {
+	if needCtrl != hasCtrl || needShift != hasShift || needAlt != hasAlt || needWin != hasWin {
 		return false
 	}
 
@@ -803,13 +807,28 @@ func init() {
 }
 
 // resolveVKFromKeyName 把任意按键名（含别名/大小写）解析为 Windows 虚拟键码。
-// 入口先经 keys.ParseKey 规范化，再查 vkByKeyHP 表；未识别返回 0。
+// 入口先经 keys.ParseKey 规范化，再查 vkByKeyHP 表（标点等特例）；
+// 字母/数字/F 键不入表，按 Windows 虚拟键码规律计算。未识别返回 0。
 func resolveVKFromKeyName(name string) int {
 	k, ok := keys.ParseKey(name)
 	if !ok {
 		return 0
 	}
-	return vkByKeyHP[k]
+	if vk, ok := vkByKeyHP[k]; ok {
+		return vk
+	}
+	s := string(k)
+	switch {
+	case len(s) == 1 && s[0] >= 'a' && s[0] <= 'z':
+		return 0x41 + int(s[0]-'a') // VK_A..VK_Z
+	case len(s) == 1 && s[0] >= '0' && s[0] <= '9':
+		return 0x30 + int(s[0]-'0') // VK_0..VK_9
+	case len(s) >= 2 && s[0] == 'f':
+		if n, err := strconv.Atoi(s[1:]); err == nil && n >= 1 && n <= 12 {
+			return 0x70 + (n - 1) // VK_F1..VK_F12
+		}
+	}
+	return 0
 }
 
 // updatePairedQuotes 根据中文配对表更新 PunctuationConverter 的引号配对状态
