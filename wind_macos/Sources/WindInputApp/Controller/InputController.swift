@@ -67,6 +67,8 @@ public class InputController: IMKInputController {
         super.activateServer(sender)
         currentClient = sender as? (IMKTextInput & NSObjectProtocol)
         CandidatePanelHost.shared.activeResponder = self
+        // 激活即确保连上 (装完首次激活 / 重启后并发竞态时 init 那次可能没连上)。
+        ensureConnected()
         sendEmpty(UpstreamCmd.focusGained)
     }
 
@@ -173,8 +175,8 @@ public class InputController: IMKInputController {
         guard event.type == .keyDown else { return false }
         // 任意真实按键出现 → 取消当前修饰键 tap 判定 (Shift+X 不算 tap)。
         pendingModSawOther = true
-        guard let bridge = bridge, bridge.isConnected else {
-            NSLog("WindInput[handle] bridge not connected, pass through")
+        guard ensureConnected(), let bridge = bridge else {
+            NSLog("WindInput[handle] bridge not connected (重连失败), pass through")
             return false
         }
 
@@ -277,6 +279,27 @@ public class InputController: IMKInputController {
     }
 
     // MARK: - Reconnect
+
+    /// 确保 bridge 已连接; 未连/断开则尝试 (重)连, 返回是否已连。
+    ///
+    /// 必要性 (实测): IME 的 InputController 在 Go 服务 socket 就绪前被创建 (装完首次激活,
+    /// 尤其重启后 IME 随登录自启与服务 LaunchAgent RunAtLoad 并发) 时, init() 那次连接会
+    /// 失败 → bridge=nil → 此后该实例所有按键直通英文且不重试 (得切走再切回让 IMKit 新建
+    /// 实例才会重连)。这里在 activate/handle 入口懒重连让同一实例自愈, 免去手动切换。
+    /// 已连时是廉价 no-op, 不影响正常路径。
+    @discardableResult
+    private func ensureConnected() -> Bool {
+        if let b = bridge, b.isConnected { return true }
+        bridge?.close()
+        do {
+            bridge = try BridgeClient(socketPath: BridgeEndpoints.requestSocket)
+            NSLog("WindInput[ensureConnected] bridge (重)连成功")
+            return true
+        } catch {
+            bridge = nil
+            return false
+        }
+    }
 
     private func reconnect() {
         bridge?.close()
