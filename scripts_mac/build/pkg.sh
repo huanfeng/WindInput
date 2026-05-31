@@ -15,8 +15,15 @@
 # IME 有系统设置 UI 硬墙 (见 wind_macos/AGENTS.md), 真正可分发需 Developer ID + 公证.
 #
 # 用法:
-#   scripts_mac/build/pkg.sh            # 用现有构建产物打包
-#   scripts_mac/build/pkg.sh --build    # 先构建 IME + 设置 + 服务/词库 再打包
+#   scripts_mac/build/pkg.sh             # 用现有构建产物打包
+#   scripts_mac/build/pkg.sh --build     # 先构建 IME + 设置 + 服务/词库 再打包
+#   scripts_mac/build/pkg.sh --universal # universal (arm64+x86_64) 产物 + 装包器
+#   WIND_MAC_UNIVERSAL=1 scripts_mac/build/pkg.sh --build  # 同上 (CI 走环境变量统一开关)
+#
+# 公证 (预留, 可选): 配齐以下环境变量则在 productbuild 后自动 productsign + notarytool + staple,
+# 否则保持 ad-hoc 产物不变 (无需改脚本即可将来启用):
+#   MACOS_DEVELOPER_ID_INSTALLER  "Developer ID Installer: Name (TEAMID)" (productsign 身份)
+#   MACOS_NOTARY_APPLE_ID / MACOS_NOTARY_PASSWORD / MACOS_NOTARY_TEAM_ID  (notarytool 凭据)
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -34,9 +41,13 @@ PKG_ID="to.feng.windinput.installer"
 STAGE_REL="Library/Application Support/WindInputInstaller"   # payload 在系统中的落点
 
 DO_BUILD=0
+# universal 开关: 既驱动子构建脚本 (经 export 继承), 也决定 distribution.xml 的 hostArchitectures.
+# --universal 时 export 给 build.sh/app.sh/setting.sh, 保证构建产物与装包器架构声明一致.
+UNIVERSAL="${WIND_MAC_UNIVERSAL:-0}"
 for arg in "$@"; do
     case "$arg" in
         --build) DO_BUILD=1 ;;
+        --universal) UNIVERSAL=1; export WIND_MAC_UNIVERSAL=1 ;;
         *) echo "[错误] 未知参数: $arg" >&2; exit 1 ;;
     esac
 done
@@ -64,7 +75,8 @@ done
 [[ $miss -eq 0 ]] || { err "请先跑 scripts_mac/build/pkg.sh --build (或手动构建各组件)"; exit 1; }
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "0.0.0")
-PKG_PATH="$DIST_DIR/WindInput-${VERSION}.pkg"
+# 文件名带 -macOS 后缀, 与 Windows 的 -Setup.exe / -Portable.zip 在同一 Release 里区分.
+PKG_PATH="$DIST_DIR/WindInput-${VERSION}-macOS.pkg"
 
 # -------- 组 payload root --------
 bold "==> 组装 payload (版本 $VERSION)"
@@ -114,6 +126,15 @@ bold "==> pkgbuild + productbuild"
 mkdir -p "$DIST_DIR"
 rm -f "$PKG_PATH"
 
+# hostArchitectures 必须与实际产物架构一致: universal 声明双架构, 否则单 arm64.
+# 不一致会导致装包器在错误架构机器上拒装或装出跑不起来的二进制.
+if [[ $UNIVERSAL -eq 1 ]]; then
+    HOST_ARCHS="arm64,x86_64"
+else
+    HOST_ARCHS="arm64"
+fi
+info "hostArchitectures: $HOST_ARCHS"
+
 COMPONENT_PKG="$SCRIPTS/WindInput-component.pkg"
 pkgbuild \
     --root "$PKGROOT" \
@@ -129,8 +150,9 @@ cat > "$DIST_XML" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
     <title>清风输入法 $VERSION</title>
-    <!-- hostArchitectures 必需: 不声明则 installer 内置架构检测在 VM 上崩 (见上). 产物均 arm64. -->
-    <options customize="never" require-scripts="true" hostArchitectures="arm64"/>
+    <!-- hostArchitectures 必需: 不声明则 installer 内置架构检测在 VM 上崩 (见上).
+         值随 universal 开关: arm64 或 arm64,x86_64, 与实际产物一致. -->
+    <options customize="never" require-scripts="true" hostArchitectures="$HOST_ARCHS"/>
     <!-- 单一系统域 + customize=never: 去掉"选择安装位置/目标磁盘"步与自定义按钮. -->
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <choices-outline><line choice="default"/></choices-outline>
@@ -144,8 +166,37 @@ productbuild \
     --package-path "$SCRIPTS" \
     "$PKG_PATH"
 
+# -------- (预留) Developer ID 签名 + 公证 --------
+# 凭据齐全才执行, 否则保持 ad-hoc 产物不变. 将来买了证书只需配环境变量, 无需改脚本.
+NOTARIZED=0
+if [[ -n "${MACOS_DEVELOPER_ID_INSTALLER:-}" ]]; then
+    bold "==> productsign (Developer ID Installer)"
+    SIGNED_PKG="${PKG_PATH%.pkg}-signed.pkg"
+    productsign --sign "$MACOS_DEVELOPER_ID_INSTALLER" "$PKG_PATH" "$SIGNED_PKG"
+    mv -f "$SIGNED_PKG" "$PKG_PATH"
+    info "已签名: $PKG_PATH"
+
+    if [[ -n "${MACOS_NOTARY_APPLE_ID:-}" && -n "${MACOS_NOTARY_PASSWORD:-}" && -n "${MACOS_NOTARY_TEAM_ID:-}" ]]; then
+        bold "==> notarytool submit --wait + stapler staple"
+        xcrun notarytool submit "$PKG_PATH" \
+            --apple-id "$MACOS_NOTARY_APPLE_ID" \
+            --password "$MACOS_NOTARY_PASSWORD" \
+            --team-id "$MACOS_NOTARY_TEAM_ID" \
+            --wait
+        xcrun stapler staple "$PKG_PATH"
+        NOTARIZED=1
+        info "已公证 + staple: $PKG_PATH"
+    else
+        info "(已签名但未配 notarytool 凭据, 跳过公证)"
+    fi
+else
+    info "(未配 MACOS_DEVELOPER_ID_INSTALLER, 保持 ad-hoc 产物)"
+fi
+
 bold "==> Done"
 info "PKG: $PKG_PATH ($(du -h "$PKG_PATH" | cut -f1))"
 info "安装: sudo installer -pkg \"$PKG_PATH\" -target /   (或双击走向导)"
 info "卸载: 双击 ~/Applications/卸载清风输入法.app"
-info "(未公证版首启需 右键→打开 绕过 Gatekeeper; Tahoe 系统设置 UI 硬墙需公证才解)"
+if [[ $NOTARIZED -eq 0 ]]; then
+    info "(未公证版首启需 右键→打开 绕过 Gatekeeper; Tahoe 系统设置 UI 硬墙需公证才解)"
+fi

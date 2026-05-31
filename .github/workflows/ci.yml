@@ -52,3 +52,41 @@ jobs:
       - name: Vet wind_setting
         working-directory: wind_setting
         run: go vet ./...
+
+  # 门控: 仅当 macOS 相关路径改动时才触发昂贵的 macos-14 编译校验 (runner 计费约 10x).
+  # GitHub 不支持 per-job paths, 故用一个 ubuntu 廉价 job 输出是否命中, macos-check 据此 if 短路.
+  changes:
+    name: Detect macOS-related changes
+    runs-on: ubuntu-latest
+    outputs:
+      macos: ${{ steps.filter.outputs.macos }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            macos:
+              - 'wind_macos/**'
+              - 'wind_input/**'
+
+  # 轻量 macOS 编译校验: 只 swift build + go build, 不打包、不跑 Wails 全量.
+  macos-check:
+    name: macOS Build Check
+    needs: changes
+    if: needs.changes.outputs.macos == 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wind_input/go.mod
+
+      - name: Build wind-input-app (Swift IME)
+        working-directory: wind_macos
+        run: swift build --product wind-input-app
+
+      - name: Build wind_input (Go service, darwin)
+        working-directory: wind_input
+        run: go build ./...

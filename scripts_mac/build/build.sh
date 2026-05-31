@@ -25,9 +25,13 @@ CACHE_DIR="$REPO_DIR/.cache"
 # -------- 参数解析 --------
 TARGETS=()
 DEBUG_VARIANT=0
+# universal: arm64+x86_64 通用二进制 (lipo 合并). WIND_MAC_UNIVERSAL=1 或 --universal 开启.
+# 默认本机单架构. CI 在 job 级设环境变量, 三件套脚本统一继承同一开关.
+UNIVERSAL="${WIND_MAC_UNIVERSAL:-0}"
 for arg in "$@"; do
     case "$arg" in
         --debug) DEBUG_VARIANT=1 ;;
+        --universal) UNIVERSAL=1 ;;
         clean) TARGETS+=("clean") ;;
         service|data|all) TARGETS+=("$arg") ;;
         *) echo "[错误] 未知参数: $arg" >&2; exit 1 ;;
@@ -92,14 +96,26 @@ download_file() {
 
 # -------- Build-GoService --------
 build_service() {
-    bold "==> [1/3] Build Go service ($EXE_NAME)"
+    bold "==> [1/3] Build Go service ($EXE_NAME$([[ $UNIVERSAL -eq 1 ]] && echo ", universal"))"
     cd "$REPO_DIR/wind_input"
     local ldflags="-X main.version=$APP_VERSION"
     [[ -n "$GO_LDFLAGS_EXTRA" ]] && ldflags="$ldflags $GO_LDFLAGS_EXTRA"
     local args=(build -ldflags "$ldflags")
     [[ -n "$GO_TAGS" ]] && args+=(-tags "$GO_TAGS")
-    args+=(-o "$BUILD_DIR/$EXE_NAME" ./cmd/service)
-    go "${args[@]}"
+    if [[ $UNIVERSAL -eq 1 ]]; then
+        # darwin 下服务纯 Go (无 cgo), 两架构各自交叉编译再 lipo 合并成通用二进制.
+        # CGO_ENABLED=0 显式锁死纯 Go 交叉编译路径 (避免本机默认 CGO_ENABLED=1 触发 cgo).
+        local tmp_arm tmp_amd
+        tmp_arm=$(mktemp); tmp_amd=$(mktemp)
+        GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go "${args[@]}" -o "$tmp_arm" ./cmd/service
+        GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go "${args[@]}" -o "$tmp_amd" ./cmd/service
+        lipo -create "$tmp_arm" "$tmp_amd" -output "$BUILD_DIR/$EXE_NAME"
+        rm -f "$tmp_arm" "$tmp_amd"
+        info "arch: $(lipo -archs "$BUILD_DIR/$EXE_NAME" 2>/dev/null || echo '?')"
+    else
+        args+=(-o "$BUILD_DIR/$EXE_NAME" ./cmd/service)
+        go "${args[@]}"
+    fi
     cd - >/dev/null
     info "$EXE_NAME 构建成功 ($(stat -f%z "$BUILD_DIR/$EXE_NAME") bytes)"
 }

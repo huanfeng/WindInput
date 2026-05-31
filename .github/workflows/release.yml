@@ -9,8 +9,9 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build & Release
+  # ---------- Windows 构建 (产 artifact, 不再自己建 Release) ----------
+  build-windows:
+    name: Build Windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,11 +33,11 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 11.3.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: wind_setting/frontend/pnpm-lock.yaml
 
@@ -69,114 +70,6 @@ jobs:
         run: |
           $version = "${{ steps.version.outputs.tag }}"
           installer\build_nsis.ps1 -Version $version
-
-      # --- Generate release notes from conventional commits ---
-      - name: Generate release notes
-        shell: pwsh
-        run: |
-          # Find previous tag
-          $currentTag = "${{ github.ref_name }}"
-          $allTags = git tag --sort=-version:refname | Where-Object { $_ -ne $currentTag -and $_ -match '^v\d+\.\d+' }
-          $prevTag = if ($allTags) { ($allTags | Select-Object -First 1) } else { $null }
-
-          if ($prevTag) {
-            $range = "$prevTag..HEAD"
-          } else {
-            $range = "HEAD"
-          }
-          Write-Host "Range: $range (prev: $prevTag)"
-
-          # Get all commit subjects
-          $commits = git log $range --pretty=format:"%s" --no-merges | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-
-          # Categorize
-          $categories = [ordered]@{
-            "feat"     = @{ title = "#### 新功能"; items = @() }
-            "fix"      = @{ title = "#### Bug 修复"; items = @() }
-            "refactor" = @{ title = "#### 重构"; items = @() }
-            "perf"     = @{ title = "#### 性能优化"; items = @() }
-            "other"    = @{ title = "#### 其他变更"; items = @() }
-          }
-
-          foreach ($msg in $commits) {
-            if ($msg -match '^(feat|fix|refactor|perf|chore|ci|docs)(\(([^)]+)\))?:\s*(.+)$') {
-              $type = $Matches[1]
-              $scope = $Matches[3]
-              $desc = $Matches[4]
-              $entry = if ($scope) { "- **$scope**: $desc" } else { "- $desc" }
-
-              switch ($type) {
-                "feat"     { $categories["feat"].items += $entry }
-                "fix"      { $categories["fix"].items += $entry }
-                "refactor" { $categories["refactor"].items += $entry }
-                "perf"     { $categories["perf"].items += $entry }
-                default    { $categories["other"].items += $entry }
-              }
-            } else {
-              $categories["other"].items += "- $msg"
-            }
-          }
-
-          # Build changelog markdown from commits
-          $changelog = ""
-          foreach ($cat in $categories.Values) {
-            if ($cat.items.Count -gt 0) {
-              $changelog += "$($cat.title)`n`n"
-              $changelog += ($cat.items -join "`n") + "`n`n"
-            }
-          }
-
-          if (-not $changelog) {
-            $changelog = "Initial release.`n"
-          }
-
-          # Assemble release notes: header + version note + changelog + footer
-          $body = ""
-
-          # 1) Common header (top)
-          $headerFile = "docs/release-notes/header.md"
-          if (Test-Path $headerFile) {
-            $headerContent = [System.IO.File]::ReadAllText($headerFile, [System.Text.UTF8Encoding]::new($false)).Trim()
-            if ($headerContent) {
-              $body += $headerContent + "`n`n---`n`n"
-              Write-Host "Included header: $headerFile"
-            }
-          }
-
-          # 2) Version-specific note (try v0.1.0-alpha.md then 0.1.0-alpha.md)
-          $tag = "${{ github.ref_name }}"
-          $noteFile = "docs/release-notes/$tag.md"
-          if (-not (Test-Path $noteFile)) {
-            $noteFile = "docs/release-notes/$($tag.TrimStart('v')).md"
-          }
-          if (Test-Path $noteFile) {
-            $body += [System.IO.File]::ReadAllText($noteFile, [System.Text.UTF8Encoding]::new($false)).TrimEnd() + "`n`n"
-            Write-Host "Included version note: $noteFile"
-          }
-
-          # 3) User-facing section (editable in draft release) + technical changelog (collapsed)
-          $body += "## ✏️ 更新说明`n`n"
-          $body += "<!-- user-facing:start -->`n"
-          $body += "### ✨ 新增`n`n`n`n"
-          $body += "### 🔧 优化`n`n`n`n"
-          $body += "### 🐛 修正`n`n`n`n"
-          $body += "### 🔩 其他`n`n`n`n"
-          $body += "<!-- user-facing:end -->`n`n<br>`n`n"
-          $body += "<details>`n"
-          $body += "<summary>变更记录</summary>`n`n"
-          $body += $changelog
-          $body += "</details>`n`n"
-
-          # 4) Common footer (installation, feedback, etc.)
-          $footerFile = "docs/release-notes/footer.md"
-          if (Test-Path $footerFile) {
-            $body += "---`n`n"
-            $body += [System.IO.File]::ReadAllText($footerFile, [System.Text.UTF8Encoding]::new($false)).TrimEnd() + "`n`n"
-            Write-Host "Included footer: $footerFile"
-          }
-
-          [System.IO.File]::WriteAllText("release_notes.md", $body, [System.Text.UTF8Encoding]::new($false))
-          Write-Host "Release notes generated ($($commits.Count) commits)"
 
       # --- Package portable ZIP ---
       - name: Package portable ZIP
@@ -218,31 +111,227 @@ jobs:
           $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
           Write-Host "Portable ZIP: $zipPath ($sizeMB MB)"
 
-      # --- Upload & Release ---
-      - name: Upload build artifacts
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: WindInput-${{ steps.version.outputs.tag }}
+          name: windows-installers
           path: |
             build/installer/WindInput-*-Setup.exe
             build/installer/WindInput-*-Portable.zip
+          if-no-files-found: error
+
+  # ---------- macOS 构建 (universal .pkg, 产 artifact) ----------
+  build-macos:
+    name: Build macOS
+    runs-on: macos-14
+    env:
+      WIND_MAC_UNIVERSAL: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $TAG"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wind_input/go.mod
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: wind_setting/frontend/pnpm-lock.yaml
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Set version from tag
+        run: |
+          printf '%s' "${{ steps.version.outputs.tag }}" > VERSION
+          echo "VERSION set to: $(cat VERSION)"
+
+      # 预留: 配了证书 secret 才导入到临时钥匙串; 未配则空跳过 (保持 ad-hoc).
+      - name: Import signing certificate (optional)
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERT_P12_BASE64" ]; then
+            echo "未配置 MACOS_CERT_P12_BASE64, 跳过证书导入 (ad-hoc 构建)"
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KPW="${MACOS_KEYCHAIN_PASSWORD:-ci-temp-pw}"
+          security create-keychain -p "$KPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KPW" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPW" "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          echo "证书已导入临时钥匙串"
+
+      - name: Build universal .pkg (三件套)
+        env:
+          MACOS_DEVELOPER_ID_INSTALLER: ${{ secrets.MACOS_DEVELOPER_ID_INSTALLER }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          scripts_mac/build/build.sh data
+          scripts_mac/build/build.sh service
+          scripts_mac/build/setting.sh
+          scripts_mac/build/app.sh
+          scripts_mac/build/pkg.sh
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-pkg
+          path: wind_macos/dist/WindInput-*-macOS.pkg
+          if-no-files-found: error
+
+  # ---------- 汇总创建草稿 Release ----------
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-macos]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $TAG"
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installers
+          path: artifacts/windows
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-pkg
+          path: artifacts/macos
+
+      # --- Generate release notes from conventional commits (bash, 等价于原 PowerShell) ---
+      - name: Generate release notes
+        env:
+          CURRENT_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # 上一个版本 tag (按 version 排序, 排除当前, 仅 ^v\d+\.\d+)
+          PREV_TAG=$(git tag --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+' \
+            | grep -vx "$CURRENT_TAG" \
+            | head -n1 || true)
+          if [ -n "$PREV_TAG" ]; then RANGE="$PREV_TAG..HEAD"; else RANGE="HEAD"; fi
+          echo "Range: $RANGE (prev: ${PREV_TAG:-none})"
+
+          feat=""; fix=""; refactor=""; perf=""; other=""
+          while IFS= read -r msg; do
+            [ -z "$msg" ] && continue
+            if [[ "$msg" =~ ^(feat|fix|refactor|perf|chore|ci|docs)(\(([^\)]+)\))?:[[:space:]]*(.+)$ ]]; then
+              type="${BASH_REMATCH[1]}"
+              scope="${BASH_REMATCH[3]}"
+              desc="${BASH_REMATCH[4]}"
+              if [ -n "$scope" ]; then entry="- **$scope**: $desc"; else entry="- $desc"; fi
+              case "$type" in
+                feat)     feat="${feat}${entry}"$'\n' ;;
+                fix)      fix="${fix}${entry}"$'\n' ;;
+                refactor) refactor="${refactor}${entry}"$'\n' ;;
+                perf)     perf="${perf}${entry}"$'\n' ;;
+                *)        other="${other}${entry}"$'\n' ;;
+              esac
+            else
+              other="${other}- ${msg}"$'\n'
+            fi
+          done < <(git log $RANGE --pretty=format:'%s' --no-merges)
+
+          changelog=""
+          append_cat() {
+            if [ -n "$2" ]; then
+              changelog="${changelog}$1"$'\n\n'"$2"$'\n'
+            fi
+          }
+          append_cat "#### 新功能"   "$feat"
+          append_cat "#### Bug 修复" "$fix"
+          append_cat "#### 重构"     "$refactor"
+          append_cat "#### 性能优化" "$perf"
+          append_cat "#### 其他变更" "$other"
+          [ -z "$changelog" ] && changelog="Initial release."$'\n'
+
+          {
+            # 1) 公共头
+            if [ -f docs/release-notes/header.md ]; then
+              cat docs/release-notes/header.md
+              printf '\n\n---\n\n'
+            fi
+            # 2) 版本说明 (docs/release-notes/<tag>.md 或 <版本>.md)
+            NOTE="docs/release-notes/${CURRENT_TAG}.md"
+            [ -f "$NOTE" ] || NOTE="docs/release-notes/${CURRENT_TAG#v}.md"
+            if [ -f "$NOTE" ]; then
+              cat "$NOTE"
+              printf '\n\n'
+            fi
+            # 3) 用户可编辑段 + 折叠的技术 changelog
+            printf '## ✏️ 更新说明\n\n'
+            printf '<!-- user-facing:start -->\n'
+            printf '### ✨ 新增\n\n\n\n'
+            printf '### 🔧 优化\n\n\n\n'
+            printf '### 🐛 修正\n\n\n\n'
+            printf '### 🔩 其他\n\n\n\n'
+            printf '<!-- user-facing:end -->\n\n<br>\n\n'
+            printf '<details>\n<summary>变更记录</summary>\n\n'
+            printf '%s' "$changelog"
+            printf '</details>\n\n'
+            # 4) 公共尾 (安装说明/反馈渠道等)
+            if [ -f docs/release-notes/footer.md ]; then
+              printf -- '---\n\n'
+              cat docs/release-notes/footer.md
+              printf '\n\n'
+            fi
+          } > release_notes.md
+          echo "Release notes generated"
 
       - name: Create GitHub Release (draft)
-        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.tag }}
+          TAG: ${{ github.ref_name }}
         run: |
-          $version = "${{ steps.version.outputs.tag }}"
-          $tag = "${{ github.ref_name }}"
-          $installer = "build\installer\WindInput-$version-Setup.exe"
-          $portable = "build\installer\WindInput-$version-Portable.zip"
-
-          # Chinese title via Unicode code points (avoids YAML encoding issues)
-          $appName = -join @([char]0x6E05, [char]0x98CE, [char]0x8F93, [char]0x5165, [char]0x6CD5)
-
-          gh release create $tag `
-            --draft `
-            --title "$appName v$version" `
-            --notes-file release_notes.md `
-            $installer `
-            $portable
+          set -euo pipefail
+          echo "下载到的产物:"
+          ls -lR artifacts || true
+          # 用通配符收集资产, 不依赖精确版本文件名 (避免命名差异导致 gh 找不到文件而退出).
+          shopt -s nullglob
+          assets=( artifacts/windows/*.exe artifacts/windows/*.zip artifacts/macos/*.pkg )
+          echo "将附加的资产: ${assets[*]:-<空>}"
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "[错误] 未收集到任何发布资产" >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --draft \
+            --title "清风输入法 v$VERSION" \
+            --notes-file release_notes.md \
+            "${assets[@]}"

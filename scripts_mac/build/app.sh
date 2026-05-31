@@ -12,6 +12,8 @@
 #   scripts_mac/build/app.sh            # release build + ad-hoc 签名
 #   scripts_mac/build/app.sh --debug    # debug build (swift build -c debug)
 #   scripts_mac/build/app.sh --no-sign  # 不 codesign (调试用)
+#   scripts_mac/build/app.sh --universal # arm64+x86_64 通用二进制 (分发/CI 用)
+#   WIND_MAC_UNIVERSAL=1 scripts_mac/build/app.sh  # 同上 (CI 走环境变量统一开关)
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -22,6 +24,9 @@ APP_BUNDLE="$MACOS_DIR/build/$APP_NAME.app"
 
 SWIFT_CONFIG="release"
 DO_SIGN=1
+# universal: arm64+x86_64 通用二进制. 环境变量 WIND_MAC_UNIVERSAL=1 或 --universal 开启.
+# 默认本机单架构 (本地/VM 快). CI 在 job 级设环境变量, 三件套脚本统一继承同一开关.
+UNIVERSAL="${WIND_MAC_UNIVERSAL:-0}"
 # 默认 ad-hoc (-). 真实证书:
 #   SIGN_IDENTITY="WindInput Dev" scripts_mac/build/app.sh
 # 自签证书的创建方法见 scripts_mac/deploy/setup_signing.md.
@@ -30,8 +35,9 @@ DO_SIGN=1
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 for arg in "$@"; do
     case "$arg" in
-        --debug)   SWIFT_CONFIG="debug" ;;
-        --no-sign) DO_SIGN=0 ;;
+        --debug)     SWIFT_CONFIG="debug" ;;
+        --no-sign)   DO_SIGN=0 ;;
+        --universal) UNIVERSAL=1 ;;
         *) echo "[错误] 未知参数: $arg" >&2; exit 1 ;;
     esac
 done
@@ -43,14 +49,28 @@ err()  { printf "\033[31m[错误] %s\033[0m\n" "$*" >&2; }
 command -v swift    >/dev/null || { err "swift 未安装 (装 Xcode CLT)"; exit 1; }
 command -v codesign >/dev/null || { err "codesign 未安装 (装 Xcode CLT)"; exit 1; }
 
-bold "==> Build wind-input-app ($SWIFT_CONFIG)"
+bold "==> Build wind-input-app ($SWIFT_CONFIG$([[ $UNIVERSAL -eq 1 ]] && echo ", universal"))"
 cd "$MACOS_DIR"
-swift build -c "$SWIFT_CONFIG" --product wind-input-app
-
-# SwiftPM 把二进制放在 .build/<config>/wind-input-app
-BIN_PATH="$MACOS_DIR/.build/$SWIFT_CONFIG/wind-input-app"
+if [[ $UNIVERSAL -eq 1 ]]; then
+    # 多架构: SwiftPM 直接产 universal 二进制, 但落点变为 .build/apple/Products/<config>/
+    # (与单架构的 .build/<config>/ 不同), 需相应取路径.
+    swift build -c "$SWIFT_CONFIG" --product wind-input-app --arch arm64 --arch x86_64
+    # 多架构产物落在 .build/apple/Products/<Config>/ (首字母大写). 显式映射避免 ${x^}
+    # 这种 bash 4+ 语法 (macOS 自带 /bin/bash 仍是 3.2, 会报错).
+    case "$SWIFT_CONFIG" in
+        release) PROD_SUBDIR="Release" ;;
+        debug)   PROD_SUBDIR="Debug" ;;
+        *)       PROD_SUBDIR="Release" ;;
+    esac
+    BIN_PATH="$MACOS_DIR/.build/apple/Products/$PROD_SUBDIR/wind-input-app"
+else
+    swift build -c "$SWIFT_CONFIG" --product wind-input-app
+    # SwiftPM 把二进制放在 .build/<config>/wind-input-app
+    BIN_PATH="$MACOS_DIR/.build/$SWIFT_CONFIG/wind-input-app"
+fi
 [[ -x "$BIN_PATH" ]] || { err "二进制未找到: $BIN_PATH"; exit 1; }
 info "binary: $BIN_PATH ($(stat -f%z "$BIN_PATH") bytes)"
+[[ $UNIVERSAL -eq 1 ]] && info "arch: $(lipo -archs "$BIN_PATH" 2>/dev/null || echo '?')"
 
 bold "==> Assemble $APP_BUNDLE"
 rm -rf "$APP_BUNDLE"
@@ -62,6 +82,19 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 # Info.plist
 cp "$MACOS_DIR/Sources/WindInputApp/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+
+# 版本贯通: 从仓库根 VERSION 文件 (CI 由 tag 写入) 注入 CFBundleShortVersionString /
+# CFBundleVersion. pkg.sh 后续读 CFBundleShortVersionString 作 .pkg 文件名/版本/向导标题,
+# 故版本真源是 VERSION 文件. 无 VERSION 文件时保持 plist 原值 (0.0.0), 不破坏纯本地构建.
+VERSION_FILE="$REPO_DIR/VERSION"
+if [[ -f "$VERSION_FILE" ]]; then
+    APP_VERSION=$(tr -d '\xef\xbb\xbf \t\r\n' < "$VERSION_FILE")
+    if [[ -n "$APP_VERSION" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP_BUNDLE/Contents/Info.plist"
+        /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" "$APP_BUNDLE/Contents/Info.plist"
+        info "version: $APP_VERSION (来自 VERSION 文件)"
+    fi
+fi
 
 # 本地化字符串 (输入法菜单名 / 应用显示名).
 # Resources/{zh-Hans,en}.lproj/InfoPlist.strings → Contents/Resources/<lang>.lproj/InfoPlist.strings
