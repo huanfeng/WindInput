@@ -26,6 +26,7 @@ import {
   statusIndicatorSchema,
   candidateTooltipSchema,
   toolbarSchema,
+  indicatorSchema,
 } from "@/schemas/appearance.schema";
 import type { PageSchema } from "@/schemas/types";
 
@@ -565,6 +566,16 @@ onUnmounted(() => {
       <div class="card-title">工具栏</div>
       <SchemaRenderer
         :schema="toolbarSchema"
+        :form-data="formData"
+        mode="bare"
+      />
+    </div>
+
+    <!-- macOS：无悬浮工具栏，改为菜单栏状态指示器（NSStatusItem）开关，复用 toolbar.visible -->
+    <div class="settings-card" v-if="isMac">
+      <div class="card-title">菜单栏指示器</div>
+      <SchemaRenderer
+        :schema="indicatorSchema"
         :form-data="formData"
         mode="bare"
       />

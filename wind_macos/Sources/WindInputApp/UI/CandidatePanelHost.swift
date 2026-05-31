@@ -62,14 +62,23 @@ public final class CandidatePanelHost {
             self?.sendFrame(BinaryCodec.encodeCandidateContextMenuFrame(index: index, action: action))
         }
         panel.unifiedMenuProvider = { [weak self] in self?.requestUnifiedMenu() }
-        panel.onUnifiedAction = { [weak self] id in
-            self?.sendFrame(BinaryCodec.encodeMenuActionFrame(id: Int32(id)))
-        }
+        panel.onUnifiedAction = { [weak self] id in self?.sendMenuAction(id) }
         // 菜单栏状态菜单复用候选框空白处右键的同一统一菜单树与回发路径, 保证两处一致。
         ModeStatusController.shared.unifiedMenuProvider = { [weak self] in self?.requestUnifiedMenu() }
-        ModeStatusController.shared.onUnifiedAction = { [weak self] id in
-            self?.sendFrame(BinaryCodec.encodeMenuActionFrame(id: Int32(id)))
-        }
+        ModeStatusController.shared.onUnifiedAction = { [weak self] id in self?.sendMenuAction(id) }
+    }
+
+    // MARK: - 统一菜单复用接口 (供系统输入菜单 InputController.menu 调用)
+
+    /// 同步取统一菜单树 (与候选框空白处右键、菜单栏指示器菜单同一 IPC 请求路径)。
+    /// 主线程调用 (菜单将要绘制时), 失败返回 nil。
+    public func unifiedMenuItems() -> [MenuItemData]? {
+        return requestUnifiedMenu()
+    }
+
+    /// 回发统一菜单项点击 (CmdMenuAction)。三处菜单共用同一发送路径。
+    public func sendMenuAction(_ id: Int) {
+        sendFrame(BinaryCodec.encodeMenuActionFrame(id: Int32(id)))
     }
 
     public func start() {
@@ -178,26 +187,41 @@ public final class CandidatePanelHost {
         }
     }
 
-    /// 空白处右键: 向 Go 请求统一菜单树 (CmdShowContextMenu → CmdMenuShow 响应)。
-    /// 同步走 request 连接 (本地 socket, 快); 失败返回 nil。在主线程调用 (鼠标事件)。
+    /// 在持久 request 连接上做一次「发一帧 + 读一帧响应」, 连接陈旧时重建并重试一次。
+    /// **仅供幂等 (只读) 请求复用** —— 重试会重发同一帧, 非幂等操作 (选词/翻页/菜单动作)
+    /// 不可用本助手, 以免「服务端已处理但 ack 丢失」时被重发双重执行。
+    ///
+    /// 必要性: sendClient 是长连接, 服务侧可能因空闲回收/重启把它关掉, 而本端半开连接
+    /// 察觉不到 —— 首次 send 看似成功但 readFrame 立即 EOF。单次尝试会让「切换应用后首次
+    /// 打开菜单」偶发取不到菜单树 (退回兜底/只读)。重试一次 (重建连接) 即可对用户透明自愈。
+    /// 两次都失败 (服务真的不可达) 返回 nil。主线程调用 (鼠标/菜单事件, 主线程串行化)。
+    private func requestResponseIdempotent(_ frame: Data) -> Frame? {
+        for attempt in 0..<2 {
+            lock.lock()
+            if sendClient == nil {
+                sendClient = try? BridgeClient(socketPath: BridgeEndpoints.requestSocket)
+            }
+            let c = sendClient
+            lock.unlock()
+            guard let c = c else { return nil } // 连不上服务 (socket 不存在), 重试无意义
+            do {
+                try c.send(frame)
+                return try c.readFrame()
+            } catch {
+                NSLog("CandidatePanelHost: requestResponse attempt \(attempt) failed: \(error)")
+                lock.lock(); sendClient?.close(); sendClient = nil; lock.unlock()
+                // 陈旧连接已丢弃; 下一轮 attempt 重建后重试。
+            }
+        }
+        return nil
+    }
+
+    /// 空白处右键 / 菜单栏指示器 / 系统输入菜单: 向 Go 请求统一菜单树
+    /// (CmdShowContextMenu → CmdMenuShow 响应)。只读查询, 连接陈旧自动重试一次; 失败返回 nil。
     private func requestUnifiedMenu() -> [MenuItemData]? {
-        lock.lock()
-        if sendClient == nil {
-            sendClient = try? BridgeClient(socketPath: BridgeEndpoints.requestSocket)
-        }
-        let c = sendClient
-        lock.unlock()
-        guard let c = c else { return nil }
-        do {
-            try c.send(BinaryCodec.encodeEmptyFrame(cmd: UpstreamCmd.showContextMenu))
-            let resp = try c.readFrame()
-            guard resp.cmd == DownstreamCmd.menuShow else { return nil }
-            return try BinaryCodec.decodeUnifiedMenuPayload(resp.payload)
-        } catch {
-            NSLog("CandidatePanelHost: requestUnifiedMenu failed: \(error)")
-            lock.lock(); sendClient?.close(); sendClient = nil; lock.unlock()
-            return nil
-        }
+        guard let resp = requestResponseIdempotent(BinaryCodec.encodeEmptyFrame(cmd: UpstreamCmd.showContextMenu)),
+              resp.cmd == DownstreamCmd.menuShow else { return nil }
+        return try? BinaryCodec.decodeUnifiedMenuPayload(resp.payload)
     }
 
     private func pagerKeyFrame(vk: UInt32) -> Data {
@@ -205,7 +229,8 @@ public final class CandidatePanelHost {
             keyCode: vk, scanCode: 0, modifiers: 0, eventType: .down, eventSeq: 0, prevChar: 0))
     }
 
-    /// 通过独立 request 连接发一帧 (CandidateSelect / Hover / 翻页键), 读掉 Ack。
+    /// 通过持久 request 连接发一帧 (CandidateSelect / Hover / 翻页键 / 菜单动作), 读掉 Ack。
+    /// 非幂等, 单次尝试: 连接陈旧时丢弃并重置 (下次自愈), 不重发以免双重执行。
     /// 候选更新/commit 走 push 通道异步到达。
     private func sendFrame(_ frame: Data) {
         lock.lock()

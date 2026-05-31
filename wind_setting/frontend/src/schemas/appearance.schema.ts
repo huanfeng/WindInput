@@ -258,6 +258,18 @@ export const candidateTooltipSchema: PageSchema = [
   },
 ];
 
+// ── 菜单栏指示器卡片（macOS）──────────────────────────────────
+// macOS 无悬浮可拖动工具栏；darwin 把 Toolbar 命令重定向为菜单栏状态指示器
+// (NSStatusItem)，故复用 toolbar.visible 控制其显隐，仅文案按菜单栏语义适配。
+export const indicatorSchema: PageSchema = [
+  {
+    type: "toggle",
+    key: "toolbar.visible",
+    label: "菜单栏指示器",
+    hint: "在菜单栏显示当前输入状态（中/英、标点、全/半角）；点击可切换输入方案、检索范围等",
+  },
+];
+
 // ── 工具栏卡片 ────────────────────────────────────────────────
 export const toolbarSchema: PageSchema = [
   {

@@ -33,6 +33,9 @@ public class InputController: IMKInputController {
     private var bridge: BridgeClient?
     private var keySeq: UInt16 = 0
     private let router = BridgeResponseRouter()
+    // 系统输入菜单 (点击菜单栏输入源图标弹出) 的统一菜单构建器。须持有 (虽 IMK 模式
+    // target=nil, 但每次 menu() 重建依赖此实例存活)。
+    private let imkMenuBuilder = UnifiedMenuBuilder()
     private var composition: CompositionState { router.composition }
     // 当前焦点 IMKit client, 供鼠标选词 push commit 路由 (见 applyPushResponse)。
     private weak var currentClient: (IMKTextInput & NSObjectProtocol)?
@@ -157,6 +160,44 @@ public class InputController: IMKInputController {
     /// 才能收到修饰键 (Shift/Ctrl) 变化, 做单击切换检测。
     public override func recognizedEvents(_ sender: Any!) -> Int {
         return Int(NSEvent.EventTypeMask.keyDown.rawValue | NSEvent.EventTypeMask.flagsChanged.rawValue)
+    }
+
+    // MARK: - 系统输入菜单 (点击菜单栏输入源图标弹出)
+
+    /// IMKit 在「文本输入菜单」需要绘制时调用 (每次打开都会问一次, 故可动态反映当前状态)。
+    /// 返回的菜单项会被系统追加到输入源列表下方 —— 这是标准 Mac 输入法的菜单接入方式
+    /// (Rime/Squirrel、搜狗等同此), 复用与候选框右键、菜单栏指示器完全一致的统一菜单树。
+    ///
+    /// 派发: 系统输入菜单由 IMK 在另一上下文绘制, 选中项经 doCommandBySelector 回到本进程,
+    /// 故菜单项 target=nil + action=imkMenuCommand:, 菜单 id 经 NSMenuItem.tag 回传。
+    public override func menu() -> NSMenu! {
+        guard let items = CandidatePanelHost.shared.unifiedMenuItems(), !items.isEmpty else {
+            return imkFallbackMenu()
+        }
+        return imkMenuBuilder.build(items, dispatch: .imkCommand(action: #selector(imkMenuCommand(_:))))
+    }
+
+    /// 统一菜单项被选中: IMK 经 doCommandBySelector 调用本方法, sender 是 infoDictionary
+    /// (含 kIMKCommandMenuItemName = 被点的 NSMenuItem)。读其 tag (统一菜单 id) 回发
+    /// CmdMenuAction, 由 Go 端 handleUnifiedMenuAction 派发, 与其它两处菜单同一路径。
+    @objc public func imkMenuCommand(_ sender: Any!) {
+        guard let info = sender as? NSDictionary,
+              let item = info[kIMKCommandMenuItemName as Any] as? NSMenuItem else { return }
+        CandidatePanelHost.shared.sendMenuAction(item.tag)
+    }
+
+    /// 服务不可达时的兜底菜单: 仅「设置…」(直接拉起设置应用, 不依赖 Go)。避免空菜单。
+    private func imkFallbackMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let item = NSMenuItem(title: "设置…", action: #selector(imkOpenSettings(_:)), keyEquivalent: "")
+        item.target = nil
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc public func imkOpenSettings(_ sender: Any!) {
+        ModeStatusController.shared.openSettings(page: "")
     }
 
     public override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {

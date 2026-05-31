@@ -84,7 +84,7 @@ final class CandidateContentView: NSView {
         // 候选 (index>=0): 候选上下文菜单; 空白/翻页区: 统一主菜单 (方案/主题/简繁/设置…)。
         guard let idx = hitIndex(event), idx >= 0 else {
             if let items = unifiedMenuProvider?(), !items.isEmpty {
-                let menu = unifiedMenuBuilder.build(items) { [weak self] id in self?.onUnifiedAction?(id) }
+                let menu = unifiedMenuBuilder.build(items, dispatch: .inProcess { [weak self] id in self?.onUnifiedAction?(id) })
                 menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
             }
             return

@@ -81,7 +81,7 @@ public final class ModeStatusController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         if let items = unifiedMenuProvider?(), !items.isEmpty {
-            menuBuilder.populate(menu, with: items) { [weak self] id in self?.onUnifiedAction?(id) }
+            menuBuilder.populate(menu, with: items, dispatch: .inProcess { [weak self] id in self?.onUnifiedAction?(id) })
         } else {
             appendFallbackState(menu)
         }

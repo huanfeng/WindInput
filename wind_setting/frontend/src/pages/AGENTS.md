@@ -12,7 +12,7 @@
 | `GeneralPage.vue` | 方案 | 引擎类型切换（五笔/拼音）、启动状态默认值（中文模式、全角、中文标点） |
 | `InputPage.vue` | 输入 | 引擎输入行为：五笔（四码自动上屏、顶字等）、拼音（模糊音设置）、过滤模式、标点跟随模式 |
 | `HotkeyPage.vue` | 按键 | 中英文切换键、引擎切换、全角切换、标点切换、候选选择键组、翻页键；负责检测快捷键冲突并 emit `update:hotkeyConflicts` |
-| `AppearancePage.vue` | 外观 | 主题选择（含实时预览 ThemePreview）、字体、候选页大小、候选排列（横/竖）、状态指示器、工具栏位置 |
+| `AppearancePage.vue` | 外观 | 主题选择（含实时预览 ThemePreview）、字体、候选页大小、候选排列（横/竖）、状态指示器、工具栏卡片（Win）/菜单栏指示器卡片（macOS，`isMac` 时渲染 `indicatorSchema`，复用 `toolbar.visible`） |
 | `DictionaryPage.vue` | 词库 | 短语管理（用户短语 + 系统短语覆盖）、用户词库管理（按方案）、临时词库管理、Shadow 候选调整（按方案）；直接调用 `wailsApi`，不通过 `formData` |
 | `AdvancedPage.vue` | 高级 | 日志级别配置、TSF 日志配置、打开日志目录（emit `openLogFolder`）、打开配置目录（emit `openConfigFolder`）、服务状态查看 |
 | `AboutPage.vue` | 关于 | 应用版本、服务运行状态、GitHub 链接（emit `openExternalLink`） |
