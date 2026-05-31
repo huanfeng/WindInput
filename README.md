@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/github/v/release/huanfeng/WindInput?include_prereleases&label=version&color=blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-brightgreen" alt="Platform">
-  <img src="https://img.shields.io/badge/macOS-in--progress-yellow" alt="macOS in progress">
+  <img src="https://img.shields.io/badge/macOS-12%2B%20alpha-orange" alt="macOS alpha">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
@@ -49,6 +49,14 @@
 从 [Releases](../../releases) 页面下载 `WindInput-x.x.x-Portable.zip`，解压到任意目录后运行 `wind_portable.exe` 即可使用。
 
 便携版数据保存在程序所在目录，适合 U 盘携带或多环境使用。更新时下载新版 ZIP 覆盖解压即可。
+
+### macOS
+
+从 [Releases](../../releases) 页面下载 `WindInput-x.x.x-macOS.pkg`，双击运行安装。安装包内含**输入法、后台服务、设置程序**三件套，为 universal 构建（同时支持 Apple Silicon 与 Intel）。
+
+安装后到 **系统设置 → 键盘 → 文本输入 → 输入法** 添加并切换到「清风输入法」（也可用 `⌃Space` 或菜单栏输入菜单切换）。设置程序为 `~/Applications/清风输入法设置.app`，也可从输入法菜单的「设置…」打开。卸载：双击 `~/Applications/卸载清风输入法.app`。
+
+> 需要 macOS 12 及以上。当前版本未做苹果公证，首次安装/启用可能需要在「系统设置 → 隐私与安全性」中点「仍要打开」放行；macOS 26 (Tahoe) 对未公证输入法限制更强。重新安装前建议先注销或重启，以清除系统的输入法注册缓存。
 
 ### 手动构建安装
 
@@ -89,14 +97,16 @@ ui:
 |------|------|------|
 | `wind_tsf` | C++ | Windows TSF 框架接口，键盘事件捕获 |
 | `wind_input` | Go | 输入引擎、候选词管理、UI 渲染（**跨平台**：Win 全功能 + macOS 服务端可运行） |
-| `wind_setting` | Go + Vue 3 | 图形化设置工具（Win） |
-| `wind_macos`（规划中） | Swift / Obj-C | macOS IMKit `.app` 客户端，对位 `wind_tsf` |
+| `wind_setting` | Go + Vue 3 | 图形化设置工具（Win / macOS） |
+| `wind_macos` | Swift | macOS IMKit `.app` 输入法客户端，对位 `wind_tsf` |
 
 架构详情和开发指南请参阅 [开发文档](docs/DEVELOPMENT.md)。
 
-### macOS 移植 (进行中)
+### macOS 版本 (alpha)
 
-Go 服务端已完成 darwin 全包编译，可在 macOS 上独立运行（产出 ~11.5MB Mach-O 二进制）。但 **macOS IMKit `.app` 客户端工程尚未启动**，当前服务可作为 IPC server 运行但**无法实际输入**。
+macOS 端采用 **IMKit `.app` 输入法客户端 + Go 后台服务** 的双进程模型，输入、候选、上屏、设置界面均已打通，以单个 `.pkg` 分发上述三件套（universal，支持 Apple Silicon 与 Intel）。安装方式见上文 [安装 → macOS](#macos)。
+
+仍处于 alpha：未做苹果公证，新系统 (macOS 26 Tahoe) 对未公证输入法限制更强；功能与 Windows 版存在差异。
 
 macOS 开发者入口文档：
 
