@@ -5,12 +5,53 @@
 ## 系统要求
 
 - Windows 10 或 Windows 11
-- Go 1.24+
+- Go 1.26+
 - Visual Studio 2017 或更高版本（含 C++ 桌面开发工具）
-- CMake 3.15+
-- Wails v2 CLI
+- CMake 3.15+（参见[CMake](#CMake)）
+- Wails v2.12 CLI
 - Node.js + pnpm（前端构建）
-- PowerShell（构建脚本）
+- PowerShell 7+（构建脚本）
+- .NET SDK 10+ （Portable版本）
+
+### CMake
+
+通过 Visual Studio 2017及以上版本下载 的C++桌面端工作负载，包含CMake和其他必要的C++工具链，通常无需另行安装其他CMake。这个负载中的 CMake 为微软定制版，默认查找 VS 生成器与编译器，区别于 CMake 官方版本默认使用 NMake+GCC。建议从 VS 终端运行开发调试脚本，以便直接使用VS下载的CMake与MSVC。
+
+请注意操作系统的环境变量PATH，靠前的CMake路径会被优先使用并且可能会覆盖 VS 终端的CMake，可在终端使用以下命令确认CMake版本
+
+```
+cmake --version	
+```
+
+示例输出：
+
+```
+cmake version 4.3.1-msvc1
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+```
+
+使用以下命令确认默认生成器与可用生成器：
+
+```
+cmake -G
+```
+
+以下为示例输出，开头带星号的是默认生成器。由于Visual Studio 内的终端会自动设置终端内的环境变量，因此VS终端的输出可能与其他终端不同（例如 VS Code终端或者在文件资源管理器打开的终端）：
+
+```
+Generators
+
+ *Visual Studio 17 2022        = Generates Visual Studio 2022 project files.
+  Visual Studio 16 2019        = Generates Visual Studio 2019 project files.
+  Visual Studio 15 2017        = Generates Visual Studio 2017 project files.
+  Ninja                        = Generates build.ninja files.
+  Unix Makefiles               = Generates standard UNIX makefiles.
+```
+
+### Power Shell
+
+Windows内置的 PowerShell 通常是 Power Shell 5，请前往[官网](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.6#msi)下载 Power Shell 7
 
 ## 项目结构
 
