@@ -19,8 +19,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 MACOS_DIR="$REPO_DIR/wind_macos"
-APP_NAME="WindInput"
-APP_BUNDLE="$MACOS_DIR/build/$APP_NAME.app"
+# 变体: release → APP_NAME=WindInput; debug → APP_NAME=WindInputDebug (--debug 设置)。
+# .app 目录名/bundleID 按变体区分以支持共存; 可执行名 EXE_NAME 恒为 WindInput
+# (= CFBundleExecutable, 两变体同名, 仅所在 .app 路径不同)。
+APP_BASE="WindInput"
+VARIANT_SUFFIX=""        # debug 时 "Debug"
+EXE_NAME="$APP_BASE"
 
 SWIFT_CONFIG="release"
 DO_SIGN=1
@@ -35,12 +39,16 @@ UNIVERSAL="${WIND_MAC_UNIVERSAL:-0}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 for arg in "$@"; do
     case "$arg" in
-        --debug)     SWIFT_CONFIG="debug" ;;
+        --debug)     SWIFT_CONFIG="debug"; VARIANT_SUFFIX="Debug" ;;
         --no-sign)   DO_SIGN=0 ;;
         --universal) UNIVERSAL=1 ;;
         *) echo "[错误] 未知参数: $arg" >&2; exit 1 ;;
     esac
 done
+
+# 变体派生: APP_NAME = .app 目录名 + bundleID 后缀 (WindInput / WindInputDebug)。
+APP_NAME="${APP_BASE}${VARIANT_SUFFIX}"
+APP_BUNDLE="$MACOS_DIR/build/$APP_NAME.app"
 
 bold() { printf "\033[1m%s\033[0m\n" "$*"; }
 info() { printf "  %s\n" "$*"; }
@@ -76,12 +84,25 @@ bold "==> Assemble $APP_BUNDLE"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 
-# 二进制 → Contents/MacOS/WindInput (与 Info.plist 的 CFBundleExecutable 对齐)
-cp "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+# 二进制 → Contents/MacOS/WindInput (与 Info.plist 的 CFBundleExecutable 对齐;
+# 两变体可执行同名, 仅 .app 路径不同)
+cp "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/$EXE_NAME"
+chmod +x "$APP_BUNDLE/Contents/MacOS/$EXE_NAME"
 
 # Info.plist
 cp "$MACOS_DIR/Sources/WindInputApp/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+
+# 变体注入 (debug): 全局把 bundleID 串换成 debug 变体 —— 一并改写 CFBundleIdentifier /
+# InputMethodConnectionName / ComponentInputModeDict 的 mode-id (作 dict key + TISInputSourceID
+# 值 + 有序数组项)。再把显示名 (CFBundleName/DisplayName/TISIconLabels) 加「开发版」。
+# 这样 debug .app 注册为独立输入源, 与 release 共存。
+if [[ -n "$VARIANT_SUFFIX" ]]; then
+    bold "==> 变体注入 (debug): bundleID/mode/连接名/显示名 → $APP_NAME"
+    sed -i '' \
+        -e 's/to\.feng\.inputmethod\.WindInput/to.feng.inputmethod.WindInputDebug/g' \
+        -e 's/清风输入法/清风输入法开发版/g' \
+        "$APP_BUNDLE/Contents/Info.plist"
+fi
 
 # 版本贯通: 从仓库根 VERSION 文件 (CI 由 tag 写入) 注入 CFBundleShortVersionString /
 # CFBundleVersion. pkg.sh 后续读 CFBundleShortVersionString 作 .pkg 文件名/版本/向导标题,
@@ -103,6 +124,14 @@ for lproj in "$MACOS_DIR/Sources/WindInputApp/Resources"/*.lproj; do
     lang=$(basename "$lproj")
     mkdir -p "$APP_BUNDLE/Contents/Resources/$lang"
     cp -R "$lproj"/* "$APP_BUNDLE/Contents/Resources/$lang/"
+    # 变体注入 (debug): mode-id 键对齐 + 本地化显示名加「开发版」/「Debug」。
+    if [[ -n "$VARIANT_SUFFIX" && -f "$APP_BUNDLE/Contents/Resources/$lang/InfoPlist.strings" ]]; then
+        sed -i '' \
+            -e 's/to\.feng\.inputmethod\.WindInput/to.feng.inputmethod.WindInputDebug/g' \
+            -e 's/"清风输入法"/"清风输入法开发版"/g' \
+            -e 's/"WindInput"/"WindInputDebug"/g' \
+            "$APP_BUNDLE/Contents/Resources/$lang/InfoPlist.strings"
+    fi
     info "lproj: $lang"
 done
 

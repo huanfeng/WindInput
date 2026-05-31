@@ -18,19 +18,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 
-LABEL="to.feng.windinput.service"
-INSTALL_ROOT="$HOME/Library/Application Support/WindInput/service"
-# 安装后的可执行名: macOS 登录项/后台列表 (BTM) 对无 Developer ID 签名的 LaunchAgent
-# 直接显示可执行文件名 (实测 AssociatedBundleIdentifiers 对 ad-hoc legacy agent 被忽略),
-# 故装为中文名让后台列表显示「清风输入法服务」而非裸 wind_input. 二进制改名不影响功能
-# (服务用 exeDir/data 定位词库、IME 走 socket 路径连接, 均与文件名无关).
-INSTALL_EXE="$INSTALL_ROOT/清风输入法服务"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs"
-OUT_LOG="$LOG_DIR/windinput.out.log"
-ERR_LOG="$LOG_DIR/windinput.err.log"
 GUI_DOMAIN="gui/$(id -u)"
-PUSH_SOCK="$HOME/Library/Application Support/WindInput/bridge_push.sock"
 
 DEBUG_VARIANT=0
 DO_UNINSTALL=0
@@ -45,6 +34,31 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+# 变体派生 (参数解析后): debug 用独立 LaunchAgent label + 运行时目录 (WindInput_debug,
+# 与 Go buildvariant.Suffix() 及 .app BridgeEndpoints.runtimeDir 对齐) + 中文名加「开发版」
+# + 独立 launchd 日志, 让 debug/release 两套服务共存, 各连各自的 .app socket。
+# 安装后的可执行名装为中文名: macOS 后台列表 (BTM) 对无 Developer ID 签名的 legacy agent
+# 直接显示可执行文件名 (AssociatedBundleIdentifiers 被忽略)。二进制改名不影响功能。
+if [[ $DEBUG_VARIANT -eq 1 ]]; then
+    LABEL="to.feng.windinput.service.debug"
+    APP_SUPPORT="$HOME/Library/Application Support/WindInput_debug"
+    SVC_EXE_NAME="清风输入法服务开发版"
+    ASSOC_BUNDLE="to.feng.inputmethod.WindInputDebug"
+    LOG_TAG="windinput_debug"
+else
+    LABEL="to.feng.windinput.service"
+    APP_SUPPORT="$HOME/Library/Application Support/WindInput"
+    SVC_EXE_NAME="清风输入法服务"
+    ASSOC_BUNDLE="to.feng.inputmethod.WindInput"
+    LOG_TAG="windinput"
+fi
+INSTALL_ROOT="$APP_SUPPORT/service"
+INSTALL_EXE="$INSTALL_ROOT/$SVC_EXE_NAME"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+OUT_LOG="$LOG_DIR/$LOG_TAG.out.log"
+ERR_LOG="$LOG_DIR/$LOG_TAG.err.log"
+PUSH_SOCK="$APP_SUPPORT/bridge_push.sock"
 
 bold() { printf "\033[1m%s\033[0m\n" "$*"; }
 info() { printf "  %s\n" "$*"; }
@@ -140,7 +154,7 @@ cat > "$PLIST" <<PLIST_EOF
          legacy agent 会忽略它, BTM 仍按可执行文件名显示 → 真正生效靠把二进制装为中文名
          (见上 INSTALL_EXE). 此键保留, 将来有 Developer ID 签名后可正常归并. -->
     <key>AssociatedBundleIdentifiers</key>
-    <string>to.feng.inputmethod.WindInput</string>
+    <string>$ASSOC_BUNDLE</string>
     <key>ProgramArguments</key>
     <array>
         <string>$INSTALL_EXE</string>

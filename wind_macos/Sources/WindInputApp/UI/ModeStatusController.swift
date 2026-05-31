@@ -75,7 +75,11 @@ public final class ModeStatusController: NSObject, NSMenuDelegate {
     /// 拉取失败 (服务未就绪) 时回退到只读状态展示。
     public func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let header = NSMenuItem(title: "清风输入法", action: nil, keyEquivalent: "")
+        // 菜单头显示本变体名 (release: 清风输入法; debug: 清风输入法开发版)。取自 Info.plist
+        // CFBundleDisplayName (app.sh 按变体注入), 让两套指示器一眼可辨。
+        let appName = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
+            ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String) ?? "清风输入法"
+        let header = NSMenuItem(title: appName, action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(.separator())
@@ -124,7 +128,10 @@ public final class ModeStatusController: NSObject, NSMenuDelegate {
             DispatchQueue.main.async { [weak self] in self?.openSettings(page: page) }
             return
         }
-        let bundleID = "com.wails.wind_setting"
+        // 设置应用按本 IME 变体启动: debug IME → debug 设置应用 (连 WindInput_debug/rpc.sock),
+        // release IME → 正式设置应用, 实现配置分离 (各编辑各自服务的配置)。
+        let isDebug = Bundle.main.bundleIdentifier?.hasSuffix("Debug") ?? false
+        let bundleID = isDebug ? "com.wails.wind_setting_debug" : "com.wails.wind_setting"
         let ws = NSWorkspace.shared
         if let url = ws.urlForApplication(withBundleIdentifier: bundleID) {
             let cfg = NSWorkspace.OpenConfiguration()

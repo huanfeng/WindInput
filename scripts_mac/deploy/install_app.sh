@@ -18,10 +18,14 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 MACOS_DIR="$REPO_DIR/wind_macos"
+# 变体: release → WindInput; debug → WindInputDebug (--debug)。两变体可作为独立输入法共存。
+# EXE_NAME 恒为 WindInput (= CFBundleExecutable): 两变体进程同名, 必须按 .app 路径定位进程,
+# 否则装/卸 debug 会误杀正在使用的 release (反之亦然)。
 APP_NAME="WindInput"
-APP_BUNDLE="$MACOS_DIR/build/$APP_NAME.app"
+EXE_NAME="WindInput"
+BUNDLE_ID="to.feng.inputmethod.WindInput"
 INSTALL_DIR="$HOME/Library/Input Methods"
-INSTALL_APP="$INSTALL_DIR/$APP_NAME.app"
+SRC_DIR=""
 
 DO_BUILD=0
 DO_UNINSTALL=0
@@ -29,15 +33,18 @@ BUILD_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --build) DO_BUILD=1 ;;
-        --debug) BUILD_ARGS+=("--debug") ;;
+        --debug) BUILD_ARGS+=("--debug"); APP_NAME="WindInputDebug"; BUNDLE_ID="to.feng.inputmethod.WindInputDebug" ;;
         --uninstall) DO_UNINSTALL=1 ;;
-        # --from <dir>: 从指定目录装 (内含 WindInput.app), 供 .pkg postinstall 等离仓库场景.
-        --from) shift; SRC_DIR="${1:-}"; [[ -n "$SRC_DIR" ]] || { echo "[错误] --from 缺目录参数" >&2; exit 1; }
-                APP_BUNDLE="$SRC_DIR/$APP_NAME.app" ;;
+        # --from <dir>: 从指定目录装 (内含 <APP_NAME>.app), 供 .pkg postinstall 等离仓库场景.
+        --from) shift; SRC_DIR="${1:-}"; [[ -n "$SRC_DIR" ]] || { echo "[错误] --from 缺目录参数" >&2; exit 1; } ;;
         *) echo "[错误] 未知参数: $1" >&2; exit 1 ;;
     esac
     shift
 done
+
+# 变体派生 (在 --debug/--from 解析后, 不依赖参数顺序)。
+APP_BUNDLE="${SRC_DIR:-$MACOS_DIR/build}/$APP_NAME.app"
+INSTALL_APP="$INSTALL_DIR/$APP_NAME.app"
 
 bold() { printf "\033[1m%s\033[0m\n" "$*"; }
 info() { printf "  %s\n" "$*"; }
@@ -54,14 +61,13 @@ fi
 # 仅 rm .app 是不够的: register 守护进程残留 / HIToolbox plist 启用项 / TIS LS DB
 # 缓存 / Caches & Application Support 都可能残留, 导致系统设置里出现幽灵条目.
 # 这里一次清干净.
-BUNDLE_ID="to.feng.inputmethod.WindInput"
 if [[ $DO_UNINSTALL -eq 1 ]]; then
-    bold "==> Uninstall WindInput (full purge)"
+    bold "==> Uninstall $APP_NAME (full purge)"
 
-    # 1. 杀所有 WindInput 进程 (含 --register-input-source 后台守护)
-    info "kill WindInput processes"
-    pkill -9 -f "WindInput.app/Contents/MacOS/WindInput" 2>/dev/null || true
-    pkill -9 -x "$APP_NAME" 2>/dev/null || true
+    # 1. 杀本变体的 IME 进程 (含 --register-input-source 后台守护)。按 .app 路径定位,
+    #    两变体进程同名 WindInput, 不能用进程名匹配 (会误杀另一变体)。
+    info "kill $APP_NAME processes"
+    pkill -9 -f "$APP_NAME.app/Contents/MacOS/$EXE_NAME" 2>/dev/null || true
     rm -f /tmp/wind_register.log
 
     # 2. 删 .app (用户域旧路径 + 历史可能装过的系统域 /Library 都尝试清)
@@ -102,8 +108,14 @@ else:
     print("    (no HIToolbox entries matched)")
 PY
 
-    # 4. 清缓存 / state
-    for d in "$HOME/Library/Caches/WindInput" "$HOME/Library/Application Support/WindInput"; do
+    # 4. 清缓存 / state (变体目录: debug 用 Caches/WindInputDebug + App Support/WindInput_debug,
+    #    与 Go buildvariant AppName()/Suffix() 对齐; release 用不带后缀的)。
+    if [[ "$APP_NAME" == "WindInputDebug" ]]; then
+        PURGE_DIRS=("$HOME/Library/Caches/WindInputDebug" "$HOME/Library/Application Support/WindInput_debug")
+    else
+        PURGE_DIRS=("$HOME/Library/Caches/WindInput" "$HOME/Library/Application Support/WindInput")
+    fi
+    for d in "${PURGE_DIRS[@]}"; do
         if [[ -d "$d" ]]; then
             rm -rf "$d"
             info "removed $d"
@@ -152,10 +164,11 @@ fi
 # -------- install --------
 bold "==> Install $APP_BUNDLE -> $INSTALL_APP"
 
-# 1. 关掉旧实例 (IMKit 进程通常常驻; 不杀的话 cp 会被持锁)
-if pgrep -x "$APP_NAME" >/dev/null; then
+# 1. 关掉本变体的旧实例 (IMKit 进程通常常驻; 不杀的话 cp 会被持锁)。
+#    按 .app 路径定位: 两变体进程同名 WindInput, 进程名匹配会误杀另一变体。
+if pgrep -f "$APP_NAME.app/Contents/MacOS/$EXE_NAME" >/dev/null; then
     info "停止旧 $APP_NAME 进程"
-    killall "$APP_NAME" 2>/dev/null || true
+    pkill -9 -f "$APP_NAME.app/Contents/MacOS/$EXE_NAME" 2>/dev/null || true
     sleep 0.5
 fi
 

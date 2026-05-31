@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/huanfeng/wind_input/internal/ipc"
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"golang.org/x/sys/unix"
 )
 
@@ -64,7 +65,10 @@ func shmUnlink(name string) error {
 // 协议同步铁律: SHM header 二进制布局必须与 Win 端 (shared_memory.go WriteFrame
 // 部分) 完全一致, 由 ipc.SharedRenderHeaderSize + 6 个 u32 字段固定。
 
-const darwinSHMName = "/WindInput_SHM"
+// 变体后缀隔离 SHM 段 (release: /WindInput_SHM; debug: /WindInput_SHM_debug)。
+// 否则开机后两变体服务都自启, NewSharedMemory 起手的 shmUnlink 会互相清掉对方的段,
+// 候选框渲染坏掉。≤30 字符 (macOS PSHMNAMLEN=31): "_debug" 后仍 20 字符, 安全。
+var darwinSHMName = "/WindInput_SHM" + buildvariant.Suffix()
 
 // SharedMemory — POSIX shm_open + mmap 封装。
 type SharedMemory struct {

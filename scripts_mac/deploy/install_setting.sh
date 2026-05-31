@@ -16,29 +16,36 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 
-APP_NAME="wind_setting"                  # 源 .app 文件名 + 可执行名 (Wails outputfilename)
+# 变体: release → wind_setting / 清风输入法设置 / com.wails.wind_setting;
+#       debug   → wind_setting_debug / 清风输入法设置开发版 / com.wails.wind_setting_debug。
+# EXE_NAME 恒为 wind_setting (Wails outputfilename, 两变体可执行同名), pkill 按它匹配。
+EXE_NAME="wind_setting"
+APP_NAME="wind_setting"                  # 源 .app 文件名 (setting.sh 产物名)
 DISPLAY_NAME="清风输入法设置"             # 安装后的 .app 文件名: Finder 显示用。实测 CFBundleDisplayName
                                          # 对 .app 的 Finder 标签无效 (仍显示文件名), 只有改文件名才生效。
 BUNDLE_ID="com.wails.wind_setting"
-DEFAULT_APP="$REPO_DIR/wind_setting/build/bin/$APP_NAME.app"
 INSTALL_DIR="$HOME/Applications"
-INSTALL_APP="$INSTALL_DIR/$DISPLAY_NAME.app"
-LEGACY_APP="$INSTALL_DIR/$APP_NAME.app"  # 旧版按 wind_setting.app 装过的残留 (清理用)
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 DO_BUILD=0
 DO_UNINSTALL=0
-SRC_APP=""
+SRC_DIR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --build)     DO_BUILD=1 ;;
+        --debug)     APP_NAME="wind_setting_debug"; DISPLAY_NAME="清风输入法设置开发版"; BUNDLE_ID="com.wails.wind_setting_debug" ;;
         --uninstall) DO_UNINSTALL=1 ;;
-        --from)      shift; SRC_DIR="${1:-}"; [[ -n "$SRC_DIR" ]] || { echo "[错误] --from 缺目录参数" >&2; exit 1; }
-                     SRC_APP="$SRC_DIR/$APP_NAME.app" ;;
+        --from)      shift; SRC_DIR="${1:-}"; [[ -n "$SRC_DIR" ]] || { echo "[错误] --from 缺目录参数" >&2; exit 1; } ;;
         *) echo "[错误] 未知参数: $1" >&2; exit 1 ;;
     esac
     shift
 done
+
+# 变体派生 (参数解析后, 不依赖顺序)。
+DEFAULT_APP="$REPO_DIR/wind_setting/build/bin/$APP_NAME.app"
+SRC_APP="${SRC_DIR:+$SRC_DIR/$APP_NAME.app}"
+INSTALL_APP="$INSTALL_DIR/$DISPLAY_NAME.app"
+LEGACY_APP="$INSTALL_DIR/$APP_NAME.app"  # 旧版按源名 .app 装过的残留 (清理用)
 
 bold() { printf "\033[1m%s\033[0m\n" "$*"; }
 info() { printf "  %s\n" "$*"; }
@@ -53,7 +60,7 @@ fi
 if [[ $DO_UNINSTALL -eq 1 ]]; then
     bold "==> Uninstall $APP_NAME"
     info "kill $APP_NAME 进程"
-    pkill -f "Contents/MacOS/$APP_NAME" 2>/dev/null || true
+    pkill -f "Contents/MacOS/$EXE_NAME" 2>/dev/null || true
     for app in "$INSTALL_APP" "$LEGACY_APP"; do
         if [[ -d "$app" ]]; then
             rm -rf "$app"
@@ -80,9 +87,9 @@ fi
 bold "==> Install $SRC_APP -> $INSTALL_APP"
 
 # 1. 关掉旧实例 (避免 cp 被持锁)
-if pgrep -f "Contents/MacOS/$APP_NAME" >/dev/null 2>&1; then
+if pgrep -f "Contents/MacOS/$EXE_NAME" >/dev/null 2>&1; then
     info "停止旧 $APP_NAME 进程"
-    pkill -f "Contents/MacOS/$APP_NAME" 2>/dev/null || true
+    pkill -f "Contents/MacOS/$EXE_NAME" 2>/dev/null || true
     sleep 0.5
 fi
 
@@ -119,7 +126,7 @@ if [[ -x "$LSREGISTER" ]]; then
 fi
 if open -gb "$BUNDLE_ID" 2>/dev/null; then
     info "✓ open -gb $BUNDLE_ID 成功 (LS 可定位)"
-    pkill -f "Contents/MacOS/$APP_NAME" 2>/dev/null || true
+    pkill -f "Contents/MacOS/$EXE_NAME" 2>/dev/null || true
 else
     info "✗ open -gb 失败 (GUI 会话外属正常; 登录会话里 IME 菜单 '设置' 应可启动)"
 fi

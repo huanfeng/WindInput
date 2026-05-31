@@ -52,19 +52,9 @@ func (r *ToastRenderer) Close() {
 }
 
 // levelAccent 返回各 Level 对应的边框/标题强调色。背景沿用 tooltip 主题色。
+// 配色已提到平台无关的 ToastAccentColor (types_neutral.go), 与 darwin forwarder 共用单一来源。
 func levelAccent(level ToastLevel) color.Color {
-	switch level {
-	case ToastSuccess:
-		return color.RGBA{R: 0x4C, G: 0xAF, B: 0x50, A: 0xFF} // 绿
-	case ToastWarn:
-		return color.RGBA{R: 0xFF, G: 0x98, B: 0x00, A: 0xFF} // 琥珀
-	case ToastError:
-		return color.RGBA{R: 0xE5, G: 0x39, B: 0x35, A: 0xFF} // 红
-	case ToastInfo:
-		fallthrough
-	default:
-		return color.RGBA{R: 0x42, G: 0xA5, B: 0xF5, A: 0xFF} // 蓝
-	}
+	return ToastAccentColor(level)
 }
 
 // getColors 返回背景 + 正文文本颜色。Toast 一律不透明（与系统通知一致，避免重要信息看不清）。

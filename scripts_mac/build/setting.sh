@@ -31,9 +31,15 @@ err()  { printf "\033[31m[错误] %s\033[0m\n" "$*" >&2; }
 # universal: arm64+x86_64 通用 .app. WIND_MAC_UNIVERSAL=1 或 --universal 开启;
 # 默认 darwin/arm64 (本机/VM 快). CI 走环境变量统一开关.
 UNIVERSAL="${WIND_MAC_UNIVERSAL:-0}"
+# 变体: --debug → 注入 buildvariant.variant=debug ldflag, 让设置应用经 pkg/rpcapi
+# 自动连 WindInput_debug/rpc.sock (与 debug 服务对齐), 实现配置分离; 再把 bundleID/名称
+# 改成 debug 变体并重命名 .app, 与正式设置应用共存。
+VARIANT_SUFFIX=""
+LDFLAGS_EXTRA=""
 for arg in "$@"; do
     case "$arg" in
         --universal) UNIVERSAL=1 ;;
+        --debug)     VARIANT_SUFFIX="_debug"; LDFLAGS_EXTRA="-X github.com/huanfeng/wind_input/pkg/buildvariant.variant=debug" ;;
         *) err "未知参数: $arg"; exit 1 ;;
     esac
 done
@@ -65,9 +71,28 @@ bold "==> [3/5] 构建前端 (vite, 跳过 vue-tsc 严格门禁)"
 ( cd frontend && ./node_modules/.bin/vite build )
 
 bold "==> [4/5] 编译 + 打包 (wails build -s 跳过前端步骤, 自签名; $WAILS_PLATFORM)"
-wails build -s -platform "$WAILS_PLATFORM"
+if [[ -n "$LDFLAGS_EXTRA" ]]; then
+    wails build -s -platform "$WAILS_PLATFORM" -ldflags "$LDFLAGS_EXTRA"
+else
+    wails build -s -platform "$WAILS_PLATFORM"
+fi
 
 [[ -d "$APP" ]] || { err "未生成 $APP"; exit 1; }
+
+# 变体后处理 (debug): wails 固定产出 wind_setting.app + bundleID com.wails.wind_setting。
+# 改成 debug 变体 (bundleID com.wails.wind_setting_debug + 名称加「开发版」) 并重命名 .app,
+# 让 debug IME 的「设置…」按独立 bundleID 启动它, 与正式设置应用共存。
+if [[ -n "$VARIANT_SUFFIX" ]]; then
+    bold "==> 变体注入 (debug): bundleID/名称 → wind_setting_debug"
+    PB=/usr/libexec/PlistBuddy
+    $PB -c "Set :CFBundleIdentifier com.wails.wind_setting_debug" "$APP/Contents/Info.plist"
+    $PB -c "Set :CFBundleName 清风输入法设置开发版" "$APP/Contents/Info.plist" 2>/dev/null || true
+    $PB -c "Set :CFBundleDisplayName 清风输入法设置开发版" "$APP/Contents/Info.plist" 2>/dev/null || true
+    DEBUG_APP="$SETTING_DIR/build/bin/wind_setting_debug.app"
+    rm -rf "$DEBUG_APP"
+    mv "$APP" "$DEBUG_APP"
+    APP="$DEBUG_APP"
+fi
 
 bold "==> [5/5] 把程序数据拷入 .app (设置界面按 exeDir/data 扫描方案/主题)"
 if [[ -d "$REPO_DIR/build/data" ]]; then

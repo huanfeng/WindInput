@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/huanfeng/wind_input/pkg/config"
+import (
+	"image/color"
+
+	"github.com/huanfeng/wind_input/pkg/config"
+)
 
 // types_neutral.go 集中 ui 包内"平台无关的纯数据类型与枚举常量"。
 //
@@ -101,6 +105,23 @@ type ToastOptions struct {
 	Position ToastPosition
 	Duration int // 自动隐藏毫秒数; 0=默认 5000; <0=不自动隐藏
 	MaxWidth int // 内容最大像素宽 (DIP); 0=工作区一半
+}
+
+// ToastAccentColor 返回各 Level 对应的边框/标题强调色 (平台无关单一来源)。
+// Win 端 toast_renderer.levelAccent 与 darwin forwarder 均复用本函数, 保证两端配色一致。
+func ToastAccentColor(level ToastLevel) color.Color {
+	switch level {
+	case ToastSuccess:
+		return color.RGBA{R: 0x4C, G: 0xAF, B: 0x50, A: 0xFF} // 绿
+	case ToastWarn:
+		return color.RGBA{R: 0xFF, G: 0x98, B: 0x00, A: 0xFF} // 琥珀
+	case ToastError:
+		return color.RGBA{R: 0xE5, G: 0x39, B: 0x35, A: 0xFF} // 红
+	case ToastInfo:
+		fallthrough
+	default:
+		return color.RGBA{R: 0x42, G: 0xA5, B: 0xF5, A: 0xFF} // 蓝
+	}
 }
 
 // ============================================================================

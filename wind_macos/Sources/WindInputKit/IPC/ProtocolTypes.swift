@@ -65,6 +65,8 @@ public enum DownstreamCmd {
     public static let tooltipHide: UInt16      = 0x0509   // 隐藏 tooltip (空 payload)
     public static let statusShow: UInt16       = 0x050A   // 状态提示气泡 (模式/标点/全半角文本 + 主题色 + 位置 + 时长)
     public static let statusHide: UInt16       = 0x050B   // 隐藏状态提示气泡 (空 payload)
+    public static let toastShow: UInt16        = 0x050C   // Toast 通知 (标题+正文 + 主题色 + accent + 位置 + 时长)
+    public static let toastHide: UInt16        = 0x050D   // 隐藏 Toast (空 payload)
     public static let batchResponse: UInt16    = 0x0F02
 }
 
@@ -122,6 +124,34 @@ public struct StatusBubblePayload {
         self.x = x
         self.y = y
         self.durationMs = durationMs
+    }
+}
+
+/// Toast 通知 (CmdToastShow 0x050C 解码结果)。屏幕级通知 (如词库加载完成), 区别于
+/// 锚 caret 的瞬态状态气泡。message 可含 \n 多行; bgColor/fgColor/accentColor 为
+/// #RRGGBB[AA]; position 为 "bottom_right"/"center" (.app 据此在工作区落位);
+/// durationMs: 0=默认 5000, >0 自动隐藏毫秒数, <0 不自动隐藏; maxWidth 内容最大像素宽
+/// (DIP, 逻辑点), 0=由 .app 决定。
+public struct ToastPayload {
+    public let title: String
+    public let message: String
+    public let bgColor: String
+    public let fgColor: String
+    public let accentColor: String
+    public let position: String
+    public let durationMs: Int32
+    public let maxWidth: Int32
+
+    public init(title: String, message: String, bgColor: String, fgColor: String,
+                accentColor: String, position: String, durationMs: Int32, maxWidth: Int32) {
+        self.title = title
+        self.message = message
+        self.bgColor = bgColor
+        self.fgColor = fgColor
+        self.accentColor = accentColor
+        self.position = position
+        self.durationMs = durationMs
+        self.maxWidth = maxWidth
     }
 }
 
@@ -245,11 +275,18 @@ public enum IPCError: Error, Equatable {
 // MARK: - 默认运行时路径
 
 public enum BridgeEndpoints {
+    /// 变体后缀: debug 变体的 .app (bundleID 以 "Debug" 结尾) 用 "_debug", 与 Go
+    /// buildvariant.Suffix() 对齐, 让 debug/release 两套 .app + 服务各用独立运行时目录
+    /// (socket/config) 共存 —— 可同时注册为两个输入法, 日常用正式版、旁边测开发版。
+    public static var variantSuffix: String {
+        (Bundle.main.bundleIdentifier?.hasSuffix("Debug") ?? false) ? "_debug" : ""
+    }
+
     public static var runtimeDir: String {
         if let env = ProcessInfo.processInfo.environment["WIND_INPUT_RUNTIME_DIR"], !env.isEmpty {
             return env
         }
-        return "\(NSHomeDirectory())/Library/Application Support/WindInput"
+        return "\(NSHomeDirectory())/Library/Application Support/WindInput\(variantSuffix)"
     }
 
     public static var requestSocket: String { "\(runtimeDir)/bridge.sock" }

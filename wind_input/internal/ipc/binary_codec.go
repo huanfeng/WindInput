@@ -888,6 +888,37 @@ func (c *BinaryCodec) EncodeStatusHide() []byte {
 	return c.EncodeHeader(CmdStatusHide, 0)
 }
 
+// EncodeToastShow 编 CmdToastShow push 帧 (darwin Toast 通知)。
+// Payload: 6 段长度前缀字符串 (titleLen(u32)+title, message, bgColor, fgColor, accentColor,
+// position) + durationMs(i32) + maxWidth(i32)。
+// title/message 为通知标题与正文 (message 可含 \n 多行); bg/fg/accent 为 #RRGGBB[AA]
+// (bg/fg 取主题 Tooltip 配色已强制不透明, accent 取 ui.ToastAccentColor 按级别);
+// position 为 "bottom_right"/"center" (.app 据此在工作区落位); durationMs: 0=默认 5000,
+// >0 自动隐藏毫秒数, <0 不自动隐藏; maxWidth 内容最大像素宽 (DIP), 0=由 .app 决定。
+func (c *BinaryCodec) EncodeToastShow(title, message, bgColor, fgColor, accentColor, position string, durationMs, maxWidth int32) []byte {
+	parts := [][]byte{[]byte(title), []byte(message), []byte(bgColor), []byte(fgColor), []byte(accentColor), []byte(position)}
+	payloadLen := 4*len(parts) + 8
+	for _, s := range parts {
+		payloadLen += len(s)
+	}
+	header := c.EncodeHeader(CmdToastShow, uint32(payloadLen))
+	buf := make([]byte, payloadLen)
+	off := 0
+	for _, s := range parts {
+		binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(s)))
+		off += 4
+		off += copy(buf[off:], s)
+	}
+	binary.LittleEndian.PutUint32(buf[off:off+4], uint32(durationMs))
+	binary.LittleEndian.PutUint32(buf[off+4:off+8], uint32(maxWidth))
+	return append(header, buf...)
+}
+
+// EncodeToastHide 编 CmdToastHide push 帧 (空 payload)。
+func (c *BinaryCodec) EncodeToastHide() []byte {
+	return c.EncodeHeader(CmdToastHide, 0)
+}
+
 // EncodeModeStatus 编 CmdModeStatus push 帧 (darwin 输入模式状态指示器)。
 // Payload: flags(u32) + effectiveMode(u32) + labelLen(u32) + label(UTF-8)。
 // flags 复用 StatusChineseMode/StatusFullWidth/StatusChinesePunct/StatusCapsLock/

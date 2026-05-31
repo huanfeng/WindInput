@@ -74,6 +74,8 @@ const (
 	CmdTooltipHide          uint16 = 0x0509 // darwin: 隐藏 tooltip (空 payload)
 	CmdStatusShow           uint16 = 0x050A // darwin: 状态提示气泡 (模式/标点/全半角文本 + 主题色 + 位置 + 时长)
 	CmdStatusHide           uint16 = 0x050B // darwin: 隐藏状态提示气泡 (空 payload)
+	CmdToastShow            uint16 = 0x050C // darwin: Toast 通知 (标题+正文 + 主题色 + accent + 位置 + 时长); .app 渲染 NSPanel
+	CmdToastHide            uint16 = 0x050D // darwin: 隐藏 Toast (空 payload)
 	CmdBatchResponse        uint16 = 0x0F02 // Batch response container
 )
 

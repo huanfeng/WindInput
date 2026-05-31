@@ -108,7 +108,7 @@ bridge handler goroutine 处理仍走同步响应的命令（`CmdHostRenderReque
 - 鼠标悬停: 发 `CmdCandidateHover` → server_darwin 双派发: (1) `SetCandidateHoverHandler` 注入的 forwarder 回调按 hoverIndex 重渲染高亮; (2) 类型断言 `candidateHoverHandler` → `Coordinator.HandleCandidateHover` 触发 tooltip 异步查询 (结果经 push `CmdTooltipShow` 下发, .app 据悬停候选矩形定位)
 - 候选右键: 发 `CmdCandidateContextMenu`(index+action) → 类型断言 `candidateContextMenuHandler` → `Coordinator.HandleCandidateContextMenu`
 - 统一菜单 (候选框空白处右键): .app 发上行 `CmdShowContextMenu` → server_darwin 调 `unifiedMenuHandler.UnifiedMenuItems()` 建树 → `encodeUnifiedMenuPayload` 经 conn.Write 回 `CmdMenuShow` (请求-响应, 非 Ack/非 push); .app 据树建 NSMenu, 点中发上行 `CmdMenuAction`(id) → `Coordinator.HandleUnifiedMenuAction`
-- POSIX SHM 名 `/WindInput_SHM` ≤30 字符 (macOS PSHMNAMLEN=31); 进程异常退出残留段在 `NewSharedMemory` 起手 `shmUnlink` 清掉
+- POSIX SHM 名 `/WindInput_SHM` + `buildvariant.Suffix()` (release 无后缀, debug `/WindInput_SHM_debug`), ≤30 字符 (macOS PSHMNAMLEN=31)。变体后缀**必须**隔离: 否则开机后两变体服务都自启时 `NewSharedMemory` 起手的 `shmUnlink` 会互相清掉对方的段 → 候选框渲染坏掉 (输入走已隔离 socket 仍正常)。Swift `CandidatePanelHost` 按 `BridgeEndpoints.variantSuffix` 对齐同名。进程异常退出残留段在 `NewSharedMemory` 起手 `shmUnlink` 清掉
 - 多客户端用 `connID` (accept 自增) 替代 Win 的 PID 索引; macOS 单 IMKit `.app` 进程多 IMKInputController 实例各自独立 socket 连接, 见 [`docs/design/macos-port.md`](../../../docs/design/macos-port.md)
 
 ## Dependencies

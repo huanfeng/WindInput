@@ -58,12 +58,18 @@ err()  { printf "\033[31m[错误] %s\033[0m\n" "$*" >&2; }
 
 if [[ $DEBUG_VARIANT -eq 1 ]]; then
     BUILD_SUBDIR="build_debug"; EXE_NAME="wind_input_debug"
+    APP_NAME="WindInputDebug"; INSTALL_FLAG="--debug"
+    SVC_LABEL="to.feng.windinput.service.debug"; SUPPORT_NAME="WindInput_debug"
+    SETTING_APP_NAME="wind_setting_debug"; SETTING_DISPLAY="清风输入法设置开发版"
 else
     BUILD_SUBDIR="build"; EXE_NAME="wind_input"
+    APP_NAME="WindInput"; INSTALL_FLAG=""
+    SVC_LABEL="to.feng.windinput.service"; SUPPORT_NAME="WindInput"
+    SETTING_APP_NAME="wind_setting"; SETTING_DISPLAY="清风输入法设置"
 fi
 LOCAL_BUILD="$REPO_DIR/$BUILD_SUBDIR"
-LOCAL_APP="$REPO_DIR/wind_macos/build/WindInput.app"
-LOCAL_SETTING="$REPO_DIR/wind_setting/build/bin/wind_setting.app"
+LOCAL_APP="$REPO_DIR/wind_macos/build/$APP_NAME.app"
+LOCAL_SETTING="$REPO_DIR/wind_setting/build/bin/$SETTING_APP_NAME.app"
 
 # -------- 解析目标 --------
 if [[ -n "$TARGET_ARG" ]]; then
@@ -85,12 +91,12 @@ if [[ $DO_BUILD -eq 1 && $DO_UNINSTALL -eq 0 ]]; then
         "$REPO_DIR/scripts_mac/build/build.sh" service ${BUILD_FLAG[@]+"${BUILD_FLAG[@]}"} 2>&1 | tail -5 | sed 's/^/  /'
     fi
     if [[ $DO_APP -eq 1 ]]; then
-        bold "宿主机构建 .app"
-        "$REPO_DIR/scripts_mac/build/app.sh" 2>&1 | tail -8 | sed 's/^/  /'
+        bold "宿主机构建 $APP_NAME.app"
+        "$REPO_DIR/scripts_mac/build/app.sh" ${BUILD_FLAG[@]+"${BUILD_FLAG[@]}"} 2>&1 | tail -8 | sed 's/^/  /'
     fi
     if [[ $DO_SETTING -eq 1 ]]; then
-        bold "宿主机构建 wind_setting.app (Wails)"
-        "$REPO_DIR/scripts_mac/build/setting.sh" 2>&1 | tail -6 | sed 's/^/  /'
+        bold "宿主机构建 $SETTING_APP_NAME.app (Wails)"
+        "$REPO_DIR/scripts_mac/build/setting.sh" $INSTALL_FLAG 2>&1 | tail -6 | sed 's/^/  /'
     fi
 fi
 
@@ -133,41 +139,43 @@ rsync -az "$REPO_DIR/scripts_mac/test/list_input_sources.swift" "$SSH_TARGET:$ST
 if [[ $DO_UNINSTALL -eq 1 ]]; then
     if [[ $DO_SERVICE -eq 1 ]]; then
         bold "4. 远程卸载 Go 服务 (普通用户, 保留用户数据)"
-        SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_service.sh && $STAGE_DIR/scripts_mac/deploy/install_service.sh --uninstall"
+        SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_service.sh && $STAGE_DIR/scripts_mac/deploy/install_service.sh --uninstall $INSTALL_FLAG"
     fi
     if [[ $DO_APP -eq 1 ]]; then
         bold "5. 远程卸载 .app (用户域, 完整清理 plist/缓存/守护进程)"
-        SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_app.sh && $STAGE_DIR/scripts_mac/deploy/install_app.sh --uninstall"
+        SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_app.sh && $STAGE_DIR/scripts_mac/deploy/install_app.sh --uninstall $INSTALL_FLAG"
     fi
     if [[ $DO_SETTING -eq 1 ]]; then
         bold "5b. 远程卸载设置应用 (普通用户, ~/Applications)"
-        SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_setting.sh && $STAGE_DIR/scripts_mac/deploy/install_setting.sh --uninstall"
+        SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_setting.sh && $STAGE_DIR/scripts_mac/deploy/install_setting.sh --uninstall $INSTALL_FLAG"
     fi
 
     bold "6. 验证清除是否干净"
     if [[ $DO_SERVICE -eq 1 ]]; then
         info "[服务]"
-        SSH 'L=to.feng.windinput.service
+        SSH "L='$SVC_LABEL'; SUP='$SUPPORT_NAME'"'
              launchctl print "gui/$(id -u)/$L" >/dev/null 2>&1 \
                  && echo "  ✗ LaunchAgent 仍加载" || echo "  ✓ LaunchAgent 已 bootout"
              [ -e "$HOME/Library/LaunchAgents/$L.plist" ] \
                  && echo "  ✗ plist 残留" || echo "  ✓ plist 已删"
-             [ -d "$HOME/Library/Application Support/WindInput/service" ] \
+             [ -d "$HOME/Library/Application Support/$SUP/service" ] \
                  && echo "  ✗ service/ 目录残留" || echo "  ✓ service/ 目录已删"' \
             | sed 's/^/  /'
     fi
     if [[ $DO_APP -eq 1 ]]; then
         info "[.app]"
-        SSH '[ -e "$HOME/Library/Input Methods/WindInput.app" ] \
-                 && echo "  ✗ ~/Library/Input Methods/WindInput.app 残留" \
-                 || echo "  ✓ ~/Library/Input Methods/WindInput.app 已删"' \
+        SSH "A='$APP_NAME'"'
+             [ -e "$HOME/Library/Input Methods/$A.app" ] \
+                 && echo "  ✗ ~/Library/Input Methods/$A.app 残留" \
+                 || echo "  ✓ ~/Library/Input Methods/$A.app 已删"' \
             | sed 's/^/  /'
     fi
     if [[ $DO_SETTING -eq 1 ]]; then
         info "[设置应用]"
-        SSH '[ -e "$HOME/Applications/wind_setting.app" ] \
-                 && echo "  ✗ ~/Applications/wind_setting.app 残留" \
-                 || echo "  ✓ ~/Applications/wind_setting.app 已删"' \
+        SSH "D='$SETTING_DISPLAY'"'
+             [ -e "$HOME/Applications/$D.app" ] \
+                 && echo "  ✗ ~/Applications/$D.app 残留" \
+                 || echo "  ✓ ~/Applications/$D.app 已删"' \
             | sed 's/^/  /'
     fi
     info "[TIS 注册表]"
@@ -186,38 +194,39 @@ fi
 
 if [[ $DO_SERVICE -eq 1 ]]; then
     bold "4. rsync Go 服务 (二进制 + 词库)"
-    # 统一落地为 build/wind_input (即便 debug), 让远端 install_macos_service.sh 默认源对齐.
-    rsync -az "$LOCAL_BUILD/$EXE_NAME" "$SSH_TARGET:$STAGE_DIR/build/wind_input"
+    # 按变体名落地 (wind_input / wind_input_debug), 与远端 install_service.sh --debug 的
+    # EXE_NAME 对齐; 两变体二进制同 STAGE 共存。data/ 共享 (两变体相同)。
+    rsync -az "$LOCAL_BUILD/$EXE_NAME" "$SSH_TARGET:$STAGE_DIR/build/$EXE_NAME"
     rsync -az --delete "$LOCAL_BUILD/data/" "$SSH_TARGET:$STAGE_DIR/build/data/"
 fi
 
 if [[ $DO_APP -eq 1 ]]; then
     bold "5. rsync .app"
-    rsync -az --delete "$LOCAL_APP/" "$SSH_TARGET:$STAGE_DIR/wind_macos/build/WindInput.app/"
+    rsync -az --delete "$LOCAL_APP/" "$SSH_TARGET:$STAGE_DIR/wind_macos/build/$APP_NAME.app/"
 fi
 
 if [[ $DO_SETTING -eq 1 ]]; then
-    bold "5b. rsync 设置应用 (wind_setting.app)"
-    rsync -az --delete "$LOCAL_SETTING/" "$SSH_TARGET:$STAGE_DIR/wind_setting/build/bin/wind_setting.app/"
+    bold "5b. rsync 设置应用 ($SETTING_APP_NAME.app)"
+    rsync -az --delete "$LOCAL_SETTING/" "$SSH_TARGET:$STAGE_DIR/wind_setting/build/bin/$SETTING_APP_NAME.app/"
 fi
 
 # -------- 远程安装 --------
 if [[ $DO_SERVICE -eq 1 ]]; then
     bold "6. 远程装 Go 服务 (LaunchAgent, 普通用户)"
-    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_service.sh && $STAGE_DIR/scripts_mac/deploy/install_service.sh --from $STAGE_DIR/build"
+    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_service.sh && $STAGE_DIR/scripts_mac/deploy/install_service.sh --from $STAGE_DIR/build $INSTALL_FLAG"
 fi
 
 if [[ $DO_APP -eq 1 ]]; then
     bold "7. 远程装 .app (用户域, 装到 ~/Library/Input Methods/)"
     # 远端 install_app.sh 会对 ad-hoc 产物原地去 hardened-runtime 重签 (纯 ad-hoc).
-    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_app.sh && $STAGE_DIR/scripts_mac/deploy/install_app.sh"
+    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_app.sh && $STAGE_DIR/scripts_mac/deploy/install_app.sh $INSTALL_FLAG"
 fi
 
 if [[ $DO_SETTING -eq 1 ]]; then
     bold "7b. 远程装设置应用 (普通用户, ~/Applications)"
-    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_setting.sh && $STAGE_DIR/scripts_mac/deploy/install_setting.sh"
+    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_setting.sh && $STAGE_DIR/scripts_mac/deploy/install_setting.sh --from $STAGE_DIR/wind_setting/build/bin $INSTALL_FLAG"
 fi
 
 bold "8. 完成"
-info "服务状态: ssh $SSH_TARGET 'launchctl print gui/\$(id -u)/to.feng.windinput.service | grep -E \"state|pid\"'"
+info "服务状态: ssh $SSH_TARGET 'launchctl print gui/\$(id -u)/$SVC_LABEL | grep -E \"state|pid\"'"
 info "切到 WindInput 后在文本框打字验证; 日志 ~/Library/Logs/windinput.err.log"

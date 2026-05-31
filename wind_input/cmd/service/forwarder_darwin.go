@@ -242,8 +242,14 @@ func (f *darwinForwarder) handle(cmd uicmd.Command, candidates []ui.Candidate) {
 		}
 	case uicmd.CmdStatusHide:
 		f.srv.BroadcastFrame(f.codec.EncodeStatusHide())
+	case uicmd.CmdToastShow:
+		if p, ok := cmd.Payload.(uicmd.ToastShowPayload); ok {
+			f.showToast(p)
+		}
+	case uicmd.CmdToastHide:
+		f.srv.BroadcastFrame(f.codec.EncodeToastHide())
 	default:
-		// 其它命令 (Toast / Menu 等) 后续 PR 接入
+		// 其它命令 (Menu 等) 后续 PR 接入
 	}
 }
 
@@ -329,6 +335,57 @@ func applyStatusOpacity(c color.Color, opacity float64) color.Color {
 	}
 	r, g, b, a := c.RGBA()
 	return color.RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), uint8(float64(a>>8) * opacity)}
+}
+
+// showToast 把 ui.Manager 投递的 Toast 请求合成最终帧推给 .app (CmdToastShow)。
+// bg/fg 取主题 Tooltip 配色 (强制不透明, 与 Win toast 一致); accent 按级别取
+// ui.ToastAccentColor; position/duration/maxWidth 透传, 由 .app 落位与计时。
+func (f *darwinForwarder) showToast(p uicmd.ToastShowPayload) {
+	if p.Title == "" && p.Message == "" {
+		return
+	}
+	f.refreshThemeIfNeeded() // 取最新主题配色
+	bg, fg := f.toastColors()
+	accent := theme.ColorToHex(ui.ToastAccentColor(wireToToastLevel(p.Level)))
+	pos := string(p.Position)
+	if pos == "" {
+		pos = string(uicmd.ToastBottomRight)
+	}
+	f.srv.BroadcastFrame(f.codec.EncodeToastShow(p.Title, p.Message, bg, fg, accent, pos, p.Duration, p.MaxWidth))
+}
+
+// toastColors 取 Toast 背景/正文配色 (#RRGGBBAA): 沿用主题 Tooltip 调色板 (暗背景+浅文本),
+// 背景强制不透明 (与系统通知一致, 避免重要信息透出底层窗口)。无主题时退到内置深色默认。
+func (f *darwinForwarder) toastColors() (bg, fg string) {
+	var bgC color.Color = color.RGBA{0x2B, 0x2B, 0x2B, 0xFF}
+	var fgC color.Color = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
+	if f.themeMgr != nil {
+		if rt := f.themeMgr.GetResolvedTheme(); rt != nil {
+			bgC = forceOpaqueColor(rt.Tooltip.BackgroundColor)
+			fgC = rt.Tooltip.TextColor
+		}
+	}
+	return theme.ColorToHex(bgC), theme.ColorToHex(fgC)
+}
+
+// forceOpaqueColor 把颜色 alpha 强制为 0xFF (镜像 Win toast_renderer.forceAlphaOpaque)。
+func forceOpaqueColor(c color.Color) color.Color {
+	r, g, b, _ := c.RGBA()
+	return color.RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), 0xFF}
+}
+
+// wireToToastLevel 把线上字符串级别 (uicmd.ToastLevel) 映射回 ui.ToastLevel, 用于取 accent 配色。
+func wireToToastLevel(l uicmd.ToastLevel) ui.ToastLevel {
+	switch l {
+	case uicmd.ToastSuccess:
+		return ui.ToastSuccess
+	case uicmd.ToastWarn:
+		return ui.ToastWarn
+	case uicmd.ToastError:
+		return ui.ToastError
+	default:
+		return ui.ToastInfo
+	}
 }
 
 // pushModeStatus 把输入模式状态经 push 通道发给 .app 菜单栏指示器 (CmdModeStatus)。

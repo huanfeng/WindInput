@@ -18,6 +18,10 @@ import InputMethodKit
 let args = CommandLine.arguments
 if args.count > 1 {
     let bundleURL = Bundle.main.bundleURL as CFURL
+    // 本 .app 自身的 bundleID (release: to.feng.inputmethod.WindInput; debug: ...WindInputDebug)。
+    // 变体共存的关键: 只认本 bundle 自己的 mode, 不把另一变体的 mode 误判为已注册。
+    let selfBundleID = Bundle.main.bundleIdentifier ?? "to.feng.inputmethod.WindInput"
+    let selfModeID = "\(selfBundleID).mode"
 
     func enabledModeIDs() -> Set<String> {
         guard let arr = TISCreateInputSourceList(nil, true)?.takeRetainedValue() as? [TISInputSource] else {
@@ -27,7 +31,9 @@ if args.count > 1 {
         for src in arr {
             guard let p = TISGetInputSourceProperty(src, kTISPropertyInputSourceID) else { continue }
             let id = Unmanaged<CFString>.fromOpaque(p).takeUnretainedValue() as String
-            if id.hasPrefix("to.feng.inputmethod.WindInput") {
+            // 用 "<bundleID>." 前缀精确隔离变体: "...WindInputDebug.mode" 不以 "...WindInput." 开头,
+            // 反之亦然, 避免两变体互相把对方的 mode 当成自己已启用。
+            if id.hasPrefix("\(selfBundleID).") {
                 let ep = TISGetInputSourceProperty(src, kTISPropertyInputSourceIsEnabled)
                 let isEnabled = ep.map { CFBooleanGetValue(Unmanaged<CFBoolean>.fromOpaque($0).takeUnretainedValue()) } ?? false
                 if isEnabled { found.insert(id) }
@@ -50,27 +56,27 @@ if args.count > 1 {
 
     switch args[1] {
     case "--register-input-source", "--install":
+        // 总是 (重新) 注册并保持常驻维持注册 —— 不能因「已注册」就早退 (踩过的坑):
+        //   1. 重新部署后 .app 的 cdhash 变化, 必须用新 bundle 重新 TISRegisterInputSource
+        //      刷新注册, 否则系统用旧 cdhash 校验新二进制失配 → 输入法无法切换/激活。
+        //   2. TIS 注册是进程级 lifecycle, 需常驻进程维持 (退出后条目会被系统回收)。install
+        //      会先按路径杀掉旧守护, 此时若早退则没有进程维持注册 → 注册失效。
+        // 本子命令仅由 install_app.sh 调用, 不在正常 IME 启动路径, 重注册无副作用。
         let already = enabledModeIDs()
-        if !already.isEmpty {
-            print("Already registered: \(already)")
-            exit(0)
-        }
         let st = TISRegisterInputSource(bundleURL)
-        print("TISRegisterInputSource bundleURL=\(bundleURL) OSStatus=\(st)")
-        if st != noErr {
+        print("TISRegisterInputSource bundleURL=\(bundleURL) OSStatus=\(st) wasEnabled=\(!already.isEmpty)")
+        // 全新注册 (此前未启用) 失败才视为致命; 重注册已存在的源时 OSStatus 可能为
+        // paramErr 等非 0, 属正常, 仍保持常驻维持现有注册。
+        if already.isEmpty && st != noErr {
             exit(2)
         }
-        // 重大 (实测教训): TIS 注册是进程级 lifecycle, 调完 API 后如果进程立刻
-        // exit, TIS DB 里的条目会在几秒内被系统清掉. 必须保持进程常驻让注册维持.
-        // 退出靠外部 SIGTERM, 这样安装流程可以 fork 一份本 binary 在背景, 不卡住
-        // installer.
-        print("注册成功, 进程保持运行以维持 TIS 注册 (后台等待 SIGTERM 退出)...")
+        print("保持进程常驻维持 TIS 注册 (后台等待 SIGTERM 退出)...")
         // 进入 RunLoop 永久等待信号
         RunLoop.current.run()
         exit(0)
 
     case "--enable-input-source":
-        let modeID = args.count > 2 ? args[2] : "to.feng.inputmethod.WindInput.mode"
+        let modeID = args.count > 2 ? args[2] : selfModeID
         guard let src = findInputSource(id: modeID) else {
             print("Mode \(modeID) 未在 TIS 中找到 (先跑 --register-input-source)")
             exit(3)
@@ -80,7 +86,7 @@ if args.count > 1 {
         exit(st == noErr ? 0 : 2)
 
     case "--select-input-source":
-        let modeID = args.count > 2 ? args[2] : "to.feng.inputmethod.WindInput.mode"
+        let modeID = args.count > 2 ? args[2] : selfModeID
         guard let src = findInputSource(id: modeID) else {
             print("Mode \(modeID) 未找到")
             exit(3)

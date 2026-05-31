@@ -331,6 +331,37 @@ public enum BinaryCodec {
         return StatusBubblePayload(text: text, bgColor: bg, fgColor: fg, x: x, y: y, durationMs: dur)
     }
 
+    public static func decodeToastPayload(_ buf: Data) throws -> ToastPayload {
+        var off = 0
+        func readStr() throws -> String {
+            guard buf.count >= off + 4 else {
+                throw IPCError.payloadTooShort(expected: off + 4, got: buf.count)
+            }
+            let n = Int(buf.readUInt32LE(at: off)); off += 4
+            guard buf.count >= off + n else {
+                throw IPCError.payloadTooShort(expected: off + n, got: buf.count)
+            }
+            let s = n > 0
+                ? (String(data: buf.subdata(in: (buf.startIndex + off)..<(buf.startIndex + off + n)), encoding: .utf8) ?? "")
+                : ""
+            off += n
+            return s
+        }
+        let title = try readStr()
+        let message = try readStr()
+        let bg = try readStr()
+        let fg = try readStr()
+        let accent = try readStr()
+        let position = try readStr()
+        guard buf.count >= off + 8 else {
+            throw IPCError.payloadTooShort(expected: off + 8, got: buf.count)
+        }
+        let dur = Int32(bitPattern: buf.readUInt32LE(at: off)); off += 4
+        let maxWidth = Int32(bitPattern: buf.readUInt32LE(at: off))
+        return ToastPayload(title: title, message: message, bgColor: bg, fgColor: fg,
+                            accentColor: accent, position: position, durationMs: dur, maxWidth: maxWidth)
+    }
+
     public static func decodeUnifiedMenuPayload(_ buf: Data) throws -> [MenuItemData] {
         var off = 0
         let items = try decodeMenuItems(buf, &off)

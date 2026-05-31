@@ -41,6 +41,8 @@
 - `CmdTooltipHide`（下行 0x0509, push）darwin 专用：隐藏 tooltip, `EncodeTooltipHide()` 空 payload
 - `CmdStatusShow`（下行 0x050A, push）darwin 专用：模式切换状态气泡, `EncodeStatusShow(text, bgColor, fgColor string, x, y, durationMs int32)`; payload 三段长度前缀字符串 text+bg+fg + x(i32)+y(i32)+durationMs(i32); text 为合并短文 (如 "中 ，"), bg/fg 为 #RRGGBB[AA] (主题 ModeIndicator 配色叠加 opacity), x/y 为 caret 底部下方锚点 (与候选窗口同位置), durationMs>0 到点自动隐藏 (temp 模式) / ==0 常驻 (always); forwarder 收 `uicmd.CmdStatusShow` 据 config 合成
 - `CmdStatusHide`（下行 0x050B, push）darwin 专用：隐藏状态气泡, `EncodeStatusHide()` 空 payload
+- `CmdToastShow`（下行 0x050C, push）darwin 专用：Toast 通知 (词库就绪/错误等屏幕级提示), `EncodeToastShow(title, message, bgColor, fgColor, accentColor, position string, durationMs, maxWidth int32)`; payload 六段长度前缀字符串 (title+message+bg+fg+accent+position) + durationMs(i32)+maxWidth(i32); bg/fg 取主题 Tooltip 配色 (强制不透明), accent 按级别取 `ui.ToastAccentColor`, position 为 "bottom_right"/"center" (.app 据此在工作区落位); durationMs 0=默认5000 / >0自动隐藏 / <0常驻; forwarder 收 `uicmd.CmdToastShow` 合成
+- `CmdToastHide`（下行 0x050D, push）darwin 专用：隐藏 Toast, `EncodeToastHide()` 空 payload
 - `CmdCandidateContextMenu`（上行 0x020F）darwin 专用：候选右键菜单动作, payload=index i32 + actionLen u32 + action(UTF-8); Coordinator.HandleCandidateContextMenu 按 action 派发 move/delete/reset/copy
 - `CmdMenuAction`（上行 0x0210）darwin 专用：统一菜单项被选中, payload=id i32; Coordinator.HandleUnifiedMenuAction 按 id 派发
 - `SharedRenderHeader` 固定 64 字节：前 40 字节有效字段，后 24 字节保留；后跟 BGRA 像素数据

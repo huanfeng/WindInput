@@ -25,6 +25,7 @@ public final class CandidatePanelHost {
     private let panel: CandidatePanel
     private let tooltip: TooltipPanel
     private let statusBubble: StatusBubblePanel
+    private let toast: ToastPanel
     private var lastHoverIndex = -1   // 仅主线程访问 (onHover/tooltipShow 都切主线程)
     private var reader: SharedMemoryReader?
     private var push: PushClient?
@@ -42,14 +43,17 @@ public final class CandidatePanelHost {
             panel = CandidatePanel()
             tooltip = TooltipPanel()
             statusBubble = StatusBubblePanel()
+            toast = ToastPanel()
         } else {
             var p: CandidatePanel?
             var t: TooltipPanel?
             var s: StatusBubblePanel?
-            DispatchQueue.main.sync { p = CandidatePanel(); t = TooltipPanel(); s = StatusBubblePanel() }
+            var to: ToastPanel?
+            DispatchQueue.main.sync { p = CandidatePanel(); t = TooltipPanel(); s = StatusBubblePanel(); to = ToastPanel() }
             panel = p!
             tooltip = t!
             statusBubble = s!
+            toast = to!
         }
         panel.onSelect = { [weak self] index in self?.handlePanelClick(index) }
         panel.onHover = { [weak self] index in
@@ -149,6 +153,7 @@ public final class CandidatePanelHost {
             self?.panel.hidePanel()
             self?.tooltip.hidePanel()
             self?.statusBubble.hidePanel()
+            self?.toast.hidePanel()
         }
     }
 
@@ -166,9 +171,12 @@ public final class CandidatePanelHost {
 
     private func openSHMIfNeeded() {
         if reader != nil { return }
+        // SHM 名按变体后缀与 Go host_render_darwin.darwinSHMName 对齐 (release: /WindInput_SHM;
+        // debug: /WindInput_SHM_debug)。否则两变体抢同一段, 开机后候选框渲染坏掉。
+        let shmName = "/WindInput_SHM\(BridgeEndpoints.variantSuffix)"
         do {
-            reader = try SharedMemoryReader(name: "/WindInput_SHM", size: 4 * 1024 * 1024)
-            NSLog("CandidatePanelHost: SHM opened /WindInput_SHM")
+            reader = try SharedMemoryReader(name: shmName, size: 4 * 1024 * 1024)
+            NSLog("CandidatePanelHost: SHM opened \(shmName)")
         } catch {
             NSLog("CandidatePanelHost: SHM open deferred (\(error))")
         }
@@ -288,6 +296,12 @@ public final class CandidatePanelHost {
             }
         case DownstreamCmd.statusHide:
             DispatchQueue.main.async { [weak self] in self?.statusBubble.hidePanel() }
+        case DownstreamCmd.toastShow:
+            if let p = try? BinaryCodec.decodeToastPayload(frame.payload) {
+                DispatchQueue.main.async { [weak self] in self?.toast.show(p) }
+            }
+        case DownstreamCmd.toastHide:
+            DispatchQueue.main.async { [weak self] in self?.toast.hidePanel() }
         case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition:
             // 鼠标选词的 commit / composition 经 push 通道异步到达, 路由到当前焦点 controller。
             let responder = activeResponder
