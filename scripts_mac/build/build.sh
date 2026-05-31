@@ -113,8 +113,11 @@ build_service() {
         rm -f "$tmp_arm" "$tmp_amd"
         info "arch: $(lipo -archs "$BUILD_DIR/$EXE_NAME" 2>/dev/null || echo '?')"
     else
+        # 单架构本机构建也锁死 CGO_ENABLED=0: darwin 服务纯 Go, 启用 cgo (宿主机默认
+        # CGO_ENABLED=1) 编出的二进制会在启动期死锁于 cgo 调用 (主线程 asmcgocall →
+        # pthread_cond_wait, 不绑 socket/不写日志)。与 universal 路径保持一致。
         args+=(-o "$BUILD_DIR/$EXE_NAME" ./cmd/service)
-        go "${args[@]}"
+        CGO_ENABLED=0 go "${args[@]}"
     fi
     cd - >/dev/null
     info "$EXE_NAME 构建成功 ($(stat -f%z "$BUILD_DIR/$EXE_NAME") bytes)"
