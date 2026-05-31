@@ -26,6 +26,7 @@ final class CandidateContentView: NSView {
     var onContextAction: ((Int, String) -> Void)? // (pageLocalIndex, action)
     var unifiedMenuProvider: (() -> [MenuItemData]?)? // 空白处右键: 取统一菜单树
     var onUnifiedAction: ((Int) -> Void)?             // 统一菜单项点击 (menu item id)
+    private let unifiedMenuBuilder = UnifiedMenuBuilder() // 与菜单栏共用的统一菜单构建器 (须持有: 作为叶子项 target)
 
     override var isFlipped: Bool { true } // top-left 原点, 与 wire/rects 坐标系一致
 
@@ -83,7 +84,7 @@ final class CandidateContentView: NSView {
         // 候选 (index>=0): 候选上下文菜单; 空白/翻页区: 统一主菜单 (方案/主题/简繁/设置…)。
         guard let idx = hitIndex(event), idx >= 0 else {
             if let items = unifiedMenuProvider?(), !items.isEmpty {
-                let menu = buildUnifiedNSMenu(items)
+                let menu = unifiedMenuBuilder.build(items) { [weak self] id in self?.onUnifiedAction?(id) }
                 menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
             }
             return
@@ -114,37 +115,6 @@ final class CandidateContentView: NSView {
     @objc private func contextMenuAction(_ sender: NSMenuItem) {
         if let action = sender.representedObject as? String {
             onContextAction?(ctxIndex, action)
-        }
-    }
-
-    /// 递归把 Go 下发的统一菜单树构建为原生 NSMenu。
-    private func buildUnifiedNSMenu(_ items: [MenuItemData]) -> NSMenu {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        for it in items {
-            if it.separator {
-                menu.addItem(.separator())
-                continue
-            }
-            let item = NSMenuItem(title: it.label, action: nil, keyEquivalent: "")
-            item.state = it.checked ? .on : .off
-            if !it.children.isEmpty {
-                item.submenu = buildUnifiedNSMenu(it.children)
-                item.isEnabled = true
-            } else {
-                item.target = self
-                item.action = #selector(unifiedMenuAction(_:))
-                item.representedObject = Int(it.id)
-                item.isEnabled = !it.disabled
-            }
-            menu.addItem(item)
-        }
-        return menu
-    }
-
-    @objc private func unifiedMenuAction(_ sender: NSMenuItem) {
-        if let id = sender.representedObject as? Int {
-            onUnifiedAction?(id)
         }
     }
 

@@ -65,6 +65,11 @@ public final class CandidatePanelHost {
         panel.onUnifiedAction = { [weak self] id in
             self?.sendFrame(BinaryCodec.encodeMenuActionFrame(id: Int32(id)))
         }
+        // 菜单栏状态菜单复用候选框空白处右键的同一统一菜单树与回发路径, 保证两处一致。
+        ModeStatusController.shared.unifiedMenuProvider = { [weak self] in self?.requestUnifiedMenu() }
+        ModeStatusController.shared.onUnifiedAction = { [weak self] id in
+            self?.sendFrame(BinaryCodec.encodeMenuActionFrame(id: Int32(id)))
+        }
     }
 
     public func start() {
