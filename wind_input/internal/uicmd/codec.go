@@ -152,6 +152,16 @@ func marshalPayload(w *binWriter, p Payload) error {
 		return v.marshal(w)
 	case DPIChangedPayload:
 		return nil
+	case KeyTapPayload:
+		return v.marshal(w)
+	case KeyHoldPayload:
+		return v.marshal(w)
+	case KeyReleasePayload:
+		return v.marshal(w)
+	case KeySeqPayload:
+		return v.marshal(w)
+	case KeyTypePayload:
+		return v.marshal(w)
 	default:
 		return fmt.Errorf("uicmd: unsupported payload type %T", p)
 	}
@@ -230,6 +240,21 @@ func unmarshalPayload(r *binReader, typ CommandType) (Payload, error) {
 		return p, p.unmarshal(r)
 	case CmdDPIChanged:
 		return DPIChangedPayload{}, nil
+	case CmdKeyTap:
+		var p KeyTapPayload
+		return p, p.unmarshal(r)
+	case CmdKeyHold:
+		var p KeyHoldPayload
+		return p, p.unmarshal(r)
+	case CmdKeyRelease:
+		var p KeyReleasePayload
+		return p, p.unmarshal(r)
+	case CmdKeySeq:
+		var p KeySeqPayload
+		return p, p.unmarshal(r)
+	case CmdKeyType:
+		var p KeyTypePayload
+		return p, p.unmarshal(r)
 	default:
 		return nil, fmt.Errorf("%w: 0x%04x", ErrUnknownCommand, uint16(typ))
 	}

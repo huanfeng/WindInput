@@ -302,8 +302,26 @@ public final class CandidatePanelHost {
             }
         case DownstreamCmd.toastHide:
             DispatchQueue.main.async { [weak self] in self?.toast.hidePanel() }
-        case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition:
-            // 鼠标选词的 commit / composition 经 push 通道异步到达, 路由到当前焦点 controller。
+        case DownstreamCmd.keyTap:
+            if let p = try? BinaryCodec.decodeKeyComboPayload(frame.payload) {
+                DispatchQueue.main.async { KeySynthesizer.tap(p) }
+            }
+        case DownstreamCmd.keyHold:
+            if let p = try? BinaryCodec.decodeKeyComboPayload(frame.payload) {
+                DispatchQueue.main.async { KeySynthesizer.hold(p) }
+            }
+        case DownstreamCmd.keyRelease:
+            if let p = try? BinaryCodec.decodeKeyComboPayload(frame.payload) {
+                DispatchQueue.main.async { KeySynthesizer.release(p) }
+            }
+        case DownstreamCmd.keySeq:
+            if let p = try? BinaryCodec.decodeKeySeqPayload(frame.payload) {
+                DispatchQueue.main.async { KeySynthesizer.sequence(p.combos) }
+            }
+        case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition,
+             DownstreamCmd.keyType:
+            // 鼠标选词的 commit / composition 及命令直通车 key.type / clip.paste 文本上屏
+            // 经 push 通道异步到达, 路由到当前焦点 controller (其 router 调 client.insertText)。
             let responder = activeResponder
             DispatchQueue.main.async { responder?.applyPushResponse(frame) }
         default:

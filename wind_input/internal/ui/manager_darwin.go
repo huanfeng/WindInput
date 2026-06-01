@@ -350,6 +350,46 @@ func (m *Manager) ShowToastSuccess(message string) {
 	m.ShowToast(ToastOptions{Message: message, Level: ToastSuccess, Position: ToastBottomRight, Duration: 3500})
 }
 
+// ============================================================================
+// 按键合成 (命令直通车 key.* / clip.paste; 仅 darwin)
+// ============================================================================
+//
+// 这些方法把已解析的按键组合 / 文本经 uicmd 命令投递给 forwarder, 由 forwarder
+// 编 push 帧下发给 IMKit `.app`, 再由 `.app` 用 CGEvent (tap/seq/hold/release)
+// 或 client.insertText (type) 实际执行。Go 服务进程无 GUI 事件上下文, 不直接合成。
+// 由 coordinator/cmdbar_inject_darwin.go 在 cmdbar 动作求值时调用。
+
+// SendKeyTap 下发单次按键组合。
+func (m *Manager) SendKeyTap(key string, modifiers []string) {
+	m.postCmd(uicmd.NewCommand(uicmd.CmdKeyTap, 0, uicmd.KeyTapPayload{Key: key, Modifiers: modifiers}))
+}
+
+// SendKeySeq 下发顺序多个按键组合。
+func (m *Manager) SendKeySeq(combos []uicmd.KeyCombo) {
+	if len(combos) == 0 {
+		return
+	}
+	m.postCmd(uicmd.NewCommand(uicmd.CmdKeySeq, 0, uicmd.KeySeqPayload{Combos: combos}))
+}
+
+// SendKeyHold 下发按下并保持。
+func (m *Manager) SendKeyHold(key string, modifiers []string) {
+	m.postCmd(uicmd.NewCommand(uicmd.CmdKeyHold, 0, uicmd.KeyHoldPayload{Key: key, Modifiers: modifiers}))
+}
+
+// SendKeyRelease 下发抬起之前 hold 的组合。
+func (m *Manager) SendKeyRelease(key string, modifiers []string) {
+	m.postCmd(uicmd.NewCommand(uicmd.CmdKeyRelease, 0, uicmd.KeyReleasePayload{Key: key, Modifiers: modifiers}))
+}
+
+// SendKeyType 下发 Unicode 文本上屏 (走 .app client.insertText)。
+func (m *Manager) SendKeyType(text string) {
+	if text == "" {
+		return
+	}
+	m.postCmd(uicmd.NewCommand(uicmd.CmdKeyType, 0, uicmd.KeyTypePayload{Text: text}))
+}
+
 func toastLevelToWire(l ToastLevel) uicmd.ToastLevel {
 	switch l {
 	case ToastSuccess:

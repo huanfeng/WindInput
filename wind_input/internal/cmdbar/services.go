@@ -10,9 +10,15 @@ var ErrServiceUnavailable = errors.New("cmdbar: service unavailable")
 
 // ClipboardService backs `clip.copy` / `clip.paste`. Production wiring
 // will adapt internal/clipboard in P4; tests supply mocks.
+//
+// Paste 把剪贴板内容送入当前输入框。平台实现不同:
+//   - Windows: 合成 Ctrl+V (keyinject.Tap)
+//   - macOS:   读 NSPasteboard 文本 → 经 .app client.insertText 上屏 (无需
+//     辅助功能授权, 不模拟 Cmd+V)
 type ClipboardService interface {
 	SetText(text string) error
 	GetText() (string, error)
+	Paste() error
 }
 
 // KeyInjector backs `key.tap` / `key.seq` / `key.hold` / `key.release` /

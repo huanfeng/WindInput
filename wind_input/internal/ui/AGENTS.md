@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-05-26 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-06-01 -->
 
 # internal/ui
 
@@ -74,7 +74,7 @@
 ### darwin-only (`//go:build darwin`)
 | File | Description |
 |------|-------------|
-| `manager_darwin.go` | `Manager` darwin stub: 保留 cmdCh/eventCh; 60+ method 投递 uicmd.Command; `SubscribeCommands(func(cmd, candidates []Candidate))` 启 goroutine 把 cmdCh + 旁路候选推给 macOS forwarder (候选含完整字段供 ui.Renderer); Win 渲染/窗口/钩子 no-op; 含 `StatusWindow`/`GetCapsLockState`/`ParseHotkeyString` 等 stub |
+| `manager_darwin.go` | `Manager` darwin stub: 保留 cmdCh/eventCh; 60+ method 投递 uicmd.Command; 含命令直通车按键模拟下发 `SendKeyTap(key, mods)`/`SendKeySeq([]uicmd.KeyCombo)`/`SendKeyHold`/`SendKeyRelease`/`SendKeyType(text)` (各 postCmd 对应 uicmd.CmdKeyXxx, 由 forwarder 转 ipc push 帧给 .app); `SubscribeCommands(func(cmd, candidates []Candidate))` 启 goroutine 把 cmdCh + 旁路候选推给 macOS forwarder (候选含完整字段供 ui.Renderer); Win 渲染/窗口/钩子 no-op; 含 `StatusWindow`/`GetCapsLockState`/`ParseHotkeyString` 等 stub |
 | `text_backend_darwin.go` | `TextBackendManager` darwin 版: 仅 freetype (gg/text) 后端; 用 `ResolvePrimaryFont` (allow TTC, 因 PingFang 是 .ttc 且当前 gg/text 支持集合) 而非 `ResolveTextPrimaryFont` (TTF-only); `SetTextRenderMode` 忽略 mode 恒走 freetype; `SetGDIFontParams`/`SetDWriteFontFallbackForPUA` no-op 占位 |
 | `font_fallback_darwin.go` | `platformTextFallbackFonts()` darwin 字形级回退链 (Apple Symbols → Helvetica → PingFang/Hiragino/STHeiti/Songti → Apple Color Emoji), 经 `systemfont.ResolveFile` 解析家族名; 被 `font_config.go` 的 `textFallbackFonts()` 调用 |
 | `emoji_sbix_darwin.go` | 彩色 emoji 渲染: gg/text v0.48.x 的 ColorFont 接口无解析器实现 (DrawWithEmoji 永远回退单色), 故用 `emoji.SBIXParser` 直接从 Apple Color Emoji 提取 sbix 位图自合成; `drawColorEmoji()`(返回 advance+handled, 仅处理全 emoji 段)/`colorEmojiAdvance()`(取 emoji 字体 hmtx advance 供测量) |

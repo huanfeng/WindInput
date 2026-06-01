@@ -274,10 +274,10 @@ func fnClipPaste(ctx cmdbar.EvalContext, args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if s.Keys == nil {
-		return "", fmt.Errorf("clip.paste: %w (keys)", cmdbar.ErrServiceUnavailable)
+	if s.Clip == nil {
+		return "", fmt.Errorf("clip.paste: %w", cmdbar.ErrServiceUnavailable)
 	}
-	if err := s.Keys.Tap("Ctrl+V"); err != nil {
+	if err := s.Clip.Paste(); err != nil {
 		return "", fmt.Errorf("clip.paste: %w", err)
 	}
 	return "", nil

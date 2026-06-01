@@ -187,6 +187,7 @@ type fakeClip struct{ set string }
 
 func (f *fakeClip) SetText(s string) error   { f.set = s; return nil }
 func (f *fakeClip) GetText() (string, error) { return "", nil }
+func (f *fakeClip) Paste() error             { return nil }
 
 // buildActionsRegistry returns a registry preloaded with every
 // function (pure + action) so eval tests can route actions through real

@@ -248,6 +248,30 @@ func (f *darwinForwarder) handle(cmd uicmd.Command, candidates []ui.Candidate) {
 		}
 	case uicmd.CmdToastHide:
 		f.srv.BroadcastFrame(f.codec.EncodeToastHide())
+	case uicmd.CmdKeyTap:
+		if p, ok := cmd.Payload.(uicmd.KeyTapPayload); ok {
+			f.srv.BroadcastFrame(f.codec.EncodeKeyTap(p.Key, p.Modifiers))
+		}
+	case uicmd.CmdKeyHold:
+		if p, ok := cmd.Payload.(uicmd.KeyHoldPayload); ok {
+			f.srv.BroadcastFrame(f.codec.EncodeKeyHold(p.Key, p.Modifiers))
+		}
+	case uicmd.CmdKeyRelease:
+		if p, ok := cmd.Payload.(uicmd.KeyReleasePayload); ok {
+			f.srv.BroadcastFrame(f.codec.EncodeKeyRelease(p.Key, p.Modifiers))
+		}
+	case uicmd.CmdKeySeq:
+		if p, ok := cmd.Payload.(uicmd.KeySeqPayload); ok {
+			combos := make([]ipc.KeyComboData, len(p.Combos))
+			for i, cb := range p.Combos {
+				combos[i] = ipc.KeyComboData{Key: cb.Key, Modifiers: cb.Modifiers}
+			}
+			f.srv.BroadcastFrame(f.codec.EncodeKeySeq(combos))
+		}
+	case uicmd.CmdKeyType:
+		if p, ok := cmd.Payload.(uicmd.KeyTypePayload); ok {
+			f.srv.BroadcastFrame(f.codec.EncodeKeyType(p.Text))
+		}
 	default:
 		// 其它命令 (Menu 等) 后续 PR 接入
 	}

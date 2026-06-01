@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Updated: 2026-05-26 -->
+<!-- Updated: 2026-06-01 -->
 
 # uicmd — UI 命令/事件平台无关数据模型
 
@@ -28,6 +28,7 @@ coordinator 等核心逻辑只产生 `uicmd.Command`, 由不同后端消费:
 | `payload_menu.go` | 菜单命令 payload + `MenuItem` 递归编解码 |
 | `payload_theme.go` | 主题/全局配置 payload + `ThemeColors`/`ThemeFonts`/`ThemeGeometry`/`WindowsRenderHints` 编解码 helper |
 | `payload_hotkeys.go` | 全局快捷键注册/撤销 payload |
+| `payload_key.go` | 命令直通车按键模拟 payload (0x069x 段): `KeyTapPayload`/`KeyHoldPayload`/`KeyReleasePayload` (单 combo: Key+Modifiers)、`KeySeqPayload` (`[]KeyCombo`)、`KeyTypePayload` (Unicode 文本上屏); 各含 `marshal/unmarshal` + `marshalKeyCombo/unmarshalKeyCombo` helper。darwin 端 forwarder 把这些转译为 ipc `CmdKeyTap`..`CmdKeyType` push 帧, IMKit `.app` 用 CGEvent/insertText 执行 |
 | `event_payloads.go` | 所有上行事件 payload |
 | `codec.go` | `EncodeCommand`/`DecodeCommand`/`EncodeEvent`/`DecodeEvent` 主入口与 type→payload dispatch |
 | `codec_buffer.go` | 私有 `binWriter`/`binReader`, 小端字节流读写工具 |

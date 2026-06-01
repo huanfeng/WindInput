@@ -67,7 +67,35 @@ public enum DownstreamCmd {
     public static let statusHide: UInt16       = 0x050B   // 隐藏状态提示气泡 (空 payload)
     public static let toastShow: UInt16        = 0x050C   // Toast 通知 (标题+正文 + 主题色 + accent + 位置 + 时长)
     public static let toastHide: UInt16        = 0x050D   // 隐藏 Toast (空 payload)
+    public static let keyTap: UInt16           = 0x050E   // 命令直通车单次按键合成 (key + modifiers); CGEvent post
+    public static let keySeq: UInt16           = 0x050F   // 顺序多个按键组合
+    public static let keyHold: UInt16          = 0x0510   // 按下并保持 (与 release 成对)
+    public static let keyRelease: UInt16       = 0x0511   // 抬起之前 hold 的组合
+    public static let keyType: UInt16          = 0x0512   // Unicode 文本上屏 (走 client.insertText, 非 CGEvent)
     public static let batchResponse: UInt16    = 0x0F02
+}
+
+/// 按键组合 (CmdKeyTap/Hold/Release 解码结果, 及 KeySeq 内单项)。
+/// key 为规范键名 (如 "a"/"enter"/"left"/"home"/"vk:0x5D"); modifiers 为
+/// {"ctrl","shift","alt","win"} 子集 (win 在 .app 侧映射为 Command)。
+/// 与 Go internal/uicmd.KeyCombo / KeyTapPayload 镜像。
+public struct KeyComboPayload {
+    public let key: String
+    public let modifiers: [String]
+
+    public init(key: String, modifiers: [String]) {
+        self.key = key
+        self.modifiers = modifiers
+    }
+}
+
+/// 顺序多个按键组合 (CmdKeySeq 0x050F 解码结果)。
+public struct KeySeqPayload {
+    public let combos: [KeyComboPayload]
+
+    public init(combos: [KeyComboPayload]) {
+        self.combos = combos
+    }
 }
 
 /// 统一菜单项 (CmdMenuShow 0x0506 解码结果, 树形)。供构建原生 NSMenu。

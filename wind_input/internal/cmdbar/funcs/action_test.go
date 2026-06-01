@@ -12,13 +12,15 @@ import (
 // --- mock services ---
 
 type mockClip struct {
-	set string
-	get string
-	err error
+	set    string
+	get    string
+	pasted int
+	err    error
 }
 
 func (m *mockClip) SetText(s string) error   { m.set = s; return m.err }
 func (m *mockClip) GetText() (string, error) { return m.get, m.err }
+func (m *mockClip) Paste() error             { m.pasted++; return m.err }
 
 type mockKeys struct {
 	taps   []string
@@ -235,8 +237,12 @@ func TestAction_ClipCopy_ClipPaste(t *testing.T) {
 	if _, err := pp.Eval(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(mk.taps) != 1 || mk.taps[0] != "Ctrl+V" {
-		t.Errorf("clip.paste taps = %v", mk.taps)
+	// clip.paste 现走 Clip.Paste() (P-mac 净重构), 不再合成 Ctrl+V。
+	if mc.pasted != 1 {
+		t.Errorf("clip.paste called Paste() %d times, want 1", mc.pasted)
+	}
+	if len(mk.taps) != 0 {
+		t.Errorf("clip.paste should not tap keys, got %v", mk.taps)
 	}
 }
 

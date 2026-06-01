@@ -51,6 +51,16 @@ const (
 	CmdSettingsOpen CommandType = 0x0680 // 打开设置窗口 (可选指定页面)
 	CmdDPIChanged   CommandType = 0x0681 // DPI 变更通知 (Windows 专有; darwin 端忽略)
 	CmdScreenshot   CommandType = 0x0682 // 截图所有可见 UI 窗口 (Windows 本地动作; darwin 端忽略)
+
+	// --- 按键合成 (0x0690 ~ 0x069F; 仅 darwin) ---
+	// 命令直通车 key.tap / key.seq / key.hold / key.release / key.type 在 macOS
+	// 由 Go 服务下发给 IMKit `.app`, 由 `.app` 用 CGEvent 合成按键 (Go 进程无 GUI
+	// 事件上下文)。Windows 端不走此通路 (keyinject 直接 SendInput)。
+	CmdKeyTap     CommandType = 0x0690 // 单次按键组合 (key + modifiers)
+	CmdKeySeq     CommandType = 0x0691 // 顺序多个按键组合
+	CmdKeyHold    CommandType = 0x0692 // 按下并保持 (与 release 成对)
+	CmdKeyRelease CommandType = 0x0693 // 抬起之前 hold 的组合
+	CmdKeyType    CommandType = 0x0694 // Unicode 文本上屏 (macOS 走 client.insertText)
 )
 
 // Payload 是所有命令 payload 的标记接口。
@@ -118,4 +128,9 @@ var commandNames = map[CommandType]string{
 	CmdSettingsOpen:       "settings.open",
 	CmdDPIChanged:         "dpi.changed",
 	CmdScreenshot:         "ui.screenshot",
+	CmdKeyTap:             "key.tap",
+	CmdKeySeq:             "key.seq",
+	CmdKeyHold:            "key.hold",
+	CmdKeyRelease:         "key.release",
+	CmdKeyType:            "key.type",
 }

@@ -76,6 +76,11 @@ const (
 	CmdStatusHide           uint16 = 0x050B // darwin: 隐藏状态提示气泡 (空 payload)
 	CmdToastShow            uint16 = 0x050C // darwin: Toast 通知 (标题+正文 + 主题色 + accent + 位置 + 时长); .app 渲染 NSPanel
 	CmdToastHide            uint16 = 0x050D // darwin: 隐藏 Toast (空 payload)
+	CmdKeyTap               uint16 = 0x050E // darwin: 命令直通车单次按键合成 (key + modifiers); .app 用 CGEvent post
+	CmdKeySeq               uint16 = 0x050F // darwin: 顺序多个按键组合
+	CmdKeyHold              uint16 = 0x0510 // darwin: 按下并保持 (与 release 成对)
+	CmdKeyRelease           uint16 = 0x0511 // darwin: 抬起之前 hold 的组合
+	CmdKeyType              uint16 = 0x0512 // darwin: Unicode 文本上屏 (.app 走 client.insertText, 非 CGEvent)
 	CmdBatchResponse        uint16 = 0x0F02 // Batch response container
 )
 

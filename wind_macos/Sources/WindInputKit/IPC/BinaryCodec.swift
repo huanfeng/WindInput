@@ -362,6 +362,63 @@ public enum BinaryCodec {
                             accentColor: accent, position: position, durationMs: dur, maxWidth: maxWidth)
     }
 
+    // readLenString 读 u32 长度前缀的 UTF-8 字符串, 推进 off。按键解码共用。
+    private static func readLenString(_ buf: Data, _ off: inout Int) throws -> String {
+        guard buf.count >= off + 4 else {
+            throw IPCError.payloadTooShort(expected: off + 4, got: buf.count)
+        }
+        let n = Int(buf.readUInt32LE(at: off)); off += 4
+        guard buf.count >= off + n else {
+            throw IPCError.payloadTooShort(expected: off + n, got: buf.count)
+        }
+        let s = n > 0
+            ? (String(data: buf.subdata(in: (buf.startIndex + off)..<(buf.startIndex + off + n)), encoding: .utf8) ?? "")
+            : ""
+        off += n
+        return s
+    }
+
+    // decodeCombo 读单个按键组合: key(string) + modCount(u32) + modCount×(string)。
+    private static func decodeCombo(_ buf: Data, _ off: inout Int) throws -> KeyComboPayload {
+        let key = try readLenString(buf, &off)
+        guard buf.count >= off + 4 else {
+            throw IPCError.payloadTooShort(expected: off + 4, got: buf.count)
+        }
+        let modCount = Int(buf.readUInt32LE(at: off)); off += 4
+        var mods: [String] = []
+        mods.reserveCapacity(modCount)
+        for _ in 0..<modCount {
+            mods.append(try readLenString(buf, &off))
+        }
+        return KeyComboPayload(key: key, modifiers: mods)
+    }
+
+    /// 解码 CmdKeyTap/Hold/Release (0x050E/0x0510/0x0511): 单个 combo。
+    public static func decodeKeyComboPayload(_ buf: Data) throws -> KeyComboPayload {
+        var off = 0
+        return try decodeCombo(buf, &off)
+    }
+
+    /// 解码 CmdKeySeq (0x050F): comboCount(u32) + comboCount×combo。
+    public static func decodeKeySeqPayload(_ buf: Data) throws -> KeySeqPayload {
+        var off = 0
+        guard buf.count >= off + 4 else {
+            throw IPCError.payloadTooShort(expected: off + 4, got: buf.count)
+        }
+        let n = Int(buf.readUInt32LE(at: off)); off += 4
+        var combos: [KeyComboPayload] = []
+        combos.reserveCapacity(n)
+        for _ in 0..<n {
+            combos.append(try decodeCombo(buf, &off))
+        }
+        return KeySeqPayload(combos: combos)
+    }
+
+    /// 解码 CmdKeyType (0x0512): 整段 UTF-8 文本 (无长度前缀)。
+    public static func decodeKeyTypePayload(_ buf: Data) throws -> String {
+        return buf.isEmpty ? "" : (String(data: buf, encoding: .utf8) ?? "")
+    }
+
     public static func decodeUnifiedMenuPayload(_ buf: Data) throws -> [MenuItemData] {
         var off = 0
         let items = try decodeMenuItems(buf, &off)

@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Updated: 2026-05-12 -->
+<!-- Updated: 2026-06-01 -->
 
 # cmdbar
 
@@ -12,7 +12,7 @@
 | File | Description |
 |------|-------------|
 | `context.go` | `EvalContext` 接口 (含 `Services()`) 与 `MemoryContext` 测试实现; 含环形 `History` (容量自定, 默认 16) |
-| `services.go` | 动作函数所需依赖接口集: `ClipboardService` / `KeyInjector` / `URLOpener` / `ProcessRunner` (含 `Shell` + `ShellEx(cmd, flags)`) / `DictService` / `IMEController` / `SearchEngine` 与 `Services` 聚合; `ErrServiceUnavailable` 用于缺失服务降级 |
+| `services.go` | 动作函数所需依赖接口集: `ClipboardService` (含 `SetText`/`GetText`/`Paste`) / `KeyInjector` / `URLOpener` / `ProcessRunner` (含 `Shell` + `ShellEx(cmd, flags)`) / `DictService` / `IMEController` / `SearchEngine` 与 `Services` 聚合; `ErrServiceUnavailable` 用于缺失服务降级。`ClipboardService.Paste()` 由宿主按平台实现 (Win=模拟 Ctrl+V; darwin=读剪贴板经 .app `insertText` 上屏, 免辅助功能授权), `clip.paste` 动作改调它而非 `key.tap` |
 | `escape.go` | `DecodeEscapes(s)` 宽松转义解码器: `\n \r \t \\` 解码, 未知 `\X` 原样保留; 供 dict 短语层解码纯字面短语转义。详见 docs/design/command-bar-escape-support.md |
 | `registry.go` | `FuncSpec` 元信息 + 线程安全 `Registry`; Category / Deterministic / Deprecated / AliasOf / Description / ExampleSrc 字段; `ListFuncs()` 返回完整 spec 列表供 wind_setting 渲染函数手册; 默认注册命名宪法新名 (proc.run / proc.shell / dict.add / setting.open / web.search) 为 Pure=false stub, 等 `funcs.RegisterActions` 调用后被真实实现覆盖。2026-05-18: 旧名 alias (run/shell/dict.addword/ime.setting/search) 已彻底删除 (发布前清理, 不留迁移负担); `Deprecated` / `AliasOf` 字段保留供未来潜在 alias 使用 |
 | `ast/ast.go` | `Expr` / `Phrase` 节点定义 (`StringLit`/`NumberLit`/`Ident`/`Call`/`ObjectLit` + `LiteralPhrase`/`TemplatePhrase`/`CommandPhrase`/`ArrayPhrase`); `CommandPhrase` 同时实现 Expr (用于嵌入 `$SS` 元素位置) 与 Phrase 接口, 带 `Modifiers map[string]any` 字段 (2026-05-16 引入, 详见 follow-up §3.2); `ObjectLit` 是 trailing options bag 字面量; `ArrayPhrase` 是 `$SS(name, elem...)` 字符串数组短语, Elements 类型为 `[]Expr` (StringLit 或 CommandPhrase) |

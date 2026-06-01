@@ -954,3 +954,86 @@ func (c *BinaryCodec) EncodeModeStatus(flags, effectiveMode uint32, label string
 	copy(buf[12:], lb)
 	return append(header, buf...)
 }
+
+// KeyComboData 是 EncodeKeySeq 的单个组合 (与 uicmd.KeyCombo 镜像; ipc 不依赖
+// uicmd, 由 forwarder 转换)。
+type KeyComboData struct {
+	Key       string
+	Modifiers []string
+}
+
+// comboPayloadLen 算单个 combo 的 payload 字节数: keyLen(u32)+key + modCount(u32)
+// + modCount×(modLen(u32)+mod)。
+func comboPayloadLen(key string, mods []string) int {
+	n := 4 + len(key) + 4
+	for _, m := range mods {
+		n += 4 + len(m)
+	}
+	return n
+}
+
+// putCombo 把单个 combo 写入 buf[off:], 返回新偏移。
+func putCombo(buf []byte, off int, key string, mods []string) int {
+	binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(key)))
+	off += 4
+	off += copy(buf[off:], key)
+	binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(mods)))
+	off += 4
+	for _, m := range mods {
+		binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(m)))
+		off += 4
+		off += copy(buf[off:], m)
+	}
+	return off
+}
+
+// encodeKeyCombo 编单组合命令 (CmdKeyTap / CmdKeyHold / CmdKeyRelease 共用)。
+func (c *BinaryCodec) encodeKeyCombo(cmd uint16, key string, mods []string) []byte {
+	payloadLen := comboPayloadLen(key, mods)
+	header := c.EncodeHeader(cmd, uint32(payloadLen))
+	buf := make([]byte, payloadLen)
+	putCombo(buf, 0, key, mods)
+	return append(header, buf...)
+}
+
+// EncodeKeyTap 编 CmdKeyTap push 帧。Payload: keyLen(u32)+key + modCount(u32)
+// + modCount×(modLen(u32)+mod)。
+func (c *BinaryCodec) EncodeKeyTap(key string, mods []string) []byte {
+	return c.encodeKeyCombo(CmdKeyTap, key, mods)
+}
+
+// EncodeKeyHold 编 CmdKeyHold push 帧 (布局同 KeyTap)。
+func (c *BinaryCodec) EncodeKeyHold(key string, mods []string) []byte {
+	return c.encodeKeyCombo(CmdKeyHold, key, mods)
+}
+
+// EncodeKeyRelease 编 CmdKeyRelease push 帧 (布局同 KeyTap)。
+func (c *BinaryCodec) EncodeKeyRelease(key string, mods []string) []byte {
+	return c.encodeKeyCombo(CmdKeyRelease, key, mods)
+}
+
+// EncodeKeySeq 编 CmdKeySeq push 帧。Payload: comboCount(u32) + comboCount×combo,
+// 每个 combo 布局同 KeyTap payload。
+func (c *BinaryCodec) EncodeKeySeq(combos []KeyComboData) []byte {
+	payloadLen := 4
+	for _, cb := range combos {
+		payloadLen += comboPayloadLen(cb.Key, cb.Modifiers)
+	}
+	header := c.EncodeHeader(CmdKeySeq, uint32(payloadLen))
+	buf := make([]byte, payloadLen)
+	off := 0
+	binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(combos)))
+	off += 4
+	for _, cb := range combos {
+		off = putCombo(buf, off, cb.Key, cb.Modifiers)
+	}
+	return append(header, buf...)
+}
+
+// EncodeKeyType 编 CmdKeyType push 帧。Payload 即 UTF-8 文本 (整段, 无长度前缀,
+// 与 EncodeOpenSettings 同风格)。.app 收到后走 client.insertText 上屏。
+func (c *BinaryCodec) EncodeKeyType(text string) []byte {
+	tb := []byte(text)
+	header := c.EncodeHeader(CmdKeyType, uint32(len(tb)))
+	return append(header, tb...)
+}

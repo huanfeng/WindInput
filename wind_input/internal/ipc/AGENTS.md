@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-05-01 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-06-01 -->
 
 # internal/ipc
 
@@ -16,7 +16,7 @@
 |------|-------------|
 | `protocol.go` | JSON 协议类型（RequestType、Request、Response、Candidate）— 遗留 |
 | `binary_protocol.go` | 二进制协议命令码常量（上行 `CmdKeyEvent`/`CmdFocusGained`/`CmdCandidateSelect` 等，下行 `CmdCommitText`/`CmdStatusUpdate`/`CmdActivationStatusPush`/`CmdHostRenderSetup`/`CmdHostRenderFrame`/`CmdCandidateRects` 等）；消息头/载荷结构体（`IpcHeader`、`KeyPayload`、`CaretPayload`、`HostRenderFramePayload`、`CandidateHitRect` 等）；共享内存协议常量（`SharedRenderMagic`、`SharedRenderHeaderSize`、`MaxSharedRenderSize`、`SharedFlagVisible`/`SharedFlagContentReady`）；`SharedRenderHeader`、`HostRenderSetupPayload` 结构体；`StatusHostRenderAvail` 状态标志位 |
-| `binary_codec.go` | `BinaryCodec`：消息的二进制编解码；`EncodeStatusUpdateEx`（含 `hostRenderAvail`）、`EncodeActivationStatusPush`（IMEActivated/FocusGained 异步化状态回包，含 hotkeys + hostRenderAvail + iconLabel）、`EncodeHostRenderSetup`、`EncodeHostRenderFrame`（darwin SHM 新帧就绪通知, 24B: seq+x+y+w+h+flags）、`EncodeBatchResponse`/`DecodeBatchEvents`、`EncodeStatePush`；`CalcKeyHash`/`ParseKeyHash` 热键哈希 |
+| `binary_codec.go` | `BinaryCodec`：消息的二进制编解码；`EncodeStatusUpdateEx`（含 `hostRenderAvail`）、`EncodeActivationStatusPush`（IMEActivated/FocusGained 异步化状态回包，含 hotkeys + hostRenderAvail + iconLabel）、`EncodeHostRenderSetup`、`EncodeHostRenderFrame`（darwin SHM 新帧就绪通知, 24B: seq+x+y+w+h+flags）、`EncodeBatchResponse`/`DecodeBatchEvents`、`EncodeStatePush`；`EncodeKeyTap`/`EncodeKeySeq`/`EncodeKeyHold`/`EncodeKeyRelease`/`EncodeKeyType`（darwin 命令直通车按键模拟 push 帧 + `KeyComboData` 入参）；`CalcKeyHash`/`ParseKeyHash` 热键哈希 |
 | `server.go` | JSON Named Pipe 服务端（`\\.\pipe\tsf_ime_service`）— 遗留，当前未使用 |
 
 ## For AI Agents
@@ -43,6 +43,8 @@
 - `CmdStatusHide`（下行 0x050B, push）darwin 专用：隐藏状态气泡, `EncodeStatusHide()` 空 payload
 - `CmdToastShow`（下行 0x050C, push）darwin 专用：Toast 通知 (词库就绪/错误等屏幕级提示), `EncodeToastShow(title, message, bgColor, fgColor, accentColor, position string, durationMs, maxWidth int32)`; payload 六段长度前缀字符串 (title+message+bg+fg+accent+position) + durationMs(i32)+maxWidth(i32); bg/fg 取主题 Tooltip 配色 (强制不透明), accent 按级别取 `ui.ToastAccentColor`, position 为 "bottom_right"/"center" (.app 据此在工作区落位); durationMs 0=默认5000 / >0自动隐藏 / <0常驻; forwarder 收 `uicmd.CmdToastShow` 合成
 - `CmdToastHide`（下行 0x050D, push）darwin 专用：隐藏 Toast, `EncodeToastHide()` 空 payload
+- `CmdKeyTap`/`CmdKeySeq`/`CmdKeyHold`/`CmdKeyRelease`（下行 0x050E/0x050F/0x0510/0x0511, push）darwin 专用：命令直通车按键模拟, `EncodeKeyTap`/`EncodeKeySeq`/`EncodeKeyHold`/`EncodeKeyRelease`; 单 combo wire = key(u32 len + UTF-8) + modCount(u32) + modCount×(u32 len + UTF-8), KeySeq = comboCount(u32) + N×combo; 编码入参 `KeyComboData{Key, Modifiers}`; forwarder 收 `uicmd.CmdKeyTap/Seq/Hold/Release` 转译, IMKit `.app` 用 CGEvent 向聚焦应用合成 (key.tap/seq/hold/release, 需「辅助功能」授权)
+- `CmdKeyType`（下行 0x0512, push）darwin 专用：命令直通车 key.type / clip.paste 文本上屏, `EncodeKeyType(text)`; payload = 整段 UTF-8 (无长度前缀, 同 `EncodeOpenSettings` 风格); forwarder 收 `uicmd.CmdKeyType` 转译, .app 经 `client.insertText` 上屏 (不模拟按键, 免辅助功能授权)
 - `CmdCandidateContextMenu`（上行 0x020F）darwin 专用：候选右键菜单动作, payload=index i32 + actionLen u32 + action(UTF-8); Coordinator.HandleCandidateContextMenu 按 action 派发 move/delete/reset/copy
 - `CmdMenuAction`（上行 0x0210）darwin 专用：统一菜单项被选中, payload=id i32; Coordinator.HandleUnifiedMenuAction 按 id 派发
 - `SharedRenderHeader` 固定 64 字节：前 40 字节有效字段，后 24 字节保留；后跟 BGRA 像素数据

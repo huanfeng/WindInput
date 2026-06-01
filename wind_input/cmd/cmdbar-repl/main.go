@@ -47,6 +47,13 @@ type clipSvc struct{}
 
 func (clipSvc) SetText(s string) error   { return clipboard.SetText(s) }
 func (clipSvc) GetText() (string, error) { return clipboard.GetText() }
+func (clipSvc) Paste() error {
+	c, err := keyinject.Parse("Ctrl+V")
+	if err != nil {
+		return err
+	}
+	return keyinject.Tap(c)
+}
 
 type keysSvc struct{}
 

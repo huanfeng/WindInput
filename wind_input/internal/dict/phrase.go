@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -195,6 +196,11 @@ type PhraseFileEntry struct {
 	Weight   *int `yaml:"weight,omitempty"`
 	Position int  `yaml:"position,omitempty"`
 	Disabled bool `yaml:"disabled,omitempty"`
+	// Platform 限定该条仅在指定平台加载: ""/"all"=所有平台; "windows"/"darwin"/
+	// "linux"=仅该平台 (值同 runtime.GOOS)。用于平台差异示例 (如删行用键、启动
+	// 命令、环境变量名在 Windows / macOS 不同)。同一 code 可写多条不同 platform,
+	// 加载时按当前平台取匹配的那条。ParsePhraseYAMLFile 统一过滤。
+	Platform string `yaml:"platform,omitempty"`
 }
 
 // NewPhraseLayer 创建短语层（测试用简化版，不绑定 Store）
@@ -780,7 +786,23 @@ func ParsePhraseYAMLFile(path string) ([]PhraseFileEntry, error) {
 		return nil, fmt.Errorf("parse phrases file %s: %w", path, err)
 	}
 
-	return config.Phrases, nil
+	// 按当前平台过滤: 丢弃 platform 设了且不匹配 runtime.GOOS 的条目, 让同一
+	// code 的跨平台变体只保留当前平台那条。所有下游 (seed / weight 刷新 / 层加载)
+	// 经此收口自动平台感知。
+	out := config.Phrases[:0]
+	for _, e := range config.Phrases {
+		if phraseMatchesPlatform(e.Platform) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// phraseMatchesPlatform 判定 platform 标签是否匹配当前运行平台。
+// ""/"all" 匹配所有平台; 否则需等于 runtime.GOOS (windows/darwin/linux)。
+func phraseMatchesPlatform(platform string) bool {
+	p := strings.TrimSpace(strings.ToLower(platform))
+	return p == "" || p == "all" || p == runtime.GOOS
 }
 
 // (detectPhraseType 已删除, 2026-05-16: store 不再保存 type 字段, 分类

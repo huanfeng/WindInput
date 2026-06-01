@@ -54,6 +54,15 @@ public final class BridgeResponseRouter {
             applyClearComposition(client: client)
             return true
 
+        case DownstreamCmd.keyType:
+            // 命令直通车 key.type / clip.paste 文本上屏: 整段 UTF-8, 直接 insertText
+            // (不经 composition, 与 commitText 一样落到当前光标处)。
+            if let text = try? BinaryCodec.decodeKeyTypePayload(frame.payload), !text.isEmpty {
+                let notFound = NSRange(location: NSNotFound, length: NSNotFound)
+                client?.insertText(text, replacementRange: notFound)
+            }
+            return true
+
         case DownstreamCmd.moveCursor:
             // M3 实装 (智能跳过); M2.2 仅丢弃但仍消费按键
             return true

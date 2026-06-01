@@ -9,59 +9,25 @@ import (
 
 	"github.com/huanfeng/wind_input/internal/clipboard"
 	"github.com/huanfeng/wind_input/internal/cmdbar"
-	"github.com/huanfeng/wind_input/internal/keyinject"
 	"github.com/huanfeng/wind_input/internal/proc"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
-// cmdbarClipService 实现 cmdbar.ClipboardService, 直接转发到内部 clipboard 包。
-type cmdbarClipService struct{}
+// cmdbarClipService 实现 cmdbar.ClipboardService。SetText/GetText 直接转发到
+// 内部 clipboard 包 (跨平台); Paste 平台相关 (见 cmdbar_inject_{darwin,other}.go):
+// Windows 合成 Ctrl+V, macOS 读剪贴板 + .app insertText。
+type cmdbarClipService struct {
+	c *Coordinator
+}
 
 func (cmdbarClipService) SetText(text string) error { return clipboard.SetText(text) }
 func (cmdbarClipService) GetText() (string, error)  { return clipboard.GetText() }
 
-// cmdbarKeysService 实现 cmdbar.KeyInjector, 通过 keyinject.Parse 把
-// combo 字符串转换为 Combo 后注入按键。
-type cmdbarKeysService struct{}
-
-func (cmdbarKeysService) Tap(combo string) error {
-	c, err := keyinject.Parse(combo)
-	if err != nil {
-		return err
-	}
-	return keyinject.Tap(c)
-}
-
-func (cmdbarKeysService) Sequence(combos ...string) error {
-	cs := make([]keyinject.Combo, 0, len(combos))
-	for _, s := range combos {
-		c, err := keyinject.Parse(s)
-		if err != nil {
-			return err
-		}
-		cs = append(cs, c)
-	}
-	return keyinject.Sequence(cs...)
-}
-
-func (cmdbarKeysService) Hold(combo string) error {
-	c, err := keyinject.Parse(combo)
-	if err != nil {
-		return err
-	}
-	return keyinject.Hold(c)
-}
-
-func (cmdbarKeysService) Release(combo string) error {
-	c, err := keyinject.Parse(combo)
-	if err != nil {
-		return err
-	}
-	return keyinject.Release(c)
-}
-
-func (cmdbarKeysService) TypeText(text string) error {
-	return keyinject.TypeText(text)
+// cmdbarKeysService 实现 cmdbar.KeyInjector。Tap/Sequence/Hold/Release/TypeText
+// 平台相关 (见 cmdbar_inject_{darwin,other}.go): Windows 直接 keyinject.SendInput,
+// macOS 经 ui.Manager 下发 push 命令给 .app 用 CGEvent 合成。
+type cmdbarKeysService struct {
+	c *Coordinator
 }
 
 // cmdbarOpenService 实现 cmdbar.URLOpener。
@@ -208,8 +174,8 @@ func (c *Coordinator) toggleCandidateWindowForCmdbar() {
 // SearchEngine 留 nil, 让 cmdbar 的 search() 走默认 URL 组装 + URLOpener 兜底。
 func (c *Coordinator) buildCmdbarServices() *cmdbar.Services {
 	return &cmdbar.Services{
-		Clip: cmdbarClipService{},
-		Keys: cmdbarKeysService{},
+		Clip: cmdbarClipService{c: c},
+		Keys: cmdbarKeysService{c: c},
 		Open: cmdbarOpenService{},
 		Proc: cmdbarProcService{},
 		Dict: cmdbarDictService{c: c},

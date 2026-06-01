@@ -273,15 +273,32 @@ phrases:
   - code: "cozd"
     text: '$CC("汉典:{last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))'
     weight: 2000
+  # 启动程序 / 用户主目录在 Windows / macOS 上目标不同, 按 platform 分别提供
+  # (ParsePhraseYAMLFile 按 runtime.GOOS 过滤, 同 code 只保留匹配当前平台那条)。
   - code: "cono"
     text: '$CC("打开记事本", proc.run("notepad.exe"))'
     weight: 2000
+    platform: windows
+  - code: "cono"
+    text: '$CC("打开文本编辑", proc.run("open", "-a", "TextEdit"))'
+    weight: 2000
+    platform: darwin
   - code: "coca"
     text: '$CC("打开计算器", proc.run("calc.exe"))'
     weight: 2000
+    platform: windows
+  - code: "coca"
+    text: '$CC("打开计算器", proc.run("open", "-a", "Calculator"))'
+    weight: 2000
+    platform: darwin
   - code: "cohm"
     text: '$CC("打开用户主目录", open(env("USERPROFILE")))'
     weight: 2000
+    platform: windows
+  - code: "cohm"
+    text: '$CC("打开用户主目录", open(env("HOME")))'
+    weight: 2000
+    platform: darwin
 
   # --- 文本上屏 ---
   - code: "coll"
@@ -295,9 +312,17 @@ phrases:
   - code: "cojk"
     text: '$CC("「」", type("「」"), key.tap("Left"))'
     weight: 2000
+  # 删行: Windows 用 Home/Shift+End/Backspace; macOS 这些键在 Cocoa 文本框是
+  # 滚动而非移动光标, 改用 emacs 绑定 Ctrl+A(行首)/Ctrl+K(删到行尾), 几乎所有
+  # Cocoa 文本框都支持。
   - code: "codl"
     text: '$CC("[删行]", key.seq("Home", "Shift+End", "Backspace"))'
     weight: 2000
+    platform: windows
+  - code: "codl"
+    text: '$CC("[删行]", key.seq("Ctrl+A", "Ctrl+K"))'
+    weight: 2000
+    platform: darwin
 
   # --- 剪贴板 / 加词 ---
   - code: "cocp"
