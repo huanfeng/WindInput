@@ -256,22 +256,36 @@ public class InputController: IMKInputController {
         }
 
         do {
-            try bridge.send(frame)
-            let resp = try bridge.readFrame()
-            let consumed = applyResponse(resp, sender: sender)
-
-            // M2.2-E: composition 启动/更新后, 上报当前 caret 屏幕位置给 Go,
-            // 让候选框/Toast/光标跟随有正确锚点. 仅在 marked text 非空时发,
-            // 避免无 composition 时浪费带宽.
-            if !composition.isEmpty {
-                sendCaretUpdateIfAvailable(client: sender as? IMKTextInput)
-            }
-            return consumed
+            return try sendAndApply(frame, on: bridge, sender: sender)
         } catch {
-            NSLog("WindInput[handle] bridge io error: \(error)")
+            // 服务重启/卡死后这条连接已死 (write→EPIPE 或 read→EOF/超时)。重连到新服务
+            // 并**用新连接重试当前键一次**, 让服务重启后第一个键就自愈, 不丢字、不需手动
+            // 重启前端。重连或重试仍失败 (如服务尚在重启窗口未就绪) 才透传, 下一键再试。
+            NSLog("WindInput[handle] bridge io error: \(error), 重连后重试本键")
             reconnect()
-            return false
+            // 注意: 上方 guard 把属性 bridge 遮蔽为非可选局部量, 这里须取重连后的 self.bridge。
+            guard let fresh = self.bridge else { return false }
+            do {
+                return try sendAndApply(frame, on: fresh, sender: sender)
+            } catch {
+                NSLog("WindInput[handle] 重连后重试仍失败: \(error)")
+                return false
+            }
         }
+    }
+
+    /// 在指定连接上发一帧、读响应并应用; composition 非空时上报 caret。
+    /// 抽出供 handle 的「首发 + 重连重试」两条路径共用。
+    private func sendAndApply(_ frame: Data, on bridge: BridgeClient, sender: Any?) throws -> Bool {
+        try bridge.send(frame)
+        let resp = try bridge.readFrame()
+        let consumed = applyResponse(resp, sender: sender)
+        // M2.2-E: composition 启动/更新后, 上报当前 caret 屏幕位置给 Go,
+        // 让候选框/Toast/光标跟随有正确锚点. 仅在 marked text 非空时发。
+        if !composition.isEmpty {
+            sendCaretUpdateIfAvailable(client: sender as? IMKTextInput)
+        }
+        return consumed
     }
 
     // MARK: - Caret update (M2.2-E)

@@ -40,6 +40,14 @@ public final class BridgeClient {
             throw IPCError.connectFailed("socket(): \(String(cString: strerror(errno)))")
         }
 
+        // SO_NOSIGPIPE: 对端 (Go 服务) 重启/退出后, 向这条已死连接 write 默认会触发
+        // SIGPIPE 信号 —— 其默认处置是**终止本进程**, 即 .app 直接被杀, 表现为服务重启后
+        // 输入法彻底失灵、必须强制重启前端。设此选项后 write 改为返回 EPIPE 错误, 由
+        // send() 抛 IPCError 交上层 reconnect, 进程存活。所有连接 (request/push) 都需要。
+        var noSigPipe: Int32 = 1
+        _ = Darwin.setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                              socklen_t(MemoryLayout<Int32>.size))
+
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
 
