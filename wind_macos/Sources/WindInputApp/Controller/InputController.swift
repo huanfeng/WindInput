@@ -30,6 +30,11 @@ import WindInputKit
 @objc(WindInputController)
 public class InputController: IMKInputController {
 
+    // request 连接 I/O 超时 (毫秒): 服务卡死/重启时避免同步 readFrame 在 IMKit 主线程
+    // 无限阻塞 (表现为输入法整体无响应)。正常 UDS roundtrip <1ms; 超时后 catch →
+    // reconnect, 下一键用新连接自愈。push 连接不设此超时 (见 BridgeClient.ioTimeoutMs)。
+    private static let requestIOTimeoutMs = 2000
+
     private var bridge: BridgeClient?
     private var keySeq: UInt16 = 0
     private let router = BridgeResponseRouter()
@@ -50,7 +55,7 @@ public class InputController: IMKInputController {
 
         let path = BridgeEndpoints.requestSocket
         do {
-            bridge = try BridgeClient(socketPath: path)
+            bridge = try BridgeClient(socketPath: path, ioTimeoutMs: Self.requestIOTimeoutMs)
             NSLog("WindInput[InputController] bridge connected path=\(path)")
         } catch {
             NSLog("WindInput[InputController] bridge connect FAILED path=\(path) err=\(error)")
@@ -333,7 +338,7 @@ public class InputController: IMKInputController {
         if let b = bridge, b.isConnected { return true }
         bridge?.close()
         do {
-            bridge = try BridgeClient(socketPath: BridgeEndpoints.requestSocket)
+            bridge = try BridgeClient(socketPath: BridgeEndpoints.requestSocket, ioTimeoutMs: Self.requestIOTimeoutMs)
             NSLog("WindInput[ensureConnected] bridge (重)连成功")
             return true
         } catch {
@@ -346,7 +351,7 @@ public class InputController: IMKInputController {
         bridge?.close()
         bridge = nil
         do {
-            bridge = try BridgeClient(socketPath: BridgeEndpoints.requestSocket)
+            bridge = try BridgeClient(socketPath: BridgeEndpoints.requestSocket, ioTimeoutMs: Self.requestIOTimeoutMs)
             NSLog("WindInput[reconnect] bridge reconnected")
         } catch {
             NSLog("WindInput[reconnect] still down: \(error)")

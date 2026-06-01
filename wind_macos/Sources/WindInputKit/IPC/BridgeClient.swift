@@ -17,9 +17,14 @@ public final class BridgeClient {
 
     private var fd: Int32 = -1
     public let socketPath: String
+    // I/O 超时 (毫秒, 0=不设, 阻塞到底)。request 连接 (InputController 同步 roundtrip)
+    // 须设超时, 否则服务卡死/重启时 readFrame 在 IMKit 主线程无限阻塞 → 输入法整体无响应。
+    // push 连接 (PushClient 长期空闲等服务端推送) 必须保持 0, 否则会被读超时误判断连。
+    private let ioTimeoutMs: Int
 
-    public init(socketPath: String) throws {
+    public init(socketPath: String, ioTimeoutMs: Int = 0) throws {
         self.socketPath = socketPath
+        self.ioTimeoutMs = ioTimeoutMs
         try connect()
     }
 
@@ -62,6 +67,17 @@ public final class BridgeClient {
             let msg = "connect(\(socketPath)): \(String(cString: strerror(errno)))"
             Darwin.close(s)
             throw IPCError.connectFailed(msg)
+        }
+
+        // 收发超时: 超时后 read/write 返回 -1 + errno=EAGAIN, 由 readExact/send 抛
+        // IPCError, 上层 (InputController) catch 后 reconnect; 避免主线程无限阻塞。
+        if ioTimeoutMs > 0 {
+            var tv = timeval(tv_sec: ioTimeoutMs / 1000,
+                             tv_usec: Int32((ioTimeoutMs % 1000) * 1000))
+            _ = Darwin.setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv,
+                                  socklen_t(MemoryLayout<timeval>.size))
+            _ = Darwin.setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv,
+                                  socklen_t(MemoryLayout<timeval>.size))
         }
 
         self.fd = s

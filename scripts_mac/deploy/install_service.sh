@@ -131,9 +131,19 @@ chmod +x "$INSTALL_EXE"
 # 新二进制 (cdhash 不同) 经 launchd 启动时缓存失配, 触发 OS_REASON_CODESIGNING 起不来.
 # 原地 --force 重签生成全新签名, 刷新校验. Go 二进制本就自带 ad-hoc 签名, 这里幂等.
 if command -v codesign >/dev/null; then
-    codesign --force -s - "$INSTALL_EXE" 2>/dev/null \
-        && info "ad-hoc 重签服务二进制" \
-        || info "codesign 重签跳过 (非致命)"
+    if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+        # 无头 ssh: 先解锁 login keychain 供 codesign 访问私钥 (见 install_app.sh 同理)
+        if [[ -n "${SIGN_KEYCHAIN_PW:-}" ]]; then
+            security unlock-keychain -p "$SIGN_KEYCHAIN_PW" "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null || true
+        fi
+        codesign --force -s "$SIGN_IDENTITY" "$INSTALL_EXE" 2>/dev/null \
+            && info "固定证书重签服务二进制: \"$SIGN_IDENTITY\"" \
+            || info "codesign 重签跳过 (非致命)"
+    else
+        codesign --force -s - "$INSTALL_EXE" 2>/dev/null \
+            && info "ad-hoc 重签服务二进制" \
+            || info "codesign 重签跳过 (非致命)"
+    fi
 fi
 if command -v rsync >/dev/null; then
     rsync -a --delete "$SRC_DATA/" "$INSTALL_ROOT/data/"

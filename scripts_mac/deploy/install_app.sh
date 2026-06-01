@@ -186,7 +186,19 @@ info "已复制 $INSTALL_APP"
 #    若 build 用了真实证书 (SIGN_IDENTITY / 已公证), 则保留原签名, 不降级成 ad-hoc.
 # 检测须用 --verbose=2: 默认 -dv (verbose=1) 不打印 "Signature=adhoc" 行 (踩过的坑).
 # 判据: CodeDirectory flags 里含 adhoc / 或 Signature=adhoc; 真证书则有 Authority=Developer ID.
-if codesign -dv --verbose=2 "$INSTALL_APP" 2>&1 | grep -qi "adhoc"; then
+# SIGN_IDENTITY 非空: 用固定自签证书重签 (csreq 基于证书身份而非 cdhash, 重新部署 .app
+#   后辅助功能/TCC 授权不失效; 证书由 scripts_mac/deploy/setup_signing.sh 在本机创建)。
+#   去 hardened-runtime (Sequoia 上 ad-hoc 路径一致行为), 仅换签名身份。
+if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+    # 无头 ssh 部署: login keychain 在该 security session 默认锁定, codesign 访问私钥
+    # 会 errSecInternalComponent。提供 SIGN_KEYCHAIN_PW 则先解锁 (本地 GUI 部署无需)。
+    if [[ -n "${SIGN_KEYCHAIN_PW:-}" ]]; then
+        security unlock-keychain -p "$SIGN_KEYCHAIN_PW" "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null \
+            && info "已解锁 login keychain (供 codesign)" || info "解锁 login keychain 失败"
+    fi
+    info "固定证书重签 .app: \"$SIGN_IDENTITY\" (授权随 cdhash 变化保持)"
+    codesign --force --sign "$SIGN_IDENTITY" --deep "$INSTALL_APP" 2>&1 | sed 's/^/    /' || true
+elif codesign -dv --verbose=2 "$INSTALL_APP" 2>&1 | grep -qi "adhoc"; then
     info "ad-hoc 产物: 去 hardened-runtime 重签 (codesign --force --sign -)"
     codesign --force --sign - --deep "$INSTALL_APP" 2>&1 | sed 's/^/    /' || true
 else

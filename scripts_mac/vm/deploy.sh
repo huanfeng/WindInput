@@ -86,17 +86,20 @@ bold "目标: $SSH_TARGET"
 
 # -------- 可选: 宿主机构建 --------
 if [[ $DO_BUILD -eq 1 && $DO_UNINSTALL -eq 0 ]]; then
+    # host 构建一律 ad-hoc 签名: 固定证书 (SIGN_IDENTITY) 只装在目标 VM, host 上没有,
+    # 传给 build 脚本会 "no identity found"。证书重签在 VM 端 install_*.sh 完成 (见下方
+    # SSH 调用透传 SIGN_IDENTITY/SIGN_KEYCHAIN_PW)。故 build 阶段显式清空 SIGN_IDENTITY。
     if [[ $DO_SERVICE -eq 1 ]]; then
         bold "宿主机构建 Go 服务"
-        "$REPO_DIR/scripts_mac/build/build.sh" service ${BUILD_FLAG[@]+"${BUILD_FLAG[@]}"} 2>&1 | tail -5 | sed 's/^/  /'
+        SIGN_IDENTITY= "$REPO_DIR/scripts_mac/build/build.sh" service ${BUILD_FLAG[@]+"${BUILD_FLAG[@]}"} 2>&1 | tail -5 | sed 's/^/  /'
     fi
     if [[ $DO_APP -eq 1 ]]; then
         bold "宿主机构建 $APP_NAME.app"
-        "$REPO_DIR/scripts_mac/build/app.sh" ${BUILD_FLAG[@]+"${BUILD_FLAG[@]}"} 2>&1 | tail -8 | sed 's/^/  /'
+        SIGN_IDENTITY= "$REPO_DIR/scripts_mac/build/app.sh" ${BUILD_FLAG[@]+"${BUILD_FLAG[@]}"} 2>&1 | tail -8 | sed 's/^/  /'
     fi
     if [[ $DO_SETTING -eq 1 ]]; then
         bold "宿主机构建 $SETTING_APP_NAME.app (Wails)"
-        "$REPO_DIR/scripts_mac/build/setting.sh" $INSTALL_FLAG 2>&1 | tail -6 | sed 's/^/  /'
+        SIGN_IDENTITY= "$REPO_DIR/scripts_mac/build/setting.sh" $INSTALL_FLAG 2>&1 | tail -6 | sed 's/^/  /'
     fi
 fi
 
@@ -131,7 +134,7 @@ SSH "mkdir -p $STAGE_DIR/scripts_mac/deploy $STAGE_DIR/scripts_mac/test $STAGE_D
 
 bold "3. rsync 脚本"
 rsync -az "$REPO_DIR/scripts_mac/deploy/install_service.sh" "$REPO_DIR/scripts_mac/deploy/install_app.sh" \
-    "$REPO_DIR/scripts_mac/deploy/install_setting.sh" \
+    "$REPO_DIR/scripts_mac/deploy/install_setting.sh" "$REPO_DIR/scripts_mac/deploy/setup_signing.sh" \
     "$SSH_TARGET:$STAGE_DIR/scripts_mac/deploy/"
 rsync -az "$REPO_DIR/scripts_mac/test/list_input_sources.swift" "$SSH_TARGET:$STAGE_DIR/scripts_mac/test/"
 
@@ -213,13 +216,13 @@ fi
 # -------- 远程安装 --------
 if [[ $DO_SERVICE -eq 1 ]]; then
     bold "6. 远程装 Go 服务 (LaunchAgent, 普通用户)"
-    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_service.sh && $STAGE_DIR/scripts_mac/deploy/install_service.sh --from $STAGE_DIR/build $INSTALL_FLAG"
+    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_service.sh && SIGN_IDENTITY='${SIGN_IDENTITY:-}' SIGN_KEYCHAIN_PW='${SIGN_KEYCHAIN_PW:-}' $STAGE_DIR/scripts_mac/deploy/install_service.sh --from $STAGE_DIR/build $INSTALL_FLAG"
 fi
 
 if [[ $DO_APP -eq 1 ]]; then
     bold "7. 远程装 .app (用户域, 装到 ~/Library/Input Methods/)"
-    # 远端 install_app.sh 会对 ad-hoc 产物原地去 hardened-runtime 重签 (纯 ad-hoc).
-    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_app.sh && $STAGE_DIR/scripts_mac/deploy/install_app.sh $INSTALL_FLAG"
+    # 远端 install_app.sh: 设了 SIGN_IDENTITY 则用固定证书重签 (授权持久), 否则 ad-hoc 去 runtime.
+    SSH "chmod +x $STAGE_DIR/scripts_mac/deploy/install_app.sh && SIGN_IDENTITY='${SIGN_IDENTITY:-}' SIGN_KEYCHAIN_PW='${SIGN_KEYCHAIN_PW:-}' $STAGE_DIR/scripts_mac/deploy/install_app.sh $INSTALL_FLAG"
 fi
 
 if [[ $DO_SETTING -eq 1 ]]; then
