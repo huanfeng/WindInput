@@ -1,7 +1,6 @@
 package proc
 
 import (
-	"errors"
 	"runtime"
 	"testing"
 )
@@ -77,20 +76,8 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 }
 
-// TestShellEx_TermUnsupported_Darwin 验证 macOS 上 term flag 返回
-// unsupported 错误 (弹出可见终端窗口暂未实现), 而无 flag 时静默执行成功。
-func TestShellEx_TermUnsupported_Darwin(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("darwin-specific term behaviour")
-	}
-	if err := ShellEx("exit 0", []string{"term"}); !errors.Is(err, ErrUnsupportedPlatform) {
-		t.Errorf("ShellEx term on darwin: want ErrUnsupportedPlatform, got %v", err)
-	}
-	// 空白 flag 应被跳过, 等同无 flag, 静默执行成功。
-	if err := ShellEx("exit 0", []string{"", "  "}); err != nil {
-		t.Errorf("ShellEx blank flags on darwin should succeed, got %v", err)
-	}
-}
+// 注: macOS 上 term flag 返回 ErrUnsupportedPlatform 的验证见 proc_darwin_test.go
+// (该符号 Windows 不存在, 不能放在无 build 约束的共享测试文件)。
 
 // TestShellEx_FlagValidation 验证 flag 白名单解析: 已知 flag 通过, 未知报错。
 // 不真正启动 powershell, 只验证 ShellEx 入口的 flag 校验路径。
