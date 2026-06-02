@@ -17,6 +17,18 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
+// buildModeLabelView 构建模式徽标 View（临时拼音等）：字体 + margin/padding 全取自 views.mode_label。
+// padding 提供与输入编码/候选的分隔（默认左右 8，主题可调），消除重叠。
+func (r *Renderer) buildModeLabelView(scale float64) *View {
+	m := &r.resolvedViews.ModeLabel
+	return &View{
+		Text:      r.config.ModeLabel,
+		TextStyle: TextStyle{FontSize: m.FontSize, Weight: m.FontWeight, Family: m.FontFamily, Color: m.TextColor},
+		Margin:    Edges{Top: m.MarginTop.Scaled(scale), Right: m.MarginRight.Scaled(scale), Bottom: m.MarginBottom.Scaled(scale), Left: m.MarginLeft.Scaled(scale)},
+		Padding:   Edges{Top: m.PadTop.Scaled(scale), Right: m.PadRight.Scaled(scale), Bottom: m.PadBottom.Scaled(scale), Left: m.PadLeft.Scaled(scale)},
+	}
+}
+
 // buildEmbeddedPreedit 构建内嵌预编辑（PreeditEmbedded 模式）：编码 + ModeLabel 内嵌到候选行首，
 // 与首个候选间留 16*scale 分隔；含内嵌光标。无内容返回 nil。
 func (r *Renderer) buildEmbeddedPreedit(input string, cursorPos, rowH int, scale float64, sc func(float64) int) *View {
@@ -30,12 +42,7 @@ func (r *Renderer) buildEmbeddedPreedit(input string, cursorPos, rowH int, scale
 		children = append(children, &View{Text: input, TextStyle: TextStyle{FontSize: pbFS, Weight: r.resolvedViews.PreeditBar.FontWeight, Family: r.resolvedViews.PreeditBar.FontFamily, Color: r.resolvedViews.PreeditBar.TextColor}})
 	}
 	if cfg.ModeLabel != "" {
-		mlv := &r.resolvedViews.ModeLabel
-		ml := &View{Text: cfg.ModeLabel, TextStyle: TextStyle{FontSize: mlv.FontSize, Weight: mlv.FontWeight, Family: mlv.FontFamily, Color: mlv.TextColor}}
-		if len(children) > 0 {
-			ml.Margin = Edges{Left: sc(4 * scale)}
-		}
-		children = append(children, ml)
+		children = append(children, r.buildModeLabelView(scale)) // margin/padding 取自 views.mode_label
 	}
 	inline := &View{
 		Layout: LayoutRow, CrossAlign: AlignCenter, FixedH: rowH,
@@ -68,8 +75,8 @@ func (r *Renderer) buildPreeditBand(input string, cursorPos, inputH int, scale f
 	}}
 	if cfg.ModeLabel != "" {
 		children = append(children,
-			&View{Grow: true}, // 弹性占位把标签推到右侧
-			&View{Text: cfg.ModeLabel, TextStyle: TextStyle{FontSize: r.resolvedViews.ModeLabel.FontSize, Weight: r.resolvedViews.ModeLabel.FontWeight, Family: r.resolvedViews.ModeLabel.FontFamily, Color: r.resolvedViews.ModeLabel.TextColor}},
+			&View{Grow: true},           // 弹性占位把标签推到右侧
+			r.buildModeLabelView(scale), // margin/padding 取自 views.mode_label（与输入编码分隔）
 		)
 	}
 	band := &View{

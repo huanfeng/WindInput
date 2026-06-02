@@ -327,8 +327,8 @@ func defaultViews() Views {
 		Text:       ViewNode{Margin: ViewEdges{Left: dimp(4)}},                                                       // index→text 间距（text 字号=base，偏移 0）
 		Comment:    ViewNode{FontSize: intp(-4), Margin: ViewEdges{Left: dimp(8)}},                                   // 注释字号默认 base-4；text→comment 间距
 		AccentBar:  ViewNode{},
-		FooterBar:  ViewNode{FontSize: intp(-4)}, // 翻页/页码字号默认 base-4
-		ModeLabel:  ViewNode{FontSize: intp(-4)}, // 模式徽标字号默认 base-4；颜色默认 ${comment}
+		FooterBar:  ViewNode{FontSize: intp(-4)},                                                    // 翻页/页码字号默认 base-4
+		ModeLabel:  ViewNode{FontSize: intp(-4), Padding: ViewEdges{Left: dimp(8), Right: dimp(8)}}, // 模式徽标字号默认 base-4、左右 padding 8（与输入编码分隔）；颜色默认 ${comment}
 		Metrics: &ViewMetrics{
 			ItemSpacing:  dimp(12),
 			BandGap:      dimp(2),
