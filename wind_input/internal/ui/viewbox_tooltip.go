@@ -2,7 +2,7 @@ package ui
 
 // viewbox_tooltip.go — Tooltip（候选编码提示）的 View 树构建与颜色解析（P4-B）。
 // 复用包级 Layout/PaintTree + newSharedDrawContext；颜色经 token 解析自 views.tooltip，
-// 默认映射 ResolvedTheme.Tooltip。多行 / \t 列对齐 / 行截断 / 行数上限逻辑在 build 内预处理。
+// 默认映射 Palette.Tooltip。多行 / \t 列对齐 / 行截断 / 行数上限逻辑在 build 内预处理。
 
 import (
 	"image/color"
@@ -11,31 +11,30 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// resolveTooltipColors 计算 Tooltip 颜色：views.tooltip token > ResolvedTheme.Tooltip > 默认。
+// resolveTooltipColors 计算 Tooltip 颜色：views.tooltip token > Palette.Tooltip > 默认。
 func (w *TooltipWindow) resolveTooltipColors() theme.ResolvedTooltipViews {
 	bg := color.Color(color.RGBA{60, 60, 60, 240})
 	text := color.Color(color.RGBA{255, 255, 255, 255})
-	if w.resolvedTheme != nil {
-		bg = w.resolvedTheme.Tooltip.BackgroundColor
-		text = w.resolvedTheme.Tooltip.TextColor
+	rv := w.resolvedV25
+	if rv == nil {
+		return theme.ResolvedTooltipViews{BgColor: bg, TextColor: text}
 	}
-	if w.themeViews != nil && w.themeViews.Tooltip != nil {
+	bg = rv.Palette.Tooltip.Background
+	text = rv.Palette.Tooltip.Text
+	if rv.Views != nil && rv.Views.Tooltip != nil {
 		res := func(name string) color.Color {
-			if w.resolvedTheme == nil {
-				return nil
-			}
 			switch name {
 			case "background":
-				return w.resolvedTheme.Tooltip.BackgroundColor
+				return rv.Palette.Tooltip.Background
 			case "text":
-				return w.resolvedTheme.Tooltip.TextColor
+				return rv.Palette.Tooltip.Text
 			}
 			return nil
 		}
-		if c := resolveTokenColor(w.themeViews.Tooltip.Background.Color, res); c != nil {
+		if c := resolveTokenColor(rv.Views.Tooltip.Background.Color, res); c != nil {
 			bg = c
 		}
-		if c := resolveTokenColor(w.themeViews.Tooltip.Color, res); c != nil {
+		if c := resolveTokenColor(rv.Views.Tooltip.Color, res); c != nil {
 			text = c
 		}
 	}

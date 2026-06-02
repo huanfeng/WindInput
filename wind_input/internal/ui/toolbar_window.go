@@ -306,12 +306,12 @@ func (w *ToolbarWindow) SetTextRenderMode(mode TextRenderMode) {
 	}
 }
 
-func (w *ToolbarWindow) SetTheme(resolved *theme.ResolvedTheme) {
+func (w *ToolbarWindow) SetTheme(rv *theme.ResolvedV25) {
 	if w.renderer != nil {
-		w.renderer.SetTheme(resolved)
+		w.renderer.SetTheme(rv)
 	}
 	if w.popupMenu != nil {
-		w.popupMenu.SetTheme(resolved)
+		w.popupMenu.SetTheme(rv)
 	}
 	// Re-render with new theme
 	w.Render()

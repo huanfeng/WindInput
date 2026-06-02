@@ -293,7 +293,6 @@ func (m *PopupMenu) showSubmenu(index int) {
 		return
 	}
 	children := m.items[index].Children
-	resolvedTheme := m.resolvedTheme
 	callback := m.callback
 	menuX := m.x
 	menuWidth := m.width
@@ -328,9 +327,7 @@ func (m *PopupMenu) showSubmenu(index int) {
 	// Create submenu sharing parent's rendering resources
 	sub := newPopupMenuShared(m)
 	sub.parentMenu = m
-	if resolvedTheme != nil {
-		sub.resolvedTheme = resolvedTheme
-	}
+	// 主题（resolvedV25）已由 newPopupMenuShared 从父菜单复制
 	if err := sub.Create(); err != nil {
 		return
 	}

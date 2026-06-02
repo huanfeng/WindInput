@@ -9,31 +9,31 @@ import (
 
 // TestResolveToolbarViews_BaseAndMode base 映射 + mode 色映射 + settings。
 func TestResolveToolbarViews_BaseAndMode(t *testing.T) {
-	tb := theme.ResolvedToolbarColors{
-		BackgroundColor:     color.RGBA{255, 255, 255, 255},
-		BorderColor:         color.RGBA{199, 209, 224, 255},
-		GripColor:           color.RGBA{153, 173, 199, 179},
-		ModeChineseBgColor:  color.RGBA{51, 154, 245, 255},
-		ModeEnglishBgColor:  color.RGBA{115, 127, 148, 255},
-		ModeTextColor:       color.RGBA{255, 255, 255, 255},
-		FullWidthOffBgColor: color.RGBA{230, 234, 239, 255},
-		FullWidthOffColor:   color.RGBA{89, 102, 122, 255},
-		SettingsBgColor:     color.RGBA{230, 234, 239, 255},
-		SettingsIconColor:   color.RGBA{122, 102, 184, 255},
-		SettingsHoleColor:   color.RGBA{230, 234, 239, 255},
+	tb := theme.ResolvedToolbarPalette{
+		Background:       color.RGBA{255, 255, 255, 255},
+		Border:           color.RGBA{199, 209, 224, 255},
+		Grip:             color.RGBA{153, 173, 199, 179},
+		ModeChineseBg:    color.RGBA{51, 154, 245, 255},
+		ModeEnglishBg:    color.RGBA{115, 127, 148, 255},
+		ModeText:         color.RGBA{255, 255, 255, 255},
+		FullWidthOffBg:   color.RGBA{230, 234, 239, 255},
+		FullWidthOffText: color.RGBA{89, 102, 122, 255},
+		SettingsBg:       color.RGBA{230, 234, 239, 255},
+		SettingsIcon:     color.RGBA{122, 102, 184, 255},
+		SettingsHole:     color.RGBA{230, 234, 239, 255},
 	}
-	r := &ToolbarRenderer{resolvedTheme: &theme.ResolvedTheme{Toolbar: tb}}
+	r := &ToolbarRenderer{resolvedV25: &theme.ResolvedV25{Palette: theme.ResolvedPalette{Toolbar: tb}}}
 	rtv := r.resolveToolbarViews()
-	if rtv.ButtonBg != tb.FullWidthOffBgColor {
+	if rtv.ButtonBg != color.Color(tb.FullWidthOffBg) {
 		t.Error("button base bg 应=FullWidthOffBg")
 	}
-	if rtv.ButtonText != tb.FullWidthOffColor {
-		t.Error("button base text 应=FullWidthOffColor")
+	if rtv.ButtonText != color.Color(tb.FullWidthOffText) {
+		t.Error("button base text 应=FullWidthOffText")
 	}
-	if rtv.ModeChineseBg != tb.ModeChineseBgColor || rtv.ModeText != tb.ModeTextColor {
+	if rtv.ModeChineseBg != color.Color(tb.ModeChineseBg) || rtv.ModeText != color.Color(tb.ModeText) {
 		t.Error("mode 色映射错误")
 	}
-	if rtv.SettingsIcon != tb.SettingsIconColor {
+	if rtv.SettingsIcon != color.Color(tb.SettingsIcon) {
 		t.Error("settings icon 映射错误")
 	}
 }

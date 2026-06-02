@@ -29,31 +29,33 @@ func TestResolveTokenColor(t *testing.T) {
 	}
 }
 
-// TestResolveStatusColors 验证状态泡颜色优先级：自定义 cfg > views token(ModeIndicator) > 默认。
+// TestResolveStatusColors 验证状态泡颜色优先级：自定义 cfg > views token(Palette.Status) > 默认。
 func TestResolveStatusColors(t *testing.T) {
-	mi := theme.ResolvedModeIndicatorColors{
-		BackgroundColor: color.RGBA{10, 20, 30, 255},
-		TextColor:       color.RGBA{200, 200, 200, 255},
+	mi := theme.ResolvedStatusPalette{
+		Background: color.RGBA{10, 20, 30, 255},
+		Text:       color.RGBA{200, 200, 200, 255},
 	}
-	rt := &theme.ResolvedTheme{ModeIndicator: mi}
-	views := &theme.Views{Status: &theme.ViewNode{
-		Background: theme.ViewFill{Color: "${background}"},
-		Color:      "${text}",
-	}}
-	r := &StatusRenderer{resolvedTheme: rt, themeViews: views}
+	rv := &theme.ResolvedV25{
+		Palette: theme.ResolvedPalette{Status: mi},
+		Views: &theme.Views{Status: &theme.ViewNode{
+			Background: theme.ViewFill{Color: "${background}"},
+			Color:      "${text}",
+		}},
+	}
+	r := &StatusRenderer{resolvedV25: rv}
 
-	// views token → ModeIndicator
+	// views token → Palette.Status
 	rsv := r.resolveStatusColors(StatusWindowConfig{})
-	if rsv.BgColor != mi.BackgroundColor {
-		t.Errorf("bg 应来自 ModeIndicator, got %v", rsv.BgColor)
+	if rsv.BgColor != mi.Background {
+		t.Errorf("bg 应来自 Palette.Status, got %v", rsv.BgColor)
 	}
-	if rsv.TextColor != mi.TextColor {
-		t.Errorf("text 应来自 ModeIndicator, got %v", rsv.TextColor)
+	if rsv.TextColor != mi.Text {
+		t.Errorf("text 应来自 Palette.Status, got %v", rsv.TextColor)
 	}
 
 	// 自定义 cfg 优先
 	rsv2 := r.resolveStatusColors(StatusWindowConfig{BackgroundColor: "#FF0000", TextColor: "#00FF00"})
-	if rsv2.BgColor == mi.BackgroundColor {
+	if rsv2.BgColor == mi.Background {
 		t.Error("自定义 bg 应覆盖 views token")
 	}
 }

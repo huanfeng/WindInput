@@ -16,10 +16,9 @@ import (
 type StatusRenderer struct {
 	TextBackendManager
 
-	mu            sync.Mutex
-	resolvedTheme *theme.ResolvedTheme
-	themeViews    *theme.Views
-	logger        *slog.Logger
+	mu          sync.Mutex
+	resolvedV25 *theme.ResolvedV25
+	logger      *slog.Logger
 }
 
 // NewStatusRenderer 创建状态渲染器，默认使用 DirectWrite 渲染（与系统默认一致，反锯齿效果更好）
@@ -146,15 +145,10 @@ func hexDigit(c byte) (uint8, bool) {
 }
 
 // SetTheme 设置主题
-func (r *StatusRenderer) SetTheme(resolved *theme.ResolvedTheme) {
+func (r *StatusRenderer) SetTheme(rv *theme.ResolvedV25) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.resolvedTheme = resolved
-	if resolved != nil {
-		r.themeViews = resolved.Views
-	} else {
-		r.themeViews = nil
-	}
+	r.resolvedV25 = rv
 }
 
 // Close 释放渲染资源

@@ -231,7 +231,7 @@ func (a *App) GetAvailableThemes() ([]ThemeInfo, error) {
 			if t != nil {
 				info.Author = t.Meta.Author
 				info.Version = t.Meta.Version
-				info.HasVariants = t.HasVariants()
+				info.HasVariants = t.HasV25Schema() // v2.5 主题的 palette 恒含 light/dark 变体
 				if t.Meta.Name != "" {
 					info.DisplayName = t.Meta.Name
 				}
@@ -251,8 +251,8 @@ func (a *App) GetAvailableThemes() ([]ThemeInfo, error) {
 // GetThemePreview 获取主题预览数据（颜色配置）
 // themeStyle 参数：传入 "system"/"light"/"dark" 以选择对应变体预览
 //
-// v2.5 支持：通过 ResolvedTheme 统一消费 v2/v2.5 两种主题；v2.5 主题的
-// layout/palette 派生与背景图（如有）均会在此正确解析。
+// v2.5 主题经 ResolvedV25 统一消费；layout/palette 派生与背景图（如有）
+// 均会在此正确解析。
 func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]interface{}, error) {
 	// 用轻量 Manager 避免 NewManager 的 default 主题双重 resolve
 	themeManager := theme.NewLightweightManager(nil)
@@ -277,14 +277,19 @@ func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]i
 	}
 
 	t := themeManager.GetCurrentTheme()
-	resolved := themeManager.GetResolvedTheme()
-	if t == nil || resolved == nil {
-		return nil, fmt.Errorf("theme not found")
+	rv := themeManager.GetResolvedV25()
+	if t == nil || rv == nil {
+		return nil, fmt.Errorf("theme not found or not v2.5")
 	}
 
-	// 把 color.Color 转为 #RRGGBBAA 字符串供前端消费
-	cwc := resolved.CandidateWindow
-	tbc := resolved.Toolbar
+	// 把 color.Color 转为 #RRGGBBAA 字符串供前端消费（P5：直接读 ResolvedV25.Palette/Layout）
+	cwc := rv.Palette.CandidateWindow
+	tbc := rv.Palette.Toolbar
+	idx := rv.Layout.CandidateWindow.CandidateList.Index
+	indexStyle := "text"
+	if idx.Circle {
+		indexStyle = "circle"
+	}
 
 	preview := map[string]interface{}{
 		"meta": map[string]string{
@@ -293,35 +298,35 @@ func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]i
 			"author":  t.Meta.Author,
 		},
 		"candidate_window": map[string]string{
-			"background_color":  theme.ColorToHex(cwc.BackgroundColor),
-			"border_color":      theme.ColorToHex(cwc.BorderColor),
-			"text_color":        theme.ColorToHex(cwc.TextColor),
-			"index_color":       theme.ColorToHex(cwc.IndexColor),
-			"index_bg_color":    theme.ColorToHex(cwc.IndexBgColor),
-			"hover_bg_color":    theme.ColorToHex(cwc.HoverBgColor),
-			"selected_bg_color": theme.ColorToHex(cwc.SelectedBgColor),
-			"input_bg_color":    theme.ColorToHex(cwc.InputBgColor),
-			"input_text_color":  theme.ColorToHex(cwc.InputTextColor),
-			"comment_color":     theme.ColorToHex(cwc.CommentColor),
-			"shadow_color":      theme.ColorToHex(cwc.ShadowColor),
+			"background_color":  theme.ColorToHex(cwc.Background),
+			"border_color":      theme.ColorToHex(cwc.Border),
+			"text_color":        theme.ColorToHex(cwc.Text),
+			"index_color":       theme.ColorToHex(cwc.IndexText),
+			"index_bg_color":    theme.ColorToHex(cwc.IndexBg),
+			"hover_bg_color":    theme.ColorToHex(cwc.HoverBg),
+			"selected_bg_color": theme.ColorToHex(cwc.SelectedBg),
+			"input_bg_color":    theme.ColorToHex(cwc.PreeditBg),
+			"input_text_color":  theme.ColorToHex(cwc.PreeditText),
+			"comment_color":     theme.ColorToHex(cwc.Comment),
+			"shadow_color":      theme.ColorToHex(rv.Palette.Shadow),
 		},
 		"toolbar": map[string]string{
-			"background_color":        theme.ColorToHex(tbc.BackgroundColor),
-			"border_color":            theme.ColorToHex(tbc.BorderColor),
-			"grip_color":              theme.ColorToHex(tbc.GripColor),
-			"mode_chinese_bg_color":   theme.ColorToHex(tbc.ModeChineseBgColor),
-			"mode_english_bg_color":   theme.ColorToHex(tbc.ModeEnglishBgColor),
-			"mode_text_color":         theme.ColorToHex(tbc.ModeTextColor),
-			"full_width_off_bg_color": theme.ColorToHex(tbc.FullWidthOffBgColor),
-			"full_width_off_color":    theme.ColorToHex(tbc.FullWidthOffColor),
-			"punct_english_bg_color":  theme.ColorToHex(tbc.PunctEnglishBgColor),
-			"punct_english_color":     theme.ColorToHex(tbc.PunctEnglishColor),
-			"settings_bg_color":       theme.ColorToHex(tbc.SettingsBgColor),
-			"settings_icon_color":     theme.ColorToHex(tbc.SettingsIconColor),
+			"background_color":        theme.ColorToHex(tbc.Background),
+			"border_color":            theme.ColorToHex(tbc.Border),
+			"grip_color":              theme.ColorToHex(tbc.Grip),
+			"mode_chinese_bg_color":   theme.ColorToHex(tbc.ModeChineseBg),
+			"mode_english_bg_color":   theme.ColorToHex(tbc.ModeEnglishBg),
+			"mode_text_color":         theme.ColorToHex(tbc.ModeText),
+			"full_width_off_bg_color": theme.ColorToHex(tbc.FullWidthOffBg),
+			"full_width_off_color":    theme.ColorToHex(tbc.FullWidthOffText),
+			"punct_english_bg_color":  theme.ColorToHex(tbc.PunctEnglishBg),
+			"punct_english_color":     theme.ColorToHex(tbc.PunctEnglishText),
+			"settings_bg_color":       theme.ColorToHex(tbc.SettingsBg),
+			"settings_icon_color":     theme.ColorToHex(tbc.SettingsIcon),
 		},
 		"style": map[string]interface{}{
-			"index_style":  resolved.Style.IndexStyle,
-			"index_labels": resolved.Style.IndexLabels,
+			"index_style":  indexStyle,
+			"index_labels": theme.BuildIndexLabelsFromSlots(idx.Labels),
 			"is_v25":       t.HasV25Schema(),
 		},
 		"is_dark": map[string]bool{
@@ -329,11 +334,11 @@ func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]i
 		},
 	}
 	// v2.5 背景图（仅暴露 mode / opacity / 是否有图，不暴露内部指针）
-	if resolved.Background != nil {
+	if rv.Palette.Background != nil {
 		preview["background"] = map[string]interface{}{
-			"mode":      resolved.Background.Mode,
-			"opacity":   resolved.Background.Opacity,
-			"has_image": resolved.Background.Image != nil,
+			"mode":      rv.Palette.Background.Mode,
+			"opacity":   rv.Palette.Background.Opacity,
+			"has_image": rv.Palette.Background.ImagePath != "",
 		}
 	}
 

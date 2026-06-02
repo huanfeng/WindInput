@@ -35,8 +35,7 @@ type ToastWindow struct {
 
 	hideVersion atomic.Uint64 // 取消待执行 Hide 用
 
-	renderer      *ToastRenderer
-	resolvedTheme *theme.ResolvedTheme
+	renderer *ToastRenderer
 
 	onLeftClick  func()         // 默认为 Hide；外部可覆盖
 	onRightClick func(x, y int) // 预留：未来用于弹"复制 / 关闭"右键菜单
@@ -62,13 +61,10 @@ func (w *ToastWindow) SetTextRenderMode(mode TextRenderMode) {
 	}
 }
 
-// SetTheme 同步主题。
-func (w *ToastWindow) SetTheme(resolved *theme.ResolvedTheme) {
-	w.mu.Lock()
-	w.resolvedTheme = resolved
-	w.mu.Unlock()
+// SetTheme 同步主题（P5：吃 ResolvedV25，转发给 renderer，颜色源 Palette.Toast）。
+func (w *ToastWindow) SetTheme(rv *theme.ResolvedV25) {
 	if w.renderer != nil {
-		w.renderer.SetTheme(resolved)
+		w.renderer.SetTheme(rv)
 	}
 }
 

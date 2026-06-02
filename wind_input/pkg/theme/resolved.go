@@ -3,7 +3,7 @@ package theme
 import "image/color"
 
 // ResolvedV25 是 v2.5 schema 解析后的最终形态，所有引用已展开、所有缺省字段已派生填充。
-// 与 v2 的 ResolvedTheme 并列存在；P2 阶段 renderer 切换消费 ResolvedV25。
+// P5 起为渲染层唯一解析结果来源（adapter/ResolvedTheme/v2 已退役）。
 type ResolvedV25 struct {
 	Meta    ThemeMeta
 	Layout  ResolvedLayout

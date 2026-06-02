@@ -21,7 +21,7 @@ func builtinThemesDir(t *testing.T) string {
 }
 
 // TestBuiltinDefaultTheme 加载实际 build/data/themes/default 主题，
-// 确认 v2.5 路径产出合理的 ResolvedTheme（颜色非零、index style 模板生效）
+// 确认 v2.5 路径产出合理的 ResolvedV25（颜色非零、index style 模板生效）
 func TestBuiltinDefaultTheme(t *testing.T) {
 	dir := builtinThemesDir(t)
 	m := &Manager{themeDirs: []string{dir}}
@@ -29,17 +29,17 @@ func TestBuiltinDefaultTheme(t *testing.T) {
 	if err := m.LoadTheme("default"); err != nil {
 		t.Fatalf("LoadTheme default: %v (themesDir=%s)", err, dir)
 	}
-	r := m.GetResolvedTheme()
+	r := m.GetResolvedV25()
 	if r == nil {
 		t.Fatal("resolved nil")
 	}
-	// 默认主题用 circle index style → IndexStyle="circle"
-	if r.Style.IndexStyle != "circle" {
-		t.Errorf("default IndexStyle want circle, got %q", r.Style.IndexStyle)
+	// 默认主题用 circle index style
+	if !r.Layout.CandidateWindow.CandidateList.Index.Circle {
+		t.Errorf("default index want circle")
 	}
-	// primary #4285F4 应反映在 IndexBgColor
-	if ColorToHexRGB(r.CandidateWindow.IndexBgColor) != "#4285F4" {
-		t.Errorf("default IndexBgColor want #4285F4, got %s", ColorToHexRGB(r.CandidateWindow.IndexBgColor))
+	// primary #4285F4 应反映在 IndexBg
+	if ColorToHexRGB(r.Palette.CandidateWindow.IndexBg) != "#4285F4" {
+		t.Errorf("default IndexBg want #4285F4, got %s", ColorToHexRGB(r.Palette.CandidateWindow.IndexBg))
 	}
 }
 
@@ -51,22 +51,23 @@ func TestBuiltinMsimeTheme(t *testing.T) {
 	if err := m.LoadTheme("msime"); err != nil {
 		t.Fatalf("LoadTheme msime: %v", err)
 	}
-	r := m.GetResolvedTheme()
-	if r.Style.IndexStyle != "text" {
-		t.Errorf("msime IndexStyle want text, got %q", r.Style.IndexStyle)
+	r := m.GetResolvedV25()
+	idx := r.Layout.CandidateWindow.CandidateList.Index
+	if idx.Circle {
+		t.Errorf("msime index want text (circle off)")
 	}
-	if r.Style.IndexLabels != "1/2/3/4/5/6/7/8/9/0" {
-		t.Errorf("msime IndexLabels want digit template, got %q", r.Style.IndexLabels)
+	if got := BuildIndexLabelsFromSlots(idx.Labels); got != "1/2/3/4/5/6/7/8/9/0" {
+		t.Errorf("msime IndexLabels want digit template, got %q", got)
 	}
-	if ColorToHexRGB(r.CandidateWindow.IndexBgColor) != "#0078D4" {
-		t.Errorf("msime IndexBgColor want #0078D4, got %s", ColorToHexRGB(r.CandidateWindow.IndexBgColor))
+	if ColorToHexRGB(r.Palette.CandidateWindow.IndexBg) != "#0078D4" {
+		t.Errorf("msime IndexBg want #0078D4, got %s", ColorToHexRGB(r.Palette.CandidateWindow.IndexBg))
 	}
-	// msime 应启用 accent bar（v2 视觉中选中项左侧蓝色条）
-	if !r.Style.HasAccentBar {
-		t.Errorf("msime HasAccentBar want true")
+	// msime 应启用 accent bar（选中项左侧蓝色条）
+	if !r.Layout.CandidateWindow.CandidateList.AccentBar.Enabled {
+		t.Errorf("msime AccentBar.Enabled want true")
 	}
-	if ColorToHexRGB(r.Style.AccentBarColor) != "#0078D4" {
-		t.Errorf("msime AccentBarColor want #0078D4, got %s", ColorToHexRGB(r.Style.AccentBarColor))
+	if ColorToHexRGB(r.Palette.CandidateWindow.AccentBar) != "#0078D4" {
+		t.Errorf("msime AccentBar want #0078D4, got %s", ColorToHexRGB(r.Palette.CandidateWindow.AccentBar))
 	}
 }
 
@@ -103,8 +104,8 @@ func TestBuiltinDarkMode(t *testing.T) {
 	if err := m.LoadTheme("default"); err != nil {
 		t.Fatalf("LoadTheme default: %v", err)
 	}
-	r := m.GetResolvedTheme()
-	if ColorToHexRGB(r.CandidateWindow.BackgroundColor) != "#2D2D2D" {
-		t.Errorf("default dark bg want #2D2D2D, got %s", ColorToHexRGB(r.CandidateWindow.BackgroundColor))
+	r := m.GetResolvedV25()
+	if ColorToHexRGB(r.Palette.CandidateWindow.Background) != "#2D2D2D" {
+		t.Errorf("default dark bg want #2D2D2D, got %s", ColorToHexRGB(r.Palette.CandidateWindow.Background))
 	}
 }

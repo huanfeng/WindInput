@@ -1,5 +1,23 @@
 package theme
 
+import "strings"
+
+// BuildIndexLabelsFromSlots 把序号槽位 []string 拼成 "/" 分隔串（候选窗 IndexLabels）。
+// 槽位 0→候选序号 1、…、槽位 9→第 10 个候选；不足 10 或空槽回退默认数字（1..9,0）。
+// 约束：单个标签不应含 '/'（渲染器以 '/' 切分槽位），此处不做转义。
+func BuildIndexLabelsFromSlots(labels []string) string {
+	digits := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"}
+	parts := make([]string, 10)
+	for i := range 10 {
+		if i < len(labels) && labels[i] != "" {
+			parts[i] = labels[i]
+		} else {
+			parts[i] = digits[i]
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
 // LayoutSchema 描述主题的尺寸与布局，与 v2.5 spec §四 的 yaml 字段 1:1 对应。
 // 不含任何颜色；颜色由 PaletteSchema 描述。
 //

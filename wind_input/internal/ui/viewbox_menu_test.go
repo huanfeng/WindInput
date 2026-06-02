@@ -7,21 +7,21 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// TestResolveMenuColors 7 色映射 ResolvedTheme.PopupMenu。
+// TestResolveMenuColors 7 色映射 Palette.PopupMenu。
 func TestResolveMenuColors(t *testing.T) {
-	pm := theme.ResolvedPopupMenuColors{
-		BackgroundColor: color.RGBA{255, 255, 255, 255},
-		BorderColor:     color.RGBA{199, 199, 199, 255},
-		TextColor:       color.RGBA{0, 0, 0, 255},
-		DisabledColor:   color.RGBA{161, 161, 161, 255},
-		HoverBgColor:    color.RGBA{0, 120, 212, 255},
-		HoverTextColor:  color.RGBA{255, 255, 255, 255},
-		SeparatorColor:  color.RGBA{219, 219, 219, 255},
+	pm := theme.ResolvedPopupMenuPalette{
+		Background: color.RGBA{255, 255, 255, 255},
+		Border:     color.RGBA{199, 199, 199, 255},
+		Text:       color.RGBA{0, 0, 0, 255},
+		Disabled:   color.RGBA{161, 161, 161, 255},
+		HoverBg:    color.RGBA{0, 120, 212, 255},
+		HoverText:  color.RGBA{255, 255, 255, 255},
+		Separator:  color.RGBA{219, 219, 219, 255},
 	}
-	m := &PopupMenu{resolvedTheme: &theme.ResolvedTheme{PopupMenu: pm}}
+	m := &PopupMenu{resolvedV25: &theme.ResolvedV25{Palette: theme.ResolvedPalette{PopupMenu: pm}}}
 	rmv := m.resolveMenuColors()
-	if rmv.BgColor != pm.BackgroundColor || rmv.HoverBgColor != pm.HoverBgColor ||
-		rmv.DisabledColor != pm.DisabledColor || rmv.SeparatorColor != pm.SeparatorColor {
+	if rmv.BgColor != color.Color(pm.Background) || rmv.HoverBgColor != color.Color(pm.HoverBg) ||
+		rmv.DisabledColor != color.Color(pm.Disabled) || rmv.SeparatorColor != color.Color(pm.Separator) {
 		t.Errorf("menu 7 色映射错误: %+v", rmv)
 	}
 }

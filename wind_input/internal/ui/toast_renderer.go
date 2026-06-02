@@ -20,9 +20,9 @@ import (
 type ToastRenderer struct {
 	TextBackendManager
 
-	mu            sync.Mutex
-	resolvedTheme *theme.ResolvedTheme
-	logger        *slog.Logger
+	mu          sync.Mutex
+	resolvedV25 *theme.ResolvedV25
+	logger      *slog.Logger
 }
 
 // NewToastRenderer 创建 toast 渲染器。默认 DirectWrite, 与项目主配置默认 FontEngine 一致;
@@ -38,10 +38,10 @@ func NewToastRenderer(logger *slog.Logger) *ToastRenderer {
 }
 
 // SetTheme 注入解析后的主题，用于颜色取值。
-func (r *ToastRenderer) SetTheme(resolved *theme.ResolvedTheme) {
+func (r *ToastRenderer) SetTheme(rv *theme.ResolvedV25) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.resolvedTheme = resolved
+	r.resolvedV25 = rv
 }
 
 // Close 释放渲染资源。
@@ -60,15 +60,15 @@ func levelAccent(level ToastLevel) color.Color {
 // getColors 返回背景 + 正文文本颜色。Toast 一律不透明（与系统通知一致，避免重要信息看不清）。
 func (r *ToastRenderer) getColors() (bg, text color.Color) {
 	r.mu.Lock()
-	resolved := r.resolvedTheme
+	rv := r.resolvedV25
 	r.mu.Unlock()
 
 	bg = color.RGBA{R: 0x2B, G: 0x2B, B: 0x2B, A: 0xFF}
 	text = color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
-	if resolved != nil {
-		// Tooltip 调色板与 toast 语义最接近：暗背景 + 浅文本。
-		bg = forceAlphaOpaque(resolved.Tooltip.BackgroundColor)
-		text = resolved.Tooltip.TextColor
+	if rv != nil {
+		// P5-6：toast 读自身 Palette.Toast（语义修正；与 Status/Tooltip 同为深灰底白字，forceAlphaOpaque 保证不透明）。
+		bg = forceAlphaOpaque(rv.Palette.Toast.Background)
+		text = rv.Palette.Toast.Text
 	}
 	return bg, text
 }

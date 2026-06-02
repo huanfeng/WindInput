@@ -28,8 +28,7 @@ type TooltipWindow struct {
 	trackingMouse bool
 	leaveBlocked  bool // 右键菜单显示期间抑制 WM_MOUSELEAVE 隐藏
 	text          string
-	resolvedTheme *theme.ResolvedTheme
-	themeViews    *theme.Views
+	resolvedV25   *theme.ResolvedV25
 	onRightClick  func(text string, x, y int)
 
 	TextBackendManager
@@ -114,16 +113,11 @@ func (w *TooltipWindow) SuppressLeave(suppress bool) {
 	w.leaveBlocked = suppress
 }
 
-// SetTheme sets the theme for the tooltip window
-func (w *TooltipWindow) SetTheme(resolved *theme.ResolvedTheme) {
+// SetTheme sets the theme for the tooltip window（P5：吃 ResolvedV25，颜色源 Palette.Tooltip）
+func (w *TooltipWindow) SetTheme(rv *theme.ResolvedV25) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.resolvedTheme = resolved
-	if resolved != nil {
-		w.themeViews = resolved.Views
-	} else {
-		w.themeViews = nil
-	}
+	w.resolvedV25 = rv
 }
 
 // Global tooltip window registry

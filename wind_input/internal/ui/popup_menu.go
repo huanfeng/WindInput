@@ -5,7 +5,6 @@ package ui
 
 import (
 	"fmt"
-	"image/color"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -29,9 +28,8 @@ type PopupMenu struct {
 	height     int
 	hoverIndex int // -1 for none
 
-	// Theme
-	resolvedTheme *theme.ResolvedTheme
-	themeViews    *theme.Views
+	// Theme（P5：吃 ResolvedV25，颜色源 Palette.PopupMenu）
+	resolvedV25 *theme.ResolvedV25
 
 	// Submenu support
 	submenu      *PopupMenu // 当前展开的子菜单实例
@@ -296,8 +294,7 @@ func NewPopupMenu() *PopupMenu {
 func newPopupMenuShared(parent *PopupMenu) *PopupMenu {
 	parent.mu.Lock()
 	menuFontSizeOverride := parent.menuFontSizeOverride
-	resolvedTheme := parent.resolvedTheme
-	themeViews := parent.themeViews
+	resolvedV25 := parent.resolvedV25
 	lockedDPI := parent.lockedDPI
 	parent.mu.Unlock()
 
@@ -311,8 +308,7 @@ func newPopupMenuShared(parent *PopupMenu) *PopupMenu {
 		renderMode:           parent.renderMode,
 		fontConfig:           parent.fontConfig,
 		menuFontSizeOverride: menuFontSizeOverride,
-		resolvedTheme:        resolvedTheme,
-		themeViews:           themeViews,
+		resolvedV25:          resolvedV25,
 		lockedDPI:            lockedDPI,
 	}
 }
@@ -544,19 +540,14 @@ func (m *PopupMenu) SetTextRenderMode(mode TextRenderMode) {
 }
 
 // SetTheme sets the theme for the popup menu
-func (m *PopupMenu) SetTheme(resolved *theme.ResolvedTheme) {
+func (m *PopupMenu) SetTheme(rv *theme.ResolvedV25) {
 	m.mu.Lock()
-	m.resolvedTheme = resolved
-	if resolved != nil {
-		m.themeViews = resolved.Views
-	} else {
-		m.themeViews = nil
-	}
+	m.resolvedV25 = rv
 	sub := m.submenu
 	m.mu.Unlock()
 
 	if sub != nil {
-		sub.SetTheme(resolved)
+		sub.SetTheme(rv)
 	}
 }
 
@@ -566,23 +557,6 @@ func (m *PopupMenu) SetFlipRefY(y int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.flipRefY = y
-}
-
-// getPopupMenuColors returns popup menu colors from theme or defaults
-func (m *PopupMenu) getPopupMenuColors() *theme.ResolvedPopupMenuColors {
-	if m.resolvedTheme != nil {
-		return &m.resolvedTheme.PopupMenu
-	}
-	// Return default colors
-	return &theme.ResolvedPopupMenuColors{
-		BackgroundColor: color.RGBA{255, 255, 255, 255},
-		BorderColor:     color.RGBA{199, 199, 199, 255},
-		TextColor:       color.RGBA{0, 0, 0, 255},
-		DisabledColor:   color.RGBA{161, 161, 161, 255},
-		HoverBgColor:    color.RGBA{0, 120, 212, 255},
-		HoverTextColor:  color.RGBA{255, 255, 255, 255},
-		SeparatorColor:  color.RGBA{219, 219, 219, 255},
-	}
 }
 
 // Create creates the popup menu window

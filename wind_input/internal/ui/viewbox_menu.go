@@ -10,34 +10,48 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// resolveMenuColors 解析菜单 7 色：默认从 ResolvedTheme.PopupMenu，views.menu token 覆盖。
+// resolveMenuColors 解析菜单 7 色：默认从 Palette.PopupMenu（P5），views.menu token 覆盖。
 func (m *PopupMenu) resolveMenuColors() theme.ResolvedMenuViews {
-	pm := m.getPopupMenuColors()
+	// 内置默认色（无主题时回退）
 	rmv := theme.ResolvedMenuViews{
-		BgColor: pm.BackgroundColor, BorderColor: pm.BorderColor, TextColor: pm.TextColor,
-		DisabledColor: pm.DisabledColor, HoverBgColor: pm.HoverBgColor,
-		HoverTextColor: pm.HoverTextColor, SeparatorColor: pm.SeparatorColor,
+		BgColor:        color.RGBA{255, 255, 255, 255},
+		BorderColor:    color.RGBA{199, 199, 199, 255},
+		TextColor:      color.RGBA{0, 0, 0, 255},
+		DisabledColor:  color.RGBA{161, 161, 161, 255},
+		HoverBgColor:   color.RGBA{0, 120, 212, 255},
+		HoverTextColor: color.RGBA{255, 255, 255, 255},
+		SeparatorColor: color.RGBA{219, 219, 219, 255},
 	}
-	if m.themeViews == nil || m.themeViews.Menu == nil {
+	rv := m.resolvedV25
+	if rv == nil {
 		return rmv
 	}
-	mv := m.themeViews.Menu
+	pm := rv.Palette.PopupMenu
+	rmv = theme.ResolvedMenuViews{
+		BgColor: pm.Background, BorderColor: pm.Border, TextColor: pm.Text,
+		DisabledColor: pm.Disabled, HoverBgColor: pm.HoverBg,
+		HoverTextColor: pm.HoverText, SeparatorColor: pm.Separator,
+	}
+	if rv.Views == nil || rv.Views.Menu == nil {
+		return rmv
+	}
+	mv := rv.Views.Menu
 	res := func(name string) color.Color {
 		switch name {
 		case "background":
-			return pm.BackgroundColor
+			return pm.Background
 		case "border":
-			return pm.BorderColor
+			return pm.Border
 		case "text":
-			return pm.TextColor
+			return pm.Text
 		case "disabled":
-			return pm.DisabledColor
+			return pm.Disabled
 		case "hover_bg":
-			return pm.HoverBgColor
+			return pm.HoverBg
 		case "hover_text":
-			return pm.HoverTextColor
+			return pm.HoverText
 		case "separator":
-			return pm.SeparatorColor
+			return pm.Separator
 		}
 		return nil
 	}

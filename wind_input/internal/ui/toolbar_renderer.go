@@ -22,8 +22,7 @@ const (
 
 // ToolbarRenderer renders the toolbar UI
 type ToolbarRenderer struct {
-	resolvedTheme *theme.ResolvedTheme
-	themeViews    *theme.Views
+	resolvedV25 *theme.ResolvedV25
 	TextBackendManager
 }
 
@@ -36,43 +35,15 @@ func NewToolbarRenderer() *ToolbarRenderer {
 	return r
 }
 
-// SetTheme sets the theme for the toolbar renderer
-func (r *ToolbarRenderer) SetTheme(resolved *theme.ResolvedTheme) {
-	r.resolvedTheme = resolved
-	if resolved != nil {
-		r.themeViews = resolved.Views
-	} else {
-		r.themeViews = nil
-	}
+// SetTheme sets the theme for the toolbar renderer（P5：吃 ResolvedV25）
+func (r *ToolbarRenderer) SetTheme(rv *theme.ResolvedV25) {
+	r.resolvedV25 = rv
 }
 
-// getToolbarColors returns toolbar colors from theme or defaults
-func (r *ToolbarRenderer) getToolbarColors() *theme.ResolvedToolbarColors {
-	if r.resolvedTheme != nil {
-		return &r.resolvedTheme.Toolbar
-	}
-	// Return default colors
-	return &theme.ResolvedToolbarColors{
-		BackgroundColor:     color.RGBA{255, 255, 255, 255},
-		BorderColor:         color.RGBA{199, 209, 224, 255},
-		GripColor:           color.RGBA{153, 173, 199, 179},
-		ModeChineseBgColor:  color.RGBA{51, 154, 245, 255},
-		ModeEnglishBgColor:  color.RGBA{115, 127, 148, 255},
-		ModeTextColor:       color.RGBA{255, 255, 255, 255},
-		FullWidthOffBgColor: color.RGBA{230, 234, 239, 255},
-		FullWidthOffColor:   color.RGBA{89, 102, 122, 255},
-		PunctEnglishBgColor: color.RGBA{230, 234, 239, 255},
-		PunctEnglishColor:   color.RGBA{89, 102, 122, 255},
-		SettingsBgColor:     color.RGBA{230, 234, 239, 255},
-		SettingsIconColor:   color.RGBA{122, 102, 184, 255},
-		SettingsHoleColor:   color.RGBA{230, 234, 239, 255},
-	}
-}
-
-// getTooltipColors returns tooltip colors from theme or defaults
+// getTooltipColors returns tooltip colors from theme or defaults（工具栏内悬停提示，复用 Palette.Tooltip）
 func (r *ToolbarRenderer) getTooltipColors() (bgColor, textColor, borderColor color.Color) {
-	if r.resolvedTheme != nil {
-		return r.resolvedTheme.Tooltip.BackgroundColor, r.resolvedTheme.Tooltip.TextColor, color.RGBA{77, 89, 107, 255}
+	if r.resolvedV25 != nil {
+		return r.resolvedV25.Palette.Tooltip.Background, r.resolvedV25.Palette.Tooltip.Text, color.RGBA{77, 89, 107, 255}
 	}
 	return color.RGBA{38, 46, 56, 242}, color.RGBA{242, 242, 242, 255}, color.RGBA{77, 89, 107, 255}
 }

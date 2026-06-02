@@ -7,20 +7,18 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// TestResolveTooltipColors token 映射 ResolvedTheme.Tooltip。
+// TestResolveTooltipColors token 映射 Palette.Tooltip。
 func TestResolveTooltipColors(t *testing.T) {
-	tt := theme.ResolvedTooltipColors{
-		BackgroundColor: color.RGBA{11, 22, 33, 255},
-		TextColor:       color.RGBA{210, 210, 210, 255},
+	bg := color.RGBA{11, 22, 33, 255}
+	txt := color.RGBA{210, 210, 210, 255}
+	rv := &theme.ResolvedV25{
+		Palette: theme.ResolvedPalette{Tooltip: theme.ResolvedTooltipPalette{Background: bg, Text: txt}},
+		Views:   &theme.Views{Tooltip: &theme.ViewNode{Background: theme.ViewFill{Color: "${background}"}, Color: "${text}"}},
 	}
-	rt := &theme.ResolvedTheme{Tooltip: tt}
-	views := &theme.Views{Tooltip: &theme.ViewNode{
-		Background: theme.ViewFill{Color: "${background}"}, Color: "${text}",
-	}}
-	w := &TooltipWindow{resolvedTheme: rt, themeViews: views}
+	w := &TooltipWindow{resolvedV25: rv}
 	rtv := w.resolveTooltipColors()
-	if rtv.BgColor != tt.BackgroundColor || rtv.TextColor != tt.TextColor {
-		t.Fatalf("tooltip 颜色应映射 ResolvedTheme.Tooltip, got %+v", rtv)
+	if rtv.BgColor != color.Color(bg) || rtv.TextColor != color.Color(txt) {
+		t.Fatalf("tooltip 颜色应映射 Palette.Tooltip, got %+v", rtv)
 	}
 }
 

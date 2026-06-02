@@ -12,7 +12,7 @@ func TestApplyThemeViews(t *testing.T) {
 	base := NewRenderer(parityConfig()).buildResolvedViews() // Item.PadLeft=8, PadRight=8
 	right10 := 10
 	selBg := color.RGBA{9, 9, 9, 255}
-	cand := theme.ResolvedCandidateWindowColors{SelectedBgColor: selBg, TextColor: color.RGBA{1, 2, 3, 255}}
+	cand := theme.ResolvedCandidateWindowPalette{SelectedBg: selBg, Text: color.RGBA{1, 2, 3, 255}}
 	tv := &theme.Views{
 		Item: theme.ViewNode{
 			Padding:  theme.ViewEdges{Right: &right10},
@@ -34,15 +34,15 @@ func TestApplyThemeViews(t *testing.T) {
 	if base.Item.SelectedBg != selBg {
 		t.Error("item selected bg 应被 ${selected_bg} token 覆盖")
 	}
-	if base.Text.TextColor != cand.TextColor {
+	if base.Text.TextColor != cand.Text {
 		t.Error("text color 应被 ${text} token 覆盖")
 	}
 }
 
 // TestResolveViewColor 验证颜色字段解析：${name} token / hex / 未知 / 空。
 func TestResolveViewColor(t *testing.T) {
-	cand := theme.ResolvedCandidateWindowColors{TextColor: color.RGBA{1, 2, 3, 255}}
-	if resolveViewColor("${text}", cand, nil) != cand.TextColor {
+	cand := theme.ResolvedCandidateWindowPalette{Text: color.RGBA{1, 2, 3, 255}}
+	if resolveViewColor("${text}", cand, nil) != cand.Text {
 		t.Error("${text} 应映射 TextColor")
 	}
 	if resolveViewColor("#FF0000", cand, nil) == nil {

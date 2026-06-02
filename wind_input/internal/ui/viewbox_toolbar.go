@@ -11,50 +11,67 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// resolveToolbarViews 解析工具栏颜色：默认从 ResolvedTheme.Toolbar 映射，views.toolbar token 覆盖。
+// resolveToolbarViews 解析工具栏颜色：默认从 Palette.Toolbar 映射（P5），views.toolbar token 覆盖。
 // button base 默认 = FullWidthOff*（非激活按钮底色/前景，零回归）；mode 中/英覆盖 background。
 func (r *ToolbarRenderer) resolveToolbarViews() theme.ResolvedToolbarViews {
-	tb := r.getToolbarColors() // *ResolvedToolbarColors（含默认）
+	// 内置默认色（无主题时回退）
 	rtv := theme.ResolvedToolbarViews{
-		BarBg:         tb.BackgroundColor,
-		BarBorder:     tb.BorderColor,
-		Grip:          tb.GripColor,
-		ButtonBg:      tb.FullWidthOffBgColor,
-		ButtonText:    tb.FullWidthOffColor,
-		ModeChineseBg: tb.ModeChineseBgColor,
-		ModeEnglishBg: tb.ModeEnglishBgColor,
-		ModeText:      tb.ModeTextColor,
-		SettingsBg:    tb.SettingsBgColor,
-		SettingsIcon:  tb.SettingsIconColor,
-		SettingsHole:  tb.SettingsHoleColor,
+		BarBg:         color.RGBA{255, 255, 255, 255},
+		BarBorder:     color.RGBA{199, 209, 224, 255},
+		Grip:          color.RGBA{153, 173, 199, 179},
+		ButtonBg:      color.RGBA{230, 234, 239, 255},
+		ButtonText:    color.RGBA{89, 102, 122, 255},
+		ModeChineseBg: color.RGBA{51, 154, 245, 255},
+		ModeEnglishBg: color.RGBA{115, 127, 148, 255},
+		ModeText:      color.RGBA{255, 255, 255, 255},
+		SettingsBg:    color.RGBA{230, 234, 239, 255},
+		SettingsIcon:  color.RGBA{122, 102, 184, 255},
+		SettingsHole:  color.RGBA{230, 234, 239, 255},
 	}
-	tv := r.themeViews
-	if tv == nil || tv.Toolbar == nil {
+	rv := r.resolvedV25
+	if rv == nil {
 		return rtv
 	}
-	t := tv.Toolbar
+	tb := rv.Palette.Toolbar
+	rtv = theme.ResolvedToolbarViews{
+		BarBg:         tb.Background,
+		BarBorder:     tb.Border,
+		Grip:          tb.Grip,
+		ButtonBg:      tb.FullWidthOffBg,
+		ButtonText:    tb.FullWidthOffText,
+		ModeChineseBg: tb.ModeChineseBg,
+		ModeEnglishBg: tb.ModeEnglishBg,
+		ModeText:      tb.ModeText,
+		SettingsBg:    tb.SettingsBg,
+		SettingsIcon:  tb.SettingsIcon,
+		SettingsHole:  tb.SettingsHole,
+	}
+	if rv.Views == nil || rv.Views.Toolbar == nil {
+		return rtv
+	}
+	t := rv.Views.Toolbar
 	res := func(name string) color.Color {
 		switch name {
 		case "background":
-			return tb.BackgroundColor
+			return tb.Background
 		case "border":
-			return tb.BorderColor
+			return tb.Border
 		case "grip":
-			return tb.GripColor
+			return tb.Grip
 		case "button_bg":
-			return tb.FullWidthOffBgColor
+			return tb.FullWidthOffBg
 		case "button_text":
-			return tb.FullWidthOffColor
+			return tb.FullWidthOffText
 		case "mode_cn_bg":
-			return tb.ModeChineseBgColor
+			return tb.ModeChineseBg
 		case "mode_en_bg":
-			return tb.ModeEnglishBgColor
+			return tb.ModeEnglishBg
 		case "mode_text":
-			return tb.ModeTextColor
+			return tb.ModeText
 		case "settings_icon":
-			return tb.SettingsIconColor
+			return tb.SettingsIcon
 		case "settings_hole":
-			return tb.SettingsHoleColor
+			return tb.SettingsHole
 		}
 		return nil
 	}

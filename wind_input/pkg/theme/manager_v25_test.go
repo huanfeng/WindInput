@@ -32,20 +32,21 @@ palette: test-palette
 		t.Fatalf("LoadTheme v25-test: %v", err)
 	}
 
-	resolved := m.GetResolvedTheme()
-	if resolved == nil {
+	rv := m.GetResolvedV25()
+	if rv == nil {
 		t.Fatal("resolved nil")
 	}
+	idx := rv.Layout.CandidateWindow.CandidateList.Index
 	// index 模板生效（来自 layout test-layout 的 index.style="1."）
-	if resolved.Style.IndexStyle != "text" {
-		t.Errorf("IndexStyle want text, got %q", resolved.Style.IndexStyle)
+	if idx.Circle {
+		t.Errorf("IndexStyle want text (circle off)")
 	}
-	if resolved.Style.IndexLabels != "1./2./3./4./5./6./7./8./9./0." {
-		t.Errorf("IndexLabels want slash-template, got %q", resolved.Style.IndexLabels)
+	if got := BuildIndexLabelsFromSlots(idx.Labels); got != "1./2./3./4./5./6./7./8./9./0." {
+		t.Errorf("IndexLabels want slash-template, got %q", got)
 	}
 	// palette 解析（来自 test-palette 的 #4285F4 primary）
-	if ColorToHexRGB(resolved.CandidateWindow.SelectedBgColor) != "#4285F4" {
-		t.Errorf("SelectedBgColor want #4285F4, got %s", ColorToHexRGB(resolved.CandidateWindow.SelectedBgColor))
+	if ColorToHexRGB(rv.Palette.CandidateWindow.SelectedBg) != "#4285F4" {
+		t.Errorf("SelectedBg want #4285F4, got %s", ColorToHexRGB(rv.Palette.CandidateWindow.SelectedBg))
 	}
 }
 
@@ -65,12 +66,12 @@ palette: test-palette
 	if err := m.LoadTheme("v25-dark"); err != nil {
 		t.Fatal(err)
 	}
-	light := m.GetResolvedTheme()
-	lightBg := ColorToHexRGB(light.CandidateWindow.BackgroundColor)
+	light := m.GetResolvedV25()
+	lightBg := ColorToHexRGB(light.Palette.CandidateWindow.Background)
 
 	m.SetDarkMode(true)
-	dark := m.GetResolvedTheme()
-	darkBg := ColorToHexRGB(dark.CandidateWindow.BackgroundColor)
+	dark := m.GetResolvedV25()
+	darkBg := ColorToHexRGB(dark.Palette.CandidateWindow.Background)
 
 	if lightBg == darkBg {
 		t.Errorf("dark mode 切换后 bg 未变化: %s == %s", lightBg, darkBg)

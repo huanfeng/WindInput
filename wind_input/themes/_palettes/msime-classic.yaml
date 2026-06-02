@@ -66,9 +66,9 @@ light:
     text:       "#FFFFFF"
 
   status:
-    background: "${bg}"
+    background: "#323232E6"
     border:     "${accent}"
-    text:       "${text}"
+    text:       "#FFFFFF"
 
   toast:
     background: "#323232E6"
@@ -132,7 +132,7 @@ dark:
     text:       "${text}"
 
   status:
-    background: "${bg}"
+    background: "#1E1E1EE6"
     border:     "${accent}"
     text:       "${text}"
 

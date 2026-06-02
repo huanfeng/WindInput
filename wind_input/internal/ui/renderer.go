@@ -215,7 +215,7 @@ func (fc *fontCache) Close() {
 // Renderer renders candidate window content
 type Renderer struct {
 	config        RenderConfig
-	resolvedTheme *theme.ResolvedTheme
+	resolvedV25   *theme.ResolvedV25
 	resolvedViews theme.ResolvedViews // 候选窗盒模型外观（P2 切片-0）：默认来自合成桥，主题提供 views 时来自 YAML
 	themeViews    *theme.Views        // 主题 YAML 提供的 views（已 merge 基线）；nil=用合成桥
 	TextBackendManager
@@ -360,47 +360,53 @@ func (r *Renderer) SetModeAccentColor(c color.Color) {
 }
 
 // SetTheme sets the theme for the renderer and updates colors
-func (r *Renderer) SetTheme(resolved *theme.ResolvedTheme) {
-	if resolved == nil {
+func (r *Renderer) SetTheme(rv *theme.ResolvedV25) {
+	if rv == nil {
 		return
 	}
-	r.resolvedTheme = resolved
-	r.themeViews = resolved.Views // 主题盒模型 views（nil=用合成桥）
+	r.resolvedV25 = rv
+	r.themeViews = rv.Views // 主题盒模型 views（nil=用合成桥）
 	// Update config colors from theme
-	colors := resolved.CandidateWindow
-	r.config.BackgroundColor = colors.BackgroundColor
-	r.config.BorderColor = colors.BorderColor
-	r.config.TextColor = colors.TextColor
-	r.config.IndexColor = colors.IndexColor
-	r.config.IndexBgColor = colors.IndexBgColor
-	r.config.HoverBgColor = colors.HoverBgColor
-	r.config.SelectedBgColor = colors.SelectedBgColor
-	r.config.InputBgColor = colors.InputBgColor
-	r.config.InputTextColor = colors.InputTextColor
-	// Update style from theme
-	r.config.IndexStyle = resolved.Style.IndexStyle
-	r.config.AccentBarColor = resolved.Style.AccentBarColor
-	r.config.HasAccentBar = resolved.Style.HasAccentBar
-	r.config.IndexFontWeight = resolved.Style.IndexFontWeight
-	r.config.ItemPaddingLeft = resolved.Style.ItemPaddingLeft
-	r.config.ItemRadius = resolved.Style.ItemRadius
-	r.config.ItemPaddingRight = resolved.Style.ItemPaddingRight
-	r.config.AlwaysShowPager = resolved.Style.AlwaysShowPager
-	r.config.ShowPageNumber = resolved.Style.ShowPageNumber
+	colors := rv.Palette.CandidateWindow
+	r.config.BackgroundColor = colors.Background
+	r.config.BorderColor = colors.Border
+	r.config.TextColor = colors.Text
+	r.config.IndexColor = colors.IndexText
+	r.config.IndexBgColor = colors.IndexBg
+	r.config.HoverBgColor = colors.HoverBg
+	r.config.SelectedBgColor = colors.SelectedBg
+	r.config.InputBgColor = colors.PreeditBg
+	r.config.InputTextColor = colors.PreeditText
+	// Update style from theme（原 adapter 从 rv.Layout 派生的 Style 字段，现直接读 Layout）
+	lay := rv.Layout.CandidateWindow
+	idx := lay.CandidateList.Index
+	if idx.Circle {
+		r.config.IndexStyle = "circle"
+	} else {
+		r.config.IndexStyle = "text"
+	}
+	r.config.AccentBarColor = rv.Palette.CandidateWindow.AccentBar
+	r.config.HasAccentBar = lay.CandidateList.AccentBar.Enabled
+	r.config.IndexFontWeight = 0
+	r.config.ItemPaddingLeft = float64(lay.CandidateList.ItemPadding.Left)
+	r.config.ItemRadius = float64(lay.CandidateList.ItemRadius)
+	r.config.ItemPaddingRight = float64(lay.CandidateList.ItemPadding.Right)
+	r.config.AlwaysShowPager = false
+	r.config.ShowPageNumber = true
 	// Apply window padding from theme (override base Padding)
 	scale := GetDPIScale()
-	if resolved.Style.WindowPaddingX > 0 {
-		r.config.WindowPaddingX = resolved.Style.WindowPaddingX * scale
+	if wpx := float64(lay.WindowPadding.Left); wpx > 0 {
+		r.config.WindowPaddingX = wpx * scale
 	}
-	if resolved.Style.WindowPaddingY > 0 {
-		r.config.WindowPaddingY = resolved.Style.WindowPaddingY * scale
+	if wpy := float64(lay.WindowPadding.Top); wpy > 0 {
+		r.config.WindowPaddingY = wpy * scale
 	}
-	if resolved.Style.CornerRadius > 0 {
-		r.config.CornerRadius = resolved.Style.CornerRadius * scale
+	if cr := float64(lay.BorderRadius); cr > 0 {
+		r.config.CornerRadius = cr * scale
 	}
-	if resolved.Style.RowHeight > 0 {
-		r.themeRowHeight = resolved.Style.RowHeight
-		r.config.ItemHeight = resolved.Style.RowHeight * scale
+	if rh := float64(lay.CandidateList.ItemHeight); rh > 0 {
+		r.themeRowHeight = rh
+		r.config.ItemHeight = rh * scale
 	} else {
 		r.themeRowHeight = 0
 		baseFontSize := r.baseFontSize
@@ -410,74 +416,50 @@ func (r *Renderer) SetTheme(resolved *theme.ResolvedTheme) {
 		r.config.ItemHeight = math.Max(32, baseFontSize*1.8) * scale
 	}
 	// Apply element spacing from theme
-	if resolved.Style.IndexMarginRight > 0 {
-		r.config.IndexMarginRight = resolved.Style.IndexMarginRight * scale
+	if g := float64(lay.CandidateList.Index.Gap); g > 0 {
+		r.config.IndexMarginRight = g * scale
 	} else {
 		r.config.IndexMarginRight = 4 * scale // default
 	}
-	if resolved.Style.TextMarginRight > 0 {
-		r.config.TextMarginRight = resolved.Style.TextMarginRight * scale
-	} else {
-		r.config.TextMarginRight = 4 * scale // default
-	}
-	if resolved.Style.CommentMarginLeft > 0 {
-		r.config.CommentMarginLeft = resolved.Style.CommentMarginLeft * scale
+	// TextMarginRight：原 adapter Style 未映射（恒 0），renderer 走 else 分支取默认值
+	r.config.TextMarginRight = 4 * scale // default
+	if g := float64(lay.CandidateList.Comment.Gap); g > 0 {
+		r.config.CommentMarginLeft = g * scale
 	} else {
 		r.config.CommentMarginLeft = 8 * scale // default
 	}
-	if resolved.Style.CommentMarginRight > 0 {
-		r.config.CommentMarginRight = resolved.Style.CommentMarginRight * scale
-	} else {
-		r.config.CommentMarginRight = 4 * scale // default
-	}
-	// Apply width limits from theme (separate for vertical and horizontal)
-	if resolved.Style.VerticalMinWidth > 0 {
-		r.config.VerticalMinWidth = resolved.Style.VerticalMinWidth * scale
-	}
-	if resolved.Style.VerticalMaxWidth > 0 {
-		r.config.VerticalMaxWidth = resolved.Style.VerticalMaxWidth * scale
-	}
-	if resolved.Style.HorizontalMinWidth > 0 {
-		r.config.HorizontalMinWidth = resolved.Style.HorizontalMinWidth * scale
-	}
-	if resolved.Style.HorizontalMaxWidth > 0 {
-		r.config.HorizontalMaxWidth = resolved.Style.HorizontalMaxWidth * scale
-	}
-	r.config.IndexLabels = resolved.Style.IndexLabels
+	// CommentMarginRight：原 adapter Style 未映射（恒 0），renderer 走 else 分支取默认值
+	r.config.CommentMarginRight = 4 * scale // default
+	// 宽度限制（Vertical/Horizontal Min/Max）原 adapter Style 未映射（恒 0），
+	// 原 renderer 仅 if>0 设置、无 else，故 rv 路径不设置，保留 config 既有值（零回归）。
+	r.config.IndexLabels = theme.BuildIndexLabelsFromSlots(idx.Labels)
 
-	// 候选窗背景图（v2.5）
-	if resolved.Background != nil && resolved.Background.Image != nil {
-		r.config.BackgroundImage = resolved.Background.Image
-		r.config.BackgroundMode = resolved.Background.Mode
-		r.config.BackgroundSlice = resolved.Background.Slice
-		r.config.BackgroundOpacity = resolved.Background.Opacity
-	} else {
-		r.config.BackgroundImage = nil
-		r.config.BackgroundMode = ""
-		r.config.BackgroundOpacity = 0
-	}
+	// 候选窗背景图：ResolvedV25 不支持解码后的背景图（种子主题无图），直接清空（零回归）
+	r.config.BackgroundImage = nil
+	r.config.BackgroundMode = ""
+	r.config.BackgroundOpacity = 0
 }
 
 // getCommentColor returns the comment color from theme or default
 func (r *Renderer) getCommentColor() color.Color {
-	if r.resolvedTheme != nil {
-		return r.resolvedTheme.CandidateWindow.CommentColor
+	if r.resolvedV25 != nil {
+		return r.resolvedV25.Palette.CandidateWindow.Comment
 	}
 	return color.RGBA{150, 150, 150, 255}
 }
 
 // getShadowColor returns the shadow color from theme or default
 func (r *Renderer) getShadowColor() color.Color {
-	if r.resolvedTheme != nil {
-		return r.resolvedTheme.CandidateWindow.ShadowColor
+	if r.resolvedV25 != nil {
+		return r.resolvedV25.Palette.Shadow
 	}
 	return color.RGBA{0, 0, 0, 15}
 }
 
 // getModeIndicatorColors returns mode indicator colors from theme or defaults
 func (r *Renderer) getModeIndicatorColors() (bgColor, textColor color.Color) {
-	if r.resolvedTheme != nil {
-		return r.resolvedTheme.ModeIndicator.BackgroundColor, r.resolvedTheme.ModeIndicator.TextColor
+	if r.resolvedV25 != nil {
+		return r.resolvedV25.Palette.Toast.Background, r.resolvedV25.Palette.Toast.Text
 	}
 	return color.RGBA{50, 50, 50, 230}, color.RGBA{255, 255, 255, 255}
 }

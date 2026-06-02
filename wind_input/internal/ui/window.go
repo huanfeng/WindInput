@@ -588,11 +588,11 @@ func (w *CandidateWindow) SetMenuFontSize(size float64) {
 	w.mu.Unlock()
 }
 
-// SetTheme sets the theme for the candidate window's popup menu
-func (w *CandidateWindow) SetTheme(resolved *theme.ResolvedTheme) {
+// SetTheme sets the theme for the candidate window's popup menu（P5：吃 ResolvedV25）
+func (w *CandidateWindow) SetTheme(rv *theme.ResolvedV25) {
 	w.mu.Lock()
 	if w.popupMenu != nil {
-		w.popupMenu.SetTheme(resolved)
+		w.popupMenu.SetTheme(rv)
 	}
 	w.mu.Unlock()
 }

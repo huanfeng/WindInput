@@ -74,8 +74,6 @@ type StatusWindow struct {
 
 	renderer *StatusRenderer
 
-	resolvedTheme *theme.ResolvedTheme
-
 	hostRenderFunc func(x, y int) error // 宿主渲染回调（由 Manager 设置）
 	hostHideFunc   func()               // 宿主隐藏回调
 }
@@ -347,15 +345,11 @@ func (w *StatusWindow) GetConfig() StatusWindowConfig {
 	return w.config
 }
 
-// SetTheme 设置主题
-func (w *StatusWindow) SetTheme(resolved *theme.ResolvedTheme) {
-	w.mu.Lock()
-	w.resolvedTheme = resolved
-	w.mu.Unlock()
-
-	w.renderer.SetTheme(resolved)
+// SetTheme 设置主题（P5：吃 ResolvedV25，转发给 renderer + popupMenu）
+func (w *StatusWindow) SetTheme(rv *theme.ResolvedV25) {
+	w.renderer.SetTheme(rv)
 	if w.popupMenu != nil {
-		w.popupMenu.SetTheme(resolved)
+		w.popupMenu.SetTheme(rv)
 	}
 }
 

@@ -89,36 +89,37 @@ func (r *Renderer) buildResolvedViews() theme.ResolvedViews {
 
 // resolveViewColor 解析 views 颜色字段：hex（#RRGGBB[AA]）或 ${name} token 映射候选窗语义色。
 // 空 / 未知 token / 解析失败返回 nil（调用方据此不覆盖 base，保零回归）。
-func resolveViewColor(s string, cand theme.ResolvedCandidateWindowColors, accent color.Color) color.Color {
+func resolveViewColor(s string, cand theme.ResolvedCandidateWindowPalette, accent color.Color) color.Color {
 	if s == "" {
 		return nil
 	}
 	if strings.HasPrefix(s, "${") && strings.HasSuffix(s, "}") {
 		switch s[2 : len(s)-1] {
 		case "background":
-			return cand.BackgroundColor
+			return cand.Background
 		case "border":
-			return cand.BorderColor
+			return cand.Border
 		case "text":
-			return cand.TextColor
+			return cand.Text
 		case "index_bg":
-			return cand.IndexBgColor
+			return cand.IndexBg
 		case "index_text":
-			return cand.IndexColor
+			return cand.IndexText
 		case "hover_bg":
-			return cand.HoverBgColor
+			return cand.HoverBg
 		case "selected_bg":
-			return cand.SelectedBgColor
+			return cand.SelectedBg
 		case "preedit_bg":
-			return cand.InputBgColor
+			return cand.PreeditBg
 		case "preedit_text":
-			return cand.InputTextColor
+			return cand.PreeditText
 		case "comment":
-			return cand.CommentColor
+			return cand.Comment
 		case "accent":
 			return accent // CandidateWindow 无 accent，单独从 Style.AccentBarColor 传入
 		case "shadow":
-			return cand.ShadowColor
+			// Shadow 在 ResolvedPalette 顶层而非 CandidateWindow；此处无源，返回 nil（不覆盖 base）。
+			return nil
 		}
 		return nil // 未知 token
 	}
@@ -133,9 +134,9 @@ func resolveViewColor(s string, cand theme.ResolvedCandidateWindowColors, accent
 func (r *Renderer) refreshResolvedViews() {
 	r.resolvedViews = r.buildResolvedViews()
 	if r.themeViews != nil {
-		var cand theme.ResolvedCandidateWindowColors
-		if r.resolvedTheme != nil {
-			cand = r.resolvedTheme.CandidateWindow
+		var cand theme.ResolvedCandidateWindowPalette
+		if r.resolvedV25 != nil {
+			cand = r.resolvedV25.Palette.CandidateWindow
 		}
 		applyThemeViews(&r.resolvedViews, r.themeViews, cand, r.config.AccentBarColor)
 	}
@@ -143,7 +144,7 @@ func (r *Renderer) refreshResolvedViews() {
 
 // applyThemeViews 把主题 YAML 的 views（仅显式字段）覆盖到合成桥 base：几何（padding/margin/
 // border 尺寸）+ 颜色（token/hex 解析）。字号不覆盖——用户全局字号优先。
-func applyThemeViews(rv *theme.ResolvedViews, tv *theme.Views, cand theme.ResolvedCandidateWindowColors, accent color.Color) {
+func applyThemeViews(rv *theme.ResolvedViews, tv *theme.Views, cand theme.ResolvedCandidateWindowPalette, accent color.Color) {
 	apply := func(dst *theme.RVNode, src theme.ViewNode) {
 		if src.Padding.Top != nil {
 			dst.PadTop = *src.Padding.Top
