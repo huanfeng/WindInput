@@ -51,10 +51,11 @@ func themePathViews(winPad, itemPad int) theme.Views {
 		Window:     theme.ViewNode{Padding: theme.ViewEdges{Top: dip(winPad), Right: dip(winPad), Bottom: dip(winPad), Left: dip(winPad)}, Border: theme.ViewBorder{Radius: dip(8)}},
 		PreeditBar: theme.ViewNode{Padding: theme.ViewEdges{Right: dip(8), Left: dip(8)}, Border: theme.ViewBorder{Radius: dip(4)}},
 		Item:       theme.ViewNode{Padding: theme.ViewEdges{Right: dip(itemPad), Left: dip(itemPad)}, Border: theme.ViewBorder{Radius: dip(4)}},
-		Index:      theme.ViewNode{},
+		Index:      theme.ViewNode{FontSize: ip(-4), Padding: theme.ViewEdges{Top: dip(2), Bottom: dip(2), Left: dip(2), Right: dip(2)}}, // 圆圈：字号 base-4，直径=字号+上下padding
 		Text:       theme.ViewNode{Margin: theme.ViewEdges{Left: dip(4)}},
-		Comment:    theme.ViewNode{Margin: theme.ViewEdges{Left: dip(8)}},
+		Comment:    theme.ViewNode{FontSize: ip(-4), Margin: theme.ViewEdges{Left: dip(8)}},
 		AccentBar:  theme.ViewNode{},
+		FooterBar:  theme.ViewNode{FontSize: ip(-4)},
 		Metrics: &theme.ViewMetrics{
 			ItemSpacing: dip(12), BandGap: dip(4), ShadowOffset: dip(2),
 			AccentBar: &theme.AccentBarMetrics{Width: dip(3), Offset: dip(1), HeightRatio: fp(0.6)},
@@ -82,6 +83,14 @@ func themePathPalette() theme.ResolvedPalette {
 	}
 }
 
+// applyThemePath 给 renderer 注入完整主题(views + palette + behavior)，驱动真实消费路径
+// （refreshResolvedViews→ResolveCandidateViews+回填）。供 fingerprint / hittest 等共用。
+func applyThemePath(r *Renderer, winPad, itemPad int) {
+	v := themePathViews(winPad, itemPad)
+	r.resolvedV25 = &theme.ResolvedV25{Palette: themePathPalette(), Behavior: theme.ResolvedBehavior{FontSize: 18, ShowPageNumber: true, VerticalMaxWidth: 600}}
+	r.themeViews = &v
+}
+
 // themePathFingerprint 走真实消费路径（refreshResolvedViews→ResolveCandidateViews+回填），
 // 返回候选窗 View 树几何+颜色指纹。
 func themePathFingerprint(t *testing.T, layout config.CandidateLayout, indexStyle string) []string {
@@ -93,9 +102,7 @@ func themePathFingerprint(t *testing.T, layout config.CandidateLayout, indexStyl
 	if r.TextDrawer() == nil {
 		t.Skip("无可用文本后端")
 	}
-	views := themePathViews(6, 8)
-	r.resolvedV25 = &theme.ResolvedV25{Palette: themePathPalette(), Behavior: theme.ResolvedBehavior{FontSize: 18, ShowPageNumber: true, VerticalMaxWidth: 600}}
-	r.themeViews = &views
+	applyThemePath(r, 6, 8)
 	r.refreshResolvedViews() // 真实生产路径：ResolveCandidateViews + 运行时回填
 	cands := []Candidate{
 		{Text: "中文", Index: 1},
@@ -117,7 +124,7 @@ func themePathFingerprint(t *testing.T, layout config.CandidateLayout, indexStyl
 // 主题路径几何+颜色基准（window padding=6，DPI scale=1）。后续重构须保持不变。
 var (
 	wantHThemeGeometry = []string{"0,0,438,72|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,426,24|bg=f0f0f0ff|bd=-|tx=-", "14,9,45,18|bg=-|bd=-|tx=646464ff", "6,34,426,32|bg=-|bd=-|tx=-", "6,34,74,32|bg=d2e4ffff|bd=-|tx=-", "6,34,8,32|bg=-|bd=-|tx=-", "14,41,18,18|bg=4285f4ff|bd=-|tx=-", "14,41,18,18|bg=-|bd=-|tx=ffffffff", "36,41,36,18|bg=-|bd=-|tx=1f1f1fff", "80,34,99,32|bg=e6f0ffff|bd=-|tx=-", "80,34,8,32|bg=-|bd=-|tx=-", "88,41,18,18|bg=4285f4ff|bd=-|tx=-", "88,41,18,18|bg=-|bd=-|tx=ffffffff", "110,41,18,18|bg=-|bd=-|tx=1f1f1fff", "136,43,35,14|bg=-|bd=-|tx=969696ff", "179,34,56,32|bg=-|bd=-|tx=-", "179,34,8,32|bg=-|bd=-|tx=-", "187,41,18,18|bg=4285f4ff|bd=-|tx=-", "187,41,18,18|bg=-|bd=-|tx=ffffffff", "209,41,18,18|bg=-|bd=-|tx=1f1f1fff", "235,34,56,32|bg=-|bd=-|tx=-", "235,34,8,32|bg=-|bd=-|tx=-", "243,41,18,18|bg=4285f4ff|bd=-|tx=-", "243,41,18,18|bg=-|bd=-|tx=ffffffff", "265,41,18,18|bg=-|bd=-|tx=1f1f1fff", "291,34,56,32|bg=-|bd=-|tx=-", "291,34,8,32|bg=-|bd=-|tx=-", "299,41,18,18|bg=4285f4ff|bd=-|tx=-", "299,41,18,18|bg=-|bd=-|tx=ffffffff", "321,41,18,18|bg=-|bd=-|tx=1f1f1fff", "355,34,21,32|bg=-|bd=-|tx=-", "376,43,35,14|bg=-|bd=-|tx=646464ff", "411,34,21,32|bg=-|bd=-|tx=-"}
-	wantVThemeGeometry = []string{"0,0,121,242|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,109,30|bg=f0f0f0ff|bd=-|tx=-", "14,12,45,18|bg=-|bd=-|tx=646464ff", "6,40,109,160|bg=-|bd=-|tx=-", "6,40,109,32|bg=d2e4ffff|bd=-|tx=-", "6,40,8,32|bg=-|bd=-|tx=-", "17,45,22,22|bg=4285f4ff|bd=-|tx=-", "17,45,22,22|bg=-|bd=-|tx=ffffffff", "46,47,36,18|bg=-|bd=-|tx=1f1f1fff", "6,72,109,32|bg=e6f0ffff|bd=-|tx=-", "6,72,8,32|bg=-|bd=-|tx=-", "17,77,22,22|bg=4285f4ff|bd=-|tx=-", "17,77,22,22|bg=-|bd=-|tx=ffffffff", "46,79,18,18|bg=-|bd=-|tx=1f1f1fff", "72,81,35,14|bg=-|bd=-|tx=969696ff", "6,104,109,32|bg=-|bd=-|tx=-", "6,104,8,32|bg=-|bd=-|tx=-", "17,109,22,22|bg=4285f4ff|bd=-|tx=-", "17,109,22,22|bg=-|bd=-|tx=ffffffff", "46,111,18,18|bg=-|bd=-|tx=1f1f1fff", "6,136,109,32|bg=-|bd=-|tx=-", "6,136,8,32|bg=-|bd=-|tx=-", "17,141,22,22|bg=4285f4ff|bd=-|tx=-", "17,141,22,22|bg=-|bd=-|tx=ffffffff", "46,143,18,18|bg=-|bd=-|tx=1f1f1fff", "6,168,109,32|bg=-|bd=-|tx=-", "6,168,8,32|bg=-|bd=-|tx=-", "17,173,22,22|bg=4285f4ff|bd=-|tx=-", "17,173,22,22|bg=-|bd=-|tx=ffffffff", "46,175,18,18|bg=-|bd=-|tx=1f1f1fff", "22,204,77,32|bg=-|bd=-|tx=-", "22,204,21,32|bg=-|bd=-|tx=-", "43,213,35,14|bg=-|bd=-|tx=646464ff", "78,204,21,32|bg=-|bd=-|tx=-"}
+	wantVThemeGeometry = []string{"0,0,117,242|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,105,30|bg=f0f0f0ff|bd=-|tx=-", "14,12,45,18|bg=-|bd=-|tx=646464ff", "6,40,105,160|bg=-|bd=-|tx=-", "6,40,105,32|bg=d2e4ffff|bd=-|tx=-", "6,40,8,32|bg=-|bd=-|tx=-", "17,47,18,18|bg=4285f4ff|bd=-|tx=-", "17,47,18,18|bg=-|bd=-|tx=ffffffff", "42,47,36,18|bg=-|bd=-|tx=1f1f1fff", "6,72,105,32|bg=e6f0ffff|bd=-|tx=-", "6,72,8,32|bg=-|bd=-|tx=-", "17,79,18,18|bg=4285f4ff|bd=-|tx=-", "17,79,18,18|bg=-|bd=-|tx=ffffffff", "42,79,18,18|bg=-|bd=-|tx=1f1f1fff", "68,81,35,14|bg=-|bd=-|tx=969696ff", "6,104,105,32|bg=-|bd=-|tx=-", "6,104,8,32|bg=-|bd=-|tx=-", "17,111,18,18|bg=4285f4ff|bd=-|tx=-", "17,111,18,18|bg=-|bd=-|tx=ffffffff", "42,111,18,18|bg=-|bd=-|tx=1f1f1fff", "6,136,105,32|bg=-|bd=-|tx=-", "6,136,8,32|bg=-|bd=-|tx=-", "17,143,18,18|bg=4285f4ff|bd=-|tx=-", "17,143,18,18|bg=-|bd=-|tx=ffffffff", "42,143,18,18|bg=-|bd=-|tx=1f1f1fff", "6,168,105,32|bg=-|bd=-|tx=-", "6,168,8,32|bg=-|bd=-|tx=-", "17,175,18,18|bg=4285f4ff|bd=-|tx=-", "17,175,18,18|bg=-|bd=-|tx=ffffffff", "42,175,18,18|bg=-|bd=-|tx=1f1f1fff", "20,204,77,32|bg=-|bd=-|tx=-", "20,204,21,32|bg=-|bd=-|tx=-", "41,213,35,14|bg=-|bd=-|tx=646464ff", "76,204,21,32|bg=-|bd=-|tx=-"}
 )
 
 // TestGeometryFingerprint_ThemePathHorizontal 横排真实主题路径几何+颜色零回归（圆点序号）。
@@ -137,7 +144,7 @@ func TestGeometryFingerprint_ThemePathVertical(t *testing.T) {
 }
 
 // wantVTextThemeGeometry 竖排文本序号真实主题路径基准（强调条 rail 占位 + 序号列宽按字形收紧，DPI scale=1）。
-var wantVTextThemeGeometry = []string{"0,0,109,242|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,97,30|bg=f0f0f0ff|bd=-|tx=-", "14,12,45,18|bg=-|bd=-|tx=646464ff", "6,40,97,160|bg=-|bd=-|tx=-", "6,40,97,32|bg=d2e4ffff|bd=-|tx=-", "6,40,8,32|bg=-|bd=-|tx=-", "14,49,11,14|bg=-|bd=-|tx=ffffffff", "29,47,36,18|bg=-|bd=-|tx=1f1f1fff", "6,72,97,32|bg=e6f0ffff|bd=-|tx=-", "6,72,8,32|bg=-|bd=-|tx=-", "14,81,11,14|bg=-|bd=-|tx=ffffffff", "29,79,18,18|bg=-|bd=-|tx=1f1f1fff", "55,80,40,16|bg=-|bd=-|tx=969696ff", "6,104,97,32|bg=-|bd=-|tx=-", "6,104,8,32|bg=-|bd=-|tx=-", "14,113,11,14|bg=-|bd=-|tx=ffffffff", "29,111,18,18|bg=-|bd=-|tx=1f1f1fff", "6,136,97,32|bg=-|bd=-|tx=-", "6,136,8,32|bg=-|bd=-|tx=-", "14,145,11,14|bg=-|bd=-|tx=ffffffff", "29,143,18,18|bg=-|bd=-|tx=1f1f1fff", "6,168,97,32|bg=-|bd=-|tx=-", "6,168,8,32|bg=-|bd=-|tx=-", "14,177,11,14|bg=-|bd=-|tx=ffffffff", "29,175,18,18|bg=-|bd=-|tx=1f1f1fff", "12,204,84,32|bg=-|bd=-|tx=-", "12,204,22,32|bg=-|bd=-|tx=-", "34,212,40,16|bg=-|bd=-|tx=646464ff", "74,204,22,32|bg=-|bd=-|tx=-"}
+var wantVTextThemeGeometry = []string{"0,0,104,242|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,92,30|bg=f0f0f0ff|bd=-|tx=-", "14,12,45,18|bg=-|bd=-|tx=646464ff", "6,40,92,160|bg=-|bd=-|tx=-", "6,40,92,32|bg=d2e4ffff|bd=-|tx=-", "6,40,8,32|bg=-|bd=-|tx=-", "14,49,11,14|bg=-|bd=-|tx=ffffffff", "29,47,36,18|bg=-|bd=-|tx=1f1f1fff", "6,72,92,32|bg=e6f0ffff|bd=-|tx=-", "6,72,8,32|bg=-|bd=-|tx=-", "14,81,11,14|bg=-|bd=-|tx=ffffffff", "29,79,18,18|bg=-|bd=-|tx=1f1f1fff", "55,81,35,14|bg=-|bd=-|tx=969696ff", "6,104,92,32|bg=-|bd=-|tx=-", "6,104,8,32|bg=-|bd=-|tx=-", "14,113,11,14|bg=-|bd=-|tx=ffffffff", "29,111,18,18|bg=-|bd=-|tx=1f1f1fff", "6,136,92,32|bg=-|bd=-|tx=-", "6,136,8,32|bg=-|bd=-|tx=-", "14,145,11,14|bg=-|bd=-|tx=ffffffff", "29,143,18,18|bg=-|bd=-|tx=1f1f1fff", "6,168,92,32|bg=-|bd=-|tx=-", "6,168,8,32|bg=-|bd=-|tx=-", "14,177,11,14|bg=-|bd=-|tx=ffffffff", "29,175,18,18|bg=-|bd=-|tx=1f1f1fff", "13,204,77,32|bg=-|bd=-|tx=-", "13,204,21,32|bg=-|bd=-|tx=-", "34,213,35,14|bg=-|bd=-|tx=646464ff", "69,204,21,32|bg=-|bd=-|tx=-"}
 
 // TestGeometryFingerprint_ThemePathVerticalText 竖排文本序号（msime 同款）几何零回归：
 // 守护强调条 rail 占位（序号排在 rail 右侧不重叠）+ 序号列宽测量收紧。

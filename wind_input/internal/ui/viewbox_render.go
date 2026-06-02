@@ -22,11 +22,15 @@ func (r *Renderer) refreshResolvedViews() {
 	// P7-B：主题 views 显式字号（逻辑像素，ResolveCandidateViews 填入）优先并 ×DPI scale；
 	// 未写（0）则回退运行时派生（用户全局字号 + DPI，已含 scale）。
 	scale := GetDPIScale()
-	r.resolvedViews.Text.FontSize = pickF(r.resolvedViews.Text.FontSize*scale, r.config.FontSize)
-	r.resolvedViews.PreeditBar.FontSize = pickF(r.resolvedViews.PreeditBar.FontSize*scale, r.config.FontSize)
-	r.resolvedViews.Index.FontSize = pickF(r.resolvedViews.Index.FontSize*scale, r.config.IndexFontSize)
-	// Comment 无运行时默认（build 从 index 派生）：显式则 ×scale，未写保持 0 由 build 派生。
-	r.resolvedViews.Comment.FontSize *= scale
+	// 相对字号：各元素字号 = 主候选字体(base) + 主题配置的有符号偏移(逻辑px)，再 ×DPI。
+	// ResolveCandidateViews 已把 views.<el>.font_size 解析为偏移量填入 rv.<el>.FontSize；
+	// 偏移 0（含 text/preedit 默认）即等于主字体。零魔法数字——差值全在主题/基线配置里。
+	base := r.config.FontSize // 主候选字体(device px) = 用户基准字号 × scale
+	r.resolvedViews.Text.FontSize = base + r.resolvedViews.Text.FontSize*scale
+	r.resolvedViews.PreeditBar.FontSize = base + r.resolvedViews.PreeditBar.FontSize*scale
+	r.resolvedViews.Index.FontSize = base + r.resolvedViews.Index.FontSize*scale
+	r.resolvedViews.Comment.FontSize = base + r.resolvedViews.Comment.FontSize*scale
+	r.resolvedViews.FooterBar.FontSize = base + r.resolvedViews.FooterBar.FontSize*scale
 	r.resolvedViews.ItemHeight = r.config.ItemHeight
 	// 竖排最大宽：用户运行时覆盖优先（cfg，目前仅测试设置），否则跟随主题 behavior.vertical_max_width。
 	r.resolvedViews.VerticalMaxWidth = pickF(r.config.VerticalMaxWidth, float64(r.resolvedV25.Behavior.VerticalMaxWidth))

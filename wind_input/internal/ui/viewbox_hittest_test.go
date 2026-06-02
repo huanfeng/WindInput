@@ -82,6 +82,7 @@ func TestViewEngine_HitTest_Horizontal(t *testing.T) {
 	if r.TextDrawer() == nil {
 		t.Skip("无可用文本后端")
 	}
+	applyThemePath(r, 6, 8) // 真实主题路径：填充 resolvedViews 字号/几何（生产环境总有主题）
 	cands := []Candidate{
 		{Text: "中文", Index: 1},
 		{Text: "中", Index: 2, Comment: "zhōng"},
@@ -102,6 +103,7 @@ func TestViewEngine_HitTest_Vertical(t *testing.T) {
 	if r.TextDrawer() == nil {
 		t.Skip("无可用文本后端")
 	}
+	applyThemePath(r, 6, 8) // 真实主题路径：填充 resolvedViews 字号/几何
 	cands := []Candidate{
 		{Text: "中文", Index: 1},
 		{Text: "中", Index: 2, Comment: "zhōng"},
@@ -119,6 +121,7 @@ func TestViewEngine_HitTest_SinglePage(t *testing.T) {
 	if r.TextDrawer() == nil {
 		t.Skip("无可用文本后端")
 	}
+	applyThemePath(r, 6, 8) // 真实主题路径：填充 resolvedViews 字号/几何
 	cands := []Candidate{{Text: "中文", Index: 1}, {Text: "中", Index: 2}, {Text: "众", Index: 3}}
 	img, res := r.renderHorizontalV2(cands, "zhong", 5, 1, 1, -1, "", 0)
 	assertHitRects(t, "single-page", img, res, len(cands), false)

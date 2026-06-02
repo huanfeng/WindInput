@@ -256,14 +256,9 @@ func (r *Renderer) buildHorizontalCandidateTree(
 	commentMarginLeft := scD(rv.Comment.MarginLeft)
 
 	itemSpacing := scD(rv.ItemSpacing) // 间距全由主题 metrics.item_spacing 决定（文本序号模式的旧 +4 magic 已下沉到 msime 主题）
-	commentSize := rv.Index.FontSize
-	if isTextIndex {
-		commentSize = rv.Index.FontSize + 2*scale
-	}
-	if rv.Comment.FontSize > 0 { // P7-B：views.comment.font_size 显式则绝对覆盖派生值
-		commentSize = rv.Comment.FontSize
-	}
-	indexSize := maxF(18*scale, rv.Index.FontSize+4*scale)
+	commentSize := rv.Comment.FontSize // 注释字号 = base + views.comment.font_size 偏移（无派生魔法）
+	// 圆圈序号直径 = 序号字号 + index 上下 padding（盒模型：背景=内容+padding；无 max(18) 下限魔法，全由主题 index.padding 控制）
+	indexSize := rv.Index.FontSize + float64(scD(rv.Index.PadTop)+scD(rv.Index.PadBottom))
 	rowH := int(rv.ItemHeight + 0.5)
 
 	// ---- 候选项 ----
@@ -354,7 +349,7 @@ func (r *Renderer) buildHorizontalCandidateTree(
 	}
 
 	// ---- 候选列表行：[内嵌预编辑?] + 候选项 + [翻页区?] ----
-	pagerChildren, pagerUp, pagerDown := r.buildPager(scale, sc, isTextIndex, page, totalPages, hoverPageBtn, rowH)
+	pagerChildren, pagerUp, pagerDown := r.buildPager(scale, sc, page, totalPages, hoverPageBtn, rowH)
 	listChildren := make([]*View, 0, len(items)+4)
 	if isEmbedded {
 		if inline := r.buildEmbeddedPreedit(input, cursorPos, rowH, scale, sc); inline != nil {

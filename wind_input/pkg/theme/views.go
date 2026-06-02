@@ -86,7 +86,7 @@ type ViewNode struct {
 	Background ViewFill    `yaml:"background,omitempty"`
 	Border     ViewBorder  `yaml:"border,omitempty"`
 	FontFamily string      `yaml:"font_family,omitempty"`
-	FontSize   *int        `yaml:"font_size,omitempty"`
+	FontSize   *int        `yaml:"font_size,omitempty"` // 相对主候选字体的有符号偏移(逻辑px)：-4=base-4、+2=base+2；nil/0=同主字体。随用户主字号同步缩放，零魔法数字
 	FontWeight *int        `yaml:"font_weight,omitempty"`
 	Color      string      `yaml:"color,omitempty"`  // 文本色 token
 	Labels     []string    `yaml:"labels,omitempty"` // 仅 index：序号槽位字符（≤10）
@@ -321,11 +321,11 @@ func defaultViews() Views {
 		Window:     ViewNode{Padding: ViewEdges{Top: dimp(8), Right: dimp(8), Bottom: dimp(8), Left: dimp(8)}, Border: ViewBorder{Width: dimp(1), Radius: dimp(8)}},
 		PreeditBar: ViewNode{Padding: ViewEdges{Right: dimp(8), Left: dimp(8)}, Border: ViewBorder{Radius: dimp(4)}},
 		Item:       ViewNode{Padding: ViewEdges{Right: dimp(8), Left: dimp(8)}, Border: ViewBorder{Radius: dimp(4)}},
-		Index:      ViewNode{Labels: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"}}, // 序号默认槽位（无圆背景）；主题可覆盖 labels / background.shape
-		Text:       ViewNode{Margin: ViewEdges{Left: dimp(4)}},                                   // index→text 间距
-		Comment:    ViewNode{Margin: ViewEdges{Left: dimp(8)}},                                   // text→comment 间距
+		Index:      ViewNode{FontSize: intp(-4), Labels: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"}}, // 序号字号默认 base-4（小号）；主题可覆盖 labels / background.shape / font_size
+		Text:       ViewNode{Margin: ViewEdges{Left: dimp(4)}},                                                       // index→text 间距（text 字号=base，偏移 0）
+		Comment:    ViewNode{FontSize: intp(-4), Margin: ViewEdges{Left: dimp(8)}},                                   // 注释字号默认 base-4；text→comment 间距
 		AccentBar:  ViewNode{},
-		FooterBar:  ViewNode{},
+		FooterBar:  ViewNode{FontSize: intp(-4)}, // 翻页/页码字号默认 base-4
 		Metrics: &ViewMetrics{
 			ItemSpacing:  dimp(12),
 			BandGap:      dimp(2),

@@ -28,12 +28,17 @@ views:
   index:
     background: {color: "${index_bg}", shape: circle}
     color: "${index_text}"
+    font_size: -4                                  # 序号小号(主候选-4)；数字嵌入圆内
+    padding: {top: 2, bottom: 2, left: 2, right: 2}  # 圆圈直径 = 序号字号 + 上下 padding
   text:
     margin: {left: 4}
     color: "${text}"
   comment:
     margin: {left: 6}
     color: "${comment}"
+    font_size: -4                                  # 注释小号(主候选-4)
+  footer_bar:
+    font_size: -4                                  # 页码/翻页字号(主候选-4)
   accent_bar:
     background: {color: "${accent}"}
   status:

@@ -59,32 +59,39 @@ func TestMeasureText_FamilyRouting(t *testing.T) {
 	}
 }
 
-// TestRefreshResolvedViews_FontOverride 验证 P7-B 字号回填语义：
-//   - views 显式 font_size（逻辑像素）经 refreshResolvedViews ×DPI scale 生效（绝对覆盖）；
-//   - font_weight 原样透传进 RVNode；
-//   - 未写 font_size 的元素回退运行时派生字号（config.FontSize，已含 scale）。
-func TestRefreshResolvedViews_FontOverride(t *testing.T) {
+// TestRefreshResolvedViews_RelativeFont 验证相对字号语义：
+//   - views.<el>.font_size 是相对主候选字体(base=config.FontSize)的有符号偏移；
+//   - 字号 = base + offset×scale；偏移 0（含 text/preedit 默认）= 同主字体；
+//   - font_weight 原样透传进 RVNode。
+func TestRefreshResolvedViews_RelativeFont(t *testing.T) {
 	cfg := parityConfig()
 	r := NewRenderer(cfg)
 	if r.TextDrawer() == nil {
 		t.Skip("无可用文本后端")
 	}
-	views := themePathViews(6, 8)
-	views.Text.FontSize = ip(20)
-	views.Text.FontWeight = ip(700)
+	v := themePathViews(6, 8) // fixture: index/comment/footer 偏移 -4，text/preedit 偏移 0
+	v.Text.FontSize = ip(2)   // 主候选 +2
+	v.Text.FontWeight = ip(700)
+	v.Index.FontSize = ip(-6) // 序号 -6
 	r.resolvedV25 = &theme.ResolvedV25{Palette: themePathPalette(), Behavior: theme.ResolvedBehavior{FontSize: 18, ShowPageNumber: true, VerticalMaxWidth: 600}}
-	r.themeViews = &views
+	r.themeViews = &v
 	r.refreshResolvedViews()
 
 	scale := GetDPIScale()
-	if got, want := r.resolvedViews.Text.FontSize, 20*scale; got != want {
-		t.Errorf("Text.FontSize 显式 20(逻辑px) 应 ×scale=%v, got %v", want, got)
+	base := r.config.FontSize // 主候选字体
+	if got, want := r.resolvedViews.Text.FontSize, base+2*scale; got != want {
+		t.Errorf("Text 偏移 +2 应 = base+2×scale=%v, got %v", want, got)
+	}
+	if got, want := r.resolvedViews.Index.FontSize, base+(-6)*scale; got != want {
+		t.Errorf("Index 偏移 -6 应 = base-6×scale=%v, got %v", want, got)
+	}
+	if got, want := r.resolvedViews.Comment.FontSize, base+(-4)*scale; got != want {
+		t.Errorf("Comment 偏移 -4(fixture) 应 = base-4×scale=%v, got %v", want, got)
 	}
 	if r.resolvedViews.Text.FontWeight != 700 {
 		t.Errorf("Text.FontWeight 应透传 700, got %d", r.resolvedViews.Text.FontWeight)
 	}
-	// PreeditBar 未写 font_size → 回退运行时派生（config.FontSize，已 ×scale）
-	if got, want := r.resolvedViews.PreeditBar.FontSize, r.config.FontSize; got != want {
-		t.Errorf("PreeditBar.FontSize 未写应回退 config.FontSize=%v, got %v", want, got)
+	if got, want := r.resolvedViews.PreeditBar.FontSize, base; got != want {
+		t.Errorf("PreeditBar 偏移 0 应 = base=%v, got %v", want, got)
 	}
 }

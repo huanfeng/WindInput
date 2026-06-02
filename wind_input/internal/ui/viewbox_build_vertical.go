@@ -11,7 +11,7 @@ import (
 // buildPager 构建翻页区的子节点（chevron 箭头 + 可选页码）。
 // 返回子节点切片，以及可用时的上/下翻页按钮（供命中测试）。无翻页时返回空。
 func (r *Renderer) buildPager(
-	scale float64, sc func(float64) int, isTextIndex bool,
+	scale float64, sc func(float64) int,
 	page, totalPages int, hoverPageBtn string, rowH int,
 ) (children []*View, up, down *View) {
 	cfg := &r.config
@@ -23,12 +23,8 @@ func (r *Renderer) buildPager(
 		return nil, nil, nil
 	}
 
-	idxFS := r.resolvedViews.Index.FontSize
-	pageFS := maxF(12*scale, idxFS)
-	if isTextIndex {
-		pageFS = maxF(14*scale, idxFS+2*scale)
-	}
-	arrowSz := maxF(8*scale, pageFS*0.65)
+	pageFS := r.resolvedViews.FooterBar.FontSize // 页码/翻页字号 = base + views.footer_bar.font_size 偏移（无派生魔法）
+	arrowSz := maxF(8*scale, pageFS*0.65)        // chevron 视觉尺寸按字号比例（绘制内禀几何，非主题字号配置）
 	arrowW := int(arrowSz + 6*scale*2 + 0.5)
 	lineW := 1.5 * scale
 	canUp := page > 1
@@ -96,8 +92,9 @@ func (r *Renderer) buildVerticalCandidateTree(
 	commentMarginLeft := scD(rv.Comment.MarginLeft)
 	itemPadR := scD(rv.Item.PadRight)
 
-	indexRadius := maxF(11*scale, (rv.Index.FontSize+8*scale)/2)
-	indexAreaW := int(2*indexRadius + 6*scale + 0.5)
+	// 圆圈序号直径 = 序号字号 + index 上下 padding（盒模型，无 max(11/18) 尺寸下限魔法）。
+	indexD := rv.Index.FontSize + float64(scD(rv.Index.PadTop)+scD(rv.Index.PadBottom))
+	indexAreaW := int(indexD + 6*scale + 0.5)
 	if isTextIndex {
 		// 文本序号列宽按字形测量收紧：取最宽序号标签实际宽 + 小留白，紧凑且各行候选文字对齐。
 		// （旧 sc(20*scale) 既偏宽、又重复乘 scale 致高 DPI 失真。）
@@ -112,13 +109,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 		}
 		indexAreaW = int(maxLabelW + 4*scale + 0.5)
 	}
-	commentSize := rv.Index.FontSize
-	if isTextIndex {
-		commentSize = rv.Index.FontSize + 2*scale
-	}
-	if rv.Comment.FontSize > 0 { // P7-B：views.comment.font_size 显式则绝对覆盖派生值
-		commentSize = rv.Comment.FontSize
-	}
+	commentSize := rv.Comment.FontSize // 注释字号 = base + views.comment.font_size 偏移（无派生魔法）
 	rowH := int(rv.ItemHeight + 0.5)
 
 	// 强调条占位 rail 宽度（逻辑像素）：与横排一致取 item 左内边距为左留白，承载强调条；
@@ -188,7 +179,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 					TextStyle: TextStyle{FontSize: rv.Index.FontSize, Weight: idxWeight, Family: rv.Index.FontFamily, Color: idxColor},
 				})
 			} else {
-				d := int(2*indexRadius + 0.5)
+				d := int(indexD + 0.5)
 				leftM := sc(3 * scale)
 				rightM := indexAreaW - d - leftM
 				if rightM < 0 {
@@ -267,7 +258,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 	bands = append(bands, list)
 
 	// ---- 翻页区（底部居中行）----
-	pagerChildren, pagerUp, pagerDown := r.buildPager(scale, sc, isTextIndex, page, totalPages, hoverPageBtn, rowH)
+	pagerChildren, pagerUp, pagerDown := r.buildPager(scale, sc, page, totalPages, hoverPageBtn, rowH)
 	if len(pagerChildren) > 0 {
 		bands = append(bands, &View{
 			Layout:     LayoutRow,
