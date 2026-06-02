@@ -70,7 +70,7 @@ func TestWindowBackgroundImage_Rendered(t *testing.T) {
 		t.Skip("无可用文本后端")
 	}
 	views := themePathViews(6, 8)
-	views.Window.Background.Image = &theme.ViewImage{Ref: "panel", Mode: "nine_slice", Slice: theme.ViewEdges{Top: ip(8), Right: ip(8), Bottom: ip(8), Left: ip(8)}}
+	views.Window.Background.Image = &theme.ViewImage{Ref: "panel", Mode: "nine_slice", Slice: theme.ViewEdges{Top: dip(8), Right: dip(8), Bottom: dip(8), Left: dip(8)}}
 	r.resolvedV25 = &theme.ResolvedV25{
 		Palette:   themePathPalette(),
 		Behavior:  theme.ResolvedBehavior{FontSize: 18, ShowPageNumber: true, VerticalMaxWidth: 600},

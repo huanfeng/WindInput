@@ -117,8 +117,12 @@ func TestMsimeThemeViewsParse(t *testing.T) {
 	if th.Views == nil {
 		t.Fatal("msime theme.yaml 应含 views 块")
 	}
-	if th.Views.Item.Border.Radius == nil || *th.Views.Item.Border.Radius != 2 {
-		t.Errorf("msime item radius 应为 2, got %v", th.Views.Item.Border.Radius)
+	if th.Views.Item.Border.Radius == nil || th.Views.Item.Border.Radius.Value != 4 {
+		t.Errorf("msime item radius 应为 4, got %v", th.Views.Item.Border.Radius)
+	}
+	// 窗口边框=1px 发丝线（设备像素，不随 DPI 加粗）——匹配旧渲染器的固定 1px 边框。
+	if w := th.Views.Window.Border.Width; w == nil || w.Value != 1 || !w.Px {
+		t.Errorf("msime window border width 应为 1px(设备像素), got %v", w)
 	}
 	if th.Views.Window.Background.Color != "${background}" {
 		t.Errorf("window background token, got %q", th.Views.Window.Background.Color)
@@ -240,23 +244,23 @@ comment:
 	if err := yaml.Unmarshal([]byte(data), &v); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if v.Window.Padding.Top == nil || *v.Window.Padding.Top != 6 {
+	if v.Window.Padding.Top == nil || v.Window.Padding.Top.Value != 6 {
 		t.Errorf("window padding top: %v", v.Window.Padding.Top)
 	}
-	if v.Window.Border.Radius == nil || *v.Window.Border.Radius != 8 {
+	if v.Window.Border.Radius == nil || v.Window.Border.Radius.Value != 8 {
 		t.Errorf("window border radius: %v", v.Window.Border.Radius)
 	}
-	if v.Item.Padding.Right == nil || *v.Item.Padding.Right != 10 {
+	if v.Item.Padding.Right == nil || v.Item.Padding.Right.Value != 10 {
 		t.Errorf("item padding right: %v", v.Item.Padding.Right)
 	}
-	if v.Text.Margin.Left == nil || *v.Text.Margin.Left != 4 {
+	if v.Text.Margin.Left == nil || v.Text.Margin.Left.Value != 4 {
 		t.Errorf("text margin left: %v", v.Text.Margin.Left)
 	}
 	// 未写字段应为 nil（显式语义）
 	if v.Item.Margin.Left != nil {
 		t.Errorf("item margin left 未写应为 nil, got %v", *v.Item.Margin.Left)
 	}
-	if v.Window.Padding.Right == nil || *v.Window.Padding.Right != 8 {
+	if v.Window.Padding.Right == nil || v.Window.Padding.Right.Value != 8 {
 		t.Errorf("window padding right: %v", v.Window.Padding.Right)
 	}
 }

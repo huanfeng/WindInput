@@ -43,11 +43,11 @@ func TestViewShadowSpec_Resolve(t *testing.T) {
 	pal := testPalette()
 	v := defaultViews()
 	v.Metrics = &ViewMetrics{
-		Shadow: &ViewShadowSpec{OffsetX: intp(3), OffsetY: intp(5), Blur: intp(8), Color: "#FF0000"},
+		Shadow: &ViewShadowSpec{OffsetX: dimp(3), OffsetY: dimp(5), Blur: dimp(8), Color: "#FF0000"},
 	}
 	rv := ResolveCandidateViews(v, pal)
-	if rv.ShadowOffsetX != 3 || rv.ShadowOffsetY != 5 {
-		t.Errorf("structured shadow offset x/y 应解析: %d/%d", rv.ShadowOffsetX, rv.ShadowOffsetY)
+	if rv.ShadowOffsetX.Value != 3 || rv.ShadowOffsetY.Value != 5 {
+		t.Errorf("structured shadow offset x/y 应解析: %v/%v", rv.ShadowOffsetX, rv.ShadowOffsetY)
 	}
 	if rv.ShadowColor == nil {
 		t.Error("structured shadow color 应覆盖 palette.Shadow")

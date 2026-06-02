@@ -13,7 +13,7 @@ palette: msime-classic
 views:
   window:
     padding: {top: 6, right: 8, bottom: 6, left: 8}
-    border: {radius: 4, color: "${border}"}
+    border: {radius: 4, width: 1px, color: "${border}"}   # 1px 发丝线：边框不随 DPI 加粗（匹配旧渲染器）
     background: {color: "${background}"}
   preedit_bar:
     padding: {left: 8, right: 8}
@@ -21,7 +21,7 @@ views:
     color: "${preedit_text}"
   item:
     padding: {left: 8, right: 8}
-    border: {radius: 2}
+    border: {radius: 4}
     selected: {background: {color: "${selected_bg}"}}
     hover: {background: {color: "${hover_bg}"}}
   index:
@@ -35,6 +35,7 @@ views:
   accent_bar:
     background: {color: "${accent}"}
   metrics:
+    item_spacing: 16   # 文本序号模式间距（旧合成桥 12+4 magic 下沉，显式声明）
     accent_bar:
       enabled: true
       width: 3

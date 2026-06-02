@@ -14,7 +14,7 @@ palette: windy-blue
 views:
   window:
     padding: {top: 6, right: 8, bottom: 6, left: 8}
-    border: {radius: 8, color: "${border}"}
+    border: {radius: 8, width: 1px, color: "${border}"}   # 1px 发丝线：边框不随 DPI 加粗（匹配旧渲染器）
     background: {color: "${background}"}
   preedit_bar:
     padding: {left: 8, right: 8}

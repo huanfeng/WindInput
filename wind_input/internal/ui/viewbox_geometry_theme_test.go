@@ -40,23 +40,24 @@ func flattenNodes(v *View) []string {
 // 且真实主题窗口 padding≠8。此处用内联完整 views（padding=6）驱动真实消费路径并锁 golden，
 // 守护 P6 阶段2c「合成桥→ResolveCandidateViews」切换的几何+颜色零回归。
 
-func ip(v int) *int         { return &v }
-func fp(v float64) *float64 { return &v }
+func ip(v int) *int              { return &v }                   // 字号/字重等 *int 字段
+func dip(v int) *theme.Dimension { d := theme.Dp(v); return &d } // 几何字段=dp 尺寸
+func fp(v float64) *float64      { return &v }
 
 // themePathViews 返回一份完整候选窗 views（= defaultViews 量级），winPad/itemPad 可调
 // 以覆盖不同 padding（默认指纹用 winPad=6 覆盖 parityConfig padding=8 盲区）。
 func themePathViews(winPad, itemPad int) theme.Views {
 	return theme.Views{
-		Window:     theme.ViewNode{Padding: theme.ViewEdges{Top: ip(winPad), Right: ip(winPad), Bottom: ip(winPad), Left: ip(winPad)}, Border: theme.ViewBorder{Radius: ip(8)}},
-		PreeditBar: theme.ViewNode{Padding: theme.ViewEdges{Right: ip(8), Left: ip(8)}, Border: theme.ViewBorder{Radius: ip(4)}},
-		Item:       theme.ViewNode{Padding: theme.ViewEdges{Right: ip(itemPad), Left: ip(itemPad)}, Border: theme.ViewBorder{Radius: ip(4)}},
+		Window:     theme.ViewNode{Padding: theme.ViewEdges{Top: dip(winPad), Right: dip(winPad), Bottom: dip(winPad), Left: dip(winPad)}, Border: theme.ViewBorder{Radius: dip(8)}},
+		PreeditBar: theme.ViewNode{Padding: theme.ViewEdges{Right: dip(8), Left: dip(8)}, Border: theme.ViewBorder{Radius: dip(4)}},
+		Item:       theme.ViewNode{Padding: theme.ViewEdges{Right: dip(itemPad), Left: dip(itemPad)}, Border: theme.ViewBorder{Radius: dip(4)}},
 		Index:      theme.ViewNode{},
-		Text:       theme.ViewNode{Margin: theme.ViewEdges{Left: ip(4)}},
-		Comment:    theme.ViewNode{Margin: theme.ViewEdges{Left: ip(8)}},
+		Text:       theme.ViewNode{Margin: theme.ViewEdges{Left: dip(4)}},
+		Comment:    theme.ViewNode{Margin: theme.ViewEdges{Left: dip(8)}},
 		AccentBar:  theme.ViewNode{},
 		Metrics: &theme.ViewMetrics{
-			ItemSpacing: ip(12), BandGap: ip(4), ShadowOffset: ip(2),
-			AccentBar: &theme.AccentBarMetrics{Width: ip(3), Offset: ip(1), HeightRatio: fp(0.6)},
+			ItemSpacing: dip(12), BandGap: dip(4), ShadowOffset: dip(2),
+			AccentBar: &theme.AccentBarMetrics{Width: dip(3), Offset: dip(1), HeightRatio: fp(0.6)},
 		},
 	}
 }

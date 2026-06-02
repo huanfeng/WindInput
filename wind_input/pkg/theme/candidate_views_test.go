@@ -62,17 +62,17 @@ func TestResolveCandidateViews_GeometryAndColor(t *testing.T) {
 	v.Window.Background = ViewFill{Color: "${background}"}
 	rv := ResolveCandidateViews(v, pal)
 
-	if rv.Window.PadLeft != 8 || rv.Window.PadTop != 8 {
-		t.Errorf("Window padding 应为 8, got L=%d T=%d", rv.Window.PadLeft, rv.Window.PadTop)
+	if rv.Window.PadLeft.Value != 8 || rv.Window.PadTop.Value != 8 {
+		t.Errorf("Window padding 应为 8, got L=%v T=%v", rv.Window.PadLeft, rv.Window.PadTop)
 	}
-	if rv.Item.BorderRadius != 4 {
-		t.Errorf("Item radius 应为 4, got %d", rv.Item.BorderRadius)
+	if rv.Item.BorderRadius.Value != 4 {
+		t.Errorf("Item radius 应为 4, got %v", rv.Item.BorderRadius)
 	}
-	if rv.ItemSpacing != 12 || rv.WindowGap != 4 || rv.ShadowOffset != 2 {
-		t.Errorf("metrics 顶层错: spacing=%d gap=%d shadow=%d", rv.ItemSpacing, rv.WindowGap, rv.ShadowOffset)
+	if rv.ItemSpacing.Value != 12 || rv.WindowGap.Value != 2 || rv.ShadowOffset.Value != 2 {
+		t.Errorf("metrics 顶层错: spacing=%v gap=%v shadow=%v", rv.ItemSpacing, rv.WindowGap, rv.ShadowOffset)
 	}
-	if rv.AccentBarWidth != 3 || rv.AccentBarOffset != 1 || rv.AccentBarHRatio != 0.6 {
-		t.Errorf("accent metrics 错: w=%d off=%d hr=%v", rv.AccentBarWidth, rv.AccentBarOffset, rv.AccentBarHRatio)
+	if rv.AccentBarWidth.Value != 3 || rv.AccentBarOffset.Value != 1 || rv.AccentBarHRatio != 0.6 {
+		t.Errorf("accent metrics 错: w=%v off=%v hr=%v", rv.AccentBarWidth, rv.AccentBarOffset, rv.AccentBarHRatio)
 	}
 	if rv.Index.BgColor != pal.CandidateWindow.IndexBg {
 		t.Errorf("Index.BgColor 默认应=palette.IndexBg, got %v", rv.Index.BgColor)
@@ -113,7 +113,7 @@ func TestResolveCandidateViews_States(t *testing.T) {
 		Background: ViewFill{Color: "#102030", Image: &ViewImage{Ref: "hl", Mode: "nine_slice"}},
 		Color:      "#FFFFFF",
 		FontWeight: intp(700),
-		Border:     ViewBorder{Color: "#445566", Width: intp(2)},
+		Border:     ViewBorder{Color: "#445566", Width: dimp(2)},
 	}
 	v.Item.Hover = &ViewNode{Background: ViewFill{Color: "${hover_bg}"}}
 	v.Item.Disabled = &ViewNode{Color: "#999999"}
@@ -132,7 +132,7 @@ func TestResolveCandidateViews_States(t *testing.T) {
 	if sel.FontWeight != 700 {
 		t.Errorf("selected 字重应=700, got %d", sel.FontWeight)
 	}
-	if sel.BorderColor == nil || sel.BorderWidth == nil || *sel.BorderWidth != 2 {
+	if sel.BorderColor == nil || sel.BorderWidth == nil || sel.BorderWidth.Value != 2 {
 		t.Errorf("selected 边框解析错: color=%v width=%v", sel.BorderColor, sel.BorderWidth)
 	}
 
@@ -203,7 +203,7 @@ func TestResolveCandidateViews_BackgroundImage(t *testing.T) {
 	v.Window.Background.Image = &ViewImage{
 		Ref:   "paper",
 		Mode:  "nine_slice",
-		Slice: ViewEdges{Top: intp(4), Right: intp(4), Bottom: intp(4), Left: intp(4)},
+		Slice: ViewEdges{Top: dimp(4), Right: dimp(4), Bottom: dimp(4), Left: dimp(4)},
 	}
 	v.Item.Layers = []ViewImage{
 		{Ref: "glow", Mode: "stretch", Z: -1, Anchor: "left", Offset: ViewImagePoint{X: 2, Y: 0}, Size: ViewImageSize{W: 8, H: 8}},

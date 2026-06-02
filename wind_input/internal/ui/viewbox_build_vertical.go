@@ -2,7 +2,11 @@ package ui
 
 // 竖排候选窗的盒模型 View 树构建（v2.6 P1），以及横/竖共用的翻页区构建。
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/huanfeng/wind_input/pkg/theme"
+)
 
 // buildPager 构建翻页区的子节点（chevron 箭头 + 可选页码）。
 // 返回子节点切片，以及可用时的上/下翻页按钮（供命中测试）。无翻页时返回空。
@@ -81,15 +85,16 @@ func (r *Renderer) buildVerticalCandidateTree(
 	cfg := &r.config
 	scale := GetDPIScale()
 	sc := func(v float64) int { return int(v*scale + 0.5) }
+	scD := func(d theme.Dimension) int { return d.Scaled(scale) } // 按单位换算为设备像素（dp 缩放 / px 不缩放）
 
 	isTextIndex := cfg.IndexStyle == "text"
-	// 外观取值改走 ResolvedViews（逻辑像素，single-scale）。
+	// 外观取值改走 ResolvedViews，经 scD 按单位换算为设备像素（dp 缩放 / px 不缩放）。
 	rv := &r.resolvedViews
-	padX := float64(rv.Window.PadLeft)
-	padY := float64(rv.Window.PadTop)
-	indexMarginRight := float64(rv.Text.MarginLeft)
-	commentMarginLeft := float64(rv.Comment.MarginLeft)
-	itemPadR := float64(rv.Item.PadRight)
+	padX := scD(rv.Window.PadLeft)
+	padY := scD(rv.Window.PadTop)
+	indexMarginRight := scD(rv.Text.MarginLeft)
+	commentMarginLeft := scD(rv.Comment.MarginLeft)
+	itemPadR := scD(rv.Item.PadRight)
 
 	indexRadius := maxF(11*scale, (rv.Index.FontSize+8*scale)/2)
 	indexAreaW := int(2*indexRadius + 6*scale + 0.5)
@@ -118,14 +123,14 @@ func (r *Renderer) buildVerticalCandidateTree(
 
 	// 强调条占位 rail 宽度（逻辑像素）：与横排一致取 item 左内边距为左留白，承载强调条；
 	// 不足以容纳强调条（offset+width）时取下限。无强调条时 railFixedW=0（不占位）。
-	railW := 0.0
+	railW := 0 // 设备像素；0=无强调条不占位
 	railFixedW := 0
 	if cfg.HasAccentBar && rv.AccentBar.BgColor != nil {
-		railW = float64(rv.Item.PadLeft)
-		if minW := float64(rv.AccentBarOffset + rv.AccentBarWidth + 2); railW < minW {
+		railW = scD(rv.Item.PadLeft)
+		if minW := rv.AccentBarOffset.Scaled(scale) + rv.AccentBarWidth.Scaled(scale) + sc(2); railW < minW {
 			railW = minW
 		}
-		railFixedW = sc(railW)
+		railFixedW = railW
 	}
 
 	// 长候选钳制：预量算自然宽，计算截断预算 targetW ≤ VerticalMaxWidth（默认 600*scale）。
@@ -135,15 +140,15 @@ func (r *Renderer) buildVerticalCandidateTree(
 	for i, cand := range candidates {
 		lo := float64(railFixedW) + 8*scale
 		if cand.Index >= 0 {
-			lo = float64(railFixedW) + float64(indexAreaW) + indexMarginRight
+			lo = float64(railFixedW) + float64(indexAreaW) + float64(indexMarginRight)
 		}
 		tw := measureText(r.textDrawer, candidateDisplayText(cand, cfg.CmdbarPrefix), rv.Text.FontSize, rv.Text.FontFamily)
 		if cand.Comment != "" {
 			commentWidths[i] = measureText(r.textDrawer, cand.Comment, commentSize, rv.Comment.FontFamily)
 		}
-		nat := lo + tw + itemPadR
+		nat := lo + tw + float64(itemPadR)
 		if commentWidths[i] > 0 {
-			nat += commentMarginLeft + commentWidths[i]
+			nat += float64(commentMarginLeft) + commentWidths[i]
 		}
 		if nat > maxNatural {
 			maxNatural = nat
@@ -208,18 +213,18 @@ func (r *Renderer) buildVerticalCandidateTree(
 
 		lo := float64(railFixedW) + 8*scale
 		if cand.Index >= 0 {
-			lo = float64(railFixedW) + float64(indexAreaW) + indexMarginRight
+			lo = float64(railFixedW) + float64(indexAreaW) + float64(indexMarginRight)
 		}
-		availText := targetW - lo - itemPadR
+		availText := targetW - lo - float64(itemPadR)
 		if commentWidths[i] > 0 {
-			availText -= commentMarginLeft + commentWidths[i]
+			availText -= float64(commentMarginLeft) + commentWidths[i]
 		}
 		textChild := &View{
 			Text:      r.truncateToWidth(candidateDisplayText(cand, cfg.CmdbarPrefix), rv.Text.FontSize, availText, rv.Text.FontFamily),
 			TextStyle: TextStyle{FontSize: rv.Text.FontSize, Weight: textWeight, Family: rv.Text.FontFamily, Color: textColor},
 		}
 		if len(children) > 0 {
-			textChild.Margin = Edges{Left: sc(indexMarginRight)}
+			textChild.Margin = Edges{Left: indexMarginRight}
 		} else {
 			textChild.Margin = Edges{Left: sc(8 * scale)} // 无序号时靠左
 		}
@@ -229,14 +234,14 @@ func (r *Renderer) buildVerticalCandidateTree(
 			children = append(children, &View{
 				Text:      cand.Comment,
 				TextStyle: TextStyle{FontSize: commentSize, Weight: cmtWeight, Family: rv.Comment.FontFamily, Color: cmtColor},
-				Margin:    Edges{Left: sc(commentMarginLeft)},
+				Margin:    Edges{Left: commentMarginLeft},
 			})
 		}
 
 		// 强调条占位元素：rail 在所有行占据左留白（保持列对齐），仅选中行绘制强调条；
 		// 内容（序号/文字）排在 rail 右侧。无强调条主题不加 rail（railFixedW=0，内容靠左）。
 		itemChildren := children
-		if rail := r.buildAccentRail(railW, i == selectedIndex, rowH, sc); rail != nil {
+		if rail := r.buildAccentRail(railW, i == selectedIndex, rowH, scale); rail != nil {
 			itemChildren = append([]*View{rail}, children...)
 		}
 		item := &View{
@@ -244,10 +249,10 @@ func (r *Renderer) buildVerticalCandidateTree(
 			CrossAlign: AlignCenter,
 			Stretch:    true, // 每行全宽
 			FixedH:     rowH,
-			Padding:    Edges{Right: sc(itemPadR)},
+			Padding:    Edges{Right: itemPadR},
 			Children:   itemChildren,
 		}
-		r.applyItemState(item, st, sc)                // P7-D：选中/悬停态背景（高亮位图/底色）+ 边框
+		r.applyItemState(item, st, scale)             // P7-D：选中/悬停态背景（高亮位图/底色）+ 边框
 		r.appendThemeLayers(item, rv.Item.Layers, sc) // P7-C：候选项装饰层
 		items = append(items, item)
 	}
@@ -274,11 +279,11 @@ func (r *Renderer) buildVerticalCandidateTree(
 	window := &View{
 		Layout:     LayoutColumn,
 		CrossAlign: AlignCenter, // 让底部翻页行水平居中
-		Gap:        sc(float64(rv.WindowGap)),
-		Padding:    Edges{Top: sc(padY), Right: sc(padX), Bottom: sc(padY), Left: sc(padX)},
+		Gap:        rv.WindowGap.Scaled(scale),
+		Padding:    Edges{Top: padY, Right: padX, Bottom: padY, Left: padX},
 		Background: r.fillFor(r.resolvedViews.Window.BgColor, r.resolvedViews.Window.BgImage), // P7-C：背景图来自 views.window.background.image
-		Border:     r.windowBorder(sc(float64(rv.Window.BorderRadius)), sc, scale),
-		Shadow:     &ViewShadow{OffsetX: sc(float64(rv.ShadowOffsetX)), OffsetY: sc(float64(rv.ShadowOffsetY)), Color: r.resolvedViews.ShadowColor},
+		Border:     r.windowBorder(rv.Window.BorderRadius.Scaled(scale), sc, scale),
+		Shadow:     &ViewShadow{OffsetX: rv.ShadowOffsetX.Scaled(scale), OffsetY: rv.ShadowOffsetY.Scaled(scale), Color: r.resolvedViews.ShadowColor},
 		Children:   bands,
 	}
 	r.appendThemeLayers(window, rv.Window.Layers, sc) // P7-C：窗口装饰层（水印等）

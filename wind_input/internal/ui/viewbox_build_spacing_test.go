@@ -26,15 +26,16 @@ func horizontalListGap(t *testing.T, indexStyle string) int {
 	return list.Gap
 }
 
-// TestBuildHorizontal_TextIndexSpacing 验证 build 对文本序号施加 +4（圆点 boxGap 8 vs 文本 12）。
-// P6 阶段2c 把间距 12/16 的 isTextIndex 选择从 resolve 层下沉到 build；本测试守护该下沉。
-func TestBuildHorizontal_TextIndexSpacing(t *testing.T) {
-	circleGap := horizontalListGap(t, "circle") // spacing 12 → boxGap max(12-4,0)=8
-	textGap := horizontalListGap(t, "text")     // spacing 16 → boxGap max(16-4,0)=12
-	if circleGap != 8 {
-		t.Errorf("圆点序号 boxGap 应为 8（spacing 12），got %d", circleGap)
+// TestBuildHorizontal_SpacingFollowsTheme 验证间距完全由主题 metrics.item_spacing 决定，
+// 与序号样式（circle/text）无关。旧的「文本序号 +4」magic 已移除并下沉到主题文件（msime
+// 显式 item_spacing:16），使渲染完全遵循主题文件。
+func TestBuildHorizontal_SpacingFollowsTheme(t *testing.T) {
+	circleGap := horizontalListGap(t, "circle") // spacing 12, padding 2 → boxGap max(12-4,0)=8
+	textGap := horizontalListGap(t, "text")     // 同上：序号样式不再影响间距
+	if circleGap != textGap {
+		t.Errorf("序号样式不应影响间距（+4 magic 已移除）：circle=%d text=%d", circleGap, textGap)
 	}
-	if textGap != 12 {
-		t.Errorf("文本序号 boxGap 应为 12（spacing 16，+4 已下沉 build），got %d", textGap)
+	if circleGap != 8 {
+		t.Errorf("boxGap 应为 8（spacing 12 − padL2 − padR2），got %d", circleGap)
 	}
 }

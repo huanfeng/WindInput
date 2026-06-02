@@ -73,9 +73,9 @@ func (r *Renderer) buildPreeditBand(input string, cursorPos, inputH int, scale f
 	}
 	band := &View{
 		Layout: LayoutRow, CrossAlign: AlignCenter, Stretch: true, FixedH: inputH,
-		Padding:    Edges{Left: sc(float64(pb.PadLeft)), Right: sc(float64(pb.PadRight))},
+		Padding:    Edges{Left: pb.PadLeft.Scaled(scale), Right: pb.PadRight.Scaled(scale)},
 		Background: r.fillFor(bgColor, pb.BgImage), // P7-C：preedit 背景可带图
-		Border:     Border{Radius: sc(float64(pb.BorderRadius))},
+		Border:     Border{Radius: pb.BorderRadius.Scaled(scale)},
 		Children:   children,
 	}
 	r.appendThemeLayers(band, pb.Layers, sc)
@@ -83,7 +83,7 @@ func (r *Renderer) buildPreeditBand(input string, cursorPos, inputH int, scale f
 		cw := measureText(r.textDrawer, input[:cursorPos], pbFS, pb.FontFamily)
 		band.Layers = append(band.Layers, ImageLayer{
 			Color: pb.TextColor, Z: 1, Anchor: "left",
-			OffsetX: sc(float64(pb.PadLeft)) + int(cw+0.5), W: maxInt(1, sc(1.5*scale)), H: int(pbFS + 0.5),
+			OffsetX: pb.PadLeft.Scaled(scale) + int(cw+0.5), W: maxInt(1, sc(1.5*scale)), H: int(pbFS + 0.5),
 		})
 	}
 	return band
@@ -96,7 +96,7 @@ func (r *Renderer) windowBorder(radius int, sc func(float64) int, scale float64)
 		return Border{Width: maxInt(1, sc(2.5*scale)), Color: cfg.ModeAccentColor, Radius: radius}
 	}
 	// 非 accent：边框宽来自 views.window.border.width（逻辑像素，经 sc 缩放）；0=无边框。
-	return Border{Width: sc(float64(r.resolvedViews.Window.BorderWidth)), Color: r.resolvedViews.Window.BorderColor, Radius: radius}
+	return Border{Width: r.resolvedViews.Window.BorderWidth.Scaled(scale), Color: r.resolvedViews.Window.BorderColor, Radius: radius}
 }
 
 // truncateToWidth 把 text 截断到不超过 avail 像素宽，超出时尾部加省略号。
@@ -186,7 +186,7 @@ func (r *Renderer) elementFill(n theme.RVNode, selected, hover bool) Fill {
 
 // applyItemState 把状态 patch 应用到候选项 View：背景（高亮位图优先于底色）+ 边框覆盖（P7-D）。
 // 文字色/字重在行内构建文本 cell 时单独应用（整行统一），不在此处理。
-func (r *Renderer) applyItemState(item *View, st *theme.RVState, sc func(float64) int) {
+func (r *Renderer) applyItemState(item *View, st *theme.RVState, scale float64) {
 	if st == nil {
 		return
 	}
@@ -195,7 +195,7 @@ func (r *Renderer) applyItemState(item *View, st *theme.RVState, sc func(float64
 		item.Border.Color = st.BorderColor
 	}
 	if st.BorderWidth != nil {
-		item.Border.Width = sc(float64(*st.BorderWidth))
+		item.Border.Width = st.BorderWidth.Scaled(scale)
 	}
 }
 
@@ -203,17 +203,17 @@ func (r *Renderer) applyItemState(item *View, st *theme.RVState, sc func(float64
 // 占位以保持序号/文字列对齐，仅 selected 行绘制强调条（z<0 纯色层，竖直居中、左缘偏移）。
 // 主题无强调条（HasAccentBar=false 或无颜色）时返回 nil，调用方据此不加 rail（沿用原内边距/无留白）。
 // 替代旧的 item.Layers 覆盖层写法：强调条从此参与盒模型布局，内容自然排在其右，不再依赖左内边距兜位。
-func (r *Renderer) buildAccentRail(railW float64, selected bool, rowH int, sc func(float64) int) *View {
+func (r *Renderer) buildAccentRail(railW int, selected bool, rowH int, scale float64) *View {
 	rv := &r.resolvedViews
 	if !r.config.HasAccentBar || rv.AccentBar.BgColor == nil {
 		return nil
 	}
-	rail := &View{FixedW: sc(railW), FixedH: rowH}
+	rail := &View{FixedW: railW, FixedH: rowH}
 	if selected {
-		barW := sc(float64(rv.AccentBarWidth))
+		barW := rv.AccentBarWidth.Scaled(scale)
 		rail.Layers = []ImageLayer{{
 			Color: rv.AccentBar.BgColor, Z: -1, Anchor: "left",
-			OffsetX: sc(float64(rv.AccentBarOffset)), W: barW,
+			OffsetX: rv.AccentBarOffset.Scaled(scale), W: barW,
 			H: int(rv.ItemHeight*rv.AccentBarHRatio + 0.5), Radius: barW / 2,
 		}}
 	}
@@ -240,23 +240,22 @@ func (r *Renderer) buildHorizontalCandidateTree(
 	cfg := &r.config
 	scale := GetDPIScale()
 	sc := func(v float64) int { return int(v*scale + 0.5) }
+	// scD 按单位换算几何尺寸为设备像素：dp ×scale 四舍五入，px 原样（发丝线不随 DPI 加粗）。
+	scD := func(d theme.Dimension) int { return d.Scaled(scale) }
 
 	isTextIndex := cfg.IndexStyle == "text"
 	isEmbedded := cfg.PreeditMode == config.PreeditEmbedded && !cfg.HidePreedit
 
-	// 外观取值改走 ResolvedViews（逻辑像素，single-scale；后续 sc() 乘一次 scale）。
+	// 外观取值改走 ResolvedViews，经 scD 按单位换算为设备像素（dp 缩放 / px 不缩放）。
 	rv := &r.resolvedViews
-	padX := float64(rv.Window.PadLeft)
-	padY := float64(rv.Window.PadTop)
-	bgPadL := float64(rv.Item.PadLeft)
-	bgPadR := float64(rv.Item.PadRight)
-	indexMarginRight := float64(rv.Text.MarginLeft)
-	commentMarginLeft := float64(rv.Comment.MarginLeft)
+	padX := scD(rv.Window.PadLeft)
+	padY := scD(rv.Window.PadTop)
+	bgPadL := scD(rv.Item.PadLeft)
+	bgPadR := scD(rv.Item.PadRight)
+	indexMarginRight := scD(rv.Text.MarginLeft)
+	commentMarginLeft := scD(rv.Comment.MarginLeft)
 
-	itemSpacing := float64(rv.ItemSpacing)
-	if isTextIndex {
-		itemSpacing += 4 // 文本序号模式间距 +4（原合成桥 12/16，现下沉到 build，使 ResolveCandidateViews 保持运行时无感知）
-	}
+	itemSpacing := scD(rv.ItemSpacing) // 间距全由主题 metrics.item_spacing 决定（文本序号模式的旧 +4 magic 已下沉到 msime 主题）
 	commentSize := rv.Index.FontSize
 	if isTextIndex {
 		commentSize = rv.Index.FontSize + 2*scale
@@ -320,7 +319,7 @@ func (r *Renderer) buildHorizontalCandidateTree(
 			TextStyle: TextStyle{FontSize: rv.Text.FontSize, Weight: textWeight, Family: rv.Text.FontFamily, Color: textColor},
 		}
 		if len(children) > 0 {
-			textChild.Margin = Edges{Left: sc(indexMarginRight)}
+			textChild.Margin = Edges{Left: indexMarginRight}
 		}
 		children = append(children, textChild)
 
@@ -329,7 +328,7 @@ func (r *Renderer) buildHorizontalCandidateTree(
 			children = append(children, &View{
 				Text:      cand.Comment,
 				TextStyle: TextStyle{FontSize: commentSize, Weight: cmtWeight, Family: rv.Comment.FontFamily, Color: cmtColor},
-				Margin:    Edges{Left: sc(commentMarginLeft)},
+				Margin:    Edges{Left: commentMarginLeft},
 			})
 		}
 
@@ -337,19 +336,19 @@ func (r *Renderer) buildHorizontalCandidateTree(
 		// 无强调条主题沿用左内边距。
 		itemChildren := children
 		itemPadLeft := bgPadL
-		if rail := r.buildAccentRail(bgPadL, i == selectedIndex, rowH, sc); rail != nil {
+		if rail := r.buildAccentRail(bgPadL, i == selectedIndex, rowH, scale); rail != nil {
 			itemPadLeft = 0
 			itemChildren = append([]*View{rail}, children...)
 		}
 		item := &View{
 			Layout:     LayoutRow,
 			CrossAlign: AlignCenter,
-			Padding:    Edges{Left: sc(itemPadLeft), Right: sc(bgPadR)},
+			Padding:    Edges{Left: itemPadLeft, Right: bgPadR},
 			FixedH:     rowH,
-			Border:     Border{Radius: sc(float64(rv.Item.BorderRadius))},
+			Border:     Border{Radius: rv.Item.BorderRadius.Scaled(scale)},
 			Children:   itemChildren,
 		}
-		r.applyItemState(item, st, sc)                // P7-D：选中/悬停态背景（高亮位图/底色）+ 边框
+		r.applyItemState(item, st, scale)             // P7-D：选中/悬停态背景（高亮位图/底色）+ 边框
 		r.appendThemeLayers(item, rv.Item.Layers, sc) // P7-C：候选项装饰层（per-item 覆盖图）
 		items = append(items, item)
 	}
@@ -370,11 +369,11 @@ func (r *Renderer) buildHorizontalCandidateTree(
 
 	// 候选框间隙：旧渲染器 effectiveSpacing=max(padL+padR, itemSpacing)，扣掉左右内边距后
 	// 即相邻框之间的真实间隙（通常为 0，框相邻）。
-	boxGap := maxF(itemSpacing-bgPadL-bgPadR, 0)
+	boxGap := maxInt(itemSpacing-bgPadL-bgPadR, 0)
 	list := &View{
 		Layout:     LayoutRow,
 		CrossAlign: AlignCenter, // 页码文本/箭头按钮在行内垂直居中
-		Gap:        sc(boxGap),
+		Gap:        boxGap,
 		Children:   listChildren,
 	}
 
@@ -388,11 +387,11 @@ func (r *Renderer) buildHorizontalCandidateTree(
 
 	window := &View{
 		Layout:     LayoutColumn,
-		Gap:        sc(float64(rv.WindowGap)),
-		Padding:    Edges{Top: sc(padY), Right: sc(padX), Bottom: sc(padY), Left: sc(padX)},
+		Gap:        rv.WindowGap.Scaled(scale),
+		Padding:    Edges{Top: padY, Right: padX, Bottom: padY, Left: padX},
 		Background: r.fillFor(rv.Window.BgColor, rv.Window.BgImage), // P7-C：背景图来自 views.window.background.image
-		Border:     r.windowBorder(sc(float64(rv.Window.BorderRadius)), sc, scale),
-		Shadow:     &ViewShadow{OffsetX: sc(float64(rv.ShadowOffsetX)), OffsetY: sc(float64(rv.ShadowOffsetY)), Color: rv.ShadowColor},
+		Border:     r.windowBorder(rv.Window.BorderRadius.Scaled(scale), sc, scale),
+		Shadow:     &ViewShadow{OffsetX: rv.ShadowOffsetX.Scaled(scale), OffsetY: rv.ShadowOffsetY.Scaled(scale), Color: rv.ShadowColor},
 		Children:   bands,
 	}
 	r.appendThemeLayers(window, rv.Window.Layers, sc) // P7-C：窗口装饰层（水印等）

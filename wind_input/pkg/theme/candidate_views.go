@@ -58,16 +58,16 @@ func resolveCandidateViewColor(s string, pal ResolvedPalette) color.Color {
 func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 	build := func(n ViewNode, defBg, defBorder, defText color.Color) RVNode {
 		out := RVNode{
-			MarginTop:    edgeOr(n.Margin.Top, 0),
-			MarginRight:  edgeOr(n.Margin.Right, 0),
-			MarginBottom: edgeOr(n.Margin.Bottom, 0),
-			MarginLeft:   edgeOr(n.Margin.Left, 0),
-			PadTop:       edgeOr(n.Padding.Top, 0),
-			PadRight:     edgeOr(n.Padding.Right, 0),
-			PadBottom:    edgeOr(n.Padding.Bottom, 0),
-			PadLeft:      edgeOr(n.Padding.Left, 0),
-			BorderRadius: edgeOr(n.Border.Radius, 0),
-			BorderWidth:  edgeOr(n.Border.Width, 0),
+			MarginTop:    dimOr(n.Margin.Top, Dimension{}),
+			MarginRight:  dimOr(n.Margin.Right, Dimension{}),
+			MarginBottom: dimOr(n.Margin.Bottom, Dimension{}),
+			MarginLeft:   dimOr(n.Margin.Left, Dimension{}),
+			PadTop:       dimOr(n.Padding.Top, Dimension{}),
+			PadRight:     dimOr(n.Padding.Right, Dimension{}),
+			PadBottom:    dimOr(n.Padding.Bottom, Dimension{}),
+			PadLeft:      dimOr(n.Padding.Left, Dimension{}),
+			BorderRadius: dimOr(n.Border.Radius, Dimension{}),
+			BorderWidth:  dimOr(n.Border.Width, Dimension{}),
 			BgColor:      defBg,
 			BorderColor:  defBorder,
 			TextColor:    defText,
@@ -125,9 +125,9 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 	rv.Comment.Selected = resolveState(views.Comment.Selected, nil, nil, pal)
 	rv.Comment.Hover = resolveState(views.Comment.Hover, nil, nil, pal)
 	if m := views.Metrics; m != nil {
-		rv.ItemSpacing = edgeOr(m.ItemSpacing, 0)
-		rv.WindowGap = edgeOr(m.BandGap, 0)
-		rv.ShadowOffset = edgeOr(m.ShadowOffset, 0)
+		rv.ItemSpacing = dimOr(m.ItemSpacing, Dimension{})
+		rv.WindowGap = dimOr(m.BandGap, Dimension{})
+		rv.ShadowOffset = dimOr(m.ShadowOffset, Dimension{})
 		// P7-E：X/Y 默认 = 标量 shadow_offset；structured shadow 存在则覆盖（blur/spread 暂不消费）。
 		rv.ShadowOffsetX, rv.ShadowOffsetY = rv.ShadowOffset, rv.ShadowOffset
 		if m.Shadow != nil {
@@ -142,8 +142,8 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 			}
 		}
 		if m.AccentBar != nil {
-			rv.AccentBarWidth = edgeOr(m.AccentBar.Width, 0)
-			rv.AccentBarOffset = edgeOr(m.AccentBar.Offset, 0)
+			rv.AccentBarWidth = dimOr(m.AccentBar.Width, Dimension{})
+			rv.AccentBarOffset = dimOr(m.AccentBar.Offset, Dimension{})
 			if m.AccentBar.HeightRatio != nil {
 				rv.AccentBarHRatio = *m.AccentBar.HeightRatio
 			}
@@ -203,10 +203,10 @@ func toRVImage(im ViewImage) RVImage {
 		Ref:  im.Ref,
 		Mode: im.Mode,
 		Slice: Padding{
-			Top:    edgeOr(im.Slice.Top, 0),
-			Right:  edgeOr(im.Slice.Right, 0),
-			Bottom: edgeOr(im.Slice.Bottom, 0),
-			Left:   edgeOr(im.Slice.Left, 0),
+			Top:    dimOr(im.Slice.Top, Dimension{}).Value,
+			Right:  dimOr(im.Slice.Right, Dimension{}).Value,
+			Bottom: dimOr(im.Slice.Bottom, Dimension{}).Value,
+			Left:   dimOr(im.Slice.Left, Dimension{}).Value,
 		},
 		Opacity: op,
 		Z:       im.Z,

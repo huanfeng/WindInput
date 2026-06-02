@@ -13,12 +13,13 @@ package theme
 
 import "image/color"
 
-// ViewEdges 四向距离（逻辑像素）。*int：nil=未写（回退基线），非 nil（含 0）=显式值。
+// ViewEdges 四向距离。*Dimension：nil=未写（回退基线），非 nil（含 0）=显式值。
+// 值支持 px/dp 单位（裸数字=dp，"Npx"=设备像素不缩放），见 Dimension。
 type ViewEdges struct {
-	Top    *int `yaml:"top,omitempty"`
-	Right  *int `yaml:"right,omitempty"`
-	Bottom *int `yaml:"bottom,omitempty"`
-	Left   *int `yaml:"left,omitempty"`
+	Top    *Dimension `yaml:"top,omitempty"`
+	Right  *Dimension `yaml:"right,omitempty"`
+	Bottom *Dimension `yaml:"bottom,omitempty"`
+	Left   *Dimension `yaml:"left,omitempty"`
 }
 
 // ViewImagePoint 覆盖图偏移（逻辑像素）。
@@ -73,9 +74,9 @@ type ViewGradientStop struct {
 
 // ViewBorder 边框。
 type ViewBorder struct {
-	Width  *int   `yaml:"width,omitempty"`
-	Color  string `yaml:"color,omitempty"`
-	Radius *int   `yaml:"radius,omitempty"`
+	Width  *Dimension `yaml:"width,omitempty"` // 支持 px/dp：边框常用 "1px" 发丝线（不随 DPI 加粗）
+	Color  string     `yaml:"color,omitempty"`
+	Radius *Dimension `yaml:"radius,omitempty"`
 }
 
 // ViewNode 一个具名 View 的外观属性（盒模型 + Text 属性）。
@@ -115,9 +116,9 @@ type Views struct {
 
 // ViewMetrics 候选窗"列表级"几何（P6）：不便归入单个 ViewNode 的尺寸。全部可空指针，nil=走 defaultViews 基线。
 type ViewMetrics struct {
-	ItemSpacing  *int              `yaml:"item_spacing,omitempty"`  // 横排候选框间距基数（旧 hardcode 12/16）
-	BandGap      *int              `yaml:"band_gap,omitempty"`      // band 间距（旧 WindowGap）
-	ShadowOffset *int              `yaml:"shadow_offset,omitempty"` // 窗口投影偏移（标量，legacy；新主题用 shadow）
+	ItemSpacing  *Dimension        `yaml:"item_spacing,omitempty"`  // 横排候选框间距基数（旧 hardcode 12/16）
+	BandGap      *Dimension        `yaml:"band_gap,omitempty"`      // band 间距（旧 WindowGap）
+	ShadowOffset *Dimension        `yaml:"shadow_offset,omitempty"` // 窗口投影偏移（标量，legacy；新主题用 shadow）
 	Shadow       *ViewShadowSpec   `yaml:"shadow,omitempty"`        // 结构化投影（P7-E）：offset_x/y/color 已实现，blur/spread 预留
 	AccentBar    *AccentBarMetrics `yaml:"accent_bar,omitempty"`    // 强调条尺寸
 }
@@ -125,19 +126,19 @@ type ViewMetrics struct {
 // ViewShadowSpec 结构化窗口投影（P7-E）。offset_x/offset_y/color 已实现；blur/spread 为预留字段（渲染 later）。
 // 优先级：Shadow 非 nil 时其 offset/color 覆盖 legacy shadow_offset + palette.Shadow；未给的子字段回退。
 type ViewShadowSpec struct {
-	OffsetX *int   `yaml:"offset_x,omitempty"` // 水平偏移（逻辑像素）
-	OffsetY *int   `yaml:"offset_y,omitempty"` // 垂直偏移
-	Blur    *int   `yaml:"blur,omitempty"`     // 模糊半径（P7-E 预留，渲染 later）
-	Spread  *int   `yaml:"spread,omitempty"`   // 扩散（P7-E 预留，渲染 later）
-	Color   string `yaml:"color,omitempty"`    // ColorToken；空=palette.Shadow
+	OffsetX *Dimension `yaml:"offset_x,omitempty"` // 水平偏移
+	OffsetY *Dimension `yaml:"offset_y,omitempty"` // 垂直偏移
+	Blur    *Dimension `yaml:"blur,omitempty"`     // 模糊半径（P7-E 预留，渲染 later）
+	Spread  *Dimension `yaml:"spread,omitempty"`   // 扩散（P7-E 预留，渲染 later）
+	Color   string     `yaml:"color,omitempty"`    // ColorToken；空=palette.Shadow
 }
 
 // AccentBarMetrics 强调条尺寸（P6）+ 开关（P7-5：HasAccentBar 归口此处，原 layout.accent_bar.enabled 退役）。
 type AccentBarMetrics struct {
-	Enabled     *bool    `yaml:"enabled,omitempty"`      // 是否绘制选中候选左侧强调条；nil/false=不绘制
-	Width       *int     `yaml:"width,omitempty"`        // 条宽
-	Offset      *int     `yaml:"offset,omitempty"`       // 左缘偏移
-	HeightRatio *float64 `yaml:"height_ratio,omitempty"` // 条高 = ItemHeight × 此比例
+	Enabled     *bool      `yaml:"enabled,omitempty"`      // 是否绘制选中候选左侧强调条；nil/false=不绘制
+	Width       *Dimension `yaml:"width,omitempty"`        // 条宽
+	Offset      *Dimension `yaml:"offset,omitempty"`       // 左缘偏移
+	HeightRatio *float64   `yaml:"height_ratio,omitempty"` // 条高 = ItemHeight × 此比例
 }
 
 // RVImage 渲染消费形态的图片 spec（plain 值；不含解码后的位图——位图由 ui 侧按 Ref 一次性解码缓存）。
@@ -163,7 +164,7 @@ type RVState struct {
 	BgImage     *RVImage    // 非空=该态铺高亮位图（优先于 BgColor）
 	TextColor   color.Color // nil=沿用基态文字色（整行统一）
 	BorderColor color.Color // nil=沿用基态边框色
-	BorderWidth *int        // nil=沿用基态边框宽（含显式 0）
+	BorderWidth *Dimension  // nil=沿用基态边框宽（含显式 0）；支持 px/dp
 	FontWeight  int         // 0=沿用基态字重
 }
 
@@ -171,10 +172,10 @@ type RVState struct {
 // 各字段为该 View 实际用到的子集；零值表示「用渲染器内置默认」。
 // 状态 patch（Selected/Hover/Disabled，P7-D）仅 Item 节点填充；nil=该态无覆盖。
 type RVNode struct {
-	MarginTop, MarginRight, MarginBottom, MarginLeft int
-	PadTop, PadRight, PadBottom, PadLeft             int
-	BorderRadius                                     int
-	BorderWidth                                      int
+	MarginTop, MarginRight, MarginBottom, MarginLeft Dimension
+	PadTop, PadRight, PadBottom, PadLeft             Dimension
+	BorderRadius                                     Dimension
+	BorderWidth                                      Dimension
 	BorderColor                                      color.Color
 	BgColor                                          color.Color
 	FontSize                                         float64
@@ -202,15 +203,15 @@ type ResolvedViews struct {
 	AccentBar     RVNode
 	FooterBar     RVNode
 
-	// 几何杂项（逻辑像素 / 倍率）
-	WindowGap        int         // window 列间距（band 之间）
-	ShadowOffset     int         // 窗口投影偏移（标量，legacy；= ShadowOffsetX/Y 的同值兜底）
-	ShadowOffsetX    int         // 窗口投影水平偏移（P7-E：来自 metrics.shadow.offset_x，未配=ShadowOffset）
-	ShadowOffsetY    int         // 窗口投影垂直偏移（P7-E：来自 metrics.shadow.offset_y，未配=ShadowOffset）
+	// 几何杂项（Dimension 带 px/dp 单位 / 倍率）
+	WindowGap        Dimension   // window 列间距（band 之间）
+	ShadowOffset     Dimension   // 窗口投影偏移（标量，legacy；= ShadowOffsetX/Y 的同值兜底）
+	ShadowOffsetX    Dimension   // 窗口投影水平偏移（P7-E：来自 metrics.shadow.offset_x，未配=ShadowOffset）
+	ShadowOffsetY    Dimension   // 窗口投影垂直偏移（P7-E：来自 metrics.shadow.offset_y，未配=ShadowOffset）
 	ItemHeight       float64     // 行高（rowH = round(ItemHeight)）
-	ItemSpacing      int         // 横排候选框间距基数（已按 isTextIndex 选定 12/16）
-	AccentBarWidth   int         // 强调条宽
-	AccentBarOffset  int         // 强调条左缘偏移
+	ItemSpacing      Dimension   // 横排候选框间距基数（已按 isTextIndex 选定 12/16）
+	AccentBarWidth   Dimension   // 强调条宽
+	AccentBarOffset  Dimension   // 强调条左缘偏移
 	AccentBarHRatio  float64     // 强调条高 = ItemHeight * 此比例
 	VerticalMaxWidth float64     // 竖排最大宽（逻辑像素）
 	ShadowColor      color.Color // 窗口投影颜色（P2 切片-1）
@@ -293,8 +294,19 @@ func intp(v int) *int { return &v }
 
 func f64p(v float64) *float64 { return &v }
 
-// edgeOr 返回指针值或回退默认（保留显式 0）。
+// dimp 返回指向 dp 尺寸的指针（基线/默认用；px 单位由主题 YAML 显式写 "Npx"）。
+func dimp(v int) *Dimension { d := Dimension{Value: v}; return &d }
+
+// edgeOr 返回指针值或回退默认（保留显式 0）。用于 *int 字段（字号/字重）。
 func edgeOr(p *int, def int) int {
+	if p != nil {
+		return *p
+	}
+	return def
+}
+
+// dimOr 返回 Dimension 指针值或回退默认（保留显式 0）。用于几何字段（带 px/dp 单位）。
+func dimOr(p *Dimension, def Dimension) Dimension {
 	if p != nil {
 		return *p
 	}
@@ -306,19 +318,19 @@ func edgeOr(p *int, def int) int {
 // 故基线不含颜色。主题 views 块以此为基线覆盖。
 func defaultViews() Views {
 	return Views{
-		Window:     ViewNode{Padding: ViewEdges{Top: intp(8), Right: intp(8), Bottom: intp(8), Left: intp(8)}, Border: ViewBorder{Width: intp(1), Radius: intp(8)}},
-		PreeditBar: ViewNode{Padding: ViewEdges{Right: intp(8), Left: intp(8)}, Border: ViewBorder{Radius: intp(4)}},
-		Item:       ViewNode{Padding: ViewEdges{Right: intp(8), Left: intp(8)}, Border: ViewBorder{Radius: intp(4)}},
+		Window:     ViewNode{Padding: ViewEdges{Top: dimp(8), Right: dimp(8), Bottom: dimp(8), Left: dimp(8)}, Border: ViewBorder{Width: dimp(1), Radius: dimp(8)}},
+		PreeditBar: ViewNode{Padding: ViewEdges{Right: dimp(8), Left: dimp(8)}, Border: ViewBorder{Radius: dimp(4)}},
+		Item:       ViewNode{Padding: ViewEdges{Right: dimp(8), Left: dimp(8)}, Border: ViewBorder{Radius: dimp(4)}},
 		Index:      ViewNode{Labels: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"}}, // 序号默认槽位（无圆背景）；主题可覆盖 labels / background.shape
-		Text:       ViewNode{Margin: ViewEdges{Left: intp(4)}},                                   // index→text 间距
-		Comment:    ViewNode{Margin: ViewEdges{Left: intp(8)}},                                   // text→comment 间距
+		Text:       ViewNode{Margin: ViewEdges{Left: dimp(4)}},                                   // index→text 间距
+		Comment:    ViewNode{Margin: ViewEdges{Left: dimp(8)}},                                   // text→comment 间距
 		AccentBar:  ViewNode{},
 		FooterBar:  ViewNode{},
 		Metrics: &ViewMetrics{
-			ItemSpacing:  intp(12),
-			BandGap:      intp(4),
-			ShadowOffset: intp(2),
-			AccentBar:    &AccentBarMetrics{Width: intp(3), Offset: intp(1), HeightRatio: f64p(0.6)},
+			ItemSpacing:  dimp(12),
+			BandGap:      dimp(2),
+			ShadowOffset: dimp(2),
+			AccentBar:    &AccentBarMetrics{Width: dimp(3), Offset: dimp(1), HeightRatio: f64p(0.6)},
 		},
 	}
 }
