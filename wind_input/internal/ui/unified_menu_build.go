@@ -128,6 +128,14 @@ func BuildUnifiedMenuItems(state UnifiedMenuState) []MenuItem {
 		items = append(items, MenuItem{Text: "三级菜单测试", Children: testChildren})
 	}
 
+	// 服务控制项 (重载配置 / 重启服务): Win/darwin 共用, 底层 reload_config 与
+	// resetAndResync 均为跨平台实现。放在「高级」块之前以保持与移植前一致的布局。
+	items = append(items,
+		MenuItem{Separator: true},
+		MenuItem{ID: UnifiedMenuReloadConfig, Text: "重载配置"},
+		MenuItem{ID: UnifiedMenuRestartService, Text: "重启服务"},
+	)
+
 	if !state.OmitAdvanced {
 		processLabel := state.ActiveProcessName
 		if processLabel == "" {
