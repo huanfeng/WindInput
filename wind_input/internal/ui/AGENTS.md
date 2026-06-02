@@ -53,6 +53,13 @@
 | `text_drawer_windows.go` | `gdiDrawer` + `directWriteDrawer`：`TextDrawer` 的 GDI/DirectWrite 实现 (依赖 `TextRenderer`/`DWriteRenderer`) |
 | `dwrite_cgo_windows.go` | CGO 桥接文件（仅 Windows）：C trampoline `cDrawGlyphRunTrampoline` 从 XMM 寄存器正确接收 float 参数后转发给 Go 导出函数 `goDrawGlyphRunBridge`；解决 Windows x64 COM 回调中 float 参数无法通过 `syscall.NewCallback` 可靠提取的问题；`dwCGODrawGlyphRunCallback()` 返回 C 函数指针供 COM vtable 使用 |
 | `dwrite_text.go` | DirectWrite 文字渲染实现（IDWriteFactory/IDWriteTextLayout COM 接口调用）；`TextRenderer`(GDI)/`DWriteRenderer` 类型定义在此与 gdi_text.go |
+| `renderer.go` | `Renderer`：GDI 渲染候选词列表（文字、颜色、高亮） |
+| `renderer_layout.go` | `RenderCandidates` 候选窗渲染入口（DPI 刷新后按 Layout 委派 `renderHorizontalV2`/`renderVerticalV2`）+ 横竖排共用辅助 `candidateDisplayText`/`indexLabel`/`hasSideEffectAction`；旧固定化渲染器已退役删除，盒模型 View 引擎为唯一路径 |
+| `viewbox.go` | **盒模型 View 渲染引擎**(v2.6 P1，设计见 docs/design/theme-view-architecture.md)：`View`/`Fill`/`Border`/`ImageLayer`(图片或纯色层)/`TextStyle`/`Shadow`/`GlyphKind`(矢量箭头)/`Edges` 类型 + measure/arrange（行/列流式、margin/padding、交叉轴对齐、`Stretch` 撑满、`Grow` 弹性占位右对齐）；布局层经 `TextMeasurer` 注入文本度量，可纯断言单测 |
+| `viewbox_paint.go` | 盒模型绘制层：`PaintTree` 三趟遍历（形状/背景图/z<0 → 文本 → z>0 覆盖图），复用 `theme.DrawBackground` + 注入 `TextDrawer`；含 chevron 箭头绘制 |
+| `viewbox_build.go` | `(r *Renderer) buildHorizontalCandidateTree`：从 `RenderConfig`+候选构建横排候选窗 View 树（旧 magic number → 各 View 的 margin/padding/border）；覆盖 selected/hover 背景、accent 强调条（z<0 纯色层）、pager 翻页区（chevron + 页码 + 命中矩形）；返回 `candWindowTree`(root + items + pagerUp/Down) |
+| `viewbox_build_vertical.go` | `buildVerticalCandidateTree`（竖排：每候选一行全宽、翻页区底部居中）+ 横竖共用的 `buildPager`（chevron + 页码 + 命中按钮） |
+| `viewbox_render.go` | `renderHorizontalV2`/`renderVerticalV2` + 共享 `renderTree`（布局→绘制→`DrawDebugBanner`→命中矩形提取），复用 `acquireDrawContext` 共享缓冲；盒模型 View 引擎为候选窗唯一渲染路径（无开关，旧渲染器已删） |
 | `toolbar_window.go` | 工具栏 Win32 窗口创建和消息循环 |
 | `toolbar_window_event.go` | 工具栏鼠标事件（拖拽、按钮点击） |
 | `toolbar_renderer.go` | 工具栏 GDI 渲染（模式按钮、全角按钮、标点按钮、设置按钮） |

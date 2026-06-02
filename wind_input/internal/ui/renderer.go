@@ -60,7 +60,7 @@ type RenderConfig struct {
 
 	// v2.5 候选窗背景图（nil = 仅纯色背景）
 	BackgroundImage   *image.RGBA
-	BackgroundMode    string  // nine_slice | stretch | tile | center
+	BackgroundMode    string // nine_slice | stretch | tile | center
 	BackgroundSlice   theme.Padding
 	BackgroundOpacity float64
 }
@@ -582,7 +582,7 @@ func (r *Renderer) RenderModeIndicator(mode string) *image.RGBA {
 	return img
 }
 
-// DrawDebugBanner draws a small anti-aliased red dot in the top-right area (debug variant only)
+// DrawDebugBanner draws a small anti-aliased green dot in the top-right area (debug variant only)
 // Inset from the corner to stay within rounded rectangle bounds.
 func DrawDebugBanner(img *image.RGBA) {
 	if !buildvariant.IsDebug() {
@@ -597,10 +597,13 @@ func DrawDebugBanner(img *image.RGBA) {
 	}
 
 	scale := GetDPIScale()
-	radius := 4.0 * scale // 红点半径
+	radius := 4.0 * scale // 圆点半径
 	inset := 8.0 * scale  // 从边缘内缩，避开圆角
 
-	// 红点中心（右上角内缩）
+	// 调试圆点统一为绿色（盒模型 View 引擎是唯一渲染路径）。
+	dotR, dotG, dotB := uint16(40), uint16(180), uint16(70)
+
+	// 圆点中心（右上角内缩）
 	cxf := float64(w) - inset
 	cyf := inset
 
@@ -636,9 +639,9 @@ func DrawDebugBanner(img *image.RGBA) {
 			a := uint8(alpha * 255)
 			bg := img.RGBAAt(px, py)
 			invA := 255 - uint16(a)
-			nr := uint8((uint16(220)*uint16(a) + uint16(bg.R)*invA) / 255)
-			ng := uint8((uint16(40)*uint16(a) + uint16(bg.G)*invA) / 255)
-			nb := uint8((uint16(40)*uint16(a) + uint16(bg.B)*invA) / 255)
+			nr := uint8((dotR*uint16(a) + uint16(bg.R)*invA) / 255)
+			ng := uint8((dotG*uint16(a) + uint16(bg.G)*invA) / 255)
+			nb := uint8((dotB*uint16(a) + uint16(bg.B)*invA) / 255)
 			na := uint8(math.Min(float64(uint16(a)+uint16(bg.A)), 255))
 			img.SetRGBA(px, py, color.RGBA{nr, ng, nb, na})
 		}

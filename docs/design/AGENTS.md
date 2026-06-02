@@ -24,6 +24,7 @@
 | `macos-port.md` | macOS 移植设计 (IMKit + Go 服务双进程模型, UDS bridge 协议, uicmd 命令模型, 与 Win 端 wind_tsf 的对应关系, PR-A 工作清单) |
 | `macos-imkit-plan.md` | **PR-A 实战手册**: macOS IMKit `.app` 工程目录结构 / Swift 类骨架 / Info.plist 模板 / 6 个开发里程碑 / 验证步骤 / 风险清单 |
 | `enum-constraint.md` | 枚举与魔法字符串约束 SSOT (跨模块共享) |
+| `theme-view-architecture.md` | 主题渲染架构演进：从固定化渲染到统一 View 盒模型（margin/padding/background/border/layers/states + Text 排版），具名 View + 可换 token palette + 整数 z 层级 + 通用 Image/资源表；含 P0-P4 分阶段与迁移 |
 
 ## 文件分类
 
@@ -55,7 +56,7 @@
 ### 新增设计文档
 
 新设计方案应：
-1. 使用日期前缀（`YYYY-MM-DD-name.md`）或描述性标题
+1. 使用描述性标题（**不要日期前缀**，长期演变中文件名带日期会变乱）
 2. 包含背景、问题分析、建议方案、实现步骤
 3. 完成后可移至 `archive/`
 4. 在本文件中更新文件列表
