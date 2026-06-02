@@ -1,7 +1,9 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-06-01 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-06-02 -->
 
 # pkg/theme
+
+> ⛔ **候选窗 schema 已冻结为 v2.6（2026-06-02）**。冻结字段语义/类型变更须走迁移（升版本+迁移器）；新增可选字段才是非破坏扩展。冻结声明 + 契约见 `docs/design/theme-view-architecture.md`「⛔ v2.6 schema 冻结声明」与 `docs/design/theme-v26-freeze-report.md`。未冻结：其它窗口几何（P8）。
 
 ## Purpose
 主题系统。定义候选窗口、工具栏、弹出菜单、Tooltip、模式指示器的颜色与布局结构，提供从 YAML 文件动态加载主题、颜色解析、layout/palette 双形态组合与派生工具。

@@ -4,6 +4,28 @@
 
 本文档定义清风输入法主题系统从"固定化渲染"演进到"统一 View 盒模型"的架构。它是一个跨多阶段的工程，本文是 **P0 设计层**，约束后续各阶段（每阶段单独 spec → 计划 → 实现）。
 
+## ⛔ v2.6 schema 冻结声明（2026-06-02）
+
+**候选窗口 schema 已冻结**为 v2.6 契约。冻结范围、契约与变更规则如下：
+
+- **冻结范围**：候选窗口的盒模型 schema —— `views`（window/preedit_bar/candidate_list/item/index/text/comment/accent_bar/footer_bar + metrics）、`resources`、`palette`、`behavior`，及其涉及的 `ViewNode/ViewFill/ViewImage/ViewGradient/ViewShadowSpec/ResourceRef` 等类型。**主题 `meta.version` 用 `"2.6"`**。
+- **契约基准**：完整字段面见 `theme-v26-freeze-report.md` 第四节，编辑器（P3）与未来扩展以此为准。
+- **未冻结（P8 增量）**：工具栏 / 弹出菜单 / Tooltip / 状态泡 / Toast 的**几何** View 化（当前仅颜色 View 化）。这些是后续增量，按下方扩展政策非破坏地补。
+- **变更规则**：冻结字段的**语义/类型变更**须走迁移（升版本 + 迁移器）；**新增可选字段**属非破坏扩展，无需迁移（见下）。
+
+### 钦定的非破坏扩展（冻结后可直接加，无需迁移）
+
+这些是已设计好、保证不破坏 v2.6 结构的扩展路径。编辑器与解析器**必须容忍**未知的此类字段，不得写死假设：
+
+| 扩展 | 形状 | 现状 |
+|---|---|---|
+| **渐变** | `ViewFill.gradient {type,angle,stops:[{color,pos}]}` | 字段已在、merge 保留，渲染待补 |
+| **阴影 blur/spread** | `ViewMetrics.shadow.{blur,spread}` | 字段已在，渲染仅 offset+color |
+| **方向变体** | `ViewNode.vertical:`（与 selected/hover 同构的 patch，竖排叠加在 base 上）；字段**未加**，需要时增补即非破坏 | 仅政策声明（YAGNI） |
+| **整窗/整 View 透明** | 用现有 `background.color: transparent`（全透）或 `#RRGGBBAA`（半透）+ `border.{radius,width}: 0` 组合；位图自带形状 | 字段已对；引擎需补"窗口透明时以位图 alpha 作遮罩"（blendOver alpha-gate，render-later） |
+
+> 编辑器必须把**方向（横/竖）当作一个维度**、把**透明**当作 `background.color` 的常规取值，不得假设单方向或不透明。
+
 ## 一、背景与动机
 
 ### 现状（v2.5 固定化渲染）
