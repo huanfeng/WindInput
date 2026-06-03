@@ -256,8 +256,6 @@ func (r *Renderer) buildHorizontalCandidateTree(
 
 	// 外观取值改走 ResolvedViews，经 scD 按单位换算为设备像素（dp 缩放 / px 不缩放）。
 	rv := &r.resolvedViews
-	padX := scD(rv.Window.PadLeft)
-	padY := scD(rv.Window.PadTop)
 	bgPadL := scD(rv.Item.PadLeft)
 	bgPadR := scD(rv.Item.PadRight)
 	indexMarginRight := scD(rv.Text.MarginLeft)
@@ -391,8 +389,8 @@ func (r *Renderer) buildHorizontalCandidateTree(
 	window := &View{
 		Layout:     LayoutColumn,
 		Gap:        rv.WindowGap.Scaled(scale),
-		Padding:    Edges{Top: padY, Right: padX, Bottom: padY, Left: padX},
-		Background: r.fillFor(rv.Window.BgColor, rv.Window.BgImage), // P7-C：背景图来自 views.window.background.image
+		Padding:    Edges{Top: scD(rv.Window.PadTop), Right: scD(rv.Window.PadRight), Bottom: scD(rv.Window.PadBottom), Left: scD(rv.Window.PadLeft)}, // 完整遵循主题 window.padding 四边
+		Background: r.fillFor(rv.Window.BgColor, rv.Window.BgImage),                                                                                   // P7-C：背景图来自 views.window.background.image
 		Border:     r.windowBorder(rv.Window.BorderRadius.Scaled(scale), sc, scale),
 		Shadow:     &ViewShadow{OffsetX: rv.ShadowOffsetX.Scaled(scale), OffsetY: rv.ShadowOffsetY.Scaled(scale), Color: rv.ShadowColor},
 		Children:   bands,
