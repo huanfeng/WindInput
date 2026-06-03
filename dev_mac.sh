@@ -16,6 +16,7 @@ WindInput - Dev Menu (macOS)     调试版加前缀 d (如 d1 / d2 / dr / di / d
   2        仅构建 Go 服务 (跳过词库下载)
   app      仅构建 IME .app bundle
   setting  仅构建设置应用 wind_setting.app (Wails)
+  pkg      打分发安装包 .pkg (余参透传 pkg.sh: --build 先构建 / --universal 双架构)
   clean    清 build/ 与 build_debug/
 
   -- 本机安装 / 卸载 --
@@ -66,13 +67,18 @@ do_build_svc()     { "$MAC/build/build.sh" service ${VARIANT:+$VARIANT}; }
 do_build_app()     { "$MAC/build/app.sh" ${VARIANT:+$VARIANT}; }
 do_build_setting() { "$MAC/build/setting.sh"; }
 do_clean()         { "$MAC/build/build.sh" clean; }
+# 分发安装包 .pkg (面向终端用户). 余参透传 pkg.sh: --build 先构建三件套 / --universal 双架构.
+# 始终打 release 产物, 与 VARIANT(debug) 无关, 故不透传 $VARIANT.
+do_pkg()           { bash "$MAC/build/pkg.sh" "$@"; }
 
 # ---- 安装 / 部署 ----
 # install_service.sh / install_app.sh / install_setting.sh 均为 per-user (装到 ~/Library
 # 或 ~/Applications), 都不要 sudo.
 do_install() {
     "$MAC/deploy/install_service.sh" ${VARIANT:+$VARIANT}
-    bash "$MAC/deploy/install_app.sh"
+    # 必须把 $VARIANT 透传给 install_app.sh: 否则 di (--debug) 会装成 release .app,
+    # 造成前端(release)/后端(debug) 变体错配, socket 路径隔离导致连不上 → 打字无候选。
+    bash "$MAC/deploy/install_app.sh" ${VARIANT:+$VARIANT}
     bash "$MAC/deploy/install_setting.sh"
 }
 do_redeploy() { bash "$MAC/deploy/redeploy.sh"; }
@@ -89,7 +95,7 @@ do_module() {
                 "$MAC/deploy/install_service.sh" ${VARIANT:+$VARIANT} ;;
             app)
                 "$MAC/build/app.sh" ${VARIANT:+$VARIANT}
-                bash "$MAC/deploy/install_app.sh" ;;
+                bash "$MAC/deploy/install_app.sh" ${VARIANT:+$VARIANT} ;;
             setting|set)
                 "$MAC/build/setting.sh"
                 bash "$MAC/deploy/install_setting.sh" ;;
@@ -100,8 +106,9 @@ do_module() {
 
 # ---- 卸载 ----
 do_uninstall() {
-    "$MAC/deploy/install_service.sh" --uninstall
-    bash "$MAC/deploy/install_app.sh" --uninstall
+    # du (--debug) 须卸载 debug 变体; 不传 $VARIANT 会误卸 release、留下 debug 残留。
+    "$MAC/deploy/install_service.sh" --uninstall ${VARIANT:+$VARIANT}
+    bash "$MAC/deploy/install_app.sh" --uninstall ${VARIANT:+$VARIANT}
     bash "$MAC/deploy/install_setting.sh" --uninstall
 }
 
@@ -147,6 +154,7 @@ case "$CHOICE" in
     2)         do_build_svc ;;
     app)       do_build_app ;;
     setting)   do_build_setting ;;
+    pkg)       do_pkg "${@:2}" ;;
     clean)     do_clean ;;
     i)         do_install ;;
     m)         do_module "${@:2}" ;;
