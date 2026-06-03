@@ -251,7 +251,9 @@ func (r *Renderer) buildVerticalCandidateTree(
 			Stretch:    true, // 每行全宽
 			FixedH:     rowH,
 			// 上下 padding 真实生效（与横排一致）：对称时逐像素同旧版，非对称不再均摊。
-			Padding:  Edges{Top: scD(rv.Item.PadTop), Right: itemPadR, Bottom: scD(rv.Item.PadBottom)},
+			Padding: Edges{Top: scD(rv.Item.PadTop), Right: itemPadR, Bottom: scD(rv.Item.PadBottom)},
+			// 候选项圆角（与横排一致；原竖排漏设导致横竖排圆角不同）。
+			Border:   Border{Radius: rv.Item.BorderRadius.Scaled(scale)},
 			Children: itemChildren,
 		}
 		r.applyItemState(item, st, scale)             // P7-D：选中/悬停态背景（高亮位图/底色）+ 边框
