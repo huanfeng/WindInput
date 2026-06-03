@@ -222,7 +222,7 @@ func (r *Renderer) buildAccentRail(railW int, selected bool, rowH int, scale flo
 		rail.Layers = []ImageLayer{{
 			Color: rv.AccentBar.BgColor, Z: -1, Anchor: "left",
 			OffsetX: rv.AccentBarOffset.Scaled(scale), W: barW,
-			H: int(rv.ItemHeight*rv.AccentBarHRatio + 0.5), Radius: barW / 2,
+			H: int(float64(rowH)*rv.AccentBarHRatio + 0.5), Radius: barW / 2,
 		}}
 	}
 	return rail
@@ -265,7 +265,20 @@ func (r *Renderer) buildHorizontalCandidateTree(
 	commentSize := rv.Comment.FontSize // 注释字号 = base + views.comment.font_size 偏移（无派生魔法）
 	// 圆圈序号直径 = 序号字号 + index 上下 padding（盒模型：背景=内容+padding；无 max(18) 下限魔法，全由主题 index.padding 控制）
 	indexSize := rv.Index.FontSize + float64(scD(rv.Index.PadTop)+scD(rv.Index.PadBottom))
-	rowH := int(rv.ItemHeight + 0.5)
+	// 行高 = 行内容自然高(最高元素：候选文字/序号/注释) + item 上下内边距。
+	// 全由主题 item.padding 控制（无 max(32, base*1.8) 派生魔法）；不想要高度就把 item 上下 padding 配 0。
+	lineH := rv.Text.FontSize
+	if commentSize > lineH {
+		lineH = commentSize
+	}
+	if isTextIndex {
+		if rv.Index.FontSize > lineH {
+			lineH = rv.Index.FontSize
+		}
+	} else if indexSize > lineH {
+		lineH = indexSize
+	}
+	rowH := int(lineH+0.5) + scD(rv.Item.PadTop) + scD(rv.Item.PadBottom)
 
 	// ---- 候选项 ----
 	items := make([]*View, 0, len(candidates))

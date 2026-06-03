@@ -51,7 +51,7 @@ func themePathViews(winPad, itemPad int) theme.Views {
 	return theme.Views{
 		Window:     theme.ViewNode{Padding: theme.ViewEdges{Top: dip(winPad), Right: dip(winPad), Bottom: dip(winPad), Left: dip(winPad)}, Border: theme.ViewBorder{Radius: dip(8)}},
 		PreeditBar: theme.ViewNode{Padding: theme.ViewEdges{Right: dip(8), Left: dip(8)}, Border: theme.ViewBorder{Radius: dip(4)}},
-		Item:       theme.ViewNode{Padding: theme.ViewEdges{Right: dip(itemPad), Left: dip(itemPad)}, Border: theme.ViewBorder{Radius: dip(4)}},
+		Item:       theme.ViewNode{Padding: theme.ViewEdges{Top: dip(7), Right: dip(itemPad), Bottom: dip(7), Left: dip(itemPad)}, Border: theme.ViewBorder{Radius: dip(4)}}, // 上下 7：行高=内容18+14=32（行高现由 item 上下 padding 决定）
 		Index:      theme.ViewNode{FontSize: ip(-4), Padding: theme.ViewEdges{Top: dip(2), Bottom: dip(2), Left: dip(2), Right: dip(2)}}, // 圆圈：字号 base-4，直径=字号+上下padding
 		Text:       theme.ViewNode{Margin: theme.ViewEdges{Left: dip(4)}},
 		Comment:    theme.ViewNode{FontSize: ip(-4), Margin: theme.ViewEdges{Left: dip(8)}},

@@ -108,7 +108,19 @@ func (r *Renderer) buildVerticalCandidateTree(
 		indexAreaW = int(maxLabelW + 4*scale + 0.5)
 	}
 	commentSize := rv.Comment.FontSize // 注释字号 = base + views.comment.font_size 偏移（无派生魔法）
-	rowH := int(rv.ItemHeight + 0.5)
+	// 行高 = 行内容自然高 + item 上下内边距（全由主题 item.padding 控制，无 max(32) 魔法）。
+	lineH := rv.Text.FontSize
+	if commentSize > lineH {
+		lineH = commentSize
+	}
+	if isTextIndex {
+		if rv.Index.FontSize > lineH {
+			lineH = rv.Index.FontSize
+		}
+	} else if indexD > lineH {
+		lineH = indexD
+	}
+	rowH := int(lineH+0.5) + scD(rv.Item.PadTop) + scD(rv.Item.PadBottom)
 
 	// 强调条占位 rail 宽度（逻辑像素）：与横排一致取 item 左内边距为左留白，承载强调条；
 	// 不足以容纳强调条（offset+width）时取下限。无强调条时 railFixedW=0（不占位）。

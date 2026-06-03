@@ -26,7 +26,7 @@ views:
     background: {color: "${preedit_bg}"}
     color: "${preedit_text}"
   item:
-    padding: {left: 8, right: 8}
+    padding: {top: 6, right: 8, bottom: 6, left: 8}   # 上下 6：行高 = 内容(文本序号20)+上下padding = 32
     border: {radius: 4}
     selected: {background: {color: "${selected_bg}"}}
     hover: {background: {color: "${hover_bg}"}}
