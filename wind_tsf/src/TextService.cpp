@@ -25,6 +25,21 @@ static const UINT64 kScopeBitPassword = 1ULL << 31; // IS_PASSWORD
 static const GUID kGuidCompartmentKeyboardDisabled =
     { 0x71a5b253, 0x1951, 0x466b, { 0x9f, 0xbc, 0x9c, 0x88, 0x08, 0xfa, 0x84, 0xf2 } };
 
+// 判断屏幕坐标点是否落在前台窗口矩形之外（原点错误的越界坐标）。个别宿主（某些 OpenGL /
+// 异常渲染应用）的 GetTextExt 会返回越界屏幕坐标，直接用会把候选框甩到屏幕角落。检出后
+// 调用方应丢弃该坐标、回退到窗口相对的方法。参考 Weasel enhanced_position；仅在明显越界时
+// 返回 true，光标在窗口内的正常情形不受影响。
+static bool IsScreenPointOutsideForegroundWindow(LONG x, LONG y)
+{
+    HWND hwndFg = GetForegroundWindow();
+    if (hwndFg == nullptr)
+        return false;
+    RECT rcWin = {};
+    if (!GetWindowRect(hwndFg, &rcWin))
+        return false;
+    return (x < rcWin.left || x > rcWin.right || y < rcWin.top || y > rcWin.bottom);
+}
+
 // EditSession for reading the focused context's TSF InputScope set.
 // 用于识别密码框等语义控件：GetInputScopes 返回的枚举值按位编码为 bitmask
 // （bit N 表示枚举值 N 存在，如 IS_PASSWORD=31 → bit 31），交由 Go 端决策。
@@ -549,7 +564,9 @@ private:
                 // Cache 仅作为 timer 兜底使用；OnLayoutChange 路径会清掉 cache
                 // 并重新通过 fallback 查询，因此这里不再需要标记延迟重试。
                 LONG h = caretRect.bottom - caretRect.top;
-                if (h > 0)
+                // 同 GetCaretPositionFromTSF：跳过退化矩形(h<=0)与越界坐标，避免把不可信坐标
+                // 缓存后被 timer 兜底取用。越界时不缓存，留待 fallback 链重新求解。
+                if (h > 0 && !IsScreenPointOutsideForegroundWindow(caretRect.left, caretRect.top))
                 {
                     _pTextService->_cachedCaretRect = caretRect;
                     _pTextService->_hasCachedCaretPos = TRUE;
@@ -3158,6 +3175,14 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight)
         if (*pHeight <= 0)
         {
             WIND_LOG_DEBUG(L"GetCaretPositionFromTSF: Degenerate rect (height=0), falling back\n");
+            return FALSE;
+        }
+
+        // 坐标越界保护：TSF 坐标落在前台窗口外时判定不可信，返回 FALSE，让 GetCaretPosition
+        // 回退到 GUIThreadInfo / GetCaretPos（窗口相对、可靠）。详见 IsScreenPointOutsideForegroundWindow。
+        if (IsScreenPointOutsideForegroundWindow(rc.left, rc.top))
+        {
+            WIND_LOG_DEBUG_FMT(L"GetCaretPositionFromTSF: caret(%ld,%ld) outside fg window, falling back\n", rc.left, rc.top);
             return FALSE;
         }
 
