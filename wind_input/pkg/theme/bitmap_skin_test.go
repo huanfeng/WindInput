@@ -1,6 +1,7 @@
 package theme
 
 import (
+	"image/color"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -118,6 +119,21 @@ func TestBitmapSkinTheme_JidianClassic(t *testing.T) {
 	if mv.Item.Hover == nil || mv.Item.Hover.BgColor == nil {
 		t.Errorf("menu.item.hover 未解析进 RVState: %+v", mv.Item.Hover)
 	}
+
+	// P8 切片6 圆角深色毛边修复守护：配了浅色背景图的窗口，底色必须不透明（α=255），
+	// 否则深色半透明底色会在圆角抗锯齿边缘透出形成深色毛边（详见 ui/viewbox_corner_test.go）。
+	opaque := func(name string, c color.Color) {
+		if c == nil {
+			t.Errorf("%s 底色为 nil", name)
+			return
+		}
+		if _, _, _, a := c.RGBA(); a>>8 != 0xFF {
+			t.Errorf("%s 底色应不透明(α=255)以避免圆角深色毛边，got α=%d", name, a>>8)
+		}
+	}
+	opaque("status.background", sv.BgColor)
+	opaque("tooltip.background", tv.BgColor)
+	opaque("toast.background", tov.BgColor)
 
 	// 同时验收 P7-A/B：accent bar 启用、序号无圆背景（极点风格）。
 	if m := rv.Views.Metrics; m == nil || m.AccentBar == nil || m.AccentBar.Enabled == nil || !*m.AccentBar.Enabled {

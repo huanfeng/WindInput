@@ -34,9 +34,10 @@ func (m *PopupMenu) render() *image.RGBA {
 	Layout(mt.root, 0, 0, td)
 	dc, img := newSharedDrawContext(width, height)
 
-	// 内圆角 clip：把 root 背景 + hover 满宽高亮裁剪到「边框内侧的圆角」，使首/末项 hover
-	// 不溢出圆角、也不覆盖圆角边框（保持满宽方块风格，不改 UI 自定义部分）。
-	// 代价：root 边框会被 clip 裁掉外半，故下方在 clip 之外重画完整圆角边框。
+	// 圆角 clip（裁到完整窗口圆角 r=radius）：把 root 背景/背景图 + hover 满宽高亮裁到窗口圆角形状，
+	// 使首/末项 hover 不溢出圆角（保持满宽方块风格）。**关键**：裁到 radius 而非旧的 radius-borderWidth，
+	// 让底色/背景图填到圆角边缘，使下方后处理边框的圆角抗锯齿像素背后有不透明底垫——否则边框圆角
+	// 呈半透明，layered 窗口里透出下方内容（P8 切片6 修复：旧 innerR 裁剪会在 innerR→radius 之间留透明月牙）。
 	radius := rmv.Root.BorderRadius.Scaled(scale)
 	if radius == 0 {
 		radius = int(float64(menuCornerRadius) * scale)
@@ -45,11 +46,7 @@ func (m *PopupMenu) render() *image.RGBA {
 	if bw == 0 {
 		bw = 1
 	}
-	innerR := radius - bw
-	if innerR < 0 {
-		innerR = 0
-	}
-	dc.DrawRoundedRectangle(float64(bw), float64(bw), float64(width-2*bw), float64(height-2*bw), float64(innerR))
+	dc.DrawRoundedRectangle(0, 0, float64(width), float64(height), float64(radius))
 	dc.Clip()
 
 	PaintTree(mt.root, dc, img, td)

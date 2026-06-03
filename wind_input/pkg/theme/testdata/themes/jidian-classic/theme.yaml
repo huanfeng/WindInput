@@ -65,20 +65,23 @@ views:
     # P7-E 结构化阴影：offset_x/y + color 已实现（blur 预留、暂不渲染）。
     shadow: {offset_x: 3, offset_y: 4, blur: 8, color: "${shadow}"}
   # P8 切片6 验收：状态泡/Tooltip 也吃九宫格背景图 + 右下角角标水印层（复用 panel/mark）。
-  # 注意 status/tooltip 颜色 token 仅认 ${background}/${text}（不认 ${border}）——边框观感由 panel 位图自带蓝边提供。
+  # ⚠️ 底色必须用「不透明 + 与浅色 panel 同调」的颜色，不能用 ${background}（深灰半透明）：
+  # 否则圆角抗锯齿边缘会透出深色底色，形成一圈深色毛边（blendOver 用底色 alpha 门控背景图所致，
+  # 候选窗用不透明白底即无此问题）。故这里用浅蓝不透明 hex；文字相应改深色保证可读。
+  # status/tooltip 颜色 token 仅认 ${background}/${text}（不认 ${border}），自定义色用 hex。
   status:
     background:
-      color: "${background}" # 图加载失败兜底底色
+      color: "#EAF1FCFF" # 不透明浅蓝（同调 panel，消除圆角深色毛边）；亦作图加载失败兜底
       image: {ref: panel, mode: nine_slice, slice: {top: 8, right: 8, bottom: 8, left: 8}}
-    color: "${text}"
+    color: "#22344D" # 深色文字（浅底可读）
     padding: {top: 6, right: 12, bottom: 6, left: 12}
     layers:
       - {ref: mark, z: 1, anchor: bottom-right, offset: {x: -4, y: -4}, size: {w: 14, h: 14}, opacity: 0.85}
   tooltip:
     background:
-      color: "${background}"
+      color: "#EAF1FCFF"
       image: {ref: panel, mode: nine_slice, slice: {top: 8, right: 8, bottom: 8, left: 8}}
-    color: "${text}"
+    color: "#22344D"
     padding: {top: 6, right: 10, bottom: 6, left: 10}
     layers:
       - {ref: mark, z: 1, anchor: bottom-right, offset: {x: -5, y: -5}, size: {w: 14, h: 14}, opacity: 0.8}
@@ -114,11 +117,11 @@ views:
     separator:
       background: {color: "${separator}"}
   # P8 切片6 验收：toast 通知也吃九宫格背景图 + 角标水印（原本无 toast 节点 → 走默认深灰底）。
-  # 注意 toast 背景经引擎 forceAlphaOpaque 强制不透明（避免重要通知透出底层窗口）。
+  # 同 status/tooltip：底色用不透明浅蓝同调 panel，消除圆角深色毛边（toast 还经 forceAlphaOpaque）。
   toast:
     background:
-      color: "${background}"
+      color: "#EAF1FCFF"
       image: {ref: panel, mode: nine_slice, slice: {top: 8, right: 8, bottom: 8, left: 8}}
-    color: "${text}"
+    color: "#22344D"
     layers:
       - {ref: mark, z: 1, anchor: bottom-right, offset: {x: -8, y: -8}, size: {w: 18, h: 18}, opacity: 0.85}
