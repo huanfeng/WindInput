@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run"
   },
   "dependencies": {
     "@tanstack/vue-table": "^8.21.3",
@@ -25,6 +26,7 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
+    "vitest": "^4.1.8",
     "vue-tsc": "^3.2.6"
   }
 }
