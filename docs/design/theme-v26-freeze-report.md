@@ -61,7 +61,7 @@ theme.yaml
 | **渐变** `gradient` | 🟡 schema 冻结、**不渲染** | 占位防冻结，merge 保留 |
 | **阴影 blur/spread** | 🟡 schema 冻结、**不渲染** | 仅 offset+color 生效 |
 | **方向变体**（横/竖分别配） | 🟡 不加字段、声明为非破坏扩展 | D7 |
-| 其它窗口（工具栏/菜单/Tooltip/状态泡） | ✅ 颜色 View 化；⚠️ 几何 hardcode | Toast 仅 palette 预留 |
+| 其它窗口（菜单/Tooltip/状态泡/Toast） | ✅ 几何+颜色+字体+背景图+layers View 化（P8 切片0-3/5/6 完成） | 工具栏仅颜色 View 化，几何延后（切片4 独立重构） |
 
 **验收证据**：`go build`（主 + wind_setting）、`go test ./...` 全绿、`go vet` 干净。`jidian-classic`（testdata）端到端覆盖九宫格背景/水印层/选中高亮位图/暗色变体/结构化阴影/逐元素字体/序号样式。
 
@@ -138,7 +138,7 @@ views:
 
 - 渐变、阴影 blur/spread：schema 在、渲染未实现（冻结后可补，不破坏 schema）。
 - 候选项 disabled 态：无运行时触发器（`Candidate` 无禁用渲染标志），目前是 schema 预留。
-- 其它窗口（工具栏/菜单/Tooltip/状态泡）**几何仍 hardcode**，只有颜色 View 化；Toast 完全未 View 化（仅 palette 预留）。
+- ~~其它窗口几何仍 hardcode~~ **已于 P8 完成**：菜单/Tooltip/状态泡/Toast 几何+背景图+layers View 化（切片0-3/5/6，2026-06-03）。**仅工具栏几何延后**（切片4，因尺寸/布局动态化 + 与 HitTest 强耦合，单列独立重构）。
 - 双渲染器一致性（Go vs P3 编辑器 Canvas）未验证——P3 阶段需逐场景比对。
 - 既有小瑕疵（待单独修）：GDI getMetrics 缓存 key 缺 symbol 字段；accent glow `sc(2.5*scale)` double-scaling。
 
@@ -156,7 +156,7 @@ views:
 | **阴影 blur/spread** | `ViewMetrics.shadow.{blur,spread}` | 字段已在，渲染仅 offset+color |
 | **方向变体** | `ViewNode.vertical:`（与 selected/hover 同构的 patch，竖排叠加在 base 上）；字段**未加**，需要时增补即非破坏 | 仅政策声明（YAGNI） |
 | **整窗/整 View 透明** | 现有 `background.color: transparent`（全透）/ `#RRGGBBAA`（半透）+ `border.{radius,width}: 0` 组合，位图自带形状 | 字段已对；引擎需补"窗口透明时以位图 alpha 作遮罩"（render-later） |
-| **其它窗口几何 View 化** | 工具栏/菜单/Tooltip/状态泡/Toast 的 margin/padding/border 等 | P8，新增字段非破坏 |
+| **其它窗口几何 View 化** | 工具栏/菜单/Tooltip/状态泡/Toast 的 margin/padding/border 等 | ✅ P8 完成（菜单/Tooltip/状态泡/Toast，切片0-3/5/6）；工具栏延后 |
 
 > 编辑器（P3）与解析器**必须**：把方向（横/竖）当作一个维度、把透明当作 `background.color` 的常规取值、容忍未知的上述扩展字段——**不得写死单方向或不透明假设**。
 

@@ -2,8 +2,11 @@
 
 # WindInput 主题 v2.6 — P8：其它窗口几何 View 化
 
-> 状态：**实现中（2026-06-03 起）**。
+> 状态：**已完成（2026-06-03，toolbar 切片4 延后）**。切片 0/1/2/3/5/6 全部合入 main 并经 `dev.ps1` 实测；toolbar 单列为独立重构工程（见切片4 说明）。
+> 完成提交：`e6193be5`(切片0-2) · `c7efe8cd`(切片3) · `51e1fab4`(切片5) · `8e9b5be3`(切片6) · `c490ae9d`(切片6 圆角修复：菜单边框透明 + status/tooltip/toast 深色毛边)。
 > 关联：`theme-v26-freeze-report.md`（候选窗冻结契约 + 第八节钦定 P8 为非破坏扩展）、`theme-view-architecture.md`（P0 设计 + 冻结声明）、`pkg/theme/AGENTS.md`、`internal/ui/AGENTS.md`。
+>
+> **切片6 收尾补记（圆角渲染两坑，勿重踩）**：① 菜单圆角边框半透明透出下方——`popup_menu_render` 内圆角 clip 须裁到**完整 radius**（非 `radius-borderWidth`），让边框抗锯齿像素有不透明底垫；② status/tooltip/toast 圆角深色毛边——**深色半透明底 + 浅色背景图**时 `blendOver` 用底色 alpha 门控图，边缘透出底色，须让底色**不透明且与图同色调**（候选窗用不透明白底故无此问题）。带图半透明窗口的配法：底色与图同调 + 底色 alpha>0（`transparent` 会令图消失）。
 
 ## 一、背景与目标
 
