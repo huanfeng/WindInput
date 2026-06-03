@@ -1109,7 +1109,7 @@ func (r *DWriteRenderer) MeasureString(text string, fontSize float64) float64 {
 
 	scaledSize := r.scaledFontSize(fontSize)
 	family := r.fontName
-	if containsSymbolChars(text) {
+	if isPureSymbolText(text) {
 		family = dwriteSymbolFont
 	}
 
@@ -1191,7 +1191,7 @@ func (r *DWriteRenderer) MeasureStringFont(text string, fontSize float64, family
 	}
 	scaledSize := r.scaledFontSize(fontSize)
 	fam := FontSpecToName(family)
-	if containsSymbolChars(text) {
+	if isPureSymbolText(text) {
 		fam = dwriteSymbolFont
 	}
 	format := r.getFormatLocked(fam, r.fontWeight, scaledSize)
@@ -1242,7 +1242,7 @@ func (r *DWriteRenderer) drawStringLocked(text string, x, y float64, fontSize fl
 	if family == "" {
 		family = r.fontName
 	}
-	if containsSymbolChars(text) {
+	if isPureSymbolText(text) {
 		family = dwriteSymbolFont
 	}
 

@@ -75,7 +75,7 @@
 | `toast_renderer.go` | `ToastRenderer`：toast 图像渲染（标题 + 多行正文 + 圆角矩形 + Level accent 边框），复用 `TextBackendManager`（DirectWrite） |
 | `monitor.go` | 多显示器支持：获取目标显示器工作区，用于窗口位置计算 |
 | `dpi.go` | Win DPI 检测 (`GetEffectiveDPI`/WM_DPICHANGED)；`init()` 注入 `dpiScaleProvider` 给跨平台 `dpi_neutral.go` |
-| `gdi_text.go` | GDI 文字渲染实现 (`TextRenderer` + `containsSymbolChars`)；`FontSpecToName` 已移至跨平台 `fontspec.go` || `uicmd_post.go` | `postCmd` 投递 helper + `snapshotCandidatesMarkers/Config/PinState` 全量快照构造器 (供 setter 末尾投递 snapshot 命令到 cmdCh) |
+| `gdi_text.go` | GDI 文字渲染实现 (`TextRenderer` + `isUIChromeSymbolRune`/`isPureSymbolText` 符号字体判定)；`FontSpecToName` 已移至跨平台 `fontspec.go` || `uicmd_post.go` | `postCmd` 投递 helper + `snapshotCandidatesMarkers/Config/PinState` 全量快照构造器 (供 setter 末尾投递 snapshot 命令到 cmdCh) |
 | `uicmd_events.go` | 反向事件通道: `Events() <-chan uicmd.Event` + `wrapCandidateCallbacks/wrapToolbarCallbacks/wrapHotkeyCallback` 双流并行包装 (原 callback + 推一份 uicmd.Event) |
 | `uicmd_post_test.go` | snapshot helper + wrap callback 双流行为 + 背压测试 |
 

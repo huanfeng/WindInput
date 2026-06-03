@@ -57,9 +57,9 @@ type TEXTMETRICW struct {
 	TmCharSet          byte
 }
 
-// containsSymbolChars returns true if text contains UI-chrome symbol characters
-// that CJK fonts (like Microsoft YaHei) cover poorly and that we want to render
-// via Segoe UI Symbol for consistent metrics.
+// isUIChromeSymbolRune reports whether a single rune is a UI-chrome symbol that
+// CJK fonts (like Microsoft YaHei) cover poorly and that we prefer to render via
+// Segoe UI Symbol for consistent metrics.
 //
 // Scope is deliberately narrow:
 //   - Geometric Shapes (U+25A0–U+25FF): UI uses ▶ ▸ ● ◑ ■ etc. These are
@@ -69,16 +69,38 @@ type TEXTMETRICW struct {
 //     emoji base characters (✂ ✈ ✉ ✊✋✌ ✏ ✨ ❄ ❤ …) that should be left
 //     to the normal emoji font-fallback chain so they can render in color
 //     and participate in ZWJ sequences (e.g. ❤️‍🔥).
-func containsSymbolChars(text string) bool {
-	for _, r := range text {
-		if r >= 0x25A0 && r <= 0x25FF {
-			return true
-		}
-		if r == 0x2713 || r == 0x2717 {
-			return true
-		}
+func isUIChromeSymbolRune(r rune) bool {
+	if r >= 0x25A0 && r <= 0x25FF {
+		return true
+	}
+	if r == 0x2713 || r == 0x2717 {
+		return true
 	}
 	return false
+}
+
+// isPureSymbolText reports whether text consists solely of UI-chrome symbol
+// characters (spaces ignored) with at least one such symbol. Only then is it safe
+// to force the whole run onto Segoe UI Symbol.
+//
+// Mixed strings — e.g. the status bubble's merged "中 英 ◐" that combines CJK mode
+// labels with the full/half-width geometric glyph — return false, so they keep the
+// primary CJK font (Microsoft YaHei). Otherwise the lone geometric symbol would drag
+// the entire run onto Segoe UI Symbol, which lacks CJK glyphs and forces the Chinese
+// characters into the SimSun fallback (the reported 雅黑→宋体 regression).
+func isPureSymbolText(text string) bool {
+	hasSymbol := false
+	for _, r := range text {
+		if r == ' ' || r == '\t' {
+			continue
+		}
+		if isUIChromeSymbolRune(r) {
+			hasSymbol = true
+			continue
+		}
+		return false
+	}
+	return hasSymbol
 }
 
 type gdiFontKey struct {
@@ -273,7 +295,7 @@ func (tr *TextRenderer) MeasureString(text string, fontSize float64) float64 {
 	}
 
 	size := int(math.Round(fontSize))
-	useSymbol := containsSymbolChars(text)
+	useSymbol := isPureSymbolText(text)
 
 	// Use session DC if available (avoids creating temp DC)
 	if tr.inDraw && tr.drawDC != 0 {
@@ -398,7 +420,7 @@ func (tr *TextRenderer) DrawString(text string, x, y float64, fontSize float64, 
 
 	size := int(math.Round(fontSize))
 	var hFont uintptr
-	if containsSymbolChars(text) {
+	if isPureSymbolText(text) {
 		hFont = tr.getSymbolFont(size)
 	} else {
 		hFont = tr.getFont(size, false)
