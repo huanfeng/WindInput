@@ -28,7 +28,7 @@ func TestResolveTooltipColors(t *testing.T) {
 func TestBuildTooltipTree_SingleCol(t *testing.T) {
 	m := fixedMeasurer{charW: 10}
 	node := theme.RVNode{BgColor: color.RGBA{1, 1, 1, 255}, TextColor: color.RGBA{2, 2, 2, 255}}
-	root := buildTooltipTree("ab\ncde", 0, node, 1.0, m)
+	root := buildTooltipTree("ab\ncde", 0, node, 1.0, m, &imageResolver{}, nil)
 	Layout(root, 0, 0, m)
 	r := root.Rect()
 	// 行宽: "ab"=20, "cde"=30 → max 30; +padding 6*2 = 42
@@ -52,7 +52,7 @@ func TestBuildTooltipTree_MultiCol(t *testing.T) {
 	m := fixedMeasurer{charW: 10}
 	node := theme.RVNode{BgColor: color.RGBA{1, 1, 1, 255}, TextColor: color.RGBA{2, 2, 2, 255}}
 	// 行1 两列 "a\tbb"，行2 一列 "ccc"（缺第2列）
-	root := buildTooltipTree("a\tbb\nccc", 0, node, 1.0, m)
+	root := buildTooltipTree("a\tbb\nccc", 0, node, 1.0, m, &imageResolver{}, nil)
 	Layout(root, 0, 0, m)
 	if len(root.Children) != 2 {
 		t.Fatalf("应 2 行, got %d", len(root.Children))

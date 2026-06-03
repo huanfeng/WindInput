@@ -64,12 +64,24 @@ views:
     accent_bar: {enabled: true, width: 3} # 选中候选左侧蓝色强调条
     # P7-E 结构化阴影：offset_x/y + color 已实现（blur 预留、暂不渲染）。
     shadow: {offset_x: 3, offset_y: 4, blur: 8, color: "${shadow}"}
+  # P8 切片6 验收：状态泡/Tooltip 也吃九宫格背景图 + 右下角角标水印层（复用 panel/mark）。
+  # 注意 status/tooltip 颜色 token 仅认 ${background}/${text}（不认 ${border}）——边框观感由 panel 位图自带蓝边提供。
   status:
-    background: {color: "${background}"}
+    background:
+      color: "${background}" # 图加载失败兜底底色
+      image: {ref: panel, mode: nine_slice, slice: {top: 8, right: 8, bottom: 8, left: 8}}
     color: "${text}"
+    padding: {top: 6, right: 12, bottom: 6, left: 12}
+    layers:
+      - {ref: mark, z: 1, anchor: bottom-right, offset: {x: -4, y: -4}, size: {w: 14, h: 14}, opacity: 0.85}
   tooltip:
-    background: {color: "${background}"}
+    background:
+      color: "${background}"
+      image: {ref: panel, mode: nine_slice, slice: {top: 8, right: 8, bottom: 8, left: 8}}
     color: "${text}"
+    padding: {top: 6, right: 10, bottom: 6, left: 10}
+    layers:
+      - {ref: mark, z: 1, anchor: bottom-right, offset: {x: -5, y: -5}, size: {w: 14, h: 14}, opacity: 0.8}
   toolbar:
     background: {color: "${background}"}
     border: {color: "${border}"}
@@ -83,12 +95,30 @@ views:
     settings:
       icon: {color: "${settings_icon}"}
       hole: {color: "${settings_hole}"}
+  # P8 切片3 schema（root/item/separator 三具名 ViewNode；旧扁平 menu.background/hover 写法已失效）
+  # + 切片6：菜单 root 吃九宫格背景图 + 右下角角标水印层。
   menu:
-    background: {color: "${background}"}
-    border: {color: "${border}"}
+    root:
+      background:
+        color: "${background}" # 图加载失败兜底底色
+        image: {ref: panel, mode: nine_slice, slice: {top: 8, right: 8, bottom: 8, left: 8}}
+      border: {color: "${border}", radius: 6, width: 1}
+      layers:
+        - {ref: mark, z: 1, anchor: bottom-right, offset: {x: -6, y: -6}, size: {w: 16, h: 16}, opacity: 0.8}
+    item:
+      color: "${text}"
+      hover:
+        background: {color: "${hover_bg}"}
+        color: "${hover_text}"
+      disabled: {color: "${disabled}"}
+    separator:
+      background: {color: "${separator}"}
+  # P8 切片6 验收：toast 通知也吃九宫格背景图 + 角标水印（原本无 toast 节点 → 走默认深灰底）。
+  # 注意 toast 背景经引擎 forceAlphaOpaque 强制不透明（避免重要通知透出底层窗口）。
+  toast:
+    background:
+      color: "${background}"
+      image: {ref: panel, mode: nine_slice, slice: {top: 8, right: 8, bottom: 8, left: 8}}
     color: "${text}"
-    separator: {color: "${separator}"}
-    disabled: "${disabled}"
-    hover:
-      background: {color: "${hover_bg}"}
-      color: "${hover_text}"
+    layers:
+      - {ref: mark, z: 1, anchor: bottom-right, offset: {x: -8, y: -8}, size: {w: 18, h: 18}, opacity: 0.85}

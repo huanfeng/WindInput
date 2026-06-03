@@ -65,7 +65,7 @@ func (r *StatusRenderer) resolveStatusNode(cfg StatusWindowConfig) theme.RVNode 
 // fallbackPad/fallbackRadius 为现状兜底（逻辑像素）：node 未配 padding（四向皆 0）→ 兜底 fallbackPad；
 // node 未配 radius（0）→ 兜底 fallbackRadius。字号 = (fontSize + node.FontSize 偏移) × scale。
 // minWidth=32（逻辑）经 FixedW 钳制。
-func buildStatusTree(text string, node theme.RVNode, fontSize, fallbackPad, fallbackRadius, scale float64, m TextMeasurer) *View {
+func buildStatusTree(text string, node theme.RVNode, fontSize, fallbackPad, fallbackRadius, scale float64, m TextMeasurer, ir *imageResolver, resources map[string]string) *View {
 	fs := (fontSize + node.FontSize) * scale
 	padT := node.PadTop.Scaled(scale)
 	padR := node.PadRight.Scaled(scale)
@@ -93,12 +93,14 @@ func buildStatusTree(text string, node theme.RVNode, fontSize, fallbackPad, fall
 		}
 	}
 
-	return &View{
+	root := &View{
 		Text:       text,
 		TextStyle:  TextStyle{FontSize: fs, Color: node.TextColor, Align: AlignCenter, Weight: node.FontWeight, Family: node.FontFamily},
 		Padding:    Edges{Top: padT, Right: padR, Bottom: padB, Left: padL},
-		Background: Fill{Color: node.BgColor},
+		Background: ir.fillFor(node.BgColor, node.BgImage, resources), // P8 切片6：背景可带图
 		Border:     border,
 		FixedW:     w,
 	}
+	ir.appendLayers(root, node.Layers, resources, func(v float64) int { return int(v * scale) }) // P8 切片6：状态泡装饰层
+	return root
 }

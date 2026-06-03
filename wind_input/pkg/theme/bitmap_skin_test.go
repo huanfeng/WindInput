@@ -84,6 +84,41 @@ func TestBitmapSkinTheme_JidianClassic(t *testing.T) {
 		t.Fatalf("选中高亮图解码失败: %v", serr)
 	}
 
+	// P8 切片6：其它窗口（status/tooltip/menu/toast）也吃背景图 + layers。
+	// 验证字段名命中（yaml.v3 静默忽略不认的字段，故须断言确实解析进 RVNode 而非被丢弃）。
+	sv := ResolveStatusViews(rv.Views.Status, rv.Palette)
+	if sv.BgImage == nil || sv.BgImage.Ref != "panel" {
+		t.Errorf("status.background.image 未解析进 RVNode.BgImage: %+v", sv.BgImage)
+	}
+	if len(sv.Layers) != 1 || sv.Layers[0].Ref != "mark" {
+		t.Errorf("status.layers 未解析: %+v", sv.Layers)
+	}
+	tv := ResolveTooltipViews(rv.Views.Tooltip, rv.Palette)
+	if tv.BgImage == nil || tv.BgImage.Ref != "panel" {
+		t.Errorf("tooltip.background.image 未解析: %+v", tv.BgImage)
+	}
+	if len(tv.Layers) != 1 || tv.Layers[0].Ref != "mark" {
+		t.Errorf("tooltip.layers 未解析: %+v", tv.Layers)
+	}
+	tov := ResolveToastViews(rv.Views.Toast, rv.Palette)
+	if tov.BgImage == nil || tov.BgImage.Ref != "panel" {
+		t.Errorf("toast.background.image 未解析: %+v", tov.BgImage)
+	}
+	if len(tov.Layers) != 1 || tov.Layers[0].Ref != "mark" {
+		t.Errorf("toast.layers 未解析: %+v", tov.Layers)
+	}
+	mv := ResolveMenuViews(rv.Views.Menu, rv.Palette)
+	if mv.Root.BgImage == nil || mv.Root.BgImage.Ref != "panel" {
+		t.Errorf("menu.root.background.image 未解析: %+v", mv.Root.BgImage)
+	}
+	if len(mv.Root.Layers) != 1 || mv.Root.Layers[0].Ref != "mark" {
+		t.Errorf("menu.root.layers 未解析: %+v", mv.Root.Layers)
+	}
+	// menu 新 schema（root/item/separator）：item.hover patch 应命中（旧扁平写法早已失效）。
+	if mv.Item.Hover == nil || mv.Item.Hover.BgColor == nil {
+		t.Errorf("menu.item.hover 未解析进 RVState: %+v", mv.Item.Hover)
+	}
+
 	// 同时验收 P7-A/B：accent bar 启用、序号无圆背景（极点风格）。
 	if m := rv.Views.Metrics; m == nil || m.AccentBar == nil || m.AccentBar.Enabled == nil || !*m.AccentBar.Enabled {
 		t.Error("jidian-classic 应启用 accent_bar")

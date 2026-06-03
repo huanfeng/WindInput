@@ -8,7 +8,8 @@ import (
 // other_views.go — P8：其它窗口（status/tooltip/menu/toolbar/toast）的盒模型 View 解析。
 // 复用候选窗的通用 resolveViewNode（ViewNode→RVNode）+ resolveState + toRVImage（candidate_views.go），
 // 各窗口仅注入自己的 palette 语义色表（makeColorResolver 的 tokenMap）。
-// 几何/border/font/颜色由各 ResolveXxxViews 解析；background image/layers 待 P8 切片6（共享位图基础设施）接入。
+// 几何/border/font/颜色由各 ResolveXxxViews 解析；background image/layers 经 RVNode.BgImage/Layers 承载，
+// 由 ui 侧共享 imageResolver 消费（P8 切片6）。
 
 // makeColorResolver 构造一个 ViewNode 颜色字段解析闭包：
 //   - 空串 → nil（调用方据此保留默认）
@@ -39,7 +40,7 @@ func makeColorResolver(tokenMap func(name string) color.Color) func(string) colo
 // 几何（margin/padding/border/font 偏移）来自 ViewNode；
 // 颜色 token：${background}/${text} → Palette.Status；默认底色/文字 = Palette.Status（无 views 覆盖时）。
 // node==nil（主题未配 views.status）时返回纯默认色 + 零几何，由 ui 侧按现状兜底 padding/radius。
-// background image/layers 本切片不消费（待 P8 切片6 共享位图基础设施）。
+// background image/layers 由 ui 侧 imageResolver 消费（P8 切片6：fillFor 装配 BgImage、appendLayers 追加 Layers）。
 func ResolveStatusViews(node *ViewNode, pal ResolvedPalette) RVNode {
 	resolve := makeColorResolver(func(name string) color.Color {
 		switch name {
@@ -61,7 +62,7 @@ func ResolveStatusViews(node *ViewNode, pal ResolvedPalette) RVNode {
 // 几何（margin/padding/border/font 偏移）来自 ViewNode；
 // 颜色 token：${background}/${text} → Palette.Tooltip；默认底色/文字 = Palette.Tooltip。
 // node==nil（主题未配 views.tooltip）时返回纯默认色 + 零几何，由 ui 侧按现状兜底 padding/radius。
-// background image/layers 本切片不消费（待 P8 切片6 共享位图基础设施）。
+// background image/layers 由 ui 侧 imageResolver 消费（P8 切片6：fillFor 装配 BgImage、appendLayers 追加 Layers）。
 func ResolveTooltipViews(node *ViewNode, pal ResolvedPalette) RVNode {
 	resolve := makeColorResolver(func(name string) color.Color {
 		switch name {
@@ -82,7 +83,7 @@ func ResolveTooltipViews(node *ViewNode, pal ResolvedPalette) RVNode {
 // ResolveToastViews 解析 views.toast 节点为渲染消费的 RVNode（P8 切片5）。
 // 颜色 token：${background}/${text} → Palette.Toast；默认底色/文字 = Palette.Toast。
 // 几何（padding/border 圆角/字号偏移）由 ui 侧按现状兜底；bg 不透明化在 ui 侧 forceAlphaOpaque。
-// background image/layers 本切片不消费（待 P8 切片6 共享位图基础设施）。
+// background image/layers 由 ui 侧 imageResolver 消费（P8 切片6：fillFor 装配 BgImage、appendLayers 追加 Layers）。
 func ResolveToastViews(node *ViewNode, pal ResolvedPalette) RVNode {
 	resolve := makeColorResolver(func(name string) color.Color {
 		switch name {
@@ -104,7 +105,7 @@ func ResolveToastViews(node *ViewNode, pal ResolvedPalette) RVNode {
 // 颜色 token → Palette.PopupMenu 语义色；item 的 hover/disabled 走 ViewNode states patch
 // （hover 默认 HoverBg/HoverText、disabled 默认文字 Disabled）。
 // mv==nil（主题未配 views.menu）时各节点取 palette 默认色 + 零几何，由 ui 侧按现状兜底布局尺寸。
-// background image/layers 本切片不消费（待 P8 切片6 共享位图基础设施）。
+// background image/layers 由 ui 侧 imageResolver 消费（P8 切片6：fillFor 装配 BgImage、appendLayers 追加 Layers）。
 func ResolveMenuViews(mv *MenuViews, pal ResolvedPalette) ResolvedMenuViews {
 	pm := pal.PopupMenu
 	resolve := makeColorResolver(func(name string) color.Color {

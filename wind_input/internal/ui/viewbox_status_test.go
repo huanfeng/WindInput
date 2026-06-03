@@ -71,7 +71,7 @@ func TestBuildStatusTree_Fingerprint(t *testing.T) {
 	}
 	// 桩：固定字宽，scale=1，避免依赖真实字体后端
 	m := fixedMeasurer{charW: 10}
-	root := buildStatusTree("中", node, 18.0, 6.0, 8.0, 1.0, m)
+	root := buildStatusTree("中", node, 18.0, 6.0, 8.0, 1.0, m, &imageResolver{}, nil)
 	Layout(root, 0, 0, m)
 
 	r := root.Rect()

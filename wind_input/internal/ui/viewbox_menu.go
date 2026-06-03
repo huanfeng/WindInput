@@ -44,7 +44,7 @@ type menuTree struct {
 // buildMenuTree 构建菜单 View 树（root LayoutColumn + 每项 LayoutRow）。
 // width/height 用预算值（与命中测试一致）。hoverIdx/submenuIdx 决定 hover 态。
 // 勾选✓/箭头▸/文本走 View 文本叶子；分隔项收集到 separators 供后处理画线。
-func buildMenuTree(items []MenuItem, hoverIdx, submenuIdx int, hasChecked, hasChildren bool, rmv theme.ResolvedMenuViews, width, height int, baseFontSize float64, itemHeightLogical int, scale float64) *menuTree {
+func buildMenuTree(items []MenuItem, hoverIdx, submenuIdx int, hasChecked, hasChildren bool, rmv theme.ResolvedMenuViews, width, height int, baseFontSize float64, itemHeightLogical int, scale float64, ir *imageResolver, resources map[string]string) *menuTree {
 	fontSize := (baseFontSize + rmv.Item.FontSize) * scale
 	itemH := int(float64(itemHeightLogical) * scale)
 	sepH := int(float64(menuSeparatorHeight) * scale)
@@ -85,9 +85,10 @@ func buildMenuTree(items []MenuItem, hoverIdx, submenuIdx int, hasChecked, hasCh
 		FixedH:     height,
 		Layout:     LayoutColumn,
 		Padding:    Edges{Top: padTop, Bottom: padBottom},
-		Background: Fill{Color: rmv.Root.BgColor},
+		Background: ir.fillFor(rmv.Root.BgColor, rmv.Root.BgImage, resources), // P8 切片6：菜单背景可带图（PaintTree 在内圆角 clip 内绘制）
 		Border:     Border{Radius: radius},
 	}
+	ir.appendLayers(root, rmv.Root.Layers, resources, func(v float64) int { return int(v * scale) }) // P8 切片6：菜单装饰层
 	mt := &menuTree{root: root}
 
 	for i := range items {

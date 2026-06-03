@@ -21,12 +21,16 @@ func (m *PopupMenu) render() *image.RGBA {
 	rmv := m.resolveMenuViews()
 	td := m.textDrawer
 	baseFontSize := m.getMenuFontSize()
+	var resources map[string]string
+	if m.resolvedV25 != nil {
+		resources = m.resolvedV25.Resources
+	}
 	m.mu.Unlock()
 
 	scale := m.dpiScale()
 	itemHeightLogical := m.getMenuItemHeight()
 
-	mt := buildMenuTree(items, hoverIdx, submenuIdx, hasChecked, hasChildren, rmv, width, height, baseFontSize, itemHeightLogical, scale)
+	mt := buildMenuTree(items, hoverIdx, submenuIdx, hasChecked, hasChildren, rmv, width, height, baseFontSize, itemHeightLogical, scale, &m.imgRes, resources)
 	Layout(mt.root, 0, 0, td)
 	dc, img := newSharedDrawContext(width, height)
 

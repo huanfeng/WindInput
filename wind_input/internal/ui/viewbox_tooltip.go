@@ -36,7 +36,7 @@ func (w *TooltipWindow) resolveTooltipNode() theme.RVNode {
 // node 携带主题几何+颜色+border+font（来自 views.tooltip）。padding 四向未配（皆 0）兜底 6、
 // radius 未配兜底 4（逻辑像素 × scale）；字号 = (14 + node.FontSize 偏移) × scale；字重/字体族随 node。
 // 多列间距（lineSpacing 2 / colGap 16）保留 hardcode（非单节点盒模型字段）。maxContentWidth<=0 不限宽，无行返回 nil。
-func buildTooltipTree(text string, maxContentWidth float64, node theme.RVNode, scale float64, m TextMeasurer) *View {
+func buildTooltipTree(text string, maxContentWidth float64, node theme.RVNode, scale float64, m TextMeasurer, ir *imageResolver, resources map[string]string) *View {
 	fontSize := (14.0 + node.FontSize) * scale
 	padT := node.PadTop.Scaled(scale)
 	padR := node.PadRight.Scaled(scale)
@@ -91,9 +91,10 @@ func buildTooltipTree(text string, maxContentWidth float64, node theme.RVNode, s
 		Layout:     LayoutColumn,
 		Gap:        lineSpacing,
 		Padding:    Edges{Top: padT, Right: padR, Bottom: padB, Left: padL},
-		Background: Fill{Color: node.BgColor},
+		Background: ir.fillFor(node.BgColor, node.BgImage, resources), // P8 切片6：背景可带图
 		Border:     border,
 	}
+	ir.appendLayers(root, node.Layers, resources, func(v float64) int { return int(v * scale) }) // P8 切片6：tooltip 装饰层
 	mkText := func(s string) *View {
 		return &View{Text: s, TextStyle: TextStyle{FontSize: fontSize, Color: node.TextColor, Weight: weight, Family: family}}
 	}

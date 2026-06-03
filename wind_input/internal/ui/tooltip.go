@@ -30,6 +30,7 @@ type TooltipWindow struct {
 	text          string
 	resolvedV25   *theme.ResolvedV25
 	onRightClick  func(text string, x, y int)
+	imgRes        imageResolver // P8 切片6：背景图/layers 解码缓存（与候选窗共享基础设施）
 
 	TextBackendManager
 }
@@ -118,6 +119,7 @@ func (w *TooltipWindow) SetTheme(rv *theme.ResolvedV25) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.resolvedV25 = rv
+	w.imgRes.reset() // 换主题清空位图缓存（ref 解码结果按主题失效）
 }
 
 // Global tooltip window registry
@@ -338,9 +340,13 @@ func (w *TooltipWindow) render(text string, maxContentWidth float64) *image.RGBA
 	w.mu.Lock()
 	td := w.TextDrawer()
 	node := w.resolveTooltipNode()
+	var resources map[string]string
+	if w.resolvedV25 != nil {
+		resources = w.resolvedV25.Resources
+	}
 	w.mu.Unlock()
 
-	root := buildTooltipTree(text, maxContentWidth, node, scale, td)
+	root := buildTooltipTree(text, maxContentWidth, node, scale, td, &w.imgRes, resources)
 	if root == nil {
 		return nil
 	}

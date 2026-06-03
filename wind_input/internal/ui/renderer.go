@@ -181,9 +181,9 @@ type Renderer struct {
 	resolvedV25   *theme.ResolvedV25
 	resolvedViews theme.ResolvedViews // 候选窗盒模型外观：每帧由 refreshResolvedViews 经 theme.ResolveCandidateViews 重建（几何+颜色）+ 运行时字号回填
 	themeViews    *theme.Views        // 主题盒模型 views（已 merge defaultViews 基线）；来自 rv.Views
-	// imageCache 按 ViewImage.ref 缓存解码后的位图（P7-C）：一次性解码、跨帧复用，SetTheme 换主题时清空。
-	// 值为 nil 表示该 ref 解析/解码失败（已尝试过，不再重试）。
-	imageCache map[string]*image.RGBA
+	// imgRes 位图解码缓存基础设施（P7-C；P8 切片6 抽为 imageResolver 与 status/tooltip/menu/toast 共享）：
+	// 一次性解码、跨帧复用，SetTheme 换主题时 reset。resources 表按帧从 resolvedV25.Resources 传入。
+	imgRes imageResolver
 	TextBackendManager
 
 	// Base (unscaled) values for DPI recalculation
@@ -378,73 +378,31 @@ func (r *Renderer) SetTheme(rv *theme.ResolvedV25) {
 	// 候选窗背景图/层级覆盖图（P7-C）：来源已归口 views（window.background.image / 各 View 的 layers），
 	// 经 r.resolvedViews 的 BgImage/Layers spec 承载，build 时按 ref 经 imageForRef 取缓存位图。
 	// 换主题清空位图缓存（ref 解码结果按主题失效）。
-	r.imageCache = nil
+	r.imgRes.reset()
 }
 
-// imageForRef 把 ViewImage.ref 解码为位图：先查缓存，未命中则解析 ref（resources 表 → 字面 path/data URI）
-// 并一次性解码后缓存（含失败的 nil，避免每帧重试）。仅在 build 路径调用（单线程）。
+// resourcesSnapshot 返回当前主题的资源表（ref→path/dataURI），nil-safe。
+func (r *Renderer) resourcesSnapshot() map[string]string {
+	if r.resolvedV25 != nil {
+		return r.resolvedV25.Resources
+	}
+	return nil
+}
+
+// imageForRef 把 ViewImage.ref 解码为位图（委派共享 imageResolver）。仅在 build 路径调用（单线程）。
 func (r *Renderer) imageForRef(ref string) *image.RGBA {
-	if ref == "" {
-		return nil
-	}
-	if r.imageCache == nil {
-		r.imageCache = make(map[string]*image.RGBA)
-	}
-	if img, ok := r.imageCache[ref]; ok {
-		return img
-	}
-	path := ref
-	if r.resolvedV25 != nil && r.resolvedV25.Resources != nil {
-		if p, ok := r.resolvedV25.Resources[ref]; ok {
-			path = p
-		}
-	}
-	img, err := theme.LoadBackgroundImage(path)
-	if err != nil {
-		img = nil // 缓存失败结果，不再重试（不打断渲染）
-	}
-	r.imageCache[ref] = img
-	return img
+	return r.imgRes.imageForRef(ref, r.resourcesSnapshot())
 }
 
-// fillFor 构建 View 背景填充：底色 + 可选背景图（按 RVImage spec 经 imageForRef 取缓存位图）。
-// bg 为 nil 或图解码失败时退化为纯底色（零回归）。
+// fillFor 构建 View 背景填充：底色 + 可选背景图（委派共享 imageResolver）。
 func (r *Renderer) fillFor(col color.Color, bg *theme.RVImage) Fill {
-	f := Fill{Color: col}
-	if bg != nil {
-		if img := r.imageForRef(bg.Ref); img != nil {
-			f.Image = img
-			f.Mode = bg.Mode
-			f.Slice = bg.Slice
-			f.Opacity = bg.Opacity
-		}
-	}
-	return f
+	return r.imgRes.fillFor(col, bg, r.resourcesSnapshot())
 }
 
-// appendThemeLayers 把主题 RVImage 层级覆盖图（spec）解码后追加到 View.Layers（P7-C，D4）。
+// appendThemeLayers 把主题 RVImage 层级覆盖图（spec）解码后追加到 View.Layers（P7-C，D4；委派共享 imageResolver）。
 // 与引擎内置层（accent rail / 光标）共存；offset/size 为逻辑像素经 sc 缩放，W/H=0 保持原图尺寸。
-// 解码失败的层静默跳过（不打断渲染）。
 func (r *Renderer) appendThemeLayers(v *View, layers []theme.RVImage, sc func(float64) int) {
-	for i := range layers {
-		L := &layers[i]
-		img := r.imageForRef(L.Ref)
-		if img == nil {
-			continue
-		}
-		v.Layers = append(v.Layers, ImageLayer{
-			Img:     img,
-			Mode:    L.Mode,
-			Slice:   L.Slice,
-			Opacity: L.Opacity,
-			Z:       L.Z,
-			Anchor:  L.Anchor,
-			OffsetX: sc(float64(L.OffsetX)),
-			OffsetY: sc(float64(L.OffsetY)),
-			W:       sc(float64(L.W)),
-			H:       sc(float64(L.H)),
-		})
-	}
+	r.imgRes.appendLayers(v, layers, r.resourcesSnapshot(), sc)
 }
 
 // getModeIndicatorColors returns mode indicator colors from theme or defaults

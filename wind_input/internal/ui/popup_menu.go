@@ -30,6 +30,7 @@ type PopupMenu struct {
 
 	// Theme（P5：吃 ResolvedV25，颜色源 Palette.PopupMenu）
 	resolvedV25 *theme.ResolvedV25
+	imgRes      imageResolver // P8 切片6：菜单背景图/layers 解码缓存（与候选窗共享基础设施）
 
 	// Submenu support
 	submenu      *PopupMenu // 当前展开的子菜单实例
@@ -543,6 +544,7 @@ func (m *PopupMenu) SetTextRenderMode(mode TextRenderMode) {
 func (m *PopupMenu) SetTheme(rv *theme.ResolvedV25) {
 	m.mu.Lock()
 	m.resolvedV25 = rv
+	m.imgRes.reset() // 换主题清空位图缓存（ref 解码结果按主题失效）
 	sub := m.submenu
 	m.mu.Unlock()
 

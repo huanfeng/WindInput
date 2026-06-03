@@ -54,7 +54,7 @@ func TestBuildMenuTree_Geometry(t *testing.T) {
 	}
 	m := fixedMeasurer{charW: 14}
 	// hoverIdx=0（项目一 hover），hasChecked=true，hasChildren=true
-	mt := buildMenuTree(items, 0, -1, true, true, rmv, 200, 80, 14.0, 24, 1.0)
+	mt := buildMenuTree(items, 0, -1, true, true, rmv, 200, 80, 14.0, 24, 1.0, &imageResolver{}, nil)
 	Layout(mt.root, 0, 0, m)
 	if mt.root.Background.Color != (color.RGBA{255, 255, 255, 255}) {
 		t.Error("root bg 应=BgColor")

@@ -19,6 +19,7 @@ type StatusRenderer struct {
 	mu          sync.Mutex
 	resolvedV25 *theme.ResolvedV25
 	logger      *slog.Logger
+	imgRes      imageResolver // P8 切片6：背景图/layers 解码缓存（与候选窗共享基础设施）
 }
 
 // NewStatusRenderer 创建状态渲染器，默认使用 DirectWrite 渲染（与系统默认一致，反锯齿效果更好）
@@ -58,13 +59,17 @@ func (r *StatusRenderer) Render(state StatusState, cfg StatusWindowConfig) *imag
 	r.mu.Lock()
 	td := r.TextDrawer()
 	node := r.resolveStatusNode(cfg)
+	var resources map[string]string
+	if r.resolvedV25 != nil {
+		resources = r.resolvedV25.Resources
+	}
 	r.mu.Unlock()
 
 	// 透明度应用到背景色（与现状一致）
 	node.BgColor = applyOpacity(node.BgColor, cfg.Opacity)
 
 	// 构建 View 树 + 布局（padding 现状兜底 6、radius 兜底 cfg.BorderRadius）
-	root := buildStatusTree(text, node, cfg.FontSize, 6.0, cfg.BorderRadius, scale, td)
+	root := buildStatusTree(text, node, cfg.FontSize, 6.0, cfg.BorderRadius, scale, td, &r.imgRes, resources)
 	Layout(root, 0, 0, td)
 
 	w := root.Rect().Dx()
@@ -149,6 +154,7 @@ func (r *StatusRenderer) SetTheme(rv *theme.ResolvedV25) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.resolvedV25 = rv
+	r.imgRes.reset() // 换主题清空位图缓存（ref 解码结果按主题失效）
 }
 
 // Close 释放渲染资源

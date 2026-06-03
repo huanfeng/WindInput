@@ -22,6 +22,7 @@ type ToastRenderer struct {
 	mu          sync.Mutex
 	resolvedV25 *theme.ResolvedV25
 	logger      *slog.Logger
+	imgRes      imageResolver // P8 切片6：背景图/layers 解码缓存（与候选窗共享基础设施）
 }
 
 // NewToastRenderer 创建 toast 渲染器。默认 DirectWrite, 与项目主配置默认 FontEngine 一致;
@@ -41,6 +42,7 @@ func (r *ToastRenderer) SetTheme(rv *theme.ResolvedV25) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.resolvedV25 = rv
+	r.imgRes.reset() // 换主题清空位图缓存（ref 解码结果按主题失效）
 }
 
 // Close 释放渲染资源。
@@ -122,6 +124,10 @@ func (r *ToastRenderer) Render(opts ToastOptions, maxContentPx int) *image.RGBA 
 
 	r.mu.Lock()
 	td := r.TextDrawer()
+	var resources map[string]string
+	if r.resolvedV25 != nil {
+		resources = r.resolvedV25.Resources
+	}
 	r.mu.Unlock()
 	accent := levelAccent(opts.Level)
 
@@ -184,10 +190,11 @@ func (r *ToastRenderer) Render(opts ToastOptions, maxContentPx int) *image.RGBA 
 		Layout:     LayoutColumn,
 		Gap:        int(lineSpacing),
 		Padding:    Edges{Top: padTop, Right: padRight, Bottom: padBottom, Left: int(textLeft)},
-		Background: Fill{Color: node.BgColor},
+		Background: r.imgRes.fillFor(node.BgColor, node.BgImage, resources), // P8 切片6：背景可带图
 		Border:     border,
 		FixedW:     int(width),
 	}
+	r.imgRes.appendLayers(root, node.Layers, resources, func(v float64) int { return int(v * scale) }) // P8 切片6：toast 装饰层
 	if title != "" {
 		// 标题用 accent 颜色（level 运行时色），醒目。
 		tv := &View{Text: title, TextStyle: TextStyle{FontSize: titleSize, Color: accent, Weight: node.FontWeight, Family: node.FontFamily}}
