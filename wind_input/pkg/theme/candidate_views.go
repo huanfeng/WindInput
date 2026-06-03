@@ -51,54 +51,62 @@ func resolveCandidateViewColor(s string, pal ResolvedPalette) color.Color {
 	return nil
 }
 
+// resolveViewNode 通用「ViewNode → RVNode」解析器（P8 切片0）：把单个盒模型 ViewNode 解析为
+// 渲染消费形态。窗口无关——颜色 token 由 resolveColor 注入（候选窗=resolveCandidateViewColor(s,pal)，
+// 其它窗口注入各自的 palette 语义色表）；defBg/defBorder/defText = 该节点 palette 默认色（nil=无默认）。
+// 几何（margin/padding/border）逻辑像素直拷；颜色 = 默认 ⊕ token 覆盖（token 解析非 nil 才覆盖）；
+// FontSize 存「相对主字号的有符号偏移」（0/未写=同主字体），由 ui 侧换算；
+// 字重 0=继承全局；字体族名空=继承全局（未知名由平台文本引擎回退）；背景图/layers 转 RVImage spec（不解码位图）。
+func resolveViewNode(n ViewNode, resolveColor func(string) color.Color, defBg, defBorder, defText color.Color) RVNode {
+	out := RVNode{
+		MarginTop:    dimOr(n.Margin.Top, Dimension{}),
+		MarginRight:  dimOr(n.Margin.Right, Dimension{}),
+		MarginBottom: dimOr(n.Margin.Bottom, Dimension{}),
+		MarginLeft:   dimOr(n.Margin.Left, Dimension{}),
+		PadTop:       dimOr(n.Padding.Top, Dimension{}),
+		PadRight:     dimOr(n.Padding.Right, Dimension{}),
+		PadBottom:    dimOr(n.Padding.Bottom, Dimension{}),
+		PadLeft:      dimOr(n.Padding.Left, Dimension{}),
+		BorderRadius: dimOr(n.Border.Radius, Dimension{}),
+		BorderWidth:  dimOr(n.Border.Width, Dimension{}),
+		BgColor:      defBg,
+		BorderColor:  defBorder,
+		TextColor:    defText,
+		FontSize:     float64(edgeOr(n.FontSize, 0)),
+		FontWeight:   edgeOr(n.FontWeight, 0),
+		FontFamily:   n.FontFamily,
+	}
+	if c := resolveColor(n.Background.Color); c != nil {
+		out.BgColor = c
+	}
+	if c := resolveColor(n.Border.Color); c != nil {
+		out.BorderColor = c
+	}
+	if c := resolveColor(n.Color); c != nil {
+		out.TextColor = c
+	}
+	// P7-C：背景填充图 + 层级覆盖图 spec（不解码位图，ui 侧按 Ref 缓存解码）。
+	if n.Background.Image != nil {
+		im := toRVImage(*n.Background.Image)
+		out.BgImage = &im
+	}
+	if len(n.Layers) > 0 {
+		out.Layers = make([]RVImage, len(n.Layers))
+		for i := range n.Layers {
+			out.Layers[i] = toRVImage(n.Layers[i])
+		}
+	}
+	return out
+}
+
 // ResolveCandidateViews 把候选窗 Views（已 merge defaultViews 基线，含 Metrics）+ palette
 // 解析为渲染消费的 ResolvedViews（几何=逻辑像素、颜色=color.Color）。
 // 颜色 = palette 默认 ⊕ views token 覆盖（views 颜色非空才覆盖）。
 // 不设字号（Text/Index/PreeditBar.FontSize）、ItemHeight、VerticalMaxWidth——这些是运行时值，由 ui 回填。
 func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
+	resolve := func(s string) color.Color { return resolveCandidateViewColor(s, pal) }
 	build := func(n ViewNode, defBg, defBorder, defText color.Color) RVNode {
-		out := RVNode{
-			MarginTop:    dimOr(n.Margin.Top, Dimension{}),
-			MarginRight:  dimOr(n.Margin.Right, Dimension{}),
-			MarginBottom: dimOr(n.Margin.Bottom, Dimension{}),
-			MarginLeft:   dimOr(n.Margin.Left, Dimension{}),
-			PadTop:       dimOr(n.Padding.Top, Dimension{}),
-			PadRight:     dimOr(n.Padding.Right, Dimension{}),
-			PadBottom:    dimOr(n.Padding.Bottom, Dimension{}),
-			PadLeft:      dimOr(n.Padding.Left, Dimension{}),
-			BorderRadius: dimOr(n.Border.Radius, Dimension{}),
-			BorderWidth:  dimOr(n.Border.Width, Dimension{}),
-			BgColor:      defBg,
-			BorderColor:  defBorder,
-			TextColor:    defText,
-			// 逐元素字体：FontSize 此处存「相对主候选字体的有符号偏移」（0/未写=同主字体），
-			// 由 ui 侧 refreshResolvedViews 换算为 base+offset×scale；
-			// 字重 0=继承全局；字体族名空=继承全局（未知名由平台文本引擎回退）。
-			FontSize:   float64(edgeOr(n.FontSize, 0)),
-			FontWeight: edgeOr(n.FontWeight, 0),
-			FontFamily: n.FontFamily,
-		}
-		if c := resolveCandidateViewColor(n.Background.Color, pal); c != nil {
-			out.BgColor = c
-		}
-		if c := resolveCandidateViewColor(n.Border.Color, pal); c != nil {
-			out.BorderColor = c
-		}
-		if c := resolveCandidateViewColor(n.Color, pal); c != nil {
-			out.TextColor = c
-		}
-		// P7-C：背景填充图 + 层级覆盖图 spec（不解码位图，ui 侧按 Ref 缓存解码）。
-		if n.Background.Image != nil {
-			im := toRVImage(*n.Background.Image)
-			out.BgImage = &im
-		}
-		if len(n.Layers) > 0 {
-			out.Layers = make([]RVImage, len(n.Layers))
-			for i := range n.Layers {
-				out.Layers[i] = toRVImage(n.Layers[i])
-			}
-		}
-		return out
+		return resolveViewNode(n, resolve, defBg, defBorder, defText)
 	}
 	cw := pal.CandidateWindow
 	rv := ResolvedViews{
@@ -117,15 +125,15 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 	}
 	// P7-D：item 三态解析为完整 patch。selected 默认 palette SelectedBg/SelectedText，
 	// hover 默认 HoverBg（文字沿用基态），disabled 无 palette 默认（schema 预留）。
-	rv.Item.Selected = resolveState(views.Item.Selected, cw.SelectedBg, cw.SelectedText, pal)
-	rv.Item.Hover = resolveState(views.Item.Hover, cw.HoverBg, nil, pal)
-	rv.Item.Disabled = resolveState(views.Item.Disabled, nil, nil, pal)
+	rv.Item.Selected = resolveState(views.Item.Selected, cw.SelectedBg, cw.SelectedText, resolve)
+	rv.Item.Hover = resolveState(views.Item.Hover, cw.HoverBg, nil, resolve)
+	rv.Item.Disabled = resolveState(views.Item.Disabled, nil, nil, resolve)
 	// P7-D：序号/注释也各自支持选中/悬停态（View 模型对称）。无 palette 默认 → 未配置即返回 nil，
 	// 渲染沿用各元素基态（默认与普通态一致）；主题可用 views.index.selected / views.comment.selected 独立配。
-	rv.Index.Selected = resolveState(views.Index.Selected, nil, nil, pal)
-	rv.Index.Hover = resolveState(views.Index.Hover, nil, nil, pal)
-	rv.Comment.Selected = resolveState(views.Comment.Selected, nil, nil, pal)
-	rv.Comment.Hover = resolveState(views.Comment.Hover, nil, nil, pal)
+	rv.Index.Selected = resolveState(views.Index.Selected, nil, nil, resolve)
+	rv.Index.Hover = resolveState(views.Index.Hover, nil, nil, resolve)
+	rv.Comment.Selected = resolveState(views.Comment.Selected, nil, nil, resolve)
+	rv.Comment.Hover = resolveState(views.Comment.Hover, nil, nil, resolve)
 	if m := views.Metrics; m != nil {
 		rv.ItemSpacing = dimOr(m.ItemSpacing, Dimension{})
 		rv.WindowGap = dimOr(m.BandGap, Dimension{})
@@ -157,11 +165,11 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 // resolveState 把状态 patch ViewNode（selected/hover/disabled）解析为 RVState（P7-D）。
 // defBg/defText = 该态的 palette 默认底色/文字色（nil=无默认）；patch 提供对应字段才覆盖。
 // 全空且无 palette 默认 → 返回 nil（该态无覆盖，渲染沿用基态）。
-func resolveState(node *ViewNode, defBg, defText color.Color, pal ResolvedPalette) *RVState {
+func resolveState(node *ViewNode, defBg, defText color.Color, resolveColor func(string) color.Color) *RVState {
 	st := RVState{BgColor: defBg, TextColor: defText}
 	has := defBg != nil || defText != nil
 	if node != nil {
-		if c := resolveCandidateViewColor(node.Background.Color, pal); c != nil {
+		if c := resolveColor(node.Background.Color); c != nil {
 			st.BgColor = c
 			has = true
 		}
@@ -170,11 +178,11 @@ func resolveState(node *ViewNode, defBg, defText color.Color, pal ResolvedPalett
 			st.BgImage = &im
 			has = true
 		}
-		if c := resolveCandidateViewColor(node.Color, pal); c != nil {
+		if c := resolveColor(node.Color); c != nil {
 			st.TextColor = c
 			has = true
 		}
-		if c := resolveCandidateViewColor(node.Border.Color, pal); c != nil {
+		if c := resolveColor(node.Border.Color); c != nil {
 			st.BorderColor = c
 			has = true
 		}

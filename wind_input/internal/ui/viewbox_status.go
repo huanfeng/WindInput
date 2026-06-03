@@ -29,67 +29,76 @@ func resolveTokenColor(s string, resolver func(name string) color.Color) color.C
 	return nil
 }
 
-// resolveStatusColors 计算状态泡最终颜色，优先级：自定义 cfg > views.status token > Palette.Status 默认。
-func (r *StatusRenderer) resolveStatusColors(cfg StatusWindowConfig) theme.ResolvedStatusViews {
-	// base：Palette.Status 主题色（P5-6：状态泡读自身 Palette.Status，配色与 Toast 统一深灰底白字，零回归）
-	bg := color.Color(color.RGBA{60, 60, 60, 240})
-	text := color.Color(color.RGBA{255, 255, 255, 255})
-	rv := r.resolvedV25
-	if rv != nil {
-		bg = rv.Palette.Status.Background
-		text = rv.Palette.Status.Text
-		// views.status token 覆盖（resolver 映射到 Palette.Status 同源色）
-		if rv.Views != nil && rv.Views.Status != nil {
-			res := func(name string) color.Color {
-				switch name {
-				case "background":
-					return rv.Palette.Status.Background
-				case "text":
-					return rv.Palette.Status.Text
-				}
-				return nil
-			}
-			if c := resolveTokenColor(rv.Views.Status.Background.Color, res); c != nil {
-				bg = c
-			}
-			if c := resolveTokenColor(rv.Views.Status.Color, res); c != nil {
-				text = c
-			}
+// resolveStatusNode 计算状态泡盒模型 RVNode（P8 切片1：几何+border+font+颜色）。
+// 几何（padding/margin/border/font 偏移）来自 views.status；
+// 颜色优先级：自定义 cfg > views.status token > Palette.Status 默认。
+func (r *StatusRenderer) resolveStatusNode(cfg StatusWindowConfig) theme.RVNode {
+	// 无主题兜底：深灰底白字（与 P5-6 现状一致）；几何零值由 buildStatusTree 兜底为现状 hardcode。
+	node := theme.RVNode{
+		BgColor:   color.RGBA{60, 60, 60, 240},
+		TextColor: color.RGBA{255, 255, 255, 255},
+	}
+	if rv := r.resolvedV25; rv != nil {
+		var sn *theme.ViewNode
+		if rv.Views != nil {
+			sn = rv.Views.Status
 		}
+		node = theme.ResolveStatusViews(sn, rv.Palette)
 	}
 
-	// 自定义 cfg 优先级最高
+	// 自定义 cfg 颜色优先级最高
 	if cfg.BackgroundColor != "" {
 		if c, ok := parseHexColor(cfg.BackgroundColor); ok {
-			bg = c
+			node.BgColor = c
 		}
 	}
 	if cfg.TextColor != "" {
 		if c, ok := parseHexColor(cfg.TextColor); ok {
-			text = c
+			node.TextColor = c
+		}
+	}
+	return node
+}
+
+// buildStatusTree 构建状态泡 View 树（单文本节点：完整盒模型 padding/border/font + 居中文本）。
+// node 携带主题几何+颜色+border+font（已叠加运行时 cfg 颜色覆盖）。
+// fallbackPad/fallbackRadius 为现状兜底（逻辑像素）：node 未配 padding（四向皆 0）→ 兜底 fallbackPad；
+// node 未配 radius（0）→ 兜底 fallbackRadius。字号 = (fontSize + node.FontSize 偏移) × scale。
+// minWidth=32（逻辑）经 FixedW 钳制。
+func buildStatusTree(text string, node theme.RVNode, fontSize, fallbackPad, fallbackRadius, scale float64, m TextMeasurer) *View {
+	fs := (fontSize + node.FontSize) * scale
+	padT := node.PadTop.Scaled(scale)
+	padR := node.PadRight.Scaled(scale)
+	padB := node.PadBottom.Scaled(scale)
+	padL := node.PadLeft.Scaled(scale)
+	if padT == 0 && padR == 0 && padB == 0 && padL == 0 {
+		p := int(fallbackPad * scale)
+		padT, padR, padB, padL = p, p, p, p
+	}
+	radius := node.BorderRadius.Scaled(scale)
+	if radius == 0 {
+		radius = int(fallbackRadius * scale)
+	}
+	minW := int(32.0 * scale)
+
+	tw := measureText(m, text, fs, node.FontFamily)
+	w := max(int(tw)+padL+padR, minW)
+
+	border := Border{Radius: radius}
+	if node.BorderColor != nil {
+		border.Color = node.BorderColor
+		border.Width = node.BorderWidth.Scaled(scale)
+		if border.Width == 0 {
+			border.Width = int(1.0 * scale) // 配了边框色但未配宽 → 1px 发丝线
 		}
 	}
 
-	return theme.ResolvedStatusViews{BgColor: bg, TextColor: text}
-}
-
-// buildStatusTree 构建状态泡的 View 树（单文本节点：bg 圆角 + padding + 居中文本）。
-// 所有尺寸入参为逻辑像素，内部乘 scale 得最终像素（与现状 Render 一致）。
-// minWidth=32（逻辑）经 FixedW 钳制；高 = fontSize + padding*2（由 measure 算出）。
-func buildStatusTree(text string, rsv theme.ResolvedStatusViews, fontSize, padding, borderRadius, scale float64, m TextMeasurer) *View {
-	fs := fontSize * scale
-	pad := int(padding * scale)
-	minW := int(32.0 * scale)
-
-	tw := m.MeasureString(text, fs)
-	w := max(int(tw)+pad*2, minW)
-
 	return &View{
 		Text:       text,
-		TextStyle:  TextStyle{FontSize: fs, Color: rsv.TextColor, Align: AlignCenter},
-		Padding:    Edges{Top: pad, Right: pad, Bottom: pad, Left: pad},
-		Background: Fill{Color: rsv.BgColor},
-		Border:     Border{Radius: int(borderRadius * scale)},
+		TextStyle:  TextStyle{FontSize: fs, Color: node.TextColor, Align: AlignCenter, Weight: node.FontWeight, Family: node.FontFamily},
+		Padding:    Edges{Top: padT, Right: padR, Bottom: padB, Left: padL},
+		Background: Fill{Color: node.BgColor},
+		Border:     border,
 		FixedW:     w,
 	}
 }

@@ -57,14 +57,14 @@ func (r *StatusRenderer) Render(state StatusState, cfg StatusWindowConfig) *imag
 
 	r.mu.Lock()
 	td := r.TextDrawer()
-	rsv := r.resolveStatusColors(cfg)
+	node := r.resolveStatusNode(cfg)
 	r.mu.Unlock()
 
 	// 透明度应用到背景色（与现状一致）
-	rsv.BgColor = applyOpacity(rsv.BgColor, cfg.Opacity)
+	node.BgColor = applyOpacity(node.BgColor, cfg.Opacity)
 
-	// 构建 View 树 + 布局
-	root := buildStatusTree(text, rsv, cfg.FontSize, 6.0, cfg.BorderRadius, scale, td)
+	// 构建 View 树 + 布局（padding 现状兜底 6、radius 兜底 cfg.BorderRadius）
+	root := buildStatusTree(text, node, cfg.FontSize, 6.0, cfg.BorderRadius, scale, td)
 	Layout(root, 0, 0, td)
 
 	w := root.Rect().Dx()

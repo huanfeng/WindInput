@@ -47,17 +47,17 @@ func TestResolveStatusColors(t *testing.T) {
 	r := &StatusRenderer{resolvedV25: rv}
 
 	// views token → Palette.Status
-	rsv := r.resolveStatusColors(StatusWindowConfig{})
-	if rsv.BgColor != mi.Background {
-		t.Errorf("bg 应来自 Palette.Status, got %v", rsv.BgColor)
+	node := r.resolveStatusNode(StatusWindowConfig{})
+	if node.BgColor != mi.Background {
+		t.Errorf("bg 应来自 Palette.Status, got %v", node.BgColor)
 	}
-	if rsv.TextColor != mi.Text {
-		t.Errorf("text 应来自 Palette.Status, got %v", rsv.TextColor)
+	if node.TextColor != mi.Text {
+		t.Errorf("text 应来自 Palette.Status, got %v", node.TextColor)
 	}
 
 	// 自定义 cfg 优先
-	rsv2 := r.resolveStatusColors(StatusWindowConfig{BackgroundColor: "#FF0000", TextColor: "#00FF00"})
-	if rsv2.BgColor == mi.Background {
+	node2 := r.resolveStatusNode(StatusWindowConfig{BackgroundColor: "#FF0000", TextColor: "#00FF00"})
+	if node2.BgColor == mi.Background {
 		t.Error("自定义 bg 应覆盖 views token")
 	}
 }
@@ -65,13 +65,13 @@ func TestResolveStatusColors(t *testing.T) {
 // TestBuildStatusTree_Fingerprint 验证状态泡 View 树几何 + 颜色指纹（零回归基准）。
 // 单节点文本 View：FixedW（minWidth 钳制）+ Padding + 居中文本 + bg 圆角。
 func TestBuildStatusTree_Fingerprint(t *testing.T) {
-	rsv := theme.ResolvedStatusViews{
+	node := theme.RVNode{
 		BgColor:   color.RGBA{60, 60, 60, 240},
 		TextColor: color.RGBA{255, 255, 255, 255},
 	}
 	// 桩：固定字宽，scale=1，避免依赖真实字体后端
 	m := fixedMeasurer{charW: 10}
-	root := buildStatusTree("中", rsv, 18.0, 6.0, 8.0, 1.0, m)
+	root := buildStatusTree("中", node, 18.0, 6.0, 8.0, 1.0, m)
 	Layout(root, 0, 0, m)
 
 	r := root.Rect()

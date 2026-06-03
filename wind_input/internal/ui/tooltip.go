@@ -337,10 +337,10 @@ func (w *TooltipWindow) render(text string, maxContentWidth float64) *image.RGBA
 	scale := GetDPIScale()
 	w.mu.Lock()
 	td := w.TextDrawer()
-	rtv := w.resolveTooltipColors()
+	node := w.resolveTooltipNode()
 	w.mu.Unlock()
 
-	root := buildTooltipTree(text, maxContentWidth, rtv, scale, td)
+	root := buildTooltipTree(text, maxContentWidth, node, scale, td)
 	if root == nil {
 		return nil
 	}

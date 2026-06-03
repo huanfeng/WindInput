@@ -18,17 +18,17 @@ func TestResolveTooltipColors(t *testing.T) {
 		Views:   &theme.Views{Tooltip: &theme.ViewNode{Background: theme.ViewFill{Color: "${background}"}, Color: "${text}"}},
 	}
 	w := &TooltipWindow{resolvedV25: rv}
-	rtv := w.resolveTooltipColors()
-	if rtv.BgColor != color.Color(bg) || rtv.TextColor != color.Color(txt) {
-		t.Fatalf("tooltip 颜色应映射 Palette.Tooltip, got %+v", rtv)
+	node := w.resolveTooltipNode()
+	if node.BgColor != color.Color(bg) || node.TextColor != color.Color(txt) {
+		t.Fatalf("tooltip 颜色应映射 Palette.Tooltip, got %+v", node)
 	}
 }
 
 // TestBuildTooltipTree_SingleCol 单列多行：列布局，行高/总尺寸指纹。
 func TestBuildTooltipTree_SingleCol(t *testing.T) {
 	m := fixedMeasurer{charW: 10}
-	rtv := theme.ResolvedTooltipViews{BgColor: color.RGBA{1, 1, 1, 255}, TextColor: color.RGBA{2, 2, 2, 255}}
-	root := buildTooltipTree("ab\ncde", 0, rtv, 1.0, m)
+	node := theme.RVNode{BgColor: color.RGBA{1, 1, 1, 255}, TextColor: color.RGBA{2, 2, 2, 255}}
+	root := buildTooltipTree("ab\ncde", 0, node, 1.0, m)
 	Layout(root, 0, 0, m)
 	r := root.Rect()
 	// 行宽: "ab"=20, "cde"=30 → max 30; +padding 6*2 = 42
@@ -50,9 +50,9 @@ func TestBuildTooltipTree_SingleCol(t *testing.T) {
 // TestBuildTooltipTree_MultiCol 多列：每行 LayoutRow，列宽对齐 + 缺列空占位。
 func TestBuildTooltipTree_MultiCol(t *testing.T) {
 	m := fixedMeasurer{charW: 10}
-	rtv := theme.ResolvedTooltipViews{BgColor: color.RGBA{1, 1, 1, 255}, TextColor: color.RGBA{2, 2, 2, 255}}
+	node := theme.RVNode{BgColor: color.RGBA{1, 1, 1, 255}, TextColor: color.RGBA{2, 2, 2, 255}}
 	// 行1 两列 "a\tbb"，行2 一列 "ccc"（缺第2列）
-	root := buildTooltipTree("a\tbb\nccc", 0, rtv, 1.0, m)
+	root := buildTooltipTree("a\tbb\nccc", 0, node, 1.0, m)
 	Layout(root, 0, 0, m)
 	if len(root.Children) != 2 {
 		t.Fatalf("应 2 行, got %d", len(root.Children))
