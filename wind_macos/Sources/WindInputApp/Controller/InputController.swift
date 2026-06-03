@@ -1,6 +1,7 @@
 import Cocoa
 import InputMethodKit
 import WindInputKit
+import Carbon.HIToolbox // IsSecureEventInputEnabled (密码框/安全输入检测)
 
 // InputController — IMKit 为每个文本框/会话实例化一个本类对象 (PR-1 设计 方案 A).
 //
@@ -50,6 +51,11 @@ public class InputController: IMKInputController {
     private var pendingModVK: UInt32?    // 当前按住、待判定的修饰键 Win VK (nil=无)
     private var pendingModSawOther = false // 修饰键按住期间是否出现过其它键 (→ 非 tap)
 
+    // 上次随 focusGained 上报给 Go 的系统安全输入(密码框)状态。handle 每键与系统实时值
+    // 比对, 翻转即补发 focusGained —— 补偿同一 IMKit client 内字段切换不触发 activateServer
+    // 的盲区(见 syncSecureInputIfChanged)。
+    private var lastReportedSecureInput = false
+
     public override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
         super.init(server: server, delegate: delegate, client: inputClient)
 
@@ -94,7 +100,7 @@ public class InputController: IMKInputController {
         CandidatePanelHost.shared.activeResponder = self
         // 激活即确保连上 (装完首次激活 / 重启后并发竞态时 init 那次可能没连上)。
         ensureConnected()
-        sendEmpty(UpstreamCmd.focusGained)
+        sendFocusGained()
     }
 
     /// IME 失去焦点 (切到别的输入法/应用) 时由系统调用。发 FocusLost 让 Go 端
@@ -114,7 +120,46 @@ public class InputController: IMKInputController {
         super.deactivateServer(sender)
     }
 
-    /// 发一个无 payload 的上行帧 (focusGained/focusLost 等), 读掉 ack。失败仅 log。
+    /// 发 FocusGained 帧, 携带 InputScope bitmask。读掉 ack, 失败仅 log。
+    ///
+    /// 密码框适配 (对齐 Win 36614ae): macOS 焦点进入密码框/NSSecureTextField 时, AppKit
+    /// 会启用系统"安全输入" (IsSecureEventInputEnabled 返回真; 浏览器 <input type=password>
+    /// 同样置位)。命中即把 InputScope 置上 IS_PASSWORD 位 (TSF 枚举 31), Go 端 coordinator
+    /// 据此对密码框强制英文半角直通 (sensitiveFieldActive), 与 Win 端共用同一套判定逻辑。
+    /// 非密码框时 mask=0, 行为与原空帧一致。
+    private func sendFocusGained() {
+        guard let bridge = bridge, bridge.isConnected else { return }
+        // 读系统安全输入状态并记录, 供 handle 每键比对 (见 syncSecureInputIfChanged)。
+        let secure = IsSecureEventInputEnabled()
+        lastReportedSecureInput = secure
+        let mask: UInt64 = secure ? Self.inputScopePasswordBit : 0
+        do {
+            try bridge.send(BinaryCodec.encodeFocusGainedFrame(inputScopeMask: mask))
+            _ = try bridge.readFrame()
+        } catch {
+            NSLog("WindInput[sendFocusGained] io error: \(error)")
+            reconnect()
+        }
+    }
+
+    /// IS_PASSWORD 位 (TSF InputScope 枚举 31) 的 bitmask, 与 Go coordinator 的
+    /// inputScopePassword 常量对齐。
+    private static let inputScopePasswordBit: UInt64 = UInt64(1) << 31
+
+    /// 每键检测系统安全输入(密码框)状态是否相对上次上报发生翻转, 变化则补发一帧
+    /// focusGained 同步 Go 端 sensitiveFieldActive。
+    ///
+    /// 为何需要: macOS IMKit 的 activateServer 是「输入法 ↔ 某 client」级别的激活, 而浏览器
+    /// 整个网页是单个 client —— 网页内普通框 ↔ 密码框的字段切换**不**触发 activateServer,
+    /// 只在激活时检测会漏掉(表现: 第二次进密码框不再抑制)。IsSecureEventInputEnabled 是
+    /// 全局实时状态, 随密码框聚焦翻转, 故在每个 keyDown 前比对补偿。轻量系统调用, 每键一次。
+    private func syncSecureInputIfChanged() {
+        if IsSecureEventInputEnabled() != lastReportedSecureInput {
+            sendFocusGained()
+        }
+    }
+
+    /// 发一个无 payload 的上行帧 (focusLost/toggleMode 等), 读掉 ack。失败仅 log。
     private func sendEmpty(_ cmd: UInt16) {
         guard let bridge = bridge, bridge.isConnected else { return }
         do {
@@ -242,6 +287,11 @@ public class InputController: IMKInputController {
             NSLog("WindInput[handle] bridge not connected (重连失败), pass through")
             return false
         }
+
+        // 密码框实时跟随: 在发本键前同步系统安全输入状态(同一 client 内字段切换补偿),
+        // 让 Go 处理本键时 sensitiveFieldActive 已最新(密码框→英文直通 / 普通框→恢复中文)。
+        // 同连接串行: 补发的 focusGained 必先于本 keyEvent 被 Go 处理, 顺序正确。
+        syncSecureInputIfChanged()
 
         keySeq &+= 1
         guard let frame = KeyHandler.encodeKeyEvent(event, seq: keySeq) else {

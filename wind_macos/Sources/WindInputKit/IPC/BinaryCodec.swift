@@ -121,6 +121,23 @@ public enum BinaryCodec {
         return encodeHeader(cmd: cmd, payloadLen: 0, async: async)
     }
 
+    /// 编码 CmdFocusGained (0x0201 upstream) 帧, 携带 InputScope bitmask (darwin)。
+    /// 布局: header(8) + payload {
+    ///   pid:u32 (4)            // darwin 无 PID 概念, 恒 0 占位 (与 Win 端 [0:4]=pid 约定对齐)
+    ///   inputScopeMask:u64 (8) // TSF InputScope bitmask; macOS 仅用 bit31 (IS_PASSWORD) 标记安全输入
+    /// }
+    /// 密码框/安全输入检测见 InputController.activateServer (IsSecureEventInputEnabled)。
+    /// 空帧 (旧版无 payload) 由 server_darwin 解析为 mask=0, 向后兼容。
+    public static func encodeFocusGainedFrame(inputScopeMask: UInt64) -> Data {
+        var payload = Data(count: 12)
+        payload.writeUInt32LE(0, at: 0) // pid 占位
+        payload.writeUInt32LE(UInt32(truncatingIfNeeded: inputScopeMask), at: 4)        // 低 32 位
+        payload.writeUInt32LE(UInt32(truncatingIfNeeded: inputScopeMask >> 32), at: 8)  // 高 32 位
+        var out = encodeHeader(cmd: UpstreamCmd.focusGained, payloadLen: UInt32(payload.count))
+        out.append(payload)
+        return out
+    }
+
     // MARK: - Downstream payload decoders (Go → IME)
 
     // CommitText flags (与 ipc/binary_codec.go: CommitFlagXxx 对齐)

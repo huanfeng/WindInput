@@ -83,6 +83,27 @@ final class BinaryCodecTests: XCTestCase {
         XCTAssertEqual(len, 0)
     }
 
+    func testFocusGainedFrame_InputScopeMask() throws {
+        // 密码框: IS_PASSWORD 位 (bit31)。布局 = pid:u32(0) + inputScopeMask:u64。
+        let mask: UInt64 = UInt64(1) << 31
+        let f = BinaryCodec.encodeFocusGainedFrame(inputScopeMask: mask)
+        let (cmd, len, _) = try BinaryCodec.decodeHeader(f)
+        XCTAssertEqual(cmd, UpstreamCmd.focusGained)
+        XCTAssertEqual(len, 12)
+        let payload = f.subdata(in: WireProtocol.headerSize ..< f.count)
+        XCTAssertEqual(payload.readUInt32LE(at: 0), 0) // pid 占位
+        let lo = UInt64(payload.readUInt32LE(at: 4))
+        let hi = UInt64(payload.readUInt32LE(at: 8))
+        XCTAssertEqual(lo | (hi << 32), mask)
+    }
+
+    func testFocusGainedFrame_NonSensitiveMaskZero() throws {
+        let f = BinaryCodec.encodeFocusGainedFrame(inputScopeMask: 0)
+        let payload = f.subdata(in: WireProtocol.headerSize ..< f.count)
+        XCTAssertEqual(payload.readUInt32LE(at: 4), 0)
+        XCTAssertEqual(payload.readUInt32LE(at: 8), 0)
+    }
+
     func testDecodeKeyEventPayloadTooShort() {
         do {
             _ = try BinaryCodec.decodeKeyEventPayload(Data(repeating: 0, count: 8))

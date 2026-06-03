@@ -340,8 +340,14 @@ func (s *Server) dispatchFrame(conn net.Conn, id connID, header *ipc.IpcHeader, 
 		if len(payload) >= 4 {
 			pid = binary.LittleEndian.Uint32(payload[0:4])
 		}
-		// inputScopeMask 传 0：macOS 端尚未实现 InputScope/密码框探测（后续在 forwarder 补充）。
-		_ = s.handler.HandleFocusGained(pid, 0)
+		// inputScopeMask：forwarder 在 payload[4:12] 携带焦点控件的 InputScope bitmask
+		// （macOS 用 bit31=IS_PASSWORD 标记密码框/安全输入，见 BinaryCodec.encodeFocusGainedFrame）。
+		// 旧版空帧/截断载荷取 0（IS_DEFAULT），向后兼容。
+		var inputScopeMask uint64
+		if len(payload) >= 12 {
+			inputScopeMask = binary.LittleEndian.Uint64(payload[4:12])
+		}
+		_ = s.handler.HandleFocusGained(pid, inputScopeMask)
 		s.focusMu.Lock()
 		s.focusedClients[id] = true
 		s.focusMu.Unlock()

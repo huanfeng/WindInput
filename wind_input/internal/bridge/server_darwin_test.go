@@ -28,6 +28,7 @@ type fakeHandler struct {
 	keyEvents        []KeyEventData
 	caretUpdates     []CaretData
 	focusGained      uint32
+	focusScopeMask   uint64
 	focusLost        bool
 	imeActivated     uint32
 	imeDeactivated   bool
@@ -66,6 +67,7 @@ func (h *fakeHandler) HandleCompositionTerminated() {}
 func (h *fakeHandler) HandleFocusGained(processID uint32, inputScopeMask uint64) *StatusUpdateData {
 	h.mu.Lock()
 	h.focusGained = processID
+	h.focusScopeMask = inputScopeMask
 	h.mu.Unlock()
 	return &StatusUpdateData{ChineseMode: true, IconLabel: "中"}
 }
@@ -243,6 +245,33 @@ func TestDarwinBridge_FocusGained(t *testing.T) {
 	// 这是设计约定: PID 概念在 darwin 不适用。
 	if srv.IsActivelyFocusedPID(12345) {
 		t.Error("IsActivelyFocusedPID should be false on darwin even after focus")
+	}
+}
+
+// TestDarwinBridge_FocusGainedInputScope 验证 forwarder 在 payload[4:12] 携带的
+// InputScope bitmask（密码框 IS_PASSWORD=bit31）被解析并透传给 HandleFocusGained。
+func TestDarwinBridge_FocusGainedInputScope(t *testing.T) {
+	srv, h, cleanup := setupTestServer(t)
+	defer cleanup()
+	_ = srv
+
+	codec := ipc.NewBinaryCodec()
+	const wantMask = uint64(1) << 31 // IS_PASSWORD
+	payload := make([]byte, 12)
+	binary.LittleEndian.PutUint32(payload[0:4], 0) // pid 占位
+	binary.LittleEndian.PutUint64(payload[4:12], wantMask)
+	header := codec.EncodeHeader(ipc.CmdFocusGained, uint32(len(payload)))
+	frame := append(header, payload...)
+
+	_, _, conn := dialAndSend(t, frame)
+	defer conn.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	h.mu.Lock()
+	gotMask := h.focusScopeMask
+	h.mu.Unlock()
+	if gotMask != wantMask {
+		t.Errorf("focusGained inputScopeMask = 0x%X, want 0x%X", gotMask, wantMask)
 	}
 }
 
