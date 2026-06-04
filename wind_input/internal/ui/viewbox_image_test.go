@@ -102,7 +102,7 @@ func TestItemState_SelectedHighlightImage(t *testing.T) {
 	views := themePathViews(6, 8)
 	views.Item.Selected = &theme.ViewNode{
 		Background: theme.ViewFill{Image: &theme.ViewImage{Ref: "hl", Mode: "stretch"}},
-		Color:      "#FFFFFF",
+		Color:      theme.NewLightDark("#FFFFFF"),
 		FontWeight: ip(700),
 	}
 	r.resolvedV3 = &theme.ResolvedV3{

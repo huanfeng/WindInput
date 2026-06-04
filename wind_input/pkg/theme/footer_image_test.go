@@ -8,9 +8,9 @@ import (
 // TestMergeViewNode_FooterImages 守护回归：footer_bar 的 prev_image/next_image 必须能通过
 // base 单链继承的 mergeViewNode 保留（曾漏合并这两个字段，导致薄主题配的翻页箭头图被静默丢弃）。
 func TestMergeViewNode_FooterImages(t *testing.T) {
-	base := ViewNode{Color: "${footer}"}
+	base := ViewNode{Color: NewLightDark("${footer}")}
 	ov := ViewNode{
-		PrevImage: &ViewImage{Ref: "arrow_left", Tint: "#112233"},
+		PrevImage: &ViewImage{Ref: "arrow_left", Tint: NewLightDark("#112233")},
 		NextImage: &ViewImage{Ref: "arrow_right"},
 	}
 	out := mergeViewNode(base, ov)
@@ -22,8 +22,8 @@ func TestMergeViewNode_FooterImages(t *testing.T) {
 	}
 
 	// resolve：tint token → TintColor。
-	rv := resolveViewNode(out, func(s string) color.Color {
-		if s == "#112233" {
+	rv := resolveViewNode(out, func(c ColorRef) color.Color {
+		if c.Select(false) == "#112233" {
 			return color.RGBA{0x11, 0x22, 0x33, 0xff}
 		}
 		return nil

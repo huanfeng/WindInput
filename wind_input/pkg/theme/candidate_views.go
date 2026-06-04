@@ -36,7 +36,7 @@ func resolveColorToken(s string, pal ResolvedPalette) color.Color {
 // 几何（margin/padding/border）逻辑像素直拷；颜色 = 默认 ⊕ token 覆盖（token 解析非 nil 才覆盖）；
 // FontSize 存「相对主字号的有符号偏移」（0/未写=同主字体），由 ui 侧换算；
 // 字重 0=继承全局；字体族名空=继承全局（未知名由平台文本引擎回退）；背景图/layers 转 RVImage spec（不解码位图）。
-func resolveViewNode(n ViewNode, resolveColor func(string) color.Color, defBg, defBorder, defText color.Color) RVNode {
+func resolveViewNode(n ViewNode, resolveColor func(ColorRef) color.Color, defBg, defBorder, defText color.Color) RVNode {
 	out := RVNode{
 		MarginTop:    dimOr(n.Margin.Top, Dimension{}),
 		MarginRight:  dimOr(n.Margin.Right, Dimension{}),
@@ -92,7 +92,7 @@ func resolveViewNode(n ViewNode, resolveColor func(string) color.Color, defBg, d
 // 颜色 = palette 默认 ⊕ views token 覆盖（views 颜色非空才覆盖）。
 // 不设字号（Text/Index/PreeditBar.FontSize）、ItemHeight、VerticalMaxWidth——这些是运行时值，由 ui 回填。
 func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
-	resolve := func(s string) color.Color { return resolveColorToken(s, pal) }
+	resolve := func(c ColorRef) color.Color { return resolveColorToken(c.Select(pal.IsDark), pal) }
 	build := func(n ViewNode, defBg, defBorder, defText color.Color) RVNode {
 		return resolveViewNode(n, resolve, defBg, defBorder, defText)
 	}
@@ -138,7 +138,7 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 		rv.ShadowOffsetX = dimOr(sh.OffsetX, Dimension{})
 		rv.ShadowOffsetY = dimOr(sh.OffsetY, Dimension{})
 		rv.ShadowOffset = rv.ShadowOffsetX
-		if c := resolveColorToken(sh.Color, pal); c != nil {
+		if c := resolveColorToken(sh.Color.Select(pal.IsDark), pal); c != nil {
 			rv.ShadowColor = c
 		}
 	}
@@ -157,7 +157,7 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 //
 // nil-gating：仅当 patch 显式提供了 bg/bgImage/text/border 色/border 宽/字重，或存在 palette
 // 默认色时，才视为「有覆盖」并返回非 nil（与旧 RVState 语义一致，守 golden）。
-func resolveState(node *ViewNode, defBg, defText color.Color, resolveColor func(string) color.Color) *RVNode {
+func resolveState(node *ViewNode, defBg, defText color.Color, resolveColor func(ColorRef) color.Color) *RVNode {
 	has := defBg != nil || defText != nil
 	if node != nil {
 		if resolveColor(node.Background.Color) != nil || node.Background.Image != nil ||
@@ -179,7 +179,7 @@ func resolveState(node *ViewNode, defBg, defText color.Color, resolveColor func(
 
 // toRVImage 把 schema ViewImage 廉价转换为渲染消费形态 RVImage：
 // slice 指针边距→plain Padding；opacity nil→1.0；其余字段直拷。不解码位图（ui 侧按 Ref 缓存）。
-func toRVImage(im ViewImage, resolveColor func(string) color.Color) RVImage {
+func toRVImage(im ViewImage, resolveColor func(ColorRef) color.Color) RVImage {
 	op := 1.0
 	if im.Opacity != nil {
 		op = *im.Opacity
@@ -202,10 +202,10 @@ func toRVImage(im ViewImage, resolveColor func(string) color.Color) RVImage {
 		H:       im.Size.H,
 	}
 	if resolveColor != nil {
-		if im.Tint != "" {
+		if !im.Tint.IsZero() {
 			out.TintColor = resolveColor(im.Tint)
 		}
-		if im.DisabledTint != "" {
+		if !im.DisabledTint.IsZero() {
 			out.DisabledTintColor = resolveColor(im.DisabledTint)
 		}
 	}

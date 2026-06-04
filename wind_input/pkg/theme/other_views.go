@@ -23,7 +23,7 @@ func tk(pal ResolvedPalette, name string) color.Color {
 // 颜色 token 统一查 pal.Tokens（${status_bg}/${status_text}/${accent}…）；默认底色/文字 = status_bg/status_text。
 // node==nil（主题未配 views.status）时返回纯默认色 + 零几何，由 ui 侧按现状兜底 padding/radius。
 func ResolveStatusViews(node *ViewNode, pal ResolvedPalette) RVNode {
-	resolve := func(s string) color.Color { return resolveColorToken(s, pal) }
+	resolve := func(c ColorRef) color.Color { return resolveColorToken(c.Select(pal.IsDark), pal) }
 	var n ViewNode
 	if node != nil {
 		n = *node
@@ -34,7 +34,7 @@ func ResolveStatusViews(node *ViewNode, pal ResolvedPalette) RVNode {
 // ResolveTooltipViews 解析 views.tooltip 节点为渲染消费的 RVNode（P8 切片2）。
 // 颜色 token 查 pal.Tokens（${tooltip_bg}/${tooltip_text}…）；默认底色/文字 = tooltip_bg/tooltip_text。
 func ResolveTooltipViews(node *ViewNode, pal ResolvedPalette) RVNode {
-	resolve := func(s string) color.Color { return resolveColorToken(s, pal) }
+	resolve := func(c ColorRef) color.Color { return resolveColorToken(c.Select(pal.IsDark), pal) }
 	var n ViewNode
 	if node != nil {
 		n = *node
@@ -45,7 +45,7 @@ func ResolveTooltipViews(node *ViewNode, pal ResolvedPalette) RVNode {
 // ResolveToastViews 解析 views.toast 节点为渲染消费的 RVNode（P8 切片5）。
 // 颜色 token 查 pal.Tokens（${toast_bg}/${toast_text}…）；默认底色/文字 = toast_bg/toast_text。
 func ResolveToastViews(node *ViewNode, pal ResolvedPalette) RVNode {
-	resolve := func(s string) color.Color { return resolveColorToken(s, pal) }
+	resolve := func(c ColorRef) color.Color { return resolveColorToken(c.Select(pal.IsDark), pal) }
 	var n ViewNode
 	if node != nil {
 		n = *node
@@ -58,7 +58,7 @@ func ResolveToastViews(node *ViewNode, pal ResolvedPalette) RVNode {
 // （hover 默认 menu_hover_bg/menu_hover_text、disabled 默认文字 menu_disabled）。
 // mv==nil（主题未配 views.menu）时各节点取默认色 + 零几何，由 ui 侧按现状兜底布局尺寸。
 func ResolveMenuViews(mv *MenuViews, pal ResolvedPalette) ResolvedMenuViews {
-	resolve := func(s string) color.Color { return resolveColorToken(s, pal) }
+	resolve := func(c ColorRef) color.Color { return resolveColorToken(c.Select(pal.IsDark), pal) }
 	var root, item, sep ViewNode
 	if mv != nil {
 		root, item, sep = mv.Root, mv.Item, mv.Separator

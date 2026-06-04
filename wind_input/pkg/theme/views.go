@@ -13,6 +13,12 @@ package theme
 
 import "image/color"
 
+// ColorRef 是 view 颜色字段的取值：标量 ColorToken（"${token}"/hex/transparent）或内联 {light,dark}。
+// 复用 LightDark[string] 原语——标量明暗共用、{light,dark} 分设；按 isDark Select 选分支后再走
+// resolveColorToken 求值（内联分支仍可写 ${token}，两机制可嵌套）。亮暗值的集中定义仍推荐放
+// colors token；本内联是一次性颜色的便捷写法。
+type ColorRef = LightDark[string]
+
 // ViewEdges 四向距离。*Dimension：nil=未写（回退基线），非 nil（含 0）=显式值。
 // 值支持 px/dp 单位（裸数字=dp，"Npx"=设备像素不缩放），见 Dimension。
 type ViewEdges struct {
@@ -47,15 +53,15 @@ type ViewImage struct {
 	Anchor  string         `yaml:"anchor,omitempty"`  // 仅覆盖图：top-left|top|...|center|...|bottom-right
 	Offset  ViewImagePoint `yaml:"offset,omitempty"`  // 仅覆盖图
 	Size    ViewImageSize  `yaml:"size,omitempty"`    // 仅覆盖图：0=原尺寸
-	Tint    string         `yaml:"tint,omitempty"`    // 单色染色 ColorToken（标量或内联 {light,dark}）：非空=把图当 alpha mask、用此色填充（单色图标随主题变色）；SVG 矢量按目标尺寸现场栅格化
+	Tint    ColorRef       `yaml:"tint,omitempty"`    // 单色染色 ColorToken（标量或内联 {light,dark}）：非空=把图当 alpha mask、用此色填充（单色图标随主题变色）；SVG 矢量按目标尺寸现场栅格化
 	// DisabledTint 禁用态染色 ColorToken（仅 footer_bar 翻页箭头消费）：首/末页箭头禁用时改用此色（可标量/内联 {light,dark}/引用 LightDark token）；空=不变化（不做硬编码淡化）
-	DisabledTint string `yaml:"disabled_tint,omitempty"`
+	DisabledTint ColorRef `yaml:"disabled_tint,omitempty"`
 }
 
 // ViewFill 背景填充。Color 底色 + 可选 Image（画在底色之上、裁剪到圆角内）。
 // Gradient 为 P7-E 预留字段（schema 冻结，渲染 later）；与 Color 概念互斥（同时存在时 render later 决定优先级）。
 type ViewFill struct {
-	Color    string        `yaml:"color,omitempty"`    // ColorToken（标量或内联 {light,dark}）: "#RRGGBB[AA]" | "${semantic}" | "transparent"
+	Color    ColorRef      `yaml:"color,omitempty"`    // ColorToken（标量或内联 {light,dark}）: "#RRGGBB[AA]" | "${semantic}" | "transparent"
 	Shape    string        `yaml:"shape,omitempty"`    // 背景形状: "circle" | "none"（空=none）。当前仅 views.index 消费（序号项圆形/无背景）
 	Image    *ViewImage    `yaml:"image,omitempty"`    // 背景填充图（P7-C，D5）；nil=无图
 	Gradient *ViewGradient `yaml:"gradient,omitempty"` // 渐变填充（P7-E 预留：schema 冻结，渲染 later）；nil=无渐变
@@ -71,14 +77,14 @@ type ViewGradient struct {
 
 // ViewGradientStop 渐变色停。
 type ViewGradientStop struct {
-	Color string  `yaml:"color"`         // ColorToken（标量或内联 {light,dark}）
-	Pos   float64 `yaml:"pos,omitempty"` // 0..1（沿渐变轴的位置）
+	Color ColorRef `yaml:"color"`         // ColorToken（标量或内联 {light,dark}）
+	Pos   float64  `yaml:"pos,omitempty"` // 0..1（沿渐变轴的位置）
 }
 
 // ViewBorder 边框。
 type ViewBorder struct {
 	Width  *Dimension `yaml:"width,omitempty"` // 支持 px/dp：边框常用 "1px" 发丝线（不随 DPI 加粗）
-	Color  string     `yaml:"color,omitempty"` // ColorToken（标量或内联 {light,dark}）
+	Color  ColorRef   `yaml:"color,omitempty"` // ColorToken（标量或内联 {light,dark}）
 	Radius *Dimension `yaml:"radius,omitempty"`
 }
 
@@ -98,7 +104,7 @@ type ViewNode struct {
 	FontFamily string      `yaml:"font_family,omitempty"`
 	FontSize   *int        `yaml:"font_size,omitempty"` // 相对主候选字体的有符号偏移(逻辑px)：-4=base-4、+2=base+2；nil/0=同主字体。随用户主字号同步缩放，零魔法数字
 	FontWeight *int        `yaml:"font_weight,omitempty"`
-	Color      string      `yaml:"color,omitempty"`  // 文本色 token（标量或内联 {light,dark}）
+	Color      ColorRef    `yaml:"color,omitempty"`  // 文本色 token（标量或内联 {light,dark}）
 	Labels     []string    `yaml:"labels,omitempty"` // 仅 index：序号槽位字符（≤10）
 	Layers     []ViewImage `yaml:"layers,omitempty"` // z 层级覆盖图（P7-C，D4）：z<0 在内容下、z>0 在上
 
@@ -145,7 +151,7 @@ type ViewShadowSpec struct {
 	OffsetY *Dimension `yaml:"offset_y,omitempty"` // 垂直偏移
 	Blur    *Dimension `yaml:"blur,omitempty"`     // 模糊半径（P7-E 预留，渲染 later）
 	Spread  *Dimension `yaml:"spread,omitempty"`   // 扩散（P7-E 预留，渲染 later）
-	Color   string     `yaml:"color,omitempty"`    // ColorToken（标量或内联 {light,dark}）；空=palette.Shadow
+	Color   ColorRef   `yaml:"color,omitempty"`    // ColorToken（标量或内联 {light,dark}）；空=palette.Shadow
 }
 
 // RVImage 渲染消费形态的图片 spec（plain 值；不含解码后的位图——位图由 ui 侧按 Ref 一次性解码缓存）。
@@ -253,7 +259,7 @@ type ToolbarViews struct {
 // ToolbarButtonNode 按钮通用 base（background/color）+ mode 状态覆盖。
 type ToolbarButtonNode struct {
 	Background ViewFill           `yaml:"background,omitempty"`
-	Color      string             `yaml:"color,omitempty"`
+	Color      ColorRef           `yaml:"color,omitempty"`
 	Border     ViewBorder         `yaml:"border,omitempty"`
 	Mode       *ToolbarModeStates `yaml:"mode,omitempty"`
 }
@@ -368,7 +374,7 @@ func mergeViewNode(base, ov ViewNode) ViewNode {
 	out := base
 	out.Margin = mergeEdges(base.Margin, ov.Margin)
 	out.Padding = mergeEdges(base.Padding, ov.Padding)
-	if ov.Background.Color != "" {
+	if !ov.Background.Color.IsZero() {
 		out.Background.Color = ov.Background.Color
 	}
 	if ov.Background.Shape != "" {
@@ -383,7 +389,7 @@ func mergeViewNode(base, ov ViewNode) ViewNode {
 	if ov.Border.Width != nil {
 		out.Border.Width = ov.Border.Width
 	}
-	if ov.Border.Color != "" {
+	if !ov.Border.Color.IsZero() {
 		out.Border.Color = ov.Border.Color
 	}
 	if ov.Border.Radius != nil {
@@ -398,7 +404,7 @@ func mergeViewNode(base, ov ViewNode) ViewNode {
 	if ov.FontWeight != nil {
 		out.FontWeight = ov.FontWeight
 	}
-	if ov.Color != "" {
+	if !ov.Color.IsZero() {
 		out.Color = ov.Color
 	}
 	if ov.Labels != nil {
@@ -522,7 +528,7 @@ func mergeShadowSpec(base, ov *ViewShadowSpec) *ViewShadowSpec {
 	if ov.Spread != nil {
 		out.Spread = ov.Spread
 	}
-	if ov.Color != "" {
+	if !ov.Color.IsZero() {
 		out.Color = ov.Color
 	}
 	return &out

@@ -43,7 +43,7 @@ func TestViewShadowSpec_Resolve(t *testing.T) {
 	pal := testPalette()
 	v := defaultViews()
 	// V3-D：shadow 归位到 window 节点。
-	v.Window.Shadow = &ViewShadowSpec{OffsetX: dimp(3), OffsetY: dimp(5), Blur: dimp(8), Color: "#FF0000"}
+	v.Window.Shadow = &ViewShadowSpec{OffsetX: dimp(3), OffsetY: dimp(5), Blur: dimp(8), Color: NewLightDark("#FF0000")}
 	rv := ResolveCandidateViews(v, pal)
 	if rv.ShadowOffsetX.Value != 3 || rv.ShadowOffsetY.Value != 5 {
 		t.Errorf("structured shadow offset x/y 应解析: %v/%v", rv.ShadowOffsetX, rv.ShadowOffsetY)
@@ -95,7 +95,7 @@ func TestViewGradient_MergePreserved(t *testing.T) {
 	base := defaultViews()
 	ov := Views{Window: ViewNode{Background: ViewFill{Gradient: &ViewGradient{
 		Type: "linear", Angle: 90,
-		Stops: []ViewGradientStop{{Color: "#000000"}, {Color: "#FFFFFF", Pos: 1}},
+		Stops: []ViewGradientStop{{Color: NewLightDark("#000000")}, {Color: NewLightDark("#FFFFFF"), Pos: 1}},
 	}}}}
 	merged := mergeViews(base, ov)
 	g := merged.Window.Background.Gradient

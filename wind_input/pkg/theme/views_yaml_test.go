@@ -28,16 +28,16 @@ func TestDefaultThemeViewsParse(t *testing.T) {
 	if th.Views == nil {
 		t.Fatal("default 合并后应含 views 块")
 	}
-	if th.Views.Window.Background.Color != "${bg}" {
+	if th.Views.Window.Background.Color.Select(false) != "${bg}" {
 		t.Errorf("window background token, got %q", th.Views.Window.Background.Color)
 	}
-	if th.Views.Item.Selected == nil || th.Views.Item.Selected.Background.Color != "${selection}" {
+	if th.Views.Item.Selected == nil || th.Views.Item.Selected.Background.Color.Select(false) != "${selection}" {
 		t.Error("item selected bg token 缺失")
 	}
-	if th.Views.AccentBar.Background.Color != "${accent}" {
+	if th.Views.AccentBar.Background.Color.Select(false) != "${accent}" {
 		t.Errorf("accent_bar token, got %q", th.Views.AccentBar.Background.Color)
 	}
-	if th.Views.Index.Color != "${on_accent}" {
+	if th.Views.Index.Color.Select(false) != "${on_accent}" {
 		t.Errorf("index text token, got %q", th.Views.Index.Color)
 	}
 }
@@ -49,10 +49,10 @@ func TestDefaultThemeStatusParse(t *testing.T) {
 	if th.Views == nil || th.Views.Status == nil {
 		t.Fatal("default 合并后应含 views.status")
 	}
-	if th.Views.Status.Background.Color != "${status_bg}" {
+	if th.Views.Status.Background.Color.Select(false) != "${status_bg}" {
 		t.Errorf("status background token, got %q", th.Views.Status.Background.Color)
 	}
-	if th.Views.Status.Color != "${status_text}" {
+	if th.Views.Status.Color.Select(false) != "${status_text}" {
 		t.Errorf("status text token, got %q", th.Views.Status.Color)
 	}
 }
@@ -61,7 +61,7 @@ func TestDefaultThemeStatusParse(t *testing.T) {
 func TestDefaultThemeTooltipParse(t *testing.T) {
 	m := themesDirManager(t)
 	th := loadMerged(t, m, "default")
-	if th.Views == nil || th.Views.Tooltip == nil || th.Views.Tooltip.Background.Color != "${tooltip_bg}" {
+	if th.Views == nil || th.Views.Tooltip == nil || th.Views.Tooltip.Background.Color.Select(false) != "${tooltip_bg}" {
 		t.Fatal("default 合并后应含 views.tooltip 且 background token")
 	}
 }
@@ -73,7 +73,7 @@ func TestDefaultThemeToolbarParse(t *testing.T) {
 	if th.Views == nil || th.Views.Toolbar == nil || th.Views.Toolbar.Button.Mode == nil {
 		t.Fatal("default 合并后应含 views.toolbar.button.mode")
 	}
-	if th.Views.Toolbar.Button.Mode.Chinese.Background.Color != "${toolbar_mode_chinese_bg}" {
+	if th.Views.Toolbar.Button.Mode.Chinese.Background.Color.Select(false) != "${toolbar_mode_chinese_bg}" {
 		t.Errorf("mode_cn_bg token, got %q", th.Views.Toolbar.Button.Mode.Chinese.Background.Color)
 	}
 }
@@ -83,7 +83,7 @@ func TestDefaultThemeMenuParse(t *testing.T) {
 	m := themesDirManager(t)
 	th := loadMerged(t, m, "default")
 	if th.Views == nil || th.Views.Menu == nil || th.Views.Menu.Item.Hover == nil ||
-		th.Views.Menu.Item.Hover.Background.Color != "${menu_hover_bg}" {
+		th.Views.Menu.Item.Hover.Background.Color.Select(false) != "${menu_hover_bg}" {
 		t.Fatal("default 合并后应含 views.menu.item.hover.background")
 	}
 }
@@ -103,11 +103,11 @@ func TestMsimeThemeViewsParse(t *testing.T) {
 	if w := th.Views.Window.Border.Width; w == nil || w.Value != 1 || !w.Px {
 		t.Errorf("msime window border width 应为 1px(设备像素), got %v", w)
 	}
-	if th.Views.Window.Background.Color != "${bg}" {
+	if th.Views.Window.Background.Color.Select(false) != "${bg}" {
 		t.Errorf("window background token, got %q", th.Views.Window.Background.Color)
 	}
 	// 主题架构简化后 msime 序号直接写死灰色文本（取代旧 ${index_text} token）。
-	if th.Views.Index.Color != "#888888" {
+	if th.Views.Index.Color.Select(false) != "#888888" {
 		t.Errorf("index text 应为 #888888, got %q", th.Views.Index.Color)
 	}
 }
@@ -126,10 +126,10 @@ status:
 	if v.Status == nil {
 		t.Fatal("views.status 应解析为非 nil")
 	}
-	if v.Status.Background.Color != "${background}" {
+	if v.Status.Background.Color.Select(false) != "${background}" {
 		t.Errorf("status background token, got %q", v.Status.Background.Color)
 	}
-	if v.Status.Color != "${text}" {
+	if v.Status.Color.Select(false) != "${text}" {
 		t.Errorf("status text token, got %q", v.Status.Color)
 	}
 }
@@ -140,7 +140,7 @@ func TestViews_TooltipParse(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("tooltip:\n  background: {color: \"${background}\"}\n  color: \"${text}\"\n"), &v); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if v.Tooltip == nil || v.Tooltip.Background.Color != "${background}" || v.Tooltip.Color != "${text}" {
+	if v.Tooltip == nil || v.Tooltip.Background.Color.Select(false) != "${background}" || v.Tooltip.Color.Select(false) != "${text}" {
 		t.Fatalf("tooltip token 解析错误: %+v", v.Tooltip)
 	}
 }
@@ -168,13 +168,13 @@ toolbar:
 	if v.Toolbar == nil {
 		t.Fatal("views.toolbar 应非 nil")
 	}
-	if v.Toolbar.Button.Background.Color != "${button_bg}" {
+	if v.Toolbar.Button.Background.Color.Select(false) != "${button_bg}" {
 		t.Errorf("button base bg token, got %q", v.Toolbar.Button.Background.Color)
 	}
-	if v.Toolbar.Button.Mode == nil || v.Toolbar.Button.Mode.Chinese.Background.Color != "${mode_cn_bg}" {
+	if v.Toolbar.Button.Mode == nil || v.Toolbar.Button.Mode.Chinese.Background.Color.Select(false) != "${mode_cn_bg}" {
 		t.Error("mode.chinese bg 覆盖缺失")
 	}
-	if v.Toolbar.Settings.Icon.Color != "${settings_icon}" {
+	if v.Toolbar.Settings.Icon.Color.Select(false) != "${settings_icon}" {
 		t.Errorf("settings icon token, got %q", v.Toolbar.Settings.Icon.Color)
 	}
 }
@@ -202,10 +202,10 @@ menu:
 	if v.Menu == nil {
 		t.Fatal("views.menu 应非 nil")
 	}
-	if v.Menu.Item.Color != "${text}" || v.Menu.Item.Disabled == nil || v.Menu.Item.Disabled.Color != "${disabled}" {
+	if v.Menu.Item.Color.Select(false) != "${text}" || v.Menu.Item.Disabled == nil || v.Menu.Item.Disabled.Color.Select(false) != "${disabled}" {
 		t.Errorf("menu item text/disabled token 错误: %+v", v.Menu)
 	}
-	if v.Menu.Item.Hover == nil || v.Menu.Item.Hover.Background.Color != "${hover_bg}" || v.Menu.Item.Hover.Color != "${hover_text}" {
+	if v.Menu.Item.Hover == nil || v.Menu.Item.Hover.Background.Color.Select(false) != "${hover_bg}" || v.Menu.Item.Hover.Color.Select(false) != "${hover_text}" {
 		t.Error("menu item hover 覆盖缺失")
 	}
 }

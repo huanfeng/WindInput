@@ -285,6 +285,11 @@ views:  { candidate: { item: { border: { radius: 8 } } } }  # 局部覆盖
 6. behavior：最终值 = followTheme ? 主题 behavior : config.UI 用户值
 ```
 
+> **view 颜色字段 = `ColorRef`（=`LightDark[string]`）**：上述求值的「v 是 LightDark」分支落到字段类型上——
+> 所有 view 颜色字段（`ViewFill/ViewNode/ViewBorder.Color`、`tint`/`disabled_tint`、`shadow.color`、gradient stop）
+> 既可写**标量** token/hex（明暗共用），也可写**内联 `{light,dark}`**（各分支仍可 `${token}`）。亮暗值**集中定义**
+> 仍推荐 `colors:` token；内联是一次性颜色的便捷写法。后端实现见 `pkg/theme` 的 `ColorRef` 别名 + 各 resolve 闭包 `Select(isDark)`。
+
 **加载期校验（lint，已定须入文档与实现）**：一刀切只读 v3 后无 legacy 兜底，一个 `${typo}` 会静默变 transparent → 透明/黑屏难排查。故加载期须校验并 **fail fast**：
 
 - 所有 `${token}` 引用**可达**（token 存在）且**无环**（循环引用报错，非静默）。

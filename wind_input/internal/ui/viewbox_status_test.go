@@ -41,8 +41,8 @@ func TestResolveStatusColors(t *testing.T) {
 			"status_text": statusText,
 		}},
 		Views: &theme.Views{Status: &theme.ViewNode{
-			Background: theme.ViewFill{Color: "${status_bg}"},
-			Color:      "${status_text}",
+			Background: theme.ViewFill{Color: theme.NewLightDark("${status_bg}")},
+			Color:      theme.NewLightDark("${status_text}"),
 		}},
 	}
 	r := &StatusRenderer{resolvedV3: rv}

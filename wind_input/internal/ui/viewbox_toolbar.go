@@ -79,9 +79,10 @@ func (r *ToolbarRenderer) resolveToolbarViews() theme.ResolvedToolbarViews {
 		}
 		return nil
 	}
-	set := func(dst *color.Color, s string) {
-		if c := resolveTokenColor(s, res); c != nil {
-			*dst = c
+	isDark := rv.Palette.IsDark
+	set := func(dst *color.Color, c theme.ColorRef) {
+		if col := resolveTokenColor(c.Select(isDark), res); col != nil {
+			*dst = col
 		}
 	}
 	set(&rtv.BarBg, t.Background.Color)

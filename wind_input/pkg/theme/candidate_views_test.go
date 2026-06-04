@@ -67,7 +67,7 @@ func TestResolveColorToken(t *testing.T) {
 func TestResolveCandidateViews_GeometryAndColor(t *testing.T) {
 	pal := testPalette()
 	v := defaultViews()
-	v.Window.Background = ViewFill{Color: "${bg}"}
+	v.Window.Background = ViewFill{Color: NewLightDark("${bg}")}
 	rv := ResolveCandidateViews(v, pal)
 
 	if rv.Window.PadLeft.Value != 8 || rv.Window.PadTop.Value != 8 {
@@ -118,13 +118,13 @@ func TestResolveCandidateViews_States(t *testing.T) {
 
 	v := defaultViews()
 	v.Item.Selected = &ViewNode{
-		Background: ViewFill{Color: "#102030", Image: &ViewImage{Ref: "hl", Mode: "nine_slice"}},
-		Color:      "#FFFFFF",
+		Background: ViewFill{Color: NewLightDark("#102030"), Image: &ViewImage{Ref: "hl", Mode: "nine_slice"}},
+		Color:      NewLightDark("#FFFFFF"),
 		FontWeight: intp(700),
-		Border:     ViewBorder{Color: "#445566", Width: dimp(2)},
+		Border:     ViewBorder{Color: NewLightDark("#445566"), Width: dimp(2)},
 	}
-	v.Item.Hover = &ViewNode{Background: ViewFill{Color: "${hover}"}}
-	v.Item.Disabled = &ViewNode{Color: "#999999"}
+	v.Item.Hover = &ViewNode{Background: ViewFill{Color: NewLightDark("${hover}")}}
+	v.Item.Disabled = &ViewNode{Color: NewLightDark("#999999")}
 	rv := ResolveCandidateViews(v, pal)
 
 	sel := rv.Item.Selected
@@ -155,7 +155,7 @@ func TestResolveCandidateViews_States(t *testing.T) {
 	if rv.Index.Selected != nil || rv.Comment.Selected != nil {
 		t.Errorf("未配置 index/comment.selected 应为 nil（默认与普通态一致）: idx=%+v cmt=%+v", rv.Index.Selected, rv.Comment.Selected)
 	}
-	v.Index.Selected = &ViewNode{Color: "#FF8800", FontWeight: intp(700)}
+	v.Index.Selected = &ViewNode{Color: NewLightDark("#FF8800"), FontWeight: intp(700)}
 	rv2 := ResolveCandidateViews(v, pal)
 	if rv2.Index.Selected == nil || rv2.Index.Selected.TextColor == nil || rv2.Index.Selected.FontWeight != 700 {
 		t.Errorf("views.index.selected 应独立解析进 rv.Index.Selected: %+v", rv2.Index.Selected)

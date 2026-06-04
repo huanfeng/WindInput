@@ -15,7 +15,7 @@ func TestResolveTooltipColors(t *testing.T) {
 	txt := color.RGBA{210, 210, 210, 255}
 	rv := &theme.ResolvedV3{
 		Palette: theme.ResolvedPalette{Tokens: map[string]color.Color{"tooltip_bg": bg, "tooltip_text": txt}},
-		Views:   &theme.Views{Tooltip: &theme.ViewNode{Background: theme.ViewFill{Color: "${tooltip_bg}"}, Color: "${tooltip_text}"}},
+		Views:   &theme.Views{Tooltip: &theme.ViewNode{Background: theme.ViewFill{Color: theme.NewLightDark("${tooltip_bg}")}, Color: theme.NewLightDark("${tooltip_text}")}},
 	}
 	w := &TooltipWindow{resolvedV3: rv}
 	node := w.resolveTooltipNode()

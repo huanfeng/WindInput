@@ -57,9 +57,9 @@ func TestGeometry_YAMLParse(t *testing.T) {
 func TestMergeViews_PreservesIndependentWindows(t *testing.T) {
 	base := defaultViews() // 不含 Status/Tooltip/Toolbar/Menu
 	ov := Views{
-		Status:  &ViewNode{Color: "${text}"},
-		Tooltip: &ViewNode{Color: "${text}"},
-		Toast:   &ViewNode{Color: "${text}"},
+		Status:  &ViewNode{Color: NewLightDark("${text}")},
+		Tooltip: &ViewNode{Color: NewLightDark("${text}")},
+		Toast:   &ViewNode{Color: NewLightDark("${text}")},
 		Toolbar: &ToolbarViews{},
 		Menu:    &MenuViews{},
 	}

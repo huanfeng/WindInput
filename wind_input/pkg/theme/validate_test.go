@@ -14,7 +14,7 @@ import (
 func TestValidateViews_UnknownToken(t *testing.T) {
 	pal := testPalette()
 	views := &Views{
-		Window: ViewNode{Background: ViewFill{Color: "${nope}"}},
+		Window: ViewNode{Background: ViewFill{Color: NewLightDark("${nope}")}},
 	}
 	err := validateViews(views, pal.Tokens, nil)
 	if err == nil || !strings.Contains(err.Error(), "未知颜色 token") {
@@ -29,7 +29,7 @@ func TestValidateViews_UnknownToken(t *testing.T) {
 func TestValidateViews_UnknownTokenInState(t *testing.T) {
 	pal := testPalette()
 	views := &Views{
-		Item: ViewNode{Selected: &ViewNode{Color: "${typo_sel}"}},
+		Item: ViewNode{Selected: &ViewNode{Color: NewLightDark("${typo_sel}")}},
 	}
 	err := validateViews(views, pal.Tokens, nil)
 	if err == nil || !strings.Contains(err.Error(), "item.selected.color") {
@@ -54,8 +54,8 @@ func TestValidateViews_ValidRefs(t *testing.T) {
 	pal := testPalette()
 	resources := map[string]ResourceRef{"panel": {Light: "panel.png", Dark: "panel.png"}}
 	views := &Views{
-		Window:     ViewNode{Background: ViewFill{Color: "${bg}", Image: &ViewImage{Ref: "panel"}}},
-		PreeditBar: ViewNode{Background: ViewFill{Color: "transparent"}, Color: "#112233"},
+		Window:     ViewNode{Background: ViewFill{Color: NewLightDark("${bg}"), Image: &ViewImage{Ref: "panel"}}},
+		PreeditBar: ViewNode{Background: ViewFill{Color: NewLightDark("transparent")}, Color: NewLightDark("#112233")},
 		Item:       ViewNode{Background: ViewFill{Image: &ViewImage{Ref: "data:image/png;base64,xxx"}}},
 		Index:      ViewNode{Background: ViewFill{Image: &ViewImage{Ref: "skins/foo.png"}}},
 	}
@@ -67,7 +67,7 @@ func TestValidateViews_ValidRefs(t *testing.T) {
 // TestValidateViews_BadHexLiteral 校验：非 ${}/transparent 的颜色字面须是合法 hex。
 func TestValidateViews_BadHexLiteral(t *testing.T) {
 	pal := testPalette()
-	views := &Views{Window: ViewNode{Color: "reddish"}}
+	views := &Views{Window: ViewNode{Color: NewLightDark("reddish")}}
 	err := validateViews(views, pal.Tokens, nil)
 	if err == nil || !strings.Contains(err.Error(), "颜色字面值非法") {
 		t.Fatalf("应报非法颜色字面, got %v", err)

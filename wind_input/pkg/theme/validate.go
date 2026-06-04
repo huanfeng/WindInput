@@ -108,8 +108,16 @@ func (v *viewsValidator) border(path string, b ViewBorder) {
 	v.color(path+".color", b.Color)
 }
 
-// color 校验单个颜色字段：空跳过；transparent 合法；${token} 须可达；其余须可解析为 hex。
-func (v *viewsValidator) color(path, s string) {
+// color 校验单个颜色字段（ColorRef：标量或内联 {light,dark}）：两分支分别校验。
+func (v *viewsValidator) color(path string, c ColorRef) {
+	v.colorStr(path, c.Light)
+	if c.Dark != c.Light {
+		v.colorStr(path, c.Dark)
+	}
+}
+
+// colorStr 校验单个颜色 token 字符串：空跳过；transparent 合法；${token} 须可达；其余须可解析为 hex。
+func (v *viewsValidator) colorStr(path, s string) {
 	if v.err != nil || s == "" || s == "transparent" {
 		return
 	}

@@ -44,13 +44,13 @@ func TestMergeViews_ExplicitZero(t *testing.T) {
 }
 
 func TestMergeViews_StatesRecursive(t *testing.T) {
-	base := Views{Item: ViewNode{Selected: &ViewNode{Background: ViewFill{Color: "#base"}}}}
+	base := Views{Item: ViewNode{Selected: &ViewNode{Background: ViewFill{Color: NewLightDark("#base")}}}}
 	ov := Views{Item: ViewNode{Selected: &ViewNode{Border: ViewBorder{Radius: dimp(6)}}}}
 	got := mergeViews(base, ov)
 	if got.Item.Selected == nil {
 		t.Fatal("Selected 不应为 nil")
 	}
-	if got.Item.Selected.Background.Color != "#base" {
+	if got.Item.Selected.Background.Color.Select(false) != "#base" {
 		t.Errorf("Selected 应保留基线 bg, got %q", got.Item.Selected.Background.Color)
 	}
 	if got.Item.Selected.Border.Radius == nil || got.Item.Selected.Border.Radius.Value != 6 {
