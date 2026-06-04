@@ -310,7 +310,13 @@ func (f *darwinForwarder) tooltipColors() (bg, fg string) {
 	if rt == nil {
 		return "", ""
 	}
-	return theme.ColorToHex(rt.Palette.Tooltip.Background), theme.ColorToHex(rt.Palette.Tooltip.Text)
+	// v3：tooltip 配色扁平进 Tokens（tooltip_bg/tooltip_text）。主题未提供时退到 nil → .app 内置默认。
+	bgC := rt.Palette.Tokens["tooltip_bg"]
+	fgC := rt.Palette.Tokens["tooltip_text"]
+	if bgC == nil && fgC == nil {
+		return "", ""
+	}
+	return theme.ColorToHex(bgC), theme.ColorToHex(fgC)
 }
 
 // showStatusBubble 按 config 把 ShowStatusIndicator 投递的状态合成最终气泡帧推给 .app。
@@ -359,8 +365,13 @@ func (f *darwinForwarder) statusColors() (bg, fg string) {
 	var fgC color.Color = color.RGBA{255, 255, 255, 255}
 	if f.themeMgr != nil {
 		if rt := f.themeMgr.GetResolvedV25(); rt != nil {
-			bgC = rt.Palette.Status.Background
-			fgC = rt.Palette.Status.Text
+			// v3：status 配色扁平进 Tokens；缺省时保留内置默认（不覆盖为全透明）。
+			if c := rt.Palette.Tokens["status_bg"]; c != nil {
+				bgC = c
+			}
+			if c := rt.Palette.Tokens["status_text"]; c != nil {
+				fgC = c
+			}
 		}
 	}
 	if c, err := theme.ParseHexColor(f.cfgStatus.BackgroundColor); err == nil {
@@ -408,8 +419,13 @@ func (f *darwinForwarder) toastColors() (bg, fg string) {
 	var fgC color.Color = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
 	if f.themeMgr != nil {
 		if rt := f.themeMgr.GetResolvedV25(); rt != nil {
-			bgC = forceOpaqueColor(rt.Palette.Tooltip.Background)
-			fgC = rt.Palette.Tooltip.Text
+			// v3：Toast 沿用 tooltip 调色板（Tokens）；缺省时保留内置深色默认。
+			if c := rt.Palette.Tokens["tooltip_bg"]; c != nil {
+				bgC = forceOpaqueColor(c)
+			}
+			if c := rt.Palette.Tokens["tooltip_text"]; c != nil {
+				fgC = c
+			}
 		}
 	}
 	return theme.ColorToHex(bgC), theme.ColorToHex(fgC)
