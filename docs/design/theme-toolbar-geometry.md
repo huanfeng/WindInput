@@ -54,15 +54,29 @@ computeGeometry() → 用零 state/零色 buildToolbarTree + Layout，提取：
 
 **不变**：渲染（`Render`）与矢量符号后处理已用 `tt.X.Rect()`，本就单源，无需改。
 
-## L2：盒模型化（规划，L1 绿后再开）
+## L2：几何进 schema（已实现）
 
-L1 解耦后，几何收口到 `buildToolbarTree`，可安全地让 measure 真正生效、几何进主题 schema：
+L1 解耦后几何收口到 `buildToolbarTree`，L2 把硬编码几何提升为主题可覆盖字段：
 
-1. **schema 补几何字段**：`ToolbarViews` 增按钮 padding / gap / grip 宽 / 圆角等；默认值=当前常量（零回归）。
-2. **弃 `FixedW`**：按钮尺寸由内容 measure + padding 决定，root 尺寸由 measure 汇总；`GetToolbarSize` 自然反映。
-3. **补 `ResolveToolbarViews`**：`other_views.go` 当前唯一缺失槽位；走统一 `resolveViewNode`，
-   消费目前被忽略的 `ToolbarButtonNode.Border` 等字段。
-4. 协调 `GetDPIScale` vs `ScaleIntForDPI`，统一窗口尺寸到 `GetToolbarSize`（#4 收口）。
+1. **schema 几何字段**（`ToolbarViews`，`*Dimension`，nil=内置默认零回归）：
+   `height`(30) / `grip_width`(10) / `button_width`(26 槽位含 padding) / `button_padding`(2) / `button_radius`(4)。
+   `resolveToolbarGeom(rv, scale)`（internal/ui）按 scale 换算为设备像素、缺省回退默认；
+   `buildToolbarTree` 改吃 `toolbarGeom`。
+2. **保持固定统一按钮 + 预留内容驱动**：按钮仍 `FixedW`（统一固定，工具栏的正确模型）；
+   `button_width` 取 `*Dimension` 形态即为内容驱动预留——未来 nil 可改走"内容 measure + padding"，
+   届时只改 `resolveToolbarGeom`/`buildToolbarTree` 一处，命中/尺寸经 L1 自动跟随。
+3. **总宽 116→114**：`root` 去掉 `FixedW`，由 measure 汇总 = `grip + 4×button 槽位` = 114，
+   消除旧 116 的尾部 2px 死区。
+4. **间距用按钮 margin（非引擎 Gap）**：margin 盒首尾相接 → 命中带无缝（`viewOuterRect` 平铺），
+   避免 `Gap` 在按钮间留 2px 死区。引擎通用 `View.Gap` 已具备（候选列表在用），
+   工具栏出于命中无缝考量用 margin；`button_padding` 即间距控制。
+5. **窗口尺寸收口（#4）**：`toolbar_window.go` 创建/DPI 变化处改用 `renderer.GetToolbarSize()`
+   （与渲染同源；`GetDPIScale` 与 `ScaleIntForDPI` 本就同一 provider，仅四舍五入 vs 截断之差）。
+   实际显示尺寸由 `UpdateLayeredWindow` 取渲染图像 bounds，`GetToolbarSize` 使三者一致。
+   `computeGeometry` 用 `zeroMeasurer`（几何全 FixedW，免依赖文本后端，窗口创建早期可安全调）。
+
+**未做（可延后）**：补 `other_views.go` 的 `ResolveToolbarViews` 统一走 `resolveViewNode`（颜色解析现仍在
+`viewbox_toolbar.go` 自实现，工作正常）；矢量符号尺寸仍按 scale（不随 button_width 变），属 L3 内容动态化范畴。
 
 ## L3 愿景（远期，不在本次）
 

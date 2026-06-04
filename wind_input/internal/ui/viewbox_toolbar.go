@@ -121,24 +121,23 @@ func modeButtonText(state ToolbarState) string {
 // buildToolbarTree 构建工具栏 View 树（整条 LayoutRow：grip + 4 按钮）。
 // 按钮框走 View（Background+Border，Stretch 撑满整条高 - margin）；mode 是带背景的文本叶子；
 // width/punct/settings 是无 Text 的框（符号后处理）。grip 是占位框。
-// 几何 hardcode × scale，与现状 Render 的按钮布局逐像素一致。
-func buildToolbarTree(state ToolbarState, rtv theme.ResolvedToolbarViews, scale float64) *toolbarTree {
-	gripW := int(float64(gripWidth) * scale)
-	btnW := int(float64(buttonWidth) * scale)
-	pad := int(float64(buttonPadding) * scale)
-	btnRadius := int(4.0 * scale)
-	fontSize := 14.0 * scale
+// 几何全部取自 toolbarGeom（来自 views.toolbar 的 *Dimension×scale，缺省=内置默认）。
+// root 不设 FixedW：整条宽 = grip + 4×button 槽位（measure 汇总，去除旧 116 的尾部死区→114）。
+// 间距用按钮 margin（margin 盒首尾相接、命中带无缝，避免 Gap 在按钮间留死区；引擎通用 Gap 候选列表在用）。
+func buildToolbarTree(state ToolbarState, rtv theme.ResolvedToolbarViews, g toolbarGeom) *toolbarTree {
+	pad := g.buttonPadding
+	inner := g.buttonWidth - pad*2 // 按钮可见框宽（槽位 - 两侧 padding）
 
 	// grip 占位框（Stretch 撑高，后处理画点阵）
-	grip := &View{FixedW: gripW, Stretch: true}
+	grip := &View{FixedW: g.gripWidth, Stretch: true}
 
-	// 按钮框（无 Text，符号后处理）：FixedW = btnW-pad*2，margin pad，Stretch 撑高
+	// 按钮框（无 Text，符号后处理）：FixedW = inner，margin pad，Stretch 撑高
 	mkFrame := func(bg color.Color) *View {
 		return &View{
-			FixedW:     btnW - pad*2,
+			FixedW:     inner,
 			Margin:     Edges{Top: pad, Right: pad, Bottom: pad, Left: pad},
 			Background: Fill{Color: bg},
-			Border:     Border{Radius: btnRadius},
+			Border:     Border{Radius: g.buttonRadius},
 			Stretch:    true,
 		}
 	}
@@ -150,11 +149,11 @@ func buildToolbarTree(state ToolbarState, rtv theme.ResolvedToolbarViews, scale 
 	// mode 是带背景的文本叶子（文字居中由 paintText AlignCenter + 基线居中）
 	mode := &View{
 		Text:       modeButtonText(state),
-		TextStyle:  TextStyle{FontSize: fontSize, Color: rtv.ModeText, Align: AlignCenter},
-		FixedW:     btnW - pad*2,
+		TextStyle:  TextStyle{FontSize: g.fontSize, Color: rtv.ModeText, Align: AlignCenter},
+		FixedW:     inner,
 		Margin:     Edges{Top: pad, Right: pad, Bottom: pad, Left: pad},
 		Background: Fill{Color: modeBg},
-		Border:     Border{Radius: btnRadius},
+		Border:     Border{Radius: g.buttonRadius},
 		Stretch:    true,
 	}
 
@@ -163,11 +162,10 @@ func buildToolbarTree(state ToolbarState, rtv theme.ResolvedToolbarViews, scale 
 	settings := mkFrame(rtv.SettingsBg)
 
 	root := &View{
-		FixedW:     int(float64(toolbarBaseWidth) * scale),
-		FixedH:     int(float64(toolbarBaseHeight) * scale),
+		FixedH:     g.height,
 		Layout:     LayoutRow,
 		Background: Fill{Color: rtv.BarBg},
-		Border:     Border{Radius: int(6.0 * scale), Color: rtv.BarBorder, Width: 1},
+		Border:     Border{Radius: g.barRadius, Color: rtv.BarBorder, Width: g.barBorderW},
 		Children:   []*View{grip, mode, width, punct, settings},
 	}
 	return &toolbarTree{root: root, grip: grip, mode: mode, width: width, punct: punct, settings: settings}

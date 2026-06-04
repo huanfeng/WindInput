@@ -11,14 +11,60 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// Toolbar layout constants (will be scaled for DPI)
+// Toolbar 默认几何（逻辑像素 dp；随 DPI 缩放，主题可经 views.toolbar 逐项覆盖）。
+// 整条宽度不是常量，由 grip + 4×button 槽位 measure 汇总 = 10 + 4×26 = 114。
 const (
-	toolbarBaseWidth  = 116 // gripWidth + 4 * buttonWidth + 2 = 10 + 104 + 2 = 116
-	toolbarBaseHeight = 30
-	gripWidth         = 10
-	buttonWidth       = 26
-	buttonPadding     = 2
+	tbDefaultHeight       = 30
+	tbDefaultGripWidth    = 10
+	tbDefaultButtonWidth  = 26 // 按钮槽位宽（含 padding），可见框 = 槽位 - 2×padding
+	tbDefaultButtonPad    = 2  // 按钮四周间距/竖向内缩（margin）
+	tbDefaultButtonRadius = 4
+	tbDefaultBarRadius    = 6
+	tbDefaultBarBorderW   = 1 // 整条边框宽（px 发丝线，不缩放）
 )
+
+// toolbarGeom 工具栏解析后的几何（设备像素）：views.toolbar 的 *Dimension×scale，缺省=内置默认。
+type toolbarGeom struct {
+	height, gripWidth, buttonWidth, buttonPadding, buttonRadius int
+	barRadius, barBorderW                                       int
+	fontSize                                                    float64
+}
+
+// resolveToolbarGeom 把主题 views.toolbar 的几何 *Dimension 按 scale 换算为设备像素，缺省回退内置默认。
+func resolveToolbarGeom(rv *theme.ResolvedV3, scale float64) toolbarGeom {
+	g := toolbarGeom{
+		height:        theme.Dp(tbDefaultHeight).Scaled(scale),
+		gripWidth:     theme.Dp(tbDefaultGripWidth).Scaled(scale),
+		buttonWidth:   theme.Dp(tbDefaultButtonWidth).Scaled(scale),
+		buttonPadding: theme.Dp(tbDefaultButtonPad).Scaled(scale),
+		buttonRadius:  theme.Dp(tbDefaultButtonRadius).Scaled(scale),
+		barRadius:     theme.Dp(tbDefaultBarRadius).Scaled(scale),
+		barBorderW:    tbDefaultBarBorderW,
+		fontSize:      14.0 * scale,
+	}
+	if rv == nil || rv.Views == nil || rv.Views.Toolbar == nil {
+		return g
+	}
+	t := rv.Views.Toolbar
+	dim := func(d *theme.Dimension, def int) int {
+		if d != nil {
+			return d.Scaled(scale)
+		}
+		return def
+	}
+	g.height = dim(t.Height, g.height)
+	g.gripWidth = dim(t.GripWidth, g.gripWidth)
+	g.buttonWidth = dim(t.ButtonWidth, g.buttonWidth)
+	g.buttonPadding = dim(t.ButtonPadding, g.buttonPadding)
+	g.buttonRadius = dim(t.ButtonRadius, g.buttonRadius)
+	return g
+}
+
+// zeroMeasurer 是几何专用文本度量桩：工具栏尺寸全由 FixedW/FixedH 决定，文本度量不影响布局，
+// 故几何查询（computeGeometry）用它即可，免依赖文本后端——HitTest/GetToolbarSize 可在窗口创建早期安全调用。
+type zeroMeasurer struct{}
+
+func (zeroMeasurer) MeasureString(string, float64) float64 { return 0 }
 
 // ToolbarRenderer renders the toolbar UI
 type ToolbarRenderer struct {
@@ -54,9 +100,10 @@ func (r *ToolbarRenderer) getTooltipColors() (bgColor, textColor, borderColor co
 func (r *ToolbarRenderer) Render(state ToolbarState) *image.RGBA {
 	scale := GetDPIScale()
 	rtv := r.resolveToolbarViews()
+	geom := resolveToolbarGeom(r.resolvedV3, scale)
 	td := r.TextDrawer()
 
-	tt := buildToolbarTree(state, rtv, scale)
+	tt := buildToolbarTree(state, rtv, geom)
 	Layout(tt.root, 0, 0, td)
 	dc, img := newSharedDrawContext(tt.root.Rect().Dx(), tt.root.Rect().Dy())
 	PaintTree(tt.root, dc, img, td)
@@ -189,9 +236,9 @@ func viewOuterRect(v *View) image.Rectangle {
 // computeGeometry 用零 state/零色构建工具栏 View 树并 Layout，派生几何——命中/边界/尺寸的唯一来源。
 // 几何与 state/颜色无关（按钮 FixedW 固定、mode 文字不影响布局），故按需计算、无需缓存。
 func (r *ToolbarRenderer) computeGeometry() toolbarGeometry {
-	scale := GetDPIScale()
-	tt := buildToolbarTree(ToolbarState{}, theme.ResolvedToolbarViews{}, scale)
-	Layout(tt.root, 0, 0, r.TextDrawer())
+	geom := resolveToolbarGeom(r.resolvedV3, GetDPIScale())
+	tt := buildToolbarTree(ToolbarState{}, theme.ResolvedToolbarViews{}, geom)
+	Layout(tt.root, 0, 0, zeroMeasurer{})
 	return toolbarGeometry{
 		size: tt.root.Rect().Size(),
 		bounds: map[ToolbarHitResult]image.Rectangle{

@@ -50,11 +50,12 @@ func TestBuildToolbarTree_Geometry(t *testing.T) {
 		SettingsBg: color.RGBA{230, 234, 239, 255}, SettingsIcon: color.RGBA{1, 1, 1, 255}, SettingsHole: color.RGBA{2, 2, 2, 255},
 	}
 	m := fixedMeasurer{charW: 10}
-	tt := buildToolbarTree(ToolbarState{ChineseMode: true, ModeLabel: "拼"}, rtv, 1.0)
+	geom := resolveToolbarGeom(nil, 1.0)
+	tt := buildToolbarTree(ToolbarState{ChineseMode: true, ModeLabel: "拼"}, rtv, geom)
 	Layout(tt.root, 0, 0, m)
-	// 整条宽 = 116, 高 = 30（scale=1）
-	if tt.root.Rect().Dx() != 116 || tt.root.Rect().Dy() != 30 {
-		t.Errorf("整条尺寸应 116x30, got %dx%d", tt.root.Rect().Dx(), tt.root.Rect().Dy())
+	// 整条宽 = 114（grip 10 + 4×26 槽位；L2 去除旧 116 尾部死区）, 高 = 30（scale=1）
+	if tt.root.Rect().Dx() != 114 || tt.root.Rect().Dy() != 30 {
+		t.Errorf("整条尺寸应 114x30, got %dx%d", tt.root.Rect().Dx(), tt.root.Rect().Dy())
 	}
 	// 按钮框 Stretch 撑高 = 30 - pad*2 = 26
 	if tt.mode.Rect().Dy() != 26 {
@@ -65,7 +66,7 @@ func TestBuildToolbarTree_Geometry(t *testing.T) {
 		t.Errorf("中文模式 mode 背景应=ModeChineseBg, got %v", tt.mode.Background.Color)
 	}
 	// 英文模式
-	tt2 := buildToolbarTree(ToolbarState{ChineseMode: false}, rtv, 1.0)
+	tt2 := buildToolbarTree(ToolbarState{ChineseMode: false}, rtv, geom)
 	if tt2.mode.Background.Color != (color.RGBA{115, 127, 148, 255}) {
 		t.Errorf("英文模式 mode 背景应=ModeEnglishBg, got %v", tt2.mode.Background.Color)
 	}
@@ -80,7 +81,7 @@ func TestBuildToolbarTree_Geometry(t *testing.T) {
 // 且与旧线性公式逐项等价（scale=1：grip=10, button=26, pad=2, H=30）。
 func TestToolbarGeometry_SingleSource(t *testing.T) {
 	m := fixedMeasurer{charW: 10}
-	tt := buildToolbarTree(ToolbarState{ChineseMode: true}, theme.ResolvedToolbarViews{}, 1.0)
+	tt := buildToolbarTree(ToolbarState{ChineseMode: true}, theme.ResolvedToolbarViews{}, resolveToolbarGeom(nil, 1.0))
 	Layout(tt.root, 0, 0, m)
 
 	// content 矩形（GetButtonBounds 语义）= 旧 GetButtonBounds 公式
@@ -130,8 +131,41 @@ func TestToolbarGeometry_SingleSource(t *testing.T) {
 		prevMax = hb.Max.X
 	}
 
-	// 整条尺寸（GetToolbarSize 语义）
-	if sz := tt.root.Rect().Size(); sz.X != 116 || sz.Y != 30 {
-		t.Errorf("整条尺寸应 116x30, got %dx%d", sz.X, sz.Y)
+	// 整条尺寸（GetToolbarSize 语义）= grip 10 + 4×26 槽位 = 114（去尾部死区）
+	if sz := tt.root.Rect().Size(); sz.X != 114 || sz.Y != 30 {
+		t.Errorf("整条尺寸应 114x30, got %dx%d", sz.X, sz.Y)
+	}
+}
+
+// tbDim 构造 *theme.Dimension（dp）供测试覆盖几何。
+func tbDim(v int) *theme.Dimension { d := theme.Dp(v); return &d }
+
+// TestResolveToolbarGeom_SchemaOverride 守护 L2：views.toolbar 几何字段覆盖默认、总宽随之变化；
+// 未覆盖项保持默认（零回归）。
+func TestResolveToolbarGeom_SchemaOverride(t *testing.T) {
+	rv := &theme.ResolvedV3{Views: &theme.Views{Toolbar: &theme.ToolbarViews{
+		GripWidth:   tbDim(12),
+		ButtonWidth: tbDim(30),
+	}}}
+	g := resolveToolbarGeom(rv, 1.0)
+	if g.gripWidth != 12 || g.buttonWidth != 30 {
+		t.Errorf("schema 覆盖未生效: gripW=%d btnW=%d", g.gripWidth, g.buttonWidth)
+	}
+	if g.height != 30 || g.buttonPadding != 2 || g.buttonRadius != 4 {
+		t.Errorf("未覆盖项应保持默认: h=%d pad=%d r=%d", g.height, g.buttonPadding, g.buttonRadius)
+	}
+	// 总宽随之变化 = grip + 4×button 槽位
+	tt := buildToolbarTree(ToolbarState{}, theme.ResolvedToolbarViews{}, g)
+	Layout(tt.root, 0, 0, zeroMeasurer{})
+	if w, want := tt.root.Rect().Dx(), 12+4*30; w != want {
+		t.Errorf("覆盖后总宽应=%d, got %d", want, w)
+	}
+}
+
+// TestResolveToolbarGeom_NilDefaults 守护：rv 为 nil 时回退内置默认（grip 10 + 4×26 = 114）。
+func TestResolveToolbarGeom_NilDefaults(t *testing.T) {
+	g := resolveToolbarGeom(nil, 1.0)
+	if g.gripWidth != 10 || g.buttonWidth != 26 || g.height != 30 {
+		t.Errorf("默认几何错误: gripW=%d btnW=%d h=%d", g.gripWidth, g.buttonWidth, g.height)
 	}
 }

@@ -223,13 +223,23 @@ type ResolvedTooltipViews struct {
 	TextColor color.Color
 }
 
-// ToolbarViews 工具栏 YAML schema（P4-C）。button base + mode 状态覆盖 + settings 齿轮色。
+// ToolbarViews 工具栏 YAML schema（P4-C；L2 加几何）。button base + mode 状态覆盖 + settings 齿轮色。
+//
+// 几何字段（L2）：nil=内置默认（零回归），主题可逐项覆盖。`ButtonWidth` 为按钮槽位宽（含 padding），
+// 当前按固定槽位布局；其 `*Dimension` 形态预留 nil=未来"内容驱动"扩展（按内容+padding 量算）。
 type ToolbarViews struct {
-	Background ViewFill            `yaml:"background,omitempty"`
-	Border     ViewBorder          `yaml:"border,omitempty"`
-	Grip       ViewNode            `yaml:"grip,omitempty"`
-	Button     ToolbarButtonNode   `yaml:"button,omitempty"`
-	Settings   ToolbarSettingsNode `yaml:"settings,omitempty"`
+	Background ViewFill   `yaml:"background,omitempty"`
+	Border     ViewBorder `yaml:"border,omitempty"`
+
+	Height        *Dimension `yaml:"height,omitempty"`         // 整条高度（默认 30dp）
+	GripWidth     *Dimension `yaml:"grip_width,omitempty"`     // 左侧拖动区宽（默认 10dp）
+	ButtonWidth   *Dimension `yaml:"button_width,omitempty"`   // 单按钮槽位宽，含 padding（默认 26dp）
+	ButtonPadding *Dimension `yaml:"button_padding,omitempty"` // 按钮四周间距/竖向内缩（默认 2dp）
+	ButtonRadius  *Dimension `yaml:"button_radius,omitempty"`  // 按钮圆角（默认 4dp）
+
+	Grip     ViewNode            `yaml:"grip,omitempty"`
+	Button   ToolbarButtonNode   `yaml:"button,omitempty"`
+	Settings ToolbarSettingsNode `yaml:"settings,omitempty"`
 }
 
 // ToolbarButtonNode 按钮通用 base（background/color）+ mode 状态覆盖。
