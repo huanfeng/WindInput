@@ -38,7 +38,8 @@ func (r *Renderer) buildPager(
 		pageColor = fb.TextColor
 	}
 
-	mkBtn := func(glyph GlyphKind, enabled, hovered bool) *View {
+	iconSz := int(arrowSz + 0.5)
+	mkBtn := func(glyph GlyphKind, img *theme.RVImage, enabled, hovered bool) *View {
 		clr := r.resolvedViews.Index.BgColor
 		if fb.TextColor != nil {
 			clr = fb.TextColor
@@ -46,18 +47,35 @@ func (r *Renderer) buildPager(
 		if !enabled {
 			clr = r.resolvedViews.PreeditBar.TextColor
 		}
-		b := &View{
-			FixedW: arrowW, FixedH: rowH,
-			Glyph: glyph, GlyphColor: clr, GlyphSize: arrowSz, GlyphLineWidth: lineW,
-		}
+		b := &View{FixedW: arrowW, FixedH: rowH}
+		var bg Fill
 		if hovered && enabled {
-			b.Background = Fill{Color: stateBg(r.resolvedViews.Item.Hover)}
+			bg.Color = stateBg(r.resolvedViews.Item.Hover)
 			b.Border = Border{Radius: sc(4 * scale)}
 		}
+		// 主题配了翻页箭头图（views.footer_bar.prev_image/next_image，SVG/PNG，可 tint 随主题变色）→
+		// 按图标尺寸栅格化、居中绘制；解码失败回退内置矢量 chevron（零回归）。
+		useGlyph := true
+		if img != nil {
+			// 禁用态（首/末页）用主题配的 disabled_tint（可引用 LightDark token 自动亮暗）；未配则不变化。
+			tint := img.TintColor
+			if !enabled && img.DisabledTintColor != nil {
+				tint = img.DisabledTintColor
+			}
+			if decoded := r.imgRes.resolveImage(img.Ref, r.resourcesSnapshot(), iconSz, iconSz, tint); decoded != nil {
+				bg.Image = decoded
+				bg.Mode = "center"
+				useGlyph = false
+			}
+		}
+		if useGlyph {
+			b.Glyph, b.GlyphColor, b.GlyphSize, b.GlyphLineWidth = glyph, clr, arrowSz, lineW
+		}
+		b.Background = bg
 		return b
 	}
 
-	u := mkBtn(GlyphChevronLeft, canUp, hoverPageBtn == "up")
+	u := mkBtn(GlyphChevronLeft, fb.PrevImage, canUp, hoverPageBtn == "up")
 	children = append(children, u)
 	if cfg.ShowPageNumber {
 		txt := fmt.Sprintf(" %d/%d ", page, absTotal)
@@ -69,7 +87,7 @@ func (r *Renderer) buildPager(
 			TextStyle: TextStyle{FontSize: pageFS, Color: pageColor},
 		})
 	}
-	d := mkBtn(GlyphChevronRight, canDown, hoverPageBtn == "down")
+	d := mkBtn(GlyphChevronRight, fb.NextImage, canDown, hoverPageBtn == "down")
 	children = append(children, d)
 	if canUp {
 		up = u

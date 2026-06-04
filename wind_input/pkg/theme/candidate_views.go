@@ -66,14 +66,23 @@ func resolveViewNode(n ViewNode, resolveColor func(string) color.Color, defBg, d
 	}
 	// P7-C：背景填充图 + 层级覆盖图 spec（不解码位图，ui 侧按 Ref 缓存解码）。
 	if n.Background.Image != nil {
-		im := toRVImage(*n.Background.Image)
+		im := toRVImage(*n.Background.Image, resolveColor)
 		out.BgImage = &im
 	}
 	if len(n.Layers) > 0 {
 		out.Layers = make([]RVImage, len(n.Layers))
 		for i := range n.Layers {
-			out.Layers[i] = toRVImage(n.Layers[i])
+			out.Layers[i] = toRVImage(n.Layers[i], resolveColor)
 		}
+	}
+	// 仅 footer_bar 消费：上/下翻页箭头图（其它节点不写即 nil）。
+	if n.PrevImage != nil {
+		im := toRVImage(*n.PrevImage, resolveColor)
+		out.PrevImage = &im
+	}
+	if n.NextImage != nil {
+		im := toRVImage(*n.NextImage, resolveColor)
+		out.NextImage = &im
 	}
 	return out
 }
@@ -170,12 +179,12 @@ func resolveState(node *ViewNode, defBg, defText color.Color, resolveColor func(
 
 // toRVImage 把 schema ViewImage 廉价转换为渲染消费形态 RVImage：
 // slice 指针边距→plain Padding；opacity nil→1.0；其余字段直拷。不解码位图（ui 侧按 Ref 缓存）。
-func toRVImage(im ViewImage) RVImage {
+func toRVImage(im ViewImage, resolveColor func(string) color.Color) RVImage {
 	op := 1.0
 	if im.Opacity != nil {
 		op = *im.Opacity
 	}
-	return RVImage{
+	out := RVImage{
 		Ref:  im.Ref,
 		Mode: im.Mode,
 		Slice: Padding{
@@ -192,4 +201,13 @@ func toRVImage(im ViewImage) RVImage {
 		W:       im.Size.W,
 		H:       im.Size.H,
 	}
+	if resolveColor != nil {
+		if im.Tint != "" {
+			out.TintColor = resolveColor(im.Tint)
+		}
+		if im.DisabledTint != "" {
+			out.DisabledTintColor = resolveColor(im.DisabledTint)
+		}
+	}
+	return out
 }

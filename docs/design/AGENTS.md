@@ -25,6 +25,7 @@
 | `macos-imkit-plan.md` | **PR-A 实战手册**: macOS IMKit `.app` 工程目录结构 / Swift 类骨架 / Info.plist 模板 / 6 个开发里程碑 / 验证步骤 / 风险清单 |
 | `enum-constraint.md` | 枚举与魔法字符串约束 SSOT (跨模块共享) |
 | `theme-schema-v3.md` | **主题 Schema v3（当前权威设计语义）**：结构归一（删 layout 并入 views / 删 candidate_window 颜色组并入 colors 扁平 token）+ 亮暗统一（`LightDark<T>` 贯穿颜色与图片）+ base 单链继承 + Fill(色·渐变·图)/font 分组；含 v2.6→v3 迁移映射与编辑器原型（`WindInputThemeEditor/src/lib/theme3`）作参考实现 |
+| `theme-vector-images.md` | 主题图片接入矢量图（SVG，oksvg 现场栅格化）+ 单色染色（tint，把图当 alpha mask 用主题色填充）；首个消费=翻页箭头 `views.footer_bar.prev_image/next_image`。栅格化收口 `theme.RasterizeSVG` |
 | `theme-toolbar-geometry.md` | 工具栏几何重构：L1 几何单一真相源（HitTest/GetButtonBounds/GetToolbarSize 统一查 Layout 派生的 Rect，删线性公式）+ L2 盒模型化（几何进 schema、measure 生效、补 ResolveToolbarViews）规划 |
 | `theme-v3-freeze-report.md` | **主题 v3 冻结契约（当前权威）**：冻结字段面 + 求值语义快照 + 不兼容旧主题（不合法整体回退 default）+ golden 逐字节验收证据。历史演进/阶段文档（architecture/P2/P4-P8、v26-freeze）已移入 `archive/` |
 | `settings-incremental-save.md` | 设置端全局保存重构：快照 diff + 按 key 最小化提交（`Config.Set`）。根治「全局保存整份覆盖、formData 不含 stats 导致 null 冲掉 track_english」的 bug；独立段（stats/dict）天然隔离 |

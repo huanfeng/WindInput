@@ -47,12 +47,15 @@ type ViewImage struct {
 	Anchor  string         `yaml:"anchor,omitempty"`  // 仅覆盖图：top-left|top|...|center|...|bottom-right
 	Offset  ViewImagePoint `yaml:"offset,omitempty"`  // 仅覆盖图
 	Size    ViewImageSize  `yaml:"size,omitempty"`    // 仅覆盖图：0=原尺寸
+	Tint    string         `yaml:"tint,omitempty"`    // 单色染色 ColorToken（标量或内联 {light,dark}）：非空=把图当 alpha mask、用此色填充（单色图标随主题变色）；SVG 矢量按目标尺寸现场栅格化
+	// DisabledTint 禁用态染色 ColorToken（仅 footer_bar 翻页箭头消费）：首/末页箭头禁用时改用此色（可标量/内联 {light,dark}/引用 LightDark token）；空=不变化（不做硬编码淡化）
+	DisabledTint string `yaml:"disabled_tint,omitempty"`
 }
 
 // ViewFill 背景填充。Color 底色 + 可选 Image（画在底色之上、裁剪到圆角内）。
 // Gradient 为 P7-E 预留字段（schema 冻结，渲染 later）；与 Color 概念互斥（同时存在时 render later 决定优先级）。
 type ViewFill struct {
-	Color    string        `yaml:"color,omitempty"`    // ColorToken: "#RRGGBB[AA]" | "${semantic}" | "transparent"
+	Color    string        `yaml:"color,omitempty"`    // ColorToken（标量或内联 {light,dark}）: "#RRGGBB[AA]" | "${semantic}" | "transparent"
 	Shape    string        `yaml:"shape,omitempty"`    // 背景形状: "circle" | "none"（空=none）。当前仅 views.index 消费（序号项圆形/无背景）
 	Image    *ViewImage    `yaml:"image,omitempty"`    // 背景填充图（P7-C，D5）；nil=无图
 	Gradient *ViewGradient `yaml:"gradient,omitempty"` // 渐变填充（P7-E 预留：schema 冻结，渲染 later）；nil=无渐变
@@ -68,14 +71,14 @@ type ViewGradient struct {
 
 // ViewGradientStop 渐变色停。
 type ViewGradientStop struct {
-	Color string  `yaml:"color"`         // ColorToken
+	Color string  `yaml:"color"`         // ColorToken（标量或内联 {light,dark}）
 	Pos   float64 `yaml:"pos,omitempty"` // 0..1（沿渐变轴的位置）
 }
 
 // ViewBorder 边框。
 type ViewBorder struct {
 	Width  *Dimension `yaml:"width,omitempty"` // 支持 px/dp：边框常用 "1px" 发丝线（不随 DPI 加粗）
-	Color  string     `yaml:"color,omitempty"`
+	Color  string     `yaml:"color,omitempty"` // ColorToken（标量或内联 {light,dark}）
 	Radius *Dimension `yaml:"radius,omitempty"`
 }
 
@@ -95,7 +98,7 @@ type ViewNode struct {
 	FontFamily string      `yaml:"font_family,omitempty"`
 	FontSize   *int        `yaml:"font_size,omitempty"` // 相对主候选字体的有符号偏移(逻辑px)：-4=base-4、+2=base+2；nil/0=同主字体。随用户主字号同步缩放，零魔法数字
 	FontWeight *int        `yaml:"font_weight,omitempty"`
-	Color      string      `yaml:"color,omitempty"`  // 文本色 token
+	Color      string      `yaml:"color,omitempty"`  // 文本色 token（标量或内联 {light,dark}）
 	Labels     []string    `yaml:"labels,omitempty"` // 仅 index：序号槽位字符（≤10）
 	Layers     []ViewImage `yaml:"layers,omitempty"` // z 层级覆盖图（P7-C，D4）：z<0 在内容下、z>0 在上
 
@@ -107,6 +110,8 @@ type ViewNode struct {
 	Width       *Dimension      `yaml:"width,omitempty"`        // 仅 accent_bar：条宽
 	Offset      *Dimension      `yaml:"offset,omitempty"`       // 仅 accent_bar：左缘偏移
 	HeightRatio *float64        `yaml:"height_ratio,omitempty"` // 仅 accent_bar：条高 = ItemHeight × 此比例
+	PrevImage   *ViewImage      `yaml:"prev_image,omitempty"`   // 仅 footer_bar：上一页箭头图（替代内置 chevron；可 SVG + tint 随主题变色）
+	NextImage   *ViewImage      `yaml:"next_image,omitempty"`   // 仅 footer_bar：下一页箭头图
 
 	Selected *ViewNode `yaml:"selected,omitempty"`
 	Hover    *ViewNode `yaml:"hover,omitempty"`
@@ -140,22 +145,24 @@ type ViewShadowSpec struct {
 	OffsetY *Dimension `yaml:"offset_y,omitempty"` // 垂直偏移
 	Blur    *Dimension `yaml:"blur,omitempty"`     // 模糊半径（P7-E 预留，渲染 later）
 	Spread  *Dimension `yaml:"spread,omitempty"`   // 扩散（P7-E 预留，渲染 later）
-	Color   string     `yaml:"color,omitempty"`    // ColorToken；空=palette.Shadow
+	Color   string     `yaml:"color,omitempty"`    // ColorToken（标量或内联 {light,dark}）；空=palette.Shadow
 }
 
 // RVImage 渲染消费形态的图片 spec（plain 值；不含解码后的位图——位图由 ui 侧按 Ref 一次性解码缓存）。
 // P7-C：ResolveCandidateViews 每帧从 ViewImage 廉价转换填入；ui build 时 Ref→缓存位图→Fill/ImageLayer。
 type RVImage struct {
-	Ref     string  // resources 键或字面 path/data URI
-	Mode    string  // nine_slice|stretch|tile|center；空=stretch
-	Slice   Padding // 仅 nine_slice
-	Opacity float64 // 已解析（nil→1.0）
-	Z       int     // 仅 layers：内容基准 0
-	Anchor  string  // 仅覆盖图
-	OffsetX int     // 仅覆盖图
-	OffsetY int     // 仅覆盖图
-	W       int     // 仅覆盖图：0=原尺寸
-	H       int     // 仅覆盖图：0=原尺寸
+	Ref               string      // resources 键或字面 path/data URI
+	Mode              string      // nine_slice|stretch|tile|center；空=stretch
+	Slice             Padding     // 仅 nine_slice
+	Opacity           float64     // 已解析（nil→1.0）
+	Z                 int         // 仅 layers：内容基准 0
+	Anchor            string      // 仅覆盖图
+	OffsetX           int         // 仅覆盖图
+	OffsetY           int         // 仅覆盖图
+	W                 int         // 仅覆盖图：0=原尺寸
+	H                 int         // 仅覆盖图：0=原尺寸
+	TintColor         color.Color // 已解析单色染色（nil=图原样）；非 nil 时 ui 把图当 alpha mask 用此色填充
+	DisabledTintColor color.Color // 已解析禁用态染色（仅翻页箭头）；nil=禁用时不变化
 }
 
 // RVNode 渲染消费形态的单个 View 外观（plain 逻辑像素 + 颜色）。
@@ -180,6 +187,7 @@ type RVNode struct {
 	Disabled                                         *RVNode   // P7-D/V3-D：禁用态 patch（递归；schema 预留，暂无渲染触发器）
 	BgImage                                          *RVImage  // 背景填充图（P7-C）；nil=无
 	Layers                                           []RVImage // z 层级覆盖图（P7-C）
+	PrevImage, NextImage                             *RVImage  // 仅 footer_bar：上/下翻页箭头图（替代内置 chevron，可 SVG + tint）；nil=用内置矢量箭头
 }
 
 // ResolvedViews 候选窗各具名 View 的解析后外观（plain 逻辑像素，渲染器直接读）。
@@ -420,6 +428,12 @@ func mergeViewNode(base, ov ViewNode) ViewNode {
 	}
 	if ov.HeightRatio != nil {
 		out.HeightRatio = ov.HeightRatio
+	}
+	if ov.PrevImage != nil {
+		out.PrevImage = ov.PrevImage
+	}
+	if ov.NextImage != nil {
+		out.NextImage = ov.NextImage
 	}
 	if ov.Selected != nil {
 		var baseSel ViewNode
