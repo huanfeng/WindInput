@@ -185,7 +185,20 @@ type UIConfig struct {
 	// 注意：**不可加 omitempty**——默认值为 true 时，omitempty 会把"显式 false"与"未设置"
 	// 在 YAML 中混为一谈，破坏 diff-save/merge-on-default 的闭环（false 写不出、回读成默认 true）。
 	// 走通用「缺失=继承默认」机制，无特例探针。见 renderer.recomputeBaseFont。
-	FontSizeFollowTheme     bool             `yaml:"font_size_follow_theme" json:"font_size_follow_theme"`
+	FontSizeFollowTheme bool `yaml:"font_size_follow_theme" json:"font_size_follow_theme"`
+
+	// 主题 behavior 用户覆盖层（哲学Y，见 docs/design/theme-schema-v3.md「behavior」）：
+	// 每个 behavior 字段 = FollowTheme ? 主题 behavior 推荐默认 : 用户自定义值。
+	// 与 FontSize/FontSizeFollowTheme 同模式；*FollowTheme 默认 true（新装跟随主题）。
+	// 注意：FollowTheme 类 bool **不可加 omitempty**——默认 true 时 omitempty 会把"显式 false"
+	// 与"未设置"在 YAML 中混为一谈，破坏 diff-save/merge-on-default 闭环（见 FontSizeFollowTheme 注释）。
+	AlwaysShowPager             bool `yaml:"always_show_pager" json:"always_show_pager"`                             // 单页时也显示翻页区（FollowTheme=false 时生效）
+	AlwaysShowPagerFollowTheme  bool `yaml:"always_show_pager_follow_theme" json:"always_show_pager_follow_theme"`   // true=跟随主题 behavior.always_show_pager
+	ShowPageNumber              bool `yaml:"show_page_number" json:"show_page_number"`                               // 显示页码文字 "1/3"（FollowTheme=false 时生效）
+	ShowPageNumberFollowTheme   bool `yaml:"show_page_number_follow_theme" json:"show_page_number_follow_theme"`     // true=跟随主题 behavior.show_page_number
+	VerticalMaxWidth            int  `yaml:"vertical_max_width" json:"vertical_max_width"`                           // 竖排候选最大宽度（逻辑像素，FollowTheme=false 时生效）
+	VerticalMaxWidthFollowTheme bool `yaml:"vertical_max_width_follow_theme" json:"vertical_max_width_follow_theme"` // true=跟随主题 behavior.vertical_max_width
+
 	CandidatesPerPage       int              `yaml:"candidates_per_page" json:"candidates_per_page"`
 	FontFamily              string           `yaml:"font_family" json:"font_family"`
 	FontPath                string           `yaml:"font_path" json:"font_path"`
@@ -430,26 +443,33 @@ func DefaultConfig() *Config {
 			GlobalHotkeys:   []string{},
 		},
 		UI: UIConfig{
-			FontSize:                18,
-			FontSizeFollowTheme:     true, // 新装默认跟随主题字号；老配置经 LoadFrom 探针迁移为 false（自定义）
-			CandidatesPerPage:       7,
-			MaxCandidateChars:       16,
-			FontFamily:              "",
-			FontPath:                "",
-			InlinePreedit:           true,
-			PreeditMode:             PreeditTop,
-			CandidateLayout:         LayoutHorizontal,
-			StatusIndicatorDuration: 800,
-			StatusIndicatorOffsetX:  0,
-			StatusIndicatorOffsetY:  0,
-			TooltipDelay:            100,
-			Theme:                   "default",
-			ThemeStyle:              ThemeStyleSystem,
-			TextRenderMode:          FontEngineDirectWrite,
-			GDIFontWeight:           500,
-			GDIFontScale:            1.0,
-			MenuFontWeight:          500,
-			MenuFontSize:            12.0,
+			FontSize:            18,
+			FontSizeFollowTheme: true, // 新装默认跟随主题字号；老配置经 LoadFrom 探针迁移为 false（自定义）
+			// 主题 behavior 用户覆盖默认跟随主题（哲学Y）；值字段为自定义模式兜底初值。
+			AlwaysShowPager:             false,
+			AlwaysShowPagerFollowTheme:  true,
+			ShowPageNumber:              true,
+			ShowPageNumberFollowTheme:   true,
+			VerticalMaxWidth:            600,
+			VerticalMaxWidthFollowTheme: true,
+			CandidatesPerPage:           7,
+			MaxCandidateChars:           16,
+			FontFamily:                  "",
+			FontPath:                    "",
+			InlinePreedit:               true,
+			PreeditMode:                 PreeditTop,
+			CandidateLayout:             LayoutHorizontal,
+			StatusIndicatorDuration:     800,
+			StatusIndicatorOffsetX:      0,
+			StatusIndicatorOffsetY:      0,
+			TooltipDelay:                100,
+			Theme:                       "default",
+			ThemeStyle:                  ThemeStyleSystem,
+			TextRenderMode:              FontEngineDirectWrite,
+			GDIFontWeight:               500,
+			GDIFontScale:                1.0,
+			MenuFontWeight:              500,
+			MenuFontSize:                12.0,
 			Tooltip: TooltipConfig{
 				Pinyin: TooltipPinyinConfig{Enabled: true, Heteronyms: true, MaxReadings: 0},
 				Chaizi: TooltipChaiziConfig{Enabled: false},

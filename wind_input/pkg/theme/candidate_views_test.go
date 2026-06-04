@@ -5,51 +5,59 @@ import (
 	"testing"
 )
 
+// testPalette 构造 v3 形态 ResolvedPalette：扁平 Tokens + 镜像便捷字段。
 func testPalette() ResolvedPalette {
+	tokens := map[string]color.Color{
+		"bg":             color.RGBA{255, 255, 255, 255},
+		"border":         color.RGBA{200, 200, 200, 255},
+		"text":           color.RGBA{30, 30, 30, 255},
+		"text_hint":      color.RGBA{150, 150, 150, 255},
+		"text_dim":       color.RGBA{100, 100, 100, 255},
+		"surface":        color.RGBA{240, 240, 240, 255},
+		"accent":         color.RGBA{66, 133, 244, 255},
+		"on_accent":      color.RGBA{255, 255, 255, 255},
+		"selection":      color.RGBA{210, 228, 255, 255},
+		"selection_text": color.RGBA{30, 30, 30, 255},
+		"hover":          color.RGBA{230, 240, 255, 255},
+	}
 	return ResolvedPalette{
-		Shadow: color.RGBA{1, 1, 1, 15},
-		CandidateWindow: ResolvedCandidateWindowPalette{
-			Background:  color.RGBA{255, 255, 255, 255},
-			Border:      color.RGBA{200, 200, 200, 255},
-			Text:        color.RGBA{30, 30, 30, 255},
-			Comment:     color.RGBA{150, 150, 150, 255},
-			IndexBg:     color.RGBA{66, 133, 244, 255},
-			IndexText:   color.RGBA{255, 255, 255, 255},
-			HoverBg:     color.RGBA{230, 240, 255, 255},
-			SelectedBg:  color.RGBA{210, 228, 255, 255},
-			PreeditBg:   color.RGBA{240, 240, 240, 255},
-			PreeditText: color.RGBA{100, 100, 100, 255},
-			AccentBar:   color.RGBA{0, 120, 212, 255},
-		},
+		Shadow:   color.RGBA{1, 1, 1, 15},
+		Tokens:   tokens,
+		Bg:       tokens["bg"],
+		Surface:  tokens["surface"],
+		Border:   tokens["border"],
+		Text:     tokens["text"],
+		TextDim:  tokens["text_dim"],
+		TextHint: tokens["text_hint"],
+		Accent:   tokens["accent"],
+		OnAccent: tokens["on_accent"],
 	}
 }
 
-func TestResolveCandidateViewColor(t *testing.T) {
+func TestResolveColorToken(t *testing.T) {
 	pal := testPalette()
 	cases := map[string]color.Color{
-		"${background}":  pal.CandidateWindow.Background,
-		"${index_bg}":    pal.CandidateWindow.IndexBg,
-		"${selected_bg}": pal.CandidateWindow.SelectedBg,
-		"${comment}":     pal.CandidateWindow.Comment,
-		"${accent}":      pal.CandidateWindow.AccentBar,
-		"${shadow}":      pal.Shadow,
+		"${bg}":        pal.Tokens["bg"],
+		"${accent}":    pal.Tokens["accent"],
+		"${selection}": pal.Tokens["selection"],
+		"${text_hint}": pal.Tokens["text_hint"],
 	}
 	for tok, want := range cases {
-		if got := resolveCandidateViewColor(tok, pal); got != want {
+		if got := resolveColorToken(tok, pal); got != want {
 			t.Errorf("%s → got %v, want %v", tok, got, want)
 		}
 	}
-	if got := resolveCandidateViewColor("#FF0000", pal); got == nil {
+	if got := resolveColorToken("#FF0000", pal); got == nil {
 		t.Error("hex 应解析为非 nil")
 	}
-	if resolveCandidateViewColor("", pal) != nil {
+	if resolveColorToken("", pal) != nil {
 		t.Error("空串应为 nil")
 	}
-	if resolveCandidateViewColor("${unknown}", pal) != nil {
+	if resolveColorToken("${unknown}", pal) != nil {
 		t.Error("未知 token 应为 nil")
 	}
-	// P7-C：transparent 字面量 → 全透明（位图皮肤让背景透出）
-	if c := resolveCandidateViewColor("transparent", pal); c == nil {
+	// transparent 字面量 → 全透明（位图皮肤让背景透出）
+	if c := resolveColorToken("transparent", pal); c == nil {
 		t.Error("transparent 应返回非 nil 的全透明色")
 	} else if _, _, _, a := c.RGBA(); a != 0 {
 		t.Errorf("transparent 的 alpha 应为 0, got %d", a)
@@ -59,7 +67,7 @@ func TestResolveCandidateViewColor(t *testing.T) {
 func TestResolveCandidateViews_GeometryAndColor(t *testing.T) {
 	pal := testPalette()
 	v := defaultViews()
-	v.Window.Background = ViewFill{Color: "${background}"}
+	v.Window.Background = ViewFill{Color: "${bg}"}
 	rv := ResolveCandidateViews(v, pal)
 
 	if rv.Window.PadLeft.Value != 8 || rv.Window.PadTop.Value != 8 {
@@ -74,24 +82,24 @@ func TestResolveCandidateViews_GeometryAndColor(t *testing.T) {
 	if rv.AccentBarWidth.Value != 3 || rv.AccentBarOffset.Value != 1 || rv.AccentBarHRatio != 0.6 {
 		t.Errorf("accent metrics 错: w=%v off=%v hr=%v", rv.AccentBarWidth, rv.AccentBarOffset, rv.AccentBarHRatio)
 	}
-	if rv.Index.BgColor != pal.CandidateWindow.IndexBg {
-		t.Errorf("Index.BgColor 默认应=palette.IndexBg, got %v", rv.Index.BgColor)
+	if rv.Index.BgColor != pal.Tokens["accent"] {
+		t.Errorf("Index.BgColor 默认应=token accent, got %v", rv.Index.BgColor)
 	}
-	if rv.Text.TextColor != pal.CandidateWindow.Text {
-		t.Errorf("Text.TextColor 默认应=palette.Text, got %v", rv.Text.TextColor)
+	if rv.Text.TextColor != pal.Tokens["text"] {
+		t.Errorf("Text.TextColor 默认应=token text, got %v", rv.Text.TextColor)
 	}
-	// P7-D：item 三态升级为 RVState patch。selected 默认 palette SelectedBg+SelectedText，hover 默认 HoverBg。
-	if rv.Item.Selected == nil || rv.Item.Selected.BgColor != pal.CandidateWindow.SelectedBg ||
-		rv.Item.Selected.TextColor != pal.CandidateWindow.SelectedText {
+	// P7-D：item 三态升级为 RVState patch。selected 默认 selection+selection_text，hover 默认 hover。
+	if rv.Item.Selected == nil || rv.Item.Selected.BgColor != pal.Tokens["selection"] ||
+		rv.Item.Selected.TextColor != pal.Tokens["selection_text"] {
 		t.Errorf("Item selected 默认错: %+v", rv.Item.Selected)
 	}
-	if rv.Item.Hover == nil || rv.Item.Hover.BgColor != pal.CandidateWindow.HoverBg {
+	if rv.Item.Hover == nil || rv.Item.Hover.BgColor != pal.Tokens["hover"] {
 		t.Errorf("Item hover 默认错: %+v", rv.Item.Hover)
 	}
 	if rv.Item.Disabled != nil {
-		t.Errorf("Item disabled 无 palette 默认、主题未配应为 nil, got %+v", rv.Item.Disabled)
+		t.Errorf("Item disabled 无默认、主题未配应为 nil, got %+v", rv.Item.Disabled)
 	}
-	if rv.Window.BgColor != pal.CandidateWindow.Background {
+	if rv.Window.BgColor != pal.Tokens["bg"] {
 		t.Errorf("Window.BgColor token 覆盖错, got %v", rv.Window.BgColor)
 	}
 	if rv.ShadowColor != pal.Shadow {
@@ -106,7 +114,7 @@ func TestResolveCandidateViews_GeometryAndColor(t *testing.T) {
 // （底色 + 高亮位图 + 文字色 + 字重 + 边框色/宽），hover token 解析，disabled 预留可解析。
 func TestResolveCandidateViews_States(t *testing.T) {
 	pal := testPalette()
-	pal.CandidateWindow.SelectedText = color.RGBA{255, 255, 255, 255}
+	pal.Tokens["selection_text"] = color.RGBA{255, 255, 255, 255}
 
 	v := defaultViews()
 	v.Item.Selected = &ViewNode{
@@ -115,7 +123,7 @@ func TestResolveCandidateViews_States(t *testing.T) {
 		FontWeight: intp(700),
 		Border:     ViewBorder{Color: "#445566", Width: dimp(2)},
 	}
-	v.Item.Hover = &ViewNode{Background: ViewFill{Color: "${hover_bg}"}}
+	v.Item.Hover = &ViewNode{Background: ViewFill{Color: "${hover}"}}
 	v.Item.Disabled = &ViewNode{Color: "#999999"}
 	rv := ResolveCandidateViews(v, pal)
 
@@ -132,12 +140,12 @@ func TestResolveCandidateViews_States(t *testing.T) {
 	if sel.FontWeight != 700 {
 		t.Errorf("selected 字重应=700, got %d", sel.FontWeight)
 	}
-	if sel.BorderColor == nil || sel.BorderWidth == nil || sel.BorderWidth.Value != 2 {
+	if sel.BorderColor == nil || sel.BorderWidth.Value != 2 {
 		t.Errorf("selected 边框解析错: color=%v width=%v", sel.BorderColor, sel.BorderWidth)
 	}
 
-	if rv.Item.Hover == nil || rv.Item.Hover.BgColor != pal.CandidateWindow.HoverBg {
-		t.Errorf("hover bg token 应解析为 palette.HoverBg: %+v", rv.Item.Hover)
+	if rv.Item.Hover == nil || rv.Item.Hover.BgColor != pal.Tokens["hover"] {
+		t.Errorf("hover bg token 应解析为 token hover: %+v", rv.Item.Hover)
 	}
 	if rv.Item.Disabled == nil || rv.Item.Disabled.TextColor == nil {
 		t.Errorf("disabled patch 应可解析（schema 预留）: %+v", rv.Item.Disabled)

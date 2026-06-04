@@ -43,91 +43,88 @@ func TestDeriveNone(t *testing.T) {
 	}
 }
 
-func TestApplyDerivedToVariant_PreservesUserValues(t *testing.T) {
-	v := PaletteVariant{
-		Bg:     "#ABCDEF", // 用户显式
-		Accent: "",        // 待派生
+// TestApplyDeriveToTokens_PreservesUserValues：用户显式 token 不被派生覆盖，缺失 token 被填充。
+func TestApplyDeriveToTokens_PreservesUserValues(t *testing.T) {
+	tokens := map[string]Color{
+		"bg": {Light: "#ABCDEF", Dark: "#123456"}, // 用户显式
+		// accent 缺失 → 待派生
 	}
-	d := derivedSemantics{Bg: "#FFFFFF", Accent: "#4285F4"}
-	applyDerivedToVariant(&v, d)
-	if v.Bg != "#ABCDEF" {
-		t.Errorf("user bg should be preserved, got %s", v.Bg)
+	applyDeriveToTokens(tokens, "#4285F4", "hsl-shift")
+	if tokens["bg"].Light != "#ABCDEF" {
+		t.Errorf("user bg.light should be preserved, got %s", tokens["bg"].Light)
 	}
-	if v.Accent != "#4285F4" {
-		t.Errorf("empty accent should be filled by derive, got %s", v.Accent)
-	}
-}
-
-func TestExpandPaletteRefs_SimpleChain(t *testing.T) {
-	v := &PaletteVariant{
-		Bg:     "#FFFFFF",
-		Accent: "${primary}",
-		CandidateWindow: CandidateWindowPalette{
-			Background: "${bg}",
-			IndexBg:    "${accent}",
-		},
-	}
-	if err := expandPaletteRefs(v, "#4285F4"); err != nil {
-		t.Fatalf("expand failed: %v", err)
-	}
-	if v.Accent != "#4285F4" {
-		t.Errorf("accent want #4285F4, got %s", v.Accent)
-	}
-	if v.CandidateWindow.Background != "#FFFFFF" {
-		t.Errorf("cw.bg want #FFFFFF, got %s", v.CandidateWindow.Background)
-	}
-	if v.CandidateWindow.IndexBg != "#4285F4" {
-		t.Errorf("cw.index_bg want #4285F4, got %s", v.CandidateWindow.IndexBg)
+	if tokens["accent"].Light != "#4285F4" {
+		t.Errorf("missing accent should be filled by derive, got %s", tokens["accent"].Light)
 	}
 }
 
-func TestExpandPaletteRefs_TransparentLiteralPreserved(t *testing.T) {
-	v := &PaletteVariant{
-		Bg:     "#FFFFFF",
-		Accent: "#4285F4",
-		CandidateWindow: CandidateWindowPalette{
-			Background: "transparent",
-		},
+// TestResolveColorTokens_SimpleChain：${} 多跳展开 + LightDark 选取。
+func TestResolveColorTokens_SimpleChain(t *testing.T) {
+	tokens := map[string]Color{
+		"bg":      {Light: "#FFFFFF", Dark: "#FFFFFF"},
+		"accent":  {Light: "${primary}", Dark: "${primary}"},
+		"surface": {Light: "${accent}", Dark: "${accent}"}, // 两跳 → primary
 	}
-	if err := expandPaletteRefs(v, "#4285F4"); err != nil {
-		t.Fatalf("expand failed: %v", err)
+	out, err := resolveColorTokens(tokens, "#4285F4", false)
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
 	}
-	if v.CandidateWindow.Background != "transparent" {
-		t.Errorf("literal transparent should pass through, got %s", v.CandidateWindow.Background)
+	if ColorToHexRGB(out["accent"]) != "#4285F4" {
+		t.Errorf("accent want #4285F4, got %s", ColorToHexRGB(out["accent"]))
+	}
+	if ColorToHexRGB(out["surface"]) != "#4285F4" {
+		t.Errorf("surface (两跳) want #4285F4, got %s", ColorToHexRGB(out["surface"]))
+	}
+	if ColorToHexRGB(out["bg"]) != "#FFFFFF" {
+		t.Errorf("bg want #FFFFFF, got %s", ColorToHexRGB(out["bg"]))
 	}
 }
 
-func TestExpandPaletteRefs_UnknownToken(t *testing.T) {
-	v := &PaletteVariant{
-		Bg:     "#FFFFFF",
-		Accent: "${nosuch}",
+// TestResolveColorTokens_LightDark：isDark 贯穿求值，逐 token 选分支。
+func TestResolveColorTokens_LightDark(t *testing.T) {
+	tokens := map[string]Color{
+		"bg": {Light: "#FFFFFF", Dark: "#2D2D2D"},
 	}
-	if err := expandPaletteRefs(v, "#4285F4"); err == nil {
+	light, _ := resolveColorTokens(tokens, "#4285F4", false)
+	dark, _ := resolveColorTokens(tokens, "#4285F4", true)
+	if ColorToHexRGB(light["bg"]) != "#FFFFFF" {
+		t.Errorf("light bg want #FFFFFF, got %s", ColorToHexRGB(light["bg"]))
+	}
+	if ColorToHexRGB(dark["bg"]) != "#2D2D2D" {
+		t.Errorf("dark bg want #2D2D2D, got %s", ColorToHexRGB(dark["bg"]))
+	}
+}
+
+func TestResolveColorTokens_TransparentLiteral(t *testing.T) {
+	tokens := map[string]Color{"x": {Light: "transparent", Dark: "transparent"}}
+	out, err := resolveColorTokens(tokens, "#4285F4", false)
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if _, _, _, a := out["x"].RGBA(); a != 0 {
+		t.Errorf("transparent should yield alpha 0, got %d", a)
+	}
+}
+
+func TestResolveColorTokens_UnknownToken(t *testing.T) {
+	tokens := map[string]Color{"accent": {Light: "${nosuch}", Dark: "${nosuch}"}}
+	if _, err := resolveColorTokens(tokens, "#4285F4", false); err == nil {
 		t.Errorf("expected error for unknown token")
 	}
 }
 
-// TestExpandPaletteRefs_OrderIndependent 验证迭代式展开不依赖字段顺序：
-// bg → accent → primary 间接两跳引用，bg 在 accent 之前定义也能正常解析
-func TestExpandPaletteRefs_OrderIndependent(t *testing.T) {
-	v := &PaletteVariant{
-		Bg:     "${accent}",  // 指向 accent
-		Accent: "${primary}", // 指向 primary
+func TestResolveColorTokens_Cycle(t *testing.T) {
+	tokens := map[string]Color{
+		"a": {Light: "${b}", Dark: "${b}"},
+		"b": {Light: "${a}", Dark: "${a}"},
 	}
-	if err := expandPaletteRefs(v, "#4285F4"); err != nil {
-		t.Fatalf("两跳引用应支持: %v", err)
-	}
-	if v.Bg != "#4285F4" {
-		t.Errorf("bg should resolve transitively to primary, got %s", v.Bg)
-	}
-	if v.Accent != "#4285F4" {
-		t.Errorf("accent should resolve to primary, got %s", v.Accent)
+	if _, err := resolveColorTokens(tokens, "#4285F4", false); err == nil {
+		t.Errorf("expected error for cyclic token reference")
 	}
 }
 
-func TestExpandPaletteRefs_PrimaryRefRejected(t *testing.T) {
-	v := &PaletteVariant{}
-	if err := expandPaletteRefs(v, "${primary}"); err == nil {
+func TestResolveColorTokens_PrimaryRefRejected(t *testing.T) {
+	if _, err := resolveColorTokens(map[string]Color{}, "${primary}", false); err == nil {
 		t.Errorf("primary itself must not contain ${} ref")
 	}
 }

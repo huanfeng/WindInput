@@ -5,43 +5,22 @@ import (
 	"strings"
 )
 
-// resolveCandidateViewColor 解析候选窗 views 颜色字段：${name}→palette 候选窗语义色 /
-// hex(#RRGGBB[AA]) 直解 / 空或未知 token → nil（调用方据此保留 palette 默认）。
-// 从 ui 侧 resolveViewColor 下沉（P6 2b），token 映射表与之一致。
-func resolveCandidateViewColor(s string, pal ResolvedPalette) color.Color {
+// resolveColorToken 是 v3 统一的 views 颜色字段解析器（候选窗 + 其它窗口共用）：
+//   - 空串 → nil（调用方据此保留默认）
+//   - "transparent" → 全透明（位图皮肤让背景透出用，P0 ColorToken）
+//   - "${name}" → pal.Tokens[name]（缺失返回 nil）
+//   - "#RRGGBB[AA]" → 直解
+//   - 其余/未知 → nil
+func resolveColorToken(s string, pal ResolvedPalette) color.Color {
 	if s == "" {
 		return nil
 	}
-	if s == "transparent" { // P0 ColorToken：全透明（位图皮肤让背景图透出用）
+	if s == "transparent" {
 		return color.RGBA{0, 0, 0, 0}
 	}
-	cw := pal.CandidateWindow
 	if strings.HasPrefix(s, "${") && strings.HasSuffix(s, "}") {
-		switch s[2 : len(s)-1] {
-		case "background":
-			return cw.Background
-		case "border":
-			return cw.Border
-		case "text":
-			return cw.Text
-		case "index_bg":
-			return cw.IndexBg
-		case "index_text":
-			return cw.IndexText
-		case "hover_bg":
-			return cw.HoverBg
-		case "selected_bg":
-			return cw.SelectedBg
-		case "preedit_bg":
-			return cw.PreeditBg
-		case "preedit_text":
-			return cw.PreeditText
-		case "comment":
-			return cw.Comment
-		case "accent":
-			return cw.AccentBar
-		case "shadow":
-			return pal.Shadow
+		if c, ok := pal.Tokens[s[2:len(s)-1]]; ok {
+			return c
 		}
 		return nil
 	}
@@ -104,29 +83,36 @@ func resolveViewNode(n ViewNode, resolveColor func(string) color.Color, defBg, d
 // 颜色 = palette 默认 ⊕ views token 覆盖（views 颜色非空才覆盖）。
 // 不设字号（Text/Index/PreeditBar.FontSize）、ItemHeight、VerticalMaxWidth——这些是运行时值，由 ui 回填。
 func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
-	resolve := func(s string) color.Color { return resolveCandidateViewColor(s, pal) }
+	resolve := func(s string) color.Color { return resolveColorToken(s, pal) }
 	build := func(n ViewNode, defBg, defBorder, defText color.Color) RVNode {
 		return resolveViewNode(n, resolve, defBg, defBorder, defText)
 	}
-	cw := pal.CandidateWindow
+	// v3：候选窗默认色从扁平语义 token 取（替代旧 candidate_window 组）。
+	// 未配置的 token → nil（无默认），由 views 节点 token 覆盖。
+	tk := func(name string) color.Color {
+		if c, ok := pal.Tokens[name]; ok {
+			return c
+		}
+		return nil
+	}
 	rv := ResolvedViews{
-		Window:        build(views.Window, cw.Background, cw.Border, nil),
-		PreeditBar:    build(views.PreeditBar, cw.PreeditBg, nil, cw.PreeditText),
+		Window:        build(views.Window, tk("bg"), tk("border"), nil),
+		PreeditBar:    build(views.PreeditBar, tk("surface"), nil, tk("text_dim")),
 		CandidateList: build(views.CandidateList, nil, nil, nil),
 		Item:          build(views.Item, nil, nil, nil),
-		Index:         build(views.Index, cw.IndexBg, nil, cw.IndexText),
-		Text:          build(views.Text, nil, nil, cw.Text),
-		Comment:       build(views.Comment, nil, nil, cw.Comment),
-		AccentBar:     build(views.AccentBar, cw.AccentBar, nil, nil),
+		Index:         build(views.Index, tk("accent"), nil, tk("on_accent")),
+		Text:          build(views.Text, nil, nil, tk("text")),
+		Comment:       build(views.Comment, nil, nil, tk("text_hint")),
+		AccentBar:     build(views.AccentBar, tk("accent"), nil, nil),
 		FooterBar:     build(views.FooterBar, nil, nil, nil),
-		ModeLabel:     build(views.ModeLabel, nil, nil, cw.Comment), // 模式徽标默认文字色 = 候选注释色
+		ModeLabel:     build(views.ModeLabel, nil, nil, tk("text_hint")), // 模式徽标默认文字色 = 候选注释色
 
 		ShadowColor: pal.Shadow,
 	}
-	// P7-D：item 三态解析为完整 patch。selected 默认 palette SelectedBg/SelectedText，
-	// hover 默认 HoverBg（文字沿用基态），disabled 无 palette 默认（schema 预留）。
-	rv.Item.Selected = resolveState(views.Item.Selected, cw.SelectedBg, cw.SelectedText, resolve)
-	rv.Item.Hover = resolveState(views.Item.Hover, cw.HoverBg, nil, resolve)
+	// P7-D：item 三态解析为完整 patch。selected 默认 selection/selection_text，
+	// hover 默认 hover（文字沿用基态），disabled 无默认（schema 预留）。
+	rv.Item.Selected = resolveState(views.Item.Selected, tk("selection"), tk("selection_text"), resolve)
+	rv.Item.Hover = resolveState(views.Item.Hover, tk("hover"), nil, resolve)
 	rv.Item.Disabled = resolveState(views.Item.Disabled, nil, nil, resolve)
 	// P7-D：序号/注释也各自支持选中/悬停态（View 模型对称）。无 palette 默认 → 未配置即返回 nil，
 	// 渲染沿用各元素基态（默认与普通态一致）；主题可用 views.index.selected / views.comment.selected 独立配。
@@ -134,72 +120,52 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 	rv.Index.Hover = resolveState(views.Index.Hover, nil, nil, resolve)
 	rv.Comment.Selected = resolveState(views.Comment.Selected, nil, nil, resolve)
 	rv.Comment.Hover = resolveState(views.Comment.Hover, nil, nil, resolve)
-	if m := views.Metrics; m != nil {
-		rv.ItemSpacing = dimOr(m.ItemSpacing, Dimension{})
-		rv.WindowGap = dimOr(m.BandGap, Dimension{})
-		rv.ShadowOffset = dimOr(m.ShadowOffset, Dimension{})
-		// P7-E：X/Y 默认 = 标量 shadow_offset；structured shadow 存在则覆盖（blur/spread 暂不消费）。
-		rv.ShadowOffsetX, rv.ShadowOffsetY = rv.ShadowOffset, rv.ShadowOffset
-		if m.Shadow != nil {
-			if m.Shadow.OffsetX != nil {
-				rv.ShadowOffsetX = *m.Shadow.OffsetX
-			}
-			if m.Shadow.OffsetY != nil {
-				rv.ShadowOffsetY = *m.Shadow.OffsetY
-			}
-			if c := resolveCandidateViewColor(m.Shadow.Color, pal); c != nil {
-				rv.ShadowColor = c
-			}
+	// V3-D 属性归位：列表级几何从对应节点读取（取代退役的 views.Metrics）。
+	// candidate_list 容器：候选项间距 / band 间距。
+	rv.ItemSpacing = dimOr(views.CandidateList.Gap, Dimension{})
+	rv.WindowGap = dimOr(views.CandidateList.BandGap, Dimension{})
+	// window 节点：投影偏移/颜色（offset_x/offset_y/color）。标量 ShadowOffset = X（X/Y 默认同值）。
+	if sh := views.Window.Shadow; sh != nil {
+		rv.ShadowOffsetX = dimOr(sh.OffsetX, Dimension{})
+		rv.ShadowOffsetY = dimOr(sh.OffsetY, Dimension{})
+		rv.ShadowOffset = rv.ShadowOffsetX
+		if c := resolveColorToken(sh.Color, pal); c != nil {
+			rv.ShadowColor = c
 		}
-		if m.AccentBar != nil {
-			rv.AccentBarWidth = dimOr(m.AccentBar.Width, Dimension{})
-			rv.AccentBarOffset = dimOr(m.AccentBar.Offset, Dimension{})
-			if m.AccentBar.HeightRatio != nil {
-				rv.AccentBarHRatio = *m.AccentBar.HeightRatio
-			}
-		}
+	}
+	// accent_bar 节点：强调条几何（width/offset/height_ratio）。
+	rv.AccentBarWidth = dimOr(views.AccentBar.Width, Dimension{})
+	rv.AccentBarOffset = dimOr(views.AccentBar.Offset, Dimension{})
+	if views.AccentBar.HeightRatio != nil {
+		rv.AccentBarHRatio = *views.AccentBar.HeightRatio
 	}
 	return rv
 }
 
-// resolveState 把状态 patch ViewNode（selected/hover/disabled）解析为 RVState（P7-D）。
-// defBg/defText = 该态的 palette 默认底色/文字色（nil=无默认）；patch 提供对应字段才覆盖。
-// 全空且无 palette 默认 → 返回 nil（该态无覆盖，渲染沿用基态）。
-func resolveState(node *ViewNode, defBg, defText color.Color, resolveColor func(string) color.Color) *RVState {
-	st := RVState{BgColor: defBg, TextColor: defText}
+// resolveState 把状态 patch ViewNode（selected/hover/disabled）解析为递归 RVNode（V3-D 决策 9）。
+// 复用 resolveViewNode 做完整 ViewNode→RVNode 解析（含几何/边框/字体），再注入该态的 palette
+// 默认底色/文字色（defBg/defText，nil=无默认）。全空且无 palette 默认 → 返回 nil（该态无覆盖）。
+//
+// nil-gating：仅当 patch 显式提供了 bg/bgImage/text/border 色/border 宽/字重，或存在 palette
+// 默认色时，才视为「有覆盖」并返回非 nil（与旧 RVState 语义一致，守 golden）。
+func resolveState(node *ViewNode, defBg, defText color.Color, resolveColor func(string) color.Color) *RVNode {
 	has := defBg != nil || defText != nil
 	if node != nil {
-		if c := resolveColor(node.Background.Color); c != nil {
-			st.BgColor = c
-			has = true
-		}
-		if node.Background.Image != nil {
-			im := toRVImage(*node.Background.Image)
-			st.BgImage = &im
-			has = true
-		}
-		if c := resolveColor(node.Color); c != nil {
-			st.TextColor = c
-			has = true
-		}
-		if c := resolveColor(node.Border.Color); c != nil {
-			st.BorderColor = c
-			has = true
-		}
-		if node.Border.Width != nil {
-			w := *node.Border.Width
-			st.BorderWidth = &w
-			has = true
-		}
-		if node.FontWeight != nil {
-			st.FontWeight = *node.FontWeight
+		if resolveColor(node.Background.Color) != nil || node.Background.Image != nil ||
+			resolveColor(node.Color) != nil || resolveColor(node.Border.Color) != nil ||
+			node.Border.Width != nil || node.FontWeight != nil {
 			has = true
 		}
 	}
 	if !has {
 		return nil
 	}
-	return &st
+	var n ViewNode
+	if node != nil {
+		n = *node
+	}
+	rv := resolveViewNode(n, resolveColor, defBg, nil, defText)
+	return &rv
 }
 
 // toRVImage 把 schema ViewImage 廉价转换为渲染消费形态 RVImage：

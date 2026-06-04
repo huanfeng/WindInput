@@ -829,6 +829,7 @@ func (c *Coordinator) handleUnifiedMenuAction(id int, capturedProcess string) {
 			themeID := themeInfos[themeIndex].ID
 			c.logger.Info("Theme selected from unified menu", "theme", themeID)
 			c.uiManager.LoadTheme(themeID)
+			c.notifyThemeFallbackIfAny()
 			// Save to config
 			c.saveThemeConfig(themeID)
 		}

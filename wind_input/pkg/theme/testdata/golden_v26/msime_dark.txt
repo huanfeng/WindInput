@@ -1,0 +1,113 @@
+=== palette (顶层语义色，token 源) ===
+isDark=true primary=#0078D4FF
+bg=#2D2D2DFF surface=#3A3A3AFF border=#404040FF text=#E0E0E0FF textDim=#B0B0B0FF textHint=#808080FF accent=#0078D4FF onAccent=#FFFFFFFF shadow=#0000001A
+
+=== candidate views ===
+[window]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 6dp 8dp 6dp 8dp
+  border: radius=8dp width=1px color=#404040FF
+  bg=#2D2D2DFF text=nil
+  font: size=0.0 weight=0 family=""
+[preedit_bar]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 3dp 8dp 3dp 8dp
+  border: radius=4dp width=0dp color=nil
+  bg=#3A3A3AFF text=#B0B0B0FF
+  font: size=0.0 weight=0 family=""
+[candidate_list]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=nil text=nil
+  font: size=0.0 weight=0 family=""
+[item]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 6dp 8dp 6dp 8dp
+  border: radius=4dp width=0dp color=nil
+  bg=nil text=nil
+  font: size=0.0 weight=0 family=""
+  selected: bg=#3D4A5CFF text=#E0E0E0FF border=nil bw=nil fw=0
+  hover: bg=#3D4A5CFF text=nil border=nil bw=nil fw=0
+[index]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 3dp 0dp 3dp
+  border: radius=0dp width=0dp color=nil
+  bg=#0078D4FF text=#888888FF
+  font: size=2.0 weight=0 family=""
+[text]
+  margin: 0dp 0dp 0dp 4dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=nil text=#E0E0E0FF
+  font: size=0.0 weight=0 family=""
+[comment]
+  margin: 0dp 0dp 0dp 6dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=nil text=#808080FF
+  font: size=-2.0 weight=0 family=""
+[accent_bar]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=#0078D4FF text=nil
+  font: size=0.0 weight=0 family=""
+[footer_bar]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=nil text=nil
+  font: size=-2.0 weight=0 family=""
+[mode_label]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 8dp 0dp 8dp
+  border: radius=0dp width=0dp color=nil
+  bg=nil text=#808080FF
+  font: size=-4.0 weight=0 family=""
+[geom] windowGap=2dp shadowOffset=2dp shadowXY=(2dp,2dp) itemSpacing=12dp accentBar=(w=3dp off=1dp hr=0.60) shadowColor=#0000001A
+
+=== other windows ===
+[status]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=#1E1E1EE6 text=#E0E0E0FF
+  font: size=0.0 weight=0 family=""
+[tooltip]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=#1E1E1EF0 text=#E0E0E0FF
+  font: size=0.0 weight=0 family=""
+[toast]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=#1E1E1EE6 text=#E0E0E0FF
+  font: size=0.0 weight=0 family=""
+[menu.root]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=6dp width=1dp color=#404040FF
+  bg=#2D2D2DFF text=nil
+  font: size=0.0 weight=0 family=""
+[menu.item]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=nil text=#E0E0E0FF
+  font: size=0.0 weight=0 family=""
+  hover: bg=#0078D4FF text=#FFFFFFFF border=nil bw=nil fw=0
+  disabled: bg=nil text=#707070FF border=nil bw=nil fw=0
+[menu.separator]
+  margin: 0dp 0dp 0dp 0dp
+  padding: 0dp 0dp 0dp 0dp
+  border: radius=0dp width=0dp color=nil
+  bg=#404040FF text=nil
+  font: size=0.0 weight=0 family=""
+
+=== behavior ===
+{FontSize:18 AlwaysShowPager:false ShowPageNumber:true VerticalMaxWidth:600}
+
+=== resources ===

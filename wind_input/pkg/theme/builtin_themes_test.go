@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 )
 
@@ -43,9 +44,9 @@ func TestBuiltinDefaultTheme(t *testing.T) {
 	if r.Views.Index.Background.Shape != "circle" {
 		t.Errorf("default index want circle bg, got %q", r.Views.Index.Background.Shape)
 	}
-	// primary #4285F4 应反映在 IndexBg
-	if ColorToHexRGB(r.Palette.CandidateWindow.IndexBg) != "#4285F4" {
-		t.Errorf("default IndexBg want #4285F4, got %s", ColorToHexRGB(r.Palette.CandidateWindow.IndexBg))
+	// primary #4285F4 应反映在 accent token（序号底色源）
+	if ColorToHexRGB(r.Palette.Accent) != "#4285F4" {
+		t.Errorf("default accent want #4285F4, got %s", ColorToHexRGB(r.Palette.Accent))
 	}
 	// behavior 块显式声明：单页不显翻页区、多页显页码
 	if r.Behavior.AlwaysShowPager {
@@ -73,15 +74,15 @@ func TestBuiltinMsimeTheme(t *testing.T) {
 	if got := BuildIndexLabelsFromSlots(vi.Labels); got != "1/2/3/4/5/6/7/8/9/0" {
 		t.Errorf("msime IndexLabels want digit template, got %q", got)
 	}
-	if ColorToHexRGB(r.Palette.CandidateWindow.IndexBg) != "#0078D4" {
-		t.Errorf("msime IndexBg want #0078D4, got %s", ColorToHexRGB(r.Palette.CandidateWindow.IndexBg))
+	if ColorToHexRGB(r.Palette.Accent) != "#0078D4" {
+		t.Errorf("msime accent want #0078D4, got %s", ColorToHexRGB(r.Palette.Accent))
 	}
-	// msime 应启用 accent bar（选中项左侧蓝色条）
-	if m := r.Views.Metrics; m == nil || m.AccentBar == nil || m.AccentBar.Enabled == nil || !*m.AccentBar.Enabled {
-		t.Errorf("msime metrics.accent_bar.enabled want true")
+	// msime 应启用 accent bar（选中项左侧蓝色条）。V3-D：归位到 accent_bar 节点。
+	if ab := r.Views.AccentBar; ab.Enabled == nil || !*ab.Enabled {
+		t.Errorf("msime accent_bar.enabled want true")
 	}
-	if ColorToHexRGB(r.Palette.CandidateWindow.AccentBar) != "#0078D4" {
-		t.Errorf("msime AccentBar want #0078D4, got %s", ColorToHexRGB(r.Palette.CandidateWindow.AccentBar))
+	if ColorToHexRGB(r.Palette.Accent) != "#0078D4" {
+		t.Errorf("msime accent_bar source want #0078D4, got %s", ColorToHexRGB(r.Palette.Accent))
 	}
 	// behavior 块显式声明：单页不显翻页区、多页显页码
 	if r.Behavior.AlwaysShowPager {
@@ -92,26 +93,22 @@ func TestBuiltinMsimeTheme(t *testing.T) {
 	}
 }
 
-// TestListAvailableThemes 验证下划线前缀目录（_layouts / _palettes）不被列为主题
+// TestListAvailableThemes 验证下划线前缀的隐藏基础主题 _base 不被列为主题，
+// 且旧 base 主题 windy-blue/msime-base 已合并删除、不再出现。
 func TestListAvailableThemes_SkipsUnderscoreDirs(t *testing.T) {
 	dir := builtinThemesDir(t)
 	m := &Manager{themeDirs: []string{dir}}
 	themes := m.ListAvailableThemes()
-	for _, name := range themes {
-		if name == "_layouts" || name == "_palettes" {
-			t.Errorf("零件目录 %q 不应出现在主题列表", name)
-		}
+	// _ 前缀隐藏基础主题不应出现在主题列表
+	if slices.Contains(themes, "_base") {
+		t.Errorf("隐藏基础主题 _base 不应出现在主题列表: %v", themes)
+	}
+	// 旧 base 主题已合并进 _base 并删除
+	if slices.Contains(themes, "windy-blue") || slices.Contains(themes, "msime-base") {
+		t.Errorf("旧 base 主题 windy-blue/msime-base 应已删除: %v", themes)
 	}
 	// 至少应列出 default 和 msime
-	has := func(s string) bool {
-		for _, x := range themes {
-			if x == s {
-				return true
-			}
-		}
-		return false
-	}
-	if !has("default") || !has("msime") {
+	if !slices.Contains(themes, "default") || !slices.Contains(themes, "msime") {
 		t.Errorf("主题列表缺失 default/msime: %v", themes)
 	}
 }
@@ -126,7 +123,7 @@ func TestBuiltinDarkMode(t *testing.T) {
 		t.Fatalf("LoadTheme default: %v", err)
 	}
 	r := m.GetResolvedV25()
-	if ColorToHexRGB(r.Palette.CandidateWindow.Background) != "#2D2D2D" {
-		t.Errorf("default dark bg want #2D2D2D, got %s", ColorToHexRGB(r.Palette.CandidateWindow.Background))
+	if ColorToHexRGB(r.Palette.Bg) != "#2D2D2D" {
+		t.Errorf("default dark bg want #2D2D2D, got %s", ColorToHexRGB(r.Palette.Bg))
 	}
 }

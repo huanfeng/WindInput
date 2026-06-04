@@ -143,9 +143,7 @@ func (fc *fontCache) getFace(size float64) ggtext.Face {
 	if len(fc.faces) >= maxFontFaces && len(fc.faceOrder) > 0 {
 		oldest := fc.faceOrder[0]
 		fc.faceOrder = fc.faceOrder[1:]
-		if _, ok := fc.faces[oldest]; ok {
-			delete(fc.faces, oldest)
-		}
+		delete(fc.faces, oldest) // delete 对不存在的键是 no-op，无需 ok 守卫（S1033）
 	}
 
 	fc.faces[size] = face
@@ -193,6 +191,15 @@ type Renderer struct {
 	fontFollowTheme bool    // true=候选字号跟随主题 behavior.font_size；false=用 userFontSize
 	lastDPI         int     // Last DPI used for scaling; 0 means not yet set
 
+	// 主题 behavior 用户覆盖层（哲学Y，来自 config.UI）：每项 = FollowTheme ? 主题 behavior : 用户值。
+	// 应用点在 SetTheme（pager/page_number）与 viewbox_render（vertical_max_width）。
+	pagerFollowTheme            bool // true=always_show_pager 跟随主题；false=用 userAlwaysShowPager
+	userAlwaysShowPager         bool
+	pageNumberFollowTheme       bool // true=show_page_number 跟随主题；false=用 userShowPageNumber
+	userShowPageNumber          bool
+	verticalMaxWidthFollowTheme bool    // true=vertical_max_width 跟随主题；false=用 userVerticalMaxWidth
+	userVerticalMaxWidth        float64 // 用户竖排最大宽（逻辑像素，未乘 scale）
+
 	// 候选框绘制缓冲. 跨帧复用以避免 gg.NewPixmap + dc.Image() 的双倍分配
 	// (旧 pprof 中合计 ~2.3 GB 累计). RenderCandidates 在 UI 单线程调用,
 	// UpdateLayeredWindow 同步消费 img, 之后下一帧才会写入 — 无并发竞争.
@@ -221,6 +228,12 @@ func NewRenderer(config RenderConfig) *Renderer {
 		TextBackendManager: NewTextBackendManager("candidate"),
 		baseFontSize:       18, // Default base font size (unscaled)
 		userFontSize:       18,
+		// 主题 behavior 覆盖默认全部跟随主题（与未配置时的旧行为一致：直接用主题 behavior）。
+		pagerFollowTheme:            true,
+		pageNumberFollowTheme:       true,
+		verticalMaxWidthFollowTheme: true,
+		userShowPageNumber:          true,
+		userVerticalMaxWidth:        600,
 	}
 	r.SetTextRenderMode(config.TextRenderMode)
 	return r
@@ -266,6 +279,48 @@ func (r *Renderer) recomputeBaseFont() {
 func (r *Renderer) SetFontFollowTheme(follow bool) {
 	r.fontFollowTheme = follow
 	r.recomputeBaseFont()
+}
+
+// SetBehaviorOverrides 设置主题 behavior 的用户覆盖层（哲学Y，来自 config.UI）：
+// always_show_pager / show_page_number / vertical_max_width 各自的「跟随主题」开关 + 用户值。
+// 跟随=true 时用主题 behavior（SetTheme 写入），=false 时用此处用户值。
+// 需在 SetTheme 之前或之后调用均可——applyBehaviorOverrides 在 SetTheme 末尾据当前
+// 标志位与主题 behavior 计算最终值；verticalMaxWidth 在 viewbox_render 每帧据标志位选值。
+func (r *Renderer) SetBehaviorOverrides(
+	alwaysShowPager, alwaysShowPagerFollowTheme bool,
+	showPageNumber, showPageNumberFollowTheme bool,
+	verticalMaxWidth int, verticalMaxWidthFollowTheme bool,
+) {
+	r.pagerFollowTheme = alwaysShowPagerFollowTheme
+	r.userAlwaysShowPager = alwaysShowPager
+	r.pageNumberFollowTheme = showPageNumberFollowTheme
+	r.userShowPageNumber = showPageNumber
+	r.verticalMaxWidthFollowTheme = verticalMaxWidthFollowTheme
+	if verticalMaxWidth > 0 {
+		r.userVerticalMaxWidth = float64(verticalMaxWidth)
+	}
+	r.applyBehaviorOverrides()
+}
+
+// applyBehaviorOverrides 据「跟随主题/用户值」标志位把 pager/page_number 最终值写入
+// r.config（vertical_max_width 不在此——它由 viewbox_render 每帧据标志位选值）。
+// 跟随主题时用 r.resolvedV25.Behavior；用户自定义时用 r.user* 值。
+// 注意：用户 PagerDisplayMode（applyPagerOverride）是更上层的独立强制覆盖，仍在其后生效。
+func (r *Renderer) applyBehaviorOverrides() {
+	if r.pagerFollowTheme {
+		if r.resolvedV25 != nil {
+			r.config.AlwaysShowPager = r.resolvedV25.Behavior.AlwaysShowPager
+		}
+	} else {
+		r.config.AlwaysShowPager = r.userAlwaysShowPager
+	}
+	if r.pageNumberFollowTheme {
+		if r.resolvedV25 != nil {
+			r.config.ShowPageNumber = r.resolvedV25.Behavior.ShowPageNumber
+		}
+	} else {
+		r.config.ShowPageNumber = r.userShowPageNumber
+	}
 }
 
 // UpdateFont updates font settings
@@ -350,8 +405,8 @@ func (r *Renderer) SetTheme(rv *theme.ResolvedV25) {
 	r.themeViews = rv.Views // 主题盒模型 views（已 merge defaultViews 基线）
 	// 候选窗颜色/几何已由 theme.ResolveCandidateViews 经 r.resolvedViews 承载（P6 阶段2e 删合成桥）；
 	// 此处只搬运渲染运行时仍需的 RenderConfig 字段：IndexStyle / HasAccentBar / page 策略 / 序号标签。
-	// P7-5：这些已归口 views（序号样式=views.index.background.shape、强调条开关=views.metrics.accent_bar.enabled、
-	// 标签=views.index.labels），不再来自 layout；行高恒由有效字号派生（themeRowHeight 退役）。
+	// P7-5/V3-D：这些已归口 views（序号样式=views.index.background.shape、强调条开关=views.accent_bar.enabled、
+	// 标签=views.index.labels），不再来自 layout/metrics；行高恒由有效字号派生（themeRowHeight 退役）。
 	// rv.Views 生产路径恒非 nil（resolver 保证）；此处 nil 防御供仅构造 Behavior/Palette 的单元测试。
 	r.config.IndexStyle = "text"
 	r.config.HasAccentBar = false
@@ -360,15 +415,15 @@ func (r *Renderer) SetTheme(rv *theme.ResolvedV25) {
 		if v.Index.Background.Shape == "circle" {
 			r.config.IndexStyle = "circle"
 		}
-		if m := v.Metrics; m != nil && m.AccentBar != nil && m.AccentBar.Enabled != nil {
-			r.config.HasAccentBar = *m.AccentBar.Enabled
+		if v.AccentBar.Enabled != nil {
+			r.config.HasAccentBar = *v.AccentBar.Enabled
 		}
 		indexLabels = v.Index.Labels
 	}
-	// page 策略默认来自主题 behavior（P6 阶段2d）；用户 PagerDisplayMode 覆盖在
-	// applyPagerOverride 注入（Default=跟随主题，即保留此处写入的 behavior 值）。
-	r.config.AlwaysShowPager = rv.Behavior.AlwaysShowPager
-	r.config.ShowPageNumber = rv.Behavior.ShowPageNumber
+	// page 策略：哲学Y 双层覆盖——最终值 = FollowTheme ? 主题 behavior : config.UI 用户值
+	// （applyBehaviorOverrides 据 r.*FollowTheme 标志位选源）。用户 PagerDisplayMode 是更上层的
+	// 独立强制覆盖，在 applyPagerOverride 注入（Default=不覆盖，保留此处选定值）。
+	r.applyBehaviorOverrides()
 	// 字号跟随：记录主题 behavior.font_size，按「跟随/自定义」重算有效基准字号 + 派生（含行高）。
 	r.themeFontSize = float64(rv.Behavior.FontSize)
 	r.recomputeBaseFont()
@@ -408,7 +463,8 @@ func (r *Renderer) appendThemeLayers(v *View, layers []theme.RVImage, sc func(fl
 // getModeIndicatorColors returns mode indicator colors from theme or defaults
 func (r *Renderer) getModeIndicatorColors() (bgColor, textColor color.Color) {
 	if r.resolvedV25 != nil {
-		return r.resolvedV25.Palette.Toast.Background, r.resolvedV25.Palette.Toast.Text
+		t := r.resolvedV25.Palette.Tokens
+		return t["toast_bg"], t["toast_text"]
 	}
 	return color.RGBA{50, 50, 50, 230}, color.RGBA{255, 255, 255, 255}
 }

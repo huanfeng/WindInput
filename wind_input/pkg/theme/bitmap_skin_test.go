@@ -9,7 +9,7 @@ import (
 
 // bitmapTestThemeDirs 返回加载位图测试主题 jidian-classic 所需的 themeDirs：
 // jidian-classic 是**纯测试主题**（不随发布打包），位于 pkg/theme/testdata/themes/；
-// 其引用的共享零件 _layouts/compact-horizontal、_palettes/windy-blue 仍在源 themes/ 下。
+// 其继承的基础主题 _base 仍在源 themes/ 下（base 单链解析跨 themeDirs 兜底）。
 func bitmapTestThemeDirs(t *testing.T) []string {
 	t.Helper()
 	_, file, _, _ := runtime.Caller(0)
@@ -135,16 +135,16 @@ func TestBitmapSkinTheme_JidianClassic(t *testing.T) {
 	opaque("tooltip.background", tv.BgColor)
 	opaque("toast.background", tov.BgColor)
 
-	// 同时验收 P7-A/B：accent bar 启用、序号无圆背景（极点风格）。
-	if m := rv.Views.Metrics; m == nil || m.AccentBar == nil || m.AccentBar.Enabled == nil || !*m.AccentBar.Enabled {
+	// 同时验收 P7-A/B：accent bar 启用、序号无圆背景（极点风格）。V3-D：accent_bar 几何归位到节点。
+	if ab := rv.Views.AccentBar; ab.Enabled == nil || !*ab.Enabled {
 		t.Error("jidian-classic 应启用 accent_bar")
 	}
 	if rv.Views.Index.Background.Shape == "circle" {
 		t.Error("jidian-classic 序号应为 none（纯数字）")
 	}
 
-	// P7-E：结构化阴影 offset_x/y 解析（blur 预留不消费）。
-	if rv.Views.Metrics.Shadow == nil || rv.Views.Metrics.Shadow.OffsetX == nil {
+	// P7-E：结构化阴影 offset_x/y 解析（blur 预留不消费）。V3-D：shadow 归位到 window 节点。
+	if rv.Views.Window.Shadow == nil || rv.Views.Window.Shadow.OffsetX == nil {
 		t.Error("jidian-classic 应配结构化 shadow")
 	}
 

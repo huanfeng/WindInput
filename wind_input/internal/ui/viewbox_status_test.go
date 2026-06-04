@@ -31,33 +31,34 @@ func TestResolveTokenColor(t *testing.T) {
 	}
 }
 
-// TestResolveStatusColors 验证状态泡颜色优先级：自定义 cfg > views token(Palette.Status) > 默认。
+// TestResolveStatusColors 验证状态泡颜色优先级：自定义 cfg > views token(status_*) > 默认。
 func TestResolveStatusColors(t *testing.T) {
-	mi := theme.ResolvedStatusPalette{
-		Background: color.RGBA{10, 20, 30, 255},
-		Text:       color.RGBA{200, 200, 200, 255},
-	}
+	statusBg := color.RGBA{10, 20, 30, 255}
+	statusText := color.RGBA{200, 200, 200, 255}
 	rv := &theme.ResolvedV25{
-		Palette: theme.ResolvedPalette{Status: mi},
+		Palette: theme.ResolvedPalette{Tokens: map[string]color.Color{
+			"status_bg":   statusBg,
+			"status_text": statusText,
+		}},
 		Views: &theme.Views{Status: &theme.ViewNode{
-			Background: theme.ViewFill{Color: "${background}"},
-			Color:      "${text}",
+			Background: theme.ViewFill{Color: "${status_bg}"},
+			Color:      "${status_text}",
 		}},
 	}
 	r := &StatusRenderer{resolvedV25: rv}
 
-	// views token → Palette.Status
+	// views token → status_* token
 	node := r.resolveStatusNode(StatusWindowConfig{})
-	if node.BgColor != mi.Background {
-		t.Errorf("bg 应来自 Palette.Status, got %v", node.BgColor)
+	if node.BgColor != statusBg {
+		t.Errorf("bg 应来自 status_bg token, got %v", node.BgColor)
 	}
-	if node.TextColor != mi.Text {
-		t.Errorf("text 应来自 Palette.Status, got %v", node.TextColor)
+	if node.TextColor != statusText {
+		t.Errorf("text 应来自 status_text token, got %v", node.TextColor)
 	}
 
 	// 自定义 cfg 优先
 	node2 := r.resolveStatusNode(StatusWindowConfig{BackgroundColor: "#FF0000", TextColor: "#00FF00"})
-	if node2.BgColor == mi.Background {
+	if node2.BgColor == statusBg {
 		t.Error("自定义 bg 应覆盖 views token")
 	}
 }

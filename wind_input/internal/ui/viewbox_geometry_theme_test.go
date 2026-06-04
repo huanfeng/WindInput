@@ -48,39 +48,49 @@ func fp(v float64) *float64      { return &v }
 // themePathViews 返回一份完整候选窗 views（= defaultViews 量级），winPad/itemPad 可调
 // 以覆盖不同 padding（默认指纹用 winPad=6 覆盖 parityConfig padding=8 盲区）。
 func themePathViews(winPad, itemPad int) theme.Views {
-	return theme.Views{
+	v := theme.Views{
 		Window:     theme.ViewNode{Padding: theme.ViewEdges{Top: dip(winPad), Right: dip(winPad), Bottom: dip(winPad), Left: dip(winPad)}, Border: theme.ViewBorder{Radius: dip(8)}},
 		PreeditBar: theme.ViewNode{Padding: theme.ViewEdges{Top: dip(3), Right: dip(8), Bottom: dip(3), Left: dip(8)}, Border: theme.ViewBorder{Radius: dip(4)}},             // 上下 3：条高=内容18+6=24
 		Item:       theme.ViewNode{Padding: theme.ViewEdges{Top: dip(7), Right: dip(itemPad), Bottom: dip(7), Left: dip(itemPad)}, Border: theme.ViewBorder{Radius: dip(4)}}, // 上下 7：行高=内容18+14=32（行高现由 item 上下 padding 决定）
 		Index:      theme.ViewNode{FontSize: ip(-4), Padding: theme.ViewEdges{Top: dip(2), Bottom: dip(2), Left: dip(2), Right: dip(2)}},                                     // 圆圈：字号 base-4，直径=字号+上下padding
 		Text:       theme.ViewNode{Margin: theme.ViewEdges{Left: dip(4)}},
 		Comment:    theme.ViewNode{FontSize: ip(-4), Margin: theme.ViewEdges{Left: dip(8)}},
-		AccentBar:  theme.ViewNode{},
-		FooterBar:  theme.ViewNode{FontSize: ip(-4)},
-		Metrics: &theme.ViewMetrics{
-			ItemSpacing: dip(12), BandGap: dip(4), ShadowOffset: dip(2),
-			AccentBar: &theme.AccentBarMetrics{Width: dip(3), Offset: dip(1), HeightRatio: fp(0.6)},
-		},
+		// V3-D：列表级几何归位到节点（candidate_list.gap/band_gap、window.shadow、accent_bar 几何）。
+		CandidateList: theme.ViewNode{Gap: dip(12), BandGap: dip(4)},
+		AccentBar:     theme.ViewNode{Width: dip(3), Offset: dip(1), HeightRatio: fp(0.6)},
+		FooterBar:     theme.ViewNode{FontSize: ip(-4)},
 	}
+	v.Window.Shadow = &theme.ViewShadowSpec{OffsetX: dip(2), OffsetY: dip(2)}
+	return v
 }
 
 // themePathPalette 返回内联候选窗调色板（与 parityConfig 颜色一致，便于对照）。
+// v3：颜色全部扁平进 Tokens（候选窗节点经 ${token} 引用消费）。
 func themePathPalette() theme.ResolvedPalette {
+	tokens := map[string]color.Color{
+		"bg":             color.RGBA{255, 255, 255, 255},
+		"border":         color.RGBA{194, 198, 203, 255},
+		"text":           color.RGBA{31, 31, 31, 255},
+		"text_hint":      color.RGBA{150, 150, 150, 255},
+		"text_dim":       color.RGBA{100, 100, 100, 255},
+		"surface":        color.RGBA{240, 240, 240, 255},
+		"accent":         color.RGBA{66, 133, 244, 255},
+		"on_accent":      color.RGBA{255, 255, 255, 255},
+		"selection":      color.RGBA{210, 228, 255, 255},
+		"selection_text": color.RGBA{31, 31, 31, 255},
+		"hover":          color.RGBA{230, 240, 255, 255},
+	}
 	return theme.ResolvedPalette{
-		Shadow: color.RGBA{0, 0, 0, 15},
-		CandidateWindow: theme.ResolvedCandidateWindowPalette{
-			Background:  color.RGBA{255, 255, 255, 255},
-			Border:      color.RGBA{194, 198, 203, 255},
-			Text:        color.RGBA{31, 31, 31, 255},
-			Comment:     color.RGBA{150, 150, 150, 255},
-			IndexBg:     color.RGBA{66, 133, 244, 255},
-			IndexText:   color.RGBA{255, 255, 255, 255},
-			HoverBg:     color.RGBA{230, 240, 255, 255},
-			SelectedBg:  color.RGBA{210, 228, 255, 255},
-			PreeditBg:   color.RGBA{240, 240, 240, 255},
-			PreeditText: color.RGBA{100, 100, 100, 255},
-			AccentBar:   color.RGBA{0, 120, 212, 255},
-		},
+		Shadow:   color.RGBA{0, 0, 0, 15},
+		Tokens:   tokens,
+		Bg:       tokens["bg"],
+		Surface:  tokens["surface"],
+		Border:   tokens["border"],
+		Text:     tokens["text"],
+		TextDim:  tokens["text_dim"],
+		TextHint: tokens["text_hint"],
+		Accent:   tokens["accent"],
+		OnAccent: tokens["on_accent"],
 	}
 }
 

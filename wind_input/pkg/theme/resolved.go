@@ -6,7 +6,6 @@ import "image/color"
 // P5 起为渲染层唯一解析结果来源（adapter/ResolvedTheme/v2 已退役）。
 type ResolvedV25 struct {
 	Meta     ThemeMeta
-	Layout   ResolvedLayout
 	Palette  ResolvedPalette
 	Views    *Views           // 盒模型 View 外观（v2.6 P2）；nil=主题未提供 views，渲染器用合成桥
 	Behavior ResolvedBehavior // 行为配置（v2.6 P6）：defaultBehavior ⊕ 主题 behavior（用户 override 在 ui/config 层）
@@ -16,25 +15,16 @@ type ResolvedV25 struct {
 	Resources map[string]string
 }
 
-// ResolvedLayout layout 的解析形态（与 LayoutSchema 同形，标量类型不变）。
-// P7-5：候选窗几何/序号/强调条/行高已全部归口 views/behavior，layout 不再承载候选窗，仅剩其它窗口。
-type ResolvedLayout struct {
-	Density string
-	Scale   float64
-
-	Toolbar   ToolbarLayout
-	Status    StatusLayout
-	Tooltip   TooltipLayout
-	PopupMenu PopupMenuLayout
-	Toast     ToastLayout
-}
-
-// ResolvedPalette palette 的解析形态，所有颜色已 ParseColor 完成
+// ResolvedPalette palette 的解析形态，所有颜色已逐 token 在 isDark 环境下递归求值 + ParseColor 完成。
+//
+// v3（颜色系统 v3 化）：删 5 个嵌套窗口色组（candidate/menu/tooltip/status/toast），
+// 全部颜色扁平进 Tokens；保留顶层语义便捷字段（从 Tokens 镜像填充，供 internal/ui 既有读法）；
+// 保留 ResolvedToolbarPalette（其 13 字段从 Tokens["toolbar_*"] 填充，使 viewbox_toolbar 消费最小改动）。
 type ResolvedPalette struct {
 	IsDark  bool
 	Primary color.Color
 
-	// 顶层语义色
+	// 顶层语义便捷字段（从 Tokens 镜像；供 internal/ui 既有字段读法）
 	Bg       color.Color
 	Surface  color.Color
 	Border   color.Color
@@ -45,27 +35,12 @@ type ResolvedPalette struct {
 	OnAccent color.Color
 	Shadow   color.Color
 
-	CandidateWindow ResolvedCandidateWindowPalette
-	Toolbar         ResolvedToolbarPalette
-	PopupMenu       ResolvedPopupMenuPalette
-	Tooltip         ResolvedTooltipPalette
-	Status          ResolvedStatusPalette
-	Toast           ResolvedToastPalette
-}
+	// Tokens 全部解析后颜色 token（顶层语义 + selection/hover + 功能前缀 token）。
+	// candidate_views / other_views 的 token resolver 统一查此表。
+	Tokens map[string]color.Color
 
-type ResolvedCandidateWindowPalette struct {
-	Background   color.Color
-	Border       color.Color
-	Text         color.Color
-	Comment      color.Color
-	IndexBg      color.Color
-	IndexText    color.Color
-	HoverBg      color.Color
-	SelectedBg   color.Color
-	SelectedText color.Color
-	PreeditBg    color.Color
-	PreeditText  color.Color
-	AccentBar    color.Color
+	// Toolbar 保留（颜色来源仍是 toolbar_* token），viewbox_toolbar 经此消费。
+	Toolbar ResolvedToolbarPalette
 }
 
 type ResolvedToolbarPalette struct {
@@ -82,30 +57,4 @@ type ResolvedToolbarPalette struct {
 	SettingsBg       color.Color
 	SettingsIcon     color.Color
 	SettingsHole     color.Color
-}
-
-type ResolvedPopupMenuPalette struct {
-	Background color.Color
-	Border     color.Color
-	Text       color.Color
-	Disabled   color.Color
-	HoverBg    color.Color
-	HoverText  color.Color
-	Separator  color.Color
-}
-
-type ResolvedTooltipPalette struct {
-	Background color.Color
-	Text       color.Color
-}
-
-type ResolvedStatusPalette struct {
-	Background color.Color
-	Border     color.Color
-	Text       color.Color
-}
-
-type ResolvedToastPalette struct {
-	Background color.Color
-	Text       color.Color
 }

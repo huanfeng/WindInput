@@ -9,18 +9,18 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// TestResolveTooltipColors token 映射 Palette.Tooltip。
+// TestResolveTooltipColors token 映射 tooltip_* 功能 token（v3）。
 func TestResolveTooltipColors(t *testing.T) {
 	bg := color.RGBA{11, 22, 33, 255}
 	txt := color.RGBA{210, 210, 210, 255}
 	rv := &theme.ResolvedV25{
-		Palette: theme.ResolvedPalette{Tooltip: theme.ResolvedTooltipPalette{Background: bg, Text: txt}},
-		Views:   &theme.Views{Tooltip: &theme.ViewNode{Background: theme.ViewFill{Color: "${background}"}, Color: "${text}"}},
+		Palette: theme.ResolvedPalette{Tokens: map[string]color.Color{"tooltip_bg": bg, "tooltip_text": txt}},
+		Views:   &theme.Views{Tooltip: &theme.ViewNode{Background: theme.ViewFill{Color: "${tooltip_bg}"}, Color: "${tooltip_text}"}},
 	}
 	w := &TooltipWindow{resolvedV25: rv}
 	node := w.resolveTooltipNode()
 	if node.BgColor != color.Color(bg) || node.TextColor != color.Color(txt) {
-		t.Fatalf("tooltip 颜色应映射 Palette.Tooltip, got %+v", node)
+		t.Fatalf("tooltip 颜色应映射 tooltip_* token, got %+v", node)
 	}
 }
 

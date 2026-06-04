@@ -43,7 +43,8 @@ func (r *ToolbarRenderer) SetTheme(rv *theme.ResolvedV25) {
 // getTooltipColors returns tooltip colors from theme or defaults（工具栏内悬停提示，复用 Palette.Tooltip）
 func (r *ToolbarRenderer) getTooltipColors() (bgColor, textColor, borderColor color.Color) {
 	if r.resolvedV25 != nil {
-		return r.resolvedV25.Palette.Tooltip.Background, r.resolvedV25.Palette.Tooltip.Text, color.RGBA{77, 89, 107, 255}
+		t := r.resolvedV25.Palette.Tokens
+		return t["tooltip_bg"], t["tooltip_text"], color.RGBA{77, 89, 107, 255}
 	}
 	return color.RGBA{38, 46, 56, 242}, color.RGBA{242, 242, 242, 255}, color.RGBA{77, 89, 107, 255}
 }
@@ -78,9 +79,9 @@ func (r *ToolbarRenderer) paintGrip(dc *gg.Context, rect image.Rectangle, scale 
 	cx := float64(rect.Min.X) + float64(rect.Dx())/2
 	cy := float64(rect.Min.Y) + float64(rect.Dy())/2
 	startY := cy - dotGap
-	for row := 0; row < 3; row++ {
+	for row := range 3 {
 		y := startY + float64(row)*dotGap
-		for col := 0; col < 2; col++ {
+		for col := range 2 {
 			x := cx - dotGap/2 + float64(col)*dotGap
 			dc.DrawCircle(x, y, dotSize/2)
 			dc.Fill()
@@ -148,7 +149,7 @@ func (r *ToolbarRenderer) paintGear(dc *gg.Context, rect image.Rectangle, scale 
 
 	dc.SetColor(rtv.SettingsIcon)
 	teeth := 8
-	for i := 0; i < teeth; i++ {
+	for i := range teeth {
 		angle := float64(i) * 360.0 / float64(teeth)
 		dc.Push()
 		dc.RotateAbout(radians(angle), centerX, centerY)

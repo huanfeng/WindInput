@@ -95,10 +95,7 @@ func TestResolveV25_BehaviorDefault(t *testing.T) {
 	tmp, cleanup := setupTestThemes(t)
 	defer cleanup()
 	m := makeTestManager(tmp)
-	var lm, pm map[string]any
-	_ = yaml.Unmarshal([]byte(sampleLayoutYAML), &lm)
-	_ = yaml.Unmarshal([]byte(samplePaletteYAML), &pm)
-	th := &Theme{Meta: ThemeMeta{Name: "t"}, Layout: lm, Palette: pm}
+	th := loadMerged(t, m, "test-base")
 	rv, err := m.ResolveV25(th, false, tmp)
 	if err != nil {
 		t.Fatalf("ResolveV25: %v", err)
@@ -112,11 +109,9 @@ func TestResolveV25_BehaviorOverride(t *testing.T) {
 	tmp, cleanup := setupTestThemes(t)
 	defer cleanup()
 	m := makeTestManager(tmp)
-	var lm, pm map[string]any
-	_ = yaml.Unmarshal([]byte(sampleLayoutYAML), &lm)
-	_ = yaml.Unmarshal([]byte(samplePaletteYAML), &pm)
 	fs := 20
-	th := &Theme{Meta: ThemeMeta{Name: "t"}, Layout: lm, Palette: pm, Behavior: &Behavior{FontSize: &fs}}
+	th := loadMerged(t, m, "test-base")
+	th.Behavior = &Behavior{FontSize: &fs}
 	rv, err := m.ResolveV25(th, false, tmp)
 	if err != nil {
 		t.Fatalf("ResolveV25: %v", err)

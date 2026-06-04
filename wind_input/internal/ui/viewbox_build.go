@@ -145,7 +145,7 @@ func blendColor(base, over color.Color, overAlpha uint32) color.Color {
 
 // itemStateFor 选取候选项当前要应用的状态 patch（P7-D）：selected 优先于 hover；
 // 均不命中返回 nil（沿用基态）。disabled 候选项暂无运行时触发器，不在此选取（schema 预留）。
-func itemStateFor(item theme.RVNode, selected, hover bool) *theme.RVState {
+func itemStateFor(item theme.RVNode, selected, hover bool) *theme.RVNode {
 	if selected {
 		return item.Selected
 	}
@@ -156,7 +156,7 @@ func itemStateFor(item theme.RVNode, selected, hover bool) *theme.RVState {
 }
 
 // stateBg 取状态 patch 的底色（nil-safe）；用于不需要位图/边框的轻量场景（如翻页按钮 hover）。
-func stateBg(st *theme.RVState) color.Color {
+func stateBg(st *theme.RVNode) color.Color {
 	if st != nil {
 		return st.BgColor
 	}
@@ -194,7 +194,7 @@ func (r *Renderer) elementFill(n theme.RVNode, selected, hover bool) Fill {
 
 // applyItemState 把状态 patch 应用到候选项 View：背景（高亮位图优先于底色）+ 边框覆盖（P7-D）。
 // 文字色/字重在行内构建文本 cell 时单独应用（整行统一），不在此处理。
-func (r *Renderer) applyItemState(item *View, st *theme.RVState, scale float64) {
+func (r *Renderer) applyItemState(item *View, st *theme.RVNode, scale float64) {
 	if st == nil {
 		return
 	}
@@ -202,7 +202,8 @@ func (r *Renderer) applyItemState(item *View, st *theme.RVState, scale float64) 
 	if st.BorderColor != nil {
 		item.Border.Color = st.BorderColor
 	}
-	if st.BorderWidth != nil {
+	// V3-D：BorderWidth 由 *Dimension 改 Dimension，零值=未设（沿用基态边框宽）。
+	if st.BorderWidth != (theme.Dimension{}) {
 		item.Border.Width = st.BorderWidth.Scaled(scale)
 	}
 }

@@ -33,8 +33,15 @@ func (r *Renderer) refreshResolvedViews() {
 	r.resolvedViews.FooterBar.FontSize = base + r.resolvedViews.FooterBar.FontSize*scale
 	r.resolvedViews.ModeLabel.FontSize = base + r.resolvedViews.ModeLabel.FontSize*scale
 	r.resolvedViews.ItemHeight = r.config.ItemHeight
-	// 竖排最大宽：用户运行时覆盖优先（cfg，目前仅测试设置），否则跟随主题 behavior.vertical_max_width。
-	r.resolvedViews.VerticalMaxWidth = pickF(r.config.VerticalMaxWidth, float64(r.resolvedV25.Behavior.VerticalMaxWidth))
+	// 竖排最大宽（哲学Y 双层覆盖）：
+	//   1. r.config.VerticalMaxWidth>0：运行时强制覆盖（目前仅测试设置），最高优先；
+	//   2. 否则 verticalMaxWidthFollowTheme ? 主题 behavior.vertical_max_width : config.UI 用户值。
+	themeVMW := float64(r.resolvedV25.Behavior.VerticalMaxWidth)
+	effVMW := themeVMW
+	if !r.verticalMaxWidthFollowTheme && r.userVerticalMaxWidth > 0 {
+		effVMW = r.userVerticalMaxWidth
+	}
+	r.resolvedViews.VerticalMaxWidth = pickF(r.config.VerticalMaxWidth, effVMW)
 }
 
 // newSharedDrawContext 创建 dc 与 img 实时共享同一像素缓冲的绘制上下文（独立窗口用，
@@ -42,6 +49,14 @@ func (r *Renderer) refreshResolvedViews() {
 // 注意：gogpu/gg 的 NewContext().Image() 返回快照而非实时视图，PaintTree 要求 dc 绘制
 // 实时反映到 img，故必须经 pixmap 的 ImageView 共享缓冲。
 func newSharedDrawContext(w, h int) (*gg.Context, *image.RGBA) {
+	// 纵深防御：尺寸为 0/负（异常主题导致几何塌缩）时 clamp 到 1×1，
+	// 避免 gg.NewPixmapFromBuffer panic「width and height must be > 0」（候选窗消失）。
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
 	pm := gg.NewPixmapFromBuffer(make([]byte, w*h*4), w, h)
 	return gg.NewContextForPixmap(pm), pm.ImageView()
 }
@@ -85,6 +100,13 @@ func (r *Renderer) renderTree(tree *candWindowTree) (*image.RGBA, *RenderResult)
 	}
 	w := root.Rect().Dx() + ext
 	h := root.Rect().Dy() + ext
+	// 纵深防御：root 几何塌缩（异常主题）时 clamp，避免 0 尺寸画布 panic 致候选窗消失。
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
 	dc, img := r.acquireDrawContext(w, h)
 	PaintTree(root, dc, img, td)
 	DrawDebugBanner(img)

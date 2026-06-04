@@ -670,6 +670,12 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 			fontSpec = cfg.UI.FontPath
 		}
 		c.uiManager.UpdateConfig(cfg.UI.FontSize, cfg.UI.FontSizeFollowTheme, fontSpec, cfg.UI.HideCandidateWindow)
+		// 主题 behavior 用户覆盖层（哲学Y；与 UpdateUIConfig 热更新对称，否则启动后失效直到下次热更新）
+		c.uiManager.SetBehaviorOverrides(
+			cfg.UI.AlwaysShowPager, cfg.UI.AlwaysShowPagerFollowTheme,
+			cfg.UI.ShowPageNumber, cfg.UI.ShowPageNumberFollowTheme,
+			cfg.UI.VerticalMaxWidth, cfg.UI.VerticalMaxWidthFollowTheme,
+		)
 		// Set candidate layout (horizontal/vertical)
 		if cfg.UI.CandidateLayout != "" {
 			c.uiManager.SetCandidateLayout(cfg.UI.CandidateLayout)
@@ -869,6 +875,7 @@ func (c *Coordinator) initThemeMode(cfg *config.Config) {
 		themeName = "default"
 	}
 	c.uiManager.LoadTheme(themeName)
+	c.notifyThemeFallbackIfAny()
 
 	// Start system theme watcher if following system mode
 	if themeStyle == config.ThemeStyleSystem {

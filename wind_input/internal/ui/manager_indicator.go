@@ -363,6 +363,15 @@ func (m *Manager) GetCurrentThemeID() string {
 	return m.themeManager.GetCurrentThemeID()
 }
 
+// ConsumeThemeFallbackNotice 转发 theme.Manager 的回退通知：返回上次 LoadTheme 因主题不合法
+// 回退默认主题时的原请求名（一次性），无回退返回 ""。供 coordinator 弹 Toast 提示。
+func (m *Manager) ConsumeThemeFallbackNotice() string {
+	if m.themeManager == nil {
+		return ""
+	}
+	return m.themeManager.ConsumeFallbackNotice()
+}
+
 // GetAvailableThemeInfos returns theme display info (ID + display name) for all available themes
 func (m *Manager) GetAvailableThemeInfos() []theme.ThemeDisplayInfo {
 	if m.themeManager == nil {

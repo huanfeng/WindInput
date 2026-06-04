@@ -42,9 +42,8 @@ func TestResourceRef_YAMLUnion(t *testing.T) {
 func TestViewShadowSpec_Resolve(t *testing.T) {
 	pal := testPalette()
 	v := defaultViews()
-	v.Metrics = &ViewMetrics{
-		Shadow: &ViewShadowSpec{OffsetX: dimp(3), OffsetY: dimp(5), Blur: dimp(8), Color: "#FF0000"},
-	}
+	// V3-D：shadow 归位到 window 节点。
+	v.Window.Shadow = &ViewShadowSpec{OffsetX: dimp(3), OffsetY: dimp(5), Blur: dimp(8), Color: "#FF0000"}
 	rv := ResolveCandidateViews(v, pal)
 	if rv.ShadowOffsetX.Value != 3 || rv.ShadowOffsetY.Value != 5 {
 		t.Errorf("structured shadow offset x/y 应解析: %v/%v", rv.ShadowOffsetX, rv.ShadowOffsetY)
@@ -59,19 +58,18 @@ func TestViewShadowSpec_Resolve(t *testing.T) {
 func TestResources_DarkVariantSwitch(t *testing.T) {
 	tmp, cleanup := setupTestThemes(t)
 	defer cleanup()
-	themeYAML := `meta: {name: "v25-res"}
-layout: test-layout
-palette: test-palette
+	themeYAML := `meta: {name: "v3-res"}
+base: test-base
 resources:
   panel: {light: "light-panel.png", dark: "dark-panel.png"}
   mark: "mark.png"
 `
-	dir := filepath.Join(tmp, "v25-res")
+	dir := filepath.Join(tmp, "v3-res")
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, "theme.yaml"), []byte(themeYAML), 0o644)
 
 	m := &Manager{themeDirs: []string{tmp}}
-	if err := m.LoadTheme("v25-res"); err != nil {
+	if err := m.LoadTheme("v3-res"); err != nil {
 		t.Fatal(err)
 	}
 	light := m.GetResolvedV25()

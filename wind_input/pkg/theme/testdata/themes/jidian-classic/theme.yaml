@@ -5,10 +5,9 @@ meta:
   order: 2
 
 # P7-C 验收样例：以九宫格背景图为主体的位图皮肤。
-# 复用 compact-horizontal 布局（其它窗口）+ windy-blue 调色板；核心在 views.window.background.image。
+# 复用 _base 基础主题（颜色 colors + 候选窗几何）；核心在 views.window.background.image。
 # 背景图 panel.png 由 tools 生成（64x64：2px 蓝边 + 浅蓝竖向渐变，slice=8 保四角清晰）。
-layout: compact-horizontal
-palette: windy-blue
+base: _base
 
 # 顶层资源注册表（P7-C / D5）：名→路径（相对 theme.yaml），views 里按 ref 引用。
 resources:
@@ -22,13 +21,15 @@ views:
     # 九宫格背景图：纯渐变填充，四角随 slice 保持原样、四边/中心拉伸贴合候选窗尺寸。
     # 边框/圆角由 View 提供（引擎裁剪），位图只负责填充——避免硬边被圆角裁出缺角。
     background:
-      color: "${background}" # 图加载失败时的兜底底色
+      color: "${bg}" # 图加载失败时的兜底底色
       image:
         ref: panel
         mode: nine_slice
         slice: {top: 8, right: 8, bottom: 8, left: 8}
     border: {radius: 8, width: 1, color: "${border}"} # 引擎画圆角边框，位图渐变裁进其内
     padding: {top: 8, right: 10, bottom: 8, left: 10}
+    # P7-E 结构化阴影：offset_x/y + color 已实现（blur 预留、暂不渲染）。V3-D 归位到 window 节点。
+    shadow: {offset_x: 3, offset_y: 4, blur: 8, color: "${shadow}"}
     # 装饰层（P7-C2 / D4）：右下角半透明水印，z>0 覆盖在内容之上。
     # 注意 offset 是屏幕平移(+x 右/+y 下)：bottom-right 锚点要内缩须用负偏移。
     layers:
@@ -36,7 +37,7 @@ views:
   preedit_bar:
     padding: {left: 8, right: 8}
     background: {color: "transparent"} # 透明：让窗口背景图从上到下整窗透出（位图皮肤验收）
-    color: "${preedit_text}"
+    color: "${text_dim}"
   item:
     padding: {left: 8, right: 10}
     border: {radius: 4}
@@ -44,31 +45,28 @@ views:
     # 位图加载失败时 color 作兜底底色。
     selected:
       background:
-        color: "${selected_bg}"
+        color: "${selection}"
         image: {ref: sel, mode: stretch}
       color: "#FFFFFF"
       font_weight: 600
-    hover: {background: {color: "${hover_bg}"}}
+    hover: {background: {color: "${hover}"}}
   index:
-    color: "${index_text}"
-    background: {color: "${index_bg}", shape: none} # 极点风格：纯数字序号，无圆背景
+    color: "${on_accent}"
+    background: {color: "${accent}", shape: none} # 极点风格：纯数字序号，无圆背景
   text:
     margin: {left: 4}
     color: "${text}"
   comment:
     margin: {left: 6}
-    color: "${comment}"
+    color: "${text_hint}"
   accent_bar:
+    enabled: true       # 选中候选左侧蓝色强调条（几何归位至本节点）
+    width: 3
     background: {color: "${accent}"}
-  metrics:
-    accent_bar: {enabled: true, width: 3} # 选中候选左侧蓝色强调条
-    # P7-E 结构化阴影：offset_x/y + color 已实现（blur 预留、暂不渲染）。
-    shadow: {offset_x: 3, offset_y: 4, blur: 8, color: "${shadow}"}
   # P8 切片6 验收：状态泡/Tooltip 也吃九宫格背景图 + 右下角角标水印层（复用 panel/mark）。
-  # ⚠️ 底色必须用「不透明 + 与浅色 panel 同调」的颜色，不能用 ${background}（深灰半透明）：
+  # ⚠️ 底色必须用「不透明 + 与浅色 panel 同调」的颜色，不能用半透明 token：
   # 否则圆角抗锯齿边缘会透出深色底色，形成一圈深色毛边（blendOver 用底色 alpha 门控背景图所致，
   # 候选窗用不透明白底即无此问题）。故这里用浅蓝不透明 hex；文字相应改深色保证可读。
-  # status/tooltip 颜色 token 仅认 ${background}/${text}（不认 ${border}），自定义色用 hex。
   status:
     background:
       color: "#EAF1FCFF" # 不透明浅蓝（同调 panel，消除圆角深色毛边）；亦作图加载失败兜底
@@ -86,36 +84,36 @@ views:
     layers:
       - {ref: mark, z: 1, anchor: bottom-right, offset: {x: -5, y: -5}, size: {w: 14, h: 14}, opacity: 0.8}
   toolbar:
-    background: {color: "${background}"}
-    border: {color: "${border}"}
-    grip: {color: "${grip}"}
+    background: {color: "${toolbar_background}"}
+    border: {color: "${toolbar_border}"}
+    grip: {color: "${toolbar_grip}"}
     button:
-      background: {color: "${button_bg}"}
-      color: "${button_text}"
+      background: {color: "${toolbar_full_width_off_bg}"}
+      color: "${toolbar_full_width_off_text}"
       mode:
-        chinese: {background: {color: "${mode_cn_bg}"}}
-        english: {background: {color: "${mode_en_bg}"}}
+        chinese: {background: {color: "${toolbar_mode_chinese_bg}"}}
+        english: {background: {color: "${toolbar_mode_english_bg}"}}
     settings:
-      icon: {color: "${settings_icon}"}
-      hole: {color: "${settings_hole}"}
+      icon: {color: "${toolbar_settings_icon}"}
+      hole: {color: "${toolbar_settings_hole}"}
   # P8 切片3 schema（root/item/separator 三具名 ViewNode；旧扁平 menu.background/hover 写法已失效）
   # + 切片6：菜单 root 吃九宫格背景图 + 右下角角标水印层。
   menu:
     root:
       background:
-        color: "${background}" # 图加载失败兜底底色
+        color: "${menu_bg}" # 图加载失败兜底底色
         image: {ref: panel, mode: nine_slice, slice: {top: 8, right: 8, bottom: 8, left: 8}}
-      border: {color: "${border}", radius: 6, width: 1}
+      border: {color: "${menu_border}", radius: 6, width: 1}
       layers:
         - {ref: mark, z: 1, anchor: bottom-right, offset: {x: -6, y: -6}, size: {w: 16, h: 16}, opacity: 0.8}
     item:
-      color: "${text}"
+      color: "${menu_text}"
       hover:
-        background: {color: "${hover_bg}"}
-        color: "${hover_text}"
-      disabled: {color: "${disabled}"}
+        background: {color: "${menu_hover_bg}"}
+        color: "${menu_hover_text}"
+      disabled: {color: "${menu_disabled}"}
     separator:
-      background: {color: "${separator}"}
+      background: {color: "${menu_separator}"}
   # P8 切片6 验收：toast 通知也吃九宫格背景图 + 角标水印（原本无 toast 节点 → 走默认深灰底）。
   # 同 status/tooltip：底色用不透明浅蓝同调 panel，消除圆角深色毛边（toast 还经 forceAlphaOpaque）。
   toast:

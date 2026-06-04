@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"io"
 	"os"
 	"path/filepath"
@@ -231,7 +232,7 @@ func (a *App) GetAvailableThemes() ([]ThemeInfo, error) {
 			if t != nil {
 				info.Author = t.Meta.Author
 				info.Version = t.Meta.Version
-				info.HasVariants = t.HasV25Schema() // v2.5 主题的 palette 恒含 light/dark 变体
+				info.HasVariants = t.HasV3Schema() // v3 主题的 colors 恒含亮暗（逐值 LightDark）
 				if t.Meta.Name != "" {
 					info.DisplayName = t.Meta.Name
 				}
@@ -283,7 +284,15 @@ func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]i
 	}
 
 	// 把 color.Color 转为 #RRGGBBAA 字符串供前端消费（P5：直接读 ResolvedV25.Palette/Layout）
-	cwc := rv.Palette.CandidateWindow
+	pal := rv.Palette
+	// hexTok 优先取 v3 colors token，缺失回退便捷语义色（default 多为转发、走 fallback；
+	// msime 等有特有色则命中 token，保证预览与渲染一致）。
+	hexTok := func(key string, fallback color.Color) string {
+		if c := pal.Tokens[key]; c != nil {
+			return theme.ColorToHex(c)
+		}
+		return theme.ColorToHex(fallback)
+	}
 	tbc := rv.Palette.Toolbar
 	// 序号样式/标签 P7-5 起归口 views.index（背景形状 circle|none + labels）；rv.Views 生产路径恒非 nil。
 	indexStyle := "text"
@@ -302,17 +311,17 @@ func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]i
 			"author":  t.Meta.Author,
 		},
 		"candidate_window": map[string]string{
-			"background_color":  theme.ColorToHex(cwc.Background),
-			"border_color":      theme.ColorToHex(cwc.Border),
-			"text_color":        theme.ColorToHex(cwc.Text),
-			"index_color":       theme.ColorToHex(cwc.IndexText),
-			"index_bg_color":    theme.ColorToHex(cwc.IndexBg),
-			"hover_bg_color":    theme.ColorToHex(cwc.HoverBg),
-			"selected_bg_color": theme.ColorToHex(cwc.SelectedBg),
-			"input_bg_color":    theme.ColorToHex(cwc.PreeditBg),
-			"input_text_color":  theme.ColorToHex(cwc.PreeditText),
-			"comment_color":     theme.ColorToHex(cwc.Comment),
-			"shadow_color":      theme.ColorToHex(rv.Palette.Shadow),
+			"background_color":  hexTok("bg", pal.Bg),
+			"border_color":      hexTok("border", pal.Border),
+			"text_color":        hexTok("text", pal.Text),
+			"index_color":       hexTok("index_text", pal.OnAccent),
+			"index_bg_color":    hexTok("index_bg", pal.Accent),
+			"hover_bg_color":    hexTok("hover", pal.Accent),
+			"selected_bg_color": hexTok("selection", pal.Accent),
+			"input_bg_color":    hexTok("preedit_bg", pal.Surface),
+			"input_text_color":  hexTok("preedit_text", pal.TextDim),
+			"comment_color":     hexTok("comment", pal.TextHint),
+			"shadow_color":      theme.ColorToHex(pal.Shadow),
 		},
 		"toolbar": map[string]string{
 			"background_color":        theme.ColorToHex(tbc.Background),
@@ -331,7 +340,7 @@ func (a *App) GetThemePreview(themeName string, themeStyle string) (map[string]i
 		"style": map[string]interface{}{
 			"index_style":  indexStyle,
 			"index_labels": theme.BuildIndexLabelsFromSlots(indexLabels),
-			"is_v25":       t.HasV25Schema(),
+			"is_v25":       t.HasV3Schema(),
 		},
 		"is_dark": map[string]bool{
 			"active": isDark,

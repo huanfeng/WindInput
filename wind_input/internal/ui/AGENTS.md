@@ -1,7 +1,9 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-06-02 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-06-04 -->
 
 # internal/ui
+
+> **主题颜色 v3（2026-06-04）**：`ResolvedPalette` 删 5 个窗口色组（CandidateWindow/PopupMenu/Tooltip/Status/Toast），颜色全部扁平进 `Palette.Tokens map[string]color.Color`（保留顶层语义便捷字段 `Bg/Text/Accent…` + `ResolvedToolbarPalette`）。本层消费改动最小：直接读窗口色组的两处改查 `Tokens`——`renderer.go getModeIndicatorColors`→`Tokens["toast_bg"/"toast_text"]`、`toolbar_renderer.go getTooltipColors`→`Tokens["tooltip_bg"/"tooltip_text"]`；`viewbox_toolbar.go resolveToolbarViews` 的 `${token}` 名改 `toolbar_*`。状态泡/Tooltip/菜单/Toast 仍走 `theme.ResolveXxxViews`（其内部默认色已改取功能 token），消费方法名不变。`pal.Toolbar`（ResolvedToolbarPalette 保留）不变。
 
 ## Purpose
 跨平台 UI 层. 历史上仅 Windows 原生渲染, 经跨平台重构后拆为:

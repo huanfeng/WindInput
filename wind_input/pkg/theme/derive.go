@@ -77,35 +77,46 @@ func pickOnColor(c color.Color) string {
 	return "#FFFFFF"
 }
 
-// applyDerivedToVariant 用派生值填充 PaletteVariant 中未显式给出的语义色字段。
-// 用户显式给值的字段不变。
-func applyDerivedToVariant(v *PaletteVariant, d derivedSemantics) {
-	if v.Bg == "" {
-		v.Bg = d.Bg
+// applyDeriveToTokens 用 primary 派生的语义色填充 colors token 表中未显式给出的语义 token（维度①）。
+// 用户显式给值的 token 不变。light/dark 两分支各自派生（同 primary、不同 isDark）。
+// 仅当 derive 启用时由调用方调用。
+func applyDeriveToTokens(tokens map[string]Color, primary, algorithm string) {
+	dl := derivePalette(primary, algorithm, false)
+	dd := derivePalette(primary, algorithm, true)
+	sem := []struct {
+		name         string
+		light, dark0 string
+	}{
+		{"bg", dl.Bg, dd.Bg},
+		{"surface", dl.Surface, dd.Surface},
+		{"border", dl.Border, dd.Border},
+		{"text", dl.Text, dd.Text},
+		{"text_dim", dl.TextDim, dd.TextDim},
+		{"text_hint", dl.TextHint, dd.TextHint},
+		{"accent", dl.Accent, dd.Accent},
+		{"on_accent", dl.OnAccent, dd.OnAccent},
+		{"shadow", dl.Shadow, dd.Shadow},
 	}
-	if v.Surface == "" {
-		v.Surface = d.Surface
+	for _, s := range sem {
+		if _, exists := tokens[s.name]; exists {
+			continue
+		}
+		if s.light == "" && s.dark0 == "" {
+			continue
+		}
+		tokens[s.name] = Color{Light: s.light, Dark: s.dark0}
 	}
-	if v.Border == "" {
-		v.Border = d.Border
-	}
-	if v.Text == "" {
-		v.Text = d.Text
-	}
-	if v.TextDim == "" {
-		v.TextDim = d.TextDim
-	}
-	if v.TextHint == "" {
-		v.TextHint = d.TextHint
-	}
-	if v.Accent == "" {
-		v.Accent = d.Accent
-	}
-	if v.OnAccent == "" {
-		v.OnAccent = d.OnAccent
-	}
-	if v.Shadow == "" {
-		v.Shadow = d.Shadow
+}
+
+// applyAutoDarkToTokens 为未显式给 dark 分支的 token 用其 light 分支补 dark（维度②，auto_dark）。
+// 默认不启用（windy-blue/msime 都显式给了 dark）。当前实现：dark 直接复用 light（占位），
+// 与「先合并后求值」管线对齐——更精细的 light→dark 派生算法作为后续。
+func applyAutoDarkToTokens(tokens map[string]Color) {
+	for name, c := range tokens {
+		if c.Dark == "" && c.Light != "" {
+			c.Dark = c.Light
+			tokens[name] = c
+		}
 	}
 }
 

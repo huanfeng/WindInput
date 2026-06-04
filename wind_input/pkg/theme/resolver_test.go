@@ -3,45 +3,27 @@ package theme
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
-// 完整 layout/palette yaml 文本 — 内联与外链测试共用
-// P7-5：候选窗已不在 layout，fixture 改用其它窗口字段（toolbar/tooltip）验证 layout 合并。
-const sampleLayoutYAML = `
-meta: {name: "test-layout", version: "1.0"}
-density: compact
-scale: 1.0
-toolbar:
-  item_gap: 3
-tooltip:
-  max_width: 500
+// v3-C：外链 _layouts/_palettes + Overrides 机制已删，改为 base 单链继承内联块。
+// 本测试构造一个 base 主题（test-base）+ 派生主题，覆盖继承 / 求值 / 暗色。
+
+// 共享 base 主题：colors（含 derive）+ views（候选项圆角，验证 views 继承）。
+// V3-D：layout/density 几何块已删，继承覆盖改用 colors/views 验证。
+const sampleBaseThemeYAML = `meta: {name: "test-base", version: "1.0"}
+colors:
+  primary: "#4285F4"
+  derive: {enabled: true, algorithm: hsl-shift}
+  bg:        { light: "#FFFFFF", dark: "#2D2D2D" }
+  text:      { light: "#1E1E1E", dark: "#E0E0E0" }
+  selection: "${primary}"
+views:
+  item:
+    border: {radius: 7}
 `
 
-const samplePaletteYAML = `
-meta: {name: "test-palette", version: "1.0"}
-primary: "#4285F4"
-derive: {enabled: true, algorithm: hsl-shift}
-light:
-  bg: "#FFFFFF"
-  text: "#1E1E1E"
-  candidate_window:
-    background: "${bg}"
-    text: "${text}"
-    selected_bg: "${primary}"
-dark:
-  bg: "#2D2D2D"
-  text: "#E0E0E0"
-  candidate_window:
-    background: "${bg}"
-    text: "${text}"
-    selected_bg: "${primary}"
-`
-
-// 创建一个临时主题目录结构
+// 创建一个临时主题目录结构（写入 base 主题）。
 func setupTestThemes(t *testing.T) (themesDir string, cleanup func()) {
 	t.Helper()
 	tmp, err := os.MkdirTemp("", "themetest")
@@ -58,8 +40,7 @@ func setupTestThemes(t *testing.T) (themesDir string, cleanup func()) {
 			t.Fatal(err)
 		}
 	}
-	mustWrite(filepath.Join(tmp, "_layouts", "test-layout.yaml"), sampleLayoutYAML)
-	mustWrite(filepath.Join(tmp, "_palettes", "test-palette.yaml"), samplePaletteYAML)
+	mustWrite(filepath.Join(tmp, "test-base", "theme.yaml"), sampleBaseThemeYAML)
 
 	return tmp, cleanup
 }
@@ -69,97 +50,48 @@ func makeTestManager(themesDir string) *Manager {
 	return &Manager{themeDirs: []string{themesDir}}
 }
 
-func TestResolveV25_External(t *testing.T) {
-	tmp, cleanup := setupTestThemes(t)
-	defer cleanup()
-	m := makeTestManager(tmp)
-
-	theme := &Theme{
-		Meta:    ThemeMeta{Name: "External"},
-		Layout:  "test-layout",
-		Palette: "test-palette",
-	}
-	r, err := m.ResolveV25(theme, false, tmp)
+// loadMerged 加载并 base 合并一个主题，返回合并后的 raw Theme（供测试直接 ResolveV25）。
+func loadMerged(t *testing.T, m *Manager, name string) *Theme {
+	t.Helper()
+	th, _, err := m.loadThemeFileWithDir(name)
 	if err != nil {
-		t.Fatalf("ResolveV25 external: %v", err)
+		t.Fatalf("loadThemeFileWithDir %s: %v", name, err)
 	}
-	if r.Layout.Toolbar.ItemGap != 3 {
-		t.Errorf("toolbar.item_gap want 3, got %d", r.Layout.Toolbar.ItemGap)
-	}
-	if r.Layout.Tooltip.MaxWidth != 500 {
-		t.Errorf("tooltip.max_width want 500, got %d", r.Layout.Tooltip.MaxWidth)
-	}
-	// density 基线填充
-	if r.Layout.Toolbar.Padding.Top == 0 {
-		t.Errorf("toolbar padding should be baseline-filled")
-	}
-	// palette 解析 + ${} 展开
-	if ColorToHexRGB(r.Palette.CandidateWindow.SelectedBg) != "#4285F4" {
-		t.Errorf("selected_bg should be primary, got %s", ColorToHexRGB(r.Palette.CandidateWindow.SelectedBg))
-	}
-	if ColorToHexRGB(r.Palette.CandidateWindow.Background) != "#FFFFFF" {
-		t.Errorf("background should be #FFFFFF, got %s", ColorToHexRGB(r.Palette.CandidateWindow.Background))
-	}
+	return th
 }
 
-func TestResolveV25_Inline(t *testing.T) {
+func TestResolveV25_Inherited(t *testing.T) {
 	tmp, cleanup := setupTestThemes(t)
 	defer cleanup()
 	m := makeTestManager(tmp)
 
-	// 内联：把 layout/palette 内容作为对象直接挂在 Theme 上
-	var layoutMap, paletteMap map[string]any
-	if err := yaml.Unmarshal([]byte(sampleLayoutYAML), &layoutMap); err != nil {
-		t.Fatal(err)
-	}
-	if err := yaml.Unmarshal([]byte(samplePaletteYAML), &paletteMap); err != nil {
-		t.Fatal(err)
-	}
-	theme := &Theme{
-		Meta:    ThemeMeta{Name: "Inline"},
-		Layout:  layoutMap,
-		Palette: paletteMap,
-	}
-	r, err := m.ResolveV25(theme, false, tmp)
+	// 派生主题：base = test-base，仅自带 behavior（颜色/几何全继承）。
+	derived := `meta: {name: "derived"}
+base: test-base
+`
+	dir := filepath.Join(tmp, "derived")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "theme.yaml"), []byte(derived), 0o644)
+
+	th := loadMerged(t, m, "derived")
+	r, err := m.ResolveV25(th, false, dir)
 	if err != nil {
-		t.Fatalf("ResolveV25 inline: %v", err)
+		t.Fatalf("ResolveV25: %v", err)
 	}
-	if r.Layout.Toolbar.ItemGap != 3 {
-		t.Errorf("inline toolbar.item_gap want 3, got %d", r.Layout.Toolbar.ItemGap)
+	// views 继承（V3-D：layout 几何块已删，改用 views 继承验证）：派生主题仅自带 behavior，
+	// item 圆角应从 base 的 views.item.border.radius=7 继承。
+	if r.Views == nil || r.Views.Item.Border.Radius == nil {
+		t.Fatalf("继承 views.item.border.radius 缺失")
 	}
-	if ColorToHexRGB(r.Palette.CandidateWindow.SelectedBg) != "#4285F4" {
-		t.Errorf("inline selected_bg want #4285F4, got %s", ColorToHexRGB(r.Palette.CandidateWindow.SelectedBg))
+	if got := r.Views.Item.Border.Radius.Value; got != 7 {
+		t.Errorf("继承 views.item.border.radius want 7, got %d", got)
 	}
-}
-
-func TestResolveV25_ExternalAndInlineEquivalent(t *testing.T) {
-	tmp, cleanup := setupTestThemes(t)
-	defer cleanup()
-	m := makeTestManager(tmp)
-
-	external := &Theme{Layout: "test-layout", Palette: "test-palette"}
-	rExt, err := m.ResolveV25(external, false, tmp)
-	if err != nil {
-		t.Fatal(err)
+	// colors 继承 + ${} 展开（selection = ${primary}）
+	if ColorToHexRGB(r.Palette.Tokens["selection"]) != "#4285F4" {
+		t.Errorf("selection should be primary, got %s", ColorToHexRGB(r.Palette.Tokens["selection"]))
 	}
-
-	var lm, pm map[string]any
-	_ = yaml.Unmarshal([]byte(sampleLayoutYAML), &lm)
-	_ = yaml.Unmarshal([]byte(samplePaletteYAML), &pm)
-	inline := &Theme{Layout: lm, Palette: pm}
-	rIn, err := m.ResolveV25(inline, false, tmp)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !reflect.DeepEqual(rExt.Layout, rIn.Layout) {
-		t.Errorf("layout 不等价:\nExt:%+v\nIn :%+v", rExt.Layout, rIn.Layout)
-	}
-	if ColorToHex(rExt.Palette.Bg) != ColorToHex(rIn.Palette.Bg) {
-		t.Errorf("palette.bg 不等价")
-	}
-	if ColorToHex(rExt.Palette.CandidateWindow.SelectedBg) != ColorToHex(rIn.Palette.CandidateWindow.SelectedBg) {
-		t.Errorf("palette.candidate_window.selected_bg 不等价")
+	if ColorToHexRGB(r.Palette.Bg) != "#FFFFFF" {
+		t.Errorf("bg should be #FFFFFF, got %s", ColorToHexRGB(r.Palette.Bg))
 	}
 }
 
@@ -168,8 +100,8 @@ func TestResolveV25_DarkMode(t *testing.T) {
 	defer cleanup()
 	m := makeTestManager(tmp)
 
-	theme := &Theme{Layout: "test-layout", Palette: "test-palette"}
-	r, err := m.ResolveV25(theme, true, tmp)
+	th := loadMerged(t, m, "test-base")
+	r, err := m.ResolveV25(th, true, tmp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,48 +110,72 @@ func TestResolveV25_DarkMode(t *testing.T) {
 	}
 }
 
-func TestResolveV25_Overrides(t *testing.T) {
+func TestResolveV25_UnknownBase(t *testing.T) {
 	tmp, cleanup := setupTestThemes(t)
 	defer cleanup()
 	m := makeTestManager(tmp)
 
-	theme := &Theme{
-		Layout:  "test-layout",
-		Palette: "test-palette",
-		Overrides: &Overrides{
-			Layout: map[string]any{
-				"toolbar": map[string]any{
-					"item_gap": 99,
-				},
-			},
-			Palette: map[string]any{
-				"light": map[string]any{
-					"candidate_window": map[string]any{
-						"selected_bg": "#FF0000",
-					},
-				},
-			},
-		},
-	}
-	r, err := m.ResolveV25(theme, false, tmp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Layout.Toolbar.ItemGap != 99 {
-		t.Errorf("overrides toolbar.item_gap want 99, got %d", r.Layout.Toolbar.ItemGap)
-	}
-	if ColorToHexRGB(r.Palette.CandidateWindow.SelectedBg) != "#FF0000" {
-		t.Errorf("overrides selected_bg want #FF0000, got %s", ColorToHexRGB(r.Palette.CandidateWindow.SelectedBg))
+	bad := `meta: {name: "bad"}
+base: nosuch-base
+`
+	dir := filepath.Join(tmp, "bad")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "theme.yaml"), []byte(bad), 0o644)
+
+	if _, _, err := m.loadThemeFileWithDir("bad"); err == nil {
+		t.Errorf("expected error for unknown base theme")
 	}
 }
 
-func TestResolveV25_UnknownLayoutID(t *testing.T) {
+// TestInheritResolveOrder 是 A 修正「先合并后求值」的回归守护：
+// base 给 primary + derive.enabled；派生主题仅覆盖 primary——断言派生主题的语义色
+// 基于**新 primary** 重新派生（而非沿用 base 旧派生值）。
+func TestInheritResolveOrder(t *testing.T) {
 	tmp, cleanup := setupTestThemes(t)
 	defer cleanup()
 	m := makeTestManager(tmp)
 
-	theme := &Theme{Layout: "nosuch", Palette: "test-palette"}
-	if _, err := m.ResolveV25(theme, false, tmp); err == nil {
-		t.Errorf("expected error for unknown layout id")
+	// base：只给 primary + 开启 derive（不显式给任何语义色，全靠派生）。
+	base := `meta: {name: "io-base"}
+colors:
+  primary: "#4285F4"
+  derive: {enabled: true, algorithm: hsl-shift}
+`
+	bdir := filepath.Join(tmp, "io-base")
+	_ = os.MkdirAll(bdir, 0o755)
+	_ = os.WriteFile(filepath.Join(bdir, "theme.yaml"), []byte(base), 0o644)
+
+	// 派生：仅换 primary（accent 应跟着变成新 primary）。
+	derived := `meta: {name: "io-derived"}
+base: io-base
+colors:
+  primary: "#FF0000"
+`
+	ddir := filepath.Join(tmp, "io-derived")
+	_ = os.MkdirAll(ddir, 0o755)
+	_ = os.WriteFile(filepath.Join(ddir, "theme.yaml"), []byte(derived), 0o644)
+
+	// base 自身：accent = 旧 primary。
+	bth := loadMerged(t, m, "io-base")
+	br, err := m.ResolveV25(bth, false, bdir)
+	if err != nil {
+		t.Fatalf("ResolveV25 base: %v", err)
+	}
+	if got := ColorToHexRGB(br.Palette.Accent); got != "#4285F4" {
+		t.Fatalf("base accent want #4285F4, got %s", got)
+	}
+
+	// 派生：accent 必须 = 新 primary #FF0000（证明 derive 在合并后基于新 primary 重跑）。
+	dth := loadMerged(t, m, "io-derived")
+	dr, err := m.ResolveV25(dth, false, ddir)
+	if err != nil {
+		t.Fatalf("ResolveV25 derived: %v", err)
+	}
+	if got := ColorToHexRGB(dr.Palette.Accent); got != "#FF0000" {
+		t.Errorf("派生主题只换 primary，accent 应基于新 primary 重新派生为 #FF0000, got %s "+
+			"（若为 #4285F4 说明 derive 误用 base 旧值——先求值后合并 bug）", got)
+	}
+	if got := ColorToHexRGB(dr.Palette.Primary); got != "#FF0000" {
+		t.Errorf("派生 primary want #FF0000, got %s", got)
 	}
 }

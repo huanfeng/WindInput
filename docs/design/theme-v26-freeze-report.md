@@ -2,7 +2,9 @@
 
 # WindInput v2.6 主题系统 — 评估报告 + 冻结契约
 
-> 状态：**候选窗 schema 已冻结（2026-06-02）**。冻结声明见 `theme-view-architecture.md`「⛔ v2.6 schema 冻结声明」；本文第四节为冻结契约字段面，第八节附扩展政策。
+> ⚠️ **已解冻 → v3 取代（2026-06-04）**：v2.5/v2.6 均未正式发布，主题 schema 转入破坏性重构 **v3**（结构归一 + 亮暗统一），权威 spec 见 `theme-schema-v3.md`。本报告作为 **v2.6 历史快照 + v3 回归基准的语义参照**保留；v3 全部切片完成后产出 `theme-v3-freeze-report.md` 重新冻结。下方 v2.6 契约内容仅供 v3 迁移对照，不再是当前约束。
+>
+> 状态（历史）：**候选窗 schema 曾冻结（2026-06-02）**。冻结声明见 `theme-view-architecture.md`「⛔ v2.6 schema 冻结声明」；本文第四节为冻结契约字段面，第八节附扩展政策。
 > 关联：`theme-view-architecture.md`（P0 设计 + 冻结声明）、`theme-view-p7-schema-completion.md`（P7 蓝图）、`pkg/theme/AGENTS.md`（实现现状）。
 
 ## 一、目标

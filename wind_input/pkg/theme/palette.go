@@ -1,14 +1,28 @@
 package theme
 
-// PaletteSchema 描述主题的颜色，与 v2.5 spec §五 1:1 对应。
-// 不含任何尺寸；尺寸由 LayoutSchema 描述。
-type PaletteSchema struct {
-	Meta    PaletteMeta  `yaml:"meta" json:"meta"`
-	Primary string       `yaml:"primary" json:"primary"`
-	Derive  DeriveConfig `yaml:"derive" json:"derive"`
+import (
+	"fmt"
 
-	Light PaletteVariant `yaml:"light" json:"light"`
-	Dark  PaletteVariant `yaml:"dark" json:"dark"`
+	"gopkg.in/yaml.v3"
+)
+
+// Color 是 v3 颜色 token 值：单值=明暗共用，{light,dark}=分设（见 lightdark.go）。
+// ColorScalar 形态："#RRGGBB[AA]" / "${tokenName}" / "transparent"。
+type Color = LightDark[string]
+
+// PaletteSchema 描述主题的颜色 token 提供者（v3「colors」块，见 docs/design/theme-schema-v3.md）。
+// 颜色全部扁平进 Tokens（值为 LightDark），不再有 light/dark 顶层分块、不再有嵌套窗口色组。
+//
+// 命名约定（落地细则）：
+//   - 顶层语义：primary / bg / surface / border / text / text_dim / text_hint / accent / on_accent / shadow
+//   - 候选窗特有色提升为语义：selection / selection_text / hover
+//   - 其它窗口特有色用功能前缀 token：menu_* / tooltip_* / status_* / toast_* / toolbar_*
+type PaletteSchema struct {
+	Meta     PaletteMeta      `yaml:"meta" json:"meta"`
+	Primary  string           `yaml:"primary" json:"primary"`
+	Derive   DeriveConfig     `yaml:"derive" json:"derive"`
+	AutoDark bool             `yaml:"auto_dark" json:"auto_dark"` // 维度②：未显式给 dark 的 token 由 light 派生（默认 false）
+	Tokens   map[string]Color `yaml:"-" json:"tokens"`            // 全部扁平颜色 token（自定义 UnmarshalYAML 填充）
 }
 
 // PaletteMeta 标识一个共享 palette 零件
@@ -17,96 +31,81 @@ type PaletteMeta struct {
 	Version string `yaml:"version" json:"version"`
 }
 
-// DeriveConfig 颜色派生配置
+// DeriveConfig 颜色派生配置（维度①：由 primary 派生缺失的语义色）
 type DeriveConfig struct {
 	Enabled   bool   `yaml:"enabled" json:"enabled"`
 	Algorithm string `yaml:"algorithm" json:"algorithm"` // hct | hsl-shift | none
 }
 
-// PaletteVariant 一个变体（light/dark）的完整颜色集
-type PaletteVariant struct {
-	// 顶层语义色
-	Bg       string `yaml:"bg" json:"bg"`
-	Surface  string `yaml:"surface" json:"surface"`
-	Border   string `yaml:"border" json:"border"`
-	Text     string `yaml:"text" json:"text"`
-	TextDim  string `yaml:"text_dim" json:"text_dim"`
-	TextHint string `yaml:"text_hint" json:"text_hint"`
-	Accent   string `yaml:"accent" json:"accent"`
-	OnAccent string `yaml:"on_accent" json:"on_accent"`
-	Shadow   string `yaml:"shadow" json:"shadow"`
-
-	// 组件覆盖（缺省回退到语义色）
-	CandidateWindow CandidateWindowPalette `yaml:"candidate_window" json:"candidate_window"`
-	Toolbar         ToolbarPalette         `yaml:"toolbar" json:"toolbar"`
-	PopupMenu       PopupMenuPalette       `yaml:"popup_menu" json:"popup_menu"`
-	Tooltip         TooltipPalette         `yaml:"tooltip" json:"tooltip"`
-	Status          StatusPalette          `yaml:"status" json:"status"`
-	Toast           ToastPalette           `yaml:"toast" json:"toast"`
+// 这些键在 colors 块里是特殊字段，不进 Tokens 表。
+var paletteReservedKeys = map[string]bool{
+	"meta":      true,
+	"primary":   true,
+	"derive":    true,
+	"auto_dark": true,
 }
 
-// CandidateWindowPalette 候选窗口色板
-type CandidateWindowPalette struct {
-	Background   string `yaml:"background" json:"background"`
-	Border       string `yaml:"border" json:"border"`
-	Text         string `yaml:"text" json:"text"`
-	Comment      string `yaml:"comment" json:"comment"`
-	IndexBg      string `yaml:"index_bg" json:"index_bg"`
-	IndexText    string `yaml:"index_text" json:"index_text"`
-	HoverBg      string `yaml:"hover_bg" json:"hover_bg"`
-	SelectedBg   string `yaml:"selected_bg" json:"selected_bg"`
-	SelectedText string `yaml:"selected_text" json:"selected_text"`
-	PreeditBg    string `yaml:"preedit_bg" json:"preedit_bg"`
-	PreeditText  string `yaml:"preedit_text" json:"preedit_text"`
-	AccentBar    string `yaml:"accent_bar" json:"accent_bar"` // 强调条颜色；空则用 ${accent}
+// UnmarshalYAML 把 colors 块解析为 v3 PaletteSchema：
+// 遍历 mapping，meta/primary/derive/auto_dark 抽出特殊处理，其余键 → Tokens（每值按 LightDark 解析）。
+func (p *PaletteSchema) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("palette/colors 必须为 mapping，got kind=%d", value.Kind)
+	}
+	p.Tokens = make(map[string]Color)
+	// mapping 子节点成对出现：key, value, key, value, ...
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		keyNode := value.Content[i]
+		valNode := value.Content[i+1]
+		key := keyNode.Value
+		switch key {
+		case "meta":
+			if err := valNode.Decode(&p.Meta); err != nil {
+				return fmt.Errorf("colors.meta: %w", err)
+			}
+		case "primary":
+			if err := valNode.Decode(&p.Primary); err != nil {
+				return fmt.Errorf("colors.primary: %w", err)
+			}
+		case "derive":
+			if err := valNode.Decode(&p.Derive); err != nil {
+				return fmt.Errorf("colors.derive: %w", err)
+			}
+		case "auto_dark":
+			if err := valNode.Decode(&p.AutoDark); err != nil {
+				return fmt.Errorf("colors.auto_dark: %w", err)
+			}
+		default:
+			if paletteReservedKeys[key] {
+				continue
+			}
+			var c Color
+			if err := valNode.Decode(&c); err != nil {
+				return fmt.Errorf("colors.%s: %w", key, err)
+			}
+			p.Tokens[key] = c
+		}
+	}
+	return nil
 }
 
-// ToolbarPalette 工具栏色板（字段对应 v2 ToolbarColors，去掉 _color 后缀）
-type ToolbarPalette struct {
-	Background       string `yaml:"background" json:"background"`
-	Border           string `yaml:"border" json:"border"`
-	Grip             string `yaml:"grip" json:"grip"`
-	ModeChineseBg    string `yaml:"mode_chinese_bg" json:"mode_chinese_bg"`
-	ModeEnglishBg    string `yaml:"mode_english_bg" json:"mode_english_bg"`
-	ModeText         string `yaml:"mode_text" json:"mode_text"`
-	FullWidthOffBg   string `yaml:"full_width_off_bg" json:"full_width_off_bg"`
-	FullWidthOffText string `yaml:"full_width_off_text" json:"full_width_off_text"`
-	PunctEnglishBg   string `yaml:"punct_english_bg" json:"punct_english_bg"`
-	PunctEnglishText string `yaml:"punct_english_text" json:"punct_english_text"`
-	SettingsBg       string `yaml:"settings_bg" json:"settings_bg"`
-	SettingsIcon     string `yaml:"settings_icon" json:"settings_icon"`
-	SettingsHole     string `yaml:"settings_hole" json:"settings_hole"`
+// MarshalYAML 把 v3 PaletteSchema 还原为扁平 colors mapping（内联/导出用）。
+// 输出顺序：meta、primary、derive、auto_dark（仅 true 时）、再各 token（map 顺序由 yaml 库排序）。
+func (p PaletteSchema) MarshalYAML() (any, error) {
+	out := map[string]any{}
+	if p.Meta.Name != "" || p.Meta.Version != "" {
+		out["meta"] = p.Meta
+	}
+	if p.Primary != "" {
+		out["primary"] = p.Primary
+	}
+	if p.Derive.Enabled || p.Derive.Algorithm != "" {
+		out["derive"] = p.Derive
+	}
+	if p.AutoDark {
+		out["auto_dark"] = p.AutoDark
+	}
+	for k, v := range p.Tokens {
+		out[k] = v
+	}
+	return out, nil
 }
-
-// PopupMenuPalette 弹出菜单色板
-type PopupMenuPalette struct {
-	Background string `yaml:"background" json:"background"`
-	Border     string `yaml:"border" json:"border"`
-	Text       string `yaml:"text" json:"text"`
-	Disabled   string `yaml:"disabled" json:"disabled"`
-	HoverBg    string `yaml:"hover_bg" json:"hover_bg"`
-	HoverText  string `yaml:"hover_text" json:"hover_text"`
-	Separator  string `yaml:"separator" json:"separator"`
-}
-
-// TooltipPalette tooltip 色板
-type TooltipPalette struct {
-	Background string `yaml:"background" json:"background"`
-	Text       string `yaml:"text" json:"text"`
-}
-
-// StatusPalette 状态提示色板
-type StatusPalette struct {
-	Background string `yaml:"background" json:"background"`
-	Border     string `yaml:"border" json:"border"`
-	Text       string `yaml:"text" json:"text"`
-}
-
-// ToastPalette Toast 色板，本期预留
-type ToastPalette struct {
-	Background string `yaml:"background" json:"background"`
-	Text       string `yaml:"text" json:"text"`
-}
-
-// 注：palette 级背景图（PaletteBackground）已于 P7-F 移除——背景图统一走
-// views.window.background.image + 顶层 resources（含 {light,dark} 暗色变体，P7-C/E）。

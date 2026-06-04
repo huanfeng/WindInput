@@ -9,28 +9,35 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// TestResolveMenuColors 7 色映射 Palette.PopupMenu。
+// TestResolveMenuColors 菜单 7 色映射 menu_* 功能 token（v3）。
 func TestResolveMenuColors(t *testing.T) {
-	pm := theme.ResolvedPopupMenuPalette{
-		Background: color.RGBA{255, 255, 255, 255},
-		Border:     color.RGBA{199, 199, 199, 255},
-		Text:       color.RGBA{0, 0, 0, 255},
-		Disabled:   color.RGBA{161, 161, 161, 255},
-		HoverBg:    color.RGBA{0, 120, 212, 255},
-		HoverText:  color.RGBA{255, 255, 255, 255},
-		Separator:  color.RGBA{219, 219, 219, 255},
+	bg := color.RGBA{255, 255, 255, 255}
+	border := color.RGBA{199, 199, 199, 255}
+	text := color.RGBA{0, 0, 0, 255}
+	disabled := color.RGBA{161, 161, 161, 255}
+	hoverBg := color.RGBA{0, 120, 212, 255}
+	hoverText := color.RGBA{255, 255, 255, 255}
+	separator := color.RGBA{219, 219, 219, 255}
+	tokens := map[string]color.Color{
+		"menu_bg":         bg,
+		"menu_border":     border,
+		"menu_text":       text,
+		"menu_disabled":   disabled,
+		"menu_hover_bg":   hoverBg,
+		"menu_hover_text": hoverText,
+		"menu_separator":  separator,
 	}
-	m := &PopupMenu{resolvedV25: &theme.ResolvedV25{Palette: theme.ResolvedPalette{PopupMenu: pm}}}
+	m := &PopupMenu{resolvedV25: &theme.ResolvedV25{Palette: theme.ResolvedPalette{Tokens: tokens}}}
 	rmv := m.resolveMenuViews()
-	if rmv.Root.BgColor != color.Color(pm.Background) || rmv.Root.BorderColor != color.Color(pm.Border) ||
-		rmv.Item.TextColor != color.Color(pm.Text) || rmv.Separator.BgColor != color.Color(pm.Separator) {
+	if rmv.Root.BgColor != color.Color(bg) || rmv.Root.BorderColor != color.Color(border) ||
+		rmv.Item.TextColor != color.Color(text) || rmv.Separator.BgColor != color.Color(separator) {
 		t.Errorf("menu 颜色映射错误: %+v", rmv)
 	}
-	if rmv.Item.Hover == nil || rmv.Item.Hover.BgColor != color.Color(pm.HoverBg) ||
-		rmv.Item.Hover.TextColor != color.Color(pm.HoverText) {
+	if rmv.Item.Hover == nil || rmv.Item.Hover.BgColor != color.Color(hoverBg) ||
+		rmv.Item.Hover.TextColor != color.Color(hoverText) {
 		t.Errorf("menu hover 态映射错误: %+v", rmv.Item.Hover)
 	}
-	if rmv.Item.Disabled == nil || rmv.Item.Disabled.TextColor != color.Color(pm.Disabled) {
+	if rmv.Item.Disabled == nil || rmv.Item.Disabled.TextColor != color.Color(disabled) {
 		t.Errorf("menu disabled 态映射错误: %+v", rmv.Item.Disabled)
 	}
 }
@@ -41,8 +48,8 @@ func TestBuildMenuTree_Geometry(t *testing.T) {
 		Root: theme.RVNode{BgColor: color.RGBA{255, 255, 255, 255}, BorderColor: color.RGBA{1, 2, 3, 255}},
 		Item: theme.RVNode{
 			TextColor: color.RGBA{0, 0, 0, 255},
-			Hover:     &theme.RVState{BgColor: color.RGBA{0, 120, 212, 255}, TextColor: color.RGBA{255, 255, 255, 255}},
-			Disabled:  &theme.RVState{TextColor: color.RGBA{161, 161, 161, 255}},
+			Hover:     &theme.RVNode{BgColor: color.RGBA{0, 120, 212, 255}, TextColor: color.RGBA{255, 255, 255, 255}},
+			Disabled:  &theme.RVNode{TextColor: color.RGBA{161, 161, 161, 255}},
 		},
 		Separator: theme.RVNode{BgColor: color.RGBA{219, 219, 219, 255}},
 	}

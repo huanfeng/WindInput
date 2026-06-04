@@ -12,38 +12,37 @@ type ThemeMeta struct {
 	Order   int    `yaml:"order" json:"order"` // Sort order, lower = first. Third-party themes get +100
 }
 
-// Theme represents a complete theme configuration（v2.5 schema：layout / palette / views）。
+// Theme 是 v3 主题的顶层结构（见 docs/design/theme-schema-v3.md「顶层结构」）。
 //
-// v2/legacy 格式（light/dark variant、顶层颜色、style、Theme.Resolve、ResolvedTheme）已于 P5
-// 退役——只支持 v2.5。渲染层统一消费 ResolvedV25（manager.ResolveV25 产出）。
+// v3-C「base 单链继承」：
+//   - 旧的 `layout: <id>` / `palette: <id>` 外链 + `overrides` 机制已删除；
+//   - 改为顶层内联块 colors / views / behavior，配 `base` 单链继承复用别人的配置。
+//   - 加载器把 base 链与 self 在**原始未求值 Theme** 上 deepMerge，合并后再统一 resolve
+//     （先合并后求值——见 manager.go loadRawTheme / deepMergeTheme）。
+//
+// V3-D：原顶层 `layout` 块（LayoutSchema/density 基线）已删除——其它窗口几何随 P8 几何
+// View 化后由 views 节点或 internal/ui 内置常量承载，不再有独立几何来源。
+//
+// 各块均为指针/可空，未写即缺省（base 提供、或引擎基线兜底）。
 type Theme struct {
 	Meta ThemeMeta `yaml:"meta" json:"meta"`
 
-	// v2.5 format: layout / palette 字段。值可为：
-	//   - string: 共享零件 ID（外链形态），加载器到 themes/_layouts/ 或 _palettes/ 解析
-	//   - map[string]any: 内联对象（内联形态），通过 yaml round-trip 解为 LayoutSchema/PaletteSchema
-	Layout    any        `yaml:"layout,omitempty" json:"layout,omitempty"`
-	Palette   any        `yaml:"palette,omitempty" json:"palette,omitempty"`
-	Views     *Views     `yaml:"views,omitempty" json:"views,omitempty"`       // 盒模型 View 外观（v2.6 P2）
-	Behavior  *Behavior  `yaml:"behavior,omitempty" json:"behavior,omitempty"` // 行为配置（v2.6 P6，可被用户覆盖）
-	Overrides *Overrides `yaml:"overrides,omitempty" json:"overrides,omitempty"`
+	// Base 单链继承的基主题 ID（按 themeDirs 找 <base>/theme.yaml，与普通主题同路径）。
+	// 空=无继承。链上禁止成环（loadRawTheme 检测并报错）。
+	Base string `yaml:"base,omitempty" json:"base,omitempty"`
 
-	// Resources 顶层图片资源注册表（v2.6 P7-C，D5；P7-E 起值支持 {light,dark} 双变体）：
-	// 名→ResourceRef（单图 path/data URI，或 {light,dark}）。views 里的 ViewImage.ref 优先查此表，
-	// 否则按字面 path/data URI 解析。相对路径相对 theme.yaml。ResolveV25 按 isDark 选变体填 ResolvedV25.Resources。
+	// 内联块（v3）：
+	//   - Colors（yaml: colors）：扁平 LightDark 颜色 token 表（PaletteSchema）。
+	//   - Views：盒模型 View 外观（所有窗口几何 + token 引用）。
+	//   - Behavior：用户可覆盖的主题推荐默认。
+	Colors    *PaletteSchema         `yaml:"colors,omitempty" json:"colors,omitempty"`
+	Views     *Views                 `yaml:"views,omitempty" json:"views,omitempty"`
+	Behavior  *Behavior              `yaml:"behavior,omitempty" json:"behavior,omitempty"`
 	Resources map[string]ResourceRef `yaml:"resources,omitempty" json:"resources,omitempty"`
 }
 
-// Overrides 用于外链形态对引用的 layout/palette 做就地微调。
-// 字段为 map[string]any，按 yaml 路径深度合并到被引用文件之上。
-// 内联形态不使用此字段（直接在内联块里改即可）。
-type Overrides struct {
-	Layout  map[string]any `yaml:"layout,omitempty" json:"layout,omitempty"`
-	Palette map[string]any `yaml:"palette,omitempty" json:"palette,omitempty"`
-}
-
-// HasV25Schema 返回 true 表示该 Theme 使用了 v2.5 的 layout/palette 字段。
-// 非 v2.5 主题（无 layout/palette）已不被支持，加载时 resolvedV25 为 nil。
-func (t *Theme) HasV25Schema() bool {
-	return t.Layout != nil || t.Palette != nil
+// HasV3Schema 返回 true 表示该 Theme 提供了 v3 颜色块（colors）。
+// 无 colors 块的主题（如 emptyTheme 兜底）解析为 nil resolvedV25。
+func (t *Theme) HasV3Schema() bool {
+	return t.Colors != nil
 }

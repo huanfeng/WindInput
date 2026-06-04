@@ -1,0 +1,118 @@
+meta:
+  name: "基础主题(清风蓝·跟随语义)"
+  version: "1.0"
+
+# 唯一基础主题（_ 前缀目录 → 不显示在主题列表，仅供 default/msime/jidian 等通过 base 继承）。
+# 配方：颜色=清风蓝；toolbar=跟随语义（${accent}/${surface}/${text_dim}）；候选窗几何基线
+# （item padding 保证合理行高）；序号=纯数字无圆圈（派生可 override 圆圈）。合并自旧 windy-blue + msime-base。
+colors:
+  primary: "#4285F4"
+  derive: {enabled: true, algorithm: hsl-shift}
+
+  bg:        {light: "#FFFFFF", dark: "#2D2D2D"}
+  surface:   {light: "#F0F0F0", dark: "#3A3A3A"}
+  border:    {light: "#C8C8C8", dark: "#404040"}
+  text:      {light: "#1E1E1E", dark: "#E0E0E0"}
+  text_dim:  {light: "#646464", dark: "#B0B0B0"}
+  text_hint: {light: "#969696", dark: "#808080"}
+  accent:    "${primary}"
+  on_accent: "#FFFFFF"
+  shadow:    {light: "#0000000F", dark: "#0000001A"}
+
+  selection:      {light: "#E6F0FF", dark: "#3D4A5C"}
+  selection_text: "${text}"
+  hover:          "${selection}"
+
+  menu_bg:         "${bg}"
+  menu_border:     {light: "#C7C7C7", dark: "${border}"}
+  menu_text:       "${text}"
+  menu_disabled:   {light: "#A1A1A1", dark: "#707070"}
+  menu_hover_bg:   "${accent}"
+  menu_hover_text: "${on_accent}"
+  menu_separator:  {light: "#DBDBDB", dark: "${border}"}
+
+  tooltip_bg:    {light: "#3C3C3CF0", dark: "#1E1E1EF0"}
+  tooltip_text:  {light: "#FFFFFF", dark: "${text}"}
+  status_bg:     {light: "#323232E6", dark: "#1E1E1EE6"}
+  status_text:   {light: "#FFFFFF", dark: "${text}"}
+  status_border: "${accent}"
+  toast_bg:      {light: "#323232E6", dark: "#1E1E1EE6"}
+  toast_text:    {light: "#FFFFFF", dark: "${text}"}
+
+  toolbar_background:          "${bg}"
+  toolbar_border:              {light: "#E0E0E0", dark: "${border}"}
+  toolbar_grip:                {light: "#C0C0C0B3", dark: "#5A5A5AB3"}
+  toolbar_mode_chinese_bg:     "${accent}"
+  toolbar_mode_english_bg:     {light: "#8A8A8A", dark: "#5A5A5A"}
+  toolbar_mode_text:           "${on_accent}"
+  toolbar_full_width_off_bg:   {light: "${surface}", dark: "${border}"}
+  toolbar_full_width_off_text: "${text_dim}"
+  toolbar_punct_english_bg:    {light: "${surface}", dark: "${border}"}
+  toolbar_punct_english_text:  "${text_dim}"
+  toolbar_settings_bg:         {light: "${surface}", dark: "${border}"}
+  toolbar_settings_icon:       {light: "${text_dim}", dark: "#9B8CCE"}
+  toolbar_settings_hole:       {light: "${surface}", dark: "${border}"}
+
+views:
+  window:
+    padding: {top: 6, right: 8, bottom: 6, left: 8}
+    border: {radius: 8, width: 1px, color: "${border}"}
+    background: {color: "${bg}"}
+    shadow: {offset_x: 2, offset_y: 2, color: "${shadow}"}
+  preedit_bar:
+    padding: {top: 3, right: 8, bottom: 3, left: 8}
+    background: {color: "${surface}"}
+    color: "${text_dim}"
+  item:
+    padding: {top: 7, right: 10, bottom: 7, left: 8}
+    border: {radius: 4}
+    selected: {background: {color: "${selection}"}, color: "${selection_text}"}
+    hover: {background: {color: "${hover}"}}
+  index:
+    color: "${accent}"
+    background: {shape: none}
+    font_size: -2
+    padding: {left: 3, right: 3}
+  text:
+    margin: {left: 4}
+    color: "${text}"
+  comment:
+    margin: {left: 6}
+    color: "${text_hint}"
+    font_size: -4
+  footer_bar:
+    font_size: -4
+  accent_bar:
+    background: {color: "${accent}"}
+  status:
+    background: {color: "${status_bg}"}
+    color: "${status_text}"
+  tooltip:
+    background: {color: "${tooltip_bg}"}
+    color: "${tooltip_text}"
+  toast:
+    background: {color: "${toast_bg}"}
+    color: "${toast_text}"
+  toolbar:
+    background: {color: "${toolbar_background}"}
+    border: {color: "${toolbar_border}"}
+    grip: {color: "${toolbar_grip}"}
+    button:
+      background: {color: "${toolbar_full_width_off_bg}"}
+      color: "${toolbar_full_width_off_text}"
+      mode:
+        chinese: {background: {color: "${toolbar_mode_chinese_bg}"}}
+        english: {background: {color: "${toolbar_mode_english_bg}"}}
+    settings:
+      icon: {color: "${toolbar_settings_icon}"}
+      hole: {color: "${toolbar_settings_hole}"}
+  menu:
+    root:
+      background: {color: "${menu_bg}"}
+      border: {color: "${menu_border}", radius: 6, width: 1}
+    item:
+      color: "${menu_text}"
+      hover: {background: {color: "${menu_hover_bg}"}, color: "${menu_hover_text}"}
+      disabled: {color: "${menu_disabled}"}
+    separator:
+      background: {color: "${menu_separator}"}

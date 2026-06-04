@@ -53,27 +53,28 @@ func (r *ToolbarRenderer) resolveToolbarViews() theme.ResolvedToolbarViews {
 		return rtv
 	}
 	t := rv.Views.Toolbar
+	// v3：toolbar views token 名与 colors 的 toolbar_* token 对齐。
 	res := func(name string) color.Color {
 		switch name {
-		case "background":
+		case "toolbar_background":
 			return tb.Background
-		case "border":
+		case "toolbar_border":
 			return tb.Border
-		case "grip":
+		case "toolbar_grip":
 			return tb.Grip
-		case "button_bg":
+		case "toolbar_full_width_off_bg":
 			return tb.FullWidthOffBg
-		case "button_text":
+		case "toolbar_full_width_off_text":
 			return tb.FullWidthOffText
-		case "mode_cn_bg":
+		case "toolbar_mode_chinese_bg":
 			return tb.ModeChineseBg
-		case "mode_en_bg":
+		case "toolbar_mode_english_bg":
 			return tb.ModeEnglishBg
-		case "mode_text":
+		case "toolbar_mode_text":
 			return tb.ModeText
-		case "settings_icon":
+		case "toolbar_settings_icon":
 			return tb.SettingsIcon
-		case "settings_hole":
+		case "toolbar_settings_hole":
 			return tb.SettingsHole
 		}
 		return nil

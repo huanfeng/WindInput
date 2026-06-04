@@ -42,6 +42,13 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 			fontSpec = uiConfig.FontPath
 		}
 		c.uiManager.UpdateConfig(uiConfig.FontSize, uiConfig.FontSizeFollowTheme, fontSpec, uiConfig.HideCandidateWindow)
+		// 主题 behavior 用户覆盖层（哲学Y）：always_show_pager / show_page_number / vertical_max_width
+		// 各自的「跟随主题」开关 + 用户值。最终值 = FollowTheme ? 主题 behavior : 用户值。
+		c.uiManager.SetBehaviorOverrides(
+			uiConfig.AlwaysShowPager, uiConfig.AlwaysShowPagerFollowTheme,
+			uiConfig.ShowPageNumber, uiConfig.ShowPageNumberFollowTheme,
+			uiConfig.VerticalMaxWidth, uiConfig.VerticalMaxWidthFollowTheme,
+		)
 		// Update candidate layout
 		if uiConfig.CandidateLayout != "" {
 			c.uiManager.SetCandidateLayout(uiConfig.CandidateLayout)
@@ -295,6 +302,7 @@ func (c *Coordinator) updateThemeStyle(uiConfig *config.UIConfig) {
 	// Load the theme (always reload to pick up new dark mode state)
 	if uiConfig.Theme != "" {
 		c.uiManager.LoadTheme(uiConfig.Theme)
+		c.notifyThemeFallbackIfAny()
 	} else {
 		c.uiManager.ReapplyTheme()
 	}

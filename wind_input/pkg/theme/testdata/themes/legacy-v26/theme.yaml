@@ -1,0 +1,11 @@
+meta:
+  name: "旧格式测试主题(v2.6)"
+  version: "2.6"
+
+# 故意的旧 v2.6 格式：用 palette（无 v3 的 colors 块）→ HasV3Schema()=false。
+# 用于回归测试：加载此不合法主题应自动整体回退内置 default（不兼容旧主题）。
+palette:
+  primary: "#FF0000"
+  light:
+    bg: "#FFFFFF"
+    text: "#000000"

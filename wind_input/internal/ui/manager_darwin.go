@@ -417,11 +417,12 @@ func toastPositionToWire(p ToastPosition) uicmd.ToastPosition {
 // 主题
 // ============================================================================
 
-func (m *Manager) LoadTheme(string) error       { return nil }
-func (m *Manager) ReapplyTheme()                {}
-func (m *Manager) SetDarkMode(bool)             {}
-func (m *Manager) GetAvailableThemes() []string { return nil }
-func (m *Manager) GetCurrentThemeName() string  { return "" }
+func (m *Manager) LoadTheme(string) error             { return nil }
+func (m *Manager) ReapplyTheme()                      {}
+func (m *Manager) SetDarkMode(bool)                   {}
+func (m *Manager) GetAvailableThemes() []string       { return nil }
+func (m *Manager) GetCurrentThemeName() string        { return "" }
+func (m *Manager) ConsumeThemeFallbackNotice() string { return "" }
 
 // GetCurrentThemeID 读 config 的 ui.theme (统一菜单主题项勾选用)。
 func (m *Manager) GetCurrentThemeID() string {
@@ -458,6 +459,16 @@ func (m *Manager) SetCandidateIndexLabels(labels string) {
 	m.candidateIndexLabels = labels
 	m.mu.Unlock()
 }
+
+// SetBehaviorOverrides 与 Win 版同签名。darwin 上候选窗由 forwarder 自持的 ui.Renderer 管理，
+// behavior 覆盖经 forwarder 读 config.yaml 生效，故此 stub 不消费。
+func (m *Manager) SetBehaviorOverrides(
+	alwaysShowPager, alwaysShowPagerFollowTheme bool,
+	showPageNumber, showPageNumberFollowTheme bool,
+	verticalMaxWidth int, verticalMaxWidthFollowTheme bool,
+) {
+}
+
 func (m *Manager) UpdateStatusIndicatorConfig(duration, offsetX, offsetY int) {}
 func (m *Manager) UpdateStatusIndicatorFullConfig(cfg StatusWindowConfig) {
 	m.mu.Lock()

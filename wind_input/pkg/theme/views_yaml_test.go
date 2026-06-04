@@ -7,129 +7,108 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestDefaultThemeViewsParse 验证真实 default/theme.yaml 的 views 块能解析为 Theme.Views，
-// 且关键颜色 token 就位（兜底运行时加载，避免 YAML 语法/结构错导致主题加载失败）。
+// themesDirManager 返回一个 themeDirs 指向源 themes/ 的 Manager，用于把 default/msime
+// 经 base 单链合并（deepMergeTheme）后再断言 views 字段——主题架构简化后，window/status/
+// tooltip/toolbar/menu 等共享几何/颜色已移入隐藏基础主题 _base，薄派生文件不再内联这些块，
+// 故须断言**合并后**的形态（这才是运行时真正消费的主题）。
+func themesDirManager(t *testing.T) *Manager {
+	t.Helper()
+	m := &Manager{themeDirs: []string{"../../themes"}}
+	if _, statErr := os.Stat("../../themes/_base/theme.yaml"); statErr != nil {
+		t.Skip("源 themes/_base 不可读: " + statErr.Error())
+	}
+	return m
+}
+
+// TestDefaultThemeViewsParse 验证 default 主题（经 _base 合并）的 views 关键颜色 token 就位
+// （兜底运行时加载，避免 YAML 语法/结构错导致主题加载失败）。
 func TestDefaultThemeViewsParse(t *testing.T) {
-	data, err := os.ReadFile("../../themes/default/theme.yaml")
-	if err != nil {
-		t.Skip("default theme.yaml 不可读: " + err.Error())
-	}
-	var th Theme
-	if err := yaml.Unmarshal(data, &th); err != nil {
-		t.Fatalf("default theme.yaml 解析失败: %v", err)
-	}
+	m := themesDirManager(t)
+	th := loadMerged(t, m, "default")
 	if th.Views == nil {
-		t.Fatal("default theme.yaml 应含 views 块")
+		t.Fatal("default 合并后应含 views 块")
 	}
-	if th.Views.Window.Background.Color != "${background}" {
+	if th.Views.Window.Background.Color != "${bg}" {
 		t.Errorf("window background token, got %q", th.Views.Window.Background.Color)
 	}
-	if th.Views.Item.Selected == nil || th.Views.Item.Selected.Background.Color != "${selected_bg}" {
+	if th.Views.Item.Selected == nil || th.Views.Item.Selected.Background.Color != "${selection}" {
 		t.Error("item selected bg token 缺失")
 	}
 	if th.Views.AccentBar.Background.Color != "${accent}" {
 		t.Errorf("accent_bar token, got %q", th.Views.AccentBar.Background.Color)
 	}
-	if th.Views.Index.Color != "${index_text}" {
+	if th.Views.Index.Color != "${on_accent}" {
 		t.Errorf("index text token, got %q", th.Views.Index.Color)
 	}
 }
 
-// TestDefaultThemeStatusParse 验证 default theme.yaml 的 views.status 解析（P4-A）。
+// TestDefaultThemeStatusParse 验证 default 主题（经 _base 合并）的 views.status（P4-A）。
 func TestDefaultThemeStatusParse(t *testing.T) {
-	data, err := os.ReadFile("../../themes/default/theme.yaml")
-	if err != nil {
-		t.Skip("default theme.yaml 不可读: " + err.Error())
-	}
-	var th Theme
-	if err := yaml.Unmarshal(data, &th); err != nil {
-		t.Fatalf("解析失败: %v", err)
-	}
+	m := themesDirManager(t)
+	th := loadMerged(t, m, "default")
 	if th.Views == nil || th.Views.Status == nil {
-		t.Fatal("default theme.yaml 应含 views.status")
+		t.Fatal("default 合并后应含 views.status")
 	}
-	if th.Views.Status.Background.Color != "${background}" {
+	if th.Views.Status.Background.Color != "${status_bg}" {
 		t.Errorf("status background token, got %q", th.Views.Status.Background.Color)
 	}
-	if th.Views.Status.Color != "${text}" {
+	if th.Views.Status.Color != "${status_text}" {
 		t.Errorf("status text token, got %q", th.Views.Status.Color)
 	}
 }
 
-// TestDefaultThemeTooltipParse 验证 default theme.yaml 的 views.tooltip（P4-B）。
+// TestDefaultThemeTooltipParse 验证 default 主题（经 _base 合并）的 views.tooltip（P4-B）。
 func TestDefaultThemeTooltipParse(t *testing.T) {
-	data, err := os.ReadFile("../../themes/default/theme.yaml")
-	if err != nil {
-		t.Skip("default theme.yaml 不可读: " + err.Error())
-	}
-	var th Theme
-	if err := yaml.Unmarshal(data, &th); err != nil {
-		t.Fatalf("解析失败: %v", err)
-	}
-	if th.Views == nil || th.Views.Tooltip == nil || th.Views.Tooltip.Background.Color != "${background}" {
-		t.Fatal("default theme.yaml 应含 views.tooltip 且 background token")
+	m := themesDirManager(t)
+	th := loadMerged(t, m, "default")
+	if th.Views == nil || th.Views.Tooltip == nil || th.Views.Tooltip.Background.Color != "${tooltip_bg}" {
+		t.Fatal("default 合并后应含 views.tooltip 且 background token")
 	}
 }
 
-// TestDefaultThemeToolbarParse 验证 default theme.yaml 的 views.toolbar（P4-C）。
+// TestDefaultThemeToolbarParse 验证 default 主题（经 _base 合并）的 views.toolbar（P4-C）。
 func TestDefaultThemeToolbarParse(t *testing.T) {
-	data, err := os.ReadFile("../../themes/default/theme.yaml")
-	if err != nil {
-		t.Skip("default theme.yaml 不可读: " + err.Error())
-	}
-	var th Theme
-	if err := yaml.Unmarshal(data, &th); err != nil {
-		t.Fatalf("解析失败: %v", err)
-	}
+	m := themesDirManager(t)
+	th := loadMerged(t, m, "default")
 	if th.Views == nil || th.Views.Toolbar == nil || th.Views.Toolbar.Button.Mode == nil {
-		t.Fatal("default theme.yaml 应含 views.toolbar.button.mode")
+		t.Fatal("default 合并后应含 views.toolbar.button.mode")
 	}
-	if th.Views.Toolbar.Button.Mode.Chinese.Background.Color != "${mode_cn_bg}" {
+	if th.Views.Toolbar.Button.Mode.Chinese.Background.Color != "${toolbar_mode_chinese_bg}" {
 		t.Errorf("mode_cn_bg token, got %q", th.Views.Toolbar.Button.Mode.Chinese.Background.Color)
 	}
 }
 
-// TestDefaultThemeMenuParse 验证 default theme.yaml 的 views.menu（P4-D）。
+// TestDefaultThemeMenuParse 验证 default 主题（经 _base 合并）的 views.menu（P4-D）。
 func TestDefaultThemeMenuParse(t *testing.T) {
-	data, err := os.ReadFile("../../themes/default/theme.yaml")
-	if err != nil {
-		t.Skip("default theme.yaml 不可读: " + err.Error())
-	}
-	var th Theme
-	if err := yaml.Unmarshal(data, &th); err != nil {
-		t.Fatalf("解析失败: %v", err)
-	}
+	m := themesDirManager(t)
+	th := loadMerged(t, m, "default")
 	if th.Views == nil || th.Views.Menu == nil || th.Views.Menu.Item.Hover == nil ||
-		th.Views.Menu.Item.Hover.Background.Color != "${hover_bg}" {
-		t.Fatal("default theme.yaml 应含 views.menu.item.hover.background")
+		th.Views.Menu.Item.Hover.Background.Color != "${menu_hover_bg}" {
+		t.Fatal("default 合并后应含 views.menu.item.hover.background")
 	}
 }
 
-// TestMsimeThemeViewsParse 验证 msime/theme.yaml 的 views 块解析 + 关键字段（item radius 2 / 颜色 token）。
+// TestMsimeThemeViewsParse 验证 msime 主题（经 _base 合并）的 views 关键字段
+// （item radius 4 来自 _base / 序号灰色文本 #888888 来自 msime override）。
 func TestMsimeThemeViewsParse(t *testing.T) {
-	data, err := os.ReadFile("../../themes/msime/theme.yaml")
-	if err != nil {
-		t.Skip("msime theme.yaml 不可读: " + err.Error())
-	}
-	var th Theme
-	if err := yaml.Unmarshal(data, &th); err != nil {
-		t.Fatalf("msime theme.yaml 解析失败: %v", err)
-	}
+	m := themesDirManager(t)
+	th := loadMerged(t, m, "msime")
 	if th.Views == nil {
-		t.Fatal("msime theme.yaml 应含 views 块")
+		t.Fatal("msime 合并后应含 views 块")
 	}
 	if th.Views.Item.Border.Radius == nil || th.Views.Item.Border.Radius.Value != 4 {
 		t.Errorf("msime item radius 应为 4, got %v", th.Views.Item.Border.Radius)
 	}
-	// 窗口边框=1px 发丝线（设备像素，不随 DPI 加粗）——匹配旧渲染器的固定 1px 边框。
+	// 窗口边框=1px 发丝线（设备像素，不随 DPI 加粗）——继承自 _base。
 	if w := th.Views.Window.Border.Width; w == nil || w.Value != 1 || !w.Px {
 		t.Errorf("msime window border width 应为 1px(设备像素), got %v", w)
 	}
-	if th.Views.Window.Background.Color != "${background}" {
+	if th.Views.Window.Background.Color != "${bg}" {
 		t.Errorf("window background token, got %q", th.Views.Window.Background.Color)
 	}
-	if th.Views.Index.Color != "${index_text}" {
-		t.Errorf("index text token, got %q", th.Views.Index.Color)
+	// 主题架构简化后 msime 序号直接写死灰色文本（取代旧 ${index_text} token）。
+	if th.Views.Index.Color != "#888888" {
+		t.Errorf("index text 应为 #888888, got %q", th.Views.Index.Color)
 	}
 }
 

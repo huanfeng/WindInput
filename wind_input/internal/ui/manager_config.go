@@ -39,6 +39,24 @@ func (m *Manager) UpdateConfig(fontSize float64, fontFollowTheme bool, fontFamil
 	m.logger.Info("UI config updated", "fontSize", fontSize, "fontFollowTheme", fontFollowTheme, "fontFamily", fontFamily, "hideCandidateWindow", hideCandidateWindow)
 }
 
+// SetBehaviorOverrides 把主题 behavior 的用户覆盖层（哲学Y）下发到候选窗渲染器：
+// always_show_pager / show_page_number / vertical_max_width 各自的「跟随主题」开关 + 用户值。
+// 最终值 = FollowTheme ? 主题 behavior : config.UI 用户值（见 renderer.applyBehaviorOverrides）。
+func (m *Manager) SetBehaviorOverrides(
+	alwaysShowPager, alwaysShowPagerFollowTheme bool,
+	showPageNumber, showPageNumberFollowTheme bool,
+	verticalMaxWidth int, verticalMaxWidthFollowTheme bool,
+) {
+	if m.renderer != nil {
+		m.renderer.SetBehaviorOverrides(
+			alwaysShowPager, alwaysShowPagerFollowTheme,
+			showPageNumber, showPageNumberFollowTheme,
+			verticalMaxWidth, verticalMaxWidthFollowTheme,
+		)
+	}
+	m.postCmd(m.snapshotCandidatesConfig())
+}
+
 // UpdateStatusIndicatorConfig 更新状态提示配置
 func (m *Manager) UpdateStatusIndicatorConfig(duration, offsetX, offsetY int) {
 	m.mu.Lock()

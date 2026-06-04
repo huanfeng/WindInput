@@ -25,6 +25,7 @@
 | `macos-imkit-plan.md` | **PR-A 实战手册**: macOS IMKit `.app` 工程目录结构 / Swift 类骨架 / Info.plist 模板 / 6 个开发里程碑 / 验证步骤 / 风险清单 |
 | `enum-constraint.md` | 枚举与魔法字符串约束 SSOT (跨模块共享) |
 | `theme-view-architecture.md` | 主题渲染架构演进：从固定化渲染到统一 View 盒模型（margin/padding/background/border/layers/states + Text 排版），具名 View + 可换 token palette + 整数 z 层级 + 通用 Image/资源表；含 P0-P4 分阶段与迁移 |
+| `theme-schema-v3.md` | 主题 Schema v3：结构归一（删 layout 并入 views / 删 candidate_window 颜色组并入 colors 扁平 token）+ 亮暗统一（`Variant<T>` 贯穿颜色与图片）+ base 单链继承 + Fill(色·渐变·图)/font 分组；含 v2.6→v3 迁移映射与编辑器原型（`WindInputThemeEditor/src/lib/theme3`）作参考实现 |
 | `settings-incremental-save.md` | 设置端全局保存重构：快照 diff + 按 key 最小化提交（`Config.Set`）。根治「全局保存整份覆盖、formData 不含 stats 导致 null 冲掉 track_english」的 bug；独立段（stats/dict）天然隔离 |
 
 ## 文件分类

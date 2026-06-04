@@ -1,84 +1,21 @@
 meta:
   name: "默认主题"
-  version: "2.5"
+  version: "3.0"
   author: "清风输入法"
   order: 0
 
-# v2.5 schema: 引用共享 layout + palette 零件
-layout: compact-horizontal
-palette: windy-blue
+# v3-C schema: base 单链继承唯一基础主题 _base（颜色清风蓝 + 候选窗几何基线 + toolbar 跟随语义）。
+# default 仅覆盖序号样式：把 _base 的「纯数字无圆圈」override 成「圆圈数字」。
+base: _base
 
 # v2.6 行为配置（P6）：可被用户 ui.pager_display_mode 覆盖。
-# 不声明 font_size / vertical_max_width → 沿用引擎基线 + 用户全局配置。
 behavior:
   always_show_pager: false   # 仅 1 页时不显示翻页区
   show_page_number: true     # 多页时显示 "1/3" 页码文字
 
-# v2.6 盒模型 View 外观（P2 切片-0 几何 + 切片-1 颜色）：与 compact-horizontal/windy-blue
-# 现状一致，仅显式字段覆盖渲染器合成桥基线。颜色用 ${语义} token 解析自 palette（零回归）；
-# 字号不在此声明（沿用用户全局配置）。
 views:
-  window:
-    padding: {top: 6, right: 8, bottom: 6, left: 8}
-    border: {radius: 8, width: 1px, color: "${border}"}   # 1px 发丝线：边框不随 DPI 加粗（匹配旧渲染器）
-    background: {color: "${background}"}
-  preedit_bar:
-    padding: {top: 3, right: 8, bottom: 3, left: 8}   # 上下 3：预编辑条高 = 内容(字号18)+6 = 24
-    background: {color: "${preedit_bg}"}
-    color: "${preedit_text}"
-  item:
-    padding: {top: 7, right: 10, bottom: 7, left: 8}   # 上下 7：行高 = 内容(字号18)+上下padding = 32（行高由此决定，配 0 则无额外高度）
-    border: {radius: 4}
-    selected: {background: {color: "${selected_bg}"}}
-    hover: {background: {color: "${hover_bg}"}}
-  index:
-    background: {color: "${index_bg}", shape: circle}
-    color: "${index_text}"
-    font_size: -4                                  # 序号小号(主候选-4)；数字嵌入圆内
-    padding: {top: 2, bottom: 2, left: 2, right: 2}  # 圆圈直径 = 序号字号 + 上下 padding
-  text:
-    margin: {left: 4}
-    color: "${text}"
-  comment:
-    margin: {left: 6}
-    color: "${comment}"
-    font_size: -4                                  # 注释小号(主候选-4)
-  footer_bar:
-    font_size: -4                                  # 页码/翻页字号(主候选-4)
-  accent_bar:
-    background: {color: "${accent}"}
-  status:
-    background: {color: "${background}"}
-    color: "${text}"
-  tooltip:
-    background: {color: "${background}"}
-    color: "${text}"
-  toast:
-    background: {color: "${background}"}
-    color: "${text}"
-  toolbar:
-    background: {color: "${background}"}
-    border: {color: "${border}"}
-    grip: {color: "${grip}"}
-    button:
-      background: {color: "${button_bg}"}
-      color: "${button_text}"
-      mode:
-        chinese: {background: {color: "${mode_cn_bg}"}}
-        english: {background: {color: "${mode_en_bg}"}}
-    settings:
-      icon: {color: "${settings_icon}"}
-      hole: {color: "${settings_hole}"}
-  menu:
-    root:
-      background: {color: "${background}"}
-      border: {color: "${border}"}
-    item:
-      color: "${text}"
-      hover:
-        background: {color: "${hover_bg}"}
-        color: "${hover_text}"
-      disabled:
-        color: "${disabled}"
-    separator:
-      color: "${separator}"
+  index:   # override base 的无圆圈 → 圆圈数字
+    background: {color: "${accent}", shape: circle}
+    color: "${on_accent}"
+    font_size: -4
+    padding: {top: 2, right: 2, bottom: 2, left: 2}

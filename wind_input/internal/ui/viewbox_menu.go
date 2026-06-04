@@ -13,8 +13,8 @@ import (
 	"github.com/huanfeng/wind_input/pkg/theme"
 )
 
-// resolveMenuViews 解析菜单盒模型 ResolvedMenuViews（P8 切片3）：默认从 Palette.PopupMenu（P5），
-// views.menu（Root/Item/Separator）覆盖几何+颜色，item 的 hover/disabled 走 ViewNode states。
+// resolveMenuViews 解析菜单盒模型 ResolvedMenuViews（P8 切片3）：默认从 Palette token，
+// views.menu（Root/Item/Separator）覆盖几何+颜色，item 的 hover/disabled 走递归 RVNode patch（V3-D）。
 func (m *PopupMenu) resolveMenuViews() theme.ResolvedMenuViews {
 	if rv := m.resolvedV25; rv != nil {
 		var mv *theme.MenuViews
@@ -28,8 +28,8 @@ func (m *PopupMenu) resolveMenuViews() theme.ResolvedMenuViews {
 		Root: theme.RVNode{BgColor: color.RGBA{255, 255, 255, 255}, BorderColor: color.RGBA{199, 199, 199, 255}},
 		Item: theme.RVNode{
 			TextColor: color.RGBA{0, 0, 0, 255},
-			Hover:     &theme.RVState{BgColor: color.RGBA{0, 120, 212, 255}, TextColor: color.RGBA{255, 255, 255, 255}},
-			Disabled:  &theme.RVState{TextColor: color.RGBA{161, 161, 161, 255}},
+			Hover:     &theme.RVNode{BgColor: color.RGBA{0, 120, 212, 255}, TextColor: color.RGBA{255, 255, 255, 255}},
+			Disabled:  &theme.RVNode{TextColor: color.RGBA{161, 161, 161, 255}},
 		},
 		Separator: theme.RVNode{BgColor: color.RGBA{219, 219, 219, 255}},
 	}

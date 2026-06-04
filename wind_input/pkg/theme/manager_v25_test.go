@@ -6,20 +6,19 @@ import (
 	"testing"
 )
 
-// TestManagerLoadV25Theme 端到端验证 Manager.LoadTheme 能正确处理 v2.5 主题：
-// 写入真实 theme.yaml + _layouts + _palettes，调用 LoadTheme，断言 resolved 来自 v2.5 路径
-func TestManagerLoadV25Theme(t *testing.T) {
+// TestManagerLoadV3Theme 端到端验证 Manager.LoadTheme 能正确处理 v3 base 继承主题：
+// 写入真实 base 主题 + 派生主题，调用 LoadTheme，断言 resolved 来自 v3 路径（含继承）。
+func TestManagerLoadV3Theme(t *testing.T) {
 	tmp, cleanup := setupTestThemes(t)
 	defer cleanup()
 
-	// 写入一个 v2.5 主题入口
+	// 派生主题：base = test-base（颜色/几何全继承），无 views 块。
 	themeYAML := `meta:
-  name: "v25-test"
+  name: "v3-test"
   version: "1.0"
-layout: test-layout
-palette: test-palette
+base: test-base
 `
-	themeDir := filepath.Join(tmp, "v25-test")
+	themeDir := filepath.Join(tmp, "v3-test")
 	if err := os.MkdirAll(themeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -28,15 +27,15 @@ palette: test-palette
 	}
 
 	m := &Manager{themeDirs: []string{tmp}}
-	if err := m.LoadTheme("v25-test"); err != nil {
-		t.Fatalf("LoadTheme v25-test: %v", err)
+	if err := m.LoadTheme("v3-test"); err != nil {
+		t.Fatalf("LoadTheme v3-test: %v", err)
 	}
 
 	rv := m.GetResolvedV25()
 	if rv == nil {
 		t.Fatal("resolved nil")
 	}
-	// P7-5：序号样式/标签归口 views。该主题无 views 块 → 走 defaultViews 基线（无圆背景 + 默认数字标签）。
+	// 该主题无 views 块 → 走 defaultViews 基线（无圆背景 + 默认数字标签）。
 	vi := rv.Views.Index
 	if vi.Background.Shape == "circle" {
 		t.Errorf("IndexStyle want none (no circle bg)")
@@ -44,34 +43,33 @@ palette: test-palette
 	if got := BuildIndexLabelsFromSlots(vi.Labels); got != "1/2/3/4/5/6/7/8/9/0" {
 		t.Errorf("IndexLabels want default digits, got %q", got)
 	}
-	// palette 解析（来自 test-palette 的 #4285F4 primary）
-	if ColorToHexRGB(rv.Palette.CandidateWindow.SelectedBg) != "#4285F4" {
-		t.Errorf("SelectedBg want #4285F4, got %s", ColorToHexRGB(rv.Palette.CandidateWindow.SelectedBg))
+	// colors 继承 + 展开（selection = ${primary} = #4285F4）。
+	if ColorToHexRGB(rv.Palette.Tokens["selection"]) != "#4285F4" {
+		t.Errorf("selection want #4285F4, got %s", ColorToHexRGB(rv.Palette.Tokens["selection"]))
 	}
 }
 
-// TestManagerV25DarkModeSwitch 验证暗色模式切换走 v2.5 路径
-func TestManagerV25DarkModeSwitch(t *testing.T) {
+// TestManagerV3DarkModeSwitch 验证暗色模式切换走 v3 路径
+func TestManagerV3DarkModeSwitch(t *testing.T) {
 	tmp, cleanup := setupTestThemes(t)
 	defer cleanup()
-	themeYAML := `meta: {name: "v25-dark"}
-layout: test-layout
-palette: test-palette
+	themeYAML := `meta: {name: "v3-dark"}
+base: test-base
 `
-	dir := filepath.Join(tmp, "v25-dark")
+	dir := filepath.Join(tmp, "v3-dark")
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, "theme.yaml"), []byte(themeYAML), 0o644)
 
 	m := &Manager{themeDirs: []string{tmp}}
-	if err := m.LoadTheme("v25-dark"); err != nil {
+	if err := m.LoadTheme("v3-dark"); err != nil {
 		t.Fatal(err)
 	}
 	light := m.GetResolvedV25()
-	lightBg := ColorToHexRGB(light.Palette.CandidateWindow.Background)
+	lightBg := ColorToHexRGB(light.Palette.Bg)
 
 	m.SetDarkMode(true)
 	dark := m.GetResolvedV25()
-	darkBg := ColorToHexRGB(dark.Palette.CandidateWindow.Background)
+	darkBg := ColorToHexRGB(dark.Palette.Bg)
 
 	if lightBg == darkBg {
 		t.Errorf("dark mode 切换后 bg 未变化: %s == %s", lightBg, darkBg)

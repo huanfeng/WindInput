@@ -2,141 +2,64 @@ package theme
 
 import (
 	"fmt"
-	"reflect"
+	"image/color"
 	"regexp"
 	"strings"
 )
 
-// refRe 匹配 ${name} 引用，name 由字母数字下划线构成；不支持嵌套引用（无点号）
-var refRe = regexp.MustCompile(`\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}`)
+// refRe 匹配 ${name} 引用，name 由字母数字下划线构成。
+var refRe = regexp.MustCompile(`^\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}$`)
 
-// expandPaletteRefs 展开 PaletteVariant 中所有 ${name} 引用。
-// 支持引用的 token：primary、变体内的顶层语义色（bg / surface / border / text / accent / ...）。
-// 不允许两级引用（被引用值再含 ${...} 报错）。
-func expandPaletteRefs(v *PaletteVariant, primary string) error {
-	// 先建一张可引用值表 — 注意：顺序很重要。
-	// 用户可能写 accent: "${primary}"；展开 accent 时需要先解析 primary。
-	// 此处约定 primary 已是字面值（不能为 ${xxx}），由 PaletteSchema 校验保证。
+// resolveColorTokens 把 v3 colors token 表在 isDark 环境下逐 token 递归求值为终值颜色。
+//
+// 求值语义（见 docs/design/theme-schema-v3.md「解析管线」第 3 步）：
+//   - isDark 是贯穿求值的环境参数（非最后一步）：LightDark.Select(isDark) 先选分支；
+//   - 选出的标量若是 "${token}" → 查 colors 表替换，对结果继续求值（多跳展开 + 循环保护）；
+//   - 直到 hex/transparent 标量，再 ParseColor。primary 作为隐式 token 参与引用解析。
+//
+// 返回每个 token 的终值 color.Color；引用未知 token 或成环 → 报错（fail fast）。
+func resolveColorTokens(tokens map[string]Color, primary string, isDark bool) (map[string]color.Color, error) {
 	if hasRef(primary) {
-		return fmt.Errorf("palette.primary 不允许使用 ${} 引用: %q", primary)
+		return nil, fmt.Errorf("palette.primary 不允许使用 ${} 引用: %q", primary)
 	}
+	out := make(map[string]color.Color, len(tokens)+1)
 
-	table := map[string]string{
-		"primary": primary,
-	}
-
-	// 顶层语义色之间也可互引（如 accent: ${primary}）。
-	// 用迭代式展开：每轮把无引用的字面值加入 table；最多 N 轮（防循环）。
-	semFields := []struct {
-		name string
-		ptr  *string
-	}{
-		{"bg", &v.Bg},
-		{"surface", &v.Surface},
-		{"border", &v.Border},
-		{"text", &v.Text},
-		{"text_dim", &v.TextDim},
-		{"text_hint", &v.TextHint},
-		{"accent", &v.Accent},
-		{"on_accent", &v.OnAccent},
-		{"shadow", &v.Shadow},
-	}
-
-	const maxIter = 4
-	for iter := 0; iter < maxIter; iter++ {
-		progress := false
-		for _, f := range semFields {
-			if _, done := table[f.name]; done {
-				continue
-			}
-			if *f.ptr == "" {
-				continue
-			}
-			if !hasRef(*f.ptr) {
-				table[f.name] = *f.ptr
-				progress = true
-				continue
-			}
-			expanded, ok := tryExpand(*f.ptr, table)
-			if ok {
-				if hasRef(expanded) {
-					// 引用目标本身又是引用 — 第二级，禁止
-					return fmt.Errorf("palette.%s 引用链超过 1 级: %q", f.name, *f.ptr)
-				}
-				*f.ptr = expanded
-				table[f.name] = expanded
-				progress = true
-			}
+	// resolveScalar 把一个标量（hex / transparent / ${token}）在当前环境下展开到终值字符串。
+	var resolveScalar func(s string, seen map[string]bool) (string, error)
+	resolveScalar = func(s string, seen map[string]bool) (string, error) {
+		if !hasRef(s) {
+			return s, nil
 		}
-		if !progress {
-			break
+		mm := refRe.FindStringSubmatch(strings.TrimSpace(s))
+		if mm == nil {
+			return "", fmt.Errorf("不支持的颜色引用形态（仅支持单一 ${token}）: %q", s)
 		}
-	}
-
-	// 检查是否仍有未解析的顶层引用
-	for _, f := range semFields {
-		if *f.ptr != "" && hasRef(*f.ptr) {
-			return fmt.Errorf("palette.%s 引用未能解析: %q", f.name, *f.ptr)
+		name := mm[1]
+		if name == "primary" {
+			return primary, nil
 		}
-	}
-
-	// 展开各组件块中的引用：用 reflect 遍历 string 字段
-	componentVals := []reflect.Value{
-		reflect.ValueOf(&v.CandidateWindow).Elem(),
-		reflect.ValueOf(&v.Toolbar).Elem(),
-		reflect.ValueOf(&v.PopupMenu).Elem(),
-		reflect.ValueOf(&v.Tooltip).Elem(),
-		reflect.ValueOf(&v.Status).Elem(),
-		reflect.ValueOf(&v.Toast).Elem(),
-	}
-	for _, cv := range componentVals {
-		if err := expandStringFields(cv, table); err != nil {
-			return err
+		if seen[name] {
+			return "", fmt.Errorf("颜色 token 引用成环: %q", name)
 		}
-	}
-	return nil
-}
-
-func expandStringFields(rv reflect.Value, table map[string]string) error {
-	t := rv.Type()
-	for i := 0; i < rv.NumField(); i++ {
-		fv := rv.Field(i)
-		if fv.Kind() != reflect.String || !fv.CanSet() {
-			continue
-		}
-		s := fv.String()
-		if s == "" || !hasRef(s) {
-			continue
-		}
-		expanded, ok := tryExpand(s, table)
+		seen[name] = true
+		ref, ok := tokens[name]
 		if !ok {
-			return fmt.Errorf("palette.%s 字段引用未知 token: %q", t.Field(i).Name, s)
+			return "", fmt.Errorf("颜色引用未知 token: ${%s}", name)
 		}
-		if hasRef(expanded) {
-			return fmt.Errorf("palette.%s 字段引用链超过 1 级: %q", t.Field(i).Name, s)
-		}
-		fv.SetString(expanded)
+		return resolveScalar(ref.Select(isDark), seen)
 	}
-	return nil
+
+	for name, c := range tokens {
+		scalar, err := resolveScalar(c.Select(isDark), map[string]bool{name: true})
+		if err != nil {
+			return nil, fmt.Errorf("token %q: %w", name, err)
+		}
+		out[name] = parseColorOrTransparent(scalar)
+	}
+	out["primary"] = parseColorOrTransparent(primary)
+	return out, nil
 }
 
 func hasRef(s string) bool {
 	return strings.Contains(s, "${")
-}
-
-// tryExpand 把 ${name} 替换为 table[name]；只要有一个 name 不在 table 则返回 (s, false)。
-// 全部成功时返回 (expanded, true)。
-func tryExpand(s string, table map[string]string) (string, bool) {
-	allFound := true
-	out := refRe.ReplaceAllStringFunc(s, func(m string) string {
-		sub := refRe.FindStringSubmatch(m)
-		name := sub[1]
-		val, ok := table[name]
-		if !ok {
-			allFound = false
-			return m
-		}
-		return val
-	})
-	return out, allFound
 }
