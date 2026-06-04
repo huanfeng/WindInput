@@ -9,7 +9,7 @@
     <div class="settings-card">
       <div class="card-title">字符与标点</div>
       <SchemaRenderer :schema="punctSchema" :form-data="formData" mode="bare" />
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.punct_custom.enabled">
         <div class="setting-info">
           <label>自定义标点映射</label>
           <p class="setting-hint">自定义英文标点的中文/全角替换</p>
@@ -131,7 +131,7 @@
     <!-- 简入繁出（简体输入 → 繁体输出） -->
     <div class="settings-card">
       <div class="card-title">简入繁出</div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="s2t.enabled">
         <div class="setting-info">
           <label>启用简入繁出</label>
           <p class="setting-hint">候选与上屏均输出繁体（基于 OpenCC 词典）</p>
@@ -143,7 +143,7 @@
           </label>
         </div>
       </div>
-      <div class="setting-item" :class="{ 'item-disabled': !s2tEnabled }">
+      <div class="setting-item" data-search-anchor="s2t.variant" :class="{ 'item-disabled': !s2tEnabled }">
         <div class="setting-info">
           <label>转换变体</label>
           <p class="setting-hint">选择目标繁体字形与词汇风格</p>
@@ -162,7 +162,7 @@
     <!-- 标点配对 -->
     <div class="settings-card">
       <div class="card-title">标点配对</div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.auto_pair.chinese">
         <div class="setting-info">
           <label>中文标点自动配对</label>
           <p class="setting-hint">
@@ -185,7 +185,7 @@
           </Button>
         </div>
       </div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.auto_pair.english">
         <div class="setting-info">
           <label>英文标点自动配对</label>
           <p class="setting-hint">
@@ -250,7 +250,7 @@
     <!-- 快捷输入 -->
     <div class="settings-card">
       <div class="card-title">快捷输入</div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.quick_input.trigger_keys">
         <div class="setting-info">
           <label>触发键</label>
           <p class="setting-hint">
@@ -287,7 +287,7 @@
         :form-data="formData"
         mode="bare"
       />
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.temp_pinyin.trigger_keys">
         <div class="setting-info">
           <label>触发键</label>
           <p class="setting-hint">按触发键临时切换拼音输入</p>
@@ -323,7 +323,7 @@
         :form-data="formData"
         mode="bare"
       />
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.shift_temp_english.trigger_keys">
         <div class="setting-info">
           <label>触发键</label>
           <p class="setting-hint">按触发键进入临时英文模式（输入全小写字母）</p>
@@ -355,6 +355,7 @@
       />
       <div
         class="setting-item"
+        data-search-anchor="startup.default_chinese_mode"
         :class="{ 'item-disabled': formData.startup.remember_last_state }"
       >
         <div class="setting-info">
@@ -382,6 +383,7 @@
       </div>
       <div
         class="setting-item"
+        data-search-anchor="startup.default_full_width"
         :class="{ 'item-disabled': formData.startup.remember_last_state }"
       >
         <div class="setting-info">
@@ -409,6 +411,7 @@
       </div>
       <div
         class="setting-item"
+        data-search-anchor="startup.default_chinese_punct"
         :class="{ 'item-disabled': formData.startup.remember_last_state }"
       >
         <div class="setting-info">

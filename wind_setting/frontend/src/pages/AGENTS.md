@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-06-03 -->
 
 # pages
 
@@ -92,10 +92,33 @@ async function handleSaveShadowRule() {
 />
 ```
 
+## 搜索清单（*.search.ts）
+
+每个页面对应一个 `<page>.search.ts`，导出 `entries: SearchEntry[]`，由 `src/searchIndex.ts` 通过 `import.meta.glob('./pages/*.search.ts', { eager: true })` 编译期自动收集，无需手动注册。
+
+### 现有清单文件
+| 文件 | 对应标签页 | 说明 |
+|------|-----------|------|
+| `general.search.ts` | 方案 | 手写条目（主方案选择）+ 拼音/码表两条引擎入口条目（`openDialog: "schemaSettingsPinyin"`/`"schemaSettingsCodetable"`，按引擎路由到主方案）+ 方案管理动作入口 |
+| `input.search.ts` | 输入 | `schemaToEntries` 派生的 schema 条目 + 手写卡片（简入繁出等）补充条目 |
+| `hotkey.search.ts` | 按键 | 整页手写条目（HotkeyPage 全手写，无 schema） |
+| `appearance.search.ts` | 外观 | `schemaToEntries` 派生 + 手写卡片补充条目 |
+| `advanced.search.ts` | 高级 | `schemaToEntries` 派生 |
+| `dictionary.search.ts` | 词库 | 仅 dialog 入口条目（`openDialog: "importDict"` / `"exportDict"`）；DictionaryPage 整页为列表/动作 UI，无普通配置项 |
+
+### 约定
+- schema 字段由 `schemaToEntries(schema, ctx)` 派生，`anchor` 默认等于字段 `key`，与 `FieldRenderer` 的 `data-search-anchor` 对齐。
+- 手写控件条目需在 `.vue` 模板对应行根上手工加 `data-search-anchor="<anchor>"` 才能支持跳转高亮。
+- `openDialog` 字段（`"schemaSettingsPinyin"` / `"schemaSettingsCodetable"` / `"importDict"` / `"exportDict"`）用于 dialog 入口条目：`anchor` 可留空，`jumpTo` 切 tab 后通过回调打开弹窗，不滚动到字段。方案专属设置按引擎类型路由到主拼音/主码表方案。
+- 护栏：`id` 全局唯一（`searchIndex.test.ts` 校验）；每条 `title` / `anchor` 至少有一个非空（`anchor` 对 dialog 入口可为空，但 `openDialog` 必须非空作为替代）。
+- 新增页面搜索清单：创建 `<page>.search.ts` 并导出 `entries: SearchEntry[]`，Vite glob 自动收集，无需改 `searchIndex.ts`。
+
 ## Dependencies
 ### Internal
 - `../api/wails` — Wails IPC API（DictionaryPage 直接使用：Shadow pin/delete/remove、短语、用户词库；AppearancePage 通过父组件 props 传入 theme 数据）
 - `../api/settings` — Config 类型定义
+- `../schemas/searchEntry` — `SearchEntry` 类型（各 `*.search.ts` 引用）
+- `../schemas/*.schema.ts` — 各页 schema 实例（由 `*.search.ts` 调用 `schemaToEntries` 时引用）
 
 ### External
 - Vue 3（`ref`、`computed`、`defineProps`、`defineEmits`、`onMounted`、`watch`）

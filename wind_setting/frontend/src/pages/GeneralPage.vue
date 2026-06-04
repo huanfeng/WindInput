@@ -56,6 +56,15 @@ function openSchemaSettings(schemaID: string) {
   showSchemaSettings.value = true;
 }
 
+function openSchemaSettingsByEngine(engine: "pinyin" | "codetable") {
+  const id =
+    engine === "pinyin" ? primaryPinyin.value : primaryCodetable.value;
+  if (id) openSchemaSettings(id);
+  else if (activeSchemaID.value) openSchemaSettings(activeSchemaID.value);
+}
+
+defineExpose({ openSchemaSettingsByEngine });
+
 // 方案引用关系
 const schemaReferences = ref<Record<string, SchemaReference>>({});
 // 仅通过引用显示的方案ID（不在 available 列表中）
@@ -419,7 +428,10 @@ const primaryPinyin = computed({
     </div>
 
     <!-- 方案列表 -->
-    <div class="settings-card schema-list-card">
+    <div
+      class="settings-card schema-list-card"
+      data-search-anchor="general.action.schema_manager"
+    >
       <div class="card-title schema-list-header">
         <span>输入方案</span>
         <Button size="sm" @click="showSchemaManager = true"> 方案管理 </Button>
@@ -554,7 +566,7 @@ const primaryPinyin = computed({
     <div class="settings-card primary-schema-card">
       <div class="card-title">主方案设置</div>
 
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="schema.primaryCodetable">
         <div class="setting-info">
           <label>主码表方案</label>
           <p class="setting-hint">拼音方案的"反查/编码提示"基于此方案的码表</p>
@@ -577,7 +589,7 @@ const primaryPinyin = computed({
         </div>
       </div>
 
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="schema.primaryPinyin">
         <div class="setting-info">
           <label>主拼音方案</label>
           <p class="setting-hint">码表方案的"临时拼音"使用此方案</p>

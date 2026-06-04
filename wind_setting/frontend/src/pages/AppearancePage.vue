@@ -198,7 +198,7 @@ onUnmounted(() => {
     <!-- 主题选择 -->
     <div class="settings-card" v-if="isWailsEnv">
       <div class="card-title">主题</div>
-      <div class="setting-item align-start">
+      <div class="setting-item align-start" data-search-anchor="ui.theme">
         <div class="setting-info">
           <label>主题选择</label>
           <p class="setting-hint">候选窗与工具栏的主题样式</p>
@@ -319,7 +319,11 @@ onUnmounted(() => {
                     <div
                       v-for="(item, idx) in [
                         { n: resolveIndexLabel(0), text: '中文', hover: true },
-                        { n: resolveIndexLabel(1), text: '清风', comment: 'igmq' },
+                        {
+                          n: resolveIndexLabel(1),
+                          text: '清风',
+                          comment: 'igmq',
+                        },
                         { n: resolveIndexLabel(2), text: '输入' },
                       ]"
                       :key="idx"
@@ -448,10 +452,12 @@ onUnmounted(() => {
 
     <div class="settings-card">
       <div class="card-title">候选窗口</div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="ui.font_size_follow_theme">
         <div class="setting-info">
           <label>字号跟随主题</label>
-          <p class="setting-hint">开启后候选字号由主题决定；关闭可在下方自定义</p>
+          <p class="setting-hint">
+            开启后候选字号由主题决定；关闭可在下方自定义
+          </p>
         </div>
         <div class="setting-control">
           <Switch
@@ -462,6 +468,7 @@ onUnmounted(() => {
       </div>
       <div
         class="setting-item"
+        data-search-anchor="ui.font_size"
         :class="{ 'setting-item-disabled': formData.ui.font_size_follow_theme }"
       >
         <div class="setting-info">
@@ -480,7 +487,11 @@ onUnmounted(() => {
           <span class="range-value">{{ formData.ui.font_size }}px</span>
         </div>
       </div>
-      <div class="setting-item" v-if="isWailsEnv">
+      <div
+        class="setting-item"
+        data-search-anchor="ui.font_family"
+        v-if="isWailsEnv"
+      >
         <div class="setting-info">
           <label>候选字体</label>
           <p class="setting-hint">自定义字体，留空跟随系统默认</p>
@@ -513,7 +524,7 @@ onUnmounted(() => {
         :form-data="formData"
         mode="bare"
       />
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="ui.cmdbar_candidate_prefix">
         <div class="setting-info">
           <label>命令直通车标注</label>
           <p class="setting-hint">命令候选前的提示符号</p>
@@ -536,11 +547,7 @@ onUnmounted(() => {
             <span class="cmdbar-prefix-chip">{{
               formData.ui.cmdbar_candidate_prefix
             }}</span>
-            <Button
-              variant="outline"
-              size="sm"
-              @click="openCmdbarPrefixDialog"
-            >
+            <Button variant="outline" size="sm" @click="openCmdbarPrefixDialog">
               编辑
             </Button>
           </template>
@@ -556,7 +563,11 @@ onUnmounted(() => {
         mode="bare"
       />
       <!-- 显示内容（复选框组，无对应 schema 类型） -->
-      <div class="setting-item" v-if="formData.ui.status_indicator.enabled">
+      <div
+        class="setting-item"
+        data-search-anchor="ui.status_indicator.show_items"
+        v-if="formData.ui.status_indicator.enabled"
+      >
         <div class="setting-info">
           <label>显示内容</label>
           <p class="setting-hint">状态提示中要显示的图标</p>
@@ -634,11 +645,7 @@ onUnmounted(() => {
           @keydown.enter="confirmCmdbarPrefixDialog"
         />
         <DialogFooter>
-          <Button
-            variant="outline"
-            size="sm"
-            @click="cancelCmdbarPrefixDialog"
-          >
+          <Button variant="outline" size="sm" @click="cancelCmdbarPrefixDialog">
             取消
           </Button>
           <Button size="sm" @click="confirmCmdbarPrefixDialog">确定</Button>

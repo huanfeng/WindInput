@@ -7,7 +7,7 @@
 
     <div class="settings-card">
       <div class="card-title">配置文件</div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="advanced.action.config_dir">
         <div class="setting-info">
           <label>配置文件目录</label>
           <p class="setting-hint">{{ configDirDisplay }}</p>
@@ -25,7 +25,10 @@
           >
         </div>
       </div>
-      <div class="setting-item">
+      <div
+        class="setting-item"
+        data-search-anchor="advanced.action.backup_restore"
+      >
         <div class="setting-info">
           <label>数据备份与还原</label>
           <p class="setting-hint">备份用户词库、词频、短语及统计数据</p>
@@ -53,7 +56,7 @@
       />
       <!-- TSF（Windows 文本服务框架）日志：macOS 用 IMKit，无 TSF，隐藏 -->
       <template v-if="!isMac">
-        <div class="setting-item">
+        <div class="setting-item" data-search-anchor="advanced.tsf_log_mode">
           <div class="setting-info">
             <label>TSF 日志输出方式</label>
             <p class="setting-hint">仅对新进程生效</p>
@@ -77,7 +80,7 @@
             </Select>
           </div>
         </div>
-        <div class="setting-item">
+        <div class="setting-item" data-search-anchor="advanced.tsf_log_level">
           <div class="setting-info">
             <label>TSF 日志级别</label>
             <p class="setting-hint">仅在排障时临时启用 Debug / Trace</p>
@@ -110,7 +113,7 @@
           </p>
         </div>
       </div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="advanced.action.logs_dir">
         <div class="setting-info">
           <label>日志目录</label>
           <p class="setting-hint">{{ logsDirDisplay }}</p>
@@ -138,7 +141,7 @@
           </p>
         </div>
       </div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="advanced.action.perf_data">
         <div class="setting-info">
           <label>采样状态</label>
           <p class="setting-hint">
@@ -179,7 +182,7 @@
 
     <div class="settings-card">
       <div class="card-title">内存诊断</div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="advanced.action.mem_diag">
         <div class="setting-info">
           <label>Go 运行时内存</label>
           <p class="setting-hint">查看堆内存与 GC 统计，可导出 pprof 文件</p>

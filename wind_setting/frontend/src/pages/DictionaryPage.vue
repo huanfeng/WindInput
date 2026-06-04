@@ -25,7 +25,10 @@
 
     <template v-else>
       <!-- ===== 内容卡片（包含类型选择器 + 面板） ===== -->
-      <div class="dict-content-card">
+      <div
+        class="dict-content-card"
+        data-search-anchor="dictionary.action.manage"
+      >
         <!-- ===== 类型选择器行 ===== -->
         <DictTypeSelector :schemas="allSchemaStatuses" v-model="selection">
           <template #actions>
@@ -603,6 +606,8 @@ watch(
 onUnmounted(() => {
   wailsApi.offDictEvent();
 });
+
+defineExpose({ openIeDialog });
 </script>
 
 <style scoped>

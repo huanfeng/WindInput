@@ -624,7 +624,7 @@ onUnmounted(() => {
       <!-- 统计设置 -->
       <div class="settings-card">
         <div class="card-title">统计设置</div>
-        <div class="setting-item">
+        <div class="setting-item" data-search-anchor="stats.enabled">
           <div class="setting-info">
             <label>启用输入统计</label>
           </div>
@@ -635,7 +635,7 @@ onUnmounted(() => {
             />
           </div>
         </div>
-        <div class="setting-item">
+        <div class="setting-item" data-search-anchor="stats.track_english">
           <div class="setting-info">
             <label>统计英文模式</label>
           </div>
@@ -646,7 +646,7 @@ onUnmounted(() => {
             />
           </div>
         </div>
-        <div class="setting-item">
+        <div class="setting-item" data-search-anchor="stats.action.clear_old">
           <div class="setting-info">
             <label>数据清理</label>
             <p class="setting-hint">删除指定范围前的历史数据</p>

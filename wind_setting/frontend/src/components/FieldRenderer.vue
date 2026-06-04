@@ -87,6 +87,7 @@ function onSelectChange(raw: string) {
   <div
     v-if="field.type === 'toggle'"
     class="setting-item"
+    :data-search-anchor="field.key"
     :class="{ 'item-disabled': isDisabled }"
   >
     <div class="setting-info">
@@ -105,6 +106,7 @@ function onSelectChange(raw: string) {
   <div
     v-else-if="field.type === 'select'"
     class="setting-item"
+    :data-search-anchor="field.key"
     :class="{ 'item-disabled': isDisabled }"
   >
     <div class="setting-info">
@@ -153,6 +155,7 @@ function onSelectChange(raw: string) {
   <div
     v-else-if="field.type === 'slider'"
     class="setting-item"
+    :data-search-anchor="field.key"
     :class="{ 'item-disabled': isDisabled }"
   >
     <div class="setting-info">
@@ -176,6 +179,7 @@ function onSelectChange(raw: string) {
   <div
     v-else-if="field.type === 'number-input'"
     class="setting-item"
+    :data-search-anchor="field.key"
     :class="{ 'item-disabled': isDisabled }"
   >
     <div class="setting-info">

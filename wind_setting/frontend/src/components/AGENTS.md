@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-01 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-01 | Updated: 2026-06-03 -->
 
 # components
 
@@ -10,6 +10,7 @@
 | 文件 | 说明 |
 |------|------|
 | `ToastContainer.vue` | 全局浮动 Toast 容器：接收 `toasts: ToastItem[]` prop，通过 `<Teleport to="body">` 渲染到页面顶层；使用 `<TransitionGroup>` 实现入场/离场动画；支持 `success`（绿色）和 `error`（红色）两种类型 |
+| `SettingsSearch.vue` | 侧栏搜索框 + 结果下拉面板 + 键盘导航（↑↓/Enter/Esc）；从 `searchIndex` 消费全局索引，调用 `filterEntries` 过滤；`emits: jump(entry: SearchEntry)`，由 `App.vue` 接收后调用 `useSettingsSearch().jumpTo` |
 | `dict/` | 词库管理相关组件（DictDataTable、短语/用户词库/临时词库/Shadow 管理面板、导入导出） (see `dict/AGENTS.md`) |
 | `ui/` | shadcn UI 组件（auto-generated，勿手动编辑） |
 
@@ -20,6 +21,7 @@
 - Toast 样式定义在组件内（非 scoped），因为通过 Teleport 渲染到 body 时 scoped 选择器失效
 - Toast 默认显示 3000ms 后自动消失（由 `useToast` 的 `setTimeout` 控制，非组件本身）
 - 新增组件时，若需全局层级（遮罩、弹窗等），使用 `<Teleport to="body">` 避免层叠上下文问题
+- **`SettingsSearch.vue`**：只负责 UI 展示与键盘导航，不持有跳转逻辑；通过 `emit('jump', entry)` 将选中条目交给 `App.vue`；`defineExpose({ focus })` 支持从父组件聚焦搜索框（如 Ctrl+F 快捷键）
 
 ### Toast 视觉规格
 | 属性 | 值 |
@@ -51,8 +53,10 @@ toast('提示信息', 'success', 2000)  // 自定义显示时长（ms）
 ## Dependencies
 ### Internal
 - `../composables/useToast` — `ToastItem` 类型定义
+- `../schemas/searchEntry` — `SearchEntry` 类型、`filterEntries`（`SettingsSearch.vue` 使用）
+- `../searchIndex` — `searchIndex: SearchEntry[]` 全局索引（`SettingsSearch.vue` 消费）
 
 ### External
-- Vue 3（`Teleport`、`TransitionGroup`、`defineProps`）
+- Vue 3（`Teleport`、`TransitionGroup`、`defineProps`、`ref`、`computed`）
 
 <!-- MANUAL: -->

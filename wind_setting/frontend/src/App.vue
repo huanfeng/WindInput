@@ -45,6 +45,9 @@ import StatsPage from "./pages/StatsPage.vue";
 import AboutPage from "./pages/AboutPage.vue";
 import AddWordPage from "./pages/AddWordPage.vue";
 import type { AddWordParams } from "./api/wails";
+import SettingsSearch from "./components/SettingsSearch.vue";
+import { useSettingsSearch } from "./composables/useSettingsSearch";
+import type { SearchEntry } from "./schemas/searchEntry";
 
 // 检测是否在 Wails 环境中
 const isWailsEnv = computed(() => {
@@ -86,6 +89,21 @@ const connected = ref(false);
 const activeTab = ref("general");
 const contentRef = ref<HTMLElement | null>(null);
 const saving = ref(false);
+
+const generalPageRef = ref<InstanceType<typeof GeneralPage> | null>(null);
+const dictPageRef = ref<InstanceType<typeof DictionaryPage> | null>(null);
+
+const { jumpTo } = useSettingsSearch({
+  activeTab,
+  container: contentRef,
+  onOpenSchemaSettings: (engine) =>
+    generalPageRef.value?.openSchemaSettingsByEngine(engine),
+  onOpenImportExport: (mode) => dictPageRef.value?.openIeDialog(mode),
+});
+
+async function onSearchJump(entry: SearchEntry) {
+  await jumpTo(entry);
+}
 
 // 切换页面时重置滚动位置
 watch(activeTab, () => {
@@ -346,9 +364,7 @@ async function saveConfig() {
       const reply = await wailsApi.setConfigItems(items);
       await wailsApi.saveTSFLogConfig(tsfLogConfig.value);
       toast(
-        reply.requires_restart
-          ? "保存成功（部分设置需重启生效）"
-          : "保存成功",
+        reply.requires_restart ? "保存成功（部分设置需重启生效）" : "保存成功",
       );
       config.value = JSON.parse(JSON.stringify(formData.value));
       savedTSFLogConfig.value = JSON.parse(JSON.stringify(tsfLogConfig.value));
@@ -784,6 +800,7 @@ onUnmounted(() => {
           :title="connected ? '已连接' : '未连接'"
         ></span>
       </div>
+      <SettingsSearch @jump="onSearchJump" />
       <nav class="nav">
         <button
           v-for="tab in tabs"
@@ -827,6 +844,7 @@ onUnmounted(() => {
 
       <div v-else class="content" ref="contentRef">
         <GeneralPage
+          ref="generalPageRef"
           v-show="activeTab === 'general'"
           :formData="formData"
           :engines="engines"
@@ -856,12 +874,17 @@ onUnmounted(() => {
         />
 
         <DictionaryPage
+          ref="dictPageRef"
           v-show="activeTab === 'dictionary'"
           :isWailsEnv="isWailsEnv"
           :activeTab="activeTab"
         />
 
-        <StatsPage v-show="activeTab === 'stats'" :isWailsEnv="isWailsEnv" :formData="formData" />
+        <StatsPage
+          v-show="activeTab === 'stats'"
+          :isWailsEnv="isWailsEnv"
+          :formData="formData"
+        />
 
         <AdvancedPage
           v-show="activeTab === 'advanced'"
@@ -916,3 +939,26 @@ onUnmounted(() => {
     </AlertDialog>
   </div>
 </template>
+
+<style>
+.search-flash {
+  position: relative;
+}
+.search-flash::after {
+  content: "";
+  position: absolute;
+  inset: -2px; /* 四边外扩 2px，高亮包裹住整个设置项（含右侧控件），不裁掉贴边内容 */
+  border-radius: 8px;
+  background: hsl(var(--primary, 220 90% 56%) / 0.18);
+  animation: search-flash-kf 1.5s ease-out forwards;
+  pointer-events: none; /* 覆盖在整行上方的半透明高亮，包裹整个设置项且不挡交互 */
+}
+@keyframes search-flash-kf {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+</style>

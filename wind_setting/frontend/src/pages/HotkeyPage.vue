@@ -21,7 +21,7 @@
     <!-- 中英文切换 -->
     <div class="settings-card">
       <div class="card-title">中英文切换</div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="hotkeys.toggle_mode_keys">
         <div class="setting-info">
           <label>切换按键</label>
           <p class="setting-hint">可多选，按下任意一个即切换</p>
@@ -51,7 +51,7 @@
           </div>
         </div>
       </div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="hotkeys.commit_on_switch">
         <div class="setting-info">
           <label>切换时编码上屏</label>
           <p class="setting-hint">中文切换为英文时，将已输入的编码直接上屏</p>
@@ -72,7 +72,7 @@
         <span class="warning-icon">⚠</span>
         <span>置顶和删除不能使用相同的快捷键</span>
       </div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="hotkeys.pin_candidate">
         <div class="setting-info">
           <label>置顶词条</label>
           <p class="setting-hint">将候选词固定到首位</p>
@@ -95,7 +95,7 @@
           </Select>
         </div>
       </div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="hotkeys.delete_candidate">
         <div class="setting-info">
           <label>删除词条</label>
           <p class="setting-hint">隐藏候选词（单字不可删除）</p>
@@ -123,7 +123,7 @@
     <!-- 候选操作 -->
     <div class="settings-card">
       <div class="card-title">候选操作</div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.select_key_groups">
         <div class="setting-info">
           <label>次选/三选快捷键</label>
           <p class="setting-hint">选中第2、3位候选词的快捷键</p>
@@ -169,7 +169,7 @@
           </div>
         </div>
       </div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.highlight_keys">
         <div class="setting-info">
           <label>高亮移动按键</label>
           <p class="setting-hint">
@@ -202,7 +202,7 @@
           </div>
         </div>
       </div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.page_keys">
         <div class="setting-info">
           <label>翻页快捷键</label>
           <p class="setting-hint">同时启用多组翻页键</p>
@@ -251,7 +251,7 @@
           </div>
         </div>
       </div>
-      <div class="setting-item">
+      <div class="setting-item" data-search-anchor="input.select_char_keys">
         <div class="setting-info">
           <label>以词定字</label>
           <p class="setting-hint">
@@ -301,6 +301,7 @@
       <HotkeyComposer
         v-for="item in visibleComposerItems"
         :key="item.field"
+        :data-search-anchor="`hotkeys.${item.field}`"
         :label="item.label"
         :hint="item.hint"
         :model-value="getHotkeyValue(item.field)"

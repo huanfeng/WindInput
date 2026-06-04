@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-05-01 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-06-03 -->
 
 # src
 
@@ -10,7 +10,8 @@
 | 文件 | 说明 |
 |------|------|
 | `main.ts` | Vue 应用入口，挂载 `App.vue` 到 `#app` |
-| `App.vue` | 根组件：侧边栏 + 内容区；管理全局 `formData`（Config）、`status`、`engines`、`availableThemes`、`themePreview`；通过 `provideToast()` 提供全局 Toast 上下文；包含 `AddWordPage` 对话框逻辑（独立加词窗口模式和嵌入弹出模式） |
+| `App.vue` | 根组件：侧边栏 + 内容区；管理全局 `formData`（Config）、`status`、`engines`、`availableThemes`、`themePreview`；通过 `provideToast()` 提供全局 Toast 上下文；包含 `AddWordPage` 对话框逻辑（独立加词窗口模式和嵌入弹出模式）；接入 `SettingsSearch` 并调用 `useSettingsSearch().jumpTo` 处理跳转 |
+| `searchIndex.ts` | 编译期聚合搜索索引：通过 `import.meta.glob('./pages/*.search.ts', { eager: true })` 收集所有页面清单，导出 `searchIndex: SearchEntry[]`；新增页面清单自动纳入，无需改动本文件 |
 | `style.css` | 基础全局样式 |
 | `global.css` | 补充全局样式（字体等） |
 | `vite-env.d.ts` | Vite 环境类型声明 |
@@ -19,9 +20,10 @@
 | 目录 | 说明 |
 |------|------|
 | `api/` | API 调用层 (see `api/AGENTS.md`) |
-| `pages/` | 各设置页面组件（含 AddWordPage） (see `pages/AGENTS.md`) |
-| `components/` | 可复用组件（ToastContainer、词库管理） (see `components/AGENTS.md`) |
-| `composables/` | Vue composables（useToast） (see `composables/AGENTS.md`) |
+| `pages/` | 各设置页面组件（含 AddWordPage）及搜索清单 `*.search.ts` (see `pages/AGENTS.md`) |
+| `components/` | 可复用组件（ToastContainer、SettingsSearch、词库管理） (see `components/AGENTS.md`) |
+| `composables/` | Vue composables（useToast、useSettingsSearch） (see `composables/AGENTS.md`) |
+| `schemas/` | 设置项 Schema 类型体系 + 搜索条目纯函数 (see `schemas/AGENTS.md`) |
 | `assets/` | 静态资源（字体、图片） (see `assets/AGENTS.md`) |
 | `lib/` | 工具函数库（样式类合并） (see `lib/AGENTS.md`) |
 
