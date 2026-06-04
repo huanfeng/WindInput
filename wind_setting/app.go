@@ -29,6 +29,9 @@ type App struct {
 	// 启动时自动检查到的更新结果，供前端主动拉取（避免 emit 比 EventsOn 注册更早）
 	startupUpdateMu     sync.Mutex
 	startupUpdateResult *updater.CheckResult
+
+	// themeServer 在线主题编辑 HTTP 服务（开关由前端控制）
+	themeServer *ThemeServer
 }
 
 // NewApp creates a new App application struct
@@ -86,7 +89,11 @@ func (a *App) startup(ctx context.Context) {
 }
 
 // shutdown is called when the app is closing
-func (a *App) shutdown(ctx context.Context) {}
+func (a *App) shutdown(ctx context.Context) {
+	if a.themeServer != nil {
+		a.themeServer.Stop()
+	}
+}
 
 // runStartupUpdateCheck 后台静默检查更新，有新版本时：
 // 1. 存入 startupUpdateResult 供前端主动拉取（GetPendingUpdate）

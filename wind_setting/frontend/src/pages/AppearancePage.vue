@@ -2,7 +2,12 @@
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { ChevronDown } from "lucide-vue-next";
 import type { Config } from "../api/settings";
-import type { ThemeInfo, ThemePreview, SystemFontInfo } from "../api/wails";
+import type { ThemeInfo, ThemePreview, SystemFontInfo, ThemeServerStatus } from "../api/wails";
+import {
+  startThemeServer,
+  stopThemeServer,
+  getThemeServerStatus,
+} from "../api/wails";
 import {
   Select,
   SelectTrigger,
@@ -49,6 +54,11 @@ const emit = defineEmits<{
 }>();
 
 const themeImportOpen = ref(false);
+
+const themeServerRunning = ref(false);
+const themeServerURL = ref("");
+const themeServerError = ref("");
+const themeServerLoading = ref(false);
 
 function onThemeImported(themeName: string) {
   themeImportOpen.value = false;
@@ -188,13 +198,57 @@ function handleDocumentClick(event: MouseEvent) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   document.addEventListener("click", handleDocumentClick);
+  if (props.isWailsEnv) {
+    try {
+      const status = await getThemeServerStatus();
+      themeServerRunning.value = status.running;
+      themeServerURL.value = status.url;
+    } catch {
+      // 后端未就绪时静默忽略，保持默认关闭状态
+    }
+  }
 });
 
 onUnmounted(() => {
   document.removeEventListener("click", handleDocumentClick);
 });
+
+async function toggleThemeServer(enabled: boolean) {
+  themeServerError.value = "";
+  themeServerLoading.value = true;
+  try {
+    if (enabled) {
+      try {
+        const status = await startThemeServer();
+        themeServerRunning.value = true;
+        themeServerURL.value = status.url;
+      } catch (e) {
+        themeServerError.value = String(e);
+      }
+    } else {
+      try {
+        await stopThemeServer();
+        themeServerRunning.value = false;
+        themeServerURL.value = "";
+      } catch (e) {
+        themeServerError.value = String(e);
+      }
+    }
+  } finally {
+    themeServerLoading.value = false;
+  }
+}
+
+async function copyServerURL() {
+  if (!themeServerURL.value) return;
+  try {
+    await navigator.clipboard.writeText(themeServerURL.value);
+  } catch {
+    // Wails webview 中 clipboard API 不可用时静默忽略
+  }
+}
 </script>
 
 <template>
@@ -462,6 +516,29 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
+
+      <!-- 在线编辑开关（内嵌于主题卡片） -->
+      <div v-if="isWailsEnv" class="setting-item" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);">
+        <div class="setting-info">
+          <label>开启 Web 编辑器连接</label>
+          <p class="setting-hint">允许 Web 编辑器推送主题到本地输入法</p>
+        </div>
+        <div class="setting-control">
+          <Switch
+            :checked="themeServerRunning"
+            :disabled="themeServerLoading"
+            @update:checked="toggleThemeServer"
+          />
+        </div>
+      </div>
+      <div v-if="isWailsEnv && themeServerRunning" class="flex items-center gap-2 text-xs" style="margin-top: 6px;">
+        <span class="text-green-500">●</span>
+        <span class="text-muted-foreground flex-1 truncate">{{ themeServerURL }}</span>
+        <Button size="sm" variant="outline" @click="copyServerURL">复制地址</Button>
+      </div>
+      <p v-if="isWailsEnv && themeServerError" class="text-xs text-destructive" style="margin-top: 4px;">
+        {{ themeServerError }}
+      </p>
     </div>
 
     <div class="settings-card">

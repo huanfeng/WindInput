@@ -1284,3 +1284,23 @@ export async function restoreData(zipPath: string): Promise<string> {
 export async function resetData(): Promise<string> {
   return App.ResetData() as unknown as string;
 }
+
+// ========== 在线主题编辑服务 ==========
+
+export interface ThemeServerStatus {
+  running: boolean;
+  port: number;
+  url: string;
+}
+
+export async function startThemeServer(): Promise<ThemeServerStatus> {
+  return (window as any).go.main.App.StartThemeServer();
+}
+
+export async function stopThemeServer(): Promise<void> {
+  return (window as any).go.main.App.StopThemeServer();
+}
+
+export async function getThemeServerStatus(): Promise<ThemeServerStatus> {
+  return (window as any).go.main.App.GetThemeServerStatus();
+}
