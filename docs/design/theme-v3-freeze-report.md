@@ -98,7 +98,7 @@ resources:
 ```
 margin / padding : ViewEdges{top,right,bottom,left : Dimension}
 border           : ViewBorder{width *Dimension, color string(token), radius *Dimension}
-background       : ViewFill{ color, shape(circle|none), gradient*, image:ViewImage }
+background       : ViewFill{ color, shape(circle|none), gradient(linear/radial), image:ViewImage }
 font_family / font_size(相对主字号有符号偏移) / font_weight / color(token)
 labels[]         : 仅 index（序号槽位 ≤10）
 layers[]         : ViewImage{ ref,mode(nine_slice|stretch|tile|center),slice,opacity,z,anchor,offset{x,y},size{w,h} }
@@ -112,7 +112,8 @@ selected / hover / disabled : *ViewNode（递归 patch）
 
 **状态 patch 递归**：消费层 `RVNode.Selected/Hover/Disabled *RVNode`（取代扁平 `RVState`）——未来 hover 要渐变/图层时零改结构。各字段零值/nil = 该属性不覆盖、沿用基态。
 
-> 标 `*` 的字段（`gradient`、阴影 `blur`/`spread`、item 基底色/border、preedit border、footer align、disabled 运行时触发器）是**可补能力**：schema 占位、merge 保留、渲染 later。v3 只对齐 v2.6 现状渲染，不在结构改造里夹带能力补全（保回归判据纯粹）。
+> 标 `*` 的字段（阴影 `blur`/`spread`、item 基底色/border、preedit border、footer align、disabled 运行时触发器）是**可补能力**：schema 占位、merge 保留、渲染 later。v3 只对齐 v2.6 现状渲染，不在结构改造里夹带能力补全（保回归判据纯粹）。
+> **`gradient` 已于 P7-E 落地渲染**（linear/radial，`pkg/theme/gradient.go`），能力矩阵标 `supported`，不再是占位字段。
 
 ## 七、behavior（哲学Y：主题推荐默认 + 用户覆盖层，冻结）
 
@@ -195,7 +196,7 @@ views:  { item: { border: { radius: 8 } } }                 # 局部覆盖
 
 ## 十二、能力声明 schema（Capability Manifest）
 
-冻结的 schema 字段渲染消费不均：有的已渲染（真能力）、有的 schema 占位但渲染未实现（假字段，如 `gradient`/`shadow.blur`）、有的对某 view 概念上无意义（如 `status` 无交互状态）。**能力声明 schema** 给出权威清单消解这种歧义，作前后端统一标准。
+冻结的 schema 字段渲染消费不均：有的已渲染（真能力）、有的 schema 占位但渲染未实现（假字段，如 `shadow.blur`/`spread`）、有的对某 view 概念上无意义（如 `status` 无交互状态）。**能力声明 schema** 给出权威清单消解这种歧义，作前后端统一标准。
 
 - **真相源**：`pkg/theme/capability.go` 的 `ThemeCapabilities`（Go 权威矩阵）→ `MarshalCapabilities()` 导出 `docs/design/theme-capabilities.json`（前端编辑器消费）。
 - **三态**：`supported`（已渲染）/ `reserved`（schema 有、渲染未实现）/ `unsupported`（该 view 概念不支持）。编辑器：supported→正常控件、reserved→灰显标"未生效"、unsupported→隐藏；引擎：reserved/unsupported→忽略。
