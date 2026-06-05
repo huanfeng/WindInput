@@ -172,6 +172,8 @@ func effectiveNode(n theme.RVNode, selected, hover bool) theme.RVNode {
 	if st == nil {
 		return n
 	}
+	// 仅合并颜色/边框/字重/字体族（状态态的有意范围）；padding/margin/font_size 不合并
+	// （capability `state_geometry`=unsupported）。需要状态态改几何时，在此补合并 + 放开 resolveState 判定。
 	out := n
 	if st.BgColor != nil {
 		out.BgColor = st.BgColor

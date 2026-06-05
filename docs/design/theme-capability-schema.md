@@ -37,7 +37,7 @@ const (
 | 颜色 | `background_color` `text_color` |
 | 背景填充 | `background_image` `background_gradient` `background_shape` |
 | 字体 | `font`（size/weight/family 合一） |
-| 状态 | `state_selected` `state_hover` `state_disabled` |
+| 状态 | `state_selected` `state_hover` `state_disabled` · `state_geometry`（状态态能否覆盖几何） |
 | 层/阴影 | `layers` `shadow_offset` `shadow_blur_spread` |
 | 间距 | `line_spacing` `col_gap` `title_gap`（提示窗）· `item_spacing` `band_gap` `row_gap`（候选列表：横向 / band / 纵向） |
 | 节点专有 | `index_shape` `index_labels` `accent_bar` `footer_arrow_image` `pager` `mode_states` |
@@ -97,6 +97,12 @@ JSON 形态（稳定、语言无关）：
 
 候选项无禁用业务语义（`Candidate` 无 disabled 字段、无触发源），故 `item/index/comment` 的 `state_disabled` 在矩阵中标 `unsupported`，**不新增无触发源的假字段**。菜单项 `state_disabled` 已完整实现（`MenuItem.Disabled`），标 `supported`。
 
+### 状态态覆盖范围的处理（澄清）
+
+状态态 patch（`selected`/`hover`/`disabled`）schema 上是完整 `ViewNode`，但**渲染只消费颜色/边框/字重覆盖**——`resolveState` 的"有无覆盖"判定不看几何、`effectiveNode` 合并时也不碰 `padding`/`margin`/`font_size`。即"选中态改间距/字号"是声明可写、渲染必忽略的假字段。
+
+故新增单一能力键 `state_geometry`（粒度="状态态能否改几何"，非每个几何叶子 × 每个状态，避免矩阵爆炸），在所有有状态的 view（`item`/`index`/`text`/`comment`/`menu.item`）标 `unsupported`。编辑器据此在状态态编辑器里隐藏/灰显几何控件，只留颜色/边框/字重。转 `supported` 须先补齐 `resolveState`+`effectiveNode` 的几何消费并重做 golden。详见 `theme-dimension-inheritance.md`。
+
 ## 五、回归判据
 
 - `TestV3GoldenSnapshot` 全程逐字节绿（本次改动设计为 golden 零影响）。
@@ -108,3 +114,30 @@ JSON 形态（稳定、语言无关）：
 
 - 能力维度键白名单、view 主体白名单变更须同步本文档 + `capability.go` 注释。
 - 渲染补全把格子从 `reserved`/`unsupported` 转 `supported` 时，必须同时落地真实渲染消费（不得空转声明）。
+
+## 七、编辑器消费契约：能力三态 × 继承三态（正交）
+
+编辑器（独立仓 `WindInputThemeEditor`；`wind_setting` 只编辑 `ui.*` 高层覆盖，不碰 `views` 盒模型）消费两套正交的三态，组合决定每个尺寸控件的呈现：
+
+| 维度 | 三态 | 决定 | 数据源 |
+|---|---|---|---|
+| 能力声明 | supported / reserved / unsupported | 控件**显不显示**（reserved 灰显角标、unsupported 隐藏） | `theme-capabilities.json` |
+| 继承（值是否填写） | 空 / 0 / N | 控件**填没填值**（空=继承占位） | 主题 JSON 的 key 存在性 |
+
+### 继承三态 ↔ `*Dimension` 序列化（round-trip 铁律）
+
+后端尺寸字段是 `*Dimension`（nil=继承、`&{0}`=显式 0），`omitempty` 使 nil 省略、`0` 写出。继承语义只有在序列化保留时才成立，故编辑器须遵守：
+
+| 控件状态 | 含义 | 序列化 |
+|---|---|---|
+| 空（placeholder 显示**继承来的有效值**，灰字） | 继承 base/默认 | **省略该 key** |
+| 填 `0` | 显式覆盖为 0 | 写 `0` |
+| 填 `N` / 切 px | 显式覆盖 | 写 `N` 或 `"Npx"` |
+
+**铁律：清空控件 ⇒ 删除 JSON key（回到继承），绝不写 0**——否则把"继承"悄悄变成"显式 0 覆盖"，污染 base 单链继承。加载主题时缺省的 key 渲染为"空 + placeholder（有效值）"，而非"0"。round-trip 测试：加载→不动→保存的 diff 必须为空；清空字段→对应 key 消失。
+
+### 单位（dp/px）是正交第三维
+
+`Dimension` 支持 `8`（dp，随 DPI 缩放）/ `"8px"`（设备像素，不缩放）。数值控件宜配单位切换，分别序列化为裸数字 / `"Npx"`。这是"值本身的单位"，**不要与"空=继承"混淆**。
+
+详见 `theme-dimension-inheritance.md`（继承语义现状审计 + 三个残留缺口）。

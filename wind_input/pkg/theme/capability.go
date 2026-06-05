@@ -35,6 +35,10 @@ const (
 	CapStateSelected      = "state_selected"
 	CapStateHover         = "state_hover"
 	CapStateDisabled      = "state_disabled"
+	// CapStateGeometry：状态态（selected/hover/disabled）能否覆盖几何（padding/margin/字号）。
+	// 当前渲染消费仅限颜色/边框/字重——resolveState 判定不看几何、effectiveNode 也不合并几何，
+	// 故状态态的 padding/margin/font_size 在 schema 可写但不渲染（假字段）→ 有状态的 view 标 unsupported。
+	CapStateGeometry = "state_geometry"
 	CapLayers             = "layers"
 	CapShadowOffset       = "shadow_offset"
 	CapShadowBlurSpread   = "shadow_blur_spread"
@@ -57,7 +61,7 @@ var capabilityKeys = map[string]bool{
 	CapBackgroundColor: true, CapTextColor: true,
 	CapBackgroundImage: true, CapBackgroundGradient: true, CapBackgroundShape: true,
 	CapFont:          true,
-	CapStateSelected: true, CapStateHover: true, CapStateDisabled: true,
+	CapStateSelected: true, CapStateHover: true, CapStateDisabled: true, CapStateGeometry: true,
 	CapLayers: true, CapShadowOffset: true, CapShadowBlurSpread: true,
 	CapLineSpacing: true, CapColGap: true, CapTitleGap: true,
 	CapItemSpacing: true, CapBandGap: true, CapRowGap: true,
@@ -116,6 +120,7 @@ var ThemeCapabilities = []ViewCapability{
 		CapBackgroundColor: CapSupported, CapBackgroundImage: CapSupported, CapLayers: CapSupported,
 		CapStateSelected: CapSupported, CapStateHover: CapSupported,
 		CapStateDisabled:      CapUnsupported, // 候选项无禁用业务语义（Candidate 无 disabled 字段）
+		CapStateGeometry:      CapUnsupported, // 状态态仅覆盖颜色/边框/字重，几何不渲染
 		CapBackgroundGradient: CapSupported,
 	}},
 	{"index", map[string]CapabilityStatus{
@@ -124,15 +129,18 @@ var ThemeCapabilities = []ViewCapability{
 		CapBackgroundShape: CapSupported, CapIndexLabels: CapSupported,
 		CapStateSelected: CapSupported, CapStateHover: CapSupported,
 		CapStateDisabled:      CapUnsupported,
+		CapStateGeometry:      CapUnsupported, // 状态态仅覆盖颜色/边框/字重，几何不渲染
 		CapBackgroundGradient: CapSupported,
 	}},
 	{"text", map[string]CapabilityStatus{
 		CapMargin: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
 		CapStateSelected: CapSupported, CapStateHover: CapSupported, CapStateDisabled: CapUnsupported,
+		CapStateGeometry: CapUnsupported, // 状态态仅覆盖颜色/字重，几何不渲染
 	}},
 	{"comment", map[string]CapabilityStatus{
 		CapMargin: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
 		CapStateSelected: CapSupported, CapStateHover: CapSupported, CapStateDisabled: CapUnsupported,
+		CapStateGeometry: CapUnsupported, // 状态态仅覆盖颜色/字重，几何不渲染
 	}},
 	{"accent_bar", map[string]CapabilityStatus{
 		CapAccentBar: CapSupported, CapBackgroundColor: CapSupported,
@@ -179,6 +187,7 @@ var ThemeCapabilities = []ViewCapability{
 		CapPadding: CapSupported, CapBorder: CapSupported,
 		CapBackgroundColor: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
 		CapStateHover: CapSupported, CapStateDisabled: CapSupported,
+		CapStateGeometry: CapUnsupported, // 状态态仅覆盖颜色/边框/字重，几何不渲染
 	}},
 	{"menu.separator", map[string]CapabilityStatus{
 		CapBackgroundColor: CapSupported, // 作分隔线色
