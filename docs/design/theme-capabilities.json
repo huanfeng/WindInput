@@ -71,8 +71,13 @@
     {
       "view": "text",
       "caps": {
+        "background_color": "supported",
+        "background_gradient": "supported",
+        "background_image": "supported",
+        "border": "supported",
         "font": "supported",
         "margin": "supported",
+        "padding": "supported",
         "state_disabled": "unsupported",
         "state_geometry": "unsupported",
         "state_hover": "supported",
@@ -83,8 +88,13 @@
     {
       "view": "comment",
       "caps": {
+        "background_color": "supported",
+        "background_gradient": "supported",
+        "background_image": "supported",
+        "border": "supported",
         "font": "supported",
         "margin": "supported",
+        "padding": "supported",
         "state_disabled": "unsupported",
         "state_geometry": "unsupported",
         "state_hover": "supported",

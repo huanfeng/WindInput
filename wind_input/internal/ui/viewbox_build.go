@@ -83,8 +83,9 @@ func (r *Renderer) buildPreeditBand(input string, cursorPos, inputH int, scale f
 		Layout: LayoutRow, CrossAlign: AlignCenter, Stretch: true, FixedH: inputH,
 		Padding:    Edges{Left: pb.PadLeft.Scaled(scale), Right: pb.PadRight.Scaled(scale)},
 		Background: r.fillFor(bgColor, pb.BgImage, pb.BgGradient), // P7-C：preedit 背景可带图/渐变
-		Border:     Border{Radius: pb.BorderRadius.Scaled(scale)},
-		Children:   children,
+		// 边框 color/width 忠实生效（与候选项/tooltip 统一）：未配 color=不描边（零回归）。
+		Border:   Border{Radius: pb.BorderRadius.Scaled(scale), Color: pb.BorderColor, Width: pb.BorderWidth.Scaled(scale)},
+		Children: children,
 	}
 	r.appendThemeLayers(band, pb.Layers, sc)
 	if input != "" && cursorPos >= 0 && cursorPos <= len(input) {
@@ -226,6 +227,10 @@ func (r *Renderer) styleLeaf(eff theme.RVNode, text string, scale float64, align
 		Text:      text,
 		TextStyle: TextStyle{FontSize: eff.FontSize, Weight: eff.FontWeight, Family: eff.FontFamily, Color: eff.TextColor, Align: align},
 		Margin:    margin,
+		// 文本叶子内边距忠实生效（盒模型统一）：未配=0 零回归；配了则四边撑大叶子盒，
+		// AlignStart 文字按 PadLeft 起绘（paintText）。竖排文本序号的列宽 indexAreaW 已含左右 padding，
+		// 与本 padding 同值不双算（FixedW 钉死列宽、padding 仅定位标签）。
+		Padding: Edges{Top: eff.PadTop.Scaled(scale), Right: eff.PadRight.Scaled(scale), Bottom: eff.PadBottom.Scaled(scale), Left: eff.PadLeft.Scaled(scale)},
 	}
 	r.applyNodeBox(v, eff, scale)
 	return v

@@ -133,12 +133,16 @@ var ThemeCapabilities = []ViewCapability{
 		CapBackgroundGradient: CapSupported,
 	}},
 	{"text", map[string]CapabilityStatus{
-		CapMargin: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
+		CapMargin: CapSupported, CapPadding: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
+		// 候选文字经 styleLeaf+applyNodeBox 上盒模型，故可带自身背景/边框（"文字药丸"）。layers 不消费。
+		CapBackgroundColor: CapSupported, CapBackgroundImage: CapSupported, CapBackgroundGradient: CapSupported, CapBorder: CapSupported,
 		CapStateSelected: CapSupported, CapStateHover: CapSupported, CapStateDisabled: CapUnsupported,
 		CapStateGeometry: CapUnsupported, // 几何不随状态变（避免跳动）；色/图/渐变/边框/字体可覆盖
 	}},
 	{"comment", map[string]CapabilityStatus{
-		CapMargin: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
+		CapMargin: CapSupported, CapPadding: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
+		// 注释同候选文字：经 styleLeaf+applyNodeBox 可带自身背景/边框。layers 不消费。
+		CapBackgroundColor: CapSupported, CapBackgroundImage: CapSupported, CapBackgroundGradient: CapSupported, CapBorder: CapSupported,
 		CapStateSelected: CapSupported, CapStateHover: CapSupported, CapStateDisabled: CapUnsupported,
 		CapStateGeometry: CapUnsupported, // 几何不随状态变（避免跳动）；色/图/渐变/边框/字体可覆盖
 	}},

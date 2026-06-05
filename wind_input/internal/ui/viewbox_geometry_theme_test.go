@@ -169,7 +169,9 @@ func TestGeometryFingerprint_ThemePathVertical(t *testing.T) {
 }
 
 // wantVTextThemeGeometry 竖排文本序号真实主题路径基准（强调条 rail 占位 + 序号列宽按字形收紧，DPI scale=1）。
-var wantVTextThemeGeometry = []string{"0,0,104,236|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,92,24|bg=f0f0f0ff|bd=-|tx=-", "14,9,45,18|bg=-|bd=-|tx=646464ff", "6,34,92,160|bg=-|bd=-|tx=-", "6,34,92,32|bg=d2e4ffff|bd=-|tx=-", "6,34,8,32|bg=-|bd=-|tx=-", "14,43,11,14|bg=-|bd=-|tx=ffffffff", "29,41,36,18|bg=-|bd=-|tx=1f1f1fff", "6,66,92,32|bg=e6f0ffff|bd=-|tx=-", "6,66,8,32|bg=-|bd=-|tx=-", "14,75,11,14|bg=-|bd=-|tx=ffffffff", "29,73,18,18|bg=-|bd=-|tx=1f1f1fff", "55,75,35,14|bg=-|bd=-|tx=969696ff", "6,98,92,32|bg=-|bd=-|tx=-", "6,98,8,32|bg=-|bd=-|tx=-", "14,107,11,14|bg=-|bd=-|tx=ffffffff", "29,105,18,18|bg=-|bd=-|tx=1f1f1fff", "6,130,92,32|bg=-|bd=-|tx=-", "6,130,8,32|bg=-|bd=-|tx=-", "14,139,11,14|bg=-|bd=-|tx=ffffffff", "29,137,18,18|bg=-|bd=-|tx=1f1f1fff", "6,162,92,32|bg=-|bd=-|tx=-", "6,162,8,32|bg=-|bd=-|tx=-", "14,171,11,14|bg=-|bd=-|tx=ffffffff", "29,169,18,18|bg=-|bd=-|tx=1f1f1fff", "8,198,87,32|bg=-|bd=-|tx=-", "8,198,26,32|bg=-|bd=-|tx=4285f4ff", "34,207,35,14|bg=-|bd=-|tx=646464ff", "69,198,26,32|bg=-|bd=-|tx=4285f4ff"}
+// 序号 padding 在文本模式忠实生效（styleLeaf 接上 eff.Padding）：index.padding{2,2,2,2} 使标签盒
+// 高=字号14+上下2+2=18（垂直居中），左 padding 经 paintText 内移文字（不改列宽，indexAreaW 已含左右）。
+var wantVTextThemeGeometry = []string{"0,0,104,236|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,92,24|bg=f0f0f0ff|bd=-|tx=-", "14,9,45,18|bg=-|bd=-|tx=646464ff", "6,34,92,160|bg=-|bd=-|tx=-", "6,34,92,32|bg=d2e4ffff|bd=-|tx=-", "6,34,8,32|bg=-|bd=-|tx=-", "14,41,11,18|bg=-|bd=-|tx=ffffffff", "29,41,36,18|bg=-|bd=-|tx=1f1f1fff", "6,66,92,32|bg=e6f0ffff|bd=-|tx=-", "6,66,8,32|bg=-|bd=-|tx=-", "14,73,11,18|bg=-|bd=-|tx=ffffffff", "29,73,18,18|bg=-|bd=-|tx=1f1f1fff", "55,75,35,14|bg=-|bd=-|tx=969696ff", "6,98,92,32|bg=-|bd=-|tx=-", "6,98,8,32|bg=-|bd=-|tx=-", "14,105,11,18|bg=-|bd=-|tx=ffffffff", "29,105,18,18|bg=-|bd=-|tx=1f1f1fff", "6,130,92,32|bg=-|bd=-|tx=-", "6,130,8,32|bg=-|bd=-|tx=-", "14,137,11,18|bg=-|bd=-|tx=ffffffff", "29,137,18,18|bg=-|bd=-|tx=1f1f1fff", "6,162,92,32|bg=-|bd=-|tx=-", "6,162,8,32|bg=-|bd=-|tx=-", "14,169,11,18|bg=-|bd=-|tx=ffffffff", "29,169,18,18|bg=-|bd=-|tx=1f1f1fff", "8,198,87,32|bg=-|bd=-|tx=-", "8,198,26,32|bg=-|bd=-|tx=4285f4ff", "34,207,35,14|bg=-|bd=-|tx=646464ff", "69,198,26,32|bg=-|bd=-|tx=4285f4ff"}
 
 // TestGeometryFingerprint_ThemePathVerticalText 竖排文本序号（msime 同款）几何零回归：
 // 守护强调条 rail 占位（序号排在 rail 右侧不重叠）+ 序号列宽测量收紧。
@@ -217,5 +219,54 @@ func TestVerticalPaddingAndRowGap(t *testing.T) {
 	circle := tree.items[0].Children[0]
 	if off := circle.Rect().Min.X - tree.items[0].Rect().Min.X; off < 8 {
 		t.Errorf("无 accent 时 item.padding.left(8) 应在竖排生效，序号左偏移 got %d (<8)", off)
+	}
+}
+
+// TestVerticalTextIndexPadding 守护文本序号 padding 忠实生效（styleLeaf 接上 eff.Padding）：
+// index.padding{2,2,2,2} → 文本序号叶子四边内边距=2（dp scale=1）。圆圈模式由 wantV/wantH 指纹守护。
+func TestVerticalTextIndexPadding(t *testing.T) {
+	cfg := parityConfig()
+	cfg.Layout = config.LayoutVertical
+	cfg.IndexStyle = "text"
+	cfg.HasAccentBar = false // 关 accent：Children[0] 即序号叶子（无 rail 前导）
+	r := NewRenderer(cfg)
+	if r.TextDrawer() == nil {
+		t.Skip("无可用文本后端")
+	}
+	v := themePathViews(6, 8) // index.padding = {2,2,2,2}
+	r.resolvedV3 = &theme.ResolvedV3{Palette: themePathPalette(), Behavior: theme.ResolvedBehavior{FontSize: 18, VerticalMaxWidth: 600}}
+	r.themeViews = &v
+	r.refreshResolvedViews()
+
+	tree := r.buildVerticalCandidateTree([]Candidate{{Text: "中", Index: 1}}, "", -1, 1, 1, 0, -1, "")
+	Layout(tree.root, 0, 0, r.textDrawer)
+	idx := tree.items[0].Children[0] // 文本序号叶子
+	if idx.Padding.Left != 2 || idx.Padding.Top != 2 || idx.Padding.Right != 2 || idx.Padding.Bottom != 2 {
+		t.Errorf("文本序号 padding 应忠实生效(四边=2), got %+v", idx.Padding)
+	}
+}
+
+// TestPreeditBorderColorWidth 守护预编辑条边框 color/width 忠实生效（buildPreeditBand 接通）：
+// 此前只取 Radius，配了 color/width 不渲染（同 menu.item 旧病）。
+func TestPreeditBorderColorWidth(t *testing.T) {
+	cfg := parityConfig()
+	cfg.Layout = config.LayoutVertical
+	r := NewRenderer(cfg)
+	if r.TextDrawer() == nil {
+		t.Skip("无可用文本后端")
+	}
+	v := themePathViews(6, 8)
+	r.resolvedV3 = &theme.ResolvedV3{Palette: themePathPalette(), Behavior: theme.ResolvedBehavior{FontSize: 18, VerticalMaxWidth: 600}}
+	r.themeViews = &v
+	r.refreshResolvedViews()
+	red := color.RGBA{255, 0, 0, 255}
+	r.resolvedViews.PreeditBar.BorderColor = red
+	r.resolvedViews.PreeditBar.BorderWidth = theme.Dp(2)
+
+	tree := r.buildVerticalCandidateTree([]Candidate{{Text: "中", Index: 1}}, "zhong", 5, 1, 1, 0, -1, "")
+	Layout(tree.root, 0, 0, r.textDrawer)
+	band := tree.root.Children[0] // input 非空 → 第一个 band = 预编辑条
+	if band.Border.Color != color.Color(red) || band.Border.Width != 2 {
+		t.Errorf("preedit 边框 color/width 应生效, got color=%v width=%d", band.Border.Color, band.Border.Width)
 	}
 }
