@@ -160,26 +160,29 @@ func (r *Renderer) buildVerticalCandidateTree(
 	}
 	rowH := int(lineH+0.5) + scD(rv.Item.PadTop) + scD(rv.Item.PadBottom)
 
-	// 强调条占位 rail 宽度（逻辑像素）：与横排一致取 item 左内边距为左留白，承载强调条；
-	// 不足以容纳强调条（offset+width）时取下限。无强调条时 railFixedW=0（不占位）。
+	// padding/accent 横竖统一：item 左内边距走 padding（itemPadLeft），有强调条时让位给 rail
+	// （itemPadLeft=0，rail 占 railW 宽、内容位置不变）。effLeft=内容左偏移（横竖一致）。
+	// 无强调条 → itemPadLeft=bgPadL（item.padding.left 在竖排也生效）。
+	bgPadL := scD(rv.Item.PadLeft)
+	itemPadLeft := bgPadL
 	railW := 0 // 设备像素；0=无强调条不占位
-	railFixedW := 0
 	if cfg.HasAccentBar && rv.AccentBar.BgColor != nil {
-		railW = scD(rv.Item.PadLeft)
+		railW = bgPadL
 		if minW := rv.AccentBarOffset.Scaled(scale) + rv.AccentBarWidth.Scaled(scale) + sc(2); railW < minW {
 			railW = minW
 		}
-		railFixedW = railW
+		itemPadLeft = 0
 	}
+	effLeft := itemPadLeft + railW // 内容左偏移：无 accent=bgPadL；有 accent=railW
 
 	// 长候选钳制：预量算自然宽，计算截断预算 targetW ≤ VerticalMaxWidth（默认 600*scale）。
 	maxItemW := rv.VerticalMaxWidth * scale
 	commentWidths := make([]float64, len(candidates))
 	maxNatural := 0.0
 	for i, cand := range candidates {
-		lo := float64(railFixedW) + 8*scale
+		lo := float64(effLeft)
 		if cand.Index >= 0 {
-			lo = float64(railFixedW) + float64(indexAreaW) + float64(indexMarginRight)
+			lo += float64(indexAreaW) + float64(indexMarginRight)
 		}
 		tw := measureText(r.textDrawer, candidateDisplayText(cand, cfg.CmdbarPrefix), rv.Text.FontSize, rv.Text.FontFamily)
 		if cand.Comment != "" {
@@ -232,9 +235,9 @@ func (r *Renderer) buildVerticalCandidateTree(
 			}
 		}
 
-		lo := float64(railFixedW) + 8*scale
+		lo := float64(effLeft)
 		if cand.Index >= 0 {
-			lo = float64(railFixedW) + float64(indexAreaW) + float64(indexMarginRight)
+			lo += float64(indexAreaW) + float64(indexMarginRight)
 		}
 		availText := targetW - lo - float64(itemPadR)
 		if commentWidths[i] > 0 {
@@ -242,7 +245,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 		}
 		textMargin := Edges{Left: indexMarginRight}
 		if len(children) == 0 {
-			textMargin = Edges{Left: sc(8 * scale)} // 无序号时靠左
+			textMargin = Edges{} // 无序号：文本紧跟 padding（横排一致，左留白由 item.padding.left 提供）
 		}
 		textStr := r.truncateToWidth(candidateDisplayText(cand, cfg.CmdbarPrefix), rv.Text.FontSize, availText, rv.Text.FontFamily)
 		children = append(children, r.styleLeaf(effText, textStr, scale, AlignStart, textMargin))
@@ -262,15 +265,15 @@ func (r *Renderer) buildVerticalCandidateTree(
 			CrossAlign: AlignCenter,
 			Stretch:    true, // 每行全宽
 			FixedH:     rowH,
-			// 上下 padding 真实生效（与横排一致）：对称时逐像素同旧版，非对称不再均摊。
-			Padding:  Edges{Top: scD(rv.Item.PadTop), Right: itemPadR, Bottom: scD(rv.Item.PadBottom)},
+			// 四向 padding 真实生效（与横排一致）：左 padding 走 itemPadLeft（有 accent 时让位给 rail）。
+			Padding:  Edges{Top: scD(rv.Item.PadTop), Right: itemPadR, Bottom: scD(rv.Item.PadBottom), Left: itemPadLeft},
 			Children: itemChildren,
 		}
 		r.applyNodeBox(item, effItem, scale)          // 统一：item 行背景 + 边框（含选中/悬停态）
 		r.appendThemeLayers(item, rv.Item.Layers, sc) // P7-C：候选项装饰层
 		items = append(items, item)
 	}
-	list := &View{Layout: LayoutColumn, Stretch: true, Children: items}
+	list := &View{Layout: LayoutColumn, Stretch: true, Gap: scD(rv.RowGap), Children: items} // 纵向行间距 = candidate_list.row_gap（默认 0=紧贴）
 
 	// ---- band 列表 ----
 	bands := make([]*View, 0, 3)

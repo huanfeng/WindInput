@@ -66,7 +66,7 @@ bg=#FFFFFFFF surface=#F0F0F0FF border=#C8C8C8FF text=#1E1E1EFF textDim=#646464FF
   border: radius=0dp width=0dp color=nil
   bg=nil text=#969696FF
   font: size=-4.0 weight=0 family=""
-[geom] windowGap=2dp shadowOffset=2dp shadowXY=(2dp,2dp) itemSpacing=12dp accentBar=(w=3dp off=1dp hr=0.60) shadowColor=#0000000F
+[geom] windowGap=2dp shadowOffset=2dp shadowXY=(2dp,2dp) itemSpacing=12dp rowGap=0dp accentBar=(w=3dp off=1dp hr=0.60) shadowColor=#0000000F
 
 === other windows ===
 [status]

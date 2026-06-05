@@ -179,3 +179,43 @@ func TestGeometryFingerprint_ThemePathVerticalText(t *testing.T) {
 		t.Errorf("竖排文本序号主题路径几何+颜色漂移:\n got (%d): %#v", len(got), got)
 	}
 }
+
+// TestVerticalPaddingAndRowGap 守护两项一致性修正（accent 关闭路径，现有指纹测试只覆盖 accent 路径）：
+//  1. item.padding.left 在竖排也生效（无 accent 时内容右移 padding.left，与横排一致）；
+//  2. candidate_list.row_gap 产生竖排纵向行间距。
+//
+// 几何不依赖文本宽度（圆圈 FixedW + 行 Y 坐标），故无需字体度量闸门。
+func TestVerticalPaddingAndRowGap(t *testing.T) {
+	cfg := parityConfig()
+	cfg.Layout = config.LayoutVertical
+	cfg.IndexStyle = "circle"
+	cfg.HasAccentBar = false // 关闭 accent：验证 padding.left 在竖排作内边距生效（而非被 rail 顶替）
+	r := NewRenderer(cfg)
+	if r.TextDrawer() == nil {
+		t.Skip("无可用文本后端")
+	}
+	v := themePathViews(6, 8)        // itemPad=8 → bgPadL=8
+	v.CandidateList.RowGap = dip(10) // 纵向行间距 10
+	r.resolvedV3 = &theme.ResolvedV3{Palette: themePathPalette(), Behavior: theme.ResolvedBehavior{FontSize: 18, ShowPageNumber: true, VerticalMaxWidth: 600}}
+	r.themeViews = &v
+	r.refreshResolvedViews()
+
+	cands := []Candidate{{Text: "中", Index: 1}, {Text: "文", Index: 2}}
+	tree := r.buildVerticalCandidateTree(cands, "", -1, 1, 1, 0, -1, "")
+	Layout(tree.root, 0, 0, r.textDrawer)
+	if len(tree.items) < 2 {
+		t.Fatalf("应 2 个候选项, got %d", len(tree.items))
+	}
+
+	// row_gap=10：相邻候选行的垂直间隙 = LayoutColumn Gap = 10。
+	if gap := tree.items[1].Rect().Min.Y - tree.items[0].Rect().Max.Y; gap != 10 {
+		t.Errorf("竖排 row_gap 应=10，相邻行间距 got %d", gap)
+	}
+
+	// padding.left=8 生效（无 accent，无 rail 顶替）：序号圆圈左偏移 = padding.left(8) + circle margin.left(3) = 11。
+	// 旧逻辑（竖排丢弃 padding.left）下圆圈左偏移仅 = margin.left(3)，<8。
+	circle := tree.items[0].Children[0]
+	if off := circle.Rect().Min.X - tree.items[0].Rect().Min.X; off < 8 {
+		t.Errorf("无 accent 时 item.padding.left(8) 应在竖排生效，序号左偏移 got %d (<8)", off)
+	}
+}

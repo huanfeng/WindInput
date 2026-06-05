@@ -143,6 +143,7 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 	// candidate_list 容器：候选项间距 / band 间距。
 	rv.ItemSpacing = dimOr(views.CandidateList.Gap, Dimension{})
 	rv.WindowGap = dimOr(views.CandidateList.BandGap, Dimension{})
+	rv.RowGap = dimOr(views.CandidateList.RowGap, Dimension{})
 	// window 节点：投影偏移/颜色（offset_x/offset_y/color）。标量 ShadowOffset = X（X/Y 默认同值）。
 	if sh := views.Window.Shadow; sh != nil {
 		rv.ShadowOffsetX = dimOr(sh.OffsetX, Dimension{})

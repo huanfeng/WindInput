@@ -296,6 +296,13 @@ func (r *Renderer) buildHorizontalCandidateTree(
 	rv := &r.resolvedViews
 	bgPadL := scD(rv.Item.PadLeft)
 	bgPadR := scD(rv.Item.PadRight)
+	// rail 宽（横竖统一）：取 item 左内边距；有强调条且不足以容纳其几何（offset+width）时取下限。
+	railW := bgPadL
+	if cfg.HasAccentBar && rv.AccentBar.BgColor != nil {
+		if minW := rv.AccentBarOffset.Scaled(scale) + rv.AccentBarWidth.Scaled(scale) + sc(2); railW < minW {
+			railW = minW
+		}
+	}
 	indexMarginRight := scD(rv.Text.MarginLeft)
 	commentMarginLeft := scD(rv.Comment.MarginLeft)
 
@@ -360,7 +367,7 @@ func (r *Renderer) buildHorizontalCandidateTree(
 		// 无强调条主题沿用左内边距。
 		itemChildren := children
 		itemPadLeft := bgPadL
-		if rail := r.buildAccentRail(bgPadL, sel, rowH, scale); rail != nil {
+		if rail := r.buildAccentRail(railW, sel, rowH, scale); rail != nil {
 			itemPadLeft = 0
 			itemChildren = append([]*View{rail}, children...)
 		}

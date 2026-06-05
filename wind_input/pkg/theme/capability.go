@@ -43,6 +43,7 @@ const (
 	CapTitleGap           = "title_gap"
 	CapItemSpacing        = "item_spacing"
 	CapBandGap            = "band_gap"
+	CapRowGap             = "row_gap"
 	CapIndexLabels        = "index_labels"
 	CapAccentBar          = "accent_bar"
 	CapFooterArrowImage   = "footer_arrow_image"
@@ -59,7 +60,7 @@ var capabilityKeys = map[string]bool{
 	CapStateSelected: true, CapStateHover: true, CapStateDisabled: true,
 	CapLayers: true, CapShadowOffset: true, CapShadowBlurSpread: true,
 	CapLineSpacing: true, CapColGap: true, CapTitleGap: true,
-	CapItemSpacing: true, CapBandGap: true,
+	CapItemSpacing: true, CapBandGap: true, CapRowGap: true,
 	CapIndexLabels: true, CapAccentBar: true, CapFooterArrowImage: true,
 	CapPager: true, CapModeStates: true,
 }
@@ -107,7 +108,7 @@ var ThemeCapabilities = []ViewCapability{
 		CapBackgroundGradient: CapSupported,
 	}},
 	{"candidate_list", map[string]CapabilityStatus{
-		CapItemSpacing: CapSupported, CapBandGap: CapSupported,
+		CapItemSpacing: CapSupported, CapBandGap: CapSupported, CapRowGap: CapSupported,
 		CapBackgroundColor: CapReserved, // ViewNode 可配，但列表 View 当前不绘制底色
 	}},
 	{"item", map[string]CapabilityStatus{

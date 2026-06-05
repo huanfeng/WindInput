@@ -39,7 +39,7 @@ const (
 | 字体 | `font`（size/weight/family 合一） |
 | 状态 | `state_selected` `state_hover` `state_disabled` |
 | 层/阴影 | `layers` `shadow_offset` `shadow_blur_spread` |
-| 间距 | `line_spacing` `col_gap` `title_gap` |
+| 间距 | `line_spacing` `col_gap` `title_gap`（提示窗）· `item_spacing` `band_gap` `row_gap`（候选列表：横向 / band / 纵向） |
 | 节点专有 | `index_shape` `index_labels` `accent_bar` `footer_arrow_image` `pager` `mode_states` |
 
 某 view 的 caps 中未列出的键 = 隐式 `unsupported`（该能力对该 view 不适用）。

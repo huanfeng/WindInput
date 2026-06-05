@@ -113,8 +113,9 @@ type ViewNode struct {
 
 	// 仅特定节点字段（V3-D 属性归位）：
 	Shadow      *ViewShadowSpec `yaml:"shadow,omitempty"`       // 仅 window：窗口投影（offset/color 已实现，blur/spread 预留）
-	Gap         *Dimension      `yaml:"gap,omitempty"`          // 仅 candidate_list：横排候选项间距基数（旧 metrics.item_spacing）
+	Gap         *Dimension      `yaml:"gap,omitempty"`          // 仅 candidate_list：横排候选项**横向**间距基数（旧 metrics.item_spacing）
 	BandGap     *Dimension      `yaml:"band_gap,omitempty"`     // 仅 candidate_list：band 间距（旧 metrics.band_gap → WindowGap）
+	RowGap      *Dimension      `yaml:"row_gap,omitempty"`      // 仅 candidate_list：竖排候选项**纵向**（行）间距；nil/0=紧贴（横排不用，横向间距走 gap）
 	Enabled     *bool           `yaml:"enabled,omitempty"`      // 仅 accent_bar：是否绘制选中候选左侧强调条；nil/false=不绘制
 	Width       *Dimension      `yaml:"width,omitempty"`        // 仅 accent_bar：条宽
 	Offset      *Dimension      `yaml:"offset,omitempty"`       // 仅 accent_bar：左缘偏移
@@ -241,7 +242,8 @@ type ResolvedViews struct {
 	ShadowOffsetX    Dimension   // 窗口投影水平偏移（P7-E：来自 metrics.shadow.offset_x，未配=ShadowOffset）
 	ShadowOffsetY    Dimension   // 窗口投影垂直偏移（P7-E：来自 metrics.shadow.offset_y，未配=ShadowOffset）
 	ItemHeight       float64     // 行高（rowH = round(ItemHeight)）
-	ItemSpacing      Dimension   // 横排候选框间距基数（已按 isTextIndex 选定 12/16）
+	ItemSpacing      Dimension   // 横排候选框横向间距基数（已按 isTextIndex 选定 12/16）
+	RowGap           Dimension   // 竖排候选项纵向（行）间距（来自 candidate_list.row_gap；0=紧贴）
 	AccentBarWidth   Dimension   // 强调条宽
 	AccentBarOffset  Dimension   // 强调条左缘偏移
 	AccentBarHRatio  float64     // 强调条高 = ItemHeight * 此比例
@@ -446,6 +448,9 @@ func mergeViewNode(base, ov ViewNode) ViewNode {
 	}
 	if ov.BandGap != nil {
 		out.BandGap = ov.BandGap
+	}
+	if ov.RowGap != nil {
+		out.RowGap = ov.RowGap
 	}
 	if ov.Enabled != nil {
 		out.Enabled = ov.Enabled

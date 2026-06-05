@@ -32,7 +32,8 @@
       "caps": {
         "background_color": "reserved",
         "band_gap": "supported",
-        "item_spacing": "supported"
+        "item_spacing": "supported",
+        "row_gap": "supported"
       }
     },
     {

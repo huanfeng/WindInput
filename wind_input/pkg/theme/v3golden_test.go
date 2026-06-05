@@ -100,9 +100,9 @@ func snapshotResolvedV3(rv *ResolvedV3) string {
 		dumpRVNode(&b, "accent_bar", cv.AccentBar)
 		dumpRVNode(&b, "footer_bar", cv.FooterBar)
 		dumpRVNode(&b, "mode_label", cv.ModeLabel)
-		fmt.Fprintf(&b, "[geom] windowGap=%s shadowOffset=%s shadowXY=(%s,%s) itemSpacing=%s accentBar=(w=%s off=%s hr=%.2f) shadowColor=%s\n",
+		fmt.Fprintf(&b, "[geom] windowGap=%s shadowOffset=%s shadowXY=(%s,%s) itemSpacing=%s rowGap=%s accentBar=(w=%s off=%s hr=%.2f) shadowColor=%s\n",
 			dimStr(cv.WindowGap), dimStr(cv.ShadowOffset), dimStr(cv.ShadowOffsetX), dimStr(cv.ShadowOffsetY),
-			dimStr(cv.ItemSpacing), dimStr(cv.AccentBarWidth), dimStr(cv.AccentBarOffset), cv.AccentBarHRatio, colorHex(cv.ShadowColor))
+			dimStr(cv.ItemSpacing), dimStr(cv.RowGap), dimStr(cv.AccentBarWidth), dimStr(cv.AccentBarOffset), cv.AccentBarHRatio, colorHex(cv.ShadowColor))
 
 		b.WriteString("\n=== other windows ===\n")
 		dumpRVNode(&b, "status", ResolveStatusViews(rv.Views.Status, rv.Palette))
