@@ -403,6 +403,18 @@ function hasUnsavedChanges(): boolean {
   );
 }
 
+// 支持「恢复本页」和「重新加载」的 tab（操作 formData 的配置页）
+const CONFIG_TABS = new Set([
+  "general",
+  "input",
+  "hotkey",
+  "appearance",
+  "advanced",
+]);
+const canResetPage = computed(() => CONFIG_TABS.has(activeTab.value));
+const canReloadPage = computed(() => CONFIG_TABS.has(activeTab.value));
+const hasChanges = computed(() => hasUnsavedChanges());
+
 // 关闭加词对话框
 function handleAddWordClose() {
   showAddWordDialog.value = false;
@@ -821,16 +833,22 @@ onUnmounted(() => {
       <div class="sidebar-footer">
         <div class="sidebar-actions">
           <div class="sidebar-actions-row">
-            <Button variant="outline" @click="resetCurrentPageDefaults">
-              恢复本页
-            </Button>
-            <Button variant="outline" @click="handleReloadConfig">
-              重新加载
-            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              :disabled="!canResetPage"
+              @click="resetCurrentPageDefaults"
+            >恢复本页</Button>
+            <Button
+              variant="outline"
+              size="sm"
+              :disabled="!canReloadPage"
+              @click="handleReloadConfig"
+            >重新加载</Button>
           </div>
           <Button
             @click="saveConfig"
-            :disabled="saving || hotkeyConflicts.length > 0"
+            :disabled="saving || hotkeyConflicts.length > 0 || !hasChanges"
           >
             {{ saving ? "保存中..." : "保存设置" }}
           </Button>
