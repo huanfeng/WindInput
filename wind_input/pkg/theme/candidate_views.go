@@ -172,15 +172,17 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 // 复用 resolveViewNode 做完整 ViewNode→RVNode 解析（含几何/边框/字体），再注入该态的 palette
 // 默认底色/文字色（defBg/defText，nil=无默认）。全空且无 palette 默认 → 返回 nil（该态无覆盖）。
 //
-// nil-gating：仅当 patch 显式提供了 bg/bgImage/text/border 色/border 宽/字重，或存在 palette
-// 默认色时，才视为「有覆盖」并返回非 nil（与旧 RVState 语义一致，守 golden）。
+// nil-gating：仅当 patch 显式提供了 bg/bgImage/渐变/层/text/border 色/border 宽/字重，或存在
+// palette 默认色时，才视为「有覆盖」并返回非 nil。
 //
-// 有意不看几何：padding/margin/font_size 不计入"有无覆盖"判定——状态态几何当前不渲染
-// （capability `state_geometry`=unsupported）。即只改 padding 的 selected 态会被视为空 patch 而丢弃。
+// 有意不看几何：padding/margin/font_size 不计入"有无覆盖"判定——状态态几何**刻意不渲染**
+// （状态改几何会牵动行高/列宽致候选框跳动，capability `state_geometry`=unsupported）。
+// 即只改 padding 的 selected 态会被视为空 patch 而丢弃；但只改渐变/层的会保留（已支持）。
 func resolveState(node *ViewNode, defBg, defText color.Color, resolveColor func(ColorRef) color.Color) *RVNode {
 	has := defBg != nil || defText != nil
 	if node != nil {
 		if resolveColor(node.Background.Color) != nil || node.Background.Image != nil ||
+			(node.Background.Gradient != nil && len(node.Background.Gradient.Stops) > 0) || len(node.Layers) > 0 ||
 			resolveColor(node.Color) != nil || resolveColor(node.Border.Color) != nil ||
 			node.Border.Width != nil || node.FontWeight != nil {
 			has = true

@@ -49,3 +49,26 @@ func TestEffectiveNode(t *testing.T) {
 		t.Errorf("hover 态 bg 应=red, got %v", eff.BgColor)
 	}
 }
+
+// TestEffectiveNode_StateGradientLayers 守护状态态补齐：选中态可覆盖背景渐变 + 覆盖层
+// （几何仍不随状态变，见 TestEffectiveNode）。
+func TestEffectiveNode_StateGradientLayers(t *testing.T) {
+	grad := &theme.RVGradient{Type: "linear", Stops: []theme.RVGradientStop{
+		{Color: color.RGBA{1, 2, 3, 255}, Pos: 0}, {Color: color.RGBA{4, 5, 6, 255}, Pos: 1},
+	}}
+	base := theme.RVNode{TextColor: color.RGBA{0, 0, 0, 255}}
+	base.Selected = &theme.RVNode{BgGradient: grad, Layers: []theme.RVImage{{Ref: "wm", Z: 1}}}
+
+	// 基态：不应带 selected 的渐变/层。
+	if eff := effectiveNode(base, false, false); eff.BgGradient != nil || eff.Layers != nil {
+		t.Errorf("基态不应有 selected 的渐变/层, got grad=%v layers=%v", eff.BgGradient, eff.Layers)
+	}
+	// 选中态：渐变 + 层被合并。
+	eff := effectiveNode(base, true, false)
+	if eff.BgGradient != grad {
+		t.Errorf("选中态渐变未合并, got %v", eff.BgGradient)
+	}
+	if len(eff.Layers) != 1 || eff.Layers[0].Ref != "wm" {
+		t.Errorf("选中态覆盖层未合并, got %v", eff.Layers)
+	}
+}

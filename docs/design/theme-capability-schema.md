@@ -99,9 +99,13 @@ JSON 形态（稳定、语言无关）：
 
 ### 状态态覆盖范围的处理（澄清）
 
-状态态 patch（`selected`/`hover`/`disabled`）schema 上是完整 `ViewNode`，但**渲染只消费颜色/边框/字重覆盖**——`resolveState` 的"有无覆盖"判定不看几何、`effectiveNode` 合并时也不碰 `padding`/`margin`/`font_size`。即"选中态改间距/字号"是声明可写、渲染必忽略的假字段。
+状态态 patch（`selected`/`hover`/`disabled`）schema 上是完整 `ViewNode`。**渲染消费状态态的颜色/背景图/渐变/边框/字体/层覆盖**（`effectiveNode` 合并这些、`resolveState` 据此判定"有无覆盖"）；**唯几何（`padding`/`margin`/`font_size`）不渲染**——状态改几何会牵动行高/列宽致候选框跳动，故刻意不支持。
 
-故新增单一能力键 `state_geometry`（粒度="状态态能否改几何"，非每个几何叶子 × 每个状态，避免矩阵爆炸），在所有有状态的 view（`item`/`index`/`text`/`comment`/`menu.item`）标 `unsupported`。编辑器据此在状态态编辑器里隐藏/灰显几何控件，只留颜色/边框/字重。转 `supported` 须先补齐 `resolveState`+`effectiveNode` 的几何消费并重做 golden。详见 `theme-dimension-inheritance.md`。
+故用单一能力键 `state_geometry`（粒度="状态态能否改几何"，非每个几何叶子 × 每个状态，避免矩阵爆炸）在所有有状态的 view（`item`/`index`/`text`/`comment`/`menu.item`）标 `unsupported`。编辑器据此在状态态编辑器里隐藏/灰显**几何**控件，保留颜色/背景图/渐变/边框/字体/层。转 `supported` 须先补齐 `resolveState`+`effectiveNode` 的几何消费并重做 golden。
+
+> 状态态背景四件套（色/图/渐变）+ 层与默认态对齐：`effectiveNode` 合并 `BgColor`/`BgImage`/`BgGradient`/`Layers`，`applyNodeBox` 门控含 `BgGradient`，候选项装饰层取 `effItem.Layers`（非基态）。
+
+详见 `theme-dimension-inheritance.md`。
 
 ## 五、回归判据
 

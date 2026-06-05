@@ -172,14 +172,20 @@ func effectiveNode(n theme.RVNode, selected, hover bool) theme.RVNode {
 	if st == nil {
 		return n
 	}
-	// 仅合并颜色/边框/字重/字体族（状态态的有意范围）；padding/margin/font_size 不合并
-	// （capability `state_geometry`=unsupported）。需要状态态改几何时，在此补合并 + 放开 resolveState 判定。
+	// 合并颜色/背景图/渐变/边框/字体/覆盖层（状态态的有意范围）；唯几何（padding/margin/font_size）
+	// 不合并——状态改几何会牵动行高/列宽致候选框跳动（capability `state_geometry`=unsupported）。
 	out := n
 	if st.BgColor != nil {
 		out.BgColor = st.BgColor
 	}
 	if st.BgImage != nil {
 		out.BgImage = st.BgImage
+	}
+	if st.BgGradient != nil {
+		out.BgGradient = st.BgGradient
+	}
+	if st.Layers != nil {
+		out.Layers = st.Layers // 整组替换（与 mergeViewNode 一致）
 	}
 	if st.BorderColor != nil {
 		out.BorderColor = st.BorderColor
@@ -205,8 +211,8 @@ func effectiveNode(n theme.RVNode, selected, hover bool) theme.RVNode {
 // applyNodeBox 把有效节点的背景 + 边框应用到 View——**仅配置了才设**，未配=不动（纯文本/无框，零回归）。
 // index/text/comment/item 统一经此上盒模型；padding 由各自构建处控制（item 行内边距含 rail 逻辑，不在此覆盖）。
 func (r *Renderer) applyNodeBox(v *View, eff theme.RVNode, scale float64) {
-	if eff.BgColor != nil || eff.BgImage != nil {
-		v.Background = r.fillFor(eff.BgColor, eff.BgImage, eff.BgGradient) // 高亮位图优先于底色
+	if eff.BgColor != nil || eff.BgImage != nil || eff.BgGradient != nil {
+		v.Background = r.fillFor(eff.BgColor, eff.BgImage, eff.BgGradient) // 优先级：底色 < 渐变 < 背景图
 	}
 	if eff.BorderColor != nil || eff.BorderWidth != (theme.Dimension{}) || eff.BorderRadius != (theme.Dimension{}) {
 		v.Border = Border{Color: eff.BorderColor, Width: eff.BorderWidth.Scaled(scale), Radius: eff.BorderRadius.Scaled(scale)}
@@ -354,7 +360,7 @@ func (r *Renderer) buildCandidateItem(cand Candidate, sel, hov bool, st *candIte
 		Children: itemChildren,
 	}
 	r.applyNodeBox(item, effItem, scale)          // 统一：item 行背景 + 边框（含选中/悬停态）
-	r.appendThemeLayers(item, rv.Item.Layers, sc) // P7-C：候选项装饰层
+	r.appendThemeLayers(item, effItem.Layers, sc) // P7-C：候选项装饰层（effItem→状态态可覆盖 layers）
 	return item
 }
 
