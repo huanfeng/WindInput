@@ -357,11 +357,17 @@ async function saveConfig() {
   try {
     if (isWailsEnv.value) {
       const items = diffConfigToItems(config.value, formData.value);
-      if (items.length === 0) {
+      const hasSchemaPending =
+        generalPageRef.value?.hasPendingSchemaChanges() ?? false;
+      if (items.length === 0 && !hasSchemaPending) {
         toast("当前无改动");
         return;
       }
       const reply = await wailsApi.setConfigItems(items);
+      // 批量提交暂存的方案配置
+      if (hasSchemaPending) {
+        await generalPageRef.value!.flushPendingSchemaConfigs();
+      }
       await wailsApi.saveTSFLogConfig(tsfLogConfig.value);
       toast(
         reply.requires_restart ? "保存成功（部分设置需重启生效）" : "保存成功",
@@ -396,8 +402,12 @@ function hasUnsavedChanges(): boolean {
     JSON.stringify(formData.value) !== JSON.stringify(config.value);
   if (!isWailsEnv.value) return configChanged;
 
+  const schemaSettingsChanged =
+    generalPageRef.value?.hasPendingSchemaChanges() ?? false;
+
   return (
     configChanged ||
+    schemaSettingsChanged ||
     JSON.stringify(tsfLogConfig.value) !==
       JSON.stringify(savedTSFLogConfig.value)
   );
@@ -444,6 +454,8 @@ async function handleReload() {
   try {
     if (isWailsEnv.value) {
       await wailsApi.reloadConfig();
+      // 丢弃暂存的方案配置改动，从后端重新加载
+      await generalPageRef.value?.discardPendingSchemaConfigs();
       toast("重载成功");
       await loadData();
     } else {

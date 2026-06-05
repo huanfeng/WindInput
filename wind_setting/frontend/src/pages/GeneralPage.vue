@@ -37,9 +37,12 @@ const allSchemas = ref<SchemaInfo[]>([]);
 // 已启用方案的 ID 列表（有序）
 const enabledSchemaIDs = ref<string[]>([]);
 
-// 各方案的配置（schemaID -> config）
+// 各方案的配置（schemaID -> config，包含已加载的和暂存的改动）
 const schemaConfigs = ref<Record<string, SchemaConfig>>({});
 const schemaLoading = ref(false);
+
+// 暂存的方案配置改动（schemaID -> config），等待 App.vue 统一保存
+const pendingSchemaConfigs = ref<Record<string, SchemaConfig>>({});
 
 // 方案管理对话框
 const showSchemaManager = ref(false);
@@ -63,7 +66,36 @@ function openSchemaSettingsByEngine(engine: "pinyin" | "codetable") {
   else if (activeSchemaID.value) openSchemaSettings(activeSchemaID.value);
 }
 
-defineExpose({ openSchemaSettingsByEngine });
+// 供 App.vue 查询是否有待保存的方案配置
+function hasPendingSchemaChanges(): boolean {
+  return Object.keys(pendingSchemaConfigs.value).length > 0;
+}
+
+// 供 App.vue 保存时批量提交所有暂存的方案配置
+async function flushPendingSchemaConfigs(): Promise<void> {
+  const entries = Object.entries(pendingSchemaConfigs.value);
+  for (const [schemaID, cfg] of entries) {
+    await wailsApi.saveSchemaConfig(schemaID, cfg);
+  }
+  pendingSchemaConfigs.value = {};
+}
+
+// 丢弃所有暂存（重新加载时使用）
+async function discardPendingSchemaConfigs(): Promise<void> {
+  // 重新从后端加载每个有暂存的方案，恢复本地缓存
+  const ids = Object.keys(pendingSchemaConfigs.value);
+  pendingSchemaConfigs.value = {};
+  for (const id of ids) {
+    await loadSchemaConfig(id);
+  }
+}
+
+defineExpose({
+  openSchemaSettingsByEngine,
+  hasPendingSchemaChanges,
+  flushPendingSchemaConfigs,
+  discardPendingSchemaConfigs,
+});
 
 // 方案引用关系
 const schemaReferences = ref<Record<string, SchemaReference>>({});
@@ -184,19 +216,17 @@ async function loadSchemaConfig(schemaID: string) {
   }
 }
 
-async function onSchemaConfigSave(schemaID: string, cfg: SchemaConfig) {
-  // 更新本地缓存
+function onSchemaConfigSave(schemaID: string, cfg: SchemaConfig) {
+  // 更新本地缓存（供 UI 即时展示）
   schemaConfigs.value[schemaID] = cfg;
-  // 保存到后端
-  try {
-    await wailsApi.saveSchemaConfig(schemaID, cfg);
-  } catch (e) {
-    console.error(`保存方案配置失败: ${schemaID}`, e);
-  }
+  // 暂存改动，等待 App.vue 统一保存到后端
+  pendingSchemaConfigs.value[schemaID] = cfg;
 }
 
 async function onSchemaConfigReset(schemaID: string) {
+  // 重置后端配置后重新加载，并清除对应的暂存改动
   await loadSchemaConfig(schemaID);
+  delete pendingSchemaConfigs.value[schemaID];
 }
 
 async function onSchemaSettingsDictChanged() {
