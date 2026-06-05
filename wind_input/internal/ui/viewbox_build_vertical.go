@@ -60,7 +60,7 @@ func (r *Renderer) buildPager(
 		var bg Fill
 		if hovered && enabled {
 			bg.Color = stateBg(r.resolvedViews.Item.Hover)
-			b.Border = Border{Radius: sc(4 * scale)}
+			b.Border = Border{Radius: sc(4)}
 		}
 		// 主题配了翻页箭头图（views.footer_bar.prev_image/next_image，SVG/PNG，可 tint 随主题变色）→
 		// 按图标尺寸栅格化、居中绘制；解码失败回退内置矢量 chevron（零回归）。
@@ -133,7 +133,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 	indexAreaW := int(indexD + 6*scale + 0.5)
 	if isTextIndex {
 		// 文本序号列宽按字形测量收紧：取最宽序号标签实际宽 + 小留白，紧凑且各行候选文字对齐。
-		// （旧 sc(20*scale) 既偏宽、又重复乘 scale 致高 DPI 失真。）
+		// （旧写法 sc(20×scale) 既偏宽、又重复乘 scale 致高 DPI 失真。）
 		maxLabelW := 0.0
 		for _, cand := range candidates {
 			if cand.Index >= 0 {
@@ -224,7 +224,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 				children = append(children, idx)
 			} else {
 				d := int(indexD + 0.5)
-				leftM := sc(3 * scale)
+				leftM := sc(3)
 				rightM := indexAreaW - d - leftM
 				if rightM < 0 {
 					rightM = 0

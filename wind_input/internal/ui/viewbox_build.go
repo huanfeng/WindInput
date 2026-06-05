@@ -46,14 +46,14 @@ func (r *Renderer) buildEmbeddedPreedit(input string, cursorPos, rowH int, scale
 	}
 	inline := &View{
 		Layout: LayoutRow, CrossAlign: AlignCenter, FixedH: rowH,
-		Margin:   Edges{Right: sc(16 * scale)},
+		Margin:   Edges{Right: sc(16)},
 		Children: children,
 	}
 	if input != "" && cursorPos >= 0 && cursorPos <= len(input) {
 		cw := measureText(r.textDrawer, input[:cursorPos], pbFS, r.resolvedViews.PreeditBar.FontFamily)
 		inline.Layers = append(inline.Layers, ImageLayer{
 			Color: r.resolvedViews.PreeditBar.TextColor, Z: 1, Anchor: "left",
-			OffsetX: int(cw + 0.5), W: maxInt(1, sc(1.5*scale)), H: int(float64(rowH) * 0.7),
+			OffsetX: int(cw + 0.5), W: maxInt(1, sc(1.5)), H: int(float64(rowH) * 0.7),
 		})
 	}
 	return inline
@@ -91,7 +91,7 @@ func (r *Renderer) buildPreeditBand(input string, cursorPos, inputH int, scale f
 		cw := measureText(r.textDrawer, input[:cursorPos], pbFS, pb.FontFamily)
 		band.Layers = append(band.Layers, ImageLayer{
 			Color: pb.TextColor, Z: 1, Anchor: "left",
-			OffsetX: pb.PadLeft.Scaled(scale) + int(cw+0.5), W: maxInt(1, sc(1.5*scale)), H: int(pbFS + 0.5),
+			OffsetX: pb.PadLeft.Scaled(scale) + int(cw+0.5), W: maxInt(1, sc(1.5)), H: int(pbFS + 0.5),
 		})
 	}
 	return band
@@ -101,7 +101,7 @@ func (r *Renderer) buildPreeditBand(input string, cursorPos, inputH int, scale f
 func (r *Renderer) windowBorder(radius int, sc func(float64) int, scale float64) Border {
 	cfg := &r.config
 	if cfg.ModeAccentColor != nil {
-		return Border{Width: maxInt(1, sc(2.5*scale)), Color: cfg.ModeAccentColor, Radius: radius}
+		return Border{Width: maxInt(1, sc(2.5)), Color: cfg.ModeAccentColor, Radius: radius}
 	}
 	// 非 accent：边框宽来自 views.window.border.width（逻辑像素，经 sc 缩放）；0=无边框。
 	return Border{Width: r.resolvedViews.Window.BorderWidth.Scaled(scale), Color: r.resolvedViews.Window.BorderColor, Radius: radius}
@@ -396,7 +396,7 @@ func (r *Renderer) buildHorizontalCandidateTree(
 	}
 	listChildren = append(listChildren, items...)
 	if len(pagerChildren) > 0 {
-		pagerChildren[0].Margin = Edges{Left: sc(8 * scale)} // 与候选列表的分隔
+		pagerChildren[0].Margin = Edges{Left: sc(8)} // 与候选列表的分隔
 		listChildren = append(listChildren, pagerChildren...)
 	}
 

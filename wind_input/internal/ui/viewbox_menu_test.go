@@ -91,6 +91,43 @@ func TestBuildMenuTree_Geometry(t *testing.T) {
 	}
 }
 
+// TestBuildMenuTree_ItemBorder 守护 menu.item 边框 color/width 真实生效（基态 + hover 逐字段覆盖）。
+func TestBuildMenuTree_ItemBorder(t *testing.T) {
+	baseBorder := color.RGBA{10, 20, 30, 255}
+	hoverBorder := color.RGBA{40, 50, 60, 255}
+	rmv := theme.ResolvedMenuViews{
+		Root: theme.RVNode{BgColor: color.RGBA{255, 255, 255, 255}},
+		Item: theme.RVNode{
+			TextColor:   color.RGBA{0, 0, 0, 255},
+			BorderColor: baseBorder,
+			BorderWidth: theme.Dimension{Value: 2},
+			Hover:       &theme.RVNode{BgColor: color.RGBA{0, 120, 212, 255}, BorderColor: hoverBorder},
+		},
+	}
+	items := []MenuItem{{Text: "项目一"}, {Text: "项目二"}}
+	m := fixedMeasurer{charW: 14}
+	// hoverIdx=0：项0 hover、项1 基态；scale=1.0。
+	mt := buildMenuTree(items, 0, -1, false, false, rmv, 200, 80, 14.0, 24, 1.0, &imageResolver{}, nil)
+	Layout(mt.root, 0, 0, m)
+
+	// 基态项（索引1）：边框 color=base、width=2（修复前只读 radius，color/width 被丢弃）。
+	base := mt.root.Children[1]
+	if base.Border.Color != color.Color(baseBorder) {
+		t.Errorf("基态 menu.item 边框色应=base, got %v", base.Border.Color)
+	}
+	if base.Border.Width != 2 {
+		t.Errorf("基态 menu.item 边框宽应=2, got %d", base.Border.Width)
+	}
+	// hover 项（索引0）：color 被 hover 覆盖、width 继承 base（hover 未配 width）。
+	hov := mt.root.Children[0]
+	if hov.Border.Color != color.Color(hoverBorder) {
+		t.Errorf("hover menu.item 边框色应=hover, got %v", hov.Border.Color)
+	}
+	if hov.Border.Width != 2 {
+		t.Errorf("hover menu.item 边框宽应继承 base=2, got %d", hov.Border.Width)
+	}
+}
+
 // TestBuildMenuTree_Padding 守护 root 左右 padding 生效 + item 上下 padding 独立化（仿候选项）。
 func TestBuildMenuTree_Padding(t *testing.T) {
 	rmv := theme.ResolvedMenuViews{

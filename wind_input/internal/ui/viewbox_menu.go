@@ -128,14 +128,28 @@ func buildMenuTree(items []MenuItem, hoverIdx, submenuIdx int, hasChecked, hasCh
 			CrossAlign: AlignCenter, // check/text/arrow 在内容区垂直居中
 			Padding:    Edges{Top: itemPadT, Bottom: itemPadB, Left: padL, Right: padR},
 		}
+		// 菜单项边框（color/width/radius）：基态读 views.menu.item.border，hover 态逐字段覆盖。
+		// color 未配=不描边（零回归，与候选项/tooltip 统一）；radius 始终生效以裁 hover 满宽高亮圆角。
+		itemBorderColor := rmv.Item.BorderColor
+		itemBorderWidth := rmv.Item.BorderWidth
+		itemBorderRadius := rmv.Item.BorderRadius
+		if isHovered && rmv.Item.Hover != nil {
+			h := rmv.Item.Hover
+			if h.BorderColor != nil {
+				itemBorderColor = h.BorderColor
+			}
+			if h.BorderWidth != (theme.Dimension{}) {
+				itemBorderWidth = h.BorderWidth
+			}
+			if h.BorderRadius != (theme.Dimension{}) {
+				itemBorderRadius = h.BorderRadius
+			}
+		}
 		if isHovered && rmv.Item.Hover != nil && rmv.Item.Hover.BgColor != nil {
 			row.Background = Fill{Color: rmv.Item.Hover.BgColor}
-			// 菜单项高亮背景圆角：默认取 views.menu.item.border.radius，hover 显式 radius 则覆盖。
-			hr := rmv.Item.BorderRadius.Scaled(scale)
-			if hov := rmv.Item.Hover.BorderRadius.Scaled(scale); hov > 0 {
-				hr = hov
-			}
-			row.Border = Border{Radius: hr}
+		}
+		if itemBorderColor != nil || itemBorderRadius != (theme.Dimension{}) {
+			row.Border = Border{Color: itemBorderColor, Width: itemBorderWidth.Scaled(scale), Radius: itemBorderRadius.Scaled(scale)}
 		}
 
 		if hasChecked {
