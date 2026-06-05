@@ -5,7 +5,7 @@
       "view": "window",
       "caps": {
         "background_color": "supported",
-        "background_gradient": "reserved",
+        "background_gradient": "supported",
         "background_image": "supported",
         "border": "supported",
         "layers": "supported",
@@ -18,7 +18,7 @@
       "view": "preedit_bar",
       "caps": {
         "background_color": "supported",
-        "background_gradient": "reserved",
+        "background_gradient": "supported",
         "background_image": "supported",
         "border": "supported",
         "font": "supported",
@@ -39,7 +39,7 @@
       "view": "item",
       "caps": {
         "background_color": "supported",
-        "background_gradient": "reserved",
+        "background_gradient": "supported",
         "background_image": "supported",
         "border": "supported",
         "layers": "supported",
@@ -53,7 +53,7 @@
       "view": "index",
       "caps": {
         "background_color": "supported",
-        "background_gradient": "reserved",
+        "background_gradient": "supported",
         "background_shape": "supported",
         "border": "supported",
         "font": "supported",
@@ -117,7 +117,7 @@
       "view": "status",
       "caps": {
         "background_color": "supported",
-        "background_gradient": "reserved",
+        "background_gradient": "supported",
         "background_image": "supported",
         "border": "supported",
         "font": "supported",
@@ -131,7 +131,7 @@
       "view": "tooltip",
       "caps": {
         "background_color": "supported",
-        "background_gradient": "reserved",
+        "background_gradient": "supported",
         "background_image": "supported",
         "border": "supported",
         "col_gap": "supported",
@@ -147,7 +147,7 @@
       "view": "toast",
       "caps": {
         "background_color": "supported",
-        "background_gradient": "reserved",
+        "background_gradient": "supported",
         "background_image": "supported",
         "border": "supported",
         "font": "supported",
@@ -163,6 +163,7 @@
       "view": "menu.root",
       "caps": {
         "background_color": "supported",
+        "background_gradient": "supported",
         "background_image": "supported",
         "border": "supported",
         "layers": "supported",

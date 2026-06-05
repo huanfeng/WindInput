@@ -91,7 +91,7 @@ func buildMenuTree(items []MenuItem, hoverIdx, submenuIdx int, hasChecked, hasCh
 		FixedH:     height,
 		Layout:     LayoutColumn,
 		Padding:    Edges{Top: padTop, Bottom: padBottom, Left: rootPadL, Right: rootPadR},
-		Background: ir.fillFor(rmv.Root.BgColor, rmv.Root.BgImage, resources), // P8 切片6：菜单背景可带图（PaintTree 在内圆角 clip 内绘制）
+		Background: ir.fillFor(rmv.Root.BgColor, rmv.Root.BgImage, rmv.Root.BgGradient, resources), // P8 切片6：菜单背景可带图/渐变（PaintTree 在内圆角 clip 内绘制）
 		Border:     Border{Radius: radius},
 	}
 	ir.appendLayers(root, rmv.Root.Layers, resources, func(v float64) int { return int(v * scale) }) // P8 切片6：菜单装饰层

@@ -52,13 +52,14 @@ const (
 	GlyphChevronRight
 )
 
-// Fill 背景填充：底色 + 可选背景图（画在底色之上，裁剪到 View 圆角内）。
+// Fill 背景填充：底色 + 可选渐变 + 可选背景图（依次叠加，裁剪到 View 圆角内）。
 type Fill struct {
-	Color   color.Color
-	Image   *image.RGBA // nil = 无背景图
-	Mode    string      // nine_slice | stretch | tile | center
-	Slice   Edges       // 仅 nine_slice
-	Opacity float64     // 0..1
+	Color    color.Color
+	Image    *image.RGBA       // nil = 无背景图
+	Mode     string            // nine_slice | stretch | tile | center
+	Slice    Edges             // 仅 nine_slice
+	Opacity  float64           // 0..1
+	Gradient *theme.RVGradient // nil = 无渐变；paint 时按 View rect 栅格化（优先级：底色 < 渐变 < 背景图）
 }
 
 // Border 描边：宽度/颜色/圆角。描边沿边框盒边缘绘制，不参与布局尺寸（与旧渲染器一致）。

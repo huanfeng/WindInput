@@ -98,13 +98,13 @@ var ThemeCapabilities = []ViewCapability{
 		CapPadding: CapSupported, CapBorder: CapSupported,
 		CapBackgroundColor: CapSupported, CapBackgroundImage: CapSupported, CapLayers: CapSupported,
 		CapShadowOffset: CapSupported, CapShadowBlurSpread: CapReserved,
-		CapBackgroundGradient: CapReserved,
+		CapBackgroundGradient: CapSupported,
 	}},
 	{"preedit_bar", map[string]CapabilityStatus{
 		CapPadding: CapSupported, CapBorder: CapSupported,
 		CapBackgroundColor: CapSupported, CapBackgroundImage: CapSupported, CapLayers: CapSupported,
 		CapTextColor: CapSupported, CapFont: CapSupported,
-		CapBackgroundGradient: CapReserved,
+		CapBackgroundGradient: CapSupported,
 	}},
 	{"candidate_list", map[string]CapabilityStatus{
 		CapItemSpacing: CapSupported, CapBandGap: CapSupported,
@@ -115,7 +115,7 @@ var ThemeCapabilities = []ViewCapability{
 		CapBackgroundColor: CapSupported, CapBackgroundImage: CapSupported, CapLayers: CapSupported,
 		CapStateSelected: CapSupported, CapStateHover: CapSupported,
 		CapStateDisabled:      CapUnsupported, // 候选项无禁用业务语义（Candidate 无 disabled 字段）
-		CapBackgroundGradient: CapReserved,
+		CapBackgroundGradient: CapSupported,
 	}},
 	{"index", map[string]CapabilityStatus{
 		CapPadding: CapSupported, CapBorder: CapSupported,
@@ -123,7 +123,7 @@ var ThemeCapabilities = []ViewCapability{
 		CapBackgroundShape: CapSupported, CapIndexLabels: CapSupported,
 		CapStateSelected: CapSupported, CapStateHover: CapSupported,
 		CapStateDisabled:      CapUnsupported,
-		CapBackgroundGradient: CapReserved,
+		CapBackgroundGradient: CapSupported,
 	}},
 	{"text", map[string]CapabilityStatus{
 		CapMargin: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
@@ -151,7 +151,7 @@ var ThemeCapabilities = []ViewCapability{
 		CapBackgroundColor: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
 		CapBackgroundImage: CapSupported, CapLayers: CapSupported,
 		CapStateHover:         CapUnsupported, // 瞬时提示窗，无交互状态
-		CapBackgroundGradient: CapReserved,
+		CapBackgroundGradient: CapSupported,
 	}},
 	{"tooltip", map[string]CapabilityStatus{
 		CapPadding: CapSupported, CapBorder: CapSupported,
@@ -159,7 +159,7 @@ var ThemeCapabilities = []ViewCapability{
 		CapLineSpacing: CapSupported, CapColGap: CapSupported,
 		CapBackgroundImage: CapSupported, CapLayers: CapSupported,
 		CapStateHover:         CapUnsupported,
-		CapBackgroundGradient: CapReserved,
+		CapBackgroundGradient: CapSupported,
 	}},
 	{"toast", map[string]CapabilityStatus{
 		CapPadding: CapSupported, CapBorder: CapSupported,
@@ -167,11 +167,12 @@ var ThemeCapabilities = []ViewCapability{
 		CapLineSpacing: CapSupported, CapTitleGap: CapSupported,
 		CapBackgroundImage: CapSupported, CapLayers: CapSupported,
 		CapStateHover:         CapUnsupported,
-		CapBackgroundGradient: CapReserved,
+		CapBackgroundGradient: CapSupported,
 	}},
 	{"menu.root", map[string]CapabilityStatus{
 		CapPadding: CapSupported, CapBorder: CapSupported,
 		CapBackgroundColor: CapSupported, CapBackgroundImage: CapSupported, CapLayers: CapSupported,
+		CapBackgroundGradient: CapSupported,
 	}},
 	{"menu.item", map[string]CapabilityStatus{
 		CapPadding: CapSupported, CapBorder: CapSupported,

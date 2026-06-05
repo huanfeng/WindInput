@@ -97,7 +97,7 @@ func buildStatusTree(text string, node theme.RVNode, fontSize, fallbackPad, fall
 		Text:       text,
 		TextStyle:  TextStyle{FontSize: fs, Color: node.TextColor, Align: AlignCenter, Weight: node.FontWeight, Family: node.FontFamily},
 		Padding:    Edges{Top: padT, Right: padR, Bottom: padB, Left: padL},
-		Background: ir.fillFor(node.BgColor, node.BgImage, resources), // P8 切片6：背景可带图
+		Background: ir.fillFor(node.BgColor, node.BgImage, node.BgGradient, resources), // P8 切片6：背景可带图/渐变
 		Border:     border,
 		FixedW:     w,
 	}

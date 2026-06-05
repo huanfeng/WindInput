@@ -295,7 +295,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 		CrossAlign: AlignCenter, // 让底部翻页行水平居中
 		Gap:        rv.WindowGap.Scaled(scale),
 		Padding:    Edges{Top: scD(rv.Window.PadTop), Right: scD(rv.Window.PadRight), Bottom: scD(rv.Window.PadBottom), Left: scD(rv.Window.PadLeft)}, // 完整遵循主题 window.padding 四边
-		Background: r.fillFor(r.resolvedViews.Window.BgColor, r.resolvedViews.Window.BgImage),                                                         // P7-C：背景图来自 views.window.background.image
+		Background: r.fillFor(r.resolvedViews.Window.BgColor, r.resolvedViews.Window.BgImage, r.resolvedViews.Window.BgGradient),                      // P7-C：背景图来自 views.window.background.image
 		Border:     r.windowBorder(rv.Window.BorderRadius.Scaled(scale), sc, scale),
 		Shadow:     &ViewShadow{OffsetX: rv.ShadowOffsetX.Scaled(scale), OffsetY: rv.ShadowOffsetY.Scaled(scale), Color: r.resolvedViews.ShadowColor},
 		Children:   bands,

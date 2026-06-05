@@ -139,8 +139,8 @@ func tintMask(src *image.RGBA, c color.Color) *image.RGBA {
 
 // fillFor 构建 View 背景填充：底色 + 可选背景图（经 resolveImage 取缓存位图，支持 SVG/tint）。
 // bg 为 nil 或图解码失败时退化为纯底色（零回归）。背景尺寸动态 → SVG 兜底分辨率后 gg 缩放。
-func (ir *imageResolver) fillFor(col color.Color, bg *theme.RVImage, resources map[string]string) Fill {
-	f := Fill{Color: col}
+func (ir *imageResolver) fillFor(col color.Color, bg *theme.RVImage, grad *theme.RVGradient, resources map[string]string) Fill {
+	f := Fill{Color: col, Gradient: grad}
 	if bg != nil {
 		if img := ir.resolveImage(bg.Ref, resources, 0, 0, bg.TintColor); img != nil {
 			f.Image = img

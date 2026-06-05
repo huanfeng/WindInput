@@ -450,8 +450,8 @@ func (r *Renderer) imageForRef(ref string) *image.RGBA {
 }
 
 // fillFor 构建 View 背景填充：底色 + 可选背景图（委派共享 imageResolver）。
-func (r *Renderer) fillFor(col color.Color, bg *theme.RVImage) Fill {
-	return r.imgRes.fillFor(col, bg, r.resourcesSnapshot())
+func (r *Renderer) fillFor(col color.Color, bg *theme.RVImage, grad *theme.RVGradient) Fill {
+	return r.imgRes.fillFor(col, bg, grad, r.resourcesSnapshot())
 }
 
 // appendThemeLayers 把主题 RVImage 层级覆盖图（spec）解码后追加到 View.Layers（P7-C，D4；委派共享 imageResolver）。

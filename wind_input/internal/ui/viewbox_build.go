@@ -82,7 +82,7 @@ func (r *Renderer) buildPreeditBand(input string, cursorPos, inputH int, scale f
 	band := &View{
 		Layout: LayoutRow, CrossAlign: AlignCenter, Stretch: true, FixedH: inputH,
 		Padding:    Edges{Left: pb.PadLeft.Scaled(scale), Right: pb.PadRight.Scaled(scale)},
-		Background: r.fillFor(bgColor, pb.BgImage), // P7-C：preedit 背景可带图
+		Background: r.fillFor(bgColor, pb.BgImage, pb.BgGradient), // P7-C：preedit 背景可带图/渐变
 		Border:     Border{Radius: pb.BorderRadius.Scaled(scale)},
 		Children:   children,
 	}
@@ -204,7 +204,7 @@ func effectiveNode(n theme.RVNode, selected, hover bool) theme.RVNode {
 // index/text/comment/item 统一经此上盒模型；padding 由各自构建处控制（item 行内边距含 rail 逻辑，不在此覆盖）。
 func (r *Renderer) applyNodeBox(v *View, eff theme.RVNode, scale float64) {
 	if eff.BgColor != nil || eff.BgImage != nil {
-		v.Background = r.fillFor(eff.BgColor, eff.BgImage) // 高亮位图优先于底色
+		v.Background = r.fillFor(eff.BgColor, eff.BgImage, eff.BgGradient) // 高亮位图优先于底色
 	}
 	if eff.BorderColor != nil || eff.BorderWidth != (theme.Dimension{}) || eff.BorderRadius != (theme.Dimension{}) {
 		v.Border = Border{Color: eff.BorderColor, Width: eff.BorderWidth.Scaled(scale), Radius: eff.BorderRadius.Scaled(scale)}
@@ -233,7 +233,7 @@ func (r *Renderer) buildIndexCircle(eff theme.RVNode, label string, d int, scale
 	return &View{
 		FixedW:     d,
 		FixedH:     d,
-		Background: r.fillFor(eff.BgColor, eff.BgImage),
+		Background: r.fillFor(eff.BgColor, eff.BgImage, eff.BgGradient),
 		Border:     Border{Radius: radius, Color: eff.BorderColor, Width: eff.BorderWidth.Scaled(scale)},
 		Layout:     LayoutStack,
 		Children: []*View{{
@@ -415,7 +415,7 @@ func (r *Renderer) buildHorizontalCandidateTree(
 		Layout:     LayoutColumn,
 		Gap:        rv.WindowGap.Scaled(scale),
 		Padding:    Edges{Top: scD(rv.Window.PadTop), Right: scD(rv.Window.PadRight), Bottom: scD(rv.Window.PadBottom), Left: scD(rv.Window.PadLeft)}, // 完整遵循主题 window.padding 四边
-		Background: r.fillFor(rv.Window.BgColor, rv.Window.BgImage),                                                                                   // P7-C：背景图来自 views.window.background.image
+		Background: r.fillFor(rv.Window.BgColor, rv.Window.BgImage, rv.Window.BgGradient),                                                             // P7-C：背景图来自 views.window.background.image
 		Border:     r.windowBorder(rv.Window.BorderRadius.Scaled(scale), sc, scale),
 		Shadow:     &ViewShadow{OffsetX: rv.ShadowOffsetX.Scaled(scale), OffsetY: rv.ShadowOffsetY.Scaled(scale), Color: rv.ShadowColor},
 		Children:   bands,

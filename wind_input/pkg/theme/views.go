@@ -58,20 +58,23 @@ type ViewImage struct {
 	DisabledTint ColorRef `yaml:"disabled_tint,omitempty"`
 }
 
-// ViewFill 背景填充。Color 底色 + 可选 Image（画在底色之上、裁剪到圆角内）。
-// Gradient 为 P7-E 预留字段（schema 冻结，渲染 later）；与 Color 概念互斥（同时存在时 render later 决定优先级）。
+// ViewFill 背景填充。Color 底色 + 可选 Gradient + 可选 Image（依次叠加，裁剪到圆角内）。
+// 优先级：底色 < 渐变 < 背景图（通常 Color/Gradient 互斥）。
 type ViewFill struct {
 	Color    ColorRef      `yaml:"color,omitempty"`    // ColorToken（标量或内联 {light,dark}）: "#RRGGBB[AA]" | "${semantic}" | "transparent"
 	Shape    string        `yaml:"shape,omitempty"`    // 背景形状: "circle" | "none"（空=none）。当前仅 views.index 消费（序号项圆形/无背景）
 	Image    *ViewImage    `yaml:"image,omitempty"`    // 背景填充图（P7-C，D5）；nil=无图
-	Gradient *ViewGradient `yaml:"gradient,omitempty"` // 渐变填充（P7-E 预留：schema 冻结，渲染 later）；nil=无渐变
+	Gradient *ViewGradient `yaml:"gradient,omitempty"` // 渐变填充（P7-E 落地）；nil=无渐变
 }
 
-// ViewGradient 渐变填充（P7-E 预留字段形状）。当前仅定义 schema、不参与渲染（RVNode 不消费）。
-// 设计为 CSS 风格：linear（默认）按 Angle 方向，多色停 Stops 任意位置。
+// ViewGradient 渐变填充（P7-E 落地）。CSS 风格：
+//   - linear（默认）：按 Angle 方向（0=左→右、90=上→下）沿矩形投影插值；
+//   - radial：圆心=矩形中心、半径=中心到最远角（按宽高比椭圆）。
+//
+// 解析为 RVGradient（resolveGradient），由 ui 经 RasterizeGradient 现场栅格化、复用背景图圆角路径渲染。
 type ViewGradient struct {
-	Type  string             `yaml:"type,omitempty"`  // "linear"（默认）| "radial"（预留）
-	Angle float64            `yaml:"angle,omitempty"` // linear 角度（度）：0=左→右、90=上→下
+	Type  string             `yaml:"type,omitempty"`  // "linear"（默认）| "radial"
+	Angle float64            `yaml:"angle,omitempty"` // linear 角度（度）：0=左→右、90=上→下；radial 忽略
 	Stops []ViewGradientStop `yaml:"stops,omitempty"` // 色停列表（≥2）
 }
 
@@ -176,6 +179,20 @@ type RVImage struct {
 	DisabledTintColor color.Color // 已解析禁用态染色（仅翻页箭头）；nil=禁用时不变化
 }
 
+// RVGradient 渲染消费形态的渐变 spec（plain 值；stop 颜色已解析，Stops 已按 Pos 升序排序）。
+// ui 侧 paintShapes 按目标 rect 尺寸经 RasterizeGradient 现场栅格化，复用 DrawBackground 圆角路径绘制。
+type RVGradient struct {
+	Type  string           // "linear"（默认）| "radial"
+	Angle float64          // linear 角度（度）：0=左→右、90=上→下；radial 忽略
+	Stops []RVGradientStop // 已按 Pos 升序
+}
+
+// RVGradientStop 渐变色停（解析后）。
+type RVGradientStop struct {
+	Color color.Color
+	Pos   float64 // 0..1
+}
+
 // RVNode 渲染消费形态的单个 View 外观（plain 逻辑像素 + 颜色）。
 // 各字段为该 View 实际用到的子集；零值表示「用渲染器内置默认」。
 //
@@ -193,13 +210,14 @@ type RVNode struct {
 	FontWeight                                       int
 	FontFamily                                       string // 平台字体族名（空=继承全局）；未知名由平台文本引擎回退
 	TextColor                                        color.Color
-	Selected                                         *RVNode   // P7-D/V3-D：选中态 patch（递归）
-	Hover                                            *RVNode   // P7-D/V3-D：悬停态 patch（递归）
-	Disabled                                         *RVNode   // P7-D/V3-D：禁用态 patch（递归；schema 预留，暂无渲染触发器）
-	BgImage                                          *RVImage  // 背景填充图（P7-C）；nil=无
-	Layers                                           []RVImage // z 层级覆盖图（P7-C）
-	PrevImage, NextImage                             *RVImage  // 仅 footer_bar：上/下翻页箭头图（替代内置 chevron，可 SVG + tint）；nil=用内置矢量箭头
-	LineSpacing, ColGap, TitleGap                    Dimension // 多行/多列布局间距（tooltip/toast 专用；零值=渲染层兜底现状）
+	Selected                                         *RVNode     // P7-D/V3-D：选中态 patch（递归）
+	Hover                                            *RVNode     // P7-D/V3-D：悬停态 patch（递归）
+	Disabled                                         *RVNode     // P7-D/V3-D：禁用态 patch（递归；schema 预留，暂无渲染触发器）
+	BgImage                                          *RVImage    // 背景填充图（P7-C）；nil=无
+	BgGradient                                       *RVGradient // 背景渐变（P7-E 落地）；nil=无。优先级：底色 < 渐变 < 背景图
+	Layers                                           []RVImage   // z 层级覆盖图（P7-C）
+	PrevImage, NextImage                             *RVImage    // 仅 footer_bar：上/下翻页箭头图（替代内置 chevron，可 SVG + tint）；nil=用内置矢量箭头
+	LineSpacing, ColGap, TitleGap                    Dimension   // 多行/多列布局间距（tooltip/toast 专用；零值=渲染层兜底现状）
 }
 
 // ResolvedViews 候选窗各具名 View 的解析后外观（plain 逻辑像素，渲染器直接读）。

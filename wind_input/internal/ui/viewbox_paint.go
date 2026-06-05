@@ -46,6 +46,14 @@ func (v *View) paintShapes(dc *gg.Context, img *image.RGBA) {
 		dc.Fill()
 	}
 
+	// 渐变（底色之上、背景图之下）：按 View rect 现场栅格化为预乘位图，
+	// 复用 DrawBackground 的圆角裁剪 + 预乘合成（与背景图同路径）。
+	if g := v.Background.Gradient; g != nil {
+		if gimg := theme.RasterizeGradient(g, r.Dx(), r.Dy()); gimg != nil {
+			theme.DrawBackground(img, r, gimg, "stretch", Edges{}, 1.0, v.Border.Radius)
+		}
+	}
+
 	// 背景图：传 Border.Radius 让 DrawBackground 按圆角矩形覆盖度裁角——内部元素（如选中候选项）
 	// 四周已被窗口底色填满，无法靠 alpha-gate 裁角，必须靠 radius 遮罩。
 	if v.Background.Image != nil {

@@ -72,6 +72,10 @@ func resolveViewNode(n ViewNode, resolveColor func(ColorRef) color.Color, defBg,
 		im := toRVImage(*n.Background.Image, resolveColor)
 		out.BgImage = &im
 	}
+	// P7-E 落地：背景渐变 spec（stop 颜色解析 + 按 Pos 排序）。
+	if g := n.Background.Gradient; g != nil && len(g.Stops) > 0 {
+		out.BgGradient = resolveGradient(g, resolveColor)
+	}
 	if len(n.Layers) > 0 {
 		out.Layers = make([]RVImage, len(n.Layers))
 		for i := range n.Layers {
