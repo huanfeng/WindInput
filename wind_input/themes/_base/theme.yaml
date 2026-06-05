@@ -82,6 +82,16 @@ views:
     font_size: -4
   footer_bar:
     font_size: -4
+    prev_image:
+      ref: chevron_prev.svg
+      mode: center
+      tint: "${accent}"
+      disabled_tint: "${text_hint}"
+    next_image:
+      ref: chevron_next.svg
+      mode: center
+      tint: "${accent}"
+      disabled_tint: "${text_hint}"
   accent_bar:
     background: {color: "${accent}"}
   status:
