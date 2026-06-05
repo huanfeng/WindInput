@@ -201,40 +201,25 @@ func (r *Renderer) buildVerticalCandidateTree(
 		targetW = maxItemW
 	}
 
-	// ---- 候选项（每行全宽）----
+	// ---- 候选项（每行全宽）----（横竖共用 buildCandidateItem；竖排：序号固定列宽对齐、截断、撑满）
+	st := &candItemStyle{
+		isTextIndex:      isTextIndex,
+		indexCircleD:     int(indexD + 0.5),
+		indexFixedW:      indexAreaW, // 竖排：固定列宽使各行候选文字对齐
+		indexMarginRight: indexMarginRight,
+		commentMarginL:   commentMarginLeft,
+		itemPadTop:       scD(rv.Item.PadTop),
+		itemPadBottom:    scD(rv.Item.PadBottom),
+		itemPadRight:     itemPadR,
+		itemPadLeft:      itemPadLeft,
+		railW:            railW,
+		rowH:             rowH,
+		stretch:          true, // 竖排：每行全宽
+	}
 	items := make([]*View, 0, len(candidates))
 	for i, cand := range candidates {
-		children := make([]*View, 0, 3)
-
-		// 架构统一：与横排同一套 effectiveNode + styleLeaf + buildIndexCircle。
 		sel, hov := i == selectedIndex, i == hoverIndex
-		effIdx := effectiveNode(rv.Index, sel, hov)
-		effText := effectiveNode(rv.Text, sel, hov)
-		effCmt := effectiveNode(rv.Comment, sel, hov)
-		effItem := effectiveNode(rv.Item, sel, hov)
-
-		if cand.Index >= 0 {
-			label := indexLabel(r.effectiveIndexLabels(), cand.Index, cand.IndexLabel)
-			if isTextIndex {
-				// 文本序号：accent 底色是圆圈模式专属，文本模式无背景（保留 color/font/border）。
-				effIdxText := effIdx
-				effIdxText.BgColor, effIdxText.BgImage = nil, nil
-				idx := r.styleLeaf(effIdxText, label, scale, AlignStart, Edges{})
-				idx.FixedW = indexAreaW
-				children = append(children, idx)
-			} else {
-				d := int(indexD + 0.5)
-				leftM := sc(3)
-				rightM := indexAreaW - d - leftM
-				if rightM < 0 {
-					rightM = 0
-				}
-				circle := r.buildIndexCircle(effIdx, label, d, scale)
-				circle.Margin = Edges{Left: leftM, Right: rightM}
-				children = append(children, circle)
-			}
-		}
-
+		// 截断预算：targetW 内扣除左偏移(effLeft + 序号列) + 右 padding + 注释。
 		lo := float64(effLeft)
 		if cand.Index >= 0 {
 			lo += float64(indexAreaW) + float64(indexMarginRight)
@@ -243,35 +228,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 		if commentWidths[i] > 0 {
 			availText -= float64(commentMarginLeft) + commentWidths[i]
 		}
-		textMargin := Edges{Left: indexMarginRight}
-		if len(children) == 0 {
-			textMargin = Edges{} // 无序号：文本紧跟 padding（横排一致，左留白由 item.padding.left 提供）
-		}
-		textStr := r.truncateToWidth(candidateDisplayText(cand, cfg.CmdbarPrefix), rv.Text.FontSize, availText, rv.Text.FontFamily)
-		children = append(children, r.styleLeaf(effText, textStr, scale, AlignStart, textMargin))
-
-		if cand.Comment != "" {
-			children = append(children, r.styleLeaf(effCmt, cand.Comment, scale, AlignStart, Edges{Left: commentMarginLeft}))
-		}
-
-		// 强调条占位元素：rail 在所有行占据左留白（保持列对齐），仅选中行绘制强调条；
-		// 内容（序号/文字）排在 rail 右侧。无强调条主题不加 rail（railFixedW=0，内容靠左）。
-		itemChildren := children
-		if rail := r.buildAccentRail(railW, sel, rowH, scale); rail != nil {
-			itemChildren = append([]*View{rail}, children...)
-		}
-		item := &View{
-			Layout:     LayoutRow,
-			CrossAlign: AlignCenter,
-			Stretch:    true, // 每行全宽
-			FixedH:     rowH,
-			// 四向 padding 真实生效（与横排一致）：左 padding 走 itemPadLeft（有 accent 时让位给 rail）。
-			Padding:  Edges{Top: scD(rv.Item.PadTop), Right: itemPadR, Bottom: scD(rv.Item.PadBottom), Left: itemPadLeft},
-			Children: itemChildren,
-		}
-		r.applyNodeBox(item, effItem, scale)          // 统一：item 行背景 + 边框（含选中/悬停态）
-		r.appendThemeLayers(item, rv.Item.Layers, sc) // P7-C：候选项装饰层
-		items = append(items, item)
+		items = append(items, r.buildCandidateItem(cand, sel, hov, st, availText, scale, sc))
 	}
 	list := &View{Layout: LayoutColumn, Stretch: true, Gap: scD(rv.RowGap), Children: items} // 纵向行间距 = candidate_list.row_gap（默认 0=紧贴）
 

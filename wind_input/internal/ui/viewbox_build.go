@@ -266,6 +266,96 @@ func (r *Renderer) buildAccentRail(railW int, selected bool, rowH int, scale flo
 	return rail
 }
 
+// candItemStyle 横竖候选窗共用的单项构建参数（每窗口恒定部分）。
+// 横竖差异收敛到 3 处：indexFixedW（序号列宽）、stretch（行是否撑满）、以及 buildCandidateItem 的 availText（截断预算）。
+type candItemStyle struct {
+	isTextIndex      bool
+	indexCircleD     int // 圆圈序号直径（设备像素）
+	indexFixedW      int // 序号列固定宽：0=自然流（横排）；>0=固定列宽跨行对齐（竖排）
+	indexMarginRight int
+	commentMarginL   int
+	itemPadTop       int
+	itemPadBottom    int
+	itemPadRight     int
+	itemPadLeft      int  // effLeft 的 padding 分量（有强调条时=0，让位给 rail）
+	railW            int  // 强调条占位宽（设备像素；0=无强调条不占位）
+	rowH             int  // 行高（含上下 padding，FixedH 用）
+	stretch          bool // 行是否撑满父宽（竖排 true、横排 false）
+}
+
+// buildCandidateItem 构建单个候选项 View（横竖共用）：序号(圆/文本) + 文字(可截断) + 注释 + 强调条 rail + item 盒。
+// 横竖差异仅由 st（indexFixedW/stretch）与 availText 表达：availText<=0=不截断（横排自然宽），>0=截断到该像素预算（竖排）。
+// 与横竖各自实现逐字节等价（序号列宽/截断/撑满之外的样式完全同源），消除「加字段只接一边」的漂移。
+func (r *Renderer) buildCandidateItem(cand Candidate, sel, hov bool, st *candItemStyle, availText, scale float64, sc func(float64) int) *View {
+	rv := &r.resolvedViews
+	children := make([]*View, 0, 3)
+
+	// 架构统一（默认/选中/悬停 × 背景/边框/字体/颜色）：每元素经 effectiveNode 取「基态 ⊕ 当前激活状态」的有效外观。
+	effIdx := effectiveNode(rv.Index, sel, hov)
+	effText := effectiveNode(rv.Text, sel, hov)
+	effCmt := effectiveNode(rv.Comment, sel, hov)
+	effItem := effectiveNode(rv.Item, sel, hov)
+
+	if cand.Index >= 0 {
+		label := indexLabel(r.effectiveIndexLabels(), cand.Index, cand.IndexLabel)
+		if st.isTextIndex {
+			// 文本序号：accent 底色是圆圈模式专属，文本模式无背景（保留 color/font/border）。
+			effIdxText := effIdx
+			effIdxText.BgColor, effIdxText.BgImage = nil, nil
+			idx := r.styleLeaf(effIdxText, label, scale, AlignStart, Edges{})
+			if st.indexFixedW > 0 {
+				idx.FixedW = st.indexFixedW // 竖排：固定列宽使各行候选文字对齐
+			}
+			children = append(children, idx)
+		} else {
+			circle := r.buildIndexCircle(effIdx, label, st.indexCircleD, scale)
+			if st.indexFixedW > 0 {
+				// 竖排：圆圈在固定列内左对齐 + 右侧留白补足列宽（跨行对齐）。
+				leftM := sc(3)
+				rightM := st.indexFixedW - st.indexCircleD - leftM
+				if rightM < 0 {
+					rightM = 0
+				}
+				circle.Margin = Edges{Left: leftM, Right: rightM}
+			}
+			children = append(children, circle)
+		}
+	}
+
+	// 候选文字（颜色/字重来自 text 自身状态）。横排自然宽；竖排截断到 availText。
+	textMargin := Edges{}
+	if len(children) > 0 {
+		textMargin = Edges{Left: st.indexMarginRight}
+	}
+	textStr := candidateDisplayText(cand, r.config.CmdbarPrefix)
+	if availText > 0 {
+		textStr = r.truncateToWidth(textStr, rv.Text.FontSize, availText, rv.Text.FontFamily)
+	}
+	children = append(children, r.styleLeaf(effText, textStr, scale, AlignStart, textMargin))
+
+	if cand.Comment != "" {
+		children = append(children, r.styleLeaf(effCmt, cand.Comment, scale, AlignStart, Edges{Left: st.commentMarginL}))
+	}
+
+	// 强调条占位元素：rail 在所有行占据左留白（保持列对齐），仅选中行绘制强调条；内容排在 rail 右侧。
+	itemChildren := children
+	if rail := r.buildAccentRail(st.railW, sel, st.rowH, scale); rail != nil {
+		itemChildren = append([]*View{rail}, children...)
+	}
+	item := &View{
+		Layout:     LayoutRow,
+		CrossAlign: AlignCenter,
+		Stretch:    st.stretch,
+		FixedH:     st.rowH,
+		// 四向 padding 真实生效（横竖一致）：左 padding 走 itemPadLeft（有强调条时让位给 rail）。
+		Padding:  Edges{Top: st.itemPadTop, Right: st.itemPadRight, Bottom: st.itemPadBottom, Left: st.itemPadLeft},
+		Children: itemChildren,
+	}
+	r.applyNodeBox(item, effItem, scale)          // 统一：item 行背景 + 边框（含选中/悬停态）
+	r.appendThemeLayers(item, rv.Item.Layers, sc) // P7-C：候选项装饰层
+	return item
+}
+
 // buildHorizontalCandidateTree 构建横排候选窗 View 树。
 // candWindowTree 是构建结果：窗口根 + 命中测试所需的关键 View。
 type candWindowTree struct {
@@ -326,64 +416,29 @@ func (r *Renderer) buildHorizontalCandidateTree(
 	}
 	rowH := int(lineH+0.5) + scD(rv.Item.PadTop) + scD(rv.Item.PadBottom)
 
-	// ---- 候选项 ----
+	// ---- 候选项 ----（横竖共用 buildCandidateItem；横排：序号自然流、不截断、不撑满）
+	itemPadLeft := bgPadL
+	if cfg.HasAccentBar && rv.AccentBar.BgColor != nil {
+		itemPadLeft = 0 // 有强调条时左 padding 让位给 rail（effLeft=railW），与竖排一致
+	}
+	st := &candItemStyle{
+		isTextIndex:      isTextIndex,
+		indexCircleD:     int(indexSize + 0.5),
+		indexFixedW:      0, // 横排：序号自然流（不固定列宽）
+		indexMarginRight: indexMarginRight,
+		commentMarginL:   commentMarginLeft,
+		itemPadTop:       scD(rv.Item.PadTop),
+		itemPadBottom:    scD(rv.Item.PadBottom),
+		itemPadRight:     bgPadR,
+		itemPadLeft:      itemPadLeft,
+		railW:            railW,
+		rowH:             rowH,
+		stretch:          false, // 横排：行宽自然（不撑满）
+	}
 	items := make([]*View, 0, len(candidates))
 	for i, cand := range candidates {
-		children := make([]*View, 0, 3)
-
-		// 架构统一（默认/选中/悬停 × 背景/边框/字体/颜色）：每个元素经 effectiveNode 取
-		// 「基态 ⊕ 当前激活状态」的有效外观，再统一经 styleLeaf/applyNodeBox 上盒模型。
 		sel, hov := i == selectedIndex, i == hoverIndex
-		effIdx := effectiveNode(rv.Index, sel, hov)
-		effText := effectiveNode(rv.Text, sel, hov)
-		effCmt := effectiveNode(rv.Comment, sel, hov)
-		effItem := effectiveNode(rv.Item, sel, hov)
-
-		if cand.Index >= 0 {
-			label := indexLabel(r.effectiveIndexLabels(), cand.Index, cand.IndexLabel)
-			if isTextIndex {
-				// 文本序号：accent 底色是圆圈模式专属，文本模式无背景（保留 color/font/border）。
-				effIdxText := effIdx
-				effIdxText.BgColor, effIdxText.BgImage = nil, nil
-				children = append(children, r.styleLeaf(effIdxText, label, scale, AlignStart, Edges{}))
-			} else {
-				children = append(children, r.buildIndexCircle(effIdx, label, int(indexSize+0.5), scale))
-			}
-		}
-
-		// 候选文字（颜色/字重来自 text 自身状态：选中默认 selection_text，与旧 item.selected 等价）。
-		textMargin := Edges{}
-		if len(children) > 0 {
-			textMargin = Edges{Left: indexMarginRight}
-		}
-		children = append(children, r.styleLeaf(effText, candidateDisplayText(cand, cfg.CmdbarPrefix), scale, AlignStart, textMargin))
-
-		// 注释
-		if cand.Comment != "" {
-			children = append(children, r.styleLeaf(effCmt, cand.Comment, scale, AlignStart, Edges{Left: commentMarginLeft}))
-		}
-
-		// 强调条占位元素：rail 存在时占据原左内边距宽度（内容位置不变），并承载强调条；
-		// 无强调条主题沿用左内边距。
-		itemChildren := children
-		itemPadLeft := bgPadL
-		if rail := r.buildAccentRail(railW, sel, rowH, scale); rail != nil {
-			itemPadLeft = 0
-			itemChildren = append([]*View{rail}, children...)
-		}
-		item := &View{
-			Layout:     LayoutRow,
-			CrossAlign: AlignCenter,
-			// 上下 padding 作为真实内边距生效：内容带从 y+PadTop 起、高 lineH，PadBottom 留在下方。
-			// 配合 FixedH=rowH(=lineH+PadTop+PadBottom)，对称 padding 与旧版逐像素一致；
-			// 非对称时上下不再被均摊（修复"改上等于上下同时变"）。
-			Padding:  Edges{Top: scD(rv.Item.PadTop), Right: bgPadR, Bottom: scD(rv.Item.PadBottom), Left: itemPadLeft},
-			FixedH:   rowH,
-			Children: itemChildren,
-		}
-		r.applyNodeBox(item, effItem, scale)          // 统一：item 行背景 + 边框（含选中/悬停态）
-		r.appendThemeLayers(item, rv.Item.Layers, sc) // P7-C：候选项装饰层（per-item 覆盖图）
-		items = append(items, item)
+		items = append(items, r.buildCandidateItem(cand, sel, hov, st, 0, scale, sc)) // availText=0：横排不截断
 	}
 
 	// ---- 候选列表行：[内嵌预编辑?] + 候选项 + [翻页区?] ----
