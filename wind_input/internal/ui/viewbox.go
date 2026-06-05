@@ -40,18 +40,6 @@ const (
 	AlignCenter
 )
 
-// GlyphKind 矢量字形（翻页箭头等，非文本/图片，由 paint 层用 gg 路径绘制）。
-type GlyphKind int
-
-const (
-	// GlyphNone 无字形。
-	GlyphNone GlyphKind = iota
-	// GlyphChevronLeft 左向尖括号 ‹（翻页上一页）。
-	GlyphChevronLeft
-	// GlyphChevronRight 右向尖括号 ›（翻页下一页）。
-	GlyphChevronRight
-)
-
 // Fill 背景填充：底色 + 可选渐变 + 可选背景图（依次叠加，裁剪到 View 圆角内）。
 type Fill struct {
 	Color    color.Color
@@ -119,16 +107,11 @@ type View struct {
 	TextStyle TextStyle // 仅文本叶子用
 	Children  []*View   // 容器子节点
 
-	// 矢量字形叶子（翻页箭头）：Glyph != GlyphNone 时在本 View 矩形中心绘制
-	Glyph          GlyphKind
-	GlyphColor     color.Color
-	GlyphSize      float64
-	GlyphLineWidth float64
-	Layout         LayoutKind
-	Gap            int   // 主轴方向子节点间距（px）
-	CrossAlign     Align // 交叉轴对齐
-	Stretch        bool  // 交叉轴撑满父内容（列布局=撑满宽、行布局=撑满高）；优先于 CrossAlign
-	Grow           bool  // 弹性占位：吸收父容器主轴方向的剩余空间（右对齐/space-between）
+	Layout     LayoutKind
+	Gap        int   // 主轴方向子节点间距（px）
+	CrossAlign Align // 交叉轴对齐
+	Stretch    bool  // 交叉轴撑满父内容（列布局=撑满宽、行布局=撑满高）；优先于 CrossAlign
+	Grow       bool  // 弹性占位：吸收父容器主轴方向的剩余空间（右对齐/space-between）
 
 	// 固定尺寸覆盖（>0 时覆盖量算出的边框盒尺寸；候选项常用固定行高/列宽对齐）
 	FixedW int

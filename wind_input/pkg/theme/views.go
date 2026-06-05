@@ -120,14 +120,20 @@ type ViewNode struct {
 	Width       *Dimension      `yaml:"width,omitempty"`        // 仅 accent_bar：条宽
 	Offset      *Dimension      `yaml:"offset,omitempty"`       // 仅 accent_bar：左缘偏移
 	HeightRatio *float64        `yaml:"height_ratio,omitempty"` // 仅 accent_bar：条高 = ItemHeight × 此比例
-	PrevImage   *ViewImage      `yaml:"prev_image,omitempty"`   // 仅 footer_bar：上一页箭头图（替代内置 chevron；可 SVG + tint 随主题变色）
+	PrevImage   *ViewImage      `yaml:"prev_image,omitempty"`   // 仅 footer_bar：上一页箭头图（替代内置字符；可 SVG + tint 随主题变色）
 	NextImage   *ViewImage      `yaml:"next_image,omitempty"`   // 仅 footer_bar：下一页箭头图
+	PrevChar    *string         `yaml:"prev_char,omitempty"`    // 仅 footer_bar：上一页字符（nil=内置 ❮）；未配 prev_image 时生效
+	NextChar    *string         `yaml:"next_char,omitempty"`    // 仅 footer_bar：下一页字符（nil=内置 ❯）；未配 next_image 时生效
 
 	// 多行/多列布局间距（提示窗专有；nil=渲染层兜底现状值，零回归）：
 	LineSpacing *Dimension `yaml:"line_spacing,omitempty"` // 行间距（tooltip 兜底 2 / toast 兜底 4）
 	ColGap      *Dimension `yaml:"col_gap,omitempty"`      // 多列列间距（仅 tooltip，兜底 16）
 	TitleGap    *Dimension `yaml:"title_gap,omitempty"`    // 标题与正文间距（仅 toast，兜底 6）
 
+	// 状态态 patch（递归 ViewNode）。渲染只消费状态态的颜色/边框/字重覆盖；
+	// padding/margin/font_size 在状态态**不渲染**（见 capability `state_geometry`=unsupported，
+	// 以及 resolveState 的"有无覆盖"判定 + effectiveNode 的合并范围）。需要状态态改几何时，
+	// 须先补齐这两处消费再把 state_geometry 转 supported。
 	Selected *ViewNode `yaml:"selected,omitempty"`
 	Hover    *ViewNode `yaml:"hover,omitempty"`
 	Disabled *ViewNode `yaml:"disabled,omitempty"` // P7-D：禁用态 patch（候选项暂无运行时触发器，schema 预留）
@@ -217,7 +223,8 @@ type RVNode struct {
 	BgImage                                          *RVImage    // 背景填充图（P7-C）；nil=无
 	BgGradient                                       *RVGradient // 背景渐变（P7-E 落地）；nil=无。优先级：底色 < 渐变 < 背景图
 	Layers                                           []RVImage   // z 层级覆盖图（P7-C）
-	PrevImage, NextImage                             *RVImage    // 仅 footer_bar：上/下翻页箭头图（替代内置 chevron，可 SVG + tint）；nil=用内置矢量箭头
+	PrevImage, NextImage                             *RVImage    // 仅 footer_bar：上/下翻页箭头图（替代内置字符，可 SVG + tint）；nil=用字符
+	PrevChar, NextChar                               string      // 仅 footer_bar：上/下翻页字符；空=内置默认（❮/❯）；PrevImage/NextImage 非 nil 时不消费
 	LineSpacing, ColGap, TitleGap                    Dimension   // 多行/多列布局间距（tooltip/toast 专用；零值=渲染层兜底现状）
 }
 

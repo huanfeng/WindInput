@@ -10,7 +10,6 @@ package ui
 
 import (
 	"image"
-	"image/color"
 
 	"github.com/gogpu/gg"
 	"github.com/huanfeng/wind_input/pkg/theme"
@@ -70,13 +69,6 @@ func (v *View) paintShapes(dc *gg.Context, img *image.RGBA) {
 	// 子节点
 	for _, c := range v.Children {
 		c.paintShapes(dc, img)
-	}
-
-	// 矢量字形（翻页箭头），在矩形中心绘制
-	if v.Glyph != GlyphNone && v.GlyphColor != nil {
-		cx := float64(r.Min.X) + w/2
-		cy := float64(r.Min.Y) + h/2
-		paintChevron(dc, cx, cy, v.GlyphSize, v.GlyphLineWidth, v.Glyph == GlyphChevronLeft, v.GlyphColor)
 	}
 
 	// 描边（沿边框盒边缘，内缩半个线宽，与旧渲染器一致）
@@ -180,30 +172,6 @@ func anchorOffset(host image.Rectangle, w, h int, anchor string) (int, int) {
 	default: // top-left
 		return hx, hy
 	}
-}
-
-// paintChevron 在 (cx,cy) 中心绘制尖括号箭头（left=true 为 ‹，否则 ›），
-// 与旧渲染器 drawChevronLeft/Right 几何一致（halfW=size*0.35）。
-func paintChevron(dc *gg.Context, cx, cy, size, lineWidth float64, left bool, clr color.Color) {
-	if size <= 0 {
-		return
-	}
-	halfH := size / 2
-	halfW := size * 0.35
-	dc.SetColor(clr)
-	dc.SetLineWidth(lineWidth)
-	dc.SetLineCap(gg.LineCapRound)
-	dc.SetLineJoin(gg.LineJoinRound)
-	if left {
-		dc.MoveTo(cx+halfW, cy-halfH)
-		dc.LineTo(cx-halfW, cy)
-		dc.LineTo(cx+halfW, cy+halfH)
-	} else {
-		dc.MoveTo(cx-halfW, cy-halfH)
-		dc.LineTo(cx+halfW, cy)
-		dc.LineTo(cx-halfW, cy+halfH)
-	}
-	dc.Stroke()
 }
 
 func opacityOr1(o float64) float64 {

@@ -24,8 +24,7 @@ func (r *Renderer) buildPager(
 	}
 
 	fb := r.resolvedViews.FooterBar
-	pageFS := fb.FontSize                 // 页码/翻页字号 = base + views.footer_bar.font_size 偏移（无派生魔法）
-	arrowSz := maxF(8*scale, pageFS*0.65) // chevron 视觉尺寸按字号比例（绘制内禀几何，非主题字号配置）
+	pageFS := fb.FontSize // 页码/翻页字号 = base + views.footer_bar.font_size 偏移（无派生魔法）
 	// 箭头左右 padding 来自 views.footer_bar.padding；未配兜底现状 6（默认逐像素零回归）。
 	arrowPadL := 6.0 * scale
 	if v := fb.PadLeft.Scaled(scale); v != 0 {
@@ -35,8 +34,7 @@ func (r *Renderer) buildPager(
 	if v := fb.PadRight.Scaled(scale); v != 0 {
 		arrowPadR = float64(v)
 	}
-	arrowW := int(arrowSz + arrowPadL + arrowPadR + 0.5)
-	lineW := 1.5 * scale
+	arrowW := int(pageFS + arrowPadL + arrowPadR + 0.5)
 	canUp := page > 1
 	canDown := page < absTotal
 
@@ -47,8 +45,8 @@ func (r *Renderer) buildPager(
 		pageColor = fb.TextColor
 	}
 
-	iconSz := int(arrowSz + 0.5)
-	mkBtn := func(glyph GlyphKind, img *theme.RVImage, enabled, hovered bool) *View {
+	iconSz := int(pageFS + 0.5)
+	mkBtn := func(char string, img *theme.RVImage, enabled, hovered bool) *View {
 		clr := r.resolvedViews.Index.BgColor
 		if fb.TextColor != nil {
 			clr = fb.TextColor
@@ -63,8 +61,8 @@ func (r *Renderer) buildPager(
 			b.Border = Border{Radius: sc(4)}
 		}
 		// 主题配了翻页箭头图（views.footer_bar.prev_image/next_image，SVG/PNG，可 tint 随主题变色）→
-		// 按图标尺寸栅格化、居中绘制；解码失败回退内置矢量 chevron（零回归）。
-		useGlyph := true
+		// 按图标尺寸栅格化、居中绘制；解码失败回退 Unicode 字符（零回归）。
+		useChar := true
 		if img != nil {
 			// 禁用态（首/末页）用主题配的 disabled_tint（可引用 LightDark token 自动亮暗）；未配则不变化。
 			tint := img.TintColor
@@ -74,17 +72,25 @@ func (r *Renderer) buildPager(
 			if decoded := r.imgRes.resolveImage(img.Ref, r.resourcesSnapshot(), iconSz, iconSz, tint); decoded != nil {
 				bg.Image = decoded
 				bg.Mode = "center"
-				useGlyph = false
+				useChar = false
 			}
 		}
-		if useGlyph {
-			b.Glyph, b.GlyphColor, b.GlyphSize, b.GlyphLineWidth = glyph, clr, arrowSz, lineW
+		if useChar {
+			b.Text = char
+			b.TextStyle = TextStyle{FontSize: pageFS, Color: clr, Align: AlignCenter}
 		}
 		b.Background = bg
 		return b
 	}
 
-	u := mkBtn(GlyphChevronLeft, fb.PrevImage, canUp, hoverPageBtn == "up")
+	prevChar, nextChar := "‹", "›"
+	if fb.PrevChar != "" {
+		prevChar = fb.PrevChar
+	}
+	if fb.NextChar != "" {
+		nextChar = fb.NextChar
+	}
+	u := mkBtn(prevChar, fb.PrevImage, canUp, hoverPageBtn == "up")
 	children = append(children, u)
 	if cfg.ShowPageNumber {
 		txt := fmt.Sprintf(" %d/%d ", page, absTotal)
@@ -96,7 +102,7 @@ func (r *Renderer) buildPager(
 			TextStyle: TextStyle{FontSize: pageFS, Color: pageColor},
 		})
 	}
-	d := mkBtn(GlyphChevronRight, fb.NextImage, canDown, hoverPageBtn == "down")
+	d := mkBtn(nextChar, fb.NextImage, canDown, hoverPageBtn == "down")
 	children = append(children, d)
 	if canUp {
 		up = u

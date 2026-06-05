@@ -82,7 +82,7 @@ func resolveViewNode(n ViewNode, resolveColor func(ColorRef) color.Color, defBg,
 			out.Layers[i] = toRVImage(n.Layers[i], resolveColor)
 		}
 	}
-	// 仅 footer_bar 消费：上/下翻页箭头图（其它节点不写即 nil）。
+	// 仅 footer_bar 消费：上/下翻页箭头图与字符（其它节点不写即 nil/空）。
 	if n.PrevImage != nil {
 		im := toRVImage(*n.PrevImage, resolveColor)
 		out.PrevImage = &im
@@ -90,6 +90,12 @@ func resolveViewNode(n ViewNode, resolveColor func(ColorRef) color.Color, defBg,
 	if n.NextImage != nil {
 		im := toRVImage(*n.NextImage, resolveColor)
 		out.NextImage = &im
+	}
+	if n.PrevChar != nil {
+		out.PrevChar = *n.PrevChar
+	}
+	if n.NextChar != nil {
+		out.NextChar = *n.NextChar
 	}
 	return out
 }
@@ -168,6 +174,9 @@ func ResolveCandidateViews(views Views, pal ResolvedPalette) ResolvedViews {
 //
 // nil-gating：仅当 patch 显式提供了 bg/bgImage/text/border 色/border 宽/字重，或存在 palette
 // 默认色时，才视为「有覆盖」并返回非 nil（与旧 RVState 语义一致，守 golden）。
+//
+// 有意不看几何：padding/margin/font_size 不计入"有无覆盖"判定——状态态几何当前不渲染
+// （capability `state_geometry`=unsupported）。即只改 padding 的 selected 态会被视为空 patch 而丢弃。
 func resolveState(node *ViewNode, defBg, defText color.Color, resolveColor func(ColorRef) color.Color) *RVNode {
 	has := defBg != nil || defText != nil
 	if node != nil {
