@@ -239,10 +239,13 @@ func (m *Manager) loadThemeFileWithDir(name string) (*Theme, string, error) {
 			return nil, "", fmt.Errorf("主题 base 链成环: %q", baseName)
 		}
 		seen[baseName] = true
-		base, _, err := m.loadRawThemeByName(baseName)
+		base, baseDir, err := m.loadRawThemeByName(baseName)
 		if err != nil {
 			return nil, "", fmt.Errorf("加载 base 主题 %q 失败: %w", baseName, err)
 		}
+		// base 的 ViewImage.Ref / resources 相对路径相对于 baseDir 解析。
+		// 必须在 deepMerge 之前做，否则 selfDir 传入 ResolveV3 后路径上下文错位。
+		resolveThemePaths(base, baseDir)
 		chain = append([]*Theme{base}, chain...)
 		cur = base
 	}
@@ -292,6 +295,60 @@ func (m *Manager) loadThemeFromPath(path string) (*Theme, error) {
 	}
 
 	return theme, nil
+}
+
+// resolveThemePaths 把 base 主题里所有相对路径就地升格为绝对路径：
+//   - t.Resources 各条目（ResourceRef.Light / Dark）
+//   - t.Views 各节点的 ViewImage.Ref（background.image / layers / prev_image / next_image）
+//
+// 必须在 deepMerge 之前调用，避免 base 的相对路径被带入 self 的目录上下文后错位解析。
+func resolveThemePaths(t *Theme, dir string) {
+	if t == nil || dir == "" {
+		return
+	}
+	for name, ref := range t.Resources {
+		ref.Light = resolveImagePath(ref.Light, dir)
+		ref.Dark = resolveImagePath(ref.Dark, dir)
+		t.Resources[name] = ref
+	}
+	if t.Views != nil {
+		for _, n := range viewNodePtrs(t.Views) {
+			resolveViewNodeImageRefs(n, dir)
+		}
+	}
+}
+
+// viewNodePtrs 返回 Views 中所有 ViewNode 的指针（便于统一遍历路径字段）。
+func viewNodePtrs(v *Views) []*ViewNode {
+	ptrs := []*ViewNode{
+		&v.Window, &v.PreeditBar, &v.CandidateList,
+		&v.Item, &v.Index, &v.Text, &v.Comment,
+		&v.AccentBar, &v.FooterBar, &v.ModeLabel,
+		v.Status, v.Tooltip, v.Toast,
+	}
+	return ptrs
+}
+
+// resolveViewNodeImageRefs 把单个 ViewNode（含递归状态节点）的 ViewImage.Ref 解析为绝对路径。
+func resolveViewNodeImageRefs(n *ViewNode, dir string) {
+	if n == nil {
+		return
+	}
+	if n.Background.Image != nil {
+		n.Background.Image.Ref = resolveImagePath(n.Background.Image.Ref, dir)
+	}
+	for i := range n.Layers {
+		n.Layers[i].Ref = resolveImagePath(n.Layers[i].Ref, dir)
+	}
+	if n.PrevImage != nil {
+		n.PrevImage.Ref = resolveImagePath(n.PrevImage.Ref, dir)
+	}
+	if n.NextImage != nil {
+		n.NextImage.Ref = resolveImagePath(n.NextImage.Ref, dir)
+	}
+	resolveViewNodeImageRefs(n.Selected, dir)
+	resolveViewNodeImageRefs(n.Hover, dir)
+	resolveViewNodeImageRefs(n.Disabled, dir)
 }
 
 // GetCurrentTheme returns the current theme
