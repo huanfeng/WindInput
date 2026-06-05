@@ -758,7 +758,7 @@ function close() {
 /* Tabs */
 .schema-mgr-tabs {
   display: flex;
-  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  border-bottom: 1px solid hsl(var(--border));
   padding: 0 20px;
 }
 .schema-mgr-tab {

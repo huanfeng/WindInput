@@ -841,7 +841,7 @@ const tempEnglishConflictMsg = computed(() => {
 .punct-table-wrap {
   max-height: 320px;
   overflow-y: auto;
-  border: 1px solid var(--border-color, #e5e7eb);
+  border: 1px solid hsl(var(--border));
   border-radius: 6px;
 }
 .punct-table {
@@ -856,22 +856,22 @@ const tempEnglishConflictMsg = computed(() => {
   z-index: 1;
 }
 .punct-table th {
-  background: var(--bg-secondary, #f9fafb);
-  color: var(--text-primary, #374151);
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
   font-weight: 600;
   padding: 8px 10px;
   text-align: center;
-  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  border-bottom: 1px solid hsl(var(--border));
   font-size: 12px;
 }
 .punct-table td {
   padding: 5px 10px;
   text-align: center;
-  border-bottom: 1px solid var(--border-color, #f3f4f6);
+  border-bottom: 1px solid hsl(var(--border));
   white-space: nowrap;
 }
 .punct-table tbody tr:hover {
-  background: var(--bg-hover, #f9fafb);
+  background: hsl(var(--accent));
 }
 .col-src {
   width: 90px;
