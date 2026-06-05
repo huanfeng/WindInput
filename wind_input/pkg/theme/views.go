@@ -130,10 +130,9 @@ type ViewNode struct {
 	ColGap      *Dimension `yaml:"col_gap,omitempty"`      // 多列列间距（仅 tooltip，兜底 16）
 	TitleGap    *Dimension `yaml:"title_gap,omitempty"`    // 标题与正文间距（仅 toast，兜底 6）
 
-	// 状态态 patch（递归 ViewNode）。渲染只消费状态态的颜色/边框/字重覆盖；
-	// padding/margin/font_size 在状态态**不渲染**（见 capability `state_geometry`=unsupported，
-	// 以及 resolveState 的"有无覆盖"判定 + effectiveNode 的合并范围）。需要状态态改几何时，
-	// 须先补齐这两处消费再把 state_geometry 转 supported。
+	// 状态态 patch（递归 ViewNode）。渲染消费状态态的颜色/背景图/渐变/边框/字体/层覆盖；
+	// **唯几何（padding/margin/font_size）不渲染**——状态改几何会牵动行高/列宽致候选框跳动
+	// （capability `state_geometry`=unsupported；见 resolveState 判定 + effectiveNode 合并范围）。
 	Selected *ViewNode `yaml:"selected,omitempty"`
 	Hover    *ViewNode `yaml:"hover,omitempty"`
 	Disabled *ViewNode `yaml:"disabled,omitempty"` // P7-D：禁用态 patch（候选项暂无运行时触发器，schema 预留）
@@ -471,11 +470,22 @@ func mergeViewNode(base, ov ViewNode) ViewNode {
 	if ov.HeightRatio != nil {
 		out.HeightRatio = ov.HeightRatio
 	}
+	// prev_image / next_image 与 prev_char / next_char 互斥：
+	// 子主题显式配了字符 → 表示"用字符替代图片"，清除继承来的图片（反之亦然）。
+	// 两者均未配 → 保留 base 的设置。
 	if ov.PrevImage != nil {
 		out.PrevImage = ov.PrevImage
+		out.PrevChar = nil // 图片优先，清除 base 可能继承来的字符
+	} else if ov.PrevChar != nil {
+		out.PrevChar = ov.PrevChar
+		out.PrevImage = nil // 字符优先，清除 base 继承来的图片
 	}
 	if ov.NextImage != nil {
 		out.NextImage = ov.NextImage
+		out.NextChar = nil
+	} else if ov.NextChar != nil {
+		out.NextChar = ov.NextChar
+		out.NextImage = nil
 	}
 	if ov.LineSpacing != nil {
 		out.LineSpacing = ov.LineSpacing

@@ -59,6 +59,56 @@ func TestFooterImagesInheritedFromBase(t *testing.T) {
 	}
 }
 
+// TestMergeViewNode_CharClearsInheritedImage 守护回归：子主题显式设置 PrevChar/NextChar 时
+// 必须清除从 base 继承来的 PrevImage/NextImage，否则图片优先级会永远压制字符配置。
+func TestMergeViewNode_CharClearsInheritedImage(t *testing.T) {
+	base := ViewNode{
+		PrevImage: &ViewImage{Ref: "chevron_prev.svg"},
+		NextImage: &ViewImage{Ref: "chevron_next.svg"},
+	}
+	customPrev := "◀"
+	customNext := "▶"
+	ov := ViewNode{
+		PrevChar: &customPrev,
+		NextChar: &customNext,
+	}
+	out := mergeViewNode(base, ov)
+	if out.PrevImage != nil {
+		t.Errorf("子主题配了 PrevChar，应清除继承的 PrevImage，got %+v", out.PrevImage)
+	}
+	if out.NextImage != nil {
+		t.Errorf("子主题配了 NextChar，应清除继承的 NextImage，got %+v", out.NextImage)
+	}
+	if out.PrevChar == nil || *out.PrevChar != customPrev {
+		t.Errorf("PrevChar 应为 %q，got %v", customPrev, out.PrevChar)
+	}
+	if out.NextChar == nil || *out.NextChar != customNext {
+		t.Errorf("NextChar 应为 %q，got %v", customNext, out.NextChar)
+	}
+}
+
+// TestMergeViewNode_ImageClearsInheritedChar 守护回归：子主题显式设置 PrevImage/NextImage 时
+// 应清除 base 可能存在的字符（保持互斥语义）。
+func TestMergeViewNode_ImageClearsInheritedChar(t *testing.T) {
+	prev := "◀"
+	next := "▶"
+	base := ViewNode{PrevChar: &prev, NextChar: &next}
+	ov := ViewNode{
+		PrevImage: &ViewImage{Ref: "arrow_left.svg"},
+		NextImage: &ViewImage{Ref: "arrow_right.svg"},
+	}
+	out := mergeViewNode(base, ov)
+	if out.PrevChar != nil {
+		t.Errorf("子主题配了 PrevImage，应清除继承的 PrevChar，got %v", out.PrevChar)
+	}
+	if out.NextChar != nil {
+		t.Errorf("子主题配了 NextImage，应清除继承的 NextChar，got %v", out.NextChar)
+	}
+	if out.PrevImage == nil || out.PrevImage.Ref != "arrow_left.svg" {
+		t.Errorf("PrevImage 应保留，got %v", out.PrevImage)
+	}
+}
+
 // TestMergeViewNode_FooterImages 守护回归：footer_bar 的 prev_image/next_image 必须能通过
 // base 单链继承的 mergeViewNode 保留（曾漏合并这两个字段，导致薄主题配的翻页箭头图被静默丢弃）。
 func TestMergeViewNode_FooterImages(t *testing.T) {
