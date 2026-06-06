@@ -258,7 +258,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 			Layout:     LayoutRow,
 			CrossAlign: AlignCenter,
 			// 翻页条四边 margin 忠实生效（窗口列内的底部翻页带外间距），默认 0 零回归。
-			// 横排无独立翻页带（页码内嵌候选行），footer_bar margin 仅竖排生效。
+			// 横排有独立容器承载 footer_bar.margin（与竖排对齐，两种排版均生效）。
 			Margin:   nodeMargin(rv.FooterBar, scale),
 			Children: pagerChildren,
 		})

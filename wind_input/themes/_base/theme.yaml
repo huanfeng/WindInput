@@ -82,6 +82,7 @@ views:
     font_size: -4
   footer_bar:
     font_size: -4
+    margin: {left: 8}
     prev_image:
       ref: chevron_prev.svg
       mode: center
