@@ -93,14 +93,25 @@ func buildStatusTree(text string, node theme.RVNode, fontSize, fallbackPad, fall
 		}
 	}
 
+	var shadow *ViewShadow
+	if node.ShadowColor != nil {
+		shadow = &ViewShadow{
+			OffsetX: node.ShadowOffsetX.Scaled(scale),
+			OffsetY: node.ShadowOffsetY.Scaled(scale),
+			Blur:    node.ShadowBlur.Scaled(scale),
+			Spread:  node.ShadowSpread.Scaled(scale),
+			Color:   node.ShadowColor,
+		}
+	}
 	root := &View{
 		Text:       text,
 		TextStyle:  TextStyle{FontSize: fs, Color: node.TextColor, Align: AlignCenter, Weight: node.FontWeight, Family: node.FontFamily},
 		Padding:    Edges{Top: padT, Right: padR, Bottom: padB, Left: padL},
-		Background: ir.fillFor(node.BgColor, node.BgImage, node.BgGradient, resources, scale), // P8 切片6：背景可带图/渐变
+		Background: ir.fillFor(node.BgColor, node.BgImage, node.BgGradient, resources, scale),
 		Border:     border,
+		Shadow:     shadow,
 		FixedW:     w,
 	}
-	ir.appendLayers(root, node.Layers, resources, func(v float64) int { return int(v * scale) }) // P8 切片6：状态泡装饰层
+	ir.appendLayers(root, node.Layers, resources, func(v float64) int { return int(v * scale) })
 	return root
 }

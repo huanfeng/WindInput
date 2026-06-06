@@ -350,8 +350,9 @@ func (w *TooltipWindow) render(text string, maxContentWidth float64) *image.RGBA
 	if root == nil {
 		return nil
 	}
-	Layout(root, 0, 0, td)
-	dc, img := newSharedDrawContext(root.Rect().Dx(), root.Rect().Dy())
+	ml, mt, mr, mb := shadowMargins(root.Shadow)
+	Layout(root, ml, mt, td)
+	dc, img := newSharedDrawContext(root.Rect().Dx()+ml+mr, root.Rect().Dy()+mt+mb)
 	PaintTree(root, dc, img, td)
 	DrawDebugBanner(img)
 	return img

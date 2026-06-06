@@ -70,10 +70,11 @@ func (r *StatusRenderer) Render(state StatusState, cfg StatusWindowConfig) *imag
 
 	// 构建 View 树 + 布局（padding 现状兜底 6、radius 兜底 cfg.BorderRadius）
 	root := buildStatusTree(text, node, cfg.FontSize, 6.0, cfg.BorderRadius, scale, td, &r.imgRes, resources)
-	Layout(root, 0, 0, td)
+	ml, mt, mr, mb := shadowMargins(root.Shadow)
+	Layout(root, ml, mt, td)
 
-	w := root.Rect().Dx()
-	h := root.Rect().Dy()
+	w := root.Rect().Dx() + ml + mr
+	h := root.Rect().Dy() + mt + mb
 	dc, img := newSharedDrawContext(w, h)
 	PaintTree(root, dc, img, td)
 

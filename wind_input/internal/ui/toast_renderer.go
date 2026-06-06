@@ -187,15 +187,26 @@ func (r *ToastRenderer) Render(opts ToastOptions, maxContentPx int) *image.RGBA 
 			border.Width = int(1.0 * scale)
 		}
 	}
+	var shadow *ViewShadow
+	if node.ShadowColor != nil {
+		shadow = &ViewShadow{
+			OffsetX: node.ShadowOffsetX.Scaled(scale),
+			OffsetY: node.ShadowOffsetY.Scaled(scale),
+			Blur:    node.ShadowBlur.Scaled(scale),
+			Spread:  node.ShadowSpread.Scaled(scale),
+			Color:   node.ShadowColor,
+		}
+	}
 	root := &View{
 		Layout:     LayoutColumn,
 		Gap:        int(lineSpacing),
 		Padding:    Edges{Top: padTop, Right: padRight, Bottom: padBottom, Left: int(textLeft)},
-		Background: r.imgRes.fillFor(node.BgColor, node.BgImage, node.BgGradient, resources, scale), // P8 切片6：背景可带图/渐变
+		Background: r.imgRes.fillFor(node.BgColor, node.BgImage, node.BgGradient, resources, scale),
 		Border:     border,
+		Shadow:     shadow,
 		FixedW:     int(width),
 	}
-	r.imgRes.appendLayers(root, node.Layers, resources, func(v float64) int { return int(v * scale) }) // P8 切片6：toast 装饰层
+	r.imgRes.appendLayers(root, node.Layers, resources, func(v float64) int { return int(v * scale) })
 	if title != "" {
 		// 标题用 accent 颜色（level 运行时色），醒目。
 		tv := &View{Text: title, TextStyle: TextStyle{FontSize: titleSize, Color: accent, Weight: node.FontWeight, Family: node.FontFamily}}
@@ -209,17 +220,19 @@ func (r *ToastRenderer) Render(opts ToastOptions, maxContentPx int) *image.RGBA 
 		root.Children = append(root.Children, &View{Text: line, TextStyle: TextStyle{FontSize: bodySize, Color: node.TextColor, Weight: node.FontWeight, Family: node.FontFamily}})
 	}
 
-	Layout(root, 0, 0, td)
-	w := root.Rect().Dx()
-	h := root.Rect().Dy()
+	ml, mt, mr, mb := shadowMargins(root.Shadow)
+	Layout(root, ml, mt, td)
+	w := root.Rect().Dx() + ml + mr
+	h := root.Rect().Dy() + mt + mb
 	dc, img := newSharedDrawContext(w, h)
 	PaintTree(root, dc, img, td)
 
-	// 左侧 accent 条（Fill，完全位于 bg 内部，不接触圆角外缘）。后处理：定位用 root 高度。
-	barH := float64(h) - accentBarInset*2
+	// 左侧 accent 条（Fill，完全位于 bg 内部，不接触圆角外缘）。
+	// X/Y 需叠加 shadow margin 偏移，使条位于 root content 区内而非 shadow 扩展区。
+	barH := float64(root.Rect().Dy()) - accentBarInset*2
 	if barH > 0 {
 		dc.SetColor(accent)
-		dc.DrawRoundedRectangle(accentBarInset, accentBarInset, accentBarWidth, barH, accentBarWidth/2)
+		dc.DrawRoundedRectangle(float64(ml)+accentBarInset, float64(mt)+accentBarInset, accentBarWidth, barH, accentBarWidth/2)
 		dc.Fill()
 	}
 
