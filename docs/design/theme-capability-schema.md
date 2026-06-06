@@ -50,7 +50,7 @@ const (
 
 - **`text` 的 `margin.left`**：维持 lead-gap 语义——有前导序号时取序号→文字列间距，无序号则不留左间距（零回归）；T/R/B 恒生效。
 - **`index` 的水平边**：横排自然流四边全应用；竖排固定列模式下水平间距由列宽（`indexFixedW`）治理，仅上下生效。
-- **`footer_bar`**：仅竖排有独立翻页带；横排页码内嵌候选行，margin 不生效。
+- **`footer_bar`**：竖排有独立翻页 band，margin 直接承载；横排页码内联候选行，包一层 `LayoutRow` 容器承载 margin（容器 `Gap` 沿用候选框间隙保持页码按钮间距零回归，命中测试取按钮绝对 `Rect` 不受嵌套影响）。横竖排均生效。
 
 ### view 主体（subjects）
 

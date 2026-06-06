@@ -503,14 +503,23 @@ func (r *Renderer) buildHorizontalCandidateTree(
 		}
 	}
 	listChildren = append(listChildren, items...)
-	if len(pagerChildren) > 0 {
-		pagerChildren[0].Margin = Edges{Left: sc(8)} // 与候选列表的分隔
-		listChildren = append(listChildren, pagerChildren...)
-	}
-
 	// 候选框间隙：旧渲染器 effectiveSpacing=max(padL+padR, itemSpacing)，扣掉左右内边距后
 	// 即相邻框之间的真实间隙（通常为 0，框相邻）。
 	boxGap := maxInt(itemSpacing-bgPadL-bgPadR, 0)
+	if len(pagerChildren) > 0 {
+		pagerChildren[0].Margin = Edges{Left: sc(8)} // 与候选列表的分隔（容器内首个按钮）
+		// 横排翻页区包一层容器，使 footer_bar.margin 有处安放（页码内联无独立带，与竖排对齐）。
+		// 容器 Gap=boxGap 保持页码按钮间距与未包裹前逐像素一致（默认 footer margin=0 → 零回归）；
+		// 命中测试取 pagerUp/Down 的绝对 Rect()，不受嵌套层级影响。
+		listChildren = append(listChildren, &View{
+			Layout:     LayoutRow,
+			CrossAlign: AlignCenter,
+			Gap:        boxGap,
+			Margin:     nodeMargin(rv.FooterBar, scale),
+			Children:   pagerChildren,
+		})
+	}
+
 	list := &View{
 		Layout:     LayoutRow,
 		CrossAlign: AlignCenter, // 页码文本/箭头按钮在行内垂直居中

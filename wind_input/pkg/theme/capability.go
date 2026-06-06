@@ -155,7 +155,7 @@ var ThemeCapabilities = []ViewCapability{
 		CapFont: CapSupported, CapTextColor: CapSupported,
 		CapFooterArrowImage: CapSupported, CapPager: CapSupported,
 		CapPadding: CapSupported, // 翻页箭头左右 padding（复用 footer_bar.padding）
-		CapMargin:  CapSupported, // 翻页带外间距：仅竖排生效（横排页码内嵌候选行，无独立翻页带）
+		CapMargin:  CapSupported, // 翻页带外间距：横竖排均生效（横排把内联页码包一层容器承载 margin）
 	}},
 	{"mode_label", map[string]CapabilityStatus{
 		CapPadding: CapSupported, CapMargin: CapSupported,

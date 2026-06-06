@@ -148,7 +148,7 @@ func themePathFingerprint(t *testing.T, layout config.CandidateLayout, indexStyl
 
 // 主题路径几何+颜色基准（window padding=6，DPI scale=1）。后续重构须保持不变。
 var (
-	wantHThemeGeometry = []string{"0,0,448,72|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,436,24|bg=f0f0f0ff|bd=-|tx=-", "14,9,45,18|bg=-|bd=-|tx=646464ff", "6,34,436,32|bg=-|bd=-|tx=-", "6,34,74,32|bg=d2e4ffff|bd=-|tx=-", "6,34,8,32|bg=-|bd=-|tx=-", "14,41,18,18|bg=4285f4ff|bd=-|tx=-", "14,41,18,18|bg=-|bd=-|tx=ffffffff", "36,41,36,18|bg=-|bd=-|tx=1f1f1fff", "80,34,99,32|bg=e6f0ffff|bd=-|tx=-", "80,34,8,32|bg=-|bd=-|tx=-", "88,41,18,18|bg=4285f4ff|bd=-|tx=-", "88,41,18,18|bg=-|bd=-|tx=ffffffff", "110,41,18,18|bg=-|bd=-|tx=1f1f1fff", "136,43,35,14|bg=-|bd=-|tx=969696ff", "179,34,56,32|bg=-|bd=-|tx=-", "179,34,8,32|bg=-|bd=-|tx=-", "187,41,18,18|bg=4285f4ff|bd=-|tx=-", "187,41,18,18|bg=-|bd=-|tx=ffffffff", "209,41,18,18|bg=-|bd=-|tx=1f1f1fff", "235,34,56,32|bg=-|bd=-|tx=-", "235,34,8,32|bg=-|bd=-|tx=-", "243,41,18,18|bg=4285f4ff|bd=-|tx=-", "243,41,18,18|bg=-|bd=-|tx=ffffffff", "265,41,18,18|bg=-|bd=-|tx=1f1f1fff", "291,34,56,32|bg=-|bd=-|tx=-", "291,34,8,32|bg=-|bd=-|tx=-", "299,41,18,18|bg=4285f4ff|bd=-|tx=-", "299,41,18,18|bg=-|bd=-|tx=ffffffff", "321,41,18,18|bg=-|bd=-|tx=1f1f1fff", "355,34,26,32|bg=-|bd=-|tx=4285f4ff", "381,43,35,14|bg=-|bd=-|tx=646464ff", "416,34,26,32|bg=-|bd=-|tx=4285f4ff"}
+	wantHThemeGeometry = []string{"0,0,448,72|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,436,24|bg=f0f0f0ff|bd=-|tx=-", "14,9,45,18|bg=-|bd=-|tx=646464ff", "6,34,436,32|bg=-|bd=-|tx=-", "6,34,74,32|bg=d2e4ffff|bd=-|tx=-", "6,34,8,32|bg=-|bd=-|tx=-", "14,41,18,18|bg=4285f4ff|bd=-|tx=-", "14,41,18,18|bg=-|bd=-|tx=ffffffff", "36,41,36,18|bg=-|bd=-|tx=1f1f1fff", "80,34,99,32|bg=e6f0ffff|bd=-|tx=-", "80,34,8,32|bg=-|bd=-|tx=-", "88,41,18,18|bg=4285f4ff|bd=-|tx=-", "88,41,18,18|bg=-|bd=-|tx=ffffffff", "110,41,18,18|bg=-|bd=-|tx=1f1f1fff", "136,43,35,14|bg=-|bd=-|tx=969696ff", "179,34,56,32|bg=-|bd=-|tx=-", "179,34,8,32|bg=-|bd=-|tx=-", "187,41,18,18|bg=4285f4ff|bd=-|tx=-", "187,41,18,18|bg=-|bd=-|tx=ffffffff", "209,41,18,18|bg=-|bd=-|tx=1f1f1fff", "235,34,56,32|bg=-|bd=-|tx=-", "235,34,8,32|bg=-|bd=-|tx=-", "243,41,18,18|bg=4285f4ff|bd=-|tx=-", "243,41,18,18|bg=-|bd=-|tx=ffffffff", "265,41,18,18|bg=-|bd=-|tx=1f1f1fff", "291,34,56,32|bg=-|bd=-|tx=-", "291,34,8,32|bg=-|bd=-|tx=-", "299,41,18,18|bg=4285f4ff|bd=-|tx=-", "299,41,18,18|bg=-|bd=-|tx=ffffffff", "321,41,18,18|bg=-|bd=-|tx=1f1f1fff", "347,34,95,32|bg=-|bd=-|tx=-", "355,34,26,32|bg=-|bd=-|tx=4285f4ff", "381,43,35,14|bg=-|bd=-|tx=646464ff", "416,34,26,32|bg=-|bd=-|tx=4285f4ff"}
 	wantVThemeGeometry = []string{"0,0,117,236|bg=ffffffff|bd=c2c6cbff|tx=-", "6,6,105,24|bg=f0f0f0ff|bd=-|tx=-", "14,9,45,18|bg=-|bd=-|tx=646464ff", "6,34,105,160|bg=-|bd=-|tx=-", "6,34,105,32|bg=d2e4ffff|bd=-|tx=-", "6,34,8,32|bg=-|bd=-|tx=-", "17,41,18,18|bg=4285f4ff|bd=-|tx=-", "17,41,18,18|bg=-|bd=-|tx=ffffffff", "42,41,36,18|bg=-|bd=-|tx=1f1f1fff", "6,66,105,32|bg=e6f0ffff|bd=-|tx=-", "6,66,8,32|bg=-|bd=-|tx=-", "17,73,18,18|bg=4285f4ff|bd=-|tx=-", "17,73,18,18|bg=-|bd=-|tx=ffffffff", "42,73,18,18|bg=-|bd=-|tx=1f1f1fff", "68,75,35,14|bg=-|bd=-|tx=969696ff", "6,98,105,32|bg=-|bd=-|tx=-", "6,98,8,32|bg=-|bd=-|tx=-", "17,105,18,18|bg=4285f4ff|bd=-|tx=-", "17,105,18,18|bg=-|bd=-|tx=ffffffff", "42,105,18,18|bg=-|bd=-|tx=1f1f1fff", "6,130,105,32|bg=-|bd=-|tx=-", "6,130,8,32|bg=-|bd=-|tx=-", "17,137,18,18|bg=4285f4ff|bd=-|tx=-", "17,137,18,18|bg=-|bd=-|tx=ffffffff", "42,137,18,18|bg=-|bd=-|tx=1f1f1fff", "6,162,105,32|bg=-|bd=-|tx=-", "6,162,8,32|bg=-|bd=-|tx=-", "17,169,18,18|bg=4285f4ff|bd=-|tx=-", "17,169,18,18|bg=-|bd=-|tx=ffffffff", "42,169,18,18|bg=-|bd=-|tx=1f1f1fff", "15,198,87,32|bg=-|bd=-|tx=-", "15,198,26,32|bg=-|bd=-|tx=4285f4ff", "41,207,35,14|bg=-|bd=-|tx=646464ff", "76,198,26,32|bg=-|bd=-|tx=4285f4ff"}
 )
 
@@ -289,6 +289,16 @@ func TestMarginWiring(t *testing.T) {
 	}
 	if got := item.Children[2].Margin; got != (Edges{Top: 13, Left: 14}) { // comment
 		t.Errorf("comment.Margin 应生效, got %+v", got)
+	}
+
+	// 横排 footer_bar：内联翻页包一层容器承载 margin（totalPages=2 才出现翻页区）。
+	r.resolvedViews.FooterBar.MarginTop, r.resolvedViews.FooterBar.MarginLeft = theme.Dp(15), theme.Dp(16)
+	ht := r.buildHorizontalCandidateTree([]Candidate{{Text: "中", Index: 1}}, "", -1, 1, 2, 0, -1, "")
+	Layout(ht.root, 0, 0, r.textDrawer)
+	hlist := ht.root.Children[len(ht.root.Children)-1] // window 末 band = 候选列表行
+	hfooter := hlist.Children[len(hlist.Children)-1]   // list 末子 = 翻页容器
+	if got := hfooter.Margin; got != (Edges{Top: 15, Left: 16}) {
+		t.Errorf("横排 footer_bar.Margin 应生效(包裹容器), got %+v", got)
 	}
 
 	// ---- 竖排：preedit_bar / footer_bar 四边 margin ----
