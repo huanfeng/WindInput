@@ -6,10 +6,12 @@ package theme
 
 // ThemeMeta contains theme metadata
 type ThemeMeta struct {
-	Name    string `yaml:"name" json:"name"`
-	Version string `yaml:"version" json:"version"`
-	Author  string `yaml:"author" json:"author"`
-	Order   int    `yaml:"order" json:"order"` // Sort order, lower = first. Third-party themes get +100
+	Name        string `yaml:"name" json:"name"`
+	Version     string `yaml:"version" json:"version"`
+	Author      string `yaml:"author" json:"author"`
+	Description string `yaml:"description,omitempty" json:"description,omitempty"` // Short description for publishing
+	Tags        string `yaml:"tags,omitempty" json:"tags,omitempty"`               // Comma-separated tags for theme marketplace, e.g. "简约,深色,毛玻璃"
+	Order       int    `yaml:"order" json:"order"`                                 // Sort order, lower = first. Third-party themes get +100
 }
 
 // Theme 是 v3 主题的顶层结构（见 docs/design/theme-schema-v3.md「顶层结构」）。
