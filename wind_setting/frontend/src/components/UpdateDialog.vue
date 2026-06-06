@@ -11,6 +11,13 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   getUpdateConfig,
   saveUpdateConfig,
   checkUpdate,
@@ -37,7 +44,7 @@ const emit = defineEmits<{ close: [] }>()
 type Phase = 'consent' | 'checking' | 'has_update' | 'no_update' | 'downloading' | 'done' | 'error'
 
 const phase = ref<Phase>('checking')
-const cfg = ref<UpdateConfig>({ network_consent: false, auto_check: false, auto_install: false })
+const cfg = ref<UpdateConfig>({ network_consent: false, auto_check: false, auto_install: false, channel: 'official' })
 const checkResult = ref<CheckResult | null>(null)
 const cachedResult = ref<CheckResult | null>(null)
 const autoInstall = ref(false)
@@ -187,6 +194,11 @@ async function onAutoCheckChange() {
   await saveUpdateConfig(cfg.value)
 }
 
+async function onChannelChange() {
+  await saveUpdateConfig(cfg.value)
+  await doRecheck()
+}
+
 async function openReleaseURL() {
   if (!checkResult.value?.release_url) return
   try {
@@ -259,13 +271,26 @@ onUnmounted(() => {
       <!-- 联网同意 -->
       <template v-if="phase === 'consent'">
         <div class="space-y-2 py-1 text-sm text-muted-foreground">
-          <p>检查更新需要连接网络访问 GitHub，这是清风输入法首次使用网络功能。</p>
+          <p>检查更新需要连接网络，这是清风输入法首次使用网络功能。</p>
           <p>本功能将访问以下地址以检查版本更新：</p>
           <ul class="list-inside list-disc space-y-1 pl-2">
-            <li>api.github.com（GitHub 官方 API）</li>
-            <li>镜像站点（网络不稳定时自动切换）</li>
+            <li v-if="cfg.channel !== 'github'">dl.windinput.com（官网升级渠道，国内直连）</li>
+            <li v-if="cfg.channel === 'github'">api.github.com（GitHub 官方 API）</li>
+            <li v-if="cfg.channel === 'github'">镜像站点（网络不稳定时自动切换）</li>
           </ul>
           <p>不会收集任何个人信息或输入内容。</p>
+          <div class="channel-consent-row">
+            <span>升级渠道：</span>
+            <Select v-model="cfg.channel">
+              <SelectTrigger class="h-7 w-[120px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="official">官网（推荐）</SelectItem>
+                <SelectItem value="github">GitHub</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
       </template>
 
@@ -355,6 +380,15 @@ onUnmounted(() => {
                 <input type="checkbox" v-model="cfg.auto_check" @change="onAutoCheckChange" class="h-4 w-4 rounded" />
                 自动检查
               </label>
+              <Select v-model="cfg.channel" @update:modelValue="onChannelChange" class="ml-auto">
+                <SelectTrigger class="h-7 w-[110px] text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="official">官网渠道</SelectItem>
+                  <SelectItem value="github">GitHub</SelectItem>
+                </SelectContent>
+              </Select>
               <span v-if="autoInstall" class="auto-install-tip">下载完成后将自动静默安装并关闭设置窗口</span>
             </div>
             <div class="footer-buttons">
@@ -368,12 +402,23 @@ onUnmounted(() => {
           </div>
         </template>
 
-        <!-- 无更新：左侧自动检查 + 右侧重新检查+确定 -->
+        <!-- 无更新：左侧自动检查+渠道 + 右侧重新检查+确定 -->
         <template v-else-if="phase === 'no_update'">
-          <label class="mr-auto flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground">
-            <input type="checkbox" v-model="cfg.auto_check" @change="onAutoCheckChange" class="h-4 w-4 rounded" />
-            自动检查更新
-          </label>
+          <div class="mr-auto flex items-center gap-3 text-sm text-muted-foreground">
+            <label class="flex cursor-pointer items-center gap-1.5">
+              <input type="checkbox" v-model="cfg.auto_check" @change="onAutoCheckChange" class="h-4 w-4 rounded" />
+              自动检查
+            </label>
+            <Select v-model="cfg.channel" @update:modelValue="onChannelChange">
+              <SelectTrigger class="h-7 w-[110px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="official">官网渠道</SelectItem>
+                <SelectItem value="github">GitHub</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <Button variant="outline" @click="doRecheck">重新检查</Button>
           <Button @click="onClose">确定</Button>
         </template>
@@ -389,12 +434,23 @@ onUnmounted(() => {
           <Button @click="onInstallClick">立即安装</Button>
         </template>
 
-        <!-- 错误：左侧自动检查 + 右侧重试+关闭 -->
+        <!-- 错误：左侧自动检查+渠道 + 右侧重试+关闭 -->
         <template v-else-if="phase === 'error'">
-          <label class="mr-auto flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground">
-            <input type="checkbox" v-model="cfg.auto_check" @change="onAutoCheckChange" class="h-4 w-4 rounded" />
-            自动检查更新
-          </label>
+          <div class="mr-auto flex items-center gap-3 text-sm text-muted-foreground">
+            <label class="flex cursor-pointer items-center gap-1.5">
+              <input type="checkbox" v-model="cfg.auto_check" @change="onAutoCheckChange" class="h-4 w-4 rounded" />
+              自动检查
+            </label>
+            <Select v-model="cfg.channel" @update:modelValue="onChannelChange">
+              <SelectTrigger class="h-7 w-[110px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="official">官网渠道</SelectItem>
+                <SelectItem value="github">GitHub</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <Button variant="outline" @click="doRecheck">重试</Button>
           <Button @click="onClose">关闭</Button>
         </template>
@@ -429,6 +485,14 @@ onUnmounted(() => {
 .auto-install-tip {
   font-size: 0.75rem;
   color: hsl(var(--warning));
+}
+
+.channel-consent-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.875rem;
 }
 
 .markdown-body :deep(h1),

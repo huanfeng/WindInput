@@ -13,6 +13,7 @@ export interface UpdateConfig {
   network_consent: boolean
   auto_check: boolean
   auto_install: boolean
+  channel: string // 'official' | 'github'
 }
 
 export interface CheckResult {

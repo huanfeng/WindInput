@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,8 +37,16 @@ type DownloadProgress struct {
 type ProgressCallback func(DownloadProgress)
 
 // CheckUpdate 获取最新 Release 并与 currentVersion 比较。
+// 渠道由 Config.Channel 决定："official"（默认）走官网 CDN，"github" 走 GitHub API。
 func CheckUpdate(currentVersion string) (*CheckResult, error) {
-	release, err := FetchLatestRelease()
+	cfg := LoadConfig()
+	var release *ReleaseInfo
+	var err error
+	if cfg.Channel == "github" {
+		release, err = FetchLatestRelease()
+	} else {
+		release, err = FetchOfficialLatest()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -98,8 +107,15 @@ func DownloadRelease(downloadURL, assetName string, expectedSize int64, progress
 
 	client := newHTTPClient()
 
+	// 官网 CDN 直连即可，不需要也不应加 GitHub 镜像前缀
+	mirrors := downloadMirrorPrefixes
+	if !strings.HasPrefix(downloadURL, "https://github.com/") &&
+		!strings.HasPrefix(downloadURL, "https://objects.githubusercontent.com/") {
+		mirrors = downloadMirrorPrefixes[:1]
+	}
+
 	var lastErr error
-	for i := range downloadMirrorPrefixes {
+	for i := range mirrors {
 		mirrorURL := MirroredURL(downloadURL, i)
 		err := downloadFile(ctx, client, mirrorURL, dest, progressFn)
 		if err == nil {
