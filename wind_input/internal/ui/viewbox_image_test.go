@@ -45,7 +45,7 @@ func TestImageForRef_DecodeAndCache(t *testing.T) {
 	}
 
 	// fillFor：带图 spec → Fill.Image 非空 + 参数透传
-	f := r.fillFor(color.Black, &theme.RVImage{Ref: "bg", Mode: "stretch", Opacity: 0.5}, nil)
+	f := r.fillFor(color.Black, &theme.RVImage{Ref: "bg", Mode: "stretch", Opacity: 0.5}, nil, 1.0)
 	if f.Image == nil {
 		t.Error("fillFor 应填入解码位图")
 	}
@@ -57,7 +57,7 @@ func TestImageForRef_DecodeAndCache(t *testing.T) {
 	if r.imageForRef("missing") != nil {
 		t.Error("未知 ref 应返回 nil（已缓存失败）")
 	}
-	if got := r.fillFor(color.White, nil, nil); got.Image != nil {
+	if got := r.fillFor(color.White, nil, nil, 1.0); got.Image != nil {
 		t.Error("nil spec 应退化为纯底色")
 	}
 }
@@ -135,7 +135,7 @@ func TestWindowLayer_Rendered(t *testing.T) {
 	}
 	views := themePathViews(6, 8)
 	views.Window.Layers = []theme.ViewImage{
-		{Ref: "mark", Z: 1, Anchor: "bottom-right", Offset: theme.ViewImagePoint{X: 4, Y: 4}, Size: theme.ViewImageSize{W: 12, H: 12}},
+		{Ref: "mark", Z: 1, Anchor: "bottom-right", Offset: theme.ViewImagePoint{X: theme.OffsetDp(4), Y: theme.OffsetDp(4)}, Size: theme.ViewImageSize{W: 12, H: 12}},
 	}
 	r.resolvedV3 = &theme.ResolvedV3{
 		Palette:   themePathPalette(),

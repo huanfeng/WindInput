@@ -98,7 +98,7 @@ func buildTooltipTree(text string, maxContentWidth float64, node theme.RVNode, s
 		Layout:     LayoutColumn,
 		Gap:        lineSpacing,
 		Padding:    Edges{Top: padT, Right: padR, Bottom: padB, Left: padL},
-		Background: ir.fillFor(node.BgColor, node.BgImage, node.BgGradient, resources), // P8 切片6：背景可带图/渐变
+		Background: ir.fillFor(node.BgColor, node.BgImage, node.BgGradient, resources, scale), // P8 切片6：背景可带图/渐变
 		Border:     border,
 	}
 	ir.appendLayers(root, node.Layers, resources, func(v float64) int { return int(v * scale) }) // P8 切片6：tooltip 装饰层

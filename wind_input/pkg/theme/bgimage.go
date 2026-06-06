@@ -76,6 +76,14 @@ func toRGBA(img image.Image) *image.RGBA {
 //	露出底层（如窗口背景）形成圆角。窗口靠外侧 alpha=0 也能裁角，但**内部元素**（如选中候选项，
 //	四周已被窗口底色填成不透明）只能靠此遮罩裁圆角。radius=0 走快路径（整矩形，零回归）。
 func DrawBackground(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, mode string, slice Padding, opacity float64, radius int) {
+	// clip=rect → 不额外裁剪（全覆盖老路，零回归）。
+	DrawBackgroundClipped(dst, rect, src, mode, slice, opacity, radius, rect)
+}
+
+// DrawBackgroundClipped 同 DrawBackground，但额外把绘制硬裁到 clip 矩形内：clip 外的像素一律不画。
+// 用于「定位图」（背景定位图 / 覆盖图层）——目标 rect 决定缩放/平铺，clip=host 边框盒保证不画到外面。
+// clip 为空时退化为 rect（无额外裁剪）。注意 clip 只做矩形硬裁，圆角仍由 radius 经 clipRect/clipRad 处理。
+func DrawBackgroundClipped(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, mode string, slice Padding, opacity float64, radius int, clip image.Rectangle) {
 	if src == nil || rect.Empty() {
 		return
 	}
@@ -85,28 +93,31 @@ func DrawBackground(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, mode
 	if opacity > 1 {
 		opacity = 1
 	}
+	if clip.Empty() {
+		clip = rect
+	}
 	rad := float64(radius)
 
 	switch mode {
 	case "nine_slice":
-		drawNineSlice(dst, rect, src, slice, opacity, rad)
+		drawNineSlice(dst, rect, src, slice, opacity, rad, clip)
 	case "tile":
-		drawTile(dst, rect, src, opacity, rad)
+		drawTile(dst, rect, src, opacity, rad, clip)
 	case "center":
-		drawCenter(dst, rect, src, opacity, rad)
+		drawCenter(dst, rect, src, opacity, rad, clip)
 	case "stretch":
 		fallthrough
 	default:
-		drawStretch(dst, rect, src, opacity, rad)
+		drawStretch(dst, rect, src, opacity, rad, clip)
 	}
 }
 
-func drawStretch(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, opacity, rad float64) {
+func drawStretch(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, opacity, rad float64, clip image.Rectangle) {
 	scaled := scaleImage(src, rect.Dx(), rect.Dy())
-	blendOver(dst, rect.Min, scaled, scaled.Bounds(), opacity, rect, rad)
+	blendOver(dst, rect.Min, scaled, scaled.Bounds(), opacity, rect, rad, clip)
 }
 
-func drawCenter(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, opacity, rad float64) {
+func drawCenter(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, opacity, rad float64, clip image.Rectangle) {
 	sb := src.Bounds()
 	w, h := sb.Dx(), sb.Dy()
 	x := rect.Min.X + (rect.Dx()-w)/2
@@ -123,10 +134,10 @@ func drawCenter(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, opacity,
 		sb.Min.X+(dstClip.Max.X-x),
 		sb.Min.Y+(dstClip.Max.Y-y),
 	)
-	blendOver(dst, dstClip.Min, src, srcClip, opacity, rect, rad)
+	blendOver(dst, dstClip.Min, src, srcClip, opacity, rect, rad, clip)
 }
 
-func drawTile(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, opacity, rad float64) {
+func drawTile(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, opacity, rad float64, clip image.Rectangle) {
 	sb := src.Bounds()
 	tw, th := sb.Dx(), sb.Dy()
 	if tw == 0 || th == 0 {
@@ -144,13 +155,13 @@ func drawTile(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, opacity, r
 				sb.Min.X+tile.Dx(),
 				sb.Min.Y+tile.Dy(),
 			)
-			blendOver(dst, tile.Min, src, srcClip, opacity, rect, rad)
+			blendOver(dst, tile.Min, src, srcClip, opacity, rect, rad, clip)
 		}
 	}
 }
 
 // drawNineSlice 把 src 按 slice 划分为 9 块：四角原样、四边在主轴方向拉伸、中心双轴拉伸
-func drawNineSlice(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, slice Padding, opacity, rad float64) {
+func drawNineSlice(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, slice Padding, opacity, rad float64, clip image.Rectangle) {
 	sb := src.Bounds()
 	sw, sh := sb.Dx(), sb.Dy()
 
@@ -215,10 +226,10 @@ func drawNineSlice(dst *image.RGBA, rect image.Rectangle, src *image.RGBA, slice
 		}
 		// 角块尺寸相同直接 copy；否则缩放
 		if s.src.Dx() == s.dst.Dx() && s.src.Dy() == s.dst.Dy() {
-			blendOver(dst, s.dst.Min, src, s.src, opacity, rect, rad)
+			blendOver(dst, s.dst.Min, src, s.src, opacity, rect, rad, clip)
 		} else {
 			scaled := scaleImageRect(src, s.src, s.dst.Dx(), s.dst.Dy())
-			blendOver(dst, s.dst.Min, scaled, scaled.Bounds(), opacity, rect, rad)
+			blendOver(dst, s.dst.Min, scaled, scaled.Bounds(), opacity, rect, rad, clip)
 		}
 	}
 }
@@ -259,7 +270,10 @@ func scaleImageRect(src *image.RGBA, srcRect image.Rectangle, w, h int) *image.R
 //   - **clipRad 圆角覆盖遮罩**：clipRect+clipRad>0 时，按圆角矩形覆盖度再缩放 src 贡献。这是
 //     **内部元素**（如选中候选项，四周已被窗口底色填成 alpha=255，dst 遮罩失效）裁圆角的唯一手段：
 //     半径外四角 coverage=0 → 不画 → 露出底层窗口背景。clipRad<=0 时整矩形绘制（零回归）。
-func blendOver(dst *image.RGBA, dstMin image.Point, src *image.RGBA, srcRect image.Rectangle, opacity float64, clipRect image.Rectangle, clipRad float64) {
+//
+// clipBounds：矩形硬裁——dst 中落在此矩形外的像素一律不画（定位图裁到 host 边框盒、不外溢）。
+// 全覆盖路径传 clipBounds=rect 自身 → 恒含所有绘制像素，no-op（零回归）。
+func blendOver(dst *image.RGBA, dstMin image.Point, src *image.RGBA, srcRect image.Rectangle, opacity float64, clipRect image.Rectangle, clipRad float64, clipBounds image.Rectangle) {
 	if opacity <= 0 {
 		return
 	}
@@ -276,6 +290,9 @@ func blendOver(dst *image.RGBA, dstMin image.Point, src *image.RGBA, srcRect ima
 		if dy < dstBounds.Min.Y || dy >= dstBounds.Max.Y {
 			continue
 		}
+		if dy < clipBounds.Min.Y || dy >= clipBounds.Max.Y { // 矩形硬裁（上下）
+			continue
+		}
 		sy := sy0 + y
 		if sy < srcBounds.Min.Y || sy >= srcBounds.Max.Y {
 			continue
@@ -283,6 +300,9 @@ func blendOver(dst *image.RGBA, dstMin image.Point, src *image.RGBA, srcRect ima
 		for x := 0; x < w; x++ {
 			dx := dx0 + x
 			if dx < dstBounds.Min.X || dx >= dstBounds.Max.X {
+				continue
+			}
+			if dx < clipBounds.Min.X || dx >= clipBounds.Max.X { // 矩形硬裁（左右）
 				continue
 			}
 			sx := sx0 + x

@@ -28,10 +28,11 @@ type ViewEdges struct {
 	Left   *Dimension `yaml:"left,omitempty"`
 }
 
-// ViewImagePoint 覆盖图偏移（逻辑像素）。
+// ViewImagePoint 覆盖图/背景图偏移。X/Y 各支持 dp（裸数字）或百分比（"N%"，相对 host 宽/高）。
+// 背景图（ViewFill.Image）配了 anchor/offset/size 时按定位图绘制并裁到 host；未配则全覆盖（零回归）。
 type ViewImagePoint struct {
-	X int `yaml:"x,omitempty"`
-	Y int `yaml:"y,omitempty"`
+	X OffsetValue `yaml:"x,omitempty"`
+	Y OffsetValue `yaml:"y,omitempty"`
 }
 
 // ViewImageSize 覆盖图尺寸（逻辑像素）；0=原图尺寸。
@@ -176,9 +177,11 @@ type RVImage struct {
 	Slice             Padding     // 仅 nine_slice
 	Opacity           float64     // 已解析（nil→1.0）
 	Z                 int         // 仅 layers：内容基准 0
-	Anchor            string      // 仅覆盖图
-	OffsetX           int         // 仅覆盖图
-	OffsetY           int         // 仅覆盖图
+	Anchor            string      // 仅覆盖图/定位背景图
+	OffsetX           int         // 仅覆盖图：dp 水平偏移（build 阶段 ×scale）
+	OffsetY           int         // 仅覆盖图：dp 垂直偏移
+	OffsetXPct        float64     // 仅覆盖图：百分比水平偏移（相对 host 宽，paint 阶段换算）；与 OffsetX 互斥
+	OffsetYPct        float64     // 仅覆盖图：百分比垂直偏移（相对 host 高）
 	W                 int         // 仅覆盖图：0=原尺寸
 	H                 int         // 仅覆盖图：0=原尺寸
 	TintColor         color.Color // 已解析单色染色（nil=图原样）；非 nil 时 ui 把图当 alpha mask 用此色填充

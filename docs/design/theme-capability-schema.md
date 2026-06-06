@@ -52,6 +52,16 @@ const (
 - **`index` 的水平边**：横排自然流四边全应用；竖排固定列模式下水平间距由列宽（`indexFixedW`）治理，仅上下生效。
 - **`footer_bar`**：竖排有独立翻页 band，margin 直接承载；横排页码内联候选行，包一层 `LayoutRow` 容器承载 margin（容器 `Gap` 沿用候选框间隙保持页码按钮间距零回归，命中测试取按钮绝对 `Rect` 不受嵌套影响）。横竖排均生效。
 
+#### `background_image` / `layers` 的定位与裁剪规则（通用盒模型）
+
+背景填充图（`background_image`）与覆盖图层（`layers`）共用同一类型 `ViewImage`，定位/裁剪能力对齐：
+
+- **背景图两形态**：未配 `anchor`/`offset`/`size` → **全覆盖**（铺满边框盒，按 `mode` stretch/nine_slice/tile/center，零回归历史行为）；配了任一定位字段 → **定位**（在边框盒内按 `anchor`+`offset` 摆放、可缩到 `size`）。
+- **层定位**：`anchor` 九宫（top-left…bottom-right/center）+ `offset` 再偏移 + `size` 显式尺寸 + `z`（z<0 内容下、z>0 内容上）。
+- **`offset` 百分比**：`offset.x`/`offset.y` 各分量支持 dp（裸数字，随 DPI 缩放）或百分比（`"N%"`，相对 host 宽/高，正负皆可）。百分比是相对量，须 host 尺寸已知 → paint 阶段（布局完成后）换算；dp 部分 build 阶段 ×scale。两者互斥（一个分量要么 dp 要么百分比）。
+- **统一裁剪**：定位背景图与覆盖图层绘制时**矩形硬裁到 host 边框盒**——超出部分一律不画（不外溢）。全覆盖背景图走 `clip=rect` 退化路径（no-op，零回归）。层不强制圆角裁剪（仅矩形硬裁，形状由素材 alpha 决定）；全覆盖背景图仍按 `border.radius` 圆角覆盖度裁角。
+- **实现注**：定位背景图 paint 期复用 `drawLayer`（与层同源）；矩形硬裁经 `theme.DrawBackgroundClipped` 把 `clipBounds=host` 透传至 `blendOver` 逐像素门控。窗口根盒由各窗口定位逻辑放置，其背景图定位相对**自身**边框盒（非屏幕）。
+
 ### view 主体（subjects）
 
 候选窗：`window` `preedit_bar` `candidate_list` `item` `index` `text` `comment` `accent_bar` `footer_bar` `mode_label`

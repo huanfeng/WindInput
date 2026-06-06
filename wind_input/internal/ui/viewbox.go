@@ -41,6 +41,11 @@ const (
 )
 
 // Fill 背景填充：底色 + 可选渐变 + 可选背景图（依次叠加，裁剪到 View 圆角内）。
+//
+// 背景图两种形态：
+//   - 全覆盖（默认，Positioned=false）：铺满 View 边框盒（按 Mode），保持历史行为。
+//   - 定位（Positioned=true，配了 anchor/offset/size）：按 anchor+offset 在边框盒内摆放、可缩到 size，
+//     超出边框盒的部分裁掉（不画到外面）。paint 阶段走与 ImageLayer 同一套定位+裁剪逻辑。
 type Fill struct {
 	Color    color.Color
 	Image    *image.RGBA       // nil = 无背景图
@@ -48,6 +53,16 @@ type Fill struct {
 	Slice    Edges             // 仅 nine_slice
 	Opacity  float64           // 0..1
 	Gradient *theme.RVGradient // nil = 无渐变；paint 时按 View rect 栅格化（优先级：底色 < 渐变 < 背景图）
+
+	// 定位背景图（Positioned=true 时生效）：语义同 ImageLayer 的 anchor/offset/size。
+	Positioned bool
+	Anchor     string
+	OffsetX    int     // dp（已 ×scale）
+	OffsetY    int     // dp（已 ×scale）
+	OffsetXPct float64 // 百分比（相对 host 宽，paint 阶段换算）
+	OffsetYPct float64 // 百分比（相对 host 高）
+	ImgW       int     // 定位图目标宽；0=原图尺寸
+	ImgH       int     // 定位图目标高；0=原图尺寸
 }
 
 // Border 描边：宽度/颜色/圆角。描边沿边框盒边缘绘制，不参与布局尺寸（与旧渲染器一致）。
@@ -67,18 +82,20 @@ type ViewShadow struct {
 // ImageLayer 覆盖图层（z 相对内容基准=0；z<0 在内容下，z>0 在内容上）。
 // 可以是图片（Img 非空）或纯色矩形（Color 非空，如选中项左侧 accent 强调条）。
 type ImageLayer struct {
-	Img     *image.RGBA
-	Color   color.Color // 纯色层；Img 为空时生效（圆角由 Radius 控制）
-	Radius  int         // 纯色层圆角
-	Mode    string
-	Slice   Edges
-	Opacity float64
-	Z       int
-	Anchor  string // top-left|top|...|center|...|bottom-right；空=top-left
-	OffsetX int
-	OffsetY int
-	W       int // 0 = 原尺寸（纯色层必须显式给）
-	H       int // 0 = 原尺寸（纯色层必须显式给）
+	Img        *image.RGBA
+	Color      color.Color // 纯色层；Img 为空时生效（圆角由 Radius 控制）
+	Radius     int         // 纯色层圆角
+	Mode       string
+	Slice      Edges
+	Opacity    float64
+	Z          int
+	Anchor     string  // top-left|top|...|center|...|bottom-right；空=top-left
+	OffsetX    int     // dp 偏移（已 ×scale）
+	OffsetY    int     // dp 偏移（已 ×scale）
+	OffsetXPct float64 // 百分比偏移（相对 host 宽，paint 阶段换算）；与 OffsetX 互斥
+	OffsetYPct float64 // 百分比偏移（相对 host 高）
+	W          int     // 0 = 原尺寸（纯色层必须显式给）
+	H          int     // 0 = 原尺寸（纯色层必须显式给）
 }
 
 // TextStyle 文本排版属性。

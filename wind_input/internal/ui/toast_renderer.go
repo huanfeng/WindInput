@@ -191,7 +191,7 @@ func (r *ToastRenderer) Render(opts ToastOptions, maxContentPx int) *image.RGBA 
 		Layout:     LayoutColumn,
 		Gap:        int(lineSpacing),
 		Padding:    Edges{Top: padTop, Right: padRight, Bottom: padBottom, Left: int(textLeft)},
-		Background: r.imgRes.fillFor(node.BgColor, node.BgImage, node.BgGradient, resources), // P8 切片6：背景可带图/渐变
+		Background: r.imgRes.fillFor(node.BgColor, node.BgImage, node.BgGradient, resources, scale), // P8 切片6：背景可带图/渐变
 		Border:     border,
 		FixedW:     int(width),
 	}

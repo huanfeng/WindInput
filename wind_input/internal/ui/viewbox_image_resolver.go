@@ -139,7 +139,11 @@ func tintMask(src *image.RGBA, c color.Color) *image.RGBA {
 
 // fillFor 构建 View 背景填充：底色 + 可选背景图（经 resolveImage 取缓存位图，支持 SVG/tint）。
 // bg 为 nil 或图解码失败时退化为纯底色（零回归）。背景尺寸动态 → SVG 兜底分辨率后 gg 缩放。
-func (ir *imageResolver) fillFor(col color.Color, bg *theme.RVImage, grad *theme.RVGradient, resources map[string]string) Fill {
+//
+// 背景图若配了 anchor/offset/size（bgPositioned 判定）→ 标记 Positioned 并把 offset/size 的 dp 部分
+// 经 scale 换算、百分比部分透传，paint 阶段走与 ImageLayer 同一套定位+裁剪逻辑（裁到边框盒、不外溢）；
+// 未配则维持全覆盖老路（零回归）。
+func (ir *imageResolver) fillFor(col color.Color, bg *theme.RVImage, grad *theme.RVGradient, resources map[string]string, scale float64) Fill {
 	f := Fill{Color: col, Gradient: grad}
 	if bg != nil {
 		if img := ir.resolveImage(bg.Ref, resources, 0, 0, bg.TintColor); img != nil {
@@ -147,13 +151,30 @@ func (ir *imageResolver) fillFor(col color.Color, bg *theme.RVImage, grad *theme
 			f.Mode = bg.Mode
 			f.Slice = bg.Slice
 			f.Opacity = bg.Opacity
+			if bgPositioned(bg) {
+				f.Positioned = true
+				f.Anchor = bg.Anchor
+				f.OffsetX = int(float64(bg.OffsetX)*scale + 0.5)
+				f.OffsetY = int(float64(bg.OffsetY)*scale + 0.5)
+				f.OffsetXPct = bg.OffsetXPct
+				f.OffsetYPct = bg.OffsetYPct
+				f.ImgW = int(float64(bg.W)*scale + 0.5)
+				f.ImgH = int(float64(bg.H)*scale + 0.5)
+			}
 		}
 	}
 	return f
 }
 
+// bgPositioned 判定背景图是否要走「定位」绘制：配了 anchor、任一 offset（dp/百分比）或显式 size。
+func bgPositioned(bg *theme.RVImage) bool {
+	return bg.Anchor != "" || bg.OffsetX != 0 || bg.OffsetY != 0 ||
+		bg.OffsetXPct != 0 || bg.OffsetYPct != 0 || bg.W != 0 || bg.H != 0
+}
+
 // appendLayers 把主题 RVImage 层级覆盖图（spec）解码后追加到 View.Layers。
-// offset/size 为逻辑像素经 sc 缩放，W/H=0 保持原图尺寸；解码失败的层静默跳过（不打断渲染）。
+// offset dp 部分经 sc 缩放、百分比部分透传（paint 阶段相对 host 换算）；size W/H=0 保持原图尺寸；
+// 解码失败的层静默跳过（不打断渲染）。
 func (ir *imageResolver) appendLayers(v *View, layers []theme.RVImage, resources map[string]string, sc func(float64) int) {
 	for i := range layers {
 		L := &layers[i]
@@ -163,16 +184,18 @@ func (ir *imageResolver) appendLayers(v *View, layers []theme.RVImage, resources
 			continue
 		}
 		v.Layers = append(v.Layers, ImageLayer{
-			Img:     img,
-			Mode:    L.Mode,
-			Slice:   L.Slice,
-			Opacity: L.Opacity,
-			Z:       L.Z,
-			Anchor:  L.Anchor,
-			OffsetX: sc(float64(L.OffsetX)),
-			OffsetY: sc(float64(L.OffsetY)),
-			W:       w,
-			H:       h,
+			Img:        img,
+			Mode:       L.Mode,
+			Slice:      L.Slice,
+			Opacity:    L.Opacity,
+			Z:          L.Z,
+			Anchor:     L.Anchor,
+			OffsetX:    sc(float64(L.OffsetX)), // dp 部分 ×scale
+			OffsetY:    sc(float64(L.OffsetY)),
+			OffsetXPct: L.OffsetXPct, // 百分比部分透传，paint 阶段相对 host 换算（不缩放）
+			OffsetYPct: L.OffsetYPct,
+			W:          w,
+			H:          h,
 		})
 	}
 }

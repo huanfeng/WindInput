@@ -53,10 +53,24 @@ func (v *View) paintShapes(dc *gg.Context, img *image.RGBA) {
 		}
 	}
 
-	// 背景图：传 Border.Radius 让 DrawBackground 按圆角矩形覆盖度裁角——内部元素（如选中候选项）
-	// 四周已被窗口底色填满，无法靠 alpha-gate 裁角，必须靠 radius 遮罩。
+	// 背景图：
+	//   - 全覆盖（默认）：铺满边框盒，传 Border.Radius 让 DrawBackground 按圆角矩形覆盖度裁角——
+	//     内部元素（如选中候选项）四周已被窗口底色填满，无法靠 alpha-gate 裁角，必须靠 radius 遮罩。
+	//   - 定位（配了 anchor/offset/size）：按 anchor+offset（含百分比）在边框盒内摆放、可缩到 size，
+	//     复用 drawLayer 的定位+矩形硬裁逻辑（裁到边框盒、不外溢），与覆盖图层同源。
 	if v.Background.Image != nil {
-		theme.DrawBackground(img, r, v.Background.Image, modeOrStretch(v.Background.Mode), v.Background.Slice, opacityOr1(v.Background.Opacity), v.Border.Radius)
+		if v.Background.Positioned {
+			bl := ImageLayer{
+				Img: v.Background.Image, Mode: v.Background.Mode, Slice: v.Background.Slice,
+				Opacity: v.Background.Opacity, Anchor: v.Background.Anchor,
+				OffsetX: v.Background.OffsetX, OffsetY: v.Background.OffsetY,
+				OffsetXPct: v.Background.OffsetXPct, OffsetYPct: v.Background.OffsetYPct,
+				W: v.Background.ImgW, H: v.Background.ImgH,
+			}
+			drawLayer(dc, img, r, &bl)
+		} else {
+			theme.DrawBackground(img, r, v.Background.Image, modeOrStretch(v.Background.Mode), v.Background.Slice, opacityOr1(v.Background.Opacity), v.Border.Radius)
+		}
 	}
 
 	// 覆盖图层 z<0
@@ -141,11 +155,13 @@ func drawLayer(dc *gg.Context, img *image.RGBA, host image.Rectangle, l *ImageLa
 		return
 	}
 	x, y := anchorOffset(host, w, h, l.Anchor)
-	x += l.OffsetX
-	y += l.OffsetY
+	// dp 偏移（已 ×scale）+ 百分比偏移（相对 host 对应边长，此刻 host 已知）。
+	x += l.OffsetX + int(float64(host.Dx())*l.OffsetXPct/100+0.5)
+	y += l.OffsetY + int(float64(host.Dy())*l.OffsetYPct/100+0.5)
 	if l.Img != nil {
 		// 覆盖层（水印等装饰图）不按 host 圆角裁剪（radius=0）；其自身形状由素材 alpha 决定。
-		theme.DrawBackground(img, image.Rect(x, y, x+w, y+h), l.Img, modeOrStretch(l.Mode), l.Slice, opacityOr1(l.Opacity), 0)
+		// 但矩形硬裁到 host：超出边框盒的部分不画（定位/百分比偏移后不外溢）。
+		theme.DrawBackgroundClipped(img, image.Rect(x, y, x+w, y+h), l.Img, modeOrStretch(l.Mode), l.Slice, opacityOr1(l.Opacity), 0, host)
 		return
 	}
 	dc.SetColor(l.Color)

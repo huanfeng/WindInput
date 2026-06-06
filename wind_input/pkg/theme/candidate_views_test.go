@@ -214,7 +214,7 @@ func TestResolveCandidateViews_BackgroundImage(t *testing.T) {
 		Slice: ViewEdges{Top: dimp(4), Right: dimp(4), Bottom: dimp(4), Left: dimp(4)},
 	}
 	v.Item.Layers = []ViewImage{
-		{Ref: "glow", Mode: "stretch", Z: -1, Anchor: "left", Offset: ViewImagePoint{X: 2, Y: 0}, Size: ViewImageSize{W: 8, H: 8}},
+		{Ref: "glow", Mode: "stretch", Z: -1, Anchor: "left", Offset: ViewImagePoint{X: OffsetDp(2), Y: OffsetDp(0)}, Size: ViewImageSize{W: 8, H: 8}},
 	}
 	rv := ResolveCandidateViews(v, pal)
 

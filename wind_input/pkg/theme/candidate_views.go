@@ -218,11 +218,11 @@ func toRVImage(im ViewImage, resolveColor func(ColorRef) color.Color) RVImage {
 		Opacity: op,
 		Z:       im.Z,
 		Anchor:  im.Anchor,
-		OffsetX: im.Offset.X,
-		OffsetY: im.Offset.Y,
 		W:       im.Size.W,
 		H:       im.Size.H,
 	}
+	out.OffsetX, out.OffsetXPct = im.Offset.X.Split() // dp 或百分比分流（百分比 paint 阶段相对 host 换算）
+	out.OffsetY, out.OffsetYPct = im.Offset.Y.Split()
 	if resolveColor != nil {
 		if !im.Tint.IsZero() {
 			out.TintColor = resolveColor(im.Tint)

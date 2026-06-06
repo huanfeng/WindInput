@@ -28,6 +28,9 @@ const (
 	CapBorder             = "border"
 	CapBackgroundColor    = "background_color"
 	CapTextColor          = "text_color"
+	// CapBackgroundImage：背景填充图。两种形态——全覆盖（默认，铺满边框盒）/ 定位（配 anchor/offset/size →
+	// 在边框盒内按 anchor+offset 摆放、可缩到 size，超出部分裁到边框盒不外溢）。offset 各分量支持 dp 或
+	// 百分比（"N%"，相对 host 宽/高）。定位形态与 layers 同源（paint 期复用 drawLayer 定位+矩形硬裁）。
 	CapBackgroundImage    = "background_image"
 	CapBackgroundGradient = "background_gradient"
 	CapBackgroundShape    = "background_shape"
@@ -39,6 +42,8 @@ const (
 	// 状态态支持颜色/背景图/渐变/边框/字体/层覆盖，**唯几何不支持**——状态改几何会牵动行高/列宽
 	// 致候选框跳动（effectiveNode 不合并几何、resolveState 判定不看几何）→ 有状态的 view 标 unsupported。
 	CapStateGeometry    = "state_geometry"
+	// CapLayers：z 层级覆盖图（z<0 内容下 / z>0 内容上）。anchor 九宫定位 + offset（dp 或百分比 "N%"
+	// 相对 host 宽/高）+ size + opacity + tint。绘制矩形硬裁到 host 边框盒（不外溢）；层自身形状由素材 alpha 决定。
 	CapLayers           = "layers"
 	CapShadowOffset     = "shadow_offset"
 	CapShadowBlurSpread = "shadow_blur_spread"
