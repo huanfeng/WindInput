@@ -450,13 +450,8 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 		if len(c.tempEnglishBuffer) == 0 {
 			// 缓冲区为空时，直接按标点状态输出触发键字符
 			punctText := c.tempEnglishTriggerPrefix()
-			if len(punctText) == 1 && c.isEffectiveChinesePunct() {
-				if converted, ok := c.punctConverter.ToChinesePunctStr(rune(punctText[0])); ok {
-					punctText = converted
-				}
-			}
-			if c.fullWidth {
-				punctText = transform.ToFullWidth(punctText)
+			if len(punctText) == 1 {
+				punctText = c.convertPunct(rune(punctText[0]), false, 0)
 			}
 			return c.exitTempEnglishMode(true, punctText)
 		}
@@ -473,13 +468,8 @@ func (c *Coordinator) handleTempEnglishKey(key string, data *bridge.KeyEventData
 			text = transform.ToFullWidth(text)
 		}
 		punctText := key
-		if len(key) == 1 && c.isEffectiveChinesePunct() {
-			if converted, ok := c.punctConverter.ToChinesePunctStr(rune(key[0])); ok {
-				punctText = converted
-			}
-		}
-		if c.fullWidth {
-			punctText = transform.ToFullWidth(punctText)
+		if len(key) == 1 {
+			punctText = c.convertPunct(rune(key[0]), false, 0)
 		}
 		return c.exitTempEnglishMode(true, text+punctText)
 

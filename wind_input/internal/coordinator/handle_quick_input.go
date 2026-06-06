@@ -285,13 +285,8 @@ func (c *Coordinator) handleQuickInputKey(key string, data *bridge.KeyEventData)
 	case c.isQuickInputTriggerKey(key, data.KeyCode) && len(c.quickInputBuffer) == 0:
 		prefix := c.quickInputPrefix()
 		punctText := prefix
-		if c.chinesePunctuation {
-			if converted, ok := c.punctConverter.ToChinesePunctStr(rune(prefix[0])); ok {
-				punctText = converted
-			}
-		}
-		if c.fullWidth {
-			punctText = transform.ToFullWidth(punctText)
+		if len(prefix) == 1 {
+			punctText = c.convertPunct(rune(prefix[0]), false, 0)
 		}
 		return c.exitQuickInputMode(true, punctText)
 

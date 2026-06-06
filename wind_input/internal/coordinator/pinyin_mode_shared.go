@@ -258,16 +258,11 @@ func (c *Coordinator) handlePinyinModeKey(ops *pinyinModeOps, key string, data *
 
 	// === 触发键 ===
 	case ops.triggerKey != nil && ops.triggerKey(key, data.KeyCode):
-		// 缓冲区为空时，输出触发键字符的标点形式
+		// 缓冲区为空时，输出触发键字符的标点形式（走完整转换链：自定义映射 > 中文标点 > 全角）
 		if len(*ops.buffer) == 0 {
 			punctText := key
-			if len(key) == 1 && c.isEffectiveChinesePunct() {
-				if converted, ok := c.punctConverter.ToChinesePunctStr(rune(key[0])); ok {
-					punctText = converted
-				}
-			}
-			if c.fullWidth {
-				punctText = transform.ToFullWidth(punctText)
+			if len(key) == 1 {
+				punctText = c.convertPunct(rune(key[0]), false, 0)
 			}
 			return ops.exitMode(true, punctText)
 		}
@@ -473,10 +468,8 @@ func (c *Coordinator) selectPinyinModeWithPunct(ops *pinyinModeOps, pageOffset i
 		text = transform.ToFullWidth(text)
 	}
 	punctText := key
-	if len(key) == 1 && c.isEffectiveChinesePunct() {
-		if converted, ok := c.punctConverter.ToChinesePunctStr(rune(key[0])); ok {
-			punctText = converted
-		}
+	if len(key) == 1 {
+		punctText = c.convertPunct(rune(key[0]), false, 0)
 	}
 	c.recordPinyinModeHistory(ops, text)
 	return ops.exitMode(true, pinyinModeFullText(ops, text)+punctText)
