@@ -125,8 +125,7 @@ var ThemeCapabilities = []ViewCapability{
 	}},
 	{"index", map[string]CapabilityStatus{
 		CapPadding: CapSupported, CapBorder: CapSupported,
-		// margin：横排序号四边全应用；竖排固定列模式下水平间距由列宽治理，仅上下生效。
-		CapMargin:          CapSupported,
+		CapMargin:          CapSupported, // 横排/竖排四边全应用；竖排 L/R 已纳入列宽计算，不再清零
 		CapBackgroundColor: CapSupported, CapTextColor: CapSupported, CapFont: CapSupported,
 		CapBackgroundShape: CapSupported, CapIndexLabels: CapSupported,
 		CapStateSelected: CapSupported, CapStateHover: CapSupported,

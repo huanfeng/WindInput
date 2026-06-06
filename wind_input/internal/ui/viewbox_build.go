@@ -300,6 +300,7 @@ type candItemStyle struct {
 	isTextIndex      bool
 	indexCircleD     int // 圆圈序号直径（设备像素）
 	indexFixedW      int // 序号列固定宽：0=自然流（横排）；>0=固定列宽跨行对齐（竖排）
+	indexContentW    int // 文本序号 FixedW：indexFixedW - marginLeft - marginRight（仅内容+padding）
 	indexMarginRight int
 	commentMarginL   int
 	itemPadTop       int
@@ -333,20 +334,17 @@ func (r *Renderer) buildCandidateItem(cand Candidate, sel, hov bool, st *candIte
 			// 文本序号：accent 底色是圆圈模式专属，文本模式无背景（保留 color/font/border）。
 			effIdxText := effIdx
 			effIdxText.BgColor, effIdxText.BgImage = nil, nil
-			textIm := im
-			if st.indexFixedW > 0 {
-				textIm.Left, textIm.Right = 0, 0
-			}
+			textIm := im // 四向 margin 全量生效（L/R 已纳入 indexAreaW）
 			idx := r.styleLeaf(effIdxText, label, scale, AlignStart, textIm)
 			if st.indexFixedW > 0 {
-				idx.FixedW = st.indexFixedW // 竖排：固定列宽使各行候选文字对齐
+				idx.FixedW = st.indexContentW // 内容+padding 宽（不含 margin；竖排各行文字对齐）
 			}
 			children = append(children, idx)
 		} else {
 			circle := r.buildIndexCircle(effIdx, label, st.indexCircleD, scale)
 			if st.indexFixedW > 0 {
-				// 竖排：圆圈在固定列内左对齐 + 右侧留白补足列宽（跨行对齐）；序号 margin 仅 T/B。
-				leftM := sc(3)
+				// 竖排：圆圈在固定列内左对齐 + 右侧留白补足列宽；L/R margin 叠加到定位间距上。
+				leftM := sc(3) + im.Left
 				rightM := st.indexFixedW - st.indexCircleD - leftM
 				if rightM < 0 {
 					rightM = 0

@@ -136,7 +136,10 @@ func (r *Renderer) buildVerticalCandidateTree(
 
 	// 圆圈序号直径 = 序号字号 + index 上下 padding（盒模型，无 max(11/18) 尺寸下限魔法）。
 	indexD := rv.Index.FontSize + maxF(float64(scD(rv.Index.PadTop)+scD(rv.Index.PadBottom)), float64(scD(rv.Index.PadLeft)+scD(rv.Index.PadRight))) // 四边 padding 都参与，保持正圆
-	indexAreaW := int(indexD + 6*scale + 0.5)
+	indexMarginL := scD(rv.Index.MarginLeft)
+	indexMarginR := scD(rv.Index.MarginRight)
+	indexAreaW := int(indexD+6*scale+0.5) + indexMarginL + indexMarginR
+	indexContentW := int(indexD + 6*scale + 0.5) // 圆圈模式：内容宽=不含 margin 的原始值
 	if isTextIndex {
 		// 文本序号列宽按字形测量收紧：取最宽序号标签实际宽 + 小留白，紧凑且各行候选文字对齐。
 		// （旧写法 sc(20×scale) 既偏宽、又重复乘 scale 致高 DPI 失真。）
@@ -149,7 +152,8 @@ func (r *Renderer) buildVerticalCandidateTree(
 				}
 			}
 		}
-		indexAreaW = int(maxLabelW + float64(scD(rv.Index.PadLeft)+scD(rv.Index.PadRight)) + 0.5) // 文本序号列宽 = 最宽标签 + 左右 padding（取代 +4 魔法）
+		indexContentW = int(maxLabelW + float64(scD(rv.Index.PadLeft)+scD(rv.Index.PadRight)) + 0.5) // 文本序号列宽 = 最宽标签 + 左右 padding（取代 +4 魔法）
+		indexAreaW = indexContentW + indexMarginL + indexMarginR
 	}
 	commentSize := rv.Comment.FontSize // 注释字号 = base + views.comment.font_size 偏移（无派生魔法）
 	// 行高 = 行内容自然高 + item 上下内边距（全由主题 item.padding 控制，无 max(32) 魔法）。
@@ -211,7 +215,8 @@ func (r *Renderer) buildVerticalCandidateTree(
 	st := &candItemStyle{
 		isTextIndex:      isTextIndex,
 		indexCircleD:     int(indexD + 0.5),
-		indexFixedW:      indexAreaW, // 竖排：固定列宽使各行候选文字对齐
+		indexFixedW:      indexAreaW,   // 竖排：固定列宽使各行候选文字对齐（含 margin）
+		indexContentW:    indexContentW, // 内容+padding 宽（不含 margin）
 		indexMarginRight: indexMarginRight,
 		commentMarginL:   commentMarginLeft,
 		itemPadTop:       scD(rv.Item.PadTop),
