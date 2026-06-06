@@ -235,8 +235,11 @@ func paintBlurredShadow(dst *image.RGBA, v *View, x, y, w, h, borderRadius float
 	boxX := x + offsetX - spread
 	boxY := y + offsetY - spread
 
-	// 临时图：阴影盒 + 四周 blur px + 2px AA 裕量
-	pad := blur + 2
+	// 临时图：阴影盒 + 四周足够的 padding 容纳模糊梯度。
+	// 3 次方框模糊级联后 sigma ≈ sqrt(blur*(blur+2))，3-sigma 需约 3×sigma px 才能衰减到透明。
+	// pad = ceil(3×sigma) + 2（AA 裕量），远比 blur+2 宽裕。
+	sigma := math.Sqrt(float64(blur) * float64(blur+2))
+	pad := int(math.Ceil(3*sigma)) + 2
 	tmpW := int(math.Ceil(boxW)) + 2*pad
 	tmpH := int(math.Ceil(boxH)) + 2*pad
 	if tmpW < 1 {

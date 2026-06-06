@@ -5,6 +5,7 @@ package ui
 
 import (
 	"image"
+	"math"
 
 	"github.com/gogpu/gg"
 	"github.com/huanfeng/wind_input/pkg/theme"
@@ -98,7 +99,10 @@ func (r *Renderer) renderTree(tree *candWindowTree) (*image.RGBA, *RenderResult)
 	marginLeft, marginTop, marginRight, marginBottom := 0, 0, 0, 0
 	if sh := root.Shadow; sh != nil {
 		if sh.Blur > 0 || sh.Spread > 0 {
-			base := sh.Blur + sh.Spread
+			// 与 paintBlurredShadow 相同的公式：3-sigma 覆盖 99.7% 模糊梯度。
+			sigma := math.Sqrt(float64(sh.Blur) * float64(sh.Blur+2))
+			pad := int(math.Ceil(3*sigma)) + 2
+			base := pad + sh.Spread
 			marginLeft = base + maxInt(-sh.OffsetX, 0)
 			marginTop = base + maxInt(-sh.OffsetY, 0)
 			marginRight = base + maxInt(sh.OffsetX, 0)
