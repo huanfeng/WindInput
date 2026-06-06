@@ -56,6 +56,15 @@ func (a *App) ImportThemeFromText(yamlContent string, force bool) ImportThemeRes
 
 // importThemeFromContent 统一校验写入管线：解析 → 校验 → 冲突检测 → 写入。
 func importThemeFromContent(content []byte, force bool) ImportThemeResult {
+	userThemesDir, err := config.GetThemesUserDir()
+	if err != nil {
+		return ImportThemeResult{ErrorMsg: "获取用户主题目录失败: " + err.Error()}
+	}
+	return importThemeToDir(content, force, userThemesDir)
+}
+
+// importThemeToDir 是 importThemeFromContent 的核心实现，userThemesDir 由调用方传入（便于测试）。
+func importThemeToDir(content []byte, force bool, userThemesDir string) ImportThemeResult {
 	// 1. 解析 YAML
 	t := &theme.Theme{}
 	if err := yaml.Unmarshal(content, t); err != nil {
@@ -87,15 +96,9 @@ func importThemeFromContent(content []byte, force bool) ImportThemeResult {
 		return ImportThemeResult{ErrorMsg: "主题非 v3 格式或解析失败（缺少有效的 colors 块）"}
 	}
 
-	// 4. 计算目标目录，检测同名冲突
-	slug := sanitizeThemeSlug(t.Meta.Name)
-	userThemesDir, err := config.GetThemesUserDir()
-	if err != nil {
-		return ImportThemeResult{ErrorMsg: "获取用户主题目录失败: " + err.Error()}
-	}
-
-	destDir := filepath.Join(userThemesDir, slug)
-	if _, err := os.Stat(destDir); err == nil && !force {
+	// 4. 按 meta.name 检测同名冲突（目录名可能与 slug 不同，必须扫描内容）
+	existingDir := findUserThemeDirByName(userThemesDir, t.Meta.Name)
+	if existingDir != "" && !force {
 		return ImportThemeResult{
 			ThemeName: t.Meta.Name,
 			Conflict:  true,
@@ -103,7 +106,12 @@ func importThemeFromContent(content []byte, force bool) ImportThemeResult {
 		}
 	}
 
-	// 5. 写入用户主题目录
+	// 5. 确定目标目录：有同名主题则原地覆盖，否则按 slug 新建
+	destDir := existingDir
+	if destDir == "" {
+		destDir = filepath.Join(userThemesDir, sanitizeThemeSlug(t.Meta.Name))
+	}
+
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return ImportThemeResult{ErrorMsg: "创建主题目录失败: " + err.Error()}
 	}
@@ -115,6 +123,33 @@ func importThemeFromContent(content []byte, force bool) ImportThemeResult {
 		Success:   true,
 		ThemeName: t.Meta.Name,
 	}
+}
+
+// findUserThemeDirByName 扫描 userThemesDir 下所有子目录，返回第一个 meta.name 匹配的绝对路径；
+// 未找到则返回空字符串。
+func findUserThemeDirByName(userThemesDir, name string) string {
+	entries, err := os.ReadDir(userThemesDir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		themeFile := filepath.Join(userThemesDir, entry.Name(), "theme.yaml")
+		data, err := os.ReadFile(themeFile)
+		if err != nil {
+			continue
+		}
+		var t theme.Theme
+		if err := yaml.Unmarshal(data, &t); err != nil {
+			continue
+		}
+		if t.Meta.Name == name {
+			return filepath.Join(userThemesDir, entry.Name())
+		}
+	}
+	return ""
 }
 
 // DeleteTheme 删除用户安装的主题目录（内置主题不可删除）。
