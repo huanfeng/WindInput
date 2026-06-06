@@ -908,9 +908,13 @@ func (c *Coordinator) stopDarkModeWatcher() {
 	}
 }
 
-// hasPendingInput 检查是否有任何类型的待处理输入
+// hasPendingInput 检查是否有任何类型的待处理输入或活跃的临时模式。
+// 临时模式激活即意味着有待清理的 UI 状态（即使缓冲区为空）。
 func (c *Coordinator) hasPendingInput() bool {
-	return len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 || len(c.tempEnglishBuffer) > 0 || len(c.tempPinyinBuffer) > 0 || c.quickInputMode
+	return len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 ||
+		c.tempEnglishMode || len(c.tempEnglishBuffer) > 0 ||
+		c.tempPinyinMode || len(c.tempPinyinBuffer) > 0 ||
+		c.quickInputMode
 }
 
 // getPendingBufferText 获取当前待处理缓冲区的文本（用于 CommitOnSwitch 上屏）
