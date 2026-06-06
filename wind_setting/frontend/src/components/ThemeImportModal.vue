@@ -19,25 +19,25 @@ const emit = defineEmits<{
   imported: [themeName: string];
 }>();
 
-type Tab = "file" | "text";
+type Tab = "file" | "text" | "url";
 const activeTab = ref<Tab>("file");
 
 const loading = ref(false);
 const errorMsg = ref("");
 const conflictName = ref("");
-const pendingContent = ref(""); // 冲突时暂存内容，force=true 时重用
 const yamlText = ref("");
+const urlInput = ref("");
 
 function resetState() {
   errorMsg.value = "";
   conflictName.value = "";
-  pendingContent.value = "";
 }
 
 function close() {
   if (loading.value) return;
   resetState();
   yamlText.value = "";
+  urlInput.value = "";
   activeTab.value = "file";
   emit("update:open", false);
 }
@@ -47,7 +47,7 @@ async function handleFileImport(force = false) {
   errorMsg.value = "";
   try {
     const result = await wailsApi.importThemeFromFile(force);
-    handleResult(result, "file");
+    handleResult(result);
   } finally {
     loading.value = false;
   }
@@ -58,16 +58,24 @@ async function handleTextImport(force = false) {
   errorMsg.value = "";
   try {
     const result = await wailsApi.importThemeFromText(yamlText.value, force);
-    handleResult(result, "text");
+    handleResult(result);
   } finally {
     loading.value = false;
   }
 }
 
-function handleResult(
-  result: wailsApi.ImportThemeResult,
-  source: "file" | "text",
-) {
+async function handleURLImport(force = false) {
+  loading.value = true;
+  errorMsg.value = "";
+  try {
+    const result = await wailsApi.importThemeFromURL(urlInput.value, force);
+    handleResult(result);
+  } finally {
+    loading.value = false;
+  }
+}
+
+function handleResult(result: wailsApi.ImportThemeResult) {
   if (result.cancelled) return;
   if (result.success) {
     emit("imported", result.theme_name);
@@ -76,8 +84,6 @@ function handleResult(
   }
   if (result.conflict) {
     conflictName.value = result.theme_name;
-    // file 路径：后端持有文件路径，force=true 直接重调即可
-    // text 路径：内容已在 yamlText 中，force=true 重调即可
     errorMsg.value = "";
     return;
   }
@@ -87,8 +93,10 @@ function handleResult(
 async function confirmOverwrite() {
   if (activeTab.value === "file") {
     await handleFileImport(true);
-  } else {
+  } else if (activeTab.value === "text") {
     await handleTextImport(true);
+  } else {
+    await handleURLImport(true);
   }
   conflictName.value = "";
 }
@@ -101,6 +109,15 @@ async function pasteFromClipboard() {
   try {
     const text = await navigator.clipboard.readText();
     yamlText.value = text;
+  } catch {
+    errorMsg.value = "无法读取剪贴板，请手动粘贴";
+  }
+}
+
+async function pasteURL() {
+  try {
+    const text = await navigator.clipboard.readText();
+    urlInput.value = text.trim();
   } catch {
     errorMsg.value = "无法读取剪贴板，请手动粘贴";
   }
@@ -126,6 +143,14 @@ async function pasteFromClipboard() {
         </button>
         <button
           class="tab-btn"
+          :class="{ active: activeTab === 'url' }"
+          type="button"
+          @click="activeTab = 'url'"
+        >
+          从链接导入
+        </button>
+        <button
+          class="tab-btn"
           :class="{ active: activeTab === 'text' }"
           type="button"
           @click="activeTab = 'text'"
@@ -137,6 +162,19 @@ async function pasteFromClipboard() {
       <!-- 从文件导入 -->
       <div v-if="activeTab === 'file'" class="tab-content">
         <p class="tab-hint">选择一个 .yaml 格式的主题文件</p>
+      </div>
+
+      <!-- 从链接导入 -->
+      <div v-if="activeTab === 'url'" class="tab-content url-content">
+        <p class="tab-hint-sm">粘贴主题市场提供的下载链接（.yaml）</p>
+        <input
+          v-model="urlInput"
+          class="url-input"
+          type="url"
+          placeholder="https://..."
+          spellcheck="false"
+          @keydown.enter="!loading && urlInput.trim() && handleURLImport(false)"
+        />
       </div>
 
       <!-- 粘贴 YAML -->
@@ -168,6 +206,15 @@ async function pasteFromClipboard() {
       <DialogFooter class="footer">
         <div class="footer-left">
           <Button
+            v-if="activeTab === 'url'"
+            variant="outline"
+            size="sm"
+            @click="pasteURL"
+            :disabled="loading"
+          >
+            粘贴链接
+          </Button>
+          <Button
             v-if="activeTab === 'text'"
             variant="outline"
             size="sm"
@@ -178,7 +225,12 @@ async function pasteFromClipboard() {
           </Button>
         </div>
         <div class="footer-right">
-          <Button variant="outline" size="sm" @click="close" :disabled="loading">
+          <Button
+            variant="outline"
+            size="sm"
+            @click="close"
+            :disabled="loading"
+          >
             取消
           </Button>
           <Button
@@ -188,6 +240,14 @@ async function pasteFromClipboard() {
             :disabled="loading"
           >
             {{ loading ? "导入中..." : "选择文件..." }}
+          </Button>
+          <Button
+            v-if="activeTab === 'url'"
+            size="sm"
+            @click="handleURLImport(false)"
+            :disabled="loading || !urlInput.trim()"
+          >
+            {{ loading ? "下载中..." : "下载并导入" }}
           </Button>
           <Button
             v-if="activeTab === 'text'"
@@ -225,7 +285,9 @@ async function pasteFromClipboard() {
   color: hsl(var(--muted-foreground));
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
-  transition: color 0.15s, border-color 0.15s;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
 }
 
 .tab-btn:hover {
@@ -252,6 +314,36 @@ async function pasteFromClipboard() {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.url-content {
+  justify-content: center;
+}
+
+.tab-hint-sm {
+  font-size: 13px;
+  color: hsl(var(--muted-foreground));
+  margin: 0;
+}
+
+.url-input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  outline: none;
+  line-height: 1.5;
+}
+
+.url-input:focus {
+  border-color: hsl(var(--primary));
+}
+
+.url-input::placeholder {
+  color: hsl(var(--muted-foreground));
 }
 
 .yaml-textarea {

@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/theme"
@@ -40,6 +43,37 @@ func (a *App) ImportThemeFromFile(force bool) ImportThemeResult {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return ImportThemeResult{ErrorMsg: "读取文件失败: " + err.Error()}
+	}
+
+	return importThemeFromContent(content, force)
+}
+
+// ImportThemeFromURL 从指定 URL 下载并导入 yaml 主题文件。
+// force=true 时覆盖同名主题。
+func (a *App) ImportThemeFromURL(rawURL string, force bool) ImportThemeResult {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ImportThemeResult{ErrorMsg: "URL 不能为空"}
+	}
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		return ImportThemeResult{ErrorMsg: "仅支持 http/https 链接"}
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(rawURL) //nolint:noctx
+	if err != nil {
+		return ImportThemeResult{ErrorMsg: "下载失败: " + err.Error()}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ImportThemeResult{ErrorMsg: fmt.Sprintf("下载失败，服务器返回 %d", resp.StatusCode)}
+	}
+
+	const maxSize = 1 << 20 // 1 MB
+	content, err := io.ReadAll(io.LimitReader(resp.Body, maxSize))
+	if err != nil {
+		return ImportThemeResult{ErrorMsg: "读取内容失败: " + err.Error()}
 	}
 
 	return importThemeFromContent(content, force)

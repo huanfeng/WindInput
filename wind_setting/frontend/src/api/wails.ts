@@ -334,10 +334,7 @@ export async function validatePhraseValue(
   )) as unknown as PhraseValidateValueReply;
 }
 
-export async function removePhrase(
-  code: string,
-  text: string,
-): Promise<void> {
+export async function removePhrase(code: string, text: string): Promise<void> {
   return App.RemovePhrase(code, text);
 }
 
@@ -1022,6 +1019,16 @@ export async function importThemeFromText(
 ): Promise<ImportThemeResult> {
   return (window as any).go.main.App.ImportThemeFromText(
     yamlContent,
+    force,
+  ) as ImportThemeResult;
+}
+
+export async function importThemeFromURL(
+  url: string,
+  force: boolean,
+): Promise<ImportThemeResult> {
+  return (window as any).go.main.App.ImportThemeFromURL(
+    url,
     force,
   ) as ImportThemeResult;
 }
