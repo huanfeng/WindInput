@@ -42,7 +42,8 @@ type Manager struct {
 	hideCandidateWindow  bool
 	hidePreedit          bool
 	preeditMode          config.PreeditMode
-	pagerDisplayMode     config.PagerDisplayMode
+	pagerBarDisplay      config.PagerBarDisplay
+	pageNumberDisplay    config.PageNumberDisplay
 	cmdbarPrefix         string
 	maxCandidateChars    int
 	candidateIndexLabels string
@@ -512,6 +513,7 @@ func (m *Manager) SetGDIFontParams(int, float64)       {}
 func (m *Manager) SetMenuFontParams(int, float64)      {}
 func (m *Manager) SetMenuFontSize(float64)             {}
 func (m *Manager) SetTextRenderMode(config.FontEngine) {}
+func (m *Manager) SetFlipLayoutWhenAbove(_ bool)       {}
 func (m *Manager) SetHidePreedit(hide bool) {
 	m.mu.Lock()
 	m.hidePreedit = hide
@@ -524,9 +526,15 @@ func (m *Manager) SetPreeditMode(mode config.PreeditMode) {
 	m.mu.Unlock()
 	m.postCmd(m.snapshotConfig())
 }
-func (m *Manager) SetPagerDisplayMode(mode config.PagerDisplayMode) {
+func (m *Manager) SetPagerBarDisplay(mode config.PagerBarDisplay) {
 	m.mu.Lock()
-	m.pagerDisplayMode = mode
+	m.pagerBarDisplay = mode
+	m.mu.Unlock()
+	m.postCmd(m.snapshotConfig())
+}
+func (m *Manager) SetPageNumberDisplay(mode config.PageNumberDisplay) {
+	m.mu.Lock()
+	m.pageNumberDisplay = mode
 	m.mu.Unlock()
 	m.postCmd(m.snapshotConfig())
 }
@@ -554,7 +562,8 @@ func (m *Manager) snapshotConfig() uicmd.Command {
 		HideCandidateWindow: m.hideCandidateWindow,
 		HidePreedit:         m.hidePreedit,
 		PreeditMode:         uicmd.PreeditMode(m.preeditMode),
-		PagerDisplayMode:    uicmd.PagerDisplayMode(m.pagerDisplayMode),
+		PagerBarDisplay:     uicmd.PagerBarDisplay(m.pagerBarDisplay),
+		PageNumberDisplay:   uicmd.PageNumberDisplay(m.pageNumberDisplay),
 		CmdbarPrefix:        m.cmdbarPrefix,
 		MaxCandidateChars:   m.maxCandidateChars,
 	}
