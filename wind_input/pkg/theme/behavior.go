@@ -6,6 +6,7 @@ type Behavior struct {
 	FontSize         *int  `yaml:"font_size,omitempty" json:"font_size,omitempty"`
 	AlwaysShowPager  *bool `yaml:"always_show_pager,omitempty" json:"always_show_pager,omitempty"`
 	ShowPageNumber   *bool `yaml:"show_page_number,omitempty" json:"show_page_number,omitempty"`
+	HidePager        *bool `yaml:"hide_pager,omitempty" json:"hide_pager,omitempty"`
 	VerticalMaxWidth *int  `yaml:"vertical_max_width,omitempty" json:"vertical_max_width,omitempty"`
 }
 
@@ -14,6 +15,7 @@ type ResolvedBehavior struct {
 	FontSize         int
 	AlwaysShowPager  bool
 	ShowPageNumber   bool
+	HidePager        bool
 	VerticalMaxWidth int
 }
 
@@ -43,6 +45,9 @@ func mergeBehavior(base ResolvedBehavior, ov *Behavior) ResolvedBehavior {
 	}
 	if ov.ShowPageNumber != nil {
 		out.ShowPageNumber = *ov.ShowPageNumber
+	}
+	if ov.HidePager != nil {
+		out.HidePager = *ov.HidePager
 	}
 	if ov.VerticalMaxWidth != nil {
 		out.VerticalMaxWidth = *ov.VerticalMaxWidth

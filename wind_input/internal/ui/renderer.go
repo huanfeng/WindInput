@@ -28,6 +28,7 @@ type RenderConfig struct {
 	VerticalMaxWidth  float64                // Vertical layout maximum width (scaled px), 0 = default 600
 	AlwaysShowPager   bool                   // Always show page navigation (disable buttons when not navigable)
 	ShowPageNumber    bool                   // Show page number text (e.g. "1/3")
+	HidePager         bool                   // Completely hide pager bar (arrows + page number)
 	TextRenderMode    TextRenderMode         // "gdi" (Windows native) or "freetype" (original)
 	ModeLabel         string                 // Temporary mode label (e.g. "临时拼音", "快捷输入"), empty = no label
 	ModeAccentColor   color.Color            // Inner glow border color for special modes, nil = no glow
@@ -326,6 +327,10 @@ func (r *Renderer) applyBehaviorOverrides() {
 	} else {
 		r.config.ShowPageNumber = r.userShowPageNumber
 	}
+	// HidePager 始终跟随主题默认值；用户 PagerDisplayMode（applyPagerOverride）在其后强制覆盖。
+	if r.resolvedV3 != nil {
+		r.config.HidePager = r.resolvedV3.Behavior.HidePager
+	}
 }
 
 // UpdateFont updates font settings
@@ -399,6 +404,11 @@ func (r *Renderer) SetAlwaysShowPager(v bool) {
 // SetShowPageNumber 设置是否在翻页区域显示页码文字（如 "1/3"）
 func (r *Renderer) SetShowPageNumber(v bool) {
 	r.config.ShowPageNumber = v
+}
+
+// SetHidePager 设置是否完全隐藏翻页区（含箭头按钮），优先级高于 AlwaysShowPager/ShowPageNumber
+func (r *Renderer) SetHidePager(v bool) {
+	r.config.HidePager = v
 }
 
 // SetModeLabel sets the temporary mode label for display

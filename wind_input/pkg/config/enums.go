@@ -199,6 +199,7 @@ type PagerDisplayMode string
 
 const (
 	PagerDisplayDefault PagerDisplayMode = ""       // 使用主题配置（默认）
+	PagerDisplayHide    PagerDisplayMode = "hide"   // 完全隐藏翻页区（含箭头）
 	PagerDisplayNever   PagerDisplayMode = "never"  // 不显示页码文字
 	PagerDisplayAuto    PagerDisplayMode = "auto"   // 仅在多页时显示
 	PagerDisplayAlways  PagerDisplayMode = "always" // 总是显示
@@ -207,7 +208,7 @@ const (
 // Valid 校验取值
 func (m PagerDisplayMode) Valid() bool {
 	switch m {
-	case PagerDisplayDefault, PagerDisplayNever, PagerDisplayAuto, PagerDisplayAlways:
+	case PagerDisplayDefault, PagerDisplayHide, PagerDisplayNever, PagerDisplayAuto, PagerDisplayAlways:
 		return true
 	}
 	return false

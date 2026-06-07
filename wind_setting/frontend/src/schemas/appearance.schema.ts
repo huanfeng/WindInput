@@ -25,11 +25,12 @@ export const themeExtraSchema: PageSchema = [
   {
     type: "select",
     key: "ui.pager_display_mode",
-    label: "页码显示方式",
-    hint: "覆盖主题配置中的页码显示行为",
+    label: "翻页区显示方式",
+    hint: "覆盖主题配置中的翻页区显示行为；隐藏时整个翻页栏（含箭头）不渲染",
     options: [
       { value: PagerDisplayMode.Default, label: "默认（主题配置）" },
-      { value: PagerDisplayMode.Never, label: "不显示" },
+      { value: PagerDisplayMode.Hide, label: "隐藏" },
+      { value: PagerDisplayMode.Never, label: "不显示页码" },
       { value: PagerDisplayMode.Auto, label: "大于一页时显示" },
       { value: PagerDisplayMode.Always, label: "总是显示" },
     ],

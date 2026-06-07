@@ -284,13 +284,18 @@ func (m *Manager) applyPagerOverride() {
 		return
 	}
 	switch m.pagerDisplayMode {
+	case config.PagerDisplayHide:
+		m.renderer.SetHidePager(true)
 	case config.PagerDisplayNever:
+		m.renderer.SetHidePager(false)
 		m.renderer.SetAlwaysShowPager(false)
 		m.renderer.SetShowPageNumber(false)
 	case config.PagerDisplayAuto:
+		m.renderer.SetHidePager(false)
 		m.renderer.SetAlwaysShowPager(false)
 		m.renderer.SetShowPageNumber(true)
 	case config.PagerDisplayAlways:
+		m.renderer.SetHidePager(false)
 		m.renderer.SetAlwaysShowPager(true)
 		m.renderer.SetShowPageNumber(true)
 		// PagerDisplayDefault（空字符串）：不覆盖，保留主题值

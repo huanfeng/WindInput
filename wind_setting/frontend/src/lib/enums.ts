@@ -95,6 +95,7 @@ export type S2TVariantValue = (typeof S2TVariant)[keyof typeof S2TVariant];
 
 export const PagerDisplayMode = {
   Default: "",       // 使用主题配置
+  Hide: "hide",      // 完全隐藏翻页区（含箭头）
   Never: "never",    // 不显示页码文字
   Auto: "auto",      // 仅在多页时显示
   Always: "always",  // 总是显示

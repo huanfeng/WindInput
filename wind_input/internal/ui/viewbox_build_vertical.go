@@ -15,6 +15,9 @@ func (r *Renderer) buildPager(
 	page, totalPages int, hoverPageBtn string, rowH int,
 ) (children []*View, up, down *View) {
 	cfg := &r.config
+	if cfg.HidePager {
+		return nil, nil, nil
+	}
 	absTotal := totalPages
 	if absTotal < 0 {
 		absTotal = -absTotal

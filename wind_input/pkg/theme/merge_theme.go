@@ -94,6 +94,9 @@ func mergeBehaviorRaw(base, override *Behavior) *Behavior {
 	if override.ShowPageNumber != nil {
 		out.ShowPageNumber = override.ShowPageNumber
 	}
+	if override.HidePager != nil {
+		out.HidePager = override.HidePager
+	}
 	if override.VerticalMaxWidth != nil {
 		out.VerticalMaxWidth = override.VerticalMaxWidth
 	}
