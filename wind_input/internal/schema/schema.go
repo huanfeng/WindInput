@@ -224,7 +224,7 @@ type AutoPhraseSpec struct {
 // FreqSpec 自动调频配置
 type FreqSpec struct {
 	Enabled     bool    `yaml:"enabled"`                 // 是否启用自动调频
-	ProtectTopN int     `yaml:"protect_top_n,omitempty"` // 锁定前 N 位候选的排序位置（默认 0 不锁定）
+	ProtectTopN int     `yaml:"protect_top_n,omitempty"` // 锁定前 N 位候选的排序位置（默认 0 不锁定；仅纯码表路径生效，混输按 weight tier 重排不锁首选）
 	HalfLife    float64 `yaml:"half_life,omitempty"`     // 半衰期（小时，默认 72）
 	BoostMax    int     `yaml:"boost_max,omitempty"`     // 加成上限（默认 2000）
 	MaxRecency  float64 `yaml:"max_recency,omitempty"`   // 时间衰减峰值（默认 300）

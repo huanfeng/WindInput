@@ -25,7 +25,7 @@
   - `PunctCommit`：标点符号触发顶码上屏
   - `SingleCodeInput`：关闭前缀匹配，只做精确匹配（逐字键入模式）
   - `ShowCodeHint`：候选词显示四码编码提示
-  - `ProtectTopN`：首选保护，前 N 位锁定**系统码表**原始顺序（通过 `CompositeDict.SearchSystemOnly` 取，仅看 `LayerTypeCell+LayerTypeSystem`，跳过 user/temp/phrase 避免用户词污染肌肉记忆）
+  - `ProtectTopN`：首选保护，前 N 位锁定**系统码表**原始顺序（通过 `CompositeDict.SearchSystemOnly` 取，仅看 `LayerTypeCell+LayerTypeSystem`，跳过 user/temp/phrase 避免用户词污染肌肉记忆）。**作用域**：仅 `convertCodetableOnly` 纯码表路径（短码 < `MinPinyinLength`）生效；混输 `convertMixed`/`convertMixedOverflow` 在合并码表+拼音候选后按 weight tier 重排，**有意不保留**此锁定（方案 B 设计取舍，详见 `mixed.convertMixed` 注释）
   - `CandidateSortMode`：候选排序模式，由引擎在每次调用 `CompositeDict.Search/SearchPrefix` 时通过 `dict.SearchOptions.SortMode` 传入（**不再**经由全局 `SetSortMode`，避免多方案共享 dm 时跨方案污染）
   - `SkipShadow`：跳过引擎内部的 Shadow 应用，由外层（MixedEngine）统一处理
 - `HandleTopCode(input string)` 处理五码输入：截取前四码查找候选，剩余一码作为新输入

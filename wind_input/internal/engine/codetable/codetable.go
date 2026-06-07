@@ -43,7 +43,7 @@ type Config struct {
 	SingleCodeComplete      bool   // 精确匹配空码补全：精确匹配模式下无候选时，从更长编码中取首个候选
 	DedupCandidates         bool   // 候选去重（内部开关，未来可能开放给用户）
 	CandidateSortMode       string // 候选排序模式：frequency（词频）、natural（自然顺序）
-	ProtectTopN             int    // 首选保护：前 N 位锁定码表原始顺序
+	ProtectTopN             int    // 首选保护：前 N 位锁定码表原始顺序（仅 convertCodetableOnly 纯码表路径生效；混输按 weight tier 重排不保留，详见 mixed.convertMixed）
 	SkipShadow              bool   // 跳过 Shadow 规则应用（混输模式下由外层统一应用）
 	SkipSingleCharFreq      bool   // 单字不自动调频
 	WeightAsOrder           bool   // 权重仅表示同码内排序，前缀匹配时抹平权重差异

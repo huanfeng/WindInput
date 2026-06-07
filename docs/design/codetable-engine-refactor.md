@@ -63,6 +63,8 @@ type Config struct {
    - 应用 `CharsetPreference` 特权（如全码词组提前）。
 6. **合并、排序与截断 (Phase 5/6)**：全局排序（`Better` 或 `BetterNatural`），应用 `ProtectTopN`，返回最终页。
 
+   > **ProtectTopN 作用域（方案 B，2026-06-07）**：本节描述的是码表引擎**自身**的输出顺序，`ProtectTopN` 在此生效。但上层混输引擎（`mixed.convertMixed` / `convertMixedOverflow`）会在合并码表+拼音候选后按 weight tier 重排，且**不补救** `ProtectTopN`（它只改位置不改 weight，会被纯 weight 重排还原）。因此 `ProtectTopN` 实际仅在纯码表路径（`convertCodetableOnly`，短码 < `MinPinyinLength`）对用户可见；多码混输有意不锁首选，与顶码上屏（复用 `e.ConvertEx`，与 UI 同源）保持一致。
+
 ## 3. 实施步骤
 
 1. **配置层改造**：扩展 `codetable.Config`，实现向后兼容逻辑。修改 `gen_codetable_wdb` 支持 `HasWeight` 探测。

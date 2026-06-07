@@ -608,6 +608,7 @@ func (e *Engine) convertMixedOverflow(input string, maxCandidates int) *ConvertR
 	merged = append(merged, codetableCandidates...)
 	merged = append(merged, pinyinCandidates...)
 
+	// 同 convertMixed：有意不补做 ProtectTopN，混输按 weight tier 重排（理由见 convertMixed）。
 	sort.SliceStable(merged, func(i, j int) bool {
 		return candidate.Better(merged[i], merged[j])
 	})
@@ -774,7 +775,15 @@ func (e *Engine) convertMixed(input string, maxCandidates int) *ConvertResult {
 	merged = append(merged, pinyinCandidates...)
 	merged = append(merged, englishCandidates...)
 
-	// 按权重排序
+	// 按权重排序。
+	//
+	// 设计取舍（方案 B，2026-06-07）：此处【有意不补做】码表子引擎的 ProtectTopN（首选
+	// 保护）。子引擎 ConvertEx 内部用 applyProtectTopN 把系统码表原始 top-N 锁到固定位置，
+	// 但它只改位置、不改 weight；下面的纯 weight 重排会把它们还原回 weight 应在的位置。
+	// 与 Shadow 不同（Shadow 会在 merged 上重新 ApplyShadowPins 补救），ProtectTopN 在混输
+	// 路径不补救：混输的 tier/boost 体系（码表 +10M / phrase +1M / 拼音 0~100K）本身就是
+	// 经过设计的优先级，再叠加位置锁定会与之冲突。故 ProtectTopN 仅在 convertCodetableOnly
+	// （纯码表、短码 < MinPinyinLength）生效，多码混输不锁首选——这是有意设计，勿"修复"。
 	sort.SliceStable(merged, func(i, j int) bool {
 		return candidate.Better(merged[i], merged[j])
 	})
