@@ -507,6 +507,10 @@ func (c *Coordinator) handleArrowDown() *bridge.KeyEventResult {
 		// 当前页最后一个，跳转到下一页第一个
 		c.currentPage++
 		c.selectedIndex = 0
+		// 分级加载：翻到最后 2 页时预加载更多
+		if c.hasMoreCandidates && c.currentPage >= c.totalPages-1 {
+			c.expandCandidates()
+		}
 		c.logger.Debug("Arrow down to next page", "currentPage", c.currentPage, "selectedIndex", c.selectedIndex)
 		c.showUI()
 	}
