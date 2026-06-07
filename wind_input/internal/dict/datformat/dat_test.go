@@ -320,6 +320,43 @@ func TestWdatReader_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestWdatReader_LookupAbbrevExactNoPrefix 验证简拼查询为精确长度匹配，不展开
+// code* 前缀子树：LookupAbbrev("nh") 只返回 abbrev=="nh" 的词，不召回更长简拼
+// "nhh" 的词。锁定性能修复后的语义（旧 PrefixCollect 实现下本用例会返回 2 条而失败）。
+func TestWdatReader_LookupAbbrevExactNoPrefix(t *testing.T) {
+	w := NewWdatWriter()
+	w.AddCode("nihao", []WdatEntry{{Text: "你好", Weight: 200}})
+	w.AddAbbrev("nh", []WdatEntry{{Text: "你好", Weight: 200}})
+	w.AddAbbrev("nhh", []WdatEntry{{Text: "你好哈", Weight: 100}})
+
+	path := writeTestWdat(t, w)
+	r, err := OpenWdat(path)
+	if err != nil {
+		t.Fatalf("OpenWdat: %v", err)
+	}
+	defer r.Close()
+
+	// "nh" 只精确命中两字词，不展开到 "nhh"
+	cands := r.LookupAbbrev("nh", 0)
+	if len(cands) != 1 {
+		t.Fatalf("LookupAbbrev(nh): 精确匹配应只返回 1 条，got %d", len(cands))
+	}
+	if cands[0].Text != "你好" {
+		t.Errorf("LookupAbbrev(nh)[0] = %q, want 你好", cands[0].Text)
+	}
+
+	// 更长简拼仍能被自身精确命中
+	cands = r.LookupAbbrev("nhh", 0)
+	if len(cands) != 1 || cands[0].Text != "你好哈" {
+		t.Fatalf("LookupAbbrev(nhh): want [你好哈]，got %v", cands)
+	}
+
+	// 不存在的简拼返回空
+	if cands = r.LookupAbbrev("nx", 0); len(cands) != 0 {
+		t.Errorf("LookupAbbrev(nx): want 0, got %d", len(cands))
+	}
+}
+
 func TestWdatReader_PrefixCursor(t *testing.T) {
 	w := NewWdatWriter()
 	codes := []string{"sa", "sai", "san", "sang", "she", "shi", "shou", "si", "song", "su"}

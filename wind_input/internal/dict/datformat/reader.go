@@ -285,38 +285,25 @@ func (r *WdatReader) hotPrefixSlice(b byte, limit int) []candidate.Candidate {
 	return out
 }
 
-// LookupAbbrev 简拼查找
+// LookupAbbrev 简拼查找（精确长度匹配）。
+//
+// 简拼 code 的声母数即目标词字数（如 "nh"=2 声母→两字词），因此只做 ExactMatch，
+// 不展开 code* 前缀子树。旧实现用 PrefixCollect(code, 0) 收集整棵子树的全部叶子，
+// 对短简拼（如 "sf"）会扫描数千叶子 / 上万词条再排序截断，造成 50~100ms 卡顿；
+// 且把 "sf" 召回 "sfg"(三字) 等更长简拼词，既是噪声也不符合主流"N 声母 = N 字"语义。
+// 与 binformat DictReader.LookupAbbrev 的精确匹配行为对齐。
 func (r *WdatReader) LookupAbbrev(code string, limit int) []candidate.Candidate {
 	if !r.hasAbbrev {
 		return nil
 	}
 	dat := r.abbrevDAT()
-	leafIndices := dat.PrefixCollect(code, 0)
-
-	// 也尝试精确匹配
-	if leafIdx, found := dat.ExactMatch(code); found {
-		// 去重：精确匹配的 leafIdx 可能已在 PrefixCollect 中
-		has := false
-		for _, idx := range leafIndices {
-			if idx == leafIdx {
-				has = true
-				break
-			}
-		}
-		if !has {
-			leafIndices = append([]uint32{leafIdx}, leafIndices...)
-		}
-	}
-
-	if len(leafIndices) == 0 {
+	leafIdx, found := dat.ExactMatch(code)
+	if !found {
 		return nil
 	}
 
-	var all []candidate.Candidate
-	for _, leafIdx := range leafIndices {
-		leaf := r.readLeaf(r.abbrevLeafBase, leafIdx)
-		all = r.appendEntries(all, r.abbrevEntryBase, leaf, code)
-	}
+	leaf := r.readLeaf(r.abbrevLeafBase, leafIdx)
+	all := r.appendEntries(nil, r.abbrevEntryBase, leaf, code)
 
 	sort.Slice(all, func(i, j int) bool {
 		return candidate.Better(all[i], all[j])
