@@ -109,6 +109,6 @@ bg=#2D2D2DFF surface=#3A3A3AFF border=#404040FF text=#E0E0E0FF textDim=#B0B0B0FF
   font: size=0.0 weight=0 family=""
 
 === behavior ===
-{FontSize:18 AlwaysShowPager:false ShowPageNumber:true VerticalMaxWidth:600}
+{FontSize:18 AlwaysShowPager:false ShowPageNumber:true HidePager:false VerticalMaxWidth:600}
 
 === resources ===
