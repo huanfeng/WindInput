@@ -13,7 +13,7 @@ import (
 
 // ensureSingleInstance darwin 上恒成功 (单实例由 LaunchServices 保证)。
 // startPage / addWordParams 由命令行参数照常解析 (main 里), 这里不需要跨实例转发。
-func ensureSingleInstance(startPage string, addWordParams AddWordParams) (func(), bool) {
+func ensureSingleInstance(startPage string, addWordParams AddWordParams, protocolURL string) (func(), bool) {
 	return func() {}, true
 }
 
@@ -44,4 +44,4 @@ func quoteAS(s string) string {
 }
 
 // startIPCListener darwin 上无跨实例 IPC 需求 (单实例由系统保证), no-op。
-func startIPCListener(ctx context.Context) {}
+func startIPCListener(ctx context.Context, app *App) {}

@@ -69,6 +69,35 @@
     </div>
 
     <div class="settings-card">
+      <div class="card-title">桌面集成</div>
+      <div
+        class="setting-item"
+        data-search-anchor="advanced.protocol_association"
+      >
+        <div class="setting-info">
+          <label>关联 windinput:// 链接</label>
+          <p class="setting-hint">
+            允许从浏览器点击 windinput:// 链接一键导入主题（后续支持方案 / 词库）
+          </p>
+        </div>
+        <div class="setting-control">
+          <span v-if="protocolStatus?.managed" class="setting-hint">
+            已随应用自动注册（由系统管理）
+          </span>
+          <Button
+            v-else
+            variant="outline"
+            size="sm"
+            :disabled="protocolBusy"
+            @click="toggleProtocol(!protocolStatus?.registered)"
+          >
+            {{ protocolStatus?.registered ? "取消关联" : "启用关联" }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-card">
       <div class="card-title">日志设置</div>
       <SchemaRenderer
         :schema="advancedLogSchema"
@@ -414,6 +443,11 @@ import type {
   BackupPreview,
   RestorePreview,
   MemStatsResult,
+  ProtocolRegStatus,
+} from "../api/wails";
+import {
+  getProtocolStatus,
+  setProtocolRegistered,
 } from "../api/wails";
 import { useToast } from "../composables/useToast";
 import { Button } from "@/components/ui/button";
@@ -515,6 +549,31 @@ async function handleClearPerf() {
   }
 }
 
+// windinput:// 协议关联状态
+const protocolStatus = ref<ProtocolRegStatus | null>(null);
+const protocolBusy = ref(false);
+
+async function refreshProtocolStatus() {
+  try {
+    protocolStatus.value = await getProtocolStatus();
+  } catch (e) {
+    console.warn("Failed to get protocol status:", e);
+  }
+}
+
+async function toggleProtocol(enabled: boolean) {
+  protocolBusy.value = true;
+  try {
+    await setProtocolRegistered(enabled);
+    await refreshProtocolStatus();
+    toast(enabled ? "已关联 windinput:// 链接" : "已取消关联", "success");
+  } catch (e: any) {
+    toast(String(e?.message || e) || "操作失败", "error");
+  } finally {
+    protocolBusy.value = false;
+  }
+}
+
 onMounted(async () => {
   if (props.isWailsEnv) {
     try {
@@ -526,6 +585,7 @@ onMounted(async () => {
       console.warn("Failed to get path info:", e);
     }
     await refreshPerfStats();
+    await refreshProtocolStatus();
   }
 });
 

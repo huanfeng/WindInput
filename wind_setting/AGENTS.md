@@ -9,14 +9,18 @@
 ## Key Files
 | 文件 | 说明 |
 |------|------|
-| `main.go` | 程序入口：解析 `--page` 参数，初始化 Wails App，注册 Go 绑定 |
+| `main.go` | 程序入口：解析 `--page` / `windinput://` 协议参数，初始化 Wails App（含 `Mac.OnUrlOpen` 接收协议链接），注册 Go 绑定 |
 | `app.go` | `App` 结构体定义及生命周期（startup/shutdown），初始化各编辑器和文件监控 |
 | `app_config.go` | 配置读写 API：`GetConfig`、`SetConfigItems`（按 key 增量保存）、`ReloadConfig`、`CheckConfigModified` |
 | `app_dict.go` | 词库管理 API：短语（Phrase）、用户词库（UserDict）、Shadow 规则（pin+delete 架构），含导入/导出 |
 | `app_schema.go` | 输入方案管理 API：`GetAvailableSchemas`、`GetSchemaConfig` 等方案相关操作 |
 | `app_service.go` | 服务控制 API：`CheckServiceRunning`、`NotifyReload`、主题管理、文件变化检测 |
 | `app_tsf_log.go` | TSF 日志配置 API：`GetTSFLogConfig`、`SaveTSFLogConfig` |
-| `singleton_windows.go` / `singleton_darwin.go` | 单实例 + 原生消息框 + 跨实例 IPC：Win 用互斥锁/窗口激活；darwin 靠 .app 天然单实例(no-op), 消息框走 osascript。`ensureSingleInstance` 返回 `(release func(), ok bool)` 跨平台契约 |
+| `protocol_url.go` | `windinput://` 链接解析：`ParseProtocolURL` → `ProtocolRequest{Kind,URL,Name}`，仅接受 https，kind ∈ theme/schema/dict/extdict |
+| `protocol_handler.go` | 协议导入投递与注册开关 API：`handleProtocolURL`、`ConsumePendingProtocol`、`GetProtocolStatus`、`SetProtocolRegistered`；emit `protocol-import` 事件 + pending 冷启动缓存 |
+| `protocol_register_windows.go` / `protocol_register_darwin.go` | 协议注册：Win 写/删/自愈 `HKCU\Software\Classes\windinput`（`RegisterProtocol`/`UnregisterProtocol`/`ProtocolStatus`/`SelfHealProtocol`）；darwin 声明式托管(no-op)，`protocolManagedBySystem` 区分 |
+| `app_theme.go` | 主题导入 API：`ImportThemeFromFile/URL/Text`、`PreviewThemeFromURL`（下载解析 meta 不落盘，供 URL schema 确认框） |
+| `singleton_windows.go` / `singleton_darwin.go` | 单实例 + 原生消息框 + 跨实例 IPC：Win 用互斥锁/窗口激活；darwin 靠 .app 天然单实例(no-op), 消息框走 osascript。`ensureSingleInstance(startPage, addWordParams, protocolURL)` 返回 `(release func(), ok bool)` 跨平台契约；IPC 消息支持 `add-word\|...` 与 `protocol\|<url>`；`startIPCListener(ctx, *App)` |
 | `open_windows.go` / `open_darwin.go` | `shellOpen`(打开文件/URL)：Win 用 ShellExecuteW, darwin 用 `open` 命令 |
 | `wails.json` | Wails 项目配置，前端包管理器为 pnpm; `frontend:build` 用 `pnpm exec vite build`(跳过 vue-tsc 严格门禁) |
 | `go.mod` | Go 模块：`wind_setting`，依赖 `wind_input`（本地 replace）和 `wailsapp/wails/v2 v2.11.0` |

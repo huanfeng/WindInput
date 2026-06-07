@@ -10,6 +10,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	wailsMac "github.com/wailsapp/wails/v2/pkg/options/mac"
 	wailsWindows "github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
@@ -85,6 +86,16 @@ func parseAddWordParams() AddWordParams {
 	return params
 }
 
+// parseProtocolArg 从命令行参数中找出 windinput:// 协议链接（Windows 主路径）。
+func parseProtocolArg() string {
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(strings.ToLower(arg), "windinput://") {
+			return arg
+		}
+	}
+	return ""
+}
+
 func main() {
 	// 解析启动页面参数（需在单例检查前解析，以便发送给已有实例）
 	startPage := parseStartPage()
@@ -95,9 +106,12 @@ func main() {
 		addWordParams = parseAddWordParams()
 	}
 
+	// 解析协议链接参数（windinput://...，需在单例检查前解析以便透传给已有实例）
+	protocolURL := parseProtocolArg()
+
 	// 单例检查：如果已有实例在运行，发送页面参数、激活其窗口并退出
 	// (darwin 上由 LaunchServices 保证单实例, ensureSingleInstance 恒成功)
-	releaseInstance, ok := ensureSingleInstance(startPage, addWordParams)
+	releaseInstance, ok := ensureSingleInstance(startPage, addWordParams, protocolURL)
 	if !ok {
 		return
 	}
@@ -107,6 +121,7 @@ func main() {
 	app := NewApp()
 	app.startPage = startPage
 	app.addWordParams = addWordParams
+	app.protocolURL = protocolURL
 
 	// 加词对话框模式使用较小的窗口
 	winWidth := 800
@@ -141,6 +156,12 @@ func main() {
 			WindowIsTranslucent:  false,
 			DisableWindowIcon:    false,
 			WebviewUserDataPath:  filepath.Join(os.TempDir(), "wind_setting"),
+		},
+		Mac: &wailsMac.Options{
+			// macOS 经 Apple Events 投递 windinput:// 链接（不走 os.Args）
+			OnUrlOpen: func(url string) {
+				app.handleProtocolURL(url)
+			},
 		},
 	})
 

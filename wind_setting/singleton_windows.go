@@ -49,7 +49,7 @@ func navigateFilePath() string {
 // the existing window, and returns false.
 // 返回 (release, ok)。ok=false 表示已有实例在运行 (本进程应退出); ok=true 时
 // release 用于退出前释放互斥锁 (跨平台统一契约, darwin 见 singleton_darwin.go)。
-func ensureSingleInstance(startPage string, addWordParams AddWordParams) (func(), bool) {
+func ensureSingleInstance(startPage string, addWordParams AddWordParams, protocolURL string) (func(), bool) {
 	name, _ := windows.UTF16PtrFromString(mutexName)
 	handle, err := windows.CreateMutex(nil, false, name)
 	if err == windows.ERROR_ALREADY_EXISTS {
@@ -64,6 +64,10 @@ func ensureSingleInstance(startPage string, addWordParams AddWordParams) (func()
 			} else {
 				sendPageToExisting(startPage)
 			}
+		}
+		// 协议导入：发送 "protocol|<rawURL>" 给已有实例
+		if protocolURL != "" {
+			sendPageToExisting("protocol|" + protocolURL)
 		}
 		if !activateExistingWindow() {
 			// 互斥锁存在说明进程还活着，但窗口始终找不到（可能正在启动或已挂起）
@@ -118,7 +122,7 @@ func sendPageToExisting(page string) {
 // startIPCListener creates a named event and waits for signals from new
 // instances. When signaled, reads the page name from the temp file and
 // emits a Wails "navigate" event to the frontend.
-func startIPCListener(ctx context.Context) {
+func startIPCListener(ctx context.Context, app *App) {
 	evtName, _ := windows.UTF16PtrFromString(eventName)
 	// auto-reset event (manualReset=0), initial state not signaled (initialState=0)
 	evtHandle, _ := windows.CreateEvent(nil, 0, 0, evtName)
@@ -151,6 +155,14 @@ func startIPCListener(ctx context.Context) {
 
 				raw := strings.TrimSpace(string(data))
 				log.Printf("[singleton] 收到导航请求: %q", raw)
+
+				// 协议导入格式: "protocol|<rawURL>"
+				if strings.HasPrefix(raw, "protocol|") {
+					url := strings.TrimPrefix(raw, "protocol|")
+					app.handleProtocolURL(url)
+					log.Printf("[singleton] 已处理协议导入请求")
+					continue
+				}
 
 				// 支持加词参数格式: "add-word|text|code|schema"
 				if strings.HasPrefix(raw, "add-word|") {

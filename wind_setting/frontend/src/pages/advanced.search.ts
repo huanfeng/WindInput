@@ -10,6 +10,17 @@ const tabLabel = "高级";
 export const entries: SearchEntry[] = [
   ...schemaToEntries(advancedLogSchema, { tab, tabLabel, card: "日志设置" }),
   ...schemaToEntries(advancedPerfSchema, { tab, tabLabel, card: "性能诊断" }),
+  // ── 桌面集成 ──
+  {
+    id: "advanced.protocol_association",
+    tab,
+    tabLabel,
+    card: "桌面集成",
+    title: "关联 windinput:// 链接",
+    hint: "允许从浏览器点击 windinput:// 链接一键导入主题",
+    anchor: "advanced.protocol_association",
+    keywords: ["windinput", "协议", "链接", "schema", "url", "导入", "主题"],
+  },
   // ── 手写控件（tsfLogConfig 独立 prop，非 formData）──
   {
     id: "advanced.tsf_log_mode",

@@ -122,3 +122,11 @@ func TestImportThemeToDir_ForceOverwriteExistingDir(t *testing.T) {
 		t.Errorf("不应新建 slug 目录 %q", slug)
 	}
 }
+
+func TestParseThemePreviewMeta(t *testing.T) {
+	yaml := "meta:\n  name: 暗夜\n  author: 张三\n  version: \"1.2\"\n"
+	name, author, version := parseThemePreviewMeta([]byte(yaml))
+	if name != "暗夜" || author != "张三" || version != "1.2" {
+		t.Errorf("got %q/%q/%q", name, author, version)
+	}
+}

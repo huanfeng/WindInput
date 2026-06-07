@@ -44,6 +44,11 @@ import AdvancedPage from "./pages/AdvancedPage.vue";
 import StatsPage from "./pages/StatsPage.vue";
 import AboutPage from "./pages/AboutPage.vue";
 import AddWordPage from "./pages/AddWordPage.vue";
+import ProtocolImportDialog from "./components/ProtocolImportDialog.vue";
+import {
+  consumePendingProtocol,
+  type ProtocolImportPayload,
+} from "./api/wails";
 import type { AddWordParams } from "./api/wails";
 import SettingsSearch from "./components/SettingsSearch.vue";
 import { useSettingsSearch } from "./composables/useSettingsSearch";
@@ -111,6 +116,7 @@ watch(activeTab, () => {
 });
 const addWordParams = ref<AddWordParams | null>(null);
 const showAddWordDialog = ref(false);
+const protocolPayload = ref<ProtocolImportPayload | null>(null);
 const isStandaloneAddWord = ref(false); // 独立加词窗口模式（无设置主界面）
 const hotkeyConflicts = ref<string[]>([]);
 const serviceDisconnected = ref(false); // 服务未运行弹框
@@ -798,6 +804,23 @@ onMounted(async () => {
       } catch {}
     });
 
+    // 监听协议导入事件（windinput://，从 IPC 透传或 mac.OnUrlOpen）
+    EventsOn("protocol-import", (payload: ProtocolImportPayload) => {
+      protocolPayload.value = payload;
+      try {
+        Show();
+      } catch {}
+    });
+    // 冷启动兜底：主动拉取早于 EventsOn 到达的协议请求
+    consumePendingProtocol().then((p) => {
+      if (p) {
+        protocolPayload.value = p;
+        try {
+          Show();
+        } catch {}
+      }
+    });
+
     // 监听系统外观变化, 跟随系统模式下刷新主题预览
     systemDarkMql?.addEventListener("change", handleSystemThemeChange);
   }
@@ -807,6 +830,7 @@ onUnmounted(() => {
   offConfigEvent();
   EventsOff("navigate");
   EventsOff("navigate-addword");
+  EventsOff("protocol-import");
   systemDarkMql?.removeEventListener("change", handleSystemThemeChange);
 });
 </script>
@@ -822,6 +846,12 @@ onUnmounted(() => {
       :initialSchema="addWordParams?.schema_id"
       :standalone="isStandaloneAddWord"
       @close="handleAddWordClose"
+    />
+
+    <!-- 协议导入确认框（windinput://） -->
+    <ProtocolImportDialog
+      :payload="protocolPayload"
+      @close="protocolPayload = null"
     />
 
     <aside v-show="!isStandaloneAddWord" class="sidebar">

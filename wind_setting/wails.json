@@ -15,6 +15,13 @@
     "copyright": "Copyright © 2026 清风输入法",
     "comments": "清风输入法设置工具",
     "productVersion": "0.0.0",
-    "productName": "清风输入法开发版 设置"
+    "productName": "清风输入法开发版 设置",
+    "protocols": [
+      {
+        "scheme": "windinput",
+        "description": "清风输入法协议",
+        "role": "Viewer"
+      }
+    ]
   }
 }

@@ -995,6 +995,12 @@ install_standard_mode:
   DetailPrint "正在配置开机自启动..."
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "WindInput" '"$INSTDIR\wind_input.exe"'
 
+  ; --- Step 9b: Register windinput:// URL protocol (HKCU, 装完即用) ---
+  DetailPrint "正在注册 windinput:// 协议..."
+  WriteRegStr HKCU "Software\Classes\windinput" "" "URL:清风输入法协议"
+  WriteRegStr HKCU "Software\Classes\windinput" "URL Protocol" ""
+  WriteRegStr HKCU "Software\Classes\windinput\shell\open\command" "" '"$INSTDIR\wind_setting.exe" "%1"'
+
   ; --- Step 9: Pre-start service (background, so dictionary can be pre-loaded) ---
   ; 预启动前等待 data\schemas 目录可枚举：覆盖安装时 Defender 实时扫描 + 旧进程 mmap 回收
   ; 可能让新写入的 schemas 短时间内被其他进程看到 PATH_NOT_FOUND，造成服务卡在 initializing。
@@ -1236,6 +1242,8 @@ uninst_skip_userdata:
   ; --- Step 7: Registry ---
   ; Remove auto-start entry
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "WindInput"
+  ; Remove windinput:// URL protocol registration
+  DeleteRegKey HKCU "Software\Classes\windinput"
   DeleteRegKey HKLM "${UNINST_KEY}"
   IfRebootFlag 0 uninst_done
     IfSilent uninst_done 0

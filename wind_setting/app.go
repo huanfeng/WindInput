@@ -32,6 +32,14 @@ type App struct {
 
 	// themeServer 在线主题编辑 HTTP 服务（开关由前端控制）
 	themeServer *ThemeServer
+
+	// pendingProtocol 缓存冷启动/早于前端就绪时收到的协议导入请求，
+	// 由前端 onMounted 调 ConsumePendingProtocol 拉取（消除 emit 早于 EventsOn 的竞争）。
+	pendingProtocol *ProtocolImportPayload
+	pendingMu       sync.Mutex
+
+	// protocolURL 是 Windows 冷启动时从 os.Args 解析出的协议链接，在 startup 中处理。
+	protocolURL string
 }
 
 // NewApp creates a new App application struct
@@ -75,8 +83,16 @@ func (a *App) IsDebugVariant() bool {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
+	// 自愈注册 windinput:// 协议（Windows 写 HKCU；macOS 为 no-op）
+	SelfHealProtocol()
+
+	// 处理 Windows 冷启动经 os.Args 传入的协议链接（macOS 走 mac.OnUrlOpen）
+	if a.protocolURL != "" {
+		a.handleProtocolURL(a.protocolURL)
+	}
+
 	// 启动 IPC 监听，接收其他实例的页面切换请求
-	startIPCListener(ctx)
+	startIPCListener(ctx, a)
 
 	// 启动事件监听
 	go a.startEventListener()

@@ -1328,3 +1328,43 @@ export async function stopThemeServer(): Promise<void> {
 export async function getThemeServerStatus(): Promise<ThemeServerStatus> {
   return (window as any).go.main.App.GetThemeServerStatus();
 }
+
+// ===== URL Schema 协议导入 =====
+export interface ProtocolRequest {
+  kind: string;
+  url: string;
+  name?: string;
+}
+export interface ProtocolImportPayload {
+  ok: boolean;
+  error?: string;
+  request?: ProtocolRequest;
+}
+export interface ProtocolRegStatus {
+  registered: boolean;
+  command: string;
+  managed: boolean;
+}
+export interface ThemeURLPreview {
+  ok: boolean;
+  name: string;
+  author: string;
+  version: string;
+  description: string;
+  source_url: string;
+  yaml: string;
+  error_msg: string;
+}
+
+export function consumePendingProtocol(): Promise<ProtocolImportPayload | null> {
+  return (window as any).go.main.App.ConsumePendingProtocol();
+}
+export function getProtocolStatus(): Promise<ProtocolRegStatus> {
+  return (window as any).go.main.App.GetProtocolStatus();
+}
+export function setProtocolRegistered(enabled: boolean): Promise<void> {
+  return (window as any).go.main.App.SetProtocolRegistered(enabled);
+}
+export function previewThemeFromURL(url: string): Promise<ThemeURLPreview> {
+  return (window as any).go.main.App.PreviewThemeFromURL(url);
+}

@@ -79,6 +79,60 @@ func (a *App) ImportThemeFromURL(rawURL string, force bool) ImportThemeResult {
 	return importThemeFromContent(content, force)
 }
 
+// ThemeURLPreview 主题 URL 预览结果（确认框展示用）。
+// YAML 字段回传原始内容，确认导入时走 ImportThemeFromText，避免二次下载。
+type ThemeURLPreview struct {
+	OK          bool   `json:"ok"`
+	Name        string `json:"name"`
+	Author      string `json:"author"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+	SourceURL   string `json:"source_url"`
+	YAML        string `json:"yaml"`
+	ErrorMsg    string `json:"error_msg"`
+}
+
+// parseThemePreviewMeta 从 YAML 内容提取 meta 字段（不校验完整性）。
+func parseThemePreviewMeta(content []byte) (name, author, version string) {
+	var t theme.Theme
+	if err := yaml.Unmarshal(content, &t); err != nil {
+		return "", "", ""
+	}
+	return t.Meta.Name, t.Meta.Author, t.Meta.Version
+}
+
+// PreviewThemeFromURL 下载并解析主题 meta（不落盘），供 URL schema 确认框展示。
+func (a *App) PreviewThemeFromURL(rawURL string) ThemeURLPreview {
+	rawURL = strings.TrimSpace(rawURL)
+	if !strings.HasPrefix(rawURL, "https://") {
+		return ThemeURLPreview{ErrorMsg: "仅支持 https 链接"}
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(rawURL) //nolint:noctx
+	if err != nil {
+		return ThemeURLPreview{ErrorMsg: "下载失败: " + err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ThemeURLPreview{ErrorMsg: fmt.Sprintf("下载失败，服务器返回 %d", resp.StatusCode)}
+	}
+	const maxSize = 1 << 20
+	content, err := io.ReadAll(io.LimitReader(resp.Body, maxSize))
+	if err != nil {
+		return ThemeURLPreview{ErrorMsg: "读取内容失败: " + err.Error()}
+	}
+	name, author, version := parseThemePreviewMeta(content)
+	if name == "" {
+		return ThemeURLPreview{ErrorMsg: "主题缺少 meta.name 或格式错误"}
+	}
+	var t theme.Theme
+	_ = yaml.Unmarshal(content, &t)
+	return ThemeURLPreview{
+		OK: true, Name: name, Author: author, Version: version,
+		Description: t.Meta.Description, SourceURL: rawURL, YAML: string(content),
+	}
+}
+
 // ImportThemeFromText 校验并导入粘贴的 YAML 文本内容。
 // force=true 时覆盖同名主题。
 func (a *App) ImportThemeFromText(yamlContent string, force bool) ImportThemeResult {
