@@ -233,11 +233,10 @@ func (e *Engine) HandleEmptyCode(input string) (shouldClear bool, toEnglish bool
 // HandleTopCode 处理顶码
 // 混输模式下：先检查前 maxCodeLen 码是否构成合法拼音序列，
 // 若是则抑制顶码（用户可能在输入拼音，如 yans→yan+se=颜色）；
-// 若不是合法拼音（如 rcqn）则走完整候选流水线后应用 Shadow 规则再取首选上屏。
+// 若不是合法拼音（如 rcqn）则走与 UI 相同的转换路径取首选上屏。
 //
-// 注意：不能直接委托 codetableEngine.HandleTopCode，因为码表子引擎在混输模式下
-// 设置了 SkipShadow=true，其 ConvertEx 会跳过 Phase 6，导致用户通过候选调整
-// 置顶的词条（Shadow pin）无法生效，顶码上屏的仍是原始首候选而非调整后首候选。
+// 关键：顶码上屏的首候选必须与用户看到的候选框首选严格一致，因此直接复用
+// e.ConvertEx（UI 同款入口），而非委托 codetableEngine 或手工重排。详见下方实现注释。
 func (e *Engine) HandleTopCode(input string) (commitText string, newInput string, shouldCommit bool) {
 	if len(input) <= e.maxCodeLen {
 		return "", input, false
@@ -266,31 +265,28 @@ func (e *Engine) HandleTopCode(input string) (commitText string, newInput string
 		return "", input, false
 	}
 
-	// 取前 N 码，获取全量候选（maxCandidates=0 不截断），再由本层应用 Shadow
+	// 取前 N 码，走与 UI 展示完全相同的转换路径（e.ConvertEx），确保顶码上屏的
+	// 首候选 == 用户输入该前缀时候选框看到的首候选。
+	//
+	// 不能直接用 codetableEngine.ConvertEx 的输出顺序：码表子引擎 ConvertEx 在最终
+	// 排序后会用 applyProtectTopN 把"系统码表原始 top-N"回填到固定位置（保护五笔
+	// 肌肉记忆），覆盖按 weight 的排序；而 UI 的 convertMixed 路径在合并 +10M boost
+	// 后重新按 weight 排序，破坏了 ProtectTopN。两条路径首候选不同。手工补排也不行
+	// （缺少 boost/phrase tier/拼音合并，edge case 仍会与 UI 漂移）。复用 e.ConvertEx
+	// 让顶码与 UI 走同一函数，自动对齐 boost/tier/ProtectTopN/Shadow。
+	//
+	// prefix 长度恒等于 maxCodeLen，ConvertEx 分支必然落到 convertMixed（2~maxCodeLen
+	// 码），即用户输入到第 maxCodeLen 码时候选框所展示的同一结果。
 	prefix := input[:e.maxCodeLen]
-	result := e.codetableEngine.ConvertEx(prefix, 0)
-	e.logger.Debug("HandleTopCode", "prefix", prefix, "candidates", len(result.Candidates))
-
-	if len(result.Candidates) == 0 {
+	convResult := e.ConvertEx(prefix, 0)
+	if len(convResult.Candidates) == 0 {
 		e.logger.Debug("HandleTopCode: no candidates found", "prefix", prefix)
 		return "", input, false
 	}
 
-	candidates := result.Candidates
-	// 应用 Shadow 规则（置顶/删除），与 convertCodetableOnly 保持一致
-	if e.dictManager != nil {
-		if shadowLayer := e.dictManager.GetShadowProvider(); shadowLayer != nil {
-			rules := shadowLayer.GetShadowRules(prefix)
-			candidates = dict.ApplyShadowPins(candidates, rules)
-		}
-	}
-
-	if len(candidates) == 0 {
-		return "", input, false
-	}
-
-	e.logger.Debug("HandleTopCode commit", "commit", candidates[0].Text, "newInput", input[e.maxCodeLen:])
-	return candidates[0].Text, input[e.maxCodeLen:], true
+	commitText = convResult.Candidates[0].Text
+	e.logger.Debug("HandleTopCode commit", "commit", commitText, "newInput", input[e.maxCodeLen:])
+	return commitText, input[e.maxCodeLen:], true
 }
 
 // isPossiblePinyinSequence 判断输入是否构成合法的拼音序列。
