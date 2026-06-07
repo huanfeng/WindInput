@@ -120,6 +120,7 @@ export interface UIConfig {
   preedit_mode: PreeditModeValue;
   hide_candidate_window: boolean;
   candidate_layout: CandidateLayoutValue;
+  flip_layout_when_above: boolean;
   mode_accent_border: boolean;
   status_indicator: StatusIndicatorConfig;
   theme: string;
@@ -393,6 +394,7 @@ export function getDefaultConfig(): Config {
       preedit_mode: "top",
       hide_candidate_window: false,
       candidate_layout: "horizontal",
+      flip_layout_when_above: true,
       mode_accent_border: false,
       status_indicator: {
         enabled: true,

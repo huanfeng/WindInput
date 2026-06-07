@@ -84,6 +84,12 @@ export const candidateWindowSchema: PageSchema = [
   },
   {
     type: "toggle",
+    key: "ui.flip_layout_when_above",
+    label: "上方显示时反转布局",
+    hint: "候选窗显示在光标上方时，将预编辑栏移至底部，竖排模式下首候选同步移至底部，使最相关内容始终靠近光标",
+  },
+  {
+    type: "toggle",
     key: "ui.mode_accent_border",
     label: "模式彩色边框",
     hint: "临时拼音、快捷输入等特殊模式下，候选窗口显示彩色边框指示",
