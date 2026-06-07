@@ -41,6 +41,7 @@ ui:
   status_indicator_duration: 800
   status_indicator_offset_x: 0
   status_indicator_offset_y: 0
+  flip_layout_when_above: true
   tooltip_delay: 200
   theme: "default"
   theme_style: "system"

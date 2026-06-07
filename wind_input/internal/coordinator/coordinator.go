@@ -686,6 +686,8 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 		c.uiManager.SetCandidateIndexLabels(cfg.UI.CandidateIndexLabels)
 		// Set preedit display mode
 		c.uiManager.SetPreeditMode(cfg.UI.PreeditMode)
+		// 候选窗在光标上方时反转 bands（与 UpdateUIConfig 热更新对称；启动时遗漏则需热更新才能生效）
+		c.uiManager.SetFlipLayoutWhenAbove(cfg.UI.FlipLayoutWhenAbove)
 		// 翻页器显示方式覆盖（与 UpdateUIConfig 热更新对称；此处遗漏会导致用户的
 		// never/always 设置在启动后失效，直到下一次配置热更新才生效）
 		c.uiManager.SetPagerDisplayMode(cfg.UI.PagerDisplayMode)

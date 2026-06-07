@@ -410,10 +410,11 @@ func (r *Renderer) buildCandidateItem(cand Candidate, sel, hov bool, st *candIte
 // buildHorizontalCandidateTree 构建横排候选窗 View 树。
 // candWindowTree 是构建结果：窗口根 + 命中测试所需的关键 View。
 type candWindowTree struct {
-	root      *View
-	items     []*View // 与 candidates 一一对应
-	pagerUp   *View   // nil = 无翻页上键 / 不可用
-	pagerDown *View
+	root          *View
+	items         []*View // 与 candidates 一一对应（原始顺序，用于命中检测）
+	pagerUp       *View   // nil = 无翻页上键 / 不可用
+	pagerDown     *View
+	candidateList *View // 竖排时指向候选列表 View，上方翻转时反转其 Children；横排为 nil
 }
 
 // (x,y) 由调用方在 Layout 时给定；本函数只描述结构与样式。

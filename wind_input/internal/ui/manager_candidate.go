@@ -135,6 +135,13 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	// even before WM_DPICHANGED is received by our windows.
 	UpdateEffectiveDPIFromPoint(caretX, caretY)
 
+	// 注入当前「是否在光标上方」状态，供 build 函数在 flip 模式下反转 bands 排列。
+	// 使用 currentStickyAbove（本帧渲染前捕获）：已在上方的帧直接以正确方向渲染；
+	// 刚切换到上方的首帧在下方位置计算后再做一次二次渲染（见下方 showAbove 逻辑）。
+	if m.renderer != nil {
+		m.renderer.SetIsAbove(currentStickyAbove)
+	}
+
 	// Render first to get actual window size (with hover highlight)
 	m.logger.Debug("Rendering candidates...", "hoverIndex", hoverIndex, "hoverPageBtn", hoverPageBtn, "selectedIndex", selectedIndex)
 	img, renderResult := m.renderer.RenderCandidates(candidates, input, cursorPos, page, totalPages, hoverIndex, hoverPageBtn, selectedIndex)
@@ -231,6 +238,19 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 			m.stickyAbove = true
 			m.mu.Unlock()
 			m.logger.Debug("Set sticky state to above")
+
+			// 首次切换到上方：若 flip 模式开启，以正确方向做一次二次渲染。
+			// 尺寸不变（bands 内容相同，仅顺序不同），位置无需重算，仅更新 img 和 hitRects。
+			if m.renderer != nil && m.renderer.config.FlipWhenAbove {
+				m.renderer.SetIsAbove(true)
+				img, renderResult = m.renderer.RenderCandidates(candidates, input, cursorPos, page, totalPages, hoverIndex, hoverPageBtn, selectedIndex)
+				m.logger.Debug("Re-rendered with flipped layout (above)")
+				// 同步更新 hit rects（候选项位置已随 flip 变化）
+				if renderResult != nil {
+					m.window.SetHitRects(renderResult.Rects)
+					m.window.SetPageRects(renderResult.PageUpRect, renderResult.PageDownRect)
+				}
+			}
 		}
 	}
 

@@ -227,7 +227,7 @@ func (r *Renderer) buildVerticalCandidateTree(
 		rowH:             rowH,
 		stretch:          true, // 竖排：每行全宽
 	}
-	items := make([]*View, 0, len(candidates))
+	items := make([]*View, len(candidates))
 	for i, cand := range candidates {
 		sel, hov := i == selectedIndex, i == hoverIndex
 		// 截断预算：targetW 内扣除左偏移(effLeft + 序号列) + 右 padding + 注释。
@@ -239,9 +239,13 @@ func (r *Renderer) buildVerticalCandidateTree(
 		if commentWidths[i] > 0 {
 			availText -= float64(commentMarginLeft) + commentWidths[i]
 		}
-		items = append(items, r.buildCandidateItem(cand, sel, hov, st, availText, scale, sc))
+		items[i] = r.buildCandidateItem(cand, sel, hov, st, availText, scale, sc)
 	}
-	list := &View{Layout: LayoutColumn, Stretch: true, Gap: scD(rv.RowGap), Children: items} // 纵向行间距 = candidate_list.row_gap（默认 0=紧贴）
+	// listChildren 独立切片：renderTree 的 flipTreeIfAbove 会就地反转此切片，
+	// 不能直接用 items（否则 items 原始顺序被破坏，命中检测下标错位）。
+	listChildren := make([]*View, len(items))
+	copy(listChildren, items)
+	list := &View{Layout: LayoutColumn, Stretch: true, Gap: scD(rv.RowGap), Children: listChildren} // 纵向行间距 = candidate_list.row_gap（默认 0=紧贴）
 
 	// ---- band 列表 ----
 	bands := make([]*View, 0, 3)
@@ -263,7 +267,6 @@ func (r *Renderer) buildVerticalCandidateTree(
 			Children: pagerChildren,
 		})
 	}
-
 	window := &View{
 		Layout:     LayoutColumn,
 		CrossAlign: AlignCenter, // 让底部翻页行水平居中
@@ -275,5 +278,5 @@ func (r *Renderer) buildVerticalCandidateTree(
 		Children:   bands,
 	}
 	r.appendThemeLayers(window, rv.Window.Layers, sc) // P7-C：窗口装饰层（水印等）
-	return &candWindowTree{root: window, items: items, pagerUp: pagerUp, pagerDown: pagerDown}
+	return &candWindowTree{root: window, items: items, pagerUp: pagerUp, pagerDown: pagerDown, candidateList: list}
 }

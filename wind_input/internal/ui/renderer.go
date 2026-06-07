@@ -41,6 +41,11 @@ type RenderConfig struct {
 	BackgroundMode    string // nine_slice | stretch | tile | center
 	BackgroundSlice   theme.Padding
 	BackgroundOpacity float64
+
+	// FlipWhenAbove 在候选窗位于光标上方时反转 bands 排列顺序，使 preedit 保持最靠近光标。
+	FlipWhenAbove bool
+	// IsAbove 当前渲染帧候选窗是否在光标上方（由 Manager 在 doShowCandidates 中按帧注入）。
+	IsAbove bool
 }
 
 // DefaultRenderConfig returns default rendering configuration with DPI scaling
@@ -369,6 +374,16 @@ func (r *Renderer) SetHidePreedit(hide bool) {
 // SetPreeditMode sets the preedit display mode ("top" or "embedded")
 func (r *Renderer) SetPreeditMode(mode config.PreeditMode) {
 	r.config.PreeditMode = mode
+}
+
+// SetFlipWhenAbove 设置候选窗在光标上方时是否反转 bands 排列顺序。
+func (r *Renderer) SetFlipWhenAbove(flip bool) {
+	r.config.FlipWhenAbove = flip
+}
+
+// SetIsAbove 设置当前帧候选窗是否位于光标上方（由 Manager 在每次渲染前注入）。
+func (r *Renderer) SetIsAbove(above bool) {
+	r.config.IsAbove = above
 }
 
 // SetCmdbarPrefix 设置副作用 cmdbar 候选的渲染前缀符号。空字符串=不显示前缀。

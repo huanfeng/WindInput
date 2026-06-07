@@ -110,11 +110,32 @@ func (r *Renderer) renderVerticalV2(
 	return r.renderTree(tree)
 }
 
+// flipTreeIfAbove 在 renderTree 前统一处理上方翻转：反转 bands 顺序（preedit 移至底部）、
+// 以及竖排候选项顺序（首候选在底部，最靠近光标）。横排 candidateList 为 nil，跳过项级翻转。
+// 在 Layout 前调用，此时 View 的 Rect 尚未填充，仅修改 Children 顺序。
+func (r *Renderer) flipTreeIfAbove(tree *candWindowTree) {
+	ch := tree.root.Children
+	for i, j := 0, len(ch)-1; i < j; i, j = i+1, j-1 {
+		ch[i], ch[j] = ch[j], ch[i]
+	}
+	if tree.candidateList != nil {
+		cl := tree.candidateList.Children
+		for i, j := 0, len(cl)-1; i < j; i, j = i+1, j-1 {
+			cl[i], cl[j] = cl[j], cl[i]
+		}
+	}
+}
+
 // renderTree 对已构建的候选窗 View 树执行布局 → 绘制 → 命中矩形提取。
 // 有 blur/spread 时四向扩展画布以容纳模糊扩散；否则仅右下留出偏移空间（向后兼容）。
 func (r *Renderer) renderTree(tree *candWindowTree) (*image.RGBA, *RenderResult) {
 	td := r.textDrawer
 	root := tree.root
+
+	// 上方翻转：在 Layout 前调整 bands 和候选项顺序，覆盖所有渲染路径（含 coly/快捷输入）。
+	if r.config.IsAbove && r.config.FlipWhenAbove {
+		r.flipTreeIfAbove(tree)
+	}
 
 	// 先计算阴影四向 margin，再以 (marginLeft, marginTop) 为起点 layout。
 	marginLeft, marginTop, marginRight, marginBottom := shadowMargins(root.Shadow)

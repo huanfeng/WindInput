@@ -215,6 +215,11 @@ type UIConfig struct {
 
 	PreeditMode PreeditMode `yaml:"preedit_mode" json:"preedit_mode"` // 编码显示模式："top"（默认，编码在上方独立行）, "embedded"（嵌入候选行前）；仅 InlinePreedit=false 时生效
 
+	// FlipLayoutWhenAbove 候选窗在光标上方时反转 bands 排列顺序，使预编辑栏保持最靠近光标。
+	// true（默认，由 data/config.yaml 设置）：上方模式下 preedit 在底部，首候选紧贴光标；
+	// false：保持旧行为（preedit 在顶部）。
+	FlipLayoutWhenAbove bool `yaml:"flip_layout_when_above" json:"flip_layout_when_above"`
+
 	Tooltip TooltipConfig `yaml:"tooltip" json:"tooltip"` // 候选悬停提示配置
 
 	// 文本渲染设置

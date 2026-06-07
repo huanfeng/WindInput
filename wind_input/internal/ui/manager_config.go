@@ -239,6 +239,14 @@ func (m *Manager) SetTextRenderMode(mode config.FontEngine) {
 	m.logger.Info("Text render mode updated", "mode", mode)
 }
 
+// SetFlipLayoutWhenAbove 设置候选窗在光标上方时是否反转 bands 排列顺序。
+func (m *Manager) SetFlipLayoutWhenAbove(flip bool) {
+	if m.renderer != nil {
+		m.renderer.SetFlipWhenAbove(flip)
+		m.logger.Info("Flip layout when above updated", "flip", flip)
+	}
+}
+
 // SetHidePreedit 设置是否隐藏预编辑区域
 func (m *Manager) SetHidePreedit(hide bool) {
 	if m.renderer != nil {
