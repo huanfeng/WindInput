@@ -73,6 +73,9 @@
                   currentImportFormat.example
                 }}</pre>
               </div>
+              <p v-if="importFormat !== 'zip'" class="ie-encoding-hint">
+                文件须以 UTF-8 编码保存
+              </p>
             </div>
 
             <!-- Step 2: 预览确认 -->
@@ -931,6 +934,13 @@ async function doExport() {
   color: hsl(var(--foreground));
   max-height: 100px;
   overflow-y: auto;
+}
+
+/* ===== 编码提示 ===== */
+.ie-encoding-hint {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  margin: 6px 0 0;
 }
 
 /* ===== 预览信息 ===== */
