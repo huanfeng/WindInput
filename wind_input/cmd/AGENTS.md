@@ -15,7 +15,7 @@
 | Directory | Purpose |
 |-----------|---------|
 | `service/` | 主服务进程（输入法后端） (see `service/AGENTS.md`) |
-| `gen_bindict/` | 从 Rime 词库生成 `pinyin.wdb` 和 `unigram.wdb` (see `gen_bindict/AGENTS.md`) |
+| `gen_bindict/` | 生成 `unigram.wdb`（拼音词库已改用运行时构建的 DAT）(see `gen_bindict/AGENTS.md`) |
 | `gen_codetable_wdb/` | 将五笔 Rime `.dict.yaml` 码表转换为 `codetable.wdb` 二进制格式 (see `gen_codetable_wdb/AGENTS.md`) |
 | `gen_unigram/` | 从 Rime `.dict.yaml` 提取词频，输出 `unigram.txt` (see `gen_unigram/AGENTS.md`) |
 | `test_codetable/` | 码表调试工具，测试码表查询和顶码行为 (see `test_codetable/AGENTS.md`) |

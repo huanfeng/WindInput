@@ -11,20 +11,16 @@ import (
 	"strings"
 
 	"github.com/huanfeng/wind_input/internal/candidate"
-	"github.com/huanfeng/wind_input/internal/dict/binformat"
 	"github.com/huanfeng/wind_input/internal/dict/datformat"
 )
 
 // PinyinDict 拼音专用词库（基于 Trie 索引或 mmap 二进制文件）
-// 支持从 Rime dict.yaml 格式或预编译的 .wdb 二进制格式加载
+// 支持从 Rime dict.yaml 格式或预编译的 .wdat（DAT）二进制格式加载
 type PinyinDict struct {
 	logger     *slog.Logger
 	trie       *Trie // Trie 索引，用于精确和前缀搜索（YAML 模式）
 	abbrevTrie *Trie // 简拼索引（声母首字母 → 词条），用于简拼词组匹配（YAML 模式）
 	entryCount int
-
-	// 二进制模式（mmap）
-	binReader *binformat.DictReader
 
 	// DAT 模式（mmap）
 	datReader *datformat.WdatReader
@@ -78,24 +74,6 @@ func (d *PinyinDict) LoadRimeDir(dirPath string) error {
 	return nil
 }
 
-// LoadBinary 从预编译的 .wdb 文件加载词库（mmap 模式）
-func (d *PinyinDict) LoadBinary(wdbPath string) error {
-	reader, err := binformat.OpenDict(wdbPath)
-	if err != nil {
-		return fmt.Errorf("打开二进制词库失败: %w", err)
-	}
-	d.binReader = reader
-	d.entryCount = reader.KeyCount()
-	d.trie = nil
-	d.abbrevTrie = nil
-	return nil
-}
-
-// IsBinaryMode 检查是否为二进制模式
-func (d *PinyinDict) IsBinaryMode() bool {
-	return d.binReader != nil
-}
-
 // LoadDAT 从预编译的 .wdat 文件加载词库（DAT mmap 模式）
 func (d *PinyinDict) LoadDAT(wdatPath string) error {
 	reader, err := datformat.OpenWdat(wdatPath)
@@ -106,7 +84,6 @@ func (d *PinyinDict) LoadDAT(wdatPath string) error {
 	d.entryCount = reader.KeyCount()
 	d.trie = nil
 	d.abbrevTrie = nil
-	d.binReader = nil
 	return nil
 }
 
@@ -119,9 +96,6 @@ func (d *PinyinDict) IsDATMode() bool {
 func (d *PinyinDict) Close() error {
 	if d.datReader != nil {
 		return d.datReader.Close()
-	}
-	if d.binReader != nil {
-		return d.binReader.Close()
 	}
 	return nil
 }
@@ -204,9 +178,6 @@ func (d *PinyinDict) Lookup(pinyin string) []candidate.Candidate {
 	if d.datReader != nil {
 		return d.datReader.Lookup(pinyin)
 	}
-	if d.binReader != nil {
-		return d.binReader.Lookup(pinyin)
-	}
 	if d.trie == nil {
 		return nil
 	}
@@ -221,9 +192,6 @@ func (d *PinyinDict) LookupPhrase(syllables []string) []candidate.Candidate {
 	if d.datReader != nil {
 		return d.datReader.Lookup(strings.ToLower(strings.Join(syllables, "")))
 	}
-	if d.binReader != nil {
-		return d.binReader.LookupPhrase(syllables)
-	}
 	if d.trie == nil {
 		return nil
 	}
@@ -235,9 +203,6 @@ func (d *PinyinDict) LookupPhrase(syllables []string) []candidate.Candidate {
 func (d *PinyinDict) LookupPrefix(prefix string, limit int) []candidate.Candidate {
 	if d.datReader != nil {
 		return d.datReader.LookupPrefix(prefix, limit)
-	}
-	if d.binReader != nil {
-		return d.binReader.LookupPrefix(prefix, limit)
 	}
 	if d.trie == nil {
 		return nil
@@ -257,9 +222,6 @@ func (d *PinyinDict) LookupPrefix(prefix string, limit int) []candidate.Candidat
 func (d *PinyinDict) HasPrefix(prefix string) bool {
 	if d.datReader != nil {
 		return d.datReader.HasPrefix(prefix)
-	}
-	if d.binReader != nil {
-		return d.binReader.HasPrefix(prefix)
 	}
 	if d.trie == nil {
 		return false
@@ -345,9 +307,6 @@ func patchPinyinIsCommon(candidates []candidate.Candidate) {
 func (d *PinyinDict) LookupAbbrev(code string, limit int) []candidate.Candidate {
 	if d.datReader != nil {
 		return d.datReader.LookupAbbrev(code, limit)
-	}
-	if d.binReader != nil {
-		return d.binReader.LookupAbbrev(code, limit)
 	}
 	if d.abbrevTrie == nil {
 		return nil

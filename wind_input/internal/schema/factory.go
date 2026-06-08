@@ -357,7 +357,7 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 		if dictSpec.WeightSpec != nil {
 			norm = dictSpec.WeightSpec.NewWeightNormalizer()
 		}
-		if err := loadPinyinDict(pinyinDict, dictPath, logger, norm, spec.DictFormat); err != nil {
+		if err := loadPinyinDict(pinyinDict, dictPath, logger, norm); err != nil {
 			return nil, fmt.Errorf("加载拼音词库失败: %w", err)
 		}
 	}
@@ -446,69 +446,29 @@ func createPinyinEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager,
 
 // --- 词库加载辅助函数（从 manager_init.go 迁移） ---
 
-func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string, logger *slog.Logger, normalizer *dict.WeightNormalizer, dictFormat DictFormat) error {
-	if dictFormat == "" {
-		dictFormat = DictFormatDAT
-	}
+// loadPinyinDict 加载拼音词库（统一走 DAT/wdat 双数组 Trie，旧版 wdb 已废弃）。
+func loadPinyinDict(pinyinDict *dict.PinyinDict, dictPath string, logger *slog.Logger, normalizer *dict.WeightNormalizer) error {
 	dictDir := filepath.Dir(dictPath)
 	srcPaths := dictcache.RimePinyinSourcePaths(dictPath)
 
-	// DAT 模式
-	if dictFormat == DictFormatDAT {
-		wdatInDir := filepath.Join(dictDir, "pinyin.wdat")
-		if !dictcache.NeedsRegenerate(srcPaths, wdatInDir) {
-			if err := pinyinDict.LoadDAT(wdatInDir); err == nil {
-				logger.Info("拼音词库(预编译 wdat)加载成功", "entryCount", pinyinDict.EntryCount())
-				return nil
-			}
-		}
-		wdatCachePath := dictcache.WdatCachePath("pinyin")
-		if dictcache.NeedsRegenerate(srcPaths, wdatCachePath) {
-			// 缓存尚未就绪，异步构建，不阻塞当前调用方
-			startPinyinWdatBuildAsync(dictPath, wdatCachePath, logger, normalizer)
-			return fmt.Errorf("%w: 拼音 wdat 词库正在后台生成，请稍后切换到此方案", ErrAssetBuilding)
-		}
-		if err := pinyinDict.LoadDAT(wdatCachePath); err == nil {
-			logger.Info("拼音词库(缓存 wdat)加载成功", "entryCount", pinyinDict.EntryCount())
-			return nil
-		}
-		return fmt.Errorf("拼音 wdat 词库加载失败，缓存可能已损坏")
-	}
-
-	// 原有 wdb 流程
-	wdbInDir := filepath.Join(dictDir, "pinyin.wdb")
-	if !dictcache.NeedsRegenerate(srcPaths, wdbInDir) {
-		if err := pinyinDict.LoadBinary(wdbInDir); err == nil {
-			logger.Info("拼音词库(预编译 wdb)加载成功", "entryCount", pinyinDict.EntryCount())
+	wdatInDir := filepath.Join(dictDir, "pinyin.wdat")
+	if !dictcache.NeedsRegenerate(srcPaths, wdatInDir) {
+		if err := pinyinDict.LoadDAT(wdatInDir); err == nil {
+			logger.Info("拼音词库(预编译 wdat)加载成功", "entryCount", pinyinDict.EntryCount())
 			return nil
 		}
 	}
-
-	wdbCachePath := dictcache.CachePath("pinyin")
-	if dictcache.NeedsRegenerate(srcPaths, wdbCachePath) {
-		if err := dictcache.ConvertPinyinToWdb(dictPath, wdbCachePath, logger, normalizer); err != nil {
-			if _, statErr := os.Stat(wdbInDir); statErr == nil {
-				if err := pinyinDict.LoadBinary(wdbInDir); err == nil {
-					return nil
-				}
-			}
-			return fmt.Errorf("无法加载拼音词库: %w", err)
-		}
+	wdatCachePath := dictcache.WdatCachePath("pinyin")
+	if dictcache.NeedsRegenerate(srcPaths, wdatCachePath) {
+		// 缓存尚未就绪，异步构建，不阻塞当前调用方
+		startPinyinWdatBuildAsync(dictPath, wdatCachePath, logger, normalizer)
+		return fmt.Errorf("%w: 拼音 wdat 词库正在后台生成，请稍后切换到此方案", ErrAssetBuilding)
 	}
-
-	if err := pinyinDict.LoadBinary(wdbCachePath); err != nil {
-		// 缓存文件可能损坏（截断），删除后重新生成
-		logger.Warn("缓存拼音词库损坏，删除后重新生成", "path", wdbCachePath, "error", err)
-		os.Remove(wdbCachePath)
-		if err := dictcache.ConvertPinyinToWdb(dictPath, wdbCachePath, logger, normalizer); err != nil {
-			return fmt.Errorf("重新生成拼音词库失败: %w", err)
-		}
-		if err := pinyinDict.LoadBinary(wdbCachePath); err != nil {
-			return fmt.Errorf("加载重新生成的拼音词库失败: %w", err)
-		}
+	if err := pinyinDict.LoadDAT(wdatCachePath); err == nil {
+		logger.Info("拼音词库(缓存 wdat)加载成功", "entryCount", pinyinDict.EntryCount())
+		return nil
 	}
-	logger.Info("拼音词库(缓存 wdb)加载成功", "entryCount", pinyinDict.EntryCount())
-	return nil
+	return fmt.Errorf("拼音 wdat 词库加载失败，缓存可能已损坏")
 }
 
 func loadUnigramModel(engine *pinyin.Engine, txtPath string, logger *slog.Logger) error {
@@ -1381,7 +1341,7 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		if pinyinDictSpec.WeightSpec != nil {
 			pinyinNorm = pinyinDictSpec.WeightSpec.NewWeightNormalizer()
 		}
-		if err := loadPinyinDict(pinyinDict, dictPath, logger, pinyinNorm, pinyinSpec.DictFormat); err != nil {
+		if err := loadPinyinDict(pinyinDict, dictPath, logger, pinyinNorm); err != nil {
 			return nil, fmt.Errorf("混输：加载拼音词库失败: %w", err)
 		}
 	}
