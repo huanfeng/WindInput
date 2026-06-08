@@ -18,15 +18,17 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 		return
 	}
 
-	// 更新每页候选数
+	// 更新每页候选数（基础档 + 扩展档），再物化生效值并重算分页
 	if uiConfig.CandidatesPerPage > 0 {
-		c.candidatesPerPage = uiConfig.CandidatesPerPage
-		// 重新计算总页数
-		if len(c.candidates) > 0 {
-			c.totalPages = (len(c.candidates) + c.candidatesPerPage - 1) / c.candidatesPerPage
-			if c.currentPage > c.totalPages {
-				c.currentPage = c.totalPages
-			}
+		c.candidatesPerPageBase = uiConfig.CandidatesPerPage
+	}
+	c.candidatesPerPageExtended = uiConfig.CandidatesPerPageExtended
+	c.refreshEffectivePerPage()
+	// 重新计算总页数
+	if len(c.candidates) > 0 {
+		c.totalPages = (len(c.candidates) + c.candidatesPerPage - 1) / c.candidatesPerPage
+		if c.currentPage > c.totalPages {
+			c.currentPage = c.totalPages
 		}
 	}
 

@@ -703,6 +703,8 @@ func (c *Coordinator) buildTempEnglishCandidates(limit int) {
 	c.candidates = allCandidates
 	c.tempEnglishCandLimit = limit
 	c.tempEnglishCandInput = buf
+	// 物化生效每页候选数：临时英文当前不触发扩展档，但仍需调用以收回上一模式可能残留的扩展值
+	c.refreshEffectivePerPage()
 	if len(allCandidates) > 0 {
 		c.totalPages = (len(allCandidates) + c.candidatesPerPage - 1) / c.candidatesPerPage
 	} else {

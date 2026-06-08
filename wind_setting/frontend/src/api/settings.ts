@@ -114,6 +114,7 @@ export interface UIConfig {
   font_size: number;
   font_size_follow_theme: boolean; // true=候选字号跟随主题；false=用 font_size 自定义
   candidates_per_page: number;
+  candidates_per_page_extended: number; // 扩展档每页候选数（临时拼音/快捷输入/短语等场景）；0=禁用，与基础档相同
   max_candidate_chars: number;
   font_family: string;
   font_path: string;
@@ -391,6 +392,7 @@ export function getDefaultConfig(): Config {
       font_size: 18,
       font_size_follow_theme: true,
       candidates_per_page: 7,
+      candidates_per_page_extended: 0,
       max_candidate_chars: 16,
       font_family: "",
       font_path: "",

@@ -224,8 +224,15 @@ type Coordinator struct {
 	candidates         []ui.Candidate
 	currentPage        int
 	totalPages         int
-	candidatesPerPage  int
-	selectedIndex      int // 当前页内选中的候选索引（0-based），用于上下箭头键选择
+	// candidatesPerPage 是「当前生效」的每页候选数（物化值），所有分页/选择/切片逻辑读它。
+	// 它在每条分页源头由 refreshEffectivePerPage() 写入：普通码表输入用 candidatesPerPageBase，
+	// 临时拼音/快捷输入/短语/拼音引擎等场景用 candidatesPerPageExtended（若已配置）。
+	candidatesPerPage int
+	// candidatesPerPageBase 用户配置的基础档（初始化/热更新写它）；candidatesPerPageExtended
+	// 用户配置的扩展档（<=0 表示禁用，始终用基础档）。两者只读，生效值物化到 candidatesPerPage。
+	candidatesPerPageBase     int
+	candidatesPerPageExtended int
+	selectedIndex             int // 当前页内选中的候选索引（0-based），用于上下箭头键选择
 
 	// 分级加载状态
 	candidateLimit    int    // 当前加载上限（0=无限制）
@@ -555,9 +562,13 @@ func (c *Coordinator) syncToolbarStateNoLock() {
 
 // NewCoordinator creates a new Coordinator
 func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *config.Config, appCompat *config.AppCompat, logger *slog.Logger) *Coordinator {
-	candidatesPerPage := 9
+	candidatesPerPageBase := 9
 	if cfg != nil && cfg.UI.CandidatesPerPage > 0 {
-		candidatesPerPage = cfg.UI.CandidatesPerPage
+		candidatesPerPageBase = cfg.UI.CandidatesPerPage
+	}
+	candidatesPerPageExtended := 0
+	if cfg != nil {
+		candidatesPerPageExtended = cfg.UI.CandidatesPerPageExtended
 	}
 
 	// 确定初始状态
@@ -610,20 +621,22 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 	}
 
 	c := &Coordinator{
-		engineMgr:          engineMgr,
-		uiManager:          uiManager,
-		logger:             logger,
-		config:             cfg,
-		chineseMode:        startInChineseMode,
-		fullWidth:          fullWidth,
-		chinesePunctuation: chinesePunctuation,
-		punctFollowMode:    punctFollowMode,
-		toolbarVisible:     toolbarVisible,
-		inputBuffer:        "",
-		candidates:         nil,
-		currentPage:        1,
-		totalPages:         1,
-		candidatesPerPage:  candidatesPerPage,
+		engineMgr:                 engineMgr,
+		uiManager:                 uiManager,
+		logger:                    logger,
+		config:                    cfg,
+		chineseMode:               startInChineseMode,
+		fullWidth:                 fullWidth,
+		chinesePunctuation:        chinesePunctuation,
+		punctFollowMode:           punctFollowMode,
+		toolbarVisible:            toolbarVisible,
+		inputBuffer:               "",
+		candidates:                nil,
+		currentPage:               1,
+		totalPages:                1,
+		candidatesPerPage:         candidatesPerPageBase, // 初始物化为基础档；首次查询时由 refreshEffectivePerPage 重算
+		candidatesPerPageBase:     candidatesPerPageBase,
+		candidatesPerPageExtended: candidatesPerPageExtended,
 		caretState: caretState{
 			caretX:      100,
 			caretY:      100,

@@ -360,6 +360,45 @@ func (c *Coordinator) applyValueExpansion(cand *candidate.Candidate) {
 	}
 }
 
+// refreshEffectivePerPage 把「当前生效」的每页候选数物化到 c.candidatesPerPage。
+// 必须在每条分页源头计算 totalPages **之前**调用，保证整个 composition 期间分页/选择/
+// 切片逻辑读到的是同一个生效值（天然一致，避免「显示 9 个却按 7 翻页」的错位）。
+//
+// 生效规则：扩展档已配置 (>0) 且当前场景需要扩展 → 用扩展档；否则用基础档。
+func (c *Coordinator) refreshEffectivePerPage() {
+	base := c.candidatesPerPageBase
+	if base <= 0 {
+		base = 7 // 兜底，与历史默认一致
+	}
+	if c.candidatesPerPageExtended > 0 && c.shouldUseExtendedCandidates() {
+		c.candidatesPerPage = c.candidatesPerPageExtended
+	} else {
+		c.candidatesPerPage = base
+	}
+}
+
+// shouldUseExtendedCandidates 判定当前输入场景是否需要「扩展档」候选数。
+// 这是候选数分档的**唯一对接点**：未来新增需要更多候选的模式，只需在此追加一个判断分支，
+// 无需改动 refreshEffectivePerPage 或任何分页使用点。
+//
+// 仅覆盖「临时/特殊场景」，常态打字（含混输/纯拼音引擎）一律尊重用户配置的基础档——
+// 引擎类型是常态属性，不参与分档，否则混输等主力模式会永远停在扩展档，违背「保持干净」初衷。
+//
+// 当前覆盖：
+//   - 临时拼音 / 快捷输入：直接读已有模式标志（事件型，有明确进入/退出）
+//   - 候选含 PhraseLayer 短语（如 zzbd）：内容型，每次查询结果派生
+func (c *Coordinator) shouldUseExtendedCandidates() bool {
+	if c.tempPinyinMode || c.quickInputMode {
+		return true
+	}
+	for i := range c.candidates {
+		if c.candidates[i].PhraseTemplate != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 	if len(c.inputBuffer) == 0 {
 		c.candidates = nil
@@ -507,7 +546,8 @@ func (c *Coordinator) updateCandidatesEx() *engine.ConvertResult {
 			"code", ec.Code, "naturalOrder", ec.NaturalOrder, "consumed", ec.ConsumedLength)
 	}
 
-	// Calculate pagination
+	// Calculate pagination（先物化生效每页候选数：短语/拼音引擎等场景切扩展档）
+	c.refreshEffectivePerPage()
 	c.totalPages = (len(c.candidates) + c.candidatesPerPage - 1) / c.candidatesPerPage
 	if c.totalPages == 0 {
 		c.totalPages = 1
@@ -766,7 +806,8 @@ func (c *Coordinator) expandCandidates() {
 		c.candidates[i] = cand
 	}
 
-	// 重新计算分页（保持当前页不变）
+	// 重新计算分页（保持当前页不变）；展开二级候选可能含短语，物化生效每页数
+	c.refreshEffectivePerPage()
 	c.totalPages = (len(c.candidates) + c.candidatesPerPage - 1) / c.candidatesPerPage
 	if c.totalPages == 0 {
 		c.totalPages = 1

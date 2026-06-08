@@ -62,6 +62,16 @@ export const candidateWindowSchema: PageSchema = [
     displayValue: (v) => `${v} 个`,
   },
   {
+    type: "slider",
+    key: "ui.candidates_per_page_extended",
+    label: "扩展候选数",
+    hint: "临时拼音 / 快捷输入 / 短语等场景下的每页候选数；设为 0 表示与上面相同（关闭分档）。最多 10 个（受数字键 1-9、0 限制）",
+    min: 0,
+    max: 10,
+    step: 1,
+    displayValue: (v) => (v <= 0 ? "跟随基础" : `${v} 个`),
+  },
+  {
     type: "toggle",
     key: "ui.hide_candidate_window",
     label: "隐藏候选窗口",

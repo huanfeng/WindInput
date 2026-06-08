@@ -199,20 +199,26 @@ type UIConfig struct {
 	VerticalMaxWidth            int  `yaml:"vertical_max_width" json:"vertical_max_width"`                           // 竖排候选最大宽度（逻辑像素，FollowTheme=false 时生效）
 	VerticalMaxWidthFollowTheme bool `yaml:"vertical_max_width_follow_theme" json:"vertical_max_width_follow_theme"` // true=跟随主题 behavior.vertical_max_width
 
-	CandidatesPerPage       int               `yaml:"candidates_per_page" json:"candidates_per_page"`
-	FontFamily              string            `yaml:"font_family" json:"font_family"`
-	FontPath                string            `yaml:"font_path" json:"font_path"`
-	InlinePreedit           bool              `yaml:"inline_preedit" json:"inline_preedit"`
-	HideCandidateWindow     bool              `yaml:"hide_candidate_window" json:"hide_candidate_window"`
-	CandidateLayout         CandidateLayout   `yaml:"candidate_layout" json:"candidate_layout"`                   // 候选布局：horizontal 或 vertical
-	StatusIndicatorDuration int               `yaml:"status_indicator_duration" json:"status_indicator_duration"` // 状态提示显示时长（毫秒）
-	StatusIndicatorOffsetX  int               `yaml:"status_indicator_offset_x" json:"status_indicator_offset_x"` // 状态提示 X 偏移量
-	StatusIndicatorOffsetY  int               `yaml:"status_indicator_offset_y" json:"status_indicator_offset_y"` // 状态提示 Y 偏移量
-	Theme                   string            `yaml:"theme" json:"theme"`                                         // 主题名称：default, msime 或自定义主题名
-	ThemeStyle              ThemeStyle        `yaml:"theme_style" json:"theme_style"`                             // 主题风格：system(跟随系统), light(亮色), dark(暗色)
-	PagerBarDisplay         PagerBarDisplay   `yaml:"pager_bar_display" json:"pager_bar_display"`                 // 翻页栏显示方式：空=主题配置, always=总是显示, auto=多页时显示, hide=隐藏
-	PageNumberDisplay       PageNumberDisplay `yaml:"page_number_display" json:"page_number_display"`             // 页码显示方式：空=主题配置, show=显示, hide=隐藏
-	TooltipDelay            int               `yaml:"tooltip_delay" json:"tooltip_delay"`                         // 编码提示延迟显示时间（毫秒），0 表示立即显示
+	CandidatesPerPage int `yaml:"candidates_per_page" json:"candidates_per_page"`
+	// CandidatesPerPageExtended 扩展档每页候选数。在临时拼音/快捷输入/短语等场景下生效，
+	// 让这些场景显示更多候选；普通码表输入仍用 CandidatesPerPage（基础档）。
+	// <=0 表示禁用扩展档（始终用基础档，向后兼容）；正值有效，上界 clamp 到 10
+	// （候选用数字键 1-9、0 选择，每页最多 10 个可选，超出无对应数字键且标签会重复）。
+	// 判定"是否启用扩展档"统一由 >0 决定，故无需下界 clamp。
+	CandidatesPerPageExtended int               `yaml:"candidates_per_page_extended,omitempty" json:"candidates_per_page_extended,omitempty"`
+	FontFamily                string            `yaml:"font_family" json:"font_family"`
+	FontPath                  string            `yaml:"font_path" json:"font_path"`
+	InlinePreedit             bool              `yaml:"inline_preedit" json:"inline_preedit"`
+	HideCandidateWindow       bool              `yaml:"hide_candidate_window" json:"hide_candidate_window"`
+	CandidateLayout           CandidateLayout   `yaml:"candidate_layout" json:"candidate_layout"`                   // 候选布局：horizontal 或 vertical
+	StatusIndicatorDuration   int               `yaml:"status_indicator_duration" json:"status_indicator_duration"` // 状态提示显示时长（毫秒）
+	StatusIndicatorOffsetX    int               `yaml:"status_indicator_offset_x" json:"status_indicator_offset_x"` // 状态提示 X 偏移量
+	StatusIndicatorOffsetY    int               `yaml:"status_indicator_offset_y" json:"status_indicator_offset_y"` // 状态提示 Y 偏移量
+	Theme                     string            `yaml:"theme" json:"theme"`                                         // 主题名称：default, msime 或自定义主题名
+	ThemeStyle                ThemeStyle        `yaml:"theme_style" json:"theme_style"`                             // 主题风格：system(跟随系统), light(亮色), dark(暗色)
+	PagerBarDisplay           PagerBarDisplay   `yaml:"pager_bar_display" json:"pager_bar_display"`                 // 翻页栏显示方式：空=主题配置, always=总是显示, auto=多页时显示, hide=隐藏
+	PageNumberDisplay         PageNumberDisplay `yaml:"page_number_display" json:"page_number_display"`             // 页码显示方式：空=主题配置, show=显示, hide=隐藏
+	TooltipDelay              int               `yaml:"tooltip_delay" json:"tooltip_delay"`                         // 编码提示延迟显示时间（毫秒），0 表示立即显示
 
 	PreeditMode PreeditMode `yaml:"preedit_mode" json:"preedit_mode"` // 编码显示模式："top"（默认，编码在上方独立行）, "embedded"（嵌入候选行前）；仅 InlinePreedit=false 时生效
 
@@ -462,6 +468,7 @@ func DefaultConfig() *Config {
 			VerticalMaxWidth:            600,
 			VerticalMaxWidthFollowTheme: true,
 			CandidatesPerPage:           7,
+			CandidatesPerPageExtended:   0, // 默认禁用扩展档，老用户行为不变；用户主动配置后才分档
 			MaxCandidateChars:           16,
 			FontFamily:                  "",
 			FontPath:                    "",
@@ -634,6 +641,12 @@ func ApplyConfigFallbacks(cfg *Config) {
 	// MaxCandidateChars 兜底：0 或越界时回退到 16，合法范围 8-64
 	if cfg.UI.MaxCandidateChars < 8 || cfg.UI.MaxCandidateChars > 64 {
 		cfg.UI.MaxCandidateChars = 16
+	}
+
+	// CandidatesPerPageExtended 兜底：<=0 表示禁用扩展档（保持），上界 clamp 到 10
+	// （受数字键 1-9、0 限制，每页最多 10 个可选）
+	if cfg.UI.CandidatesPerPageExtended > 10 {
+		cfg.UI.CandidatesPerPageExtended = 10
 	}
 
 	// Phrase.MinPrefixLength 兜底：未配置 (0) 或负值时回退到 2

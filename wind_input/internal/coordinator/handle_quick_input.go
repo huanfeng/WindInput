@@ -429,10 +429,8 @@ func (c *Coordinator) updateQuickInputCandidates() {
 
 	c.candidates = candidates
 
-	// 计算分页
-	if c.candidatesPerPage <= 0 {
-		c.candidatesPerPage = 7
-	}
+	// 计算分页：物化生效每页候选数（快捷输入 quickInputMode 已置位 → 切扩展档）
+	c.refreshEffectivePerPage()
 	total := len(c.candidates)
 	c.totalPages = (total + c.candidatesPerPage - 1) / c.candidatesPerPage
 	if c.totalPages < 1 {

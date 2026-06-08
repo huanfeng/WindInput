@@ -334,9 +334,8 @@ func (c *Coordinator) updatePinyinModeCandidates(ops *pinyinModeOps) {
 	c.candidates = result.Candidates
 	c.preeditDisplay = result.PreeditDisplay
 
-	if c.candidatesPerPage <= 0 {
-		c.candidatesPerPage = 7
-	}
+	// 物化生效每页候选数（临时拼音 tempPinyinMode 已置位 → 切扩展档）
+	c.refreshEffectivePerPage()
 	total := len(c.candidates)
 	c.totalPages = (total + c.candidatesPerPage - 1) / c.candidatesPerPage
 	if c.totalPages < 1 {

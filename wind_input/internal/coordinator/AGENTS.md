@@ -13,7 +13,7 @@
 | `handle_key_event.go` | 按键事件主入口，根据模式分发处理 |
 | `handle_key_action.go` | 具体按键动作处理（退格、确认、翻页、数字选词等） |
 | `handle_candidate_action.go` | 候选词快捷键操作：`matchCandidateActionKey` 匹配 Ctrl+数字/Ctrl+Shift+数字热键；`handleDeleteCandidateByKey` 删除指定候选词（走 `dm.DeleteWord(code, text, cand.ID)`）；`handlePinCandidateByKey` 置顶指定候选词（走 `dm.PinWord(code, text, cand.ID, 0)`）；**R2**: 短语候选统一走 Shadow（不再走 PhraseLayer.MoveToTop） |
-| `handle_candidates.go` | 候选词请求引擎计算、分页管理、UI 更新 |
+| `handle_candidates.go` | 候选词请求引擎计算、分页管理、UI 更新；候选数分档：`refreshEffectivePerPage` 在每条分页源头把生效每页数物化到 `c.candidatesPerPage`（基础档 `candidatesPerPageBase` / 扩展档 `candidatesPerPageExtended`），`shouldUseExtendedCandidates` 是新增"扩展档"场景的唯一对接点 |
 | `handle_config.go` | 配置更新处理（引擎切换、热键、UI、工具栏等） |
 | `handle_config_menu.go` | 右键菜单命令处理 |
 | `handle_config_state.go` | 状态查询方法（`GetChineseMode`、`GetCurrentEngineName` 等） |

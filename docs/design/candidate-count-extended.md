@@ -1,6 +1,10 @@
 <!-- Updated: 2026-06-08 -->
 
-# 候选数量分档：基础档 + 扩展档（可统一对接的模式驱动）
+# 候选数量分档：基础档 + 扩展档（物化生效值 + 单一判定对接）
+
+> **实现说明**：本文档为最终实现版。设计阶段曾考虑 `ExtendedCandidateReason` 位标志方案，
+> 实现时发现一个更优解——**物化（materialize）字段**：复用现有 `candidatesPerPage` 字段
+> 作为"当前生效值"，让几十个分页使用点零改动。本文已按物化方案重写。
 
 ## 背景与目标
 
@@ -13,41 +17,38 @@
 
 目标：让候选数量**按输入场景自动分档**，普通码表输入用"基础档"（少而干净），上述场景自动切到"扩展档"（多而全）。并且——**新增场景时有统一、低成本的对接方式**，不必每次改动核心判定逻辑。
 
-## 现状分析：单一配置的贯穿链路
+> **分档原则**：只有「临时/特殊场景」才扩展（临时拼音、快捷输入、短语候选）。**引擎类型是常态属性，不参与分档**——混输/纯拼音是主力常态模式，若按引擎类型总是扩展，基础档将永远用不上，违背「保持干净」初衷。纯拼音用户想要更多候选可直接调大基础档。
 
-`candidatesPerPage` 是一个 `int`，从配置经 Coordinator 贯穿到分页、UI 渲染、提交记录三处：
+## 现状分析：单一字段贯穿几十个分页点
 
-| 位置 | 文件:行 | 作用 |
-|------|---------|------|
-| 配置字段 | `pkg/config/config.go:202` | `CandidatesPerPage int` |
-| 默认值 | `pkg/config/config.go:455` | 默认 7 |
-| 运行时字段 | `internal/coordinator/coordinator.go:227` | `candidatesPerPage int` |
-| 初始化 | `coordinator.go:558-561` | 从 cfg 读，缺省 9 |
-| 热更新 | `handle_config.go:22-23` | 配置变更时重算 |
-| 分页总数 | `handle_candidates.go:511,770` | `totalPages` 计算 |
-| 当前页切片 | `handle_candidates.go:546-547` | `startIdx/endIdx` |
-| 发送 UI | `handle_candidates.go:615` | 传给 `sendCandidates` |
-| 数字键选择 | `handle_key_event.go:720,747` | `pageStart = (page-1)*perPage` |
-| 提交页内索引 | `coordinator.go:968,971` | `index % candidatesPerPage` |
+`c.candidatesPerPage` 在 `internal/coordinator` 包里有**几十个使用点**，分散在 10+ 个文件（`handle_key_action.go`、`handle_clipboard.go`、`handle_candidate_action.go`、`handle_punctuation.go`、`handle_lifecycle.go`、`handle_quick_input.go`、`handle_candidates.go` 等），几乎全是 `(currentPage-1)*candidatesPerPage + ...` 的页偏移计算与页内切片。
 
-**关键观察**：`candidatesPerPage` 与输入模式完全解耦，所有使用点都是"每次现取"。因此分档逻辑可**完全收敛在 Coordinator 层**，无需改动引擎层或 UI 层——只要把这些使用点统一改成调用一个"取有效值"的方法即可。
+**关键观察**：所有候选路径（主路径 `updateCandidatesEx`、临时拼音 `pinyin_mode_shared.go`、快捷输入 `handle_quick_input.go`、临时英文 `handle_temp_english.go`、二级展开）都**共用同一个 `c.candidatesPerPage` 字段**做分页。这个字段本质上已是"全局生效值"。
 
-## 设计概览
+## 设计概览：物化方案
 
 ```
-                       ┌─────────────────────────────┐
-  各输入模式/候选结果 ──▶│  extendedReasons (bitset)   │
-                       └──────────────┬──────────────┘
-                                      │ 只读
-                       ┌──────────────▼──────────────┐
-   分页/切片/选择/提交 ◀─│ effectiveCandidatesPerPage()│
-                       └─────────────────────────────┘
+   各分页源头（candidates 确定后、totalPages 之前）
+        │  调用 refreshEffectivePerPage()
+        ▼
+   ┌─────────────────────────────┐   读 base/extended 配置
+   │ refreshEffectivePerPage()   │ + shouldUseExtendedCandidates()
+   │  物化生效值 → candidatesPerPage│
+   └──────────────┬──────────────┘
+                  │ 写入
+        ┌─────────▼─────────┐
+        │ c.candidatesPerPage│ （生效值，整个 composition 期间稳定）
+        └─────────┬─────────┘
+                  │ 几十个分页/切片/选择/提交点直接读它（零改动）
+                  ▼
+        分页 / 切片 / 数字键选择 / 提交索引
 ```
 
-- 保留 `candidates_per_page`（**基础档**）。
-- 新增 `candidates_per_page_extended`（**扩展档**，`int`，`0` 表示禁用、始终用基础档）。
-- 运行时维护一个位标志 `extendedReasons`，记录"当前有哪些原因要求扩展候选"。
-- 所有使用点改调 `effectiveCandidatesPerPage()`：只要 `extendedReasons != 0` 且扩展档已配置，就返回扩展档，否则基础档。
+- `candidatesPerPage` 字段语义从"配置值"升级为**"当前生效值"**（物化值）。
+- 新增 `candidatesPerPageBase`（配置基础档）+ `candidatesPerPageExtended`（配置扩展档）。
+- 在每条分页源头算 `totalPages` **之前**调一次 `refreshEffectivePerPage()`，把生效值物化到 `candidatesPerPage`。
+- 几十个分页使用点**完全不动**——它们读 `candidatesPerPage` 读到的就是生效值。
+- **一致性天然保证**：生效值在两次候选更新之间稳定，同一 composition 内分页/选择/提交读到的是同一个值，不会出现"显示 9 个却按 7 翻页"的错位。
 
 ## 配置层变更
 
@@ -56,211 +57,173 @@
 `UIConfig` 紧邻 `CandidatesPerPage` 新增：
 
 ```go
-CandidatesPerPage         int `yaml:"candidates_per_page" json:"candidates_per_page"`
-// CandidatesPerPageExtended 扩展档每页候选数。在临时拼音/快捷输入/短语/拼音引擎等
-// 场景下生效。<=0 表示禁用扩展档（始终用基础档，向后兼容）；正值有效，上界
-// clamp 到 15（与基础档上限一致）。判定"是否启用"统一由 >0 决定，故无需下界 clamp。
+CandidatesPerPage int `yaml:"candidates_per_page" json:"candidates_per_page"`
+// CandidatesPerPageExtended 扩展档每页候选数。在临时拼音/快捷输入/短语等场景下生效。
+// <=0 表示禁用扩展档（始终用基础档，向后兼容）；正值有效，上界 clamp 到 10。
 CandidatesPerPageExtended int `yaml:"candidates_per_page_extended,omitempty" json:"candidates_per_page_extended,omitempty"`
 ```
 
-默认值（`config.go:455` 附近）：`CandidatesPerPageExtended: 0`（新装默认不启用，保持现有行为；用户主动配置后才分档）。
+- 默认值：`CandidatesPerPageExtended: 0`（新装默认不启用，保持现有行为；用户主动配置后才分档）。
+- 兜底（`ApplyConfigFallbacks`，参照 `MaxCandidateChars`）：`>10` 时 clamp 到 10；`<=0` 表示禁用，无需下界 clamp。
 
-> **配置语义**：`0` = 关闭分档（向后兼容，老用户行为不变）。这避免了"新版本静默改变老用户候选数"的意外。
+> **每页上限 10**：候选用数字键 1-9、0 选择，每页最多 10 个可选。超过 10 时第 11 个起既无对应数字键，`showUI` 的 `(i+1)%10` 标签还会与前面重复，故扩展档上限为 10。
 
-### 前端镜像（enum-constraint §前后端镜像要求）
+> **配置语义**：`0` = 关闭分档（向后兼容，老用户行为不变），避免"新版本静默改变老用户候选数"。
 
-- `wind_setting/frontend/src/api/settings.ts:115` 的 `UIConfig` 接口加 `candidates_per_page_extended: number;`
-- 同文件 `:388` 附近 default 加 `candidates_per_page_extended: 0,`
-- `wind_setting/frontend/src/schemas/appearance.schema.ts:44` 的"每页候选数"slider 下方新增一条 slider（详见下文 UI 段）。
+### 前端镜像
 
-## 运行时核心：extendedReasons 位标志
+- `api/settings.ts` 的 `UIConfig` 接口加 `candidates_per_page_extended: number;`，default 加 `candidates_per_page_extended: 0`。
+- `schemas/appearance.schema.ts` 的"每页候选数"slider 下方新增一条 slider（详见 UI 段）。
+- 设置搜索索引 `general.search.ts` 从各 PageSchema 的 label/hint **自动派生**，新 slider 自动收录，无需手动登记。
 
-### 类型与字段（`coordinator.go`）
+## 运行时核心
 
-```go
-// ExtendedCandidateReason 标记"当前为何需要扩展候选档"。
-// 纯运行时内部状态，多个原因可同时成立，故用位标志。
-// 注意：本类型**不序列化、不进 YAML、不跨进程**，因此不受 docs/design/enum-constraint.md
-// 约束（该约束针对会进 YAML 的有限取值字符串配置）。1<<iota 是 Go bitset 标准惯用法。
-type ExtendedCandidateReason uint32
-
-const (
-    ExtendedReasonTempPinyin  ExtendedCandidateReason = 1 << iota // 临时拼音模式
-    ExtendedReasonQuickInput                                       // 快捷输入模式
-    ExtendedReasonPinyinEngine                                     // 当前为拼音/混输引擎
-    ExtendedReasonPhraseCands                                      // 当前候选含 PhraseLayer 短语
-    // 未来新增场景：在此追加一行常量，effectiveCandidatesPerPage() 无需改动
-)
-```
-
-Coordinator 新增字段（与 `candidatesPerPage` 相邻，`coordinator.go:227` 附近）：
+### 字段（`coordinator.go`）
 
 ```go
-candidatesPerPage         int
+// candidatesPerPage 是「当前生效」的每页候选数（物化值），所有分页/选择/切片逻辑读它。
+candidatesPerPage int
+// 用户配置的基础档 / 扩展档（只读，生效值物化到 candidatesPerPage）。
+candidatesPerPageBase     int
 candidatesPerPageExtended int
-extendedReasons           ExtendedCandidateReason
 ```
 
-### 单一裁判：effectiveCandidatesPerPage()
+初始化（`NewCoordinator`）读 `cfg.UI.CandidatesPerPage`/`CandidatesPerPageExtended` 填 base/extended，`candidatesPerPage` 初始物化为 base。
+
+### 物化函数（`handle_candidates.go`）
 
 ```go
-// effectiveCandidatesPerPage 返回当前应使用的每页候选数。
-// 这是分档的唯一裁判，新增扩展场景时**无需改动本函数**——
-// 只需让对应场景在 extendedReasons 上置/清自己的位。
-func (c *Coordinator) effectiveCandidatesPerPage() int {
-    if c.candidatesPerPageExtended > 0 && c.extendedReasons != 0 {
-        return c.candidatesPerPageExtended
+// refreshEffectivePerPage 把「当前生效」的每页候选数物化到 c.candidatesPerPage。
+// 必须在每条分页源头计算 totalPages 之前调用。
+func (c *Coordinator) refreshEffectivePerPage() {
+    base := c.candidatesPerPageBase
+    if base <= 0 {
+        base = 7 // 兜底，与历史默认一致
     }
-    return c.candidatesPerPage
-}
-```
-
-辅助方法：
-
-```go
-func (c *Coordinator) setExtendedReason(r ExtendedCandidateReason)   { c.extendedReasons |= r }
-func (c *Coordinator) clearExtendedReason(r ExtendedCandidateReason) { c.extendedReasons &^= r }
-```
-
-> **并发**：`set/clear/读取` 全部发生在 `HandleKeyEvent → ... → sendCandidates` 链路内，调用方已持 `c.mu`，无额外加锁需求。与现有 `candidatesPerPage` 的访问约束一致。
-
-## 两类登记方式（统一对接契约）
-
-审查中发现：四个 reason 的生命周期**不是同一种**，必须分两类登记，否则会出现"删回普通字但扩展档没收回"的 bug。
-
-### A. 事件型（有明确激活/退出入口）
-
-`set` 与 `clear` 严格配对，挂在模式的进入/退出处：
-
-| Reason | 置位点 | 清位点 |
-|--------|--------|--------|
-| `ExtendedReasonTempPinyin` | `handle_temp_pinyin.go` 各 `tempPinyinMode = true` 处（:164, :332） | 各 `tempPinyinMode = false` 处（:218, :363）+ `clearState()` |
-| `ExtendedReasonQuickInput` | 快捷输入激活入口（`quickInputMode = true`） | 退出入口 + `clearState()` |
-
-> **兜底**：`clearState()`（`coordinator.go:976` 附近，重置全部输入态）统一 `c.extendedReasons = 0`，保证任何异常退出路径都不会残留事件型位。
-
-### B. 派生型（每次候选刷新后重新评估）
-
-无固定生命周期，是"当前查询状态"的派生属性。在 `updateCandidatesEx()` 末尾（`handle_candidates.go`，候选列表确定后）统一调用一次 `refreshDerivedExtendedReasons()` 重算：
-
-```go
-// refreshDerivedExtendedReasons 重算"可从当前查询状态派生"的扩展原因。
-// 每次候选更新后调用，确保同一 composition 内增删字符时分档实时跟随。
-func (c *Coordinator) refreshDerivedExtendedReasons() {
-    // 引擎型：当前引擎是拼音/混输 → 置位，否则清位
-    if c.engineMgr != nil {
-        t := c.engineMgr.GetCurrentType()
-        if t == engine.EngineTypePinyin || t == engine.EngineTypeMixed {
-            c.setExtendedReason(ExtendedReasonPinyinEngine)
-        } else {
-            c.clearExtendedReason(ExtendedReasonPinyinEngine)
-        }
-    }
-    // 内容型：候选列表含 PhraseLayer 短语（PhraseTemplate 非空）→ 置位，否则清位
-    hasPhrase := false
-    for i := range c.candidates {
-        if c.candidates[i].PhraseTemplate != "" {
-            hasPhrase = true
-            break
-        }
-    }
-    if hasPhrase {
-        c.setExtendedReason(ExtendedReasonPhraseCands)
+    if c.candidatesPerPageExtended > 0 && c.shouldUseExtendedCandidates() {
+        c.candidatesPerPage = c.candidatesPerPageExtended
     } else {
-        c.clearExtendedReason(ExtendedReasonPhraseCands)
+        c.candidatesPerPage = base
     }
 }
 ```
 
-> 派生型必须 **set/clear 对称重算**（不能只 set），否则用户从 `zzbd`（短语）退格回普通码字时，扩展档不会收回。
+### 唯一对接点：shouldUseExtendedCandidates()
 
-### 新增场景的对接流程（这就是"统一对接方式"）
+```go
+// shouldUseExtendedCandidates 判定当前输入场景是否需要「扩展档」候选数。
+// 这是候选数分档的唯一对接点：未来新增需要更多候选的模式，只需在此追加一个判断分支，
+// 无需改动 refreshEffectivePerPage 或任何分页使用点。
+//
+// 仅覆盖「临时/特殊场景」；常态打字（含混输/纯拼音引擎）一律用基础档——
+// 引擎类型是常态属性，不参与分档。
+func (c *Coordinator) shouldUseExtendedCandidates() bool {
+    if c.tempPinyinMode || c.quickInputMode { // 事件型：直接读已有模式标志
+        return true
+    }
+    for i := range c.candidates { // 内容型：候选含 PhraseLayer 短语（如 zzbd）
+        if c.candidates[i].PhraseTemplate != "" {
+            return true
+        }
+    }
+    return false
+}
+```
 
-未来加新模式，只需判断它属于哪一类，二选一：
+> **为何不用位标志**：设计阶段曾设想 `ExtendedCandidateReason` bitset + set/clear 配对。实现时发现
+> `tempPinyinMode`/`quickInputMode` 本就是可随时读取的持久字段，短语候选也可从当前候选列表
+> 直接派生——所有"原因"都是**可派生的**，于是 bitset 退化成一个布尔或。`shouldUseExtendedCandidates()`
+> 每次物化时全量重算，比维护 bitset 生命周期更简单，且天然修复"删回普通字扩展档不收回"的隐患
+> （每次候选刷新都重算，派生原因消失即收回）。
 
-1. **事件型**（有明确进入/退出）：
-   - 在 `ExtendedCandidateReason` 追加一个常量；
-   - 在激活入口 `setExtendedReason(新常量)`，退出入口 `clearExtendedReason(新常量)`；
-   - `clearState()` 已统一清零，无需额外处理。
-2. **派生型**（从查询/候选状态可判断）：
-   - 在 `ExtendedCandidateReason` 追加一个常量；
-   - 在 `refreshDerivedExtendedReasons()` 加一段 set/clear 对称判断。
+> **并发**：物化与读取全部发生在 `HandleKeyEvent` 持 `c.mu` 的链路内，无额外加锁需求。
 
-**两种情况都不需要改 `effectiveCandidatesPerPage()`**。这是本设计满足开闭原则的核心。
+### 新增场景的对接流程（"统一对接方式"）
 
-## 代码修改点清单
+未来加新模式，只需在 `shouldUseExtendedCandidates()` 里加一行判断：
 
-### 必改：使用点切换到 effectiveCandidatesPerPage()
+```go
+if c.someNewMode { return true }   // 事件型：读新模式标志
+// 或内容型：在候选遍历里加一个属性判断
+```
 
-将下列直接读 `c.candidatesPerPage` 的点替换为 `c.effectiveCandidatesPerPage()`：
+**不需要改 `refreshEffectivePerPage()`，不需要改任何分页使用点。** 这是本设计满足开闭原则的核心。
 
-- `handle_candidates.go:511` `totalPages` 计算
-- `handle_candidates.go:546-547` `startIdx/endIdx` 切片
-- `handle_candidates.go:615` 传 `sendCandidates` 的 perPage 参数
-- `handle_candidates.go:770` 重算分页
-- `handle_key_event.go:720,747`（及该文件其余数字键分支）`pageStart` 计算
-- `coordinator.go:968,971` 提交时 `index % perPage`
+## 代码修改点清单（实际）
 
-> **一致性约束**：同一次按键处理内，分页切片、UI 发送、数字键选择、提交索引必须取**同一个** perPage 值，否则会出现"看到 9 个候选但按 7 翻页"的错位。由于 `effectiveCandidatesPerPage()` 是纯读且同一 composition 内 `extendedReasons` 稳定，同一次按键多次调用结果一致，天然满足。**例外**：派生型在 `updateCandidatesEx()` 末尾才刷新，需确认刷新发生在分页计算（:511）**之前**——见下"待确认"。
+### 配置与初始化
 
-### 必改：配置与初始化
+- `config.go`：新增 `CandidatesPerPageExtended` 字段 + 默认值 0 + `>10` clamp 兜底。
+- `coordinator.go`：字段定义新增 base/extended；`NewCoordinator` 读配置初始化。
+- `handle_config.go`：热更新写 `candidatesPerPageBase`/`candidatesPerPageExtended` 后调 `refreshEffectivePerPage()` 再重算分页。
 
-- `config.go` 加字段 + 默认值 + `Normalize`/兜底（参照 `MaxCandidateChars` 在 `config.go:625-627` 的越界回退写法）
-- `coordinator.go:558-561` 初始化 `candidatesPerPageExtended`
-- `handle_config.go:22-23` 热更新时同步 `candidatesPerPageExtended`
+### 物化函数 + 判定函数
 
-### 必改：前端三处（见配置层段）
+- `handle_candidates.go`：新增 `refreshEffectivePerPage()` + `shouldUseExtendedCandidates()`。
 
-### 文档同步（CLAUDE.md 要求）
+### 各分页源头插入物化调用（在 `totalPages` 计算之前）
 
-- `internal/coordinator/AGENTS.md`：新增导出类型 `ExtendedCandidateReason` 与字段，需补一句说明。
-- `pkg/config/AGENTS.md`（若存在枚举/字段清单）：新增 `CandidatesPerPageExtended`。
-- 运行 `scripts/lint_agents_md.ps1` 校验引用不悬空。
+| 路径 | 文件 | 场景 |
+|------|------|------|
+| 主路径 | `handle_candidates.go`（updateCandidatesEx 末尾） | 码表/混输/拼音引擎 + 短语 |
+| 二级展开 | `handle_candidates.go`（展开候选重算分页） | 字符组展开含短语 |
+| 临时拼音 | `pinyin_mode_shared.go`（替换原 `if<=0{=7}` 兜底） | tempPinyinMode |
+| 快捷输入 | `handle_quick_input.go`（替换原 `if<=0{=7}` 兜底） | quickInputMode |
+| 临时英文 | `handle_temp_english.go` | 不触发扩展，但需收回上一模式残留值 |
+| 热更新 | `handle_config.go` | 配置变更实时重算 |
+
+> **几十个页偏移使用点零改动**——这是物化方案相对"每点改调 effectiveCandidatesPerPage()"的核心优势：改动面小、一致性天然。
+
+### 文档同步
+
+- `internal/coordinator/AGENTS.md`：`handle_candidates.go` 条目补充分档机制说明（物化 + 唯一对接点）。
+- `pkg/config/AGENTS.md` 不存在；`CandidatesPerPageExtended` 是普通 int 字段，非枚举，不受 `enum-constraint` 约束。
 
 ## 设置页 UI
 
-在 `appearance.schema.ts` 的"每页候选数"slider（`:44`）正下方新增：
+`appearance.schema.ts` 的"每页候选数"slider 正下方新增：
 
 ```ts
 {
   type: "slider",
   key: "ui.candidates_per_page_extended",
   label: "扩展候选数",
-  hint: "临时拼音 / 快捷输入 / 短语等场景下的候选数；设为最小值表示与上面相同（关闭分档）",
-  min: 0,            // 0 = 关闭分档
-  max: 15,
-  // 0 时 UI 展示 "跟随基础"，其余显示数字
+  hint: "临时拼音 / 快捷输入 / 短语等场景下的每页候选数；设为 0 表示与上面相同（关闭分档）",
+  min: 0,
+  max: 10,
+  step: 1,
+  displayValue: (v) => (v <= 0 ? "跟随基础" : `${v} 个`),
 }
 ```
 
-> 文案与最小值含义需在 `general.search.ts`（搜索索引）同步登记，保持设置搜索可命中（参照现有 `candidates_per_page` 的登记）。
-
 ## 边界与测试
 
-### 单元测试（`internal/coordinator`）
+### 单元测试（`internal/coordinator/candidate_perpage_test.go`，已实现）
 
-1. `extendedReasons == 0` 且扩展档已配 → 返回基础档。
-2. 任一 reason 置位 + 扩展档已配 → 返回扩展档。
-3. 扩展档 `= 0`（禁用）+ reason 置位 → 仍返回基础档。
-4. 派生型对称性：模拟候选含/不含 `PhraseTemplate`，调用 `refreshDerivedExtendedReasons()` 后位正确置/清。
-5. 事件型兜底：临时拼音激活置位 → `clearState()` 后 `extendedReasons == 0`。
-6. 分页一致性：扩展档生效时 `totalPages`、切片、数字键 `pageStart` 用同一 perPage。
+`TestRefreshEffectivePerPage` 表驱动覆盖：
+1. 扩展档禁用（=0）+ 临时拼音 → 仍用基础档。
+2. 临时拼音 / 快捷输入 / 短语候选 → 切扩展档。
+3. 普通候选无原因 → 基础档。
+4. base 配置 0 → 兜底回退 7；base=0 但有原因 → 仍用扩展档。
 
-### 配置测试（`pkg/config/enums_test.go` 风格）
+`TestRefreshEffectivePerPage_RecoversExtendedValue`：含短语候选物化为扩展档后，退回普通候选重算应**收回基础档**（验证派生原因消失即收回，修复隐患）。
 
-- YAML round-trip：`candidates_per_page_extended` 缺省（老配置）→ 读为 0，行为不变。
-- 边界处理：`<=0` → 禁用（用基础档）；`>15` → clamp 到 15。
+### 配置测试
 
-## 待实现阶段确认
+`candidates_per_page_extended` 缺省（老配置）→ 读为 0，行为不变（由 config 包结构体序列化测试覆盖）。
 
-1. **刷新时序**：确认 `refreshDerivedExtendedReasons()` 的调用点在 `updateCandidatesEx()` 内、且早于 `handle_candidates.go:511` 的 `totalPages` 计算（同一次按键内）。若分页计算在 `updateCandidatesEx()` 之外的更上层，需把刷新提到分页前。
-2. **临时拼音融合入口**：临时拼音已"去模式化"为融合模型（拼音+码表候选融合）。`tempPinyinMode` 标志在 `handle_temp_pinyin.go` 仍真实 set/clear（z 触发路径已验证），但需排查是否存在**不置 `tempPinyinMode`** 的其它融合入口；若有，这类场景的扩展需求应改走派生型（按候选 `Source == 拼音` 判断）而非事件型。
-3. **快捷输入子模式**：快捷输入内部可能再触发临时拼音子模式（`quickInputPinyinDictSwapped`）。两个事件型 reason 可同时置位，bitset 天然支持；确认退出子模式只 `clear` 自己的位，不误清外层 `ExtendedReasonQuickInput`。
-4. **数字键边界**：`AllowSymbols` 开启时，数字键 1-9 "仅在索引超出当前页可见候选数时进 buffer"（`config.go:385`）。该判断也依赖 perPage，需一并改用 `effectiveCandidatesPerPage()`，避免扩展档下数字键行为错位。
+## 实现阶段已确认结论
+
+1. **刷新时序** ✅：真正的分页发送点是 `showUI()`，`updateCandidatesEx()` 在候选确定后、`totalPages` 计算前调 `refreshEffectivePerPage()`，时序正确。
+2. **临时拼音融合入口** ✅：`tempPinyinMode` 在 `handle_temp_pinyin.go` 真实 set/clear；临时拼音候选走 `pinyin_mode_shared.go` 分页路径，已接入物化调用。
+3. **快捷输入子模式** ✅：物化方案不用 bitset，`shouldUseExtendedCandidates()` 每次全量重算，子模式嵌套无"误清外层位"问题。
+4. **数字键边界**：`AllowSymbols` 数字键判断读 `c.candidatesPerPage`（生效值），随物化自动一致，无需单独改动。
+5. **临时英文一致性** ✅：临时英文不触发扩展，但仍调 `refreshEffectivePerPage()` 以收回上一模式可能残留的扩展值。
 
 ## 影响面小结
 
-- **新增**：1 个配置字段（Go + 前端镜像）、1 个运行时枚举类型、3 个 Coordinator 方法、1 条设置项。
-- **修改**：约 8 处 `candidatesPerPage` 使用点改为方法调用。
-- **不触碰**：引擎层、UI 渲染层、IPC 协议（`CandidatesPerPage` 仍按实际生效值透传，无需新增协议字段）。
+- **新增**：1 个配置字段（Go + 前端镜像）、2 个 Coordinator 字段、2 个 Coordinator 方法、1 条设置项。
+- **修改**：6 处分页源头插入物化调用；初始化/热更新写 base/extended。
+- **零改动**：几十个页偏移/切片/选择使用点（复用 `candidatesPerPage` 生效值）。
+- **不触碰**：引擎层、UI 渲染层、IPC 协议（`CandidatesPerPage` 按生效值透传，无新协议字段）。
 - **向后兼容**：扩展档默认 0，老用户行为零变化。
