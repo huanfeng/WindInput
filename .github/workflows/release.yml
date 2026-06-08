@@ -49,8 +49,28 @@ jobs:
       - name: Install NSIS
         shell: pwsh
         run: |
-          choco install nsis -y --no-progress
-          echo "C:\Program Files (x86)\NSIS" >> $env:GITHUB_PATH
+          $ErrorActionPreference = "Stop"
+          # choco 社区源偶发 503，重试最多 3 次（应对瞬时故障）
+          $installed = $false
+          for ($i = 1; $i -le 3; $i++) {
+            Write-Host "安装 NSIS (尝试 $i/3)..."
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -eq 0) { $installed = $true; break }
+            Write-Host "choco 退出码 $LASTEXITCODE，10s 后重试..."
+            Start-Sleep -Seconds 10
+          }
+          if (-not $installed) {
+            Write-Error "NSIS 安装失败：choco install 连续 3 次非零退出（可能是 Chocolatey 源故障）"
+            exit 1
+          }
+          # 校验 makensis.exe 真实存在，缺失即提前失败（不拖到打包步骤）
+          $nsisDir = "C:\Program Files (x86)\NSIS"
+          if (-not (Test-Path "$nsisDir\makensis.exe")) {
+            Write-Error "NSIS 安装后未找到 makensis.exe（路径：$nsisDir）"
+            exit 1
+          }
+          echo "$nsisDir" >> $env:GITHUB_PATH
+          Write-Host "NSIS 安装成功：$nsisDir\makensis.exe"
 
       - name: Install frontend dependencies
         working-directory: wind_setting/frontend
