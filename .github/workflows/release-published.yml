@@ -77,6 +77,10 @@ jobs:
             --repo "${{ github.repository }}" \
             --pattern "WindInput-${VERSION}-Setup.exe" \
             --dir ./dl
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "WindInput-${VERSION}-macOS.pkg" \
+            --dir ./dl
           gh release view "$TAG" --repo "${{ github.repository }}" --json body -q .body \
             > "./dl/WindInput-${VERSION}-Release.md"
           ls -lh ./dl
@@ -100,6 +104,7 @@ jobs:
           fi
           echo "Purging previous version: $PREV_VERSION"
           wrangler r2 object delete --remote "$R2_BUCKET/WindInput-${PREV_VERSION}-Setup.exe" || true
+          wrangler r2 object delete --remote "$R2_BUCKET/WindInput-${PREV_VERSION}-macOS.pkg" || true
           wrangler r2 object delete --remote "$R2_BUCKET/WindInput-${PREV_VERSION}-Release.md" || true
 
       - name: Upload installer to R2
@@ -107,6 +112,9 @@ jobs:
         run: |
           wrangler r2 object put --remote "$R2_BUCKET/WindInput-${VERSION}-Setup.exe" \
             --file "./dl/WindInput-${VERSION}-Setup.exe" \
+            --content-type "application/octet-stream"
+          wrangler r2 object put --remote "$R2_BUCKET/WindInput-${VERSION}-macOS.pkg" \
+            --file "./dl/WindInput-${VERSION}-macOS.pkg" \
             --content-type "application/octet-stream"
 
       - name: Upload release notes to R2
@@ -125,6 +133,7 @@ jobs:
             "version": "${VERSION}",
             "tag": "${TAG}",
             "exeUrl": "${R2_BASE_URL}/WindInput-${VERSION}-Setup.exe",
+            "pkgUrl": "${R2_BASE_URL}/WindInput-${VERSION}-macOS.pkg",
             "releaseNotesUrl": "${R2_BASE_URL}/WindInput-${VERSION}-Release.md",
             "publishedAt": "${PUBLISHED_AT}"
           }
@@ -139,6 +148,7 @@ jobs:
         run: |
           set -e
           EXPECTED_EXE_SIZE=$(stat -c %s "./dl/WindInput-${VERSION}-Setup.exe")
+          EXPECTED_PKG_SIZE=$(stat -c %s "./dl/WindInput-${VERSION}-macOS.pkg")
           check() {
             local url="$1"
             local expected_size="$2"
@@ -170,6 +180,7 @@ jobs:
             return 1
           }
           check "${R2_BASE_URL}/WindInput-${VERSION}-Setup.exe" "$EXPECTED_EXE_SIZE"
+          check "${R2_BASE_URL}/WindInput-${VERSION}-macOS.pkg" "$EXPECTED_PKG_SIZE"
           check "${R2_BASE_URL}/WindInput-${VERSION}-Release.md" ""
           check "${R2_BASE_URL}/latest.json" ""
           echo "All R2 objects verified."

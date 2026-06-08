@@ -55,7 +55,6 @@ func CheckUpdate(currentVersion string) (*CheckResult, error) {
 	asset := release.SetupAsset()
 	result := &CheckResult{
 		// 仅当版本更新 *且* 存在本平台安装包时才算"有更新"。
-		// macOS 暂无发布资源 (SetupAsset=nil) → 不报更新, 避免误报 Windows 版本。
 		HasUpdate:      latest.IsNewerThan(current) && asset != nil,
 		LatestVersion:  release.TagName,
 		CurrentVersion: currentVersion,

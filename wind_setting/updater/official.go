@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"time"
 )
 
@@ -15,6 +16,7 @@ type officialLatestJSON struct {
 	Version         string `json:"version"`
 	Tag             string `json:"tag"`
 	ExeURL          string `json:"exeUrl"`
+	PkgURL          string `json:"pkgUrl"`
 	ReleaseNotesURL string `json:"releaseNotesUrl"`
 	PublishedAt     string `json:"publishedAt"`
 }
@@ -63,9 +65,22 @@ func FetchOfficialLatest() (*ReleaseInfo, error) {
 
 	releaseNotes := fetchOfficialReleaseNotes(client, latest.ReleaseNotesURL)
 
-	asset := ReleaseAsset{
-		Name:               "WindInput-" + latest.Version + "-Setup.exe",
-		BrowserDownloadURL: latest.ExeURL,
+	var assets []ReleaseAsset
+	switch runtime.GOOS {
+	case "darwin":
+		if latest.PkgURL != "" {
+			assets = []ReleaseAsset{{
+				Name:               "WindInput-" + latest.Version + "-macOS.pkg",
+				BrowserDownloadURL: latest.PkgURL,
+			}}
+		}
+	default: // windows
+		if latest.ExeURL != "" {
+			assets = []ReleaseAsset{{
+				Name:               "WindInput-" + latest.Version + "-Setup.exe",
+				BrowserDownloadURL: latest.ExeURL,
+			}}
+		}
 	}
 
 	return &ReleaseInfo{
@@ -73,7 +88,7 @@ func FetchOfficialLatest() (*ReleaseInfo, error) {
 		Name:    "清风输入法 v" + latest.Version,
 		Body:    releaseNotes,
 		HTMLURL: "https://github.com/" + repoOwner + "/" + repoName + "/releases/tag/" + tag,
-		Assets:  []ReleaseAsset{asset},
+		Assets:  assets,
 	}, nil
 }
 

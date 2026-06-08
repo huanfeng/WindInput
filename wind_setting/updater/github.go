@@ -53,7 +53,7 @@ func platformAssetSuffixes() []string {
 	case "windows":
 		return []string{"-Setup.exe"}
 	case "darwin":
-		return []string{".dmg", "-mac.zip", "-macos.zip", "-arm64.dmg"}
+		return []string{"-macOS.pkg", ".dmg", "-mac.zip", "-macos.zip", "-arm64.dmg"}
 	default:
 		return nil
 	}
