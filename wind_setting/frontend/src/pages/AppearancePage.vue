@@ -44,6 +44,7 @@ import {
   indicatorSchema,
 } from "@/schemas/appearance.schema";
 import type { PageSchema } from "@/schemas/types";
+import { useToast } from "../composables/useToast";
 
 const props = defineProps<{
   formData: Config;
@@ -62,6 +63,8 @@ const emit = defineEmits<{
   themeDeleted: [themeName: string];
 }>();
 
+const { toast } = useToast();
+
 const themeImportOpen = ref(false);
 
 const themeServerRunning = ref(false);
@@ -72,6 +75,7 @@ const themeServerLoading = ref(false);
 function onThemeImported(themeName: string) {
   themeImportOpen.value = false;
   emit("themeImported", themeName);
+  toast(`主题「${themeName}」导入成功`);
 }
 
 const themeSelectOpen = ref(false);

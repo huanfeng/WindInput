@@ -1003,12 +1003,23 @@ export interface ImportThemeResult {
   theme_name: string;
   conflict: boolean;
   error_msg: string;
+  file_path: string;
 }
 
 export async function importThemeFromFile(
   force: boolean,
 ): Promise<ImportThemeResult> {
   return (window as any).go.main.App.ImportThemeFromFile(
+    force,
+  ) as ImportThemeResult;
+}
+
+export async function importThemeFromFilePath(
+  path: string,
+  force: boolean,
+): Promise<ImportThemeResult> {
+  return (window as any).go.main.App.ImportThemeFromFilePath(
+    path,
     force,
   ) as ImportThemeResult;
 }

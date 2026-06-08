@@ -22,10 +22,11 @@ type ImportThemeResult struct {
 	ThemeName string `json:"theme_name"`
 	Conflict  bool   `json:"conflict"`
 	ErrorMsg  string `json:"error_msg"`
+	FilePath  string `json:"file_path"` // 文件导入冲突时回传已选路径，供二次确认时直接导入无需重新选择
 }
 
 // ImportThemeFromFile 打开系统文件选择对话框，读取并导入 yaml 主题文件。
-// force=true 时覆盖同名主题。
+// force=true 时覆盖同名主题。冲突时在结果中回传 FilePath，供前端确认覆盖时调用 ImportThemeFromFilePath 无需重新选择文件。
 func (a *App) ImportThemeFromFile(force bool) ImportThemeResult {
 	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "选择主题文件",
@@ -45,7 +46,28 @@ func (a *App) ImportThemeFromFile(force bool) ImportThemeResult {
 		return ImportThemeResult{ErrorMsg: "读取文件失败: " + err.Error()}
 	}
 
-	return importThemeFromContent(content, force)
+	result := importThemeFromContent(content, force)
+	if result.Conflict {
+		result.FilePath = path
+	}
+	return result
+}
+
+// ImportThemeFromFilePath 直接使用已知路径导入主题文件，不再打开文件选择对话框。
+// 用于文件导入冲突确认后的二次调用：前端缓存第一次选择的路径，确认覆盖时传入。
+func (a *App) ImportThemeFromFilePath(path string, force bool) ImportThemeResult {
+	if path == "" {
+		return ImportThemeResult{ErrorMsg: "文件路径不能为空"}
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return ImportThemeResult{ErrorMsg: "读取文件失败: " + err.Error()}
+	}
+	result := importThemeFromContent(content, force)
+	if result.Conflict {
+		result.FilePath = path
+	}
+	return result
 }
 
 // ImportThemeFromURL 从指定 URL 下载并导入 yaml 主题文件。

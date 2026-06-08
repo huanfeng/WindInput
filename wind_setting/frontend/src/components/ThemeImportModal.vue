@@ -25,12 +25,14 @@ const activeTab = ref<Tab>("file");
 const loading = ref(false);
 const errorMsg = ref("");
 const conflictName = ref("");
+const conflictFilePath = ref(""); // 文件导入冲突时缓存已选路径，确认覆盖无需重新选文件
 const yamlText = ref("");
 const urlInput = ref("");
 
 function resetState() {
   errorMsg.value = "";
   conflictName.value = "";
+  conflictFilePath.value = "";
 }
 
 function close() {
@@ -84,6 +86,7 @@ function handleResult(result: wailsApi.ImportThemeResult) {
   }
   if (result.conflict) {
     conflictName.value = result.theme_name;
+    conflictFilePath.value = result.file_path ?? "";
     errorMsg.value = "";
     return;
   }
@@ -91,18 +94,28 @@ function handleResult(result: wailsApi.ImportThemeResult) {
 }
 
 async function confirmOverwrite() {
-  if (activeTab.value === "file") {
-    await handleFileImport(true);
-  } else if (activeTab.value === "text") {
-    await handleTextImport(true);
-  } else {
-    await handleURLImport(true);
+  loading.value = true;
+  errorMsg.value = "";
+  try {
+    let result: wailsApi.ImportThemeResult;
+    if (activeTab.value === "file" && conflictFilePath.value) {
+      result = await wailsApi.importThemeFromFilePath(conflictFilePath.value, true);
+    } else if (activeTab.value === "text") {
+      result = await wailsApi.importThemeFromText(yamlText.value, true);
+    } else {
+      result = await wailsApi.importThemeFromURL(urlInput.value, true);
+    }
+    conflictName.value = "";
+    conflictFilePath.value = "";
+    handleResult(result);
+  } finally {
+    loading.value = false;
   }
-  conflictName.value = "";
 }
 
 function cancelOverwrite() {
   conflictName.value = "";
+  conflictFilePath.value = "";
 }
 
 async function pasteFromClipboard() {
