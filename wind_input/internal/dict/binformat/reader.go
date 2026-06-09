@@ -220,6 +220,12 @@ func (r *DictReader) LookupPrefix(prefix string, limit int) []candidate.Candidat
 	return r.scanPrefix(prefix, limit, false)
 }
 
+// AllEntries 返回整个词库的全部候选（top-K，limit>0 时按权重选；limit<=0 全量）。
+// 用空前缀走 scanPrefix 子树扫描（公开的 LookupPrefix 对空前缀短路返回 nil，故单列此法）。
+func (r *DictReader) AllEntries(limit int) []candidate.Candidate {
+	return r.scanPrefix("", limit, false)
+}
+
 // scanPrefix 扫描整个 prefix 子树并返回候选；excludeExact=true 时跳过 code==prefix。
 func (r *DictReader) scanPrefix(prefix string, limit int, excludeExact bool) []candidate.Candidate {
 	keyCount := int(r.header.KeyCount)

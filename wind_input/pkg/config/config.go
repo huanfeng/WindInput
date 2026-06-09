@@ -352,6 +352,9 @@ type SpecialModeConfig struct {
 	FixedLength   int      `yaml:"fixed_length,omitempty" json:"fixed_length,omitempty"`
 	ForceVertical bool     `yaml:"force_vertical,omitempty" json:"force_vertical,omitempty"`
 	AccentColor   string   `yaml:"accent_color,omitempty" json:"accent_color,omitempty"`
+	// ShowAllOnEntry 刚进入模式（编码为空）时是否立即列出整张码表的全部候选。
+	// false(默认)=只显示模式徽标提示，打字后才按前缀出候选；true=进入即列全部（大表慎用）。
+	ShowAllOnEntry bool `yaml:"show_all_on_entry,omitempty" json:"show_all_on_entry,omitempty"`
 	// —— 预留字段，MVP 不实现 ——
 	CodeCharset string   `yaml:"code_charset,omitempty" json:"code_charset,omitempty"`
 	Schemes     []string `yaml:"schemes,omitempty" json:"schemes,omitempty"`

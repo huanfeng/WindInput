@@ -466,6 +466,25 @@ func (ct *CodeTable) HasLongerCode(input string) bool {
 	return false
 }
 
+// AllCandidates 返回整张码表的全部候选（limit>0 时按权重取 top-K，<=0 全量）。
+// 供「进入即列全部」等场景使用；二进制模式走 binReader.AllEntries，内存模式遍历 entries。
+func (ct *CodeTable) AllCandidates(limit int) []candidate.Candidate {
+	if ct.binReader != nil {
+		return patchIsCommon(ct.binReader.AllEntries(limit))
+	}
+	var results []candidate.Candidate
+	for _, cands := range ct.entries {
+		results = append(results, cands...)
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Weight > results[j].Weight
+	})
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results
+}
+
 // LookupPrefixExcludeExact 前缀匹配查找（排除精确匹配）
 func (ct *CodeTable) LookupPrefixExcludeExact(prefix string, limit int) []candidate.Candidate {
 	if ct.binReader != nil {

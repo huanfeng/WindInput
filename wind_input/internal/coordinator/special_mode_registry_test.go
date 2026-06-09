@@ -41,6 +41,25 @@ func TestSpecialModeRegistry_MatchAndLoad(t *testing.T) {
 	}
 }
 
+// TestSpecialModeRegistry_AllCandidates 验证 wdb 路径下 AllCandidates 能列出整张码表
+// （wdb 的 LookupPrefix("") 返回 nil，AllCandidates 走 scanPrefix("") 绕过；
+// 这是 ShowAllOnEntry「进入即列全部」的依赖）。
+func TestSpecialModeRegistry_AllCandidates(t *testing.T) {
+	dir, _ := filepath.Abs("testdata")
+	reg := newSpecialModeRegistry([]config.SpecialModeConfig{
+		{ID: "sym", TriggerKeys: []string{"grave"}, Table: "special_symbols.dict.yaml", AutoCommit: "prefix_free"},
+	}, []string{dir}, testSpecialLogger())
+	tbl, err := reg.ensureLoaded(reg.get("sym"))
+	if err != nil {
+		t.Fatalf("ensureLoaded: %v", err)
+	}
+	// 夹具至少含 jt(→/←)、xh(①)、arrow(⇧) 等多条；AllCandidates 应远多于 0。
+	all := tbl.AllCandidates(200)
+	if len(all) < 4 {
+		t.Fatalf("AllCandidates want >=4 entries, got %d", len(all))
+	}
+}
+
 func testSpecialLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

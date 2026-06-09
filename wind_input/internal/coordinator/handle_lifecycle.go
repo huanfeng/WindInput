@@ -204,7 +204,7 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	// 仍需把候选窗（即便只有 preedit）渲染出来。
 	// 非嵌入模式：主输入也允许空候选 show，让用户看到 inputBuffer（如 v/i/u/o
 	// 等无对应候选的拼音字母），避免编码既不嵌入宿主又看不到候选窗的死角。
-	canShow := hasUI && (hasCandidates || hasTempEnglish || hasTempPinyin || hasQuickInput || (hasMainInput && !c.isInlinePreedit()))
+	canShow := hasUI && (hasCandidates || hasTempEnglish || hasTempPinyin || hasQuickInput || hasSpecial || (hasMainInput && !c.isInlinePreedit()))
 	if hasInput && canShow {
 		// 首次 show（pendingFirstShow 刚被消费）必须无条件 show，无视 3px 过滤；
 		// 否则若 reflow 后坐标恰好与按键前差 ≤3px，候选窗会一直不显示。

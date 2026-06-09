@@ -99,7 +99,8 @@ func (c *Coordinator) updateSpecialCandidates() (autoCommit bool) {
 		return false
 	}
 	buf := c.specialBuffer
-	if len(buf) == 0 {
+	if len(buf) == 0 && !inst.cfg.ShowAllOnEntry {
+		// 默认：刚进入（空编码）只显示模式徽标提示，不列候选。
 		c.candidates = nil
 		c.totalPages = 1
 		c.currentPage = 1
@@ -108,9 +109,17 @@ func (c *Coordinator) updateSpecialCandidates() (autoCommit bool) {
 	}
 
 	// 展示用前缀匹配（进入后/打字时即时提示），自动上屏判定用精确匹配。
+	// 空编码 + ShowAllOnEntry：prefix "" 列出整张码表（Lookup/HasLongerCode 对空串
+	// 分别返回 空/false，故不会误触自动上屏）。
 	exact := inst.table.Lookup(buf)
 	hasLonger := inst.table.HasLongerCode(buf)
-	display := inst.table.LookupPrefix(buf, specialPrefixLimit)
+	var display []ui.Candidate
+	if len(buf) == 0 {
+		// ShowAllOnEntry：空编码列出整张码表（LookupPrefix("") 在 wdb 下返回 nil，故用 AllCandidates）。
+		display = inst.table.AllCandidates(specialPrefixLimit)
+	} else {
+		display = inst.table.LookupPrefix(buf, specialPrefixLimit)
+	}
 	c.candidates = c.buildSpecialUICandidates(display)
 
 	auto := decideSpecialAutoCommit(inst.cfg.AutoCommit, inst.cfg.FixedLength, len(buf), len(exact), hasLonger)
