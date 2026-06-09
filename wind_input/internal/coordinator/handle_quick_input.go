@@ -115,6 +115,15 @@ func (c *Coordinator) getQuickInputTriggerKey(key string, keyCode int) string {
 	return ""
 }
 
+// matchQuickInputTrigger 纯触发键匹配 + enabled 门禁，不含 buffer/candidates 状态门禁。
+// 状态优先级由 decideBufferedTrigger 统一裁决。
+func (c *Coordinator) matchQuickInputTrigger(key string, keyCode int) string {
+	if c.config == nil || len(c.config.Input.QuickInput.TriggerKeys) == 0 {
+		return ""
+	}
+	return matchTriggerKeyInList(c.config.Input.QuickInput.TriggerKeys, key, keyCode)
+}
+
 // quickInputPrefix 返回当前触发键对应的字符
 func (c *Coordinator) quickInputPrefix() string {
 	parsed, _ := keys.ParseKey(c.quickInputTriggerKey)
@@ -140,8 +149,8 @@ func (c *Coordinator) quickInputPrefix() string {
 	}
 }
 
-// enterQuickInputMode 进入快捷输入模式，triggerKey 标识触发键类型
-func (c *Coordinator) enterQuickInputMode(triggerKey string) *bridge.KeyEventResult {
+// setupQuickInputMode 设置快捷输入模式状态（不构造返回结果）。返回 (prefix, true)。
+func (c *Coordinator) setupQuickInputMode(triggerKey string) (string, bool) {
 	c.quickInputMode = true
 	c.quickInputTriggerKey = triggerKey
 	c.quickInputBuffer = ""
@@ -165,8 +174,13 @@ func (c *Coordinator) enterQuickInputMode(triggerKey string) *bridge.KeyEventRes
 	// 否则会先用按键前的旧坐标显示再跳到正确位置（与 handleAlphaKey 首字符一致）。
 	c.armPendingFirstShow()
 
-	preedit := c.quickInputPrefix()
-	return c.modeCompositionResult(preedit, len(preedit))
+	return c.quickInputPrefix(), true
+}
+
+// enterQuickInputMode 空 buffer 进入快捷输入模式（薄封装）。triggerKey 标识触发键类型
+func (c *Coordinator) enterQuickInputMode(triggerKey string) *bridge.KeyEventResult {
+	prefix, _ := c.setupQuickInputMode(triggerKey)
+	return c.modeCompositionResult(prefix, len(prefix))
 }
 
 // handleQuickInputKey 处理快捷输入模式下的按键

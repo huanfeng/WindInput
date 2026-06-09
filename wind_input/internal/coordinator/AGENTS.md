@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-06-01 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-06-09 -->
 
 # internal/coordinator
 
@@ -10,7 +10,8 @@
 | File | Description |
 |------|-------------|
 | `coordinator.go` | `Coordinator` 结构体定义、构造函数、状态广播、信号通道（退出/重启）；`NotifySchemaActivated(displayName)` 供外部异步资源就绪后调用，触发 toolbar/TSF 状态同步并显示"<方案>已就绪"指示器 |
-| `handle_key_event.go` | 按键事件主入口，根据模式分发处理 |
+| `handle_key_event.go` | 按键事件主入口，根据模式分发处理；正在输入（buffer 非空 / 有候选）时按触发键先走统一优先级回落链 `routeBufferedTriggerKey`（见 `mode_trigger.go`），buffer 空场景仍走旧 `getXxxTriggerKey` |
+| `mode_trigger.go` | 触发键激活模式的统一优先级回落链：`decideBufferedTrigger`（纯决策，无副作用）+ `routeBufferedTriggerKey`（执行）+ `enterModeCommitting`（顶码上屏当前高亮候选后原子进入模式，复用 `doSelectCandidate` + `HasNewComposition`）+ `triggerModes()` 有序模式表（快捷输入 > 临时拼音 > 临时英文，未来模式插中间）+ `matchTriggerKeyInList` 公共键匹配。详见 docs/design/mode-trigger-priority-chain.md |
 | `handle_key_action.go` | 具体按键动作处理（退格、确认、翻页、数字选词等） |
 | `handle_candidate_action.go` | 候选词快捷键操作：`matchCandidateActionKey` 匹配 Ctrl+数字/Ctrl+Shift+数字热键；`handleDeleteCandidateByKey` 删除指定候选词（走 `dm.DeleteWord(code, text, cand.ID)`）；`handlePinCandidateByKey` 置顶指定候选词（走 `dm.PinWord(code, text, cand.ID, 0)`）；**R2**: 短语候选统一走 Shadow（不再走 PhraseLayer.MoveToTop） |
 | `handle_candidates.go` | 候选词请求引擎计算、分页管理、UI 更新；候选数分档：`refreshEffectivePerPage` 在每条分页源头把生效每页数物化到 `c.candidatesPerPage`（基础档 `candidatesPerPageBase` / 扩展档 `candidatesPerPageExtended`），`shouldUseExtendedCandidates` 是新增"扩展档"场景的唯一对接点 |
@@ -49,6 +50,7 @@
 - 热键编译结果缓存（`cachedKeyDownHotkeys`），配置变更时置 `hotkeysDirty=true` 触发重新编译
 - 运行时状态（中英文、全角、中文标点）在 `startup.remember_last_state=true` 时从 `config.RuntimeState` 恢复
 - 临时拼音模式（`handle_temp_pinyin.go`）通过 `engine.Manager.ActivateTempPinyin` 向 `CompositeDict` 注入拼音词库层，退出时 `DeactivateTempPinyin` 卸载，防止拼音词库污染五笔查询
+- **模式激活优先级回落链**（`mode_trigger.go`，2026-06-09）：正在输入（buffer 非空 / 有候选）时按触发键，`handle_key_event.go` 入口先调 `routeBufferedTriggerKey`，按 `decideBufferedTrigger`（纯函数，可单测）走优先级链：① 双拼韵母键 → 送引擎 ② 二候选键(候选≥2) ③ 三候选键(候选≥3) ④ **模式激活键 → 顶码上屏当前高亮候选 + 进模式** ⑤ overflow ⑥ 标点。同一键身兼多职时按此优先级裁决（如 `;` 候选足够选候选、不足则回落进模式）。模式间顺序由 `triggerModes()` 定义：**快捷输入 > 临时拼音 > 临时英文**，未来模式（生僻字 / 符号码表）插在临时拼音之后、临时英文之前。各模式拆为 `matchXxxTrigger`（纯匹配 + enabled，**临时拼音排除 z**）+ `setupXxxMode`（状态设置）。**buffer 空场景仍走旧 `getXxxTriggerKey`**（保留 z 键首次触发临时拼音逻辑，`zHybridFallback` 只管已以 z 开头的回退）。改动这条链或新增模式前必读 docs/design/mode-trigger-priority-chain.md
 - 命令直通车 (cmdbar) 接入：`NewCoordinator` 末尾构造 `cmdbarHistory`/`cmdbarServices` 并通过 `installCmdbarPhraseHook` 把解析+求值闭包注入到当前 schema 的 `PhraseLayer.SetCmdbarHook`, 并构造 `c.cmdbarValueExpander` 用于候选后处理。`recordCommit` 同步 `cmdbarHistory.Push(text)` 让 `last()` 可见上一次上屏；`doSelectCandidate` 检测候选 `Actions` 非空时返回 `ResponseTypeClearComposition` 并在 goroutine 内顺序执行动作（错误只记 WARN 元数据，不带内容）。`handlePinCandidateByKey` 拒绝对 cmdbar 动作候选置顶。短语 value **不含** cmdbar marker (`$CC(`/`$CC1(`) 时仍走旧 `templateEngine.Expand` 路径，零行为变更。
 - 命令前缀可见性: `$CC(...)` 短语仅在精确编码匹配时出现; `$CC1(...)` 同时参与前缀匹配。该语义由 `dict.IsCmdbarExactOnly` + 各 `SearchPrefix` 尾部 `filterCmdbarExactOnly` 共同实现, coordinator 侧无需配置/热更新入口 (旧 `Phrase.CmdbarPrefixNav` 已彻底删除)。
 - 候选后处理: `updateCandidatesEx` 在把 engine 返回的候选转 UI 候选之前, 调 `applyValueExpansion(*candidate)` 用同一个 `ValueExpander` 统一展开 `$CC(`/`$CC1(`/`$X`; PhraseLayer 出口候选 (`PhraseTemplate != ""`) 跳过, 普通候选用 `strings.IndexByte(text, '$') < 0` 早跳。

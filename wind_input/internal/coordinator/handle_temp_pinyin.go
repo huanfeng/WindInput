@@ -94,6 +94,28 @@ func (c *Coordinator) getTempPinyinTriggerKey(key string, keyCode int) string {
 	return ""
 }
 
+// matchTempPinyinTrigger 纯匹配 + enabled（引擎类型 + 临时拼音开关），不含状态门禁。
+// 不处理 z（z 走 handleAlphaKey/zHybridFallback 独立路径）。
+func (c *Coordinator) matchTempPinyinTrigger(key string, keyCode int) string {
+	if c.engineMgr == nil || !c.engineMgr.IsCurrentEngineType(schema.EngineTypeCodeTable) {
+		return ""
+	}
+	if !c.engineMgr.IsTempPinyinEnabled() {
+		return ""
+	}
+	if c.config == nil {
+		return ""
+	}
+	// 过滤掉 z，仅匹配标点类触发键
+	punctKeys := make([]string, 0, len(c.config.Input.TempPinyin.TriggerKeys))
+	for _, tk := range c.config.Input.TempPinyin.TriggerKeys {
+		if tk != "z" {
+			punctKeys = append(punctKeys, tk)
+		}
+	}
+	return matchTriggerKeyInList(punctKeys, key, keyCode)
+}
+
 // isTempPinyinTriggerKeyMatch 仅检查按键是否匹配临时拼音触发键（不检查状态条件）
 func (c *Coordinator) isTempPinyinTriggerKeyMatch(key string, keyCode int) bool {
 	if c.config == nil {
@@ -148,14 +170,14 @@ func (c *Coordinator) isTempPinyinTriggerKeyMatch(key string, keyCode int) bool 
 	return false
 }
 
-// enterTempPinyinMode 进入临时拼音模式
-// triggerKey 标识触发键类型（"backtick"/"semicolon"/"z"）
-func (c *Coordinator) enterTempPinyinMode(triggerKey string) *bridge.KeyEventResult {
+// setupTempPinyinMode 设置临时拼音模式状态（不构造返回结果）。
+// 返回 preedit 前缀字符与是否成功（拼音引擎加载失败 → false）。
+func (c *Coordinator) setupTempPinyinMode(triggerKey string) (string, bool) {
 	// 确保拼音引擎已加载
 	if c.engineMgr != nil {
 		if err := c.engineMgr.EnsurePinyinLoaded(); err != nil {
 			c.logger.Warn("Failed to load pinyin engine for temp pinyin", "error", err)
-			return nil
+			return "", false
 		}
 		// 激活拼音词库层（进入时注册，退出时卸载，避免污染五笔查询）
 		c.engineMgr.ActivateTempPinyin()
@@ -175,7 +197,16 @@ func (c *Coordinator) enterTempPinyinMode(triggerKey string) *bridge.KeyEventRes
 	// 否则会先用按键前的旧坐标显示再跳到正确位置（与 handleAlphaKey 首字符一致）。
 	c.armPendingFirstShow()
 
-	prefix := c.tempPinyinPrefix()
+	return c.tempPinyinPrefix(), true
+}
+
+// enterTempPinyinMode 空 buffer 进入临时拼音模式（薄封装）。
+// triggerKey 标识触发键类型（"backtick"/"semicolon"/"z"）
+func (c *Coordinator) enterTempPinyinMode(triggerKey string) *bridge.KeyEventResult {
+	prefix, ok := c.setupTempPinyinMode(triggerKey)
+	if !ok {
+		return nil
+	}
 	return c.modeCompositionResult(prefix, len(prefix))
 }
 

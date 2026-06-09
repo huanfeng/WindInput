@@ -29,6 +29,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/schema"
 	"github.com/huanfeng/wind_input/internal/transform"
 	"github.com/huanfeng/wind_input/pkg/config"
+	"github.com/huanfeng/wind_input/pkg/keys"
 )
 
 // testCoordinator 封装一个最小化构造的 *Coordinator + *testing.T,
@@ -80,6 +81,37 @@ func withChineseMode(chinese bool) testOption {
 // withConfig 整体替换 config（便于测试 hotkeys / quick input / temp pinyin 配置）.
 func withConfig(cfg *config.Config) testOption {
 	return func(c *Coordinator) { c.config = cfg }
+}
+
+// withCandidates 注入候选 + inputBuffer（模拟"正在输入有候选"）。
+func withCandidates(buffer string, cands ...candidate.Candidate) testOption {
+	return func(c *Coordinator) {
+		c.inputBuffer = buffer
+		c.inputCursorPos = len(buffer)
+		c.candidates = cands
+		c.currentPage = 1
+		c.selectedIndex = 0
+	}
+}
+
+// withSelectKeyGroups 配置二三候选选择键分组（如 PairSemicolonQuote → ; 二候选 / ' 三候选）。
+func withSelectKeyGroups(groups ...keys.PairGroup) testOption {
+	return func(c *Coordinator) {
+		if c.config == nil {
+			c.config = &config.Config{}
+		}
+		c.config.Input.SelectKeyGroups = groups
+	}
+}
+
+// withQuickInputTriggers 配置快捷输入触发键（enabled 仅依赖此项，不触达引擎）。
+func withQuickInputTriggers(keysList ...string) testOption {
+	return func(c *Coordinator) {
+		if c.config == nil {
+			c.config = &config.Config{}
+		}
+		c.config.Input.QuickInput.TriggerKeys = keysList
+	}
 }
 
 // ── engine.Manager fixture（最小化） ─────────────────────────────────────────

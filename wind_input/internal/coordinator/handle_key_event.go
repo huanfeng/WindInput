@@ -494,19 +494,27 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		return c.handleQuickInputKey(key, &data)
 	}
 
-	// 检查是否应触发临时拼音模式（Shift 时不触发，Shift+` 应输出 ~）
+	// 正在输入（有 buffer / 有候选）时：统一优先级回落链
+	// （二三候选 > 模式激活 > overflow > 标点）。详见
+	// docs/design/mode-trigger-priority-chain.md。
+	if !hasShift && c.chineseMode && (len(c.inputBuffer) > 0 || len(c.candidates) > 0) {
+		if r := c.routeBufferedTriggerKey(key, &data); r != nil {
+			return r
+		}
+	}
+
+	// buffer 为空且无候选：保留原三段 getXxxTriggerKey 调用，仅按新优先级
+	// 顺序重排（快捷输入 > 临时拼音 > 临时英文）。
+	// ★ 保留旧 getXxxTriggerKey：getTempPinyinTriggerKey 内含 z 键首次触发逻辑，
+	//   matchTempPinyinTrigger 已排除 z；改用 matchXxx 遍历会丢失 z 首次触发 → 回归。
+	if triggerKey := c.getQuickInputTriggerKey(key, data.KeyCode); !hasShift && triggerKey != "" {
+		return c.enterQuickInputMode(triggerKey)
+	}
 	if triggerKey := c.getTempPinyinTriggerKey(key, data.KeyCode); !hasShift && triggerKey != "" {
 		return c.enterTempPinyinMode(triggerKey)
 	}
-
-	// 检查是否应触发临时英文模式（触发键方式，Shift 时不触发）
 	if triggerKey := c.getTempEnglishTriggerKey(key, data.KeyCode); !hasShift && triggerKey != "" {
 		return c.enterTempEnglishModeWithTrigger(triggerKey)
-	}
-
-	// 检查是否应触发快捷输入模式（仅在未按 Shift 时，且临时拼音未拦截分号时）
-	if triggerKey := c.getQuickInputTriggerKey(key, data.KeyCode); !hasShift && triggerKey != "" {
-		return c.enterQuickInputMode(triggerKey)
 	}
 
 	// 中文模式下，Shift+字母处理（CapsLock OFF 时）
@@ -710,25 +718,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		return result
 
 	case !hasShift && c.isSelectKey2(key, data.KeyCode):
-		// Handle 2nd candidate selection key (e.g., semicolon)
-		// Shift 时不触发选择（Shift+; 应输出 : 而非选候选）
-		// 双拼模式下，若该键是当前方案的韵母键且有未上屏编码，优先送入引擎
-		if len(c.inputBuffer) > 0 && c.isShuangpinFinalKey(key) {
-			return c.handleAlphaKey(key)
-		}
-		if len(c.inputBuffer) > 0 {
-			pageStart := (c.currentPage - 1) * c.candidatesPerPage
-			idx := pageStart + 1
-			if idx < len(c.candidates) && idx-pageStart < c.candidatesPerPage {
-				return c.selectCandidate(idx)
-			}
-			// 候选不足时（含无候选），按 overflow 策略处理
-			if result := c.handleOverflowSelectKey(key); result != nil {
-				return result
-			}
-		}
-		// 无输入缓冲时，按标点处理
-		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
+		// buffer 非空时的二候选/overflow 已由 routeBufferedTriggerKey 接管，
+		// 这里只处理无输入缓冲时的标点回退。
+		if len(c.inputBuffer) == 0 && len(key) == 1 && c.isPunctuation(rune(key[0])) {
 			return c.handlePunctuation(rune(key[0]), prevDigitState, data.PrevChar)
 		}
 		return nil
@@ -737,25 +729,9 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		return c.handlePinyinSeparator()
 
 	case !hasShift && c.isSelectKey3(key, data.KeyCode):
-		// Handle 3rd candidate selection key (e.g., quote)
-		// Shift 时不触发选择（Shift+' 应输出 " 而非选候选）
-		// 双拼模式下，若该键是当前方案的韵母键且有未上屏编码，优先送入引擎
-		if len(c.inputBuffer) > 0 && c.isShuangpinFinalKey(key) {
-			return c.handleAlphaKey(key)
-		}
-		if len(c.inputBuffer) > 0 {
-			pageStart := (c.currentPage - 1) * c.candidatesPerPage
-			idx := pageStart + 2
-			if idx < len(c.candidates) && idx-pageStart < c.candidatesPerPage {
-				return c.selectCandidate(idx)
-			}
-			// 候选不足时（含无候选），按 overflow 策略处理
-			if result := c.handleOverflowSelectKey(key); result != nil {
-				return result
-			}
-		}
-		// 无输入缓冲时，按标点处理
-		if len(key) == 1 && c.isPunctuation(rune(key[0])) {
+		// buffer 非空时的三候选/overflow 已由 routeBufferedTriggerKey 接管，
+		// 这里只处理无输入缓冲时的标点回退。
+		if len(c.inputBuffer) == 0 && len(key) == 1 && c.isPunctuation(rune(key[0])) {
 			return c.handlePunctuation(rune(key[0]), prevDigitState, data.PrevChar)
 		}
 		return nil

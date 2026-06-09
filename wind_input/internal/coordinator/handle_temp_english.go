@@ -149,8 +149,9 @@ func (c *Coordinator) enterTempEnglishMode(key string) *bridge.KeyEventResult {
 	return c.tempEnglishCompositionResult()
 }
 
-// enterTempEnglishModeWithTrigger 通过触发键进入临时英文模式
-func (c *Coordinator) enterTempEnglishModeWithTrigger(triggerKey string) *bridge.KeyEventResult {
+// setupTempEnglishMode 设置临时英文模式状态（不构造返回结果）。返回 (prefix, true)。
+// 空 buffer 进入，preedit 仅为触发键前缀。
+func (c *Coordinator) setupTempEnglishMode(triggerKey string) (string, bool) {
 	c.tempEnglishMode = true
 	c.tempEnglishTriggerKey = triggerKey
 	c.tempEnglishBuffer = ""
@@ -163,7 +164,13 @@ func (c *Coordinator) enterTempEnglishModeWithTrigger(triggerKey string) *bridge
 	c.logger.Debug("Entered temp English mode via trigger key", "triggerKey", triggerKey)
 	c.armPendingFirstShow()
 
-	return c.tempEnglishCompositionResult()
+	return c.tempEnglishTriggerPrefix(), true
+}
+
+// enterTempEnglishModeWithTrigger 通过触发键进入临时英文模式（薄封装）
+func (c *Coordinator) enterTempEnglishModeWithTrigger(triggerKey string) *bridge.KeyEventResult {
+	prefix, _ := c.setupTempEnglishMode(triggerKey)
+	return c.modeCompositionResult(prefix, len(prefix))
 }
 
 // exitTempEnglishMode 退出临时英文模式
@@ -882,6 +889,14 @@ func (c *Coordinator) isTempEnglishTriggerKeyMatch(key string, keyCode int) bool
 }
 
 // ─── 触发键 ───
+
+// matchTempEnglishTrigger 纯匹配 + enabled，不含状态门禁。
+func (c *Coordinator) matchTempEnglishTrigger(key string, keyCode int) string {
+	if c.config == nil || !c.config.Input.ShiftTempEnglish.Enabled {
+		return ""
+	}
+	return matchTriggerKeyInList(c.config.Input.ShiftTempEnglish.TriggerKeys, key, keyCode)
+}
 
 // getTempEnglishTriggerKey 检查按键是否应触发临时英文模式
 func (c *Coordinator) getTempEnglishTriggerKey(key string, keyCode int) string {
