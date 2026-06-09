@@ -72,15 +72,26 @@ type triggerModeEntry struct {
 }
 
 // triggerModes 按优先级返回模式表。
-// 顺序：快捷输入 > 临时拼音 >（未来模式插此）> 临时英文。
+// 顺序：快捷输入 > 临时拼音 > 特殊模式（配置顺序）> 临时英文。
 // 详见 docs/design/mode-trigger-priority-chain.md。
 func (c *Coordinator) triggerModes() []triggerModeEntry {
-	return []triggerModeEntry{
+	modes := []triggerModeEntry{
 		{name: "quick_input", match: c.matchQuickInputTrigger, setup: c.setupQuickInputMode},
 		{name: "temp_pinyin", match: c.matchTempPinyinTrigger, setup: c.setupTempPinyinMode},
-		// ★ 未来模式（生僻字 / 符号码表）插入此处
-		{name: "temp_english", match: c.matchTempEnglishTrigger, setup: c.setupTempEnglishMode},
 	}
+	// 特殊模式实例（配置顺序）插入临时拼音之后、临时英文之前。
+	if c.specialModeReg != nil {
+		for _, inst := range c.specialModeReg.instances {
+			id := inst.cfg.ID
+			modes = append(modes, triggerModeEntry{
+				name:  "special:" + id,
+				match: func(key string, keyCode int) string { return c.matchSpecialTrigger(id, key, keyCode) },
+				setup: func(triggerKey string) (string, bool) { return c.setupSpecialMode(id, triggerKey) },
+			})
+		}
+	}
+	modes = append(modes, triggerModeEntry{name: "temp_english", match: c.matchTempEnglishTrigger, setup: c.setupTempEnglishMode})
+	return modes
 }
 
 // decideBufferedTrigger 裁决 buffer 非空 / 有候选时一个 !hasShift 键的归属。
