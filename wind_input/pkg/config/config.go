@@ -313,6 +313,7 @@ type InputConfig struct {
 	QuickInput           QuickInputConfig       `yaml:"quick_input" json:"quick_input"`
 	OverflowBehavior     OverflowBehaviorConfig `yaml:"overflow_behavior" json:"overflow_behavior"` // 候选按键无效时的处理策略
 	Phrase               PhraseConfig           `yaml:"phrase" json:"phrase"`                       // 短语相关行为
+	SpecialModes         []SpecialModeConfig    `yaml:"special_modes,omitempty" json:"special_modes,omitempty"`
 }
 
 // PhraseConfig 短语相关行为配置（暂无 UI，文件配置）
@@ -332,6 +333,52 @@ type OverflowBehaviorConfig struct {
 	SelectKey OverflowBehavior `yaml:"select_key" json:"select_key"`
 	// 以词定字键无效时: "ignore"(不起作用) | "commit"(顶字上屏) | "commit_and_input"(顶字上屏并输入编码)
 	SelectCharKey OverflowBehavior `yaml:"select_char_key" json:"select_char_key"`
+}
+
+// 特殊模式自动上屏策略
+const (
+	SpecialAutoCommitPrefixFree  = "prefix_free"  // 唯一候选且无更长前缀
+	SpecialAutoCommitFixedLength = "fixed_length" // 达固定码长且唯一候选
+	SpecialAutoCommitManual      = "manual"       // 永远手动选
+)
+
+// SpecialModeConfig 引导键特殊模式（自定义码表）单实例配置
+type SpecialModeConfig struct {
+	ID            string   `yaml:"id" json:"id"`
+	Name          string   `yaml:"name" json:"name"`                 // 模式徽标显示名
+	TriggerKeys   []string `yaml:"trigger_keys" json:"trigger_keys"` // 引导键
+	Table         string   `yaml:"table" json:"table"`               // 码表文件，相对 schemas 目录
+	AutoCommit    string   `yaml:"auto_commit" json:"auto_commit"`   // prefix_free|fixed_length|manual
+	FixedLength   int      `yaml:"fixed_length,omitempty" json:"fixed_length,omitempty"`
+	ForceVertical bool     `yaml:"force_vertical,omitempty" json:"force_vertical,omitempty"`
+	AccentColor   string   `yaml:"accent_color,omitempty" json:"accent_color,omitempty"`
+	// —— 预留字段，MVP 不实现 ——
+	CodeCharset string   `yaml:"code_charset,omitempty" json:"code_charset,omitempty"`
+	Schemes     []string `yaml:"schemes,omitempty" json:"schemes,omitempty"`
+	Engines     []string `yaml:"engines,omitempty" json:"engines,omitempty"`
+}
+
+// Validate 校验单实例配置（不校验文件是否存在，那由 registry 在加载时做）。
+func (s SpecialModeConfig) Validate() error {
+	if s.ID == "" {
+		return fmt.Errorf("special mode: id 不能为空")
+	}
+	if len(s.TriggerKeys) == 0 {
+		return fmt.Errorf("special mode %q: trigger_keys 不能为空", s.ID)
+	}
+	if s.Table == "" {
+		return fmt.Errorf("special mode %q: table 不能为空", s.ID)
+	}
+	switch s.AutoCommit {
+	case SpecialAutoCommitPrefixFree, SpecialAutoCommitManual:
+	case SpecialAutoCommitFixedLength:
+		if s.FixedLength <= 0 {
+			return fmt.Errorf("special mode %q: auto_commit=fixed_length 时 fixed_length 必须 > 0", s.ID)
+		}
+	default:
+		return fmt.Errorf("special mode %q: 未知 auto_commit=%q", s.ID, s.AutoCommit)
+	}
+	return nil
 }
 
 // QuickInputConfig 快捷输入配置
