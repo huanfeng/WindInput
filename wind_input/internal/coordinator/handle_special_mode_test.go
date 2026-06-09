@@ -345,6 +345,55 @@ func TestSpecialMode_FixedLengthAutoCommit(t *testing.T) {
 	}
 }
 
+// TestSpecialMode_DynamicPagingExpand 验证翻页动态加载：limit 翻倍重查，加载到表尾停止。
+func TestSpecialMode_DynamicPagingExpand(t *testing.T) {
+	tc := newTestCoordinator(t)
+	dir, _ := filepath.Abs("testdata")
+	tc.specialModeReg = newSpecialModeRegistry(
+		[]config.SpecialModeConfig{{
+			ID: "pg", TriggerKeys: []string{"grave"},
+			Table: "special_paging.dict.yaml", AutoCommit: config.SpecialAutoCommitManual,
+		}},
+		[]string{dir}, testSpecialLogger())
+	inst := tc.specialModeReg.get("pg")
+	if _, err := tc.specialModeReg.ensureLoaded(inst); err != nil {
+		t.Fatalf("ensureLoaded: %v", err)
+	}
+
+	// 模拟已进入、已加载前 4 条（prefix "z" 共 12 条）。
+	tc.specialMode = true
+	tc.specialActiveID = "pg"
+	tc.specialBuffer = "z"
+	tc.specialCandidateInput = "z"
+	tc.specialCandidateLimit = 4
+	tc.specialHasMore = true
+	tc.candidates = tc.buildSpecialUICandidates(inst.table.LookupPrefix("z", 4))
+
+	// 第一次扩展：4 → 8，仍有更多（12 > 8）。
+	tc.expandSpecialCandidates()
+	if tc.specialCandidateLimit != 8 || len(tc.candidates) != 8 {
+		t.Fatalf("after 1st expand want limit=8/len=8, got limit=%d/len=%d", tc.specialCandidateLimit, len(tc.candidates))
+	}
+	if !tc.specialHasMore {
+		t.Error("should still have more after loading 8/12")
+	}
+
+	// 第二次扩展：8 → 16，命中表尾 12 条，停止。
+	tc.expandSpecialCandidates()
+	if len(tc.candidates) != 12 {
+		t.Fatalf("after 2nd expand want all 12, got %d", len(tc.candidates))
+	}
+	if tc.specialHasMore {
+		t.Error("should have no more after loading all 12")
+	}
+
+	// 第三次扩展：已无更多，应为 no-op。
+	tc.expandSpecialCandidates()
+	if len(tc.candidates) != 12 {
+		t.Fatalf("3rd expand should be no-op, got %d", len(tc.candidates))
+	}
+}
+
 // TestSpecialMode_HotReloadRebuildsRegistry 验证 UpdateInputConfig 热重载会重建 registry，
 // 使新增的 special_modes 配置立即生效（无需重启）。
 func TestSpecialMode_HotReloadRebuildsRegistry(t *testing.T) {

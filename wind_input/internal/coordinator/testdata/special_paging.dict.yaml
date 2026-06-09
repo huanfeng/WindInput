@@ -1,0 +1,19 @@
+---
+name: special_paging
+sort: by_order
+columns:
+  - code
+  - text
+...
+za	A
+zb	B
+zc	C
+zd	D
+ze	E
+zf	F
+zg	G
+zh	H
+zi	I
+zj	J
+zk	K
+zl	L

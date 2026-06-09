@@ -186,6 +186,11 @@ type specialModeState struct {
 	specialTriggerKey  string                 // 当前触发键
 	specialBuffer      string                 // 编码缓冲（不含触发符）
 	specialSavedLayout config.CandidateLayout // 进入前布局（force_vertical 时恢复用）
+	// 动态分级加载（对标正常模式 candidateLimit/candidateInput/hasMoreCandidates）：
+	// 初始只取一小批，翻页到末尾时 expandSpecialCandidates 翻倍重查。
+	specialCandidateLimit int    // 当前候选加载上限
+	specialCandidateInput string // 加载时的 specialBuffer 快照
+	specialHasMore        bool   // 码表中是否还有更多候选未加载
 }
 
 // Coordinator orchestrates between C++ Bridge, Engine, and native UI

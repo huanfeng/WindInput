@@ -105,21 +105,22 @@ func (c *Coordinator) updateSpecialCandidates() (autoCommit bool) {
 		c.totalPages = 1
 		c.currentPage = 1
 		c.selectedIndex = 0
+		c.specialHasMore = false
+		c.specialCandidateLimit = 0
+		c.specialCandidateInput = ""
 		return false
 	}
 
 	// 展示用前缀匹配（进入后/打字时即时提示），自动上屏判定用精确匹配。
 	// 空编码 + ShowAllOnEntry：prefix "" 列出整张码表（Lookup/HasLongerCode 对空串
 	// 分别返回 空/false，故不会误触自动上屏）。
+	// 动态分级：初始只取一小批，翻页到末尾再 expandSpecialCandidates 翻倍。
 	exact := inst.table.Lookup(buf)
 	hasLonger := inst.table.HasLongerCode(buf)
-	var display []ui.Candidate
-	if len(buf) == 0 {
-		// ShowAllOnEntry：空编码列出整张码表（LookupPrefix("") 在 wdb 下返回 nil，故用 AllCandidates）。
-		display = inst.table.AllCandidates(specialPrefixLimit)
-	} else {
-		display = inst.table.LookupPrefix(buf, specialPrefixLimit)
-	}
+	c.specialCandidateLimit = specialInitialCandidateLimit
+	c.specialCandidateInput = buf
+	display := c.specialLookup(inst, buf, c.specialCandidateLimit)
+	c.specialHasMore = len(display) >= c.specialCandidateLimit
 	c.candidates = c.buildSpecialUICandidates(display)
 
 	auto := decideSpecialAutoCommit(inst.cfg.AutoCommit, inst.cfg.FixedLength, len(buf), len(exact), hasLonger)
@@ -231,6 +232,9 @@ func (c *Coordinator) handleSpecialModeKey(key string, data *bridge.KeyEventData
 		if c.currentPage < c.totalPages {
 			c.currentPage++
 			c.selectedIndex = 0
+			if c.specialHasMore && c.currentPage >= c.totalPages-1 {
+				c.expandSpecialCandidates()
+			}
 			c.showSpecialUI()
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
@@ -269,6 +273,9 @@ func (c *Coordinator) handleSpecialModeKey(key string, data *bridge.KeyEventData
 			} else if c.currentPage < c.totalPages {
 				c.currentPage++
 				c.selectedIndex = 0
+				if c.specialHasMore && c.currentPage >= c.totalPages-1 {
+					c.expandSpecialCandidates()
+				}
 				c.showSpecialUI()
 			}
 		}
@@ -350,8 +357,65 @@ func (c *Coordinator) specialPunctCommit(key string) *bridge.KeyEventResult {
 	return c.exitSpecialMode(true, head+tail)
 }
 
-// specialPrefixLimit 特殊模式前缀匹配展示候选的上限。
-const specialPrefixLimit = 200
+// 动态分级加载参数（对标正常模式：初始小批 + 翻页到末尾翻倍，上限封顶）。
+const (
+	specialInitialCandidateLimit = 100  // 初始加载候选上限
+	specialMaxCandidateLimit     = 5000 // 翻倍加载的封顶
+)
+
+// specialLookup 按编码取展示候选：空编码走 AllCandidates（列全表），否则前缀匹配。
+// 返回原始码表候选（未展开 $AA/$SS），limit 为本次加载上限。
+func (c *Coordinator) specialLookup(inst *specialModeInstance, buf string, limit int) []ui.Candidate {
+	if len(buf) == 0 {
+		// LookupPrefix("") 在 wdb 下短路返回 nil，列全表须用 AllCandidates。
+		return inst.table.AllCandidates(limit)
+	}
+	return inst.table.LookupPrefix(buf, limit)
+}
+
+// expandSpecialCandidates 翻页到已加载末尾时翻倍重查更多候选（镜像 expandCandidates）。
+func (c *Coordinator) expandSpecialCandidates() {
+	if !c.specialHasMore || c.specialCandidateInput != c.specialBuffer {
+		return
+	}
+	if c.specialModeReg == nil {
+		return
+	}
+	inst := c.specialModeReg.get(c.specialActiveID)
+	if inst == nil || inst.table == nil {
+		return
+	}
+	newLimit := c.specialCandidateLimit * 2
+	if newLimit > specialMaxCandidateLimit {
+		newLimit = specialMaxCandidateLimit
+	}
+	if newLimit <= c.specialCandidateLimit {
+		c.specialHasMore = false
+		return
+	}
+	display := c.specialLookup(inst, c.specialBuffer, newLimit)
+	if len(display) <= c.specialCandidateLimit {
+		// 没拿到更多（已到表尾）：停止扩展。
+		c.specialHasMore = false
+		return
+	}
+	c.candidates = c.buildSpecialUICandidates(display)
+	c.specialCandidateLimit = newLimit
+	c.specialHasMore = len(display) >= newLimit
+
+	c.refreshEffectivePerPage()
+	total := len(c.candidates)
+	c.totalPages = (total + c.candidatesPerPage - 1) / c.candidatesPerPage
+	if c.totalPages < 1 {
+		c.totalPages = 1
+	}
+	if c.currentPage > c.totalPages {
+		c.currentPage = c.totalPages
+	}
+	if c.currentPage < 1 {
+		c.currentPage = 1
+	}
+}
 
 // commitSpecialAuto 自动上屏：提交当前 buffer 的精确匹配候选（唯一），
 // 而非前缀展示列表的首项——避免 fixed_length 档存在更长码时选错。
@@ -432,6 +496,9 @@ func (c *Coordinator) exitSpecialMode(commit bool, text string) *bridge.KeyEvent
 	c.specialTriggerKey = ""
 	c.specialBuffer = ""
 	c.specialSavedLayout = ""
+	c.specialCandidateLimit = 0
+	c.specialCandidateInput = ""
+	c.specialHasMore = false
 	c.candidates = nil
 	c.currentPage = 1
 	c.totalPages = 1
@@ -511,6 +578,12 @@ func (c *Coordinator) showSpecialUI() {
 	c.uiManager.SetModeLabel(label)
 	c.uiManager.SetModeAccentColor(c.modeAccentColor("special:" + id))
 
+	// 分级加载：还有更多未加载时传负 totalPages，告知渲染层「页数不止于此」（镜像主流程）。
+	displayTotalPages := c.totalPages
+	if c.specialHasMore {
+		displayTotalPages = -c.totalPages
+	}
+
 	c.uiManager.ShowCandidates(
 		displayCandidates,
 		preedit,
@@ -519,7 +592,7 @@ func (c *Coordinator) showSpecialUI() {
 		caretY,
 		caretHeight,
 		c.currentPage,
-		c.totalPages,
+		displayTotalPages,
 		len(c.candidates),
 		c.candidatesPerPage,
 		c.selectedIndex,
