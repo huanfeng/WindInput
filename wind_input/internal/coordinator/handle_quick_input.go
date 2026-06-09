@@ -124,9 +124,9 @@ func (c *Coordinator) matchQuickInputTrigger(key string, keyCode int) string {
 	return matchTriggerKeyInList(c.config.Input.QuickInput.TriggerKeys, key, keyCode)
 }
 
-// quickInputPrefix 返回当前触发键对应的字符
-func (c *Coordinator) quickInputPrefix() string {
-	parsed, _ := keys.ParseKey(c.quickInputTriggerKey)
+// triggerKeyToChar 将触发键名映射到其对应的字符（供多种模式复用）。
+func triggerKeyToChar(triggerKey string) string {
+	parsed, _ := keys.ParseKey(triggerKey)
 	switch parsed {
 	case keys.KeyGrave:
 		return "`"
@@ -147,6 +147,11 @@ func (c *Coordinator) quickInputPrefix() string {
 	default:
 		return ";"
 	}
+}
+
+// quickInputPrefix 返回当前触发键对应的字符
+func (c *Coordinator) quickInputPrefix() string {
+	return triggerKeyToChar(c.quickInputTriggerKey)
 }
 
 // setupQuickInputMode 设置快捷输入模式状态（不构造返回结果）。返回 (prefix, true)。

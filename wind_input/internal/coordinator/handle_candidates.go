@@ -388,7 +388,7 @@ func (c *Coordinator) refreshEffectivePerPage() {
 //   - 临时拼音 / 快捷输入：直接读已有模式标志（事件型，有明确进入/退出）
 //   - 候选含 PhraseLayer 短语（如 zzbd）：内容型，每次查询结果派生
 func (c *Coordinator) shouldUseExtendedCandidates() bool {
-	if c.tempPinyinMode || c.quickInputMode {
+	if c.tempPinyinMode || c.quickInputMode || c.specialMode {
 		return true
 	}
 	for i := range c.candidates {

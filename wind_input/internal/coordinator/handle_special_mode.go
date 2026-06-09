@@ -1,0 +1,424 @@
+// handle_special_mode.go — 引导键特殊模式（自定义码表）状态机。
+// 结构上紧跟 handle_quick_input.go；查询码表而非日期/计算生成器，并实施三档自动上屏。
+package coordinator
+
+import (
+	"path/filepath"
+
+	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/ipc"
+	"github.com/huanfeng/wind_input/internal/store"
+	"github.com/huanfeng/wind_input/internal/transform"
+	"github.com/huanfeng/wind_input/internal/ui"
+	"github.com/huanfeng/wind_input/pkg/config"
+)
+
+// schemasDir 返回码表文件解析的基目录（exeDir/schemas）。
+// 注: dataDir/schemas 用户覆盖留作后续，MVP 用 exeDir/schemas。
+func (c *Coordinator) schemasDir() string {
+	exeDir, err := config.GetExeDir()
+	if err != nil {
+		return "schemas"
+	}
+	return filepath.Join(exeDir, "schemas")
+}
+
+// matchSpecialTrigger 检查 (key, keyCode) 是否匹配指定 id 的触发键，返回匹配的触发键字符串。
+func (c *Coordinator) matchSpecialTrigger(id, key string, keyCode int) string {
+	if c.specialModeReg == nil {
+		return ""
+	}
+	inst := c.specialModeReg.get(id)
+	if inst == nil {
+		return ""
+	}
+	return matchTriggerKeyInList(inst.cfg.TriggerKeys, key, keyCode)
+}
+
+// setupSpecialMode 进入特殊模式，初始化状态，返回 (prefix, true)；失败返回 ("", false)。
+func (c *Coordinator) setupSpecialMode(id, triggerKey string) (string, bool) {
+	if c.specialModeReg == nil {
+		return "", false
+	}
+	inst := c.specialModeReg.get(id)
+	if inst == nil {
+		return "", false
+	}
+	_, err := c.specialModeReg.ensureLoaded(inst)
+	if err != nil {
+		c.logger.Warn("special mode 码表加载失败",
+			"id", id, "err", err.Error())
+		return "", false
+	}
+
+	c.specialMode = true
+	c.specialActiveID = id
+	c.specialTriggerKey = triggerKey
+	c.specialBuffer = ""
+
+	// 强制竖排：保存当前布局并切换
+	if inst.cfg.ForceVertical {
+		if c.config != nil {
+			c.specialSavedLayout = c.config.UI.CandidateLayout
+		}
+		if c.uiManager != nil {
+			c.uiManager.SetCandidateLayout(config.LayoutVertical)
+		}
+	}
+
+	c.logger.Debug("Entered special mode", "id", id)
+
+	c.updateSpecialCandidates()
+
+	// 首次进入触发 C++ 端 StartComposition，等 OnLayoutChange 坐标到达后再 show。
+	c.armPendingFirstShow()
+
+	return c.specialPrefix(), true
+}
+
+// specialPrefix 返回当前特殊模式触发键对应的字符。
+func (c *Coordinator) specialPrefix() string {
+	return triggerKeyToChar(c.specialTriggerKey)
+}
+
+// updateSpecialCandidates 根据 specialBuffer 查表更新候选，返回是否应自动上屏。
+func (c *Coordinator) updateSpecialCandidates() (autoCommit bool) {
+	if c.specialModeReg == nil {
+		return false
+	}
+	inst := c.specialModeReg.get(c.specialActiveID)
+	if inst == nil || inst.table == nil {
+		return false
+	}
+	buf := c.specialBuffer
+	if len(buf) == 0 {
+		c.candidates = nil
+		c.totalPages = 1
+		c.currentPage = 1
+		c.selectedIndex = 0
+		return false
+	}
+
+	raw := inst.table.Lookup(buf)
+	hasLonger := inst.table.HasLongerCode(buf)
+	c.candidates = c.buildSpecialUICandidates(raw)
+
+	auto := decideSpecialAutoCommit(inst.cfg.AutoCommit, inst.cfg.FixedLength, len(buf), len(raw), hasLonger)
+
+	// 计算分页（与 updateQuickInputCandidates 一致）
+	c.refreshEffectivePerPage()
+	total := len(c.candidates)
+	c.totalPages = (total + c.candidatesPerPage - 1) / c.candidatesPerPage
+	if c.totalPages < 1 {
+		c.totalPages = 1
+	}
+	if c.currentPage > c.totalPages {
+		c.currentPage = c.totalPages
+	}
+	if c.currentPage < 1 {
+		c.currentPage = 1
+	}
+
+	return auto
+}
+
+// buildSpecialUICandidates 将码表候选转换为 UI 候选，并应用 $CC/$X 展开。
+func (c *Coordinator) buildSpecialUICandidates(raw []ui.Candidate) []ui.Candidate {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]ui.Candidate, 0, len(raw))
+	for i, cand := range raw {
+		cand.Index = i + 1
+		// 展开 $CC/$X 等模板变量（$AA/$SS 数组留待后续任务）
+		c.applyValueExpansion(&cand)
+		out = append(out, cand)
+	}
+	return out
+}
+
+// handleSpecialModeKey 处理特殊模式下的按键，镜像 handleQuickInputKey。
+func (c *Coordinator) handleSpecialModeKey(key string, data *bridge.KeyEventData) *bridge.KeyEventResult {
+	vk := uint32(data.KeyCode)
+
+	switch {
+	// 空格：缓冲区非空 → 选当前高亮；空 → 上屏触发符
+	case vk == ipc.VK_SPACE:
+		if len(c.specialBuffer) > 0 && len(c.candidates) > 0 {
+			index := (c.currentPage-1)*c.candidatesPerPage + c.selectedIndex
+			return c.selectSpecialCandidate(index)
+		}
+		return c.exitSpecialMode(true, c.specialPrefix())
+
+	// 回车：有 buffer → 上屏原文；空 → 上屏触发符
+	case vk == ipc.VK_RETURN:
+		if len(c.specialBuffer) > 0 {
+			return c.exitSpecialMode(true, c.specialBuffer)
+		}
+		return c.exitSpecialMode(true, c.specialPrefix())
+
+	// 退格
+	case vk == ipc.VK_BACK:
+		if len(c.specialBuffer) > 0 {
+			c.specialBuffer = c.specialBuffer[:len(c.specialBuffer)-1]
+			c.currentPage = 1
+			c.selectedIndex = 0
+			c.updateSpecialCandidates()
+			c.showSpecialUI()
+			prefix := c.specialPrefix()
+			preedit := prefix + c.specialBuffer
+			return c.modeCompositionResult(preedit, len(preedit))
+		}
+		return c.exitSpecialMode(false, "")
+
+	// ESC：退出
+	case vk == ipc.VK_ESCAPE:
+		return c.exitSpecialMode(false, "")
+
+	// 翻页上
+	case c.isQuickInputPageUpKey(key, int(vk), uint32(data.Modifiers)):
+		if c.currentPage > 1 {
+			c.currentPage--
+			c.selectedIndex = 0
+			c.showSpecialUI()
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	// 翻页下
+	case c.isQuickInputPageDownKey(key, int(vk), uint32(data.Modifiers)):
+		if c.currentPage < c.totalPages {
+			c.currentPage++
+			c.selectedIndex = 0
+			c.showSpecialUI()
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	// 高亮上移
+	case c.isHighlightUpKey(vk, uint32(data.Modifiers)):
+		if len(c.candidates) > 0 {
+			if c.selectedIndex > 0 {
+				c.selectedIndex--
+				c.showSpecialUI()
+			} else if c.currentPage > 1 {
+				c.currentPage--
+				startIdx := (c.currentPage - 1) * c.candidatesPerPage
+				endIdx := startIdx + c.candidatesPerPage
+				if endIdx > len(c.candidates) {
+					endIdx = len(c.candidates)
+				}
+				c.selectedIndex = endIdx - startIdx - 1
+				c.showSpecialUI()
+			}
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	// 高亮下移
+	case c.isHighlightDownKey(vk, uint32(data.Modifiers)):
+		if len(c.candidates) > 0 {
+			startIdx := (c.currentPage - 1) * c.candidatesPerPage
+			endIdx := startIdx + c.candidatesPerPage
+			if endIdx > len(c.candidates) {
+				endIdx = len(c.candidates)
+			}
+			pageCount := endIdx - startIdx
+			if c.selectedIndex < pageCount-1 {
+				c.selectedIndex++
+				c.showSpecialUI()
+			} else if c.currentPage < c.totalPages {
+				c.currentPage++
+				c.selectedIndex = 0
+				c.showSpecialUI()
+			}
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	// 数字 1-9：选当前页第 n-1 候选
+	case len(key) == 1 && key[0] >= '1' && key[0] <= '9':
+		n := int(key[0] - '0')
+		pageStart := (c.currentPage - 1) * c.candidatesPerPage
+		globalIdx := pageStart + n - 1
+		if globalIdx < len(c.candidates) {
+			return c.selectSpecialCandidate(globalIdx)
+		}
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+
+	// 字母 a-z（小写归一）：追加到缓冲区
+	case len(key) == 1 && ((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z')):
+		lower := key[0]
+		if lower >= 'A' && lower <= 'Z' {
+			lower = lower - 'A' + 'a'
+		}
+		c.specialBuffer += string(lower)
+		c.currentPage = 1
+		c.selectedIndex = 0
+		if c.updateSpecialCandidates() {
+			// 自动上屏：选唯一候选
+			return c.selectSpecialCandidate((c.currentPage-1)*c.candidatesPerPage + c.selectedIndex)
+		}
+		c.showSpecialUI()
+		prefix := c.specialPrefix()
+		preedit := prefix + c.specialBuffer
+		return c.modeCompositionResult(preedit, len(preedit))
+
+	default:
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
+}
+
+// selectSpecialCandidate 选择特殊模式候选并上屏或执行命令。
+func (c *Coordinator) selectSpecialCandidate(index int) *bridge.KeyEventResult {
+	if index < 0 || index >= len(c.candidates) {
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
+	cand := c.candidates[index]
+
+	// 命令候选（带 Actions）
+	if len(cand.Actions) > 0 {
+		return c.commitSpecialCommand(cand)
+	}
+
+	// 普通文本候选
+	text := cand.Text
+	if c.fullWidth {
+		text = transform.ToFullWidth(text)
+	}
+	if c.inputHistory != nil {
+		c.inputHistory.Record(text, "", "", 0)
+	}
+	return c.exitSpecialMode(true, text)
+}
+
+// commitSpecialCommand 执行命令候选（有副作用 Actions），复用 commitCmdbarCandidate。
+func (c *Coordinator) commitSpecialCommand(cand ui.Candidate) *bridge.KeyEventResult {
+	// 先退出特殊模式（重置状态、恢复布局），然后走 cmdbar 候选上屏流程。
+	// 注意：commitCmdbarCandidate 内部会调用 clearState + hideUI，
+	// 所以这里只需重置 specialMode 特有字段，不重复调用 exitSpecialMode。
+	if c.specialSavedLayout != "" && c.uiManager != nil {
+		c.uiManager.SetCandidateLayout(c.specialSavedLayout)
+	}
+	if c.uiManager != nil {
+		c.uiManager.SetModeLabel("")
+		c.uiManager.SetModeAccentColor(nil)
+	}
+	c.specialMode = false
+	c.specialActiveID = ""
+	c.specialTriggerKey = ""
+	c.specialBuffer = ""
+	c.specialSavedLayout = ""
+
+	// 复用 commitCmdbarCandidate：它负责执行 Actions、记录历史、clearState、hideUI、返回结果。
+	return c.commitCmdbarCandidate(cand, 0, 0)
+}
+
+// exitSpecialMode 退出特殊模式，镜像 exitQuickInputMode。
+func (c *Coordinator) exitSpecialMode(commit bool, text string) *bridge.KeyEventResult {
+	// 恢复布局
+	if c.specialSavedLayout != "" && c.uiManager != nil {
+		c.uiManager.SetCandidateLayout(c.specialSavedLayout)
+	}
+
+	// 重置模式标签和光效
+	if c.uiManager != nil {
+		c.uiManager.SetModeLabel("")
+		c.uiManager.SetModeAccentColor(nil)
+	}
+
+	// 重置所有特殊模式字段
+	c.specialMode = false
+	c.specialActiveID = ""
+	c.specialTriggerKey = ""
+	c.specialBuffer = ""
+	c.specialSavedLayout = ""
+	c.candidates = nil
+	c.currentPage = 1
+	c.totalPages = 1
+	c.selectedIndex = 0
+	c.hideUI()
+
+	c.logger.Debug("Exited special mode", "commit", commit, "textLen", len(text))
+
+	if commit && len(text) > 0 {
+		c.recordCommit(text, 0, -1, store.SourceSpecialMode)
+		return &bridge.KeyEventResult{
+			Type: bridge.ResponseTypeInsertText,
+			Text: text,
+		}
+	}
+	return &bridge.KeyEventResult{Type: bridge.ResponseTypeClearComposition}
+}
+
+// showSpecialUI 显示特殊模式候选窗，镜像 showQuickInputUI。
+func (c *Coordinator) showSpecialUI() {
+	if c.uiManager == nil || !c.uiManager.IsReady() {
+		return
+	}
+
+	caretX := c.caretX
+	caretY := c.caretY
+	caretHeight := c.caretHeight
+	if c.config != nil && c.config.UI.InlinePreedit && c.compositionStartValid {
+		caretX = c.compositionStartX
+		caretY = c.compositionStartY
+	}
+
+	const maxCoord = 32000
+	if (c.caretX == 0 && c.caretY == 0) || caretX > maxCoord || caretX < -maxCoord || caretY > maxCoord || caretY < -maxCoord {
+		if c.lastValidX != 0 || c.lastValidY != 0 {
+			caretX = c.lastValidX
+			caretY = c.lastValidY
+			caretHeight = 20
+		} else {
+			caretX = 400
+			caretY = 300
+			caretHeight = 20
+		}
+	}
+
+	// 当前页候选切片
+	startIdx := (c.currentPage - 1) * c.candidatesPerPage
+	endIdx := startIdx + c.candidatesPerPage
+	if endIdx > len(c.candidates) {
+		endIdx = len(c.candidates)
+	}
+	var pageCandidates []ui.Candidate
+	if startIdx < len(c.candidates) {
+		pageCandidates = c.candidates[startIdx:endIdx]
+	}
+
+	displayCandidates := make([]ui.Candidate, len(pageCandidates))
+	copy(displayCandidates, pageCandidates)
+	for i := range displayCandidates {
+		displayCandidates[i].Index = i + 1
+	}
+
+	// 预编辑文本
+	preedit := c.specialPrefix() + c.specialBuffer
+	// 嵌入编码且 buffer 为空：置空，让渲染层显示「只含模式徽标」的提示条
+	if c.isInlinePreedit() && len(c.specialBuffer) == 0 {
+		preedit = ""
+	}
+
+	// 模式标签与光效
+	id := c.specialActiveID
+	inst := c.specialModeReg.get(id)
+	label := id
+	if inst != nil {
+		label = inst.cfg.Name
+	}
+	c.uiManager.SetModeLabel(label)
+	c.uiManager.SetModeAccentColor(c.modeAccentColor("special:" + id))
+
+	c.uiManager.ShowCandidates(
+		displayCandidates,
+		preedit,
+		len(preedit),
+		caretX,
+		caretY,
+		caretHeight,
+		c.currentPage,
+		c.totalPages,
+		len(c.candidates),
+		c.candidatesPerPage,
+		c.selectedIndex,
+	)
+}

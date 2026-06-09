@@ -1,0 +1,227 @@
+// handle_special_mode_test.go — 特殊模式状态机集成测试。
+// 使用真实 specialModeRegistry + 真实码表（testdata/special_symbols.dict.yaml）。
+package coordinator
+
+import (
+	"path/filepath"
+	"testing"
+
+	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/ipc"
+	"github.com/huanfeng/wind_input/pkg/config"
+)
+
+// specialModeCfg 构造测试用的特殊模式配置（prefix_free，使用 grave 触发）。
+func specialModeCfg() config.SpecialModeConfig {
+	return config.SpecialModeConfig{
+		ID:          "sym",
+		Name:        "快符",
+		TriggerKeys: []string{"grave"},
+		Table:       "special_symbols.dict.yaml",
+		AutoCommit:  config.SpecialAutoCommitPrefixFree,
+	}
+}
+
+// newSpecialTestCoordinator 构造已注入 specialModeReg 的 testCoordinator。
+func newSpecialTestCoordinator(t *testing.T) *testCoordinator {
+	t.Helper()
+	tc := newTestCoordinator(t)
+	dir, _ := filepath.Abs("testdata")
+	tc.specialModeReg = newSpecialModeRegistry(
+		[]config.SpecialModeConfig{specialModeCfg()},
+		dir,
+		testSpecialLogger(),
+	)
+	return tc
+}
+
+// enterSpecialMode 触发 grave 键进入特殊模式，断言成功并返回结果。
+func enterSpecialMode(t *testing.T, tc *testCoordinator) *bridge.KeyEventResult {
+	t.Helper()
+	res := tc.HandleKeyEvent(bridge.KeyEventData{
+		Key:     "`",
+		KeyCode: int(ipc.VK_OEM_3),
+	})
+	if !tc.specialMode {
+		t.Fatal("enterSpecialMode: specialMode should be true after grave key")
+	}
+	return res
+}
+
+// TestSpecialMode_AutoCommit_ArrowExact 打 "arrow" → 唯一候选且无更长编码 → 自动上屏 "⇧"
+func TestSpecialMode_AutoCommit_ArrowExact(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	// 逐字符输入 "arrow"
+	for _, ch := range "arrow" {
+		tc.pressKey(string(ch))
+	}
+
+	// 最后一个字母 w 应触发自动上屏
+	// 由于 pressKey 在 for 循环中已调用，这里检查最终状态
+	if tc.specialMode {
+		t.Error("specialMode should be false after auto-commit")
+	}
+}
+
+// TestSpecialMode_AutoCommit_ArrowFinalKey "arrow" 最后一字触发自动上屏，检查返回值
+func TestSpecialMode_AutoCommit_ArrowFinalKey(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	// 输入前四个字母 "arro"
+	for _, ch := range "arro" {
+		tc.pressKey(string(ch))
+	}
+	// 此时仍在模式中
+	if !tc.specialMode {
+		t.Fatal("should still be in special mode after 'arro'")
+	}
+
+	// 输入最后一个字母 "w" → autoCommit
+	res := tc.pressKey("w")
+	if res == nil {
+		t.Fatal("result should not be nil")
+	}
+	if res.Type != bridge.ResponseTypeInsertText {
+		t.Fatalf("expected InsertText, got %q", res.Type)
+	}
+	if res.Text != "⇧" {
+		t.Errorf("expected ⇧, got %q", res.Text)
+	}
+	if tc.specialMode {
+		t.Error("specialMode should be false after auto-commit")
+	}
+}
+
+// TestSpecialMode_PrefixHasLonger "ar" → HasLongerCode true → 不自动上屏，仍在模式
+// Lookup("ar") 返回空（无精确匹配），但 HasLongerCode("ar") 为 true，
+// 因此 decideSpecialAutoCommit(prefix_free, ...) 返回 false，模式保持激活。
+func TestSpecialMode_PrefixHasLonger(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	tc.pressKey("a")
+	tc.pressKey("r")
+
+	if !tc.specialMode {
+		t.Error("should still be in special mode after 'ar' (hasLonger=true, no auto-commit)")
+	}
+	// "ar" 无精确匹配，所以 candidates 为空，但模式仍激活（未自动上屏）
+	if tc.specialBuffer != "ar" {
+		t.Errorf("expected buffer 'ar', got %q", tc.specialBuffer)
+	}
+}
+
+// TestSpecialMode_JT_TwoCandidates 打 "jt" → 2 候选，不自动上屏；数字 '1' 选 "→" 退出
+func TestSpecialMode_JT_TwoCandidates(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	tc.pressKey("j")
+	res := tc.pressKey("t")
+	_ = res
+
+	if !tc.specialMode {
+		t.Fatal("should be in special mode after 'jt'")
+	}
+	if len(tc.candidates) != 2 {
+		t.Fatalf("expected 2 candidates for 'jt', got %d", len(tc.candidates))
+	}
+
+	// 按数字 '1' 选第一候选
+	res = tc.pressKey("1")
+	if res == nil {
+		t.Fatal("result should not be nil")
+	}
+	if res.Type != bridge.ResponseTypeInsertText {
+		t.Fatalf("expected InsertText, got %q", res.Type)
+	}
+	if res.Text != "→" {
+		t.Errorf("expected →, got %q", res.Text)
+	}
+	if tc.specialMode {
+		t.Error("specialMode should be false after selection")
+	}
+}
+
+// TestSpecialMode_Backspace_EmptyBuffer 空 buffer 下退格 → 退出模式，返回 ClearComposition
+func TestSpecialMode_Backspace_EmptyBuffer(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	// buffer 为空，退格应退出模式
+	res := tc.pressKeyCode(int(ipc.VK_BACK))
+	if res == nil {
+		t.Fatal("result should not be nil")
+	}
+	if res.Type != bridge.ResponseTypeClearComposition {
+		t.Fatalf("expected ClearComposition, got %q", res.Type)
+	}
+	if tc.specialMode {
+		t.Error("specialMode should be false after backspace on empty buffer")
+	}
+}
+
+// TestSpecialMode_Escape 按 Esc → 退出，返回 ClearComposition
+func TestSpecialMode_Escape(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	// 输入一些字符后 Esc
+	tc.pressKey("j")
+	res := tc.pressKeyCode(int(ipc.VK_ESCAPE))
+	if res == nil {
+		t.Fatal("result should not be nil")
+	}
+	if res.Type != bridge.ResponseTypeClearComposition {
+		t.Fatalf("expected ClearComposition, got %q", res.Type)
+	}
+	if tc.specialMode {
+		t.Error("specialMode should be false after Esc")
+	}
+}
+
+// TestSpecialMode_Backspace_NonEmpty 有 buffer 时退格删末字符，模式仍激活
+func TestSpecialMode_Backspace_NonEmpty(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	tc.pressKey("j")
+	tc.pressKey("t")
+	if tc.specialBuffer != "jt" {
+		t.Fatalf("expected buffer 'jt', got %q", tc.specialBuffer)
+	}
+
+	res := tc.pressKeyCode(int(ipc.VK_BACK))
+	if res == nil {
+		t.Fatal("result should not be nil")
+	}
+	if tc.specialBuffer != "j" {
+		t.Errorf("expected buffer 'j' after backspace, got %q", tc.specialBuffer)
+	}
+	if !tc.specialMode {
+		t.Error("specialMode should still be true")
+	}
+}
+
+// TestSpecialMode_SpaceOnEmptyBuffer 空 buffer 时按空格 → 上屏触发符
+func TestSpecialMode_SpaceOnEmptyBuffer(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	res := tc.pressKeyCode(int(ipc.VK_SPACE))
+	if res == nil {
+		t.Fatal("result should not be nil")
+	}
+	if res.Type != bridge.ResponseTypeInsertText {
+		t.Fatalf("expected InsertText, got %q", res.Type)
+	}
+	if res.Text != "`" {
+		t.Errorf("expected backtick, got %q", res.Text)
+	}
+	if tc.specialMode {
+		t.Error("specialMode should be false after space on empty buffer")
+	}
+}

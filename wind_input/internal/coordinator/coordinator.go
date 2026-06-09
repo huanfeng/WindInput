@@ -179,6 +179,15 @@ type quickInputState struct {
 	savedLayout                 config.CandidateLayout // 进入快捷输入前的布局（用于退出时恢复）
 }
 
+// specialModeState 引导键特殊模式（自定义码表）状态
+type specialModeState struct {
+	specialMode        bool                   // 是否处于特殊模式
+	specialActiveID    string                 // 当前激活实例 id
+	specialTriggerKey  string                 // 当前触发键
+	specialBuffer      string                 // 编码缓冲（不含触发符）
+	specialSavedLayout config.CandidateLayout // 进入前布局（force_vertical 时恢复用）
+}
+
 // Coordinator orchestrates between C++ Bridge, Engine, and native UI
 type Coordinator struct {
 	engineMgr    *engine.Manager
@@ -290,6 +299,10 @@ type Coordinator struct {
 
 	// 快捷输入模式
 	quickInputState
+
+	// 引导键特殊模式（自定义码表）
+	specialModeState
+	specialModeReg *specialModeRegistry
 
 	// 输入统计采集器
 	statCollector *store.StatCollector
@@ -775,6 +788,9 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 	// 必须在 setupToolbarCallbacks 之后启动也仍然安全 —— callback 到达时 reducer 已就绪。
 	c.toolbarReducer = newToolbarReducer(c)
 
+	// 特殊模式注册表（引导键自定义码表）
+	c.specialModeReg = newSpecialModeRegistry(c.config.Input.SpecialModes, c.schemasDir(), c.logger)
+
 	return c
 }
 
@@ -930,7 +946,7 @@ func (c *Coordinator) hasPendingInput() bool {
 	return len(c.inputBuffer) > 0 || len(c.confirmedSegments) > 0 ||
 		c.tempEnglishMode || len(c.tempEnglishBuffer) > 0 ||
 		c.tempPinyinMode || len(c.tempPinyinBuffer) > 0 ||
-		c.quickInputMode
+		c.quickInputMode || c.specialMode
 }
 
 // getPendingBufferText 获取当前待处理缓冲区的文本（用于 CommitOnSwitch 上屏）
@@ -1025,6 +1041,22 @@ func (c *Coordinator) clearState() {
 	c.quickInputPinyinCommitted = ""
 	c.quickInputPinyinDictSwapped = false
 	c.savedLayout = ""
+
+	// 清理特殊模式状态（恢复布局需在重置标志前执行）
+	if c.specialMode {
+		if c.specialSavedLayout != "" && c.uiManager != nil {
+			c.uiManager.SetCandidateLayout(c.specialSavedLayout)
+		}
+		if c.uiManager != nil {
+			c.uiManager.SetModeLabel("")
+			c.uiManager.SetModeAccentColor(nil)
+		}
+	}
+	c.specialMode = false
+	c.specialActiveID = ""
+	c.specialTriggerKey = ""
+	c.specialBuffer = ""
+	c.specialSavedLayout = ""
 
 	// 注意：不清除 activeProcessID，需要跨 composition 持久化
 

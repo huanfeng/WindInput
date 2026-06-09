@@ -494,6 +494,11 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		return c.handleQuickInputKey(key, &data)
 	}
 
+	// 检查是否处于特殊模式（自定义码表）
+	if c.specialMode {
+		return c.handleSpecialModeKey(key, &data)
+	}
+
 	// 正在输入（有 buffer / 有候选）时：统一优先级回落链
 	// （二三候选 > 模式激活 > overflow > 标点）。详见
 	// docs/design/mode-trigger-priority-chain.md。
@@ -515,6 +520,16 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 	}
 	if triggerKey := c.getTempEnglishTriggerKey(key, data.KeyCode); !hasShift && triggerKey != "" {
 		return c.enterTempEnglishModeWithTrigger(triggerKey)
+	}
+	// 特殊模式（自定义码表）：buffer 为空时触发
+	if !hasShift && c.specialModeReg != nil {
+		if id := c.specialModeReg.match(key, data.KeyCode); id != "" {
+			if tk := c.matchSpecialTrigger(id, key, data.KeyCode); tk != "" {
+				if prefix, ok := c.setupSpecialMode(id, tk); ok {
+					return c.modeCompositionResult(prefix, len(prefix))
+				}
+			}
+		}
 	}
 
 	// 中文模式下，Shift+字母处理（CapsLock OFF 时）
