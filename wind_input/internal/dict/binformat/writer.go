@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"runtime"
 	"sort"
 )
 
@@ -28,15 +29,21 @@ type AbbrevEntry struct {
 
 // DictWriter 词库二进制格式写入器
 type DictWriter struct {
-	codes    []DictCodeEntry
-	abbrevs  []AbbrevEntry
-	metaJSON []byte // 可选的 JSON 元数据
+	codes     []DictCodeEntry
+	abbrevs   []AbbrevEntry
+	metaJSON  []byte // 可选的 JSON 元数据
+	lowMemory bool
 }
 
 // NewDictWriter 创建词库写入器
 func NewDictWriter() *DictWriter {
 	return &DictWriter{}
 }
+
+// SetLowMemory 启用省内存写入路径：词条记录转入 entryRecords 后立即释放原始
+// Entries 切片并触发一次 GC，用更慢的速度换取更低的内存峰值。
+// 仅影响内存占用，不改变输出文件内容。
+func (w *DictWriter) SetLowMemory(v bool) { w.lowMemory = v }
 
 // AddCode 添加一个编码及其候选词
 func (w *DictWriter) AddCode(code string, entries []DictEntry) {
@@ -134,6 +141,18 @@ func (w *DictWriter) Write(out io.Writer) error {
 		})
 	}
 	totalEntryRecordsSize := entryRecordsSize + uint32(len(abbrevEntryRecords))*DictEntryRecordSize
+
+	// 省内存：词条文本已复制进 pool、记录已转入 entryRecords/abbrevEntryRecords，
+	// 后续仅依赖 keyMetas/abbrevMetas（含 code）与 pool，可释放原始 Entries 并 GC。
+	if w.lowMemory {
+		for i := range w.codes {
+			w.codes[i].Entries = nil
+		}
+		for i := range w.abbrevs {
+			w.abbrevs[i].Entries = nil
+		}
+		runtime.GC()
+	}
 
 	// 4. 计算偏移
 	indexOff := uint32(DictFileHeaderSize)

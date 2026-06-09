@@ -58,11 +58,62 @@ func (d *DAT) ExactMatch(key string) (leafIndex uint32, found bool) {
 	return uint32(-d.Base[leaf] - 1), true
 }
 
-// trieNode 内部 trie 节点
+// trieChild 是 trieNode 子节点表的一项：字节 b → 子节点。
+type trieChild struct {
+	b    byte
+	node *trieNode
+}
+
+// trieNode 内部 trie 节点。
+//
+// children 用按 b 升序排列的切片而非 map[byte]*trieNode：大型词库（拼音
+// 50 万+词条）会产生数百万节点，每个空 map 的 header 约 128B，仅 map 开销
+// 即可达数百 MB。改为有序切片后单节点开销降到 slice header + 少量元素，
+// 是低内存机器上 wdat 生成内存峰值的主要来源之一。
+// 字符集很小（拼音 26 字母、五笔约 30 键），二分查找/插入成本可忽略。
 type trieNode struct {
-	children  map[byte]*trieNode
+	children  []trieChild
 	dataIndex uint32
 	isEnd     bool
+}
+
+// findChild 二分查找字节 b 对应的子节点，未命中返回 nil。
+func (n *trieNode) findChild(b byte) *trieNode {
+	lo, hi := 0, len(n.children)
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		c := n.children[mid].b
+		if c == b {
+			return n.children[mid].node
+		} else if c < b {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return nil
+}
+
+// getOrCreateChild 返回字节 b 的子节点，不存在则按升序位置插入新建。
+func (n *trieNode) getOrCreateChild(b byte) *trieNode {
+	lo, hi := 0, len(n.children)
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		c := n.children[mid].b
+		if c == b {
+			return n.children[mid].node
+		} else if c < b {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	child := &trieNode{}
+	// 在 lo 处插入，保持 children 按 b 升序
+	n.children = append(n.children, trieChild{})
+	copy(n.children[lo+1:], n.children[lo:])
+	n.children[lo] = trieChild{b: b, node: child}
+	return child
 }
 
 // DATBuilder 构建 Double-Array Trie
@@ -74,7 +125,7 @@ type DATBuilder struct {
 // NewDATBuilder 创建新的 Builder
 func NewDATBuilder() *DATBuilder {
 	return &DATBuilder{
-		root: &trieNode{children: make(map[byte]*trieNode)},
+		root: &trieNode{},
 	}
 }
 
@@ -84,12 +135,7 @@ func (b *DATBuilder) Add(key string, dataIndex uint32) {
 	for i := 0; i < len(key); i++ {
 		c := key[i]
 		b.seen[c] = true
-		child, ok := node.children[c]
-		if !ok {
-			child = &trieNode{children: make(map[byte]*trieNode)}
-			node.children[c] = child
-		}
-		node = child
+		node = node.getOrCreateChild(c)
 	}
 	node.isEnd = true
 	node.dataIndex = dataIndex
@@ -195,13 +241,11 @@ func (b *DATBuilder) Build() (*DAT, error) {
 		if node.isEnd {
 			pairs = append(pairs, codePair{compact: 0, orig: 0}) // 终止符
 		}
-		childBytes := make([]byte, 0, len(node.children))
-		for c := range node.children {
-			childBytes = append(childBytes, c)
-		}
-		sort.Slice(childBytes, func(i, j int) bool { return childBytes[i] < childBytes[j] })
-		for _, c := range childBytes {
-			pairs = append(pairs, codePair{compact: charMap[c], orig: c})
+		// children 已按 b 升序排列（getOrCreateChild 保证），直接顺序遍历
+		// 即与旧实现"收集后排序"产生完全一致的 pairs 顺序，从而保证最终
+		// DAT 布局逐字节不变。
+		for _, ch := range node.children {
+			pairs = append(pairs, codePair{compact: charMap[ch.b], orig: ch.b})
 		}
 
 		if len(pairs) == 0 {
@@ -229,7 +273,7 @@ func (b *DATBuilder) Build() (*DAT, error) {
 				base[t] = -int32(node.dataIndex) - 1
 			} else {
 				// 内部节点：入队
-				child := node.children[p.orig]
+				child := node.findChild(p.orig)
 				queue = append(queue, queueItem{child, t})
 			}
 		}

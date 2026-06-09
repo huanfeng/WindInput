@@ -16,7 +16,7 @@
 |------|-------------|
 | `format.go` | 文件头、索引、条目的结构体定义和大小常量，以及 `Validate` 方法 |
 | `reader.go` | `DictReader`：词库 wdb 的 mmap 读取器（`Lookup`、`LookupPrefix`、`LookupAbbrev`） |
-| `writer.go` | `DictWriter`：词库 wdb 写入器（`AddCode`、`AddAbbrev`、`Write`） |
+| `writer.go` | `DictWriter`：词库 wdb 写入器（`AddCode`、`AddAbbrev`、`Write`、`SetLowMemory`） |
 | `unigram_reader.go` | `UnigramReader`：unigram.wdb 的 mmap 读取器（`Lookup` 返回对数概率） |
 | `unigram_writer.go` | `UnigramWriter`：unigram.wdb 写入器（`Add`、`Write`） |
 | `mmap_windows.go` | Windows mmap 实现（`CreateFileMapping`/`MapViewOfFile`） |
@@ -31,6 +31,7 @@
 - AbbrevSection 在文件末尾，`AbbrevOff=0` 表示无简拼索引
 - mmap 生命周期：`Open()` 映射，`Close()` 解除映射；Reader 未关闭时不要删除文件
 - 写入器将字符串统一存入 StringPool，索引用偏移量引用，实现零拷贝读取
+- `DictWriter.SetLowMemory(true)`：省内存写入路径，在 EntryRecords 构建完成后释放原始 `Entries` 切片并 GC（StringPool 已复制文本字节，释放安全）；仅降内存峰值，**不改变输出文件内容**。由 `dictcache` 在低内存机器上启用
 
 ### Testing Requirements
 - `go test ./internal/dict/binformat/`

@@ -23,6 +23,8 @@
 - **Rime 码表（五笔等）**：`ConvertRimeCodetableToWdb(mainDictPath, wdbPath)` 同理，`RimeCodetableSourcePaths` 返回包含主文件和所有 import 文件、patch 文件的完整列表，用于 `NeedsRegenerate` 检测
 - `schema/factory.go` 是主要调用方，在引擎初始化时调用各 `Convert*` 函数；失败时直接向上报错（不再静默回退到旧 wdb）
 - `LoadCodeTableMetaFromWdb(reader)` 从 wdb 内嵌的 meta 段恢复码表 Header，供 `codetable.Engine.RestoreCodeTableHeader` 使用
+- **低内存模式**：首次生成大词库（拼音 wdat / Rime 码表 wdb）峰值可超 1GB。`pkg/sysinfo.LowMemoryMode()` 为 true 时，`ConvertPinyinToWdat`/`ConvertRimeCodetableToWdb` 边转换边 `delete` 源 map 并主动 GC，且对 writer 启用 `SetLowMemory`；`ConvertCodeTableToWdb` 仅启用 writer 释放（其源 map 是 `CodeTable` 内部引用，不可 delete）。可用物理内存 < 1024MB 触发（`WINDINPUT_FORCE_LOWMEM`/`WINDINPUT_LOWMEM_MB` 可覆盖）。**仅降内存峰值、略慢，不改变输出**
+- 内存峰值的另一来源是 DAT 构建（`datformat`），其 trie 节点已由 map 改为有序切片，与本模块的省内存释放协同生效
 
 ### Testing Requirements
 - 缓存有效性检测可做单元测试（文件 mtime 比较逻辑）
@@ -36,6 +38,8 @@
 ### Internal
 - `internal/dict` — `LoadCodeTable`、`CodeTable`
 - `internal/dict/binformat` — `DictWriter`、`UnigramWriter`
+- `internal/dict/datformat` — `WdatWriter`（拼音 DAT 写入）
+- `pkg/sysinfo` — `LowMemoryMode`（低内存路径决策）
 
 ### External
 - 无（仅标准库）

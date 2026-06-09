@@ -13,11 +13,13 @@ import (
 	"strings"
 
 	"io"
+	"runtime"
 	"sync/atomic"
 
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/dict/binformat"
 	"github.com/huanfeng/wind_input/internal/dict/datformat"
+	"github.com/huanfeng/wind_input/pkg/sysinfo"
 )
 
 // CodeTableMeta 存储 CodeTable 的 Header 信息（sidecar 文件）
@@ -49,6 +51,12 @@ func ConvertCodeTableToWdb(srcPath, wdbPath string, logger *slog.Logger) error {
 
 	// 构建 DictWriter
 	writer := binformat.NewDictWriter()
+	if sysinfo.LowMemoryMode() {
+		// 传统单文件码表：GetEntries 返回的是 CodeTable 内部 map 引用，
+		// 不能在此 delete；仅启用 writer 内部的省内存释放路径即可。
+		writer.SetLowMemory(true)
+		logger.Info("低内存模式：码表 wdb 采用省内存生成", "availMB", sysinfo.AvailablePhysicalMB())
+	}
 	entries := ct.GetEntries()
 
 	for code, candidates := range entries {
@@ -312,7 +320,13 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 		norm = normalizer[0]
 	}
 
+	lowMem := sysinfo.LowMemoryMode()
 	writer := binformat.NewDictWriter()
+	if lowMem {
+		writer.SetLowMemory(true)
+		logger.Info("低内存模式：rime 码表 wdb 采用省内存生成", "availMB", sysinfo.AvailablePhysicalMB())
+	}
+	codesCount := len(codeEntries)
 
 	for code, entries := range codeEntries {
 		sort.SliceStable(entries, func(i, j int) bool {
@@ -334,6 +348,14 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 			}
 		}
 		writer.AddCode(code, binEntries)
+		// 省内存：该编码已转入 writer，释放源 map 项（range 中 delete 安全）。
+		if lowMem {
+			delete(codeEntries, code)
+		}
+	}
+	if lowMem {
+		codeEntries = nil
+		runtime.GC()
 	}
 
 	// 生成元数据（从主词库文件名推导）
@@ -359,7 +381,7 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 		return err
 	}
 
-	logger.Info("rime 码表词库转换完成", "codes", len(codeEntries), "count", totalCount)
+	logger.Info("rime 码表词库转换完成", "codes", codesCount, "count", totalCount)
 	return nil
 }
 
@@ -671,7 +693,14 @@ func ConvertPinyinToWdat(mainDictPath, wdatPath string, logger *slog.Logger, nor
 		norm = normalizer[0]
 	}
 
+	lowMem := sysinfo.LowMemoryMode()
 	writer := datformat.NewWdatWriter()
+	if lowMem {
+		writer.SetLowMemory(true)
+		logger.Info("低内存模式：拼音 wdat 采用省内存生成", "availMB", sysinfo.AvailablePhysicalMB())
+	}
+	codesCount := len(codeEntries)
+	abbrevsCount := len(abbrevEntries)
 
 	for code, entries := range codeEntries {
 		sort.SliceStable(entries, func(i, j int) bool {
@@ -692,6 +721,14 @@ func ConvertPinyinToWdat(mainDictPath, wdatPath string, logger *slog.Logger, nor
 			}
 		}
 		writer.AddCode(code, wdatEntries)
+		// 省内存：该编码已转入 writer，释放源 map 项（range 中 delete 安全）。
+		if lowMem {
+			delete(codeEntries, code)
+		}
+	}
+	if lowMem {
+		codeEntries = nil
+		runtime.GC()
 	}
 
 	for abbrev, entries := range abbrevEntries {
@@ -713,6 +750,14 @@ func ConvertPinyinToWdat(mainDictPath, wdatPath string, logger *slog.Logger, nor
 			}
 		}
 		writer.AddAbbrev(abbrev, wdatEntries)
+		// 省内存：该简拼已转入 writer，释放源 map 项（range 中 delete 安全）。
+		if lowMem {
+			delete(abbrevEntries, abbrev)
+		}
+	}
+	if lowMem {
+		abbrevEntries = nil
+		runtime.GC()
 	}
 
 	if err := atomicWriteWdb(wdatPath, func(w io.Writer) error {
@@ -721,7 +766,7 @@ func ConvertPinyinToWdat(mainDictPath, wdatPath string, logger *slog.Logger, nor
 		return err
 	}
 
-	logger.Info("拼音词库(DAT)转换完成", "codes", len(codeEntries), "abbrevs", len(abbrevEntries))
+	logger.Info("拼音词库(DAT)转换完成", "codes", codesCount, "abbrevs", abbrevsCount)
 	return nil
 }
 

@@ -3,6 +3,7 @@ package datformat
 import (
 	"encoding/binary"
 	"io"
+	"runtime"
 	"sort"
 )
 
@@ -47,15 +48,21 @@ type WdatAbbrevEntry struct {
 
 // WdatWriter wdat 文件写入器
 type WdatWriter struct {
-	codes   []WdatCodeEntry
-	abbrevs []WdatAbbrevEntry
-	meta    []byte
+	codes     []WdatCodeEntry
+	abbrevs   []WdatAbbrevEntry
+	meta      []byte
+	lowMemory bool
 }
 
 // NewWdatWriter 创建新的写入器
 func NewWdatWriter() *WdatWriter {
 	return &WdatWriter{}
 }
+
+// SetLowMemory 启用省内存写入路径：在 DAT 构建等内存高峰前主动释放已消费的
+// 候选词条切片并触发一次 GC，用更慢的速度换取更低的内存峰值。
+// 仅影响内存占用，不改变输出文件内容。
+func (w *WdatWriter) SetLowMemory(v bool) { w.lowMemory = v }
 
 // AddCode 添加全拼编码词条组
 func (w *WdatWriter) AddCode(code string, entries []WdatEntry) {
@@ -130,6 +137,15 @@ func (w *WdatWriter) Write(out io.Writer) error {
 	// 3. 构建主 EntryRecords + LeafTable
 	mainLeaves, mainEntries := buildEntriesAndLeaves(w.codes, pool)
 
+	// 省内存：主词条文本已复制进 pool、记录已转入 mainEntries，后续 DAT
+	// 构建只读取 Code 字段，可立即释放 Entries 切片并 GC，压低 DAT 构建期峰值。
+	if w.lowMemory {
+		for i := range w.codes {
+			w.codes[i].Entries = nil
+		}
+		runtime.GC()
+	}
+
 	// 4. 构建主 DAT
 	mainDATBuilder := NewDATBuilder()
 	for i, ce := range w.codes {
@@ -152,6 +168,15 @@ func (w *WdatWriter) Write(out io.Writer) error {
 			abbrevCodes[i] = WdatCodeEntry{Code: ae.Abbrev, Entries: ae.Entries}
 		}
 		abbrevLeaves, abbrevEntries = buildEntriesAndLeaves(abbrevCodes, pool)
+
+		// 省内存：简拼词条同理，DAT 构建前释放 Entries。
+		if w.lowMemory {
+			abbrevCodes = nil
+			for i := range w.abbrevs {
+				w.abbrevs[i].Entries = nil
+			}
+			runtime.GC()
+		}
 
 		abbrevDATBuilder := NewDATBuilder()
 		for i, ae := range w.abbrevs {
