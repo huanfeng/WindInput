@@ -513,6 +513,9 @@ func (c *Coordinator) replayBufferLen() int {
 		}
 		return len(prefix) + len(c.quickInputBuffer)
 	}
+	if c.specialMode {
+		return len(c.specialPrefix()) + len(c.specialBuffer)
+	}
 	return 0
 }
 
@@ -726,6 +729,9 @@ func (c *Coordinator) HandleFocusGained(processID uint32, inputScopeMask uint64)
 					} else {
 						replayText = prefix + c.quickInputBuffer
 					}
+					replayCaretPos = utf8.RuneCountInString(replayText)
+				case c.specialMode:
+					replayText = c.specialPrefix() + c.specialBuffer
 					replayCaretPos = utf8.RuneCountInString(replayText)
 				default:
 					replayText = c.getPendingBufferText()

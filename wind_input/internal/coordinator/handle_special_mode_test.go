@@ -310,3 +310,25 @@ func TestSpecialMode_PunctCommitsHighlight(t *testing.T) {
 		t.Errorf("expected committed highlight → as prefix, got %q", res.Text)
 	}
 }
+
+// TestSpecialMode_HotReloadRebuildsRegistry 验证 UpdateInputConfig 热重载会重建 registry，
+// 使新增的 special_modes 配置立即生效（无需重启）。
+func TestSpecialMode_HotReloadRebuildsRegistry(t *testing.T) {
+	tc := newTestCoordinator(t)
+	if tc.specialModeReg != nil && tc.specialModeReg.match("`", int(ipc.VK_OEM_3)) != "" {
+		t.Fatal("no special mode expected before reload")
+	}
+
+	newInput := tc.config.Input
+	newInput.SpecialModes = []config.SpecialModeConfig{
+		{ID: "sym", Name: "快符", TriggerKeys: []string{"grave"}, Table: "x.dict.yaml", AutoCommit: "prefix_free"},
+	}
+	tc.UpdateInputConfig(&newInput)
+
+	if tc.specialModeReg == nil {
+		t.Fatal("specialModeReg should be rebuilt after hot reload")
+	}
+	if got := tc.specialModeReg.match("`", int(ipc.VK_OEM_3)); got != "sym" {
+		t.Fatalf("special trigger should match after hot reload, got %q", got)
+	}
+}

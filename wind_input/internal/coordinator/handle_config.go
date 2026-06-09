@@ -168,6 +168,8 @@ func (c *Coordinator) UpdateInputConfig(inputConfig *config.InputConfig) {
 	// 更新配置引用
 	if c.config != nil {
 		c.config.Input = *inputConfig
+		// 重建特殊模式注册表，使 special_modes 配置变更热生效（码表懒加载，仅首次激活时加载）。
+		c.specialModeReg = newSpecialModeRegistry(c.config.Input.SpecialModes, c.schemasDirs(), c.logger)
 	}
 
 	// 更新自动配对配置

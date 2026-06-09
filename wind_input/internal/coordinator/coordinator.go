@@ -983,6 +983,8 @@ func (c *Coordinator) getPendingBufferText() string {
 		text = c.quickInputPinyinBuffer
 	case c.quickInputMode && len(c.quickInputBuffer) > 0:
 		text = c.quickInputBuffer
+	case c.specialMode:
+		text = c.specialBuffer
 	default:
 		return ""
 	}
