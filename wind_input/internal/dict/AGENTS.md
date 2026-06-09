@@ -26,7 +26,7 @@
 | `cmdbar_filter.go` | `HasCmdbarMarker(value)` 检测 `$CC(`/`$CC1(`; `IsExactOnly(value)` 字符串扫描语义; `candidateIsExactOnly(c)` 优先看 `c.Modifiers["prefix"]` (2026-05-16 新增, 由 cmdbar parser 在解析期填充, 含 marker syntax sugar 默认值合并), 缺失时回退字符串扫描; `filterCmdbarExactOnly(cs)` 给各 layer 的 `SearchPrefix` 收尾共享 |
 | `aa_marker.go` | `ParseAAMarker(value)` 解析 `$AA("name", "chars")` 字符组 marker, 返回 (groupName, chars, ok); `HasAAMarker(value)` 快速旁路判断。yaml 短语统一只用 `text` 字段表达字符组, 取代旧的 `texts`+`name` 双字段; 精确码展开为 N 个独立字符候选, 前缀显示导航候选, 语义不变。详见 docs/design/command-bar-design.md §3.7 |
 | `ss_marker.go` | `HasSSMarker(value)` / `ParseSSGroupName(value)` 处理 `$SS("name", elem, ...)` 字符串数组 marker。LoadFromStore 阶段用 ParseSSGroupName 静态提取 group name 注入 PhraseGroup; 元素 (含嵌入 `$CC`) 留待 SearchCommand 通过 `CmdbarArrayHook` 动态展开 (走 cmdbar parser/eval)。详见 docs/design/command-bar-followup.md §4.3 |
-| `value_expand.go` | `ValueExpander` (`Hook` + `TemplateEngine`) + `ExpandResult` 统一展开任意候选 value: cmdbar marker (`$CC(`/`$CC1(`) → hook, `$X` 模板 → templateEngine, 其它 → 原样; 暴露 `HasExpandable(value)` 快速判断, 供 coordinator 候选后处理使用 |
+| `value_expand.go` | `ValueExpander` (`Hook` + `TemplateEngine` + `ArrayHook`) + `ExpandResult` 统一展开任意候选 value: cmdbar marker (`$CC(`/`$CC1(`) → hook, `$X` 模板 → templateEngine, 其它 → 原样; 暴露 `HasExpandable(value)` 快速判断, 供 coordinator 候选后处理使用。**`ExpandToCandidates(code, value)`** (2026-06-09): value 式把一个 raw value 展开成**一条或多条**候选 — `$AA` 走 `ParseAAMarker` 逐字符、`$SS` 走 `ArrayHook`、`$CC`/`$X` 走 `Expand` 单条、其它字面量；供引导键特殊模式(自定义码表)复用同一批底层原语，**不**改 phrase 的加载期 `$AA` 存储式展开 |
 | `shadow.go` | `ShadowLayer`：pin(position)+delete 架构——`pinned` 列表按位置固定词条，`deleted` 列表隐藏词条；YAML 序列化 |
 | `user_dict.go` | `UserDict`：用户词频学习，按权重排序，持久化为 JSON |
 | `adapter.go` | 引擎词库适配器（将 binformat Reader 适配为词库层） |
