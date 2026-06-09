@@ -842,6 +842,7 @@ func (c *Coordinator) installCmdbarPhraseHook() {
 	pl.SetCmdbarHook(dict.CmdbarPhraseHook(hook))
 
 	// 装配 ValueExpander, 给候选后处理使用。hook 与 PhraseLayer 共享同一闭包。
+	// ArrayHook 在下方 arrayHook 构造完成后再赋值。
 	c.cmdbarValueExpander = &dict.ValueExpander{
 		Hook:           dict.CmdbarPhraseHook(hook),
 		TemplateEngine: dict.GetTemplateEngine(),
@@ -874,6 +875,10 @@ func (c *Coordinator) installCmdbarPhraseHook() {
 		return name, out, groupModifiers, true, nil
 	}
 	pl.SetCmdbarArrayHook(dict.CmdbarArrayHook(arrayHook))
+	// 同步给 ValueExpander 装配 ArrayHook，使特殊码表候选的 $SS 展开可用。
+	if c.cmdbarValueExpander != nil {
+		c.cmdbarValueExpander.ArrayHook = dict.CmdbarArrayHook(arrayHook)
+	}
 }
 
 // initThemeMode initializes the dark mode state and starts the system theme watcher if needed

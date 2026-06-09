@@ -225,3 +225,45 @@ func TestSpecialMode_SpaceOnEmptyBuffer(t *testing.T) {
 		t.Error("specialMode should be false after space on empty buffer")
 	}
 }
+
+// TestSpecialMode_AA_ExpandsToFourCandidates 码表中 $AA("箭头","←↑→↓") 应展开为 4 候选；
+// 按 '1' 上屏第一个字符 "←"。
+// testdata 中 arrx 有两行（$AA + "→"），raw candCount=2 → 不自动上屏，可验证候选列表。
+func TestSpecialMode_AA_ExpandsToFourCandidates(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	// 输入 "arrx"：testdata 中有 $AA("箭头","←↑→↓") 和 "→" 两行，candCount=2 不自动上屏
+	for _, ch := range "arrx" {
+		tc.pressKey(string(ch))
+	}
+
+	if !tc.specialMode {
+		t.Fatal("should still be in special mode after 'arrx'")
+	}
+	// $AA 展开 4 个 + 字面量 "→" = 5 个
+	if len(tc.candidates) != 5 {
+		t.Fatalf("expected 5 candidates (4 from $AA + 1 literal), got %d", len(tc.candidates))
+	}
+	wantFirst4 := []string{"←", "↑", "→", "↓"}
+	for i, want := range wantFirst4 {
+		if tc.candidates[i].Text != want {
+			t.Errorf("candidates[%d].Text = %q, want %q", i, tc.candidates[i].Text, want)
+		}
+	}
+
+	// 按数字 '1' 选第一候选 "←"
+	res := tc.pressKey("1")
+	if res == nil {
+		t.Fatal("result should not be nil")
+	}
+	if res.Type != bridge.ResponseTypeInsertText {
+		t.Fatalf("expected InsertText, got %q", res.Type)
+	}
+	if res.Text != "←" {
+		t.Errorf("expected ←, got %q", res.Text)
+	}
+	if tc.specialMode {
+		t.Error("specialMode should be false after selection")
+	}
+}

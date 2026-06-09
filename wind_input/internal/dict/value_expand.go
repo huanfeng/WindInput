@@ -12,14 +12,17 @@ package dict
 import (
 	"strings"
 
+	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/cmdbar"
 )
 
 // ValueExpander 把含 `$CC(` 或模板变量的 value 文本展开成 (text, display, actions)。
 // Hook 为 nil 时 $CC 内容会被原样返回; TemplateEngine 为 nil 时也仅做 $CC 处理。
+// ArrayHook 为 nil 时 $SS 内容回落到字面量候选。
 type ValueExpander struct {
 	Hook           CmdbarPhraseHook
 	TemplateEngine *TemplateEngine
+	ArrayHook      CmdbarArrayHook
 }
 
 // ExpandResult 是 ValueExpander.Expand 的返回三元组 + 元信息。
@@ -96,4 +99,47 @@ func (ve *ValueExpander) Expand(value string) ExpandResult {
 		return ExpandResult{Text: expanded, Changed: true}
 	}
 	return ExpandResult{Text: value, Changed: false}
+}
+
+// ExpandToCandidates 把一个 raw value 展开成一条或多条候选（value 式，供特殊码表等场景用）。
+//
+//   - $AA → ParseAAMarker 逐字符 N 条; 解析失败 → 1 条字面量
+//   - $SS → ArrayHook N 条; hook 为 nil 或失败 → 1 条字面量
+//   - $CC/$X → Expand 1 条
+//   - 其它 → 1 条字面量
+func (ve *ValueExpander) ExpandToCandidates(code, value string) []candidate.Candidate {
+	// $AA 字符组: 现解析 marker → 逐 rune 候选
+	if HasAAMarker(value) {
+		if name, chars, ok := ParseAAMarker(value); ok {
+			out := make([]candidate.Candidate, 0, len([]rune(chars)))
+			for _, r := range chars {
+				out = append(out, candidate.Candidate{Text: string(r), Code: code, Comment: name})
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+		// ok=false 或空: 落到字面量
+		return []candidate.Candidate{{Text: value, Code: code}}
+	}
+	// $SS 字符串数组: 运行时 hook
+	if HasSSMarker(value) && ve.ArrayHook != nil {
+		if name, elements, _, ok, err := ve.ArrayHook(value); ok && err == nil {
+			out := make([]candidate.Candidate, 0, len(elements))
+			for _, el := range elements {
+				out = append(out, candidate.Candidate{Text: el.Display, Code: code, Comment: name, Actions: el.Actions})
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+		return []candidate.Candidate{{Text: value, Code: code}}
+	}
+	// $CC / $X / 纯文本: 单候选
+	res := ve.Expand(value)
+	text := res.Text
+	if text == "" {
+		text = value
+	}
+	return []candidate.Candidate{{Text: text, Code: code, Actions: res.Actions}}
 }

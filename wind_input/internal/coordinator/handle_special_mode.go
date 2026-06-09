@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/store"
 	"github.com/huanfeng/wind_input/internal/transform"
@@ -122,17 +123,40 @@ func (c *Coordinator) updateSpecialCandidates() (autoCommit bool) {
 	return auto
 }
 
-// buildSpecialUICandidates 将码表候选转换为 UI 候选，并应用 $CC/$X 展开。
+// buildSpecialUICandidates 将码表候选转换为 UI 候选，并应用 $CC/$X/$AA/$SS 展开。
+// $AA/$SS 会展开为多条候选；$CC/$X 展开为单条；普通文本原样保留。
 func (c *Coordinator) buildSpecialUICandidates(raw []ui.Candidate) []ui.Candidate {
 	if len(raw) == 0 {
 		return nil
 	}
 	out := make([]ui.Candidate, 0, len(raw))
-	for i, cand := range raw {
-		cand.Index = i + 1
-		// 展开 $CC/$X 等模板变量（$AA/$SS 数组留待后续任务）
-		c.applyValueExpansion(&cand)
-		out = append(out, cand)
+	for _, cand := range raw {
+		switch {
+		case c.cmdbarValueExpander != nil && (dict.HasExpandable(cand.Text) || dict.HasSSMarker(cand.Text)):
+			// $CC/$X/$SS：需要 hook，必须有 expander
+			expanded := c.cmdbarValueExpander.ExpandToCandidates(cand.Code, cand.Text)
+			out = append(out, expanded...)
+		case dict.HasAAMarker(cand.Text):
+			// $AA：纯解析，不需要 hook，可无 expander
+			if c.cmdbarValueExpander != nil {
+				expanded := c.cmdbarValueExpander.ExpandToCandidates(cand.Code, cand.Text)
+				out = append(out, expanded...)
+			} else {
+				// 无 expander 时直接调解析路径
+				if name, chars, ok := dict.ParseAAMarker(cand.Text); ok {
+					for _, r := range chars {
+						out = append(out, ui.Candidate{Text: string(r), Code: cand.Code, Comment: name})
+					}
+				} else {
+					out = append(out, cand)
+				}
+			}
+		default:
+			out = append(out, cand)
+		}
+	}
+	for i := range out {
+		out[i].Index = i + 1
 	}
 	return out
 }
