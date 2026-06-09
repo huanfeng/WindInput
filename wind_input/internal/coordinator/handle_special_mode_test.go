@@ -311,6 +311,40 @@ func TestSpecialMode_PunctCommitsHighlight(t *testing.T) {
 	}
 }
 
+// TestSpecialMode_FixedLengthAutoCommit fixed_length=2：打满 2 码且唯一候选时自动上屏。
+func TestSpecialMode_FixedLengthAutoCommit(t *testing.T) {
+	tc := newTestCoordinator(t)
+	dir, _ := filepath.Abs("testdata")
+	tc.specialModeReg = newSpecialModeRegistry(
+		[]config.SpecialModeConfig{{
+			ID: "rare", Name: "生僻字", TriggerKeys: []string{"grave"},
+			Table: "special_symbols.dict.yaml", AutoCommit: config.SpecialAutoCommitFixedLength, FixedLength: 2,
+		}},
+		[]string{dir}, testSpecialLogger())
+
+	if res := tc.HandleKeyEvent(bridge.KeyEventData{Key: "`", KeyCode: int(ipc.VK_OEM_3)}); res == nil {
+		t.Fatal("enter result nil")
+	}
+	if !tc.specialMode {
+		t.Fatal("should be in special mode after grave")
+	}
+
+	// "x"：长度 1 < 2，不自动上屏
+	tc.pressKey("x")
+	if !tc.specialMode {
+		t.Fatal("should still be in mode after 'x' (len < fixed_length)")
+	}
+
+	// "h"：buffer "xh" 长度 2 且唯一候选 ① → 自动上屏
+	res := tc.pressKey("h")
+	if tc.specialMode {
+		t.Error("specialMode should be false after fixed_length auto-commit")
+	}
+	if res == nil || res.Type != bridge.ResponseTypeInsertText || res.Text != "①" {
+		t.Fatalf("expected InsertText ①, got %+v", res)
+	}
+}
+
 // TestSpecialMode_HotReloadRebuildsRegistry 验证 UpdateInputConfig 热重载会重建 registry，
 // 使新增的 special_modes 配置立即生效（无需重启）。
 func TestSpecialMode_HotReloadRebuildsRegistry(t *testing.T) {
