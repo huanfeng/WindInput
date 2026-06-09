@@ -274,6 +274,24 @@ func (c *Coordinator) handleSpecialModeKey(key string, data *bridge.KeyEventData
 		}
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 
+	// 二候选键：候选 ≥ 2 选第二候选，否则回落标点顶屏
+	case c.isSelectKey2(key, data.KeyCode):
+		pageStart := (c.currentPage - 1) * c.candidatesPerPage
+		idx := pageStart + 1
+		if idx < len(c.candidates) && idx-pageStart < c.candidatesPerPage {
+			return c.selectSpecialCandidate(idx)
+		}
+		return c.specialPunctCommit(key)
+
+	// 三候选键：候选 ≥ 3 选第三候选，否则回落标点顶屏
+	case c.isSelectKey3(key, data.KeyCode):
+		pageStart := (c.currentPage - 1) * c.candidatesPerPage
+		idx := pageStart + 2
+		if idx < len(c.candidates) && idx-pageStart < c.candidatesPerPage {
+			return c.selectSpecialCandidate(idx)
+		}
+		return c.specialPunctCommit(key)
+
 	// 数字 1-9：选当前页第 n-1 候选
 	case len(key) == 1 && key[0] >= '1' && key[0] <= '9':
 		n := int(key[0] - '0')
@@ -302,9 +320,34 @@ func (c *Coordinator) handleSpecialModeKey(key string, data *bridge.KeyEventData
 		preedit := prefix + c.specialBuffer
 		return c.modeCompositionResult(preedit, len(preedit))
 
+	// 可打印符号（含引导符、标点）：顶屏当前高亮候选 + 输出该符号，然后退出。
+	// 解决：再次按引导符即可输入该符号、标点顶屏、无效符号顶屏。
+	case len(key) == 1 && key[0] >= '!' && key[0] <= '~':
+		return c.specialPunctCommit(key)
+
 	default:
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 	}
+}
+
+// specialPunctCommit 顶屏当前高亮候选（仅 buffer 非空且为文本候选时）+ 输出按键字符
+// （标点按中英文模式转换），然后退出特殊模式。供再次按引导符 / 标点顶屏 / 无效符号顶屏复用。
+func (c *Coordinator) specialPunctCommit(key string) *bridge.KeyEventResult {
+	var head string
+	if len(c.specialBuffer) > 0 && len(c.candidates) > 0 {
+		idx := (c.currentPage-1)*c.candidatesPerPage + c.selectedIndex
+		if idx >= 0 && idx < len(c.candidates) && len(c.candidates[idx].Actions) == 0 {
+			head = c.candidates[idx].Text
+			if c.fullWidth {
+				head = transform.ToFullWidth(head)
+			}
+		}
+	}
+	tail := key
+	if len(key) == 1 {
+		tail = c.convertPunct(rune(key[0]), false, 0)
+	}
+	return c.exitSpecialMode(true, head+tail)
 }
 
 // specialPrefixLimit 特殊模式前缀匹配展示候选的上限。

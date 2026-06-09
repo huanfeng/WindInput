@@ -267,3 +267,46 @@ func TestSpecialMode_AA_ExpandsToFourCandidates(t *testing.T) {
 		t.Error("specialMode should be false after selection")
 	}
 }
+
+// TestSpecialMode_RetriggerCommitsSymbol 进入后再次按引导符 ` → 作为符号上屏并退出
+// （避免无法输入该符号本身）。
+func TestSpecialMode_RetriggerCommitsSymbol(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	// 用真实 VK_OEM_3（避免 pressKey 把 ` 的 keycode 取成 96=VK_NUMPAD0 被小键盘拦截）。
+	res := tc.HandleKeyEvent(bridge.KeyEventData{Key: "`", KeyCode: int(ipc.VK_OEM_3)})
+	if tc.specialMode {
+		t.Error("specialMode should be false after re-pressing trigger symbol")
+	}
+	if res == nil || res.Type != bridge.ResponseTypeInsertText {
+		t.Fatalf("expected InsertText, got %+v", res)
+	}
+	if res.Text != "`" {
+		t.Errorf("expected backtick committed, got %q", res.Text)
+	}
+}
+
+// TestSpecialMode_PunctCommitsHighlight 打 "jt"(高亮 →) 后按标点 → 顶屏高亮候选 + 标点，退出。
+func TestSpecialMode_PunctCommitsHighlight(t *testing.T) {
+	tc := newSpecialTestCoordinator(t)
+	enterSpecialMode(t, tc)
+
+	tc.pressKey("j")
+	tc.pressKey("t")
+	if !tc.specialMode || len(tc.candidates) == 0 {
+		t.Fatal("should be in mode with candidates after 'jt'")
+	}
+
+	res := tc.pressKey(",")
+	if tc.specialMode {
+		t.Error("specialMode should be false after punctuation commit")
+	}
+	if res == nil || res.Type != bridge.ResponseTypeInsertText {
+		t.Fatalf("expected InsertText, got %+v", res)
+	}
+	rs := []rune(res.Text)
+	if len(rs) < 1 || rs[0] != '→' {
+		t.Errorf("expected committed highlight → as prefix, got %q", res.Text)
+	}
+}
