@@ -107,11 +107,13 @@ func (c *Coordinator) updateSpecialCandidates() (autoCommit bool) {
 		return false
 	}
 
-	raw := inst.table.Lookup(buf)
+	// 展示用前缀匹配（进入后/打字时即时提示），自动上屏判定用精确匹配。
+	exact := inst.table.Lookup(buf)
 	hasLonger := inst.table.HasLongerCode(buf)
-	c.candidates = c.buildSpecialUICandidates(raw)
+	display := inst.table.LookupPrefix(buf, specialPrefixLimit)
+	c.candidates = c.buildSpecialUICandidates(display)
 
-	auto := decideSpecialAutoCommit(inst.cfg.AutoCommit, inst.cfg.FixedLength, len(buf), len(raw), hasLonger)
+	auto := decideSpecialAutoCommit(inst.cfg.AutoCommit, inst.cfg.FixedLength, len(buf), len(exact), hasLonger)
 
 	// 计算分页（与 updateQuickInputCandidates 一致）
 	c.refreshEffectivePerPage()
@@ -283,8 +285,8 @@ func (c *Coordinator) handleSpecialModeKey(key string, data *bridge.KeyEventData
 		c.currentPage = 1
 		c.selectedIndex = 0
 		if c.updateSpecialCandidates() {
-			// 自动上屏：选唯一候选
-			return c.selectSpecialCandidate((c.currentPage-1)*c.candidatesPerPage + c.selectedIndex)
+			// 自动上屏：提交精确匹配候选（而非前缀展示列表的首项）
+			return c.commitSpecialAuto()
 		}
 		c.showSpecialUI()
 		prefix := c.specialPrefix()
@@ -294,6 +296,24 @@ func (c *Coordinator) handleSpecialModeKey(key string, data *bridge.KeyEventData
 	default:
 		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
 	}
+}
+
+// specialPrefixLimit 特殊模式前缀匹配展示候选的上限。
+const specialPrefixLimit = 200
+
+// commitSpecialAuto 自动上屏：提交当前 buffer 的精确匹配候选（唯一），
+// 而非前缀展示列表的首项——避免 fixed_length 档存在更长码时选错。
+func (c *Coordinator) commitSpecialAuto() *bridge.KeyEventResult {
+	inst := c.specialModeReg.get(c.specialActiveID)
+	if inst == nil || inst.table == nil {
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
+	expanded := c.buildSpecialUICandidates(inst.table.Lookup(c.specialBuffer))
+	if len(expanded) == 0 {
+		return &bridge.KeyEventResult{Type: bridge.ResponseTypeConsumed}
+	}
+	c.candidates = expanded
+	return c.selectSpecialCandidate(0)
 }
 
 // selectSpecialCandidate 选择特殊模式候选并上屏或执行命令。

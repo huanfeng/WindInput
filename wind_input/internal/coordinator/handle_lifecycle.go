@@ -65,6 +65,9 @@ func (c *Coordinator) armPendingFirstShowWithTimeout(d time.Duration) {
 		case c.quickInputMode:
 			c.logger.Debug("pendingFirstShow timeout: forcing showQuickInputUI")
 			c.showQuickInputUI()
+		case c.specialMode:
+			c.logger.Debug("pendingFirstShow timeout: forcing showSpecialUI")
+			c.showSpecialUI()
 		default:
 			// 非嵌入模式：即使无候选也要显示窗口，让用户看到 inputBuffer（如 v/i/u/o
 			// 等无对应候选的拼音字母），避免编码既不嵌入宿主又看不到候选窗的死角。
@@ -192,7 +195,8 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 	hasTempPinyin := c.tempPinyinMode
 	hasQuickInputPinyin := c.quickInputPinyinMode
 	hasQuickInput := c.quickInputMode
-	hasInput := hasMainInput || hasTempEnglish || hasTempPinyin || hasQuickInput
+	hasSpecial := c.specialMode
+	hasInput := hasMainInput || hasTempEnglish || hasTempPinyin || hasQuickInput || hasSpecial
 	hasCandidates := len(c.candidates) > 0
 	hasUI := c.uiManager != nil
 	// 主输入流程必须有候选才 show；模式入口（quickInput / tempPinyin / tempEnglish）
@@ -229,6 +233,8 @@ func (c *Coordinator) HandleCaretUpdate(data bridge.CaretData) error {
 			c.showPinyinModeUI(c.quickInputPinyinOps())
 		case hasQuickInput:
 			c.showQuickInputUI()
+		case hasSpecial:
+			c.showSpecialUI()
 		default:
 			c.showUI()
 		}
