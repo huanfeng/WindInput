@@ -29,7 +29,7 @@ func newSpecialTestCoordinator(t *testing.T) *testCoordinator {
 	dir, _ := filepath.Abs("testdata")
 	tc.specialModeReg = newSpecialModeRegistry(
 		[]config.SpecialModeConfig{specialModeCfg()},
-		dir,
+		[]string{dir},
 		testSpecialLogger(),
 	)
 	return tc

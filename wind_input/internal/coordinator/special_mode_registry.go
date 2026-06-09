@@ -5,6 +5,7 @@ package coordinator
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -20,15 +21,18 @@ type specialModeInstance struct {
 }
 
 type specialModeRegistry struct {
-	mu         sync.Mutex
-	instances  []*specialModeInstance
-	schemasDir string
-	logger     *slog.Logger
+	mu        sync.Mutex
+	instances []*specialModeInstance
+	// schemasDirs 是码表文件的候选基目录（按优先级，靠前者覆盖）。
+	// 通常为 [用户配置目录/schemas, 内置 dataRoot/schemas]，与 DiscoverSchemas 同源。
+	schemasDirs []string
+	logger      *slog.Logger
 }
 
 // newSpecialModeRegistry 校验配置、去重 id/触发键, 构造注册表。无效实例跳过+WARN。
-func newSpecialModeRegistry(cfgs []config.SpecialModeConfig, schemasDir string, logger *slog.Logger) *specialModeRegistry {
-	r := &specialModeRegistry{schemasDir: schemasDir, logger: logger}
+// schemasDirs 为码表文件候选基目录（按优先级），ensureLoaded 取首个存在的解析路径。
+func newSpecialModeRegistry(cfgs []config.SpecialModeConfig, schemasDirs []string, logger *slog.Logger) *specialModeRegistry {
+	r := &specialModeRegistry{schemasDirs: schemasDirs, logger: logger}
 	seenID := map[string]bool{}
 	seenKey := map[string]string{}
 	for _, c := range cfgs {
@@ -71,6 +75,25 @@ func (r *specialModeRegistry) get(id string) *specialModeInstance {
 	return nil
 }
 
+// resolveTablePath 在候选基目录中解析码表文件，返回首个存在的绝对路径；
+// 都不存在时返回首个候选拼接路径（供加载失败时的错误信息使用）。
+func (r *specialModeRegistry) resolveTablePath(table string) string {
+	var fallback string
+	for i, base := range r.schemasDirs {
+		p := filepath.Join(base, table)
+		if i == 0 {
+			fallback = p
+		}
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return table
+}
+
 // ensureLoaded 懒加载实例码表(转 wdb + LoadBinary), 缓存到实例。
 func (r *specialModeRegistry) ensureLoaded(inst *specialModeInstance) (*dict.CodeTable, error) {
 	r.mu.Lock()
@@ -78,7 +101,7 @@ func (r *specialModeRegistry) ensureLoaded(inst *specialModeInstance) (*dict.Cod
 	if inst.table != nil {
 		return inst.table, nil
 	}
-	srcPath := filepath.Join(r.schemasDir, inst.cfg.Table)
+	srcPath := r.resolveTablePath(inst.cfg.Table)
 	cacheKey := "special-" + inst.cfg.ID
 	wdbPath := dictcache.CachePath(cacheKey)
 	srcPaths := dictcache.RimeCodetableSourcePaths(srcPath)

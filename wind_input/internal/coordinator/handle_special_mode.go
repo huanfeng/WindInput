@@ -14,14 +14,21 @@ import (
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
-// schemasDir 返回码表文件解析的基目录（exeDir/schemas）。
-// 注: dataDir/schemas 用户覆盖留作后续，MVP 用 exeDir/schemas。
-func (c *Coordinator) schemasDir() string {
-	exeDir, err := config.GetExeDir()
-	if err != nil {
-		return "schemas"
+// schemasDirs 返回码表文件解析的候选基目录（按优先级，靠前者覆盖），
+// 与 schema.DiscoverSchemas 同源：用户配置目录/schemas（覆盖）+ 内置 dataRoot/schemas。
+// 其中 dataRoot = GetDataDir(exeDir) = exeDir/data（内置方案/词库根目录）。
+func (c *Coordinator) schemasDirs() []string {
+	var dirs []string
+	if cfgDir, err := config.GetConfigDir(); err == nil {
+		dirs = append(dirs, filepath.Join(cfgDir, "schemas"))
 	}
-	return filepath.Join(exeDir, "schemas")
+	if exeDir, err := config.GetExeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(config.GetDataDir(exeDir), "schemas"))
+	}
+	if len(dirs) == 0 {
+		dirs = append(dirs, "schemas")
+	}
+	return dirs
 }
 
 // matchSpecialTrigger 检查 (key, keyCode) 是否匹配指定 id 的触发键，返回匹配的触发键字符串。

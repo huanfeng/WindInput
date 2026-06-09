@@ -14,7 +14,7 @@ func TestTriggerModes_SpecialInserted(t *testing.T) {
 	c.config.Input.SpecialModes = []config.SpecialModeConfig{
 		{ID: "sym", Name: "快符", TriggerKeys: []string{"grave"}, Table: "special_symbols.dict.yaml", AutoCommit: "prefix_free"},
 	}
-	c.specialModeReg = newSpecialModeRegistry(c.config.Input.SpecialModes, dir, testSpecialLogger())
+	c.specialModeReg = newSpecialModeRegistry(c.config.Input.SpecialModes, []string{dir}, testSpecialLogger())
 
 	modes := c.triggerModes()
 	var names []string

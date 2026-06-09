@@ -789,7 +789,7 @@ func NewCoordinator(engineMgr *engine.Manager, uiManager *ui.Manager, cfg *confi
 	c.toolbarReducer = newToolbarReducer(c)
 
 	// 特殊模式注册表（引导键自定义码表）
-	c.specialModeReg = newSpecialModeRegistry(c.config.Input.SpecialModes, c.schemasDir(), c.logger)
+	c.specialModeReg = newSpecialModeRegistry(c.config.Input.SpecialModes, c.schemasDirs(), c.logger)
 
 	return c
 }
