@@ -617,7 +617,7 @@ type StatsDailyItem struct {
 	CandPosDist   [5]int                      `json:"cpd"`
 	ActiveSeconds int                         `json:"as"`
 	BySchema      map[string]*SchemaStatsItem `json:"bs,omitempty"`
-	BySource      [9]int                      `json:"src"`
+	BySource      [10]int                     `json:"src"`
 }
 
 // SchemaStatsItem 方案统计条目

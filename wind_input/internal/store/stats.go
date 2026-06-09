@@ -27,6 +27,7 @@ const (
 	SourceFullWidth                       // 全角转换
 	SourceModeSwitch                      // 模式切换时上屏
 	SourceTSFDirect                       // TSF 层直接输入 (英文模式)
+	SourceSpecialMode                     // 引导键特殊模式（自定义码表）
 	commitSourceCount                     // 来源总数（内部使用）
 )
 
