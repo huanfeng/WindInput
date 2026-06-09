@@ -1,0 +1,11 @@
+---
+name: special_symbols
+sort: by_order
+columns:
+  - code
+  - text
+...
+jt	→
+jt	←
+xh	①
+arrow	⇧
