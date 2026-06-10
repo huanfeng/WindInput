@@ -1,4 +1,4 @@
-﻿<p align="center">
+<p align="center">
   <img src="pic/logo_fix.png" alt="清风输入法" width="128">
 </p>
 
@@ -73,18 +73,18 @@
 
 ## 配置
 
-配置文件位于 `%APPDATA%\WindInput\config.yaml`，也可通过设置工具修改：
+配置文件位于 `%APPDATA%\WindInput\config.toml`，也可通过设置工具修改：
 
-```yaml
-schema:
-  active: "wubi86"            # 当前输入方案：wubi86 / wubi86_pinyin
+```toml
+[schema]
+active = "wubi86"                       # 当前输入方案：wubi86 / wubi86_pinyin
 
-hotkeys:
-  toggle_mode_keys: [lshift, rshift]   # 中英切换键
+[hotkeys]
+toggle_mode_keys = ["lshift", "rshift"] # 中英切换键
 
-ui:
-  font_size: 18             # 候选窗字体大小
-  candidates_per_page: 7    # 每页候选数量
+[ui]
+font_size = 18                          # 候选窗字体大小
+candidates_per_page = 7                 # 每页候选数量
 ```
 
 完整配置项请参阅设置工具中的说明。

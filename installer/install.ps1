@@ -1,4 +1,4 @@
-﻿param(
+param(
     [ValidateSet("all", "dll", "service", "setting", "portable")]
     [string[]]$Module = @("all"),
 
@@ -563,7 +563,7 @@ Write-Host "- Ctrl+Shift+E`: 切换拼音/五笔引擎"
 Write-Host ""
 Write-Host "设置:"
 Write-Host "- 运行 $SettingName 或在开始菜单中找到`"$ShortcutName`""
-Write-Host "- 配置位置: %APPDATA%\$AppDirName\config.yaml"
+Write-Host "- 配置位置: %APPDATA%\$AppDirName\config.toml"
 Write-Host ""
 Write-Host "注意: 如果旧文件无法删除,请重启电脑后"
 Write-Host "重新运行安装程序以完成清理。"

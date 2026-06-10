@@ -237,7 +237,7 @@ CompositeDict (聚合词库)
 
 | 平台 | 路径 | 用途 |
 |------|------|------|
-| Windows | `%APPDATA%\WindInput\config.yaml` | 用户配置文件 |
+| Windows | `%APPDATA%\WindInput\config.toml` | 用户配置文件 |
 | Windows | `%APPDATA%\WindInput\schemas\` | 方案文件 |
 | Windows | `%LOCALAPPDATA%\WindInput\logs\` | 日志文件 |
 | macOS | `~/Library/Application Support/WindInput<suffix>/` | 运行时目录（socket / pid / 数据） |

@@ -8,6 +8,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/gogpu/gg v0.48.3
 	github.com/google/uuid v1.6.0
+	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
 	go.etcd.io/bbolt v1.4.3

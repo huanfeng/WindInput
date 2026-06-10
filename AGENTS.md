@@ -85,7 +85,7 @@ Schema 驱动流程:
 2. `[2/6]` C++ DLL: `cd wind_tsf/build && cmake .. && cmake --build . --config Release`（仅输出 wind_tsf.dll；wind_dwrite.dll 已移除，Go 侧通过 CGO 直接调用系统 dwrite.dll）
 3. `[3/6]` 设置界面: `cd wind_setting && wails build [-debug]`
 4. `[4/6]` 下载白霜拼音 rime-frost 词库到 `.cache/rime-frost/`
-5. `[5/6]` 复制词库、Schema 配置和默认配置（config.yaml）到 `build/`
+5. `[5/6]` 复制词库、Schema 配置和默认配置（config.toml）到 `build/`
 6. `[6/6]` 验证构建产物
 
 ### Testing Requirements

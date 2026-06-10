@@ -35,7 +35,7 @@ func NewSchemaManager(exeDir, dataDir string, logger *slog.Logger) *SchemaManage
 }
 
 // LoadSchemas 扫描并加载所有方案文件
-// 加载顺序：Layer1 内置方案 → Layer2 用户方案 → Layer3 schema_overrides.yaml
+// 加载顺序：Layer1 内置方案 → Layer2 用户方案 → Layer3 schema_overrides.toml
 func (sm *SchemaManager) LoadSchemas() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -46,7 +46,7 @@ func (sm *SchemaManager) LoadSchemas() error {
 		return err
 	}
 
-	// Layer 3: 叠加 schema_overrides.yaml 覆盖配置
+	// Layer 3: 叠加 schema_overrides.toml 覆盖配置
 	// dictionaries 数组按 id patch（与 loader.go 中 Layer 2 合并语义一致），
 	// 避免 L3 写入 `dictionaries: [{id, enabled}]` 时把 L1+L2 合并出的完整词库
 	// 元数据（label/path/type/role 等）整体替换掉。

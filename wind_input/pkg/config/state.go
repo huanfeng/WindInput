@@ -35,14 +35,15 @@ func DefaultRuntimeState() *RuntimeState {
 	}
 }
 
-// LoadRuntimeState 加载运行时状态
+// LoadRuntimeState 加载运行时状态（state.toml 优先，缺失时回退旧版 state.yaml）。
+// 从旧版加载成功后立即写出 TOML 并把旧文件改名 *.migrated.bak（一次性迁移）。
 func LoadRuntimeState() (*RuntimeState, error) {
 	statePath, err := GetStatePath()
 	if err != nil {
 		return DefaultRuntimeState(), err
 	}
 
-	data, err := os.ReadFile(statePath)
+	data, readPath, migratedFrom, err := readFileWithLegacyFallback(statePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return DefaultRuntimeState(), nil
@@ -51,8 +52,20 @@ func LoadRuntimeState() (*RuntimeState, error) {
 	}
 
 	state := DefaultRuntimeState()
-	if err := yaml.Unmarshal(data, state); err != nil {
+	yamlData, err := normalizeToYAML(readPath, data)
+	if err != nil {
 		return DefaultRuntimeState(), fmt.Errorf("failed to parse state file: %w", err)
+	}
+	if err := yaml.Unmarshal(yamlData, state); err != nil {
+		return DefaultRuntimeState(), fmt.Errorf("failed to parse state file: %w", err)
+	}
+
+	if migratedFrom != "" {
+		if err := SaveRuntimeState(state); err != nil {
+			fmt.Fprintf(os.Stderr, "[config] warning: 状态迁移写出失败（下次启动重试） err=%v\n", err)
+		} else {
+			renameLegacyFile(migratedFrom)
+		}
 	}
 
 	return state, nil
@@ -69,7 +82,7 @@ func SaveRuntimeState(state *RuntimeState) error {
 		return err
 	}
 
-	data, err := yaml.Marshal(state)
+	data, err := marshalForPath(statePath, state)
 	if err != nil {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}

@@ -216,7 +216,7 @@ type Config struct {
 }
 ```
 
-配置路径：`%APPDATA%\WindInput\config.yaml`
+配置路径：`%APPDATA%\WindInput\config.toml`
 
 ## IPC 协议（二进制）
 
@@ -269,27 +269,27 @@ zhongguo 中国 150
 
 ## 配置文件
 
-`%APPDATA%\WindInput\config.yaml`（全局配置）+ `data/schemas/*.schema.yaml`（方案配置）：
+`%APPDATA%\WindInput\config.toml`（全局配置）+ `data/schemas/*.schema.yaml`（方案配置）：
 
-```yaml
-# config.yaml — 全局配置
-startup:
-  default_chinese_mode: true    # 启动默认中文
+```toml
+# config.toml — 全局配置
+[startup]
+default_chinese_mode = true        # 启动默认中文
 
-schema:
-  active: pinyin                # 当前活跃方案 ID
-  available: [pinyin, wubi86]   # 可切换方案列表
+[schema]
+active = "pinyin"                  # 当前活跃方案 ID
+available = ["pinyin", "wubi86"]   # 可切换方案列表
 
-hotkeys:
-  toggle_mode_keys: [lshift]    # 中英切换键
+[hotkeys]
+toggle_mode_keys = ["lshift"]      # 中英切换键
 
-ui:
-  font_size: 18                 # 字体大小
-  candidates_per_page: 9        # 每页候选数
-  font_path: ""                 # 自定义字体路径
+[ui]
+font_size = 18                     # 字体大小
+candidates_per_page = 9            # 每页候选数
+font_path = ""                     # 自定义字体路径
 
-advanced:
-  log_level: info               # debug/info/warn/error
+[advanced]
+log_level = "info"                 # debug/info/warn/error
 ```
 
 引擎类型、词库路径等由方案文件（`*.schema.yaml`）自描述定义。

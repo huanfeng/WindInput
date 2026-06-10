@@ -1,13 +1,14 @@
 # 应用兼容性规则
 # 针对特定应用的候选框定位、光标获取等兼容性修正。
-# 用户可在 %APPDATA%\WindInput\compat.yaml 中覆盖或添加规则。
+# 用户可在 %APPDATA%\WindInput\compat.toml 中覆盖或添加规则。
 #
 # 可用字段:
 #   process:              进程名（不区分大小写）
 #   comment:              说明（仅文档用途）
 #   caret_use_top:        使用 caret rect 的 top 而非 bottom 定位候选框
 #                         适用于 GetTextExt 返回的 height 不稳定的 WebView 应用
-apps:
-  - process: "Weixin.exe"
-    comment: "微信 - Qt WebView 输入框 caret height 不稳定（h=1 或 h=20），使用 rect.top 定位"
-    caret_use_top: true
+
+[[apps]]
+process = "Weixin.exe"
+comment = "微信 - Qt WebView 输入框 caret height 不稳定（h=1 或 h=20），使用 rect.top 定位"
+caret_use_top = true

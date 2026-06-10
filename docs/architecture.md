@@ -560,10 +560,10 @@ type Config struct {
     UI         UIConfig         `yaml:"ui"`
 }
 
-// 配置路径: %APPDATA%\WindInput\config.yaml
+// 配置路径: %APPDATA%\WindInput\config.toml
 func GetConfigPath() (string, error) {
     configDir, _ := os.UserConfigDir()  // %APPDATA%
-    return filepath.Join(configDir, "WindInput", "config.yaml"), nil
+    return filepath.Join(configDir, "WindInput", "config.toml"), nil
 }
 
 func Load() (*Config, error) {
@@ -918,8 +918,8 @@ WindInput 设置工具 (`wind_setting`) 是独立的 GUI 应用，通过**控制
             ▼ 直接读写                              ▼ 控制管道
     ┌───────────────────┐               ┌───────────────────────┐
     │ %APPDATA%\WindInput│               │ \\.\pipe\wind_input_  │
-    │   config.yaml     │               │      control          │
-    │   state.yaml      │               └───────────┬───────────┘
+    │   config.toml     │               │      control          │
+    │   state.toml      │               └───────────┬───────────┘
     └───────────────────┘                           │
                                                     ▼
                                     ┌───────────────────────────┐
@@ -956,7 +956,7 @@ WindInput 设置工具 (`wind_setting`) 是独立的 GUI 应用，通过**控制
 
 1. **修改配置**：
    - 用户在设置界面修改选项
-   - wind_setting 直接写入 `config.yaml`
+   - wind_setting 直接写入 `config.toml`
 
 2. **通知服务**：
    - 发送 `RELOAD_CONFIG` 到控制管道

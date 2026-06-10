@@ -305,7 +305,7 @@ func (a *App) loadSchemaBase(schemaID string) (*SchemaConfig, error) {
 }
 
 // GetSchemaConfig 获取指定方案的完整配置
-// 使用三层合并读取：内置方案 → 用户方案 → schema_overrides.yaml
+// 使用三层合并读取：内置方案 → 用户方案 → schema_overrides.toml
 func (a *App) GetSchemaConfig(schemaID string) (*SchemaConfig, error) {
 	cfg, err := a.loadSchemaBase(schemaID)
 	if err != nil {
@@ -368,7 +368,7 @@ func setMapDefault(m map[string]interface{}, key string, defaultVal interface{})
 	}
 }
 
-// SaveSchemaConfig 保存方案配置（写入 schema_overrides.yaml 覆盖层）
+// SaveSchemaConfig 保存方案配置（写入 schema_overrides.toml 覆盖层）
 // 计算 cfg 与基础配置（Layer1+Layer2）的 diff，仅将差异写入覆盖层。
 func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
 	// 加载基础配置（Layer1 + Layer2）
@@ -416,7 +416,7 @@ func (a *App) SaveSchemaConfig(schemaID string, cfg *SchemaConfig) error {
 }
 
 // SetDictEnabled 切换指定方案下某个附加词库的启用状态。
-// 仅写入 Layer 3 (schema_overrides.yaml) 的稀疏 diff，不污染 Layer 1/Layer 2
+// 仅写入 Layer 3 (schema_overrides.toml) 的稀疏 diff，不污染 Layer 1/Layer 2
 // 的方案文件。写入完成后由 ConfigSetSchemaOverride 触发 wind_input 热重载。
 //
 // L3 中的形态示例：
@@ -476,7 +476,7 @@ func (a *App) ResetSchemaConfig(schemaID string) error {
 	return a.rpcClient.ConfigResetSchemaOverride(schemaID)
 }
 
-// SwitchActiveSchema 切换活跃方案（原子修改 config.yaml + 热更新，由 wind_input 统一处理）
+// SwitchActiveSchema 切换活跃方案（原子修改 config.toml + 热更新，由 wind_input 统一处理）
 func (a *App) SwitchActiveSchema(schemaID string) error {
 	if a.rpcClient == nil {
 		return fmt.Errorf("RPC client not initialized")
@@ -1135,7 +1135,7 @@ func (a *App) DeleteSchema(schemaID string) error {
 		}
 	}
 
-	// 清理方案覆盖配置（通过 RPC，wind_input 统一管理 schema_overrides.yaml）
+	// 清理方案覆盖配置（通过 RPC，wind_input 统一管理 schema_overrides.toml）
 	if a.rpcClient != nil {
 		a.rpcClient.ConfigDeleteSchemaOverride(schemaID)
 	}

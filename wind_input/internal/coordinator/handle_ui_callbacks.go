@@ -989,7 +989,7 @@ func (c *Coordinator) syncToolbarState() {
 	c.syncToolbarStateNoLock()
 }
 
-// handleToggleSkipCaretPending 切换指定应用的"即时候选"标志，写入用户 compat.yaml
+// handleToggleSkipCaretPending 切换指定应用的"即时候选"标志，写入用户 compat.toml
 // 并重新加载兼容性规则，使改动立即生效。
 // processName 在菜单弹出时捕获，避免菜单关闭期间 FocusLost 清空 activeProcessName 导致操作失效。
 func (c *Coordinator) handleToggleSkipCaretPending(processName string) {
@@ -1013,9 +1013,9 @@ func (c *Coordinator) handleToggleSkipCaretPending(processName string) {
 	c.mu.Unlock()
 }
 
-// handleTogglePinCandidatePosition 切换指定应用的「固定候选位置」标志，写入用户 compat.yaml
+// handleTogglePinCandidatePosition 切换指定应用的「固定候选位置」标志，写入用户 compat.toml
 // 并重新加载兼容性规则、推送 pin 状态到 uiManager，使改动立即生效。
-// 关闭时同步清空该应用在 state.yaml 中已记忆的所有显示器位置。
+// 关闭时同步清空该应用在 state.toml 中已记忆的所有显示器位置。
 // processName 在菜单弹出时捕获，避免菜单关闭期间 FocusLost 清空 activeProcessName 导致操作失效。
 func (c *Coordinator) handleTogglePinCandidatePosition(processName string) {
 	if processName == "" {
@@ -1036,7 +1036,7 @@ func (c *Coordinator) handleTogglePinCandidatePosition(processName string) {
 	c.appCompat = newCompat
 	c.activeCompatRule = newCompat.GetRule(processName)
 	if !newValue {
-		// 关闭即清记忆：删掉该进程在 state.yaml 中的所有显示器位置
+		// 关闭即清记忆：删掉该进程在 state.toml 中的所有显示器位置
 		if _, ok := c.candidatePinPositions[procKey]; ok {
 			delete(c.candidatePinPositions, procKey)
 			clearedMemory = true

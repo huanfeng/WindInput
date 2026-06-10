@@ -61,7 +61,7 @@ func (c *Coordinator) UpdateUIConfig(uiConfig *config.UIConfig) {
 		c.uiManager.SetCandidateIndexLabels(uiConfig.CandidateIndexLabels)
 		// Update preedit display mode
 		c.uiManager.SetPreeditMode(uiConfig.PreeditMode)
-		// 候选窗在光标上方时反转 bands 排列（由 data/config.yaml 默认设为 true）
+		// 候选窗在光标上方时反转 bands 排列（由 data/config.toml 默认设为 true）
 		c.uiManager.SetFlipLayoutWhenAbove(uiConfig.FlipLayoutWhenAbove)
 		// Update pager display mode override
 		c.uiManager.SetPagerBarDisplay(uiConfig.PagerBarDisplay)

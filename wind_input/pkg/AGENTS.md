@@ -29,7 +29,7 @@
 - `go test ./pkg/...`
 
 ### Common Patterns
-- 配置文件路径：`%APPDATA%\WindInput\config.yaml`
+- 配置文件路径：`%APPDATA%\WindInput\config.toml`
 - 数据文件路径：`%APPDATA%\WindInput\`（user_data.db 词库数据库、system.phrases.yaml 系统短语种子）
 
 ## Dependencies

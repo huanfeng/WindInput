@@ -10,13 +10,14 @@ import (
 )
 
 const (
-	SchemaOverridesFile = "schema_overrides.yaml"
+	SchemaOverridesFile       = "schema_overrides.toml"
+	LegacySchemaOverridesFile = "schema_overrides.yaml" // 旧版文件名，双读回退用
 )
 
 // overridesMu 文件锁，防止并发读写
 var overridesMu sync.Mutex
 
-// getSchemaOverridesPath 返回 schema_overrides.yaml 的完整路径
+// getSchemaOverridesPath 返回 schema_overrides.toml 的完整路径
 func getSchemaOverridesPath() (string, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
@@ -36,13 +37,14 @@ func LoadSchemaOverrides() (map[string]map[string]any, error) {
 }
 
 // loadSchemaOverridesLocked 在已持有锁的情况下加载覆盖配置
+// （schema_overrides.toml 优先，缺失时回退旧版 schema_overrides.yaml）
 func loadSchemaOverridesLocked() (map[string]map[string]any, error) {
 	path, err := getSchemaOverridesPath()
 	if err != nil {
 		return make(map[string]map[string]any), err
 	}
 
-	data, err := os.ReadFile(path)
+	data, readPath, _, err := readFileWithLegacyFallback(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return make(map[string]map[string]any), nil
@@ -54,8 +56,13 @@ func loadSchemaOverridesLocked() (map[string]map[string]any, error) {
 		return make(map[string]map[string]any), nil
 	}
 
+	yamlData, err := normalizeToYAML(readPath, data)
+	if err != nil {
+		return make(map[string]map[string]any), fmt.Errorf("failed to parse schema overrides file: %w", err)
+	}
+
 	var raw map[string]map[string]any
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := yaml.Unmarshal(yamlData, &raw); err != nil {
 		return make(map[string]map[string]any), fmt.Errorf("failed to parse schema overrides file: %w", err)
 	}
 
@@ -85,14 +92,14 @@ func saveSchemaOverridesLocked(overrides map[string]map[string]any) error {
 		return err
 	}
 
-	data, err := yaml.Marshal(overrides)
+	data, err := marshalForPath(path, overrides)
 	if err != nil {
 		return fmt.Errorf("failed to marshal schema overrides: %w", err)
 	}
 
 	// 原子写入：先写临时文件再 rename
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "schema_overrides_*.yaml.tmp")
+	tmp, err := os.CreateTemp(dir, "schema_overrides_*.toml.tmp")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -113,6 +120,13 @@ func saveSchemaOverridesLocked(overrides map[string]map[string]any) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	// TOML 已成功落盘：残留的旧版 YAML 文件已过时，改名备份完成迁移
+	if legacy := LegacyYAMLPath(path); legacy != path {
+		if _, err := os.Stat(legacy); err == nil {
+			renameLegacyFile(legacy)
+		}
 	}
 
 	return nil
@@ -174,6 +188,13 @@ func DeleteSchemaOverride(schemaID string) error {
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to remove schema overrides file: %w", err)
+		}
+		// 残留的旧版 YAML 也要改名备份，否则下次加载会回退读到旧文件，
+		// 让已删除的覆盖"复活"
+		if legacy := LegacyYAMLPath(path); legacy != path {
+			if _, err := os.Stat(legacy); err == nil {
+				renameLegacyFile(legacy)
+			}
 		}
 		return nil
 	}

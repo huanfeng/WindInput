@@ -43,7 +43,7 @@ func NewReloadHandler(coord *Coordinator, cfg *config.Config, cfgMu *sync.RWMute
 	}
 }
 
-// ReloadConfig 重载配置（处理 config.yaml 变更和 schema 文件变更）
+// ReloadConfig 重载配置（处理 config.toml 变更和 schema 文件变更）
 func (h *ReloadHandler) ReloadConfig() error {
 	newCfg, err := config.Load()
 	if err != nil {

@@ -1104,7 +1104,7 @@ export async function getPlatform(): Promise<string> {
   return "";
 }
 
-// 默认配置（从后端获取系统默认值：代码默认 + data/config.yaml 合并）
+// 默认配置（从后端获取系统默认值：代码默认 + data/config.toml 合并）
 // Go Config 不含 dictionary/engine（由方案单独管理），前端用硬编码默认值补齐
 export async function fetchSystemDefaultConfig(): Promise<Config> {
   const goDefaults =

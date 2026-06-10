@@ -53,8 +53,8 @@ learning:
 ### Working In This Directory
 
 - Schema 文件是方案驱动架构的核心，修改后需运行 `cd wind_input && go test ./internal/schema/...` 验证解析
-- `id` 字段必须唯一，与 `config.yaml` 中 `schema.available` 列表对应
-- 新增方案后需同时在 `config.yaml` 的 `schema.available` 中注册
+- `id` 字段必须唯一，与 `config.toml` 中 `schema.available` 列表对应
+- 新增方案后需同时在 `config.toml` 的 `schema.available` 中注册
 - 不要修改 `id` 字段（会影响用户数据目录路径和配置持久化）
 
 ### Testing Requirements
@@ -73,6 +73,6 @@ cd wind_input && go test ./internal/engine/...
 - `wind_input/internal/schema` — Schema 文件解析和验证
 - `wind_input/internal/engine` — EngineFactory 根据 schema.engine.type 创建引擎
 - `data/dict/` — 词库源数据（schema 中 dictionaries 字段引用）
-- `data/config.yaml` — `schema.available` 列表决定哪些方案可用
+- `data/config.toml` — `schema.available` 列表决定哪些方案可用
 
 <!-- MANUAL: -->

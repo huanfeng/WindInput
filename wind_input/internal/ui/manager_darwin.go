@@ -448,7 +448,7 @@ func (m *Manager) ListThemeIDs() []string {
 // ============================================================================
 
 // UpdateConfig 与 Win 版同签名 (4 参)。darwin 上候选窗字体由 forwarder 自持的
-// ui.Renderer 管理: 字号/字号跟随主题经 forwarder 读 config.yaml 生效 (applyFontFromConfig),
+// ui.Renderer 管理: 字号/字号跟随主题经 forwarder 读 config.toml 生效 (applyFontFromConfig),
 // 字体族恒用 forwarder 启动解析的本机 CJK 族 (config.UI.FontFamily 可能是 Win 字体名)。
 // 故此 stub 仅镜像 hideCandidateWindow, fontSize/fontFollowTheme/fontFamily 不在此消费。
 func (m *Manager) UpdateConfig(fontSize float64, fontFollowTheme bool, fontFamily string, hideCandidateWindow bool) {
@@ -458,7 +458,7 @@ func (m *Manager) UpdateConfig(fontSize float64, fontFollowTheme bool, fontFamil
 }
 
 // SetCandidateIndexLabels 与 Win 版同签名。darwin 上仅镜像到字段;实际生效路径是
-// forwarder 经 config.yaml mtime 读取 CandidateIndexLabels 并 SetGlobalIndexLabels
+// forwarder 经 config.toml mtime 读取 CandidateIndexLabels 并 SetGlobalIndexLabels
 // (见 cmd/service/forwarder_darwin.go applyFontFromConfig), 不走此 stub。
 func (m *Manager) SetCandidateIndexLabels(labels string) {
 	m.mu.Lock()
@@ -467,7 +467,7 @@ func (m *Manager) SetCandidateIndexLabels(labels string) {
 }
 
 // SetBehaviorOverrides 与 Win 版同签名。darwin 上候选窗由 forwarder 自持的 ui.Renderer 管理，
-// behavior 覆盖经 forwarder 读 config.yaml 生效，故此 stub 不消费。
+// behavior 覆盖经 forwarder 读 config.toml 生效，故此 stub 不消费。
 func (m *Manager) SetBehaviorOverrides(
 	alwaysShowPager, alwaysShowPagerFollowTheme bool,
 	showPageNumber, showPageNumberFollowTheme bool,

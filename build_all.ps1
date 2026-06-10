@@ -713,7 +713,7 @@ if ($BuildAll) {
     Write-Host "- $buildDirLabel\data\schemas\pinyin\unigram.txt（Unigram 语言模型）"
     Write-Host "- $buildDirLabel\data\schemas\wubi86\wubi86_jidian*.dict.yaml（五笔词库）"
     Write-Host "- $buildDirLabel\data\schemas\common_chars.txt（常用字表）"
-    Write-Host "- $buildDirLabel\data\config.yaml（默认配置）"
+    Write-Host "- $buildDirLabel\data\config.toml（默认配置）"
     Write-Host "- $buildDirLabel\data\system.phrases.yaml（系统短语配置）"
     Write-Host "- $buildDirLabel\data\themes\*\theme.yaml（主题配置）"
     Write-Host ""

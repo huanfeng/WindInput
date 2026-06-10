@@ -600,7 +600,7 @@ func (s *SystemService) ListSchemas(args *rpcapi.Empty, reply *rpcapi.ListSchema
 		return fmt.Errorf("list schema IDs: %w", err)
 	}
 
-	// 获取配置中启用的方案（从内存中持有的活配置读取，wind_input 是 config.yaml 的唯一 owner）
+	// 获取配置中启用的方案（从内存中持有的活配置读取，wind_input 是 config.toml 的唯一 owner）
 	if s.server == nil || s.server.cfg == nil {
 		return fmt.Errorf("config not available")
 	}

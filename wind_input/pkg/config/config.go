@@ -510,7 +510,7 @@ func DefaultConfig() *Config {
 		},
 		UI: UIConfig{
 			FontSize:            18,
-			FontSizeFollowTheme: true, // 新装默认跟随主题字号；老配置经 LoadFrom 探针迁移为 false（自定义）
+			FontSizeFollowTheme: true, // 新装默认跟随主题字号；走通用「缺失=继承默认」机制（探针迁移已移除）
 			// 主题 behavior 用户覆盖默认跟随主题（哲学Y）；值字段为自定义模式兜底初值。
 			AlwaysShowPager:             false,
 			AlwaysShowPagerFollowTheme:  true,
@@ -626,15 +626,18 @@ func DefaultConfig() *Config {
 
 // Load loads the configuration using three-layer merge:
 // 1. Code defaults (DefaultConfig)
-// 2. System bundled config (data/config.yaml) overlay
-// 3. User config (%APPDATA%/WindInput/config.yaml) overlay
+// 2. System bundled config (data/config.toml) overlay
+// 3. User config (%APPDATA%/WindInput/config.toml) overlay
 func Load() (*Config, error) {
 	return LoadFrom("")
 }
 
 // LoadFrom loads the configuration from a specific user config path.
 // If path is empty, uses the default user config path.
-// System config (data/config.yaml) is always loaded as the middle layer.
+// System config (data/config.toml) is always loaded as the middle layer.
+//
+// 旧版迁移：当目标为 .toml 且不存在、同名旧版 .yaml 存在时，自动从旧文件
+// 加载，成功后写出 TOML 并把旧文件改名 *.migrated.bak（一次性迁移）。
 func LoadFrom(path string) (*Config, error) {
 	if path == "" {
 		var err error
@@ -647,19 +650,19 @@ func LoadFrom(path string) (*Config, error) {
 	// Layer 1: 代码默认值
 	cfg := DefaultConfig()
 
-	// Layer 2: 加载系统预置配置（data/config.yaml）覆盖代码默认值
+	// Layer 2: 加载系统预置配置（data/config.toml，兼容旧版 .yaml）覆盖代码默认值
 	if sysPath, err := GetSystemConfigPath(); err == nil {
 		if sysData, err := os.ReadFile(sysPath); err == nil {
 			// 系统配置解析失败只打印警告，不中断
-			if err := yaml.Unmarshal(sysData, cfg); err != nil {
+			if err := unmarshalConfigData(sysPath, sysData, cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "[config] warning: failed to parse system config %s: %v\n", sysPath, err)
 			}
 		}
 		// 系统配置文件不存在是正常情况，不需要报错
 	}
 
-	// Layer 3: 加载用户配置覆盖
-	userData, err := os.ReadFile(path)
+	// Layer 3: 加载用户配置覆盖（config.toml 优先，缺失时回退旧版 config.yaml）
+	userData, readPath, migratedFrom, err := readFileWithLegacyFallback(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// 用户配置不存在，使用前两层的结果
@@ -668,7 +671,7 @@ func LoadFrom(path string) (*Config, error) {
 		return cfg, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	if err := yaml.Unmarshal(userData, cfg); err != nil {
+	if err := unmarshalConfigData(readPath, userData, cfg); err != nil {
 		// 区分错误类型，尽量自愈，避免每次启动都解析失败而永久降级。
 		var typeErr *yaml.TypeError
 		if errors.As(err, &typeErr) {
@@ -677,20 +680,23 @@ func LoadFrom(path string) (*Config, error) {
 			// 隐私：只记录数量等元数据，typeErr.Errors 为字段路径描述，不含字段值内容。
 			fmt.Fprintf(os.Stderr, "[config] warning: 配置部分字段不兼容，已保留其余配置并对不兼容字段使用默认值 count=%d\n", len(typeErr.Errors))
 		} else {
-			// 其它错误（语法损坏）：无法部分解码，回退到默认配置。
-			fmt.Fprintf(os.Stderr, "[config] warning: 配置文件损坏，使用默认配置 path=%s err=%v\n", path, err)
+			// 其它错误（语法损坏，含 TOML 语法错误）：无法部分解码，回退到默认配置。
+			fmt.Fprintf(os.Stderr, "[config] warning: 配置文件损坏，使用默认配置 path=%s err=%v\n", readPath, err)
 			cfg = DefaultConfig()
 		}
 
 		// 兜底校验，确保自愈写回的配置是合法可加载状态。
 		ApplyConfigFallbacks(cfg)
 
-		// 自愈文件：先备份原始内容（best-effort），再原子回写当前有效配置。
-		if bakErr := os.WriteFile(path+".bak", userData, 0o644); bakErr != nil {
-			fmt.Fprintf(os.Stderr, "[config] warning: 备份损坏配置失败 path=%s err=%v\n", path+".bak", bakErr)
+		// 自愈文件：先备份原始内容（best-effort），再回写当前有效配置到规范路径。
+		if bakErr := os.WriteFile(readPath+".bak", userData, 0o644); bakErr != nil {
+			fmt.Fprintf(os.Stderr, "[config] warning: 备份损坏配置失败 path=%s err=%v\n", readPath+".bak", bakErr)
 		}
 		if saveErr := SaveTo(cfg, path); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "[config] warning: 自愈回写配置失败 path=%s err=%v\n", path, saveErr)
+		} else if migratedFrom != "" {
+			// 自愈写出即完成迁移（损坏的旧文件已另存 .bak）
+			renameLegacyFile(migratedFrom)
 		}
 
 		return cfg, nil
@@ -699,7 +705,28 @@ func LoadFrom(path string) (*Config, error) {
 	// 兜底校验
 	ApplyConfigFallbacks(cfg)
 
+	// 旧格式一次性迁移：从旧版 YAML 成功加载后写出 TOML，旧文件改名备份。
+	// 写出失败时保留旧文件，下次启动自动重试。
+	if migratedFrom != "" {
+		if err := SaveTo(cfg, path); err != nil {
+			fmt.Fprintf(os.Stderr, "[config] warning: 配置迁移写出失败（下次启动重试） path=%s err=%v\n", path, err)
+		} else {
+			renameLegacyFile(migratedFrom)
+		}
+	}
+
 	return cfg, nil
+}
+
+// unmarshalConfigData 把配置文件字节解码进 cfg：先按扩展名归一化为 YAML
+// （TOML 语法错误在此阶段返回，等价于文件损坏），再走 yaml.Unmarshal 保留
+// 部分覆盖与 yaml.TypeError 部分解码语义。
+func unmarshalConfigData(path string, data []byte, cfg *Config) error {
+	yamlData, err := normalizeToYAML(path, data)
+	if err != nil {
+		return err
+	}
+	return yaml.Unmarshal(yamlData, cfg)
 }
 
 // ApplyConfigFallbacks 对关键字段进行兜底处理
@@ -816,14 +843,14 @@ func SaveTo(cfg *Config, path string) error {
 	if err != nil {
 		// diff 失败时回退到全量保存
 		fmt.Fprintf(os.Stderr, "[config] warning: diff failed, falling back to full save: %v\n", err)
-		data, err := yaml.Marshal(cfg)
+		data, err := marshalForPath(path, cfg)
 		if err != nil {
 			return fmt.Errorf("failed to marshal config: %w", err)
 		}
 		return os.WriteFile(path, data, 0644)
 	}
 
-	data, err := yaml.Marshal(diff)
+	data, err := marshalForPath(path, diff)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config diff: %w", err)
 	}
@@ -836,14 +863,14 @@ func SaveTo(cfg *Config, path string) error {
 }
 
 // SystemDefaultConfig returns the system default configuration
-// by merging code defaults (Layer 1) with bundled data/config.yaml (Layer 2).
+// by merging code defaults (Layer 1) with bundled data/config.toml (Layer 2).
 // This is the "factory default" that excludes user customizations.
 func SystemDefaultConfig() *Config {
 	cfg := DefaultConfig()
 
 	if sysPath, err := GetSystemConfigPath(); err == nil {
 		if sysData, err := os.ReadFile(sysPath); err == nil {
-			if err := yaml.Unmarshal(sysData, cfg); err != nil {
+			if err := unmarshalConfigData(sysPath, sysData, cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "[config] warning: failed to parse system config %s: %v\n", sysPath, err)
 			}
 		}

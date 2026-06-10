@@ -258,7 +258,7 @@ type Coordinator struct {
 	caretState
 
 	// 应用兼容性规则
-	appCompat        *config.AppCompat     // 兼容性规则（从 compat.yaml 加载）
+	appCompat        *config.AppCompat     // 兼容性规则（从 compat.toml 加载）
 	activeCompatRule *config.AppCompatRule // 当前进程匹配的兼容性规则（nil 表示无特殊处理）
 
 	// 临时输入模式

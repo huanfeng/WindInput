@@ -19,7 +19,7 @@
 ### 根目录文件
 | File | Description |
 |------|-------------|
-| `config.yaml` | 系统预置默认配置文件；加载优先级：代码默认值 → 本文件 → 用户配置（`%APPDATA%\WindInput\config.yaml`）；包含 startup、schema、hotkeys、ui、toolbar、input、advanced 等所有配置项 |
+| `config.toml` | 系统预置默认配置文件；加载优先级：代码默认值 → 本文件 → 用户配置（`%APPDATA%\WindInput\config.toml`）；包含 startup、schema、hotkeys、ui、toolbar、input、advanced 等所有配置项 |
 | `system.phrases.yaml` | 系统内置短语配置，随安装包分发 |
 
 ### schemas/
@@ -41,7 +41,7 @@
 ### Working In This Directory
 - Schema 文件是方案驱动架构的核心配置，修改后需确保 `internal/schema` 包能正确解析
 - 词库源数据较大（unigram.txt ~25MB），不要在 AI 上下文中完整读取
-- `config.yaml` 是随安装包分发的系统默认配置，修改会影响所有新安装用户的默认行为；不要在此文件中写入用户个人配置
+- `config.toml` 是随安装包分发的系统默认配置，修改会影响所有新安装用户的默认行为；不要在此文件中写入用户个人配置
 - `advanced.host_render_processes` 列表控制哪些宿主进程激活 HostWindow 机制（当前默认为 `SearchHost.exe`）
 - examples/ 文件供用户参考，修改时保持格式清晰易懂
 

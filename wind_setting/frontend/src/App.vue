@@ -132,7 +132,7 @@ const engines = ref<EngineInfo[]>([]);
 const formData = ref<Config>(getDefaultConfig());
 const tsfLogConfig = ref<TSFLogConfig>(getDefaultTSFLogConfig());
 
-// 系统默认配置缓存（代码默认值 + data/config.yaml 合并结果）
+// 系统默认配置缓存（代码默认值 + data/config.toml 合并结果）
 const systemDefaults = ref<Config>(getDefaultConfig());
 
 // 主题相关状态
@@ -194,7 +194,7 @@ async function loadDataFromWails() {
   }
 
   try {
-    // 加载系统默认配置（代码默认值 + data/config.yaml）
+    // 加载系统默认配置（代码默认值 + data/config.toml）
     try {
       const sysDefaults = await wailsApi.fetchSystemDefaultConfig();
       if (sysDefaults) {
@@ -548,7 +548,7 @@ function handleQuitApp() {
   Quit();
 }
 
-// 重置为当前页面默认（使用系统默认配置：代码默认值 + data/config.yaml）
+// 重置为当前页面默认（使用系统默认配置：代码默认值 + data/config.toml）
 async function resetCurrentPageDefaults() {
   const defaults = systemDefaults.value;
   let changed = true;

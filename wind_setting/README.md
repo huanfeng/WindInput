@@ -70,8 +70,8 @@ wails build
 ## 配置文件
 
 设置工具读写的配置文件位于：
-- 配置: `%APPDATA%\WindInput\config.yaml`
-- 状态: `%APPDATA%\WindInput\state.yaml`
+- 配置: `%APPDATA%\WindInput\config.toml`
+- 状态: `%APPDATA%\WindInput\state.toml`
 
 ## 与输入服务通信
 
@@ -82,7 +82,7 @@ wails build
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    wind_setting                                  │
-│  1. 读写配置文件 ──────────► %APPDATA%\WindInput\config.yaml    │
+│  1. 读写配置文件 ──────────► %APPDATA%\WindInput\config.toml    │
 │  2. 发送重载命令 ──────────► \\.\pipe\wind_input_control        │
 └─────────────────────────────────────────────────────────────────┘
                                         │
@@ -111,7 +111,7 @@ wails build
 
 ### 工作流程
 
-1. **修改配置**: 直接写入 `config.yaml`
+1. **修改配置**: 直接写入 `config.toml`
 2. **通知重载**: 发送 `RELOAD_CONFIG` 到控制管道
 3. **实时生效**: 服务重新加载配置并应用
 

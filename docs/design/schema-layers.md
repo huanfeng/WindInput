@@ -12,7 +12,7 @@
 |---|---|---|---|
 | **L1 内置方案** | `{exeDir}/schemas/<id>.schema.yaml` | 程序分发的完整方案，**禁止运行时改写** | 仅 release/构建流水线 |
 | **L2 用户方案** | `{configDir}/schemas/<id>.schema.yaml` | 用户自带的第三方方案 / 完全独立的自定义方案；同 ID 时与 L1 合并（用户提供的字段覆盖 L1） | 用户手动放置、方案导入器 |
-| **L3 用户覆盖** | `{configDir}/schema_overrides.yaml` | **设置界面**对方案做的所有 diff，按 `{schemaID: 稀疏字段}` 索引 | 设置界面的"方案设置"对话框、附加词库开关、其它将来的 UI 调整入口 |
+| **L3 用户覆盖** | `{configDir}/schema_overrides.toml` | **设置界面**对方案做的所有 diff，按 `{schemaID: 稀疏字段}` 索引 | 设置界面的"方案设置"对话框、附加词库开关、其它将来的 UI 调整入口 |
 
 > `configDir` = `pkg/config.GetConfigDir()`，参见 `wind_input/pkg/config`。
 
@@ -76,7 +76,7 @@ L3 里允许出现的字段是 `SchemaConfig` 的子集（参见 `wind_setting/a
 
 ```
 是用户在程序 UI 里改的吗？
-├─ 是 → 写 L3（schema_overrides.yaml）
+├─ 是 → 写 L3（schema_overrides.toml）
 │   ├─ 通过"方案设置"对话框？  → SaveSchemaConfig（计算 diff 进 L3）
 │   └─ 单点开关 / 即时生效？    → 单独函数，按"读 L3 → patch → 写 L3"模式
 └─ 否

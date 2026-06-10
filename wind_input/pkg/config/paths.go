@@ -11,10 +11,16 @@ import (
 
 const (
 	DataSubDir        = "data"                // 程序目录下的数据子目录
-	ConfigFileName    = "config.yaml"         // 用户配置
-	StateFileName     = "state.yaml"          // 用户状态
+	ConfigFileName    = "config.toml"         // 用户配置
+	StateFileName     = "state.toml"          // 用户状态
 	SystemPhrasesFile = "system.phrases.yaml" // 系统短语（data/ 目录 和 用户目录同名覆盖）
-	SystemConfigFile  = "config.yaml"         // 系统预置配置（data/ 目录）
+	SystemConfigFile  = "config.toml"         // 系统预置配置（data/ 目录）
+
+	// 旧版 YAML 文件名：双读回退用。用户目录下的旧文件在首次加载时
+	// 自动迁移为 TOML 并改名 *.migrated.bak（见 codec.go）。
+	LegacyConfigFileName       = "config.yaml"
+	LegacyStateFileName        = "state.yaml"
+	LegacySystemConfigFileName = "config.yaml"
 )
 
 // GetConfigDir returns the user configuration directory path.
@@ -71,13 +77,24 @@ func GetExeDir() (string, error) {
 	return filepath.Dir(exePath), nil
 }
 
-// GetSystemConfigPath returns the path to the system default config file (data/config.yaml)
+// GetSystemConfigPath returns the path to the system default config file
+// (data/config.toml). 若 TOML 不存在但旧版 data/config.yaml 存在（如升级
+// 安装后残留的旧文件、或旧版安装包），回退到旧版路径。
 func GetSystemConfigPath() (string, error) {
 	exeDir, err := GetExeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(GetDataDir(exeDir), SystemConfigFile), nil
+	dataDir := GetDataDir(exeDir)
+	tomlPath := filepath.Join(dataDir, SystemConfigFile)
+	if _, err := os.Stat(tomlPath); err == nil {
+		return tomlPath, nil
+	}
+	legacyPath := filepath.Join(dataDir, LegacySystemConfigFileName)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath, nil
+	}
+	return tomlPath, nil
 }
 
 // GetOpenCCDir returns the directory path where OpenCC .octrie dictionaries live (data/opencc).

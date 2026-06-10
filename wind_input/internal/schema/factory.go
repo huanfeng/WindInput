@@ -1142,7 +1142,7 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 
 	// === 2. 创建码表引擎 ===
 	// 以主方案的码表配置为 base，再将混输方案自身的覆盖字段叠加其上。
-	// 这样用户在 schema_overrides.yaml 中只写部分字段时，未写的字段沿用主方案值，
+	// 这样用户在 schema_overrides.toml 中只写部分字段时，未写的字段沿用主方案值，
 	// 而不会因 yaml.Unmarshal 的零值语义导致关键字段（如 MaxCodeLength）丢失。
 	codeTableSpec := s.Engine.CodeTable
 	if primarySchema != nil && primarySchema.Engine.CodeTable != nil {

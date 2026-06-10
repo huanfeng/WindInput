@@ -89,7 +89,7 @@ func (f *darwinForwarder) detectDarkMode() bool {
 
 // refreshThemeIfNeeded 按需重应用主题: config 文件变化时重读 ui.theme / theme_style
 // (mtime 门控避免每帧 Load); theme_style=system 时每帧按 TTL 检测系统暗色。
-// 主题名或暗色状态变化时才 renderer.SetTheme。设置界面改主题/风格 → 存 config.yaml
+// 主题名或暗色状态变化时才 renderer.SetTheme。设置界面改主题/风格 → 存 config.toml
 // → 下次渲染检测到并换肤; 系统切暗色 → system 风格下自动跟随。
 func (f *darwinForwarder) refreshThemeIfNeeded() {
 	if f.themeMgr == nil {

@@ -88,7 +88,7 @@ File /a "${BUILD_DIR}\wind_setting.exe"
 
 ; 默认配置文件
 SetOutPath "$INSTDIR\data"
-File /a "${BUILD_DIR}\data\config.yaml"
+File /a "${BUILD_DIR}\data\config.toml"
 
 ; Schema 配置文件
 SetOutPath "$INSTDIR\data\schemas"
@@ -172,7 +172,7 @@ build\installer\清风输入法-0.1.0-Setup.exe
 - `../../build/` - 编译产物目录（wind_tsf.dll、wind_input.exe、wind_setting.exe；不含 wind_dwrite.dll）
 - `../../build/data/dict/` - 词库文件
 - `../../build/data/schemas/` - schema 配置文件（*.schema.yaml）
-- `../../build/data/config.yaml` - 默认配置文件
+- `../../build/data/config.toml` - 默认配置文件
 
 ### 外部
 

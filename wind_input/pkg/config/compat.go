@@ -9,7 +9,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const CompatFileName = "compat.yaml"
+const (
+	CompatFileName       = "compat.toml"
+	LegacyCompatFileName = "compat.yaml" // 旧版文件名，双读回退用
+)
 
 // AppCompatRule 定义单个应用的兼容性规则。
 type AppCompatRule struct {
@@ -46,26 +49,32 @@ func (c *AppCompat) buildLookup() {
 }
 
 // LoadAppCompat 加载应用兼容性规则，支持系统预置 + 用户覆盖。
-// 加载顺序：{exeDir}/data/compat.yaml → {userConfigDir}/compat.yaml
-// 用户文件中的规则会覆盖系统预置中同进程名的规则。
+// 加载顺序：{exeDir}/data/compat.toml → {userConfigDir}/compat.toml
+// （各层均兼容旧版 .yaml 回退）。用户文件中的规则会覆盖系统预置中同进程名的规则。
 func LoadAppCompat() *AppCompat {
 	result := &AppCompat{}
 
-	// Layer 1: 系统预置（程序目录/data/compat.yaml）
+	// Layer 1: 系统预置（程序目录/data/compat.toml）
 	exeDir, err := GetExeDir()
 	if err == nil {
 		sysPath := filepath.Join(GetDataDir(exeDir), CompatFileName)
-		if sysCompat, err := loadCompatFile(sysPath); err == nil {
+		if sysCompat, _, err := loadCompatFile(sysPath); err == nil {
 			result.Apps = sysCompat.Apps
 		}
 	}
 
-	// Layer 2: 用户覆盖（%APPDATA%\WindInput\compat.yaml）
+	// Layer 2: 用户覆盖（%APPDATA%\WindInput\compat.toml）
 	configDir, err := GetConfigDir()
 	if err == nil {
 		userPath := filepath.Join(configDir, CompatFileName)
-		if userCompat, err := loadCompatFile(userPath); err == nil {
+		if userCompat, migratedFrom, err := loadCompatFile(userPath); err == nil {
 			result.Apps = mergeCompatRules(result.Apps, userCompat.Apps)
+			// 旧格式一次性迁移：写出 TOML 成功后把旧文件改名备份
+			if migratedFrom != "" {
+				if err := saveUserCompat(configDir, userCompat); err == nil {
+					renameLegacyFile(migratedFrom)
+				}
+			}
 		}
 	}
 
@@ -73,67 +82,62 @@ func LoadAppCompat() *AppCompat {
 	return result
 }
 
-// loadCompatFile 从指定路径加载兼容性规则文件。
-func loadCompatFile(path string) (*AppCompat, error) {
-	data, err := os.ReadFile(path)
+// loadCompatFile 从指定路径加载兼容性规则文件（.toml 缺失时回退同名旧版 .yaml）。
+// migratedFrom 非空表示数据来自旧版文件。
+func loadCompatFile(path string) (*AppCompat, string, error) {
+	data, readPath, migratedFrom, err := readFileWithLegacyFallback(path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	yamlData, err := normalizeToYAML(readPath, data)
+	if err != nil {
+		return nil, "", err
 	}
 	var compat AppCompat
-	if err := yaml.Unmarshal(data, &compat); err != nil {
-		return nil, err
+	if err := yaml.Unmarshal(yamlData, &compat); err != nil {
+		return nil, "", err
 	}
-	return &compat, nil
+	return &compat, migratedFrom, nil
 }
 
-// ToggleUserSkipCaretPending 切换用户层 compat.yaml 中指定进程的 skip_caret_pending
+// saveUserCompat 把用户层兼容性规则写出到 {configDir}/compat.toml。
+func saveUserCompat(configDir string, compat *AppCompat) error {
+	userPath := filepath.Join(configDir, CompatFileName)
+	data, err := marshalForPath(userPath, compat)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(userPath, data, 0644)
+}
+
+// ToggleUserSkipCaretPending 切换用户层 compat.toml 中指定进程的 skip_caret_pending
 // 标志，并返回新值。文件不存在时自动创建。
 func ToggleUserSkipCaretPending(processName string) (bool, error) {
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return false, err
-	}
-	userPath := filepath.Join(configDir, CompatFileName)
-
-	var userCompat AppCompat
-	if data, err := os.ReadFile(userPath); err == nil {
-		_ = yaml.Unmarshal(data, &userCompat)
-	}
-
-	key := strings.ToLower(processName)
-	newValue := true
-	found := false
-	for i, r := range userCompat.Apps {
-		if strings.ToLower(r.Process) == key {
-			userCompat.Apps[i].SkipCaretPending = !r.SkipCaretPending
-			newValue = userCompat.Apps[i].SkipCaretPending
-			found = true
-			break
-		}
-	}
-	if !found {
-		userCompat.Apps = append(userCompat.Apps, AppCompatRule{
-			Process:          processName,
-			SkipCaretPending: true,
-		})
-	}
-
-	data, err := yaml.Marshal(&userCompat)
-	if err != nil {
-		return false, err
-	}
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return false, err
-	}
-	if err := os.WriteFile(userPath, data, 0644); err != nil {
-		return false, err
-	}
-	return newValue, nil
+	return toggleUserCompatFlag(processName,
+		func(r *AppCompatRule) bool {
+			r.SkipCaretPending = !r.SkipCaretPending
+			return r.SkipCaretPending
+		},
+		AppCompatRule{Process: processName, SkipCaretPending: true})
 }
 
-// ToggleUserPinCandidatePosition 切换用户层 compat.yaml 中指定进程的 pin_candidate_position
+// ToggleUserPinCandidatePosition 切换用户层 compat.toml 中指定进程的 pin_candidate_position
 // 标志，并返回新值。文件不存在时自动创建。
 func ToggleUserPinCandidatePosition(processName string) (bool, error) {
+	return toggleUserCompatFlag(processName,
+		func(r *AppCompatRule) bool {
+			r.PinCandidatePosition = !r.PinCandidatePosition
+			return r.PinCandidatePosition
+		},
+		AppCompatRule{Process: processName, PinCandidatePosition: true})
+}
+
+// toggleUserCompatFlag 读取用户层 compat 文件（兼容旧版 yaml 回退），对指定
+// 进程的规则应用 toggle，写出 TOML；数据来自旧版文件时完成一次性迁移。
+func toggleUserCompatFlag(processName string, toggle func(*AppCompatRule) bool, newRule AppCompatRule) (bool, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
 		return false, err
@@ -141,8 +145,10 @@ func ToggleUserPinCandidatePosition(processName string) (bool, error) {
 	userPath := filepath.Join(configDir, CompatFileName)
 
 	var userCompat AppCompat
-	if data, err := os.ReadFile(userPath); err == nil {
-		_ = yaml.Unmarshal(data, &userCompat)
+	migratedFrom := ""
+	if loaded, from, err := loadCompatFile(userPath); err == nil {
+		userCompat = *loaded
+		migratedFrom = from
 	}
 
 	key := strings.ToLower(processName)
@@ -150,28 +156,20 @@ func ToggleUserPinCandidatePosition(processName string) (bool, error) {
 	found := false
 	for i, r := range userCompat.Apps {
 		if strings.ToLower(r.Process) == key {
-			userCompat.Apps[i].PinCandidatePosition = !r.PinCandidatePosition
-			newValue = userCompat.Apps[i].PinCandidatePosition
+			newValue = toggle(&userCompat.Apps[i])
 			found = true
 			break
 		}
 	}
 	if !found {
-		userCompat.Apps = append(userCompat.Apps, AppCompatRule{
-			Process:              processName,
-			PinCandidatePosition: true,
-		})
+		userCompat.Apps = append(userCompat.Apps, newRule)
 	}
 
-	data, err := yaml.Marshal(&userCompat)
-	if err != nil {
+	if err := saveUserCompat(configDir, &userCompat); err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return false, err
-	}
-	if err := os.WriteFile(userPath, data, 0644); err != nil {
-		return false, err
+	if migratedFrom != "" {
+		renameLegacyFile(migratedFrom)
 	}
 	return newValue, nil
 }
