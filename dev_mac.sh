@@ -61,11 +61,12 @@ case "$CHOICE" in
 esac
 
 # ---- 构建 ----
-# 设置应用 (Wails) 无 debug 变体, VARIANT 仅作用于 Go 服务 / IME .app.
-do_build_all()     { "$MAC/build/build.sh" all ${VARIANT:+$VARIANT}; "$MAC/build/app.sh" ${VARIANT:+$VARIANT}; "$MAC/build/setting.sh"; }
+# setting.sh 支持 --debug: 注入 buildvariant.variant=debug ldflag + 产出 wind_setting_debug.app。
+# VARIANT 同样透传给三件套, 保证 debug 全链路（服务/IME/.app/设置）使用同一变体。
+do_build_all()     { "$MAC/build/build.sh" all ${VARIANT:+$VARIANT}; "$MAC/build/app.sh" ${VARIANT:+$VARIANT}; "$MAC/build/setting.sh" ${VARIANT:+$VARIANT}; }
 do_build_svc()     { "$MAC/build/build.sh" service ${VARIANT:+$VARIANT}; }
 do_build_app()     { "$MAC/build/app.sh" ${VARIANT:+$VARIANT}; }
-do_build_setting() { "$MAC/build/setting.sh"; }
+do_build_setting() { "$MAC/build/setting.sh" ${VARIANT:+$VARIANT}; }
 do_clean()         { "$MAC/build/build.sh" clean; }
 # 分发安装包 .pkg (面向终端用户). 余参透传 pkg.sh: --build 先构建三件套 / --universal 双架构.
 # 始终打 release 产物, 与 VARIANT(debug) 无关, 故不透传 $VARIANT.
@@ -79,7 +80,9 @@ do_install() {
     # 必须把 $VARIANT 透传给 install_app.sh: 否则 di (--debug) 会装成 release .app,
     # 造成前端(release)/后端(debug) 变体错配, socket 路径隔离导致连不上 → 打字无候选。
     bash "$MAC/deploy/install_app.sh" ${VARIANT:+$VARIANT}
-    bash "$MAC/deploy/install_setting.sh"
+    # 同样透传 $VARIANT: debug 变体需装 清风输入法设置开发版.app (bundleID com.wails.wind_setting_debug),
+    # 否则 debug IME 菜单「设置…」找不到对应 app, 用户打开的是 release 设置（连 release socket）。
+    bash "$MAC/deploy/install_setting.sh" ${VARIANT:+$VARIANT}
 }
 do_redeploy() { bash "$MAC/deploy/redeploy.sh"; }
 do_deploy()   { bash "$MAC/vm/deploy.sh" "$@"; }
@@ -97,8 +100,8 @@ do_module() {
                 "$MAC/build/app.sh" ${VARIANT:+$VARIANT}
                 bash "$MAC/deploy/install_app.sh" ${VARIANT:+$VARIANT} ;;
             setting|set)
-                "$MAC/build/setting.sh"
-                bash "$MAC/deploy/install_setting.sh" ;;
+                "$MAC/build/setting.sh" ${VARIANT:+$VARIANT}
+                bash "$MAC/deploy/install_setting.sh" ${VARIANT:+$VARIANT} ;;
             *) echo "[错误] 未知模块: $mod (可选 service / app / setting)" >&2; exit 1 ;;
         esac
     done
@@ -109,7 +112,7 @@ do_uninstall() {
     # du (--debug) 须卸载 debug 变体; 不传 $VARIANT 会误卸 release、留下 debug 残留。
     "$MAC/deploy/install_service.sh" --uninstall ${VARIANT:+$VARIANT}
     bash "$MAC/deploy/install_app.sh" --uninstall ${VARIANT:+$VARIANT}
-    bash "$MAC/deploy/install_setting.sh" --uninstall
+    bash "$MAC/deploy/install_setting.sh" --uninstall ${VARIANT:+$VARIANT}
 }
 
 # ---- 运行 / 诊断 ----
