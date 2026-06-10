@@ -5,6 +5,8 @@ import (
 	"math"
 	"sort"
 	"sync"
+
+	"github.com/huanfeng/wind_input/internal/dict/hotcache"
 )
 
 // UnigramReader 基于 mmap 的 unigram 读取器
@@ -22,10 +24,15 @@ type UnigramReader struct {
 	// path 用于在 Close 时反注册；closeOnce 保证幂等
 	path      string
 	closeOnce sync.Once
+
+	// 进程级共享池状态（见 shared.go），由 sharedMu 保护。
+	shareKey hotcache.FileKey
+	refs     int
 }
 
-// OpenUnigram 打开二进制 unigram 文件
-func OpenUnigram(path string) (*UnigramReader, error) {
+// openUnigram 打开二进制 unigram 文件（独立 mmap，不经共享池）。
+// 公开入口是 shared.go 的 OpenUnigram，按 FileKey 复用已打开的 reader。
+func openUnigram(path string) (*UnigramReader, error) {
 	mf, err := MmapOpen(path)
 	if err != nil {
 		return nil, fmt.Errorf("mmap 打开失败: %w", err)
@@ -74,9 +81,21 @@ func OpenUnigram(path string) (*UnigramReader, error) {
 	return r, nil
 }
 
-// Close 关闭读取器（幂等）。
-// 同时从进程级注册表移除自身；data/mmap 置 nil，后续查询安全返回 minProb。
+// Close 释放一个持有者的引用。共享池中仍有其他持有者时仅递减计数；
+// 最后一个持有者关闭时真正释放 mmap，并从共享池与强关注册表移除自身。
 func (r *UnigramReader) Close() error {
+	sharedMu.Lock()
+	if r.refs > 1 {
+		r.refs--
+		sharedMu.Unlock()
+		return nil
+	}
+	r.refs = 0
+	if r.shareKey != "" && sharedUnigrams[r.shareKey] == r {
+		delete(sharedUnigrams, r.shareKey)
+	}
+	sharedMu.Unlock()
+
 	var err error
 	r.closeOnce.Do(func() {
 		err = r.releaseLocked()
@@ -86,7 +105,14 @@ func (r *UnigramReader) Close() error {
 }
 
 // closeFromRegistry 由注册表强制关闭时调用：释放 mmap 但跳过注销。
+// 同时从共享池摘除，避免后续 OpenUnigram 命中已失效的 reader。
 func (r *UnigramReader) closeFromRegistry() error {
+	sharedMu.Lock()
+	if r.shareKey != "" && sharedUnigrams[r.shareKey] == r {
+		delete(sharedUnigrams, r.shareKey)
+	}
+	sharedMu.Unlock()
+
 	var err error
 	r.closeOnce.Do(func() {
 		err = r.releaseLocked()

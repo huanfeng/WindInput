@@ -35,14 +35,20 @@ type DictReader struct {
 	// path 用于在 Close 时反注册；closeOnce 保证幂等
 	path      string
 	closeOnce sync.Once
+
+	// 进程级共享池状态（见 shared.go）：shareKey 为池中的键，
+	// refs 为持有者计数，两者均由 sharedMu 保护。
+	shareKey hotcache.FileKey
+	refs     int
 }
 
 // HotPrefixIndexN 是单字母前缀 hot index 缓存的容量。
 // 取 500 比生产 prefixSafeLimit (200) 留余量，覆盖少量翻页扩展场景。
 const HotPrefixIndexN = 500
 
-// OpenDict 打开二进制词库
-func OpenDict(path string) (*DictReader, error) {
+// openDict 打开二进制词库（独立 mmap，不经共享池）。
+// 公开入口是 shared.go 的 OpenDict，按 FileKey 复用已打开的 reader。
+func openDict(path string) (*DictReader, error) {
 	mf, err := MmapOpen(path)
 	if err != nil {
 		return nil, fmt.Errorf("mmap 打开失败: %w", err)
@@ -115,9 +121,22 @@ func OpenDict(path string) (*DictReader, error) {
 	return r, nil
 }
 
-// Close 关闭读取器（幂等）。
-// 同时从进程级注册表移除自身；data/mmap 字段被置 nil，后续查询路径全部短路返回空。
+// Close 释放一个持有者的引用（幂等于"每持有者一次"语义）。
+// 共享池中仍有其他持有者时仅递减计数；最后一个持有者关闭时真正释放 mmap、
+// 从共享池与强关注册表移除自身；data/mmap 字段被置 nil，后续查询路径全部短路返回空。
 func (r *DictReader) Close() error {
+	sharedMu.Lock()
+	if r.refs > 1 {
+		r.refs--
+		sharedMu.Unlock()
+		return nil
+	}
+	r.refs = 0
+	if r.shareKey != "" && sharedDicts[r.shareKey] == r {
+		delete(sharedDicts, r.shareKey)
+	}
+	sharedMu.Unlock()
+
 	var err error
 	r.closeOnce.Do(func() {
 		err = r.releaseLocked()
@@ -128,7 +147,15 @@ func (r *DictReader) Close() error {
 
 // closeFromRegistry 由注册表强制关闭时调用：释放 mmap 但跳过注销
 // （注册表本身已经把条目摘出 map 了，重复 unregister 是 no-op，但避免再走一遍）。
+// 同时从共享池摘除，避免后续 OpenDict 命中一个已失效的 reader；
+// 残余持有者之后的 Close 只会递减计数并落入已消费的 closeOnce，安全无副作用。
 func (r *DictReader) closeFromRegistry() error {
+	sharedMu.Lock()
+	if r.shareKey != "" && sharedDicts[r.shareKey] == r {
+		delete(sharedDicts, r.shareKey)
+	}
+	sharedMu.Unlock()
+
 	var err error
 	r.closeOnce.Do(func() {
 		err = r.releaseLocked()

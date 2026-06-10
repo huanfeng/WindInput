@@ -92,10 +92,14 @@ func (d *PinyinDict) IsDATMode() bool {
 	return d.datReader != nil
 }
 
-// Close 关闭词库（释放 mmap 资源）
+// Close 关闭词库（释放 mmap 资源）。
+// reader 是进程级共享 + 引用计数的，Close 必须每持有者恰好一次——
+// 置 nil 保证本实例重复 Close 不会多扣别的持有者的引用。
 func (d *PinyinDict) Close() error {
 	if d.datReader != nil {
-		return d.datReader.Close()
+		r := d.datReader
+		d.datReader = nil
+		return r.Close()
 	}
 	return nil
 }

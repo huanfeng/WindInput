@@ -42,10 +42,16 @@ type WdatReader struct {
 
 	// 进程级 hot index 缓存键（按 path+size+mtime 聚合，多 reader 共享同一份）
 	hotKey hotcache.FileKey
+
+	// 进程级共享池状态（见 shared.go），shareKey/refs/closed 由 sharedMu 保护。
+	shareKey hotcache.FileKey
+	refs     int
+	closed   bool
 }
 
-// OpenWdat 打开 wdat 文件并映射到内存
-func OpenWdat(path string) (*WdatReader, error) {
+// openWdat 打开 wdat 文件并映射到内存（独立 mmap，不经共享池）。
+// 公开入口是 shared.go 的 OpenWdat，按 FileKey 复用已打开的 reader。
+func openWdat(path string) (*WdatReader, error) {
 	mf, err := binformat.MmapOpen(path)
 	if err != nil {
 		return nil, fmt.Errorf("mmap open: %w", err)
@@ -150,8 +156,27 @@ func OpenWdat(path string) (*WdatReader, error) {
 	return r, nil
 }
 
-// Close 关闭文件映射
+// Close 释放一个持有者的引用（幂等于"每持有者一次"语义）。
+// 共享池中仍有其他持有者时仅递减计数；最后一个持有者关闭时真正释放 mmap
+// 并从共享池摘除。
 func (r *WdatReader) Close() error {
+	sharedMu.Lock()
+	if r.refs > 1 {
+		r.refs--
+		sharedMu.Unlock()
+		return nil
+	}
+	r.refs = 0
+	if r.closed {
+		sharedMu.Unlock()
+		return nil
+	}
+	r.closed = true
+	if r.shareKey != "" && sharedWdats[r.shareKey] == r {
+		delete(sharedWdats, r.shareKey)
+	}
+	sharedMu.Unlock()
+
 	if r.mmap != nil {
 		return r.mmap.Close()
 	}

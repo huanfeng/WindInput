@@ -371,9 +371,16 @@ func (m *BinaryUnigramModel) Size() int {
 	return m.reader.Size()
 }
 
-// Close 关闭底层 mmap 资源
+// Close 关闭底层 mmap 资源。
+// reader 是进程级共享 + 引用计数的，Close 必须每持有者恰好一次——
+// 置 nil 保证本实例重复 Close 不会多扣别的持有者的引用。
 func (m *BinaryUnigramModel) Close() error {
-	return m.reader.Close()
+	if m.reader == nil {
+		return nil
+	}
+	r := m.reader
+	m.reader = nil
+	return r.Close()
 }
 
 // LoadUserFreqsFromStore 从 Store 的 Freq bucket 加载用户词频

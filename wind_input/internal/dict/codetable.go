@@ -101,10 +101,14 @@ func (ct *CodeTable) IsBinaryMode() bool {
 	return ct.binReader != nil
 }
 
-// Close 关闭码表资源（二进制模式下释放 mmap）
+// Close 关闭码表资源（二进制模式下释放 mmap）。
+// reader 是进程级共享 + 引用计数的，Close 必须每持有者恰好一次——
+// 置 nil 保证本实例重复 Close 不会多扣别的持有者的引用。
 func (ct *CodeTable) Close() error {
 	if ct.binReader != nil {
-		return ct.binReader.Close()
+		r := ct.binReader
+		ct.binReader = nil
+		return r.Close()
 	}
 	return nil
 }
