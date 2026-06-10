@@ -261,6 +261,12 @@ func (ws *webServer) handleCall(w http.ResponseWriter, r *http.Request) {
 		writeCall(w, nil, "bad request: "+err.Error())
 		return
 	}
+	// 服务端方法黑名单：拒绝任意文件路径读写 / 不可逆全局破坏类方法（详见 web_security.go）。
+	// 独立于前端 webShim 黑名单强制，防其被绕过。
+	if webCallDenied[req.Method] {
+		writeCall(w, nil, "method not permitted in web mode")
+		return
+	}
 	data, err := callReflect(ws.app, req.Method, req.Args)
 	if err != nil {
 		writeCall(w, nil, err.Error())
@@ -272,14 +278,15 @@ func (ws *webServer) handleCall(w http.ResponseWriter, r *http.Request) {
 // muxWithStatic 装配路由。
 //
 // 安全：本 server 同源，刻意不包 CORS 中间件，尤其不设 Access-Control-Allow-Origin: *。
-// 否则任意外站网页的 JS 可跨域 POST 本机 /api/call 调用任意 App 方法（含 ResetData
-// 等危险方法）。不设 CORS 头时浏览器同源策略自动拦截外站请求。
+// 所有 /api/* 端点经 ws.guard 包裹，抵御恶意网页跨站请求与 DNS rebinding（详见
+// web_security.go）。/api/call 反射网关另有服务端方法黑名单（webCallDenied）。
+// 静态文件（/）无需 guard：用户直接导航无副作用，且 EventSource 等仍受各自 guard 约束。
 func (ws *webServer) muxWithStatic(staticFS fs.FS) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/call", ws.handleCall)
-	mux.HandleFunc("/api/events", ws.handleEvents)
-	mux.HandleFunc("/api/ping", ws.handlePing)
-	mux.HandleFunc("/api/bye", ws.handleBye)
+	mux.HandleFunc("/api/call", ws.guard(ws.handleCall))
+	mux.HandleFunc("/api/events", ws.guard(ws.handleEvents))
+	mux.HandleFunc("/api/ping", ws.guard(ws.handlePing))
+	mux.HandleFunc("/api/bye", ws.guard(ws.handleBye))
 	if staticFS != nil {
 		mux.Handle("/", http.FileServer(http.FS(staticFS)))
 	}

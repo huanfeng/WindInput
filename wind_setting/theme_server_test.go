@@ -153,13 +153,75 @@ func TestThemeServer_CORS_Preflight(t *testing.T) {
 	handler := corsMiddleware(mux)
 
 	req := httptest.NewRequest(http.MethodOptions, "/api/themes", nil)
+	req.Host = "127.0.0.1:29731"
+	req.Header.Set("Origin", "https://editor.windinput.com")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNoContent {
 		t.Errorf("preflight 应返回 204，got %d", w.Code)
 	}
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("CORS header 应为 *，got %q", got)
+	// 白名单 Origin 应被回显（不再是 *）
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://editor.windinput.com" {
+		t.Errorf("CORS header 应回显白名单 Origin，got %q", got)
+	}
+}
+
+// TestThemeServer_CORS_RejectsNonLoopback 验证防 DNS rebinding：Host 非回环地址时拒绝。
+func TestThemeServer_CORS_RejectsNonLoopback(t *testing.T) {
+	ts := newTestServer()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/themes", ts.handleListThemes)
+	handler := corsMiddleware(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/themes", nil)
+	req.Host = "evil.com"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("非回环 Host 应返回 403（防 DNS rebinding），got %d", w.Code)
+	}
+}
+
+// TestThemeServer_CORS_RejectsForeignOrigin 验证非白名单 Origin 被拒绝（不执行写副作用）。
+func TestThemeServer_CORS_RejectsForeignOrigin(t *testing.T) {
+	ts := newTestServer()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/theme/push", ts.handlePushTheme)
+	handler := corsMiddleware(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/theme/push", nil)
+	req.Host = "127.0.0.1:29731"
+	req.Header.Set("Origin", "https://evil.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("非白名单 Origin 应返回 403，got %d", w.Code)
+	}
+}
+
+// TestIsAllowedThemeOrigin 覆盖 Origin 白名单判定。
+func TestIsAllowedThemeOrigin(t *testing.T) {
+	cases := []struct {
+		origin string
+		want   bool
+	}{
+		{"https://windinput.com", true},
+		{"https://editor.windinput.com", true},
+		{"https://api.theme.windinput.com", true},
+		{"http://localhost:5173", true},
+		{"http://127.0.0.1:8080", true},
+		{"https://evil.com", false},
+		{"https://windinput.com.evil.com", false},
+		{"https://xwindinput.com", false},
+		{"http://windinput.com", false}, // 生产域要求 https
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isAllowedThemeOrigin(c.origin); got != c.want {
+			t.Errorf("isAllowedThemeOrigin(%q) = %v, want %v", c.origin, got, c.want)
+		}
 	}
 }

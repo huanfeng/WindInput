@@ -88,10 +88,27 @@ func (ts *ThemeServer) Status() ThemeServerStatus {
 	}
 }
 
-// corsMiddleware 允许所有来源（本地服务，无鉴权需求）。
+// corsMiddleware 为外部主题编辑器（独立仓 WindInputThemeEditor，跨域）开放 CORS，
+// 但加两道约束（详见 web_security.go）：
+//   - Host 必须指向本机回环地址，抵御 DNS rebinding。
+//   - Origin（若存在）必须在白名单内（*.windinput.com 或 localhost），否则直接 403，
+//     连写副作用（push 主题 + reload）都不执行；并按请求回显具体 Origin（不再用 *）。
+//
+// 无 Origin 的请求（同源页面或非浏览器工具）放行，由上面的 Host 回环校验兜底。
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if !isLoopbackHost(r.Host) {
+			http.Error(w, "forbidden: non-loopback host", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !isAllowedThemeOrigin(origin) {
+				http.Error(w, "forbidden: origin not allowed", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Add("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {

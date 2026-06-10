@@ -15,6 +15,7 @@ func TestReflectGateway_RealAppGetVersion(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/call",
 		strings.NewReader(`{"method":"GetVersion","args":[]}`))
+	req.Host = "127.0.0.1:18923"
 	ws.muxWithStatic(nil).ServeHTTP(rec, req)
 
 	var resp callResponse
@@ -37,6 +38,7 @@ func TestReflectGateway_GetPlatform(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/call",
 		strings.NewReader(`{"method":"GetPlatform","args":[]}`))
+	req.Host = "127.0.0.1:18923"
 	ws.muxWithStatic(nil).ServeHTTP(rec, req)
 
 	var resp callResponse

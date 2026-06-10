@@ -84,6 +84,7 @@ func TestCallEndpoint_MethodGuard(t *testing.T) {
 	ws := &webServer{}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/call", nil)
+	req.Host = "127.0.0.1:18923"
 	ws.muxWithStatic(nil).ServeHTTP(rec, req)
 	var resp callResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -96,6 +97,7 @@ func TestCallEndpoint_UnknownMethod(t *testing.T) {
 	ws := &webServer{app: &App{}}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/call", strings.NewReader(`{"method":"NoSuchMethod","args":[]}`))
+	req.Host = "127.0.0.1:18923"
 	ws.muxWithStatic(nil).ServeHTTP(rec, req)
 	var resp callResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -110,6 +112,7 @@ func TestNoCORSHeader(t *testing.T) {
 	ws := &webServer{}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/call", nil)
+	req.Host = "127.0.0.1:18923"
 	ws.muxWithStatic(nil).ServeHTTP(rec, req)
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("Access-Control-Allow-Origin = %q, want empty (no CORS)", got)
@@ -198,6 +201,7 @@ func TestByeTriggersShutdown(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/bye", nil)
+	req.Host = "127.0.0.1:18923"
 	ws.muxWithStatic(nil).ServeHTTP(rec, req)
 
 	select {
