@@ -206,10 +206,10 @@ func (c *Coordinator) handleEngineSwitchKey() *bridge.KeyEventResult {
 		if c.cfgMu != nil && c.config != nil {
 			c.cfgMu.Lock()
 			c.config.Schema.Active = result.NewSchemaID
-			cfgCopy := *c.config
+			cfgCopy := c.config.Clone()
 			c.cfgMu.Unlock()
 
-			if err := config.Save(&cfgCopy); err != nil {
+			if err := config.Save(cfgCopy); err != nil {
 				c.logger.Error("Failed to save schema to config", "error", err)
 			} else {
 				c.logger.Debug("Schema saved to config", "schema", result.NewSchemaID)

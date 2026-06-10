@@ -107,10 +107,10 @@ func (c *Coordinator) persistS2TConfigAsync() {
 	notifier := c.eventNotifier
 	go func() {
 		c.cfgMu.Lock()
-		cfgCopy := *c.config
+		cfgCopy := c.config.Clone()
 		c.cfgMu.Unlock()
 
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			c.logger.Warn("s2t: save config failed", "error", err)
 		}
 		if notifier != nil {

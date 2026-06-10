@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-06-10 -->
 
 # pkg/config
 
@@ -10,6 +10,7 @@
 | File | Description |
 |------|-------------|
 | `config.go` | `Config` 结构体（含所有子配置）、`Load()`/`LoadFrom()`/`Save()`/`SaveTo()`/`DefaultConfig()`，三层加载逻辑，YAML 序列化标签 |
+| `clone.go` | `Config.Clone()` 反射式深拷贝（自动覆盖全部导出字段，新增字段无需改此文件）。**红线：异步持久化（`go config.Save(...)`）必须先 Clone，禁止 `cfgCopy := *cfg` 浅拷贝**——浅拷贝共享底层 map/slice，与前台并发修改会触发 concurrent map 硬 panic。防漂移由 `clone_test.go` 反射别名检查守护 |
 | `paths.go` | 路径常量（`AppName`、`DataSubDir`、`ConfigFileName` 等）和辅助函数（`GetConfigDir`、`GetDataDir`、`GetSystemConfigPath`、`EnsureConfigDir` 等） |
 | `config_hotkey.go` | `HotkeyConfig`：热键字符串配置（`ToggleModeKeys`、`SwitchEngine`、`DeleteCandidate`、`PinCandidate`、`ToggleToolbar`、`OpenSettings`、`AddWord` 等） |
 | `state.go` | `RuntimeState`：运行时状态持久化（中英文模式、全角、标点、工具栏位置 `ToolbarPositions`、候选窗固定位置 `CandidatePinPositions`），`LoadRuntimeState`/`SaveRuntimeState` |

@@ -221,9 +221,9 @@ func (c *Coordinator) toggleCandidateLayoutForCmdbar() {
 		}
 		c.cfgMu.Lock()
 		c.config.UI.CandidateLayout = next
-		cfgCopy := *c.config
+		cfgCopy := c.config.Clone()
 		c.cfgMu.Unlock()
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			c.logger.Error("Failed to save layout config", "error", err)
 		}
 	}()
@@ -261,12 +261,12 @@ func (c *Coordinator) togglePreeditModeForCmdbar() error {
 		next = config.PreeditEmbedded
 	}
 	c.config.UI.PreeditMode = next
-	cfgCopy := *c.config
+	cfgCopy := c.config.Clone()
 	c.cfgMu.Unlock()
 
 	c.uiManager.SetPreeditMode(next)
 	go func() {
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			c.logger.Error("Failed to save preedit mode config", "error", err)
 		}
 	}()
@@ -299,9 +299,9 @@ func (c *Coordinator) switchSchemaForCmdbar(id string) error {
 		if c.cfgMu != nil && c.config != nil {
 			c.cfgMu.Lock()
 			c.config.Schema.Active = id
-			cfgCopy := *c.config
+			cfgCopy := c.config.Clone()
 			c.cfgMu.Unlock()
-			if err := config.Save(&cfgCopy); err != nil {
+			if err := config.Save(cfgCopy); err != nil {
 				c.logger.Error("Failed to save schema config", "error", err)
 			}
 		}
@@ -358,12 +358,12 @@ func (s cmdbarConfigService) Set(key, value string) error {
 		s.c.cfgMu.Unlock()
 		return err
 	}
-	cfgCopy := *s.c.config
+	cfgCopy := s.c.config.Clone()
 	s.c.cfgMu.Unlock()
 
-	s.applySection(key, &cfgCopy)
+	s.applySection(key, cfgCopy)
 	go func() {
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			s.c.logger.Error("config.set: save failed", "key", key, "error", err)
 		}
 	}()
@@ -388,12 +388,12 @@ func (s cmdbarConfigService) Toggle(key string) (string, error) {
 		s.c.cfgMu.Unlock()
 		return "", err
 	}
-	cfgCopy := *s.c.config
+	cfgCopy := s.c.config.Clone()
 	s.c.cfgMu.Unlock()
 
-	s.applySection(key, &cfgCopy)
+	s.applySection(key, cfgCopy)
 	go func() {
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			s.c.logger.Error("config.toggle: save failed", "key", key, "error", err)
 		}
 	}()

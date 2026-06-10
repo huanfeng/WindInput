@@ -16,10 +16,10 @@ func (c *Coordinator) saveToolbarConfig() {
 	go func() {
 		c.cfgMu.Lock()
 		c.config.Toolbar.Visible = visible
-		cfgCopy := *c.config
+		cfgCopy := c.config.Clone()
 		c.cfgMu.Unlock()
 
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			c.logger.Error("Failed to save toolbar config", "error", err)
 		} else {
 			c.logger.Debug("Toolbar config saved")
@@ -36,10 +36,10 @@ func (c *Coordinator) saveThemeConfig(themeName string) {
 	go func() {
 		c.cfgMu.Lock()
 		c.config.UI.Theme = themeName
-		cfgCopy := *c.config
+		cfgCopy := c.config.Clone()
 		c.cfgMu.Unlock()
 
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			c.logger.Error("Failed to save theme config", "error", err)
 		} else {
 			c.logger.Debug("Theme config saved", "theme", themeName)
@@ -56,10 +56,10 @@ func (c *Coordinator) saveThemeStyleConfig(themeStyle config.ThemeStyle) {
 	go func() {
 		c.cfgMu.Lock()
 		c.config.UI.ThemeStyle = themeStyle
-		cfgCopy := *c.config
+		cfgCopy := c.config.Clone()
 		c.cfgMu.Unlock()
 
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			c.logger.Error("Failed to save theme style config", "error", err)
 		} else {
 			c.logger.Debug("Theme style config saved", "themeStyle", themeStyle)
@@ -76,10 +76,10 @@ func (c *Coordinator) saveFilterModeConfig(filterMode config.FilterMode) {
 	go func() {
 		c.cfgMu.Lock()
 		c.config.Input.FilterMode = filterMode
-		cfgCopy := *c.config
+		cfgCopy := c.config.Clone()
 		c.cfgMu.Unlock()
 
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			c.logger.Error("Failed to save filter mode config", "error", err)
 		} else {
 			c.logger.Debug("Filter mode config saved", "filterMode", filterMode)
@@ -164,10 +164,10 @@ func (c *Coordinator) saveStatusIndicatorConfig() {
 	go func() {
 		c.cfgMu.Lock()
 		c.config.UI.StatusIndicator = siCfg
-		cfgCopy := *c.config
+		cfgCopy := c.config.Clone()
 		c.cfgMu.Unlock()
 
-		if err := config.Save(&cfgCopy); err != nil {
+		if err := config.Save(cfgCopy); err != nil {
 			c.logger.Error("Failed to save status indicator config", "error", err)
 		} else {
 			c.logger.Debug("Status indicator config saved")
