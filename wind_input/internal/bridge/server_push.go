@@ -24,7 +24,11 @@ import (
 //   - Disconnect+Close 由 winio PipeConn 接口提供（conn.Disconnect()+conn.Close()），
 //     不再需要手工 DisconnectNamedPipe+CancelIoEx+CloseHandle 三联。
 //   - 不再需要 watchdog——overlapped Write 不会被 sync read park 卡住，
-//     真死的 client 会让 conn.Write 返回 broken pipe，自然走 cleanup。
+//     真死的 client 会让 conn.Write 返回 broken pipe，自然走 cleanup；
+//     「活着但不读」的半开连接由 pushClient.Write 的 pushWriteTimeout 写超时覆盖。
+//   - 所有出站消息（含 CommitText/ClearComposition/UpdateComposition）统一经
+//     outbound 队列由 pushWriterLoop 单点写出，保证同 client 消息顺序、
+//     且任何调用方都不会被慢连接阻塞；禁止绕过队列直写 conn。
 func (s *Server) startPushPipeListener() {
 	s.logger.Info("Starting Push pipe listener", "pipe", PushPipeName)
 
@@ -273,43 +277,11 @@ func (s *Server) cleanupPushHandle(handle windows.Handle) bool {
 // 定位策略与 PushCommitTextToActiveClient 一致：优先 token（多实例宿主精确
 // 区分），回退 PID（旧 token 还没注册时兜底）。
 func (s *Server) pushToActiveClient(encoded []byte, kind string) {
-	s.activeMu.RLock()
-	activeProcessID := s.activeProcessID
-	activeToken := s.activeToken
-	s.activeMu.RUnlock()
-
+	writer, activeProcessID, activeToken := s.resolveActivePushClient()
 	if activeProcessID == 0 && activeToken == 0 {
 		s.logger.Debug("Push skipped: no active client", "kind", kind)
 		return
 	}
-
-	s.pushMu.RLock()
-	var writer *pushClient
-	// Phase 1: token 精确匹配且 PID 一致 — 单进程多 DLL 实例场景下走这里。
-	// 注意要校验 PID, 否则 activeToken 可能是上一次 IMEActivated 残留的(FOCUS_GAINED
-	// 不更新 token 是为兼容 EverEdit 双进程, 见 server_handler.go), 导致 push 误投。
-	if activeToken != 0 {
-		if h, ok := s.tokenToPushHandle[activeToken]; ok {
-			if s.pushHandleToPID[h] == activeProcessID {
-				writer = s.pushClients[h]
-			}
-		}
-	}
-	// Phase 2: PID 查表 — 正常单进程场景, 覆盖 activeToken 卡死的情况。
-	if writer == nil && activeProcessID != 0 {
-		if h, ok := s.pushClientsByPID[activeProcessID]; ok {
-			writer = s.pushClients[h]
-		}
-	}
-	// Phase 3: token 兜底 — EverEdit 双进程场景, A 进程 (activeProcessID) 没 push pipe,
-	// B 进程持 push pipe, 通过 IMEActivated 注册了 token, 必须走 token 才能找到 B。
-	if writer == nil && activeToken != 0 {
-		if h, ok := s.tokenToPushHandle[activeToken]; ok {
-			writer = s.pushClients[h]
-		}
-	}
-	s.pushMu.RUnlock()
-
 	if writer == nil {
 		s.logger.Debug("Push skipped: active client has no push pipe",
 			"kind", kind, "processID", activeProcessID, "token", activeToken)
@@ -325,6 +297,52 @@ func (s *Server) pushToActiveClient(encoded []byte, kind string) {
 	// 看到完整的 enqueue → WriteFile → C++ 收到 的链路在哪一环掉链子。
 	s.logger.Debug("Push enqueued",
 		"kind", kind, "processID", activeProcessID, "size", len(encoded), "queueLen", len(writer.outbound))
+}
+
+// resolveActivePushClient 解析当前 active client 对应的 push 连接，
+// 返回 (连接, activeProcessID, activeToken)；找不到时连接为 nil。
+//
+// 三段策略（所有按 active client 定位的 push 路径共用，含 CommitText/
+// ClearComposition/UpdateComposition——多实例宿主下必须 token 精确区分，
+// 否则可能误投到同进程的其他 DLL 实例造成重复上屏）：
+//
+//	Phase 1: token 精确匹配且 PID 一致 — 单进程多 DLL 实例场景下走这里。
+//	  注意要校验 PID, 否则 activeToken 可能是上一次 IMEActivated 残留的
+//	  (FOCUS_GAINED 不更新 token 是为兼容 EverEdit 双进程, 见 server_handler.go)。
+//	Phase 2: PID 查表 — 正常单进程场景, 覆盖 activeToken 卡死的情况。
+//	Phase 3: token 兜底 — EverEdit 双进程场景, A 进程 (activeProcessID) 没
+//	  push pipe, B 进程持 push pipe 并经 IMEActivated 注册 token, 走 token 才能找到 B。
+func (s *Server) resolveActivePushClient() (*pushClient, uint32, uint64) {
+	s.activeMu.RLock()
+	activeProcessID := s.activeProcessID
+	activeToken := s.activeToken
+	s.activeMu.RUnlock()
+
+	if activeProcessID == 0 && activeToken == 0 {
+		return nil, 0, 0
+	}
+
+	s.pushMu.RLock()
+	defer s.pushMu.RUnlock()
+	var writer *pushClient
+	if activeToken != 0 {
+		if h, ok := s.tokenToPushHandle[activeToken]; ok {
+			if s.pushHandleToPID[h] == activeProcessID {
+				writer = s.pushClients[h]
+			}
+		}
+	}
+	if writer == nil && activeProcessID != 0 {
+		if h, ok := s.pushClientsByPID[activeProcessID]; ok {
+			writer = s.pushClients[h]
+		}
+	}
+	if writer == nil && activeToken != 0 {
+		if h, ok := s.tokenToPushHandle[activeToken]; ok {
+			writer = s.pushClients[h]
+		}
+	}
+	return writer, activeProcessID, activeToken
 }
 
 // PushStateToActiveClient sends a state update to the currently active TSF client.
@@ -387,83 +405,36 @@ func (s *Server) PushActivationStatusToActiveClient(status *StatusUpdateData, pr
 // PushCommitTextToActiveClient sends a commit text command to the active TSF client only
 // This is used for proactive text insertion (e.g., when user clicks a candidate with mouse)
 // For security, we only send to the client that currently has focus, not to all clients
+//
+// 经 outbound 队列发出（不直写）：与状态推送共用单 writer goroutine，保证同
+// client 上的消息顺序一致，且调用方（coordinator 鼠标选词路径）不会被慢连接
+// 阻塞。写失败的连接清理由 pushWriterLoop → reader cleanup 统一完成。
 func (s *Server) PushCommitTextToActiveClient(text string) {
 	if text == "" {
 		s.logger.Debug("PushCommitText: empty text, skipping")
 		return
 	}
 
-	// Get the active process ID
-	s.activeMu.RLock()
-	activeProcessID := s.activeProcessID
-	s.activeMu.RUnlock()
-
-	if activeProcessID == 0 {
+	// 必须精确定位持有活跃 composition 的 TextService 实例（token 优先，详见
+	// resolveActivePushClient）；不能广播给同 PID 所有 handle，否则多实例宿主
+	// （如 explorer）会重复上屏。
+	writer, activeProcessID, activeToken := s.resolveActivePushClient()
+	if activeProcessID == 0 && activeToken == 0 {
 		s.logger.Warn("PushCommitText: no active client recorded, cannot send")
 		return
 	}
-
-	// 对于 CommitText，必须精确定位持有活跃 composition 的 TextService 实例：
-	// 1. 优先用 activeToken（C++ 在 CMD_IME_ACTIVATED/CMD_FOCUS_GAINED 中携带）
-	// 2. 回退到 pushClientsByPID（最新连接的 handle，适用于单实例进程）
-	// 不能广播给同 PID 所有 handle，否则多实例宿主（如 explorer）会重复上屏。
-	s.activeMu.RLock()
-	activeToken := s.activeToken
-	s.activeMu.RUnlock()
-
-	s.pushMu.RLock()
-	var handle windows.Handle
-	var writer *pushClient
-	// Phase 1: token 精确匹配且 PID 一致 (单进程多实例); activeToken 不更新于
-	// FOCUS_GAINED, 因此 PID 校验必须的 —— 否则 token 可能指向另一个进程的
-	// push handle (见 pushToActiveClient 注释)。
-	if activeToken != 0 {
-		if h, ok := s.tokenToPushHandle[activeToken]; ok {
-			if s.pushHandleToPID[h] == activeProcessID {
-				if w := s.pushClients[h]; w != nil {
-					handle, writer = h, w
-				}
-			}
-		}
-	}
-	// Phase 2: PID 查表 (正常单进程, 覆盖 activeToken 卡死)
-	if writer == nil && activeProcessID != 0 {
-		if h, ok := s.pushClientsByPID[activeProcessID]; ok {
-			if w := s.pushClients[h]; w != nil {
-				handle, writer = h, w
-			}
-		}
-	}
-	// Phase 3: token 兜底 (EverEdit 双进程)
-	if writer == nil && activeToken != 0 {
-		if h, ok := s.tokenToPushHandle[activeToken]; ok {
-			if w := s.pushClients[h]; w != nil {
-				handle, writer = h, w
-			}
-		}
-	}
-	s.pushMu.RUnlock()
 
 	// Encode the commit text message using CMD_COMMIT_TEXT
 	encoded := s.codec.EncodeCommitText(text, "", false, false, false)
 
 	if writer != nil {
-		s.logger.Debug("Pushing commit text to active TSF client via push pipe",
-			"processID", activeProcessID, "token", activeToken)
-
-		if err := s.codec.WriteMessage(writer, encoded); err != nil {
-			s.logger.Warn("Failed to push commit text to active client",
-				"processID", activeProcessID, "error", err)
-			s.pushMu.Lock()
-			removed := s.cleanupPushHandle(handle)
-			s.pushMu.Unlock()
-			if removed {
-				writer.shutdown()
-			}
+		if !writer.enqueueBroadcast(encoded) {
+			s.logger.Warn("PushCommitText dropped: active client queue full",
+				"processID", activeProcessID)
 			return
 		}
-
-		s.logger.Info("Commit text push completed to active client", "processID", activeProcessID)
+		s.logger.Debug("Commit text enqueued to active TSF client",
+			"processID", activeProcessID, "token", activeToken)
 		return
 	}
 
@@ -472,11 +443,9 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 	// Do NOT broadcast to all clients — that causes duplicate text insertion.
 	s.pushMu.RLock()
 	clientCount := len(s.pushClients)
-	var fallbackHandle windows.Handle
 	var fallbackWriter *pushClient
 	if clientCount == 1 {
-		for h, w := range s.pushClients {
-			fallbackHandle = h
+		for _, w := range s.pushClients {
 			fallbackWriter = w
 		}
 	}
@@ -485,16 +454,8 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 	if clientCount == 1 && fallbackWriter != nil {
 		s.logger.Warn("PushCommitText: no push pipe for active process, using single-client fallback",
 			"activeProcessID", activeProcessID)
-		if err := s.codec.WriteMessage(fallbackWriter, encoded); err != nil {
-			s.logger.Warn("Failed to push commit text via fallback", "error", err)
-			s.pushMu.Lock()
-			removed := s.cleanupPushHandle(fallbackHandle)
-			s.pushMu.Unlock()
-			if removed {
-				fallbackWriter.shutdown()
-			}
-		} else {
-			s.logger.Info("Commit text push completed via single-client fallback")
+		if !fallbackWriter.enqueueBroadcast(encoded) {
+			s.logger.Warn("PushCommitText dropped: fallback client queue full")
 		}
 		return
 	}
@@ -505,101 +466,51 @@ func (s *Server) PushCommitTextToActiveClient(text string) {
 
 // PushClearCompositionToActiveClient sends a clear composition command to the active TSF client
 // This is used when mode is toggled via menu/toolbar while there's an active composition
+//
+// 经 outbound 队列发出（不直写），与状态推送保序；定位策略与 CommitText 统一
+// 走 resolveActivePushClient（token 优先，多实例宿主精确区分）。
 func (s *Server) PushClearCompositionToActiveClient() {
-	// Get the active process ID
-	s.activeMu.RLock()
-	activeProcessID := s.activeProcessID
-	s.activeMu.RUnlock()
-
-	if activeProcessID == 0 {
+	writer, activeProcessID, activeToken := s.resolveActivePushClient()
+	if activeProcessID == 0 && activeToken == 0 {
 		s.logger.Debug("PushClearComposition: no active client recorded, skipping")
 		return
 	}
-
-	// Find the push pipe handle for the active process
-	s.pushMu.RLock()
-	handle, exists := s.pushClientsByPID[activeProcessID]
-	var writer *pushClient
-	if exists {
-		writer = s.pushClients[handle]
-	}
-	s.pushMu.RUnlock()
-
-	if !exists || writer == nil {
+	if writer == nil {
 		s.logger.Debug("PushClearComposition: no push pipe for active process",
 			"activeProcessID", activeProcessID)
 		return
 	}
 
-	// Encode the clear composition message
-	encoded := s.codec.EncodeClearComposition()
-
-	s.logger.Debug("Pushing clear composition to active TSF client via push pipe",
-		"processID", activeProcessID)
-
-	// Send to the active client only
-	if err := s.codec.WriteMessage(writer, encoded); err != nil {
-		s.logger.Warn("Failed to push clear composition to active client",
-			"processID", activeProcessID, "error", err)
-		s.pushMu.Lock()
-		removed := s.cleanupPushHandle(handle)
-		s.pushMu.Unlock()
-		if removed {
-			writer.shutdown()
-		}
+	if !writer.enqueueBroadcast(s.codec.EncodeClearComposition()) {
+		s.logger.Warn("PushClearComposition dropped: active client queue full",
+			"processID", activeProcessID)
 		return
 	}
-
-	s.logger.Debug("Clear composition push completed to active client", "processID", activeProcessID)
+	s.logger.Debug("Clear composition enqueued to active client", "processID", activeProcessID)
 }
 
 // PushUpdateCompositionToActiveClient sends an update composition command to the active TSF client
 // This is used for mouse click partial confirm in pinyin mode
+//
+// 经 outbound 队列发出（不直写），与状态推送保序；定位策略与 CommitText 统一。
 func (s *Server) PushUpdateCompositionToActiveClient(text string, caretPos int) {
-	// Get the active process ID
-	s.activeMu.RLock()
-	activeProcessID := s.activeProcessID
-	s.activeMu.RUnlock()
-
-	if activeProcessID == 0 {
+	writer, activeProcessID, activeToken := s.resolveActivePushClient()
+	if activeProcessID == 0 && activeToken == 0 {
 		s.logger.Debug("PushUpdateComposition: no active client recorded, skipping")
 		return
 	}
-
-	// Find the push pipe handle for the active process
-	s.pushMu.RLock()
-	handle, exists := s.pushClientsByPID[activeProcessID]
-	var writer *pushClient
-	if exists {
-		writer = s.pushClients[handle]
-	}
-	s.pushMu.RUnlock()
-
-	if !exists || writer == nil {
+	if writer == nil {
 		s.logger.Debug("PushUpdateComposition: no push pipe for active process",
 			"activeProcessID", activeProcessID)
 		return
 	}
 
-	// Encode the update composition message
-	encoded := s.codec.EncodeUpdateComposition(text, caretPos)
-
-	s.logger.Debug("Pushing update composition to active TSF client via push pipe",
-		"processID", activeProcessID)
-
-	if err := s.codec.WriteMessage(writer, encoded); err != nil {
-		s.logger.Warn("Failed to push update composition to active client",
-			"processID", activeProcessID, "error", err)
-		s.pushMu.Lock()
-		removed := s.cleanupPushHandle(handle)
-		s.pushMu.Unlock()
-		if removed {
-			writer.shutdown()
-		}
+	if !writer.enqueueBroadcast(s.codec.EncodeUpdateComposition(text, caretPos)) {
+		s.logger.Warn("PushUpdateComposition dropped: active client queue full",
+			"processID", activeProcessID)
 		return
 	}
-
-	s.logger.Debug("Update composition push completed to active client", "processID", activeProcessID)
+	s.logger.Debug("Update composition enqueued to active client", "processID", activeProcessID)
 }
 
 // pushSyncConfigToActiveClient pushes a SyncConfig message to the active TSF client only.

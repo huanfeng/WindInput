@@ -387,6 +387,12 @@ func (s *Server) handleClient(conn net.Conn, clientID int) uint32 {
 // 状态/配置推送 idempotent，队列满则 drop 最新（下次 push 自带最新 value）。
 const pushOutboundBufferSize = 16
 
+// pushWriteTimeout: push pipe 单次写出的超时上限。
+// 对端进程活着但 AsyncReader 不消费（半开连接）时，内核接收缓冲填满后
+// overlapped Write 会无限期 park writer goroutine；超时让写返回错误，
+// writer loop 据此 shutdown 该连接自愈。与 main pipe 的 30s 写超时对称。
+const pushWriteTimeout = 30 * time.Second
+
 // pushClient wraps a winio-backed net.Conn for push pipe (Go→C++ broadcasts).
 //
 // 关键设计：
@@ -430,9 +436,12 @@ func newPushClient(conn net.Conn) (*pushClient, error) {
 }
 
 // Write 通过 mu 串行化写入；底层 net.Conn.Write 走 winio overlapped。
+// 每次写前重置 pushWriteTimeout 写超时：覆盖「对端活着但不读」的半开连接，
+// 超时错误会让 pushWriterLoop shutdown 本连接自愈。
 func (c *pushClient) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(pushWriteTimeout))
 	return c.conn.Write(p)
 }
 
