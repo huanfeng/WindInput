@@ -2,15 +2,21 @@ package uicmd
 
 // SettingsOpenPayload 请求渲染端打开设置窗口。
 // Page 为可选的指定页面 (如 "about"), 空 = 默认页。
+// WebMode=true 时向 wind_setting.exe 追加 --web 参数，直接打开 Web 版设置界面。
 type SettingsOpenPayload struct {
-	Page string
+	Page    string
+	WebMode bool
 }
 
 func (SettingsOpenPayload) isPayload()               {}
 func (SettingsOpenPayload) CommandType() CommandType { return CmdSettingsOpen }
 
 func (p SettingsOpenPayload) marshal(w *binWriter) error {
-	return w.writeString(p.Page)
+	if err := w.writeString(p.Page); err != nil {
+		return err
+	}
+	w.writeBool(p.WebMode)
+	return nil
 }
 
 func (p *SettingsOpenPayload) unmarshal(r *binReader) error {
@@ -19,6 +25,14 @@ func (p *SettingsOpenPayload) unmarshal(r *binReader) error {
 		return err
 	}
 	p.Page = s
+	// WebMode 是后加字段，旧消息流可能没有此字节；EOF 时默认 false。
+	if !r.eof() {
+		b, err := r.readBool()
+		if err != nil {
+			return err
+		}
+		p.WebMode = b
+	}
 	return nil
 }
 

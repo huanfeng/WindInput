@@ -43,6 +43,7 @@ const (
 	CategoryDict    FuncCategory = "dict"
 	CategoryIME     FuncCategory = "ime"
 	CategorySetting FuncCategory = "setting"
+	CategoryConfig  FuncCategory = "config" // config.get / config.set / config.toggle
 	CategoryWeb     FuncCategory = "web"
 	CategoryMeta    FuncCategory = "meta"
 )

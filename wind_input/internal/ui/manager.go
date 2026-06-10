@@ -401,7 +401,7 @@ func (m *Manager) processOneCommand(item uicmdItem) {
 		m.doTakeScreenshot()
 	case uicmd.CmdSettingsOpen:
 		p := cmd.Payload.(uicmd.SettingsOpenPayload)
-		m.doOpenSettings(p.Page)
+		m.doOpenSettings(p.Page, p.WebMode)
 	case uicmd.CmdDPIChanged:
 		m.doDPIChanged()
 	case uicmd.CmdCandidatesConfig,

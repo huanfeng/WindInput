@@ -342,6 +342,15 @@ func (m *Manager) OpenSettings() {
 
 // OpenSettingsWithPage opens the settings window with a specific page
 func (m *Manager) OpenSettingsWithPage(page string) {
+	m.sendSettingsCmd(page, false)
+}
+
+// OpenSettingsWebMode opens the settings window in web mode (passes --web to wind_setting.exe)
+func (m *Manager) OpenSettingsWebMode(page string) {
+	m.sendSettingsCmd(page, true)
+}
+
+func (m *Manager) sendSettingsCmd(page string, webMode bool) {
 	m.mu.Lock()
 	if !m.ready {
 		m.mu.Unlock()
@@ -349,7 +358,7 @@ func (m *Manager) OpenSettingsWithPage(page string) {
 	}
 	m.mu.Unlock()
 
-	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdSettingsOpen, 0, uicmd.SettingsOpenPayload{Page: page})}
+	item := uicmdItem{Cmd: uicmd.NewCommand(uicmd.CmdSettingsOpen, 0, uicmd.SettingsOpenPayload{Page: page, WebMode: webMode})}
 	select {
 	case m.cmdCh <- item:
 		if m.cmdEvent != 0 {
@@ -360,10 +369,10 @@ func (m *Manager) OpenSettingsWithPage(page string) {
 	}
 }
 
-// doOpenSettings opens the settings window (called from UI thread)
-// page parameter can specify a specific page to open (e.g., "about")
-func (m *Manager) doOpenSettings(page string) {
-	m.logger.Info("Opening settings application", "page", page)
+// doOpenSettings opens the settings window (called from UI thread).
+// webMode=true 时向 wind_setting.exe 追加 --web 参数。
+func (m *Manager) doOpenSettings(page string, webMode bool) {
+	m.logger.Info("Opening settings application", "page", page, "webMode", webMode)
 
 	// Try to launch wind_setting.exe
 	// First try the install directory, then fall back to current directory
@@ -383,11 +392,17 @@ func (m *Manager) doOpenSettings(page string) {
 
 	openPtr, _ := windows.UTF16PtrFromString("open")
 
-	// Prepare parameters if page is specified
+	// Prepare parameters: --page=<page> and/or --web
 	var paramsPtr *uint16
+	var parts []string
 	if page != "" {
-		params := "--page=" + page
-		paramsPtr, _ = windows.UTF16PtrFromString(params)
+		parts = append(parts, "--page="+page)
+	}
+	if webMode {
+		parts = append(parts, "--web")
+	}
+	if len(parts) > 0 {
+		paramsPtr, _ = windows.UTF16PtrFromString(strings.Join(parts, " "))
 	}
 
 	var attempts []settingsLaunchAttempt
