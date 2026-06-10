@@ -999,10 +999,13 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             response.chineseMode = (commitHeader->flags & COMMIT_FLAG_CHINESE_MODE) != 0;
 
             // Extract text
+            // 边界检查统一用减法形式（len <= size - offset）：textLength 是对端可控的
+            // uint32，32 位构建下 offset + len 的加法会回绕绕过检查导致越界读。
+            // 前提 offset <= payload.size() 由上方 sizeof(CommitTextHeader) 守卫保证。
             if (commitHeader->textLength > 0)
             {
                 size_t textOffset = sizeof(CommitTextHeader);
-                if (textOffset + commitHeader->textLength <= payload.size())
+                if (commitHeader->textLength <= payload.size() - textOffset)
                 {
                     response.text = _Utf8ToWide(
                         reinterpret_cast<const char*>(payload.data() + textOffset),
@@ -1013,12 +1016,18 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             // Extract new composition text (only if compositionLength > 0)
             if ((commitHeader->flags & COMMIT_FLAG_HAS_NEW_COMPOSITION) && commitHeader->compositionLength > 0)
             {
-                size_t compOffset = sizeof(CommitTextHeader) + commitHeader->textLength;
-                if (compOffset + commitHeader->compositionLength <= payload.size())
+                // 先验证 textLength 在界内再推进 offset——直接算
+                // sizeof(header) + textLength 的加法本身就可能回绕。
+                size_t compOffset = sizeof(CommitTextHeader);
+                if (commitHeader->textLength <= payload.size() - compOffset)
                 {
-                    response.newComposition = _Utf8ToWide(
-                        reinterpret_cast<const char*>(payload.data() + compOffset),
-                        commitHeader->compositionLength);
+                    compOffset += commitHeader->textLength;
+                    if (commitHeader->compositionLength <= payload.size() - compOffset)
+                    {
+                        response.newComposition = _Utf8ToWide(
+                            reinterpret_cast<const char*>(payload.data() + compOffset),
+                            commitHeader->compositionLength);
+                    }
                 }
             }
             // restartComposition = flag set, regardless of compositionLength
@@ -1072,10 +1081,13 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             response.chineseMode = (statusHeader->flags & STATUS_CHINESE_MODE) != 0;
 
             // Extract hotkeys
+            // 防溢出：keyDownCount+keyUpCount 用 uint64 累加（避免 uint32 加法回绕），
+            // 容量检查用除法形式（避免 count*4 在 32 位回绕）。hotkeysOffset<=size 由上方守卫保证。
             size_t hotkeysOffset = sizeof(StatusHeader);
-            uint32_t totalHotkeys = statusHeader->keyDownCount + statusHeader->keyUpCount;
+            uint64_t totalHotkeys = (uint64_t)statusHeader->keyDownCount + statusHeader->keyUpCount;
+            bool hotkeysValid = totalHotkeys <= (payload.size() - hotkeysOffset) / sizeof(uint32_t);
 
-            if (payload.size() >= hotkeysOffset + totalHotkeys * sizeof(uint32_t))
+            if (hotkeysValid)
             {
                 const uint32_t* hotkeys = reinterpret_cast<const uint32_t*>(payload.data() + hotkeysOffset);
 
@@ -1091,7 +1103,10 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             }
 
             // Extract trailing icon label (UTF-8, after StatusHeader + hotkeys)
-            size_t structuredSize = hotkeysOffset + totalHotkeys * sizeof(uint32_t);
+            // hotkeys 无效时不解析尾部（structuredSize 取 size() 使下面的 > 判定为假）。
+            size_t structuredSize = hotkeysValid
+                ? hotkeysOffset + (size_t)totalHotkeys * sizeof(uint32_t)
+                : payload.size();
             if (payload.size() > structuredSize)
             {
                 std::string utf8Label(payload.begin() + structuredSize, payload.end());
@@ -1122,11 +1137,11 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
 
             const StatusHeader* syncHeader = reinterpret_cast<const StatusHeader*>(payload.data());
 
-            // Extract hotkeys
+            // Extract hotkeys（防溢出，同 CMD_STATUS_UPDATE 注释）
             size_t hotkeysOffset = sizeof(StatusHeader);
-            uint32_t totalHotkeys = syncHeader->keyDownCount + syncHeader->keyUpCount;
+            uint64_t totalHotkeys = (uint64_t)syncHeader->keyDownCount + syncHeader->keyUpCount;
 
-            if (payload.size() >= hotkeysOffset + totalHotkeys * sizeof(uint32_t))
+            if (totalHotkeys <= (payload.size() - hotkeysOffset) / sizeof(uint32_t))
             {
                 const uint32_t* hotkeys = reinterpret_cast<const uint32_t*>(payload.data() + hotkeysOffset);
 
@@ -1162,11 +1177,12 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             response.statusFlags = statusHeader->flags;
             response.chineseMode = (statusHeader->flags & STATUS_CHINESE_MODE) != 0;
 
-            // Extract hotkeys
+            // Extract hotkeys（防溢出，同 CMD_STATUS_UPDATE 注释）
             size_t hotkeysOffset = sizeof(StatusHeader);
-            uint32_t totalHotkeys = statusHeader->keyDownCount + statusHeader->keyUpCount;
+            uint64_t totalHotkeys = (uint64_t)statusHeader->keyDownCount + statusHeader->keyUpCount;
+            bool hotkeysValid = totalHotkeys <= (payload.size() - hotkeysOffset) / sizeof(uint32_t);
 
-            if (payload.size() >= hotkeysOffset + totalHotkeys * sizeof(uint32_t))
+            if (hotkeysValid)
             {
                 const uint32_t* hotkeys = reinterpret_cast<const uint32_t*>(payload.data() + hotkeysOffset);
 
@@ -1182,7 +1198,9 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             }
 
             // Extract trailing icon label (UTF-8, after StatusHeader + hotkeys)
-            size_t structuredSize = hotkeysOffset + totalHotkeys * sizeof(uint32_t);
+            size_t structuredSize = hotkeysValid
+                ? hotkeysOffset + (size_t)totalHotkeys * sizeof(uint32_t)
+                : payload.size();
             if (payload.size() > structuredSize)
             {
                 std::string utf8Label(payload.begin() + structuredSize, payload.end());
@@ -1255,10 +1273,11 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             response.chineseMode = (resultPayload->flags & COMMIT_FLAG_CHINESE_MODE) != 0;
 
             // Extract text
+            // 减法形式防 32 位加法回绕（同 CMD_COMMIT_TEXT 注释）。
             if (resultPayload->textLength > 0)
             {
                 size_t textOffset = sizeof(CommitResultPayload);
-                if (textOffset + resultPayload->textLength <= payload.size())
+                if (resultPayload->textLength <= payload.size() - textOffset)
                 {
                     response.text = _Utf8ToWide(
                         reinterpret_cast<const char*>(payload.data() + textOffset),
@@ -1269,12 +1288,16 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             // Extract new composition
             if ((resultPayload->flags & COMMIT_FLAG_HAS_NEW_COMPOSITION) && resultPayload->compositionLength > 0)
             {
-                size_t compOffset = sizeof(CommitResultPayload) + resultPayload->textLength;
-                if (compOffset + resultPayload->compositionLength <= payload.size())
+                size_t compOffset = sizeof(CommitResultPayload);
+                if (resultPayload->textLength <= payload.size() - compOffset)
                 {
-                    response.newComposition = _Utf8ToWide(
-                        reinterpret_cast<const char*>(payload.data() + compOffset),
-                        resultPayload->compositionLength);
+                    compOffset += resultPayload->textLength;
+                    if (resultPayload->compositionLength <= payload.size() - compOffset)
+                    {
+                        response.newComposition = _Utf8ToWide(
+                            reinterpret_cast<const char*>(payload.data() + compOffset),
+                            resultPayload->compositionLength);
+                    }
                 }
             }
 
@@ -1295,8 +1318,9 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             response.cursorOffset = (int)p->cursorOffset;
             if (p->textLength > 0)
             {
+                // 减法形式防 32 位加法回绕（同 CMD_COMMIT_TEXT 注释）。
                 size_t textOffset = sizeof(CommitTextWithCursorPayload);
-                if (textOffset + p->textLength <= payload.size())
+                if (p->textLength <= payload.size() - textOffset)
                 {
                     response.text = _Utf8ToWide(
                         reinterpret_cast<const char*>(payload.data() + textOffset),
@@ -1336,8 +1360,10 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             response.maxBufferSize = setupHeader->maxBufferSize;
 
             size_t offset = sizeof(HostRenderSetupHeader);
+            // 减法形式防 32 位加法回绕；offset <= payload.size() 由上方守卫保证，
+            // 且仅在通过检查后才推进 offset，保持不变式。
             // Extract shared memory name
-            if (setupHeader->shmNameLen > 0 && offset + setupHeader->shmNameLen <= payload.size())
+            if (setupHeader->shmNameLen > 0 && setupHeader->shmNameLen <= payload.size() - offset)
             {
                 response.shmName = _Utf8ToWide(
                     reinterpret_cast<const char*>(payload.data() + offset),
@@ -1345,7 +1371,7 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
                 offset += setupHeader->shmNameLen;
             }
             // Extract event name
-            if (setupHeader->eventNameLen > 0 && offset + setupHeader->eventNameLen <= payload.size())
+            if (setupHeader->eventNameLen > 0 && setupHeader->eventNameLen <= payload.size() - offset)
             {
                 response.eventName = _Utf8ToWide(
                     reinterpret_cast<const char*>(payload.data() + offset),
@@ -1531,7 +1557,8 @@ BOOL CIPCClient::ReceiveBatchResponse(std::vector<ServiceResponse>& responses, i
     for (uint16_t i = 0; i < responseCount && offset < payload.size(); i++)
     {
         // Check if we have enough data for a header
-        if (offset + sizeof(IpcHeader) > payload.size())
+        // 减法形式防回绕：offset < payload.size() 由循环条件保证。
+        if (sizeof(IpcHeader) > payload.size() - offset)
         {
             _LogError(L"Batch response %d: incomplete header at offset %zu", i, offset);
             break;
@@ -1542,7 +1569,8 @@ BOOL CIPCClient::ReceiveBatchResponse(std::vector<ServiceResponse>& responses, i
         offset += sizeof(IpcHeader);
 
         // Check if we have enough data for the payload
-        if (offset + respHeader->length > payload.size())
+        // respHeader->length 是对端可控的 uint32，加法形式在 32 位下可回绕绕过检查。
+        if (respHeader->length > payload.size() - offset)
         {
             _LogError(L"Batch response %d: incomplete payload at offset %zu", i, offset);
             break;
@@ -2104,7 +2132,10 @@ void CIPCClient::_AsyncReaderLoop()
                     uint16_t keyLen = *reinterpret_cast<const uint16_t*>(payload.data());
                     uint32_t valueLen = *reinterpret_cast<const uint32_t*>(payload.data() + 2);
 
-                    if (payload.size() >= 6 + keyLen + valueLen)
+                    // 减法形式防回绕：valueLen 是对端可控的 uint32，
+                    // 6 + keyLen + valueLen 在 32 位下可回绕绕过检查。
+                    // payload.size() >= 6 由外层 if 保证；先验 keyLen 再验 valueLen 防二次回绕。
+                    if (keyLen <= payload.size() - 6 && valueLen <= payload.size() - 6 - keyLen)
                     {
                         std::string key(reinterpret_cast<const char*>(payload.data() + 6), keyLen);
                         std::vector<uint8_t> value(payload.data() + 6 + keyLen, payload.data() + 6 + keyLen + valueLen);
