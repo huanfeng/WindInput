@@ -14,7 +14,7 @@ import {
 export const themeExtraSchema: PageSchema = [
   {
     type: "select",
-    key: "ui.theme_style",
+    key: "ui.theme.style",
     label: "主题风格",
     hint: "选择亮色、暗色或跟随系统设置",
     options: [
@@ -25,7 +25,7 @@ export const themeExtraSchema: PageSchema = [
   },
   {
     type: "select",
-    key: "ui.pager_bar_display",
+    key: "ui.candidate.pager_bar_display",
     label: "翻页栏显示",
     hint: "覆盖主题配置中翻页栏的显示方式；隐藏时整个翻页栏（含箭头）不渲染",
     options: [
@@ -37,7 +37,7 @@ export const themeExtraSchema: PageSchema = [
   },
   {
     type: "select",
-    key: "ui.page_number_display",
+    key: "ui.candidate.page_number_display",
     label: "显示页码",
     hint: "翻页栏可见时，是否显示页码文字",
     options: [
@@ -53,7 +53,7 @@ export const candidateWindowSchema: PageSchema = [
   // font_size / font_family 手写（两者相邻，font_family 需要 isWailsEnv + 系统字体列表）
   {
     type: "slider",
-    key: "ui.candidates_per_page",
+    key: "ui.candidate.per_page",
     label: "每页候选数",
     hint: "每页显示的候选词数量",
     min: 2,
@@ -63,7 +63,7 @@ export const candidateWindowSchema: PageSchema = [
   },
   {
     type: "slider",
-    key: "ui.candidates_per_page_extended",
+    key: "ui.candidate.per_page_extended",
     label: "扩展候选数",
     hint: "临时拼音 / 快捷输入 / 短语等场景下的每页候选数；设为 0 表示与上面相同（关闭分档）。最多 10 个（受数字键 1-9、0 限制）",
     min: 0,
@@ -73,22 +73,22 @@ export const candidateWindowSchema: PageSchema = [
   },
   {
     type: "toggle",
-    key: "ui.hide_candidate_window",
+    key: "ui.candidate.hide_window",
     label: "隐藏候选窗口",
     hint: "不显示候选窗口",
   },
   {
     type: "toggle",
-    key: "ui.inline_preedit",
+    key: "ui.candidate.inline_preedit",
     label: "嵌入式编码行",
     hint: "输入码直接显示在光标处，而非候选窗上方",
   },
   {
     type: "select",
-    key: "ui.preedit_mode",
+    key: "ui.candidate.preedit_mode",
     label: "非嵌入编码显示方式",
     hint: "未开启嵌入编码时，编码在候选窗中的显示位置",
-    dependsOn: (cfg) => !cfg.ui.inline_preedit,
+    dependsOn: (cfg) => !cfg.ui.candidate.inline_preedit,
     options: [
       { value: PreeditMode.Top, label: "独立编码行" },
       { value: PreeditMode.Embedded, label: "嵌入候选行" },
@@ -96,7 +96,7 @@ export const candidateWindowSchema: PageSchema = [
   },
   {
     type: "select",
-    key: "ui.candidate_layout",
+    key: "ui.candidate.layout",
     label: "候选布局",
     hint: "候选词的排列方式",
     options: [
@@ -106,19 +106,19 @@ export const candidateWindowSchema: PageSchema = [
   },
   {
     type: "toggle",
-    key: "ui.flip_layout_when_above",
+    key: "ui.candidate.flip_when_above",
     label: "上方显示时反转布局",
     hint: "候选窗显示在光标上方时，将预编辑栏移至底部，竖排模式下首候选同步移至底部，使最相关内容始终靠近光标",
   },
   {
     type: "toggle",
-    key: "ui.mode_accent_border",
+    key: "ui.candidate.mode_accent_border",
     label: "模式彩色边框",
     hint: "临时拼音、快捷输入等特殊模式下，候选窗口显示彩色边框指示",
   },
   {
     type: "slider",
-    key: "ui.max_candidate_chars",
+    key: "ui.candidate.max_chars",
     label: "候选最大显示字符数",
     hint: "候选文本超过此 rune 数时截断并追加省略号，范围 8-64",
     min: 8,
@@ -252,7 +252,7 @@ export const statusIndicatorSchema: PageSchema = [
 export const candidateTooltipSchema: PageSchema = [
   {
     type: "slider",
-    key: "ui.tooltip_delay",
+    key: "ui.tooltip.delay",
     label: "悬停延时",
     hint: "鼠标停留在候选上多久后弹出提示框（毫秒）；越大越不易误触",
     min: 0,
@@ -292,7 +292,7 @@ export const candidateTooltipSchema: PageSchema = [
 export const indicatorSchema: PageSchema = [
   {
     type: "toggle",
-    key: "toolbar.visible",
+    key: "ui.toolbar.visible",
     label: "菜单栏指示器",
     hint: "在菜单栏显示当前输入状态（中/英、标点、全/半角）；点击可切换输入方案、检索范围等",
   },
@@ -302,13 +302,13 @@ export const indicatorSchema: PageSchema = [
 export const toolbarSchema: PageSchema = [
   {
     type: "toggle",
-    key: "toolbar.visible",
+    key: "ui.toolbar.visible",
     label: "显示工具栏",
     hint: "在屏幕上显示可拖动的输入法状态栏",
   },
   {
     type: "toggle",
-    key: "toolbar.hide_in_fullscreen",
+    key: "ui.toolbar.hide_in_fullscreen",
     label: "全屏应用时隐藏工具栏",
     hint: "当前台应用进入全屏（游戏、视频、演示等）时自动隐藏工具栏",
   },

@@ -131,7 +131,7 @@
     <!-- 简入繁出（简体输入 → 繁体输出） -->
     <div class="settings-card">
       <div class="card-title">简入繁出</div>
-      <div class="setting-item" data-search-anchor="s2t.enabled">
+      <div class="setting-item" data-search-anchor="features.s2t.enabled">
         <div class="setting-info">
           <label>启用简入繁出</label>
           <p class="setting-hint">候选与上屏均输出繁体（基于 OpenCC 词典）</p>
@@ -143,7 +143,7 @@
           </label>
         </div>
       </div>
-      <div class="setting-item" data-search-anchor="s2t.variant" :class="{ 'item-disabled': !s2tEnabled }">
+      <div class="setting-item" data-search-anchor="features.s2t.variant" :class="{ 'item-disabled': !s2tEnabled }">
         <div class="setting-info">
           <label>转换变体</label>
           <p class="setting-hint">选择目标繁体字形与词汇风格</p>
@@ -250,7 +250,7 @@
     <!-- 快捷输入 -->
     <div class="settings-card">
       <div class="card-title">快捷输入</div>
-      <div class="setting-item" data-search-anchor="input.quick_input.trigger_keys">
+      <div class="setting-item" data-search-anchor="features.quick_input.trigger_keys">
         <div class="setting-info">
           <label>触发键</label>
           <p class="setting-hint">
@@ -260,9 +260,9 @@
         <div class="setting-control">
           <TriggerKeySelect
             :options="triggerKeyOptions"
-            :model-value="formData.input.quick_input.trigger_keys"
+            :model-value="formData.features.quick_input.trigger_keys"
             @update:model-value="
-              formData.input.quick_input.trigger_keys = $event
+              formData.features.quick_input.trigger_keys = $event
             "
             :conflicts="quickInputConflicts"
             placeholder="选择触发键（未选择=关闭）"
@@ -355,8 +355,8 @@
       />
       <div
         class="setting-item"
-        data-search-anchor="startup.default_chinese_mode"
-        :class="{ 'item-disabled': formData.startup.remember_last_state }"
+        data-search-anchor="general.default_chinese_mode"
+        :class="{ 'item-disabled': formData.general.remember_last_state }"
       >
         <div class="setting-info">
           <label>初始语言模式</label>
@@ -365,16 +365,16 @@
         <div class="setting-control">
           <div class="segmented-control">
             <button
-              :class="{ active: formData.startup.default_chinese_mode }"
-              @click="formData.startup.default_chinese_mode = true"
-              :disabled="formData.startup.remember_last_state"
+              :class="{ active: formData.general.default_chinese_mode }"
+              @click="formData.general.default_chinese_mode = true"
+              :disabled="formData.general.remember_last_state"
             >
               中文
             </button>
             <button
-              :class="{ active: !formData.startup.default_chinese_mode }"
-              @click="formData.startup.default_chinese_mode = false"
-              :disabled="formData.startup.remember_last_state"
+              :class="{ active: !formData.general.default_chinese_mode }"
+              @click="formData.general.default_chinese_mode = false"
+              :disabled="formData.general.remember_last_state"
             >
               英文
             </button>
@@ -383,8 +383,8 @@
       </div>
       <div
         class="setting-item"
-        data-search-anchor="startup.default_full_width"
-        :class="{ 'item-disabled': formData.startup.remember_last_state }"
+        data-search-anchor="general.default_full_width"
+        :class="{ 'item-disabled': formData.general.remember_last_state }"
       >
         <div class="setting-info">
           <label>初始字符宽度</label>
@@ -393,16 +393,16 @@
         <div class="setting-control">
           <div class="segmented-control">
             <button
-              :class="{ active: !formData.startup.default_full_width }"
-              @click="formData.startup.default_full_width = false"
-              :disabled="formData.startup.remember_last_state"
+              :class="{ active: !formData.general.default_full_width }"
+              @click="formData.general.default_full_width = false"
+              :disabled="formData.general.remember_last_state"
             >
               半角
             </button>
             <button
-              :class="{ active: formData.startup.default_full_width }"
-              @click="formData.startup.default_full_width = true"
-              :disabled="formData.startup.remember_last_state"
+              :class="{ active: formData.general.default_full_width }"
+              @click="formData.general.default_full_width = true"
+              :disabled="formData.general.remember_last_state"
             >
               全角
             </button>
@@ -411,8 +411,8 @@
       </div>
       <div
         class="setting-item"
-        data-search-anchor="startup.default_chinese_punct"
-        :class="{ 'item-disabled': formData.startup.remember_last_state }"
+        data-search-anchor="general.default_chinese_punct"
+        :class="{ 'item-disabled': formData.general.remember_last_state }"
       >
         <div class="setting-info">
           <label>初始标点模式</label>
@@ -421,16 +421,16 @@
         <div class="setting-control">
           <div class="segmented-control">
             <button
-              :class="{ active: formData.startup.default_chinese_punct }"
-              @click="formData.startup.default_chinese_punct = true"
-              :disabled="formData.startup.remember_last_state"
+              :class="{ active: formData.general.default_chinese_punct }"
+              @click="formData.general.default_chinese_punct = true"
+              :disabled="formData.general.remember_last_state"
             >
               中文标点
             </button>
             <button
-              :class="{ active: !formData.startup.default_chinese_punct }"
-              @click="formData.startup.default_chinese_punct = false"
-              :disabled="formData.startup.remember_last_state"
+              :class="{ active: !formData.general.default_chinese_punct }"
+              @click="formData.general.default_chinese_punct = false"
+              :disabled="formData.general.remember_last_state"
             >
               英文标点
             </button>
@@ -469,28 +469,28 @@ const props = defineProps<{
   formData: Config;
 }>();
 
-// 简入繁出（S2T）：通过 v-model 直接读写 formData.s2t（默认值兜底）
+// 简入繁出（S2T）：通过 v-model 直接读写 formData.features.s2t（默认值兜底）
 const s2tEnabled = computed<boolean>({
   get() {
-    return !!props.formData.s2t?.enabled;
+    return !!props.formData.features.s2t?.enabled;
   },
   set(value: boolean) {
-    if (!props.formData.s2t) {
-      props.formData.s2t = { enabled: false, variant: S2TVariant.Standard };
+    if (!props.formData.features.s2t) {
+      props.formData.features.s2t = { enabled: false, variant: S2TVariant.Standard };
     }
-    props.formData.s2t.enabled = value;
+    props.formData.features.s2t.enabled = value;
   },
 });
 
 const s2tVariant = computed<string>({
   get() {
-    return props.formData.s2t?.variant || S2TVariant.Standard;
+    return props.formData.features.s2t?.variant || S2TVariant.Standard;
   },
   set(value: string) {
-    if (!props.formData.s2t) {
-      props.formData.s2t = { enabled: false, variant: S2TVariant.Standard };
+    if (!props.formData.features.s2t) {
+      props.formData.features.s2t = { enabled: false, variant: S2TVariant.Standard };
     }
-    props.formData.s2t.variant = value;
+    props.formData.features.s2t.variant = value;
   },
 });
 
@@ -767,7 +767,7 @@ const tempPinyinKeyOptions = [
 // 快捷输入冲突 Map
 const quickInputConflicts = computed(() => {
   const map = new Map<string, string>();
-  const quickKeys = props.formData.input.quick_input?.trigger_keys || [];
+  const quickKeys = props.formData.features.quick_input?.trigger_keys || [];
   const pinyinKeys = props.formData.input.temp_pinyin?.trigger_keys || [];
   const englishKeys =
     props.formData.input.shift_temp_english?.trigger_keys || [];
@@ -790,7 +790,7 @@ const tempPinyinConflictMap = computed(() => {
   const pinyinKeys = props.formData.input.temp_pinyin?.trigger_keys || [];
   const englishKeys =
     props.formData.input.shift_temp_english?.trigger_keys || [];
-  const quickKeys = props.formData.input.quick_input?.trigger_keys || [];
+  const quickKeys = props.formData.features.quick_input?.trigger_keys || [];
   for (const pk of pinyinKeys) {
     const conflicts: string[] = [];
     if (englishKeys.includes(pk)) conflicts.push("临时英文");
@@ -810,7 +810,7 @@ const tempEnglishConflictMap = computed(() => {
   const englishKeys =
     props.formData.input.shift_temp_english?.trigger_keys || [];
   const pinyinKeys = props.formData.input.temp_pinyin?.trigger_keys || [];
-  const quickKeys = props.formData.input.quick_input?.trigger_keys || [];
+  const quickKeys = props.formData.features.quick_input?.trigger_keys || [];
   for (const ek of englishKeys) {
     const conflicts: string[] = [];
     if (pinyinKeys.includes(ek)) conflicts.push("临时拼音");

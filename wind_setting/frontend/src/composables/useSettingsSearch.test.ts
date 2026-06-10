@@ -13,12 +13,12 @@ function fakeEl() {
 }
 
 const entry: SearchEntry = {
-  id: "ui.font_size",
+  id: "ui.candidate.font_size",
   tab: "appearance",
   tabLabel: "外观",
   card: "候选窗口",
   title: "字体大小",
-  anchor: "ui.font_size",
+  anchor: "ui.candidate.font_size",
 };
 
 describe("useSettingsSearch.jumpTo", () => {
@@ -39,7 +39,7 @@ describe("useSettingsSearch.jumpTo", () => {
 
     expect(activeTab.value).toBe("appearance");
     expect(container.value.querySelector).toHaveBeenCalledWith(
-      '[data-search-anchor="ui.font_size"]',
+      '[data-search-anchor="ui.candidate.font_size"]',
     );
     expect(scrollTo).toHaveBeenCalled();
     expect(el.classList.add).toHaveBeenCalledWith("search-flash");

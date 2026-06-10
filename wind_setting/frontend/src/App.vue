@@ -262,12 +262,16 @@ async function loadDataFromHTTP() {
 function mergeWithDefaults(cfg: any): Config {
   const defaults = getDefaultConfig();
   return {
-    startup: { ...defaults.startup, ...cfg.startup },
+    general: { ...defaults.general, ...cfg.general },
     schema: { ...defaults.schema, ...cfg.schema },
     hotkeys: { ...defaults.hotkeys, ...cfg.hotkeys },
     ui: {
       ...defaults.ui,
       ...cfg.ui,
+      candidate: { ...defaults.ui.candidate, ...cfg.ui?.candidate },
+      font: { ...defaults.ui.font, ...cfg.ui?.font },
+      theme: { ...defaults.ui.theme, ...cfg.ui?.theme },
+      toolbar: { ...defaults.ui.toolbar, ...cfg.ui?.toolbar },
       status_indicator: {
         ...defaults.ui.status_indicator,
         ...cfg.ui?.status_indicator,
@@ -281,7 +285,6 @@ function mergeWithDefaults(cfg: any): Config {
         debug: { ...defaults.ui.tooltip.debug, ...cfg.ui?.tooltip?.debug },
       },
     },
-    toolbar: { ...defaults.toolbar, ...cfg.toolbar },
     input: {
       ...defaults.input,
       ...cfg.input,
@@ -293,21 +296,32 @@ function mergeWithDefaults(cfg: any): Config {
         ...defaults.input.auto_pair,
         ...cfg.input?.auto_pair,
       },
-      overflow_behavior: {
-        ...defaults.input.overflow_behavior,
-        ...cfg.input?.overflow_behavior,
+      overflow: {
+        ...defaults.input.overflow,
+        ...cfg.input?.overflow,
+      },
+      capslock: {
+        ...defaults.input.capslock,
+        ...cfg.input?.capslock,
       },
     },
-    advanced: { ...defaults.advanced, ...cfg.advanced },
-    s2t: { ...defaults.s2t, ...cfg.s2t },
-    // stats 段逐字段 ?? 兜底（而非 spread）：后端 *bool(enabled/track_english)
-    // 未设时序列化为 null，简单 spread 会用 null 覆盖默认 true，丢失默认语义。
-    // 切勿为“统一风格”改回 { ...defaults.stats, ...cfg.stats }。
-    stats: {
-      enabled: cfg.stats?.enabled ?? defaults.stats.enabled,
-      retain_days: cfg.stats?.retain_days ?? defaults.stats.retain_days,
-      track_english: cfg.stats?.track_english ?? defaults.stats.track_english,
+    features: {
+      ...defaults.features,
+      ...cfg.features,
+      s2t: { ...defaults.features.s2t, ...cfg.features?.s2t },
+      // stats 段逐字段 ?? 兜底（而非 spread）：后端 *bool(enabled/track_english)
+      // 未设时序列化为 null，简单 spread 会用 null 覆盖默认 true，丢失默认语义。
+      // 切勿为”统一风格”改回 { ...defaults.features.stats, ...cfg.features?.stats }。
+      stats: {
+        enabled: cfg.features?.stats?.enabled ?? defaults.features.stats.enabled,
+        retain_days: cfg.features?.stats?.retain_days ?? defaults.features.stats.retain_days,
+        track_english: cfg.features?.stats?.track_english ?? defaults.features.stats.track_english,
+      },
+      quick_input: { ...defaults.features.quick_input, ...cfg.features?.quick_input },
+      cmdbar: { ...defaults.features.cmdbar, ...cfg.features?.cmdbar },
     },
+    compat: { ...defaults.compat, ...cfg.compat },
+    debug: { ...defaults.debug, ...cfg.debug },
   };
 }
 
@@ -589,7 +603,6 @@ async function resetCurrentPageDefaults() {
           enabled: defaults.input.punct_custom.enabled,
           mappings: { ...defaults.input.punct_custom.mappings },
         },
-        quick_input: { ...defaults.input.quick_input },
         temp_pinyin: {
           ...defaults.input.temp_pinyin,
           trigger_keys: [...(defaults.input.temp_pinyin.trigger_keys || [])],
@@ -600,9 +613,14 @@ async function resetCurrentPageDefaults() {
             ...(defaults.input.shift_temp_english.trigger_keys || []),
           ],
         },
-        overflow_behavior: { ...defaults.input.overflow_behavior },
+        overflow: { ...defaults.input.overflow },
+        capslock: { ...defaults.input.capslock },
       };
-      formData.value.startup = { ...defaults.startup };
+      formData.value.general = { ...defaults.general };
+      formData.value.features = {
+        ...formData.value.features,
+        quick_input: { ...defaults.features.quick_input },
+      };
       break;
     case "hotkey":
       formData.value.hotkeys = {
@@ -621,15 +639,19 @@ async function resetCurrentPageDefaults() {
     case "appearance":
       formData.value.ui = {
         ...defaults.ui,
+        candidate: { ...defaults.ui.candidate },
+        font: { ...defaults.ui.font },
+        theme: { ...defaults.ui.theme },
+        toolbar: { ...defaults.ui.toolbar },
         status_indicator: { ...defaults.ui.status_indicator },
+        tooltip: { ...defaults.ui.tooltip },
       };
-      formData.value.toolbar = { ...defaults.toolbar };
       if (isWailsEnv.value) {
-        await loadThemePreview(formData.value.ui.theme);
+        await loadThemePreview(formData.value.ui.theme.name);
       }
       break;
     case "advanced":
-      formData.value.advanced = { ...defaults.advanced };
+      formData.value.debug = { ...defaults.debug };
       tsfLogConfig.value = getDefaultTSFLogConfig();
       break;
     default:
@@ -650,8 +672,8 @@ async function loadThemes() {
   try {
     const themes = await wailsApi.getAvailableThemes();
     availableThemes.value = themes;
-    if (formData.value.ui.theme) {
-      await loadThemePreview(formData.value.ui.theme);
+    if (formData.value.ui.theme.name) {
+      await loadThemePreview(formData.value.ui.theme.name);
     }
   } catch (e) {
     console.error("加载主题列表失败", e);
@@ -661,7 +683,7 @@ async function loadThemes() {
 async function loadThemePreview(themeName: string) {
   if (!isWailsEnv.value) return;
   try {
-    const themeStyle = formData.value.ui.theme_style || "system";
+    const themeStyle = formData.value.ui.theme.style || "system";
     const preview = await wailsApi.getThemePreview(themeName, themeStyle);
     themePreview.value = preview;
   } catch (e) {
@@ -676,23 +698,23 @@ async function onThemeSelect(themeName: string) {
 
 async function onThemeImported(themeName: string) {
   await loadThemes();
-  formData.value.ui.theme = themeName;
+  formData.value.ui.theme.name = themeName;
   await loadThemePreview(themeName);
 }
 
 async function onThemeDeleted(themeName: string) {
   await loadThemes();
   // 若删除的是当前主题，回退到 default
-  if (formData.value.ui.theme === themeName) {
-    formData.value.ui.theme = "default";
+  if (formData.value.ui.theme.name === themeName) {
+    formData.value.ui.theme.name = "default";
     await loadThemePreview("default");
   }
 }
 
 async function onThemeStyleChange(_themeStyle: string) {
   // Reload preview to show the correct light/dark variant
-  if (formData.value.ui.theme) {
-    await loadThemePreview(formData.value.ui.theme);
+  if (formData.value.ui.theme.name) {
+    await loadThemePreview(formData.value.ui.theme.name);
   }
 }
 
@@ -703,10 +725,10 @@ const systemDarkMql =
     ? window.matchMedia("(prefers-color-scheme: dark)")
     : null;
 async function handleSystemThemeChange() {
-  const style = formData.value.ui.theme_style || "system";
+  const style = formData.value.ui.theme.style || "system";
   if (style !== "system") return;
-  if (!formData.value.ui.theme) return;
-  await loadThemePreview(formData.value.ui.theme);
+  if (!formData.value.ui.theme.name) return;
+  await loadThemePreview(formData.value.ui.theme.name);
 }
 
 // 外部链接和工具

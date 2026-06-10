@@ -122,8 +122,12 @@ show_full_width = false
 position_mode = "follow_caret"
 offset_x = 0
 offset_y = 0
+custom_x = 0
+custom_y = 0
 font_size = 18.0
 opacity = 0.9
+background_color = ""
+text_color = ""
 border_radius = 6.0
 
 [ui.tooltip]

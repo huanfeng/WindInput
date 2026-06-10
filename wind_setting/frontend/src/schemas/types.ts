@@ -87,7 +87,20 @@ export type PageSchema = FieldDef[];
 
 /** 从对象中按点分路径读取值 */
 export function getPath(obj: any, path: string): any {
-  return path.split(".").reduce((cur, key) => cur?.[key], obj);
+  const parts = path.split(".");
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (cur == null || typeof cur !== "object") {
+      if (import.meta.env.DEV) {
+        console.warn(
+          `[getPath] 中间节点 "${parts.slice(0, i + 1).join(".")}" 为 ${JSON.stringify(cur)}，路径 "${path}" 可能有误`,
+        );
+      }
+      return undefined;
+    }
+    cur = cur[parts[i]];
+  }
+  return cur?.[parts[parts.length - 1]];
 }
 
 /** 向对象按点分路径写入值（直接 mutation，适配 Vue reactive 对象） */

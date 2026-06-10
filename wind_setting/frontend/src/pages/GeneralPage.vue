@@ -172,17 +172,17 @@ async function loadAllSchemas() {
     }
 
     // 确保主方案有显式值，避免保存时后端依赖列表顺序自动选取
-    if (!props.formData.schema.primaryCodetable) {
+    if (!props.formData.schema.primary_codetable) {
       const firstCodetable = enabledSchemaIDs.value.find((id) => {
         const info = allSchemas.value.find((s) => s.id === id);
         return info?.engine_type === "codetable";
       });
       if (firstCodetable) {
-        props.formData.schema.primaryCodetable = firstCodetable;
+        props.formData.schema.primary_codetable = firstCodetable;
       }
     }
-    if (!props.formData.schema.primaryPinyin) {
-      props.formData.schema.primaryPinyin = "pinyin";
+    if (!props.formData.schema.primary_pinyin) {
+      props.formData.schema.primary_pinyin = "pinyin";
     }
 
     // 加载方案引用关系
@@ -433,19 +433,19 @@ const pinyinSchemaOptions = computed(() => {
 // 主码表方案：无"自动"选项，默认第一个已启用的码表方案
 const primaryCodetable = computed({
   get: () =>
-    props.formData.schema?.primaryCodetable ||
+    props.formData.schema?.primary_codetable ||
     enabledCodetableSchemas.value[0] ||
     "",
   set: (val: string) => {
-    props.formData.schema.primaryCodetable = val;
+    props.formData.schema.primary_codetable = val;
   },
 });
 
 // 主拼音方案：无"自动"选项，默认全拼（"pinyin"）
 const primaryPinyin = computed({
-  get: () => props.formData.schema?.primaryPinyin || "pinyin",
+  get: () => props.formData.schema?.primary_pinyin || "pinyin",
   set: (val: string) => {
-    props.formData.schema.primaryPinyin = val;
+    props.formData.schema.primary_pinyin = val;
   },
 });
 </script>
@@ -596,7 +596,7 @@ const primaryPinyin = computed({
     <div class="settings-card primary-schema-card">
       <div class="card-title">主方案设置</div>
 
-      <div class="setting-item" data-search-anchor="schema.primaryCodetable">
+      <div class="setting-item" data-search-anchor="schema.primary_codetable">
         <div class="setting-info">
           <label>主码表方案</label>
           <p class="setting-hint">拼音方案的"反查/编码提示"基于此方案的码表</p>
@@ -619,7 +619,7 @@ const primaryPinyin = computed({
         </div>
       </div>
 
-      <div class="setting-item" data-search-anchor="schema.primaryPinyin">
+      <div class="setting-item" data-search-anchor="schema.primary_pinyin">
         <div class="setting-info">
           <label>主拼音方案</label>
           <p class="setting-hint">码表方案的"临时拼音"使用此方案</p>

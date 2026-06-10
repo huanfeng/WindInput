@@ -624,29 +624,29 @@ onUnmounted(() => {
       <!-- 统计设置 -->
       <div class="settings-card">
         <div class="card-title">统计设置</div>
-        <div class="setting-item" data-search-anchor="stats.enabled">
+        <div class="setting-item" data-search-anchor="features.stats.enabled">
           <div class="setting-info">
             <label>启用输入统计</label>
           </div>
           <div class="setting-control">
             <Switch
-              :checked="props.formData.stats.enabled"
-              @update:checked="(v: boolean) => (props.formData.stats.enabled = v)"
+              :checked="props.formData.features.stats.enabled"
+              @update:checked="(v: boolean) => (props.formData.features.stats.enabled = v)"
             />
           </div>
         </div>
-        <div class="setting-item" data-search-anchor="stats.track_english">
+        <div class="setting-item" data-search-anchor="features.stats.track_english">
           <div class="setting-info">
             <label>统计英文模式</label>
           </div>
           <div class="setting-control">
             <Switch
-              :checked="props.formData.stats.track_english"
-              @update:checked="(v: boolean) => (props.formData.stats.track_english = v)"
+              :checked="props.formData.features.stats.track_english"
+              @update:checked="(v: boolean) => (props.formData.features.stats.track_english = v)"
             />
           </div>
         </div>
-        <div class="setting-item" data-search-anchor="stats.action.clear_old">
+        <div class="setting-item" data-search-anchor="features.stats.action.clear_old">
           <div class="setting-info">
             <label>数据清理</label>
             <p class="setting-hint">删除指定范围前的历史数据</p>

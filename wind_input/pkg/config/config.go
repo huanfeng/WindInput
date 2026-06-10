@@ -276,8 +276,8 @@ type UICandidateConfig struct {
 	VerticalMaxWidthFollowTheme bool `yaml:"vertical_max_width_follow_theme" json:"vertical_max_width_follow_theme"`
 
 	// 强制覆盖枚举（空=不覆盖主题/行为层，在 follow 层之后应用）
-	PagerBarDisplay   PagerBarDisplay   `yaml:"pager_bar_display" json:"pager_bar_display"`       // 空=主题配置, always, auto, hide
-	PageNumberDisplay PageNumberDisplay `yaml:"page_number_display" json:"page_number_display"`   // 空=主题配置, show, hide
+	PagerBarDisplay   PagerBarDisplay   `yaml:"pager_bar_display" json:"pager_bar_display"`     // 空=主题配置, always, auto, hide
+	PageNumberDisplay PageNumberDisplay `yaml:"page_number_display" json:"page_number_display"` // 空=主题配置, show, hide
 }
 
 // UIFontConfig 字体与文本渲染

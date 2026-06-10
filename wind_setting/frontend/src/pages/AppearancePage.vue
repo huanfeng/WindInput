@@ -127,7 +127,7 @@ async function confirmDeleteTheme() {
 
 const currentThemeOption = computed(() => {
   return themeOptions.value.find(
-    (option) => option.name === props.formData.ui.theme,
+    (option) => option.name === props.formData.ui.theme.name,
   );
 });
 
@@ -183,16 +183,16 @@ function resolveIndexLabel(slotIdx: number): string {
 // undefined / "⚡" → default, "" → none, 其他 → custom。
 type CmdbarPrefixMode = "default" | "none" | "custom";
 const cmdbarPrefixMode = computed<CmdbarPrefixMode>(() => {
-  const v = props.formData.ui.cmdbar_candidate_prefix;
+  const v = props.formData.features.cmdbar.candidate_prefix;
   if (v == null || v === "⚡") return "default";
   if (v === "") return "none";
   return "custom";
 });
 function setCmdbarPrefixMode(mode: CmdbarPrefixMode) {
   if (mode === "default") {
-    props.formData.ui.cmdbar_candidate_prefix = "⚡";
+    props.formData.features.cmdbar.candidate_prefix = "⚡";
   } else if (mode === "none") {
-    props.formData.ui.cmdbar_candidate_prefix = "";
+    props.formData.features.cmdbar.candidate_prefix = "";
   } else {
     // custom: 已有自定义值直接保留 + 打开弹框给用户改;
     // 没有自定义值时先记住旧值, 打开弹框等用户输入, 取消或空输入回退到旧值。
@@ -206,7 +206,7 @@ const cmdbarPrefixDraft = ref("");
 // 打开弹框前的原值, 用于取消或空提交时回退
 const cmdbarPrefixFallback = ref<string | null | undefined>(undefined);
 function openCmdbarPrefixDialog() {
-  const cur = props.formData.ui.cmdbar_candidate_prefix;
+  const cur = props.formData.features.cmdbar.candidate_prefix;
   cmdbarPrefixFallback.value = cur;
   // 已经是自定义符号 (非空且非默认 ⚡) 时, 用现值作为草稿; 否则草稿留空
   cmdbarPrefixDraft.value = cur && cur !== "⚡" ? cur : "";
@@ -218,23 +218,23 @@ function confirmCmdbarPrefixDialog() {
     cancelCmdbarPrefixDialog();
     return;
   }
-  props.formData.ui.cmdbar_candidate_prefix = v;
+  props.formData.features.cmdbar.candidate_prefix = v;
   cmdbarPrefixDialogOpen.value = false;
 }
 function cancelCmdbarPrefixDialog() {
   // 把字段恢复到打开弹框前的值, 让 cmdbarPrefixMode 计算属性切回正确的下拉项
-  props.formData.ui.cmdbar_candidate_prefix = cmdbarPrefixFallback.value;
+  props.formData.features.cmdbar.candidate_prefix = cmdbarPrefixFallback.value ?? "";
   cmdbarPrefixDialogOpen.value = false;
 }
 
 function onThemeSelect(themeName: string) {
-  props.formData.ui.theme = themeName;
+  props.formData.ui.theme.name = themeName;
   emit("themeSelect", themeName);
   themeSelectOpen.value = false;
 }
 
 watch(
-  () => props.formData.ui.theme_style,
+  () => props.formData.ui.theme.style,
   (val) => emit("themeStyleChange", val),
 );
 
@@ -253,7 +253,7 @@ onMounted(async () => {
       themeServerRunning.value = status.running;
       themeServerURL.value = status.url;
       // 配置了自动开启且服务尚未运行时，自动启动
-      if (props.formData.ui.theme_editor_auto_start && !status.running) {
+      if (props.formData.ui.theme.editor_auto_start && !status.running) {
         const started = await startThemeServer();
         themeServerRunning.value = true;
         themeServerURL.value = started.url;
@@ -272,7 +272,7 @@ onUnmounted(() => {
 type ThemeEditorMode = "off" | "once" | "auto";
 
 const themeEditorMode = computed<ThemeEditorMode>(() => {
-  if (props.formData.ui.theme_editor_auto_start) return "auto";
+  if (props.formData.ui.theme.editor_auto_start) return "auto";
   if (themeServerRunning.value) return "once";
   return "off";
 });
@@ -287,16 +287,16 @@ async function setThemeEditorMode(mode: ThemeEditorMode) {
         themeServerRunning.value = false;
         themeServerURL.value = "";
       }
-      props.formData.ui.theme_editor_auto_start = false;
+      props.formData.ui.theme.editor_auto_start = false;
     } else if (mode === "once") {
-      props.formData.ui.theme_editor_auto_start = false;
+      props.formData.ui.theme.editor_auto_start = false;
       if (!themeServerRunning.value) {
         const status = await startThemeServer();
         themeServerRunning.value = true;
         themeServerURL.value = status.url;
       }
     } else if (mode === "auto") {
-      props.formData.ui.theme_editor_auto_start = true;
+      props.formData.ui.theme.editor_auto_start = true;
       if (!themeServerRunning.value) {
         const status = await startThemeServer();
         themeServerRunning.value = true;
@@ -348,7 +348,7 @@ async function copyServerURL() {
           </Button>
         </div>
       </div>
-      <div class="setting-item align-start" data-search-anchor="ui.theme">
+      <div class="setting-item align-start" data-search-anchor="ui.theme.name">
         <div class="setting-info">
           <label>主题选择</label>
           <p class="setting-hint">候选窗与工具栏的主题样式</p>
@@ -388,7 +388,7 @@ async function copyServerURL() {
                 <button
                   type="button"
                   class="theme-option"
-                  :class="{ selected: formData.ui.theme === theme.name }"
+                  :class="{ selected: formData.ui.theme.name === theme.name }"
                   @click="onThemeSelect(theme.name)"
                 >
                   <div class="theme-option-title">
@@ -463,7 +463,7 @@ async function copyServerURL() {
                 >
                   <!-- 输入行（嵌入编码模式下隐藏） -->
                   <div
-                    v-if="!formData.ui.inline_preedit"
+                    v-if="!formData.ui.candidate.inline_preedit"
                     class="preview-input-bar"
                     :style="{
                       backgroundColor:
@@ -686,7 +686,7 @@ async function copyServerURL() {
 
     <div class="settings-card">
       <div class="card-title">候选窗口</div>
-      <div class="setting-item" data-search-anchor="ui.font_size_follow_theme">
+      <div class="setting-item" data-search-anchor="ui.candidate.font_size_follow_theme">
         <div class="setting-info">
           <label>字号跟随主题</label>
           <p class="setting-hint">
@@ -695,15 +695,15 @@ async function copyServerURL() {
         </div>
         <div class="setting-control">
           <Switch
-            :checked="formData.ui.font_size_follow_theme"
-            @update:checked="formData.ui.font_size_follow_theme = $event"
+            :checked="formData.ui.candidate.font_size_follow_theme"
+            @update:checked="formData.ui.candidate.font_size_follow_theme = $event"
           />
         </div>
       </div>
       <div
         class="setting-item"
-        data-search-anchor="ui.font_size"
-        :class="{ 'setting-item-disabled': formData.ui.font_size_follow_theme }"
+        data-search-anchor="ui.candidate.font_size"
+        :class="{ 'setting-item-disabled': formData.ui.candidate.font_size_follow_theme }"
       >
         <div class="setting-info">
           <label>字体大小</label>
@@ -715,15 +715,15 @@ async function copyServerURL() {
             min="12"
             max="36"
             step="1"
-            :disabled="formData.ui.font_size_follow_theme"
-            v-model.number="formData.ui.font_size"
+            :disabled="formData.ui.candidate.font_size_follow_theme"
+            v-model.number="formData.ui.candidate.font_size"
           />
-          <span class="range-value">{{ formData.ui.font_size }}px</span>
+          <span class="range-value">{{ formData.ui.candidate.font_size }}px</span>
         </div>
       </div>
       <div
         class="setting-item"
-        data-search-anchor="ui.font_family"
+        data-search-anchor="ui.font.family"
         v-if="isWailsEnv"
       >
         <div class="setting-info">
@@ -732,9 +732,9 @@ async function copyServerURL() {
         </div>
         <div class="setting-control">
           <Select
-            :model-value="formData.ui.font_family || '__default__'"
+            :model-value="formData.ui.font.family || '__default__'"
             @update:model-value="
-              formData.ui.font_family = $event === '__default__' ? '' : $event
+              formData.ui.font.family = $event === '__default__' ? '' : $event
             "
           >
             <SelectTrigger class="w-[200px]">
@@ -758,7 +758,7 @@ async function copyServerURL() {
         :form-data="formData"
         mode="bare"
       />
-      <div class="setting-item" data-search-anchor="ui.cmdbar_candidate_prefix">
+      <div class="setting-item" data-search-anchor="features.cmdbar.candidate_prefix">
         <div class="setting-info">
           <label>命令直通车标注</label>
           <p class="setting-hint">命令候选前的提示符号</p>
@@ -779,7 +779,7 @@ async function copyServerURL() {
           </Select>
           <template v-if="cmdbarPrefixMode === 'custom'">
             <span class="cmdbar-prefix-chip">{{
-              formData.ui.cmdbar_candidate_prefix
+              formData.features.cmdbar.candidate_prefix
             }}</span>
             <Button variant="outline" size="sm" @click="openCmdbarPrefixDialog">
               编辑

@@ -76,7 +76,7 @@ export const inputSchema: PageSchema = [
   { type: 'card', label: '候选无效按键' },
   {
     type: 'select',
-    key: 'input.overflow_behavior.number_key',
+    key: 'input.overflow.number_key',
     label: '数字键无效时',
     hint: '按的数字超出当前页候选数量时的处理方式',
     options: [
@@ -87,7 +87,7 @@ export const inputSchema: PageSchema = [
   },
   {
     type: 'select',
-    key: 'input.overflow_behavior.select_key',
+    key: 'input.overflow.select_key',
     label: '次选三选键无效时',
     hint: '候选数量不足时按次选或三选键的处理方式',
     options: [
@@ -98,7 +98,7 @@ export const inputSchema: PageSchema = [
   },
   {
     type: 'select',
-    key: 'input.overflow_behavior.select_char_key',
+    key: 'input.overflow.select_char_key',
     label: '以词定字键无效时',
     hint: '候选词长度不足时按以词定字键的处理方式',
     options: [
@@ -113,19 +113,19 @@ export const inputSchema: PageSchema = [
   { type: 'card', label: '__quick_input_extra__' }, // 占位符，不实际使用
   {
     type: 'toggle',
-    key: 'input.quick_input.force_vertical',
+    key: 'features.quick_input.force_vertical',
     label: '强制竖排显示',
     hint: '快捷输入时候选窗口强制使用竖排布局，退出后恢复原布局',
-    dependsOn: (cfg) => cfg.input.quick_input.trigger_keys.length > 0,
+    dependsOn: (cfg) => cfg.features.quick_input.trigger_keys.length > 0,
   },
   {
     type: 'number-input',
-    key: 'input.quick_input.decimal_places',
+    key: 'features.quick_input.decimal_places',
     label: '小数保留位数',
     hint: '计算结果最多保留的小数位数（0 表示取整）',
     min: 0,
     max: 6,
-    dependsOn: (cfg) => cfg.input.quick_input.trigger_keys.length > 0,
+    dependsOn: (cfg) => cfg.features.quick_input.trigger_keys.length > 0,
   },
 
   // ── 临时拼音（trigger_keys 手写，分隔符 schema 驱动）────
@@ -180,7 +180,7 @@ export const inputSchema: PageSchema = [
   { type: 'card', label: '__startup_extra__' }, // 占位符，不实际使用
   {
     type: 'toggle',
-    key: 'startup.remember_last_state',
+    key: 'general.remember_last_state',
     label: '记忆前次状态',
     hint: '启用后恢复上次的中英文、全半角和标点状态',
   },

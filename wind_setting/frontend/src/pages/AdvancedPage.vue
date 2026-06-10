@@ -183,7 +183,7 @@
         :form-data="formData"
         mode="bare"
       />
-      <div v-if="formData.advanced.perf_sampling" class="setting-item">
+      <div v-if="formData.debug.perf_sampling" class="setting-item">
         <div class="setting-info">
           <label>隐私提示</label>
           <p class="setting-hint warning-text">
@@ -815,7 +815,7 @@ async function handleDumpGoroutineProfile() {
 }
 
 const showSensitiveLogWarning = computed(() => {
-  const serviceLevel = props.formData.advanced.log_level;
+  const serviceLevel = props.formData.debug.log_level;
   const tsfLevel = props.tsfLogConfig.level;
   return (
     serviceLevel === "debug" || tsfLevel === "debug" || tsfLevel === "trace"

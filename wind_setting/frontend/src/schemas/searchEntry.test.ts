@@ -18,12 +18,12 @@ const sample: SearchEntry[] = [
     anchor: "input.enter_behavior",
   },
   {
-    id: "ui.font_size",
+    id: "ui.candidate.font_size",
     tab: "appearance",
     tabLabel: "外观",
     card: "候选窗口",
     title: "字体大小",
-    anchor: "ui.font_size",
+    anchor: "ui.candidate.font_size",
     keywords: ["fontsize"],
   },
 ];
@@ -54,7 +54,7 @@ describe("filterEntries", () => {
 
   it("命中 keywords，且大小写不敏感", () => {
     expect(filterEntries(sample, "FontSize").map((e) => e.id)).toEqual([
-      "ui.font_size",
+      "ui.candidate.font_size",
     ]);
   });
 

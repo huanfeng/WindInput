@@ -5,23 +5,23 @@ const tabLabel = "方案";
 
 export const entries: SearchEntry[] = [
   {
-    id: "schema.primaryCodetable",
+    id: "schema.primary_codetable",
     tab,
     tabLabel,
     card: "主方案设置",
     title: "主码表方案",
     hint: '拼音方案的"反查/编码提示"基于此方案的码表',
-    anchor: "schema.primaryCodetable",
+    anchor: "schema.primary_codetable",
     keywords: ["码表", "主方案"],
   },
   {
-    id: "schema.primaryPinyin",
+    id: "schema.primary_pinyin",
     tab,
     tabLabel,
     card: "主方案设置",
     title: "主拼音方案",
     hint: '码表方案的"临时拼音"使用此方案',
-    anchor: "schema.primaryPinyin",
+    anchor: "schema.primary_pinyin",
     keywords: ["拼音", "主方案"],
   },
   {

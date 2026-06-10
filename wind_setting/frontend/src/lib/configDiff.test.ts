@@ -9,10 +9,10 @@ describe("diffConfigToItems", () => {
   });
 
   it("标量改动产出点路径 key", () => {
-    const base = { ui: { font_size: 18 } };
-    const cur = { ui: { font_size: 22 } };
+    const base = { ui: { candidate: { font_size: 18 } } };
+    const cur = { ui: { candidate: { font_size: 22 } } };
     expect(diffConfigToItems(base, cur)).toEqual([
-      { key: "ui.font_size", value: 22 },
+      { key: "ui.candidate.font_size", value: 22 },
     ]);
   });
 
@@ -33,40 +33,40 @@ describe("diffConfigToItems", () => {
   });
 
   it("current 比 base 多出的字段会被产出", () => {
-    const base = { ui: {} as Record<string, unknown> };
-    const cur = { ui: { theme: "msime" } };
+    const base = { ui: { theme: {} as Record<string, unknown> } };
+    const cur = { ui: { theme: { name: "msime" } } };
     expect(diffConfigToItems(base, cur)).toEqual([
-      { key: "ui.theme", value: "msime" },
+      { key: "ui.theme.name", value: "msime" },
     ]);
   });
 
   it("base 为 null 时整份 current 作为变化产出", () => {
-    const cur = { ui: { font_size: 16 } };
+    const cur = { ui: { candidate: { font_size: 16 } } };
     expect(diffConfigToItems(null, cur)).toEqual([
-      { key: "ui.font_size", value: 16 },
+      { key: "ui.candidate.font_size", value: 16 },
     ]);
   });
 
   it("不会产出 base 有而 current 没有的字段（formData 不管理的段被忽略）", () => {
-    const base = { ui: { font_size: 18 }, stats: { track_english: false } };
-    const cur = { ui: { font_size: 18 } };
+    const base = { ui: { candidate: { font_size: 18 } }, features: { stats: { track_english: false } } };
+    const cur = { ui: { candidate: { font_size: 18 } } };
     expect(diffConfigToItems(base, cur)).toEqual([]);
   });
 
-  it("stats 段改动产出 stats.* 点路径 key", () => {
-    const base = { stats: { enabled: true, retain_days: 0, track_english: true } };
-    const cur = { stats: { enabled: true, retain_days: 0, track_english: false } };
+  it("features.stats 段改动产出 features.stats.* 点路径 key", () => {
+    const base = { features: { stats: { enabled: true, retain_days: 0, track_english: true } } };
+    const cur = { features: { stats: { enabled: true, retain_days: 0, track_english: false } } };
     expect(diffConfigToItems(base, cur)).toEqual([
-      { key: "stats.track_english", value: false },
+      { key: "features.stats.track_english", value: false },
     ]);
   });
 
-  it("stats 段多字段同改产出多条 item", () => {
-    const base = { stats: { enabled: true, retain_days: 0, track_english: true } };
-    const cur = { stats: { enabled: false, retain_days: 0, track_english: false } };
+  it("features.stats 段多字段同改产出多条 item", () => {
+    const base = { features: { stats: { enabled: true, retain_days: 0, track_english: true } } };
+    const cur = { features: { stats: { enabled: false, retain_days: 0, track_english: false } } };
     expect(diffConfigToItems(base, cur)).toEqual([
-      { key: "stats.enabled", value: false },
-      { key: "stats.track_english", value: false },
+      { key: "features.stats.enabled", value: false },
+      { key: "features.stats.track_english", value: false },
     ]);
   });
 });

@@ -6,7 +6,7 @@ import type { PageSchema } from './types'
 export const advancedLogSchema: PageSchema = [
   {
     type: 'select',
-    key: 'advanced.log_level',
+    key: 'debug.log_level',
     label: '服务日志级别',
     hint: '重启输入法服务后生效',
     options: [
@@ -21,7 +21,7 @@ export const advancedLogSchema: PageSchema = [
 export const advancedPerfSchema: PageSchema = [
   {
     type: 'toggle',
-    key: 'advanced.perf_sampling',
+    key: 'debug.perf_sampling',
     label: '按键链路采样',
     hint: '开启后记录每次按键的引擎耗时等数据，用于性能分析',
   },

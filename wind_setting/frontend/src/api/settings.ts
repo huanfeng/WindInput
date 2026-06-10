@@ -1,4 +1,7 @@
 // Settings API 调用层
+// Config 接口与 Go 侧 pkg/config（v1 结构）一一对应，
+// 结构权威：docs/design/config-restructure.md §3；
+// key 一致性校验：src/generated/config-keys.json（Go 反射导出）。
 
 import type {
   EnterBehaviorValue,
@@ -27,8 +30,8 @@ export interface APIResponse<T = any> {
   error?: string;
 }
 
-// 启动/默认状态配置
-export interface StartupConfig {
+// 启动/默认状态配置（v1: 原 startup → general）
+export interface GeneralConfig {
   remember_last_state: boolean;
   default_chinese_mode: boolean;
   default_full_width: boolean;
@@ -52,7 +55,7 @@ export interface HotkeyConfig {
   global_hotkeys: string[]; // 注册为全局热键的快捷键名称列表
 }
 
-// 简入繁出（S->T）配置
+// 简入繁出（S->T）配置（v1: features.s2t）
 export interface S2TConfig {
   enabled: boolean;
   variant: string; // "s2t" / "s2tw" / "s2twp" / "s2hk"
@@ -101,48 +104,71 @@ export interface TooltipDebugConfig {
   enabled: boolean;
 }
 
-// 候选悬停提示总配置
+// 候选悬停提示总配置（v1: 吸收 tooltip_delay → delay）
 export interface TooltipConfig {
+  delay: number; // 悬停候选触发 tooltip 的延迟（毫秒）
   code: TooltipCodeConfig;
   pinyin: TooltipPinyinConfig;
   chaizi: TooltipChaiziConfig;
   debug: TooltipDebugConfig;
 }
 
-// UI配置
-export interface UIConfig {
+// 候选窗布局与行为（v1: ui.candidate）
+export interface UICandidateConfig {
   font_size: number;
   font_size_follow_theme: boolean; // true=候选字号跟随主题；false=用 font_size 自定义
-  candidates_per_page: number;
-  candidates_per_page_extended: number; // 扩展档每页候选数（临时拼音/快捷输入/短语等场景）；0=禁用，与基础档相同
-  max_candidate_chars: number;
-  font_family: string;
-  font_path: string;
+  per_page: number;
+  per_page_extended: number; // 扩展档每页候选数；0=禁用，与基础档相同
+  max_chars: number;
+  layout: CandidateLayoutValue;
   inline_preedit: boolean;
   preedit_mode: PreeditModeValue;
-  hide_candidate_window: boolean;
-  candidate_layout: CandidateLayoutValue;
-  flip_layout_when_above: boolean;
+  flip_when_above: boolean;
+  hide_window: boolean;
+  index_labels: string;
   mode_accent_border: boolean;
-  status_indicator: StatusIndicatorConfig;
-  theme: string;
-  theme_style: ThemeStyleValue;
+  always_show_pager: boolean;
+  always_show_pager_follow_theme: boolean;
+  show_page_number: boolean;
+  show_page_number_follow_theme: boolean;
+  vertical_max_width: number;
+  vertical_max_width_follow_theme: boolean;
   pager_bar_display: PagerBarDisplayValue;
   page_number_display: PageNumberDisplayValue;
-  tooltip: TooltipConfig;
-  tooltip_delay: number; // 悬停候选触发 tooltip 的延迟（毫秒）
-  // 副作用命令直通车候选 (Actions 含 ActionEffect) 的渲染前缀符号。
-  // 未设置 (undefined / 字段缺省) 时使用默认 "⚡"; 设为空串完全关闭; 可填自定义符号如 "▶"。
-  // 仅 type(...) 上屏的命令视觉上与普通候选无差, 不会加前缀。
-  cmdbar_candidate_prefix?: string | null;
-  // 打开设置界面时自动开启 Web 编辑器连接服务。
-  theme_editor_auto_start?: boolean;
 }
 
-// 工具栏配置
+// 字体与文本渲染（v1: ui.font）
+export interface UIFontConfig {
+  family: string;
+  path: string;
+  render_mode: string; // "directwrite" / "gdi" / "freetype"
+  gdi_weight: number;
+  gdi_scale: number;
+  menu_weight: number;
+  menu_size: number;
+}
+
+// 主题（v1: ui.theme）
+export interface UIThemeConfig {
+  name: string;
+  style: ThemeStyleValue;
+  editor_auto_start: boolean; // 打开设置界面时自动开启 Web 编辑器连接服务
+}
+
+// 工具栏配置（v1: ui.toolbar）
 export interface ToolbarConfig {
   visible: boolean;
-  hide_in_fullscreen?: boolean;
+  hide_in_fullscreen: boolean;
+}
+
+// UI 配置（v1: 纯容器）
+export interface UIConfig {
+  candidate: UICandidateConfig;
+  font: UIFontConfig;
+  theme: UIThemeConfig;
+  status_indicator: StatusIndicatorConfig;
+  tooltip: TooltipConfig;
+  toolbar: ToolbarConfig;
 }
 
 // 临时英文模式配置
@@ -155,9 +181,15 @@ export interface ShiftTempEnglishConfig {
   space_as_input: boolean;
 }
 
-// 临时拼音配置
+// 临时拼音配置（v1: 吸收 accent_color）
 export interface TempPinyinConfig {
   trigger_keys: string[];
+  accent_color: string; // 模式内发光边框颜色，空=内置默认色
+}
+
+// CapsLock 行为配置（v1: 原 capslock_behavior → capslock）
+export interface CapsLockConfig {
+  cancel_on_mode_switch: boolean;
 }
 
 // 自动标点配对配置
@@ -169,10 +201,26 @@ export interface AutoPairConfig {
   english_pairs: string[];
 }
 
-// 输入配置
+// 候选按键无效时的处理策略（v1: 原 overflow_behavior → overflow）
+export interface OverflowConfig {
+  number_key: OverflowBehaviorValue;
+  select_key: OverflowBehaviorValue;
+  select_char_key: OverflowBehaviorValue;
+}
+
+// 短语相关行为配置
+export interface PhraseConfig {
+  min_prefix_length: number;
+}
+
+// 自定义标点映射配置
+export interface PunctCustomConfig {
+  enabled: boolean;
+  mappings: Record<string, string[]>;
+}
+
+// 输入配置（v1: quick_input/special_modes 已迁 features）
 export interface InputConfig {
-  full_width: boolean;
-  chinese_punctuation: boolean;
   punct_follow_mode: boolean;
   filter_mode: FilterModeValue;
   smart_punct_after_digit: boolean;
@@ -186,44 +234,67 @@ export interface InputConfig {
   select_char_keys: string[]; // PairGroupValue 子集（"comma_period" | "minus_equal" | "brackets"）
   pinyin_separator: PinyinSeparatorModeValue;
   shift_temp_english: ShiftTempEnglishConfig;
+  capslock: CapsLockConfig;
   temp_pinyin: TempPinyinConfig;
   auto_pair: AutoPairConfig;
   punct_custom: PunctCustomConfig;
-  quick_input: QuickInputConfig;
-  overflow_behavior: OverflowBehaviorConfig;
+  overflow: OverflowConfig;
+  phrase: PhraseConfig;
 }
 
-// 候选按键无效时的处理策略
-export interface OverflowBehaviorConfig {
-  number_key: OverflowBehaviorValue;
-  select_key: OverflowBehaviorValue;
-  select_char_key: OverflowBehaviorValue;
-}
-
-// 快捷输入配置
+// 快捷输入配置（v1: features.quick_input，吸收 accent_color）
 export interface QuickInputConfig {
   trigger_keys: string[];
   force_vertical: boolean;
   decimal_places: number;
+  accent_color: string;
 }
 
-// 自定义标点映射配置
-export interface PunctCustomConfig {
-  enabled: boolean;
-  mappings: Record<string, string[]>;
-}
-
-// 高级配置
-export interface AdvancedConfig {
-  log_level: string;
-  perf_sampling: boolean | null; // *bool: null 表示未设置（视为 false）
-}
-
-// 统计配置
+// 统计配置（v1: features.stats）
 export interface StatsConfig {
   enabled: boolean;
   retain_days: number;
   track_english: boolean;
+}
+
+// 引导键特殊模式单实例（v1: features.special_modes，暂无 UI）
+export interface SpecialModeConfig {
+  id: string;
+  name: string;
+  trigger_keys: string[];
+  table: string;
+  auto_commit: string; // "prefix_free" | "fixed_length" | "manual"
+  fixed_length: number;
+  force_vertical: boolean;
+  accent_color: string;
+  show_all_on_entry: boolean;
+  code_charset: string;
+}
+
+// 命令直通车配置（v1: features.cmdbar）
+export interface CmdbarConfig {
+  // 副作用命令候选的渲染前缀符号；默认 "⚡"，空串=完全关闭。
+  candidate_prefix: string;
+}
+
+// 自包含可选功能（v1: features）
+export interface FeaturesConfig {
+  stats: StatsConfig;
+  s2t: S2TConfig;
+  quick_input: QuickInputConfig;
+  special_modes?: SpecialModeConfig[];
+  cmdbar: CmdbarConfig;
+}
+
+// 进程级兼容（v1: compat）
+export interface CompatConfig {
+  host_render_processes?: string[];
+}
+
+// 诊断配置（v1: 原 advanced → debug）
+export interface DebugConfig {
+  log_level: string;
+  perf_sampling: boolean;
 }
 
 export interface TSFLogConfig {
@@ -235,21 +306,20 @@ export interface TSFLogConfig {
 export interface SchemaConfig {
   active: string;
   available: string[];
-  primaryCodetable?: string; // 主码表方案 ID
-  primaryPinyin?: string; // 主拼音方案 ID
+  primary_codetable: string; // 主码表方案 ID，空=自动
+  primary_pinyin: string; // 主拼音方案 ID，空=自动
 }
 
-// 完整配置
+// 完整配置（v1 顶层节：general/schema/hotkeys/input/ui/features/compat/debug）
 export interface Config {
-  startup: StartupConfig;
+  general: GeneralConfig;
   schema: SchemaConfig;
   hotkeys: HotkeyConfig;
-  ui: UIConfig;
-  toolbar: ToolbarConfig;
   input: InputConfig;
-  advanced: AdvancedConfig;
-  s2t?: S2TConfig;
-  stats: StatsConfig;
+  ui: UIConfig;
+  features: FeaturesConfig;
+  compat: CompatConfig;
+  debug: DebugConfig;
 }
 
 // 状态类型
@@ -360,10 +430,11 @@ export async function reloadConfig(): Promise<
   return request("POST", "/api/config/reload");
 }
 
-// 默认配置值（用于前端初始化）
+// 默认配置值（用于前端初始化兜底；值与 Go SystemDefaultConfig 对齐，
+// 演进方向是改为 RPC ConfigGetDefaults 动态下发，见设计 §10.2）
 export function getDefaultConfig(): Config {
   return {
-    startup: {
+    general: {
       remember_last_state: false,
       default_chinese_mode: true,
       default_full_width: false,
@@ -372,6 +443,8 @@ export function getDefaultConfig(): Config {
     schema: {
       active: "wubi86",
       available: ["wubi86", "pinyin"],
+      primary_codetable: "",
+      primary_pinyin: "",
     },
     hotkeys: {
       toggle_mode_keys: ["lshift", "rshift"],
@@ -388,58 +461,7 @@ export function getDefaultConfig(): Config {
       take_screenshot: "ctrl+shift+f11",
       global_hotkeys: [],
     },
-    ui: {
-      font_size: 18,
-      font_size_follow_theme: true,
-      candidates_per_page: 7,
-      candidates_per_page_extended: 0,
-      max_candidate_chars: 16,
-      font_family: "",
-      font_path: "",
-      inline_preedit: true,
-      preedit_mode: "top",
-      hide_candidate_window: false,
-      candidate_layout: "horizontal",
-      flip_layout_when_above: true,
-      mode_accent_border: false,
-      status_indicator: {
-        enabled: true,
-        duration: 800,
-        display_mode: "temp",
-        schema_name_style: "full",
-        show_mode: true,
-        show_punct: true,
-        show_full_width: false,
-        position_mode: "follow_caret",
-        offset_x: 0,
-        offset_y: 0,
-        custom_x: 0,
-        custom_y: 0,
-        font_size: 18,
-        opacity: 0.9,
-        background_color: "",
-        text_color: "",
-        border_radius: 6,
-      },
-      theme: "default",
-      theme_style: "system",
-      pager_bar_display: "",
-      page_number_display: "",
-      tooltip: {
-        code: { enabled: true },
-        pinyin: { enabled: false, heteronyms: false, max_readings: 0 },
-        chaizi: { enabled: false },
-        debug: { enabled: false },
-      },
-      tooltip_delay: 200,
-    },
-    toolbar: {
-      visible: true,
-      hide_in_fullscreen: true,
-    },
     input: {
-      full_width: false,
-      chinese_punctuation: true,
       punct_follow_mode: false,
       filter_mode: "smart",
       smart_punct_after_digit: true,
@@ -460,8 +482,12 @@ export function getDefaultConfig(): Config {
         allow_symbols: false,
         space_as_input: false,
       },
+      capslock: {
+        cancel_on_mode_switch: false,
+      },
       temp_pinyin: {
         trigger_keys: ["backtick"],
+        accent_color: "",
       },
       auto_pair: {
         chinese: true,
@@ -474,29 +500,109 @@ export function getDefaultConfig(): Config {
         enabled: false,
         mappings: {},
       },
-      quick_input: {
-        trigger_keys: ["semicolon"],
-        force_vertical: true,
-        decimal_places: 6,
-      },
-      overflow_behavior: {
+      overflow: {
         number_key: "ignore",
         select_key: "ignore",
         select_char_key: "ignore",
       },
+      phrase: {
+        min_prefix_length: 2,
+      },
     },
-    advanced: {
+    ui: {
+      candidate: {
+        font_size: 18,
+        font_size_follow_theme: true,
+        per_page: 7,
+        per_page_extended: 0,
+        max_chars: 16,
+        layout: "horizontal",
+        inline_preedit: true,
+        preedit_mode: "top",
+        flip_when_above: true,
+        hide_window: false,
+        index_labels: "",
+        mode_accent_border: false,
+        always_show_pager: false,
+        always_show_pager_follow_theme: true,
+        show_page_number: true,
+        show_page_number_follow_theme: true,
+        vertical_max_width: 600,
+        vertical_max_width_follow_theme: true,
+        pager_bar_display: "",
+        page_number_display: "",
+      },
+      font: {
+        family: "",
+        path: "",
+        render_mode: "directwrite",
+        gdi_weight: 500,
+        gdi_scale: 1.0,
+        menu_weight: 500,
+        menu_size: 12.0,
+      },
+      theme: {
+        name: "default",
+        style: "system",
+        editor_auto_start: false,
+      },
+      status_indicator: {
+        enabled: true,
+        duration: 800,
+        display_mode: "temp",
+        schema_name_style: "full",
+        show_mode: true,
+        show_punct: true,
+        show_full_width: false,
+        position_mode: "follow_caret",
+        offset_x: 0,
+        offset_y: 0,
+        custom_x: 0,
+        custom_y: 0,
+        font_size: 18,
+        opacity: 0.9,
+        background_color: "",
+        text_color: "",
+        border_radius: 6,
+      },
+      tooltip: {
+        delay: 200,
+        code: { enabled: true },
+        pinyin: { enabled: false, heteronyms: false, max_readings: 0 },
+        chaizi: { enabled: false },
+        debug: { enabled: false },
+      },
+      toolbar: {
+        visible: true,
+        hide_in_fullscreen: true,
+      },
+    },
+    features: {
+      stats: {
+        enabled: true,
+        retain_days: 0,
+        track_english: true,
+      },
+      s2t: {
+        enabled: false,
+        variant: "s2t",
+      },
+      quick_input: {
+        trigger_keys: ["semicolon"],
+        force_vertical: true,
+        decimal_places: 6,
+        accent_color: "",
+      },
+      cmdbar: {
+        candidate_prefix: "⚡",
+      },
+    },
+    compat: {
+      host_render_processes: ["SearchHost.exe"],
+    },
+    debug: {
       log_level: "info",
       perf_sampling: false,
-    },
-    s2t: {
-      enabled: false,
-      variant: "s2t",
-    },
-    stats: {
-      enabled: true,
-      retain_days: 0,
-      track_english: true,
     },
   };
 }
