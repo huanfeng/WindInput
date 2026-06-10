@@ -60,6 +60,25 @@ func unregisterReader(path string, r closeable) {
 	}
 }
 
+// externalCloser 把外部包（如 datformat）reader 的强关函数适配进注册表，
+// 使 CloseReadersForPath 能覆盖非本包的 mmap reader（wdat 等）。
+type externalCloser struct {
+	f func() error
+}
+
+func (e *externalCloser) closeFromRegistry() error {
+	return e.f()
+}
+
+// RegisterExternalCloser 注册外部 reader 的强关函数，返回注销函数。
+// reader 正常 Close 时应调用返回的 unregister；被 CloseReadersForPath
+// 强关后再调用 unregister 是安全的 no-op。
+func RegisterExternalCloser(path string, close func() error) (unregister func()) {
+	ec := &externalCloser{f: close}
+	registerReader(path, ec)
+	return func() { unregisterReader(path, ec) }
+}
+
 // CloseReadersForPath 强制关闭本进程内所有指向该路径的 mmap reader，
 // 返回被关闭的 reader 数量。dictcache 在原子替换 wdb 前调用本函数，
 // 释放 Windows 上对目标文件的 mmap 锁。

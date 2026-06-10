@@ -20,7 +20,7 @@
 | `unigram_reader.go` | `UnigramReader`：unigram.wdb 的 mmap 读取器（`Lookup` 返回对数概率） |
 | `unigram_writer.go` | `UnigramWriter`：unigram.wdb 写入器（`Add`、`Write`） |
 | `shared.go` | 进程级共享 reader 池：`OpenDict`/`OpenUnigram` 按 FileKey（path+size+mtime）复用同一 mmap，引用计数管理生命周期 |
-| `registry.go` | 强制关闭注册表：`CloseReadersForPath` 供 dictcache 在原子替换 wdb 前释放本进程 mmap 锁 |
+| `registry.go` | 强制关闭注册表：`CloseReadersForPath` 供 dictcache 在原子替换 wdb/wdat 前释放本进程 mmap 锁；`RegisterExternalCloser` 让外部包 reader（datformat 的 WdatReader）也接入强关 |
 | `mmap_windows.go` | Windows mmap 实现（`CreateFileMapping`/`MapViewOfFile`） |
 | `binformat_test.go` | 读写往返测试 |
 | `meta_test.go` | 元数据序列化测试 |

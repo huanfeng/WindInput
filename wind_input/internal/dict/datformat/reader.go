@@ -47,6 +47,10 @@ type WdatReader struct {
 	shareKey hotcache.FileKey
 	refs     int
 	closed   bool
+
+	// unregister 从 binformat 强关注册表注销自身；词库重建在原子替换 wdat
+	// 前经 CloseReadersForPath 强制释放本进程 mmap 锁（与 wdb 同一机制）。
+	unregister func()
 }
 
 // openWdat 打开 wdat 文件并映射到内存（独立 mmap，不经共享池）。
@@ -153,12 +157,15 @@ func openWdat(path string) (*WdatReader, error) {
 		r.maxCode = 255
 	}
 
+	// 接入 binformat 强关注册表：词库重建原子替换 wdat 前，
+	// CloseReadersForPath 经此强制释放本进程的 mmap 锁（与 wdb 同一机制）。
+	r.unregister = binformat.RegisterExternalCloser(path, r.forceClose)
 	return r, nil
 }
 
 // Close 释放一个持有者的引用（幂等于"每持有者一次"语义）。
 // 共享池中仍有其他持有者时仅递减计数；最后一个持有者关闭时真正释放 mmap
-// 并从共享池摘除。
+// 并从共享池与强关注册表摘除。
 func (r *WdatReader) Close() error {
 	sharedMu.Lock()
 	if r.refs > 1 {
@@ -177,10 +184,50 @@ func (r *WdatReader) Close() error {
 	}
 	sharedMu.Unlock()
 
-	if r.mmap != nil {
-		return r.mmap.Close()
+	if r.unregister != nil {
+		r.unregister()
+	}
+	return r.releaseMmap()
+}
+
+// forceClose 由 binformat 强关注册表（CloseReadersForPath）调用：
+// 绕过引用计数直接释放 mmap，供词库重建在原子替换 wdat 前解除本进程文件锁。
+// 残余持有者之后的 Close 只会递减计数并命中 closed 标记，安全无副作用。
+func (r *WdatReader) forceClose() error {
+	sharedMu.Lock()
+	if r.closed {
+		sharedMu.Unlock()
+		return nil
+	}
+	r.closed = true
+	if r.shareKey != "" && sharedWdats[r.shareKey] == r {
+		delete(sharedWdats, r.shareKey)
+	}
+	sharedMu.Unlock()
+	// 注册表强关时已把条目摘出 map，无需 unregister。
+	return r.releaseMmap()
+}
+
+// releaseMmap 真正释放映射。先置 nil 再 unmap：查询入口经 isClosed() 短路，
+// 避免访问已释放的映射内存。
+func (r *WdatReader) releaseMmap() error {
+	mf := r.mmap
+	r.mmap = nil
+	r.data = nil
+	r.datBase = nil
+	r.datCheck = nil
+	r.abbrevBase = nil
+	r.abbrevCheck = nil
+	if mf != nil {
+		return mf.Close()
 	}
 	return nil
+}
+
+// isClosed 报告 reader 是否已被释放。查询入口据此短路，
+// 与 binformat.DictReader 的防护策略一致。
+func (r *WdatReader) isClosed() bool {
+	return r.data == nil
 }
 
 // KeyCount 返回主 DAT 中的 key 数量
@@ -244,6 +291,9 @@ func (r *WdatReader) readEntries(entryBase uint32, leaf LeafRecord, code string)
 
 // Lookup 精确查找编码，返回候选词列表
 func (r *WdatReader) Lookup(code string) []candidate.Candidate {
+	if r.isClosed() {
+		return nil
+	}
 	dat := r.mainDAT()
 	leafIdx, found := dat.ExactMatch(code)
 	if !found {
@@ -269,6 +319,9 @@ func (r *WdatReader) LookupPrefix(prefix string, limit int) []candidate.Candidat
 
 // scanPrefix 扫描整个 prefix 子树并按 limit 选取 top-K（或完整排序）。
 func (r *WdatReader) scanPrefix(prefix string, limit int) []candidate.Candidate {
+	if r.isClosed() {
+		return nil
+	}
 	dat := r.mainDAT()
 	leafIndices := dat.PrefixCollect(prefix, 0)
 	if len(leafIndices) == 0 {
@@ -318,7 +371,7 @@ func (r *WdatReader) hotPrefixSlice(b byte, limit int) []candidate.Candidate {
 // 且把 "sf" 召回 "sfg"(三字) 等更长简拼词，既是噪声也不符合主流"N 声母 = N 字"语义。
 // 与 binformat DictReader.LookupAbbrev 的精确匹配行为对齐。
 func (r *WdatReader) LookupAbbrev(code string, limit int) []candidate.Candidate {
-	if !r.hasAbbrev {
+	if !r.hasAbbrev || r.isClosed() {
 		return nil
 	}
 	dat := r.abbrevDAT()
@@ -342,6 +395,9 @@ func (r *WdatReader) LookupAbbrev(code string, limit int) []candidate.Candidate 
 
 // HasPrefix 检查主 DAT 中是否存在指定前缀
 func (r *WdatReader) HasPrefix(prefix string) bool {
+	if r.isClosed() {
+		return false
+	}
 	dat := r.mainDAT()
 	_, found := dat.walkPrefix(prefix)
 	return found
@@ -355,6 +411,9 @@ type WdatCursor struct {
 
 // PrefixCursor 创建前缀遍历游标
 func (r *WdatReader) PrefixCursor(prefix string) *WdatCursor {
+	if r.isClosed() {
+		return &WdatCursor{reader: r}
+	}
 	dat := r.mainDAT()
 	inner := dat.PrefixCursor(prefix)
 	return &WdatCursor{reader: r, inner: inner}
@@ -362,6 +421,9 @@ func (r *WdatReader) PrefixCursor(prefix string) *WdatCursor {
 
 // NextEntries 取下一批候选词
 func (c *WdatCursor) NextEntries(maxLeaves int) []candidate.Candidate {
+	if c.inner == nil || c.reader.isClosed() {
+		return nil
+	}
 	leafIndices := c.inner.Next(maxLeaves)
 	if len(leafIndices) == 0 {
 		return nil
