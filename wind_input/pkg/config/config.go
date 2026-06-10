@@ -841,14 +841,23 @@ func SaveTo(cfg *Config, path string) error {
 	base := SystemDefaultConfig()
 	diff, err := ComputeYAMLDiff(base, cfg)
 	if err != nil {
-		// diff 失败时回退到全量保存
+		// diff 失败时回退到全量保存（同样注入 version 元数据）
 		fmt.Fprintf(os.Stderr, "[config] warning: diff failed, falling back to full save: %v\n", err)
-		data, err := marshalForPath(path, cfg)
-		if err != nil {
-			return fmt.Errorf("failed to marshal config: %w", err)
+		full, mapErr := toYAMLMap(cfg)
+		if mapErr != nil {
+			return fmt.Errorf("failed to marshal config: %w", mapErr)
+		}
+		injectVersion(full)
+		data, mErr := marshalForPath(path, full)
+		if mErr != nil {
+			return fmt.Errorf("failed to marshal config: %w", mErr)
 		}
 		return os.WriteFile(path, data, 0644)
 	}
+
+	// version 是元数据不参与 diff，在 diff 之后强制注入；
+	// 空 diff 也写出 version 一行（迁移完成标记，见设计 §4.3）。
+	injectVersion(diff)
 
 	data, err := marshalForPath(path, diff)
 	if err != nil {

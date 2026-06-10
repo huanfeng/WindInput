@@ -155,7 +155,8 @@ func TestSaveTo_TOMLDiffOnly(t *testing.T) {
 	}
 }
 
-// 与系统默认完全一致时，diff 为空，应写出空文件且可正常回读。
+// 与系统默认完全一致时，diff 只含 version 元数据（见 version_test.go 的
+// TestSaveTo_EmptyDiffWritesVersion），且可正常回读。
 func TestSaveTo_TOMLEmptyDiff(t *testing.T) {
 	setTestConfigDir(t)
 	dir := t.TempDir()
@@ -168,8 +169,8 @@ func TestSaveTo_TOMLEmptyDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bytes.TrimSpace(data)) != 0 {
-		t.Errorf("无差异时应写出空文件, 实际:\n%s", data)
+	if !bytes.Contains(data, []byte("version")) {
+		t.Errorf("无差异时应写出 version 元数据, 实际:\n%s", data)
 	}
 	if _, err := LoadFrom(path); err != nil {
 		t.Fatalf("空 diff 文件回读失败: %v", err)
