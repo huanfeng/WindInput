@@ -15,13 +15,12 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID pvReserved)
                 WCHAR hostExe[MAX_PATH] = {};
                 DWORD len = GetModuleFileNameW(nullptr, hostExe, ARRAYSIZE(hostExe));
                 WIND_LOG_INFO_FMT(
-                    L"DllMain PROCESS_ATTACH pid=%lu tid=%lu hInstance=0x%p",
+                    L"DllMain PROCESS_ATTACH pid=%lu tid=%lu hInstance=0x%p hostExe=%ls",
                     GetCurrentProcessId(),
                     GetCurrentThreadId(),
-                    hInstance
+                    hInstance,
+                    len > 0 ? hostExe : L"(unknown)"
                 );
-                if (len > 0)
-                    WIND_LOG_DEBUG_FMT(L"DllMain PROCESS_ATTACH hostExe=%ls", hostExe);
             }
             break;
 
