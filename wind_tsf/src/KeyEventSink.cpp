@@ -1063,15 +1063,13 @@ STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lP
         }
     }
 
-    // Handle pending toggle key release
-    if (_pendingKeyUpKey != 0)
+    // Handle pending toggle key release.
+    // Dispatch here so apps like mintty (which call OnTestKeyUp but NOT OnKeyUp) still toggle.
+    // _DispatchPendingToggleKeyUp clears _pendingKeyUpKey, making the OnKeyUp call a no-op.
+    if (_DispatchPendingToggleKeyUp(wParam))
     {
-        // Check if this matches the pending key
-        if (_IsMatchingKeyUp(wParam, _pendingKeyUpKey))
-        {
-            *pfEaten = TRUE;
-            return S_OK;
-        }
+        *pfEaten = TRUE;
+        return S_OK;
     }
 
     // Also handle Caps Lock for indicator
@@ -1115,76 +1113,13 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
         return S_OK;
     }
 
-    // Handle toggle key release for mode toggle
-    if (_pendingKeyUpKey != 0)
+    // Handle toggle key release for mode toggle.
+    // _pendingKeyUpKey may already be 0 if OnTestKeyUp already dispatched it
+    // (apps like mintty call OnTestKeyUp but skip OnKeyUp — dispatch happens there).
+    if (_DispatchPendingToggleKeyUp(wParam))
     {
-        if (_IsMatchingKeyUp(wParam, _pendingKeyUpKey))
-        {
-            uint32_t pendingKey = _pendingKeyUpKey;
-            DWORD pressDuration = GetTickCount() - _pendingKeyDownTime;
-            _pendingKeyUpKey = 0;
-            _pendingKeyUpModifiers = 0;
-            _pendingKeyDownTime = 0;
-
-            // Long press should NOT trigger mode toggle - only short taps count
-            if (pressDuration > TOGGLE_TAP_THRESHOLD_MS)
-            {
-                WIND_LOG_DEBUG_FMT(L"OnKeyUp: Toggle key held too long (%lu ms > %lu ms), ignoring\n",
-                    pressDuration, TOGGLE_TAP_THRESHOLD_MS);
-                *pfEaten = TRUE;
-                return S_OK;
-            }
-
-            // For Shift/Ctrl toggle: Send KeyUp event to Go service
-            // Go side will check config (e.g., only LShift vs both L/R Shift)
-            // and return StatusUpdate response if the key is configured as toggle key
-            if (pendingKey != VK_CAPITAL)
-            {
-                WIND_LOG_DEBUG_FMT(L"Sending toggle key KeyUp to Go: vk=0x%02X\n", pendingKey);
-
-                // Build modifiers for the specific key being released
-                // This helps Go identify exactly which key was released
-                uint32_t mods = 0;
-                if (pendingKey == VK_LSHIFT)
-                {
-                    mods = KEYMOD_SHIFT | KEYMOD_LSHIFT;
-                }
-                else if (pendingKey == VK_RSHIFT)
-                {
-                    mods = KEYMOD_SHIFT | KEYMOD_RSHIFT;
-                }
-                else if (pendingKey == VK_LCONTROL)
-                {
-                    mods = KEYMOD_CTRL | KEYMOD_LCTRL;
-                }
-                else if (pendingKey == VK_RCONTROL)
-                {
-                    mods = KEYMOD_CTRL | KEYMOD_RCTRL;
-                }
-
-                // Update caret position before sending toggle key
-                // This ensures status indicators appear at the correct position
-                _pTextService->SendCaretPositionUpdate();
-
-                // Send KeyUp event to Go service (SYNC mode, wait for response)
-                // Go will check config and return StatusUpdate if key is configured as toggle
-                // All state changes go through Go service - no local fallback
-                if (_SendKeyToService(pendingKey, mods, KEY_EVENT_UP))
-                {
-                    // Handle response - may include mode change
-                    _HandleServiceResponse();
-                }
-                else
-                {
-                    // IPC failed - don't toggle locally to keep state consistent with Go
-                    WIND_LOG_ERROR(L"IPC failed for toggle key, not toggling locally");
-                }
-
-            }
-
-            *pfEaten = TRUE;
-            return S_OK;
-        }
+        *pfEaten = TRUE;
+        return S_OK;
     }
 
     // Handle Caps Lock key release
@@ -1388,10 +1323,55 @@ void CKeyEventSink::Uninitialize()
     }
 }
 
-// Helper: Check if wParam matches the pending KeyUp key
-// IMPORTANT: We now store specific keys (VK_LSHIFT vs VK_RSHIFT) at KeyDown time,
-// so we need to match the specific key that was pressed, not any Shift/Ctrl.
-// When KeyUp comes with generic VK_SHIFT, we use GetAsyncKeyState to determine which one.
+// Dispatch the pending toggle key (Shift/Ctrl) to Go service.
+// Clears _pendingKeyUpKey so a subsequent OnKeyUp call is a no-op (prevents double dispatch).
+// This is called from BOTH OnTestKeyUp and OnKeyUp because some apps (e.g. mintty) call
+// OnTestKeyUp but never call OnKeyUp; others skip OnTestKeyUp and go straight to OnKeyUp.
+BOOL CKeyEventSink::_DispatchPendingToggleKeyUp(WPARAM wParam)
+{
+    if (_pendingKeyUpKey == 0)
+        return FALSE;
+    if (!_IsMatchingKeyUp(wParam, _pendingKeyUpKey))
+        return FALSE;
+
+    uint32_t pendingKey = _pendingKeyUpKey;
+    DWORD pressDuration = GetTickCount() - _pendingKeyDownTime;
+    _pendingKeyUpKey = 0;
+    _pendingKeyUpModifiers = 0;
+    _pendingKeyDownTime = 0;
+
+    if (pressDuration > TOGGLE_TAP_THRESHOLD_MS)
+    {
+        WIND_LOG_DEBUG_FMT(L"Toggle key held too long (%lu ms > %lu ms), ignoring\n",
+            pressDuration, TOGGLE_TAP_THRESHOLD_MS);
+        return TRUE;
+    }
+
+    if (pendingKey != VK_CAPITAL)
+    {
+        WIND_LOG_DEBUG_FMT(L"Sending toggle key KeyUp to Go: vk=0x%02X\n", pendingKey);
+
+        uint32_t mods = 0;
+        if (pendingKey == VK_LSHIFT)
+            mods = KEYMOD_SHIFT | KEYMOD_LSHIFT;
+        else if (pendingKey == VK_RSHIFT)
+            mods = KEYMOD_SHIFT | KEYMOD_RSHIFT;
+        else if (pendingKey == VK_LCONTROL)
+            mods = KEYMOD_CTRL | KEYMOD_LCTRL;
+        else if (pendingKey == VK_RCONTROL)
+            mods = KEYMOD_CTRL | KEYMOD_RCTRL;
+
+        _pTextService->SendCaretPositionUpdate();
+
+        if (_SendKeyToService(pendingKey, mods, KEY_EVENT_UP))
+            _HandleServiceResponse();
+        else
+            WIND_LOG_ERROR(L"IPC failed for toggle key, not toggling locally");
+    }
+
+    return TRUE;
+}
+
 BOOL CKeyEventSink::_IsMatchingKeyUp(WPARAM wParam, uint32_t pendingKey)
 {
     if (pendingKey == 0)

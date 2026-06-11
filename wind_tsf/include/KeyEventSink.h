@@ -188,6 +188,10 @@ private:
     // Helper methods
     // ========================================================================
     BOOL _IsMatchingKeyUp(WPARAM wParam, uint32_t pendingKey);
+    // Dispatch the pending toggle key (Shift/Ctrl) to Go service and clear _pendingKeyUpKey.
+    // Called from both OnTestKeyUp and OnKeyUp; clearing in the first caller makes the second a no-op.
+    // Returns TRUE if a toggle was matched (caller should set pfEaten=TRUE).
+    BOOL _DispatchPendingToggleKeyUp(WPARAM wParam);
     BOOL _SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType);
     BOOL _HandleServiceResponse(); // Returns TRUE if key was handled, FALSE to pass through
 
