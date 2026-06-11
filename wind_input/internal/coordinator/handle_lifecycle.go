@@ -525,28 +525,32 @@ func (c *Coordinator) replayBufferLen() int {
 // Unlike HandleFocusLost, this does NOT hide the toolbar since the user is still
 // in the same input field.
 func (c *Coordinator) HandleCompositionTerminated() {
-	// HostRender 模式下（开始菜单等受限环境），SearchHost 的搜索框不支持 TSF
-	// composition，DLL 每次设置 composition 文本后搜索框会立即终止它。但在
-	// HostRender 模式下候选框通过 Band 窗口独立渲染，不依赖 TSF composition，
-	// 因此忽略 composition 终止事件，保持输入状态和候选窗口不变。
-	if c.uiManager != nil && c.uiManager.IsHostRendering() {
-		c.logger.Debug("Composition terminated in host render mode, ignoring")
-		return
-	}
+	// HostRender 已成为通用能力，受限宿主（SearchHost/开始菜单：搜索框不支持 TSF
+	// composition，DLL 每次设置 composition 后宿主会立即终止它）与普通应用（记事本
+	// 等：用户点击移动光标 = 真正的终止，应隐藏候选）都可能走 HostRender。不能再
+	// 对 HostRender 一刀切忽略，否则普通应用点击移光标后候选框不消失。
+	//
+	// 区分依据是**距上次按键的时间**：两类"伪终止"（顶码竞态 + 受限宿主的即时终止）
+	// 都紧跟在按键之后到达；用户主动点击移光标则不会紧跟按键。HostRender 受限宿主的
+	// 异步终止可能比本地竞态稍晚到，故 HostRender 模式放宽时间窗。
+	hostRendering := c.uiManager != nil && c.uiManager.IsHostRendering()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 安全网：如果 composition 终止事件在最近一次按键后很短时间内到达（<100ms），
-	// 且输入缓冲区非空，说明这很可能是应用异步处理 composition 变更导致的竞态
-	// （如顶码上屏后 InsertTextAndStartComposition 创建的新 composition 被应用终止），
-	// 而非用户主动点击其他位置。此时保留输入状态，下一个按键的 UpdateComposition
-	// 会自动重建 composition。
+	// 安全网：composition 终止在最近一次按键后很短时间内到达（且输入缓冲非空）→
+	// 视为应用异步处理 composition 变更的竞态 / 受限宿主即时终止，保留输入状态与候选，
+	// 下一个按键的 UpdateComposition 会自动重建 composition。
+	raceWindow := 100 * time.Millisecond
+	if hostRendering {
+		raceWindow = 500 * time.Millisecond
+	}
 	if len(c.inputBuffer) > 0 && !c.lastKeyTime.IsZero() &&
-		time.Since(c.lastKeyTime) < 100*time.Millisecond {
+		time.Since(c.lastKeyTime) < raceWindow {
 		c.logger.Debug("Composition terminated shortly after key event, preserving input state",
 			"sinceLastKey", time.Since(c.lastKeyTime).String(),
-			"bufferLen", len(c.inputBuffer))
+			"bufferLen", len(c.inputBuffer),
+			"hostRendering", hostRendering)
 		return
 	}
 

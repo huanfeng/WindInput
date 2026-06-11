@@ -208,6 +208,20 @@ func (d *DeferredHandler) HandleCandidateHover(index int) {
 	}
 }
 
+// HandleCandidateHoverAt 转发带屏幕锚点的候选悬停 (Windows host render, Coordinator 实现)。
+func (d *DeferredHandler) HandleCandidateHoverAt(index, tooltipX, tooltipBelowY, tooltipAboveY int) {
+	if h, ok := d.getHandler().(hostCandidateHoverHandler); ok {
+		h.HandleCandidateHoverAt(index, tooltipX, tooltipBelowY, tooltipAboveY)
+	}
+}
+
+// HandleCandidateScroll 转发候选框鼠标滚轮 (Windows host render, Coordinator 实现)。
+func (d *DeferredHandler) HandleCandidateScroll(delta int) {
+	if h, ok := d.getHandler().(candidateScrollHandler); ok {
+		h.HandleCandidateScroll(delta)
+	}
+}
+
 // UnifiedMenuItems 转发: 取底层 handler 构建的统一菜单树 (Coordinator 实现)。
 func (d *DeferredHandler) UnifiedMenuItems() []MenuItem {
 	if h, ok := d.getHandler().(unifiedMenuHandler); ok {

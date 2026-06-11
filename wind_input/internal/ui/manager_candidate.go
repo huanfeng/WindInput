@@ -5,9 +5,61 @@ package ui
 import (
 	"image/color"
 
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/uicmd"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
+
+// buildHostHitRects converts a render result's panel-local hit geometry into the
+// neutral wire form embedded in host-render shared memory. Page buttons are encoded
+// as Index -1 (page up) / -2 (page down), matching the darwin CmdCandidateRects
+// convention the DLL hit-tests against. Rect coordinates share the bitmap origin
+// (shadow margin included), so they map 1:1 onto the host window's client space.
+func buildHostHitRects(rr *RenderResult) []ipc.CandidateHitRect {
+	if rr == nil {
+		return nil
+	}
+	rects := make([]ipc.CandidateHitRect, 0, len(rr.Rects)+2)
+	for _, r := range rr.Rects {
+		rects = append(rects, ipc.CandidateHitRect{
+			Index: int32(r.Index),
+			X:     int32(r.X),
+			Y:     int32(r.Y),
+			W:     int32(r.W),
+			H:     int32(r.H),
+		})
+	}
+	if rr.PageUpRect != nil {
+		rects = append(rects, ipc.CandidateHitRect{
+			Index: -1, X: int32(rr.PageUpRect.X), Y: int32(rr.PageUpRect.Y),
+			W: int32(rr.PageUpRect.W), H: int32(rr.PageUpRect.H),
+		})
+	}
+	if rr.PageDownRect != nil {
+		rects = append(rects, ipc.CandidateHitRect{
+			Index: -2, X: int32(rr.PageDownRect.X), Y: int32(rr.PageDownRect.Y),
+			W: int32(rr.PageDownRect.W), H: int32(rr.PageDownRect.H),
+		})
+	}
+	return rects
+}
+
+// hostRenderedHover encodes which element this frame actually highlights, for the SHM
+// header's RenderedHoverIndex. The DLL syncs its hover-dedup baseline to it so re-hovering
+// the same candidate after a content change re-highlights. Encoding matches the DLL's hover
+// convention: >=0 candidate, -1 none, -2 page-up, -3 page-down (NOT the rect -1/-2 convention).
+func hostRenderedHover(hoverIndex int, hoverPageBtn string) int {
+	switch hoverPageBtn {
+	case "up":
+		return -2
+	case "down":
+		return -3
+	}
+	if hoverIndex >= 0 {
+		return hoverIndex
+	}
+	return -1
+}
 
 // ShowCandidates shows candidates at the given caret position (async, non-blocking)
 // The position will be automatically adjusted to stay within screen bounds.
@@ -113,6 +165,11 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	// (not during hover refreshes which have the same input and page)
 	if input != m.lastRenderedInput || page != m.lastRenderedPage {
 		m.window.ResetMouseTracking()
+		// host render 模式下同步清除 host 悬停态：内容变化后新帧不应带上一次的高亮
+		// （镜像本地 ResetMouseTracking 清 hoverIndex）。DLL 侧也会在几何变化时吸收
+		// 内容更新引发的合成鼠标移动，二者共同消除"打字时光标恰在候选上"的高亮/tooltip 抖动。
+		m.hostHoverIndex = -1
+		m.hostHoverPageBtn = ""
 		m.lastRenderedInput = input
 		m.lastRenderedPage = page
 	}
@@ -122,6 +179,14 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	// Get current hover index and page button hover for rendering
 	hoverIndex := m.window.GetHoverIndex()
 	hoverPageBtn := m.window.GetHoverPageBtn()
+	// host render 模式下鼠标在 DLL 处理，本地 window 的 hoverIndex 恒为 -1；改用
+	// coordinator 经 SetHostHoverIndex 同步过来的 host 悬停索引来渲染高亮。
+	// 注意：此处 m.mu 已由本函数上方持有（紧接着的 Unlock 释放），直接读字段，
+	// 切勿再次 m.mu.Lock()（非重入互斥锁会自我死锁，卡死整个 UI 线程）。
+	if m.hostRenderFunc != nil {
+		hoverIndex = m.hostHoverIndex
+		hoverPageBtn = m.hostHoverPageBtn
+	}
 	m.mu.Unlock()
 
 	// Set mode label and accent color on renderer before rendering
@@ -260,9 +325,16 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 	m.mu.Unlock()
 
 	if hostRender != nil {
-		// Send bitmap to DLL via shared memory for host window rendering
-		m.logger.Debug("Host rendering: sending bitmap to shared memory...")
-		if err := hostRender(img, windowX, windowY); err != nil {
+		// Send bitmap to DLL via shared memory for host window rendering, embedding
+		// the panel-local hit rects so the host window can route mouse clicks/hover
+		// back to Go. Rects share the bitmap's coordinate origin (shadow margin
+		// included), matching the local-window hit-test basis 1:1.
+		hostRects := buildHostHitRects(renderResult)
+		// Tell the DLL which element this frame highlights so it can keep its hover-dedup
+		// baseline in sync (hoverIndex/hoverPageBtn are the values used for this render).
+		renderedHover := hostRenderedHover(hoverIndex, hoverPageBtn)
+		m.logger.Debug("Host rendering: sending bitmap to shared memory...", "rects", len(hostRects), "renderedHover", renderedHover)
+		if err := hostRender(img, windowX, windowY, hostRects, renderedHover); err != nil {
 			// Host render failed (e.g., shared memory closed after process restart).
 			// Clear the stale function so subsequent calls don't keep failing,
 			// and fall through to the local window path as a fallback.
@@ -270,6 +342,7 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 			m.mu.Lock()
 			m.hostRenderFunc = nil
 			m.hostHideFunc = nil
+			m.hostVisible = false
 			m.mu.Unlock()
 			// Fall through to local window rendering below
 		} else {
@@ -277,6 +350,14 @@ func (m *Manager) doShowCandidates(candidates []Candidate, input string, cursorP
 			if m.window.IsVisible() {
 				m.window.Hide()
 			}
+			// Mark the host candidate as visible. This mirrors the local window's
+			// IsVisible() (which stays false in host mode) so RefreshCandidates and
+			// other "is a candidate currently shown?" checks behave identically to
+			// non-host mode — critical so a stray hover(-1) after Hide() doesn't
+			// re-show the just-hidden candidates.
+			m.mu.Lock()
+			m.hostVisible = true
+			m.mu.Unlock()
 			m.logger.Debug("doShowCandidates complete (host render)")
 			return
 		}
@@ -324,6 +405,10 @@ func (m *Manager) Hide() {
 	m.mu.Lock()
 	m.inputSession++
 	newSession := m.inputSession
+	// 同步置 host 候选不可见（doHide 真正 WriteHide 是异步的）：一旦决定隐藏，逻辑上
+	// 候选即不可见，避免随后到来的 hover(-1)→RefreshCandidates 在 doHide 执行前读到
+	// 旧的 hostVisible=true 而把刚隐藏的候选又重显。镜像 Hide() 同步自增 session 的语义。
+	m.hostVisible = false
 	m.mu.Unlock()
 
 	m.logger.Debug("Hide called, new session", "session", newSession)
@@ -357,6 +442,11 @@ func (m *Manager) doHide() {
 	if hostHide != nil {
 		hostHide()
 	}
+	m.mu.Lock()
+	m.hostHoverIndex = -1   // 候选隐藏时清空 host 悬停，避免下次显示残留高亮
+	m.hostHoverPageBtn = "" // 同上：清空翻页按钮悬停态
+	m.hostVisible = false   // host 候选已隐藏，镜像本地 window 的 Hide
+	m.mu.Unlock()
 	m.window.ResetHoverIndex()
 	m.window.ResetDragPinned()
 	// 重置鼠标移动追踪：候选窗再次出现时，必须等用户真正挪动鼠标后才能触发 tooltip，
@@ -384,7 +474,11 @@ func (m *Manager) IsVisible() bool {
 // Used to update hover highlight without changing candidate data
 func (m *Manager) RefreshCandidates() {
 	m.mu.Lock()
-	if !m.ready || !m.window.IsVisible() {
+	// host render 模式下本地 window 始终隐藏（候选经 SHM 在宿主进程渲染），用 hostVisible
+	// 镜像可见性：仅当本地窗口可见、或 host 渲染中且 host 候选正在显示时才刷新。否则隐藏
+	// 后到来的 hover(-1) 会经 RefreshCandidates 把刚隐藏的候选又重新显示出来（ESC/选词后）。
+	hostShown := m.hostRenderFunc != nil && m.hostVisible
+	if !m.ready || (!m.window.IsVisible() && !hostShown) {
 		m.mu.Unlock()
 		return
 	}

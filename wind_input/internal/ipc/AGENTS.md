@@ -29,10 +29,11 @@
 - 与 `EncodeStatePush`（`CmdStatePush=0x0206`）的区别：StatePush 是状态变更广播（hotkey 不变所以不带），ActivationStatusPush 是 activation 握手回包（必须带完整 hotkeys + hostRenderAvail）
 - `CmdHostRenderSetup`（下行 0x0501）和 `CmdHostRenderRequest`（上行 0x0501，C++ DLL 请求）共用同一命令码值，但方向不同
 - `CmdHostRenderFrame`（下行 0x0502, push）darwin 专用：Win 用命名 Event 通知 host render 新帧, darwin 无等价 API 改走 push 通道发 `HostRenderFramePayload`(seq+几何), 客户端据 seq 从 SHM 取帧 blit
-- `CmdCandidateRects`（下行 0x0503, push）darwin 专用：候选命中矩形 `[]CandidateHitRect` (panel-local), `EncodeCandidateRects`; 供 IMKit `.app` NSPanel 鼠标 hit-test
-- `CmdCandidateSelect`（上行 0x020D）darwin 专用：NSPanel 鼠标点中候选, payload=pageLocalIndex u32; Go 选词结果走 push 通道 (`PushCommitTextToActiveClient`) 异步交付
-- `CmdCandidateHover`（上行 0x020E）darwin 专用：NSPanel 鼠标悬停候选, payload=pageLocalIndex i32 (-1=无); server_darwin 双派发——forwarder 回调缓存候选按 hoverIndex 重渲染高亮, 同时 `Coordinator.HandleCandidateHover` 触发 tooltip 异步查询
-- `CmdCandidateRects` 中 index<0 为翻页按钮 (-1=上页 -2=下页), 客户端点中合成 PgUp/PgDn 键
+- `CmdCandidateRects`（下行 0x0503, push）darwin 专用：候选命中矩形 `[]CandidateHitRect` (panel-local), `EncodeCandidateRects`; 供 IMKit `.app` NSPanel 鼠标 hit-test。**Win host render 不走此 push 通道**：命中矩形内嵌进 SHM（`SharedRenderHeader.RectCount`/`RectsOffset` + 像素后的矩形表，复用 `CandidateHitRect` 20 字节布局 index/x/y/w/h），与位图同 sequence；常量 `HostRenderHitRectSize=20`/`MaxHostRenderRects=256`
+- `CmdCandidateSelect`（上行 0x020D）darwin + **Win host render** 共用：鼠标点中候选, payload=pageLocalIndex i32 (负值=翻页按钮 -1 上页 / -2 下页, Win 滚轮亦复用); Go 选词/翻页结果走 push 通道 (`PushCommitTextToActiveClient`) 异步交付
+- `CmdCandidateHover`（上行 0x020E）：darwin payload=index i32 (-1=无), index-only; **Win host render payload=index i32 + anchorX i32 + belowY i32 + aboveY i32**（屏幕锚点由 DLL 算, 供 Go 定位 tooltip——Win tooltip 由 Go 端窗口渲染, 不同于 .app 自定位）; 均触发悬停高亮重渲染 + tooltip 异步查询
+- `CmdCandidateRects` / 内嵌矩形 中 index<0 为翻页按钮 (-1=上页 -2=下页), 客户端点中合成翻页
+- `CmdCandidateScroll`（上行 0x0211）Win host render 专用：候选框鼠标滚轮, payload=delta i32 (WHEEL_DELTA=120 倍数, 正=上滚); DLL **不**在本地翻页, 交 Go 统一决策 (`Coordinator.HandleCandidateScroll`, 默认 no-op——标准版本地候选窗无滚轮翻页)
 - `CmdModeStatus`（下行 0x0504, push）darwin 专用：输入模式状态指示器, `EncodeModeStatus(flags, effectiveMode, label)`; payload=flags(u32)+effectiveMode(u32)+labelLen(u32)+label(UTF-8); flags 复用 `StatusChineseMode/StatusFullWidth/StatusChinesePunct/StatusCapsLock/StatusToolbarVisible` 位; forwarder 收 `CmdToolbarShow/Update/Hide` 转译为此帧, .app 据此更新菜单栏 NSStatusItem
 - `CmdCandidateMenuFlags`（下行 0x0505, push）darwin 专用：当前页候选右键菜单禁用位, `EncodeCandidateMenuFlags(flags []byte)`; 每候选 1 字节, 位 `MenuFlagDisableTop/Move/Delete/Reset/Copy`(0x01..0x10); .app 据此 disable 候选右键 NSMenuItem
 - `CmdMenuShow`（下行 0x0506）darwin 专用：统一菜单树, 是上行 `CmdShowContextMenu`(0x020A) 的请求-响应回包 (经 request 连接 conn.Write, 非 push); payload 见 `bridge.encodeUnifiedMenuPayload` (count u32 + 递归 item: id i32 + flags u8[0x01 sep/0x02 checked/0x04 disabled] + labelLen u32 + label + childCount u32 + children)
@@ -47,7 +48,8 @@
 - `CmdKeyType`（下行 0x0512, push）darwin 专用：命令直通车 key.type / clip.paste 文本上屏, `EncodeKeyType(text)`; payload = 整段 UTF-8 (无长度前缀, 同 `EncodeOpenSettings` 风格); forwarder 收 `uicmd.CmdKeyType` 转译, .app 经 `client.insertText` 上屏 (不模拟按键, 免辅助功能授权)
 - `CmdCandidateContextMenu`（上行 0x020F）darwin 专用：候选右键菜单动作, payload=index i32 + actionLen u32 + action(UTF-8); Coordinator.HandleCandidateContextMenu 按 action 派发 move/delete/reset/copy
 - `CmdMenuAction`（上行 0x0210）darwin 专用：统一菜单项被选中, payload=id i32; Coordinator.HandleUnifiedMenuAction 按 id 派发
-- `SharedRenderHeader` 固定 64 字节：前 40 字节有效字段，后 24 字节保留；后跟 BGRA 像素数据
+- `SharedRenderHeader` 固定 64 字节：前 52 字节有效字段（…/`RectCount`[40:44]/`RectsOffset`[44:48]/`RenderedHoverIndex`[48:52]），后 12 字节保留；后跟 BGRA 像素数据，再跟命中矩形表
+- `RenderedHoverIndex`（int32 [48:52]）：Go 本帧实际高亮的元素（hover 编码：>=0 候选 / -1 无 / -2 上翻页 / -3 下翻页）。Win host window 每帧把去重基线 `_lastHoverIndex` 同步成它，使打字清空高亮后再次悬停同一候选仍能重新高亮；darwin 忽略此字段
 - `CmdBatchEvents` 是批量事件命令，`bridge` 对其有特殊处理路径
 - `IsAsyncRequest(header)` 判断是否为不需要响应的异步请求（版本字段高位为 `AsyncFlag=0x8000`）
 - 修改命令码时需同步修改 C++ TSF Bridge 侧的枚举定义

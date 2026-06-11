@@ -23,7 +23,7 @@ Public and internal header files defining interfaces, structures, and protocols 
 | `DisplayAttributeInfo.h` | CDisplayAttributeInfoInput, CDisplayAttributeProvider (composition text styling) |
 | `Register.h` | RegisterServer, UnregisterServer functions (Windows registry integration) |
 | `FileLogger.h` | CFileLogger class (运行时可配置文件日志，单例，支持 none/file/debugstring/all 四种输出模式，5MB 自动轮转，多进程安全) |
-| `HostWindow.h` | CHostWindow 类（开始菜单宿主进程代理渲染窗口，通过 CreateWindowInBand 解决 Win11 z-order 问题，使用共享内存接收 Go 侧渲染帧） |
+| `HostWindow.h` | CHostWindow 类（开始菜单宿主进程代理渲染窗口，通过 CreateWindowInBand 解决 Win11 z-order 问题，使用共享内存接收 Go 侧渲染帧 + 内嵌命中矩形；`_WndProc` 路由鼠标点选/悬停/滚轮经 SendAsync 回传 Go。`Initialize` 第 4 参为 `CIPCClient*` 弱引用） |
 
 ## Architecture Overview
 

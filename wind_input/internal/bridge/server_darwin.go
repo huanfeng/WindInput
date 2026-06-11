@@ -141,7 +141,7 @@ func (s *Server) GetHostRenderManager() *HostRenderManager { return s.hostRender
 func (s *Server) IsActivelyFocusedPID(pid uint32) bool { return false }
 
 // GetActiveHostRender darwin 上始终返回 nil (无 host render)。
-func (s *Server) GetActiveHostRender() (writeFrame func(img *image.RGBA, x, y int) error, hideFunc func()) {
+func (s *Server) GetActiveHostRender() (writeFrame func(img *image.RGBA, x, y int, rects []ipc.CandidateHitRect, renderedHover int) error, hideFunc func()) {
 	return nil, nil
 }
 

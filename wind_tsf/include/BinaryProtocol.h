@@ -30,6 +30,9 @@ constexpr uint16_t CMD_TOGGLE_MODE      = 0x0207; // Toggle mode request (from U
 constexpr uint16_t CMD_SYSTEM_MODE_SWITCH = 0x020B; // System mode switch (Ctrl+Space, sync, carries target mode)
 constexpr uint16_t CMD_MENU_COMMAND     = 0x0208; // Menu command (toggle_mode, toggle_width, etc.)
 constexpr uint16_t CMD_SHOW_CONTEXT_MENU     = 0x020A; // Request to show context menu (sends screen coordinates)
+constexpr uint16_t CMD_CANDIDATE_SELECT      = 0x020D; // Host render: mouse click hit a candidate (payload: pageLocalIndex i32; <0 = page button -1 up / -2 down)
+constexpr uint16_t CMD_CANDIDATE_HOVER       = 0x020E; // Host render: mouse hover (payload: index i32 + anchorX i32 + belowY i32 + aboveY i32). index: >=0 candidate, -1 nothing, -2 page-up button, -3 page-down button (differs from select/rect -1/-2 convention: hover needs a distinct "nothing")
+constexpr uint16_t CMD_CANDIDATE_SCROLL      = 0x0211; // Host render: mouse wheel over candidate box (payload: delta i32, WHEEL_DELTA multiple, >0 = up); Go decides (no paging by default)
 constexpr uint16_t CMD_COMPOSITION_TERMINATED = 0x0209; // Composition unexpectedly terminated (e.g., user clicked in input field)
 constexpr uint16_t CMD_CARET_UPDATE     = 0x0301; // Caret position update
 constexpr uint16_t CMD_SELECTION_CHANGED = 0x0302; // Selection/caret changed without composition (from ITfTextEditSink)
@@ -272,9 +275,37 @@ struct SharedRenderHeader
     uint32_t height;     // Bitmap height in pixels
     uint32_t stride;     // Bytes per row (width * 4)
     uint32_t dataSize;   // Total BGRA pixel data size in bytes
-    uint32_t reserved[6];// Padding to 64 bytes
+    // Mouse hit-test geometry, embedded so rects and the bitmap they describe always
+    // share the same sequence (no cross-channel skew). The rect table is rectCount
+    // HostRenderHitRect entries (20 bytes each) starting at byte rectsOffset from the
+    // SHM base (right after the pixels). rectCount==0 ⇒ frame is non-interactive.
+    uint32_t rectCount;  // Number of hit rects in the table (0 = none)
+    uint32_t rectsOffset;// Byte offset from SHM base to the rect table
+    // Candidate index Go actually highlighted in THIS frame (hover encoding: >=0 candidate,
+    // -1 none, -2 page-up, -3 page-down). The host window syncs its hover-dedup baseline
+    // (_lastHoverIndex) to this each frame, so re-hovering the same index after a content
+    // change (typing) still re-highlights instead of being deduped against a stale value.
+    int32_t  renderedHoverIndex;
+    uint32_t reserved[3];// Padding to 64 bytes
 };
 static_assert(sizeof(SharedRenderHeader) == 64, "SharedRenderHeader must be 64 bytes");
+
+// One candidate hit rect embedded after the pixels (panel-local pixel coords, mirrors
+// the bitmap origin including shadow margin). index >= 0 is a page-local candidate;
+// index -1 = page-up button, -2 = page-down button.
+struct HostRenderHitRect
+{
+    int32_t index;
+    int32_t x;
+    int32_t y;
+    int32_t w;
+    int32_t h;
+};
+static_assert(sizeof(HostRenderHitRect) == 20, "HostRenderHitRect must be 20 bytes");
+
+// Cap on the embedded rect table (matches Go ipc.MaxHostRenderRects) so a malformed
+// count can never make the DLL read past the buffer.
+constexpr uint32_t MAX_HOST_RENDER_RECTS = 256;
 
 // Host render setup payload (from Go, response to CMD_HOST_RENDER_REQUEST)
 // Wire format: maxBufferSize(4) + shmNameLen(4) + eventNameLen(4) + shmName + eventName

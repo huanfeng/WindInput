@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/uicmd"
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/theme"
@@ -629,8 +630,10 @@ func (m *Manager) TakeUIScreenshots() {}
 // Host render (Win 专有, darwin 无概念)
 // ============================================================================
 
-func (m *Manager) SetHostRenderFunc(func(img *image.RGBA, x, y int) error, func()) {}
-func (m *Manager) IsHostRendering() bool                                           { return false }
+func (m *Manager) SetHostRenderFunc(func(img *image.RGBA, x, y int, rects []ipc.CandidateHitRect, renderedHover int) error, func()) {
+}
+func (m *Manager) IsHostRendering() bool    { return false }
+func (m *Manager) SetHostHover(int, string) {}
 
 // ============================================================================
 // callback 注册

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/pkg/config"
 )
 
@@ -32,7 +33,7 @@ func (m *mockBridgeServer) PushUpdateCompositionToActiveClient(text string, care
 func (m *mockBridgeServer) PushEnglishPairConfigToActiveClient(_ bool, _ []string) {}
 func (m *mockBridgeServer) PushStatsConfigToActiveClient(_ bool, _ bool)           {}
 func (m *mockBridgeServer) RestartService()                                        {}
-func (m *mockBridgeServer) GetActiveHostRender() (func(*image.RGBA, int, int) error, func()) {
+func (m *mockBridgeServer) GetActiveHostRender() (func(*image.RGBA, int, int, []ipc.CandidateHitRect, int) error, func()) {
 	return nil, nil
 }
 func (m *mockBridgeServer) IsActivelyFocusedPID(_ uint32) bool { return false }

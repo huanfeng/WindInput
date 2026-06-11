@@ -1192,12 +1192,7 @@ STDAPI CTextService::Deactivate()
     }
 
     // Release host window (before IPC client, so shared memory is still valid during shutdown)
-    if (_pHostWindow != nullptr)
-    {
-        _pHostWindow->Uninitialize();
-        delete _pHostWindow;
-        _pHostWindow = nullptr;
-    }
+    _DestroyHostWindow();
 
     // Release IPC client
     _UninitIPCClient();
@@ -1379,6 +1374,11 @@ STDAPI CTextService::OnKillThreadFocus()
     {
         _UnregisterCandidateHotkeys();
     }
+    // 注意：失焦时**不**销毁 HostWindow。SearchHost/任务管理器等用 XamlIsland
+    // locked/transient DocMgr，OnSetFocus 对其跳过 focus_gained（防 composition
+    // replay），而 HostWindow 重建依赖 focus_gained → 一旦销毁就再也不会重建，
+    // 候选永久不显示。per-PID event 模型下 HostWindow 可常驻：失焦时 Go 发 WriteHide
+    // 经本进程 event 隐藏窗口即可，无需销毁。
     return S_OK;
 }
 
@@ -2004,6 +2004,9 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         _UnadviseTextLayoutSink();
         _UnadviseTextEditSink();
 
+        // 失焦时**不**销毁 HostWindow（见 OnKillThreadFocus 注释）：locked/transient
+        // DocMgr 会跳过 focus_gained，销毁后无法重建。靠 Go 的 WriteHide 隐藏即可。
+
         _needsFocusRecovery = FALSE;
     }
 
@@ -2085,6 +2088,16 @@ void CTextService::_SyncStateFromResponse(const ServiceResponse& response)
         response.IsChinesePunct(), response.IsToolbarVisible(), response.IsHostRenderAvailable());
 }
 
+void CTextService::_DestroyHostWindow()
+{
+    if (_pHostWindow != nullptr)
+    {
+        _pHostWindow->Uninitialize();
+        delete _pHostWindow;
+        _pHostWindow = nullptr;
+    }
+}
+
 void CTextService::_EnsureHostRenderSetup(const ServiceResponse& response, BOOL forceRefresh)
 {
     if (_pIPCClient == nullptr || !_pIPCClient->IsConnected())
@@ -2099,9 +2112,7 @@ void CTextService::_EnsureHostRenderSetup(const ServiceResponse& response, BOOL 
         if (forceRefresh && _pHostWindow != nullptr)
         {
             WIND_LOG_INFO(L"Host render unavailable after refresh, disabling existing host window\n");
-            _pHostWindow->Uninitialize();
-            delete _pHostWindow;
-            _pHostWindow = nullptr;
+            _DestroyHostWindow();
         }
         return;
     }
@@ -2127,9 +2138,7 @@ void CTextService::_EnsureHostRenderSetup(const ServiceResponse& response, BOOL 
     if (_pHostWindow != nullptr)
     {
         WIND_LOG_INFO(L"Refreshing host render window after service reconnection\n");
-        _pHostWindow->Uninitialize();
-        delete _pHostWindow;
-        _pHostWindow = nullptr;
+        _DestroyHostWindow();
     }
 
     WIND_LOG_INFO(L"Host render available, requesting setup\n");
@@ -2143,7 +2152,8 @@ void CTextService::_EnsureHostRenderSetup(const ServiceResponse& response, BOOL 
         if (!_pHostWindow->Initialize(
             hrResponse.shmName.c_str(),
             hrResponse.eventName.c_str(),
-            hrResponse.maxBufferSize))
+            hrResponse.maxBufferSize,
+            _pIPCClient)) // weak ref: host window routes mouse events back to Go
         {
             WIND_LOG_WARN(L"Host window initialization failed, falling back to Go window\n");
             delete _pHostWindow;

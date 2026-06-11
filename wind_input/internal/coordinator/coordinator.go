@@ -21,6 +21,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/dict"
 	"github.com/huanfeng/wind_input/internal/engine"
 	"github.com/huanfeng/wind_input/internal/hotkey"
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/store"
 	"github.com/huanfeng/wind_input/internal/tooltip"
 	"github.com/huanfeng/wind_input/internal/transform"
@@ -378,7 +379,7 @@ type BridgeServer interface {
 	RestartService()
 	// GetActiveHostRender returns write/hide functions if the active process has host rendering.
 	// Returns nil functions if host rendering is not active for the current process.
-	GetActiveHostRender() (writeFrame func(img *image.RGBA, x, y int) error, hideFunc func())
+	GetActiveHostRender() (writeFrame func(img *image.RGBA, x, y int, rects []ipc.CandidateHitRect, renderedHover int) error, hideFunc func())
 
 	// IsActivelyFocusedPID 报告指定 PID 当下是否仍有任一 TSF clientID 持有可编辑焦点。
 	// 用于 HandleIMEDeactivated / HandleFocusLost 区分两种场景：

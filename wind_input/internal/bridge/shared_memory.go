@@ -20,7 +20,6 @@ var (
 	procUnmapViewOfFile    = modkernel32.NewProc("UnmapViewOfFile")
 	procCreateEventW       = modkernel32.NewProc("CreateEventW")
 	procSetEvent           = modkernel32.NewProc("SetEvent")
-	procFlushViewOfFile    = modkernel32.NewProc("FlushViewOfFile")
 )
 
 const (
@@ -28,41 +27,56 @@ const (
 	pageReadWrite    = 0x04
 )
 
+// hostRenderSecurityAttributes builds SECURITY_ATTRIBUTES with an SDDL that grants
+// AppContainer/UWP processes (SearchHost.exe, Start Menu) access. Shared by the
+// shared-memory section and the per-PID named events so both are openable by the
+// same low-integrity host processes. Returns nil sa if the descriptor fails (the
+// kernel object is then created with the default ACL — still works for
+// non-AppContainer hosts).
+//
+// SDDL: GA = Generic All; S:(ML;;NW;;;LW) = Low mandatory label, required for
+// UWP/AppContainer processes. Verified to work with SearchHost.exe / Start Menu.
+func hostRenderSecurityAttributes() *windows.SecurityAttributes {
+	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)"
+	sd, _ := windows.SecurityDescriptorFromString(sddl)
+	if sd == nil {
+		return nil
+	}
+	return &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: sd,
+		InheritHandle:      0,
+	}
+}
+
 // SharedMemory manages a named shared memory region for host render bitmap transfer.
+//
+// Wake signaling is DECOUPLED from the region: the named section is global/shared
+// across all host processes (one physical backing — Windows shares the pages of a
+// named file-mapping among every process that maps it), while each host process is
+// woken via its own NamedEvent (see host_render.go). WriteFrame/WriteHide therefore
+// do NOT signal — the caller signals only the active process's event, which keeps a
+// backgrounded process's render thread asleep and prevents cross-talk over the one
+// shared section.
 type SharedMemory struct {
 	mu       sync.Mutex
 	name     string
 	size     uint32
 	hMapping windows.Handle
 	pView    unsafe.Pointer
-	hEvent   windows.Handle
-	evtName  string
 	sequence uint32
 }
 
-// NewSharedMemory creates a named shared memory region and a named event for signaling.
-// name: e.g. "Local\\WindInput_SHM_12345"
-// evtName: e.g. "Local\\WindInput_EVT_12345"
+// NewSharedMemory creates a named shared memory region.
+// name: e.g. "Local\\WindInput_SHM"
 // size: total size including header (e.g. MaxSharedRenderSize)
-func NewSharedMemory(name, evtName string, size uint32) (*SharedMemory, error) {
+func NewSharedMemory(name string, size uint32) (*SharedMemory, error) {
 	namePtr, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return nil, fmt.Errorf("invalid shared memory name: %w", err)
 	}
 
-	// Use same SDDL as the named pipe server — verified to work with AppContainer
-	// processes (SearchHost.exe, Start Menu). GA = Generic All access.
-	// S:(ML;;NW;;;LW) = Low mandatory label, required for UWP/AppContainer processes.
-	sddl := "D:P(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)"
-	sd, _ := windows.SecurityDescriptorFromString(sddl)
-	var sa *windows.SecurityAttributes
-	if sd != nil {
-		sa = &windows.SecurityAttributes{
-			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-			SecurityDescriptor: sd,
-			InheritHandle:      0,
-		}
-	}
+	sa := hostRenderSecurityAttributes()
 
 	// Create file mapping with AppContainer-accessible security
 	hMapping, _, err := procCreateFileMappingW.Call(
@@ -97,33 +111,25 @@ func NewSharedMemory(name, evtName string, size uint32) (*SharedMemory, error) {
 		headerSlice[i] = 0
 	}
 
-	// Create named event (auto-reset, initially non-signaled) with same security
-	evtNamePtr, _ := windows.UTF16PtrFromString(evtName)
-	hEvent, _, err := procCreateEventW.Call(
-		uintptr(unsafe.Pointer(sa)),
-		0, // auto-reset
-		0, // initially non-signaled
-		uintptr(unsafe.Pointer(evtNamePtr)),
-	)
-	if hEvent == 0 {
-		procUnmapViewOfFile.Call(uintptr(pView))
-		windows.CloseHandle(windows.Handle(hMapping))
-		return nil, fmt.Errorf("CreateEvent failed: %w", err)
-	}
-
 	return &SharedMemory{
 		name:     name,
 		size:     size,
 		hMapping: windows.Handle(hMapping),
 		pView:    pView,
-		hEvent:   windows.Handle(hEvent),
-		evtName:  evtName,
 	}, nil
 }
 
-// WriteFrame writes a rendered candidate image to shared memory and signals the event.
+// WriteFrame writes a rendered candidate image to shared memory.
 // img must be *image.RGBA. Performs RGBA→BGRA conversion inline.
-func (sm *SharedMemory) WriteFrame(img *image.RGBA, screenX, screenY int) error {
+// rects is the panel-local hit-test geometry for this frame (candidates + page
+// buttons as Index -1/-2); it is embedded right after the pixel data so the DLL's
+// host window can route mouse clicks/hover back to Go. Pass nil for a non-interactive
+// frame. renderedHover is the candidate index actually highlighted in this frame
+// (hover encoding: >=0 candidate, -1 none, -2 page-up, -3 page-down); the DLL syncs its
+// hover-dedup baseline to it so re-hovering the same index after a content change still
+// re-highlights. Does NOT signal any event — the caller wakes the active process's render
+// thread via that process's NamedEvent.
+func (sm *SharedMemory) WriteFrame(img *image.RGBA, screenX, screenY int, rects []ipc.CandidateHitRect, renderedHover int) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -137,9 +143,18 @@ func (sm *SharedMemory) WriteFrame(img *image.RGBA, screenX, screenY int) error 
 	stride := width * 4
 	dataSize := stride * height
 
-	// Check if data fits
-	if ipc.SharedRenderHeaderSize+dataSize > sm.size {
-		return fmt.Errorf("frame too large: %d bytes (max %d)", ipc.SharedRenderHeaderSize+dataSize, sm.size)
+	// Clamp the rect table so a runaway count can never overflow the buffer.
+	if len(rects) > ipc.MaxHostRenderRects {
+		rects = rects[:ipc.MaxHostRenderRects]
+	}
+	rectCount := uint32(len(rects))
+	rectsOffset := ipc.SharedRenderHeaderSize + dataSize // table follows the pixels
+	rectsBytes := rectCount * ipc.HostRenderHitRectSize
+
+	// Check if header + pixels + rect table fit
+	totalSize := rectsOffset + rectsBytes
+	if totalSize > sm.size {
+		return fmt.Errorf("frame too large: %d bytes (max %d)", totalSize, sm.size)
 	}
 
 	sm.sequence++
@@ -156,9 +171,12 @@ func (sm *SharedMemory) WriteFrame(img *image.RGBA, screenX, screenY int) error 
 	binary.LittleEndian.PutUint32(headerBuf[28:32], height)
 	binary.LittleEndian.PutUint32(headerBuf[32:36], stride)
 	binary.LittleEndian.PutUint32(headerBuf[36:40], dataSize)
-	// reserved bytes [40:64] stay zero
+	binary.LittleEndian.PutUint32(headerBuf[40:44], rectCount)
+	binary.LittleEndian.PutUint32(headerBuf[44:48], rectsOffset)
+	binary.LittleEndian.PutUint32(headerBuf[48:52], uint32(int32(renderedHover)))
+	// reserved bytes [52:64] stay zero
 
-	dst := unsafe.Slice((*byte)(sm.pView), ipc.SharedRenderHeaderSize+dataSize)
+	dst := unsafe.Slice((*byte)(sm.pView), totalSize)
 
 	// Copy header
 	copy(dst[:ipc.SharedRenderHeaderSize], headerBuf)
@@ -175,13 +193,22 @@ func (sm *SharedMemory) WriteFrame(img *image.RGBA, screenX, screenY int) error 
 		pixelDst[dstIdx+3] = img.Pix[srcIdx+3] // A
 	}
 
-	// Signal event to wake DLL render thread
-	procSetEvent.Call(uintptr(sm.hEvent))
+	// Write the hit-rect table right after the pixels (panel-local int32 fields).
+	rectDst := dst[rectsOffset:totalSize]
+	for i, r := range rects {
+		off := i * ipc.HostRenderHitRectSize
+		binary.LittleEndian.PutUint32(rectDst[off:off+4], uint32(r.Index))
+		binary.LittleEndian.PutUint32(rectDst[off+4:off+8], uint32(r.X))
+		binary.LittleEndian.PutUint32(rectDst[off+8:off+12], uint32(r.Y))
+		binary.LittleEndian.PutUint32(rectDst[off+12:off+16], uint32(r.W))
+		binary.LittleEndian.PutUint32(rectDst[off+16:off+20], uint32(r.H))
+	}
 
 	return nil
 }
 
-// WriteHide writes a "hide" command to shared memory and signals the event.
+// WriteHide writes a "hide" command (flags=0) to shared memory.
+// Does NOT signal — the caller wakes the active process's render thread.
 func (sm *SharedMemory) WriteHide() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -198,14 +225,15 @@ func (sm *SharedMemory) WriteHide() {
 	binary.LittleEndian.PutUint32(headerBuf[4:8], ipc.SharedRenderVersion)
 	binary.LittleEndian.PutUint32(headerBuf[8:12], sm.sequence)
 	// flags = 0 (not visible, no content)
+	// renderedHoverIndex = -1 (nothing highlighted); the DLL hides without reading it,
+	// but keep it consistent so a stale 0 can't read as "candidate 0 highlighted".
+	binary.LittleEndian.PutUint32(headerBuf[48:52], 0xFFFFFFFF) // int32(-1) bit pattern
 
 	dst := unsafe.Slice((*byte)(sm.pView), ipc.SharedRenderHeaderSize)
 	copy(dst, headerBuf)
-
-	procSetEvent.Call(uintptr(sm.hEvent))
 }
 
-// Close releases all shared memory and event resources.
+// Close releases the shared memory mapping.
 func (sm *SharedMemory) Close() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -218,17 +246,65 @@ func (sm *SharedMemory) Close() {
 		windows.CloseHandle(sm.hMapping)
 		sm.hMapping = 0
 	}
-	if sm.hEvent != 0 {
-		windows.CloseHandle(sm.hEvent)
-		sm.hEvent = 0
-	}
 }
 
 // Name returns the shared memory name.
 func (sm *SharedMemory) Name() string { return sm.name }
 
-// EventName returns the event name.
-func (sm *SharedMemory) EventName() string { return sm.evtName }
-
 // Size returns the total shared memory size.
 func (sm *SharedMemory) Size() uint32 { return sm.size }
+
+// NamedEvent is a per-process auto-reset wake event for host render. Go signals
+// ONLY the active process's event, so a backgrounded process's render thread stays
+// asleep — this is what prevents cross-talk when multiple host processes share the
+// single global SharedMemory section.
+type NamedEvent struct {
+	name   string
+	handle windows.Handle
+}
+
+// newNamedEvent creates a named auto-reset event with the same AppContainer-
+// accessible security as the shared memory section.
+// name: e.g. "Local\\WindInput_EVT_12345"
+func newNamedEvent(name string) (*NamedEvent, error) {
+	namePtr, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, fmt.Errorf("invalid event name: %w", err)
+	}
+
+	sa := hostRenderSecurityAttributes()
+	hEvent, _, err := procCreateEventW.Call(
+		uintptr(unsafe.Pointer(sa)),
+		0, // auto-reset
+		0, // initially non-signaled
+		uintptr(unsafe.Pointer(namePtr)),
+	)
+	if hEvent == 0 {
+		return nil, fmt.Errorf("CreateEvent failed: %w", err)
+	}
+
+	return &NamedEvent{name: name, handle: windows.Handle(hEvent)}, nil
+}
+
+// Signal wakes the render thread waiting on this event (SetEvent). No-op if closed.
+func (e *NamedEvent) Signal() {
+	if e != nil && e.handle != 0 {
+		procSetEvent.Call(uintptr(e.handle))
+	}
+}
+
+// Close releases the event handle.
+func (e *NamedEvent) Close() {
+	if e != nil && e.handle != 0 {
+		windows.CloseHandle(e.handle)
+		e.handle = 0
+	}
+}
+
+// Name returns the event name.
+func (e *NamedEvent) Name() string {
+	if e == nil {
+		return ""
+	}
+	return e.name
+}

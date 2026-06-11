@@ -51,7 +51,10 @@ func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte
 	switch header.Command {
 	case ipc.CmdKeyEvent, ipc.CmdCommitRequest,
 		ipc.CmdFocusGained, ipc.CmdFocusLost, ipc.CmdIMEActivated,
-		ipc.CmdCompositionTerminated, ipc.CmdCaretUpdate, ipc.CmdCaretPending, ipc.CmdHostRenderRequest:
+		ipc.CmdCompositionTerminated, ipc.CmdCaretUpdate, ipc.CmdCaretPending, ipc.CmdHostRenderRequest,
+		ipc.CmdCandidateSelect, ipc.CmdCandidateHover, ipc.CmdCandidateScroll:
+		// host render 鼠标事件：DLL 走 SendAsync（不等响应），仅做轻量分发到
+		// coordinator goroutine，必须留在同步快速路径，绝不能进 goroutine+timeout。
 		return s.processRequest(header, payload, clientID, processID)
 	}
 
@@ -188,6 +191,15 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 
 	case ipc.CmdHostRenderRequest:
 		return s.handleHostRenderRequest(clientID, processID)
+
+	case ipc.CmdCandidateSelect:
+		return s.handleHostCandidateSelect(payload)
+
+	case ipc.CmdCandidateHover:
+		return s.handleHostCandidateHover(payload)
+
+	case ipc.CmdCandidateScroll:
+		return s.handleHostCandidateScroll(payload)
 
 	case ipc.CmdInputStats:
 		return s.handleInputStats(payload, clientID)
@@ -605,6 +617,56 @@ func (s *Server) handleHostRenderRequest(clientID int, processID uint32) []byte 
 	s.handler.HandleHostRenderReady()
 
 	return s.codec.EncodeHostRenderSetup(setup)
+}
+
+// handleHostCandidateSelect 处理 host render 宿主窗口的鼠标左键点选（DLL 经 CmdCandidateSelect
+// 异步上报，无响应写回）。payload = pageLocalIndex i32；负值是翻页按钮（-1=上页 -2=下页），
+// 与 SHM 内嵌命中矩形的约定一致。经可选接口 candidateSelector 派发到 Coordinator，
+// 选词/翻页逻辑与本地候选窗完全一致；结果走 push 管道。
+func (s *Server) handleHostCandidateSelect(payload []byte) []byte {
+	if len(payload) >= 4 {
+		idx := int(int32(binary.LittleEndian.Uint32(payload[0:4])))
+		cs, ok := s.handler.(candidateSelector)
+		s.logger.Info("Host render candidate select", "index", idx, "routed", ok)
+		if ok {
+			cs.HandleCandidateSelect(idx)
+		}
+	}
+	return s.codec.EncodeAck()
+}
+
+// handleHostCandidateScroll 处理 host render 候选框的鼠标滚轮（DLL 经 CmdCandidateScroll
+// 异步上报，无响应写回）。payload = delta i32（WHEEL_DELTA 倍数，正=上滚）。经可选接口
+// candidateScrollHandler 派发到 Coordinator 统一决策（默认不翻页）。
+func (s *Server) handleHostCandidateScroll(payload []byte) []byte {
+	if len(payload) >= 4 {
+		delta := int(int32(binary.LittleEndian.Uint32(payload[0:4])))
+		if h, ok := s.handler.(candidateScrollHandler); ok {
+			h.HandleCandidateScroll(delta)
+		}
+	}
+	return s.codec.EncodeAck()
+}
+
+// handleHostCandidateHover 处理 host render 宿主窗口的鼠标悬停（DLL 经 CmdCandidateHover
+// 异步上报，无响应写回）。payload = index i32 + anchorX i32 + belowY i32 + aboveY i32：
+// 屏幕锚点由 DLL 据 host 窗口屏幕位置 + 悬停候选矩形算出，Go 端据此定位 tooltip。
+// 经可选接口 hostCandidateHoverHandler 派发到 Coordinator：触发带高亮的重渲染（经 SHM
+// 重推宿主帧）+ tooltip 异步查询。index<0 表示离开候选区。
+func (s *Server) handleHostCandidateHover(payload []byte) []byte {
+	if len(payload) >= 4 {
+		idx := int(int32(binary.LittleEndian.Uint32(payload[0:4])))
+		tooltipX, belowY, aboveY := 0, 0, 0
+		if len(payload) >= 16 {
+			tooltipX = int(int32(binary.LittleEndian.Uint32(payload[4:8])))
+			belowY = int(int32(binary.LittleEndian.Uint32(payload[8:12])))
+			aboveY = int(int32(binary.LittleEndian.Uint32(payload[12:16])))
+		}
+		if h, ok := s.handler.(hostCandidateHoverHandler); ok {
+			h.HandleCandidateHoverAt(idx, tooltipX, belowY, aboveY)
+		}
+	}
+	return s.codec.EncodeAck()
 }
 
 // handleInputStats 处理 TSF 英文模式的输入统计上报（异步，无需响应）

@@ -358,6 +358,12 @@ private:
     // State sync helper (internal): apply status response to local state
     void _SyncStateFromResponse(const ServiceResponse& response);
     void _EnsureHostRenderSetup(const ServiceResponse& response, BOOL forceRefresh);
+    // 销毁宿主代理渲染窗口（释放共享内存映射 + 渲染线程 + Band 窗口）。
+    // 仅在 Deactivate（IME 卸载）和 _EnsureHostRenderSetup（强制刷新/host render
+    // 不可用）时调用。**不要**在失焦时调用：locked/transient DocMgr（SearchHost/任务
+    // 管理器）会跳过 focus_gained，销毁后无法重建 → 候选永久不显示。失焦只需靠 Go 的
+    // WriteHide 经本进程 event 隐藏窗口。空操作安全。
+    void _DestroyHostWindow();
 
 public:
     // Perform full state sync with Go service (sends IMEActivated + processes response).

@@ -571,6 +571,19 @@ func (c *Coordinator) showUI() {
 	// had already been set up for the active process.
 	c.updateHostRenderState()
 
+	// host render: 候选内容更新（打字/翻页）时清除上一次 hover 残留的 tooltip。
+	// 本地候选窗靠"缩放时光标移出窗口→WM_MOUSELEAVE"偶然清除；host 模式鼠标在 DLL 处理，
+	// 内容更新不会自动产生 leave，故需在此显式清，否则"移出 tooltip 后不动鼠标继续打字"
+	// 旧 tooltip 会一直残留。高亮由 manager.doShowCandidates 内容变化分支重置 hostHoverIndex
+	// 处理；hover 刷新走 RefreshCandidates 不经过 showUI，故不影响正常悬停 tooltip。
+	if c.uiManager.IsHostRendering() {
+		c.cancelTooltipQuery()
+		c.tooltipMu.Lock()
+		c.tooltipHoverIdx = -1
+		c.tooltipMu.Unlock()
+		c.uiManager.HideTooltip()
+	}
+
 	// 设置拼音模式标记（影响右键菜单前移/后移启用状态）
 	isPinyin := c.engineMgr != nil && c.engineMgr.GetCurrentType() == engine.EngineTypePinyin
 	c.uiManager.SetPinyinMode(isPinyin)

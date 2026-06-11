@@ -168,3 +168,19 @@ type candidateContextMenuHandler interface {
 type candidateHoverHandler interface {
 	HandleCandidateHover(index int)
 }
+
+// hostCandidateHoverHandler 是 Windows host render 鼠标悬停的可选扩展接口。与
+// candidateHoverHandler（darwin, index-only）不同：Windows host render 的 tooltip
+// 由 Go 端窗口渲染，需要候选的屏幕锚点来定位（below/above 两个候选 Y 供 tooltip 子
+// 系统按工作区择优）。锚点由 DLL 据 host 窗口屏幕位置 + 命中矩形算出。index<0 表示
+// 离开候选区。Coordinator 实现, DeferredHandler 转发。
+type hostCandidateHoverHandler interface {
+	HandleCandidateHoverAt(index, tooltipX, tooltipBelowY, tooltipAboveY int)
+}
+
+// candidateScrollHandler 是 Windows host render 候选框鼠标滚轮的可选扩展接口。
+// delta 为原始滚轮增量（WHEEL_DELTA=120 的整数倍，正=上滚）。Coordinator 实现统一
+// 决策（默认不翻页，标准版本地候选窗也无滚轮翻页）；DeferredHandler 转发。
+type candidateScrollHandler interface {
+	HandleCandidateScroll(delta int)
+}

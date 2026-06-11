@@ -14,7 +14,7 @@
   - darwin: `~/Library/Application Support/WindInput<suffix>/bridge_push.sock` UDS
 
 平台特定能力:
-- **Win**: Host Render（命名共享内存 + 命名 Event 把候选词位图传给白名单宿主进程，绕过 Win11 开始菜单 Band 层级）
+- **Win**: Host Render（**单块全局命名共享内存** + **per-PID 命名 Event** 把候选词位图传给白名单宿主进程，绕过 Win11 开始菜单 Band 层级；SHM 共享省内存，event 按进程隔离防唤醒串扰）
 - **darwin**: Host Render（POSIX SHM `shm_open`+`mmap` 单段 `/WindInput_SHM`, Go 服务用 `gg` 渲染 `*image.RGBA` 写入, 经 push 通道 `CmdHostRenderFrame` 通知唯一消费者 IMKit `.app` mmap 同段贴 NSPanel）。Go 端是渲染源, IMKit `.app` 只 blit。
 
 二进制协议 (`internal/ipc.BinaryCodec`) 跨平台一致, IMKit `.app` 端写一份解码器同时服务 Win+macOS.
@@ -38,8 +38,8 @@
 | `server.go` | Named Pipe 服务端 (go-winio overlapped I/O; net.Conn 接口统一读写); Server struct 含 windows.Handle / push handle map / focus token 等 Win 特有字段; handleClient 对 `CmdIMEActivated`/`CmdFocusGained` 走「先 Ack 后处理」两段式 (processRequest 立即返回 Ack 释放 C++ 同步等待, 第二段同 goroutine 调 `runActivationHandlerAndPush` 经 push pipe 推状态) |
 | `server_handler.go` | 消息分发: 解码二进制消息并路由到 MessageHandler 各方法 (Win 端 Server method); `runActivationHandlerAndPush`(收 payload, FocusGained 时解出 InputScope bitmask 传给 `HandleFocusGained`)/`applyFocusGainedCaret` 实现 activation 异步化第二段; `PushActivationStatusToActiveClient` 把完整状态以 `CmdActivationStatusPush` 推回 C++ |
 | `server_push.go` | Push 管道管理 (per-client outbound channel + 单 writer goroutine + phase-2 死链监听; 所有 push 仅触达 active client); `PushActivationStatusToActiveClient` 用于 activation 异步化的状态回包 (含 hotkeys + hostRenderAvail)。**单写者不变式**: 所有出站消息 (含 CommitText/ClearComposition/UpdateComposition) 必须经 `enqueueBroadcast` 入 outbound 队列由 `pushWriterLoop` 单点写出, 禁止直写 conn (保序 + 不阻塞调用方); active client 定位统一走 `resolveActivePushClient` (token→PID→token 三段); `pushClient.Write` 带 `pushWriteTimeout` 30s 写超时覆盖半开连接 |
-| `host_render.go` | `HostRenderManager`: 白名单进程的宿主渲染状态; 通过 `OpenProcess`/`QueryFullProcessImageNameW` 识别进程名称 |
-| `shared_memory.go` | `SharedMemory`: 命名共享内存 + 命名事件; `WriteFrame` RGBA→BGRA 转换写入; AppContainer 低完整性标记 (`S:(ML;;NW;;;LW)`) 支持 UWP |
+| `host_render.go` | `HostRenderManager`: 白名单进程的宿主渲染状态; 通过 `OpenProcess`/`QueryFullProcessImageNameW` 识别进程名称。**单块全局 SHM + per-PID event 模型**: 全局一份 `SharedMemory`（懒建常驻，`winSHMName`，物理页跨进程共享→内存恒一份），每个 PID 一个私有 `NamedEvent`（`Local\WindInput_EVT_<PID>`）存于 `clients` map。白名单支持 `filepath.Match` 通配符（`*` 短路匹配全部→全局模式）。`HostRenderState.WriteFrame/WriteHide` 写共享 SHM 后只 signal **本进程**的 event（焦点进程才被 Go signal，背景进程渲染线程休眠→无串扰）。`SetupSeq` 防竞态保留；`CleanupClient` 只关该 PID event（不动全局 SHM），`CleanupAll` 关所有 event + 全局 SHM |
+| `shared_memory.go` | `SharedMemory`: 纯命名共享内存（**不含 event**，`WriteFrame`/`WriteHide` 不 signal，由调用方 signal）; `NamedEvent`: per-PID auto-reset 唤醒 event; `hostRenderSecurityAttributes` 共用 AppContainer 低完整性 SDDL (`S:(ML;;NW;;;LW)`) 给 SHM + event; `WriteFrame` RGBA→BGRA 转换写入 |
 
 ### darwin-only (`//go:build darwin`)
 | File | Description |
@@ -61,9 +61,14 @@
 - 推送管道按进程 ID（PID）跟踪客户端，`activeProcessID` 标识当前有焦点的进程，安全推送只发给活跃客户端
 - 请求处理带 1000ms 超时（`RequestProcessTimeout`），覆盖高负载下的调度抖动
 - 异步请求（`IsAsyncRequest`）不发送响应
-- **Host Render 流程**：C++ DLL 看到 `StatusHostRenderAvail` 标志后发送 `CmdHostRenderRequest`；Go 侧 `HostRenderManager.SetupHostRender` 为该进程创建共享内存并返回 `CmdHostRenderSetup` 响应，随后每次候选词更新通过 `SHM.WriteFrame` 推送位图
-- 共享内存命名规则：`Local\WindInput_SHM_<PID>`，事件命名：`Local\WindInput_EVT_<PID>`
-- `HostRenderManager.UpdateWhitelist` 在配置重载时调用
+- **Host Render 流程**：C++ DLL 看到 `StatusHostRenderAvail` 标志后发送 `CmdHostRenderRequest`；Go 侧 `HostRenderManager.SetupHostRender` 懒建**全局唯一**共享内存 + 为该 PID 建私有 event，返回 `CmdHostRenderSetup` 响应，随后焦点进程的候选词更新经 `HostRenderState.WriteFrame`（写共享 SHM + signal 本进程 event）推送位图
+- 共享内存命名：`Local\WindInput_SHM`（+变体后缀，全局唯一，物理页跨进程共享→内存恒一份）；事件命名：`Local\WindInput_EVT_<PID>`（**按 PID 隔离**）。**关键教训**：SHM 可共享但 event 绝不能共享——多个渲染线程争抢同一 auto-reset event 时 `SetEvent` 只唤醒其中一个（不确定），焦点进程拿不到帧→候选不显示（曾因合并 event 出现"切换后再也不显示"回归）
+- **失焦不销毁 HostWindow**：HostWindow 在失焦时常驻（靠 Go 的 `WriteHide`+本进程 event 隐藏）。**不可**在失焦时销毁——SearchHost/任务管理器用 XamlIsland locked/transient DocMgr，`OnSetFocus` 对其跳过 `focus_gained`，而 HostWindow 重建依赖 `focus_gained`，销毁后再也不会重建 → 候选永久不显示（已踩坑）。`_DestroyHostWindow` 只在 Deactivate / `_EnsureHostRenderSetup` 刷新时调用
+- **Host Render 鼠标交互（Win）**：候选命中矩形**内嵌进 SHM**——`SharedMemory.WriteFrame(img, x, y, rects []ipc.CandidateHitRect, renderedHover int)` 把矩形表写在像素数据之后（头部 `RectCount`/`RectsOffset`），与位图共享同一 sequence（无跨通道错位）；翻页按钮编码为 `Index=-1`(上页)/`-2`(下页)。`renderedHover`（hover 编码 >=0 候选/-1 无/-2 上翻页/-3 下翻页）写入头部 `RenderedHoverIndex`，DLL 每帧据此同步去重基线 `_lastHoverIndex`——修复"打字清高亮后鼠标停同一候选不重新高亮"（基线对齐屏幕真实高亮，而非 DLL 上次发出的 hover）。DLL 的 `CHostWindow::_WndProc` 命中测试后经 `SendAsync` 上报：左键→`CmdCandidateSelect`(index i32，负值=翻页按钮 -1/-2)、悬停→`CmdCandidateHover`(index + 屏幕锚点 anchorX/belowY/aboveY i32)、滚轮→`CmdCandidateScroll`(delta i32，**不**在 DLL 翻页)。server 端 `handleHostCandidateSelect`/`handleHostCandidateHover`/`handleHostCandidateScroll`（均在同步快速路径，因 DLL 走 async 不等响应）类型断言 `candidateSelector`/`hostCandidateHoverHandler`/`candidateScrollHandler` 派发到 Coordinator，复用与本地候选窗相同的 `handleCandidateSelect`/`handleCandidateHoverChange`/`handlePageUp/Down`（滚轮默认 no-op，标准版无滚轮翻页）
+- **host render 悬停高亮**：本地 `window` 在 host 模式始终隐藏，故 ① `Manager.RefreshCandidates` 不能再用 `window.IsVisible()` gate（改为 `hostRenderFunc != nil` 也放行）；② `doShowCandidates` 的 `hoverIndex` 改取 `Manager.hostHoverIndex`（由 `Coordinator.HandleCandidateHoverAt`→`SetHostHoverIndex` 同步，本地 window 的 hoverIndex 恒 -1 无法承载）；隐藏时 `doHide` 重置 hostHoverIndex
+- **host render 通用化对 composition 终止的影响**：`Coordinator.HandleCompositionTerminated` 不再对 host 模式一刀切忽略（那是 SearchHost 受限宿主"每次设 composition 即被终止"的特例）；改为按"距上次按键时间窗"判定（host 模式放宽到 500ms），紧跟按键的伪终止保留输入、用户点击移光标的真终止隐藏候选——否则普通应用（记事本）host render 时点击移光标候选框不消失
+- `hostCandidateHoverHandler`（protocol.go）是 Win 专用可选接口 `HandleCandidateHoverAt(index, tooltipX, belowY, aboveY)`，区别于 darwin 的 index-only `candidateHoverHandler`（Win tooltip 由 Go 端窗口渲染需屏幕锚点）；DeferredHandler 转发
+- `HostRenderManager.UpdateWhitelist` 在配置重载时调用（注：当前 compat 配置变更仍要求重启服务生效，见 `coordinator/reload_handler.go`）
 
 ### 红线：bridge handler 同步路径禁止「跨进程 Win32 / Shell 调用」
 

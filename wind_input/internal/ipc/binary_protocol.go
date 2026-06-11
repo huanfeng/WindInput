@@ -32,6 +32,7 @@ const (
 	CmdCandidateHover        uint16 = 0x020E // darwin: NSPanel 鼠标悬停候选 (payload: pageLocalIndex i32, -1=无悬停)
 	CmdCandidateContextMenu  uint16 = 0x020F // darwin: NSPanel 右键菜单动作 (payload: index i32 + actionLen u32 + action UTF-8)
 	CmdMenuAction            uint16 = 0x0210 // darwin: 统一菜单项被选中 (payload: id i32)
+	CmdCandidateScroll       uint16 = 0x0211 // Win host render: 候选框鼠标滚轮 (payload: delta i32, WHEEL_DELTA 倍数, 正=上滚); Go 统一决策, 默认不翻页
 	CmdCaretUpdate           uint16 = 0x0301 // Caret position update
 	CmdSelectionChanged      uint16 = 0x0302 // Selection/caret changed without composition (from ITfTextEditSink)
 	CmdCaretPending          uint16 = 0x0303 // First-show handshake: composition just started, real caret coming after reflow
@@ -299,6 +300,14 @@ const (
 
 	// MaxSharedRenderSize is the max shared memory allocation (4MB, covers ~1024x1024 BGRA)
 	MaxSharedRenderSize = 4 * 1024 * 1024
+
+	// HostRenderHitRectSize is the wire size of one candidate hit rect embedded in
+	// shared memory (index,x,y,w,h — 5×int32). Matches EncodeCandidateRects layout.
+	HostRenderHitRectSize = 20
+
+	// MaxHostRenderRects caps the embedded hit-rect table so a malformed count can
+	// never make the DLL read past the buffer (candidates/page + 2 page buttons).
+	MaxHostRenderRects = 256
 )
 
 // SharedRenderHeader is the header at the start of shared memory.
@@ -314,7 +323,24 @@ type SharedRenderHeader struct {
 	Height   uint32 // Bitmap height in pixels
 	Stride   uint32 // Bytes per row (width * 4)
 	DataSize uint32 // Total BGRA pixel data size in bytes
-	// 40 bytes used, 24 bytes reserved to reach 64
+
+	// Mouse hit-test geometry, embedded so rects and the bitmap they describe always
+	// share the same Sequence (no cross-channel skew). The rect table is RectCount
+	// CandidateHitRect entries (20 bytes each) starting at byte RectsOffset from the
+	// SHM base, i.e. right after the pixel data. RectCount==0 ⇒ no interactivity for
+	// this frame. Page buttons are encoded as rects with Index -1 (page up) / -2
+	// (page down), matching the darwin CmdCandidateRects convention.
+	RectCount   uint32 // [40:44] number of hit rects in the table (0 = none)
+	RectsOffset uint32 // [44:48] byte offset from SHM base to the rect table
+
+	// RenderedHoverIndex is the candidate index Go actually highlighted in THIS frame,
+	// using the hover encoding (>=0 candidate, -1 none, -2 page-up, -3 page-down). The
+	// Win host window syncs its hover-dedup baseline (_lastHoverIndex) to this value each
+	// frame, so when a content change (typing) clears the highlight without a mouse event,
+	// re-hovering the same candidate index afterwards still triggers a fresh hover (the DLL
+	// no longer dedups against a stale "still highlighted" assumption). darwin ignores it.
+	RenderedHoverIndex int32 // [48:52]
+	// 52 bytes used, 12 bytes reserved to reach 64
 }
 
 // HostRenderSetupPayload is sent from Go to DLL with shared memory details.

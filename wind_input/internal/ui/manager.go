@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/huanfeng/wind_input/internal/ipc"
 	"github.com/huanfeng/wind_input/internal/uicmd"
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/theme"
@@ -124,8 +125,19 @@ type Manager struct {
 
 	// Host render callback: when set, rendered bitmap is sent here instead of local window.
 	// Used for Band window proxy rendering in high-Band processes (e.g. Start Menu).
-	hostRenderFunc func(img *image.RGBA, x, y int) error
+	hostRenderFunc func(img *image.RGBA, x, y int, rects []ipc.CandidateHitRect, renderedHover int) error
 	hostHideFunc   func()
+	// hostHoverIndex 是 host render 模式下鼠标悬停的候选索引（页内 0-based，-1=无）。
+	// host 模式鼠标在 DLL 处理，本地 window 的 hoverIndex 永远为 -1，故单独跟踪供
+	// doShowCandidates 渲染高亮。由 coordinator 的 HandleCandidateHoverAt 设置。
+	hostHoverIndex int
+	// hostHoverPageBtn 是 host render 模式下鼠标悬停的翻页按钮（""=无 / "up" / "down"）。
+	// 与 hostHoverIndex 互斥（悬停候选时为 ""，悬停翻页按钮时 hostHoverIndex=-1）。
+	hostHoverPageBtn string
+	// hostVisible 镜像 host render 候选框的可见性（本地 window 在 host 模式恒隐藏，
+	// 无法承载"候选是否正在显示"）。doShowCandidates 成功推帧置 true、doHide 置 false，
+	// 让 RefreshCandidates 等"是否有候选可刷新"的判断与非 host 模式完全一致。
+	hostVisible bool
 
 	// maxCandidateChars 候选文本最大显示 rune 数（0 表示不限制）
 	maxCandidateChars int
@@ -154,22 +166,34 @@ func NewManager(logger *slog.Logger) *Manager {
 	themeManager := theme.NewManager(logger)
 
 	return &Manager{
-		window:        NewCandidateWindow(logger),
-		renderer:      NewRenderer(DefaultRenderConfig()),
-		toolbar:       NewToolbarWindow(logger),
-		tooltip:       NewTooltipWindow(logger),
-		status:        NewStatusWindow(logger),
-		toast:         NewToastWindow(logger),
-		themeManager:  themeManager,
-		logger:        logger,
-		readyCh:       make(chan struct{}),
-		cmdCh:         make(chan uicmdItem, 100), // Buffered channel to avoid blocking IPC
-		eventCh:       make(chan uicmd.Event, 100),
-		cmdEvent:      event,
-		globalHotkeys: &globalHotkeyState{logger: logger},
+		window:         NewCandidateWindow(logger),
+		renderer:       NewRenderer(DefaultRenderConfig()),
+		toolbar:        NewToolbarWindow(logger),
+		tooltip:        NewTooltipWindow(logger),
+		status:         NewStatusWindow(logger),
+		toast:          NewToastWindow(logger),
+		themeManager:   themeManager,
+		logger:         logger,
+		readyCh:        make(chan struct{}),
+		cmdCh:          make(chan uicmdItem, 100), // Buffered channel to avoid blocking IPC
+		eventCh:        make(chan uicmd.Event, 100),
+		cmdEvent:       event,
+		globalHotkeys:  &globalHotkeyState{logger: logger},
+		hostHoverIndex: -1, // -1 = 无悬停（默认不高亮任何候选）
 		// 注意：statusIndicator* 和 tooltipDelay 的默认值统一由 config.DefaultConfig() 提供，
 		// 通过 coordinator 初始化时调用对应的 Set/Update 方法设置。
 	}
+}
+
+// SetHostHover 设置 host render 模式下的悬停目标（候选索引 + 翻页按钮）。
+// index：页内 0-based 候选索引，-1=未悬停候选；pageBtn："" / "up" / "down"。
+// 两者互斥（悬停候选时 pageBtn=""，悬停翻页按钮时 index=-1）。由 coordinator 在收到
+// DLL 的 CmdCandidateHover 后调用；下一次 RefreshCandidates 重渲染据此高亮。
+func (m *Manager) SetHostHover(index int, pageBtn string) {
+	m.mu.Lock()
+	m.hostHoverIndex = index
+	m.hostHoverPageBtn = pageBtn
+	m.mu.Unlock()
 }
 
 // Start starts the UI manager (creates window and runs message loop)
@@ -512,7 +536,7 @@ func (m *Manager) UnregisterGlobalHotkeys() {
 // SetHostRenderFunc sets the host render callback.
 // When set, rendered bitmaps are sent to this function instead of the local window.
 // Pass nil to disable host rendering and resume local window rendering.
-func (m *Manager) SetHostRenderFunc(renderFunc func(img *image.RGBA, x, y int) error, hideFunc func()) {
+func (m *Manager) SetHostRenderFunc(renderFunc func(img *image.RGBA, x, y int, rects []ipc.CandidateHitRect, renderedHover int) error, hideFunc func()) {
 	m.mu.Lock()
 	m.hostRenderFunc = renderFunc
 	m.hostHideFunc = hideFunc
