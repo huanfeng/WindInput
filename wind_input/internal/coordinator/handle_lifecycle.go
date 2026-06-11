@@ -329,7 +329,14 @@ func (c *Coordinator) updateHostRenderState() {
 		c.uiManager.SetTooltipHostRenderFunc(nil, nil)
 	}
 
-	// TODO(Phase 2): StatusWindow 的 host render 接入（HostWindowStatus）。
+	// Status host render：同理，状态提示气泡也走 host render 避免被候选遮挡（纯显示）。
+	if stsWrite, stsHide := c.bridgeServer.GetActiveHostRenderFor(ipc.HostWindowStatus); stsWrite != nil {
+		c.uiManager.SetStatusHostRenderFunc(func(img *image.RGBA, x, y int) error {
+			return stsWrite(img, x, y, nil, -1)
+		}, stsHide)
+	} else {
+		c.uiManager.SetStatusHostRenderFunc(nil, nil)
+	}
 }
 
 // HandleFocusLost handles focus lost events (real focus change, e.g., user clicked another window).

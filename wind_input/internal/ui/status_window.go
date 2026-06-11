@@ -4,6 +4,7 @@ package ui
 
 import (
 	"fmt"
+	"image"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -74,8 +75,11 @@ type StatusWindow struct {
 
 	renderer *StatusRenderer
 
-	hostRenderFunc func(x, y int) error // 宿主渲染回调（由 Manager 设置）
-	hostHideFunc   func()               // 宿主隐藏回调
+	// Host render（高 Band 宿主进程）：非 nil 时把渲染好的 bitmap 经 SHM 送到宿主进程的
+	// 状态 band 窗口显示，本地 hwnd 保持隐藏。hostVisible 镜像 host 模式下的可见性。
+	hostRenderFunc func(img *image.RGBA, x, y int) error // 宿主渲染回调（由 Manager 设置）
+	hostHideFunc   func()                                // 宿主隐藏回调
+	hostVisible    bool
 }
 
 // 全局状态窗口注册表
@@ -243,6 +247,7 @@ func (w *StatusWindow) Show(x, y int) {
 	w.mouseHovering = false
 	w.mouseHasMoved = false
 	w.hasLastMousePos = false
+	hostRender := w.hostRenderFunc
 	w.mu.Unlock()
 
 	// 渲染状态图像
@@ -256,6 +261,25 @@ func (w *StatusWindow) Show(x, y int) {
 	w.height = img.Bounds().Dy()
 	w.mu.Unlock()
 
+	// Host render 路径：把 bitmap 送到宿主进程的状态 band 窗口，本地窗口保持隐藏。
+	if hostRender != nil {
+		if err := hostRender(img, x, y); err != nil {
+			// 宿主渲染失败（如进程重启后 SHM 失效）：清除陈旧回调，回退本地窗口。
+			w.logger.Error("Host render status failed, falling back to local", "error", err)
+			w.mu.Lock()
+			w.hostRenderFunc = nil
+			w.hostHideFunc = nil
+			w.hostVisible = false
+			w.mu.Unlock()
+		} else {
+			w.mu.Lock()
+			w.hostVisible = true
+			w.mu.Unlock()
+			procShowWindow.Call(uintptr(w.hwnd), SW_HIDE) // 隐藏本地窗口（已隐藏无副作用）
+			return
+		}
+	}
+
 	// 更新分层窗口
 	if err := UpdateLayeredWindowFromImage(w.hwnd, img, x, y); err != nil {
 		w.logger.Warn("更新状态窗口失败", "error", err)
@@ -265,17 +289,29 @@ func (w *StatusWindow) Show(x, y int) {
 	procShowWindow.Call(uintptr(w.hwnd), SW_SHOWNA)
 }
 
-// Hide 隐藏状态窗口
+// Hide 隐藏状态窗口。host 模式下经 SHM 隐藏宿主进程的状态 band 窗口；否则隐藏本地窗口。
 func (w *StatusWindow) Hide() {
-	if w.hwnd == 0 {
-		return
-	}
-
 	// 同时隐藏弹出菜单
 	if w.popupMenu != nil && w.popupMenu.IsVisible() {
 		w.popupMenu.Hide()
 	}
 
+	w.mu.Lock()
+	hostHide := w.hostHideFunc
+	w.mu.Unlock()
+
+	if hostHide != nil {
+		hostHide()
+		w.mu.Lock()
+		w.visible = false
+		w.hostVisible = false
+		w.mu.Unlock()
+		return
+	}
+
+	if w.hwnd == 0 {
+		return
+	}
 	procShowWindow.Call(uintptr(w.hwnd), SW_HIDE)
 
 	w.mu.Lock()
@@ -388,11 +424,15 @@ func (w *StatusWindow) SetMenuFontSize(size float64) {
 	}
 }
 
-// SetHostRenderFunc 设置宿主渲染回调
-func (w *StatusWindow) SetHostRenderFunc(fn func(x, y int) error) {
+// SetHostRenderFunc 设置宿主渲染回调。非 nil 时 Show 把 bitmap 经 SHM 送宿主进程的状态
+// band 窗口，本地窗口保持隐藏；传 nil 恢复本地窗口渲染。
+func (w *StatusWindow) SetHostRenderFunc(fn func(img *image.RGBA, x, y int) error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.hostRenderFunc = fn
+	if fn == nil {
+		w.hostVisible = false
+	}
 }
 
 // SetHostHideFunc 设置宿主隐藏回调
@@ -650,16 +690,8 @@ func (w *StatusWindow) scheduleHide() {
 			return
 		}
 
-		// 调用宿主隐藏函数或直接隐藏
-		w.mu.Lock()
-		hideFn := w.hostHideFunc
-		w.mu.Unlock()
-
-		if hideFn != nil {
-			hideFn()
-		} else {
-			w.Hide()
-		}
+		// 直接隐藏（Hide 内部按 host/local 分流）
+		w.Hide()
 	}()
 }
 

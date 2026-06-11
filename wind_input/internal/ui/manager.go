@@ -561,6 +561,18 @@ func (m *Manager) SetTooltipHostRenderFunc(renderFunc func(img *image.RGBA, x, y
 	}
 }
 
+// SetStatusHostRenderFunc wires the status window's host render callback (高 Band 宿主进程
+// 下状态提示气泡也走 host render，避免被候选 band 窗口遮挡)。传 nil 恢复本地渲染。
+func (m *Manager) SetStatusHostRenderFunc(renderFunc func(img *image.RGBA, x, y int) error, hideFunc func()) {
+	m.mu.Lock()
+	sw := m.status
+	m.mu.Unlock()
+	if sw != nil {
+		sw.SetHostRenderFunc(renderFunc)
+		sw.SetHostHideFunc(hideFunc)
+	}
+}
+
 // SetToolbarCallbacks sets the callbacks for toolbar actions.
 // 用 wrapToolbarCallbacks 包装传入 callbacks, 每次触发同时推一份 EvtToolbarClick。
 func (m *Manager) SetToolbarCallbacks(callbacks *ToolbarCallback) {

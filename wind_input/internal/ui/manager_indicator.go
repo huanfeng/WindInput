@@ -81,31 +81,11 @@ func (m *Manager) doShowStatus(state StatusState, x, y int) {
 		m.status.ResetDragPosition()
 	}
 
-	// Host render 路径
+	// 更新内部状态并显示（Show 内部按 host/local 分流）
 	m.status.mu.Lock()
-	hostRender := m.status.hostRenderFunc
+	m.status.state = state
 	m.status.mu.Unlock()
-
-	if hostRender != nil {
-		// 先更新状态以便宿主渲染
-		m.status.mu.Lock()
-		m.status.state = state
-		m.status.mu.Unlock()
-
-		if err := hostRender(finalX, finalY); err != nil {
-			m.logger.Error("Host render status indicator failed", "error", err)
-		}
-		if m.status.IsVisible() {
-			m.status.Hide()
-		}
-	} else {
-		// 更新内部状态并显示
-		m.status.mu.Lock()
-		m.status.state = state
-		m.status.mu.Unlock()
-
-		m.status.Show(finalX, finalY)
-	}
+	m.status.Show(finalX, finalY)
 
 	// 临时模式下启动自动隐藏
 	if cfg.DisplayMode == StatusDisplayModeTemp {
@@ -118,13 +98,7 @@ func (m *Manager) doHideStatus() {
 	if m.status == nil {
 		return
 	}
-	m.status.mu.Lock()
-	hostHide := m.status.hostHideFunc
-	m.status.mu.Unlock()
-	if hostHide != nil {
-		hostHide()
-	}
-	m.status.Hide()
+	m.status.Hide() // Hide 内部按 host/local 分流
 }
 
 // HideTooltip hides the tooltip and cancels any pending delayed show

@@ -25,10 +25,11 @@ const processQueryLimitedInformation = 0x1000
 
 // hostRenderKinds 列出当前接入 host render 的窗口种类。每类有独立的 SHM 段 + per-PID
 // 唤醒 event + DLL band 窗口——因为候选/tooltip/状态窗可能同时可见，不能共用单 bitmap
-// 通道。Phase 1 接入候选 + tooltip；状态窗（HostWindowStatus）在 Phase 2 加入此列表。
+// 通道。DLL 侧 _EnsureHostRenderSetup 通用遍历条目建窗，新增种类只需加入此列表。
 var hostRenderKinds = []ipc.HostWindowKind{
 	ipc.HostWindowCandidate,
 	ipc.HostWindowTooltip,
+	ipc.HostWindowStatus,
 }
 
 // winSHMNameFor 返回某窗口种类的全局 SHM 段名。候选保持原名（向后兼容），其余加后缀。
