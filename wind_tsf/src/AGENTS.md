@@ -163,11 +163,11 @@ level=debug  # off | error | warn | info | debug | trace
 - `CHostWindow::Uninitialize()` - 停止渲染线程，销毁窗口，解除共享内存映射
 - `CHostWindow::_ResolveAPIs()` - 动态从 user32.dll 获取 `CreateWindowInBand` 和 `GetWindowBand` 函数指针
 - `CHostWindow::_GetHostBand()` - 获取宿主进程前台窗口的 DWM Band 等级
-- `CHostWindow::_CreateBandWindow()` - 在指定 Band 等级创建 `WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` 无边框窗口；建后 `SetWindowLongPtr(GWLP_USERDATA, this)` 供静态 `_WndProc` 取实例
+- `CHostWindow::_CreateBandWindow()` - 在指定 Band 等级创建 `WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` 无边框窗口；建后 `SetWindowLongPtr(GWLP_USERDATA, this)` 供静态 `_WndProc` 取实例。**band 回退**：受限 UWP/AppContainer 宿主（微软商店 `WinStore.App.exe` 等）下 `CreateWindowInBand(band=1, ZBID_DESKTOP)` 返回 `ERROR_INVALID_PARAMETER(87)`；失败且 band≠0 时自动回退 `band=0`(`ZBID_DEFAULT`) 重试（这类宿主本不在高 band，`WS_EX_TOPMOST`+owner 即可保层级）
 - `CHostWindow::_RenderThread()` / `_RenderLoop()` - 渲染线程：等待事件信号 → 读取 SharedRenderHeader → 跳过过期帧 → **帧定向过滤**（`!visible || header.targetInstanceId != _instanceId` → `_HideWindow` 后 continue，否则才渲染）→ `_RenderFrame()`。同进程多实例（如两个记事本窗口）共用单块 SHM、各等独立 event，Go signal 全部实例并盖 `targetInstanceId`，仅目标实例渲染、兄弟实例自隐藏——修复"两层候选只隐一个"
 - `CHostWindow::_RenderFrame()` - 先 `_UpdateHitRects()` 快照内嵌命中矩形（render 线程写、UI 线程读，`_rectLock` 守护），再将像素数据经 `UpdateLayeredWindow` 渲染到分层窗口
 - `CHostWindow::_WndProc()` - 静态窗口过程，经 GWLP_USERDATA 取实例后路由鼠标（**仅 `_windowKind==HOST_WINDOW_CANDIDATE` 路由；tooltip/状态纯显示落 DefWindowProc**）：`WM_LBUTTONDOWN`→`_OnMouseClick`（命中→`CmdCandidateSelect` index/翻页）、`WM_MOUSEMOVE`+`WM_MOUSELEAVE`→`_OnMouseMove`/`_OnMouseLeave`（悬停→`CmdCandidateHover` index+屏幕锚点）、`WM_MOUSEWHEEL`→`_OnMouseWheel`（原始 delta→`CmdCandidateScroll`，**不**在 DLL 翻页，交 Go 决策）；均经 `SendAsync` 异步发送不阻塞宿主 UI 线程。`WM_MOUSEACTIVATE`→`MA_NOACTIVATE` 对所有 kind 生效（防夺焦）
-- **多 host 窗口**：`CTextService::_pHostWindow[HOST_WINDOW_KIND_COUNT]` 每 kind 一个 CHostWindow。`_EnsureHostRenderSetup` 遍历 `ServiceResponse.hostRenderSetups`（CMD_HOST_RENDER_SETUP 多条目）两趟建窗：先候选（pass 0，作 z-order owner），再 tooltip/状态（pass 1，owner=候选 hwnd）。band 变化整组重建（保持 owner 一致）；`_DestroyHostWindow` 反序销毁（owned 先于 owner）
+- **多 host 窗口**：`CTextService::_pHostWindow[HOST_WINDOW_KIND_COUNT]` 每 kind 一个 CHostWindow。`_EnsureHostRenderSetup` 遍历 `ServiceResponse.hostRenderSetups`（CMD_HOST_RENDER_SETUP 多条目）两趟建窗：先候选（pass 0，作 z-order owner），再 tooltip/状态（pass 1，owner=候选 hwnd）。band 变化整组重建（保持 owner 一致）；`_DestroyHostWindow` 反序销毁（owned 先于 owner）。**失败上报**：建窗后候选仍为 null（band=0 回退也失败）或 setup 请求失败时，经 `SendAsync(CMD_HOST_RENDER_FAILED, reason u32)` 通知 Go（中央日志可观测 + 按 PID 去重 toast 提示用户已回退本地窗口）
 - `CHostWindow::_HitTest()` - 客户区坐标命中测试 `_hitRects`，候选(≥0)优先于翻页按钮(-1/-2)，无命中返回 `INT_MIN`
 - `CHostWindow::_HideWindow()` - 隐藏窗口（候选框消失时调用），同时清空 `_hitRects` 与悬停状态防止贴到隐藏帧
 

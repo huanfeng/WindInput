@@ -2207,11 +2207,17 @@ void CTextService::_EnsureHostRenderSetup(const ServiceResponse& response, BOOL 
         else
         {
             WIND_LOG_WARN(L"Candidate host window missing after setup, falling back to Go window\n");
+            // Tell Go so it can log centrally + notify the user the candidate fell back to its
+            // local window (e.g. restricted UWP hosts where even band=0 CreateWindowInBand fails).
+            uint32_t reason = HOST_RENDER_FAIL_WINDOW_CREATE;
+            _pIPCClient->SendAsync(CMD_HOST_RENDER_FAILED, &reason, sizeof(reason));
         }
     }
     else
     {
         WIND_LOG_WARN(L"Host render setup request failed, falling back to Go window\n");
+        uint32_t reason = HOST_RENDER_FAIL_WINDOW_CREATE;
+        _pIPCClient->SendAsync(CMD_HOST_RENDER_FAILED, &reason, sizeof(reason));
     }
 }
 

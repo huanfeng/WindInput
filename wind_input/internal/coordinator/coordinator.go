@@ -204,6 +204,10 @@ type Coordinator struct {
 	version      string         // App version for display in menu
 	memTrim      idleMemTrimmer // 空闲内存修剪器（见 mem_idle_trim.go）
 
+	// hostRenderFailedPIDs 记录已就「host render 建窗失败」提示过的宿主 PID，按 PID 去重
+	// 一会话一次，避免 DLL 每次焦点/激活重试失败都刷屏 toast。守护于 c.mu，懒初始化。
+	hostRenderFailedPIDs map[uint32]struct{}
+
 	mu    sync.Mutex
 	cfgMu *sync.RWMutex // 与 rpc.Server 共享，守护 *config 读写（cfgMu → mu 顺序）
 

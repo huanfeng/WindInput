@@ -52,9 +52,10 @@ func (s *Server) processRequestWithTimeout(header *ipc.IpcHeader, payload []byte
 	case ipc.CmdKeyEvent, ipc.CmdCommitRequest,
 		ipc.CmdFocusGained, ipc.CmdFocusLost, ipc.CmdIMEActivated,
 		ipc.CmdCompositionTerminated, ipc.CmdCaretUpdate, ipc.CmdCaretPending, ipc.CmdHostRenderRequest,
-		ipc.CmdCandidateSelect, ipc.CmdCandidateHover, ipc.CmdCandidateScroll:
-		// host render 鼠标事件：DLL 走 SendAsync（不等响应），仅做轻量分发到
-		// coordinator goroutine，必须留在同步快速路径，绝不能进 goroutine+timeout。
+		ipc.CmdCandidateSelect, ipc.CmdCandidateHover, ipc.CmdCandidateScroll, ipc.CmdHostRenderFailed:
+		// host render 鼠标/失败事件：DLL 走 SendAsync（不等响应），仅做轻量分发到
+		// coordinator goroutine，必须留在同步快速路径，绝不能进 goroutine+timeout
+		// （否则 GetProcessName syscall 偶发变慢会误触 timeout 误报 + 回多余 Ack）。
 		return s.processRequest(header, payload, clientID, processID)
 	}
 
@@ -211,6 +212,9 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 
 	case ipc.CmdCandidateScroll:
 		return s.handleHostCandidateScroll(payload)
+
+	case ipc.CmdHostRenderFailed:
+		return s.handleHostRenderFailed(payload, processID)
 
 	case ipc.CmdInputStats:
 		return s.handleInputStats(payload, clientID)
@@ -655,6 +659,20 @@ func (s *Server) handleHostCandidateScroll(payload []byte) []byte {
 		if h, ok := s.handler.(candidateScrollHandler); ok {
 			h.HandleCandidateScroll(delta)
 		}
+	}
+	return s.codec.EncodeAck()
+}
+
+// handleHostRenderFailed 处理 DLL 上报的 host render 建窗失败（DLL 经 CmdHostRenderFailed
+// 异步上报，无响应写回）。payload = reason u32。经可选接口 hostRenderFailureReporter 派发
+// 到 Coordinator（按 PID 去重记 WARN 日志 + 提示用户已回退本地候选窗）。
+func (s *Server) handleHostRenderFailed(payload []byte, processID uint32) []byte {
+	var reason uint32
+	if len(payload) >= 4 {
+		reason = binary.LittleEndian.Uint32(payload[0:4])
+	}
+	if h, ok := s.handler.(hostRenderFailureReporter); ok {
+		h.HandleHostRenderFailed(processID, reason)
 	}
 	return s.codec.EncodeAck()
 }

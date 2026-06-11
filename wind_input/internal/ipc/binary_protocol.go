@@ -33,6 +33,7 @@ const (
 	CmdCandidateContextMenu  uint16 = 0x020F // darwin: NSPanel 右键菜单动作 (payload: index i32 + actionLen u32 + action UTF-8)
 	CmdMenuAction            uint16 = 0x0210 // darwin: 统一菜单项被选中 (payload: id i32)
 	CmdCandidateScroll       uint16 = 0x0211 // Win host render: 候选框鼠标滚轮 (payload: delta i32, WHEEL_DELTA 倍数, 正=上滚); Go 统一决策, 默认不翻页
+	CmdHostRenderFailed      uint16 = 0x0212 // Win host render: DLL 建 band 窗口失败 (async, payload: reason u32)，Go 据此记日志/提示用户已回退本地窗口
 	CmdCaretUpdate           uint16 = 0x0301 // Caret position update
 	CmdSelectionChanged      uint16 = 0x0302 // Selection/caret changed without composition (from ITfTextEditSink)
 	CmdCaretPending          uint16 = 0x0303 // First-show handshake: composition just started, real caret coming after reflow
@@ -119,6 +120,11 @@ const ConfigKeyStats = "stats"
 // Host render commands (C++ -> Go)
 const (
 	CmdHostRenderRequest uint16 = 0x0501 // DLL requests host render setup after seeing HOST_RENDER flag
+)
+
+// Host render failure reasons (CmdHostRenderFailed payload, uint32 little-endian).
+const (
+	HostRenderFailWindowCreate uint32 = 1 // band 窗口创建失败（CreateWindowInBand 在目标 band 与 band=0 均失败）
 )
 
 // Key event types

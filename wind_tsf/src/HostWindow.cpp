@@ -427,6 +427,20 @@ BOOL CHostWindow::_CreateBandWindow(DWORD band)
         band
     );
 
+    // CreateWindowInBand rejects band=1 (ZBID_DESKTOP) with ERROR_INVALID_PARAMETER (87) in
+    // restricted UWP/AppContainer hosts — notably the Microsoft Store (WinStore.App.exe).
+    // Retry at band=0 (ZBID_DEFAULT, the process's normal band): these hosts aren't in a high
+    // band anyway, so WS_EX_TOPMOST + the foreground owner keep the candidate above content.
+    if (!_hwnd && band != 0)
+    {
+        DWORD err = GetLastError();
+        WIND_LOG_WARN_FMT(L"HostWindow: CreateWindowInBand failed at band=%u err=%u, retrying at band=0\n", band, err);
+        band = 0;
+        _hwnd = _pfnCreateWindowInBand(
+            exStyle, _wndClassAtom, L"", style, 0, 0, 1, 1,
+            owner, NULL, g_hInstance, NULL, band);
+    }
+
     if (!_hwnd)
     {
         WIND_LOG_ERROR_FMT(L"HostWindow: CreateWindowInBand failed, band=%u, err=%u\n", band, GetLastError());

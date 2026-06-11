@@ -188,3 +188,10 @@ type hostCandidateHoverHandler interface {
 type candidateScrollHandler interface {
 	HandleCandidateScroll(delta int)
 }
+
+// hostRenderFailureReporter 是 Windows host render 建窗失败的可选上报接口。DLL 在 band
+// 窗口创建失败、候选回退本地窗口时经 CmdHostRenderFailed 异步通知；Coordinator 实现：
+// 按 PID 去重，记 WARN 日志并提示用户。DeferredHandler 转发。
+type hostRenderFailureReporter interface {
+	HandleHostRenderFailed(processID uint32, reason uint32)
+}

@@ -2,6 +2,13 @@
 
 package coordinator
 
+import (
+	"fmt"
+
+	"github.com/huanfeng/wind_input/internal/bridge"
+	"github.com/huanfeng/wind_input/internal/ui"
+)
+
 // 本文件集中 Windows host render（宿主进程代理渲染）模式下的鼠标交互导出包装。
 // host render 时候选框是宿主进程内的 Band 分层窗口，鼠标消息在 DLL 的 _WndProc
 // 命中测试后经 CmdCandidateSelect / CmdCandidateHover 异步上报，bridge server 类型
@@ -42,6 +49,51 @@ func (c *Coordinator) HandleCandidateSelect(index int) {
 func (c *Coordinator) HandleCandidateScroll(delta int) {
 	c.logger.Debug("Host render mouse scroll (no-op by default)", "delta", delta)
 	// TODO: 统一滚轮逻辑（配置开关 + 翻页/选词策略）后在此实现。
+}
+
+// HandleHostRenderFailed 处理 DLL 上报的 host render 建窗失败（经 CmdHostRenderFailed 异步
+// 上报）。受限宿主（如微软商店等 UWP 进程）下 CreateWindowInBand 即便回退 band=0 仍可能
+// 失败，候选框回退本地窗口（在这类宿主里可能仍被遮挡）。这里把失败集中暴露：记 WARN
+// 日志（DLL 自有日志在各宿主进程内，Go 中央日志原本看不到），并按 PID 去重弹一次 toast
+// 告知用户。reason 见 ipc.HostRenderFail*。
+func (c *Coordinator) HandleHostRenderFailed(processID uint32, reason uint32) {
+	procName := bridge.GetProcessName(processID) // syscall：放在 c.mu 之外
+
+	c.mu.Lock()
+	if c.hostRenderFailedPIDs == nil {
+		c.hostRenderFailedPIDs = make(map[uint32]struct{})
+	}
+	_, seen := c.hostRenderFailedPIDs[processID]
+	if !seen {
+		c.hostRenderFailedPIDs[processID] = struct{}{}
+	}
+	c.mu.Unlock()
+
+	if seen {
+		// 同一宿主反复失败（每次焦点/激活重试）只首次提示，其余降为 Debug 防刷屏。
+		c.logger.Debug("Host render failed (already reported for this PID)",
+			"pid", processID, "reason", reason)
+		return
+	}
+
+	c.logger.Warn("Host render unavailable for process; candidate fell back to local window",
+		"pid", processID, "process", procName, "reason", reason)
+
+	if c.uiManager == nil {
+		return
+	}
+	appLabel := procName
+	if appLabel == "" {
+		appLabel = "该程序"
+	}
+	// ShowToast 非阻塞（内部 cmdCh 非阻塞发送），在 c.mu 之外调用，避免触碰 UI 阻塞红线。
+	c.uiManager.ShowToast(ui.ToastOptions{
+		Title:    "候选框宿主渲染不可用",
+		Message:  fmt.Sprintf("「%s」不支持候选框宿主渲染，已回退普通候选窗。", appLabel),
+		Level:    ui.ToastWarn,
+		Position: ui.ToastBottomRight,
+		Duration: 5000,
+	})
 }
 
 // HandleCandidateHoverAt 处理 host 窗口的鼠标悬停（DLL 经 CmdCandidateHover 异步上报）。

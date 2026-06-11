@@ -230,6 +230,13 @@ func (d *DeferredHandler) HandleCandidateScroll(delta int) {
 	}
 }
 
+// HandleHostRenderFailed 转发 host render 建窗失败上报 (Windows, Coordinator 实现)。
+func (d *DeferredHandler) HandleHostRenderFailed(processID uint32, reason uint32) {
+	if h, ok := d.getHandler().(hostRenderFailureReporter); ok {
+		h.HandleHostRenderFailed(processID, reason)
+	}
+}
+
 // UnifiedMenuItems 转发: 取底层 handler 构建的统一菜单树 (Coordinator 实现)。
 func (d *DeferredHandler) UnifiedMenuItems() []MenuItem {
 	if h, ok := d.getHandler().(unifiedMenuHandler); ok {
