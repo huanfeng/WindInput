@@ -254,6 +254,12 @@ func (c *Coordinator) UpdateHotkeyConfig(hotkeyConfig *config.HotkeyConfig) {
 		c.uiManager.RegisterGlobalHotkeys(c.buildGlobalHotkeyEntries())
 	}
 
+	// activate_ime 走 Windows DirectSwitchHotkeys（per-app 切换到本输入法），
+	// 同步到注册表使新键即时生效（ctfmon 监听变更）。
+	if err := ui.SyncDirectSwitchHotkey(hotkeyConfig.ActivateIME); err != nil {
+		c.logger.Warn("Failed to sync activate_ime DirectSwitch hotkey", "error", err)
+	}
+
 	c.logger.Debug("Hotkey config updated",
 		"toggleModeKeys", hotkeyConfig.ToggleModeKeys,
 		"switchEngine", hotkeyConfig.SwitchEngine)

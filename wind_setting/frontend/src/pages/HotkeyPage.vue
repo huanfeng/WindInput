@@ -377,20 +377,30 @@ const composerItems = [
     hint: "开关简体输入→繁体输出（变体在「输入 → 简入繁出」中选择）",
   },
   {
+    field: "activate_ime",
+    label: "切换到本输入法",
+    hint: "在任意应用中一键切换到本输入法",
+  },
+  {
     field: "take_screenshot",
     label: "输入法界面截图",
     hint: "保存当前可见的候选窗、工具栏、菜单等界面为图片文件",
   },
 ];
 
-// macOS 上截图为 no-op（界面由 IMKit .app 渲染，Go 端无可截窗口），隐藏该项
+// macOS 上截图和 activate_ime 均为 no-op，隐藏这两项
 const visibleComposerItems = computed(() =>
   props.isMac
-    ? composerItems.filter((item) => item.field !== "take_screenshot")
+    ? composerItems.filter(
+        (item) =>
+          item.field !== "take_screenshot" && item.field !== "activate_ime",
+      )
     : composerItems,
 );
 
-// macOS 无 Windows 低级键盘钩子，「全局」热键不生效，隐藏该开关
+// macOS 无 Windows 低级键盘钩子，「全局」热键不生效，隐藏该开关。
+// activate_ime 走 Windows 系统级 DirectSwitch（per-app 切换），不是 RegisterHotKey
+// 全局热键，由系统负责监听，无需也不应显示「全局」开关。
 function showGlobalFor(field: string): boolean {
   if (props.isMac) return false;
   return field === "open_settings" || field === "take_screenshot";

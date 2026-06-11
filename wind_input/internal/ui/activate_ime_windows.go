@@ -9,6 +9,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/huanfeng/wind_input/pkg/buildvariant"
 	"golang.org/x/sys/windows"
 )
 
@@ -24,9 +25,15 @@ const (
 	coinitApartmentThreaded     uintptr = 0x2
 	clsctxInprocServer          uintptr = 0x1
 	tfProfileTypeInputProcessor uintptr = 1
-	tfIPPMFDontCareCurrentLang  uintptr = 0x00020000
-	langidSimplifiedChinese     uintptr = 0x0804
-	rpcEChangedMode             uintptr = 0x80010106
+	// TF_IPPMF_* flags（值取自 msctf.idl，勿臆测）：
+	//   FORSESSION                   = 0x20000000：为当前桌面所有线程激活。TSF 框架下这是
+	//                                  唯一能「从任意当前输入语言立即切到中文 TIP」的方式；
+	//                                  per-thread 激活在语言不匹配时只标记待激活、不立即切换。
+	//   DONTCARECURRENTINPUTLANGUAGE = 0x00000004：当前输入语言与目标不匹配时仍激活
+	tfIPPMFForSession          uintptr = 0x20000000
+	tfIPPMFDontCareCurrentLang uintptr = 0x00000004
+	langidSimplifiedChinese    uintptr = 0x0804
+	rpcEChangedMode            uintptr = 0x80010106
 )
 
 // CLSID_TF_InputProcessorProfiles = {33C53A50-F456-4884-B049-85FD643ECFED}
@@ -37,28 +44,33 @@ var clsidTFInputProcessorProfiles = windows.GUID{
 	Data4: [8]byte{0xB0, 0x49, 0x85, 0xFD, 0x64, 0x3E, 0xCF, 0xED},
 }
 
-// IID_ITfInputProcessorProfileMgr = {71C6E74D-0F28-11D8-A82A-00065B84435C}
+// IID_ITfInputProcessorProfileMgr = {71C6E74C-0F28-11D8-A82A-00065B84435C}
 var iidITfInputProcessorProfileMgr = windows.GUID{
-	Data1: 0x71C6E74D,
+	Data1: 0x71C6E74C,
 	Data2: 0x0F28,
 	Data3: 0x11D8,
 	Data4: [8]byte{0xA8, 0x2A, 0x00, 0x06, 0x5B, 0x84, 0x43, 0x5C},
 }
 
-// WindInput TSF CLSID = {99C2EE30-5C57-45A2-9C63-FB54B34FD90A}
-var windInputCLSID = windows.GUID{
-	Data1: 0x99C2EE30,
-	Data2: 0x5C57,
-	Data3: 0x45A2,
-	Data4: [8]byte{0x9C, 0x63, 0xFB, 0x54, 0xB3, 0x4F, 0xD9, 0x0A},
-}
-
-// WindInput guidProfile = {99C2EE31-5C57-45A2-9C63-FB54B34FD90A}
-var windInputGUIDProfile = windows.GUID{
-	Data1: 0x99C2EE31,
-	Data2: 0x5C57,
-	Data3: 0x45A2,
-	Data4: [8]byte{0x9C, 0x63, 0xFB, 0x54, 0xB3, 0x4F, 0xD9, 0x0A},
+// windInputGUIDs 根据构建变体返回 (CLSID, guidProfile)。
+// Release: EE30/EE31；Debug 变体: DEB0/DEB1（与 Globals.cpp #ifdef WIND_DEBUG_VARIANT 对应）。
+func windInputGUIDs() (clsid, guidProfile windows.GUID) {
+	if buildvariant.IsDebug() {
+		// {99C2DEB0-5C57-45A2-9C63-FB54B34FD90A}
+		clsid = windows.GUID{Data1: 0x99C2DEB0, Data2: 0x5C57, Data3: 0x45A2,
+			Data4: [8]byte{0x9C, 0x63, 0xFB, 0x54, 0xB3, 0x4F, 0xD9, 0x0A}}
+		// {99C2DEB1-5C57-45A2-9C63-FB54B34FD90A}
+		guidProfile = windows.GUID{Data1: 0x99C2DEB1, Data2: 0x5C57, Data3: 0x45A2,
+			Data4: [8]byte{0x9C, 0x63, 0xFB, 0x54, 0xB3, 0x4F, 0xD9, 0x0A}}
+		return
+	}
+	// {99C2EE30-5C57-45A2-9C63-FB54B34FD90A}
+	clsid = windows.GUID{Data1: 0x99C2EE30, Data2: 0x5C57, Data3: 0x45A2,
+		Data4: [8]byte{0x9C, 0x63, 0xFB, 0x54, 0xB3, 0x4F, 0xD9, 0x0A}}
+	// {99C2EE31-5C57-45A2-9C63-FB54B34FD90A}
+	guidProfile = windows.GUID{Data1: 0x99C2EE31, Data2: 0x5C57, Data3: 0x45A2,
+		Data4: [8]byte{0x9C, 0x63, 0xFB, 0x54, 0xB3, 0x4F, 0xD9, 0x0A}}
+	return
 }
 
 const activateIMETimeout = 3 * time.Second
@@ -106,6 +118,8 @@ func activateIMEOnCurrentThread() error {
 	}
 	defer comRelease(pObj)
 
+	clsid, guidProfile := windInputGUIDs()
+
 	// vtable[3] = ActivateProfile（IUnknown 占 0-2）
 	vtblPtr := *(*uintptr)(unsafe.Pointer(pObj))
 	vtbl := (*[10]uintptr)(unsafe.Pointer(vtblPtr))
@@ -113,10 +127,10 @@ func activateIMEOnCurrentThread() error {
 		pObj,
 		tfProfileTypeInputProcessor,
 		langidSimplifiedChinese,
-		uintptr(unsafe.Pointer(&windInputCLSID)),
-		uintptr(unsafe.Pointer(&windInputGUIDProfile)),
+		uintptr(unsafe.Pointer(&clsid)),
+		uintptr(unsafe.Pointer(&guidProfile)),
 		0, // hkl = NULL（TIP 不使用）
-		tfIPPMFDontCareCurrentLang,
+		tfIPPMFForSession|tfIPPMFDontCareCurrentLang,
 	)
 	if hr != 0 {
 		return fmt.Errorf("ITfInputProcessorProfileMgr::ActivateProfile: 0x%08X", uint32(hr))
@@ -128,7 +142,9 @@ func activateIMEOnCurrentThread() error {
 func (m *Manager) ActivateIME() {
 	if err := ActivateIME(); err != nil {
 		m.logger.Warn("ActivateIME failed", "error", err)
+		return
 	}
+	m.logger.Debug("ActivateIME succeeded")
 }
 
 func comRelease(p uintptr) {

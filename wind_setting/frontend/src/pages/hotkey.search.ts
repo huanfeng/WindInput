@@ -145,6 +145,15 @@ export const entries: SearchEntry[] = [
     anchor: "hotkeys.toggle_s2t",
   },
   {
+    id: "hotkeys.activate_ime",
+    tab,
+    tabLabel,
+    card: "功能快捷键",
+    title: "切换到本输入法",
+    hint: "一键切换到本输入法",
+    anchor: "hotkeys.activate_ime",
+  },
+  {
     id: "hotkeys.take_screenshot",
     tab,
     tabLabel,

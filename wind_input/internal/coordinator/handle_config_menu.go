@@ -301,7 +301,8 @@ func (c *Coordinator) buildGlobalHotkeyEntries() []ui.GlobalHotkeyEntry {
 		"open_settings":     c.config.Hotkeys.OpenSettings,
 		"add_word":          c.config.Hotkeys.AddWord,
 		"take_screenshot":   c.config.Hotkeys.TakeScreenshot,
-		"activate_ime":      c.config.Hotkeys.ActivateIME,
+		// 注意：activate_ime 不在此处——它走 Windows DirectSwitchHotkeys（per-app 切换），
+		// 由 ui.SyncDirectSwitchHotkey 写注册表实现，不经 RegisterHotKey。
 	}
 
 	var entries []ui.GlobalHotkeyEntry

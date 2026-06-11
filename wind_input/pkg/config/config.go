@@ -440,6 +440,7 @@ func DefaultConfig() *Config {
 			ToggleS2T:       "ctrl+shift+j",
 			TakeScreenshot:  "ctrl+shift+f11",
 			GlobalHotkeys:   []string{},
+			ActivateIME:     "ctrl+shift+[",
 		},
 		Input: InputConfig{
 			SmartPunctAfterDigit: true,

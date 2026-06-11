@@ -75,7 +75,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 
 const props = withDefaults(
   defineProps<{
@@ -144,9 +144,31 @@ function parseHotkeyStr(value: string): ParsedHotkey {
   return result;
 }
 
-const enabled = computed(() => props.modelValue !== "none");
+// 独立 UI 启用状态，解耦于 modelValue。
+// 当 defaultValue 也是 "none" 时，toggleEnabled 仅翻转此 ref 而非 emit "none"。
+const localEnabled = ref(props.modelValue !== "none");
+
+const enabled = computed(() => props.modelValue !== "none" || localEnabled.value);
 
 const parsed = computed(() => parseHotkey(props.modelValue));
+
+// 组合输入中间状态：当 modelValue = "none" 且用户正在配置时持有修饰键选择。
+// 仅在 isComposing = true 时生效；按下最终键后 emit 真实值，再自动清空。
+const emptyParsed = (): ParsedHotkey => ({
+  ctrl: false,
+  shift: false,
+  alt: false,
+  win: false,
+  key: "",
+});
+const composingState = ref<ParsedHotkey>(emptyParsed());
+const isComposing = computed(
+  () => localEnabled.value && props.modelValue === "none",
+);
+// UI 实际使用的 parsed 状态：组合中用 composingState，否则用 parsed
+const activeParsed = computed(() =>
+  isComposing.value ? composingState.value : parsed.value,
+);
 
 // 修饰键复选框定义：macOS 暴露 ⌘/⌥ 并用符号，Windows 仅 Ctrl/Shift
 const modifierDefs = computed<{ key: ModKey; label: string }[]>(() =>
@@ -164,7 +186,7 @@ const modifierDefs = computed<{ key: ModKey; label: string }[]>(() =>
 );
 
 function isModOn(mod: ModKey): boolean {
-  return parsed.value[mod];
+  return activeParsed.value[mod];
 }
 
 const hasChanged = computed(() => props.modelValue !== props.defaultValue);
@@ -188,15 +210,18 @@ const keyDisplayLabels: Record<string, string> = {
 };
 
 const keyDisplay = computed(() => {
-  if (!parsed.value.key) return "";
-  const label = keyDisplayLabels[parsed.value.key];
+  if (!activeParsed.value.key) return "";
+  const label = keyDisplayLabels[activeParsed.value.key];
   if (label) return label;
   // F1-F12
-  const fnMatch = parsed.value.key.match(/^f(\d{1,2})$/);
+  const fnMatch = activeParsed.value.key.match(/^f(\d{1,2})$/);
   if (fnMatch) return `F${fnMatch[1]}`;
-  if (parsed.value.key.length === 1 && /[a-z]/.test(parsed.value.key))
-    return parsed.value.key.toUpperCase();
-  return parsed.value.key;
+  if (
+    activeParsed.value.key.length === 1 &&
+    /[a-z]/.test(activeParsed.value.key)
+  )
+    return activeParsed.value.key.toUpperCase();
+  return activeParsed.value.key;
 });
 
 function buildHotkeyString(p: ParsedHotkey): string {
@@ -214,15 +239,27 @@ function buildHotkeyString(p: ParsedHotkey): string {
 
 function toggleEnabled() {
   if (enabled.value) {
+    localEnabled.value = false;
+    composingState.value = emptyParsed();
     emit("update:modelValue", "none");
   } else {
-    emit("update:modelValue", props.defaultValue);
+    localEnabled.value = true;
+    composingState.value = emptyParsed();
+    if (props.defaultValue && props.defaultValue !== "none") {
+      emit("update:modelValue", props.defaultValue);
+    }
+    // defaultValue = "none" 时不 emit，仅激活 UI 让用户设置组合键
   }
 }
 
 function updateModifier(mod: ModKey, checked: boolean) {
-  const p = { ...parsed.value, [mod]: checked };
-  emit("update:modelValue", buildHotkeyString(p));
+  if (isComposing.value) {
+    // 组合中：只更新本地状态，等用户按下按键再 emit
+    composingState.value = { ...composingState.value, [mod]: checked };
+  } else {
+    const p = { ...parsed.value, [mod]: checked };
+    emit("update:modelValue", buildHotkeyString(p));
+  }
 }
 
 function handleKeydown(e: KeyboardEvent) {
@@ -248,13 +285,19 @@ function handleKeydown(e: KeyboardEvent) {
     return;
   }
 
+  const base = isComposing.value ? composingState.value : parsed.value;
+
+  function emitKey(str: string) {
+    emit("update:modelValue", str);
+    if (str !== "none") composingState.value = emptyParsed();
+  }
+
   // F1-F12 功能键
   const fnMatch = e.key.match(/^F(\d{1,2})$/);
   if (fnMatch) {
     const n = parseInt(fnMatch[1]);
     if (n >= 1 && n <= 12) {
-      const p = { ...parsed.value, key: `f${n}` };
-      emit("update:modelValue", buildHotkeyString(p));
+      emitKey(buildHotkeyString({ ...base, key: `f${n}` }));
       return;
     }
   }
@@ -266,16 +309,14 @@ function handleKeydown(e: KeyboardEvent) {
   };
   const mapped = specialKeys[e.key];
   if (mapped) {
-    const p = { ...parsed.value, key: mapped };
-    emit("update:modelValue", buildHotkeyString(p));
+    emitKey(buildHotkeyString({ ...base, key: mapped }));
     return;
   }
 
   // 普通字符
   const keyName = mapCharToName(e.key.length === 1 ? e.key.toLowerCase() : "");
   if (keyName) {
-    const p = { ...parsed.value, key: keyName };
-    emit("update:modelValue", buildHotkeyString(p));
+    emitKey(buildHotkeyString({ ...base, key: keyName }));
   }
 }
 
@@ -300,6 +341,8 @@ function mapCharToName(ch: string): string | null {
 }
 
 function restoreDefault() {
+  localEnabled.value = props.defaultValue !== "none";
+  composingState.value = emptyParsed();
   emit("update:modelValue", props.defaultValue);
 }
 </script>

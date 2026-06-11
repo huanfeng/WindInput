@@ -148,12 +148,12 @@ func (s *globalHotkeyState) register(entries []GlobalHotkeyEntry) {
 		if ret == 0 {
 			if s.logger != nil {
 				s.logger.Warn("Failed to register global hotkey",
-					"command", e.Command, "id", e.ID, "error", err)
+					"command", e.Command, "id", e.ID, "vk", e.VK, "mods", e.Modifiers, "error", err)
 			}
 		} else {
 			if s.logger != nil {
 				s.logger.Debug("Registered global hotkey",
-					"command", e.Command, "id", e.ID)
+					"command", e.Command, "id", e.ID, "vk", e.VK, "mods", e.Modifiers)
 			}
 		}
 	}

@@ -32,6 +32,7 @@ open_settings = "ctrl+shift+]"
 add_word = "ctrl+equal"
 toggle_s2t = "ctrl+shift+j"
 take_screenshot = "ctrl+shift+f11"
+activate_ime = "ctrl+shift+["
 global_hotkeys = []
 
 [input]

@@ -72,6 +72,31 @@ func (c *Coordinator) setupGlobalHotkeyCallbacks() {
 	c.uiManager.SetGlobalHotkeyCallback(func(command string) {
 		c.handleGlobalHotkeyCommand(command)
 	})
+
+	// 启动即注册 global_hotkeys 列表中的全局热键（如 activate_ime），不依赖 IME 激活。
+	// activate_ime 的语义是在本输入法「未激活」时从其他输入法切换过来，
+	// 必须在服务启动后立即生效；若只在 SetIMEActivated 时注册，则首次激活前热键失效。
+	c.mu.Lock()
+	entries := c.buildGlobalHotkeyEntries()
+	activateHotkey := ""
+	if c.config != nil {
+		activateHotkey = c.config.Hotkeys.ActivateIME
+	}
+	c.mu.Unlock()
+	cmds := make([]string, len(entries))
+	for i, e := range entries {
+		cmds[i] = e.Command
+	}
+	c.logger.Debug("Initial global hotkey registration", "count", len(entries), "commands", cmds)
+	if len(entries) > 0 {
+		c.uiManager.RegisterGlobalHotkeys(entries)
+	}
+
+	// activate_ime 走 Windows DirectSwitchHotkeys（per-app 切换到本输入法），
+	// 不经 RegisterHotKey/ActivateProfile。启动时同步一次，确保注册表与配置一致。
+	if err := ui.SyncDirectSwitchHotkey(activateHotkey); err != nil {
+		c.logger.Warn("Failed to sync activate_ime DirectSwitch hotkey", "error", err)
+	}
 }
 
 // handleGlobalHotkeyCommand handles a global hotkey event dispatched from the UI thread

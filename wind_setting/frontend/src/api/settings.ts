@@ -52,6 +52,7 @@ export interface HotkeyConfig {
   add_word: string; // 快捷加词: 通用按键组合或 "none"
   toggle_s2t: string; // 简入繁出开关: 通用按键组合或 "none"
   take_screenshot: string; // UI 截图: 通用按键组合或 "none"
+  activate_ime: string; // Windows 专用：切换到本输入法的全局热键，"none" 或空=禁用
   global_hotkeys: string[]; // 注册为全局热键的快捷键名称列表
 }
 
@@ -461,6 +462,7 @@ export function getDefaultConfig(): Config {
       add_word: "ctrl+=",
       toggle_s2t: "ctrl+shift+j",
       take_screenshot: "ctrl+shift+f11",
+      activate_ime: "ctrl+shift+[",
       global_hotkeys: [],
     },
     input: {
