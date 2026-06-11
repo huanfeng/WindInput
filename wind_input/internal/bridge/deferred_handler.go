@@ -186,6 +186,14 @@ func (d *DeferredHandler) HandleInputStats(chars, digits, puncts, spaces, elapse
 	}
 }
 
+func (d *DeferredHandler) GetCurrentMode() (chineseMode bool, fullWidth bool) {
+	if h := d.getHandler(); h != nil {
+		return h.GetCurrentMode()
+	}
+	// 初始化期间使用安全默认值：中文模式，半角（与 _bChineseMode=TRUE 初始化一致）
+	return true, false
+}
+
 // HandleCandidateSelect 转发给底层 handler (若其实现 candidateSelector, Coordinator 实现)。
 // 不在 MessageHandler 接口内, 仅为 darwin 鼠标点选可选扩展。
 func (d *DeferredHandler) HandleCandidateSelect(index int) {

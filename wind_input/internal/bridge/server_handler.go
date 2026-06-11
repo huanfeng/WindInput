@@ -130,6 +130,11 @@ func (s *Server) processRequest(header *ipc.IpcHeader, payload []byte, clientID 
 		// 异步化第一段：只做 caret 字段同步（纯字段写入，第一次按键前必须就绪）+ 立即回 Ack。
 		// 真正的 HandleFocusGained 由 handleClient 在 Ack 已写出后内联触发，状态走 push pipe。
 		s.applyFocusGainedCaret(payload, clientID)
+		// 模式预推送：在回 Ack 前入队 CmdModePush，仅携带 chineseMode+fullWidth。
+		// 使 DLL 侧模式就绪时机从激活 push（~15ms）提前至 ~1ms，消除首次按键竞态窗口。
+		// GetCurrentMode 极轻量（锁+读两字段），PushModePushToActiveClient 为非阻塞入队。
+		chineseMode, fullWidth := s.handler.GetCurrentMode()
+		s.PushModePushToActiveClient(chineseMode, fullWidth)
 		return s.codec.EncodeAck()
 
 	case ipc.CmdFocusLost:

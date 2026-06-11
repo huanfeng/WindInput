@@ -145,6 +145,10 @@ type MessageHandler interface {
 	HandleHostRenderReady()
 	// Input stats report from TSF English mode (async)
 	HandleInputStats(chars, digits, puncts, spaces, elapsedMs int)
+	// GetCurrentMode returns the coordinator's current chineseMode and fullWidth values.
+	// 供 FocusGained 同步路径在回 Ack 前入队 CmdModePush，缩短模式就绪竞态窗口。
+	// 实现必须极轻量（锁+读两字段），不得有任何阻塞或耗时操作。
+	GetCurrentMode() (chineseMode bool, fullWidth bool)
 }
 
 // candidateSelector 是可选扩展接口 (不并入 MessageHandler 以免牵动 Win 实现)。

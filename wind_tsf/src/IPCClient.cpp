@@ -1675,6 +1675,13 @@ void CIPCClient::SetServiceReadyCallback(ServiceReadyCallback callback)
     LeaveCriticalSection(&_asyncLock);
 }
 
+void CIPCClient::SetModePushCallback(ModePushCallback callback)
+{
+    EnterCriticalSection(&_asyncLock);
+    _modePushCallback = callback;
+    LeaveCriticalSection(&_asyncLock);
+}
+
 BOOL CIPCClient::StartAsyncReader()
 {
     if (_asyncReaderRunning)
@@ -2055,6 +2062,31 @@ void CIPCClient::_AsyncReaderLoop()
                     if (callback)
                     {
                         callback(response);
+                    }
+                }
+            }
+            else if (header.command == CMD_MODE_PUSH)
+            {
+                // 轻量模式预推送（FocusGained 竞态优化）：仅更新 _bChineseMode/_bFullWidth。
+                // 载荷：4 字节 flags（STATUS_CHINESE_MODE=bit0, STATUS_FULL_WIDTH=bit1）。
+                // 不调用 _SyncStateFromResponse，不影响热键白名单。
+                if (header.length >= 4 && bytesRead >= sizeof(IpcHeader) + 4)
+                {
+                    const uint8_t* p = buffer.data() + sizeof(IpcHeader);
+                    uint32_t flags = static_cast<uint32_t>(p[0])
+                                   | (static_cast<uint32_t>(p[1]) << 8)
+                                   | (static_cast<uint32_t>(p[2]) << 16)
+                                   | (static_cast<uint32_t>(p[3]) << 24);
+                    bool chineseMode = (flags & STATUS_CHINESE_MODE) != 0;
+                    bool fullWidth   = (flags & STATUS_FULL_WIDTH) != 0;
+                    _LogDebug(L"Async reader: CMD_MODE_PUSH received - chineseMode=%d fullWidth=%d",
+                              chineseMode, fullWidth);
+                    EnterCriticalSection(&_asyncLock);
+                    ModePushCallback mpCallback = _modePushCallback;
+                    LeaveCriticalSection(&_asyncLock);
+                    if (mpCallback)
+                    {
+                        mpCallback(chineseMode, fullWidth);
                     }
                 }
             }

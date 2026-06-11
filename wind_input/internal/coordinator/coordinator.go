@@ -504,6 +504,16 @@ func (c *Coordinator) BuildCurrentStatus() *bridge.StatusUpdateData {
 	return c.buildStatusUpdate()
 }
 
+// GetCurrentMode 返回当前的 chineseMode 和 fullWidth，供 FocusGained 同步路径
+// 在回 Ack 前入队 CmdModePush。必须极轻量：仅加锁读两字段即返回。
+func (c *Coordinator) GetCurrentMode() (chineseMode bool, fullWidth bool) {
+	c.mu.Lock()
+	chineseMode = c.chineseMode
+	fullWidth = c.fullWidth
+	c.mu.Unlock()
+	return
+}
+
 // buildStatusUpdate creates a StatusUpdateData from current state (caller must hold lock)
 func (c *Coordinator) buildStatusUpdate() *bridge.StatusUpdateData {
 	keyDownHotkeys, keyUpHotkeys := c.getCompiledHotkeys()

@@ -58,6 +58,11 @@ const (
 	// _SyncStateFromResponse + _EnsureHostRenderSetup。区别于 CmdStatePush：本命令是
 	// activation 握手的回包，必须携带完整状态；CmdStatePush 是状态变更广播，hotkeys 不变所以不带。
 	CmdActivationStatusPush uint16 = 0x020C
+	// CmdModePush 是 FocusGained 同步路径上的轻量模式预推送（仅 chineseMode+fullWidth）。
+	// 在回 Ack 之前入队，使 DLL 侧模式就绪时机从激活 push（~15ms）缩短至 ~1ms，
+	// 消除首次按键竞态窗口。载荷：4 字节 flags（位定义同 StatusChineseMode/StatusFullWidth）。
+	// DLL 侧仅更新 _bChineseMode/_bFullWidth，不触碰热键白名单。
+	CmdModePush             uint16 = 0x020D
 	CmdSyncHotkeys          uint16 = 0x0301 // Sync hotkey whitelist
 	CmdSyncConfig           uint16 = 0x0303 // Sync config key/value (generic)
 	CmdCommitTextWithCursor uint16 = 0x0106 // Commit text with cursor offset

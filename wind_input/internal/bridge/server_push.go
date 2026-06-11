@@ -368,6 +368,16 @@ func (s *Server) encodeStatePush(status *StatusUpdateData) []byte {
 	)
 }
 
+// PushModePushToActiveClient 在 FocusGained 同步路径中（回 Ack 之前）入队 CmdModePush。
+//
+// 仅携带 chineseMode + fullWidth（4 字节），不含热键/图标/hostRenderAvail。
+// DLL 侧收到后仅 InterlockedExchange 两个字段，不调用 _SyncStateFromResponse，不影响热键白名单。
+// 目的：将 DLL 侧模式就绪时机从激活 push（~15ms）提前至 ~1ms，消除首次按键竞态窗口。
+func (s *Server) PushModePushToActiveClient(chineseMode, fullWidth bool) {
+	encoded := s.codec.EncodeModePush(chineseMode, fullWidth)
+	s.pushToActiveClient(encoded, "mode-push")
+}
+
 // PushActivationStatusToActiveClient pushes a full activation status to the active TSF client.
 //
 // IMEActivated / FocusGained 异步化后的状态回包通道。bridge handler 在收到原同步命令时

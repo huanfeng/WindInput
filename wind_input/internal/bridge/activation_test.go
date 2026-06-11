@@ -68,6 +68,7 @@ func (f *fakeMessageHandler) HandleShowContextMenu(int, int)           {}
 func (f *fakeMessageHandler) HandleSelectionChanged(rune)              {}
 func (f *fakeMessageHandler) HandleHostRenderReady()                   {}
 func (f *fakeMessageHandler) HandleInputStats(int, int, int, int, int) {}
+func (f *fakeMessageHandler) GetCurrentMode() (bool, bool)             { return true, false }
 
 func newServerWithFakeHandler(t *testing.T, h MessageHandler) *Server {
 	t.Helper()

@@ -177,6 +177,29 @@ func (c *BinaryCodec) EncodeAck() []byte {
 	return c.EncodeHeader(CmdAck, 0)
 }
 
+// EncodeModePush encodes a lightweight mode-only push (CMD_MODE_PUSH).
+//
+// 仅携带 chineseMode + fullWidth 两个标志（4 字节 flags payload），不含热键/图标/其他状态。
+// 用于 FocusGained 同步路径：在回 Ack 前入队，令 DLL 侧 _bChineseMode/_bFullWidth 在
+// ~1ms 内就绪，而非等待激活 push（~15ms），消除首次按键竞态窗口。
+// DLL 侧对应处理：仅 InterlockedExchange 两个字段，不调用 _SyncStateFromResponse，不影响热键。
+func (c *BinaryCodec) EncodeModePush(chineseMode, fullWidth bool) []byte {
+	var flags uint32
+	if chineseMode {
+		flags |= StatusChineseMode
+	}
+	if fullWidth {
+		flags |= StatusFullWidth
+	}
+	header := c.EncodeHeader(CmdModePush, 4)
+	payload := make([]byte, 4)
+	binary.LittleEndian.PutUint32(payload, flags)
+	result := make([]byte, 0, HeaderSize+4)
+	result = append(result, header...)
+	result = append(result, payload...)
+	return result
+}
+
 // EncodePassThrough encodes a pass-through response (key not handled, pass to system)
 func (c *BinaryCodec) EncodePassThrough() []byte {
 	return c.EncodeHeader(CmdPassThrough, 0)

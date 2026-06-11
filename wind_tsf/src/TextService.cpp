@@ -2869,6 +2869,18 @@ BOOL CTextService::_InitIPCClient()
         }
     });
 
+    // Set up mode-only push callback (CMD_MODE_PUSH)
+    // FocusGained 竞态优化：Go 在回 Ack 前入队此轻量包，使 _bChineseMode/_bFullWidth
+    // 在 ~1ms 内就绪（vs 激活 push 的 ~15ms），消除首次按键竞态窗口。
+    // 此回调在 AsyncReader 线程执行，不得访问 TSF COM 对象。
+    // InterlockedExchange 提供全内存屏障，保证 TSF 主线程 OnTestKeyDown 立即见到新值。
+    _pIPCClient->SetModePushCallback([pThis](bool chineseMode, bool fullWidth) {
+        ::InterlockedExchange(reinterpret_cast<LONG*>(&pThis->_bChineseMode),
+                              chineseMode ? TRUE : FALSE);
+        ::InterlockedExchange(reinterpret_cast<LONG*>(&pThis->_bFullWidth),
+                              fullWidth ? TRUE : FALSE);
+    });
+
     // Set up state push callback
     _pIPCClient->SetStatePushCallback([pThis](const ServiceResponse& response) {
         // This callback is called from the async reader thread

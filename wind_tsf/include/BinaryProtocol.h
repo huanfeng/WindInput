@@ -61,6 +61,10 @@ constexpr uint16_t CMD_SERVICE_READY      = 0x0207; // Go service connected push
 // 区别于 CMD_STATE_PUSH：本命令是 activation 握手的回包，必须携带完整状态；
 // CMD_STATE_PUSH 是状态变更广播，hotkeys 不变所以不带。
 constexpr uint16_t CMD_ACTIVATION_STATUS_PUSH = 0x020C;
+// CMD_MODE_PUSH：FocusGained 同步路径的轻量模式预推送（仅 chineseMode+fullWidth）。
+// 载荷：4 字节 flags（位定义同 STATUS_CHINESE_MODE/STATUS_FULL_WIDTH）。
+// DLL 侧仅 InterlockedExchange _bChineseMode/_bFullWidth，不调用 _SyncStateFromResponse，不影响热键白名单。
+constexpr uint16_t CMD_MODE_PUSH              = 0x020D;
 constexpr uint16_t CMD_SYNC_HOTKEYS       = 0x0301; // Sync hotkey whitelist
 constexpr uint16_t CMD_SYNC_CONFIG        = 0x0303; // Sync config key/value (generic)
 constexpr uint16_t CMD_CONSUMED           = 0x0401; // Key consumed

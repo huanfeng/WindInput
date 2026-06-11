@@ -226,6 +226,12 @@ public:
     // Callback type for service-ready notification (Go service connected push pipe)
     using ServiceReadyCallback = std::function<void()>;
 
+    // Callback type for mode-only push (CMD_MODE_PUSH).
+    // 仅携带 chineseMode + fullWidth，用于 FocusGained 竞态窗口优化。
+    // 回调在 AsyncReader 线程上调用；实现必须用 InterlockedExchange 写 _bChineseMode/_bFullWidth，
+    // 不得调用 _SyncStateFromResponse（会清热键）。
+    using ModePushCallback = std::function<void(bool chineseMode, bool fullWidth)>;
+
     // Set callback for receiving state push from Go
     void SetStatePushCallback(StatePushCallback callback);
 
@@ -246,6 +252,9 @@ public:
 
     // Set callback for service-ready notification (Go service connected push pipe)
     void SetServiceReadyCallback(ServiceReadyCallback callback);
+
+    // Set callback for mode-only push (CMD_MODE_PUSH, FocusGained 竞态优化)
+    void SetModePushCallback(ModePushCallback callback);
 
     // Start async reader thread (call after successful connection)
     BOOL StartAsyncReader();
@@ -346,6 +355,7 @@ private:
     UpdateCompositionCallback _updateCompositionCallback;
     SyncConfigCallback _syncConfigCallback;
     ServiceReadyCallback _serviceReadyCallback;
+    ModePushCallback _modePushCallback;
     CRITICAL_SECTION _asyncLock;         // Lock for thread-safe access
     volatile BOOL _asyncReaderRunning = FALSE;
 
