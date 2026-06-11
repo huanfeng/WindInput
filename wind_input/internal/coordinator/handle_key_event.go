@@ -173,6 +173,21 @@ func (c *Coordinator) HandleKeyEvent(data bridge.KeyEventData) (result *bridge.K
 		return c.handleAddWordKey(data)
 	}
 
+	// 进入临时拼音模式热键（仅中文模式，非加词模式）
+	if c.config != nil && c.chineseMode &&
+		c.matchHotkey(c.config.Hotkeys.EnterTempPinyin, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
+		return c.enterModeFromHotkey("temp_pinyin")
+	}
+
+	// 进入特殊模式热键（仅中文模式，非加词模式）
+	if c.config != nil && c.chineseMode {
+		for id, hk := range c.config.Hotkeys.EnterSpecialMode {
+			if c.matchHotkey(hk, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
+				return c.enterModeFromHotkey("special:" + id)
+			}
+		}
+	}
+
 	// 加词快捷键
 	if c.config != nil && c.matchHotkey(c.config.Hotkeys.AddWord, hasCtrl, hasShift, hasAlt, hasWin, data.KeyCode) {
 		return c.enterAddWordMode()

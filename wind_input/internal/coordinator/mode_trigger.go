@@ -207,6 +207,33 @@ func (c *Coordinator) enterModeCommitting(name, triggerKey string, commitIdx int
 	return c.modeCompositionResult(prefix, len(prefix))
 }
 
+// enterModeFromHotkey 通过热键直接进入指定模式（不通过触发键字符）。
+// 若当前有候选则先提交首候选再进模式，行为与 trigger key 的 actEnterMode 路径一致。
+// name 格式与 triggerModes() 中的 name 字段相同：
+//   - "temp_pinyin"
+//   - "special:<id>"
+func (c *Coordinator) enterModeFromHotkey(name string) *bridge.KeyEventResult {
+	commitIdx := -1
+	if len(c.candidates) > 0 {
+		pageStart := (c.currentPage - 1) * c.candidatesPerPage
+		hi := pageStart + c.selectedIndex
+		if hi >= len(c.candidates) {
+			hi = pageStart
+		}
+		if hi < len(c.candidates) {
+			cnd := c.candidates[hi]
+			if !cnd.IsGroup && len(cnd.Actions) == 0 {
+				commitIdx = hi
+			}
+		}
+	}
+	result := c.enterModeCommitting(name, "hotkey", commitIdx)
+	if result == nil {
+		c.logger.Warn("enterModeFromHotkey: mode not found or setup failed", "name", name)
+	}
+	return result
+}
+
 // routeBufferedTriggerKey 在 buffer 非空 / 有候选时按优先级回落链处理一个 !hasShift 键。
 // 返回 nil 表示本链未处理，调用方继续后续 switch（标点等）。
 func (c *Coordinator) routeBufferedTriggerKey(key string, data *bridge.KeyEventData) *bridge.KeyEventResult {

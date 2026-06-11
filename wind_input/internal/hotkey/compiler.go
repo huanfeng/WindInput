@@ -67,6 +67,17 @@ func (c *Compiler) Compile() (keyDownList, keyUpList []uint32) {
 	keyDownList = append(keyDownList, c.compileNumberHotkey(c.config.Hotkeys.PinCandidate)...)
 	keyDownList = append(keyDownList, c.compileNumberHotkey(c.config.Hotkeys.DeleteCandidate)...)
 
+	// 进入临时拼音模式（本地热键，仅中文模式吃）
+	if hash, ok := c.parseHotkeyString(c.config.Hotkeys.EnterTempPinyin); ok {
+		keyDownList = append(keyDownList, hash|ipc.HotkeyPolicyChineseOnly)
+	}
+	// 进入特殊模式（本地热键，仅中文模式吃）
+	for _, hk := range c.config.Hotkeys.EnterSpecialMode {
+		if hash, ok := c.parseHotkeyString(hk); ok {
+			keyDownList = append(keyDownList, hash|ipc.HotkeyPolicyChineseOnly)
+		}
+	}
+
 	// Debug: Ctrl+Shift+R for clipboard paste code (hardcoded, debug only)
 	if buildvariant.IsDebug() {
 		keyDownList = append(keyDownList, ipc.CalcKeyHash(ipc.ModCtrl|ipc.ModShift, 0x52)|ipc.HotkeyPolicyChineseOnly)

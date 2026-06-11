@@ -64,6 +64,11 @@ func (h *ReloadHandler) ReloadConfig() error {
 		h.logger.Info("Config reloaded successfully",
 			"schema", newCfg.Schema.Active,
 			"toggleModeKeys", newCfg.Hotkeys.ToggleModeKeys)
+		if conflicts := newCfg.ValidateHotkeyConflicts(); len(conflicts) > 0 {
+			for _, c := range conflicts {
+				h.logger.Warn("hotkey conflict", "detail", c)
+			}
+		}
 	}
 	return err
 }

@@ -3,6 +3,8 @@ package config
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/huanfeng/wind_input/pkg/keys"
 )
@@ -184,5 +186,77 @@ func (c *Config) ValidateHotkeyConflicts() []string {
 		}
 	}
 
+	conflicts = append(conflicts, c.validateActionHotkeyConflicts()...)
+	return conflicts
+}
+
+// normalizeActionHotkey 将热键字符串规范化为 "mod1+mod2+key" 形式（修饰符字母序排列）。
+// 空串或 "none" 原样返回，供冲突检测使用。
+// key 部分通过 keys.ParseKey 归一化别名，与 compiler.parseHotkeyString 同源，
+// 避免 "ctrl+grave" 与 "ctrl+`" 被判为不同热键的漏报。
+func normalizeActionHotkey(s string) string {
+	trimmed := strings.TrimSpace(s)
+	lower := strings.ToLower(trimmed)
+	if lower == "" || lower == "none" {
+		return lower
+	}
+	parts := strings.Split(lower, "+")
+	var modifiers []string
+	var key string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if _, ok := keys.ParseModifier(p); ok {
+			modifiers = append(modifiers, p)
+		} else if pk, ok := keys.ParseKey(p); ok {
+			key = string(pk)
+		} else {
+			key = p
+		}
+	}
+	if key == "" {
+		return lower
+	}
+	sort.Strings(modifiers)
+	return strings.Join(append(modifiers, key), "+")
+}
+
+// validateActionHotkeyConflicts 检测动作热键空间（modifier+key 组合）内的冲突。
+func (c *Config) validateActionHotkeyConflicts() []string {
+	type entry struct {
+		norm  string
+		label string
+	}
+	entries := []entry{}
+	add := func(hotkey, label string) {
+		n := normalizeActionHotkey(hotkey)
+		if n == "" || n == "none" {
+			return
+		}
+		entries = append(entries, entry{n, label})
+	}
+
+	add(c.Hotkeys.SwitchEngine, "切换方案")
+	add(c.Hotkeys.ToggleFullWidth, "全角切换")
+	add(c.Hotkeys.TogglePunct, "标点切换")
+	add(c.Hotkeys.ToggleToolbar, "工具栏")
+	add(c.Hotkeys.OpenSettings, "打开设置")
+	add(c.Hotkeys.AddWord, "快捷加词")
+	add(c.Hotkeys.ToggleS2T, "简繁切换")
+	add(c.Hotkeys.TakeScreenshot, "UI截图")
+	add(c.Hotkeys.ActivateIME, "切换到本输入法")
+	add(c.Hotkeys.EnterTempPinyin, "进入临时拼音")
+	for id, hk := range c.Hotkeys.EnterSpecialMode {
+		add(hk, fmt.Sprintf("进入特殊模式(%s)", id))
+	}
+
+	usedActions := make(map[string]string)
+	var conflicts []string
+	for _, e := range entries {
+		if existing, ok := usedActions[e.norm]; ok {
+			conflicts = append(conflicts, fmt.Sprintf("热键 %s 同时用于: %s 和 %s", e.norm, existing, e.label))
+		} else {
+			usedActions[e.norm] = e.label
+		}
+	}
 	return conflicts
 }

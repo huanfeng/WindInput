@@ -85,7 +85,11 @@ func (c *Coordinator) setupSpecialMode(id, triggerKey string) (string, bool) {
 }
 
 // specialPrefix 返回当前特殊模式触发键对应的字符。
+// triggerKey 为 "hotkey" 时表示通过热键进入，无前缀字符，返回空串。
 func (c *Coordinator) specialPrefix() string {
+	if c.specialTriggerKey == "hotkey" {
+		return ""
+	}
 	return triggerKeyToChar(c.specialTriggerKey)
 }
 

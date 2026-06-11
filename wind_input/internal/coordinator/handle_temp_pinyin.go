@@ -210,8 +210,12 @@ func (c *Coordinator) enterTempPinyinMode(triggerKey string) *bridge.KeyEventRes
 	return c.modeCompositionResult(prefix, len(prefix))
 }
 
-// tempPinyinPrefix 返回临时拼音模式的前缀显示字符（使用实际触发键字符）
+// tempPinyinPrefix 返回临时拼音模式的前缀显示字符（使用实际触发键字符）。
+// triggerKey 为 "hotkey" 时表示通过热键进入，无前缀字符，返回空串。
 func (c *Coordinator) tempPinyinPrefix() string {
+	if c.tempPinyinTriggerKey == "hotkey" {
+		return ""
+	}
 	parsed, _ := keys.ParseKey(c.tempPinyinTriggerKey)
 	switch parsed {
 	case keys.KeyGrave:

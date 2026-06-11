@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-06-09 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-06-10 -->
 
 # internal/coordinator
 
@@ -10,8 +10,8 @@
 | File | Description |
 |------|-------------|
 | `coordinator.go` | `Coordinator` 结构体定义、构造函数、状态广播、信号通道（退出/重启）；`NotifySchemaActivated(displayName)` 供外部异步资源就绪后调用，触发 toolbar/TSF 状态同步并显示"<方案>已就绪"指示器 |
-| `handle_key_event.go` | 按键事件主入口，根据模式分发处理；正在输入（buffer 非空 / 有候选）时按触发键先走统一优先级回落链 `routeBufferedTriggerKey`（见 `mode_trigger.go`），buffer 空场景仍走旧 `getXxxTriggerKey` |
-| `mode_trigger.go` | 触发键激活模式的统一优先级回落链：`decideBufferedTrigger`（纯决策，无副作用）+ `routeBufferedTriggerKey`（执行）+ `enterModeCommitting`（顶码上屏当前高亮候选后原子进入模式，复用 `doSelectCandidate` + `HasNewComposition`）+ `triggerModes()` **动态**有序模式表（快捷输入 > 临时拼音 > **引导键特殊模式 N 个实例**（`special:<id>`，按 `Input.SpecialModes` 配置顺序）> 临时英文）+ `matchTriggerKeyInList` 公共键匹配。详见 docs/design/mode-trigger-priority-chain.md 与 docs/design/special-mode-codetable.md |
+| `handle_key_event.go` | 按键事件主入口，根据模式分发处理；正在输入（buffer 非空 / 有候选）时按触发键先走统一优先级回落链 `routeBufferedTriggerKey`（见 `mode_trigger.go`），buffer 空场景仍走旧 `getXxxTriggerKey`；新增 `Hotkeys.EnterTempPinyin` / `Hotkeys.EnterSpecialMode` 本地热键路由（仅中文模式，调用 `enterModeFromHotkey`） |
+| `mode_trigger.go` | 触发键激活模式的统一优先级回落链：`decideBufferedTrigger`（纯决策，无副作用）+ `routeBufferedTriggerKey`（执行）+ `enterModeCommitting`（顶码上屏当前高亮候选后原子进入模式，复用 `doSelectCandidate` + `HasNewComposition`）+ `triggerModes()` **动态**有序模式表（快捷输入 > 临时拼音 > **引导键特殊模式 N 个实例**（`special:<id>`，按 `Input.SpecialModes` 配置顺序）> 临时英文）+ `matchTriggerKeyInList` 公共键匹配；新增 `enterModeFromHotkey(name)` 供热键直接进入模式（复用 `enterModeCommitting`，triggerKey="hotkey" 表示无前缀字符）。详见 docs/design/mode-trigger-priority-chain.md 与 docs/design/special-mode-codetable.md |
 | `handle_key_action.go` | 具体按键动作处理（退格、确认、翻页、数字选词等） |
 | `handle_candidate_action.go` | 候选词快捷键操作：`matchCandidateActionKey` 匹配 Ctrl+数字/Ctrl+Shift+数字热键；`handleDeleteCandidateByKey` 删除指定候选词（走 `dm.DeleteWord(code, text, cand.ID)`）；`handlePinCandidateByKey` 置顶指定候选词（走 `dm.PinWord(code, text, cand.ID, 0)`）；**R2**: 短语候选统一走 Shadow（不再走 PhraseLayer.MoveToTop） |
 | `handle_candidates.go` | 候选词请求引擎计算、分页管理、UI 更新；候选数分档：`refreshEffectivePerPage` 在每条分页源头把生效每页数物化到 `c.candidatesPerPage`（基础档 `candidatesPerPageBase` / 扩展档 `candidatesPerPageExtended`），`shouldUseExtendedCandidates` 是新增"扩展档"场景的唯一对接点 |
