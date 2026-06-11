@@ -92,6 +92,10 @@ func (c *Coordinator) handleGlobalHotkeyCommand(command string) {
 		if c.uiManager != nil {
 			c.uiManager.TakeUIScreenshots()
 		}
+	case "activate_ime":
+		if c.uiManager != nil {
+			go c.uiManager.ActivateIME()
+		}
 	}
 }
 

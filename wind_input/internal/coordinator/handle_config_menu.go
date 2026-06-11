@@ -301,6 +301,7 @@ func (c *Coordinator) buildGlobalHotkeyEntries() []ui.GlobalHotkeyEntry {
 		"open_settings":     c.config.Hotkeys.OpenSettings,
 		"add_word":          c.config.Hotkeys.AddWord,
 		"take_screenshot":   c.config.Hotkeys.TakeScreenshot,
+		"activate_ime":      c.config.Hotkeys.ActivateIME,
 	}
 
 	var entries []ui.GlobalHotkeyEntry
