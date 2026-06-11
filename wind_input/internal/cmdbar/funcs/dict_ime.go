@@ -187,8 +187,8 @@ func fnIMEThemeCycle(ctx cmdbar.EvalContext, args []string) (string, error) {
 	return next, nil
 }
 
-// fnIMETheme 实现 `ime.theme(name)`。通过 ConfigService.Set("ui.theme", name)
-// 完成主题切换+热更新+持久化，与 config.set("ui.theme", name) 等价。
+// fnIMETheme 实现 `ime.theme(name)`。通过 ConfigService.Set("ui.theme.name", name)
+// 完成主题切换+热更新+持久化，与 config.set("ui.theme.name", name) 等价。
 func fnIMETheme(ctx cmdbar.EvalContext, args []string) (string, error) {
 	s, err := svcs(ctx)
 	if err != nil {
@@ -197,7 +197,7 @@ func fnIMETheme(ctx cmdbar.EvalContext, args []string) (string, error) {
 	if s.Config == nil {
 		return "", fmt.Errorf("ime.theme: %w", cmdbar.ErrServiceUnavailable)
 	}
-	if err := s.Config.Set("ui.theme", args[0]); err != nil {
+	if err := s.Config.Set("ui.theme.name", args[0]); err != nil {
 		return "", fmt.Errorf("ime.theme: %w", err)
 	}
 	return "", nil

@@ -17,8 +17,8 @@ func configActionFuncs() []cmdbar.FuncSpec {
 			MinArgs: 1, MaxArgs: 1,
 			Pure:          true,
 			Deterministic: false,
-			Description:   "读取配置项当前值；key 为 YAML 路径（如 ui.candidate_layout）",
-			ExampleSrc:    `config.get("ui.theme_style")`,
+			Description:   "读取配置项当前值；key 为 YAML 路径（如 ui.candidate.layout）",
+			ExampleSrc:    `config.get("ui.theme.style")`,
 			Eval:          fnConfigGet,
 		},
 		{
@@ -26,7 +26,7 @@ func configActionFuncs() []cmdbar.FuncSpec {
 			MinArgs: 2, MaxArgs: 2,
 			Pure:        false,
 			Description: "设置配置项并持久化；key 为 YAML 路径，value 为字符串值",
-			ExampleSrc:  `config.set("ui.theme_style", "dark")`,
+			ExampleSrc:  `config.set("ui.theme.style", "dark")`,
 			Eval:        fnConfigSet,
 		},
 		{
@@ -34,7 +34,7 @@ func configActionFuncs() []cmdbar.FuncSpec {
 			MinArgs: 1, MaxArgs: 1,
 			Pure:        false,
 			Description: "枚举配置项循环切换下一值，bool 配置项翻转；持久化并返回新值",
-			ExampleSrc:  `config.toggle("ui.theme_style")`,
+			ExampleSrc:  `config.toggle("ui.theme.style")`,
 			Eval:        fnConfigToggle,
 		},
 	}
@@ -67,7 +67,7 @@ func fnConfigSet(ctx cmdbar.EvalContext, args []string) (string, error) {
 
 // fnConfigToggle 实现 config.toggle(key)。
 // 返回值非空（新值字符串），可用于 $CC 的 display 侧显示当前状态，
-// 例如：$CC(config.toggle("ui.theme_style"))。
+// 例如：$CC(config.toggle("ui.theme.style"))。
 func fnConfigToggle(ctx cmdbar.EvalContext, args []string) (string, error) {
 	s, err := svcs(ctx)
 	if err != nil {

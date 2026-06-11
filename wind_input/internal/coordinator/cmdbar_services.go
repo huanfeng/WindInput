@@ -175,7 +175,7 @@ func (s cmdbarIMEService) ThemeCycle(dir string) (string, error) {
 	} else {
 		next = themes[(idx+1)%len(themes)]
 	}
-	if err := (cmdbarConfigService{c: s.c}).Set("ui.theme", next); err != nil {
+	if err := (cmdbarConfigService{c: s.c}).Set("ui.theme.name", next); err != nil {
 		return "", fmt.Errorf("ime.theme_cycle: %w", err)
 	}
 	return next, nil
@@ -407,11 +407,11 @@ func (s cmdbarConfigService) applySection(key string, cfgCopy *config.Config) {
 	switch config.Section(key) {
 	case "ui":
 		c.UpdateUIConfig(&cfgCopy.UI)
-	case "s2t":
+	case "features":
 		c.UpdateS2TConfig(&cfgCopy.Features.S2T)
 	case "input":
 		c.UpdateInputConfig(&cfgCopy.Input)
-	case "startup":
+	case "general":
 		c.UpdateStartupConfig(&cfgCopy.General)
 	}
 }
