@@ -631,7 +631,23 @@ func (c *Coordinator) handleSpace() *bridge.KeyEventResult {
 			Text: finalText,
 		}
 	}
-	// 无编码空闲状态：全角模式下输出全角空格
+	// 无编码空闲状态：先查自定义空格映射，再按全角标志降级
+	if c.config != nil && c.config.Input.PunctCustom.Enabled {
+		colIdx := 3 // 英文半角
+		if c.chineseMode && c.fullWidth {
+			colIdx = 2 // 中文全角
+		} else if c.chineseMode {
+			colIdx = 0 // 中文半角
+		} else if c.fullWidth {
+			colIdx = 1 // 英文全角
+		}
+		if text, ok := c.punctConverter.LookupCustom(' ', colIdx); ok {
+			return &bridge.KeyEventResult{
+				Type: bridge.ResponseTypeInsertText,
+				Text: text,
+			}
+		}
+	}
 	if c.fullWidth {
 		return &bridge.KeyEventResult{
 			Type: bridge.ResponseTypeInsertText,

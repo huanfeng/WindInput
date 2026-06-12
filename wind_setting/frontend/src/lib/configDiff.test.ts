@@ -69,4 +69,46 @@ describe("diffConfigToItems", () => {
       { key: "features.stats.track_english", value: false },
     ]);
   });
+
+  // ── mappings（Record<string, string[]>）删除条目时整体 diff ────────────────
+  // 新增/修改条目走递归，产出 mappings.<key> 点路径；
+  // 删除条目（base 有 current 无）整体作为叶子提交，避免漏报。
+
+  it("mappings 新增条目时按 key 路径产出", () => {
+    const base = { input: { punct_custom: { mappings: {} } } };
+    const cur  = { input: { punct_custom: { mappings: { ";": ["；", "", "", ""] } } } };
+    expect(diffConfigToItems(base, cur)).toEqual([
+      { key: "input.punct_custom.mappings.;", value: ["；", "", "", ""] },
+    ]);
+  });
+
+  it("mappings 条目全部移除时整体作为叶子提交（核心修复：恢复默认可保存）", () => {
+    const base = { input: { punct_custom: { mappings: { ";": ["；", "", "", ""] } } } };
+    const cur  = { input: { punct_custom: { mappings: {} } } };
+    expect(diffConfigToItems(base, cur)).toEqual([
+      { key: "input.punct_custom.mappings", value: {} },
+    ]);
+  });
+
+  it("mappings 部分条目移除时整体作为叶子提交", () => {
+    const base = { input: { punct_custom: { mappings: { ";": ["；","","",""], ",": ["，","","",""] } } } };
+    const cur  = { input: { punct_custom: { mappings: { ";": ["；","","",""] } } } };
+    expect(diffConfigToItems(base, cur)).toEqual([
+      { key: "input.punct_custom.mappings", value: { ";": ["；","","",""] } },
+    ]);
+  });
+
+  it("mappings 无变化时不产出", () => {
+    const base = { input: { punct_custom: { mappings: { ";": ["；", "", "", ""] } } } };
+    const cur  = { input: { punct_custom: { mappings: { ";": ["；", "", "", ""] } } } };
+    expect(diffConfigToItems(base, cur)).toEqual([]);
+  });
+
+  it("mappings 内容修改时按 key 路径产出", () => {
+    const base = { input: { punct_custom: { mappings: { ";": ["；", "", "", ""] } } } };
+    const cur  = { input: { punct_custom: { mappings: { ";": ["；", "；", "", ""] } } } };
+    expect(diffConfigToItems(base, cur)).toEqual([
+      { key: "input.punct_custom.mappings.;", value: ["；", "；", "", ""] },
+    ]);
+  });
 });

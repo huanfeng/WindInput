@@ -96,9 +96,10 @@
             <table class="punct-table">
               <thead>
                 <tr>
-                  <th class="col-src">英文半角</th>
-                  <th>中文半角</th>
+                  <th class="col-src">原字符</th>
+                  <th>英文半角</th>
                   <th>英文全角</th>
+                  <th>中文半角</th>
                   <th>中文全角</th>
                 </tr>
               </thead>
@@ -106,7 +107,7 @@
                 <tr v-for="(row, ri) in punctEditRows" :key="row.key">
                   <td class="col-src">{{ row.src }}</td>
                   <td
-                    v-for="(_, ci) in 3"
+                    v-for="(_, ci) in 4"
                     :key="ci"
                     class="col-edit"
                     :class="{
@@ -126,7 +127,7 @@
                       @blur="commitEditCell()"
                       ref="cellInputRef"
                     />
-                    <span v-else class="cell-text">{{ row.values[ci] }}</span>
+                    <span v-else class="cell-text">{{ row.key === " " && row.values[ci] === "" ? "—" : row.values[ci] === " " ? "␣" : row.values[ci] }}</span>
                   </td>
                 </tr>
               </tbody>
@@ -663,50 +664,53 @@ function setAllPairs(enabled: boolean) {
 interface PunctRow {
   src: string;
   key: string;
-  defaults: [string, string, string];
-  values: [string, string, string];
+  defaults: [string, string, string, string];
+  values: [string, string, string, string];
 }
 
-// 默认标点映射表（完整 34 行）
+// 默认标点映射表（完整 35 行）
+// defaults 顺序与 UI 列一致：[英文半角, 英文全角, 中文半角, 中文全角]
+// 内部存储顺序为 [中文半角=0, 英文全角=1, 中文全角=2, 英文半角=3]，读写时经 uiToInternal 转换
 const defaultPunctTable: {
   src: string;
   key: string;
-  defaults: [string, string, string];
+  defaults: [string, string, string, string];
 }[] = [
-  { src: "!", key: "!", defaults: ["！", "！", "！"] },
-  { src: "@", key: "@", defaults: ["@", "＠", "＠"] },
-  { src: "#", key: "#", defaults: ["#", "＃", "＃"] },
-  { src: "$", key: "$", defaults: ["￥", "＄", "￥"] },
-  { src: "%", key: "%", defaults: ["%", "％", "％"] },
-  { src: "^", key: "^", defaults: ["……", "＾", "……"] },
-  { src: "&", key: "&", defaults: ["&", "＆", "＆"] },
-  { src: "*", key: "*", defaults: ["*", "＊", "＊"] },
-  { src: "(", key: "(", defaults: ["（", "（", "（"] },
-  { src: ")", key: ")", defaults: ["）", "）", "）"] },
-  { src: "_", key: "_", defaults: ["——", "＿", "——"] },
-  { src: "-", key: "-", defaults: ["-", "－", "－"] },
-  { src: "+", key: "+", defaults: ["+", "＋", "＋"] },
-  { src: "=", key: "=", defaults: ["=", "＝", "＝"] },
-  { src: "[", key: "[", defaults: ["【", "［", "【"] },
-  { src: "]", key: "]", defaults: ["】", "］", "】"] },
-  { src: "{", key: "{", defaults: ["｛", "｛", "｛"] },
-  { src: "}", key: "}", defaults: ["｝", "｝", "｝"] },
-  { src: "\\", key: "\\", defaults: ["、", "＼", "、"] },
-  { src: "|", key: "|", defaults: ["|", "｜", "｜"] },
-  { src: ";", key: ";", defaults: ["；", "；", "；"] },
-  { src: ":", key: ":", defaults: ["：", "：", "："] },
-  { src: '" 第一次', key: '"1', defaults: ["\u201C", "\uFF02", "\u201C"] },
-  { src: '" 第二次', key: '"2', defaults: ["\u201D", "\uFF02", "\u201D"] },
-  { src: "' 第一次", key: "'1", defaults: ["\u2018", "\uFF07", "\u2018"] },
-  { src: "' 第二次", key: "'2", defaults: ["\u2019", "\uFF07", "\u2019"] },
-  { src: ",", key: ",", defaults: ["，", "，", "，"] },
-  { src: ".", key: ".", defaults: ["。", "．", "。"] },
-  { src: "<", key: "<", defaults: ["《", "＜", "《"] },
-  { src: ">", key: ">", defaults: ["》", "＞", "》"] },
-  { src: "/", key: "/", defaults: ["/", "／", "／"] },
-  { src: "?", key: "?", defaults: ["？", "？", "？"] },
-  { src: "~", key: "~", defaults: ["～", "～", "～"] },
-  { src: "`", key: "`", defaults: ["·", "｀", "·"] },
+  { src: "空格", key: " ",  defaults: ["",   "　", "",   "　"] },
+  { src: "!",   key: "!",  defaults: ["!",  "！", "！", "！"] },
+  { src: "@",   key: "@",  defaults: ["@",  "＠", "@",  "＠"] },
+  { src: "#",   key: "#",  defaults: ["#",  "＃", "#",  "＃"] },
+  { src: "$",   key: "$",  defaults: ["$",  "＄", "￥", "￥"] },
+  { src: "%",   key: "%",  defaults: ["%",  "％", "%",  "％"] },
+  { src: "^",   key: "^",  defaults: ["^",  "＾", "……", "……"] },
+  { src: "&",   key: "&",  defaults: ["&",  "＆", "&",  "＆"] },
+  { src: "*",   key: "*",  defaults: ["*",  "＊", "*",  "＊"] },
+  { src: "(",   key: "(",  defaults: ["(",  "（", "（", "（"] },
+  { src: ")",   key: ")",  defaults: [")",  "）", "）", "）"] },
+  { src: "_",   key: "_",  defaults: ["_",  "＿", "——", "——"] },
+  { src: "-",   key: "-",  defaults: ["-",  "－", "-",  "－"] },
+  { src: "+",   key: "+",  defaults: ["+",  "＋", "+",  "＋"] },
+  { src: "=",   key: "=",  defaults: ["=",  "＝", "=",  "＝"] },
+  { src: "[",   key: "[",  defaults: ["[",  "［", "【", "【"] },
+  { src: "]",   key: "]",  defaults: ["]",  "］", "】", "】"] },
+  { src: "{",   key: "{",  defaults: ["{",  "｛", "｛", "｛"] },
+  { src: "}",   key: "}",  defaults: ["}",  "｝", "｝", "｝"] },
+  { src: "\\",  key: "\\", defaults: ["\\", "＼", "、", "、"] },
+  { src: "|",   key: "|",  defaults: ["|",  "｜", "|",  "｜"] },
+  { src: ";",   key: ";",  defaults: [";",  "；", "；", "；"] },
+  { src: ":",   key: ":",  defaults: [":",  "：", "：", "："] },
+  { src: '" 第一次', key: '"1', defaults: ['"', "＂", "“", "“"] },
+  { src: '" 第二次', key: '"2', defaults: ['"', "＂", "”", "”"] },
+  { src: "' 第一次", key: "'1", defaults: ["'", "＇", "‘", "‘"] },
+  { src: "' 第二次", key: "'2", defaults: ["'", "＇", "’", "’"] },
+  { src: ",",   key: ",",  defaults: [",",  "，", "，", "，"] },
+  { src: ".",   key: ".",  defaults: [".",  "．", "。", "。"] },
+  { src: "<",   key: "<",  defaults: ["<",  "＜", "《", "《"] },
+  { src: ">",   key: ">",  defaults: [">",  "＞", "》", "》"] },
+  { src: "/",   key: "/",  defaults: ["/",  "／", "/",  "／"] },
+  { src: "?",   key: "?",  defaults: ["?",  "？", "？", "？"] },
+  { src: "~",   key: "~",  defaults: ["~",  "～", "～", "～"] },
+  { src: "`",   key: "`",  defaults: ["`",  "｀", "·", "·"] },
 ];
 
 const showPunctCustomDialog = ref(false);
@@ -730,17 +734,20 @@ function ensurePunctCustom() {
 function buildEditRows(): PunctRow[] {
   ensurePunctCustom();
   const mappings = props.formData.input.punct_custom.mappings || {};
+  // 内部存储顺序：[中文半角=0, 英文全角=1, 中文全角=2, 英文半角=3]
+  // UI 显示顺序：[英文半角=ci0, 英文全角=ci1, 中文半角=ci2, 中文全角=ci3]
   return defaultPunctTable.map((def) => {
     const custom = mappings[def.key];
-    const values: [string, string, string] = [
-      custom?.[0] || def.defaults[0],
-      custom?.[1] || def.defaults[1],
-      custom?.[2] || def.defaults[2],
+    const values: [string, string, string, string] = [
+      custom?.[3] || def.defaults[0], // UI[0]=英文半角 = internal[3]
+      custom?.[1] || def.defaults[1], // UI[1]=英文全角 = internal[1]
+      custom?.[0] || def.defaults[2], // UI[2]=中文半角 = internal[0]
+      custom?.[2] || def.defaults[3], // UI[3]=中文全角 = internal[2]
     ];
     return {
       src: def.src,
       key: def.key,
-      defaults: [...def.defaults] as [string, string, string],
+      defaults: [...def.defaults] as [string, string, string, string],
       values,
     };
   });
@@ -775,7 +782,9 @@ function startEditCell(row: number, col: number) {
 function commitEditCell() {
   if (!editingCell.value) return;
   const { row, col, value } = editingCell.value;
-  const trimmed = value.trim();
+  // 半角/全角空格均为合法映射值，JS trim() 会把 U+3000 也裁掉，需单独保留
+  const isSpaceValue = value === " " || value === "　";
+  const trimmed = isSpaceValue ? value : value.trim();
   if (trimmed.length > 0 && trimmed.length <= 8) {
     punctEditRows.value[row].values[col] = trimmed;
   }
@@ -793,13 +802,15 @@ function cancelEditCell() {
 
 function confirmPunctCustom() {
   // 从编辑行提取覆盖项（与默认不同的值才存储）
+  // UI 顺序 → 内部存储顺序：[英半=ci0→3, 英全=ci1→1, 中半=ci2→0, 中全=ci3→2]
+  const uiToInternal = [3, 1, 0, 2];
   const mappings: Record<string, string[]> = {};
   for (const row of punctEditRows.value) {
-    const overrides: string[] = ["", "", ""];
+    const overrides: string[] = ["", "", "", ""];
     let hasOverride = false;
-    for (let i = 0; i < 3; i++) {
-      if (row.values[i] !== row.defaults[i]) {
-        overrides[i] = row.values[i];
+    for (let ui = 0; ui < 4; ui++) {
+      if (row.values[ui] !== row.defaults[ui]) {
+        overrides[uiToInternal[ui]] = row.values[ui];
         hasOverride = true;
       }
     }
@@ -825,8 +836,8 @@ function resetPunctCustomDefaults() {
   punctEditRows.value = defaultPunctTable.map((def) => ({
     src: def.src,
     key: def.key,
-    defaults: [...def.defaults] as [string, string, string],
-    values: [...def.defaults] as [string, string, string],
+    defaults: [...def.defaults] as [string, string, string, string],
+    values: [...def.defaults] as [string, string, string, string],
   }));
   editingCell.value = null;
 }

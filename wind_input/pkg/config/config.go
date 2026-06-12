@@ -175,7 +175,7 @@ type QuickInputConfig struct {
 // PunctCustomConfig 自定义标点映射配置
 type PunctCustomConfig struct {
 	Enabled  bool                `yaml:"enabled" json:"enabled"`                       // 总开关
-	Mappings map[string][]string `yaml:"mappings,omitempty" json:"mappings,omitempty"` // key=源字符(引号用"1/"2/'1/'2), value=[中文半角,英文全角,中文全角], 空串=默认
+	Mappings map[string][]string `yaml:"mappings,omitempty" json:"mappings,omitempty"` // key=源字符(引号用"1/"2/'1/'2), value=[中文半角,英文全角,中文全角,英文半角], 空串=默认
 }
 
 // TempPinyinConfig 临时拼音模式配置

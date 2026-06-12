@@ -437,6 +437,68 @@ func TestConfigSetActiveSchema(t *testing.T) {
 	}
 }
 
+// TestConfigSet_PunctCustomMappings_ClearAll 验证清空 punct_custom.mappings 后旧条目不残留。
+// 回归保护：setSectionFromMap 必须先清零 section 再 Unmarshal，否则 encoding/json 的 map
+// 合并语义会让 {} 保留已有条目（Bug：恢复默认后保存成功但重开对话框还是旧数据）。
+func TestConfigSet_PunctCustomMappings_ClearAll(t *testing.T) {
+	cfg := config.SystemDefaultConfig()
+	cfg.Input.PunctCustom.Enabled = true
+	cfg.Input.PunctCustom.Mappings = map[string][]string{
+		";": {"；", "", "", ""},
+		",": {"，", "", "", ""},
+	}
+	svc := newTestConfigService(cfg)
+
+	// 发送 mappings = {} 清空所有条目（等同于前端"恢复默认"后保存）
+	var reply rpcapi.ConfigSetReply
+	err := svc.Set(&rpcapi.ConfigSetArgs{
+		Items: []rpcapi.ConfigSetItem{
+			{Key: "input.punct_custom.mappings", Value: map[string]any{}},
+		},
+	}, &reply)
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	if len(cfg.Input.PunctCustom.Mappings) != 0 {
+		t.Errorf("清空 mappings 后应为空，got %v", cfg.Input.PunctCustom.Mappings)
+	}
+}
+
+// TestConfigSet_PunctCustomMappings_PartialRemove 验证移除部分条目后只保留剩余条目。
+func TestConfigSet_PunctCustomMappings_PartialRemove(t *testing.T) {
+	cfg := config.SystemDefaultConfig()
+	cfg.Input.PunctCustom.Enabled = true
+	cfg.Input.PunctCustom.Mappings = map[string][]string{
+		";": {"；", "", "", ""},
+		",": {"，", "", "", ""},
+	}
+	svc := newTestConfigService(cfg)
+
+	// 只保留 ";" 条目，去掉 ","
+	var reply rpcapi.ConfigSetReply
+	err := svc.Set(&rpcapi.ConfigSetArgs{
+		Items: []rpcapi.ConfigSetItem{
+			{Key: "input.punct_custom.mappings", Value: map[string]any{
+				";": []any{"；", "", "", ""},
+			}},
+		},
+	}, &reply)
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	if len(cfg.Input.PunctCustom.Mappings) != 1 {
+		t.Errorf("应剩 1 个条目，got %v", cfg.Input.PunctCustom.Mappings)
+	}
+	if _, ok := cfg.Input.PunctCustom.Mappings[","]; ok {
+		t.Error("',' 条目应已被删除")
+	}
+	if v := cfg.Input.PunctCustom.Mappings[";"]; len(v) == 0 {
+		t.Error("';' 条目应被保留")
+	}
+}
+
 // TestConfigSet_StatsTrackEnglish 验证 stats 配置走通用 Config.Set（按 key）：
 // bool 字段经 setNestedKey/setSectionFromMap 往返正确：设 false 得 false，
 // 且未改的其它 stats 字段（enabled）保留默认。

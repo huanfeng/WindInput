@@ -299,7 +299,11 @@ func getSectionMap(cfg *config.Config, section string) (map[string]any, error) {
 	return m, nil
 }
 
-// setSectionFromMap 将修改后的 map 反序列化回 config struct 的对应 section
+// setSectionFromMap 将修改后的 map 反序列化回 config struct 的对应 section。
+//
+// 注意：必须先将目标 section 清零再 Unmarshal，否则 encoding/json 对 map 类型字段
+// 执行合并语义（JSON {} 不清空已有条目），导致删除 mappings 条目时旧数据残留。
+// sectionMap 来自 getSectionMap（完整序列化整个 section），清零后 Unmarshal 不会丢失其他字段。
 func setSectionFromMap(cfg *config.Config, section string, m map[string]any) error {
 	data, err := json.Marshal(m)
 	if err != nil {
@@ -307,20 +311,28 @@ func setSectionFromMap(cfg *config.Config, section string, m map[string]any) err
 	}
 	switch rpcapi.ConfigSection(section) {
 	case rpcapi.ConfigSectionGeneral:
+		cfg.General = config.GeneralConfig{}
 		return json.Unmarshal(data, &cfg.General)
 	case rpcapi.ConfigSectionSchema:
+		cfg.Schema = config.SchemaConfig{}
 		return json.Unmarshal(data, &cfg.Schema)
 	case rpcapi.ConfigSectionHotkeys:
+		cfg.Hotkeys = config.HotkeyConfig{}
 		return json.Unmarshal(data, &cfg.Hotkeys)
 	case rpcapi.ConfigSectionInput:
+		cfg.Input = config.InputConfig{}
 		return json.Unmarshal(data, &cfg.Input)
 	case rpcapi.ConfigSectionUI:
+		cfg.UI = config.UIConfig{}
 		return json.Unmarshal(data, &cfg.UI)
 	case rpcapi.ConfigSectionFeatures:
+		cfg.Features = config.FeaturesConfig{}
 		return json.Unmarshal(data, &cfg.Features)
 	case rpcapi.ConfigSectionCompat:
+		cfg.Compat = config.CompatConfig{}
 		return json.Unmarshal(data, &cfg.Compat)
 	case rpcapi.ConfigSectionDebug:
+		cfg.Debug = config.DebugConfig{}
 		return json.Unmarshal(data, &cfg.Debug)
 	default:
 		return fmt.Errorf("unknown config section %q", section)

@@ -290,6 +290,19 @@ func (h *testCoordinator) pressKeyCode(keyCode int) *bridge.KeyEventResult {
 	return h.HandleKeyEvent(bridge.KeyEventData{KeyCode: keyCode})
 }
 
+// withPunctCustom 启用自定义标点映射并同步到 punctConverter.
+// 必须同时设置 config 和调用 SetCustomMappings，否则 LookupCustom 的 customEnabled 门禁不生效.
+func withPunctCustom(mappings map[string][]string) testOption {
+	return func(c *Coordinator) {
+		if c.config == nil {
+			c.config = &config.Config{}
+		}
+		c.config.Input.PunctCustom.Enabled = true
+		c.config.Input.PunctCustom.Mappings = mappings
+		c.punctConverter.SetCustomMappings(true, mappings)
+	}
+}
+
 // pressKey 用最常见参数构造 KeyEventData 并调用 HandleKeyEvent.
 // key 应为单字符（如 "a"）或 keys.Key* 字符串.
 // 对单字符字母, KeyCode 自动取 ASCII 大写值（与 Win32 VK_A..VK_Z 对齐）.

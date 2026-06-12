@@ -916,9 +916,9 @@ func (c *Coordinator) convertPunct(r rune, afterDigit bool, prevChar rune) strin
 	smartPunct := effectiveChPunct && c.shouldSmartPunct(r, afterDigit, prevChar)
 	isChinesePunct := effectiveChPunct && !smartPunct
 
-	// 自定义标点映射优先
+	// 自定义标点映射优先（四状态均可配置）
 	if c.config != nil && c.config.Input.PunctCustom.Enabled {
-		colIdx := -1
+		colIdx := 3 // 英文半角（默认）
 		if isChinesePunct && c.fullWidth {
 			colIdx = 2 // 中文全角
 		} else if isChinesePunct {
@@ -926,10 +926,8 @@ func (c *Coordinator) convertPunct(r rune, afterDigit bool, prevChar rune) strin
 		} else if c.fullWidth {
 			colIdx = 1 // 英文全角
 		}
-		if colIdx >= 0 {
-			if text, ok := c.punctConverter.LookupCustom(r, colIdx); ok {
-				return text
-			}
+		if text, ok := c.punctConverter.LookupCustom(r, colIdx); ok {
+			return text
 		}
 	}
 
