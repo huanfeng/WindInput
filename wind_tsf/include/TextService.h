@@ -33,6 +33,7 @@ class CTextService : public ITfTextInputProcessorEx,
     friend class CUpdateCompositionEditSession;
     friend class CEndCompositionEditSession;
     friend class CCommitTextEditSession;
+    friend class CReplaceBackwardEditSession;
     friend class CInsertAndComposeEditSession;
     friend class CInsertTextEditSession;
 public:
@@ -136,6 +137,11 @@ public:
 
     // Commit text atomically (end composition + insert text in one EditSession)
     BOOL CommitText(const std::wstring& text);
+
+    // 把光标前 count 个已上屏字符替换为 text（智能符号纠错替换）。
+    // 优先走 TSF 同步 EditSession（原子、不受输入队列时序/修饰键影响）；
+    // 失败时回退到 SendInput（count 次 Backspace + Unicode 注入 text）。
+    BOOL ReplacePrecedingChars(int count, const std::wstring& text);
 
     // End current composition.
     // pDocMgrHint: 失焦场景下 GetFocus() 已为 nullptr，调用方可传入 pDocMgrPrevFocus

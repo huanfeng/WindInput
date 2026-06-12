@@ -9,6 +9,49 @@
     <div class="settings-card">
       <div class="card-title">字符与标点</div>
       <SchemaRenderer :schema="punctSchema" :form-data="formData" mode="bare" />
+      <div class="setting-item" data-search-anchor="input.smart_symbol_mode">
+        <div class="setting-info">
+          <label>智能符号模式</label>
+          <p class="setting-hint">
+            连按两次同一中文标点，自动删除并替换为对应英文符号
+          </p>
+        </div>
+        <div class="setting-control inline-control">
+          <label class="checkbox-label">
+            <input type="checkbox" v-model="formData.input.smart_symbol_mode" />
+            启用
+          </label>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="!formData.input.smart_symbol_mode"
+            @click="openSmartSymbolDialog()"
+          >
+            配置
+          </Button>
+        </div>
+      </div>
+      <div
+        class="setting-item"
+        data-search-anchor="input.smart_symbol_timeout_ms"
+        :class="{ 'item-disabled': !formData.input.smart_symbol_mode }"
+      >
+        <div class="setting-info">
+          <label>智能符号时限</label>
+          <p class="setting-hint">两次按键的最大间隔（毫秒），超时视为普通标点</p>
+        </div>
+        <div class="setting-control">
+          <input
+            type="number"
+            class="number-input"
+            v-model.number="formData.input.smart_symbol_timeout_ms"
+            min="100"
+            max="2000"
+            step="50"
+            :disabled="!formData.input.smart_symbol_mode"
+          />
+        </div>
+      </div>
       <div class="setting-item" data-search-anchor="input.punct_custom.enabled">
         <div class="setting-info">
           <label>自定义标点映射</label>
@@ -103,6 +146,50 @@
               >取消</Button
             >
             <Button size="sm" @click="confirmPunctCustom()">确定</Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 智能符号集合对话框 -->
+    <Dialog
+      :open="showSmartSymbolDialog"
+      @update:open="
+        (v: boolean) => {
+          if (!v) cancelSmartSymbol();
+        }
+      "
+    >
+      <DialogContent class="max-w-[600px]">
+        <DialogHeader>
+          <DialogTitle>智能符号集合</DialogTitle>
+        </DialogHeader>
+        <div>
+          <p class="dialog-hint">
+            列出参与「连按两次转英文」的中文标点，直接连写即可（无需分隔）。<br />
+            支持多字符标点（省略号 …… / 破折号 ——）与引号（“”‘’，默认未纳入，可手动添加）。全角模式下自动输出全角英文；配置了自定义标点映射时按你的映射识别。<br />
+            提示：开启「自动配对」（中文/英文标点配对）后，被配对的符号（括号、引号等）<b>不会触发</b>本特性；被设为模式激活键的符号（如 ` 临时拼音、; ' 选词键）在相应场景下也不会触发。
+          </p>
+          <textarea
+            v-model="smartSymbolDraft"
+            class="smart-symbol-textarea"
+            rows="3"
+            placeholder="。，？！：；"
+          ></textarea>
+        </div>
+        <DialogFooter class="flex !justify-between">
+          <Button
+            variant="outline"
+            size="sm"
+            @click="resetSmartSymbolDefaults()"
+          >
+            恢复默认
+          </Button>
+          <div class="flex gap-2">
+            <Button variant="outline" size="sm" @click="cancelSmartSymbol()"
+              >取消</Button
+            >
+            <Button size="sm" @click="confirmSmartSymbol()">确定</Button>
           </div>
         </DialogFooter>
       </DialogContent>
@@ -444,6 +531,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from "vue";
 import type { Config } from "../api/settings";
+import { getDefaultConfig } from "../api/settings";
 import { Key, S2TVariant } from "@/lib/enums";
 import TriggerKeySelect from "@/components/TriggerKeySelect.vue";
 import { Button } from "@/components/ui/button";
@@ -743,6 +831,26 @@ function resetPunctCustomDefaults() {
   editingCell.value = null;
 }
 
+// ========== 智能符号集合 ==========
+const showSmartSymbolDialog = ref(false);
+const smartSymbolDraft = ref("");
+
+function openSmartSymbolDialog() {
+  smartSymbolDraft.value = props.formData.input.smart_symbol_chars ?? "";
+  showSmartSymbolDialog.value = true;
+}
+// 恢复默认仅重置草稿，确定后才写回（与自定义标点一致）
+function resetSmartSymbolDefaults() {
+  smartSymbolDraft.value = getDefaultConfig().input.smart_symbol_chars;
+}
+function cancelSmartSymbol() {
+  showSmartSymbolDialog.value = false;
+}
+function confirmSmartSymbol() {
+  props.formData.input.smart_symbol_chars = smartSymbolDraft.value;
+  showSmartSymbolDialog.value = false;
+}
+
 // 触发键选项列表
 const triggerKeyOptions = [
   { value: "backtick", label: "反引号 ( ` )" },
@@ -950,5 +1058,28 @@ const tempEnglishConflictMsg = computed(() => {
 .number-input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ========== 智能符号集合文本框 ========== */
+.smart-symbol-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 84px;
+  padding: 8px 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  font-size: 16px;
+  line-height: 1.9;
+  color: hsl(var(--foreground));
+  background: hsl(var(--card));
+  resize: vertical;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+.smart-symbol-textarea:focus {
+  outline: none;
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.15);
 }
 </style>

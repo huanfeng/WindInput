@@ -81,6 +81,9 @@ type InputConfig struct {
 	SelectCharKeys       []keys.PairGroup       `yaml:"select_char_keys" json:"select_char_keys"`               // 以词定字按键: PairCommaPeriod / PairMinusEqual / PairBrackets
 	SmartPunctAfterDigit bool                   `yaml:"smart_punct_after_digit" json:"smart_punct_after_digit"` // 数字后标点智能转换（默认 true）
 	SmartPunctList       string                 `yaml:"smart_punct_list" json:"smart_punct_list"`               // 数字后保持英文的标点字符，如 ".,:"
+	SmartSymbolMode      bool                   `yaml:"smart_symbol_mode" json:"smart_symbol_mode"`             // 智能符号模式：同一中文标点在时限内连按两次，删前一字符替换为英文（默认 false）
+	SmartSymbolTimeoutMs int                    `yaml:"smart_symbol_timeout_ms" json:"smart_symbol_timeout_ms"` // 智能符号模式判定时限（毫秒，默认 500），内部配置
+	SmartSymbolChars     string                 `yaml:"smart_symbol_chars" json:"smart_symbol_chars"`           // 参与智能符号转换的中文标点集合（默认 "。，？！：；"），内部配置，为成对符号等扩展预留
 	EnterBehavior        EnterBehavior          `yaml:"enter_behavior" json:"enter_behavior"`                   // 回车键行为: "commit"(上屏编码), "clear"(清空编码)
 	SpaceOnEmptyBehavior SpaceOnEmptyBehavior   `yaml:"space_on_empty_behavior" json:"space_on_empty_behavior"` // 空码时空格键行为: "commit"(上屏编码), "clear"(清空编码)
 	NumpadBehavior       string                 `yaml:"numpad_behavior" json:"numpad_behavior"`                 // 数字小键盘功能: "direct"(直接输入数字,默认) | "follow_main"(同主键盘区数字)
@@ -445,6 +448,9 @@ func DefaultConfig() *Config {
 		Input: InputConfig{
 			SmartPunctAfterDigit: true,
 			SmartPunctList:       ".,:",
+			SmartSymbolMode:      false,
+			SmartSymbolTimeoutMs: 500,
+			SmartSymbolChars:     "。，？！：；、～￥·……——",
 			EnterBehavior:        EnterCommit,
 			SpaceOnEmptyBehavior: SpaceOnEmptyCommit,
 			PunctFollowMode:      false,

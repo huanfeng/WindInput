@@ -73,6 +73,7 @@ constexpr uint16_t CMD_CONSUMED           = 0x0401; // Key consumed
 constexpr uint16_t CMD_COMMIT_TEXT_WITH_CURSOR = 0x0106; // Commit text with cursor offset
 constexpr uint16_t CMD_MOVE_CURSOR             = 0x0107; // Move cursor (smart skip)
 constexpr uint16_t CMD_DELETE_PAIR             = 0x0108; // Delete pair (smart backspace)
+constexpr uint16_t CMD_REPLACE_BACKWARD        = 0x0109; // Replace preceding char(s): delete N before caret + insert text
 constexpr uint16_t CMD_HOST_RENDER_SETUP  = 0x0501; // Host render setup (shared memory + event names)
 constexpr uint16_t CMD_BATCH_RESPONSE     = 0x0F02; // Batch response container
 
@@ -217,6 +218,15 @@ struct MoveCursorPayload
     uint32_t direction; // 1=right
 };
 static_assert(sizeof(MoveCursorPayload) == 4, "MoveCursorPayload must be 4 bytes");
+
+// Replace backward payload (smart symbol: delete N chars before caret, then insert text)
+struct ReplaceBackwardPayload
+{
+    uint32_t count;      // Number of chars to delete before caret
+    uint32_t textLength; // Length of insert text (UTF-8)
+    // Followed by UTF-8 text
+};
+static_assert(sizeof(ReplaceBackwardPayload) == 8, "ReplaceBackwardPayload must be 8 bytes");
 
 // Commit text flags
 constexpr uint32_t COMMIT_FLAG_MODE_CHANGED       = 0x0001;
@@ -449,6 +459,7 @@ enum class ResponseType
     InsertTextWithCursor, // Insert text and position cursor
     MoveCursorRight,      // Move cursor right (smart skip)
     DeletePair,           // Delete left + right char (smart delete)
+    ReplaceBackward,      // Delete N chars before caret + insert text (smart symbol)
     HostRenderSetup, // Host render setup (shared memory info)
     Error
 };

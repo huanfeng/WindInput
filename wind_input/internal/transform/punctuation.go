@@ -203,6 +203,42 @@ func (c *PunctuationConverter) ToChinesePunctStr(r rune) (string, bool) {
 	return string(r), false
 }
 
+// PeekChineseStr 预测 ToChinesePunctStr(r) 的输出但**不修改任何状态**（不翻转引号
+// 左右交替）。覆盖多字符标点（^→……、_→——）、引号（按当前左右状态/配对状态预测）、
+// 以及普通单字符标点。供智能符号模式无副作用地预判按键将产生的中文标点串。
+func (c *PunctuationConverter) PeekChineseStr(r rune) (string, bool) {
+	if str, ok := englishToChinesePunctStr[r]; ok {
+		return str, true
+	}
+	switch r {
+	case '\'':
+		if c.pairedSingleQuote || c.singleQuoteLeft {
+			return string(chineseSingleQuoteLeft), true
+		}
+		return string(chineseSingleQuoteRight), true
+	case '"':
+		if c.pairedDoubleQuote || c.doubleQuoteLeft {
+			return string(chineseDoubleQuoteLeft), true
+		}
+		return string(chineseDoubleQuoteRight), true
+	}
+	if ch, ok := englishToChinesePunct[r]; ok {
+		return string(ch), true
+	}
+	return "", false
+}
+
+// RevertLastQuote 把引号的左右交替状态回退一步。智能符号替换吃掉一个引号后调用，
+// 抵消 convertPunct 已做出的翻转，使下一次同引号仍从左引号开始。非引号为 no-op。
+func (c *PunctuationConverter) RevertLastQuote(r rune) {
+	switch r {
+	case '\'':
+		c.singleQuoteLeft = !c.singleQuoteLeft
+	case '"':
+		c.doubleQuoteLeft = !c.doubleQuoteLeft
+	}
+}
+
 // ToEnglishPunct converts Chinese punctuation to English punctuation
 // 中文标点转英文标点
 func ToEnglishPunct(r rune) (rune, bool) {

@@ -48,6 +48,7 @@ public enum DownstreamCmd {
     public static let commitTextWithCursor: UInt16 = 0x0106
     public static let moveCursor: UInt16       = 0x0107
     public static let deletePair: UInt16       = 0x0108
+    public static let replaceBackward: UInt16  = 0x0109   // 删除光标前 N 字符 + 插入文本 (智能符号)
     public static let consumed: UInt16         = 0x0401
     public static let statusUpdate: UInt16     = 0x0202
     public static let statePush: UInt16        = 0x0206

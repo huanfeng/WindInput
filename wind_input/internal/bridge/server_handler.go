@@ -302,6 +302,10 @@ func (s *Server) handleKeyEvent(payload []byte, clientID int) []byte {
 		s.logger.Debug("Returning DeletePair response", "clientID", clientID)
 		return s.codec.EncodeDeletePair()
 
+	case ResponseTypeReplaceBackward:
+		s.logger.Debug("Returning ReplaceBackward response", "clientID", clientID, "count", result.ReplaceCount)
+		return s.codec.EncodeReplaceBackward(result.ReplaceCount, result.Text)
+
 	default:
 		return s.codec.EncodeAck()
 	}

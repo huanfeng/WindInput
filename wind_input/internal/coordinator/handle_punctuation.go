@@ -138,6 +138,12 @@ func (c *Coordinator) isPunctuation(r rune) bool {
 func (c *Coordinator) handlePunctuation(r rune, afterDigit bool, prevChar rune) *bridge.KeyEventResult {
 	c.logger.Debug("handlePunctuation", "char", string(r), "buffer", c.inputBuffer)
 
+	// 智能符号模式：同一中文标点在时限内连按两次 → 删前一字符替换为英文。
+	// 必须在 OnPhraseTerminated / 顶字逻辑之前判定并短路返回（详见 handle_smart_symbol.go）。
+	if res := c.trySmartSymbolReplace(r, afterDigit, prevChar); res != nil {
+		return res
+	}
+
 	// 任意标点 = 短语终止符，**无关** punct_commit 开关与是否有候选/buffer。
 	// 这是码表自动造词的强约束：标点出现即视为一句结束，flush 当前 charBuffer。
 	// 后续若再触发 OnCandidateSelected（punct_commit 顶字上屏路径），Manager 内部

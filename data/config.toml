@@ -44,6 +44,10 @@ highlight_keys = ["arrows", "tab"]
 select_char_keys = []
 smart_punct_after_digit = true
 smart_punct_list = ".,:"
+# 智能符号模式：同一中文标点在时限内连按两次，自动删除并替换为对应英文符号
+smart_symbol_mode = false
+smart_symbol_timeout_ms = 500
+smart_symbol_chars = "。，？！：；、～￥·……——"
 enter_behavior = "commit"
 space_on_empty_behavior = "commit"
 numpad_behavior = "direct"

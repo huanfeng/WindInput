@@ -373,6 +373,110 @@ private:
     BOOL _success;
 };
 
+// EditSession：把光标前 count 个字符替换为 text（智能符号纠错替换）。
+// 在单一同步 EditSession 内完成：取选区光标 → 起点回退 count 字符 → SetText 覆盖。
+// 同步、原子、不受输入队列时序与修饰键状态影响——优于"合成退格 + 提交"组合。
+class CReplaceBackwardEditSession : public ITfEditSession
+{
+public:
+    CReplaceBackwardEditSession(CTextService* pTextService, ITfContext* pContext,
+                                int count, const std::wstring& text)
+        : _refCount(1), _pTextService(pTextService), _pContext(pContext),
+          _count(count), _text(text), _success(FALSE)
+    {
+        _pTextService->AddRef();
+        _pContext->AddRef();
+    }
+
+    ~CReplaceBackwardEditSession()
+    {
+        _pTextService->Release();
+        _pContext->Release();
+    }
+
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj)
+    {
+        if (ppvObj == nullptr) return E_INVALIDARG;
+        *ppvObj = nullptr;
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfEditSession))
+        {
+            *ppvObj = (ITfEditSession*)this;
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&_refCount); }
+    STDMETHODIMP_(ULONG) Release()
+    {
+        LONG cr = InterlockedDecrement(&_refCount);
+        if (cr == 0) delete this;
+        return cr;
+    }
+
+    // ITfEditSession
+    STDMETHODIMP DoEditSession(TfEditCookie ec)
+    {
+        TF_SELECTION sel = {};
+        ULONG fetched = 0;
+        if (FAILED(_pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) ||
+            fetched == 0 || sel.range == nullptr)
+        {
+            WIND_LOG_DEBUG(L"CReplaceBackwardEditSession: GetSelection failed\n");
+            return E_FAIL;
+        }
+
+        ITfRange* pRange = sel.range; // 取得所有权，末尾 Release
+
+        // 先折叠到光标（选区末端），确保 range 锚定在光标处，再向前覆盖 count 个字符，
+        // 即便此刻存在非空选区也只替换"光标前 count 字符"。
+        pRange->Collapse(ec, TF_ANCHOR_END);
+
+        LONG shifted = 0;
+        HRESULT hr = pRange->ShiftStart(ec, -_count, &shifted, nullptr);
+        if (FAILED(hr) || shifted != -_count)
+        {
+            // 无法回退足够字符（行首 / 不可编辑等）：放弃，交由调用方走 SendInput 兜底。
+            WIND_LOG_DEBUG_FMT(L"CReplaceBackwardEditSession: ShiftStart failed hr=0x%08X shifted=%ld\n", hr, shifted);
+            pRange->Release();
+            return E_FAIL;
+        }
+
+        hr = pRange->SetText(ec, TF_ST_CORRECTION, _text.c_str(), (LONG)_text.length());
+        if (FAILED(hr))
+        {
+            WIND_LOG_DEBUG_FMT(L"CReplaceBackwardEditSession: SetText failed hr=0x%08X\n", hr);
+            pRange->Release();
+            return hr;
+        }
+
+        // 光标定位到替换文本之后。
+        pRange->Collapse(ec, TF_ANCHOR_END);
+        TF_SELECTION newSel = {};
+        newSel.range = pRange;
+        newSel.style.ase = TF_AE_NONE;
+        newSel.style.fInterimChar = FALSE;
+        _pContext->SetSelection(ec, 1, &newSel);
+
+        pRange->Release();
+        _success = TRUE;
+        WIND_LOG_DEBUG(L"CReplaceBackwardEditSession: range replace committed\n");
+        return S_OK;
+    }
+
+    BOOL GetSuccess() const { return _success; }
+
+private:
+    LONG _refCount;
+    CTextService* _pTextService;
+    ITfContext* _pContext;
+    int _count;
+    std::wstring _text;
+    BOOL _success;
+};
+
 // EditSession for updating composition
 class CUpdateCompositionEditSession : public ITfEditSession
 {
@@ -4427,6 +4531,88 @@ BOOL CTextService::UpdateComposition(const std::wstring& text, int caretPos)
     }
 
     return SUCCEEDED(hr);
+}
+
+// 把光标前 count 个已上屏字符替换为 text（智能符号纠错替换）。
+// 优先走 TSF 同步 EditSession（原子、不受输入队列时序 / 修饰键影响）；失败时回退到
+// SendInput（count 次 Backspace + Unicode 注入 text，两者同入输入队列，顺序一致：
+// 先退格删旧字符，再插入新字符，避免"TSF 同步提交 + 队列退格"的时序倒错）。
+BOOL CTextService::ReplacePrecedingChars(int count, const std::wstring& text)
+{
+    if (count <= 0)
+    {
+        // 无删除需求，等价于直接上屏。
+        return CommitText(text);
+    }
+
+    _lastCompositionText.clear();
+    _lastCaretPos = -1;
+
+    ITfDocumentMgr* pDocMgr = nullptr;
+    if (_pThreadMgr != nullptr && SUCCEEDED(_pThreadMgr->GetFocus(&pDocMgr)) && pDocMgr != nullptr)
+    {
+        ITfContext* pContext = nullptr;
+        HRESULT hr = pDocMgr->GetTop(&pContext);
+        pDocMgr->Release();
+
+        if (SUCCEEDED(hr) && pContext != nullptr)
+        {
+            CReplaceBackwardEditSession* pEditSession =
+                new CReplaceBackwardEditSession(this, pContext, count, text);
+
+            HRESULT hrSession;
+            hr = pContext->RequestEditSession(_tfClientId, pEditSession,
+                                              TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
+            BOOL success = pEditSession->GetSuccess();
+            pEditSession->Release();
+            pContext->Release();
+
+            if (SUCCEEDED(hr) && SUCCEEDED(hrSession) && success)
+            {
+                WIND_LOG_DEBUG_FMT(L"ReplacePrecedingChars: TSF range replace succeeded count=%d\n", count);
+                return TRUE;
+            }
+            WIND_LOG_DEBUG_FMT(L"ReplacePrecedingChars: TSF failed (hr=0x%08X, hrSession=0x%08X), falling back to SendInput\n",
+                               hr, hrSession);
+        }
+    }
+
+    // 兜底：SendInput count 次 Backspace + Unicode 注入 text。
+    std::vector<INPUT> inputs;
+    inputs.reserve((size_t)count * 2 + text.length() * 2);
+    for (int i = 0; i < count; i++)
+    {
+        INPUT down = {};
+        down.type = INPUT_KEYBOARD;
+        down.ki.wVk = VK_BACK;
+        inputs.push_back(down);
+
+        INPUT up = {};
+        up.type = INPUT_KEYBOARD;
+        up.ki.wVk = VK_BACK;
+        up.ki.dwFlags = KEYEVENTF_KEYUP;
+        inputs.push_back(up);
+    }
+    for (wchar_t ch : text)
+    {
+        INPUT down = {};
+        down.type = INPUT_KEYBOARD;
+        down.ki.wScan = ch;
+        down.ki.dwFlags = KEYEVENTF_UNICODE;
+        inputs.push_back(down);
+
+        INPUT up = {};
+        up.type = INPUT_KEYBOARD;
+        up.ki.wScan = ch;
+        up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        inputs.push_back(up);
+    }
+    if (!inputs.empty())
+    {
+        SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT));
+    }
+    WIND_LOG_DEBUG_FMT(L"ReplacePrecedingChars: SendInput fallback count=%d textLen=%zu\n", count, text.length());
+    return TRUE;
 }
 
 // Commit text atomically: end composition + insert text in a single EditSession.

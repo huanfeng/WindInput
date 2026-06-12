@@ -471,6 +471,8 @@ func (s *Server) writeKeyResult(conn net.Conn, r *KeyEventResult) {
 		_, _ = conn.Write(s.codec.EncodeMoveCursor(1))
 	case ResponseTypeDeletePair:
 		_, _ = conn.Write(s.codec.EncodeDeletePair())
+	case ResponseTypeReplaceBackward:
+		_, _ = conn.Write(s.codec.EncodeReplaceBackward(r.ReplaceCount, r.Text))
 	default:
 		_, _ = conn.Write(s.codec.EncodeAck())
 	}

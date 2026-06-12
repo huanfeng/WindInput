@@ -1721,6 +1721,18 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         }
         return TRUE;
 
+    case ResponseType::ReplaceBackward:
+        {
+            // 智能符号：删除光标前 N 个字符并插入替换文本（同步 TSF 范围替换，
+            // 失败时内部回退 SendInput）。不走 _SimulatePairKey，避免"TSF 同步提交 +
+            // 队列退格"的时序倒错，以及 Shift 类标点的发键抑制问题。
+            WIND_LOG_DEBUG(L"Processing ReplaceBackward response (smart symbol)\n");
+            _pTextService->ReplacePrecedingChars(response.replaceCount, response.text);
+            _isComposing = FALSE;
+            _hasCandidates = FALSE;
+        }
+        return TRUE;
+
     default:
         WIND_LOG_ERROR(L"Unknown response type from service");
         return TRUE;

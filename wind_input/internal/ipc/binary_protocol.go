@@ -69,6 +69,7 @@ const (
 	CmdCommitTextWithCursor uint16 = 0x0106 // Commit text with cursor offset
 	CmdMoveCursor           uint16 = 0x0107 // Move cursor (skip over)
 	CmdDeletePair           uint16 = 0x0108 // Delete pair (smart backspace)
+	CmdReplaceBackward      uint16 = 0x0109 // Replace preceding char(s): delete N before caret + insert text
 	CmdConsumed             uint16 = 0x0401 // Key consumed (no output)
 	CmdHostRenderSetup      uint16 = 0x0501 // Host render setup (shared memory + event names)
 	CmdHostRenderFrame      uint16 = 0x0502 // Host render frame ready notification (darwin: SHM seq + geometry)

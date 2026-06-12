@@ -278,6 +278,12 @@ type Coordinator struct {
 	pairTrackerEn  *transform.PairTracker // 英文配对追踪器
 	pairInsertTime time.Time              // 最近一次自动配对插入的时间，用于抑制 SelectionChanged 清栈
 
+	// 智能符号模式状态（详见 handle_smart_symbol.go / docs/design/smart-symbol-mode.md）
+	smartSymbolArmed bool      // 是否处于「刚提交一个参与集合内的中文标点」的待命态
+	smartSymbolKey   rune      // 触发该中文标点的 ASCII 按键（替换时输出此原字符）
+	smartSymbolStr   string    // 待命的中文标点串（可多字符，如 ……/——）
+	smartSymbolAt    time.Time // 该中文标点的提交时刻
+
 	// lastSelfCommitTime 最近一次 IME 主动向宿主提交文本的时间。
 	// 用于在 HandleSelectionChanged 里区分"用户主动操作"和"IME 自家提交导致的回响"：
 	// 我们提交候选词后宿主插入文本，会立即触发一次 OnEndEdit → HandleSelectionChanged，

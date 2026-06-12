@@ -21,4 +21,13 @@ public protocol TextInputClient: AnyObject {
     /// selectionRange 是 text 内的光标位置 (UTF-16 unit).
     /// replacementRange 同 insertText.
     func setMarkedText(_ text: String, selectionRange: NSRange, replacementRange: NSRange)
+
+    /// 当前宿主文本框的选区/光标 (UTF-16 unit)；光标位置取 location。
+    /// 智能符号替换据此把 replacementRange 锚定到"光标前 N 个字符"。
+    /// 默认实现返回 NSNotFound（无法定位），由调用方降级为仅插入。
+    func selectedRange() -> NSRange
+}
+
+public extension TextInputClient {
+    func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
 }

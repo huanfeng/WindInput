@@ -89,6 +89,23 @@ public final class BridgeResponseRouter {
             // 收到则仅消费按键, 待将来需要时经 moveHostCursor + 删除键合成。
             return true
 
+        case DownstreamCmd.replaceBackward:
+            // 智能符号: 删除光标前 count 个字符并插入替换文本。用 IMKit selectedRange
+            // 定位光标, insertText(replacementRange:) 一步原子替换 (无需合成退格, 规避
+            // 时序与修饰键问题)。无法取得光标时降级为仅插入 (不删除), 保证不误删。
+            if let p = try? BinaryCodec.decodeReplaceBackwardPayload(frame.payload), let client = client {
+                let count = Int(p.count)
+                let sel = client.selectedRange()
+                if count > 0, sel.location != NSNotFound, sel.location >= count {
+                    let range = NSRange(location: sel.location - count, length: count)
+                    client.insertText(p.text, replacementRange: range)
+                } else {
+                    let notFound = NSRange(location: NSNotFound, length: NSNotFound)
+                    client.insertText(p.text, replacementRange: notFound)
+                }
+            }
+            return true
+
         default:
             return true   // 未知 cmd: 默认消费, 避免重复出字符
         }

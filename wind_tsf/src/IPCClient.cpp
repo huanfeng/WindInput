@@ -1346,6 +1346,31 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
         }
         break;
 
+    case CMD_REPLACE_BACKWARD:
+        {
+            response.type = ResponseType::ReplaceBackward;
+            if (payload.size() < sizeof(ReplaceBackwardPayload))
+            {
+                _LogError(L"ReplaceBackward payload too short");
+                return FALSE;
+            }
+            const ReplaceBackwardPayload* p = reinterpret_cast<const ReplaceBackwardPayload*>(payload.data());
+            response.replaceCount = (int)p->count;
+            if (p->textLength > 0)
+            {
+                // 减法形式防 32 位加法回绕（同 CMD_COMMIT_TEXT 注释）。
+                size_t textOffset = sizeof(ReplaceBackwardPayload);
+                if (p->textLength <= payload.size() - textOffset)
+                {
+                    response.text = _Utf8ToWide(
+                        reinterpret_cast<const char*>(payload.data() + textOffset),
+                        p->textLength);
+                }
+            }
+            _LogDebug(L"Response: ReplaceBackward count=%d, textLen=%zu", response.replaceCount, response.text.length());
+        }
+        break;
+
     case CMD_HOST_RENDER_SETUP:
         {
             response.type = ResponseType::HostRenderSetup;

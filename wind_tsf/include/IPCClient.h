@@ -62,6 +62,9 @@ struct ServiceResponse
     // For InsertTextWithCursor
     int cursorOffset = 0;
 
+    // For ReplaceBackward: 删除光标前的字符数（v1 固定 1），随后插入 text
+    int replaceCount = 0;
+
     // For UpdateComposition
     std::wstring composition;
     int caretPos = 0;

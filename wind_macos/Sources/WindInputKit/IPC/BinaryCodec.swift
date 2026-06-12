@@ -224,6 +224,27 @@ public enum BinaryCodec {
         return MoveCursorPayload(direction: buf.readUInt32LE(at: 0))
     }
 
+    public struct ReplaceBackwardPayload: Equatable {
+        public let count: UInt32
+        public let text: String
+    }
+
+    /// 解 CmdReplaceBackward payload (0x0109 downstream).
+    /// 布局: count:u32 + textLength:u32 + text:bytes
+    public static func decodeReplaceBackwardPayload(_ buf: Data) throws -> ReplaceBackwardPayload {
+        guard buf.count >= 8 else {
+            throw IPCError.payloadTooShort(expected: 8, got: buf.count)
+        }
+        let count = buf.readUInt32LE(at: 0)
+        let textLen = Int(buf.readUInt32LE(at: 4))
+        guard buf.count >= 8 + textLen else {
+            throw IPCError.payloadTooShort(expected: 8 + textLen, got: buf.count)
+        }
+        let textStart = buf.startIndex + 8
+        let text = String(data: buf.subdata(in: textStart..<(textStart + textLen)), encoding: .utf8) ?? ""
+        return ReplaceBackwardPayload(count: count, text: text)
+    }
+
     public struct StatePushPayload: Equatable {
         public let flags: UInt32
         public let iconLabel: String

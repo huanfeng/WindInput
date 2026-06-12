@@ -228,6 +228,9 @@ export interface InputConfig {
   filter_mode: FilterModeValue;
   smart_punct_after_digit: boolean;
   smart_punct_list: string;
+  smart_symbol_mode: boolean;
+  smart_symbol_timeout_ms: number;
+  smart_symbol_chars: string;
   enter_behavior: EnterBehaviorValue;
   space_on_empty_behavior: SpaceOnEmptyBehaviorValue;
   numpad_behavior: NumpadBehaviorValue;
@@ -470,6 +473,9 @@ export function getDefaultConfig(): Config {
       filter_mode: "smart",
       smart_punct_after_digit: true,
       smart_punct_list: ".,:",
+      smart_symbol_mode: false,
+      smart_symbol_timeout_ms: 500,
+      smart_symbol_chars: "。，？！：；、～￥·……——",
       enter_behavior: "commit",
       space_on_empty_behavior: "commit",
       numpad_behavior: "direct",

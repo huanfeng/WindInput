@@ -25,7 +25,8 @@
 | `handle_mode.go` | 中英文模式切换、CapsLock 状态处理 |
 | `mem_idle_trim.go` | 空闲内存修剪器 `idleMemTrimmer`：按键路径 `noteActivity` 记录活动（两次原子写），后台 goroutine 每分钟检测，持续空闲 10 分钟后执行一次 GC+FreeOSMemory+EmptyWorkingSet，把 mmap 词库触页与堆余量还给 OS；每个空闲期最多修剪一次，恢复输入后按需软缺页拉回 |
 | `mem_trim_windows.go` / `mem_trim_other.go` | `emptyWorkingSet()` 平台实现：Windows 走 psapi `EmptyWorkingSet`，非 Windows 为 no-op |
-| `handle_punctuation.go` | 中英文标点转换处理；自动配对 (`getAutoPairTracker` 中文模式 / `handleEnglishModeAutoPair` IME 英文模式) ——智能跳过 + 插入配对回退光标，英文模式配对受 `englishModeAutoPairInGo` 平台常量 gate |
+| `handle_punctuation.go` | 中英文标点转换处理；自动配对 (`getAutoPairTracker` 中文模式 / `handleEnglishModeAutoPair` IME 英文模式) ——智能跳过 + 插入配对回退光标，英文模式配对受 `englishModeAutoPairInGo` 平台常量 gate；入口先走 `trySmartSymbolReplace`（智能符号模式短路） |
+| `handle_smart_symbol.go` | 智能符号模式：同一**按键**在时限内（`Input.SmartSymbolTimeoutMs`，默认 500ms）连按两次 → 删前一中文标点替换为英文（`ResponseTypeReplaceBackward`）。`trySmartSymbolReplace` 在 `handlePunctuation` 入口按已武装产物+按键+`PrevChar` 判定（引号/多字符/全角/自定义映射均覆盖，经 `computePunctStrPure` 镜像 `convertPunct` 优先级）。参与集 `Input.SmartSymbolChars`（可在设置对话框配置）。`disarmSmartSymbol` 在焦点丢失等场景复位。详见 `docs/design/smart-symbol-mode.md`（测试 `handle_smart_symbol_test.go`） |
 | `english_pair_darwin.go` / `english_pair_other.go` | 平台常量 `englishModeAutoPairInGo`：darwin=true（macOS 无 C++ TSF 层，IME 英文模式成对标点由 Go 的 `handleEnglishModeAutoPair` 接管），非 darwin=false（Windows 英文配对由 C++ 处理，Go 透传不重复）。配对的光标移动在 macOS 经 `MoveCursorRight`/`InsertTextWithCursor.CursorOffset` 下发，IMKit `.app` 用 CGEvent 合成方向键（需辅助功能授权） |
 | `handle_temp_english.go` | 临时英文模式：五笔输入态下按特定键（如 Z）触发，输入英文后恢复；维护临时英文缓冲区和上屏逻辑 |
 | `handle_temp_pinyin.go` | 临时拼音模式：五笔方案下临时切换到拼音输入；通过 `engine.Manager.ActivateTempPinyin`/`DeactivateTempPinyin` 管理拼音词库层的注入与退出 |

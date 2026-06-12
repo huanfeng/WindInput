@@ -403,6 +403,9 @@ public class InputController: IMKInputController {
         func setMarkedText(_ text: String, selectionRange: NSRange, replacementRange: NSRange) {
             imkClient.setMarkedText(text, selectionRange: selectionRange, replacementRange: replacementRange)
         }
+        func selectedRange() -> NSRange {
+            imkClient.selectedRange()
+        }
     }
 
     // MARK: - Reconnect

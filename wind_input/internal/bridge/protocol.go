@@ -15,6 +15,7 @@ const (
 	ResponseTypeInsertTextWithCursor ResponseType = "insert_text_with_cursor" // 插入文本并定位光标
 	ResponseTypeMoveCursorRight      ResponseType = "move_cursor_right"       // 光标右移（智能跳过）
 	ResponseTypeDeletePair           ResponseType = "delete_pair"             // 删除配对（智能删除）
+	ResponseTypeReplaceBackward      ResponseType = "replace_backward"        // 删除光标前 N 字符并插入文本（智能符号替换）
 )
 
 // Toggle key state flags (matching C++ TOGGLE_* constants)
@@ -75,6 +76,7 @@ type KeyEventResult struct {
 	NewComposition    string // New composition text after commit (inline preedit: actual text; non-inline: empty)
 	HasNewComposition bool   // Whether to restart composition after commit (set for both inline and non-inline when there is remaining input)
 	CursorOffset      int    // For InsertTextWithCursor: 光标从文本末尾向左偏移的字符数
+	ReplaceCount      int    // For ReplaceBackward: 删除光标前的字符数（v1 固定 1），随后插入 Text
 
 	// Status: 当 Type 为 ResponseTypeStatusUpdate 时携带完整状态（含 IconLabel）。
 	// 用于模式切换响应——bridge 响应自包含 iconLabel，C++ 端的 CLangBar 立刻通过

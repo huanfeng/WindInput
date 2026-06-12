@@ -342,6 +342,24 @@ func (c *BinaryCodec) EncodeDeletePair() []byte {
 	return c.EncodeHeader(CmdDeletePair, 0)
 }
 
+// EncodeReplaceBackward 编码「删除光标前 count 个字符并插入 text」响应（智能符号替换）。
+// Format: count(4) + textLength(4) + UTF-8 text
+func (c *BinaryCodec) EncodeReplaceBackward(count int, text string) []byte {
+	textBytes := []byte(text)
+	payloadLen := uint32(8 + len(textBytes))
+	header := c.EncodeHeader(CmdReplaceBackward, payloadLen)
+
+	payload := make([]byte, 8)
+	binary.LittleEndian.PutUint32(payload[0:4], uint32(count))
+	binary.LittleEndian.PutUint32(payload[4:8], uint32(len(textBytes)))
+
+	result := make([]byte, 0, HeaderSize+payloadLen)
+	result = append(result, header...)
+	result = append(result, payload...)
+	result = append(result, textBytes...)
+	return result
+}
+
 // EncodeUpdateComposition encodes an update composition response
 // Format: CompositionHeader (4 bytes) + UTF-8 text
 func (c *BinaryCodec) EncodeUpdateComposition(text string, caretPos int) []byte {

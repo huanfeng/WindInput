@@ -349,6 +349,7 @@ func (c *Coordinator) HandleFocusLost() {
 	// HandleFocusGained 重新评估。
 	c.mu.Lock()
 	c.clearSensitiveFieldNoLock()
+	c.disarmSmartSymbol() // 焦点丢失：解除智能符号待命，防跨焦点误触发
 	c.mu.Unlock()
 
 	if c.bridgeServer != nil {
