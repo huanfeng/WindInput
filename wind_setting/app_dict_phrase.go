@@ -3,11 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/huanfeng/wind_input/pkg/config"
 	"github.com/huanfeng/wind_input/pkg/rpcapi"
+	toml "github.com/pelletier/go-toml/v2"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"gopkg.in/yaml.v3"
 )
@@ -394,27 +397,27 @@ func statusRank(status string) int {
 // legacyTexts/legacyName 仅用于反序列化旧格式 (升级期间还会读到老 yaml 文件
 // 含 texts/name 双字段, 导入时把它们重组为 $AA marker)。
 type phraseYAMLEntry struct {
-	Code     string `yaml:"code"`
-	Text     string `yaml:"text,omitempty"`
-	Weight   int    `yaml:"weight,omitempty"`
-	Position int    `yaml:"position,omitempty"`
-	Disabled bool   `yaml:"disabled,omitempty"`
+	Code     string `yaml:"code" toml:"code"`
+	Text     string `yaml:"text,omitempty" toml:"text,omitempty"`
+	Weight   int    `yaml:"weight,omitempty" toml:"weight,omitempty"`
+	Position int    `yaml:"position,omitempty" toml:"position,omitempty"`
+	Disabled bool   `yaml:"disabled,omitempty" toml:"disabled,omitempty"`
 
 	// 兼容旧格式: 读 texts/name 字段, 写入时不输出 (omitempty + 写时不填)
-	LegacyTexts string `yaml:"texts,omitempty"`
-	LegacyName  string `yaml:"name,omitempty"`
+	LegacyTexts string `yaml:"texts,omitempty" toml:"texts,omitempty"`
+	LegacyName  string `yaml:"name,omitempty" toml:"name,omitempty"`
 }
 
 type phraseYAMLFile struct {
-	Phrases []phraseYAMLEntry `yaml:"phrases"`
+	Phrases []phraseYAMLEntry `yaml:"phrases" toml:"phrases"`
 }
 
-// ImportPhrases 导入短语（简化 YAML 格式）
+// ImportPhrases 导入短语（TOML，与系统短语 system.phrases.toml 同格式；兼容旧 YAML 导出）
 func (a *App) ImportPhrases() (*ImportExportResult, error) {
 	path, err := a.openFileDialog(wailsRuntime.OpenDialogOptions{
 		Title: "导入短语",
 		Filters: []wailsRuntime.FileFilter{
-			{DisplayName: "短语文件 (*.yaml, *.yml)", Pattern: "*.yaml;*.yml"},
+			{DisplayName: "短语文件 (*.toml, *.yaml, *.yml)", Pattern: "*.toml;*.yaml;*.yml"},
 			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
 		},
 	})
@@ -430,8 +433,13 @@ func (a *App) ImportPhrases() (*ImportExportResult, error) {
 		return nil, fmt.Errorf("读取文件失败: %w", err)
 	}
 
+	// 按扩展名原生解码：.toml 走 go-toml，其余按 YAML（兼容旧导出文件）
 	var file phraseYAMLFile
-	if err := yaml.Unmarshal(data, &file); err != nil {
+	if strings.EqualFold(filepath.Ext(path), ".toml") {
+		if err := toml.Unmarshal(data, &file); err != nil {
+			return nil, fmt.Errorf("解析 TOML 失败: %w", err)
+		}
+	} else if err := yaml.Unmarshal(data, &file); err != nil {
 		return nil, fmt.Errorf("解析 YAML 失败: %w", err)
 	}
 
@@ -461,14 +469,14 @@ func (a *App) ImportPhrases() (*ImportExportResult, error) {
 	return &ImportExportResult{Count: count, Total: len(file.Phrases)}, nil
 }
 
-// ExportPhrases 导出短语（简化 YAML 格式）
+// ExportPhrases 导出短语（TOML，与系统短语 system.phrases.toml 同格式）
 func (a *App) ExportPhrases() (*ImportExportResult, error) {
-	defaultFilename := fmt.Sprintf("phrases_%s.yaml", time.Now().Format("20060102"))
+	defaultFilename := fmt.Sprintf("phrases_%s.toml", time.Now().Format("20060102"))
 	path, err := a.saveFileDialog(wailsRuntime.SaveDialogOptions{
 		Title:           "导出短语",
 		DefaultFilename: defaultFilename,
 		Filters: []wailsRuntime.FileFilter{
-			{DisplayName: "短语文件 (*.yaml)", Pattern: "*.yaml"},
+			{DisplayName: "短语文件 (*.toml)", Pattern: "*.toml"},
 		},
 	})
 	if err != nil {
@@ -494,7 +502,7 @@ func (a *App) ExportPhrases() (*ImportExportResult, error) {
 		})
 	}
 
-	data, err := yaml.Marshal(phraseYAMLFile{Phrases: entries})
+	data, err := toml.Marshal(phraseYAMLFile{Phrases: entries})
 	if err != nil {
 		return nil, fmt.Errorf("序列化失败: %w", err)
 	}

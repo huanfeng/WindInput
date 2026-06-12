@@ -16,7 +16,7 @@
 | `app_runtime_compat.go` | wailsRuntime 调用的 **Web 安全包装**：`a.logInfof`/`a.logErrorf`/`a.emitEvent`。Web 模式下降级为标准库 `log` / SSE 广播；桌面模式原样转发到 `wailsRuntime.*(a.ctx,...)`。**关键**：Web 形态 `a.ctx` 为占位 `context.Background()`，直接调 `wailsRuntime.*` 会触发 `log.Fatalf` 终止进程 |
 | `app_config.go` | 配置读写 API：`GetConfig`、`SetConfigItems`（按 key 增量保存）、`ReloadConfig`、`CheckConfigModified` |
 | `app_dict.go` | 词库管理 API：短语（Phrase）、用户词库（UserDict）、Shadow 规则（pin+delete 架构），含导入/导出 |
-| `app_schema.go` | 输入方案管理 API：`GetAvailableSchemas`、`GetSchemaConfig` 等方案相关操作 |
+| `app_schema.go` | 输入方案管理 API：`GetAvailableSchemas`、`GetSchemaConfig`、`ExportSchema(s)`、`Preview/ConfirmImportSchema` 等。**方案文件双格式**：`SchemaConfig` 全树带 `yaml+toml` tag，`collectSchemaIDs`/`find*SchemaFile`/解析按 `.schema.toml` 优先、`.schema.yaml` 回退（`resolveSchemaFileIn`/`unmarshalSchemaFileData`/`isSchemaFileName`/`schemaIDFromFileName`）。**导出统一 TOML**（`toml.Marshal`→`id.schema.toml`），词库文件原样复制（内容保持其原格式）。**导出资源收集** `collectSchemaResourceFiles`：词库 + split 体(.dict.tsv) + 补丁(.dict.patch.yaml) + 词库头 `import_tables` 兄弟（`readDictImportTables` 自带最小头解析，因独立 module 不能引 internal/dictcache）+ 拆字 `engine.chaizi` 的 db_path/font_family（`SchemaConfigEngine.Chaizi` 字段，缺失会导致拆字资源随方案丢失）。导入解压逐文件原样写出，格式无关 |
 | `app_service.go` | 服务控制 API：`CheckServiceRunning`、`NotifyReload`、主题管理、文件变化检测 |
 | `app_tsf_log.go` | TSF 日志配置 API：`GetTSFLogConfig`、`SaveTSFLogConfig` |
 | `protocol_url.go` | `windinput://` 链接解析：`ParseProtocolURL` → `ProtocolRequest{Kind,URL,Name}`，仅接受 https，kind ∈ theme/schema/dict/extdict |

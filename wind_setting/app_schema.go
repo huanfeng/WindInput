@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -32,6 +33,122 @@ func isSchemaFileName(name string) bool {
 		}
 	}
 	return false
+}
+
+// schemaIDFromFileName 从方案文件名去掉 .schema.toml/.schema.yaml 后缀得到 schema ID。
+func schemaIDFromFileName(name string) string {
+	base := filepath.Base(name)
+	for _, suf := range schemaFileSuffixes {
+		if s, ok := strings.CutSuffix(base, suf); ok {
+			return s
+		}
+	}
+	return base
+}
+
+// dictRelSuffix 返回词库相对路径的格式后缀（.dict.toml 或 .dict.yaml），无则空。
+func dictRelSuffix(p string) string {
+	for _, s := range []string{".dict.toml", ".dict.yaml"} {
+		if strings.HasSuffix(p, s) {
+			return s
+		}
+	}
+	return ""
+}
+
+// readDictImportTables 读取词库头中的 import_tables（导出时发现关联词库）。
+// toml 整文件解析；yaml 截断到 header 结束标记 `...` 再解析（避免 TSV 体干扰）。
+// wind_setting 为独立 module 不能引用 wind_input/internal/dictcache，故自带此最小解析。
+func readDictImportTables(absPath string) []string {
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil
+	}
+	var h struct {
+		ImportTables []string `yaml:"import_tables" toml:"import_tables"`
+	}
+	if isSchemaTOMLFile(absPath) || strings.HasSuffix(absPath, ".dict.toml") {
+		_ = toml.Unmarshal(data, &h)
+	} else {
+		_ = yaml.Unmarshal(truncateYAMLHeader(data), &h)
+	}
+	return h.ImportTables
+}
+
+// truncateYAMLHeader 把 rime .dict.yaml 截断到 header 结束标记 `...`（独占一行），
+// 仅保留头部供 import_tables 解析，丢弃其后海量 TSV 体。
+func truncateYAMLHeader(data []byte) []byte {
+	s := string(data)
+	if strings.HasPrefix(s, "...\n") || strings.HasPrefix(s, "...\r\n") {
+		return nil
+	}
+	for _, marker := range []string{"\n...\n", "\n...\r\n"} {
+		if i := strings.Index(s, marker); i >= 0 {
+			return []byte(s[:i])
+		}
+	}
+	return data
+}
+
+// collectChaiziFiles 从 engine.chaizi 收集拆字资源文件（db_path/font_family）相对路径。
+func collectChaiziFiles(cfg *SchemaConfig) []string {
+	ch := cfg.Engine.Chaizi
+	if ch == nil {
+		return nil
+	}
+	var out []string
+	for _, key := range []string{"db_path", "font_family"} {
+		if v, ok := ch[key].(string); ok && v != "" {
+			out = append(out, filepath.ToSlash(v))
+		}
+	}
+	return out
+}
+
+// collectSchemaResourceFiles 收集方案引用的全部资源文件相对路径（data/schemas 下）：
+// 各词库文件 + split 体(.dict.tsv) + 补丁(.dict.patch.yaml) + import_tables 兄弟词库
+// + 拆字 db/字体。返回候选相对路径（去重，未解析存在性，由导出循环逐个 resolve+跳过缺失）。
+func collectSchemaResourceFiles(cfg *SchemaConfig, exeDataDir, configDir string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(rel string) {
+		rel = filepath.ToSlash(rel)
+		if rel == "" || seen[rel] {
+			return
+		}
+		seen[rel] = true
+		out = append(out, rel)
+	}
+	addDictFamily := func(dictRel string) {
+		suffix := dictRelSuffix(dictRel)
+		stem := strings.TrimSuffix(dictRel, suffix)
+		add(dictRel)
+		if suffix == ".dict.toml" {
+			add(stem + ".dict.tsv")
+		}
+		add(stem + ".dict.patch.yaml")
+	}
+	for _, d := range cfg.Dicts {
+		if d.Path == "" {
+			continue
+		}
+		addDictFamily(d.Path)
+		// 解析该词库头 import_tables，关联兄弟词库（目录相对、后缀跟随主词库格式）
+		abs := resolveDictFilePath(d.Path, exeDataDir, configDir)
+		if abs == "" {
+			continue
+		}
+		suffix := dictRelSuffix(d.Path)
+		dir := path.Dir(filepath.ToSlash(d.Path))
+		for _, name := range readDictImportTables(abs) {
+			sibling := path.Join(dir, name+suffix)
+			addDictFamily(sibling)
+		}
+	}
+	for _, rel := range collectChaiziFiles(cfg) {
+		add(rel)
+	}
+	return out
 }
 
 // unmarshalSchemaFileData 按扩展名原生解码方案文件（.toml→go-toml，其余→yaml）。
@@ -154,10 +271,13 @@ type SchemaConfigMeta struct {
 
 // SchemaConfigEngine 引擎配置
 type SchemaConfigEngine struct {
-	Type       string                 `yaml:"type" json:"type" toml:"type"`
-	CodeTable  map[string]interface{} `yaml:"codetable,omitempty" json:"codetable,omitempty" toml:"codetable,omitempty"`
-	Pinyin     map[string]interface{} `yaml:"pinyin,omitempty" json:"pinyin,omitempty" toml:"pinyin,omitempty"`
-	Mixed      map[string]interface{} `yaml:"mixed,omitempty" json:"mixed,omitempty" toml:"mixed,omitempty"`
+	Type      string                 `yaml:"type" json:"type" toml:"type"`
+	CodeTable map[string]interface{} `yaml:"codetable,omitempty" json:"codetable,omitempty" toml:"codetable,omitempty"`
+	Pinyin    map[string]interface{} `yaml:"pinyin,omitempty" json:"pinyin,omitempty" toml:"pinyin,omitempty"`
+	Mixed     map[string]interface{} `yaml:"mixed,omitempty" json:"mixed,omitempty" toml:"mixed,omitempty"`
+	// Chaizi 拆字提示配置（db_path/font_family/font_dw_name），engine 下与 codetable 平级；
+	// 不建模会在读取/导出方案时被丢弃（拆字资源无法随方案导出）。
+	Chaizi     map[string]interface{} `yaml:"chaizi,omitempty" json:"chaizi,omitempty" toml:"chaizi,omitempty"`
 	FilterMode string                 `yaml:"filter_mode" json:"filter_mode" toml:"filter_mode"`
 }
 
@@ -847,38 +967,35 @@ func (a *App) ExportSchema(schemaID string) (string, error) {
 	w := zip.NewWriter(zipFile)
 	defer w.Close()
 
-	// 写入方案配置文件（完整合并后的配置）
-	schemaYAML, err := yaml.Marshal(cfg)
+	// 写入方案配置文件（完整合并后的配置，统一 TOML 格式）
+	schemaTOML, err := toml.Marshal(cfg)
 	if err != nil {
 		return "", fmt.Errorf("序列化方案配置失败: %w", err)
 	}
-	schemaFileName := schemaID + ".schema.yaml"
+	schemaFileName := schemaID + ".schema.toml"
 	fw, err := w.Create(schemaFileName)
 	if err != nil {
 		return "", fmt.Errorf("添加方案文件到 ZIP 失败: %w", err)
 	}
-	if _, err := fw.Write(schemaYAML); err != nil {
+	if _, err := fw.Write(schemaTOML); err != nil {
 		return "", fmt.Errorf("写入方案文件失败: %w", err)
 	}
 
-	// 收集并写入词典文件
+	// 收集并写入全部资源文件：词库（含 split 体/补丁/import_tables 兄弟）+ 拆字 db/字体
 	exeDir := getExeDir()
 	exeDataDir := filepath.Join(exeDir, "data")
 	configDir, _ := config.GetConfigDir()
 
-	for _, dict := range cfg.Dicts {
-		if dict.Path == "" {
-			continue
+	for _, rel := range collectSchemaResourceFiles(cfg, exeDataDir, configDir) {
+		absPath := resolveDictFilePath(rel, exeDataDir, configDir)
+		if absPath == "" {
+			continue // 候选文件不存在（如缺省补丁），跳过
 		}
-		dictAbsPath := resolveDictFilePath(dict.Path, exeDataDir, configDir)
-		if dictAbsPath == "" {
-			continue
-		}
-		data, err := os.ReadFile(dictAbsPath)
+		data, err := os.ReadFile(absPath)
 		if err != nil {
 			continue
 		}
-		dfw, err := w.Create(dict.Path)
+		dfw, err := w.Create(rel)
 		if err != nil {
 			continue
 		}
@@ -946,12 +1063,12 @@ func (a *App) PreviewImportSchema() (*ImportPreview, error) {
 		}
 		fileCount++
 		name := filepath.Base(stripPrefix(e.Name, prefix))
-		if strings.HasSuffix(name, ".schema.yaml") {
+		if isSchemaFileName(name) {
 			schemaEntries = append(schemaEntries, schemaEntry{name: e.Name, open: e.Open})
 		}
 	}
 	if len(schemaEntries) == 0 {
-		return nil, fmt.Errorf("压缩包中未找到 .schema.yaml 文件")
+		return nil, fmt.Errorf("压缩包中未找到 .schema.toml / .schema.yaml 文件")
 	}
 
 	preview := &ImportPreview{
@@ -971,10 +1088,10 @@ func (a *App) PreviewImportSchema() (*ImportPreview, error) {
 		}
 
 		var cfg SchemaConfig
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
+		if err := unmarshalSchemaFileData(se.name, data, &cfg); err != nil {
 			continue
 		}
-		schemaID := strings.TrimSuffix(filepath.Base(se.name), ".schema.yaml")
+		schemaID := schemaIDFromFileName(se.name)
 		if cfg.Schema.ID == "" {
 			cfg.Schema.ID = schemaID
 		}
@@ -1023,7 +1140,7 @@ func (a *App) ConfirmImportSchema(zipPath string) (*SchemaInfo, error) {
 		}
 		name := stripPrefix(e.Name, prefix)
 		baseName := filepath.Base(name)
-		if strings.HasSuffix(baseName, ".schema.yaml") {
+		if isSchemaFileName(baseName) {
 			rc, err := e.Open()
 			if err != nil {
 				continue
@@ -1034,10 +1151,10 @@ func (a *App) ConfirmImportSchema(zipPath string) (*SchemaInfo, error) {
 				continue
 			}
 			var cfg SchemaConfig
-			if err := yaml.Unmarshal(data, &cfg); err != nil {
+			if err := unmarshalSchemaFileData(baseName, data, &cfg); err != nil {
 				continue
 			}
-			schemaID := strings.TrimSuffix(baseName, ".schema.yaml")
+			schemaID := schemaIDFromFileName(baseName)
 			if cfg.Schema.ID == "" {
 				cfg.Schema.ID = schemaID
 			}
@@ -1048,7 +1165,7 @@ func (a *App) ConfirmImportSchema(zipPath string) (*SchemaInfo, error) {
 		}
 	}
 	if firstCfg == nil {
-		return nil, fmt.Errorf("压缩包中未找到 .schema.yaml 文件")
+		return nil, fmt.Errorf("压缩包中未找到 .schema.toml / .schema.yaml 文件")
 	}
 
 	// 解压到用户方案目录
@@ -1148,11 +1265,13 @@ func (a *App) DeleteSchema(schemaID string) error {
 	}
 	schemasDir := filepath.Join(configDir, "schemas")
 
-	// 删除方案配置文件
-	schemaFile := filepath.Join(schemasDir, schemaID+".schema.yaml")
-	if _, err := os.Stat(schemaFile); err == nil {
-		if err := os.Remove(schemaFile); err != nil {
-			return fmt.Errorf("删除方案文件失败: %w", err)
+	// 删除方案配置文件（.schema.toml / .schema.yaml 两种格式若都存在则都删，避免残留）
+	for _, suf := range schemaFileSuffixes {
+		schemaFile := filepath.Join(schemasDir, schemaID+suf)
+		if _, err := os.Stat(schemaFile); err == nil {
+			if err := os.Remove(schemaFile); err != nil {
+				return fmt.Errorf("删除方案文件失败: %w", err)
+			}
 		}
 	}
 
@@ -1236,10 +1355,10 @@ func (a *App) ExportSchemas(schemaIDs []string) (string, error) {
 			continue
 		}
 
-		// 写入方案配置
-		schemaFileName := sid + ".schema.yaml"
+		// 写入方案配置（统一 TOML 格式）
+		schemaFileName := sid + ".schema.toml"
 		if !writtenPaths[schemaFileName] {
-			schemaYAML, err := yaml.Marshal(cfg)
+			schemaTOML, err := toml.Marshal(cfg)
 			if err != nil {
 				continue
 			}
@@ -1247,16 +1366,16 @@ func (a *App) ExportSchemas(schemaIDs []string) (string, error) {
 			if err != nil {
 				continue
 			}
-			fw.Write(schemaYAML)
+			fw.Write(schemaTOML)
 			writtenPaths[schemaFileName] = true
 		}
 
-		// 写入词典文件（去重）
-		for _, dict := range cfg.Dicts {
-			if dict.Path == "" || writtenPaths[dict.Path] {
+		// 写入全部资源文件（词库 + split 体/补丁/import_tables 兄弟 + 拆字 db/字体，去重）
+		for _, rel := range collectSchemaResourceFiles(cfg, exeDataDir, configDir) {
+			if writtenPaths[rel] {
 				continue
 			}
-			absPath := resolveDictFilePath(dict.Path, exeDataDir, configDir)
+			absPath := resolveDictFilePath(rel, exeDataDir, configDir)
 			if absPath == "" {
 				continue
 			}
@@ -1264,12 +1383,12 @@ func (a *App) ExportSchemas(schemaIDs []string) (string, error) {
 			if err != nil {
 				continue
 			}
-			dfw, err := w.Create(dict.Path)
+			dfw, err := w.Create(rel)
 			if err != nil {
 				continue
 			}
 			dfw.Write(data)
-			writtenPaths[dict.Path] = true
+			writtenPaths[rel] = true
 		}
 	}
 
