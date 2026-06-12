@@ -105,7 +105,7 @@ func activateIMEOnCurrentThread() error {
 		return fmt.Errorf("CoInitializeEx: 0x%08X", uint32(hr))
 	}
 
-	var pObj uintptr
+	var pObj unsafe.Pointer
 	hr, _, _ = procCoCreateInstance.Call(
 		uintptr(unsafe.Pointer(&clsidTFInputProcessorProfiles)),
 		0,
@@ -121,10 +121,10 @@ func activateIMEOnCurrentThread() error {
 	clsid, guidProfile := windInputGUIDs()
 
 	// vtable[3] = ActivateProfile（IUnknown 占 0-2）
-	vtblPtr := *(*uintptr)(unsafe.Pointer(pObj))
-	vtbl := (*[10]uintptr)(unsafe.Pointer(vtblPtr))
+	vtblPtr := *(*unsafe.Pointer)(pObj)
+	vtbl := (*[10]uintptr)(vtblPtr)
 	hr, _, _ = syscall.SyscallN(vtbl[3],
-		pObj,
+		uintptr(pObj),
 		tfProfileTypeInputProcessor,
 		langidSimplifiedChinese,
 		uintptr(unsafe.Pointer(&clsid)),
@@ -147,11 +147,11 @@ func (m *Manager) ActivateIME() {
 	m.logger.Debug("ActivateIME succeeded")
 }
 
-func comRelease(p uintptr) {
-	if p == 0 {
+func comRelease(p unsafe.Pointer) {
+	if p == nil {
 		return
 	}
-	vtblPtr := *(*uintptr)(unsafe.Pointer(p))
-	vtbl := (*[3]uintptr)(unsafe.Pointer(vtblPtr))
-	syscall.SyscallN(vtbl[2], p) //nolint:errcheck
+	vtblPtr := *(*unsafe.Pointer)(p)
+	vtbl := (*[3]uintptr)(vtblPtr)
+	syscall.SyscallN(vtbl[2], uintptr(p)) //nolint:errcheck
 }
