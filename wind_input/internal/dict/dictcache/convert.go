@@ -167,22 +167,22 @@ func LoadCodeTableMetaFromWdb(reader *binformat.DictReader) (*CodeTableMeta, err
 // RimePinyinSourcePaths 返回拼音词库的所有源文件路径（用于缓存失效检测）
 // mainDictPath 为主词库文件路径，自动从 import_tables 发现关联词库及补丁文件
 func RimePinyinSourcePaths(mainDictPath string) []string {
-	paths := []string{mainDictPath}
+	paths := dictFilesFor(mainDictPath)
 	dictDir := filepath.Dir(mainDictPath)
 
 	importFiles := discoverRimePinyinFiles(mainDictPath)
 	for _, name := range importFiles {
 		p := filepath.Join(dictDir, name)
 		if _, err := os.Stat(p); err == nil {
-			paths = append(paths, p)
+			paths = append(paths, dictFilesFor(p)...)
 		}
 	}
 
 	// 包含补丁文件（补丁变更时触发缓存重建）
-	// 将 import 文件名转换回 import_tables 名称格式（去掉 .dict.yaml 后缀）
+	// 将 import 文件名转换回 import_tables 名称格式（去掉词库后缀）
 	var importNames []string
 	for _, f := range importFiles {
-		importNames = append(importNames, strings.TrimSuffix(f, ".dict.yaml"))
+		importNames = append(importNames, dictStem(f))
 	}
 	paths = append(paths, FindPatchFiles(mainDictPath, importNames)...)
 
@@ -190,14 +190,16 @@ func RimePinyinSourcePaths(mainDictPath string) []string {
 }
 
 // discoverRimePinyinFiles 从主词库的 import_tables 发现关联词库的相对路径
-// 严格只加载 import_tables 中声明的词库，保留原始路径结构（如 "cn_dicts/8105.dict.yaml"）
+// 严格只加载 import_tables 中声明的词库，保留原始路径结构（如 "cn_dicts/8105.dict.yaml"）。
+// 兄弟词库扩展名跟随主词库格式（split→.dict.toml，rime→.dict.yaml）。
 func discoverRimePinyinFiles(mainDictPath string) []string {
-	importNames := parseRimeImportTables(mainDictPath)
+	hdr, _ := ReadDictHeader(mainDictPath)
+	suffix := dictSuffixOf(mainDictPath)
 
 	var files []string
-	for _, name := range importNames {
-		// 保留原始路径: "cn_dicts/8105" → "cn_dicts/8105.dict.yaml"
-		files = append(files, name+".dict.yaml")
+	for _, name := range hdr.ImportTables {
+		// 保留原始路径: "cn_dicts/8105" → "cn_dicts/8105.dict.yaml"（或 .dict.toml）
+		files = append(files, name+suffix)
 	}
 
 	return files
@@ -282,8 +284,9 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 
 	// 2. 发现关联词库：import_tables + 目录扫描
 	importNames := discoverRimeCodetableImports(mainDictPath)
+	importSuffix := dictSuffixOf(mainDictPath)
 	for _, name := range importNames {
-		path := filepath.Join(dictDir, name+".dict.yaml")
+		path := filepath.Join(dictDir, name+importSuffix)
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 			continue
 		}
@@ -359,7 +362,7 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 	}
 
 	// 生成元数据（从主词库文件名推导）
-	mainName := strings.TrimSuffix(filepath.Base(mainDictPath), ".dict.yaml")
+	mainName := dictStem(filepath.Base(mainDictPath))
 	meta := CodeTableMeta{
 		Name:       mainName,
 		Version:    "rime",
@@ -388,14 +391,15 @@ func ConvertRimeCodetableToWdb(mainDictPath, wdbPath string, logger *slog.Logger
 // RimeCodetableSourcePaths 返回 rime 码表词库的所有源文件路径（用于缓存失效检测）
 // mainDictPath 为主词库文件路径，自动发现关联词库及补丁文件
 func RimeCodetableSourcePaths(mainDictPath string) []string {
-	paths := []string{mainDictPath}
+	paths := dictFilesFor(mainDictPath)
 	dictDir := filepath.Dir(mainDictPath)
 
 	importNames := discoverRimeCodetableImports(mainDictPath)
+	importSuffix := dictSuffixOf(mainDictPath)
 	for _, name := range importNames {
-		p := filepath.Join(dictDir, name+".dict.yaml")
+		p := filepath.Join(dictDir, name+importSuffix)
 		if _, err := os.Stat(p); err == nil {
-			paths = append(paths, p)
+			paths = append(paths, dictFilesFor(p)...)
 		}
 	}
 
@@ -405,151 +409,51 @@ func RimeCodetableSourcePaths(mainDictPath string) []string {
 	return paths
 }
 
-// discoverRimeCodetableImports 从主词库 YAML header 的 import_tables 发现关联词库名称
-// 严格只加载 import_tables 中声明的词库，不进行目录扫描，避免加载不合理的文件
+// discoverRimeCodetableImports 从主词库头的 import_tables 发现关联词库名称。
+// 严格只加载 import_tables 中声明的词库，不进行目录扫描，避免加载不合理的文件。
 func discoverRimeCodetableImports(mainDictPath string) []string {
-	return parseRimeImportTables(mainDictPath)
+	hdr, _ := ReadDictHeader(mainDictPath)
+	return hdr.ImportTables
 }
 
-// parseRimeImportTables 解析 rime .dict.yaml 文件 YAML header 中的 import_tables 列表
-func parseRimeImportTables(path string) []string {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	// Rime/YAML 习惯以 `---` 起、`...` 止包裹 header；但 `---` 是可选的，
-	// 用户写的 dict.yaml 常直接从 `name:` 开始。默认认为文件开头即处于 header，
-	// 仅以 `...` 作为 header 结束标记。
-	inHeader := true
-	inImportTables := false
-	var tables []string
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-
-		if trimmed == "---" {
-			inHeader = true
-			continue
-		}
-		if trimmed == "..." {
-			break
-		}
-		if !inHeader {
-			continue
-		}
-
-		if strings.HasPrefix(trimmed, "import_tables:") {
-			inImportTables = true
-			continue
-		}
-
-		if inImportTables {
-			if name, ok := strings.CutPrefix(trimmed, "- "); ok {
-				// 移除行内注释
-				if idx := strings.Index(name, "#"); idx >= 0 {
-					name = strings.TrimSpace(name[:idx])
-				}
-				name = strings.TrimSpace(name)
-				if name != "" {
-					tables = append(tables, name)
-				}
-			} else if strings.HasPrefix(trimmed, "#") {
-				// 跳过注释行（如被注释掉的 import 条目）
-				continue
-			} else if trimmed != "" {
-				// 遇到非 import_tables 内容，结束解析
-				inImportTables = false
-			}
-		}
-	}
-
-	return tables
-}
-
-// loadRimeCodetableFile 解析 rime 格式的码表 .dict.yaml 文件。
-// 列顺序由 YAML header 的 columns 字段决定，默认为 text/code/weight。
+// loadRimeCodetableFile 解析 rime 格式的码表词库（.dict.yaml 或 split .dict.toml+.dict.tsv）。
+// 头/体来源经 OpenDictSource 解耦：列顺序由头的 columns 决定（缺省 text/code/weight），
+// 数据体逐行制表符分隔解析，两种磁盘格式共用同一段体解析逻辑、零行为差异。
 //
 // 权重策略基于词库自身的 sort 字段：
 //   - sort: by_weight → 使用显式权重（权威词库，如主词库）
 //   - sort: original  → 忽略显式权重，统一 weight=1（补充词库，不与主词库竞争）
 func loadRimeCodetableFile(path string, codeEntries map[string][]dictEntry, globalOrder *int, logger *slog.Logger) (int, bool, error) {
-	file, err := os.Open(path)
+	hdr, body, err := OpenDictSource(path)
 	if err != nil {
 		return 0, false, err
 	}
-	defer file.Close()
+	defer body.Close()
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-
-	inHeader := true
-	sortMode := ""
-	// 列索引：默认 rime 标准顺序 text/code/weight
+	sortMode := strings.TrimSpace(hdr.Sort)
+	// 列索引：默认 rime 标准顺序 text/code/weight；header 显式声明 columns 时按名定位。
 	colText, colCode, colWeight := 0, 1, 2
-	inColumns := false
-	var columnNames []string
+	if len(hdr.Columns) > 0 {
+		colText, colCode, colWeight = -1, -1, -1
+		for i, name := range hdr.Columns {
+			switch strings.TrimSpace(name) {
+			case "text":
+				colText = i
+			case "code":
+				colCode = i
+			case "weight":
+				colWeight = i
+			}
+		}
+	}
+
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 	count := 0
 	hasWeight := false
 
 	for scanner.Scan() {
-		line := scanner.Text()
-
-		if inHeader {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "..." {
-				// 解析完 header，根据收集到的 columns 列表确定索引
-				if len(columnNames) > 0 {
-					colText, colCode, colWeight = -1, -1, -1
-					for i, name := range columnNames {
-						switch name {
-						case "text":
-							colText = i
-						case "code":
-							colCode = i
-						case "weight":
-							colWeight = i
-						}
-					}
-				}
-				inHeader = false
-				continue
-			}
-			// 提取 sort 字段
-			if val, ok := strings.CutPrefix(trimmed, "sort:"); ok {
-				if idx := strings.Index(val, "#"); idx >= 0 {
-					val = val[:idx]
-				}
-				sortMode = strings.TrimSpace(val)
-				inColumns = false
-				continue
-			}
-			// 收集 columns 列表
-			if strings.HasPrefix(trimmed, "columns:") {
-				inColumns = true
-				columnNames = nil
-				continue
-			}
-			if inColumns {
-				if name, ok := strings.CutPrefix(trimmed, "- "); ok {
-					name = strings.TrimSpace(name)
-					if idx := strings.Index(name, "#"); idx >= 0 {
-						name = strings.TrimSpace(name[:idx])
-					}
-					if name != "" {
-						columnNames = append(columnNames, name)
-					}
-				} else if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-					inColumns = false
-				}
-			}
-			continue
-		}
-
-		line = strings.TrimSpace(line)
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -676,7 +580,7 @@ func ConvertPinyinToWdat(mainDictPath, wdatPath string, logger *slog.Logger, nor
 	// 发现并应用词库补丁
 	var wdatImportNames []string
 	for _, f := range allFiles {
-		wdatImportNames = append(wdatImportNames, strings.TrimSuffix(f, ".dict.yaml"))
+		wdatImportNames = append(wdatImportNames, dictStem(f))
 	}
 	wdatPatchFiles := FindPatchFiles(mainDictPath, wdatImportNames)
 	if len(wdatPatchFiles) > 0 {
@@ -778,30 +682,23 @@ type dictEntry struct {
 	naturalOrder int // 同编码下的原始顺序（0-based，按文件出现顺序）
 }
 
+// loadRimeFile 解析 rime 拼音词库（.dict.yaml 或 split .dict.toml+.dict.tsv）。
+// 拼音词库固定 text/code/weight 列序（不读 header columns），头/体经 OpenDictSource
+// 解耦后体解析逻辑两种格式共用。
 func loadRimeFile(path string, codeEntries map[string][]dictEntry, abbrevEntries map[string][]dictEntry, globalOrder *int, logger *slog.Logger) (int, error) {
-	file, err := os.Open(path)
+	_, body, err := OpenDictSource(path)
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
+	defer body.Close()
 
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
-	inHeader := true
 	count := 0
 
 	for scanner.Scan() {
-		line := scanner.Text()
-
-		if inHeader {
-			if strings.TrimSpace(line) == "..." {
-				inHeader = false
-			}
-			continue
-		}
-
-		line = strings.TrimSpace(line)
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}

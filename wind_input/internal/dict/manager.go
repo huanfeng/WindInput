@@ -3,12 +3,24 @@ package dict
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/huanfeng/wind_input/internal/store"
 )
+
+// resolveSystemPhrasePath 返回 dir 下系统短语文件路径：`.toml` 优先、`.yaml` 回退。
+// 都不存在时返回 `.yaml` 路径作占位（调用方按 ParsePhraseYAMLFile 读取是否成功处理），
+// 保证旧用户/用户目录的 yaml 副本仍可读。
+func resolveSystemPhrasePath(dir string) string {
+	tomlPath := filepath.Join(dir, "system.phrases.toml")
+	if _, err := os.Stat(tomlPath); err == nil {
+		return tomlPath
+	}
+	return filepath.Join(dir, "system.phrases.yaml")
+}
 
 // DictManager 词库管理器
 // 统一管理所有词库层的加载、保存和生命周期
@@ -19,7 +31,7 @@ type DictManager struct {
 
 	// 用户数据目录（%APPDATA%\WindInput）
 	dataDir string
-	// 程序数据目录（exe 所在目录/data，存放 system.phrases.yaml 等）
+	// 程序数据目录（exe 所在目录/data，存放 system.phrases.toml 等）
 	systemDir string
 
 	// 全局层
@@ -51,7 +63,7 @@ type DictManager struct {
 
 // NewDictManager 创建词库管理器
 // dataDir: 用户数据目录（%APPDATA%\WindInput）
-// systemDir: 程序数据目录（exeDir/data，存放 system.phrases.yaml 等）
+// systemDir: 程序数据目录（exeDir/data，存放 system.phrases.toml 等）
 func NewDictManager(dataDir, systemDir string, logger *slog.Logger) *DictManager {
 	if logger == nil {
 		logger = slog.Default()
@@ -108,8 +120,9 @@ func (dm *DictManager) Initialize() error {
 
 	// 初始化短语层 (Lv1) — 全局共享
 	// 系统短语：优先加载用户目录的同名文件（用户修改后的副本），不存在则加载程序目录的原始文件
-	systemPhrasePath := filepath.Join(dm.systemDir, "system.phrases.yaml")
-	systemPhraseUserPath := filepath.Join(dm.dataDir, "system.phrases.yaml")
+	// （每个目录内 .toml 优先、.yaml 回退）
+	systemPhrasePath := resolveSystemPhrasePath(dm.systemDir)
+	systemPhraseUserPath := resolveSystemPhrasePath(dm.dataDir)
 	dm.phraseLayer = NewPhraseLayerEx("phrases", systemPhrasePath, systemPhraseUserPath, dm.store)
 
 	if err := dm.SeedDefaultPhrases(); err != nil {
@@ -147,8 +160,9 @@ func (dm *DictManager) SeedDefaultPhrases() error {
 	var records []store.PhraseRecord
 
 	// Load system phrases: prefer user-dir copy, fall back to system-dir original
-	systemFile := filepath.Join(dm.systemDir, "system.phrases.yaml")
-	systemUserFile := filepath.Join(dm.dataDir, "system.phrases.yaml")
+	// （每个目录内 .toml 优先、.yaml 回退）
+	systemFile := resolveSystemPhrasePath(dm.systemDir)
+	systemUserFile := resolveSystemPhrasePath(dm.dataDir)
 
 	systemLoaded := false
 	if entries, err := ParsePhraseYAMLFile(systemUserFile); err == nil {
@@ -214,8 +228,8 @@ func (dm *DictManager) refreshSystemPhraseWeights() error {
 		return nil
 	}
 
-	systemFile := filepath.Join(dm.systemDir, "system.phrases.yaml")
-	systemUserFile := filepath.Join(dm.dataDir, "system.phrases.yaml")
+	systemFile := resolveSystemPhrasePath(dm.systemDir)
+	systemUserFile := resolveSystemPhrasePath(dm.dataDir)
 
 	var entries []PhraseFileEntry
 	if e, err := ParsePhraseYAMLFile(systemUserFile); err == nil {

@@ -1,0 +1,34 @@
+[schema]
+id = "wubi86_pinyin"
+name = "五笔拼音"
+icon_label = "中"
+version = "1.0"
+author = "内置"
+description = "五笔86+拼音混合输入方案，五笔优先，拼音补充"
+
+[engine]
+type = "mixed"
+filter_mode = "smart"
+
+[engine.mixed]
+primary_schema = "wubi86"
+secondary_schema = "pinyin"
+min_pinyin_length = 2
+codetable_weight_boost = 10000000
+show_source_hint = false
+z_key_repeat = true
+
+# 用户数据从引用方案继承：
+#   shadow/userdict → 主方案 (wubi86)
+#   userfreq → 拼音方案 (pinyin)
+
+[learning]
+temp_max_entries = 5000
+temp_promote_count = 0
+
+[learning.auto_learn]
+enabled = false
+
+[learning.freq]
+enabled = false
+protect_top_n = 1

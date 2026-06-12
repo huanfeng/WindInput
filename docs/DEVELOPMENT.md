@@ -87,7 +87,7 @@ WindInput/
 ├── wind_portable/         # 便携启动器 (.NET Framework 4.8 WinForms，Windows)
 │
 ├── data/                  # 数据文件
-│   ├── schemas/           # 输入方案定义 (*.schema.yaml)
+│   ├── schemas/           # 输入方案定义 (*.schema.toml)
 │   ├── dict/              # 词库源数据
 │   └── examples/          # 示例配置
 │
@@ -188,17 +188,17 @@ WindInput 采用 **系统接口层 / Go 业务层** 分离的设计，以 **Sche
 每个输入方案通过 YAML 文件定义，位于 `data/schemas/`，包含引擎类型、词库配置、用户数据路径和学习策略：
 
 ```
-data/schemas/*.schema.yaml → SchemaManager (loader) → SchemaFactory → Engine + Dict
+data/schemas/*.schema.toml → SchemaManager (loader) → SchemaFactory → Engine + Dict
 ```
 
 内置方案：
 
 | 方案文件 | 引擎类型 | 说明 |
 |----------|----------|------|
-| `pinyin.schema.yaml` | `pinyin` | 全拼输入 |
-| `shuangpin.schema.yaml` | `pinyin`（双拼模式） | 双拼输入（支持小鹤/自然码/搜狗/微软） |
-| `wubi86.schema.yaml` | `codetable` | 五笔 86 |
-| `wubi86_pinyin.schema.yaml` | `mixed` | 五笔拼音混输 |
+| `pinyin.schema.toml` | `pinyin` | 全拼输入 |
+| `shuangpin.schema.toml` | `pinyin`（双拼模式） | 双拼输入（支持小鹤/自然码/搜狗/微软） |
+| `wubi86.schema.toml` | `codetable` | 五笔 86 |
+| `wubi86_pinyin.schema.toml` | `mixed` | 五笔拼音混输 |
 
 ### 引擎系统
 

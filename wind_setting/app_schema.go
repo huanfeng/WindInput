@@ -10,9 +10,49 @@ import (
 
 	"github.com/bodgit/sevenzip"
 	"github.com/huanfeng/wind_input/pkg/config"
+	toml "github.com/pelletier/go-toml/v2"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"gopkg.in/yaml.v3"
 )
+
+// 方案文件格式优先级：.schema.toml 优先、.schema.yaml 回退（内置方案现为 toml，
+// 用户/旧版 yaml 仍兼容读取）。
+var schemaFileSuffixes = []string{".schema.toml", ".schema.yaml"}
+
+// isSchemaTOMLFile 判断方案文件是否为 TOML 格式。
+func isSchemaTOMLFile(path string) bool {
+	return strings.EqualFold(filepath.Ext(path), ".toml")
+}
+
+// isSchemaFileName 判断文件名是否为方案文件（.schema.toml 或 .schema.yaml）。
+func isSchemaFileName(name string) bool {
+	for _, suf := range schemaFileSuffixes {
+		if strings.HasSuffix(name, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// unmarshalSchemaFileData 按扩展名原生解码方案文件（.toml→go-toml，其余→yaml）。
+func unmarshalSchemaFileData(path string, data []byte, v any) error {
+	if isSchemaTOMLFile(path) {
+		return toml.Unmarshal(data, v)
+	}
+	return yaml.Unmarshal(data, v)
+}
+
+// resolveSchemaFileIn 在 dir 下按 .schema.toml 优先、.schema.yaml 回退查找 schemaID 文件，
+// 返回首个存在的路径与 true；都不存在返回 ("", false)。
+func resolveSchemaFileIn(dir, schemaID string) (string, bool) {
+	for _, suf := range schemaFileSuffixes {
+		p := filepath.Join(dir, schemaID+suf)
+		if _, err := os.Stat(p); err == nil {
+			return p, true
+		}
+	}
+	return "", false
+}
 
 // archiveEntry 统一的压缩包文件条目接口
 type archiveEntry struct {
@@ -104,45 +144,45 @@ func extractShuangpinInfo(engineType string, pinyinSpec map[string]interface{}) 
 
 // SchemaConfigMeta 方案元信息
 type SchemaConfigMeta struct {
-	ID          string `yaml:"id" json:"id"`
-	Name        string `yaml:"name" json:"name"`
-	IconLabel   string `yaml:"icon_label" json:"icon_label"`
-	Version     string `yaml:"version" json:"version"`
-	Author      string `yaml:"author" json:"author"`
-	Description string `yaml:"description" json:"description"`
+	ID          string `yaml:"id" json:"id" toml:"id"`
+	Name        string `yaml:"name" json:"name" toml:"name"`
+	IconLabel   string `yaml:"icon_label" json:"icon_label" toml:"icon_label"`
+	Version     string `yaml:"version" json:"version" toml:"version"`
+	Author      string `yaml:"author" json:"author" toml:"author"`
+	Description string `yaml:"description" json:"description" toml:"description"`
 }
 
 // SchemaConfigEngine 引擎配置
 type SchemaConfigEngine struct {
-	Type       string                 `yaml:"type" json:"type"`
-	CodeTable  map[string]interface{} `yaml:"codetable,omitempty" json:"codetable,omitempty"`
-	Pinyin     map[string]interface{} `yaml:"pinyin,omitempty" json:"pinyin,omitempty"`
-	Mixed      map[string]interface{} `yaml:"mixed,omitempty" json:"mixed,omitempty"`
-	FilterMode string                 `yaml:"filter_mode" json:"filter_mode"`
+	Type       string                 `yaml:"type" json:"type" toml:"type"`
+	CodeTable  map[string]interface{} `yaml:"codetable,omitempty" json:"codetable,omitempty" toml:"codetable,omitempty"`
+	Pinyin     map[string]interface{} `yaml:"pinyin,omitempty" json:"pinyin,omitempty" toml:"pinyin,omitempty"`
+	Mixed      map[string]interface{} `yaml:"mixed,omitempty" json:"mixed,omitempty" toml:"mixed,omitempty"`
+	FilterMode string                 `yaml:"filter_mode" json:"filter_mode" toml:"filter_mode"`
 }
 
 // SchemaConfigDict 词库配置项
 type SchemaConfigDict struct {
-	ID             string      `yaml:"id" json:"id"`
-	Label          string      `yaml:"label,omitempty" json:"label,omitempty"`
-	Description    string      `yaml:"description,omitempty" json:"description,omitempty"`
-	Path           string      `yaml:"path" json:"path"`
-	Type           string      `yaml:"type" json:"type"`
-	Default        bool        `yaml:"default" json:"default"`
-	DefaultEnabled *bool       `yaml:"default_enabled,omitempty" json:"default_enabled,omitempty"`
-	Enabled        *bool       `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Role           string      `yaml:"role,omitempty" json:"role,omitempty"`
-	WeightAsOrder  bool        `yaml:"weight_as_order,omitempty" json:"weight_as_order,omitempty"`
-	WeightSpec     interface{} `yaml:"weight_spec,omitempty" json:"weight_spec,omitempty"`
+	ID             string      `yaml:"id" json:"id" toml:"id"`
+	Label          string      `yaml:"label,omitempty" json:"label,omitempty" toml:"label,omitempty"`
+	Description    string      `yaml:"description,omitempty" json:"description,omitempty" toml:"description,omitempty"`
+	Path           string      `yaml:"path" json:"path" toml:"path"`
+	Type           string      `yaml:"type" json:"type" toml:"type"`
+	Default        bool        `yaml:"default" json:"default" toml:"default"`
+	DefaultEnabled *bool       `yaml:"default_enabled,omitempty" json:"default_enabled,omitempty" toml:"default_enabled,omitempty"`
+	Enabled        *bool       `yaml:"enabled,omitempty" json:"enabled,omitempty" toml:"enabled,omitempty"`
+	Role           string      `yaml:"role,omitempty" json:"role,omitempty" toml:"role,omitempty"`
+	WeightAsOrder  bool        `yaml:"weight_as_order,omitempty" json:"weight_as_order,omitempty" toml:"weight_as_order,omitempty"`
+	WeightSpec     interface{} `yaml:"weight_spec,omitempty" json:"weight_spec,omitempty" toml:"weight_spec,omitempty"`
 }
 
 // SchemaConfigAutoLearn 自动造词配置
 type SchemaConfigAutoLearn struct {
-	Enabled        bool `yaml:"enabled" json:"enabled"`
-	CountThreshold int  `yaml:"count_threshold,omitempty" json:"count_threshold,omitempty"`
-	MinWordLength  int  `yaml:"min_word_length,omitempty" json:"min_word_length,omitempty"`
-	WeightDelta    int  `yaml:"weight_delta,omitempty" json:"weight_delta,omitempty"`
-	AddWeight      int  `yaml:"add_weight,omitempty" json:"add_weight,omitempty"`
+	Enabled        bool `yaml:"enabled" json:"enabled" toml:"enabled"`
+	CountThreshold int  `yaml:"count_threshold,omitempty" json:"count_threshold,omitempty" toml:"count_threshold,omitempty"`
+	MinWordLength  int  `yaml:"min_word_length,omitempty" json:"min_word_length,omitempty" toml:"min_word_length,omitempty"`
+	WeightDelta    int  `yaml:"weight_delta,omitempty" json:"weight_delta,omitempty" toml:"weight_delta,omitempty"`
+	AddWeight      int  `yaml:"add_weight,omitempty" json:"add_weight,omitempty" toml:"add_weight,omitempty"`
 }
 
 // SchemaConfigFreq 自动调频配置
@@ -151,35 +191,35 @@ type SchemaConfigFreq struct {
 	// ProtectTopN 不带 omitempty：0 表示"不保护"是有效值，必须能被序列化进 override
 	// 文件，否则前端选 0 与未设置无法区分（ComputeYAMLDiff 会丢弃 0 值导致 override 不写入，
 	// 下次打开恢复基础配置的默认值）。同 TempPromoteCount 的处理逻辑。
-	ProtectTopN int     `yaml:"protect_top_n" json:"protect_top_n"`
-	HalfLife    float64 `yaml:"half_life,omitempty" json:"half_life,omitempty"`
-	BoostMax    int     `yaml:"boost_max,omitempty" json:"boost_max,omitempty"`
-	MaxRecency  float64 `yaml:"max_recency,omitempty" json:"max_recency,omitempty"`
-	BaseScale   float64 `yaml:"base_scale,omitempty" json:"base_scale,omitempty"`
-	StreakScale float64 `yaml:"streak_scale,omitempty" json:"streak_scale,omitempty"`
-	StreakCap   float64 `yaml:"streak_cap,omitempty" json:"streak_cap,omitempty"`
+	ProtectTopN int     `yaml:"protect_top_n" json:"protect_top_n" toml:"protect_top_n"`
+	HalfLife    float64 `yaml:"half_life,omitempty" json:"half_life,omitempty" toml:"half_life,omitempty"`
+	BoostMax    int     `yaml:"boost_max,omitempty" json:"boost_max,omitempty" toml:"boost_max,omitempty"`
+	MaxRecency  float64 `yaml:"max_recency,omitempty" json:"max_recency,omitempty" toml:"max_recency,omitempty"`
+	BaseScale   float64 `yaml:"base_scale,omitempty" json:"base_scale,omitempty" toml:"base_scale,omitempty"`
+	StreakScale float64 `yaml:"streak_scale,omitempty" json:"streak_scale,omitempty" toml:"streak_scale,omitempty"`
+	StreakCap   float64 `yaml:"streak_cap,omitempty" json:"streak_cap,omitempty" toml:"streak_cap,omitempty"`
 }
 
 // SchemaConfigLearning 学习策略配置
 type SchemaConfigLearning struct {
-	AutoLearn      *SchemaConfigAutoLearn `yaml:"auto_learn,omitempty" json:"auto_learn,omitempty"`
-	Freq           *SchemaConfigFreq      `yaml:"freq,omitempty" json:"freq,omitempty"`
-	ProtectTopN    int                    `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty"`
-	UnigramPath    string                 `yaml:"unigram_path,omitempty" json:"unigram_path,omitempty"`
-	TempMaxEntries int                    `yaml:"temp_max_entries,omitempty" json:"temp_max_entries,omitempty"`
+	AutoLearn      *SchemaConfigAutoLearn `yaml:"auto_learn,omitempty" json:"auto_learn,omitempty" toml:"auto_learn,omitempty"`
+	Freq           *SchemaConfigFreq      `yaml:"freq,omitempty" json:"freq,omitempty" toml:"freq,omitempty"`
+	ProtectTopN    int                    `yaml:"protect_top_n,omitempty" json:"protect_top_n,omitempty" toml:"protect_top_n,omitempty"`
+	UnigramPath    string                 `yaml:"unigram_path,omitempty" json:"unigram_path,omitempty" toml:"unigram_path,omitempty"`
+	TempMaxEntries int                    `yaml:"temp_max_entries,omitempty" json:"temp_max_entries,omitempty" toml:"temp_max_entries,omitempty"`
 	// 不带 omitempty：0 表示"永不晋升"是有效值，必须能被序列化进 override 文件，
 	// 否则前端选 0 与未设置无法区分（diff 算法会丢弃 0 值，导致 override 不写入）。
-	TempPromoteCount int `yaml:"temp_promote_count" json:"temp_promote_count"`
+	TempPromoteCount int `yaml:"temp_promote_count" json:"temp_promote_count" toml:"temp_promote_count"`
 }
 
 // SchemaConfig 完整方案配置（YAML 结构，前端可直接编辑）
 type SchemaConfig struct {
-	Schema   SchemaConfigMeta     `yaml:"schema" json:"schema"`
-	Engine   SchemaConfigEngine   `yaml:"engine" json:"engine"`
-	Dicts    []SchemaConfigDict   `yaml:"dictionaries" json:"dictionaries"`
-	Learning SchemaConfigLearning `yaml:"learning" json:"learning"`
+	Schema   SchemaConfigMeta     `yaml:"schema" json:"schema" toml:"schema"`
+	Engine   SchemaConfigEngine   `yaml:"engine" json:"engine" toml:"engine"`
+	Dicts    []SchemaConfigDict   `yaml:"dictionaries" json:"dictionaries" toml:"dictionaries"`
+	Learning SchemaConfigLearning `yaml:"learning" json:"learning" toml:"learning"`
 	// 以下字段由 wind_input 核心使用，设置界面不编辑但保存时必须保留
-	Encoder interface{} `yaml:"encoder,omitempty" json:"encoder,omitempty"`
+	Encoder interface{} `yaml:"encoder,omitempty" json:"encoder,omitempty" toml:"encoder,omitempty"`
 }
 
 // GetAvailableSchemas 获取所有可用的输入方案列表
@@ -274,7 +314,7 @@ func (a *App) loadSchemaBase(schemaID string) (*SchemaConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("读取内置方案文件失败: %w", err)
 		}
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
+		if err := unmarshalSchemaFileData(builtinPath, data, &cfg); err != nil {
 			return nil, fmt.Errorf("解析内置方案文件失败: %w", err)
 		}
 	}
@@ -290,7 +330,7 @@ func (a *App) loadSchemaBase(schemaID string) (*SchemaConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("读取用户方案文件失败: %w", err)
 		}
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
+		if err := unmarshalSchemaFileData(userPath, data, &cfg); err != nil {
 			return nil, fmt.Errorf("解析用户方案文件失败: %w", err)
 		}
 		// Layer 2 的 Dicts 是稀疏列表，按 ID 合并确保 Layer 1 新增词库不丢失
@@ -497,7 +537,7 @@ func collectSchemaIDs(exeDir, configDir string) []string {
 			return
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".schema.yaml") {
+			if entry.IsDir() || !isSchemaFileName(entry.Name()) {
 				continue
 			}
 			path := filepath.Join(dir, entry.Name())
@@ -507,10 +547,10 @@ func collectSchemaIDs(exeDir, configDir string) []string {
 			}
 			var peek struct {
 				Schema struct {
-					ID string `yaml:"id"`
-				} `yaml:"schema"`
+					ID string `yaml:"id" toml:"id"`
+				} `yaml:"schema" toml:"schema"`
 			}
-			if err := yaml.Unmarshal(data, &peek); err != nil || peek.Schema.ID == "" {
+			if err := unmarshalSchemaFileData(path, data, &peek); err != nil || peek.Schema.ID == "" {
 				continue
 			}
 			if !seen[peek.Schema.ID] {
@@ -587,49 +627,38 @@ func resolveDictFileExists(dictPath, exeDataDir, configDir string) bool {
 	return false
 }
 
+// findSchemaFile 查找方案文件：用户目录优先、程序数据目录回退；每个目录内 .schema.toml
+// 优先、.schema.yaml 回退。
 func findSchemaFile(schemaID string) (string, error) {
-	filename := schemaID + ".schema.yaml"
-
 	// 优先查找用户目录
-	configDir, err := config.GetConfigDir()
-	if err == nil {
-		userPath := filepath.Join(configDir, "schemas", filename)
-		if _, err := os.Stat(userPath); err == nil {
-			return userPath, nil
+	if configDir, err := config.GetConfigDir(); err == nil {
+		if p, ok := resolveSchemaFileIn(filepath.Join(configDir, "schemas"), schemaID); ok {
+			return p, nil
 		}
 	}
-
 	// 回退到程序数据目录
-	exeDir := getExeDir()
-	exePath := filepath.Join(exeDir, "data", "schemas", filename)
-	if _, err := os.Stat(exePath); err == nil {
-		return exePath, nil
+	if p, ok := resolveSchemaFileIn(filepath.Join(getExeDir(), "data", "schemas"), schemaID); ok {
+		return p, nil
 	}
-
 	return "", fmt.Errorf("方案文件不存在: %s", schemaID)
 }
 
-// findBuiltinSchemaFile 查找内置方案文件（程序数据目录）
+// findBuiltinSchemaFile 查找内置方案文件（程序数据目录，.schema.toml 优先、.yaml 回退）
 func findBuiltinSchemaFile(schemaID string) (string, error) {
-	filename := schemaID + ".schema.yaml"
-	exeDir := getExeDir()
-	exePath := filepath.Join(exeDir, "data", "schemas", filename)
-	if _, err := os.Stat(exePath); err == nil {
-		return exePath, nil
+	if p, ok := resolveSchemaFileIn(filepath.Join(getExeDir(), "data", "schemas"), schemaID); ok {
+		return p, nil
 	}
 	return "", fmt.Errorf("内置方案文件不存在: %s", schemaID)
 }
 
-// findUserSchemaFile 查找用户方案文件（用户配置目录）
+// findUserSchemaFile 查找用户方案文件（用户配置目录，.schema.toml 优先、.yaml 回退）
 func findUserSchemaFile(schemaID string) (string, error) {
-	filename := schemaID + ".schema.yaml"
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
 	}
-	userPath := filepath.Join(configDir, "schemas", filename)
-	if _, err := os.Stat(userPath); err == nil {
-		return userPath, nil
+	if p, ok := resolveSchemaFileIn(filepath.Join(configDir, "schemas"), schemaID); ok {
+		return p, nil
 	}
 	return "", fmt.Errorf("用户方案文件不存在: %s", schemaID)
 }

@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-03-13 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-03-13 | Updated: 2026-06-12 -->
 
 # cmd
 
@@ -20,6 +20,7 @@
 | `gen_unigram/` | 从 Rime `.dict.yaml` 提取词频，输出 `unigram.txt` (see `gen_unigram/AGENTS.md`) |
 | `test_codetable/` | 码表调试工具，测试码表查询和顶码行为 (see `test_codetable/AGENTS.md`) |
 | `gen_pinyin_data/` | 从 pinyin-data 原始数据生成拼音提示嵌入数据 `internal/tooltip/pinyin_data_generated.go` (see `gen_pinyin_data/AGENTS.md`) |
+| `dicttool/` | 词库格式转换：`split` 子命令把 rime `.dict.yaml` 无损拆为 split 格式 `.dict.toml` + `.dict.tsv`（调用 `dictcache.ConvertRimeYAMLToSplit`） |
 
 ## For AI Agents
 

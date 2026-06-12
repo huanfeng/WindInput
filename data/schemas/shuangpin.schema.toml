@@ -1,0 +1,43 @@
+[schema]
+id = "shuangpin"
+name = "双拼"
+icon_label = "双"
+version = "1.0"
+author = "内置"
+description = "双拼输入方案，每个汉字固定两键输入，支持多种键位布局"
+
+[engine]
+type = "pinyin"
+filter_mode = "smart"
+
+[engine.pinyin]
+scheme = "shuangpin"
+show_code_hint = true
+use_smart_compose = true
+candidate_order = "smart"
+
+[engine.pinyin.shuangpin]
+layout = "xiaohe"
+
+[engine.pinyin.fuzzy]
+enabled = false
+
+[[dictionaries]]
+id = "pinyin_main"
+path = "pinyin/rime_frost.dict.yaml"
+type = "rime_pinyin"
+default = true
+
+[dictionaries.weight_spec]
+median = 200
+max = 19260817
+mode = "log"
+
+[learning]
+unigram_path = "pinyin/unigram.txt"
+
+[learning.auto_learn]
+enabled = false
+
+[learning.freq]
+enabled = false

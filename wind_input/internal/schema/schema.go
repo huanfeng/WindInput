@@ -8,21 +8,21 @@ import (
 
 // Schema 输入方案定义
 type Schema struct {
-	Schema   SchemaInfo   `yaml:"schema"`
-	Engine   EngineSpec   `yaml:"engine"`
-	Dicts    []DictSpec   `yaml:"dictionaries"`
-	Learning LearningSpec `yaml:"learning"`
-	Encoder  *EncoderSpec `yaml:"encoder,omitempty"` // 造词编码规则（codetable 方案用）
+	Schema   SchemaInfo   `yaml:"schema" toml:"schema"`
+	Engine   EngineSpec   `yaml:"engine" toml:"engine"`
+	Dicts    []DictSpec   `yaml:"dictionaries" toml:"dictionaries"`
+	Learning LearningSpec `yaml:"learning" toml:"learning"`
+	Encoder  *EncoderSpec `yaml:"encoder,omitempty" toml:"encoder,omitempty"` // 造词编码规则（codetable 方案用）
 }
 
 // SchemaInfo 方案基本信息
 type SchemaInfo struct {
-	ID          string `yaml:"id"`
-	Name        string `yaml:"name"`
-	IconLabel   string `yaml:"icon_label"`
-	Version     string `yaml:"version"`
-	Author      string `yaml:"author"`
-	Description string `yaml:"description"`
+	ID          string `yaml:"id" toml:"id"`
+	Name        string `yaml:"name" toml:"name"`
+	IconLabel   string `yaml:"icon_label" toml:"icon_label"`
+	Version     string `yaml:"version" toml:"version"`
+	Author      string `yaml:"author" toml:"author"`
+	Description string `yaml:"description" toml:"description"`
 }
 
 // EngineType 引擎内部处理类型
@@ -36,94 +36,94 @@ const (
 
 // EngineSpec 引擎规格
 type EngineSpec struct {
-	Type       EngineType     `yaml:"type"`
-	CodeTable  *CodeTableSpec `yaml:"codetable,omitempty"`
-	Pinyin     *PinyinSpec    `yaml:"pinyin,omitempty"`
-	Mixed      *MixedSpec     `yaml:"mixed,omitempty"`
-	FilterMode string         `yaml:"filter_mode"`
-	Chaizi     *ChaiziSpec    `yaml:"chaizi,omitempty"` // 拆字提示配置（可选）
+	Type       EngineType     `yaml:"type" toml:"type"`
+	CodeTable  *CodeTableSpec `yaml:"codetable,omitempty" toml:"codetable,omitempty"`
+	Pinyin     *PinyinSpec    `yaml:"pinyin,omitempty" toml:"pinyin,omitempty"`
+	Mixed      *MixedSpec     `yaml:"mixed,omitempty" toml:"mixed,omitempty"`
+	FilterMode string         `yaml:"filter_mode" toml:"filter_mode"`
+	Chaizi     *ChaiziSpec    `yaml:"chaizi,omitempty" toml:"chaizi,omitempty"` // 拆字提示配置（可选）
 }
 
 // MixedSpec 混输引擎配置
 type MixedSpec struct {
-	PrimarySchema        string `yaml:"primary_schema"`           // 主形码方案ID（如 wubi86）
-	SecondarySchema      string `yaml:"secondary_schema"`         // 拼音方案ID（如 pinyin）
-	MinPinyinLength      int    `yaml:"min_pinyin_length"`        // 拼音最小触发长度，默认2
-	CodetableWeightBoost int    `yaml:"codetable_weight_boost"`   // 码表权重提升值，默认10000000
-	ShowSourceHint       bool   `yaml:"show_source_hint"`         // 是否在候选提示中显示来源标记
-	EnableAbbrevMatch    *bool  `yaml:"enable_abbrev_match"`      // 混输模式下是否启用简拼匹配（默认 false）
-	PinyinOnlyOverflow   *bool  `yaml:"pinyin_only_overflow"`     // 超过最大码长时仅查拼音（默认 true）
-	ZKeyRepeat           *bool  `yaml:"z_key_repeat,omitempty"`   // Z键重复上屏：输入z时首选为上次上屏的内容
-	EnableEnglish        *bool  `yaml:"enable_english,omitempty"` // 混输模式下是否启用英文候选（默认 false）
+	PrimarySchema        string `yaml:"primary_schema" toml:"primary_schema"`                     // 主形码方案ID（如 wubi86）
+	SecondarySchema      string `yaml:"secondary_schema" toml:"secondary_schema"`                 // 拼音方案ID（如 pinyin）
+	MinPinyinLength      int    `yaml:"min_pinyin_length" toml:"min_pinyin_length"`               // 拼音最小触发长度，默认2
+	CodetableWeightBoost int    `yaml:"codetable_weight_boost" toml:"codetable_weight_boost"`     // 码表权重提升值，默认10000000
+	ShowSourceHint       bool   `yaml:"show_source_hint" toml:"show_source_hint"`                 // 是否在候选提示中显示来源标记
+	EnableAbbrevMatch    *bool  `yaml:"enable_abbrev_match" toml:"enable_abbrev_match"`           // 混输模式下是否启用简拼匹配（默认 false）
+	PinyinOnlyOverflow   *bool  `yaml:"pinyin_only_overflow" toml:"pinyin_only_overflow"`         // 超过最大码长时仅查拼音（默认 true）
+	ZKeyRepeat           *bool  `yaml:"z_key_repeat,omitempty" toml:"z_key_repeat,omitempty"`     // Z键重复上屏：输入z时首选为上次上屏的内容
+	EnableEnglish        *bool  `yaml:"enable_english,omitempty" toml:"enable_english,omitempty"` // 混输模式下是否启用英文候选（默认 false）
 	// TopCodeOverridePinyin 歧义串顶码偏好（默认 false）：当前 maxCodeLen 前缀既是
 	// 完整拼音音节、又是终止性精确五笔全码时（如 wang/aipu），是否放行顶码倒向五笔。
 	// 默认维持拼音保护；偏好五笔顶码连打的用户可设为 true。
-	TopCodeOverridePinyin *bool `yaml:"topcode_override_pinyin,omitempty"`
+	TopCodeOverridePinyin *bool `yaml:"topcode_override_pinyin,omitempty" toml:"topcode_override_pinyin,omitempty"`
 }
 
 // TempPinyinSpec 码表方案的临时拼音配置
 type TempPinyinSpec struct {
-	Enabled bool   `yaml:"enabled"`          // 是否开启临时拼音
-	Schema  string `yaml:"schema,omitempty"` // 使用的拼音方案ID（默认 "pinyin"）
+	Enabled bool   `yaml:"enabled" toml:"enabled"`                   // 是否开启临时拼音
+	Schema  string `yaml:"schema,omitempty" toml:"schema,omitempty"` // 使用的拼音方案ID（默认 "pinyin"）
 }
 
 // CodeTableSpec 码表引擎配置
 type CodeTableSpec struct {
-	MaxCodeLength           int             `yaml:"max_code_length"`
-	AutoCommitUnique        bool            `yaml:"auto_commit_unique"`
-	AutoCommitAtFull        *bool           `yaml:"auto_commit_at_full,omitempty"`         // 新字段，未设置时回退 auto_commit_unique
-	AutoCommitMinLen        int             `yaml:"auto_commit_min_len,omitempty"`         // 0 = 跟随 MaxCodeLength
-	AutoCommitBlockOnPinyin *bool           `yaml:"auto_commit_block_on_pinyin,omitempty"` // 默认 true
-	ClearOnEmptyMax         bool            `yaml:"clear_on_empty_max"`
-	TopCodeCommit           bool            `yaml:"top_code_commit"`
-	PunctCommit             bool            `yaml:"punct_commit"`
-	ShowCodeHint            bool            `yaml:"show_code_hint"`
-	SingleCodeInput         bool            `yaml:"single_code_input"`
-	SingleCodeComplete      bool            `yaml:"single_code_complete"` // 精确匹配空码补全
-	CandidateSortMode       string          `yaml:"candidate_sort_mode"`
-	DedupCandidates         *bool           `yaml:"dedup_candidates,omitempty"`
-	SkipSingleCharFreq      *bool           `yaml:"skip_single_char_freq"`  // 单字不自动调频（指针以区分未设置和 false）
-	TempPinyin              *TempPinyinSpec `yaml:"temp_pinyin,omitempty"`  // 临时拼音配置
-	ZKeyRepeat              *bool           `yaml:"z_key_repeat,omitempty"` // Z键重复上屏：输入z时首选为上次上屏的内容
+	MaxCodeLength           int             `yaml:"max_code_length" toml:"max_code_length"`
+	AutoCommitUnique        bool            `yaml:"auto_commit_unique" toml:"auto_commit_unique"`
+	AutoCommitAtFull        *bool           `yaml:"auto_commit_at_full,omitempty" toml:"auto_commit_at_full,omitempty"`                 // 新字段，未设置时回退 auto_commit_unique
+	AutoCommitMinLen        int             `yaml:"auto_commit_min_len,omitempty" toml:"auto_commit_min_len,omitempty"`                 // 0 = 跟随 MaxCodeLength
+	AutoCommitBlockOnPinyin *bool           `yaml:"auto_commit_block_on_pinyin,omitempty" toml:"auto_commit_block_on_pinyin,omitempty"` // 默认 true
+	ClearOnEmptyMax         bool            `yaml:"clear_on_empty_max" toml:"clear_on_empty_max"`
+	TopCodeCommit           bool            `yaml:"top_code_commit" toml:"top_code_commit"`
+	PunctCommit             bool            `yaml:"punct_commit" toml:"punct_commit"`
+	ShowCodeHint            bool            `yaml:"show_code_hint" toml:"show_code_hint"`
+	SingleCodeInput         bool            `yaml:"single_code_input" toml:"single_code_input"`
+	SingleCodeComplete      bool            `yaml:"single_code_complete" toml:"single_code_complete"` // 精确匹配空码补全
+	CandidateSortMode       string          `yaml:"candidate_sort_mode" toml:"candidate_sort_mode"`
+	DedupCandidates         *bool           `yaml:"dedup_candidates,omitempty" toml:"dedup_candidates,omitempty"`
+	SkipSingleCharFreq      *bool           `yaml:"skip_single_char_freq" toml:"skip_single_char_freq"`   // 单字不自动调频（指针以区分未设置和 false）
+	TempPinyin              *TempPinyinSpec `yaml:"temp_pinyin,omitempty" toml:"temp_pinyin,omitempty"`   // 临时拼音配置
+	ZKeyRepeat              *bool           `yaml:"z_key_repeat,omitempty" toml:"z_key_repeat,omitempty"` // Z键重复上屏：输入z时首选为上次上屏的内容
 
 	// 新增架构字段
-	LoadMode          string `yaml:"load_mode,omitempty"`
-	PrefixMode        string `yaml:"prefix_mode,omitempty"`
-	BucketLimit       int    `yaml:"bucket_limit,omitempty"`
-	WeightMode        string `yaml:"weight_mode,omitempty"`
-	ShortCodeFirst    *bool  `yaml:"short_code_first,omitempty"`
-	CharsetPreference string `yaml:"charset_preference,omitempty"`
+	LoadMode          string `yaml:"load_mode,omitempty" toml:"load_mode,omitempty"`
+	PrefixMode        string `yaml:"prefix_mode,omitempty" toml:"prefix_mode,omitempty"`
+	BucketLimit       int    `yaml:"bucket_limit,omitempty" toml:"bucket_limit,omitempty"`
+	WeightMode        string `yaml:"weight_mode,omitempty" toml:"weight_mode,omitempty"`
+	ShortCodeFirst    *bool  `yaml:"short_code_first,omitempty" toml:"short_code_first,omitempty"`
+	CharsetPreference string `yaml:"charset_preference,omitempty" toml:"charset_preference,omitempty"`
 }
 
 // PinyinSpec 拼音引擎配置
 type PinyinSpec struct {
-	Scheme          PinyinScheme   `yaml:"scheme"`
-	Shuangpin       *ShuangpinSpec `yaml:"shuangpin,omitempty"`
-	ShowCodeHint    bool           `yaml:"show_code_hint"`
-	UseSmartCompose bool           `yaml:"use_smart_compose"`
-	CandidateOrder  string         `yaml:"candidate_order"`
-	Fuzzy           *FuzzySpec     `yaml:"fuzzy,omitempty"`
+	Scheme          PinyinScheme   `yaml:"scheme" toml:"scheme"`
+	Shuangpin       *ShuangpinSpec `yaml:"shuangpin,omitempty" toml:"shuangpin,omitempty"`
+	ShowCodeHint    bool           `yaml:"show_code_hint" toml:"show_code_hint"`
+	UseSmartCompose bool           `yaml:"use_smart_compose" toml:"use_smart_compose"`
+	CandidateOrder  string         `yaml:"candidate_order" toml:"candidate_order"`
+	Fuzzy           *FuzzySpec     `yaml:"fuzzy,omitempty" toml:"fuzzy,omitempty"`
 }
 
 // ShuangpinSpec 双拼子配置
 type ShuangpinSpec struct {
-	Layout string `yaml:"layout"` // "ziranma" | "xiaohe" | "sogou" | "mspy"
+	Layout string `yaml:"layout" toml:"layout"` // "ziranma" | "xiaohe" | "sogou" | "mspy"
 }
 
 // FuzzySpec 模糊音配置
 type FuzzySpec struct {
-	Enabled bool `yaml:"enabled"`
-	ZhZ     bool `yaml:"zh_z"`
-	ChC     bool `yaml:"ch_c"`
-	ShS     bool `yaml:"sh_s"`
-	NL      bool `yaml:"n_l"`
-	FH      bool `yaml:"f_h"`
-	RL      bool `yaml:"r_l"`
-	AnAng   bool `yaml:"an_ang"`
-	EnEng   bool `yaml:"en_eng"`
-	InIng   bool `yaml:"in_ing"`
-	IanIang bool `yaml:"ian_iang"`
-	UanUang bool `yaml:"uan_uang"`
+	Enabled bool `yaml:"enabled" toml:"enabled"`
+	ZhZ     bool `yaml:"zh_z" toml:"zh_z"`
+	ChC     bool `yaml:"ch_c" toml:"ch_c"`
+	ShS     bool `yaml:"sh_s" toml:"sh_s"`
+	NL      bool `yaml:"n_l" toml:"n_l"`
+	FH      bool `yaml:"f_h" toml:"f_h"`
+	RL      bool `yaml:"r_l" toml:"r_l"`
+	AnAng   bool `yaml:"an_ang" toml:"an_ang"`
+	EnEng   bool `yaml:"en_eng" toml:"en_eng"`
+	InIng   bool `yaml:"in_ing" toml:"in_ing"`
+	IanIang bool `yaml:"ian_iang" toml:"ian_iang"`
+	UanUang bool `yaml:"uan_uang" toml:"uan_uang"`
 }
 
 // DictRole 词库角色
@@ -136,17 +136,17 @@ const (
 
 // DictSpec 词库规格
 type DictSpec struct {
-	ID             string      `yaml:"id"`
-	Label          string      `yaml:"label,omitempty"`       // UI 显示名称；空时回退为 id
-	Description    string      `yaml:"description,omitempty"` // 备注说明，显示在 UI 开关下方
-	Path           string      `yaml:"path"`
-	Type           DictType    `yaml:"type"`
-	Default        bool        `yaml:"default"`
-	DefaultEnabled *bool       `yaml:"default_enabled,omitempty"` // nil = true（默认启用）
-	Enabled        *bool       `yaml:"enabled,omitempty"`         // 用户覆盖；nil = 继承 DefaultEnabled
-	Role           DictRole    `yaml:"role,omitempty"`
-	WeightSpec     *WeightSpec `yaml:"weight_spec,omitempty"`     // 权重归一化参数
-	WeightAsOrder  bool        `yaml:"weight_as_order,omitempty"` // 权重仅表示同码内排序序号，不参与跨码比较
+	ID             string      `yaml:"id" toml:"id"`
+	Label          string      `yaml:"label,omitempty" toml:"label,omitempty"`             // UI 显示名称；空时回退为 id
+	Description    string      `yaml:"description,omitempty" toml:"description,omitempty"` // 备注说明，显示在 UI 开关下方
+	Path           string      `yaml:"path" toml:"path"`
+	Type           DictType    `yaml:"type" toml:"type"`
+	Default        bool        `yaml:"default" toml:"default"`
+	DefaultEnabled *bool       `yaml:"default_enabled,omitempty" toml:"default_enabled,omitempty"` // nil = true（默认启用）
+	Enabled        *bool       `yaml:"enabled,omitempty" toml:"enabled,omitempty"`                 // 用户覆盖；nil = 继承 DefaultEnabled
+	Role           DictRole    `yaml:"role,omitempty" toml:"role,omitempty"`
+	WeightSpec     *WeightSpec `yaml:"weight_spec,omitempty" toml:"weight_spec,omitempty"`         // 权重归一化参数
+	WeightAsOrder  bool        `yaml:"weight_as_order,omitempty" toml:"weight_as_order,omitempty"` // 权重仅表示同码内排序序号，不参与跨码比较
 }
 
 // IsEnabled 返回该词库是否启用
@@ -183,57 +183,57 @@ const NormalizedWeightMax = 10000
 // WeightSpec 词库权重归一化参数
 // 用于将不同词库的原始权重映射到统一的 [0, NormalizedWeightMax] 区间
 type WeightSpec struct {
-	Median int            `yaml:"median"`           // 原始权重中位数（映射到统一区间的基准点）
-	Max    int            `yaml:"max"`              // 原始权重最大值
-	Min    int            `yaml:"min,omitempty"`    // 原始权重最小值（默认 0）
-	Mode   WeightNormMode `yaml:"mode"`             // 映射算法
-	Target int            `yaml:"target,omitempty"` // 中位映射目标值（默认 1000）
+	Median int            `yaml:"median" toml:"median"`                     // 原始权重中位数（映射到统一区间的基准点）
+	Max    int            `yaml:"max" toml:"max"`                           // 原始权重最大值
+	Min    int            `yaml:"min,omitempty" toml:"min,omitempty"`       // 原始权重最小值（默认 0）
+	Mode   WeightNormMode `yaml:"mode" toml:"mode"`                         // 映射算法
+	Target int            `yaml:"target,omitempty" toml:"target,omitempty"` // 中位映射目标值（默认 1000）
 }
 
 // LearningSpec 学习策略配置
 type LearningSpec struct {
-	AutoLearn  *AutoLearnSpec  `yaml:"auto_learn,omitempty"`  // 自动造词配置（拼音：选词即学）
-	AutoPhrase *AutoPhraseSpec `yaml:"auto_phrase,omitempty"` // 自动造词配置（码表：连续单字组词）
-	Freq       *FreqSpec       `yaml:"freq,omitempty"`        // 自动调频配置
+	AutoLearn  *AutoLearnSpec  `yaml:"auto_learn,omitempty" toml:"auto_learn,omitempty"`   // 自动造词配置（拼音：选词即学）
+	AutoPhrase *AutoPhraseSpec `yaml:"auto_phrase,omitempty" toml:"auto_phrase,omitempty"` // 自动造词配置（码表：连续单字组词）
+	Freq       *FreqSpec       `yaml:"freq,omitempty" toml:"freq,omitempty"`               // 自动调频配置
 
-	UnigramPath      string `yaml:"unigram_path,omitempty"`
-	TempMaxEntries   int    `yaml:"temp_max_entries,omitempty"`   // 临时词库最大条目数（默认 5000）
-	TempPromoteCount int    `yaml:"temp_promote_count,omitempty"` // 选择几次后晋升到用户词库（默认 5）
+	UnigramPath      string `yaml:"unigram_path,omitempty" toml:"unigram_path,omitempty"`
+	TempMaxEntries   int    `yaml:"temp_max_entries,omitempty" toml:"temp_max_entries,omitempty"`     // 临时词库最大条目数（默认 5000）
+	TempPromoteCount int    `yaml:"temp_promote_count,omitempty" toml:"temp_promote_count,omitempty"` // 选择几次后晋升到用户词库（默认 5）
 }
 
 // AutoLearnSpec 自动造词配置
 type AutoLearnSpec struct {
-	Enabled        bool `yaml:"enabled"`                   // 是否启用自动造词
-	CountThreshold int  `yaml:"count_threshold,omitempty"` // 误选保护阈值（默认 2）
-	MinWordLength  int  `yaml:"min_word_length,omitempty"` // 最小造词字数（默认 2）
-	WeightDelta    int  `yaml:"weight_delta,omitempty"`    // 每次选词权重增量（默认 40）
-	AddWeight      int  `yaml:"add_weight,omitempty"`      // 新词初始权重（默认 800）
+	Enabled        bool `yaml:"enabled" toml:"enabled"`                                     // 是否启用自动造词
+	CountThreshold int  `yaml:"count_threshold,omitempty" toml:"count_threshold,omitempty"` // 误选保护阈值（默认 2）
+	MinWordLength  int  `yaml:"min_word_length,omitempty" toml:"min_word_length,omitempty"` // 最小造词字数（默认 2）
+	WeightDelta    int  `yaml:"weight_delta,omitempty" toml:"weight_delta,omitempty"`       // 每次选词权重增量（默认 40）
+	AddWeight      int  `yaml:"add_weight,omitempty" toml:"add_weight,omitempty"`           // 新词初始权重（默认 800）
 }
 
 // AutoPhraseSpec 码表自动造词配置（连续单字 + 终止符 = 自动组词）
 type AutoPhraseSpec struct {
-	Enabled        bool `yaml:"enabled"`                   // 是否启用
-	MinPhraseLen   int  `yaml:"min_phrase_len,omitempty"`  // 最小造词字数（默认 2）
-	MaxPhraseLen   int  `yaml:"max_phrase_len,omitempty"`  // 最大造词字数（默认 5）
-	AddWeight      int  `yaml:"add_weight,omitempty"`      // 新词初始权重（默认 800）
-	WeightDelta    int  `yaml:"weight_delta,omitempty"`    // 每次命中权重增量（默认 40）
-	CountThreshold int  `yaml:"count_threshold,omitempty"` // 误选保护阈值（默认 2）
+	Enabled        bool `yaml:"enabled" toml:"enabled"`                                     // 是否启用
+	MinPhraseLen   int  `yaml:"min_phrase_len,omitempty" toml:"min_phrase_len,omitempty"`   // 最小造词字数（默认 2）
+	MaxPhraseLen   int  `yaml:"max_phrase_len,omitempty" toml:"max_phrase_len,omitempty"`   // 最大造词字数（默认 5）
+	AddWeight      int  `yaml:"add_weight,omitempty" toml:"add_weight,omitempty"`           // 新词初始权重（默认 800）
+	WeightDelta    int  `yaml:"weight_delta,omitempty" toml:"weight_delta,omitempty"`       // 每次命中权重增量（默认 40）
+	CountThreshold int  `yaml:"count_threshold,omitempty" toml:"count_threshold,omitempty"` // 误选保护阈值（默认 2）
 	// IdleTimeoutMs 连续单字之间的最大空闲间隔（毫秒），超过则把已累积的序列作为终止信号 flush（写词）。
 	// 兜底场景：Enter/Space 在 buffer 为空时不会被 IME 捕获，无法触发常规 OnPhraseTerminated；
 	// 下一次单字到达时 idle 检测会先 flush 旧序列再开始新序列，避免跨句拼接出 "加好加好" 这种乱词。
-	IdleTimeoutMs int `yaml:"idle_timeout_ms,omitempty"` // 默认 5000
+	IdleTimeoutMs int `yaml:"idle_timeout_ms,omitempty" toml:"idle_timeout_ms,omitempty"` // 默认 5000
 }
 
 // FreqSpec 自动调频配置
 type FreqSpec struct {
-	Enabled     bool    `yaml:"enabled"`                 // 是否启用自动调频
-	ProtectTopN int     `yaml:"protect_top_n,omitempty"` // 锁定前 N 位候选的排序位置（默认 0 不锁定；仅纯码表路径生效，混输按 weight tier 重排不锁首选）
-	HalfLife    float64 `yaml:"half_life,omitempty"`     // 半衰期（小时，默认 72）
-	BoostMax    int     `yaml:"boost_max,omitempty"`     // 加成上限（默认 2000）
-	MaxRecency  float64 `yaml:"max_recency,omitempty"`   // 时间衰减峰值（默认 300）
-	BaseScale   float64 `yaml:"base_scale,omitempty"`    // base 系数（默认 100）
-	StreakScale float64 `yaml:"streak_scale,omitempty"`  // 连续选择系数（默认 50）
-	StreakCap   float64 `yaml:"streak_cap,omitempty"`    // 连续选择上限（默认 250）
+	Enabled     bool    `yaml:"enabled" toml:"enabled"`                                 // 是否启用自动调频
+	ProtectTopN int     `yaml:"protect_top_n,omitempty" toml:"protect_top_n,omitempty"` // 锁定前 N 位候选的排序位置（默认 0 不锁定；仅纯码表路径生效，混输按 weight tier 重排不锁首选）
+	HalfLife    float64 `yaml:"half_life,omitempty" toml:"half_life,omitempty"`         // 半衰期（小时，默认 72）
+	BoostMax    int     `yaml:"boost_max,omitempty" toml:"boost_max,omitempty"`         // 加成上限（默认 2000）
+	MaxRecency  float64 `yaml:"max_recency,omitempty" toml:"max_recency,omitempty"`     // 时间衰减峰值（默认 300）
+	BaseScale   float64 `yaml:"base_scale,omitempty" toml:"base_scale,omitempty"`       // base 系数（默认 100）
+	StreakScale float64 `yaml:"streak_scale,omitempty" toml:"streak_scale,omitempty"`   // 连续选择系数（默认 50）
+	StreakCap   float64 `yaml:"streak_cap,omitempty" toml:"streak_cap,omitempty"`       // 连续选择上限（默认 250）
 }
 
 // IsAutoLearnEnabled 是否启用自动造词（拼音：选词即学）
@@ -340,16 +340,16 @@ func (ls *LearningSpec) GetFreqProfile() *store.FreqProfile {
 
 // EncoderSpec 造词编码规则配置
 type EncoderSpec struct {
-	Rules           []EncoderRule `yaml:"rules"`
-	MaxWordLength   int           `yaml:"max_word_length,omitempty"`
-	ExcludePatterns []string      `yaml:"exclude_patterns,omitempty"`
+	Rules           []EncoderRule `yaml:"rules" toml:"rules"`
+	MaxWordLength   int           `yaml:"max_word_length,omitempty" toml:"max_word_length,omitempty"`
+	ExcludePatterns []string      `yaml:"exclude_patterns,omitempty" toml:"exclude_patterns,omitempty"`
 }
 
 // EncoderRule 单条编码规则
 type EncoderRule struct {
-	LengthEqual   int    `yaml:"length_equal,omitempty"`
-	LengthInRange []int  `yaml:"length_in_range,omitempty,flow"`
-	Formula       string `yaml:"formula"`
+	LengthEqual   int    `yaml:"length_equal,omitempty" toml:"length_equal,omitempty"`
+	LengthInRange []int  `yaml:"length_in_range,omitempty,flow" toml:"length_in_range,omitempty"`
+	Formula       string `yaml:"formula" toml:"formula"`
 }
 
 // NewWeightNormalizer 从 WeightSpec 创建归一化器，spec 为 nil 时返回 nil
@@ -394,9 +394,9 @@ func (s *Schema) DataSchemaID() string {
 
 // ChaiziSpec 拆字提示配置（方案级，与词库文件放一起）
 type ChaiziSpec struct {
-	DBPath     string `yaml:"db_path"`                // 拆字数据库文件路径（相对词库目录或绝对路径）
-	FontFamily string `yaml:"font_family,omitempty"`  // 显示拆字所用的字体（空=使用默认字体）
-	FontDWName string `yaml:"font_dw_name,omitempty"` // DirectWrite 字体族名称（字体已安装到系统时使用，优先于 font_family 路径加载）
+	DBPath     string `yaml:"db_path" toml:"db_path"`                               // 拆字数据库文件路径（相对词库目录或绝对路径）
+	FontFamily string `yaml:"font_family,omitempty" toml:"font_family,omitempty"`   // 显示拆字所用的字体（空=使用默认字体）
+	FontDWName string `yaml:"font_dw_name,omitempty" toml:"font_dw_name,omitempty"` // DirectWrite 字体族名称（字体已安装到系统时使用，优先于 font_family 路径加载）
 }
 
 // GetDictsByRole 按角色筛选词库规格

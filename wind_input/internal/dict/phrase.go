@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/huanfeng/wind_input/internal/candidate"
 	"github.com/huanfeng/wind_input/internal/cmdbar"
 	"github.com/huanfeng/wind_input/internal/store"
+	toml "github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -177,9 +179,9 @@ type PhraseGroup struct {
 	LoadSeq int
 }
 
-// PhrasesFileConfig 短语文件的 YAML 结构
+// PhrasesFileConfig 短语文件结构（TOML 与 YAML 双格式，各自原生解码进同一结构）
 type PhrasesFileConfig struct {
-	Phrases []PhraseFileEntry `yaml:"phrases"`
+	Phrases []PhraseFileEntry `yaml:"phrases" toml:"phrases"`
 }
 
 // PhraseFileEntry 短语文件中的单条配置。
@@ -189,18 +191,18 @@ type PhrasesFileConfig struct {
 // 详见 internal/dict/aa_marker.go 与
 // docs/design/command-bar-design.md §3.7。
 type PhraseFileEntry struct {
-	Code string `yaml:"code"`
-	Text string `yaml:"text"`
+	Code string `yaml:"code" toml:"code"`
+	Text string `yaml:"text" toml:"text"`
 	// Weight 显式权重 (0~10000), 优先级高于 Position。
 	// 用 *int 以区分"未设置"和"显式设置为 0"。
-	Weight   *int `yaml:"weight,omitempty"`
-	Position int  `yaml:"position,omitempty"`
-	Disabled bool `yaml:"disabled,omitempty"`
+	Weight   *int `yaml:"weight,omitempty" toml:"weight,omitempty"`
+	Position int  `yaml:"position,omitempty" toml:"position,omitempty"`
+	Disabled bool `yaml:"disabled,omitempty" toml:"disabled,omitempty"`
 	// Platform 限定该条仅在指定平台加载: ""/"all"=所有平台; "windows"/"darwin"/
 	// "linux"=仅该平台 (值同 runtime.GOOS)。用于平台差异示例 (如删行用键、启动
 	// 命令、环境变量名在 Windows / macOS 不同)。同一 code 可写多条不同 platform,
 	// 加载时按当前平台取匹配的那条。ParsePhraseYAMLFile 统一过滤。
-	Platform string `yaml:"platform,omitempty"`
+	Platform string `yaml:"platform,omitempty" toml:"platform,omitempty"`
 }
 
 // NewPhraseLayer 创建短语层（测试用简化版，不绑定 Store）
@@ -774,7 +776,8 @@ func isAAMarker(text string) bool {
 	return ok
 }
 
-// ParsePhraseYAMLFile reads a phrases YAML file and returns PhraseFileEntry slice.
+// ParsePhraseYAMLFile reads a phrases file (TOML 或 YAML，按扩展名原生解码进
+// 同一结构) and returns PhraseFileEntry slice。.toml 走 go-toml/v2，其余走 yaml.v3。
 func ParsePhraseYAMLFile(path string) ([]PhraseFileEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -782,7 +785,11 @@ func ParsePhraseYAMLFile(path string) ([]PhraseFileEntry, error) {
 	}
 
 	var config PhrasesFileConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
+	if strings.EqualFold(filepath.Ext(path), ".toml") {
+		if err := toml.Unmarshal(data, &config); err != nil {
+			return nil, fmt.Errorf("parse phrases file %s: %w", path, err)
+		}
+	} else if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("parse phrases file %s: %w", path, err)
 	}
 

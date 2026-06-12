@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-06-12 -->
 
 # data
 
@@ -10,7 +10,7 @@
 
 | Directory | Purpose |
 |-----------|---------|
-| `schemas/` | 输入方案定义文件（`*.schema.yaml`），驱动引擎创建和词库配置 (see `schemas/AGENTS.md`) |
+| `schemas/` | 输入方案定义文件（`*.schema.toml`，加载器也兼容 `.schema.yaml`），驱动引擎创建和词库配置 (see `schemas/AGENTS.md`) |
 | `dict/` | 词库源数据（拼音 unigram、常用字表等）(see `dict/AGENTS.md`) |
 | `examples/` | 用户数据示例文件（短语、Shadow 规则） |
 
@@ -20,15 +20,15 @@
 | File | Description |
 |------|-------------|
 | `config.toml` | 系统预置默认配置文件；加载优先级：代码默认值 → 本文件 → 用户配置（`%APPDATA%\WindInput\config.toml`）；包含 startup、schema、hotkeys、ui、toolbar、input、advanced 等所有配置项 |
-| `system.phrases.yaml` | 系统内置短语配置，随安装包分发 |
+| `system.phrases.toml` | 系统内置短语配置（种子），随安装包分发；加载器 toml 优先、yaml 回退 |
 
 ### schemas/
 | File | Description |
 |------|-------------|
-| `pinyin.schema.yaml` | 全拼输入方案定义（引擎类型、词库路径、学习策略） |
-| `shuangpin.schema.yaml` | 双拼输入方案定义 |
-| `wubi86.schema.yaml` | 五笔86输入方案定义（码表配置、自动上屏规则） |
-| `wubi86_pinyin.schema.yaml` | 五笔拼音混输方案定义 |
+| `pinyin.schema.toml` | 全拼输入方案定义（引擎类型、词库路径、学习策略） |
+| `shuangpin.schema.toml` | 双拼输入方案定义 |
+| `wubi86.schema.toml` | 五笔86输入方案定义（码表配置、自动上屏规则；词库 rime `.dict.yaml`） |
+| `wubi86_pinyin.schema.toml` | 五笔拼音混输方案定义 |
 
 ### examples/
 | File | Description |

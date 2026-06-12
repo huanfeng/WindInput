@@ -4,12 +4,73 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	toml "github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
 
-const schemaFileSuffix = ".schema.yaml"
+// 方案文件支持两种磁盘格式。schemaSuffixes 的顺序即优先级：同 stem 下
+// .schema.toml 优先于 .schema.yaml（两者并存时只加载 toml）。
+const (
+	schemaSuffixTOML = ".schema.toml"
+	schemaSuffixYAML = ".schema.yaml"
+)
+
+var schemaSuffixes = []string{schemaSuffixTOML, schemaSuffixYAML}
+
+// isSchemaTOMLPath 判断方案文件路径是否为 TOML 格式。
+func isSchemaTOMLPath(path string) bool {
+	return strings.EqualFold(filepath.Ext(path), ".toml")
+}
+
+// unmarshalSchemaData 按磁盘格式把方案文件字节原生解码进 v。
+//
+// 中间层 = 类型化 struct 本身：TOML 走 go-toml/v2（toml tag）、YAML 走
+// yaml.v3（yaml tag），两种格式各自原生解码、互不经过对方（不走"内部
+// YAML"桥接）。两种解码器都满足"解码进已填充 struct 只覆盖文档中出现的
+// 键、不清零缺失字段"，故用户层覆盖内置层的部分覆盖语义对两者一致成立。
+func unmarshalSchemaData(path string, data []byte, v any) error {
+	if isSchemaTOMLPath(path) {
+		return toml.Unmarshal(data, v)
+	}
+	return yaml.Unmarshal(data, v)
+}
+
+// discoverSchemaPaths 扫描 dir，返回需加载的方案文件路径列表（已按 stem
+// 去重：同 stem 同时存在 .schema.toml 与 .schema.yaml 时 toml 优先、yaml 忽略）。
+func discoverSchemaPaths(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	chosenPrio := make(map[string]int)    // stem -> 已选后缀优先级序号（越小越优先）
+	chosenPath := make(map[string]string) // stem -> 选中的完整路径
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		for prio, suf := range schemaSuffixes {
+			if stem, ok := strings.CutSuffix(name, suf); ok {
+				if old, ok := chosenPrio[stem]; !ok || prio < old {
+					chosenPrio[stem] = prio
+					chosenPath[stem] = filepath.Join(dir, name)
+				}
+				break
+			}
+		}
+	}
+
+	paths := make([]string, 0, len(chosenPath))
+	for _, p := range chosenPath {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths) // 稳定加载顺序（方案按 id 入 map，顺序仅影响日志确定性）
+	return paths, nil
+}
 
 // LoadSchemaFile 加载单个方案文件
 func LoadSchemaFile(path string) (*Schema, error) {
@@ -19,7 +80,7 @@ func LoadSchemaFile(path string) (*Schema, error) {
 	}
 
 	var s Schema
-	if err := yaml.Unmarshal(data, &s); err != nil {
+	if err := unmarshalSchemaData(path, data, &s); err != nil {
 		return nil, fmt.Errorf("解析方案文件失败 %s: %w", path, err)
 	}
 
@@ -57,23 +118,14 @@ func DiscoverSchemas(exeDir, dataDir string) (map[string]*Schema, error) {
 	return schemas, nil
 }
 
-// loadSchemasFromDir 从指定目录加载所有方案文件
+// loadSchemasFromDir 从指定目录加载所有方案文件（toml 优先、yaml 回退）
 func loadSchemasFromDir(dir string, schemas map[string]*Schema) error {
-	entries, err := os.ReadDir(dir)
+	paths, err := discoverSchemaPaths(dir)
 	if err != nil {
 		return err
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, schemaFileSuffix) {
-			continue
-		}
-
-		path := filepath.Join(dir, name)
+	for _, path := range paths {
 		s, err := LoadSchemaFile(path)
 		if err != nil {
 			// 单个文件加载失败不中断，记录日志后跳过
@@ -91,34 +143,25 @@ func loadSchemasFromDir(dir string, schemas map[string]*Schema) error {
 // 同 ID 时：以内置方案为基础，用户配置覆盖其上（缺失字段保留内置值）
 // 不同 ID 时：作为全新用户方案加载
 func loadAndMergeUserSchemas(dir string, schemas map[string]*Schema) error {
-	entries, err := os.ReadDir(dir)
+	paths, err := discoverSchemaPaths(dir)
 	if err != nil {
 		return err
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, schemaFileSuffix) {
-			continue
-		}
-
-		path := filepath.Join(dir, name)
+	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[schema] 跳过无法读取的方案文件 %s: %v\n", path, err)
 			continue
 		}
 
-		// 先提取 schema ID，判断是否需要与内置方案合并
+		// 先提取 schema ID，判断是否需要与内置方案合并（按格式原生解码）
 		var peek struct {
 			Schema struct {
-				ID string `yaml:"id"`
-			} `yaml:"schema"`
+				ID string `yaml:"id" toml:"id"`
+			} `yaml:"schema" toml:"schema"`
 		}
-		if err := yaml.Unmarshal(data, &peek); err != nil {
+		if err := unmarshalSchemaData(path, data, &peek); err != nil {
 			fmt.Fprintf(os.Stderr, "[schema] 跳过无效方案文件 %s: %v\n", path, err)
 			continue
 		}
@@ -127,9 +170,13 @@ func loadAndMergeUserSchemas(dir string, schemas map[string]*Schema) error {
 		if builtin, ok := schemas[peek.Schema.ID]; ok && peek.Schema.ID != "" {
 			// 存在同 ID 内置方案：深拷贝内置方案作为基础，用户配置覆盖其上
 			s = deepCopySchema(builtin)
-			// 记录内置词库列表，用于后续按 id 合并（yaml.Unmarshal 会全量替换数组）
+			// 记录内置词库列表，用于后续按 id 合并（解码会全量替换数组）。
+			// 关键：go-toml/v2 解码 [[dictionaries]] 进已填充 struct 时会复用
+			// 切片底层数组就地改写（yaml.v3 则分配新切片），若不先置 nil，捕获的
+			// baseDicts 会被覆盖污染——故 overlay 前清空，强制解码器分配新切片。
 			baseDicts := s.Dicts
-			if err := yaml.Unmarshal(data, s); err != nil {
+			s.Dicts = nil
+			if err := unmarshalSchemaData(path, data, s); err != nil {
 				fmt.Fprintf(os.Stderr, "[schema] 合并方案文件失败 %s: %v\n", path, err)
 				continue
 			}
@@ -138,7 +185,7 @@ func loadAndMergeUserSchemas(dir string, schemas map[string]*Schema) error {
 		} else {
 			// 无内置方案：作为全新方案加载
 			s = &Schema{}
-			if err := yaml.Unmarshal(data, s); err != nil {
+			if err := unmarshalSchemaData(path, data, s); err != nil {
 				fmt.Fprintf(os.Stderr, "[schema] 跳过无效方案文件 %s: %v\n", path, err)
 				continue
 			}

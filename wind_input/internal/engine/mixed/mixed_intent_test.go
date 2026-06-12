@@ -438,10 +438,13 @@ func TestMixedOverflow_PinyinWithCodetable(t *testing.T) {
 func createCodetableEngine(t *testing.T, dictRoot string) *codetable.Engine {
 	t.Helper()
 
-	// 查找五笔 RIME 词库
-	rimeMainDict := filepath.Join(dictRoot, "wubi86", "wubi86_jidian.dict.yaml")
+	// 查找五笔 RIME 词库（split .dict.toml 优先，回退旧 .dict.yaml）
+	rimeMainDict := filepath.Join(dictRoot, "wubi86", "wubi86_jidian.dict.toml")
 	if _, err := os.Stat(rimeMainDict); os.IsNotExist(err) {
-		t.Skipf("wubi rime dict not found at %s", rimeMainDict)
+		rimeMainDict = filepath.Join(dictRoot, "wubi86", "wubi86_jidian.dict.yaml")
+		if _, err := os.Stat(rimeMainDict); os.IsNotExist(err) {
+			t.Skipf("wubi rime dict not found under %s", filepath.Join(dictRoot, "wubi86"))
+		}
 	}
 
 	// 转换 RIME 格式到 wdb（放在 dictRoot 同级目录避免 mmap 文件锁导致 TempDir 清理失败）

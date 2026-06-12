@@ -173,22 +173,27 @@ func (sm *SchemaManager) GetDataDir() string {
 	return sm.dataDir
 }
 
-// GetBuiltinSchemaPath 返回内置方案文件路径（exeDir/schemas/<id>.schema.yaml），
-// 第二个返回值表示文件是否存在
-func (sm *SchemaManager) GetBuiltinSchemaPath(schemaID string) (string, bool) {
-	p := filepath.Join(sm.exeDir, "schemas", schemaID+schemaFileSuffix)
-	if _, err := os.Stat(p); err == nil {
-		return p, true
+// resolveSchemaPath 在 dir/schemas 下按格式优先级（.schema.toml 优先、
+// .schema.yaml 回退）查找方案 id 对应的文件，返回首个存在的路径与 true；
+// 都不存在时返回回退（yaml）路径与 false（该路径仅作占位，调用方应据 bool 判定）。
+func resolveSchemaPath(dir, schemaID string) (string, bool) {
+	for _, suf := range schemaSuffixes {
+		p := filepath.Join(dir, "schemas", schemaID+suf)
+		if _, err := os.Stat(p); err == nil {
+			return p, true
+		}
 	}
-	return p, false
+	return filepath.Join(dir, "schemas", schemaID+schemaSuffixYAML), false
 }
 
-// GetUserSchemaPath 返回用户方案文件路径（dataDir/schemas/<id>.schema.yaml），
-// 第二个返回值表示文件是否存在
+// GetBuiltinSchemaPath 返回内置方案文件路径（exeDir/schemas/<id>.schema.{toml,yaml}），
+// 第二个返回值表示文件是否存在（toml 优先、yaml 回退）
+func (sm *SchemaManager) GetBuiltinSchemaPath(schemaID string) (string, bool) {
+	return resolveSchemaPath(sm.exeDir, schemaID)
+}
+
+// GetUserSchemaPath 返回用户方案文件路径（dataDir/schemas/<id>.schema.{toml,yaml}），
+// 第二个返回值表示文件是否存在（toml 优先、yaml 回退）
 func (sm *SchemaManager) GetUserSchemaPath(schemaID string) (string, bool) {
-	p := filepath.Join(sm.dataDir, "schemas", schemaID+schemaFileSuffix)
-	if _, err := os.Stat(p); err == nil {
-		return p, true
-	}
-	return p, false
+	return resolveSchemaPath(sm.dataDir, schemaID)
 }

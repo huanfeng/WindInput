@@ -34,7 +34,7 @@
                                           └──────────────────┘
 
 Schema 驱动流程:
-  data/schemas/*.schema.yaml → SchemaManager → EngineFactory → Engine + Dict
+  data/schemas/*.schema.toml → SchemaManager → EngineFactory → Engine + Dict
 ```
 
 - **wind_tsf**: C++17 DLL，实现 Windows TSF (Text Services Framework) 接口，负责系统级输入法注册和键盘事件捕获；采用 HostWindow 机制解决 Win11 开始菜单候选框 z-order 问题

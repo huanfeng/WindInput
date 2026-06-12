@@ -1,0 +1,437 @@
+# WindInput 系统短语
+# 随程序打包发布，用户不应直接修改此文件
+# 文本中的 $变量 会在运行时自动展开（$var / ${var}，$$ 转义为 $）
+#
+# weight: 0~10000 短语 tier 内排序权重，未设置默认 1000（中位）
+# position: 仅同 code 多条 tie-break（升序）
+# platform: ""/"all"=全平台；"windows"/"darwin"/"linux"=仅该平台
+# 详见 docs/design/command-bar-design.md
+
+[[phrases]]
+code = 'date'
+text = '$Y年$M月$D日'
+weight = 1000
+position = 1
+
+[[phrases]]
+code = 'date'
+text = '$Y-$MM-$DD'
+weight = 800
+position = 2
+
+[[phrases]]
+code = 'date'
+text = '$Y.$MM.$DD'
+weight = 800
+position = 3
+
+[[phrases]]
+code = 'date'
+text = '$Y/$MM/$DD'
+weight = 800
+position = 4
+
+[[phrases]]
+code = 'date'
+text = '${YC}年${MC}月${DC}日'
+weight = 800
+position = 5
+
+[[phrases]]
+code = 'time'
+text = '$HH:$mm:$ss'
+weight = 1000
+position = 1
+
+[[phrases]]
+code = 'time'
+text = '$HH:$mm'
+weight = 800
+position = 2
+
+[[phrases]]
+code = 'time'
+text = '$HH时$mm分$ss秒'
+weight = 800
+position = 3
+
+[[phrases]]
+code = 'datm'
+text = '$Y年$M月$D日 $HH:$mm:$ss'
+weight = 1000
+position = 1
+
+[[phrases]]
+code = 'datm'
+text = '$Y-$MM-$DD $HH:$mm:$ss'
+weight = 800
+position = 2
+
+[[phrases]]
+code = 'datm'
+text = '${YC}年${MC}月${DC}日 $HH:$mm:$ss'
+weight = 800
+position = 3
+
+[[phrases]]
+code = 'week'
+text = '星期$WC'
+weight = 1000
+position = 1
+
+[[phrases]]
+code = 'week'
+text = '周$WC'
+weight = 800
+position = 2
+
+[[phrases]]
+code = 'week'
+text = '$Y年$M月$D日 星期$WC'
+weight = 800
+position = 3
+
+[[phrases]]
+code = 'week'
+text = '$Y年$M月$D日 周$WC'
+weight = 800
+position = 4
+
+[[phrases]]
+code = 'uuid'
+text = '$uuid'
+weight = 1000
+
+[[phrases]]
+code = 'tmts'
+text = '$ts'
+weight = 800
+position = 2
+
+[[phrases]]
+code = 'tmts'
+text = '$tsms'
+weight = 800
+position = 3
+
+[[phrases]]
+code = 'zzbd'
+text = '$AA("标点", "、。·ˉˇ¨〃々—～‖…‘’“”〔〕〈〉《》「」『』〖〗【】±×÷∶∧∨∑∏∪∩∈∷√⊥∥∠⌒⊙∫∮≡≌≈∽∝≠≮≯≤≥∞∵∴♂♀°′″℃＄¤￠￡‰§№☆★○●◎◇◆□■△▲※→←↑↓〓")'
+weight = 1230
+
+[[phrases]]
+code = 'zzsz'
+text = '$AA("数字", "❶❷❸❹❺❻❼❽❾❿")'
+weight = 1220
+
+[[phrases]]
+code = 'zzzm'
+text = '$AA("字母", "ⓐⓑⓒⓓⓔⓕⓖⓗⓘⓙⓚⓛⓜⓝⓞⓟⓠⓡⓢⓣⓤⓥⓦⓧⓨⓩ")'
+weight = 1210
+
+[[phrases]]
+code = 'zzpp'
+text = '$AA("偏旁", "亻彳讠饣艹丶乛亠冖宀冫丷扌氵灬丨亅丿乚勹匚冂凵爫忄丬纟疒阝刂卩犭辶廴钅礻衤罒覀夂癶耂牜虍歺糹釒飠")'
+weight = 1200
+
+[[phrases]]
+code = 'zzdw'
+text = '$AA("单位", "㎎㎏㎜㎝㎞㎡㏄㏎㏑㏒㏕")'
+weight = 1190
+
+[[phrases]]
+code = 'zzpy'
+text = '$AA("拼音", "āáǎàōóǒòêēéěèīíǐìǖǘǚǜüūúǔù")'
+weight = 1180
+
+[[phrases]]
+code = 'zzds'
+text = '$AA("点号数字", "⒈⒉⒊⒋⒌⒍⒎⒏⒐⒑⒒⒓⒔⒕⒖⒗⒘⒙⒚⒛")'
+weight = 1170
+
+[[phrases]]
+code = 'zzks'
+text = '$AA("括号数字", "⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇")'
+weight = 1160
+
+[[phrases]]
+code = 'zzys'
+text = '$AA("圆圈数字", "①②③④⑤⑥⑦⑧⑨⑩")'
+weight = 1150
+
+[[phrases]]
+code = 'zzzs'
+text = '$AA("中文数字", "㈠㈡㈢㈣㈤㈥㈦㈧㈨㈩")'
+weight = 1140
+
+[[phrases]]
+code = 'zzhb'
+text = '$AA("货币符号", "＄￠￡￥¤")'
+weight = 1130
+
+[[phrases]]
+code = 'zzjt'
+text = '$AA("箭头符号", "→↑←↓↖↗↘↙")'
+weight = 1120
+
+[[phrases]]
+code = 'zzde'
+text = '$AA("大写俄文", "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯЁ")'
+weight = 1110
+
+[[phrases]]
+code = 'zzxe'
+text = '$AA("小写俄文", "абвгдежзийклмнопрстуфхцчшщъыьэюяё")'
+weight = 1100
+
+[[phrases]]
+code = 'zzdl'
+text = '$AA("大写罗马", "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ")'
+weight = 1090
+
+[[phrases]]
+code = 'zzxl'
+text = '$AA("小写罗马", "ⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ")'
+weight = 1080
+
+[[phrases]]
+code = 'zzdx'
+text = '$AA("大写希腊", "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ")'
+weight = 1070
+
+[[phrases]]
+code = 'zzxx'
+text = '$AA("小写希腊", "αβγδεζηθικλμνξοπρστυφχψω")'
+weight = 1060
+
+[[phrases]]
+code = 'zzpj'
+text = '$AA("平假名", "ぁあぃいぅうぇえぉおかがきぎぱくぐけげこごさざしじすずせぜそぞただちぢっつづてでとどなにぬねのはばひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろゎわゐゑをん゛゜ゝゞ")'
+weight = 1050
+
+[[phrases]]
+code = 'zzjp'
+text = '$AA("片假名", "ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴヵヶーヽヾ")'
+weight = 1040
+
+[[phrases]]
+code = 'zzsx'
+text = '$AA("数学符号", "＋－＜＝＞±×÷∈∏∑∕√∝∞∟∠∣∥∧∨∩∪∫∮∴∵∶∷∽≈≌≒≠≡≤≥≦≧≮≯⊕⊙⊥⊿")'
+weight = 1030
+
+[[phrases]]
+code = 'zzts'
+text = '$AA("特殊符号", "℃°‰♂♀§№☆★○●◎◇◆□■△▲※〓＃＆＠＼＾＿￣")'
+weight = 1020
+
+[[phrases]]
+code = 'zzzy'
+text = '$AA("注音符号", "ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ")'
+weight = 1010
+
+[[phrases]]
+code = 'zzrq'
+text = '$Y年$M月$D日'
+weight = 1000
+position = 1
+
+[[phrases]]
+code = 'zzrq'
+text = '$Y-$MM-$DD'
+weight = 800
+position = 2
+
+[[phrases]]
+code = 'zzrq'
+text = '$Y.$MM.$DD'
+weight = 800
+position = 3
+
+[[phrases]]
+code = 'zzrq'
+text = '$Y/$MM/$DD'
+weight = 800
+position = 4
+
+[[phrases]]
+code = 'zzrq'
+text = '${YC}年${MC}月${DC}日'
+weight = 800
+position = 5
+
+[[phrases]]
+code = 'zzsj'
+text = '$HH:$mm:$ss'
+weight = 1000
+position = 1
+
+[[phrases]]
+code = 'zzsj'
+text = '$HH:$mm'
+weight = 800
+position = 2
+
+[[phrases]]
+code = 'zzsj'
+text = '$HH时$mm分$ss秒'
+weight = 800
+position = 3
+
+[[phrases]]
+code = 'zzxq'
+text = '星期$WC'
+weight = 1000
+position = 1
+
+[[phrases]]
+code = 'zzxq'
+text = '周$WC'
+weight = 800
+position = 2
+
+[[phrases]]
+code = 'zzxq'
+text = '$Y年$M月$D日 星期$WC'
+weight = 800
+position = 3
+
+[[phrases]]
+code = 'zzxq'
+text = '$Y年$M月$D日 周$WC'
+weight = 800
+position = 4
+
+[[phrases]]
+code = 'cobd'
+text = '$CC("打开百度", open("https://baidu.com"))'
+weight = 2000
+
+[[phrases]]
+code = 'cozd'
+text = '$CC("汉典:{last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))'
+weight = 2000
+
+[[phrases]]
+code = 'cono'
+text = '$CC("打开记事本", proc.run("notepad.exe"))'
+weight = 2000
+platform = 'windows'
+
+[[phrases]]
+code = 'cono'
+text = '$CC("打开文本编辑", proc.run("open", "-a", "TextEdit"))'
+weight = 2000
+platform = 'darwin'
+
+[[phrases]]
+code = 'coca'
+text = '$CC("打开计算器", proc.run("calc.exe"))'
+weight = 2000
+platform = 'windows'
+
+[[phrases]]
+code = 'coca'
+text = '$CC("打开计算器", proc.run("open", "-a", "Calculator"))'
+weight = 2000
+platform = 'darwin'
+
+[[phrases]]
+code = 'cohm'
+text = '$CC("打开用户主目录", open(env("USERPROFILE")))'
+weight = 2000
+platform = 'windows'
+
+[[phrases]]
+code = 'cohm'
+text = '$CC("打开用户主目录", open(env("HOME")))'
+weight = 2000
+platform = 'darwin'
+
+[[phrases]]
+code = 'coll'
+text = '$CC(last(), type(last()))'
+weight = 2000
+
+[[phrases]]
+code = 'copa'
+text = '$CC("粘贴", clip.paste())'
+weight = 2000
+
+[[phrases]]
+code = 'cojk'
+text = '$CC("「」", type("「」"), key.tap("Left"))'
+weight = 2000
+
+[[phrases]]
+code = 'codl'
+text = '$CC("[删行]", key.seq("Home", "Shift+End", "Backspace"))'
+weight = 2000
+platform = 'windows'
+
+[[phrases]]
+code = 'codl'
+text = '$CC("[删行]", key.seq("Ctrl+A", "Ctrl+K"))'
+weight = 2000
+platform = 'darwin'
+
+[[phrases]]
+code = 'cocp'
+text = '$CC("复制时间", clip.copy(now()))'
+weight = 2000
+
+[[phrases]]
+code = 'coad'
+text = '$CC("剪贴板加词:{clip()}", dict.add(clip()))'
+weight = 2000
+
+[[phrases]]
+code = 'coen'
+text = '$CC("切中英", ime.toggle("cn-en"))'
+weight = 2000
+
+[[phrases]]
+code = 'cofs'
+text = '$CC("切全半角", ime.toggle("fullshape"))'
+weight = 2000
+
+[[phrases]]
+code = 'coly'
+text = '$CC("切横纵候选", ime.toggle("layout"))'
+weight = 2000
+
+[[phrases]]
+code = 'cocw'
+text = '$CC("切候选窗", ime.toggle("candwin"))'
+weight = 2000
+
+[[phrases]]
+code = 'coss'
+text = '$CC("打开设置", setting.open(""))'
+weight = 2000
+position = 1
+
+[[phrases]]
+code = 'coss'
+text = '$CC("设置(Web)", setting.web(""))'
+weight = 2000
+position = 2
+
+[[phrases]]
+code = 'cost'
+text = '$CC("切简繁", ime.toggle("s2t"))'
+weight = 2000
+
+[[phrases]]
+code = 'copm'
+text = '$CC("切编码模式", ime.toggle("preedit"))'
+weight = 2000
+
+[[phrases]]
+code = 'cotb'
+text = '$CC("切工具栏", ime.toggle("toolbar"))'
+weight = 2000
+
+[[phrases]]
+code = 'cots'
+text = '$CC("切主题", ime.theme_cycle())'
+weight = 2000

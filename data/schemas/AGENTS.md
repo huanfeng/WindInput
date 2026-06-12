@@ -1,52 +1,54 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-08 | Updated: 2026-04-20 -->
+<!-- Generated: 2026-04-08 | Updated: 2026-06-12 -->
 
 # schemas/ - 输入方案定义文件
 
 ## Purpose
 
-输入方案（Schema）定义文件目录，每个 `*.schema.yaml` 文件描述一种完整的输入法方案。Schema 是方案驱动架构的核心配置，由 `wind_input/internal/schema` 包解析，驱动 EngineFactory 创建对应引擎和加载词库。
+输入方案（Schema）定义文件目录，每个 `*.schema.toml` 文件描述一种完整的输入法方案。Schema 是方案驱动架构的核心配置，由 `wind_input/internal/schema` 包解析，驱动 EngineFactory 创建对应引擎和加载词库。
+
+内置方案文件为 **TOML 格式**（`.schema.toml`）。加载器同时支持 `.schema.yaml`（同 stem 并存时 toml 优先、yaml 回退），仅读取、不写出——用户可放置任一格式覆盖文件。
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `pinyin.schema.yaml` | 全拼输入方案（引擎类型 `pinyin`，fuzzy 音、智能组句、显示五笔提示） |
-| `shuangpin.schema.yaml` | 双拼输入方案（引擎类型 `pinyin`，scheme: shuangpin） |
-| `wubi86.schema.yaml` | 五笔86输入方案（引擎类型 `wubi`，码表配置、自动上屏规则） |
-| `wubi86_pinyin.schema.yaml` | 五笔拼音混输方案（引擎类型 `wubi`，启用拼音混输） |
+| `pinyin.schema.toml` | 全拼输入方案（引擎类型 `pinyin`，fuzzy 音、智能组句、显示五笔提示） |
+| `shuangpin.schema.toml` | 双拼输入方案（引擎类型 `pinyin`，scheme: shuangpin） |
+| `wubi86.schema.toml` | 五笔86输入方案（引擎类型 `codetable`，码表配置、自动上屏规则；词库为 rime `.dict.yaml`） |
+| `wubi86_pinyin.schema.toml` | 五笔拼音混输方案（引擎类型 `mixed`，引用 wubi86+pinyin） |
 
 ## Schema 文件格式
 
-每个 schema 文件包含以下顶层字段：
+每个 schema 文件包含以下顶层字段（TOML）：
 
-```yaml
-schema:
-  id: <唯一标识符，如 "pinyin">
-  name: <显示名称，如 "全拼">
-  icon_label: <语言栏图标文字，如 "拼">
-  version: "1.0"
-  author: "内置"
-  description: <方案描述>
+```toml
+[schema]
+id = "pinyin"          # 唯一标识符
+name = "全拼"          # 显示名称
+icon_label = "拼"      # 语言栏图标文字
+version = "1.0"
+author = "内置"
+description = "..."
 
-engine:
-  type: <pinyin | wubi>
-  pinyin:             # 仅 pinyin 引擎
-    scheme: <full | shuangpin>
-    show_wubi_hint: <bool>
-    use_smart_compose: <bool>
-    candidate_order: <smart | frequency>
-    fuzzy:
-      enabled: <bool>
-  filter_mode: <smart | strict>
+[engine]
+type = "pinyin"        # pinyin | codetable | mixed
+filter_mode = "smart"  # smart | strict
 
-dictionaries:
-  - <词库配置列表>
+[engine.pinyin]        # 仅 pinyin 引擎
+scheme = "full"        # full | shuangpin
+show_code_hint = true
+use_smart_compose = true
+candidate_order = "smart"   # smart | frequency
 
-learning:
-  enabled: <bool>
-  <学习策略配置>
+[[dictionaries]]       # 词库配置列表（数组表）
+# id/path/type/...
+
+[learning]
+# 学习策略配置（auto_learn / freq / ...）
 ```
+
+字段命名与含义和旧 YAML 一致（Schema struct 带双 yaml+toml tag）；新增字段须同步加 `toml` tag。词库文件**默认 rime `.dict.yaml`**；词库 `path` 按各自扩展名解析格式，也隐含支持 split `.dict.toml`+`.dict.tsv`（非默认生成，可经 `cmd/dicttool split` 转换）。
 
 ## For AI Agents
 

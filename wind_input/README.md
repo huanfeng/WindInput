@@ -269,7 +269,7 @@ zhongguo 中国 150
 
 ## 配置文件
 
-`%APPDATA%\WindInput\config.toml`（全局配置）+ `data/schemas/*.schema.yaml`（方案配置）：
+`%APPDATA%\WindInput\config.toml`（全局配置）+ `data/schemas/*.schema.toml`（方案配置）：
 
 ```toml
 # config.toml — 全局配置
@@ -292,7 +292,7 @@ font_path = ""                     # 自定义字体路径
 log_level = "info"                 # debug/info/warn/error
 ```
 
-引擎类型、词库路径等由方案文件（`*.schema.yaml`）自描述定义。
+引擎类型、词库路径等由方案文件（`*.schema.toml`）自描述定义。
 
 ## 依赖
 

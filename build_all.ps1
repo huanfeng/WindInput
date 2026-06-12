@@ -708,13 +708,13 @@ foreach ($f in $checkFiles) {
 }
 
 if ($BuildAll) {
-    Write-Host "- $buildDirLabel\data\schemas\*.schema.yaml（输入方案配置）"
+    Write-Host "- $buildDirLabel\data\schemas\*.schema.toml（输入方案配置）"
     Write-Host "- $buildDirLabel\data\schemas\pinyin\*.dict.yaml（拼音词库）"
     Write-Host "- $buildDirLabel\data\schemas\pinyin\unigram.txt（Unigram 语言模型）"
     Write-Host "- $buildDirLabel\data\schemas\wubi86\wubi86_jidian*.dict.yaml（五笔词库）"
     Write-Host "- $buildDirLabel\data\schemas\common_chars.txt（常用字表）"
     Write-Host "- $buildDirLabel\data\config.toml（默认配置）"
-    Write-Host "- $buildDirLabel\data\system.phrases.yaml（系统短语配置）"
+    Write-Host "- $buildDirLabel\data\system.phrases.toml（系统短语配置）"
     Write-Host "- $buildDirLabel\data\themes\*\theme.yaml（主题配置）"
     Write-Host ""
     Write-Host "注: .wdb 二进制词库由运行时按需自动生成并缓存"

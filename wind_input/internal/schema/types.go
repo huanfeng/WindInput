@@ -18,6 +18,9 @@ func (s PinyinScheme) Valid() bool {
 }
 
 // DictType 词库类型。
+//
+// 注：DictType / EngineType / PinyinScheme 等枚举本身无需 toml/yaml tag
+// （它们是 string 别名，作为字段值出现，tag 写在引用它们的结构字段上）。
 type DictType string
 
 const (

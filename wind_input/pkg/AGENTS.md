@@ -30,7 +30,7 @@
 
 ### Common Patterns
 - 配置文件路径：`%APPDATA%\WindInput\config.toml`
-- 数据文件路径：`%APPDATA%\WindInput\`（user_data.db 词库数据库、system.phrases.yaml 系统短语种子）
+- 数据文件路径：`%APPDATA%\WindInput\`（user_data.db 词库数据库、system.phrases.toml 系统短语种子，toml 优先 yaml 回退）
 
 ## Dependencies
 ### Internal
