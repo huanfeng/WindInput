@@ -269,21 +269,7 @@ func createCodeTableEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManag
 	// 加载附加词库（非 default 且 enabled 的词库条目）
 	var extraLayers []dict.DictLayer
 	if dm != nil {
-		for _, dictSpec := range s.Dicts {
-			if dictSpec.Default || !dictSpec.IsEnabled() {
-				continue
-			}
-			srcPath := resolvePath(exeDir, dataDir, dictSpec.Path)
-			cacheKey := s.Schema.ID + "_" + dictSpec.ID
-			layer, err := loadExtraCodetable(dm, s.Schema.ID, srcPath, dictSpec, cacheKey, logger)
-			if err != nil {
-				logger.Warn("附加词库加载失败，跳过", "dictID", dictSpec.ID, "error", err)
-				continue
-			}
-			if layer != nil {
-				extraLayers = append(extraLayers, layer)
-			}
-		}
+		extraLayers = loadEnabledExtraDicts(dm, s.Schema.ID, s.Schema.ID, s.Dicts, exeDir, dataDir, logger)
 	}
 
 	// 后台预生成拼音 wdat/unigram
@@ -680,6 +666,55 @@ func loadExtraCodetable(dm *dict.DictManager, schemaID, srcPath string, spec Dic
 	return layer, nil
 }
 
+// mixedExtraDictSource 决定混输码表侧应加载哪些扩展词库、以及它们的缓存归属方案 ID。
+// 混输自身配置了 Dicts 时用自身（缓存归自身 ID）；否则回退到主方案的 Dicts（缓存复用
+// 主方案 ID，与主码表共享 wdb）。返回的 cacheSchemaID 必须与 ensureMixedSchemaCaches
+// 预生成缓存时所用的方案 ID 一致，否则会重复生成同内容 wdb。
+func mixedExtraDictSource(s, primarySchema *Schema) (dicts []DictSpec, cacheSchemaID string) {
+	if len(s.Dicts) > 0 {
+		return s.Dicts, s.Schema.ID
+	}
+	if primarySchema != nil {
+		return primarySchema.Dicts, primarySchema.Schema.ID
+	}
+	return nil, s.Schema.ID
+}
+
+// loadEnabledExtraDicts 加载 dicts 中所有"已启用的非默认附加词库"为独立 CodeTable 层，
+// 注册到 dm 并返回层列表。这是码表方案（createCodeTableEngine）与混输方案
+// （createMixedEngine）共用的扩展词库加载逻辑——抽出共享避免两条建引擎路径各写一份
+// 导致漂移（历史上混输路径漏抄此循环，导致扩展词库里的词在混输下查不到）。
+//
+//   - layerSchemaID 决定 layer 命名隔离（ExtraLayerName），各方案独立注册/清理，
+//     防止 LRU 驱逐时跨方案误删；混输应传自身 ID（如 wubi86_pinyin），与主方案区分。
+//   - cacheSchemaID 决定 wdb 缓存 key，可跨方案共享同一份缓存；混输复用主方案的词库时
+//     传主方案 ID（如 wubi86），与主码表缓存共享，避免重复生成同内容 wdb。
+//
+// 附加词库加载失败为非致命错误：记录警告后跳过，不影响主词库工作。
+func loadEnabledExtraDicts(dm *dict.DictManager, layerSchemaID, cacheSchemaID string, dicts []DictSpec, exeDir, dataDir string, logger *slog.Logger) []dict.DictLayer {
+	if dm == nil {
+		return nil
+	}
+	var extraLayers []dict.DictLayer
+	for i := range dicts {
+		dictSpec := dicts[i]
+		if dictSpec.Default || !dictSpec.IsEnabled() {
+			continue
+		}
+		srcPath := resolvePath(exeDir, dataDir, dictSpec.Path)
+		cacheKey := cacheSchemaID + "_" + dictSpec.ID
+		layer, err := loadExtraCodetable(dm, layerSchemaID, srcPath, dictSpec, cacheKey, logger)
+		if err != nil {
+			logger.Warn("附加词库加载失败，跳过", "dictID", dictSpec.ID, "error", err)
+			continue
+		}
+		if layer != nil {
+			extraLayers = append(extraLayers, layer)
+		}
+	}
+	return extraLayers
+}
+
 func loadCodetableFromWdb(engine *codetable.Engine, wdbPath string) error {
 	if err := engine.LoadCodeTableBinary(wdbPath); err != nil {
 		return err
@@ -999,8 +1034,13 @@ func ensureMixedSchemaCaches(s *Schema, exeDir, dataDir string, resolver SchemaR
 		}
 	}
 
-	// 混输自身已启用的附加词库
-	ensureExtraCodetableCaches(s, exeDir, dataDir, logger)
+	// 已启用的附加词库缓存：混输自身有 Dicts 用自身，否则用主方案（与 createMixedEngine
+	// 的扩展词库来源一致，cacheKey 同样落在来源方案 ID 上以共享 wdb）。
+	if len(s.Dicts) > 0 {
+		ensureExtraCodetableCaches(s, exeDir, dataDir, logger)
+	} else if primarySchema != nil {
+		ensureExtraCodetableCaches(primarySchema, exeDir, dataDir, logger)
+	}
 
 	// 拼音 wdat + unigram：辅方案含 rime pinyin 主词库时优先用辅方案，否则用混输自身
 	pinyinSchema := s
@@ -1303,6 +1343,17 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		}
 	}
 
+	// 加载码表侧的已启用扩展词库（emoji / 扩展词 / 行政区域等），与纯码表方案
+	// （createCodeTableEngine）保持一致——混输本质是复用主方案码表，主方案启用的扩展
+	// 词库也应一并加载，否则像 "孙燕姿(bauq)" 这类只存在于扩展词库的词在混输下查不到。
+	// 词库来源：混输自身 Dicts 优先，为空则取主方案 Dicts；layer 名用混输自身 ID 隔离，
+	// 缓存 key 复用来源方案 ID 以共享主方案已生成的 wdb。
+	var mixedExtraLayers []dict.DictLayer
+	if dm != nil {
+		extraDicts, extraCacheID := mixedExtraDictSource(s, primarySchema)
+		mixedExtraLayers = loadEnabledExtraDicts(dm, s.Schema.ID, extraCacheID, extraDicts, exeDir, dataDir, logger)
+	}
+
 	// === 3. 创建拼音引擎（使用独立的 CompositeDict）===
 	// 优先使用混输方案自身的拼音配置，其次从拼音方案继承
 	pinyinSpec := s.Engine.Pinyin
@@ -1480,6 +1531,7 @@ func createMixedEngine(s *Schema, exeDir, dataDir string, dm *dict.DictManager, 
 		SchemaID:    s.Schema.ID,
 		Engine:      mixedEngine,
 		SystemLayer: mixedSystemLayer,
+		ExtraLayers: mixedExtraLayers,
 	}, nil
 }
 
