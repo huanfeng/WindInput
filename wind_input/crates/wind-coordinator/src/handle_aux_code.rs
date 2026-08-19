@@ -140,7 +140,7 @@ impl Coordinator {
     /// 当 `bound_key_decision` 已解析出 `BoundAction::AuxCode` 后，再用此方法
     /// 查 `session_keys` 是否也把同一个 VK 映射到了 `PagePrev`/`PageNext`。
     /// 两个条件同时成立即为共享键——只做 VK 比较，开销可忽略。
-    fn is_shared_page_aux_key(&self, key_code: u32) -> bool {
+    pub(crate) fn is_shared_page_aux_key(&self, key_code: u32) -> bool {
         matches!(
             self.rt().session_keys.classify(key_code, false, true),
             Some(wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageNext)
@@ -199,11 +199,17 @@ impl Coordinator {
         data: &KeyEventData,
     ) -> Option<KeyAction> {
         let at_first_page = state.current_page == 0;
+        // 仅对翻页键做自动退出检测；高亮/其他导航键不触发。
+        let is_page_key = matches!(
+            self.rt().session_keys.classify(data.key_code, false, true),
+            Some(wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageNext)
+        );
         if let Some(act) = self.handle_candidate_nav(state, data) {
             return Some(act);
         }
         // 翻页未成功（page_prev 在第一页返回 None）+ 辅助码缓冲为空 → 退出
-        if at_first_page
+        if is_page_key
+            && at_first_page
             && state
                 .aux_code
                 .as_ref()
@@ -285,7 +291,8 @@ impl Coordinator {
             return self.aux_code_exited(state);
         }
         // 候选导航（翻页 / 高亮）：辅助码只收字母，`-`/`=`/`[`/`]` 等按普通导航处理。
-        if let Some(act) = self.handle_candidate_nav(state, data) {
+        // 共享键在第一页边界时自动退出辅助码模式（见 `handle_candidate_nav_or_auto_exit`）。
+        if let Some(act) = self.handle_candidate_nav_or_auto_exit(state, data) {
             return act;
         }
         match data.key_code {
