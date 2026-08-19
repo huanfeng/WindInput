@@ -135,6 +135,89 @@ impl Coordinator {
         })
     }
 
+    /// 检查按键是否同时绑定了辅助码触发和翻页功能（共享键）。
+    ///
+    /// 当 `bound_key_decision` 已解析出 `BoundAction::AuxCode` 后，再用此方法
+    /// 查 `session_keys` 是否也把同一个 VK 映射到了 `PagePrev`/`PageNext`。
+    /// 两个条件同时成立即为共享键——只做 VK 比较，开销可忽略。
+    fn is_shared_page_aux_key(&self, key_code: u32) -> bool {
+        matches!(
+            self.rt().session_keys.classify(key_code, false, true),
+            Some(wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageNext)
+        )
+    }
+
+    /// 从翻页动作触发进入辅助码模式（不经过 `[key_actions]` 路径）。
+    ///
+    /// 与 [`Self::enter_aux_code`] 的区别：不接收 `key_code`（翻页侧无此概念），
+    /// 门卫只保留功能启用、码表、候选三道。
+    pub(crate) fn enter_aux_code_from_page(&self, state: &mut State) -> Option<KeyAction> {
+        let settings = self.engine_mgr.aux_code_settings();
+        if !settings.enabled {
+            return None;
+        }
+        let paths = settings.files;
+        if paths.is_empty() || state.candidates.is_empty() {
+            return None;
+        }
+        self.ensure_aux_code_table(&paths);
+        let session = wind_aux_code::AuxCodeSession::new(std::mem::take(&mut state.candidates));
+        let preedit_base = std::mem::take(&mut state.preedit);
+        let preedit_prefix = format!("{}    ", preedit_base);
+        let filter_options = wind_aux_code::AuxCodeFilterOptions {
+            max_phrase_len: settings.max_phrase_len,
+        };
+        state.aux_code = Some(AuxCodeOverlay {
+            session,
+            preedit_base,
+            preedit_prefix,
+            filter_options,
+        });
+        state.active = Some(ModeKind::AuxCode);
+        self.refresh_aux_code_candidates(state);
+        let display = state.preedit.clone();
+        let caret_pos = self.overlay_caret(state);
+        self.notify_ui_update(state);
+        debug!(
+            "aux_code: entered from page ({} candidates)",
+            state.candidates.len()
+        );
+        Some(KeyAction::UpdateComposition {
+            text: display,
+            caret_pos,
+        })
+    }
+
+    /// 辅助码模式下的导航处理：执行翻页后检测边界，满足条件时自动退出。
+    ///
+    /// 边界检测采用**前置检查**：翻页前读 `state.current_page == 0`（纯读），
+    /// 翻页后若仍在第一页且辅助码缓冲为空 → 自动退出辅助码模式。
+    /// 不改 `apply_session_action` 签名，不影响其他调用点。
+    pub(crate) fn handle_candidate_nav_or_auto_exit(
+        &self,
+        state: &mut State,
+        data: &KeyEventData,
+    ) -> Option<KeyAction> {
+        let at_first_page = state.current_page == 0;
+        if let Some(act) = self.handle_candidate_nav(state, data) {
+            return Some(act);
+        }
+        // 翻页未成功（page_prev 在第一页返回 None）+ 辅助码缓冲为空 → 退出
+        if at_first_page
+            && state
+                .aux_code
+                .as_ref()
+                .is_some_and(|o| o.session.is_empty())
+        {
+            self.exit_aux_code(state);
+            return Some(KeyAction::UpdateComposition {
+                text: state.preedit.clone(),
+                caret_pos: self.overlay_caret(state),
+            });
+        }
+        None
+    }
+
     /// 刷新辅助码候选：按会话内辅助码缓冲对**原始候选快照**重筛，只保留命中者
     /// （被滤候选直接丢弃，候选窗只显示匹配词）。空缓冲 / 空表由 wind-aux-code 内部
     /// passthrough。同步重拼组合区 = 显示前缀 + 辅助码缓冲。
