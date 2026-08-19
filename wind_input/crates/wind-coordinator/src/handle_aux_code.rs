@@ -730,6 +730,21 @@ mod tests {
     }
 
     #[test]
+    fn backspace_without_input_exits_aux_mode() {
+        let c = coord_with("back_no_input");
+        let mut st = seed_composition(&c);
+        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        assert_eq!(st.active, Some(ModeKind::AuxCode));
+        // 未输入任何辅助码，直接退格 → 退出辅助码模式。
+        let act = c.handle_aux_code_key(&mut st, &key(keymap::VK_BACK, 0));
+        assert_eq!(st.active, None, "无输入退格退出辅助码");
+        assert!(st.aux_code.is_none());
+        assert_eq!(st.preedit, "li");
+        assert_eq!(st.candidates.len(), 3);
+        assert!(matches!(act, KeyAction::UpdateComposition { .. }));
+    }
+
+    #[test]
     fn backspace_restores_previous_filter_level() {
         let c = coord_with("prev");
         let mut st = seed_composition(&c);
