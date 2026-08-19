@@ -75,24 +75,8 @@ impl Coordinator {
     /// 「辅助码触发键被音节分隔符占用」的诊断告警，**每方案一次**（复位点见
     /// [`Coordinator::invalidate_aux_code_table`]——切方案即换了一套键位环境，值得再报）。
     ///
-    /// 不节流的话每按一次键就是一条 warn；而这条的价值全在「第一次就说清为什么没反应」。
-    fn warn_aux_code_key_taken(&self, key_code: u32) {
-        use std::sync::atomic::Ordering;
-        if self.aux_code_key_warned.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        tracing::warn!(
-            "辅助码触发键 0x{key_code:02X} 已被拼音音节分隔符占用\
-             （schema.pinyin.separator = {:?}），本次不进入辅助码。\
-             全拼下 separator = \"auto\" 且 `'` 作选词键时，反引号即分隔符——\
-             请为辅助码改绑其它键，或把 separator 显式设为 \"quote\"/\"none\"。",
-            self.engine_mgr.pinyin_separator_mode()
-        );
-    }
-
     /// 进入辅助码模式。门卫没过返回 `None` 不吞键（与各模式进入门卫同策略）：
     /// - 功能未启用（`[schema.pinyin.aux_code].enabled` 折叠方案覆盖后为 false，**出厂即此**）
-    /// - 触发键已被拼音音节分隔符占用（见 [`Self::warn_aux_code_key_taken`]）
     /// - 方案未配 `[engine.aux_code].files` 或码表文件全部缺失
     /// - 当前无候选（没有可筛的东西；空缓冲下触发键落普通标点流程）
     pub(crate) fn enter_aux_code(&self, state: &mut State, key_code: u32) -> Option<KeyAction> {
@@ -112,16 +96,6 @@ impl Coordinator {
         }
         let settings = self.engine_mgr.aux_code_settings();
         if !settings.enabled {
-            return None;
-        }
-        // 键位仲裁：分隔符臂在按键 match 里位于 `key_actions` 裁决**之前**
-        // （`message_handler.rs` 的 VK_QUOTE|VK_BACKTICK 臂 vs 兜底臂里的 D0），
-        // 故此处即便放行，该键在组码中也早被分隔符吃掉、根本走不到这里。
-        // 全拼出厂 `separator = "auto"` + `'` 作选词键 = 反引号恒为分隔符——
-        // 若不告警，用户在 schema_overrides 里绑了 `backtick = "aux_code"` 会
-        // **完全无反应且无任何日志**，正是本仓反复出现的「配了没反应」型缺陷。
-        if self.pinyin_separator_key(key_code) {
-            self.warn_aux_code_key_taken(key_code);
             return None;
         }
         let paths = settings.files;
