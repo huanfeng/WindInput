@@ -569,6 +569,45 @@ mod tests {
         dir
     }
 
+    /// 共享键场景但辅助码禁用：backslash 绑了翻页 + aux_code，但 enabled=false。
+    fn data_dir_with_aux_shared_disabled(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wind_aux_code_data_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let schemas = dir.join("schemas");
+        let aux_code_dir = schemas.join("aux_code");
+        std::fs::create_dir_all(&aux_code_dir).unwrap();
+        std::fs::write(
+            schemas.join("pinyin.schema.toml"),
+            "[schema]\nid = \"pinyin\"\nname = \"pinyin\"\n\
+             [engine]\ntype = \"pinyin\"\n\
+             [engine.aux_code]\nfiles = [\"aux_code/flypy_test.txt\"]\nenabled = false\n\
+             [key_actions]\nbackslash = \"aux_code\"\n",
+        )
+        .unwrap();
+        std::fs::write(aux_code_dir.join("flypy_test.txt"), "李=mz\n樱=my\n河=sk\n").unwrap();
+        dir
+    }
+
+    /// 创建辅助码禁用的共享键 coordinator。
+    fn coord_with_shared_disabled(tag: &str) -> Arc<Coordinator> {
+        let data_dir = data_dir_with_aux_shared_disabled(tag);
+        let path = std::env::temp_dir().join(format!("wind_aux_code_{tag}.redb"));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(Store::open(&path).unwrap());
+        let mut cfg = Config::default();
+        cfg.schema.active = "pinyin".to_string();
+        cfg.keys
+            .session_actions
+            .insert("backslash".to_string(), "page_prev".to_string());
+        cfg.keys
+            .session_actions
+            .insert("pagedown".to_string(), "page_next".to_string());
+        cfg.keys
+            .session_actions
+            .insert("pageup".to_string(), "page_prev".to_string());
+        Coordinator::new_headless_with_store(cfg, Some(&data_dir), store)
+    }
+
     /// 创建共享键场景的 coordinator：backslash 同时是翻页键（session_actions）和
     /// 辅助码触发键（schema [key_actions]）。
     fn coord_with_shared(tag: &str) -> Arc<Coordinator> {
@@ -1558,5 +1597,33 @@ mod tests {
         let act = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
         assert!(act.is_some(), "非共享键正常进入辅助码");
         assert_eq!(st.active, Some(ModeKind::AuxCode));
+    }
+
+    /// 辅助码未启用时按共享键 → 只翻页不进辅助码。
+    #[test]
+    fn shared_key_not_trigger_without_aux_enabled() {
+        let c = coord_with_shared_disabled("shared_disabled");
+        {
+            let mut st = seed_composition(&c);
+            st.chinese_mode = true;
+            st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
+        }
+        let _act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.active, None, "辅助码未启用时不应进入辅助码模式");
+        assert!(st.aux_code.is_none(), "不应创建 overlay");
+    }
+
+    /// 非共享键的原有触发 → 行为不变（直接 enter_aux_code 走原路径）。
+    #[test]
+    fn existing_trigger_key_still_works() {
+        let c = coord_with("existing_trigger");
+        let mut st = seed_composition(&c);
+        // backtick 在 schema [key_actions] 绑了 aux_code，但 session_keys 里没绑翻页
+        // → 不是共享键。直接调用 enter_aux_code 走原有路径。
+        let act = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        assert!(act.is_some(), "原有触发键应正常进入辅助码");
+        assert_eq!(st.active, Some(ModeKind::AuxCode));
+        assert!(st.aux_code.is_some(), "应创建 overlay");
     }
 }
