@@ -72,9 +72,6 @@ impl Coordinator {
         }
     }
 
-    /// 「辅助码触发键被音节分隔符占用」的诊断告警，**每方案一次**（复位点见
-    /// [`Coordinator::invalidate_aux_code_table`]——切方案即换了一套键位环境，值得再报）。
-    ///
     /// 进入辅助码模式。门卫没过返回 `None` 不吞键（与各模式进入门卫同策略）：
     /// - 功能未启用（`[schema.pinyin.aux_code].enabled` 折叠方案覆盖后为 false，**出厂即此**）
     /// - 方案未配 `[engine.aux_code].files` 或码表文件全部缺失
@@ -103,37 +100,12 @@ impl Coordinator {
         if paths.is_empty() || state.candidates.is_empty() {
             return None;
         }
-        self.ensure_aux_code_table(&paths);
-        // 三件套整体建立：筛选会话（快照原始候选，后续筛选都从它重筛）+ 显示基线
-        // （进入前的拼音显示，退出还原）+ 显示前缀（基线 + 分隔符，进入拼一次）。
-        // 此后三者同生共死，退出/上屏/复位一律整体销毁，见 `AuxCodeOverlay`。
-        let session = wind_aux_code::AuxCodeSession::new(std::mem::take(&mut state.candidates));
-        let preedit_base = std::mem::take(&mut state.preedit);
-        let preedit_prefix = format!("{}    ", preedit_base);
-        // 筛选选项按本次进入时的生效设置固化（期间方案切换不可见）。
-        // 词组逐字首码匹配是固定语义，无模式选项（`AuxCodeFilterOptions` 其余取默认）。
-        let filter_options = wind_aux_code::AuxCodeFilterOptions {
-            max_phrase_len: settings.max_phrase_len,
-        };
-        state.aux_code = Some(AuxCodeOverlay {
-            session,
-            preedit_base,
-            preedit_prefix,
-            filter_options,
-        });
-        state.active = Some(ModeKind::AuxCode);
-        self.refresh_aux_code_candidates(state);
-        let display = state.preedit.clone();
-        let caret_pos = self.overlay_caret(state);
-        self.notify_ui_update(state);
+        let act = self.init_aux_overlay(state, &paths, settings.max_phrase_len);
         debug!(
             "aux_code: entered (key 0x{key_code:02X}, {} candidates)",
             state.candidates.len()
         );
-        Some(KeyAction::UpdateComposition {
-            text: display,
-            caret_pos,
-        })
+        Some(act)
     }
 
     /// 检查按键是否同时绑定了辅助码触发和翻页功能（共享键）。
@@ -165,13 +137,32 @@ impl Coordinator {
         if paths.is_empty() || state.candidates.is_empty() {
             return None;
         }
-        self.ensure_aux_code_table(&paths);
+        let act = self.init_aux_overlay(state, &paths, settings.max_phrase_len);
+        debug!(
+            "aux_code: entered from page ({} candidates)",
+            state.candidates.len()
+        );
+        Some(act)
+    }
+
+    /// 创建辅助码 overlay 并激活辅助码模式（`enter_aux_code` 和
+    /// `enter_aux_code_from_page` 的公共逻辑）。
+    fn init_aux_overlay(
+        &self,
+        state: &mut State,
+        paths: &[std::path::PathBuf],
+        max_phrase_len: usize,
+    ) -> KeyAction {
+        self.ensure_aux_code_table(paths);
+        // 三件套整体建立：筛选会话（快照原始候选，后续筛选都从它重筛）+ 显示基线
+        // （进入前的拼音显示，退出还原）+ 显示前缀（基线 + 分隔符，进入拼一次）。
+        // 此后三者同生共死，退出/上屏/复位一律整体销毁，见 `AuxCodeOverlay`。
         let session = wind_aux_code::AuxCodeSession::new(std::mem::take(&mut state.candidates));
         let preedit_base = std::mem::take(&mut state.preedit);
         let preedit_prefix = format!("{}    ", preedit_base);
-        let filter_options = wind_aux_code::AuxCodeFilterOptions {
-            max_phrase_len: settings.max_phrase_len,
-        };
+        // 筛选选项按本次进入时的生效设置固化（期间方案切换不可见）。
+        // 词组逐字首码匹配是固定语义，无模式选项（`AuxCodeFilterOptions` 其余取默认）。
+        let filter_options = wind_aux_code::AuxCodeFilterOptions { max_phrase_len };
         state.aux_code = Some(AuxCodeOverlay {
             session,
             preedit_base,
@@ -183,19 +174,12 @@ impl Coordinator {
         let display = state.preedit.clone();
         let caret_pos = self.overlay_caret(state);
         self.notify_ui_update(state);
-        debug!(
-            "aux_code: entered from page ({} candidates)",
-            state.candidates.len()
-        );
-        Some(KeyAction::UpdateComposition {
+        KeyAction::UpdateComposition {
             text: display,
             caret_pos,
-        })
+        }
     }
 
-    /// 辅助码模式下的导航处理：执行翻页后检测边界，满足条件时自动退出。
-    ///
-    /// 边界检测采用**前置检查**：翻页前读 `state.current_page == 0`（纯读），
     /// 辅助码模式下的翻页/导航处理，含共享键自动退出逻辑。
     ///
     /// - PagePrev 翻页成功（从非首页回到首页） + 辅助码缓冲为空 → 自动退出辅助码模式。
@@ -550,8 +534,8 @@ mod tests {
         dir
     }
 
-    /// 辅助码触发键绑定到 backslash（共享键场景）。
-    fn data_dir_with_aux_shared(tag: &str) -> std::path::PathBuf {
+    /// 辅助码触发键绑定到 backslash（共享键场景），`enabled` 控制辅助码开关。
+    fn data_dir_with_aux_shared_enabled(tag: &str, enabled: bool) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("wind_aux_code_data_{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         let schemas = dir.join("schemas");
@@ -559,59 +543,22 @@ mod tests {
         std::fs::create_dir_all(&aux_code_dir).unwrap();
         std::fs::write(
             schemas.join("pinyin.schema.toml"),
-            "[schema]\nid = \"pinyin\"\nname = \"pinyin\"\n\
-             [engine]\ntype = \"pinyin\"\n\
-             [engine.aux_code]\nfiles = [\"aux_code/flypy_test.txt\"]\nenabled = true\n\
-             [key_actions]\nbackslash = \"aux_code\"\n",
+            format!(
+                "[schema]\nid = \"pinyin\"\nname = \"pinyin\"\n\
+                 [engine]\ntype = \"pinyin\"\n\
+                 [engine.aux_code]\nfiles = [\"aux_code/flypy_test.txt\"]\nenabled = {enabled}\n\
+                 [key_actions]\nbackslash = \"aux_code\"\n"
+            ),
         )
         .unwrap();
         std::fs::write(aux_code_dir.join("flypy_test.txt"), "李=mz\n樱=my\n河=sk\n").unwrap();
         dir
-    }
-
-    /// 共享键场景但辅助码禁用：backslash 绑了翻页 + aux_code，但 enabled=false。
-    fn data_dir_with_aux_shared_disabled(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("wind_aux_code_data_{tag}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("schemas");
-        let aux_code_dir = schemas.join("aux_code");
-        std::fs::create_dir_all(&aux_code_dir).unwrap();
-        std::fs::write(
-            schemas.join("pinyin.schema.toml"),
-            "[schema]\nid = \"pinyin\"\nname = \"pinyin\"\n\
-             [engine]\ntype = \"pinyin\"\n\
-             [engine.aux_code]\nfiles = [\"aux_code/flypy_test.txt\"]\nenabled = false\n\
-             [key_actions]\nbackslash = \"aux_code\"\n",
-        )
-        .unwrap();
-        std::fs::write(aux_code_dir.join("flypy_test.txt"), "李=mz\n樱=my\n河=sk\n").unwrap();
-        dir
-    }
-
-    /// 创建辅助码禁用的共享键 coordinator。
-    fn coord_with_shared_disabled(tag: &str) -> Arc<Coordinator> {
-        let data_dir = data_dir_with_aux_shared_disabled(tag);
-        let path = std::env::temp_dir().join(format!("wind_aux_code_{tag}.redb"));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(Store::open(&path).unwrap());
-        let mut cfg = Config::default();
-        cfg.schema.active = "pinyin".to_string();
-        cfg.keys
-            .session_actions
-            .insert("backslash".to_string(), "page_prev".to_string());
-        cfg.keys
-            .session_actions
-            .insert("pagedown".to_string(), "page_next".to_string());
-        cfg.keys
-            .session_actions
-            .insert("pageup".to_string(), "page_prev".to_string());
-        Coordinator::new_headless_with_store(cfg, Some(&data_dir), store)
     }
 
     /// 创建共享键场景的 coordinator：backslash 同时是翻页键（session_actions）和
-    /// 辅助码触发键（schema [key_actions]）。
-    fn coord_with_shared(tag: &str) -> Arc<Coordinator> {
-        let data_dir = data_dir_with_aux_shared(tag);
+    /// 辅助码触发键（schema [key_actions]）。`enabled` 控制辅助码开关。
+    fn coord_with_shared_impl(tag: &str, enabled: bool) -> Arc<Coordinator> {
+        let data_dir = data_dir_with_aux_shared_enabled(tag, enabled);
         let path = std::env::temp_dir().join(format!("wind_aux_code_{tag}.redb"));
         let _ = std::fs::remove_file(&path);
         let store = Arc::new(Store::open(&path).unwrap());
@@ -629,6 +576,14 @@ mod tests {
             .session_actions
             .insert("pageup".to_string(), "page_prev".to_string());
         Coordinator::new_headless_with_store(cfg, Some(&data_dir), store)
+    }
+
+    fn coord_with_shared(tag: &str) -> Arc<Coordinator> {
+        coord_with_shared_impl(tag, true)
+    }
+
+    fn coord_with_shared_disabled(tag: &str) -> Arc<Coordinator> {
+        coord_with_shared_impl(tag, false)
     }
 
     fn coord_with(tag: &str) -> Arc<Coordinator> {
