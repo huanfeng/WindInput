@@ -197,31 +197,29 @@ impl Coordinator {
         match action {
             Some(wind_config::SessionAction::PagePrev) => {
                 let at_first_page_before = state.current_page == 0;
-                let changed = self.page_prev(state);
-                if changed {
-                    self.notify_ui_update(state);
-                    // 翻页成功且刚回到首页 + 辅助码缓冲为空 → 自动退出
-                    if state.current_page == 0
-                        && !at_first_page_before
-                        && state
-                            .aux_code
-                            .as_ref()
-                            .is_some_and(|o| o.session.is_empty())
-                    {
-                        self.exit_aux_code(state);
-                        return Some(KeyAction::UpdateComposition {
-                            text: state.preedit.clone(),
-                            caret_pos: self.overlay_caret(state),
-                        });
-                    }
+                if !self.page_prev(state) {
+                    // page_prev 在首页无效果（只有一/从未翻过页）→ 不退出，留在辅助码模式
                     return Some(KeyAction::Consumed);
                 }
-                // page_prev 在首页无效果（只有一/从未翻过页）→ 不退出，留在辅助码模式
+                self.notify_ui_update(state);
+                // 翻页成功且刚回到首页 + 辅助码缓冲为空 → 自动退出
+                if state.current_page == 0
+                    && !at_first_page_before
+                    && state
+                        .aux_code
+                        .as_ref()
+                        .is_some_and(|o| o.session.is_empty())
+                {
+                    self.exit_aux_code(state);
+                    return Some(KeyAction::UpdateComposition {
+                        text: state.preedit.clone(),
+                        caret_pos: self.overlay_caret(state),
+                    });
+                }
                 Some(KeyAction::Consumed)
             }
             Some(wind_config::SessionAction::PageNext) => {
-                let changed = self.page_next(state);
-                if changed {
+                if self.page_next(state) {
                     self.notify_ui_update(state);
                 }
                 Some(KeyAction::Consumed)
