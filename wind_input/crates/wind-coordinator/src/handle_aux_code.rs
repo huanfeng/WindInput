@@ -110,14 +110,55 @@ impl Coordinator {
 
     /// 检查按键是否同时绑定了辅助码触发和翻页功能（共享键）。
     ///
-    /// 当 `bound_key_decision` 已解析出 `BoundAction::AuxCode` 后，再用此方法
-    /// 查 `session_keys` 是否也把同一个 VK 映射到了 `PagePrev`/`PageNext`。
-    /// 两个条件同时成立即为共享键——只做 VK 比较，开销可忽略。
+    /// 两个条件同时成立即为共享键：
+    /// 1. `session_keys` 把该 VK 映射到了 `PageNext`（仅下翻，不含上翻 `PagePrev`）
+    /// 2. 方案 `[key_actions]` 或全局 `keys.key_actions` 把同一键绑到了 `aux_code`
+    ///
+    /// 只做配置查表（不做运行时 yield 仲裁），开销可忽略。
     pub(crate) fn is_shared_page_aux_key(&self, key_code: u32) -> bool {
         matches!(
             self.rt().session_keys.classify(key_code, false, true),
-            Some(wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageNext)
-        )
+            Some(wind_config::SessionAction::PageNext)
+        ) && self.is_key_bound_to_aux_code(key_code)
+    }
+
+    /// 检查按键是否在 `[key_actions]`（方案或全局）中绑定到了 `aux_code`。
+    /// 仅查配置，不做 yield 仲裁。
+    fn is_key_bound_to_aux_code(&self, key_code: u32) -> bool {
+        // 1. 方案 [key_actions]
+        for (name, action) in self.engine_mgr.active_key_actions() {
+            let vk = keymap::key_name_to_vk_with_letters(&name)
+                .or_else(|| keymap::modifier_name_to_vk(&name));
+            if vk == Some(key_code)
+                && matches!(
+                    wind_config::BoundAction::parse(&action),
+                    wind_config::BoundAction::AuxCode
+                )
+            {
+                return true;
+            }
+        }
+        // 2. 全局 keys.key_actions（单键 + LeadingKey 路由，与 bound_action_with_source 对齐）
+        for (name, action) in &self.rt().config.keys.key_actions {
+            if !matches!(
+                wind_config::hotkey::route_of_key_action(name),
+                Some(wind_config::hotkey::KeyActionRoute::LeadingKey)
+                    | Some(wind_config::hotkey::KeyActionRoute::ModifierKeyUp)
+            ) {
+                continue;
+            }
+            let vk = keymap::key_name_to_vk_with_letters(name)
+                .or_else(|| keymap::modifier_name_to_vk(name));
+            if vk == Some(key_code)
+                && matches!(
+                    wind_config::BoundAction::parse(action),
+                    wind_config::BoundAction::AuxCode
+                )
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// 从翻页动作触发进入辅助码模式（不经过 `[key_actions]` 路径）。
@@ -553,8 +594,8 @@ mod tests {
         dir
     }
 
-    /// 创建共享键场景的 coordinator：backslash 同时是翻页键（session_actions）和
-    /// 辅助码触发键（schema [key_actions]）。`enabled` 控制辅助码开关。
+    /// 创建共享键场景的 coordinator：backslash 同时是翻页键（PageNext）和
+    /// 辅助码触发键（全局 keys.key_actions）。`enabled` 控制辅助码开关。
     fn coord_with_shared_impl(tag: &str, enabled: bool) -> Arc<Coordinator> {
         let data_dir = data_dir_with_aux_shared_enabled(tag, enabled);
         let path = std::env::temp_dir().join(format!("wind_aux_code_{tag}.redb"));
@@ -562,17 +603,23 @@ mod tests {
         let store = Arc::new(Store::open(&path).unwrap());
         let mut cfg = Config::default();
         cfg.schema.active = "pinyin".to_string();
-        // backslash 同时绑到翻页（PagePrev）——与 schema [key_actions] 的 aux_code 形成共享键。
+        // backslash 绑到 PageNext——与 keys.key_actions 的 aux_code 形成共享键。
+        // 仅 PageNext 允许与辅助码共键，PagePrev 不参与共键。
         cfg.keys
             .session_actions
-            .insert("backslash".to_string(), "page_prev".to_string());
-        // 翻页键（用于测试中 PageDown 前进）
+            .insert("backslash".to_string(), "page_next".to_string());
+        // pagedown 绑到 PageNext（纯翻页，不绑 aux_code → 非共享键）
         cfg.keys
             .session_actions
             .insert("pagedown".to_string(), "page_next".to_string());
+        // pageup 绑到 PagePrev（用于测试自动退出：从非首页翻回首页）
         cfg.keys
             .session_actions
             .insert("pageup".to_string(), "page_prev".to_string());
+        // backslash 同时绑到 aux_code（全局 keys.key_actions，与 session_actions 的 page_next 形成共享键）
+        cfg.keys
+            .key_actions
+            .insert("backslash".to_string(), "aux_code".to_string());
         Coordinator::new_headless_with_store(cfg, Some(&data_dir), store)
     }
 
@@ -1401,6 +1448,8 @@ mod tests {
         {
             let mut st = seed_composition(&c);
             st.chinese_mode = true;
+            // 12 个候选，per_page=9 → 2 页，确保 page_next 不触发末页放宽重建
+            st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
         } // 释放锁
         let act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
         let st = c.state.lock().unwrap();
@@ -1475,14 +1524,14 @@ mod tests {
             assert_eq!(st.active, Some(ModeKind::AuxCode));
             assert!(st.aux_code.as_ref().unwrap().session.is_empty());
         }
-        // 翻到第二页
+        // 翻到第二页（pagedown = page_next）
         let _ = c.handle_key_event(&key(keymap::VK_NEXT, 0));
         {
             let st = c.state.lock().unwrap();
             assert_eq!(st.current_page, 1);
         }
-        // 翻回第一页 + 空缓冲 → 自动退出
-        let act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
+        // 翻回第一页（pageup = page_prev）+ 空缓冲 → 自动退出
+        let act = c.handle_key_event(&key(keymap::VK_PRIOR, 0));
         let st = c.state.lock().unwrap();
         assert_eq!(st.active, None, "从非首页翻回+空缓冲应自动退出");
         assert!(st.aux_code.is_none());
@@ -1496,12 +1545,8 @@ mod tests {
         {
             let mut st = seed_composition(&c);
             st.chinese_mode = true;
-            // 3 个候选，全部在一页
-        }
-        // 进入辅助码模式
-        let _ = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
-        {
-            let st = c.state.lock().unwrap();
+            // 3 个候选，全部在一页。直接进入辅助码模式（绕过 shared key 路径避免 page_next 放宽重建）
+            let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
             assert_eq!(st.active, Some(ModeKind::AuxCode));
         }
         // 只有一页 → 按共享键不退出
@@ -1521,9 +1566,10 @@ mod tests {
         {
             let mut st = seed_composition(&c);
             st.chinese_mode = true;
+            // 直接进入辅助码模式（绕过 shared key 路径避免 page_next 放宽重建）
+            let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+            assert_eq!(st.active, Some(ModeKind::AuxCode));
         }
-        // 进入辅助码模式
-        let _ = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
         // 输入辅助码 'm'
         let _ = c.handle_key_event(&key(vk_letter('M'), 0));
         {
