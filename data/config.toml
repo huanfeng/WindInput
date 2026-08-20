@@ -137,23 +137,18 @@ separator = "auto"
 # 非双拼方案下本项无效；混输的拼音次引擎强制关闭。
 allow_full_pinyin = false
 
-# 辅助码：在拼音候选上再按**字形**筛一轮（打「时间」的拼音，再敲 om 只留字形对得上的）。
-# 方案级 [engine.aux_code] 声明「这个方案用哪张码表」（全拼笔画 / 双拼小鹤形码），
-# 本段是行为基线；方案可用同名段的 enabled / max_phrase_len 逐字段覆盖（tri-state，
-# 缺省即回落本节），与 [schema.codetable] 那套一致，见 schema-config-layering.md §4。
+# 辅助码：拼音候选按**字形**二次筛选（打「时间」的拼音，再敲 om 只留字形对得上的）。
+# 方案级 [engine.aux_code] 声明用哪张码表（全拼笔画 / 双拼小鹤形码），
+# 本段是行为基线；方案可用同名段逐字段覆盖（tri-state，缺省回落本节）。
 [schema.pinyin.aux_code]
-# 总开关。★ 出厂 false：辅助码会改变一个已有按键的语义（双拼下反引号从标点变成进入
-# 筛选模式），并把数万条码表读进内存——两件事都不该在用户没表态时发生。
-#
-# ⚠️ 全拼与双拼要分别开关，不能只靠本项：全拼的反引号出厂已被音节分隔符占用
-# （separator = "auto" 且 ' 作选词键），绑了也进不去。故常见配置是「只在双拼开」——
-# 写 %APPDATA%\WindInput\schema_overrides\shuangpin.toml：
+# 总开关。出厂 false——辅助码会改变已有按键语义并加载数万条码表，需用户显式开启。
+# 全拼与双拼要分别开关：全拼的反引号出厂被音节分隔符占用，绑了也进不去。
+# 典型做法：只在双拼开，写 %APPDATA%\WindInput\schema_overrides\shuangpin.toml：
 #     [engine.aux_code]
 #     enabled = true
 enabled = false
-# 词组长度上限：字数 > 此值的词组一律排除、不参与筛选（0 = 不限）。单字恒参与。
-# 长词组（整词补全，如 meishijian 下的「没时间看/没时间做」）靠首字前缀会大量残留、
-# 污染逐字词筛选；设成 4 之类可把它们挡在筛选之外。
+# 词组长度上限：字数 > 此值的词组不参与筛选（0 = 不限）。长词组靠首字前缀大量残留，
+# 设 4 可把它们挡在筛选之外。
 max_phrase_len = 0
 
 # 模糊音：enabled 是总开关，下面每项各自控制一组等价音（默认全关，逐项按需开启）。

@@ -13,27 +13,15 @@ type = "pinyin"
 scheme = "full"
 
 # 辅助码：拼音候选的字形二次筛选（笔画码，由 rime-stroke 笔画表按常用字集转换）。
-# 路径相对 schemas 目录；文件由构建脚本从上游拉取并转换，不入版本库（见 NOTICE.md）。
-# 词组逐字首码匹配为固定语义（第 i 位命中第 i 字任一码的首字符；短于词字数 = 前缀态保留）。
-#
-# ⚠️ 本段只声明「全拼推荐哪张辅助码表」，**不代表功能开启**。
+# 文件由构建脚本从上游拉取并转换，不入版本库（见 NOTICE.md）。
+# 词组逐字首码匹配：第 i 位命中第 i 字任一码的首字符；输入短于词字数 = 前缀态保留。
 # 总开关是 config.toml 的 [schema.pinyin.aux_code].enabled（出厂 false）。
 [engine.aux_code]
 files = ["aux_code/stroke.txt"]
 
-# ★ 全拼出厂**不设**辅助码触发键，且这不是「暂时没配」——是键位预算不够。
-#
-# 全拼的音节边界必须靠符号键表达：出厂 schema.pinyin.separator = "auto"，而 `'`
-# 已被 select_key_groups 占作选词键，于是 pinyin_separator_key 判定**反引号即音节
-# 分隔符**。按键分派里分隔符臂位于 [key_actions] 裁决之前（message_handler.rs 的
-# VK_QUOTE|VK_BACKTICK 臂 vs 兜底臂中的 D0），所以哪怕在 schema_overrides 里写了
-# backtick = "aux_code"，那个键也永远走不到辅助码——enter_aux_code 的门卫会为此
-# 打一条 warn，不再静默失效。
-#
-# 双拼没有这个问题：pinyin_separator_key 对双拼恒早退（buffer 会与 preedit 发散），
-# 反引号是自由键。这就是两个方案必须能分别开关的根本原因。
-#
-# 全拼要用辅助码，需在 schema_overrides/pinyin.toml 里改绑一个未被占用的键，例如：
+# 全拼出厂**不设**辅助码触发键——auto 模式下反引号被占作音节分隔符
+# （VK_QUOTE|VK_BACKTICK 臂优先于 [key_actions] 分派），无法到达 aux_code。
+# 要启用需在 schema_overrides/pinyin.toml 里改绑未占用键，例如：
 #     [engine.aux_code]
 #     enabled = true
 #     [key_actions]
