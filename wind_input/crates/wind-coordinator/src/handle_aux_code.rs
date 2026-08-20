@@ -51,6 +51,25 @@ pub(crate) struct AuxCodeOverlay {
     pub(crate) filter_options: wind_aux_code::AuxCodeFilterOptions,
 }
 
+/// 辅助码进入来源（决定是否保留翻页位置）。
+///
+/// 两种路径共用同一门卫和核心逻辑，差异仅「从翻页键进入时需保留当前页码」。
+pub(crate) enum AuxCodeTrigger {
+    /// 从 `[key_actions]` 绑定直接触发。
+    Direct,
+    /// 从共享翻页键触发（`apply_session_action` 已翻页，需保留 `current_page`）。
+    FromPage,
+}
+
+impl std::fmt::Display for AuxCodeTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuxCodeTrigger::Direct => write!(f, "direct trigger"),
+            AuxCodeTrigger::FromPage => write!(f, "from page turn"),
+        }
+    }
+}
+
 /// 辅助码会话（快照/缓冲/重筛）已移入 `wind-aux-code::session`，见
 /// [`wind_aux_code::AuxCodeSession`]；显示态（组合区 preedit/光标）与筛选会话打包在
 /// [`AuxCodeOverlay`]，经 `State.aux_code` 整体持有、整体销毁。
@@ -76,7 +95,16 @@ impl Coordinator {
     /// - 功能未启用（`[schema.pinyin.aux_code].enabled` 折叠方案覆盖后为 false，**出厂即此**）
     /// - 方案未配 `[engine.aux_code].files` 或码表文件全部缺失
     /// - 当前无候选（没有可筛的东西；空缓冲下触发键落普通标点流程）
-    pub(crate) fn enter_aux_code(&self, state: &mut State, key_code: u32) -> Option<KeyAction> {
+    ///
+    /// `trigger` 区分两种进入路径：
+    /// - [`AuxCodeTrigger::Direct`]：从 `[key_actions]` 绑定直接触发。
+    /// - [`AuxCodeTrigger::FromPage`]：从共享翻页键触发（`apply_session_action` 已翻页，
+    ///   需保存并恢复 `current_page`，使辅助码模式从翻到的页开始筛选）。
+    pub(crate) fn enter_aux_code(
+        &self,
+        state: &mut State,
+        trigger: AuxCodeTrigger,
+    ) -> Option<KeyAction> {
         // ★★ 只能从**主输入路**进入：本模式筛的是主路候选，而各 overlay 模式有自己的
         // 候选面与生命周期。
         //
@@ -88,7 +116,7 @@ impl Coordinator {
         // 少了它的实际症状（2026-08-22 真机）：辅助码态再按一次 Tab → 重入 →
         // `preedit_prefix` 每次在旧 preedit 上再拼 4 个空格，组合区里长出一段越来越宽的
         // 空白，看起来像插进了一个宽制表符。
-        // 已在辅助码模式时不再重复进入（共享键场景：D0 路径会再次尝试进入）。
+        // 已在辅助码模式时不再重复进入（共享键场景会再次尝试进入）。
         if state.active == Some(ModeKind::AuxCode) {
             return None;
         }
@@ -100,10 +128,15 @@ impl Coordinator {
         if paths.is_empty() || state.candidates.is_empty() {
             return None;
         }
+        let preserve_page = matches!(trigger, AuxCodeTrigger::FromPage);
+        let saved_page = preserve_page.then_some(state.current_page);
         let act = self.init_aux_overlay(state, &paths, settings.max_phrase_len);
+        if let Some(page) = saved_page {
+            state.current_page = page;
+        }
         self.notify_ui_update(state);
         debug!(
-            "aux_code: entered (key 0x{key_code:02X}, {} candidates)",
+            "aux_code: entered ({trigger}), {} candidates)",
             state.candidates.len()
         );
         Some(act)
@@ -162,41 +195,7 @@ impl Coordinator {
         false
     }
 
-    /// 从翻页动作触发进入辅助码模式（不经过 `[key_actions]` 路径）。
-    ///
-    /// 与 [`Self::enter_aux_code`] 的区别：不接收 `key_code`（翻页侧无此概念），
-    /// 门卫只保留功能启用、码表、候选三道。
-    ///
-    /// **保留当前页码**：共享键场景下 `apply_session_action` 已执行翻页（`current_page`
-    /// 已前进），`init_aux_overlay` → `refresh_aux_code_candidates` → `reset_candidate_view`
-    /// 会将其归零。此处保存并在 overlay 建立后恢复，使辅助码模式从翻到的页开始筛选。
-    pub(crate) fn enter_aux_code_from_page(&self, state: &mut State) -> Option<KeyAction> {
-        // 已在辅助码模式时不再重复进入（共享键场景：翻页后再次触发）。
-        if state.active == Some(ModeKind::AuxCode) {
-            return None;
-        }
-        let settings = self.engine_mgr.aux_code_settings();
-        if !settings.enabled {
-            return None;
-        }
-        let paths = settings.files;
-        if paths.is_empty() || state.candidates.is_empty() {
-            return None;
-        }
-        let saved_page = state.current_page;
-        let act = self.init_aux_overlay(state, &paths, settings.max_phrase_len);
-        state.current_page = saved_page;
-        self.notify_ui_update(state);
-        debug!(
-            "aux_code: entered from page {} ({} candidates)",
-            saved_page,
-            state.candidates.len()
-        );
-        Some(act)
-    }
-
-    /// 创建辅助码 overlay 并激活辅助码模式（`enter_aux_code` 和
-    /// `enter_aux_code_from_page` 的公共逻辑）。
+    /// 创建辅助码 overlay 并激活辅助码模式（`enter_aux_code` 的公共逻辑）。
     ///
     /// **不发送 UI 更新**：调用方负责在状态完全就绪后统一调用 `notify_ui_update`。
     /// 这样共享键路径可以在翻页后保存/恢复 `current_page`，只发一次通知，避免闪烁。
@@ -712,7 +711,10 @@ mod tests {
         let mut st = c.state.lock().unwrap();
         st.chinese_mode = true;
         // 空候选（空缓冲场景）：门卫拦下，触发键不吞（返回 None → 落普通标点）。
-        assert!(c.enter_aux_code(&mut st, keymap::VK_BACKTICK).is_none());
+        assert!(
+            c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct)
+                .is_none()
+        );
         assert_eq!(st.active, None);
     }
 
@@ -721,7 +723,7 @@ mod tests {
         let c = coord_with("enter");
         let mut st = seed_composition(&c);
         let act = c
-            .enter_aux_code(&mut st, keymap::VK_BACKTICK)
+            .enter_aux_code(&mut st, super::AuxCodeTrigger::Direct)
             .expect("有候选应进入");
         assert_eq!(st.active, Some(ModeKind::AuxCode));
         let overlay = st.aux_code.as_ref().expect("辅助码 overlay 已建立");
@@ -736,7 +738,7 @@ mod tests {
     fn aux_letters_filter_and_drop_tail() {
         let c = coord_with("filter");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         // 打 m：李(mz)/樱(my) 命中，河(sk) 被滤 → 直接丢弃，不在候选列表里。
         let act = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         assert!(matches!(act, KeyAction::UpdateComposition { .. }));
@@ -753,7 +755,7 @@ mod tests {
     fn deeper_aux_code_narrows_again() {
         let c = coord_with("narrow");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         // 再打 y：只剩 樱(my)。
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('Y'), 0));
@@ -766,7 +768,7 @@ mod tests {
     fn esc_exits_and_restores_pinyin_composition() {
         let c = coord_with("esc");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         let act = c.handle_aux_code_key(&mut st, &key(keymap::VK_ESCAPE, 0));
         assert_eq!(st.active, None, "Esc 退出辅助码");
@@ -824,7 +826,7 @@ mod tests {
     fn backspace_to_empty_stays_for_reinput() {
         let c = coord_with("back");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         let _ = c.handle_aux_code_key(&mut st, &key(keymap::VK_BACK, 0));
         // 删空后保持在辅助码态（空码、候选还原），方便重新输入。
@@ -854,7 +856,7 @@ mod tests {
     fn backspace_without_input_exits_aux_mode() {
         let c = coord_with("back_no_input");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         assert_eq!(st.active, Some(ModeKind::AuxCode));
         // 未输入任何辅助码，直接退格 → 退出辅助码模式。
         let act = c.handle_aux_code_key(&mut st, &key(keymap::VK_BACK, 0));
@@ -869,7 +871,7 @@ mod tests {
     fn backspace_restores_previous_filter_level() {
         let c = coord_with("prev");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         // my → 只剩 樱。
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('Y'), 0));
@@ -891,7 +893,7 @@ mod tests {
     fn wrong_aux_code_backspace_restores_all() {
         let c = coord_with("wrong");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         // 错误辅助码 zz：一个都匹配不上，候选列表清空（被滤候选直接丢弃）。
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('Z'), 0));
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('Z'), 0));
@@ -918,7 +920,7 @@ mod tests {
     fn space_commits_highlighted_and_exits() {
         let c = coord_with("space");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         // 首选仍是「李」（选中下标 0 未移动，排序保持子序列）。
         let act = c.handle_aux_code_key(&mut st, &key(keymap::VK_SPACE, 0));
@@ -935,7 +937,7 @@ mod tests {
         let c = coord_with("ctrl");
         {
             let mut st = seed_composition(&c);
-            let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+            let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
             // Ctrl+M 不被当辅助码字符：有输入态 → ClearComposition 退出。
             let act = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), MOD_CTRL));
             assert_eq!(st.active, None);
@@ -943,7 +945,7 @@ mod tests {
         }
         // 无输入态 → PassThrough。
         let mut st2 = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st2, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st2, super::AuxCodeTrigger::Direct);
         st2.input_buffer.clear();
         st2.committed_text.clear();
         let act = c.handle_aux_code_key(&mut st2, &key(vk_letter('M'), MOD_ALT));
@@ -962,7 +964,7 @@ mod tests {
             .join("schemas/aux_code/flypy_test.txt");
         let mut st = seed_composition(&c);
         // 首次进入：载入旧表（李=mz/樱=my/河=sk），打 m 命中李+樱。
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         let kept: Vec<&str> = st.candidates.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(kept, vec!["李", "樱"], "旧表：m 命中李/樱");
@@ -971,7 +973,7 @@ mod tests {
         std::fs::write(&aux_file, "# name: 新表\n李=zz\n樱=zy\n河=zk\n").unwrap();
         c.invalidate_aux_code_table(); // 切方案钩子置 None，下次进入重挂
         // 再次进入：缓存若没失效会沿用旧表（打 m 仍命中）；失效后按新表（全滤为空）。
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         assert!(
             st.candidates.is_empty(),
@@ -987,7 +989,7 @@ mod tests {
         let c = coord_with("continuous");
         let mut st = seed_composition(&c);
         st.candidates[0].consumed_length = 1; // 李 只消费 li 的前 1 码
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0)); // 筛 m → 李/樱
         assert_eq!(st.active, Some(ModeKind::AuxCode));
         // 空格选 李：部分消费 → 逐步转换 + 重建会话，留在辅助码模式。
@@ -1068,7 +1070,7 @@ mod tests {
         let c = coord_with("continuous_exit");
         let mut st = seed_composition(&c);
         // 全部候选 consumed_length=0（未标注 = 整串消费）→ 空格选中即完整上屏退出。
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let act = c.handle_aux_code_key(&mut st, &key(keymap::VK_SPACE, 0));
         assert_eq!(st.active, None, "整串消费仍退出辅助码");
         assert!(st.aux_code.is_none());
@@ -1082,7 +1084,7 @@ mod tests {
     fn arrow_navigation_does_not_lose_filter() {
         let c = coord_with("nav");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         // 筛 m → [李, 樱]，并制造「池未穷尽、可翻页放宽」的条件。
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         st.has_more = true;
@@ -1108,7 +1110,7 @@ mod tests {
         let dir = data_dir_with_aux_enabled("default_off", None);
         let c = coord_with_data("default_off", dir);
         let mut st = seed_composition(&c);
-        let act = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let act = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         assert!(
             act.is_none(),
             "出厂未启用时门卫必须不吞键（落普通标点流程）"
@@ -1289,7 +1291,7 @@ mod tests {
             "前提：全局基线出厂为关，本用例才证明得了方案覆盖生效"
         );
         let mut st = seed_composition(&c);
-        let act = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let act = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         assert!(act.is_some(), "方案 enabled = true 应覆盖全局的关");
         assert_eq!(st.active, Some(ModeKind::AuxCode));
     }
@@ -1309,7 +1311,7 @@ mod tests {
         cfg.schema.pinyin.aux_code.enabled = true; // 全局开
         let c = Coordinator::new_headless_with_store(cfg, Some(&dir), store);
         let mut st = seed_composition(&c);
-        let act = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let act = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         assert!(act.is_none(), "方案 enabled = false 应覆盖全局的开");
         assert_eq!(st.active, None);
     }
@@ -1329,7 +1331,7 @@ mod tests {
         {
             let mut st = seed_composition(&c);
             st.candidates[0].consumed_length = 1; // 李 只消费 li 的前 1 码
-            let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+            let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
             let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0)); // 筛 m → 李/樱
             assert_eq!(st.active, Some(ModeKind::AuxCode));
         } // select_candidate_at 自己取锁，必须先放
@@ -1355,7 +1357,7 @@ mod tests {
         let c = coord_with("mouse_full");
         {
             let mut st = seed_composition(&c); // consumed_length 全 0 = 整串消费
-            let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+            let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         }
         let _ = c.select_candidate_at(0);
         let st = c.state.lock().unwrap();
@@ -1376,7 +1378,7 @@ mod tests {
     fn mode_switch_to_english_commits_pinyin_code() {
         let c = coord_with("switch_en");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         assert_eq!(st.active, Some(ModeKind::AuxCode));
         // 切英文（commit_on_switch 出厂即开，见 keys.commit_on_switch）。
@@ -1418,7 +1420,7 @@ mod tests {
         let pages_before = c.total_pages(&st);
         assert_eq!(pages_before, 3, "前置：主路径 12 条 / 每页 5 = 3 页");
         let _ = c
-            .enter_aux_code(&mut st, keymap::VK_BACKTICK)
+            .enter_aux_code(&mut st, super::AuxCodeTrigger::Direct)
             .expect("有候选应进入");
         assert_eq!(
             c.total_pages(&st),
@@ -1438,7 +1440,7 @@ mod tests {
     fn aux_code_does_not_relax_scope_on_page_end() {
         let c = coord_with("relax");
         let mut st = seed_composition(&c);
-        let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         let kept: Vec<&str> = st.candidates.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(kept, vec!["李", "樱"], "前置：m 筛出 李/樱");
@@ -1560,7 +1562,7 @@ mod tests {
             let mut st = seed_composition(&c);
             st.chinese_mode = true;
             // 3 个候选，全部在一页。直接进入辅助码模式（绕过 shared key 路径避免 page_next 放宽重建）
-            let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+            let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
             assert_eq!(st.active, Some(ModeKind::AuxCode));
         }
         // 只有一页 → 按共享键不退出
@@ -1581,7 +1583,7 @@ mod tests {
             let mut st = seed_composition(&c);
             st.chinese_mode = true;
             // 直接进入辅助码模式（绕过 shared key 路径避免 page_next 放宽重建）
-            let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+            let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
             assert_eq!(st.active, Some(ModeKind::AuxCode));
         }
         // 输入辅助码 'm'
@@ -1607,7 +1609,7 @@ mod tests {
         let mut st = seed_composition(&c);
         // backtick 在 [key_actions] 绑了 aux_code，但 session_keys 里没绑翻页
         // → 不是共享键。按 backtick 走正常 aux_code 进入路径（原有行为不变）。
-        let act = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let act = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         assert!(act.is_some(), "非共享键正常进入辅助码");
         assert_eq!(st.active, Some(ModeKind::AuxCode));
     }
@@ -1634,7 +1636,7 @@ mod tests {
         let mut st = seed_composition(&c);
         // backtick 在 schema [key_actions] 绑了 aux_code，但 session_keys 里没绑翻页
         // → 不是共享键。直接调用 enter_aux_code 走原有路径。
-        let act = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
+        let act = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         assert!(act.is_some(), "原有触发键应正常进入辅助码");
         assert_eq!(st.active, Some(ModeKind::AuxCode));
         assert!(st.aux_code.is_some(), "应创建 overlay");

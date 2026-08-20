@@ -903,7 +903,8 @@ impl MessageHandler for Coordinator {
         if let Some(act) = self.apply_session_action(&mut state, data, true) {
             // 共享键：翻页后同时进入辅助码模式（仅当键同时绑到翻页和辅助码时触发）。
             if self.is_shared_page_aux_key(data.key_code)
-                && let Some(enter_act) = self.enter_aux_code_from_page(&mut state)
+                && let Some(enter_act) = self
+                    .enter_aux_code(&mut state, crate::handle_aux_code::AuxCodeTrigger::FromPage)
             {
                 return enter_act;
             }
