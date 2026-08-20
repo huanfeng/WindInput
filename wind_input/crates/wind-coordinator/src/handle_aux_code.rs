@@ -146,53 +146,20 @@ impl Coordinator {
     ///
     /// 两个条件同时成立即为共享键：
     /// 1. `session_keys` 把该 VK 映射到了 `PageNext`（仅下翻，不含上翻 `PagePrev`）
-    /// 2. 方案 `[key_actions]` 或全局 `keys.key_actions` 把同一键绑到了 `aux_code`
+    /// 2. `bound_action_with_source` 把同一键解析为 `BoundAction::AuxCode`（方案级 →
+    ///    全局 `keys.key_actions` → `z_key_action` 的完整查找，与按键分派共用同一真相源）
     ///
     /// 只做配置查表（不做运行时 yield 仲裁），开销可忽略。
     pub(crate) fn is_shared_page_aux_key(&self, key_code: u32) -> bool {
-        matches!(
+        let is_page_next = matches!(
             self.rt().session_keys.classify(key_code, false, true),
             Some(wind_config::SessionAction::PageNext)
-        ) && self.is_key_bound_to_aux_code(key_code)
-    }
-
-    /// 检查按键是否在 `[key_actions]`（方案或全局）中绑定到了 `aux_code`。
-    /// 仅查配置，不做 yield 仲裁。
-    fn is_key_bound_to_aux_code(&self, key_code: u32) -> bool {
-        // 1. 方案 [key_actions]
-        for (name, action) in self.engine_mgr.active_key_actions() {
-            let vk = keymap::key_name_to_vk_with_letters(&name)
-                .or_else(|| keymap::modifier_name_to_vk(&name));
-            if vk == Some(key_code)
-                && matches!(
-                    wind_config::BoundAction::parse(&action),
-                    wind_config::BoundAction::AuxCode
-                )
-            {
-                return true;
-            }
-        }
-        // 2. 全局 keys.key_actions（单键 + LeadingKey 路由，与 bound_action_with_source 对齐）
-        for (name, action) in &self.rt().config.keys.key_actions {
-            if !matches!(
-                wind_config::hotkey::route_of_key_action(name),
-                Some(wind_config::hotkey::KeyActionRoute::LeadingKey)
-                    | Some(wind_config::hotkey::KeyActionRoute::ModifierKeyUp)
-            ) {
-                continue;
-            }
-            let vk = keymap::key_name_to_vk_with_letters(name)
-                .or_else(|| keymap::modifier_name_to_vk(name));
-            if vk == Some(key_code)
-                && matches!(
-                    wind_config::BoundAction::parse(action),
-                    wind_config::BoundAction::AuxCode
-                )
-            {
-                return true;
-            }
-        }
-        false
+        );
+        let is_aux_code = matches!(
+            self.bound_action_with_source(key_code),
+            Some((wind_config::BoundAction::AuxCode, _))
+        );
+        is_page_next && is_aux_code
     }
 
     /// 创建辅助码 overlay 并激活辅助码模式（`enter_aux_code` 的公共逻辑）。
@@ -1640,5 +1607,32 @@ mod tests {
         assert!(act.is_some(), "原有触发键应正常进入辅助码");
         assert_eq!(st.active, Some(ModeKind::AuxCode));
         assert!(st.aux_code.is_some(), "应创建 overlay");
+    }
+
+    /// 同一 VK 的两个键名同时绑到全局 `key_actions`：`\` 与 `backslash` 都指向 VK_BACKSLASH。
+    /// 复用 `bound_action_with_source` 后按**首个命中**生效（BTreeMap 键序：`\` < `backslash`），
+    /// `\` 绑的 `toggle_punct` 抢先，aux_code 被遮蔽 → 不构成共享键。
+    ///
+    /// 这是从旧的「任一命中即 true」迁移到「首个生效」后的固定行为（歧义配置，后者更接近
+    /// 真实按键分派语义），补测试防止将来有人改回去。
+    #[test]
+    fn shared_key_ambiguous_vk_first_wins() {
+        let data_dir = data_dir_with_aux("shared_ambiguous");
+        let c = coord_with_data_cfg("shared_ambiguous", data_dir, |cfg| {
+            cfg.schema.active = "pinyin".to_string();
+            cfg.keys
+                .session_actions
+                .insert("backslash".to_string(), "page_next".to_string());
+            cfg.keys
+                .key_actions
+                .insert("\\".to_string(), "toggle_punct".to_string());
+            cfg.keys
+                .key_actions
+                .insert("backslash".to_string(), "aux_code".to_string());
+        });
+        assert!(
+            !c.is_shared_page_aux_key(keymap::VK_BACKSLASH),
+            "`\\`(toggle_punct) 排序在前，首个命中生效，aux_code 被遮蔽 → 非共享键"
+        );
     }
 }
