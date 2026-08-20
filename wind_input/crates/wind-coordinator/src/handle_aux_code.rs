@@ -101,6 +101,7 @@ impl Coordinator {
             return None;
         }
         let act = self.init_aux_overlay(state, &paths, settings.max_phrase_len);
+        self.notify_ui_update(state);
         debug!(
             "aux_code: entered (key 0x{key_code:02X}, {} candidates)",
             state.candidates.len()
@@ -165,6 +166,10 @@ impl Coordinator {
     ///
     /// 与 [`Self::enter_aux_code`] 的区别：不接收 `key_code`（翻页侧无此概念），
     /// 门卫只保留功能启用、码表、候选三道。
+    ///
+    /// **保留当前页码**：共享键场景下 `apply_session_action` 已执行翻页（`current_page`
+    /// 已前进），`init_aux_overlay` → `refresh_aux_code_candidates` → `reset_candidate_view`
+    /// 会将其归零。此处保存并在 overlay 建立后恢复，使辅助码模式从翻到的页开始筛选。
     pub(crate) fn enter_aux_code_from_page(&self, state: &mut State) -> Option<KeyAction> {
         // 已在辅助码模式时不再重复进入（共享键场景：翻页后再次触发）。
         if state.active == Some(ModeKind::AuxCode) {
@@ -178,9 +183,13 @@ impl Coordinator {
         if paths.is_empty() || state.candidates.is_empty() {
             return None;
         }
+        let saved_page = state.current_page;
         let act = self.init_aux_overlay(state, &paths, settings.max_phrase_len);
+        state.current_page = saved_page;
+        self.notify_ui_update(state);
         debug!(
-            "aux_code: entered from page ({} candidates)",
+            "aux_code: entered from page {} ({} candidates)",
+            saved_page,
             state.candidates.len()
         );
         Some(act)
@@ -188,6 +197,9 @@ impl Coordinator {
 
     /// 创建辅助码 overlay 并激活辅助码模式（`enter_aux_code` 和
     /// `enter_aux_code_from_page` 的公共逻辑）。
+    ///
+    /// **不发送 UI 更新**：调用方负责在状态完全就绪后统一调用 `notify_ui_update`。
+    /// 这样共享键路径可以在翻页后保存/恢复 `current_page`，只发一次通知，避免闪烁。
     fn init_aux_overlay(
         &self,
         state: &mut State,
@@ -214,7 +226,7 @@ impl Coordinator {
         self.refresh_aux_code_candidates(state);
         let display = state.preedit.clone();
         let caret_pos = self.overlay_caret(state);
-        self.notify_ui_update(state);
+        // ★ 不在此处 notify_ui_update —— 由调用方在状态完全就绪后统一发送。
         KeyAction::UpdateComposition {
             text: display,
             caret_pos,
@@ -1441,7 +1453,7 @@ mod tests {
 
     // ────────────────────── 共享键（翻页 + 辅助码同一键）──────────────────────
 
-    /// 有候选时按共享键 → 翻页 + 同时进入辅助码模式。
+    /// 有候选时按共享键 → 翻页 + 同时进入辅助码模式，且翻到的页码被保留。
     #[test]
     fn shared_key_pages_and_enters_aux() {
         let c = coord_with_shared("shared_enter");
@@ -1456,6 +1468,8 @@ mod tests {
         assert_eq!(st.active, Some(ModeKind::AuxCode), "共享键应进入辅助码模式");
         assert!(st.aux_code.is_some(), "共享键进入后应建立 overlay");
         assert!(matches!(act, KeyAction::UpdateComposition { .. }));
+        // ★ 核心回归：翻页后的页码必须保留（此前 init_aux_overlay 会归零）
+        assert_eq!(st.current_page, 1, "共享键翻到第二页后页码应保留");
     }
 
     /// 空缓冲时按共享键 → 不进辅助码，正常翻页。
@@ -1496,7 +1510,7 @@ mod tests {
         }
         // 输入辅助码 'a'，使 session 非空（防止翻回首页时自动退出）
         let _ = c.handle_key_event(&key(keymap::VK_A, 0));
-        // 模式内按共享键 → page_prev 回到第一页，不退出
+        // 模式内按共享键（PageNext）→ 筛选后仅一页，不翻页、不退出
         let act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
         let st = c.state.lock().unwrap();
         assert_eq!(st.active, Some(ModeKind::AuxCode), "模式内共享键不应退出");
