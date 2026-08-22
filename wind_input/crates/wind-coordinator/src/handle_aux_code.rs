@@ -55,7 +55,7 @@ pub(crate) struct AuxCodeOverlay {
 ///
 /// 两种路径共用同一门卫和核心逻辑，差异仅「从翻页键进入时需保留当前页码」。
 pub(crate) enum AuxCodeTrigger {
-    /// 从 `[key_actions]` 绑定直接触发。
+    /// 从 `session_actions` 的 `aux_code` 绑定直接触发。
     Direct,
     /// 从共享翻页键触发（`apply_session_action` 已翻页，需保留 `current_page`）。
     FromPage,
@@ -1110,13 +1110,14 @@ mod tests {
         assert!(st.committed_text.is_empty(), "不该有待上屏文本");
     }
 
-    /// ★ 辅助码态里**字母恒是码元**，即便它在 `key_actions` 里绑了 `aux_code`。
+    /// ★ 辅助码态里**字母恒是码元**，即便把它在 `session_actions` 里绑成 `aux_code`。
     ///
-    /// 两张表在这一点上必须同规格。会话态那侧是天然的：`z` 在 `session_key_name_to_vk`
-    /// 里标着 `printable: true`，而辅助码态取 `include_printable = false` ⇒ 自动排除。
-    /// `key_actions` 那侧压根没有 `printable` 这个维度，得显式排。
+    /// `is_dedicated_aux_trigger` 显式排除字母（`VK_A..=VK_Z` 一律不当触发键），所以
+    /// `z = "aux_code"` 这种绑定在辅助码态内不会把 `z` 当触发键吞掉，而是照常累积为码元。
+    /// 会话态那侧同理：`z` 在 `session_key_name_to_vk` 里标着 `printable: true`，辅助码态
+    /// 取 `include_printable = false` ⇒ 自动排除。
     ///
-    /// 少了这一排的后果：配了 `z = "aux_code"` 的用户在辅助码里再也打不出 `z`——
+    /// 少了这一排的后果：用户若把 `z` 绑成辅助码触发键，在辅助码里就再也打不出 `z`——
     /// 而 `z` 是笔画码的「折」、也是形码方案的常用码元。
     ///
     /// ⚠️ 这条绑定对**进入**本就无效（`bound_action_yield_reason`：字母键仅码表引擎
@@ -1125,7 +1126,7 @@ mod tests {
     fn letter_stays_code_input_even_when_bound_as_trigger() {
         let c = coord_with_data_cfg("sess_zletter", data_dir_with_aux("sess_zletter"), |cfg| {
             cfg.keys
-                .key_actions
+                .session_actions
                 .insert("z".to_string(), "aux_code".to_string());
         });
         let mut st = seed_composition(&c);
