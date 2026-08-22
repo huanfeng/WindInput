@@ -649,8 +649,6 @@ pub enum BoundAction {
     TempPinyin,
     /// 进临时英文。
     TempEnglish,
-    /// 进辅助码模式（拼音候选字形二次筛选；仅组码中有效）。
-    AuxCode,
     /// 进指定融合模式（携带实例 id）。
     Mix(String),
     /// 进指定特殊模式（携带实例 id）。
@@ -758,7 +756,6 @@ impl BoundAction {
         match lower.as_str() {
             "temp_pinyin" => Self::TempPinyin,
             "temp_english" => Self::TempEnglish,
-            "aux_code" => Self::AuxCode,
             a if Self::DISPATCH_ACTIONS.contains(&a) => Self::Action(a.to_string()),
             _ => Self::None,
         }
@@ -843,10 +840,10 @@ pub enum SessionAction {
     /// （`key_action_name_to_vk` 的值域），Tab / PageDown / 方向键那一批**根本解析不出来**，
     /// 写进去会被静默丢弃。本表认得它们，于是「Tab 进辅助码」才表达得出来。
     ///
-    /// ⚠️ `key_actions` 里的 `aux_code` 仍然有效且保留（双拼出厂就是 `backtick = "aux_code"`）。
-    /// 两条路都通向同一个 `enter_aux_code`，差别只在**哪些键名解析得出来**。
+    /// `aux_code` 只住本表（`key_actions` 不收此动词）：辅助码本质是有候选才触发的会话内
+    /// 动作，不该落到「给这个键指定一个功能」的那张表。
     ///
-    /// 想让同一个键**同时翻页 + 进辅助码**且不跨表，用 [`Self::PageNextAuxCode`]
+    /// 想让同一个键**同时翻页 + 进辅助码**，用 [`Self::PageNextAuxCode`]
     /// （单一 `session_actions` 动词），不必在 `key_actions` 另配一份 `aux_code`。
     AuxCode,
     /// 翻页并进入辅助码筛选（共享键的「单一表」写法）。
@@ -856,7 +853,7 @@ pub enum SessionAction {
     /// `page_next` 与 `aux_code` 绑到同一个键，但**无需跨 `key_actions` / `session_actions`
     /// 两张表**——辅助码本质是有候选才触发的会话内动作，本就该住在 `session_actions`。
     ///
-    /// 仅 `page_next` 参与共键（`page_prev` 不参与，与前 `SharedPage` 路径的限制一致）；
+    /// 仅 `page_next` 参与共键（`page_prev` 不参与）；
     /// 辅助码未开启 / 无码表 / 无候选时退化为纯翻页（`enter_aux_code` 门卫同策略）。
     PageNextAuxCode,
 }
@@ -4814,7 +4811,8 @@ mod tests {
         assert_eq!(BoundAction::parse("none"), BoundAction::None);
         assert_eq!(BoundAction::parse(" TEMP_PINYIN "), BoundAction::TempPinyin);
         assert_eq!(BoundAction::parse("temp_english"), BoundAction::TempEnglish);
-        assert_eq!(BoundAction::parse("AUX_CODE"), BoundAction::AuxCode);
+        // `aux_code` 已移出 `key_actions`（只住 `session_actions`），此处视为未识别。
+        assert_eq!(BoundAction::parse("AUX_CODE"), BoundAction::None);
         assert_eq!(
             BoundAction::parse("mix:quick_mix"),
             BoundAction::Mix("quick_mix".into())

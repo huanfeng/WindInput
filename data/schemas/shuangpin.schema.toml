@@ -21,10 +21,11 @@ layout = "xiaohe"
 [engine.aux_code]
 files = ["aux_code/flypy_full.txt"]
 
-# 反引号进辅助码（组码中有效；空缓冲时落普通标点）。绑定本身不激活功能：
-# enabled = false 时门卫拒绝进入，该键照常落普通标点。
-[key_actions]
-backtick = "aux_code"
+# 反引号进辅助码（组码中有效；空缓冲时落普通标点）。辅助码触发键现在只住
+# `session_actions`（不收进 `key_actions`），例如：
+#     [session_actions]
+#     backtick = "aux_code"
+# 绑定本身不激活功能：enabled = false 时门卫拒绝进入，该键照常落普通标点。
 
 [[dictionaries]]
 id = "pinyin_main"

@@ -669,10 +669,10 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
   预算不同**。双拼把韵母塞进字母键、符号键全空闲（`pinyin_separator_key` 对双拼恒早退）；
   全拼的音节边界必须靠符号表达，出厂 `separator = "auto"` + `'` 作选词键 ⇒ **反引号即音节
   分隔符**。且按键 match 里分隔符臂（`message_handler.rs` 的 `VK_QUOTE|VK_BACKTICK`）位于
-  `[key_actions]` 裁决（兜底臂里的 D0）**之前**，所以全拼下哪怕绑了 `backtick = "aux_code"`
-  也永远走不到辅助码。于是「双拼开、全拼关」是常态需求，一个全局开关表达不了。
-- **触发**：`[key_actions]` 绑 `"aux_code"`；双拼出厂绑反引号（绑定本身不激活功能，
-  `enabled = false` 时门卫拒绝、该键照常落普通标点），全拼出厂不绑（理由见上）。
+   `[session_actions]` 裁决**之前**（分隔符判定在按键分发最靠前），所以全拼下哪怕把反引号绑成
+   `session_actions.aux_code` 也永远走不到辅助码。于是「双拼开、全拼关」是常态需求，一个全局开关表达不了。
+- **触发**：`session_actions` 绑 `"aux_code"`（或 `"page_next_aux_code"` 共键）；双拼出厂绑反引号
+   （绑定本身不激活功能，`enabled = false` 时门卫拒绝、该键照常落普通标点），全拼出厂不绑（理由见上）。
   门卫四道：未启用 / 触发键被音节分隔符占用（`warn_aux_code_key_taken` 每方案告警一次，
   不再静默失效）/ 方案未配 `files` 或文件全缺 / 当前无候选 → 一律不吞键。
   组码中进入，**只筛选不改排序**。

@@ -24,7 +24,7 @@ files = ["aux_code/stroke.txt"]
 # 要启用需在 schema_overrides/pinyin.toml 里改绑未占用键，例如：
 #     [engine.aux_code]
 #     enabled = true
-#     [key_actions]
+#     [session_actions]
 #     backslash = "aux_code"
 
 [[dictionaries]]

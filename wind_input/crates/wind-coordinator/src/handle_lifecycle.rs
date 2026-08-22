@@ -501,10 +501,6 @@ impl Coordinator {
                 debug!("key_action: entering mix idx={}", idx);
                 Some(self.enter_mix_mode(state, idx, key_code))
             }
-            // 辅助码：空缓冲无候选可筛 → 门卫返回 None，触发键落普通标点流程。
-            BoundAction::AuxCode => {
-                self.enter_aux_code(state, crate::handle_aux_code::AuxCodeTrigger::Direct)
-            }
             BoundAction::Special(id) => {
                 let idx = self.special_mode_idx(id)?;
                 let schema = self.special_schema(idx)?;

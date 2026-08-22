@@ -3076,8 +3076,8 @@ impl Coordinator {
             }
             // 翻页 + 进辅助码的组合动词（单一 `session_actions` 写法，无需跨 `key_actions`）。
             // 正常态先翻到下一页、尚未进入辅助码态则进入（FromPage 保留刚翻到的页码）；
-            // 已在辅助码态内则只翻页（与 `SharedPage` 语义一致，底下
-            // `handle_candidate_nav_or_auto_exit` 把本动词按 `page_next` 处理）。
+            // 已在辅助码态内则只翻页（底下 `handle_candidate_nav_or_auto_exit` 把本动词按
+            // `page_next` 处理）。
             // 辅助码未开启 / 无码表时 `enter_aux_code` 返回 None，退化为纯翻页。
             wind_config::SessionAction::PageNextAuxCode => {
                 self.page_next(state);

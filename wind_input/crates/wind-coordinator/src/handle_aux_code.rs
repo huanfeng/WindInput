@@ -1,7 +1,7 @@
 //! 辅助码输入模式：拼音候选的字形二次筛选。
 //!
-//! 触发：`[key_actions]` 绑 `"aux_code"`（出厂默认 `` ` ``），空缓冲时**不进**（无候选可筛，
-//! 触发键落普通标点），组码中按下 → 进入并原地筛选候选。
+//! 触发：`session_actions` 绑 `"aux_code"`（或 `"page_next_aux_code"` 共键），空缓冲时**不进**
+//! （无候选可筛，触发键落普通标点），组码中按下 → 进入并原地筛选候选。
 //!
 //! 设计要点（对齐 docs 中已拍板的决策）：
 //! - **不进即不动**：进入不改候选顺序；辅助码只筛选（通过 `CandidateStore::set_filter`
@@ -70,15 +70,17 @@ impl std::fmt::Display for AuxCodeTrigger {
     }
 }
 
-/// 一个键与「辅助码触发」的关系，统一【进入】与【模式内】两处判定，
-/// 避免再写两份方向相反（一个要求、一个排除 `page_next`）的触发键查询。
+/// 一个键与「辅助码触发」的关系，统一【进入】与【模式内】两处判定。
+///
+/// 辅助码现在只住 `session_actions`（`aux_code` 单触发 / `page_next_aux_code` 共键），
+/// 不再有 `key_actions` 那条路径。`aux_trigger_kind` 只需回答「这个键是不是**专用**
+/// 辅助码触发键（只绑 `aux_code`、不带翻页）」，供辅助码态内静默消费。共键情形由
+/// `apply_session_action` 的 `PageNextAuxCode` 臂在【进入侧】一并处理，不走这里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuxTriggerKind {
-    /// 只绑 `aux_code`（不带翻页）：正常态下进入辅助码（`Direct`）；辅助码态内静默消费。
+    /// 只绑 `aux_code`（不带翻页）：正常态下经 `apply_session_action` 进入辅助码（`Direct`）；
+    /// 辅助码态内静默消费。
     Dedicated,
-    /// 同时绑 `aux_code` 与 `page_next`（共享键）：正常态下进入辅助码（`FromPage`）；
-    /// 辅助码态内只翻页、不退出。
-    SharedPage,
 }
 
 /// 辅助码会话（快照/缓冲/重筛）已移入 `wind-aux-code::session`，见
@@ -108,8 +110,9 @@ impl Coordinator {
     /// - 当前无候选（没有可筛的东西；空缓冲下触发键落普通标点流程）
     ///
     /// `trigger` 区分两种进入路径：
-    /// - [`AuxCodeTrigger::Direct`]：从 `[key_actions]` 绑定直接触发。
-    /// - [`AuxCodeTrigger::FromPage`]：从共享翻页键触发（`apply_session_action` 已翻页，
+    /// - [`AuxCodeTrigger::Direct`]：从 `session_actions` 的 `aux_code` 绑定直接触发。
+    /// - [`AuxCodeTrigger::FromPage`]：从共键（`page_next_aux_code`）触发，`apply_session_action`
+    ///   已翻页，
     ///   需保存并恢复 `current_page`，使辅助码模式从翻到的页开始筛选）。
     pub(crate) fn enter_aux_code(
         &self,
@@ -156,39 +159,26 @@ impl Coordinator {
         Some(act)
     }
 
-    /// 这个键是不是辅助码触发键，以及是哪一种。
+    /// 这个键是不是**专用**辅助码触发键（只绑 `session_actions.aux_code`、不带翻页）。
     ///
-    /// 两张表都问——`aux_code` 在 `keys.key_actions` 与 `keys.session_actions` 里各有一份，
-    /// 用户配在哪张都算数；判定结果与按键分派**同一真相源**，不另写平行逻辑。
+    /// 与按键分派**同一真相源**（复用 `session_action_for`），不另写平行逻辑。
     ///
     /// - 字母（`A`..`Z`）恒是辅助码码元，绝不当触发键。
-    /// - \[进入侧] `message_handler` 取 `SharedPage` 走 `AuxCodeTrigger::FromPage`；
-    ///   `Dedicated` 走 `apply_session_action` 的 `AuxCode` 臂（`Direct`）。
-    /// - \[模式内侧] `handle_aux_code_key`：`Dedicated` 静默消费；`SharedPage` 落到导航翻页。
+    /// - 共键情形（`page_next_aux_code`）在【进入侧】由 `apply_session_action` 一并处理，
+    ///   不在此判定；此处只服务于辅助码态内的「专用触发键静默消费」。
     pub(crate) fn aux_trigger_kind(&self, key_code: u32, shift: bool) -> Option<AuxTriggerKind> {
         // 字母恒是码元，绝不当触发键。区间与 `handle_aux_code_key` 里那条累积臂
         // （`VK_A..=VK_Z`）**取同一个**，两处不会漂。
         if (keymap::VK_A..=keymap::VK_Z).contains(&key_code) {
             return None;
         }
-        let is_aux = self.session_action_for(key_code, shift, false)
+        if self.session_action_for(key_code, shift, false)
             == Some(wind_config::SessionAction::AuxCode)
-            || matches!(
-                self.bound_action_with_source(key_code),
-                Some((wind_config::BoundAction::AuxCode, _))
-            );
-        if !is_aux {
-            return None;
-        }
-        let is_page_next = matches!(
-            self.session_action_for(key_code, shift, true),
-            Some(wind_config::SessionAction::PageNext)
-        );
-        Some(if is_page_next {
-            AuxTriggerKind::SharedPage
+        {
+            Some(AuxTriggerKind::Dedicated)
         } else {
-            AuxTriggerKind::Dedicated
-        })
+            None
+        }
     }
 
     /// 创建辅助码 overlay 并激活辅助码模式（`enter_aux_code` 的公共逻辑）。
@@ -347,16 +337,16 @@ impl Coordinator {
         {
             return act;
         }
-        // 触发键在辅助码态内：
-        // - 专用触发键（`Dedicated`，只绑 aux_code）→ 静默消费（Consumed），**不退出**；
-        // - 共享翻页键（`SharedPage`，同时绑 page_next）→ 落到下方导航分支翻页，**不退出**。
+        // 专用触发键（只绑 `aux_code`、不带翻页）在辅助码态内 → 静默消费（Consumed），**不退出**。
+        // 共键键（`page_next_aux_code`）不在此列，它落到下方导航分支正常翻页。
         // 退出辅助码模式**只**有三条路：Esc、空码退格、翻回首页（自动退出）。本判断必须排在
         // `handle_candidate_nav` / 兜底臂之前：否则触发键会落到下方兜底臂**上屏高亮候选**，
         // 那是破坏性动作。
-        match self.aux_trigger_kind(data.key_code, data.modifiers & MOD_SHIFT != 0) {
-            Some(AuxTriggerKind::Dedicated) => return KeyAction::Consumed,
-            Some(AuxTriggerKind::SharedPage) => { /* 共享键：下方导航分支正常翻页 */ }
-            None => {}
+        if self
+            .aux_trigger_kind(data.key_code, data.modifiers & MOD_SHIFT != 0)
+            .is_some()
+        {
+            return KeyAction::Consumed;
         }
         // 候选导航（翻页 / 高亮）：辅助码只收字母，`-`/`=`/`[`/`]` 等按普通导航处理。
         // 共享键在第一页边界时自动退出辅助码模式（见 `handle_candidate_nav_or_auto_exit`）。
@@ -554,71 +544,12 @@ mod tests {
             format!(
                 "[schema]\nid = \"pinyin\"\nname = \"pinyin\"\n\
                  [engine]\ntype = \"pinyin\"\n\
-                 [engine.aux_code]\nfiles = [\"aux_code/flypy_test.txt\"]\n{enabled_line}\
-                 [key_actions]\nbacktick = \"aux_code\"\n"
+                 [engine.aux_code]\nfiles = [\"aux_code/flypy_test.txt\"]\n{enabled_line}"
             ),
         )
         .unwrap();
         std::fs::write(aux_code_dir.join("flypy_test.txt"), "李=mz\n樱=my\n河=sk\n").unwrap();
         dir
-    }
-
-    /// 辅助码触发键绑定到 backslash（共享键场景），`enabled` 控制辅助码开关。
-    fn data_dir_with_aux_shared_enabled(tag: &str, enabled: bool) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("wind_aux_code_data_{tag}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("schemas");
-        let aux_code_dir = schemas.join("aux_code");
-        std::fs::create_dir_all(&aux_code_dir).unwrap();
-        std::fs::write(
-            schemas.join("pinyin.schema.toml"),
-            format!(
-                "[schema]\nid = \"pinyin\"\nname = \"pinyin\"\n\
-                 [engine]\ntype = \"pinyin\"\n\
-                 [engine.aux_code]\nfiles = [\"aux_code/flypy_test.txt\"]\nenabled = {enabled}\n\
-                 [key_actions]\nbackslash = \"aux_code\"\n"
-            ),
-        )
-        .unwrap();
-        std::fs::write(aux_code_dir.join("flypy_test.txt"), "李=mz\n樱=my\n河=sk\n").unwrap();
-        dir
-    }
-
-    /// 创建共享键场景的 coordinator：backslash 同时是翻页键（PageNext）和
-    /// 辅助码触发键（全局 keys.key_actions）。`enabled` 控制辅助码开关。
-    fn coord_with_shared_impl(tag: &str, enabled: bool) -> Arc<Coordinator> {
-        let data_dir = data_dir_with_aux_shared_enabled(tag, enabled);
-        let path = std::env::temp_dir().join(format!("wind_aux_code_{tag}.redb"));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(Store::open(&path).unwrap());
-        let mut cfg = Config::default();
-        cfg.schema.active = "pinyin".to_string();
-        // backslash 绑到 PageNext——与 keys.key_actions 的 aux_code 形成共享键。
-        // 仅 PageNext 允许与辅助码共键，PagePrev 不参与共键。
-        cfg.keys
-            .session_actions
-            .insert("backslash".to_string(), "page_next".to_string());
-        // pagedown 绑到 PageNext（纯翻页，不绑 aux_code → 非共享键）
-        cfg.keys
-            .session_actions
-            .insert("pagedown".to_string(), "page_next".to_string());
-        // pageup 绑到 PagePrev（用于测试自动退出：从非首页翻回首页）
-        cfg.keys
-            .session_actions
-            .insert("pageup".to_string(), "page_prev".to_string());
-        // backslash 同时绑到 aux_code（全局 keys.key_actions，与 session_actions 的 page_next 形成共享键）
-        cfg.keys
-            .key_actions
-            .insert("backslash".to_string(), "aux_code".to_string());
-        Coordinator::new_headless_with_store(cfg, Some(&data_dir), store)
-    }
-
-    fn coord_with_shared(tag: &str) -> Arc<Coordinator> {
-        coord_with_shared_impl(tag, true)
-    }
-
-    fn coord_with_shared_disabled(tag: &str) -> Arc<Coordinator> {
-        coord_with_shared_impl(tag, false)
     }
 
     fn coord_with(tag: &str) -> Arc<Coordinator> {
@@ -1261,12 +1192,12 @@ mod tests {
         }
     }
 
-    /// 两张表的动词写法必须逐字一致：同一个功能在两处写法不同的话，用户把配置从一张表
-    /// 挪到另一张就会静默失效。
+    /// `aux_code` 只住 `session_actions`：`key_actions` 不收此动词（写法一致性的旧约束已
+    /// 不再适用，因为两张表不再共享这个动词）。
     #[test]
-    fn aux_code_verb_spelling_matches_across_both_tables() {
+    fn aux_code_verb_only_in_session_actions() {
         use wind_config::{BoundAction, SessionAction};
-        assert_eq!(BoundAction::parse("aux_code"), BoundAction::AuxCode);
+        assert_eq!(BoundAction::parse("aux_code"), BoundAction::None);
         assert_eq!(SessionAction::parse("aux_code"), SessionAction::AuxCode);
         // 写回也要能读回来（Display 与 parse 互逆）。
         assert_eq!(SessionAction::AuxCode.to_string(), "aux_code");
@@ -1444,100 +1375,27 @@ mod tests {
         assert_eq!(kept, vec!["李", "樱"], "辅助码的筛选结果必须原样保留");
     }
 
-    // ────────────────────── 共享键（翻页 + 辅助码同一键）──────────────────────
+    // ────────────────────── 辅助码自动退出 ───────────────────────
 
-    /// 有候选时按共享键 → 翻页 + 同时进入辅助码模式，且翻到的页码被保留。
+    /// 翻回第一页（从非首页） + 无辅助码输入 → 自动退出辅助码模式。
     #[test]
-    fn shared_key_pages_and_enters_aux() {
-        let c = coord_with_shared("shared_enter");
-        {
-            let mut st = seed_composition(&c);
-            st.chinese_mode = true;
-            // 12 个候选，per_page=9 → 2 页，确保 page_next 不触发末页放宽重建
-            st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
-        } // 释放锁
-        let act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
-        let st = c.state.lock().unwrap();
-        assert_eq!(st.active, Some(ModeKind::AuxCode), "共享键应进入辅助码模式");
-        assert!(st.aux_code.is_some(), "共享键进入后应建立 overlay");
-        assert!(matches!(act, KeyAction::UpdateComposition { .. }));
-        // ★ 核心回归：翻页后的页码必须保留（此前 init_aux_overlay 会归零）
-        assert_eq!(st.current_page, 1, "共享键翻到第二页后页码应保留");
-    }
-
-    /// 空缓冲时按共享键 → 不进辅助码，正常翻页。
-    #[test]
-    fn shared_key_no_candidates_stays_normal() {
-        let c = coord_with_shared("shared_empty");
-        {
-            let mut st = c.state.lock().unwrap();
-            st.chinese_mode = true;
-            // 无候选
-        } // 释放锁
-        let _act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
-        let st = c.state.lock().unwrap();
-        assert_eq!(st.active, None, "空缓冲不进辅助码");
-    }
-
-    /// 辅助码模式内按共享键 → 继续翻页，不退出。
-    #[test]
-    fn shared_key_continues_paging_in_aux() {
-        let c = coord_with_shared("shared_paging");
+    fn auto_exit_on_first_page_no_aux_input() {
+        let c = coord_with("auto_exit_first");
         {
             let mut st = seed_composition(&c);
             st.chinese_mode = true;
             // 12 个候选，per_page=9 → 2 页
             st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
-        }
-        // 进入辅助码模式
-        let _ = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
-        {
-            let st = c.state.lock().unwrap();
+            let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
             assert_eq!(st.active, Some(ModeKind::AuxCode));
-        }
-        // 先翻到第二页（辅助码缓冲为空时 page_next 不受限制）
+        } // 释放锁
+        // 翻到第二页
         let _ = c.handle_key_event(&key(keymap::VK_NEXT, 0));
         {
             let st = c.state.lock().unwrap();
             assert_eq!(st.current_page, 1, "应翻到第二页");
         }
-        // 输入辅助码 'a'，使 session 非空（防止翻回首页时自动退出）
-        let _ = c.handle_key_event(&key(keymap::VK_A, 0));
-        // 模式内按共享键（PageNext）→ 筛选后仅一页，不翻页、不退出
-        let act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
-        let st = c.state.lock().unwrap();
-        assert_eq!(st.active, Some(ModeKind::AuxCode), "模式内共享键不应退出");
-        assert_eq!(st.current_page, 0, "应回到第一页");
-        assert!(matches!(
-            act,
-            KeyAction::Consumed | KeyAction::UpdateComposition { .. }
-        ));
-    }
-
-    /// 翻回第一页（从非首页） + 无辅助码输入 → 自动退出辅助码模式。
-    #[test]
-    fn auto_exit_on_first_page_no_aux_input() {
-        let c = coord_with_shared("shared_auto_exit");
-        {
-            let mut st = seed_composition(&c);
-            st.chinese_mode = true;
-            // 12 个候选，per_page=9 → 2 页
-            st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
-        }
-        // 进入辅助码模式
-        let _ = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
-        {
-            let st = c.state.lock().unwrap();
-            assert_eq!(st.active, Some(ModeKind::AuxCode));
-            assert!(st.aux_code.as_ref().unwrap().session.is_empty());
-        }
-        // 翻到第二页（pagedown = page_next）
-        let _ = c.handle_key_event(&key(keymap::VK_NEXT, 0));
-        {
-            let st = c.state.lock().unwrap();
-            assert_eq!(st.current_page, 1);
-        }
-        // 翻回第一页（pageup = page_prev）+ 空缓冲 → 自动退出
+        // 翻回第一页（page_prev）+ 空缓冲 → 自动退出
         let act = c.handle_key_event(&key(keymap::VK_PRIOR, 0));
         let st = c.state.lock().unwrap();
         assert_eq!(st.active, None, "从非首页翻回+空缓冲应自动退出");
@@ -1545,48 +1403,45 @@ mod tests {
         assert!(matches!(act, KeyAction::UpdateComposition { .. }));
     }
 
-    /// 只有一页候选 + 空辅助码缓冲 → 按共享键不退出（留在辅助码模式）。
+    /// 只有一页候选 + 空辅助码缓冲 → 不退出（留在辅助码模式）。
     #[test]
     fn no_auto_exit_when_single_page() {
-        let c = coord_with_shared("shared_single_page");
-        {
-            let mut st = seed_composition(&c);
-            st.chinese_mode = true;
-            // 3 个候选，全部在一页。直接进入辅助码模式（绕过 shared key 路径避免 page_next 放宽重建）
-            let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
-            assert_eq!(st.active, Some(ModeKind::AuxCode));
-        }
-        // 只有一页 → 按共享键不退出
-        let act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
+        let c = coord_with("single_page");
+        let mut st = seed_composition(&c);
+        st.chinese_mode = true;
+        // 直接进入辅助码模式。
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
+        assert_eq!(st.active, Some(ModeKind::AuxCode));
+        drop(st);
+        // 只有一页 → 按 page_prev 不退出
+        let _act = c.handle_key_event(&key(keymap::VK_PRIOR, 0));
         let st = c.state.lock().unwrap();
         assert_eq!(st.active, Some(ModeKind::AuxCode), "只有一页不应自动退出");
-        assert!(matches!(
-            act,
-            KeyAction::Consumed | KeyAction::UpdateComposition { .. }
-        ));
     }
 
-    /// 已输入辅助码字母后翻到第一页 → 不自动退出。
+    /// 已输入辅助码字母后翻回首页 → 不自动退出。
     #[test]
     fn no_auto_exit_when_aux_input_exists() {
-        let c = coord_with_shared("shared_no_exit");
-        {
-            let mut st = seed_composition(&c);
-            st.chinese_mode = true;
-            // 直接进入辅助码模式（绕过 shared key 路径避免 page_next 放宽重建）
-            let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
-            assert_eq!(st.active, Some(ModeKind::AuxCode));
-        }
-        // 输入辅助码 'm'
+        let c = coord_with("no_exit");
+        let mut st = seed_composition(&c);
+        st.chinese_mode = true;
+        st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
+        let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
+        assert_eq!(st.active, Some(ModeKind::AuxCode));
+        drop(st);
+        // 输入辅助码 'm'（session 非空；输码本身会把页码重置回首页）
         let _ = c.handle_key_event(&key(vk_letter('M'), 0));
         {
-            let st = c.state.lock().unwrap();
+            let mut st = c.state.lock().unwrap();
             assert!(!st.aux_code.as_ref().unwrap().session.is_empty());
+            // 强行置于第二页，模拟「从深页翻回」
+            st.current_page = 1;
         }
-        // 已在第一页 + 有辅助码 → 按共享键不退出
-        let act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
+        // 从第二页翻回第一页 + 有辅助码输入 → 不自动退出
+        let act = c.handle_key_event(&key(keymap::VK_PRIOR, 0));
         let st = c.state.lock().unwrap();
         assert_eq!(st.active, Some(ModeKind::AuxCode), "有辅助码输入不退出");
+        assert_eq!(st.current_page, 0);
         assert!(matches!(
             act,
             KeyAction::Consumed | KeyAction::UpdateComposition { .. }
@@ -1598,26 +1453,10 @@ mod tests {
     fn page_key_only_no_aux_trigger() {
         let c = coord_with("page_only");
         let mut st = seed_composition(&c);
-        // backtick 在 [key_actions] 绑了 aux_code，但 session_keys 里没绑翻页
-        // → 不是共享键。按 backtick 走正常 aux_code 进入路径（原有行为不变）。
+        // 未绑辅助码触发键：直接 enter_aux_code 走原路径。
         let act = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
-        assert!(act.is_some(), "非共享键正常进入辅助码");
+        assert!(act.is_some(), "非辅助码触发键正常进入辅助码");
         assert_eq!(st.active, Some(ModeKind::AuxCode));
-    }
-
-    /// 辅助码未启用时按共享键 → 只翻页不进辅助码。
-    #[test]
-    fn shared_key_not_trigger_without_aux_enabled() {
-        let c = coord_with_shared_disabled("shared_disabled");
-        {
-            let mut st = seed_composition(&c);
-            st.chinese_mode = true;
-            st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
-        }
-        let _act = c.handle_key_event(&key(keymap::VK_BACKSLASH, 0));
-        let st = c.state.lock().unwrap();
-        assert_eq!(st.active, None, "辅助码未启用时不应进入辅助码模式");
-        assert!(st.aux_code.is_none(), "不应创建 overlay");
     }
 
     /// 非共享键的原有触发 → 行为不变（直接 enter_aux_code 走原路径）。
@@ -1625,42 +1464,11 @@ mod tests {
     fn existing_trigger_key_still_works() {
         let c = coord_with("existing_trigger");
         let mut st = seed_composition(&c);
-        // backtick 在 schema [key_actions] 绑了 aux_code，但 session_keys 里没绑翻页
-        // → 不是共享键。直接调用 enter_aux_code 走原有路径。
+        // 直接调用 enter_aux_code 走原有路径（session_actions.aux_code 的进入逻辑）。
         let act = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         assert!(act.is_some(), "原有触发键应正常进入辅助码");
         assert_eq!(st.active, Some(ModeKind::AuxCode));
         assert!(st.aux_code.is_some(), "应创建 overlay");
-    }
-
-    /// 同一 VK 的两个键名同时绑到全局 `key_actions`：`\` 与 `backslash` 都指向 VK_BACKSLASH。
-    /// 复用 `bound_action_with_source` 后按**首个命中**生效（BTreeMap 键序：`\` < `backslash`），
-    /// `\` 绑的 `toggle_punct` 抢先，aux_code 被遮蔽 → 不构成共享键。
-    ///
-    /// 这是从旧的「任一命中即 true」迁移到「首个生效」后的固定行为（歧义配置，后者更接近
-    /// 真实按键分派语义），补测试防止将来有人改回去。
-    #[test]
-    fn shared_key_ambiguous_vk_first_wins() {
-        let data_dir = data_dir_with_aux("shared_ambiguous");
-        let c = coord_with_data_cfg("shared_ambiguous", data_dir, |cfg| {
-            cfg.schema.active = "pinyin".to_string();
-            cfg.keys
-                .session_actions
-                .insert("backslash".to_string(), "page_next".to_string());
-            cfg.keys
-                .key_actions
-                .insert("\\".to_string(), "toggle_punct".to_string());
-            cfg.keys
-                .key_actions
-                .insert("backslash".to_string(), "aux_code".to_string());
-        });
-        assert!(
-            !matches!(
-                c.aux_trigger_kind(keymap::VK_BACKSLASH, false),
-                Some(AuxTriggerKind::SharedPage)
-            ),
-            "`\\`(toggle_punct) 排序在前，首个命中生效，aux_code 被遮蔽 → 非共享键"
-        );
     }
 
     /// `page_next_aux_code`：单一 `session_actions` 动词即可翻页 + 进辅助码，无需跨表。

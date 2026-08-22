@@ -14,7 +14,7 @@
 | 1 | 全局基线 `enabled` / `max_phrase_len` | `config.toml` `[schema.pinyin.aux_code]` | 键已登记 REGISTRY，无控件 |
 | 2 | 方案级覆盖（tri-state，`None` = 跟随全局） | `.schema.toml` `[engine.aux_code]` / `schema_overrides/{id}.toml` | 无控件 |
 | 3 | 码表 `files`（这个方案用哪张字形表） | 同上（方案属性） | 无控件 |
-| 4 | **触发键** | **方案文件 `[key_actions]`**（如 `backtick = "aux_code"`） | UI 已有（`dialogs/schema_key_actions.rs`），**但动词列表里没有 `aux_code`** |
+| 4 | **触发键** | **方案文件 `[session_actions]`**（如 `backtick = "aux_code"`） | `session_actions` 动词表 UI 已有，**但动词列表里没有 `aux_code`** |
 
 第 4 项是「开了能不能进去」的决定因素，却最容易被漏——它不在 `[schema.pinyin.aux_code]` 段里，
 按配置键去找根本找不到它。
@@ -24,12 +24,12 @@
 ### 2.1 引导键会被音节分隔符吃掉（「配了没反应」的头号来源）
 
 全拼出厂 `separator = "auto"` 且 `'` 作选词键时，**反引号恒为音节分隔符**——
-分隔符臂在按键分发里先于 `key_actions`，所以即使方案里写了 `backtick = "aux_code"` 也进不去。
-core 已在 `handle_aux_code.rs` 打了告警日志，但用户看不见日志。
+ 分隔符臂在按键分发里先于 `session_actions` 裁决，所以即使方案里把反引号绑成 `aux_code` 也进不去。
+ core 已在 `handle_aux_code.rs` 打了告警日志，但用户看不见日志。
 
 ⇒ 界面必须承担这件事，两条同时做：
 - 开关的 hint 直书前提，不能只写「启用辅助码」；
-- **绑定冲突要有可见反馈**：当方案 `[key_actions]` 里把某键绑成 `aux_code`、而该键在当前
+- **绑定冲突要有可见反馈**：当方案 `[session_actions]` 里把某键绑成 `aux_code`、而该键在当前
   `separator` 设置下是分隔符时，在按键表那一行给出警示（这是 UI 能替用户挡住的坑，不该留给日志）。
 
 ### 2.2 `files` 非空 ≠ 功能开启
@@ -48,8 +48,9 @@ core 已在 `handle_aux_code.rs` 打了告警日志，但用户看不见日志�
 
 ### P1 — 最小可用（改动小，价值最大）
 
-1. `dialogs/schema_manager.rs` 的动词列表加 `Verb { value: "aux_code", label: "辅助码筛选" }`
-   （现有列表是 `none` / `temp_pinyin` / `temp_english` + 动态的 `mix:` / `special:` / `toggle_schema:`）。
+1. `session_actions` 的动词列表加 `Verb { value: "aux_code", label: "辅助码筛选" }`
+   （现有列表是 `none` / `page_next` / `page_prev` / `cancel` + 动态项；与 `key_actions` 的动词表分开），
+   共键场景另提供 `page_next_aux_code`。
 2. `settings_manifest.toml` 加两个 `[[items]]`（`group = "schema"`、`section = "候选行为"`、
    `subsection = "辅助码"`），草稿已在 `capabilities.rs` ㉒ 条注释里，含 `type` / `min-max` /
    `enabled_when`。**hint 按 §2.1 重写**，交代引导键前提。
