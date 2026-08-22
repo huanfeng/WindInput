@@ -201,8 +201,10 @@ impl Coordinator {
 
     /// 辅助码模式下的翻页/导航处理，含共享键自动退出逻辑。
     ///
-    /// - PagePrev 翻页成功（从非首页回到首页） + 辅助码缓冲为空 → 自动退出辅助码模式。
-    /// - PagePrev 在首页无效果（只有一 / 从未翻过页） → 不退出，留在辅助码模式。
+    /// - PagePrev 且**停在首页（翻回首页，或本就已在首页）+ 辅助码缓冲为空** → 自动退出。
+    ///   去掉了「必须是从非首页翻回」的限制：输码会把页码重置回首页、单页结果、专用触发键在
+    ///   首页进入等情形都会让你停在首页空缓冲，旧逻辑下按 page_prev 是空操作、退不出去，粘滞。
+    /// - 缓冲非空（有筛选）→ 不退出，留在辅助码模式（避免静默丢掉筛选）。
     /// - PageNext / 高亮 → 正常导航，不触发退出。
     ///
     /// 不改 `apply_session_action` 签名，不影响其他调用点。
@@ -215,15 +217,9 @@ impl Coordinator {
         let action = self.rt().session_keys.classify(data.key_code, shift, true);
         match action {
             Some(wind_config::SessionAction::PagePrev) => {
-                let at_first_page_before = state.current_page == 0;
-                if !self.page_prev(state) {
-                    // page_prev 在首页无效果（只有一/从未翻过页）→ 不退出，留在辅助码模式
-                    return Some(KeyAction::Consumed);
-                }
-                self.notify_ui_update(state);
-                // 翻页成功且刚回到首页 + 辅助码缓冲为空 → 自动退出
+                // 空缓冲 + 停在首页（翻回，或本就在首页）→ 退出；否则正常翻页。
+                let paged = self.page_prev(state);
                 if state.current_page == 0
-                    && !at_first_page_before
                     && state
                         .aux_code
                         .as_ref()
@@ -234,6 +230,9 @@ impl Coordinator {
                         text: state.preedit.clone(),
                         caret_pos: self.overlay_caret(state),
                     });
+                }
+                if paged {
+                    self.notify_ui_update(state);
                 }
                 Some(KeyAction::Consumed)
             }
@@ -320,14 +319,15 @@ impl Coordinator {
         }
         // 专用触发键（只绑 `aux_code`、不带翻页）在辅助码态内 → 静默消费（Consumed），**不退出**。
         // 共键键（`page_next_aux_code`）不在此列，它落到下方导航分支正常翻页。
-        // 退出辅助码模式**只**有三条路：Esc、空码退格、翻回首页（自动退出）。本判断必须排在
-        // `handle_candidate_nav` / 兜底臂之前：否则触发键会落到下方兜底臂**上屏高亮候选**，
-        // 那是破坏性动作。
+        // 退出辅助码模式**只**有三条路：Esc、空码退格、停在首页空缓冲时按 page_prev（自动退出）。
+        // 本判断必须排在 `handle_candidate_nav` / 兜底臂之前：否则触发键会落到下方兜底臂
+        // **上屏高亮候选**，那是破坏性动作。
         if self.is_dedicated_aux_trigger(data.key_code, data.modifiers & MOD_SHIFT != 0) {
             return KeyAction::Consumed;
         }
         // 候选导航（翻页 / 高亮）：辅助码只收字母，`-`/`=`/`[`/`]` 等按普通导航处理。
-        // 共享键在第一页边界时自动退出辅助码模式（见 `handle_candidate_nav_or_auto_exit`）。
+        // 共享键停在首页（翻回或本就在）且空缓冲时自动退出辅助码模式
+        // （见 `handle_candidate_nav_or_auto_exit`）。
         if let Some(act) = self.handle_candidate_nav_or_auto_exit(state, data) {
             return act;
         }
@@ -1382,20 +1382,21 @@ mod tests {
         assert!(matches!(act, KeyAction::UpdateComposition { .. }));
     }
 
-    /// 只有一页候选 + 空辅助码缓冲 → 不退出（留在辅助码模式）。
+    /// 只有一页候选 + 空辅助码缓冲 → 按 page_prev（空操作翻页）仍因「首页空缓冲」自动退出。
     #[test]
-    fn no_auto_exit_when_single_page() {
+    fn auto_exit_on_single_page_when_empty() {
         let c = coord_with("single_page");
         let mut st = seed_composition(&c);
         st.chinese_mode = true;
-        // 直接进入辅助码模式。
+        // 直接进入辅助码模式（首页）。
         let _ = c.enter_aux_code(&mut st, super::AuxCodeTrigger::Direct);
         assert_eq!(st.active, Some(ModeKind::AuxCode));
         drop(st);
-        // 只有一页 → 按 page_prev 不退出
-        let _act = c.handle_key_event(&key(keymap::VK_PRIOR, 0));
+        // 只有一页 → 按 page_prev 是空操作翻页，但仍因停在首页 + 空缓冲而退出。
+        let act = c.handle_key_event(&key(keymap::VK_PRIOR, 0));
         let st = c.state.lock().unwrap();
-        assert_eq!(st.active, Some(ModeKind::AuxCode), "只有一页不应自动退出");
+        assert_eq!(st.active, None, "单页空缓冲按 page_prev 应自动退出");
+        assert!(matches!(act, KeyAction::UpdateComposition { .. }));
     }
 
     /// 已输入辅助码字母后翻回首页 → 不自动退出。
