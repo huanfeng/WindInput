@@ -32,6 +32,9 @@ use wind_candidate::Candidate;
 use wind_ipc::protocol::{MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use wind_keys::keymap;
 
+/// 进入辅助码时拼在拼音基线之后的分隔空格（只写一遍，见 `AuxCodeOverlay::preedit_prefix`）。
+const AUX_PREFIX_SPACES: &str = "    ";
+
 /// 辅助码 overlay 的协调器侧状态三件套（筛选会话 + 显示基线 + 显示前缀）。
 ///
 /// 三者**同生共死**：enter 一次全建，退出/上屏/复位一律整体 `take`/`None`——
@@ -132,12 +135,10 @@ impl Coordinator {
         if paths.is_empty() || state.candidates.is_empty() {
             return None;
         }
-        let preserve_page = matches!(trigger, AuxCodeTrigger::FromPage);
-        let saved_page = preserve_page.then_some(state.current_page);
-        let act = self.init_aux_overlay(state, &paths, settings.max_phrase_len);
-        if let Some(page) = saved_page {
-            state.current_page = page;
-        }
+        // FromPage（共键 `page_next_aux_code`）需保留进入前翻到的页码；Direct 落回首页。
+        let preserve_page =
+            matches!(trigger, AuxCodeTrigger::FromPage).then_some(state.current_page);
+        let act = self.init_aux_overlay(state, &paths, settings.max_phrase_len, preserve_page);
         self.notify_ui_update(state);
         debug!(
             "aux_code: entered ({trigger}), {} candidates",
@@ -171,6 +172,7 @@ impl Coordinator {
         state: &mut State,
         paths: &[std::path::PathBuf],
         max_phrase_len: usize,
+        preserve_page: Option<usize>,
     ) -> KeyAction {
         self.ensure_aux_code_table(paths);
         // 三件套整体建立：筛选会话（快照原始候选，后续筛选都从它重筛）+ 显示基线
@@ -178,7 +180,7 @@ impl Coordinator {
         // 此后三者同生共死，退出/上屏/复位一律整体销毁，见 `AuxCodeOverlay`。
         let session = wind_aux_code::AuxCodeSession::new(std::mem::take(&mut state.candidates));
         let preedit_base = std::mem::take(&mut state.preedit);
-        let preedit_prefix = format!("{}    ", preedit_base);
+        let preedit_prefix = format!("{}{}", preedit_base, AUX_PREFIX_SPACES);
         // 筛选选项按本次进入时的生效设置固化（期间方案切换不可见）。
         // 词组逐字首码匹配是固定语义，无模式选项（`AuxCodeFilterOptions` 其余取默认）。
         let filter_options = wind_aux_code::AuxCodeFilterOptions { max_phrase_len };
@@ -190,6 +192,9 @@ impl Coordinator {
         });
         state.active = Some(ModeKind::AuxCode);
         self.refresh_aux_code_candidates(state);
+        // `refresh` 经 `reset_candidate_view` 把 `current_page` 归零；在此显式落定进入后的页码：
+        // FromPage 保留进入前翻到的页，Direct 落回首页。
+        state.current_page = preserve_page.unwrap_or(0);
         let display = state.preedit.clone();
         let caret_pos = self.overlay_caret(state);
         // ★ 不在此处 notify_ui_update —— 由调用方在状态完全就绪后统一发送。
@@ -466,7 +471,7 @@ impl Coordinator {
         let overlay = state.aux_code.as_mut().expect("辅助码模式必持 overlay");
         let preedit_base = std::mem::take(&mut state.preedit);
         overlay.preedit_base = preedit_base.clone();
-        overlay.preedit_prefix = format!("{}    ", preedit_base);
+        overlay.preedit_prefix = format!("{}{}", preedit_base, AUX_PREFIX_SPACES);
         overlay.session = wind_aux_code::AuxCodeSession::new(std::mem::take(&mut state.candidates));
         self.refresh_aux_code_candidates(state);
     }
