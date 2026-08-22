@@ -70,19 +70,6 @@ impl std::fmt::Display for AuxCodeTrigger {
     }
 }
 
-/// 一个键与「辅助码触发」的关系，统一【进入】与【模式内】两处判定。
-///
-/// 辅助码现在只住 `session_actions`（`aux_code` 单触发 / `page_next_aux_code` 共键），
-/// 不再有 `key_actions` 那条路径。`aux_trigger_kind` 只需回答「这个键是不是**专用**
-/// 辅助码触发键（只绑 `aux_code`、不带翻页）」，供辅助码态内静默消费。共键情形由
-/// `apply_session_action` 的 `PageNextAuxCode` 臂在【进入侧】一并处理，不走这里。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuxTriggerKind {
-    /// 只绑 `aux_code`（不带翻页）：正常态下经 `apply_session_action` 进入辅助码（`Direct`）；
-    /// 辅助码态内静默消费。
-    Dedicated,
-}
-
 /// 辅助码会话（快照/缓冲/重筛）已移入 `wind-aux-code::session`，见
 /// [`wind_aux_code::AuxCodeSession`]；显示态（组合区 preedit/光标）与筛选会话打包在
 /// [`AuxCodeOverlay`]，经 `State.aux_code` 整体持有、整体销毁。
@@ -166,19 +153,13 @@ impl Coordinator {
     /// - 字母（`A`..`Z`）恒是辅助码码元，绝不当触发键。
     /// - 共键情形（`page_next_aux_code`）在【进入侧】由 `apply_session_action` 一并处理，
     ///   不在此判定；此处只服务于辅助码态内的「专用触发键静默消费」。
-    pub(crate) fn aux_trigger_kind(&self, key_code: u32, shift: bool) -> Option<AuxTriggerKind> {
+    pub(crate) fn is_dedicated_aux_trigger(&self, key_code: u32, shift: bool) -> bool {
         // 字母恒是码元，绝不当触发键。区间与 `handle_aux_code_key` 里那条累积臂
         // （`VK_A..=VK_Z`）**取同一个**，两处不会漂。
         if (keymap::VK_A..=keymap::VK_Z).contains(&key_code) {
-            return None;
+            return false;
         }
-        if self.session_action_for(key_code, shift, false)
-            == Some(wind_config::SessionAction::AuxCode)
-        {
-            Some(AuxTriggerKind::Dedicated)
-        } else {
-            None
-        }
+        self.session_action_for(key_code, shift, false) == Some(wind_config::SessionAction::AuxCode)
     }
 
     /// 创建辅助码 overlay 并激活辅助码模式（`enter_aux_code` 的公共逻辑）。
@@ -342,10 +323,7 @@ impl Coordinator {
         // 退出辅助码模式**只**有三条路：Esc、空码退格、翻回首页（自动退出）。本判断必须排在
         // `handle_candidate_nav` / 兜底臂之前：否则触发键会落到下方兜底臂**上屏高亮候选**，
         // 那是破坏性动作。
-        if self
-            .aux_trigger_kind(data.key_code, data.modifiers & MOD_SHIFT != 0)
-            .is_some()
-        {
+        if self.is_dedicated_aux_trigger(data.key_code, data.modifiers & MOD_SHIFT != 0) {
             return KeyAction::Consumed;
         }
         // 候选导航（翻页 / 高亮）：辅助码只收字母，`-`/`=`/`[`/`]` 等按普通导航处理。

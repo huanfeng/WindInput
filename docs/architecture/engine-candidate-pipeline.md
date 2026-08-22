@@ -673,9 +673,11 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
    `session_actions.aux_code` 也永远走不到辅助码。于是「双拼开、全拼关」是常态需求，一个全局开关表达不了。
 - **触发**：`session_actions` 绑 `"aux_code"`（或 `"page_next_aux_code"` 共键）；双拼出厂绑反引号
    （绑定本身不激活功能，`enabled = false` 时门卫拒绝、该键照常落普通标点），全拼出厂不绑（理由见上）。
-  门卫四道：未启用 / 触发键被音节分隔符占用（`warn_aux_code_key_taken` 每方案告警一次，
-  不再静默失效）/ 方案未配 `files` 或文件全缺 / 当前无候选 → 一律不吞键。
-  组码中进入，**只筛选不改排序**。
+   门卫三道（均在 `enter_aux_code`）：未启用 / 方案未配 `files` 或文件全缺 /
+   当前无候选 → 一律不吞键。组码中进入，**只筛选不改排序**。
+   （反引号之类若被音节分隔符占用，是按键分发层在更靠前就 preempt 掉了——那不是辅助码模块的职责，
+   core 不在此处告警；冲突反馈交由设置 UI 承担，见 `docs/design/aux-code-settings-ui.md`，
+   故「绑了却进不去」时辅助码侧不报任何日志。）
 - **加载**：`EngineManager::aux_code_settings` 一次 `read_schema` 出齐 `enabled` /
   `max_phrase_len` / 已解析的 `files`（用户目录同名优先；**关闭时不解析路径**）；首进时
   `ensure_aux_code_table` 懒加载 + `merge`（先出现 = 高优），**不参与预热**。缓存是全局一份，

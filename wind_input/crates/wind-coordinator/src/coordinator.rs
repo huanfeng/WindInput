@@ -3079,17 +3079,21 @@ impl Coordinator {
             // 已在辅助码态内则只翻页（底下 `handle_candidate_nav_or_auto_exit` 把本动词按
             // `page_next` 处理）。
             // 辅助码未开启 / 无码表时 `enter_aux_code` 返回 None，退化为纯翻页。
+            // 既没翻动也没进辅助码（无候选 / 已在末页）→ 放行，让键落原语义（与 `AuxCode`
+            // 臂一致，避免空闲时吞掉 Tab 之类共键）。`enter_aux_code` 内部 `active.is_some()`
+            // 守卫挡住「从其它 overlay 模式误入辅助码」，故此处无需再判 `state.active`。
             wind_config::SessionAction::PageNextAuxCode => {
-                self.page_next(state);
-                if state.active.is_none() {
-                    if let Some(act) =
-                        self.enter_aux_code(state, crate::handle_aux_code::AuxCodeTrigger::FromPage)
-                    {
-                        return Some(act);
-                    }
+                let paged = self.page_next(state);
+                if let Some(act) =
+                    self.enter_aux_code(state, crate::handle_aux_code::AuxCodeTrigger::FromPage)
+                {
+                    return Some(act);
                 }
-                self.notify_ui_update(state);
-                return Some(KeyAction::Consumed);
+                if paged {
+                    self.notify_ui_update(state);
+                    return Some(KeyAction::Consumed);
+                }
+                return None;
             }
             // 表里只存启用项（`ConfigBundle::build` 过滤过），None 到不了这里。
             wind_config::SessionAction::None => return None,
