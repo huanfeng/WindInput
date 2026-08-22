@@ -70,6 +70,17 @@ impl std::fmt::Display for AuxCodeTrigger {
     }
 }
 
+/// 一个键与「辅助码触发」的关系，统一【进入】与【模式内】两处判定，
+/// 避免再写两份方向相反（一个要求、一个排除 `page_next`）的触发键查询。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuxTriggerKind {
+    /// 只绑 `aux_code`（不带翻页）：正常态下进入辅助码（`Direct`）；辅助码态内静默消费。
+    Dedicated,
+    /// 同时绑 `aux_code` 与 `page_next`（共享键）：正常态下进入辅助码（`FromPage`）；
+    /// 辅助码态内只翻页、不退出。
+    SharedPage,
+}
+
 /// 辅助码会话（快照/缓冲/重筛）已移入 `wind-aux-code::session`，见
 /// [`wind_aux_code::AuxCodeSession`]；显示态（组合区 preedit/光标）与筛选会话打包在
 /// [`AuxCodeOverlay`]，经 `State.aux_code` 整体持有、整体销毁。
@@ -145,26 +156,39 @@ impl Coordinator {
         Some(act)
     }
 
-    /// 检查按键是否同时绑定了辅助码触发和翻页功能（共享键）。
+    /// 这个键是不是辅助码触发键，以及是哪一种。
     ///
-    /// 两个条件同时成立即为共享键：
-    /// 1. `session_action_for` 把该 VK 映射到了 `PageNext`（仅下翻，不含上翻 `PagePrev`）
-    ///    —— 经 `session_action_for` 查表，与按键分派**同一真相源**（先方案级 `[session_actions]`
-    ///    再回落全局 `keys.session_actions`，含 Shift 变体），不再平行查 `session_keys`。
-    /// 2. `bound_action_with_source` 把同一键解析为 `BoundAction::AuxCode`（方案级 →
-    ///    全局 `keys.key_actions` → `z_key_action` 的完整查找，与按键分派共用同一真相源）。
+    /// 两张表都问——`aux_code` 在 `keys.key_actions` 与 `keys.session_actions` 里各有一份，
+    /// 用户配在哪张都算数；判定结果与按键分派**同一真相源**，不另写平行逻辑。
     ///
-    /// 只做配置查表（不做运行时 yield 仲裁），开销可忽略。
-    pub(crate) fn is_shared_page_aux_key(&self, key_code: u32, shift: bool) -> bool {
+    /// - 字母（`A`..`Z`）恒是辅助码码元，绝不当触发键。
+    /// - \[进入侧] `message_handler` 取 `SharedPage` 走 `AuxCodeTrigger::FromPage`；
+    ///   `Dedicated` 走 `apply_session_action` 的 `AuxCode` 臂（`Direct`）。
+    /// - \[模式内侧] `handle_aux_code_key`：`Dedicated` 静默消费；`SharedPage` 落到导航翻页。
+    pub(crate) fn aux_trigger_kind(&self, key_code: u32, shift: bool) -> Option<AuxTriggerKind> {
+        // 字母恒是码元，绝不当触发键。区间与 `handle_aux_code_key` 里那条累积臂
+        // （`VK_A..=VK_Z`）**取同一个**，两处不会漂。
+        if (keymap::VK_A..=keymap::VK_Z).contains(&key_code) {
+            return None;
+        }
+        let is_aux = self.session_action_for(key_code, shift, false)
+            == Some(wind_config::SessionAction::AuxCode)
+            || matches!(
+                self.bound_action_with_source(key_code),
+                Some((wind_config::BoundAction::AuxCode, _))
+            );
+        if !is_aux {
+            return None;
+        }
         let is_page_next = matches!(
             self.session_action_for(key_code, shift, true),
             Some(wind_config::SessionAction::PageNext)
         );
-        let is_aux_code = matches!(
-            self.bound_action_with_source(key_code),
-            Some((wind_config::BoundAction::AuxCode, _))
-        );
-        is_page_next && is_aux_code
+        Some(if is_page_next {
+            AuxTriggerKind::SharedPage
+        } else {
+            AuxTriggerKind::Dedicated
+        })
     }
 
     /// 创建辅助码 overlay 并激活辅助码模式（`enter_aux_code` 的公共逻辑）。
@@ -321,13 +345,16 @@ impl Coordinator {
         {
             return act;
         }
-        // 触发键在辅助码态内：**专用触发键（只绑 aux_code）静默消费（Consumed），不退出**；
-        // 共享翻页键（同时绑 page_next）已在 `is_aux_code_trigger` 里排除，落到下方导航分支翻页。
-        // 退出辅助码模式**只**有三条路：Esc、空码退格、翻回首页（自动退出）——触发键本身不退出。
-        // 本判断必须排在 `handle_candidate_nav` / 兜底臂之前：否则触发键会落到下方兜底臂
-        // **上屏高亮候选**，那是破坏性动作。
-        if self.is_aux_code_trigger(data) {
-            return KeyAction::Consumed;
+        // 触发键在辅助码态内：
+        // - 专用触发键（`Dedicated`，只绑 aux_code）→ 静默消费（Consumed），**不退出**；
+        // - 共享翻页键（`SharedPage`，同时绑 page_next）→ 落到下方导航分支翻页，**不退出**。
+        // 退出辅助码模式**只**有三条路：Esc、空码退格、翻回首页（自动退出）。本判断必须排在
+        // `handle_candidate_nav` / 兜底臂之前：否则触发键会落到下方兜底臂**上屏高亮候选**，
+        // 那是破坏性动作。
+        match self.aux_trigger_kind(data.key_code, data.modifiers & MOD_SHIFT != 0) {
+            Some(AuxTriggerKind::Dedicated) => return KeyAction::Consumed,
+            Some(AuxTriggerKind::SharedPage) => { /* 共享键：下方导航分支正常翻页 */ }
+            None => {}
         }
         // 候选导航（翻页 / 高亮）：辅助码只收字母，`-`/`=`/`[`/`]` 等按普通导航处理。
         // 共享键在第一页边界时自动退出辅助码模式（见 `handle_candidate_nav_or_auto_exit`）。
@@ -400,44 +427,6 @@ impl Coordinator {
                 }
             }
         }
-    }
-
-    /// 这个键是不是「进辅助码」的触发键。**两张表都问**——`aux_code` 在
-    /// `keys.key_actions` 与 `keys.session_actions` 里各有一份，用户配在哪张都算数。
-    ///
-    /// 会话态那侧取 `include_printable = false`，与 `handle_candidate_nav` 在辅助码态下
-    /// 的取值一致：辅助码态里字母是码元输入，不能被当成会话键抢走。
-    fn is_aux_code_trigger(&self, data: &KeyEventData) -> bool {
-        // ★ 字母恒是码元，绝不当触发键。区间与下方那条累积臂（`VK_A..=VK_Z`）**取同一个**，
-        // 两处不会漂。
-        //
-        // 会话态那侧本已天然排除（`z` 在 `session_key_name_to_vk` 里标 `printable: true`，
-        // 而这里取 `include_printable = false`）；`key_actions` 压根没有 printable 这个维度，
-        // 得在此显式排。少了它，配过 `z = "aux_code"` 的用户在辅助码里再也打不出 `z`。
-        if (keymap::VK_A..=keymap::VK_Z).contains(&data.key_code) {
-            return false;
-        }
-        let shift = data.modifiers & MOD_SHIFT != 0;
-        // 共享翻页键（同时绑 `page_next` 与 `aux_code`）在辅助码模式内**只翻页、不退出**：
-        // 它一旦被当成触发键就会在 `handle_aux_code_key` 里被静默消费掉，翻不了页，
-        // 与「翻页 + 辅助码同键」的意图相悖。故此处先排除会走会话导航的那类键，让它们落到
-        // `handle_candidate_nav_or_auto_exit` 正常翻页。专用触发键（如反引号，只绑 aux_code）
-        // 也不退出——在 `handle_aux_code_key` 里同样被静默消费；退出只走 Esc / 空码退格 / 翻回首页。
-        if matches!(
-            self.session_action_for(data.key_code, shift, true),
-            Some(wind_config::SessionAction::PageNext)
-        ) {
-            return false;
-        }
-        if self.session_action_for(data.key_code, shift, false)
-            == Some(wind_config::SessionAction::AuxCode)
-        {
-            return true;
-        }
-        matches!(
-            self.bound_action_for(data.key_code),
-            Some(wind_config::BoundAction::AuxCode)
-        )
     }
 
     /// 组合区随辅助码更新：通知 UI 并回组合更新（光标在辅助码串尾）。
@@ -1664,7 +1653,10 @@ mod tests {
                 .insert("backslash".to_string(), "aux_code".to_string());
         });
         assert!(
-            !c.is_shared_page_aux_key(keymap::VK_BACKSLASH, false),
+            !matches!(
+                c.aux_trigger_kind(keymap::VK_BACKSLASH, false),
+                Some(AuxTriggerKind::SharedPage)
+            ),
             "`\\`(toggle_punct) 排序在前，首个命中生效，aux_code 被遮蔽 → 非共享键"
         );
     }
