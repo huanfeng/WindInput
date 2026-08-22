@@ -1,5 +1,5 @@
 <!-- Parent: ../../AGENTS.md -->
-<!-- Updated: 2026-08-14 -->
+<!-- Updated: 2026-08-20 -->
 
 # wind-coordinator
 
@@ -34,6 +34,7 @@
 | `src/handle_lifecycle.rs` | 配置重载、服务重启、独占模式进入/复位（IME 激活/焦点/composition 终止仍在 coordinator.rs 的 `impl MessageHandler`） |
 | `src/handle_config.rs` | 配置更新处理（引擎/热键/UI/工具栏） |
 | `src/handle_tooltip.rs` | 候选悬停提示（编码/拆字/拼音反查） |
+| `src/handle_aux_code.rs` | 辅助码模式：进入/退出/筛选/导航/共享键（翻页+辅助码同一键）/自动退出。`AuxCodeTrigger` 枚举统一两种进入路径（`Direct`/`FromPage`），`init_aux_overlay` 不发 UI 通知（由调用方统一发送） |
 | `src/hotkey_match.rs` | key_down 热键匹配 |
 | `src/web_host.rs` | `WebDataHost` trait（16 方法）+ 转发 impl：设置页数据 RPC（**独立 crate `wind-webdata`**）消费宿主能力的窄面。依赖方向 webdata→coordinator，本 crate 因此不依赖 wind-transfer/fontdb（Android 闭包免 C 依赖、check-android 免 NDK 的关键，Cargo.toml 有⚠注释）。★新增 RPC 需要新宿主能力时**必须加在本 trait 上** |
 | `src/freq_learn_tests.rs` | 词频路由/选词记账/自动造词/加词的 crate 内行为测试（白盒零 RPC；原住 webdata 契约测试，按「是否用 web_data_rpc」分拣回归） |
@@ -51,6 +52,7 @@
 - **独占模式单点真相源**：临时拼音/临英/URL/特殊/mix 收敛为单字段 `State.active: Option<ModeKind>`（pipeline.rs），结构上保证「同一时刻至多一个独占模式」。新增模式 = 加一个 `ModeKind` 变体 + 一条 match 臂 + 一个 `handle_*_key`，**不要**再引入并行 bool。
 - **不移植 Go 决策器**：Rust 各模式按 schema id 独立查引擎（`EngineManager::convert_with`），无被多模式改写的共享引擎，故 pipeline.rs 刻意不引入 Capability/Processor trait 抽象。读 Go 同名模块时勿照搬其 `decider`/`applyEngineDiff` 机制——此处不存在。
 - **导航键走统一入口 `apply_nav_key`**（配置驱动 `keymap::NavKeys`，来自 wind-keys）：普通模式与所有候选模式共用；`include_printable` 区分码表型（`-`/`=` 作翻页）与文本/表达式型（临英/快捷，`-`/`=` 作输入）。禁止在各模式里各写一套翻页/高亮。
+- **辅助码与翻页共键**：同一按键可同时绑定翻页（`session_keys`）和辅助码触发（`[key_actions]`），系统运行时自动识别。检测统一收口到 `handle_aux_code.rs` 内的 `aux_trigger_kind(key_code, shift) -> Option<AuxTriggerKind>`：返回 `SharedPage` 表示同时绑 `page_next` + `aux_code`（共享键），返回 `Dedicated` 表示只绑 `aux_code`；字母恒排除。`aux_trigger_kind` 复用按键分派的同一查表（`session_action_for` + `bound_action_with_source`，不另写平行逻辑；同 VK 双键名歧义配置按首个命中生效）。进入侧（`message_handler.rs` 的 `apply_session_action` 之后）取 `SharedPage` 翻页成功后调用 `enter_aux_code(state, AuxCodeTrigger::FromPage)`；`Dedicated` 走 `apply_session_action` 的 `AuxCode` 臂（`Direct`）。辅助码模式内，`handle_aux_code_key` 对 `Dedicated` 静默消费、`SharedPage` 落到 `handle_candidate_nav_or_auto_exit` 翻页；后者直接调用 `page_prev`/`page_next`（绕过 `handle_candidate_nav` 的 `include_printable=false` 过滤），并在从非首页翻回首页且 session 为空时自动退出。`enter_aux_code` 统一两种进入路径（`AuxCodeTrigger::Direct` / `FromPage`），有防重入守卫（`state.active == Some(ModeKind::AuxCode)` 时返回 None）。`init_aux_overlay` 不发送 UI 通知（`notify_ui_update` 由调用方统一发送），`AuxCodeTrigger::FromPage` 在 `init_aux_overlay` 前后保存/恢复 `current_page`，确保共享键路径只发两次 UI 更新（避免三重通知闪烁）。所有辅助码逻辑内聚在 `handle_aux_code.rs` 内，其他模块只提供信息 pathway。
 - **夺取回退（`pipeline::Rewind`）**：URL 抢前缀、z 抢前导拼音等「夺取式」模式登记快照后，退到前缀边界再退格 → 撤销夺取、把 `snapshot` 回放回正常码表输入流。URL 与 z 共用此机制，勿各写各的回退。
 - **拼音逐步转换不变量**：`committed_text`/`committed_segs` 存「选中汉字累积、留组合区不上屏，全转完才整体上屏」；码表（五笔）选词消费整串、绝不进入此态。`preedit` 仅含输入码/拼音，**绝不含候选列表**。
 - **配置热重载**：读配置统一经 `self.rt()`（`RwLock<Arc<ConfigBundle>>` 原子快照）；`reload_user_config` 整体替换 bundle，轻量项（标点/热键/候选数/导航键/配对）即时生效，重型项（引擎/方案/词典/字体）仍需重启。

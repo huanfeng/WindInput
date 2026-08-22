@@ -417,7 +417,9 @@ impl Coordinator {
                 Some(self.commit_and_enter_mix_mode(state, idx, key_code))
             }
             // 辅助码刻意**不顶字**：候选列表保持原状仅筛选，进入后原地过滤。见 `enter_aux_code`。
-            BoundAction::AuxCode => self.enter_aux_code(state, key_code),
+            BoundAction::AuxCode => {
+                self.enter_aux_code(state, crate::handle_aux_code::AuxCodeTrigger::Direct)
+            }
             BoundAction::Special(id) => {
                 let idx = self.special_mode_idx(id)?;
                 let schema = self.special_schema(idx)?;

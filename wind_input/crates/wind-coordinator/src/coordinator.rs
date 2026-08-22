@@ -865,9 +865,6 @@ pub struct Coordinator {
     /// 辅助码表（懒加载，首次辅助码输入时经 `ensure_aux_code_table` 读取并 merge；路径由
     /// 调用方经覆盖解析函数定位，本处不做 `data_dir.join`）。`None` = 尚未加载。
     pub(crate) aux_code_table: std::sync::RwLock<Option<wind_aux_code::AuxCodeTable>>,
-    /// 「辅助码触发键被音节分隔符占用」的告警是否已发过（每方案一次，随
-    /// `invalidate_aux_code_table` 复位）。见 `handle_aux_code::warn_aux_code_key_taken`。
-    pub(crate) aux_code_key_warned: std::sync::atomic::AtomicBool,
     /// 快捷输入格式表（`system.quick.toml`，支持用户目录整份覆盖）。
     ///
     /// 启动加载后不变，故无锁：与 `system.phrases.toml` 同语义——**改完必须重启服务**，
@@ -1651,7 +1648,6 @@ impl Coordinator {
             current_toolbar_monitor: Mutex::new(None),
             reverse: std::sync::RwLock::new(reverse),
             aux_code_table: std::sync::RwLock::new(None),
-            aux_code_key_warned: std::sync::atomic::AtomicBool::new(false),
             quick_formats,
             // 空初值：真正的装载在 new() 里经 `reload_quick_adjust` 完成（需要 store，
             // 而 store 在本结构体构造之后才可用）。headless 无 store 时保持空 = 出厂顺序。
@@ -2697,9 +2693,6 @@ impl Coordinator {
             .aux_code_table
             .write()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        // 键位环境随方案而变（全拼反引号是分隔符、双拼是自由键），故告警配额一并重置。
-        self.aux_code_key_warned
-            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 就地改写内存配置并重建 ConfigBundle，**不触发** reload_user_config 的那一整套副作用
@@ -3073,13 +3066,13 @@ impl Coordinator {
             wind_config::SessionAction::SelectCandidate(_)
             | wind_config::SessionAction::SelectChar(_) => return None,
             // 辅助码：**不顶字**，原地筛当前候选（见 `enter_aux_code` / `commit_and_enter_bound_action`
-            // 的同名分支）。门卫在 `enter_aux_code` 里（未开启 / 无码表 / 该键被音节分隔符占用
+            // 的同名分支）。门卫在 `enter_aux_code` 里（未开启 / 无码表 / 无候选
             // 都返回 None），此处不重复判断——两处各写一份判据必然漂移。
             //
             // 无候选时走不到这里：上面的 `requires_candidates()` 已经放行了按键，
             // 于是空闲按 Tab 仍是宿主的制表符。
             wind_config::SessionAction::AuxCode => {
-                return self.enter_aux_code(state, data.key_code);
+                return self.enter_aux_code(state, crate::handle_aux_code::AuxCodeTrigger::Direct);
             }
             // 表里只存启用项（`ConfigBundle::build` 过滤过），None 到不了这里。
             wind_config::SessionAction::None => return None,

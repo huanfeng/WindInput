@@ -15,22 +15,14 @@ scheme = "shuangpin"
 [engine.pinyin.shuangpin]
 layout = "xiaohe"
 
-# 辅助码：拼音候选的字形二次筛选（小鹤拆分码）。路径相对 schemas 目录。
-# 词组逐字首码匹配为固定语义（第 i 位命中第 i 字任一码的首字符；短于词字数 = 前缀态保留）。
-#
-# ⚠️ 本段只声明「双拼推荐哪张辅助码表」，**不代表功能开启**。
-# 总开关是 config.toml 的 [schema.pinyin.aux_code].enabled（出厂 false）；
-# 用户要单独在双拼开启，写 %APPDATA%\WindInput\schema_overrides\shuangpin.toml：
-#     [engine.aux_code]
-#     enabled = true
-# 行为字段（enabled / max_phrase_len）在此留空 = 回落全局，见 schema-config-layering.md §4。
+# 辅助码：拼音候选的字形二次筛选（小鹤拆分码）。
+# 词组逐字首码匹配：第 i 位命中第 i 字任一码的首字符；输入短于词字数 = 前缀态保留。
+# 行为字段（enabled / max_phrase_len）留空回落全局，见 schema-config-layering.md §4。
 [engine.aux_code]
 files = ["aux_code/flypy_full.txt"]
 
-# 反引号进辅助码（组码中有效；空缓冲时落普通标点）。覆盖全局 backtick = "temp_pinyin"
-# 的默认绑定——temp_pinyin_target 对拼音方案本就不成立，反引号在此原为自由键
-# （双拼不支持手动音节分隔符，见 pinyin_separator_key 的 pinyin_is_shuangpin 早退）。
-# 绑定本身不激活功能：enabled = false 时门卫拒绝进入，该键照常落普通标点。
+# 反引号进辅助码（组码中有效；空缓冲时落普通标点）。绑定本身不激活功能：
+# enabled = false 时门卫拒绝进入，该键照常落普通标点。
 [key_actions]
 backtick = "aux_code"
 
