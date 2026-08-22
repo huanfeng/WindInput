@@ -902,7 +902,7 @@ impl MessageHandler for Coordinator {
         // 仅有候选时生效；无候选时下方 match 的回退臂负责透传方向/翻页键。
         if let Some(act) = self.apply_session_action(&mut state, data, true) {
             // 共享键：翻页后同时进入辅助码模式（仅当键同时绑到翻页和辅助码时触发）。
-            if self.is_shared_page_aux_key(data.key_code)
+            if self.is_shared_page_aux_key(data.key_code, data.modifiers & MOD_SHIFT != 0)
                 && let Some(enter_act) = self
                     .enter_aux_code(&mut state, crate::handle_aux_code::AuxCodeTrigger::FromPage)
             {

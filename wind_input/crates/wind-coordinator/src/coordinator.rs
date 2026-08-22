@@ -3066,13 +3066,13 @@ impl Coordinator {
             wind_config::SessionAction::SelectCandidate(_)
             | wind_config::SessionAction::SelectChar(_) => return None,
             // 辅助码：**不顶字**，原地筛当前候选（见 `enter_aux_code` / `commit_and_enter_bound_action`
-            // 的同名分支）。门卫在 `enter_aux_code` 里（未开启 / 无码表 / 该键被音节分隔符占用
+            // 的同名分支）。门卫在 `enter_aux_code` 里（未开启 / 无码表 / 无候选
             // 都返回 None），此处不重复判断——两处各写一份判据必然漂移。
             //
             // 无候选时走不到这里：上面的 `requires_candidates()` 已经放行了按键，
             // 于是空闲按 Tab 仍是宿主的制表符。
             wind_config::SessionAction::AuxCode => {
-                return self.enter_aux_code(state, data.key_code);
+                return self.enter_aux_code(state, crate::handle_aux_code::AuxCodeTrigger::Direct);
             }
             // 表里只存启用项（`ConfigBundle::build` 过滤过），None 到不了这里。
             wind_config::SessionAction::None => return None,
