@@ -3074,6 +3074,23 @@ impl Coordinator {
             wind_config::SessionAction::AuxCode => {
                 return self.enter_aux_code(state, crate::handle_aux_code::AuxCodeTrigger::Direct);
             }
+            // 翻页 + 进辅助码的组合动词（单一 `session_actions` 写法，无需跨 `key_actions`）。
+            // 正常态先翻到下一页、尚未进入辅助码态则进入（FromPage 保留刚翻到的页码）；
+            // 已在辅助码态内则只翻页（与 `SharedPage` 语义一致，底下
+            // `handle_candidate_nav_or_auto_exit` 把本动词按 `page_next` 处理）。
+            // 辅助码未开启 / 无码表时 `enter_aux_code` 返回 None，退化为纯翻页。
+            wind_config::SessionAction::PageNextAuxCode => {
+                self.page_next(state);
+                if state.active.is_none() {
+                    if let Some(act) =
+                        self.enter_aux_code(state, crate::handle_aux_code::AuxCodeTrigger::FromPage)
+                    {
+                        return Some(act);
+                    }
+                }
+                self.notify_ui_update(state);
+                return Some(KeyAction::Consumed);
+            }
             // 表里只存启用项（`ConfigBundle::build` 过滤过），None 到不了这里。
             wind_config::SessionAction::None => return None,
         };

@@ -845,7 +845,20 @@ pub enum SessionAction {
     ///
     /// ⚠️ `key_actions` 里的 `aux_code` 仍然有效且保留（双拼出厂就是 `backtick = "aux_code"`）。
     /// 两条路都通向同一个 `enter_aux_code`，差别只在**哪些键名解析得出来**。
+    ///
+    /// 想让同一个键**同时翻页 + 进辅助码**且不跨表，用 [`Self::PageNextAuxCode`]
+    /// （单一 `session_actions` 动词），不必在 `key_actions` 另配一份 `aux_code`。
     AuxCode,
+    /// 翻页并进入辅助码筛选（共享键的「单一表」写法）。
+    ///
+    /// 正常态下先翻到下一页、再进入辅助码模式（`AuxCodeTrigger::FromPage`，保留刚翻到的
+    /// 页码，从那一页开始筛选）；已在辅助码态内则只翻页、不重复进入。语义等价于把
+    /// `page_next` 与 `aux_code` 绑到同一个键，但**无需跨 `key_actions` / `session_actions`
+    /// 两张表**——辅助码本质是有候选才触发的会话内动作，本就该住在 `session_actions`。
+    ///
+    /// 仅 `page_next` 参与共键（`page_prev` 不参与，与前 `SharedPage` 路径的限制一致）；
+    /// 辅助码未开启 / 无码表 / 无候选时退化为纯翻页（`enter_aux_code` 门卫同策略）。
+    PageNextAuxCode,
 }
 
 impl SessionAction {
@@ -873,6 +886,7 @@ impl SessionAction {
         match t.as_str() {
             "page_prev" => Self::PagePrev,
             "page_next" => Self::PageNext,
+            "page_next_aux_code" => Self::PageNextAuxCode,
             "highlight_up" => Self::HighlightUp,
             "highlight_down" => Self::HighlightDown,
             // 与 `BoundAction::parse` 的同名动词逐字一致：同一个功能在两张表里写法不同的话，
@@ -953,6 +967,7 @@ impl std::fmt::Display for SessionAction {
             Self::SelectCandidate(n) => write!(f, "select_candidate:{n}"),
             Self::SelectChar(n) => write!(f, "select_char:{n}"),
             Self::AuxCode => f.write_str("aux_code"),
+            Self::PageNextAuxCode => f.write_str("page_next_aux_code"),
         }
     }
 }

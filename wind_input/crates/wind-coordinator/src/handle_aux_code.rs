@@ -266,7 +266,9 @@ impl Coordinator {
                 }
                 Some(KeyAction::Consumed)
             }
-            Some(wind_config::SessionAction::PageNext) => {
+            Some(
+                wind_config::SessionAction::PageNext | wind_config::SessionAction::PageNextAuxCode,
+            ) => {
                 if self.page_next(state) {
                     self.notify_ui_update(state);
                 }
@@ -1659,5 +1661,105 @@ mod tests {
             ),
             "`\\`(toggle_punct) 排序在前，首个命中生效，aux_code 被遮蔽 → 非共享键"
         );
+    }
+
+    /// `page_next_aux_code`：单一 `session_actions` 动词即可翻页 + 进辅助码，无需跨表。
+    #[test]
+    fn page_next_aux_code_enters_and_pages() {
+        let c = coord_with_data_cfg("pna_enter", data_dir_with_aux("pna_enter"), |cfg| {
+            cfg.schema.active = "pinyin".to_string();
+            cfg.keys
+                .session_actions
+                .insert("tab".to_string(), "page_next_aux_code".to_string());
+        });
+        {
+            let mut st = seed_composition(&c);
+            st.chinese_mode = true;
+            // 12 个候选，per_page=9 → 2 页
+            st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
+        }
+        let act = c.handle_key_event(&key(keymap::VK_TAB, 0));
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.active, Some(ModeKind::AuxCode), "应进入辅助码模式");
+        assert!(st.aux_code.is_some(), "应建立 overlay");
+        assert!(matches!(act, KeyAction::UpdateComposition { .. }));
+        // 翻页后的页码必须保留（FromPage 保留刚翻到的页码）
+        assert_eq!(st.current_page, 1, "翻到第二页后页码应保留");
+    }
+
+    /// 空缓冲时按 `page_next_aux_code` → 不进辅助码，键正常放行。
+    #[test]
+    fn page_next_aux_code_no_candidates_passes_through() {
+        let c = coord_with_data_cfg("pna_empty", data_dir_with_aux("pna_empty"), |cfg| {
+            cfg.schema.active = "pinyin".to_string();
+            cfg.keys
+                .session_actions
+                .insert("tab".to_string(), "page_next_aux_code".to_string());
+        });
+        {
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            // 无候选
+        }
+        let _act = c.handle_key_event(&key(keymap::VK_TAB, 0));
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.active, None, "空缓冲不进辅助码");
+    }
+
+    /// 辅助码模式内按 `page_next_aux_code` → 只翻页、不退出、不重复进入。
+    #[test]
+    fn page_next_aux_code_continues_paging_in_aux() {
+        let c = coord_with_data_cfg("pna_paging", data_dir_with_aux("pna_paging"), |cfg| {
+            cfg.schema.active = "pinyin".to_string();
+            cfg.keys
+                .session_actions
+                .insert("tab".to_string(), "page_next_aux_code".to_string());
+        });
+        {
+            let mut st = seed_composition(&c);
+            st.chinese_mode = true;
+            st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
+        }
+        // 进入辅助码模式（page_next_aux_code：先翻页再进入）
+        let _ = c.handle_key_event(&key(keymap::VK_TAB, 0));
+        {
+            let st = c.state.lock().unwrap();
+            assert_eq!(st.active, Some(ModeKind::AuxCode));
+            assert_eq!(st.current_page, 1, "已进入且翻到第二页");
+        }
+        // 输入辅助码 'a'，使 session 非空（防止翻回首页时自动退出）
+        let _ = c.handle_key_event(&key(vk_letter('A'), 0));
+        // 模式内再按 → 只翻页（已是末页，不翻动）、不退出
+        let act = c.handle_key_event(&key(keymap::VK_TAB, 0));
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.active, Some(ModeKind::AuxCode), "模式内不应退出");
+        assert!(matches!(
+            act,
+            KeyAction::Consumed | KeyAction::UpdateComposition { .. }
+        ));
+    }
+
+    /// 辅助码未启用时按 `page_next_aux_code` → 只翻页不进辅助码。
+    #[test]
+    fn page_next_aux_code_disabled_pure_page() {
+        let c = coord_with_data_cfg(
+            "pna_disabled",
+            data_dir_with_aux_enabled("pna_disabled", Some(false)),
+            |cfg| {
+                cfg.schema.active = "pinyin".to_string();
+                cfg.keys
+                    .session_actions
+                    .insert("tab".to_string(), "page_next_aux_code".to_string());
+            },
+        );
+        {
+            let mut st = seed_composition(&c);
+            st.chinese_mode = true;
+            st.candidates = (0..12).map(|i| cand(&format!("候选{i}"))).collect();
+        }
+        let _act = c.handle_key_event(&key(keymap::VK_TAB, 0));
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.active, None, "辅助码未启用不应进入辅助码模式");
+        assert!(st.aux_code.is_none(), "不应创建 overlay");
     }
 }
