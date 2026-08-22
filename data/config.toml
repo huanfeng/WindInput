@@ -632,6 +632,8 @@ key_actions = {}
 #       cancel(放弃当前输入，等同 Esc；别名 clear) / none(在本态禁用该键)
 #       select_candidate:N(选中当前页第 N 个候选，N 从 1 起，2 即次选键)
 #       select_char:N(以词定字，取高亮候选词的第 N 个字，N 从 1 起)
+#       aux_code(普通辅助码筛选：有候选时直接进、空缓冲时该键落普通标点；辅助码未开启 /
+#       无码表 / 当前无候选时门卫拒绝、不吞键。字母恒当码元、不当触发键)
 #       page_next_aux_code(翻页并进入辅助码筛选：Tab 既翻到下一页又进辅助码，
 #       已在辅助码态内则只翻页；辅助码未开启时退化为纯翻页。想让同一个键同时翻页+辅助码
 #       就用它，不必跨 key_actions / session_actions 两张表配)
@@ -639,6 +641,8 @@ key_actions = {}
 #   session_actions = { tab = "page_next", "shift+tab" = "page_prev", capslock = "page_prev" }
 # 例（嫌 Esc 太远，用 Tab 放弃这一段）：
 #   session_actions = { tab = "cancel" }
+# 例（反引号进普通辅助码筛选，单一动词）：
+#   session_actions = { backtick = "aux_code" }
 # 例（Tab 既翻页又进辅助码筛选，单一动词、不必跨表配）：
 #   session_actions = { tab = "page_next_aux_code" }
 # 本表只存**你显式配的**键。下面四项 page_keys / highlight_keys / select_key_groups /
