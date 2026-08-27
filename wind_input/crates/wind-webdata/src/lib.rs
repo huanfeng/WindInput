@@ -1145,6 +1145,20 @@ pub trait WebDataRpc: WebDataHost {
                         obj.insert("codetableOverride".to_string(), ov);
                     }
                 }
+                // override 层的 `[punct]` 段。设置页据此分辨自定义标点表的**来源**：
+                // 合并值有、这里没有 ⇒ 方案作者写的；两边都有 ⇒ 用户自己改的。
+                //
+                // 不给「跟随全局时表里是什么」的旁路字段——那就是全局 `input.punct`，
+                // 设置页手里本来就有整份全局配置，再从这里发一遍就是第二个真相源。
+                let punct_ov = self
+                    .engine_mgr()
+                    .get_schema_override(id)
+                    .and_then(|t| t.get("punct").map(|p| serde_json::to_value(p.clone())))
+                    .transpose()?
+                    .unwrap_or_else(|| json!({}));
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("punctOverride".to_string(), punct_ov);
+                }
                 // 首码集里的符号键（键名形式）。给设置页判「按键功能表绑的这个键，是不是
                 // 同一方案的码元首码」——两者同层冲突，内核裁决是绑定优先，于是该符号
                 // 起头的编码在本方案静默失效（见 schema-key-actions.md §4.3）。
@@ -3233,6 +3247,10 @@ pub const READONLY_SIDECAR_FIELDS: &[&str] = &[
     // 方案照常能用，但那一段从此谁也不读、也没人会想到去删。
     "followedCodetable",
     "codetableOverride",
+    // override 层的 `[punct]` 段原文。设置页判「这张自定义标点表是方案作者写的还是我改的」
+    // 只能问它——合并值里的 `Some(表)` 两种来源给不出区别，拿它判会把「方案自带」显示成
+    // 「已自定义」，用户一取消就以为回到全局、实际回到作者的表。同 `codetableOverride`。
+    "punctOverride",
     "leadingCodeKeys",
     "keysOverview",
 ];
@@ -3336,6 +3354,20 @@ fn json_diff(base: &Value, cfg: &Value) -> Option<Value> {
             let mut out = serde_json::Map::new();
             for (k, cv) in c {
                 match b.get(k) {
+                    // ★★ `custom_mappings` 必须作**原子叶子**，与 `merge_toml` 那侧的整体
+                    // 替换例外配对。逐键下钻的话，用户改一行 ⇒ override 里只有那一行 ⇒
+                    // 读侧整体替换 ⇒ **方案作者写的其余行全部丢失**。
+                    //
+                    // ⇒ 可复用判据：**改了合并语义（读侧），必须同步查产生 override 的写侧。**
+                    // 「整体替换 + 稀疏 diff」这个组合是数据丢失，而两侧各自看都合理。
+                    //
+                    // 键空间是用户数据（标点 token 可含 `.`/`/`），本就不该按路径下钻——
+                    // 全局配置那侧早有同一条铁律（`Capabilities::map_keys` 的原子叶子）。
+                    Some(bv) if k == "custom_mappings" => {
+                        if bv != cv {
+                            out.insert(k.clone(), cv.clone());
+                        }
+                    }
                     Some(bv) => {
                         if let Some(d) = json_diff(bv, cv) {
                             out.insert(k.clone(), d);
@@ -5960,6 +5992,42 @@ moved = [{ id = 'date.lunar', position = 0 }]
         assert_eq!(d, json!({ "a": 9, "t": { "y": 20 } }));
         // 完全相同 → None
         assert!(json_diff(&base, &base).is_none());
+    }
+
+    /// ★★ `custom_mappings` 必须整表进 override，不能只写变化的那一行。
+    ///
+    /// 读侧 `merge_toml` 对它是**整体替换**（否则用户删不掉方案作者写的行）。写侧若照常
+    /// 逐键下钻，两条各自合理的规则合起来就是数据丢失：用户改一行 ⇒ override 只有那一行
+    /// ⇒ 整体替换 ⇒ 作者写的其余行全没了。
+    ///
+    /// 断言落在「**没被改的那一行在不在 diff 里**」——只断言「改的那行在」的话，
+    /// 逐键下钻的实现照样通过。
+    #[test]
+    fn json_diff_keeps_custom_mappings_atomic() {
+        let base = json!({
+            "punct": { "mode": "follow", "custom_mappings": { ".": ["。"], ",": ["，"] } }
+        });
+        // 用户只改了 `.` 那一行，`,` 原样不动。
+        let cfg = json!({
+            "punct": { "mode": "follow", "custom_mappings": { ".": ["·"], ",": ["，"] } }
+        });
+        let d = json_diff(&base, &cfg).unwrap();
+        assert_eq!(
+            d.pointer("/punct/custom_mappings"),
+            Some(&json!({ ".": ["·"], ",": ["，"] })),
+            "★ 整张表都要进 override——逐键 diff 只会写 `.` 那一行，读侧整体替换后 `,` 丢失"
+        );
+        // 表没变时不该无谓地写进 override（否则每次打开设置页保存都在冻结一份快照）。
+        assert!(json_diff(&base, &base).is_none(), "未改动时不得产生 diff");
+        // 同层的其余键仍走稀疏 diff——原子只对 `custom_mappings` 一个键成立。
+        let mode_only = json!({
+            "punct": { "mode": "english", "custom_mappings": { ".": ["。"], ",": ["，"] } }
+        });
+        assert_eq!(
+            json_diff(&base, &mode_only).unwrap(),
+            json!({ "punct": { "mode": "english" } }),
+            "只改 mode 时不该把整表也写进 override"
+        );
     }
 
     /// 只读旁路字段不得随 saveConfig 落进 override。
