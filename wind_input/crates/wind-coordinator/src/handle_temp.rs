@@ -814,7 +814,17 @@ impl Coordinator {
             // 于是同一串输入在英文方案下取 300 条、在临英下只取 50 条，用户刚用过的词
             // 若在 top-k 里排 50 名开外，临英就永远等不到词频把它提上来。
             // `loaded_engine_type` 而非 `schema_engine_type`：后者每次读文件 + 解析 TOML，
-            // 本函数在逐键路径上（同 `temp_pinyin_limit` 的取舍）。
+            // 本函数在逐键路径上。
+            //
+            // ⚠️ 但它查的是**已加载引擎表**，而英文方案通常不在 `schema.available` 里、不受
+            // 预热覆盖 ⇒ 不先 `ensure_schema` 的话，每次进程启动后的**首次**临英拿到的是
+            // `None`。今天 `None` 与 `English` 恰好同落 `_ => 300` 那一分支，看不出问题；
+            // 一旦临英改指码表类方案，就是「首键 300、此后 100」的真缺陷。
+            // ★ 不可照抄 `temp_pinyin_limit`：那边的 `_` 兜底是**小值**（50），本函数的
+            // `_` 兜底是**大值**（300）——同一个「取不到引擎类型」的处置，在两处后果相反。
+            // ensure 的代价：已加载时只是一次 `is_loaded` map 查找，而下一行的 `convert_with`
+            // 内部本来也要调 `ensure_loaded`，等于只把它提前了一行。
+            self.engine_mgr.ensure_schema(&schema);
             let limit = Self::initial_candidate_limit_of(
                 self.engine_mgr.loaded_engine_type(&schema),
                 &code,
