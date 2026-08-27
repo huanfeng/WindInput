@@ -1608,6 +1608,14 @@ impl Coordinator {
                 if !self.engine_mgr.ensure_schema(member) {
                     continue;
                 }
+                // 50 是**每成员配额**，不是主输入路那种「取数上限」——别照
+                // `initial_candidate_limit_of` 把它按引擎类型放大。本函数无跨成员排序
+                // （见函数文档「成员顺序即候选优先级」），`seen` 又是先到先得，于是每个成员
+                // 取多少，直接等于它从靠后成员那里抢走多少位置：把它提到 300，排在末位的
+                // `english` 成员的候选就从第 ~100 条被推到第 ~400 条，越改越难找。
+                //
+                // 临英那处（`update_temp_english_candidates`）形似而实不同：那里只有一个词库
+                // 来源，上限纯粹是「够不够得着」，故与主路径同表分级。
                 let result = self.engine_mgr.convert_with(member, &state.mix_buffer, 50);
                 // 空串是「这个成员没给出显示串」（方案加载失败等），不是一种形态——漏掉这半个
                 // 判据会把组合区整段吞成前缀。

@@ -809,9 +809,17 @@ impl Coordinator {
             // 词库段起点：下面的词频重排与候选调整**只作用于这一段**。
             let dict_start = cands.len();
             let code = buf.to_lowercase();
-            let result = self
-                .engine_mgr
-                .convert_with(&schema, &code, ENGINE_MAX_CANDIDATES);
+            // 取数上限按**词库方案自己的引擎类型**分级，与主输入路同一张表（见
+            // `initial_candidate_limit_of`）。此前写死 `ENGINE_MAX_CANDIDATES`（50），
+            // 于是同一串输入在英文方案下取 300 条、在临英下只取 50 条，用户刚用过的词
+            // 若在 top-k 里排 50 名开外，临英就永远等不到词频把它提上来。
+            // `loaded_engine_type` 而非 `schema_engine_type`：后者每次读文件 + 解析 TOML，
+            // 本函数在逐键路径上（同 `temp_pinyin_limit` 的取舍）。
+            let limit = Self::initial_candidate_limit_of(
+                self.engine_mgr.loaded_engine_type(&schema),
+                &code,
+            );
+            let result = self.engine_mgr.convert_with(&schema, &code, limit);
             for c in result.candidates {
                 // 来源与码原样带上：临英与英文方案共用一个词频桶，记账要的正是这两样
                 // （见 `record_temp_english_selection`）。此前只取 `text`，候选身份在这里

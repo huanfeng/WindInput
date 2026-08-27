@@ -486,14 +486,31 @@ impl Coordinator {
 
     /// 首次加载候选上限（对齐 Go：短前缀小批量分级加载，长前缀近全量）。
     pub(crate) fn initial_candidate_limit(&self, input: &str) -> usize {
+        Self::initial_candidate_limit_of(self.engine_mgr.current_engine_type(), input)
+    }
+
+    /// 同 [`Self::initial_candidate_limit`]，但按**指定引擎类型**分级。
+    ///
+    /// overlay 类模式的候选来自它自己引用的方案，而 `current_engine_type()` 报的是**主方案**
+    /// （临英下常是五笔/混输）——拿它分级，等于给英文词库套上码表那档「单字母只取 100 条」。
+    /// 临拼早有同型分流（见 `temp_pinyin_limit`），临英此前漏了、写死 50 条。
+    ///
+    /// 真机现象：英文方案下打 `t` 能出刚用过的 `then`，临英下同一个 `t` 出不来，而打到 `th`
+    /// 又正常。根因是 `then` 在该词库 `t` 的 top-k 里排第 86（`t` 前缀有 232 条同为最高
+    /// weight，按 `order` 兜底），卡在临英的 50 与主路径的 300 之间；`th` 下它排第 15，
+    /// 两个上限都够得着。**词频重排只能重排已在池中的候选**，取不到就无从谈起。
+    pub(crate) fn initial_candidate_limit_of(
+        engine_type: Option<wind_engine::engine::EngineType>,
+        input: &str,
+    ) -> usize {
         let len = input.chars().count();
-        match self.engine_mgr.current_engine_type() {
+        match engine_type {
             Some(wind_engine::engine::EngineType::CodeTable) => match len {
                 0 | 1 => 100,
                 2 => 300,
                 _ => 1000,
             },
-            // 拼音 / 混输
+            // 拼音 / 混输 / 英文
             _ => 300,
         }
     }

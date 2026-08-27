@@ -274,6 +274,53 @@ fn temp_english_candidates_follow_recorded_freq() {
     );
 }
 
+/// 取数上限须按**词库方案**（english）的引擎类型分级，不是写死 50。
+///
+/// # 判据词的位次就是这条测试的全部意义
+///
+/// `technicians` 在内置英文词库 `t` 前缀的 top-k 里排第 **150**：50 条取不到、300 条取得到。
+/// 换一个排在前 50 的词，改前改后都能通过，等于什么都没锁住——本条已做变异验证（把上限
+/// 改回 50 则精确变红）。
+///
+/// # 这条守的是什么缺陷
+///
+/// 真机现象：英文方案下打 `t` 能出刚用过的词，临英下同一个 `t` 出不来，打到 `th` 又正常。
+/// 根因不在词频链路（读写两端都正常），而在**候选池**——词频重排只能重排已在池中的候选，
+/// 取不到就无从谈起。临英此前写死 `ENGINE_MAX_CANDIDATES`(50)，而主输入路按引擎类型取 300。
+///
+/// ⚠️ 断言用 `debug_all_candidate_texts` 而非 `dict_texts`：后者只有**当前页**，一页装不下
+/// 第 150 名，用它会让「进没进池」与「排到第几」两件事混在一起。
+#[test]
+fn temp_english_limit_follows_dict_schema_engine_type() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    const TARGET: &str = "technicians";
+    let store = store_at("limit_scope");
+    let coord = Coordinator::new_headless_with_store(
+        temp_english_config(true, "top"),
+        Some(&data_dir()),
+        store.clone(),
+    );
+    // 直接种记录：默认 `code_scope = "candidate"`，记账码即候选自身拼写。
+    store.record_freq("english", TARGET, TARGET).unwrap();
+
+    enter_temp_english(&coord, "t");
+
+    let all = coord.debug_all_candidate_texts();
+    assert!(
+        all.iter().any(|t| t == TARGET),
+        "「{TARGET}」在 t 的 top-k 里排第 150，上限 300 时必须进池（实得 {} 条候选）",
+        all.len()
+    );
+    assert_eq!(
+        dict_texts(&coord).first().map(String::as_str),
+        Some(TARGET),
+        "唯一有词频记录者，`top` 策略下应升到词库段首位"
+    );
+}
+
 /// 词频重排**不得越过首候选**：首条恒是用户所打原文。
 ///
 /// 这是临英的硬承诺——打词库里没有的词时，原文是唯一能上屏的东西。重排一旦作用于整个列表，
