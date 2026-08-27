@@ -1,22 +1,40 @@
 //! wind-punct: 标点转换纯逻辑（从 wind-coordinator 抽出，可原生测试）。
 //!
 //! 与 Go `wind_input/internal/coordinator/handle_punctuation.go` 对齐。所有函数无副作用
-//! （除经 `&mut PunctuationConverter` 推进引号状态机外），输入为 `&InputConfig` 配置 +
-//! 当前模式布尔（chinese_punct / full_width），便于单测。
+//! （除经 `&mut PunctuationConverter` 推进引号状态机外），输入为配置 + 当前模式布尔
+//! （chinese_punct / full_width），便于单测。
 //!
 //! 转换优先级（对齐 Go `convertPunct`）：自定义映射 → 数字后智能 → 中文标点 → 全半角。
+//!
+//! # ★★ 参数是 `&PunctConfig` 而不是 `&InputConfig`（自定义标点方案级化的关键）
+//!
+//! 自定义映射表可以由方案整表替换（[`wind_config::PunctSpec::custom_mappings`]），于是
+//! 「该用哪张表」不再是全局唯一答案——临英查 `english` 方案的表、快符查快符方案的表、
+//! 主输入路查活跃方案的表。调用方必须显式说明用的是**哪一份**。
+//!
+//! ⇒ 凡读 `punct.*` 的函数一律收窄到 `&PunctConfig`，由 `Coordinator::effective_punct`
+//! 供给；**经本 crate 的消费点漏接一个就是编译失败**，而不是「这条路上方案表静默不生效」。
+//! 同型见 `[phrases]` 六闸门把 `scope` 做成必填参数（漏接表现是另一个功能停止工作，零日志）。
+//!
+//! ⚠️ **这道防线有一个缺口**：`PunctuationConverter::peek_custom`（wind-transform）可以被
+//! 直接调用，绕过本 crate。当前唯一这么做的是 `Coordinator::english_pairs_via_pipeline`
+//! （英文自动配对要算左右符号的实际形态），它有专门的守门测试。**再出现这种直调时，要么
+//! 收编进本 crate，要么给它也补一条守门测试**——签名收窄管不着它。
+//!
+//! 仍吃 `&InputConfig` 的是读 `symbol.*` 的那几个（[`participates`] /
+//! [`english_participates`] / [`english_smart_source_chars`]）——智能符号**不下放**方案级。
 
-use wind_config::config::InputConfig;
+use wind_config::config::{InputConfig, PunctConfig};
 use wind_transform::fullwidth::to_full_width;
 use wind_transform::punctuation::PunctuationConverter;
 
 /// 数字后智能标点：中文标点模式下，若 ch 在智能标点列表且光标前一字符为数字，
 /// 则该标点按英文（半角）输出（如 "3." 不转 "3。"）。`prev_char` 为 UTF-16 单元（0=不可用）。
-pub fn is_smart_punct_after_digit(cfg: &InputConfig, ch: char, prev_char: u16) -> bool {
-    if !cfg.punct.smart_after_digit {
+pub fn is_smart_punct_after_digit(punct: &PunctConfig, ch: char, prev_char: u16) -> bool {
+    if !punct.smart_after_digit {
         return false;
     }
-    let list = &cfg.punct.smart_list;
+    let list = &punct.smart_list;
     let in_list = if list.is_empty() {
         ch == '.' || ch == ','
     } else {
@@ -48,7 +66,7 @@ pub fn punct_col_idx(chinese_punct: bool, full_width: bool) -> usize {
 /// 配对，交替态与配对栈立刻错位（就是「一次出对、一次出单」那个老 bug 的自定义映射版本）。
 /// 无状态：不看也不动引号交替态，因为左右是**按行**取的，不靠「第几次」推导。
 pub fn quote_forms(
-    cfg: &InputConfig,
+    punct: &PunctConfig,
     chinese_punct: bool,
     full_width: bool,
     c: char,
@@ -57,10 +75,10 @@ pub fn quote_forms(
     let (left_key, right_key) = wind_transform::punctuation::quote_custom_keys(c)?;
     let col = punct_col_idx(chinese_punct, full_width);
     let pick = |key: &str, def: char| -> String {
-        if !cfg.punct.custom_enabled {
+        if !punct.custom_enabled {
             return def.to_string();
         }
-        cfg.punct
+        punct
             .custom_mappings
             .get(key)
             .and_then(|vals| vals.get(col))
@@ -83,12 +101,12 @@ pub fn quote_forms(
 /// 默认转换）不算覆盖，否则会吃下一个自己不出字的键。
 ///
 /// 引号两行（`"1`/`"2`）折回同一个源字符 `"`，任一行有值即视为该键有覆盖。
-pub fn custom_english_punct_chars(cfg: &InputConfig) -> Vec<char> {
-    if !cfg.punct.custom_enabled {
+pub fn custom_english_punct_chars(punct: &PunctConfig) -> Vec<char> {
+    if !punct.custom_enabled {
         return Vec::new();
     }
     let mut out: Vec<char> = Vec::new();
-    for (key, vals) in &cfg.punct.custom_mappings {
+    for (key, vals) in &punct.custom_mappings {
         if vals.get(3).is_none_or(|v| v.is_empty()) {
             continue; // 英半列无值 → 回落默认转换，不必吃键
         }
@@ -110,29 +128,29 @@ pub fn custom_english_punct_chars(cfg: &InputConfig) -> Vec<char> {
 /// 于是引号（存储键是 `"1`/`"2`）在这条路上永远查不到自定义。
 pub fn custom_lookup(
     conv: &PunctuationConverter,
-    cfg: &InputConfig,
+    punct: &PunctConfig,
     ch: char,
     col_idx: usize,
 ) -> Option<String> {
-    conv.peek_custom(&cfg.punct, ch, col_idx)
+    conv.peek_custom(punct, ch, col_idx)
 }
 
 /// 标点转换单点流水线（对齐 Go `convertPunct`）。`conv` 推进引号状态机故取 `&mut`。
 pub fn convert_punct(
     conv: &mut PunctuationConverter,
-    cfg: &InputConfig,
+    punct: &PunctConfig,
     chinese_punct: bool,
     full_width: bool,
     ch: char,
     prev_char: u16,
 ) -> String {
-    let smart_en = chinese_punct && is_smart_punct_after_digit(cfg, ch, prev_char);
+    let smart_en = chinese_punct && is_smart_punct_after_digit(punct, ch, prev_char);
     let is_chinese_punct = chinese_punct && !smart_en;
 
-    // 1. 自定义映射优先（四状态均可配置）。开关与映射表同取自实时 `cfg.punct`
+    // 1. 自定义映射优先（四状态均可配置）。开关与映射表同取自传入的**生效** `PunctConfig`
     //    （`lookup_custom` 内部判 `custom_enabled`，故此处不再重复一道开关）。
     let col_idx = punct_col_idx(is_chinese_punct, full_width);
-    if let Some(text) = conv.lookup_custom(&cfg.punct, ch, col_idx) {
+    if let Some(text) = conv.lookup_custom(punct, ch, col_idx) {
         return text;
     }
 
@@ -160,7 +178,7 @@ pub fn convert_punct(
 /// 连按两次就换不回英文了。
 pub fn compute_punct_str_pure(
     conv: &PunctuationConverter,
-    cfg: &InputConfig,
+    punct: &PunctConfig,
     full_width: bool,
     ch: char,
     chinese: bool,
@@ -175,7 +193,7 @@ pub fn compute_punct_str_pure(
         None // 英文半角：pure 计算走原样（见上方文档）
     };
     if let Some(ci) = col_idx
-        && let Some(v) = custom_lookup(conv, cfg, ch, ci)
+        && let Some(v) = custom_lookup(conv, punct, ch, ci)
     {
         return Some(v);
     }
@@ -242,11 +260,11 @@ mod tests {
     fn smart_punct_after_digit_default_list() {
         let c = cfg(); // 默认 smart_punct_after_digit=true, list=".,:"
         // '.' 在列表 + 前字符是数字 '5'(0x35) → true
-        assert!(is_smart_punct_after_digit(&c, '.', 0x35));
+        assert!(is_smart_punct_after_digit(&c.punct, '.', 0x35));
         // 前字符非数字 → false
-        assert!(!is_smart_punct_after_digit(&c, '.', b'a' as u16));
+        assert!(!is_smart_punct_after_digit(&c.punct, '.', b'a' as u16));
         // 不在列表的标点 → false
-        assert!(!is_smart_punct_after_digit(&c, '!', 0x35));
+        assert!(!is_smart_punct_after_digit(&c.punct, '!', 0x35));
     }
 
     #[test]
@@ -254,9 +272,12 @@ mod tests {
         let mut conv = PunctuationConverter::new();
         let c = cfg();
         // 中文标点模式：'.' → '。'
-        assert_eq!(convert_punct(&mut conv, &c, true, false, '.', 0), "。");
+        assert_eq!(
+            convert_punct(&mut conv, &c.punct, true, false, '.', 0),
+            "。"
+        );
         // 英文标点模式 + 全角：'.' 走全半角 → '．'
-        let out = convert_punct(&mut conv, &c, false, true, '.', 0);
+        let out = convert_punct(&mut conv, &c.punct, false, true, '.', 0);
         assert_ne!(out, "."); // 全角化
     }
 
@@ -265,7 +286,10 @@ mod tests {
         let mut conv = PunctuationConverter::new();
         let c = cfg();
         // 中文模式但前字符是数字 → '.' 按英文输出（不转 '。'）。
-        assert_eq!(convert_punct(&mut conv, &c, true, false, '.', 0x33), ".");
+        assert_eq!(
+            convert_punct(&mut conv, &c.punct, true, false, '.', 0x33),
+            "."
+        );
     }
 
     #[test]
@@ -274,7 +298,7 @@ mod tests {
         let c = cfg();
         // 中文产物：'.' → '。'（peek 不改状态）。
         assert_eq!(
-            compute_punct_str_pure(&conv, &c, false, '.', true).as_deref(),
+            compute_punct_str_pure(&conv, &c.punct, false, '.', true).as_deref(),
             Some("。")
         );
     }
@@ -320,7 +344,7 @@ mod tests {
     fn custom_lookup_empty_is_none() {
         let conv = PunctuationConverter::new();
         let c = cfg(); // 默认无自定义映射
-        assert_eq!(custom_lookup(&conv, &c, '.', 0), None);
+        assert_eq!(custom_lookup(&conv, &c.punct, '.', 0), None);
     }
 
     /// 回归锁（根因）：自定义映射来自**实时配置**，不是转换器里的启动快照。
@@ -332,7 +356,7 @@ mod tests {
         let mut c = cfg();
         // 出厂：中文标点模式下 '"' 走内置引号交替 → 左引号。
         assert_eq!(
-            convert_punct(&mut conv, &c, true, false, '"', 0),
+            convert_punct(&mut conv, &c.punct, true, false, '"', 0),
             "\u{201C}"
         );
         conv.reset();
@@ -346,12 +370,12 @@ mod tests {
             .custom_mappings
             .insert("\"2".into(), vec!["」".into()]);
         assert_eq!(
-            convert_punct(&mut conv, &c, true, false, '"', 0),
+            convert_punct(&mut conv, &c.punct, true, false, '"', 0),
             "「",
             "热重载后第一次应立即出自定义值"
         );
         assert_eq!(
-            convert_punct(&mut conv, &c, true, false, '"', 0),
+            convert_punct(&mut conv, &c.punct, true, false, '"', 0),
             "」",
             "第二次应出「第二次」那一行"
         );
@@ -386,11 +410,11 @@ mod tests {
             "'1".into(),
             vec!["".into(), "".into(), "".into(), "@".into()],
         );
-        assert_eq!(custom_english_punct_chars(&c), vec!['"', '\'']);
+        assert_eq!(custom_english_punct_chars(&c.punct), vec!['"', '\'']);
 
         // 总开关关掉 → 空集合（DLL 恢复历史行为）
         c.punct.custom_enabled = false;
-        assert!(custom_english_punct_chars(&c).is_empty());
+        assert!(custom_english_punct_chars(&c.punct).is_empty());
     }
 
     /// `"1`/`"2` 两行 = 左形/右形：配对判定与插入都从这里取，两行都用得上
@@ -400,7 +424,7 @@ mod tests {
         let mut c = cfg();
         // 未自定义：回落内置中文引号。
         assert_eq!(
-            quote_forms(&c, true, false, '"'),
+            quote_forms(&c.punct, true, false, '"'),
             Some(("\u{201C}".into(), "\u{201D}".into()))
         );
         // 两行齐：左形取 "1、右形取 "2。
@@ -412,23 +436,23 @@ mod tests {
             .custom_mappings
             .insert("\"2".into(), vec!["」".into()]);
         assert_eq!(
-            quote_forms(&c, true, false, '"'),
+            quote_forms(&c.punct, true, false, '"'),
             Some(("「".into(), "」".into()))
         );
         // 只配左形：右侧回落内置（不会跟着变）。
         c.punct.custom_mappings.remove("\"2");
         assert_eq!(
-            quote_forms(&c, true, false, '"'),
+            quote_forms(&c.punct, true, false, '"'),
             Some(("「".into(), "\u{201D}".into()))
         );
         // 非引号键无左右形。
-        assert_eq!(quote_forms(&c, true, false, ','), None);
+        assert_eq!(quote_forms(&c.punct, true, false, ','), None);
         // 列随模式走：中文全角取第 2 列。
         c.punct
             .custom_mappings
             .insert("\"1".into(), vec!["「".into(), "x".into(), "『".into()]);
         assert_eq!(
-            quote_forms(&c, true, true, '"').map(|(l, _)| l),
+            quote_forms(&c.punct, true, true, '"').map(|(l, _)| l),
             Some("『".into())
         );
     }
@@ -444,12 +468,12 @@ mod tests {
             .custom_mappings
             .insert("\"1".into(), vec!["￥".into()]);
         assert_eq!(
-            compute_punct_str_pure(&conv, &c, false, '"', true).as_deref(),
+            compute_punct_str_pure(&conv, &c.punct, false, '"', true).as_deref(),
             Some("￥")
         );
         // 英文半角列刻意不查自定义（press2 的替换目标须保持原样英文）。
         assert_eq!(
-            compute_punct_str_pure(&conv, &c, false, '"', false).as_deref(),
+            compute_punct_str_pure(&conv, &c.punct, false, '"', false).as_deref(),
             Some("\"")
         );
     }

@@ -52,8 +52,15 @@ impl Coordinator {
             return;
         }
         state.schema_scope_gen = generation;
-        // 布局手动值随代际失效。标点不需要对应动作，理由见模块文档最后一节。
+        // 布局手动值随代际失效。标点态不需要对应动作，理由见模块文档最后一节。
         state.layout_manual = None;
+        // 引号交替态随代际归位。`PunctuationConverter` 是 Coordinator 单例、跨方案共享，而
+        // 左右形是**按方案取的**（方案 A 把 `"` 配成 `「」`、方案 B 用默认 `“”`）。不归位的话
+        // 切过去第一次按引号可能直接拿到右形。
+        //
+        // 与「⛔ 进入时保存、退出时回放」那条否决无关：这里是无条件复位到左形，没有需要被记住
+        // 的原值。锁序 state → punct 与 `convert_punct` 一致（调用方均已持 state 锁）。
+        self.punct.lock().unwrap_or_else(|e| e.into_inner()).reset();
         match self.engine_mgr.active_behavior().punct.resolve() {
             Some(v) => {
                 // 首次被方案意图覆盖时记下原值。已经是 `Some` 就不再覆写——从一个有意图的

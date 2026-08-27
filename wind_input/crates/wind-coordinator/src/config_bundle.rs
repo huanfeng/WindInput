@@ -150,6 +150,16 @@ pub(crate) struct SchemaKeyUnion {
     /// 存键名而非 VK：编译 TSF 转发条目要区分 `shift+tab` 与 `tab`，而 VK 集合把
     /// `shift+` 前缀丢了。VK 形式在 `ConfigBundle` 里另存一份供快速判定。
     pub(crate) session_key_names: std::collections::BTreeSet<String>,
+    /// 所有方案 `[punct.custom_mappings]` 里配了**英半列**的源字符。
+    ///
+    /// 与上面两项同一条理由，只是这次的资源在 C++ 那边：`CONFIG_KEY_CUSTOM_EN_PUNCT` 只在
+    /// 握手与配置热重载时推送，**切方案不推**。按活跃方案裁剪就得给五条切方案路径各接一次
+    /// 推送，漏一条的表现是「刚切完方案这个键不灵」——正是本结构存在的那个坑。
+    ///
+    /// 并集在这里是**安全**的，理由现成：集合内没配英半自定义的键会原样出 ASCII，与透传
+    /// 等价（见 `push_custom_en_punct_config` 与 `wind_punct::english_smart_source_chars`
+    /// 的文档）。代价只是英文模式下多转发几个标点键。
+    pub(crate) punct_en_chars: std::collections::BTreeSet<char>,
 }
 
 /// 算一次跨方案并集。
@@ -157,7 +167,37 @@ pub(crate) fn schema_key_union(mgr: &EngineManager) -> SchemaKeyUnion {
     SchemaKeyUnion {
         modifier_vks: schema_bound_modifier_vks(mgr),
         session_key_names: mgr.all_session_action_keys(),
+        punct_en_chars: schema_custom_en_punct_chars(mgr),
     }
+}
+
+/// 所有**已安装**方案的方案级标点表里，配了英半列的源字符（并集）。
+///
+/// ⚠️ 枚举源是 `installed_schemas()` 而非 `available`：overlay 方案（`hidden = true`）不进
+/// `available`，而快符这类方案恰恰是最想配自己符号表的一类。这与 `all_key_action_keys` 用
+/// `available` 是**两种情况**——那里的键在 overlay 下查不到消费点，本表的键则实打实要出字
+/// （`effective_punct` 走 `effective_data_schema`，特殊模式正是它照顾的对象）。
+///
+/// ★ 判据复用 [`wind_punct::custom_english_punct_chars`] 而不是在此另写一份「哪一列非空」：
+/// 吃键判据与出字判据必须同源，两份迟早漂移成「吃了再吐」丢键。
+pub(crate) fn schema_custom_en_punct_chars(
+    mgr: &EngineManager,
+) -> std::collections::BTreeSet<char> {
+    let mut out = std::collections::BTreeSet::new();
+    for id in mgr.installed_schemas() {
+        let Some(table) = mgr.behavior_for(&id).punct_custom_mappings.clone() else {
+            continue; // 跟随全局 ⇒ 已由全局那份贡献，不重复算
+        };
+        // 造一份「只含该方案表」的 PunctConfig 去问同一个判据函数，与 `effective_punct`
+        // 合成生效配置的方式保持一致（整表替换连开关一起换）。
+        let punct = wind_config::config::PunctConfig {
+            custom_enabled: !table.is_empty(),
+            custom_mappings: table,
+            ..Default::default()
+        };
+        out.extend(wind_punct::custom_english_punct_chars(&punct));
+    }
+    out
 }
 
 impl ConfigBundle {
@@ -246,13 +286,17 @@ impl ConfigBundle {
         let jump_out_keys = parse_jump_out_keys(&config.input.auto_pair.jump_out_keys);
         let jump_out_on_right_symbol =
             parse_jump_out_on_right_symbol(&config.input.auto_pair.jump_out_keys);
-        // 英文模式下需要 DLL 吃下转发的标点键 = 「配了英半列自定义」∪「英文智能符号参与集」。
-        // 两个来源都是「英文半角下 DLL 默认透传、core 却需要收到」的键，合并成一份推送即可
-        // （DLL 侧判据是数据驱动的字符集查表，集合变大自动多吃，无需改 C++）。
+        // 英文模式下需要 DLL 吃下转发的标点键 = 「全局配了英半列自定义」∪「英文智能符号参与集」
+        // ∪「**任一方案**配了英半列自定义」。三个来源都是「英文半角下 DLL 默认透传、core 却
+        // 需要收到」的键，合并成一份推送即可（DLL 侧判据是数据驱动的字符集查表，集合变大自动
+        // 多吃，无需改 C++）。
+        //
+        // 第三项取跨方案**并集**而非活跃方案那一份，理由见 [`SchemaKeyUnion::punct_en_chars`]。
         let custom_en_punct_chars: std::collections::BTreeSet<char> =
-            wind_punct::custom_english_punct_chars(&config.input)
+            wind_punct::custom_english_punct_chars(&config.input.punct)
                 .into_iter()
                 .chain(wind_punct::english_smart_source_chars(&config.input))
+                .chain(schema_keys.punct_en_chars.iter().copied())
                 .collect();
         // 预编译放在 `normalize()` 之后：`trigger_keys` 收编等存量迁移会往 `key_actions`
         // 折算，早于迁移编译就会漏掉那批键。
@@ -301,6 +345,7 @@ mod reload_tests {
         let union = SchemaKeyUnion {
             modifier_vks: Default::default(),
             session_key_names: ["home".to_string()].into_iter().collect(),
+            punct_en_chars: Default::default(),
         };
         let with_schema = ConfigBundle::build(cfg, &union);
         assert!(
@@ -332,6 +377,7 @@ mod reload_tests {
         let union = SchemaKeyUnion {
             modifier_vks: Default::default(),
             session_key_names: ["home".to_string()].into_iter().collect(),
+            punct_en_chars: Default::default(),
         };
         let both = ConfigBundle::build(cfg, &union);
         assert_eq!(

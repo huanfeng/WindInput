@@ -4,6 +4,7 @@
 //! 纯转换逻辑在 wind-punct crate；此处是 coordinator 包装（锁转换器/读状态）+ 智能符号
 //! 连按替换的状态机（武装/触发/解除）。
 
+use crate::config_bundle::ConfigBundle;
 use crate::coordinator::{Coordinator, State, full_width_source_char, numpad_char, punct_char};
 use tracing::debug;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -21,10 +22,52 @@ fn single_char(s: &str) -> Option<char> {
 }
 
 impl Coordinator {
+    /// 当前输入语境下**生效**的标点配置——`wind_punct::*` 一切读 `punct.*` 的入口都从这里取。
+    ///
+    /// # 归属方案：`effective_data_schema`，不是活跃方案
+    ///
+    /// 自定义映射表回答的是「这个键出什么字」，是**数据**，与 `[phrases]` 同源：临英归
+    /// `english` 桶、快符归快符方案，两者的活跃方案都还是主方案（五笔/拼音）。按活跃方案取
+    /// 会让快符方案配的符号表永远不生效——而特殊方案本就是「该有自己一套」的那一类。
+    ///
+    /// ⚠️ 同段的 `[punct] mode` 走的是 `active_behavior()`（活跃方案），**刻意不同**，
+    /// 理由见 [`wind_config::PunctSpec`] 的字段对照表。别看见同一个段就统一成一个判据。
+    ///
+    /// # 整表替换：连 `custom_enabled` 一起换
+    ///
+    /// 方案声明了表 ⇒ 全局表整份不参与，全局的总开关也随之失效（`Some({})` = 本方案不用任何
+    /// 自定义映射）。`smart_after_digit` / `smart_list` 不在下放范围，故仍是全局值原样带过来。
+    ///
+    /// 返回 `Cow`：没有方案表时零拷贝借用全局那份（绝大多数用户、每一次标点按键），
+    /// 只有真配了方案表才 clone 一次。
+    pub(crate) fn effective_punct<'a>(
+        &self,
+        bundle: &'a ConfigBundle,
+        state: &State,
+    ) -> std::borrow::Cow<'a, wind_config::config::PunctConfig> {
+        let global = &bundle.config.input.punct;
+        let behavior = match self.effective_data_schema(state) {
+            Some(id) => self.engine_mgr.behavior_for(&id),
+            None => self.engine_mgr.active_behavior(),
+        };
+        match &behavior.punct_custom_mappings {
+            None => std::borrow::Cow::Borrowed(global),
+            Some(table) => {
+                let mut p = global.clone();
+                p.custom_enabled = !table.is_empty();
+                p.custom_mappings = table.clone();
+                std::borrow::Cow::Owned(p)
+            }
+        }
+    }
+
     /// 数字后智能标点：在中文标点模式下，若 ch 在智能标点列表且光标前一字符为数字，
     /// 则该标点应按英文（半角）输出（如 "3." 不转成 "3。"）。
+    ///
+    /// 读的是 `smart_after_digit` / `smart_list`，**不在方案级下放范围**，故直接取全局那份，
+    /// 不必为它去查方案。
     pub(crate) fn is_smart_punct_after_digit(&self, ch: char, prev_char: u16) -> bool {
-        wind_punct::is_smart_punct_after_digit(&self.rt().config.input, ch, prev_char)
+        wind_punct::is_smart_punct_after_digit(&self.rt().config.input.punct, ch, prev_char)
     }
 
     /// 按当前中英标点/全半角配置转换一个标点字符为上屏文本（无 prev_char 上下文）。
@@ -41,10 +84,12 @@ impl Coordinator {
     ///
     /// `prev_char` 为光标前一字符的 UTF-16 单元（0=不可用），用于数字后智能判定。
     pub(crate) fn convert_punct(&self, state: &State, ch: char, prev_char: u16) -> String {
+        let bundle = self.rt();
+        let punct = self.effective_punct(&bundle, state);
         let mut conv = self.punct.lock().unwrap_or_else(|e| e.into_inner());
         wind_punct::convert_punct(
             &mut conv,
-            &self.rt().config.input,
+            &punct,
             state.chinese_punct,
             state.full_width,
             ch,
@@ -69,8 +114,9 @@ impl Coordinator {
     ///
     /// 须在标点流水线**之前**调用：钉的是本次转换的输入态，兼带清掉历史残留的「右」态。
     pub(crate) fn pin_quote_left_if_paired(&self, state: &State, ch: char) -> bool {
+        let bundle = self.rt();
         let Some((l, r)) = wind_punct::quote_forms(
-            &self.rt().config.input,
+            &self.effective_punct(&bundle, state),
             state.chinese_punct,
             state.full_width,
             ch,
@@ -112,14 +158,10 @@ impl Coordinator {
         ch: char,
         chinese: bool,
     ) -> Option<String> {
+        let bundle = self.rt();
+        let punct = self.effective_punct(&bundle, state);
         let conv = self.punct.lock().unwrap_or_else(|e| e.into_inner());
-        wind_punct::compute_punct_str_pure(
-            &conv,
-            &self.rt().config.input,
-            state.full_width,
-            ch,
-            chinese,
-        )
+        wind_punct::compute_punct_str_pure(&conv, &punct, state.full_width, ch, chinese)
     }
 
     /// 判断中文标点串 `cn` 是否在用户配置的参与集合内（子串包含匹配，支持多字符/引号）。
@@ -139,9 +181,10 @@ impl Coordinator {
     fn press1_committed_str(&self, state: &State, ch: char, chinese: bool) -> Option<String> {
         if !chinese && !state.full_width {
             let bundle = self.rt();
+            let punct = self.effective_punct(&bundle, state);
             let conv = self.punct.lock().unwrap_or_else(|e| e.into_inner());
             // 英半列（col 3）：先查自定义，无值回落原样 ASCII——与 `convert_punct` 同一条路。
-            if let Some(v) = wind_punct::custom_lookup(&conv, &bundle.config.input, ch, 3) {
+            if let Some(v) = wind_punct::custom_lookup(&conv, &punct, ch, 3) {
                 return Some(v);
             }
             return Some(ch.to_string());
@@ -620,18 +663,21 @@ impl Coordinator {
             return None;
         }
         let col = wind_punct::punct_col_idx(false, state.full_width);
+        // ⚠️ 这一处直调 `PunctuationConverter::peek_custom`（wind-transform），**绕过了**
+        // wind-punct 那层——所以自定义标点方案级化时它不会因签名变更而编译失败。生效表必须
+        // 在这里显式取，否则方案把 `(` 配成别的形态后，英文配对仍按全局表判定与插入。
+        // 守门测试见本文件末 `english_pairs_pipeline_uses_effective_punct`。
+        let punct = self.effective_punct(&rt, state);
         let conv = self.punct.lock().unwrap_or_else(|e| e.into_inner());
         let form = |c: char| -> Option<char> {
-            let s = conv
-                .peek_custom(&rt.config.input.punct, c, col)
-                .unwrap_or_else(|| {
-                    let raw = c.to_string();
-                    if state.full_width {
-                        wind_transform::fullwidth::to_full_width(&raw)
-                    } else {
-                        raw
-                    }
-                });
+            let s = conv.peek_custom(&punct, c, col).unwrap_or_else(|| {
+                let raw = c.to_string();
+                if state.full_width {
+                    wind_transform::fullwidth::to_full_width(&raw)
+                } else {
+                    raw
+                }
+            });
             single_char(&s)
         };
         let pairs: Vec<(char, char)> = rt
@@ -1001,5 +1047,184 @@ mod pair_commit_tests {
             "第二次 Tab 应跳出外层（1 格）"
         );
         assert!(stack_top(&c).is_none());
+    }
+}
+
+/// 方案级自定义标点表（`[punct.custom_mappings]`）：整表替换 + 按数据归属方案取。
+#[cfg(test)]
+mod schema_scoped_punct_tests {
+    use super::*;
+    use crate::pipeline::ModeKind;
+    use std::sync::Arc;
+    use wind_config::config::Config;
+
+    /// 三个方案的临时 data 目录：
+    /// - `zzp_own`：自带表（`.`→`·`；`;` 的**英半列**→`#`）
+    /// - `zzp_follow`：不写 `[punct]` ⇒ 跟随全局
+    /// - `english`：临英的数据归属方案，自带**另一张**表（`.`→`!`）
+    ///
+    /// 三张表在同一个源字符 `.` 上取值**互不相同**——这是本组用例能测出差别的前提。
+    /// 若让它们碰巧同值，「取错了方案」和「取对了」会给出一样的断言结果。
+    fn data_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("wind_punct_scope_{}_{tag}", std::process::id()));
+        let schemas = dir.join("schemas");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&schemas).unwrap();
+        let write = |id: &str, punct: &str| {
+            std::fs::write(
+                schemas.join(format!("{id}.schema.toml")),
+                format!("[schema]\nid = \"{id}\"\n[engine]\ntype = \"codetable\"\n{punct}"),
+            )
+            .unwrap();
+        };
+        write(
+            "zzp_own",
+            "[punct.custom_mappings]\n\".\" = [\"·\", \"\", \"\", \"\"]\n\
+             \";\" = [\"；\", \"\", \"\", \"#\"]\n",
+        );
+        write("zzp_follow", "");
+        write(
+            "english",
+            "[punct.custom_mappings]\n\".\" = [\"!\", \"\", \"\", \"\"]\n",
+        );
+        dir
+    }
+
+    /// 全局表里有一行 `,`→`G`，且与三个方案表的键**不重叠**——于是「全局那行还在不在」
+    /// 就直接回答了「整表替换有没有真的整表」。
+    fn coord_at(dir: &std::path::Path, active: &str) -> Arc<Coordinator> {
+        let mut cfg = Config::default();
+        cfg.schema.active = active.to_string();
+        cfg.schema.available = vec!["zzp_own".into(), "zzp_follow".into()];
+        cfg.input.punct.custom_enabled = true;
+        cfg.input.punct.custom_mappings.insert(
+            ",".into(),
+            vec!["G".into(), "".into(), "".into(), "".into()],
+        );
+        Coordinator::new_headless(cfg, Some(dir))
+    }
+
+    /// 取当前语境下生效表里某个源字符的中半列（col 0）值。
+    fn cn_half(c: &Coordinator, mode: Option<ModeKind>, ch: char) -> Option<String> {
+        {
+            let mut st = c.state.lock().unwrap();
+            st.active = mode;
+        }
+        let bundle = c.rt();
+        let state = c.state.lock().unwrap();
+        let punct = c.effective_punct(&bundle, &state);
+        let conv = c.punct.lock().unwrap();
+        conv.peek_custom(&punct, ch, 0)
+    }
+
+    /// ★ 方案声明了表 ⇒ 全局表**整份**不参与。
+    ///
+    /// 两条断言缺一不可：只断言「方案的行生效」的话，逐键合并的实现照样通过——
+    /// 真正区分两种模型的是**全局那行还在不在**。
+    #[test]
+    fn schema_table_replaces_global_table_wholesale() {
+        let dir = data_dir("own");
+        let c = coord_at(&dir, "zzp_own");
+
+        assert_eq!(
+            cn_half(&c, None, '.'),
+            Some("·".into()),
+            "方案自己的行要生效"
+        );
+        assert_eq!(
+            cn_half(&c, None, ','),
+            None,
+            "★ 全局的 `,` 那行必须整份不参与——逐键合并时它会残留"
+        );
+
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 方案不写这一段 ⇒ 全走全局（含全局的 `custom_enabled`）。
+    #[test]
+    fn schema_without_table_follows_global() {
+        let dir = data_dir("follow");
+        let c = coord_at(&dir, "zzp_follow");
+
+        assert_eq!(cn_half(&c, None, ','), Some("G".into()), "跟随全局那张表");
+        assert_eq!(cn_half(&c, None, '.'), None, "别的方案的表不该漏过来");
+
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★ 归属方案是 `effective_data_schema` 而**不是**活跃方案。
+    ///
+    /// 活跃方案是 `zzp_own`（`.`→`·`），进临英后必须换成 `english` 方案那张（`.`→`!`）。
+    /// 三张表在 `.` 上各不相同，故「取错方案」与「取对」给出的值互不相同——若让 english
+    /// 也写 `·`，把实现改成按活跃方案取，这条照样绿。
+    #[test]
+    fn temp_english_takes_english_schema_table() {
+        let dir = data_dir("temp");
+        let c = coord_at(&dir, "zzp_own");
+
+        assert_eq!(
+            cn_half(&c, None, '.'),
+            Some("·".into()),
+            "主输入路取活跃方案"
+        );
+        assert_eq!(
+            cn_half(&c, Some(ModeKind::TempEnglish), '.'),
+            Some("!".into()),
+            "★ 临英必须取 english 方案的表——按活跃方案取会拿到 `·`"
+        );
+
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★ 推给 DLL 的吃键集是**跨方案并集**，不随活跃方案变。
+    ///
+    /// `;` 的英半列只有 `zzp_own` 配了，而这里的活跃方案是 `zzp_follow`。按活跃方案裁剪
+    /// 的话它不在集合里 ⇒ 切到 `zzp_own` 后 DLL 手里还是旧表（`CONFIG_KEY_CUSTOM_EN_PUNCT`
+    /// 只在握手与热重载时推），表现为「刚切完方案这个键不灵」。
+    #[test]
+    fn en_punct_eat_set_is_cross_schema_union() {
+        let dir = data_dir("union");
+        let c = coord_at(&dir, "zzp_follow");
+
+        assert!(
+            c.rt().custom_en_punct_chars.contains(&';'),
+            "★ 别的方案配的英半列源字符也必须在吃键集里（并集），实际: {:?}",
+            c.rt().custom_en_punct_chars
+        );
+
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 守门：`english_pairs_via_pipeline` 直调 `PunctuationConverter::peek_custom`（wind-transform），
+    /// **绕过了 wind-punct 那层签名收窄** ⇒ 它漏接生效表时不会编译失败，只会静默按全局表
+    /// 判定英文配对。这条测试补上那个缺口。
+    ///
+    /// 再出现这种直调时，要么收编进 wind-punct，要么照此加一条。
+    #[test]
+    fn english_pairs_pipeline_uses_effective_punct() {
+        const SRC: &str = include_str!("handle_punct.rs");
+        let at = SRC
+            .find("fn english_pairs_via_pipeline")
+            .expect("源码里找不到 fn english_pairs_via_pipeline（改名了？守卫需同步更新）");
+        let body: String = SRC[at..]
+            .lines()
+            .take_while(|l| !l.starts_with("    /// 英文模式 + 半角"))
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            body.contains("effective_punct"),
+            "英文配对的左右形必须按**生效**标点表算，否则方案改了 `(` 的形态后判定按全局表"
+        );
+        assert!(
+            !body.contains("config.input.punct"),
+            "不得直取全局 punct——那正是本守卫要挡的漏接"
+        );
     }
 }

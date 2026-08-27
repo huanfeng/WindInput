@@ -92,15 +92,18 @@ pub struct Schema {
     /// 见 `docs/redesign/overlay-mode-config.md`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay: Option<OverlaySpec>,
-    /// **方案级标点态意图**（`[punct]` 段）。默认 `Follow` = 不干预。
+    /// **方案级标点**（`[punct]` 段）：标点态意图 `mode` + 自定义映射表 `custom_mappings`。
     ///
-    /// 与 [`Self::candidate`] 共用「代际感知覆盖」：方案意图是默认值，用户在本方案期间
-    /// 手动 `toggle_punct` 的值胜出，切走再切回后手动值随 `schema_generation` 失效。
+    /// `mode` 与 [`Self::candidate`] 共用「代际感知覆盖」：方案意图是默认值，用户在本方案
+    /// 期间手动 `toggle_punct` 的值胜出，切走再切回后手动值随 `schema_generation` 失效。
     /// 见 `docs/design/schema-scoped-behavior.md` §2、§4。
     ///
-    /// ⛔ 本段刻意**只有 `mode`**：`custom_mappings` / `smart_after_digit` 那些是另一个
-    /// 量级（前者有严格的列序契约，方案级覆盖要先回答「整表替换还是逐键合并」）。
-    /// 段名留成 `punct` 就是为了以后能加，但不要顺手塞进来。
+    /// ⚠️ **两个字段的作用域不同**（`mode` 跟活跃方案、`custom_mappings` 跟数据归属方案），
+    /// 对照表在 [`PunctSpec`] 上，动之前先读。
+    ///
+    /// ⛔ 仍**不含** `smart_after_digit` / `smart_list` / `follow_mode`：前两者是「数字后
+    /// 智能标点」的参数、后者是切中英时的交互习惯，都属全局。段名留成 `punct` 是为了以后
+    /// 能加，但不要顺手塞进来。
     #[serde(default)]
     pub punct: PunctSpec,
     /// **方案级候选呈现**（`[candidate]` 段）。默认 `Follow` = 跟随下一层。
@@ -575,20 +578,52 @@ impl DictSpec {
     }
 }
 
-/// 深合并 TOML：`over` 覆盖到 `base` 之上。两侧皆为 table 时逐键递归；否则 over 整体替换。
-/// 数组按整体替换（如 encoder.rules 覆盖即替换全表）。
-///
-/// **例外：`dictionaries`** 走 [`merge_dict_overrides`] 的按 id 稀疏合并——词库的
-/// path/label/base_order 等结构定义必须始终以方案文件为准，override 层只表达用户开关。
-///
-/// 方案级标点态意图（`[punct]` 段）。
+/// 方案级标点（`[punct]` 段）。
 ///
 /// 取值词汇刻意与 [`crate::config::LayoutIntent`] 同构（`Follow` 打头且是 default）：
 /// 让「方案级」与「全局」在用户眼里是同一件事的两个层级，而不是两套发明出来的词。
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// # ★★ 两个字段的作用域**刻意不同**，不要「顺手统一」
+///
+/// | 字段 | 归属方案取自 | 因为它回答的是 |
+/// |---|---|---|
+/// | [`Self::mode`] | `active_behavior()`（活跃方案） | 「我此刻该用中文还是英文标点」——**用户可见的模式态**，与语言栏图标、`toggle_punct` 同一层，走代际同步与 `punct_before_schema` 基线 |
+/// | [`Self::custom_mappings`] | `effective_data_schema`（数据归属方案） | 「这个键出什么字」——是**数据**，与 `[phrases]` 同源；临英归 `english`、快符归快符方案 |
+///
+/// 把 `custom_mappings` 改成跟活跃方案走，快符/临英就永远拿不到自己的符号表（而那正是
+/// 「特殊方案本质就是码表方案、该有自己的一套」的直接延伸）；把 `mode` 改成跟数据走，则要
+/// 重跑那条已真机修过一轮的链（`Follow` ≠「什么都不做」，见 `sync_schema_scope`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PunctSpec {
     #[serde(default)]
     pub mode: PunctIntent,
+    /// **方案级自定义标点映射表**（`[punct.custom_mappings]`）。语义是**整表替换**：
+    ///
+    /// | 取值 | 含义 |
+    /// |---|---|
+    /// | `None`（段不写） | 跟随全局——全局的 `custom_enabled` 与整张表原样生效 |
+    /// | `Some(表)` | 本方案只认这张表，全局表**整份不参与**（连 `custom_enabled` 一起换） |
+    /// | `Some({})` | 本方案不用任何自定义映射 |
+    ///
+    /// # ⛔ 刻意**没有**方案级的 `custom_enabled`
+    ///
+    /// 三态是「跟随 / 用我的表 / 一条都不要」，而第三态已由 `Some({})` 表达。两个字段的代价
+    /// 不是多一个字段，是**矛盾态**（`enabled=None` 配非空表、`=true` 配空表都得再规定一次
+    /// 语义，且规定完没人记得）。同型见 `[phrases]` 的 `categories`——那里的 `Option<Vec>`
+    /// 三态也是因为「一条都不要」已被 `enabled=false` 表达而塌成了普通 `Vec`。
+    ///
+    /// ⇒ 推论（**设置页与文档站必须写明**）：全局页关掉「自定义标点」总开关，声明了本表的
+    /// 方案**仍然出自定义符号**——那个开关管的是全局表，整表替换连开关一起换掉了。
+    ///
+    /// # ⚠️ override 走整体替换，不是深合并
+    ///
+    /// 见 [`merge_toml`] 里的 `custom_mappings` 例外。深合并（HashMap 逐键）会让用户在设置页
+    /// **删不掉方案作者写的行**——override 层没有「删除」的表达。
+    ///
+    /// 列序契约与全局表**完全一致**：`[中半, 英全, 中全, 英半]`，引号用 `"1`/`"2`/`'1`/`'2`
+    /// 区分左右形。见 [`crate::config::PunctConfig`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_mappings: Option<std::collections::HashMap<String, Vec<String>>>,
 }
 
 /// 标点态三态。`Follow` = 本方案不干预，沿用用户当前状态 / 全局配置。
@@ -694,6 +729,12 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchemaBehavior {
     pub punct: PunctIntent,
+    /// 方案级自定义标点表（整表替换，`None` = 跟随全局）。见 [`PunctSpec::custom_mappings`]。
+    ///
+    /// ★ **刻意与 [`Self::punct`] 分成两个字段而不是打包成一个 `PunctSpec`**：两者虽同住
+    /// `[punct]` 段，取归属方案的判据却不同（前者数据归属、后者活跃方案）。打包成一个结构体
+    /// 会让下一个人理所当然地用同一个 `behavior_for(id)` 结果去喂两条路——而那正是错的。
+    pub punct_custom_mappings: Option<std::collections::HashMap<String, Vec<String>>>,
     pub candidate_layout: crate::config::LayoutIntent,
     /// 方案级注释模板（竖排）。三态，见 [`CandidateSpec::comment_template_vertical`]。
     pub comment_template_vertical: crate::config::CommentTemplateOverride,
@@ -707,6 +748,7 @@ impl Schema {
     pub fn behavior(&self) -> SchemaBehavior {
         SchemaBehavior {
             punct: self.punct.mode,
+            punct_custom_mappings: self.punct.custom_mappings.clone(),
             candidate_layout: self.candidate.layout,
             comment_template_vertical: self.candidate.comment_template_vertical.clone(),
             comment_template_horizontal: self.candidate.comment_template_horizontal.clone(),
@@ -715,15 +757,33 @@ impl Schema {
     }
 }
 
+/// 深合并 TOML：`over` 覆盖到 `base` 之上。两侧皆为 table 时逐键递归；否则 over 整体替换。
+/// 数组按整体替换（如 encoder.rules 覆盖即替换全表）。
+///
 /// 这是 `schema_overrides/{id}.toml` 折叠到方案文件之上的**唯一**合并实现：
 /// 引擎加载（wind-engine `read_schema`）与方案包导出（wind-transfer）共用，
 /// 两边对「定制后的方案长什么样」必须同源，否则导出的包与实际打字行为不一致。
+///
+/// # 两个例外
+///
+/// - **`dictionaries`** 走 [`merge_dict_overrides`] 的按 id 稀疏合并——词库的
+///   path/label/base_order 等结构定义必须始终以方案文件为准，override 层只表达用户开关。
+/// - **`custom_mappings`**（方案级自定义标点表）走**整体替换**。默认的逐键深合并会让用户
+///   在设置页**删不掉方案作者写的那一行**：override 层没有「删除」的表达，写空只能覆盖成
+///   空串。失效形态是本仓反复栽的那种——界面上删掉了、保存重开又回来，或界面没了打字还在。
+///   整表替换与该字段本身的语义（[`PunctSpec::custom_mappings`]）也一致：方案表是一整份，
+///   不与任何东西逐行混。
+///
+/// ⚠️ 两个例外都按**键名**匹配、与所在路径无关。方案文件里 `custom_mappings` 只出现在
+/// `[punct]` 段下；将来若别处再出现同名键，它会一并按整体替换处理——那时要么改成判路径，
+/// 要么给新键换个名字。
 pub fn merge_toml(base: &mut toml::Value, over: toml::Value) {
     match (base, over) {
         (toml::Value::Table(b), toml::Value::Table(o)) => {
             for (k, ov) in o {
                 match b.get_mut(&k) {
                     Some(bv) if k == "dictionaries" => merge_dict_overrides(bv, &ov),
+                    Some(bv) if k == "custom_mappings" => *bv = ov,
                     Some(bv) => merge_toml(bv, ov),
                     // base 无 dictionaries 时不接纳 override 的稀疏项（它们无 path，凭空
                     // 造不出可用词库）；其余键正常新增。
@@ -841,6 +901,90 @@ layout = "xiaohe"
             two_emoji.encode_utf16().count(),
             4,
             "两个标量值可占四个 wchar——C++ 侧缓冲按这个上限取容量"
+        );
+    }
+
+    // ── 方案级自定义标点表 ──────────────────────────────────────────────
+
+    /// 三态必须由**同一个字段**区分开：不写 = 跟随全局、空表 = 一条都不要、
+    /// 非空表 = 整表替换。`None` 与 `Some({})` 混为一谈的话，「本方案不要自定义标点」
+    /// 就没法表达，只能退回去加一个方案级 `custom_enabled`。
+    #[test]
+    fn schema_punct_custom_mappings_three_states() {
+        let parse = |s: &str| toml::from_str::<Schema>(s).expect("方案应解析成功").punct;
+
+        assert_eq!(
+            parse("[punct]\nmode = \"chinese\"").custom_mappings,
+            None,
+            "段里不写 custom_mappings ⇒ 跟随全局"
+        );
+        assert_eq!(
+            parse("[punct]\n[punct.custom_mappings]").custom_mappings,
+            Some(Default::default()),
+            "空表 ⇒ 本方案一条自定义都不要（与「跟随」必须可区分）"
+        );
+
+        let filled =
+            parse("[punct]\n[punct.custom_mappings]\n\".\" = [\"。\", \"．\", \"。\", \".\"]");
+        let table = filled.custom_mappings.expect("非空表应是 Some");
+        assert_eq!(
+            table.get("."),
+            Some(&vec![
+                "。".to_string(),
+                "．".to_string(),
+                "。".to_string(),
+                ".".to_string()
+            ]),
+            "列序契约与全局表一致：[中半, 英全, 中全, 英半]"
+        );
+    }
+
+    /// ★★ `custom_mappings` 在 override 合并里走**整体替换**，不是深合并。
+    ///
+    /// 失效形态：深合并（HashMap 逐键）时 override 层没有「删除」的表达 ⇒ 用户在设置页
+    /// 删掉方案作者写的行，保存后那行还在。这条测试直接问「作者的行还在不在」，
+    /// 而不是问「我写的行生效没有」——后者在两种合并策略下都通过，测不出差别。
+    #[test]
+    fn custom_mappings_override_replaces_whole_table() {
+        let mut base = toml::from_str::<toml::Value>(
+            "[punct.custom_mappings]\n\
+             \".\" = [\"。\"]\n\
+             \",\" = [\"，\"]\n",
+        )
+        .unwrap();
+        // 用户在设置页只留下了 `.` 那一行（删掉了作者写的 `,`）。
+        let over =
+            toml::from_str::<toml::Value>("[punct.custom_mappings]\n\".\" = [\"·\"]\n").unwrap();
+        merge_toml(&mut base, over);
+
+        let table = base["punct"]["custom_mappings"].as_table().unwrap();
+        assert_eq!(
+            table.get(".").and_then(|v| v[0].as_str()),
+            Some("·"),
+            "用户改的那行要生效"
+        );
+        assert!(
+            !table.contains_key(","),
+            "★ 作者写的 `,` 必须随整表替换被删掉——深合并时它会残留，\
+             表现为「设置页删了、保存重开又回来」"
+        );
+    }
+
+    /// 反向对照：同一份 override，换成**别的**键名就该走深合并（作者的行保留）。
+    /// 没有这条的话，把上面那条的整体替换误写成「所有 table 都整体替换」也照样通过，
+    /// 而那会连带毁掉 `[engine]` 等所有段的合并语义。
+    #[test]
+    fn non_custom_mappings_tables_still_deep_merge() {
+        let mut base =
+            toml::from_str::<toml::Value>("[engine]\ntype = \"codetable\"\nfoo = 1\n").unwrap();
+        let over = toml::from_str::<toml::Value>("[engine]\nfoo = 2\n").unwrap();
+        merge_toml(&mut base, over);
+
+        assert_eq!(base["engine"]["foo"].as_integer(), Some(2), "覆盖的键生效");
+        assert_eq!(
+            base["engine"]["type"].as_str(),
+            Some("codetable"),
+            "未提及的键必须保留——这才是深合并"
         );
     }
 }

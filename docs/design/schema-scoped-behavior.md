@@ -138,6 +138,85 @@ pub enum PunctIntent {
 `HashMap<String, Vec<String>>` 且有严格的**列序契约**（见 `project_punct_selchar_colorder_fix`），
 方案级覆盖要先回答「整表替换还是逐键合并」，与本需求无关。
 
+> ⚠️ **后续更正**：`custom_mappings` 已在续篇里落地，见 §2.5。本节余下两项
+> （`smart_after_digit` / `smart_list`）仍不做。
+
+### 2.5 续篇：`custom_mappings` 方案级化（整表替换）
+
+用户拍板的三项：**整表替换** / 归属方案跟 `effective_data_schema` / 只下放映射表。
+
+#### 2.5.1 一个字段表达三态，刻意没有方案级 `custom_enabled`
+
+```rust
+pub struct PunctSpec {
+    pub mode: PunctIntent,
+    /// None = 跟随全局；Some(表) = 整表替换；Some({}) = 一条都不要
+    pub custom_mappings: Option<HashMap<String, Vec<String>>>,
+}
+```
+
+三态里的「一条都不要」已由 `Some({})` 表达 ⇒ 再加一个 `custom_enabled` 只会造出**矛盾态**
+（`enabled = None` 配非空表、`= true` 配空表都得再规定一次语义）。这与 §6.2 里 `categories`
+从 `Option<Vec<String>>` 塌成普通 `Vec` 是同一条判据：**给一族配置加维度前，先问这个三态里
+有没有一态已被别的字段表达**。
+
+⇒ 推论（设置页与文档站必须写明）：**全局页关掉「自定义标点」总开关，声明了本表的方案仍然
+出自定义符号**——那个开关管的是全局表，整表替换连开关一起换掉了。
+
+#### 2.5.2 ★★ 同一个段里两个字段的作用域**刻意不同**
+
+| 字段 | 归属方案取自 | 因为它回答的是 |
+|---|---|---|
+| `mode` | `active_behavior()`（活跃方案） | 「我此刻该用中文还是英文标点」——用户可见的**模式态**，与语言栏图标、`toggle_punct` 同层，走 §4 的代际同步与 `punct_before_schema` 基线 |
+| `custom_mappings` | `effective_data_schema`（数据归属方案） | 「这个键出什么字」——是**数据**，与 §6 的 `[phrases]` 同源；临英归 `english`、快符归快符方案 |
+
+两边都试图统一都会坏事：把 `custom_mappings` 改成跟活跃方案走，快符/临英永远拿不到自己的
+符号表（而特殊方案本就是「该有自己一套」的那一类）；把 `mode` 改成跟数据走，则要重跑
+§4.3 那条已真机修过一轮的链。⇒ **看见同一个段就统一判据是错的**，同型见
+`key_actions` / `session_actions` 两张表维度不同（`docs/design/key-resolver-unification.md`）。
+
+#### 2.5.3 ⚠️ override 合并必须为它开整体替换的例外
+
+`merge_toml` 默认深合并，HashMap 会逐键合。那样用户在设置页**删不掉方案作者写的行**：
+override 层没有「删除」的表达。失效形态是本仓反复栽的那种——界面上删掉了、保存重开又回来。
+
+⇒ `merge_toml` 里 `custom_mappings` 与 `dictionaries` 并列成为例外，走整体替换。
+⚠️ 两个例外都按**键名**匹配、与路径无关；将来别处再出现同名键会一并被整体替换。
+
+测试直接问「作者的行还在不在」，而不是问「我写的行生效没有」——后者在两种合并策略下都通过。
+配一条反向对照（别的段仍深合并），防止误写成「所有 table 都整体替换」。
+
+#### 2.5.4 ★★ DLL 吃键集取跨方案**并集**，不按活跃方案裁剪
+
+`CONFIG_KEY_CUSTOM_EN_PUNCT`（英文模式下 DLL 要吃哪些标点键）只在**握手与配置热重载**时推送，
+**切方案不推**。按活跃方案裁剪就得给五条切方案路径各接一次推送，漏一条的表现是
+「刚切完方案这个键不灵、点下别的窗口又灵了」。
+
+本仓已为同一个坑写过答案：`SchemaKeyUnion` 那两项（修饰键 VK / session 键名）正是因此取并集。
+本项作为第三项并入。**并集是安全的**，理由现成：集合内没配英半自定义的键会原样出 ASCII，
+与透传等价（`push_custom_en_punct_config` 的既有文档）。代价只是多转发几个标点键。
+
+⚠️ 枚举源必须是 `installed_schemas()` 而非 `available`——overlay 方案 `hidden = true` 不进
+`available`，而快符恰恰是最想配自己符号表的一类。这与 `all_key_action_keys` 用 `available`
+是两种情况：那里的键在 overlay 下查不到消费点，本表的键实打实要出字。
+
+#### 2.5.5 收窄签名把消费点变成编译错误 —— 以及那条**绕过的路**
+
+`wind_punct` 里凡读 `punct.*` 的函数一律从 `&InputConfig` 收窄到 `&PunctConfig`，由
+`Coordinator::effective_punct` 供给 ⇒ 漏接一个消费点就是编译失败，而不是「这条路上方案表
+静默不生效」。同 §6.3 把 `scope` 做成 `PhraseLayer` 六个方法的必填参数。
+
+⚠️ **这道防线有一个缺口**，实施时才发现：`PunctuationConverter::peek_custom`（wind-transform）
+可以被直接调用、绕过 wind-punct。当时唯一这么做的是 `english_pairs_via_pipeline`（英文自动配对
+要算左右符号的实际形态），它不会因签名变更而报错。已单独补一条源码级守门测试。
+⇒ **再出现这种直调时，要么收编进 wind-punct，要么照此加一条守门测试。**
+
+#### 2.5.6 顺带：引号交替态随代际归位
+
+`PunctuationConverter` 是 Coordinator 单例、跨方案共享，而左右形现在是按方案取的
+（方案 A 把 `"` 配成 `「」`、方案 B 用默认）。不归位的话切过去第一次按引号可能直接拿到右形。
+在 `sync_schema_scope` 里无条件 `reset()`——是复位不是回放，不违反 §4.3 那条否决。
+
 ---
 
 ## 三、`[candidate]`：方案级候选布局
@@ -695,7 +774,10 @@ D 风险最高（改 store schema + 六处闸门），放最后单独验证。
 | 项 | 结论 |
 |---|---|
 | 只对英文做标点特判 | ⛔ 否决。见 §2.3——本仓已为「用 `hidden` 代理 overlay」付过一次三处修改的代价 |
-| `[punct]` 本轮涵盖 `custom_mappings` | ⏸ 暂缓。列序契约要先单独回答「整表替换还是逐键合并」，见 §2.4 |
+| `[punct]` 本轮涵盖 `custom_mappings` | ⏸ 本轮暂缓 → ✅ **已在续篇落地**（整表替换，见 §2.5）。`smart_after_digit` / `smart_list` 仍不做 |
+| 方案级也开一个 `custom_enabled` | ⛔ 否决。「一条都不要」已由 `Some({})` 表达，多一个字段只造出矛盾态，见 §2.5.1 |
+| `custom_mappings` 跟活跃方案走（与同段 `mode` 统一） | ⛔ 否决。快符/临英永远拿不到自己的符号表；两个字段的作用域刻意不同，见 §2.5.2 |
+| 按活跃方案裁剪 DLL 吃键集 + 切方案时重推 | ⛔ 否决。五条切方案路径漏一条就是「刚切完方案这个键不灵」，取并集，见 §2.5.4 |
 | `[candidate]` 与 `[overlay].candidate_layout` 合并成一段 | ⛔ 否决。两者语义不同（常驻期 vs 叠加期），一个方案可以两段都写，见 §1.2 |
 | `case_variants` 下放英文方案 | ✅ **本轮做**，默认 `false`。2026-08-21 的否决理由实际只对 `symbol_chars`/`space_as_input` 成立，见 §5.3 |
 | `symbol_chars` / `space_as_input` 下放英文方案 | ⛔ 否决（2026-08-21 用户拍板）。它们会改标点键既有语义 |
