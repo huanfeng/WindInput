@@ -52,12 +52,17 @@ const EMOJI_RANGES: &[(u32, u32)] = &[
 
 const PUA_RANGES: &[(u32, u32)] = &[(0xE000, 0xF8FF), (0xF0000, 0xFFFFF), (0x100000, 0x10FFFF)];
 
+/// 表意文字码位区间（`require_cjk` / `classify` 用）。
+///
+/// 末项是**整个平面 2（SIP）与平面 3（TIP）**：这两个平面专用于表意文字，扩展 B–J 与
+/// 兼容汉字补充全在其中，将来的扩展 K/L 亦然。原先逐块列举只到 `0x2CEAF`（扩展 E 末尾），
+/// 于是 `require_cjk` 开启时会把扩展 F 及以后的字**整批丢弃**、`classify` 也分错桶。
+/// 逐块列举的写法保证每升一版 Unicode 就静默漏一次，故按平面兜底。
 const CJK_RANGES: &[(u32, u32)] = &[
     (0x3400, 0x4DBF),
     (0x4E00, 0x9FFF),
     (0xF900, 0xFAFF),
-    (0x20000, 0x2A6DF),
-    (0x2A700, 0x2CEAF),
+    (0x20000, 0x3FFFF),
 ];
 
 fn in_ranges(c: char, ranges: &[(u32, u32)]) -> bool {

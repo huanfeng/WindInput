@@ -34,8 +34,11 @@ pub struct CommonCharRow {
 /// 某个字的当前状态（设置页「添加」时的预览与校验）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommonCharState {
-    /// 是否落在常用字表的管辖域内（[`wind_candidate::is_common_scope`]）。
-    /// `false` 时界面必须拒绝添加——域外字符读端根本不查表，存了也永不生效。
+    /// 这个字符在**默认字表**里有没有说法（[`wind_candidate::is_common_scope`]）。
+    ///
+    /// ⚠️ 纯提示，**界面不得据此拒绝添加**（issue #83 起任何字符都可登记）。`false` 只表示
+    /// 「默认字表管不着它，这条是纯用户规则」——用户给注音、假名、结构描述符设生僻时正是
+    /// 这种情况，而那恰恰是本功能要支持的用法。
     pub governed: bool,
     /// 出厂判定。
     pub base_common: bool,
@@ -69,19 +72,19 @@ pub(crate) struct CommonCharMark {
 ///
 /// 两条准入，缺一不可：
 /// 1. **恰好一个字符**——「常用」是字级属性，词组没有；
-/// 2. **落在常用字表的管辖域内**（[`wind_candidate::is_common_scope`]）——域外字符
-///    （中文标点、emoji、字母数字）读端根本不查表，放行就会存下一条永不生效的记录。
+/// 2. [`wind_candidate::is_markable`]——除空白/控制字符外全放行。
 ///
-/// ⚠️ 第 2 条必须调 `is_common_scope` 而不是自己再写一份「是不是汉字」：两份判据一旦
-/// 漂移，用户设了却完全静默地不生效（`wind-candidate` 侧有
-/// `common_scope_matches_string_judgement` 钉着同源性）。
+/// ⚠️ 第 2 条曾是 `is_common_scope`（只认汉字与 PUA），已按 issue #83 放开到全字符：
+/// 用户要能把字根、间架结构符、注音、假名这些**非汉字**候选关掉，而它们无一落在那个域内。
+/// 放开的前提是读端 `is_string_common` **先**改成了覆盖优先——顺序反了就会存下一批
+/// 永不被查询的死记录，且全程无报错（`markable_char_takes_effect` 钉着这条）。
 pub(crate) fn common_char_of(text: &str) -> Option<char> {
     let mut it = text.chars();
     let ch = it.next()?;
     if it.next().is_some() {
         return None;
     }
-    wind_candidate::is_common_scope(ch).then_some(ch)
+    wind_candidate::is_markable(ch).then_some(ch)
 }
 
 impl crate::Coordinator {
@@ -157,9 +160,9 @@ impl crate::Coordinator {
 
     /// 设置页对一个字的编辑：写库 + 回灌镜像一并完成。
     ///
-    /// ⚠️ 拒绝管辖域外的字符（中文标点、emoji、字母数字）。读端 `is_string_common` 对它们
-    /// 直接跳过，放行只会在库里留下一条用户以为生效的死记录，且**全程无报错**。
-    /// 这里返回 Err 而不是静默忽略，界面才能告诉用户「这个字符不受常用字表管辖」。
+    /// ⚠️ 只拒绝空白与控制字符（[`wind_candidate::is_markable`]）。**不再按「是不是汉字」
+    /// 设限**：用户可以给任何字符登记常用/生僻，读端一律认（issue #83）。
+    /// 这里返回 Err 而不是静默忽略，界面才说得清为什么没写进去。
     pub(crate) fn common_char_edit(&self, ch: char, edit: CommonCharEdit) -> anyhow::Result<()> {
         let Some(store) = self.store.as_ref() else {
             anyhow::bail!("无持久化存储");
@@ -174,8 +177,8 @@ impl crate::Coordinator {
                 self.clear_common_char(ch);
             }
             CommonCharEdit::Set(common) => {
-                if !wind_candidate::is_common_scope(ch) {
-                    anyhow::bail!("「{ch}」不受常用字表管辖（只有汉字才有常用/生僻之分）");
+                if !wind_candidate::is_markable(ch) {
+                    anyhow::bail!("空白与控制字符不能登记常用/生僻");
                 }
                 self.apply_common_target(ch, common);
             }
@@ -424,16 +427,16 @@ fn parse_common_chars_jsonl(content: &str) -> ParsedCommonChars {
     out
 }
 
-/// 收一条，域外字符如实报告。
+/// 收一条，收不下的如实报告。
 ///
-/// ⚠️ 准入必须是 [`wind_candidate::is_common_scope`]，与右键写端同源：放行域外字符
-/// （中文标点、emoji、字母数字）会存下一条读端永不查询的死记录，且全程无报错。
+/// ⚠️ 准入与右键写端同为 [`wind_candidate::is_markable`]（issue #83 起放开到全字符）。
+/// 导入文件里的空白本就会被上游按行/按字切掉，这道只是最后一层数据卫生。
 fn push_common_char_entry(out: &mut ParsedCommonChars, ch: char, common: bool) {
-    if wind_candidate::is_common_scope(ch) {
+    if wind_candidate::is_markable(ch) {
         out.entries.push((ch, common));
     } else {
         out.skipped
-            .push(format!("「{ch}」不受常用字表管辖，已跳过"));
+            .push(format!("U+{:04X} 是空白或控制字符，已跳过", ch as u32));
     }
 }
 
@@ -563,11 +566,25 @@ mod tests {
         assert_eq!(common_char_of(""), None);
     }
 
-    /// 域外字符一律拒绝：读端 `is_string_common` 直接忽略它们，放行等于存一条死记录。
+    /// 非汉字字符**现在一律放行**（issue #83：词库管理全范围放开）。
+    ///
+    /// 取代旧的 `rejects_out_of_scope_chars`——那条钉的是相反的行为，理由是读端会忽略
+    /// 域外覆盖、放行等于存死记录。读端改成覆盖优先后那个理由不再成立，两条断言必然互斥。
+    /// 用户点名要能关掉的字根、间架结构符、注音、假名，全都在这一批里。
     #[test]
-    fn rejects_out_of_scope_chars() {
-        for s in ["、", "，", "①", "℃", "あ", "😀", "A", "7", " "] {
-            assert_eq!(common_char_of(s), None, "{s} 不该放行");
+    fn accepts_non_han_chars() {
+        for s in ["、", "，", "①", "℃", "あ", "ㄅ", "⿰", "😀", "A", "7"] {
+            let ch = s.chars().next().unwrap();
+            assert_eq!(common_char_of(s), Some(ch), "{s} 应放行");
+        }
+    }
+
+    /// 空白与控制字符仍然拒绝——数据卫生，不是作用域判断：它们不会作为候选出现，
+    /// 登记进去只会在列表里显示成一行空白，用户既看不出是什么也点不掉。
+    #[test]
+    fn rejects_blank_and_control_chars() {
+        for s in [" ", "\t", "\u{3000}", "\u{0}"] {
+            assert_eq!(common_char_of(s), None, "{s:?} 不该放行");
         }
     }
 }

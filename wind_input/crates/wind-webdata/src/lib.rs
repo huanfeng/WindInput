@@ -4923,16 +4923,29 @@ mod tests {
         assert_eq!(q["override"], json!(true));
         assert_eq!(q["effective"], json!(true));
 
-        // 管辖域外的字符：query 如实说不管辖，set 直接报错而不是静默存一条死记录。
+        // 默认字表管不着的字符：`governed` 如实报 false（纯提示），但 set **必须放行**
+        // ——issue #83 起词库管理全范围放开，用户要能把字根、注音、假名这些关掉。
         let q2 = c
             .web_data_rpc("commonChars.query", &json!({ "char": "、" }))
             .unwrap();
-        assert_eq!(q2["governed"], json!(false));
-        assert!(
-            c.web_data_rpc("commonChars.set", &json!({ "char": "、", "common": false }))
-                .is_err(),
-            "域外字符必须拒绝——读端根本不查它，存了也永不生效且无任何报错"
+        assert_eq!(q2["governed"], json!(false), "默认字表确实管不着它");
+        assert_eq!(
+            q2["effective"],
+            json!(true),
+            "没覆盖时域外字符照常放行，故当前判定是「常用」"
         );
+        c.web_data_rpc("commonChars.set", &json!({ "char": "、", "common": false }))
+            .expect("域外字符必须可登记");
+        let q3 = c
+            .web_data_rpc("commonChars.query", &json!({ "char": "、" }))
+            .unwrap();
+        assert_eq!(
+            q3["effective"],
+            json!(false),
+            "设了就得生效——写得进去却不生效，就是一条静默的死记录"
+        );
+        c.web_data_rpc("commonChars.reset", &json!({ "char": "、" }))
+            .unwrap();
 
         // 多字符一律拒绝，不取首字符：悄悄截取会让用户以为整个词都标记了。
         assert!(
@@ -5034,23 +5047,28 @@ mod tests {
         assert_eq!(o["imported"], json!(2));
         assert_eq!(common_char_rows_rpc(&c2, json!({})).1, 2);
 
-        // 手写文件：rare 段与本装置的默认同向 ⇒ 不写记录；域外字符如实报告而不是静默吞掉。
+        // 手写文件：与本装置默认同向的不写记录；非汉字照收（issue #83 放开后不再跳过）。
+        //
+        // 本装置无 data_dir ⇒ 默认表为空 ⇒ 域内的字默认全判生僻，而**域外字符默认判常用**
+        // （没覆盖时读端一律放行，见 `is_base_common`）。于是同为 rare 段：
+        // 「畢」与默认同向、不留记录，「、」与默认相反、必须留下——否则用户想隐藏顿号
+        // 会得到「导入成功但毫无变化」。
         let hand = "wind_common_chars = 1\ncommon = \"玥\"\nrare = \"畢、\"\n";
         let o2 = c2
             .web_data_rpc("commonChars.import", &json!({ "content": hand }))
             .unwrap();
-        assert_eq!(o2["imported"], json!(1), "只有 common 段那个字与默认相反");
+        assert_eq!(o2["imported"], json!(2), "「玥」与「、」都与默认相反");
         assert_eq!(
             o2["sameAsDefault"],
             json!(1),
             "与默认同向的字不该留记录——照单全收会把它钉死在当前判定上"
         );
-        assert_eq!(
-            o2["skipped"].as_array().unwrap().len(),
-            1,
-            "「、」不受常用字表管辖，必须报出来"
+        assert!(
+            o2["skipped"].as_array().unwrap().is_empty(),
+            "非汉字不再被跳过：{:?}",
+            o2["skipped"]
         );
-        assert_eq!(common_char_rows_rpc(&c2, json!({})).1, 3);
+        assert_eq!(common_char_rows_rpc(&c2, json!({})).1, 4);
 
         // JSONL（备份包 `userdata/common_chars.jsonl` 那一段的原始形态）也认。
         let c3 = coord("commonchars_io3");
