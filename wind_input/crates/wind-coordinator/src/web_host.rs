@@ -55,13 +55,13 @@ pub trait WebDataHost {
     ) -> Vec<crate::handle_common_chars::CommonCharRow>;
 
     /// 某个字的当前状态：出厂判定 / 覆盖 / 是否受管辖。设置页「添加」时预览与校验用。
-    fn common_char_state(&self, ch: char) -> crate::handle_common_chars::CommonCharState;
+    fn common_char_state(&self, ch: &str) -> crate::handle_common_chars::CommonCharState;
 
     /// 设置页对一个字的编辑：**写库 + 回灌运行时镜像**一并完成（同 `quick_format_edit`）。
     /// 管辖域外的字符返回 Err——放行只会存下一条永不生效的记录，且全程无报错。
     fn common_char_edit(
         &self,
-        ch: char,
+        ch: &str,
         edit: crate::handle_common_chars::CommonCharEdit,
     ) -> anyhow::Result<()>;
 
@@ -69,7 +69,7 @@ pub trait WebDataHost {
     /// 按某个字所属的 Unicode 块整类设常用/生僻；`apply=false` 只预览不写库。
     fn common_char_bulk_by_block(
         &self,
-        ch: char,
+        ch: &str,
         common: bool,
         apply: bool,
     ) -> anyhow::Result<crate::handle_common_chars::CommonCharBulkOutcome>;
@@ -202,19 +202,19 @@ impl WebDataHost for Coordinator {
     ) -> Vec<crate::handle_common_chars::CommonCharRow> {
         Coordinator::common_char_rows(self, query, only_modified)
     }
-    fn common_char_state(&self, ch: char) -> crate::handle_common_chars::CommonCharState {
+    fn common_char_state(&self, ch: &str) -> crate::handle_common_chars::CommonCharState {
         Coordinator::common_char_state(self, ch)
     }
     fn common_char_edit(
         &self,
-        ch: char,
+        ch: &str,
         edit: crate::handle_common_chars::CommonCharEdit,
     ) -> anyhow::Result<()> {
         Coordinator::common_char_edit(self, ch, edit)
     }
     fn common_char_bulk_by_block(
         &self,
-        ch: char,
+        ch: &str,
         common: bool,
         apply: bool,
     ) -> anyhow::Result<crate::handle_common_chars::CommonCharBulkOutcome> {

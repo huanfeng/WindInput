@@ -1,6 +1,6 @@
 //! 常用字表的**用户覆盖**：运行时镜像装载 + 候选右键「设为生僻字 / 设为常用字」。
 //!
-//! 真相在 store（`wind_store::common_chars`，key = 单个字，不带方案），这里维护
+//! 真相在 store（`wind_store::common_chars`，key = 一个字素簇，不带方案），这里维护
 //! `Coordinator::common_chars` 这份内存镜像，并在写库后立刻重灌——「设了没反应、
 //! 重启才生效」正是镜像没回灌造成的，本仓已在别处栽过。
 //!
@@ -20,9 +20,11 @@ use tracing::{debug, warn};
 ///
 /// 列的是**全表**（出厂字 + 用户加的），不是只列改过的那几条：用户来这个页面最常问的
 /// 是「这个字现在算不算常用」，只列改动答不了。改过的那些靠 [`Self::overridden`] 标出来。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonCharRow {
-    pub ch: char,
+    /// 这一行的**字素簇文本**（用户眼里的一个字符）。类型是 `String` 而非 `char`：
+    /// 覆盖表里可以有 `👨‍👩‍👧`（5 个码位）、`🇨🇳`（2 个）这样的条目。
+    pub text: String,
     /// **当前生效**的判定（用户改过就是用户设的，否则跟随默认）。
     pub common: bool,
     /// 默认判定（出厂字表说了算）。界面靠它显示「默认 → 现在」的对照。
@@ -34,14 +36,13 @@ pub struct CommonCharRow {
     /// 光看字形分不清这些东西是什么——issue #83 的用户为此把整张码表喂给 AI 分类、再手工
     /// 逐个试，才弄明白哪些会显示哪些不会。类型列就是把那份工作内建进来。
     ///
-    /// ⚠️ 范围文本（`2FF0-2FFF`）**不存在这里**：本结构是 `Copy` 的，8104 行的列表靠它便宜
-    /// 地流转，塞一个 `String` 进来就得整体降级成 `Clone`。需要范围的消费方自己调
-    /// `block_of(ch).range_text()`，多一次查表换来行结构不变胖，也避免把格式化逻辑抄第二份。
+    /// ⚠️ 范围文本（`2FF0-2FFF`）**不存在这里**：消费方自己调 `block_of_cluster(t).range_text()`，
+    /// 免得把同一份格式化逻辑抄第二份。
     pub block: &'static str,
     /// 这个块能不能整类批量操作（[`wind_candidate::block_allows_bulk_edit`]）。
     ///
     /// ⛔ 汉字块恒 `false`：对着一行「我」点「将『基本汉字』全部设为生僻」，一次误点就是
-    /// 七千多条覆盖，整张常用字表当场作废。菜单项据此灰显。
+    /// 七千多条覆盖，整张常用字表当场作废。设置页据此**不显示**该菜单项。
     pub block_bulk_editable: bool,
 }
 
@@ -94,8 +95,8 @@ pub enum CommonCharEdit {
 /// 刻意不带「是否已有覆盖」：菜单只有一项，点回出厂方向即等于恢复
 /// （见 [`crate::Coordinator::toggle_common_char`]），没有第二个菜单项需要靠它灰显。
 pub(crate) struct CommonCharMark {
-    /// 目标字。
-    pub ch: char,
+    /// 目标字素簇（用户眼里的一个字符，可能由多个码位组成）。
+    pub text: String,
     /// 当前判定（含用户覆盖）。菜单据此二选一：判常用就给「设为生僻字」，反之亦然。
     pub common: bool,
 }
@@ -107,9 +108,10 @@ pub(crate) struct CommonCharMark {
 /// 1. **不再限定汉字**。曾用 `is_common_scope`（只认汉字与 PUA），于是字根、间架结构符、
 ///    注音、假名这些用户点名要关掉的候选反而标不了。放开的前提是读端 `is_string_common`
 ///    **先**改成覆盖优先——顺序反了会存下一批永不被查询的死记录，且全程无报错。
-/// 2. **「一个字」按基础字符数算，不是 `char` 数**。`⚽️` 是 `U+26BD`+`U+FE0F`，
-///    `👍🏻` 带肤色修饰符，按 `chars().count() == 1` 判会把整类 emoji 挡在门外。
-pub(crate) fn common_char_of(text: &str) -> Option<char> {
+/// 2. **「一个字」按 Unicode 字素簇算，不是 `char` 数**。`⚽️`(2 个码位)、`👨‍👩‍👧`(5 个)、
+///    `🇨🇳`(2 个)、`1️⃣`(3 个) 在屏幕上都只有一个图形——**用户分辨不出的差别，不该决定
+///    能不能设置**。按 `chars().count() == 1` 判会把整类 emoji 挡在门外。
+pub(crate) fn common_char_of(text: &str) -> Option<&str> {
     wind_candidate::single_markable_char(text)
 }
 
@@ -141,11 +143,11 @@ impl crate::Coordinator {
         // 无 store 就没有落点：菜单给了入口而写端无处可写，是那种「点得动却毫无反应」
         // 的静默错配。headless 与未初始化存储一律不给。
         self.store.as_ref()?;
-        let ch = common_char_of(text)?;
+        let g = common_char_of(text)?;
         let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
         Some(CommonCharMark {
-            ch,
-            common: cc.is_char_common(ch),
+            text: g.to_string(),
+            common: cc.is_cluster_common(g),
         })
     }
 
@@ -160,18 +162,20 @@ impl crate::Coordinator {
     /// `only_modified` 为真时只留改过的行：全表 8104 条里自己动过的那几个，翻页是找不到的。
     pub(crate) fn common_char_rows(&self, query: &str, only_modified: bool) -> Vec<CommonCharRow> {
         let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
-        let q: Vec<char> = query.trim().chars().collect();
+        let q = query.trim();
         cc.list_all()
             .into_iter()
-            .filter(|(ch, _, _)| q.is_empty() || q.contains(ch))
-            .filter(|(ch, _, _)| !only_modified || cc.override_of(*ch).is_some())
-            .map(|(ch, base_common, common)| {
-                let blk = wind_candidate::block_of(ch);
+            // 搜索按**子串包含**：查询串里出现过这个簇即命中。多码位簇用 `chars().contains`
+            // 判不出来（那是按单码位比的），`⚽️` 会永远搜不到。
+            .filter(|(t, _, _)| q.is_empty() || q.contains(t.as_str()))
+            .filter(|(t, _, _)| !only_modified || cc.override_of_cluster(t).is_some())
+            .map(|(text, base_common, common)| {
+                let blk = wind_candidate::block_of_cluster(&text);
                 CommonCharRow {
-                    ch,
+                    overridden: cc.override_of_cluster(&text).is_some(),
+                    text,
                     common,
                     base_common,
-                    overridden: cc.override_of(ch).is_some(),
                     block: blk.name,
                     block_bulk_editable: wind_candidate::block_allows_bulk_edit(&blk),
                 }
@@ -190,11 +194,11 @@ impl crate::Coordinator {
     /// 整张常用字表当场作废。那些块本就有默认字表逐字管着，要调也该逐字调。
     pub(crate) fn common_char_bulk_by_block(
         &self,
-        ch: char,
+        text: &str,
         common: bool,
         apply: bool,
     ) -> anyhow::Result<CommonCharBulkOutcome> {
-        let blk = wind_candidate::block_of(ch);
+        let blk = wind_candidate::block_of_cluster(text);
         if !wind_candidate::block_allows_bulk_edit(&blk) {
             anyhow::bail!("「{}」由默认字表逐字管辖，不支持整类操作", blk.name);
         }
@@ -210,16 +214,16 @@ impl crate::Coordinator {
         if !apply {
             return Ok(out);
         }
-        for &c in &scan.chars {
+        for c in scan.chars.iter().map(|c| c.to_string()) {
             // ⚠️ `apply_common_target` 返回的是「操作成功」，不是「写了记录」：与默认同向时
             // 它走的是**删覆盖**那一支，照样返回 true。要如实报告落库条数，得自己先问一遍
             // 默认判定。读锁取在循环内的短作用域里——`apply_common_target` 自己也要取读锁，
             // 在外层长期持有会跟它撞上。
             let same_as_default = {
                 let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
-                cc.is_base_common(c) == common
+                cc.is_cluster_common_by_default(&c) == common
             };
-            if self.apply_common_target(c, common) && !same_as_default {
+            if self.apply_common_target(&c, common) && !same_as_default {
                 out.written += 1;
             }
         }
@@ -236,12 +240,17 @@ impl crate::Coordinator {
     }
 
     /// 某个字的当前状态：设置页「添加」时用来预览与**校验**。
-    pub(crate) fn common_char_state(&self, ch: char) -> CommonCharState {
+    pub(crate) fn common_char_state(&self, ch: &str) -> CommonCharState {
         let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
         CommonCharState {
-            governed: wind_candidate::is_common_scope(ch),
-            base_common: cc.is_base_common(ch),
-            over: cc.override_of(ch),
+            // 多码位簇（emoji 序列）默认字表一律管不着，`governed` 恒 false。
+            governed: ch.chars().count() == 1
+                && ch
+                    .chars()
+                    .next()
+                    .is_some_and(wind_candidate::is_common_scope),
+            base_common: cc.is_cluster_common_by_default(ch),
+            over: cc.override_of_cluster(ch),
         }
     }
 
@@ -250,7 +259,7 @@ impl crate::Coordinator {
     /// ⚠️ 只拒绝空白与控制字符（[`wind_candidate::is_markable`]）。**不再按「是不是汉字」
     /// 设限**：用户可以给任何字符登记常用/生僻，读端一律认（issue #83）。
     /// 这里返回 Err 而不是静默忽略，界面才说得清为什么没写进去。
-    pub(crate) fn common_char_edit(&self, ch: char, edit: CommonCharEdit) -> anyhow::Result<()> {
+    pub(crate) fn common_char_edit(&self, ch: &str, edit: CommonCharEdit) -> anyhow::Result<()> {
         let Some(store) = self.store.as_ref() else {
             anyhow::bail!("无持久化存储");
         };
@@ -264,8 +273,8 @@ impl crate::Coordinator {
                 self.clear_common_char(ch);
             }
             CommonCharEdit::Set(common) => {
-                if !wind_candidate::is_markable(ch) {
-                    anyhow::bail!("空白与控制字符不能登记常用/生僻");
+                if wind_candidate::single_markable_char(ch).is_none() {
+                    anyhow::bail!("只能登记单个字符（空白与控制字符除外）");
                 }
                 self.apply_common_target(ch, common);
             }
@@ -278,7 +287,7 @@ impl crate::Coordinator {
     ///
     /// 菜单可用性与写端准入共用 [`Self::common_char_mark`]，故断言本函数
     /// **等于同时锁住两条通路**——它们错配的表现是「点得动却毫无反应」，没有日志。
-    pub fn debug_common_char_mark(&self, page_local: usize) -> Option<(char, bool)> {
+    pub fn debug_common_char_mark(&self, page_local: usize) -> Option<(String, bool)> {
         let text = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let (start, end) = self.page_range(&state);
@@ -288,13 +297,13 @@ impl crate::Coordinator {
             }
             state.candidates[idx].text.clone()
         };
-        self.common_char_mark(&text).map(|m| (m.ch, m.common))
+        self.common_char_mark(&text).map(|m| (m.text, m.common))
     }
 
     /// 写一条覆盖并立刻重灌镜像。`common` = 设为常用字 / 设为生僻字。
     ///
     /// 返回是否写成功——调用方据此决定要不要重建候选（写失败还重建纯属白跑一轮）。
-    pub(crate) fn set_common_char(&self, ch: char, common: bool) -> bool {
+    pub(crate) fn set_common_char(&self, ch: &str, common: bool) -> bool {
         let Some(store) = self.store.as_ref() else {
             return false;
         };
@@ -313,7 +322,7 @@ impl crate::Coordinator {
     /// 撤销某字的覆盖，回到出厂判定。
     ///
     /// 与「设为常用字」**不是**一回事：出厂判生僻的字撤销后仍是生僻。
-    pub(crate) fn clear_common_char(&self, ch: char) -> bool {
+    pub(crate) fn clear_common_char(&self, ch: &str) -> bool {
         let Some(store) = self.store.as_ref() else {
             return false;
         };
@@ -344,12 +353,12 @@ impl crate::Coordinator {
     ///
     /// ★ 右键与设置页共用本函数。两条入口各写一份「要不要删」的判断，迟早会漂移成
     /// 「右键点回去干净、设置页改回去留一条冗余」这种没人看得出的差别。
-    pub(crate) fn apply_common_target(&self, ch: char, common: bool) -> bool {
+    pub(crate) fn apply_common_target(&self, ch: &str, common: bool) -> bool {
         let base = self
             .common_chars
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .is_base_common(ch);
+            .is_cluster_common_by_default(ch);
         if common == base {
             self.clear_common_char(ch)
         } else {
@@ -364,8 +373,8 @@ impl crate::Coordinator {
         };
         // 目标 = 当前判定取反。菜单文案正是按 `mark.common` 二选一的，两边同源。
         let target = !mark.common;
-        if !self.apply_common_target(mark.ch, target) {
-            warn!("常用字标记: {} 写库未生效，跳过重建", mark.ch);
+        if !self.apply_common_target(&mark.text, target) {
+            warn!("常用字标记: {} 写库未生效，跳过重建", mark.text);
             return;
         }
         let before = state.candidates.len();
@@ -391,10 +400,10 @@ impl crate::Coordinator {
             .common_chars
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .is_char_common(mark.ch);
+            .is_cluster_common(&mark.text);
         debug!(
             "常用字标记: {} {}→{}（生效={}）；候选 {} → {} 条，码={}",
-            mark.ch,
+            mark.text,
             if mark.common { "常用" } else { "生僻" },
             if target { "常用" } else { "生僻" },
             now_common == target,
@@ -421,7 +430,7 @@ const COMMON_CHARS_FILE_TAG: &str = "wind_common_chars";
 
 /// 解析结果：字与目标判定，加上跳过的条目及原因。
 struct ParsedCommonChars {
-    entries: Vec<(char, bool)>,
+    entries: Vec<(String, bool)>,
     skipped: Vec<String>,
 }
 
@@ -452,9 +461,9 @@ pub struct CommonCharsImportOutcome {
     pub skipped: Vec<String>,
 }
 
-/// 把一串字按 TOML 字符串字面量输出（汉字里不会有引号/反斜杠，但不自己拼引号）。
-fn toml_string_literal(s: &str) -> String {
-    toml::Value::String(s.to_string()).to_string()
+/// 把一组字符按 TOML 数组字面量输出（不自己拼引号，交给 toml 转义）。
+fn toml_array_literal(items: &[String]) -> String {
+    toml::Value::Array(items.iter().cloned().map(toml::Value::String).collect()).to_string()
 }
 
 /// 解析导入文件。TOML 为主格式，JSONL 是备份包里那一段的原始形态。
@@ -483,12 +492,32 @@ fn parse_common_chars_file(content: &str) -> anyhow::Result<ParsedCommonChars> {
     // 两段分别是两个方向。段缺失是合法的（用户只降级过、没升级过）。
     for (key, common) in [("common", true), ("rare", false)] {
         let Some(v) = table.get(key) else { continue };
-        let Some(s) = v.as_str() else {
-            out.skipped.push(format!("{key}：应为字符串，已跳过整段"));
-            continue;
-        };
-        for ch in s.chars() {
-            push_common_char_entry(&mut out, ch, common);
+        // 两种形态都认：
+        // - **数组**（现在导出的形态）：一项一个字符，无歧义；
+        // - **字符串**（旧版导出的形态）：按**字素簇**切，不能按 `char` 切——那会把
+        //   `👨‍👩‍👧` 拆成 5 条垃圾记录。对旧文件里清一色的单码位汉字，两种切法结果相同，
+        //   故向后兼容。
+        //
+        // ⚠️ 之所以改用数组：字符串形态下相邻条目会被字素簇算法重新组合。用户若分别
+        // 登记过 `🇨` 与 `🇳`，拼进同一个字符串再读回来就成了一个国旗 `🇨🇳`——数据在
+        // 导出导入之间悄悄变了。
+        match v {
+            toml::Value::Array(items) => {
+                for it in items {
+                    match it.as_str() {
+                        Some(t) => push_common_char_entry(&mut out, t, common),
+                        None => out.skipped.push(format!("{key}：非字符串项，已跳过")),
+                    }
+                }
+            }
+            toml::Value::String(s) => {
+                for g in wind_candidate::split_markable_clusters(s) {
+                    push_common_char_entry(&mut out, g, common);
+                }
+            }
+            _ => out
+                .skipped
+                .push(format!("{key}：应为数组或字符串，已跳过整段")),
         }
     }
     Ok(out)
@@ -507,7 +536,7 @@ fn parse_common_chars_jsonl(content: &str) -> ParsedCommonChars {
             continue;
         }
         match serde_json::from_str::<wind_store::common_chars::CommonCharOverride>(line) {
-            Ok(o) => push_common_char_entry(&mut out, o.ch, o.common),
+            Ok(o) => push_common_char_entry(&mut out, &o.ch, o.common),
             Err(e) => out.skipped.push(format!("第 {} 行：{e}", i + 1)),
         }
     }
@@ -518,12 +547,12 @@ fn parse_common_chars_jsonl(content: &str) -> ParsedCommonChars {
 ///
 /// ⚠️ 准入与右键写端同为 [`wind_candidate::is_markable`]（issue #83 起放开到全字符）。
 /// 导入文件里的空白本就会被上游按行/按字切掉，这道只是最后一层数据卫生。
-fn push_common_char_entry(out: &mut ParsedCommonChars, ch: char, common: bool) {
-    if wind_candidate::is_markable(ch) {
-        out.entries.push((ch, common));
-    } else {
-        out.skipped
-            .push(format!("U+{:04X} 是空白或控制字符，已跳过", ch as u32));
+fn push_common_char_entry(out: &mut ParsedCommonChars, text: &str, common: bool) {
+    match wind_candidate::single_markable_char(text) {
+        Some(g) => out.entries.push((g.to_string(), common)),
+        None => out
+            .skipped
+            .push(format!("{text:?} 不是单个可登记的字符，已跳过")),
     }
 }
 
@@ -542,13 +571,9 @@ impl crate::Coordinator {
             .store
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        let (mut common, mut rare) = (String::new(), String::new());
+        let (mut common, mut rare): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
         for o in store.list_common_char_overrides()? {
-            if o.common {
-                common.push(o.ch);
-            } else {
-                rare.push(o.ch);
-            }
+            if o.common { &mut common } else { &mut rare }.push(o.ch);
         }
         Ok(format!(
             "# 清风输入法 · 常用字调整（只记录与默认不同的字）\n\
@@ -556,8 +581,8 @@ impl crate::Coordinator {
              {COMMON_CHARS_FILE_TAG} = 1\n\
              common = {}\n\
              rare = {}\n",
-            toml_string_literal(&common),
-            toml_string_literal(&rare),
+            toml_array_literal(&common),
+            toml_array_literal(&rare),
         ))
     }
 
@@ -610,11 +635,11 @@ impl crate::Coordinator {
             // 逐条取锁纯属白付。回灌要写锁，故这一段单独作用域。
             let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
             for (ch, common) in parsed.entries {
-                if common == cc.is_base_common(ch) {
-                    store.remove_common_char_override(ch)?;
+                if common == cc.is_cluster_common_by_default(&ch) {
+                    store.remove_common_char_override(&ch)?;
                     outcome.same_as_default += 1;
                 } else {
-                    store.set_common_char_override(ch, common)?;
+                    store.set_common_char_override(&ch, common)?;
                     outcome.imported += 1;
                 }
             }
@@ -636,14 +661,29 @@ mod tests {
 
     #[test]
     fn accepts_single_han_and_pua() {
-        assert_eq!(common_char_of("我"), Some('我'));
-        assert_eq!(common_char_of("鬱"), Some('鬱'));
-        assert_eq!(
-            common_char_of("\u{E831}"),
-            Some('\u{E831}'),
-            "PUA 被码表当汉字用"
-        );
-        assert_eq!(common_char_of("\u{20000}"), Some('\u{20000}'), "扩展 B");
+        for s in ["我", "鬱", "\u{E831}", "\u{20000}"] {
+            assert_eq!(common_char_of(s), Some(s), "{s} 应放行（键就是它自己）");
+        }
+    }
+
+    /// 多码位的一个图形也算一个字符——用户报的 `⚽️`，以及 ZWJ 序列、国旗、keycap。
+    ///
+    /// 键是**整簇**：只登记组合，单个成员不受牵连（见 wind-candidate 的
+    /// `multi_code_point_cluster_override_takes_effect`）。
+    #[test]
+    fn accepts_multi_code_point_graphemes() {
+        for (s, what) in [
+            ("\u{26BD}\u{FE0F}", "变体选择符 ⚽️"),
+            ("\u{1F44D}\u{1F3FB}", "肤色修饰符"),
+            (
+                "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+                "ZWJ 家庭序列",
+            ),
+            ("\u{1F1E8}\u{1F1F3}", "国旗"),
+            ("\u{0031}\u{FE0F}\u{20E3}", "keycap"),
+        ] {
+            assert_eq!(common_char_of(s), Some(s), "{what} 应放行");
+        }
     }
 
     #[test]
@@ -661,8 +701,7 @@ mod tests {
     #[test]
     fn accepts_non_han_chars() {
         for s in ["、", "，", "①", "℃", "あ", "ㄅ", "⿰", "😀", "A", "7"] {
-            let ch = s.chars().next().unwrap();
-            assert_eq!(common_char_of(s), Some(ch), "{s} 应放行");
+            assert_eq!(common_char_of(s), Some(s), "{s} 应放行");
         }
     }
 

@@ -129,7 +129,8 @@ fn sort_common_char_rows(
     desc: bool,
 ) {
     let key = |r: &wind_coordinator::handle_common_chars::CommonCharRow| match sort_by {
-        "text" | "char" => (r.ch as u32, false),
+        // 多码位簇按首码位排——它没有单一码位，取首个是唯一稳定且直观的口径。
+        "text" | "char" => (r.text.chars().next().map_or(0, |c| c as u32), false),
         // bool 升序 = false 在前 = 生僻在前。
         "baseCommon" => (0, r.base_common),
         "common" => (0, r.common),
@@ -148,16 +149,18 @@ fn sort_common_char_rows(
 ///
 /// 多字符 / 空串一律拒绝，而不是取首字符：「常用」是字级属性，悄悄截取会让用户以为
 /// 自己给整个词做了标记，而实际上只标了第一个字。
-fn char_param(p: &Value, key: &str) -> anyhow::Result<char> {
+/// 读取「一个字符」参数——按**字素簇**校验，不是按 `char`。
+///
+/// `⚽️`(2 个码位)、`👨‍👩‍👧`(5 个)、`🇨🇳`(2 个) 在屏幕上都只有一个图形，按 `char` 数校验会把
+/// 它们当成词组拒掉，用户看到的是候选右键里根本没有「设为生僻字」这一项。
+fn char_param(p: &Value, key: &str) -> anyhow::Result<String> {
     let s = str_param(p, key)?;
-    let mut it = s.chars();
-    let ch = it
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("参数 {key} 不能为空"))?;
-    if it.next().is_some() {
-        anyhow::bail!("参数 {key} 只能是一个字（收到「{s}」）");
+    if s.is_empty() {
+        anyhow::bail!("参数 {key} 不能为空");
     }
-    Ok(ch)
+    wind_candidate::single_markable_char(s)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("参数 {key} 只能是一个字符（收到「{s}」）"))
 }
 
 /// 读取 `sections` 参数（字符串数组）→ 词库数据段；缺省返回 None（由调用方取引擎默认）。
@@ -2558,7 +2561,7 @@ pub trait WebDataRpc: WebDataHost {
             .take(limit)
             .map(|r| {
                 json!({
-                    "char": r.ch.to_string(),
+                    "char": r.text,
                     "common": r.common,
                     // 默认判定要一起给：界面靠它显示「默认 → 现在」的对照。
                     // 只给 common 的话，用户看到一行「的 · 生僻」不知道自己改的是什么。
@@ -2568,7 +2571,7 @@ pub trait WebDataRpc: WebDataHost {
                     // 类型：所属 Unicode 块。光看字形分不清 ⺡(部首) 与 氵(基本汉字)、
                     // ℃(字母式符号) 与 ㎡(CJK 兼容符号)，而它们的处置方式完全不同。
                     "block": r.block,
-                    "blockRange": wind_candidate::block_of(r.ch).range_text(),
+                    "blockRange": wind_candidate::block_of_cluster(&r.text).range_text(),
                     // 整类批量能不能点。汉字块恒 false——见 `block_allows_bulk_edit`。
                     "blockBulkEditable": r.block_bulk_editable,
                 })
@@ -2579,7 +2582,7 @@ pub trait WebDataRpc: WebDataHost {
 
     fn web_common_chars_query(&self, params: &Value) -> anyhow::Result<Value> {
         let ch = char_param(params, "char")?;
-        let st = self.common_char_state(ch);
+        let st = self.common_char_state(&ch);
         Ok(json!({
             "char": ch.to_string(),
             // false ⇒ 界面应拒绝添加：读端根本不查这类字符，存了也永不生效。
@@ -2597,7 +2600,7 @@ pub trait WebDataRpc: WebDataHost {
             .get("common")
             .and_then(|v| v.as_bool())
             .ok_or_else(|| anyhow::anyhow!("缺少参数 common"))?;
-        self.common_char_edit(ch, CommonCharEdit::Set(common))?;
+        self.common_char_edit(&ch, CommonCharEdit::Set(common))?;
         Ok(json!({ "ok": true }))
     }
 
@@ -2616,7 +2619,7 @@ pub trait WebDataRpc: WebDataHost {
             .get("apply")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let o = self.common_char_bulk_by_block(ch, common, apply)?;
+        let o = self.common_char_bulk_by_block(&ch, common, apply)?;
         Ok(json!({
             "block": o.block,
             "chars": o.chars,
@@ -2630,14 +2633,14 @@ pub trait WebDataRpc: WebDataHost {
 
     fn web_common_chars_reset(&self, params: &Value) -> anyhow::Result<Value> {
         let ch = char_param(params, "char")?;
-        self.common_char_edit(ch, CommonCharEdit::Reset)?;
+        self.common_char_edit(&ch, CommonCharEdit::Reset)?;
         Ok(json!({ "ok": true }))
     }
 
     fn web_common_chars_clear(&self) -> anyhow::Result<Value> {
         // 整表操作没有单字归属，传一个占位字符（`ClearAll` 忽略它），
         // 与 `quick.resetKind` 传空 id 同一惯例。
-        self.common_char_edit('\0', CommonCharEdit::ClearAll)?;
+        self.common_char_edit("", CommonCharEdit::ClearAll)?;
         Ok(json!({ "ok": true }))
     }
 
@@ -5259,7 +5262,7 @@ mod tests {
         let row = |ch: char, base: bool, now: bool| {
             let blk = wind_candidate::block_of(ch);
             CommonCharRow {
-                ch,
+                text: ch.to_string(),
                 common: now,
                 base_common: base,
                 overridden: base != now,
@@ -5285,13 +5288,9 @@ mod tests {
             let mut r = seed.clone();
             sort_common_char_rows(&mut r, key, false);
             let asc = chars(&r);
-            let mut expect: Vec<char> = seed.iter().map(|x| x.ch).collect();
+            let mut expect: Vec<String> = seed.iter().map(|x| x.text.clone()).collect();
             expect.sort_unstable();
-            assert_eq!(
-                asc,
-                expect.iter().collect::<String>(),
-                "sortBy={key} 应按码位升序"
-            );
+            assert_eq!(asc, expect.concat(), "sortBy={key} 应按码位升序");
         }
 
         // 按「当前」升序：生僻(false) 在前；同值组内保持字表原序。
@@ -5315,7 +5314,7 @@ mod tests {
     }
 
     fn chars(rows: &[wind_coordinator::handle_common_chars::CommonCharRow]) -> String {
-        rows.iter().map(|r| r.ch).collect()
+        rows.iter().map(|r| r.text.as_str()).collect()
     }
 
     fn quick_rows(c: &Coordinator) -> Vec<Value> {

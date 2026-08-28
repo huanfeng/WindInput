@@ -120,7 +120,7 @@ fn marking_a_char_rare_removes_it_from_candidates() {
     let idx = index_of(&before, "档").expect("「档」应在候选里");
     assert_eq!(
         c.debug_common_char_mark(idx),
-        Some(('档', true)),
+        Some(("档".to_string(), true)),
         "菜单侧应认「档」为当前判常用（据此给「设为生僻字」）"
     );
     c.debug_candidate_op(CandidateOp::ToggleCommon, idx);
@@ -220,7 +220,7 @@ fn toggling_back_removes_the_row_instead_of_writing_a_redundant_one() {
 
     c.debug_candidate_op(CandidateOp::ToggleCommon, idx);
     assert_eq!(
-        st.get_common_char_override('档').unwrap(),
+        st.get_common_char_override("档").unwrap(),
         Some(false),
         "第一次点击应写下一条与出厂相反的覆盖"
     );
@@ -232,7 +232,7 @@ fn toggling_back_removes_the_row_instead_of_writing_a_redundant_one() {
     let idx2 = index_of(&list2, "档").expect("放宽后「档」应回到列表末尾");
     c.debug_candidate_op(CandidateOp::ToggleCommon, idx2);
     assert_eq!(
-        st.get_common_char_override('档').unwrap(),
+        st.get_common_char_override("档").unwrap(),
         None,
         "点回出厂方向应删掉那条记录，而不是写一条同向的冗余覆盖"
     );
@@ -308,25 +308,28 @@ fn list_covers_whole_table_and_filters_modified_only() {
         "还没改过任何字，不该有行被标成已修改"
     );
     // 字表原序：一级字打头（`common_chars.txt` 按级别拼接）。
-    assert_eq!(all[0].ch, '一', "全表须按字表原序，不能是 HashSet 的随机序");
+    assert_eq!(
+        all[0].text, "一",
+        "全表须按字表原序，不能是 HashSet 的随机序"
+    );
 
     // 搜索：只留出现在查询串里的字。
     let hit = c.common_char_rows("的", false);
     assert_eq!(hit.len(), 1);
-    assert_eq!(hit[0].ch, '的');
+    assert_eq!(hit[0].text, "的");
     assert!(hit[0].common && hit[0].base_common, "「的」默认就是常用字");
 
     // 只看已修改：改之前空，改之后只剩那一条。
     assert!(c.common_char_rows("", true).is_empty());
     // 走设置页那条写端（`common_char_edit`），与界面点按钮时同一条路径。
     c.common_char_edit(
-        '的',
+        "的",
         wind_coordinator::handle_common_chars::CommonCharEdit::Set(false),
     )
     .unwrap();
     let modified = c.common_char_rows("", true);
     assert_eq!(modified.len(), 1, "只该剩改过的那一条");
-    assert_eq!(modified[0].ch, '的');
+    assert_eq!(modified[0].text, "的");
     assert!(modified[0].overridden);
     assert!(
         !modified[0].common && modified[0].base_common,
@@ -348,7 +351,7 @@ fn overrides_survive_restart() {
         return;
     }
     let st = store("restart");
-    st.set_common_char_override('档', false).unwrap();
+    st.set_common_char_override("档", false).unwrap();
 
     let mut cfg = Config::default();
     cfg.schema.available = vec!["wubi86".into()];

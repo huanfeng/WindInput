@@ -447,8 +447,8 @@ mod tests {
         s.pin_shadow("wb", "aa", "恭", None, 0).unwrap();
         s.add_phrase("bj", "北京", 0, 10).unwrap();
         // 常用字覆盖：全局段（键不带方案），两个方向各一条。
-        s.set_common_char_override('槮', true).unwrap();
-        s.set_common_char_override('的', false).unwrap();
+        s.set_common_char_override("槮", true).unwrap();
+        s.set_common_char_override("的", false).unwrap();
         s
     }
 
@@ -605,8 +605,8 @@ mod tests {
         assert!(s2.list_phrases().unwrap().iter().any(|p| p.code == "bj"));
         // 常用字覆盖：两个方向都要还原（只还原一个方向的话，用户会发现「我降级过的字
         // 回来了、升级过的还在」这种半吊子状态）。
-        assert_eq!(s2.get_common_char_override('槮').unwrap(), Some(true));
-        assert_eq!(s2.get_common_char_override('的').unwrap(), Some(false));
+        assert_eq!(s2.get_common_char_override("槮").unwrap(), Some(true));
+        assert_eq!(s2.get_common_char_override("的").unwrap(), Some(false));
     }
 
     #[test]

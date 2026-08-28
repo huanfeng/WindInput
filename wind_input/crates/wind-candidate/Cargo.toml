@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 serde = { workspace = true }
+unicode-segmentation = { workspace = true }
 
 [lints]
 workspace = true

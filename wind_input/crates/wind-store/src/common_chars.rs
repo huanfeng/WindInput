@@ -38,10 +38,14 @@ use serde::{Deserialize, Serialize};
 /// `common` 两个方向都要存，不能只存「被踢出常用的字」：用户既会把常用字降级
 /// （某个字他从不用、老是挡路），也会把生僻字升级（专业用字、人名用字）。
 /// 只存一个方向的话另一个方向就没有落点。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommonCharOverride {
-    /// 被覆盖的字。
-    pub ch: char,
+    /// 被覆盖的**字素簇**（用户眼里的一个字符）。
+    ///
+    /// 类型是 `String` 而不是 `char`：`👨‍👩‍👧` 是 5 个码位、`🇨🇳` 是 2 个，屏幕上都只有一个
+    /// 图形。字段名保持 `ch` 是为了**向后兼容**——备份包里已有的 `{"ch":"槮",...}` 照旧
+    /// 解析得出来（JSON 字符串 → String 恒成立），换名字才会让老备份读不回来。
+    pub ch: String,
     /// `true` = 用户强制判为常用；`false` = 用户强制判为生僻。
     pub common: bool,
 }
@@ -57,14 +61,13 @@ struct CommonCharRecord {
 
 impl Store {
     /// 写一条覆盖（同字重复写即改写方向）。
-    pub fn set_common_char_override(&self, ch: char, common: bool) -> anyhow::Result<()> {
-        let key = ch.to_string();
+    pub fn set_common_char_override(&self, key: &str, common: bool) -> anyhow::Result<()> {
         let bytes = serde_json::to_vec(&CommonCharRecord { common })?;
         self.with_db(|db| {
             let txn = db.begin_write()?;
             {
                 let mut t = txn.open_table(COMMON_CHARS)?;
-                t.insert(key.as_str(), bytes.as_slice())?;
+                t.insert(key, bytes.as_slice())?;
             }
             txn.commit()?;
             Ok(())
@@ -76,14 +79,13 @@ impl Store {
     /// 与「设为常用字」**不是**一回事：出厂判生僻的字，撤销覆盖后仍是生僻。
     /// 设置页因此把两者分成两个动作（「恢复出厂」对「设为常用字」）；候选右键只有一项，
     /// 靠「切到出厂方向即删覆盖」把恢复合并了进去（见 `Coordinator::apply_common_target`）。
-    pub fn remove_common_char_override(&self, ch: char) -> anyhow::Result<bool> {
-        let key = ch.to_string();
+    pub fn remove_common_char_override(&self, key: &str) -> anyhow::Result<bool> {
         self.with_db(|db| {
             let txn = db.begin_write()?;
             let existed;
             {
                 let mut t = txn.open_table(COMMON_CHARS)?;
-                existed = t.remove(key.as_str())?.is_some();
+                existed = t.remove(key)?.is_some();
             }
             txn.commit()?;
             Ok(existed)
@@ -91,12 +93,11 @@ impl Store {
     }
 
     /// 某字是否有覆盖，以及方向。`None` = 未覆盖（由基表判定）。
-    pub fn get_common_char_override(&self, ch: char) -> anyhow::Result<Option<bool>> {
-        let key = ch.to_string();
+    pub fn get_common_char_override(&self, key: &str) -> anyhow::Result<Option<bool>> {
         self.with_db(|db| {
             let txn = db.begin_read()?;
             let t = txn.open_table(COMMON_CHARS)?;
-            Ok(t.get(key.as_str())?.and_then(|g| {
+            Ok(t.get(key)?.and_then(|g| {
                 serde_json::from_slice::<CommonCharRecord>(g.value())
                     .ok()
                     .map(|r| r.common)
@@ -115,11 +116,12 @@ impl Store {
             let mut out = Vec::new();
             for item in t.iter()? {
                 let (k, v) = item?;
-                // 键是单个字符；多字符/空键是脏数据（手工改库、旧版本残留），跳过而非报错
-                // ——一条坏记录不该让整个列表打不开。
-                let Some(ch) = single_char(k.value()) else {
+                // 键是一个字素簇，多码位合法（`👨‍👩‍👧` 5 个码位）。只有空键才是脏数据
+                // （手工改库、旧版本残留），跳过而非报错——一条坏记录不该让整个列表打不开。
+                let ch = k.value().to_string();
+                if ch.is_empty() {
                     continue;
-                };
+                }
                 let Ok(rec) = serde_json::from_slice::<CommonCharRecord>(v.value()) else {
                     continue;
                 };
@@ -175,18 +177,11 @@ impl Store {
             let Ok(o) = serde_json::from_str::<CommonCharOverride>(line) else {
                 continue;
             };
-            self.set_common_char_override(o.ch, o.common)?;
+            self.set_common_char_override(&o.ch, o.common)?;
             n += 1;
         }
         Ok(n)
     }
-}
-
-/// 恰好一个字符时返回它，否则 `None`。
-fn single_char(s: &str) -> Option<char> {
-    let mut it = s.chars();
-    let c = it.next()?;
-    it.next().is_none().then_some(c)
 }
 
 #[cfg(test)]
@@ -209,37 +204,37 @@ mod tests {
     #[test]
     fn set_get_remove_roundtrip() {
         let s = store("a");
-        assert_eq!(s.get_common_char_override('槮').unwrap(), None);
+        assert_eq!(s.get_common_char_override("槮").unwrap(), None);
 
-        s.set_common_char_override('槮', true).unwrap();
-        assert_eq!(s.get_common_char_override('槮').unwrap(), Some(true));
+        s.set_common_char_override("槮", true).unwrap();
+        assert_eq!(s.get_common_char_override("槮").unwrap(), Some(true));
 
         // 同字改写方向，不是追加第二条。
-        s.set_common_char_override('槮', false).unwrap();
-        assert_eq!(s.get_common_char_override('槮').unwrap(), Some(false));
+        s.set_common_char_override("槮", false).unwrap();
+        assert_eq!(s.get_common_char_override("槮").unwrap(), Some(false));
         assert_eq!(s.list_common_char_overrides().unwrap().len(), 1);
 
-        assert!(s.remove_common_char_override('槮').unwrap());
-        assert_eq!(s.get_common_char_override('槮').unwrap(), None);
+        assert!(s.remove_common_char_override("槮").unwrap());
+        assert_eq!(s.get_common_char_override("槮").unwrap(), None);
         // 再删一次：没有这条，返回 false 而非报错。
-        assert!(!s.remove_common_char_override('槮').unwrap());
+        assert!(!s.remove_common_char_override("槮").unwrap());
     }
 
     #[test]
     fn both_directions_are_storable() {
         let s = store("b");
         // 生僻字升级为常用
-        s.set_common_char_override('槮', true).unwrap();
+        s.set_common_char_override("槮", true).unwrap();
         // 常用字降级为生僻
-        s.set_common_char_override('的', false).unwrap();
+        s.set_common_char_override("的", false).unwrap();
         let all = s.list_common_char_overrides().unwrap();
         assert_eq!(all.len(), 2);
         assert!(all.contains(&CommonCharOverride {
-            ch: '槮',
+            ch: "槮".into(),
             common: true
         }));
         assert!(all.contains(&CommonCharOverride {
-            ch: '的',
+            ch: "的".into(),
             common: false
         }));
     }
@@ -247,8 +242,8 @@ mod tests {
     #[test]
     fn clear_removes_all() {
         let s = store("c");
-        s.set_common_char_override('槮', true).unwrap();
-        s.set_common_char_override('的', false).unwrap();
+        s.set_common_char_override("槮", true).unwrap();
+        s.set_common_char_override("的", false).unwrap();
         assert_eq!(s.clear_common_char_overrides().unwrap(), 2);
         assert!(s.list_common_char_overrides().unwrap().is_empty());
     }
@@ -256,15 +251,15 @@ mod tests {
     #[test]
     fn jsonl_roundtrip() {
         let s = store("d");
-        s.set_common_char_override('槮', true).unwrap();
-        s.set_common_char_override('的', false).unwrap();
+        s.set_common_char_override("槮", true).unwrap();
+        s.set_common_char_override("的", false).unwrap();
         let text = s.export_common_chars_jsonl().unwrap();
         assert_eq!(text.lines().count(), 2);
 
         let s2 = store("d2");
         assert_eq!(s2.import_common_chars_jsonl(&text).unwrap(), 2);
-        assert_eq!(s2.get_common_char_override('槮').unwrap(), Some(true));
-        assert_eq!(s2.get_common_char_override('的').unwrap(), Some(false));
+        assert_eq!(s2.get_common_char_override("槮").unwrap(), Some(true));
+        assert_eq!(s2.get_common_char_override("的").unwrap(), Some(false));
     }
 
     #[test]

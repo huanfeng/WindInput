@@ -117,6 +117,15 @@ pub fn block_of(ch: char) -> CharBlock {
     OTHER
 }
 
+/// 一个**字素簇**属于哪个块——按**首个** `char` 判。
+///
+/// `👨‍👩‍👧` 的首码位是 `U+1F468`（表情符号），后面跟的 ZWJ 与其余成员不改变它是什么类；
+/// `1️⃣` 的首码位是数字 `1`，归「ASCII」也说得过去（它本就是被 keycap 化的数字）。
+/// 空串归 [`OTHER`]。
+pub fn block_of_cluster(cluster: &str) -> CharBlock {
+    cluster.chars().next().map(block_of).unwrap_or(OTHER)
+}
+
 /// 这个块能不能整类批量操作。
 ///
 /// ⛔ **默认字表管得着的块一律不行**（汉字、部首、笔画、PUA，即 `is_common_scope` 为真）。

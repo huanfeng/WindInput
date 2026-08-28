@@ -26,7 +26,17 @@ pub struct CommonChars {
     /// 直接失效（第 2 页的内容会随机变）。8104 个 char 约 32KB，代价可以忽略。
     base_order: Vec<char>,
     /// 用户覆盖：`true` = 强制判为常用，`false` = 强制判为生僻。只含被碰过的字。
-    overrides: HashMap<char, bool>,
+    ///
+    /// 键是**一个字素簇**而不是一个 `char`：用户看到的「一个图形」可能由多个码位拼成
+    /// （`⚽️`=2、`👨‍👩‍👧`=5、`🇨🇳`=2、`1️⃣`=3），而屏幕上分辨不出差别的东西，能不能设置
+    /// 却不一样，是说不通的。存储层的键本就是 `&str`，故不涉及数据迁移。
+    overrides: HashMap<String, bool>,
+    /// 覆盖里**存在多码位键**。
+    ///
+    /// ★ 热路径闸门：[`Self::is_string_common`] 对**每个候选**都要跑一遍，而字素簇分割
+    /// 比逐 `char` 遍历贵得多。绝大多数用户一个 emoji 序列都不会登记，此位为假时直接走
+    /// 原来的逐 `char` 路径，开销不变。只有真的设过多码位覆盖，才付那份钱。
+    has_multi_char_keys: bool,
 }
 
 impl CommonChars {
@@ -57,6 +67,7 @@ impl CommonChars {
             base,
             base_order,
             overrides: HashMap::new(),
+            has_multi_char_keys: false,
         }
     }
 
@@ -73,6 +84,7 @@ impl CommonChars {
             base,
             base_order,
             overrides: HashMap::new(),
+            has_multi_char_keys: false,
         }
     }
 
@@ -85,26 +97,41 @@ impl CommonChars {
     /// 管不着的字符（`、` `ㄅ` `⿰`）事实上是被放行的，默认判定就得是「常用」。写死 false
     /// 会让用户把顿号设成生僻后，界面显示「默认：生僻 → 现在：生僻」——看上去什么都没改，
     /// 而写端那边判的是「与默认相反、要留记录」，两处对同一条记录给出相反的说法。
-    pub fn list_all(&self) -> Vec<(char, bool, bool)> {
-        let mut out: Vec<(char, bool, bool)> = self
+    /// 返回的第一项是**字素簇文本**而不是 `char`：覆盖表里可以有 `👨‍👩‍👧` 这样的多码位条目，
+    /// 用 `char` 表示不了。默认字表那 8104 条全是单字符，转成 `String` 只是形态统一。
+    pub fn list_all(&self) -> Vec<(String, bool, bool)> {
+        let mut out: Vec<(String, bool, bool)> = self
             .base_order
             .iter()
-            .map(|&c| (c, self.is_base_common(c), self.is_char_common(c)))
+            .map(|&c| {
+                (
+                    c.to_string(),
+                    self.is_base_common(c),
+                    self.is_char_common(c),
+                )
+            })
             .collect();
-        // 覆盖里那些不在出厂表的字：按码位排序后追加，保证顺序稳定（HashMap 迭代序随机，
-        // 直接追加会让这批字每次刷新都换位置）。
-        let mut extra: Vec<char> = self
+        // 覆盖里那些不在出厂表的：排序后追加，保证顺序稳定（HashMap 迭代序随机，
+        // 直接追加会让这批每次刷新都换位置）。
+        let mut extra: Vec<&String> = self
             .overrides
             .keys()
-            .copied()
-            .filter(|c| !self.base.contains(c))
+            .filter(|k| match single_char_of(k) {
+                Some(c) => !self.base.contains(&c),
+                None => true, // 多码位簇必不在默认字表里
+            })
             .collect();
         extra.sort_unstable();
-        out.extend(
-            extra
-                .into_iter()
-                .map(|c| (c, self.is_base_common(c), self.is_char_common(c))),
-        );
+        out.extend(extra.into_iter().map(|k| {
+            (
+                k.clone(),
+                match single_char_of(k) {
+                    Some(c) => self.is_base_common(c),
+                    None => true,
+                },
+                self.is_cluster_common(k),
+            )
+        }));
         out
     }
 
@@ -112,8 +139,10 @@ impl CommonChars {
     ///
     /// 刻意不做增量合并：增量语义下「撤销某字的覆盖」这个操作没有落点——被删掉的那条
     /// 在旧集合里仍然存在，用户会看到「点了恢复出厂、重启前毫无变化」。
-    pub fn set_overrides(&mut self, it: impl IntoIterator<Item = (char, bool)>) {
+    pub fn set_overrides(&mut self, it: impl IntoIterator<Item = (String, bool)>) {
         self.overrides = it.into_iter().collect();
+        // 热路径闸门只在装载时算一次，查询时零成本（见字段注释）。
+        self.has_multi_char_keys = self.overrides.keys().any(|k| k.chars().count() > 1);
     }
 
     /// 是否未加载到任何**出厂**字（数据缺失）。
@@ -131,9 +160,20 @@ impl CommonChars {
     /// （`char_and_string_judgements_agree` 钉着）。两者一处按字判、一处按串判，
     /// 判据分叉过就会出现「列表里显示常用、候选里却被滤掉」这种对不上账的现象。
     pub fn is_char_common(&self, ch: char) -> bool {
-        match self.overrides.get(&ch) {
+        self.is_cluster_common(ch.encode_utf8(&mut [0u8; 4]))
+    }
+
+    /// 一个**字素簇**是否常用：覆盖优先，其次落到 [`Self::is_base_common`]。
+    ///
+    /// 多码位簇（`⚽️` `👨‍👩‍👧` `🇨🇳`）没有覆盖时恒判常用——它们整体落在默认字表管辖域外，
+    /// 与单个域外字符同一待遇。
+    pub fn is_cluster_common(&self, cluster: &str) -> bool {
+        match self.overrides.get(cluster) {
             Some(&v) => v,
-            None => self.is_base_common(ch),
+            None => match single_char_of(cluster) {
+                Some(ch) => self.is_base_common(ch),
+                None => true,
+            },
         }
     }
 
@@ -152,9 +192,23 @@ impl CommonChars {
         }
     }
 
+    /// 一个字素簇的默认判定（忽略用户覆盖）。多码位簇恒「常用」——它整体落在默认字表
+    /// 管辖域外，与单个域外字符同一待遇。
+    pub fn is_cluster_common_by_default(&self, cluster: &str) -> bool {
+        match single_char_of(cluster) {
+            Some(ch) => self.is_base_common(ch),
+            None => true,
+        }
+    }
+
     /// 某字的用户覆盖方向；`None` = 未覆盖。
     pub fn override_of(&self, ch: char) -> Option<bool> {
-        self.overrides.get(&ch).copied()
+        self.override_of_cluster(ch.encode_utf8(&mut [0u8; 4]))
+    }
+
+    /// 某个字素簇的用户覆盖方向；`None` = 未覆盖。
+    pub fn override_of_cluster(&self, cluster: &str) -> Option<bool> {
+        self.overrides.get(cluster).copied()
     }
 
     /// 这串文本里**有没有**用户亲手标成生僻的字。
@@ -165,7 +219,26 @@ impl CommonChars {
     ///
     /// 词组里只要有一个字被降级就算——那个词整体也就不该再冒到前面来。
     pub fn has_user_rare(&self, text: &str) -> bool {
-        text.chars().any(|ch| self.override_of(ch) == Some(false))
+        self.units_of(text)
+            .any(|u| self.override_of_cluster(u) == Some(false))
+    }
+
+    /// 按什么粒度切这串文本去查覆盖表：**没有多码位覆盖时按 `char` 切**（等价于旧行为、
+    /// 零额外开销），有才按字素簇切。
+    ///
+    /// ★ 这道闸门是 [`Self::is_string_common`] 能保持热路径成本的原因：它对每个候选都要
+    /// 跑，而字素簇分割比逐 `char` 贵得多。绝大多数用户一个 emoji 序列都不会登记。
+    fn units_of<'a>(&self, text: &'a str) -> Box<dyn Iterator<Item = &'a str> + 'a> {
+        if self.has_multi_char_keys {
+            use unicode_segmentation::UnicodeSegmentation;
+            Box::new(text.graphemes(true))
+        } else {
+            // `split("")` 会带空串，用 char_indices 手工切才干净。
+            Box::new(
+                text.char_indices()
+                    .map(move |(i, c)| &text[i..i + c.len_utf8()]),
+            )
+        }
     }
 
     /// 字符串是否常用：其中所有「汉字」都在表内，非汉字辅助字符（标点/字母/数字/
@@ -190,8 +263,8 @@ impl CommonChars {
         if text.is_empty() {
             return false;
         }
-        for ch in text.chars() {
-            match self.overrides.get(&ch) {
+        for unit in self.units_of(text) {
+            match self.overrides.get(unit) {
                 // 用户显式表过态：照办，与它是不是汉字无关。
                 Some(&common) => {
                     if !common {
@@ -199,8 +272,12 @@ impl CommonChars {
                     }
                 }
                 // 未表态：汉字（含被本码表当汉字用的 PUA）查默认字表，其余辅助字符忽略。
+                // 多码位簇没有单个 char 可查，一律忽略——同域外字符待遇。
                 None => {
-                    if is_common_scope(ch) && !self.base.contains(&ch) {
+                    if let Some(ch) = single_char_of(unit)
+                        && is_common_scope(ch)
+                        && !self.base.contains(&ch)
+                    {
                         return false;
                     }
                 }
@@ -239,46 +316,54 @@ pub fn is_markable(ch: char) -> bool {
     !ch.is_whitespace() && !ch.is_control()
 }
 
-/// **修饰码位**：跟在基础字符后面、不自己成字的那些。
+/// 把一串文本切成一个个「用户眼里的字符」（字素簇）。
 ///
-/// 它们让「一个符号」在 `char` 层面不止一个：`⚽️` 是 `U+26BD` + `U+FE0F`（变体选择符），
-/// `👍🏻` 是 `U+1F44D` + 肤色修饰符。按 `chars().count() == 1` 判「是不是单个字」，
-/// 这类候选会被整个挡在门外。
-fn is_char_modifier(ch: char) -> bool {
-    let c = ch as u32;
-    matches!(c,
-        0x0300..=0x036F      // 组合附加符号
-        | 0x200D             // 零宽连接符（ZWJ）
-        | 0x20D0..=0x20FF    // 组合用记号
-        | 0xFE00..=0xFE0F    // 变体选择符
-        | 0xFE20..=0xFE2F    // 组合用半符号
-        | 0x1F3FB..=0x1F3FF  // 肤色修饰符
-        | 0xE0100..=0xE01EF) // 变体选择符补充
+/// 导入旧版那种 `rare = "⿰ㄅ"` 的整串格式时用它——**不能按 `char` 切**，那会把
+/// `👨‍👩‍👧` 拆成 5 条垃圾记录。对清一色单码位的旧文件，两种切法结果相同。
+///
+/// 单独导出这个函数是为了把字素簇算法**收在本 crate 一处**：别的 crate 需要切分就调它，
+/// 不必各自依赖 `unicode-segmentation`，也就不会各自写出一套略有出入的切法。
+pub fn split_markable_clusters(text: &str) -> impl Iterator<Item = &str> {
+    use unicode_segmentation::UnicodeSegmentation;
+    text.graphemes(true)
 }
 
-/// 这串文本是不是**一个**可登记的字符；是则返回用作键的那个**基础字符**。
+/// 恰好由一个 `char` 组成时返回它，否则 `None`（多码位簇没有单个 char 可查默认表）。
+fn single_char_of(s: &str) -> Option<char> {
+    let mut it = s.chars();
+    let ch = it.next()?;
+    it.next().is_none().then_some(ch)
+}
+
+/// 这串文本是不是**用户眼里的一个字符**；是则原样返回，用作覆盖表的键。
 ///
-/// 「一个」按**基础字符**数而不是 `char` 数来算：`⚽️`(U+26BD U+FE0F) 与 `👍🏻` 都只有一个
-/// 基础字符，修饰码位跟着它走。原先按 `chars().count() == 1` 判，这类候选右键里根本没有
-/// 「设为生僻字」这一项——用户报的正是 `⚽️`。
+/// 「一个」按 **Unicode 字素簇**（UAX #29）算，不是按 `char` 数：屏幕上是一个图形的东西，
+/// 码位数可以差很多——
 ///
-/// ★ 键取基础字符即可，**读端天然对得上**：`is_string_common` 是逐 `char` 判的，`U+26BD`
-/// 命中覆盖就返回非常用，`U+FE0F` 落在管辖域外被忽略。写端与读端因此不必都改。
+/// | 形态 | 例 | 码位数 |
+/// |---|---|---|
+/// | 变体选择符 | `⚽️` | 2 |
+/// | 肤色修饰符 | `👍🏻` | 2 |
+/// | ZWJ 序列 | `👨‍👩‍👧` | 5 |
+/// | 区域指示符对（国旗） | `🇨🇳` | 2 |
+/// | Keycap | `1️⃣` | 3 |
 ///
-/// 多个基础字符一律拒绝（`我们`、ZWJ 组合的 `👨‍👩‍👧`）：常用性是**单字**属性，给词组存覆盖
-/// 读端永远查不到；而取首字会让用户以为整个词都标记了。
-pub fn single_markable_char(text: &str) -> Option<char> {
-    let mut base = None;
-    for ch in text.chars() {
-        if is_char_modifier(ch) {
-            continue;
-        }
-        if !is_markable(ch) || base.is_some() {
-            return None;
-        }
-        base = Some(ch);
+/// ★ **用户分辨不出的差别，不该决定能不能设置。** 先前按 `chars().count() == 1` 判，
+/// `⚽️` 的右键里就没有「设为生僻字」；改成「跳过修饰码位数基础字符」后 `⚽️`、`👍🏻` 通了，
+/// 而 ZWJ 序列、国旗、keycap 照旧被拒——那仍是我自己列举规则的产物。
+/// ⛔ **别再退回自己列规则**：issue #83 的教训就是逐条列举 Unicode 必随版本静默漏一类。
+///
+/// 多个字素簇一律拒绝（`我们`、`abc`）：常用性是单字属性，给词组存覆盖读端永远查不到，
+/// 而取首字会让用户以为整个词都标记了。
+pub fn single_markable_char(text: &str) -> Option<&str> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut it = text.graphemes(true);
+    let g = it.next()?;
+    if it.next().is_some() {
+        return None;
     }
-    base
+    // 簇内任一 char 不可登记（空白、控制字符）即整簇拒绝。
+    g.chars().all(is_markable).then_some(g)
 }
 
 /// 是否「须按通用规范汉字表判定常用性」的汉字。
@@ -451,7 +536,7 @@ mod tests {
         assert!(cc.is_char_common('我'));
         assert!(!cc.is_char_common('鬱'));
 
-        cc.set_overrides([('我', false), ('鬱', true)]);
+        cc.set_overrides([("我".into(), false), ("鬱".into(), true)]);
         assert!(!cc.is_char_common('我'), "常用字降级为生僻");
         assert!(cc.is_char_common('鬱'), "生僻字升级为常用");
         // 整串判定走同一条路：降级后的字会拖累整个词。
@@ -471,11 +556,11 @@ mod tests {
     #[test]
     fn set_overrides_replaces_rather_than_merges() {
         let mut cc = CommonChars::from_base(['我']);
-        cc.set_overrides([('我', false), ('鬱', true)]);
+        cc.set_overrides([("我".into(), false), ("鬱".into(), true)]);
         assert!(!cc.is_char_common('我'));
 
         // 用户撤销了「我」那条，store 全量读出来只剩「鬱」。
-        cc.set_overrides([('鬱', true)]);
+        cc.set_overrides([("鬱".into(), true)]);
         assert!(cc.is_char_common('我'), "撤销后回到出厂判定");
         assert!(cc.is_char_common('鬱'));
     }
@@ -488,7 +573,7 @@ mod tests {
     fn is_empty_ignores_overrides() {
         let mut cc = CommonChars::from_base([]);
         assert!(cc.is_empty());
-        cc.set_overrides([('鬱', true)]);
+        cc.set_overrides([("鬱".into(), true)]);
         assert!(cc.is_empty(), "有覆盖也仍算数据缺失");
     }
 
@@ -545,7 +630,7 @@ mod tests {
             assert!(is_markable(ch), "{ch} 应可登记");
 
             let mut cc = CommonChars::from_base([]);
-            cc.set_overrides([(ch, false)]);
+            cc.set_overrides([(ch.to_string(), false)]);
             assert!(
                 !cc.is_string_common(&ch.to_string()),
                 "{ch} 设为生僻后必须判非常用，否则就是一条死记录"
@@ -553,7 +638,7 @@ mod tests {
             assert!(cc.has_user_rare(&ch.to_string()), "{ch} 应认作用户显式降级");
 
             // 反向：设为常用同样被认，且不拖累整串。
-            cc.set_overrides([(ch, true)]);
+            cc.set_overrides([(ch.to_string(), true)]);
             assert!(cc.is_string_common(&ch.to_string()), "{ch} 设为常用应放行");
         }
 
@@ -563,54 +648,63 @@ mod tests {
         }
     }
 
-    /// 带修饰码位的 emoji 也算「一个字」——用户报的 `⚽️` 就卡在这里。
+    /// 用户眼里的「一个字符」= 一个**字素簇**，码位数可以是 1、2、3、5……
     ///
-    /// `⚽️` 是 `U+26BD` + `U+FE0F`（变体选择符），按 `chars().count() == 1` 判会被当成词组
-    /// 拒掉，候选右键里根本没有「设为生僻字」这一项。词库里存的正是带 FE0F 的那个形态
+    /// 用户报的 `⚽️` 就卡在旧判据上（`chars().count() == 1`），候选右键里根本没有
+    /// 「设为生僻字」这一项。词库里存的正是带 FE0F 的那个形态
     /// （`wubi86_jidian_emoji.dict.yaml` 实测）。
+    ///
+    /// ⛔ 中间版本改成「跳过修饰码位、数基础字符」——那仍是自己列规则，`👨‍👩‍👧`、`🇨🇳`、
+    /// `1️⃣` 照样被拒。现在直接用 UAX #29 的字素簇，一次覆盖全部形态。
     #[test]
-    fn emoji_with_modifiers_counts_as_one_char() {
-        // 变体选择符：键取基础字符。
-        assert_eq!(single_markable_char("\u{26BD}\u{FE0F}"), Some('\u{26BD}'));
-        assert_eq!(
-            single_markable_char("\u{26BD}"),
-            Some('\u{26BD}'),
-            "裸形态同键"
-        );
-        // 肤色修饰符。
-        assert_eq!(
-            single_markable_char("\u{1F44D}\u{1F3FB}"),
-            Some('\u{1F44D}')
-        );
-        // 普通字符不受影响。
-        assert_eq!(single_markable_char("我"), Some('我'));
-        assert_eq!(single_markable_char("ㄅ"), Some('ㄅ'));
+    fn one_grapheme_is_one_char_regardless_of_code_points() {
+        for (text, what) in [
+            ("\u{26BD}\u{FE0F}", "变体选择符（用户报的 ⚽️）"),
+            ("\u{26BD}", "裸形态"),
+            ("\u{1F44D}\u{1F3FB}", "肤色修饰符"),
+            (
+                "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+                "ZWJ 家庭序列",
+            ),
+            ("\u{1F1E8}\u{1F1F3}", "区域指示符对（国旗）"),
+            ("\u{0031}\u{FE0F}\u{20E3}", "keycap"),
+            ("我", "普通汉字"),
+            ("ㄅ", "注音"),
+        ] {
+            assert_eq!(
+                single_markable_char(text),
+                Some(text),
+                "{what} 应算作一个字符，且键就是整簇"
+            );
+        }
 
-        // 多个**基础**字符一律拒绝：常用性是单字属性，取首字会让用户以为整词都标记了。
-        assert_eq!(single_markable_char("我们"), None);
-        assert_eq!(
-            single_markable_char("\u{1F468}\u{200D}\u{1F469}"),
-            None,
-            "ZWJ 组合"
-        );
+        // 多个字素簇一律拒绝：常用性是单字属性，取首簇会让用户以为整词都标记了。
+        for text in ["我们", "abc", "\u{1F468}\u{1F469}"] {
+            assert_eq!(single_markable_char(text), None, "{text:?} 是多个字符");
+        }
         assert_eq!(single_markable_char(""), None);
-        assert_eq!(
-            single_markable_char("\u{FE0F}"),
-            None,
-            "只有修饰符，没有基础字符"
-        );
-        assert_eq!(single_markable_char(" "), None);
+        assert_eq!(single_markable_char(" "), None, "空白不可登记");
     }
 
-    /// 写端按基础字符登记，读端逐 char 判定——两头必须对得上，否则又是一条死记录。
+    /// 多码位簇登记后，读端必须对**整簇**生效。
+    ///
+    /// ⚠️ 键是整簇，故 `⚽`(裸) 与 `⚽️`(带 FE0F) 是两个不同的键——用户在候选里点的是哪个
+    /// 形态就设哪个，而候选文本来自词库，形态是固定的，两者不会互相错过。
     #[test]
-    fn emoji_override_takes_effect_on_the_full_sequence() {
-        let ch = single_markable_char("\u{26BD}\u{FE0F}").unwrap();
+    fn multi_code_point_cluster_override_takes_effect() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
         let mut cc = CommonChars::from_base([]);
-        cc.set_overrides([(ch, false)]);
-        // 带修饰符的完整候选文本必须判非常用：FE0F 落在管辖域外被忽略，26BD 命中覆盖。
-        assert!(!cc.is_string_common("\u{26BD}\u{FE0F}"));
-        assert!(cc.has_user_rare("\u{26BD}\u{FE0F}"));
+        cc.set_overrides([(family.to_string(), false)]);
+        assert!(!cc.is_string_common(family), "整个 ZWJ 序列应判非常用");
+        assert!(cc.has_user_rare(family));
+        // 序列里的**单个成员**不受牵连：用户关的是这个组合，不是所有 👨。
+        assert!(
+            cc.is_string_common("\u{1F468}"),
+            "只登记了组合，单个成员不该跟着被判非常用"
+        );
+
+        // 混在句子里也认得出来。
+        assert!(!cc.is_string_common(&format!("一家{family}")));
     }
 
     /// 按字判与按串判**必须一致**，域外字符尤其。
@@ -622,7 +716,7 @@ mod tests {
     #[test]
     fn char_and_string_judgements_agree() {
         let mut cc = CommonChars::from_base(['我']);
-        cc.set_overrides([('、', false), ('鬱', true)]);
+        cc.set_overrides([("、".into(), false), ("鬱".into(), true)]);
         // 覆盖过的、没覆盖的、域内的、域外的各来一遍。
         for ch in [
             '我',
@@ -649,11 +743,11 @@ mod tests {
     fn override_wins_over_base_table() {
         let mut cc = CommonChars::from_base(['我']);
         assert!(cc.is_string_common("我"));
-        cc.set_overrides([('我', false)]);
+        cc.set_overrides([("我".into(), false)]);
         assert!(!cc.is_string_common("我"), "默认常用的字被降级后须判非常用");
 
         let mut cc = CommonChars::from_base([]);
-        cc.set_overrides([('鬱', true)]);
+        cc.set_overrides([("鬱".into(), true)]);
         assert!(cc.is_string_common("鬱"), "默认生僻的字被提升后须判常用");
     }
 
@@ -666,21 +760,25 @@ mod tests {
         let mut cc = CommonChars::from_base(['一', '乙', '二']);
         assert_eq!(
             cc.list_all(),
-            vec![('一', true, true), ('乙', true, true), ('二', true, true)],
+            vec![
+                ("一".to_string(), true, true),
+                ("乙".to_string(), true, true),
+                ("二".to_string(), true, true)
+            ],
             "无覆盖时＝字表原序，且默认与现在一致"
         );
 
         // 一个降级（在表内）+ 一个新增（不在表内）。
-        cc.set_overrides([('乙', false), ('槮', true)]);
+        cc.set_overrides([("乙".into(), false), ("槮".into(), true)]);
         assert_eq!(
             cc.list_all(),
             vec![
-                ('一', true, true),
+                ("一".to_string(), true, true),
                 // 默认仍是常用，现在被改成生僻——两个值都要保留，界面靠差异显示对照。
-                ('乙', true, false),
-                ('二', true, true),
+                ("乙".to_string(), true, false),
+                ("二".to_string(), true, true),
                 // 表外字追加在最后，默认判定恒 false（＝出厂表里没有它）。
-                ('槮', false, true),
+                ("槮".to_string(), false, true),
             ]
         );
     }
@@ -689,8 +787,12 @@ mod tests {
     #[test]
     fn list_all_orders_extras_deterministically() {
         let mut cc = CommonChars::from_base(['一']);
-        cc.set_overrides([('鬱', true), ('槮', true), ('乂', true)]);
-        let extras: Vec<char> = cc
+        cc.set_overrides([
+            ("鬱".into(), true),
+            ("槮".into(), true),
+            ("乂".into(), true),
+        ]);
+        let extras: Vec<String> = cc
             .list_all()
             .into_iter()
             .skip(1)
@@ -717,7 +819,7 @@ mod tests {
     #[test]
     fn overrides_on_out_of_scope_chars_take_effect() {
         let mut cc = CommonChars::from_base(['我']);
-        cc.set_overrides([('、', false), ('😀', false)]);
+        cc.set_overrides([("、".into(), false), ("😀".into(), false)]);
         assert!(
             !cc.is_string_common("、"),
             "用户把顿号设成生僻，就该判非常用"

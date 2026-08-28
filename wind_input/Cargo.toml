@@ -67,6 +67,11 @@ anyhow = "1"
 thiserror = "2"
 # Database
 redb = "2"
+# 字素簇分割（UAX #29）。常用字覆盖要能登记「用户看到的一个图形」——⚽️ 是两个码位、
+# 👨‍👩‍👧 是五个、🇨🇳 是两个区域指示符、1️⃣ 是三个，屏幕上都只有一个图形，分辨不出差别的
+# 用户理应都能设。⛔ 别改回自己列举 ZWJ/变体选择符规则：issue #83 的教训就是逐条列举
+# Unicode 规则必随版本静默漏一类。
+unicode-segmentation = "1"
 # Image processing。features 裁到主题背景图实际支持的格式（消费点唯一：
 # wind-ui image_cache 的 `image::open` + screenshot 的 PNG 编码）。默认全格式会把
 # avif(rav1e)/exr/tiff 全家桶拖进依赖闭包，编译重且无消费者——新增格式支持时在此追加。
