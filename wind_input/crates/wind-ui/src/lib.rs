@@ -40,6 +40,7 @@ pub mod manager;
 pub mod manager_macos;
 pub mod popup_menu;
 pub mod screenshot;
+pub mod soft_keyboard;
 pub mod status_tip;
 pub mod sys;
 /// macOS 系统明暗变更监听。对位 Windows 消息泵里的 `WM_SETTINGCHANGE`。

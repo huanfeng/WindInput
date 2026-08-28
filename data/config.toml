@@ -646,6 +646,10 @@ global_hotkeys = []
 #   switch_schema:<方案id>  切到该方案，**单向**（原 schema_hotkeys 的语义）
 #   toggle_schema:<方案id>  切到该方案，**再按一次回到来源方案**
 #   special:<方案id>        进该方案的 overlay（打完一段自动退回）
+#   softkeyboard            开 / 关软键盘面板
+#   softkeyboard:<面id>     开软键盘并直接切到那一面（面 id 见 system.softkeyboard.toml，
+#                           如 punct / num / math / greek）。已开着时按它只切面、不关闭，
+#                           所以给几个面各配一个键不会互相打架。
 # 例：key_actions = { "ctrl+shift+r" = "switch_schema:wubi86" }
 # 单向与往返的差别只在回程：前者切过去就完了，后者再按一次回到你原来那个方案。
 # ⚠ switch_schema 只能写在这里（全局）。方案文件的 [key_actions] 按活跃方案查表，
@@ -653,7 +657,7 @@ global_hotkeys = []
 # 键的形态决定它走哪条通路：组合键 → 热键表；纯修饰键（rshift）→ 轻敲；
 #   单个字符键 → 引导键链（切方案类动词不可用，那条链在英文模式下走不到）。
 # 无法识别的动词只进 warn 日志并被忽略。
-key_actions = {}
+key_actions = { "ctrl+shift+k" = "softkeyboard" }
 # 会话态按键功能表：key = 键名，value = 动词。管的是「**正在打字**（有编码或候选）时这个
 # 键干什么」；上面的 key_actions 管的是「给这个键指定一个功能」，不以正在打字为前提。
 # 两张表可以给同一个键各配一份，各自在各自的条件下生效（如 Tab 打字时翻页，没在打字时

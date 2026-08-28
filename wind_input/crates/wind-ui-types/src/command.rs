@@ -3,6 +3,7 @@
 use crate::candidate::CandidateItem;
 use crate::diag::InputDiagView;
 use crate::menu::{MenuAnchor, MenuItemSpec};
+use crate::softkeyboard::SoftKeyCap;
 use crate::toast::{ToastKind, ToastPosition};
 use crate::toolbar::{ToolbarItem, ToolbarState};
 
@@ -220,6 +221,26 @@ pub enum UiCommand {
     /// 注册全局热键（Win32 RegisterHotKey，线程级）。覆盖式：先反注册旧列表再注册新列表，
     /// 空列表 = 仅清除已注册项。来自 keys.global_hotkeys（协调器构建，启动/配置重载时下发）。
     RegisterGlobalHotkeys(Vec<GlobalHotkeyEntry>),
+    /// 软键盘：显示面板，或整块刷新它（切面也走这一条）。
+    ///
+    /// 只带**当前面**的键位，不带全部 13 面，理由见 [`crate::softkeyboard`]。
+    ShowSoftKeyboard {
+        /// 各面显示名，用来画标签行。
+        pages: Vec<String>,
+        /// 当前面在 `pages` 里的下标。
+        current: usize,
+        /// 当前面的键位表，顺序即键盘上的行列顺序。
+        keys: Vec<SoftKeyCap>,
+    },
+    /// 软键盘：隐藏面板。
+    HideSoftKeyboard,
+    /// 软键盘：物理按键按下/抬起时同步键帽高亮。
+    ///
+    /// 与 [`Self::ShowSoftKeyboard`] 分开是因为它每次按键都发，而面板内容不变——
+    /// 渲染端据此只重画那一个键帽，不必重排整块面板。
+    SoftKeyboardKeyState { slot: String, down: bool },
+    /// 软键盘：切层（按住 Shift 显示第二层，松开还原）。
+    SoftKeyboardLayer { shift: bool },
     /// 关闭 UI
     Shutdown,
     /// 注入 host-render 管理器（Windows）；协调器 `set_host_render` 后下发，

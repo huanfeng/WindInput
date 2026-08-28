@@ -35,6 +35,8 @@ use wind_bridge::handler::{KeyAction, KeyEventData};
 use wind_ipc::protocol::{MOD_SHIFT, MOD_SHORTCUT};
 use wind_keys::keymap;
 
+use wind_ui_types::{SoftKeyCap, UiCommand};
+
 use crate::coordinator::{Coordinator, State};
 
 /// 虚拟键码 → 软键盘键位名。
@@ -131,6 +133,7 @@ impl Coordinator {
             self.softkeyboard_page_idx(),
             self.softkeyboard_page_name()
         );
+        self.push_softkeyboard_view();
         KeyAction::Consumed
     }
 
@@ -141,6 +144,7 @@ impl Coordinator {
         if self.softkeyboard_active.swap(false, Ordering::Relaxed) {
             self.softkeyboard_dirty.store(true, Ordering::Relaxed);
             debug!("softkeyboard: closed");
+            let _ = self.ui_tx.send(UiCommand::HideSoftKeyboard);
         }
         KeyAction::Consumed
     }
@@ -214,6 +218,7 @@ impl Coordinator {
             "softkeyboard: page -> {next} ({})",
             self.softkeyboard_page_name()
         );
+        self.push_softkeyboard_view();
     }
 
     /// 软键盘态的按键处理。
@@ -252,6 +257,13 @@ impl Coordinator {
         // ── 符号键位 ──
         let slot = *vk_to_slot().get(&vk)?;
         let shift = data.modifiers & MOD_SHIFT != 0;
+        // 面板跟随物理按键：切层与键帽高亮。高亮不需要 keyup 配对——面板收到后自行短时
+        // 清除，而物理长按会连发 keydown 不断续期，视觉上就是持续按下。
+        let _ = self.ui_tx.send(UiCommand::SoftKeyboardLayer { shift });
+        let _ = self.ui_tx.send(UiCommand::SoftKeyboardKeyState {
+            slot: slot.to_string(),
+            down: true,
+        });
         let page = self
             .softkeyboard
             .pages()
@@ -285,6 +297,101 @@ impl Coordinator {
             mode_changed: false,
             chinese_mode: state.chinese_mode,
             has_new_composition: false,
+        }
+    }
+}
+
+impl Coordinator {
+    /// 把当前面下发给渲染端（开启 / 切面 / 内容变都走这里）。
+    ///
+    /// 只发当前面：切面时重发一次即可，而那一刻本来就要重排整块面板；一次性发全部
+    /// 13 面要搬一千多个键位，其中 92% 当场用不上。
+    pub(crate) fn push_softkeyboard_view(&self) {
+        let idx = self.softkeyboard_page_idx();
+        let pages: Vec<String> = self
+            .softkeyboard
+            .pages()
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let page = self.softkeyboard.pages().get(idx);
+        let keys: Vec<SoftKeyCap> = wind_softkeyboard::all_slots()
+            .map(|slot| SoftKeyCap {
+                slot: slot.to_string(),
+                base: page
+                    .and_then(|p| p.output(slot, false))
+                    .unwrap_or_default()
+                    .to_string(),
+                shift: page
+                    .and_then(|p| p.output(slot, true))
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+            .collect();
+        let _ = self.ui_tx.send(UiCommand::ShowSoftKeyboard {
+            pages,
+            current: idx,
+            keys,
+        });
+    }
+
+    /// 面板上点了一个符号键帽。
+    ///
+    /// ⚠️ 走 `push_commit_text` 而不是返回 `KeyAction`：UI 事件不在按键路径上，没有那条
+    /// 回程通道（同点击候选那条路）。文本仍要过 `maybe_s2t`——上屏出口只有一个。
+    pub(crate) fn ui_softkeyboard_key(&self, slot: &str, shift: bool) {
+        let Some(page) = self.softkeyboard.pages().get(self.softkeyboard_page_idx()) else {
+            return;
+        };
+        let Some(text) = page.output(slot, shift) else {
+            return; // 空键位：面板上是灰的，点了不该有反应
+        };
+        let out = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.maybe_s2t(&st, text)
+        };
+        debug!(
+            "softkeyboard: 点击 {slot}{} -> {out:?}",
+            if shift { "+shift" } else { "" }
+        );
+        self.push_commit_text(&out);
+    }
+
+    /// 面板上点了标签行 / 面名键。
+    pub(crate) fn ui_softkeyboard_page(&self, idx: usize) {
+        if idx >= self.softkeyboard.len() {
+            warn!(
+                "软键盘: 面下标 {idx} 越界（共 {} 面）",
+                self.softkeyboard.len()
+            );
+            return;
+        }
+        self.softkeyboard_page.store(idx, Ordering::Relaxed);
+        self.push_softkeyboard_view();
+    }
+
+    /// 面板上点了关闭按钮。
+    pub(crate) fn ui_softkeyboard_close(&self) {
+        self.close_softkeyboard();
+        self.push_state_update();
+    }
+
+    /// 面板上点了特殊键（退格 / Tab / 回车 / 空格 / Ins / Del）。
+    ///
+    /// 焦点在宿主、我们不能插文本，只能让那个键真的发生一次。本仓「勿用按键模拟实现
+    /// `type()`」的禁令**不适用**——那条禁的是把待上屏文本降级成按键序列（会绕开 CR
+    /// 规范化与跟打统计）；功能键点击走的正是 `key.tap` 那条正路。
+    pub(crate) fn ui_softkeyboard_fn_key(&self, name: &str) {
+        #[cfg(windows)]
+        {
+            use wind_cmdbar::KeyInjector;
+            if let Err(e) = wind_keys::key_inject::SysKeys.tap(name) {
+                warn!("软键盘: 合成按键 {name:?} 失败: {e}");
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = name;
         }
     }
 }

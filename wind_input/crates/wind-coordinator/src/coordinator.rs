@@ -4833,6 +4833,10 @@ impl Coordinator {
                 self.clear_tooltip_menu_flag();
             }
             UiEvent::GlobalHotkey(action) => self.handle_global_hotkey(&action),
+            UiEvent::SoftKeyboardKey { slot, shift } => self.ui_softkeyboard_key(&slot, shift),
+            UiEvent::SoftKeyboardPage(i) => self.ui_softkeyboard_page(i),
+            UiEvent::SoftKeyboardClose => self.ui_softkeyboard_close(),
+            UiEvent::SoftKeyboardFunctionKey(name) => self.ui_softkeyboard_fn_key(&name),
             UiEvent::StatusTipMoved { x, y } => self.save_status_tip_pos(x, y),
             UiEvent::CandidateWindowMoved { x, y } => self.save_candidate_pos(x, y),
             UiEvent::RequestStatusMenu { x, y } => self.show_status_menu(x, y),

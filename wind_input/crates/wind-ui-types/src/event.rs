@@ -27,6 +27,21 @@ pub enum UiEvent {
     MenuClose,
     /// 全局热键触发（线程级 RegisterHotKey 的 WM_HOTKEY），携带热键动作名
     GlobalHotkey(String),
+    /// 点击软键盘键帽：键位名 + 当时是否在第二层。
+    ///
+    /// 回送键位名而不是下标：下标依赖「面板与协调器对键位顺序的理解一致」，
+    /// 而键位名是两侧共同的那套拼写，错了会当场报警而不是静默错位。
+    SoftKeyboardKey { slot: String, shift: bool },
+    /// 点击软键盘标签行切面（面下标）。
+    SoftKeyboardPage(usize),
+    /// 点击软键盘的关闭按钮。
+    SoftKeyboardClose,
+    /// 点击软键盘上的**特殊键**（退格 / Tab / 回车 / 空格 / Ins / Del）。
+    ///
+    /// 键名取 `wind_keys::key_inject` 认得的那套（`backspace` / `tab` / `enter` …），
+    /// 协调器收到后合成一次真实按键。物理键不走这里——它们本就透传给宿主，
+    /// 连我们都不经过。
+    SoftKeyboardFunctionKey(String),
     /// 状态提示气泡被拖动到新位置（内容左上屏幕坐标），供协调器持久化
     StatusTipMoved { x: i32, y: i32 },
     /// 候选窗被拖动到新位置（内容左上屏幕坐标）。协调器仅在 fixed 模式下持久化；

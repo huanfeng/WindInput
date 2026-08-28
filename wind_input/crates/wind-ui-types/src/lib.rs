@@ -18,6 +18,7 @@ pub mod command;
 pub mod diag;
 pub mod event;
 pub mod menu;
+pub mod softkeyboard;
 pub mod toast;
 pub mod toolbar;
 
@@ -26,5 +27,6 @@ pub use command::*;
 pub use diag::*;
 pub use event::*;
 pub use menu::*;
+pub use softkeyboard::*;
 pub use toast::*;
 pub use toolbar::*;

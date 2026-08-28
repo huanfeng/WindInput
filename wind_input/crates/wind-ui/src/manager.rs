@@ -130,6 +130,11 @@ impl UiManager {
             }
         };
         let mut toast_hide_at: Option<std::time::Instant> = None;
+        // 软键盘面板（惰性创建：首次 ShowSoftKeyboard 时构造，best-effort）
+        let mut soft_keyboard: Option<crate::soft_keyboard::SoftKeyboard> = None;
+        // 最近一次主题。**惰性创建的窗口靠它补课**——`SetTheme` 一般只在启动时发一次，
+        // 而软键盘可能在那之后很久才第一次打开，不缓存就会永远停在内置默认配色。
+        let mut last_theme: Option<wind_theme::Resolved> = None;
         // 状态提示防抖：合并快速连续的提示（如连按切换），避免气泡闪烁
         // 载荷：(text, x, y, caret_height, offset_x, offset_y)
         // payload: (text, x, y, caret_h, off_x, off_y, duration_ms, fixed, fixed_x, fixed_y)
@@ -284,6 +289,10 @@ impl UiManager {
             // 推进菜单（脏重绘 / 关闭）
             if let Some(m) = &mut popup_menu {
                 m.tick();
+            }
+            // 推进软键盘（点击派发 / 长按重复 / 悬停重绘）
+            if let Some(k) = &mut soft_keyboard {
+                k.tick();
             }
 
             // 推进状态提示防抖（稳定后才真正显示气泡）
@@ -876,6 +885,10 @@ impl UiManager {
                     UiCommand::SetTheme(theme) => {
                         debug!("UI: SetTheme (dark={})", theme.is_dark);
                         let t = *theme;
+                        last_theme = Some(t.clone());
+                        if let Some(k) = &mut soft_keyboard {
+                            k.set_theme(&t);
+                        }
                         if let Some(tb) = &mut toolbar {
                             tb.set_theme(&t);
                             // 仅在可见时重绘：repaint→render 末尾无条件 show，对隐藏中的
@@ -1010,6 +1023,43 @@ impl UiManager {
                         debug!("UI: SetHostRender");
                         host_render = Some(hr.0);
                     }
+                    UiCommand::ShowSoftKeyboard {
+                        pages,
+                        current,
+                        keys,
+                    } => {
+                        debug!("UI: ShowSoftKeyboard (page={current}, keys={})", keys.len());
+                        if soft_keyboard.is_none() {
+                            match crate::soft_keyboard::SoftKeyboard::new(event_tx.clone()) {
+                                Ok(mut k) => {
+                                    if let Some(t) = &last_theme {
+                                        k.set_theme(t);
+                                    }
+                                    soft_keyboard = Some(k);
+                                }
+                                Err(e) => error!("软键盘窗口创建失败: {e}"),
+                            }
+                        }
+                        if let Some(k) = &mut soft_keyboard {
+                            k.show(pages, current, keys);
+                        }
+                    }
+                    UiCommand::HideSoftKeyboard => {
+                        debug!("UI: HideSoftKeyboard");
+                        if let Some(k) = &mut soft_keyboard {
+                            k.hide();
+                        }
+                    }
+                    UiCommand::SoftKeyboardKeyState { slot, down } => {
+                        if let Some(k) = &mut soft_keyboard {
+                            k.set_key_down(&slot, down);
+                        }
+                    }
+                    UiCommand::SoftKeyboardLayer { shift } => {
+                        if let Some(k) = &mut soft_keyboard {
+                            k.set_layer(shift);
+                        }
+                    }
                     UiCommand::Shutdown => {
                         info!("UI: Shutdown");
                         // host-render 全部隐藏（Shutdown 必达）
@@ -1063,6 +1113,8 @@ impl UiManager {
                     toolbar.as_ref().and_then(|t| t.next_deadline(now)),
                     // 菜单外点击轮询——唯一仍需定期唤醒者，且仅在菜单可见时
                     popup_menu.as_ref().and_then(|m| m.next_deadline(now)),
+                    // 软键盘键帽的长按重复
+                    soft_keyboard.as_ref().and_then(|k| k.next_deadline()),
                 ]
                 .into_iter()
                 .flatten()
