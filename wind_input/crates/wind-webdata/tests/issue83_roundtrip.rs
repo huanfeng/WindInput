@@ -90,3 +90,64 @@ fn hide_symbols_then_carry_to_another_machine() {
         "只登记了组合，单个成员不该跟着被判非常用"
     );
 }
+
+/// 边界：旧格式文件、空表、重复条目、以及「只登记了区域指示符的一半」。
+///
+/// 最后一条是导出分段最刁钻的输入——`🇨` 与 `🇳` 各自单码位，若都塞进文本串会合成
+/// 国旗，读回来条数就对不上了。
+#[test]
+fn import_export_edge_cases() {
+    // ① 旧格式（只有 common/rare 字符串段）必须照旧读得回来。
+    let c = coord("old");
+    let legacy = "wind_common_chars = 1\ncommon = \"槮鬱\"\nrare = \"⿰ㄅ\"\n";
+    let o = rpc(&c, "commonChars.import", json!({ "content": legacy }));
+    assert_eq!(o["imported"], json!(4), "旧格式四条: {o:?}");
+
+    // ② 空表导出后再导入：不该报错，也不该凭空多出条目。
+    let empty = coord("empty");
+    let text = rpc(&empty, "commonChars.export", json!({}))["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!text.contains("_seq"), "空表不该有数组段: {text}");
+    let o2 = rpc(&empty, "commonChars.import", json!({ "content": text }));
+    assert_eq!(o2["imported"], json!(0));
+
+    // ③ 区域指示符各登记一半：导出后必须仍是两条，不能合成一个国旗。
+    let c3 = coord("ri");
+    for t in ["\u{1F1E8}", "\u{1F1F3}"] {
+        rpc(
+            &c3,
+            "commonChars.set",
+            json!({ "char": t, "common": false }),
+        );
+    }
+    let t3 = rpc(&c3, "commonChars.export", json!({}))["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let c4 = coord("ri2");
+    let o3 = rpc(&c4, "commonChars.import", json!({ "content": t3 }));
+    assert_eq!(
+        o3["imported"],
+        json!(2),
+        "两个区域指示符必须各自留存: {o3:?}"
+    );
+    for t in ["\u{1F1E8}", "\u{1F1F3}"] {
+        assert_eq!(
+            rpc(&c4, "commonChars.query", json!({ "char": t }))["effective"],
+            json!(false),
+            "{t} 应仍是生僻"
+        );
+    }
+    // 而完整国旗（两个拼一起）是**另一个**键，没被登记过，照旧放行。
+    assert_eq!(
+        rpc(
+            &c4,
+            "commonChars.query",
+            json!({ "char": "\u{1F1E8}\u{1F1F3}" })
+        )["effective"],
+        json!(true),
+        "整面国旗是另一个键，不该被两个半边牵连"
+    );
+}
