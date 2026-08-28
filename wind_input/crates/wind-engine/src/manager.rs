@@ -248,6 +248,46 @@ pub struct AuxCodeSettings {
 }
 
 /// 引擎管理器（懒加载：仅在需要时构建对应方案引擎，降低启动内存）
+/// 某个码位区间在词库里的命中情况，[`EngineManager::scan_chars_in_range`] 的产出。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RangeScan {
+    /// 命中的字符，按码位升序、去重。
+    pub chars: Vec<char>,
+    /// **受影响的词条数**（去重）：含有区间内任一字符的词条有多少条。
+    ///
+    /// ★ 与 `chars.len()` 是两个数量级的事，界面必须显示这个：虎码里全角逗号 `，` 只是
+    /// 1 个字符，却出现在 326 条词条里（词条内部的标点）。只报「1 个字符」，谁都会
+    /// 毫不犹豫地把它设为生僻，那 326 个词跟着一起判非常用。
+    ///
+    /// ⚠️ 刻意**不是**「各字符命中数之和」：一条词条里同时出现两个注音字符时，那种口径
+    /// 会把它数两遍，答出来的就不再是「会影响多少条词」。
+    pub entries: usize,
+    /// 累加期间的去重集合（`finish` 后转进 `chars`）。
+    seen: std::collections::BTreeSet<char>,
+}
+
+impl RangeScan {
+    /// 吃一条词条的文本。
+    fn tally(&mut self, text: &str, start: u32, end: u32) {
+        let mut hit_this_entry = false;
+        for ch in text.chars() {
+            let c = ch as u32;
+            if start <= c && c <= end {
+                self.seen.insert(ch);
+                hit_this_entry = true;
+            }
+        }
+        if hit_this_entry {
+            self.entries += 1;
+        }
+    }
+
+    /// 把去重集合落成有序的 `chars`。`BTreeSet` 已按码位有序，直接倒出即可。
+    fn finish(&mut self) {
+        self.chars = std::mem::take(&mut self.seen).into_iter().collect();
+    }
+}
+
 pub struct EngineManager {
     /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）
     engines: Mutex<HashMap<String, Arc<dyn Engine>>>,
@@ -1010,6 +1050,42 @@ impl EngineManager {
     /// 指纹走「二级」通道（[`wind_dict::cache_fp::cache_digest`]）：源是各词库的 `.wdat`
     /// **摘要**而非 yaml 内容。照一级指纹读满 250 MB yaml 才能回答「缓存还能不能用」，
     /// 会把复用命中这条本该零成本的路径变成每次启动的固定开销。
+    /// 扫某方案的全部**启用**词库，收出落在 `[start, end]` 码位区间内的字符。
+    ///
+    /// 供「按类型批量设常用/生僻」圈定范围。只收**词库里真实出现过**的字符，不按整个
+    /// Unicode 块展开——「带圈 CJK 字母及月份」有 256 个码位而虎码一个都没编，全展开就是
+    /// 一堆读端永远查不到的死记录，还会把设置页的列表撑长。
+    ///
+    /// ★ 返回的条目数不是装饰，界面**必须**显示它：全角逗号 `，` 只是 1 个字符，却出现在
+    /// 326 条词条里（词条内部的标点）。只显示「1 个字符」，谁都会毫不犹豫地一键设为生僻，
+    /// 那 326 个词跟着一起判非常用。字符数与影响面在这里差了两个数量级。
+    ///
+    /// ⚠️ O(全表)，只在用户手动点菜单时调用，**绝不能进按键链路**（同 `for_each_entry`）。
+    /// 走 `load_dicts_individually` 而不是已加载的引擎：与反查索引构建同一条路径，不必为此
+    /// 给 `Engine` trait 加一个九成实现都用不上的方法。
+    pub fn scan_chars_in_range(&self, schema_id: &str, start: u32, end: u32) -> RangeScan {
+        if start > end {
+            return RangeScan::default(); // 空区间（如 charblock 的「其它」），不必开词库
+        }
+        let Some(data_dir) = self.data_dir.as_deref() else {
+            return RangeScan::default();
+        };
+        let Some(schema) =
+            Self::read_schema(schema_id, Some(data_dir), self.override_dir.as_deref())
+        else {
+            return RangeScan::default();
+        };
+        let dicts = Self::load_dicts_individually(&schema, &data_dir.join("schemas"));
+        let mut scan = RangeScan::default();
+        for d in &dicts {
+            d.for_each_entry(&mut |_code, text, _weight| {
+                scan.tally(text, start, end);
+            });
+        }
+        scan.finish();
+        scan
+    }
+
     fn build_reverse_index_for(&self, schema_id: &str) -> ReverseIndex {
         let Some(data_dir) = self.data_dir.as_deref() else {
             return ReverseIndex::default();
@@ -6003,5 +6079,37 @@ input_chars = \"a-z;\"
         assert!(!dir.join("unigram.wdb").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// 区间累加的两条规则：字符去重升序，词条数**按条去重**。
+    ///
+    /// 后者是这段逻辑最容易写错的地方——顺手写成「各字符命中数之和」，一条含两个注音的
+    /// 词条就会被数两遍，界面上那个「会影响 N 条词」的数字随即失真。虎码里全角逗号只是
+    /// 1 个字符却牵连 326 条词，这种失真用户是察觉不到的。
+    #[test]
+    fn range_scan_counts_entries_once_per_entry() {
+        let (start, end) = (0x3100, 0x312F); // 注音符号
+        let mut s = super::RangeScan::default();
+        s.tally("\u{3105}", start, end); // ㄅ：命中
+        s.tally("\u{3105}\u{3106}", start, end); // ㄅㄆ：两个字符，仍只算一条词条
+        s.tally("\u{3105}\u{3105}", start, end); // 同字符两次，也只算一条
+        s.tally("\u{6211}", start, end); // 我：区间外，不计
+        s.tally("", start, end);
+        s.finish();
+
+        assert_eq!(
+            s.chars,
+            vec!['\u{3105}', '\u{3106}'],
+            "字符去重且按码位升序"
+        );
+        assert_eq!(s.entries, 3, "三条词条命中；若按字符数累加会得到 4");
+    }
+
+    /// 空区间（`charblock` 的「其它」用 `start > end` 表示）不该命中任何东西。
+    #[test]
+    fn range_scan_empty_range_matches_nothing() {
+        let mut s = super::RangeScan::default();
+        s.tally("\u{3105}\u{6211}", 1, 0);
+        s.finish();
+        assert!(s.chars.is_empty() && s.entries == 0);
     }
 }

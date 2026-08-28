@@ -3,12 +3,14 @@
 //! 与 Go 版本 `wind_input/internal/candidate/` 对齐。
 
 pub mod candidate;
+pub mod charblock;
 pub mod common;
 pub mod filter;
 pub mod shadow;
 pub mod store;
 
 pub use candidate::*;
+pub use charblock::*;
 pub use common::*;
 pub use filter::*;
 pub use shadow::*;

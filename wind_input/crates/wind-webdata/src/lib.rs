@@ -429,6 +429,7 @@ pub trait WebDataRpc: WebDataHost {
             "commonChars.list" => self.web_common_chars_list(params),
             "commonChars.query" => self.web_common_chars_query(params),
             "commonChars.set" => self.web_common_chars_set(params),
+            "commonChars.bulkByBlock" => self.web_common_chars_bulk(params),
             "commonChars.reset" => self.web_common_chars_reset(params),
             "commonChars.clear" => self.web_common_chars_clear(),
             "commonChars.export" => self.web_common_chars_export(),
@@ -2564,6 +2565,12 @@ pub trait WebDataRpc: WebDataHost {
                     "baseCommon": r.base_common,
                     // 这一行改过没有。设置页据此决定「恢复默认」灰不灰。
                     "adjusted": r.overridden,
+                    // 类型：所属 Unicode 块。光看字形分不清 ⺡(部首) 与 氵(基本汉字)、
+                    // ℃(字母式符号) 与 ㎡(CJK 兼容符号)，而它们的处置方式完全不同。
+                    "block": r.block,
+                    "blockRange": wind_candidate::block_of(r.ch).range_text(),
+                    // 整类批量能不能点。汉字块恒 false——见 `block_allows_bulk_edit`。
+                    "blockBulkEditable": r.block_bulk_editable,
                 })
             })
             .collect();
@@ -2592,6 +2599,33 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("缺少参数 common"))?;
         self.common_char_edit(ch, CommonCharEdit::Set(common))?;
         Ok(json!({ "ok": true }))
+    }
+
+    /// 按当前行所属的 Unicode 块整类设常用/生僻。`apply` 缺省为 `false`（只预览）。
+    ///
+    /// ★ 预览与执行**走同一个方法、同一次扫描**，只差一个 `apply` 开关。分成两条实现的话，
+    /// 预览说「43 个字」而执行写了别的数目，用户没法察觉——两条路各扫一遍词库，中间还隔着
+    /// 用户的思考时间，方案切换、词库热插拔都能让它们对不上。
+    fn web_common_chars_bulk(&self, params: &Value) -> anyhow::Result<Value> {
+        let ch = char_param(params, "char")?;
+        let common = params
+            .get("common")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| anyhow::anyhow!("缺少参数 common"))?;
+        let apply = params
+            .get("apply")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let o = self.common_char_bulk_by_block(ch, common, apply)?;
+        Ok(json!({
+            "block": o.block,
+            "chars": o.chars,
+            // ★ 界面**必须**把它显示出来：`，` 只是 1 个字符却出现在 326 条词条里。
+            // 只报 chars，用户会严重低估一键操作的影响面。
+            "entries": o.entries,
+            "written": o.written,
+            "sample": o.sample,
+        }))
     }
 
     fn web_common_chars_reset(&self, params: &Value) -> anyhow::Result<Value> {
@@ -5001,6 +5035,81 @@ mod tests {
         );
     }
 
+    /// 列表每行要带类型（Unicode 块名）与「这一类能不能整类批量」。
+    ///
+    /// 类型列的价值在于光看字形分不清东西：issue #83 的用户为此把整张码表喂给 AI 分类、
+    /// 再手工逐个试，才弄明白哪些会显示哪些不会。
+    #[test]
+    fn list_rows_carry_block_type_and_bulk_flag() {
+        let c = coord("commonchars_block");
+        // 一个汉字、一个注音——两类的 bulk 标志必须相反。
+        //
+        // ⚠️ 两者的方向刻意相反，都是为了让记录**真的落库**（否则不进列表）：本装置无
+        // data_dir ⇒ 默认字表为空 ⇒ 域内的「我」默认判生僻，域外的「ㄅ」默认判常用。
+        // 各自设成与默认相反的那一边，才不会被「同向即删覆盖」吃掉。
+        c.web_data_rpc("commonChars.set", &json!({ "char": "我", "common": true }))
+            .unwrap();
+        c.web_data_rpc("commonChars.set", &json!({ "char": "ㄅ", "common": false }))
+            .unwrap();
+        let (rows, _) = common_char_rows_rpc(&c, json!({}));
+        let find = |ch: &str| {
+            rows.iter()
+                .find(|r| r["char"] == json!(ch))
+                .unwrap_or_else(|| panic!("{ch} 不在列表里"))
+        };
+        let han = find("我");
+        assert_eq!(han["block"], json!("基本汉字"));
+        assert_eq!(han["blockRange"], json!("4E00-9FFF"));
+        assert_eq!(
+            han["blockBulkEditable"],
+            json!(false),
+            "汉字块必须禁止整类操作——放行就是一个一键作废整张默认字表的按钮"
+        );
+        let bopo = find("ㄅ");
+        assert_eq!(bopo["block"], json!("注音符号"));
+        assert_eq!(bopo["blockRange"], json!("3100-312F"));
+        assert_eq!(bopo["blockBulkEditable"], json!(true));
+    }
+
+    /// 整类批量：汉字块拒绝、域外块放行，且预览不写库。
+    ///
+    /// ⚠️ 本装置没有 data_dir ⇒ 扫不到任何词库 ⇒ 命中恒 0。这里锁的是**闸门与形态**，
+    /// 「真的扫得出 43 个注音」要靠带真实词库的装置，不在本层。
+    #[test]
+    fn bulk_by_block_refuses_han_blocks() {
+        let c = coord("commonchars_bulk");
+
+        // ⛔ 汉字块：一次误点就是七千多条覆盖，必须在 core 就拒绝，不能只靠界面灰显。
+        let err = c
+            .web_data_rpc(
+                "commonChars.bulkByBlock",
+                &json!({ "char": "我", "common": false, "apply": true }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("基本汉字"), "报错要说清是哪一类: {err}");
+        assert!(err.contains("逐字"), "要给出替代做法: {err}");
+
+        // 域外块：放行，返回预览形态。
+        let o = c
+            .web_data_rpc(
+                "commonChars.bulkByBlock",
+                &json!({ "char": "ㄅ", "common": false }),
+            )
+            .unwrap();
+        assert_eq!(o["block"], json!("注音符号"));
+        assert!(
+            o.get("entries").is_some(),
+            "命中条目数必须给——`，` 只有 1 个字符却在 326 条词条里"
+        );
+        assert_eq!(o["written"], json!(0), "apply 缺省为 false，预览不得写库");
+        assert_eq!(
+            common_char_rows_rpc(&c, json!({})).1,
+            0,
+            "预览之后库里必须还是空的"
+        );
+    }
+
     /// issue #83 的实际用法：一份 TOML 关掉整块表意文字描述符（IDC，U+2FF0–U+2FFF）。
     ///
     /// 用户的虎码码表给这 16 个记号整块编了码（`⿰`=rgs、`⿱`=rfi…），它们描述汉字间架
@@ -5147,11 +5256,16 @@ mod tests {
     #[test]
     fn common_chars_sorting_is_stable_and_accepts_both_char_keys() {
         use wind_coordinator::handle_common_chars::CommonCharRow;
-        let row = |ch: char, base: bool, now: bool| CommonCharRow {
-            ch,
-            common: now,
-            base_common: base,
-            overridden: base != now,
+        let row = |ch: char, base: bool, now: bool| {
+            let blk = wind_candidate::block_of(ch);
+            CommonCharRow {
+                ch,
+                common: now,
+                base_common: base,
+                overridden: base != now,
+                block: blk.name,
+                block_bulk_editable: wind_candidate::block_allows_bulk_edit(&blk),
+            }
         };
         // 入参顺序 = 字表原序，刻意不按码位排。
         let seed = vec![

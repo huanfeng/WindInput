@@ -29,6 +29,20 @@ pub struct CommonCharRow {
     pub base_common: bool,
     /// 这一行被用户改过。决定「恢复默认」能不能点——没改过的行点它没有意义。
     pub overridden: bool,
+    /// 所属 Unicode 块的中文名（[`wind_candidate::block_of`]），如「注音符号」。
+    ///
+    /// 光看字形分不清这些东西是什么——issue #83 的用户为此把整张码表喂给 AI 分类、再手工
+    /// 逐个试，才弄明白哪些会显示哪些不会。类型列就是把那份工作内建进来。
+    ///
+    /// ⚠️ 范围文本（`2FF0-2FFF`）**不存在这里**：本结构是 `Copy` 的，8104 行的列表靠它便宜
+    /// 地流转，塞一个 `String` 进来就得整体降级成 `Clone`。需要范围的消费方自己调
+    /// `block_of(ch).range_text()`，多一次查表换来行结构不变胖，也避免把格式化逻辑抄第二份。
+    pub block: &'static str,
+    /// 这个块能不能整类批量操作（[`wind_candidate::block_allows_bulk_edit`]）。
+    ///
+    /// ⛔ 汉字块恒 `false`：对着一行「我」点「将『基本汉字』全部设为生僻」，一次误点就是
+    /// 七千多条覆盖，整张常用字表当场作废。菜单项据此灰显。
+    pub block_bulk_editable: bool,
 }
 
 /// 某个字的当前状态（设置页「添加」时的预览与校验）。
@@ -44,6 +58,24 @@ pub struct CommonCharState {
     pub base_common: bool,
     /// 用户覆盖方向；`None` = 跟随出厂。
     pub over: Option<bool>,
+}
+
+/// 「按类型批量」的预览与结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonCharBulkOutcome {
+    /// 块名，回显用（用户点的是「注音符号」，报告里也该这么说）。
+    pub block: String,
+    /// 当前词库里命中的字符数。
+    pub chars: usize,
+    /// 这些字符出现在多少条词条里。
+    ///
+    /// ★ **界面必须显示它**：`，` 只是 1 个字符却出现在 326 条词条里，只报字符数会让人
+    /// 严重低估影响面。预览就是为这一条存在的。
+    pub entries: usize,
+    /// 真正落库的覆盖条数（与默认同向的不写，同 `apply_common_target`）。
+    pub written: usize,
+    /// 命中的字符本身，供界面回显「将影响这些字」。
+    pub sample: String,
 }
 
 /// 设置页对一个字的编辑。
@@ -139,13 +171,77 @@ impl crate::Coordinator {
             .into_iter()
             .filter(|(ch, _, _)| q.is_empty() || q.contains(ch))
             .filter(|(ch, _, _)| !only_modified || cc.override_of(*ch).is_some())
-            .map(|(ch, base_common, common)| CommonCharRow {
-                ch,
-                common,
-                base_common,
-                overridden: cc.override_of(ch).is_some(),
+            .map(|(ch, base_common, common)| {
+                let blk = wind_candidate::block_of(ch);
+                CommonCharRow {
+                    ch,
+                    common,
+                    base_common,
+                    overridden: cc.override_of(ch).is_some(),
+                    block: blk.name,
+                    block_bulk_editable: wind_candidate::block_allows_bulk_edit(&blk),
+                }
             })
             .collect()
+    }
+
+    /// 按「某个字所属的 Unicode 块」批量设常用/生僻。`apply=false` 时只预览、不写库。
+    ///
+    /// 入口是**当前选中的那一行**而不是让用户填码位区间：他在候选里看见 `ㄅ` 觉得烦，
+    /// 心里想的是「这类东西别出来」，而不是「3100 到 312F 别出来」。类型从行推导，
+    /// 用户不必先知道它叫什么、码位在哪。
+    ///
+    /// ⛔ 汉字块一律拒绝（[`wind_candidate::block_allows_bulk_edit`]）：列表里 8104 个默认字
+    /// 全是汉字，对着一行「我」点「将『基本汉字』全部设为生僻」，一次误点就是七千多条覆盖，
+    /// 整张常用字表当场作废。那些块本就有默认字表逐字管着，要调也该逐字调。
+    pub(crate) fn common_char_bulk_by_block(
+        &self,
+        ch: char,
+        common: bool,
+        apply: bool,
+    ) -> anyhow::Result<CommonCharBulkOutcome> {
+        let blk = wind_candidate::block_of(ch);
+        if !wind_candidate::block_allows_bulk_edit(&blk) {
+            anyhow::bail!("「{}」由默认字表逐字管辖，不支持整类操作", blk.name);
+        }
+        let schema_id = self.engine_mgr.active_schema_id();
+        let scan = self
+            .engine_mgr
+            .scan_chars_in_range(&schema_id, blk.start, blk.end);
+
+        let mut out = CommonCharBulkOutcome {
+            block: blk.name.to_string(),
+            chars: scan.chars.len(),
+            entries: scan.entries,
+            written: 0,
+            sample: scan.chars.iter().collect(),
+        };
+        if !apply {
+            return Ok(out);
+        }
+        for &c in &scan.chars {
+            // ⚠️ `apply_common_target` 返回的是「操作成功」，不是「写了记录」：与默认同向时
+            // 它走的是**删覆盖**那一支，照样返回 true。要如实报告落库条数，得自己先问一遍
+            // 默认判定。读锁取在循环内的短作用域里——`apply_common_target` 自己也要取读锁，
+            // 在外层长期持有会跟它撞上。
+            let same_as_default = {
+                let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
+                cc.is_base_common(c) == common
+            };
+            if self.apply_common_target(c, common) && !same_as_default {
+                out.written += 1;
+            }
+        }
+        debug!(
+            "常用字批量: {} [{}] {} 字 / {} 条词条 → {}，落库 {}",
+            blk.name,
+            blk.range_text(),
+            out.chars,
+            out.entries,
+            if common { "常用" } else { "生僻" },
+            out.written
+        );
+        Ok(out)
     }
 
     /// 某个字的当前状态：设置页「添加」时用来预览与**校验**。

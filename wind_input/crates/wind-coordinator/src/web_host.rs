@@ -66,6 +66,14 @@ pub trait WebDataHost {
     ) -> anyhow::Result<()>;
 
     /// 导出用户的常用字调整为 TOML 文本（只含与默认不同的字）。
+    /// 按某个字所属的 Unicode 块整类设常用/生僻；`apply=false` 只预览不写库。
+    fn common_char_bulk_by_block(
+        &self,
+        ch: char,
+        common: bool,
+        apply: bool,
+    ) -> anyhow::Result<crate::handle_common_chars::CommonCharBulkOutcome>;
+
     fn common_chars_export(&self) -> anyhow::Result<String>;
 
     /// 导入预览：只解析与计数，不写库。
@@ -203,6 +211,14 @@ impl WebDataHost for Coordinator {
         edit: crate::handle_common_chars::CommonCharEdit,
     ) -> anyhow::Result<()> {
         Coordinator::common_char_edit(self, ch, edit)
+    }
+    fn common_char_bulk_by_block(
+        &self,
+        ch: char,
+        common: bool,
+        apply: bool,
+    ) -> anyhow::Result<crate::handle_common_chars::CommonCharBulkOutcome> {
+        Coordinator::common_char_bulk_by_block(self, ch, common, apply)
     }
     fn common_chars_export(&self) -> anyhow::Result<String> {
         Coordinator::export_common_chars(self)
