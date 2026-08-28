@@ -2562,6 +2562,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind-softkeyboard"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 0.8.23",
+ "tracing",
+ "wind-keys",
+]
+
+[[package]]
 name = "wind-store"
 version = "0.1.0"
 dependencies = [

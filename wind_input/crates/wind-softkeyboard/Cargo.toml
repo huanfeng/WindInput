@@ -1,0 +1,19 @@
+[package]
+name = "wind-softkeyboard"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# 软键盘映射表 system.softkeyboard.toml 的解析与告警。**不依赖任何 wind-* crate**——
+# 本 crate 是纯数据层（协调器与 UI 的下游），且要能在 headless / Android 目标上编译，
+# 引 wind-keys 会顺带拖进 windows / core-graphics 平台依赖。
+# 键名与 wind-keys 的一致性靠 dev-dependency 的守门测试保证，见 tests/key_name_parity.rs。
+serde = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+wind-keys = { path = "../wind-keys" }
+
+[lints]
+workspace = true

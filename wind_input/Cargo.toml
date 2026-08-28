@@ -19,6 +19,7 @@ members = [
     "crates/wind-phrase",
     "crates/wind-keys",
     "crates/wind-quick-input",
+    "crates/wind-softkeyboard",
     "crates/wind-reverse",
     "crates/wind-aux-code",
     "crates/wind-punct",
