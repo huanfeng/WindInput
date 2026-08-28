@@ -176,22 +176,32 @@ pub struct SchemaInfo {
     pub hidden: bool,
 }
 
-/// 图标主字的字符数上限。
+/// 图标主字的**显示宽度**上限（CJK 记 2、其余记 1）——即「一个汉字」或「两个拉丁字符」。
 ///
 /// 定在 2 的两条依据，**缺一都不足以定案**：
-/// ① 渲染：语言栏图标画布只有 16px（DPI 缩放后 20/24/32），字号写死 `size - 2`。
-///    两个 ASCII 字母（`En`）宽度约等于一个汉字，是"还认得出"的上限；再多即使
-///    自适应缩字号也糊成一团。
-/// ② 安全：C++ 侧 `CLangBarItemButton::_inputTypeLabel` 是 `wchar_t[4]`，赋值走
-///    `wcscpy_s`——**超长不是静默截断，是触发 invalid parameter handler 终止进程**，
-///    而那段代码跑在 Word / QQ 等宿主进程里。卡在 2 是给它留 1 个 wchar 余量。
+/// ① 渲染：语言栏图标画布只有 16px（DPI 缩放后 20/24/32）。两个 ASCII 字母（`En`）
+///    宽度约等于一个汉字，是"还认得出"的上限；再宽只能靠回缩字号塞进去，糊成一团。
+/// ② 安全：C++ 侧 `CLangBarItemButton::_inputTypeLabel` 走 `wcscpy_s`——**超长不是
+///    静默截断，是触发 invalid parameter handler 终止进程**，而那段代码跑在
+///    Word / QQ 等宿主进程里。宽度 2 蕴含**最多 2 个标量值**（每个字符至少占 1 宽），
+///    最坏 2 个 emoji = 4 wchar + NUL = 5，缓冲现为 `wchar_t[8]`。
 ///
 /// ⚠️ 改这个值之前先读上面第 ②：往上调必须同步扩 C++ 侧那个缓冲，否则是在给
 /// 用户配置留一条崩宿主进程的路。
-pub const ICON_LABEL_MAX_CHARS: usize = 2;
+///
+/// ## 为什么单位是显示宽度而不是字符数（issue #85）
+///
+/// 上限刚放宽到 2 时按**字符数**计，于是 `icon_label = "虎单"` 这类第三方方案的双汉字
+/// 标签被整个放行，渲染端为了不裁切只能把字号回缩到约一半——用户没改配置，升级后
+/// 任务栏图标从清晰的「虎」变成认不出的「虎单」。
+///
+/// 按宽度计同时满足两侧：`En` 仍完整显示（2×1），双汉字截回首字（2 已满）。
+/// 与工具栏按钮 [`crate::config::toolbar_label_trunc`] 现在是**同一条规则、不同上限常量**，
+/// 共用 [`crate::config::display_width_trunc`] 一份实现。
+pub const ICON_LABEL_MAX_WIDTH: usize = 2;
 
-/// 图标主字的**统一截断口径**：去首尾空白后取前 [`ICON_LABEL_MAX_CHARS`] 个字符。
-/// 未配置 / 全空白返回空串，由调用方决定回落成什么。
+/// 图标主字的**统一截断口径**：去首尾空白后，取显示宽度不超过
+/// [`ICON_LABEL_MAX_WIDTH`] 的前缀。未配置 / 全空白返回空串，由调用方决定回落成什么。
 ///
 /// ## 为什么必须是共享函数
 ///
@@ -201,7 +211,7 @@ pub const ICON_LABEL_MAX_CHARS: usize = 2;
 /// 编译器不管**。只改一处的表现是"方案切换显 `Wb`、进特殊模式显 `符`"这种局部
 /// 不一致，且没有任何测试会发现。
 pub fn icon_label_trunc(raw: &str) -> String {
-    raw.trim().chars().take(ICON_LABEL_MAX_CHARS).collect()
+    crate::config::display_width_trunc(raw, ICON_LABEL_MAX_WIDTH)
 }
 
 /// 同 [`icon_label_trunc`]，但截断结果为空时回落 `fallback`。
@@ -857,14 +867,23 @@ layout = "xiaohe"
 
     /// 截断的两个方向都要成立：**该截的截、不该截的别动**。
     ///
-    /// 只测"长的被截短"会让一个恒返回首字符的实现也绿——那正是本次要改掉的旧行为，
+    /// 只测"长的被截短"会让一个恒返回首字符的实现也绿——那是 issue #85 之前的旧行为，
     /// 它的表现是用户配了 `En` 只显示 `E`，而单看截断断言完全正常。
+    /// 反过来只测 `En` 不动，则一个"按字符数取 2"的实现也全绿——那正是 issue #85
+    /// 报的缺陷：双汉字整个放行、渲染端只能回缩字号到认不出。**两个方向缺一不可。**
     #[test]
-    fn icon_label_truncates_only_beyond_limit() {
-        assert_eq!(icon_label_trunc("英"), "英", "一个字符原样");
-        assert_eq!(icon_label_trunc("En"), "En", "恰好等于上限，不许动");
-        assert_eq!(icon_label_trunc("English"), "En", "超出上限截到前两个");
-        assert_eq!(icon_label_trunc("符号表"), "符号", "CJK 同一口径");
+    fn icon_label_truncates_by_display_width() {
+        assert_eq!(icon_label_trunc("英"), "英", "一个汉字宽 2，恰好满格");
+        assert_eq!(icon_label_trunc("En"), "En", "两个拉丁字符合计宽 2，不许动");
+        assert_eq!(icon_label_trunc("English"), "En", "超宽截到前两个拉丁字符");
+        assert_eq!(
+            icon_label_trunc("符号"),
+            "符",
+            "双汉字宽 4 → 截回首字（#85）"
+        );
+        assert_eq!(icon_label_trunc("符号表"), "符", "更长也一样只留首字");
+        assert_eq!(icon_label_trunc("Ｅｎ"), "Ｅ", "全角字母按 CJK 宽度算");
+        assert_eq!(icon_label_trunc("A符"), "A", "混排：A 占 1，再加汉字就超");
     }
 
     /// 首尾空白必须吃掉：设置页输入框里带出来的空格若原样落进标签，
@@ -888,11 +907,14 @@ layout = "xiaohe"
         assert_eq!(icon_label_or("English", "英"), "En", "截断后仍是配的");
     }
 
-    /// 上限的单位是 **Unicode 标量值**，不是 UTF-16 code unit、也不是字节。
+    /// 截断以 **Unicode 标量值**为单位推进，不是 UTF-16 code unit、也不是字节。
     ///
-    /// 这条约束 C++ 侧的缓冲容量：一个 emoji 是 1 个标量值但占 2 个 wchar，
-    /// 故 2 个字符最坏是 4 wchar + NUL = 5，`_inputTypeLabel` 必须 ≥ 5
-    /// （已改为 8）。若哪天这条断言被改成"按 UTF-16 长度截断"，那个缓冲要跟着重算。
+    /// 这条约束 C++ 侧的缓冲容量：宽度上限 2 蕴含**最多 2 个标量值**（每个字符至少
+    /// 占 1 宽），而 emoji 在 [`crate::config`] 的粗口径里记 1 宽却占 2 个 wchar，
+    /// 故最坏是 4 wchar + NUL = 5，`_inputTypeLabel` 必须 ≥ 5（已改为 8）。
+    ///
+    /// ⚠️ 这条同时钉住"emoji 记 1 宽"：哪天把 emoji 划进双宽字符，本断言会红，
+    /// 提醒去重算那个缓冲的最坏值（会降到 3，缓冲富余但结论要重写）。
     #[test]
     fn icon_label_limit_counts_scalar_values() {
         let two_emoji = icon_label_trunc("🙂🙃🙂");

@@ -227,7 +227,7 @@ pub struct OverlayEntry {
     pub schema_id: String,
     /// 显示名（`[schema] name`，空则回退 id）。
     pub name: String,
-    /// 模式指示短称（`[schema] icon_label` 首字符，可空）。
+    /// 模式指示短称（`[schema] icon_label` 按显示宽度截断，可空）。
     pub icon_label: String,
     /// `[overlay]` 段本体。
     pub spec: wind_config::OverlaySpec,
@@ -1705,7 +1705,7 @@ impl EngineManager {
         name
     }
 
-    /// 指定方案的图标短称（`schema.icon_label` 截断到 [`wind_config::ICON_LABEL_MAX_CHARS`]）；
+    /// 指定方案的图标短称（`schema.icon_label` 截断到 [`wind_config::ICON_LABEL_MAX_WIDTH`]）；
     /// 未配置返回空串。用于状态气泡/工具栏 short 模式（对齐 Go GetSchemaDisplayInfo 的 iconLabel）。
     ///
     /// 截断口径见 [`wind_config::icon_label_trunc`]——上限由渲染宽度与 C++ 侧缓冲共同决定，
@@ -4312,7 +4312,7 @@ mod tests {
         // 这样它们排在真实用户方案之后，相对顺序断言不受开发机上装了什么影响。
         std::fs::write(
             schemas.join("zz_kf.schema.toml"),
-            "[schema]\nid = \"zz_kf\"\nname = \"快符\"\nicon_label = \"符号\"\nhidden = true\n\
+            "[schema]\nid = \"zz_kf\"\nname = \"快符\"\nicon_label = \"符\"\nhidden = true\n\
              [engine]\ntype = \"codetable\"\n\
              [engine.codetable]\nmax_code_length = 1\n\
              [overlay]\nkind = \"special\"\nshow_all_on_enter = true\ncandidate_layout = \"vertical\"\n",
@@ -4396,10 +4396,10 @@ mod tests {
         let modes = mgr.overlay_modes();
         let kf = modes.iter().find(|e| e.schema_id == "zz_kf").unwrap();
         assert_eq!(kf.name, "快符");
-        // 上限 2（`wind_config::ICON_LABEL_MAX_CHARS`）：`"符号"` 恰好等于上限、原样保留。
-        // ⚠️ 这条断言**测不到截断**——它验证的是"没被多截"。截断本身由
+        // 一个汉字宽 2，恰好等于上限（`wind_config::ICON_LABEL_MAX_WIDTH`）、原样保留。
+        // ⚠️ 这条断言**测不到截断**——它验证的是"取自方案文件且没被多截"。截断本身由
         // `wind_config::schema` 的单元测试覆盖，别在这里加长标签的 fixture 来重复测。
-        assert_eq!(kf.icon_label, "符号", "两字符 label 在上限内，不截断");
+        assert_eq!(kf.icon_label, "符", "宽度在上限内，不截断");
         assert!(kf.spec.show_all_on_enter);
         assert_eq!(
             kf.spec.candidate_layout,

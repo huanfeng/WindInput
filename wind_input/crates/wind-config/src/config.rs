@@ -3296,24 +3296,30 @@ pub const TOOLBAR_LABEL_MAX_WIDTH: usize = 2;
 /// 工具栏按钮 label 的截断口径：去首尾空白后，取显示宽度不超过
 /// [`TOOLBAR_LABEL_MAX_WIDTH`] 的前缀。即「一个汉字」或「两个 ASCII 字符」。
 ///
-/// # 为什么不复用 `schema::icon_label_trunc`
+/// # 与 `schema::icon_label_trunc` 的关系（issue #85 后已合并口径）
 ///
-/// 那条口径是**字符数** ≤ 2（语言栏 16×16 图标的既有尺度），这条是**显示宽度** ≤ 2。
-/// 对「符号」两者判断相反：前者放行（2 个字符），后者截成「符」（宽度 4 超限）。
+/// 那条口径原先是**字符数** ≤ 2，与这条**显示宽度** ≤ 2 对「符号」判断相反（前者放行、
+/// 后者截成「符」）。当时留的话是"若日后要合并两条口径，得先确认语言栏那三个调用点
+/// 接受「符号」被截成「符」"——issue #85 就是这个确认：第三方方案的 `icon_label = "虎单"`
+/// 在 16px 图标里被回缩到认不出，用户明确要求按显示宽度收。
 ///
-/// 分野在于两处要保证的东西不同：语言栏图标是独立的一张位图，画 2 个 CJK 只是挤；
-/// 工具栏格是**等宽方格排成的一条**，一格画得比别格宽就破了整条的节奏——用户要的
-/// 正是「和其它格长宽比一致」。改 `icon_label_trunc` 去迁就这里会连带改掉方案标签
-/// 与语言栏图标的既有行为（「符号」这类 2 字标签现在是显示得出的）。
-///
-/// ⚠️ 因此这**不是**漏掉的复用。若日后要合并两条口径，得先确认语言栏那三个调用点
-/// 接受「符号」被截成「符」。
+/// 现在两者**同一条规则、不同上限常量**，共用 [`display_width_trunc`]。上限仍各留一个
+/// 常量：两处的物理约束不同（这里是等宽方格的长宽比，那里是 16px 位图 + C++ 侧
+/// `wcscpy_s` 缓冲），日后其中一处要动不该被另一处绑住。
 pub fn toolbar_label_trunc(raw: &str) -> String {
+    display_width_trunc(raw, TOOLBAR_LABEL_MAX_WIDTH)
+}
+
+/// 按**显示宽度**截断的共享内核：去首尾空白后，取显示宽度不超过 `max_width` 的前缀。
+///
+/// 宽度口径见 [`is_wide_char`]（CJK 记 2、其余记 1）。字符不可拆，故结果宽度可能小于
+/// `max_width`（`"A符"` 在上限 2 下只剩 `"A"`）。
+pub(crate) fn display_width_trunc(raw: &str, max_width: usize) -> String {
     let mut out = String::new();
     let mut w = 0usize;
     for c in raw.trim().chars() {
         let cw = if is_wide_char(c) { 2 } else { 1 };
-        if w + cw > TOOLBAR_LABEL_MAX_WIDTH {
+        if w + cw > max_width {
             break;
         }
         out.push(c);
@@ -3325,7 +3331,12 @@ pub fn toolbar_label_trunc(raw: &str) -> String {
 /// 是否按双宽字符计。粗口径够用：这里只为决定「一格能放几个」，不是排版引擎。
 ///
 /// 覆盖 CJK 统一表意文字及扩展 A、兼容表意文字、假名、全角/半角形式区、CJK 符号与标点、
-/// 注音符号、谚文——即用户会拿来当按钮标签的那些。其余（拉丁、数字、常用符号）记 1。
+/// 注音符号、谚文——即用户会拿来当按钮标签 / 图标主字的那些。其余（拉丁、数字、常用符号、
+/// **emoji**）记 1。
+///
+/// ⚠️ emoji 记 1 是有代价的：它占 2 个 UTF-16 code unit，图标主字上限 2 因此蕴含
+/// 「最坏 4 wchar」，C++ 侧 `_inputTypeLabel` 的容量按这个最坏值取。若要把 emoji
+/// 划进双宽，先看 `schema::icon_label_limit_counts_scalar_values` 那条断言。
 fn is_wide_char(c: char) -> bool {
     matches!(c as u32,
         0x1100..=0x115F      // 谚文字母

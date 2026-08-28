@@ -26,6 +26,6 @@ pub use config::{
 pub use dir_var::{dir_var, dir_var_help, dir_var_names, dir_var_str, is_dir_var};
 pub use runtime_state::RuntimeState;
 pub use schema::{
-    CandidateSpec, ICON_LABEL_MAX_CHARS, OverlaySpec, PhrasesSpec, PunctIntent, PunctSpec, Schema,
+    CandidateSpec, ICON_LABEL_MAX_WIDTH, OverlaySpec, PhrasesSpec, PunctIntent, PunctSpec, Schema,
     SchemaBehavior, icon_label_or, icon_label_trunc,
 };

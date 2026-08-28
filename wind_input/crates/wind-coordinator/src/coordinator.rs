@@ -10020,8 +10020,8 @@ mod toolbar_items_tests {
 
     /// label 按**显示宽度**截断：一个汉字或两个 ASCII。
     ///
-    /// 这与 `icon_label_trunc` 的「字符数 ≤ 2」口径不同——「符号」在那边放行、在这里
-    /// 截成「符」。分野的理由见 `toolbar_label_trunc` 的文档。
+    /// 与语言栏图标主字的 `icon_label_trunc` 现在是**同一条规则**（issue #85 起两处
+    /// 都按显示宽度收），只是上限常量各留一个。理由见 `toolbar_label_trunc` 的文档。
     #[test]
     fn custom_label_truncates_by_display_width() {
         let cases = [
