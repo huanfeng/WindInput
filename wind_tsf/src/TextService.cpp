@@ -3315,7 +3315,21 @@ STDAPI CTextService::OnChange(REFGUID rguid)
     // ⚠ 不变量：**任何改变 _bChineseMode 的路径都必须同步写 compartment**
     //   （_SetOpenCloseCompartment(_bChineseMode)）。漏一处就会让 compartment 与实际模式
     //   脱节，而它现在是对宿主的唯一真话——脱节比当年钉死更难查。
-    BOOL newChineseMode = bOpen;
+    // compartment 的值就是目标模式；它已由系统/宿主写好，故 compartmentAlreadySet=TRUE。
+    return _ApplyModeSwitch(bOpen, TRUE, L"compartment");
+}
+
+// 应用一次中英模式切换：刷统计、结束组合、通知服务端、落 _bChineseMode 与两个 compartment。
+// 两条路径共用，差别只在 compartment 由谁写：
+//   compartmentAlreadySet=TRUE  —— OPENCLOSE 变化是系统/宿主写的，值已经对，仅在服务端
+//                                  仲裁出不同模式时才回写；
+//   compartmentAlreadySet=FALSE —— 我们是发起方（按键侧兜底），compartment 还停在旧值，
+//                                  必须无条件写，否则违反「改 _bChineseMode 必同步写
+//                                  compartment」的不变量，对宿主说的就是假话。
+// source 只进日志，用于把两条路径在排查时分开。
+HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlreadySet, const WCHAR* source)
+{
+    BOOL newChineseMode = requestedMode;
 
     // 值与当前模式一致：宿主重复下发同一状态（gvim 每次 ESC 都写 0）或系统联动噪声。
     // 早退，不做任何副作用——否则每次都会白跑一轮 EndComposition + 同步 IPC +
@@ -3323,13 +3337,13 @@ STDAPI CTextService::OnChange(REFGUID rguid)
     // 注意此处**不需要**回写 compartment：值语义下它已经是对的。
     if (newChineseMode == _bChineseMode)
     {
-        WIND_LOG_INFO_FMT(L"Compartment OPENCLOSE %d matches current mode (%s), no-op\n",
-            bOpen, _bChineseMode ? L"Chinese" : L"English");
+        WIND_LOG_INFO_FMT(L"Mode request via %s (%d) matches current mode (%s), no-op\n",
+            source, requestedMode, _bChineseMode ? L"Chinese" : L"English");
         return S_OK;
     }
 
-    WIND_LOG_INFO_FMT(L"Compartment %s: mode %s -> %s\n",
-        bOpen ? L"opened" : L"closed",
+    WIND_LOG_INFO_FMT(L"Mode switch via %s: %s -> %s\n",
+        source,
         _bChineseMode ? L"Chinese" : L"English",
         newChineseMode ? L"Chinese" : L"English");
 
@@ -3375,20 +3389,41 @@ STDAPI CTextService::OnChange(REFGUID rguid)
     // 注意在 OnChange 上下文里写 compartment **未必生效**（实测：内部「值相同就不写」
     // 的守卫会读到尚未落定的旧值而跳过）。真正兜底的是 IPC 状态推送回来后
     // _SyncStateFromResponse 里的那次写入，窗口实测 400~670ms。判定逻辑不依赖此处成功。
-    if (newChineseMode != bOpen)
+    if (!compartmentAlreadySet || newChineseMode != requestedMode)
     {
-        WIND_LOG_INFO_FMT(L"Service arbitrated mode to %s (requested %s), syncing compartment\n",
-            newChineseMode ? L"Chinese" : L"English", bOpen ? L"Chinese" : L"English");
+        // 只有真被仲裁时才这么说：按键路径 compartmentAlreadySet=FALSE 恒进入本分支，
+        // 无条件打这条会谎称「服务端仲裁了」，把下次排查引向不存在的仲裁。
+        if (newChineseMode != requestedMode)
+            WIND_LOG_INFO_FMT(L"Service arbitrated mode to %s (requested %s), syncing compartment\n",
+                newChineseMode ? L"Chinese" : L"English", requestedMode ? L"Chinese" : L"English");
         _SetOpenCloseCompartment(_bChineseMode);
     }
 
     // 同步真实中英文模式到 INPUTMODE_CONVERSION（KBLSwitch / 任务栏读取此 compartment）
     _SetConversionMode(_bChineseMode);
 
-    WIND_LOG_INFO_FMT(L"Mode set via system compartment -> %s (compartment kept open)\n",
-        _bChineseMode ? L"Chinese" : L"English");
+    WIND_LOG_INFO_FMT(L"Mode set via %s -> %s\n",
+        source, _bChineseMode ? L"Chinese" : L"English");
 
     return S_OK;
+}
+
+// 按键侧兜底的中英切换（Ctrl+Space）。
+//
+// 只有当系统没把 Ctrl+Space 当作 IME 热键时才会走到这里——判据不是猜的，而是 TSF 契约：
+// OnKeyDown 只在 OnTestKeyDown 返回 pfEaten=TRUE 之后才被调用，而吃下该键就意味着
+// msctf 不会再拿它当热键、compartment 不会被翻。两条路径因此天然互斥，不存在双切换。
+//
+// 背景：此前 Ctrl+Space 的切换 100% 外包给系统（见 OnChange 的 OPENCLOSE 分支），
+// 按键侧那条兜底曾以「实测从未执行」为由删除（e152da9b）。但那次实测只采样了系统热键
+// 正常的机器；在系统热键实质失效的机器上 OnKeyDown 确实会被调用，此时整个功能无人接管。
+// 真机日志指纹：test_down eaten=1 decision=ctrl_space_intercept 紧跟 down eaten=0
+// decision=passthrough_not_handled，且全程 0 条 compat.openclose.onchange。
+BOOL CTextService::ToggleModeFromKey()
+{
+    // 不加 _hasThreadFocus 守卫：那是 OnChange 用来过滤 compartment 广播噪声的，
+    // 按键只会送到有焦点的实例，不存在噪声；而多进程宿主下该标志本身就不可靠。
+    return SUCCEEDED(_ApplyModeSwitch(!_bChineseMode, FALSE, L"ctrl_space_key"));
 }
 
 BOOL CTextService::_InitKeyboardDisabledCompartment()

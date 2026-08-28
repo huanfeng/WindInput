@@ -116,6 +116,7 @@ CKeyEventSink::CKeyEventSink(CTextService* pTextService)
     , _resyncFailStreak(0)
     , _lastPassthroughDigit(0)
     , _pendingKeyUpKey(0)
+    , _ctrlSpaceEatenInTest(FALSE)
     , _pendingKeyUpModifiers(0)
     , _pendingKeyDownTime(0)
     , _modsState(0)
@@ -293,6 +294,8 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
 
     // Trace: Log ALL key presses (very high frequency)
     WIND_LOG_TRACE_FMT(L"OnTestKeyDown: wParam=0x%02X\n", (uint32_t)wParam);
+    // 每个新按键都重新起算：凭据只对紧随其后的那一次 OnKeyDown 有效。
+    _ctrlSpaceEatenInTest = FALSE;
 
     // Keyboard disabled by system: pass through all keys
     if (_pTextService->IsKeyboardDisabled())
@@ -533,6 +536,9 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     if (wParam == VK_SPACE && (modifiers & KEYMOD_CTRL) && !(modifiers & (KEYMOD_ALT | KEYMOD_SHIFT)))
     {
         _CancelPendingToggle(wParam, L"ctrl_space_intercept");
+        // 留下凭据：若 TSF 紧接着仍调用 OnKeyDown，说明 msctf 没把这个键当系统热键，
+        // compartment 不会被翻，切换得由我们自己做（见 OnKeyDown 的 ctrl_space_toggle）。
+        _ctrlSpaceEatenInTest = TRUE;
         *pfEaten = TRUE;
         _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::None,
                         _pTextService->IsChineseMode(), _pTextService->HasActiveComposition(), _hasCandidates,
@@ -1019,11 +1025,36 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         return S_OK;
     }
 
-    // 此处原有一个 Ctrl+Space 分支（HandleCtrlSpaceToggle），已删除：实测 TSF 从不为
-    // 该键调用 OnKeyDown——系统 IME 热键在 keystroke sink 之下就被消费了，pfEaten 无效。
-    // 模式切换现由 OPENCLOSE compartment 回调按 OnTestKeyDown 留下的标记完成，
-    // 见 KeyEventSink 的 ctrl_space_intercept 与 CTextService::OnChange。
-    // 若在此重新引入按键侧切换，必须同时让 OnChange 停止处理，否则会双切换相互抵消。
+    // Ctrl+Space 兜底切换：只在 OnTestKeyDown 确实吃下过这个键时执行。
+    //
+    // 这条路径曾以「实测从未执行」为由删除（e152da9b），但那次实测只采样了系统 Ctrl+Space
+    // 热键正常的机器——那种机器上 msctf 在 keystroke sink 之下就消费了该键，OnKeyDown 确实
+    // 不会被调用。而系统热键实质失效的机器上它会被调用，此时 compartment 永远不翻，
+    // OnChange 那条路等不到任何东西，整个功能无人接管。
+    // 真机日志指纹（QQ / Maxthon / Totalcmd，2026-08-28）：
+    //   test_down eaten=1 decision=ctrl_space_intercept
+    //   down      eaten=0 decision=passthrough_not_handled
+    //   且全程 0 条 compat.openclose.onchange，State synced 的 mode 恒定不变。
+    //
+    // ⚠ 双切换为什么不会发生：判据不是时间窗也不是猜测，而是 TSF 契约——OnKeyDown 只在
+    // OnTestKeyDown 返回 pfEaten=TRUE 之后才被调用，吃下该键就意味着 msctf 不会再拿它当
+    // 热键。_ctrlSpaceEatenInTest 就是这份独占凭据，同时也兑现了吃键集不变量（test 吃了，
+    // down 就必须干活）——此前 test 吃下、down 却 passthrough，键既没切换也没落进宿主。
+    if (_ctrlSpaceEatenInTest && wParam == VK_SPACE
+        && (modifiers & KEYMOD_CTRL) && !(modifiers & (KEYMOD_ALT | KEYMOD_SHIFT)))
+    {
+        *pfEaten = TRUE;
+        // 长按 auto-repeat：吃掉但不切换。判据与上方 toggle_mode_key 分支同源
+        // （lParam bit30）——少了它，按住 Ctrl+Space 不放会让中英模式连续翻转。
+        if (lParam & 0x40000000)
+            return S_OK;
+        _ctrlSpaceEatenInTest = FALSE;
+        _pTextService->ToggleModeFromKey();
+        _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::None,
+                        _pTextService->IsChineseMode(), _pTextService->HasActiveComposition(), _hasCandidates,
+                        _pTextService->HasActiveComposition() || _hasCandidates, TRUE, L"ctrl_space_toggle");
+        return S_OK;
+    }
 
     // Policy 早期闸门：Chrome / QQ 等宿主会无视 OnTestKeyDown 的 pfEaten=FALSE 仍调用
     // OnKeyDown。这里对不满足 policy 的 chineseOnly / session 热键直接 return FALSE，

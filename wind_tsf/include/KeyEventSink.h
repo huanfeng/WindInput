@@ -317,6 +317,12 @@ private:
     uint32_t _pendingKeyUpKey;   // Key code of pending KeyUp toggle key
     uint32_t _pendingKeyUpModifiers; // Modifiers when KeyDown was pressed
     DWORD    _pendingKeyDownTime;    // GetTickCount() when toggle key was pressed down
+    // OnTestKeyDown 是否刚吃下一个 Ctrl+Space。它是「我们独占了这个键」的凭据：
+    // TSF 只在 pfEaten=TRUE 后才调 OnKeyDown，吃下就意味着 msctf 不会再拿它当 IME
+    // 热键、OPENCLOSE compartment 不会被翻，因此按键侧兜底切换与 compartment 路径
+    // 天然互斥。QQ 那类「不调 OnTestKeyDown 却调 OnKeyDown」的宿主此标志恒为 FALSE，
+    // 兜底不触发——宁可不修，也不拿双切换去赌。
+    BOOL     _ctrlSpaceEatenInTest;
 
     // Maximum duration (ms) for a toggle key press to count as a "tap"
     // Long presses beyond this threshold will NOT trigger mode toggle

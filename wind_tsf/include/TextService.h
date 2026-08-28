@@ -321,6 +321,9 @@ public:
     // Windows 输入系统会在 CapsLock 状态变化后联动写 OPENCLOSE compartment；
     // OnCompartmentChange 据此时间戳抑制该联动噪声，防止被误判为用户模式切换。
     void NoteCapsLockKeyActivity() { _lastCapsKeyTick = GetTickCount64(); }
+    // 按键侧兜底的中英切换（Ctrl+Space）。仅在系统未把该键当作 IME 热键时由
+    // CKeyEventSink::OnKeyDown 调用，与 OPENCLOSE compartment 路径天然互斥。
+    BOOL ToggleModeFromKey();
     // 当前实例是否持有输入焦点（OnSetFocus 最后一次收到非 null 的 pDocMgrFocus）。
     // 用于服务重启时避免对无焦点实例触发工具栏显示。
     BOOL HasFocus() const { return _hasFocus; }
@@ -475,6 +478,10 @@ private:
     // 中英模式集中 setter：赋值 _bChineseMode 并触发加词热键重评（模式变化是门卫条件之一）。
     // 可从 async reader 线程调用（reeval 内部 post 到窗口线程）。
     void _SetChineseMode(BOOL v);
+    // 应用一次中英模式切换（刷统计 / 结束组合 / 通知服务端 / 落模式与两个 compartment）。
+    // compartmentAlreadySet=TRUE：OPENCLOSE 已由系统或宿主写成 requestedMode，仅在服务端
+    // 仲裁出不同值时回写；FALSE：我们是发起方，必须无条件写。source 只进日志。
+    HRESULT _ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlreadySet, const WCHAR* source);
     static LRESULT CALLBACK _HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     DWORD _activateFlags;  // ActivateEx flags (TF_TMAE_SECUREMODE, etc.)
 
