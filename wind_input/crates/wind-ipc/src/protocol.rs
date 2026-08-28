@@ -1233,6 +1233,10 @@ pub const STATUS_TOOLBAR_VISIBLE: u32 = 0x0008;
 pub const STATUS_MODE_CHANGED: u32 = 0x0010;
 pub const STATUS_CAPS_LOCK: u32 = 0x0020;
 pub const STATUS_HOST_RENDER_AVAIL: u32 = 0x0040;
+/// 软键盘面板开着。**C++ 的吃键判定要用它**：中文模式无 input session 时数字键本是
+/// 交还宿主的（`session_select_or_page` 那支只在有 session 时吃），而软键盘的数字行
+/// 需要它们被吃下来。位值必须与 `BinaryProtocol.h` 的 `STATUS_SOFT_KEYBOARD` 一致。
+pub const STATUS_SOFT_KEYBOARD: u32 = 0x0080;
 
 // ──────────────────────────────────────────────
 // Commit result flags

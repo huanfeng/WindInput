@@ -460,6 +460,9 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_key_event(&self, data: &KeyEventData) -> KeyAction {
+        // 软键盘状态若在本次按键中变了，返回前推给 C++（吃键判定要用）。**声明在最开头**
+        // 是必需的：局部变量逆序析构 ⇒ 它最后走 ⇒ 那时 `state` 的 MutexGuard 已经还了。
+        let _sk_push = crate::handle_softkeyboard::SoftKeyboardPushOnDrop(self);
         // 每次按键开始重置统计标志：具体上屏路径调 record_commit 置位，
         // 顶层 record_input_stats 仅在未置位时兜底（对齐 Go handle_key_event 开头 reset）。
         self.stat_recorded
@@ -721,6 +724,12 @@ impl MessageHandler for Coordinator {
                 // 这条路径就失效了，用户回不到中文方案。
                 let commit = self.switch_schema_by_id(id);
                 return self.schema_switch_key_action(commit);
+            } else if action == "softkeyboard" {
+                // 不带面：纯开关。
+                return self.toggle_softkeyboard(None);
+            } else if let Some(id) = action.strip_prefix("softkeyboard:") {
+                // 直通车：无论开着还是关着都切到这一面，见 `toggle_softkeyboard` 的说明。
+                return self.toggle_softkeyboard(Some(id.trim()));
             } else if let Some(act) = self.dispatch_hotkey_keyed(&action) {
                 // 按键上下文走 `_keyed`：`toggle_mode` / `switch_engine` 会动输入状态，
                 // 它们的编码要经本次按键应答交还宿主（`dispatch_hotkey` 那条只能 push，
@@ -752,6 +761,15 @@ impl MessageHandler for Coordinator {
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return KeyAction::PassThrough;
+        }
+
+        // 软键盘：接管主键区的符号键位（查表直接上屏）。特殊键与布局外的键在那里返回
+        // None，自然落回下面的常规链路 → 透传给宿主，于是「退格还能删、回车还换行」不需
+        // 要单独写一条规则。
+        //
+        // 位置在密码框抑制**之后**：密码框里一律透传，软键盘也不例外。
+        if let Some(act) = self.handle_softkeyboard_key(&state, data) {
+            return act;
         }
 
         // 配对跳出键：**全模式统一前置判定**，必须早于下面的英文模式分支——英文模式对普通键
@@ -1757,6 +1775,7 @@ impl MessageHandler for Coordinator {
         // （每次 DocMgr 获焦都发一条，Excel 同一 DocMgr 6ms 抖动、VSCode 一次切换 5 次都会
         // 各发一条），全靠 menu_close_on_focus_change 的守卫期挡住刚弹出的菜单。
         self.menu_close_on_focus_change("focus_gained");
+        self.close_softkeyboard_on_focus_change("focus_gained");
         // 解析焦点进程的 caret 兼容态（微信 caret_use_top、per-app caret_offset_* 等）。
         // ★★ 必须在下面的 `apply_focus_caret` **之前**跑：那一步会读 `active_compat` 做
         // `caret_use_top`/`caret_offset_*` 变换，若仍在这之后调用，本次焦点事件带来的第一份
@@ -1935,6 +1954,7 @@ impl MessageHandler for Coordinator {
         // 关菜单**先于** stale 判定与 reason 分流：菜单的生命周期与输入态无关，
         // 陈旧失焦/噪声层失焦同样证明用户动了别处。详见 menu_close_on_focus_change。
         self.menu_close_on_focus_change("focus_lost");
+        self.close_softkeyboard_on_focus_change("focus_lost");
         if self.is_stale_focus_event(client_token, "handle_focus_lost") {
             return;
         }
@@ -2130,6 +2150,7 @@ impl MessageHandler for Coordinator {
         // 同 handle_focus_lost：关菜单先于 stale 判定。下面清 menu_open 的那段仍保留
         // （非陈旧路径的完整清理），两处幂等叠加无副作用。
         self.menu_close_on_focus_change("ime_deactivated");
+        self.close_softkeyboard_on_focus_change("ime_deactivated");
         // 与 focus_lost 同源的乱序风险：切走本输入法时旧宿主的 IME_DEACTIVATED 同样可能
         // 晚于新宿主的 focus_gained 到达（两者都是 fire-and-forget 异步写）。
         if self.is_stale_focus_event(client_token, "handle_ime_deactivated") {

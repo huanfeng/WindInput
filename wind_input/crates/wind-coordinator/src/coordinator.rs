@@ -1129,6 +1129,26 @@ pub struct Coordinator {
     /// 全仓的覆盖点都没有文件监视器。加载失败已在 `FormatTable::load` 内回落内置默认表，
     /// 此处恒是一张可用的表。
     pub(crate) quick_formats: wind_quick_input::FormatTable,
+    /// 软键盘映射表（出厂画布 ⊕ 用户按面覆盖）。启动后不变，与 `quick_formats` 同族。
+    pub(crate) softkeyboard: wind_softkeyboard::SoftKeyboardTable,
+    /// 软键盘面板开着。
+    ///
+    /// ★ **刻意不放 `State`**，虽然它看起来像一个输入状态。理由是死锁：状态推送
+    /// （`push_state_update` → `build_status`）自己要 `state.lock()`，而开关软键盘发生在
+    /// 已经持有 `&mut State` 的按键路径里——放进 `State` 就意味着「改完必须先还锁再推送」，
+    /// 那是个只能靠注释维持的不变量，漏一处的症状还极隐蔽（Rust 认为开着并接管按键，
+    /// C++ 仍按没开判定而不吃数字键，数字行整行失效）。放在 atomic 上，两条路径互不相干。
+    ///
+    /// 语义上它也确实与输入状态正交：软键盘不组码、不产候选、不进 `ModeKind`。
+    pub(crate) softkeyboard_active: std::sync::atomic::AtomicBool,
+    /// 当前面在 [`Self::softkeyboard`] 里的下标。关闭再开会停在同一面。
+    pub(crate) softkeyboard_page: std::sync::atomic::AtomicUsize,
+    /// 软键盘状态有变、待推给 C++。由 `SoftKeyboardPushOnDrop` 在按键返回时消费。
+    pub(crate) softkeyboard_dirty: std::sync::atomic::AtomicBool,
+    /// 软键盘打开时刻，供焦点路径的关闭守卫用。**必须与开启成对写入**，理由同
+    /// `State::menu_opened_at`：漏写会让守卫读到上一次的时间戳，于是刚弹出的面板
+    /// 被一条迟到的焦点事件当场关掉。
+    pub(crate) softkeyboard_opened_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// 快捷输入格式表的**用户调整**（右键调序 / 停用）运行时镜像，键为格式类别。
     ///
     /// 真相在 `userdata.redb` 的 `quick_format` 表，这里是读缓存：候选生成在热路径上
@@ -1787,6 +1807,32 @@ impl Coordinator {
         // 没有预检就没有任何线索（热路径不能每次按键都告警）。
         crate::quick_eval::precheck(&quick_formats);
 
+        // 软键盘映射表：出厂画布 + 用户按面覆盖。
+        //
+        // ⚠️ 这里**不走** `resolve_data_file`：那个函数的语义是「用户那份存在就整份取代
+        // 出厂」，而软键盘要的是按面合并——用户只想改一个键时不该失去其余 12 个面，
+        // 更不该在出厂新增面之后永远看不到它们（同 `system.quick.toml` 的用户设置分文件
+        // 那条理由）。故显式取两个路径，出厂铺底、用户叠加。
+        let softkeyboard = {
+            let system = data_dir.map(|d| d.join(wind_softkeyboard::FILE_NAME));
+            let mut table = wind_softkeyboard::SoftKeyboardTable::load(system.as_deref());
+            if let Some(user) =
+                Config::user_config_dir().map(|d| d.join(wind_softkeyboard::FILE_NAME))
+                && user.exists()
+            {
+                match std::fs::read_to_string(&user) {
+                    Ok(text) => match table.merge_user(&text) {
+                        Ok(()) => info!("软键盘: 已叠加用户覆盖 {}", user.display()),
+                        Err(e) => {
+                            warn!("软键盘: 用户覆盖解析失败，已忽略 {}: {}", user.display(), e)
+                        }
+                    },
+                    Err(e) => warn!("软键盘: 用户覆盖读取失败 {}: {}", user.display(), e),
+                }
+            }
+            table
+        };
+
         // 拼音读音表同样支持用户覆盖（整体替代）：改多音字取音、补生僻字读音都靠换这张表。
         let pinyin_map = Config::resolve_data_file(data_dir, "pinyin_map.txt");
         if pinyin_map.is_none() && data_dir.is_some() {
@@ -1941,6 +1987,11 @@ impl Coordinator {
             aux_code_table: std::sync::RwLock::new(None),
             aux_code_key_warned: std::sync::atomic::AtomicBool::new(false),
             quick_formats,
+            softkeyboard,
+            softkeyboard_active: std::sync::atomic::AtomicBool::new(false),
+            softkeyboard_page: std::sync::atomic::AtomicUsize::new(0),
+            softkeyboard_dirty: std::sync::atomic::AtomicBool::new(false),
+            softkeyboard_opened_at: std::sync::Mutex::new(None),
             // 空初值：真正的装载在 new() 里经 `reload_quick_adjust` 完成（需要 store，
             // 而 store 在本结构体构造之后才可用）。headless 无 store 时保持空 = 出厂顺序。
             quick_adjust: std::sync::RwLock::new(std::collections::HashMap::new()),
@@ -4987,6 +5038,9 @@ impl Coordinator {
                 s.caps_lock,
             )
         };
+        let soft_keyboard = self
+            .softkeyboard_active
+            .load(std::sync::atomic::Ordering::Relaxed);
         let icon_label = self.mode_icon_label(chinese_mode, caps_lock);
         StatusUpdateData {
             chinese_mode,
@@ -4994,6 +5048,7 @@ impl Coordinator {
             chinese_punct,
             toolbar_visible,
             caps_lock,
+            soft_keyboard,
             icon_label,
             key_down_hotkeys: self.rt().compiled_hotkeys.key_down_tsf_hashes(),
             key_up_hotkeys: self.rt().compiled_hotkeys.key_up_tsf_hashes(),

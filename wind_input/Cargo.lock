@@ -2417,6 +2417,7 @@ dependencies = [
  "wind-punct",
  "wind-quick-input",
  "wind-reverse",
+ "wind-softkeyboard",
  "wind-store",
  "wind-theme",
  "wind-transform",

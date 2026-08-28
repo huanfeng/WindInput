@@ -463,6 +463,9 @@ impl Coordinator {
     ) -> Option<KeyAction> {
         match action {
             BoundAction::None => None,
+            // 软键盘不是「模式」，没有编码缓冲也不进 ModeKind——直接开关面板即可。
+            // 状态推送由按键路径顶层的 SoftKeyboardPushOnDrop 兜底。
+            BoundAction::SoftKeyboard(page) => Some(self.toggle_softkeyboard(page.as_deref())),
             BoundAction::TempPinyin => {
                 let target = self.engine_mgr.temp_pinyin_target()?;
                 state.active = Some(ModeKind::TempPinyin);

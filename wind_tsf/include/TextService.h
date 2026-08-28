@@ -281,6 +281,8 @@ public:
     // CFileLogger::IsEnabled 门控**——日志宏的实参在调用点即求值，不会被级别短路。
     LONG GetOpenCloseCompartmentValue();
     BOOL IsFullWidth() { return _bFullWidth; }
+    // 软键盘面板是否开着（由服务端经 statusFlags 推送）。见 KeyEventSink 的数字键分支。
+    BOOL IsSoftKeyboard() { return _bSoftKeyboard; }
     BOOL IsKeyboardDisabled() { return _bKeyboardDisabled; }
     // 密码框强制英文抑制当前是否生效（**镜像** core 的 `apply_input_diag`：命中密码
     // InputScope 位 + compartment 未禁用 + 策略开关开）。DLL 必须能自行判定：吃键决策在
@@ -498,6 +500,7 @@ private:
     // Input mode state
     BOOL _bChineseMode;
     BOOL _bFullWidth;
+    BOOL _bSoftKeyboard;
     BOOL _bKeyboardDisabled;   // GUID_COMPARTMENT_KEYBOARD_DISABLED
     ULONGLONG _focusSessionId;
     BOOL _hasFocus;             // 当前实例持有 TSF 输入焦点时为 TRUE（OnSetFocus 最后收到非 null pDocMgrFocus）

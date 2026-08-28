@@ -954,6 +954,7 @@ CTextService::CTextService()
     , _pHostWindow{}
     , _bChineseMode(TRUE)
     , _bFullWidth(FALSE)
+    , _bSoftKeyboard(FALSE)
     , _lastCapsKeyTick(0)
     , _lastActivateTick(0)
     , _focusSessionId(0)
@@ -2682,6 +2683,7 @@ void CTextService::_SyncStateFromResponse(const ServiceResponse& response)
 
     _SetChineseMode(response.IsChineseMode());
     _bFullWidth = response.IsFullWidth();
+    _bSoftKeyboard = response.IsSoftKeyboard();
 
     // compartment 如实反映中英模式（值语义），见 _SetOpenCloseCompartment 定义处的说明。
     _SetOpenCloseCompartment(_bChineseMode);
@@ -3862,6 +3864,7 @@ BOOL CTextService::_InitIPCClient()
         // Update internal state (atomic operation, thread-safe)
         pThis->_SetChineseMode(response.IsChineseMode());
         pThis->_bFullWidth = response.IsFullWidth();
+        pThis->_bSoftKeyboard = response.IsSoftKeyboard();
 
         // Update language bar button using thread-safe PostUpdateFullStatus
         // This posts a message to the UI thread instead of calling COM directly

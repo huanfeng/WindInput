@@ -792,6 +792,13 @@ pub enum BoundAction {
     /// `vk_to_prefix_char_with_letters(key_code)?`，对修饰键恒返回 `None`，而本动词恰恰
     /// 只在修饰键上才走得到——挪进去等于这道守卫永不执行。
     SwitchSchema(String),
+    /// 开关软键盘；`Some(id)` 直接切到指定面（直通车），`None` 保持/切上次那面。
+    ///
+    /// ⚠️ **不进 [`Self::DISPATCH_ACTIONS`]**，与 `add_word` 同类：软键盘开启后要接管
+    /// 全部主键区按键，得返回占位 composition 激活宿主转发，不符 `dispatch_hotkey`
+    /// 的 `bool` 契约。混进那份白名单的症状是「按了没反应」。
+    /// 判据：**开启后是否需要接管后续按键**——`toggle_toolbar` 不接管，本动作接管。
+    SoftKeyboard(Option<String>),
     /// A 类状态切换（`toggle_punct` / `take_screenshot` 那类）。
     ///
     /// 携带动词原文，由协调器转交 `dispatch_hotkey` ——那里是这批动作的既有单点，
@@ -875,11 +882,22 @@ impl BoundAction {
                 Self::SwitchSchema(id.to_string())
             };
         }
+        // 直通车 `softkeyboard:<面 id>`。带冒号的形态先判，不带冒号的落到下面的 `lower`
+        // 分支——两者不构成子集关系（前缀判据要求冒号存在），故顺序不影响结果。
+        if let Some(id) = s.strip_prefix("softkeyboard:") {
+            let id = id.trim();
+            return if id.is_empty() {
+                Self::None
+            } else {
+                Self::SoftKeyboard(Some(id.to_string()))
+            };
+        }
         let lower = s.to_lowercase();
         match lower.as_str() {
             "temp_pinyin" => Self::TempPinyin,
             "temp_english" => Self::TempEnglish,
             "aux_code" => Self::AuxCode,
+            "softkeyboard" => Self::SoftKeyboard(None),
             a if Self::DISPATCH_ACTIONS.contains(&a) => Self::Action(a.to_string()),
             _ => Self::None,
         }

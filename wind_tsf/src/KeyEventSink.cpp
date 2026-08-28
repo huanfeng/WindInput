@@ -684,6 +684,16 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
                                 isChineseMode, hasComposition, _hasCandidates, hasInputSession, TRUE, L"session_select_or_page");
                 return S_OK;
             }
+            // 软键盘开着：数字行的键位要能出符号，故无 input session 时也拦。
+            // 与下面的全角例外同源——软键盘不组码、不产生 session，不在此拦就永远送不到
+            // 协调器，表现为「面板上数字行画着符号，敲下去却出了半角数字」。
+            if (isChineseMode && keyType == HotkeyType::Number && _pTextService->IsSoftKeyboard())
+            {
+                *pfEaten = TRUE;
+                _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, keyType,
+                                isChineseMode, hasComposition, _hasCandidates, hasInputSession, TRUE, L"softkeyboard_number");
+                return S_OK;
+            }
             // 中文+全角：无 input session 时也需拦截 Number, 让 Go 走全角转换。
             // 否则数字直通到应用得到半角, 仅在记事本(IMM32 兼容层)恰好正确,
             // VS Code/Chrome/WPS/Word 等纯 TSF 应用都会出错。

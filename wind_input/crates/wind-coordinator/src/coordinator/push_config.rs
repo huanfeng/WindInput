@@ -55,6 +55,7 @@ impl Coordinator {
             s.toolbar_visible,
             s.caps_lock,
             host_render_avail,
+            s.soft_keyboard,
             &s.key_down_hotkeys,
             &s.key_up_hotkeys,
             &s.icon_label,
@@ -365,6 +366,7 @@ impl Coordinator {
             s.chinese_punct,
             s.toolbar_visible,
             s.caps_lock,
+            s.soft_keyboard,
             &s.icon_label,
         );
         self.push_server.push_to_active(&encoded);

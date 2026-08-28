@@ -46,6 +46,9 @@ pub struct StatusUpdateData {
     pub chinese_punct: bool,
     pub toolbar_visible: bool,
     pub caps_lock: bool,
+    /// 软键盘面板是否开着。C++ 的吃键判定要用它——中文模式无 input session 时数字键
+    /// 本是交还宿主的，软键盘的数字行需要它们被吃下来。
+    pub soft_keyboard: bool,
     pub icon_label: String,
     pub key_down_hotkeys: Vec<u32>,
     pub key_up_hotkeys: Vec<u32>,

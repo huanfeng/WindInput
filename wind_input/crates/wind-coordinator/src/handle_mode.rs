@@ -386,6 +386,16 @@ impl Coordinator {
     ) -> Option<KeyAction> {
         match action {
             BoundAction::None => None,
+            // 软键盘不是模式，没有「顶字进入」的区别——但既然本函数的语义是「先把已转换
+            // 前缀和高亮候选上屏」，这里也要顶，否则开面板会把用户正在打的编码丢掉。
+            BoundAction::SoftKeyboard(page) => {
+                let committed = self.take_committed_with_highlight(state);
+                let act = self.toggle_softkeyboard(page.as_deref());
+                Some(match committed {
+                    Some(text) => self.commit_then_new_composition(text, String::new()),
+                    None => act,
+                })
+            }
             BoundAction::TempPinyin => {
                 let target = self.engine_mgr.temp_pinyin_target()?;
                 Some(self.commit_and_enter_temp_pinyin(state, key_code, target))

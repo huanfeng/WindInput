@@ -26,6 +26,7 @@ wind-cmdbar = { path = "../wind-cmdbar" }
 wind-phrase = { path = "../wind-phrase" }
 wind-keys = { path = "../wind-keys" }
 wind-quick-input = { path = "../wind-quick-input" }
+wind-softkeyboard = { path = "../wind-softkeyboard" }
 wind-reverse = { path = "../wind-reverse" }
 wind-aux-code = { path = "../wind-aux-code" }
 wind-punct = { path = "../wind-punct" }

@@ -454,6 +454,7 @@ pub fn encode_status_update(
     toolbar_visible: bool,
     caps_lock: bool,
     host_render_avail: bool,
+    soft_keyboard: bool,
     key_down_hashes: &[u32],
     key_up_hashes: &[u32],
     icon_label: &str,
@@ -466,6 +467,7 @@ pub fn encode_status_update(
         toolbar_visible,
         caps_lock,
         host_render_avail,
+        soft_keyboard,
         key_down_hashes,
         key_up_hashes,
         icon_label,
@@ -487,6 +489,7 @@ pub fn encode_activation_status_push(
     toolbar_visible: bool,
     caps_lock: bool,
     host_render_avail: bool,
+    soft_keyboard: bool,
     key_down_hashes: &[u32],
     key_up_hashes: &[u32],
     icon_label: &str,
@@ -499,6 +502,7 @@ pub fn encode_activation_status_push(
         toolbar_visible,
         caps_lock,
         host_render_avail,
+        soft_keyboard,
         key_down_hashes,
         key_up_hashes,
         icon_label,
@@ -515,6 +519,7 @@ pub fn encode_state_push(
     chinese_punct: bool,
     toolbar_visible: bool,
     caps_lock: bool,
+    soft_keyboard: bool,
     icon_label: &str,
 ) -> Vec<u8> {
     encode_status_update_ex(
@@ -525,7 +530,8 @@ pub fn encode_state_push(
         toolbar_visible,
         caps_lock,
         false, // host_render_avail
-        &[],   // no hotkeys
+        soft_keyboard,
+        &[], // no hotkeys
         &[],
         icon_label,
     )
@@ -553,6 +559,7 @@ fn encode_status_update_ex(
     toolbar_visible: bool,
     caps_lock: bool,
     host_render_avail: bool,
+    soft_keyboard: bool,
     key_down_hashes: &[u32],
     key_up_hashes: &[u32],
     icon_label: &str,
@@ -575,6 +582,9 @@ fn encode_status_update_ex(
     }
     if host_render_avail {
         flags |= STATUS_HOST_RENDER_AVAIL;
+    }
+    if soft_keyboard {
+        flags |= STATUS_SOFT_KEYBOARD;
     }
 
     let key_down_count = key_down_hashes.len() as u32;

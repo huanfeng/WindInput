@@ -31,6 +31,7 @@ pub mod handle_menu;
 pub mod handle_mode;
 pub mod handle_punct;
 pub mod handle_quick_format;
+mod handle_softkeyboard;
 pub mod handle_special;
 pub mod handle_temp;
 pub mod handle_tooltip;

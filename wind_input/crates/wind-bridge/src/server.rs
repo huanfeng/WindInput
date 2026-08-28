@@ -1097,6 +1097,7 @@ fn encode_status_update_from_data(status: &StatusUpdateData) -> Vec<u8> {
         status.toolbar_visible,
         status.caps_lock,
         false, // host_render_avail: 此响应路径无法访问 HostRenderManager；C++ 在 activation push 已获得真值
+        status.soft_keyboard,
         &status.key_down_hotkeys,
         &status.key_up_hotkeys,
         &status.icon_label,

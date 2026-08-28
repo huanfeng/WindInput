@@ -174,6 +174,10 @@ constexpr uint32_t STATUS_TOOLBAR_VISIBLE  = 0x0008; // Toolbar visible
 constexpr uint32_t STATUS_MODE_CHANGED     = 0x0010; // Mode was just changed
 constexpr uint32_t STATUS_CAPS_LOCK        = 0x0020; // CapsLock is on
 constexpr uint32_t STATUS_HOST_RENDER_AVAIL = 0x0040; // Host render available (DLL should request setup)
+// 软键盘面板开着。吃键判定要用：中文模式无 input session 时数字键本是交还宿主的
+// （session_select_or_page 那支只在有 session 时吃），软键盘的数字行需要它们被吃下来。
+// 位值必须与 wind-ipc protocol.rs 的 STATUS_SOFT_KEYBOARD 一致。
+constexpr uint32_t STATUS_SOFT_KEYBOARD    = 0x0080; // Soft keyboard panel is open
 
 // ============================================================================
 // Protocol structures (must match Go side exactly)
@@ -841,4 +845,5 @@ struct ParsedResponse
     bool IsChinesePunct() const { return (statusFlags & STATUS_CHINESE_PUNCT) != 0; }
     bool IsToolbarVisible() const { return (statusFlags & STATUS_TOOLBAR_VISIBLE) != 0; }
     bool IsCapsLock() const { return (statusFlags & STATUS_CAPS_LOCK) != 0; }
+    bool IsSoftKeyboard() const { return (statusFlags & STATUS_SOFT_KEYBOARD) != 0; }
 };
