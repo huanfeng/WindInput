@@ -29,7 +29,13 @@ pub struct CharBlock {
 
 impl CharBlock {
     /// `2FF0-2FFF` 这样的范围文本，供界面显示与批量操作传参。
+    ///
+    /// [`OTHER`] 那种空区间返回**空串**：它的 `start > end` 是刻意的哨兵值，直接格式化
+    /// 会得到 `0001-0000` 这种没有意义、还会漏进界面的字符串。
     pub fn range_text(&self) -> String {
+        if self.start > self.end {
+            return String::new();
+        }
         format!("{:04X}-{:04X}", self.start, self.end)
     }
 }

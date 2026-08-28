@@ -74,6 +74,39 @@ impl Store {
         })
     }
 
+    /// **一个事务**写一批覆盖：`Some(common)` 写入、`None` 删除。返回真正写入的条数。
+    ///
+    /// 整类批量（按 Unicode 块设常用/生僻）用它。逐条走 [`Self::set_common_char_override`]
+    /// 的话，一个块几百上千个字符就是几百上千次 fsync 提交，而调用方每写一条还要回灌一次
+    /// 运行时镜像（全表重读 + 取写锁），那把锁正是候选过滤每次按键都要拿的。
+    pub fn apply_common_char_overrides(
+        &self,
+        items: &[(String, Option<bool>)],
+    ) -> anyhow::Result<usize> {
+        let mut written = 0usize;
+        self.with_db(|db| {
+            let txn = db.begin_write()?;
+            {
+                let mut t = txn.open_table(COMMON_CHARS)?;
+                for (key, dir) in items {
+                    match dir {
+                        Some(common) => {
+                            let bytes = serde_json::to_vec(&CommonCharRecord { common: *common })?;
+                            t.insert(key.as_str(), bytes.as_slice())?;
+                            written += 1;
+                        }
+                        None => {
+                            t.remove(key.as_str())?;
+                        }
+                    }
+                }
+            }
+            txn.commit()?;
+            Ok(())
+        })?;
+        Ok(written)
+    }
+
     /// 撤销某字的覆盖，回到出厂判定。`false` = 本就没有覆盖。
     ///
     /// 与「设为常用字」**不是**一回事：出厂判生僻的字，撤销覆盖后仍是生僻。

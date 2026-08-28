@@ -272,7 +272,14 @@ impl RangeScan {
         let mut hit_this_entry = false;
         for ch in text.chars() {
             let c = ch as u32;
-            if start <= c && c <= end {
+            // ⛔ 空白与控制字符即便落在区间里也不收（`is_markable`）：`ASCII` 块整块可批量，
+            // 而词库里含空格的词条成百上千，不挡就会给空格登记一条覆盖——含空格的候选
+            // 从此全判非常用，设置页多出一行「看不出是什么也点不掉」的空白，导出还能写
+            // 进去、导入却被拒，往返都对不上。
+            //
+            // 挡在**扫描**这一层而不是写入前：预览与执行读的是同一份 `chars`，在这里滤掉
+            // 才能保证「预览说 N 个」与「实际写 N 个」始终一致。
+            if start <= c && c <= end && wind_candidate::is_markable(ch) {
                 self.seen.insert(ch);
                 hit_this_entry = true;
             }
@@ -1078,6 +1085,10 @@ impl EngineManager {
         let schemas_dir = data_dir.join("schemas");
         // 多个方案常共用同一份词库（五笔与五笔拼音），按源文件去重，否则 `entries`
         // 会把同一条词条数好几遍，报给用户的影响面就虚高了。
+        //
+        // ⚠️ 已知限制：`CachedDict::Memory`（mmap 失败时的回退形态）没有源文件，去重对它
+        // 失效，跨方案共用时 `entries` 会偏高。刻意不为此另造一个键——这个数是给用户估
+        // 影响面用的，**偏高比偏低安全**，而 Memory 形态本身已是异常路径。
         let mut seen_files = std::collections::HashSet::new();
         for schema_id in self.available_schemas() {
             let Some(schema) =
@@ -6127,6 +6138,23 @@ input_chars = \"a-z;\"
             "字符去重且按码位升序"
         );
         assert_eq!(s.entries, 3, "三条词条命中；若按字符数累加会得到 4");
+    }
+
+    /// 扫描**不收空白与控制字符**，哪怕它们落在区间里。
+    ///
+    /// `ASCII` 块（0020–007F）整块允许批量，而词库里含空格的词条成百上千。不挡的话，
+    /// 用户对任一 ASCII 行点「整类设为生僻」就会给**空格**登记一条覆盖——从此含空格的
+    /// 候选全判非常用，设置页多出一行看不出是什么的空白，导出写得进去、导入却被拒。
+    #[test]
+    fn range_scan_skips_unmarkable_chars() {
+        let (start, end) = (0x0020, 0x007F); // ASCII
+        let mut s = super::RangeScan::default();
+        s.tally("a b", start, end); // 命中 a、b，**不收**中间的空格
+        s.tally("\t", start, end); // 整条只有制表符 ⇒ 一个都不收
+        s.finish();
+
+        assert_eq!(s.chars, vec!['a', 'b'], "空白不该进候选清单");
+        assert_eq!(s.entries, 1, "只有第一条真正命中了可登记字符");
     }
 
     /// 空区间（`charblock` 的「其它」用 `start > end` 表示）不该命中任何东西。

@@ -122,13 +122,15 @@ impl CommonChars {
             })
             .collect();
         extra.sort_unstable();
+        // ⚠️ 默认判定走 `is_cluster_common_by_default`，**不能对多码位簇写死 `true`**：
+        // `鬱`+VS16 这样的簇按默认判据是「生僻」，写死 true 会让界面显示「默认：常用 →
+        // 现在：常用」（看着什么都没改），而写端判的是「与默认相反、要留记录」——
+        // 两处对同一条记录给出相反的说法，正是本函数文档开头要避免的那件事。
+        // 对单字符两者恒等（`!(in_scope && !base)` ≡ `!in_scope || base`），故是纯收敛。
         out.extend(extra.into_iter().map(|k| {
             (
                 k.clone(),
-                match single_char_of(k) {
-                    Some(c) => self.is_base_common(c),
-                    None => true,
-                },
+                self.is_cluster_common_by_default(k),
                 self.is_cluster_common(k),
             )
         }));
@@ -140,7 +142,17 @@ impl CommonChars {
     /// 刻意不做增量合并：增量语义下「撤销某字的覆盖」这个操作没有落点——被删掉的那条
     /// 在旧集合里仍然存在，用户会看到「点了恢复出厂、重启前毫无变化」。
     pub fn set_overrides(&mut self, it: impl IntoIterator<Item = (String, bool)>) {
-        self.overrides = it.into_iter().collect();
+        // ⚠️ **装载时滤掉不是「一个字素簇」的键**。库里的记录未必都经过写端校验——备份包
+        // 里的 `common_chars.jsonl` 可能被手工改过、也可能来自更早的格式。一条
+        // `{"ch":"我们"}` 进来有两重危害：读端逐簇查永远命中不了（死记录），以及它会把
+        // `has_multi_char_keys` 顶成真、**永久**把热路径切到字素簇分割。
+        //
+        // 滤在这里而不是 store 层：判据只此一份（`single_markable_char`），且不管脏数据
+        // 从哪条路径进的库都拦得住；让 wind-store 反过来依赖本 crate 才是架构倒置。
+        self.overrides = it
+            .into_iter()
+            .filter(|(k, _)| single_markable_char(k).is_some())
+            .collect();
         // 热路径闸门只在装载时算一次，查询时零成本（见字段注释）。
         self.has_multi_char_keys = self.overrides.keys().any(|k| k.chars().count() > 1);
     }
@@ -170,11 +182,39 @@ impl CommonChars {
     pub fn is_cluster_common(&self, cluster: &str) -> bool {
         match self.overrides.get(cluster) {
             Some(&v) => v,
-            None => match single_char_of(cluster) {
-                Some(ch) => self.is_base_common(ch),
-                None => true,
-            },
+            None => self.fallback_verdict_of(cluster),
         }
+    }
+
+    /// 簇本身没有覆盖时的回落判定：**逐 `char` 走一遍完整判据**（先查覆盖、再查默认字表）。
+    ///
+    /// ★★ 两处都不能省，各挡一类闸门两侧不一致（`gate_consistency` 钉着）：
+    ///
+    /// - **不能写成「多码位簇一律忽略」**。`鬱`+`U+FE0F`（变体选择符）是一个簇，整簇忽略
+    ///   就判成常用，而按 `char` 走时 `鬱` 查表失败应判非常用。
+    /// - **逐 `char` 时必须也查覆盖**。用户对 `鬱` 登记过覆盖，但簇的键是 `鬱\u{FE0F}`
+    ///   ——只查基表的话，那条覆盖在闸门开着时就查不到了。
+    ///
+    /// 症状都是「登记了一条 emoji 之后，某个字的判定忽然变了」，没人会把两件事联系起来。
+    fn fallback_verdict_of(&self, cluster: &str) -> bool {
+        cluster.chars().all(|ch| self.char_verdict(ch))
+    }
+
+    /// 单个 `char` 的判定：覆盖优先，其次受管辖的查默认字表，域外一律放行。
+    /// 这就是闸门关着时逐 `char` 走的那条路径，抽出来供簇路径回落，两边因此不会分叉。
+    fn char_verdict(&self, ch: char) -> bool {
+        match self.overrides.get(ch.encode_utf8(&mut [0u8; 4])) {
+            Some(&v) => v,
+            None => !is_common_scope(ch) || self.base.contains(&ch),
+        }
+    }
+
+    /// 簇的**默认**判定（忽略全部用户覆盖），供「与默认同向就删覆盖」那条判据用。
+    /// 与 [`Self::fallback_verdict_of`] 的差别只在要不要看 `overrides`。
+    fn default_verdict_of(&self, cluster: &str) -> bool {
+        !cluster
+            .chars()
+            .any(|ch| is_common_scope(ch) && !self.base.contains(&ch))
     }
 
     /// 默认判定（忽略用户覆盖）。供界面显示「默认：常用 → 现在：生僻」这类对照，
@@ -195,10 +235,7 @@ impl CommonChars {
     /// 一个字素簇的默认判定（忽略用户覆盖）。多码位簇恒「常用」——它整体落在默认字表
     /// 管辖域外，与单个域外字符同一待遇。
     pub fn is_cluster_common_by_default(&self, cluster: &str) -> bool {
-        match single_char_of(cluster) {
-            Some(ch) => self.is_base_common(ch),
-            None => true,
-        }
+        self.default_verdict_of(cluster)
     }
 
     /// 某字的用户覆盖方向；`None` = 未覆盖。
@@ -220,7 +257,16 @@ impl CommonChars {
     /// 词组里只要有一个字被降级就算——那个词整体也就不该再冒到前面来。
     pub fn has_user_rare(&self, text: &str) -> bool {
         self.units_of(text)
-            .any(|u| self.override_of_cluster(u) == Some(false))
+            .any(|u| match self.override_of_cluster(u) {
+                Some(v) => !v,
+                // ★ 簇本身没覆盖时**必须逐 `char` 再问一遍**，与 `is_string_common` 同一套回落。
+                // 漏了这一步就是闸门两侧不一致的另一半：覆盖表的键是裸 `⚽`(U+26BD)，而候选
+                // 文本是 `⚽️`(U+26BD U+FE0F)——闸门关着按 char 切能命中那条覆盖，开着按簇切
+                // 却查不到，`user_rare` 悄悄从 true 变 false。后果比判定错更隐蔽：智能档对
+                // `user_rare` 是**无条件滤除**（不吃孤儿码位保底），一旦丢了这个标记，那个字
+                // 又会被保底原样放回、还留在第一位。
+                None => u.chars().any(|c| self.override_of(c) == Some(false)),
+            })
     }
 
     /// 按什么粒度切这串文本去查覆盖表：**没有多码位覆盖时按 `char` 切**（等价于旧行为、
@@ -272,12 +318,9 @@ impl CommonChars {
                     }
                 }
                 // 未表态：汉字（含被本码表当汉字用的 PUA）查默认字表，其余辅助字符忽略。
-                // 多码位簇没有单个 char 可查，一律忽略——同域外字符待遇。
+                // 多码位簇**逐 char 回落**，与闸门关着时的按 char 路径给出同一答案。
                 None => {
-                    if let Some(ch) = single_char_of(unit)
-                        && is_common_scope(ch)
-                        && !self.base.contains(&ch)
-                    {
+                    if !self.fallback_verdict_of(unit) {
                         return false;
                     }
                 }

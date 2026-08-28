@@ -65,7 +65,6 @@ pub trait WebDataHost {
         edit: crate::handle_common_chars::CommonCharEdit,
     ) -> anyhow::Result<()>;
 
-    /// 导出用户的常用字调整为 TOML 文本（只含与默认不同的字）。
     /// 按某个字所属的 Unicode 块整类设常用/生僻；`apply=false` 只预览不写库。
     fn common_char_bulk_by_block(
         &self,
@@ -74,6 +73,7 @@ pub trait WebDataHost {
         apply: bool,
     ) -> anyhow::Result<crate::handle_common_chars::CommonCharBulkOutcome>;
 
+    /// 导出用户的常用字调整为 TOML 文本（只含与默认不同的字）。
     fn common_chars_export(&self) -> anyhow::Result<String>;
 
     /// 导入预览：只解析与计数，不写库。

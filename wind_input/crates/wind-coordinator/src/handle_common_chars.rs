@@ -214,19 +214,30 @@ impl crate::Coordinator {
         if !apply {
             return Ok(out);
         }
-        for c in scan.chars.iter().map(|c| c.to_string()) {
-            // ⚠️ `apply_common_target` 返回的是「操作成功」，不是「写了记录」：与默认同向时
-            // 它走的是**删覆盖**那一支，照样返回 true。要如实报告落库条数，得自己先问一遍
-            // 默认判定。读锁取在循环内的短作用域里——`apply_common_target` 自己也要取读锁，
-            // 在外层长期持有会跟它撞上。
-            let same_as_default = {
-                let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
-                cc.is_cluster_common_by_default(&c) == common
-            };
-            if self.apply_common_target(&c, common) && !same_as_default {
-                out.written += 1;
-            }
-        }
+        let Some(store) = self.store.as_ref() else {
+            anyhow::bail!("无持久化存储");
+        };
+        // ⚠️ **一个事务写完、最后统一回灌一次**，不要在循环里调 `apply_common_target`：
+        // 那条路每写一个字都是一次 fsync 提交，外加一次 `reload_common_chars()`（全表重读
+        // + 镜像重建，取的还是**写锁**，与候选过滤每次按键都要拿的读锁相撞）。「表情符号」
+        // 这类块在 emoji 词库下可能上千个字符，逐条走就是上千次提交、上千次卡住输入。
+        //
+        // 读锁在循环外取一次：默认判定只看基表，不随本次写入变化。
+        let plan: Vec<(String, Option<bool>)> = {
+            let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
+            scan.chars
+                .iter()
+                .map(|c| {
+                    let key = c.to_string();
+                    // 与默认同向的删覆盖、不留记录（判据与单字写端 `apply_common_target`
+                    // 同源，只是这里把「取默认判定」与「写库」拆开以便批处理）。
+                    let dir = (cc.is_cluster_common_by_default(&key) != common).then_some(common);
+                    (key, dir)
+                })
+                .collect()
+        };
+        out.written = store.apply_common_char_overrides(&plan)?;
+        self.reload_common_chars();
         debug!(
             "常用字批量: {} [{}] {} 字 / {} 条词条 → {}，落库 {}",
             blk.name,
@@ -243,12 +254,11 @@ impl crate::Coordinator {
     pub(crate) fn common_char_state(&self, ch: &str) -> CommonCharState {
         let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
         CommonCharState {
-            // 多码位簇（emoji 序列）默认字表一律管不着，`governed` 恒 false。
-            governed: ch.chars().count() == 1
-                && ch
-                    .chars()
-                    .next()
-                    .is_some_and(wind_candidate::is_common_scope),
+            // ⚠️ 量词要与 `default_verdict_of` 对齐（那边问的是「簇里**有没有**受管辖的
+            // char」）：`鬱`+VS16 这种簇，默认字表确实管着它里面的 `鬱`。按「恰好一个
+            // char」判会说「管不着」，而同一结构体里的 `base_common` 又报出只可能来自
+            // 默认字表的判定——两个字段自相矛盾。
+            governed: ch.chars().any(wind_candidate::is_common_scope),
             base_common: cc.is_cluster_common_by_default(ch),
             over: cc.override_of_cluster(ch),
         }
