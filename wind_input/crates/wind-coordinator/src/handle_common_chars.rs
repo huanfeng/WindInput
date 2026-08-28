@@ -204,10 +204,7 @@ impl crate::Coordinator {
         if !wind_candidate::block_allows_bulk_edit(&blk) {
             anyhow::bail!("「{}」由默认字表逐字管辖，不支持整类操作", blk.name);
         }
-        let schema_id = self.engine_mgr.active_schema_id();
-        let scan = self
-            .engine_mgr
-            .scan_chars_in_range(&schema_id, blk.start, blk.end);
+        let scan = self.engine_mgr.scan_chars_in_range(blk.start, blk.end);
 
         let mut out = CommonCharBulkOutcome {
             block: blk.name.to_string(),

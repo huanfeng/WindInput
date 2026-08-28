@@ -1063,24 +1063,37 @@ impl EngineManager {
     /// ⚠️ O(全表)，只在用户手动点菜单时调用，**绝不能进按键链路**（同 `for_each_entry`）。
     /// 走 `load_dicts_individually` 而不是已加载的引擎：与反查索引构建同一条路径，不必为此
     /// 给 `Engine` trait 加一个九成实现都用不上的方法。
-    pub fn scan_chars_in_range(&self, schema_id: &str, start: u32, end: u32) -> RangeScan {
+    /// ⚠️ 扫的是**全部已启用方案**，不是当前活跃方案：常用字覆盖是全局作用域（键就是一个
+    /// 字，不带方案），扫描若绑定活跃方案，用户在五笔下就设不了只出现在虎码里的注音符号
+    /// ——而他看到的候选正是从那个方案来的。作用域一致比省这点扫描时间重要。
+    pub fn scan_chars_in_range(&self, start: u32, end: u32) -> RangeScan {
+        let mut scan = RangeScan::default();
         if start > end {
-            return RangeScan::default(); // 空区间（如 charblock 的「其它」），不必开词库
+            return scan; // 空区间（如 charblock 的「其它」），不必开词库
         }
         let Some(data_dir) = self.data_dir.as_deref() else {
-            return RangeScan::default();
+            return scan;
         };
-        let Some(schema) =
-            Self::read_schema(schema_id, Some(data_dir), self.override_dir.as_deref())
-        else {
-            return RangeScan::default();
-        };
-        let dicts = Self::load_dicts_individually(&schema, &data_dir.join("schemas"));
-        let mut scan = RangeScan::default();
-        for d in &dicts {
-            d.for_each_entry(&mut |_code, text, _weight| {
-                scan.tally(text, start, end);
-            });
+        let schemas_dir = data_dir.join("schemas");
+        // 多个方案常共用同一份词库（五笔与五笔拼音），按源文件去重，否则 `entries`
+        // 会把同一条词条数好几遍，报给用户的影响面就虚高了。
+        let mut seen_files = std::collections::HashSet::new();
+        for schema_id in self.available_schemas() {
+            let Some(schema) =
+                Self::read_schema(&schema_id, Some(data_dir), self.override_dir.as_deref())
+            else {
+                continue;
+            };
+            for d in &Self::load_dicts_individually(&schema, &schemas_dir) {
+                if let Some(p) = d.source_file()
+                    && !seen_files.insert(p.to_path_buf())
+                {
+                    continue;
+                }
+                d.for_each_entry(&mut |_code, text, _weight| {
+                    scan.tally(text, start, end);
+                });
+            }
         }
         scan.finish();
         scan
