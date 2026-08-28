@@ -5001,12 +5001,54 @@ mod tests {
         );
     }
 
+    /// issue #83 的实际用法：一份 TOML 关掉整块表意文字描述符（IDC，U+2FF0–U+2FFF）。
+    ///
+    /// 用户的虎码码表给这 16 个记号整块编了码（`⿰`=rgs、`⿱`=rfi…），它们描述汉字间架
+    /// 结构、不是字，因而**不在默认字表的管辖域内**——放开准入前既滤不掉也加不进表。
+    /// 这条把「16 个字符一次导入并真的生效」端到端钉住：逐个点右键要点 16 次，导入是
+    /// 现实中会走的那条路，而它此前只有 parse 层的覆盖。
+    #[test]
+    fn ideographic_description_chars_can_be_hidden_via_import() {
+        let c = coord("commonchars_idc");
+        // 整块 16 个，与用户贴出的清单逐字对应。
+        let idc = "⿰⿱⿲⿳⿴⿵⿶⿷⿸⿹⿺⿻⿼⿽⿾⿿";
+        assert_eq!(idc.chars().count(), 16);
+
+        let o = c
+            .web_data_rpc(
+                "commonChars.import",
+                &json!({ "content": format!("wind_common_chars = 1\nrare = \"{idc}\"\n") }),
+            )
+            .unwrap();
+        assert_eq!(o["imported"], json!(16), "16 个应全部落库：{o:?}");
+        assert_eq!(
+            o["sameAsDefault"],
+            json!(0),
+            "默认放行 ⇒ 设为生僻是反向 ⇒ 一条都不该被当成「与默认同向」而丢掉"
+        );
+        assert!(
+            o["skipped"].as_array().unwrap().is_empty(),
+            "{:?}",
+            o["skipped"]
+        );
+
+        // 逐个查：登记后当前判定必须真的翻过来，否则就是一批静默的死记录。
+        for ch in idc.chars() {
+            let q = c
+                .web_data_rpc("commonChars.query", &json!({ "char": ch.to_string() }))
+                .unwrap();
+            assert_eq!(q["governed"], json!(false), "{ch} 本就不受默认字表管辖");
+            assert_eq!(q["baseCommon"], json!(true), "{ch} 默认是放行的");
+            assert_eq!(q["effective"], json!(false), "{ch} 设了就得生效");
+        }
+    }
+
     /// `commonChars.export` / `previewImport` / `import` 的往返契约。
     ///
-    /// ⚠️ 本装置没有 data_dir ⇒ 默认字表为空 ⇒ **任何字的默认判定都是「生僻」**。
-    /// 这恰好把导入的两条分支都摆到了台面上：`common` 段的字与默认相反、真的落库；
-    /// `rare` 段的字与默认同向、按设计**删覆盖而不写记录**（`sameAsDefault`）。
-    /// 后者若被误实现成照单全收，这个装置下 `total` 会多出两行来。
+    /// ⚠️ 本装置没有 data_dir ⇒ 默认字表为空 ⇒ **域内（汉字/PUA）的字默认判「生僻」**，
+    /// 而**域外字符默认判「常用」**（没覆盖时读端一律放行，见 `is_base_common`）。
+    /// 这恰好把导入的两条分支都摆到台面上：与默认相反的真的落库；与默认同向的按设计
+    /// **删覆盖而不写记录**（`sameAsDefault`）。后者若被误实现成照单全收，`total` 会多出行来。
     #[test]
     fn common_chars_import_export_roundtrip() {
         let c = coord("commonchars_io");
