@@ -100,23 +100,17 @@ pub(crate) struct CommonCharMark {
     pub common: bool,
 }
 
-/// 候选文本能不能被标记，能则返回那个字。
+/// 候选文本能不能被标记，能则返回那个字（[`wind_candidate::single_markable_char`]）。
 ///
-/// 两条准入，缺一不可：
-/// 1. **恰好一个字符**——「常用」是字级属性，词组没有；
-/// 2. [`wind_candidate::is_markable`]——除空白/控制字符外全放行。
+/// 两处放宽都出自 issue #83，各修掉一类「右键里没有这一项」：
 ///
-/// ⚠️ 第 2 条曾是 `is_common_scope`（只认汉字与 PUA），已按 issue #83 放开到全字符：
-/// 用户要能把字根、间架结构符、注音、假名这些**非汉字**候选关掉，而它们无一落在那个域内。
-/// 放开的前提是读端 `is_string_common` **先**改成了覆盖优先——顺序反了就会存下一批
-/// 永不被查询的死记录，且全程无报错（`markable_char_takes_effect` 钉着这条）。
+/// 1. **不再限定汉字**。曾用 `is_common_scope`（只认汉字与 PUA），于是字根、间架结构符、
+///    注音、假名这些用户点名要关掉的候选反而标不了。放开的前提是读端 `is_string_common`
+///    **先**改成覆盖优先——顺序反了会存下一批永不被查询的死记录，且全程无报错。
+/// 2. **「一个字」按基础字符数算，不是 `char` 数**。`⚽️` 是 `U+26BD`+`U+FE0F`，
+///    `👍🏻` 带肤色修饰符，按 `chars().count() == 1` 判会把整类 emoji 挡在门外。
 pub(crate) fn common_char_of(text: &str) -> Option<char> {
-    let mut it = text.chars();
-    let ch = it.next()?;
-    if it.next().is_some() {
-        return None;
-    }
-    wind_candidate::is_markable(ch).then_some(ch)
+    wind_candidate::single_markable_char(text)
 }
 
 impl crate::Coordinator {

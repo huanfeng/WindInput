@@ -239,6 +239,48 @@ pub fn is_markable(ch: char) -> bool {
     !ch.is_whitespace() && !ch.is_control()
 }
 
+/// **修饰码位**：跟在基础字符后面、不自己成字的那些。
+///
+/// 它们让「一个符号」在 `char` 层面不止一个：`⚽️` 是 `U+26BD` + `U+FE0F`（变体选择符），
+/// `👍🏻` 是 `U+1F44D` + 肤色修饰符。按 `chars().count() == 1` 判「是不是单个字」，
+/// 这类候选会被整个挡在门外。
+fn is_char_modifier(ch: char) -> bool {
+    let c = ch as u32;
+    matches!(c,
+        0x0300..=0x036F      // 组合附加符号
+        | 0x200D             // 零宽连接符（ZWJ）
+        | 0x20D0..=0x20FF    // 组合用记号
+        | 0xFE00..=0xFE0F    // 变体选择符
+        | 0xFE20..=0xFE2F    // 组合用半符号
+        | 0x1F3FB..=0x1F3FF  // 肤色修饰符
+        | 0xE0100..=0xE01EF) // 变体选择符补充
+}
+
+/// 这串文本是不是**一个**可登记的字符；是则返回用作键的那个**基础字符**。
+///
+/// 「一个」按**基础字符**数而不是 `char` 数来算：`⚽️`(U+26BD U+FE0F) 与 `👍🏻` 都只有一个
+/// 基础字符，修饰码位跟着它走。原先按 `chars().count() == 1` 判，这类候选右键里根本没有
+/// 「设为生僻字」这一项——用户报的正是 `⚽️`。
+///
+/// ★ 键取基础字符即可，**读端天然对得上**：`is_string_common` 是逐 `char` 判的，`U+26BD`
+/// 命中覆盖就返回非常用，`U+FE0F` 落在管辖域外被忽略。写端与读端因此不必都改。
+///
+/// 多个基础字符一律拒绝（`我们`、ZWJ 组合的 `👨‍👩‍👧`）：常用性是**单字**属性，给词组存覆盖
+/// 读端永远查不到；而取首字会让用户以为整个词都标记了。
+pub fn single_markable_char(text: &str) -> Option<char> {
+    let mut base = None;
+    for ch in text.chars() {
+        if is_char_modifier(ch) {
+            continue;
+        }
+        if !is_markable(ch) || base.is_some() {
+            return None;
+        }
+        base = Some(ch);
+    }
+    base
+}
+
 /// 是否「须按通用规范汉字表判定常用性」的汉字。
 ///
 /// 判定域是**真汉字块**，外加无独立输入语义的类汉字符号（部首、笔画）——后者与 PUA 同理，
@@ -519,6 +561,56 @@ mod tests {
         for ch in [' ', '\t', '\u{3000}', '\u{0}'] {
             assert!(!is_markable(ch), "U+{:04X} 不该可登记", ch as u32);
         }
+    }
+
+    /// 带修饰码位的 emoji 也算「一个字」——用户报的 `⚽️` 就卡在这里。
+    ///
+    /// `⚽️` 是 `U+26BD` + `U+FE0F`（变体选择符），按 `chars().count() == 1` 判会被当成词组
+    /// 拒掉，候选右键里根本没有「设为生僻字」这一项。词库里存的正是带 FE0F 的那个形态
+    /// （`wubi86_jidian_emoji.dict.yaml` 实测）。
+    #[test]
+    fn emoji_with_modifiers_counts_as_one_char() {
+        // 变体选择符：键取基础字符。
+        assert_eq!(single_markable_char("\u{26BD}\u{FE0F}"), Some('\u{26BD}'));
+        assert_eq!(
+            single_markable_char("\u{26BD}"),
+            Some('\u{26BD}'),
+            "裸形态同键"
+        );
+        // 肤色修饰符。
+        assert_eq!(
+            single_markable_char("\u{1F44D}\u{1F3FB}"),
+            Some('\u{1F44D}')
+        );
+        // 普通字符不受影响。
+        assert_eq!(single_markable_char("我"), Some('我'));
+        assert_eq!(single_markable_char("ㄅ"), Some('ㄅ'));
+
+        // 多个**基础**字符一律拒绝：常用性是单字属性，取首字会让用户以为整词都标记了。
+        assert_eq!(single_markable_char("我们"), None);
+        assert_eq!(
+            single_markable_char("\u{1F468}\u{200D}\u{1F469}"),
+            None,
+            "ZWJ 组合"
+        );
+        assert_eq!(single_markable_char(""), None);
+        assert_eq!(
+            single_markable_char("\u{FE0F}"),
+            None,
+            "只有修饰符，没有基础字符"
+        );
+        assert_eq!(single_markable_char(" "), None);
+    }
+
+    /// 写端按基础字符登记，读端逐 char 判定——两头必须对得上，否则又是一条死记录。
+    #[test]
+    fn emoji_override_takes_effect_on_the_full_sequence() {
+        let ch = single_markable_char("\u{26BD}\u{FE0F}").unwrap();
+        let mut cc = CommonChars::from_base([]);
+        cc.set_overrides([(ch, false)]);
+        // 带修饰符的完整候选文本必须判非常用：FE0F 落在管辖域外被忽略，26BD 命中覆盖。
+        assert!(!cc.is_string_common("\u{26BD}\u{FE0F}"));
+        assert!(cc.has_user_rare("\u{26BD}\u{FE0F}"));
     }
 
     /// 按字判与按串判**必须一致**，域外字符尤其。

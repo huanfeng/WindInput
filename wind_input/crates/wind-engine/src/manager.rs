@@ -1074,6 +1074,7 @@ impl EngineManager {
         let Some(data_dir) = self.data_dir.as_deref() else {
             return scan;
         };
+        let t0 = std::time::Instant::now();
         let schemas_dir = data_dir.join("schemas");
         // 多个方案常共用同一份词库（五笔与五笔拼音），按源文件去重，否则 `entries`
         // 会把同一条词条数好几遍，报给用户的影响面就虚高了。
@@ -1096,6 +1097,17 @@ impl EngineManager {
             }
         }
         scan.finish();
+        // 耗时留痕：这是全表遍历，是本功能唯一的重活。用户觉得「点了要等一下」时，
+        // 这行日志能直接回答「等的是扫描还是别的」，不必再去猜。
+        info!(
+            "扫描码位区间 U+{:04X}-{:04X}: {} 个字符 / {} 条词条，{} 份词库，耗时 {:?}",
+            start,
+            end,
+            scan.chars.len(),
+            scan.entries,
+            seen_files.len(),
+            t0.elapsed()
+        );
         scan
     }
 
