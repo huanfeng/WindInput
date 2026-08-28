@@ -5155,6 +5155,61 @@ mod tests {
         }
     }
 
+    /// 导出格式：单字符走文本段，多码位走数组段，**数组段为空时整段不出现**。
+    ///
+    /// 用户诉求原话：从不配置多码位的人，不该在文件里看到自己用不上的格式。
+    #[test]
+    fn export_omits_array_sections_when_no_multi_code_point_entries() {
+        let c = coord("commonchars_fmt");
+        // ⚠️ 方向各取「与本装置默认相反」的那一边，记录才留得下：本装置无 data_dir ⇒
+        // 域内的「槮」默认判生僻、域外的「ㄅ」默认判常用（见 `is_base_common`）。
+        c.web_data_rpc("commonChars.set", &json!({ "char": "槮", "common": true }))
+            .unwrap();
+        c.web_data_rpc("commonChars.set", &json!({ "char": "ㄅ", "common": false }))
+            .unwrap();
+        let text = c
+            .web_data_rpc("commonChars.export", &json!({}))
+            .unwrap()
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert!(text.contains("common = "), "单字符要走文本段: {text}");
+        assert!(
+            !text.contains("_seq"),
+            "没有多码位条目时不该出现数组段: {text}"
+        );
+
+        // 加一条 emoji 序列后，数组段才出现，且文本段仍在。
+        let ball = "\u{26BD}\u{FE0F}";
+        c.web_data_rpc("commonChars.set", &json!({ "char": ball, "common": false }))
+            .unwrap();
+        let text2 = c
+            .web_data_rpc("commonChars.export", &json!({}))
+            .unwrap()
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert!(
+            text2.contains("rare_seq = ["),
+            "多码位条目要走数组段: {text2}"
+        );
+        assert!(text2.contains(ball), "{text2}");
+
+        // 导到另一台机器：四个段都要读得回来。
+        let c2 = coord("commonchars_fmt2");
+        let o = c2
+            .web_data_rpc("commonChars.import", &json!({ "content": text2 }))
+            .unwrap();
+        assert_eq!(o["imported"], json!(3), "两个单字符 + 一条序列: {o:?}");
+        assert!(
+            o["skipped"].as_array().unwrap().is_empty(),
+            "{:?}",
+            o["skipped"]
+        );
+    }
+
     /// `commonChars.export` / `previewImport` / `import` 的往返契约。
     ///
     /// ⚠️ 本装置没有 data_dir ⇒ 默认字表为空 ⇒ **域内（汉字/PUA）的字默认判「生僻」**，

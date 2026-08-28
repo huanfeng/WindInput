@@ -466,6 +466,43 @@ fn toml_array_literal(items: &[String]) -> String {
     toml::Value::Array(items.iter().cloned().map(toml::Value::String).collect()).to_string()
 }
 
+/// 把一串字按 TOML 字符串字面量输出（不自己拼引号，交给 toml 转义）。
+fn toml_string_literal(s: &str) -> String {
+    toml::Value::String(s.to_string()).to_string()
+}
+
+/// 把导出条目分成「能安全拼进文本串的」与「必须单列成数组项的」。
+///
+/// ★ 判据是**往返等价**，不是「码位数」：把这一条接到文本串末尾后重新按字素簇切开，
+/// 末簇仍是它本身、且总簇数恰好加一，才算安全。
+///
+/// 为什么不能按码位数判：`🇨` 与 `🇳` **各自都是单码位**，拼进同一个字符串却会合成一个
+/// 国旗 `🇨🇳`——读回来就少了一条、多了一条本不存在的。变体选择符、组合附加符号同理。
+/// 要按码位数判就得先列举「哪些单码位是危险的」，而**逐条列举 Unicode 规则正是这个
+/// issue 反复吃亏的写法**。往返自检不必知道规则是什么，它直接验结果。
+fn partition_for_export(items: &[String]) -> (String, Vec<String>) {
+    let mut text = String::new();
+    let mut n = 0usize; // text 里已有的簇数，省得每轮重数
+    let mut seq = Vec::new();
+    for it in items {
+        // 多码位的一律进数组段：它们本就是「一个图形多个码位」，混在文本串里既难读也
+        // 难手工编辑，而用户要的正是「文本段保持简洁」。
+        let mut probe = text.clone();
+        probe.push_str(it);
+        let clusters: Vec<&str> = wind_candidate::split_markable_clusters(&probe).collect();
+        if it.chars().count() == 1
+            && clusters.len() == n + 1
+            && clusters.last() == Some(&it.as_str())
+        {
+            text = probe;
+            n += 1;
+        } else {
+            seq.push(it.clone());
+        }
+    }
+    (text, seq)
+}
+
 /// 解析导入文件。TOML 为主格式，JSONL 是备份包里那一段的原始形态。
 ///
 /// **兼容 JSONL 是有实际出路的**：用户从备份包里掏出 `userdata/common_chars.jsonl`
@@ -490,17 +527,19 @@ fn parse_common_chars_file(content: &str) -> anyhow::Result<ParsedCommonChars> {
         skipped: Vec::new(),
     };
     // 两段分别是两个方向。段缺失是合法的（用户只降级过、没升级过）。
-    for (key, common) in [("common", true), ("rare", false)] {
+    // 四个段：`common`/`rare` 是**字符串**（一串单字符，好手写，也是旧版的形态），
+    // `common_seq`/`rare_seq` 是**数组**（多码位字符单独成项）。两种并存而不是二选一：
+    // 从不登记 emoji 序列的用户，文件里根本不会出现 `*_seq` 段，格式与旧版一样简洁。
+    //
+    // 每个段两种形态都认（字符串段也接受数组、反之亦然），手写文件时不必记住哪个段该用
+    // 什么形态——这道宽容不花什么代价，却省掉一类「格式没写对、导入 0 条」的困惑。
+    for (key, common) in [
+        ("common", true),
+        ("rare", false),
+        ("common_seq", true),
+        ("rare_seq", false),
+    ] {
         let Some(v) = table.get(key) else { continue };
-        // 两种形态都认：
-        // - **数组**（现在导出的形态）：一项一个字符，无歧义；
-        // - **字符串**（旧版导出的形态）：按**字素簇**切，不能按 `char` 切——那会把
-        //   `👨‍👩‍👧` 拆成 5 条垃圾记录。对旧文件里清一色的单码位汉字，两种切法结果相同，
-        //   故向后兼容。
-        //
-        // ⚠️ 之所以改用数组：字符串形态下相邻条目会被字素簇算法重新组合。用户若分别
-        // 登记过 `🇨` 与 `🇳`，拼进同一个字符串再读回来就成了一个国旗 `🇨🇳`——数据在
-        // 导出导入之间悄悄变了。
         match v {
             toml::Value::Array(items) => {
                 for it in items {
@@ -510,6 +549,8 @@ fn parse_common_chars_file(content: &str) -> anyhow::Result<ParsedCommonChars> {
                     }
                 }
             }
+            // 按**字素簇**切，不能按 `char` 切——那会把 `👨‍👩‍👧` 拆成 5 条垃圾记录。
+            // 对旧文件里清一色的单码位汉字，两种切法结果相同，故向后兼容。
             toml::Value::String(s) => {
                 for g in wind_candidate::split_markable_clusters(s) {
                     push_common_char_entry(&mut out, g, common);
@@ -517,7 +558,7 @@ fn parse_common_chars_file(content: &str) -> anyhow::Result<ParsedCommonChars> {
             }
             _ => out
                 .skipped
-                .push(format!("{key}：应为数组或字符串，已跳过整段")),
+                .push(format!("{key}：应为字符串或数组，已跳过整段")),
         }
     }
     Ok(out)
@@ -575,15 +616,35 @@ impl crate::Coordinator {
         for o in store.list_common_char_overrides()? {
             if o.common { &mut common } else { &mut rare }.push(o.ch);
         }
-        Ok(format!(
+        // 单字符走文本段、多码位走数组段：绝大多数用户一个 emoji 序列都不会登记，
+        // 他们的文件里因此**根本不会出现数组段**，格式与旧版一样简洁、好手工编辑。
+        let (common_text, common_seq) = partition_for_export(&common);
+        let (rare_text, rare_seq) = partition_for_export(&rare);
+        let mut out = format!(
             "# 清风输入法 · 常用字调整（只记录与默认不同的字）\n\
              # common = 判为常用；rare = 判为生僻\n\
              {COMMON_CHARS_FILE_TAG} = 1\n\
              common = {}\n\
              rare = {}\n",
-            toml_array_literal(&common),
-            toml_array_literal(&rare),
-        ))
+            toml_string_literal(&common_text),
+            toml_string_literal(&rare_text),
+        );
+        // 空数组段一律不写：一行 `rare_seq = []` 对从不用 emoji 的人是纯噪音，
+        // 还会让人以为自己漏配了什么。
+        if !common_seq.is_empty() {
+            out.push_str(&format!(
+                "# 多码位字符（emoji 序列、国旗等）单独成项，避免与相邻字符黏连\n\
+                 common_seq = {}\n",
+                toml_array_literal(&common_seq)
+            ));
+        }
+        if !rare_seq.is_empty() {
+            if common_seq.is_empty() {
+                out.push_str("# 多码位字符（emoji 序列、国旗等）单独成项，避免与相邻字符黏连\n");
+            }
+            out.push_str(&format!("rare_seq = {}\n", toml_array_literal(&rare_seq)));
+        }
+        Ok(out)
     }
 
     /// 导入预览：只解析与计数，**不写任何东西**。
@@ -657,7 +718,49 @@ impl crate::Coordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::common_char_of;
+    use super::{common_char_of, partition_for_export};
+
+    /// 导出分段：单字符进文本串，多码位单独成项。
+    ///
+    /// ★ 关键在最后一组：`🇨` 与 `🇳` **各自都是单码位**，却不能拼进同一个文本串——
+    /// 拼了就合成一个国旗 `🇨🇳`，读回来少一条、多一条本不存在的。判据是往返自检而不是
+    /// 「数码位」，故不必列举「哪些单码位是危险的」。
+    #[test]
+    fn export_puts_plain_chars_in_text_and_sequences_in_array() {
+        // 常见情况：全是单字符 ⇒ 数组段为空 ⇒ 导出文件里根本不会出现它。
+        let (text, seq) = partition_for_export(&[
+            "槮".to_string(),
+            "鬱".to_string(),
+            "ㄅ".to_string(),
+            "⿰".to_string(),
+        ]);
+        assert_eq!(text, "槮鬱ㄅ⿰");
+        assert!(seq.is_empty(), "没有多码位字符时不该产生数组段");
+
+        // 多码位一律单列。
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let ball = "\u{26BD}\u{FE0F}";
+        let (text, seq) = partition_for_export(&[
+            "槮".to_string(),
+            ball.to_string(),
+            "鬱".to_string(),
+            family.to_string(),
+        ]);
+        assert_eq!(text, "槮鬱");
+        assert_eq!(seq, vec![ball.to_string(), family.to_string()]);
+
+        // 单码位但会与相邻字符黏连的：必须挤出去。
+        let (text, seq) = partition_for_export(&[
+            "\u{1F1E8}".to_string(), // 🇨
+            "\u{1F1F3}".to_string(), // 🇳
+        ]);
+        assert_eq!(text, "\u{1F1E8}", "第一个安全");
+        assert_eq!(
+            seq,
+            vec!["\u{1F1F3}".to_string()],
+            "第二个接上去会合成国旗，必须单列"
+        );
+    }
 
     #[test]
     fn accepts_single_han_and_pua() {
