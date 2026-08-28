@@ -1145,8 +1145,9 @@ pub trait WebDataRpc: WebDataHost {
                         obj.insert("codetableOverride".to_string(), ov);
                     }
                 }
-                // override 层的 `[punct]` 段。设置页据此分辨自定义标点表的**来源**：
+                // override 层的 `[punct]` 段。据此分辨自定义标点表的**来源**：
                 // 合并值有、这里没有 ⇒ 方案作者写的；两边都有 ⇒ 用户自己改的。
+                // ⚠️ 设置页当前还没用上这个区别，见 `READONLY_SIDECAR_FIELDS` 里的说明。
                 //
                 // 不给「跟随全局时表里是什么」的旁路字段——那就是全局 `input.punct`，
                 // 设置页手里本来就有整份全局配置，再从这里发一遍就是第二个真相源。
@@ -3247,9 +3248,13 @@ pub const READONLY_SIDECAR_FIELDS: &[&str] = &[
     // 方案照常能用，但那一段从此谁也不读、也没人会想到去删。
     "followedCodetable",
     "codetableOverride",
-    // override 层的 `[punct]` 段原文。设置页判「这张自定义标点表是方案作者写的还是我改的」
-    // 只能问它——合并值里的 `Some(表)` 两种来源给不出区别，拿它判会把「方案自带」显示成
-    // 「已自定义」，用户一取消就以为回到全局、实际回到作者的表。同 `codetableOverride`。
+    // override 层的 `[punct]` 段原文。回答「这张自定义标点表是方案作者写的还是我改的」——
+    // 合并值里的 `Some(表)` 两种来源给不出区别。
+    //
+    // ⚠️ **当前设置页尚未消费它**：整表替换下 UI 只有开/关两态，还没有像码表那节一样标出
+    // 「方案自带」。留着是因为那个区别对用户可见——作者写了表时取消勾选回到的是**作者的
+    // 表**而不是全局。要做那一档时直接用它，别再去合并值里猜。登记在此则是无论用不用都
+    // 不能让它随 saveConfig 落回 override。
     "punctOverride",
     "leadingCodeKeys",
     "keysOverview",
