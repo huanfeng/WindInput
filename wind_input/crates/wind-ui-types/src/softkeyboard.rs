@@ -53,8 +53,12 @@ pub fn slot_layer(slot: &str, shift: bool, caps: bool) -> bool {
 pub const SOFT_KEY_TAG_BASE: i32 = 0;
 /// 标签行第 n 个面：`SOFT_TAG_PAGE_BASE + n`。
 pub const SOFT_TAG_PAGE_BASE: i32 = 200_000;
-/// 关闭按钮。
+/// 右上角的关闭按钮。
 pub const SOFT_TAG_CLOSE: i32 = 300_000;
+/// 底行的 Esc 键。语义与关闭按钮相同，但**必须是另一个 tag**：
+/// 共用一个的话，鼠标停在右上角的 ✕ 上，底行的 Esc 也会跟着亮。
+/// tag 是命中标识，同一时刻只该有一个控件认领它。
+pub const SOFT_TAG_ESC: i32 = 300_001;
 /// 特殊键第 n 个：`SOFT_TAG_FN_BASE + n`（n 是 [`SOFT_FN_KEYS`] 的下标）。
 pub const SOFT_TAG_FN_BASE: i32 = 400_000;
 /// 面板上的 Shift 键。点击**锁定/解锁**第二层，是面板自己的状态，不回送协调器。

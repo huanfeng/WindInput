@@ -32,9 +32,10 @@ use crate::text::dwrite::TextRenderer;
 use crate::view::{Align, Edges, Layout, Rect, View};
 use crate::window::LayeredWindow;
 use wind_ui_types::{
-    SOFT_FN_CAPS_INDEX, SOFT_FN_KEYS, SOFT_TAG_CLOSE, SOFT_TAG_CTRL, SOFT_TAG_FN_BASE,
-    SOFT_TAG_PAGE_BASE, SOFT_TAG_PAGE_NEXT, SOFT_TAG_PAGE_PREV, SOFT_TAG_SHIFT, SOFT_TAG_TAB_LEFT,
-    SOFT_TAG_TAB_RIGHT, SOFT_TAG_TAB_VIEWPORT, SoftKeyCap, UiEvent, fn_key_repeats, slot_layer,
+    SOFT_FN_CAPS_INDEX, SOFT_FN_KEYS, SOFT_TAG_CLOSE, SOFT_TAG_CTRL, SOFT_TAG_ESC,
+    SOFT_TAG_FN_BASE, SOFT_TAG_PAGE_BASE, SOFT_TAG_PAGE_NEXT, SOFT_TAG_PAGE_PREV, SOFT_TAG_SHIFT,
+    SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT, SOFT_TAG_TAB_VIEWPORT, SoftKeyCap, UiEvent,
+    fn_key_repeats, slot_layer,
 };
 
 /// 每行的键位个数，与 `wind_softkeyboard::KEY_ROWS` 同构（数字行 / QWERTY / ASDF / ZXCV）。
@@ -59,6 +60,15 @@ const TAB_PAD_X_DP: f32 = 9.0;
 const TAB_FONT_DP: f32 = 12.5;
 const TAB_ARROW_W_DP: f32 = 22.0;
 const TAB_CLOSE_W_DP: f32 = 27.0;
+/// 顶部拖动条：行高与条本身的尺寸（dp）。
+const GRIP_ROW_H_DP: f32 = 9.0;
+/// 关闭按钮悬停框的高度（dp）。
+///
+/// ⚠️ 它**比拖动条行高**（`GRIP_ROW_H_DP`）——后者是给那根横线定的，拿它当亮框的
+/// 基准会得到一个又扁又偏上的框。亮框靠向上溢出到面板的顶部内边距里补足高度。
+const CLOSE_H_DP: f32 = 16.0;
+const GRIP_W_DP: f32 = 46.0;
+const GRIP_H_DP: f32 = 3.5;
 
 /// 长按重复：首次延迟与间隔（毫秒）。
 ///
@@ -85,6 +95,9 @@ struct Colors {
     accent: [u8; 4],
     accent_soft: [u8; 4],
     on_accent: [u8; 4],
+    /// 顶部拖动条的颜色。取工具栏那根同款（`toolbar_grip`）——两处是同一件事：
+    /// 「这块东西可以拖」。
+    grip: [u8; 4],
     /// 悬停底色。**必须比按下态轻得多**——悬停只是「鼠标在这」，按下才是「就是它」。
     /// 两者都用主色系会让人分不清自己有没有点下去。取主题的 `toolbar_hover`：
     /// 一层很淡的半透明叠加，深浅主题各有其值。
@@ -109,6 +122,7 @@ impl Default for Colors {
             accent: [44, 110, 141, 255],
             accent_soft: [217, 233, 241, 255],
             on_accent: [255, 255, 255, 255],
+            grip: [184, 190, 204, 255],
             // 很淡的一层叠加：悬停只是「鼠标在这」，不该有主色的分量。
             hover: [0, 0, 0, 13],
             fn_ink: [82, 100, 110, 255],
@@ -362,6 +376,7 @@ impl SoftKeyboard {
                 "accent_text",
                 theme.color("candidate_selected_text", d.on_accent),
             ),
+            grip: pick("softkb_grip", "toolbar_grip", d.grip),
             hover: pick("softkb_hover_soft", "toolbar_hover", d.hover),
             fn_ink: pick("softkb_fnkey_text", "text_dim", d.fn_ink),
         };
@@ -589,7 +604,7 @@ impl SoftKeyboard {
         if tag < 0 {
             return;
         }
-        if tag == SOFT_TAG_CLOSE {
+        if tag == SOFT_TAG_CLOSE || tag == SOFT_TAG_ESC {
             let _ = self.events.send(UiEvent::SoftKeyboardClose);
             return;
         }
@@ -751,7 +766,80 @@ impl SoftKeyboard {
             .border(c.line, (1.0 * s).max(1.0))
             .radius(8.0 * s);
 
-        root = root.child(self.build_tabs(s, u, gap, hover));
+        // 顶部拖动条：一根居中的短横，明示「这块面板可以拖」。
+        //
+        // ★ 它**不带 tag**，于是落进 `hit_at < 0` 那条空白分支——也就是拖动分支。
+        // 换句话说它不是一个"控件"，而是给本来就能拖的空白处加了个记号，
+        // 与工具栏那根 grip 同源。
+        //
+        // 关闭按钮也放这一行的右端：它和拖动条一样属于「这块窗口本身」，而不是标签行
+        // 里的一项。左端放一个与它等宽的透明占位，拖动条才是**精确**居中的。
+        let close_w = TAB_CLOSE_W_DP * s;
+        let close_h = CLOSE_H_DP * s;
+        let close_inset = PAD_DP * 0.5 * s;
+        // 向上溢出量：取「亮框高 − 行高」，于是 margin_box 的高度正好落回行高,
+        // `cross(Center)` 不会再叠一次偏移，亮框就稳稳居中在顶栏那条空白里。
+        let close_rise = close_h - GRIP_ROW_H_DP * s;
+        let close_down = pressed == SOFT_TAG_CLOSE;
+        let (close_bg, close_fg) = if close_down {
+            (c.accent_soft, c.accent)
+        } else if hover == SOFT_TAG_CLOSE {
+            (c.hover, c.ink)
+        } else {
+            ([0, 0, 0, 0], c.hint)
+        };
+        root = root.child(
+            View::container(Layout::Row)
+                .fill_cross()
+                .fixed_h(GRIP_ROW_H_DP * s)
+                .cross(Align::Center)
+                .child(View::container(Layout::Row).fixed_w(close_w))
+                .child(View::spacer().grow())
+                .child(
+                    View::container(Layout::Row)
+                        .fixed_w(GRIP_W_DP * s)
+                        .fixed_h((GRIP_H_DP * s).max(2.0))
+                        .radius((GRIP_H_DP * s * 0.5).max(1.0))
+                        .bg(c.grip),
+                )
+                .child(View::spacer().grow())
+                .child(
+                    // 关闭按钮向右上**溢出到面板的内边距里**，得到一个宽扁的胶囊热区,
+                    // 像标题栏那样整块可点。
+                    //
+                    // 面板有 `PAD_DP` 的内边距，按内容大小画出来的悬停框会「浮」在角落里，
+                    // 既小又对不齐边。用负 margin 把这块内边距吃回来一部分：
+                    //   宽 +inset / margin.r -inset，高 +rise / margin.t -rise
+                    //   ⇒ margin_box 与原来一模一样（宽=close_w，高=行高），
+                    //   于是**不影响同行其它元素的排布**（拖动条仍精确居中），
+                    //   只有这个节点自己向上、向右长出去。
+                    // ⚠️ 右侧只吃半个 PAD，不吃满：面板是圆角浮层不是有物理边框的标题栏，
+                    // 顶到物理边缘会盖掉圆角、显得「卡在角上」，留半格才有呼吸感。
+                    View::container(Layout::Row)
+                        .fixed_w(close_w + close_inset)
+                        .fixed_h(close_h)
+                        .margin(Edges {
+                            t: -close_rise,
+                            r: -close_inset,
+                            ..Default::default()
+                        })
+                        .radius(close_h * 0.5)
+                        .bg(close_bg)
+                        .border(
+                            if close_down { c.accent } else { [0, 0, 0, 0] },
+                            (1.0 * s).max(1.0),
+                        )
+                        .tag(SOFT_TAG_CLOSE)
+                        .child(
+                            View::leaf("✕", close_fg)
+                                .font_size(13.0 * s)
+                                .text_align(Align::Center)
+                                .fill_cross()
+                                .grow(),
+                        ),
+                ),
+        );
+        root = root.child(self.build_tabs(s, u, gap, hover, pressed));
 
         // 键位行：4 行画布 + 各行两端的功能键。
         //
@@ -799,9 +887,11 @@ impl SoftKeyboard {
         bottom = bottom.child(self.ctrl_key_latch(1.75, u, gap, s, hover));
         bottom = bottom.child(self.fn_key(3, "", 8.0, u, gap, s, hover, pressed));
         bottom = bottom.child(View::spacer().grow());
-        bottom = bottom.child(self.ctrl_key(SOFT_TAG_PAGE_PREV, "◀", 1.5, u, gap, s, hover));
-        bottom = bottom.child(self.ctrl_key(SOFT_TAG_PAGE_NEXT, "▶", 1.5, u, gap, s, hover));
-        bottom = bottom.child(self.ctrl_key(SOFT_TAG_CLOSE, "Esc", 1.5, u, gap, s, hover));
+        bottom =
+            bottom.child(self.ctrl_key(SOFT_TAG_PAGE_PREV, "◀", 1.5, u, gap, s, hover, pressed));
+        bottom =
+            bottom.child(self.ctrl_key(SOFT_TAG_PAGE_NEXT, "▶", 1.5, u, gap, s, hover, pressed));
+        bottom = bottom.child(self.ctrl_key(SOFT_TAG_ESC, "Esc", 1.5, u, gap, s, hover, pressed));
         root = root.child(bottom);
         root
     }
@@ -826,14 +916,14 @@ impl SoftKeyboard {
         let n = widths.len();
         let content_w = widths.iter().sum::<f32>() + TAB_GAP_DP * s * n.saturating_sub(1) as f32;
         let full = KBD_UNITS * u + KBD_GAPS * gap;
-        let close = TAB_CLOSE_W_DP * s + TAB_GAP_DP * s;
-        let need_scroll = content_w > full - close;
+        // 关闭按钮已经挪到拖动条那一行，标签行整行都归标签用。
+        let need_scroll = content_w > full;
         let arrows = if need_scroll {
             (TAB_ARROW_W_DP * s + TAB_GAP_DP * s) * 2.0
         } else {
             0.0
         };
-        let view_w = (full - close - arrows).max(0.0);
+        let view_w = (full - arrows).max(0.0);
         (widths, content_w, view_w, need_scroll)
     }
 
@@ -919,7 +1009,7 @@ impl SoftKeyboard {
     /// 恒定贴在同一个位置——上一版它们随内容漂，就是因为行宽被内容撑着走。
     ///
     /// 内容用负 margin 左移实现滚动，超出视口的部分由 [`View::clipped`] 裁掉。
-    fn build_tabs(&self, s: f32, u: f32, gap: f32, hover: i32) -> View {
+    fn build_tabs(&self, s: f32, u: f32, gap: f32, hover: i32, pressed: i32) -> View {
         let c = &self.colors;
         let tab_gap = TAB_GAP_DP * s;
         let pad_x = TAB_PAD_X_DP * s;
@@ -938,6 +1028,7 @@ impl SoftKeyboard {
                 TAB_ARROW_W_DP * s,
                 s,
                 hover,
+                pressed,
                 scroll > 0.5,
             ));
         }
@@ -990,55 +1081,41 @@ impl SoftKeyboard {
                 TAB_ARROW_W_DP * s,
                 s,
                 hover,
+                pressed,
                 scroll < max_scroll - 0.5,
             ));
         }
-        let close_fg = if hover == SOFT_TAG_CLOSE {
-            c.ink
-        } else {
-            c.hint
-        };
-        row = row.child(
-            View::container(Layout::Row)
-                .fixed_w(TAB_CLOSE_W_DP * s)
-                .radius(4.0 * s)
-                .bg(if hover == SOFT_TAG_CLOSE {
-                    c.keycap
-                } else {
-                    [0, 0, 0, 0]
-                })
-                .pad(Edges::xy(0.0, 4.0 * s))
-                .tag(SOFT_TAG_CLOSE)
-                .child(
-                    View::leaf("✕", close_fg)
-                        .font_size(13.0 * s)
-                        .text_align(Align::Center)
-                        .fill_cross()
-                        .grow(),
-                ),
-        );
         row
     }
 
     /// 标签行的滚动箭头。`live=false` 时画成淡的且不进命中表——到头了还能点只会让人
     /// 反复试探。
-    fn tab_arrow(&self, tag: i32, text: &str, w: f32, s: f32, hover: i32, live: bool) -> View {
+    #[allow(clippy::too_many_arguments)]
+    fn tab_arrow(
+        &self,
+        tag: i32,
+        text: &str,
+        w: f32,
+        s: f32,
+        hover: i32,
+        pressed: i32,
+        live: bool,
+    ) -> View {
         let c = &self.colors;
-        let fg = if !live {
-            c.line
+        let down = live && pressed == tag;
+        let (bg, fg) = if down {
+            (c.accent_soft, c.accent)
+        } else if !live {
+            ([0, 0, 0, 0], c.line)
         } else if hover == tag {
-            c.ink
+            (c.hover, c.ink)
         } else {
-            c.hint
+            ([0, 0, 0, 0], c.hint)
         };
         let mut v = View::container(Layout::Row)
             .fixed_w(w)
             .radius(4.0 * s)
-            .bg(if live && hover == tag {
-                c.keycap
-            } else {
-                [0, 0, 0, 0]
-            })
+            .bg(bg)
             .pad(Edges::xy(2.0 * s, 4.0 * s))
             .cross(Align::Center)
             .child(
@@ -1193,6 +1270,7 @@ impl SoftKeyboard {
 
     /// 面板控制键（翻页 / 关闭）：不合成按键，语义各自不同。
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn ctrl_key(
         &self,
         tag: i32,
@@ -1202,8 +1280,9 @@ impl SoftKeyboard {
         gap: f32,
         s: f32,
         hover: i32,
+        pressed: i32,
     ) -> View {
-        self.flat_key(tag, text, units, u, gap, s, hover, false)
+        self.flat_key(tag, text, units, u, gap, s, hover, pressed == tag)
     }
 
     /// Caps 键：显示并切换系统大写锁定。
@@ -1256,6 +1335,7 @@ impl SoftKeyboard {
     fn shift_key(&self, units: f32, u: f32, gap: f32, s: f32, hover: i32) -> View {
         let c = &self.colors;
         let on = self.layer_shift();
+        let dot_w = (4.0 * s).max(3.0);
         // 与 Caps 同款：持续态用柔和底 + 主色字，不做实心填充。
         let (bg, fg) = if on {
             (c.accent_soft, c.accent)
@@ -1270,21 +1350,37 @@ impl SoftKeyboard {
             .bg(bg)
             .radius(4.0 * s)
             .border(if on { c.accent } else { c.line }, (1.0 * s).max(1.0))
+            // ⚠️ 必须给内边距：本容器有边框，而子节点是从**边缘**开始排的——
+            // 不留内边距时，最右那个标记位正好压在边框上，看起来像是漏到了键外面。
+            .pad(Edges::xy(5.0 * s, 0.0))
             .cross(Align::Center)
             .tag(SOFT_TAG_SHIFT)
+            // 锁定标记**不能拼进文字里**：`"Shift ●"` 整串居中会把 Shift 三个字往左推,
+            // 锁定/解锁之间文字来回跳。改成三段——左侧等宽的透明占位 + 居中的文字 +
+            // 右侧的标记位，布局与是否锁定完全无关，只有标记的颜色在变。
             .child(
-                View::leaf(
-                    if self.shift_locked {
-                        "Shift ●"
+                View::container(Layout::Row)
+                    .fixed_w(dot_w)
+                    .fixed_h(dot_w)
+                    .radius(dot_w * 0.5),
+            )
+            .child(
+                View::leaf("Shift", fg)
+                    .font_size(11.5 * s)
+                    .text_align(Align::Center)
+                    .fill_cross()
+                    .grow(),
+            )
+            .child(
+                View::container(Layout::Row)
+                    .fixed_w(dot_w)
+                    .fixed_h(dot_w)
+                    .radius(dot_w * 0.5)
+                    .bg(if self.shift_locked {
+                        c.accent
                     } else {
-                        "Shift"
-                    },
-                    fg,
-                )
-                .font_size(11.5 * s)
-                .text_align(Align::Center)
-                .fill_cross()
-                .grow(),
+                        [0, 0, 0, 0]
+                    }),
             )
     }
 
@@ -1376,7 +1472,16 @@ fn scroll_to_show(widths: &[f32], gap: f32, cur: usize, scroll: f32, view_w: f32
 /// 长按重复也建立在按下就开始之上。而关闭按钮按下即关，手感上像是「还没点就没了」，
 /// 且中途反悔（按住挪开）也来不及。
 fn fires_on_release(tag: i32) -> bool {
-    tag == SOFT_TAG_CLOSE
+    // 关闭：不可撤销，按下即关像「还没点就没了」。
+    if tag == SOFT_TAG_CLOSE || tag == SOFT_TAG_ESC {
+        return true;
+    }
+    // ★ 切面类：按下即切面会**重建整块面板**，而重建顺手清掉了按下态（`show` 里的
+    // `reset_mouse`）——用户看到的是按下态「闪一下就没了」。改成抬起触发，按住期间
+    // 状态稳稳留着，松手才切。
+    tag == SOFT_TAG_PAGE_PREV
+        || tag == SOFT_TAG_PAGE_NEXT
+        || (SOFT_TAG_PAGE_BASE..SOFT_TAG_CLOSE).contains(&tag)
 }
 
 fn repeats(tag: i32) -> bool {
