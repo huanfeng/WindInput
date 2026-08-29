@@ -254,6 +254,35 @@ impl Rect {
     pub fn contains(&self, px: f32, py: f32) -> bool {
         px >= self.x && px <= self.x + self.w && py >= self.y && py <= self.y + self.h
     }
+
+    /// 与另一矩形的交集；不相交时给 `None`（不返回零尺寸矩形——那会让调用方
+    /// 把「完全裁掉」当成「有个宽 0 的可点区域」）。
+    pub fn intersect(&self, o: &Rect) -> Option<Rect> {
+        let x0 = self.x.max(o.x);
+        let y0 = self.y.max(o.y);
+        let x1 = (self.x + self.w).min(o.x + o.w);
+        let y1 = (self.y + self.h).min(o.y + o.h);
+        (x1 > x0 && y1 > y0).then(|| Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
+    }
+
+    /// 包住两者的最小矩形。
+    fn union(&self, o: &Rect) -> Rect {
+        let x0 = self.x.min(o.x);
+        let y0 = self.y.min(o.y);
+        let x1 = (self.x + self.w).max(o.x + o.w);
+        let y1 = (self.y + self.h).max(o.y + o.h);
+        Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
+    }
 }
 
 /// 左侧强调条参数（选中候选的竖条）。**覆盖层语义**：不参与 measure/布局，仅 paint 期
@@ -358,6 +387,15 @@ pub struct View {
     /// 跨轴填充：在父容器排布时把本节点撑满父内容的跨轴尺寸（Column→宽度），
     /// 供其内部 spacer 实现右对齐（如 preedit 栏让模式标记贴右）。
     pub fill_cross: bool,
+    /// 把子树**裁到本节点的矩形内**：溢出的部分既不绘制，也不参与命中。
+    ///
+    /// 这是滚动视口的地基——内容比容器宽时，超出的部分必须消失而不是画到容器外面。
+    /// 没有它，「按像素滚动」在本渲染器里做不了，只能退化成「按项取舍」（放得下几个
+    /// 画几个），那种做法在项宽不一时永远对不齐容器边缘。
+    ///
+    /// ⚠️ 实现是「画完把界外像素还原」，故**本节点自己的背景/边框不受裁剪**（它就是
+    /// 裁剪框，画在框上是对的），只裁子节点。
+    pub clip: bool,
     /// 命中标识：>=0 参与命中收集（如候选下标 / 按钮 id），<0 忽略
     pub tag: i32,
     /// 旋转 90° 呈现整棵子树（蒙古文等纵向书写的脚本用）。
@@ -423,6 +461,7 @@ impl Default for View {
             children: Vec::new(),
             grow: false,
             fill_cross: false,
+            clip: false,
             tag: -1,
             rot: Rot::None,
             mw: 0.0,
@@ -461,6 +500,12 @@ impl View {
     /// 标记本节点为弹性（主轴吸收剩余空间）。
     pub fn grow(mut self) -> Self {
         self.grow = true;
+        self
+    }
+
+    /// 把子树裁到本节点矩形内（滚动视口用）。见 [`Self::clip`] 字段说明。
+    pub fn clipped(mut self) -> Self {
+        self.clip = true;
         self
     }
 
@@ -807,6 +852,15 @@ impl View {
         }
     }
 
+    /// 子树（含自身）绘制可能触及的包围盒。`clip` 用它决定要备份哪一块。
+    fn subtree_bbox(&self) -> Rect {
+        let mut r = self.rect;
+        for c in &self.children {
+            r = r.union(&c.subtree_bbox());
+        }
+        r
+    }
+
     /// 测得尺寸（measure 后有效）
     pub fn measured_size(&self) -> (f32, f32) {
         (self.mw, self.mh)
@@ -842,23 +896,56 @@ impl View {
     /// ⚠️ 穿过 [`View::rot`] 节点时必须把子树的矩形从局部空间映射回屏幕空间——
     /// 漏掉这一步的表现是「鼠标悬停/点击到相邻候选」，而画面完全正常，从现象反推不出成因。
     pub fn collect_hits(&self, out: &mut Vec<(i32, Rect)>) {
-        if self.tag >= 0 {
-            out.push((self.tag, self.rect));
+        self.collect_hits_clipped(out, None);
+    }
+
+    /// `clip` 是祖先施加的裁剪框（多层嵌套取交集）。
+    ///
+    /// ★ 命中区必须与**看得见的部分**一致：被裁掉一半的标签只有露出来那半能点，
+    /// 否则鼠标会在容器外面的空白处「点到」一个不可见的控件。
+    fn collect_hits_clipped(&self, out: &mut Vec<(i32, Rect)>, clip: Option<Rect>) {
+        let visible = match clip {
+            Some(c) => self.rect.intersect(&c),
+            None => Some(self.rect),
+        };
+        if self.tag >= 0
+            && let Some(r) = visible
+        {
+            out.push((self.tag, r));
         }
+        // 本节点完全在裁剪框外 ⇒ 不再往下走。
+        //
+        // ⚠️ 这条剪枝的**前提**是「子节点画在父节点的矩形之内」。本仓有负 margin（软键盘
+        // 的关闭按钮就靠它溢出到面板边距里），一个节点完全出框、而它的子节点又被负 margin
+        // 拉回框内时，这里会漏掉那个子节点的命中区。之所以仍然剪枝：改成按 `subtree_bbox`
+        // 判断要对每个节点重算整棵子树（O(n²)），而「出框的父 + 回框的子」这种组合在
+        // clip 容器内没有出现过。**真要用，先把这条改掉，别指望它自己正确。**
+        if clip.is_some() && visible.is_none() {
+            return;
+        }
+        let child_clip = if self.clip { visible } else { clip };
+
+        // 旋转节点：子树在**未旋转的局部空间**里收集，映射回屏幕空间之后才谈得上裁剪。
+        //
+        // ★ 裁剪框是屏幕空间的矩形，拿去和局部空间的子矩形相交毫无意义，所以顺序只能是
+        // 「先 rotate_rect 回屏幕空间，再按 child_clip 裁」——两个能力就是在这一行会合的。
         if self.rot != Rot::None {
             let mut local = Vec::new();
             for c in &self.children {
                 c.collect_hits(&mut local);
             }
-            out.extend(
-                local
-                    .into_iter()
-                    .map(|(t, r)| (t, rotate_rect(self.rot, r, self.rect))),
-            );
+            out.extend(local.into_iter().filter_map(|(t, r)| {
+                let screen = rotate_rect(self.rot, r, self.rect);
+                match child_clip {
+                    Some(c) => screen.intersect(&c).map(|x| (t, x)),
+                    None => Some((t, screen)),
+                }
+            }));
             return;
         }
+
         for c in &self.children {
-            c.collect_hits(out);
+            c.collect_hits_clipped(out, child_clip);
         }
     }
 
@@ -977,13 +1064,95 @@ impl View {
                 );
             }
         }
-        // 子节点
-        for c in &self.children {
-            c.paint(buf, buf_w, buf_h, tr);
+        // 子节点。
+        //
+        // ★ 裁剪用「画完还原界外像素」而不是给每个绘制函数加 clip 参数：底层那十来个
+        // `fill_*` / `TextRenderer::draw` 各自逐像素写缓冲，逐个开洞既繁琐又漏一个就
+        // 前功尽弃。还原法只碰一次缓冲，且对**所有**绘制方式一视同仁——包括以后新加的。
+        //
+        // 代价是那块像素要画两遍（先被子节点覆盖，再还原），只在真正开了 clip 的节点上
+        // 发生，而它们本来就是少数。
+        if self.clip {
+            let bbox = self.subtree_bbox();
+            // 溢出区域为空 ⇒ 无需备份，直接画（绝大多数帧走这里：内容没超出）。
+            match snapshot(buf, buf_w, buf_h, bbox) {
+                Some(saved) if !contains_rect(&self.rect, &bbox) => {
+                    for c in &self.children {
+                        c.paint(buf, buf_w, buf_h, tr);
+                    }
+                    restore_outside(buf, buf_w, buf_h, bbox, self.rect, &saved);
+                }
+                _ => {
+                    for c in &self.children {
+                        c.paint(buf, buf_w, buf_h, tr);
+                    }
+                }
+            }
+        } else {
+            for c in &self.children {
+                c.paint(buf, buf_w, buf_h, tr);
+            }
         }
         // z>=0 覆盖图（在内容上方）。
         for layer in self.layers.iter().filter(|l| l.z >= 0) {
             paint_layer(buf, buf_w, buf_h, r, layer);
+        }
+    }
+}
+
+/// `outer` 是否完全包住 `inner`（含边界）。
+fn contains_rect(outer: &Rect, inner: &Rect) -> bool {
+    inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.x + inner.w <= outer.x + outer.w
+        && inner.y + inner.h <= outer.y + outer.h
+}
+
+/// 把矩形按缓冲边界夹取成整数像素范围 `(x0, y0, x1, y1)`；空则 `None`。
+fn clamp_px(r: Rect, buf_w: u32, buf_h: u32) -> Option<(u32, u32, u32, u32)> {
+    let x0 = r.x.floor().max(0.0) as u32;
+    let y0 = r.y.floor().max(0.0) as u32;
+    let x1 = (r.x + r.w).ceil().max(0.0).min(buf_w as f32) as u32;
+    let y1 = (r.y + r.h).ceil().max(0.0).min(buf_h as f32) as u32;
+    (x1 > x0 && y1 > y0 && x0 < buf_w && y0 < buf_h).then_some((
+        x0,
+        y0,
+        x1.min(buf_w),
+        y1.min(buf_h),
+    ))
+}
+
+/// 备份一块矩形区域的像素（BGRA，逐行拷贝）。
+fn snapshot(buf: &[u8], buf_w: u32, buf_h: u32, r: Rect) -> Option<Vec<u8>> {
+    let (x0, y0, x1, y1) = clamp_px(r, buf_w, buf_h)?;
+    let row = ((x1 - x0) * 4) as usize;
+    let mut out = Vec::with_capacity(row * (y1 - y0) as usize);
+    for y in y0..y1 {
+        let off = ((y * buf_w + x0) * 4) as usize;
+        out.extend_from_slice(&buf[off..off + row]);
+    }
+    Some(out)
+}
+
+/// 把 `bbox` 内、`keep` 外的像素还原成备份——即「裁剪」。
+fn restore_outside(buf: &mut [u8], buf_w: u32, buf_h: u32, bbox: Rect, keep: Rect, saved: &[u8]) {
+    let Some((x0, y0, x1, y1)) = clamp_px(bbox, buf_w, buf_h) else {
+        return;
+    };
+    let row = ((x1 - x0) * 4) as usize;
+    // keep 也夹到缓冲内；完全落在缓冲外时整块还原。
+    let keep_px = clamp_px(keep, buf_w, buf_h);
+    for y in y0..y1 {
+        let src_row = (y - y0) as usize * row;
+        for x in x0..x1 {
+            let inside = keep_px
+                .is_some_and(|(kx0, ky0, kx1, ky1)| x >= kx0 && x < kx1 && y >= ky0 && y < ky1);
+            if inside {
+                continue;
+            }
+            let dst = ((y * buf_w + x) * 4) as usize;
+            let src = src_row + ((x - x0) * 4) as usize;
+            buf[dst..dst + 4].copy_from_slice(&saved[src..src + 4]);
         }
     }
 }
@@ -2488,6 +2657,54 @@ mod layout_tests {
     /// ★ 少了 `fill_cross`，行宽只等于自身内容宽，spacer 分不到一个像素，右组会跟着
     /// 左组浮动——软键盘的关闭按钮与翻页键都栽在这里，而且**面板越宽错得越明显**，
     /// 窄面板上看起来还挺对。
+    /// 命中区必须与**看得见的部分**一致，否则鼠标会在容器外的空白处「点到」
+    /// 一个不可见的控件。
+    #[test]
+    fn clip_trims_hits_to_the_visible_part() {
+        let mut root = View::container(Layout::Row)
+            .fixed_w(100.0)
+            .fixed_h(20.0)
+            .clipped()
+            .child(fixed(60.0, 20.0, 0)) // 0..60 全露
+            .child(fixed(60.0, 20.0, 1)) // 60..120，只露出 40
+            .child(fixed(60.0, 20.0, 2)); // 120..180，全在框外
+        root.layout(0.0, 0.0, &tr());
+        assert_eq!(hit(&root, 0).w, 60.0, "完全可见的不受影响");
+        assert_eq!(hit(&root, 1).w, 40.0, "跨边界的裁到露出的那段");
+        let mut out = Vec::new();
+        root.collect_hits(&mut out);
+        assert!(
+            !out.iter().any(|(t, _)| *t == 2),
+            "完全在框外的控件不该进命中表"
+        );
+    }
+
+    /// 裁剪的实现是「画完还原界外像素」，这条钉住它真的还原了。
+    #[test]
+    fn clip_keeps_paint_inside_the_box() {
+        let mut root = View::container(Layout::Row)
+            .fixed_w(10.0)
+            .fixed_h(10.0)
+            .clipped()
+            .child(
+                View::container(Layout::Row)
+                    .fixed_w(40.0)
+                    .fixed_h(10.0)
+                    .bg([200, 30, 30, 255]),
+            );
+        root.layout(0.0, 0.0, &tr());
+        let (w, h) = (40u32, 10u32);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        root.paint(&mut buf, w, h, &tr());
+        let px = |x: u32, y: u32| -> [u8; 4] {
+            let o = ((y * w + x) * 4) as usize;
+            [buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]
+        };
+        assert_ne!(px(5, 5), [0, 0, 0, 0], "框内该被画到");
+        assert_eq!(px(20, 5), [0, 0, 0, 0], "框外必须保持原样");
+        assert_eq!(px(39, 5), [0, 0, 0, 0], "远处同样不能被涂到");
+    }
+
     #[test]
     fn fill_cross_row_lets_spacer_pin_the_last_child_right() {
         let mut root = View::container(Layout::Column)

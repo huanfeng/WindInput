@@ -74,11 +74,14 @@ toolbar_settings_hole = { light = "${surface}", dark = "${border}" }
 # 工具栏按钮鼠标悬停高亮（极淡：亮色 ~5% 黑 / 暗色 ~8% 白，对齐设计稿 status-btn:hover）。
 toolbar_hover = { light = "#0000000D", dark = "#FFFFFF14" }
 
-# ── 键盘域（移动端软键盘；桌面没有这些控件，取值时不会查到它们）──────────
+# ── 键盘域（移动端软键盘 + 桌面软键盘面板，两端共用）──────────
 #
 # 放在共享的 [colors] 而不是另立视图节点：这里缺的只有颜色，键高/圆角/间距由宿主的
-# 布局系统管（Android 侧 KeyboardDimens + layouts/*.toml）。真要做带背景图/渐变的
-# 键盘节点时，节点仍可引用下面这几个语义色。
+# 布局系统管（Android 侧 KeyboardDimens + layouts/*.toml；桌面侧 soft_keyboard.rs）。
+# 真要做带背景图/渐变的键盘节点时，节点仍可引用下面这几个语义色。
+#
+# ★ 桌面软键盘也读这几个键（`softkb_*` 是它的专用覆盖，缺省即落到这里）。改这里会
+# 同时影响两端——它们描述的本就是同一件事：一块键盘长什么样。
 #
 # ⚠ 一律用 ${var} 引用而非写死色值：派生主题（amber/jade/violet…）只覆盖
 # primary 与 accent 系，键盘色靠引用自动跟随——写死的话换成橙色主题，键盘还是蓝的。

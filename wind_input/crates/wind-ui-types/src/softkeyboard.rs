@@ -69,6 +69,9 @@ pub const SOFT_TAG_PAGE_NEXT: i32 = 320_001;
 /// 标签行的左右滚动键（面多到一行放不下时才出现）。
 pub const SOFT_TAG_TAB_LEFT: i32 = 330_000;
 pub const SOFT_TAG_TAB_RIGHT: i32 = 330_001;
+/// 标签行的滚动视口本体。**不是可点控件**——它只是给滚轮一个「鼠标在不在标签行上」
+/// 的命中区。故它必须排在标签之前收集，让标签的命中盖在它上面。
+pub const SOFT_TAG_TAB_VIEWPORT: i32 = 330_002;
 
 /// 面板上可点的特殊键：`(键名, 显示文字)`。
 ///
