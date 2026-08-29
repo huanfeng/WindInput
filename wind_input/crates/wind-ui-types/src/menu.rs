@@ -16,6 +16,8 @@ pub enum ToolbarAction {
     ToggleWidth,
     /// 简/繁转换切换
     ToggleS2t,
+    /// 开关软键盘面板
+    ToggleSoftKeyboard,
     /// 打开设置
     OpenSettings,
     /// 自定义按钮：执行 `ui.toolbar.buttons[i]` 的 cmdbar 表达式。
@@ -71,6 +73,10 @@ pub enum MenuCmd {
     ThemeStyle(u8),
     /// 显示/隐藏工具栏
     ToggleToolbar,
+    /// 开关软键盘面板
+    ToggleSoftKeyboard,
+    /// 打开软键盘并切到第 N 面
+    SoftKeyboardPage(usize),
     /// 重载配置
     ReloadConfig,
     /// 重启服务进程
@@ -227,7 +233,9 @@ impl MenuKind {
                 MenuCmd::IconToggleSizeMarks => 128,
                 MenuCmd::IconToggleDemoAnim => 129,
                 MenuCmd::IconToggleWidthMark => 130,
+                MenuCmd::ToggleSoftKeyboard => 131,
                 MenuCmd::IconBadgeShape(i) => 10000 + i as i32,
+                MenuCmd::SoftKeyboardPage(i) => 11000 + i as i32,
                 MenuCmd::InputDiagToggleSection(i) => 8000 + i as i32,
                 MenuCmd::FirstShowMode(m) => 5000 + m as i32,
                 MenuCmd::InitialMode(m) => 6000 + m as i32,
@@ -283,7 +291,9 @@ impl MenuKind {
             128 => MenuCmd::IconToggleSizeMarks,
             129 => MenuCmd::IconToggleDemoAnim,
             130 => MenuCmd::IconToggleWidthMark,
+            131 => MenuCmd::ToggleSoftKeyboard,
             10000..=10099 => MenuCmd::IconBadgeShape((id - 10000) as u8),
+            11000..=11999 => MenuCmd::SoftKeyboardPage((id - 11000) as usize),
             8000..=8999 => MenuCmd::InputDiagToggleSection((id - 8000) as u8),
             1000..=1999 => MenuCmd::SchemaSelect((id - 1000) as usize),
             2000..=2999 => MenuCmd::ThemeSelect((id - 2000) as usize),

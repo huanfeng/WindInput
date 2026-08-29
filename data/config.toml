@@ -872,6 +872,8 @@ items = ["mode", "punct", "full_width", "s2t", "settings"]
 #
 #   [ui.toolbar]
 #   items = ["mode", "punct", "full_width", "custom:sym", "settings"]
+# 软键盘格默认不显示（它另有热键 ctrl+shift+k 与主菜单入口）。要它就写进 items：
+#   items = ["mode", "punct", "full_width", "s2t", "soft_keyboard", "settings"]
 #
 #   [[ui.toolbar.buttons]]
 #   id = "sym"                          # 稳定标识，被 items 里的 custom:sym 引用

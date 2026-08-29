@@ -471,6 +471,14 @@ fn expand_cells_raw(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
                         });
                     }
                 }
+                // 软键盘格：常驻显示（不像简繁那样与配置合取）——它是个入口而不是状态
+                // 指示器，用户随时可能想开面板，藏起来就等于没有这个入口。开着时高亮。
+                ToolbarItem::SoftKeyboard => cells.push(Cell {
+                    text: "键".to_string(),
+                    highlight: state.soft_keyboard_on,
+                    dim: !state.soft_keyboard_on,
+                    action: ToolbarAction::ToggleSoftKeyboard,
+                }),
                 // 设置格：文本留空，渲染时画矢量齿轮（不依赖字体字形）。
                 // 位置随配置，不再固定末尾；隐藏它也不会锁死用户——右键工具栏任意位置
                 // 同样弹主菜单（见 `ToolbarMouse::on_message` 的 WM_RBUTTONDOWN）。

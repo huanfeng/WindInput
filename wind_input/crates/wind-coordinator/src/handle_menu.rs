@@ -155,6 +155,20 @@ impl Coordinator {
                 self.handle_menu_command("toggle_width");
                 self.notify_toolbar();
             }
+            MenuCmd::ToggleSoftKeyboard => {
+                self.toggle_softkeyboard(None);
+                self.push_state_update();
+                self.notify_toolbar();
+            }
+            MenuCmd::SoftKeyboardPage(i) => {
+                // 菜单选面：面板没开就顺带开出来，否则「选了个面却什么都没发生」。
+                if !self.softkeyboard_is_open() {
+                    self.open_softkeyboard(None);
+                    self.push_state_update();
+                    self.notify_toolbar();
+                }
+                self.ui_softkeyboard_page(i);
+            }
             MenuCmd::ToggleS2t => {
                 self.handle_menu_command("toggle_s2t");
                 self.notify_toolbar();
@@ -1275,6 +1289,7 @@ impl Coordinator {
                 true,
                 toolbar_vis,
             ),
+            self.soft_keyboard_menu_item(),
             M::submenu("主题", theme_children),
             M::separator(),
             M::leaf("重载配置", cmd(MenuCmd::ReloadConfig), true, false),
@@ -1698,6 +1713,14 @@ impl Coordinator {
                 self.run_toolbar_button(i);
                 return;
             }
+            ToolbarAction::ToggleSoftKeyboard => {
+                // 不走 `handle_menu_command` 的动词表：软键盘开启要接管后续按键，
+                // 与 `add_word` 同类，不符 `dispatch_hotkey` 的 bool 契约。
+                self.toggle_softkeyboard(None);
+                self.push_state_update();
+                self.notify_toolbar();
+                return;
+            }
             _ => {}
         }
         let cmd = match action {
@@ -1707,7 +1730,10 @@ impl Coordinator {
             ToolbarAction::ToggleWidth => "toggle_width",
             // 上面那个 match 已 return 掉的三支。**加 ToolbarAction 变体时必须一并处理
             // 上面那个 match**——漏了就落到这里当场 panic，而不是静默不响应。
-            ToolbarAction::ToggleS2t | ToolbarAction::OpenSettings | ToolbarAction::Custom(_) => {
+            ToolbarAction::ToggleS2t
+            | ToolbarAction::OpenSettings
+            | ToolbarAction::Custom(_)
+            | ToolbarAction::ToggleSoftKeyboard => {
                 unreachable!()
             }
         };
@@ -1862,6 +1888,7 @@ impl Coordinator {
             s2t_enabled: s.s2t_enabled,
             // 简繁格：已启用时才在工具栏显示（默认 false 不显示）
             s2t_shown: s.s2t_enabled,
+            soft_keyboard_on: self.softkeyboard_is_open(),
             // 不可输入（密码框 / 无编辑上下文 / 系统禁用）：模式格显 "英" 且不高亮。
             // 与语言栏图标读**同一个** effective_input_block，不会再出现「图标说英文、
             // 工具栏说中文」的错位——那正是把判据分给两个负责者的代价。
@@ -2265,6 +2292,7 @@ mod toolbar_push_dedup_tests {
             chinese_punct: true,
             s2t_enabled: false,
             s2t_shown: false,
+            soft_keyboard_on: false,
             input_blocked: false,
         }))
     }
@@ -2334,5 +2362,45 @@ mod toolbar_push_dedup_tests {
             c.take_toolbar_push_if_changed(state("五")),
             "reset 之后同样的内容也必须下发一次"
         );
+    }
+}
+
+impl Coordinator {
+    /// 主菜单里的「软键盘」项：本身是开关，子菜单直接选面。
+    ///
+    /// 面多于一个时才给子菜单——只有一面的话，子菜单里孤零零一项，点它和点父项
+    /// 效果一样，纯属多一层。
+    pub(crate) fn soft_keyboard_menu_item(&self) -> wind_ui_types::MenuItemSpec {
+        use wind_ui_types::MenuItemSpec as M;
+        let on = self.softkeyboard_is_open();
+        let pages = self.softkeyboard.pages();
+        if pages.len() < 2 {
+            return M::leaf(
+                "软键盘",
+                MenuKind::Command(MenuCmd::ToggleSoftKeyboard),
+                !pages.is_empty(),
+                on,
+            );
+        }
+        let cur = self.softkeyboard_page_idx();
+        let mut children = vec![
+            M::leaf(
+                if on { "关闭面板" } else { "打开面板" },
+                MenuKind::Command(MenuCmd::ToggleSoftKeyboard),
+                true,
+                false,
+            ),
+            M::separator(),
+        ];
+        for (i, p) in pages.iter().enumerate() {
+            children.push(M::leaf(
+                p.name.clone(),
+                MenuKind::Command(MenuCmd::SoftKeyboardPage(i)),
+                true,
+                // 勾选当前面，但面板关着时不勾——那会让人以为它开着。
+                on && i == cur,
+            ));
+        }
+        M::submenu("软键盘", children)
     }
 }

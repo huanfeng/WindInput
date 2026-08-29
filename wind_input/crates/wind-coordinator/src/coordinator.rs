@@ -916,6 +916,7 @@ pub(crate) fn parse_toolbar_items(
             "punct" => sink.push(ToolbarItem::Punct),
             "full_width" => sink.push(ToolbarItem::FullWidth),
             "s2t" => sink.push(ToolbarItem::S2t),
+            "soft_keyboard" => sink.push(ToolbarItem::SoftKeyboard),
             "settings" => sink.push(ToolbarItem::Settings),
             "" => {}
             other => match other.strip_prefix("custom:") {
@@ -9926,14 +9927,19 @@ mod toolbar_items_tests {
         assert_eq!(parse_toolbar_items(&factory, &[]), parse(&[]));
     }
 
-    /// 条目的值域散在四处：`TOOLBAR_ITEM_KEYS`（配置层键名）、本函数的 match 臂、
-    /// `DEFAULT_TOOLBAR_ITEMS`（协议层项）、`data/config.toml` 那一行。
+    /// 条目的值域散在几处：`TOOLBAR_ITEM_KEYS`（配置层**值域**）、本函数的 match 臂、
+    /// `DEFAULT_TOOLBAR_ITEMS`（协议层**默认项**）、`DEFAULT_TOOLBAR_SHOWN` 与
+    /// `data/config.toml` 那一行（配置层默认项）。
     ///
-    /// 这条钉住前三者：**`TOOLBAR_ITEM_KEYS` 里的每个键都必须被解析认识**，且认全之后
-    /// 得到的正是默认项序列。加第六个条目时若只改了常量没改 match，这条立刻红——否则
-    /// 那个新键会被当成"未知条目"静默跳过，表现为"配了没反应"。
+    /// ★ **值域 ⊋ 默认项**：软键盘格属于值域却不默认显示（它已有热键与主菜单两个入口，
+    /// 而给所有老用户的工具栏凭空多一格是打扰）。所以这里不能再断言两者相等——那会把
+    /// 「往值域里加一格」和「改所有人的工具栏外观」焊死成同一件事。
+    ///
+    /// 仍然钉住的两条：**每个登记的键都必须被解析认识**（只改常量没改 match 的话，
+    /// 那个新键会被当成"未知条目"静默跳过，表现为"配了没反应"），以及**默认项按同样的
+    /// 相对顺序出现在值域里**（顺序错位会让默认工具栏的格子排布与声明不符）。
     #[test]
-    fn every_registered_key_is_parsable_and_matches_default_order() {
+    fn every_registered_key_is_parsable_and_keeps_default_order() {
         let keys: Vec<String> = wind_config::TOOLBAR_ITEM_KEYS
             .iter()
             .map(|s| s.to_string())
@@ -9944,11 +9950,13 @@ mod toolbar_items_tests {
             keys.len(),
             "TOOLBAR_ITEM_KEYS 里有 parse_toolbar_items 不认识的键（被静默跳过了）：{keys:?} → {parsed:?}"
         );
-        assert_eq!(
-            parsed,
-            DEFAULT_TOOLBAR_ITEMS.to_vec(),
-            "键名的声明顺序必须与协议层默认项序列一致"
-        );
+        let mut rest = parsed.iter();
+        for d in DEFAULT_TOOLBAR_ITEMS.iter() {
+            assert!(
+                rest.any(|p| p == d),
+                "默认项 {d:?} 不在值域里，或与值域的声明顺序不一致：{parsed:?}"
+            );
+        }
     }
 
     // ── `-` 前缀：关着但占位 ─────────────────────────────────────

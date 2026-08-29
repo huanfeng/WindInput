@@ -786,6 +786,41 @@ mod tests {
     }
 
     /// 解析仓库内系统预置 `data/config.toml`。
+    /// ★★★ 出厂 `keys.key_actions` 里的动词必须真的编译得进热键表。
+    ///
+    /// 动词值域散在**三处**：`BoundAction::parse`（引导键链 / 方案级表）、
+    /// `hotkey::hotkey_action_entry`（组合键白名单）、协调器的分派臂。只加第一处的症状是
+    /// ——出厂热键按下去什么都不发生，与「这个键根本没绑」完全同形，唯一线索是日志里
+    /// 一行 `组合键不支持动词 ... 忽略`。软键盘的 `ctrl+shift+k` 就是这么漏的，
+    /// 部署到真机翻日志才发现。
+    #[test]
+    fn factory_combo_key_actions_are_accepted_by_the_hotkey_compiler() {
+        let Some(actions) = data_config_toml()
+            .get("keys")
+            .and_then(|k| k.get("key_actions"))
+            .and_then(|v| v.as_table())
+            .cloned()
+        else {
+            return; // 出厂没配 key_actions 时无可校验
+        };
+        for (key, action) in &actions {
+            let action = action.as_str().expect("key_actions 的值须为字符串").trim();
+            if action.is_empty() {
+                continue;
+            }
+            // 只校验走组合键通路的那些；单键与纯修饰键有各自的消费者。
+            if crate::hotkey::route_of_key_action(key)
+                != Some(crate::hotkey::KeyActionRoute::Hotkey)
+            {
+                continue;
+            }
+            assert!(
+                crate::hotkey::hotkey_action_entry(action).is_some(),
+                "出厂 keys.key_actions 的 {key:?} = {action:?} 不被组合键白名单接受，                 按下去会静默无反应（见 hotkey_action_entry）"
+            );
+        }
+    }
+
     fn data_config_toml() -> toml::Value {
         // CARGO_MANIFEST_DIR = <repo>/wind_input/crates/wind-config
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data/config.toml");

@@ -3530,10 +3530,29 @@ fn is_wide_char(c: char) -> bool {
 ///
 /// 与 [`STATUS_ITEM_KEYS`] 的差别：那份的顺序无语义（状态气泡的渲染顺序固定在代码里），
 /// 这份的顺序**就是**渲染顺序。
-pub const TOOLBAR_ITEM_KEYS: [&str; 5] = ["mode", "punct", "full_width", "s2t", "settings"];
+pub const TOOLBAR_ITEM_KEYS: [&str; 6] = [
+    "mode",
+    "punct",
+    "full_width",
+    "s2t",
+    "soft_keyboard",
+    "settings",
+];
+
+/// 出厂**默认显示**的条目。
+///
+/// ★ 刻意不是 [`TOOLBAR_ITEM_KEYS`] 的全部：那份是「合法值域」，这份是「默认显示哪些」。
+/// 软键盘格属于值域却不默认显示——它已有热键与主菜单两个入口，而给所有老用户的工具栏
+/// 凭空多一格是打扰。想要它就在 `items` 里写上 `"soft_keyboard"`。
+///
+/// 两份分开之后，往值域里加新格不再自动改变任何人的工具栏外观。
+const DEFAULT_TOOLBAR_SHOWN: [&str; 5] = ["mode", "punct", "full_width", "s2t", "settings"];
 
 fn default_toolbar_items() -> Vec<String> {
-    TOOLBAR_ITEM_KEYS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_TOOLBAR_SHOWN
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 impl Default for ToolbarConfig {

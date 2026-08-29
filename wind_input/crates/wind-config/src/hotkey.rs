@@ -31,7 +31,7 @@ use tracing::{debug, warn};
 /// ★ 动词形态在此做一次映射：引导键通路用 `special:<id>`（[`crate::BoundAction`] 的值域），
 /// 而热键分发端认的是 `enter_special:<id>`。两条通路的分发端不同，动词形态也就不同——
 /// 映射放在编译期，分发端零改动。
-fn hotkey_action_entry(action: &str) -> Option<(String, u32)> {
+pub(crate) fn hotkey_action_entry(action: &str) -> Option<(String, u32)> {
     // 两个切方案动词都**不带 CHINESE_ONLY**：切方案在中英两态下都该生效——尤其
     // 「英文方案 → 中文方案」，要求恰恰是在非中文态下也能按。带上就是「切得过去、
     // 切不回来」。与 `switch_engine` 循环键同策略。
@@ -50,6 +50,28 @@ fn hotkey_action_entry(action: &str) -> Option<(String, u32)> {
     {
         return Some((
             format!("enter_special:{}", id.trim()),
+            HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
+        ));
+    }
+    // 软键盘：与 `special:` 同策略。
+    //
+    // `CHINESE_ONLY`——面板的按键接管建立在「中文模式下 C++ 吃字母/标点」之上，英文态
+    // 根本接管不到，开出来是个点不动的面板。`GLOBAL`——同 `special:`，规避 Chromium 类
+    // 宿主无视 `pfEaten` 造成的双处理。
+    //
+    // 动词原样传给分派端（不像 `special:` 那样改写成 `enter_special:`）：协调器的
+    // `softkeyboard_hotkey` 认的就是这个串。
+    if action == "softkeyboard" {
+        return Some((
+            action.to_string(),
+            HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
+        ));
+    }
+    if let Some(id) = action.strip_prefix("softkeyboard:")
+        && !id.trim().is_empty()
+    {
+        return Some((
+            action.to_string(),
             HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
         ));
     }

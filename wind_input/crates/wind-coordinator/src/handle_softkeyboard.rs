@@ -76,7 +76,7 @@ impl Coordinator {
     }
 
     /// 当前面的下标（已按表长夹取）。
-    fn softkeyboard_page_idx(&self) -> usize {
+    pub(crate) fn softkeyboard_page_idx(&self) -> usize {
         let n = self.softkeyboard.len();
         if n == 0 {
             return 0;

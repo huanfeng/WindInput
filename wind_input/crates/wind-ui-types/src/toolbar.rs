@@ -23,6 +23,8 @@ pub enum ToolbarItem {
     /// 简/繁。⚠️ 与 [`ToolbarState::s2t_shown`] 是**合取**：本项只表示「用户允许它出现」，
     /// 简繁转换当前关着时照样不画。
     S2t,
+    /// 软键盘（键盘图标，点击开关面板；开着时高亮）。
+    SoftKeyboard,
     /// 设置（齿轮图标，点击弹主菜单）。
     Settings,
     /// 自定义按钮（`[[ui.toolbar.buttons]]` 的一项，经 `items` 里的 `custom:<id>` 引用）。
@@ -68,6 +70,8 @@ pub struct ToolbarState {
     pub s2t_enabled: bool,
     /// 是否显示简繁格（默认 false；用户开启简繁功能后显示）
     pub s2t_shown: bool,
+    /// 软键盘面板是否开着（格子据此高亮）。
+    pub soft_keyboard_on: bool,
     /// 当前打不出中文（密码框 / 焦点不在可编辑控件里 / 系统级禁用）：仅影响**呈现**
     /// （模式格显 "英" 且不高亮）。取值来自协调器的 `effective_input_block()`——
     /// 语言栏图标读的是**同一个**判定，两者不会再各说各话。
@@ -88,6 +92,7 @@ impl Default for ToolbarState {
             chinese_punct: true,
             s2t_enabled: false,
             s2t_shown: false,
+            soft_keyboard_on: false,
             input_blocked: false,
         }
     }
