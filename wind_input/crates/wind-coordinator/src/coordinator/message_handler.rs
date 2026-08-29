@@ -726,10 +726,10 @@ impl MessageHandler for Coordinator {
                 return self.schema_switch_key_action(commit);
             } else if action == "softkeyboard" {
                 // 不带面：纯开关。
-                return self.toggle_softkeyboard(None);
+                return self.softkeyboard_hotkey(None);
             } else if let Some(id) = action.strip_prefix("softkeyboard:") {
                 // 直通车：无论开着还是关着都切到这一面，见 `toggle_softkeyboard` 的说明。
-                return self.toggle_softkeyboard(Some(id.trim()));
+                return self.softkeyboard_hotkey(Some(id.trim()));
             } else if let Some(act) = self.dispatch_hotkey_keyed(&action) {
                 // 按键上下文走 `_keyed`：`toggle_mode` / `switch_engine` 会动输入状态，
                 // 它们的编码要经本次按键应答交还宿主（`dispatch_hotkey` 那条只能 push，

@@ -113,6 +113,42 @@ impl Coordinator {
         }
     }
 
+    /// 热键入口：先处置正在打的编码，再开关面板。
+    ///
+    /// ★ **必须先收掉未上屏的编码**。软键盘一开就接管主键区，用户没法再往下打，
+    /// 而候选窗还挂着旧候选——看起来就是「卡住了」。处置策略直接沿用切换那一套
+    /// （`keys.commit_on_switch`：开则上屏原码，关则丢弃），因为对「这串码还要不要」
+    /// 这个问题，开软键盘与切方案的答案相同。
+    ///
+    /// ⚠️ **空文本也要走 `InsertText`**：C++ 的 `CommitText` 即便文本为空也会
+    /// `EndComposition`，清掉宿主里残留的编码；只发状态更新是清不掉的——那正是
+    /// 「切了方案编码还挂在应用里」的根因。
+    ///
+    /// ⚠️ 内部要取 `State` 锁，**只能在不持锁时调用**（热键分派点正好在取锁之前）。
+    pub(crate) fn softkeyboard_hotkey(&self, page: Option<&str>) -> KeyAction {
+        // 关闭方向不必处置：软键盘态下本就没有输入会话。
+        if self.softkeyboard_is_open() && page.is_none() {
+            return self.close_softkeyboard();
+        }
+        let commit = self.take_input_on_schema_switch();
+        self.toggle_softkeyboard(page);
+        if commit.text.is_empty() && !commit.had_pending {
+            return KeyAction::Consumed;
+        }
+        let chinese_mode = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.chinese_mode
+        };
+        KeyAction::InsertText {
+            text: commit.text,
+            new_composition: None,
+            // 软键盘不改中英模式，别让图标白刷一次。
+            mode_changed: false,
+            chinese_mode,
+            has_new_composition: false,
+        }
+    }
+
     /// 开启软键盘。表为空时不开——弹一个一个符号都打不出的面板只会让用户以为坏了。
     pub(crate) fn open_softkeyboard(&self, page: Option<&str>) -> KeyAction {
         if self.softkeyboard.is_empty() {
