@@ -14,7 +14,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// 深合并两个 TOML 值：表递归合并（overlay 的键覆盖/新增），标量与数组由 overlay 整体覆盖。
 /// 用于配置三层合并——overlay 中未出现的键保留 base 的值。
@@ -262,9 +262,140 @@ fn collect_leaf_paths(v: &toml::Value, prefix: &mut Vec<String>, out: &mut Vec<V
     }
 }
 
+/// 段级降级的**单次探针**：把 `value` 贴到全默认骨架 `default_v` 的 `path` 处再整体
+/// 反序列化。失败即说明毒在这条路径底下，返回该路径**自己的**错误文本。
+///
+/// 骨架用默认值而不是用户值，是这套机制正确性的来源：其余部分恒定合法，于是失败只可能
+/// 来自贴上去的那一段，判定互不干扰。
+fn probe_section(default_v: &toml::Value, path: &[&str], value: &toml::Value) -> Option<String> {
+    let mut probe = default_v.clone();
+    let (last, parents) = path.split_last()?;
+    let mut cur = &mut probe;
+    for seg in parents {
+        // 骨架里没有这条路径 = 未登记键。serde 会忽略它，探不出毒，也不该降级任何东西。
+        cur = cur.get_mut(*seg)?;
+    }
+    cur.as_table_mut()?
+        .insert((*last).to_string(), value.clone());
+    probe.try_into::<Config>().err().map(|e| e.to_string())
+}
+
+/// 对**已判定为坏**的顶层段再探一层：逐个直接子键做探针，返回 `(段.子键, 该子键的错误)`。
+///
+/// 返回空表示无法细化（该段在用户值或默认值里不是表、或毒不在任何单个子键上），调用方
+/// 退回整段降级。**只探这一层**，不再往下递归。
+fn narrow_bad_section(
+    default_v: &toml::Value,
+    section: &str,
+    section_value: &toml::Value,
+) -> Vec<(String, String)> {
+    let (Some(sub), Some(_)) = (
+        section_value.as_table(),
+        default_v.get(section).and_then(|v| v.as_table()),
+    ) else {
+        return Vec::new();
+    };
+    sub.iter()
+        .filter_map(|(key, value)| {
+            probe_section(default_v, &[section, key], value)
+                .map(|err| (format!("{section}.{key}"), err))
+        })
+        .collect()
+}
+
+/// 把 `root` 里 `path`（点分）处的值换成 `default_v` 同路径的默认值；默认值里没有则删除。
+///
+/// 删除而非保留：路径在默认值里不存在意味着它不是配置键，而它又被探针判成了毒——
+/// 带进最终值只会让 `try_into` 再失败一次。
+fn reset_path_to_default(root: &mut toml::Value, default_v: &toml::Value, path: &str) {
+    let segs: Vec<&str> = path.split('.').collect();
+    let Some((last, parents)) = segs.split_last() else {
+        return;
+    };
+    let mut cur = root;
+    for seg in parents {
+        let Some(next) = cur.get_mut(*seg) else {
+            return;
+        };
+        cur = next;
+    }
+    let Some(table) = cur.as_table_mut() else {
+        return;
+    };
+    let mut def = default_v;
+    for seg in &segs {
+        match def.get(*seg) {
+            Some(v) => def = v,
+            None => {
+                table.remove(*last);
+                return;
+            }
+        }
+    }
+    table.insert((*last).to_string(), def.clone());
+}
+
+/// 本次加载中发生的**段级降级**记录（见 [`Config::deserialize_with_section_fallback`]）。
+///
+/// 这不是配置项，是「这一份 `Config` 是怎么来的」的元信息：哪些段因为反序列化失败
+/// 被换成了 L1 默认。异常态，正常加载恒为空。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigDegradation {
+    /// 被替换为 L1 默认的段，**点分路径**，按字典序排列。
+    ///
+    /// 一层（`keys`）表示整个顶层段回落；两层（`ui.font`）表示只有该子表回落、同段其余
+    /// 子表的用户值完好。探针能定位到哪一层就记到哪一层——`ui` 一段就有 99 个键，
+    /// 整段回落离「一切归零」并不远，而缩小爆炸半径正是这套机制存在的理由。
+    pub sections: Vec<String>,
+    /// 整份配置都回落到了 L1 默认——毒不在任何单段（例如顶层不是表）。
+    /// 与 `sections` 互斥：走到这一步时 `sections` 为空，因为没能定位到任何有毒段。
+    pub total_fallback: bool,
+}
+
+impl ConfigDegradation {
+    /// 本次加载是否发生过降级。
+    pub fn is_degraded(&self) -> bool {
+        self.total_fallback || !self.sections.is_empty()
+    }
+
+    /// 顶层段 `section` 是否受本次降级影响——**含它的子路径**。
+    ///
+    /// ⚠️ 判据不能写成「`sections` 里精确等于 `section`」：降级粒度可以细到子表，
+    /// `keys` 段出问题时记下的可能是 `keys.key_actions` 而不是 `keys`，精确相等会漏判，
+    /// 而漏判的后果是本该拦下的写盘照样发生（见 [`Config::materialize_key_actions`] 闸三）。
+    pub fn affects(&self, section: &str) -> bool {
+        self.total_fallback
+            || self.sections.iter().any(|s| {
+                s == section || s.strip_prefix(section).is_some_and(|r| r.starts_with('.'))
+            })
+    }
+}
+
 /// 完整配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// 本次加载的降级记录，**不是配置键**：`#[serde(skip)]` 让它既不进配置文件、
+    /// 也不进 `config.get` 的序列化产物，跟着这一份 `Config` 走完生命周期。
+    ///
+    /// ★ 选「随实例的字段」而不是「模块级静态快照」：`Config::load` 有多个并发调用方
+    /// （RPC dispatch、协调器热重载、CLI、构造期），静态快照会互相覆盖，消费点读到的
+    /// 可能是**别人那次**加载的降级结果，而这恰好是最需要可信的场合。
+    ///
+    /// 已核实的影响面（`skip` 不触碰其中任何一条）：
+    /// - `Config` 未派生 `PartialEq`，全仓无 `impl PartialEq for Config`，不存在整体相等性比较；
+    /// - `config_schema::config_leaf_keys()` 由 `toml::Value::try_from(Config::default())`
+    ///   推导叶子路径，`skip` 字段不出现在序列化产物里 ⇒ `registry_covers_every_config_key`
+    ///   的差集不变，注册表无需登记；
+    /// - `prune_redundant` / `prune_retired` / `set_user_value` 走的都是那同一套叶子路径，
+    ///   同理不受影响；
+    /// - `config.get`（`wind-rpc/dispatch.rs`、`wind-webdata/lib.rs`）把 `Config` 序列化
+    ///   回 `toml::Value` 再比对/写回，`skip` 字段不出现 ⇒ 不会被当成用户配置写进 config.toml。
+    ///
+    /// ⚠️ 这里的 `skip` **不是**被禁止的那个 `skip_serializing_if`：后者用于表达
+    /// 「某个**配置键**退出配置体系」，会让守门测试静默放行一个用户够不着的键；
+    /// 本字段从来就不是配置键。
+    #[serde(skip)]
+    pub degradation: ConfigDegradation,
     #[serde(default)]
     pub schema: SchemaConfig,
     #[serde(default)]
@@ -4505,9 +4636,123 @@ impl Config {
         Self::migrate_index_labels_value(&mut merged);
         Self::migrate_comment_max_chars_value(&mut merged);
         Self::migrate_empty_code_behavior_value(&mut merged);
-        let mut config: Config = merged.try_into()?;
+        // ⛔ 段级降级**不能**顶替上面这一族 `migrate_*_value`：迁移是「把旧值无损搬到新形态」，
+        // 降级是「把这一段整个丢掉换成出厂值」。已发布字段改类型仍必须写迁移，
+        // 降级只是最后一道兜底。
+        let mut config = Self::deserialize_with_section_fallback(merged);
         config.normalize();
         Ok(config)
+    }
+
+    /// 反序列化 `merged`，失败时**只**把有毒的那一段替换成 L1 默认，其余配置原样保留。
+    ///
+    /// 为什么需要它：整份 `try_into` 是全有全无的——任何一层里一个类型不匹配的键都让
+    /// `load()` 返回 `Err`，而调用方几乎都是 `unwrap_or_default()`（`construct.rs`、
+    /// `apps/repl`、`wind-mobile`）⇒ 用户的方案/词库/按键/主题**一起**回落出厂值，
+    /// 只留一行日志。段的边界恰好是功能边界，用户感知到的应该是「按键设置回默认了」
+    /// 而不是「一切归零」。
+    ///
+    /// ★ 定位有毒段用的是**探针**（把待测的那一段贴到全默认的骨架上试），不是「逐段替换
+    /// 直到成功」。后者会误伤：若毒在 `keys`，替换 `input` 后仍然失败，此时无从区分 `input`
+    /// 是不是也有毒，只能连它一起降级——那是在丢用户配置。探针法对每段给出独立判定。
+    ///
+    /// ★ 探两层：顶层段判坏之后，对它的**直接子键**再探一轮，能定位到 `ui.font` 就不要
+    /// 降 `ui` 整段。粒度不是锦上添花——`ui` 一段 99 个键、`schema` 88 个，整段回落等于
+    /// 候选窗尺寸、字体、主题、工具栏、注释模板一起没，离「一切归零」并不远，而缩小
+    /// 爆炸半径就是这套机制的全部意义。**只递归这一层**：再往下收益递减，而每多一层
+    /// 就多一份「把配置切碎成半新半旧」的风险。子键探不出结果（该段不是表、或毒在段
+    /// 自身的结构上）则退回整段降级。
+    ///
+    /// ⚠️ 成功路径**不是**零开销：`merged` 会被深 clone 一次。本机实测（259 个叶子键，
+    /// dev profile 已开优化）clone ≈ 24µs，`clone + try_into` ≈ 41µs——clone 占约六成。
+    ///
+    /// 这不是能省掉的：toml 0.8 只有 `impl Deserializer for Value`（**按值**消费），没有
+    /// `&Value` 的实现，`try_into` 失败后拿不回所有权，而失败路径必须拿着原值去做探针。
+    /// 相对于 `load()` 自身的两次文件 IO，这一次 clone 不在同一量级，故不值得为它改结构。
+    ///
+    /// 失败路径的探针次数：顶层段数 + 有毒段的子键数，均为个位到几十，只在异常时发生。
+    fn deserialize_with_section_fallback(merged: toml::Value) -> Config {
+        let root_err = match merged.clone().try_into::<Config>() {
+            Ok(config) => return config,
+            Err(e) => e.to_string(),
+        };
+
+        let default_v = match toml::Value::try_from(Config::default()) {
+            Ok(v) => v,
+            // 默认配置自己序列化不了属于代码 bug，此处无从补救。
+            Err(e) => {
+                error!("Config default is not serializable ({e}); config falls back to defaults");
+                return Config {
+                    degradation: ConfigDegradation {
+                        sections: Vec::new(),
+                        total_fallback: true,
+                    },
+                    ..Config::default()
+                };
+            }
+        };
+
+        // (点分路径, **该路径自己的**反序列化错误)。
+        // ⚠️ 每条都必须带自己的错误：多段同时有毒时，整份 `try_into` 的 `root_err` 只讲得清
+        // 其中一个段，拿它给每一行 WARN 用会把排查的人直接带到无关的段上。
+        let mut bad: Vec<(String, String)> = Vec::new();
+        if let Some(sections) = merged.as_table() {
+            for (section, value) in sections {
+                let Some(section_err) = probe_section(&default_v, &[section], value) else {
+                    continue;
+                };
+                let narrowed = narrow_bad_section(&default_v, section, value);
+                if narrowed.is_empty() {
+                    bad.push((section.clone(), section_err));
+                } else {
+                    bad.extend(narrowed);
+                }
+            }
+        }
+        // 顶层不是表时上面一条都收不到，直接落到下面的整体回落分支。
+        //
+        // 显式排序而不是依赖 `toml::Table` 的遍历序：后者是否有序取决于 `preserve_order`
+        // 特性，而特性可能被任何一个传递依赖打开——那种翻车只在别人的依赖树里复现。
+        bad.sort();
+
+        let mut patched = merged;
+        for (path, _) in &bad {
+            reset_path_to_default(&mut patched, &default_v, path);
+        }
+
+        match patched.try_into::<Config>() {
+            Ok(mut config) if !bad.is_empty() => {
+                for (path, err) in &bad {
+                    // WARN 而非 INFO：这是**异常**，不是正常降级。压成 INFO 会掩盖真实的
+                    // 迁移缺失——本该写 `migrate_*_value` 的字段类型变更会在这里悄悄"自愈"。
+                    warn!(
+                        "配置段 [{path}] 解析失败，已回落出厂默认值（该段的用户设置本次不生效）；\
+                         原始错误：{err}"
+                    );
+                }
+                config.degradation = ConfigDegradation {
+                    sections: bad.into_iter().map(|(path, _)| path).collect(),
+                    total_fallback: false,
+                };
+                config
+            }
+            // 防御性分支：`bad` 为空时 `patched == merged`，而 `merged` 在函数开头已经失败过，
+            // 走不到这里。留着是为了不把「探不出毒却又成功了」静默当成正常加载。
+            Ok(config) => config,
+            Err(e) => {
+                error!(
+                    "配置解析失败且无法定位到具体段，整份配置回落出厂默认值；\
+                     原始错误：{root_err}；回落后仍失败：{e}"
+                );
+                Config {
+                    degradation: ConfigDegradation {
+                        sections: Vec::new(),
+                        total_fallback: true,
+                    },
+                    ..Config::default()
+                }
+            }
+        }
     }
 
     /// 存量迁移（**须在反序列化前**跑，字段已从 [`QuickInputConfig`] 移除、结构体上读不到）：
@@ -4807,6 +5052,16 @@ impl Config {
     /// 2. **L2 `data/config.toml` 不在场** → 不动。折算结果依赖 L2 声明的出厂绑定，
     ///    L2 缺席时折算出的是一张**残缺**的表，物化下去 = 用户永久丢失出厂绑定，
     ///    而且标记一置位就再也不会补回来。这是本函数最危险的一条路径。
+    /// 3. **本次 `load()` 的 `keys` 段被降级** → 不动。与闸二同一个失效模式，但入口不同：
+    ///    段级降级（[`Self::deserialize_with_section_fallback`]）会把有毒的 `keys` 段换成
+    ///    L1 默认，于是 `bindings` 只剩出厂绑定，而 `materialize_into` 是**无条件整表覆盖**，
+    ///    还会顺手摘掉 `input.temp_pinyin/temp_english.trigger_keys` 与 `mix_modes[].trigger_keys`
+    ///    并打上一次性版本标记 ⇒ 用户的自定义绑定**永久**没了、且再也不会重跑自愈；
+    ///    毒若恰在 `key_actions` 里还会被自己覆盖掉，现场都不剩。
+    ///
+    ///    段级降级上线**之前**这条路不存在：那时 `load()` 直接返回 `Err`，下面那个 `?`
+    ///    就是保护，`main.rs` 只 warn 一句、一个字节都不写，用户改掉毒键即可复原。降级把
+    ///    `Err` 变成了「成功但内容残缺」，保护随之失效——所以必须在这里补回来。
     ///
     /// 幂等：靠 `keys.key_actions_materialized` 版本号，不靠「看起来像迁移过了」的推断。
     pub fn materialize_key_actions() -> anyhow::Result<usize> {
@@ -4843,6 +5098,15 @@ impl Config {
         // 的那张表（三层合并 ⊕ 折算 ⊕ 「用户显式配过的不被覆盖」）。这里绝不能自己再抄
         // 一遍折算规则——抄一份就是第二个真相源，本次修的正是这类问题。
         let cfg = Self::load(data_dir.as_deref())?;
+        // 闸三：`keys` 段本次被降级过 ⇒ `key_actions` 不是用户真实的绑定，是出厂残表。
+        // 判据用 `affects` 而不是精确相等——降级粒度可以细到 `keys.key_actions` 这一层。
+        if cfg.degradation.affects("keys") {
+            debug!(
+                "Skip key_actions materialization: keys section degraded this load ({:?}, total={})",
+                cfg.degradation.sections, cfg.degradation.total_fallback
+            );
+            return Ok(0);
+        }
         let bindings = cfg.keys.key_actions;
         let count = bindings.len();
         let dropped = materialize_into(&mut root, &bindings)?;
@@ -7338,6 +7602,367 @@ active = "x"
             cfg.ui.candidate.index_labels,
             vec!["a", "s", "d", "f"],
             "旧的单字符标签原样保留，用户无需重配"
+        );
+    }
+
+    // ─────────────────────── 段级降级（section fallback）───────────────────────
+
+    /// 复刻 [`Config::load`] 的「L1 默认 ⊕ 用户层 → 反序列化」链路。
+    ///
+    /// ⚠️ **刻意不调 `Config::load`**：它会走 `user_config_dir()` 去读真实
+    /// `%APPDATA%\WindInput\config.toml`——那样测试的输入取决于跑测试的这台机器
+    /// （本机有配置就测不出、别人机器上又是另一套），本仓也有过测试真写用户配置的前科。
+    /// 段级降级的全部判定都在 `deserialize_with_section_fallback` 这个纯函数里，IO 留在
+    /// `load()` 外层，测试只喂 `toml::Value`。
+    fn merged_user_value(user_toml: &str) -> toml::Value {
+        let mut merged = toml::Value::try_from(Config::default()).expect("默认配置应可序列化");
+        merge_value(
+            &mut merged,
+            toml::from_str(user_toml).expect("用例 TOML 应可解析"),
+        );
+        merged
+    }
+
+    /// `ui` 段的毒：`ui.font.scripts` 是 `BTreeMap<String, Vec<String>>`。
+    ///
+    /// ★ 用 Map 型字段而不是「被删掉的普通字段的残留键」构造用例：全仓无
+    /// `deny_unknown_fields` / `flatten` / `untagged`，普通 struct 的未知键被 serde 静默
+    /// 丢弃，是**零风险**的，拿它构造用例会得到一个恒绿的假测试。Map 型字段对 serde 而言
+    /// 「任何键都是已知的」，旧版残留项会被当真数据反序列化——那才是真实故障路径。
+    const POISON_UI: &str = "[ui.font]\nscripts = { latin = 42 }\n";
+    /// `keys` 段的毒：`keys.key_actions` 是 `BTreeMap<String, String>`，值给整型。
+    const POISON_KEYS: &str = "[keys]\nkey_actions = { F7 = 42 }\n";
+    /// 分散在各段、**必须活下来**的用户设置。
+    ///
+    /// `ui.candidate.per_page` 是关键一条：它与 [`POISON_UI`] **同属 `ui` 段但不同子表**，
+    /// 用来钉住「降级只降到 `ui.font`，不牵连 `ui.candidate`」。
+    const HEALTHY_USER: &str = "\
+[schema]
+active = \"section_fallback_probe\"
+[input.default]
+chinese_mode = false
+[ui.candidate]
+per_page = 9
+[stats]
+enabled = false
+[debug]
+log_level = \"trace\"
+";
+
+    /// 坏段回落默认，**其余段的用户值逐键完好**。
+    ///
+    /// # 反事实验证（两轮，均已实跑，非声称）
+    ///
+    /// **一、摘掉整个降级逻辑**——在 `deserialize_with_section_fallback` 开头插一行
+    /// `return merged.try_into().unwrap_or_default();`（＝本机制上线前的等价行为），
+    /// 重跑 `cargo test -p wind-config -j 2 -- section_fallback degradation_affects`：
+    /// 9 个用例红 6 个，本用例红在第一条断言上：
+    ///
+    /// ```text
+    /// assertion `left == right` failed: schema 段无毒，用户值必须原样保留
+    ///   left: "" / right: "section_fallback_probe"
+    /// ```
+    ///
+    /// **二、只摘掉子表细化、保留段级降级**——让 [`narrow_bad_section`] 恒返回空表。
+    /// 9 个用例红 5 个，红的正是粒度那几条：
+    ///
+    /// ```text
+    /// section_fallback_narrows_to_subtable_within_section:
+    ///   assertion failed: ui.candidate 不该被牵连   left: 7 / right: 9
+    /// section_fallback_is_idempotent:
+    ///   left: ["ui"] / right: ["ui.font"]
+    /// ```
+    ///
+    /// 第二轮是「探两层」这项改进单独的守门：它证明这些断言测的是**粒度**，
+    /// 而不是搭降级逻辑的便车。
+    ///
+    /// 两轮里都仍绿、且**应该**绿的：
+    /// [`section_fallback_is_transparent_when_healthy`]（断言成功路径与老行为一致，
+    /// 两种摘法都没动成功路径）、[`degradation_affects_matches_subpaths`]（纯判据单测）；
+    /// 第二轮另有 [`section_fallback_falls_back_to_whole_section_when_not_narrowable`]
+    /// 仍绿，它测的正是细化不了时的退路。
+    #[test]
+    fn section_fallback_keeps_healthy_sections() {
+        let merged = merged_user_value(&format!("{HEALTHY_USER}{POISON_UI}"));
+        // 前置：这份输入在没有降级的老链路上确实是 Err。若哪天 `scripts` 换了类型、
+        // 这条毒不再是毒，这里会先红——避免下面的断言退化成恒绿。
+        assert!(
+            merged.clone().try_into::<Config>().is_err(),
+            "用例前提失效：该输入已不再触发整体反序列化失败，请另造毒键"
+        );
+
+        let cfg = Config::deserialize_with_section_fallback(merged);
+
+        // 好段逐键保留。★ 这组断言**故意排在降级记录之前**：它们才是用户实际丢掉的东西，
+        // 摘掉降级逻辑时应该由它们先红，指向「用户的方案设置没了」而不是「元信息对不上」。
+        assert_eq!(
+            cfg.schema.active, "section_fallback_probe",
+            "schema 段无毒，用户值必须原样保留"
+        );
+        assert!(!cfg.input.default.chinese_mode, "input 段的用户值必须保留");
+        assert!(!cfg.stats.enabled, "stats 段的用户值必须保留");
+        assert_eq!(cfg.debug.log_level, "trace", "debug 段的用户值必须保留");
+        assert_eq!(
+            cfg.ui.candidate.per_page, 9,
+            "毒在 ui.font，ui.candidate 是同段的**另一个子表**，用户值必须保留"
+        );
+
+        assert_eq!(cfg.degradation.sections, vec!["ui.font".to_string()]);
+        assert!(!cfg.degradation.total_fallback);
+
+        // 坏段回落 L1 默认（不是「保留了半截毒值」，也不是「整份归零」）
+        assert!(
+            cfg.ui.font.scripts.is_empty(),
+            "有毒的 ui.font 子表须回落出厂默认"
+        );
+    }
+
+    /// ★ 降级粒度收到**子表**这一层：`ui.font.scripts` 有毒时只降 `ui.font`，
+    /// `ui` 段其余子表的用户值一个不少。
+    ///
+    /// 这条是「探两层」这项改进的全部意义所在。`ui` 一段有 99 个键——只降到段一级的话，
+    /// 一个坏的字体映射就会把候选窗尺寸、位置、注释模板、工具栏、主题一起打回出厂，
+    /// 离本机制想避免的「一切归零」只差一点。没有这条用例，这项改进等于没做。
+    #[test]
+    fn section_fallback_narrows_to_subtable_within_section() {
+        // 同一个 `ui` 段里铺开 4 个子表的用户值，只有 `ui.font` 那个有毒。
+        let merged = merged_user_value(
+            "\
+[ui.candidate]
+per_page = 9
+max_chars = 33
+[ui.theme]
+name = \"section_fallback_theme\"
+[ui.toolbar]
+visible = false
+[ui.font]
+family = \"SectionFallbackFont\"
+scripts = { latin = 42 }
+",
+        );
+        assert!(merged.clone().try_into::<Config>().is_err(), "用例前提");
+
+        let cfg = Config::deserialize_with_section_fallback(merged);
+
+        // 同段的其他子表：完好
+        assert_eq!(cfg.ui.candidate.per_page, 9, "ui.candidate 不该被牵连");
+        assert_eq!(cfg.ui.candidate.max_chars, 33, "ui.candidate 不该被牵连");
+        assert_eq!(
+            cfg.ui.theme.name, "section_fallback_theme",
+            "ui.theme 不该被牵连"
+        );
+        assert!(!cfg.ui.toolbar.visible, "ui.toolbar 不该被牵连");
+
+        // 有毒的那个子表：整个回落（`family` 是同子表内的附带损失，粒度只到这一层）
+        assert_eq!(cfg.degradation.sections, vec!["ui.font".to_string()]);
+        assert!(cfg.ui.font.scripts.is_empty());
+        assert_eq!(
+            cfg.ui.font.family,
+            Config::default().ui.font.family,
+            "同一子表内的键一并回落——这是「只递归一层」的已知代价"
+        );
+    }
+
+    /// 细化不到子键时退回整段降级：段本身就不是表（`[input]` 位置写了个标量）。
+    #[test]
+    fn section_fallback_falls_back_to_whole_section_when_not_narrowable() {
+        let mut merged = merged_user_value(HEALTHY_USER);
+        merged
+            .as_table_mut()
+            .unwrap()
+            .insert("input".to_string(), toml::Value::Integer(42));
+        assert!(merged.clone().try_into::<Config>().is_err(), "用例前提");
+
+        let cfg = Config::deserialize_with_section_fallback(merged);
+
+        assert_eq!(
+            cfg.degradation.sections,
+            vec!["input".to_string()],
+            "探不出更细的粒度就记整段，不能假装细化成功"
+        );
+        assert_eq!(
+            cfg.schema.active, "section_fallback_probe",
+            "其余段照常保留"
+        );
+        assert_eq!(cfg.ui.candidate.per_page, 9);
+        assert!(
+            cfg.input.default.chinese_mode,
+            "input 整段回落出厂默认（默认为 true）"
+        );
+    }
+
+    /// ★ 每条降级记录必须带**自己那一段**的错误，不能共用最初整份 `try_into` 的错误。
+    ///
+    /// 多段同时有毒时，整份 `try_into` 的错误只点得到其中一个段。若把它拼进每一行 WARN，
+    /// `[keys]` 那行携带的错误文本讲的会是 `ui.font.scripts`——排查的人被直接带到无关的段，
+    /// 而这类误导比没有日志更费时间。
+    #[test]
+    fn section_fallback_reports_per_section_error() {
+        let merged = merged_user_value(&format!("{HEALTHY_USER}{POISON_UI}{POISON_KEYS}"));
+        let default_v = toml::Value::try_from(Config::default()).unwrap();
+        let sections = merged.as_table().unwrap();
+
+        let ui_err = narrow_bad_section(&default_v, "ui", sections.get("ui").unwrap());
+        let keys_err = narrow_bad_section(&default_v, "keys", sections.get("keys").unwrap());
+
+        assert_eq!(ui_err.len(), 1);
+        assert_eq!(keys_err.len(), 1);
+        assert_eq!(ui_err[0].0, "ui.font");
+        assert_eq!(keys_err[0].0, "keys.key_actions");
+
+        assert!(
+            ui_err[0].1.contains("scripts"),
+            "ui 那条要讲自己的字段，实得 {:?}",
+            ui_err[0].1
+        );
+        assert!(
+            keys_err[0].1.contains("key_actions"),
+            "keys 那条要讲自己的字段，实得 {:?}",
+            keys_err[0].1
+        );
+        assert!(
+            !keys_err[0].1.contains("scripts"),
+            "keys 那条绝不能讲 ui 的字段，实得 {:?}",
+            keys_err[0].1
+        );
+    }
+
+    /// [`ConfigDegradation::affects`] 的判据必须覆盖子路径。
+    ///
+    /// 这是 [`Config::materialize_key_actions`] 闸三的判据。写成精确相等会漏判
+    /// `keys.key_actions`——而漏判的后果是本该拦下的那次写盘照样发生，把一次可恢复的降级
+    /// 变成磁盘上的永久数据丢失。
+    #[test]
+    fn degradation_affects_matches_subpaths() {
+        let d = ConfigDegradation {
+            sections: vec!["keys.key_actions".to_string()],
+            total_fallback: false,
+        };
+        assert!(d.affects("keys"), "子路径必须算作该段受影响");
+        assert!(!d.affects("ui"), "别的段不能被误判");
+        // 前缀相同但不是同一段：`key` 不是 `keys` 的父段，不能靠裸 `starts_with` 匹配上。
+        assert!(!d.affects("key"), "只认以 '.' 分隔的真父段");
+
+        let whole = ConfigDegradation {
+            sections: vec!["keys".to_string()],
+            total_fallback: false,
+        };
+        assert!(whole.affects("keys"));
+
+        let total = ConfigDegradation {
+            sections: Vec::new(),
+            total_fallback: true,
+        };
+        assert!(total.affects("keys"), "整份回落时任何段都受影响");
+        assert!(total.affects("ui"));
+    }
+
+    /// 多段同时有毒：两段都降级，好段不受牵连。
+    ///
+    /// 这条守的是「逐段替换直到成功」那种错误实现——毒在 keys 时，替换 input 后仍然失败，
+    /// 那种实现分不清 input 是否无辜，会连它一起降级。探针法对每段独立判定。
+    #[test]
+    fn section_fallback_isolates_multiple_bad_sections() {
+        let merged = merged_user_value(&format!("{HEALTHY_USER}{POISON_UI}{POISON_KEYS}"));
+        assert!(merged.clone().try_into::<Config>().is_err(), "用例前提");
+
+        let cfg = Config::deserialize_with_section_fallback(merged);
+
+        // 无辜段一个都不能少（同上，先断言用户可见的损失）
+        assert_eq!(cfg.schema.active, "section_fallback_probe");
+        assert!(!cfg.input.default.chinese_mode);
+        assert!(!cfg.stats.enabled);
+        assert_eq!(cfg.debug.log_level, "trace");
+        assert_eq!(cfg.ui.candidate.per_page, 9);
+
+        assert_eq!(
+            cfg.degradation.sections,
+            vec!["keys.key_actions".to_string(), "ui.font".to_string()],
+            "两处毒各自被定位到子表这一层"
+        );
+        assert!(cfg.ui.font.scripts.is_empty());
+        assert!(cfg.keys.key_actions.is_empty());
+    }
+
+    /// 幂等：同一输入连跑两次结果一致；且把降级后的产物再喂回去，不再降级、值也不再变。
+    ///
+    /// 后半条才是真正的幂等——「加载→写回→再加载」是设置页的实际链路，若第二轮又变一次，
+    /// 用户会看到配置在两个状态间来回跳。
+    #[test]
+    fn section_fallback_is_idempotent() {
+        let input = merged_user_value(&format!("{HEALTHY_USER}{POISON_UI}"));
+
+        let first = Config::deserialize_with_section_fallback(input.clone());
+        let second = Config::deserialize_with_section_fallback(input);
+        // 先钉住「第一轮确实降了级、且好段还在」——否则本用例在「压根没有降级逻辑」的
+        // 世界里也是绿的（两轮都得到出厂默认，当然一致），成为一个恒绿的假守门。
+        assert_eq!(first.schema.active, "section_fallback_probe");
+        assert_eq!(first.degradation.sections, vec!["ui.font".to_string()]);
+        assert_eq!(first.degradation, second.degradation);
+        assert_eq!(
+            toml::Value::try_from(&first).unwrap(),
+            toml::Value::try_from(&second).unwrap(),
+            "同一输入两次加载须逐键相同"
+        );
+
+        // 第二轮：拿第一轮的产物当输入（等价于降级后写回再加载）
+        let round_trip = Config::deserialize_with_section_fallback(
+            toml::Value::try_from(&first).expect("降级后的配置应可序列化"),
+        );
+        assert_eq!(
+            round_trip.degradation,
+            ConfigDegradation::default(),
+            "毒已被清掉，第二轮不该再降级"
+        );
+        assert_eq!(
+            toml::Value::try_from(&round_trip).unwrap(),
+            toml::Value::try_from(&first).unwrap(),
+            "第二轮不得再改动任何键"
+        );
+    }
+
+    /// 毒不在任何单段（顶层压根不是表）：整份回落 L1 默认，并把这件事标出来。
+    /// 段级降级只在「能定位到段」时成立，定位不到时不能假装成功。
+    #[test]
+    fn section_fallback_reports_total_failure() {
+        let cfg = Config::deserialize_with_section_fallback(toml::Value::Integer(42));
+        assert!(cfg.degradation.total_fallback, "定位不到有毒段须如实标记");
+        assert!(cfg.degradation.sections.is_empty());
+        assert_eq!(cfg.schema.active, Config::default().schema.active);
+    }
+
+    /// 健康配置零副作用：不降级、不留记录，且与直接 `try_into` 逐键相同。
+    #[test]
+    fn section_fallback_is_transparent_when_healthy() {
+        let merged = merged_user_value(HEALTHY_USER);
+        let direct: Config = merged.clone().try_into().expect("健康配置须直接可反序列化");
+        let cfg = Config::deserialize_with_section_fallback(merged);
+        assert_eq!(cfg.degradation, ConfigDegradation::default());
+        assert_eq!(
+            toml::Value::try_from(&cfg).unwrap(),
+            toml::Value::try_from(&direct).unwrap(),
+            "成功路径必须与老行为完全一致"
+        );
+    }
+
+    /// `degradation` 是 `#[serde(skip)]` 的运行期元信息，不是配置键：既不进注册表覆盖
+    /// 检查的叶子集合，也不会被 `config.get` 序列化回去写进用户 config.toml。
+    ///
+    /// 破坏后的现象很隐蔽：一旦它被序列化，`prune`/`set_user_value` 那套按叶子路径工作的
+    /// 逻辑会把它当成用户配置项处理，而 `registry_covers_every_config_key` 会因为多出
+    /// 一个未登记键而红——但那时已经有用户的 config.toml 被写进了这个键。
+    #[test]
+    fn degradation_is_not_a_config_key() {
+        let v = toml::Value::try_from(Config::default()).unwrap();
+        assert!(
+            v.get("degradation").is_none(),
+            "降级记录不得出现在配置的序列化产物里"
+        );
+        assert!(
+            !crate::config_schema::config_leaf_keys()
+                .iter()
+                .any(|k| k.starts_with("degradation")),
+            "降级记录不得进入配置叶子路径集合"
         );
     }
 

@@ -128,6 +128,28 @@ fn cmd_set(key: &str, raw: &str) -> i32 {
 
 fn cmd_export() -> i32 {
     match Config::load(Config::data_dir().as_deref()) {
+        Ok(cfg) if cfg.degradation.is_degraded() => {
+            // ⛔ 降级过就**拒绝导出**，宁可什么都不给。
+            //
+            // 导出产物的用途是备份和 `config export > config.toml` 回写，而降级后的配置里
+            // 坏段已经被出厂值顶掉——导出去就是把这次数据丢失**固化**成用户的新配置，
+            // 而且他从输出里完全看不出来。同 `preset_for_pruning` 取不到 preset 时退化为
+            // 「不清理」：拿不到可信的全量就别动。
+            eprintln!(
+                "拒绝导出：本次加载有配置段解析失败并回落了出厂默认值，导出的内容不是你的真实配置。"
+            );
+            if cfg.degradation.total_fallback {
+                eprintln!("  受影响：整份配置（无法定位到具体段）");
+            } else {
+                eprintln!("  受影响的段：{}", cfg.degradation.sections.join(", "));
+            }
+            eprintln!(
+                "  请先修正配置文件里这些段的坏键（日志中有 WARN 记录了具体错误），再重新导出。"
+            );
+            // 用 1（操作失败）而非 2：本 CLI 里 2 是**用法错误**（未知子命令、参数缺失），
+            // 而这是「用法没问题，但拒绝执行」。
+            1
+        }
         Ok(cfg) => match toml::to_string_pretty(&cfg) {
             Ok(s) => {
                 print!("{s}");
