@@ -113,6 +113,7 @@ struct ServiceResponse
     // 软键盘面板开着。吃键判定要用：中文模式无 input session 时数字键本是交还宿主的，
     // 软键盘的数字行需要它们被吃下来。
     bool IsSoftKeyboard() const { return (statusFlags & STATUS_SOFT_KEYBOARD) != 0; }
+    bool IsSoftKeyboardKeys() const { return (statusFlags & STATUS_SOFT_KEYBOARD_KEYS) != 0; }
     bool HasHotkeys() const { return !keyDownHotkeys.empty() || !keyUpHotkeys.empty(); }
 };
 

@@ -28,6 +28,24 @@ impl SoftKeyCap {
     }
 }
 
+/// 一个键位在给定 Shift / CapsLock 下取**哪一档**：`false` = 基础层，`true` = 第二层。
+///
+/// ★ **面板与协调器共用这一份判据**，所以它住在两边都依赖的 types crate 里。各写一份的
+/// 症状是「面板画着 A，敲下去出 a」——显示与输出分叉，比不支持 CapsLock 更糟。
+///
+/// 与真实键盘一致的两条：
+/// - CapsLock **只管字母**。Caps 开着按 `1` 出的仍是 `1`，不是 `!`。
+/// - CapsLock 与 Shift 是**异或**。Caps 开 + Shift 按下出的是小写，不是「更大写」。
+///   写成「或」在只按 Shift、只开 Caps 两种单独情形下都正常——最难发现的那种错。
+///
+/// ⚠️ **键盘面（`send_keys`）的点击合成不能用它**：那条路发的是真实按键，系统自己会
+/// 应用 CapsLock；再把 caps 混进 `shift` 修饰，Caps 开时合成的 `shift+q` 恰好出小写。
+/// 那里要的是「物理 Shift 按住了没有」，不是「显示哪一档」。
+pub fn slot_layer(slot: &str, shift: bool, caps: bool) -> bool {
+    let is_letter = slot.len() == 1 && slot.as_bytes()[0].is_ascii_lowercase();
+    if caps && is_letter { !shift } else { shift }
+}
+
 /// 命中 tag 基址：面板上的非键位控件。
 ///
 /// 键位用它在 `keys` 里的下标当 tag（0..47），故这些基址必须远高于键位数——
@@ -73,3 +91,29 @@ pub const SOFT_FN_KEYS: &[(&str, &str)] = &[
 
 /// [`SOFT_FN_KEYS`] 里大写锁定那一项的下标（面板要给它单独的高亮状态）。
 pub const SOFT_FN_CAPS_INDEX: usize = 6;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CapsLock 的档位：只管字母、与 Shift 异或、两种面一视同仁。
+    #[test]
+    fn capslock_only_flips_letters_and_xors_with_shift() {
+        // Caps 开：字母进第二层（键帽显示大写，敲下去也出大写）
+        assert!(slot_layer("q", false, true));
+        // ★ Caps 开 + Shift 按下 = 小写，回到基础层。
+        //   写成「或」会在这里出错，而它在只按 Shift、只开 Caps 两种单独情形下
+        //   都表现正常——最难发现的那种。
+        assert!(!slot_layer("q", true, true));
+        // 数字与符号键完全不受 Caps 影响：Caps 开着按 1 出的仍是 1
+        assert!(!slot_layer("1", false, true));
+        assert!(!slot_layer("comma", false, true));
+        assert!(!slot_layer("grave", false, true));
+        // Shift 对它们照常生效
+        assert!(slot_layer("1", true, true));
+        assert!(slot_layer("comma", true, false));
+        // Caps 关：只看 Shift
+        assert!(!slot_layer("q", false, false));
+        assert!(slot_layer("q", true, false));
+    }
+}

@@ -445,7 +445,7 @@ pub fn encode_clear_then_pass_through() -> Vec<u8> {
 /// 用于 bridge pipe 上的同步状态响应（如 ToggleMode、MenuCommand 等）。
 /// 与 EncodeActivationStatusPush 载荷格式一致，但 command 不同。
 // 状态位是**线协议的扁平字段**，逐个传即逐个写入报文；聚合成结构体只会在编码前多一层
-// 搬运，还要让 C++ 侧的字段顺序去对齐一个 Rust 结构体。故三个 encode 函数一律豁免。
+// 搬运，还要让 C++ 侧的字段顺序去对齐一个 Rust 结构体。故这几个 encode 函数一律豁免。
 #[allow(clippy::too_many_arguments)]
 pub fn encode_status_update(
     chinese_mode: bool,
@@ -455,6 +455,7 @@ pub fn encode_status_update(
     caps_lock: bool,
     host_render_avail: bool,
     soft_keyboard: bool,
+    soft_keyboard_keys: bool,
     key_down_hashes: &[u32],
     key_up_hashes: &[u32],
     icon_label: &str,
@@ -468,6 +469,7 @@ pub fn encode_status_update(
         caps_lock,
         host_render_avail,
         soft_keyboard,
+        soft_keyboard_keys,
         key_down_hashes,
         key_up_hashes,
         icon_label,
@@ -490,6 +492,7 @@ pub fn encode_activation_status_push(
     caps_lock: bool,
     host_render_avail: bool,
     soft_keyboard: bool,
+    soft_keyboard_keys: bool,
     key_down_hashes: &[u32],
     key_up_hashes: &[u32],
     icon_label: &str,
@@ -503,6 +506,7 @@ pub fn encode_activation_status_push(
         caps_lock,
         host_render_avail,
         soft_keyboard,
+        soft_keyboard_keys,
         key_down_hashes,
         key_up_hashes,
         icon_label,
@@ -513,6 +517,7 @@ pub fn encode_activation_status_push(
 ///
 /// 格式与 StatusUpdate 一致但使用 CmdStatePush 命令码，且不含 hotkeys。
 /// 用于焦点不变时的状态变化广播（如点击工具栏切换中英模式）。
+#[allow(clippy::too_many_arguments)]
 pub fn encode_state_push(
     chinese_mode: bool,
     full_width: bool,
@@ -520,6 +525,7 @@ pub fn encode_state_push(
     toolbar_visible: bool,
     caps_lock: bool,
     soft_keyboard: bool,
+    soft_keyboard_keys: bool,
     icon_label: &str,
 ) -> Vec<u8> {
     encode_status_update_ex(
@@ -531,6 +537,7 @@ pub fn encode_state_push(
         caps_lock,
         false, // host_render_avail
         soft_keyboard,
+        soft_keyboard_keys,
         &[], // no hotkeys
         &[],
         icon_label,
@@ -560,6 +567,7 @@ fn encode_status_update_ex(
     caps_lock: bool,
     host_render_avail: bool,
     soft_keyboard: bool,
+    soft_keyboard_keys: bool,
     key_down_hashes: &[u32],
     key_up_hashes: &[u32],
     icon_label: &str,
@@ -585,6 +593,9 @@ fn encode_status_update_ex(
     }
     if soft_keyboard {
         flags |= STATUS_SOFT_KEYBOARD;
+    }
+    if soft_keyboard_keys {
+        flags |= STATUS_SOFT_KEYBOARD_KEYS;
     }
 
     let key_down_count = key_down_hashes.len() as u32;

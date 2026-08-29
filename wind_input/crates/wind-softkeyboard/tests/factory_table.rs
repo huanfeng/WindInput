@@ -205,3 +205,60 @@ keys = { q = "㊙" }
     assert_eq!(math.output("z", false), Some("∞"), "其它行不受影响");
     assert_eq!(t.len(), 13, "面数不变");
 }
+
+/// 出厂表里**只有 PC 键盘面是键盘面**。
+///
+/// 这条钉住的是一句用户可见的行为：在 PC 键盘面上点 n-i-h-a-o 应该出「你好」，
+/// 而不是往文档里塞五个字母。它靠 `send_keys` 一路传到 C++ 的吃键判定
+/// （`STATUS_SOFT_KEYBOARD_KEYS`）——这一位丢了，那一面就退化成「打字母上屏字母」，
+/// 而面板看起来完全正常。
+///
+/// 反过来，符号面**不能**是键盘面：那些字符键盘上根本敲不出来，合成按键只会发出
+/// 对应键位的原字符。
+#[test]
+fn only_the_pc_page_sends_keys() {
+    let t = factory_table();
+    for p in t.pages() {
+        let expect = p.id == "pc";
+        assert_eq!(
+            p.send_keys, expect,
+            "面 {} 的 send_keys 应为 {expect}（只有 PC 键盘面发按键）",
+            p.id
+        );
+    }
+}
+
+/// 用户覆盖的三态：不写 `send_keys` 时沿用出厂值，写了才改。
+///
+/// ★ 只想换 PC 面画布的用户不该顺带把它降级成符号面——那会让整面突然打不出中文，
+/// 而配置里一个字都没提到这件事。
+#[test]
+fn send_keys_survives_a_canvas_only_override() {
+    let mut t = factory_table();
+    t.merge_user(
+        r#"
+[[pages]]
+id = "pc"
+rows = ["` 1 2 3 4 5 6 7 8 9 0 - ="]
+"#,
+    )
+    .expect("用户覆盖必须能解析");
+    assert!(
+        t.page("pc").unwrap().send_keys,
+        "整面替换未写 send_keys ⇒ 沿用出厂的 true"
+    );
+
+    t.merge_user(
+        r#"
+[[pages]]
+id = "pc"
+send_keys = false
+keys = { q = "Q" }
+"#,
+    )
+    .expect("用户覆盖必须能解析");
+    assert!(
+        !t.page("pc").unwrap().send_keys,
+        "显式写了 false 就该改过来"
+    );
+}

@@ -37,6 +37,10 @@ struct RawPage {
     /// 单键补丁，压在画布之上。键名形如 `q` / `shift+q`。
     #[serde(default)]
     keys: BTreeMap<String, String>,
+    /// 这一面**发送按键**而不是直接上屏符号。
+    ///
+    /// `None` = 用户没写这一项（合并时沿用出厂值），与 `Some(false)` 不同。
+    send_keys: Option<bool>,
 }
 
 // ───────────────────────── 运行时形态 ─────────────────────────
@@ -48,6 +52,19 @@ pub struct Page {
     pub id: String,
     /// 显示名（标签行与面名键上的字）。
     pub name: String,
+    /// 这一面**发送按键**，而不是把符号直接塞进宿主。
+    ///
+    /// # 为什么需要两种面
+    ///
+    /// 符号面（标点、希腊字母、数学符号）画的是键盘上打不出的字符，点一下就该出那个
+    /// 字符——走上屏出口，与自定义标点同族。
+    ///
+    /// 而**标准 PC 键盘面**画的是键盘本来就有的键。用户点 `n` `i` `h` `a` `o`，期待的是
+    /// 打出「你好」，不是往文档里塞五个字母。这一面必须把按键**交还给输入法**：
+    /// 鼠标点击合成一次真实按键，物理按键则干脆不接管，两条路都汇进常规输入链路。
+    ///
+    /// ★ 这不是「哪个面特殊」的硬编码，是面的一个属性：用户自制的键盘面同样可以打开它。
+    pub send_keys: bool,
     /// 键位名 → 两层输出。键恒是 [`crate::layout`] 的规范名。
     slots: BTreeMap<&'static str, Layers>,
 }
@@ -91,6 +108,7 @@ impl Page {
         let mut page = Self {
             id: raw.id.clone(),
             name: raw.name.clone(),
+            send_keys: raw.send_keys.unwrap_or(false),
             slots,
         };
         page.apply_patch(&raw.keys);
@@ -270,16 +288,23 @@ impl SoftKeyboardTable {
             }
             match self.pages.iter_mut().find(|p| p.id == rp.id) {
                 Some(existing) if rp.rows.is_some() => {
-                    // 整面替换：名字缺省时保留出厂名，避免用户只想换画布却把标签清空。
+                    // 整面替换：名字与 send_keys 缺省时保留出厂值——用户多半只想换画布，
+                    // 不该顺带把标签清空、把 PC 键盘面降级成符号面。
                     let mut fresh = Page::from_raw(rp);
                     if fresh.name.is_empty() {
                         fresh.name = existing.name.clone();
+                    }
+                    if rp.send_keys.is_none() {
+                        fresh.send_keys = existing.send_keys;
                     }
                     *existing = fresh;
                 }
                 Some(existing) => {
                     if !rp.name.is_empty() {
                         existing.name = rp.name.clone();
+                    }
+                    if let Some(v) = rp.send_keys {
+                        existing.send_keys = v;
                     }
                     existing.apply_patch(&rp.keys);
                 }

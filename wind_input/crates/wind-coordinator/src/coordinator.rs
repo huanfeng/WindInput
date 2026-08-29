@@ -5046,6 +5046,14 @@ impl Coordinator {
         let soft_keyboard = self
             .softkeyboard_active
             .load(std::sync::atomic::Ordering::Relaxed);
+        // 键盘面：按键交还输入法，C++ 不启用软键盘总闸。**每次都从当前面重新读**，
+        // 不另存一份 atomic——多一份镜像就多一处会与切面动作漂移的状态。
+        let soft_keyboard_keys = soft_keyboard
+            && self
+                .softkeyboard
+                .pages()
+                .get(self.softkeyboard_page_idx())
+                .is_some_and(|p| p.send_keys);
         let icon_label = self.mode_icon_label(chinese_mode, caps_lock);
         StatusUpdateData {
             chinese_mode,
@@ -5054,6 +5062,7 @@ impl Coordinator {
             toolbar_visible,
             caps_lock,
             soft_keyboard,
+            soft_keyboard_keys,
             icon_label,
             key_down_hotkeys: self.rt().compiled_hotkeys.key_down_tsf_hashes(),
             key_up_hotkeys: self.rt().compiled_hotkeys.key_up_tsf_hashes(),

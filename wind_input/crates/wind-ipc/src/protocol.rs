@@ -1237,6 +1237,14 @@ pub const STATUS_HOST_RENDER_AVAIL: u32 = 0x0040;
 /// 交还宿主的（`session_select_or_page` 那支只在有 session 时吃），而软键盘的数字行
 /// 需要它们被吃下来。位值必须与 `BinaryProtocol.h` 的 `STATUS_SOFT_KEYBOARD` 一致。
 pub const STATUS_SOFT_KEYBOARD: u32 = 0x0080;
+/// 当前面是**键盘面**（`send_keys`），不是符号面。
+///
+/// ★ 它决定 C++ 要不要启用软键盘总闸。键盘面把按键交还输入法：字母/数字/标点一律
+/// 落回常规判定链（中文模式吃并转发、英文模式放行），与没开面板时完全一致；只有
+/// Esc 与翻页仍归面板。少了这一位，键盘面在英文模式下会「吃了不发」——总闸吃掉键，
+/// 而常规链路在英文态返回 PassThrough，键彻底消失。
+/// 位值必须与 `BinaryProtocol.h` 的 `STATUS_SOFT_KEYBOARD_KEYS` 一致。
+pub const STATUS_SOFT_KEYBOARD_KEYS: u32 = 0x0100;
 
 // ──────────────────────────────────────────────
 // Commit result flags

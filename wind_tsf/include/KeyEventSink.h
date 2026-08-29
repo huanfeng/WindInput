@@ -190,6 +190,17 @@ private:
     ULONGLONG _pairLastActivityTick = 0;
     ULONGLONG _pairStateTtlMs = 0;
     bool _IsJumpOutKey(UINT vk) const { return _jumpOutKeys.count(vk) > 0; }
+
+    // 软键盘总闸的**唯一判据**。`OnTestKeyDown`（吃）与 `OnKeyDown`（转发）都调它。
+    //
+    // ★★★ 两处必须用同一个函数，不许各写一份 switch：那边吃了、这边不发，键就凭空
+    // 消失（core 侧一条日志都没有）。同一文件里 pair_jumpout / english_custom_punct /
+    // english_autopair 三条注释写的都是这句话，软键盘还是栽了第四次——物理 Esc
+    // 关不掉面板，查了两轮。收成一个函数，让「两边一致」由编译器而不是纪律来保证。
+    //
+    // 键盘面（send_keys）只接管 Esc 与翻页：字母/数字/标点落回常规判定链，
+    // 与没开面板时完全一致，于是这一面上能正常组码打中文。
+    bool _IsSoftKeyboardEatenKey(WPARAM vk, uint32_t modifiers) const;
     // 输入右符号本身是否跳出（配置 jump_out_keys 里的 `right_symbol` 特殊值）。
     // **本 DLL 已不再消费它**——右符号跳出统一由协调器裁决（配对栈在那边，需要比对具体是
     // 哪一对）。但仍须解析：它占 payload 首字节，不读就会算错后面 VK 列表的偏移。

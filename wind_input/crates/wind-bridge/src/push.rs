@@ -318,6 +318,7 @@ impl PushServer {
             false, // caps_lock
             false, // host_render_avail: 握手早期无焦点信息；真实 avail 位由 coordinator activation push 携带
             false, // soft_keyboard: 握手瞬间面板必然未开（它随焦点切换关闭）
+            false, // soft_keyboard_keys: 同上，面板没开就没有"当前面"
             &[],   // key_down_hotkeys
             &[],   // key_up_hotkeys
             label,

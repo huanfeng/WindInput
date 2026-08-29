@@ -264,6 +264,46 @@ STDAPI CKeyEventSink::OnSetFocus(BOOL fForeground)
     return S_OK;
 }
 
+// 软键盘总闸的**唯一判据**。`OnTestKeyDown`（吃）与 `OnKeyDown`（转发）都调它。
+//
+// ★★★ 两处必须用同一个函数，不许各写一份 switch：那边吃了、这边不发，键就凭空消失
+// （core 侧一条日志都没有，两边各自看起来都正常）。本文件里 pair_jumpout /
+// english_custom_punct / english_autopair 三条注释写的都是这句话，软键盘还是栽了第四次
+// ——物理 Esc 关不掉面板，查了两轮。收成一个函数，让「两边一致」由编译器保证而不是靠纪律。
+//
+// **键盘面（send_keys）只接管 Esc 与翻页**：字母/数字/标点落回常规判定链，与没开面板时
+// 完全一致，于是那一面上能正常组码打中文——这正是「软键盘也要能打中文」的实现方式。
+// 符号面则接管整个主键区。
+//
+// 两种面都**不吃「特殊键」封闭集**（Space / Tab / Enter / Backspace / 方向键）：它们透传
+// 给宿主，于是「按住退格连删」这类行为直接由系统 auto-repeat 提供。
+// Ctrl/Alt 组合一律放行：那是宿主的快捷键，软键盘开着也不该抢。
+bool CKeyEventSink::_IsSoftKeyboardEatenKey(WPARAM vk, uint32_t modifiers) const
+{
+    if (_pTextService == nullptr || !_pTextService->IsSoftKeyboard())
+        return false;
+    if (modifiers & (KEYMOD_CTRL | KEYMOD_ALT))
+        return false;
+
+    HotkeyType t = CHotkeyManager::ClassifyInputKey(vk, modifiers);
+    // 面板控制键：两种面都归面板。
+    if (t == HotkeyType::Escape || t == HotkeyType::PageKey)
+        return true;
+    // 键盘面：其余一律交还常规链路。
+    if (_pTextService->IsSoftKeyboardKeys())
+        return false;
+    switch (t)
+    {
+    case HotkeyType::Letter:
+    case HotkeyType::Number:
+    case HotkeyType::Punctuation:
+    case HotkeyType::SelectKey:
+        return true;
+    default:
+        return false;
+    }
+}
+
 STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
@@ -621,38 +661,21 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     // 这也是 TTL 判据必须以 DLL 侧为准的原因之一。
     TouchPairState();
 
-    // ── 软键盘总闸：接管主键区，**与中英文模式无关** ──
+    // ── 软键盘总闸：**与中英文模式无关**（判据见 _IsSoftKeyboardEatenKey） ──
     //
     // ★★★ 必须排在下面那个 `hasInputSession || isChineseMode` 块的**外面**。软键盘不
     // 组码、不产候选，`hasInputSession` 恒为 FALSE；一旦用户处在英文模式，两个条件都不
     // 成立，整块被跳过——放在块内的闸门根本执行不到。第一版就是这么写的，表现为英文态
     // 下整块面板点不动、物理 Esc 关不掉窗口（那个 keydown 压根没转发过来）。
     //
-    // 面板画的是「键位 → 符号」的映射，按哪个键出哪个符号跟中英文模式没有关系。
-    //
-    // **不吃的正是软键盘的「特殊键」封闭集**（Space / Tab / Enter / Backspace / 方向键）：
-    // 它们透传给宿主，于是「按住退格连删」这类行为直接由系统 auto-repeat 提供。
-    // Escape 例外——它是面板自己的关闭键，必须吃。
-    //
-    // Ctrl/Alt 组合一律放行：那是宿主的快捷键，软键盘开着也不该抢。
-    if (_pTextService->IsSoftKeyboard() && !(modifiers & (KEYMOD_CTRL | KEYMOD_ALT)))
+    // 符号面画的是「键位 → 符号」的映射，按哪个键出哪个符号跟中英文模式没有关系。
+    if (_IsSoftKeyboardEatenKey(wParam, modifiers))
     {
-        HotkeyType skType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
-        switch (skType)
-        {
-        case HotkeyType::Letter:
-        case HotkeyType::Number:
-        case HotkeyType::Punctuation:
-        case HotkeyType::SelectKey:
-        case HotkeyType::PageKey:
-        case HotkeyType::Escape:
-            *pfEaten = TRUE;
-            _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, skType,
-                            isChineseMode, hasComposition, _hasCandidates, hasInputSession, TRUE, L"softkeyboard");
-            return S_OK;
-        default:
-            break;
-        }
+        *pfEaten = TRUE;
+        _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers,
+                        CHotkeyManager::ClassifyInputKey(wParam, modifiers),
+                        isChineseMode, hasComposition, _hasCandidates, hasInputSession, TRUE, L"softkeyboard");
+        return S_OK;
     }
 
     if (hasInputSession || isChineseMode)
@@ -1172,32 +1195,20 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     if (isPairJumpOut)
         isInputKey = TRUE;
 
-    // ── 软键盘总闸的转发侧，**必须与 OnTestKeyDown 的 softkeyboard 分支逐条一致** ──
+    // ── 软键盘总闸的转发侧：与 OnTestKeyDown **调同一个判据函数** ──
     //
     // ★★★ 与上面的配对跳出、下面的 english_custom_punct 完全同构：那边吃了、这边不发，
     // 键就凭空消失。这一条漏掉的表现是**物理 Esc 关不掉面板**——软键盘不组码，
     // `hasInputSession` 恒为 FALSE，Escape 落进门内那条 `isInputKey = hasInputSession`
-    // 分支被判成非输入键，于是永远吃掉、永远不转发。
+    // 分支被判成非输入键，于是永远吃掉、永远不转发。判据收进
+    // `_IsSoftKeyboardEatenKey` 正是为了让两边一致由编译器保证。
     //
-    // 判据同样必须写在 `hasInputSession || isChineseMode` 这个门**之外**：英文模式下
+    // 位置同样必须在 `hasInputSession || isChineseMode` 这个门**之外**：英文模式下
     // 两个条件都不成立，写在门里的分支根本执行不到。
-    BOOL isSoftKeyboardKey = FALSE;
-    if (_pTextService->IsSoftKeyboard() && !(modifiers & (KEYMOD_CTRL | KEYMOD_ALT)))
+    BOOL isSoftKeyboardKey = _IsSoftKeyboardEatenKey(wParam, modifiers);
+    if (isSoftKeyboardKey)
     {
-        switch (CHotkeyManager::ClassifyInputKey(wParam, modifiers))
-        {
-        case HotkeyType::Letter:
-        case HotkeyType::Number:
-        case HotkeyType::Punctuation:
-        case HotkeyType::SelectKey:
-        case HotkeyType::PageKey:
-        case HotkeyType::Escape:
-            isSoftKeyboardKey = TRUE;
-            isInputKey = TRUE;
-            break;
-        default:
-            break;
-        }
+        isInputKey = TRUE;
     }
 
     if (hasInputSession || isChineseMode)
@@ -1221,10 +1232,9 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         {
             HotkeyType keyType = CHotkeyManager::ClassifyInputKey(wParam, modifiers);
 
-            // 配对跳出键复用门外算好的判据。**必须留在本链首位**：否则中文模式无会话时
-            // 会被下面那条 `isInputKey = hasInputSession` 覆盖回 FALSE，又变成吃了不发。
-            // 软键盘键与配对跳出键一样**必须留在本链首位**：否则中文模式下 Escape 会被
-            // 下面那条 `isInputKey = hasInputSession` 覆盖回 FALSE，又变成吃了不发。
+            // 配对跳出键与软键盘键都复用门外算好的判据，**必须留在本链首位**：否则
+            // 会被下面那条 `isInputKey = hasInputSession` 覆盖回 FALSE，又变成吃了不发
+            // （配对跳出是中文模式无会话时，软键盘是 Escape）。
             if (isPairJumpOut || isSoftKeyboardKey)
             {
                 isInputKey = TRUE;

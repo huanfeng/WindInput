@@ -1027,6 +1027,7 @@ impl UiManager {
                         pages,
                         current,
                         keys,
+                        send_keys,
                     } => {
                         debug!("UI: ShowSoftKeyboard (page={current}, keys={})", keys.len());
                         if soft_keyboard.is_none() {
@@ -1041,7 +1042,7 @@ impl UiManager {
                             }
                         }
                         if let Some(k) = &mut soft_keyboard {
-                            k.show(pages, current, keys);
+                            k.show(pages, current, keys, send_keys);
                         }
                     }
                     UiCommand::HideSoftKeyboard => {

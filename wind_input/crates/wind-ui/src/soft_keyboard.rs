@@ -34,7 +34,7 @@ use crate::window::LayeredWindow;
 use wind_ui_types::{
     SOFT_FN_CAPS_INDEX, SOFT_FN_KEYS, SOFT_TAG_CLOSE, SOFT_TAG_FN_BASE, SOFT_TAG_PAGE_BASE,
     SOFT_TAG_PAGE_NEXT, SOFT_TAG_PAGE_PREV, SOFT_TAG_SHIFT, SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT,
-    SoftKeyCap, UiEvent,
+    SoftKeyCap, UiEvent, slot_layer,
 };
 
 /// 每行的键位个数，与 `wind_softkeyboard::KEY_ROWS` 同构（数字行 / QWERTY / ASDF / ZXCV）。
@@ -206,6 +206,8 @@ pub struct SoftKeyboard {
     shift_locked: bool,
     /// 系统大写锁定当前是否开着（Caps 键据此高亮）。
     caps_on: bool,
+    /// 当前面是键盘面：CapsLock 参与字母键的档位显示（见 [`Self::cap_layer`]）。
+    send_keys: bool,
     /// 标签行第一个可见标签的下标（面多到一行放不下时才非 0）。
     tab_offset: usize,
     /// 物理按键按下中的键位名 + 该高亮的到期时刻。
@@ -250,6 +252,7 @@ impl SoftKeyboard {
             shift_held: false,
             shift_locked: false,
             caps_on: false,
+            send_keys: false,
             tab_offset: 0,
             down_slot: None,
             visible: false,
@@ -282,14 +285,47 @@ impl SoftKeyboard {
         }
     }
 
-    /// 当前显示的是第二层：物理按住 或 面板上锁定，任一即可。
+    /// 当前 Shift 档：物理按住 或 面板上锁定，任一即可。
+    ///
+    /// ★ **不含 CapsLock**。它同时是点击回送给协调器的 `shift`，而那边会据此合成
+    /// `shift+q`——Caps 开着再加 Shift 在真实键盘上出的是**小写**，把 caps 混进来
+    /// 会让「Caps 开时点字母」恰好出反。CapsLock 只影响显示，见 [`Self::cap_layer`]。
     fn layer_shift(&self) -> bool {
         self.shift_held || self.shift_locked
     }
 
+    /// 一个键位**显示**哪一档（两种面都生效，判据见 [`slot_layer`]）。
+    fn cap_layer(&self, slot: &str) -> bool {
+        slot_layer(slot, self.layer_shift(), self.caps_on)
+    }
+
+    /// 点击这个键位时回送给协调器的 `shift`。
+    ///
+    /// ★ 两种面语义不同，而这正是「显示与输出不分叉」的落点：
+    /// - **符号面**查表直接上屏 ⇒ 回送**显示档**，画着什么就出什么。
+    /// - **键盘面**合成真实按键 ⇒ 回送**物理 Shift**，CapsLock 由系统自己应用；
+    ///   把 caps 混进来，Caps 开时合成的 `shift+q` 恰好出小写，正好是反的。
+    fn click_shift(&self, slot: &str) -> bool {
+        if self.send_keys {
+            self.layer_shift()
+        } else {
+            self.cap_layer(slot)
+        }
+    }
+
     /// 显示面板 / 整块刷新（切面也走这里）。
-    pub fn show(&mut self, pages: Vec<String>, current: usize, keys: Vec<SoftKeyCap>) {
+    pub fn show(
+        &mut self,
+        pages: Vec<String>,
+        current: usize,
+        keys: Vec<SoftKeyCap>,
+        send_keys: bool,
+    ) {
         self.pages = pages;
+        self.send_keys = send_keys;
+        // 面的类型直接决定点击是「上屏符号」还是「合成按键」，值得留一行——
+        // 「CapsLock 不生效」那次排查，正是这一行一眼指出用户当时在符号面。
+        tracing::debug!("软键盘: show page={current} send_keys={send_keys}");
         self.current = current;
         // 标签窗口的校正统一在 `render` 里做（见 [`Self::ensure_current_visible`]）：
         // current 有热键、直通车、点标签、底行翻页四条来路，逐条加一次迟早漏一条。
@@ -428,6 +464,7 @@ impl SoftKeyboard {
                 self.render();
             }
             if caps != self.caps_on {
+                tracing::debug!("软键盘: caps_lock {} -> {caps}", self.caps_on);
                 self.caps_on = caps;
                 self.render();
             }
@@ -509,10 +546,11 @@ impl SoftKeyboard {
         // 键位：tag 即下标。
         if let Some(cap) = self.keys.get(tag as usize) {
             // 空键位不回送：面板上它是灰的，点了什么都不该发生。
-            if cap.output(self.layer_shift()).is_some() {
+            // 判空用**显示档**——与键帽画成灰的那条判据同源。
+            if cap.output(self.cap_layer(&cap.slot)).is_some() {
                 let _ = self.events.send(UiEvent::SoftKeyboardKey {
                     slot: cap.slot.clone(),
-                    shift: self.layer_shift(),
+                    shift: self.click_shift(&cap.slot),
                 });
             }
         }
@@ -804,7 +842,8 @@ impl SoftKeyboard {
         pressed: i32,
     ) -> View {
         let c = &self.colors;
-        let shift = self.layer_shift();
+        // 显示档含 CapsLock（键盘面的字母键），回送档不含——见 cap_layer / layer_shift。
+        let shift = self.cap_layer(&cap.slot);
         let cur = cap.output(shift);
         let alt = cap.output(!shift);
         // 「空」只看当前档：当前档没有映射就按不出东西，哪怕另一档有。

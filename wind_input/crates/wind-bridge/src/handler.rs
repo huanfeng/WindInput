@@ -49,6 +49,9 @@ pub struct StatusUpdateData {
     /// 软键盘面板是否开着。C++ 的吃键判定要用它——中文模式无 input session 时数字键
     /// 本是交还宿主的，软键盘的数字行需要它们被吃下来。
     pub soft_keyboard: bool,
+    /// 当前面是**键盘面**（`send_keys`）：按键交还输入法，C++ 不启用软键盘总闸。
+    /// 只在 `soft_keyboard` 为真时有意义。
+    pub soft_keyboard_keys: bool,
     pub icon_label: String,
     pub key_down_hotkeys: Vec<u32>,
     pub key_up_hotkeys: Vec<u32>,

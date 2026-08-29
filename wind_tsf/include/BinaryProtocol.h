@@ -178,6 +178,10 @@ constexpr uint32_t STATUS_HOST_RENDER_AVAIL = 0x0040; // Host render available (
 // （session_select_or_page 那支只在有 session 时吃），软键盘的数字行需要它们被吃下来。
 // 位值必须与 wind-ipc protocol.rs 的 STATUS_SOFT_KEYBOARD 一致。
 constexpr uint32_t STATUS_SOFT_KEYBOARD    = 0x0080; // Soft keyboard panel is open
+// 当前面是**键盘面**（send_keys），不是符号面。键盘面把按键交还输入法：字母/数字/标点
+// 一律落回常规判定链，只有 Esc 与翻页仍归面板。位值必须与 protocol.rs 的
+// STATUS_SOFT_KEYBOARD_KEYS 一致。
+constexpr uint32_t STATUS_SOFT_KEYBOARD_KEYS = 0x0100; // Current page sends keys, not symbols
 
 // ============================================================================
 // Protocol structures (must match Go side exactly)
@@ -846,4 +850,5 @@ struct ParsedResponse
     bool IsToolbarVisible() const { return (statusFlags & STATUS_TOOLBAR_VISIBLE) != 0; }
     bool IsCapsLock() const { return (statusFlags & STATUS_CAPS_LOCK) != 0; }
     bool IsSoftKeyboard() const { return (statusFlags & STATUS_SOFT_KEYBOARD) != 0; }
+    bool IsSoftKeyboardKeys() const { return (statusFlags & STATUS_SOFT_KEYBOARD_KEYS) != 0; }
 };

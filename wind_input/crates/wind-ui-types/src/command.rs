@@ -231,6 +231,12 @@ pub enum UiCommand {
         current: usize,
         /// 当前面的键位表，顺序即键盘上的行列顺序。
         keys: Vec<SoftKeyCap>,
+        /// 当前面是**键盘面**（`send_keys`）：画的是键盘本来就有的键。
+        ///
+        /// 面板只用它做一件事：**让 CapsLock 参与字母键的档位显示**。键盘面上
+        /// Caps 开着敲 `q` 出的是 `Q`，键帽就该显示 `Q`；符号面上 CapsLock 没有
+        /// 「大写」这个语义，按键处理也只认 Shift，跟着变只会让显示与实际不符。
+        send_keys: bool,
     },
     /// 软键盘：隐藏面板。
     HideSoftKeyboard,
