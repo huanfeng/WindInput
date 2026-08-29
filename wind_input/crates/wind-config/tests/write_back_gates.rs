@@ -44,6 +44,13 @@ const CONFIG_LOAD_SITES: &[(&str, usize, &str)] = &[
         "cmd_export 已闸（is_degraded ⇒ 拒绝导出）；load_value 只读单键显示",
     ),
     (
+        "apps/service/src/config_cli/custom_check.rs",
+        1,
+        "**不是调用点**：`config check --custom` 全程不加载本机配置（它体检的是别人的\
+         定制包），那一处是 `check_never_touches_the_user_layer` 里的**禁用词字面量**，\
+         正好用来钉住这一点。真新增调用点时次数会变成 2，本闸门照常拦",
+    ),
+    (
         "apps/service/src/main.rs",
         1,
         "只读：取日志级别等启动参数，不写盘",
@@ -75,13 +82,16 @@ const CONFIG_LOAD_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/wind-rpc/src/dispatch.rs",
-        4,
-        "config.get / getItem 只读；patch_entries 与 setItems 的 Map 键已闸",
+        5,
+        "config.get / getItem 只读；patch_entries 与 setItems 的 Map 键已闸；\
+         config.degradation 只读且**只报告降级本身**（把 degradation 原样交给设置页显示，\
+         不产生任何写回种子）",
     ),
     (
         "crates/wind-webdata/src/lib.rs",
         2,
-        "config_patch_diff 已闸（mark_degraded_seeds）；keys_overview 只显示不写盘",
+        "config_patch_diff 已闸（mark_degraded_seeds）；keys_overview 只显示不写盘，\
+         且降级时不列出不可信的那一层（见 keys_overview 的文档）",
     ),
 ];
 

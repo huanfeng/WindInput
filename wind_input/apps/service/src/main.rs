@@ -228,6 +228,26 @@ fn main() {
     );
     info!("Singleton check passed");
 
+    // 定制版身份摘要：非定制版一行都不打（绝大多数装机走这一条）。
+    //
+    // 放在版本行之后、任何配置加载之前：报障时贴上来的日志开头必须能一眼看出
+    // 「他装的是不是定制版、是哪一版」——否则后面所有「我的方案不见了 / 打不出字」
+    // 都无从归因（`data_custom` 的减法清单能让内置方案整个消失）。
+    //
+    // 文案与 `system.info` 的 `customEdition` 同源（`wind_rpc::custom_edition`）：
+    // 日志与关于页是报障的两条线索，两处各写一份格式化必然分叉。
+    //
+    // 隐私：只打定制者声明的元信息（id/名称/版本），**不打定制层路径**——路径是用户机器
+    // 信息，只在 `load_custom_manifest` 的 DEBUG/WARN 分支出现。
+    //
+    // ★ 面向用户的定制版摘要**只有这一处 INFO**。`wind-config` 的 `load_custom_manifest`
+    // 另有一行同类文案，已刻意压到 DEBUG——两行 INFO 会让读日志的人以为定制层被加载了
+    // 两次，而它们内容还不完全一样（那一行少显示名，触发点取决于谁先问 `custom_manifest()`）。
+    // 要再加一条「本机是不是定制版」的 INFO 之前，先想清楚它与这一行的关系。
+    if let Some(summary) = wind_rpc::custom_edition::startup_summary() {
+        info!("{summary}");
+    }
+
     // 2.5 等待用户配置目录就绪。
     //
     // 开机自启时服务可能跑在登录会话很早的阶段，此时漫游 known folder（%APPDATA%）

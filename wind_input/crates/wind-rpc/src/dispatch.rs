@@ -90,8 +90,55 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
             "engine": APP_VERSION,
             "variant": state.variant,
             "activeSchema": state.core.active_schema_id(),
+            // 定制版身份（`data_custom/custom.toml` 的 `[custom]`），非定制版为 `null`。
+            //
+            // ★ 落点选 `system.info` 而不是 `system.capabilities`，三条理由：
+            // ① 语义同类——这里已经是「我这台机器装的是什么」（version/variant/dataDir），
+            //    定制版身份正是同一个问题的一部分，而 capabilities 回答的是「配置键有哪些」；
+            // ② capabilities 在 `DispatchState::new` 时**生成一次并缓存**，身份混进去会让
+            //    「静态能力清单」与「本机装了什么」共用一个缓存，日后任一方要刷新都会牵连另一方；
+            // ③ 设置端启动时本就并发拉 `system.info`（wind-setting `state.rs` 的 `h_info`），
+            //    加字段是零额外往返，而新开一个 RPC 方法要在那个扇出里再加一条线程。
+            //
+            // 代价（不留白）：CLI 若只想问身份，也得拉一份完整 system.info。那份很小、
+            // 且不做磁盘 IO，代价可忽略——这正是不把**降级**也塞进来的原因，见 `config.degradation`。
+            "customEdition": crate::custom_edition::identity_json(),
         })),
         "system.capabilities" => Ok(state.capabilities.clone()),
+        // 段级降级记录：哪些段解析失败、已回落出厂值。
+        //
+        // ★ 语义是「**此刻盘上**的配置试加载一遍会不会降级」，**不是**「正在跑的这份
+        // 配置降没降级」。每次调用现读四层文件、现算一次，故用户把报错的键改好之后，
+        // 下一次调用就返回 `degraded=false`——横幅能自己消失，不必等重启，这正是选它的
+        // 理由。反过来说，**别拿它当运行时快照用**：服务当前生效的那份 `Config` 是启动
+        // 时加载的，与这里的答案可以不同（用户刚把配置改坏、还没重载时最明显）。要那种
+        // 语义得让协调器把自己那份 `degradation` 报上来，是另一件事。
+        //
+        // 不变量 6（`docs/design/data-custom-layer.md` §4）要求降级「必须 WARN 且在 UI 可见」。
+        // 日志那一半 P0 已做，这里补上「可见」——没有它，用户看到的只是「我的按键设置怎么
+        // 变回默认了」，而唯一的线索埋在日志文件里。
+        //
+        // ★ 为什么独立成方法，而不是并进 `system.info` 或 `config.get`：
+        // - 并进 `system.info`：那个方法当前**不碰磁盘**，而降级记录只能由一次真实的
+        //   `Config::load()`（读四层 TOML）产生。让一个轻量状态查询变成磁盘 IO，
+        //   代价会落在每一个只想知道版本号的调用方头上。
+        // - 并进 `config.get`：它返回的是 `Config` 本身的序列化结果，而 `degradation` 是
+        //   `#[serde(skip)]` 的运行期元信息、**刻意**不出现在配置命名空间里（否则设置端
+        //   diff 回传时它会被当成一个配置键写进 config.toml）。
+        //
+        // 形态恒为三个字段的对象（不是「没降级就不给」）：客户端据此可以无条件渲染，
+        // 「字段缺失」在跨仓契约里与「这版 core 还没实现」无从区分。
+        "config.degradation" => {
+            let d = Config::load(Config::data_dir().as_deref())?.degradation;
+            Ok(json!({
+                "degraded": d.is_degraded(),
+                // 点分路径**原样**传出（`ui.font` 而不是 `ui`）：降级粒度细到子表正是
+                // 「缩小爆炸半径」的产物，在边界上截成顶层段名等于把这份精度扔掉，
+                // 用户会以为整个界面设置都回了默认。
+                "sections": d.sections,
+                "totalFallback": d.total_fallback,
+            }))
+        }
         // 本机字体枚举（平台能力经 CoreRpc 注入；默认空表）。
         "system.fonts" => Ok(Value::Array(
             state

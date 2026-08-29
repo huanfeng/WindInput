@@ -492,6 +492,306 @@ english 由「用户 available 里排第一」那个子场景负责。把 `zz_hu
    - ⚠️ 这是**跨仓单向契约、无编译期约束**，两侧各写各的测试证明不了接线。
      必须有一个**真的建出 `data_custom` 再跑完整解析**的端到端用例。
 
+**★ 跨仓核实结论**（只读核过 `../wind-installer`，未改那个仓一个字节）：
+
+`data_custom` 这个名字在安装器里**零命中**——它是纯新增、未接线的。而两条契约**都已经
+成立**，靠的正是安装器两条路径都与名字无关：
+
+| 契约 | 结论 | 证据 |
+|---|---|---|
+| 升级/覆盖安装不删 `data_custom/` | ✅ 成立，且比原文的说法更强 | `installer/plan.rs:16-88` 是安装计划的唯一真相；解包前四个前置步骤里只有 `CleanupLegacy` 碰文件系统，而它是**逐条点名的黑名单**（`installer/legacy.rs:14-42`），没有递归扫描或通配。更进一步：本仓 `config/app.toml:29-30` 的 `legacy_files`/`legacy_dirs` **都是空的**，`plan.rs:40` 的门控使 `CleanupLegacy` 当前根本不入计划。`PrepareArchive`（`steps.rs:153-157`）只 `create_dir_all`、无前置清空；`ExtractFiles`（`steps.rs:170-188`）只正向遍历**包内条目**，从不 `read_dir(install_dir)` 反查差集 |
+| 卸载清得掉 `data_custom/` | ✅ 成立，不残留 | `uninstaller/cleanup.rs:242-246` 是**整目录递归删**（`remove_dir_all(install_dir)`），不是按清单逐项。前面那段逐项删（含显式点名的 `data/`，`cleanup.rs:215-218`）只是为这一刀解锁的预处理。GUI 路径还有第二道：卸载器把自己复制到 `%TEMP%` 后回头再删一次（`uninstaller/selfdelete.rs:48-53`） |
+
+⚠️ **一个既有缺口（不是 `data_custom` 引入的，知晓即可）**：`cleanup.rs:242` 的
+`remove_dir_all` 失败时兜底是 `schedule_delete_on_reboot(install_dir)`，而 `MoveFileExW`
+**对非空目录无效**——安装器自己在 `legacy.rs:45-47` 的注释里写明了这一点，并为此写了递归
+排队的 `schedule_dir_on_reboot()`，但那个函数**只在 legacy 清理里用了，`delete_install_files`
+没有用**。所以若 `data_custom/` 下有文件被占用导致整目录删失败，重启删除的兜底对它无效。
+同样的缺口对 `data/` 也存在（`cleanup.rs:216` 失败仅 `eprintln!`），故不是本功能的新问题；
+且 `data_custom` 按定义是主程序只读的内容，被独占锁的概率很低。
+改法是现成的（把兜底换成已有的 `schedule_dir_on_reboot()`），但那影响**所有**卸载路径，
+值得单独一轮验证，**刻意不在本计划里顺手做**。
+
+⚠️⚠️ **由此产生一条跨仓约束，写在这里因为它约束的是本仓的人**：
+`wind-installer` 的 `config/app.toml` 里，`legacy_dirs` **永远不能出现 `data_custom`**。
+那是唯一能让升级删掉定制层的入口。它与 `datadir.conf` 同类——**跨仓单向契约，无编译期
+约束**，两侧各写各的测试都证明不了它。
+
+#### ★ P3-3 实施结论：`config check`
+
+**形态**（`apps/service/src/config_cli.rs` 的 `cmd_check` + 子模块
+`apps/service/src/config_cli/custom_check.rs`）：
+
+```
+wind_input config check [--custom <data_custom 目录>] [--data <data 目录>]
+```
+
+两个目录都可省略（回落到本机安装的那一份），但**打包前自查的正式用法是显式给两个**——
+定制包那时还没装到任何机器上。`config` 有离线降级这一条已核实**仍然成立**：CLI 在
+`main.rs` 的单例检查**之前**被拦截，`check` 全程不连 core、不读用户层、一个字节都不写盘。
+子模块而不是塞进 `config_cli.rs`：新增 `mod` 要改 `main.rs`，而 `config_cli.rs` 自己
+`mod custom_check;` 就能落在 `config_cli/` 目录下。
+
+**退出码**：0 = 无错误（只有警告也是 0）／1 = 检出错误／2 = 用法错误。与 `cmd_export`
+同一套（2 留给用法错误，1 是「用法没问题但拒绝/不通过」）。警告刻意不影响退出码——
+它们说的是「现在能用、下次升级会坏」，拿它卡住打包流程弊大于利。
+
+**核心是纯函数** `check_layer(custom_dir, data_dir: Option<&Path>, app_version) -> Report`：
+不读环境变量、不读 `%APPDATA%`、不碰 `Config::load()` / `custom_manifest()`（后者是
+OnceLock + 安装根）。理由不只是可测试性——**体检的对象是「这个包发出去之后会怎样」，
+定制者本机的个人设置不该影响结论**，否则同一个包在两台机器上会体检出两种结果。
+这条不变量由 `check_never_touches_the_user_layer` 的禁用词清单钉住。
+
+##### 检出的类目
+
+| # | 类目 | 级别 | 判据 / 出处 |
+|---|---|---|---|
+| 1 | 目录不存在 | error | `is_dir()` |
+| 2 | 缺 `custom.toml` | error | 判据是**文件在场**，不是目录在场（契约 2）。整层被忽略且**无任何日志** |
+| 3 | 清单语法错误 / 字段类型错 | error | 两条都是「整个定制层不启用」，最该第一时间报 |
+| 4 | 清单未知段 / 未知键 | warn | 清单刻意无 `deny_unknown_fields`，`[schema] hide`（少个 s）这类拼写错误只能在这里报 |
+| 5 | 身份缺失（`id` / `version`） | warn | 没有它，报障时分辨不出用户装的是哪个包 |
+| 6 | `base_version` 与当前版本差距 | warn | 只比**主.次**两段，见下 |
+| 7a | 定制层 `config.toml` 语法错误 | error | 整份被跳过，本层配置差异一条都不生效 |
+| 7b | 定制层 `config.toml` **存在但读不出来** | error | 编码不是 UTF-8（记事本另存为 ANSI/GBK）、权限、被占用。后果同 7a，而运行时只有一行 INFO |
+| 8 | 已移除 / 未登记的键 | warn | `field(key)` 未命中 |
+| 9 | 类型不符 | error | `validate` 的 `TypeMismatch`。**后果最重**：段级降级会让这份包的每个用户每次启动都丢掉那一整段 |
+| 10 | 值域非法 | error | `validate` 的 `EnumOutOfRange`，附合法值域 |
+| 11 | 配置段被写成标量 | error | 前缀底下有已登记的键、值却不是表 ⇒ 同样整段降级 |
+| 12 | Map 的键名越出值域 | warn | 仅对 `FieldType::Map(非空)`（如 `ui.font.scripts`），越界键被静默丢弃 |
+| 13 | 定制层声明了 `key_actions` / `trigger_keys` | warn | 静默陷阱之一，见下 |
+| 14 | 与出厂值相同的冗余键 | warn | 「只写差异键」（契约 6）落成可执行判据，见下 |
+| 15 | hide 的目标在盘上不存在 | warn | 拼错的 id 完全无害地什么都不做，最难发现 |
+| 16 | hide 的方案/主题仍被引用 | error | 见下「引用面」 |
+| 17 | `opencc/` 里名字对不上的 `.octrie` | warn | 分**完全对不上**与**只差大小写**两种后果，见下 |
+| 18 | ★ **真加载一遍**：Map / StructList 内部的坏值、越界的整数 | error | 注册表看不见的那一半，见下 |
+
+##### 几处判据的取舍（都在实施时定下，别再回摆）
+
+**`base_version` 只比主.次两段。** 补丁号差异是常态，每次小版本更新都告警一次，只会让人
+把整个命令的输出当噪音略过。主/次版本变了才意味着「配置键可能改名或退役，值得复核一遍」。
+
+**⚠️ 「已移除的键」不能断言「它会被忽略」。** 少数旧键仍被 `migrate_*_value` 一族读着
+（`ui.candidate.comment_max_chars` 就是活的，`RETIRED_KEYS` 的文档注释里写明了「一个键
+只要还有值迁移在读它，就不能进退役清单」）。措辞据此改成「多半是旧版本遗留，也可能是
+拼错了；少数旧键还被兼容迁移读着，那是过渡措施，不保证长期有效」——报一个**方向**，
+不替用户断言结果。
+
+**冗余键检查的闸门 = `data/config.toml` 在场。** 拿不到出厂对照就**不做**这项检查，
+而不是退而用 L1 默认凑合——L1 与 L2 差异很大，用 L1 当对照会把 data 层调过的键统统报成
+「与出厂不同」，那是纯噪音。判据与 `preset_for_pruning`（取不到 preset 就退化为不清理）
+同构。这条检查的价值在于把契约 6 从一句文档建议变成可执行判据：与出厂相同的键**现在**
+不起任何作用，但主程序将来调整那个默认值时，它会把新默认顶住，现象是「新版本的改进在
+定制版上没生效」，极难归因。
+
+**⚠️ `Map` / `StructList` 就地停住，两道判据，关系是 ① ⟹ ②（子集）而**不是**等价。**
+
+- ① `is_opaque_leaf(prefix)`：这个键登记为 `Map` / `StructList` ⇒ 整张表 / 整个数组就是
+  一个配置项，里面是定制者的**数据**（标点符号、按键名、方案条目），不是配置项。
+- ② 这个前缀底下一个已登记的键都没有。①的每个键都满足②，但②在①不成立的地方也会触发
+  （未登记的整段 `[ui.oldsection]`），故②覆盖面更大——它顺带解决了「整段不认识的配置
+  只报一次，而不是把段里每一行各报一遍」。
+
+⇒ **行为上只有②被钉住**（摘掉①，全部用例仍绿；摘掉②，10 条红）。原文那句「两者恒同真、
+摘掉任意一道都不会红」只对了一半，已订正；`collect_leaves_stops_at_map_typed_keys` 钉的是
+合取，而**合取断言防不住两道判据分离**——分离恰恰发生在「①命中而②不命中」的键上，而那种
+键当前一个都不存在。真正钉住②的是 `removed_section_is_reported_once`。
+
+★ **①的判据必须是 `Map | StructList`，不能放宽成「登记过」。** ①排在②前面，将来注册表若
+同时登记 `ui.font` 与 `ui.font.family`，「登记过」会让①先赢、把整张表当叶子吞掉，里面的
+`family` 从此不再被校验——那正是错的那道。收窄之后语义才与「它是一个不透明叶子」相符，
+排序在嵌套未来里也是对的（同 `config_schema::collect_leaf_keys` 的判据）。①被抽成具名谓词
+`is_opaque_leaf`，由 `is_opaque_leaf_only_matches_opaque_types` **直接钉住这条收窄**——那是
+①唯一钉得住的性质（放宽回 `field(prefix).is_some()` 时该用例精确变红，已反事实验证）。
+
+**引用面（第 16 类）跑在 L1⊕L2⊕L2.5 上，刻意不含用户层。** 只看定制层自己的
+`config.toml` 会漏掉绝大多数真实情况——`schema.available` 里那个被 hide 的方案通常来自
+出厂 `data/config.toml`。当前覆盖的引用点：
+
+- `schema.active` / `schema.available[i]` / `schema.primary_pinyin` / `schema.primary_codetable`
+- `schema.mix_modes[i].members`（**`$primary_pinyin` 占位符要先解析**，否则漏掉一整类）
+- `keys.key_actions.*` 与 `schema.codetable.z_key_action` 里的
+  `special:` / `toggle_schema:` / `switch_schema:`（经 `BoundAction::parse`，不自己抄一份前缀解析）
+- `ui.theme.name`（主题）
+
+每条结论都算出**引用点住在哪一层**（定制层 / 出厂 / 内置默认），据此给不同的改法：来自
+出厂的那些，改法是「在 `data_custom/config.toml` 里写这个键把出厂值盖掉——**别去改
+`data/`**」，而不是让定制者去动出厂文件。**已知不覆盖**：方案级 `[key_actions]`
+（`.schema.toml` 里那份）。
+
+**opencc：半套目录不报错，名字对不上才报——而「对不上」有两种，后果不同。**
+
+P1d 改成按名逐文件覆盖之后，只放一两本 `.octrie` 正是被支持的用法，报它就是报错了对的做法。
+判据是「出厂 `data/opencc/` 里有没有同名文件」，不引入 `wind-transform` 依赖去问 `chain_for`。
+
+⚠️ **原文把后果写反了一半，已订正。** 检测本身两种都抓得到（`list_file_names` 走 `read_dir`
+拿磁盘真实文件名，`BTreeSet<String>` 精确比较），差别在措辞：
+
+- **完全对不上**（`STPhrase` / `MyDict`）：链认的是固定的几个名字，链里不认识它 ⇒ 在**任何**
+  平台上都永远取不到，程序照常用出厂那几本工作，现象是「换了词表却一个字都没变」。
+- **只差大小写**（`stphrases` vs `STPhrases`）：加载侧 `resolve_overridable` 用 `p.is_file()`
+  判定，`p` 是按出厂拼法 `opencc/STPhrases.octrie` 拼出来的——**在大小写不敏感的卷上它会被
+  命中并加载**。本项目两个发行平台（Windows NTFS、macOS APFS 默认）都不敏感，所以
+  「永远不会被加载」这句话对这一种是**假的**，只在 Linux 成立。措辞改成「现在能被取到，
+  但那是在赌文件系统的行为；换到区分大小写的地方就取不到了」，并直接给出正确拼法。
+
+**★ 第二道类型判据：把合并结果真的反序列化一次（第 18 类）。**
+
+⚠️ **这是审查揪出的一个洞，正中本命令存在的理由。** `validate()` 对 `Map` / `StructList`
+只做**一层形状判定**（`config_schema.rs`：`Map(_) => is_table()`、`StructList => is_array()`），
+而 `collect_leaves` 又在这两类键上就地停住 ⇒ 表里的**值**再没有任何一处被检。运行时 serde
+逐个值反序列化，一失败就是段级降级。实测的三种漏网：
+
+| 定制层写法 | 注册表 `validate` | 运行时 serde |
+|---|---|---|
+| `[input.punct.custom_mappings]` `"," = "，"` | `Ok(())` | `invalid type: string, expected a sequence in \`input.punct.custom_mappings.,\`` |
+| `[ui.font.scripts]` `latin = "Consolas"` | `Ok(())` | 同上 |
+| `[ui.candidate]` `per_page = -1` | `Ok(())` | `invalid value: integer -1, expected usize` |
+
+第一行就是最现实的失败场景：定制者写自定义标点，用最自然的写法 `"," = "，"`（值其实必须是
+数组）。`config check` 打印「✓ 没有发现问题」，包发出去，之后**每个用户、每次启动**的
+`input.punct` 整段回落出厂默认。
+
+修法是 `check_deserialization`：把 `L1⊕L2⊕L2.5` 真的 `try_into::<Config>()` 一次。判据与运行时
+完全一致，因为它**就是**运行时那条路径。三条必要的免责：
+
+1. **先拿 `L1⊕L2` 单独试一次作对照。** 出厂 `data/config.toml` 自己就反序列化不了时，合并
+   结果当然也不行——那不是定制者的错，把它栽给定制层是最坏的一种误报。对照失败就跳过本项
+   并声明。没有出厂对照（`--data` 拿不到）时同样不做，理由与冗余键那条同构。
+2. **前一道判据已经点名过的键不重复报。** 「已点过名」直接从 `rep` 里取（本文件、error 级、
+   带键名的那些），**不手动维护一个集合**——手动维护的那种一定会在下一处新增检查时漏掉，
+   实测就漏过 `collect_leaves` 报的「段被写成标量」，于是同一个键报了两遍。
+3. ⚠️ **本函数跑的是裸 `try_into`，没跑 `Config::load` 的那批 `migrate_*_value`**（它们是
+   wind-config 的私有函数，CLI 调不到）。其中**两条会就地改写已注册的键**：
+   `migrate_index_labels_value` 把 `ui.candidate.index_labels` 从字符串改写成数组、
+   `migrate_empty_code_behavior_value` 把非法枚举值改写成 `commit`。所以这两个键上
+   「裸 try_into 失败、而实际 load 成功」是可能的。**但它们不会从这里漏成误报**：两者都是
+   普通标量键，注册表那条（TypeMismatch / EnumOutOfRange）先一步点了名，免责 2 让本函数闭嘴。
+   ⛔ **不要在 CLI 里复刻一份迁移名单**——那是第二个真相源，本仓反复栽过。
+
+**已知局限（如实记下）**：靠迁移活着的旧格式（`index_labels = "1234"`、非法的
+`input.*_behavior` 值）会被注册表那条报成 **error**，而实际 load 能救回来，级别偏严。措辞
+本身没错（那两种确实都该改），只是重了一档。修它需要一份「谁还有迁移在读」的名单，
+代价大于收益，暂不做。
+
+**★ 「config.toml 存在但读不出来」必须与「不存在」分开（第 7b 类）。**
+
+`read_toml` 原先是 `let Ok(text) = read_to_string(path) else { return Ok(None) }`——**任何**
+读失败（非 UTF-8、权限、被占用）都退化成「文件不存在」，而调用方对「不存在」什么都不做。
+现实的失败场景：中文定制者用记事本编辑 `data_custom/config.toml`（注释里有中文），另存为
+ANSI/GBK ⇒ 不是合法 UTF-8 ⇒ 定制层的配置差异**一条都不生效**，运行时只有一行 INFO，而
+`config check` 打印「✓ 没有发现问题」。清单那条路径一直是分开处理的，config.toml 这条漏了。
+现改为 `TomlRead { Absent, Parsed, Unreadable, BadSyntax }` 四态；`Absent` 仍然静默——只做
+减法的定制包本就不必有 config.toml。
+
+**★ `--custom` 给了而 `--data` 省略时，绝不回落到本机安装的 data 目录。**
+
+那会拿这台机器的出厂数据去对照别人的包：冗余键、hide 目标是否存在、opencc 文件名比对
+三项检查全都会得出**与那个包不符**的结论，而抬头里印的出厂目录与 `--custom` 八竿子打不着，
+人一眼看不出结论是错的。现改为在 `--custom` 的**同级**找 `data/`（`data/` 与 `data_custom/`
+必须同级是本功能的硬契约，`variant::install_root` 刻意不拆成两个注入点正是这个理由），
+找不到就是 `None` ⇒ 需要出厂对照的检查跳过并在抬头声明。`--custom` 省略时（体检本机装的
+那份）才回落 `Config::data_dir()`。
+
+##### 两张清单守门测试的登记（不登记 = 全仓测试红）
+
+- `wind-config/tests/resource_layer_gates.rs`：新增文件出现了 `join("schemas")` /
+  `join("themes")` / `join("opencc")`。判定是**刻意只看命令行给的那两个目录**，不走
+  `resource_layers`——同 `dict weight-check --data` 的取舍。`OPENCC_SITES` 那张「刻意为空」
+  的表因此破了例，注释里写明了理由：那句「空表」约束的是**加载**侧，本处是**诊断**侧，
+  只列目录名做比对、不建 `Converter`，成立的前提恰恰就是「链按文件名跨层取」。
+- `wind-config/tests/write_back_gates.rs`：`check_never_touches_the_user_layer` 里的禁用词
+  字面量 `"Config::load("` 被那张清单的 grep 数成了调用点。登记为「**不是调用点**」而不是
+  换个写法绕开——绕开正是那份文档警告过的事，而登记把这个假阳性记在了下一个人会看的地方。
+
+##### 守门测试
+
+`apps/service/src/config_cli/custom_check.rs` 的 `mod tests`，42 条，全部自造夹具
+（`tempfile::TempDir` 建 `root/data` + `root/data_custom`），**不依赖 `build_dev/data`**：
+本命令的判据只有「注册表 + 真加载一遍 + 盘上的文件名」，没有一条需要真实词库。
+
+**反事实已逐类验证**（摘掉某类检查 ⇒ 对应用例精确变红，其余仍绿）：类型不符、值域非法、
+已移除键、Map 不下钻、hide 引用、hide 目标不存在、`key_actions` 陷阱、冗余键、清单未知段、
+`base_version`、opencc 名字（含大小写那一支）、段写成标量、Map 键名值域、清单缺失、
+清单语法错误、清单字段类型、目录不存在、**反序列化探针整条**、**探针的免责 1（出厂对照）**、
+**探针的免责 2（不重复报）**、**错误路径抽取认换行**、**config.toml 读失败分支**、
+**判据①的收窄**——全部变红且指向正确的用例。
+
+⚠️ **判据①（`is_opaque_leaf`）在行为上钉不住**（① ⟹ ②，摘掉①一条用例都不红）。能钉的是
+它的**收窄**：`is_opaque_leaf_only_matches_opaque_types` 直接断言谓词只认 `Map`/`StructList`，
+放宽回 `field(prefix).is_some()` 时该用例精确变红。这是审查退回过的一处，别再简化。
+
+⚠️ **验证过程中揪出两条「摘掉也不红」的假绿**，都是「只数错误条数、不看措辞」造成的，
+已改成断言具体措辞：
+
+- `manifest_syntax_error_*` 原来只断言「有错误且提到『整个定制层不启用』」——而清单读不出来
+  时还有一条「字段类型不对」的出口，措辞里同样有那句话，于是语法这一路被摘掉用例照样绿。
+  现在必须点到「TOML 语法错误」这几个字。
+- `missing_directory_is_error` 原来只断言 `errors() == 1`——摘掉目录判据后会落到「缺少
+  custom.toml」那条上，条数不变、照样绿。现在必须点到「这个目录不存在」。
+
+---
+
+### 定制版制作指南（要点）
+
+> 完整版归文档站 `WindInputDocs` 的「定制版制作指南」（另仓，本次未动）。这里先把**判据性**
+> 的几条记下来，免得指南写出来之前它们只存在于代码注释里。
+
+1. **层序是 `data < data_custom < %APPDATA%`。** 定制层能盖掉出厂值，但永远盖不过终端
+   用户自己的设置——这是有意的：定制版是「换一套出厂配置」，不是「替用户做决定」。
+
+2. **不要改 `data/`，只写 `data_custom/`。** 目录结构与 `data/` 同构，加法与整表替换
+   **不需要在清单里声明**，把文件放进对应位置即可。这样主程序升级时 `data/` 整个被覆盖，
+   而你的定制内容毫发无伤。
+
+3. **`data_custom/custom.toml` 必须在场且能解析**，否则整个定制层被完全忽略（**不是
+   「少了 hide 清单」，是连方案、主题、配置一起回落原版**），而且程序一切正常、日志里
+   连 WARN 都没有。格式：
+
+   ```toml
+   [custom]
+   id = "huma-edition"       # 稳定标识，日志/关于页/报障用
+   name = "虎码定制版"
+   version = "1.2"           # 定制包自身的版本
+   base_version = "0.9.30"   # 基于哪个主程序版本定制
+
+   [schemas]
+   hide = ["wubi86", "wubi86_pinyin"]
+
+   [themes]
+   hide = ["msime"]
+   ```
+
+   清单只负责**减法**（`hide`）与**身份**。段名 `[schemas]` / `[themes]` 都是**复数**：
+   写成 `[schema]` 解析得过、一个字都不起作用。
+
+4. **`hide` 是绝对的**：被 hide 的 id 在**任何层**都不存在，包括用户自己在
+   `%APPDATA%\WindInput\schemas\` 里放的同名文件。所以只 hide 你确实想删掉的**内置** id。
+
+5. **只写差异键，不要整份复制 `config.toml`。** 差异越小，跨版本存活率越高。与出厂值
+   相同的键现在不起作用，但主程序将来调整那个默认值时，你这份旧值会把新默认顶住。
+
+6. **⚠️ 静默陷阱一：定制层里不要声明 `[keys] key_actions`**（`input.temp_pinyin.trigger_keys`
+   / `input.temp_english.trigger_keys` 同理）。首次启动时程序会把折算后的按键绑定**一次性
+   物化**进终端用户的个人配置并打上完成标记；此后你在定制包里再改这些绑定，对**已经装过
+   旧版包的用户永远不生效**，且没有任何日志——只有全新安装的用户才拿得到新绑定。
+
+7. **⚠️ 静默陷阱二：`data_custom/opencc/` 里的文件名必须与出厂目录逐字相同**（含大小写）。
+   简繁转换链按**文件名**跨层取：只放一两本是正常用法（没放的那几本自动用出厂的），但
+   名字对不上的那本会出问题，而且两种「对不上」后果不同——**完全对不上**（`MyDict`）在任何
+   平台上都永远取不到；**只差大小写**（`stphrases`）在 Windows / macOS 上现在能取到，但那是
+   在赌文件系统的大小写不敏感，换到区分大小写的地方（Linux、开了大小写敏感的 NTFS 目录、
+   某些打包解包链路）就失效，届时现象是「同一个包在这台机器上换了词表、在那台上一个字都
+   没变」。两种程序都照常工作，不会报错。
+
+8. **⚠️ 映射表的值是数组，不是单个值。** `[input.punct.custom_mappings]` 里要写
+   `"," = ["，"]` 而不是 `"," = "，"`；`[ui.font.scripts]` 同理（`latin = ["Consolas"]`）。
+   写错的后果是那一整段配置在加载时被丢掉换成出厂默认，**每个用户、每次启动**都会踩到。
+
+9. **打包前跑一次 `wind_input config check --custom <目录> --data <目录>`。** 上面这几条
+   连同配置键的类型/值域、以及「把你的定制层真的加载一遍」的结果，它都会当场报出来，
+   并给出该改哪个文件的哪个键。`--data` 省略时会自动找 `--custom` 同级的 `data/`。
+
 ---
 
 ## 4. 不变量与风险
@@ -505,6 +805,25 @@ english 由「用户 available 里排第一」那个子场景负责。把 `zz_hu
 | 5 | `hide` 与 `[schema].hidden` 保持正交 | 被隐藏方案仍被 mix/active 引用到 |
 | 6 | 段级降级必须 WARN（P0）且在 UI 可见（P3） | 掩盖真实的迁移缺失，故障静默化 |
 | 7 | 降级后所有「整表覆盖 / 导出」下游必须闸掉 | 降级本身变成磁盘上的永久数据丢失 |
+| 8 | 折算型数据的降级判据须覆盖**全部来源路径** | 把出厂默认当成用户的真实绑定展示 |
+
+### 两条实施期确立、只记在这里的判断
+
+**① 不为「INFO 级定制版摘要有且只有一处」加 grep 守门测试。**
+本仓现有的两条 grep 守门（`write_back_gates` / `resource_layer_gates`）守的都是**会丢用户
+数据**的东西，威慑力正来自「红了就意味着你可能在毁数据」。为「日志多打一行」再加一条同形
+测试会稀释这个信号——下一个人看到 gates 类变红时，第一反应会从警觉滑向不耐烦。日志重复的
+最坏后果只是读日志的人误以为加载了两次，`config.rs` 与 `main.rs` 两处注释已经拦着。
+⇒ 这条改动**没有守门测试兜着**，是知情的取舍，不是疏漏。
+
+**② 不变量 8 的来源。** `keys_overview` 的 session 表是**折算**产物，来源有五个字段
+（`session_actions` / `page_keys` / `select_char_keys` / `highlight_keys` /
+`select_key_groups`）。实施时判据只问了同名子表，理由写的是「标量键探针定位不到子表、会
+整段记 `keys`」——**恰好反了**：`narrow_bad_section` 对坏段的每个直接子键都做探针，不区分
+子表与标量。实测 `[keys] page_keys = 5` ⇒ `sections=["keys.page_keys"]`，同名子表判据
+够不着。⇒ 用户写 `[keys] page_keys = "brackets"`（组名列表长得像单值，这是最自然的手误）
+就会看到一张**折算自出厂组名**的按键表，且标记为 `null`。
+该判据的前提（「降级粒度对段内标量/列表键同样成立」）住在另一个 crate，已单独钉成测试。
 
 **已核实为安全、不必额外处理的**：
 

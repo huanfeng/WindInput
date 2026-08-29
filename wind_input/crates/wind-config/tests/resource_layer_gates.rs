@@ -48,6 +48,13 @@ use std::path::{Path, PathBuf};
 /// 要 ⇒ 改用 `Config::resource_layers*`；不要 ⇒ 登记并写明只认哪一层、为什么。
 const SCHEMAS_SITES: &[(&str, usize, &str)] = &[
     (
+        "apps/service/src/config_cli/custom_check.rs",
+        1,
+        "`config check --custom` 刻意**只看命令行指定的那两个目录**（`--custom` / `--data`），\
+         不走 resource_layers：它体检的是一份还没安装的定制包，混进本机安装的层会让同一个\
+         包在两台机器上体检出两种结论。同 `dict weight-check --data` 的取舍",
+    ),
+    (
         "apps/service/src/dict_cli.rs",
         2,
         "`dict weight-check` 的扫描层序：不带 `--data` 时按 resource_layers 展开（第 2 处），\
@@ -78,12 +85,19 @@ const SCHEMAS_SITES: &[(&str, usize, &str)] = &[
 ];
 
 /// 允许出现 `join("themes")` 的文件及**出现次数**。
-const THEMES_SITES: &[(&str, usize, &str)] = &[(
-    "crates/wind-webdata/src/lib.rs",
-    3,
-    "全是**用户层**：user_themes_dir（导入/删除的落点）与两处备份源。\
-     主题搜索链走 theme_search_dirs（已按层序）",
-)];
+const THEMES_SITES: &[(&str, usize, &str)] = &[
+    (
+        "apps/service/src/config_cli/custom_check.rs",
+        1,
+        "同 SCHEMAS_SITES 里那条：`config check --custom` 只看命令行指定的两个目录",
+    ),
+    (
+        "crates/wind-webdata/src/lib.rs",
+        3,
+        "全是**用户层**：user_themes_dir（导入/删除的落点）与两处备份源。\
+         主题搜索链走 theme_search_dirs（已按层序）",
+    ),
+];
 
 /// 允许出现 `join("opencc")` 的文件及**出现次数**。
 ///
@@ -91,7 +105,16 @@ const THEMES_SITES: &[(&str, usize, &str)] = &[(
 /// （rel = `opencc/<名>.octrie`）」，全仓不该再有任何一处把 opencc 当成一个目录去拼——
 /// 那种写法一定意味着「先选中一个目录再整份加载」，而那正是「定制层只放一本
 /// `STPhrases.octrie` 就一个字都不转」的成因（见 `Converter::load_variant_resolved`）。
-const OPENCC_SITES: &[(&str, usize, &str)] = &[];
+///
+/// ⚠️ 上面那句「空表是刻意的」约束的是**加载**侧。下面这一条是**诊断**侧的例外：
+/// `config check --custom` 要把定制层 `opencc/` 里的文件名与出厂目录逐个比对，好报出
+/// 「名字对不上 ⇒ 这本永远不会被任何一条链取到」。它只列目录名、不建 `Converter`，
+/// 成立的前提恰恰就是「链按文件名跨层取」这条性质——与上面要禁的写法方向相反。
+const OPENCC_SITES: &[(&str, usize, &str)] = &[(
+    "apps/service/src/config_cli/custom_check.rs",
+    2,
+    "诊断而非加载：列定制层与出厂层的 opencc 目录做文件名比对，不构建 Converter",
+)];
 
 #[test]
 fn resource_dir_join_sites_are_all_classified() {

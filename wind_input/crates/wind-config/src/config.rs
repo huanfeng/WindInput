@@ -4776,7 +4776,15 @@ fn load_custom_manifest() -> Option<CustomManifest> {
     };
     match toml::from_str::<CustomManifest>(&text) {
         Ok(m) => {
-            info!(
+            // DEBUG 而非 INFO：面向用户的**权威摘要**只有一处——服务启动路径上的
+            // `wind_rpc::custom_edition::startup_summary()`（位置确定、含显示名）。这里再打
+            // 一行 INFO 会让读日志的人以为定制层被加载了两次，而两行内容还不完全一样。
+            //
+            // 保留这一行（不删）的理由：它记录的是「解析成功、层已启用」这个事实，且触发点
+            // 就是**第一次**问 `custom_manifest()` 的地方——排查「定制层什么时候才生效」
+            // 时，这个时间点本身就是线索；而非 service 的宿主（TSF DLL / 移动端 / CLI）
+            // 根本走不到那条启动摘要。
+            debug!(
                 "定制版 {} {}（基于 {}）",
                 if m.custom.id.is_empty() {
                     "<未命名>"
@@ -5507,6 +5515,19 @@ impl Config {
     /// 而用户会以为它还生效（这正是本次收编要消除的问题之一）。
     ///
     /// 已在 `keys.key_actions` 里显式配过的键**不覆盖**：用户的新配置优先于存量迁移。
+    ///
+    /// # ⚠️ 它让 `key_actions` 成为**跨段折算**的产物（降级判据要知道这件事）
+    ///
+    /// 来源里的 `input.temp_english.trigger_keys` 一类住在 **`input` 段**，折算目标在
+    /// `keys` 段。于是段级降级把 `input` 换成出厂值时，`keys.key_actions` 里由本函数
+    /// 填进去的那几条也一起变成出厂值，而 `degradation.sections` 记的是 `input.*`——
+    /// 任何「只问 `keys.*`」的判据都够不着。
+    ///
+    /// 已知的消费者是 `wind-webdata` 的 `keys_overview`（设置页按键总览），它**刻意
+    /// 不把 `input` 段拉进判据**：本函数只对 `key_actions_materialized < VERSION` 的
+    /// 存量用户跑一次，是过渡态，而拉进去的代价是「存量用户 `input` 段一坏，按键总览
+    /// 整片消失」。这条取舍记在这里，是为了让下一个动本函数的人知道它有这么一个
+    /// 「跨段」的性质——**别把新的折算来源加成常驻的**，那会让上面那个取舍不再成立。
     fn migrate_trigger_keys_into_key_actions(&mut self) {
         // ★ 已物化：`key_actions` 是唯一真相源，本折算必须彻底让位。
         //

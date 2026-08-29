@@ -1188,10 +1188,12 @@ pub trait WebDataRpc: WebDataHost {
                 // 按键总览（只读旁路）：本方案下每个绑过的键当前干什么、来自哪一层。
                 // 组装在这里而不是设置页：全局那份要经 `effective_session_actions` 折算，
                 // 展开规则只该有一处。见 [`keys_overview`]。
-                let overview = keys_overview(&v);
+                let (overview, overview_degraded) = keys_overview(&v);
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("leadingCodeKeys".to_string(), json!(leading_keys));
                     obj.insert("keysOverview".to_string(), Value::Array(overview));
+                    // 全局层不可信时的说明（见 [`keys_overview`]）。恒在，无降级时为 `null`。
+                    obj.insert("keysOverviewDegraded".to_string(), overview_degraded);
                 }
                 Ok(v)
             }
@@ -3315,6 +3317,10 @@ pub const READONLY_SIDECAR_FIELDS: &[&str] = &[
     "punctOverride",
     "leadingCodeKeys",
     "keysOverview",
+    // 「这张总览的全局层不完整」的说明（段级降级时非 null）。与 `keysOverview` 同进同出：
+    // 漏登记的话它会随 saveConfig 落进 override，从此方案文件里带着一段**某次启动的**
+    // 降级快照，谁也不读、也没人会想到去删。
+    "keysOverviewDegraded",
 ];
 
 /// 按键总览：这个方案下每个绑过的键**当前**干什么、来自哪一层。
@@ -3336,16 +3342,61 @@ pub const READONLY_SIDECAR_FIELDS: &[&str] = &[
 ///
 /// 给动词原值（`page_prev`）而不是中文名：文案值域已经在设置页的下拉里（两处各一份中文名
 /// 必然漂移），而这里给的是**语义结果**——哪个键、什么动作、来自哪层。翻译归 UI。
-fn keys_overview(schema_cfg: &Value) -> Vec<Value> {
-    let Ok(mut cfg) = wind_config::Config::load(wind_config::Config::data_dir().as_deref()) else {
-        // 读不到全局配置就整表不给：只列方案层会让用户以为「全局什么都没配」，
-        // 半份数据比没有更误导。
-        return Vec::new();
+///
+/// # 段级降级时这张表会骗人
+///
+/// `Config::load` 不再因为一个坏键整份失败（P0 的段级降级），而是把坏段换成 **L1 出厂值**
+/// 再返回 `Ok`。于是「读不到全局配置就整表不给」这条老判据够不着新的失效形态：`keys` 段
+/// 降级时 `load()` 成功、`cfg.keys.key_actions` 是一张**只有出厂绑定的表**，照原样渲染
+/// 出去就是把出厂默认当成「用户的真实绑定」展示——用户看着一张对的表，却怎么也对不上
+/// 实际按键行为，而唯一的线索埋在日志里。
+///
+/// 处置与老判据同构、只是判得更细：**不可信的那一层就不列**（不是列出来再打个标），
+/// 同时经第二个返回值说明「哪张表的全局层缺了、因为哪些段降级」。只标不删的话，设置页
+/// 那侧漏读一个字段就退化成「把出厂表当真实绑定展示」，而那正是要防的事。
+///
+/// 判据按**表**分别取，不是「keys 段一坏两张表全清」：两张表互不相干，一起清会把本来
+/// 完好的那张也变成空白。每张表问的是它的**全部来源路径**，见 [`keys_overview_of`] 里
+/// 那张表——那不是形式，漏一条就退回本节开头描述的失效形态。
+///
+/// 返回 `(总览, 不完整说明)`；后者无降级时为 `Value::Null`。
+fn keys_overview(schema_cfg: &Value) -> (Vec<Value>, Value) {
+    let cfg = match wind_config::Config::load(wind_config::Config::data_dir().as_deref()) {
+        Ok(mut cfg) => {
+            // 与 `ConfigBundle::build` 一样先 normalize：那里还有存量迁移（旧字段折算进
+            // `key_actions` / `session_actions`），跳过它算出来的表与运行时不一致。
+            cfg.normalize();
+            cfg
+        }
+        // 读不到全局配置：整个全局层不可信，与 `total_fallback` 是同一件事，故合流到
+        // 同一套处置（下面的 taints 对每张表都成立 ⇒ 全局层一律不列）。
+        //
+        // ⚠️ 这**是一处行为变更**（不是等价重构）：老行为是整表不给（`return Vec::new()`，
+        // 连方案层也不列），新行为是列出方案层 + 给标记。改的理由是老行为对调用方而言与
+        // 「这个方案一个键都没绑」无从区分；方案层的数据来自方案文件、不受 `Config` 降级
+        // 影响，扣着不给并不更安全。
+        //
+        // ⚠️ 且这条分支在 P0 之后**已基本不可达**：`Config::load` 内部的反序列化失败已由
+        // 段级降级接住，`?` 只剩 `toml::Value::try_from(Config::default())` 那一处（默认值
+        // 序列化失败，实际上不会发生）。留着是防御性的——不留就得写 `unwrap`，而
+        // 「不可达」这个判断依赖的是下层实现，不该在这里钉死。
+        Err(_) => {
+            let mut cfg = wind_config::Config::default();
+            cfg.degradation.total_fallback = true;
+            cfg
+        }
     };
-    // 与 `ConfigBundle::build` 一样先 normalize：那里还有存量迁移（旧字段折算进
-    // `key_actions` / `session_actions`），跳过它算出来的表与运行时不一致。
-    cfg.normalize();
+    keys_overview_of(&cfg, schema_cfg)
+}
 
+/// [`keys_overview`] 的纯函数内核：配置由调用方给定，不碰磁盘也不碰环境变量。
+///
+/// 拆出来是为了让「降级时全局层不列 + 带出不完整标记」这条判据能被**普通单测**盯住：
+/// 走 [`keys_overview`] 的话，要造一份真会降级的配置就得重定向 `WIND_INSTALL_ROOT` /
+/// `WIND_DATADIR_CONF`，那两个杠杆经 OnceLock、同一测试二进制里只认第一次，于是这条
+/// 判据要么单独占一个测试二进制，要么静默测到错误的目标。而 `degradation` 是 `Config`
+/// 上的公开字段，直接置上去就是等价的输入。
+fn keys_overview_of(cfg: &wind_config::Config, schema_cfg: &Value) -> (Vec<Value>, Value) {
     let schema_table = |key: &str| -> std::collections::BTreeMap<String, String> {
         schema_cfg
             .get(key)
@@ -3358,20 +3409,98 @@ fn keys_overview(schema_cfg: &Value) -> Vec<Value> {
             .unwrap_or_default()
     };
 
+    let empty = std::collections::BTreeMap::new();
+    let session = cfg.keys.effective_session_actions();
     let mut out = Vec::new();
-    push_overview_layer(
-        &mut out,
-        "lead",
-        &cfg.keys.key_actions,
-        &schema_table("key_actions"),
-    );
-    push_overview_layer(
-        &mut out,
-        "session",
-        &cfg.keys.effective_session_actions(),
-        &schema_table("session_actions"),
-    );
-    out
+    let mut tainted: Vec<(&str, &[&str])> = Vec::new();
+    // 每张表：(总览表名, 方案文件里的字段名, **全部来源路径**, 全局层的值)。
+    //
+    // 表名与字段名刻意不同（总览面向用户，方案文件里是 `key_actions` / `session_actions`），
+    // 故写在同一行里配对，别再另设一处映射。
+    //
+    // ★★ 来源路径是**并集**，不是「同名字段」。这里曾经只问 `keys.session_actions`，
+    // 理由写的是「折算来源是标量/列表键，出问题会整段记 `keys`，祖先判据照样成立」——
+    // **那条理由是错的**：`narrow_bad_section`（wind-config）对坏段的**每一个直接子键**
+    // 都做探针，不分子表还是标量/数组（`probe_section` 把待测值贴到全默认骨架上试，
+    // 标量一样试得出来）。实测 `[keys] page_keys = 5` ⇒ `sections = ["keys.page_keys"]`、
+    // `taints("keys.session_actions") == false`，而 `page_keys` 已被换成出厂值 ⇒ 总览
+    // 照常列出折算自出厂组名的翻页键、标记还是 `null`，正是本函数要消灭的那个形态。
+    //
+    // ⚠️ **通用形状，别只记住这一个例子**：折算型数据的降级判据必须覆盖**全部来源路径**，
+    // 而不是同名字段。给 `KeysConfig::effective_session_actions` 加新的折算来源时，这张表
+    // 要一起加——漏一个没有任何编译期或测试信号，只会让那一格悄悄退回「把出厂值当成
+    // 用户的真实绑定展示」。
+    //
+    // ⚠️ 同一形状还有一处更窄的，**刻意不进判据**：`normalize()` 里的
+    // `migrate_trigger_keys_into_key_actions` 把 `input.temp_english.trigger_keys` 等
+    // **跨段**折算进 `key_actions`，于是 `input` 段降级也能污染 lead 表。它只对
+    // `key_actions_materialized < VERSION` 的存量用户跑一次，是过渡态；为它把整个 `input`
+    // 段拉进按键表的判据，代价（存量用户 `input` 一坏，按键总览整片消失）大于收益。
+    for (table, field, sources, global) in [
+        (
+            "lead",
+            "key_actions",
+            &["keys.key_actions"][..],
+            &cfg.keys.key_actions,
+        ),
+        (
+            "session",
+            "session_actions",
+            &[
+                "keys.session_actions",
+                "keys.page_keys",
+                "keys.select_char_keys",
+                "keys.highlight_keys",
+                "keys.select_key_groups",
+            ][..],
+            &session,
+        ),
+    ] {
+        let global = if sources.iter().any(|p| cfg.degradation.taints(p)) {
+            tainted.push((table, sources));
+            &empty
+        } else {
+            global
+        };
+        push_overview_layer(&mut out, table, global, &schema_table(field));
+    }
+
+    let degraded = if tainted.is_empty() {
+        // ★ 恒在的字段、无降级时显式 `null`（不是「不给字段」）：跨仓契约无编译期约束，
+        // 「字段不存在」与「这版 core 还没实现」在设置端看来完全一样。
+        Value::Null
+    } else {
+        // ★ 只列**真正导致上面这些表被判不可信**的降级段，不是本次加载的全部降级段。
+        // 全量传出去的话，`ui.font` 坏了也会出现在按键总览的「缺失原因」里，设置端照
+        // 字面渲染就成了「字体那格坏了所以按键表不全」——一条自信的错误解释比不解释更糟。
+        //
+        // 判定复用生产判据本身（单段构造一份 `ConfigDegradation` 去问 `taints`），而不是
+        // 在这里重写一遍「相等 / 祖先 / 后代」那三种关系：重写就是第二个真相源，一旦
+        // 与 `taints` 分叉，标记会指向一组没导致任何事情发生的段。
+        let causes: Vec<&String> = cfg
+            .degradation
+            .sections
+            .iter()
+            .filter(|s| {
+                let one = wind_config::config::ConfigDegradation {
+                    sections: vec![(*s).clone()],
+                    total_fallback: false,
+                };
+                tainted
+                    .iter()
+                    .any(|(_, srcs)| srcs.iter().any(|p| one.taints(p)))
+            })
+            .collect();
+        json!({
+            // 这些表的**全局层未列出**；表名与 `keysOverview` 条目里的 `table` 同域。
+            "tables": tainted.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            // 点分路径原样传出（`keys.page_keys`），与 `config.degradation` 同一份来源。
+            // `totalFallback` 时本表为空——那种情形下 `sections` 本来就定位不到任何段。
+            "sections": causes,
+            "totalFallback": cfg.degradation.total_fallback,
+        })
+    };
+    (out, degraded)
 }
 
 /// 一张表的两层仲裁：方案层表了态就用方案的，否则用全局的。
@@ -7436,6 +7565,191 @@ short_code_yield_level = 2
             .unwrap();
         assert_eq!(listed.get("total").and_then(|v| v.as_u64()), Some(1));
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// 按键总览的**降级标记**：`keys.key_actions` 段回落出厂值时，那张表的全局层
+    /// **不列出**，并经 `keysOverviewDegraded` 说明缺了什么。
+    ///
+    /// 不这么做的后果不是「少了点信息」，而是**把出厂默认当成用户的真实绑定展示**：
+    /// 用户对着一张看起来完全正常的表，怎么也对不上实际按键行为，唯一的线索埋在日志里。
+    ///
+    /// ★ 三条判据互相兜底，故都写进同一个用例：
+    /// ① 坏表的全局层消失；② 好表的全局层**一条不少**（一起清会把完好的那张也变空白）；
+    /// ③ 方案层照常列出（它来自方案文件，不受 `Config` 降级影响）。
+    /// 只测 ① 的话，「两张表全清」这种过头的实现照样绿。
+    #[test]
+    fn keys_overview_marks_degraded_table_and_spares_the_healthy_one() {
+        let schema_cfg = json!({
+            "key_actions": { "semicolon": "special:emoji" },
+            "session_actions": { "comma": "page_prev" },
+        });
+
+        let mut cfg = wind_config::Config::default();
+        cfg.keys
+            .key_actions
+            .insert("F7".into(), "special:number".into());
+        cfg.keys
+            .session_actions
+            .insert("apostrophe".into(), "none".into());
+
+        // 前置：无降级时两层都在，且**全局层确实非空**——否则下面「消失了」的断言
+        // 会因为它本来就是空的而恒绿。
+        let (clean, marker) = keys_overview_of(&cfg, &schema_cfg);
+        assert_eq!(marker, Value::Null, "无降级时标记须为显式 null");
+        let global_of = |rows: &[Value], table: &str| -> Vec<String> {
+            rows.iter()
+                .filter(|r| r["table"] == json!(table) && r["from"] == json!("global"))
+                .map(|r| r["key"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        assert!(
+            global_of(&clean, "lead").contains(&"F7".to_string()),
+            "前置：无降级时全局层的 F7 须在表里\n{clean:?}"
+        );
+        assert!(
+            global_of(&clean, "session").contains(&"apostrophe".to_string()),
+            "前置：无降级时全局层的 apostrophe 须在表里\n{clean:?}"
+        );
+
+        // 只有 `keys.key_actions` 降级（同段的 `session_actions` 完好）。
+        cfg.degradation = wind_config::config::ConfigDegradation {
+            sections: vec!["keys.key_actions".into()],
+            total_fallback: false,
+        };
+        let (rows, marker) = keys_overview_of(&cfg, &schema_cfg);
+
+        assert!(
+            global_of(&rows, "lead").is_empty(),
+            "★ 不可信的全局层必须不列，而不是把出厂表当用户绑定展示\n{rows:?}"
+        );
+        assert!(
+            global_of(&rows, "session").contains(&"apostrophe".to_string()),
+            "★ 完好的那张表不该被牵连\n{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["table"] == json!("lead") && r["from"] == json!("schema")),
+            "方案层来自方案文件，不受 Config 降级影响，须照常列出\n{rows:?}"
+        );
+
+        assert_eq!(
+            marker,
+            json!({
+                "tables": ["lead"],
+                "sections": ["keys.key_actions"],
+                "totalFallback": false,
+            }),
+            "★ 调用方须看得出「哪张表不完整、因为哪些段降级」；点分路径原样传出"
+        );
+
+        // 整份回落：两张表的全局层都不可信。
+        cfg.degradation = wind_config::config::ConfigDegradation {
+            sections: Vec::new(),
+            total_fallback: true,
+        };
+        let (rows, marker) = keys_overview_of(&cfg, &schema_cfg);
+        assert!(
+            global_of(&rows, "lead").is_empty() && global_of(&rows, "session").is_empty(),
+            "整份回落时两张表的全局层都不该列\n{rows:?}"
+        );
+        assert_eq!(marker["tables"], json!(["lead", "session"]), "{marker}");
+        assert_eq!(marker["totalFallback"], json!(true), "{marker}");
+    }
+
+    /// ★★ session 表的判据必须覆盖**折算来源**，不只是同名的 `keys.session_actions`。
+    ///
+    /// 这条是审查退回的那个洞：`effective_session_actions()` 把 `page_keys` /
+    /// `select_char_keys` / `highlight_keys` / `select_key_groups` 四个组名列表折算成
+    /// 具体绑定，而段级降级**能**把它们单独定位（`narrow_bad_section` 对坏段的每个直接
+    /// 子键都做探针，不分子表还是标量/数组）。于是 `[keys] page_keys = "brackets"`
+    /// 这类手误 ⇒ `sections = ["keys.page_keys"]` ⇒ 只问 `keys.session_actions` 的旧判据
+    /// 返回 false ⇒ 总览照常列出折算自**出厂**组名的翻页键、标记还是 `null`。
+    ///
+    /// 逐个来源分别断言，不是只测 `page_keys`：四条共用一个 `any`，只测一条的话另外
+    /// 三条从列表里删掉用例照样绿。
+    #[test]
+    fn session_table_judgement_covers_every_folded_source() {
+        let schema_cfg = json!({ "session_actions": { "comma": "page_prev" } });
+        let mut cfg = wind_config::Config::default();
+        cfg.keys
+            .key_actions
+            .insert("F7".into(), "special:number".into());
+
+        let global_of = |rows: &[Value], table: &str| -> Vec<String> {
+            rows.iter()
+                .filter(|r| r["table"] == json!(table) && r["from"] == json!("global"))
+                .map(|r| r["key"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+
+        // 前置：出厂 `page_keys` 等折算出的全局绑定确实非空，否则「消失了」恒真。
+        let (clean, _) = keys_overview_of(&cfg, &schema_cfg);
+        assert!(
+            !global_of(&clean, "session").is_empty(),
+            "前置：折算来的全局 session 绑定须非空\n{clean:?}"
+        );
+
+        for src in [
+            "keys.session_actions",
+            "keys.page_keys",
+            "keys.select_char_keys",
+            "keys.highlight_keys",
+            "keys.select_key_groups",
+        ] {
+            cfg.degradation = wind_config::config::ConfigDegradation {
+                sections: vec![src.into()],
+                total_fallback: false,
+            };
+            let (rows, marker) = keys_overview_of(&cfg, &schema_cfg);
+            assert!(
+                global_of(&rows, "session").is_empty(),
+                "★ {src} 降级时 session 表的全局层必须不列——它是这张表的折算来源\n{rows:?}"
+            );
+            assert_eq!(marker["tables"], json!(["session"]), "{src}: {marker}");
+            assert_eq!(marker["sections"], json!([src]), "{src}: {marker}");
+            // lead 表与这些来源无关，一条都不该被牵连。
+            assert!(
+                global_of(&rows, "lead").contains(&"F7".to_string()),
+                "★ {src} 与 lead 表无关，不该牵连它\n{rows:?}"
+            );
+        }
+    }
+
+    /// `keysOverviewDegraded.sections` 只列**真正导致这些表不可信**的降级段。
+    ///
+    /// 传全量的话，`ui.font` 坏了也会出现在按键总览的「缺失原因」里，设置端照字面渲染
+    /// 就成了「字体那格坏了所以按键表不全」——一条自信的错误解释比不解释更糟。
+    #[test]
+    fn degraded_marker_lists_only_the_sections_that_caused_it() {
+        let schema_cfg = json!({});
+        let mut cfg = wind_config::Config::default();
+        cfg.keys
+            .key_actions
+            .insert("F7".into(), "special:number".into());
+        cfg.degradation = wind_config::config::ConfigDegradation {
+            // 一条相关（导致 lead 表不可信）、两条无关。
+            sections: vec!["keys.key_actions".into(), "ui.font".into(), "schema".into()],
+            total_fallback: false,
+        };
+
+        let (_, marker) = keys_overview_of(&cfg, &schema_cfg);
+        assert_eq!(marker["tables"], json!(["lead"]), "{marker}");
+        assert_eq!(
+            marker["sections"],
+            json!(["keys.key_actions"]),
+            "★ 与按键表无关的降级段不得混进「缺失原因」\n{marker}"
+        );
+    }
+
+    /// 标记字段必须登记进 [`READONLY_SIDECAR_FIELDS`]，否则它会随 saveConfig 落进
+    /// override——方案文件里从此带着一段**某次启动的**降级快照，谁也不读、也没人会
+    /// 想到去删。（剥离行为本身由 `strip_readonly_fields` 那条用例逐字段覆盖。）
+    #[test]
+    fn keys_overview_degraded_is_registered_as_sidecar() {
+        assert!(
+            READONLY_SIDECAR_FIELDS.contains(&"keysOverviewDegraded"),
+            "旁路字段漏登记：{READONLY_SIDECAR_FIELDS:?}"
+        );
     }
 }
 

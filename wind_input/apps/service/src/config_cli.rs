@@ -1,9 +1,11 @@
 //! `wind_input config ...` 命令行：配置的查看/读写/导入导出。
 //!
-//! - list/describe/get/export 纯本地（registry + Config，无需运行中的 core）。
+//! - list/describe/get/export/check 纯本地（registry + Config，无需运行中的 core）。
 //! - set/import 优先经 RPC 发给运行中的 core（即时热重载），连不上则离线直写
 //!   用户配置文件（下次启动生效）。
 //! - 写入前一律按 config_schema 注册表校验（未知键/类型/枚举越界即拒绝）。
+
+mod custom_check;
 
 use serde_json::{Value, json};
 use wind_config::Config;
@@ -30,6 +32,7 @@ pub fn run(args: &[String]) -> i32 {
             _ => usage_err("set <key> <value>"),
         },
         Some("export") => cmd_export(),
+        Some("check") => cmd_check(&args[1..]),
         Some("import") => match args.get(1) {
             Some(path) => cmd_import(path),
             None => usage_err("import <file.toml>"),
@@ -56,7 +59,14 @@ fn print_usage() {
          get <key>            读取某键当前值\n  \
          set <key> <value>    设置某键（优先热重载，core 未运行则离线写）\n  \
          export               导出当前完整配置（TOML）\n  \
-         import <file.toml>   从 TOML 文件批量导入"
+         import <file.toml>   从 TOML 文件批量导入\n  \
+         check [选项]         体检定制版数据层（data_custom），给第三方定制者用\n\
+         \n\
+         check 的选项:\n  \
+         --custom <目录>      要体检的 data_custom 目录（省略则用本机安装的那个）\n  \
+         --data <目录>        出厂 data 目录（省略则用本机安装的那个）\n\
+         \n\
+         退出码: 0 无错误 / 1 检出错误 / 2 用法错误"
     );
 }
 
@@ -165,6 +175,78 @@ fn cmd_export() -> i32 {
             1
         }
     }
+}
+
+/// `config check [--custom <目录>] [--data <目录>]`：体检定制版数据层。
+///
+/// 全程本地：不连 core、不读用户层 `%APPDATA%`、一个字节都不写盘。放在 `config` 子命令
+/// 下正是因为这一族有**离线降级**——定制者拿到安装包解开就能跑，不必先把输入法装起来。
+fn cmd_check(args: &[String]) -> i32 {
+    let mut custom: Option<std::path::PathBuf> = None;
+    let mut data: Option<std::path::PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let slot = match a.as_str() {
+            "--custom" => &mut custom,
+            "--data" => &mut data,
+            other => {
+                eprintln!("未知选项: {other}");
+                return usage_err("check [--custom <目录>] [--data <目录>]");
+            }
+        };
+        let Some(raw) = it.next() else {
+            eprintln!("{a} 缺少目录参数");
+            return usage_err("check [--custom <目录>] [--data <目录>]");
+        };
+        // `${APP_DIR}` 等内部目录变量与其它子命令同解析。
+        match crate::cli_util::resolve_path(raw) {
+            Ok(p) => *slot = Some(std::path::PathBuf::from(p)),
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        }
+    }
+
+    // `--custom` 显式给出 ⇒ 体检的是**别人的定制包**，出厂对照必须来自同一个包。
+    let explicit_custom = custom.is_some();
+    let custom_dir = match custom.or_else(Config::custom_data_dir) {
+        Some(d) => d,
+        None => {
+            eprintln!(
+                "本机不是定制版（安装目录下没有可解析的 data_custom/custom.toml）。\n\
+                 用 --custom <目录> 指定要体检的定制层目录。"
+            );
+            return 2;
+        }
+    };
+    // ★ `--custom` 给了而 `--data` 省略时，**绝不能**回落到本机安装的 data 目录。
+    //
+    // 那会拿这台机器的出厂数据去对照别人的包：冗余键（「与出厂值相同」）、hide 目标是否
+    // 存在、opencc 文件名比对三项检查全都会得出**与那个包不符**的结论，而抬头里印的
+    // 出厂目录路径与 --custom 八竿子打不着，人一眼看不出结论是错的。
+    //
+    // 改为在 `--custom` 的**同级**找 `data/`：`data/` 与 `data_custom/` 必须同级是本功能的
+    // 硬契约（`variant::install_root` 刻意不拆成两个注入点，理由正是「拆开后能构造出生产里
+    // 根本不存在的形态」）。找不到就是 `None` —— 需要出厂对照的检查跳过并在抬头声明，
+    // 拿不到可信对照就别下结论。
+    let data_dir = data.or_else(|| {
+        if explicit_custom {
+            custom_dir
+                .parent()
+                .map(|root| root.join("data"))
+                .filter(|d| d.is_dir())
+        } else {
+            Config::data_dir()
+        }
+    });
+
+    let version = env!("WIND_APP_VERSION");
+    let report = custom_check::check_layer(&custom_dir, data_dir.as_deref(), version);
+    custom_check::render(&report, &custom_dir, data_dir.as_deref(), version);
+    // 与 cmd_export 同一套：2 留给用法错误，1 是「用法没问题，但结果不通过」。
+    // 警告不影响退出码——它们是「现在能用、下次升级会坏」，卡住打包流程弊大于利。
+    i32::from(report.errors() > 0)
 }
 
 fn cmd_import(path: &str) -> i32 {

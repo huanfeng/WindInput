@@ -14,6 +14,9 @@
 /// ——手抄的镜像必然漂移，此前该快照已积累 4 处默认值偏离、缺 2 键、多 1 键。
 pub mod capabilities;
 pub mod client;
+/// 定制版身份的对外暴露（启动日志摘要 + `system.info` 字段）。**公开**是为了让
+/// service 的启动路径与 dispatch 共用同一份文案与空值处置，见模块文档。
+pub mod custom_edition;
 mod dispatch;
 mod events;
 mod security;
