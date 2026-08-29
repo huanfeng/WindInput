@@ -1481,10 +1481,15 @@ pub trait WebDataRpc: WebDataHost {
         // 说明非法即整体错误(与解析失败同级),判据与 config.previewPatch 完全一致。
         let info = wind_config::patch::extract_info(&fragment)
             .map_err(|e| anyhow::anyhow!("包内配置片段说明非法: {e}"))?;
-        let current = toml::Value::try_from(wind_config::Config::load(
-            wind_config::Config::data_dir().as_deref(),
-        )?)?;
-        let entries = wind_config::patch::preview(&fragment, &current);
+        let cfg = wind_config::Config::load(wind_config::Config::data_dir().as_deref())?;
+        // `degradation` 是 `#[serde(skip)]`，转成值树就没了，故先留一份。
+        let degradation = cfg.degradation.clone();
+        let current = toml::Value::try_from(cfg)?;
+        let mut entries = wind_config::patch::preview(&fragment, &current);
+        // 与 `config.previewPatch` 同判据：本函数只预览，但预览要显示的正是「应用后会
+        // 变成什么」，降级时 Map 键的当前表是出厂值 ⇒ 不标出来，用户看到的 diff 是假的，
+        // 且会照着它去点应用（真正的落盘闸在 `config.applyPatch`，两处必须同判据）。
+        wind_config::patch::mark_degraded_seeds(&mut entries, &degradation);
         let ok = entries.iter().all(|e| e.error.is_none());
         let mut out = json!({ "text": text, "ok": ok, "entries": entries });
         if let Some(info) = info {

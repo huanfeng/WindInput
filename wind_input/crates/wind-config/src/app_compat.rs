@@ -2,8 +2,8 @@
 //!
 //! 与 Go 版本 `wind_input/pkg/config/compat.go` 对齐：按进程名为特定应用提供候选窗
 //! 定位 / 光标获取等兼容修正。文件格式为 TOML 的 `[[apps]]` 数组表，加载顺序：
-//! 系统预置（`{data_dir}/compat.toml`）→ 用户覆盖（`{user_config_dir}/compat.toml`），
-//! 用户层同进程名规则覆盖系统层。
+//! 系统预置（`{data_dir}/compat.toml`）→ 定制版（`data_custom/compat.toml`）→
+//! 用户覆盖（`{user_config_dir}/compat.toml`），靠后层的同进程名规则整条覆盖靠前层。
 
 use crate::config::SmartMethod;
 use serde::{Deserialize, Serialize};
@@ -557,9 +557,27 @@ impl AppCompat {
             .collect();
     }
 
-    /// 加载兼容规则：系统层（`{data_dir}/compat.toml`）+ 用户层覆盖
-    /// （`{user_dir}/compat.toml`）。任一文件缺失/解析失败均静默跳过。
+    /// 加载兼容规则：系统层（`{data_dir}/compat.toml`）+ 定制层
+    /// （`data_custom/compat.toml`）+ 用户层覆盖（`{user_dir}/compat.toml`）。
+    /// 任一文件缺失/解析失败均静默跳过。
+    ///
+    /// 定制层由 [`crate::config::Config::custom_data_dir`] 决定（清单在场才有），不经参数传入：本函数
+    /// 有五个跨 crate 调用点，而定制层的位置是进程级事实、不随调用方的 `data_dir` 变。
+    /// 测试需要指定定制层时用 [`Self::load_layered`]。
     pub fn load(data_dir: Option<&Path>, user_dir: Option<&Path>) -> Self {
+        Self::load_layered(
+            data_dir,
+            crate::config::Config::custom_data_dir().as_deref(),
+            user_dir,
+        )
+    }
+
+    /// 三层显式加载，层序 `data < data_custom < user`，靠后者覆盖靠前者。
+    pub fn load_layered(
+        data_dir: Option<&Path>,
+        custom_dir: Option<&Path>,
+        user_dir: Option<&Path>,
+    ) -> Self {
         let mut apps: Vec<AppCompatRule> = Vec::new();
         let mut scope: Vec<InitialModeScopeRule> = Vec::new();
         if let Some(d) = data_dir
@@ -568,11 +586,18 @@ impl AppCompat {
             apps = sys.apps;
             scope = sys.initial_mode_scope;
         }
+        // ⚠️ 两段**各自独立**合并（下同）：用户/定制者为某进程写 [[apps]] 规则不会连带
+        // 丢掉更低层给该进程配的 [[initial_mode_scope]]，反之亦然。合并语义相同
+        // （同名进程整条覆盖），但**刻意不合并成一段** —— 见 `merge_mode_scope` 的文档。
+        if let Some(c) = custom_dir
+            && let Some(custom) = load_file(&c.join(COMPAT_FILE_NAME))
+        {
+            apps = merge_rules(apps, custom.apps);
+            scope = merge_mode_scope(scope, custom.initial_mode_scope);
+        }
         if let Some(u) = user_dir
             && let Some(user) = load_file(&u.join(COMPAT_FILE_NAME))
         {
-            // 两段**各自独立**合并：用户为某进程写 [[apps]] 规则不会连带丢掉系统层给
-            // 该进程配的 [[initial_mode_scope]]，反之亦然。合并语义相同（同名进程整条覆盖）。
             apps = merge_rules(apps, user.apps);
             scope = merge_mode_scope(scope, user.initial_mode_scope);
         }

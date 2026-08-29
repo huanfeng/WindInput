@@ -63,21 +63,49 @@ fn has_portable_marker_in(dir: &std::path::Path) -> bool {
 }
 
 /// 用 OnceLock 缓存，进程内只检测一次。
+///
+/// 根走 [`install_root`]（正常即 exe 同目录），于是「便携 + 定制版」这个组合
+/// 也能被自动化测试构造出来——三层（`userdata` / `data_custom` / `data`）在便携形态下
+/// 同处一棵目录树，恰是层序最容易出问题的形态，此前完全测不到。
 pub fn is_portable() -> bool {
     static IS_PORTABLE: OnceLock<bool> = OnceLock::new();
-    *IS_PORTABLE.get_or_init(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(has_portable_marker_in))
-            .unwrap_or(false)
-    })
+    *IS_PORTABLE.get_or_init(|| install_root().is_some_and(|d| has_portable_marker_in(&d)))
 }
 
-/// 便携模式下的用户数据根目录（exe 同目录/userdata）。
+/// 便携模式下的用户数据根目录（安装根/userdata）。
+///
+/// 与 [`is_portable`] 取同一个根，缺一不可：标记在注入根下找到、userdata 却回落真实
+/// exe 目录的话，测出来的是一个生产中不存在的混合形态。
 pub fn portable_userdata_dir() -> Option<PathBuf> {
+    install_root().map(|d| d.join("userdata"))
+}
+
+/// 覆盖安装根目录的完整路径。仅供测试与开发排查，生产部署严禁设置。
+const INSTALL_ROOT_ENV: &str = "WIND_INSTALL_ROOT";
+
+/// 安装根目录：正常情况下就是可执行文件所在目录。
+///
+/// `data/`（出厂数据）与 `data_custom/`（定制版数据）**必须同级**，故两层共用这一个根。
+/// 刻意不拆成两个注入点：拆开后测试能构造出「data 在 A、data_custom 在 B」这种生产里
+/// 根本不存在的形态，据此测出的结论对生产无效。
+///
+/// 与 [`DATADIR_CONF_ENV`] 同族——生产代码里存在但**只服务测试**。加它的直接理由：
+/// `Config::data_dir()` 此前是 `current_exe()/data` 的硬编码、没有任何注入点，于是所有
+/// 以「data 层在场」为判据的写盘闸门（`preset_for_pruning`、`materialize_key_actions`）
+/// 都只能靠代码审阅确认，端到端测不了——而那两处一旦失效就是磁盘上的永久数据丢失。
+///
+/// 不做 OnceLock 缓存：`data_dir()` 本就每次调用都读 `current_exe()`，缓存只会让同一
+/// 进程内的取值时机变得不可预期，却省不下什么。
+pub fn install_root() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var(INSTALL_ROOT_ENV) {
+        let p = PathBuf::from(p);
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("userdata")))
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
 }
 
 /// 安装器写下的自定义用户数据目录配置文件名。

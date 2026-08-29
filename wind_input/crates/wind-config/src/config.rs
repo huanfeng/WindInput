@@ -1,23 +1,25 @@
-//! 配置系统：三层合并（代码默认值、系统配置、用户配置）
+//! 配置系统：四层合并（代码默认值 L1、系统配置 L2、定制版配置 L2.5、用户配置 L3）
 //!
 //! 与 Go 版本 `wind_input/pkg/config/config.go` 对齐。
-//! 配置文件为 TOML 格式，三层合并：默认值 → data/config.toml → %APPDATA%/WindInput/config.toml
+//! 配置文件为 TOML 格式，四层合并：默认值 → data/config.toml → data_custom/config.toml
+//! → %APPDATA%/WindInput/config.toml。L2.5 见 `docs/design/data-custom-layer.md`。
 //!
 //! 顶级域（"正交大类"准则，详见 SETTINGS_REVAMP_PLAN.md / docs/config-key-migration.md）：
 //! schema(方案+pinyin+模式) / input(输入行为，含 default 启动默认 / phrase 短语) /
 //! keys(全部按键) / ui(外观) / stats(统计) / debug。
 //!
 //! 按进程名的兼容性规则（HostRender 白名单、caret 定位等）不在这里，见
-//! `app_compat.rs`（独立的 `compat.toml` 文件，字段级合并，键名不受本文件三层合并约束）。
+//! `app_compat.rs`（独立的 `compat.toml` 文件，字段级合并，键名不受本文件四层合并约束）。
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tracing::{debug, error, info, warn};
 
 /// 深合并两个 TOML 值：表递归合并（overlay 的键覆盖/新增），标量与数组由 overlay 整体覆盖。
-/// 用于配置三层合并——overlay 中未出现的键保留 base 的值。
+/// 用于配置四层合并——overlay 中未出现的键保留 base 的值。
 fn merge_value(base: &mut toml::Value, overlay: toml::Value) {
     match (base, overlay) {
         (toml::Value::Table(b), toml::Value::Table(o)) => {
@@ -55,7 +57,7 @@ pub(crate) fn set_nested(table: &mut toml::Table, path: &[&str], value: toml::Va
 }
 
 /// 在 TOML 值里按 `path` 逐级取值（任一级缺失或非表则 `None`）。
-/// 供 [`Config::set_user_value`] 与出厂默认（L1⊕L2）比对用。
+/// 供 [`Config::set_user_value`] 与出厂默认（L1⊕L2⊕L2.5）比对用。
 pub(crate) fn get_nested<'a>(root: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
     let mut cur = root;
     for k in path {
@@ -83,10 +85,10 @@ fn remove_nested(table: &mut toml::Table, path: &[&str]) -> bool {
     removed
 }
 
-/// 从 `root`（用户层）删除所有与 `preset`（出厂默认 L1⊕L2）取值相同的叶子键，返回删除数。
+/// 从 `root`（用户层）删除所有与 `preset`（出厂默认 L1⊕L2⊕L2.5）取值相同的叶子键，返回删除数。
 ///
 /// 纯函数、不碰文件系统：[`Config::prune_user_config`] 负责 IO，本函数负责判定，
-/// 单测得以在不触碰真实 `%APPDATA%` 的前提下验证「清理前后三层合并结果不变」这条不变量。
+/// 单测得以在不触碰真实 `%APPDATA%` 的前提下验证「清理前后合并结果不变」这条不变量。
 ///
 /// **两道保险，缺一不可**：
 /// 1. `is_known_key` —— 只碰注册表登记过的键。这排除掉两类绝不能删的东西：**废弃键**（清理它们
@@ -363,11 +365,67 @@ impl ConfigDegradation {
     /// ⚠️ 判据不能写成「`sections` 里精确等于 `section`」：降级粒度可以细到子表，
     /// `keys` 段出问题时记下的可能是 `keys.key_actions` 而不是 `keys`，精确相等会漏判，
     /// 而漏判的后果是本该拦下的写盘照样发生（见 [`Config::materialize_key_actions`] 闸三）。
+    ///
+    /// 传顶层段名时与 [`Self::taints`] 等价（顶层名不可能有更短的祖先）；本方法只是
+    /// 那个更一般判据的一个习惯叫法，实现共用一份。
     pub fn affects(&self, section: &str) -> bool {
+        self.taints(section)
+    }
+
+    /// **写盘闸的核心判据**：本次加载在 `path` 处的值是否**不可信**。
+    ///
+    /// # 这个判据存在的理由
+    ///
+    /// 段级降级把 `load()` 的 `Err` 变成了「成功但某段是出厂值」。原先靠 `?` 保护的下游
+    /// 因此拿到**残缺表**并当成用户的真实配置去写盘或导出——降级本身就变成了磁盘上的
+    /// 永久数据丢失。本仓已发现**四条**同形状的路径（`materialize_key_actions`、
+    /// `cmd_export`、`patch::writes`/`applyPatch`、`setItems` 的 Map 键），逐条打地鼠
+    /// 显然会漏下一条，故把判据固化成这一个函数：
+    ///
+    /// > 凡是拿 `Config::load()` 的结果（或其派生值）当**种子**，再整表写回用户层
+    /// > 或导出给用户的路径，落盘前必须先问这里。
+    ///
+    /// # 两个方向都要判
+    ///
+    /// `sections` 是点分路径，与待写路径的关系有三种，**都算不可信**：
+    ///
+    /// - 相等：`keys.key_actions` 降级，要写 `keys.key_actions`；
+    /// - 降级段是待写路径的**祖先**：`input.punct` 降级 ⇒ 它下面的
+    ///   `input.punct.custom_mappings` 也是出厂值；
+    /// - 待写路径是降级段的**祖先**：要整表写 `keys`，而 `keys.key_actions` 降级过
+    ///   ⇒ 这张表里有一块是假的。
+    ///
+    /// 只判前两种会漏掉「写大表、坏在小格」，只判后两种会漏掉「坏在大段、写小格」。
+    pub fn taints(&self, path: &str) -> bool {
+        fn is_ancestor(ancestor: &str, descendant: &str) -> bool {
+            descendant
+                .strip_prefix(ancestor)
+                .is_some_and(|r| r.starts_with('.'))
+        }
         self.total_fallback
-            || self.sections.iter().any(|s| {
-                s == section || s.strip_prefix(section).is_some_and(|r| r.starts_with('.'))
-            })
+            || self
+                .sections
+                .iter()
+                .any(|s| s == path || is_ancestor(s, path) || is_ancestor(path, s))
+    }
+
+    /// [`Self::taints`] 的带日志版本：不可信时打一行 WARN 并返回 `true`，
+    /// 调用方据此**什么都不做**（与 `preset_for_pruning` 取不到就退化为不清理同构）。
+    ///
+    /// 统一在这里打点，是为了让四条闸的日志措辞一致、可按 `降级闸` 一次 grep 出全部
+    /// 「因为降级而没做的写盘」——排查「我的设置怎么没保存」时，这一行是唯一的线索。
+    /// `what` 描述被拦下的动作（如 `key_actions 物化`），用于把日志对上现象。
+    #[must_use]
+    pub fn blocks_write_back(&self, path: &str, what: &str) -> bool {
+        if !self.taints(path) {
+            return false;
+        }
+        warn!(
+            "降级闸：本次加载的 [{path}] 不可信（降级段 {:?}，整份回落={}），已跳过「{what}」；\
+             这不是失败，是拒绝拿出厂残表覆盖你的配置——修好报错的配置键后即自动恢复",
+            self.sections, self.total_fallback
+        );
+        true
     }
 }
 
@@ -4599,11 +4657,121 @@ impl UserConfigProbe {
     }
 }
 
-impl Config {
-    /// 三层合并加载：默认值 → data_dir/config.toml → 用户配置。
+/// 定制版数据层的目录名，与 `data/` **同级**。
+pub const CUSTOM_DATA_DIR_NAME: &str = "data_custom";
+
+/// 定制版清单文件名。它在场与否就是「本机是不是定制版」的唯一判据。
+pub const CUSTOM_MANIFEST_NAME: &str = "custom.toml";
+
+/// `data_custom/custom.toml` 的内容。
+///
+/// 清单只负责**减法**（`hide`）与**身份**：加法与整表替换不需要声明，直接把文件放进
+/// `data_custom/` 对应位置即可。
+///
+/// ⚠️ 刻意**不加** `deny_unknown_fields`：清单是第三方定制者手写、随定制包分发的数据，
+/// 未来版本新增段（如 `[dicts] hide`）时，旧程序必须能忽略而不是整层退场。代价是
+/// `[schema]`（少写一个 s）这类拼写错误会被静默忽略——那一类由 P3 的
+/// `wind_input config check --custom` 负责报出来，而不是靠这里把整个定制版判废。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomManifest {
+    /// 定制版身份，见 [`CustomIdentity`]。
+    #[serde(default)]
+    pub custom: CustomIdentity,
+    /// 方案减法清单。
     ///
-    /// 合并方式：把三层各自的 `toml::Value`（默认值序列化得到）深合并（表递归、标量/数组后者覆盖），
+    /// ⚠️ 与 `[schema].hidden` 是**两个正交的轴，不得合并**：`hidden` = 「不列进方案切换
+    /// 列表」（english / 快符仍可用、仍被 mix 引用）；本字段 = 「这个方案在本定制版里
+    /// 不存在」。拿 `hidden` 实现减法会让被隐藏的方案继续被 mix / special_modes /
+    /// `schema.active` 引用到。
+    #[serde(default)]
+    pub schemas: CustomHideList,
+    /// 主题减法清单。
+    #[serde(default)]
+    pub themes: CustomHideList,
+}
+
+/// 定制版身份。没有它，定制版用户报障时连他装的是不是定制版都判断不出来。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomIdentity {
+    /// 稳定标识，日志 / 关于页 / 报障用（如 `huma-edition`）。
+    #[serde(default)]
+    pub id: String,
+    /// 展示名（如 `虎码定制版`）。
+    #[serde(default)]
+    pub name: String,
+    /// 定制包自身的版本。
+    #[serde(default)]
+    pub version: String,
+    /// 基于哪个主程序版本定制。
+    ///
+    /// 本期**只解析和保存，不做强制版本检查**——兼容性判定归 P3，届时由校验 CLI 与
+    /// 启动告警消费。现在就卡版本会让定制者每次主程序小版本更新都被迫改清单。
+    #[serde(default)]
+    pub base_version: String,
+}
+
+/// 一段减法清单。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomHideList {
+    /// 在本定制版里「不存在」的条目 id。
+    #[serde(default)]
+    pub hide: Vec<String>,
+}
+
+/// 读取并解析定制版清单。见 [`Config::custom_manifest`]（含「解析失败 ⇒ 整层退场」的理由）。
+fn load_custom_manifest() -> Option<CustomManifest> {
+    let file = crate::variant::install_root()?
+        .join(CUSTOM_DATA_DIR_NAME)
+        .join(CUSTOM_MANIFEST_NAME);
+    // 绝大多数装机走这一条：不是定制版，不打任何日志。
+    if !file.is_file() {
+        debug!("非定制版（无 {}）", file.display());
+        return None;
+    }
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(
+                "定制版清单读取失败（{e}），data_custom 层整体不启用: {}",
+                file.display()
+            );
+            return None;
+        }
+    };
+    match toml::from_str::<CustomManifest>(&text) {
+        Ok(m) => {
+            info!(
+                "定制版 {} {}（基于 {}）",
+                if m.custom.id.is_empty() {
+                    "<未命名>"
+                } else {
+                    &m.custom.id
+                },
+                m.custom.version,
+                m.custom.base_version
+            );
+            Some(m)
+        }
+        // WARN 而非 ERROR：程序照常工作，只是退回原版行为。措辞点明「整体不启用」，
+        // 因为用户看到的现象是「我的定制版变回原版了」，日志必须能一眼对上。
+        Err(e) => {
+            warn!(
+                "定制版清单解析失败（{e}），data_custom 层整体不启用（回落原版行为）: {}",
+                file.display()
+            );
+            None
+        }
+    }
+}
+
+impl Config {
+    /// 四层合并加载：默认值 → `data/config.toml` → `data_custom/config.toml` → 用户配置。
+    ///
+    /// 合并方式：把各层的 `toml::Value`（默认值序列化得到）深合并（表递归、标量/数组后者覆盖），
     /// 最后一次性反序列化为 `Config`。所有段都会被合并，不再静默丢弃；新增配置字段无需改合并代码。
+    ///
+    /// L2.5（定制层）只需写**差异键**，不必整份复制 `config.toml`——机制上支持深合并，
+    /// 差异越小跨版本存活率越高。
     pub fn load(data_dir: Option<&Path>) -> anyhow::Result<Self> {
         // Layer 1: 代码默认值（序列化为 Value，保证所有字段存在）
         let mut merged = toml::Value::try_from(Self::default())?;
@@ -4614,6 +4782,16 @@ impl Config {
             if let Some(v) = Self::read_toml_value(&sys_config) {
                 merge_value(&mut merged, v);
                 info!("Loaded system config: {}", sys_config.display());
+            }
+        }
+
+        // Layer 2.5: 定制版预置配置 (data_custom/config.toml)。
+        // 位置固定在 L2 之后、L3 之前：定制者可以覆盖出厂值，但绝不能压过终端用户。
+        if let Some(custom_dir) = Self::custom_data_dir() {
+            let custom_config = custom_dir.join("config.toml");
+            if let Some(v) = Self::read_toml_value(&custom_config) {
+                merge_value(&mut merged, v);
+                info!("Loaded custom config: {}", custom_config.display());
             }
         }
 
@@ -4636,6 +4814,8 @@ impl Config {
         Self::migrate_index_labels_value(&mut merged);
         Self::migrate_comment_max_chars_value(&mut merged);
         Self::migrate_empty_code_behavior_value(&mut merged);
+        // 位置刻意在**四层合并之后、`try_into` 之前**：定制层 (L2.5) 里的旧值因此与用户层
+        // 一样被这一批迁移救到，白捡的——迁移作用在合并结果上，不认值来自哪一层。
         // ⛔ 段级降级**不能**顶替上面这一族 `migrate_*_value`：迁移是「把旧值无损搬到新形态」，
         // 降级是「把这一段整个丢掉换成出厂值」。已发布字段改类型仍必须写迁移，
         // 降级只是最后一道兜底。
@@ -4942,10 +5122,26 @@ impl Config {
         );
     }
 
-    /// 系统预置配置的 TOML 值：代码默认(L1) ⊕ `data/config.toml`(L2)，**不含用户层(L3)**。
+    /// 系统预置配置的 TOML 值：代码默认(L1) ⊕ `data/config.toml`(L2)
+    /// ⊕ `data_custom/config.toml`(L2.5)，**不含用户层(L3)**。
     ///
-    /// 供 capability 的 `default` 来源——出厂默认 = L1⊕L2。config.toml 作为系统预置
-    /// 可合法覆盖 L1（如 schema.active）。
+    /// 供 capability 的 `default` 来源——出厂默认 = L1⊕L2⊕L2.5。系统预置与定制层
+    /// 都可合法覆盖 L1（如 `schema.active`）。
+    ///
+    /// ★ **定制层必须进入这个计算，漏了就出事。** [`preset_for_pruning`] 与
+    /// [`materialize_key_actions`] 拿这个值去**删用户层的键**：
+    ///
+    /// - 定制层不进来 ⇒ 用户在定制版里把开关点到「定制默认」位会被判成「与默认不同」而
+    ///   写进用户层永久钉死，此后不再跟随定制层的任何更新；
+    /// - 反向算错则**静默删掉用户真实设置**。这颗雷本仓已引爆过一次（真机一份配置
+    ///   105 键中 62 键冗余，`schema.mix.auto_commit_block_on_pinyin` 已经中招）。
+    ///
+    /// ⚠️ **连带效应是正确行为，不要当 bug 修掉**：`capabilities::generate`（wind-rpc）
+    /// 也吃这个值，于是定制版设置页显示的「出厂默认」、以及「恢复默认」按钮的落点，
+    /// 都会变成**定制默认值**。这正是定制版用户应该看到的语义。
+    ///
+    /// [`preset_for_pruning`]: Self::preset_for_pruning
+    /// [`materialize_key_actions`]: Self::materialize_key_actions
     pub fn system_preset_value(data_dir: Option<&Path>) -> anyhow::Result<toml::Value> {
         let mut merged = toml::Value::try_from(Self::default())?;
         if let Some(data_dir) = data_dir {
@@ -4954,10 +5150,16 @@ impl Config {
                 merge_value(&mut merged, v);
             }
         }
+        if let Some(custom_dir) = Self::custom_data_dir() {
+            let custom_config = custom_dir.join("config.toml");
+            if let Some(v) = Self::read_toml_value(&custom_config) {
+                merge_value(&mut merged, v);
+            }
+        }
         Ok(merged)
     }
 
-    /// 「与默认相同即不落盘」判定所用的出厂默认（L1⊕L2）。取不到则 `None`。
+    /// 「与默认相同即不落盘」判定所用的出厂默认（L1⊕L2⊕L2.5）。取不到则 `None`。
     ///
     /// ⚠️ **必须确认 `data/config.toml` 在场才返回 `Some`**：[`system_preset_value`] 传 `None`
     /// 会退回纯 L1，而 L2 本就允许合法覆盖 L1（`schema.active` 等出厂值只写在 L2）。
@@ -4969,6 +5171,11 @@ impl Config {
     ///
     /// 返回 `None` 时调用方一律退化为「照常写入 / 不清理」，即旧行为。
     ///
+    /// ⚠️ **闸门判据仍是「`data/config.toml` 在场」，加了定制层也不改。** `data_custom`
+    /// 单独在场而 `data/config.toml` 缺失时必须返回 `None`：L2 才是出厂基线的必要部分，
+    /// 定制层只写差异键，拿「L1⊕L2.5」这份残缺 preset 去删用户键正是上面那颗雷。
+    /// 定制层的值由 [`system_preset_value`] 自动带进来，无需在此另加分支。
+    ///
     /// [`system_preset_value`]: Self::system_preset_value
     fn preset_for_pruning() -> Option<toml::Value> {
         let dir = Self::data_dir()?;
@@ -4978,10 +5185,10 @@ impl Config {
         Self::system_preset_value(Some(&dir)).ok()
     }
 
-    /// 清理用户层里与出厂默认（L1⊕L2）相同的冗余键，返回删除的键数。
+    /// 清理用户层里与出厂默认（L1⊕L2⊕L2.5）相同的冗余键，返回删除的键数。
     ///
-    /// **不变量：清理前后 `load()` 的结果逐键完全相同** —— 删掉的每个键，三层合并时都会从
-    /// L1⊕L2 回落到同一个值。故本操作对当前行为零影响，只影响**将来**默认值变更能否到达该用户。
+    /// **不变量：清理前后 `load()` 的结果逐键完全相同** —— 删掉的每个键，四层合并时都会从
+    /// L1⊕L2⊕L2.5 回落到同一个值。故本操作对当前行为零影响，只影响**将来**默认值变更能否到达该用户。
     /// `set_user_value` 的同款收口负责不再产生新的冗余键，本函数负责清掉存量（该收口上线前
     /// 积累的量很可观：真机一份配置 105 键中 62 键冗余）。
     ///
@@ -5095,16 +5302,18 @@ impl Config {
         }
 
         // 权威来源 = 一次完整 `load()`：它已跑完 normalize，`key_actions` 就是当前**生效**
-        // 的那张表（三层合并 ⊕ 折算 ⊕ 「用户显式配过的不被覆盖」）。这里绝不能自己再抄
+        // 的那张表（四层合并 ⊕ 折算 ⊕ 「用户显式配过的不被覆盖」）。这里绝不能自己再抄
         // 一遍折算规则——抄一份就是第二个真相源，本次修的正是这类问题。
         let cfg = Self::load(data_dir.as_deref())?;
         // 闸三：`keys` 段本次被降级过 ⇒ `key_actions` 不是用户真实的绑定，是出厂残表。
         // 判据用 `affects` 而不是精确相等——降级粒度可以细到 `keys.key_actions` 这一层。
-        if cfg.degradation.affects("keys") {
-            debug!(
-                "Skip key_actions materialization: keys section degraded this load ({:?}, total={})",
-                cfg.degradation.sections, cfg.degradation.total_fallback
-            );
+        // 判据走共用的 [`ConfigDegradation::blocks_write_back`]，四条写盘闸同一份实现、
+        // 同一条日志措辞。判 `keys` 而不是 `keys.key_actions`：本函数还会顺手摘掉
+        // `input.*.trigger_keys`，而 `bindings` 的正确性依赖整个 keys 段。
+        if cfg
+            .degradation
+            .blocks_write_back("keys", "key_actions 物化")
+        {
             return Ok(0);
         }
         let bindings = cfg.keys.key_actions;
@@ -5646,7 +5855,8 @@ impl Config {
     /// （方案文件 / 词库 / 方案附属资源 / 双拼布局 / 主题 / 数据根文件），各函数的回退
     /// 级数还不一样。排查「同一版程序、这台机器行为和出厂不一致」时，唯一可靠的线索就是
     /// 「当时到底加载了哪个文件」——故所有解析点一律经此打点、共用同一措辞，便于按
-    /// `用户覆盖生效` 一次 grep 出全部生效的覆盖。
+    /// `覆盖生效` 一次 grep 出全部生效的覆盖（`wind-theme` 的 `用户覆盖生效[theme]` 也含
+    /// 这个子串，故一条 grep 仍能全覆盖）。
     ///
     /// `kind` 是资源类别（`schema` / `dict` / `resource` / `shuangpin` / `theme` / `data`），
     /// `rel` 是方案/数据根下的相对路径。**只在命中用户层时调用**：未覆盖的默认安装
@@ -5655,16 +5865,53 @@ impl Config {
     /// `shadowed` 区分命中用户层的两种情形，**不可省**：安装目录也有同名文件时才是真的
     /// 「覆盖自带数据」（记 info，排查目标）；安装目录没有时只是第三方方案自带资源走用户
     /// 目录（记 debug）。二者都打 info 的话，一个第三方方案的几十个词库会把真正的覆盖淹掉。
+    ///
+    /// 这是 [`Self::log_layer_override`] 的**用户层专用**入口，保留给自己实现多级回落
+    /// 的解析点（`wind-engine` 的方案/词库解析）。多层解析请直接用带层名的那个。
     pub fn log_user_override(kind: &str, rel: &str, path: &Path, shadowed: bool) {
+        Self::log_layer_override("user", kind, rel, path, shadowed);
+    }
+
+    /// 覆盖命中时的统一日志打点，`layer` 为命中的层名（`user` / `custom` / `data`）。
+    ///
+    /// 加层之后「覆盖生效」不再是二值的：同一个文件名可能来自用户层，也可能来自定制版
+    /// 自带的 `data_custom/`。排查「这台机器行为和出厂不一致」时，只知道「被覆盖了」而不
+    /// 知道**被谁**覆盖，等于把定制版和用户个人设置这两类完全不同的原因混成一团。
+    ///
+    /// 措辞统一为 `覆盖生效[层][类别]`，可按 `覆盖生效` 一次 grep 出全部生效的覆盖，
+    /// 也可按 `覆盖生效[custom]` 只看定制版带来的差异。
+    ///
+    /// `layer == "data"`（出厂自带、无人覆盖）**不打点**：那是绝大多数文件的常态，
+    /// 打了就是刷屏，且日志里"出现即线索"这条性质会随之失效。
+    pub fn log_layer_override(layer: &str, kind: &str, rel: &str, path: &Path, shadowed: bool) {
+        if layer == "data" {
+            return;
+        }
         if shadowed {
-            info!("用户覆盖生效[{}]: {} → {}", kind, rel, path.display());
+            info!(
+                "覆盖生效[{}][{}]: {} → {}",
+                layer,
+                kind,
+                rel,
+                path.display()
+            );
         } else {
-            debug!("用户目录资源[{}]: {} → {}", kind, rel, path.display());
+            debug!(
+                "非覆盖资源[{}][{}]: {} → {}",
+                layer,
+                kind,
+                rel,
+                path.display()
+            );
         }
     }
 
-    /// 「用户目录优先、回落安装目录」的解析内核。`sub` 为两侧共同的子目录
+    /// 「靠前的层优先、逐层回落」的解析内核。`sub` 为各层共同的子目录
     /// （方案类资源传 `Some("schemas")`，数据根文件传 `None`）。
+    ///
+    /// 层序来自 [`Self::resource_layers_with`]：`user > custom > data`。
+    /// [`Self::resolve_data_file`] / [`Self::resolve_schema_resource`] 自动继承定制层，
+    /// 这也是本计划改动量小的原因——单文件读取绝大部分都经过这里。
     fn resolve_overridable(
         data_dir: Option<&Path>,
         sub: Option<&str>,
@@ -5680,23 +5927,26 @@ impl Config {
                 None => base.join(rel),
             }
         };
-        // 借用而非 move：`under` 在下面的用户分支里还要再用一次。
-        let sys = data_dir.map(&under);
-        if let Some(user) = Self::user_config_dir() {
-            let p = under(&user);
-            if p.is_file() {
-                let shadowed = sys.as_ref().is_some_and(|s| s.is_file());
-                Self::log_user_override(kind, rel, &p, shadowed);
-                return Some(p);
+        let layers = Self::resource_layers_named(data_dir);
+        for (i, (layer, base)) in layers.iter().enumerate() {
+            let p = under(base);
+            if !p.is_file() {
+                continue;
             }
+            // `shadowed` = 「确实盖住了更靠后的某一层」，判据必须看**全部**后续层：
+            // 用户层盖住 custom 层同样是「覆盖了自带数据」，只看 data 层会把它记成
+            // 第三方自带资源（debug），于是定制版上最该被看见的那类覆盖反而不进日志。
+            let shadowed = layers[i + 1..].iter().any(|(_, b)| under(b).is_file());
+            Self::log_layer_override(layer, kind, rel, &p, shadowed);
+            return Some(p);
         }
-        sys.filter(|p| p.is_file())
+        None
     }
 
     /// 解析方案附属资源（拆字库/字根字体等 `[engine.chaizi]` 相对路径）：与方案文件同规则，
-    /// 用户方案目录（`user_config_dir()/schemas/`）优先，回落系统数据目录 `data_dir/schemas/`。
-    /// 第三方方案装在用户目录，其资源只在用户目录下——只拼 data_dir 会永远找不到。
-    /// 两处均不存在返回 None（调用方自行告警）。
+    /// 按 `user > custom > data` 逐层找 `<层>/schemas/<rel>`（层序见
+    /// [`Self::resource_layers_with`]）。第三方方案装在用户目录，其资源只在用户目录下
+    /// ——只拼 data_dir 会永远找不到。各层均不存在返回 None（调用方自行告警）。
     pub fn resolve_schema_resource(data_dir: Option<&Path>, rel: &str) -> Option<PathBuf> {
         Self::resolve_overridable(data_dir, Some("schemas"), rel, "resource")
     }
@@ -5705,7 +5955,7 @@ impl Config {
     /// 用户配置目录同名文件整体替代，回落安装目录 `data_dir/`。两处均无返回 None。
     ///
     /// 与 [`Self::resolve_schema_resource`] 的差别只在根少一层 `schemas/`。这类文件是
-    /// **整体替换**语义（不做键级合并）——合并语义只有 `config.toml`（三层）与
+    /// **整体替换**语义（不做键级合并）——合并语义只有 `config.toml`（四层）与
     /// `compat.toml`（字段级）两处，它们各有专用加载器，不走本函数。
     pub fn resolve_data_file(data_dir: Option<&Path>, rel: &str) -> Option<PathBuf> {
         Self::resolve_overridable(data_dir, None, rel, "data")
@@ -5717,7 +5967,7 @@ impl Config {
     /// 用户层维持最小 diff，避免覆盖系统层/默认层的后续更新。
     /// 原子写（tmp + rename）。`path` 如 `["ui","candidate","preedit_display"]`。
     ///
-    /// ★ **值等于出厂默认（L1⊕L2）时删除该键，而不是写入**（见
+    /// ★ **值等于出厂默认（L1⊕L2⊕L2.5）时删除该键，而不是写入**（见
     /// [`preset_for_pruning`](Self::preset_for_pruning)）。这条收口是上面那句「避免覆盖后续更新」
     /// 唯一的兑现方式：此前无论值是什么都照写，用户把开关点回默认位就在用户层留下一个显式值，
     /// 从此**永久钉死、不再跟随 L1/L2 的后续变更**。真机实测一份用户配置 105 个键里 62 个是这种
@@ -5814,11 +6064,88 @@ impl Config {
         }
     }
 
-    /// 获取 data 目录（与可执行文件同目录的 data/）
+    /// 获取 data 目录（安装根目录下的 `data/`，正常即可执行文件同目录）。
+    ///
+    /// 根走 [`crate::variant::install_root`]——那里带一个仅供测试的注入点，见其文档。
     pub fn data_dir() -> Option<PathBuf> {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("data")))
+        crate::variant::install_root().map(|d| d.join("data"))
+    }
+
+    /// 定制版清单（`data_custom/custom.toml`）。`None` = 本机不是定制版。
+    ///
+    /// **判据是清单文件可解析，不是 `data_custom/` 目录存在。** 隐式契约没有编译期约束，
+    /// 本仓已有 `datadir.conf` 整段断链（写端完整、读端一行不读，骗了用户半年）的前车之鉴；
+    /// 清单同时充当定制版身份（日志/关于页/报障）、减法清单与版本兼容判据。
+    ///
+    /// ⚠️ **解析失败 ⇒ 整个 custom 层不启用，而不是「半启用」。** 半解析出来的清单可能
+    /// 丢掉 `hide` 名单，于是定制版里本该被删掉的方案又冒出来，用户看到的是一堆自己
+    /// 从没见过的方案混在里面——诡异、难以归因。而「完全变回原版」这个现象足够明显，
+    /// 用户会立刻报障，故宁可整层退场。
+    ///
+    /// OnceLock 缓存：进程内只读一次盘。⚠️ 同一进程内改不了取值，故相关测试必须各占
+    /// 一个测试二进制（`tests/*.rs` 每个文件一个进程，见 `tests/datadir_conf.rs`）。
+    pub fn custom_manifest() -> Option<&'static CustomManifest> {
+        static MANIFEST: OnceLock<Option<CustomManifest>> = OnceLock::new();
+        MANIFEST.get_or_init(load_custom_manifest).as_ref()
+    }
+
+    /// 定制版数据层目录（`<安装根>/data_custom`）。**清单在场且可解析时才返回 `Some`**。
+    ///
+    /// 层序固定为 `data < data_custom < %APPDATA%`：`data_custom` 在安装目录下，
+    /// 普通用户无写权限，只承担「随安装包分发的定制」职责；用户个人调整仍走 `%APPDATA%`。
+    /// **程序对本目录只读**，退役键清理、配置剪枝一律只作用于用户层。
+    pub fn custom_data_dir() -> Option<PathBuf> {
+        Self::custom_manifest()?;
+        crate::variant::install_root().map(|d| d.join(CUSTOM_DATA_DIR_NAME))
+    }
+
+    /// 资源层的有序列表：`[user?, custom?, data?]`，靠前者优先。
+    ///
+    /// 这是**唯一**该被枚举点使用的层序来源。目录枚举（方案 / 主题 / 双拼布局 / opencc）
+    /// 各自维护一份自己的目录列表，漏接一处的现象是「定制版里那个方案静默不见了」——
+    /// 而这类缺陷在没有 `data_custom` 的开发机上永远复现不出来。用法示例：
+    ///
+    /// ```ignore
+    /// // 原来：两个目录写死
+    /// let dirs = [user_dir.join("schemas"), data_dir.join("schemas")];
+    /// // 改后：层序统一，自动带上 custom 层
+    /// let dirs: Vec<PathBuf> = Config::resource_layers_with(Some(data_dir))
+    ///     .into_iter()
+    ///     .map(|d| d.join("schemas"))
+    ///     .collect();
+    /// ```
+    ///
+    /// data 层取 [`Self::data_dir`]；调用方手里已有 data 目录（便携/测试会传自定义路径）
+    /// 时用 [`Self::resource_layers_with`]。
+    pub fn resource_layers() -> Vec<PathBuf> {
+        Self::resource_layers_with(Self::data_dir().as_deref())
+    }
+
+    /// 同 [`Self::resource_layers`]，但 data 层由调用方指定（`None` = 无 data 层）。
+    pub fn resource_layers_with(data_dir: Option<&Path>) -> Vec<PathBuf> {
+        Self::resource_layers_named(data_dir)
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect()
+    }
+
+    /// 带层名的层序，供解析日志分辨「命中的是哪一层」。
+    ///
+    /// custom 层刻意**不**由 `data_dir` 推导（如取它的兄弟目录）：清单的 OnceLock 缓存
+    /// 是进程级的，若目录随调用方参数变而清单不变，两者会失配——那种不一致只在传了
+    /// 自定义 data 目录的场合出现，最难查。
+    fn resource_layers_named(data_dir: Option<&Path>) -> Vec<(&'static str, PathBuf)> {
+        let mut layers: Vec<(&'static str, PathBuf)> = Vec::with_capacity(3);
+        if let Some(u) = Self::user_config_dir() {
+            layers.push(("user", u));
+        }
+        if let Some(c) = Self::custom_data_dir() {
+            layers.push(("custom", c));
+        }
+        if let Some(d) = data_dir {
+            layers.push(("data", d.to_path_buf()));
+        }
+        layers
     }
 
     /// 获取当前激活的 schema ID
@@ -6820,7 +7147,7 @@ show_all_on_enter = true
         toml::from_str::<toml::Value>(s).expect("测试 TOML 应可解析")
     }
 
-    /// 出厂默认（L1⊕L2）样本：覆盖标量 / 数组 / 多级嵌套。
+    /// 出厂默认（L1⊕L2⊕L2.5）样本：覆盖标量 / 数组 / 多级嵌套。
     fn preset_sample() -> toml::Value {
         tv(r#"
 [schema]
@@ -6877,7 +7204,7 @@ page_keys = ["pageupdown", "minus_equal"]
 
     #[test]
     fn prune_preserves_merged_result() {
-        // ★ 本轮修复的核心保证：被删的键都会从 L1⊕L2 回落到同一个值，故清理对**当前**行为
+        // ★ 本轮修复的核心保证：被删的键都会从 L1⊕L2⊕L2.5 回落到同一个值，故清理对**当前**行为
         // 零影响，只影响将来默认值变更能否到达该用户。这条不变量成立，清理才是安全的。
         let preset = preset_sample();
         let user = tv(r#"
@@ -6907,7 +7234,7 @@ page_keys = ["pageupdown", "minus_equal"]
         let mut after = preset.clone();
         merge_value(&mut after, pruned);
 
-        assert_eq!(before, after, "清理前后三层合并结果必须逐键相同");
+        assert_eq!(before, after, "清理前后合并结果必须逐键相同");
     }
 
     #[test]
@@ -7791,6 +8118,78 @@ scripts = { latin = 42 }
         );
     }
 
+    /// ★ 写盘闸的判据必须**两个方向都判**：降级段是待写路径的祖先、待写路径是降级段的祖先。
+    ///
+    /// 只判前者会漏掉「写大表、坏在小格」——`materialize_key_actions` 要整表写 `keys`，
+    /// 而降级粒度可以细到 `keys.key_actions`，漏判的后果是本该拦下的整表覆盖照样发生。
+    /// 只判后者会漏掉「坏在大段、写小格」——`input.punct` 整段降级时，
+    /// `input.punct.custom_mappings` 的种子同样是出厂值。
+    ///
+    /// 两个方向各来一条断言，且各配一条**不该命中**的对照（否则「恒为 true」也能全绿）。
+    #[test]
+    fn taints_judges_both_ancestor_directions() {
+        let deg = ConfigDegradation {
+            sections: vec!["input.punct".into(), "keys.key_actions".into()],
+            total_fallback: false,
+        };
+        // 相等
+        assert!(deg.taints("input.punct"));
+        // 降级段是待写路径的祖先（坏在大段、写小格）
+        assert!(deg.taints("input.punct.custom_mappings"));
+        // 待写路径是降级段的祖先（写大表、坏在小格）
+        assert!(
+            deg.taints("keys"),
+            "整表写 keys 时 keys.key_actions 降级必须拦下"
+        );
+        // 对照：同段的**兄弟**子路径不受牵连，否则一个坏键会把整段的写盘全堵死
+        assert!(!deg.taints("input.symbol"));
+        assert!(!deg.taints("keys.session_actions"));
+        assert!(!deg.taints("ui"));
+        // 前缀相同但不是路径祖先：`keys.key_actions_materialized` 不该被
+        // `keys.key_actions` 命中（字符串 starts_with 会误判，故判据必须看 `.`）
+        assert!(!deg.taints("keys.key_actions_materialized"));
+
+        // 整份回落 ⇒ 一切不可信
+        let total = ConfigDegradation {
+            sections: Vec::new(),
+            total_fallback: true,
+        };
+        assert!(total.taints("anything"));
+        // 未降级 ⇒ 一律放行（正常路径不能被闸误伤）
+        let clean = ConfigDegradation::default();
+        assert!(!clean.taints("keys"));
+        assert!(!clean.blocks_write_back("keys", "测试"));
+    }
+
+    /// `affects` 与 `taints` 对顶层段名必须给出同一答案——两处判据漂移正是本仓
+    /// 反复栽的那类，而这两个函数守的是同一批写盘路径。
+    #[test]
+    fn affects_agrees_with_taints_on_top_level_sections() {
+        for deg in [
+            ConfigDegradation {
+                sections: vec!["keys.key_actions".into()],
+                total_fallback: false,
+            },
+            ConfigDegradation {
+                sections: vec!["ui".into()],
+                total_fallback: false,
+            },
+            ConfigDegradation {
+                sections: Vec::new(),
+                total_fallback: true,
+            },
+            ConfigDegradation::default(),
+        ] {
+            for section in ["input", "keys", "schema", "ui", "stats", "debug", "mobile"] {
+                assert_eq!(
+                    deg.affects(section),
+                    deg.taints(section),
+                    "{deg:?} 在 [{section}] 上两个判据分叉了"
+                );
+            }
+        }
+    }
+
     /// ★ 每条降级记录必须带**自己那一段**的错误，不能共用最初整份 `try_into` 的错误。
     ///
     /// 多段同时有毒时，整份 `try_into` 的错误只点得到其中一个段。若把它拼进每一行 WARN，
@@ -8182,7 +8581,7 @@ smart_method = "delete_replace"
 
     /// 同源守门：L1（`MixGlobal::default()`）与 L2（`data/config.toml`）必须给出同一个值。
     /// 两者漂移的后果分两层：引擎单测跑在**现实中不存在的配置**下（全绿但保护实际是反的）、
-    /// 以及 `preset_for_pruning` 拿 L1⊕L2 判「用户值是否等于默认」时开始吃用户配置。
+    /// 以及 `preset_for_pruning` 拿 L1⊕L2⊕L2.5 判「用户值是否等于默认」时开始吃用户配置。
     /// 缺 `data/` 时静默跳过（全仓惯例）。
     #[test]
     fn mix_pinyin_abbrev_l1_and_l2_agree() {
@@ -8317,7 +8716,7 @@ smart_method = "delete_replace"
 
     /// 同源守门：L1（`InputConfig::default()`）与 L2（`data/config.toml`）必须给出同一个值。
     /// 漂移的后果有两层：单测跑在**现实中不存在的配置**下（全绿但保护是反的），以及
-    /// `preset_for_pruning` 拿 L1⊕L2 判「用户值是否等于默认」时开始吃用户配置。
+    /// `preset_for_pruning` 拿 L1⊕L2⊕L2.5 判「用户值是否等于默认」时开始吃用户配置。
     /// 缺 `data/` 时静默跳过（全仓惯例）。
     #[test]
     fn empty_code_behavior_l1_and_l2_agree() {

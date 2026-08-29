@@ -270,7 +270,7 @@ fn apply_items(items: Vec<(String, toml::Value)>) -> i32 {
     }
 }
 
-/// 读取某键的当前值（三层合并后），转为 JSON。
+/// 读取某键的当前值（四层合并后），转为 JSON。
 fn load_value(key: &str) -> anyhow::Result<Value> {
     let cfg = Config::load(Config::data_dir().as_deref())?;
     let full = serde_json::to_value(cfg)?;

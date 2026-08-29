@@ -18,5 +18,10 @@ wind-quick-input = { path = "../wind-quick-input" }
 # startup_trace 的时间戳需与主日志/TSF 日志格式一致，故与 service 同用 chrono
 chrono = "0.4"
 
+[dev-dependencies]
+# 集成测试（tests/*.rs）看不到本 crate 的普通依赖，而 `system_preset_value` 的返回值
+# 与「prune 前后逐键相同」的断言都要拿 `toml::Value` 说话。
+toml = { workspace = true }
+
 [lints]
 workspace = true

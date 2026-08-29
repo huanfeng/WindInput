@@ -15,5 +15,12 @@ tracing = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 
+[dev-dependencies]
+# 集成测试（tests/*.rs 各占一个进程，OnceLock 才隔离得开）看不到本 crate 的普通依赖。
+wind-ipc = { path = "../wind-ipc" }
+wind-config = { path = "../wind-config" }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
 [lints]
 workspace = true

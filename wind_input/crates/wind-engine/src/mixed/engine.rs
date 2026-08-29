@@ -102,7 +102,7 @@ impl Default for MixConfig {
             pinyin_partial_candidates: false,
             pinyin_partial_candidates_overflow: true,
             // ⚠️ 三处同源：本处 / `MixGlobal::default()`（wind-config）/ `data/config.toml
-            // [schema.mix]` 必须一致，改默认须同步全部三处。出厂默认以 L1⊕L2 为准（L2 覆盖 L1），
+            // [schema.mix]` 必须一致，改默认须同步全部三处。出厂默认以 L1⊕L2⊕L2.5 为准（靠后层覆盖靠前层），
             // 即 data/config.toml 里的值。本处曾长期为 false 而另两处为 true，导致引擎单测跑在一个
             // 现实中不存在的配置下（测试全绿但保护实际是开着的）。
             auto_commit_block_on_pinyin: true,

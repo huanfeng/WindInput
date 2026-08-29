@@ -371,13 +371,24 @@ impl ProcessRunner for CoordProc {
 struct CoordConfig(Weak<Coordinator>);
 
 impl CoordConfig {
-    /// 读某键当前值（三层合并后），字符串裸值、其余紧凑 JSON。
-    fn load_value(key: &str) -> anyhow::Result<String> {
+    /// 读某键当前值（四层合并后），字符串裸值、其余紧凑 JSON。
+    ///
+    /// `require_trustworthy` = 调用方要拿这个值**当种子写回**（`toggle`）。此时本次加载
+    /// 若在该键处降级过就必须报错而不是照读：降级时读到的是出厂值，翻转它写回去等于
+    /// 把用户真实的设置改成「出厂值的反面」——单键版的整表抹除，同样静默、同样不可逆。
+    /// 纯读（`get`）不设这道闸：显示一个出厂值不造成任何损失。
+    fn load_value(key: &str, require_trustworthy: bool) -> anyhow::Result<String> {
         use wind_config::config_schema::is_known_key;
         if !is_known_key(key) {
             anyhow::bail!("未登记的配置键: {key}");
         }
         let cfg = wind_config::Config::load(wind_config::Config::data_dir().as_deref())?;
+        if require_trustworthy && cfg.degradation.blocks_write_back(key, "config.toggle") {
+            anyhow::bail!(
+                "本次配置加载中 [{key}] 所在段解析失败并回落了出厂默认值，\
+                 翻转它会覆盖你的真实设置，故拒绝；请先修好报错的配置键（见日志 WARN）。"
+            );
+        }
         let full = serde_json::to_value(cfg)?;
         let mut cur = &full;
         for part in key.split('.') {
@@ -394,7 +405,7 @@ impl CoordConfig {
 
 impl ConfigService for CoordConfig {
     fn get(&self, key: &str) -> anyhow::Result<String> {
-        Self::load_value(key)
+        Self::load_value(key, false)
     }
 
     fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
@@ -412,7 +423,8 @@ impl ConfigService for CoordConfig {
     fn toggle(&self, key: &str) -> anyhow::Result<String> {
         use wind_config::config_schema::{FieldType, field};
         let fld = field(key).ok_or_else(|| anyhow::anyhow!("未登记的配置键: {key}"))?;
-        let cur = Self::load_value(key)?;
+        // 取当前值即取写回的种子，故必须过降级闸。
+        let cur = Self::load_value(key, true)?;
         let next: String = match fld.ty {
             FieldType::Bool => (cur != "true").to_string(),
             FieldType::Enum(vals) => {

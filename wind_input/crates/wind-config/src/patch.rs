@@ -32,7 +32,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::config::Config;
+use crate::config::{Config, ConfigDegradation};
 use crate::config_schema;
 
 /// 合法但刻意不进 REGISTRY 的配置键白名单。
@@ -417,6 +417,41 @@ fn validate_map_entry(key: &str, name: &str, value: &toml::Value) -> Result<(), 
         .map_err(|e| format!("类型或取值不合法: {e}"))
 }
 
+/// **降级闸**：把「合并种子不可信」的 Map 条目就地标成条目级 `error`。
+///
+/// # 为什么必须有这一道
+///
+/// [`writes`] 拿**当前生效配置**当 Map 键的合并种子。段级降级之后，「生效配置」在坏段处
+/// 是出厂值——`input.punct` 一降级，`custom_mappings` 的种子就是出厂空表，于是应用一个
+/// 只加一条映射的片段，会把用户**全部**已有的自定义标点整表抹掉，永久且无痕。
+///
+/// P1 之后这条路可由**第三方**触发：定制者在 `data_custom/config.toml` 里把该键写成错
+/// 类型，该定制版的每个用户每次 `load()` 都降级，此后任何一次配置导入都会引爆。
+///
+/// # 为什么标成 error 而不是在应用时 bail
+///
+/// 预览与应用共走同一批 `entries`，判据必须只有一套——「预览放行、应用才拒绝」是分发者
+/// 最难自查的一类不一致（本模块的 `patch_entries` 文档已经立过这条规矩）。标成 error 之后
+/// 预览界面直接显示原因，应用侧既有的「任何一条有错即整体拒绝」自动生效，无需第二处判断。
+///
+/// # 只管 Map 条目
+///
+/// 标量键的落盘值是片段里的**显式新值**，与种子无关，降级不影响它的正确性；连它一起拦
+/// 会把「导入一份只改了几个开关的配置」在降级期间整个堵死，代价远大于收益。
+pub fn mark_degraded_seeds(entries: &mut [PatchEntry], degradation: &ConfigDegradation) {
+    for e in entries.iter_mut() {
+        if e.map_entry.is_none() || e.error.is_some() || !degradation.taints(&e.key) {
+            continue;
+        }
+        e.error = Some(format!(
+            "本次配置加载中 [{}] 所在段解析失败并回落了出厂默认值，\
+             当前表不是你的真实配置；此时合并写回会把已有条目整表抹掉，故拒绝应用。\
+             请先修好报错的配置键（见日志 WARN）再导入。",
+            e.key
+        ));
+    }
+}
+
 /// 把预览条目折算成**实际落盘的键值**（`set_user_value` 的入参）。
 ///
 /// - 标量/整值条目：原样 `(key, next)`。
@@ -425,7 +460,11 @@ fn validate_map_entry(key: &str, name: &str, value: &toml::Value) -> Result<(), 
 ///
 /// 顺序 = 条目首次出现顺序。调用方须先确认无 `error` 条目（半应用不被允许）。
 ///
-/// ⚠️ **合并种子是「三层合并后的生效表」，不是「用户层已有的表」**——这是当前 4 个 Map 键
+/// ⚠️ **调用前须先跑 [`mark_degraded_seeds`] 并确认无 `error` 条目**：种子取自生效配置，
+/// 而段级降级会让生效配置在坏段处变成出厂值，那种表拿来合并就是整表抹掉用户数据。
+///
+/// ⚠️ **合并种子是「四层合并后的生效表」（L1⊕L2⊕L2.5⊕L3），不是「用户层已有的表」**
+/// ——这是当前 4 个 Map 键
 /// 出厂值恒为空表（`= {}`）时唯一可行的取法，但它埋着一颗休眠的雷：若将来工厂层（L1/L2）
 /// 给这些键提供了非空默认条目，本函数会把那些默认条目连同片段条目一起写进用户层，
 /// 从此**冻结、不再跟随工厂层的后续更新**——与
@@ -483,6 +522,86 @@ mod tests {
     fn parse_failure_is_whole_fragment_error() {
         assert!(parse_fragment("= not toml =").is_err());
         assert!(parse_fragment("[unclosed\n").is_err());
+    }
+
+    /// ★ 降级闸：Map 条目的合并种子来自生效配置，坏段处那张表是出厂值 ⇒ 必须拒绝应用，
+    /// 否则「加一条映射」会把用户已有的整表抹掉（永久、无痕）。标量键则不受牵连。
+    #[test]
+    fn degraded_map_seed_is_rejected_but_scalars_still_apply() {
+        let mut entries = preview_text(
+            "[input.punct.custom_mappings]\n\"'1\" = [\"①\"]\n\n[ui.candidate]\nper_page = 9\n",
+        );
+        assert!(
+            entries.iter().all(|e| e.error.is_none()),
+            "前置：这份片段本身合法，后面的 error 只能来自降级闸"
+        );
+
+        // `input.punct` 整段降级 ⇒ `custom_mappings` 的当前表是出厂空表。
+        let deg = ConfigDegradation {
+            sections: vec!["input.punct".into()],
+            total_fallback: false,
+        };
+        mark_degraded_seeds(&mut entries, &deg);
+
+        let map_entry = entries
+            .iter()
+            .find(|e| e.key == "input.punct.custom_mappings")
+            .expect("Map 条目应在");
+        assert!(
+            map_entry.error.is_some(),
+            "★ 种子不可信的 Map 条目必须报错——放行它就是把用户已有的映射整表抹掉"
+        );
+
+        // ★ 标量键**不受牵连**：它的落盘值是片段里的显式新值，与种子无关。
+        // 连它一起拦会让降级期间「导入一份只改几个开关的配置」整个堵死。
+        let scalar = entries
+            .iter()
+            .find(|e| e.key == "ui.candidate.per_page")
+            .expect("标量条目应在");
+        assert!(scalar.error.is_none(), "标量键不该被降级闸拦下");
+
+        // 对照：降级发生在**别处**时，同一个 Map 条目必须放行（否则闸恒真、上面那条是假绿）。
+        let mut entries2 = preview_text("[input.punct.custom_mappings]\n\"'1\" = [\"①\"]\n");
+        mark_degraded_seeds(
+            &mut entries2,
+            &ConfigDegradation {
+                sections: vec!["ui.font".into()],
+                total_fallback: false,
+            },
+        );
+        assert!(
+            entries2[0].error.is_none(),
+            "无关段降级不得牵连 Map 条目，实得 {:?}",
+            entries2[0].error
+        );
+
+        // 整份回落 ⇒ 一切种子不可信。
+        let mut entries3 = preview_text("[input.punct.custom_mappings]\n\"'1\" = [\"①\"]\n");
+        mark_degraded_seeds(
+            &mut entries3,
+            &ConfigDegradation {
+                sections: Vec::new(),
+                total_fallback: true,
+            },
+        );
+        assert!(entries3[0].error.is_some(), "整份回落时必须拦下");
+    }
+
+    /// 已有 error 的条目不被降级闸改写：先报的那个错才是作者要看的根因，
+    /// 覆盖掉等于把「你这个键写错了」换成「系统降级了」，排查方向被带偏。
+    #[test]
+    fn existing_error_is_not_overwritten() {
+        let mut entries = preview_text("[input.punct.custom_mappings]\n\"'1\" = 42\n");
+        let first = entries[0].error.clone();
+        assert!(first.is_some(), "前置：值类型不合法本就该报错");
+        mark_degraded_seeds(
+            &mut entries,
+            &ConfigDegradation {
+                sections: vec!["input.punct".into()],
+                total_fallback: false,
+            },
+        );
+        assert_eq!(entries[0].error, first, "原有 error 必须原样保留");
     }
 
     /// Map 键（custom_mappings）逐条目产出：`key` 恒为父 Map 键，条目名走 `map_entry`，

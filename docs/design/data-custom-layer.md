@@ -118,9 +118,24 @@ try_into(merged) 失败
 `preset_for_pruning` 取不到就退化为不清理同构。⚠️ 段名是**点分路径**（见下），
 判前缀而非精确相等。
 
+| `patch::writes`（wind-config，经 `config.applyPatch`） | Map 键（`custom_mappings` / `key_actions` 等）以**当前生效配置为种子**拼整表再覆盖用户层。降级时种子是出厂空表 ⇒ 用户真实的自定义标点映射被整表抹掉。P1 之后这条**可由第三方触发**：定制者在 `data_custom/config.toml` 把该键写成错类型，该定制版每个用户每次 load 都降级 |
+
+★ **这是同一形状的第三条**（P0 只找到前两条）。判据要固化成规矩而不是逐条打地鼠：
+**凡是「拿 `Config::load()` 的结果当种子、再整表写回用户层或导出给用户」的路径，
+降级时都会把用户数据抹掉**。新增此类路径必须过闸，并有守门测试。
+
 未加闸但已确认安全的：`prune_user_config` / `set_user_value`（`system_preset_value`
 走生 `toml::Value`，根本不反序列化，不变量 1 不破）；`keys_overview`
 （wind-webdata）只影响显示、不写盘，留待 P3 一并处理。
+
+### 定制层里不建议声明 `[keys] key_actions`（P3 的 CLI 要检出）
+
+`materialize_key_actions` 会把 L1⊕L2⊕L2.5 折算后的绑定**一次性物化**进用户层并打死
+版本标记。定制者第一版包里写的 `key_actions` 会被固化到存量用户的 `%APPDATA%`，
+**此后定制包再改这些绑定对存量用户永远不生效，且无任何日志**。
+
+这与 L2 的 `trigger_keys` 同构、不是 data_custom 引入的，但对第三方完全不可发现。
+P3 的 `config check --custom` 要把它列为「定制层里不建议声明」的键，制作指南写死。
 
 **★ 降级粒度：顶层段 + 再递归一层子表**
 
@@ -156,9 +171,13 @@ stats/mobile/debug 各 3。只按顶层段降级的话，`ui.font.scripts` 一�
 - `custom_data_dir() -> Option<PathBuf>`（manifest 在场时才返回 Some）
 - `resource_layers() -> Vec<PathBuf>`：`[user?, custom?, data?]` 有序列表
 
-`resolve_overridable`（config.rs:5367）由「两级」改为「遍历 `resource_layers()`」。
-`resolve_data_file` / `resolve_schema_resource` / `resolve_schema_file` 自动继承，
-这三个函数覆盖了绝大部分单文件读取——**这是本计划改动量小的原因**。
+`resolve_overridable` 由「两级」改为「遍历 `resource_layers()`」。
+`resolve_data_file` / `resolve_schema_resource` 是它的两个薄包装，自动继承。
+
+> ⚠️ **原文曾把 `resolve_schema_file` 也列进「自动继承」，这是错的**（P1 实施时证伪）。
+> 它在 `wind-engine/src/manager.rs`，是**另一份独立的两层实现**，自己拼
+> `user_config_dir()/schemas/` 再回落 `data_dir/schemas/`，不经过 `resolve_overridable`。
+> 详见 P1d。
 
 #### P1b config.toml 四层合并（★ 本计划最危险的一步）
 
@@ -206,6 +225,42 @@ stats/mobile/debug 各 3。只按顶层段降级的话，`ui.font.scripts` 一�
 
 **守门测试**：一条 grep 式测试钉住「除 `resource_layers()` 外不得新增裸
 `join("schemas")` / `join("themes")`」，否则下一个功能又会漏接一处。
+
+#### ★ P1 实施时发现的两处独立实现（不在上表里，且都不会自动继承）
+
+**(a) `resolve_schema_file`（`wind-engine/src/manager.rs`）——最要紧的一处**
+
+方案文件的**唯一入口**：`read_schema`（`{id}.schema.toml`）与双拼布局
+（`shuangpin/{id}.toml`）都走它。它自己拼两层路径，不经过 `resolve_overridable`。
+
+⇒ **不改它，`data_custom/schemas/*.schema.toml` 完全不可见**，而方案正是定制者要
+替换的头号资源。现象是「我把虎码方案放进 data_custom 了，程序当没看见」——
+静默降级，无任何日志。
+
+改法：**就地改成遍历层序**，不要换成 `resolve_schema_resource`。两者契约不同——
+前者返回 `PathBuf`（找不到时返回安装目录路径，由调用方报加载失败），后者返回
+`Option<PathBuf>`。换过去会改变「找不到时返回什么」。
+
+**(b) 词库路径解析（`wind-engine/src/manager.rs`）——不能套单趟循环**
+
+它不是「逐层找同一个文件」，而是**两趟**：第 1 趟在各层找 `.yaml`，第 2 趟才在各层
+找「有同名 `.wdat` 兄弟」的。遮蔽判定也不同（安装侧只投 wdat 时，用户的 yaml
+仍算覆盖）。
+
+⚠️ 天真地改成一趟 `for base in resource_layers()` 会**反转语义**。反例：用户层只有
+`.wdat`、data 层有 `.yaml` ⇒ 现行正确结果是 **data 层的 yaml 胜出**（第 1 趟就命中），
+单趟逐层则 user 的 wdat 先命中。加 custom 层后这类组合只会更多——定制者只投
+`.wdat` 是很自然的做法，那正是他们预编译词库的产物。
+
+改法：**保持两趟结构，每趟内部各自遍历层序**。
+
+⚠️ 该函数收的是已经到 `.../schemas` 那一级的路径，不是数据根。要么在调用方把层序
+转成 schemas 级列表传进来，要么改签名收数据根。**不要**在函数内部拿 `parent()` 反推
+数据根——那是把「层的兄弟关系」埋进一个反推里，正是本仓反复栽过的隐式契约。
+
+**(c) API 缺口**：`resource_layers_with()` 只返回路径，而日志需要层名
+（`log_layer_override` 要 user/custom/data）。P1d 需要一个带层名的公开形态
+（如 `ResourceLayer { name, path }`），否则每个枚举点都要自己猜层名。
 
 ### P2 — 减法（hide）
 

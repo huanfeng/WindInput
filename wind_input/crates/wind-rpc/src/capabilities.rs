@@ -23,7 +23,13 @@ fn type_name(ty: FieldType) -> &'static str {
 }
 
 /// 生成 capability descriptor JSON。
-/// `data_dir` 用于读取系统预置 `config.toml`（None 时仅 L1 代码默认）。
+///
+/// `data_dir` 用于读取系统预置 `data/config.toml`（L2）。**定制层 L2.5
+/// （`data_custom/config.toml`）由 `system_preset_value` 自行接上，不经本参数**——
+/// 故 `data_dir = None` 时得到的是 L1⊕L2.5，在定制版上并非纯 L1 代码默认。
+///
+/// ⚠️ 由此，定制版设置页显示的 `default`（以及「恢复默认」的落点）是**定制默认值**。
+/// 这是正确语义，不要当 bug 改——见 `Config::system_preset_value` 的文档。
 pub fn generate(data_dir: Option<&Path>) -> anyhow::Result<serde_json::Value> {
     let preset = Config::system_preset_value(data_dir)?;
     let leaves: BTreeMap<String, toml::Value> =

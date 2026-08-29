@@ -107,8 +107,15 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
             Ok(serde_json::to_value(cfg)?)
         }
         "config.getDefaults" => {
-            // 出厂默认 = 系统预置（代码默认 L1 ⊕ data/config.toml L2），与 capability
-            // 的 default 同源（system_preset_value）。不可用 toml::from_str("") 的纯 L1：
+            // 出厂默认 = 系统预置（代码默认 L1 ⊕ data/config.toml L2 ⊕
+            // data_custom/config.toml L2.5），与 capability 的 default 同源
+            // （system_preset_value）。
+            //
+            // ⚠️ 定制版上「出厂默认」因此是**定制默认值**，设置页的「恢复默认」会落到
+            // 定制者设的值而不是原版值。这是正确语义（定制版用户要恢复的就是定制版的默认），
+            // 不是 bug——见 `Config::system_preset_value` 的文档。
+            //
+            // 不可用 toml::from_str("") 的纯 L1：
             // 顶码上屏/拼音自动学习等键出厂经 L2 置开、L1 为关，二者分叉会让设置端
             // 「恢复默认」把这些项误关。
             let v = Config::system_preset_value(Config::data_dir().as_deref())?;
@@ -121,7 +128,7 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
         "config.applyPatch" => apply_patch(state, params),
         // 配置字段注册表（key+type+enum options）：CLI/设置端据此校验与补全。
         "config.schema" => Ok(schema_json()),
-        // 单字段当前值（含三层合并）：补 config.get 只能整份的缺口。
+        // 单字段当前值（含四层合并）：补 config.get 只能整份的缺口。
         "config.getItem" => get_item(params),
         "config.reload" => {
             // 变更通知：广播一个 config 变更事件，供订阅者（TSF/UI）刷新。
@@ -143,6 +150,19 @@ fn platform_name() -> &'static str {
     }
 }
 
+/// 惰性取本次的降级记录（首次调用才真去 `Config::load()`）。
+///
+/// 单独抽出来是为了让「只有遇到 Map 键才付这份代价」这件事在调用点一眼可见，
+/// 而不是散成一段 `if slot.is_none() { … }`。
+fn degradation_for_write_back(
+    slot: &mut Option<wind_config::config::ConfigDegradation>,
+) -> anyhow::Result<&wind_config::config::ConfigDegradation> {
+    if slot.is_none() {
+        *slot = Some(Config::load(Config::data_dir().as_deref())?.degradation);
+    }
+    Ok(slot.as_ref().expect("just filled"))
+}
+
 fn set_items(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
     let items = params
         .get("items")
@@ -152,6 +172,9 @@ fn set_items(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
     // 不让整批因一个旧字段失败（保护沿用旧字段的 webview）。malformed item（无 key）仍为硬错误。
     let mut writes: Vec<(String, toml::Value)> = Vec::with_capacity(items.len());
     let mut skipped: Vec<Value> = Vec::new();
+    // 降级记录**按需**加载：绝大多数 setItems 一个 Map 键都没有，不该为此多跑一次
+    // `Config::load()`（它要读四层文件）。`None` = 还没问过。
+    let mut degradation: Option<wind_config::config::ConfigDegradation> = None;
     for it in items {
         let key = it
             .get("key")
@@ -165,10 +188,32 @@ fn set_items(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
                 continue;
             }
         };
-        match wind_config::config_schema::validate(key, &toml_val) {
-            Ok(()) => writes.push((key.to_string(), toml_val)),
-            Err(e) => skipped.push(json!({ "key": key, "reason": e.to_string() })),
+        if let Err(e) = wind_config::config_schema::validate(key, &toml_val) {
+            skipped.push(json!({ "key": key, "reason": e.to_string() }));
+            continue;
         }
+        // ★ 降级闸（第四条同形状路径）。**只拦 Map 型键**：
+        //
+        // 设置端发来的是「base ⊕ 本次编辑」的**整表**（wind-setting 的 `diff_config` 把
+        // map 型键作原子叶子整体发送），而 base 来自 `config.get` ⇒ 本次加载降级时 base
+        // 是出厂空表 ⇒ 用户改一条自定义标点，就把他原有的整张映射表抹掉，永久且无痕。
+        // 这与 `applyPatch` 的 Map 合并种子是同一个失效模式，只是入口不同。
+        //
+        // 标量键不拦：它的落盘值是设置端发来的**显式单值**，与降级后的 base 无关，
+        // 拦掉只会让降级期间整个设置页无法保存，代价远大于收益。
+        if matches!(
+            wind_config::config_schema::field(key).map(|f| &f.ty),
+            Some(wind_config::config_schema::FieldType::Map(_))
+        ) && degradation_for_write_back(&mut degradation)?.taints(key)
+        {
+            skipped.push(json!({
+                "key": key,
+                "reason": "本次配置加载中该键所在段解析失败并回落了出厂默认值，\
+                           整表写回会抹掉已有条目，故跳过；请先修好报错的配置键再保存。",
+            }));
+            continue;
+        }
+        writes.push((key.to_string(), toml_val));
     }
     let applied = writes.len();
     if !skipped.is_empty() {
@@ -203,7 +248,7 @@ fn apply_writes(
 }
 
 /// 解析 + 展平 + 校验配置片段（previewPatch / applyPatch 共用）。
-/// TOML 解析失败是整体错误；当前值与 `config.get` 同源（三层合并后的生效配置）。
+/// TOML 解析失败是整体错误；当前值与 `config.get` 同源（四层合并后的生效配置）。
 ///
 /// 一并返回当前配置树：applyPatch 折算 Map 键的落盘整表要用它作合并种子，
 /// 重新加载一次会引入「预览用 A 树、落盘用 B 树」的窗口。
@@ -226,8 +271,16 @@ fn patch_entries(
         .map_err(|e| anyhow::anyhow!("invalid_patch: {e}"))?;
     let info = wind_config::patch::extract_info(&fragment)
         .map_err(|e| anyhow::anyhow!("invalid_patch: {e}"))?;
-    let current = toml::Value::try_from(Config::load(Config::data_dir().as_deref())?)?;
-    let entries = wind_config::patch::preview(&fragment, &current);
+    let cfg = Config::load(Config::data_dir().as_deref())?;
+    // 降级记录必须在序列化成 `toml::Value` **之前**留下来：`degradation` 是 `#[serde(skip)]`，
+    // 转成值树那一刻就没了，而下面的 Map 合并种子正是从这棵树上取的。
+    let degradation = cfg.degradation.clone();
+    let current = toml::Value::try_from(cfg)?;
+    let mut entries = wind_config::patch::preview(&fragment, &current);
+    // ★ 降级闸，preview 与 apply 共用这一处判据（见 `mark_degraded_seeds`）：坏段处的
+    // 生效表是出厂值，拿它当 Map 合并种子会把用户已有条目整表抹掉。标成条目级 error 之后，
+    // 预览直接显示原因、applyPatch 既有的「有错即整体拒绝」自动生效。
+    wind_config::patch::mark_degraded_seeds(&mut entries, &degradation);
     Ok((entries, current, info))
 }
 
@@ -317,7 +370,7 @@ fn schema_json() -> Value {
     json!({ "fields": fields })
 }
 
-/// `config.getItem`：返回单个已登记键的当前值（三层合并后）。
+/// `config.getItem`：返回单个已登记键的当前值（四层合并后）。
 fn get_item(params: &Value) -> anyhow::Result<Value> {
     let key = params
         .get("key")

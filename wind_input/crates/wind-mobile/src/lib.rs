@@ -14,7 +14,7 @@
 //!
 //! 判据不是「Android 用不用得上」，而是「**换成 iOS 还成不成立**」：
 //!
-//! - **留在这里**（移动端形态，与绑定框架无关）：三层配置加载、已装方案扫描与
+//! - **留在这里**（移动端形态，与绑定框架无关）：四层配置加载、已装方案扫描与
 //!   激活校正、`preedit_display` 覆盖、`UiCommand` 泵线程、预热闸门、吃键判定转发。
 //! - **归平台仓**（平台专属）：UniFFI/Swift 的类型投影、日志接到 logcat/oslog、
 //!   `cdylib` 产物形态、绑定生成器。
@@ -210,7 +210,8 @@ impl MobileCore {
     ) -> Arc<Self> {
         mount_user_dirs(user_root);
 
-        // 三层配置加载（代码默认 ⊕ data/config.toml ⊕ 用户层），与桌面同一条路径——
+        // 四层配置加载（代码默认 ⊕ data/config.toml ⊕ data_custom/config.toml ⊕ 用户层），
+        // 与桌面同一条路径——移动端没有定制版包时 L2.5 自然缺席，不需要分支——
         // 「配置格式三端统一」是移植的硬约束（多端同步的前提），这里若退回
         // `Config::default()`，出厂 config.toml 里的短语/命令栏/候选行为全部失效。
         let mut cfg = Config::load(Some(data_dir)).unwrap_or_else(|e| {
