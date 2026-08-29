@@ -18,6 +18,17 @@ impl Coordinator {
         self.engine_mgr.available_schemas()
     }
 
+    /// 某个 mix 实例**实际生效的成员方案**（测试/诊断用）：[`Self::mix_members`] 的直通，
+    /// 不另算一遍（另算一遍的 debug 方法证明不了生产路径接对了）。
+    ///
+    /// ★ 暴露它是因为「某个成员被跳过了」**在候选面上不可观察**：被跳过的成员本来就不
+    /// 产候选，少了几条与「那个方案没词」无从区分。定制版 `[schemas] hide` 掉一个 mix
+    /// 成员正是这种形状——跳过是对的，但「其余成员照常」必须能被断言，否则一个把整个
+    /// mix 判空的实现同样全绿。
+    pub fn debug_mix_members(&self, idx: u8) -> Vec<String> {
+        self.mix_members(idx)
+    }
+
     /// 当前联想候选的文本（测试/诊断用）。空 = 这批候选不是联想来的。
     ///
     /// 集成测试（`tests/` 下、crate 外）够不着 `state`，而联想的端到端验证恰恰必须从

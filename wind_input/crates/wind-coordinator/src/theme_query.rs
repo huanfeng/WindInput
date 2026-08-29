@@ -105,8 +105,12 @@ impl Coordinator {
         let is_dark = self.theme_dark_with(system_dark);
         let dirs = self.theme_search_dirs();
         let name = self.active_theme_id();
+        // 与桌面 push 链同一裁决：被定制版 `[themes] hide` 删掉的主题按不存在处理。
+        // 这条**不能**指望列表侧过滤兜底——`ui.theme.name` 是存量用户配置里带过来的，
+        // 列表里没有它照样能被拉取到。
+        let name = Self::theme_id_honoring_hide(&name);
 
-        let merged = match wind_theme::load_merged_dirs(&dirs, &name, 0) {
+        let merged = match wind_theme::load_merged_dirs(&dirs, name, 0) {
             Ok(v) => v,
             Err(e) => {
                 warn!("主题 {} 加载失败，调色板为空: {}", name, e);

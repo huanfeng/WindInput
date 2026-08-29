@@ -6135,6 +6135,30 @@ impl Config {
         crate::variant::install_root().map(|d| d.join(CUSTOM_DATA_DIR_NAME))
     }
 
+    /// 本定制版是否把方案 `id`「删掉了」（`data_custom/custom.toml` 的 `[schemas] hide`）。
+    ///
+    /// ★ **与 `[schema].hidden` 是两个正交的轴，不得合并**（见 [`CustomManifest::schemas`]）：
+    /// `hidden` = 「不列进方案切换列表」，english / 快符仍可用、仍被 mix 引用、仍能被
+    /// `schema.active` 指到；本判据 = 「这个方案在本定制版里**不存在**」。拿 `hidden` 实现
+    /// 减法会让被删掉的方案继续被 mix / special_modes / `schema.active` 引用到。
+    ///
+    /// ★ **hide 是绝对的：被 hide 的 id 在任何层都不存在**，`data/` 与 `data_custom/` 之外，
+    /// 也包括用户自己放在 `%APPDATA%\WindInput\schemas\` 里的同名文件。理由是契约 5 的措辞
+    /// 「这个方案在本定制版里不存在」——若 hide 只对安装层生效，用户层放一个同名文件就能
+    /// 让被删掉的方案复活，定制者的意图落空，而判定还得多带一个「命中的是哪一层」的分支。
+    /// **代价（明写在这里，别留白）**：用户无法用被 hide 的 id 给自己的方案命名——他放的
+    /// `wubi86.schema.toml` 会连同被删的内置方案一起消失，且现象与「文件没放对」难以区分。
+    /// 定制者因此应当只 hide 自己确实想删掉的**内置** id。
+    pub fn custom_hides_schema(id: &str) -> bool {
+        Self::custom_manifest().is_some_and(|m| m.schemas.hide.iter().any(|h| h == id))
+    }
+
+    /// 本定制版是否把主题 `id`「删掉了」（`[themes] hide`）。绝对性同
+    /// [`Self::custom_hides_schema`]：被 hide 的主题在用户层同名放一份也不会复活。
+    pub fn custom_hides_theme(id: &str) -> bool {
+        Self::custom_manifest().is_some_and(|m| m.themes.hide.iter().any(|h| h == id))
+    }
+
     /// 资源层的有序列表：`[user?, custom?, data?]`，靠前者优先。
     ///
     /// 这是**唯一**该被枚举点使用的层序来源。目录枚举（方案 / 主题 / 双拼布局 / opencc）

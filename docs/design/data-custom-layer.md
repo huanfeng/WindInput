@@ -329,30 +329,128 @@ stats/mobile/debug 各 3。只按顶层段降级的话，`ui.font.scripts` 一�
 
 ### P2 — 减法（hide）
 
-**主拦截点：`read_schema`（manager.rs:3190）对被 hide 的方案直接返回 `None`。**
+**主拦截点：`read_schema`（`wind-engine/src/manager.rs`）对被 hide 的方案直接返回 `None`。**
 釜底抽薪——`schema_supported`、`build_engine`、mix members 解析、special_modes
 全部自动失效，不必逐处补过滤。
 
-**上层列表过滤（双保险）**：`available_schemas`（1577）、`installed_schemas`（1599）。
+**上层列表过滤（双保险）**：`available_schemas`、`installed_schemas`。
 
 **必须一并处理的连带情形**：
 
 1. `schema.active` 指向被 hide 的方案（原版用户升级到定制版必然发生）
    → 降级到第一个可用方案，WARN 落日志，**不改写用户配置**
-   （改写会让用户切回原版时丢失设置）。
+   （改写会让用户切回原版时丢失设置；`data_custom` 本就是可卸载的）。
 2. mix `members` / `special_modes` 引用被 hide 的方案 → 该成员静默跳过 + WARN。
    这是定制者的配置错误，CLI 校验（P3）要能提前报出来。
-3. **`is_user_schema` / `delete_user_schema`（manager.rs:1995）的判据要扩**。
-   现在是「存在于用户目录 = 可删」。`data_custom` 里的方案属于**定制版内置，
-   不可删**——否则用户删掉后 `data/` 里的原版又冒出来，现象是
-   「我删了五笔，五笔自己回来了」。
-4. themes 的 hide 同理落在 `theme_search_dirs` 的消费侧 + 设置页列表。
+3. ~~`is_user_schema` / `delete_user_schema` 的判据要扩~~ —— **已推翻，无事可做**。
+   两者**刻意只查用户目录**（`resource_layer_gates.rs` 的清单已如此登记），故
+   `data_custom` 里的方案本来就已经是 `is_user_schema() == false`、
+   `delete_user_schema()` 直接 bail「内置方案不可删除」。
+4. themes 的 hide 同理落在**主题搜索链的消费侧** + 设置页列表。
 
-**守门测试**：
+#### ★ P2 实施结论
 
-- hide 掉的方案不出现在 `installed_schemas` / `available_schemas` / 设置页列表
-- `schema.active` = 被 hide 方案 → 降级成功且用户配置文件未被改写
-- `data_custom` 方案的 `is_user_schema() == false`、`delete_user_schema()` 报错
+**hide 是绝对的：被 hide 的 id 在任何层都不存在**，包括用户自己在
+`%APPDATA%\WindInput\schemas\`（`themes\`）里放的同名文件。判据落在 `id` 上，
+与「命中的是哪一层」无关（`Config::custom_hides_schema` / `custom_hides_theme`）。
+
+理由是契约 5 的措辞「这个方案在本定制版里不存在」：若 hide 只对安装层生效，用户层放一个
+同名文件就能让被删的方案复活，定制者意图落空，判定还得多带一个「哪一层」的分支。
+**代价（不留白）**：用户无法用被 hide 的 id 给自己的方案/主题命名——他放的
+`wubi86.schema.toml` 会连同被删的内置方案一起消失，现象与「文件没放对」难以区分。
+故定制者应当只 hide 自己确实想删掉的**内置** id。这条取舍同时写在两个判据函数的文档注释里。
+
+**落点**：
+
+| 落点 | 角色 |
+|---|---|
+| `manager.rs` `read_schema` | 主拦截点。`schema_supported` / `build_engine` / mix 成员的 `ensure_schema` 门卫 / `overlay_modes`（特殊模式）全部自动失效 |
+| `manager.rs` `available_schemas` | 双保险。**唯一独立生效的场合**是「构造/reload 的 `retain` 无条件保留活跃方案」那条旁路 —— 降级也找不到可用方案时，被 hide 的 active 会留在内部列表里 |
+| `manager.rs` `installed_schemas` → `scan_layer_schema_ids` | **不是**正确性闸门（`schema_supported` 已经拦住了），作用是**降噪**：不过滤的话每个被删的方案都会在目录扫描时触发一次 `warn_hidden_schema_once`，把「定制者配错了」的告警变成「定制版正常工作」的噪音 |
+| `manager.rs` `resolve_active_schema_id` | 活跃方案降级（构造与 `reload_from_config` 同源），只在内存里。★ 落点的挑法见下 |
+| `wind-mobile` `scan_installed_schemas` | 移动端方案列表，与桌面同判据 |
+| `handle_mode.rs` `list_themes_full` | 主题列表（随包分发那一段 + 用户层独有那一段，**两段各滤一次**） |
+| `handle_mode.rs` `theme_id_honoring_hide` | 主题解析侧的统一裁决，被 `load_theme_with_fallback`（桌面 `push_theme`）与 `theme_query.rs` 的 `theme_palette`（移动端拉取面）共用 |
+| `manager.rs` `overlay_index_of` | **只补 WARN，不改行为**。特殊模式是唯一不把 id 喂给 `read_schema` 的引用路径（注册表建自 `installed_schemas`，扫描侧已滤掉），于是分发点零日志。行为本身已经对：`BoundAction::Special` 拿到 `None` 后**不吞键、落普通输入**（引导键多是 `;` `/`，按下去就正常出符号），缺的只是一行能归因的日志 |
+
+**告警节流**：`read_schema` 在热路径上，故「被 hide 的方案仍被引用」按 id 每进程只 WARN
+一次（`warn_hidden_schema_once`）。这条信息是定制者的一次性配置错误，提前报出来归 P3 的
+`config check --custom`。
+
+#### ★ 降级落点怎么挑（审查退回过一版，别再简化成「第一个受支持的」）
+
+第一版是「候选表过一遍 `is_supported()` 取第一个」，而候选表当时按字典序排。**实测落点是
+`english`**（`'e' < 'h'`，英文方案抢在定制版自带的 `huma` 前面）：五笔用户装上虎码定制版，
+首启工具栏显「英」、一个汉字都打不出。触发条件一点都不刁钻——`schema.available` 只有一项
+的单方案用户很常见，而被 hide 的恰好就是他那一项。
+
+⚠️ **「加一道 `[schema] hidden` 过滤」挡不住它**：`build_dev/data/schemas/*.schema.toml` 里
+一个 `hidden` 都没有，英文方案也没标。判据必须是排序 + 类型。
+
+现在的挑法：
+
+1. 候选源 = `schema.available`（用户自己排过的顺序）+ 各层 `schemas/` 扫描结果，去重；
+2. 扫描结果**按层序**（`user > custom > data`，层内按文件名序）——定制者自带的方案才是他
+   意图中的替代品。为此 `scan_layer_schema_ids` 从 `ids.sort()` 改成层序去重，它原先那句
+   「扫描顺序无关紧要」只对 `installed_schemas` 成立（那里自己再排一次）；
+3. 按 `active_fallback_rank` **稳定**排序取第一个：`[overlay]` 方案直接出局（特殊模式是
+   引导键瞬态进入、上屏即退出的小符号表，当常驻活跃方案等于打不了字），`english` 排最后
+   （它不出汉字；排最后而不是排除——万一盘上真只剩它，能打英文仍好过没有）。稳定排序保证
+   同档位内第 1、2 条的顺序原样保留。
+
+**降级目标必须进 `available`**（`ensure_fallback_listed`，构造与 reload 共用）：单方案用户
+那个场景里，`retain` 的两条判据——「等于活跃方案」（已降级成别的 id）与「受支持」（被 hide
+的读不出来）——双双落空，`available` 会变成**空表**，方案菜单空白、循环切换键毫无反应。
+只在确实降级过时补，否则会顺手改掉「用户的 active 本来就不在 available 里」这个既有合法
+状态（`cycle_schema` 专门处理过它）。
+
+**与本节原文的两处出入**（实施时证伪，据实记下）：
+
+- 原文（及任务书）说 themes 列表是**两份**独立实现。**已不成立**：P1d 已把
+  `wind-webdata` 的 `theme_dirs()` 改为复用 `theme_search_dirs()`、`web_theme_list` 改为复用
+  `list_themes_full`。现在列表只有一份实现，设置页与右键菜单共用。
+- 反过来多出一处原文没点到的搜索链消费者：`Coordinator::theme_palette`
+  （`theme_query.rs`，移动端拉取式色表）**刻意不走** `push_theme` 那条链。不接它的现象是
+  「桌面上换掉了、Android 上还是那个本该被删的主题」。已一并接线。
+
+**守门测试**（四个独立测试二进制——`custom_manifest()` 是 OnceLock，每个进程只能有一种层状态）：
+
+- `wind-engine/tests/custom_layer_hide.rs`：`ensure_schema` 拦下 / `installed_schemas` /
+  `available_schemas`（含上表那个「唯一独立生效」的角落）/ `overlay_index_of`（特殊模式
+  注册表）/ 用户层同名文件仍不可见 / **降级落点与 `available` 非空**（上一节那个故障）/
+  **真读盘比对 `config.toml` 字节未变**
+- `wind-coordinator/tests/custom_layer_hide_themes.rs`：列表两段 + 解析侧色表 + 用户层同名主题
+- `wind-coordinator/tests/custom_layer_hide_mix.rs`：mix 成员跳过且其余成员照常
+  （经 `debug_mix_members` 直通生产函数；被跳过的成员**在候选面上不可观察**）
+- `wind-webdata/tests/custom_layer_hide_theme_import.rs`：被 hide 的 slug 导入被拒、不落盘
+
+⚠️ **降级落点那几条判据互相兜底，夹具 id 是刻意挑的**：层序 / overlay 排除 / english 排最后
+三条里任意一条单独失效，落点往往仍然正确，用例察觉不到。故 `zz_huma` 排在所有 data 层 id
+之后（只有层序能让它赢）、`aa_ov_kept` 排在 custom 层最前（只有 overlay 排除能挡它）、
+english 由「用户 available 里排第一」那个子场景负责。把 `zz_huma` 改回 `huma` 会让层序那条
+判据静默失去覆盖。
+
+⚠️ 上列第一条与第三条**依赖 `build_dev/data` 的真实词库**：正向对照要求没被 hide
+的方案**真的**能构建出引擎——自造的空词库方案 `ensure_schema` 恒 false，两侧同因异果，
+摘掉闸门用例照样绿（实施时先写成那样，反事实当场证伪）。⚠️ 这两条的跳过**不能靠耗时判**：
+`.wdat` 缓存热时整条用例只跑 0.0x 秒，与跳过分支无从区分（本仓词库测试族的惯用判据在这里
+不成立）。第二条（主题）夹具全自造，不受此限。
+
+**已知不过滤的两处**：
+
+- `dict weight-check`（`apps/service/src/dict_cli.rs`）直接扫目录，定制版里被 hide 的方案
+  仍会被它体检到。这是给**定制者自己**用的诊断工具，「盘上有什么就体检什么」正是它该有的
+  语义（同 `--data` 那个标志的取舍），且它不影响输入法任何行为。
+- **主题的 `base` 继承链**：`wind_theme::load_merged_dirs` 解析 `base = "msime"` 时直接按
+  目录找，不过 hide。定制者 hide 掉 `msime`、而某个保留主题写着 `base = "msime"` 时，
+  msime 的色值照样经继承生效。**刻意不改**：当前行为更宽容（不连累那个无辜的派生主题——
+  拦掉的话它会整个加载失败），代价只是与「在任何层都不存在」的措辞不严格一致。真要收紧
+  得先想清楚「基底缺失时派生主题怎么办」，那不是减法要解决的问题。
+
+**用户唯一能主动撞上被 hide 的 id 的入口**是主题导入 RPC（`web_theme_import_text`），
+那里**已拒掉**并给出「换个 id」的提示——放行的话文件写下去了、回执是 `ok: true`，
+但它永远不进列表、选它也会被 `push_theme` 兜底掉，用户只看到「导入成功了却哪儿都找不到」。
+（方案包导入是同一形状，归 P3。）
 
 ### P3 — 可观测性与定制者工具
 

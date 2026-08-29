@@ -768,6 +768,29 @@ impl Coordinator {
         self.theme_layers.iter().map(|l| l.path.clone()).collect()
     }
 
+    /// 定制版 `[themes] hide` 在**解析侧**的统一裁决：被 hide 的主题按「不存在」处理，
+    /// 换成 [`FALLBACK_THEME`]。
+    ///
+    /// 抽成一处而不是各点各写一行判据：解析侧有**两个**消费点——桌面的
+    /// [`Self::load_theme_with_fallback`]（`push_theme` → `UiCommand::SetTheme`）与移动端的
+    /// [`Coordinator::theme_palette`]（拉取式语义色表，刻意不走 push 那条链）。只改一处的
+    /// 现象是「桌面上换掉了、Android 上还是那个本该被删的主题」。
+    ///
+    /// ⚠️ 不判 `name == FALLBACK_THEME`：定制者把兜底主题也 hide 掉属于配置错误，此时
+    /// 照旧加载它（有个能看的界面）好过整个主题系统空转，那种「界面全黑」的现象与
+    /// 「主题目录缺失」无从区分。P3 的 `config check --custom` 负责提前报出来。
+    pub(crate) fn theme_id_honoring_hide(name: &str) -> &str {
+        if Config::custom_hides_theme(name) {
+            warn!(
+                "主题 {} 已被定制版清单 [themes] hide，按 {} 处理（配置未改写）",
+                name, FALLBACK_THEME
+            );
+            FALLBACK_THEME
+        } else {
+            name
+        }
+    }
+
     /// [`Self::push_theme`] 的降级内核：探测源是参数，故降级路径可被单测覆盖。
     ///
     /// 抽出来的理由同 `Config::wait_until_settled`——真机上主题目录几乎总是完好，
@@ -776,10 +799,16 @@ impl Coordinator {
     ///
     /// 返回 `(实际生效的主题 id, 主题)`；两级都失败返回 `None`（调用方保留当前）。
     /// 请求的就是 [`FALLBACK_THEME`] 时不重复试第二次。
+    ///
+    /// ★ 入口先过 [`Self::theme_id_honoring_hide`]：被定制版 `[themes] hide` 删掉的主题
+    /// 当作不存在，直接按 [`FALLBACK_THEME`] 加载。只在列表侧滤的话，存量用户
+    /// `ui.theme.name` 里指着的那个主题照常生效——「设置页里找不到它，界面上却就是它」。
+    /// 替换同样**不写盘**（沿用本函数既有语义），用户卸掉定制包即恢复原样。
     fn load_theme_with_fallback<T>(
         mut load: impl FnMut(&str) -> anyhow::Result<T>,
         name: &str,
     ) -> Option<(String, T)> {
+        let name = Self::theme_id_honoring_hide(name);
         match load(name) {
             Ok(t) => return Some((name.to_string(), t)),
             Err(e) => warn!("Failed to load theme {}: {}", name, e),
@@ -878,6 +907,13 @@ impl Coordinator {
                 if id.starts_with('_') || !dir.join(&id).join("theme.toml").exists() {
                     continue;
                 }
+                // 定制版 `[themes] hide` 删掉的主题：在本定制版里**不存在**（见
+                // `Config::custom_hides_theme`）。列表与解析侧（`push_theme` 的
+                // `load_theme_with_fallback`）两处都要滤，只滤一处的现象分别是
+                // 「列表里还有它」和「列表里没有、配置里还指着它于是照常生效」。
+                if Config::custom_hides_theme(&id) {
+                    continue;
+                }
                 // 同名主题只列一次：custom 层靠前，它的 meta 已由 read_meta 按同一层序取到。
                 if !prog_seen.insert(id.clone()) {
                     continue;
@@ -909,6 +945,11 @@ impl Coordinator {
                         continue;
                     };
                     if id.starts_with('_') || !udir.join(&id).join("theme.toml").exists() {
+                        continue;
+                    }
+                    // hide 是**绝对**的：用户层放一个同名主题也不会让它复活（见
+                    // `Config::custom_hides_theme` 的取舍说明）。
+                    if Config::custom_hides_theme(&id) {
                         continue;
                     }
                     if prog_ids.contains(&id) {

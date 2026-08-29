@@ -3127,6 +3127,14 @@ pub trait WebDataRpc: WebDataHost {
                 !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
             });
         let theme_id = slug.unwrap_or(meta.name.as_str()).to_string();
+        // 定制版 `[themes] hide` 掉的 id：**当场拒掉，别给成功回执**。hide 是绝对的
+        // （用户层同名主题也不复活，见 `Config::custom_hides_theme` 的取舍说明），
+        // 而导入是用户唯一能主动撞上这个 id 的入口——放行的话文件写下去了、回执是
+        // `ok: true`，但它永远不进列表、选它也会被 `push_theme` 兜底掉，用户只看到
+        // 「导入成功了却哪儿都找不到」。这里说清楚该改哪个名字。
+        if wind_config::Config::custom_hides_theme(&theme_id) {
+            anyhow::bail!("本定制版已移除主题 id「{theme_id}」，该 id 不可用；请换一个 id 再导入");
+        }
         let target = user_dir.join(&theme_id);
         let file = target.join("theme.toml");
         let existed_before = file.exists();

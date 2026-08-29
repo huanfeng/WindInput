@@ -538,6 +538,12 @@ fn scan_installed_schemas(data_dir: &Path) -> Vec<String> {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if let Some(id) = name.strip_suffix(".schema.toml") {
+                // 定制版 `[schemas] hide` 删掉的方案在任何层都不存在（与桌面端
+                // `EngineManager::scan_layer_schema_ids` 同判据）。不滤的话移动端方案列表里
+                // 会留一个选了也切不过去的空条目——引擎侧 `read_schema` 早已对它返回 None。
+                if Config::custom_hides_schema(id) {
+                    continue;
+                }
                 ids.push(id.to_owned());
             }
         }

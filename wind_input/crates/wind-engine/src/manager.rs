@@ -547,14 +547,17 @@ impl EngineManager {
             dir
         });
 
-        let active_id = config.active_schema().to_string();
+        // 活跃方案被定制版 hide 掉时在此降级（不改写用户配置），见 resolve_active_schema_id。
+        let ov = override_dir.as_deref();
+        let cfg_active = config.active_schema().to_string();
+        let active_id = Self::resolve_active_schema_id(config, data_dir, ov);
         let mut available = config.schema.available.clone();
         if available.is_empty() {
             available.push(active_id.clone());
         }
         // 过滤不支持的方案（如双拼），但始终保留活跃方案
-        let ov = override_dir.as_deref();
         available.retain(|sid| sid == &active_id || Self::schema_supported(sid, data_dir, ov));
+        Self::ensure_fallback_listed(&mut available, &cfg_active, &active_id);
         // 主码表方案(拼音反查码源):config 显式 > available 首个 codetable 类型方案。
         let primary_codetable = Self::resolve_primary_codetable(
             &config.schema.primary_codetable,
@@ -1351,6 +1354,116 @@ impl EngineManager {
         String::new()
     }
 
+    /// 解析活跃方案 id，并处理「`schema.active` 指向被定制版 hide 掉的方案」。
+    ///
+    /// 原版用户升级到定制版**必然**碰上：他 `%APPDATA%` 里的 `schema.active` 还是 `wubi86`，
+    /// 而定制版把 `wubi86` 删了。不处理的话 [`Self::read_schema`] 对它返回 `None` ⇒
+    /// 活跃引擎构建不出来 ⇒ 输入法一个字都打不出，且只有一行「Schema file not found」。
+    ///
+    /// ★ **降级只在内存里发生，绝不改写用户配置。** `data_custom` 是可以被卸载的
+    /// （定制包换回原版、用户装回官方版），把 `schema.active` 改写成定制版的方案会让用户
+    /// 回到原版后丢掉自己的选择；这也与契约 3「程序永不写 `data_custom`」同源——减法是
+    /// 定制层的主张，不该在用户层留下痕迹。
+    ///
+    /// 降级候选的次序：先 `schema.available`（用户自己启用过的，按他配的顺序），再各层
+    /// `schemas/` 目录（按层序 `user > custom > data`，见 [`Self::scan_layer_schema_ids`]），
+    /// 去重后**按 [`Self::active_fallback_rank`] 稳定排序**取第一个。都没有则原样返回
+    /// （此时盘上确实没有可用方案，让上游照旧报「方案文件不存在」，别把「定制版删空了」
+    /// 伪装成别的故障）。
+    ///
+    /// ⚠️ **不能只过一遍「受支持」就取第一个**——那是这段代码的第一版，实测落点是
+    /// `english`：候选表当时按字典序排（`'e' < 'h'`），英文方案抢在定制版自带的 `huma`
+    /// 前面。现象是五笔用户装上虎码定制版、首启工具栏显「英」，一个汉字都打不出。
+    /// 而 `build_dev/data` 里**一个方案都没标 `[schema] hidden`**（英文方案也没标），
+    /// 所以「加一道 `hidden` 过滤」挡不住它——判据必须是排序 + 类型，不是 `hidden`。
+    fn resolve_active_schema_id(
+        config: &Config,
+        data_dir: Option<&Path>,
+        override_dir: Option<&Path>,
+    ) -> String {
+        let active = config.active_schema().to_string();
+        if !Config::custom_hides_schema(&active) {
+            return active;
+        }
+        // 候选源：用户启用列表在前（他自己排过的顺序有意义），层序扫描在后。
+        let mut cands: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let from_scan = data_dir
+            .map(Self::scan_layer_schema_ids)
+            .unwrap_or_default();
+        for id in config.schema.available.iter().cloned().chain(from_scan) {
+            if !Config::custom_hides_schema(&id) && seen.insert(id.clone()) {
+                cands.push(id);
+            }
+        }
+        // 先算好每个候选的档位（`None` = 不能当活跃方案），再**稳定**排序：同档位内
+        // 上面那个「available 顺序 → 层序」原样保留，不被排序打乱。
+        let mut ranked: Vec<(u8, String)> = cands
+            .into_iter()
+            .filter_map(|id| {
+                Self::active_fallback_rank(&id, data_dir, override_dir).map(|r| (r, id))
+            })
+            .collect();
+        ranked.sort_by_key(|(r, _)| *r);
+
+        match ranked.into_iter().next() {
+            Some((_, f)) => {
+                warn!(
+                    "活跃方案 {} 已被定制版清单 [schemas] hide，本次降级到 {}（用户配置未改写）",
+                    active, f
+                );
+                f
+            }
+            None => {
+                warn!(
+                    "活跃方案 {} 已被定制版清单 [schemas] hide，且找不到任何可用方案可降级",
+                    active
+                );
+                active
+            }
+        }
+    }
+
+    /// 降级落点必须出现在 `available` 里（构造与 `reload_from_config` 共用）。
+    ///
+    /// 不补的话有个很实在的后果：单方案用户（`schema.available = ["wubi86"]`）碰上定制版
+    /// 把 `wubi86` 删了，`retain` 的两条判据——「等于活跃方案」（活跃方案已降级成别的 id）
+    /// 与「受支持」（被 hide 的读不出来）——**双双落空**，`available` 变成空表。
+    /// 空表意味着方案菜单空白、循环切换键按下去毫无反应，用户只能进设置页手动选。
+    ///
+    /// 只在**确实降级过**（`fallback != cfg_active`）时补：不然会把「用户的 active 本来就
+    /// 不在 available 里」这个既有的合法状态一并改掉，而 `cycle_schema` 专门处理过它
+    /// （「当前方案不在 available 时从头开始」）。
+    fn ensure_fallback_listed(available: &mut Vec<String>, cfg_active: &str, fallback: &str) {
+        if fallback != cfg_active && !available.iter().any(|s| s == fallback) {
+            // 插到表头：它就是此刻的活跃方案。
+            available.insert(0, fallback.to_string());
+        }
+    }
+
+    /// 一个方案作为**降级落点**的档位：`None` = 不能当活跃方案，`Some(r)` 越小越优先。
+    ///
+    /// 三条判据，缺一条都出过或会出真实故障：
+    ///
+    /// 1. 读得出来且 `is_supported()`——基本可用性（`read_schema` 已顺带拦掉被 hide 的）；
+    /// 2. **排除 `[overlay]` 方案**：那是「特殊模式」（快符等），语义是引导键瞬态进入、
+    ///    上屏即退出，几十条的小符号表当常驻活跃方案等于打不了字；
+    /// 3. **english 排到最后**：它是给临时英文 / 混输英文候选懒加载用的方案，本身不出汉字。
+    ///    排最后而不是直接排除——万一盘上真的只剩它，有个能打英文的输入法仍好过没有。
+    fn active_fallback_rank(
+        schema_id: &str,
+        data_dir: Option<&Path>,
+        override_dir: Option<&Path>,
+    ) -> Option<u8> {
+        let s = Self::read_schema(schema_id, data_dir, override_dir)?;
+        if !s.is_supported() || s.overlay.is_some() {
+            return None;
+        }
+        Some(u8::from(
+            s.engine.engine_type.eq_ignore_ascii_case("english"),
+        ))
+    }
+
     /// 读取 schema 判断是否受支持（不构建引擎，仅解析 TOML）
     fn schema_supported(
         schema_id: &str,
@@ -1574,11 +1687,21 @@ impl EngineManager {
     }
 
     /// 可用方案列表（快照拷贝）。
+    ///
+    /// **双保险**：这里再滤一遍定制版 `[schemas] hide`。主拦截在 [`Self::read_schema`]，
+    /// 但 `self.available` 有一条不经 `read_schema` 的入口——构造与
+    /// [`Self::reload_from_config`] 的 `retain` 会**无条件保留活跃方案**（`sid == &active`），
+    /// 而活跃方案恰恰是最可能被 hide 的那个（原版用户升级到定制版）。滤在读取侧而不是
+    /// 各写入点，是因为这是所有消费者（循环切换、菜单、设置页、`installed_schemas` 的种子）
+    /// 的唯一出口，加一处即全覆盖。
     pub fn available_schemas(&self) -> Vec<String> {
         self.available
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .iter()
+            .filter(|s| !Config::custom_hides_schema(s))
+            .cloned()
+            .collect()
     }
 
     /// 所有已安装且受支持的方案列表（目录扫描），**含隐藏方案**。
@@ -1596,40 +1719,22 @@ impl EngineManager {
     /// 需要按 hidden 过滤的地方自己调 [`Self::schema_is_hidden`]。
     ///
     /// **不影响** `available_schemas()`（循环切换用，只认用户启用列表）。
+    ///
+    /// **被定制版 `[schemas] hide` 删掉的方案不在返回值里**——那不是「显示不显示」，
+    /// 而是「装没装」，与 `[schema].hidden` 是两个正交的轴（见 [`Config::custom_hides_schema`]）。
     pub fn installed_schemas(&self) -> Vec<String> {
         let Some(data_dir) = self.data_dir.as_deref() else {
             return self.available_schemas();
         };
+        // 种子已由 available_schemas() 滤掉被 hide 的方案（双保险，见该方法）。
         let mut ids: Vec<String> = self.available_schemas();
         let ov = self.override_dir.as_deref();
 
-        // 合并扫描**全部资源层**（user / custom / data）的 schemas 目录，各层的
-        // *.schema.toml 都算"已安装"——用户目录可新增第三方方案、定制层可自带方案
-        // （read_schema 走 resolve_schema_file，本就按同一层序，故都能被读出并通过过滤）。
-        // 注：此处扫描顺序无关紧要（靠 !ids.contains 去重，**各层都贡献 id**）；与
-        // shuangpin_layouts 的"靠前胜出"语义不同——那里同名 stem 只取第一个。
-        let mut scan_dirs: Vec<std::path::PathBuf> = Config::resource_layers_with(Some(data_dir))
-            .into_iter()
-            .map(|d| d.join("schemas"))
-            .collect();
-        // 便携版可能把用户目录配成安装目录本身，去重免得同一目录扫两遍。
-        let mut seen_dirs = std::collections::HashSet::new();
-        scan_dirs.retain(|d| seen_dirs.insert(d.clone()));
-
-        for dir in &scan_dirs {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let fname = entry.file_name();
-                let fname_str = fname.to_string_lossy();
-                if let Some(id) = fname_str.strip_suffix(".schema.toml") {
-                    let id = id.to_string();
-                    // 只按「受支持」过滤；隐藏与否留给调用方（见本函数文档）。
-                    if !ids.contains(&id) && Self::schema_supported(&id, Some(data_dir), ov) {
-                        ids.push(id);
-                    }
-                }
+        // 目录扫描（各层合并去重）与 hide 过滤都在 scan_layer_schema_ids 里。
+        for id in Self::scan_layer_schema_ids(data_dir) {
+            // 只按「受支持」过滤；`[schema].hidden` 与否留给调用方（见本函数文档）。
+            if !ids.contains(&id) && Self::schema_supported(&id, Some(data_dir), ov) {
+                ids.push(id);
             }
         }
 
@@ -1695,11 +1800,27 @@ impl EngineManager {
     }
 
     /// 按方案 id 定位 overlay 注册表下标（供 `special:<id>` / `enter_special:<id>` 分发）。
+    ///
+    /// ★ 未命中时若该 id 是被定制版 `[schemas] hide` 掉的，补一次 WARN。
+    /// 别的引用路径（mix 成员、`schema.active`）都会把 id 喂给 [`Self::read_schema`]、
+    /// 由那里告警，**唯独特殊模式不会**：注册表建自 [`Self::installed_schemas`]，
+    /// 而目录扫描侧已把被 hide 的 id 滤掉（降噪，见 `scan_layer_schema_ids`），
+    /// 于是这里查不到、分发点零日志。
+    ///
+    /// **行为本身不用改，这里只补日志。** 分发点（`handle_lifecycle.rs` / `handle_mode.rs`
+    /// 的 `BoundAction::Special`）拿到 `None` 后返回 `None`，调用方**不吞键、落普通输入**
+    /// ——引导键通常是 `;` `/` 这类符号，用户按下去就正常出符号。那已经是应有的降级
+    /// （见调用点注释：「配了个不可用的目标就等于把这个键废掉」），缺的只是一行能归因的日志。
     pub fn overlay_index_of(&self, schema_id: &str) -> Option<u8> {
-        self.overlay_modes()
+        let idx = self
+            .overlay_modes()
             .iter()
             .position(|e| e.schema_id == schema_id)
-            .map(|i| i as u8)
+            .map(|i| i as u8);
+        if idx.is_none() && Config::custom_hides_schema(schema_id) {
+            Self::warn_hidden_schema_once(schema_id);
+        }
+        idx
     }
 
     /// 枚举可选的双拼布局：按层序（`user > custom > data`）合并扫描各层的
@@ -2145,7 +2266,13 @@ impl EngineManager {
     /// 清空引擎/词频/名称缓存使其按新配置/词典重建，并切到新的活跃方案。
     /// 返回活跃方案是否发生变化（供上层决定是否清输入缓冲、刷新 UI）。
     pub fn reload_from_config(&self, config: &Config) -> bool {
-        let new_active = config.active_schema().to_string();
+        // 与构造同源：活跃方案被定制版 hide 掉时降级（不改写用户配置）。
+        let cfg_active = config.active_schema().to_string();
+        let new_active = Self::resolve_active_schema_id(
+            config,
+            self.data_dir.as_deref(),
+            self.override_dir.as_deref(),
+        );
         let mut available = config.schema.available.clone();
         if available.is_empty() {
             available.push(new_active.clone());
@@ -2159,6 +2286,7 @@ impl EngineManager {
                     self.override_dir.as_deref(),
                 )
         });
+        Self::ensure_fallback_listed(&mut available, &cfg_active, &new_active);
 
         // 更新可变状态。
         // 重算主码表(拼音反查码源)。在 available 移入锁前用其引用解析。
@@ -3172,6 +3300,85 @@ impl EngineManager {
             .collect()
     }
 
+    /// 「被定制版 hide 掉的方案仍被引用」的告警，**每个 id 每进程只打一次**。
+    ///
+    /// 节流的理由：[`Self::read_schema`] 在热路径上（每次候选/切模式/取按键表都可能过），
+    /// 无节流会把日志刷爆到没人看。而这条信息本身是**定制者的一次性配置错误**——
+    /// mix `members` / `special_modes` / `schema.active` 指向了被 hide 的方案，
+    /// 消费端会静默跳过该成员，一次 WARN 足够定位。提前报出来归 P3 的
+    /// `wind_input config check --custom`，那才是定制者该看见它的地方。
+    fn warn_hidden_schema_once(schema_id: &str) {
+        static WARNED: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        let first = WARNED
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(schema_id.to_string());
+        if first {
+            warn!(
+                "方案 {} 已被定制版清单 [schemas] hide，引用它的地方（mix 成员 / 特殊模式 / \
+                 schema.active）将跳过它",
+                schema_id
+            );
+        }
+    }
+
+    /// 扫描**全部资源层**（user / custom / data）的 `schemas/` 目录，收集
+    /// `*.schema.toml` 的 id。
+    ///
+    /// ★ **返回值按层序**（`user > custom > data`，层内按文件名序），同名 id 只留**首次
+    /// 出现**的那一层。这不是可有可无的整齐：[`Self::resolve_active_schema_id`] 拿它挑
+    /// 降级目标，而「定制者自带的方案」才是他意图中的替代品，必须排在出厂方案前面。
+    ///
+    /// ⚠️ 这里曾是 `ids.sort()`，注释写「扫描顺序无关紧要，各层都贡献 id」——那句话对
+    /// [`Self::installed_schemas`] 成立（它自己再排一次），对「挑一个降级目标」**不成立**。
+    /// 实测后果：五笔用户装上虎码定制版，降级落点是 `english`（`'e' < 'h'`，字典序把英文
+    /// 方案排在了虎码前面），首启一个汉字都打不出。别再改回 `sort()`。
+    ///
+    /// **已剔除被定制版 hide 的 id**（不是靠下游 `read_schema` 返回 None 兜底）：那样每个
+    /// 被删的方案都会在这里触发一次 `warn_hidden_schema_once`，把「定制者配错了」的告警
+    /// 变成「定制版正常工作」的噪音。未按 `is_supported()` 过滤——那要读文件，由调用方按需做。
+    fn scan_layer_schema_ids(data_dir: &Path) -> Vec<String> {
+        // 合并扫描各层：用户目录可新增第三方方案、定制层可自带方案（read_schema 走
+        // resolve_schema_file，本就按同一层序，故都能被读出）。
+        let mut dirs: Vec<std::path::PathBuf> = Config::resource_layers_with(Some(data_dir))
+            .into_iter()
+            .map(|d| d.join("schemas"))
+            .collect();
+        // 便携版可能把用户目录配成安装目录本身，去重免得同一目录扫两遍。
+        let mut seen_dirs = std::collections::HashSet::new();
+        dirs.retain(|d| seen_dirs.insert(d.clone()));
+
+        let mut ids: Vec<String> = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        for dir in &dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            // 层内按文件名排序：`read_dir` 的返回序是文件系统的，换台机器就可能不同，
+            // 而降级落点必须可复现。
+            let mut layer_ids: Vec<String> = Vec::new();
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy();
+                if let Some(id) = fname_str.strip_suffix(".schema.toml") {
+                    if Config::custom_hides_schema(id) {
+                        continue;
+                    }
+                    layer_ids.push(id.to_string());
+                }
+            }
+            layer_ids.sort();
+            for id in layer_ids {
+                if seen_ids.insert(id.clone()) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
+
     // ───────────────────────── 词典加载 ─────────────────────────
 
     /// 按层序（`user > custom > data`）解析一个 schemas 相对文件路径，靠前的层胜出。
@@ -3202,11 +3409,23 @@ impl EngineManager {
 
     /// 读取并解析 schema 文件（仅 TOML）。用户目录优先（见 resolve_schema_file）；
     /// 若 `override_dir/{id}.toml` 存在则深合并到基础方案之上（设置页 override 层 L3）。
+    ///
+    /// ★ **定制版减法（`custom.toml` 的 `[schemas] hide`）的主拦截点就在这里。**
+    /// 釜底抽薪：方案文件读不出来 ⇒ [`Self::schema_supported`]、[`Self::build_engine`]、
+    /// mix members 的 `ensure_schema` 门卫、`overlay_modes`（特殊模式）全部自动失效，
+    /// 不必逐处补过滤——逐处补的写法漏一处就是「我明明把五笔删了，它还能从某个入口冒出来」。
+    ///
+    /// 与 `[schema].hidden` 正交，**不复用** [`Self::schema_hidden`] 那条路径：
+    /// 见 [`Config::custom_hides_schema`] 的两条 ★。
     fn read_schema(
         schema_id: &str,
         data_dir: Option<&Path>,
         override_dir: Option<&Path>,
     ) -> Option<Schema> {
+        if Config::custom_hides_schema(schema_id) {
+            Self::warn_hidden_schema_once(schema_id);
+            return None;
+        }
         let data_dir = data_dir?;
         let toml_path = Self::resolve_schema_file(&format!("{}.schema.toml", schema_id), data_dir);
         if !toml_path.exists() {
