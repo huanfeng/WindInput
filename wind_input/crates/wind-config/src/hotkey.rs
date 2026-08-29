@@ -53,27 +53,24 @@ pub(crate) fn hotkey_action_entry(action: &str) -> Option<(String, u32)> {
             HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
         ));
     }
-    // 软键盘：与 `special:` 同策略。
+    // 软键盘：**不带 `CHINESE_ONLY`**。
     //
-    // `CHINESE_ONLY`——面板的按键接管建立在「中文模式下 C++ 吃字母/标点」之上，英文态
-    // 根本接管不到，开出来是个点不动的面板。`GLOBAL`——同 `special:`，规避 Chromium 类
-    // 宿主无视 `pfEaten` 造成的双处理。
+    // 面板画的是「键位 → 符号」的映射，跟当前是中文还是英文模式没有关系——用户在英文态
+    // 想打个 ℃ 同样合理。C++ 侧为此专设了软键盘总闸（`IsSoftKeyboard()`），接管不再
+    // 依附于中文模式的那条判定链。带上这个位的话，英文态连开都开不出来。
+    //
+    // 保留 `GLOBAL`：同 `special:`，规避 Chromium 类宿主无视 `pfEaten` 造成的双处理。
+    // 它自身的注册条件含「中文 + 焦点在文本框」，英文态下自然退回普通热键链路。
     //
     // 动词原样传给分派端（不像 `special:` 那样改写成 `enter_special:`）：协调器的
     // `softkeyboard_hotkey` 认的就是这个串。
     if action == "softkeyboard" {
-        return Some((
-            action.to_string(),
-            HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
-        ));
+        return Some((action.to_string(), HOTKEY_POLICY_GLOBAL));
     }
     if let Some(id) = action.strip_prefix("softkeyboard:")
         && !id.trim().is_empty()
     {
-        return Some((
-            action.to_string(),
-            HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
-        ));
+        return Some((action.to_string(), HOTKEY_POLICY_GLOBAL));
     }
     None
 }

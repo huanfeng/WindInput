@@ -39,6 +39,18 @@ pub const SOFT_TAG_PAGE_BASE: i32 = 200_000;
 pub const SOFT_TAG_CLOSE: i32 = 300_000;
 /// 特殊键第 n 个：`SOFT_TAG_FN_BASE + n`（n 是 [`SOFT_FN_KEYS`] 的下标）。
 pub const SOFT_TAG_FN_BASE: i32 = 400_000;
+/// 面板上的 Shift 键。点击**锁定/解锁**第二层，是面板自己的状态，不回送协调器。
+pub const SOFT_TAG_SHIFT: i32 = 310_000;
+/// 底行的上一面 / 下一面键。
+///
+/// ★ **不能复用 `SOFT_TAG_PAGE_BASE + 目标下标`**：那样它与标签行里同一个面的标签
+/// 撞成同一个 tag，鼠标悬停在翻页键上时对应的标签也会跟着亮——表现为「一次移动出现
+/// 多处高亮」。tag 是命中标识，同一时刻只该有一个控件认领它。
+pub const SOFT_TAG_PAGE_PREV: i32 = 320_000;
+pub const SOFT_TAG_PAGE_NEXT: i32 = 320_001;
+/// 标签行的左右滚动键（面多到一行放不下时才出现）。
+pub const SOFT_TAG_TAB_LEFT: i32 = 330_000;
+pub const SOFT_TAG_TAB_RIGHT: i32 = 330_001;
 
 /// 面板上可点的特殊键：`(键名, 显示文字)`。
 ///
@@ -51,4 +63,13 @@ pub const SOFT_FN_KEYS: &[(&str, &str)] = &[
     ("space", ""),
     ("ins", "Ins"),
     ("del", "Del"),
+    // 大写锁定。用 `vk:0x14` 而不是名字——`parse_key` 的键名表里没有 capslock。
+    //
+    // ⛔ 这不违反「不拦截 CapsLock」那条禁令：禁的是**拦截物理键**（toggle 键的
+    // keydown/keyup 处理有坑，「翻转再回敲复原」已被删除）。这里是用户点面板时我们
+    // **主动敲一次**，与用户自己按下没有区别。物理 CapsLock 仍然完全不接管。
+    ("vk:0x14", "Caps"),
 ];
+
+/// [`SOFT_FN_KEYS`] 里大写锁定那一项的下标（面板要给它单独的高亮状态）。
+pub const SOFT_FN_CAPS_INDEX: usize = 6;

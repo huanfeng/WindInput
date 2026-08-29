@@ -2481,6 +2481,29 @@ mod layout_tests {
         assert_eq!(hit(&root, 2).x, 150.0); // spacer 吸收 200-100=100，把末项推到 150
     }
 
+    /// 「左固定 + 中间自由 + 右固定」——**不需要新的布局原语**，现有两件就够：
+    /// 窄行加 `fill_cross` 撑到列的内容宽（= 最宽那行的宽度），内部 `spacer().grow()`
+    /// 吃掉富余，末项就恒贴右缘。
+    ///
+    /// ★ 少了 `fill_cross`，行宽只等于自身内容宽，spacer 分不到一个像素，右组会跟着
+    /// 左组浮动——软键盘的关闭按钮与翻页键都栽在这里，而且**面板越宽错得越明显**，
+    /// 窄面板上看起来还挺对。
+    #[test]
+    fn fill_cross_row_lets_spacer_pin_the_last_child_right() {
+        let mut root = View::container(Layout::Column)
+            .child(fixed(200.0, 10.0, 9)) // 最宽的行，决定列宽
+            .child(
+                View::container(Layout::Row)
+                    .fill_cross()
+                    .child(fixed(20.0, 10.0, 0))
+                    .child(View::spacer().grow())
+                    .child(fixed(30.0, 10.0, 2)),
+            );
+        root.layout(0.0, 0.0, &tr());
+        assert_eq!(hit(&root, 0).x, 0.0, "左组贴左缘");
+        assert_eq!(hit(&root, 2).x, 170.0, "右组贴右缘 200-30");
+    }
+
     #[test]
     fn arrange_fill_cross_stretches_width() {
         let mut root = View::container(Layout::Column).fixed_w(100.0).child(

@@ -32,7 +32,9 @@ use crate::text::dwrite::TextRenderer;
 use crate::view::{Align, Edges, Layout, Rect, View};
 use crate::window::LayeredWindow;
 use wind_ui_types::{
-    SOFT_FN_KEYS, SOFT_TAG_CLOSE, SOFT_TAG_FN_BASE, SOFT_TAG_PAGE_BASE, SoftKeyCap, UiEvent,
+    SOFT_FN_CAPS_INDEX, SOFT_FN_KEYS, SOFT_TAG_CLOSE, SOFT_TAG_FN_BASE, SOFT_TAG_PAGE_BASE,
+    SOFT_TAG_PAGE_NEXT, SOFT_TAG_PAGE_PREV, SOFT_TAG_SHIFT, SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT,
+    SoftKeyCap, UiEvent,
 };
 
 /// 每行的键位个数，与 `wind_softkeyboard::KEY_ROWS` 同构（数字行 / QWERTY / ASDF / ZXCV）。
@@ -46,6 +48,17 @@ const UNIT_DP: f32 = 42.0;
 const GAP_DP: f32 = 5.0;
 /// 面板内边距（dp）。
 const PAD_DP: f32 = 12.0;
+/// 键盘区宽度（单位数 + 间隙数）：最宽的是第一行（13 键位 + 2u 退格 = 15u，13 个间隙）。
+/// 标签行与底行都按它对齐，面板宽度就只由键盘决定。
+const KBD_UNITS: f32 = 15.0;
+const KBD_GAPS: f32 = 13.0;
+/// 标签行度量（dp）。**必须是模块常量而不是两个函数各写一份**——
+/// [`SoftKeyboard::visible_tabs`] 与 [`SoftKeyboard::build_tabs`] 靠它们算出同一个可见集。
+const TAB_GAP_DP: f32 = 2.0;
+const TAB_PAD_X_DP: f32 = 9.0;
+const TAB_FONT_DP: f32 = 12.5;
+const TAB_ARROW_W_DP: f32 = 22.0;
+const TAB_CLOSE_W_DP: f32 = 27.0;
 
 /// 长按重复：首次延迟与间隔（毫秒）。
 ///
@@ -55,6 +68,8 @@ const REPEAT_DELAY_MS: u64 = 500;
 const REPEAT_RATE_MS: u64 = 33;
 /// 物理按键高亮的持续时间（毫秒）。长按时被连发的 keydown 不断续期。
 const KEY_FLASH_MS: u64 = 140;
+/// 物理 Shift / 大写锁定的跟随节奏（毫秒）。**仅面板可见期间生效**。
+const MODIFIER_POLL_MS: u64 = 40;
 
 /// 面板配色（全部走主题键，未配则回落到与候选窗同族的中性色）。
 #[derive(Clone)]
@@ -106,9 +121,23 @@ struct SoftMouse {
     repeating: bool,
     /// hover 变了，需要重画。
     dirty: bool,
+    /// 窗口句柄（`isize` 存，避免让本结构在非 Windows 上依赖 HWND 类型）。0 = 未装配。
+    hwnd: isize,
+    /// 拖动中；`anchor` 是按下时的屏幕光标，`origin` 是按下时的窗口左上。
+    dragging: bool,
+    anchor: (i32, i32),
+    origin: (i32, i32),
+    /// 拖动落点，供窗口在 tick 里收回去记住位置。
+    moved_to: Option<(i32, i32)>,
 }
 
 impl SoftMouse {
+    /// 还原窗口句柄。存 `isize` 是为了让本结构在非 Windows 上也能构造。
+    #[cfg(windows)]
+    fn hwnd_handle(&self) -> crate::sys::HWND {
+        crate::sys::HWND(self.hwnd as *mut core::ffi::c_void)
+    }
+
     fn hit_at(&self, x: f32, y: f32) -> i32 {
         // 逆序找：后画的（层级更高的）优先。键帽之间不重叠，这里只是稳妥。
         self.hits
@@ -168,7 +197,17 @@ pub struct SoftKeyboard {
     pages: Vec<String>,
     current: usize,
     keys: Vec<SoftKeyCap>,
-    shift: bool,
+    /// 物理 Shift 按住中（临时切层，松开还原）。
+    shift_held: bool,
+    /// 面板上的 Shift 键被点亮（锁定切层，再点还原）。
+    ///
+    /// 与 `shift_held` 分开存：物理是临时的、点击是锁定的，合成一个布尔就无法表达
+    /// 「按住物理 Shift 松开后该回哪一层」。有效层取两者的或。
+    shift_locked: bool,
+    /// 系统大写锁定当前是否开着（Caps 键据此高亮）。
+    caps_on: bool,
+    /// 标签行第一个可见标签的下标（面多到一行放不下时才非 0）。
+    tab_offset: usize,
     /// 物理按键按下中的键位名 + 该高亮的到期时刻。
     ///
     /// ★ 高亮**不靠 keyup 配对**：协调器只在 keydown 被调用，物理抬起根本不经过我们。
@@ -191,6 +230,10 @@ impl SoftKeyboard {
         let mouse = Rc::new(RefCell::new(SoftMouse {
             hover: -1,
             pressed: -1,
+            #[cfg(windows)]
+            hwnd: window.hwnd().0 as isize,
+            #[cfg(not(windows))]
+            hwnd: 0,
             ..Default::default()
         }));
         window.register_mouse(mouse.clone());
@@ -204,7 +247,10 @@ impl SoftKeyboard {
             pages: Vec::new(),
             current: 0,
             keys: Vec::new(),
-            shift: false,
+            shift_held: false,
+            shift_locked: false,
+            caps_on: false,
+            tab_offset: 0,
             down_slot: None,
             visible: false,
             origin: None,
@@ -236,12 +282,20 @@ impl SoftKeyboard {
         }
     }
 
+    /// 当前显示的是第二层：物理按住 或 面板上锁定，任一即可。
+    fn layer_shift(&self) -> bool {
+        self.shift_held || self.shift_locked
+    }
+
     /// 显示面板 / 整块刷新（切面也走这里）。
     pub fn show(&mut self, pages: Vec<String>, current: usize, keys: Vec<SoftKeyCap>) {
         self.pages = pages;
         self.current = current;
+        // 标签窗口的校正统一在 `render` 里做（见 [`Self::ensure_current_visible`]）：
+        // current 有热键、直通车、点标签、底行翻页四条来路，逐条加一次迟早漏一条。
         self.keys = keys;
-        self.shift = false;
+        self.shift_held = false;
+        self.shift_locked = false;
         self.down_slot = None;
         self.reset_mouse();
         self.visible = true;
@@ -294,8 +348,8 @@ impl SoftKeyboard {
 
     /// 切层（按住 Shift）。键帽文字要变，需要重排。
     pub fn set_layer(&mut self, shift: bool) {
-        if self.shift != shift {
-            self.shift = shift;
+        if self.shift_held != shift {
+            self.shift_held = shift;
             if self.visible {
                 self.render();
             }
@@ -311,6 +365,8 @@ impl SoftKeyboard {
             self.mouse.borrow().repeat_at,
             // 物理按键高亮的自动熄灭
             self.down_slot.as_ref().map(|(_, at)| *at),
+            // 物理 Shift / 大写锁定的跟随节奏（仅面板可见期间，见 tick 里的说明）
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(MODIFIER_POLL_MS)),
         ]
         .into_iter()
         .flatten()
@@ -345,6 +401,38 @@ impl SoftKeyboard {
         for tag in fire {
             self.dispatch(tag);
         }
+        // 拖动落点：窗口自己记住，下次显示不再回到默认锚点。
+        if let Some(pos) = self.mouse.borrow_mut().moved_to.take() {
+            self.origin = Some(pos);
+        }
+
+        // 物理 Shift 与大写锁定的跟随。
+        //
+        // ★ 为什么要轮询：单独按 Shift 不出字，那个 keydown 根本不会转发到协调器——
+        // 我们只在「Shift+某键」时才从修饰位里知道它按住了。而用户要的是「一按 Shift
+        // 面板立刻切显上档」。故面板可见期间以固定节奏查一次键盘状态。
+        //
+        // ⚠️ 这是本仓「UI 已改事件驱动、不做空转轮询」的一处**有意例外**，边界写死在
+        // 「面板可见时」：面板一关，`next_deadline` 立即不再登记这个节奏，线程回到全静默。
+        if let Some((held, caps)) = read_shift_caps() {
+            if held != self.shift_held {
+                // 松开物理 Shift 时把面板上的锁定一并解除。
+                //
+                // 两个来源本可以各管各的，但那样会出现「点了面板 Shift 锁在上档，又按了
+                // 一下物理 Shift，松开后仍停在上档」——用户刚做完一个「按下又松开」的
+                // 完整动作，界面却没回来，看起来就是卡住了。以物理动作为准更符合直觉。
+                if !held {
+                    self.shift_locked = false;
+                }
+                self.shift_held = held;
+                self.render();
+            }
+            if caps != self.caps_on {
+                self.caps_on = caps;
+                self.render();
+            }
+        }
+
         // 物理按键高亮到期熄灭。
         let mut dirty = if let Some((_, at)) = &self.down_slot
             && std::time::Instant::now() >= *at
@@ -372,6 +460,34 @@ impl SoftKeyboard {
             let _ = self.events.send(UiEvent::SoftKeyboardClose);
             return;
         }
+        if tag == SOFT_TAG_PAGE_PREV || tag == SOFT_TAG_PAGE_NEXT {
+            let n = self.pages.len();
+            if n > 0 {
+                let i = if tag == SOFT_TAG_PAGE_PREV {
+                    prev_page(self.current, n)
+                } else {
+                    next_page(self.current, n)
+                } as usize;
+                let _ = self.events.send(UiEvent::SoftKeyboardPage(i));
+            }
+            return;
+        }
+        if tag == SOFT_TAG_TAB_LEFT {
+            self.tab_offset = self.tab_offset.saturating_sub(1);
+            self.render();
+            return;
+        }
+        if tag == SOFT_TAG_TAB_RIGHT {
+            self.tab_offset = (self.tab_offset + 1).min(self.pages.len().saturating_sub(1));
+            self.render();
+            return;
+        }
+        if tag == SOFT_TAG_SHIFT {
+            // 面板自己的状态：锁定/解锁第二层，不回送协调器。
+            self.shift_locked = !self.shift_locked;
+            self.render();
+            return;
+        }
         if tag >= SOFT_TAG_FN_BASE {
             let i = (tag - SOFT_TAG_FN_BASE) as usize;
             match SOFT_FN_KEYS.get(i) {
@@ -393,10 +509,10 @@ impl SoftKeyboard {
         // 键位：tag 即下标。
         if let Some(cap) = self.keys.get(tag as usize) {
             // 空键位不回送：面板上它是灰的，点了什么都不该发生。
-            if cap.output(self.shift).is_some() {
+            if cap.output(self.layer_shift()).is_some() {
                 let _ = self.events.send(UiEvent::SoftKeyboardKey {
                     slot: cap.slot.clone(),
-                    shift: self.shift,
+                    shift: self.layer_shift(),
                 });
             }
         }
@@ -418,6 +534,7 @@ impl SoftKeyboard {
         }
         self.ensure_scale();
         let s = self.scale;
+        self.ensure_current_visible(s);
         let mut root = self.build(s);
         root.layout(0.0, 0.0, &self.renderer);
         let (w_f, h_f) = root.measured_size();
@@ -470,8 +587,8 @@ impl SoftKeyboard {
             // 行首功能键
             match r {
                 1 => row = row.child(self.fn_key(1, "Tab", 1.5, u, gap, s, hover, pressed)),
-                2 => row = row.child(self.page_name_key(1.75, u, gap, s, hover)),
-                3 => row = row.child(self.shift_key(2.25, u, gap, s)),
+                2 => row = row.child(self.caps_key(1.75, u, gap, s, hover, pressed)),
+                3 => row = row.child(self.shift_key(2.25, u, gap, s, hover)),
                 _ => {}
             }
             for i in 0..count {
@@ -484,47 +601,105 @@ impl SoftKeyboard {
             match r {
                 0 => row = row.child(self.fn_key(0, "⌫", 2.0, u, gap, s, hover, pressed)),
                 2 => row = row.child(self.fn_key(2, "Enter", 2.25, u, gap, s, hover, pressed)),
-                3 => row = row.child(self.shift_key(2.75, u, gap, s)),
+                3 => row = row.child(self.shift_key(2.75, u, gap, s, hover)),
                 _ => {}
             }
             root = root.child(row);
         }
 
-        // 底行：Ins / Del / 空格 / 翻页 / Esc
-        let mut bottom = View::container(Layout::Row).gap(gap);
+        // 底行：**左组贴左、控制键组贴右**（Ins / Del / 空格 ┄┄ ◀ ▶ Esc）。
+        //
+        // 「左固定 + 中间自由 + 右固定」不需要新的布局原语：`fill_cross` 把本行撑到列的
+        // 内容宽（= 最宽那行键盘的宽度），中间的 `spacer().grow()` 吃掉富余，右组就恒
+        // 贴右缘。少了 `fill_cross`，行宽只等于自身内容宽，spacer 分不到一个像素，右组
+        // 就跟着左组浮动——面板越宽错得越明显。
+        let mut bottom = View::container(Layout::Row).gap(gap).fill_cross();
         bottom = bottom.child(self.fn_key(4, "Ins", 1.5, u, gap, s, hover, pressed));
         bottom = bottom.child(self.fn_key(5, "Del", 1.5, u, gap, s, hover, pressed));
-        bottom = bottom.child(self.fn_key(3, "", 8.0, u, gap, s, hover, pressed));
-        bottom = bottom.child(self.ctrl_key(
-            SOFT_TAG_PAGE_BASE + prev_page(self.current, self.pages.len()),
-            "◀",
-            1.25,
-            u,
-            gap,
-            s,
-            hover,
-        ));
-        bottom = bottom.child(self.ctrl_key(
-            SOFT_TAG_PAGE_BASE + next_page(self.current, self.pages.len()),
-            "▶",
-            1.25,
-            u,
-            gap,
-            s,
-            hover,
-        ));
+        bottom = bottom.child(self.fn_key(3, "", 7.0, u, gap, s, hover, pressed));
+        bottom = bottom.child(View::spacer().grow());
+        bottom = bottom.child(self.ctrl_key(SOFT_TAG_PAGE_PREV, "◀", 1.5, u, gap, s, hover));
+        bottom = bottom.child(self.ctrl_key(SOFT_TAG_PAGE_NEXT, "▶", 1.5, u, gap, s, hover));
         bottom = bottom.child(self.ctrl_key(SOFT_TAG_CLOSE, "Esc", 1.5, u, gap, s, hover));
         root = root.child(bottom);
         root
     }
 
-    /// 标签行：面名 + 右端关闭按钮。
-    fn build_tabs(&self, s: f32, _u: f32, gap: f32, hover: i32) -> View {
+    /// 各面标签的占位宽度（含内边距与项间隙）。
+    fn tab_widths(&self, s: f32) -> Vec<f32> {
+        self.pages
+            .iter()
+            .map(|n| {
+                self.renderer.measure_text_sized(n, TAB_FONT_DP * s).width
+                    + TAB_PAD_X_DP * s * 2.0
+                    + TAB_GAP_DP * s
+            })
+            .collect()
+    }
+
+    /// 标签行的可见窗口：`(可见面下标, 是否需要滚动箭头)`。
+    ///
+    /// ★ **渲染与自动滚动共用 [`tab_window`] 这一份判据**。若各算一遍「放得下几个」，
+    /// 两处估算迟早分叉，表现为「自动滚过去了、画出来还是看不见当前面」——同一个量在
+    /// 两条路径上取值不一致，是本仓最反复的一类缺陷。
+    fn visible_tabs(&self, s: f32, u: f32, gap: f32) -> (Vec<usize>, bool) {
+        tab_window(
+            &self.tab_widths(s),
+            self.tab_offset,
+            KBD_UNITS * u + KBD_GAPS * gap,
+            s,
+        )
+    }
+
+    /// 把标签窗口滚到能看见当前面为止。
+    ///
+    /// ★ 只挡左边界是不够的：用热键或直通车切到一个**靠右**的面时，标签行仍停在原处，
+    /// 当前面的高亮落在可见范围之外，看上去像是没切成功。
+    ///
+    /// 收口在 `render` 里调一次，而不是在每个改 `current` 的地方各调一次——面的来路有
+    /// 热键、直通车、点标签、底行 ◀▶ 四条，逐条接线迟早漏一条。
+    fn ensure_current_visible(&mut self, s: f32) {
+        if self.pages.is_empty() {
+            return;
+        }
+        let last = self.pages.len() - 1;
+        self.current = self.current.min(last);
+        let full = KBD_UNITS * UNIT_DP * s + KBD_GAPS * GAP_DP * s;
+        self.tab_offset =
+            scroll_into_view(&self.tab_widths(s), self.tab_offset, self.current, full, s);
+    }
+
+    /// 标签行：**单行 + 按项滚动**，关闭按钮恒在右上角。
+    ///
+    /// 不折行：面的数量由用户的 `system.softkeyboard.toml` 决定，折行会让面板高度随
+    /// 内容变化，自定义面一多就一层层往下长。
+    ///
+    /// 不做像素级滚动：`View` 没有裁剪能力，位移出去的标签会画到面板外面。改为**按项**
+    /// 构建（见 [`Self::visible_tabs`]）——放得下几个画几个，等价于裁剪且不会溢出。
+    fn build_tabs(&self, s: f32, u: f32, gap: f32, hover: i32) -> View {
         let c = &self.colors;
-        let mut tabs = View::container(Layout::Row)
-            .gap(2.0 * s)
-            .cross(Align::Center);
-        for (i, name) in self.pages.iter().enumerate() {
+        let tab_gap = TAB_GAP_DP * s;
+        let pad_x = TAB_PAD_X_DP * s;
+        let (shown, need_scroll) = self.visible_tabs(s, u, gap);
+
+        // `fill_cross` 把本行撑到列的内容宽（= 键盘区宽度）。少了它，行宽只等于自身内容
+        // 宽，下面那个 spacer 分不到一个像素，关闭按钮就紧贴着最后一个标签浮动。
+        let mut row = View::container(Layout::Row)
+            .gap(tab_gap)
+            .cross(Align::Center)
+            .fill_cross();
+        if need_scroll {
+            let start = shown.first().copied().unwrap_or(0);
+            row = row.child(self.tab_arrow(
+                SOFT_TAG_TAB_LEFT,
+                "‹",
+                TAB_ARROW_W_DP * s,
+                s,
+                hover,
+                start > 0,
+            ));
+        }
+        for i in shown.iter().copied() {
             let tag = SOFT_TAG_PAGE_BASE + i as i32;
             let active = i == self.current;
             let (bg, fg) = if active {
@@ -534,26 +709,39 @@ impl SoftKeyboard {
             } else {
                 ([0, 0, 0, 0], c.hint)
             };
-            let label = View::leaf(name, fg)
-                .font_size(12.5 * s)
-                .text_align(Align::Center);
-            tabs = tabs.child(
+            row = row.child(
                 View::container(Layout::Row)
                     .bg(bg)
                     .radius(4.0 * s)
-                    .pad(Edges::xy(9.0 * s, 5.0 * s))
+                    .pad(Edges::xy(pad_x, 5.0 * s))
                     .cross(Align::Center)
                     .tag(tag)
-                    .child(label),
+                    .child(
+                        View::leaf(&self.pages[i], fg)
+                            .font_size(TAB_FONT_DP * s)
+                            .text_align(Align::Center),
+                    ),
             );
         }
-        tabs = tabs.child(View::spacer().grow());
+        if need_scroll {
+            let more = shown.last().is_some_and(|&l| l + 1 < self.pages.len());
+            row = row.child(self.tab_arrow(
+                SOFT_TAG_TAB_RIGHT,
+                "›",
+                TAB_ARROW_W_DP * s,
+                s,
+                hover,
+                more,
+            ));
+        }
+        // 关闭按钮恒在右上角：spacer 吃掉富余，把它推到行尾，与标签多少无关。
+        row = row.child(View::spacer().grow());
         let close_fg = if hover == SOFT_TAG_CLOSE {
             c.ink
         } else {
             c.hint
         };
-        tabs = tabs.child(
+        row = row.child(
             View::container(Layout::Row)
                 .radius(4.0 * s)
                 .bg(if hover == SOFT_TAG_CLOSE {
@@ -565,11 +753,47 @@ impl SoftKeyboard {
                 .tag(SOFT_TAG_CLOSE)
                 .child(View::leaf("✕", close_fg).font_size(13.0 * s)),
         );
-        let _ = gap;
-        tabs
+        row
     }
 
-    /// 一个符号键帽：角标（原物理键）+ 主体（当前层的符号）。
+    /// 标签行的滚动箭头。`live=false` 时画成淡的且不进命中表——到头了还能点只会让人
+    /// 反复试探。
+    fn tab_arrow(&self, tag: i32, text: &str, w: f32, s: f32, hover: i32, live: bool) -> View {
+        let c = &self.colors;
+        let fg = if !live {
+            c.line
+        } else if hover == tag {
+            c.ink
+        } else {
+            c.hint
+        };
+        let mut v = View::container(Layout::Row)
+            .fixed_w(w)
+            .radius(4.0 * s)
+            .bg(if live && hover == tag {
+                c.keycap
+            } else {
+                [0, 0, 0, 0]
+            })
+            .pad(Edges::xy(2.0 * s, 4.0 * s))
+            .cross(Align::Center)
+            .child(
+                View::leaf(text, fg)
+                    .font_size(13.0 * s)
+                    .text_align(Align::Center)
+                    .fill_cross()
+                    .grow(),
+            );
+        if live {
+            v = v.tag(tag);
+        }
+        v
+    }
+
+    /// 一个符号键帽：角标（原物理键）+ **两档符号同时显示**。
+    ///
+    /// 上排小字是另一档，下排大字是当前档，切层时两者互换视觉权重——这样用户不按 Shift
+    /// 也知道上档是什么，而当前能打出的是哪一个仍然一眼可辨（靠字号与颜色，不是靠记）。
     fn key_cap(
         &self,
         tag: i32,
@@ -580,8 +804,11 @@ impl SoftKeyboard {
         pressed: i32,
     ) -> View {
         let c = &self.colors;
-        let out = cap.output(self.shift);
-        let dead = out.is_none();
+        let shift = self.layer_shift();
+        let cur = cap.output(shift);
+        let alt = cap.output(!shift);
+        // 「空」只看当前档：当前档没有映射就按不出东西，哪怕另一档有。
+        let dead = cur.is_none();
         let phys_down = self.down_slot.as_ref().is_some_and(|(s, _)| s == &cap.slot);
         let down = phys_down || pressed == tag;
 
@@ -597,13 +824,27 @@ impl SoftKeyboard {
 
         // 角标用键位名的可读形态（`grave` → `` ` ``），大写显示更像键帽刻字。
         let label = slot_label(&cap.slot);
-        let sym = out.unwrap_or("·");
+        let sym = cur.unwrap_or("·");
         // 多字符 token 收窄字号，避免撑出键帽。
         let sym_px = if sym.chars().count() > 1 {
             12.0 * s
         } else {
             17.0 * s
         };
+
+        // 上排：角标 + 另一档（另一档没有映射时留空，不画占位符——那会让人以为它能打）。
+        let mut top = View::container(Layout::Row)
+            .cross(Align::Start)
+            .child(View::leaf(label, hint).font_size(9.0 * s))
+            .child(View::spacer().grow());
+        if let Some(a) = alt {
+            let a_px = if a.chars().count() > 1 {
+                8.5 * s
+            } else {
+                11.0 * s
+            };
+            top = top.child(View::leaf(a, hint).font_size(a_px));
+        }
 
         let mut cell = View::container(Layout::Column)
             .fixed_w(u)
@@ -612,12 +853,7 @@ impl SoftKeyboard {
             .radius(4.0 * s)
             .border(border, (1.0 * s).max(1.0))
             .pad(Edges::xy(3.0 * s, 2.0 * s))
-            .child(
-                View::leaf(label, hint)
-                    .font_size(9.0 * s)
-                    .text_align(Align::Start)
-                    .fill_cross(),
-            )
+            .child(top.fill_cross())
             .child(
                 View::leaf(sym, fg)
                     .font_size(sym_px)
@@ -665,49 +901,19 @@ impl SoftKeyboard {
         self.flat_key(tag, text, units, u, gap, s, hover, false)
     }
 
-    /// 面名键：占着 CapsLock 那个宽键位。
+    /// Caps 键：显示并切换系统大写锁定。
     ///
-    /// ⛔ **物理 CapsLock 不接管**——本仓禁止拦截 toggle 键（「翻转再回敲复原」已删除）。
-    /// 这里只是把那个显眼的键位利用起来：显示当前面名，鼠标点击切下一面。
-    fn page_name_key(&self, units: f32, u: f32, gap: f32, s: f32, hover: i32) -> View {
-        let name = self
-            .pages
-            .get(self.current)
-            .map(String::as_str)
-            .unwrap_or("");
-        let tag = SOFT_TAG_PAGE_BASE + next_page(self.current, self.pages.len());
+    /// ⛔ 这不违反「不拦截 CapsLock」那条禁令。禁的是**拦截物理键**——toggle 键的
+    /// keydown/keyup 处理有坑，「翻转再回敲复原」已被删除且不得重来。这里是用户点面板时
+    /// 我们**主动敲一次** `vk:0x14`，与用户自己按下没有区别；物理 CapsLock 仍然完全
+    /// 不接管，它的状态由下面的轮询如实读回来。
+    fn caps_key(&self, units: f32, u: f32, gap: f32, s: f32, hover: i32, pressed: i32) -> View {
+        let tag = SOFT_TAG_FN_BASE + SOFT_FN_CAPS_INDEX as i32;
         let c = &self.colors;
-        let (bg, fg) = if hover == tag {
+        let (bg, fg) = if self.caps_on {
             (c.accent, c.on_accent)
-        } else {
-            (c.accent_soft, c.accent)
-        };
-        View::container(Layout::Row)
-            .fixed_w(units * u + (units - 1.0) * gap)
-            .fixed_h(u)
-            .bg(bg)
-            .radius(4.0 * s)
-            .border(c.accent, (1.0 * s).max(1.0))
-            .cross(Align::Center)
-            .tag(tag)
-            .child(
-                View::leaf(name, fg)
-                    .font_size(12.5 * s)
-                    .font_weight(600)
-                    .text_align(Align::Center)
-                    .fill_cross()
-                    .grow(),
-            )
-    }
-
-    /// Shift 键：只作层指示，**不可点**。
-    ///
-    /// 按住物理 Shift 切层是临时的（松开还原），做成可点就变成了 toggle，
-    /// 与「临时切层」的语义打架，也与本仓「修饰键只走 keyup 轻敲」的纪律相悖。
-    fn shift_key(&self, units: f32, u: f32, gap: f32, s: f32) -> View {
-        let c = &self.colors;
-        let (bg, fg) = if self.shift {
-            (c.accent, c.on_accent)
+        } else if pressed == tag || hover == tag {
+            (c.accent_soft, c.ink)
         } else {
             (c.keycap_fn, c.hint)
         };
@@ -716,14 +922,59 @@ impl SoftKeyboard {
             .fixed_h(u)
             .bg(bg)
             .radius(4.0 * s)
-            .border(c.line, (1.0 * s).max(1.0))
+            .border(
+                if self.caps_on { c.accent } else { c.line },
+                (1.0 * s).max(1.0),
+            )
             .cross(Align::Center)
+            .tag(tag)
             .child(
-                View::leaf("Shift", fg)
+                View::leaf("Caps", fg)
                     .font_size(11.5 * s)
                     .text_align(Align::Center)
                     .fill_cross()
                     .grow(),
+            )
+    }
+
+    /// Shift 键：**可点**（锁定/解锁第二层），同时反映物理按住状态。
+    ///
+    /// 两种来源分开存（`shift_held` / `shift_locked`）：物理按住是临时的、松开还原，
+    /// 点击是锁定的、再点才还原。合成一个布尔就无法回答「松开物理 Shift 后该回哪一层」。
+    ///
+    /// ⛔ 仍然**不拦截物理 Shift 的按键事件**——面板只是跟随显示，切层判据取自每次按键
+    /// 携带的修饰位与一次轻量的键盘状态查询，不去接管这个键本身。
+    fn shift_key(&self, units: f32, u: f32, gap: f32, s: f32, hover: i32) -> View {
+        let c = &self.colors;
+        let on = self.layer_shift();
+        let (bg, fg) = if on {
+            (c.accent, c.on_accent)
+        } else if hover == SOFT_TAG_SHIFT {
+            (c.accent_soft, c.ink)
+        } else {
+            (c.keycap_fn, c.hint)
+        };
+        View::container(Layout::Row)
+            .fixed_w(units * u + (units - 1.0) * gap)
+            .fixed_h(u)
+            .bg(bg)
+            .radius(4.0 * s)
+            .border(if on { c.accent } else { c.line }, (1.0 * s).max(1.0))
+            .cross(Align::Center)
+            .tag(SOFT_TAG_SHIFT)
+            .child(
+                View::leaf(
+                    if self.shift_locked {
+                        "Shift ●"
+                    } else {
+                        "Shift"
+                    },
+                    fg,
+                )
+                .font_size(11.5 * s)
+                .text_align(Align::Center)
+                .fill_cross()
+                .grow(),
             )
     }
 
@@ -765,7 +1016,80 @@ impl SoftKeyboard {
     }
 }
 
+/// 读物理 Shift 是否按住、大写锁定是否开着。非 Windows 返回 `None`（面板本就只有
+/// Windows 实现）。
+fn read_shift_caps() -> Option<(bool, bool)> {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CAPITAL, VK_SHIFT};
+        // 高位 = 按住；低位 = toggle 态（大写锁定用的是这一位）。
+        let shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+        let caps = (GetKeyState(VK_CAPITAL.0 as i32) as u16 & 0x0001) != 0;
+        Some((shift, caps))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// 改变状态的键不重复——按住翻页键会让面飞速乱切。
+/// 从 `offset` 起放得下哪几个标签：`(可见下标, 是否需要滚动箭头)`。
+///
+/// 纯函数——宽度已量好，这里只做装箱。抽出来是为了能在单测里直接喂宽度，
+/// 而 [`SoftKeyboard::visible_tabs`] 与 [`scroll_into_view`] 共用它保证判据同源。
+fn tab_window(widths: &[f32], offset: usize, full: f32, s: f32) -> (Vec<usize>, bool) {
+    if widths.is_empty() {
+        return (Vec::new(), false);
+    }
+    let total: f32 = widths.iter().sum();
+    // 装得下就不出箭头；装不下才为左右各留一格。
+    let need_scroll = total > full - TAB_CLOSE_W_DP * s;
+    let avail = full
+        - TAB_CLOSE_W_DP * s
+        - if need_scroll {
+            TAB_ARROW_W_DP * s * 2.0
+        } else {
+            0.0
+        };
+    let start = if need_scroll {
+        offset.min(widths.len() - 1)
+    } else {
+        0
+    };
+    let mut used = 0.0;
+    let mut shown: Vec<usize> = Vec::new();
+    for (i, w) in widths.iter().enumerate().skip(start) {
+        if !shown.is_empty() && used + w > avail {
+            break;
+        }
+        used += w;
+        shown.push(i);
+    }
+    (shown, need_scroll)
+}
+
+/// 让 `current` 落进可见窗口所需的 `offset`：在左边就拉回去，在右边就逐格推进。
+fn scroll_into_view(widths: &[f32], offset: usize, current: usize, full: f32, s: f32) -> usize {
+    if widths.is_empty() {
+        return 0;
+    }
+    let last = widths.len() - 1;
+    let cur = current.min(last);
+    let mut off = offset.min(last);
+    if cur < off {
+        return cur;
+    }
+    // 每轮右移一格，最多 len 轮；到头即停，不会空转。
+    for _ in 0..widths.len() {
+        if off >= last || tab_window(widths, off, full, s).0.contains(&cur) {
+            break;
+        }
+        off += 1;
+    }
+    off
+}
+
 fn repeats(tag: i32) -> bool {
     (0..SOFT_TAG_PAGE_BASE).contains(&tag) || (SOFT_TAG_FN_BASE..).contains(&tag)
 }
@@ -831,9 +1155,13 @@ fn default_origin(w: u32, h: u32, s: f32) -> (i32, i32) {
 #[cfg(windows)]
 mod mouse_impl {
     use super::{SoftMouse, repeat_params, repeats};
+    use crate::sys::{
+        GetCursorPos, GetWindowRect, HWND_TOPMOST, POINT, RECT, ReleaseCapture, SWP_NOACTIVATE,
+        SWP_NOSIZE, SWP_NOZORDER, SetCapture, SetWindowPos, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MOUSEMOVE, clamp_to_work_area,
+    };
     use crate::window::WindowMouse;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
 
     fn pos(lparam: LPARAM) -> (f32, f32) {
         let x = (lparam.0 & 0xFFFF) as i16 as f32;
@@ -850,6 +1178,38 @@ mod mouse_impl {
             lparam: LPARAM,
         ) -> Option<LRESULT> {
             match msg {
+                WM_MOUSEMOVE if self.dragging => {
+                    let mut p = POINT::default();
+                    unsafe {
+                        let _ = GetCursorPos(&mut p);
+                    }
+                    let nx = self.origin.0 + (p.x - self.anchor.0);
+                    let ny = self.origin.1 + (p.y - self.anchor.1);
+                    let hwnd = self.hwnd_handle();
+                    let (w, h) = unsafe {
+                        let mut r = RECT::default();
+                        if GetWindowRect(hwnd, &mut r).is_ok() {
+                            ((r.right - r.left) as u32, (r.bottom - r.top) as u32)
+                        } else {
+                            (0, 0)
+                        }
+                    };
+                    // 钳到工作区：面板比候选窗大得多，拖出屏幕就再也抓不回来了。
+                    let (cx, cy) = clamp_to_work_area(nx, ny, w, h);
+                    unsafe {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            HWND_TOPMOST,
+                            cx,
+                            cy,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                        );
+                    }
+                    self.moved_to = Some((cx, cy));
+                    Some(LRESULT(0))
+                }
                 WM_MOUSEMOVE => {
                     let (x, y) = pos(lparam);
                     let h = self.hit_at(x, y);
@@ -870,6 +1230,38 @@ mod mouse_impl {
                 WM_LBUTTONDOWN => {
                     let (x, y) = pos(lparam);
                     let h = self.hit_at(x, y);
+                    if h < 0 {
+                        // 空白处（标签行留白、键位之间的缝）→ 拖动整块面板。
+                        //
+                        // 这里用 SetCapture 是安全的：按下发生在本窗口内，捕获的是本线程的
+                        // 鼠标。本仓记过「后台窗口 SetCapture 按线程失效」，那说的是拿它去
+                        // **侦听窗口外的点击**（菜单关闭），与拖动不是一回事——工具栏的拖动
+                        // 一直就是这么做的。
+                        let mut p = POINT::default();
+                        unsafe {
+                            let _ = GetCursorPos(&mut p);
+                        }
+                        let hwnd = self.hwnd_handle();
+                        let mut r = RECT::default();
+                        let origin = unsafe {
+                            if GetWindowRect(hwnd, &mut r).is_ok() {
+                                (r.left, r.top)
+                            } else {
+                                (p.x, p.y)
+                            }
+                        };
+                        self.anchor = (p.x, p.y);
+                        self.origin = origin;
+                        self.dragging = true;
+                        if self.hover != -1 {
+                            self.hover = -1;
+                            self.dirty = true;
+                        }
+                        unsafe {
+                            let _ = SetCapture(hwnd);
+                        }
+                        return Some(LRESULT(0));
+                    }
                     if h >= 0 {
                         self.pressed = h;
                         self.clicked.push(h);
@@ -884,6 +1276,12 @@ mod mouse_impl {
                     Some(LRESULT(0))
                 }
                 WM_LBUTTONUP => {
+                    if self.dragging {
+                        self.dragging = false;
+                        unsafe {
+                            let _ = ReleaseCapture();
+                        }
+                    }
                     if self.pressed >= 0 {
                         self.pressed = -1;
                         self.dirty = true;
@@ -947,5 +1345,57 @@ mod tests {
         assert_eq!(slot_label("lbracket"), "[");
         assert_eq!(slot_label("q"), "Q");
         assert_eq!(slot_label("1"), "1");
+    }
+
+    /// 标签行的宽度算术。`s=1` 时 close=27、arrow=22，装箱只看这几个数。
+    const FULL: f32 = 300.0;
+
+    #[test]
+    fn tabs_that_fit_show_all_without_arrows() {
+        let w = [40.0f32, 40.0, 40.0];
+        let (shown, scroll) = tab_window(&w, 0, FULL, 1.0);
+        assert!(!scroll, "总宽 120 远小于可用宽，不该出箭头");
+        assert_eq!(shown, vec![0, 1, 2]);
+        // 装得下时 offset 无意义——被强制归零，否则用户滚过一次就再也看不到左边的面。
+        assert_eq!(tab_window(&w, 2, FULL, 1.0).0, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn tabs_that_overflow_scroll_by_item() {
+        let w = [80.0f32; 8]; // 总宽 640 > 300-27
+        let (shown, scroll) = tab_window(&w, 0, FULL, 1.0);
+        assert!(scroll);
+        // 可用 = 300 - 27 - 44 = 229 → 放得下 2 个（240 超了）
+        assert_eq!(shown, vec![0, 1]);
+        assert_eq!(tab_window(&w, 5, FULL, 1.0).0, vec![5, 6]);
+        // 末尾：不足一屏也不回退，剩几个画几个
+        assert_eq!(tab_window(&w, 7, FULL, 1.0).0, vec![7]);
+    }
+
+    #[test]
+    fn a_tab_wider_than_the_row_still_shows() {
+        // 单个标签就超宽时也必须画出来，否则标签行整个空掉。
+        assert_eq!(tab_window(&[900.0], 0, FULL, 1.0).0, vec![0]);
+    }
+
+    /// 这次真机反馈的那条：用热键切到靠右的面，标签行不跟过去，
+    /// 当前面的高亮落在可见范围外，看上去像没切成功。
+    #[test]
+    fn current_page_is_scrolled_into_view() {
+        let w = [80.0f32; 8];
+        // 当前面在右边界之外 → 推进到能看见为止
+        let off = scroll_into_view(&w, 0, 6, FULL, 1.0);
+        assert!(
+            tab_window(&w, off, FULL, 1.0).0.contains(&6),
+            "offset={off} 仍看不到第 6 面"
+        );
+        // 当前面在窗口左边 → 直接拉回去
+        assert_eq!(scroll_into_view(&w, 5, 1, FULL, 1.0), 1);
+        // 已经可见 → 不动，避免每帧抖一格
+        let stay = scroll_into_view(&w, 5, 5, FULL, 1.0);
+        assert_eq!(stay, 5);
+        // 边界：空表、越界下标都不该 panic
+        assert_eq!(scroll_into_view(&[], 0, 3, FULL, 1.0), 0);
+        assert_eq!(scroll_into_view(&w, 99, 99, FULL, 1.0), 7);
     }
 }
