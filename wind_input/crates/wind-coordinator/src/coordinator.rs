@@ -37,6 +37,7 @@ use wind_bridge::handler::*;
 use wind_bridge::push::PushServer;
 use wind_candidate::{Candidate, CandidateSource};
 use wind_config::Config;
+use wind_config::Orientation;
 use wind_config::PreeditDisplay;
 use wind_config::hotkey;
 use wind_engine::EngineManager;
@@ -1388,10 +1389,12 @@ pub struct Coordinator {
     /// 候选布局方向运行时态（命令栏 ime.toggle("layout") 切换；true=竖排，初值随配置，持久化）。
     ///
     /// 这是布局方向的**基线真相源**——模式级覆盖（`layout.rs`）在它之上叠加，不改写它。
-    pub(crate) candidate_vertical: Mutex<bool>,
+    pub(crate) candidate_orientation: Mutex<Orientation>,
     /// 上次真正下发给 UI 的候选方向（`layout.rs` 的去重缓存，避免每次按键重发致重排抖动）。
     /// 与 `candidate_vertical` 的区别：后者是基线，本字段是**叠加模式意图后实际生效**的值。
-    pub(crate) candidate_layout_sent: Mutex<bool>,
+    pub(crate) candidate_layout_sent: Mutex<Orientation>,
+    /// 上次下发的方案级候选字族（去重用）。见 `sync_candidate_font`。
+    pub(crate) candidate_font_sent: Mutex<String>,
     /// 输入统计采集器（内存聚合 + 后台 flush，与 store 共享 Arc）；None=无持久化/headless。
     pub(crate) stat_collector: Option<StatCollector>,
     /// 本次按键是否已被具体上屏路径记录统计（AtomicBool，避免与 state 锁冲突致死锁）。
@@ -1820,7 +1823,7 @@ impl Coordinator {
         let preedit_display_init = config.ui.candidate.preedit();
 
         // 候选布局方向运行时初值（与下方 SetCandidateLayout 下发一致；config 移入前先算）。
-        let candidate_vertical_init = config.ui.candidate.layout.eq_ignore_ascii_case("vertical");
+        let candidate_orientation_init = Orientation::from_layout_str(&config.ui.candidate.layout);
 
         // 候选窗显隐运行时初值（ui.candidate.hide_window；此前恒为 false，配置不生效）。
         let hide_candidate_window_init = config.ui.candidate.hide_window;
@@ -1995,8 +1998,9 @@ impl Coordinator {
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
             preedit_display: Mutex::new(preedit_display_init),
             hide_candidate_window: Mutex::new(hide_candidate_window_init),
-            candidate_vertical: Mutex::new(candidate_vertical_init),
-            candidate_layout_sent: Mutex::new(candidate_vertical_init),
+            candidate_orientation: Mutex::new(candidate_orientation_init),
+            candidate_layout_sent: Mutex::new(candidate_orientation_init),
+            candidate_font_sent: Mutex::new(String::new()),
             stat_collector,
             stat_recorded: std::sync::atomic::AtomicBool::new(false),
             fullscreen_cached: std::sync::atomic::AtomicBool::new(false),
@@ -3356,15 +3360,14 @@ impl Coordinator {
     pub(crate) fn apply_ui_config(&self) {
         let bundle = self.rt();
         let cand = &bundle.config.ui.candidate;
-        // 候选排列方向（ui.candidate.layout == "vertical"）：config 是**基线**的持久化真相源，
+        // 候选排列方向（ui.candidate.layout）：config 是**基线**的持久化真相源，
         // 但实际下发要叠加当前模式的布局意图（见 layout.rs）——热重载不能把模式级覆盖清掉。
         // 此前这里无条件下发 config 值：模式进行中改任意一项设置都会静默取消强制竖排，
         // 且因为不留痕迹而极难复现。
-        let vertical = cand.layout.eq_ignore_ascii_case("vertical");
         *self
-            .candidate_vertical
+            .candidate_orientation
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = vertical;
+            .unwrap_or_else(|e| e.into_inner()) = Orientation::from_layout_str(&cand.layout);
         {
             // 调用点（启动 / 配置重载）均不持 state 锁；加锁顺序 state → candidate_layout_sent
             // 与 notify_ui_update 一致，不构成环。
@@ -3399,10 +3402,17 @@ impl Coordinator {
             cand.font_size
         };
         let _ = self.ui_tx.send(UiCommand::SetCandidateFontSize(font_size));
-        // 候选字体族（ui.font.family；空=默认）。
-        let _ = self.ui_tx.send(UiCommand::SetCandidateFontFamily(
-            bundle.config.ui.font.family.clone(),
-        ));
+        // 候选字体（ui.font.family / fallback / scripts；family 空=渲染端内置默认）。
+        let font = &bundle.config.ui.font;
+        let _ = self.ui_tx.send(UiCommand::SetCandidateFont {
+            family: font.family.clone(),
+            fallback: font.fallback.clone(),
+            scripts: font
+                .scripts
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        });
         // 翻页栏 / 页码显示覆盖（ui.candidate.pager_bar_display / page_number_display）
         let _ = self
             .ui_tx
@@ -4252,7 +4262,7 @@ impl Coordinator {
                 self.sync_schema_scope(&mut state);
                 // 翻转的基准是**当前实际生效值**，不是基线——基线在方案意图之下，
                 // 对它取反在强制竖排的方案里一次都不会改变用户看到的方向。
-                let want = !self.desired_vertical(&state);
+                let want = !self.desired_orientation(&state).vertical;
                 state.layout_manual = Some(want);
                 self.sync_candidate_layout(&state);
                 want
@@ -4264,13 +4274,21 @@ impl Coordinator {
             });
             return;
         }
+        // 切换只翻**竖排位**这一根轴，不碰文字排列：后者由 `desired_orientation` 每次从当前
+        // 数据方案重新取。故在蒙古文方案里切到竖排（旋转按 `normalized()` 归零——竖排再转
+        // 90° 就是横排，没有定义）、再切回横排时旋转原样回来，方案意图不被这个二值开关吃掉。
         let vertical = {
             let mut v = self
-                .candidate_vertical
+                .candidate_orientation
                 .lock()
                 .unwrap_or_else(|x| x.into_inner());
-            *v = !*v;
-            *v
+            let next = !v.vertical;
+            *v = if next {
+                Orientation::VERTICAL
+            } else {
+                Orientation::HORIZONTAL
+            };
+            next
         };
         // 翻转的是**基线**；实际下发仍要叠加当前模式意图（见 layout.rs），否则在强制竖排的
         // 模式里切换会绕过覆盖直接改方向，且去重缓存与真实下发值脱节。
@@ -4353,6 +4371,8 @@ impl Coordinator {
         // 必须在下方 UpdateCandidates **之前**——同 channel 按序处理，UI 先改方向再填候选。
         // 这是「强制竖排/横排」的唯一执行点，模式进入/退出各处都不再自己动布局（见 layout.rs）。
         self.sync_candidate_layout(state);
+        // 方案级候选字体：归属是**数据方案**，随临英/快符叠加逐次按键变化，故与布局同处重算。
+        self.sync_candidate_font(state);
         // 延迟首次显示：新组合首帧若非经授权（reflow 后权威坐标 / 兜底 timer）则不立即显示，
         // 改 arm 兜底 timer，待 handle_caret_update 的权威坐标或超时再首显。避免在 reflow 前的
         // 陈旧坐标处先显示、reflow 后再跳（根治"上屏后立即输入候选窗错位约一个上屏宽度"）。
@@ -4480,7 +4500,10 @@ impl Coordinator {
         // 方案级那一层住在方案文件里，只能取到临时 `Arc`——在候选循环外取一次存局部变量，
         // 模板借用它（`comment_template_for` 的文档说明了为什么不快照进 State）。
         let schema_behavior = self.engine_mgr.active_behavior();
-        let comment_vertical = self.desired_vertical(state);
+        // ⚠️ 注释模板按 `vertical` 位取，旋转态因此走**横排**那一份模板。
+        // 这是「旋转态的 vertical 恒为 false ⇒ 所有按方向分叉的配置走横排支」这条总规则的
+        // 一个实例，不是遗漏；要给旋转态单独的模板，用方案级 `[candidate]` 那两个键。
+        let comment_vertical = self.desired_orientation(state).vertical;
         let comment_tpl =
             self.comment_template_for(&rt.config, state, &schema_behavior, comment_vertical);
         // 注释段长度预算横竖各一份：横排全部候选共享一行宽度，竖排每行独占。

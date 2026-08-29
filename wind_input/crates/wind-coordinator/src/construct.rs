@@ -194,17 +194,14 @@ impl Coordinator {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         coordinator.push_theme(&name, coordinator.resolve_theme_dark());
-        // 下发候选布局方向（ui.candidate.layout == "vertical"）。
-        let vertical = coordinator
-            .rt()
-            .config
-            .ui
-            .candidate
-            .layout
-            .eq_ignore_ascii_case("vertical");
-        let _ = coordinator
-            .ui_tx
-            .send(UiCommand::SetCandidateLayout(vertical));
+        // 下发候选布局方向（ui.candidate.layout）。
+        let orientation =
+            wind_config::Orientation::from_layout_str(&coordinator.rt().config.ui.candidate.layout);
+        let _ = coordinator.ui_tx.send(UiCommand::SetCandidateLayout {
+            vertical: orientation.vertical,
+            rotated: orientation.rotated(),
+            upright: orientation.upright(),
+        });
         // 下发预编辑内联模式：仅 candidate_inline 需内联候选首单元（app_inline 不显示、candidate_top 独立条）。
         let embedded = coordinator.rt().config.ui.candidate.preedit().embedded();
         let _ = coordinator

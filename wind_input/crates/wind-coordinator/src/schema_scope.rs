@@ -118,6 +118,60 @@ impl Coordinator {
     pub(crate) fn schema_layout_intent(&self) -> wind_config::LayoutIntent {
         self.engine_mgr.active_behavior().candidate_layout
     }
+
+    /// 当前语境的候选字族（测试/诊断用）。对齐 `debug_desired_vertical` 的既有形态。
+    pub fn debug_candidate_font(&self) -> String {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.candidate_font_of(&state)
+    }
+
+    /// 当前输入语境的候选**文字字族**覆盖（`[candidate] font_family`）；空 = 不覆盖。
+    ///
+    /// # ⚠️ 与同段的 `layout` 归属判据**刻意不同**
+    ///
+    /// `layout` 取 `active_behavior`（它是用户可见的呈现态），字体取
+    /// `effective_data_schema`（「这些字用什么渲染」＝数据属性，与 `[phrases]`、
+    /// `[punct] custom_mappings` 同源）。同住一个 `[candidate]` 段就统一判据是错的——
+    /// 那会让临英期间候选归 `english` 桶、字体却还跟着五笔走。
+    /// `[punct]` 段的 `mode` 与 `custom_mappings` 已经踩过同一个形状。
+    ///
+    /// ⇒ 它随输入语境**逐次按键**变化，不随方案代际变化：挂到 `sync_schema_scope` 那条
+    /// 代际驱动的路上会整个失效（`schema_scope_gen == generation` 直接 return，临英进出
+    /// 根本不改代际）。故下发点与布局同处，见 `Coordinator::sync_candidate_font`。
+    pub(crate) fn candidate_font_of(&self, state: &State) -> String {
+        let id = self
+            .effective_data_schema(state)
+            .unwrap_or_else(|| self.engine_mgr.active_schema_id());
+        self.engine_mgr
+            .behavior_for(&id)
+            .candidate_font_family
+            .clone()
+    }
+
+    /// 当前输入语境的**横排时文字排列**（`[candidate] text_orientation`）。
+    ///
+    /// # 与候选字体同源，与同段的 `layout` 不同
+    ///
+    /// 「这些字怎么排」和「这些字用什么字体」是同一个问题的两面 ⇒ 判据必须一致，
+    /// 都取 [`Coordinator::effective_data_schema`]。临英期间候选是英文、归 `english` 桶，
+    /// 于是字体和排列一起跟着归它——**不会出现「打英文却还按蒙古文方案转 90°」**。
+    ///
+    /// `layout`（横/竖）走的是另一条链（`layout.rs` 的模式 > 手动 > 方案 > 基线），
+    /// 因为它回答的是用户对呈现的偏好。同段两字段判据不同这件事，`[punct]` 的
+    /// `mode` 与 `custom_mappings` 已经是同一个形状。
+    ///
+    /// ⇒ 它随输入语境**逐次按键**变化，与 [`Self::candidate_font_of`] 一样不能挂到
+    /// `sync_schema_scope` 那条代际驱动的路上（临英进出根本不改代际）。
+    /// 下发点在 `desired_orientation` 里，那是每次显示都重算的。
+    pub(crate) fn candidate_text_orientation_of(
+        &self,
+        state: &State,
+    ) -> wind_config::TextOrientation {
+        let id = self
+            .effective_data_schema(state)
+            .unwrap_or_else(|| self.engine_mgr.active_schema_id());
+        self.engine_mgr.behavior_for(&id).candidate_text_orientation
+    }
 }
 
 /// 把 `[phrases]` 规格折成一次查询的作用域。

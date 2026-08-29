@@ -304,7 +304,7 @@ fn schema_json() -> Value {
                 FieldType::Str => ("string", None),
                 FieldType::Enum(vs) => ("enum", Some(vs)),
                 FieldType::StrList => ("string[]", None),
-                FieldType::Map => ("map", None),
+                FieldType::Map(_) => ("map", None),
                 FieldType::StructList => ("array", None),
             };
             let mut obj = json!({ "key": f.key, "type": ty });

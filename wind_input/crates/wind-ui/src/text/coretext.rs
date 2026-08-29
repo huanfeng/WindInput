@@ -29,6 +29,7 @@ use core_text::line::CTLine;
 use core_text::string_attributes::{kCTFontAttributeName, kCTForegroundColorAttributeName};
 
 use super::dwrite::{TextMetrics, TextStyle};
+use super::script::FontPlan;
 
 /// 主字体载入失败时的系统回退字体族。
 const FALLBACK_FAMILY: &str = "Helvetica";
@@ -59,6 +60,14 @@ pub struct TextRenderer {
     font_size: f32,
     /// 拆字字根字体描述符（可选）：设置后构造级联回退，PUA 码位回退到它。
     chaizi: Option<CTFontDescriptor>,
+    /// 全局字体方案。**本后端只实现「默认回退链」这一半**：链尾各项进 cascade list，
+    /// 语义与 DirectWrite 侧的自定义 fallback 一致。
+    ///
+    /// ⚠️ **按脚本的字体指派（`FontPlan::declared`）在 macOS 上尚未实现**——它要按
+    /// `font_runs` 的分段构造 attributed string 的分段字体属性，而本后端目前是整行
+    /// 单字体（`make_line`）。蒙古文用户在 Windows 上，故先补 Windows 侧；这里如实标注，
+    /// 不做「声明未实现」的假接线。
+    plan: FontPlan,
     /// CTFont 缓存：按取整 px keyed，避免每次测量/绘制重建。
     fonts: RefCell<HashMap<u32, CTFont>>,
 }
@@ -70,6 +79,7 @@ impl TextRenderer {
             family: font_family.to_string(),
             font_size,
             chaizi: None,
+            plan: FontPlan::default(),
             fonts: RefCell::new(HashMap::new()),
         })
     }
@@ -88,6 +98,29 @@ impl TextRenderer {
     pub fn set_font_family(&mut self, font_family: &str) {
         self.family = font_family.to_string();
         self.fonts.borrow_mut().clear();
+    }
+
+    /// 换字体方案。字号缓存必须清：cascade list 由方案参与构建，缓存里的 CTFont
+    /// 带的是旧链。见结构体字段上关于本后端只实现了哪一半的说明。
+    pub fn set_font_plan(&mut self, plan: FontPlan) {
+        if self.plan == plan {
+            return;
+        }
+        // 脚本指派在本后端是**静默无效**的。不吭一声的话，用户看到的是「配了没反应」，
+        // 要靠一轮误诊才查到平台差异——一行日志省掉那一轮。
+        if !plan.declared().is_empty() {
+            tracing::warn!(
+                "ui.font.scripts 的按脚本字体指派在 macOS 上尚未实现，本次声明的 {} 个脚本类不生效（回退链仍生效）",
+                plan.declared().len()
+            );
+        }
+        self.plan = plan;
+        self.fonts.borrow_mut().clear();
+    }
+
+    /// 当前字体方案。
+    pub fn font_plan(&self) -> &FontPlan {
+        &self.plan
     }
 
     /// 加载拆字字根字体（TTF）作级联回退；失败返回 Err（不影响普通文本渲染）。
@@ -131,6 +164,13 @@ impl TextRenderer {
         if let Some(chaizi_desc) = &self.chaizi {
             descs.push(chaizi_desc.clone());
         }
+        // 用户声明的回退链（默认链去掉链首——链首是 base 字体本身，见 `font_for`）
+        // 排在内置兜底之前：用户显式写下的顺序必须赢过我们猜的那条链。
+        for fam in self.plan.chain_for(None).iter().skip(1) {
+            if let Ok(f) = core_text::font::new_from_name(fam, pt) {
+                descs.push(f.copy_descriptor());
+            }
+        }
         // 符号 / CJK / 彩色 emoji 回退族。
         for fam in CASCADE_FALLBACK {
             if let Ok(f) = core_text::font::new_from_name(fam, pt) {
@@ -159,14 +199,23 @@ impl TextRenderer {
             return f.clone();
         }
         let pt = key as f64;
-        let base = Self::resolve_base(&self.family, pt);
+        // 方案默认链的链首优先于全局字族——与 dwrite 侧 `create_layout` 的三层合成同序。
+        let base_family = self.plan.base_family().unwrap_or(&self.family);
+        let base = Self::resolve_base(base_family, pt);
         let font = self.apply_cascade(base, pt);
         self.fonts.borrow_mut().insert(key, font.clone());
         font
     }
 
     /// 带字体族覆盖的 CTFont 解析（styled 路径）。family=None 时走缓存的基准族；
-    /// family=Some 时按覆盖族即时构建（不入缓存，覆盖族通常少量出现）。weight 当前
+    /// family=Some 时按覆盖族即时构建（不入缓存，覆盖族通常少量出现）。
+    ///
+    /// ⚠️ 「通常少量出现」这个前提在**方案级候选字体**下不再成立：方案一旦声明
+    /// `[candidate] font_family`，每个候选文字叶子的每次测量与每次绘制都走这条不缓存的路
+    /// （`resolve_base` + `apply_cascade`，后者内含一串 `new_from_name`）。
+    /// 蒙文用户在 Windows，故暂不改；macOS 上真用起这个功能时应加一个按 (族, 字号) 的缓存。
+    ///
+    /// weight 当前
     /// 不合成粗体（CoreText 合成粗体涉及 symbolic traits，纯视觉差异，留待后续）。
     fn font_styled(&self, size: f32, _weight: i32, family: Option<&str>) -> CTFont {
         match family {

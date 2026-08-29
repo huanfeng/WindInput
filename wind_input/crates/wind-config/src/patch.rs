@@ -311,7 +311,7 @@ pub fn preview(fragment: &toml::Value, current: &toml::Value) -> Vec<PatchEntry>
 fn is_map_key(key: &str) -> bool {
     matches!(
         config_schema::field(key).map(|f| f.ty),
-        Some(config_schema::FieldType::Map)
+        Some(config_schema::FieldType::Map(_))
     )
 }
 

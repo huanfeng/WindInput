@@ -168,10 +168,11 @@ impl Forwarder {
         matches!(
             cmd,
             UiCommand::SetTheme(_)
-                | UiCommand::SetCandidateLayout(_)
+                | UiCommand::SetCandidateLayout { .. }
+                | UiCommand::SetCandidateTextFamily(_)
                 | UiCommand::SetPreeditEmbedded(_)
                 | UiCommand::SetCandidateFontSize(_)
-                | UiCommand::SetCandidateFontFamily(_)
+                | UiCommand::SetCandidateFont { .. }
                 | UiCommand::SetCandidateMinSize { .. }
                 | UiCommand::SetCandidateFlipWhenAbove(_)
                 | UiCommand::SetCandidateSwapWhenAbove(_)
@@ -345,10 +346,26 @@ impl Forwarder {
                 };
                 self.win.set_theme(*t);
             }
-            UiCommand::SetCandidateLayout(v) => self.win.set_vertical(v),
+            UiCommand::SetCandidateTextFamily(f) => self.win.set_text_family_override(&f),
+            UiCommand::SetCandidateLayout {
+                vertical,
+                rotated,
+                upright,
+            } => self.win.set_orientation(vertical, rotated, upright),
             UiCommand::SetPreeditEmbedded(v) => self.win.set_preedit_embedded(v),
             UiCommand::SetCandidateFontSize(s) => self.win.set_font_size_override(s),
-            UiCommand::SetCandidateFontFamily(f) => self.win.set_font_family(&f),
+            // 两步顺序同 Windows 侧 manager：链首必须是刚设进去的那个字族。
+            // ⚠️ CoreText 后端只实现了回退链那一半，脚本指派尚未实现（见 coretext.rs 的
+            // `plan` 字段说明）——这里照常下发，是为了让两平台的**配置通路**一致，
+            // 补上 macOS 侧渲染时不必再改接线。
+            UiCommand::SetCandidateFont {
+                family,
+                fallback,
+                scripts,
+            } => {
+                self.win.set_font_family(&family);
+                self.win.set_font_plan(&family, &fallback, &scripts);
+            }
             UiCommand::SetCandidateMinSize {
                 width_horizontal,
                 width_vertical,

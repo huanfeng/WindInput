@@ -806,6 +806,10 @@ custom_y = 0
 family = ""
 path = ""
 render_mode = "directwrite"
+# family 缺字时按序接续的字体；最终链 = [family] + fallback
+fallback = []
+# 按脚本单独指派字体：键取 latin/greek/cyrillic/cjk/emoji/digits/punct，值是该类自己的字体链
+scripts = {}
 
 [ui.theme]
 name = "default"

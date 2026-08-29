@@ -1714,6 +1714,10 @@ impl Default for QuickInputConfig {
 /// **为什么不是布尔**：`Follow` 与 `Vertical` 只在全局本身是竖排时才有区别——前者跟着
 /// 全局变、后者恒定竖排。布尔（旧 `quick_input.force_vertical`）把这两种意图压成同一个
 /// `true`，且表达不了「全局竖排但本模式横排」（临英候选一行放得下，竖排反而占屏）。
+///
+/// ⛔ **旋转 90° / 文字竖排不在本枚举里**，它们是另一根轴
+/// （[`TextOrientation`]，方案级 `[candidate] text_orientation`）。
+/// 曾把它们当成第三、第四种「排列」，作废理由见该类型的文档。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutIntent {
@@ -1721,6 +1725,155 @@ pub enum LayoutIntent {
     Follow,
     Vertical,
     Horizontal,
+}
+
+/// **横排时**文字的排列方式（方案级 `[candidate] text_orientation`）。
+///
+/// | 取值 | 屏幕上 | 给谁用 |
+/// |---|---|---|
+/// | `Normal` | 一行候选，文字水平 | 绝大多数方案 |
+/// | `Rotated` | 候选成列自左向右，**整项**顺时针转 90° | 蒙古文等连写的纵向书写脚本 |
+/// | `Upright` | 同上，但字不转、逐字下行 | 汉字的对联式竖排 |
+///
+/// 术语取自 CSS `text-orientation: sideways \| upright`，`Rotated` 对应 sideways。
+///
+/// # ★★ 为什么是**独立一根轴**，而不是 [`LayoutIntent`] 的第三、第四个取值
+///
+/// 曾按后者实现过，作废理由有三条，每条单独都足够：
+///
+/// 1. **注释模板只认横竖**。它在全局/方案/overlay/模式**四层**各有一对
+///    `_vertical`/`_horizontal`，窗口尺寸下限有四个字段，`flip_when_above` 只对竖排成立。
+///    把旋转塞进同一个枚举，这些对子要么变三元组四元组（组合级代价），要么被迫「旋转态
+///    走横排那一支」——后者能跑，但它恰恰说明**旋转本来就不是一种排列**。
+/// 2. **值域挤在同一个下拉里**。外观页那个控件面向所有用户，而旋转是极少数方案才用的；
+///    四个平铺选项既难选，也在暗示它们是同一类东西。
+/// 3. ★ **两根轴合成一根就切不开了**：蒙古文用户想在自己的方案里切横排/竖排时，
+///    `ime.toggle("layout")` 只能把方向整个换掉、连旋转一起丢。拆成两根轴之后，
+///    切换只动 `vertical`，`text_orientation` 是方案属性，纹丝不动。
+///
+/// # ⚠️ 竖排时不生效
+///
+/// 键名里的「横排时」是字面意思：`vertical = true` 时本轴一律按 `Normal` 处理
+/// （竖排再转 90° 就是横排，没有第二种解释）。归一化只在
+/// [`Orientation::normalized`] 一处做。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextOrientation {
+    /// 文字水平（出厂）。
+    #[default]
+    Normal,
+    /// 整项顺时针旋转 90°。
+    Rotated,
+    /// 整项旋转，但每个字逆时针扶正、逐字下行（对联式）。
+    ///
+    /// ⚠️ 它按**字**切单元，故会切断连写脚本（阿拉伯文、蒙古文）的字形连接；
+    /// 那些脚本要的是 [`Self::Rotated`]。本项是给汉字这类等宽独立字形用的。
+    Upright,
+}
+
+impl TextOrientation {
+    /// 配置里的字符串取值；未知值回落 `Normal`（配置文件是用户手写的，不 panic）。
+    pub fn from_str_or_normal(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("rotated") {
+            Self::Rotated
+        } else if s.eq_ignore_ascii_case("upright") {
+            Self::Upright
+        } else {
+            Self::Normal
+        }
+    }
+
+    /// 回写用字符串。与 [`Self::from_str_or_normal`] round-trip。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Rotated => "rotated",
+            Self::Upright => "upright",
+        }
+    }
+
+    /// 供设置页/文档枚举与测试穷举。
+    pub const ALL: &'static [TextOrientation] = &[Self::Normal, Self::Rotated, Self::Upright];
+}
+
+/// 候选呈现方向：竖排位 + 横排时的文字排列方式。
+///
+/// # 两根轴，且**真的正交**
+///
+/// `vertical` 是用户随时可切的呈现偏好（外观页、命令栏 `ime.toggle("layout")`、模式级覆盖）；
+/// `text` 是方案声明的「这套文字怎么写」（`[candidate] text_orientation`）。
+/// 切前者不动后者——这正是拆成两根轴的主要收益，见 [`TextOrientation`] 的第 3 条理由。
+///
+/// 唯一的耦合是**竖排时 `text` 不生效**（竖排再转 90° 就是横排）。归一化只在
+/// [`Self::normalized`] 一处做，读侧一律通过 [`Self::rotated`] / [`Self::upright`] 取值，
+/// 不要自己判 `!vertical && text != Normal`——那等于把归一化复制到第二处。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Orientation {
+    /// 候选纵向堆叠（屏幕空间）。
+    pub vertical: bool,
+    /// 横排时文字的排列方式。竖排时无意义，见 [`Self::normalized`]。
+    pub text: TextOrientation,
+}
+
+impl Orientation {
+    pub const HORIZONTAL: Self = Self {
+        vertical: false,
+        text: TextOrientation::Normal,
+    };
+    pub const VERTICAL: Self = Self {
+        vertical: true,
+        text: TextOrientation::Normal,
+    };
+    /// 横排 + 整项旋转 90°。
+    pub const ROTATED: Self = Self {
+        vertical: false,
+        text: TextOrientation::Rotated,
+    };
+    /// 横排 + 文字直立的竖排（对联式）。
+    pub const UPRIGHT: Self = Self {
+        vertical: false,
+        text: TextOrientation::Upright,
+    };
+
+    /// 竖排时把文字排列归零。**下发 UI 前必须过一次**——渲染端的
+    /// `list_vertical` 同时看两位，`vertical && rotated` 会让列表既按竖排堆叠又被转 90°。
+    pub fn normalized(self) -> Self {
+        if self.vertical { Self::VERTICAL } else { self }
+    }
+
+    /// 渲染端要的「整个列表转 90°」位。竖排时恒 false。
+    pub fn rotated(self) -> bool {
+        !self.vertical && self.text != TextOrientation::Normal
+    }
+
+    /// 渲染端要的「每个字扶正」位。蕴含 [`Self::rotated`]。
+    pub fn upright(self) -> bool {
+        !self.vertical && self.text == TextOrientation::Upright
+    }
+
+    /// 解析 `ui.candidate.layout`；未知值按横排（出厂行为）。
+    ///
+    /// ⚠️ 本函数**只认横竖两个值**。旋转/直立不从这个键来——它们是方案属性，
+    /// 混进来会让 `ime.toggle("layout")` 的写回把方案意图覆盖掉。
+    pub fn from_layout_str(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("vertical") {
+            Self::VERTICAL
+        } else {
+            Self::HORIZONTAL
+        }
+    }
+
+    /// 回写 `ui.candidate.layout` 用的字符串——**只反映 `vertical`**。
+    ///
+    /// ★ 于是 `ime.toggle("layout")` 写盘时不会碰到方案声明的文字排列：
+    /// 蒙古文用户切一次横竖，回来还是旋转态。
+    pub fn layout_str(self) -> &'static str {
+        if self.vertical {
+            "vertical"
+        } else {
+            "horizontal"
+        }
+    }
 }
 
 /// 模式级注释模板覆盖（三态）。见 `crate::comment::template_for` 的决策点说明。
@@ -3975,6 +4128,38 @@ pub struct UiFontConfig {
     pub path: String,
     #[serde(default)]
     pub render_mode: String,
+    /// 主字体的**回退链**：`family` 里没有这个字时，按本表顺序找下一个。
+    ///
+    /// ★ 刻意保持 `family: String` 不变、把链尾单独放一个数组，而不是把 `family` 改成数组：
+    /// 改类型要配一层 Value 迁移，漏了就让老用户整份配置静默回落出厂值
+    /// （见 `docs/design/config-design-rules.md` 与该坑的历史）。分成两个键则**零迁移**，
+    /// 设置页现有的字体控件也不用动。最终链 = `[family] + fallback`。
+    ///
+    /// ⛔ **不得加 `skip_serializing_if`**：本仓用它表达「这个键**退出**配置体系」
+    /// （见 `keys.key_actions_materialized` 与本文件里那几个废弃键）。加上之后
+    /// `Config::default()` 的序列化产物里没有它 ⇒ `registry_covers_every_config_key`
+    /// 的差集为空 ⇒ **守门测试静默放行**，而该键在 CLI、配置片段导入、设置页里全都够不着。
+    #[serde(default)]
+    pub fallback: Vec<String>,
+    /// 按**脚本**指派字体：键是脚本类名（`latin`/`greek`/`cyrillic`/`cjk`/`emoji`/
+    /// `digits`/`punct`），值是该类自己的字体链。
+    ///
+    /// 与 [`Self::fallback`] 是两种机制，缺一不可：回退链只在「当前字体缺这个字」时触发，
+    /// 而绝大多数字体都带 ASCII 字形——蒙古文字体自己「有」英文时，回退链永远不触发，
+    /// 想换也换不掉。指派则是无条件的。
+    ///
+    /// ⚠️ 未列出的类**不是**「用默认字体」而是「不单独切段」——它们与其余文字同属默认链。
+    /// 两者结果相同但成本不同：不切段就不会为它们各调一次 `SetFontFamilyName`。
+    ///
+    /// 用 `BTreeMap` 而非 `HashMap`：序列化顺序要稳定，否则每次写盘键序都在变，
+    /// 配置文件的 diff 会无端变脏。
+    ///
+    /// 注册表里登记为 `Map`（见 `config_schema`）：Map 型键**本身就是叶子**，不下钻，
+    /// 于是 `latin`/`cjk` 这些是**数据**而不是配置项；顺带拿到 patch 的逐条合并语义
+    /// ——配置片段只加一类指派时不会整表替换掉用户已有的。
+    /// ⛔ 同样不得加 `skip_serializing_if`，理由见 [`Self::fallback`]。
+    #[serde(default)]
+    pub scripts: BTreeMap<String, Vec<String>>,
 }
 
 /// 主题配置（[ui.theme]）

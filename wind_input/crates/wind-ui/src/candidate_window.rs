@@ -19,8 +19,52 @@ use crate::sys::{
     WM_RBUTTONDOWN, WM_SETCURSOR, WPARAM, clamp_content_to_monitor,
 };
 use crate::text::dwrite::{TextRenderer, TextStyle};
+use crate::text::script::{FontPlan, ScriptClass};
 use crate::view::{Align, Edges, Layout, LeftBar, Rect, View, ViewImage, ViewLayer};
 use wind_theme::DEFAULT_ACCENT_BAR_HEIGHT_RATIO;
+
+/// 内置默认字族：`ui.font.family` 为空时用它。
+///
+/// 它同时是 `TextRenderer::new` 的初始字族与回退链的链首，**必须只有一个来源**——
+/// 两处写死同一个字符串，改一处漏一处时的表现是「链首与实际 base family 对不上」，
+/// 而那只会让回退链静默不生效，不报任何错。
+pub const DEFAULT_FONT_FAMILY: &str = "Microsoft YaHei UI";
+
+/// 空字族回落内置默认。
+///
+/// ★ 抽成函数是因为 [`build_font_plan`] 必须用同一个答案：两处各写一次
+/// `if empty { … }` 的话，回退链的链首会变成空串，而 `AddMapping` 的 `baseFamilyName`
+/// 是空串就永远匹配不上任何段——表现是「配了 fallback，但只在显式写了 family 时才生效」，
+/// 且没有任何报错。
+fn resolve_font_family(family: &str) -> &str {
+    let f = family.trim();
+    if f.is_empty() { DEFAULT_FONT_FAMILY } else { f }
+}
+
+/// 把 `[ui.font]` 的三个键折成渲染层的 [`FontPlan`]。
+///
+/// 纯函数：它承载了本功能全部的「配置怎么变成方案」的判定（链首归一、未知类名处置），
+/// 而这些判定与窗口/COM 都无关，抽出来才测得到（构造 `CandidateWindow` 要真窗口）。
+///
+/// 未知的脚本类名记一条 warn 后**忽略**：配置文件是用户手写的，拼错一个键不该让整份
+/// 字体配置失效，更不该 panic。
+pub(crate) fn build_font_plan(
+    family: &str,
+    fallback: &[String],
+    scripts: &[(String, Vec<String>)],
+) -> FontPlan {
+    let default_chain: Vec<String> = std::iter::once(resolve_font_family(family).to_string())
+        .chain(fallback.iter().cloned())
+        .collect();
+    let mut assigned: Vec<(ScriptClass, Vec<String>)> = Vec::new();
+    for (key, chain) in scripts {
+        match ScriptClass::from_key(key) {
+            Some(c) => assigned.push((c, chain.clone())),
+            None => tracing::warn!("ui.font.scripts 里的未知脚本类名「{key}」已忽略"),
+        }
+    }
+    FontPlan::new(default_chain, assigned)
+}
 
 /// 换行可见符 U+21B5（`↵`）。取编辑器通用约定（VS Code 等显示换行即此符），
 /// 而非 Control Pictures 区的 `␊`/`␤`——后者字形是小方框里塞 `LF` 字母，
@@ -217,6 +261,25 @@ pub struct CandidateWindow {
     scale: f32,
     /// 竖排布局（候选纵向堆叠）；默认横排。来自 ui.candidate.layout。
     vertical: bool,
+    /// 候选**文字节点**的字族覆盖（方案级 `[candidate] font_family`）；空 = 不覆盖。
+    ///
+    /// 优先级：方案 > 主题节点 `views.text.font_family` > 全局 `ui.font`。
+    /// ⚠️ 只作用于候选文字：序号/编码栏/注释/翻页栏是拉丁与数字，跟着换蒙文字体反而更差；
+    /// 要按脚本换字体用全局 `ui.font.scripts`（按字符分，比按节点分更贴合真实问题）。
+    text_family_override: String,
+    /// 候选列表顺时针旋转 90° 呈现（蒙古文等纵向书写脚本）。来自 ui.candidate.layout。
+    ///
+    /// ★ 旋转态下 [`Self::vertical`] 是 **false**——屏幕上候选确是并列的，于是所有按方向
+    /// 分叉的既有判据（窗口尺寸下限、注释模板、`flip_when_above`）自动走横排那一支。
+    /// 唯一额外判 `rotated` 的地方是**列表怎么构造**：局部空间里它按竖排堆叠，
+    /// 转完才成为并列的列（见 `build_tree` 的 `list_vertical`）。
+    rotated: bool,
+    /// 旋转态下把每个字逆时针扶正、逐字下行（对联式竖排）。来自 ui.candidate.layout。
+    ///
+    /// ★ 蕴含 [`Self::rotated`]：它与旋转态是**同一种排列**，只有叶子怎么搭不同。
+    /// 于是列表构造、逆序、阴影轴、尺寸下限、分隔方向、翻页栏位置全部原样复用，
+    /// 本位只在 `build_tree` 拼文字/序号叶子时读一次。
+    upright: bool,
     /// 预编辑嵌入模式（编码嵌入候选行首，不显示独立 preedit 条）。
     /// 来自 ui.candidate.preedit_display == "candidate_inline"。
     preedit_embedded: bool,
@@ -260,7 +323,7 @@ pub struct CandidateWindow {
 impl CandidateWindow {
     pub fn new(config: CandidateWindowConfig, events: Sender<UiEvent>) -> Result<Self, String> {
         let window = LayeredWindow::create(None, 400, 200, "WindInputCandidate")?;
-        let text_renderer = TextRenderer::new("Microsoft YaHei UI", config.font_size)?;
+        let text_renderer = TextRenderer::new(DEFAULT_FONT_FAMILY, config.font_size)?;
         let tooltip_events = events.clone();
         let self_events = events.clone();
         let mouse = Rc::new(RefCell::new(CandidateMouse {
@@ -304,6 +367,9 @@ impl CandidateWindow {
             theme: wind_theme::Resolved::default(),
             scale: CandidateWindowConfig::get_dpi_scale(),
             vertical: false,
+            rotated: false,
+            upright: false,
+            text_family_override: String::new(),
             preedit_embedded: false,
             font_size_override: 0.0,
             flip_when_above: false,
@@ -323,10 +389,23 @@ impl CandidateWindow {
         })
     }
 
-    /// 应用主题（协调器下发）。同步更新悬停 tooltip 配色。
-    /// 设置候选布局方向（true=竖排）。
-    pub fn set_vertical(&mut self, vertical: bool) {
+    /// 设置候选文字的字族覆盖（方案级 `[candidate] font_family`）；空串 = 取消覆盖。
+    /// 语义与优先级见 [`Self::text_family_override`]。
+    pub fn set_text_family_override(&mut self, family: &str) {
+        self.text_family_override = family.trim().to_string();
+    }
+
+    /// 设置候选布局方向。三位的语义见 [`Self::rotated`] / [`Self::upright`] 与
+    /// `UiCommand::SetCandidateLayout`。
+    ///
+    /// ⚠️ 三位并非正交，合法值只有四个；协调器只会发出其中之一，这里 debug 下断言两条
+    /// 非法组合，把「谁手写了字段」挡在开发期。
+    pub fn set_orientation(&mut self, vertical: bool, rotated: bool, upright: bool) {
+        debug_assert!(!(vertical && rotated), "vertical 与 rotated 不能同时为真");
+        debug_assert!(!(upright && !rotated), "upright 蕴含 rotated");
         self.vertical = vertical;
+        self.rotated = rotated;
+        self.upright = upright;
     }
 
     /// 设置预编辑嵌入模式（true=编码嵌入候选行首，不显示独立 preedit 条）。
@@ -418,6 +497,35 @@ impl CandidateWindow {
         Self::dp_to_px(FALLBACK_SAFETY_DP, self.scale)
     }
 
+    /// **局部排版横轴**在屏幕上对应那条边的可用长度（设备像素）。
+    ///
+    /// ★★ 旋转态下局部宽度 = 屏幕**高度**：候选文字沿屏幕纵向延伸，拿屏幕宽度当上限，
+    /// 长候选会长到屏幕外——而这道钳制恒生效，正是为了防这件事。
+    ///
+    /// 与 [`Self::screen_safety_max_width_px`] 分成两个函数而不是加个参数：那三个调用点钳的是
+    /// **窗口在屏幕上的宽度**（旋转态下同样是宽度，不该跟着翻），本函数给的是**文字预算的轴**。
+    /// 同名同参只会让下一个人在两种语义间随手挑一个。
+    fn local_text_extent_px(&self) -> u32 {
+        if !self.rotated {
+            return self.screen_safety_max_width_px();
+        }
+        #[cfg(windows)]
+        {
+            let (px, py) = match self.fixed_pos {
+                Some(f) if f != (0, 0) => f,
+                _ => (self.x, self.y),
+            };
+            if let Some(h) = crate::sys::monitor_work_area_height_at(px, py) {
+                return h;
+            }
+            tracing::warn!(
+                "local_text_extent_px: monitor query failed at ({px},{py}), 退化到兜底常量"
+            );
+        }
+        const FALLBACK_SAFETY_DP: u32 = 2000;
+        Self::dp_to_px(FALLBACK_SAFETY_DP, self.scale)
+    }
+
     /// dp（逻辑像素）→ 设备像素，0 原样返回（0 是「不限」而非「0 像素」）。
     fn dp_to_px(dp: u32, scale: f32) -> u32 {
         if dp == 0 {
@@ -456,6 +564,45 @@ impl CandidateWindow {
     ///
     /// ⚠️ `max_w <= 0`（预算被行内其它成员吃光）语义是**截到最短**（1 字 + …），不是「不截断」：
     /// 后者与预算耗尽的含义正好相反，会把溢出放大而非收敛。
+    /// 候选文字的截断。直立态与其余形态**量的不是同一根轴**，故单开一层分派。
+    ///
+    /// ★ 直立态每个字是一格逆时针扶正的单元，它沿排布方向占的是**字的高度**（行高），
+    /// 不是字的前进宽度。直接复用 [`Self::truncate_text_for_width`] 会按横向宽度估容量：
+    /// 汉字两者接近（差 ~20%），拉丁差 2 倍以上（前进宽 ~0.5em、行高 ~1.2em）——
+    /// 表现是「英文候选在对联模式下戳出屏幕外」，而中文候选看着完全正常。
+    ///
+    /// ⚠️ 不能把判据塞进 [`Self::truncate_text_for_width`] 本身：编码栏与模式徽标也调它，
+    /// 而它们**没有**被切成格，量的仍是横向宽度。
+    fn truncate_candidate_text(&self, text: &str, style: &TextStyle, max_w: f32) -> String {
+        if !self.upright {
+            return self.truncate_text_for_width(text, style, max_w);
+        }
+        let cells = crate::text::script::upright_cells(text);
+        if cells.is_empty() {
+            return String::new();
+        }
+        // 逐格量高度而不是「格数 × 行高」：回退字体的 line metrics 不同，行高会随内容变，
+        // 而这里必须与 View 实际排出来的一致（预算按一种算、排版按另一种走 = 溢出）。
+        let extent = |cs: &[&str]| -> f32 {
+            cs.iter()
+                .map(|c| self.text_renderer.measure(c, style).height)
+                .sum()
+        };
+        const EXTENT_EPS: f32 = 0.5; // 与 truncate_text_for_width 的半像素容差同源
+        if max_w > 0.0 && extent(&cells) <= max_w + EXTENT_EPS {
+            return text.to_string();
+        }
+        // 放不下：末格换成省略号，从长到短找第一个装得下的。至少留一格，否则什么都看不见。
+        let ell_h = self.text_renderer.measure("…", style).height;
+        let mut keep = cells.len().saturating_sub(1);
+        while keep > 1 && (max_w <= 0.0 || extent(&cells[..keep]) + ell_h > max_w + EXTENT_EPS) {
+            keep -= 1;
+        }
+        let mut out: String = cells[..keep.max(1)].concat();
+        out.push('…');
+        out
+    }
+
     fn truncate_text_for_width(&self, text: &str, style: &TextStyle, max_w: f32) -> String {
         if text.is_empty() {
             return String::new();
@@ -518,14 +665,24 @@ impl CandidateWindow {
         out
     }
 
-    /// 设置候选字体族（来自 ui.font.family；空=默认 Microsoft YaHei UI）。
+    /// 设置候选字体族（来自 ui.font.family；空=默认 [`DEFAULT_FONT_FAMILY`]）。
     pub fn set_font_family(&mut self, family: &str) {
-        let f = if family.trim().is_empty() {
-            "Microsoft YaHei UI"
-        } else {
-            family
-        };
-        self.text_renderer.set_font_family(f);
+        self.text_renderer
+            .set_font_family(resolve_font_family(family));
+    }
+
+    /// 设置候选字体的回退链与按脚本的字体指派（来自 `ui.font.fallback` / `ui.font.scripts`）。
+    ///
+    /// `family` 必须与最近一次 [`Self::set_font_family`] 同源——它是默认链的链首。
+    /// 二者由同一条 `UiCommand::SetCandidateFont` 携带，故不存在到达顺序问题。
+    pub fn set_font_plan(
+        &mut self,
+        family: &str,
+        fallback: &[String],
+        scripts: &[(String, Vec<String>)],
+    ) {
+        self.text_renderer
+            .set_font_plan(build_font_plan(family, fallback, scripts));
     }
 
     /// 设置"上方时反转候选顺序"。来自 ui.candidate.flip_when_above。
@@ -711,6 +868,7 @@ impl CandidateWindow {
         }
     }
 
+    /// 应用主题（协调器下发）。同步更新悬停 tooltip 配色。
     pub fn set_theme(&mut self, theme: wind_theme::Resolved) {
         if let Some(tip) = self.tooltip.as_mut() {
             tip.set_theme(&theme);
@@ -1344,7 +1502,9 @@ impl CandidateWindow {
         if let Some(tip) = self.tooltip.as_mut() {
             match info {
                 Some((code, r)) => {
-                    if self.vertical {
+                    // 旋转态一并走「侧边」：它的候选项是又高又窄的一列，
+                    // 按横排的「上方/下方」放会离得很远。
+                    if self.vertical || self.rotated {
                         // 竖排：以悬停候选项自身宽度为锚点（hit rect 已含阴影偏移，wx+r.x 即屏幕坐标）。
                         // tooltip 显示在候选项右侧，空间不足时改左侧，不遮挡下方候选。
                         tip.show_beside(
@@ -1397,7 +1557,9 @@ impl CandidateWindow {
         let tip = self.tooltip.as_mut()?;
         match info {
             Some((code, r)) => {
-                if self.vertical {
+                // 与上面 `update_tooltip` 那处同判据，两处必须一起改：一处走侧边、
+                // 一处走上下的话，同一个悬停在「实时显示」与「重推帧」之间会跳位置。
+                if self.vertical || self.rotated {
                     tip.render_frame_beside(
                         &code,
                         wx + r.x as i32,
@@ -1746,7 +1908,55 @@ impl CandidateWindow {
     /// 号，不影响 `self.preedit`/`self.preedit_caret` 本身。`caret_at` 自身会把插入符位置钳到
     /// 截断后字符串的合法边界内（见 `View::caret_at`），故截断字符串后原样传入光标位置即可，
     /// 不需要额外调整。
-    fn preedit_view(&self, fs: f32, max_w: f32) -> View {
+    /// 直立态：把一段文本拆成**逐格扶正**的单元；其余形态原样返回一个叶子。
+    ///
+    /// # 为什么注释、模式徽标、内联编码也要走它
+    ///
+    /// 旋转态是「**一切**都转」，自洽；直立态里若只有候选文字扶正、注释仍躺着，
+    /// 同一列里就出现了两种阅读方向——真机反馈的原话是「看不懂」。
+    /// ⇒ **凡是落在旋转包裹层内部的文本节点，一律逐格扶正**，拉丁也不例外。
+    ///
+    /// 唯一例外是序号：它整块扶正（「10」横着读，日文排版称 tate-chu-yoko）。
+    /// 单位数下两种做法完全相同，多位数下横读才是纵排里数字的常规排法。
+    ///
+    /// ⚠️ 独立编码栏（非内联）**不**走它：那一栏在旋转包裹层**外面**，本就没转过。
+    ///
+    /// `leaf(片段, 该片段内的 caret 字节位)` 由调用方构造——各处的字号/字重/字族/颜色
+    /// 都不同，把它们全收成参数会得到一个七参数函数。
+    fn upright_text(
+        &self,
+        text: &str,
+        caret: Option<usize>,
+        leaf: impl Fn(&str, Option<usize>) -> View,
+    ) -> View {
+        let cells = if self.upright {
+            crate::text::script::upright_cells(text)
+        } else {
+            Vec::new()
+        };
+        if cells.is_empty() {
+            return leaf(text, caret);
+        }
+        // 局部空间里是个 Row（左→右），经外层顺时针转完才是屏幕上的一列（上→下）。
+        // 跨轴居中让宽窄不一的格（半角/全角混排）在列内对齐。
+        let mut row = View::container(Layout::Row).cross(Align::Center);
+        let mut off = 0usize;
+        let last = cells.len() - 1;
+        for (i, cell) in cells.iter().enumerate() {
+            let end = off + cell.len();
+            // caret 归它落进的那一格；落在整串末尾时归最后一格，否则末尾的插入符没处画。
+            let local = caret
+                .filter(|c| *c >= off && (*c < end || i == last))
+                .map(|c| c - off);
+            row = row.child(View::rotated_ccw(leaf(cell, local)));
+            off = end;
+        }
+        row
+    }
+
+    /// `upright` = 本节点落在旋转包裹层内部（内联编码），需要逐格扶正。
+    /// 独立编码栏传 `false`：它在包裹层外面，本就没转过。
+    fn preedit_view(&self, fs: f32, max_w: f32, upright: bool) -> View {
         let v = &self.theme.views;
         let display = self.truncate_text_for_width(
             &self.preedit,
@@ -1757,15 +1967,28 @@ impl CandidateWindow {
             ),
             max_w,
         );
-        View::leaf(
-            display,
-            v.preedit_bar.text_color.unwrap_or([100, 100, 100, 255]),
-        )
-        .font_size(fs)
-        .font_weight(v.preedit_bar.font_weight)
-        .font_family(v.preedit_bar.font_family.clone())
-        // 竖线宽度随 DPI 缩放，但至少 1px（否则高分屏下会消失）。
-        .caret_at(self.preedit_caret, self.scale.max(1.0))
+        let color = v.preedit_bar.text_color.unwrap_or([100, 100, 100, 255]);
+        let weight = v.preedit_bar.font_weight;
+        let family = v.preedit_bar.font_family.clone();
+        let caret_w = self.scale.max(1.0);
+        // 直立态逐格切时 caret 由 `upright_text` 分派到它落进的那一格；转完是格间的一条
+        // **横**线，正是纵排里插入符该有的样子。整块不切时行为与此前逐字节一致。
+        let build = |seg: &str, caret: Option<usize>| {
+            let mut leaf = View::leaf(seg.to_string(), color)
+                .font_size(fs)
+                .font_weight(weight)
+                .font_family(family.clone());
+            if let Some(c) = caret {
+                // 竖线宽度随 DPI 缩放，但至少 1px（否则高分屏下会消失）。
+                leaf = leaf.caret_at(c, caret_w);
+            }
+            leaf
+        };
+        if upright {
+            self.upright_text(&display, Some(self.preedit_caret), build)
+        } else {
+            build(&display, Some(self.preedit_caret))
+        }
     }
 
     fn build_tree(&self, above: bool) -> View {
@@ -1773,6 +1996,17 @@ impl CandidateWindow {
         use wind_theme::schema::Dim;
         let t = &self.theme;
         let v = &t.views;
+        // 候选文字的字族：**方案级覆盖优先于主题节点**，空 = 不覆盖。
+        //
+        // ★ 只算一次、四个消费点（两处测量 + 候选叶子 + 占位行叶子）共用同一个值。
+        // 各自去取的话必然漂移，而漂移的两种表现都不报错：测量与渲染不同源 ⇒ 预算按一种
+        // 字体算、排版按另一种走，窗口右侧留白或右缘溢出；占位行漏掉 ⇒ 它与真实行行高不等
+        // （本文件下方 `padded_rows_equal_real_rows_in_height` 已为同一件事钉过一次）。
+        let text_family: Option<String> = if self.text_family_override.trim().is_empty() {
+            v.text.font_family.clone()
+        } else {
+            Some(self.text_family_override.clone())
+        };
         // above=true（窗口被上翻到光标上方）时，据两个正交开关派生上方专属行为：
         //   flip_cands = 反转候选项排列顺序（ui.candidate.flip_when_above，仅竖排有意义）
         //   swap_bands = 交换编码区↔候选区上下位置（ui.candidate.swap_preedit_when_above，编码沉底贴光标）
@@ -1830,18 +2064,30 @@ impl CandidateWindow {
         // `draw_text` 的直角缓冲区裁剪一路画到窗口右缘，把圆角盖掉（见
         // project_candidate_screen_safety_width 记忆里的真机实测记录）。
         let content_budget_px: f32 = {
-            let (ml, _, mr, _) = match self.shadow_params() {
+            let (ml, mt, mr, mb) = match self.shadow_params() {
                 Some(sh) => sh.margins(),
                 None => (0, 0, 0, 0),
             };
-            let mut bound = self.screen_safety_max_width_px().saturating_sub(ml + mr);
+            // ⚠️ 这里要的是**局部排版横轴**的上限，旋转态下它是屏幕高度（见函数文档），
+            // 于是要扣的阴影扩边也跟着换成上下两边——扣 ml+mr 是拿另一条轴的量在减。
+            let shadow_along_axis = if self.rotated { mt + mb } else { ml + mr };
+            let mut bound = self
+                .local_text_extent_px()
+                .saturating_sub(shadow_along_axis);
             if self.vertical && !self.candidates.is_empty() {
                 let vmax = t.behavior.vertical_max_width;
                 if vmax > 0 {
                     bound = bound.min(Self::dp_to_px(vmax as u32, s).max(40));
                 }
             }
-            bound.max(self.min_window_w_px()) as f32
+            // 下限也要同轴：旋转态的局部横轴在屏幕上是高度，取宽度下限等于拿另一条轴的
+            // 数当地板——竖屏（工作区高 > 宽）上会把预算抬到超过实际可用长度。
+            let floor = if self.rotated {
+                self.min_window_h_px()
+            } else {
+                self.min_window_w_px()
+            };
+            bound.max(floor) as f32
         };
         let preedit_pad = edges_or(&v.preedit_bar.padding, [3.0, 8.0, 3.0, 8.0]);
         // 文字宽度下限：预算被行内其它成员吃光时每个文字节点仍保底这么宽，避免退化成
@@ -1851,6 +2097,11 @@ impl CandidateWindow {
         // 自成一行，不与候选抢宽度，故只需扣窗口内边距与自身内边距。
         // 内联编码（`preedit_embedded`）走的是另一条路——它在候选行里，预算由下方的统一分配
         // （横排 water-filling）给出。
+        //
+        // ⚠️ 旋转态下 `content_budget_px` 量的是**局部横轴**（屏幕高度），而独立编码栏在旋转
+        // 包裹**之外**、量的是屏幕宽度——这里是两条轴混用。竖屏上长 preedit 会拿到超过屏幕
+        // 宽度的预算而不被截断（窗口本身仍被渲染期的宽度钳制夹住，夹不到文字）。
+        // 已知边界，蒙文用户是横屏，暂不为它再分一条轴。
         let preedit_bar_text_budget_px =
             (content_budget_px - window_pad.l - window_pad.r - preedit_pad.l - preedit_pad.r)
                 .max(min_text_w);
@@ -2038,7 +2289,8 @@ impl CandidateWindow {
                 ))
                 .pad(preedit_pad)
                 .margin(edges_or(&v.preedit_bar.margin, [0.0; 4]))
-                .child(self.preedit_view(preedit_fs, preedit_bar_text_budget_px));
+                // 独立编码栏在旋转包裹层**外面**，永远不扶正。
+                .child(self.preedit_view(preedit_fs, preedit_bar_text_budget_px, false));
             if let Some(vi) = self.rv_image(v.preedit_bar.bg_image.as_ref()) {
                 band = band.bg_image(vi);
             }
@@ -2135,7 +2387,10 @@ impl CandidateWindow {
         // 无候选时（仅提示徽标/preedit，无候选可纵向堆叠）强制用 Row：徽标 + 等高占位
         // 并排成单行，高度 = 一个候选行，与横排一致；否则竖排下徽标行与占位行会纵向
         // 堆叠致提示窗口过高（网址/临拼/临英刚进入时尤甚）。preedit/徽标分隔方向亦随之。
-        let list_vertical = self.vertical && !self.candidates.is_empty();
+        // ★ 旋转态也走竖排这一支：它在**局部未旋转空间**里就是候选纵向堆叠，转 90° 后
+        // 才成为并列的列。于是行距、宽度预算、文字截断、分隔方向全部沿用竖排的既有实现，
+        // 一行都不用改——这正是把旋转做成「两位」而不是「第四种排列」的收益所在。
+        let list_vertical = (self.vertical || self.rotated) && !self.candidates.is_empty();
         let list_pad = edges_or(&v.candidate_list.padding, [0.0; 4]);
         // candidate_list 此前只贡献 gap/row_gap/band_gap 三个间距，背景与边框从不接线，
         // 「候选区与编码栏用不同底色分区」这类设计表达不出来。装饰全 Option，未配零回归。
@@ -2164,8 +2419,14 @@ impl CandidateWindow {
         let text_pad = edges_or(&v.text.padding, [0.0; 4]);
         // 逆序仅改排列顺序；i 仍是原始索引（tag/标签/选中据此）。提前到此是因为下面的预扫
         // 要按最终顺序算每个候选的固定开销。
+        //
+        // ★ 旋转态**恒逆序**：局部列首经顺时针 90° 会落到屏幕最右，而蒙古文的列是从左向右
+        // 推进的（候选 1 要在最左）。逆序后局部列尾 = 屏幕最左，正是候选 1。
+        // 与 `flip_cands` 合成一个布尔，是为了让下面「占位行补在哪一端」自动跟着走——
+        // 两处各判一次的话，旋转态的占位列会补在候选 1 那一侧，把候选 1 推离窗口边缘。
+        let reversed = flip_cands || self.rotated;
         let mut order: Vec<(usize, &CandidateItem)> = self.candidates.iter().enumerate().collect();
-        if flip_cands {
+        if reversed {
             order.reverse();
         }
         // 每候选的「固定开销」（除文字外无条件占用的宽度）与「自然文字宽」。
@@ -2244,7 +2505,7 @@ impl CandidateWindow {
                         &Self::measure_style(
                             text_fs,
                             eff_weight(&v.text, &v.item, is_sel, is_hover),
-                            v.text.font_family.as_deref(),
+                            text_family.as_deref(),
                         ),
                     )
                     .width;
@@ -2387,7 +2648,8 @@ impl CandidateWindow {
                 }
             };
             let node = self
-                .preedit_view(preedit_fs, inline_preedit_budget_px)
+                // 内联编码是 list 的子节点 ⇒ 在旋转包裹层里，直立态要逐格扶正。
+                .preedit_view(preedit_fs, inline_preedit_budget_px, self.upright)
                 .margin(sep);
             if inline_preedit_bottom {
                 inline_tail.push(node);
@@ -2417,14 +2679,17 @@ impl CandidateWindow {
             };
             // 主题为 mode_label 配了底色或边框 → 渲染为小徽标（圆角 + 内边距）以更醒目。
             // 与横排内嵌通路共用 decorate_mode_chip，两处装配保持一致。
+            // 徽标同样逐格扶正（多为单字，与整块无差；「全称」档下才看得出来）。
+            let ml_color = col(v.mode_label.text_color, [120, 120, 128, 255]);
+            let ml_weight = v.mode_label.font_weight;
+            let ml_family = v.mode_label.font_family.clone();
             let chip = decorate_mode_chip(
-                View::leaf(
-                    self.mode_label.clone(),
-                    col(v.mode_label.text_color, [120, 120, 128, 255]),
-                )
-                .font_size(ml_fs)
-                .font_weight(v.mode_label.font_weight)
-                .font_family(v.mode_label.font_family.clone())
+                self.upright_text(&self.mode_label, None, |seg, _| {
+                    View::leaf(seg.to_string(), ml_color)
+                        .font_size(ml_fs)
+                        .font_weight(ml_weight)
+                        .font_family(ml_family.clone())
+                })
                 .margin(sep),
             );
             if inline_preedit_bottom {
@@ -2485,14 +2750,14 @@ impl CandidateWindow {
                 View::leaf(" ".to_string(), [0, 0, 0, 0])
                     .font_size(text_fs)
                     .font_weight(eff_weight(&v.text, &v.item, false, false))
-                    .font_family(v.text.font_family.clone())
+                    .font_family(text_family.clone())
                     .pad(edges_or(&v.text.padding, [0.0; 4]))
                     .margin(edges_or(&v.text.margin, [0.0, 0.0, 0.0, 4.0])),
             )
         };
         // 反转排列时占位行补在**顶部**：窗口上翻后底边贴光标、候选 1 在最下，空行若压在
         // 候选 1 下面会把它顶离光标，候选 1 的位置反而随候选数抖动——正是本功能要消除的。
-        if flip_cands {
+        if reversed {
             for _ in 0..pad_rows {
                 list = list.child(placeholder_row());
             }
@@ -2546,7 +2811,14 @@ impl CandidateWindow {
                 if let Some((bc, bw, br)) = eff_border(&v.index, is_sel, is_hover) {
                     idx_leaf = idx_leaf.border(bc, bw).radius(br);
                 }
-                item = item.child(idx_leaf);
+                // 直立态：序号**整块**扶正，不逐字切——「10」于是横着读、位于列首，
+                // 正是纵排里数字的常规排法（日文排版称 tate-chu-yoko）。
+                // 逐字切会把它排成竖着的 1、0，看着像两个候选。
+                item = item.child(if self.upright {
+                    View::rotated_ccw(idx_leaf)
+                } else {
+                    idx_leaf
+                });
             }
             // no_index 行无序号节点：文字左边距归零，顶格不留序号间距（消除占位）。
             let text_margin = if cand.no_index {
@@ -2555,19 +2827,25 @@ impl CandidateWindow {
                 edges_or(&v.text.margin, [0.0, 0.0, 0.0, 4.0])
             };
             // 文字预算来自上方的统一分配（竖排=整行独占，横排=water-filling 公平份额）。
-            let display_text = self.truncate_text_for_width(
+            let display_text = self.truncate_candidate_text(
                 &visible_whitespace(&cand.text),
                 &Self::measure_style(
                     text_fs,
                     eff_weight(&v.text, &v.item, is_sel, is_hover),
-                    v.text.font_family.as_deref(),
+                    text_family.as_deref(),
                 ),
                 cand_text_budgets.get(k).copied().unwrap_or(min_text_w),
             );
-            let mut tleaf = View::leaf(display_text, txt_color)
-                .font_size(text_fs)
-                .font_weight(eff_weight(&v.text, &v.item, is_sel, is_hover))
-                .font_family(v.text.font_family.clone())
+            let text_weight = eff_weight(&v.text, &v.item, is_sel, is_hover);
+            // 直立态逐格扶正（见 `upright_text`）。装饰（底色/边框/内外边距）留在**外层
+            // 容器**上，整段文字仍是一个整体，不会每个字各画一个药丸。
+            let mut tleaf = self
+                .upright_text(&display_text, None, |seg, _| {
+                    View::leaf(seg.to_string(), txt_color)
+                        .font_size(text_fs)
+                        .font_weight(text_weight)
+                        .font_family(text_family.clone())
+                })
                 .pad(text_pad)
                 .margin(text_margin);
             // 文字叶子的背景（底色/图/渐变）：此前只画边框，配了背景一律不生效，
@@ -2588,10 +2866,18 @@ impl CandidateWindow {
             // 注释（编码后缀/短语提示）：非空时在候选词右侧以注释样式内联显示。
             // 内/外边距完整消费：comment.padding 四边 + comment.margin 四边（左默认 6dp 兜底间距）。
             if !cand.comment.is_empty() {
-                let mut cleaf = View::leaf(cand.comment.clone(), cmt_color)
-                    .font_size(comment_fs)
-                    .font_weight(eff_weight(&v.comment, &v.item, is_sel, is_hover))
-                    .font_family(v.comment.font_family.clone())
+                // 直立态同样逐格扶正：只让候选文字立起来、注释仍躺着的话，同一列里会有
+                // 两种阅读方向。⚠️ 拉丁编码也照切——「英文横着读反而对」那条取舍已被真机
+                // 推翻（旋转态是一切都转、自洽；直立态混排看不懂）。
+                let cmt_weight = eff_weight(&v.comment, &v.item, is_sel, is_hover);
+                let cmt_family = v.comment.font_family.clone();
+                let mut cleaf = self
+                    .upright_text(&cand.comment, None, |seg, _| {
+                        View::leaf(seg.to_string(), cmt_color)
+                            .font_size(comment_fs)
+                            .font_weight(cmt_weight)
+                            .font_family(cmt_family.clone())
+                    })
                     .pad(edges_or(&v.comment.padding, [0.0; 4]))
                     .margin(edges_or(&v.comment.margin, [0.0, 0.0, 0.0, 6.0]));
                 // 注释叶子背景同 text（「注释气泡」样式）。
@@ -2659,7 +2945,7 @@ impl CandidateWindow {
             list = list.child(item);
         }
         // 正常顺序：占位行补在候选之后（窗口下方留白，候选 1 恒在顶部）。
-        if !flip_cands {
+        if !reversed {
             for _ in 0..pad_rows {
                 list = list.child(placeholder_row());
             }
@@ -2776,15 +3062,15 @@ impl CandidateWindow {
             if let (Some(band), Some(p)) = (preedit_band.take(), pager.take()) {
                 preedit_band = Some(band.child(p));
             }
-        } else if !self.vertical
-            && let Some(p) = pager.take()
-        {
+        } else if !list_vertical && let Some(p) = pager.take() {
             list = list.child(p);
         }
         // 竖排未并入的翻页栏：候选区独立行（与 list 同属候选区，随 swap 一起移动）。
         // 独立行按主题 behavior.pager_align（left/center/right，默认 center）水平对齐：包一层
         // fill_cross 的 Row 用 spacer 顶位。inline 情形已在编码栏内右对齐，不经此。
-        let vertical_bottom_pager = if self.vertical {
+        // ⚠️ 判据是 `list_vertical` 不是 `self.vertical`：旋转态的列表在局部空间里也是竖排，
+        // 翻页栏同样该独立成行（它加在 `root` 上、在旋转包裹之外，故屏幕上仍是横的一条）。
+        let vertical_bottom_pager = if list_vertical {
             pager.take().map(|p| {
                 let row = View::container(Layout::Row)
                     .fill_cross()
@@ -2797,6 +3083,22 @@ impl CandidateWindow {
             })
         } else {
             None
+        };
+
+        // 旋转包裹**只套候选列表**：编码栏、模式标记、翻页栏都留在屏幕坐标系里横着排
+        // （参考图里 "eho" 那一行就是横的）。包裹层是裸的，装饰全在 `list` 上跟着一起转。
+        //
+        // ⚠️ 上一句只对**独立**编码栏成立。`preedit_display = "candidate_inline"` 时编码是
+        // `list` 的子节点（见上方 `inline_tail`），会跟着转成竖的。出厂是 `app_inline`
+        // （编码由宿主自绘），故不是默认路径；蒙文用户若开了内联编码需要另行处理。
+        // ⚠️ 判据必须与 `list_vertical` 同源，**不能只判 `self.rotated`**：无候选时列表被
+        // 刻意退化成 Row（徽标 + 等高占位，见 `list_vertical` 上方注释），此时再套旋转
+        // 就会把「刚进临英/临拼、只有模式徽标」的那一帧转成又窄又高的一竖条、徽标横躺。
+        // 那一帧真会显示（`render_frame` 在 mode_label 非空时就显示窗口）。
+        let list = if list_vertical && self.rotated {
+            View::rotated_cw(list)
+        } else {
+            list
         };
 
         // 编码区（band + 分隔线）与候选区（list + 竖排底部翻页栏）按 swap_bands 决定上下顺序：
@@ -3235,7 +3537,7 @@ mod min_size_tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
         w.scale = 1.0;
-        w.set_vertical(vertical);
+        w.set_orientation(vertical, false, false);
         let (wh, wv) = if vertical { (0, w_dp) } else { (w_dp, 0) };
         let (hh, hv) = if vertical { (0, h_dp) } else { (h_dp, 0) };
         w.set_min_size(wh, wv, hh, hv, rows);
@@ -3496,7 +3798,7 @@ mod min_size_tests {
         let (tx1, _rx1) = std::sync::mpsc::channel();
         let mut v_win = CandidateWindow::new(CandidateWindowConfig::default(), tx1).unwrap();
         v_win.scale = 1.0;
-        v_win.set_vertical(true);
+        v_win.set_orientation(true, false, false);
         v_win.set_min_size(400, 0, 0, 0, 0);
         v_win.update("", 0, "", vec![cand("字")], 0, -1, 1, 1);
         let v_one = measured(&v_win).0;
@@ -3511,7 +3813,7 @@ mod min_size_tests {
         let (tx2, _rx2) = std::sync::mpsc::channel();
         let mut h_win = CandidateWindow::new(CandidateWindowConfig::default(), tx2).unwrap();
         h_win.scale = 1.0;
-        h_win.set_vertical(false);
+        h_win.set_orientation(false, false, false);
         h_win.set_min_size(0, 400, 0, 0, 0);
         h_win.update("", 0, "", vec![cand("字"), cand("词")], 0, -1, 1, 1);
         let h_one = measured(&h_win).0;
@@ -3619,7 +3921,7 @@ mod min_size_tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
         w.scale = 1.0;
-        w.set_vertical(true);
+        w.set_orientation(true, false, false);
         // 只配横排高度下限，竖排渲染时不得生效。
         w.set_min_size(0, 0, 400, 0, 0);
         w.update("", 0, "", vec![cand("字")], 0, -1, 1, 1);
@@ -3668,15 +3970,39 @@ mod width_budget_tests {
 
     /// 造一个候选窗并布局，返回 (窗口, 内容宽)。scale 钉 1.0 使 dp == 设备像素。
     fn build(vertical: bool, texts: &[&str]) -> (CandidateWindow, View) {
+        build_o(vertical, false, texts)
+    }
+
+    /// 同 [`build`]，可指定旋转位与直立位。
+    fn build_o(vertical: bool, rotated: bool, texts: &[&str]) -> (CandidateWindow, View) {
+        build_ou(vertical, rotated, false, texts)
+    }
+
+    /// 同 [`build_o`]，可指定「字直立」（对联式竖排）。
+    fn build_ou(
+        vertical: bool,
+        rotated: bool,
+        upright: bool,
+        texts: &[&str],
+    ) -> (CandidateWindow, View) {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
         w.scale = 1.0;
-        w.set_vertical(vertical);
+        w.set_orientation(vertical, rotated, upright);
         let items: Vec<CandidateItem> = texts.iter().map(|t| cand(t)).collect();
         w.update("", 0, "", items, 0, -1, 1, 1);
         let mut root = w.build_tree(false);
         root.layout(0.0, 0.0, &w.text_renderer);
         (w, root)
+    }
+
+    /// 取全部候选的命中矩形，按 tag 升序（tag = 原始候选下标）。
+    fn hits_by_tag(root: &View) -> Vec<Rect> {
+        let mut out = Vec::new();
+        root.collect_hits(&mut out);
+        out.retain(|(t, _)| *t >= 0);
+        out.sort_by_key(|(t, _)| *t);
+        out.into_iter().map(|(_, r)| r).collect()
     }
 
     /// ★★ 横排多候选：**整行**宽度不得超过屏幕安全上限——与候选个数无关。
@@ -3789,7 +4115,7 @@ mod width_budget_tests {
                 let (tx, _rx) = std::sync::mpsc::channel();
                 let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
                 w.scale = 2.0;
-                w.set_vertical(vertical);
+                w.set_orientation(vertical, false, false);
                 let items: Vec<CandidateItem> = texts.iter().map(|t| cand(t)).collect();
                 w.update("ceshipinyin", 0, "", items, 0, -1, 1, 1);
                 let cache0 = w.text_renderer.measure_cache_len();
@@ -3846,6 +4172,312 @@ mod width_budget_tests {
         println!(
             "  truncate_text_for_width(840字, 热): {:?}/次",
             t.elapsed() / n
+        );
+    }
+
+    // ───────────────────── 旋转态接线（A：候选项旋转 90°）─────────────────────
+
+    /// 旋转态的窗口尺寸相对**竖排**必须整个翻过来。
+    ///
+    /// ★ 对照必须选竖排而不是横排：竖排本身就是「窄而高」，拿横排比的话，
+    /// 一个「旋转位被当成竖排、根本没套旋转包裹」的实现照样通过——
+    /// 这正是本轮变异验证抓出来的第一条假绿。
+    #[test]
+    fn rotated_window_swaps_dimensions_against_vertical() {
+        let texts = ["候选一二三四五六", "候选一二三四五六", "候选一二三四五六"];
+        let (_, v_root) = build_o(true, false, &texts);
+        let (_, r_root) = build_o(false, true, &texts);
+        let (vw, vh) = v_root.measured_size();
+        let (rw, rh) = r_root.measured_size();
+        assert!(
+            rw < vw,
+            "旋转态的宽应远小于竖排（宽只由列数决定）: 旋转 {rw} vs 竖排 {vw}"
+        );
+        assert!(
+            rh > vh,
+            "旋转态的高应远大于竖排（文字长度落到高度上）: 旋转 {rh} vs 竖排 {vh}"
+        );
+    }
+
+    /// ★★ 候选 1 必须落在**最左**。
+    ///
+    /// 局部列首经顺时针 90° 会落到屏幕最右，故列表在局部空间里是**逆序**排的。
+    /// 少了那次逆序，候选顺序就整个左右颠倒——而画面看上去仍然「正常」，
+    /// 只有对着编号读才发现是反的。
+    #[test]
+    fn rotated_puts_candidate_one_leftmost() {
+        let (_, root) = build_o(false, true, &["甲", "乙", "丙"]);
+        let hits = hits_by_tag(&root);
+        assert_eq!(hits.len(), 3, "应收集到三个候选的命中矩形");
+        assert!(
+            hits[0].x < hits[1].x && hits[1].x < hits[2].x,
+            "候选应自左向右为 1、2、3，实测 x = {:?}",
+            hits.iter().map(|r| r.x).collect::<Vec<_>>()
+        );
+    }
+
+    // ─────────────── 直立态（B：文字竖排／对联式）───────────────
+
+    /// ★★ 直立态与旋转态的**唯一**几何差别：文字沿列前进的步长。
+    ///
+    /// 旋转态每个字占它的**前进宽度**，直立态每个字占它的**行高**。
+    /// 断言写成「加字带来的高度增量」而不是「总高」，是为了把内外边距、序号、
+    /// 固定开销全部约掉——那些两态完全一样，混在总高里会稀释掉真正的差异，
+    /// 真实字体下（行高只比汉字前进宽多两成）就可能淹没到测不出。
+    ///
+    /// 用拉丁文字放大差距：前进宽约 0.5em、行高约 1.2em，两倍以上。
+    #[test]
+    fn upright_advances_by_line_height_rotated_by_glyph_width() {
+        let step = |upright: bool| {
+            let (_, one) = build_ou(false, true, upright, &["a"]);
+            let (_, four) = build_ou(false, true, upright, &["aaaa"]);
+            one.measured_size();
+            four.measured_size().1 - one.measured_size().1
+        };
+        let (rot, upr) = (step(false), step(true));
+        assert!(rot > 0.0, "对照失效：旋转态加字也该变高，实测 {rot}");
+        assert!(
+            upr > rot * 1.5,
+            "直立态每字应按行高推进（远大于字宽）：直立 {upr} vs 旋转 {rot}"
+        );
+    }
+
+    /// 直立态与旋转态**同一种排列**：候选 1 同样在最左。
+    ///
+    /// 少了这条，一个「直立时忘了跟着逆序」的实现只会让候选左右颠倒——画面照样正常。
+    #[test]
+    fn upright_puts_candidate_one_leftmost() {
+        let (_, root) = build_ou(false, true, true, &["甲", "乙", "丙"]);
+        let hits = hits_by_tag(&root);
+        assert_eq!(hits.len(), 3, "应收集到三个候选的命中矩形");
+        assert!(
+            hits[0].x < hits[1].x && hits[1].x < hits[2].x,
+            "候选应自左向右为 1、2、3，实测 x = {:?}",
+            hits.iter().map(|r| r.x).collect::<Vec<_>>()
+        );
+    }
+
+    /// ★ 序号**整块**扶正，不逐格切：两位数的序号横着读，占的仍是一格的高度。
+    ///
+    /// 判据落在**列高**上：整块扶正时序号沿列只占一个行高，与位数无关；
+    /// 逐格切则两位数占两个行高，列会变高。宽度测不出来——两种实现下它都可能被
+    /// 别的节点顶住。
+    ///
+    /// 对照必不可少：同一批候选里**多一个字**必须让列变高，否则这条断言恒真。
+    #[test]
+    fn upright_index_is_one_block_not_stacked_digits() {
+        let build = |label: &str, text: &str| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+            w.scale = 1.0;
+            w.set_orientation(false, true, true);
+            let mut item = cand(text);
+            item.label = label.to_string();
+            w.update("", 0, "", vec![item], 0, -1, 1, 1);
+            let mut root = w.build_tree(false);
+            root.layout(0.0, 0.0, &w.text_renderer);
+            root.measured_size().1
+        };
+        let one = build("1", "字");
+        assert!(
+            (build("88", "字") - one).abs() < 0.5,
+            "两位序号让列变高了 ⇒ 序号被逐格竖着切了：{} vs {one}",
+            build("88", "字")
+        );
+        assert!(
+            build("1", "字字") > one + 0.5,
+            "对照失效：多一个字也没让列变高，本用例测不出东西"
+        );
+    }
+
+    /// ★★ 注释在直立态下也**逐格竖排**，拉丁编码不例外。
+    ///
+    /// 判据落在「加一段注释让列长了多少」上：旋转态注释躺着，每个拉丁字符只吃它的
+    /// 前进宽（约 0.5em）；直立态每格站着，吃一个行高（约 1.2em）。两者若增量相同，
+    /// 说明注释还躺着——而那正是真机反馈「看不懂」的成因：同一列里两种阅读方向。
+    ///
+    /// ⚠️ 断言写成**增量之比**而不是总高：内外边距、序号、固定开销两态完全一样，
+    /// 混在总高里会稀释掉真正的差异。同 `upright_advances_by_line_height…` 的写法。
+    #[test]
+    fn upright_stacks_the_comment_too() {
+        let col_h = |upright: bool, comment: &str| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+            w.scale = 1.0;
+            w.set_orientation(false, true, upright);
+            let mut item = cand("甲");
+            item.comment = comment.to_string();
+            w.update("", 0, "", vec![item], 0, -1, 1, 1);
+            let mut root = w.build_tree(false);
+            root.layout(0.0, 0.0, &w.text_renderer);
+            root.measured_size().1
+        };
+        let rot = col_h(false, "abcd") - col_h(false, "");
+        let upr = col_h(true, "abcd") - col_h(true, "");
+        assert!(rot > 0.0, "对照失效：旋转态加注释也该变长，实测 {rot}");
+        assert!(
+            upr > rot * 1.5,
+            "直立态的注释应按行高逐格推进：直立 {upr} vs 旋转 {rot}"
+        );
+    }
+
+    /// 模式徽标与内联编码同样在旋转包裹层里，直立态一并逐格扶正。
+    ///
+    /// ★ 这两处与注释共用同一个 `upright_text`，但仍各测一次：接线漏一处的表现只是
+    /// 「某一段还躺着」，画面正常、别的测试全绿。
+    ///
+    /// ⚠️ 判据落在**窗口高度**上，且要让被测那一段成为最长的一列（故用长串 + 短候选）：
+    /// 旋转态的列表在局部空间是 Column，往里加一个节点长的是局部**高度** ⇒ 屏幕**宽度**；
+    /// 只有该节点自身沿列的长度（局部宽度）才映射到屏幕高度。拿「加了它高度涨多少」当
+    /// 判据会恒为 0——本轮第一版正是这么写的，对照直接失效。
+    ///
+    /// 用拉丁串放大差距：前进宽约 0.5em、逐格站着约 1.2em，两倍以上；
+    /// 汉字两轴只差两成，测不出分辨力。
+    #[test]
+    fn upright_stacks_the_inline_preedit_and_mode_chip() {
+        const LONG: &str = "abcdefghijkl";
+        let h = |upright: bool, preedit: &str, label: &str| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+            w.scale = 1.0;
+            w.set_orientation(false, true, upright);
+            w.set_preedit_embedded(true);
+            w.update(preedit, preedit.len(), label, vec![cand("甲")], 0, -1, 1, 1);
+            let mut root = w.build_tree(false);
+            root.layout(0.0, 0.0, &w.text_renderer);
+            root.measured_size().1
+        };
+        let bare = h(false, "", "");
+        for (what, preedit, label) in [("内联编码", LONG, ""), ("模式徽标", "", LONG)] {
+            let rot = h(false, preedit, label);
+            let upr = h(true, preedit, label);
+            assert!(
+                rot > bare,
+                "{what} 对照失效：它没成为最长的一列，这条测不出东西（{rot} vs {bare}）"
+            );
+            assert!(
+                upr > rot * 1.8,
+                "{what} 没逐格扶正：直立 {upr} vs 旋转 {rot}"
+            );
+        }
+    }
+
+    /// ★ 截断量的是**沿列方向**的长度，不是文字的横向宽度。
+    ///
+    /// 同一个预算下，直立态能放的字必须比横向**少**——拉丁字母横向前进约 0.5em、
+    /// 竖着占一个行高约 1.2em。两者若一样多，说明截断还在按横向宽度估容量，
+    /// 表现是「英文候选在对联模式下戳出屏幕」，而中文候选看着完全正常
+    /// （汉字两轴只差两成，肉眼看不出来）。
+    #[test]
+    fn upright_truncation_measures_the_stacking_axis() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+        let style = TextStyle::new(20.0);
+        let text = "abcdefghij";
+        // 预算取「横向刚好放得下五个字母」，两态用同一个数。
+        let budget = w.text_renderer.measure("abcde", &style).width;
+
+        w.set_orientation(false, false, false);
+        let flat = w.truncate_candidate_text(text, &style, budget);
+        w.set_orientation(false, true, true);
+        let stacked = w.truncate_candidate_text(text, &style, budget);
+
+        assert!(
+            flat.chars().count() > stacked.chars().count(),
+            "直立态该放得更少：横向 {flat:?} vs 直立 {stacked:?}"
+        );
+        // 再紧的预算也至少留一个字 + 省略号，不能什么都不显示。
+        w.set_orientation(false, true, true);
+        assert_eq!(w.truncate_candidate_text(text, &style, 0.0), "a…");
+        assert_eq!(w.truncate_candidate_text("", &style, 0.0), "");
+    }
+
+    /// ★★ 旋转态走的是**竖排**的列表路径：每个候选在局部空间里独占一行、宽度统一
+    /// （高亮宽度一致），转完就是**等宽的列**。
+    ///
+    /// ⚠️ 断言落在**高度**上：局部宽度经顺时针 90° 变成屏幕高度。
+    /// 断言宽度是测不出来的——那对应局部**高度**（行高），无论走哪条路径都恒等，
+    /// 本轮变异验证抓出的第二条假绿正是这个。
+    ///
+    /// 反向对照不可少：同一批长短不一的候选在横排下宽度必须**互不相同**。
+    #[test]
+    fn rotated_uses_the_vertical_list_path() {
+        let texts = ["甲", "乙丙丁", "戊己庚辛壬"];
+        let (_, r_root) = build_o(false, true, &texts);
+        let r = hits_by_tag(&r_root);
+        assert!(
+            (r[0].h - r[1].h).abs() < 0.5 && (r[1].h - r[2].h).abs() < 0.5,
+            "旋转态各列应等高（＝竖排路径统一的高亮宽度转过来）: {:?}",
+            r.iter().map(|x| x.h).collect::<Vec<_>>()
+        );
+        let (_, h_root) = build_o(false, false, &texts);
+        let h = hits_by_tag(&h_root);
+        assert!(
+            (h[0].w - h[2].w).abs() > 0.5,
+            "横排下长短候选宽度应不同，否则本用例的对照失效: {:?}",
+            h.iter().map(|x| x.w).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// 方案级候选字体（`[candidate] font_family`）的接线。
+///
+/// ⚠️ **必须 gate 到 Windows**：断言的是「换了字族宽度就变」，而非 Windows 的 mock
+/// 后端明写「字重/字体族不影响等宽近似测量，只取字号」（`text/dwrite.rs` 的 mock `measure`）
+/// ⇒ Linux CI 上 `assert_ne!` 两边相等直接红，而本机 Windows 全绿看不见。
+/// 同组的 `assert_eq!` 那条在 Linux 上更糟——它**恒真**、是条假绿。
+/// 这正是本仓「test 跑 Linux、clippy 交叉编 Win」那条分工的典型踩法，
+/// 先例见 `text/dwrite.rs` 的 `font_plan_tests`。
+///
+/// 旋转那三条留在 `width_budget_tests` 里不动：它们只用几何、mock 下同样成立。
+#[cfg(all(test, windows))]
+mod schema_font_tests {
+    use super::*;
+
+    fn cand(text: &str) -> CandidateItem {
+        CandidateItem {
+            text: text.to_string(),
+            code: String::new(),
+            label: String::new(),
+            tooltip: String::new(),
+            comment: String::new(),
+            no_index: false,
+        }
+    }
+
+    /// 造窗并布局；`preedit` 为空时窗口宽度由候选决定。
+    fn build(family: &str, preedit: &str, texts: &[&str]) -> f32 {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+        w.scale = 1.0;
+        w.set_text_family_override(family);
+        let items: Vec<CandidateItem> = texts.iter().map(|t| cand(t)).collect();
+        w.update(preedit, 0, "", items, 0, -1, 1, 1);
+        let mut root = w.build_tree(false);
+        root.layout(0.0, 0.0, &w.text_renderer);
+        root.measured_size().0
+    }
+
+    /// ★ 覆盖真的作用到排版上；空串 = 不覆盖。
+    ///
+    /// 反向对照不可少：只断言「变了」的话，一个「无条件套用覆盖」的实现在空串下也会改字体。
+    #[test]
+    fn override_changes_layout_and_empty_means_no_override() {
+        let texts = ["illill", "候选"];
+        let base = build("", "", &texts);
+        let overridden = build("Consolas", "", &texts);
+        assert_ne!(base, overridden, "方案级字族没作用到排版上");
+    }
+
+    /// ★★ 覆盖只作用于**候选文字**：编码栏由 preedit 决定，宽度不得受影响。
+    #[test]
+    fn override_does_not_touch_the_preedit_bar() {
+        // 长编码 + 短候选：窗口宽度由编码栏决定。
+        let plain = build("", "iiiiiiiiiiiiiiii", &["一"]);
+        let overridden = build("Consolas", "iiiiiiiiiiiiiiii", &["一"]);
+        assert_eq!(
+            plain, overridden,
+            "编码栏宽度受方案级候选字族影响了——覆盖越界到了 text 之外的节点"
         );
     }
 }
@@ -4021,6 +4653,81 @@ mod water_fill_tests {
     #[test]
     fn empty_demands_yield_empty_result() {
         assert!(W::water_fill(&[], 100.0, 0.0).is_empty());
+    }
+}
+
+/// `[ui.font]` → [`FontPlan`] 的折叠规则。平台无关（不碰窗口/COM），故随 Linux CI 跑。
+#[cfg(test)]
+mod font_plan_build_tests {
+    use super::{DEFAULT_FONT_FAMILY, build_font_plan};
+    use crate::text::script::ScriptClass;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// ★ 空字族的链首必须是内置默认，不能是空串。
+    ///
+    /// 空串链首的表现最阴：`AddMapping` 的 `baseFamilyName` 是空串就永远匹配不上任何段
+    /// ⇒「用户没显式写 family 时，配了 fallback 也不生效」，而配置、日志、界面全都正常。
+    #[test]
+    fn empty_family_becomes_the_builtin_default_at_the_chain_head() {
+        let p = build_font_plan("", &v(&["Noto Sans Mongolian"]), &[]);
+        assert_eq!(p.base_family(), Some(DEFAULT_FONT_FAMILY));
+        assert_eq!(
+            p.chain_for(None),
+            [DEFAULT_FONT_FAMILY, "Noto Sans Mongolian"]
+        );
+        // 只有空白也算空。
+        assert_eq!(
+            build_font_plan("   ", &[], &[]).base_family(),
+            Some(DEFAULT_FONT_FAMILY)
+        );
+    }
+
+    /// 默认链 = `[family] + fallback`，顺序不能颠倒（颠倒后主字体成了回退项）。
+    #[test]
+    fn default_chain_is_family_then_fallback() {
+        let p = build_font_plan(
+            "Mongolian Baiti",
+            &v(&["Noto Sans Mongolian", "Segoe UI"]),
+            &[],
+        );
+        assert_eq!(
+            p.chain_for(None),
+            ["Mongolian Baiti", "Noto Sans Mongolian", "Segoe UI"]
+        );
+    }
+
+    /// 已知脚本类名进方案，未知的**只忽略这一条**——不得连累同一份配置里其余的类。
+    /// 用户拼错一个键就让整份字体配置失效是不能接受的。
+    #[test]
+    fn unknown_script_key_is_dropped_without_affecting_the_others() {
+        let p = build_font_plan(
+            "Mongolian Baiti",
+            &[],
+            &[
+                ("latin".to_string(), v(&["Segoe UI"])),
+                ("mongolian".to_string(), v(&["Whatever"])), // 未知：不是具名类
+                ("CJK".to_string(), v(&["宋体"])),           // 大小写不敏感
+            ],
+        );
+        // 顺序是 `ScriptClass` 的**声明序**（`FontPlan::new` 按 `Ord` 排），不是字母序。
+        assert_eq!(p.declared(), &[ScriptClass::Latin, ScriptClass::Cjk]);
+        assert_eq!(p.chain_for(Some(ScriptClass::Latin)), ["Segoe UI"]);
+        assert_eq!(p.chain_for(Some(ScriptClass::Cjk)), ["宋体"]);
+    }
+
+    /// 零配置（出厂）必须折成平凡方案——调用方据此完全走旧路径，一次 COM 调用都不多做。
+    #[test]
+    fn factory_config_folds_to_a_trivial_plan() {
+        assert!(build_font_plan("", &[], &[]).is_trivial());
+        assert!(build_font_plan("宋体", &[], &[]).is_trivial());
+        // 反向对照：只要有一项非零配置就不再平凡（否则「平凡」判据形同虚设）。
+        assert!(!build_font_plan("宋体", &v(&["Arial"]), &[]).is_trivial());
+        assert!(
+            !build_font_plan("宋体", &[], &[("latin".to_string(), v(&["Arial"]))]).is_trivial()
+        );
     }
 }
 

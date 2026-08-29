@@ -275,7 +275,7 @@ fn type_label(ty: FieldType) -> String {
         FieldType::Str => "string".into(),
         FieldType::Enum(vals) => format!("enum({})", vals.join("|")),
         FieldType::StrList => "string[]".into(),
-        FieldType::Map => "map".into(),
+        FieldType::Map(_) => "map".into(),
         FieldType::StructList => "array".into(),
     }
 }

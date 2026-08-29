@@ -973,6 +973,8 @@ impl Coordinator {
         // 这里单独接一次——`UpdateCandidates` 的发送点共两处，两处都得接，否则加词的
         // candidate_layout 完全失效（见 layout.rs / docs/design/mode-candidate-layout.md）。
         self.sync_candidate_layout(state);
+        // 字体同理：同一批发送点，漏一处的表现是加词面板里字体变回默认。
+        self.sync_candidate_font(state);
         // 提示行构造：no_index=true 完全不显示序号（避免默认主题空圆圈）。
         let row = |text: String, comment: String| CandidateItem {
             text,

@@ -163,6 +163,7 @@ pub use imp::TextRenderer;
 #[cfg(windows)]
 mod imp {
     use super::{MEASURE_CACHE_CAP, TextMetrics, TextStyle, measure_key};
+    use crate::text::script::{FontPlan, font_runs};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::ffi::c_void;
@@ -214,6 +215,17 @@ mod imp {
         surface: RefCell<Option<Surface>>,
         /// 拆字字根字体（可选）：设置后对 PUA 码位字符级联回退到该字体渲染。
         chaizi: Option<ChaiziFont>,
+        /// 全局字体方案（来自 `ui.font`）：默认链 + 按脚本的字体指派。
+        ///
+        /// 零配置时两处短路各管一半、与升级前逐位等价：`declared().is_empty()` 跳过切段，
+        /// `needs_fallback()` 跳过自定义回退对象。
+        plan: FontPlan,
+        /// 由 [`Self::plan`] 构建的自定义回退对象；`None` = 尚未构建或本方案不需要。
+        /// 换方案时必须 take 掉（见 [`TextRenderer::set_font_plan`]）。
+        fallback: RefCell<Option<IDWriteFontFallback>>,
+        /// 回退对象构建失败过。失败是持久性的（工厂拿不到 `IDWriteFactory2` 等），
+        /// 不记就会每次绘制重建一遍 builder 与全部映射。换方案时随 `fallback` 一起复位。
+        fallback_failed: std::cell::Cell<bool>,
     }
 
     impl TextRenderer {
@@ -250,6 +262,9 @@ mod imp {
                     measure_cache: RefCell::new(HashMap::new()),
                     surface: RefCell::new(None),
                     chaizi: None,
+                    plan: FontPlan::default(),
+                    fallback: RefCell::new(None),
+                    fallback_failed: std::cell::Cell::new(false),
                 })
             }
         }
@@ -328,6 +343,166 @@ mod imp {
             self.measure_cache.borrow_mut().clear();
         }
 
+        /// 换字体方案（`ui.font` 的默认链与脚本指派变更时调用）。
+        ///
+        /// ⚠️ 两处缓存必须一起失效，各自的漏法不同：
+        /// - **测量缓存**：方案不在 [`measure_key`] 里（它是渲染器级状态，与 `family` 同理），
+        ///   不清就会拿旧方案的宽度布局新方案的文字——表现是候选框宽度对不上文字。
+        /// - **回退对象**：`IDWriteFontFallback` 是按旧链构建的不可变 COM 对象，
+        ///   不 take 掉就永远用旧链。
+        ///
+        /// `formats` **不需要**清：TextFormat 只承载字号与全局字族，而方案的 base family
+        /// 是在 layout 层用 `SetFontFamilyName` 覆盖的，不经过 format。
+        pub fn set_font_plan(&mut self, plan: FontPlan) {
+            if self.plan == plan {
+                return;
+            }
+            self.plan = plan;
+            self.fallback.borrow_mut().take();
+            self.fallback_failed.set(false);
+            self.measure_cache.borrow_mut().clear();
+        }
+
+        /// 当前字体方案。
+        pub fn font_plan(&self) -> &FontPlan {
+            &self.plan
+        }
+
+        /// 取（或构建）本方案的自定义字体回退对象。方案不需要回退时返回 `None`——
+        /// 不设自定义回退 = 走系统默认回退 = 与升级前逐位等价，故这条路径零回归。
+        ///
+        /// # ★★ 实测得到的 `AddMapping` 语义（推翻过一版猜测，别再按猜测改）
+        ///
+        /// **base font 先被问；映射的 target 列表是「base 缺这个字时」的接续。**
+        /// 三条实测互相印证：
+        /// - `fallback_chain_is_applied`：base 缺字时链尾决定字形 ⇒ target 列表确实生效；
+        /// - `default_chain_fallback_does_not_swallow_a_script_assignment`：
+        ///   拉丁段（base=Consolas）在默认链兜底映射存在时仍是 Consolas ⇒ base 优先；
+        /// - `leaf_family_survives_a_non_empty_default_chain`：叶子级字族同理不被换掉。
+        ///
+        /// ⚠️ 曾经写成「它不问 base font、每个字符都会被映射到 target」——**那是错的**，
+        /// 并且按那条错误前提推导会得出「兜底映射会把脚本指派和方案级字体整个吃掉」
+        /// 这个吓人但不存在的结论。改这段前先跑上面三条测量。
+        ///
+        /// target 列表**含链首自己**是刻意的：base 已被优先问过，重复一次是无害的冗余，
+        /// 但它让「这条链完整地写在一处」，读代码时不必再去脑补 base 是谁。
+        ///
+        /// # ⚠️ 依赖 `baseFamilyName` 作为筛选条件
+        ///
+        /// 多条链（默认链 + 各脚本指派链）共存时，靠 `baseFamilyName` 区分「这一段该走哪条
+        /// 链」——而段的 base family 正是由 `SetFontFamilyName` 按 [`font_runs`] 的切段设定的，
+        /// 两者天然对齐。这条假设由 `fallback_chain_picks_the_chain_of_its_own_base`
+        /// 直接验证（**单渲染器、双链、链尾不同**）；`fallback_chain_is_applied` 只证明
+        /// 「自定义回退挂上了」，证不了筛选——两条缺一不可。
+        ///
+        /// # 映射的添加顺序承重（`AddMapping` 取首个匹配的映射）
+        ///
+        /// 实际顺序由 [`FontPlan::chains`] 决定：**默认链在前、各脚本指派链其次**，
+        /// 然后才是下面单独追加的两条。四段的相对位置都不能随手调：
+        ///
+        /// 1. 默认链（`baseFamilyName` = 它的链首）；
+        /// 2. 各脚本指派链（`baseFamilyName` = 各自链首）；
+        /// 3. 默认链的**兜底**映射（`baseFamilyName` = None，匹配任意 base）——必须在
+        ///    全部具名映射之后，否则它会先匹配上、让具名链永远轮不到；
+        /// 4. 系统表。
+        ///
+        /// ⚠️ 第 1、2 段的先后是 `heads` 去重「第一条胜出」语义的依据（同链首的后来者被
+        /// warn 并丢弃）。照「最具体的最先」去重排会改掉那条语义。
+        ///
+        /// 第 3 段是为**叶子级字族**存在的：主题给节点配了 `font_family`（或方案级
+        /// `[candidate] font_family`）时，该段的 base 与任何链首都不匹配。没有它，
+        /// 用户配的 `ui.font.fallback` 对那些节点整条失效——而 macOS 侧
+        /// （cascade list 是字体级属性）在同样情形下链照常生效，同一份配置两平台结果相反。
+        ///
+        /// 第 2 条是为了**主题节点字族**：主题给某个节点配了 `font_family`（如宋体）时，
+        /// 该段的 base 是宋体，与任何一条链的链首都不匹配。没有这条兜底的话，用户配的
+        /// `ui.font.fallback` 会**整条静默失效**——而 macOS 侧（CoreText 的 cascade list
+        /// 是字体级属性）在同样情形下链照常生效，同一份配置两平台结果相反且都不吭声。
+        fn ensure_fallback(&self) -> Option<IDWriteFontFallback> {
+            if !self.plan.needs_fallback() {
+                return None;
+            }
+            if let Some(fb) = self.fallback.borrow().as_ref() {
+                return Some(fb.clone());
+            }
+            // 构建失败是持久性的（工厂能力问题），不记哨兵就会每次绘制重建一遍 builder
+            // 与全部映射——一次失败变成每帧的开销。
+            if self.fallback_failed.get() {
+                return None;
+            }
+            let Some(f2) = self.factory2.as_ref() else {
+                self.fallback_failed.set(true);
+                return None;
+            };
+            unsafe {
+                let Ok(builder) = f2.CreateFontFallbackBuilder() else {
+                    self.fallback_failed.set(true);
+                    return None;
+                };
+                const ALL: [DWRITE_UNICODE_RANGE; 1] = [DWRITE_UNICODE_RANGE {
+                    first: 0,
+                    last: 0x10FFFF,
+                }];
+                // `base = None` 表示不按 base family 筛选，匹配任意段。
+                let add = |chain: &[String], base: Option<&str>| {
+                    // 宽字符缓冲必须活到 AddMapping 返回之后——targets 里存的是裸指针。
+                    let targets_w: Vec<Vec<u16>> = chain
+                        .iter()
+                        .map(|s| s.encode_utf16().chain(std::iter::once(0)).collect())
+                        .collect();
+                    let targets: Vec<*const u16> = targets_w.iter().map(|v| v.as_ptr()).collect();
+                    let base_w: Option<Vec<u16>> =
+                        base.map(|b| b.encode_utf16().chain(std::iter::once(0)).collect());
+                    let base_ptr = base_w
+                        .as_ref()
+                        .map(|v| PCWSTR(v.as_ptr()))
+                        .unwrap_or(PCWSTR::null());
+                    let _ = builder.AddMapping(
+                        &ALL,
+                        &targets,
+                        None,
+                        PCWSTR(self.locale.as_ptr()),
+                        base_ptr,
+                        1.0,
+                    );
+                };
+
+                let mut heads: Vec<&str> = Vec::new();
+                for chain in self.plan.chains() {
+                    if chain.len() < 2 {
+                        continue; // 单项链无回退可言，建映射只会拖慢查表
+                    }
+                    // 两条链共用同一个链首时，靠 baseFamilyName 分不开——后加的那条永远
+                    // 匹配不到（取首个匹配）。这是配置层的问题，静默丢掉会让用户查不出来。
+                    if heads.contains(&chain[0].as_str()) {
+                        tracing::warn!(
+                            "字体方案里有多条链以「{}」开头，只有第一条的回退顺序会生效",
+                            chain[0]
+                        );
+                        continue;
+                    }
+                    heads.push(chain[0].as_str());
+                    add(chain, Some(&chain[0]));
+                }
+                // 默认链的兜底映射：放在全部具名映射之后，见函数文档「添加顺序承重」。
+                let default_chain = self.plan.chain_for(None);
+                if default_chain.len() > 1 {
+                    add(default_chain, None);
+                }
+                // 系统表兜底放最后：不接的话，凡是自定义映射没覆盖到的字符（emoji、少数民族
+                // 文字、符号）全部退化成缺字方框——自定义回退是**整体替换**系统回退，不是叠加。
+                if let Ok(sys) = f2.GetSystemFontFallback() {
+                    let _ = builder.AddMappings(&sys);
+                }
+                let Ok(fb) = builder.CreateFontFallback() else {
+                    self.fallback_failed.set(true);
+                    return None;
+                };
+                *self.fallback.borrow_mut() = Some(fb.clone());
+                Some(fb)
+            }
+        }
+
         /// 取得（或创建）给定字号的文本格式（按取整 px 缓存）。
         fn ensure_format(&self, size: f32) -> Result<IDWriteTextFormat, String> {
             let key = size.max(1.0).round() as u32;
@@ -352,17 +527,27 @@ mod imp {
             }
         }
 
-        /// 为给定文本/字号创建布局对象。
-        /// weight>0 且 ≠400 时覆盖字重；family 非空时覆盖字体族（皆作用于全文）。
+        /// 为给定文本/样式创建布局对象。
+        ///
+        /// 字体的三层合成，**从弱到强**依次覆盖（后者赢过前者）：
+        /// 1. TextFormat 自带的全局字族（`ui.font.family`）；
+        /// 2. 方案默认链的链首 → 叶子级 `ts.family`（主题节点的 `font_family`），作用于全文；
+        /// 3. 按脚本的指派（[`font_runs`] 切段）→ 最后是拆字字根的私用区段。
+        ///
+        /// ★ 第 3 层赢过第 2 层是刻意的：脚本指派回答的是「**哪些字符**用什么字体」，
+        /// 比「这个节点用什么字体」更具体。主题给候选文字配了宋体、全局又指派
+        /// 「拉丁用 Segoe UI」时，结果是汉字宋体 + 拉丁 Segoe UI——这正是想要的。
+        ///
+        /// 参数收成 `&TextStyle` 而非散开：本文件开头已经为同一个理由写过一次
+        /// （散开时每加一项都要改所有签名，而参数越多传错顺序编译器越抓不到）。
         fn create_layout(
             &self,
             text: &str,
-            size: f32,
-            weight: i32,
-            family: Option<&str>,
+            ts: &TextStyle,
             max_w: f32,
             max_h: f32,
         ) -> Result<IDWriteTextLayout, String> {
+            let (size, weight, family) = (ts.size, ts.weight, ts.family);
             let fmt = self.ensure_format(size)?;
             let wide: Vec<u16> = text.encode_utf16().collect();
             unsafe {
@@ -389,9 +574,42 @@ mod imp {
                 if weight > 0 && weight != 400 {
                     let _ = layout.SetFontWeight(DWRITE_FONT_WEIGHT(weight), full);
                 }
-                if let Some(fam) = family.filter(|s| !s.trim().is_empty()) {
+                // 叶子级字族优先，其次方案默认链的链首；都没有就沿用 TextFormat 的全局字族。
+                let base = family
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| self.plan.base_family());
+                if let Some(fam) = base {
                     let famw: Vec<u16> = fam.encode_utf16().chain(std::iter::once(0)).collect();
                     let _ = layout.SetFontFamilyName(PCWSTR(famw.as_ptr()), full);
+                }
+                // 按脚本指派：只有被显式声明了字体的类才会切出独立段（见 `font_runs`）。
+                //
+                // ⚠️ 外层的 `is_empty` 判定不能省：`font_runs` 在无声明时也会**分配**一个
+                // 单段 Vec，而本函数是每次绘制每个文本叶子各走一遍的热路径——没配脚本指派的
+                // 用户（绝大多数）会白付一次每叶子每帧的分配。零配置必须是零成本。
+                if !self.plan.declared().is_empty() {
+                    for run in font_runs(&wide, self.plan.declared()) {
+                        let Some(fam) =
+                            run.class.and_then(|c| self.plan.chain_for(Some(c)).first())
+                        else {
+                            continue; // 默认链的段：base family 已在上面设过
+                        };
+                        let famw: Vec<u16> = fam.encode_utf16().chain(std::iter::once(0)).collect();
+                        let range = DWRITE_TEXT_RANGE {
+                            startPosition: run.start as u32,
+                            length: run.len as u32,
+                        };
+                        let _ = layout.SetFontFamilyName(PCWSTR(famw.as_ptr()), range);
+                    }
+                }
+                // 回退链：让每一段在自己的 base family 缺字时按用户声明的顺序找下一个。
+                // 方案没有任何多项链时 `ensure_fallback` 返回 None，走系统默认回退。
+                // 短路顺序承重：`ensure_fallback` 先判、`cast` 后做——没有方案时连一次
+                // QueryInterface 都不该付（这是每次绘制都会走到的热路径）。
+                if let Some(fb) = self.ensure_fallback() {
+                    let _ = layout
+                        .cast::<IDWriteTextLayout2>()
+                        .and_then(|l2| l2.SetFontFallback(&fb));
                 }
                 // 拆字字根：把私用区（BMP PUA + 补充私用区 A/B）的连续段切到字根字体集，
                 // 级联回退渲染字根字符。段划分见 `super::pua_runs`——测量与绘制共用本函数，
@@ -453,14 +671,7 @@ mod imp {
         /// （由 [`TextRenderer::measure`] 决定回退值，并跳过缓存）。
         fn measure_layout(&self, text: &str, ts: &TextStyle) -> Option<TextMetrics> {
             let layout = self
-                .create_layout(
-                    text,
-                    ts.size,
-                    ts.weight,
-                    ts.family,
-                    f32::MAX / 2.0,
-                    f32::MAX / 2.0,
-                )
+                .create_layout(text, ts, f32::MAX / 2.0, f32::MAX / 2.0)
                 .ok()?;
             unsafe {
                 let mut m = DWRITE_TEXT_METRICS::default();
@@ -617,14 +828,7 @@ mod imp {
                 // 入参 color 约定为 [R,G,B,A]；COLORREF = 0x00BBGGRR。
                 let colorref: u32 =
                     (color[0] as u32) | ((color[1] as u32) << 8) | ((color[2] as u32) << 16);
-                let layout = self.create_layout(
-                    text,
-                    ts.size,
-                    ts.weight,
-                    ts.family,
-                    buf_width as f32,
-                    buf_height as f32,
-                )?;
+                let layout = self.create_layout(text, ts, buf_width as f32, buf_height as f32)?;
 
                 // 关键优化：用文本度量算出包围盒，后续两遍逐像素操作只在盒内进行
                 // （原实现每次绘制都遍历整窗，单帧十余次 × 整窗 → paint 高达 ~100ms）。
@@ -894,14 +1098,20 @@ pub use imp::TextRenderer;
 #[cfg(all(not(windows), not(target_os = "macos")))]
 mod imp {
     use super::{TextMetrics, TextStyle};
+    use crate::text::script::FontPlan;
 
     pub struct TextRenderer {
         font_size: f32,
+        /// 只为让 `font_plan()` 有东西可还——mock 的等宽近似不看字体。
+        plan: FontPlan,
     }
 
     impl TextRenderer {
         pub fn new(_font_family: &str, font_size: f32) -> Result<Self, String> {
-            Ok(Self { font_size })
+            Ok(Self {
+                font_size,
+                plan: FontPlan::default(),
+            })
         }
 
         pub fn base_size(&self) -> f32 {
@@ -913,6 +1123,15 @@ mod imp {
         }
 
         pub fn set_font_family(&mut self, _font_family: &str) {}
+
+        /// mock：等宽近似不看字体，只存下来供 `font_plan()` 读回（接线类测试要断言它）。
+        pub fn set_font_plan(&mut self, plan: FontPlan) {
+            self.plan = plan;
+        }
+
+        pub fn font_plan(&self) -> &FontPlan {
+            &self.plan
+        }
 
         pub fn set_chaizi_font(&mut self, _path: &str, _family: &str) -> Result<(), String> {
             Ok(())
@@ -1345,6 +1564,305 @@ mod pua_runs_tests {
     fn empty_and_plain_text_yield_no_runs() {
         assert!(runs("").is_empty());
         assert!(runs("中文 abc 123").is_empty());
+    }
+}
+
+// 字体方案（脚本指派 + 回退链）的接线测试。**必须用真实 DirectWrite**：切段与回退是否
+// 真的作用到排版上，只有度量能回答——`font_runs` 本身的正确性另有 `text::script` 的
+// 平台无关单测覆盖，两层缺一不可（同 `pua_runs` 的分层）。
+//
+// ⚠️ 依赖本机装有 Consolas / 宋体 / Microsoft YaHei UI——中文 Windows 上三者恒在，
+// 与既有测试用 "Microsoft YaHei UI" 的假设同级。
+#[cfg(all(test, windows))]
+mod font_plan_tests {
+    use super::super::script::{FontPlan, ScriptClass};
+    use super::{TextRenderer, TextStyle};
+
+    fn tr() -> TextRenderer {
+        TextRenderer::new("Microsoft YaHei UI", 16.0).expect("建 DirectWrite TextRenderer")
+    }
+
+    fn chain(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 平凡方案（只有一个默认字体）必须与「不设方案」逐位等价——这条守的是零回归：
+    /// 绝大多数用户不会配脚本指派，他们的排版结果一个像素都不能变。
+    #[test]
+    fn trivial_plan_does_not_change_layout() {
+        let base = tr().measure("abc中文123", &TextStyle::new(16.0));
+        let mut r = tr();
+        r.set_font_plan(FontPlan::new(chain(&["Microsoft YaHei UI"]), vec![]));
+        let with = r.measure("abc中文123", &TextStyle::new(16.0));
+        assert_eq!(base.width, with.width);
+        assert_eq!(base.height, with.height);
+    }
+
+    /// ★ 脚本指派真的作用到排版上：把拉丁指派给等宽的 Consolas 后，纯拉丁串的宽度必须变。
+    ///
+    /// 反向对照同样重要：**汉字串的宽度不得变**——只断言「变了」的话，一个「把整串都换成
+    /// Consolas」的错误实现照样通过，而那正是切段没生效的表现。
+    #[test]
+    fn latin_assignment_applies_to_latin_only() {
+        let text_latin = "illillill";
+        let text_cjk = "中文候选";
+        let ts = TextStyle::new(16.0);
+
+        let plain = tr();
+        let (w_latin0, w_cjk0) = (
+            plain.measure(text_latin, &ts).width,
+            plain.measure(text_cjk, &ts).width,
+        );
+
+        let mut r = tr();
+        r.set_font_plan(FontPlan::new(
+            chain(&["Microsoft YaHei UI"]),
+            vec![(ScriptClass::Latin, chain(&["Consolas"]))],
+        ));
+        let (w_latin1, w_cjk1) = (
+            r.measure(text_latin, &ts).width,
+            r.measure(text_cjk, &ts).width,
+        );
+
+        assert_ne!(
+            w_latin0, w_latin1,
+            "拉丁指派没生效：宽度与未指派时相同（{w_latin0} vs {w_latin1}）"
+        );
+        assert_eq!(
+            w_cjk0, w_cjk1,
+            "汉字宽度不该受拉丁指派影响——切段没生效，整串都被换了字体"
+        );
+
+        // ★ 上面两条都是**纯单脚本**串，一个「只在整串同脚本时才应用指派」的实现能通过。
+        // 混合串才真正走切段：拉丁那半的宽度变化量必须与纯拉丁串完全一致，
+        // 汉字那半不贡献任何变化。
+        let mixed = "illillill中文候选";
+        let delta_mixed = r.measure(mixed, &ts).width - plain.measure(mixed, &ts).width;
+        let delta_latin = w_latin1 - w_latin0;
+        assert!(
+            (delta_mixed - delta_latin).abs() < 0.5,
+            "混合串里的拉丁段没被单独切出来：混合串变化 {delta_mixed}，纯拉丁串变化 {delta_latin}"
+        );
+    }
+
+    /// ★★ 单渲染器、双链、链尾不同——直接验 `baseFamilyName` **筛选**是否生效。
+    ///
+    /// 这是多链设计的载重假设：靠 base family 区分「这一段该走哪条链」。
+    /// 「中」是 Cjk 类、被声明并指派了 Consolas（无汉字字形）⇒ 由 cjk 链的链尾决定字形。
+    /// 若 DWrite 不按 `baseFamilyName` 区分，第一条映射（默认链）会吃掉全部匹配，
+    /// 两次都用默认链的链尾「宋体」⇒ 高度相等 ⇒ 红。
+    ///
+    /// ⚠️ 与 `fallback_chain_is_applied` 缺一不可：那条只证明「自定义回退挂上了」，
+    /// 它的两个渲染器各只有一条映射，筛不筛选都不改变结果。
+    #[test]
+    fn fallback_chain_picks_the_chain_of_its_own_base() {
+        let ts = TextStyle::new(16.0);
+        let mk = |cjk_tail: &str| {
+            let mut r = tr();
+            r.set_font_plan(FontPlan::new(
+                chain(&["Segoe UI", "宋体"]),
+                vec![(ScriptClass::Cjk, chain(&["Consolas", cjk_tail]))],
+            ));
+            r.measure("中", &ts).height
+        };
+        let with_yahei = mk("Microsoft YaHei UI");
+        let with_songti = mk("宋体");
+        assert_ne!(
+            with_yahei, with_songti,
+            "baseFamilyName 筛选没生效：cjk 链被默认链吃掉了（{with_yahei} vs {with_songti}）"
+        );
+    }
+
+    /// ★★ 主题节点配了 `font_family` 时，用户配的默认回退链**仍须生效**。
+    ///
+    /// 叶子级字族让该段的 base 与任何一条链的链首都不匹配，若没有那条
+    /// `baseFamilyName = None` 的兜底映射，`ui.font.fallback` 会整条静默失效——
+    /// 而 macOS 侧（cascade list 是字体级属性）同样情形下链照常生效，
+    /// 同一份配置两平台结果相反且都不吭声。
+    #[test]
+    fn default_chain_still_applies_under_a_leaf_family_override() {
+        // 叶子级把 base 换成 Consolas（无汉字字形），默认链的链尾决定「中」的字形。
+        let ts = TextStyle::new(16.0).with_family(Some("Consolas"));
+        let mk = |tail: &str| {
+            let mut r = tr();
+            r.set_font_plan(FontPlan::new(chain(&["Segoe UI", tail]), vec![]));
+            r.measure("中", &ts).height
+        };
+        assert_ne!(
+            mk("Microsoft YaHei UI"),
+            mk("宋体"),
+            "叶子级字族一非空，默认回退链就整条失效了"
+        );
+    }
+
+    /// ★★ 回退链真的生效：Consolas 没有汉字字形，链尾决定「中」用什么字体渲染。
+    /// 两条链的链尾字体行高不同（宋体 ≈1.16 em、雅黑 ≈1.33 em），故高度必须不同。
+    ///
+    /// ⚠️ 它**只**证明「自定义回退对象被挂上了」。筛选由
+    /// `fallback_chain_picks_the_chain_of_its_own_base` 验证——这里每个渲染器只有一条映射。
+    #[test]
+    fn fallback_chain_is_applied() {
+        let ts = TextStyle::new(16.0);
+        let mut a = tr();
+        a.set_font_plan(FontPlan::new(chain(&["Consolas", "宋体"]), vec![]));
+        let mut b = tr();
+        b.set_font_plan(FontPlan::new(
+            chain(&["Consolas", "Microsoft YaHei UI"]),
+            vec![],
+        ));
+        let ha = a.measure("中", &ts).height;
+        let hb = b.measure("中", &ts).height;
+        assert_ne!(
+            ha, hb,
+            "回退链未生效：两条链的链尾不同却量出同样的行高（{ha} vs {hb}）"
+        );
+    }
+
+    /// ★★★ 判决性测量：默认链的兜底映射会不会把**脚本指派**整个吃掉。
+    ///
+    /// 配置形态取的就是 C 的样例：主字体有回退链、拉丁指派只有一项。
+    /// 那条指派链因 `len < 2` 不建具名映射，于是拉丁段的 base 与任何具名 `baseFamilyName`
+    /// 都不匹配——若它落到 `base = None` 的兜底映射上，就会被整段换成默认链的字体，
+    /// **拉丁指派完全不生效**，而这正是本功能存在的理由。
+    #[test]
+    fn default_chain_fallback_does_not_swallow_a_script_assignment() {
+        let ts = TextStyle::new(16.0);
+        let mut mixed = tr();
+        mixed.set_font_plan(FontPlan::new(
+            chain(&["Microsoft YaHei UI", "宋体"]),
+            vec![(ScriptClass::Latin, chain(&["Consolas"]))],
+        ));
+        let mut pure_consolas = tr();
+        pure_consolas.set_font_plan(FontPlan::new(chain(&["Consolas"]), vec![]));
+        let mut pure_yahei = tr();
+        pure_yahei.set_font_plan(FontPlan::new(chain(&["Microsoft YaHei UI"]), vec![]));
+
+        let w_mixed = mixed.measure("illillill", &ts).width;
+        let w_consolas = pure_consolas.measure("illillill", &ts).width;
+        let w_yahei = pure_yahei.measure("illillill", &ts).width;
+        assert_ne!(
+            w_consolas, w_yahei,
+            "前置条件：Consolas 与雅黑量出同宽，本用例无从判别"
+        );
+        assert_eq!(
+            w_mixed, w_consolas,
+            "拉丁指派被默认链的兜底映射吃掉了（实测 {w_mixed}，Consolas {w_consolas}，雅黑 {w_yahei}）"
+        );
+    }
+
+    /// ★★★ 同上，换成**叶子级字族**（方案级 `[candidate] font_family` 走的就是它）。
+    ///
+    /// 与 `default_chain_still_applies_under_a_leaf_family_override` 互补、缺一不可：
+    /// 那条测的是「叶子字体**缺字**时链要接上」（量的是 Consolas 没有的汉字），
+    /// 本条测的是「叶子字体**有这个字**时不能被链抢走」（量的是 Consolas 有的拉丁）。
+    /// 只有前者的话，一个「兜底映射把每个字符都换成默认链」的实现照样通过——
+    /// 而那会让方案级字体在配了 `ui.font.fallback` 时静默失效。
+    #[test]
+    fn leaf_family_survives_a_non_empty_default_chain() {
+        let ts_leaf = TextStyle::new(16.0).with_family(Some("Consolas"));
+        let ts = TextStyle::new(16.0);
+        let mut with_chain = tr();
+        with_chain.set_font_plan(FontPlan::new(
+            chain(&["Microsoft YaHei UI", "宋体"]),
+            vec![],
+        ));
+        let mut pure_consolas = tr();
+        pure_consolas.set_font_plan(FontPlan::new(chain(&["Consolas"]), vec![]));
+        assert_eq!(
+            with_chain.measure("illillill", &ts_leaf).width,
+            pure_consolas.measure("illillill", &ts).width,
+            "叶子级字族被默认链的兜底映射换掉了 —— 方案级字体会在配了 fallback 时静默失效"
+        );
+    }
+
+    /// 换方案必须清空测量缓存——方案不在 `measure_key` 里（它是渲染器级状态），
+    /// 不清就会拿旧方案的宽度布局新方案的文字。
+    ///
+    /// ★ 断言落在**条目数**上：只断言「宽度变了」的话，缓存完全没接线（每次重算）
+    /// 时也照样通过，而缓存正是这里唯一要验的东西。
+    #[test]
+    fn set_font_plan_clears_measure_cache() {
+        let mut r = tr();
+        let _ = r.measure("abc", &TextStyle::new(16.0));
+        assert_eq!(r.measure_cache_len(), 1);
+        r.set_font_plan(FontPlan::new(
+            chain(&["Microsoft YaHei UI"]),
+            vec![(ScriptClass::Latin, chain(&["Consolas"]))],
+        ));
+        assert_eq!(r.measure_cache_len(), 0, "换字体方案须清空测量缓存");
+    }
+
+    /// ★★ 换方案必须让**已构建的回退对象**跟着失效。
+    ///
+    /// 三条缓存测试断言的都是 `measure_cache_len()`，而回退对象是另一份派生状态：
+    /// 删掉 `set_font_plan` 里的 `fallback.take()`，那三条照样绿。真实后果是用户在设置页
+    /// 改一次 `ui.font.fallback`，新链要到**重启**才生效——正是最容易复发的那颗雷。
+    /// 判据必须落在**同一个渲染器**上换第二次方案（`fallback_chain_is_applied` 用的是两个
+    /// 各只 set 一次的渲染器，碰不到这条路径）。
+    #[test]
+    fn changing_the_plan_rebuilds_the_fallback_object() {
+        let ts = TextStyle::new(16.0);
+        let mut r = tr();
+        r.set_font_plan(FontPlan::new(chain(&["Consolas", "宋体"]), vec![]));
+        let h1 = r.measure("中", &ts).height;
+        r.set_font_plan(FontPlan::new(
+            chain(&["Consolas", "Microsoft YaHei UI"]),
+            vec![],
+        ));
+        let h2 = r.measure("中", &ts).height;
+        assert_ne!(h1, h2, "换方案后仍在用旧的回退对象，新链要重启才生效");
+    }
+
+    /// 设同一份方案是空操作，不该白清缓存（每帧重设方案是热重载路径的常态）。
+    #[test]
+    fn setting_the_same_plan_keeps_the_cache() {
+        let mut r = tr();
+        let p = || FontPlan::new(chain(&["Microsoft YaHei UI"]), vec![]);
+        r.set_font_plan(p());
+        let _ = r.measure("abc", &TextStyle::new(16.0));
+        assert_eq!(r.measure_cache_len(), 1);
+        r.set_font_plan(p());
+        assert_eq!(r.measure_cache_len(), 1, "同一份方案不该触发清空");
+    }
+
+    /// 叶子级字族（主题节点的 `font_family`）仍然赢过方案默认链的链首，
+    /// 但**赢不过脚本指派**——三层合成的次序，见 `create_layout` 的文档。
+    #[test]
+    fn leaf_family_beats_plan_default_but_not_script_assignment() {
+        let mut r = tr();
+        r.set_font_plan(FontPlan::new(
+            chain(&["宋体"]),
+            vec![(ScriptClass::Latin, chain(&["Consolas"]))],
+        ));
+        let ts_leaf = TextStyle::new(16.0).with_family(Some("Microsoft YaHei UI"));
+
+        // 汉字走 base family：叶子级的雅黑应赢过方案默认链的宋体。
+        let mut only_plan = tr();
+        only_plan.set_font_plan(FontPlan::new(chain(&["宋体"]), vec![]));
+        let mut leaf_only = tr();
+        leaf_only.set_font_plan(FontPlan::new(chain(&["Microsoft YaHei UI"]), vec![]));
+        let h_songti = only_plan.measure("中", &TextStyle::new(16.0)).height;
+        let h_yahei = leaf_only.measure("中", &TextStyle::new(16.0)).height;
+        // ★ 没有这条对照的话，一个**把 plan.base_family() 整个忽略**的实现照样通过：
+        // `tr()` 本身就是用雅黑建的 TextFormat，右边的期望值与「什么都没做」不可区分。
+        assert_ne!(
+            h_songti, h_yahei,
+            "宋体与雅黑量出同样的行高，本用例的对照失效、下面那条断言等于没测"
+        );
+        assert_eq!(
+            r.measure("中", &ts_leaf).height,
+            h_yahei,
+            "叶子级字族没赢过方案默认链"
+        );
+
+        // 拉丁走脚本指派：叶子级字族不该把 Consolas 顶掉。
+        let mut consolas = tr();
+        consolas.set_font_plan(FontPlan::new(chain(&["Consolas"]), vec![]));
+        assert_eq!(
+            r.measure("illill", &ts_leaf).width,
+            consolas.measure("illill", &TextStyle::new(16.0)).width,
+            "脚本指派没赢过叶子级字族"
+        );
     }
 }
 

@@ -17,7 +17,7 @@ fn type_name(ty: FieldType) -> &'static str {
         FieldType::Str => "str",
         FieldType::Enum(_) => "enum",
         FieldType::StrList => "strlist",
-        FieldType::Map => "map",
+        FieldType::Map(_) => "map",
         FieldType::StructList => "structlist",
     }
 }
@@ -37,7 +37,15 @@ pub fn generate(data_dir: Option<&Path>) -> anyhow::Result<serde_json::Value> {
             "type".into(),
             serde_json::Value::String(type_name(f.ty).to_string()),
         );
-        if let FieldType::Enum(allowed) = f.ty {
+        // `values` = 这个键的**受限词表**，由 `type` 决定读法：
+        // `enum` → 合法取值；`map` → 合法**键名**（值仍自由）。键名域为空的 map 不带此字段，
+        // 设置端据此区分「自由命名的表」（自定义标点）与「类别固定的表」（字体脚本类）。
+        let restricted: Option<&[&str]> = match f.ty {
+            FieldType::Enum(allowed) => Some(allowed),
+            FieldType::Map(keys) if !keys.is_empty() => Some(keys),
+            _ => None,
+        };
+        if let Some(allowed) = restricted {
             entry.insert(
                 "values".into(),
                 serde_json::Value::Array(
@@ -114,6 +122,35 @@ mod tests {
             entry["values"],
             serde_json::json!(["horizontal", "vertical"])
         );
+    }
+
+    /// 键名受限的 Map 也带 `values`——设置端靠它预填字体类别，缺了就只能手抄一份。
+    ///
+    /// ★ 同时断言**自由命名的 Map 不带** `values`：两者若都带，设置端无从区分
+    /// 「类别固定」与「用户自由命名」，会给自定义标点表也铺一堆预填行。
+    #[test]
+    fn keyed_map_carries_key_domain_and_open_map_does_not() {
+        let caps = generate(None).expect("生成 capability");
+        let arr = caps["configKeys"].as_array().unwrap();
+        let find = |k: &str| {
+            arr.iter()
+                .find(|e| e["key"] == k)
+                .expect("键应存在")
+                .clone()
+        };
+
+        let scripts = find("ui.font.scripts");
+        assert_eq!(scripts["type"], "map");
+        assert_eq!(
+            scripts["values"],
+            serde_json::json!([
+                "latin", "greek", "cyrillic", "cjk", "emoji", "digits", "punct"
+            ])
+        );
+
+        let punct = find("input.punct.custom_mappings");
+        assert_eq!(punct["type"], "map");
+        assert!(punct.get("values").is_none(), "自由命名的 Map 不该带键名域");
     }
 
     #[test]

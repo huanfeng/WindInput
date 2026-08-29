@@ -103,15 +103,52 @@ pub enum UiCommand {
     SetToolbarLayout(Vec<ToolbarItem>),
     /// 应用主题（协调器加载解析后下发）
     SetTheme(Box<wind_theme::Resolved>),
-    /// 候选布局方向（true=竖排）。来自 ui.candidate.layout。
-    SetCandidateLayout(bool),
+    /// 候选布局方向。来自 ui.candidate.layout（叠加方案级与模式级意图后的结果）。
+    ///
+    /// 两位刻意分开而不是一个四值枚举：旋转态的 `vertical` 是 **false**（屏幕上候选确是
+    /// 并列的），于是渲染端所有按方向分叉的既有判据自动走横排那一支，一处不用改；
+    /// 只有「列表怎么构造」这一件事额外判 `rotated`。
+    /// `upright` 再往下一层，只改「叶子怎么搭」，排列与 `rotated` 完全一致。
+    /// ⚠️ 合法组合只有四个：`vertical && rotated` 不合法（竖排再转 90° 就是横排），
+    /// `upright && !rotated` 也不合法（字直立是旋转态内部的取舍）。
+    SetCandidateLayout {
+        /// 候选纵向堆叠。
+        vertical: bool,
+        /// 整个候选列表顺时针旋转 90° 呈现（蒙古文等纵向书写脚本）。
+        rotated: bool,
+        /// 旋转态下每个字逆时针扶正、逐字下行（对联式竖排）。蕴含 `rotated`。
+        upright: bool,
+    },
     /// 预编辑嵌入模式（true=编码嵌入候选行首，不显示独立 preedit 条）。
     /// 来自 ui.candidate.preedit_display == "candidate_inline"。
     SetPreeditEmbedded(bool),
     /// 候选字号覆盖（0=跟随主题）。来自 ui.candidate.font_size。
     SetCandidateFontSize(f32),
-    /// 候选字体族（空=默认）。来自 ui.font.family。
-    SetCandidateFontFamily(String),
+    /// 候选字体：主字体 + 回退链 + 按脚本的字体指派。来自 `[ui.font]`。
+    ///
+    /// 三项合成一条命令而非各发各的：`fallback` 的语义是「`family` 缺字时找谁」，
+    /// 链首就是 `family` 本身 —— 拆成两条命令就产生了**到达顺序依赖**（先收到链、
+    /// 后收到主字体时，链首是错的），而命令通道不保证接线方按发送顺序消费每一类。
+    /// 同 `SetCandidateMinSize` 把五个值并一条的理由。
+    ///
+    /// `scripts` 的键是**字符串**而不是枚举：脚本类的定义与它的 Unicode 区间表同住
+    /// wind-ui（`text::script`），把枚举拆到本协议 crate 会让「加一个类」变成改两个 crate，
+    /// 而区间表才是那个类真正的定义。未知键由渲染端记一条 warn 后忽略——配置是用户手写的。
+    SetCandidateFont {
+        /// `ui.font.family`，空 = 用渲染端的内置默认字族。
+        family: String,
+        /// `ui.font.fallback`，主字体缺字时的接续顺序。
+        fallback: Vec<String>,
+        /// `ui.font.scripts`：脚本类名 → 该类的字体链。
+        scripts: Vec<(String, Vec<String>)>,
+    },
+    /// 候选**文字节点**的字族覆盖（方案级 `[candidate] font_family`）；空 = 不覆盖。
+    ///
+    /// ⚠️ 与 [`Self::SetCandidateFont`] 的**下发节奏不同**，故是两条命令而不是一个字段：
+    /// 前者来自 `ui.font`、随配置重载推一次；本条的归属是**数据方案**
+    /// （临英/快符叠加时会切走），随输入语境逐次按键变化，故在 `UpdateCandidates`
+    /// 的两个发送点之前重算。合成一条会让配置重载那条路每次按键都重推整份字体方案。
+    SetCandidateTextFamily(String),
     /// 候选窗尺寸下限（抗抖动）。来自 ui.candidate.min_window_width_horizontal /
     /// min_window_width_vertical / min_window_height_horizontal /
     /// min_window_height_vertical / min_rows。

@@ -317,6 +317,33 @@ pub fn monitor_work_area_width_at(x: i32, y: i32) -> Option<u32> {
     None
 }
 
+/// 同 [`monitor_work_area_width_at`]，取工作区**高度**。
+///
+/// 旋转态的候选列沿屏幕纵向延伸，其长度上限要问高度而不是宽度——拿宽度当上限，
+/// 长候选会长到屏幕外，而那道钳制恒生效正是为了防这件事。
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn monitor_work_area_height_at(x: i32, y: i32) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+        };
+        unsafe {
+            let pt = POINT { x, y };
+            let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                let wa = mi.rcWork;
+                return Some((wa.bottom - wa.top).max(0) as u32);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod clamp_rect_tests {
     use super::clamp_rect_in_bounds;

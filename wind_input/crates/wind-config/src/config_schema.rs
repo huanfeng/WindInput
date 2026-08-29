@@ -25,7 +25,15 @@ pub enum FieldType {
     /// 字符串数组。
     StrList,
     /// 键值映射表（如自定义标点 mappings）。
-    Map,
+    ///
+    /// 携带**键名值域**：非空表示这张表的键只能取这几个（如 `ui.font.scripts` 的脚本类名），
+    /// 空表示键由用户自由命名（如 `input.punct.custom_mappings`）。
+    ///
+    /// ⚠️ 值域为什么要进注册表：设置端的下拉/预填项若各自手抄一份，core 加了新类名而设置端
+    /// 没跟上，用户就永远看不到新类别；反向漂移（设置端多出 core 不认的键）则是「填了没反应」。
+    /// `ui.candidate.layout` 已经踩过这个形状（值域从 3 变 4，设置端滞后，方案里手写的第 4 个
+    /// 值被静默改写回默认）。有了这一位，设置端可用 capability 做守门比对。
+    Map(&'static [&'static str]),
     /// 结构体数组（如 mix_modes），整体作不透明叶子。
     StructList,
 }
@@ -86,6 +94,15 @@ const PROMOTE_PREFIX_VALUES: &[&str] = &["none", "single", "all"];
 
 /// 英文候选的词频记账码口径（内部配置，不进 GUI）。
 const ENGLISH_CODE_SCOPE_VALUES: &[&str] = &["candidate", "input"];
+
+/// `ui.font.scripts` 的合法键名——**文字类别**，不是脚本的全集。
+///
+/// 与渲染端 `wind_ui::text::script::ScriptClass::key()` 是同一件事的两处表达，由
+/// wind-ui 侧的 `script_class_keys_match_config_registry` 测试钉住（wind-config 依赖不到
+/// wind-ui，反向才能测）。**加类别时两处一起改，否则设置页永远不会列出新类别。**
+pub const FONT_SCRIPT_KEYS: &[&str] = &[
+    "latin", "greek", "cyrillic", "cjk", "emoji", "digits", "punct",
+];
 
 /// 模式级候选布局意图（`LayoutIntent` 的 serde 形态）。临拼/临英/网址/加词共用；
 /// mix / special 的同名字段是 StructList 条目内的属性，不在本注册表单独登记。
@@ -253,7 +270,7 @@ static REGISTRY: &[ConfigField] = &[
     f("input.punct.smart_after_digit", Bool),
     f("input.punct.smart_list", Str),
     f("input.punct.custom_enabled", Bool),
-    f("input.punct.custom_mappings", Map),
+    f("input.punct.custom_mappings", Map(&[])),
     f("input.symbol.smart_mode", Bool),
     f("input.symbol.smart_timeout_ms", Int),
     f("input.symbol.smart_chars", Str),
@@ -349,8 +366,8 @@ static REGISTRY: &[ConfigField] = &[
     // 不是为了让它继续工作；移出登记表则让 `config.setItems`
     // 不再接受对它的写入——写旧键的客户端会收到 skipped 而不是静默成功，这正是我们想要的
     // 可见性（本仓最忌讳「写进去了、没人读」）。
-    f("keys.key_actions", Map),
-    f("keys.session_actions", Map),
+    f("keys.key_actions", Map(&[])),
+    f("keys.session_actions", Map(&[])),
     f("keys.select_key_groups", StrList),
     f("keys.page_keys", StrList),
     f("keys.highlight_keys", StrList),
@@ -407,6 +424,10 @@ static REGISTRY: &[ConfigField] = &[
     f("ui.font.family", Str),
     f("ui.font.path", Str),
     f("ui.font.render_mode", Enum(&["directwrite", "gdi"])),
+    f("ui.font.fallback", StrList),
+    // 脚本类名 → 该类的字体链。登记为 Map（叶子、不下钻）：`latin`/`cjk` 这些是**数据**
+    // 不是配置项，下钻会把 `ui.font.scripts.latin` 当成注册表键去比对。同 `keys.key_actions`。
+    f("ui.font.scripts", Map(FONT_SCRIPT_KEYS)),
     f("ui.theme.name", Str),
     f("ui.theme.style", Str),
     f("ui.mode_indicator.style", Enum(&["short", "full", "none"])),
@@ -534,7 +555,7 @@ pub fn parse_str_value(key: &str, raw: &str) -> Result<toml::Value, String> {
                 .map(|s| toml::Value::String(s.to_string()))
                 .collect(),
         ),
-        FieldType::Map | FieldType::StructList => {
+        FieldType::Map(_) | FieldType::StructList => {
             let jv: serde_json::Value =
                 serde_json::from_str(raw).map_err(|e| format!("复杂值需为 JSON: {e}"))?;
             toml::Value::try_from(jv).map_err(|e| format!("无法转为配置值: {e}"))?
@@ -596,7 +617,7 @@ fn type_label(ty: FieldType) -> &'static str {
         FieldType::Str => "string",
         FieldType::Enum(_) => "string(enum)",
         FieldType::StrList => "string[]",
-        FieldType::Map => "table",
+        FieldType::Map(_) => "table",
         FieldType::StructList => "array",
     }
 }
@@ -627,7 +648,7 @@ pub fn validate(key: &str, value: &toml::Value) -> Result<(), ValidateError> {
             .as_array()
             .map(|a| a.iter().all(|e| e.is_str()))
             .unwrap_or(false),
-        FieldType::Map => value.is_table(),
+        FieldType::Map(_) => value.is_table(),
         FieldType::StructList => value.is_array(),
     };
     if type_ok {
@@ -656,7 +677,7 @@ fn collect_leaf_keys(prefix: &str, value: &toml::Value, out: &mut Vec<String>) {
         // 此前没暴露只是因为出厂配置里所有 Map 都是空表（`= {}`），没有子键可下钻。
         toml::Value::Table(_)
             if !prefix.is_empty()
-                && matches!(field(prefix).map(|f| f.ty), Some(FieldType::Map)) =>
+                && matches!(field(prefix).map(|f| f.ty), Some(FieldType::Map(_))) =>
         {
             out.push(prefix.to_string())
         }
@@ -1066,7 +1087,7 @@ mod tests {
             FieldType::Float => value.is_float(),
             FieldType::Str | FieldType::Enum(_) => value.is_str(),
             FieldType::StrList | FieldType::StructList => value.is_array(),
-            FieldType::Map => value.is_table(),
+            FieldType::Map(_) => value.is_table(),
         }
     }
 

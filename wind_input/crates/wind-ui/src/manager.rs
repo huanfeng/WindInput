@@ -910,8 +910,15 @@ impl UiManager {
                             }
                         }
                     }
-                    UiCommand::SetCandidateLayout(vertical) => {
-                        candidate_window.set_vertical(vertical);
+                    UiCommand::SetCandidateTextFamily(family) => {
+                        candidate_window.set_text_family_override(&family);
+                    }
+                    UiCommand::SetCandidateLayout {
+                        vertical,
+                        rotated,
+                        upright,
+                    } => {
+                        candidate_window.set_orientation(vertical, rotated, upright);
                     }
                     UiCommand::SetPreeditEmbedded(embedded) => {
                         candidate_window.set_preedit_embedded(embedded);
@@ -919,8 +926,16 @@ impl UiManager {
                     UiCommand::SetCandidateFontSize(size) => {
                         candidate_window.set_font_size_override(size);
                     }
-                    UiCommand::SetCandidateFontFamily(family) => {
+                    UiCommand::SetCandidateFont {
+                        family,
+                        fallback,
+                        scripts,
+                    } => {
+                        // 两步顺序承重：`set_font_family` 换的是 TextFormat 的全局字族，
+                        // `set_font_plan` 换的是链与指派，后者的链首必须是前者刚设进去的
+                        // 那个字族（空字族回落内置默认的判定在 `resolve_family` 一处）。
                         candidate_window.set_font_family(&family);
+                        candidate_window.set_font_plan(&family, &fallback, &scripts);
                     }
                     UiCommand::SetCandidateMinSize {
                         width_horizontal,

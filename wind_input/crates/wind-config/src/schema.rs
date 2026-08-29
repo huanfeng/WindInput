@@ -689,6 +689,43 @@ pub struct CandidateSpec {
     /// （竖排每行独占，横排全部候选共享一行宽度，能放什么本就不是同一个答案）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment_template_horizontal: crate::config::CommentTemplateOverride,
+    /// 本方案候选**文字节点**的字族覆盖。空 = 不覆盖（走主题 / 全局 `ui.font`）。
+    ///
+    /// 起因是蒙古文方案需要专用字体，而字体是全局的、主题也是全局的——
+    /// 「切到这个方案就换字体」此前表达不出来。
+    ///
+    /// # 作用域刻意只到 text 节点
+    ///
+    /// 序号、编码栏、注释、翻页栏都**不**跟着换：它们是拉丁/数字，换成蒙文字体反而更差。
+    /// 要给某个脚本单独指派字体，用全局 `ui.font.scripts`——那是按**字符**分的，
+    /// 比按节点分更贴合「哪些字要用什么字体」这个真实问题。
+    ///
+    /// # 归属取 `effective_data_schema`，不是活跃方案
+    ///
+    /// 与 [`Self::comment_template_vertical`]（呈现、跟活跃方案）刻意不同：
+    /// 字体回答的是「**这些字**用什么渲染」＝数据属性，与 `[phrases]`、
+    /// `[punct] custom_mappings` 同源。临英期间候选归 `english` 桶，字体也该跟着归它。
+    /// ⇒ 它随输入语境**逐次按键**变化，不能走「切方案推一次」的下发通路，
+    /// 必须在 `UpdateCandidates` 发送点之前重算（见 `Coordinator::sync_candidate_font`）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub font_family: String,
+    /// 本方案**横排时**文字的排列方式（默认 / 旋转 90° / 文字竖排）。
+    ///
+    /// # 为什么住在方案里、而不在外观页
+    ///
+    /// 它回答的是「这套文字**怎么写**」——蒙古文纵向、汉字可作对联式——是方案自带的属性，
+    /// 不是用户对界面的偏好。放进外观页那个面向所有用户的下拉，既难选，也在暗示它与
+    /// 横排/竖排是同一类东西。
+    ///
+    /// # 归属取 `effective_data_schema`，与同段的 [`Self::font_family`] 同源
+    ///
+    /// 「这些字怎么排」与「这些字用什么字体」是同一个问题的两面，判据必须一致：
+    /// 临英期间候选是英文、归 `english` 桶 ⇒ 字体和排列都该跟着归它，
+    /// 而不是继续按蒙古文方案转 90°。
+    /// ⚠️ 与同段的 [`Self::layout`]（呈现、跟活跃方案）刻意不同，取值时不要复用同一个
+    /// `behavior_for` 结果——`[punct]` 段的 `mode` 与 `custom_mappings` 已经是同一个形状。
+    #[serde(default)]
+    pub text_orientation: crate::config::TextOrientation,
 }
 
 /// 方案级短语加载（`[phrases]` 段）。
@@ -750,6 +787,12 @@ pub struct SchemaBehavior {
     pub comment_template_vertical: crate::config::CommentTemplateOverride,
     /// 方案级注释模板（横排）。
     pub comment_template_horizontal: crate::config::CommentTemplateOverride,
+    /// 方案级候选文字字族。见 [`CandidateSpec::font_family`]——⚠️ 它的归属判据与同段的
+    /// `candidate_layout` **不同**（数据方案 vs 活跃方案），取值时不要复用同一个 behavior。
+    pub candidate_font_family: String,
+    /// 方案级「横排时文字排列」。见 [`CandidateSpec::text_orientation`]——归属判据与
+    /// `candidate_font_family` 同源（数据方案），与 `candidate_layout` 不同。
+    pub candidate_text_orientation: crate::config::TextOrientation,
     pub phrases: PhrasesSpec,
 }
 
@@ -762,6 +805,8 @@ impl Schema {
             candidate_layout: self.candidate.layout,
             comment_template_vertical: self.candidate.comment_template_vertical.clone(),
             comment_template_horizontal: self.candidate.comment_template_horizontal.clone(),
+            candidate_font_family: self.candidate.font_family.clone(),
+            candidate_text_orientation: self.candidate.text_orientation,
             phrases: self.phrases.clone(),
         }
     }
