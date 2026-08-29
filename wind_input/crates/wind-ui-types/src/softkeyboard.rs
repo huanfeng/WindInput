@@ -59,6 +59,11 @@ pub const SOFT_TAG_CLOSE: i32 = 300_000;
 pub const SOFT_TAG_FN_BASE: i32 = 400_000;
 /// 面板上的 Shift 键。点击**锁定/解锁**第二层，是面板自己的状态，不回送协调器。
 pub const SOFT_TAG_SHIFT: i32 = 310_000;
+/// 面板上的 Ctrl 键。**粘滞**：点一下亮起，再点任意键位就合成 `ctrl+那个键`，然后熄灭。
+///
+/// ★ 它不能像别的功能键那样「tap 一次」——单独敲一下 Ctrl 什么也不会发生，
+/// 组合键的意义全在「按住 Ctrl 的同时按另一个键」。
+pub const SOFT_TAG_CTRL: i32 = 310_001;
 /// 底行的上一面 / 下一面键。
 ///
 /// ★ **不能复用 `SOFT_TAG_PAGE_BASE + 目标下标`**：那样它与标签行里同一个面的标签
@@ -82,7 +87,7 @@ pub const SOFT_FN_KEYS: &[(&str, &str)] = &[
     ("tab", "Tab"),
     ("enter", "Enter"),
     ("space", ""),
-    ("ins", "Ins"),
+    // Del 排在 `\` 之后（第二行末尾），照 Windows 触摸键盘的布局。
     ("del", "Del"),
     // 大写锁定。用 `vk:0x14` 而不是名字——`parse_key` 的键名表里没有 capslock。
     //
@@ -93,7 +98,15 @@ pub const SOFT_FN_KEYS: &[(&str, &str)] = &[
 ];
 
 /// [`SOFT_FN_KEYS`] 里大写锁定那一项的下标（面板要给它单独的高亮状态）。
-pub const SOFT_FN_CAPS_INDEX: usize = 6;
+pub const SOFT_FN_CAPS_INDEX: usize = 5;
+
+/// 这个功能键按住会不会连发。
+///
+/// ⛔ **大写锁定绝不能重复**：它是 toggle，按住就变成飞速开关，松手时是开是关全凭运气。
+/// 退格 / Del 之类才是「按住就该一直来」的键。
+pub fn fn_key_repeats(idx: usize) -> bool {
+    idx != SOFT_FN_CAPS_INDEX
+}
 
 #[cfg(test)]
 mod tests {

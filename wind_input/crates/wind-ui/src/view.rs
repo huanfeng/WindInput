@@ -262,7 +262,7 @@ impl Rect {
         let y0 = self.y.max(o.y);
         let x1 = (self.x + self.w).min(o.x + o.w);
         let y1 = (self.y + self.h).min(o.y + o.h);
-        (x1 > x0 && y1 > y0).then(|| Rect {
+        (x1 > x0 && y1 > y0).then_some(Rect {
             x: x0,
             y: y0,
             w: x1 - x0,

@@ -432,10 +432,24 @@ impl Coordinator {
     ///
     /// ⚠️ 走 `push_commit_text` 而不是返回 `KeyAction`：UI 事件不在按键路径上，没有那条
     /// 回程通道（同点击候选那条路）。文本仍要过 `maybe_s2t`——上屏出口只有一个。
-    pub(crate) fn ui_softkeyboard_key(&self, slot: &str, shift: bool) {
+    pub(crate) fn ui_softkeyboard_key(&self, slot: &str, shift: bool, ctrl: bool) {
         let Some(page) = self.softkeyboard.pages().get(self.softkeyboard_page_idx()) else {
             return;
         };
+        // ── Ctrl 粘滞：一律合成组合键，**不看当前是哪种面** ──
+        //
+        // Ctrl+C 要的是复制，跟这一面在 `c` 那个位置画着什么符号没有关系。所以它排在
+        // 取 `output` 之前——符号面上那些位置查表得到的是「©」之类，拿去当组合键毫无意义。
+        if ctrl {
+            let combo = if shift {
+                format!("ctrl+shift+{slot}")
+            } else {
+                format!("ctrl+{slot}")
+            };
+            debug!("softkeyboard: 点击 {slot} -> 合成组合键 {combo:?}");
+            self.softkeyboard_tap(&combo);
+            return;
+        }
         let Some(text) = page.output(slot, shift) else {
             return; // 空键位：面板上是灰的，点了不该有反应
         };

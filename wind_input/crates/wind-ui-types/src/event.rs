@@ -31,7 +31,15 @@ pub enum UiEvent {
     ///
     /// 回送键位名而不是下标：下标依赖「面板与协调器对键位顺序的理解一致」，
     /// 而键位名是两侧共同的那套拼写，错了会当场报警而不是静默错位。
-    SoftKeyboardKey { slot: String, shift: bool },
+    /// 点了一个符号键帽。
+    ///
+    /// `ctrl` = 面板上的 Ctrl 处于粘滞状态。此时**一律走合成按键**，不管当前是哪种面：
+    /// Ctrl+C 要的是复制，跟这一面画着什么符号没有关系。
+    SoftKeyboardKey {
+        slot: String,
+        shift: bool,
+        ctrl: bool,
+    },
     /// 点击软键盘标签行切面（面下标）。
     SoftKeyboardPage(usize),
     /// 点击软键盘的关闭按钮。
