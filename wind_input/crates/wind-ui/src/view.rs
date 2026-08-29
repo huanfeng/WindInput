@@ -270,6 +270,22 @@ pub struct LeftBar {
     pub offset: f32,
 }
 
+/// 子树旋转方向（见 [`View::rot`]）。
+///
+/// 做成枚举而不是两个 `bool`：`rotate_cw && rotate_ccw` 是无意义状态，枚举让它压根表达不出来。
+/// 只有 ±90° 两向——180° 用不到，加进来反而要求映射函数处理宽高**不**交换的情形。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Rot {
+    /// 不旋转（绝大多数节点）。
+    #[default]
+    None,
+    /// 顺时针 90°：局部左上角落到屏幕右上角 ⇒ 一行从左到右的文字转成一列从上到下。
+    Cw,
+    /// 逆时针 90°：局部左上角落到屏幕左下角。单独用没意义，它的用途是**抵消**外层的
+    /// [`Rot::Cw`]，把整项旋转里的单个字扶正（对联式竖排）。
+    Ccw,
+}
+
 /// 一个视图节点（容器或文本叶子）
 pub struct View {
     pub layout: Layout,
@@ -344,6 +360,31 @@ pub struct View {
     pub fill_cross: bool,
     /// 命中标识：>=0 参与命中收集（如候选下标 / 按钮 id），<0 忽略
     pub tag: i32,
+    /// 旋转 90° 呈现整棵子树（蒙古文等纵向书写的脚本用）。
+    ///
+    /// # 形态约束（只支持这一种，越界即 debug_assert）
+    ///
+    /// 本节点必须是**恰好一个子节点、无自身装饰**的裸包裹层：背景/边框/图层一律挂在
+    /// 子节点上（它们会跟着一起转），本节点只负责坐标系变换。这样旋转的数学只有一处、
+    /// 且不必回答「装饰是转前画还是转后画」这个没有正确答案的问题。
+    ///
+    /// # 为什么是「临时缓冲双向旋转」而不是让文本后端转
+    ///
+    /// ⛔ 走 DirectWrite 的 `SetCurrentTransform` 只能转**文字**，转不了背景/边框/序号圆圈；
+    /// 而且差分法回写的包围盒要在旋转空间重算，等于把已经稳定的合成路径再撬一遍。
+    /// 临时缓冲是纯像素操作 ⇒ macOS 的 CoreText 后端与 HostRender 的 SHM 帧路径自动跟上，
+    /// 不用各写一份。
+    ///
+    /// ⚠️ 已知代价：子树画进临时缓冲时文本后端的表面尺寸会与窗口尺寸交替，
+    /// 每帧多一次 `CreateBitmapRenderTarget`。真机若测出可观占比，再考虑把临时缓冲
+    /// 固定成窗口大小、子树画在其一角。
+    ///
+    /// # 两向都要，且允许嵌套
+    ///
+    /// 「文字直立的竖排」（对联式）正是**外层顺时针 + 每个字逆时针**：外层把一行拆成一列，
+    /// 内层把每个字转回正的。两次旋转都是无损的整像素搬运，且 [`View::paint_rotated`]
+    /// 会把底子搬进临时缓冲再搬回，嵌套时内层看到的仍是正确的背景（差分法合成要用它）。
+    pub rot: Rot,
     // 计算结果
     mw: f32,
     mh: f32,
@@ -383,6 +424,7 @@ impl Default for View {
             grow: false,
             fill_cross: false,
             tag: -1,
+            rot: Rot::None,
             mw: 0.0,
             mh: 0.0,
             rect: Rect::default(),
@@ -544,6 +586,25 @@ impl View {
         self
     }
 
+    /// 把 `inner` 包进一个顺时针旋转 90° 的裸包裹层。见 [`View::rot`] 的形态约束。
+    pub fn rotated_cw(inner: View) -> Self {
+        Self::rotated(Rot::Cw, inner)
+    }
+
+    /// 逆时针版。用途只有一个：套在**已被外层顺时针旋转**的子树内部，把单个字扶正。
+    pub fn rotated_ccw(inner: View) -> Self {
+        Self::rotated(Rot::Ccw, inner)
+    }
+
+    fn rotated(rot: Rot, inner: View) -> Self {
+        debug_assert_ne!(rot, Rot::None, "旋转包裹层的方向不能是 None");
+        Self {
+            rot,
+            children: vec![inner],
+            ..Self::default()
+        }
+    }
+
     fn margin_box(&self) -> (f32, f32) {
         (self.mw + self.margin.w(), self.mh + self.margin.h())
     }
@@ -569,6 +630,25 @@ impl View {
     }
 
     fn measure(&mut self, tr: &TextRenderer) {
+        if self.rot != Rot::None {
+            debug_assert_eq!(
+                self.children.len(),
+                1,
+                "旋转节点必须恰好一个子节点（见 View::rot 的形态约束）"
+            );
+            // 子树按**未旋转**测量，本节点对外交换宽高——这是整个旋转能力的支点：
+            // 排版、宽度预算、文字截断全都在未旋转的局部空间里跑，一行都不用改。
+            let (cw, ch) = match self.children.first_mut() {
+                Some(c) => {
+                    c.measure(tr);
+                    c.margin_box()
+                }
+                None => (0.0, 0.0),
+            };
+            self.mw = ch;
+            self.mh = cw;
+            return;
+        }
         let (cw, ch) = if let Some(t) = &self.text {
             let m = tr.measure(t, &self.text_style(tr));
             (m.width, m.height)
@@ -625,6 +705,15 @@ impl View {
             h: self.mh,
         };
         if self.children.is_empty() {
+            return;
+        }
+        if self.rot != Rot::None {
+            // 子树排在**局部未旋转坐标系**里、原点 (0,0)：paint 时它被画进一张同尺寸的
+            // 临时缓冲，那张缓冲的左上角就是这个原点。命中矩形随后由 collect_hits 映射回屏幕。
+            if let Some(c) = self.children.first_mut() {
+                let (ml, mt) = (c.margin.l, c.margin.t);
+                c.arrange(ml, mt);
+            }
             return;
         }
         let cx0 = x + self.padding.l;
@@ -723,10 +812,50 @@ impl View {
         (self.mw, self.mh)
     }
 
+    /// 旋转 90° 绘制子树（方向由 [`Self::rot`] 定）。
+    ///
+    /// 三步：**把屏幕上那块底子逆向旋转搬进临时缓冲 → 子树照常画进去 → 正向旋转搬回**。
+    ///
+    /// ★ 第一步不能省、更不能用「填透明」代替：文本后端的差分法合成要拿目标像素当背景做
+    /// 抗锯齿混合（`dwrite.rs` 步骤 1），底子不对文字边缘就会带上错误的混色；窗口的圆角、
+    /// 渐变、九宫格背景也都在那块底子里。搬进来再搬回去，这些全部原样保留。
+    fn paint_rotated(&self, buf: &mut [u8], buf_w: u32, buf_h: u32, tr: &TextRenderer) {
+        // 屏幕上的尺寸已是交换后的；局部空间把它交换回来。
+        let rw = self.rect.w.round().max(0.0) as u32;
+        let rh = self.rect.h.round().max(0.0) as u32;
+        let (cw, ch) = (rh, rw); // 局部：宽=屏幕高，高=屏幕宽
+        if cw == 0 || ch == 0 {
+            return;
+        }
+        let ox = self.rect.x.round() as i32;
+        let oy = self.rect.y.round() as i32;
+        let mut tmp = vec![0u8; (cw as usize) * (ch as usize) * 4];
+        blit_unrotate(self.rot, buf, buf_w, buf_h, ox, oy, &mut tmp, cw, ch);
+        for c in &self.children {
+            c.paint(&mut tmp, cw, ch, tr);
+        }
+        blit_rotate(self.rot, &tmp, cw, ch, buf, buf_w, buf_h, ox, oy);
+    }
+
     /// 收集所有 tag>=0 节点的绝对矩形 → (tag, rect)
+    ///
+    /// ⚠️ 穿过 [`View::rot`] 节点时必须把子树的矩形从局部空间映射回屏幕空间——
+    /// 漏掉这一步的表现是「鼠标悬停/点击到相邻候选」，而画面完全正常，从现象反推不出成因。
     pub fn collect_hits(&self, out: &mut Vec<(i32, Rect)>) {
         if self.tag >= 0 {
             out.push((self.tag, self.rect));
+        }
+        if self.rot != Rot::None {
+            let mut local = Vec::new();
+            for c in &self.children {
+                c.collect_hits(&mut local);
+            }
+            out.extend(
+                local
+                    .into_iter()
+                    .map(|(t, r)| (t, rotate_rect(self.rot, r, self.rect))),
+            );
+            return;
         }
         for c in &self.children {
             c.collect_hits(out);
@@ -735,6 +864,10 @@ impl View {
 
     /// 递归绘制到 BGRA 缓冲区
     pub fn paint(&self, buf: &mut [u8], buf_w: u32, buf_h: u32, tr: &TextRenderer) {
+        if self.rot != Rot::None {
+            self.paint_rotated(buf, buf_w, buf_h, tr);
+            return;
+        }
         let r = self.rect;
         // 背景 + 边框：先铺底色（满圆角矩形），再画 even-odd 描边环覆盖外缘 bw 宽。
         // 边框作为干净描边环绘制（粗细恒为 bw、内外各一条 AA），不再用内/外两次填充
@@ -1087,6 +1220,123 @@ fn anchor_pos(anchor: &str, host: Rect, lw: f32, lh: f32) -> (f32, f32) {
         host.y + (host.h - lh) * 0.5
     };
     (ax, ay)
+}
+
+// ─────────────────── 90° 旋转：几何与像素搬运（纯函数）───────────────────
+//
+// 唯一的映射约定写在这里，三处（矩形映射、两次像素搬运）共用，**不得各写一遍**：
+//
+//   局部缓冲宽 `cw`、高 `ch`；屏幕矩形宽 `rw = ch`、高 `rh = cw`（两向都交换宽高）。
+//   屏幕内偏移 (sx, sy) ← 局部 (lx, ly)：
+//     顺时针  `lx = sy`、`ly = ch - 1 - sx`
+//     逆时针  `lx = cw - 1 - sy`、`ly = sx`
+//
+// 直觉校验：局部左上角 (0,0) 顺时针落到屏幕**右上角**、逆时针落到屏幕**左下角**。
+// 于是一行从左到右的文字，顺时针转完是一列从上到下 —— 蒙古文要的就是这个。
+
+/// 局部矩形 → 屏幕矩形。`host` 是旋转节点在屏幕上的矩形（宽高已交换）。
+///
+/// ★ 与 [`for_each_mapped`] 必须同源：这里给的是**连续**坐标（矩形四边），那里是
+/// **离散**像素中心，故此处不出现 `-1`。两者若各推一遍，命中区会整体偏一像素——
+/// 画面完全正常，只有点击落点不对，从现象反推不出成因。
+fn rotate_rect(rot: Rot, local: Rect, host: Rect) -> Rect {
+    match rot {
+        Rot::None => local,
+        Rot::Cw => Rect {
+            x: host.x + host.w - local.y - local.h,
+            y: host.y + local.x,
+            w: local.h,
+            h: local.w,
+        },
+        Rot::Ccw => Rect {
+            x: host.x + local.y,
+            y: host.y + host.h - local.x - local.w,
+            w: local.h,
+            h: local.w,
+        },
+    }
+}
+
+/// 把屏幕上 `(ox, oy)` 起、`ch × cw` 大小的那块**逆向**搬进局部缓冲（旋转的逆变换）。
+/// 越界像素留零：调用方随后会把同一批坐标搬回去，越界的部分两头都不参与。
+#[allow(clippy::too_many_arguments)]
+fn blit_unrotate(
+    rot: Rot,
+    buf: &[u8],
+    buf_w: u32,
+    buf_h: u32,
+    ox: i32,
+    oy: i32,
+    tmp: &mut [u8],
+    cw: u32,
+    ch: u32,
+) {
+    for_each_mapped(rot, buf_w, buf_h, ox, oy, cw, ch, |src_i, dst_i| {
+        tmp[dst_i..dst_i + 4].copy_from_slice(&buf[src_i..src_i + 4]);
+    });
+}
+
+/// 把局部缓冲**正向**旋转 90° 写回屏幕 `(ox, oy)` 处。
+#[allow(clippy::too_many_arguments)]
+fn blit_rotate(
+    rot: Rot,
+    tmp: &[u8],
+    cw: u32,
+    ch: u32,
+    buf: &mut [u8],
+    buf_w: u32,
+    buf_h: u32,
+    ox: i32,
+    oy: i32,
+) {
+    for_each_mapped(rot, buf_w, buf_h, ox, oy, cw, ch, |dst_i, src_i| {
+        buf[dst_i..dst_i + 4].copy_from_slice(&tmp[src_i..src_i + 4]);
+    });
+}
+
+/// 遍历两个缓冲之间的对应像素，回调收到 `(屏幕字节下标, 局部字节下标)`。
+///
+/// ★ 两次搬运共用它而不是各写一个双重循环：两处的坐标映射必须逐像素一致，否则
+/// 「搬进来的底子」与「搬回去的结果」错开一个像素——表现是文字边缘发虚且整体偏移一格，
+/// 而两段代码各自看都对。同 `dwrite.rs` 那条「测量与绘制向同一个 API 传不同参数」的教训。
+///
+/// `Rot::None` 不产出任何像素：调用点都在 `rot != None` 的分支里，真走到这儿说明
+/// 上游漏判了，什么都不画比画错位置更容易发现。
+#[allow(clippy::too_many_arguments)]
+fn for_each_mapped(
+    rot: Rot,
+    buf_w: u32,
+    buf_h: u32,
+    ox: i32,
+    oy: i32,
+    cw: u32,
+    ch: u32,
+    mut f: impl FnMut(usize, usize),
+) {
+    if rot == Rot::None {
+        debug_assert!(false, "for_each_mapped 不该收到 Rot::None");
+        return;
+    }
+    let (rw, rh) = (ch, cw); // 屏幕尺寸 = 局部尺寸交换
+    for sy in 0..rh {
+        let py = oy + sy as i32;
+        if py < 0 || py >= buf_h as i32 {
+            continue;
+        }
+        for sx in 0..rw {
+            let px = ox + sx as i32;
+            if px < 0 || px >= buf_w as i32 {
+                continue;
+            }
+            let (lx, ly) = match rot {
+                Rot::Cw => (sy, ch - 1 - sx),
+                _ => (cw - 1 - sy, sx),
+            };
+            let screen_i = ((py as u32 * buf_w + px as u32) * 4) as usize;
+            let local_i = ((ly * cw + lx) * 4) as usize;
+            f(screen_i, local_i);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1860,6 +2110,241 @@ mod shadow_cache_tests {
         }
         let after = base(BLACK);
         assert_eq!(before, after, "缓存清空后重建的蒙版须与首次一致");
+    }
+}
+
+/// 顺时针 90° 旋转：几何映射、像素搬运、测量与命中。
+///
+/// **不 gate 平台**：全部断言只用 `fixed_w`/`fixed_h` 与裸缓冲，不碰文本测量，
+/// 故三个平台答案相同（`layout_tests` 之所以 gate 是因为它断言文本尺寸）。
+#[cfg(test)]
+mod rotate_tests {
+    use super::*;
+    use crate::text::dwrite::TextRenderer;
+
+    fn tr() -> TextRenderer {
+        TextRenderer::new("test", 20.0).unwrap()
+    }
+
+    fn fixed(w: f32, h: f32, tag: i32) -> View {
+        View::container(Layout::Row).fixed_w(w).fixed_h(h).tag(tag)
+    }
+
+    fn hit(root: &View, tag: i32) -> Rect {
+        let mut out = Vec::new();
+        root.collect_hits(&mut out);
+        out.into_iter()
+            .find(|(t, _)| *t == tag)
+            .unwrap_or_else(|| panic!("tag {tag} 未命中"))
+            .1
+    }
+
+    /// 旋转节点对外交换宽高——整个旋转能力的支点：子树仍在未旋转空间里排版。
+    #[test]
+    fn rotation_swaps_the_measured_size() {
+        let mut root = View::rotated_cw(fixed(40.0, 10.0, 0));
+        root.layout(0.0, 0.0, &tr());
+        assert_eq!(root.measured_size(), (10.0, 40.0));
+    }
+
+    /// ★ 方向判据：局部左上角必须落到屏幕**右上角**。落到左下角就是逆时针，
+    /// 蒙古文会变成自下而上读。
+    #[test]
+    fn local_top_left_maps_to_screen_top_right() {
+        let host = Rect {
+            x: 100.0,
+            y: 200.0,
+            w: 10.0,
+            h: 40.0,
+        };
+        // 局部 (0,0) 处 2×3 的小块。
+        let got = rotate_rect(
+            Rot::Cw,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 2.0,
+                h: 3.0,
+            },
+            host,
+        );
+        assert_eq!(got.x, 100.0 + 10.0 - 3.0, "没贴到右缘 ⇒ 转反了");
+        assert_eq!(got.y, 200.0);
+        assert_eq!((got.w, got.h), (3.0, 2.0), "宽高没交换");
+    }
+
+    /// 命中矩形必须跟着转。漏掉映射时画面完全正常、只有鼠标点错候选，从现象反推不出成因。
+    ///
+    /// ★ 反向对照同样必要：不带旋转时矩形**不得**被映射。只测「转了」的话，
+    /// 一个无条件映射的实现会让普通候选窗的命中全错，而那条路径没人测。
+    #[test]
+    fn hit_rects_follow_the_rotation() {
+        let inner = View::container(Layout::Column)
+            .child(fixed(40.0, 10.0, 1))
+            .child(fixed(40.0, 10.0, 2));
+        let mut root = View::rotated_cw(inner);
+        root.layout(0.0, 0.0, &tr());
+        // 局部：1 在上 (y=0)、2 在下 (y=10)；屏幕宽 20（=局部高）。
+        // 顺时针后：1 贴右（x=10）、2 在左（x=0）。
+        assert_eq!(hit(&root, 1).x, 10.0);
+        assert_eq!(hit(&root, 2).x, 0.0);
+        assert_eq!(hit(&root, 1).w, 10.0, "屏幕宽应为局部高");
+        assert_eq!(hit(&root, 1).h, 40.0, "屏幕高应为局部宽");
+
+        let mut plain = View::container(Layout::Column)
+            .child(fixed(40.0, 10.0, 1))
+            .child(fixed(40.0, 10.0, 2));
+        plain.layout(0.0, 0.0, &tr());
+        assert_eq!(hit(&plain, 1).y, 0.0, "无旋转时不得映射");
+        assert_eq!(hit(&plain, 2).y, 10.0);
+    }
+
+    /// 像素方向：局部缓冲左上角那一点，搬到屏幕后必须在**右上角**。
+    /// 这条与 `local_top_left_maps_to_screen_top_right` 是同一约定的两个层面
+    /// （矩形 / 像素），必须一起钉——两处各写一遍映射正是最容易错开一格的地方。
+    #[test]
+    fn pixel_blit_puts_local_origin_at_screen_top_right() {
+        let (cw, ch) = (4u32, 3u32); // 局部 4×3 ⇒ 屏幕 3×4
+        let mut tmp = vec![0u8; (cw * ch * 4) as usize];
+        tmp[0..4].copy_from_slice(&[1, 2, 3, 4]); // 局部 (0,0)
+        let (bw, bh) = (3u32, 4u32);
+        let mut buf = vec![0u8; (bw * bh * 4) as usize];
+        blit_rotate(Rot::Cw, &tmp, cw, ch, &mut buf, bw, bh, 0, 0);
+        let top_right = ((bw - 1) * 4) as usize; // 第 0 行、最后一列
+        assert_eq!(&buf[top_right..top_right + 4], &[1, 2, 3, 4]);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 0], "左上角不该有东西");
+    }
+
+    /// 搬进来再搬回去必须是恒等——底子（窗口圆角/渐变/背景图）要原样保留，
+    /// 且文本后端的差分法合成拿它当抗锯齿的背景基准，错一位文字边缘就带错误混色。
+    #[test]
+    fn blit_round_trip_is_identity() {
+        let (cw, ch) = (5u32, 7u32);
+        let (bw, bh) = (ch, cw);
+        let orig: Vec<u8> = (0..(bw * bh * 4)).map(|i| (i % 251) as u8).collect();
+        let mut buf = orig.clone();
+        let mut tmp = vec![0u8; (cw * ch * 4) as usize];
+        blit_unrotate(Rot::Cw, &buf, bw, bh, 0, 0, &mut tmp, cw, ch);
+        blit_rotate(Rot::Cw, &tmp, cw, ch, &mut buf, bw, bh, 0, 0);
+        assert_eq!(buf, orig, "往返不是恒等：底子会被搬歪");
+    }
+
+    /// 逆时针的方向判据：局部左上角落到屏幕**左下角**。
+    ///
+    /// ★ 必须与顺时针那条一起看：两条只测「宽高交换了」的话，一个把 Ccw 也实现成
+    /// 顺时针的版本能全绿——而那样对联式竖排的每个字会是倒的（转了 180°）。
+    #[test]
+    fn ccw_puts_local_origin_at_screen_bottom_left() {
+        let host = Rect {
+            x: 100.0,
+            y: 200.0,
+            w: 10.0,
+            h: 40.0,
+        };
+        let got = rotate_rect(
+            Rot::Ccw,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 2.0,
+                h: 3.0,
+            },
+            host,
+        );
+        assert_eq!(got.x, 100.0, "没贴到左缘 ⇒ 转反了");
+        assert_eq!(got.y, 200.0 + 40.0 - 2.0, "没贴到下缘 ⇒ 转反了");
+        assert_eq!((got.w, got.h), (3.0, 2.0), "宽高没交换");
+
+        // 像素层同一约定（连续/离散两处最容易错开一格）。
+        let (cw, ch) = (4u32, 3u32); // 局部 4×3 ⇒ 屏幕 3×4
+        let mut tmp = vec![0u8; (cw * ch * 4) as usize];
+        tmp[0..4].copy_from_slice(&[1, 2, 3, 4]); // 局部 (0,0)
+        let (bw, bh) = (3u32, 4u32);
+        let mut buf = vec![0u8; (bw * bh * 4) as usize];
+        blit_rotate(Rot::Ccw, &tmp, cw, ch, &mut buf, bw, bh, 0, 0);
+        let bottom_left = ((bh - 1) * bw * 4) as usize;
+        assert_eq!(&buf[bottom_left..bottom_left + 4], &[1, 2, 3, 4]);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 0], "左上角不该有东西");
+    }
+
+    /// ★★ 对联式竖排的**全部数学**就是这一条：外层顺时针套内层逆时针 ≡ 什么都没做。
+    ///
+    /// 它同时钉住三件事——两向的映射互为逆、嵌套时内层拿到的底子是对的、宽高交换两次
+    /// 回到原值。任何一处方向写反，这里的像素就与直画不同（而单看某一向的测试都能全绿）。
+    ///
+    /// 用左右异色的两块而不是单色：单色块转 180° 也一样，测不出方向。
+    #[test]
+    fn cw_around_ccw_is_the_identity() {
+        const RED: [u8; 4] = [0, 0, 255, 255];
+        const BLUE: [u8; 4] = [255, 0, 0, 255];
+        let leaf = || {
+            View::container(Layout::Row)
+                .child(
+                    View::container(Layout::Row)
+                        .fixed_w(2.0)
+                        .fixed_h(2.0)
+                        .bg(RED),
+                )
+                .child(
+                    View::container(Layout::Row)
+                        .fixed_w(2.0)
+                        .fixed_h(2.0)
+                        .bg(BLUE),
+                )
+        };
+        let (bw, bh) = (4u32, 2u32);
+
+        let mut plain = leaf();
+        plain.layout(0.0, 0.0, &tr());
+        assert_eq!(plain.measured_size(), (4.0, 2.0));
+        let mut direct = vec![0u8; (bw * bh * 4) as usize];
+        plain.paint(&mut direct, bw, bh, &tr());
+
+        let mut nested = View::rotated_cw(View::rotated_ccw(leaf()));
+        nested.layout(0.0, 0.0, &tr());
+        assert_eq!(nested.measured_size(), (4.0, 2.0), "两次交换应回到原尺寸");
+        let mut got = vec![0u8; (bw * bh * 4) as usize];
+        nested.paint(&mut got, bw, bh, &tr());
+
+        assert_eq!(got, direct, "cw∘ccw 不是恒等 ⇒ 竖排的字会歪或倒");
+    }
+
+    /// 嵌套下的命中矩形也必须还原——画面对而点击错是这类 bug 的典型形态。
+    #[test]
+    fn cw_around_ccw_restores_hit_rects() {
+        let build = || {
+            View::container(Layout::Row)
+                .child(fixed(4.0, 2.0, 1))
+                .child(fixed(6.0, 2.0, 2))
+        };
+        let mut plain = build();
+        plain.layout(0.0, 0.0, &tr());
+        let mut nested = View::rotated_cw(View::rotated_ccw(build()));
+        nested.layout(0.0, 0.0, &tr());
+        for tag in [1, 2] {
+            let (n, p) = (hit(&nested, tag), hit(&plain, tag));
+            assert_eq!(
+                (n.x, n.y, n.w, n.h),
+                (p.x, p.y, p.w, p.h),
+                "tag {tag} 的命中区没还原"
+            );
+        }
+    }
+
+    /// 旋转块部分落在缓冲外时不得 panic，也不得写坏界内像素。
+    #[test]
+    fn out_of_bounds_blit_is_clipped_not_panicking() {
+        let (cw, ch) = (4u32, 4u32);
+        let tmp = vec![9u8; (cw * ch * 4) as usize];
+        let (bw, bh) = (4u32, 4u32);
+        let mut buf = vec![0u8; (bw * bh * 4) as usize];
+        // 原点在负象限：只有右下角一部分落在界内。
+        blit_rotate(Rot::Cw, &tmp, cw, ch, &mut buf, bw, bh, -2, -2);
+        assert_eq!(&buf[0..4], &[9, 9, 9, 9], "界内部分应被写到");
+        // 完全在界外：一个字节都不该动。
+        let mut buf2 = vec![0u8; (bw * bh * 4) as usize];
+        blit_rotate(Rot::Cw, &tmp, cw, ch, &mut buf2, bw, bh, 100, 100);
+        assert!(buf2.iter().all(|&b| b == 0));
     }
 }
 
