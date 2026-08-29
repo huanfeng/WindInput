@@ -22,8 +22,9 @@ pub use config::{
     CodetableGlobal, Config, CustomHideList, CustomIdentity, CustomManifest, DEFAULT_LABEL_CAPS,
     DEFAULT_LABEL_ENGLISH, LabelsConfig, LangBarConfig, LayoutIntent, MixGlobal,
     MobileAssociationConfig, MobileConfig, ModeIndicatorStyle, Orientation, PinyinFuzzy,
-    PinyinGlobalConfig, PreeditDisplay, SessionAction, TOOLBAR_ITEM_KEYS, TOOLBAR_LABEL_MAX_WIDTH,
-    TextOrientation, ToolbarButtonSpec, TopCommitMode, toolbar_label_trunc,
+    PinyinGlobalConfig, PreeditDisplay, ResourceLayer, SessionAction, TOOLBAR_ITEM_KEYS,
+    TOOLBAR_LABEL_MAX_WIDTH, TextOrientation, ToolbarButtonSpec, TopCommitMode,
+    toolbar_label_trunc,
 };
 pub use dir_var::{dir_var, dir_var_help, dir_var_names, dir_var_str, is_dir_var};
 pub use runtime_state::RuntimeState;

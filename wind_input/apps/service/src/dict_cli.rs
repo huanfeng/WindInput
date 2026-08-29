@@ -197,7 +197,8 @@ fn print_import_report(v: &Value) {
 /// 上锚点建议 **p99 而非 max**：虎码方案级 max=1e11（12 条脏数据）而 p99=343,880，
 /// 相差 30 万倍，用 max 会让量程被那 12 条吃掉。
 fn cmd_weight_check(args: &[String]) -> anyhow::Result<i32> {
-    let data_dir = match args.iter().position(|a| a == "--data") {
+    let explicit_data = args.iter().position(|a| a == "--data");
+    let data_dir = match explicit_data {
         Some(i) => std::path::PathBuf::from(
             args.get(i + 1)
                 .ok_or_else(|| anyhow::anyhow!("--data 后缺少目录"))?,
@@ -205,18 +206,49 @@ fn cmd_weight_check(args: &[String]) -> anyhow::Result<i32> {
         None => wind_config::Config::data_dir()
             .ok_or_else(|| anyhow::anyhow!("找不到数据目录，请用 --data <目录> 指定"))?,
     };
-    let schemas_dir = data_dir.join("schemas");
-    if !schemas_dir.is_dir() {
+    // 扫描层序：不带 `--data` 时按程序真实的层序（user > custom > data），否则**只看
+    // 指定的那个目录**——`--data` 的语义是「体检这个目录」（常指向构建产物），把
+    // %APPDATA% 与 data_custom 混进来会让结果对不上用户指的那份数据。
+    //
+    // 不加层序的后果：定制版里只存在于 `data_custom` 的方案，`dict weight-check` 一个都
+    // 看不见，而它恰恰是给定制者查词库权重用的工具。
+    let schemas_dirs: Vec<std::path::PathBuf> = if explicit_data.is_some() {
+        vec![data_dir.join("schemas")]
+    } else {
+        wind_config::Config::resource_layers_with(Some(&data_dir))
+            .into_iter()
+            .map(|d| d.join("schemas"))
+            .collect()
+    };
+    if !schemas_dirs.iter().any(|d| d.is_dir()) {
         anyhow::bail!("{} 不是有效的数据目录（缺 schemas/）", data_dir.display());
     }
     println!("数据目录: {}", data_dir.display());
+    for d in schemas_dirs.iter().skip(1).filter(|d| d.is_dir()) {
+        println!("附加层  : {}", d.display());
+    }
     println!("约定值域: 0 ~ {}\n", wind_dict::WEIGHT_RANGE_MAX);
 
-    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&schemas_dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.to_string_lossy().ends_with(".schema.toml"))
-        .collect();
-    files.sort();
+    // 各层合并，同名方案由**靠前的层**胜出（与 `EngineManager::resolve_schema_file` 同序）。
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for dir in &schemas_dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for p in rd.filter_map(|e| e.ok().map(|e| e.path())) {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+            let Some(name) = name.filter(|n| n.ends_with(".schema.toml")) else {
+                continue;
+            };
+            if seen.insert(name) {
+                files.push(p);
+            }
+        }
+    }
+    // 按**文件名**排（不是全路径）：多层合并后按路径排会先按层分组，同一份报告里
+    // 方案顺序随「它住在哪一层」跳动，读起来对不上。
+    files.sort_by_key(|p| p.file_name().map(|n| n.to_os_string()));
 
     let mut bad = 0usize;
     for f in files {
@@ -245,11 +277,17 @@ fn cmd_weight_check(args: &[String]) -> anyhow::Result<i32> {
         let mut files_n = 0usize;
         let mut missing: Vec<&str> = Vec::new();
         for d in &dicts {
-            let path = schemas_dir.join(&d.path);
-            if !path.is_file() {
+            // 词库同样逐层找：定制层换掉的词库要按它实际生效的那一份体检。
+            // （这里只认 `.dict.yaml` 源，wdat-only 的库读不出权重值，记 missing——
+            //  与改造前对 data 层的行为一致。）
+            let Some(path) = schemas_dirs
+                .iter()
+                .map(|dir| dir.join(&d.path))
+                .find(|p| p.is_file())
+            else {
                 missing.push(&d.path);
                 continue;
-            }
+            };
             match wind_dict::codetable::scan_weight_values(&path) {
                 Ok((mut ws, z)) => {
                     all.append(&mut ws);

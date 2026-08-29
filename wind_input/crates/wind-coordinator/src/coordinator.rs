@@ -1325,8 +1325,11 @@ pub struct Coordinator {
     /// 前台上下文快照 `(app, title, sel)`，供命令直通车 app()/title()/sel() 取值。
     /// darwin `.app` 经 CMD_FRONT_CONTEXT 于聚焦时上报；其它平台暂空。
     front_ctx: Mutex<(String, String, String)>,
-    /// 主题目录（data/themes）
-    pub(crate) themes_dir: Option<std::path::PathBuf>,
+    /// 主题搜索层：各资源层的 `themes/` 目录，靠前者优先（user > custom > data）。
+    ///
+    /// 带层名而不是裸路径列表：`list_themes_full` 要靠层名区分「内置（随安装包分发，
+    /// 不可删）」与「用户自带」，靠路径前缀猜会在便携版/自定义 data 目录下猜错。
+    pub(crate) theme_layers: Vec<wind_config::ResourceLayer>,
     /// 当前主题名
     pub(crate) theme_name: Mutex<String>,
     /// 主题颜色风格：0=跟随系统 1=亮色 2=暗色
@@ -1754,20 +1757,21 @@ impl Coordinator {
             }
         };
 
-        // 简繁转换器：从 data/opencc 加载（变体来自配置，默认 s2t）
-        let opencc_dir = data_dir.map(|d| d.join("opencc"));
+        // 简繁转换器：转换链里的**每本 octrie 各自按层序解析**（走 resolve_data_file
+        // 这个单文件收口点，`opencc/<名>.octrie`），定制层只放一本 `STPhrases.octrie`
+        // 也能正常工作，缺的那本自动落回出厂。**不能整份目录胜出**——理由见
+        // `Converter::load_variant_resolved` 的文档（残链会一个字都不转，且无从察觉）。
         let s2t_variant = if config.input.s2t.variant.is_empty() {
             "s2t".to_string()
         } else {
             config.input.s2t.variant.clone()
         };
-        let s2t = opencc_dir.as_ref().and_then(|dir| {
-            let conv = wind_transform::s2t::Converter::load_variant(dir, &s2t_variant);
-            if conv.is_some() {
-                info!("Loaded S2T converter (variant={})", s2t_variant);
-            }
-            conv
+        let s2t = wind_transform::s2t::Converter::load_variant_resolved(&s2t_variant, |file| {
+            Config::resolve_data_file(data_dir, &format!("opencc/{file}"))
         });
+        if s2t.is_some() {
+            info!("Loaded S2T converter (variant={})", s2t_variant);
+        }
 
         // 词频已迁 redb（self.store 的 FREQ 表，选词时 record_freq）。
 
@@ -1851,7 +1855,12 @@ impl Coordinator {
             .map(|d| wind_config::RuntimeState::load(&d))
             .unwrap_or_default();
         let toolbar_positions_init = runtime_state.toolbar_positions.clone();
-        let themes_dir = data_dir.map(|d| d.join("themes"));
+        // 主题目录按层序展开（user > custom > data），各层的 `themes/`。
+        let theme_layers: Vec<wind_config::ResourceLayer> =
+            Config::resource_layers_named_with(data_dir)
+                .into_iter()
+                .map(|l| l.sub("themes"))
+                .collect();
         // 初始主题名：config.ui.theme.name 为单一源，未设置则回退 FALLBACK_THEME。
         let cfg_theme = config.ui.theme.name.trim();
         let initial_theme = if !cfg_theme.is_empty() {
@@ -2036,7 +2045,7 @@ impl Coordinator {
             runtime_last: Mutex::new((init_chinese, init_full, init_punct)),
             last_caps_inject: Mutex::new(None),
             front_ctx: Mutex::new((String::new(), String::new(), String::new())),
-            themes_dir,
+            theme_layers,
             theme_name: Mutex::new(initial_theme),
             last_status_text: Mutex::new(String::new()),
             last_toolbar_push: Mutex::new(None),

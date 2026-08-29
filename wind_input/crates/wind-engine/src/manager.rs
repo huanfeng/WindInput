@@ -1603,18 +1603,18 @@ impl EngineManager {
         let mut ids: Vec<String> = self.available_schemas();
         let ov = self.override_dir.as_deref();
 
-        // 合并扫描：安装目录 data/schemas 与用户目录 %APPDATA%/…/schemas，
-        // 两处的 *.schema.toml 都算"已安装"——用户目录可新增第三方方案（read_schema
-        // 走 resolve_schema_file，本就用户目录优先，故用户方案能被读出并通过过滤）。
-        // 注：此处扫描顺序无关紧要（靠 !ids.contains 去重，两目录都贡献 id）；与
-        // shuangpin_layouts 的"用户优先覆盖"语义不同——那里靠前目录同名 stem 胜出。
-        let mut scan_dirs: Vec<std::path::PathBuf> = vec![data_dir.join("schemas")];
-        if let Some(user) = Config::user_config_dir() {
-            let ud = user.join("schemas");
-            if ud != scan_dirs[0] {
-                scan_dirs.push(ud);
-            }
-        }
+        // 合并扫描**全部资源层**（user / custom / data）的 schemas 目录，各层的
+        // *.schema.toml 都算"已安装"——用户目录可新增第三方方案、定制层可自带方案
+        // （read_schema 走 resolve_schema_file，本就按同一层序，故都能被读出并通过过滤）。
+        // 注：此处扫描顺序无关紧要（靠 !ids.contains 去重，**各层都贡献 id**）；与
+        // shuangpin_layouts 的"靠前胜出"语义不同——那里同名 stem 只取第一个。
+        let mut scan_dirs: Vec<std::path::PathBuf> = Config::resource_layers_with(Some(data_dir))
+            .into_iter()
+            .map(|d| d.join("schemas"))
+            .collect();
+        // 便携版可能把用户目录配成安装目录本身，去重免得同一目录扫两遍。
+        let mut seen_dirs = std::collections::HashSet::new();
+        scan_dirs.retain(|d| seen_dirs.insert(d.clone()));
 
         for dir in &scan_dirs {
             let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1702,8 +1702,8 @@ impl EngineManager {
             .map(|i| i as u8)
     }
 
-    /// 枚举可选的双拼布局：合并扫描 [用户目录, 安装目录] 的
-    /// `schemas/shuangpin/*.toml`，用户目录同名（按文件名 stem）覆盖安装目录。
+    /// 枚举可选的双拼布局：按层序（`user > custom > data`）合并扫描各层的
+    /// `schemas/shuangpin/*.toml`，靠前的层同名（按文件名 stem）覆盖靠后的层。
     ///
     /// 返回 `(id, 显示名)`：**id 取文件名 stem**（与加载路径 `{layout}.toml` 一致，
     /// 保证"能选=能加载"），显示名取布局 `[meta].name`；解析失败（如缺 `[finals]`）
@@ -1714,22 +1714,26 @@ impl EngineManager {
         let Some(data_dir) = self.data_dir.as_deref() else {
             return Vec::new();
         };
-        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-        if let Some(user) = Config::user_config_dir() {
-            dirs.push(user.join("schemas").join("shuangpin"));
-        }
-        dirs.push(data_dir.join("schemas").join("shuangpin"));
-        Self::scan_shuangpin_layouts(&dirs)
+        let layers: Vec<wind_config::ResourceLayer> =
+            Config::resource_layers_named_with(Some(data_dir))
+                .into_iter()
+                .map(|l| l.sub("schemas").sub("shuangpin"))
+                .collect();
+        Self::scan_shuangpin_layouts(&layers)
     }
 
-    /// 纯扫描逻辑（可测）：按 `dirs` 顺序扫描 `*.toml`，靠前目录优先，
+    /// 纯扫描逻辑（可测）：按 `layers` 顺序扫描 `*.toml`，靠前的层优先，
     /// 以文件名 stem 去重；输出按 id 字典序稳定排序。
-    fn scan_shuangpin_layouts(dirs: &[std::path::PathBuf]) -> Vec<(String, String)> {
-        // 值是胜出文件的路径，仅供被遮蔽方打覆盖日志时引用（见下）。
-        let mut seen: std::collections::HashMap<String, std::path::PathBuf> =
+    ///
+    /// 收带层名的 [`wind_config::ResourceLayer`] 而不是裸路径：覆盖日志要说清「胜出的是
+    /// 哪一层」，只有路径就只能靠前缀去猜。
+    fn scan_shuangpin_layouts(layers: &[wind_config::ResourceLayer]) -> Vec<(String, String)> {
+        // 值是胜出文件的 (层名, 路径)，仅供被遮蔽方打覆盖日志时引用（见下）。
+        let mut seen: std::collections::HashMap<String, (&'static str, std::path::PathBuf)> =
             std::collections::HashMap::new();
         let mut out: Vec<(String, String)> = Vec::new();
-        for dir in dirs {
+        for layer in layers {
+            let dir = &layer.path;
             let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
             };
@@ -1744,11 +1748,12 @@ impl EngineManager {
                     continue;
                 };
                 let id = stem.to_string();
-                if let Some(winner) = seen.get(&id) {
-                    // 靠前目录（用户）已收录：本条是被遮蔽的安装目录同名布局。打点必须放在
-                    // **被遮蔽方**——只有扫到这里才确证「两侧都有同名」，命中那一刻还不知道
-                    // 安装目录有没有；但日志里给的路径要是**胜出**的那份，故记住胜出路径。
-                    Config::log_user_override(
+                if let Some((winner_layer, winner)) = seen.get(&id) {
+                    // 靠前的层已收录：本条是被遮蔽的同名布局。打点必须放在**被遮蔽方**
+                    // ——只有扫到这里才确证「不止一层有同名」，命中那一刻还不知道后面的层
+                    // 有没有；但日志里给的层名与路径要是**胜出**的那份，故一并记住。
+                    Config::log_layer_override(
+                        winner_layer,
                         "shuangpin",
                         &format!("shuangpin/{id}.toml"),
                         winner,
@@ -1756,7 +1761,7 @@ impl EngineManager {
                     );
                     continue;
                 }
-                seen.insert(id.clone(), entry.path());
+                seen.insert(id.clone(), (layer.name, entry.path()));
                 match crate::pinyin::shuangpin::Layout::from_toml(&entry.path()) {
                     Ok(lay) => {
                         // id 以文件名 stem 为准（加载路径 {layout}.toml）；[meta].id 仅作校验。
@@ -3169,20 +3174,28 @@ impl EngineManager {
 
     // ───────────────────────── 词典加载 ─────────────────────────
 
-    /// 在 [用户配置/schemas, 安装/schemas] 中解析一个 schemas 相对文件路径，用户目录优先。
-    /// 用户目录存在同名文件即覆盖安装目录（schema 用户覆盖；方案/词典/字根表共用）。
+    /// 按层序（`user > custom > data`）解析一个 schemas 相对文件路径，靠前的层胜出。
+    ///
+    /// 这是**方案文件的唯一入口**：`read_schema` 的 `{id}.schema.toml` 与双拼布局的
+    /// `shuangpin/{id}.toml` 都走这里。
+    ///
+    /// ⚠️ **不能换成 `Config::resolve_schema_resource`**，两者契约不同：那个返回
+    /// `Option`（各层都没有 ⇒ None），本函数返回 `PathBuf`，**各层都没有时返回 data 层
+    /// 的路径**，由调用方 `exists()` 判定后报「方案文件不存在」。换过去会改变「找不到时
+    /// 返回什么」，把「缺文件」变成上游一路 `?` 掉的静默 None。
     fn resolve_schema_file(rel: &str, data_dir: &Path) -> std::path::PathBuf {
-        if let Some(user) = Config::user_config_dir() {
-            let p = user.join("schemas").join(rel);
-            if p.is_file() {
-                Config::log_user_override(
-                    "schema",
-                    rel,
-                    &p,
-                    data_dir.join("schemas").join(rel).is_file(),
-                );
-                return p;
+        let layers = Config::resource_layers_named_with(Some(data_dir));
+        for (i, layer) in layers.iter().enumerate() {
+            let p = layer.path.join("schemas").join(rel);
+            if !p.is_file() {
+                continue;
             }
+            // 遮蔽判定看**全部**后续层：用户层盖住 custom 层同样是「覆盖自带数据」。
+            let shadowed = layers[i + 1..]
+                .iter()
+                .any(|b| b.path.join("schemas").join(rel).is_file());
+            Config::log_layer_override(layer.name, "schema", rel, &p, shadowed);
+            return p;
         }
         data_dir.join("schemas").join(rel)
     }
@@ -3624,10 +3637,11 @@ impl EngineManager {
     /// `codetable-extra-<id>`(enabled=is_enabled())。**不再合并 combined.wdat**——查询期由
     /// CompositeDict 合并去重，开关扩展只需翻该层 enabled 标志，无需重熔大词库（对齐 Go 的
     /// 每库独立缓存 + 查询期合并）。主库优先返回（层序最靠前 → 等权重时排前）。
-    /// 词库文件路径解析：用户配置/schemas 优先，回退 schemas_dir（与 read_schema 同语义）。
+    /// 词库文件路径解析：按层序 `user > custom > data` 逐层，回退 schemas_dir（data 层，
+    /// 与 read_schema 同语义）。
     ///
     /// 同时支持 **wdat-only 词库**——用户可只投放编译好的 `xxx.wdat` 而不带
-    /// `xxx.dict.yaml`（对齐 Go 的 wdb-only 分发）。yaml 在两个目录都不存在时，改按同名
+    /// `xxx.dict.yaml`（对齐 Go 的 wdb-only 分发）。yaml 在**各层**都不存在时，改按同名
     /// wdat 再探一轮**相同顺序**，命中则返回该目录下的 yaml 路径：文件本身不存在，但
     /// `CachedDict::load_at_with` 会据此推导同目录的 wdat 并直接 mmap。
     ///
@@ -3638,52 +3652,76 @@ impl EngineManager {
     /// 本函数取代了此前 `load_codetable_layers` 与 `load_dictionary` 里两份逐字相同的
     /// 闭包——「两处各写一份」正是 R6 那条陈旧路径的成因。
     fn resolve_dict_file(rel: &str, schemas_dir: &Path) -> std::path::PathBuf {
-        Self::resolve_dict_file_in(
-            rel,
-            Config::user_config_dir()
-                .map(|u| u.join("schemas"))
-                .as_deref(),
-            schemas_dir,
-        )
+        Self::resolve_dict_file_in(rel, &Self::dict_layers(schemas_dir))
     }
 
-    /// [`Self::resolve_dict_file`] 的纯函数内核：用户 schemas 目录显式传入，便于测试
-    /// 四级优先级（user yaml → sys yaml → user wdat → sys wdat → 兜底 sys）。
+    /// 词库解析的层序，元素是**各层的 schemas 级目录**，末位必须是 data 层。
+    ///
+    /// ⚠️ data 层直接取调用方传进来的 `schemas_dir`（便携版/测试会传自定义路径），
+    /// **不从它 `parent()` 反推数据根**再交给 `resource_layers_named_with`——那是把「层的
+    /// 兄弟关系」埋进一个反推里，本仓已在这类隐式契约上栽过。user/custom 两层与 data
+    /// 目录参数无关（分别来自 `%APPDATA%` 与安装根下的清单），故取 `None` 那一支。
+    fn dict_layers(schemas_dir: &Path) -> Vec<wind_config::ResourceLayer> {
+        let mut layers: Vec<wind_config::ResourceLayer> = Config::resource_layers_named_with(None)
+            .into_iter()
+            .map(|l| l.sub("schemas"))
+            .collect();
+        layers.push(wind_config::ResourceLayer::new(
+            "data",
+            schemas_dir.to_path_buf(),
+        ));
+        layers
+    }
+
+    /// [`Self::resolve_dict_file`] 的纯函数内核：层序显式传入（元素为 schemas 级目录、
+    /// 靠前者优先、**末位是 data 层兼兜底**），便于测试多层组合。
+    ///
+    /// ★ **两趟，不是一趟。** 第 1 趟在各层找 `.yaml`，全都没有才进第 2 趟在各层找
+    /// 「有同名 `.wdat` 兄弟」的。改成一趟逐层「yaml 或 wdat 谁先命中算谁」会**反转语义**：
+    /// 用户层只投了 `.wdat`、data 层有 `.yaml` 时，正确结果是 **data 层的 yaml 胜出**
+    /// （yaml 整体优先于 wdat），一趟写法却会让用户的 wdat 抢走。加了 custom 层之后这类
+    /// 组合只会更多——定制者只投 `.wdat`（预编译词库的产物）是很自然的做法。
     fn resolve_dict_file_in(
         rel: &str,
-        user_schemas: Option<&Path>,
-        schemas_dir: &Path,
+        layers: &[wind_config::ResourceLayer],
     ) -> std::path::PathBuf {
-        // fn item 而非闭包：闭包会借住 `sys`，与后面几处 `return sys` 的 move 冲突。
+        // fn item 而非闭包：闭包会借住外部变量，与几处 return 的 move 冲突。
         fn has_wdat(p: &Path) -> bool {
             wind_dict::cached::wdat_sibling(p).is_some_and(|w| w.is_file())
         }
-        let sys = schemas_dir.join(rel);
-        // 1) yaml 按原优先级
-        if let Some(u) = user_schemas {
-            let p = u.join(rel);
-            if p.is_file() {
-                // 遮蔽判定含 wdat：安装侧只投放了 wdat（无 yaml）时，用户的 yaml 同样是覆盖。
-                Config::log_user_override("dict", rel, &p, sys.is_file() || has_wdat(&sys));
-                return p;
+        // 兜底同原行为：返回 data 层（末位）路径，由调用方报加载失败。层序恒非空
+        // （`dict_layers` 必压入 data 层），空表只可能来自测试，退化为相对路径。
+        let fallback = layers
+            .last()
+            .map(|l| l.path.join(rel))
+            .unwrap_or_else(|| std::path::PathBuf::from(rel));
+        // 1) 第 1 趟：yaml 逐层
+        for (i, layer) in layers.iter().enumerate() {
+            let p = layer.path.join(rel);
+            if !p.is_file() {
+                continue;
             }
+            // 遮蔽判定含 wdat：更靠后的层只投放了 wdat（无 yaml）时，本层的 yaml 同样是覆盖。
+            let shadowed = layers[i + 1..].iter().any(|b| {
+                let q = b.path.join(rel);
+                q.is_file() || has_wdat(&q)
+            });
+            Config::log_layer_override(layer.name, "dict", rel, &p, shadowed);
+            return p;
         }
-        if sys.is_file() {
-            return sys;
-        }
-        // 2) 两处都无 yaml → 按 wdat-only 同序再探
-        if let Some(u) = user_schemas {
-            let p = u.join(rel);
-            if has_wdat(&p) {
-                Config::log_user_override("dict", rel, &p, has_wdat(&sys));
-                return p;
+        // 2) 各层都无 yaml → 按 wdat-only 同序再探
+        for (i, layer) in layers.iter().enumerate() {
+            let p = layer.path.join(rel);
+            if !has_wdat(&p) {
+                continue;
             }
+            // 此时任何层都没有 yaml，遮蔽只可能来自更靠后层的 wdat。
+            let shadowed = layers[i + 1..].iter().any(|b| has_wdat(&b.path.join(rel)));
+            Config::log_layer_override(layer.name, "dict", rel, &p, shadowed);
+            return p;
         }
-        if has_wdat(&sys) {
-            return sys;
-        }
-        // 3) 兜底同原行为：返回安装目录路径，由调用方报加载失败
-        sys
+        // 3) 都没有
+        fallback
     }
 
     fn load_codetable_layers(schema: &Schema, schemas_dir: &Path) -> Vec<CodetableLayer> {
@@ -4140,7 +4178,10 @@ impl EngineManager {
 
     /// 加载整句词频用的拼音词库。由 `codetable::sentence` 的懒加载在首次解码时调用。
     pub(crate) fn load_sentence_freq_dict(schemas_dir: &Path) -> Option<CachedDict> {
-        let path = schemas_dir.join("pinyin/rime_frost.dict.yaml");
+        // 走 resolve_dict_file 而不是直接 join：这份词库同样可能被 custom / user 层替换，
+        // 直接拼 data 层路径的话「定制版换了拼音词库」对整句词频不生效——而现象只是
+        // 排序略有不同，没有任何日志，几乎不可能被归因。
+        let path = Self::resolve_dict_file("pinyin/rime_frost.dict.yaml", schemas_dir);
         let d = Self::load_rime_pinyin_dict(&path)?;
         info!("码表整句：已接入拼音词库作为词频来源 {}", path.display());
         Some(d)
@@ -4717,10 +4758,18 @@ mod tests {
         std::fs::create_dir_all(sys.join("s")).unwrap();
         let rel = "s/d.dict.yaml";
         let touch = |p: &std::path::Path| std::fs::write(p, b"x").unwrap();
+        let two = |u: Option<&std::path::Path>| -> Vec<wind_config::ResourceLayer> {
+            let mut v: Vec<wind_config::ResourceLayer> = Vec::new();
+            if let Some(u) = u {
+                v.push(wind_config::ResourceLayer::new("user", u.to_path_buf()));
+            }
+            v.push(wind_config::ResourceLayer::new("data", sys.clone()));
+            v
+        };
 
         // 全空 → 兜底安装目录
         assert_eq!(
-            EngineManager::resolve_dict_file_in(rel, Some(&user), &sys),
+            EngineManager::resolve_dict_file_in(rel, &two(Some(&user))),
             sys.join(rel),
             "全都没有时应兜底到安装目录（与改造前行为一致）"
         );
@@ -4728,14 +4777,14 @@ mod tests {
         // 只有安装目录的 wdat → 命中它
         touch(&sys.join("s/d.wdat"));
         assert_eq!(
-            EngineManager::resolve_dict_file_in(rel, Some(&user), &sys),
+            EngineManager::resolve_dict_file_in(rel, &two(Some(&user))),
             sys.join(rel)
         );
 
         // 用户目录也有 wdat → 用户目录优先
         touch(&user.join("s/d.wdat"));
         assert_eq!(
-            EngineManager::resolve_dict_file_in(rel, Some(&user), &sys),
+            EngineManager::resolve_dict_file_in(rel, &two(Some(&user))),
             user.join(rel),
             "用户目录的 wdat 必须优先于安装目录"
         );
@@ -4743,7 +4792,7 @@ mod tests {
         // 出现安装目录的 yaml → yaml 整体优先于 wdat
         touch(&sys.join(rel));
         assert_eq!(
-            EngineManager::resolve_dict_file_in(rel, Some(&user), &sys),
+            EngineManager::resolve_dict_file_in(rel, &two(Some(&user))),
             sys.join(rel),
             "yaml 在场时不得被任何 wdat 抢走"
         );
@@ -4751,14 +4800,99 @@ mod tests {
         // 用户目录的 yaml → 最高优先级
         touch(&user.join(rel));
         assert_eq!(
-            EngineManager::resolve_dict_file_in(rel, Some(&user), &sys),
+            EngineManager::resolve_dict_file_in(rel, &two(Some(&user))),
             user.join(rel)
         );
 
         // 无用户目录时不应 panic
         assert_eq!(
-            EngineManager::resolve_dict_file_in(rel, None, &sys),
+            EngineManager::resolve_dict_file_in(rel, &two(None)),
             sys.join(rel)
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// 三层（user / custom / data）下的词库解析：**两趟结构**必须保住。
+    ///
+    /// 核心是那个反例组合——靠前的层只投了 `.wdat`、靠后的层有 `.yaml`：
+    /// 正确结果是**靠后那层的 yaml 胜出**（第 1 趟就在各层找完了 yaml），而天真地改成
+    /// 一趟逐层「yaml 或 wdat 谁先命中算谁」会让靠前那层的 wdat 抢走。定制者只投
+    /// `.wdat`（预编译词库的产物）是很自然的做法，加了 custom 层后这类组合只会更多。
+    #[test]
+    fn resolve_dict_file_three_layers_keeps_two_pass_semantics() {
+        let base = std::env::temp_dir().join(format!("wind-resolve3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let user = base.join("user/schemas");
+        let custom = base.join("custom/schemas");
+        let sys = base.join("sys/schemas");
+        for d in [&user, &custom, &sys] {
+            std::fs::create_dir_all(d.join("s")).unwrap();
+        }
+        let rel = "s/d.dict.yaml";
+        let yaml = |d: &std::path::Path| d.join(rel);
+        let wdat = |d: &std::path::Path| d.join("s/d.wdat");
+        let touch = |p: std::path::PathBuf| std::fs::write(p, b"x").unwrap();
+        let layers = vec![
+            wind_config::ResourceLayer::new("user", user.clone()),
+            wind_config::ResourceLayer::new("custom", custom.clone()),
+            wind_config::ResourceLayer::new("data", sys.clone()),
+        ];
+        let got = || EngineManager::resolve_dict_file_in(rel, &layers);
+
+        // 三层皆空 → 兜底 data 层（末位）
+        assert_eq!(got(), yaml(&sys), "三层皆空应兜底到 data 层");
+
+        // ★ 反例组合一：user 只有 wdat、data 有 yaml ⇒ **data 的 yaml 胜出**。
+        // 一趟逐层写法会在这里返回 user 的路径——这正是本测试存在的理由。
+        touch(wdat(&user));
+        touch(yaml(&sys));
+        assert_eq!(
+            got(),
+            yaml(&sys),
+            "第 1 趟要在各层找完 yaml：user 只有 wdat 时不得抢走 data 的 yaml"
+        );
+
+        // ★ 反例组合二：中间层同理。custom 只有 wdat、data 有 yaml ⇒ 仍是 data 胜出。
+        touch(wdat(&custom));
+        assert_eq!(
+            got(),
+            yaml(&sys),
+            "custom 只投 wdat 时同样不得抢走 data 的 yaml"
+        );
+
+        // custom 补上 yaml ⇒ 第 1 趟命中 custom（user 只有 wdat，轮不到它）
+        touch(yaml(&custom));
+        assert_eq!(
+            got(),
+            yaml(&custom),
+            "第 1 趟按层序：custom 的 yaml 优先于 data 的 yaml"
+        );
+
+        // user 也补上 yaml ⇒ 最靠前的层胜出
+        touch(yaml(&user));
+        assert_eq!(got(), yaml(&user), "user 的 yaml 是最高优先级");
+
+        // 第 2 趟的层序：三层都只有 wdat 时，按同一层序取最靠前的（此处 custom，
+        // 因为 user 层这次不投）。
+        let base2 = base.join("pass2");
+        let u2 = base2.join("user/schemas");
+        let c2 = base2.join("custom/schemas");
+        let s2 = base2.join("sys/schemas");
+        for d in [&u2, &c2, &s2] {
+            std::fs::create_dir_all(d.join("s")).unwrap();
+        }
+        let layers2 = vec![
+            wind_config::ResourceLayer::new("user", u2.clone()),
+            wind_config::ResourceLayer::new("custom", c2.clone()),
+            wind_config::ResourceLayer::new("data", s2.clone()),
+        ];
+        touch(wdat(&c2));
+        touch(wdat(&s2));
+        assert_eq!(
+            EngineManager::resolve_dict_file_in(rel, &layers2),
+            yaml(&c2),
+            "第 2 趟（wdat-only）也要按层序：custom 的 wdat 优先于 data 的"
         );
 
         std::fs::remove_dir_all(&base).ok();
@@ -5865,17 +5999,21 @@ input_chars = \"a-z;\"
         let _ = std::fs::remove_dir_all(&ov_dir);
     }
 
-    /// scan_shuangpin_layouts：合并扫描多目录、靠前目录（用户）优先、
+    /// scan_shuangpin_layouts：合并扫描多层、靠前的层优先（user > custom > data）、
     /// 跳过解析失败（缺 [finals]）的布局、按 id 字典序排序。
     #[test]
     fn scan_shuangpin_layouts_merges_user_priority() {
         use std::io::Write;
 
-        let base = std::env::temp_dir().join("wind_eng_sp_layouts_test");
+        // 带 pid：多 worktree / 多会话并行跑测试时，固定名 + `remove_dir_all` 会互删夹具。
+        let base =
+            std::env::temp_dir().join(format!("wind_eng_sp_layouts_test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let install = base.join("install");
+        let custom = base.join("custom");
         let user = base.join("user");
         std::fs::create_dir_all(&install).unwrap();
+        std::fs::create_dir_all(&custom).unwrap();
         std::fs::create_dir_all(&user).unwrap();
 
         let write_layout =
@@ -5897,19 +6035,29 @@ input_chars = \"a-z;\"
         write_layout(&user, "xiaohe.toml", "xiaohe", "小鹤(用户版)", true);
         // 用户目录：损坏布局（缺 [finals]）应被跳过
         write_layout(&user, "broken.toml", "broken", "坏的", false);
+        // 定制层：新增 huma；mspy 盖住安装层；xiaohe 自己被用户层盖住（夹在中间的一层
+        // 既能盖人也能被盖，正是「两层扩成层序」最容易漏掉的那一格）。
+        write_layout(&custom, "huma.toml", "huma", "虎码双拼", true);
+        write_layout(&custom, "mspy.toml", "mspy", "微软双拼(定制版)", true);
+        write_layout(&custom, "xiaohe.toml", "xiaohe", "小鹤(定制版)", true);
 
-        // dirs 顺序：用户优先
-        let dirs = vec![user.clone(), install.clone()];
-        let got = EngineManager::scan_shuangpin_layouts(&dirs);
+        // 层序：user > custom > data
+        let layers = vec![
+            wind_config::ResourceLayer::new("user", user.clone()),
+            wind_config::ResourceLayer::new("custom", custom.clone()),
+            wind_config::ResourceLayer::new("data", install.clone()),
+        ];
+        let got = EngineManager::scan_shuangpin_layouts(&layers);
 
         assert_eq!(
             got,
             vec![
                 ("xiaohe".to_string(), "小鹤(用户版)".to_string()),
-                ("mspy".to_string(), "微软双拼".to_string()),
+                ("mspy".to_string(), "微软双拼(定制版)".to_string()),
+                ("huma".to_string(), "虎码双拼".to_string()),
                 ("shoudao".to_string(), "手道双拼".to_string()),
             ],
-            "布局枚举应合并、用户优先、跳过损坏、内置方案按流行度排序，实际={got:?}"
+            "布局枚举应合并、靠前的层优先、跳过损坏、内置方案按流行度排序，实际={got:?}"
         );
 
         let _ = std::fs::remove_dir_all(&base);

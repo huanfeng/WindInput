@@ -4,7 +4,6 @@
 //! 依赖方向是 wind-webdata → wind-coordinator，本 crate 不依赖 wind-transfer/fontdb，
 //! Android 闭包（不含 wind-webdata）因此无任何 C 依赖。
 
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use wind_engine::EngineManager;
@@ -28,7 +27,10 @@ pub trait WebDataHost {
     fn user_store(&self) -> Option<&Arc<Store>>;
     fn stat_collector(&self) -> Option<&StatCollector>;
     fn reverse_lookup(&self) -> &RwLock<ReverseLookup>;
-    fn themes_dir(&self) -> Option<&Path>;
+    // 曾有 `themes_dir() -> Option<&Path>`（安装目录的 themes 根），已删：它只有一个
+    // 用途——让 wind-webdata 自己拼一份「用户目录 + 安装目录」的搜索链，而那正是
+    // `theme_search_dirs()` 的第二份实现。加 data_custom 层时两份各改各的就会分叉。
+    // 需要主题目录一律走 `theme_search_dirs()`（已按层序展开）。
     fn rebuild_phrases(&self);
     fn restore_missing_system_phrases(&self, reason: &str);
     fn restore_system_phrases(&self) -> usize;
@@ -149,9 +151,6 @@ impl WebDataHost for Coordinator {
     }
     fn reverse_lookup(&self) -> &RwLock<ReverseLookup> {
         &self.reverse
-    }
-    fn themes_dir(&self) -> Option<&Path> {
-        self.themes_dir.as_deref()
     }
     fn rebuild_phrases(&self) {
         Coordinator::rebuild_phrases(self);

@@ -761,17 +761,11 @@ impl Coordinator {
         let _ = Config::set_user_string(&["ui", "theme", "name"], name);
     }
 
-    /// 主题搜索目录：用户主题目录（%APPDATA%\WindInput\themes，优先覆盖）+ 安装主题目录。
-    /// 用户目录靠前 → 同名主题用户版覆盖内置；base 继承跨目录解析（用户主题可 `base: _base`）。
+    /// 主题搜索目录：各资源层的 `themes/`，按层序 `user > custom > data`（见
+    /// [`wind_config::Config::resource_layers_named`]）。靠前的层同名主题覆盖靠后的；
+    /// base 继承跨目录解析（用户主题可 `base: _base`，定制版主题同理）。
     pub(crate) fn theme_search_dirs(&self) -> Vec<std::path::PathBuf> {
-        let mut dirs = Vec::new();
-        if let Some(d) = Config::user_config_dir() {
-            dirs.push(d.join("themes"));
-        }
-        if let Some(d) = &self.themes_dir {
-            dirs.push(d.clone());
-        }
-        dirs
+        self.theme_layers.iter().map(|l| l.path.clone()).collect()
     }
 
     /// [`Self::push_theme`] 的降级内核：探测源是参数，故降级路径可被单测覆盖。
@@ -842,8 +836,8 @@ impl Coordinator {
         let _ = self.ui_tx.send(UiCommand::SetTheme(Box::new(theme)));
     }
 
-    /// 列出可用主题：(id, 显示名)。程序目录主题优先（按 order/id 排序），
-    /// 用户目录独有主题排后（忽略 order，按 id 排序）。
+    /// 列出可用主题：(id, 显示名)。随安装包分发的主题（data / data_custom）优先
+    /// （按 order/id 排序），用户目录独有主题排后（忽略 order，按 id 排序）。
     ///
     /// 唯一排序实现：右键菜单与 RPC `theme.list`（[`Self::web_theme_list`]）
     /// 均基于此结果，避免两处各自扫描目录导致顺序不一致。
@@ -854,37 +848,51 @@ impl Coordinator {
             .collect()
     }
 
-    /// [`Self::list_themes`] 的完整版本，附带是否内置（程序目录）标记。
+    /// [`Self::list_themes`] 的完整版本，附带是否内置标记（内置 = 非用户层，即
+    /// data 或 data_custom；两者对用户都是只读、不可删）。
     pub(crate) fn list_themes_full(&self) -> Vec<(String, String, bool)> {
         let all_dirs = self.theme_search_dirs();
-        let user_dir = Config::user_config_dir().map(|d| d.join("themes"));
+        let user_dir = self
+            .theme_layers
+            .iter()
+            .find(|l| l.is_user())
+            .map(|l| l.path.clone());
 
-        // 扫描程序目录主题，按 (order, id) 排序
+        // 扫描**随安装包分发的**主题（data + data_custom 两层），按 (order, id) 排序。
+        // 定制版自带的主题算「内置」：它和出厂主题一样对用户不可写不可删，把它归到
+        // 用户侧会让设置页给出一个删不掉的删除按钮。
         let mut prog_rows: Vec<(String, String, i32)> = Vec::new();
-        if let Some(dir) = &self.themes_dir {
-            if let Ok(rd) = std::fs::read_dir(dir) {
-                for e in rd.filter_map(|e| e.ok()) {
-                    if !e.path().is_dir() {
-                        continue;
-                    }
-                    let Ok(id) = e.file_name().into_string() else {
-                        continue;
-                    };
-                    if id.starts_with('_') || !dir.join(&id).join("theme.toml").exists() {
-                        continue;
-                    }
-                    let meta = wind_theme::read_meta(&all_dirs, &id);
-                    let name = meta
-                        .as_ref()
-                        .map(|m| m.name.clone())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| id.clone());
-                    let order = meta.as_ref().map(|m| m.order).unwrap_or(0);
-                    prog_rows.push((id, name, order));
+        let mut prog_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for layer in self.theme_layers.iter().filter(|l| !l.is_user()) {
+            let dir = &layer.path;
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for e in rd.filter_map(|e| e.ok()) {
+                if !e.path().is_dir() {
+                    continue;
                 }
+                let Ok(id) = e.file_name().into_string() else {
+                    continue;
+                };
+                if id.starts_with('_') || !dir.join(&id).join("theme.toml").exists() {
+                    continue;
+                }
+                // 同名主题只列一次：custom 层靠前，它的 meta 已由 read_meta 按同一层序取到。
+                if !prog_seen.insert(id.clone()) {
+                    continue;
+                }
+                let meta = wind_theme::read_meta(&all_dirs, &id);
+                let name = meta
+                    .as_ref()
+                    .map(|m| m.name.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| id.clone());
+                let order = meta.as_ref().map(|m| m.order).unwrap_or(0);
+                prog_rows.push((id, name, order));
             }
-            prog_rows.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
         }
+        prog_rows.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
 
         let prog_ids: std::collections::HashSet<String> =
             prog_rows.iter().map(|(id, _, _)| id.clone()).collect();

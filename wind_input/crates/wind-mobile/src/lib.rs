@@ -521,22 +521,29 @@ fn spawn_ui_pump(
         .expect("spawn wind-ui-pump");
 }
 
-/// 扫描 `<data_dir>/schemas/*.schema.toml`，返回已安装的方案 id。
+/// 扫描**各资源层**（user / custom / data）的 `schemas/*.schema.toml`，返回已安装的方案 id。
+///
+/// 与桌面端 `EngineManager::installed_schemas` 同语义：**合并去重**，各层都贡献 id
+/// （不是「靠前层胜出」——那是双拼布局的语义）。层序见
+/// [`wind_config::Config::resource_layers_with`]。
 ///
 /// 顺序按文件名排序以保证**稳定**：方案下标要回送给引擎选择（`SelectSchema`），
 /// 顺序随目录遍历漂移会让「上次选的第 2 个」这次指向另一个方案。
 fn scan_installed_schemas(data_dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(data_dir.join("schemas")) else {
-        return Vec::new();
-    };
-    let mut ids: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| {
+    let mut ids: Vec<String> = Vec::new();
+    for base in Config::resource_layers_with(Some(data_dir)) {
+        let Ok(entries) = std::fs::read_dir(base.join("schemas")) else {
+            continue;
+        };
+        for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            name.strip_suffix(".schema.toml").map(str::to_owned)
-        })
-        .collect();
+            if let Some(id) = name.strip_suffix(".schema.toml") {
+                ids.push(id.to_owned());
+            }
+        }
+    }
     ids.sort();
+    ids.dedup();
     ids
 }
 

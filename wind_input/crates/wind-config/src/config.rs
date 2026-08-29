@@ -4718,6 +4718,42 @@ pub struct CustomHideList {
     pub hide: Vec<String>,
 }
 
+/// 一个资源层：层名 + 该层的根目录。见 [`Config::resource_layers_named`]。
+///
+/// 层名是 `user` / `custom` / `data` 三个**固定字面量**（`&'static str` 而非 String：
+/// 值域封闭，写错就编译不过的那种封闭）。它同时是日志措辞（`覆盖生效[custom][schema]`）
+/// 与呈现层判据（主题列表的 builtin = 非 user 层）的来源，两处必须指同一件事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceLayer {
+    /// 层名：`user` / `custom` / `data`。
+    pub name: &'static str,
+    /// 该层的根目录（`%APPDATA%\WindInput` / `<安装根>\data_custom` / `<安装根>\data`）。
+    pub path: PathBuf,
+}
+
+impl ResourceLayer {
+    /// 构造一层。层名只应取 `user` / `custom` / `data`。
+    pub fn new(name: &'static str, path: PathBuf) -> Self {
+        Self { name, path }
+    }
+
+    /// 层内子目录（`schemas` / `themes` / `opencc`），**层名不变**。
+    ///
+    /// 枚举点要的几乎都是「各层的某个子目录」，写成 `layers.map(|l| l.sub("themes"))`
+    /// 才不会在 map 里把层名丢掉——层名一丢，日志与 builtin 判定就只能靠猜路径前缀。
+    pub fn sub(&self, sub: &str) -> Self {
+        Self {
+            name: self.name,
+            path: self.path.join(sub),
+        }
+    }
+
+    /// 是否用户层（`%APPDATA%`）。其余层都是「随安装包分发的」，对用户不可写、不可删。
+    pub fn is_user(&self) -> bool {
+        self.name == "user"
+    }
+}
+
 /// 读取并解析定制版清单。见 [`Config::custom_manifest`]（含「解析失败 ⇒ 整层退场」的理由）。
 fn load_custom_manifest() -> Option<CustomManifest> {
     let file = crate::variant::install_root()?
@@ -5927,17 +5963,17 @@ impl Config {
                 None => base.join(rel),
             }
         };
-        let layers = Self::resource_layers_named(data_dir);
-        for (i, (layer, base)) in layers.iter().enumerate() {
-            let p = under(base);
+        let layers = Self::resource_layers_named_with(data_dir);
+        for (i, layer) in layers.iter().enumerate() {
+            let p = under(&layer.path);
             if !p.is_file() {
                 continue;
             }
             // `shadowed` = 「确实盖住了更靠后的某一层」，判据必须看**全部**后续层：
             // 用户层盖住 custom 层同样是「覆盖了自带数据」，只看 data 层会把它记成
             // 第三方自带资源（debug），于是定制版上最该被看见的那类覆盖反而不进日志。
-            let shadowed = layers[i + 1..].iter().any(|(_, b)| under(b).is_file());
-            Self::log_layer_override(layer, kind, rel, &p, shadowed);
+            let shadowed = layers[i + 1..].iter().any(|b| under(&b.path).is_file());
+            Self::log_layer_override(layer.name, kind, rel, &p, shadowed);
             return Some(p);
         }
         None
@@ -6123,27 +6159,40 @@ impl Config {
 
     /// 同 [`Self::resource_layers`]，但 data 层由调用方指定（`None` = 无 data 层）。
     pub fn resource_layers_with(data_dir: Option<&Path>) -> Vec<PathBuf> {
-        Self::resource_layers_named(data_dir)
+        Self::resource_layers_named_with(data_dir)
             .into_iter()
-            .map(|(_, p)| p)
+            .map(|l| l.path)
             .collect()
     }
 
-    /// 带层名的层序，供解析日志分辨「命中的是哪一层」。
+    /// 同 [`Self::resource_layers`]，但**带层名**（`user` / `custom` / `data`）。
+    ///
+    /// 层名不是装饰：解析点要用它打 [`Self::log_layer_override`]（「被谁覆盖」是排查
+    /// 定制版行为差异的第一个问题），枚举点要用它区分「内置 vs 用户自带」（主题列表的
+    /// builtin 标记、方案可删判定）。**没有这个公开形态，每个枚举点都会自己猜层名**
+    /// ——猜法一旦分叉，日志里的 `custom` 就不再指同一件事。
+    pub fn resource_layers_named() -> Vec<ResourceLayer> {
+        Self::resource_layers_named_with(Self::data_dir().as_deref())
+    }
+
+    /// 带层名的层序，data 层由调用方指定（`None` = 无 data 层，只剩 user/custom）。
     ///
     /// custom 层刻意**不**由 `data_dir` 推导（如取它的兄弟目录）：清单的 OnceLock 缓存
     /// 是进程级的，若目录随调用方参数变而清单不变，两者会失配——那种不一致只在传了
-    /// 自定义 data 目录的场合出现，最难查。
-    fn resource_layers_named(data_dir: Option<&Path>) -> Vec<(&'static str, PathBuf)> {
-        let mut layers: Vec<(&'static str, PathBuf)> = Vec::with_capacity(3);
+    /// 自定义 data 目录的场合出现，最难查。这条也是 `None` 的正当用法：调用方手里只有
+    /// 「data 层的某个子目录」（如 `wind-engine` 的 `schemas_dir`）时，用 `None` 取
+    /// user/custom 两层、再把自己那份 data 层接到末尾，**好过从子目录 `parent()` 反推
+    /// 数据根**——反推是把层的兄弟关系埋进一个隐式契约里。
+    pub fn resource_layers_named_with(data_dir: Option<&Path>) -> Vec<ResourceLayer> {
+        let mut layers: Vec<ResourceLayer> = Vec::with_capacity(3);
         if let Some(u) = Self::user_config_dir() {
-            layers.push(("user", u));
+            layers.push(ResourceLayer::new("user", u));
         }
         if let Some(c) = Self::custom_data_dir() {
-            layers.push(("custom", c));
+            layers.push(ResourceLayer::new("custom", c));
         }
         if let Some(d) = data_dir {
-            layers.push(("data", d.to_path_buf()));
+            layers.push(ResourceLayer::new("data", d.to_path_buf()));
         }
         layers
     }

@@ -162,16 +162,44 @@ pub struct Converter {
 }
 
 impl Converter {
-    /// 按变体从 opencc 目录加载转换链。无可用词典返回 None。
+    /// 按变体从**单个** opencc 目录加载转换链。无可用词典返回 None。
+    ///
+    /// 多层（`data` / `data_custom` / 用户目录）场景用
+    /// [`Self::load_variant_resolved`]——链里的每本词典各自逐层解析，见那里的说明。
     pub fn load_variant(opencc_dir: &Path, variant: &str) -> Option<Converter> {
+        Self::load_variant_resolved(variant, |file| Some(opencc_dir.join(file)))
+    }
+
+    /// 按变体加载转换链，链里**每本词典的路径由 `resolve` 逐个给出**（入参是文件名，
+    /// 如 `STPhrases.octrie`；返回 `None` 表示哪一层都没有）。
+    ///
+    /// # 为什么是逐文件解析，而不是「先选中一个目录再整份加载」
+    ///
+    /// 每个 `.octrie` 由 `gen_opencc` **各自独立生成**，`Converter` 的组合方式（组内取
+    /// 最长匹配、组间串行）就是 OpenCC 自己的组合模型——跨来源按名取文件正是它设计上
+    /// 支持的事。而「整份胜出」在本函数的加载语义下是**危险**的：下面那句
+    /// `if !group.is_empty()` 只要求组内**至少一本**加载成功，于是定制者只放了一本
+    /// `STPhrases.octrie`（只想改几个词组的繁体写法）时，「整份胜出」会拿一条只有词组表、
+    /// 没有 `STCharacters` 的**残链**当胜利：输入「简体字转换测试」一个字都不转，日志上
+    /// 只有一行「命中了定制层」，看不出链是残的。`STVariants.octrie`（以词定字的繁体
+    /// 变体候选）同样会随之整份消失。
+    ///
+    /// 逐文件解析下，定制层放半套是**正常工作**的：缺的那本自动落回下一层。
+    pub fn load_variant_resolved(
+        variant: &str,
+        resolve: impl Fn(&str) -> Option<std::path::PathBuf>,
+    ) -> Option<Converter> {
+        let load = |name: &str| -> Option<Dict> {
+            let p = resolve(&format!("{name}.octrie"))?;
+            Dict::load(&p)
+        };
         let chain = chain_for(variant);
         let mut steps = Vec::new();
         let mut post_st_start = 0;
         for (gi, group_names) in chain.into_iter().enumerate() {
             let mut group = Vec::new();
             for name in group_names {
-                let path = opencc_dir.join(format!("{}.octrie", name));
-                if let Some(d) = Dict::load(&path) {
+                if let Some(d) = load(name) {
                     group.push(d);
                 }
             }
@@ -186,7 +214,7 @@ impl Converter {
         if steps.is_empty() {
             None
         } else {
-            let variants = Dict::load(&opencc_dir.join("STVariants.octrie"));
+            let variants = load("STVariants");
             Some(Converter {
                 steps,
                 post_st_start,
@@ -307,8 +335,21 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// 真实 opencc 数据目录（`build_dev/data/opencc`）。
+    ///
+    /// ⚠️ 这里原本只写**两级** `../../build_dev/...`，解析到 `wind_input/build_dev/data/opencc`
+    /// ——那个目录不存在，于是本文件所有依赖真实数据的用例长期静默走「跳过」分支、
+    /// 计数照常绿，判据只有耗时。仓库根才是 `build_dev` 的位置（三级：
+    /// crates/wind-transform → crates → wind_input → 仓库根）。同款坑见
+    /// `wind-engine/tests/engine_manager.rs` 的同名函数，那边早已修正。
+    /// 两处都试，取真的有数据的那一个。
     fn opencc_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build_dev/data/opencc")
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = base.join("../../../build_dev/data/opencc");
+        [root.clone(), base.join("../../build_dev/data/opencc")]
+            .into_iter()
+            .find(|d| d.join("STCharacters.octrie").is_file())
+            .unwrap_or(root)
     }
 
     #[test]
@@ -403,6 +444,121 @@ mod tests {
         // 单值字不在变体表：返回空（展开层据此跳过）。
         assert!(conv.variants_of("汉").is_empty());
         assert!(conv.variants_of("x").is_empty());
+    }
+
+    /// 造一份最小 .octrie（格式见文件头）：entries 按 key 字节序排，offset 相对字符串池起点。
+    fn build_octrie(pairs: &[(&str, &str)]) -> Vec<u8> {
+        let mut rows: Vec<(&str, &str)> = pairs.to_vec();
+        rows.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let mut strings: Vec<u8> = Vec::new();
+        let mut entries: Vec<u8> = Vec::new();
+        let mut max_key = 0usize;
+        for (k, v) in &rows {
+            let ko = strings.len() as u32;
+            strings.extend_from_slice(k.as_bytes());
+            let vo = strings.len() as u32;
+            strings.extend_from_slice(v.as_bytes());
+            entries.extend_from_slice(&ko.to_le_bytes());
+            entries.extend_from_slice(&(k.len() as u16).to_le_bytes());
+            entries.extend_from_slice(&vo.to_le_bytes());
+            entries.extend_from_slice(&(v.len() as u16).to_le_bytes());
+            max_key = max_key.max(k.len());
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(max_key as u16).to_le_bytes());
+        out.extend_from_slice(&[0u8; 2]);
+        out.extend_from_slice(&entries);
+        out.extend_from_slice(&strings);
+        out
+    }
+
+    /// ★ 定制层只放一本 `STPhrases.octrie` 时，链的其余部分必须落回出厂那一层。
+    ///
+    /// 这是实测出来的静默失效：`load_variant` 的组内判据是「至少一本加载成功」
+    /// (`if !group.is_empty()`)，故「先选中一个目录再整份加载」会拿一条只有词组表的
+    /// **残链**当胜利——输入「简体字转换测试」一个字都不转，而日志上只有一行「命中定制层」。
+    /// 定制者只想改几个词组的繁体写法，放一本 STPhrases 是最自然的做法。
+    ///
+    /// 夹具全部自造（不依赖 build_dev 的真实 opencc 数据），故本用例永远真的在跑。
+    #[test]
+    fn resolved_chain_falls_back_per_file_not_per_directory() {
+        let base = std::env::temp_dir().join(format!("wind-s2t-layers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let data = base.join("data/opencc");
+        let custom = base.join("custom/opencc");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&custom).unwrap();
+
+        // data 层：字表 + 变体表（出厂自带的全套）
+        std::fs::write(
+            data.join("STCharacters.octrie"),
+            build_octrie(&[
+                ("简", "簡"),
+                ("体", "體"),
+                ("转", "轉"),
+                ("换", "換"),
+                ("测", "測"),
+                ("试", "試"),
+            ]),
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("STVariants.octrie"),
+            build_octrie(&[("发", "發 髮")]),
+        )
+        .unwrap();
+        // data 层也有词组表，定制层要能盖住它（证明「命中靠前层」这一半也成立）
+        std::fs::write(
+            data.join("STPhrases.octrie"),
+            build_octrie(&[("转换测试", "轉換測試")]),
+        )
+        .unwrap();
+        // custom 层：**只放一本**词组表
+        std::fs::write(
+            custom.join("STPhrases.octrie"),
+            build_octrie(&[("转换测试", "轉換測試〔定制〕")]),
+        )
+        .unwrap();
+
+        let layers = [custom.clone(), data.clone()];
+        let resolve = |file: &str| -> Option<PathBuf> {
+            layers
+                .iter()
+                .map(|d| d.join(file))
+                .find(|p| p.is_file())
+                .or(None)
+        };
+        let conv = Converter::load_variant_resolved("s2t", resolve).expect("应能建出链");
+
+        assert_eq!(
+            conv.convert("简体字转换测试"),
+            "簡體字轉換測試〔定制〕",
+            "定制层的词组表要生效，而字表必须仍从 data 层取——整份胜出时这里会原样不转"
+        );
+        assert_eq!(
+            conv.convert("简体"),
+            "簡體",
+            "定制层没有字表，不得因此丢掉出厂字表"
+        );
+        assert_eq!(
+            conv.variants_of("发"),
+            vec!["發", "髮"],
+            "STVariants 只在 data 层，同样不得被定制层的存在挤掉"
+        );
+
+        // 反面对照：只看定制层（= 旧的「整份胜出」在这台机器上的实际效果），
+        // 链只剩词组表，字表整个消失。
+        let only_custom = Converter::load_variant(&custom, "s2t").expect("残链也能建出来");
+        assert_eq!(
+            only_custom.convert("简体"),
+            "简体",
+            "对照：只有 STPhrases 的残链一个字都不转——这正是本用例要挡住的现象"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

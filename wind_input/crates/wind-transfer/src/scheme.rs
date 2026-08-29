@@ -7,6 +7,8 @@
 //! my/main.dict.yaml   引用资源
 //! ```
 //! 三分类:用户目录命中→打包;系统目录命中→记 system 引用;均无→记 missing。
+//! 「系统目录」是**一组**(`system_dirs`),按层序 `data_custom > data`——定制版自带的方案
+//! 与出厂方案同类:导出时一并打包(自包含),删除时永不触碰。
 //! 不再使用 bundle 层 manifest(方案文件自身已含 id/版本等大部分信息)。
 use std::collections::HashSet;
 use std::io::Write;
@@ -177,7 +179,13 @@ fn is_safe_rel(rel: &str) -> bool {
 
 /// 定位一个方案资源。**不安全的 rel 一律当 Missing**——调用方据此记进 `plan.missing`
 /// 并告警，既不打包也不删除。
-fn locate(rel: &str, user_dir: &Path, system_dir: Option<&Path>) -> Located {
+///
+/// `system_dirs` 是**按层序排列的一组**系统 schemas 目录（`data_custom` 在前、`data` 在后）。
+/// 只传 data 层的话，定制版里只存在于 `data_custom` 的方案会被判成 `Missing`——导出得到一个
+/// 装不回去的空包，删除则连引用都记不上。定制层归 `System` 而不是 `User` 是刚性的：同一个
+/// `locate` 也服务删除路径，判成 `User` 就等于允许程序删 `data_custom` 里的文件（破不变量
+/// 「程序永不写 data_custom」）。
+fn locate(rel: &str, user_dir: &Path, system_dirs: &[PathBuf]) -> Located {
     if !is_safe_rel(rel) {
         // 归到 Missing 而不是静默丢弃：调用方会把它记进 `plan.missing`，那条通道本来
         // 就是「这个引用没解析到」的出口，且一路上送到设置页的缺失清单——用户看到的是
@@ -191,7 +199,7 @@ fn locate(rel: &str, user_dir: &Path, system_dir: Option<&Path>) -> Located {
     if u.is_file() {
         return Located::User(u);
     }
-    if let Some(s) = system_dir {
+    for s in system_dirs {
         let sp = s.join(rel);
         if sp.is_file() {
             return Located::System(sp);
@@ -221,11 +229,11 @@ fn wdat_rel(rel: &str) -> Option<String> {
 ///
 /// 非词库资源（字根字体、shuangpin toml 等）不受影响——`wdat_sibling` 对非 yaml 后缀
 /// 返回 `None`，直接落回原结果。
-fn locate_resource(rel: &str, user_dir: &Path, system_dir: Option<&Path>) -> (String, Located) {
-    match locate(rel, user_dir, system_dir) {
+fn locate_resource(rel: &str, user_dir: &Path, system_dirs: &[PathBuf]) -> (String, Located) {
+    match locate(rel, user_dir, system_dirs) {
         Located::Missing => {
             if let Some(w) = wdat_rel(rel) {
-                match locate(&w, user_dir, system_dir) {
+                match locate(&w, user_dir, system_dirs) {
                     Located::Missing => {}
                     hit => return (w, hit),
                 }
@@ -304,7 +312,7 @@ fn read_override_value(
 pub fn collect_package_files(
     id: &str,
     user_dir: &Path,
-    system_dir: Option<&Path>,
+    system_dirs: &[PathBuf],
     override_dir: Option<&Path>,
     include_system: bool,
 ) -> anyhow::Result<CollectPlan> {
@@ -322,7 +330,7 @@ pub fn collect_package_files(
         true,
         include_system,
         user_dir,
-        system_dir,
+        system_dirs,
         override_dir,
         &mut plan,
         &mut visited,
@@ -336,7 +344,7 @@ fn collect_into(
     is_root: bool,
     include_system: bool,
     user_dir: &Path,
-    system_dir: Option<&Path>,
+    system_dirs: &[PathBuf],
     override_dir: Option<&Path>,
     plan: &mut CollectPlan,
     visited: &mut HashSet<String>,
@@ -347,7 +355,7 @@ fn collect_into(
     let schema_rel = format!("{id}.schema.toml");
     // 方案文件解析:用户优先;根方案系统命中必打包(包自含);非根系统命中在自包含模式下也
     // 打包并继续递归其资源,否则只记引用不递归(删除路径:系统文件永不触碰)。
-    let schema_abs = match locate(&schema_rel, user_dir, system_dir) {
+    let schema_abs = match locate(&schema_rel, user_dir, system_dirs) {
         Located::User(p) => p,
         Located::System(p) => {
             if is_root || include_system {
@@ -392,7 +400,7 @@ fn collect_into(
     for rel in resource_rels(&schema) {
         // 词库可能是 wdat-only（只有编译好的 .wdat、无 .dict.yaml 源），实际打包的相对
         // 路径要以命中者为准，见 locate_resource。
-        let (rel, located) = locate_resource(&rel, user_dir, system_dir);
+        let (rel, located) = locate_resource(&rel, user_dir, system_dirs);
         match located {
             Located::User(p) => plan.pack.push((rel, p)),
             // 自包含导出:系统词库/拆字库/字体也读源打包;删除路径:只记引用不打包。
@@ -415,7 +423,7 @@ fn collect_into(
                 false,
                 include_system,
                 user_dir,
-                system_dir,
+                system_dirs,
                 override_dir,
                 plan,
                 visited,
@@ -441,7 +449,7 @@ pub struct SchemeExportResult {
 pub fn export_package(
     id: &str,
     user_dir: &Path,
-    system_dir: Option<&Path>,
+    system_dirs: &[PathBuf],
     override_dir: Option<&Path>,
     out_path: &Path,
     app_version: &str,
@@ -449,7 +457,7 @@ pub fn export_package(
     created_at: &str,
 ) -> anyhow::Result<SchemeExportResult> {
     // 自包含导出:内置(系统目录)词库/拆字/字体一并打包,产出的包脱离目标机内置文件也完整可用。
-    let plan = collect_package_files(id, user_dir, system_dir, override_dir, true)?;
+    let plan = collect_package_files(id, user_dir, system_dirs, override_dir, true)?;
     let meta = PackageMeta {
         package: PackageInfo {
             format_version: PACKAGE_FORMAT_VERSION,
@@ -798,20 +806,20 @@ pub struct SchemeDeleteResult {
 pub fn delete_package(
     id: &str,
     user_dir: &Path,
-    system_dir: Option<&Path>,
+    system_dirs: &[PathBuf],
     keep_ids: &[String],
 ) -> anyhow::Result<SchemeDeleteResult> {
     // 删除只关心用户目录文件,系统命中记引用即可(include_system=false),避免解析系统子方案。
     // 不折叠 override(传 None):删除按方案文件本身的引用收集,语义与历史行为字节级一致;
     // 与导出侧的折叠不对称是刻意的,这轮不动删除的收集语义。
-    let plan = collect_package_files(id, user_dir, system_dir, None, false)?;
+    let plan = collect_package_files(id, user_dir, system_dirs, None, false)?;
     // 其余现存方案引用的文件集合(单个方案收集失败不阻断删除,跳过即可)。
     let mut kept: HashSet<String> = HashSet::new();
     for kid in keep_ids {
         if kid == id {
             continue;
         }
-        if let Ok(p) = collect_package_files(kid, user_dir, system_dir, None, false) {
+        if let Ok(p) = collect_package_files(kid, user_dir, system_dirs, None, false) {
             kept.extend(p.pack.into_iter().map(|(rel, _)| rel));
         }
     }
@@ -937,7 +945,8 @@ path = "wb/main.dict.yaml"
         // 只投放 wdat，不放 yaml
         fs::write(user.join("wb/main.wdat"), b"binary").unwrap();
 
-        let plan = collect_package_files("wb", &user, Some(&system), None, false).unwrap();
+        let plan =
+            collect_package_files("wb", &user, std::slice::from_ref(&system), None, false).unwrap();
         let names: Vec<&str> = plan.pack.iter().map(|(n, _)| n.as_str()).collect();
         assert!(
             names.contains(&"wb/main.wdat"),
@@ -962,6 +971,75 @@ path = "wb/main.dict.yaml"
         assert!(src.is_file());
     }
 
+    /// ★ 多个系统目录（`data_custom` 在前、`data` 在后）：
+    ///
+    /// 1. 只存在于 `data_custom` 的方案不得判成 `Missing`——只传 data 层时，定制版的方案
+    ///    导出会得到一个空包/全进 missing，用户拿它装不回去；
+    /// 2. 它归 `System` 而不是 `User`：同一个 `locate` 也服务删除路径，判成 `User` 就等于
+    ///    允许程序删 `data_custom` 里的文件（破不变量「程序永不写 data_custom」）；
+    /// 3. 自包含导出（`include_system = true`）照样把它读源打包，包在别的机器上可用；
+    /// 4. 同名文件靠前的层（custom）胜出。
+    #[test]
+    fn custom_layer_counts_as_system_not_missing() {
+        let t = tempfile::tempdir().unwrap();
+        let (user, custom, data) = (t.path().join("u"), t.path().join("dc"), t.path().join("d"));
+        fs::create_dir_all(user.join("tiger")).unwrap();
+        fs::create_dir_all(custom.join("tiger")).unwrap();
+        fs::create_dir_all(data.join("tiger")).unwrap();
+        // 方案文件与主词库只在定制层；另有一本词库两层都有（定制层应胜出）。
+        fs::write(
+            custom.join("tiger.schema.toml"),
+            "[schema]\nid = \"tiger\"\n[engine]\ntype = \"codetable\"\n\
+             [[dictionaries]]\npath = \"tiger/main.dict.yaml\"\n\
+             [[dictionaries]]\npath = \"tiger/both.dict.yaml\"\n",
+        )
+        .unwrap();
+        fs::write(custom.join("tiger/main.dict.yaml"), "custom-main").unwrap();
+        fs::write(custom.join("tiger/both.dict.yaml"), "custom-both").unwrap();
+        fs::write(data.join("tiger/both.dict.yaml"), "data-both").unwrap();
+
+        let sys = vec![custom.clone(), data.clone()];
+
+        // 自包含导出：定制层的方案文件与词库都读源打包，missing 为空。
+        let plan = collect_package_files("tiger", &user, &sys, None, true).unwrap();
+        let names: Vec<&str> = plan.pack.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"tiger.schema.toml") && names.contains(&"tiger/main.dict.yaml"),
+            "只存在于 data_custom 的方案与词库必须入包，实际: {names:?}"
+        );
+        assert!(
+            plan.missing.is_empty(),
+            "定制层命中不得记成缺失，实际: {:?}",
+            plan.missing
+        );
+        let both = plan
+            .pack
+            .iter()
+            .find(|(n, _)| n == "tiger/both.dict.yaml")
+            .map(|(_, p)| p.clone())
+            .expect("both 应入包");
+        assert_eq!(
+            fs::read_to_string(&both).unwrap(),
+            "custom-both",
+            "同名文件靠前的层（custom）胜出"
+        );
+
+        // 删除路径（include_system=false）：非根的系统命中只记引用。根方案本身按既有
+        // 语义仍会进 pack（包必须自含方案文件），但删除侧另有 user_dir 前缀守卫，
+        // 这里只断言资源不会被当成可删的用户文件。
+        let del = collect_package_files("tiger", &user, &sys, None, false).unwrap();
+        assert!(
+            del.system_refs
+                .contains(&"tiger/main.dict.yaml".to_string()),
+            "删除路径下定制层资源必须只记 system_refs，实际: {:?}",
+            del.system_refs
+        );
+        assert!(
+            !del.pack.iter().any(|(n, _)| n == "tiger/main.dict.yaml"),
+            "定制层资源不得进入删除路径的 pack（那等于允许程序删 data_custom）"
+        );
+    }
+
     /// yaml 与 wdat 并存时走原路径，wdat 不得抢占（正常方案行为一步不变）。
     #[test]
     fn yaml_wins_over_sibling_wdat_when_packing() {
@@ -977,7 +1055,8 @@ path = "wb/main.dict.yaml"
         fs::write(user.join("wb/main.dict.yaml"), "src").unwrap();
         fs::write(user.join("wb/main.wdat"), b"binary").unwrap();
 
-        let plan = collect_package_files("wb", &user, Some(&system), None, false).unwrap();
+        let plan =
+            collect_package_files("wb", &user, std::slice::from_ref(&system), None, false).unwrap();
         let names: Vec<&str> = plan.pack.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"wb/main.dict.yaml"));
         assert!(!names.contains(&"wb/main.wdat"), "yaml 在场时不应改打 wdat");
@@ -989,7 +1068,8 @@ path = "wb/main.dict.yaml"
         let t = tempfile::tempdir().unwrap();
         let (user, system) = (t.path().join("u"), t.path().join("s"));
         fixture(&user, &system);
-        let plan = collect_package_files("my", &user, Some(&system), None, false).unwrap();
+        let plan =
+            collect_package_files("my", &user, std::slice::from_ref(&system), None, false).unwrap();
         assert_eq!(
             plan.missing,
             vec!["my/ghost.dict.yaml"],
@@ -1002,7 +1082,8 @@ path = "wb/main.dict.yaml"
         let t = tempfile::tempdir().unwrap();
         let (user, system) = (t.path().join("u"), t.path().join("s"));
         fixture(&user, &system);
-        let plan = collect_package_files("my", &user, Some(&system), None, false).unwrap();
+        let plan =
+            collect_package_files("my", &user, std::slice::from_ref(&system), None, false).unwrap();
         let names: Vec<&str> = plan.pack.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"my.schema.toml"), "根方案文件必打包");
         assert!(names.contains(&"my/main.dict.yaml"));
@@ -1038,7 +1119,8 @@ secondary_schema = "pinyin"
             "[schema]\nid=\"pinyin\"\n",
         )
         .unwrap();
-        let plan = collect_package_files("mix", &user, Some(&system), None, false).unwrap();
+        let plan = collect_package_files("mix", &user, std::slice::from_ref(&system), None, false)
+            .unwrap();
         let names: Vec<&str> = plan.pack.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"mix.schema.toml"));
         assert!(names.contains(&"my.schema.toml"), "用户引用方案递归打包");
@@ -1057,7 +1139,8 @@ secondary_schema = "pinyin"
         let t = tempfile::tempdir().unwrap();
         let (user, system) = (t.path().join("u"), t.path().join("s"));
         fixture(&user, &system);
-        let plan = collect_package_files("my", &user, Some(&system), None, true).unwrap();
+        let plan =
+            collect_package_files("my", &user, std::slice::from_ref(&system), None, true).unwrap();
         let names: Vec<&str> = plan.pack.iter().map(|(n, _)| n.as_str()).collect();
         assert!(
             names.contains(&"sys/shared.dict.yaml"),
@@ -1098,7 +1181,8 @@ secondary_schema = "pinyin"
         .unwrap();
         fs::write(system.join("pinyin/main.dict.yaml"), "py").unwrap();
 
-        let plan = collect_package_files("mix", &user, Some(&system), None, true).unwrap();
+        let plan =
+            collect_package_files("mix", &user, std::slice::from_ref(&system), None, true).unwrap();
         let names: Vec<&str> = plan.pack.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"pinyin.schema.toml"), "系统子方案文件入包");
         assert!(
@@ -1118,7 +1202,7 @@ secondary_schema = "pinyin"
         let r = export_package(
             "my",
             &user,
-            Some(&system),
+            std::slice::from_ref(&system),
             None,
             &out,
             "1.0.0",
@@ -1186,7 +1270,7 @@ layout = "old"
         let r = export_package(
             "sp",
             &user,
-            Some(&system),
+            std::slice::from_ref(&system),
             Some(&ov_dir),
             &out,
             "1.0.0",
@@ -1226,7 +1310,7 @@ layout = "old"
         let r = export_package(
             "my",
             &user,
-            Some(&system),
+            std::slice::from_ref(&system),
             Some(&ov_dir),
             &out,
             "1.0.0",
@@ -1234,7 +1318,8 @@ layout = "old"
             "t",
         )
         .unwrap();
-        let baseline = collect_package_files("my", &user, Some(&system), None, true).unwrap();
+        let baseline =
+            collect_package_files("my", &user, std::slice::from_ref(&system), None, true).unwrap();
         let baseline_rels: Vec<String> = baseline.pack.iter().map(|(n, _)| n.clone()).collect();
         assert_eq!(r.packed, baseline_rels, "无 override 时打包清单不变");
         // 字节级:包内方案文件 == 源文件原字节(不走 Value 序列化往返)
@@ -1257,7 +1342,7 @@ layout = "old"
         let err = export_package(
             "my",
             &user,
-            Some(&system),
+            std::slice::from_ref(&system),
             Some(&ov_dir),
             &out,
             "1.0.0",
@@ -1298,7 +1383,7 @@ layout = "old"
         let r = export_package(
             "mix",
             &user,
-            Some(&system),
+            std::slice::from_ref(&system),
             Some(&ov_dir),
             &out,
             "1.0.0",
@@ -1332,7 +1417,7 @@ layout = "old"
         export_package(
             "my",
             &user,
-            Some(&system),
+            std::slice::from_ref(&system),
             None,
             &out,
             "1.0.0",
@@ -1373,7 +1458,7 @@ layout = "old"
         export_package(
             "my",
             &user,
-            Some(&system),
+            std::slice::from_ref(&system),
             None,
             &out,
             "1.0.0",
@@ -1822,7 +1907,7 @@ layout = "old"
         .unwrap();
 
         let keep = vec!["other".to_string()];
-        let r = delete_package("my", &user, Some(&system), &keep).unwrap();
+        let r = delete_package("my", &user, std::slice::from_ref(&system), &keep).unwrap();
         assert!(r.deleted.contains(&"my.schema.toml".to_string()));
         assert!(r.deleted.contains(&"my/main.dict.yaml".to_string()));
         assert!(
@@ -1857,7 +1942,7 @@ layout = "old"
         .unwrap();
 
         // 无其它方案共享 → mix 及其递归引用的用户方案 my 一并删除
-        let r = delete_package("mix", &user, Some(&system), &[]).unwrap();
+        let r = delete_package("mix", &user, std::slice::from_ref(&system), &[]).unwrap();
         assert!(r.deleted.contains(&"mix.schema.toml".to_string()));
         assert!(
             r.deleted.contains(&"my.schema.toml".to_string()),
@@ -1891,7 +1976,7 @@ layout = "old"
             .unwrap();
         }
         let keep = vec!["mix2".to_string()];
-        let r = delete_package("mix1", &user, Some(&system), &keep).unwrap();
+        let r = delete_package("mix1", &user, std::slice::from_ref(&system), &keep).unwrap();
         assert!(r.deleted.contains(&"mix1.schema.toml".to_string()));
         assert!(
             r.kept_shared.contains(&"my.schema.toml".to_string()),
@@ -1987,7 +2072,7 @@ layout = "old"
         let t = tempfile::tempdir().unwrap();
         let (user, victim) = evil_schema_fixture(t.path());
 
-        let r = delete_package("evil", &user, None, &[]).unwrap();
+        let r = delete_package("evil", &user, &[], &[]).unwrap();
         assert!(victim.exists(), "越界文件被删了：{:?}", r.deleted);
         assert_eq!(
             r.deleted,
@@ -2003,7 +2088,7 @@ layout = "old"
         let (user, _victim) = evil_schema_fixture(t.path());
         let out = t.path().join("evil.wpkg");
 
-        let r = export_package("evil", &user, None, None, &out, "0.0.0", "windows", "t").unwrap();
+        let r = export_package("evil", &user, &[], None, &out, "0.0.0", "windows", "t").unwrap();
         assert_eq!(r.packed, vec!["evil.schema.toml"], "越界文件不得入包");
         // 直接查 zip：`packed` 是我们自己填的，光看它等于自证。
         let a = zip::ZipArchive::new(fs::File::open(&out).unwrap()).unwrap();
@@ -2036,7 +2121,7 @@ layout = "old"
         )
         .unwrap();
 
-        let plan = collect_package_files("mix", &user, None, None, true).unwrap();
+        let plan = collect_package_files("mix", &user, &[], None, true).unwrap();
         let packed: Vec<&str> = plan.pack.iter().map(|(r, _)| r.as_str()).collect();
         assert_eq!(packed, vec!["mix.schema.toml"], "越界子方案不得被收集");
         assert!(
@@ -2139,7 +2224,8 @@ layout = "old"
         let t = tempfile::tempdir().unwrap();
         let (user, system) = (t.path().join("u"), t.path().join("s"));
         fixture(&user, &system);
-        let plan = collect_package_files("my", &user, Some(&system), None, false).unwrap();
+        let plan =
+            collect_package_files("my", &user, std::slice::from_ref(&system), None, false).unwrap();
         let packed: Vec<&str> = plan.pack.iter().map(|(r, _)| r.as_str()).collect();
         assert!(
             packed.contains(&"my/main.dict.yaml") && packed.contains(&"my/chaizi.txt"),

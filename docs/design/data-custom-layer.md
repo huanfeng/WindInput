@@ -219,7 +219,7 @@ stats/mobile/debug 各 3。只按顶层段降级的话，`ui.font.scripts` 一�
 | `manager.rs:1719` `shuangpin_layouts` | 目录列表，靠前同名 stem 胜出 |
 | `handle_mode.rs:756` `theme_search_dirs` | 主题搜索链 |
 | `webdata/lib.rs:3035` `theme_dirs` | 设置页主题列表（与上一条**是两份**） |
-| `coordinator.rs:1737` `join("opencc")` | 简繁数据目录 |
+| `coordinator.rs:1737` `join("opencc")` | 简繁数据目录（实施时改为**按名逐文件**解析，见下） |
 | `coordinator.rs:1807` `join("themes")` | 主题根 |
 | `wind-mobile/lib.rs:528` `read_dir(join("schemas"))` | 移动端方案枚举 |
 
@@ -261,6 +261,71 @@ stats/mobile/debug 各 3。只按顶层段降级的话，`ui.font.scripts` 一�
 **(c) API 缺口**：`resource_layers_with()` 只返回路径，而日志需要层名
 （`log_layer_override` 要 user/custom/data）。P1d 需要一个带层名的公开形态
 （如 `ResourceLayer { name, path }`），否则每个枚举点都要自己猜层名。
+
+#### ★ P1d 实施结论
+
+**层名 API 落成 `ResourceLayer { name: &'static str, path: PathBuf }`**（含 `sub()` /
+`is_user()`），`Config::resource_layers_named[_with]()` 公开返回它；
+`resource_layers[_with]()` 保持返回纯路径，给不关心层名的调用方。层名不只喂日志——
+主题列表的 builtin 标记、P2 的「方案可不可删」都要靠它，靠路径前缀猜会在便携版
+/自定义 data 目录下猜错。
+
+**上表七处之外，另有四处同类落点**（本次一并接线，否则同样是静默降级）：
+
+| 落点 | 不改的后果 |
+|---|---|
+| `manager.rs` `load_sentence_freq_dict` | 直接 `schemas_dir.join("pinyin/rime_frost.dict.yaml")`。定制版换了拼音词库，码表整句的**词频来源**仍读 data 层，现象只是「排序有点不对」，无日志 |
+| `handle_mode.rs` `list_themes_full` 的「程序目录」扫描 | 只扫 data 层 ⇒ 定制版主题进得了搜索链却**不进设置页/右键列表**，现象是「主题在包里，界面上没有」 |
+| `wind-webdata` `system_schemas_dir()` → **`system_schemas_dirs()`** | 它喂给 `wind_transfer::scheme::{export_package, delete_package}` 当「系统目录」。只传 data 层时，只存在于 `data_custom` 的方案被 `locate` 判成 `Missing` ⇒ 导出成功但包是空的/全进 missing，**用户拿它装不回去**。改为传「非 user 的每一层」：定制层与出厂层同类——导出一并打包（自包含），删除永不触碰（判成 `User` 就等于允许程序删 `data_custom`，破不变量 3）。`scheme.rs` 的 `system_dir: Option<&Path>` 随之改为 `system_dirs: &[PathBuf]` |
+| `apps/service/src/dict_cli.rs` `cmd_weight_check` | 单目录 `read_dir` + `schemas_dir.join(词库)` ⇒ `dict weight-check` 看不见定制层自带的方案，而它恰恰是给定制者查权重用的工具。**带 `--data` 时仍只看指定目录**（那个标志的语义是「体检这个目录」，混进 `%APPDATA%`/`data_custom` 会让结果对不上用户所指的那份数据） |
+
+顺带把 `wind-webdata` 的 `theme_dirs()` 改为直接复用 `theme_search_dirs()`——那两份
+本就逐字重复，留着就是下一次分叉的种子。`WebDataHost::themes_dir()` 随之删除
+（它唯一的用途就是让人再拼一份两层链）。
+
+**`opencc` 按名逐文件覆盖**（§2 表格写的「搜索链按名覆盖」是对的）。实现走
+`Converter::load_variant_resolved(variant, resolve)`：链里每本 octrie 各自经
+`resolve_data_file(data_dir, "opencc/<名>.octrie")` 逐层解析。
+
+> ⚠️ 这里曾一度实现成「逐层探测、首个能建出链的目录整份胜出」，理由写的是「半份定制
+> 半份出厂会拼出一条没人验证过的链」。**那个理由不成立，且已实测出静默失效**：定制者
+> 只想改几个词组的繁体写法，往 `data_custom/opencc/` 放一本 `STPhrases.octrie`，输入
+> 「简体字转换测试」**一个字都不转**。机理是 `load_variant` 的组内判据只要求「至少一本
+> 加载成功」（`if !group.is_empty()`），于是残链被当成胜利，日志只有一行「命中定制层」，
+> 看不出链是残的；`STVariants.octrie`（以词定字的繁体变体）也随之整份消失。而且那一版
+> **把风险新引入了用户层**——改动前 opencc 只看 data 层，整份胜出之后 `%APPDATA%\WindInput\opencc\`
+> 里一个残留目录就能顶掉出厂链。
+>
+> 每本 `.octrie` 由 `gen_opencc` 各自独立生成，`Converter` 的组合方式（组内最长匹配、
+> 组间串行）就是 OpenCC 自己的组合模型，跨层按名取文件正是它设计上支持的事。
+> 「整份胜出 + 完整性闸门（缺一本就跳过该层并 WARN）」是治标：定制者放半套时仍然不
+> 工作，只是多一行 WARN——而按名覆盖下，放半套本来就该正常工作。
+>
+> 守门：`wind-transform` 的 `resolved_chain_falls_back_per_file_not_per_directory`
+> 用自造的 octrie 夹具（不依赖 `build_dev`）复现这个组合，并对照断言「只看定制层的残链
+> 一个字都不转」。
+>
+> ⚠️ 顺带修掉一个**长期静默跳过**：`s2t.rs` 测试模块的 `opencc_dir()` 写的是**两级**
+> `../../build_dev/...`（= 不存在的 `wind_input/build_dev/`），于是那几个依赖真实 opencc
+> 数据的用例一直走「跳过」分支、计数照常绿。改成三级（仓库根）后它们真的在跑了——
+> 同款坑 `wind-engine/tests/engine_manager.rs` 早已修正并在注释里记过，这里是漏网的一处。
+
+**词库两趟结构**（(b) 那条）已按「每趟内部各自遍历层序」实现，并配了直接的行为测试
+（`resolve_dict_file_three_layers_keeps_two_pass_semantics`），钉住那个反例组合。
+`resolve_dict_file` 的 data 层取调用方传进来的 `schemas_dir`，user/custom 走
+`resource_layers_named_with(None)`，**没有从 `schemas_dir` 反推数据根**。
+
+**守门测试**：`wind-config/tests/resource_layer_gates.rs` 用「文件 → 出现次数 + 判定
+理由」的清单钉住 `join("schemas")` / `join("themes")` / `join("opencc")`（opencc 的清单
+**刻意为空**：改按名解析后全仓不该再有把 opencc 当目录拼的写法）。它钉不住的：只认这
+三个字面量（换成常量或 `push` 即绕过）；不看调用上下文；跳过测试模块的判据是精确字面量
+`#[cfg(test)]`，`#[cfg(all(test, windows))]` 一族**不跳过**（在那种块里写夹具会假红，
+遇到假红要扩判据、别改数字）；闭合判据是缩进精确相等的 `}`，缩进对不齐会从
+`#[cfg(test)]` 一路吞到文件末尾。
+
+⚠️ 这里曾写过「写在测试模块之后的生产代码同样不计」——**已实测推翻**（跳过测试模块后
+扫描回主循环继续，`log_rotate.rs` 里写在测试模块之后的函数照样计入）。一条假的「已知
+盲区」比没有更糟：它让人相信一块其实有覆盖的区域没覆盖。
 
 ### P2 — 减法（hide）
 
@@ -346,9 +411,15 @@ stats/mobile/debug 各 3。只按顶层段降级的话，`ui.font.scripts` 一�
 **已核实为安全、不必额外处理的**：
 
 - 词库缓存指纹（`cache_fp.rs` 的 `fingerprint`）按**文件内容**哈希，不是路径/mtime，
-  custom 层替换词库后缓存自然失效。**但** `wind-reverse/lib.rs:648` 提示过
-  「同一时刻 `resolve_data_file` 只解析出一个路径」，缓存文件**命名**若含路径派生，
-  两层可能撞名——实施 P1d 时核一遍。
+  custom 层替换词库后缓存自然失效。**缓存撞名已于 P1d 核实：安全**，三条各自成立——
+  ① 缓存名 = `<父目录名>/<文件干>.<ext>`（`manager::cache_path`、
+  `wind-reverse::comment_cache_path` 同构），**层前缀不进名字**，故三层共用同一个缓存名；
+  而同一时刻 `resolve_dict_file` 只解析出**一个**路径，共用者至多一个，撞不上；
+  ② 新鲜度判据是内容指纹（+ 解析语义版本 + tag），换层即内容变即重建；`.wridx` 的
+  `derived_cache_is_fresh` 更把**源文件全路径**编进摘要，字节完全相同的换层也会失效；
+  ③ wdat-only 的层（定制者最可能的分发形态）直接 mmap 层内的 sidecar，根本不经过缓存根。
+  唯一残留的撞名是**与分层无关的老问题**：两个不同 rel 若父目录名与文件干都相同
+  （`a/wubi/x.dict.yaml` 与 `b/wubi/x.dict.yaml`），缓存名相同——`data_custom` 不新增此类组合。
 - 单层 TOML 语法错误已隔离（`read_toml_value` 返回 None，只跳过那一层）。
 
 ## 5. 明确不做的

@@ -1301,7 +1301,7 @@ pub trait WebDataRpc: WebDataHost {
             anyhow::bail!("内置方案不可删除: {id}");
         }
         let user = Self::user_schemas_dir()?;
-        let system = Self::system_schemas_dir();
+        let system = Self::system_schemas_dirs();
         // 共享检查基准 = 其余已安装方案(含内置——混输可能引用用户资源)。
         let keep: Vec<String> = self
             .engine_mgr()
@@ -1310,7 +1310,7 @@ pub trait WebDataRpc: WebDataHost {
             .filter(|s| s != id)
             .collect();
         // 镜像导入的收集逻辑删文件:方案文件+引用资源+递归引用的用户方案,共享保留。
-        let r = wind_transfer::scheme::delete_package(id, &user, system.as_deref(), &keep)?;
+        let r = wind_transfer::scheme::delete_package(id, &user, &system, &keep)?;
         // 级联清词库数据:仅清数据域=方案自身的(拼音族数据在共享 pinyin 域,
         // data_schema_id≠自身时跳过;文件已删读不到类型时回落自身,清空域无害)。
         if let Some(store) = self.user_store() {
@@ -1343,18 +1343,27 @@ pub trait WebDataRpc: WebDataHost {
         Ok(dir)
     }
 
-    /// 系统 schemas 根目录(<exe>/data/schemas),可能不存在(如测试环境)。
-    fn system_schemas_dir() -> Option<std::path::PathBuf> {
-        wind_config::Config::data_dir()
-            .map(|d| d.join("schemas"))
+    /// **系统** schemas 根目录们：非用户层的每一层（`data_custom` 在前、`data` 在后）的
+    /// `schemas/`，只保留真实存在的（测试环境可能一个都没有）。
+    ///
+    /// 复数不是随手写的：定制版里只存在于 `data_custom` 的方案，只传 data 层时会被
+    /// `wind_transfer::scheme::locate` 判成 `Missing` ⇒ 导出成功但包是空的/全进 missing，
+    /// 用户拿它装不回去；删除路径则连 `system_refs` 都记不上。定制层与出厂层在这里同类：
+    /// 导出一并打包（自包含），删除永不触碰。
+    fn system_schemas_dirs() -> Vec<std::path::PathBuf> {
+        wind_config::Config::resource_layers_named()
+            .into_iter()
+            .filter(|l| !l.is_user())
+            .map(|l| l.path.join("schemas"))
             .filter(|d| d.is_dir())
+            .collect()
     }
 
     fn web_scheme_export_package(&self, params: &Value) -> anyhow::Result<Value> {
         let id = str_param(params, "id")?;
         let out = str_param(params, "path")?;
         let user = Self::user_schemas_dir()?;
-        let system = Self::system_schemas_dir();
+        let system = Self::system_schemas_dirs();
         // 设置页方案定制层(schema_overrides/<id>.toml,见 write_schema_override):
         // 导出必须带上,否则定制过的方案(如换过双拼布局)导出的是未定制版本,
         // override 新指向的资源文件也会漏打包。
@@ -1363,7 +1372,7 @@ pub trait WebDataRpc: WebDataHost {
         let r = wind_transfer::scheme::export_package(
             id,
             &user,
-            system.as_deref(),
+            &system,
             override_dir.as_deref(),
             std::path::Path::new(out),
             env!("CARGO_PKG_VERSION"),
@@ -3036,16 +3045,14 @@ pub trait WebDataRpc: WebDataHost {
         })
     }
 
-    /// 主题查找目录：用户主题（user_config_dir/themes）优先，回退内置（data/themes）。
+    /// 主题查找目录：各资源层的 `themes/`，按层序 `user > custom > data`
+    /// （宿主的 `theme_search_dirs()` 是唯一真相源）。
     fn theme_dirs(&self) -> Vec<std::path::PathBuf> {
-        let mut dirs = Vec::new();
-        if let Some(u) = wind_config::Config::user_config_dir() {
-            dirs.push(u.join("themes"));
-        }
-        if let Some(d) = self.themes_dir() {
-            dirs.push(d.to_path_buf());
-        }
-        dirs
+        // 直接复用宿主的搜索链，**不再自己拼一份**：此前这里是「用户目录 + 安装目录」
+        // 的第二份实现，与 `theme_search_dirs` 逐字重复。加 data_custom 层时两份各改各的
+        // ⇒ 设置页列表与实际生效的主题解析用的不是同一条链，现象是「主题列表里有它、
+        // 选了却没变化」。
+        self.theme_search_dirs()
     }
 
     /// 用户主题写入目录（导入/删除）。
@@ -7188,7 +7195,7 @@ short_code_yield_level = 2
         wind_transfer::scheme::export_package(
             "my",
             &user,
-            Some(&system),
+            std::slice::from_ref(&system),
             None,
             &pkg,
             "1.0.0",
