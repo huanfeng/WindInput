@@ -1106,7 +1106,12 @@ impl SoftKeyboard {
         let (bg, fg) = if down {
             (c.accent_soft, c.accent)
         } else if !live {
-            ([0, 0, 0, 0], c.line)
+            // 到头了：淡化**正常态的文字色**，而不是拿 `line`（边框色）当前景。
+            //
+            // ⚠️ border 在浅色主题里几乎等于面板底色（213 vs 251），箭头会看着像整个
+            // 消失，用户实测反馈「不可点击时完全隐藏了」。而箭头是常驻占位的，突然
+            // 不见等于布局变了。淡化才是「这里有个键，只是现在按不动」，且自动跟随主题。
+            ([0, 0, 0, 0], faded(c.hint, 150))
         } else if hover == tag {
             (c.hover, c.ink)
         } else {
@@ -1471,6 +1476,14 @@ fn scroll_to_show(widths: &[f32], gap: f32, cur: usize, scroll: f32, view_w: f32
 /// 只给「关掉整块面板」这一类不可撤销的动作用。普通键位必须按下即出字——打字要跟手，
 /// 长按重复也建立在按下就开始之上。而关闭按钮按下即关，手感上像是「还没点就没了」，
 /// 且中途反悔（按住挪开）也来不及。
+/// 把颜色淡化到指定不透明度（禁用态用）。
+///
+/// 文字色的 alpha 由 `TextRenderer` 在选择性回写那一步混合（`dwrite.rs` 有像素级
+/// 测试守着），所以这里只改 alpha 通道即可，不必知道底色是什么。
+fn faded(c: [u8; 4], alpha: u8) -> [u8; 4] {
+    [c[0], c[1], c[2], alpha]
+}
+
 fn fires_on_release(tag: i32) -> bool {
     // 关闭：不可撤销，按下即关像「还没点就没了」。
     if tag == SOFT_TAG_CLOSE || tag == SOFT_TAG_ESC {
