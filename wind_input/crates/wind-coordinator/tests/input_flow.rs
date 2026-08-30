@@ -1087,6 +1087,246 @@ fn separator_disabled_for_shuangpin() {
     );
 }
 
+/// 回归：**临时拼音**里手动分隔符必须与主输入路同样生效。
+///
+/// 缺陷形态（用户报障）：纯五笔方案 + `z_key_action = "temp_pinyin"`，在临拼里按分隔符键
+/// **直接把第一个字上屏了**。两层根因叠加：
+/// ① `handle_temp_pinyin_key` 根本没有分隔符臂 ⇒ 键落到 `_` 兜底的「其它键：有候选则上屏
+///    高亮候选」（主路径的分隔符臂在 `message_handler.rs`，而临拼在那之前就 early return 了）；
+/// ② 即便补上臂，`manual_separator_key` 问的是**活跃**引擎（五笔=码表）⇒ 判据恒 false。
+///
+/// 故本测试必须用**码表主方案 + 临拼**这个组合：在纯拼音方案下跑，根因②测不出来。
+#[test]
+fn separator_works_in_temp_pinyin_over_codetable_schema() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.input.temp_pinyin.enabled = true;
+    cfg.schema.codetable.z_key_action = "temp_pinyin".into();
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    for c in "zxi".chars() {
+        press_letter(&coord, c);
+    }
+    assert!(coord.debug_in_temp_pinyin(), "前置条件：z 引导应已进入临拼");
+    // 反引号(0xC0)：出厂 auto + 选键组含 `'` ⇒ 反引号作分隔符（与主路径同一套键位判定）。
+    let b = coord.handle_key_event(&key_event(0xC0, EVENT_KEY_DOWN));
+    let pre = action_text(&b).expect("临拼下反引号应作分隔符并返回组合区");
+    assert!(
+        pre.contains('\''),
+        "临拼：反引号应插入手动分隔符，实际组合区: {}",
+        pre
+    );
+    let mut last = b;
+    for c in "an".chars() {
+        last = press_letter(&coord, c);
+    }
+    assert_eq!(
+        action_text(&last).as_deref(),
+        Some("zxi'an"),
+        "临拼手动分隔符应固定音节边界（z 为引导前缀）"
+    );
+    let texts = coord.debug_page_texts();
+    assert!(
+        texts.iter().any(|t| t == "西安"),
+        "分隔后候选应含整句「西安」，实际: {:?}",
+        texts
+    );
+}
+
+/// 回归：临拼下分隔符键**不得**再走「其它键 → 上屏高亮候选」那条兜底。
+///
+/// 与上一条互为正反面：上一条锁「插进去了」，这一条锁「没把字打出去」。判据取
+/// **KeyAction 不是上屏类**——只看组合区文本的话，上屏那一帧同样会返回组合区更新
+/// （分段上屏保留剩余拼音），恒绿。
+#[test]
+fn separator_in_temp_pinyin_does_not_commit_candidate() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.input.temp_pinyin.enabled = true;
+    cfg.schema.codetable.z_key_action = "temp_pinyin".into();
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    for c in "zxi".chars() {
+        press_letter(&coord, c);
+    }
+    assert!(coord.debug_in_temp_pinyin(), "前置条件：应已进入临拼");
+    let act = coord.handle_key_event(&key_event(0xC0, EVENT_KEY_DOWN));
+    assert!(
+        !matches!(act, KeyAction::InsertText { .. }),
+        "临拼按分隔符键不得上屏候选，实际: {:?}",
+        act
+    );
+    assert!(coord.debug_in_temp_pinyin(), "按分隔符键后应仍在临拼模式内");
+}
+
+/// 造一个「临拼目标 = 微软双拼（`;` 是韵母 ing）」的环境：wubi86 主方案 + z 引导，
+/// primary_pinyin 指向 shuangpin，并用 override 把布局换成 mspy。
+///
+/// 出厂 shuangpin 用的是小鹤（韵母全在字母键上），测不出符号韵母键这条路。
+fn coord_with_mspy_temp_pinyin(tag: &str) -> Option<std::sync::Arc<Coordinator>> {
+    let d = data_dir();
+    if !has_schemas() || !d.join("schemas/shuangpin/mspy.toml").exists() {
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("wind_tp_mspy_{tag}"));
+    std::fs::create_dir_all(&dir).expect("建 override 目录失败");
+    std::fs::write(
+        dir.join("shuangpin.toml"),
+        "[engine.pinyin.shuangpin]\nlayout = \"mspy\"\n",
+    )
+    .expect("写 override 失败");
+    let mut cfg = config_with("wubi86");
+    cfg.schema.available = vec!["wubi86".into(), "shuangpin".into()];
+    cfg.schema.primary_pinyin = "shuangpin".into();
+    cfg.input.temp_pinyin.enabled = true;
+    cfg.schema.codetable.z_key_action = "temp_pinyin".into();
+    Some(Coordinator::new_headless_with_override(
+        cfg,
+        Some(&d),
+        Some(dir),
+    ))
+}
+
+/// 回归：临拼下**双拼布局的符号韵母键**必须能进缓冲。
+///
+/// 缺陷形态：主输入路的码元闸门 `try_code_char_gate` 位于 `message_handler.rs` 那句
+/// `Some(ModeKind::TempPinyin) => return handle_temp_pinyin_key(..)` 之后，临拼走不到；
+/// 而临拼的字母臂只认 `VK_A..=VK_Z` ⇒ 微软/搜狗/紫光双拼的 `;`(=ing) 落到兜底臂被
+/// `select_key_offset` 认成次选键，**把第 2 个候选打了出去**，`ying` 一族音节在临拼里
+/// 完全不可达。
+///
+/// 与分隔符那两条是同一个形状（overlay 是主路径的平行实现），故判据同样按 overlay
+/// 方案取（`is_code_char_of`），不是按活跃的五笔方案。
+#[test]
+fn temp_pinyin_accepts_shuangpin_symbol_final_key() {
+    let Some(coord) = coord_with_mspy_temp_pinyin("final") else {
+        return;
+    };
+    for c in "zy".chars() {
+        press_letter(&coord, c);
+    }
+    assert!(coord.debug_in_temp_pinyin(), "前置条件：z 引导应已进入临拼");
+    let act = coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ; = VK_SEMICOLON
+    assert!(
+        !matches!(act, KeyAction::InsertText { .. }),
+        "`;` 是 mspy 的韵母键(ing)，不得被当成次选键上屏，实际: {:?}",
+        act
+    );
+    assert!(
+        coord.debug_in_temp_pinyin(),
+        "按韵母键后应仍在临拼模式内（此前会被兜底臂上屏并退出）"
+    );
+    let pre = action_text(&act).expect("`;` 应作码元进缓冲并返回组合区");
+    assert!(
+        pre.contains(';'),
+        "组合区应含击键 `;`（双拼 preedit 显示原始按键），实际: {}",
+        pre
+    );
+    let texts = coord.debug_page_texts();
+    assert!(
+        texts.iter().any(|t| t == "应" || t == "英" || t == "影"),
+        "y+; 应解释为 ying 并出候选，实际: {:?}",
+        texts
+    );
+}
+
+/// 反向对照：**全拼**临拼下 `;` 仍是次选键，不得被新的码元臂夺走。
+///
+/// 这条锁住新臂的零回归依据——拼音引擎的码元集完全由双拼布局推导，全拼恒 `None`
+/// ⇒ 回落默认 `a-z` ⇒ 非字母恒 false。若哪天有人把回落改成「空集」或「全放行」，
+/// 这条会红，而上面那条仍绿。
+#[test]
+fn temp_pinyin_full_pinyin_keeps_semicolon_as_select_key() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.input.temp_pinyin.enabled = true;
+    cfg.schema.codetable.z_key_action = "temp_pinyin".into();
+    // primary_pinyin 留空 = 全拼（见 resolve_temp_pinyin_target）。
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    for c in "zni".chars() {
+        press_letter(&coord, c);
+    }
+    assert!(coord.debug_in_temp_pinyin(), "前置条件：应已进入临拼");
+    let n = coord.debug_page_texts().len();
+    assert!(n >= 2, "前置条件：ni 应至少有 2 个候选，实际 {}", n);
+    let act = coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN));
+    assert!(
+        matches!(act, KeyAction::InsertText { .. }),
+        "全拼临拼下 `;` 应仍是次选键、选词上屏，实际: {:?}",
+        act
+    );
+}
+
+/// 写一份只含 `[engine.pinyin] separator = <mode>` 的方案级 override，返回目录。
+/// 每个用例独立目录（并发写同一文件会撕裂），用法同
+/// `codetable_short_code_yield.rs` 的 `override_with_level`。
+fn override_with_separator(tag: &str, mode: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("wind_sep_ov_{tag}"));
+    std::fs::create_dir_all(&dir).expect("建 override 目录失败");
+    std::fs::write(
+        dir.join("pinyin.toml"),
+        format!("[engine.pinyin]\nseparator = \"{mode}\"\n"),
+    )
+    .expect("写 override 失败");
+    dir
+}
+
+/// 方案级 `[engine.pinyin].separator` 关掉分隔符，压过全局 `auto`。
+///
+/// 这一项做成方案级可覆盖，是因为**键位预算按方案分**：双拼出厂把反引号给了辅助码
+/// （`shuangpin.schema.toml` 的 `[key_actions]`），而全拼的音节边界只能靠符号键表达。
+/// 全局唯一的 `separator` 表达不了这个组合——一改全局，另一个方案的键就被静默夺走。
+///
+/// 反向对照是既有的 `separator_auto_avoids_quote_when_it_is_select_key`：同样的按键、
+/// 无 override 时反引号**会**插入分隔符。
+#[test]
+fn separator_schema_override_none_disables_it() {
+    if !has_schemas() {
+        return;
+    }
+    let ov = override_with_separator("none", "none");
+    let coord =
+        Coordinator::new_headless_with_override(config_with("pinyin"), Some(&data_dir()), Some(ov));
+    for c in "xi".chars() {
+        press_letter(&coord, c);
+    }
+    let b = coord.handle_key_event(&key_event(0xC0, EVENT_KEY_DOWN));
+    assert!(
+        separator_not_inserted(&b),
+        "方案级 separator=none 应压过全局 auto，反引号不该作分隔符，实际: {:?}",
+        b
+    );
+}
+
+/// 方案级 `separator = "quote"` 把分隔符**改到** `'` 上（全局仍是 auto）。
+///
+/// 与上一条互补：那条只证明「方案值能关掉功能」，可能被一个「读不到就当 none」的
+/// 错误实现假绿；这条要求方案值被真正读出来并按它选键——`'` 出厂是三选键，只有
+/// 显式模式才夺得走。
+#[test]
+fn separator_schema_override_selects_quote_key() {
+    if !has_schemas() {
+        return;
+    }
+    let ov = override_with_separator("quote", "quote");
+    let coord =
+        Coordinator::new_headless_with_override(config_with("pinyin"), Some(&data_dir()), Some(ov));
+    for c in "xi".chars() {
+        press_letter(&coord, c);
+    }
+    let q = coord.handle_key_event(&key_event(0xDE, EVENT_KEY_DOWN));
+    let pre = action_text(&q).expect("方案级 quote：引号应作分隔符并返回组合区");
+    assert!(
+        pre.contains('\''),
+        "方案级 separator=quote 应让引号作分隔符（覆盖三选键），实际: {}",
+        pre
+    );
+}
+
 /// C1 回归：全拼手动分隔符 `xi'an` 选「西安」应**全消费**上屏、组合区清空无残留。
 /// 修复前引擎按剥除 `'` 的 query 算 consumed_length，协调器却按含 `'` 缓冲切片 → 误判 partial、
 /// 残留尾字符 "n"（组合区变「西安n」）。修复后 consumed_length 回映射到含 `'` 的原始输入空间。

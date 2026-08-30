@@ -1736,13 +1736,29 @@ impl Coordinator {
     ///
     /// 缓冲是否为空由调用方判定（空缓冲维持标点路径）。
     pub(crate) fn manual_separator_key(&self, key_code: u32) -> bool {
+        self.manual_separator_key_of(key_code, &self.engine_mgr.active_schema_id())
+    }
+
+    /// 同 [`Self::manual_separator_key`]，但判据取**指定方案**而非活跃方案。
+    ///
+    /// ★★ overlay 必须走这条。临拼在纯五笔方案下引用的是拼音方案，而
+    /// `engine_mgr.is_pinyin()` 问的是**活跃**引擎（= 码表）⇒ 恒 false ⇒ 临拼下分隔符
+    /// 永远不生效，且完全静默。这与 `update_temp_pinyin_candidates` 里
+    /// 「`ignore_weight` 必须按临拼目标方案取，不能用 `active_base_sort_ignores_weight()`」
+    /// 是**同一个错误的两个实例**——凡「按当前引擎类型决定行为」的判据，在 overlay 里
+    /// 都需要一个 `_of(&schema)` 版本，否则拿主方案的性质去裁决 overlay 的行为。
+    ///
+    /// `separator` 本身也按方案取（见 `EngineManager::pinyin_separator_mode_of`）：
+    /// 临拼引用哪个拼音方案，就用那个方案生效的分隔符策略。
+    pub(crate) fn manual_separator_key_of(&self, key_code: u32, schema_id: &str) -> bool {
         use wind_keys::keymap::{VK_BACKTICK, VK_QUOTE};
         // 码表整句与拼音共用下面那套键位判定；两者都不成立时该键维持原本语义。
-        let pinyin_ok = self.engine_mgr.is_pinyin() && !self.engine_mgr.pinyin_is_shuangpin();
-        if !pinyin_ok && !self.engine_mgr.sentence_input_enabled() {
+        let pinyin_ok = self.engine_mgr.is_pinyin_of(schema_id)
+            && !self.engine_mgr.pinyin_is_shuangpin_of(schema_id);
+        if !pinyin_ok && !self.engine_mgr.sentence_input_enabled_of(schema_id) {
             return false;
         }
-        match self.engine_mgr.pinyin_separator_mode().as_str() {
+        match self.engine_mgr.pinyin_separator_mode_of(schema_id).as_str() {
             "none" => false,
             "quote" => key_code == VK_QUOTE,
             "backtick" => key_code == VK_BACKTICK,

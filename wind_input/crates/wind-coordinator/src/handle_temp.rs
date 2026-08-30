@@ -6,6 +6,7 @@
 use crate::coordinator::{
     Coordinator, ENGINE_MAX_CANDIDATES, State, TEMP_PINYIN_MAX_CANDIDATES, numpad_char, punct_char,
 };
+use crate::key_convert::printable_char;
 use crate::pipeline::{ModeKind, Rewind};
 use crate::preedit_cursor;
 use tracing::debug;
@@ -460,6 +461,42 @@ impl Coordinator {
         }
     }
 
+    /// 这个键在临拼下是否应作为**非字母码元**进缓冲；是则返回进缓冲的小写字符。
+    ///
+    /// 存在的理由：双拼布局把韵母塞进符号键（微软/搜狗/紫光的 `;` = ing），而主输入路的
+    /// 码元闸门 [`Coordinator::try_code_char_gate`] 位于 `message_handler.rs` 那句
+    /// `Some(ModeKind::TempPinyin) => return handle_temp_pinyin_key(..)` **之后**，临拼
+    /// 根本走不到 ⇒ 那些音节在临拼里一个也打不出（`;` 反被兜底臂当成次选键）。
+    ///
+    /// ★★ 判据按 **overlay 方案**取（`is_code_char_of` / `is_leading_char_of`），与
+    /// `manual_separator_key_of` 同一条纪律：主输入路的 `can_enter_buffer` 问的是活跃
+    /// 引擎，而临拼在五笔方案下引用的是拼音方案。
+    ///
+    /// ⚠️ **零回归的依据**：拼音引擎的码元集完全由双拼布局推导，全拼恒 `None` ⇒ 回落
+    /// 默认 `a-z` ⇒ 非字母恒 false。故本函数在全拼、以及纯字母布局的双拼（小鹤等）下
+    /// **恒返回 None**，调用点那条臂等于不存在。
+    ///
+    /// 首码/全集之分与主输入路一致：缓冲空时查首码集（数字默认不在其中 ⇒ 空缓冲的数字键
+    /// 仍是选词/透传），否则查全集。
+    ///
+    /// ⚠️ 字母**不走这里**：它们有专门的累积臂，且那条臂不问码元集——拼音码元恒含 a-z，
+    /// 多问一次只会在布局解析失败时把整个临拼打死。这与 `try_code_char_gate` 开头
+    /// `if ch.is_ascii_alphabetic() { return None }` 是同一个分工。
+    fn temp_pinyin_code_char(&self, state: &State, data: &KeyEventData) -> Option<char> {
+        let ch = printable_char(data.key_code, data.modifiers & MOD_SHIFT != 0)?;
+        if ch.is_ascii_alphabetic() {
+            return None;
+        }
+        let lower = ch.to_ascii_lowercase();
+        let schema = self.overlay_engine_schema(state)?;
+        let accepted = if state.temp_pinyin_buffer.is_empty() {
+            self.engine_mgr.is_leading_char_of(&schema, lower)
+        } else {
+            self.engine_mgr.is_code_char_of(&schema, lower)
+        };
+        accepted.then_some(lower)
+    }
+
     /// 临时拼音模式下的按键处理
     pub(crate) fn handle_temp_pinyin_key(
         &self,
@@ -684,6 +721,66 @@ impl Coordinator {
                 self.exit_temp_pinyin(state);
                 self.notify_ui_hide();
                 Self::commit_action(format!("{}{}", head, tail), true)
+            }
+            // 手动音节分隔符：把 `'` 压入临拼缓冲作硬边界，与主输入路完全同构
+            // （`message_handler.rs` 的 VK_QUOTE|VK_BACKTICK 臂）。引擎侧零改动——
+            // `convert_with` 走的就是主路径同一个入口，全拼路径按 `'` 硬切分、查询前剥除、
+            // `preedit_display` 原样回显，`overlay_body` 已按「含引擎插入的分隔符」换算光标。
+            //
+            // ★★ 判据必须走 `manual_separator_key_of(.., overlay 方案)`：`manual_separator_key`
+            // 问的是**活跃**引擎，而临拼的典型场景（五笔方案 + z 引导）下活跃引擎是码表，
+            // 恒返回 false。此前本模式**根本没有这条臂**，反引号一路落到下方 `_` 兜底的
+            // 「其它键：有候选则上屏高亮候选」——现场表现就是「按分隔符直接把第一个字打出去了」。
+            //
+            // ★ 必须排在上方「引导键二次按下」之后：反引号出厂即临拼引导键
+            // （`[input.temp_pinyin] trigger_keys = ["backtick"]`）。两者语义互补——那条要求
+            // 缓冲为空，分隔符只在缓冲非空时有意义，故同键同绑不冲突。
+            keymap::VK_QUOTE | keymap::VK_BACKTICK
+                if data.modifiers & MOD_SHIFT == 0
+                    && !state.temp_pinyin_buffer.is_empty()
+                    && self
+                        .overlay_engine_schema(state)
+                        .is_some_and(|s| self.manual_separator_key_of(data.key_code, &s)) =>
+            {
+                preedit_cursor::BufEdit::new(
+                    &mut state.temp_pinyin_buffer,
+                    &mut state.temp_pinyin_cursor,
+                )
+                .insert('\'');
+                self.update_temp_pinyin_candidates(state);
+                let display = state.preedit.clone();
+                let caret_pos = self.overlay_caret(state);
+                self.notify_ui_update(state);
+                KeyAction::UpdateComposition {
+                    text: display,
+                    caret_pos,
+                }
+            }
+            // 非字母码元（双拼布局的符号韵母键，如微软/搜狗/紫光的 `;` = ing）。
+            // 判据与产出同源，见 [`Self::temp_pinyin_code_char`]——全拼与纯字母布局下它恒
+            // 返回 `None`，这条臂等于不存在。
+            //
+            // ★ 位置：排在 Esc / 退格 / 空格 / 回车 / 数字选词 / 小键盘 / 分隔符**之后**，
+            // 只抢下方 `_` 兜底臂的键。主输入路的闸门比这更靠前（在选词与翻页之前），
+            // 这里刻意保守——临拼里那些键各有明确语义，而双拼布局的码元集只会含符号键，
+            // 与它们本就不相交；真正需要夺回来的只有兜底臂那条「其它键 → 上屏高亮候选」，
+            // `;` 正是在那里被当成次选键、把首选打了出去。
+            _ if data.modifiers & MOD_SHORTCUT == 0
+                && let Some(ch) = self.temp_pinyin_code_char(state, data) =>
+            {
+                preedit_cursor::BufEdit::new(
+                    &mut state.temp_pinyin_buffer,
+                    &mut state.temp_pinyin_cursor,
+                )
+                .insert(ch);
+                self.update_temp_pinyin_candidates(state);
+                let display = state.preedit.clone();
+                let caret_pos = self.overlay_caret(state);
+                self.notify_ui_update(state);
+                KeyAction::UpdateComposition {
+                    text: display,
+                    caret_pos,
+                }
             }
             // 守卫条件在入口的 `overlay_ctrl_alt_guard` 之后已恒真（Ctrl/Alt 组合到不了这里），
             // 保留作纵深防御。它曾是**全仓唯一**一处模式内 Ctrl 判定，而且只护住了这一条臂。
