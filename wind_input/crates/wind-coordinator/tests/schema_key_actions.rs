@@ -325,6 +325,100 @@ fn key_up(vk: u32) -> KeyEventData {
     }
 }
 
+/// 从 `KeyAction` 里取中英文态（切换类动作的应答都带这个字段）。
+fn chinese_of(act: &KeyAction) -> Option<bool> {
+    match act {
+        KeyAction::StatusUpdate(s) => Some(s.chinese_mode),
+        KeyAction::InsertText { chinese_mode, .. } => Some(*chinese_mode),
+        _ => None,
+    }
+}
+
+/// ★★ 英文半角态下按键功能表**跳过方案级层**，只认全局配置。
+///
+/// 复现用户报障（2026-08-30）：拼音方案里方案级配 `lshift = toggle_mode`，全局配
+/// `lshift = switch_schema:wubi86`。
+///
+/// - 中文态按左 Shift → 方案级命中 → 进系统英文（**方案不变**）
+/// - 系统英文态再按 → 跳过方案级 → 全局命中 → 切到五笔（`switch_schema_by_id` 自带
+///   中文态归位）
+///
+/// 修复前第二次按仍命中方案级的 `toggle_mode`，只把 `chinese_mode` 翻回来 ⇒ 用户看到
+/// 「切回了原方案」（方案其实从未变过）。
+///
+/// 判据取**活跃方案**：`toggle_mode` 与 `switch_schema` 都会让 `chinese_mode` 回到 true，
+/// 只看中英文态两者同形、测不出来。
+#[test]
+fn english_mode_skips_schema_layer_for_modifier_bindings() {
+    if !has_schemas() {
+        eprintln!("跳过：缺少 build_dev/data 方案");
+        return;
+    }
+    let ov = make_override("en_layer", "pinyin", "lshift = \"toggle_mode\"");
+    let mut cfg = cfg_for("pinyin");
+    cfg.keys
+        .key_actions
+        .insert("lshift".into(), "switch_schema:wubi86".into());
+    let coord = Coordinator::new_headless_with_override(cfg, Some(&data_dir()), Some(ov.clone()));
+    assert_eq!(coord.active_schema_id(), "pinyin");
+
+    // ① 中文态：方案级那条生效 —— 进系统英文，方案不动。
+    let a1 = coord.handle_key_event(&key_up(VK_LSHIFT));
+    assert_eq!(
+        chinese_of(&a1),
+        Some(false),
+        "中文态按左 Shift 应进英文半角，实际: {a1:?}"
+    );
+    assert_eq!(
+        coord.active_schema_id(),
+        "pinyin",
+        "方案级 toggle_mode 只切中英文态，不该动方案"
+    );
+
+    // ② 英文态：跳过方案级 ⇒ 命中全局的单向切换。
+    let a2 = coord.handle_key_event(&key_up(VK_LSHIFT));
+    assert_eq!(
+        coord.active_schema_id(),
+        "wubi86",
+        "英文态应走全局表切到五笔（修复前会命中方案级 toggle_mode、方案原地不动）"
+    );
+    assert_eq!(
+        chinese_of(&a2),
+        Some(true),
+        "切方案自带中文态归位（finish_user_schema_switch 的既有断言）"
+    );
+
+    let _ = std::fs::remove_dir_all(&ov);
+}
+
+/// 反向对照：**中文态**下方案级层照常优先，全局那条不得抢走。
+///
+/// 与上一条共用同一份配置，只差不进英文态。少了它，把分层判据写反（中文态跳过方案级）
+/// 同样能让上一条变绿。
+#[test]
+fn chinese_mode_still_prefers_schema_layer() {
+    if !has_schemas() {
+        eprintln!("跳过：缺少 build_dev/data 方案");
+        return;
+    }
+    let ov = make_override("cn_layer", "pinyin", "lshift = \"toggle_mode\"");
+    let mut cfg = cfg_for("pinyin");
+    cfg.keys
+        .key_actions
+        .insert("lshift".into(), "switch_schema:wubi86".into());
+    let coord = Coordinator::new_headless_with_override(cfg, Some(&data_dir()), Some(ov.clone()));
+
+    let act = coord.handle_key_event(&key_up(VK_LSHIFT));
+    assert_eq!(
+        coord.active_schema_id(),
+        "pinyin",
+        "中文态必须命中方案级 toggle_mode，全局的 switch_schema 不得抢走"
+    );
+    assert_eq!(chinese_of(&act), Some(false));
+
+    let _ = std::fs::remove_dir_all(&ov);
+}
+
 /// 方案级**单向** `switch_schema`：切过去就完事，再按**不回程**。
 ///
 /// 2026-08-30 放开——此前 `bound_key_decision` 对方案级单向整条让位并 warn，理由是

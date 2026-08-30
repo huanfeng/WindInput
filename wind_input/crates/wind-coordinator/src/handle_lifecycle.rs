@@ -248,7 +248,19 @@ impl Coordinator {
     /// 同源教训见 `project_mixed_overflow_vs_topcode`（混输上屏三条通路，否决开关必须三处
     /// 都接）。盘查的判据是「进这个模式有几个入口」，不是「我改的函数里有几个分支」。
     pub(crate) fn bound_key_decision(&self, key_code: u32) -> BoundKeyDecision {
-        let Some((action, from_schema)) = self.bound_action_with_source(key_code) else {
+        self.bound_key_decision_layered(key_code, true)
+    }
+
+    /// 同上，可跳过方案级层。语义与适用范围见
+    /// [`Self::bound_action_with_source_layered`]（英文半角态用）。
+    pub(crate) fn bound_key_decision_layered(
+        &self,
+        key_code: u32,
+        use_schema_layer: bool,
+    ) -> BoundKeyDecision {
+        let Some((action, from_schema)) =
+            self.bound_action_with_source_layered(key_code, use_schema_layer)
+        else {
             return BoundKeyDecision::NotBound;
         };
         // 跨层仲裁：**全局**引导键遇上方案声明的首码要让位——全局配置无从知道某个方案
@@ -344,14 +356,57 @@ impl Coordinator {
     /// 见 docs/design/schema-key-actions.md §4.3。合并两层来源时若丢掉这个区分，
     /// 全局引导键就会变成「绑定优先」，把方案自己的码元抢走。
     pub(crate) fn bound_action_with_source(&self, key_code: u32) -> Option<(BoundAction, bool)> {
+        self.bound_action_with_source_layered(key_code, true)
+    }
+
+    /// 同上，但可**跳过方案级层**（`use_schema_layer = false` ⇒ 只认全局 `keys.key_actions`）。
+    ///
+    /// # ★★ 为什么英文半角态要跳过方案级层
+    ///
+    /// 英文半角态下**当前方案整体已经不参与输入行为**——码元集、标点、候选、引擎全都不
+    /// 工作（`handle_key_event` 在英文分水岭处直接 `PassThrough`）。那么「这个方案的按键
+    /// 表」也就没有理由继续生效：用户此刻不在任何方案的输入语境里，他期望的是**全局配置**。
+    ///
+    /// 现场（2026-08-30 用户报障）：英文方案里方案级配了 `lshift = toggle_mode`，全局配了
+    /// `lshift = switch_schema:wubi86`。进系统英文后再按左 Shift，用户期望走全局那条切回
+    /// 五笔，实际却仍命中英文方案那条、只把 `chinese_mode` 翻回来 ⇒ 看起来像「切回了英文
+    /// 方案」（方案其实从未变过，见 project_shift_schema_mode_switch）。
+    ///
+    /// ⚠️ **这不是新增一张表**，是三层链在英文态少查一层——配置面零增长。
+    ///
+    /// # ⚠️ 只有修饰键会走到这里
+    ///
+    /// 英文态下有字符的键在分水岭前就 `PassThrough`，组合键走的 `compiled_hotkeys` 本就是
+    /// 全局编译、不分方案。故本参数实际只作用于 `lshift`/`rshift`/`lctrl`/`rctrl`。
+    ///
+    /// # ⚠️ 可达性并集**不得**跟着这个维度走
+    ///
+    /// 推给 C++ 的转发键集必须是所有维度所有取值的并集（`reachability()` /
+    /// `all_key_action_keys()` 照常枚举两层）。按当前态裁剪的话，每切一次中英文就要重推
+    /// 一次，漏一次就是「切完中英文这个键不灵」——与按活跃方案裁剪同型，见
+    /// docs/design/key-resolver-unification.md §4.2。
+    ///
+    /// # ⚠️ 代价：对称配置负担
+    ///
+    /// 全局一旦配了切方案类动词，**没有方案级同键绑定的方案**在中文态下按这个键就会命中
+    /// 全局那条（`handle_bound_modifier_key_up` 先于 `is_toggle_mode_keycode`）。用户需要
+    /// 在每个方案里都配一遍 `lshift = "toggle_mode"`。这是本设计已知且已被接受的代价
+    /// （2026-08-30 用户拍板），设置页在方案级面板给提示。
+    fn bound_action_with_source_layered(
+        &self,
+        key_code: u32,
+        use_schema_layer: bool,
+    ) -> Option<(BoundAction, bool)> {
         // 键名→VK 走与全局层**同一个**解析口（`key_action_name_to_vk`）：两层各留一份解析
         // 规则，就是「同一张表按维度分裂」。同类**现存**缺陷有一个未修的样本：
         // `hotkey_action_entry` 的动词白名单只认 3 个，而单键那条路的 `BoundAction` 值域
         // 更大 ⇒ `ctrl+alt+e = "temp_english"` 静默失效、`z = "temp_english"` 正常。
         // 见 docs/design/key-resolver-unification.md §2.5。
-        for (name, action) in self.engine_mgr.active_key_actions().iter() {
-            if crate::key_resolver::key_action_name_to_vk(name) == Some(key_code) {
-                return Some((BoundAction::parse(action), true));
+        if use_schema_layer {
+            for (name, action) in self.engine_mgr.active_key_actions().iter() {
+                if crate::key_resolver::key_action_name_to_vk(name) == Some(key_code) {
+                    return Some((BoundAction::parse(action), true));
+                }
             }
         }
         // 全局 `keys.key_actions` 的单键条目。方案没表态时才落到这里——方案覆盖全局是
@@ -369,7 +424,10 @@ impl Coordinator {
             return Some((action, false));
         }
         // 表里没写 z 时，回落到专用字段（其自身已含全局→方案的折叠）。
-        if key_code == keymap::VK_Z {
+        // 跳过方案级层时一并跳过：`z_key_action` 本身就是方案级配置。实际到不了——z 是
+        // 字母键、英文态下在分水岭就 `PassThrough` 了——判据仍写出来，免得日后有人把
+        // 本函数用在别的态上时，这一层成为唯一漏网的方案级来源。
+        if use_schema_layer && key_code == keymap::VK_Z {
             let z = self.z_key_action();
             if z.is_enabled() {
                 // z_key_action 本身是方案级配置（经 codetable_settings 折叠），
@@ -722,7 +780,20 @@ impl Coordinator {
     ///
     /// 返回 `None` 表示本函数不接管，调用方继续走 `is_toggle_mode_keycode`。
     pub(crate) fn handle_bound_modifier_key_up(&self, key_code: u32) -> Option<KeyAction> {
-        match self.bound_key_decision(key_code) {
+        // ★★ 英文半角态跳过方案级层，只认全局配置——理由与代价见
+        // `bound_action_with_source_layered`。**本函数是这条规则的唯一落点**：英文态下
+        // 有字符的键到不了分派（分水岭 `PassThrough`），组合键走全局编译的 hotkeys，
+        // 故只有修饰键这条路需要按态分层。
+        //
+        // ⚠️ 在此读 `chinese_mode` 是安全的：本函数由 message_handler 的 keyup 分支直接
+        // 调用，**调用点不持 `State` 锁**（上游 `handle_select_key_up` /
+        // `handle_session_action_key_up` 都是各自 lock 各自释放）。若日后有持锁的调用方
+        // 接进来，必须改为由调用方传入该值，否则死锁。
+        let chinese = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.chinese_mode
+        };
+        match self.bound_key_decision_layered(key_code, chinese) {
             // 活跃方案没绑这个键，但它可能**携带往返语义**——刚才正是用它把用户带到当前
             // 方案的。少了这一条，「五笔按 RShift 去英文方案」就要求英文方案自己也配一遍
             // 才回得来。见 `schema_toggle_key_authorized`。
