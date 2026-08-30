@@ -1385,6 +1385,22 @@ pub struct Coordinator {
     /// 才回得来——设计文档 §5 原本断言 `toggle_schema` 对锁死「从结构上免疫」，那只覆盖了
     /// 「回到哪」，没覆盖「怎么按得动」。测试里复现过。
     pub(crate) schema_toggle_origin: Mutex<Option<SchemaToggleOrigin>>,
+    /// **单向** `switch_schema` 的送达记录：`(触发键 VK, 送达时的方案代际)`。
+    ///
+    /// 用途**只有一个**：目标方案里再按这把键时**吞键**，不让它漏回全局链。
+    /// 方案级 `[key_actions]` 按活跃方案查表，单向切走后目标方案没有这条绑定 ⇒ 走到
+    /// `NotBound` ⇒ 若就此返回 `None`，键会落到 `is_toggle_mode_keycode`，而
+    /// `lshift`/`rshift` 出厂就是 `toggle_mode` 键 ⇒ **用户配的是「切方案」却切了中英文**。
+    /// 这正是方案级单向曾被整条禁掉的理由；改为放行 + 本记录兜底后，那个后果不再成立。
+    ///
+    /// ★ **刻意不复用 [`SchemaToggleOrigin`]**：那个结构的每个字段都为**回程**服务
+    /// （`origin` 是回程目标、`landing` 是「该回程还是该重新落地」的判据），而单向记录
+    /// 两样都不需要——它只回答「这把键刚把用户送到这儿吗」。塞进同一个结构等于让
+    /// `origin` 对一半记录无意义，是「一条记录承载两种语义」的开端。
+    ///
+    /// 代际用于失效：期间用别的方式切过方案 ⇒ 记录作废 ⇒ 该键恢复它原本的语义
+    /// （与往返记录的失效判据同源，理由见 `schema_toggle_key_authorized`）。
+    pub(crate) schema_switch_arrival: Mutex<Option<(u32, u64)>>,
     /// 当前主题定义的序号槽位字符（views.index.labels）；push_theme 载入时刷新。
     /// 序号优先级：用户配置 index_labels > 本字段 > 默认数字。
     pub(crate) theme_index_labels: Mutex<Vec<String>>,
@@ -2078,6 +2094,7 @@ impl Coordinator {
             last_status_text: Mutex::new(String::new()),
             last_toolbar_push: Mutex::new(None),
             schema_toggle_origin: Mutex::new(None),
+            schema_switch_arrival: Mutex::new(None),
             theme_style: Mutex::new(theme_style_init),
             theme_index_labels: Mutex::new(Vec::new()),
             cmdbar_services: std::sync::OnceLock::new(),

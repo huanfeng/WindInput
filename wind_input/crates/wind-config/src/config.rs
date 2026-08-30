@@ -972,14 +972,21 @@ pub enum BoundAction {
     ToggleSchema(String),
     /// 切到指定方案，**单向**（携带目标方案 id）。原 `keys.schema_hotkeys` 的语义。
     ///
-    /// ⚠️ **只在全局 `keys.key_actions` 里合法**。方案级 `[key_actions]` 按活跃方案查表，
-    /// 单向切走之后目标方案没有这条绑定，这个键就再也按不动了——「五笔里配 `rshift`→
-    /// 英文方案，而英文方案没配 `rshift` ⇒ 回不来」。方案级要往返语义，用
-    /// [`Self::ToggleSchema`]，它靠运行时来源兜底回程。
-    /// 方案级出现本动词时由 `bound_key_decision` 让位并 warn。⚠️ 那道守卫**必须留在**
-    /// `bound_action_yield_reason` **之外**：后者开头就是
-    /// `vk_to_prefix_char_with_letters(key_code)?`，对修饰键恒返回 `None`，而本动词恰恰
-    /// 只在修饰键上才走得到——挪进去等于这道守卫永不执行。
+    /// 全局 `keys.key_actions` 与方案级 `[key_actions]` **都合法**，但作用域不同：
+    ///
+    /// - **全局**：在所有方案下都命中。目标方案里再按走幂等分支
+    ///   （`restore_state_for_same_schema`：把中英态/CapsLock 归位到能用这个方案打字）。
+    /// - **方案级**：只在源方案里命中。切走之后目标方案没有这条绑定，这把键在那里
+    ///   **被吞掉、不动作**（`Coordinator::schema_switch_arrival` 记录 +
+    ///   `handle_bound_modifier_key_up` 的 `NotBound` 分支）。
+    ///
+    /// ⚠️ **方案级单向没有回程**——这是它与 [`Self::ToggleSchema`] 的全部区别，也正是
+    /// 「切过去就完事、不留状态」这个诉求要的东西；回程请交给另一把键。
+    ///
+    /// ★ 2026-08-30 之前方案级单向被整条禁掉（`bound_key_decision` 让位并 warn），理由是
+    /// 「单向切走就回不来了」。那描述的是**这把键**按不动，而回程本可以由别的键负责，
+    /// 禁令因此挡掉了合法配法。放开的同时必须保留那条吞键兜底：少了它，键会落回全局链，
+    /// 而 `lshift`/`rshift` 出厂就是 `toggle_mode` 键 ⇒「配的是切方案却切了中英文」。
     SwitchSchema(String),
     /// 开关软键盘；`Some(id)` 直接切到指定面（直通车），`None` 保持/切上次那面。
     ///

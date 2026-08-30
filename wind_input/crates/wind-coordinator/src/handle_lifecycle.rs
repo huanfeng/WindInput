@@ -258,24 +258,17 @@ impl Coordinator {
             debug!("key_action: vk=0x{key_code:02X} 让位 —— 全局绑定遇方案首码（跨层仲裁）");
             return BoundKeyDecision::Yield;
         }
-        // 方案级 `[key_actions]` 里的**单向**切换会锁死用户：本表按活跃方案查，单向切走
-        // 之后目标方案没有这条绑定，这个键就再也按不动了（「五笔里配 rshift→英文方案，
-        // 而英文方案没配 rshift ⇒ 回不来」）。全局表没有这个问题——它在所有方案下都生效。
+        // 注：方案级 `switch_schema` 曾在此整条让位并 warn。**2026-08-30 放开**——
+        // 当时的理由是「单向切走后目标方案没有这条绑定，这个键就再也按不动了」，但那描述的
+        // 是**这把键**按不动，而回程本就可以由别的键负责（用户的实际配法正是「右 Shift 单向
+        // 去英文方案、左 Shift 管中英文态」）。禁令把一个「可能的困扰」升成了「绝对禁止」，
+        // 挡掉了合法配法。
         //
-        // 判据放在 `bound_action_yield_reason` **之外**：那个函数开头就
-        // `vk_to_prefix_char_with_letters(key_code)?`，对修饰键恒返回 None（修饰键没有字符），
-        // 而 `switch_schema` 恰恰只在修饰键上才走得到这里——写进去等于这道守卫永不执行。
-        //
-        // 让位（吞键）而非 NotBound：落回全局链多半会撞上 `toggle_mode`，用户配的是
-        // 「切方案」却切了中英文，比没反应更难排查。
-        if from_schema && matches!(action, BoundAction::SwitchSchema(_)) {
-            warn!(
-                "key_actions: 方案级绑定不支持 switch_schema（单向切走就回不来了），\
-                 键 0x{key_code:02X} 上忽略。改用 toggle_schema:<id>（往返），\
-                 或把这条写进全局 keys.key_actions"
-            );
-            return BoundKeyDecision::Yield;
-        }
+        // ★ 但禁令担心的**后果**是真的，只是换了个地方兜：目标方案里该键走到 `NotBound`，
+        // 若就此返回 None 会落到 `is_toggle_mode_keycode`，而 lshift/rshift 出厂就是
+        // `toggle_mode` 键 ⇒「配的是切方案却切了中英文」。现由
+        // `Coordinator::schema_switch_arrival` 记录 + `handle_bound_modifier_key_up` 的
+        // `NotBound` 分支吞键兜底，见那两处。
         match self.bound_action_yield_reason(key_code, &action) {
             Some(reason) => {
                 debug!("key_action: vk=0x{key_code:02X} 让位 —— {reason}");
@@ -590,14 +583,53 @@ impl Coordinator {
     /// 时不会走到这里**——`bound_action_yield_reason` 已让位并 warn，理由见
     /// [`BoundAction::SwitchSchema`]：方案级按活跃方案查表，单向切走后目标方案没有这条
     /// 绑定，键就再也按不动了。
-    fn run_switch_schema_action(&self, id: &str) -> Option<KeyAction> {
+    fn run_switch_schema_action(&self, id: &str, trigger_vk: u32) -> Option<KeyAction> {
         if !self.engine_mgr.ensure_schema(id) {
             warn!("key_actions: switch_schema 目标 {id} 加载失败，不动作");
             return None;
         }
         debug!("key_actions: switch_schema -> {id}");
         let commit = self.switch_schema_by_id(id);
+        // 记下「这把键刚把用户单向送到了这里」，供目标方案里再按时吞键（见
+        // `Coordinator::schema_switch_arrival`）。**不是**回程记录——单向没有回程。
+        //
+        // 切换失败时不记：`switch_schema_by_id` 的加载失败分支会让 active 保持原样，
+        // 记了等于宣称「这把键把你送到了当前方案」，而它其实哪也没去（与
+        // `toggle_schema_by_id` 只在 active 确实变成目标后才 `record_schema_toggle_origin`
+        // 同一条判据）。
+        //
+        // 全局配法下这条记录**查不到**也无害：目标方案里该键仍命中全局表走 `Act` 分支，
+        // 根本到不了消费它的 `NotBound`。故此处不必区分绑定来自哪一层。
+        if trigger_vk != 0 && self.engine_mgr.active_schema_id() == id {
+            *self
+                .schema_switch_arrival
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) =
+                Some((trigger_vk, self.engine_mgr.schema_generation()));
+        }
         Some(self.schema_switch_key_action(commit))
+    }
+
+    /// 这把键是不是**刚刚把用户单向送到当前方案**的那一把（见
+    /// [`Coordinator::schema_switch_arrival`]）。
+    ///
+    /// 与 [`Self::schema_toggle_key_authorized`] 是**两件事**，不可合并：那个回答「这把键
+    /// 能不能执行往返」，本函数回答「这把键该不该被安静吃掉」。合并的话，单向绑定会获得
+    /// 它从未声明过的回程语义——那正是用户明确不想要的「切过去还会弹回来」。
+    ///
+    /// 代际不等 = 期间用别的方式切过方案，记录作废，该键恢复原本语义。
+    fn schema_switch_key_arrived(&self, key_code: u32) -> bool {
+        if key_code == 0 {
+            return false;
+        }
+        matches!(
+            *self
+                .schema_switch_arrival
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            Some((vk, arrived_gen))
+                if vk == key_code && arrived_gen == self.engine_mgr.schema_generation()
+        )
     }
 
     /// 执行 A 类状态切换，转交 `dispatch_hotkey`（这批动作的既有单点）。
@@ -642,7 +674,7 @@ impl Coordinator {
     ) -> Option<KeyAction> {
         match action {
             BoundAction::ToggleSchema(id) => self.run_toggle_schema_action(id, trigger_vk),
-            BoundAction::SwitchSchema(id) => self.run_switch_schema_action(id),
+            BoundAction::SwitchSchema(id) => self.run_switch_schema_action(id, trigger_vk),
             BoundAction::Action(a) => self.run_dispatch_action(a),
             _ => None,
         }
@@ -705,6 +737,18 @@ impl Coordinator {
                     let commit =
                         self.toggle_schema_by_id(&self.engine_mgr.active_schema_id(), key_code);
                     return Some(self.schema_switch_key_action(commit));
+                }
+                // 方案级**单向**切换刚把用户送到这里：吞键、不动作。
+                //
+                // ★ 绝不能返回 `None` 落回全局链——`lshift`/`rshift` 出厂就是 `toggle_mode`
+                // 键，那样「配的是切方案」会变成「切了中英文」，比没反应难查得多。方案级
+                // 单向曾因此被整条禁掉（见 `bound_key_decision` 的注释），现由本分支兜底。
+                //
+                // ★ 与上面那条的区别是**吞键 vs 回程**：单向没有回程，用户要的就是「切过去
+                // 就完事」。回程由他自己安排的另一把键负责。
+                if self.schema_switch_key_arrived(key_code) {
+                    debug!("switch_schema: 0x{key_code:02X} 是本方案的单向送达键，吞键不动作");
+                    return Some(KeyAction::Consumed);
                 }
                 None
             }

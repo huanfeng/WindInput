@@ -325,11 +325,101 @@ fn key_up(vk: u32) -> KeyEventData {
     }
 }
 
+/// 方案级**单向** `switch_schema`：切过去就完事，再按**不回程**。
+///
+/// 2026-08-30 放开——此前 `bound_key_decision` 对方案级单向整条让位并 warn，理由是
+/// 「单向切走后目标方案没有这条绑定，这个键就再也按不动了」。但那描述的是**这把键**
+/// 按不动，而回程完全可以由别的键负责（真实配法：右 Shift 单向去英文方案、左 Shift 管
+/// 中英文态）。禁令把「可能的困扰」升成了「绝对禁止」，挡掉了合法配法。
+///
+/// ★★ 第二次按的断言取 `KeyAction::Consumed`，这是本用例的**要害**：
+/// `Config::default()` 的 `toggle_mode_keys` 出厂就含 `rshift`，若目标方案里该键返回
+/// `None` 落回全局链，就会被 `is_toggle_mode_keycode` 接住去**切中英文**——用户配的是
+/// 「切方案」却切了中英文，比没反应难查得多，正是当初那条禁令担心的后果。
+/// 断言「仍在 pinyin」测不出这个（切中英文同样不改方案），必须断言键被吞掉。
+#[test]
+fn schema_level_switch_schema_is_one_way() {
+    if !has_schemas() {
+        eprintln!("跳过：缺少 build_dev/data 方案");
+        return;
+    }
+    let ov = make_override("sw_oneway", "wubi86", "rshift = \"switch_schema:pinyin\"");
+    let coord = Coordinator::new_headless_with_override(
+        cfg_for("wubi86"),
+        Some(&data_dir()),
+        Some(ov.clone()),
+    );
+    assert_eq!(coord.active_schema_id(), "wubi86");
+    // 前置：出厂 toggle_mode_keys 含 rshift —— 没有这个前提，下面那条吞键断言就失去意义。
+    assert!(
+        Config::default()
+            .keys
+            .toggle_mode_keys
+            .iter()
+            .any(|k| k == "rshift"),
+        "前置：rshift 出厂应是 toggle_mode 键"
+    );
+
+    coord.handle_key_event(&key_up(VK_RSHIFT));
+    assert_eq!(
+        coord.active_schema_id(),
+        "pinyin",
+        "方案级单向应生效（放开前这里会被让位吞掉、停在 wubi86）"
+    );
+
+    // pinyin 的 override 里没有任何 key_actions ⇒ 走 NotBound。
+    let act = coord.handle_key_event(&key_up(VK_RSHIFT));
+    assert_eq!(
+        coord.active_schema_id(),
+        "pinyin",
+        "单向没有回程，再按应留在目标方案"
+    );
+    assert!(
+        matches!(act, KeyAction::Consumed),
+        "再按必须被吞掉，绝不能漏回全局链去切中英文，实际: {act:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ov);
+}
+
+/// 全局 `switch_schema` 不受放开影响：在目标方案里仍命中全局表走 `Act` 分支（幂等归位），
+/// 而**不是**被单向送达记录吞掉。
+///
+/// 两条路的处置不同是刻意的：全局绑定在所有方案下都在作用域内，「再按一次」该走它自己的
+/// 幂等语义（把中英态/CapsLock 归位到能用这个方案打字）；方案级绑定在目标方案里根本不
+/// 存在，才需要送达记录兜底。
+#[test]
+fn global_switch_schema_unaffected_by_one_way_arrival() {
+    if !has_schemas() {
+        eprintln!("跳过：缺少 build_dev/data 方案");
+        return;
+    }
+    let mut cfg = cfg_for("wubi86");
+    cfg.keys
+        .key_actions
+        .insert("rshift".into(), "switch_schema:pinyin".into());
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+
+    coord.handle_key_event(&key_up(VK_RSHIFT));
+    assert_eq!(coord.active_schema_id(), "pinyin");
+    // 再按：全局表仍命中 ⇒ 幂等分支，方案不变且不回程。
+    coord.handle_key_event(&key_up(VK_RSHIFT));
+    assert_eq!(
+        coord.active_schema_id(),
+        "pinyin",
+        "全局单向再按应原地不动（幂等），不回程也不切走"
+    );
+}
+
 /// C 类 `toggle_schema` 的往返：五笔按右 Shift 去拼音，再按回五笔。
 ///
 /// ★ 回程**不要求目标方案配对称的绑定**——本例 pinyin 的 override 里没有任何
-/// `key_actions`，回程仍然成立。这正是方案级只收 `toggle_schema`、不收单向
-/// `switch_schema` 的理由：后者会把用户锁在目标方案里（见设计文档 §5）。
+/// `key_actions`，回程仍然成立。
+///
+/// ⚠️ 这条曾被写成「方案级只收 `toggle_schema`、不收单向 `switch_schema` 的理由」。
+/// **2026-08-30 起方案级单向已放开**（回程可以由别的键负责，禁令挡掉了合法配法），
+/// 单向在目标方案里的处置改为**吞键**，见 `schema_level_switch_schema_is_one_way`。
+/// 本用例只管 `toggle_schema` 自己的往返语义，不再兼职论证那条禁令。
 #[test]
 fn toggle_schema_on_modifier_round_trips() {
     if !has_schemas() {
