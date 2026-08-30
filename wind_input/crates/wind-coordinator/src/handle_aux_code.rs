@@ -1211,6 +1211,85 @@ mod tests {
         st
     }
 
+    /// 在 `data_dir_with_aux` 之上再放一个**码表**方案，供「活跃方案 ≠ 临拼目标方案」的用例。
+    ///
+    /// ⚠️ 没有这一步就测不出「按目标方案取绑定」——活跃与目标是同一个方案时，
+    /// `bound_action_for`（活跃）与 `bound_action_in_schema`（目标）答案相同，变异不会变红。
+    /// 这个方案**刻意不写** `[key_actions]`：绑定只存在于 pinyin 那份里。
+    fn data_dir_with_codetable_active(tag: &str) -> std::path::PathBuf {
+        let dir = data_dir_with_aux(tag);
+        std::fs::write(
+            dir.join("schemas").join("wb.schema.toml"),
+            "[schema]\nid = \"wb\"\nname = \"wb\"\n[engine]\ntype = \"codetable\"\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// 临拼里按**目标方案**（拼音/双拼）`[key_actions]` 声明的辅助码触发键即可进入。
+    ///
+    /// 真实场景：五笔主方案 + z 引导临拼，而 `backtick = "aux_code"` 写在
+    /// 出厂 shuangpin.schema.toml 里。活跃方案（五笔）那张表没有这条绑定，
+    /// 按活跃方案取则**永远进不去**，且无任何日志。
+    ///
+    /// ★ 辅助码是「编码类」动词，按产出候选的方案取——判据见
+    /// docs/design/key-resolver-unification.md §4.4。整张表并不随目标方案走。
+    #[test]
+    fn temp_pinyin_enters_aux_by_target_schema_binding() {
+        let dir = data_dir_with_codetable_active("tp_aux_bind");
+        let c = coord_with_data_cfg("tp_aux_bind", dir, |cfg| {
+            cfg.schema.active = "wb".to_string();
+            cfg.schema.available = vec!["wb".to_string(), "pinyin".to_string()];
+        });
+        let mut st = seed_temp_pinyin(&c);
+        // 前置条件：活跃方案（wb）不认这条绑定——否则本用例测的是回落而不是目标方案。
+        assert_ne!(
+            c.bound_action_for(keymap::VK_BACKTICK),
+            Some(wind_config::BoundAction::AuxCode),
+            "前置：活跃方案不该有 aux_code 绑定"
+        );
+        let act = c.handle_temp_pinyin_key(&mut st, &key(keymap::VK_BACKTICK, 0));
+        assert_eq!(
+            st.active,
+            Some(ModeKind::AuxCode),
+            "应按临拼目标方案的 [key_actions] 进入辅助码，实际: {act:?}"
+        );
+        assert_eq!(
+            st.aux_code.as_ref().and_then(|o| o.origin),
+            Some(ModeKind::TempPinyin)
+        );
+    }
+
+    /// 字母键不参与目标方案的辅助码触发判定——辅助码态里字母恒是码元。
+    ///
+    /// 与 `aux_code_key_role` 的第一道守卫同源：少了它，配过 `z = "aux_code"` 的用户
+    /// 在临拼里打不出 z（`zi` / `zuo` / `zhang` 一个都出不来）。
+    #[test]
+    fn temp_pinyin_letter_not_taken_as_aux_trigger() {
+        let dir = data_dir_with_codetable_active("tp_aux_letter");
+        // 把 z 也绑成 aux_code：字母守卫若缺失，下面按 z 就会进辅助码而不是累积拼音。
+        std::fs::write(
+            dir.join("schemas").join("pinyin.schema.toml"),
+            "[schema]\nid = \"pinyin\"\nname = \"pinyin\"\n\
+             [engine]\ntype = \"pinyin\"\n\
+             [engine.aux_code]\nfiles = [\"aux_code/flypy_test.txt\"]\nenabled = true\n\
+             [key_actions]\nz = \"aux_code\"\n",
+        )
+        .unwrap();
+        let c = coord_with_data_cfg("tp_aux_letter", dir, |cfg| {
+            cfg.schema.active = "wb".to_string();
+            cfg.schema.available = vec!["wb".to_string(), "pinyin".to_string()];
+        });
+        let mut st = seed_temp_pinyin(&c);
+        c.handle_temp_pinyin_key(&mut st, &key(vk_letter('Z'), 0));
+        assert_eq!(
+            st.active,
+            Some(ModeKind::TempPinyin),
+            "z 是码元，不得进辅助码"
+        );
+        assert_eq!(st.temp_pinyin_buffer, "liz", "z 应累积进临拼缓冲");
+    }
+
     /// 临拼态可进辅助码，并**记住来源**；筛选照常作用在临拼候选上。
     ///
     /// 用户诉求原话：「临时拼音的其它功能应该尽量和拼音方案本身一致」。辅助码筛的正是

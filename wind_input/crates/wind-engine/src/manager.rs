@@ -2635,7 +2635,20 @@ impl EngineManager {
     /// 返回 `Arc`：本表在按键热路径上被查，`Arc::clone` 只加一次引用计数，而返回 owned
     /// 表要复制整张表连同每个 `String`。调用方按 `&*` / `.iter()` 用即可。
     pub fn active_key_actions(&self) -> Arc<std::collections::BTreeMap<String, String>> {
-        let id = self.active_schema_id();
+        self.key_actions_of(&self.active_schema_id())
+    }
+
+    /// 同 [`Self::active_key_actions`]，但取**指定方案**。
+    ///
+    /// ⚠️ **只服务「编码类」动词的查询**（见 docs/design/key-resolver-unification.md §4.4）。
+    /// 整张表并不随 overlay 的目标方案走——`special:*` / `temp_pinyin` 那类是「从这个输入
+    /// 环境去哪」，恒属主方案；只有解释「用户敲的码」的动词（辅助码触发键、码元、分隔符）
+    /// 才该按产出候选的方案取。拿它做通用分派会让拼音方案对快符之类的存在负责。
+    pub fn key_actions_of(
+        &self,
+        schema_id: &str,
+    ) -> Arc<std::collections::BTreeMap<String, String>> {
+        let id = schema_id.to_string();
         if let Some(cached) = self
             .key_actions_cache
             .lock()

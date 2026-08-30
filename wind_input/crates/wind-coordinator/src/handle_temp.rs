@@ -516,6 +516,31 @@ impl Coordinator {
         if let Some(act) = self.handle_candidate_nav(state, data) {
             return act;
         }
+        // 目标方案 `[key_actions]` 里绑的辅助码触发键（如出厂 shuangpin 的 `backtick = "aux_code"`）。
+        //
+        // ★ 辅助码是**编码类**动词——它筛的是眼前这批拼音候选的字形，故按**产出候选的方案**
+        // 取，而不是活跃的五笔方案（见 docs/design/key-resolver-unification.md §4.4）。整张表
+        // 不随目标方案走：`special:*` 那类仍恒属主方案，本处只认 `aux_code` 这一个动词。
+        //
+        // ★ 位置在 `handle_candidate_nav` **之后**：全局/主方案 `session_actions` 那条路
+        // （`apply_session_action` 认得 `SessionAction::AuxCode`，含共键形态）优先，与主输入路
+        // 的裁决顺序一致；本处只补「目标方案自己声明了 aux_code」这一种。两条最终都汇到
+        // `enter_aux_code`，由它的门卫统一裁决（分隔符占用 / 未启用 / 无候选一律返回 None
+        // 不吞键，键继续落下方各臂）。
+        //
+        // ⚠️ 字母不参与：辅助码态里字母恒是码元，与 `aux_code_key_role` 的第一道守卫同源
+        // （少了它，配过 `z = "aux_code"` 的用户在临拼里打不出 z）。
+        if data.modifiers & MOD_SHORTCUT == 0
+            && !(keymap::VK_A..=keymap::VK_Z).contains(&data.key_code)
+            && let Some(schema) = self.overlay_engine_schema(state)
+            && matches!(
+                self.bound_action_in_schema(data.key_code, &schema),
+                Some(wind_config::BoundAction::AuxCode)
+            )
+            && let Some(act) = self.enter_aux_code(state, data.key_code)
+        {
+            return act;
+        }
         // 编码区光标移动（左右 / Home / End）；置于候选导航之后，导航键优先。
         if let Some(act) = self.overlay_cursor_key(state, data) {
             return act;

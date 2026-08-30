@@ -312,6 +312,32 @@ impl Coordinator {
         self.bound_action_with_source(key_code).map(|(a, _)| a)
     }
 
+    /// **指定方案**的 `[key_actions]` 里这个键绑了什么（只查方案层，不回落全局）。
+    ///
+    /// ⚠️ 与 [`Self::bound_action_for`] 的分工是**动词类别**，不是「另一种取表方式」，
+    /// 见 docs/design/key-resolver-unification.md §4.4：
+    ///
+    /// - 「从这个输入环境去哪」（`special:*` / `temp_pinyin` / `switch_schema`…）恒走
+    ///   `bound_action_for`（主方案 → 全局 → `z_key_action` 三层链）；
+    /// - 「解释用户敲的码」（辅助码触发键、码元、分隔符）在 overlay 里按**产出候选的
+    ///   方案**取，走本函数。
+    ///
+    /// **刻意不回落全局**：全局层那份已经由 `bound_action_for` 那条链覆盖了，在这里再回落
+    /// 一次等于同一条配置在同一个按键上被查两遍，且两遍的优先级无从定义。本函数只回答
+    /// 「目标方案**自己**声明了什么」。
+    pub(crate) fn bound_action_in_schema(
+        &self,
+        key_code: u32,
+        schema_id: &str,
+    ) -> Option<BoundAction> {
+        for (name, action) in self.engine_mgr.key_actions_of(schema_id).iter() {
+            if crate::key_resolver::key_action_name_to_vk(name) == Some(key_code) {
+                return Some(BoundAction::parse(action));
+            }
+        }
+        None
+    }
+
     /// 同 [`Self::bound_action_for`]，但一并给出**这条绑定来自哪一层**
     /// （`true` = 方案级 `[key_actions]`，`false` = 全局 `keys.key_actions` / `z_key_action`）。
     ///
