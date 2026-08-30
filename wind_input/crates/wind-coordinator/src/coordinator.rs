@@ -3758,7 +3758,16 @@ impl Coordinator {
             // UpdateComposition 而非 ClearComposition），两个动作从此语义分明。
             Some(ModeKind::AuxCode) => {
                 self.exit_aux_code(state);
-                self.reset_pinyin_composition(state);
+                // `exit_aux_code` 已把 `active` 还原成**来源模式**。取消的语义是「连来源
+                // 一起放弃」，故还要把那个模式也退掉——否则从临拼进来的会话按 Esc 后，
+                // `active` 停在 `TempPinyin`、`temp_pinyin_buffer` 还留着码，而下面
+                // 无条件 `ClearComposition` 已告诉宿主「组合没了」，正是上面那段注释
+                // 描述的自相矛盾，只是换了个缓冲。主输入路来源时 `active == None`，
+                // 走 `_` 臂 `reset_pinyin_composition`，与改动前逐字等价。
+                match state.active {
+                    Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
+                    _ => self.reset_pinyin_composition(state),
+                }
             }
             // 普通输入：取消整个组合，含已转换前缀（拼音分步上屏的那部分）一并丢弃。
             None => self.reset_pinyin_composition(state),
@@ -5906,15 +5915,30 @@ impl Coordinator {
                 Some(ModeKind::Mix(_)) => {
                     Some((state.mix_buffer.clone(), state.mix_prefix.clone()))
                 }
-                // 辅助码是唯一**不清空 `input_buffer`** 的独占模式（它只筛候选，拼音码
-                // 原封不动留在主缓冲里），故上面那句「独占模式下 input_buffer 必为空」
-                // 对它不成立。取主缓冲、无引导前缀——语义与普通拼音态切英文完全一致，
+                // 辅助码是唯一**不清空来源缓冲**的独占模式（它只筛候选，拼音码原封不动
+                // 留在来源那儿），故上面那句「独占模式下 input_buffer 必为空」对它不成立。
+                // 取来源缓冲、按来源给引导前缀——语义与「在来源模式里直接切英文」完全一致，
                 // 否则辅助码态下切英文会把待上屏的拼音原码静默丢掉。
-                Some(ModeKind::AuxCode) => Some((
-                    preedit_cursor::cased_or_buffer(&state.input_buffer, &state.input_buffer_cased)
-                        .to_string(),
-                    String::new(),
-                )),
+                //
+                // ⚠️ 「来源」不再恒是主输入路：辅助码现在也能从临拼进入，那时码在
+                // `temp_pinyin_buffer`、引导前缀是 `temp_pinyin_prefix`（`z` 要归还）。
+                // 判据取 `AuxCodeOverlay::origin`，与 `aux_code_source_buffer` 同源。
+                Some(ModeKind::AuxCode) => {
+                    Some(match state.aux_code.as_ref().and_then(|o| o.origin) {
+                        Some(ModeKind::TempPinyin) => (
+                            state.temp_pinyin_buffer.clone(),
+                            state.temp_pinyin_prefix.clone(),
+                        ),
+                        _ => (
+                            preedit_cursor::cased_or_buffer(
+                                &state.input_buffer,
+                                &state.input_buffer_cased,
+                            )
+                            .to_string(),
+                            String::new(),
+                        ),
+                    })
+                }
                 _ => None,
             } {
                 // 临拼 / mix：镜像普通组合的 commit_on_switch，且对齐各自的回车上屏语义。

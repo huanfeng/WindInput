@@ -49,6 +49,17 @@ pub(crate) struct AuxCodeOverlay {
     /// 本次会话的筛选选项：进入时按方案 `[engine.aux_code].max_phrase_len` 固化
     /// （`AuxCodeFilterOptions` 其余取默认：逐字首码匹配固定语义），期间方案切换不可见。
     pub(crate) filter_options: wind_aux_code::AuxCodeFilterOptions,
+    /// 从哪个模式进来的：`None` = 主输入路（历史唯一来源），`Some(TempPinyin)` = 临拼。
+    ///
+    /// ★★ **本字段是所有「来源相关」分支的唯一开关，且 `None` 分支必须与改动前逐位等价**
+    /// ——辅助码的出口散布在选词（键盘 3 条 + 鼠标 1 条）、退出（Esc / 退格 / 触发键复按）、
+    /// 取消、切中英文六处，逐处加判断必然漏。所有落点一律问它，不各自去猜「码在哪个缓冲」。
+    ///
+    /// 为什么需要它：`coordinator.rs` 那句「辅助码是唯一**不清空** `input_buffer` 的独占
+    /// 模式（它只筛候选，拼音码原封不动留在主缓冲里）」曾是准确的——直到辅助码能从临拼
+    /// 进入：那时码在 `temp_pinyin_buffer`，`input_buffer` 恒空。判据不跟着走，
+    /// 「部分消费」会恒判成完整消费、切英文会把待上屏原码静默丢掉。
+    pub(crate) origin: Option<ModeKind>,
 }
 
 /// 辅助码态里一个按键相对**辅助码绑定**的角色，见 [`Coordinator::aux_code_key_role`]。
@@ -121,10 +132,22 @@ impl Coordinator {
         // 少了它的实际症状（2026-08-22 真机）：辅助码态再按一次 Tab → 重入 →
         // `preedit_prefix` 每次在旧 preedit 上再拼 4 个空格，组合区里长出一段越来越宽的
         // 空白，看起来像插进了一个宽制表符。
-        if state.active.is_some() {
+        // 放行集合：主输入路（`None`）与临拼。**其余 overlay 一律拒**——它们各有自己的
+        // 候选面与生命周期，而上面那条重入路径对它们依然成立。
+        //
+        // ★ 临拼放行的依据是「它产出的正是拼音候选」，与辅助码筛的对象同类；判据不是
+        // 「哪些模式允许」的第二份清单，而是下面 `aux_code_settings_of(来源方案)` 是否
+        // 真的给出了码表——落点存在 ⇔ 操作可行（同 `candidate_op_scope` 的收敛方式）。
+        if !matches!(state.active, None | Some(ModeKind::TempPinyin)) {
             return None;
         }
-        let settings = self.engine_mgr.aux_code_settings();
+        let origin = state.active;
+        // 设置按**来源方案**取：临拼在五笔方案下引用的是拼音方案，而辅助码码表配在
+        // `[engine.aux_code].files` 里——拿五笔的取，`paths.is_empty()` 恒成立、静默不进。
+        let settings = match self.overlay_engine_schema(state) {
+            Some(s) => self.engine_mgr.aux_code_settings_of(&s),
+            None => self.engine_mgr.aux_code_settings(),
+        };
         if !settings.enabled {
             return None;
         }
@@ -134,7 +157,13 @@ impl Coordinator {
         // 全拼出厂 `separator = "auto"` + `'` 作选词键 = 反引号恒为分隔符——
         // 若不告警，用户在 schema_overrides 里绑了 `backtick = "aux_code"` 会
         // **完全无反应且无任何日志**，正是本仓反复出现的「配了没反应」型缺陷。
-        if self.manual_separator_key(key_code) {
+        // 键位仲裁同样按来源方案问：临拼下「这个键是不是分隔符」取决于临拼引用的拼音方案，
+        // 不是活跃的五笔方案（后者恒答否，等于这道闸对临拼完全失效）。
+        let separator_taken = match self.overlay_engine_schema(state) {
+            Some(s) => self.manual_separator_key_of(key_code, &s),
+            None => self.manual_separator_key(key_code),
+        };
+        if separator_taken {
             self.warn_aux_code_key_taken(key_code);
             return None;
         }
@@ -159,6 +188,7 @@ impl Coordinator {
             preedit_base,
             preedit_prefix,
             filter_options,
+            origin,
         });
         state.active = Some(ModeKind::AuxCode);
         self.refresh_aux_code_candidates(state);
@@ -207,10 +237,26 @@ impl Coordinator {
         let Some(mut overlay) = state.aux_code.take() else {
             return;
         };
-        state.active = None;
+        // 回到**来源模式**而不是无条件 `None`：从临拼进来的要退回临拼继续打拼音，
+        // 否则组合区还留着 `zni` 却已不在任何模式里，下一个字母会被当成新一轮五笔码。
+        // 主输入路来源时 `origin == None`，与改动前逐字等价。
+        state.active = overlay.origin;
         state.candidates = overlay.session.restore_original();
         state.preedit = overlay.preedit_base;
-        debug!("aux_code: exited");
+        debug!("aux_code: exited (origin={:?})", overlay.origin);
+    }
+
+    /// 辅助码当前正在筛的那个码所在的缓冲（按来源模式取），空串 = 无剩余码。
+    ///
+    /// ★★ 「部分消费 vs 完整消费」的**唯一判据**。辅助码是唯一不清空来源缓冲的独占模式，
+    /// 但「来源缓冲」是哪一个取决于 `origin`：主输入路是 `input_buffer`，临拼是
+    /// `temp_pinyin_buffer`。写死 `input_buffer` 的话，从临拼进来的会话恒判「完整消费」，
+    /// 「没时间」这类分步组句在选第一个词时就把剩余拼音丢了——而这**不会报错**。
+    pub(crate) fn aux_code_source_buffer<'a>(&self, state: &'a State) -> &'a str {
+        match state.aux_code.as_ref().and_then(|o| o.origin) {
+            Some(ModeKind::TempPinyin) => &state.temp_pinyin_buffer,
+            _ => &state.input_buffer,
+        }
     }
 
     /// 选词上屏后的辅助码收尾：仅清模式态，**不碰 preedit/候选**——上屏路径
@@ -223,11 +269,13 @@ impl Coordinator {
     /// 辅助码模式下的按键处理。
     pub(crate) fn handle_aux_code_key(&self, state: &mut State, data: &KeyEventData) -> KeyAction {
         // Ctrl/Alt 组合守卫：必须最先，否则组合键会落到下方各臂被当普通辅助码输入。
+        // 「有没有待输入」按**来源缓冲**问（见 `aux_code_source_buffer`）：从临拼进来时
+        // `input_buffer` 恒空，写死它会让 Ctrl 组合在有拼音待上屏时也判成「无输入」。
         let has_input = state
             .aux_code
             .as_ref()
             .is_some_and(|o| !o.session.is_empty())
-            || !state.input_buffer.is_empty()
+            || !self.aux_code_source_buffer(state).is_empty()
             || !state.committed_text.is_empty();
         if let Some(act) =
             self.overlay_ctrl_alt_guard(state, data, has_input, |s, st| s.exit_aux_code(st))
@@ -418,9 +466,26 @@ impl Coordinator {
         cand: Candidate,
         offset: i32,
     ) -> KeyAction {
-        let act = self.commit_selected(state, &cand, offset);
+        // 上屏走**来源模式自己的出口**：临拼的选词要走 `commit_temp_pinyin_selected`
+        // ——它负责分段前缀、造词、记账（`CommitSource::TempPinyin`）与引导字母归还，
+        // 这些 `commit_selected` 一件也不做。
+        //
+        // ★ 先把 `active` 还原成来源模式再调：那条出口内部按 `state.active` 判断自己
+        // 该不该退出（`exit_temp_pinyin` 会把它置回 `None`），停在 `AuxCode` 上会让它
+        // 认不出自己所在的模式。
+        let act = match state.aux_code.as_ref().and_then(|o| o.origin) {
+            Some(ModeKind::TempPinyin) => {
+                state.active = Some(ModeKind::TempPinyin);
+                self.commit_temp_pinyin_selected(state, &cand, offset)
+            }
+            _ => self.commit_selected(state, &cand, offset),
+        };
         // 部分消费 → 缓冲还有剩余编码，处于逐步转换态 → 重建会话、留在辅助码模式。
-        if !state.input_buffer.is_empty() {
+        // 判据取**来源缓冲**（见 `aux_code_source_buffer`）：临拼的剩余码不在 `input_buffer` 里。
+        if !self.aux_code_source_buffer(state).is_empty() {
+            // 上面为调用出口把 `active` 挪到了来源模式，这里要还给辅助码——否则组合区
+            // 是辅助码的形态，模式却停在临拼上，下一个字母会被当成拼音码累积。
+            state.active = Some(ModeKind::AuxCode);
             self.rearm_aux_code_session(state);
             let display = state.preedit.clone();
             let caret_pos = self.overlay_caret(state);
@@ -1095,19 +1160,26 @@ mod tests {
         );
     }
 
-    /// ★ 别的 overlay 模式里，触发键也不得把辅助码套进来。
+    /// ★ **临拼以外**的 overlay 模式里，触发键不得把辅助码套进来。
     ///
     /// `handle_candidate_nav` 被五个 overlay 共用，全都会把键送回 `apply_session_action`。
-    /// 少了 `enter_aux_code` 的 `state.active.is_some()` 守卫，Tab 在特殊模式/临拼/临英/URL
-    /// 里都会夺走那个模式的候选、改写 preedit。
+    /// 少了 `enter_aux_code` 的守卫，Tab 在特殊模式/临英/URL/mix 里都会夺走那个模式的
+    /// 候选、改写 preedit。
+    ///
+    /// ⚠️ 2026-08-30 起 `TempPinyin` **不在**本集合里——它产出的正是拼音候选，与辅助码
+    /// 筛的对象同类，故单独放行（正向用例见 `enters_from_temp_pinyin_*`）。放行集合从
+    /// 「只有主输入路」变成「主输入路 + 临拼」时，本用例覆盖的其余模式**一个都没少**，
+    /// 反而补齐了 Url / Special / Mix 三个当初漏测的。
     #[test]
-    fn enter_is_refused_from_any_overlay_mode() {
+    fn enter_is_refused_from_non_pinyin_overlay_modes() {
         let c = coord_with("overlay_guard");
         let mut st = seed_composition(&c);
         for mode in [
-            ModeKind::TempPinyin,
             ModeKind::TempEnglish,
             ModeKind::AuxCode,
+            ModeKind::Url,
+            ModeKind::Special(0),
+            ModeKind::Mix(0),
         ] {
             st.active = Some(mode);
             assert!(
@@ -1118,6 +1190,108 @@ mod tests {
             assert_eq!(st.candidates.len(), 3, "被拒时候选必须原封不动");
             assert_eq!(st.preedit, "li", "被拒时组合区必须原封不动");
         }
+    }
+
+    /// 装填「临时拼音组合中」的初始状态：码在 `temp_pinyin_buffer`（**不是** `input_buffer`），
+    /// 方案指向 fixture 的 pinyin，引导前缀 `z`。与 `seed_composition` 是同一批候选。
+    fn seed_temp_pinyin(
+        c: &Arc<Coordinator>,
+    ) -> std::sync::MutexGuard<'_, crate::coordinator::State> {
+        let mut st = c.state.lock().unwrap();
+        st.chinese_mode = true;
+        st.active = Some(ModeKind::TempPinyin);
+        st.temp_pinyin_schema = "pinyin".to_string();
+        st.temp_pinyin_buffer = "li".to_string();
+        st.temp_pinyin_cursor = 2;
+        st.temp_pinyin_prefix = "z".to_string();
+        st.candidates = vec![cand("李"), cand("樱"), cand("河")];
+        st.selected_index = 0;
+        st.current_page = 0;
+        st.preedit = "zli".to_string();
+        st
+    }
+
+    /// 临拼态可进辅助码，并**记住来源**；筛选照常作用在临拼候选上。
+    ///
+    /// 用户诉求原话：「临时拼音的其它功能应该尽量和拼音方案本身一致」。辅助码筛的正是
+    /// 拼音候选，而临拼产出的就是拼音候选——此前被 `active.is_some()` 一刀切拒之门外。
+    #[test]
+    fn enters_from_temp_pinyin_and_filters() {
+        let c = coord_with("from_temp");
+        let mut st = seed_temp_pinyin(&c);
+        c.enter_aux_code(&mut st, keymap::VK_BACKTICK)
+            .expect("临拼有候选时应能进入辅助码");
+        assert_eq!(st.active, Some(ModeKind::AuxCode));
+        assert_eq!(
+            st.aux_code.as_ref().and_then(|o| o.origin),
+            Some(ModeKind::TempPinyin),
+            "来源必须记下来——退出/上屏/切英文全靠它分流"
+        );
+        // 显示基线取的是临拼的组合区（含引导前缀 z），不是空的 input_buffer。
+        assert_eq!(
+            st.aux_code.as_ref().map(|o| o.preedit_base.as_str()),
+            Some("zli"),
+            "显示基线应是临拼组合区"
+        );
+        // 打 m → 李(mz)/樱(my) 命中，河(sk) 被滤。
+        let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
+        let texts: Vec<&str> = st.candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["李", "樱"], "辅助码筛选应作用在临拼候选上");
+    }
+
+    /// 退出辅助码回到**临拼**，而不是掉进「什么模式都不在」。
+    ///
+    /// 少了这条，Esc / 退格 / 触发键复按之后 `active` 会变成 `None`，而组合区里还留着
+    /// `zli`、`temp_pinyin_buffer` 也还在——下一个字母会被当成新一轮五笔码。
+    #[test]
+    fn exits_back_to_temp_pinyin() {
+        let c = coord_with("exit_temp");
+        let mut st = seed_temp_pinyin(&c);
+        c.enter_aux_code(&mut st, keymap::VK_BACKTICK).unwrap();
+        c.exit_aux_code(&mut st);
+        assert_eq!(st.active, Some(ModeKind::TempPinyin), "应退回临拼");
+        assert!(st.aux_code.is_none());
+        assert_eq!(st.candidates.len(), 3, "候选应还原为进入前的快照");
+        assert_eq!(st.preedit, "zli", "组合区应还原成临拼形态");
+        assert_eq!(st.temp_pinyin_buffer, "li", "临拼缓冲全程不该被动过");
+    }
+
+    /// 主输入路来源仍退到 `None`——`origin` 的 `None` 分支必须与改动前逐位等价。
+    #[test]
+    fn exits_to_main_path_when_origin_is_none() {
+        let c = coord_with("exit_main");
+        let mut st = seed_composition(&c);
+        c.enter_aux_code(&mut st, keymap::VK_BACKTICK).unwrap();
+        assert_eq!(st.aux_code.as_ref().and_then(|o| o.origin), None);
+        c.exit_aux_code(&mut st);
+        assert_eq!(st.active, None, "主输入路来源退出后不应停在任何模式里");
+        assert_eq!(st.preedit, "li");
+    }
+
+    /// 「部分消费 vs 完整消费」的判据必须按**来源缓冲**取。
+    ///
+    /// 写死 `input_buffer` 的话，从临拼进来的会话恒判「完整消费」——「没时间」这类分步
+    /// 组句在选第一个词时就把剩余拼音丢了，而且不会报错。本用例直接锁那个取值函数：
+    /// 同一个 `State`（`input_buffer` 空、`temp_pinyin_buffer` 非空）下，两种来源必须
+    /// 给出不同答案。
+    #[test]
+    fn source_buffer_follows_origin() {
+        let c = coord_with("src_buf");
+        let mut st = seed_temp_pinyin(&c);
+        assert!(st.input_buffer.is_empty(), "前置：临拼态主缓冲为空");
+        c.enter_aux_code(&mut st, keymap::VK_BACKTICK).unwrap();
+        assert_eq!(
+            c.aux_code_source_buffer(&st),
+            "li",
+            "临拼来源应取 temp_pinyin_buffer"
+        );
+        // 把来源改成主输入路，同一个 State 下答案必须翻转（锁住「不是恒取某一个」）。
+        st.aux_code.as_mut().unwrap().origin = None;
+        assert_eq!(
+            c.aux_code_source_buffer(&st),
+            "",
+            "主输入路来源应取 input_buffer（此处为空）"
+        );
     }
 
     /// 两张表的动词写法必须逐字一致：同一个功能在两处写法不同的话，用户把配置从一张表
@@ -1410,22 +1584,51 @@ mod tests {
         assert_eq!(st.active, None);
     }
 
-    /// 已在别的 overlay 模式里 ⇒ `enter_aux_code` 的 `active.is_some()` 守卫拒 ⇒ 只翻页。
+    /// 已在**临拼以外**的 overlay 模式里 ⇒ `enter_aux_code` 的守卫拒 ⇒ 只翻页。
     ///
     /// `apply_session_action` 被五个 overlay 共用（`handle_candidate_nav` 转调），共键
     /// 在那些模式里必须是个安分的翻页键，不能把主候选夺过来筛。
+    ///
+    /// ⚠️ 代表模式从 `TempPinyin` 换成 `TempEnglish`：临拼现在放行，共键在那里的语义
+    /// 与主输入路一致（先试进入、进不去才翻页），由 `share_key_enters_aux_from_temp_pinyin`
+    /// 单独锁。
     #[test]
     fn share_key_only_pages_in_other_overlay_modes() {
         let c = coord_with_share_key("share_overlay", Some(true));
         let mut st = seed_multi_page(&c);
-        st.active = Some(ModeKind::TempPinyin);
+        st.active = Some(ModeKind::TempEnglish);
         let act = c
             .apply_session_action(&mut st, &key(keymap::VK_TAB, 0), true)
             .expect("翻页 ⇒ 消费");
-        assert_eq!(st.active, Some(ModeKind::TempPinyin), "不得改动所在模式");
+        assert_eq!(st.active, Some(ModeKind::TempEnglish), "不得改动所在模式");
         assert!(st.aux_code.is_none());
         assert_eq!(st.current_page, 1);
         assert!(matches!(act, KeyAction::Consumed));
+    }
+
+    /// 共键在**临拼**里与主输入路同语义：能进辅助码就进（进不去才翻页）。
+    ///
+    /// 这是上一条的正面：放行集合改了之后，共键的处置必须跟着改，否则「临拼能进辅助码」
+    /// 只对专用触发键成立、对共键不成立——同一个功能两个入口两种结果。
+    #[test]
+    fn share_key_enters_aux_from_temp_pinyin() {
+        let c = coord_with_share_key("share_temp", Some(true));
+        let mut st = seed_multi_page(&c);
+        st.active = Some(ModeKind::TempPinyin);
+        st.temp_pinyin_schema = "pinyin".to_string();
+        st.temp_pinyin_buffer = "li".to_string();
+        c.apply_session_action(&mut st, &key(keymap::VK_TAB, 0), true)
+            .expect("进入辅助码 ⇒ 消费");
+        assert_eq!(
+            st.active,
+            Some(ModeKind::AuxCode),
+            "共键应把临拼候选接进辅助码"
+        );
+        assert_eq!(
+            st.aux_code.as_ref().and_then(|o| o.origin),
+            Some(ModeKind::TempPinyin),
+            "来源须记成临拼"
+        );
     }
 
     /// ★★★ 专用触发键**只配在 `session_actions` 的符号键上**时，模式内再按必须正常退出，
