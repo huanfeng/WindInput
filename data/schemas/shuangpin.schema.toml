@@ -31,6 +31,10 @@ files = ["aux_code/flypy_full.txt"]
 # 的默认绑定——temp_pinyin_target 对拼音方案本就不成立，反引号在此原为自由键
 # （双拼不支持手动音节分隔符，见 pinyin_separator_key 的 pinyin_is_shuangpin 早退）。
 # 绑定本身不激活功能：enabled = false 时门卫拒绝进入，该键照常落普通标点。
+#
+# ⚠️ 若将来双拼开放手动分隔符，本绑定会被分隔符臂夺走（它在按键裁决里排在 key_actions
+# 之前）。届时在上方 [engine.pinyin] 段写 separator = "none" 即可把反引号还给辅助码
+# ——这正是 separator 做成方案级可覆盖的原因。
 [key_actions]
 backtick = "aux_code"
 

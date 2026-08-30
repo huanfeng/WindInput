@@ -435,6 +435,16 @@ pub struct PinyinSpec {
     /// 双拼布局 id（引用 data/schemas/shuangpin/<layout>.toml）
     #[serde(default)]
     pub shuangpin: ShuangpinSpec,
+    /// 本方案的手动音节分隔符策略（`auto` / `quote` / `backtick` / `none`）。
+    /// `None`（及空串）= 回落全局 `[schema.pinyin].separator`。
+    ///
+    /// ★ **为什么需要方案级覆盖**：与 [`AuxCodeSpec::enabled`] 是同一条论证的另一半——
+    /// 全拼与双拼**键位预算不同**。全拼的音节边界只能靠符号键表达；双拼把韵母塞进字母键、
+    /// 符号键空闲，出厂就把反引号给了辅助码（`shuangpin.schema.toml` 的
+    /// `backtick = "aux_code"`）。全局唯一的 `separator` 表达不了「全拼用反引号作分隔符、
+    /// 双拼用反引号进辅助码」，一改全局就把双拼的辅助码触发键静默夺走。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
 }
 
 /// 双拼布局（[engine.pinyin.shuangpin]）

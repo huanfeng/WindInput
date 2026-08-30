@@ -613,19 +613,50 @@ impl EngineManager {
     /// 当前活跃引擎是否开启整句输入（当前只有码表引擎会返回 true）。
     /// 供协调器判定手动分隔符键是否放行，见 `Engine::sentence_input_enabled`。
     pub fn sentence_input_enabled(&self) -> bool {
-        self.active_engine()
+        self.sentence_input_enabled_of(&self.active_schema_id())
+    }
+
+    /// **指定方案**是否开启整句输入。overlay 用这条，见 [`Self::engine_for`]。
+    pub fn sentence_input_enabled_of(&self, schema_id: &str) -> bool {
+        self.engine_for(schema_id)
             .is_some_and(|e| e.sentence_input_enabled())
     }
 
-    /// 拼音分隔符模式（auto/quote/backtick/none）的原始配置值。
+    /// 活跃方案生效的拼音分隔符模式（auto/quote/backtick/none）。
     /// 分隔符键的最终判定（含 auto 动态避让候选选择键）在协调器侧完成——
     /// 因「`'` 是否为选择键」需读 `select_key_groups`（协调器配置），引擎无该信息。
     pub fn pinyin_separator_mode(&self) -> String {
-        self.pinyin
+        self.pinyin_separator_mode_of(&self.active_schema_id())
+    }
+
+    /// **指定方案**生效的分隔符模式：方案段 `[engine.pinyin].separator`（含
+    /// `schema_overrides` 深合并）折叠全局基线 `[schema.pinyin].separator`，
+    /// 与 `[engine.aux_code].enabled` 同构的 tri-state（`None` = 跟随全局）。
+    ///
+    /// ★ **为什么这一项必须能按方案分**：全拼与双拼的键位预算不同（见
+    /// `AuxCodeSpec::enabled` 的同款论证）——全拼的音节边界只能靠符号键表达，而双拼
+    /// 把韵母塞进字母键、符号键空闲，出厂就把反引号给了辅助码
+    /// （`shuangpin.schema.toml` 的 `backtick = "aux_code"`）。全局唯一的 `separator`
+    /// 表达不了「全拼用反引号作分隔符、双拼用反引号进辅助码」这个最自然的组合：
+    /// 一改全局，双拼的辅助码触发键就被夺走，且只剩一条 warn 日志。
+    pub fn pinyin_separator_mode_of(&self, schema_id: &str) -> String {
+        let global = self
+            .pinyin
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .separator
-            .clone()
+            .clone();
+        if schema_id.is_empty() {
+            return global;
+        }
+        Self::read_schema(
+            schema_id,
+            self.data_dir.as_deref(),
+            self.override_dir.as_deref(),
+        )
+        .and_then(|s| s.engine.pinyin.separator)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(global)
     }
 
     /// 当前活跃拼音方案是否为双拼（`engine.pinyin.scheme == "shuangpin"`）。
@@ -633,22 +664,30 @@ impl EngineManager {
     /// 发散、Backspace 删不可见字符），供协调器 gate。复用韵母键集缓存（Some 即双拼），
     /// 与 `shuangpin_final_key` 同源、方案切换/reload 自动失效。
     pub fn pinyin_is_shuangpin(&self) -> bool {
-        let active_id = self.active_schema_id();
+        self.pinyin_is_shuangpin_of(&self.active_schema_id())
+    }
+
+    /// **指定方案**是否为双拼。overlay 用这条，见 [`Self::engine_for`]。
+    ///
+    /// ⚠️ 缓存是**单槽**（key = 方案 id）：临拼与主方案交替询问会来回刷。代价是一次
+    /// `read_schema`，只发生在按下分隔符/符号键那一帧，不在逐键路径上（字母键不问它）。
+    pub fn pinyin_is_shuangpin_of(&self, schema_id: &str) -> bool {
+        let id = schema_id.to_string();
         {
             let cache = self
                 .shuangpin_finals_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if cache.0 == active_id {
+            if cache.0 == id {
                 return cache.1.is_some();
             }
         }
-        let finals_set = self.build_shuangpin_finals(&active_id);
+        let finals_set = self.build_shuangpin_finals(&id);
         let is_sp = finals_set.is_some();
         *self
             .shuangpin_finals_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = (active_id, finals_set);
+            .unwrap_or_else(|e| e.into_inner()) = (id, finals_set);
         is_sp
     }
 
@@ -1586,12 +1625,24 @@ impl EngineManager {
 
     /// 取当前活跃引擎（必要时懒加载）
     fn active_engine(&self) -> Option<Arc<dyn Engine>> {
-        let id = self.active_schema_id();
-        self.ensure_loaded(&id);
+        self.engine_for(&self.active_schema_id())
+    }
+
+    /// 取**指定方案**的引擎（必要时懒加载）。
+    ///
+    /// overlay 模式（临拼/特殊模式）的判据必须走这条：`active_engine` 问的是主方案，
+    /// 而临拼在五笔方案下引用的是拼音方案——拿五笔的引擎类型去判「要不要支持音节
+    /// 分隔符 / 哪些符号是码元」，答案恒为否，且**静默**（同类现场见 handle_temp.rs
+    /// 里 `base_sort_ignores_weight_of` 那条注释）。
+    fn engine_for(&self, schema_id: &str) -> Option<Arc<dyn Engine>> {
+        if schema_id.is_empty() {
+            return None;
+        }
+        self.ensure_loaded(schema_id);
         self.engines
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&id)
+            .get(schema_id)
             .cloned()
     }
 
@@ -1605,7 +1656,12 @@ impl EngineManager {
 
     /// 当前活跃引擎是否为拼音类型
     pub fn is_pinyin(&self) -> bool {
-        self.active_engine()
+        self.is_pinyin_of(&self.active_schema_id())
+    }
+
+    /// **指定方案**的引擎是否为拼音类型。overlay（临拼）用这条，见 [`Self::engine_for`]。
+    pub fn is_pinyin_of(&self, schema_id: &str) -> bool {
+        self.engine_for(schema_id)
             .map(|e| e.engine_type() == EngineType::Pinyin)
             .unwrap_or(false)
     }
@@ -1634,7 +1690,16 @@ impl EngineManager {
     ///
     /// 混输取主码表子引擎的集合（见 `MixedEngine::input_chars`）。
     pub fn active_input_chars(&self) -> wind_config::CodeCharSet {
-        self.active_engine()
+        self.input_chars_of(&self.active_schema_id())
+    }
+
+    /// **指定方案**的码元字符集。语义同 [`Self::active_input_chars`]（含「绝不回落空集」）。
+    ///
+    /// 双拼布局把韵母塞进符号键（微软/搜狗/紫光的 `;` = ing）时，这张集合是唯一的仲裁者。
+    /// overlay 必须按自己引用的方案取——临拼在五笔方案下取 `active` 会拿到五笔的码元集，
+    /// 于是双拼韵母符号键在临拼里一个也打不出来。
+    pub fn input_chars_of(&self, schema_id: &str) -> wind_config::CodeCharSet {
+        self.engine_for(schema_id)
             .and_then(|e| e.input_chars().cloned())
             .unwrap_or_else(wind_config::CodeCharSet::default_alpha)
     }
@@ -1656,6 +1721,34 @@ impl EngineManager {
     /// 选词/透传，否则用户既选不了「第 1 个候选」也拿不回原生数字输入。
     pub fn active_is_leading_char(&self, ch: char) -> bool {
         match self.active_engine().as_ref().and_then(|e| e.input_chars()) {
+            Some(cs) => cs.contains_leading(ch),
+            None => wind_config::CodeCharSet::default_contains(ch),
+        }
+    }
+
+    /// 同 [`Self::active_is_code_char`]，但取**指定方案**（overlay 用，见 [`Self::engine_for`]）。
+    ///
+    /// ⚠️ 拼音引擎的码元集**完全由双拼布局推导**（`PinyinEngine::input_chars`）：全拼恒
+    /// `None` ⇒ 回落默认 `a-z` ⇒ 非字母恒 false。故调用点新增的非字母分支，在全拼与
+    /// 纯字母双拼布局下**恒不进入**——这是它「零回归」的全部依据。
+    pub fn is_code_char_of(&self, schema_id: &str, ch: char) -> bool {
+        match self
+            .engine_for(schema_id)
+            .as_ref()
+            .and_then(|e| e.input_chars())
+        {
+            Some(cs) => cs.contains(ch),
+            None => wind_config::CodeCharSet::default_contains(ch),
+        }
+    }
+
+    /// 同 [`Self::active_is_leading_char`]，但取**指定方案**。首码/全集之分见那边的文档。
+    pub fn is_leading_char_of(&self, schema_id: &str, ch: char) -> bool {
+        match self
+            .engine_for(schema_id)
+            .as_ref()
+            .and_then(|e| e.input_chars())
+        {
             Some(cs) => cs.contains_leading(ch),
             None => wind_config::CodeCharSet::default_contains(ch),
         }
@@ -3014,13 +3107,21 @@ impl EngineManager {
     /// `files` 逐条解析，`schemas/` 基准、用户目录优先——与 `read_schema` 同源
     /// `self.data_dir`，故方案从哪读、码表也从哪解析；缺失逐条 warn，不中断其余文件。
     pub fn aux_code_settings(&self) -> AuxCodeSettings {
+        self.aux_code_settings_of(&self.active_schema_id())
+    }
+
+    /// 同 [`Self::aux_code_settings`]，但取**指定方案**。
+    ///
+    /// 辅助码可以从临拼进入，而临拼在五笔方案下引用的是拼音方案——码表配在那个方案的
+    /// `[engine.aux_code].files` 里。按活跃方案取的话 `files` 恒空，门卫静默拒绝进入。
+    pub fn aux_code_settings_of(&self, schema_id: &str) -> AuxCodeSettings {
         let global = self
             .pinyin
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .aux_code
             .clone();
-        let id = self.active_schema_id();
+        let id = schema_id.to_string();
         let spec = (!id.is_empty())
             .then(|| Self::read_schema(&id, self.data_dir.as_deref(), self.override_dir.as_deref()))
             .flatten()

@@ -98,7 +98,7 @@ schema_overrides/{id}.toml ── 方案覆盖（仅码表；带开关；设置�
 |------|------|
 | `show_code_hint` | 显示编码提示 |
 | `use_smart_compose` | 智能组字 |
-| `separator` | 拼音分隔策略 |
+| `separator` | 拼音分隔策略（**已改为可被方案覆盖**，见下方 override 清单） |
 | `fuzzy.*`（11 项） | 模糊音 |
 
 > `candidate_order`：**删除**。当前未接入引擎（`PinyinEngine::Config` 有字段，注释"后续阶段接入"，
@@ -118,6 +118,15 @@ schema_overrides/{id}.toml ── 方案覆盖（仅码表；带开关；设置�
   > 裁决之前，绑了也进不去；双拼则 `pinyin_separator_key` 恒早退、反引号是自由键。
   > 「双拼开、全拼关」由此成为常态需求，全局唯一的开关表达不了。
   > 这与 `shuangpin.layout` 破例的性质相同：**方案的编码规则决定了它，不是用户的偏好**。
+- `[engine.pinyin].separator`（手动音节分隔符，2026-08-30 补）：tri-state，`None`/空串
+  回落全局 `[schema.pinyin].separator`（`EngineManager::pinyin_separator_mode_of`）。
+  出厂方案一律不声明，由 `builtin_pinyin_schemas_do_not_declare_separator` 守门。
+  > **它与上一条是同一条论证的另一半**。上面写着「全拼的反引号已被分隔符占用，故辅助码
+  > 要能按方案开关」——那时 `separator` 还是全局唯一的，于是只能单向让步：辅助码躲开
+  > 分隔符。真正的争用双方是「哪个功能拿到反引号」，而**双方都只能按方案回答**
+  > （双拼把韵母塞进字母键、符号键空闲；全拼的音节边界只能靠符号键表达）。
+  > 只让一方可配，另一方就永远是那个被夺走键位的：用户把全局 `separator` 设成
+  > `backtick`，双拼出厂的 `backtick = "aux_code"` 当场失效，且只剩一条 warn 日志。
 
 ### 3.3 混输（mix）
 

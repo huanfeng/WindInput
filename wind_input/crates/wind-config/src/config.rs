@@ -8785,6 +8785,34 @@ smart_method = "delete_replace"
         );
     }
 
+    /// 出厂守门：内置拼音方案**不得**自带 `[engine.pinyin].separator`。
+    ///
+    /// 同 `wubi86_schema_does_not_declare_short_code_yield` 的形状与理由——方案级
+    /// `Some(_)` 恒压过全局，一旦出厂方案声明了它，用户在全局页改分隔符对该方案
+    /// 完全失效，而「方案自带」这件事藏在方案文件里，从设置页看不出来。
+    ///
+    /// 这一项**存在的意义恰恰是让用户去覆盖它**（全拼用反引号作分隔符、双拼把反引号
+    /// 留给辅助码），所以出厂留空、由用户或第三方方案作者按自己的键位预算填。
+    #[test]
+    fn builtin_pinyin_schemas_do_not_declare_separator() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data/schemas");
+        for id in ["pinyin", "shuangpin"] {
+            let path = dir.join(format!("{id}.schema.toml"));
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                eprintln!("跳过 {id}：{} 不存在", path.display());
+                continue;
+            };
+            let schema: crate::schema::Schema =
+                toml::from_str(&text).unwrap_or_else(|e| panic!("{id}.schema.toml 应能解析: {e}"));
+            assert!(
+                schema.engine.pinyin.separator.is_none(),
+                "出厂方案 {id} 不该自带 separator（实际 {:?}）——它会让全局页那一项对该方案失效",
+                schema.engine.pinyin.separator
+            );
+        }
+    }
+
     /// 取值守门：空码时按标点**出厂即丢弃废码**，而同族的回车/空格仍是 `commit`。
     ///
     /// 三个值一起断言是刻意的：这组不一致是产品决策（判据见

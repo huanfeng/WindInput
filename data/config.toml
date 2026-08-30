@@ -128,6 +128,14 @@ temp_max_entries = 5000
 [schema.pinyin]
 show_code_hint = true
 use_smart_compose = true
+# 手动音节分隔符策略。auto = 动态避让选词键（' 被占作选词键时改用反引号，反之用 '）；
+# 也可显式写 quote / backtick / none。
+#
+# ⚠️ 这是**基线**，方案可以覆盖：在方案的 [engine.pinyin] 段（或
+# %APPDATA%\WindInput\schema_overrides\<方案id>.toml）写 separator = "none" 即可。
+# 需要它的典型场景是键位争用——双拼出厂把反引号给了辅助码
+# （见 schemas/shuangpin.schema.toml 的 [key_actions]），而全拼的音节边界只能靠符号键
+# 表达。全局唯一的值表达不了「全拼用反引号作分隔符、双拼用反引号进辅助码」。
 separator = "auto"
 
 # 双拼相关的全局行为。与**方案级** [engine.pinyin.shuangpin]（那里放 layout＝这个方案的
