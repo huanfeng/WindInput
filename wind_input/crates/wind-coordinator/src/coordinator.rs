@@ -1812,27 +1812,55 @@ impl Coordinator {
         // 没有预检就没有任何线索（热路径不能每次按键都告警）。
         crate::quick_eval::precheck(&quick_formats);
 
-        // 软键盘映射表：出厂画布 + 用户按面覆盖。
+        // 软键盘映射表：出厂画布 ⊕ 定制层按面覆盖 ⊕ 用户层按面覆盖。
         //
-        // ⚠️ 这里**不走** `resolve_data_file`：那个函数的语义是「用户那份存在就整份取代
+        // ⚠️ 这里**不走** `resolve_data_file`：那个函数的语义是「靠前的层存在就整份取代
         // 出厂」，而软键盘要的是按面合并——用户只想改一个键时不该失去其余 12 个面，
         // 更不该在出厂新增面之后永远看不到它们（同 `system.quick.toml` 的用户设置分文件
-        // 那条理由）。故显式取两个路径，出厂铺底、用户叠加。
+        // 那条理由）。故显式取各层路径，出厂铺底、逐层叠加。定制者由此也能只改几个面，
+        // 不必整份复制（同 `config.toml` 的四层深合并、`compat.toml` 的按条目合并）。
         let softkeyboard = {
-            let system = data_dir.map(|d| d.join(wind_softkeyboard::FILE_NAME));
+            let layers = Config::resource_layers_named_with(data_dir);
+            // 出厂画布只认 data 层：缺了就回落内置兜底表（部署损坏时软键盘仍可用）。
+            // 定制层不接这个位置——它的语义是叠加，把它当画布会让「只改一个面」的定制包
+            // 丢掉出厂其余 12 个面，正是本段一开始就拒绝掉的那种整份取代。
+            let system = layers
+                .iter()
+                .find(|l| l.name == "data")
+                .map(|l| l.path.join(wind_softkeyboard::FILE_NAME));
             let mut table = wind_softkeyboard::SoftKeyboardTable::load(system.as_deref());
-            if let Some(user) =
-                Config::user_config_dir().map(|d| d.join(wind_softkeyboard::FILE_NAME))
-                && user.exists()
-            {
-                match std::fs::read_to_string(&user) {
+            // ⚠️ 层序方向：`resource_layers_named_with` 返回的是**优先级从高到低**的
+            // `[user, custom, data]`，而按面合并必须**从低到高**依次叠加（出厂铺底、
+            // 定制层次之、用户层最后）。故 `.rev()`。反过来叠的现象是
+            // 「用户改了一个键，定制版把它盖回去」。
+            for layer in layers.iter().rev().filter(|l| l.name != "data") {
+                let path = layer.path.join(wind_softkeyboard::FILE_NAME);
+                if !path.exists() {
+                    continue;
+                }
+                match std::fs::read_to_string(&path) {
                     Ok(text) => match table.merge_user(&text) {
-                        Ok(()) => info!("软键盘: 已叠加用户覆盖 {}", user.display()),
-                        Err(e) => {
-                            warn!("软键盘: 用户覆盖解析失败，已忽略 {}: {}", user.display(), e)
-                        }
+                        Ok(()) => Config::log_layer_override(
+                            layer.name,
+                            "softkeyboard",
+                            wind_softkeyboard::FILE_NAME,
+                            &path,
+                            // 按面合并里每一层都真的生效（不是「谁赢了」），恒是覆盖。
+                            true,
+                        ),
+                        Err(e) => warn!(
+                            "软键盘: [{}]层覆盖解析失败，已忽略 {}: {}",
+                            layer.name,
+                            path.display(),
+                            e
+                        ),
                     },
-                    Err(e) => warn!("软键盘: 用户覆盖读取失败 {}: {}", user.display(), e),
+                    Err(e) => warn!(
+                        "软键盘: [{}]层覆盖读取失败 {}: {}",
+                        layer.name,
+                        path.display(),
+                        e
+                    ),
                 }
             }
             table

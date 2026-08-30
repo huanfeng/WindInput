@@ -279,6 +279,34 @@ stats/mobile/debug 各 3。只按顶层段降级的话，`ui.font.scripts` 一�
 | `wind-webdata` `system_schemas_dir()` → **`system_schemas_dirs()`** | 它喂给 `wind_transfer::scheme::{export_package, delete_package}` 当「系统目录」。只传 data 层时，只存在于 `data_custom` 的方案被 `locate` 判成 `Missing` ⇒ 导出成功但包是空的/全进 missing，**用户拿它装不回去**。改为传「非 user 的每一层」：定制层与出厂层同类——导出一并打包（自包含），删除永不触碰（判成 `User` 就等于允许程序删 `data_custom`，破不变量 3）。`scheme.rs` 的 `system_dir: Option<&Path>` 随之改为 `system_dirs: &[PathBuf]` |
 | `apps/service/src/dict_cli.rs` `cmd_weight_check` | 单目录 `read_dir` + `schemas_dir.join(词库)` ⇒ `dict weight-check` 看不见定制层自带的方案，而它恰恰是给定制者查权重用的工具。**带 `--data` 时仍只看指定目录**（那个标志的语义是「体检这个目录」，混进 `%APPDATA%`/`data_custom` 会让结果对不上用户所指的那份数据） |
 
+**★ 软键盘：rebase 之后补上的第五处（`coordinator.rs`，`system.softkeyboard.toml`）**
+
+软键盘是本分支 rebase 到 main 时带进来的新功能，它自成一套加载路径：**刻意不走**
+`resolve_data_file`（那个函数是「靠前的层存在就整份取代出厂」，而软键盘要的是**按面
+合并**——用户只想改一个键时不该失去其余 12 个面），于是也**不会**随 `resolve_overridable`
+自动继承定制层，原实现只认 `data_dir` 与 `user_config_dir` 两层。定制者放
+`data_custom/system.softkeyboard.toml` 会被静默忽略，无任何日志。
+
+现改为**三层按面合并**（`data` 铺底 ⊕ `data_custom` ⊕ `%APPDATA%`），与 `config.toml`
+的四层深合并、`compat.toml` 的按条目合并同一个思路：定制者可以只改几个面，终端用户仍能
+在定制版之上改自己的键。层序取自 `resource_layers_named_with`，**不自己拼**。
+
+⚠️ **层序方向**：该函数返回的是**优先级从高到低**的 `[user, custom, data]`，而按面合并
+必须**从低到高**依次叠加，故要 `.rev()`。反了的现象是「用户改了一个键，定制版把它盖
+回去」。出厂画布仍**只认 data 层**（缺失即回落内置兜底表，行为不变）：把定制层接成画布
+等于整份取代，正是这段一开始就拒绝掉的那件事。
+
+⇒ 判据推广（比这一处更要紧）：**凡「刻意不走 `resolve_*`」的加载路径都不会自动继承新层，
+每加一层都得逐个补**，而 `resource_layer_gates.rs` 对它们**无能为力**——那张清单只认
+`join("schemas")` / `join("themes")` / `join("opencc")` 三个字面量，换个文件名就绕过了。
+
+守门测试两个二进制（`custom_manifest()` 是 OnceLock，一个进程只能有一种层状态）：
+`wind-coordinator/tests/custom_layer_softkeyboard.rs`（三层齐全的合并与覆盖顺序、
+无用户层时定制层生效、定制层解析失败只跳过它）与 `custom_layer_softkeyboard_no_custom.rs`
+（无清单时与加层前逐字节同构，兼钉契约 2）。层序方向由「同一个键三层各写一个值」与
+「面的出现序」各钉一次——只断言「定制层生效了」是不够的：顺序反了时定制层同样生效，
+只是把用户的覆盖盖掉了。
+
 顺带把 `wind-webdata` 的 `theme_dirs()` 改为直接复用 `theme_search_dirs()`——那两份
 本就逐字重复，留着就是下一次分叉的种子。`WebDataHost::themes_dir()` 随之删除
 （它唯一的用途就是让人再拼一份两层链）。
