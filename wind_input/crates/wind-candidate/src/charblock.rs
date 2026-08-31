@@ -1,4 +1,4 @@
-//! 字符的 Unicode 块归类——**仅供显示与批量操作**，不参与任何判定。
+//! 字符的 Unicode 块归类——显示、批量操作，以及**退化方向安全**的成组判定。
 //!
 //! # ⛔ 与 [`crate::common`] 里的 `is_han` 是两张表，永远不要合并
 //!
@@ -14,8 +14,25 @@
 //! 修法是补充平面按**平面**整体兜底，不再逐块。
 //!
 //! 本表则**必须**逐块——它的产出就是块名，兜底成一个大范围就没有信息量了。所以这里保留
-//! 逐块列举，代价是新版 Unicode 的新块会落进「其它」，而那是可以接受的退化。
-//! **正因为可接受，才不能让这张表回头去承担判定职责。**
+//! 逐块列举，代价是新版 Unicode 的新块会落进「其它」。
+//!
+//! # ★ 本表什么时候可以承担判定职责
+//!
+//! 原先这里写的是「正因为那个退化可以接受，才不能让本表回头去承担判定职责」——一刀切的
+//! 禁令。[`crate::charclass`] 出现后它被改写成一条**带判据的准入**，因为一刀切挡掉的是
+//! 合法用法，而真正危险的是特定的**失败方向**：
+//!
+//! > **显示域的表可以承担判定职责，当且仅当「漏一块」的退化方向是安全的**
+//! > ——即退回当前已有的行为，而不是产生一种新的失效。
+//!
+//! | 用途 | 漏一块的后果 | 方向 | 需要的缓解 |
+//! |---|---|---|---|
+//! | 类型列显示 | 标签显示「其它」 | 安全 | 无 |
+//! | emoji 免词频 | 那批 emoji 照旧参与词频 | **安全**（= 改动前的行为） | 无 |
+//! | 生僻字模式准入 | 那批字在该模式里**打不出** | **不安全** | 必须有「其它」兜底档 |
+//! | `is_han`（对照） | 恒判常用、过滤静默失效 | 不安全 | 已改为按平面兜底 |
+//!
+//! ⇒ 新增消费者时先把自己填进这张表。填不出「安全」的那一栏，就不要用本表做判据。
 
 /// 一个 Unicode 块。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +69,7 @@ const OTHER: CharBlock = CharBlock {
 ///
 /// ⚠️ 扩展 I（`2EBF0–2EE5F`）在码位上夹在扩展 F 与扩展 G 之间，不是按字母顺序排的；
 /// 扩展 J（`323B0–3347F`）同理排在扩展 H 之后。照字母顺序写会破坏有序性。
-const BLOCKS: &[CharBlock] = &[
+pub(crate) const BLOCKS: &[CharBlock] = &[
     b("ASCII", 0x0020, 0x007F),
     b("拉丁文补充", 0x00A0, 0x024F),
     b("希腊字母", 0x0370, 0x03FF),
@@ -91,8 +108,12 @@ const BLOCKS: &[CharBlock] = &[
     b("兼容汉字", 0xF900, 0xFAFF),
     b("CJK 兼容形式", 0xFE30, 0xFE4F),
     b("半角及全角形式", 0xFF00, 0xFFEF),
+    // 国旗 🇨🇳 = 两个**区域指示符**（`U+1F1E8 U+1F1F3`），不在「表情符号」块内——它起于
+    // `1F300`，而区域指示符在 `1F1E6`。补这一块之前 `block_of('🇨')` 返回「其它」，于是
+    // emoji 预设组勾了也带不出国旗。
+    b("区域指示符", 0x1F1E6, 0x1F1FF),
     // ⚠️ 表情符号在**平面 1**（1F300…），码位上排在扩展 B（20000…）之前。按「重要性」
-    // 把它挪到表尾会破坏有序性——线性扫描碰巧仍能命中，但有序性一旦失守，日后换二分就错。
+    // 把它挪到表尾会破坏有序性——[`block_index_of`] 是二分，有序性一失守就直接错。
     b("表情符号", 0x1F300, 0x1FAFF),
     b("扩展 B", 0x20000, 0x2A6DF),
     b("扩展 C", 0x2A700, 0x2B73F),
@@ -110,17 +131,60 @@ const fn b(name: &'static str, start: u32, end: u32) -> CharBlock {
     CharBlock { name, start, end }
 }
 
+/// 「基本汉字」在 [`BLOCKS`] 里的下标，编译期算出——[`block_index_of`] 的早退要用它。
+///
+/// 写成常量而不是硬编码数字：块表中间插一块（本轮就插了「区域指示符」）会让所有后续
+/// 下标平移，而早退返回的是下标，写错就是**整片汉字被归进邻近的块**且没有任何报错。
+/// `basic_han_index_points_at_the_right_block` 钉着它。
+const BASIC_HAN_IDX: usize = {
+    let mut i = 0;
+    while i < BLOCKS.len() {
+        if BLOCKS[i].start == 0x4E00 {
+            break;
+        }
+        i += 1;
+    }
+    i
+};
+
+/// 扫不到「基本汉字」时 [`BASIC_HAN_IDX`] 会等于 `BLOCKS.len()`，而早退直接把它当下标
+/// 返回 ⇒ [`block_of`] 越界 panic。让这种情况在编译期就失败，而不是等某次按键时崩。
+const _: () = assert!(
+    BASIC_HAN_IDX < BLOCKS.len(),
+    "块表里找不到起于 U+4E00 的「基本汉字」块"
+);
+
+/// 这个字符落在 [`BLOCKS`] 的哪一项；表外为 `None`。
+///
+/// [`crate::charclass::BlockMask`] 按下标建位集，故这里给的是下标而不是 [`CharBlock`]。
+///
+/// # 为什么从线性扫描换成二分
+///
+/// 原实现逐项扫描 ~50 项，注释里写着「只在列表渲染与批量操作时调用，线性扫描足够；
+/// **真需要提速再换不迟**」。`charclass` 把本函数放上了按键热路径（每次按键 × 每个候选，
+/// 五笔单字母下 78+ 个），那个「不迟」到了。
+///
+/// 两层加速，都不影响正确性：
+/// 1. **基本汉字早退**——绝大多数候选是汉字，一次范围比较即可返回；该区与其余各块不相交。
+/// 2. **二分**取代线性：`partition_point` 找到最后一个 `start <= c` 的块再验 `end`。
+///
+/// ⚠️ 二分的正确性**依赖块表有序且互不重叠**。`blocks_are_sorted_and_disjoint` 此前只是
+/// 防「归类结果被插入顺序悄悄决定」，现在是**正确性前提**——那条测试的地位随本次改动升级，
+/// 不要因为它看起来只是整洁性检查而放宽它。
+pub(crate) fn block_index_of(ch: char) -> Option<usize> {
+    let c = ch as u32;
+    if (0x4E00..=0x9FFF).contains(&c) {
+        return Some(BASIC_HAN_IDX);
+    }
+    // partition_point 给出首个 `start > c` 的位置，故候选块是它的前一项。
+    let i = BLOCKS.partition_point(|blk| blk.start <= c);
+    let idx = i.checked_sub(1)?;
+    (c <= BLOCKS[idx].end).then_some(idx)
+}
+
 /// 这个字符属于哪个块；表外一律 [`OTHER`]。
 pub fn block_of(ch: char) -> CharBlock {
-    let c = ch as u32;
-    // 表短（约 50 项）且只在列表渲染与批量操作时调用，线性扫描足够；二分要先保证有序，
-    // 而有序性已经由测试钉住，真需要提速再换不迟。
-    for blk in BLOCKS {
-        if blk.start <= c && c <= blk.end {
-            return *blk;
-        }
-    }
-    OTHER
+    block_index_of(ch).map_or(OTHER, |i| BLOCKS[i])
 }
 
 /// 一个**字素簇**属于哪个块——按**首个** `char` 判。
@@ -153,8 +217,12 @@ pub fn block_allows_bulk_edit(blk: &CharBlock) -> bool {
 mod tests {
     use super::*;
 
-    /// 表必须按 `start` 升序且互不重叠——线性扫描「首个命中即返回」的正确性全靠它。
-    /// 重叠时，插入顺序会悄悄决定归类结果，改表的人不会察觉。
+    /// 表必须按 `start` 升序且互不重叠。
+    ///
+    /// ⚠️ **这条测试的地位升级过**：原先它防的是「重叠时插入顺序会悄悄决定归类结果」——
+    /// 一种归类漂移。[`block_index_of`] 改用二分之后，有序性成了**查找算法的正确性前提**：
+    /// 表一旦失序，`partition_point` 会直接返回错误的块，而不只是某个有争议的归类。
+    /// 别因为它看起来像整洁性检查就放宽它。
     #[test]
     fn blocks_are_sorted_and_disjoint() {
         for w in BLOCKS.windows(2) {
@@ -239,5 +307,71 @@ mod tests {
     fn range_text_is_hex_padded() {
         assert_eq!(block_of('⿰').range_text(), "2FF0-2FFF");
         assert_eq!(block_of('\u{323B0}').range_text(), "323B0-3347F");
+    }
+
+    /// 早退用的下标必须真的指向「基本汉字」。
+    ///
+    /// 本轮往表中间插了「区域指示符」，所有后续下标随之平移——若早退还硬编码着旧数字，
+    /// 表现是**整片汉字被归进邻近的块**，且没有任何报错。常量由编译期扫表算出正是为了
+    /// 免疫这种平移，这条测试钉住「扫表的判据（`start == 0x4E00`）没有失配」。
+    #[test]
+    fn basic_han_index_points_at_the_right_block() {
+        assert_eq!(BLOCKS[BASIC_HAN_IDX].name, "基本汉字");
+        assert_eq!(block_of('我').name, "基本汉字");
+        assert_eq!(block_of('\u{4E00}').name, "基本汉字");
+        assert_eq!(block_of('\u{9FFF}').name, "基本汉字");
+    }
+
+    /// **二分 + 早退 必须与原来的线性扫描逐字符等价。**
+    ///
+    /// 这条是本次算法替换的回归锁：性能改写最怕的不是崩，而是**某几个码位悄悄换了归类**
+    /// ——类型列上看不出来，拿它做准入判据时却是「这批字打不出」。故不抽样，直接遍历
+    /// 每个块的两端与相邻块之间的空隙，把边界全覆盖掉。
+    #[test]
+    fn binary_search_matches_linear_scan() {
+        fn linear(ch: char) -> CharBlock {
+            let c = ch as u32;
+            for blk in BLOCKS {
+                if blk.start <= c && c <= blk.end {
+                    return *blk;
+                }
+            }
+            OTHER
+        }
+
+        let mut probes: Vec<u32> = vec![0, 0x1F, 0x10FFFF];
+        for blk in BLOCKS {
+            // 块内两端与中点，以及紧邻两侧的空隙码位。
+            probes.extend([
+                blk.start.saturating_sub(1),
+                blk.start,
+                blk.start + (blk.end - blk.start) / 2,
+                blk.end,
+                blk.end + 1,
+            ]);
+        }
+        for c in probes {
+            let Some(ch) = char::from_u32(c) else {
+                continue; // 代理区等非法标量值，两条路径都够不着
+            };
+            assert_eq!(
+                block_of(ch).name,
+                linear(ch).name,
+                "U+{c:04X} 的归类被算法替换改变了"
+            );
+        }
+    }
+
+    /// 国旗的两个区域指示符必须各自归到「区域指示符」块。
+    ///
+    /// 补这一块之前它们落在「其它」——emoji 预设组因此带不出国旗，而这在类型列上
+    /// 只表现为一个不起眼的「其它」标签。
+    #[test]
+    fn regional_indicators_are_classified() {
+        assert_eq!(block_of('\u{1F1E8}').name, "区域指示符"); // 🇨
+        assert_eq!(block_of('\u{1F1F3}').name, "区域指示符"); // 🇳
+        assert_eq!(block_of_cluster("🇨🇳").name, "区域指示符");
+        // 邻接的「表情符号」块不受影响。
+        assert_eq!(block_of('😀').name, "表情符号");
     }
 }
