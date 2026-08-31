@@ -524,6 +524,99 @@ pub fn is_known_key(key: &str) -> bool {
     field(key).is_some()
 }
 
+/// 一条「这个全局项可被方案级配置覆盖」的登记。见 [`SCHEMA_OVERRIDES`]。
+#[derive(Debug, Clone, Copy)]
+pub struct SchemaOverride {
+    /// 全局键；**以 `.` 结尾表示整段前缀**（该段下所有键都可被覆盖）。
+    pub key: &'static str,
+    /// 方案文件（`.schema.toml` / `schema_overrides/<id>.toml`）里的落点段名。
+    pub section: &'static str,
+    /// 覆盖语义，一句话，直接进设置页的提示——**写给用户，不是写给维护者**。
+    pub note: &'static str,
+}
+
+/// 可被方案级配置覆盖的全局项。
+///
+/// # 这张表回答的问题
+///
+/// 「我在全局改了标点行为，为什么某个方案里没变」——因为那个方案自己声明了。这是本仓
+/// 配置模型里用户最常撞到的一层，而全局设置页此前**没有任何地方提示过它的存在**。
+///
+/// ★ 它是**静态事实**：某项能不能被方案覆盖由配置模型决定，与用户机器上有什么文件无关。
+/// 因此走 capability 快照（启动时随 `system.capabilities` 拉一次），**零运行时成本**。
+/// ⛔ 不要为它去遍历 [`crate::config::OriginSnapshot`]——那是排查用的重查询，
+/// 回答的也是另一个问题（「实际来自哪一层」）。
+///
+/// # ⚠️ 没有编译期约束，加方案级字段时必须回来加一行
+///
+/// 「方案的 `[codetable].top_code_commit` 覆盖全局的 `schema.codetable.top_code_commit`」
+/// 这层对应关系只存在于 `resolved()` 的函数体里，类型系统看不见。新增方案级字段而漏了
+/// 这张表，后果是设置页那一行**不再提示可被覆盖**——没有任何测试会红。
+/// 各方案级段的权威定义：[`crate::schema::SchemaBehavior`]（punct/candidate/phrases）、
+/// [`crate::config::CodetableGlobal::resolved`]、[`crate::config::AuxCodeGlobal::resolved`]。
+///
+/// # 不在表里的方案级字段
+///
+/// `[candidate]` 的 `font_family` 与 `text_orientation`、`[punct]` 的 `mode`、`[phrases]`
+/// 整段：它们**没有对应的全局配置键**（回落目标分别是主题、运行时中英标点态、方案自身），
+/// 全局设置页上根本没有那一行，无从标记。
+pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
+    SchemaOverride {
+        key: "schema.codetable.",
+        section: "[codetable]",
+        note: "码表方案可逐项覆盖这里的设置；方案没写的项仍然用这里的值。",
+    },
+    SchemaOverride {
+        key: "schema.pinyin.aux_code.enabled",
+        section: "[aux_code]",
+        note: "方案可覆盖这一项；方案没写则用这里的值。",
+    },
+    SchemaOverride {
+        key: "schema.pinyin.aux_code.max_phrase_len",
+        section: "[aux_code]",
+        note: "方案可覆盖这一项；方案没写则用这里的值。",
+    },
+    SchemaOverride {
+        key: "input.punct.custom_mappings",
+        section: "[punct]",
+        note: "声明了自己标点表的方案**整表**不用这里的表——不是逐条合并。",
+    },
+    // ★ 这一条是 `PunctSpec::custom_mappings` 的文档点名要求「设置页与文档站必须写明」
+    // 的那条推论：整表替换连开关一起换掉，所以关掉总开关，声明了自己标点表的方案
+    // 照样出自定义符号。不标出来的话，用户会以为这个开关坏了。
+    SchemaOverride {
+        key: "input.punct.custom_enabled",
+        section: "[punct]",
+        note: "声明了自己标点表的方案不受这个开关约束——整表替换时连它一起换掉了。",
+    },
+    SchemaOverride {
+        key: "ui.candidate.layout",
+        section: "[candidate]",
+        note: "方案可覆盖候选窗排列方向；方案没写则用这里的值。",
+    },
+    SchemaOverride {
+        key: "ui.candidate.comment_template_vertical",
+        section: "[candidate]",
+        note: "方案可覆盖注释模板；方案没写则用这里的值。",
+    },
+    SchemaOverride {
+        key: "ui.candidate.comment_template_horizontal",
+        section: "[candidate]",
+        note: "方案可覆盖注释模板；方案没写则用这里的值。",
+    },
+];
+
+/// 查一个全局键是否可被方案级配置覆盖。段前缀登记（`key` 以 `.` 结尾）对该段下所有键成立。
+pub fn schema_override_of(key: &str) -> Option<&'static SchemaOverride> {
+    SCHEMA_OVERRIDES.iter().find(|o| {
+        if let Some(prefix) = o.key.strip_suffix('.') {
+            key.strip_prefix(prefix).is_some_and(|r| r.starts_with('.'))
+        } else {
+            o.key == key
+        }
+    })
+}
+
 /// 把命令行/词条来源的原始字符串按注册表类型解析为 TOML 值（CLI `config set` 与
 /// cmdbar `config.set` 共用；解析不校验枚举成员与范围，交给 [`validate`]）。
 ///
@@ -1146,5 +1239,57 @@ mod tests {
             "data/config.toml 含非法值（类型/enum 不符 registry）:\n{}",
             bad.join("\n")
         );
+    }
+
+    /// [`SCHEMA_OVERRIDES`] 里的每条登记都必须指到真实存在的键（或非空的段）。
+    ///
+    /// 这道闸拦的是**键名漂移**：全局键被改名或删掉之后，表里那条会静默失配，
+    /// 设置页那一行就不再提示可被方案覆盖——而这种缺失没有任何别的东西看得见。
+    ///
+    /// ⚠️ 它拦不住反方向（core 新增了方案级字段却没往表里加一条）：那层对应关系只存在于
+    /// `resolved()` 的函数体里，类型系统与本测试都看不见。见 `SCHEMA_OVERRIDES` 的文档。
+    #[test]
+    fn schema_overrides_point_at_real_keys() {
+        for o in SCHEMA_OVERRIDES {
+            match o.key.strip_suffix('.') {
+                // 段前缀：该段下至少要有一个已登记的叶子键。
+                Some(prefix) => {
+                    let n = registry()
+                        .iter()
+                        .filter(|f| {
+                            f.key
+                                .strip_prefix(prefix)
+                                .is_some_and(|r| r.starts_with('.'))
+                        })
+                        .count();
+                    assert!(
+                        n > 0,
+                        "SCHEMA_OVERRIDES 的段前缀 `{}` 在注册表里一个键都没匹配到——\
+                         多半是那一段被改名或删了",
+                        o.key
+                    );
+                }
+                None => assert!(
+                    is_known_key(o.key),
+                    "SCHEMA_OVERRIDES 登记了未知键 `{}`（改名或已删除？）",
+                    o.key
+                ),
+            }
+        }
+    }
+
+    /// 前缀匹配不能误伤同前缀的兄弟段，也不能把段名本身当成叶子键。
+    #[test]
+    fn schema_override_prefix_matches_only_that_section() {
+        // 段内叶子命中。
+        assert!(schema_override_of("schema.codetable.top_code_commit").is_some());
+        // 段名本身不是叶子键，不该命中。
+        assert!(schema_override_of("schema.codetable").is_none());
+        // 同前缀的兄弟段不该被误伤（`schema.codetableX` 与 `schema.codetable` 只差一个字符）。
+        assert!(schema_override_of("schema.codetableX.foo").is_none());
+        // 精确登记项。
+        assert!(schema_override_of("input.punct.custom_enabled").is_some());
+        // 同段但没登记的键不该命中（`smart_list` 不在方案级下放范围）。
+        assert!(schema_override_of("input.punct.smart_list").is_none());
     }
 }

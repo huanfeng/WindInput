@@ -67,6 +67,18 @@ pub fn generate(data_dir: Option<&Path>) -> anyhow::Result<serde_json::Value> {
             None => serde_json::Value::Null,
         };
         entry.insert("default".into(), default);
+        // `schemaOverride` = 这个全局项可被方案级配置覆盖，值是给用户看的一句话 + 方案侧段名。
+        //
+        // ★ 走快照而不是运行时查询：能不能被方案覆盖是**静态**的配置模型属性，与用户机器上
+        // 有什么文件无关。设置页据此给那些行标一个提示图标，零额外 RPC、零读盘。
+        // 不可覆盖的键**不带这个字段**（而不是给 null）：设置端 `if let Some` 即可，
+        // 与同为可选的 `values` 一致。
+        if let Some(o) = config_schema::schema_override_of(f.key) {
+            entry.insert(
+                "schemaOverride".into(),
+                serde_json::json!({ "section": o.section, "note": o.note }),
+            );
+        }
         config_keys.push(serde_json::Value::Object(entry));
     }
 
