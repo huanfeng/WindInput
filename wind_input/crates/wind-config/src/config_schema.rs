@@ -527,7 +527,13 @@ pub fn is_known_key(key: &str) -> bool {
 /// 一条「这个全局项可被方案级配置覆盖」的登记。见 [`SCHEMA_OVERRIDES`]。
 #[derive(Debug, Clone, Copy)]
 pub struct SchemaOverride {
-    /// 全局键；**以 `.` 结尾表示整段前缀**（该段下所有键都可被覆盖）。
+    /// 全局键；**以 `.` 结尾表示段前缀，且只管这一段的直接子键**。
+    ///
+    /// ★ 前缀刻意**不递归**到更深的子段。覆盖能力是逐字段实现的（`resolved()` 里一个
+    /// `if let Some` 一行），子段未必跟着——`schema.codetable.` 可覆盖，它下面的
+    /// `auto_phrase` 子段却整个不折叠。递归前缀会把 `auto_phrase.*` 一并标成「可被方案
+    /// 覆盖」，而那是**告诉用户一件不成立的事**：他会去方案里写这一段，写了没反应，
+    /// 然后怀疑是自己写错了。要覆盖某个子段就为它再登记一条。
     pub key: &'static str,
     /// 方案文件（`.schema.toml` / `schema_overrides/<id>.toml`）里的落点段名。
     pub section: &'static str,
@@ -565,6 +571,15 @@ pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
         key: "schema.codetable.",
         section: "[codetable]",
         note: "码表方案可逐项覆盖这里的设置；方案没写的项仍然用这里的值。",
+    },
+    // 调频子段单独登记：段前缀不递归（见 `SchemaOverride::key`）。
+    // ⚠️ 与它并列的 `auto_phrase` 子段**刻意不登记**——`CodetableGlobal::resolved` 里
+    // 只折叠到 `frequency` 就返回了，码表自动造词没有方案级形态。标了它等于教用户
+    // 去方案里写一段不会被读的配置。
+    SchemaOverride {
+        key: "schema.codetable.frequency.",
+        section: "[codetable.frequency]",
+        note: "码表方案可逐项覆盖这里的调频设置；方案没写的项仍然用这里的值。",
     },
     SchemaOverride {
         key: "schema.pinyin.aux_code.enabled",
@@ -609,10 +624,13 @@ pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
 /// 查一个全局键是否可被方案级配置覆盖。段前缀登记（`key` 以 `.` 结尾）对该段下所有键成立。
 pub fn schema_override_of(key: &str) -> Option<&'static SchemaOverride> {
     SCHEMA_OVERRIDES.iter().find(|o| {
-        if let Some(prefix) = o.key.strip_suffix('.') {
-            key.strip_prefix(prefix).is_some_and(|r| r.starts_with('.'))
-        } else {
-            o.key == key
+        match o.key.strip_suffix('.') {
+            // 段前缀只管直接子键：剩余部分必须是 `.名字` 且名字里不再有点（见 `key` 的文档）。
+            Some(prefix) => key
+                .strip_prefix(prefix)
+                .and_then(|r| r.strip_prefix('.'))
+                .is_some_and(|leaf| !leaf.is_empty() && !leaf.contains('.')),
+            None => o.key == key,
         }
     })
 }
@@ -1291,5 +1309,30 @@ mod tests {
         assert!(schema_override_of("input.punct.custom_enabled").is_some());
         // 同段但没登记的键不该命中（`smart_list` 不在方案级下放范围）。
         assert!(schema_override_of("input.punct.smart_list").is_none());
+    }
+
+    /// 段前缀**不递归**：子段要么自己登记，要么不该被标记。
+    ///
+    /// 现场：第一版用递归前缀，`schema.codetable.auto_phrase.*` 六个键被一并标成
+    /// 「可被方案覆盖」，而 `CodetableGlobal::resolved` 折叠到 `frequency` 就返回了，
+    /// 根本不读 auto_phrase。标错比漏标更糟——用户会去方案里写一段不会被读的配置，
+    /// 写了没反应还以为是自己写错了。
+    #[test]
+    fn section_prefix_does_not_leak_into_subsections() {
+        // 登记了的子段：命中，且命中的是**子段那一条**（提示文案要说 [codetable.frequency]）。
+        let hit = schema_override_of("schema.codetable.frequency.half_life")
+            .expect("frequency 子段已单独登记，应命中");
+        assert_eq!(hit.section, "[codetable.frequency]");
+        // 没登记的子段：绝不能因为父段登记了就跟着被标。
+        for k in [
+            "schema.codetable.auto_phrase.enabled",
+            "schema.codetable.auto_phrase.min_phrase_len",
+            "schema.codetable.auto_phrase.temp_max_entries",
+        ] {
+            assert!(
+                schema_override_of(k).is_none(),
+                "{k} 没有方案级形态（resolved 不折叠 auto_phrase），不该被标记"
+            );
+        }
     }
 }
