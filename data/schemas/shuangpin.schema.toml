@@ -28,13 +28,13 @@ layout = "xiaohe"
 files = ["aux_code/flypy_full.txt"]
 
 # 反引号进辅助码（组码中有效；空缓冲时落普通标点）。覆盖全局 backtick = "temp_pinyin"
-# 的默认绑定——temp_pinyin_target 对拼音方案本就不成立，反引号在此原为自由键
-# （双拼不支持手动音节分隔符，见 pinyin_separator_key 的 pinyin_is_shuangpin 早退）。
+# 的默认绑定——temp_pinyin_target 对拼音方案本就不成立，反引号在此是自由键。
 # 绑定本身不激活功能：enabled = false 时门卫拒绝进入，该键照常落普通标点。
 #
-# ⚠️ 若将来双拼开放手动分隔符，本绑定会被分隔符臂夺走（它在按键裁决里排在 key_actions
-# 之前）。届时在上方 [engine.pinyin] 段写 separator = "none" 即可把反引号还给辅助码
-# ——这正是 separator 做成方案级可覆盖的原因。
+# 分隔符臂在按键裁决里排在 key_actions 之前，本可以把这个键夺走（双拼已支持手动分隔符，
+# 见 docs/design/shuangpin-separator.md）。夺不走是因为 separator 的 auto 模式会**避让
+# 本段已绑的键**：双拼下 `'` 被选词键占、反引号被这里占，auto 于是两个都不选。
+# 想在双拼用分隔符，显式写上方 [engine.pinyin] separator = "quote"（那时反引号仍归辅助码）。
 [key_actions]
 backtick = "aux_code"
 

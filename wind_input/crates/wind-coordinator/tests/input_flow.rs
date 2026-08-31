@@ -1048,10 +1048,19 @@ fn separator_explicit_quote_overrides_select_key() {
     );
 }
 
-/// Fix Round 1：双拼方案下手动分隔符一律禁用（`'` 会进 buffer 但引擎剥除，致 buffer 与 preedit
-/// 发散）——引号/反引号均不作分隔符。
+/// 双拼在 `auto` 下不占用任何分隔符键——引号/反引号均不作分隔符。
+///
+/// ⚠️ **同一个现象，判据已经换过一次**。原先是「双拼一律禁用」（键位判定里按引擎类型
+/// 早退）；引擎侧支持分隔符后（`docs/design/shuangpin-separator.md`）改由 `auto` 的
+/// 空闲判定拦住：双拼下 `'` 被选词键占、反引号被方案的 `[key_actions]` 占给辅助码，
+/// 两个都不空闲 ⇒ auto 不启用。
+///
+/// ⇒ 本用例守的是**「auto 会避让已占用的键」**，不再是「双拼这条路走不通」。
+/// 显式配 `quote` 仍然生效，那条由
+/// [`separator_works_for_shuangpin_when_explicitly_enabled`] 守——两条必须并存：
+/// 少了后者，把判据改回按引擎类型早退，这条照样绿。
 #[test]
-fn separator_disabled_for_shuangpin() {
+fn separator_off_by_default_for_shuangpin() {
     let d = data_dir();
     if !d.join("schemas/shuangpin.schema.toml").exists()
         && !d.join("schemas/shuangpin.schema.yaml").exists()
@@ -1084,6 +1093,46 @@ fn separator_disabled_for_shuangpin() {
         separator_not_inserted(&b),
         "双拼：反引号不应作分隔符，实际: {:?}",
         b
+    );
+}
+
+/// 双拼显式配 `separator = "quote"` 后，`'` 作分隔符压入缓冲。
+///
+/// 这是「引擎侧支持 + 键位判定放行」两件事在协调器这一层的会合点。
+/// ⚠️ 与上一条互为正反：只留上一条的话，把 `pinyin_ok` 改回对双拼早退它照样绿
+///（出厂本来就是 none），放行有没有真的发生根本测不出来。
+///
+/// ⚠️ **必须覆盖在方案层**：`separator` 方案级优先、全局只作回落，而
+/// `shuangpin.schema.toml` 出厂就写了 `none`——改 `cfg.schema.pinyin.separator`
+/// 会被它盖掉，测试变成恒绿的假用例。
+#[test]
+fn separator_works_for_shuangpin_when_explicitly_enabled() {
+    let d = data_dir();
+    if !d.join("schemas/shuangpin.schema.toml").exists()
+        && !d.join("schemas/shuangpin.schema.yaml").exists()
+    {
+        return;
+    }
+    let ov = std::env::temp_dir().join("wind_sp_sep_quote_ov");
+    let _ = std::fs::remove_dir_all(&ov);
+    std::fs::create_dir_all(&ov).expect("建 override 目录");
+    std::fs::write(
+        ov.join("shuangpin.toml"),
+        "[engine.pinyin]\nseparator = \"quote\"\n",
+    )
+    .expect("写方案覆盖");
+
+    let mut cfg = config_with("pinyin");
+    cfg.schema.available = vec!["shuangpin".into(), "pinyin".into()];
+    cfg.schema.active = "shuangpin".into();
+    let coord = Coordinator::new_headless_with_override(cfg, Some(&d), Some(ov));
+    for c in "ui".chars() {
+        press_letter(&coord, c);
+    }
+    let q = coord.handle_key_event(&key_event(0xDE, EVENT_KEY_DOWN));
+    assert!(
+        !separator_not_inserted(&q),
+        "双拼在方案层配了 quote 后，`'` 应作分隔符压入缓冲，实际: {q:?}"
     );
 }
 

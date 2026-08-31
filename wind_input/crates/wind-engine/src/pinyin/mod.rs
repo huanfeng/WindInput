@@ -1678,25 +1678,38 @@ fn build_raw_preedit(raw_input: &str, sp: &shuangpin::SpConvertResult) -> String
     if raw_input.is_empty() {
         return String::new();
     }
-    let mut segments: Vec<&str> = Vec::new();
+
+    // 段起点集合：每个音节的 raw_start，以及音节之间／尾部未被覆盖段的起点
+    //（无匹配键对的原样回写、partial 尾键）。
+    let mut starts: Vec<usize> = Vec::new();
     let mut cursor = 0usize;
     for s in &sp.syllables {
-        // 音节之前未被覆盖的字节：无匹配键对的原样回写段。
         if s.raw_start > cursor {
-            segments.push(&raw_input[cursor..s.raw_start]);
+            starts.push(cursor);
         }
-        segments.push(&raw_input[s.raw_start..s.raw_end]);
+        starts.push(s.raw_start);
         cursor = s.raw_end;
     }
-    // 尾部剩余：partial 尾键 或 无匹配回写段。
     if cursor < raw_input.len() {
-        segments.push(&raw_input[cursor..]);
+        starts.push(cursor);
     }
-    if segments.is_empty() {
-        // 无 syllables：原样返回。
-        return raw_input.to_string();
+
+    // ★ 逐字节重建而非 `join("'")`：raw_input 里**可能已经有用户手打的 `'`**，join 会在它
+    // 旁边再插一个（`n'hc` → `n''hc`）。判据是「这一位输出前，前面是不是已经有分隔符了」
+    // ——手动的和自动的都算，于是两者天然合流，连续 `''` 与首尾 `'` 也都原样留住。
+    let bytes = raw_input.as_bytes();
+    let mut out = String::with_capacity(raw_input.len() + starts.len());
+    for (i, &c) in bytes.iter().enumerate() {
+        if c == b'\'' {
+            out.push('\'');
+            continue;
+        }
+        if starts.contains(&i) && !out.is_empty() && !out.ends_with('\'') {
+            out.push('\'');
+        }
+        out.push(c as char);
     }
-    segments.join("'")
+    out
 }
 
 impl Engine for PinyinEngine {
@@ -1728,15 +1741,9 @@ impl Engine for PinyinEngine {
             return Ok(ConvertResult::default());
         }
 
-        // 双拼方案不支持手动音节分隔符 `'`：若含 `'` 先整体剥除，保持双拼转换/preedit 原语义。
-        // 手动分隔符仅在全拼路径（shuangpin=None）生效。
-        let sp_stripped: String;
-        let input: &str = if self.shuangpin.is_some() && input.contains('\'') {
-            sp_stripped = input.chars().filter(|&c| c != '\'').collect();
-            &sp_stripped
-        } else {
-            input
-        };
+        // 手动音节分隔符 `'` 在双拼下同样生效：由 `ShuangpinConverter::convert` 当作配对的
+        // 硬边界消化（见那里的文档），到这里之后 `input` 已是纯全拼域、不含 `'`，
+        // 下面全拼路径的 `has_sep` 分支只对 shuangpin=None 的输入成立。
 
         // Fix A：在任何 shadow 之前保存用户实际输入的原始字符（双拼键序列或全拼）。
         // 用于重建 preedit_display（显示原始按键），以及简拼判定（见 `abbr_query`）。
@@ -1752,6 +1759,15 @@ impl Engine for PinyinEngine {
         // 全拼下 `raw_input == query`，故此改动对全拼零影响。简拼串不含 `'`
         //（`is_abbreviation` 对分隔符判假），故与手动分隔符路径也不冲突。
         let abbr_query = raw_input;
+
+        // 混合简拼（声母段 + 音节段）枚举模式用的串。**与 `abbr_query` 分家**：
+        // 纯简拼判据问的是「这串击键是不是一串声母」，只有击键域答得了（`xan`）；
+        // 混合模式问的是「哪几段是音节」，击键域在双拼下根本没有音节可言。
+        //
+        // 仅当双拼**且用户打了分隔符**时改用全拼域——那时段结构由 `'` 定死，
+        // `full_pinyin` 是唯一解释，不存在拿它去猜的风险。没有分隔符时维持原样，
+        // 双拼既有行为（靠击键串碰巧在全拼域可读）一字不动。
+        let use_fp_for_mixed = self.shuangpin.is_some() && raw_input.contains('\'');
 
         // 双拼激活时保留 SpConvertResult，以便后续用 map_consumed_length 回算消费键数。
         let sp_result: Option<shuangpin::SpConvertResult> =
@@ -1773,6 +1789,9 @@ impl Engine for PinyinEngine {
             String::new()
         };
         let query: &str = if has_sep { query_owned.as_str() } else { input };
+
+        // 见上面 `use_fp_for_mixed`：此处 `input` 已是全拼域（双拼转换后的结果）。
+        let mixed_pattern_source: &str = if use_fp_for_mixed { input } else { abbr_query };
 
         // 纯分隔符输入（如 `'` / `''`）：无可查询拼音，仅回显分隔符，不产候选。
         if has_sep && query.is_empty() {
@@ -1934,11 +1953,28 @@ impl Engine for PinyinEngine {
         //
         // 全拼下比较 `completed_len` 与击键长度；双拼下 `completed_len` 说的是转换后的全拼域，
         // 与 `abbr_query`（原始击键）不同域，故改判「转换结果覆盖了整串击键」。
+        //
+        // ★ 双拼这边问的是「**有没有**击键没被音节覆盖」，不是「最后一个音节到没到末尾」。
+        // 后者隐含「音节连续铺满」的假设——手动分隔符第一次让中间合法地出现空洞
+        //（`n'hc` 的 `n` 是简拼段，不进 `syllables`），只看末尾就会把「整串已覆盖」
+        // 误判成真、把混合简拼整条路短路掉，候选一条不剩。
+        // 同一个洞在开头时（`omni` 的回写段 `om`）旧判据也一样漏，只是此前没有场景踩到。
+        //
+        // `'` 自身不是待解释的击键，空洞里只有分隔符不算漏。
         let mixed_covered = match &sp_result {
-            Some(r) => r
-                .syllables
-                .last()
-                .is_some_and(|s| s.raw_end >= raw_input.len()),
+            Some(r) => {
+                let unexplained = |seg: &str| seg.bytes().any(|c| c != b'\'');
+                let mut cursor = 0usize;
+                let mut covered = true;
+                for s in &r.syllables {
+                    if unexplained(&raw_input[cursor..s.raw_start]) {
+                        covered = false;
+                        break;
+                    }
+                    cursor = s.raw_end;
+                }
+                covered && !unexplained(&raw_input[cursor..])
+            }
             None => completed_len >= abbr_query.len(),
         };
 
@@ -2463,8 +2499,15 @@ impl Engine for PinyinEngine {
         //     不额外建 Dag），但只在全拼下可用：双拼的 `completed_len` 说的是转换后的全拼串，
         //     与 `abbr_query`（原始击键，文档 §5 约束 4）不同域。双拼下改为「转换结果覆盖了
         //     整串击键」——双拼每 2 键 1 音节，覆盖完整即无残码可作声母段。
+        //
+        //     ★ **双拼 + 手动分隔符时模式改从全拼域枚举**（`mixed_pattern_source`）。
+        //     模式要的是「声母段 + 音节段」，而双拼击键域里没有音节：`n'hc` 的击键
+        //     `nhc` 只能读成三个声母，`[n][hao]` 永远出不来。此前双拼下混合能work，
+        //     靠的是击键串**碰巧**在全拼域也读得通（`xanning` = x+an+ning），是巧合
+        //     不是机制——那正是「双拼下 `xan` 本身歧义、故意未处理」记的那件事。
+        //     分隔符把段结构定死之后，`full_pinyin` 成了无歧义的解释，比击键域更可信。
         let mixed_pats = if self.config.enable_abbrev && !mixed_covered {
-            mixed_abbrev::mixed_patterns(abbr_query, trie)
+            mixed_abbrev::mixed_patterns(mixed_pattern_source, trie)
         } else {
             Vec::new()
         };
@@ -5470,5 +5513,53 @@ mod tests {
             "双拼输入 \"ni\" 经转换后应返回含「你」的候选，实际候选: {:?}",
             r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
         );
+    }
+
+    /// 探针（临时）：双拼下手动分隔符。
+    #[test]
+    fn probe_shuangpin_separator_current() {
+        let eng = sp_fp_engine(
+            "probe_sep",
+            &[
+                ("你好", "ni hao", 200),
+                ("你", "ni", 100),
+                ("西安", "xi an", 150),
+                ("好", "hao", 90),
+            ],
+            false,
+        );
+        for input in [
+            "nhc", "n'hc", "nihc", "xiaj", "xi'aj", "ni'", "'ni", "n''hc",
+        ] {
+            let sp = eng.shuangpin.as_ref().unwrap().convert(input);
+            let r = eng.convert(input, 10).unwrap();
+            println!(
+                "IN {:?} | full={:?} pre={:?} partial={:?} syl={:?}",
+                input,
+                sp.full_pinyin,
+                sp.preedit_display,
+                sp.partial_initial,
+                sp.syllables
+                    .iter()
+                    .map(|s| (
+                        s.pinyin.clone(),
+                        s.raw_start,
+                        s.raw_end,
+                        s.fp_start,
+                        s.fp_end
+                    ))
+                    .collect::<Vec<_>>(),
+            );
+            println!(
+                "   -> eng.preedit={:?} disp={:?} cands={:?}",
+                r.preedit_pinyin,
+                r.preedit_display,
+                r.candidates
+                    .iter()
+                    .take(4)
+                    .map(|c| (c.text.clone(), c.consumed_length))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 }

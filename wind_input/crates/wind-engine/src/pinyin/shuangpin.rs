@@ -209,6 +209,15 @@ use crate::pinyin::syllable::SyllableTrie;
 /// 见 `super::interp` 的模块文档。
 pub use super::interp::SylSpan;
 
+/// 手动音节分隔符。全拼与双拼共用同一个字符：协调器把用户配的那个键（`'` 或反引号，
+/// 见 `manual_separator_key_of`）统一翻译成它再送进引擎，引擎侧只认这一个形态。
+///
+/// 它同时也是 `preedit_display` 里**自动**分段用的字符——两者刻意同形，用户看到的
+/// `n'hc` 里那一撇既是他按的、也正好是系统会加的位置，视觉上不分叉。
+const SEPARATOR: char = '\'';
+/// [`SEPARATOR`] 的字节形态。双拼键序列按字节扫描（全为 ASCII），比较用这个。
+const SEPARATOR_B: u8 = b'\'';
+
 /// 双拼→全拼转换结果（对齐 Go ConvertResult）。
 #[derive(Debug, Clone, Default)]
 pub struct SpConvertResult {
@@ -413,7 +422,30 @@ impl ShuangpinConverter {
     }
 
     /// 将双拼键序列转换为全拼（对齐 Go Convert）。
-    /// `keys` 为小写字母序列（如小鹤方案下的 "nihc"）。
+    /// `keys` 为小写字母序列（如小鹤方案下的 "nihc"），可含手动音节分隔符 `'`。
+    ///
+    /// ## 手动分隔符 `'` 是**配对的硬边界**
+    ///
+    /// 双拼每 2 键一音节，配对起点由「前面消耗了几个键」决定——一旦用户想让某个键单独
+    /// 作简拼声母，其后**所有**键的配对都会错位：`nhc`（你 简 + 好 全）被读成
+    /// `nh`→`nang` 加残码 `c`，全然不是用户敲的那两个字。这个歧义无法由打分挽回，
+    /// 因为两种读法都是合法击键序列（见 `pinyin-mixed-abbrev.md` 记下的「双拼下 `xan`
+    /// 是三声母还是 xa+残码，本身歧义，故意未处理」——本函数就是补上那个手段）。
+    ///
+    /// ⇒ `'` 处**重置配对起点**：`n'hc` → 段 `n`（落单，作声母）+ 段 `hc`（→`hao`），
+    /// full 得 `nhao`，正是混合简拼（声母段 + 完整音节）认得的形状。
+    ///
+    /// ★ **段尾落单键与末尾落单键不是一回事**：后者是「还没打完」（`partial`，可能续打
+    /// 下一键成对），前者是用户已用 `'` 明确宣告「它就到此为止」。故段尾落单键写进 full
+    /// 却**不置 `has_partial`**——置了会让下游把已定案的简拼段当成待续输入。
+    ///
+    /// ★ 段尾落单键刻意**不进 `syllables`**：它不是音节。这样 `sp_boundary_mask` 会把它
+    /// 当作「回写段」自动标出段起点（那里已有 `s.fp_start > cursor` 的空隙分支），
+    /// 手动边界因此无需在 mask 里另开一路。
+    ///
+    /// `'` 自身不进 `full_pinyin`、不占 `position_map`；但 `raw_start`/`raw_end` 与
+    /// `position_map` 的值取**含 `'` 的击键偏移**，故 `map_consumed_length` 回算出的
+    /// 键数天然把分隔符算在内——用户确实按了那一下。
     pub fn convert(&self, keys: &str) -> SpConvertResult {
         let mut result = SpConvertResult::default();
         if keys.is_empty() {
@@ -431,25 +463,39 @@ impl ShuangpinConverter {
         while i < b.len() {
             let key1 = b[i];
 
-            if i + 1 >= b.len() {
-                // 奇数尾键：未配对（partial）。
+            // 分隔符自身不产出任何东西，只是让下一轮从这里重新起段。
+            // 连续 `''` 与开头 `'` 都落在这里，各自空转一轮。
+            if key1 == SEPARATOR_B {
+                i += 1;
+                continue;
+            }
+
+            // 段尾 = 输入到头，或下一个键是分隔符。
+            let is_last_of_segment = i + 1 >= b.len() || b[i + 1] == SEPARATOR_B;
+            if is_last_of_segment {
+                // 落单键一律解析成声母写进 full；两种落单的区别只在要不要置 partial。
                 let partial_str = match self.layout.initial_of(key1) {
                     Some(init) => init.to_string(),
                     None => (key1 as char).to_string(),
                 };
-                result.partial_initial = Some(partial_str.clone());
-                result.partial_key = Some(key1);
-                result.has_partial = true;
+                // 只有输入末尾那个才是「未配对、可能续打」。段尾的是用户已定案的简拼段。
+                if i + 1 >= b.len() {
+                    result.partial_initial = Some(partial_str.clone());
+                    result.partial_key = Some(key1);
+                    result.has_partial = true;
+                }
 
                 if !preedit.is_empty() {
-                    preedit.push('\'');
+                    preedit.push(SEPARATOR);
                 }
                 preedit.push_str(&partial_str);
                 full.push_str(&partial_str);
                 for _ in 0..partial_str.len() {
                     result.position_map.push(i);
                 }
-                break;
+                fp_pos += partial_str.len();
+                i += 1;
+                continue;
             }
 
             let key2 = b[i + 1];
@@ -458,7 +504,7 @@ impl ShuangpinConverter {
             if !syllables.is_empty() {
                 let best = syllables[0].clone();
                 if !preedit.is_empty() {
-                    preedit.push('\'');
+                    preedit.push(SEPARATOR);
                 }
                 preedit.push_str(&best);
                 full.push_str(&best);
@@ -485,7 +531,7 @@ impl ShuangpinConverter {
                 // 无法匹配：两个键原样保留（简拼/无效键对）。
                 let s = format!("{}{}", key1 as char, key2 as char);
                 if !preedit.is_empty() {
-                    preedit.push('\'');
+                    preedit.push(SEPARATOR);
                 }
                 preedit.push_str(&s);
                 full.push_str(&s);
