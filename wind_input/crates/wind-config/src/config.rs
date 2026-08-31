@@ -4761,6 +4761,111 @@ impl ResourceLayer {
     }
 }
 
+/// 四层配置的一次性快照：各层原始内容 + 一次真实加载的结果。
+///
+/// # 为什么要有它
+///
+/// 追溯一个键要读 4 个层文件 + 跑一次完整 [`Config::load`]。把「采样」与「取键」分开，
+/// 一是让 [`Config::key_origin`] 的实现只剩一行，二是留出**同一次采样查多个键**的形态
+/// ——那时几个键的答案来自同一个世界，而逐键各采各的样时，用户正好在这中间改了配置
+/// 文件，前后两个键就会给出对不上的答案。
+///
+/// ⚠️ **不要拿它遍历整张注册表**（几百个键）来给设置页做「每项的来源」：那是把一次
+/// 排查用的重查询放进了常态路径。设置页要表达的「此项可被方案覆盖」是**静态**事实，
+/// 走 capability 快照，与本快照无关。
+///
+/// # 一致性边界
+///
+/// 快照是**采样那一刻**的盘上状态，不随后续文件改动更新。它服务于「现在解释一下」，
+/// 不是一个可以长期持有的视图——用完即弃。
+pub struct OriginSnapshot {
+    /// 各层：层名、配置文件路径、该层**整份**未合并的 TOML。从低到高。
+    layers: Vec<(&'static str, Option<PathBuf>, Option<toml::Value>)>,
+    /// 一次真实 `load()` 结果的序列化形态（含 `normalize` 之后）。
+    effective: toml::Value,
+    /// 那次加载的降级记录。
+    degradation: ConfigDegradation,
+}
+
+impl OriginSnapshot {
+    /// 采样四层。`data_dir` 同 [`Config::load`]。
+    pub fn capture(data_dir: Option<&Path>) -> anyhow::Result<Self> {
+        // L1 序列化不了属于代码 bug，与 `load()` 里同样处置——往上抛。
+        let default_v = toml::Value::try_from(Config::default())?;
+
+        // 层不存在（非定制版的 custom、漫游目录取不到的 user）与「有这层但文件缺失」
+        // 要分得开：前者 path 为 None，后者 path 有值而内容为 None。呈现端据此说得出
+        // 「本机不是定制版」还是「这一层没写这个键」。
+        let file_layer = |name: &'static str, dir: Option<PathBuf>| {
+            let Some(dir) = dir else {
+                return (name, None, None);
+            };
+            let path = dir.join("config.toml");
+            let value = Config::read_toml_value(&path);
+            (name, Some(path), value)
+        };
+
+        let layers = vec![
+            ("default", None, Some(default_v)),
+            file_layer("data", data_dir.map(|d| d.to_path_buf())),
+            file_layer("custom", Config::custom_data_dir()),
+            file_layer("user", Config::user_config_dir()),
+        ];
+
+        let cfg = Config::load(data_dir)?;
+        Ok(Self {
+            layers,
+            effective: toml::Value::try_from(&cfg)?,
+            degradation: cfg.degradation,
+        })
+    }
+
+    /// 追溯一个键。语义见 [`KeyOrigin`] 与 [`Config::key_origin`]。
+    pub fn key(&self, key: &str) -> KeyOrigin {
+        let layers: Vec<LayerOrigin> = self
+            .layers
+            .iter()
+            .map(|(name, path, whole)| LayerOrigin {
+                layer: name,
+                path: path.clone(),
+                value: whole.as_ref().and_then(|v| value_at_path(v, key)),
+            })
+            .collect();
+
+        let effective = value_at_path(&self.effective, key);
+
+        // 归属判定：从高到低找第一个声明了的层，其值与生效值相同才算「就是它」。
+        //
+        // ★ 值相等这一步不能省。表类型跨层深合并时，最高声明层的值只是并集的一部分
+        // （user 写 `{a=1}`、data 写 `{b=2}`，生效值是 `{a=1,b=2}`），此时归属到 user
+        // 是错的——用户照着去改 user 层，改不动来自 data 的那一半。`normalize()` 改写过
+        // 的值同理。宁可报「指不到单独一层」，也不要报一个会把人带偏的层名。
+        let effective_layer = layers
+            .iter()
+            .rev()
+            .find(|l| l.value.is_some())
+            .filter(|l| l.value == effective)
+            .map(|l| l.layer);
+
+        KeyOrigin {
+            layers,
+            effective,
+            effective_layer,
+            degraded: self.degradation.taints(key),
+        }
+    }
+}
+
+/// 按点分路径在 TOML 值里取一个子值。中途遇到非表即视为不存在——
+/// 「`ui` 被用户写成了字符串」这类情况下，`ui.font.size` 确实不存在。
+fn value_at_path(v: &toml::Value, key: &str) -> Option<toml::Value> {
+    let mut cur = v;
+    for part in key.split('.') {
+        cur = cur.as_table()?.get(part)?;
+    }
+    Some(cur.clone())
+}
+
 /// 一个配置键在**某一层**的声明情况。见 [`Config::key_origin`]。
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayerOrigin {
@@ -6313,76 +6418,7 @@ impl Config {
     /// 每次调用做 4 次文件读 + 一次完整 `load()`。这是**排查用的单次查询**，不要放进
     /// 热路径；需要批量时应当另做一个复用这一次 `load()` 的形态。
     pub fn key_origin(key: &str, data_dir: Option<&Path>) -> anyhow::Result<KeyOrigin> {
-        /// 按点分路径在 TOML 值里取一个子值。中途遇到非表即视为不存在——
-        /// 「`ui` 被用户写成了字符串」这类情况下，`ui.font.size` 确实不存在。
-        fn at_path(v: &toml::Value, key: &str) -> Option<toml::Value> {
-            let mut cur = v;
-            for part in key.split('.') {
-                cur = cur.as_table()?.get(part)?;
-            }
-            Some(cur.clone())
-        }
-
-        // L1：代码默认。序列化不了属于代码 bug，与 `load()` 里同样处置——往上抛。
-        let default_v = toml::Value::try_from(Self::default())?;
-
-        // L2/L2.5/L3：各层的**原始**文件内容（未合并）。层不存在或文件缺失都落在
-        // `path: None` / `value: None` 上，两者在呈现端要分得开：前者是「这台机器没有
-        // 这一层」，后者是「有这一层但没写这个键」。
-        let file_layer = |name: &'static str, dir: Option<PathBuf>| {
-            let Some(dir) = dir else {
-                return LayerOrigin {
-                    layer: name,
-                    path: None,
-                    value: None,
-                };
-            };
-            let path = dir.join("config.toml");
-            let value = Self::read_toml_value(&path)
-                .as_ref()
-                .and_then(|v| at_path(v, key));
-            LayerOrigin {
-                layer: name,
-                path: Some(path),
-                value,
-            }
-        };
-
-        let layers = vec![
-            LayerOrigin {
-                layer: "default",
-                path: None,
-                value: at_path(&default_v, key),
-            },
-            file_layer("data", data_dir.map(|d| d.to_path_buf())),
-            file_layer("custom", Self::custom_data_dir()),
-            file_layer("user", Self::user_config_dir()),
-        ];
-
-        // 生效值走一次真实加载，理由见本函数文档的第二个要点。
-        let cfg = Self::load(data_dir)?;
-        let degraded = cfg.degradation.taints(key);
-        let effective = at_path(&toml::Value::try_from(&cfg)?, key);
-
-        // 归属判定：从高到低找第一个声明了的层，其值与生效值相同才算「就是它」。
-        //
-        // ★ 值相等这一步不能省。表类型跨层深合并时，最高声明层的值只是并集的一部分
-        // （user 写 `{a=1}`、data 写 `{b=2}`，生效值是 `{a=1,b=2}`），此时归属到 user
-        // 是错的——用户照着去改 user 层，改不动来自 data 的那一半。`normalize()` 改写过
-        // 的值同理。宁可报「指不到单独一层」，也不要报一个会把人带偏的层名。
-        let effective_layer = layers
-            .iter()
-            .rev()
-            .find(|l| l.value.is_some())
-            .filter(|l| l.value == effective)
-            .map(|l| l.layer);
-
-        Ok(KeyOrigin {
-            layers,
-            effective,
-            effective_layer,
-            degraded,
-        })
+        Ok(OriginSnapshot::capture(data_dir)?.key(key))
     }
 
     /// 获取当前激活的 schema ID
