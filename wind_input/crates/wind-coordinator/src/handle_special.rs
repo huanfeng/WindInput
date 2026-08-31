@@ -198,7 +198,7 @@ impl Coordinator {
     /// 而用户完全看不出区别。宁可什么都不滤，也不要给出一个假装过滤过的列表。
     ///
     /// 「严格过滤，空了就空着」是用户拍板的取舍（2026-08-24）：滤空不回补、不降级。
-    fn retain_rare_admitted(&self, candidates: &mut Vec<wind_candidate::Candidate>) {
+    pub(crate) fn retain_rare_admitted(&self, candidates: &mut Vec<wind_candidate::Candidate>) {
         let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
         if cc.is_empty() {
             return;
@@ -860,6 +860,51 @@ mod tests {
             c.retain_rare_admitted(&mut cands);
             let got: Vec<&str> = cands.iter().map(|c| c.text.as_str()).collect();
             assert_eq!(got, vec!["龘"], "没配区块时域外字符不该进来");
+        }
+
+        /// `$rare_char` 必须被进入门卫认作有效成员。
+        ///
+        /// 它不是真实方案，`ensure_schema` 对它必然失败 ⇒ 会被 `mix_members`（真实方案
+        /// 列表）滤掉。若门卫只看那份列表，一个只配了 `$rare_char` 的 mix 就**进都进不去**
+        /// ——按引导键毫无反应，且没有任何报错。
+        #[test]
+        fn rare_char_member_is_recognized_by_the_entry_gate() {
+            let mut cfg = Config::default();
+            let m = cfg
+                .schema
+                .mix_modes
+                .get_mut(0)
+                .expect("出厂应有内置 quick_mix");
+            m.members = vec![wind_config::config::MIX_MEMBER_RARE_CHAR.to_string()];
+            let c = Coordinator::new_headless(cfg, None);
+
+            assert!(c.mix_has_rare_char(0), "门卫须认得生僻字成员");
+            assert!(
+                c.mix_members(0).is_empty(),
+                "它不是真实方案，不该出现在真实方案列表里"
+            );
+            // 两者合起来才是完整判据：真实方案列表为空，但门卫仍应放行。
+            assert!(
+                !c.mix_has_quick_input(0),
+                "本用例已把 members 换成只有生僻字，不应再含 quick 来源"
+            );
+        }
+
+        /// 生僻字成员**不该**触发强制竖排。
+        ///
+        /// 竖排是 `mix_has_quick_input` 的语义（内置来源的候选是长文本，横排放不下），
+        /// 而生僻字成员产出的是普通单字。两个谓词合并的话，只配生僻字的 mix 会平白变竖排。
+        #[test]
+        fn rare_char_member_does_not_force_vertical() {
+            let mut cfg = Config::default();
+            let m = cfg.schema.mix_modes.get_mut(0).unwrap();
+            m.members = vec![wind_config::config::MIX_MEMBER_RARE_CHAR.to_string()];
+            let c = Coordinator::new_headless(cfg, None);
+            assert!(c.mix_has_rare_char(0));
+            assert!(
+                !c.mix_has_quick_input(0),
+                "生僻字成员不属于 quick 来源族，不应带来竖排"
+            );
         }
 
         /// 装一份最小常用字表。`retain_rare_admitted` 对空表整条早退（见那条测试），

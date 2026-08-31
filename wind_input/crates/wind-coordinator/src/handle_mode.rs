@@ -162,6 +162,10 @@ impl Coordinator {
             .filter(|s| {
                 !s.is_empty()
                     && !wind_quick_input::is_quick_member(s)
+                    // 生僻字成员不是真实方案（它指向「此刻的活跃方案 + 过滤」），
+                    // `ensure_schema` 对它必然失败——不排除的话它会被当成一个加载不了的
+                    // 方案静默丢弃，而进入门卫恰好看的就是这份列表空不空。
+                    && s != wind_config::config::MIX_MEMBER_RARE_CHAR
                     && self.engine_mgr.ensure_schema(s)
             })
             .collect()
@@ -179,6 +183,25 @@ impl Coordinator {
                 m.members
                     .iter()
                     .any(|s| wind_quick_input::is_quick_member(s))
+            })
+            .unwrap_or(false)
+    }
+
+    /// mix 是否含生僻字成员（`$rare_char`）。
+    ///
+    /// 单独一个谓词而不是并进 [`Self::mix_has_quick_input`]：那个的语义是「含内置来源
+    /// ⇒ 进入条件 + 强制竖排」，而生僻字成员产出的是普通的单字候选，不需要竖排。
+    /// 合并会让只配了生僻字的 mix 平白变成竖排。
+    pub(crate) fn mix_has_rare_char(&self, idx: u8) -> bool {
+        self.rt()
+            .config
+            .schema
+            .mix_modes
+            .get(idx as usize)
+            .map(|m| {
+                m.members
+                    .iter()
+                    .any(|s| s == wind_config::config::MIX_MEMBER_RARE_CHAR)
             })
             .unwrap_or(false)
     }
@@ -365,7 +388,9 @@ impl Coordinator {
         // 融合「快捷」（现唯一的快捷输入形态，成员含日期/计算/拼音/英文）——对齐空缓冲
         // 时 handle_lifecycle 的 enter_mix_mode，使有无候选都进同一融合模式。
         if let Some(idx) = self.match_mix_trigger(data.key_code)
-            && (self.mix_has_quick_input(idx) || !self.mix_members(idx).is_empty())
+            && (self.mix_has_quick_input(idx)
+                || self.mix_has_rare_char(idx)
+                || !self.mix_members(idx).is_empty())
         {
             return Some(self.commit_and_enter_mix_mode(state, idx, data.key_code));
         }
@@ -424,7 +449,10 @@ impl Coordinator {
             }
             BoundAction::Mix(id) => {
                 let idx = self.mix_mode_idx(id)?;
-                if !self.mix_has_quick_input(idx) && self.mix_members(idx).is_empty() {
+                if !self.mix_has_quick_input(idx)
+                    && !self.mix_has_rare_char(idx)
+                    && self.mix_members(idx).is_empty()
+                {
                     return None;
                 }
                 Some(self.commit_and_enter_mix_mode(state, idx, key_code))
@@ -1663,6 +1691,28 @@ impl Coordinator {
                             text: r.text,
                             ..Default::default()
                         });
+                    }
+                }
+            } else if member == wind_config::config::MIX_MEMBER_RARE_CHAR {
+                // 生僻字成员：用**当前活跃方案**查询，再过一道生僻准入。与独立模式共用
+                // `retain_rare_admitted`（含 `input.rare_char.include_blocks` 与「常用字表
+                // 未加载则整条不过滤」那道保护），两个入口的口径因此不会分叉。
+                if numeric {
+                    continue; // 数字透镜下是算式，没有编码可查
+                }
+                let schema = self.engine_mgr.active_schema_id();
+                if !self.engine_mgr.ensure_schema(&schema) {
+                    continue;
+                }
+                let result = self.engine_mgr.convert_with(&schema, &state.mix_buffer, 50);
+                // ⚠️ 刻意**不在这里 finalize**：循环外还会对整份 `cands` 统一 finalize 一次，
+                // 在此提前展开会让 `$AA`/`$CC` 那类词条过两遍。生僻准入判的是候选文本，
+                // 未展开的源码形态必然不是单字、自然被滤掉——而生僻字模式本就不该出命令候选。
+                let mut rare = result.candidates;
+                self.retain_rare_admitted(&mut rare);
+                for c in rare {
+                    if seen.insert(c.text.clone()) {
+                        cands.push(c);
                     }
                 }
             } else if wind_quick_input::is_quick_member(member) {

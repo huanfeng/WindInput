@@ -2271,6 +2271,16 @@ pub const QUICK_MIX_ID: &str = "quick_mix";
 /// 与字面 `"pinyin"` 严格区分——后者表示"就要全拼"，永不被替换。
 pub const MIX_MEMBER_PRIMARY_PINYIN: &str = "$primary_pinyin";
 
+/// mix 成员占位符：**生僻字候选**（用当前活跃方案的编码查询，只留生僻字）。
+///
+/// 与 [`MIX_MEMBER_PRIMARY_PINYIN`] 同样是 `$` 前缀的占位符而非字面方案 id——它指向的
+/// 不是某个固定方案，而是「此刻的活跃方案 + 一道过滤」。写成字面 id 是不可能的：
+/// 用户在五笔下和在拼音下要查的是同一个东西，而那是两个不同的方案。
+///
+/// ⚠️ 它不是真实方案，`ensure_schema` 对它必然失败，故 `mix_members`（真实方案列表）
+/// 要像排除 `quick_input.*` 那样把它排除，进入门卫则要单独认它。
+pub const MIX_MEMBER_RARE_CHAR: &str = "$rare_char";
+
 /// 主拼音方案缺省回退（`schema.primary_pinyin` 为空时的目标方案）。
 /// 固定全拼，不扫描 available——避免方案列表顺序静默改变拼音行为。
 pub const DEFAULT_PINYIN_SCHEMA: &str = "pinyin";
