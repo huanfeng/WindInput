@@ -1758,16 +1758,23 @@ impl Engine for PinyinEngine {
         //
         // 全拼下 `raw_input == query`，故此改动对全拼零影响。简拼串不含 `'`
         //（`is_abbreviation` 对分隔符判假），故与手动分隔符路径也不冲突。
-        let abbr_query = raw_input;
+        // 用户是否打了手动分隔符。下面几处判据要据此换域——击键串含 `'`，
+        // 而音节、模式、长度比较全都活在不含 `'` 的域里。
+        let has_manual_sep = raw_input.contains('\'');
 
-        // 混合简拼（声母段 + 音节段）枚举模式用的串。**与 `abbr_query` 分家**：
-        // 纯简拼判据问的是「这串击键是不是一串声母」，只有击键域答得了（`xan`）；
-        // 混合模式问的是「哪几段是音节」，击键域在双拼下根本没有音节可言。
+        // ★ **剥掉分隔符**：`'` 是边界声明，不是待解释的字母。留着它，
+        // `is_abbreviation` 一见非字母就判假 ⇒ `b'z'd`（用户明确写出三个声母）
+        // 反而**一条候选都没有**，而同样意思的 `bzd` 好好地出「不知道」。
         //
-        // 仅当双拼**且用户打了分隔符**时改用全拼域——那时段结构由 `'` 定死，
-        // `full_pinyin` 是唯一解释，不存在拿它去猜的风险。没有分隔符时维持原样，
-        // 双拼既有行为（靠击键串碰巧在全拼域可读）一字不动。
-        let use_fp_for_mixed = self.shuangpin.is_some() && raw_input.contains('\'');
+        // 剥除后仍在**击键域**，约束 4（判据用击键不用 query）照旧成立：双拼下
+        // `n'hc` 剥成 `nhc`，与不打分隔符时逐位相同，双拼纯简拼行为一字不动。
+        let abbr_query_owned: String;
+        let abbr_query: &str = if has_manual_sep {
+            abbr_query_owned = raw_input.chars().filter(|&c| c != '\'').collect();
+            &abbr_query_owned
+        } else {
+            raw_input
+        };
 
         // 双拼激活时保留 SpConvertResult，以便后续用 map_consumed_length 回算消费键数。
         let sp_result: Option<shuangpin::SpConvertResult> =
@@ -1790,8 +1797,18 @@ impl Engine for PinyinEngine {
         };
         let query: &str = if has_sep { query_owned.as_str() } else { input };
 
-        // 见上面 `use_fp_for_mixed`：此处 `input` 已是全拼域（双拼转换后的结果）。
-        let mixed_pattern_source: &str = if use_fp_for_mixed { input } else { abbr_query };
+        // 混合简拼（声母段 + 音节段）枚举模式用的串。**与 `abbr_query` 分家**：
+        // 纯简拼判据问的是「这串击键是不是一串声母」，只有击键域答得了（双拼下 `xan`
+        // 靠它才命中「西安宁」）；混合模式问的是「哪几段是音节」，那要在**音节存在的域**
+        // 里问——`abbr_query` 含 `'`，模式枚举遇到它直接判假，整条混合路走不到。
+        //
+        // ★ 打了分隔符就换到 `query`，它恰好在两条路上都是「不含 `'` 的全拼域串」：
+        // 全拼下是剥除 `'` 的查询串；双拼下 `'` 已被 `convert` 消化，`query == input`
+        // 即转换后的 full_pinyin。故这一行同时修好两边，不必按引擎类型分叉。
+        //
+        // 没打分隔符时维持 `abbr_query` 原样：双拼既有行为（靠击键串碰巧在全拼域可读，
+        // 如 `xanning` = x+an+ning）一字不动。
+        let mixed_pattern_source: &str = if has_manual_sep { query } else { abbr_query };
 
         // 纯分隔符输入（如 `'` / `''`）：无可查询拼音，仅回显分隔符，不产候选。
         if has_sep && query.is_empty() {
@@ -1883,7 +1900,23 @@ impl Engine for PinyinEngine {
         let syllables = if let Some(v) = sp_syllables {
             v
         } else if has_sep {
-            sep_spans.iter().map(|s| s.pinyin.clone()).collect()
+            // ★ 只收**从起点连续**的音节段。下面 `completed` 的契约是「从 0 开始的连续
+            // 覆盖」，而手动分隔符第一次让**开头的段可以不是音节**（`n'hao` 的 `n` 是
+            // 简拼声母）。照单全收会把不接在起点上的 `hao` 当成 completed，于是
+            // `lookup_with_fuzzy("hao")` 让「好」「号」「薅」以**精确匹配**身份占满前排
+            // ——它们根本没解释前半段，却把真正解释了整串的混合简拼候选压到一百多位。
+            //
+            // 段间只允许隔着分隔符；隔着成不了音节的字母就断在那里。
+            let mut out: Vec<String> = Vec::new();
+            let mut cursor = 0usize;
+            for s in &sep_spans {
+                if input[cursor..s.raw_start].bytes().any(|c| c != b'\'') {
+                    break;
+                }
+                out.push(s.pinyin.clone());
+                cursor = s.raw_end;
+            }
+            out
         } else {
             Dag::build(input, trie).maximum_match()
         };
@@ -1975,7 +2008,12 @@ impl Engine for PinyinEngine {
                 }
                 covered && !unexplained(&raw_input[cursor..])
             }
-            None => completed_len >= abbr_query.len(),
+            // ⚠️ 比的是 `query`：`completed_len` 数的是音节字节数，与 `query` 同源。
+            // ⓘ 变异验证测不出与 `abbr_query.len()` 的差别（`abbr_query` 现已剥掉 `'`，
+            // 全拼下两者相等；双拼下 `has_manual_sep` 时长度虽差一截，但下游的
+            // 模式校验兜住了噪音）。仍按 `query` 写，是因为**跨域比长度本身是错的**，
+            // 留一个碰巧无害的错误判据，下次有人依赖它时就不无害了。
+            None => completed_len >= query.len(),
         };
 
         // 2. Viterbi 长句解码（>=2 音节，仅在完成音节前缀上跑；use_smart_compose=false 时跳过）
@@ -2793,6 +2831,14 @@ impl Engine for PinyinEngine {
         // 与所跨音节数不符」的候选被剔除——如 xi'an 强制 [xi,an]，则单字「先」(code=xian,
         // 跨 2 音节却仅 1 字) 不该出现；「西」(code=xi,1 字 1 音节)、整句「西安」(2 字 2 音节) 保留。
         // 码不落在任何边界的候选（如前缀补全）不受影响。
+        //
+        // ⓘ 曾在此加过一条 `is_abbrev` 豁免（简拼族的 code 是全拼码、与击键不同域，
+        // 拿手动分段去量必然不符）。**撤掉了**：`syllables` 改成只收从起点连续的音节段
+        // 之后，简拼族出场的前提恰恰是「起点那段成不了音节」⇒ 那时 `syllables` 为空，
+        // `syllable_span` 一律返回 None 走 `_ => true`，豁免永远不会被用到。
+        // 变异验证时把它去掉，7 条用例全绿——没有可达路径能证明它必要，故不留。
+        // 若将来放开 step 2b 的 `!has_sep` 门槛（`ni'hm` 那类三段混合），
+        // 简拼候选就可能与非空 `syllables` 共存，届时再加回来并配一条用例。
         if has_sep {
             let syls = &syllables;
             candidates.retain(|c| match syllable_span(syls, &c.code) {
