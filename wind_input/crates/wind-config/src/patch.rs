@@ -540,6 +540,7 @@ mod tests {
         let deg = ConfigDegradation {
             sections: vec!["input.punct".into()],
             total_fallback: false,
+            unparsable: Vec::new(),
         };
         mark_degraded_seeds(&mut entries, &deg);
 
@@ -567,6 +568,7 @@ mod tests {
             &ConfigDegradation {
                 sections: vec!["ui.font".into()],
                 total_fallback: false,
+                unparsable: Vec::new(),
             },
         );
         assert!(
@@ -582,6 +584,7 @@ mod tests {
             &ConfigDegradation {
                 sections: Vec::new(),
                 total_fallback: true,
+                unparsable: Vec::new(),
             },
         );
         assert!(entries3[0].error.is_some(), "整份回落时必须拦下");
@@ -599,6 +602,7 @@ mod tests {
             &ConfigDegradation {
                 sections: vec!["input.punct".into()],
                 total_fallback: false,
+                unparsable: Vec::new(),
             },
         );
         assert_eq!(entries[0].error, first, "原有 error 必须原样保留");

@@ -337,10 +337,62 @@ fn reset_path_to_default(root: &mut toml::Value, default_v: &toml::Value, path: 
     table.insert((*last).to_string(), def.clone());
 }
 
-/// 本次加载中发生的**段级降级**记录（见 [`Config::deserialize_with_section_fallback`]）。
+/// 某一层配置文件**没能按 TOML 语法读完**的记录（见 [`parse_toml_lenient`]）。
 ///
-/// 这不是配置项，是「这一份 `Config` 是怎么来的」的元信息：哪些段因为反序列化失败
-/// 被换成了 L1 默认。异常态，正常加载恒为空。
+/// 与 [`ConfigDegradation::sections`] 是**两类不同的故障**，不要混为一谈：
+///
+/// | | 段级降级 (`sections`) | 层级语法故障（本结构） |
+/// |---|---|---|
+/// | 出错位置 | 四层合并**之后**的 `try_into` | 合并**之前**的单文件 `from_str` |
+/// | 文件本身 | 语法合法，只是某个键的**类型**不对 | 语法就不合法（重复键、缺引号、括号不配对……） |
+/// | 影响范围 | 精确到一段/一个子表 | 整个文件——除非能逐行救回 |
+///
+/// ★ 本结构是 2026-08-31 补的**第二个维度**：在此之前语法错误走
+/// `read_toml_value` 的 `Err ⇒ None`，整层被静默丢弃且 `degradation` 全程干净，
+/// 于是四道写盘闸、设置页横幅、CLI 报告**同时**判定「一切正常」——而那正是
+/// 用户配置被整表覆盖的时刻。教训：安全网的判据必须覆盖它要防的**全部**入口，
+/// 只覆盖一个入口的安全网，会在另一个入口上给出最有底气的错误答案。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnparsableLayer {
+    /// 层名：`data` / `custom` / `user`，与 [`LayerOrigin::layer`] 同域。
+    pub layer: &'static str,
+    /// 出问题的配置文件。
+    pub path: PathBuf,
+    /// **首个**解析错误的原文（含 toml 自带的行列与代码片段）。
+    ///
+    /// 只留第一个：逐行救回时后续错误往往是同一处笔误的连锁，全列出来会把用户
+    /// 淹没在噪音里，而第一个恰好是他要去改的那一行。
+    pub error: String,
+    /// 被跳过的行号（**1-based**，升序）。空 = 一行都没救回来（整个文件作废）。
+    pub skipped_lines: Vec<usize>,
+    /// 救回来的顶层键数量。0 且 `skipped_lines` 为空 ⇒ 该层完全作废。
+    pub salvaged_keys: usize,
+}
+
+impl UnparsableLayer {
+    /// 是否救回了内容（哪怕只有一个键）。
+    pub fn is_salvaged(&self) -> bool {
+        self.salvaged_keys > 0
+    }
+
+    /// 给用户看的一句话：哪个文件、丢了哪几行。
+    ///
+    /// 行号用 1-based 并且**列出具体行**——「配置有语法错误」这种说法用户无从下手，
+    /// 「第 6 行」他能直接跳过去改。
+    pub fn describe(&self) -> String {
+        let file = self.path.display();
+        if self.skipped_lines.is_empty() {
+            return format!("{file}：语法错误，本次未能加载");
+        }
+        let lines: Vec<String> = self.skipped_lines.iter().map(|n| n.to_string()).collect();
+        format!("{file}：已跳过第 {} 行后加载其余内容", lines.join("、"))
+    }
+}
+
+/// 本次加载中发生的**降级**记录（段级见 [`Config::deserialize_with_section_fallback`]，
+/// 层级语法故障见 [`UnparsableLayer`]）。
+///
+/// 这不是配置项，是「这一份 `Config` 是怎么来的」的元信息。异常态，正常加载恒为空。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigDegradation {
     /// 被替换为 L1 默认的段，**点分路径**，按字典序排列。
@@ -352,12 +404,25 @@ pub struct ConfigDegradation {
     /// 整份配置都回落到了 L1 默认——毒不在任何单段（例如顶层不是表）。
     /// 与 `sections` 互斥：走到这一步时 `sections` 为空，因为没能定位到任何有毒段。
     pub total_fallback: bool,
+    /// 本次加载中**语法不合法**的配置文件，按层从低到高。正常加载恒为空。
+    ///
+    /// ⚠️ 非空时 [`Self::taints`] 对**任何路径**恒为真（见那里的说明）：文件层面的
+    /// 残缺没有「只影响某一段」这回事，被跳过的行可能落在任何段里。
+    pub unparsable: Vec<UnparsableLayer>,
 }
 
 impl ConfigDegradation {
-    /// 本次加载是否发生过降级。
+    /// 本次加载是否发生过降级（含层级语法故障）。
     pub fn is_degraded(&self) -> bool {
-        self.total_fallback || !self.sections.is_empty()
+        self.total_fallback || !self.sections.is_empty() || !self.unparsable.is_empty()
+    }
+
+    /// 是否有配置文件语法不合法。
+    ///
+    /// 与 [`Self::is_degraded`] 分开：写盘路径需要**区分**这两种，语法故障要备份原文件，
+    /// 段级降级不需要（后者的文件还是好的，只是某个值类型不对）。
+    pub fn has_unparsable(&self) -> bool {
+        !self.unparsable.is_empty()
     }
 
     /// 顶层段 `section` 是否受本次降级影响——**含它的子路径**。
@@ -396,6 +461,13 @@ impl ConfigDegradation {
     ///   ⇒ 这张表里有一块是假的。
     ///
     /// 只判前两种会漏掉「写大表、坏在小格」，只判后两种会漏掉「坏在大段、写小格」。
+    ///
+    /// # 层级语法故障恒为真
+    ///
+    /// `unparsable` 非空时对**任何** `path` 返回 `true`，不做路径匹配。这不是偷懒：
+    /// 被跳过的行落在哪一段是**不可知的**——救回来的那份 Value 里，丢掉的键与从未写过的
+    /// 键完全同形。任何「只有这几段受影响」的判断都是在猜，而猜错的代价是把残缺表
+    /// 写回磁盘、覆盖掉用户原本还在文件里的内容。
     pub fn taints(&self, path: &str) -> bool {
         fn is_ancestor(ancestor: &str, descendant: &str) -> bool {
             descendant
@@ -403,6 +475,7 @@ impl ConfigDegradation {
                 .is_some_and(|r| r.starts_with('.'))
         }
         self.total_fallback
+            || !self.unparsable.is_empty()
             || self
                 .sections
                 .iter()
@@ -420,12 +493,154 @@ impl ConfigDegradation {
         if !self.taints(path) {
             return false;
         }
+        // 语法故障单独措辞：它的修法（去改那一行）与段级降级（去改那个键的类型）
+        // 完全不同，共用一句话会把用户支使到错误的地方。
+        if let Some(u) = self.unparsable.first() {
+            warn!(
+                "降级闸：配置文件语法不合法（{}），本次加载的 [{path}] 不可信，已跳过「{what}」；\
+                 这不是失败，是拒绝拿残表覆盖你的配置——修好该文件的语法后即自动恢复",
+                u.describe()
+            );
+            return true;
+        }
         warn!(
             "降级闸：本次加载的 [{path}] 不可信（降级段 {:?}，整份回落={}），已跳过「{what}」；\
              这不是失败，是拒绝拿出厂残表覆盖你的配置——修好报错的配置键后即自动恢复",
             self.sections, self.total_fallback
         );
         true
+    }
+}
+
+/// [`parse_toml_lenient`] 的结果。
+#[derive(Debug, Clone, Default)]
+pub struct LenientParse {
+    /// 解析出的值。`None` = 连容错都救不回来。
+    pub value: Option<toml::Value>,
+    /// **首个**语法错误原文；`None` = 文件本来就合法（此时 `skipped_lines` 必为空）。
+    pub first_error: Option<String>,
+    /// 被跳过的行号（1-based，升序）。
+    pub skipped_lines: Vec<usize>,
+}
+
+impl LenientParse {
+    /// 文件语法是否合法（没动过一行）。
+    pub fn is_clean(&self) -> bool {
+        self.first_error.is_none()
+    }
+}
+
+/// 容错解析上限：最多剔除这么多处语法错误。
+///
+/// 超过基本可以断定「这不是一份写坏了几行的配置，而是一份根本不是 TOML 的文件」
+/// （编码搞错、被别的程序覆盖、下载到半截）。继续剔下去只会把它啃成一个语义面目全非
+/// 的残骸，那比整份作废更危险——用户会以为配置还在。
+const LENIENT_MAX_SKIPS: usize = 32;
+
+/// **容错解析 TOML**：严格解析失败时，逐行剔除报错处，尽量救回其余内容。
+///
+/// # 为什么要有它
+///
+/// `toml::from_str` 是全有全无的：一个重复键、一个漏引号，整个文件作废。而配置文件
+/// 是用户手写的，写错一行是常态。整份作废意味着他**所有**设置一次性失效。
+///
+/// # 算法：按 toml 报错的 span 逐行剔除
+///
+/// 每轮拿 [`toml::de::Error::span`] 定位到出错行，把它**置空**（不是删除）后重试。
+/// 置空保持总行数不变 ⇒ 行号在整个过程中稳定，报给用户的行号就是他在编辑器里看到的行号。
+///
+/// ★ **出错行是段头时丢弃整段，而不是只删那一行**。这是本函数唯一不显然的地方：
+/// 删掉 `[ui]` 之后，它下面那几十个键并不会消失，而是被 TOML 语法归给**上一个段**——
+/// `ui.font_size` 变成 `input.font_size`。那不是「丢了一段配置」，是「把一段配置
+/// 悄悄搬到了别的段里」，可能碰巧解析成功并生效。**污染比丢失更危险**：丢失看得见，
+/// 污染看不见。
+///
+/// ⚠️ 救回来的值里，「被跳过的键」与「用户从未写过的键」完全同形，事后无从区分。
+/// 这正是 [`ConfigDegradation::taints`] 在 `unparsable` 非空时对任何路径都返回真的理由。
+pub fn parse_toml_lenient(src: &str) -> LenientParse {
+    let first_error = match toml::from_str::<toml::Value>(src) {
+        Ok(v) => {
+            return LenientParse {
+                value: Some(v),
+                first_error: None,
+                skipped_lines: Vec::new(),
+            };
+        }
+        Err(e) => e,
+    };
+    let first_error_text = first_error.to_string();
+
+    // 逐行工作副本。置空后 join 回去，行数恒定。
+    let mut lines: Vec<String> = src.lines().map(str::to_string).collect();
+    let mut skipped: Vec<usize> = Vec::new();
+    let mut err = first_error;
+
+    for _ in 0..LENIENT_MAX_SKIPS {
+        let current = lines.join("\n");
+        let Some(span) = err.span() else {
+            // 没有位置信息就无从下手，整份作废。
+            return LenientParse {
+                value: None,
+                first_error: Some(first_error_text),
+                skipped_lines: skipped,
+            };
+        };
+        // span 落在当前文本上；行数恒定 ⇒ 行索引对原文同样成立。
+        let Some(head) = current.get(..span.start) else {
+            return LenientParse {
+                value: None,
+                first_error: Some(first_error_text),
+                skipped_lines: skipped,
+            };
+        };
+        let idx = head.matches('\n').count();
+        if idx >= lines.len() {
+            return LenientParse {
+                value: None,
+                first_error: Some(first_error_text),
+                skipped_lines: skipped,
+            };
+        }
+
+        let killed = if lines[idx].trim_start().starts_with('[') {
+            // 段头有毒 ⇒ 整段丢弃（见上方 ★）。段的范围 = 本行到下一个段头之前。
+            let mut end = idx + 1;
+            while end < lines.len() && !lines[end].trim_start().starts_with('[') {
+                end += 1;
+            }
+            (idx..end).collect::<Vec<_>>()
+        } else {
+            vec![idx]
+        };
+        for i in &killed {
+            // 只记**非空**行：段内的空行/注释行本来就不承载配置，报给用户只是噪音。
+            if !lines[*i].trim().is_empty() {
+                skipped.push(*i + 1);
+            }
+            lines[*i] = String::new();
+        }
+
+        let retry = lines.join("\n");
+        match toml::from_str::<toml::Value>(&retry) {
+            Ok(v) => {
+                skipped.sort_unstable();
+                skipped.dedup();
+                return LenientParse {
+                    value: Some(v),
+                    first_error: Some(first_error_text),
+                    skipped_lines: skipped,
+                };
+            }
+            Err(e) => err = e,
+        }
+    }
+
+    skipped.sort_unstable();
+    skipped.dedup();
+    LenientParse {
+        value: None,
+        first_error: Some(first_error_text),
+        skipped_lines: skipped,
     }
 }
 
@@ -4852,6 +5067,7 @@ impl OriginSnapshot {
             effective,
             effective_layer,
             degraded: self.degradation.taints(key),
+            syntax_error: self.degradation.unparsable.first().map(|u| u.describe()),
         }
     }
 }
@@ -4902,11 +5118,26 @@ pub struct KeyOrigin {
     /// 生效值来自哪一层。`None` 表示**指不到单独一层**，三种成因：
     /// 表类型跨层深合并（生效值是多层的并集）、`normalize()` 改写过、或该键压根不存在。
     pub effective_layer: Option<&'static str>,
-    /// 本次加载中，该键是否被段级降级殃及（[`ConfigDegradation::taints`]）。
+    /// 本次加载中，该键是否被降级殃及（[`ConfigDegradation::taints`]）。
     ///
-    /// 为真时**用户层的值没有进入生效值**——那一段整个回落了出厂默认。这是「设置改了
-    /// 不生效」里最难自查的一种：配置文件里白纸黑字写着，程序却在用别的值。
+    /// 为真时**用户层的值没有进入生效值**——那一段整个回落了出厂默认，或所在文件语法
+    /// 不合法。这是「设置改了不生效」里最难自查的一种：配置文件里白纸黑字写着，
+    /// 程序却在用别的值。具体是哪一种，看 [`Self::syntax_error`]。
     pub degraded: bool,
+    /// `degraded` 为真且成因是**文件语法不合法**时，那条故障的一句话描述
+    /// （[`UnparsableLayer::describe`]）；成因是段级降级时为 `None`。
+    ///
+    /// ★ 呈现端必须分开讲这两种：段级降级要用户去改**那个键的类型**，语法故障要他去改
+    /// **那一行**。只给一个 bool 就只能讲其中一种，另一种的用户会被支去翻一个没问题的段。
+    ///
+    /// ★★ **本字段非 `None` 时不要照搬 `degraded` 去报「本次未生效」。**
+    /// 语法故障让 [`ConfigDegradation::taints`] 对任何路径恒为真——那是写盘闸的判据，
+    /// 保守方向选对了（不知道哪些键受影响就一律不写，损失为零）。但同一判据用于呈现
+    /// 就是在撒谎：被跳过的只是某几行，本键很可能好好地生效着。实跑撞见过一次——
+    /// `per_page` 明明取到了 user 层的值，却被报成「本次未生效」。
+    /// **保守的方向对写是安全，对读是错误**：呈现说错了，用户会去改一个没问题的键。
+    /// 正确做法是照常报 `effective_layer`，把语法故障降级为附加警示（见 `config describe`）。
+    pub syntax_error: Option<String>,
 }
 
 /// 读取并解析定制版清单。见 [`Config::custom_manifest`]（含「解析失败 ⇒ 整层退场」的理由）。
@@ -4974,11 +5205,14 @@ impl Config {
     pub fn load(data_dir: Option<&Path>) -> anyhow::Result<Self> {
         // Layer 1: 代码默认值（序列化为 Value，保证所有字段存在）
         let mut merged = toml::Value::try_from(Self::default())?;
+        // 各层的语法故障。收满后连同段级降级一起挂到 `Config::degradation` 上——
+        // 写盘闸、RPC、设置页横幅、CLI 全部只认那一个出口，多一条通道就多一处会漂移的判据。
+        let mut unparsable: Vec<UnparsableLayer> = Vec::new();
 
         // Layer 2: 系统预置配置 (data/config.toml)
         if let Some(data_dir) = data_dir {
             let sys_config = data_dir.join("config.toml");
-            if let Some(v) = Self::read_toml_value(&sys_config) {
+            if let Some(v) = Self::read_toml_value_reporting(&sys_config, "data", &mut unparsable) {
                 merge_value(&mut merged, v);
                 info!("Loaded system config: {}", sys_config.display());
             }
@@ -4988,7 +5222,9 @@ impl Config {
         // 位置固定在 L2 之后、L3 之前：定制者可以覆盖出厂值，但绝不能压过终端用户。
         if let Some(custom_dir) = Self::custom_data_dir() {
             let custom_config = custom_dir.join("config.toml");
-            if let Some(v) = Self::read_toml_value(&custom_config) {
+            if let Some(v) =
+                Self::read_toml_value_reporting(&custom_config, "custom", &mut unparsable)
+            {
                 merge_value(&mut merged, v);
                 info!("Loaded custom config: {}", custom_config.display());
             }
@@ -4998,7 +5234,9 @@ impl Config {
         match Self::user_config_dir() {
             Some(user_dir) => {
                 let user_config = user_dir.join("config.toml");
-                if let Some(v) = Self::read_toml_value(&user_config) {
+                if let Some(v) =
+                    Self::read_toml_value_reporting(&user_config, "user", &mut unparsable)
+                {
                     merge_value(&mut merged, v);
                     info!("Loaded user config: {}", user_config.display());
                 }
@@ -5019,6 +5257,11 @@ impl Config {
         // 降级是「把这一段整个丢掉换成出厂值」。已发布字段改类型仍必须写迁移，
         // 降级只是最后一道兜底。
         let mut config = Self::deserialize_with_section_fallback(merged);
+        // 语法故障挂在段级降级**之后**：`deserialize_with_section_fallback` 整个改写
+        // `config.degradation`（它只填 sections/total_fallback，unparsable 恒空），
+        // 先挂会被它覆盖掉。两者可以同时发生——文件里既有笔误又有类型错时，
+        // 救回来的那部分内容仍可能带着类型不对的键。
+        config.degradation.unparsable = unparsable;
         config.normalize();
         Ok(config)
     }
@@ -5065,6 +5308,8 @@ impl Config {
                     degradation: ConfigDegradation {
                         sections: Vec::new(),
                         total_fallback: true,
+                        // 语法故障由 `load()` 在本函数返回后挂上；这里恒空。
+                        unparsable: Vec::new(),
                     },
                     ..Config::default()
                 };
@@ -5112,6 +5357,8 @@ impl Config {
                 config.degradation = ConfigDegradation {
                     sections: bad.into_iter().map(|(path, _)| path).collect(),
                     total_fallback: false,
+                    // 同上：`load()` 负责补语法故障，本函数只管段级降级。
+                    unparsable: Vec::new(),
                 };
                 config
             }
@@ -5127,6 +5374,8 @@ impl Config {
                     degradation: ConfigDegradation {
                         sections: Vec::new(),
                         total_fallback: true,
+                        // 语法故障由 `load()` 在本函数返回后挂上；这里恒空。
+                        unparsable: Vec::new(),
                     },
                     ..Config::default()
                 }
@@ -5397,11 +5646,24 @@ impl Config {
             return Ok(0);
         };
         let file = dir.join("config.toml");
-        let Some(mut root) = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-        else {
-            return Ok(0);
+        // 严格解析，失败即**什么都不做**（本函数与 `materialize_key_actions` 同类：后台自动
+        // 跑的写盘，用户没要求任何事）。⛔ 不要改用 `parse_toml_lenient`：剪枝会整表写回，
+        // 拿容错救回的近似值当种子等于把被跳过的行永久删除。
+        let mut root = match std::fs::read_to_string(&file) {
+            Err(_) => return Ok(0), // 没有用户配置 = 没什么可清理的
+            Ok(s) => match toml::from_str::<toml::Value>(&s) {
+                Ok(v) => v,
+                Err(e) => {
+                    // 这条 WARN 是必要的：本函数在启动流程里排在任何一次 `load()` **之前**，
+                    // 静默返回的话，日志里第一条与配置有关的记录要等到 materialize 那一步。
+                    warn!(
+                        "降级闸：用户配置 {} 语法不合法（{e}），已跳过「陈旧键清理」；\
+                         这不是失败，是拒绝拿残表覆盖你的配置——修好该文件的语法后即自动恢复",
+                        file.display()
+                    );
+                    return Ok(0);
+                }
+            },
         };
 
         // 退役键（[`RETIRED_KEYS`]）先清：它们与出厂默认无关，**不能**被 preset 取不到时的
@@ -5450,7 +5712,7 @@ impl Config {
     /// 只迁移「已有 config.toml 的老用户」会让方案退化成没修：新装机器的用户层里永远没有
     /// 实体条目，删除依然会被 L2 折算复活。故用户层文件不存在时按空表处理，照常物化。
     ///
-    /// # 两道安全闸（缺一不可，且都退化为「什么都不做」）
+    /// # 四道安全闸（缺一不可，且都退化为「什么都不做」）
     ///
     /// 1. **用户配置目录不可用**（漫游未挂载）→ 不动。此时用户层「看起来是空的」，
     ///    照做会把出厂绑定物化成用户的全部绑定，抹掉他真实的自定义。同
@@ -5468,6 +5730,9 @@ impl Config {
     ///    段级降级上线**之前**这条路不存在：那时 `load()` 直接返回 `Err`，下面那个 `?`
     ///    就是保护，`main.rs` 只 warn 一句、一个字节都不写，用户改掉毒键即可复原。降级把
     ///    `Err` 变成了「成功但内容残缺」，保护随之失效——所以必须在这里补回来。
+    /// 4. **用户 config.toml 语法不合法** → 不动。闸三管不到它：语法错误发生在四层合并
+    ///    **之前**（`read_toml_value`），那时 `degradation` 还是干净的，闸三照常放行。
+    ///    这是真机踩中的那一条，见函数体里的说明。
     ///
     /// 幂等：靠 `keys.key_actions_materialized` 版本号，不靠「看起来像迁移过了」的推断。
     pub fn materialize_key_actions() -> anyhow::Result<usize> {
@@ -5485,12 +5750,34 @@ impl Config {
             return Ok(0);
         }
         let file = dir.join("config.toml");
-        // 文件不存在 = 新用户，按空表继续（见上文「对新用户也必须跑」）。
-        // 解析失败也按空表：那种情况下用户层本就不生效，物化不会额外丢失什么。
-        let mut root = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-            .unwrap_or_else(|| toml::Value::Table(Default::default()));
+        // 闸四：文件在盘上但**语法不合法** → 不动。
+        //
+        // ⛔ 这里曾写着「解析失败也按空表：那种情况下用户层本就不生效，物化不会额外
+        // 丢失什么」——**那个推理是错的，且真机上引爆过**。「本次加载不生效」说的是内存里
+        // 那一份，文件里的内容一个字都没少；拿空表当种子 `to_string_pretty` 写回去，
+        // 才是真正把它删掉。用户只在 config.toml 里重复写了一个字段，重启后整份配置
+        // 变成只含 key_actions 的空壳，全程无提示。
+        //
+        // 放大器：`already_materialized(空表)` 恒为 false ⇒ 每次启动都重跑一遍。
+        //
+        // 只用严格解析、不用 `parse_toml_lenient`：本函数要做的是**整表写回**，种子必须与
+        // 盘上内容逐字节对应。容错解析救回的是「够用来读」的近似值，拿它当写回种子
+        // 等于把被跳过的行永久删除——那是另一种形态的同一个 bug。
+        let mut root = match std::fs::read_to_string(&file) {
+            // 文件不存在 = 新用户，按空表继续（见上文「对新用户也必须跑」）。
+            Err(_) => toml::Value::Table(Default::default()),
+            Ok(s) => match toml::from_str::<toml::Value>(&s) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "降级闸：用户配置 {} 语法不合法（{e}），已跳过「key_actions 物化」；\
+                         这不是失败，是拒绝拿残表覆盖你的配置——修好该文件的语法后即自动恢复",
+                        file.display()
+                    );
+                    return Ok(0);
+                }
+            },
+        };
         if !root.is_table() {
             root = toml::Value::Table(Default::default());
         }
@@ -5531,8 +5818,25 @@ impl Config {
         Ok(count)
     }
 
-    /// 读取 TOML 文件为 Value（不存在/解析失败返回 None 并告警，不中断加载）
+    /// 读取 TOML 文件为 Value（不存在/读不了返回 None，不中断加载）。
+    ///
+    /// 不关心语法诊断的调用方用这个；要把语法故障报进 [`ConfigDegradation`] 的
+    /// 用 [`Self::read_toml_value_reporting`]。两者共用同一套容错解析，行为一致。
     fn read_toml_value(path: &Path) -> Option<toml::Value> {
+        Self::read_toml_value_reporting(path, "", &mut Vec::new())
+    }
+
+    /// [`Self::read_toml_value`] 的**带诊断**版本：语法不合法时尽量救回，并把这件事
+    /// 记进 `unparsable`（`layer` 为空则只记日志不上报，供不关心诊断的调用方复用）。
+    ///
+    /// ★ 「文件不存在」与「文件语法错」必须走出不同的结果。此前两者都返回 `None`，
+    /// 于是下游的 `unwrap_or_else(空表)` 对它们一视同仁——而对前者用空表是对的，
+    /// 对后者用空表就是**拿空表当种子覆盖用户配置**。本仓真机踩中的正是这一条。
+    fn read_toml_value_reporting(
+        path: &Path,
+        layer: &'static str,
+        unparsable: &mut Vec<UnparsableLayer>,
+    ) -> Option<toml::Value> {
         if !path.exists() {
             // 「文件不存在」曾是唯一无日志的失败路径：它让「用户没有配置」与
             // 「开机早期读不到配置」在日志上完全同形，只能靠有无 `Loaded user config`
@@ -5540,19 +5844,46 @@ impl Config {
             debug!("Config file absent: {}", path.display());
             return None;
         }
-        match std::fs::read_to_string(path) {
-            Ok(content) => match toml::from_str::<toml::Value>(&content) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    info!("Skip invalid config {}: {}", path.display(), e);
-                    None
-                }
-            },
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
             Err(e) => {
-                info!("Cannot read config {}: {}", path.display(), e);
-                None
+                // 读不出来（权限、被独占、坏扇区）不是语法问题，不进 `unparsable`：
+                // 那份文件在盘上可能完好，报「语法错误」会把用户支去改一个没错的文件。
+                warn!("Cannot read config {}: {}", path.display(), e);
+                return None;
             }
+        };
+        let parsed = parse_toml_lenient(&content);
+        if parsed.is_clean() {
+            return parsed.value;
         }
+
+        let salvaged_keys = parsed
+            .value
+            .as_ref()
+            .and_then(|v| v.as_table())
+            .map_or(0, |t| t.len());
+        // WARN 而非此前的 INFO：整层配置失效是**异常**。压成 INFO 的代价本仓已经付过——
+        // 用户配置被整表重写，而唯一的线索是一行默认不打印的 INFO。
+        if let Some(err) = &parsed.first_error {
+            warn!(
+                "配置文件语法不合法 {}：{}（已跳过 {} 行，救回 {} 个顶层段）",
+                path.display(),
+                err,
+                parsed.skipped_lines.len(),
+                salvaged_keys
+            );
+        }
+        if !layer.is_empty() {
+            unparsable.push(UnparsableLayer {
+                layer,
+                path: path.to_path_buf(),
+                error: parsed.first_error.clone().unwrap_or_default(),
+                skipped_lines: parsed.skipped_lines.clone(),
+                salvaged_keys,
+            });
+        }
+        parsed.value
     }
 
     /// 反序列化后的归一化：修正无效值（如 per_page=0 视为未设置，回退默认）。
@@ -6173,6 +6504,34 @@ impl Config {
         Self::resolve_overridable(data_dir, None, rel, "data")
     }
 
+    /// 把**语法不合法**的配置原件另存一份，返回备份路径。
+    ///
+    /// 命名 `config.toml.corrupt-<YYYYMMDD-HHMMSS>.bak`，与原文件同目录——放同目录是为了
+    /// 让用户在「打开配置文件夹」时一眼看到它，扔进临时目录等于没备份。
+    ///
+    /// 内容由调用方传入而不是在这里重读：调用方刚读过，重读既多一次 IO，又打开了
+    /// 「读到的与备份的不是同一份」的竞态窗口。
+    ///
+    /// 失败只告警不中断：备份失败不该连累用户这次保存操作本身。
+    fn backup_corrupt_config(file: &Path, content: &str) -> Option<PathBuf> {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let name = format!(
+            "{}.corrupt-{stamp}.bak",
+            file.file_name()?.to_string_lossy()
+        );
+        let target = file.with_file_name(name);
+        match std::fs::write(&target, content) {
+            Ok(()) => {
+                info!("已备份语法不合法的配置：{}", target.display());
+                Some(target)
+            }
+            Err(e) => {
+                warn!("备份配置失败 {}: {e}", target.display());
+                None
+            }
+        }
+    }
+
     /// 把单个配置项**部分合并**写入用户层 `config.toml`（%APPDATA%/WindInput/config.toml）。
     ///
     /// 只改 `path` 指定的项、保留用户文件里其它已有项，**不写入未改动的默认/系统段**——
@@ -6197,10 +6556,30 @@ impl Config {
         std::fs::create_dir_all(&dir)?;
         let file = dir.join("config.toml");
 
-        // 读现有用户层（partial），不存在/解析失败则空表（不丢已有项时尽量保留）。
-        let mut root = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+        // 读现有用户层（partial）。
+        //
+        // ★ 这里与 [`Self::materialize_key_actions`] 的处置**刻意不同**，因为触发者不同：
+        // 那边是后台自动跑的（用户没要求任何事），语法不合法就什么都不做最安全；这边是
+        // 用户刚在设置页点了保存，直接不写会变成「点了没反应」——本仓反复栽过的那一类。
+        //
+        // 故走三步：容错解析救回尽量多的内容 → **先把原件备份出去** → 拿救回的部分当种子写回。
+        // 备份是这条路径能成立的前提：写回会永久丢掉被跳过的那几行，没有备份就是数据损毁。
+        let existing = std::fs::read_to_string(&file).unwrap_or_default();
+        let parsed = parse_toml_lenient(&existing);
+        if !parsed.is_clean() {
+            let backup = Self::backup_corrupt_config(&file, &existing);
+            warn!(
+                "用户配置 {} 语法不合法（已跳过第 {:?} 行），本次保存将只保留可解析的部分；\
+                 原件已备份到 {}",
+                file.display(),
+                parsed.skipped_lines,
+                backup
+                    .as_ref()
+                    .map_or_else(|| "（备份失败）".to_string(), |p| p.display().to_string())
+            );
+        }
+        let mut root = parsed
+            .value
             .unwrap_or_else(|| toml::Value::Table(Default::default()));
         if !root.is_table() {
             root = toml::Value::Table(Default::default());
@@ -8398,12 +8777,108 @@ scripts = { latin = 42 }
     /// 只判后者会漏掉「坏在大段、写小格」——`input.punct` 整段降级时，
     /// `input.punct.custom_mappings` 的种子同样是出厂值。
     ///
+    /// 一个重复键不该让整份配置失效——救回其余内容，并如实报出被跳过的行号。
+    ///
+    /// 这是用户真机踩中的那份配置的最小形态。
+    #[test]
+    fn lenient_parse_salvages_around_duplicate_key() {
+        let src = "[ui]\nx = 1\n\n[input]\nfoo = true\nfoo = false\nbar = 3\n";
+        let r = parse_toml_lenient(src);
+        assert!(!r.is_clean(), "重复键必须被记成语法故障");
+        // 行号是**用户在编辑器里看到的那个**（1-based），不是内部索引。
+        assert_eq!(r.skipped_lines, vec![6], "只该丢重复的那一行");
+
+        let v = r.value.expect("其余内容必须救回来");
+        assert_eq!(v["ui"]["x"].as_integer(), Some(1), "无关段不受影响");
+        assert_eq!(
+            v["input"]["bar"].as_integer(),
+            Some(3),
+            "同段里出错行之后的键也要保住——按段丢弃就会丢掉它"
+        );
+        assert_eq!(
+            v["input"]["foo"].as_bool(),
+            Some(true),
+            "保留的是首次出现的那个值"
+        );
+    }
+
+    /// ★ **段头坏掉时必须丢弃整段，而不是只删那一行。**
+    ///
+    /// 只删段头，它下面的键不会消失，而是被 TOML 归给**上一个段**——`b` 段的 `y`
+    /// 会变成 `a.y` 并可能解析成功、真的生效。那不是「丢了配置」而是
+    /// 「把配置搬到了别的段里」。**污染比丢失危险得多**：丢失看得见，污染看不见。
+    #[test]
+    fn lenient_parse_drops_whole_section_when_header_is_broken() {
+        // `[b` 缺右括号 ⇒ 段头本身非法。
+        let src = "[a]\nx = 1\n\n[b\ny = 2\nz = 9\n\n[c]\nw = 3\n";
+        let r = parse_toml_lenient(src);
+        let v = r.value.expect("应能救回 a 与 c");
+
+        assert_eq!(v["a"]["x"].as_integer(), Some(1));
+        assert_eq!(v["c"]["w"].as_integer(), Some(3), "坏段之后的段要保住");
+        assert!(v.get("b").is_none(), "坏掉的段整个不该出现");
+        // 本测试的**核心断言**：坏段里的键绝不能被吸进上一个段。
+        assert!(
+            v["a"].get("y").is_none() && v["a"].get("z").is_none(),
+            "段头被删后其下的键漂到了上一段——这正是本函数要防的污染"
+        );
+    }
+
+    /// 完全不是 TOML 的内容（编码错乱、被别的文件覆盖）不该被「啃」成残骸。
+    ///
+    /// 剔到上限仍不成立就整份作废：一份被啃得面目全非却能解析的配置，比一份
+    /// 明确失败的配置危险——用户会以为它还在。
+    #[test]
+    fn lenient_parse_gives_up_on_non_toml() {
+        let src = "<!DOCTYPE html>\n<html><body>\n".repeat(40);
+        let r = parse_toml_lenient(&src);
+        assert!(r.value.is_none(), "啃不动就该整份作废，不能返回残骸");
+        assert!(r.first_error.is_some());
+    }
+
+    /// 合法文件走的是零改动的快路径：`is_clean` 为真、一行都没跳过。
+    #[test]
+    fn lenient_parse_leaves_valid_toml_untouched() {
+        let r = parse_toml_lenient("[ui]\nx = 1\n");
+        assert!(r.is_clean());
+        assert!(r.skipped_lines.is_empty());
+        assert_eq!(r.value.unwrap()["ui"]["x"].as_integer(), Some(1));
+    }
+
+    /// ★ 任一层语法不合法 ⇒ `taints` 对**任何**路径为真，四道写盘闸一并关上。
+    ///
+    /// 不做路径匹配是刻意的：被跳过的行落在哪一段**不可知**——救回的 Value 里
+    /// 「被跳过的键」与「从未写过的键」完全同形。任何「只影响这几段」的判断都是猜，
+    /// 猜错就是把残表写回磁盘。
+    #[test]
+    fn unparsable_layer_taints_every_path() {
+        let deg = ConfigDegradation {
+            sections: Vec::new(),
+            total_fallback: false,
+            unparsable: vec![UnparsableLayer {
+                layer: "user",
+                path: PathBuf::from("config.toml"),
+                error: "duplicate key".into(),
+                skipped_lines: vec![6],
+                salvaged_keys: 2,
+            }],
+        };
+        assert!(deg.is_degraded());
+        assert!(deg.has_unparsable());
+        for p in ["keys", "ui.font", "input.punct.custom_mappings", "schema"] {
+            assert!(deg.taints(p), "语法故障必须让 {p} 也不可信");
+        }
+        // 对照：干净的降级记录不该恒为真，否则上面的断言全是废话。
+        assert!(!ConfigDegradation::default().taints("keys"));
+    }
+
     /// 两个方向各来一条断言，且各配一条**不该命中**的对照（否则「恒为 true」也能全绿）。
     #[test]
     fn taints_judges_both_ancestor_directions() {
         let deg = ConfigDegradation {
             sections: vec!["input.punct".into(), "keys.key_actions".into()],
             total_fallback: false,
+            unparsable: Vec::new(),
         };
         // 相等
         assert!(deg.taints("input.punct"));
@@ -8426,6 +8901,7 @@ scripts = { latin = 42 }
         let total = ConfigDegradation {
             sections: Vec::new(),
             total_fallback: true,
+            unparsable: Vec::new(),
         };
         assert!(total.taints("anything"));
         // 未降级 ⇒ 一律放行（正常路径不能被闸误伤）
@@ -8442,14 +8918,17 @@ scripts = { latin = 42 }
             ConfigDegradation {
                 sections: vec!["keys.key_actions".into()],
                 total_fallback: false,
+                unparsable: Vec::new(),
             },
             ConfigDegradation {
                 sections: vec!["ui".into()],
                 total_fallback: false,
+                unparsable: Vec::new(),
             },
             ConfigDegradation {
                 sections: Vec::new(),
                 total_fallback: true,
+                unparsable: Vec::new(),
             },
             ConfigDegradation::default(),
         ] {
@@ -8509,6 +8988,7 @@ scripts = { latin = 42 }
         let d = ConfigDegradation {
             sections: vec!["keys.key_actions".to_string()],
             total_fallback: false,
+            unparsable: Vec::new(),
         };
         assert!(d.affects("keys"), "子路径必须算作该段受影响");
         assert!(!d.affects("ui"), "别的段不能被误判");
@@ -8518,12 +8998,14 @@ scripts = { latin = 42 }
         let whole = ConfigDegradation {
             sections: vec!["keys".to_string()],
             total_fallback: false,
+            unparsable: Vec::new(),
         };
         assert!(whole.affects("keys"));
 
         let total = ConfigDegradation {
             sections: Vec::new(),
             total_fallback: true,
+            unparsable: Vec::new(),
         };
         assert!(total.affects("keys"), "整份回落时任何段都受影响");
         assert!(total.affects("ui"));
