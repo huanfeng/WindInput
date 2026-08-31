@@ -98,8 +98,11 @@ const CONFIG_LOAD_SITES: &[(&str, usize, &str)] = &[
 /// `Self::load(` 在 wind-config 内部的调用点（上表按 `Config::load(` 计，扫不到它）。
 const SELF_LOAD_SITES: &[(&str, usize, &str)] = &[(
     "crates/wind-config/src/config.rs",
-    1,
-    "materialize_key_actions 的权威加载，已闸（blocks_write_back(\"keys\", …)）",
+    2,
+    "① materialize_key_actions 的权威加载，已闸（blocks_write_back(\"keys\", …)）；\
+     ② key_origin 的生效值取样——纯只读（结果只进 CLI/RPC 的呈现），\
+     且它反过来把 degradation.taints 作为 KeyOrigin.degraded 报出去，\
+     正是这张闸门表想要的方向",
 )];
 
 /// 工作区根（`wind_input/`）：本 crate 在 `wind_input/crates/wind-config`。

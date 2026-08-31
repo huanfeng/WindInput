@@ -4761,6 +4761,49 @@ impl ResourceLayer {
     }
 }
 
+/// 一个配置键在**某一层**的声明情况。见 [`Config::key_origin`]。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerOrigin {
+    /// 层名：`default` / `data` / `custom` / `user`。
+    ///
+    /// 后三个与 [`ResourceLayer::name`] 同名同义（日志 `覆盖生效[custom][…]` 里也是它们）；
+    /// `default` 是配置层独有的第四个——资源层没有「代码里的默认文件」这回事。
+    pub layer: &'static str,
+    /// 该层配置文件的路径。`default` 层是代码里的默认值，没有文件，恒为 `None`。
+    ///
+    /// 层不存在（非定制版的 `custom`、漫游目录取不到的 `user`）时同样是 `None`，
+    /// 与 `value: None` 一起表示「这一层根本不在」。
+    pub path: Option<PathBuf>,
+    /// 该层**显式声明**的值；`None` = 这一层没写这个键（或该层不存在）。
+    ///
+    /// ⚠️ 不是「该层生效后的值」——层与层之间是深合并，单层的声明可能只是最终值的一部分。
+    pub value: Option<toml::Value>,
+}
+
+/// 一个配置键的来源追溯：每层各声明了什么、最终生效的是哪个。见 [`Config::key_origin`]。
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyOrigin {
+    /// 各层声明，**从低到高排列**（`default` → `data` → `custom` → `user`）。
+    ///
+    /// 顺序与 [`Config::resource_layers_named`] 相反是有意的：那个 API 服务于「逐层找文件，
+    /// 先找到的赢」，倒序最省事；而这里是给人看的，覆盖关系从下往上叠更符合直觉。
+    /// 恒含四个元素（层不存在时也占位），呈现端因此不必判断「这一层怎么没了」。
+    pub layers: Vec<LayerOrigin>,
+    /// 实际生效值，取自一次真实的 [`Config::load`]（含 `normalize` 归一化之后）。
+    ///
+    /// ★ **不是从 `layers` 推算的**：推算会漏掉 `normalize()` 的改写与段级降级的回落，
+    /// 而这两者恰好是「我明明设了值，为什么不是这个」最常见的两个答案。
+    pub effective: Option<toml::Value>,
+    /// 生效值来自哪一层。`None` 表示**指不到单独一层**，三种成因：
+    /// 表类型跨层深合并（生效值是多层的并集）、`normalize()` 改写过、或该键压根不存在。
+    pub effective_layer: Option<&'static str>,
+    /// 本次加载中，该键是否被段级降级殃及（[`ConfigDegradation::taints`]）。
+    ///
+    /// 为真时**用户层的值没有进入生效值**——那一段整个回落了出厂默认。这是「设置改了
+    /// 不生效」里最难自查的一种：配置文件里白纸黑字写着，程序却在用别的值。
+    pub degraded: bool,
+}
+
 /// 读取并解析定制版清单。见 [`Config::custom_manifest`]（含「解析失败 ⇒ 整层退场」的理由）。
 fn load_custom_manifest() -> Option<CustomManifest> {
     let file = crate::variant::install_root()?
@@ -6247,6 +6290,99 @@ impl Config {
             layers.push(ResourceLayer::new("data", d.to_path_buf()));
         }
         layers
+    }
+
+    /// 追溯一个配置键的来源：四层各声明了什么、最终生效的是哪一层的值。
+    ///
+    /// 回答的是**「我改的这个值为什么不生效」**——此前唯一的答案来源是 `config get`
+    /// 的最终值，而它恰好不包含「为什么」。四层里任何一层写了同名键都会静默改变结果，
+    /// 定制版还多夹一层（`data_custom`），排查时无从下手。
+    ///
+    /// # 语义要点
+    ///
+    /// - **层的值是「该层显式写了什么」，不是「该层生效后是什么」。** 表类型逐键深合并，
+    ///   单层声明常常只是最终值的一部分——此时 `effective_layer` 为 `None`，因为确实
+    ///   指不到某一层。
+    /// - **`effective` 取自真实的 [`Self::load`]**，含 `normalize()` 的归一化改写；
+    ///   段级降级发生时它是出厂默认，而 `degraded` 会告诉你用户值被丢了。
+    /// - 键不存在于任何层（含默认层）时四层全 `None`——调用方应当先用
+    ///   `config_schema::is_known_key` 挡掉拼错的键，本函数不认识注册表。
+    ///
+    /// # 代价
+    ///
+    /// 每次调用做 4 次文件读 + 一次完整 `load()`。这是**排查用的单次查询**，不要放进
+    /// 热路径；需要批量时应当另做一个复用这一次 `load()` 的形态。
+    pub fn key_origin(key: &str, data_dir: Option<&Path>) -> anyhow::Result<KeyOrigin> {
+        /// 按点分路径在 TOML 值里取一个子值。中途遇到非表即视为不存在——
+        /// 「`ui` 被用户写成了字符串」这类情况下，`ui.font.size` 确实不存在。
+        fn at_path(v: &toml::Value, key: &str) -> Option<toml::Value> {
+            let mut cur = v;
+            for part in key.split('.') {
+                cur = cur.as_table()?.get(part)?;
+            }
+            Some(cur.clone())
+        }
+
+        // L1：代码默认。序列化不了属于代码 bug，与 `load()` 里同样处置——往上抛。
+        let default_v = toml::Value::try_from(Self::default())?;
+
+        // L2/L2.5/L3：各层的**原始**文件内容（未合并）。层不存在或文件缺失都落在
+        // `path: None` / `value: None` 上，两者在呈现端要分得开：前者是「这台机器没有
+        // 这一层」，后者是「有这一层但没写这个键」。
+        let file_layer = |name: &'static str, dir: Option<PathBuf>| {
+            let Some(dir) = dir else {
+                return LayerOrigin {
+                    layer: name,
+                    path: None,
+                    value: None,
+                };
+            };
+            let path = dir.join("config.toml");
+            let value = Self::read_toml_value(&path)
+                .as_ref()
+                .and_then(|v| at_path(v, key));
+            LayerOrigin {
+                layer: name,
+                path: Some(path),
+                value,
+            }
+        };
+
+        let layers = vec![
+            LayerOrigin {
+                layer: "default",
+                path: None,
+                value: at_path(&default_v, key),
+            },
+            file_layer("data", data_dir.map(|d| d.to_path_buf())),
+            file_layer("custom", Self::custom_data_dir()),
+            file_layer("user", Self::user_config_dir()),
+        ];
+
+        // 生效值走一次真实加载，理由见本函数文档的第二个要点。
+        let cfg = Self::load(data_dir)?;
+        let degraded = cfg.degradation.taints(key);
+        let effective = at_path(&toml::Value::try_from(&cfg)?, key);
+
+        // 归属判定：从高到低找第一个声明了的层，其值与生效值相同才算「就是它」。
+        //
+        // ★ 值相等这一步不能省。表类型跨层深合并时，最高声明层的值只是并集的一部分
+        // （user 写 `{a=1}`、data 写 `{b=2}`，生效值是 `{a=1,b=2}`），此时归属到 user
+        // 是错的——用户照着去改 user 层，改不动来自 data 的那一半。`normalize()` 改写过
+        // 的值同理。宁可报「指不到单独一层」，也不要报一个会把人带偏的层名。
+        let effective_layer = layers
+            .iter()
+            .rev()
+            .find(|l| l.value.is_some())
+            .filter(|l| l.value == effective)
+            .map(|l| l.layer);
+
+        Ok(KeyOrigin {
+            layers,
+            effective,
+            effective_layer,
+            degraded,
+        })
     }
 
     /// 获取当前激活的 schema ID

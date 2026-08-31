@@ -20,8 +20,8 @@ pub use code_charset::{CodeCharSet, CodeCharSetError};
 pub use config::{
     AssociationConfig, AuxCodeShare, BoundAction, CUSTOM_DATA_DIR_NAME, CUSTOM_MANIFEST_NAME,
     CodetableGlobal, Config, CustomHideList, CustomIdentity, CustomManifest, DEFAULT_LABEL_CAPS,
-    DEFAULT_LABEL_ENGLISH, LabelsConfig, LangBarConfig, LayoutIntent, MixGlobal,
-    MobileAssociationConfig, MobileConfig, ModeIndicatorStyle, Orientation, PinyinFuzzy,
+    DEFAULT_LABEL_ENGLISH, KeyOrigin, LabelsConfig, LangBarConfig, LayerOrigin, LayoutIntent,
+    MixGlobal, MobileAssociationConfig, MobileConfig, ModeIndicatorStyle, Orientation, PinyinFuzzy,
     PinyinGlobalConfig, PreeditDisplay, ResourceLayer, SessionAction, TOOLBAR_ITEM_KEYS,
     TOOLBAR_LABEL_MAX_WIDTH, TextOrientation, ToolbarButtonSpec, TopCommitMode,
     toolbar_label_trunc,

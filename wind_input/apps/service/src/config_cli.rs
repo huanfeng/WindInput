@@ -55,7 +55,7 @@ fn print_usage() {
          \n\
          命令:\n  \
          list [前缀]          列出配置键与类型（可按键前缀过滤）\n  \
-         describe <key>       显示某键的类型/可选值/当前值\n  \
+         describe <key>       显示某键的类型/可选值/当前值，并逐层追溯来源\n  \
          get <key>            读取某键当前值\n  \
          set <key> <value>    设置某键（优先热重载，core 未运行则离线写）\n  \
          export               导出当前完整配置（TOML）\n  \
@@ -101,7 +101,136 @@ fn cmd_describe(key: &str) -> i32 {
         Ok(v) => println!("当前值: {}", format_value(&v)),
         Err(e) => println!("当前值: <读取失败: {e}>"),
     }
+    print_key_origin(key);
     0
+}
+
+/// 单层值的显示上限。Map / StructList 整表打出来能刷屏几十行，而这里要回答的是
+/// 「哪一层写了」，不是「写了什么」——完整值有 `config get`。
+const ORIGIN_VALUE_MAX: usize = 40;
+
+/// 终端显示宽度：CJK / 全角标点占两列，其余按一列。
+///
+/// 不能用 `str::len`（UTF-8 字节数）也不能用 `chars().count()`：本表的值列里满是中文
+/// （标点映射、方案名、`—` 占位符本身就是全角破折号），按字符数补空格会让路径列参差
+/// 不齐——而那正是这张表唯一需要对齐的地方。
+fn display_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| {
+            let c = c as u32;
+            // CJK 统一表意文字、全角标点、假名、全角 ASCII 区段——覆盖本表实际会出现的字符。
+            let wide = (0x1100..=0x115F).contains(&c)
+                || (0x2E80..=0xA4CF).contains(&c)
+                || (0xAC00..=0xD7A3).contains(&c)
+                || (0xF900..=0xFAFF).contains(&c)
+                || (0xFE30..=0xFE4F).contains(&c)
+                || (0xFF00..=0xFF60).contains(&c)
+                || (0xFFE0..=0xFFE6).contains(&c);
+            if wide { 2 } else { 1 }
+        })
+        .sum()
+}
+
+/// 左对齐补足到 `width` 显示列（已超宽则原样返回）。
+fn pad_display(s: &str, width: usize) -> String {
+    let w = display_width(s);
+    if w >= width {
+        return s.to_string();
+    }
+    format!("{s}{}", " ".repeat(width - w))
+}
+
+/// 把一层的值压成一行。超长截断并给出省略号，空缺显示破折号。
+fn origin_value_cell(v: Option<&toml::Value>) -> String {
+    let Some(v) = v else {
+        return "—".into();
+    };
+    // 字符串去引号与 `format_value` 对齐；其余走 TOML 的紧凑写法（数组/表都读得懂）。
+    let s = match v {
+        toml::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let s = s.replace('\n', " ");
+    if s.chars().count() <= ORIGIN_VALUE_MAX {
+        return s;
+    }
+    let head: String = s.chars().take(ORIGIN_VALUE_MAX - 1).collect();
+    format!("{head}…")
+}
+
+/// 打印四层来源追溯。这是 `describe` 相对 `get` 的全部增量——
+/// `get` 回答「现在是什么」，这里回答**「为什么是它」**。
+fn print_key_origin(key: &str) {
+    let origin = match Config::key_origin(key, Config::data_dir().as_deref()) {
+        Ok(o) => o,
+        // 追溯失败不影响上面已经打出的类型与当前值，故只提示、不改退出码。
+        Err(e) => {
+            println!("来源:   <追溯失败: {e}>");
+            return;
+        }
+    };
+
+    // ★ 降级必须先判。`effective_layer == None` 同时承载三种成因（跨层深合并、
+    // `normalize` 改写、降级回落），前两种是「正常但指不到单一层」，第三种是「你的配置
+    // 根本没生效」——含义相反。不先判降级就会把最严重的那种说成最平常的那种。
+    if origin.degraded {
+        println!("来源:   ⚠ 本次未生效——所在配置段解析失败，已整段回落出厂默认");
+    } else {
+        match origin.effective_layer {
+            Some(l) => println!("来源:   {}", layer_label(l)),
+            // 说清是哪一种「指不到」，否则用户会以为工具没查出来。
+            None if origin.effective.is_none() => println!("来源:   任何一层都没有声明"),
+            None => println!("来源:   多层合并（表按键逐层合并，指不到单独一层）"),
+        }
+    }
+
+    println!("\n各层声明（低 → 高，靠后的覆盖靠前的；→ 标出生效层）:");
+    let cells: Vec<String> = origin
+        .layers
+        .iter()
+        .map(|l| origin_value_cell(l.value.as_ref()))
+        .collect();
+    // 列宽随内容走：绝大多数键的值是个位数字或短枚举，固定宽会把路径推到屏幕外面去。
+    let vw = cells.iter().map(|c| display_width(c)).max().unwrap_or(1);
+    for (l, cell) in origin.layers.iter().zip(&cells) {
+        let mark = if Some(l.layer) == origin.effective_layer {
+            "→"
+        } else {
+            " "
+        };
+        let path = match (&l.path, l.layer) {
+            (Some(p), _) => p.display().to_string(),
+            // 各有各的缺席原因——留白会让人以为是工具没读到。
+            (None, "default") => "（代码内置，无文件）".into(),
+            (None, "custom") => "（本机不是定制版）".into(),
+            (None, _) => "（该层目录不可用）".into(),
+        };
+        println!(
+            "{mark} {}  {}  {path}",
+            pad_display(l.layer, 7),
+            pad_display(cell, vw)
+        );
+    }
+
+    if origin.degraded {
+        // 这一条是「配置文件里白纸黑字写着，程序却在用别的值」的唯一解释。
+        println!(
+            "\n⚠ 该键所在的配置段本次解析失败、已整段回落出厂默认——上面各层的声明\n\
+             \x20 本次都没有生效。日志里搜「解析失败」可定位到具体是哪个值的问题。"
+        );
+    }
+}
+
+/// 层名的中文标签。与日志里的 `覆盖生效[user][…]` 用同一批层名，只是这里给人读。
+fn layer_label(layer: &str) -> String {
+    let what = match layer {
+        "default" => "代码默认",
+        "data" => "出厂",
+        "custom" => "定制版",
+        "user" => "用户",
+        other => other,
+    };
+    format!("{what}（{layer}）")
 }
 
 fn cmd_get(key: &str) -> i32 {
