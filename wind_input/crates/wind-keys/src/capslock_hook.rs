@@ -57,10 +57,34 @@ pub fn should_eat() -> bool {
     SHOULD_EAT.load(Ordering::Relaxed)
 }
 
+/// 钩子对一次**非注入的** CapsLock 事件的裁决：`(要不要吃掉, 配对状态的新值)`。
+///
+/// 抽成纯函数有两个理由：钩子回调在单测里根本跑不到（要真装 LL 钩子，CI 的 Linux 上更没有），
+/// 而这段逻辑的两个方向后果**极不对称**——少吃只是「这次绑定没生效」，多吃是「用户在**别的
+/// 应用**里 CapsLock 按不动」。这种判据必须能脱离平台逐条断言。
+///
+/// 规则只有三条：
+/// - down + 闸门开 → 吃，并记下「欠一个 up」；
+/// - down + 闸门关 → 放行，**不动**配对状态（此时没有欠账，也不该清掉别人的）；
+/// - up → 只看配对状态：欠着就吃并销账，没欠就放行。**刻意不问闸门**，因为绑定动作自己
+///   就可能在 down 与 up 之间把闸门关掉（选词上屏 ⇒ 候选清空 ⇒ 无会话）。
+pub(crate) fn decide_eat(is_down: bool, should_eat: bool, eaten_down: bool) -> (bool, bool) {
+    if is_down {
+        if should_eat {
+            // 按住不放时系统重复发 keydown：重复置位是幂等的，最后那次 up 一并销账。
+            (true, true)
+        } else {
+            (false, eaten_down)
+        }
+    } else {
+        (eaten_down, false)
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use super::{CALLBACK, SHOULD_EAT};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use tracing::{debug, error, info};
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -73,6 +97,27 @@ mod imp {
     /// `nCode` 为该值时 wParam/lParam 才含按键信息；小于 0 时文档要求原样下传。
     const HC_ACTION: i32 = 0;
 
+    /// 上一个被吃掉的 CapsLock keydown 是否还在等它的 keyup。
+    ///
+    /// ★★ 与 [`SHOULD_EAT`] **正交**：闸门管「这一次按下要不要接管」，本标志管「已经接管
+    /// 的这一次要吃到底」。
+    ///
+    /// 模块文档那句「down 和 up 都要吃」是对的，但它默认了一个**没写出来的前提**——闸门在
+    /// down 与 up 之间不会变。而本功能的动作**自己就会破坏这个前提**：`select_candidate`
+    /// 选词上屏后候选清空 ⇒ `has_input_session` 为假 ⇒ `notify_ui_update` 把闸门归零，
+    /// 而那时用户还没松手。于是 keyup 漏出去，系统与宿主收到一个**没有 down 的孤儿 up**，
+    /// TSF 还会把它当成「用户切了大写」的状态通知转发给服务端。
+    ///
+    /// 真机现象（2026-08-31）：功能完全正常，却在第一次操作时闪一下状态提示泡——因为
+    /// 服务端的 `show_status()` 拿空的 `last_status_text` 去比，首次必然弹一次。翻页碰不到
+    /// 是因为翻完页候选还在，闸门不会归零。
+    ///
+    /// ⚠️ 只由 CapsLock 的 down 置位、up 清零，另在装钩子时清零（装卸之间若卡着一次未配对
+    /// 的 down，重装后第一个 keyup 会被误吃——那正是「用户在别的应用里 CapsLock 按不动」
+    /// 的方向，必须避免）。`notify_ui_hide` / `handle_focus_lost` 那类闸门归零**不得**碰它：
+    /// 它们要收回的是「接管新按下」的权限，不是撤销一次已经吃了一半的按键。
+    static EATEN_DOWN: AtomicBool = AtomicBool::new(false);
+
     /// 已安装的钩子。Drop 即卸载（停消息泵 → 线程内 `UnhookWindowsHookEx` → join）。
     pub struct CapsLockHook {
         thread_id: u32,
@@ -81,8 +126,11 @@ mod imp {
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         // 文档：nCode < 0 必须直接下传；这里连 HC_ACTION 之外的一律下传。
-        // 未开启拦截时也立刻下传——绝大多数按键走的是这条路径，必须最短。
-        if code == HC_ACTION && SHOULD_EAT.load(Ordering::Relaxed) {
+        // 两个标志都为假时立刻下传——绝大多数按键走的是这条路径，必须最短（两次
+        // relaxed 原子读，不解引用 lParam、不进任何分支）。
+        if code == HC_ACTION
+            && (SHOULD_EAT.load(Ordering::Relaxed) || EATEN_DOWN.load(Ordering::Relaxed))
+        {
             // SAFETY: 文档保证 nCode == HC_ACTION 时 lParam 指向有效的 KBDLLHOOKSTRUCT。
             let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
             if info.vkCode == VK_CAPITAL {
@@ -90,14 +138,22 @@ mod imp {
                 // 程序）可能会——拦下它们既无意义，又会让那些工具行为异常。
                 if (info.flags & LLKHF_INJECTED).0 == 0 {
                     let msg = wparam.0 as u32;
-                    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
-                        && let Some(cb) = CALLBACK.get()
-                    {
-                        cb();
+                    let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                    // 裁决抽成纯函数（见其文档）。load + store 不是原子对，但钩子回调由
+                    // 系统在**本模块自己的那一个线程**上串行调用，不存在并发进入；
+                    // `SHOULD_EAT` 是别的线程写的，这里只取一次快照。
+                    let (eat, next_eaten) = super::decide_eat(
+                        is_down,
+                        SHOULD_EAT.load(Ordering::Relaxed),
+                        EATEN_DOWN.load(Ordering::Relaxed),
+                    );
+                    EATEN_DOWN.store(next_eaten, Ordering::Relaxed);
+                    if eat {
+                        if is_down && let Some(cb) = CALLBACK.get() {
+                            cb();
+                        }
+                        return LRESULT(1);
                     }
-                    // ★ down 和 up **都要吃**。只吃 down 会让系统状态机收到不成对的
-                    // 事件，某些宿主会据此认为该键仍处于按下状态。
-                    return LRESULT(1);
                 }
             }
         }
@@ -111,6 +167,9 @@ mod imp {
         /// 回调只能设置一次（`OnceLock`）——钩子的装卸可以反复，回调本身是进程级常量。
         pub fn install(on_press: super::PressCallback) -> anyhow::Result<Self> {
             let _ = CALLBACK.set(on_press);
+            // 装卸之间若卡着一次未配对的 down（卸载恰好发生在用户按住 CapsLock 时），
+            // 重装后第一个 keyup 会被误吃 ⇒ 用户在别的应用里 CapsLock 按不动。清零。
+            EATEN_DOWN.store(false, Ordering::Relaxed);
 
             let (tx, rx) = mpsc::channel::<Result<u32, String>>();
             let join = std::thread::Builder::new()
@@ -156,6 +215,8 @@ mod imp {
         fn drop(&mut self) {
             // 卸载期间先停止拦截：PostThreadMessage 到线程真正退出之间仍会有回调进来。
             SHOULD_EAT.store(false, Ordering::Relaxed);
+            // 配对状态一并清零：钩子都要没了，「还欠一个 up」的账不能留给下一次安装。
+            EATEN_DOWN.store(false, Ordering::Relaxed);
             unsafe {
                 let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
             }
@@ -179,3 +240,59 @@ mod imp {
 }
 
 pub use imp::CapsLockHook;
+
+#[cfg(test)]
+mod tests {
+    use super::decide_eat;
+
+    /// 正常一次：闸门开着按下、松手，两半都吃掉，账也平了。
+    #[test]
+    fn paired_down_and_up_are_both_eaten() {
+        let (eat_down, eaten) = decide_eat(true, true, false);
+        assert!(eat_down, "闸门开时 down 必须吃");
+        assert!(eaten, "吃了 down 就要记下欠一个 up");
+        let (eat_up, eaten) = decide_eat(false, true, eaten);
+        assert!(eat_up, "配对的 up 必须吃");
+        assert!(!eaten, "销账");
+    }
+
+    /// ★ 回归 2026-08-31：动作**自己**在 down 与 up 之间把闸门关掉（选词上屏 ⇒ 候选清空
+    /// ⇒ 无会话）。up 必须照吃——否则系统与宿主收到孤儿 up，TSF 还会把它当成「用户切了
+    /// 大写」的状态通知转发给服务端（真机现象：功能正常，却闪一下状态提示泡）。
+    #[test]
+    fn up_is_eaten_even_after_gate_closed_mid_press() {
+        let (_, eaten) = decide_eat(true, true, false);
+        let (eat_up, eaten_after) = decide_eat(false, /* 闸门已关 */ false, eaten);
+        assert!(eat_up, "闸门中途关掉，配对的 up 仍必须吃");
+        assert!(!eaten_after);
+    }
+
+    /// 反方向的守卫：没吃过 down 的 up 一律放行。多吃的后果是「用户在别的应用里
+    /// CapsLock 按不动」，比功能不生效严重得多，故这条不能有例外——闸门开着也不例外
+    /// （闸门刚在别处置位、而这次按下发生在置位之前，正是那个竞态窗口）。
+    #[test]
+    fn orphan_up_is_never_eaten() {
+        assert_eq!(decide_eat(false, false, false), (false, false));
+        assert_eq!(decide_eat(false, true, false), (false, false));
+    }
+
+    /// 闸门关时 down 放行，且**不动**配对状态：那时没有欠账，也不该清掉别人的。
+    #[test]
+    fn down_with_gate_closed_passes_through_and_keeps_pairing_state() {
+        assert_eq!(decide_eat(true, false, false), (false, false));
+        assert_eq!(decide_eat(true, false, true), (false, true));
+    }
+
+    /// 按住不放：系统重复发 keydown，重复置位幂等，最后一次 up 一并销账。
+    #[test]
+    fn repeated_down_is_idempotent() {
+        let mut eaten = false;
+        for _ in 0..5 {
+            let (eat, next) = decide_eat(true, true, eaten);
+            assert!(eat);
+            eaten = next;
+        }
+        assert!(eaten);
+        assert_eq!(decide_eat(false, true, eaten), (true, false));
+    }
+}
