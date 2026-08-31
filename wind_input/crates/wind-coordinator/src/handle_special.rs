@@ -907,6 +907,135 @@ mod tests {
             );
         }
 
+        /// ── 真实词库端到端 ──────────────────────────────────────────────────
+        ///
+        /// ⚠️ 上面那些用例走的都是自造夹具，验的是判据与生命周期；**真实词库下这个模式
+        /// 到底还剩几个候选**是另一回事，只有这里能答。缺数据时整族静默跳过而计数照绿
+        /// （本仓的老坑），故守卫里带 eprintln，别只看绿灯。
+        /// 补数据：worktree 根建 `build_dev` 符号链接指向主仓，或跑 `dev.ps1 gd`。
+        fn wubi_coord(tag: &str) -> Option<std::sync::Arc<Coordinator>> {
+            let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../build_dev/data");
+            if !d.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
+                eprintln!("跳过 {tag}：五笔词库不存在（build_dev/data 缺失）");
+                return None;
+            }
+            let mut cfg = Config::default();
+            cfg.schema.active = "wubi86".into();
+            cfg.schema.available = vec!["wubi86".into()];
+            Some(Coordinator::new_headless(cfg, Some(&d)))
+        }
+
+        /// 取某个码在生僻字模式下的候选文本。
+        fn rare_cands(c: &Coordinator, code: &str) -> Vec<String> {
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            c.enter_rare_char_mode(&mut st, 0);
+            st.special_buffer = code.to_string();
+            st.special_cursor = code.len();
+            c.update_special_candidates(&mut st);
+            let out = st.candidates.iter().map(|x| x.text.clone()).collect();
+            c.exit_special_mode(&mut st);
+            out
+        }
+
+        /// 取某个码在**普通输入路**的候选文本（对照组）。
+        fn normal_cands(c: &Coordinator, code: &str) -> Vec<String> {
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            st.input_buffer = code.to_string();
+            c.update_candidates(&mut st);
+            let out = st.candidates.iter().map(|x| x.text.clone()).collect();
+            st.input_buffer.clear();
+            st.candidates.clear();
+            out
+        }
+
+        /// ★ 真实五笔词库下，同码位的常用字被滤掉、生僻字留下。
+        ///
+        /// `sivg` 是本仓反复出现的样本：常用「档」与生僻「桜」同码，检索范围放宽那一轮
+        /// 也用的它。这里精确断言而非只验性质——它稳定到足以当回归锁，词库升级真把它改了
+        /// 也该有人来看一眼。
+        #[test]
+        fn real_dict_keeps_only_the_rare_homograph() {
+            let Some(c) = wubi_coord("sivg") else { return };
+            assert_eq!(
+                normal_cands(&c, "sivg"),
+                vec!["档"],
+                "对照组：普通输入只出常用字"
+            );
+            assert_eq!(
+                rare_cands(&c, "sivg"),
+                vec!["桜"],
+                "生僻字模式应只留同码的生僻字"
+            );
+        }
+
+        /// ★ 真实词库下的性质断言：候选**非空**、**全是单字**、**全部判非常用**。
+        ///
+        /// 非空这一条最要紧——「严格过滤空了就空着」是设计取舍，但如果连 `a` 这种一级简码
+        /// 都滤空了，这个模式就是个摆设，而所有自造夹具的测试都不会红。
+        #[test]
+        fn real_dict_yields_single_uncommon_chars() {
+            let Some(c) = wubi_coord("a") else { return };
+            let got = rare_cands(&c, "a");
+            assert!(!got.is_empty(), "一级简码下不该一个候选都没有");
+
+            let cc = c.common_chars.read().unwrap();
+            for t in &got {
+                assert!(
+                    wind_candidate::single_markable_char(t).is_some(),
+                    "「{t}」不是单字——严格只出单字这条没生效"
+                );
+                assert!(
+                    !cc.is_string_common(t),
+                    "「{t}」是常用字，不该出现在生僻字模式"
+                );
+            }
+            // 普通输入路里那些常用字，一个都不该漏进来。
+            let normal = normal_cands(&c, "a");
+            assert!(normal.len() > got.len(), "普通候选应远多于生僻候选");
+            for t in ["工", "戈", "式"] {
+                assert!(normal.contains(&t.to_string()), "对照组应含常用字「{t}」");
+                assert!(
+                    !got.contains(&t.to_string()),
+                    "常用字「{t}」漏进了生僻字模式"
+                );
+            }
+        }
+
+        /// 多字词一个都不该进来（`ii` 的普通候选里有「洋洋洒洒」这类）。
+        #[test]
+        fn real_dict_drops_multi_char_words() {
+            let Some(c) = wubi_coord("ii") else { return };
+            let normal = normal_cands(&c, "ii");
+            assert!(
+                normal.iter().any(|t| t.chars().count() > 1),
+                "对照组里应当有多字词，否则这条测试什么都没验到"
+            );
+            for t in rare_cands(&c, "ii") {
+                assert_eq!(
+                    wind_candidate::semantic_units(&t),
+                    1,
+                    "「{t}」是多字词，不该进生僻字模式"
+                );
+            }
+        }
+
+        /// ★ 生僻字模式不污染普通输入路：进出一趟之后，同一个码的普通候选逐字节不变。
+        ///
+        /// 「完全不记词频」那条取舍的端到端体现——模式内选过什么都不该改变正常输入的顺序。
+        #[test]
+        fn real_dict_normal_path_unaffected_by_the_mode() {
+            let Some(c) = wubi_coord("roundtrip") else {
+                return;
+            };
+            let before = normal_cands(&c, "ii");
+            let _ = rare_cands(&c, "ii");
+            let after = normal_cands(&c, "ii");
+            assert_eq!(before, after, "进出生僻字模式不应改变普通输入的候选");
+        }
+
         /// 装一份最小常用字表。`retain_rare_admitted` 对空表整条早退（见那条测试），
         /// 故凡要验过滤结果的用例都得先装表。
         fn set_common(c: &Coordinator, chars: impl IntoIterator<Item = char>) {
