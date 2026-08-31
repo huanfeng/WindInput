@@ -3264,11 +3264,16 @@ impl Coordinator {
                 // 诊断采集开关本身与配置文件无关（会话级），这里重推纯属幂等保险——
                 // 与 password_suppress 同样处理，让"重载一次"能修好任何 DLL 侧状态漂移。
                 self.push_diag_snapshot_config(0);
-                self.show_toast(
-                    "设置已更新",
-                    ToastPosition::BottomCenter,
-                    ToastKind::Success,
-                );
+                // 语法错误时**取代**「设置已更新」，而不是两条都弹：报成功再报失败会让
+                // 用户以为是两件事，而这里只有一件——他刚存的设置里有一部分没生效。
+                // 此时 `self.rt()` 已是上面换进去的新 bundle，读到的就是本次加载的降级记录。
+                if !self.notify_config_syntax_error() {
+                    self.show_toast(
+                        "设置已更新",
+                        ToastPosition::BottomCenter,
+                        ToastKind::Success,
+                    );
+                }
                 false
             }
             Err(e) => {
@@ -3450,6 +3455,45 @@ impl Coordinator {
             ToastPosition::BottomCenter,
             ToastKind::Success,
         );
+    }
+
+    /// 配置文件**语法不合法**时弹一次提示，返回是否弹了。
+    ///
+    /// # 为什么这条提示非有不可
+    ///
+    /// 语法错误此前只留一行 INFO 日志（默认不打印），而后果是整层配置失效——用户看到的
+    /// 是「我的设置怎么全变回默认了」，唯一线索藏在一个他不会去看、也看不到的地方。
+    /// 真机上更糟：后台的 `key_actions` 物化拿空表当种子把 config.toml 整个覆盖了。
+    /// 写盘那一侧已经在 `wind-config` 里堵死（`ConfigDegradation::unparsable`），
+    /// 但**堵住损坏不等于告诉用户**——不提示的话，他的设置依然静默失效，只是这次文件还在。
+    ///
+    /// 时长给足 8 秒（默认 2.5 秒）：这条提示带着文件路径和行号，是要照着去改的，
+    /// 不是「已保存」那种扫一眼即可的回执。
+    ///
+    /// 只报**第一个**出问题的层：多层同时坏是极罕见的，而堆两条路径会把 toast 撑爆。
+    pub fn notify_config_syntax_error(&self) -> bool {
+        let rt = self.rt();
+        let Some(u) = rt.config.degradation.unparsable.first() else {
+            return false;
+        };
+        let text = if u.skipped_lines.is_empty() {
+            format!("配置文件语法错误，本次未能加载\n{}", u.path.display())
+        } else {
+            let lines: Vec<String> = u.skipped_lines.iter().map(|n| n.to_string()).collect();
+            format!(
+                "配置文件第 {} 行语法错误，该行设置未生效\n{}",
+                lines.join("、"),
+                u.path.display()
+            )
+        };
+        drop(rt);
+        let _ = self.ui_tx.send(UiCommand::ShowToast {
+            text,
+            position: ToastPosition::BottomCenter,
+            kind: ToastKind::Error,
+            duration_ms: 8000,
+        });
+        true
     }
 
     /// 触发截图所有可见 UI 窗口，保存到用户配置目录下的 screenshots/ 子目录。

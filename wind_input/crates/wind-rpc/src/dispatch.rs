@@ -126,7 +126,7 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
         //   `#[serde(skip)]` 的运行期元信息、**刻意**不出现在配置命名空间里（否则设置端
         //   diff 回传时它会被当成一个配置键写进 config.toml）。
         //
-        // 形态恒为三个字段的对象（不是「没降级就不给」）：客户端据此可以无条件渲染，
+        // 形态恒为四个字段的对象（不是「没降级就不给」）：客户端据此可以无条件渲染，
         // 「字段缺失」在跨仓契约里与「这版 core 还没实现」无从区分。
         "config.degradation" => {
             let d = Config::load(Config::data_dir().as_deref())?.degradation;
@@ -137,6 +137,18 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
                 // 用户会以为整个界面设置都回了默认。
                 "sections": d.sections,
                 "totalFallback": d.total_fallback,
+                // 文件**语法**不合法（重复键、漏引号……），与 `sections` 是两类故障：
+                // 那个发生在四层合并**之后**的类型检查，这个发生在合并**之前**的单文件
+                // 解析。设置端要分开讲——修法不同（改那一行 vs 改那个键的类型），
+                // 混成一句会把用户支使到错误的地方。
+                "unparsable": d.unparsable.iter().map(|u| json!({
+                    "layer": u.layer,
+                    "path": u.path.display().to_string(),
+                    "error": u.error,
+                    // 1-based，就是用户在编辑器里看到的行号。
+                    "skippedLines": u.skipped_lines,
+                    "salvagedKeys": u.salvaged_keys,
+                })).collect::<Vec<_>>(),
             }))
         }
         // 本机字体枚举（平台能力经 CoreRpc 注入；默认空表）。

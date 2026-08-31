@@ -173,7 +173,15 @@ fn print_key_origin(key: &str) {
     // ★ 降级必须先判。`effective_layer == None` 同时承载三种成因（跨层深合并、
     // `normalize` 改写、降级回落），前两种是「正常但指不到单一层」，第三种是「你的配置
     // 根本没生效」——含义相反。不先判降级就会把最严重的那种说成最平常的那种。
-    if origin.degraded {
+    // ★★ 语法故障**不能**照搬 `degraded` 来报「未生效」。
+    //
+    // 语法故障时 `ConfigDegradation::taints` 对任何路径恒为真——那是**写盘闸**的判据，
+    // 保守方向选对了：不知道哪些键受影响就一律不写，损失为零。但同一个判据拿来呈现
+    // 就是在撒谎：被跳过的只是某几行，本键很可能好好地生效着（实跑见过一次——
+    // `per_page` 明明取到了 user 层的 9，却被报成「本次未生效」）。
+    // **保守的方向对写是安全，对读是错误**：呈现说错了，用户会去改一个没问题的键。
+    // 所以这里照常报来源，语法故障降级为底部的附加警示。
+    if origin.degraded && origin.syntax_error.is_none() {
         println!("来源:   ⚠ 本次未生效——所在配置段解析失败，已整段回落出厂默认");
     } else {
         match origin.effective_layer {
@@ -212,7 +220,16 @@ fn print_key_origin(key: &str) {
         );
     }
 
-    if origin.degraded {
+    if let Some(err) = &origin.syntax_error {
+        // 措辞刻意是**条件式**的（「若……则」），不是断言：本函数无从知道被跳过的那几行
+        // 里写的是哪些键——救回来的 Value 里，「被跳过的键」与「从未写过的键」完全同形。
+        println!(
+            "\n⚠ 配置文件语法不合法：{err}\n\
+             \x20 若本键正写在被跳过的行里，则它本次没有生效；上面的「来源」按救回的\n\
+             \x20 内容判定，不受影响的键照常生效。修好那一行即可完全恢复。\n\
+             \x20 在此期间程序不会覆盖该文件（写回已被拦下），设置页保存时会先备份原件。"
+        );
+    } else if origin.degraded {
         // 这一条是「配置文件里白纸黑字写着，程序却在用别的值」的唯一解释。
         println!(
             "\n⚠ 该键所在的配置段本次解析失败、已整段回落出厂默认——上面各层的声明\n\
@@ -274,6 +291,27 @@ fn cmd_export() -> i32 {
             // 坏段已经被出厂值顶掉——导出去就是把这次数据丢失**固化**成用户的新配置，
             // 而且他从输出里完全看不出来。同 `preset_for_pruning` 取不到 preset 时退化为
             // 「不清理」：拿不到可信的全量就别动。
+            // 语法故障先讲：它的修法（去改那一行）与段级降级（去改那个键的类型）不同，
+            // 共用一句「段解析失败」会把用户支去翻一个语法上根本没问题的段。
+            if let Some(u) = cfg.degradation.unparsable.first() {
+                eprintln!(
+                    "拒绝导出：配置文件语法不合法，本次只加载了其中可解析的部分，\
+                     导出的内容不是你的真实配置。"
+                );
+                eprintln!("  文件：{}", u.path.display());
+                if u.skipped_lines.is_empty() {
+                    eprintln!("  本次完全未能加载该文件");
+                } else {
+                    let lines: Vec<String> =
+                        u.skipped_lines.iter().map(|n| n.to_string()).collect();
+                    eprintln!("  已跳过的行：{}", lines.join(", "));
+                }
+                if !u.error.is_empty() {
+                    eprintln!("  首个错误：{}", u.error);
+                }
+                eprintln!("  请先修正该文件的语法，再重新导出。");
+                return 1;
+            }
             eprintln!(
                 "拒绝导出：本次加载有配置段解析失败并回落了出厂默认值，导出的内容不是你的真实配置。"
             );

@@ -419,6 +419,16 @@ fn main() {
         coord_for_restart_toast.show_restart_toast();
     }
 
+    // 配置文件语法不合法 ⇒ 弹一次提示（带文件路径与行号）。
+    //
+    // 排在这里而不是更早：toast 由本进程 wind-ui 窗口渲染，service-ready 之前窗口线程
+    // 未必起得来，发出去也没人画（同 `show_restart_toast` 的时机理由）。
+    //
+    // 这条提示是「配置被静默重写」那个 bug 的**用户可见**那一半：写盘一侧已由
+    // `ConfigDegradation::unparsable` 在 wind-config 里堵死，但堵住损坏不等于告诉用户——
+    // 不提示的话他的设置照样失效，只是这次文件还在盘上。
+    coord_for_restart_toast.notify_config_syntax_error();
+
     // 10. 阻塞主线程，直到菜单触发"重启服务"
     //
     // macOS 例外：主线程改跑 CFRunLoop。Carbon 全局热键的事件只投递到**主线程**的

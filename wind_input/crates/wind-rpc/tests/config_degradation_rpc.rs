@@ -121,10 +121,16 @@ fn degradation_is_readable_over_rpc_with_dotted_paths() {
     assert_eq!(d["degraded"], json!(false), "毒清除后须回正常态\n{d}");
     assert_eq!(d["sections"], json!([]), "{d}");
     assert_eq!(d["totalFallback"], json!(false), "{d}");
-    // 三个字段恒在（不是「没降级就不给」）：设置端据此可以无条件渲染。
-    for k in ["degraded", "sections", "totalFallback"] {
+    // 四个字段恒在（不是「没降级就不给」）：设置端据此可以无条件渲染，
+    // 「字段缺失」在跨仓契约里与「这版 core 还没实现」无从区分。
+    for k in ["degraded", "sections", "totalFallback", "unparsable"] {
         assert!(d.get(k).is_some(), "字段 {k} 须恒在\n{d}");
     }
+    assert_eq!(
+        d["unparsable"],
+        json!([]),
+        "健康态下语法故障列表须为空\n{d}"
+    );
 
     // ── ★★ 钉住一条**别处依赖的前提**：降级粒度对段内的标量/列表键同样成立 ──────
     //
@@ -147,6 +153,50 @@ fn degradation_is_readable_over_rpc_with_dotted_paths() {
          而不是退回整段（`keys`）——`wind-webdata::keys_overview` 的来源路径表依赖这条\n{d}"
     );
     assert_eq!(d["totalFallback"], json!(false), "{d}");
+
+    // ── ★★ 语法故障：与段级降级是**两个独立维度**，同一个 RPC 里各占一格 ─────────
+    //
+    // 两者出错位置不同：段级降级在四层合并**之后**的类型检查，语法故障在合并**之前**的
+    // 单文件解析。此前 core 只有前一个维度，于是「文件里重复写了一个键」这种事
+    // `degraded` 恒为 false——设置端、写盘闸、CLI 一致判定「一切正常」，而那正是
+    // 用户配置被后台整表覆盖的时刻。这条用例钉住第二个维度确实到得了边界。
+    std::fs::write(&file, "[ui.candidate]\nper_page = 9\nper_page = 5\n").unwrap();
+    let d = call(&state, "config.degradation").expect("config.degradation");
+    assert_eq!(
+        d["degraded"],
+        json!(true),
+        "★ 语法错误必须让 degraded 为真——它曾恒为 false，那是真机数据丢失的起点\n{d}"
+    );
+    assert_eq!(
+        d["sections"],
+        json!([]),
+        "语法故障不该伪装成段级降级：两者修法不同（改那一行 vs 改那个键的类型）\n{d}"
+    );
+    let u = &d["unparsable"][0];
+    assert_eq!(u["layer"], json!("user"), "{d}");
+    assert_eq!(
+        u["skippedLines"],
+        json!([3]),
+        "行号须是 1-based 的原始行号——用户拿它直接跳到编辑器那一行\n{d}"
+    );
+    assert!(
+        u["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("config.toml")),
+        "要说清是哪个文件\n{d}"
+    );
+    assert!(
+        u["error"].as_str().is_some_and(|e| e.contains("per_page")),
+        "原始错误要带上出问题的键名\n{d}"
+    );
+
+    // 容错不是摆设：坏行之外的内容仍要正常加载。
+    let cfg = call(&state, "config.get").expect("config.get");
+    assert_eq!(
+        cfg.pointer("/ui/candidate/per_page"),
+        Some(&json!(9)),
+        "被跳过的是第二次声明，首次声明的值须留下\n{cfg}"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
