@@ -660,9 +660,13 @@ impl EngineManager {
     }
 
     /// 当前活跃拼音方案是否为双拼（`engine.pinyin.scheme == "shuangpin"`）。
-    /// 双拼不支持手动音节分隔符（`'` 会进 buffer 但引擎 convert 前剥除，致 buffer 与 preedit
-    /// 发散、Backspace 删不可见字符），供协调器 gate。复用韵母键集缓存（Some 即双拼），
-    /// 与 `shuangpin_final_key` 同源、方案切换/reload 自动失效。
+    /// 复用韵母键集缓存（Some 即双拼），与 `shuangpin_final_key` 同源、
+    /// 方案切换/reload 自动失效。
+    ///
+    /// ⚠️ 曾用于「双拼不支持手动分隔符」的协调器 gate，那个用法已撤销——双拼现在支持
+    /// 分隔符（`docs/design/shuangpin-separator.md`），拦它的改成方案出厂
+    /// `separator = "none"`。别再按「是不是双拼」去关某个拼音特性：拼音族的差异应当
+    /// 落在方案级配置上，靠引擎类型硬判会把用户显式配的东西也一并否掉。
     pub fn pinyin_is_shuangpin(&self) -> bool {
         self.pinyin_is_shuangpin_of(&self.active_schema_id())
     }
