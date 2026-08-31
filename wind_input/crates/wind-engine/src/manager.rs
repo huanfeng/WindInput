@@ -117,6 +117,11 @@ pub struct FreqSettings {
     /// ⚠️ 本项**按候选来源生效、不按当前方案**，故 `freq_settings` 的三个分支取的是
     /// 同一个值——混输方案里混进来的英文候选同样要按英文的口径记账。
     pub english_code_by_input: bool,
+    /// 不参与词频的字符区块（`schema.frequency.exclude_blocks`）。空集 = 全都参与。
+    ///
+    /// ⚠️ 与 [`Self::english_code_by_input`] 同样**跨引擎共用一个值**，三个分支取自
+    /// 分支之外算好的那一份——「emoji 不参与词频」在码表里成立、在拼音里不成立说不通。
+    pub exclude: wind_candidate::BlockMask,
 }
 
 impl Default for FreqSettings {
@@ -127,7 +132,27 @@ impl Default for FreqSettings {
             protect: ProtectPolicy::NONE,
             promote_prefix: PromotePrefix::Single,
             english_code_by_input: false,
+            exclude: wind_candidate::BlockMask::EMPTY,
         }
+    }
+}
+
+impl FreqSettings {
+    /// 这条候选文本要不要**整个绕开词频**（既不记录、也不重排）。
+    ///
+    /// # ★ 这个方法存在的唯一理由是「两端同源」
+    ///
+    /// 词频有写、读两个端点：`record_selection_in`（选中时记账）与 `apply_freq_rerank_in`
+    /// （每次按键重排）。它们**必须用同一个判据**，否则两种失效都完全静默：
+    ///
+    /// - 只跳过写端 ⇒ 用户库里既有的 emoji 词频记录照旧生效，开关看起来像没反应；
+    /// - 只跳过读端 ⇒ 记录还在继续累积，关掉开关后那些 emoji 会突然全部浮上来。
+    ///
+    /// 把判据挂在两端**都已经在读**的 [`FreqSettings`] 上，同源就由类型保证，而不是靠
+    /// 两处各写一遍 `if`、再靠注释提醒别人保持一致。同款教训见 `shadow_code_of`
+    /// （读端、写端、菜单灰显三处取码必须走同一个口）。
+    pub fn excluded_from_freq(&self, text: &str) -> bool {
+        self.exclude.contains_text(text)
     }
 }
 
@@ -328,6 +353,12 @@ pub struct EngineManager {
     english: Mutex<wind_config::config::EnglishGlobal>,
     /// 全局临时拼音配置（码表方案下临时切拼音反查；全局唯一）。Mutex 以支持热重载。
     temp_pinyin: Mutex<wind_config::config::TempPinyinConfig>,
+    /// 不参与词频的字符区块（`schema.frequency.exclude_blocks` 的**解析结果**）。
+    ///
+    /// 存解析后的 [`wind_candidate::BlockMask`] 而不是原始 `Vec<String>`：解析要按名字线性
+    /// 查块表，而本项的消费点在按键热路径上。跟 `codetable`/`english` 那几份镜像一样由
+    /// `update_config` 刷新——**漏了那一步的症状是「设置页改了不生效、重启后才生效」**。
+    freq_exclude: Mutex<wind_candidate::BlockMask>,
     /// 词频排序设置缓存（schema_id -> FreqSettings；按需解析、避免每键读盘）
     freq_cache: Mutex<HashMap<String, FreqSettings>>,
     /// 方案引擎类型缓存（`schema_engine_type`）。**按 id 缓存，reload/invalidate 时清**，
@@ -577,6 +608,7 @@ impl EngineManager {
             mix: Mutex::new(config.schema.mix.clone()),
             english: Mutex::new(config.schema.english.clone()),
             temp_pinyin: Mutex::new(config.input.temp_pinyin.clone()),
+            freq_exclude: Mutex::new(Self::parse_freq_exclude(config)),
             freq_cache: Mutex::new(HashMap::new()),
             schema_type_cache: Mutex::new(HashMap::new()),
             key_actions_cache: Mutex::new(HashMap::new()),
@@ -2427,6 +2459,10 @@ impl EngineManager {
         *self.english.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.english.clone();
         *self.temp_pinyin.lock().unwrap_or_else(|e| e.into_inner()) =
             config.input.temp_pinyin.clone();
+        // 词频排除区块：**重新解析**而不是照搬字符串——镜像存的是解析结果。漏掉这一行的
+        // 症状是设置页改了不生效、重启后才生效（`freq_cache` 在下面被清，会拿着旧 mask 重建）。
+        *self.freq_exclude.lock().unwrap_or_else(|e| e.into_inner()) =
+            Self::parse_freq_exclude(config);
         *self
             .primary_pinyin
             .lock()
@@ -3203,6 +3239,9 @@ impl EngineManager {
             let en = self.english.lock().unwrap_or_else(|e| e.into_inner());
             en.frequency.code_scope == "input"
         };
+        // 同上：跨引擎共用一个值，故在分支之外取一次。只在某个分支里读的话，别的引擎下
+        // 这条规则会静默失效——而那正是 `english_code_by_input` 当初踩过的坑。
+        let exclude = *self.freq_exclude.lock().unwrap_or_else(|e| e.into_inner());
         let engine_type = self.schema_engine_type(&id);
         let settings = match engine_type.as_deref() {
             Some("english") => {
@@ -3215,6 +3254,7 @@ impl EngineManager {
                     protect: ProtectPolicy::NONE,
                     promote_prefix: PromotePrefix::parse(&en.frequency.promote_prefix),
                     english_code_by_input,
+                    exclude,
                 }
             }
             Some("pinyin") => {
@@ -3226,6 +3266,7 @@ impl EngineManager {
                     protect: ProtectPolicy::NONE,
                     promote_prefix: PromotePrefix::parse(&pf.frequency.promote_prefix),
                     english_code_by_input,
+                    exclude,
                 }
             }
             _ => {
@@ -3249,6 +3290,7 @@ impl EngineManager {
                     // 对前缀补全从无限制），避免升级后存量用户的调频突然变窄。
                     promote_prefix: PromotePrefix::parse(&ct.frequency.promote_prefix),
                     english_code_by_input,
+                    exclude,
                     enabled: ct.frequency.enabled,
                     strategy: Self::parse_freq_strategy(&ct.frequency.strategy),
                     protect: ProtectPolicy {
@@ -3267,6 +3309,26 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, settings);
         settings
+    }
+
+    /// 解析 `schema.frequency.exclude_blocks`，并把拼错的名字 warn 出来。
+    ///
+    /// `BlockMask::from_config` 刻意只返回未识别项、不自己报警告（wind-candidate 无
+    /// `tracing` 依赖，且「怎么报」属调用方）——这里就是承接那一半的地方。
+    ///
+    /// ⚠️ 必须报：块名是中文串，`表情符號`（繁体"號"）这种错法肉眼极难分辨，而静默跳过的
+    /// 表现就是「配了没反应」，用户无从判断是名字写错还是功能没生效。
+    fn parse_freq_exclude(config: &wind_config::Config) -> wind_candidate::BlockMask {
+        let (mask, unknown) =
+            wind_candidate::BlockMask::from_config(&config.schema.frequency.exclude_blocks);
+        if !unknown.is_empty() {
+            warn!(
+                "schema.frequency.exclude_blocks 有 {} 个名字不认识、已跳过: {}（应为区块名或预设组名 emoji）",
+                unknown.len(),
+                unknown.join("、")
+            );
+        }
+        mask
     }
 
     /// 词频策略字符串 → 枚举（纯映射，便于单测）。

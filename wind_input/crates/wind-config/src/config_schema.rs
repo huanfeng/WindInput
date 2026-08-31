@@ -245,6 +245,10 @@ static REGISTRY: &[ConfigField] = &[
     // mix_modes[].candidate_layout；per-instance 字段由 StructList 条目承载，不另立项
     // （一个配置键只能有一个 manifest 项）。
     f("schema.mix_modes", StructList),
+    // 跨引擎的词频公共基线。与 schema.{codetable,pinyin,english}.frequency 分工见
+    // `FrequencyGlobal`：那三段是各引擎的调频参数，本段是三个引擎都照办的同一条规则。
+    // 值域为区块名或预设组名（"emoji"），故是 StrList 而非 Enum——块表会随 Unicode 增长。
+    f("schema.frequency.exclude_blocks", StrList),
     // -- input（输入行为）--
     f("input.filter_mode", Str),
     // 检索范围放宽（智能档增强，见 docs/design/smart-filter-scope-relax.md）

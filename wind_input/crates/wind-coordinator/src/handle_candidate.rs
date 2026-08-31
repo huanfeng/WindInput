@@ -251,7 +251,19 @@ impl Coordinator {
                 .map(str::to_string)
                 .unwrap_or_else(|| self.engine_mgr.active_schema_id());
             // 未开启「自动调频」则不记录（配置说关、代码却记的潜在 bug，对齐 apply_freq_rerank 的开关检查）。
-            if !self.engine_mgr.freq_settings_for(&owner).enabled {
+            let settings = self.engine_mgr.freq_settings_for(&owner);
+            if !settings.enabled {
+                return;
+            }
+            // 排除区块（`schema.frequency.exclude_blocks`，出厂为空）：emoji 这类候选不学词频。
+            //
+            // ⚠️ 位置必须在 `push_commit_history` **之后**——那是「重复上屏」功能的数据源，
+            // 与词频是两条独立通路。在它之前 return 会让刚上屏的 emoji 无法被 `;` 重复调出，
+            // 而用户只会觉得重复上屏偶尔失灵。同理 `record_commit`（统计）也不受本项影响。
+            //
+            // 读端 `apply_freq_rerank_in` 调**同一个** `excluded_from_freq`：只跳过这一端的话，
+            // 库里既有的 emoji 记录照旧参与重排，开关看起来毫无反应。
+            if settings.excluded_from_freq(text) {
                 return;
             }
             // 归属 id：非混输折叠自身/拼音；混输按候选来源分流，无法归因则跳过本次记频。
@@ -346,6 +358,12 @@ impl Coordinator {
             // weight/position 决定，且求值型短语的文本逐日变化，点查恒 miss——白花一次
             // redb 查询，还会让人误以为词频在这里生效。
             if c.is_phrase {
+                continue;
+            }
+            // 排除区块（写端 `record_selection_in` 调同一个判据）：跳过即不进 probe，
+            // 于是也不占 `get_freq_batch` 的一个条目——**这道判断在热路径上是净省**，
+            // 它省掉的是三次 String 分配加一次批量查条目，而自身只是一次移位加与运算。
+            if settings.excluded_from_freq(&c.text) {
                 continue;
             }
             let consumes_all = c.consumed_length == 0 || c.consumed_length >= input_len;

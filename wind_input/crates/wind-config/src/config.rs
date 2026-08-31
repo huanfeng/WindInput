@@ -539,6 +539,14 @@ pub struct SchemaConfig {
     /// 快捷输入（日期/计算等内置类方案）配置。将随"英文/快捷做成方案"一并重构。
     #[serde(default)]
     pub quick_input: QuickInputConfig,
+    /// **跨引擎**的词频公共基线（[schema.frequency]）。
+    ///
+    /// ⚠️ 与 `schema.{codetable,pinyin,english}.frequency` **是不同的东西，别合并**：
+    /// 那三段是各引擎自己的调频参数（策略、保护位数、半衰期），值可以互不相同；本段装的是
+    /// 「三个引擎都该照办的同一条规则」。判据是**用户会不会想给不同引擎配不同的值**——
+    /// 「emoji 不参与词频」在码表里成立、在拼音里就不成立是说不通的，配三遍只会漂移。
+    #[serde(default)]
+    pub frequency: FrequencyGlobal,
     /// **已废弃**：特殊模式的实例集合改由「带 `[overlay]` 段的已安装方案」定义
     /// （`EngineManager::overlay_modes`），见 `docs/redesign/overlay-mode-config.md`。
     ///
@@ -568,10 +576,31 @@ impl Default for SchemaConfig {
             mix: MixGlobal::default(),
             english: EnglishGlobal::default(),
             quick_input: QuickInputConfig::default(),
+            frequency: FrequencyGlobal::default(),
             legacy_special_modes: Vec::new(),
             mix_modes: default_mix_modes(),
         }
     }
+}
+
+/// 跨引擎的词频公共基线（[schema.frequency]）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FrequencyGlobal {
+    /// 这些 Unicode 区块的候选**不参与词频**：既不记录选中（不学习），也不受已有记录影响
+    /// （不重排）。取值为区块名（`"表情符号"`）或预设组名（`"emoji"`），
+    /// 解析见 `wind_candidate::BlockMask::from_config`。
+    ///
+    /// 出厂**为空**（＝行为与改动前完全一致）。诉求来自「emoji 在正常输入时不要参与词频
+    /// 调整」：emoji 多是一次性的点缀，被它顶到前面会把常用字挤下去，而用户下次多半又想
+    /// 打回那个字。
+    ///
+    /// ★ **空列表即关闭，故不另设 `enabled` 开关**——「开着但一个区块都没选」是个无意义
+    /// 状态，两个键就要多解释一次它们的组合（配置设计规则 R3 的「枚举当开关」同款判据）。
+    ///
+    /// ⚠️ **写端与读端必须同时照办**：只跳过记录的话，用户库里既有的 emoji 词频记录仍在
+    /// 生效，开关看起来像没反应。两端共用 `FreqSettings::excluded_from_freq` 一个判据。
+    #[serde(default)]
+    pub exclude_blocks: Vec<String>,
 }
 
 /// 全局英文配置（[schema.english]）。
