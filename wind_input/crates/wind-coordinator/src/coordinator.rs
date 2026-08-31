@@ -5675,6 +5675,33 @@ impl Coordinator {
             || rt.schema_session_vks.contains(&keymap::VK_CAPITAL)
     }
 
+    /// keyup 到达服务端时，该键的会话动作是否仍应执行。
+    ///
+    /// ★ 唯一为假的情形：CapsLock **且**钩子装着。keyup 能到服务端，本身就证明钩子那一刻
+    /// 没吃它 ⇒ 系统已经翻转了锁定态（不可撤销），此时再执行绑定动作就是「和系统抢」，
+    /// 用户看到翻页与大写同时发生。详见 `message_handler` 调用点的长注释。
+    ///
+    /// 纯函数：真装钩子的分支在 CI 的 Linux 上跑不到，判据必须能脱离平台单独验证。
+    pub(crate) fn key_up_session_action_allowed(
+        key_code: u32,
+        capslock_hook_installed: bool,
+    ) -> bool {
+        !(key_code == keymap::VK_CAPITAL && capslock_hook_installed)
+    }
+
+    /// 钩子此刻是否真的装着。
+    ///
+    /// ★ 与 [`Self::capslock_bound`] 是**两件事**：后者是「配置想不想要」，本函数是「系统里
+    /// 有没有」。安装可能失败（非 Windows、`SetWindowsHookExW` 被拒），也可能事后被系统静默
+    /// 移除。凡是要判「这个键归谁管」的地方都必须问本函数——问 `capslock_bound()` 会在钩子
+    /// 装不上时把键判给一个不存在的处理者，那正是「按了完全没反应」。
+    pub(crate) fn capslock_hook_installed(&self) -> bool {
+        self.capslock_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
     /// 按配置装/卸 CapsLock 全局钩子（启动与配置热重载时调用）。
     ///
     /// ★ 幂等：已装且仍该装 → 不动（重复 `SetWindowsHookExW` 会留下卸不掉的旧钩子）。
@@ -5682,6 +5709,12 @@ impl Coordinator {
         let want = self.capslock_bound();
         let mut slot = self.capslock_hook.lock().unwrap_or_else(|e| e.into_inner());
         if want == slot.is_some() {
+            // ★ 「没配所以没装」此前是**完全静默**的：装成功打 INFO、卸载打 INFO，唯独这条
+            // 最常见的路径一行都没有。排障时日志里搜不到任何 CapsLock 字样，无从区分
+            // 「用户没配」「配了但动词/键名写错被剔除」「装失败」——三者的处置完全不同。
+            if !want {
+                debug!("CapsLock 未配置会话态绑定，不装全局钩子（该键完全交由系统处理）");
+            }
             return;
         }
         if !want {
@@ -5726,37 +5759,47 @@ impl Coordinator {
 
     /// 钩子报告「CapsLock 被按下」（在专用消费线程执行，可安全加锁）。
     ///
-    /// 走的是与键盘路径**同一个** `apply_session_action`，故动词值域、守卫、各模式的翻页
-    /// 出口都不会分叉。钩子只负责「这个键被按了」，「按了该干什么」仍归那一张表。
+    /// 走的是与键盘 keyup 路径**同一对函数、同一顺序**，故动词值域、守卫、各模式的选中/
+    /// 翻页出口都不会分叉。钩子只负责「这个键被按了」，「按了该干什么」仍归那两张表。
     fn handle_capslock_hook_press(&self) {
-        let action = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            // 合成一个 keyup 事件：CapsLock 在键盘路径上本来就只有 keyup 到得了这里
-            // （见 `handle_session_action_key_up`），保持同形以免两条路径的守卫产生差异。
-            let data = KeyEventData {
-                key_code: keymap::VK_CAPITAL,
-                scan_code: 0,
-                modifiers: 0,
-                event_type: EVENT_KEY_UP,
-                toggles: 0,
-                event_seq: 0,
-                prev_char: 0,
-            };
-            self.apply_session_action(&mut state, &data, true)
+        // 合成一个 keyup 事件：CapsLock 在键盘路径上本来就只有 keyup 到得了服务端
+        // （见 `handle_session_action_key_up`），保持同形以免两条路径的守卫产生差异。
+        let data = KeyEventData {
+            key_code: keymap::VK_CAPITAL,
+            scan_code: 0,
+            modifiers: 0,
+            event_type: EVENT_KEY_UP,
+            toggles: 0,
+            event_seq: 0,
+            prev_char: 0,
         };
-        // 候选窗刷新已在 `apply_session_action` 内部完成（`notify_ui_update`），此处无须再推。
-        // 返回值是给 TSF 的按键结果，而钩子路径**没有 TSF 按键上下文**可回传——与既有的
-        // 全局热键路径（`handle_global_hotkey`）同一处境。
-        //
-        // ⚠️ 已知限制：`app_inline`（编码嵌入宿主）模式下，需要回写宿主内联串的结果
-        // （`UpdateComposition` / `ClearComposition`）无法送达，宿主里的编码会滞留到下一次
-        // 真实按键。翻页/高亮在候选窗模式下不受影响——那是本功能的主诉求。
+        // ★ 必须先试选词出口，顺序与 `message_handler` 的 keyup 分支逐字一致。
+        //   `apply_session_action` 对 `select_candidate:N` / `select_char:N` 一律
+        //   `return None`（它们带 overflow 语义，要落到各自的既有消费点执行），而键盘路径
+        //   上「落到既有消费点」靠的是 keydown 继续往下走——CapsLock **没有可用的 keydown**
+        //   （C++ 压根不发），钩子路径更是走完就结束，None 即终点。少了这一行的表现是
+        //   `capslock = "select_candidate:3"` 配了完全没反应：既不选词，也因为钩子照吃而
+        //   连大写都不翻。2026-08-31 修。
+        let action = self
+            .handle_select_key_up(&data)
+            .or_else(|| self.handle_session_action_key_up(&data));
+        // 候选窗刷新已在各出口内部完成（`notify_ui_update`），此处无须再推。
         match action {
             Some(KeyAction::Consumed) | None => {}
-            Some(_) => {
-                debug!(
-                    "CapsLock 钩子：该动作需回写宿主内联编码，钩子路径无法回传（app_inline 下会滞留）"
-                );
+            Some(act) => {
+                // 钩子路径**没有 TSF 按键上下文**可回传——与鼠标点选候选完全同一处境，
+                // 故复用它的既有出口 `push_no_key_ctx_action`（`UpdateComposition` / `InsertText`
+                // 经 push 通道定向投递，C++ 侧再用合成提交键在按键上下文里落地）。
+                //
+                // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
+                // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
+                let chinese_mode = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .chinese_mode;
+                debug!("CapsLock 钩子：经 push 通道投递 {:?}", act);
+                self.push_no_key_ctx_action(&act, chinese_mode);
             }
         }
     }
@@ -8989,6 +9032,128 @@ mod capslock_tests {
             !c.state.lock().unwrap().caps_lock,
             "set_caps_lock(false) 后应为 false"
         );
+    }
+
+    /// 配了 `capslock` 会话绑定的协调器（钩子在 headless 下装不上，故 slot 恒为 None）。
+    fn coord_with_capslock(verb: &str) -> Arc<Coordinator> {
+        let mut cfg = Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.input.symbol.smart_mode = false;
+        cfg.keys
+            .session_actions
+            .insert("capslock".to_string(), verb.to_string());
+        Coordinator::new_headless(cfg, None)
+    }
+
+    /// ★ 双动作修复的判据：keyup 到达即证明钩子没吃这个键。
+    ///
+    /// 回归 2026-08-31 报障「翻页与转大写同时生效，且偶发」：闸门 `SHOULD_EAT` 由服务端在
+    /// `notify_ui_update` 里置位、钩子在按键瞬间读取，中间隔着一整个 IPC 往返，
+    /// `notify_ui_hide` / `handle_focus_lost` 又会无条件归零 ⇒ 不一致的窗口无法消除。
+    /// 解法不是缩小窗口，而是让服务端一律服从钩子的结论。
+    #[test]
+    fn capslock_key_up_defers_to_hook_when_installed() {
+        // 钩子装着：CapsLock 的 keyup 不再执行会话动作（系统已经翻转，别再抢）。
+        assert!(!Coordinator::key_up_session_action_allowed(
+            keymap::VK_CAPITAL,
+            true
+        ));
+        // 钩子没装（非 Windows / 安装失败 / 用户没配）：keyup 是唯一退路，必须放行。
+        assert!(Coordinator::key_up_session_action_allowed(
+            keymap::VK_CAPITAL,
+            false
+        ));
+        // 其余 keyup-only 键与钩子无关，两种情况都放行——CapsLock 是唯一有专用拦截器的键。
+        for vk in [keymap::VK_LSHIFT, keymap::VK_RCONTROL] {
+            assert!(
+                Coordinator::key_up_session_action_allowed(vk, true),
+                "{vk:#X}"
+            );
+            assert!(
+                Coordinator::key_up_session_action_allowed(vk, false),
+                "{vk:#X}"
+            );
+        }
+    }
+
+    /// ★ 钩子漏吃那一次，状态同步分支只校准镜像，**不得**毁掉正在打的编码。
+    ///
+    /// 配了会话绑定的用户按 CapsLock 的意图不是切大写；系统的翻转撤不回，但没有理由再由
+    /// 我们把编码上屏/丢弃（`take_input_on_mode_switch`）。现象是「翻页时编码莫名没了」。
+    #[test]
+    fn capslock_state_sync_keeps_pending_input_when_bound() {
+        let c = coord_with_capslock("page_prev");
+        assert!(c.capslock_bound(), "夹具应已绑定 capslock");
+        {
+            let mut s = c.state.lock().unwrap();
+            s.input_buffer = "nihao".to_string();
+        }
+        // 无候选 ⇒ 会话动作返回 None ⇒ 落到 CapsLock 状态同步分支。
+        let mut ev = kev(0x14, EVENT_KEY_UP);
+        ev.toggles = 0x01;
+        c.handle_key_event(&ev);
+        let s = c.state.lock().unwrap();
+        assert!(s.caps_lock, "镜像仍须同步成系统的真实锁定态");
+        assert_eq!(s.input_buffer, "nihao", "绑定态下不得动输入缓冲");
+    }
+
+    /// 未绑定时保持原语义：切大写按「切英文」处置待输入（`commit_on_switch`）。
+    /// 与上一条成对——分野是「配没配」，不是「有没有会话」。
+    #[test]
+    fn capslock_state_sync_still_takes_input_when_unbound() {
+        let c = coord_cn();
+        assert!(!c.capslock_bound(), "夹具不应绑定 capslock");
+        {
+            let mut s = c.state.lock().unwrap();
+            s.input_buffer = "nihao".to_string();
+        }
+        let mut ev = kev(0x14, EVENT_KEY_UP);
+        ev.toggles = 0x01;
+        c.handle_key_event(&ev);
+        let s = c.state.lock().unwrap();
+        assert!(s.caps_lock);
+        assert!(s.input_buffer.is_empty(), "未绑定时维持既有的清空语义");
+    }
+
+    /// ★ `capslock = "select_candidate:N"` 必须走得到选词出口。
+    ///
+    /// 回归 2026-08-31 报障「CapsLock 配选第 3 候选完全无作用」：`handle_select_key_up` 的门
+    /// 曾硬编码 `VK_LSHIFT..=VK_RCONTROL`，而 CapsLock（0x14）与那四个键**不连号**，被挡在
+    /// 门外；`apply_session_action` 对选词类动词又一律 `return None`（overflow 语义归各自的
+    /// 消费点），于是两条路都是终点。
+    #[test]
+    fn capslock_select_candidate_reaches_select_key_up() {
+        let c = coord_with_capslock("select_candidate:3");
+        {
+            let mut s = c.state.lock().unwrap();
+            s.candidates = (0..5)
+                .map(|i| Candidate {
+                    text: format!("候{i}"),
+                    ..Default::default()
+                })
+                .collect();
+        }
+        let act = c.handle_select_key_up(&kev(0x14, EVENT_KEY_UP));
+        assert!(
+            act.is_some(),
+            "CapsLock 的 select_candidate 必须被选词出口接住，而不是落到大写同步"
+        );
+    }
+
+    /// 门的值域取 `is_key_up_only_vk` 这个单一真相源，不再各写一份区间。
+    /// 守卫「以后有人图省事改回 `VK_LSHIFT..=VK_RCONTROL`」——那样写没有任何报错，
+    /// 只是 CapsLock 的选词绑定重新变成死配置。
+    #[test]
+    fn select_key_up_gate_covers_all_key_up_only_vks() {
+        for vk in [
+            keymap::VK_LSHIFT,
+            keymap::VK_RSHIFT,
+            keymap::VK_LCONTROL,
+            keymap::VK_RCONTROL,
+            keymap::VK_CAPITAL,
+        ] {
+            assert!(keymap::is_key_up_only_vk(vk), "{vk:#X} 应属 keyup-only");
+        }
     }
 }
 

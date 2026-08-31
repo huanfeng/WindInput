@@ -1700,9 +1700,16 @@ impl Coordinator {
     /// 吞键而非落到切换，是为了让「有候选时按它绝不切中英文」成为无例外的规则——否则
     /// 候选恰好只有 1 个的那次会突然切走中英文，是最难复现也最恼人的一类不确定行为。
     pub(crate) fn handle_select_key_up(&self, data: &KeyEventData) -> Option<KeyAction> {
-        // 只认纯修饰键 VK（0xA0..=0xA3）。可打印选词键（`;` `'`）在 keydown 路径消费，
-        // 万一哪天 TSF 也转发它们的 keyup，不能在这里被重复选一次。
-        if !(keymap::VK_LSHIFT..=keymap::VK_RCONTROL).contains(&data.key_code) {
+        // 只认 keyup-only 键。可打印选词键（`;` `'`）在 keydown 路径消费，万一哪天 TSF
+        // 也转发它们的 keyup，不能在这里被重复选一次。
+        //
+        // ⚠️ 判据取 `is_key_up_only_vk` 而非区间 `VK_LSHIFT..=VK_RCONTROL`：CapsLock（0x14）
+        // 与那四个修饰键**不连号**，用区间写就把它漏在门外了——而 CapsLock 是这批键里唯一
+        // 连 keydown 都拿不到的（C++ 压根不发，钩子路径合成的也是 keyup）。漏掉的表现是
+        // `capslock = "select_candidate:3"` 配了完全没反应：`apply_session_action` 对选词类
+        // 动词一律 `return None`（选词带 overflow 语义，要落到各自的既有消费点执行），而
+        // CapsLock 的两条路都没有「继续往下走」，None 就是终点。见 project_modifier_key_as_function_key。
+        if !keymap::is_key_up_only_vk(data.key_code) {
             return None;
         }
         let offset = self.select_key_offset(data.key_code)?;
@@ -3458,7 +3465,7 @@ impl Coordinator {
     /// 点击选词：提交页内第 N 个候选，经 push 管道异步上屏（对齐 Go PushCommitText）。
     ///
     /// 主输入路（`active == None`）复用键盘选词的 [`Self::commit_selected`]，其返回的 KeyAction
-    /// 经 [`Self::push_mouse_action`] 翻译成 push 消息——分步提交（候选只消费缓冲前缀，如
+    /// 经 [`Self::push_no_key_ctx_action`] 翻译成 push 消息——分步提交（候选只消费缓冲前缀，如
     /// 「nihao」选「你」）由此与数字键完全一致：组合区留活、剩余码续查候选。此前鼠标独走
     /// `commit_candidate`（无条件清空缓冲），故点选分段候选会丢弃剩余编码、丢失已确认前缀段，
     /// 并把词频错记到整串码上。
@@ -3511,7 +3518,7 @@ impl Coordinator {
         // 主输入路（含辅助码）的判据，下方两处共用。
         let main_path = state.active.is_none() || state.active == Some(ModeKind::AuxCode);
         // **纯文本命令走下方 `commit_selected`**，不进本分支：其 `is_command` 守卫经
-        // `commit_command` 同步上屏产出 `InsertText`，由 `push_mouse_action` 编成
+        // `commit_command` 同步上屏产出 `InsertText`，由 `push_no_key_ctx_action` 编成
         // `CMD_COMMIT_TEXT`，宿主侧仍是「组合区活跃时提交」。走本分支则先 ClearComposition
         // 再裸插入，换行等语义随之改变（原委见 [`Self::commit_command`]）。
         // overlay 路径不在此列：它有各自的退出闭包，仍按 `overlay_commit_command` 语义异步执行。
@@ -3574,7 +3581,7 @@ impl Coordinator {
             };
             drop(state);
             // commit_selected 已按分支自行 notify_ui_update / notify_ui_hide，此处不再重复。
-            self.push_mouse_action(&act, chinese_mode);
+            self.push_no_key_ctx_action(&act, chinese_mode);
             return Some(act);
         }
         // ── 以下为 overlay 模式（active != None）路径 ──
@@ -3615,31 +3622,33 @@ impl Coordinator {
         self.mouse_select_action(page_local)
     }
 
-    /// 鼠标选词产生的 KeyAction → push 管道消息。
+    /// 无按键上下文的 KeyAction → push 管道消息。
     ///
-    /// 键盘选词把 KeyAction 交回 TSF 按键管线应答，鼠标点击没有按键上下文（不在 OnKeyDown
-    /// 的应答里），只能自行编码经 push 管道投递。仅覆盖 `commit_selected` 的两种返回：
+    /// 键盘选词把 KeyAction 交回 TSF 按键管线应答，**鼠标点击**（不在 OnKeyDown 的应答里）
+    /// 与 **CapsLock 全局钩子**（`handle_capslock_hook_press`，事件根本不经 TSF）都没有那个
+    /// 上下文，只能自行编码经 push 管道投递——两者是同一处境，故共用本函数而不是各写一份。
+    /// 仅覆盖 `commit_selected` 的两种返回：
     /// - `UpdateComposition`（分步提交 / 二级选择）→ `CMD_UPDATE_COMPOSITION`，组合区留活。
     ///   C++ 侧 IPCClient 异步 reader 与 TextService 的 `SetUpdateCompositionCallback` 自 Go 版
     ///   起就在位（注释即写 "mouse click partial confirm"），Rust 侧此前从未发过此包。
     /// - `InsertText`（整串提交）→ `CMD_COMMIT_TEXT`。
     ///
     /// 两者均带副作用，故一律 `push_commit_to_active` 定向投递（非广播），避免多个 TSF 端重复。
-    fn push_mouse_action(&self, act: &KeyAction, chinese_mode: bool) {
+    pub(crate) fn push_no_key_ctx_action(&self, act: &KeyAction, chinese_mode: bool) {
         match act {
             KeyAction::UpdateComposition { text, caret_pos } => {
                 let encoded = wind_ipc::codec::encode_update_composition(text, *caret_pos);
                 self.push_server.push_commit_to_active(&encoded);
-                debug!("mouse_select: 分步提交，组合区留活 preedit='{}'", text);
+                debug!("push_no_key_ctx: 分步提交，组合区留活 preedit='{}'", text);
             }
             KeyAction::InsertText { text, .. } => {
                 let encoded =
                     wind_ipc::codec::encode_commit_text(text, None, false, chinese_mode, false);
                 self.push_server.push_commit_to_active(&encoded);
-                debug!("mouse_select: committed '{}'", text);
+                debug!("push_no_key_ctx: committed '{}'", text);
             }
             other => {
-                debug!("mouse_select: 无需推送的 KeyAction {:?}", other);
+                debug!("push_no_key_ctx: 无需推送的 KeyAction {:?}", other);
             }
         }
     }

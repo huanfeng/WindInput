@@ -543,23 +543,53 @@ impl MessageHandler for Coordinator {
             // 「有候选选词、无候选切换」——输入到一半按 Ctrl 想选词的意图远比切中英文常见，而
             // 空闲时按 Ctrl 除了切换也没别的可做。无候选/越界时返回 None 落到下面各分支。
             //
-            // ⚠ 2026-08-10 从 CapsLock 分支**之后**上移到这里。CapsLock 永远不在
-            // `select_key_vks` 的值域里（那边只有 semicolon/quote/comma/period/lrshift/lrctrl），
-            // 故这次上移对 CapsLock 是无副作用的空转；上移的目的是让下面新增的会话态绑定
-            // 也排在选词之后，保住「选词优先」这条既有裁决。
-            if let Some(act) = self.handle_select_key_up(data) {
-                return act;
-            }
-            // 会话态绑定里的 keyup-only 键（`capslock = "page_prev"` 那类）。
+            // ⚠ 2026-08-10 从 CapsLock 分支**之后**上移到这里，目的是让下面新增的会话态
+            // 绑定也排在选词之后，保住「选词优先」这条既有裁决。
             //
-            // ★ **必须先于**下面 CapsLock 的状态同步分支：那条会调 `take_input_on_mode_switch`
-            // 把正在打的编码上屏或丢弃。配了 CapsLock 翻页的用户每翻一页就毁一次输入，
-            // 现象是「翻页时编码莫名没了」——极难联想到是大小写同步干的。
+            // ⚠️ 当时的理由「CapsLock 永远不在选词键值域里」**已经作废**：2026-08-31 起
+            // `handle_select_key_up` 的门改成 `is_key_up_only_vk`，`capslock =
+            // "select_candidate:3"` 是合法且可达的配置（此前它两条路都执行不到，配了完全
+            // 没反应）。上移本身仍然成立，但对 CapsLock 不再是空转。
             //
-            // 无候选时本函数返回 None，键照常落到下面的原有处理（CapsLock 仍切大小写、
-            // 修饰键仍切中英文）。「有会话归绑定、无会话归原语义」正是两张表的分野。
-            if let Some(act) = self.handle_session_action_key_up(data) {
-                return act;
+            // ⚠️ 2026-08-31 起 CapsLock 在钩子已装时**不走**这两条：见紧邻下方的判据。
+            //
+            // ★★ CapsLock 专属闸门：keyup 能走到这里，本身就证明**钩子那一刻没吃这个键**
+            // ——钩子吃掉时 TSF 根本收不到事件，也就转发不出来。也就是说系统已经翻转了
+            // 锁定态，而那是既成事实（锁定态在输入线程状态机里更新，位置比 TSF 早，撤不回）。
+            // 此时再执行会话动作就成了「和系统抢」：用户看到翻页与大写同时发生，且只在闸门
+            // 恰好滞后的那一瞬复现，报障形态是「偶发、回头又测不到」。
+            //
+            // 闸门滞后是**结构性**的，不是哪里写漏了：`SHOULD_EAT` 由服务端在
+            // `notify_ui_update` 里置位，而钩子读它的时刻是按键瞬间，中间隔着一整个 IPC
+            // 往返；`notify_ui_hide` 与 `handle_focus_lost` 又都会无条件归零（后者在本机
+            // 一次会话里触发上千次）。只要「吃不吃」与「做不做」分处两个时刻、读两份数据，
+            // 就永远存在不一致的窗口。故这里不试图缩小窗口，而是**把两个判据合成一个**：
+            // 吃与不吃只由钩子裁决，服务端一律服从它的结论。
+            //
+            // 钩子未安装时（非 Windows / `SetWindowsHookExW` 失败 / 用户没配）保留 keyup
+            // 这条退路——那种情况下本来就没有「钩子吃了」的语义可服从。
+            //
+            // 判定抽成纯函数（`Coordinator::key_up_session_action_allowed`）：真装钩子的分支
+            // 在 CI 的 Linux 上跑不到，判据本身必须能脱离平台直接测。
+            if Coordinator::key_up_session_action_allowed(
+                data.key_code,
+                self.capslock_hook_installed(),
+            ) {
+                if let Some(act) = self.handle_select_key_up(data) {
+                    return act;
+                }
+                // 会话态绑定里的 keyup-only 键（`capslock = "page_prev"` 那类）。
+                //
+                // ★ **必须先于**下面 CapsLock 的状态同步分支：那条会调
+                // `take_input_on_mode_switch` 把正在打的编码上屏或丢弃。配了 CapsLock 翻页
+                // 的用户每翻一页就毁一次输入，现象是「翻页时编码莫名没了」——极难联想到是
+                // 大小写同步干的。
+                //
+                // 无候选时本函数返回 None，键照常落到下面的原有处理（CapsLock 仍切大小写、
+                // 修饰键仍切中英文）。「有会话归绑定、无会话归原语义」正是两张表的分野。
+                if let Some(act) = self.handle_session_action_key_up(data) {
+                    return act;
+                }
             }
             // CapsLock 单独处理：C++ 侧总是发送此 key_up（不经 key_up_tsf_hashes 过滤），
             // 故须先于 is_toggle_mode_keycode 检查。同步真实大写锁定状态，不翻转 chinese_mode
@@ -569,6 +599,23 @@ impl MessageHandler for Coordinator {
             {
                 let caps_lock_on = (data.toggles & 0x01) != 0;
                 debug!("CapsLock state notification: on={}", caps_lock_on);
+                // ★ 配了会话绑定的用户，按 CapsLock 的意图**不是**切大写。走到这里说明钩子
+                // 没拦住、系统已经翻了锁定态——那部分撤不回，但不该再由我们连带把正在打的
+                // 编码上屏/丢弃（`take_input_on_mode_switch` + `notify_ui_hide` 干的事）。
+                // 只同步镜像即可：镜像准确是 `cancel_on_mode_switch` 等下游判据的前提。
+                //
+                // 判据复用 `capslock_bound()`（装钩子用的同一张编译后绑定表），不另写一份
+                // ——两份判据必然漂移，而漂移的表现是「有时毁输入有时不毁」。
+                if self.capslock_bound() {
+                    {
+                        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                        s.caps_lock = caps_lock_on;
+                    }
+                    self.push_state_update();
+                    self.show_status();
+                    self.notify_toolbar();
+                    return KeyAction::StatusUpdate(self.build_status());
+                }
                 let had_pending = {
                     let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     !s.input_buffer.is_empty()
