@@ -973,6 +973,7 @@ impl Default for PinyinGlobalConfig {
 /// - `""` / `"none"`：z 是普通编码字母（默认）
 /// - `"temp_pinyin"`：进临时拼音
 /// - `"temp_english"`：进临时英文
+/// - `"rare_char"`：进生僻字模式（当前方案的编码，候选只留生僻字）
 /// - `"mix:<id>"`：进指定融合模式（`mix:quick_mix` = 内置「快捷」）
 /// - `"special:<id>"`：进指定特殊模式
 /// - `"toggle_schema:<id>"`：切到指定方案，再按回来
@@ -990,6 +991,10 @@ pub enum BoundAction {
     TempEnglish,
     /// 进辅助码模式（拼音候选字形二次筛选；仅组码中有效）。
     AuxCode,
+    /// 进生僻字模式：用当前活跃方案的编码输入，候选只留生僻字。
+    ///
+    /// 无载荷——它是单例，不像 [`Self::Special`] 那样一个引导键对应一份码表方案。
+    RareChar,
     /// 进指定融合模式（携带实例 id）。
     Mix(String),
     /// 进指定特殊模式（携带实例 id）。
@@ -1122,6 +1127,7 @@ impl BoundAction {
             "temp_pinyin" => Self::TempPinyin,
             "temp_english" => Self::TempEnglish,
             "aux_code" => Self::AuxCode,
+            "rare_char" => Self::RareChar,
             "softkeyboard" => Self::SoftKeyboard(None),
             a if Self::DISPATCH_ACTIONS.contains(&a) => Self::Action(a.to_string()),
             _ => Self::None,
@@ -9110,5 +9116,18 @@ smart_method = "delete_replace"
         let d = ToolbarConfig::default();
         assert!(!d.auto_hide);
         assert_eq!(d.auto_hide_delay, 5);
+    }
+
+    /// `rare_char` 必须解析成生僻字模式，且**未知动词仍回落 None**。
+    ///
+    /// 后半条不是凑数：`BoundAction::parse` 的契约是「未知值一律 None，不静默变成别的
+    /// 功能」。新增一个动词时最容易破坏的正是这条——比如顺手写成前缀匹配，
+    /// 于是 `rare_char_xxx` 也进了生僻字模式。
+    #[test]
+    fn rare_char_bound_action_parses() {
+        assert_eq!(BoundAction::parse("rare_char"), BoundAction::RareChar);
+        assert_eq!(BoundAction::parse("rare_charx"), BoundAction::None);
+        assert_eq!(BoundAction::parse("rare"), BoundAction::None);
+        assert_eq!(BoundAction::parse(""), BoundAction::None);
     }
 }

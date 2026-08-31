@@ -394,7 +394,13 @@ impl crate::Coordinator {
         //
         // ⚠️ 必须按模式分派：主路径的 `update_candidates` 读 `input_buffer`，特殊模式下它
         // 恒为空——走错分支的后果不是「不刷新」而是候选窗当场清空。
-        if matches!(state.active, Some(crate::pipeline::ModeKind::Special(_))) {
+        // 生僻字模式一并走这支：它的编码同样在 `special_buffer`，漏掉就会落进 else 的
+        // `update_candidates`（读恒空的 `input_buffer`）⇒ 用户刚把一个字设成常用，
+        // 候选窗当场清空。而这恰恰是生僻字模式里最常做的操作。
+        if matches!(
+            state.active,
+            Some(crate::pipeline::ModeKind::Special(_)) | Some(crate::pipeline::ModeKind::RareChar)
+        ) {
             // 返回值是「全码策略请求自动上屏」的意向，此处刻意丢弃：编码一个字没变，
             // 用户只是在标记字的常用性，凭空上屏是错的。
             let _ = self.update_special_candidates(state);

@@ -106,6 +106,9 @@ impl Coordinator {
                 (!state.temp_pinyin_schema.is_empty()).then(|| state.temp_pinyin_schema.clone())
             }
             Some(ModeKind::Special(idx)) => self.special_schema(idx),
+            // ★ 生僻字模式与 special 的引擎差异**只有这一行**：它没有自带码表，用的就是
+            // 当前活跃方案——「使用当前的方案进行编码输入」这条需求在实现上落到这里。
+            Some(ModeKind::RareChar) => Some(self.engine_mgr.active_schema_id()),
             Some(ModeKind::TempEnglish) => self
                 .rt()
                 .config
@@ -436,6 +439,8 @@ impl Coordinator {
                 }
                 Some(self.commit_and_enter_special_mode(state, idx, key_code))
             }
+            // 生僻字模式：顶字重开（用户 2026-08-31 选定），与临拼/快符/mix 一致。
+            BoundAction::RareChar => Some(self.commit_and_enter_rare_char_mode(state, key_code)),
             // A/C 类不建 overlay，「顶字再进」这套对它们没有意义；且目标函数自加锁，
             // 本函数持锁。两类都在锁外的专用分派点执行，见 `enter_bound_action` 的同名分支。
             //
@@ -1001,6 +1006,10 @@ impl Coordinator {
             }
             ModeKind::TempEnglish => Some(("临时英文".to_string(), "英".to_string())),
             ModeKind::Url => Some(("网址输入".to_string(), "网址".to_string())),
+            // 生僻字模式：名字写死而不像 special 那样从方案取——它没有宿主方案可取名，
+            // 是单例。指示必须有：这个模式下候选被大幅收窄，用户不知道自己在里面的话，
+            // 「怎么一个字都打不出来」无从解释（模式本身就允许候选为空）。
+            ModeKind::RareChar => Some(("生僻字".to_string(), "僻".to_string())),
             ModeKind::Mix(i) => {
                 let (full, short) = {
                     let rt = self.rt();

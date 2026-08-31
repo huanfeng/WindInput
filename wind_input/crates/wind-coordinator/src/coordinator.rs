@@ -3761,7 +3761,7 @@ impl Coordinator {
             Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
             Some(ModeKind::TempEnglish) => self.exit_temp_english(state),
             Some(ModeKind::Url) => self.exit_url_mode(state),
-            Some(ModeKind::Special(_)) => self.exit_special_mode(state),
+            Some(ModeKind::Special(_)) | Some(ModeKind::RareChar) => self.exit_special_mode(state),
             Some(ModeKind::Mix(_)) => self.exit_mix_mode(state),
             // ★ 辅助码要**两步**：`exit_aux_code` 是本仓唯一一个「退出后主组合仍存活」的
             // 退出函数——它按设计还原拼音候选与 preedit（辅助码只是筛选，Esc 的语义是

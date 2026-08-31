@@ -597,6 +597,12 @@ impl Coordinator {
                 debug!("key_action: entering special idx={}", idx);
                 Some(self.enter_special_mode(state, idx, key_code))
             }
+            // 生僻字模式：用的就是当前活跃方案，无需 `ensure_schema` 门卫——那个方案此刻
+            // 正在被用来打字，必然已加载。
+            BoundAction::RareChar => {
+                debug!("key_action: entering rare-char mode");
+                Some(self.enter_rare_char_mode(state, key_code))
+            }
             // C 类**不在这里执行**，见 [`Self::run_toggle_schema_action`]。
             //
             // 本函数的契约是「调用方持 `State` 锁」，而 `toggle_schema_by_id` 要走

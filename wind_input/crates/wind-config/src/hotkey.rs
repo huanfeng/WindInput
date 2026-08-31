@@ -53,6 +53,16 @@ pub(crate) fn hotkey_action_entry(action: &str) -> Option<(String, u32)> {
             HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
         ));
     }
+    // 生僻字模式：策略位与 `special:` 完全一致——同样是「进 overlay 只在中文输入中途有
+    // 意义」，同样需要 GLOBAL 穿透 Chromium 类宿主的同名加速键。动词做一次映射
+    // （`rare_char` → `enter_rare_char`），理由同 `special:`：引导键通路与热键分发端
+    // 认的是两个不同的串。
+    if action == "rare_char" {
+        return Some((
+            "enter_rare_char".to_string(),
+            HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
+        ));
+    }
     // 软键盘：**不带 `CHINESE_ONLY`**。
     //
     // 面板画的是「键位 → 符号」的映射，跟当前是中文还是英文模式没有关系——用户在英文态
@@ -1548,5 +1558,32 @@ mod tests {
             .find(|e| (e.match_hash & 0xFFFF) == VK_RSHIFT)
             .expect("rshift 应进 key_up 转发集");
         assert_eq!(up.action, "schema_bound");
+    }
+
+    /// 生僻字模式直达热键：`rare_char` 编成分发端认的 `enter_rare_char`，
+    /// 策略位与 `special:` 一致（CHINESE_ONLY | GLOBAL）。
+    ///
+    /// GLOBAL 那半不是可选的：少了它，QQNT / Tabby 这类 Chromium 宿主会用自己的同名
+    /// 加速键把这个组合吃掉，用户只在部分程序里按不出来——最难归因的一类问题。
+    #[test]
+    fn rare_char_hotkey_compiles_with_global_policy() {
+        let mut cfg = Config::default();
+        cfg.keys
+            .key_actions
+            .insert("ctrl+shift+r".to_string(), "rare_char".to_string());
+        let compiled = Compiler::new(cfg).compile();
+        let e = compiled
+            .key_down
+            .iter()
+            .find(|e| e.action == "enter_rare_char")
+            .expect("key_actions 的 rare_char 应编出 enter_rare_char");
+        assert!(
+            e.tsf_hash & HOTKEY_POLICY_GLOBAL != 0,
+            "须带 GLOBAL，否则 Chromium 类宿主会吃掉它"
+        );
+        assert!(
+            e.tsf_hash & HOTKEY_POLICY_CHINESE_ONLY != 0,
+            "进 overlay 只在中文输入中途有意义"
+        );
     }
 }
