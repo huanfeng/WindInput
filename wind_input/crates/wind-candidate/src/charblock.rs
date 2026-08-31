@@ -59,7 +59,7 @@ impl CharBlock {
 
 /// 落在本表之外的字符统一归到这里。`start > end` 是刻意的**空区间**：批量操作拿它去圈
 /// 范围会得到零个字符，天然拦住「把一堆互不相干的字符当成一类批量处理」。
-const OTHER: CharBlock = CharBlock {
+pub(crate) const OTHER: CharBlock = CharBlock {
     name: "其它",
     start: 1,
     end: 0,

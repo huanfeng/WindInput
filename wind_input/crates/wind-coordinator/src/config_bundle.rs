@@ -79,6 +79,12 @@ pub(crate) struct ConfigBundle {
     /// 取值就成了「切方案反复装卸」。同 `schema_bound_modifier_vks` 那条理由，只是它
     /// 落在 Rust 侧而非 C++ 边界。
     pub(crate) schema_session_vks: std::collections::BTreeSet<u32>,
+    /// 生僻字模式额外纳入的区块（预解析自 `input.rare_char.include_blocks`）。
+    ///
+    /// 与 `jump_out_keys` / `custom_en_punct_chars` 同族：**在这里解析而不是在消费点**，
+    /// 因为消费点（`retain_rare_admitted`）在候选刷新路径上，而解析要按名字线性查块表、
+    /// 还要把拼错的名字 warn 出来——那种 warn 放在热路径上会刷屏。
+    pub(crate) rare_char_blocks: wind_candidate::BlockMask,
 }
 
 /// 所有方案 `[key_actions]` 里绑过的纯修饰键 VK（并集）。
@@ -301,6 +307,17 @@ impl ConfigBundle {
         // 预编译放在 `normalize()` 之后：`trigger_keys` 收编等存量迁移会往 `key_actions`
         // 折算，早于迁移编译就会漏掉那批键。
         let key_resolver = crate::key_resolver::KeyResolver::build(&config);
+        // 拼错的区块名 warn 后跳过，不让整份列表失效（同 schema.frequency.exclude_blocks）。
+        // 「表情符號」这种繁简混写肉眼极难分辨，静默跳过的表现就是「配了没反应」。
+        let (rare_char_blocks, unknown_blocks) =
+            wind_candidate::BlockMask::from_config(&config.input.rare_char.include_blocks);
+        if !unknown_blocks.is_empty() {
+            tracing::warn!(
+                "input.rare_char.include_blocks 有 {} 个名字不认识、已跳过: {}（应为区块名、\"其它\" 或预设组名 emoji）",
+                unknown_blocks.len(),
+                unknown_blocks.join("、")
+            );
+        }
         Self {
             config,
             compiled_hotkeys,
@@ -312,6 +329,7 @@ impl ConfigBundle {
             custom_en_punct_chars,
             key_resolver,
             schema_session_vks,
+            rare_char_blocks,
         }
     }
 }

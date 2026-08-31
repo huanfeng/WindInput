@@ -19,7 +19,7 @@
 //! 压成一次移位加一次与运算，且 [`BlockMask`] 是 `Copy` 的，取用时不必克隆、不必借用
 //! 配置。配置解析只在装载期做一次。
 
-use crate::charblock::{BLOCKS, block_index_of};
+use crate::charblock::{BLOCKS, OTHER, block_index_of};
 
 /// 一组 Unicode 块的位集，按 [`BLOCKS`] 的下标建位。
 ///
@@ -34,9 +34,17 @@ pub struct BlockMask(u64);
 /// 溢出时的两条出路：把 [`BlockMask`] 换成 `u128`（表示层改一处，判定成本几乎不变），
 /// 或合并相邻的细碎块（会改变类型列的显示粒度，须一并确认界面）。
 const _: () = assert!(
-    BLOCKS.len() <= 64,
-    "块表超出 BlockMask 的位宽：改用 u128，或合并相邻块"
+    BLOCKS.len() < 64,
+    "块表超出 BlockMask 的位宽：改用 u128，或合并相邻块（最高位留给「其它」兜底档）"
 );
+
+/// 「其它」兜底档占用的位——[`OTHER`] 不在 [`BLOCKS`] 里（它是块表**之外**的一切），
+/// 没有下标可用，故单独占最高位。位宽断言因此是 `< 64` 而不是 `<= 64`。
+///
+/// ★ 这一档存在的理由：块表逐块列举一份仍在增长的 Unicode 区间，新版本的新块必然落进
+/// 「其它」。对**准入**类消费者（生僻字模式）而言，漏一块 = 那批字打不出——不安全的
+/// 方向。给出这一档，新块就落进一个用户控制得到的开关，而不是静默消失。
+const OTHER_BIT: u64 = 1 << 63;
 
 /// 预设组：**跨块**的命名集合。
 ///
@@ -103,6 +111,13 @@ impl BlockMask {
 
     /// 按块名置位；块名不存在返回 false（调用方据此收集未识别项）。
     fn insert_block_named(&mut self, name: &str) -> bool {
+        // 「其它」不在块表里，单独占最高位（见 OTHER_BIT）。名字取自 `charblock::OTHER`
+        // 而不是写死字面量——两处各写一份的话，块表那边改了显示名，这里就静默失配，
+        // 表现为配置里那一行「拼错了」。
+        if name == OTHER.name {
+            self.0 |= OTHER_BIT;
+            return true;
+        }
         match BLOCKS.iter().position(|b| b.name == name) {
             Some(i) => {
                 self.0 |= 1u64 << i;
@@ -116,7 +131,8 @@ impl BlockMask {
     pub fn contains_char(&self, ch: char) -> bool {
         match block_index_of(ch) {
             Some(i) => self.0 & (1u64 << i) != 0,
-            None => false,
+            // 块表之外的字符 ⇒ 归「其它」，只有显式配了这一档才算命中。
+            None => self.0 & OTHER_BIT != 0,
         }
     }
 
@@ -352,5 +368,38 @@ mod tests {
             assert!(rare_admits(s, &cc, emoji), "{s} 是一个字素簇，应算单字");
         }
         assert!(!rare_admits("😀😀", &cc, emoji), "两个字素簇不算单字");
+    }
+
+    /// ★ 「其它」兜底档：块表**之外**的字符只有显式配了这一档才命中。
+    ///
+    /// 存在理由是准入类消费者的失败方向不安全——块表逐块列举一份仍在增长的 Unicode 区间，
+    /// 新版本的新块必然落进「其它」。没有这一档的话，那批字在生僻字模式里直接打不出，
+    /// 而用户和代码都看不出发生了什么。
+    #[test]
+    fn other_bucket_catches_chars_outside_the_table() {
+        // U+0700（叙利亚字母）不在块表内 —— 用它代表「本程序还不认识的区块」。
+        let outside = '\u{0700}';
+        assert_eq!(crate::block_of(outside).name, "其它", "样本须真的落在表外");
+
+        let (none, _) = BlockMask::from_config::<&str>(&[]);
+        assert!(!none.contains_char(outside), "不配「其它」时不该命中");
+
+        let (other, unknown) = BlockMask::from_config(&["其它"]);
+        assert!(unknown.is_empty(), "「其它」必须被认作合法档位而非拼错");
+        assert!(other.contains_char(outside), "配了就该命中");
+
+        // 表内字符不会被「其它」捞走——两者是互补的，不是叠加的。
+        assert!(!other.contains_char('我'), "基本汉字在表内，不归其它");
+        assert!(!other.contains_char('😀'), "表情符号在表内，不归其它");
+    }
+
+    /// 「其它」与具名区块可以同时配，互不干扰。
+    #[test]
+    fn other_bucket_composes_with_named_blocks() {
+        let (m, unknown) = BlockMask::from_config(&["emoji", "其它"]);
+        assert!(unknown.is_empty());
+        assert!(m.contains_char('😀'), "具名组照常生效");
+        assert!(m.contains_char('\u{0700}'), "兜底档同时生效");
+        assert!(!m.contains_char('我'));
     }
 }

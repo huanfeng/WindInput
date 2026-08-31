@@ -317,6 +317,9 @@ static REGISTRY: &[ConfigField] = &[
     ),
     f("input.url.enabled", Bool),
     f("input.url.prefixes", StrList),
+    // 生僻字模式额外纳入的区块（区块名或预设组名）。进入方式在 keys.key_actions，
+    // 本段刻意没有 enabled / trigger_keys——不绑键即进不去，见 `RareCharConfig`。
+    f("input.rare_char.include_blocks", StrList),
     f("input.url.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
     f(
         "input.add_word.candidate_layout",

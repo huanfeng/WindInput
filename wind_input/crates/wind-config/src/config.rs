@@ -2598,6 +2598,9 @@ pub struct InputConfig {
     /// 临时拼音（码表方案下临时切到拼音反查）。
     #[serde(default)]
     pub temp_pinyin: TempPinyinConfig,
+    /// 生僻字模式（用当前方案的编码输入，候选只留生僻字）。
+    #[serde(default)]
+    pub rare_char: RareCharConfig,
     /// 网址输入模式。
     #[serde(default)]
     pub url: UrlConfig,
@@ -2637,6 +2640,7 @@ impl Default for InputConfig {
             temp_english: TempEnglishConfig::default(),
             capslock: CapslockConfig::default(),
             temp_pinyin: TempPinyinConfig::default(),
+            rare_char: RareCharConfig::default(),
             url: UrlConfig::default(),
             add_word: AddWordConfig::default(),
             s2t: S2TConfig::default(),
@@ -2948,6 +2952,31 @@ impl Default for TempEnglishConfig {
 pub struct CapslockConfig {
     #[serde(default)]
     pub cancel_on_mode_switch: bool,
+}
+
+/// 生僻字模式配置（[input.rare_char]）。
+///
+/// ⚠️ **没有 `enabled`、也没有 `trigger_keys`**：进入方式统一由 `keys.key_actions`
+/// （全局）与方案文件 `[key_actions]`（按源方案分流）两张现成的表承载，动词是
+/// `"rare_char"`。在这里再开一个入口字段就是第三个真相源，正是 overlay-mode-config
+/// 那一轮重构要消除的东西。不绑任何键 ＝ 这个模式进不去 ＝ 关闭。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RareCharConfig {
+    /// **额外**纳入本模式的 Unicode 区块（区块名或预设组名，如 `"emoji"`）。
+    ///
+    /// 生僻汉字本来就在（判据见 `wind_candidate::rare_admits`），本项管的是那些
+    /// **默认字表管不着**的字符：emoji、注音符号、假名、间架结构符。它们的
+    /// `is_string_common` 恒为 true（语义是「忽略」而非「常用」），不显式纳入就永远
+    /// 进不来——这正是本项存在的理由。
+    ///
+    /// 出厂为空 ＝ 只出生僻汉字。
+    ///
+    /// ★ **「其它」是一个可选的兜底档**：区块表是显示域的表，逐块列举一份仍在增长的
+    /// Unicode 区间，新版本的新块会落进「其它」。对本项而言漏一块的后果是「那批字在
+    /// 这个模式里打不出」——不安全的方向，故给出这个兜底档，让新块落进一个用户控制得
+    /// 到的开关里，而不是静默消失。判据表见 `wind_candidate::charblock` 模块头。
+    #[serde(default)]
+    pub include_blocks: Vec<String>,
 }
 
 /// 临时拼音配置（[input.temp_pinyin]）。码表方案下临时切到拼音反查。全局唯一。

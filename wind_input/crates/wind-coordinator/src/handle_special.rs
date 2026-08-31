@@ -177,6 +177,11 @@ impl Coordinator {
         }
     }
 
+    /// 生僻字模式额外纳入的区块（`input.rare_char.include_blocks` 的解析结果）。
+    fn rare_char_blocks(&self) -> wind_candidate::BlockMask {
+        self.rt().rare_char_blocks
+    }
+
     /// 对当前候选施加生僻字准入（仅生僻字模式；其余模式为空操作）。
     fn apply_rare_admission(&self, state: &mut State) {
         if !matches!(state.active, Some(ModeKind::RareChar)) {
@@ -198,7 +203,9 @@ impl Coordinator {
         if cc.is_empty() {
             return;
         }
-        let extra = wind_candidate::BlockMask::EMPTY;
+        // 额外纳入的区块（`input.rare_char.include_blocks`）。解析结果取自 `rt()` 的镜像，
+        // 与词频那份一样在装载期算好——本函数在每次按键的候选刷新路径上。
+        let extra = self.rare_char_blocks();
         candidates.retain(|c| wind_candidate::rare_admits(&c.text, &cc, extra));
     }
 
@@ -815,6 +822,57 @@ mod tests {
             assert_eq!(st.active, None);
             assert!(st.special_buffer.is_empty());
             assert!(st.preedit.is_empty());
+        }
+
+        /// ★ 配置真的走到了判据。
+        ///
+        /// 本仓的经典失效形态是「配置四层就位、消费点却在不可达的调用点上」——开关配了
+        /// 毫无反应，且没有任何报错。这条测试从**配置**出发一路走到**候选列表**，
+        /// 中间任何一环断掉都会红：
+        /// `input.rare_char.include_blocks` → ConfigBundle 预解析 → `rare_char_blocks()`
+        /// → `rare_admits` 的 extra 参数。
+        #[test]
+        fn include_blocks_config_reaches_the_verdict() {
+            let mut cfg = Config::default();
+            cfg.input.rare_char.include_blocks = vec!["emoji".to_string()];
+            let c = Coordinator::new_headless(cfg, None);
+            // 常用字表必须非空，否则 `retain_rare_admitted` 走「表未加载」那条早退。
+            set_common(&c, ['我', '你', '好']);
+
+            let mut cands = vec![
+                cand("我"),   // 常用汉字 → 滤掉
+                cand("龘"),   // 生僻汉字 → 留下
+                cand("😀"),   // 域外字符，靠 include_blocks 纳入 → 留下
+                cand("ㄅ"),   // 域外字符，没配它那一档 → 滤掉
+                cand("你好"), // 多字词 → 滤掉
+            ];
+            c.retain_rare_admitted(&mut cands);
+            let got: Vec<&str> = cands.iter().map(|c| c.text.as_str()).collect();
+            assert_eq!(got, vec!["龘", "😀"], "配置未生效或判据接错");
+        }
+
+        /// 不配 include_blocks 时 emoji 进不来（与上一条互为对照，锁住「是配置起的作用」）。
+        #[test]
+        fn without_include_blocks_emoji_stays_out() {
+            let c = coord();
+            set_common(&c, ['我']);
+            let mut cands = vec![cand("龘"), cand("😀")];
+            c.retain_rare_admitted(&mut cands);
+            let got: Vec<&str> = cands.iter().map(|c| c.text.as_str()).collect();
+            assert_eq!(got, vec!["龘"], "没配区块时域外字符不该进来");
+        }
+
+        /// 装一份最小常用字表。`retain_rare_admitted` 对空表整条早退（见那条测试），
+        /// 故凡要验过滤结果的用例都得先装表。
+        fn set_common(c: &Coordinator, chars: impl IntoIterator<Item = char>) {
+            *c.common_chars.write().unwrap() = wind_candidate::CommonChars::from_base(chars);
+        }
+
+        fn cand(text: &str) -> wind_candidate::Candidate {
+            wind_candidate::Candidate {
+                text: text.to_string(),
+                ..Default::default()
+            }
         }
 
         /// ★ 常用字表未加载时**整条不过滤**，而不是放行全部。
