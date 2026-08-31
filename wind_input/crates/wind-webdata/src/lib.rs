@@ -3141,7 +3141,22 @@ pub trait WebDataRpc: WebDataHost {
         let file = target.join("theme.toml");
         let existed_before = file.exists();
         if existed_before && !force {
-            anyhow::bail!("主题已存在（force=false）: {}", meta.name);
+            // 「同名已存在」是**可预期的业务性失败**，客户端拿它去弹「是否覆盖」再以
+            // force=true 重推，因此走 result 字段而非 error 通道——同 dispatch 里
+            // 「逐键错误不是 RPC 错误」的取舍。error 通道只有一个 String，客户端只能
+            // 靠匹配文案来认冲突，改一次文案，设置端的覆盖确认就会静默退化成一条普通
+            // 报错（没有任何测试或编译期检查看得见这种耦合）。`conflict` 是机器可读的
+            // 稳定判据。
+            //
+            // 旧设置端只认 ok/slug/display_name，会把这里显示成「主题导入失败」——
+            // 文案不如从前，但它本来就没有覆盖能力，走哪条通道都只能失败。
+            return Ok(json!({
+                "ok": false,
+                "conflict": true,
+                "slug": theme_id,
+                "display_name": meta.name,
+                "error": format!("主题「{}」已存在", meta.name),
+            }));
         }
         // 覆盖已存在主题前备份原文本，供依赖链校验失败时回滚。
         let backup = if existed_before {
@@ -3485,6 +3500,7 @@ fn keys_overview_of(cfg: &wind_config::Config, schema_cfg: &Value) -> (Vec<Value
                 let one = wind_config::config::ConfigDegradation {
                     sections: vec![(*s).clone()],
                     total_fallback: false,
+                    unparsable: Vec::new(),
                 };
                 tainted
                     .iter()
@@ -7615,6 +7631,7 @@ short_code_yield_level = 2
         cfg.degradation = wind_config::config::ConfigDegradation {
             sections: vec!["keys.key_actions".into()],
             total_fallback: false,
+            unparsable: Vec::new(),
         };
         let (rows, marker) = keys_overview_of(&cfg, &schema_cfg);
 
@@ -7646,6 +7663,7 @@ short_code_yield_level = 2
         cfg.degradation = wind_config::config::ConfigDegradation {
             sections: Vec::new(),
             total_fallback: true,
+            unparsable: Vec::new(),
         };
         let (rows, marker) = keys_overview_of(&cfg, &schema_cfg);
         assert!(
@@ -7699,6 +7717,7 @@ short_code_yield_level = 2
             cfg.degradation = wind_config::config::ConfigDegradation {
                 sections: vec![src.into()],
                 total_fallback: false,
+                unparsable: Vec::new(),
             };
             let (rows, marker) = keys_overview_of(&cfg, &schema_cfg);
             assert!(
@@ -7730,6 +7749,7 @@ short_code_yield_level = 2
             // 一条相关（导致 lead 表不可信）、两条无关。
             sections: vec!["keys.key_actions".into(), "ui.font".into(), "schema".into()],
             total_fallback: false,
+            unparsable: Vec::new(),
         };
 
         let (_, marker) = keys_overview_of(&cfg, &schema_cfg);
