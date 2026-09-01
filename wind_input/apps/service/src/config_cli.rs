@@ -224,9 +224,11 @@ fn print_key_origin(key: &str) {
         // 措辞刻意是**条件式**的（「若……则」），不是断言：本函数无从知道被跳过的那几行
         // 里写的是哪些键——救回来的 Value 里，「被跳过的键」与「从未写过的键」完全同形。
         println!(
+            // 「修好那一行」在「整个文件都不是 TOML」的情形下不成立（那时没有「那一行」），
+            // 故用通用措辞。同一句要覆盖两种形态：跳过几行 vs 整份没加载。
             "\n⚠ 配置文件语法不合法：{err}\n\
-             \x20 若本键正写在被跳过的行里，则它本次没有生效；上面的「来源」按救回的\n\
-             \x20 内容判定，不受影响的键照常生效。修好那一行即可完全恢复。\n\
+             \x20 若本键正写在未能解析的行里，则它本次没有生效；上面的「来源」按救回的\n\
+             \x20 内容判定，不受影响的键照常生效。修好语法即可完全恢复。\n\
              \x20 在此期间程序不会覆盖该文件（写回已被拦下），设置页保存时会先备份原件。"
         );
     } else if origin.degraded {
@@ -294,17 +296,26 @@ fn cmd_export() -> i32 {
             // 语法故障先讲：它的修法（去改那一行）与段级降级（去改那个键的类型）不同，
             // 共用一句「段解析失败」会把用户支去翻一个语法上根本没问题的段。
             if let Some(u) = cfg.degradation.unparsable.first() {
+                // 「只加载了可解析的部分」与「一个字都没加载」是两种情形，判据是
+                // `is_salvaged()` 而**不是** `skipped_lines` 非空——啃到上限仍失败时
+                // 两者同时成立（同一处判据本轮曾在四个地方各写错一遍）。
                 eprintln!(
-                    "拒绝导出：配置文件语法不合法，本次只加载了其中可解析的部分，\
-                     导出的内容不是你的真实配置。"
+                    "拒绝导出：{}，导出的内容不是你的真实配置。",
+                    if u.is_salvaged() {
+                        "配置文件语法不合法，本次只加载了其中可解析的部分"
+                    } else {
+                        "配置文件语法不合法，本次一个键都没能加载"
+                    }
                 );
                 eprintln!("  文件：{}", u.path.display());
-                if u.skipped_lines.is_empty() {
-                    eprintln!("  本次完全未能加载该文件");
-                } else {
-                    let lines: Vec<String> =
-                        u.skipped_lines.iter().map(|n| n.to_string()).collect();
-                    eprintln!("  已跳过的行：{}", lines.join(", "));
+                if !u.skipped_lines.is_empty() {
+                    let verb = if u.is_salvaged() {
+                        "已跳过"
+                    } else {
+                        "已尝试跳过（仍无法解析）"
+                    };
+                    // 紧凑形态：啃不动的文件会攒到 32 个行号。量词在 lines_phrase 里。
+                    eprintln!("  {verb}：{}", u.lines_phrase());
                 }
                 if !u.error.is_empty() {
                     eprintln!("  首个错误：{}", u.error);

@@ -3476,13 +3476,17 @@ impl Coordinator {
         let Some(u) = rt.config.degradation.unparsable.first() else {
             return false;
         };
-        let text = if u.skipped_lines.is_empty() {
-            format!("配置文件语法错误，本次未能加载\n{}", u.path.display())
+        // ★ 判据是 `is_salvaged()`，不是 `skipped_lines` 非空——「跳过了几行」不等于
+        // 「救回来了」，啃到上限仍失败时两者同时成立。用后者会在一个字都没加载的时候
+        // 报「该行设置未生效」，暗示其余还在，而实际整份都没生效。
+        // 行号走 `lines_phrase()`：紧凑（啃不动的文件会攒到 32 个行号，全列进 toast
+        // 会把版面撑爆）且自带量词——模板里再拼「第 {} 行」会拼出「等 32 处 行」的语病。
+        let text = if !u.is_salvaged() {
+            format!("配置文件语法错误，本次全部未生效\n{}", u.path.display())
         } else {
-            let lines: Vec<String> = u.skipped_lines.iter().map(|n| n.to_string()).collect();
             format!(
-                "配置文件第 {} 行语法错误，该行设置未生效\n{}",
-                lines.join("、"),
+                "配置文件{}语法错误，相应设置未生效\n{}",
+                u.lines_phrase(),
                 u.path.display()
             )
         };

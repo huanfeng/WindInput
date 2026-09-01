@@ -369,23 +369,69 @@ pub struct UnparsableLayer {
     pub salvaged_keys: usize,
 }
 
+/// 文案里最多列出几个行号，其余折叠成计数。
+///
+/// 实跑定的：一份完全不是 TOML 的文件（编码错乱、被别的文件覆盖）会一路啃到
+/// [`LENIENT_MAX_SKIPS`]，于是 32 个行号全列进 toast 和设置页横幅——撑爆版面，
+/// 而且那种情形下具体是哪几行本来就没意义（整份都没加载）。
+const LINES_LISTED_MAX: usize = 6;
+
 impl UnparsableLayer {
     /// 是否救回了内容（哪怕只有一个键）。
     pub fn is_salvaged(&self) -> bool {
         self.salvaged_keys > 0
     }
 
+    /// 行号**短语**（含「第…行」），最多列 [`LINES_LISTED_MAX`] 个，其余折叠成「等 N 处」。
+    /// 无行号时返回空串。
+    ///
+    /// ★ 连「第…行」一起给，而不是只给数字列表：调用方各自拼 `"第 {} 行"` 的话，
+    /// 折叠形态会拼出「第 1、2、3… 等 32 处 **行**」这种语病（实跑撞到过）。
+    /// 量词跟着内容走，别留给模板。
+    ///
+    /// 供 core 内所有文案（`describe`、toast、CLI）共用。跨仓的设置端另有一份等价实现
+    /// ——那边拿到的是 JSON 数组，共用不了这段代码，但截断阈值须保持一致。
+    pub fn lines_phrase(&self) -> String {
+        if self.skipped_lines.is_empty() {
+            return String::new();
+        }
+        let n = self.skipped_lines.len();
+        let listed: Vec<String> = self
+            .skipped_lines
+            .iter()
+            .take(LINES_LISTED_MAX)
+            .map(|x| x.to_string())
+            .collect();
+        if n > LINES_LISTED_MAX {
+            format!("第 {} 行等 {n} 处", listed.join("、"))
+        } else {
+            format!("第 {} 行", listed.join("、"))
+        }
+    }
+
     /// 给用户看的一句话：哪个文件、丢了哪几行。
     ///
     /// 行号用 1-based 并且**列出具体行**——「配置有语法错误」这种说法用户无从下手，
     /// 「第 6 行」他能直接跳过去改。
+    ///
+    /// ★ 判据是 [`Self::is_salvaged`]，**不是** `skipped_lines` 非空。
+    /// 「跳过了几行」与「救回来了」是两件事：啃到 [`LENIENT_MAX_SKIPS`] 仍失败时
+    /// 两者同时成立，而那时说「加载其余内容」是在撒谎——一个字都没加载。
     pub fn describe(&self) -> String {
         let file = self.path.display();
-        if self.skipped_lines.is_empty() {
-            return format!("{file}：语法错误，本次未能加载");
+        if !self.is_salvaged() {
+            // 尝试过的行号仍要给（用户拿它去看那几行怎么了），但走紧凑形态：
+            // 啃不动的文件会攒到 32 个行号，全列出来只是噪音。
+            return if self.skipped_lines.is_empty() {
+                format!("{file}：语法错误，本次未能加载")
+            } else {
+                format!(
+                    "{file}：语法错误，本次未能加载（已尝试跳过{}仍无法解析）",
+                    self.lines_phrase()
+                )
+            };
         }
-        let lines: Vec<String> = self.skipped_lines.iter().map(|n| n.to_string()).collect();
-        format!("{file}：已跳过第 {} 行后加载其余内容", lines.join("、"))
+        format!("{file}：已跳过{}后加载其余内容", self.lines_phrase())
     }
 }
 
@@ -6567,15 +6613,33 @@ impl Config {
         let existing = std::fs::read_to_string(&file).unwrap_or_default();
         let parsed = parse_toml_lenient(&existing);
         if !parsed.is_clean() {
-            let backup = Self::backup_corrupt_config(&file, &existing);
+            // ★ 备份**失败就拒绝写回**，不是记一句日志接着写。
+            //
+            // 备份是这条路径唯一的安全网：写回会把没救回的那几行永久删掉。备份失败还照写，
+            // 就是「无备份销毁数据」——比 materialize 那个 bug 更糟，因为那个至少还能从
+            // 别处恢复，这个是用户亲手点的保存把自己的配置吃了。
+            // 同本仓既有原则「拿不到可信的全量就别动」（见 `preset_for_pruning`）。
+            //
+            // 报 Err 而不是静默不写：这是用户主动发起的操作，他需要知道为什么没保存成功
+            // ——磁盘满/只读目录都是他能处理的问题，而「点了没反应」他处理不了。
+            let backup = Self::backup_corrupt_config(&file, &existing).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "配置文件 {} 语法不合法，需要先备份原件才能保存，但备份写入失败\
+                     （磁盘空间不足或目录只读？）。本次未做任何改动，你的配置文件原样保留。",
+                    file.display()
+                )
+            })?;
             warn!(
-                "用户配置 {} 语法不合法（已跳过第 {:?} 行），本次保存将只保留可解析的部分；\
-                 原件已备份到 {}",
+                "用户配置 {} 语法不合法（已跳过第 {:?} 行），本次保存{}；原件已备份到 {}",
                 file.display(),
                 parsed.skipped_lines,
-                backup
-                    .as_ref()
-                    .map_or_else(|| "（备份失败）".to_string(), |p| p.display().to_string())
+                if parsed.value.is_some() {
+                    "只保留可解析的部分"
+                } else {
+                    // 一个键都没救回来：写回等于用「只含本次修改」的新文件替换原件。
+                    "将丢弃原文件全部内容（一个键都没能解析出来）"
+                },
+                backup.display()
             );
         }
         let mut root = parsed
@@ -8834,6 +8898,78 @@ scripts = { latin = 42 }
         let r = parse_toml_lenient(&src);
         assert!(r.value.is_none(), "啃不动就该整份作废，不能返回残骸");
         assert!(r.first_error.is_some());
+    }
+
+    /// ★ 「跳过了几行」**不等于**「救回来了」：啃到上限仍失败时两者同时成立，
+    /// 而此时说「已跳过第 N 行后加载其余内容」是在撒谎——一个字都没加载。
+    ///
+    /// 判据必须是 `is_salvaged()`（真的解析出了内容），不是 `skipped_lines` 非空。
+    /// 这条文案是 toast / CLI describe / CLI export 的共同来源，错一次错三处。
+    #[test]
+    fn describe_never_claims_success_when_nothing_was_salvaged() {
+        let mut u = UnparsableLayer {
+            layer: "user",
+            path: PathBuf::from("config.toml"),
+            error: "invalid".into(),
+            // 试着跳了三行……
+            skipped_lines: vec![1, 2, 3],
+            // ……但最终什么都没解析出来。
+            salvaged_keys: 0,
+        };
+        let s = u.describe();
+        assert!(
+            !s.contains("加载其余内容"),
+            "一个键都没救回来时不许说「加载其余内容」：{s}"
+        );
+        assert!(s.contains("未能加载"), "必须说清本次没加载成功：{s}");
+        // 尝试过的行号仍要留着——用户拿它去看那几行到底怎么了。
+        assert!(
+            s.contains('1') && s.contains('3'),
+            "尝试跳过的行号不该丢：{s}"
+        );
+
+        // 对照：救回了内容才能说「加载其余内容」，否则上面的断言恒真也能全绿。
+        u.salvaged_keys = 2;
+        let ok = u.describe();
+        assert!(ok.contains("加载其余内容"), "救回来了就该这么说：{ok}");
+        assert!(!ok.contains("未能加载"), "{ok}");
+    }
+
+    /// ★ 行号多到一定程度必须折叠。
+    ///
+    /// 实跑撞到的：一份完全不是 TOML 的文件（编码错乱、被别的文件覆盖）会一路啃到
+    /// `LENIENT_MAX_SKIPS`，于是 32 个行号全列进 toast 和设置页横幅——撑爆版面，
+    /// 而那种情形下具体哪几行本就没意义（整份都没加载）。
+    #[test]
+    fn lines_phrase_folds_long_lists() {
+        let mk = |n: usize| UnparsableLayer {
+            layer: "user",
+            path: PathBuf::from("config.toml"),
+            error: String::new(),
+            skipped_lines: (1..=n).collect(),
+            salvaged_keys: 1,
+        };
+        assert_eq!(mk(0).lines_phrase(), "", "没有行号就返回空串");
+
+        // 不超阈值：逐个列出，不折叠。
+        let few = mk(LINES_LISTED_MAX).lines_phrase();
+        assert!(!few.contains('等'), "刚好到阈值不该折叠：{few}");
+        assert!(few.contains(&LINES_LISTED_MAX.to_string()), "{few}");
+
+        // 超阈值：折叠，并给出总数——量级信息比逐个行号有用。
+        let many = mk(32).lines_phrase();
+        assert!(many.contains("等 32 处"), "超阈值须折叠并给总数：{many}");
+        assert!(!many.contains("30"), "不该把第 30 个行号也列出来：{many}");
+        assert!(
+            many.chars().count() < 40,
+            "折叠后仍然很长就等于没折叠：{many}"
+        );
+        // ★ 量词自带：调用方直接嵌入，不再拼「第 {} 行」——那样折叠形态会拼出
+        // 「第 …等 32 处 行」的语病（实跑撞到过）。
+        assert!(
+            many.starts_with("第 ") && many.contains(" 行"),
+            "短语须自带「第…行」：{many}"
+        );
     }
 
     /// 合法文件走的是零改动的快路径：`is_clean` 为真、一行都没跳过。

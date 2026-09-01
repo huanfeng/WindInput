@@ -161,4 +161,6 @@ key_actions = { \"F2\" = \"toggle_schema\" }
         .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
         .count();
     assert_eq!(n_backups, 1, "文件已修好后不该继续攒备份");
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
