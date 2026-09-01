@@ -316,41 +316,77 @@ fn every_close_path_clears_the_toolbar_icon() {
     }
 }
 
-/// 记进 `state.toml` 的是**面 id**（不是下标），且相同的面不重复写盘。
+/// 该记什么：记**面 id**（不是下标）、开着时不记、同一面不重复记。
 ///
-/// 存 id 而不是下标：面表来自配置，两次运行之间增删一面就会让下标指到别处。
-/// 去重是因为落盘挂在「软键盘状态变了」这个收口上，而开合远比换面频繁。
-///
-/// ⚠️ **不假设启动时的镜像值**：`save_softkeyboard_page` 写的是本机真实的 `state.toml`，
-/// 于是同一台机器上第二次跑测试时，构造出来的协调器已经带着上一次写进去的 id。
-/// 依赖「初值为空」的断言会在第一次跑之后永远红——那是测试自己的全局状态污染，
-/// 与被测行为无关。这里先把镜像清成一个不可能的值，只验证「之后变成了什么」。
+/// 测的是 `softkeyboard_page_to_persist` 这个纯判据，而不是 `save_softkeyboard_page`——
+/// 后者要写进程外的全局 `state.toml`（`%LOCALAPPDATA%\WindInput[Dev]`），测试碰不得：
+/// 那会改掉开发者本机的记录，还会与**正在运行的服务**抢同一个文件（两边都是
+/// load-modify-save，一次丢更新就能吞掉刚存好的 `toolbar_positions`）。
+/// 判据与写盘因此分成两层，下面 `headless_never_touches_the_real_state_toml` 守另一半。
 #[test]
-fn page_is_remembered_by_id_and_written_once() {
+fn page_to_persist_uses_the_id_and_skips_redundant_writes() {
     let c = coord();
     let Some(first) = c.softkeyboard.pages().first().map(|p| p.id.clone()) else {
         return; // 兜底表为空（不该发生），无从验证
     };
-    let saved = || {
-        c.softkeyboard_page_saved
+    let set_mirror = |v: &str| {
+        *c.softkeyboard_page_saved
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .unwrap_or_else(|e| e.into_inner()) = v.to_string();
     };
+    set_mirror("<从未记录过的面>");
+
+    // 开着时一律不记：翻页键走系统 auto-repeat 且刻意不去抖，开着时也记就成了在按键
+    // 返回路径上每秒几十次重写整个 state.toml。
+    c.open_softkeyboard(None);
+    assert_eq!(
+        c.softkeyboard_page_to_persist(),
+        None,
+        "面板开着时不该落盘（长按翻页会打爆按键路径）"
+    );
+
+    // 关掉才记，记的是面 id 而不是下标。
+    c.close_softkeyboard();
+    assert_eq!(
+        c.softkeyboard_page_to_persist(),
+        Some(first.clone()),
+        "关掉后该记的是面 id"
+    );
+
+    // 镜像已是这一面 ⇒ 不重复写。
+    set_mirror(&first);
+    assert_eq!(c.softkeyboard_page_to_persist(), None, "同一面不该重复记录");
+}
+
+/// ⚠️ **测试进程绝不写本机的 `state.toml`**。
+///
+/// `Config::state_dir()` 是进程外的全局路径，而单测构造的协调器同样走得到落盘那条路。
+/// 门开着的后果有两个，都不像是测试的问题：跑一次 `cargo test` 改掉开发者自己机器上的
+/// `last_softkeyboard_page`；以及与正在运行的服务抢同一个文件，丢更新时连
+/// `toolbar_positions` 一起吞掉。
+///
+/// 判据借 `store`（它的文档本来就写着「None = 无持久化（headless 测试）」）。
+/// 这条钉的是那道门还在——镜像没被改动即证明写盘整条路没走。
+#[test]
+fn headless_never_touches_the_real_state_toml() {
+    let c = coord();
+    assert!(c.store.is_none(), "前置：headless 夹具无 store");
     *c.softkeyboard_page_saved
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = "<从未记录过的面>".to_string();
-
+        .unwrap_or_else(|e| e.into_inner()) = "<哨兵>".to_string();
     c.open_softkeyboard(None);
     c.after_softkeyboard_change();
-    assert_eq!(saved(), first, "记的应当是面 id");
-
-    // 同一面再走一次收口：镜像不变，也就不会再写盘。把镜像换成别的值才能证明这条
-    // 断言测的是去重而不是恒真——若去重没生效，下面这次会把它改回 first。
-    *c.softkeyboard_page_saved
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = first.clone();
     c.close_softkeyboard();
-    c.after_softkeyboard_change();
-    assert_eq!(saved(), first, "同一面不该重复记录");
+    c.after_softkeyboard_change(); // 判据说「该写」，但 store 门该拦下
+    assert_eq!(
+        *c.softkeyboard_page_saved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        "<哨兵>",
+        "镜像变了 ⇒ 写盘那条路真的走了 ⇒ 测试正在改开发者本机的 state.toml"
+    );
+    assert!(
+        c.softkeyboard_page_to_persist().is_some(),
+        "前置：判据本身说该写，否则上面那条断言恒真"
+    );
 }

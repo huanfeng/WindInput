@@ -138,37 +138,77 @@ impl Coordinator {
         self.save_softkeyboard_page();
     }
 
-    /// 把当前面的 id 记进 `state.toml`（与上次记的相同则不写盘）。
+    /// 把当前面的 id 记进 `state.toml`。存 id 而非下标的理由见
+    /// `RuntimeState::last_softkeyboard_page`。
     ///
-    /// 存 id 而非下标的理由见 `RuntimeState::last_softkeyboard_page`。
-    /// 去重是因为本函数挂在「软键盘状态变了」这个收口上，而开合远比换面频繁——
-    /// 每次开关都 load-modify-save 一遍整个 state.toml 是白费。
-    fn save_softkeyboard_page(&self) {
-        let Some(id) = self
+    /// # ★ 只在面板**关着**时写，且同一面不重复写
+    ///
+    /// 翻页键（PgUp/PgDn）走系统 auto-repeat，长按会连发 keydown 且**本模块刻意不去抖**
+    /// （见设计文档 §5）。每翻一面 id 都不同，去重挡不住 ⇒ 若开着时也写，长按翻页就成了
+    /// 在**按键返回路径上**每秒几十次 load-序列化-写-rename 整个 state.toml。输入法的
+    /// 按键路径上不该有同步磁盘 I/O。
+    ///
+    /// 「关着时才写」同时也正是这个状态的语义——记的是**上次用完时停在哪一面**，而不是
+    /// 翻页过程中的每一帧。关闭是必经路径（失焦也会关，见
+    /// [`Self::close_softkeyboard_on_focus_change`]），故不会漏记；代价只是「开着面板
+    /// 直接杀进程」时丢掉最后一次换面，后果不过是下次开在上上次那一面。
+    /// 这次该不该记、记什么。`None` = 不记。**判据全在这里，写盘全在外面**——
+    /// 分两层是为了让判据可测：写盘那半要碰进程外的全局路径，测试碰不得（见
+    /// [`Self::save_softkeyboard_page`] 里那道 store 门）。同 `expand_cells` /
+    /// `expand_cells_raw` 分层的理由。
+    pub(crate) fn softkeyboard_page_to_persist(&self) -> Option<String> {
+        // 开着时不记：翻页键走 auto-repeat 且刻意不去抖，见 `save_softkeyboard_page`。
+        if self.softkeyboard_is_open() {
+            return None;
+        }
+        let id = self
             .softkeyboard
             .pages()
             .get(self.softkeyboard_page_idx())
-            .map(|p| p.id.clone())
-        else {
+            .map(|p| p.id.clone())?;
+        if *self
+            .softkeyboard_page_saved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            == id
+        {
+            return None;
+        }
+        Some(id)
+    }
+
+    fn save_softkeyboard_page(&self) {
+        // ⚠️ **无 store 的实例不写本机状态**。`state_dir()` 是进程外的全局路径
+        // （`%LOCALAPPDATA%\WindInput[Dev]`），而单测构造的协调器同样走得到这里——
+        // 于是跑一次 `cargo test` 就改掉了开发者自己那台机器上的 `last_softkeyboard_page`，
+        // 还会与**正在运行的服务**抢同一个 `state.toml`：两边都是 load-modify-save，
+        // 一次丢更新就能吞掉刚存好的 `toolbar_positions`。
+        //
+        // 判据借 `store`：它的文档本来就写着「None = 无持久化（headless 测试）」，
+        // 这个语义不是这里新赋予的。Android 生产形态经 `new_headless_with_ui_at` 拿到
+        // 用户目录、是有 store 的，故这道门恰好只挡住测试夹具。
+        if self.store.is_none() {
+            return;
+        }
+        let Some(id) = self.softkeyboard_page_to_persist() else {
             return;
         };
-        {
-            let mut last = self
-                .softkeyboard_page_saved
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if *last == id {
-                return;
-            }
-            *last = id.clone();
-        }
         let Some(dir) = wind_config::Config::state_dir() else {
             return;
         };
         let mut rs = wind_config::RuntimeState::load(&dir);
-        rs.last_softkeyboard_page = id;
-        if let Err(e) = rs.save(&dir) {
-            warn!("软键盘: 保存当前面失败: {e}");
+        rs.last_softkeyboard_page = id.clone();
+        // ★ 镜像**写成功之后**才更新。写在前面的话，一次偶发失败（文件被同步/备份工具
+        // 锁住、磁盘满）就会让镜像谎称「已经存过了」，此后同一面的每次关闭都被去重挡掉
+        // ——本次会话再也存不进去，而线索只有一行 warn。
+        match rs.save(&dir) {
+            Ok(()) => {
+                *self
+                    .softkeyboard_page_saved
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = id;
+            }
+            Err(e) => warn!("软键盘: 保存当前面失败: {e}"),
         }
     }
 

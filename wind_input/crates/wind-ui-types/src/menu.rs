@@ -81,6 +81,13 @@ pub enum MenuCmd {
     ToggleSoftKeyboard,
     /// 打开软键盘并切到第 N 面
     SoftKeyboardPage(usize),
+    /// 从工具栏的**分格快捷菜单**回到完整功能主菜单。
+    ///
+    /// 存在的理由是一条不变量：隐藏齿轮后，右键工具栏是主菜单仅剩的鼠标入口
+    /// （`toolbar-customization.md` §2.2 判据③）。分格右键把大部分格子的右键让给了
+    /// 精简菜单，只剩 12dp 的拖动柄还能弹主菜单——那是个要瞄准的目标。每份分格菜单
+    /// 末尾挂一条回主菜单的路，判据③就不再依赖那 12dp。
+    OpenMainMenu,
     /// 重载配置
     ReloadConfig,
     /// 重启服务进程
@@ -238,6 +245,7 @@ impl MenuKind {
                 MenuCmd::IconToggleDemoAnim => 129,
                 MenuCmd::IconToggleWidthMark => 130,
                 MenuCmd::ToggleSoftKeyboard => 131,
+                MenuCmd::OpenMainMenu => 132,
                 MenuCmd::IconBadgeShape(i) => 10000 + i as i32,
                 MenuCmd::SoftKeyboardPage(i) => 11000 + i as i32,
                 MenuCmd::InputDiagToggleSection(i) => 8000 + i as i32,
@@ -296,6 +304,7 @@ impl MenuKind {
             129 => MenuCmd::IconToggleDemoAnim,
             130 => MenuCmd::IconToggleWidthMark,
             131 => MenuCmd::ToggleSoftKeyboard,
+            132 => MenuCmd::OpenMainMenu,
             10000..=10099 => MenuCmd::IconBadgeShape((id - 10000) as u8),
             11000..=11999 => MenuCmd::SoftKeyboardPage((id - 11000) as usize),
             8000..=8999 => MenuCmd::InputDiagToggleSection((id - 8000) as u8),

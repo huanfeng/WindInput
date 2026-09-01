@@ -159,12 +159,25 @@ impl Coordinator {
                 self.toggle_softkeyboard(None);
                 self.after_softkeyboard_change();
             }
+            // 分格快捷菜单末尾的「更多…」：弹完整主菜单。锚点取光标位（`i32::MIN` 由 UI
+            // 侧解释成"当前鼠标处"）——用户刚在那里点过，比回头去算工具栏几何更贴合，
+            // 也不必把上一个菜单的锚点一路带过来。
+            MenuCmd::OpenMainMenu => {
+                self.show_main_menu(wind_ui_types::MenuAnchor::at_point(i32::MIN, i32::MIN));
+            }
             MenuCmd::SoftKeyboardPage(i) => {
                 // 菜单选面：面板没开就顺带开出来，否则「选了个面却什么都没发生」。
                 if !self.softkeyboard_is_open() {
                     self.open_softkeyboard(None);
+                    // ⚠️ **开面板这一步自己负责收口，不能指望下面那句**：
+                    // `ui_softkeyboard_page` 在下标越界时只 `warn!` 就返回，走不到收口。
+                    // 而菜单是照**构建时**的面表列的，配置一重载就可能少一面——那时面板
+                    // 已经开着并接管按键，C++ 却收不到 STATUS_SOFT_KEYBOARD 位、工具栏
+                    // 图标也不亮，正是这组提交要消灭的那对症状。
+                    // 判据：**谁改了状态谁负责收口**。成功路径会多推一次，两处推送都幂等
+                    // （工具栏有 PartialEq 去重），比漏推划算得多。
+                    self.after_softkeyboard_change();
                 }
-                // 收口在 `ui_softkeyboard_page` 里，开面板那一步不必自己再推一次。
                 self.ui_softkeyboard_page(i);
             }
             MenuCmd::ToggleS2t => {
@@ -2134,6 +2147,41 @@ mod tests {
         }
     }
 
+    /// ⛔ **每份分格菜单都必须留一条通往完整主菜单的路**。
+    ///
+    /// 判据③（`toolbar-customization.md` §2.2）是「隐藏齿轮不会锁死用户——右键工具栏
+    /// 任意位置同样弹主菜单」。分格右键把功能格的右键让给了精简菜单，若不补这一条，
+    /// 隐藏了齿轮的用户就只剩 **12dp 的拖动柄**通向主菜单——一个要瞄准的目标。
+    ///
+    /// ⚠️ 上面那条穷举测试**证不了这件事**：它断言的恰恰是「这些格有自己的菜单」，
+    /// 与本条方向相反。两条一起才把判据③钉住。
+    #[test]
+    fn every_cell_menu_keeps_a_way_back_to_the_main_menu() {
+        use crate::coordinator::Coordinator;
+        use wind_config::Config;
+        use wind_ui_types::{MenuCmd, MenuKind, ToolbarAction as A};
+
+        let c = Coordinator::new_headless(Config::default(), None);
+        for a in [
+            A::ToggleMode,
+            A::SwitchEngine,
+            A::TogglePunct,
+            A::ToggleWidth,
+            A::ToggleS2t,
+            A::ToggleSoftKeyboard,
+        ] {
+            let items = c
+                .build_toolbar_cell_menu(a)
+                .unwrap_or_else(|| panic!("{a:?}"));
+            assert!(
+                items
+                    .iter()
+                    .any(|i| i.kind == MenuKind::Command(MenuCmd::OpenMainMenu)),
+                "{a:?} 的分格菜单没有回主菜单的入口，隐藏齿轮后用户只剩 12dp 拖动柄"
+            );
+        }
+    }
+
     /// 分格菜单里的开关，文案与勾选态必须与主菜单里同一个开关**逐字相同**。
     ///
     /// 同一个开关在两处叫不同的名字，用户会当成两件事；勾选态对不上则更糟——
@@ -2151,21 +2199,39 @@ mod tests {
         };
 
         let cell = c.build_toolbar_cell_menu(A::TogglePunct).expect("标点格");
-        for label in ["中文标点", "全角", "简入繁出"] {
+        for label in ["全角", "中文标点", "简入繁出"] {
             assert_eq!(
                 find(&cell, label),
                 find(&main, label),
                 "{label} 在分格菜单与主菜单里对不上（文案或勾选态）"
             );
         }
+        // ★ 顺序也要对齐，而按 label 查找对顺序是**盲的**——上面那个循环换成任意排列
+        // 都照样绿。同一组开关在两处排得不一样，用户每次都得重新找。
+        let order: Vec<&str> = cell
+            .iter()
+            .map(|i| i.label.as_str())
+            .filter(|l| ["全角", "中文标点", "简入繁出"].contains(l))
+            .collect();
+        let main_order: Vec<&str> = main
+            .iter()
+            .map(|i| i.label.as_str())
+            .filter(|l| ["全角", "中文标点", "简入繁出"].contains(l))
+            .collect();
+        assert_eq!(order, main_order, "三个开关在两处的排列顺序不一致");
 
-        // 中英格给的是主菜单「输入方案」子菜单的原样内容。
+        // 中英格给的是主菜单「输入方案」子菜单的原样内容（后面另挂「更多…」，见
+        // `every_cell_menu_keeps_a_way_back_to_the_main_menu`，故是前缀相等而非全等）。
         let cell = c.build_toolbar_cell_menu(A::ToggleMode).expect("中英格");
         let sub = main
             .iter()
             .find(|i| i.label == "输入方案")
             .expect("主菜单缺「输入方案」");
-        assert_eq!(cell, sub.children, "中英格右键与「输入方案」子菜单不同源");
+        assert_eq!(
+            cell.get(..sub.children.len()),
+            Some(&sub.children[..]),
+            "中英格右键与「输入方案」子菜单不同源"
+        );
     }
 
     /// 状态图标开关必须同时出现在 macOS 的**两棵**菜单树里，且文案一致。
@@ -2536,16 +2602,26 @@ impl Coordinator {
                     let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     (s.chinese_punct, s.full_width, s.s2t_enabled)
                 };
-                // 文案与勾选态与主菜单里那三项**逐字相同**：同一个开关在两处叫不同的
-                // 名字，用户会当成两件事。
+                // 文案、勾选态**与顺序**都跟主菜单里那三项一致（见 `build_main_menu_items`
+                // 的 items 开头）：同一组开关在两处排得不一样，用户每次都要重新找。
                 Some(vec![
-                    M::leaf("中文标点", cmd(MenuCmd::TogglePunct), true, punct),
                     M::leaf("全角", cmd(MenuCmd::ToggleWidth), true, full),
+                    M::leaf("中文标点", cmd(MenuCmd::TogglePunct), true, punct),
                     M::leaf("简入繁出", cmd(MenuCmd::ToggleS2t), true, s2t),
                 ])
             }
             ToolbarAction::OpenSettings | ToolbarAction::Custom(_) => None,
         }
+        .map(|mut items| {
+            // 每份分格菜单末尾都挂一条回主菜单的路。
+            //
+            // ⛔ 不可省：隐藏齿轮后右键工具栏是主菜单**仅剩的鼠标入口**（§2.2 判据③），
+            // 而分格右键把功能格的右键让给了精简菜单，只剩 12dp 的拖动柄还通向主菜单
+            // ——那是个要瞄准的目标。有了这一条，判据③就不再依赖那 12dp。
+            items.push(M::separator());
+            items.push(M::leaf("更多…", cmd(MenuCmd::OpenMainMenu), true, false));
+            items
+        })
     }
 
     /// 右键工具栏：该格有定制就弹定制菜单，否则回落完整主菜单。

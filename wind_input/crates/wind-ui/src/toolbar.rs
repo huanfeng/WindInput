@@ -985,9 +985,14 @@ impl ToolbarMouse {
     /// 而不是整条的起点。
     ///
     /// 分格菜单只有几项，锚在整条起点会让它落在离点击位置半条远的地方——尤其是齿轮
-    /// 排末尾的横条上。方向仍由朝向决定：横条向上弹（对齐格的左缘）、纵条向侧面弹
-    /// （对齐格的上缘），故只替换沿条身那一维，另一维仍取整条的边（菜单该贴的是条身
-    /// 的外沿，不是格的）。
+    /// 排末尾的横条上。方向仍由朝向决定，只替换**沿条身**那一维，另一维仍取整条的边
+    /// （菜单该贴的是条身的外沿，不是格的）。
+    ///
+    /// ⚠️ **沿条身那一维是哪个字段，两种朝向不一样**，得照 `place_menu` 实际读哪个来传：
+    ///
+    /// - 横条（`Above`）：横向位置读 `x` ⇒ 传格的左缘；纵向恒在整条顶边之上。
+    /// - 纵条（`Side`）：纵向位置读 **`bottom`**（底边对齐、向上展开），`y` 只在上方
+    ///   装不下时作回退 ⇒ **两个都要传格的**，否则菜单仍按整条底边对齐、贴格等于没做。
     ///
     /// 命中不到格（拖动柄区）时退回整条锚点。
     fn cell_menu_anchor(&self, x: f32, y: f32) -> MenuAnchor {
@@ -996,7 +1001,7 @@ impl ToolbarMouse {
             return self.menu_anchor();
         };
         if self.vertical {
-            MenuAnchor::beside_rect(l, t + cell.y as i32, r, b)
+            MenuAnchor::beside_rect(l, t + cell.y as i32, r, t + (cell.y + cell.h) as i32)
         } else {
             MenuAnchor::above_rect(l + cell.x as i32, t, b)
         }
@@ -1161,6 +1166,11 @@ impl WindowMouse for ToolbarMouse {
             //
             // 落在 UP 而非 DOWN，与左键一致：按下再挪开取消，是鼠标交互的通行预期。
             WM_MBUTTONUP => {
+                // 拖动中不触发格动作，与左键 UP 同一条守卫：拖着工具栏走时命中矩形照样
+                // 命中，没有这道判断就会在挪动过程中顺手切了方案。
+                if self.dragging {
+                    return Some(LRESULT(0));
+                }
                 if let Some(ToolbarAction::ToggleMode) = self.cell_at(cx, cy) {
                     // 复用既有的 SwitchEngine（协调器映射到 `switch_engine` → `cycle_schema`），
                     // 不新增动作：这里要的正是它，另起一个只会多一条要各自维护的路径。
@@ -1569,5 +1579,80 @@ mod tests {
         let one = bar_layout(true, THICK, GRIP, CELL, N);
         let two = bar_layout(true, THICK * 2.0, GRIP * 2.0, CELL * 2.0, N);
         assert_eq!((two.w, two.h), (one.w * 2.0, one.h * 2.0));
+    }
+}
+
+#[cfg(test)]
+mod cell_anchor_tests {
+    use super::*;
+    use crate::view::Rect;
+
+    /// 造一个只填了锚点计算所需字段的鼠标处理器。
+    fn mouse(vertical: bool, hits: Vec<(ToolbarAction, Rect)>) -> ToolbarMouse {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        ToolbarMouse {
+            hits,
+            events: tx,
+            hwnd: Default::default(),
+            pos: Some((1000, 500)),
+            dragging: false,
+            anchor: (0, 0),
+            origin: (0, 0),
+            hover_idx: -1,
+            dirty: false,
+            cursor_inside: false,
+            size: if vertical { (40, 200) } else { (200, 40) },
+            vertical,
+        }
+    }
+
+    fn cell(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    /// 横条：菜单横向贴到**格的左缘**，纵向仍取整条顶边（向上展开）。
+    #[test]
+    fn horizontal_anchor_hugs_the_cell_left_edge() {
+        let m = mouse(
+            false,
+            vec![
+                (ToolbarAction::ToggleMode, cell(12.0, 0.0, 30.0, 40.0)),
+                (ToolbarAction::TogglePunct, cell(42.0, 0.0, 30.0, 40.0)),
+            ],
+        );
+        let a = m.cell_menu_anchor(50.0, 20.0); // 命中第二格
+        assert_eq!(a.x, 1000 + 42, "应贴到格的左缘，而不是整条起点");
+        assert_eq!(a.y, 500, "纵向仍取整条顶边");
+        assert_eq!(a.bottom, 500 + 40, "翻转回退用整条底边");
+    }
+
+    /// ★ 纵条：`Side` 的纵坐标读的是 **`bottom`**（底边对齐、向上展开），`y` 只作越界
+    /// 回退。所以两个都得传格的边——只传 `y` 的话菜单仍按整条底边对齐，「贴格」等于没做，
+    /// 而代码看着是对的。这条测试就是钉住那个差别。
+    #[test]
+    fn vertical_anchor_hugs_the_cell_bottom_not_the_bar_bottom() {
+        let m = mouse(
+            true,
+            vec![
+                (ToolbarAction::ToggleMode, cell(0.0, 12.0, 40.0, 30.0)),
+                (ToolbarAction::TogglePunct, cell(0.0, 42.0, 40.0, 30.0)),
+            ],
+        );
+        let a = m.cell_menu_anchor(20.0, 50.0); // 命中第二格
+        assert_eq!(a.bottom, 500 + 42 + 30, "必须是格的底边");
+        assert_ne!(a.bottom, 500 + 200, "整条底边就是没贴格");
+        assert_eq!(a.y, 500 + 42, "回退用格的上缘");
+        assert_eq!(a.right, 1000 + 40, "横向仍贴条身外沿");
+    }
+
+    /// 命中不到格（拖动柄区）时退回整条锚点——右键那里仍该弹完整主菜单。
+    #[test]
+    fn miss_falls_back_to_the_whole_bar() {
+        let m = mouse(
+            false,
+            vec![(ToolbarAction::ToggleMode, cell(12.0, 0.0, 30.0, 40.0))],
+        );
+        let a = m.cell_menu_anchor(5.0, 20.0); // 拖动柄区
+        assert_eq!(a.x, 1000, "应退回整条起点");
     }
 }
