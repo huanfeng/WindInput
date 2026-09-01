@@ -358,6 +358,11 @@ decimal_places = 6
 # 与 [schema.codetable.frequency] / [schema.pinyin.frequency] / [schema.english.frequency]
 # 分工：那三段是**各引擎自己**的调频参数（策略、保护位数、半衰期），值可以互不相同；
 # 本段是**三个引擎都照办的同一条规则**。判据＝用户会不会想给不同引擎配不同的值。
+#
+# ⚠️ 本段**没有方案级形态**：方案文件里写 [frequency] 不会被读取。
+# 与它只差一层的 [schema.codetable.frequency] 恰恰是可以被方案覆盖的（方案里写
+# [codetable.frequency] 有效），故此处点明，免得照着那个类推。全局唯一正是本段的定义
+# ——「三个引擎都照办的同一条规则」，让方案改掉它就自相矛盾了。
 [schema.frequency]
 # 这些 Unicode 区块的候选不参与词频：既不记录选中（不学习），也不受已有记录影响（不重排）。
 # 取值为区块名或预设组名，两种写法都收：
