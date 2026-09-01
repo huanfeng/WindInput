@@ -150,7 +150,7 @@ pub struct ConvertOptions {
 /// [`Engine::resolve_boundary`] 的结果。见
 /// `docs/design/pinyin-entry-boundary-contract.md` §3.1。
 ///
-/// ★★ 五个变体**必须分开处置**，合并任意两个都会出错。最容易合并错的是最后两个：
+/// ★★ 六个变体**必须分开处置**，合并任意两个都会出错。最容易合并错的是最后两个：
 /// `NoInfo` 与 `Unresolvable` 都给不出边界，但前者**合法**（照常入库，`boundary = 0`
 /// 走既有降级路径），后者**非法**（拒收）。把 `NoInfo` 当非法会拒掉所有码表词库；
 /// 把 `Unresolvable` 当无信息则等于这套契约白做。
@@ -165,10 +165,24 @@ pub enum BoundaryResolution {
     Derived(u64),
     /// 约束筛完仍多解，已按读音权重择一。
     Ambiguous(u64),
+    /// **合法、切分已定，但读音表验证不了**：`text` 含无读音字符（符号 `←`、外文、
+    /// 词典单字表里没有的字），而 `code` 切得出与字数相符的音节序列。
+    ///
+    /// ★ 这一档是从 `Unresolvable` 里**拆出来**的。合在一起时，用户在设置页手动添加的
+    /// `zuo ←`（加词路径有意放行，见 `webdata::normalize_add_code`）导出后再导入会被
+    /// 判非法丢弃——同一条词条，加词放行、导出放行、导入拒收。见 issue #97。
+    ///
+    /// ⚠️ **不再单独记 `ambiguous`**：那个变体的语义是「多解，已按读音权重择一」，而
+    /// 读音表在这里整体缺席，压根没有权重可择。两者不是正交维度，是同一维度的互斥取值。
+    NoReading(u64),
     /// **合法但边界无法表达**：非拼音方案（码表码无音节语义），或码超 64 字节
     /// （bitmask 装不下，既定语义是整体降级，见 `wdict::split_spaced_code`）。
     NoInfo,
-    /// **不合法**：不满足拼音词条判据（切不出与字数相符的音节序列 / 含无读音字符）。
+    /// **不合法**：`code` 切不出与字数相符的音节序列。这是「拿错了文件」的判据——
+    /// 五笔码 `wgkq` 配单字「工」、`aaaa` 配「田」都在此被拒。
+    ///
+    /// ⚠️ 「含无读音字符」**不再落到这里**（那是 `NoReading`）：拦截误导入的力量全部
+    /// 来自「切不出音节序列」这一条，`text` 是不是汉字与文件选没选错无关。
     Unresolvable,
 }
 
@@ -176,7 +190,7 @@ impl BoundaryResolution {
     /// 取边界值；`NoInfo` / `Unresolvable` 均为 0。
     pub fn boundary(self) -> u64 {
         match self {
-            Self::Exact(b) | Self::Derived(b) | Self::Ambiguous(b) => b,
+            Self::Exact(b) | Self::Derived(b) | Self::Ambiguous(b) | Self::NoReading(b) => b,
             Self::NoInfo | Self::Unresolvable => 0,
         }
     }

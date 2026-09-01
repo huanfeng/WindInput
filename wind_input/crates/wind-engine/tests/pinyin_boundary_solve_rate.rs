@@ -76,6 +76,9 @@ enum Outcome {
     Rescued(u64),
     /// 层 4 多解且层 3 没救回，附带按读音权重选出的首选。
     Ambiguous(u64),
+    /// 切分已定、但 text 含无读音字符 ⇒ 读音表验证不了（照常入库）。
+    /// 真实词库里这一档应当≈0：出现得多意味着夹具的单字读音表没建起来。
+    NoReading(u64),
     /// 层 4 无解 ⇒ 契约判非法。
     Unresolvable,
 }
@@ -88,11 +91,16 @@ fn resolve_without_layer_two(
     code: &str,
     text: &str,
 ) -> Outcome {
-    let Some((solved, ambiguous)) = generate::boundary_by_char_count(idx, trie, code, text) else {
+    let Some(sol) = generate::boundary_by_char_count(idx, trie, code, text) else {
         return Outcome::Unresolvable;
     };
-    if !ambiguous {
-        return Outcome::Unique(solved);
+    // 与生产代码同序：no_reading 先于 ambiguous 判（那一档的「已按读音权重择一」
+    // 在读音表缺席时讲不通）。
+    if sol.no_reading {
+        return Outcome::NoReading(sol.mask);
+    }
+    if !sol.ambiguous {
+        return Outcome::Unique(sol.mask);
     }
     // 层 3：仅在多解时出场，与生产代码同序。
     if let Some(spaced) = generate::generate_word_pinyin(dict, idx, text) {
@@ -101,7 +109,7 @@ fn resolve_without_layer_two(
             return Outcome::Rescued(derived);
         }
     }
-    Outcome::Ambiguous(solved)
+    Outcome::Ambiguous(sol.mask)
 }
 
 #[derive(Default)]
@@ -115,6 +123,9 @@ struct Tally {
     /// 层 4 多解、层 3 也没救回（Ambiguous），统计其首选是否正确。
     ambiguous_ok: usize,
     ambiguous_wrong: usize,
+    /// text 含无读音字符 ⇒ 切分已定但验证不了（照常入库，故计入 `filled`）。
+    no_reading_ok: usize,
+    no_reading_wrong: usize,
     /// 层 4 无解 ⇒ 契约判非法、拒收。
     unresolvable: usize,
 }
@@ -127,15 +138,22 @@ impl Tally {
             + self.rescued_wrong
             + self.ambiguous_ok
             + self.ambiguous_wrong
+            + self.no_reading_ok
+            + self.no_reading_wrong
             + self.unresolvable
     }
-    /// 「导入并由程序补充」实际能覆盖的面：层 4 唯一解 + 层 3 救回。
+    /// 「导入并由程序补充」实际能覆盖的面：层 4 唯一解 + 层 3 救回 + 读音验证缺席档。
     /// ⚠️ 不含 Ambiguous——那一档按契约不落库为确定值。
     fn filled(&self) -> usize {
-        self.unique_ok + self.unique_wrong + self.rescued_ok + self.rescued_wrong
+        self.unique_ok
+            + self.unique_wrong
+            + self.rescued_ok
+            + self.rescued_wrong
+            + self.no_reading_ok
+            + self.no_reading_wrong
     }
     fn filled_ok(&self) -> usize {
-        self.unique_ok + self.rescued_ok
+        self.unique_ok + self.rescued_ok + self.no_reading_ok
     }
 }
 
@@ -243,10 +261,21 @@ fn measure_layer_four_solve_rate() {
                     }
                     m
                 }
+                Outcome::NoReading(m) => {
+                    if m == want {
+                        t.no_reading_ok += 1
+                    } else {
+                        t.no_reading_wrong += 1
+                    }
+                    m
+                }
             };
             // ★ 只收「真会被写进库」的错解：Ambiguous 一档按契约不落库为确定值，
             // 把它算进「补错」会高估危害面。
-            let written = matches!(outcome, Outcome::Unique(_) | Outcome::Rescued(_));
+            let written = matches!(
+                outcome,
+                Outcome::Unique(_) | Outcome::Rescued(_) | Outcome::NoReading(_)
+            );
             if written && got != want && wrong_samples.len() < 30 {
                 wrong_samples.push((code.clone(), text.clone(), want, got));
             }
@@ -282,6 +311,13 @@ fn measure_layer_four_solve_rate() {
         pct(t.ambiguous_ok + t.ambiguous_wrong, n),
         t.ambiguous_ok,
         t.ambiguous_wrong
+    );
+    println!(
+        "读音验证缺席      {:>8}  ({:>5.2}%)  正确 {:>8} / 错误 {:>6}  ← 应≈0，多了说明夹具读音表没建起来",
+        t.no_reading_ok + t.no_reading_wrong,
+        pct(t.no_reading_ok + t.no_reading_wrong, n),
+        t.no_reading_ok,
+        t.no_reading_wrong
     );
     println!(
         "无解 Unresolvable {:>8}  ({:>5.2}%)  ← 契约按非法拒收",

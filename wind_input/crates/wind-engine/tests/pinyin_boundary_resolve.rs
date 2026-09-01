@@ -189,8 +189,8 @@ fn resolves_ambiguous_by_reading_weight() {
 
 /// 层 2（词典点查真值）优先于求解，且**确实是层 2 在起作用**。
 ///
-/// 判据可靠性来自夹具：「喜」「爱」没有单字读音 ⇒ 判据①失败 ⇒ 层 4 必然 `Unresolvable`。
-/// 因此拿到 `Exact` 只可能是层 2 给的。
+/// 判据可靠性来自夹具：「喜」「爱」没有单字读音 ⇒ 判据①标记 `no_reading` ⇒ 层 4 必然
+/// 给出 `NoReading` 而非 `Exact`。因此拿到 `Exact` 只可能是层 2 给的。
 #[test]
 fn dictionary_truth_wins_and_is_actually_layer_two() {
     let e = engine("xiai");
@@ -198,11 +198,13 @@ fn dictionary_truth_wins_and_is_actually_layer_two() {
         e.resolve_boundary("xiai", "喜爱"),
         BoundaryResolution::Exact(0b101),
     );
-    // 反向对照：同样的字、换一个词典里没有的码 ⇒ 层 2 落空，层 4 也救不了。
+    // 反向对照：同样的字、换一个词典里没有的码 ⇒ 层 2 落空，只剩层 4 的求解结果。
+    // ⚠️ 这里断的是**变体不同**（`NoReading` ≠ `Exact`），层 2 是否起作用的判据在此，
+    // 与「无读音该不该拒收」无关——后者见 `non_han_text_is_kept_with_solved_boundary`。
     assert_eq!(
         e.resolve_boundary("xiaiai", "喜爱爱"),
-        BoundaryResolution::Unresolvable,
-        "无单字读音 ⇒ 判据①不满足"
+        BoundaryResolution::NoReading(0b10101),
+        "无单字读音 ⇒ 判据①标记，切分 xi|ai|ai 仍成立"
     );
 }
 
@@ -223,14 +225,24 @@ fn illegal_code_is_unresolvable() {
     );
 }
 
-/// 判据①不满足 → `Unresolvable`。含非汉字的词（`你好a`）在拼音库里没有位置，走短语。
+/// ★★ 判据①不满足 → `NoReading`（**入库**），绝不是 `Unresolvable`。
+///
+/// 这条曾断言拒收。改变来自 issue #97：用户在设置页加了 `zuo ←`（拼音码 → 符号候选，
+/// 加词路径有意放行），导出后再导入却被判非法丢弃——同一条词条，加词放行、导出放行、
+/// 导入拒收。符号在拼音词典里当然没有单字读音，可 `zuo` 是正经音节、`←` 恰好一个字符，
+/// 边界 `0b1` 是确定的，根本不需要读音来定。
+///
+/// ⚠️ 拦截「拿错文件」的力量**不在这条**，在判据②（见 `illegal_code_is_unresolvable`）。
 #[test]
-fn non_han_text_is_unresolvable() {
+fn non_han_text_is_kept_with_solved_boundary() {
     let e = engine("nonhan");
-    assert_eq!(
-        e.resolve_boundary("nana", "那a"),
-        BoundaryResolution::Unresolvable,
+    let r = e.resolve_boundary("nana", "那a");
+    assert_eq!(r, BoundaryResolution::NoReading(0b101), "切分 na|na 已定");
+    assert!(
+        r.accepted(),
+        "★ 含符号/外文的词条必须入库，这正是 #97 的诉求"
     );
+    assert!(!r.lacks_boundary(), "它有边界，不是 NoInfo 那一档");
 }
 
 /// ★★ 码超 64 字节 → `NoInfo`（**合法但无边界**），绝不是 `Unresolvable`。
@@ -273,7 +285,7 @@ fn non_pinyin_engine_defaults_to_no_info() {
     assert!(r.accepted(), "码表词条必须照常入库");
 }
 
-/// `accepted()` / `boundary()` 的取值表——五个变体里只有一个被拒。
+/// `accepted()` / `boundary()` 的取值表——六个变体里只有一个被拒。
 #[test]
 fn resolution_accessors() {
     use BoundaryResolution::*;
@@ -281,10 +293,28 @@ fn resolution_accessors() {
         (Exact(0b101), 0b101, true),
         (Derived(0b11), 0b11, true),
         (Ambiguous(0b1), 0b1, true),
+        // ★ 带边界且入库：漏掉 `boundary()` 里的这一支，符号词条会以 boundary=0 落库，
+        // 简拼索引对它们静默失效——比直接拒收更难查。
+        (NoReading(0b1), 0b1, true),
         (NoInfo, 0, true),
         (Unresolvable, 0, false),
     ] {
         assert_eq!(r.boundary(), b, "{r:?}");
         assert_eq!(r.accepted(), ok, "{r:?}");
     }
+}
+
+/// issue #97 的**端到端形状**：单音节码 + 单符号，正是导出/导入往返里被拒的那一条。
+///
+/// ★ 单独立一条而不是并进上面那个多字用例：`zuo ←` 走的是与 `nana 那a` 不同的路径——
+/// 单音节码在 `join_code_by_boundary` 里导出成**无空格**串（`boundary == 1` 与
+/// `boundary == 0` 同形），导入端 `split_spaced_code` 拿到 0、必须重解。多音节词条
+/// 导出带空格、走「层 1 采信作者真值」，压根碰不到求解链。**用户观察到的「2 字及以上
+/// 正常」就是这么来的**，两条路必须各测各的。
+#[test]
+fn single_syllable_symbol_entry_survives_reimport() {
+    let e = engine("symbol");
+    let r = e.resolve_boundary("zuo", "←");
+    assert_eq!(r, BoundaryResolution::NoReading(0b1), "单音节边界是确定的");
+    assert!(r.accepted(), "★ #97：导出得出来，就必须导得回去");
 }

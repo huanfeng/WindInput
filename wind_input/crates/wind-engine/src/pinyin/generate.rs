@@ -326,7 +326,21 @@ fn infer_by_subword_segmentation(
 /// 取 16：正常词条码 ≤ 12 字节，同字数的合法切分极少超过个位数；超限即按「多解」处置。
 const MAX_BOUNDARY_PATHS: usize = 16;
 
-/// 按「音节数 == 汉字数」求解 `(code, text)` 的音节边界。返回 `(boundary, ambiguous)`。
+/// [`boundary_by_char_count`] 的求解结果。
+///
+/// `ambiguous` 与 `no_reading` **不是**两个可以任意组合的正交布尔：`no_reading` 为真时
+/// 读音表整体缺席，`ambiguous`（「多解，已按读音权重择一」）的语义不成立，调用方须先看
+/// `no_reading`。分成两个字段只是因为求解过程里它们在不同步骤得出。
+pub struct BoundarySolve {
+    /// 音节起点 bitmask，语义同 `DictEntry::boundary`。
+    pub mask: u64,
+    /// 约束筛完仍多解（或路径枚举被截断），已按读音权重择一。
+    pub ambiguous: bool,
+    /// `text` 含无读音字符 ⇒ **读音验证整体缺席**（不是「读音对不上」）。
+    pub no_reading: bool,
+}
+
+/// 按「音节数 == 汉字数」求解 `(code, text)` 的音节边界。
 ///
 /// 这是**导入闸口的第 4 层**（见 `docs/design/pinyin-entry-boundary-contract.md` §3.1）。
 ///
@@ -348,22 +362,34 @@ const MAX_BOUNDARY_PATHS: usize = 16;
 /// 本函数只管求解，不区分「非法」与「码太长装不下 bitmask」——后者由调用方在进来之前
 /// 按 `code.len() > 64` 拦掉（那是**合法但无边界**，既定语义是降级为 0，见
 /// [`wind_store::wdict::split_spaced_code`] 的同款契约），到这里的 `None` 一律是非法。
+///
+/// ## 判据①（每字须有读音）为什么只标记、不拒收
+///
+/// 它曾是一条早退：`text` 里但凡有一个字符查不到读音就整行判非法。这误伤了**完全合法**
+/// 的一类词条——`zuo ←`、`dengyu ＝`（拼音码 → 符号候选），符号在拼音词典里当然没有
+/// 单字读音，可 `zuo` 本身是个正经音节、`←` 恰好一个字符，边界 `0b1` 是**确定**的，
+/// 根本不需要读音来定。见 issue #97。
+///
+/// 拦截「码表词库误导入拼音方案」的力量全部在**判据②**（`paths.is_empty()`）：`wgkq`
+/// 切不出 1 个音节、`aaaa` 切不出 1 段，两个既有测试样例都是判据② 挡下的，判据① 对它们
+/// 是多余的。判据① 唯一独占的战果是「中英/符号混排词条」，而那恰恰是上面那类合法用法。
+///
+/// ⚠️ 降级后逻辑是**自洽**的，不是绕过：无读音时 [`reading_score`] 里的
+/// `index.readings(runes[i])?` 本就会让每条路径都不计分，`scored` 自然为空，于是落进
+/// 下面那个早已存在、注释也早已写明「切分本身合法就不能否决」的降级分支。
 pub fn boundary_by_char_count(
     index: &CharPinyinIndex,
     trie: &SyllableTrie,
     code: &str,
     text: &str,
-) -> Option<(u64, bool)> {
+) -> Option<BoundarySolve> {
     let runes: Vec<char> = text.chars().collect();
     if runes.is_empty() || code.is_empty() || code.len() > 64 {
         return None;
     }
-    // 判据①（设计文档 §2.1）：每个字符都要有读音。`你好a` 在此被拒。
-    // ⚠️ `readings` 只收**单字词典条目**，故这条同时也是「该字在本方案词典里存在」——
-    // 判据比「是不是汉字」略严，这是有意的：词典里没有的字，其词条在本方案下打不出来。
-    if runes.iter().any(|&c| index.readings(c).is_none()) {
-        return None;
-    }
+    // 判据①（设计文档 §2.1）：每个字符都要有读音。**只作标记，不再拒收**（见上方说明）。
+    // ⚠️ `readings` 只收**单字词典条目**，故这条同时也是「该字在本方案词典里存在」。
+    let no_reading = runes.iter().any(|&c| index.readings(c).is_none());
     // **必须 `build_strict`**：这里推的是词条的**真值边界**（哪几个字节属于哪个字的读音），
     // 下面还要拿每个音节去比对该字的 readings。带模糊拼写层会凭空多出「用户错音」那些边，
     // 既可能撑爆 `MAX_BOUNDARY_PATHS` 把本来唯一的解判成 truncated，也让判据②
@@ -385,7 +411,8 @@ pub fn boundary_by_char_count(
         .collect();
 
     let (best, multi) = if scored.is_empty() {
-        // 读音表不认可任何一条切分（方言音 / 词库作者用了非常用读音 / 词典单字表不全）。
+        // 读音表不认可任何一条切分（方言音 / 词库作者用了非常用读音 / 词典单字表不全 /
+        // `no_reading`：text 含符号等无读音字符）。
         // ★ 切分本身在音节图上合法，不能因此否决——否则会把「码没错、只是读音冷门」的
         // 词条误判成非法。退回「唯一即采信、多解算歧义」。
         (&paths[0], paths.len() > 1)
@@ -393,7 +420,11 @@ pub fn boundary_by_char_count(
         scored.sort_by_key(|(s, _)| *s);
         (scored[0].1, scored.len() > 1)
     };
-    Some((mask_of(best), multi || truncated))
+    Some(BoundarySolve {
+        mask: mask_of(best),
+        ambiguous: multi || truncated,
+        no_reading,
+    })
 }
 
 /// 一条切分的读音代价：各音节在对应字读音表中的下标之和；任一音节不是该字的读音则 `None`。

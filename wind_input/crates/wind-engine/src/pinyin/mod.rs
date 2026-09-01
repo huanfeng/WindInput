@@ -3446,13 +3446,17 @@ impl Engine for PinyinEngine {
             .char_pinyin_idx
             .get_or_init(|| CharPinyinIndex::build(&self.dict));
         // 层 4：字数约束求解。
-        let Some((solved, ambiguous)) =
-            generate::boundary_by_char_count(idx, &self.trie, code, text)
-        else {
+        let Some(sol) = generate::boundary_by_char_count(idx, &self.trie, code, text) else {
             return BoundaryResolution::Unresolvable;
         };
-        if !ambiguous {
-            return BoundaryResolution::Derived(solved);
+        // 读音表整体缺席（text 含符号/外文等无读音字符）⇒ 切分已定但验证不了。
+        // ★ 必须先于 `ambiguous` 判：那一档的语义是「已按读音权重择一」，这里没有权重可择。
+        // 层 3 在此也走不到——`generate_word_pinyin` 对含无读音字符的 text 必返回 None。
+        if sol.no_reading {
+            return BoundaryResolution::NoReading(sol.mask);
+        }
+        if !sol.ambiguous {
+            return BoundaryResolution::Derived(sol.mask);
         }
         // 层 3：仅在多解时出场——推导码与目标码逐字相同，则其切分是确定的。
         if let Some(spaced) = generate::generate_word_pinyin(&self.dict, idx, text) {
@@ -3461,7 +3465,7 @@ impl Engine for PinyinEngine {
                 return BoundaryResolution::Derived(derived);
             }
         }
-        BoundaryResolution::Ambiguous(solved)
+        BoundaryResolution::Ambiguous(sol.mask)
     }
 
     /// 为词语生成带空格的全拼音节码（多音字按词典权重消歧）。

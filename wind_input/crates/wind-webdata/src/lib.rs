@@ -26,6 +26,12 @@ pub struct EntryContractStats {
     pub filled: usize,
     /// 多解已按读音权重择一的行数（是 `filled` 的子集）。
     pub ambiguous: usize,
+    /// 切分已定、但 `text` 含无读音字符（符号 `←`、外文）而验证不了的行数
+    /// （是 `filled` 的子集）。**照常入库**——见 `BoundaryResolution::NoReading`。
+    ///
+    /// 单列一档不是为了拦截，是为了保住一个信号：这类行从前按非法拒收并告警，
+    /// 现在静默入库；若某次导入这个数很大，用户仍该有机会怀疑自己拿错了文件。
+    pub no_reading: usize,
     /// 入库了但仍无边界的行数（码超 64 字节等）。
     pub no_boundary: usize,
     /// 用户选了「不补充」⇒ 本可补齐、但按其意愿**跳过未入库**的行数。
@@ -79,8 +85,12 @@ fn dispose_contract_rows(
         } else {
             st.no_boundary += 1;
         }
+        // 两档互斥（见 `BoundaryResolution::NoReading` 的 ⚠️）：读音表缺席时没有权重可择，
+        // 「已按读音权重择一」讲不通，不能两边都记。
         if matches!(v, wind_engine::BoundaryResolution::Ambiguous(_)) {
             st.ambiguous += 1;
+        } else if matches!(v, wind_engine::BoundaryResolution::NoReading(_)) {
+            st.no_reading += 1;
         }
         out.push(r);
     }
@@ -229,6 +239,7 @@ fn dict_report_json(
                 o.insert("rejectedSamples".into(), json!(st.samples));
                 o.insert("boundaryFilled".into(), json!(st.filled));
                 o.insert("boundaryAmbiguous".into(), json!(st.ambiguous));
+                o.insert("boundaryNoReading".into(), json!(st.no_reading));
                 o.insert("noBoundary".into(), json!(st.no_boundary));
                 o.insert("boundarySkipped".into(), json!(st.unfilled_skipped));
             }
@@ -946,6 +957,7 @@ pub trait WebDataRpc: WebDataHost {
                 "rejected": contract.rejected,
                 "boundaryFilled": contract.filled,
                 "boundaryAmbiguous": contract.ambiguous,
+                "boundaryNoReading": contract.no_reading,
                 "noBoundary": contract.no_boundary,
                 // 用户选「不补充」时跳过的行数（与 rejected 分开：那是程序判非法，这是用户的选择）。
                 "boundarySkipped": contract.unfilled_skipped,
@@ -986,6 +998,7 @@ pub trait WebDataRpc: WebDataHost {
                             "rejectedSamples": ct.samples,
                             "boundaryFilled": ct.filled,
                             "boundaryAmbiguous": ct.ambiguous,
+                            "boundaryNoReading": ct.no_reading,
                             "noBoundary": ct.no_boundary,
                         }));
                     }
@@ -1001,6 +1014,7 @@ pub trait WebDataRpc: WebDataHost {
                             "rejectedSamples": ct.samples,
                             "boundaryFilled": ct.filled,
                             "boundaryAmbiguous": ct.ambiguous,
+                            "boundaryNoReading": ct.no_reading,
                             "noBoundary": ct.no_boundary,
                         }));
                     }
@@ -1055,6 +1069,7 @@ pub trait WebDataRpc: WebDataHost {
                     "rejectedSamples": contract.samples,
                     "boundaryFilled": contract.filled,
                     "boundaryAmbiguous": contract.ambiguous,
+                    "boundaryNoReading": contract.no_reading,
                     "noBoundary": contract.no_boundary,
                     // ⚠️ 预览恒按「补充」求解（`fill = true`），故这里没有 boundarySkipped：
                     // 那个选择在预览之后、由用户在对话框里做。预览的职责是告诉他
@@ -3643,7 +3658,7 @@ mod tests {
     use wind_coordinator::Coordinator;
     use wind_store::Store;
 
-    /// 拼音词条准入契约的**处置表**：五种裁决 × 两种 fill 选择，各落到哪一档。
+    /// 拼音词条准入契约的**处置表**：六种裁决 × 两种 fill 选择，各落到哪一档。
     ///
     /// ⚠️ 这条测试之所以直接喂 `dispose_contract_rows` 而不走 `dict.import`：本模块的
     /// `coord()` 用 `Config::default()`、没有数据目录 ⇒ 引擎加载不起来 ⇒
@@ -3665,6 +3680,7 @@ mod tests {
             row("angan", "安甘"),    // Ambiguous
             row("wgkq", "工"),       // Unresolvable
             row("verylong", "超长"), // NoInfo（码超 64 字节等）
+            row("zuo", "←"),         // NoReading（issue #97：拼音码 → 符号候选）
         ];
         let verdicts = [
             None,
@@ -3672,14 +3688,19 @@ mod tests {
             Some(B::Ambiguous(0b101)),
             Some(B::Unresolvable),
             Some(B::NoInfo),
+            Some(B::NoReading(0b1)),
         ];
 
         // ① 补充（默认）
         let (kept, st) = dispose_contract_rows(rows.clone(), &verdicts, true);
-        assert_eq!(kept.len(), 4, "只有 Unresolvable 不入库");
+        assert_eq!(kept.len(), 5, "只有 Unresolvable 不入库");
         assert_eq!(st.rejected, 1);
-        assert_eq!(st.filled, 2, "Derived 与 Ambiguous 都算补齐");
+        assert_eq!(st.filled, 3, "Derived / Ambiguous / NoReading 都算补齐");
         assert_eq!(st.ambiguous, 1, "Ambiguous 是 filled 的子集");
+        assert_eq!(
+            st.no_reading, 1,
+            "★ NoReading 单列一档：它入库，但读音表验证不了，用户该知道有多少条"
+        );
         assert_eq!(st.no_boundary, 1);
         assert_eq!(st.unfilled_skipped, 0);
         assert_eq!(kept[0].boundary, None, "层 1 不该被改写");
@@ -3688,12 +3709,21 @@ mod tests {
             Some(0b101),
             "求解结果必须落到 boundary 字段"
         );
-        assert_eq!(st.samples, vec!["wgkq 工".to_string()], "拒收要留样例");
+        assert_eq!(
+            kept[4].boundary,
+            Some(0b1),
+            "★ #97：符号词条要带着解出的单音节边界入库，落 0 会让简拼索引静默失效"
+        );
+        assert_eq!(
+            st.samples,
+            vec!["wgkq 工".to_string()],
+            "拒收要留样例；★ NoReading 不该混进来——它没被拒"
+        );
 
-        // ② 不补充：可补的那两条**跳过**，而不是原样入库
+        // ② 不补充：可补的那三条**跳过**，而不是原样入库
         let (kept, st) = dispose_contract_rows(rows.clone(), &verdicts, false);
-        assert_eq!(kept.len(), 2, "层 1 与 NoInfo 仍入库，可补的两条被跳过");
-        assert_eq!(st.unfilled_skipped, 2);
+        assert_eq!(kept.len(), 2, "层 1 与 NoInfo 仍入库，可补的三条被跳过");
+        assert_eq!(st.unfilled_skipped, 3);
         assert_eq!(st.filled, 0);
         assert_eq!(st.rejected, 1, "拒收与用户的选择无关");
         assert!(
