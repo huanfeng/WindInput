@@ -1116,7 +1116,9 @@ pub struct Coordinator {
     /// 置于 `RwLock`：出厂基表在构造期一次性加载，而**用户覆盖**（候选右键「设为生僻字 /
     /// 设为常用字」、词库管理界面）随时可改，改完必须当场生效。若仍是不可变字段，用户
     /// 就会撞上那类最难查的现象——「设了没反应，重启后才对」。
-    pub(crate) common_chars: std::sync::RwLock<wind_candidate::CommonChars>,
+    /// 常用字表。**`Arc` 是为了让准入判据能被交给引擎**（`ConvertOptions::admit` 要求
+    /// `Send + Sync + 'static` 的闭包，捕获裸字段做不到）；除此之外用法与普通 `RwLock` 相同。
+    pub(crate) common_chars: std::sync::Arc<std::sync::RwLock<wind_candidate::CommonChars>>,
     // Shadow 规则已迁至 redb（self.store 的 SHADOW 表）。
     /// 工具栏位置，按显示器 key（"workRight,workBottom"）独立记录。
     pub(crate) toolbar_positions: Mutex<std::collections::HashMap<String, (i32, i32)>>,
@@ -2045,7 +2047,7 @@ impl Coordinator {
             s2t: Mutex::new(s2t),
             // 只含出厂基表：用户覆盖住在 store 里，而 store 在本结构体构造之后才可用，
             // 故由 new() 里的 `reload_common_chars` 补灌（与 `quick_adjust` 同一套路）。
-            common_chars: std::sync::RwLock::new(common_chars),
+            common_chars: std::sync::Arc::new(std::sync::RwLock::new(common_chars)),
             toolbar_positions: Mutex::new(toolbar_positions_init),
             current_toolbar_monitor: Mutex::new(None),
             reverse: std::sync::RwLock::new(reverse),
