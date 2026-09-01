@@ -478,6 +478,11 @@ impl MessageHandler for Coordinator {
         // 「同主键盘区数字」的语义 = 小键盘键就是主键盘键，故在此改写键码后交由既有主键盘
         // 逻辑接管，一处生效于所有模式。置于最前（仅晚于统计复位）：模式分派、热键、英文
         // 直通等所有后续判断都应看到归一化后的键。direct 时不改写，各模式走自己的 numpad 臂。
+        //
+        // ★ 来源标记必须**在改写之前**取：follow_main 改完键码后就再也分不出这键来自小键盘，
+        // 而 `input.numpad_half_width` 要在出字那一步知道。写进 `state` 见下方加锁处
+        // （此处还没拿到锁）。
+        let numpad_origin = numpad_to_main(data.key_code).is_some();
         let normalized;
         let data = match numpad_to_main(data.key_code) {
             Some((vk, need_shift)) if self.rt().config.input.numpad_behavior == "follow_main" => {
@@ -805,6 +810,9 @@ impl MessageHandler for Coordinator {
         }
 
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // **无条件**写入（含 false）：只在为真时置位会把上一次按键的来源留给这一次，
+        // 表现为「先按一下小键盘、再按主键盘同一个键也出半角」。见 `State::numpad_origin`。
+        state.numpad_origin = numpad_origin;
 
         // 快捷加词模式：消费全部按键（↑↓调词长/Enter确认/Esc退出），先于英文透传与单点分派。
         if state.add_word_active {

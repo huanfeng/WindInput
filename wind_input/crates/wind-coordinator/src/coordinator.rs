@@ -452,6 +452,16 @@ pub(crate) struct State {
     /// 数次的日常事件。字段保留是因为 tooltip 与未来的权威状态上报仍要用它。
     pub(crate) focus_no_edit_ctx: bool,
     pub(crate) caps_lock: bool,
+    /// **本次按键**是否来自小键盘（原始键码在 `numpad_to_main` 覆盖内）。
+    ///
+    /// 存在的唯一理由是 `numpad_behavior = follow_main` 会在 `handle_key_event` 入口
+    /// 把 `VK_NUMPAD2` **改写成** `VK_2`，此后全部下游再也分不出这键来自哪块键盘，
+    /// 而 `input.numpad_half_width` 恰恰要在**出字那一步**知道来源。
+    ///
+    /// ⚠️ 每次 `handle_key_event` 拿到锁后**无条件写入**（不是「只在为真时置位」），
+    /// 否则会留下上一次按键的陈旧值。读它的地方只有出字点，见
+    /// [`Coordinator::numpad_raw_output`]。
+    pub(crate) numpad_origin: bool,
     pub(crate) input_buffer: String,
     /// `input_buffer` 的「原始大小写」影子串：用户按 Shift+字母打出的大写只存在这里。
     /// 空 = 没有大写；与缓冲失配同样视为没有大写（见 `preedit_cursor::cased_is_valid`）。
@@ -1961,6 +1971,7 @@ impl Coordinator {
                 has_edit_context: false, // 同上：焦点尚未落到任何可编辑控件
                 focus_no_edit_ctx: false, // 尚无权威判定，不表态
                 caps_lock: false,
+                numpad_origin: false, // 每次按键入口无条件重写，此处只是占位初值
                 input_buffer: String::new(),
                 input_buffer_cased: String::new(),
                 input_cursor_pos: 0,
@@ -4242,7 +4253,9 @@ impl Coordinator {
         // 英文补空格（`schema.english.commit_space`）**刻意不接这里**：本函数的用途是
         // 「顶掉高亮候选 + 紧接着上屏这个字符」，补了会得到 `hello ,` 这种断开的标点。
         // 不是漏接。
-        out.push_str(&if state.full_width {
+        // `numpad_raw_output`：小键盘恒半角时不转全角（普通模式 direct 档的落点，
+        // 也是这个开关最常被触发的一条路——空缓冲下按小键盘数字就走这里）。
+        out.push_str(&if state.full_width && !self.numpad_raw_output(state) {
             to_full_width(&ch.to_string())
         } else {
             ch.to_string()

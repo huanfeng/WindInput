@@ -513,6 +513,122 @@ fn test_numpad_follow_main_empty_passthrough() {
     );
 }
 
+/// 全角态、指定 numpad 档位与中英模式的协调器。
+fn coord_full_width(
+    numpad_behavior: &str,
+    half_width: bool,
+    chinese: bool,
+) -> std::sync::Arc<Coordinator> {
+    let mut cfg = config_with("wubi86");
+    cfg.input.numpad_behavior = numpad_behavior.into();
+    cfg.input.numpad_half_width = half_width;
+    // remember_last_state 会让三态改从 state.toml 恢复，全角就设不上了。
+    cfg.input.default.remember_last_state = false;
+    cfg.input.default.full_width = true;
+    cfg.input.default.chinese_mode = chinese;
+    Coordinator::new_headless(cfg, Some(&data_dir()))
+}
+
+#[test]
+fn test_numpad_half_width_direct() {
+    if !has_schemas() {
+        return;
+    }
+    // direct 档、空缓冲：出厂（开关关）走 commit_highlight_then_char 的 to_full_width。
+    let off = coord_full_width("direct", false, true);
+    assert_eq!(
+        action_text(&off.handle_key_event(&key_event(0x65, EVENT_KEY_DOWN))).unwrap_or_default(),
+        "５",
+        "开关关时 direct 小键盘 5 应出全角"
+    );
+
+    let on = coord_full_width("direct", true, true);
+    assert_eq!(
+        action_text(&on.handle_key_event(&key_event(0x65, EVENT_KEY_DOWN))).unwrap_or_default(),
+        "5",
+        "开关开时 direct 小键盘 5 应出半角"
+    );
+    // 小键盘小数点：direct 档不走中文标点，只被全角转换成 `．`；开关开后回 ASCII。
+    let on_dot = coord_full_width("direct", true, true);
+    assert_eq!(
+        action_text(&on_dot.handle_key_event(&key_event(0x6E, EVENT_KEY_DOWN))).unwrap_or_default(),
+        ".",
+        "开关开时 direct 小键盘 . 应出半角"
+    );
+}
+
+#[test]
+fn test_numpad_half_width_follow_main() {
+    if !has_schemas() {
+        return;
+    }
+    // follow_main 档：键已归一化成主键盘键、来源只剩 `State::numpad_origin` 一个凭据，
+    // 空缓冲数字落 convert_punct 流水线。
+    let off = coord_full_width("follow_main", false, true);
+    assert_eq!(
+        action_text(&off.handle_key_event(&key_event(0x67, EVENT_KEY_DOWN))).unwrap_or_default(),
+        "７",
+        "开关关时 follow_main 小键盘 7 应出全角"
+    );
+
+    let on = coord_full_width("follow_main", true, true);
+    assert_eq!(
+        action_text(&on.handle_key_event(&key_event(0x67, EVENT_KEY_DOWN))).unwrap_or_default(),
+        "7",
+        "开关开时 follow_main 小键盘 7 应出半角"
+    );
+    // 小键盘 `.` 在 follow_main 下归一化成 VK_PERIOD，本会被中文标点转成「。」——
+    // 开关的语义是整条流水线跳过，故这里也必须是 ASCII。
+    let on_dot = coord_full_width("follow_main", true, true);
+    assert_eq!(
+        action_text(&on_dot.handle_key_event(&key_event(0x6E, EVENT_KEY_DOWN))).unwrap_or_default(),
+        ".",
+        "开关开时 follow_main 小键盘 . 应出半角（不转中文句号）"
+    );
+}
+
+#[test]
+fn test_numpad_half_width_english_mode() {
+    if !has_schemas() {
+        return;
+    }
+    // 英文模式全角走 handle_english_full_width → convert_punct，同样受管辖
+    // （用户拍板：中英两种模式都生效）。
+    let off = coord_full_width("direct", false, false);
+    assert_eq!(
+        action_text(&off.handle_key_event(&key_event(0x65, EVENT_KEY_DOWN))).unwrap_or_default(),
+        "５",
+        "英文模式开关关时小键盘 5 应出全角"
+    );
+
+    let on = coord_full_width("direct", true, false);
+    assert_eq!(
+        action_text(&on.handle_key_event(&key_event(0x65, EVENT_KEY_DOWN))).unwrap_or_default(),
+        "5",
+        "英文模式开关开时小键盘 5 应出半角"
+    );
+}
+
+#[test]
+fn test_numpad_half_width_leaves_main_keyboard_alone() {
+    if !has_schemas() {
+        return;
+    }
+    // ★ 守 `State::numpad_origin` 的**无条件重写**：只在为真时置位的话，先按一次小键盘
+    // 会把来源标记留给后面的主键盘按键，表现为「主键盘数字也跟着出半角」。
+    let coord = coord_full_width("direct", true, true);
+    assert_eq!(
+        action_text(&coord.handle_key_event(&key_event(0x65, EVENT_KEY_DOWN))).unwrap_or_default(),
+        "5",
+        "小键盘 5 应出半角"
+    );
+    assert_eq!(
+        action_text(&coord.handle_key_event(&key_event(0x37, EVENT_KEY_DOWN))).unwrap_or_default(),
+        "７",
+        "紧接着的主键盘 7 仍应出全角（开关只管小键盘）"
+    );
+}
+
 #[test]
 fn test_pinyin_basic_input() {
     if !has_schemas() {

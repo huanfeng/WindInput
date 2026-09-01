@@ -405,6 +405,10 @@ enter_behavior = "commit"
 space_on_empty_behavior = "commit"
 punct_on_empty_behavior = "clear"
 numpad_behavior = "direct"
+# 小键盘恒半角：开启后小键盘的 0-9 与 . + - * / 在全角态下仍输出半角，且不走中文标点与
+# 自定义标点映射。与 numpad_behavior 正交（follow_main 下照常选词，只改出字）。
+# 仅覆盖「单键直接上屏」的路径；临英/网址/快捷输入等先入缓冲的模式不受影响。
+numpad_half_width = false
 # 顶码上屏时「已确认文字」如何落到宿主（内部/实验项，设置页不暴露）：
 #   direct_commit（默认）= 顶码时真提交，余码的新组合延到触发键 keyup 才开，靠隔一拍
 #                          消息泵躲开 diff 合并；无下划线歧义、WPS 智能标点顶屏不清空。

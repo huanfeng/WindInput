@@ -70,6 +70,22 @@ impl Coordinator {
         wind_punct::is_smart_punct_after_digit(&self.rt().config.input.punct, ch, prev_char)
     }
 
+    /// 小键盘恒半角（`input.numpad_half_width`）对**本次按键**是否生效。
+    ///
+    /// 为真时调用方必须**原样输出 ASCII**：跳过整条标点流水线（自定义映射 / 中文标点 /
+    /// 全半角三步全不走），而不是只跳过全半角那一步。用户拍板的语义是「小键盘就是数字
+    /// 键盘」，`direct` 与 `follow_main` 两档在此统一——此前同一个小键盘 `.`，direct 出
+    /// `．`、follow_main 出 `。`。
+    ///
+    /// ⚠️ **凡是「小键盘字符直接上屏」的路径都必须问它**，漏接一处的症状是「某个模式下
+    /// 开关静默无效、零日志」。现有调用点：本文件 `convert_punct`（流水线总口）、
+    /// `commit_highlight_then_char`（普通模式 direct）、临拼 numpad 臂、数字键越界
+    /// `commit_and_input`。缓冲类模式（临英 / URL / mix）**刻意不接**，见
+    /// `InputConfig::numpad_half_width` 的能力边界说明。
+    pub(crate) fn numpad_raw_output(&self, state: &State) -> bool {
+        state.numpad_origin && self.rt().config.input.numpad_half_width
+    }
+
     /// 按当前中英标点/全半角配置转换一个标点字符为上屏文本（无 prev_char 上下文）。
     /// 用于独占模式（快捷输入/临时英文）等不涉及数字后智能的场景。
     pub(crate) fn convert_punct_char(&self, state: &State, ch: char) -> String {
@@ -84,6 +100,13 @@ impl Coordinator {
     ///
     /// `prev_char` 为光标前一字符的 UTF-16 单元（0=不可用），用于数字后智能判定。
     pub(crate) fn convert_punct(&self, state: &State, ch: char, prev_char: u16) -> String {
+        // 小键盘恒半角：整条流水线跳过（不只是第 4 步）。`ch` 进来时已是 ASCII 原形，
+        // 故原样返回即可，无须回推字符。这是本开关最主要的一处收口——英文全角、
+        // CapsLock 全角、follow_main 归一化后的数字/标点臂、临英的 convert_punct_char
+        // 全都汇聚于此。
+        if self.numpad_raw_output(state) {
+            return ch.to_string();
+        }
         let bundle = self.rt();
         let punct = self.effective_punct(&bundle, state);
         let mut conv = self.punct.lock().unwrap_or_else(|e| e.into_inner());

@@ -2850,6 +2850,20 @@ pub struct InputConfig {
     pub punct_on_empty_behavior: String,
     #[serde(default = "default_numpad_behavior")]
     pub numpad_behavior: String,
+    /// 小键盘恒半角：开启后小键盘的 `0-9` 与 `. + - * /` 在**全角态下仍输出 ASCII 原形**，
+    /// 且**整条标点流水线一并跳过**（自定义映射四态表 / 中文标点 / 全半角三步全不走）。
+    ///
+    /// 语义是「设备级」而非「字符级」——小键盘的用途就是录数字（金额 / 编号 / 日期），
+    /// 全角 `１２３` 在表格与编号栏里几乎总是错的，而用户开全角通常只为排版正文。
+    /// 故它与 [`Self::numpad_behavior`] **正交**：`follow_main` 下小键盘仍照常选词 / 翻页
+    /// （归一化照做），只有落到**出字**那一步才改半角。
+    ///
+    /// ⚠️ 覆盖面止于「单键直接上屏」的路径。临英 / URL / mix 等**缓冲类**模式下，
+    /// 小键盘字符先入缓冲、整串上屏时才全角化，而缓冲只存字符不存来源，
+    /// `"abc12"` 里的 `12` 是不是小键盘打的已无从分辨 ⇒ 那几条路不受本开关影响。
+    /// 这是刻意的能力边界，不是漏接。
+    #[serde(default)]
+    pub numpad_half_width: bool,
     /// 启动默认状态（记住上次状态 / 默认中文 / 全角 / 中文标点；原 general 域）。
     #[serde(default)]
     pub default: InputDefaultConfig,
@@ -2905,6 +2919,7 @@ impl Default for InputConfig {
             space_on_empty_behavior: "commit".to_string(),
             punct_on_empty_behavior: default_punct_on_empty_behavior(),
             numpad_behavior: default_numpad_behavior(),
+            numpad_half_width: false,
             default: InputDefaultConfig::default(),
             punct: PunctConfig::default(),
             symbol: SymbolConfig::default(),

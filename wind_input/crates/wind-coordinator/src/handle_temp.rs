@@ -737,7 +737,8 @@ impl Coordinator {
                     state.committed_text.push_str(&cand.text);
                 }
                 let head = self.maybe_s2t(state, &state.committed_text.clone());
-                let tail = if state.full_width {
+                // 小键盘恒半角：不转全角（临拼 direct 档的落点）。
+                let tail = if state.full_width && !self.numpad_raw_output(state) {
                     to_full_width(&ch.to_string())
                 } else {
                     ch.to_string()

@@ -264,6 +264,7 @@ static REGISTRY: &[ConfigField] = &[
         Enum(PUNCT_EMPTY_CODE_BEHAVIOR_VALUES),
     ),
     f("input.numpad_behavior", Str),
+    f("input.numpad_half_width", Bool),
     // 启动默认状态（原 general 域）
     f("input.default.remember_last_state", Bool),
     f("input.default.state_scope", Enum(&["global", "app"])),

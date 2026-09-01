@@ -2690,7 +2690,9 @@ impl Coordinator {
                 self.commit_selected(state, &cand, state.selected_index as i32)
             }
             "commit_and_input" => {
-                let full_width = state.full_width;
+                // 小键盘恒半角：follow_main 下小键盘数字选词越界会落到这里，顶字之后
+                // 补的那个数字同样要跟着走半角。
+                let full_width = state.full_width && !self.numpad_raw_output(state);
                 let cand = state.candidates[hi].clone();
                 let act = self.commit_selected(state, &cand, state.selected_index as i32);
                 let digit = (b'0' + (num % 10) as u8) as char;
