@@ -120,6 +120,37 @@ fn str_param<'a>(p: &'a Value, key: &str) -> anyhow::Result<&'a str> {
         .ok_or_else(|| anyhow::anyhow!("缺少参数 {}", key))
 }
 
+/// 导入类方法的文本来源：**`path` 优先，`content` 回落**。
+///
+/// ## 为什么要有 `path` 这条路
+///
+/// 走 `content` 时整份词库要塞进一帧 JSON-RPC，而设置端的读帧上限是 16MB
+/// （`wind-setting::rpc::MAX_FRAME`）。按每条约 30 字节（含 JSON 对 `\t\n` 的转义）算，
+/// 单是用户词库就在 55 万条左右撞墙，带上词频/候选调整等段则 25 万条起——**这是随词库
+/// 增长必然撞上的墙，不是偶发**。见 issue #101（用户实测报「帧长超限」）。
+///
+/// `path` 让 payload 从 O(词库大小) 降到 O(1)，上限**消失**而不是提高。这不是新花样：
+/// `backup.*` 一直就是这么传的（见 [`WebData::web_backup_create`]），本函数只是把
+/// `dict.*` 拉齐到同一套做法。
+///
+/// ## 为什么 `content` 必须留着
+///
+/// 两类调用方没有文件可指：命令行的管道用法，以及设置端「纯词列表」那条路——它把用户
+/// 的词表分批送去出码、在内存里拼成 TSV 再导入，那份 TSV 从来不落盘。
+///
+/// ⚠️ 路径不做额外校验，与 `backup.*` 保持一致：它来自用户在本机文件对话框里的选择，
+/// 与 core 同权限同用户。在这一处单独立一套规矩，只会让两条路的行为解释不通。
+fn dict_source_text(params: &Value) -> anyhow::Result<std::borrow::Cow<'_, str>> {
+    if let Some(path) = params.get("path").and_then(|v| v.as_str())
+        && !path.is_empty()
+    {
+        let s = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("读取 {} 失败：{}", path, e))?;
+        return Ok(std::borrow::Cow::Owned(s));
+    }
+    Ok(std::borrow::Cow::Borrowed(str_param(params, "content")?))
+}
+
 /// 按设置页点选的列给常用字列表排序。`sort_by` 为空 = 不动，保持字表原序。
 ///
 /// ## 为什么 `"text"` 也要认
@@ -781,6 +812,10 @@ pub trait WebDataRpc: WebDataHost {
     }
 
     /// 导出方案数据为单个多段 wdict 文件。`sections` 参数选类型；缺省按引擎类型取默认适用段。
+    ///
+    /// 带 `path` 时**由 core 直接写盘**、只回报字节数；缺省仍回 `{content}`。理由同
+    /// [`dict_source_text`]：整库走一帧 JSON 会在几十万条上撞设置端的 16MB 读帧上限
+    /// （issue #101 就是在这里报的「帧长超限」）。
     fn web_dict_export(&self, params: &Value) -> anyhow::Result<Value> {
         let schema_id = str_param(params, "schemaId")?;
         let data_schema = self.engine_mgr().data_schema_id(schema_id); // 拼音族折叠到 "pinyin"
@@ -800,6 +835,13 @@ pub trait WebDataRpc: WebDataHost {
             &chrono::Local::now().to_rfc3339(),
             etype,
         )?;
+        if let Some(path) = params.get("path").and_then(|v| v.as_str())
+            && !path.is_empty()
+        {
+            std::fs::write(path, &content)
+                .map_err(|e| anyhow::anyhow!("写入 {} 失败：{}", path, e))?;
+            return Ok(json!({ "path": path, "bytes": content.len() }));
+        }
         Ok(json!({ "content": content }))
     }
 
@@ -874,7 +916,8 @@ pub trait WebDataRpc: WebDataHost {
         use wind_transfer::merge::Strategy;
         let schema_id = str_param(params, "schemaId")?;
         let data_schema = self.engine_mgr().data_schema_id(schema_id);
-        let content = str_param(params, "content")?;
+        let content = dict_source_text(params)?;
+        let content = content.as_ref();
         let replace = Strategy::from_param(
             params
                 .get("strategy")
@@ -970,7 +1013,8 @@ pub trait WebDataRpc: WebDataHost {
         use wind_store::dict_export::DictSection;
         let schema_id = str_param(params, "schemaId")?;
         let data_schema = self.engine_mgr().data_schema_id(schema_id);
-        let content = str_param(params, "content")?;
+        let content = dict_source_text(params)?;
+        let content = content.as_ref();
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
@@ -3730,6 +3774,87 @@ mod tests {
             kept.iter().all(|r| r.text != "安甘"),
             "★ 不补充 ≠ 照原样导入：boundary=0 的拼音词条正是契约要消灭的东西"
         );
+    }
+
+    /// 导入导出的**文件路径通道**：`dict.export` 直接写盘、`dict.*Import` 直接读盘。
+    ///
+    /// ★ 这条守的是 issue #101 的修法。走 `content` 时整库要穿过一帧 JSON-RPC，而设置端
+    /// 读帧上限 16MB，几十万条必撞（用户实测报「帧长超限」）。传路径后 payload 是 O(1)。
+    ///
+    /// ⚠️ **必须真做一次往返**，不能只断言「没报错」：`path` 参数被忽略、退回读 `content`
+    /// 是最可能的回归形态，而那时缺 `content` 只会报「缺少参数」——看起来像别的毛病。
+    /// 这里 import 一侧**只传 path 不传 content**，正是为了让那种退化立刻现形。
+    #[test]
+    fn dict_io_round_trips_through_file_path() {
+        let c = coord("dictpath");
+        c.web_data_rpc(
+            "dict.add",
+            &json!({ "schemaId": "wb", "code": "a", "text": "工", "weight": 100 }),
+        )
+        .unwrap();
+
+        let out = std::env::temp_dir().join("wind_webdata_dictpath_export.wdict.yaml");
+        let _ = std::fs::remove_file(&out);
+        let path = out.to_string_lossy().to_string();
+
+        // 导出：回的是落点与字节数，**不再回全文**
+        let exp = c
+            .web_data_rpc("dict.export", &json!({ "schemaId": "wb", "path": path }))
+            .unwrap();
+        assert!(
+            exp.get("content").is_none(),
+            "带 path 时不该再回全文：{exp}"
+        );
+        assert_eq!(
+            exp.get("path").and_then(|v| v.as_str()),
+            Some(path.as_str())
+        );
+        let written = std::fs::read_to_string(&out).expect("core 应已把文件写出来");
+        assert!(
+            written.contains("--- !words"),
+            "写出来的得是 wdict：{written}"
+        );
+        assert_eq!(
+            exp.get("bytes").and_then(|v| v.as_u64()),
+            Some(written.len() as u64),
+            "回报的字节数要与落盘一致"
+        );
+
+        // 预览 + 导入：只给路径
+        let prev = c
+            .web_data_rpc(
+                "dict.previewImport",
+                &json!({ "schemaId": "wb2", "path": path }),
+            )
+            .unwrap();
+        assert_eq!(
+            sec(&prev, "userWords")
+                .get("willAdd")
+                .and_then(|v| v.as_u64()),
+            Some(1),
+            "★ 预览必须从文件里读到内容，而不是把 path 当没看见"
+        );
+        let imported = c
+            .web_data_rpc("dict.import", &json!({ "schemaId": "wb2", "path": path }))
+            .unwrap();
+        assert_eq!(
+            sec(&imported, "userWords")
+                .get("added")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+
+        // 反向对照：路径不存在要**报错**，不能静默当成空文件导入 0 条。
+        let bad = c.web_data_rpc(
+            "dict.import",
+            &json!({ "schemaId": "wb2", "path": "Z:\\no\\such\\file.yaml" }),
+        );
+        assert!(
+            bad.is_err(),
+            "读不到的路径必须报错，否则用户看到「导入 0 条」会以为文件坏了"
+        );
+
+        let _ = std::fs::remove_file(&out);
     }
 
     /// 构造一个带临时 store 的无头 Coordinator。
