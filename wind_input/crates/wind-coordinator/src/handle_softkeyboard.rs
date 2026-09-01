@@ -115,6 +115,63 @@ impl Coordinator {
             .unwrap_or_default()
     }
 
+    /// 软键盘开合 / 换面**之后**要做的三件事，一处收口。
+    ///
+    /// # 为什么必须收口
+    ///
+    /// 关闭软键盘有五条路径（Esc、面板关闭按钮、热键、工具栏点击、菜单、失焦），此前
+    /// 只有工具栏与菜单两条记得刷工具栏 ⇒ **用 Esc 或面板关闭按钮关掉后，工具栏上的
+    /// 软键盘图标一直亮着**。让每个调用点各记一次注定要漏，且漏的表现是「图标不对」
+    /// 这种没人会当成 bug 报的小事。
+    ///
+    /// 三件事：
+    /// 1. 推 C++（`STATUS_SOFT_KEYBOARD*` 位，吃键判定要跟上）；
+    /// 2. 刷工具栏（图标高亮 = `softkeyboard_is_open()`）；
+    /// 3. 记住当前面（换面才写盘，见 [`Self::save_softkeyboard_page`]）。
+    ///
+    /// ⚠️ **只能在不持 `State` 锁时调用**：`notify_toolbar` 内部要读 state，而
+    /// `std::sync::Mutex` 不可重入。按键路径上由 `SoftKeyboardPushOnDrop` 负责——那个
+    /// RAII 守卫声明在 `handle_key_event` 最开头，故析构得最晚，那时 guard 已经还了。
+    pub(crate) fn after_softkeyboard_change(&self) {
+        self.push_state_update();
+        self.notify_toolbar();
+        self.save_softkeyboard_page();
+    }
+
+    /// 把当前面的 id 记进 `state.toml`（与上次记的相同则不写盘）。
+    ///
+    /// 存 id 而非下标的理由见 `RuntimeState::last_softkeyboard_page`。
+    /// 去重是因为本函数挂在「软键盘状态变了」这个收口上，而开合远比换面频繁——
+    /// 每次开关都 load-modify-save 一遍整个 state.toml 是白费。
+    fn save_softkeyboard_page(&self) {
+        let Some(id) = self
+            .softkeyboard
+            .pages()
+            .get(self.softkeyboard_page_idx())
+            .map(|p| p.id.clone())
+        else {
+            return;
+        };
+        {
+            let mut last = self
+                .softkeyboard_page_saved
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if *last == id {
+                return;
+            }
+            *last = id.clone();
+        }
+        let Some(dir) = wind_config::Config::state_dir() else {
+            return;
+        };
+        let mut rs = wind_config::RuntimeState::load(&dir);
+        rs.last_softkeyboard_page = id;
+        if let Err(e) = rs.save(&dir) {
+            warn!("软键盘: 保存当前面失败: {e}");
+        }
+    }
+
     /// 开关软键盘。
     ///
     /// `page` 非空时**无论开关状态都切到那一面**（直通车语义）：按一次进数学面，再按
@@ -236,7 +293,7 @@ impl Coordinator {
         }
         debug!("softkeyboard: closed by focus change ({why})");
         self.close_softkeyboard();
-        self.push_state_update();
+        self.after_softkeyboard_change();
     }
 
     /// 切到指定 id 的面。面不存在返回 `false` 并告警——**不静默忽略**：用户配了
@@ -494,14 +551,14 @@ impl Coordinator {
         self.softkeyboard_page.store(idx, Ordering::Relaxed);
         self.push_softkeyboard_view();
         // UI 事件不在按键路径上，没有那个 RAII guard 兜底，得自己推：切面可能改变
-        // `STATUS_SOFT_KEYBOARD_KEYS`，C++ 的吃键判定要跟上。
-        self.push_state_update();
+        // `STATUS_SOFT_KEYBOARD_KEYS`，C++ 的吃键判定要跟上；换了面也要记下来。
+        self.after_softkeyboard_change();
     }
 
     /// 面板上点了关闭按钮。
     pub(crate) fn ui_softkeyboard_close(&self) {
         self.close_softkeyboard();
-        self.push_state_update();
+        self.after_softkeyboard_change();
     }
 
     /// 面板上点了特殊键（退格 / Tab / 回车 / 空格 / Ins / Del）。
@@ -542,7 +599,7 @@ pub(crate) struct SoftKeyboardPushOnDrop<'a>(pub(crate) &'a Coordinator);
 impl Drop for SoftKeyboardPushOnDrop<'_> {
     fn drop(&mut self) {
         if self.0.softkeyboard_dirty.swap(false, Ordering::Relaxed) {
-            self.0.push_state_update();
+            self.0.after_softkeyboard_change();
         }
     }
 }

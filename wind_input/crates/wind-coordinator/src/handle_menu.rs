@@ -157,16 +157,14 @@ impl Coordinator {
             }
             MenuCmd::ToggleSoftKeyboard => {
                 self.toggle_softkeyboard(None);
-                self.push_state_update();
-                self.notify_toolbar();
+                self.after_softkeyboard_change();
             }
             MenuCmd::SoftKeyboardPage(i) => {
                 // 菜单选面：面板没开就顺带开出来，否则「选了个面却什么都没发生」。
                 if !self.softkeyboard_is_open() {
                     self.open_softkeyboard(None);
-                    self.push_state_update();
-                    self.notify_toolbar();
                 }
+                // 收口在 `ui_softkeyboard_page` 里，开面板那一步不必自己再推一次。
                 self.ui_softkeyboard_page(i);
             }
             MenuCmd::ToggleS2t => {
@@ -1703,8 +1701,7 @@ impl Coordinator {
                 // 不走 `handle_menu_command` 的动词表：软键盘开启要接管后续按键，
                 // 与 `add_word` 同类，不符 `dispatch_hotkey` 的 bool 契约。
                 self.toggle_softkeyboard(None);
-                self.push_state_update();
-                self.notify_toolbar();
+                self.after_softkeyboard_change();
                 return;
             }
             _ => {}

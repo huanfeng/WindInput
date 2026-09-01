@@ -39,6 +39,24 @@ pub struct RuntimeState {
     /// 工具栏位置，按显示器 key（"workRight,workBottom"）独立记录。
     #[serde(default)]
     pub toolbar_positions: HashMap<String, (i32, i32)>,
+    /// 软键盘上次停在哪一面（面 **id**）。空 = 没记录过，开在第一面。
+    ///
+    /// # 为什么存 id 不存下标
+    ///
+    /// 这份状态跨重启，而面表来自配置（`softkeyboard.toml` 与定制层），用户在两次运行
+    /// 之间增删一面，下标就**必然**指到别的面上。`SoftKeyboardTable::index_of` 按 id
+    /// 找不到就当没记录，比默默开到一个陌生的面好。
+    ///
+    /// ⚠️ 与 `ToolbarAction::Custom(u8)` 那个**刻意用下标**的载荷不是一回事：那条是同一
+    /// 进程内的一次回指，两端之间最多隔着一瞬的配置重载；这条两端之间隔着一次重启。
+    ///
+    /// # 为什么不受 `input.default.remember_last_state` 门控
+    ///
+    /// 那个开关管的是**输入态**（中英 / 全半角 / 标点）——它会改变用户下一次开始打字的
+    /// 行为，确实有人想每次都从中文半角起步。而「面板上次停在哪一页」不是输入态，是
+    /// 界面便利，与 [`Self::toolbar_positions`] 同类：没有人会想要「每次都跳回第一面」。
+    #[serde(default)]
+    pub last_softkeyboard_page: String,
     /// 候选框固定位置（pin_candidate_position 启用时）。
     /// 外层 key = 进程名（小写），内层 key = 显示器 key。
     #[serde(default)]
@@ -53,6 +71,7 @@ impl Default for RuntimeState {
             last_chinese_punct: true,
             langbar_icon_size_marks: None,
             toolbar_positions: HashMap::new(),
+            last_softkeyboard_page: String::new(),
             candidate_pin_positions: HashMap::new(),
         }
     }

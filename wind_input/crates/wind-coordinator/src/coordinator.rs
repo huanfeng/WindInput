@@ -1154,8 +1154,15 @@ pub struct Coordinator {
     ///
     /// 语义上它也确实与输入状态正交：软键盘不组码、不产候选、不进 `ModeKind`。
     pub(crate) softkeyboard_active: std::sync::atomic::AtomicBool,
-    /// 当前面在 [`Self::softkeyboard`] 里的下标。关闭再开会停在同一面。
+    /// 当前面在 [`Self::softkeyboard`] 里的下标。关闭再开会停在同一面，
+    /// **重启也会**（启动时按 `RuntimeState::last_softkeyboard_page` 的面 id 还原）。
     pub(crate) softkeyboard_page: std::sync::atomic::AtomicUsize,
+    /// 已写进 `state.toml` 的面 id，用于去重写盘。
+    ///
+    /// 落盘挂在「软键盘状态变了」那个收口上（`after_softkeyboard_change`），而**开合远比
+    /// 换面频繁**——每次开关都 load-modify-save 一遍整个 state.toml 是白费。初值取自启动
+    /// 时读到的那一份，故「开了面板、没换面、关掉」全程零写盘。
+    pub(crate) softkeyboard_page_saved: std::sync::Mutex<String>,
     /// 软键盘状态有变、待推给 C++。由 `SoftKeyboardPushOnDrop` 在按键返回时消费。
     pub(crate) softkeyboard_dirty: std::sync::atomic::AtomicBool,
     /// 软键盘打开时刻，供焦点路径的关闭守卫用。**必须与开启成对写入**，理由同
@@ -1911,6 +1918,12 @@ impl Coordinator {
             .map(|d| wind_config::RuntimeState::load(&d))
             .unwrap_or_default();
         let toolbar_positions_init = runtime_state.toolbar_positions.clone();
+        // 软键盘上次停在哪一面：按**面 id** 还原（面表来自配置，两次运行之间可能增删面，
+        // 存下标必然指到别处）。id 找不到就当没记录过、开在第一面——那比默默开到一个
+        // 陌生的面好。
+        let softkeyboard_page_init = softkeyboard
+            .index_of(&runtime_state.last_softkeyboard_page)
+            .unwrap_or(0);
         // 主题目录按层序展开（user > custom > data），各层的 `themes/`。
         let theme_layers: Vec<wind_config::ResourceLayer> =
             Config::resource_layers_named_with(data_dir)
@@ -2056,7 +2069,10 @@ impl Coordinator {
             quick_formats,
             softkeyboard,
             softkeyboard_active: std::sync::atomic::AtomicBool::new(false),
-            softkeyboard_page: std::sync::atomic::AtomicUsize::new(0),
+            softkeyboard_page: std::sync::atomic::AtomicUsize::new(softkeyboard_page_init),
+            softkeyboard_page_saved: std::sync::Mutex::new(
+                runtime_state.last_softkeyboard_page.clone(),
+            ),
             softkeyboard_dirty: std::sync::atomic::AtomicBool::new(false),
             softkeyboard_opened_at: std::sync::Mutex::new(None),
             // 空初值：真正的装载在 new() 里经 `reload_quick_adjust` 完成（需要 store，
