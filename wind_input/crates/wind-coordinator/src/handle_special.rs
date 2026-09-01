@@ -195,6 +195,40 @@ impl Coordinator {
         self.rt().rare_char_blocks
     }
 
+    /// 交给引擎的生僻字准入闭包（仅生僻字模式；其余模式返回 `None` = 不筛）。
+    ///
+    /// 与 [`Self::retain_rare_admitted`] **同一个判据**（都走 `wind_candidate::rare_admits`），
+    /// 差别只在施加的位置：这个在引擎产出候选时逐条判，那个在拿到结果后兜底。
+    /// ⚠️ 两者必须同源——引擎侧放行、调用方侧却滤掉的候选，会白白占掉引擎的配额；
+    /// 反过来则是「引擎筛掉了调用方本想要的」，表现为候选莫名其妙地少。
+    ///
+    /// 常用字表**未加载**时返回 `None`（不筛），与 `retain_rare_admitted` 的同款保护
+    /// 一致：那时全体候选都会被判成「非常用」，筛了等于没筛，还白付一次判定。
+    fn rare_admit_fn(
+        &self,
+        state: &State,
+    ) -> Option<std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>> {
+        if !matches!(state.active, Some(ModeKind::RareChar)) {
+            return None;
+        }
+        if self
+            .common_chars
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+        {
+            return None;
+        }
+        // Arc 克隆而非借用：`ConvertOptions::admit` 要求 `'static`（它可能被引擎存进
+        // 局部闭包里传递）。克隆的是 Arc 本身，表数据不复制。
+        let cc = self.common_chars.clone();
+        let extra = self.rare_char_blocks();
+        Some(std::sync::Arc::new(move |text: &str| {
+            let g = cc.read().unwrap_or_else(|e| e.into_inner());
+            wind_candidate::rare_admits(text, &g, extra)
+        }))
+    }
+
     /// 对当前候选施加生僻字准入（仅生僻字模式；其余模式为空操作）。
     fn apply_rare_admission(&self, state: &mut State) {
         if !matches!(state.active, Some(ModeKind::RareChar)) {
@@ -239,6 +273,11 @@ impl Coordinator {
     ///
     /// 那是**每次按键**都要付的。故只在真的不够时才付：候选少的码（绝大多数）一次到位，
     /// 高频音节多付一次重取。⛔ 别改成无条件的大上限。
+    ///
+    /// ⚠️ **准入已下推给引擎**（`ConvertOptions::admit`）之后本函数仍然必需：那个下推
+    /// 判定在 `push_unique`，而词库层已按上限取过 top-N，滤掉的名额不补——实测下推后
+    /// `limit=100` 时 `y`/`sh` 的合格候选仍是 **0**。下推买到的是查重成本：`y` 的端到端
+    /// 耗时 148.7ms → 50.0ms。两者是「够不够」与「快不快」的分工，缺一不可。
     ///
     /// 重取上限取 [`RARE_REFILL_LIMIT`]＝1000，与拼音引擎的 `MAX_COMPLETION_CANDIDATES`
     /// 对齐：再大也被那里 clamp 掉，实测 2000 与 1000 的条数、耗时完全相同，写 2000 只会
@@ -330,9 +369,19 @@ impl Coordinator {
             return None;
         }
         let schema = self.overlay_engine_schema(state)?;
-        let result =
-            self.engine_mgr
-                .convert_with(&schema, &state.special_buffer, SPECIAL_CONVERT_LIMIT);
+        // 生僻字模式把准入**下推给引擎**：上限施加在过滤之前，事后 retain 只能在被截断过
+        // 的那一段里筛（拼音 `yi` 事后过滤只剩 4 条，而该音实际有 1183 个非常用字）。
+        // 详见 `ConvertOptions::admit`。其余模式传 None，行为与本改动前逐条一致。
+        let opts = wind_engine::ConvertOptions {
+            admit: self.rare_admit_fn(state),
+            ..Default::default()
+        };
+        let result = self.engine_mgr.convert_with_opts(
+            &schema,
+            &state.special_buffer,
+            SPECIAL_CONVERT_LIMIT,
+            opts,
+        );
         // 统一展开汇聚点：快符表内 `$AA/$SS/$CC` 等特殊语法在此炸开/标命令（见 finalize_candidates）。
         state.candidates = self.finalize_candidates(result.candidates, &state.special_buffer);
         // 生僻字模式：候选只留生僻字。放在 finalize **之后**——判据要看候选的最终文本，
@@ -1002,6 +1051,55 @@ mod tests {
             cfg.schema.active = "wubi86".into();
             cfg.schema.available = vec!["wubi86".into()];
             Some(Coordinator::new_headless(cfg, Some(&d)))
+        }
+
+        /// ★ 下推给引擎的准入与调用方兜底的过滤**必须同源**。
+        ///
+        /// 两者现在都走 `wind_candidate::rare_admits`，但它们是两处独立的调用点，
+        /// 将来任何一侧「顺手改一下判据」都不会有编译错误。失效是静默且方向相反的：
+        /// 引擎侧更严 ⇒ 调用方想要的候选压根没产出；引擎侧更松 ⇒ 白占配额还是被滤掉。
+        #[test]
+        fn engine_side_admit_matches_caller_side_filter() {
+            let c = coord();
+            set_common(&c, ['工', '水']);
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            c.enter_rare_char_mode(&mut st, 0);
+            let f = c.rare_admit_fn(&st).expect("生僻字模式应给出准入闭包");
+            c.exit_special_mode(&mut st);
+            drop(st);
+            // 逐条比对两侧结论：常用字、生僻字、多字词、空串、空白。
+            for t in ["工", "水", "沝", "龘", "工作", "", " "] {
+                let engine_side = f(t);
+                let mut v = vec![cand(t)];
+                c.retain_rare_admitted(&mut v);
+                let caller_side = !v.is_empty();
+                assert_eq!(
+                    engine_side, caller_side,
+                    "{t:?} 两侧结论不一致：引擎侧={engine_side} 调用方={caller_side}"
+                );
+            }
+        }
+
+        /// 常用字表未加载时不下推准入——那时全体候选都会被判成「非常用」，
+        /// 筛了等于没筛，还白付一次判定。与 `retain_rare_admitted` 的同款保护成对。
+        #[test]
+        fn no_admit_pushdown_when_common_table_is_missing() {
+            let c = coord();
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            c.enter_rare_char_mode(&mut st, 0);
+            assert!(c.rare_admit_fn(&st).is_none(), "常用字表为空时不该下推准入");
+            c.exit_special_mode(&mut st);
+        }
+
+        /// 非生僻字模式不下推——普通 special 模式的候选不该被筛掉。
+        #[test]
+        fn no_admit_pushdown_outside_rare_mode() {
+            let c = coord();
+            set_common(&c, ['工']);
+            let st = c.state.lock().unwrap();
+            assert!(c.rare_admit_fn(&st).is_none(), "非生僻字模式不该下推准入");
         }
 
         /// 拼音方案下的生僻字模式。与 `wubi_coord` 分开是因为两者暴露的问题不同：

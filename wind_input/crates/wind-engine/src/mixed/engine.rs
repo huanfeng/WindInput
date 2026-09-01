@@ -387,6 +387,8 @@ impl MixedEngine {
         ConvertOptions {
             require_full_match: !self.pinyin_partial_candidates,
             allow_partial_final: Some(false),
+            // 混输不筛候选：它的两侧配额与截断另有一套（`merge_sort_dedup`）。
+            admit: None,
         }
     }
 
@@ -401,6 +403,7 @@ impl MixedEngine {
         ConvertOptions {
             require_full_match: !self.pinyin_partial_candidates_overflow,
             allow_partial_final: Some(true),
+            admit: None,
         }
     }
 

@@ -1843,6 +1843,15 @@ impl Engine for PinyinEngine {
             if text.is_empty() || cands.iter().any(|c| c.text == text) {
                 return;
             }
+            // 调用方指定的准入（`ConvertOptions::admit`）：**在这里判而不是让调用方事后
+            // retain**，理由见该字段文档——上限施加在过滤之前，事后过滤只能在被截断过的
+            // 那一段里筛。放在查重之后：不合格的候选连查重表都不该占位，而查重本身是
+            // O(n²) 的成本大头。
+            if let Some(f) = opts.admit.as_deref()
+                && !f(&text)
+            {
+                return;
+            }
             // 子短语候选：code 是输入的真前缀（比输入短，如 baoan 的「报」(bao)）。
             // Viterbi 整句走 insert(0) 不经此闭包，故无需 weight 启发式即可排除整句。
             // 注：以剥除分隔符后的 query 为基准（无分隔符时 query==input，行为不变）。

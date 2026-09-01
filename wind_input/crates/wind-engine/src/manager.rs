@@ -11,7 +11,7 @@
 
 use crate::codetable::CodeTableEngine;
 use crate::encoder;
-use crate::engine::{BoundaryResolution, ConvertResult, Engine, EngineType};
+use crate::engine::{BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType};
 use crate::freq_rerank::ProtectPolicy;
 use crate::pinyin::{Config as PinyinConfig, PinyinEngine};
 use std::collections::HashMap;
@@ -3342,6 +3342,39 @@ impl EngineManager {
 
     /// 用指定方案引擎转换（不改变当前活跃方案，必要时懒加载）。
     /// 用于临时拼音：码表模式下临时借用拼音引擎反查。
+    /// 同 [`Self::convert_with`]，但把 [`ConvertOptions`] 交给引擎。
+    ///
+    /// 目前唯一的调用方是生僻字模式：它要在**截断之前**筛掉常用字，否则配额会被常用字
+    /// 占满（详见 `ConvertOptions::admit`）。拼音引擎认这个选项，其余引擎的默认实现转发
+    /// 到 `convert` 而忽略它——那不是遗漏：调用方在拿到结果后仍有一道最终过滤，
+    /// 下推只是让**够不够**与**快不快**这两件事变好。
+    pub fn convert_with_opts(
+        &self,
+        schema_id: &str,
+        input: &str,
+        max_candidates: usize,
+        opts: ConvertOptions,
+    ) -> ConvertResult {
+        if !self.ensure_loaded(schema_id) {
+            return ConvertResult::default();
+        }
+        let engine = self
+            .engines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(schema_id)
+            .cloned();
+        match engine {
+            Some(e) => e
+                .convert_with_opts(input, max_candidates, opts)
+                .unwrap_or_else(|err| {
+                    warn!("convert_with_opts error: {}", err);
+                    ConvertResult::default()
+                }),
+            None => ConvertResult::default(),
+        }
+    }
+
     pub fn convert_with(
         &self,
         schema_id: &str,
