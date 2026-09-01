@@ -1068,21 +1068,7 @@ impl Coordinator {
         let cmd = |c: MenuCmd| MenuKind::Command(c);
 
         // 输入方案子菜单：英文 + 方案单选
-        let active = self.engine_mgr.active_schema_id();
-        let schemas = self.engine_mgr.available_schemas().to_vec();
-        let mut schema_children =
-            vec![M::leaf("英文", cmd(MenuCmd::SchemaEnglish), true, !chinese)];
-        if !schemas.is_empty() {
-            schema_children.push(M::separator());
-            for (i, id) in schemas.iter().enumerate() {
-                schema_children.push(M::leaf(
-                    self.engine_mgr.schema_name(id),
-                    cmd(MenuCmd::SchemaSelect(i)),
-                    true,
-                    chinese && *id == active,
-                ));
-            }
-        }
+        let schema_children = self.schema_menu_children(chinese);
 
         // 主题子菜单：主题单选 + 亮/暗
         let themes = self.list_themes();
@@ -2113,6 +2099,78 @@ mod tests {
         );
     }
 
+    /// 工具栏分格右键：**每一格要么有定制、要么明确回落主菜单**，且回落这条路不可断。
+    ///
+    /// 隐藏了齿轮之后，右键工具栏是主菜单仅剩的鼠标入口（`toolbar-customization.md`
+    /// §2.2 判据③）。若哪天给齿轮格也配了定制菜单而忘了在里面留一条通往主菜单的路，
+    /// 用户就可能把自己锁在设置之外——这条断言钉的正是那个前提。
+    ///
+    /// 用穷举而非逐个点名：`ToolbarAction` 加新变体时，新变体没被想过就会红。
+    #[test]
+    fn every_toolbar_cell_either_customizes_or_falls_back() {
+        use crate::coordinator::Coordinator;
+        use wind_config::Config;
+        use wind_ui_types::ToolbarAction as A;
+
+        let c = Coordinator::new_headless(Config::default(), None);
+        // 有定制的格：菜单非空（空表在 `show_toolbar_menu` 里同样回落，但那是兜底，
+        // 不该是这几格的常态）。
+        for a in [
+            A::ToggleMode,
+            A::SwitchEngine,
+            A::TogglePunct,
+            A::ToggleWidth,
+            A::ToggleS2t,
+            A::ToggleSoftKeyboard,
+        ] {
+            let items = c
+                .build_toolbar_cell_menu(a)
+                .unwrap_or_else(|| panic!("{a:?} 应有定制菜单"));
+            assert!(!items.is_empty(), "{a:?} 的定制菜单是空的");
+        }
+        // 没定制的格：必须返回 None 才会回落主菜单。
+        for a in [A::OpenSettings, A::Custom(0)] {
+            assert!(
+                c.build_toolbar_cell_menu(a).is_none(),
+                "{a:?} 不该有定制菜单——它要回落完整主菜单"
+            );
+        }
+    }
+
+    /// 分格菜单里的开关，文案与勾选态必须与主菜单里同一个开关**逐字相同**。
+    ///
+    /// 同一个开关在两处叫不同的名字，用户会当成两件事；勾选态对不上则更糟——
+    /// 两处菜单会互相"打脸"。这条把「复制了一份文案」这种改动挡在合并前。
+    #[test]
+    fn cell_menu_labels_match_the_main_menu() {
+        use crate::coordinator::Coordinator;
+        use wind_config::Config;
+        use wind_ui_types::ToolbarAction as A;
+
+        let c = Coordinator::new_headless(Config::default(), None);
+        let main = c.build_main_menu_items();
+        let find = |items: &[wind_ui_types::MenuItemSpec], label: &str| -> Option<bool> {
+            items.iter().find(|i| i.label == label).map(|i| i.checked)
+        };
+
+        let cell = c.build_toolbar_cell_menu(A::TogglePunct).expect("标点格");
+        for label in ["中文标点", "全角", "简入繁出"] {
+            assert_eq!(
+                find(&cell, label),
+                find(&main, label),
+                "{label} 在分格菜单与主菜单里对不上（文案或勾选态）"
+            );
+        }
+
+        // 中英格给的是主菜单「输入方案」子菜单的原样内容。
+        let cell = c.build_toolbar_cell_menu(A::ToggleMode).expect("中英格");
+        let sub = main
+            .iter()
+            .find(|i| i.label == "输入方案")
+            .expect("主菜单缺「输入方案」");
+        assert_eq!(cell, sub.children, "中英格右键与「输入方案」子菜单不同源");
+    }
+
     /// 状态图标开关必须同时出现在 macOS 的**两棵**菜单树里，且文案一致。
     ///
     /// 回归背景：IMK 输入源菜单走精简树 `build_menu_items_macos()`、候选框右键与状态指示器
@@ -2382,16 +2440,28 @@ impl Coordinator {
                 on,
             );
         }
+        M::submenu("软键盘", self.soft_keyboard_menu_children())
+    }
+
+    /// 软键盘的「开关 + 各面单选」项列表。
+    ///
+    /// 抽成独立函数供两处用：主菜单的「软键盘」子菜单、右键软键盘格的快捷菜单。
+    /// ⚠️ 只有一面时这份列表**仍然有意义**（开关那一项），故这里不做 `pages.len() < 2`
+    /// 的退化——那条判断属于「主菜单该不该给子菜单」，是调用方的问题。
+    pub(crate) fn soft_keyboard_menu_children(&self) -> Vec<wind_ui_types::MenuItemSpec> {
+        use wind_ui_types::MenuItemSpec as M;
+        let on = self.softkeyboard_is_open();
+        let pages = self.softkeyboard.pages();
         let cur = self.softkeyboard_page_idx();
-        let mut children = vec![
-            M::leaf(
-                if on { "关闭面板" } else { "打开面板" },
-                MenuKind::Command(MenuCmd::ToggleSoftKeyboard),
-                true,
-                false,
-            ),
-            M::separator(),
-        ];
+        let mut children = vec![M::leaf(
+            if on { "关闭面板" } else { "打开面板" },
+            MenuKind::Command(MenuCmd::ToggleSoftKeyboard),
+            !pages.is_empty(),
+            false,
+        )];
+        if !pages.is_empty() {
+            children.push(M::separator());
+        }
         for (i, p) in pages.iter().enumerate() {
             children.push(M::leaf(
                 p.name.clone(),
@@ -2401,6 +2471,103 @@ impl Coordinator {
                 on && i == cur,
             ));
         }
-        M::submenu("软键盘", children)
+        children
+    }
+
+    /// 输入方案的「英文 + 各方案单选」项列表（主菜单的「输入方案」子菜单内容）。
+    ///
+    /// `chinese` 由调用方传入而不是这里现读：主菜单构建时已在一次加锁里把几个状态
+    /// 一并取出，重读一次是第二次加锁，且两次之间状态可能变——勾选态与同一菜单里
+    /// 别的项就会互相矛盾。
+    pub(crate) fn schema_menu_children(&self, chinese: bool) -> Vec<wind_ui_types::MenuItemSpec> {
+        use wind_ui_types::MenuItemSpec as M;
+        let cmd = |c: MenuCmd| MenuKind::Command(c);
+        let active = self.engine_mgr.active_schema_id();
+        let schemas = self.engine_mgr.available_schemas().to_vec();
+        let mut children = vec![M::leaf("英文", cmd(MenuCmd::SchemaEnglish), true, !chinese)];
+        if !schemas.is_empty() {
+            children.push(M::separator());
+            for (i, id) in schemas.iter().enumerate() {
+                children.push(M::leaf(
+                    self.engine_mgr.schema_name(id),
+                    cmd(MenuCmd::SchemaSelect(i)),
+                    true,
+                    chinese && *id == active,
+                ));
+            }
+        }
+        children
+    }
+
+    /// 右键工具栏某一格时给的**精简快捷菜单**；这一格没有定制则返回 `None`。
+    ///
+    /// # 为什么按格分而不是一律给主菜单
+    ///
+    /// 主菜单是完整的功能面，而右键一个具体的格，意图几乎总是「就在这一格管的事情里
+    /// 换一个」。把方案切换从「右键 → 输入方案 → 展开子菜单 → 点」压成「右键 → 点」，
+    /// 省的正是最高频那条路径上的两步。
+    ///
+    /// # 各格给什么
+    ///
+    /// - **中英格**：整份方案列表（含「英文」），即主菜单「输入方案」子菜单的内容。
+    /// - **软键盘格**：开关 + 各面单选。
+    /// - **标点格 / 全半角格**：共用一份「输出形态」——中文标点、全角、简入繁出。
+    ///   三者是同一类「打出来长什么样」的量，分给两个格各做一份反而要用户记住
+    ///   哪个格管哪个；一次看全三个开关，右键谁都对。
+    ///
+    /// ⛔ **齿轮格 / 自定义按钮格 / 拖动柄不在此列**，返回 `None` 回落完整主菜单：
+    /// 隐藏了齿轮之后，右键工具栏是主菜单**仅剩的鼠标入口**（`toolbar-customization.md`
+    /// §2.2 判据③），这条回落断了就等于让用户可以把自己锁在外面。
+    pub(crate) fn build_toolbar_cell_menu(
+        &self,
+        action: ToolbarAction,
+    ) -> Option<Vec<wind_ui_types::MenuItemSpec>> {
+        use wind_ui_types::MenuItemSpec as M;
+        let cmd = |c: MenuCmd| MenuKind::Command(c);
+        match action {
+            ToolbarAction::ToggleMode | ToolbarAction::SwitchEngine => {
+                let chinese = {
+                    let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    s.chinese_mode
+                };
+                Some(self.schema_menu_children(chinese))
+            }
+            ToolbarAction::ToggleSoftKeyboard => Some(self.soft_keyboard_menu_children()),
+            // 简繁格也走这一份：它本来就是那三项之一，右键给同一张表最省记忆。
+            ToolbarAction::TogglePunct | ToolbarAction::ToggleWidth | ToolbarAction::ToggleS2t => {
+                let (punct, full, s2t) = {
+                    let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    (s.chinese_punct, s.full_width, s.s2t_enabled)
+                };
+                // 文案与勾选态与主菜单里那三项**逐字相同**：同一个开关在两处叫不同的
+                // 名字，用户会当成两件事。
+                Some(vec![
+                    M::leaf("中文标点", cmd(MenuCmd::TogglePunct), true, punct),
+                    M::leaf("全角", cmd(MenuCmd::ToggleWidth), true, full),
+                    M::leaf("简入繁出", cmd(MenuCmd::ToggleS2t), true, s2t),
+                ])
+            }
+            ToolbarAction::OpenSettings | ToolbarAction::Custom(_) => None,
+        }
+    }
+
+    /// 右键工具栏：该格有定制就弹定制菜单，否则回落完整主菜单。
+    pub(crate) fn show_toolbar_menu(&self, action: Option<ToolbarAction>, anchor: MenuAnchor) {
+        let items = action.and_then(|a| self.build_toolbar_cell_menu(a));
+        let Some(items) = items else {
+            self.show_main_menu(anchor);
+            return;
+        };
+        // 空列表同样回落：一个弹出来什么都没有的菜单比不弹更让人以为坏了。
+        // （软键盘一面都没有时 `soft_keyboard_menu_children` 只剩个禁用的开关项，
+        //  不为空，走的仍是定制那条。）
+        if items.is_empty() {
+            self.show_main_menu(anchor);
+            return;
+        }
+        self.mark_menu_open(0, String::new());
+        let _ = self
+            .ui_tx
+            .send(UiCommand::ShowCandidateMenu { items, anchor });
     }
 }

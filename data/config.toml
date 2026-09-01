@@ -935,12 +935,13 @@ auto_hide_delay = 5
 # 纵向排列：竖着摆放工具栏（默认横条）。几何仍取主题 [toolbar]，条宽=height、每格高=button_width。
 vertical = false
 # 显示哪些格、按什么顺序（数组顺序即从左到右 / 从上到下的顺序）；留空 = 全部显示。
-# 可选：mode（中英/方案）/punct（标点）/full_width（全半角）/s2t（简繁）/settings（设置）
+# 可选：mode（中英/方案）/punct（标点）/full_width（全半角）/s2t（简繁）/
+#       soft_keyboard（软键盘）/settings（设置）
 # 名字前加 - 表示「不显示，但记住它排在这个位置」，如 "-s2t"——设置页关掉某格时就是
 # 这么写的，于是关掉再打开它还在原位，而不是跳回默认顺序。
-# 注意 s2t 格只在简繁转换**当前开着**时才出现（关掉即消失），本项只决定"允许它出现"。
+# s2t 格出厂关着；去掉下面那个 - 即可，之后点它就能随时开关简入繁出。
 # 整条工具栏都不想要请用 visible = false，别把每一项都加上 - 前缀。
-items = ["mode", "punct", "full_width", "s2t", "settings"]
+items = ["mode", "punct", "full_width", "-s2t", "soft_keyboard", "settings"]
 
 # 自定义按钮（高级功能，出厂无）。定义在 [[ui.toolbar.buttons]]，**要显示还得在上面的
 # items 里写一条 custom:<id>**——items 是「显示哪些、排第几」的唯一真相源，光定义不显示。
@@ -949,8 +950,6 @@ items = ["mode", "punct", "full_width", "s2t", "settings"]
 #
 #   [ui.toolbar]
 #   items = ["mode", "punct", "full_width", "custom:sym", "settings"]
-# 软键盘格默认不显示（它另有热键 ctrl+shift+k 与主菜单入口）。要它就写进 items：
-#   items = ["mode", "punct", "full_width", "s2t", "soft_keyboard", "settings"]
 #
 #   [[ui.toolbar.buttons]]
 #   id = "sym"                          # 稳定标识，被 items 里的 custom:sym 引用

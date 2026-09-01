@@ -898,9 +898,14 @@ mod tests {
             .collect();
         assert_eq!(l1, l2, "ui.toolbar.items 的 L1 默认值与 L2 出厂文件不一致");
         // 两侧都必须是登记过的键，否则出厂配置里就躺着一个会被解析跳过的条目。
+        //
+        // ⚠️ 先剥 `-` 前缀：那是**值域自带的语法**（「在这个位置，但不显示」），出厂
+        // 的 `-s2t` 是合法条目而非拼错。按裸键名比会把它判成未登记——测试红了却指向
+        // 一个不存在的问题，而真正的拼错（`-punkt`）照样被这条拦下。
         for k in &l2 {
+            let key = k.strip_prefix('-').unwrap_or(k);
             assert!(
-                crate::TOOLBAR_ITEM_KEYS.contains(&k.as_str()),
+                crate::TOOLBAR_ITEM_KEYS.contains(&key),
                 "出厂 items 含未登记条目 {k:?}"
             );
         }

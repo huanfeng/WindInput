@@ -4096,14 +4096,25 @@ pub const TOOLBAR_ITEM_KEYS: [&str; 6] = [
     "settings",
 ];
 
-/// 出厂**默认显示**的条目。
+/// 出厂**默认排布**：全集的每一项都在，关掉的写 `-` 前缀（「在这个位置，但不显示」）。
 ///
-/// ★ 刻意不是 [`TOOLBAR_ITEM_KEYS`] 的全部：那份是「合法值域」，这份是「默认显示哪些」。
-/// 软键盘格属于值域却不默认显示——它已有热键与主菜单两个入口，而给所有老用户的工具栏
-/// 凭空多一格是打扰。想要它就在 `items` 里写上 `"soft_keyboard"`。
+/// ★ 刻意不是 [`TOOLBAR_ITEM_KEYS`] 原样：那份是「合法值域」（顺序即声明序），这份是
+/// 「出厂长什么样」。两份分开之后，往值域里加新格不再自动改变任何人的工具栏外观。
 ///
-/// 两份分开之后，往值域里加新格不再自动改变任何人的工具栏外观。
-const DEFAULT_TOOLBAR_SHOWN: [&str; 5] = ["mode", "punct", "full_width", "s2t", "settings"];
+/// **为什么 `s2t` 关着**：这一格恒显示（渲染端已无运行时合取，见 `expand_cells_raw`），
+/// 而简繁转换是少数人才用的功能——默认给所有人多一格「简」是打扰。想要就在设置页
+/// 勾上，勾上之后它就是简繁的鼠标开关，不再有「关着时看不见、于是开不回来」的自锁。
+///
+/// **为什么 `soft_keyboard` 开着**：软键盘面板没有别的显眼入口（热键要记、主菜单要两层），
+/// 而它恰恰是那种「偶尔要、要的时候得马上找到」的东西。
+const DEFAULT_TOOLBAR_SHOWN: [&str; 6] = [
+    "mode",
+    "punct",
+    "full_width",
+    "-s2t",
+    "soft_keyboard",
+    "settings",
+];
 
 fn default_toolbar_items() -> Vec<String> {
     DEFAULT_TOOLBAR_SHOWN

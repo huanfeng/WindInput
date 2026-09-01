@@ -1,0 +1,13 @@
+<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <!-- 软键盘：圆角外壳 + 上排键 + 下排空格长条。
+       外壳用 stroke 而非挖空路径（少一条易写错的内孔），线宽与键块高度按 15px
+       渲染下仍可辨的粗度取；颜色仅作 alpha 蒙版，实际由工具栏按主题 tint。 -->
+  <rect x="68" y="260" width="888" height="504" rx="88" fill="none" stroke="#000" stroke-width="72"/>
+  <rect x="168" y="376" width="112" height="96" rx="24"/>
+  <rect x="344" y="376" width="112" height="96" rx="24"/>
+  <rect x="520" y="376" width="112" height="96" rx="24"/>
+  <rect x="696" y="376" width="160" height="96" rx="24"/>
+  <rect x="168" y="552" width="112" height="96" rx="24"/>
+  <rect x="344" y="552" width="336" height="96" rx="24"/>
+  <rect x="744" y="552" width="112" height="96" rx="24"/>
+</svg>

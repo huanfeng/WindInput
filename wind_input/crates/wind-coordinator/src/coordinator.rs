@@ -4951,6 +4951,9 @@ impl Coordinator {
                 self.show_candidate_menu(page_local, x, y)
             }
             UiEvent::RequestMainMenu(anchor) => self.show_main_menu(anchor),
+            UiEvent::RequestToolbarMenu { action, anchor } => {
+                self.show_toolbar_menu(action, anchor)
+            }
             UiEvent::MenuAction(kind) => self.menu_action(kind),
             UiEvent::MenuClose => {
                 // ESC / 点击别处关闭：无动作派发，可直接解除 tooltip 隐藏抑制。
@@ -10161,13 +10164,13 @@ mod toolbar_items_tests {
         }
     }
 
-    /// ★ **P1 的回归基线**：留空必须渲染出与本功能落地前**逐格相同**的序列。
+    /// 留空 = **全部显示**，按值域的声明顺序。
     ///
-    /// 这条红了就意味着给所有老用户改了工具栏外观——那是本次改动最不能有的后果。
     /// 断言写死字面序列而不是拿 `DEFAULT_TOOLBAR_ITEMS` 对拍：后者跟着实现一起改，
-    /// 对拍恒绿，钉不住"和改动前一样"这件事。
+    /// 对拍恒绿，钉不住具体是哪几格、什么顺序。下面 `l1_default_items_are_a_full_cover`
+    /// 反过来拿这条当基准——两条一起才形成「值域、出厂排布、留空兜底」的三方对齐。
     #[test]
-    fn empty_falls_back_to_legacy_order() {
+    fn empty_means_every_item() {
         assert_eq!(
             parse(&[]),
             vec![
@@ -10175,6 +10178,7 @@ mod toolbar_items_tests {
                 ToolbarItem::Punct,
                 ToolbarItem::FullWidth,
                 ToolbarItem::S2t,
+                ToolbarItem::SoftKeyboard,
                 ToolbarItem::Settings,
             ]
         );
@@ -10231,26 +10235,37 @@ mod toolbar_items_tests {
         );
     }
 
-    /// L1（`Config::default()`）写死的那一行必须与「留空」等价——否则「配置里显式写出
-    /// 全部条目」与「不写这个键」会渲染出不同的工具栏。
+    /// L1（`Config::default()`）写死的那一行必须**覆盖全集**：把 `-` 前缀（「在这个位置，
+    /// 但不显示」）剥掉之后，它解析出的序列应与「留空」逐项相同。
+    ///
+    /// ⚠️ 断言从早先的「L1 == 留空」改成了这条：出厂排布如今**刻意**关掉了 `s2t`
+    /// （简繁是少数人才用的功能），两者不再相等。但「关掉某几格」与「压根没写这几格」
+    /// 是两回事——后者会让设置页里那几格跳回声明序位（位置信息丢了），也让往值域加新格
+    /// 时忘记同步 `DEFAULT_TOOLBAR_SHOWN` 这件事无人发现。剥前缀再比，恰好只放过前者。
     ///
     /// ⚠️ 这条**只管 L1**。它读的是 Rust 侧默认值，全程不碰 `data/config.toml`；
     /// L1↔L2 一致由 wind-config 侧的 `data_config_toml_*` 那组守门负责（只有那里读得到 L2）。
     #[test]
-    fn l1_default_items_match_empty_fallback() {
+    fn l1_default_items_are_a_full_cover() {
         let factory = wind_config::Config::default().ui.toolbar.items;
-        assert_eq!(parse_toolbar_items(&factory, &[]), parse(&[]));
+        let all_shown: Vec<String> = factory
+            .iter()
+            .map(|k| k.strip_prefix('-').unwrap_or(k).to_string())
+            .collect();
+        assert_eq!(parse_toolbar_items(&all_shown, &[]), parse(&[]));
     }
 
     /// 条目的值域散在几处：`TOOLBAR_ITEM_KEYS`（配置层**值域**）、本函数的 match 臂、
     /// `DEFAULT_TOOLBAR_ITEMS`（协议层**默认项**）、`DEFAULT_TOOLBAR_SHOWN` 与
     /// `data/config.toml` 那一行（配置层默认项）。
     ///
-    /// ★ **值域 ⊋ 默认项**：软键盘格属于值域却不默认显示（它已有热键与主菜单两个入口，
-    /// 而给所有老用户的工具栏凭空多一格是打扰）。所以这里不能再断言两者相等——那会把
-    /// 「往值域里加一格」和「改所有人的工具栏外观」焊死成同一件事。
+    /// ★ **「出厂不显示某格」不在这条的管辖内**：那件事由 `DEFAULT_TOOLBAR_SHOWN` 里的
+    /// `-` 前缀表达（当前是 `-s2t`），值域与协议层默认项都仍然是全集。所以这里断言的是
+    /// 覆盖与顺序，不是「出厂长什么样」——后者归 `l1_default_items_are_a_full_cover`
+    /// 与 wind-config 侧的 L1↔L2 守门。两件事分开，往值域里加一格才不会自动改变
+    /// 任何人的工具栏外观。
     ///
-    /// 仍然钉住的两条：**每个登记的键都必须被解析认识**（只改常量没改 match 的话，
+    /// 钉住的两条：**每个登记的键都必须被解析认识**（只改常量没改 match 的话，
     /// 那个新键会被当成"未知条目"静默跳过，表现为"配了没反应"），以及**默认项按同样的
     /// 相对顺序出现在值域里**（顺序错位会让默认工具栏的格子排布与声明不符）。
     #[test]

@@ -19,8 +19,21 @@ pub enum UiEvent {
     CandidateOp { op: CandidateOp, page_local: usize },
     /// 右键候选请求弹出菜单（页内下标 + 屏幕坐标）；协调器据此构建菜单项回送
     RequestCandidateMenu { page_local: usize, x: i32, y: i32 },
-    /// 请求功能主菜单；来自候选窗空白/工具栏右键或设置键。
+    /// 请求功能主菜单；来自候选窗空白或工具栏的设置键。
     RequestMainMenu(MenuAnchor),
+    /// 右键工具栏：请求**该格**的快捷菜单。
+    ///
+    /// `action` 是命中格的动作（拖动柄区右键为 `None`）。协调器据它决定给哪一份精简
+    /// 菜单——中英格给方案切换、软键盘格给面切换、标点/全半角格给输出形态开关；
+    /// **没有定制的格一律回落完整主菜单**，这条回落不可省：隐藏了齿轮时，右键工具栏
+    /// 是主菜单仅剩的鼠标入口。
+    ///
+    /// 判据留在协调器而不是 UI 侧：菜单内容本来就要读方案列表 / 软键盘面 / 各开关态，
+    /// 那些 UI 侧一概读不到。这里只回报「点在哪一格上」这个 UI 侧独有的事实。
+    RequestToolbarMenu {
+        action: Option<ToolbarAction>,
+        anchor: MenuAnchor,
+    },
     /// 菜单项激活（携带动作）：UI 自管导航/子菜单，仅把最终动作回送协调器
     MenuAction(MenuKind),
     /// 关闭菜单（点击菜单外 / ESC / 右键）

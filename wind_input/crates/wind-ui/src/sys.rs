@@ -17,7 +17,8 @@ mod imp {
     pub use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorPos, GetWindowRect, HWND_TOPMOST, IDC_ARROW, IDC_SIZEALL, LoadCursorW, SW_HIDE,
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetWindowPos, ShowWindow,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_SETCURSOR,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+        WM_SETCURSOR,
     };
     // WM_MOUSELEAVE 不在 WindowsAndMessaging 模块内，直接以字面量定义（与 Win32 一致）。
     pub const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -84,6 +85,7 @@ mod imp {
     pub const WM_LBUTTONDOWN: u32 = 0x0201;
     pub const WM_LBUTTONUP: u32 = 0x0202;
     pub const WM_RBUTTONDOWN: u32 = 0x0204;
+    pub const WM_MBUTTONUP: u32 = 0x0208;
     pub const WM_MOUSEMOVE: u32 = 0x0200;
     pub const WM_MOUSEWHEEL: u32 = 0x020A;
     pub const WM_SETCURSOR: u32 = 0x0020;

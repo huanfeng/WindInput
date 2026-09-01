@@ -13,8 +13,8 @@ use crate::manager::{MenuAnchor, ToolbarAction, UiEvent};
 use crate::sys::{
     GetCursorPos, GetWindowRect, HWND, HWND_TOPMOST, IDC_ARROW, IDC_SIZEALL, LPARAM, LRESULT,
     LoadCursorW, POINT, RECT, ReleaseCapture, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetCapture,
-    SetCursor, SetWindowPos, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSELEAVE, WM_MOUSEMOVE,
-    WM_RBUTTONDOWN, WM_SETCURSOR, WPARAM, clamp_to_work_area,
+    SetCursor, SetWindowPos, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSELEAVE,
+    WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_SETCURSOR, WPARAM, clamp_to_work_area,
 };
 use crate::text::dwrite::TextRenderer;
 use crate::view::Rect;
@@ -46,6 +46,10 @@ const WIDTH_FULL_SVG: &str = include_str!("../res/icons/width_full.svg");
 const WIDTH_HALF_SVG: &str = include_str!("../res/icons/width_half.svg");
 /// 设置齿轮图标。
 const SETTING_SVG: &str = include_str!("../res/icons/setting.svg");
+/// 软键盘图标。**只有一张**：开关态由格底高亮表达（同 `Mode` 格的做法），而不像
+/// 标点 / 全半角那样两态两张图——那两格切换的是**输出形态**，两个状态各有自己的样子；
+/// 软键盘格切换的是**面板开合**，图标始终代表同一个东西。
+const SOFT_KEYBOARD_SVG: &str = include_str!("../res/icons/soft_keyboard.svg");
 
 /// 工具栏窗口
 pub struct Toolbar {
@@ -392,13 +396,16 @@ impl Toolbar {
 ///
 /// # 空结果必须回落，且这道闸门只能装在这里
 ///
-/// 协调器的 `parse_toolbar_items` 已保证**项序列**非空，但那挡不住这条路：`S2t` 是
-/// **运行时合取**（还要 `state.s2t_shown`），配 `items = ["s2t"]` 而简繁没开，项序列非空、
-/// 展开结果却是空的——工具栏渲染成一条只剩 12dp 拖动柄的窄条，看着像 bug 而用户无从
-/// 自查（设置页里只勾「简繁」一项就能走到，不必手写 TOML）。
+/// 协调器的 `parse_toolbar_items` 已保证**项序列**非空，但那只保证「配置里写了东西」，
+/// 保证不了「展开后还剩几格」——决定画几格的是这里。
 ///
-/// 判据：**兜底要装在产出最终结果的那一环**。装在解析层只能保证「配置里写了东西」，
-/// 而决定画几格的是这里。同一形态在本仓反复出现（闸门装上游、判据在下游）。
+/// ⚠️ 触发这条的路径**变过一次**：原先是 `S2t` 带运行时合取（简繁没开就不产格），
+/// 配 `items = ["s2t"]` 而简繁关着即整条空掉。那层合取已删（见 `S2t` 分支的说明），
+/// 于是当下所有内置项都无条件产格，只剩「全是 `Custom` 且全被 `enabled = false` 关掉」
+/// 这一条路能走到空——协调器侧那种情况已在 `push_custom_item` 里跳过，故理论上到不了。
+///
+/// 兜底照留：**闸门要装在产出最终结果的那一环**，而不是靠上游当下恰好不会送空进来。
+/// 一旦日后又给某个内置项加回运行时条件（那正是上一轮发生过的事），这里不必跟着改。
 ///
 /// 不 panic 也不返回空：`bar_layout` 在 n=0 下数学上安全（无除法），但「安全」不等于
 /// 「可接受」——回落全量条至少是个能用的工具栏，且与 `visible=false` 那条真正的
@@ -408,13 +415,11 @@ fn expand_cells(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
     if !cells.is_empty() {
         return cells;
     }
-    // 回落全集再展开一次（而不是直接返回全集的 Cell）：全集里的 S2t 同样要过
-    // s2t_shown 那道合取，直接构造会画出一个简繁没开却存在的「简」格——那是用一个
-    // 新 bug 换掉旧 bug。
+    // 回落走 `expand_cells_raw` 而不是直接构造全集的 Cell：状态相关的取值（简繁字面、
+    // 高亮）只该有一份实现，绕开它就是把同一套判断抄第二遍。
     //
-    // ⚠️ **这一步不可能再空，不必加第二层兜底**：全集里 Mode / Punct / FullWidth /
-    // Settings 四项在 `expand_cells_raw` 里都是无条件 push，只有 S2t 带运行时条件，
-    // 故结果最少 4 格。若日后给别的内置项也加运行时条件，这条论证就失效了——
+    // ⚠️ **这一步不可能再空，不必加第二层兜底**：全集里的内置项在 `expand_cells_raw`
+    // 里全是无条件 push。若日后给某个内置项加运行时条件，这条论证就失效了——
     // 那时要么改这里，要么保证至少一项恒存。
     expand_cells_raw(&wind_ui_types::DEFAULT_TOOLBAR_ITEMS, state)
 }
@@ -458,25 +463,27 @@ fn expand_cells_raw(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
                     dim: false,
                     action: ToolbarAction::ToggleWidth,
                 }),
-                // 简繁格与配置是**合取**：配置允许显示（本项在 layout 里）且简繁转换当前
-                // 开着（s2t_shown）。少一边都不画——用户没开简繁却常驻一个"简"格，点它
-                // 才发现是开关，那不是状态指示器该干的事。
-                ToolbarItem::S2t => {
-                    if state.s2t_shown {
-                        cells.push(Cell {
-                            text: if state.s2t_enabled { "繁" } else { "简" }.to_string(),
-                            highlight: state.s2t_enabled,
-                            dim: !state.s2t_enabled,
-                            action: ToolbarAction::ToggleS2t,
-                        });
-                    }
-                }
-                // 软键盘格：常驻显示（不像简繁那样与配置合取）——它是个入口而不是状态
-                // 指示器，用户随时可能想开面板，藏起来就等于没有这个入口。开着时高亮。
+                // 简繁格：**只由 layout 决定显隐**，与 `state.s2t_enabled` 无关。
+                //
+                // 曾额外合取一个运行时条件（`s2t_shown`，取值就是「当前是否简入繁出」），
+                // 理由是「没开简繁却常驻一个『简』格不是状态指示器该干的事」。真机推翻：
+                // 那让开关**自锁**——关着时格子不画，于是工具栏上再也开不回来，而这一格
+                // 恰恰是它唯一的鼠标入口。显隐本来就有 `ui.toolbar.items` 这个开关，
+                // 运行时那层是第二个开关，方向还与用户意图相反。
+                //
+                // 与全半角 / 标点两格现在是同一套呈现逻辑：格子恒在，状态由字与高亮表达。
+                ToolbarItem::S2t => cells.push(Cell {
+                    text: if state.s2t_enabled { "繁" } else { "简" }.to_string(),
+                    highlight: state.s2t_enabled,
+                    dim: !state.s2t_enabled,
+                    action: ToolbarAction::ToggleS2t,
+                }),
+                // 软键盘格：文本留空，渲染时画矢量键盘（同齿轮/月亮，不依赖字体字形）。
+                // 开着时高亮——图标只有一张，开合由格底表达。
                 ToolbarItem::SoftKeyboard => cells.push(Cell {
-                    text: "键".to_string(),
+                    text: String::new(),
                     highlight: state.soft_keyboard_on,
-                    dim: !state.soft_keyboard_on,
+                    dim: false,
                     action: ToolbarAction::ToggleSoftKeyboard,
                 }),
                 // 设置格：文本留空，渲染时画矢量齿轮（不依赖字体字形）。
@@ -685,9 +692,12 @@ impl Toolbar {
                 );
             } else if matches!(
                 c.action,
-                ToolbarAction::TogglePunct | ToolbarAction::ToggleWidth
+                ToolbarAction::TogglePunct
+                    | ToolbarAction::ToggleWidth
+                    | ToolbarAction::ToggleSoftKeyboard
             ) {
-                // 标点 / 全半角：按状态渲染内联 SVG 图标，主题色 tint，居中于方格。
+                // 标点 / 全半角 / 软键盘：渲染内联 SVG 图标，主题色 tint，居中于方格。
+                // 前两者按状态换图，软键盘只有一张（开合由格底高亮表达）。
                 // 英文模式下标点固定半角（不可切换），无论 chinese_punct 状态如何。
                 let svg = match (
                     c.action,
@@ -696,22 +706,17 @@ impl Toolbar {
                 ) {
                     (ToolbarAction::TogglePunct, true, _) => PUNCT_FULL_SVG,
                     (ToolbarAction::TogglePunct, false, _) => PUNCT_HALF_SVG,
+                    (ToolbarAction::ToggleSoftKeyboard, _, _) => SOFT_KEYBOARD_SVG,
                     (ToolbarAction::ToggleWidth, _, true) => WIDTH_FULL_SVG,
                     _ => WIDTH_HALF_SVG,
                 };
                 let size = font_h * 0.80;
                 let dx = r.x + (r.w - size) * 0.5;
                 let dy = r.y + (r.h - size) * 0.5;
-                crate::view::draw_svg_icon(
-                    self.window.buffer_mut(),
-                    w,
-                    h,
-                    svg,
-                    dx,
-                    dy,
-                    size,
-                    self.fg,
-                );
+                // 高亮格（软键盘开着）要用 hl_fg：hl_bg 是主题色实底，用常态 fg 画图标
+                // 会与底色撞成一团。文字分支下面本来就按 highlight 选色，这里补齐同一条。
+                let tint = if c.highlight { self.hl_fg } else { self.fg };
+                crate::view::draw_svg_icon(self.window.buffer_mut(), w, h, svg, dx, dy, size, tint);
             } else {
                 // 居中文字
                 let m = self.renderer.measure_text(&c.text);
@@ -976,6 +981,27 @@ impl ToolbarMouse {
             .map(|(a, _)| *a)
     }
 
+    /// 右键某一格时的菜单锚点：与 [`Self::menu_anchor`] 同一套展开方向，但**贴到那一格**
+    /// 而不是整条的起点。
+    ///
+    /// 分格菜单只有几项，锚在整条起点会让它落在离点击位置半条远的地方——尤其是齿轮
+    /// 排末尾的横条上。方向仍由朝向决定：横条向上弹（对齐格的左缘）、纵条向侧面弹
+    /// （对齐格的上缘），故只替换沿条身那一维，另一维仍取整条的边（菜单该贴的是条身
+    /// 的外沿，不是格的）。
+    ///
+    /// 命中不到格（拖动柄区）时退回整条锚点。
+    fn cell_menu_anchor(&self, x: f32, y: f32) -> MenuAnchor {
+        let (l, t, r, b) = self.rect();
+        let Some((_, cell)) = self.hits.iter().find(|(_, cr)| cr.contains(x, y)) else {
+            return self.menu_anchor();
+        };
+        if self.vertical {
+            MenuAnchor::beside_rect(l, t + cell.y as i32, r, b)
+        } else {
+            MenuAnchor::above_rect(l + cell.x as i32, t, b)
+        }
+    }
+
     /// 命中格下标（-1=无）。用于悬停高亮。
     fn hover_at(&self, x: f32, y: f32) -> i32 {
         self.hits
@@ -1118,10 +1144,30 @@ impl WindowMouse for ToolbarMouse {
                 Some(LRESULT(0))
             }
             WM_RBUTTONDOWN => {
-                // 右键工具栏 → 功能主菜单，贴着工具栏弹出（避免遮挡工具栏）。
-                let _ = self
-                    .events
-                    .send(UiEvent::RequestMainMenu(self.menu_anchor()));
+                // 右键工具栏 → 该格的快捷菜单，贴着工具栏弹出（避免遮挡工具栏）。
+                // 认不认得这一格由协调器判断（它才读得到方案/软键盘/开关态），
+                // 认不得就回落完整主菜单——这里只负责报出点在哪一格上。
+                let _ = self.events.send(UiEvent::RequestToolbarMenu {
+                    action: self.cell_at(cx, cy),
+                    anchor: self.cell_menu_anchor(cx, cy),
+                });
+                Some(LRESULT(0))
+            }
+            // 中键点中英格 = 直接切到下一个方案，省掉「右键 → 找到方案 → 点」三步。
+            //
+            // 只认这一格：其余格中键无动作。中键是**没有视觉提示**的入口，绑在语义
+            // 最直白的那一格上还能靠「这格本来就管方案」猜到；散给每一格就成了记忆负担，
+            // 且误触代价不一（在简繁格上误触会改动正文的输出形态）。
+            //
+            // 落在 UP 而非 DOWN，与左键一致：按下再挪开取消，是鼠标交互的通行预期。
+            WM_MBUTTONUP => {
+                if let Some(ToolbarAction::ToggleMode) = self.cell_at(cx, cy) {
+                    // 复用既有的 SwitchEngine（协调器映射到 `switch_engine` → `cycle_schema`），
+                    // 不新增动作：这里要的正是它，另起一个只会多一条要各自维护的路径。
+                    let _ = self
+                        .events
+                        .send(UiEvent::Toolbar(ToolbarAction::SwitchEngine));
+                }
                 Some(LRESULT(0))
             }
             WM_SETCURSOR => {
@@ -1398,10 +1444,15 @@ mod tests {
         assert!(zero.w > 0.0 && zero.h > 0.0);
     }
 
-    fn tb_state(s2t_shown: bool) -> ToolbarState {
+    /// `s2t_on` = 简入繁出当前是否开着。**它只该影响格里画什么，不该影响有没有这一格**
+    /// ——参数名从早先的 `s2t_shown` 改过来，正是因为那层「开着才显示」的合取已删。
+    fn tb_state(s2t_on: bool) -> ToolbarState {
         ToolbarState {
             icon_label: "拼".to_string(),
-            s2t_shown,
+            s2t_enabled: s2t_on,
+            // 桌面工具栏已不读这个字段（它留给 macOS / 移动端），这里跟着 s2t_enabled 填，
+            // 避免读者误以为两者还有关系。
+            s2t_shown: s2t_on,
             ..Default::default()
         }
     }
@@ -1410,31 +1461,43 @@ mod tests {
         cells.iter().map(|c| c.action).collect()
     }
 
-    /// 回归基线：默认项序列展开出的格，必须与本功能落地前**逐格相同**。
+    /// 默认项序列展开出全部六格，且**与任何运行时状态无关**。
     #[test]
-    fn default_layout_expands_to_legacy_cells() {
-        let cells = expand_cells(&wind_ui_types::DEFAULT_TOOLBAR_ITEMS, &tb_state(true));
-        assert_eq!(
-            actions(&cells),
-            vec![
-                ToolbarAction::ToggleMode,
-                ToolbarAction::TogglePunct,
-                ToolbarAction::ToggleWidth,
-                ToolbarAction::ToggleS2t,
-                ToolbarAction::OpenSettings,
-            ]
-        );
-        // 简繁未开时那一格消失，其余不变（旧行为同此）。
-        let cells = expand_cells(&wind_ui_types::DEFAULT_TOOLBAR_ITEMS, &tb_state(false));
-        assert_eq!(
-            actions(&cells),
-            vec![
-                ToolbarAction::ToggleMode,
-                ToolbarAction::TogglePunct,
-                ToolbarAction::ToggleWidth,
-                ToolbarAction::OpenSettings,
-            ]
-        );
+    fn default_layout_expands_to_every_item() {
+        let expected = vec![
+            ToolbarAction::ToggleMode,
+            ToolbarAction::TogglePunct,
+            ToolbarAction::ToggleWidth,
+            ToolbarAction::ToggleS2t,
+            ToolbarAction::ToggleSoftKeyboard,
+            ToolbarAction::OpenSettings,
+        ];
+        for s2t_on in [true, false] {
+            assert_eq!(
+                actions(&expand_cells(
+                    &wind_ui_types::DEFAULT_TOOLBAR_ITEMS,
+                    &tb_state(s2t_on)
+                )),
+                expected,
+                "格的有无不该随运行时状态变（s2t_on={s2t_on}）"
+            );
+        }
+    }
+
+    /// ★ 防回归：简繁格**恒在**，开关态只体现在格内的字与高亮上。
+    ///
+    /// 这一格曾与「简繁当前开着」合取，于是关掉之后它自己消失，而它正是简繁的唯一
+    /// 鼠标入口——开关把自己藏了，工具栏上再也开不回来。显隐归 `ui.toolbar.items`
+    /// 一处管，这条钉的就是「运行时不许再插一脚」。
+    #[test]
+    fn s2t_cell_stays_when_conversion_is_off() {
+        let layout = [ToolbarItem::S2t];
+        for (s2t_on, text, hl) in [(true, "繁", true), (false, "简", false)] {
+            let cells = expand_cells(&layout, &tb_state(s2t_on));
+            assert_eq!(actions(&cells), vec![ToolbarAction::ToggleS2t]);
+            assert_eq!(cells[0].text, text);
+            assert_eq!(cells[0].highlight, hl);
+        }
     }
 
     /// 顺序照配置走，没配的项不出现。
@@ -1447,34 +1510,57 @@ mod tests {
         );
     }
 
-    /// ★ 本次修的那条：`items` 只留 `s2t` 而简繁没开 → 展开为空 → 必须回落全量条，
-    /// 而不是渲染出一条只剩拖动柄的空窄条。
+    /// 空展开必须回落全量条，而不是渲染出一条只剩拖动柄的空窄条。
     ///
-    /// 兜底装在展开层而非解析层：解析层只保证「项序列非空」，`S2t` 却是运行时合取，
-    /// 决定画几格的是这里。
+    /// ⚠️ **触发这条的路径变过**：原先是「`items` 只留 `s2t` 而简繁没开」——那层合取
+    /// 已删，如今内置项全部无条件产格，只有空 layout 还能走到。兜底照留：闸门要装在
+    /// 产出最终结果的那一环，而不是靠上游当下恰好不会送空进来。
     #[test]
     fn empty_expansion_falls_back_instead_of_rendering_nothing() {
-        let only_s2t = [ToolbarItem::S2t];
-        // 简繁开着：正常只画一格，不触发兜底。
-        assert_eq!(
-            actions(&expand_cells(&only_s2t, &tb_state(true))),
-            vec![ToolbarAction::ToggleS2t]
-        );
-        // 简繁没开：展开为空 → 回落全量条。
-        let cells = expand_cells(&only_s2t, &tb_state(false));
+        let cells = expand_cells(&[], &tb_state(false));
         assert!(!cells.is_empty(), "空展开必须回落，否则工具栏只剩拖动柄");
         assert_eq!(
             actions(&cells),
-            vec![
-                ToolbarAction::ToggleMode,
-                ToolbarAction::TogglePunct,
-                ToolbarAction::ToggleWidth,
-                ToolbarAction::OpenSettings,
-            ],
-            "回落后仍须尊重 s2t 合取：不能凭空画出一个简繁没开的「简」格"
+            actions(&expand_cells_raw(
+                &wind_ui_types::DEFAULT_TOOLBAR_ITEMS,
+                &tb_state(false)
+            )),
+            "回落的应当是全量条"
         );
         // 内核（无兜底）确实会给出空——证明上面那条断言测的是兜底本身，不是恒真。
-        assert!(expand_cells_raw(&only_s2t, &tb_state(false)).is_empty());
+        assert!(expand_cells_raw(&[], &tb_state(false)).is_empty());
+    }
+
+    /// 每张工具栏图标都必须**真的能光栅化出可见形状**。
+    ///
+    /// ★ 这条守的是一个**全程无声**的失效：`rasterize_svg_str_tinted` 解析失败返回
+    /// `None`，`draw_svg_icon` 见 `None` 就直接 return——SVG 写错（路径语法、viewBox
+    /// 缺失、把形状画到画布外）的表现是**格子空白**，没有日志、没有 panic，编译与其余
+    /// 测试全绿。而工具栏格空白与「这一格没配」长得一模一样。
+    ///
+    /// 按 `FONT_PX * 0.80` 的实际渲染尺寸测（12px），而不是挑一个宽松的大尺寸：细节
+    /// 太密的图标在真实尺寸下可能糊成一片，这里顺带把「12px 上还剩多少墨」钉住——
+    /// 低于阈值多半是形状太细或跑到画布外了。
+    #[test]
+    fn every_toolbar_icon_rasterizes_to_visible_ink() {
+        let size = (Toolbar::FONT_PX * 0.80).round() as u32;
+        for (name, svg) in [
+            ("punct_full", PUNCT_FULL_SVG),
+            ("punct_half", PUNCT_HALF_SVG),
+            ("width_full", WIDTH_FULL_SVG),
+            ("width_half", WIDTH_HALF_SVG),
+            ("setting", SETTING_SVG),
+            ("soft_keyboard", SOFT_KEYBOARD_SVG),
+        ] {
+            let pm = crate::image_cache::rasterize_svg_str_tinted(svg, size, size, [0, 0, 0, 255])
+                .unwrap_or_else(|| panic!("{name}.svg 解析失败——渲染时会静默画不出来"));
+            let inked = pm.pixels().iter().filter(|p| p.alpha() > 0).count();
+            let total = (size * size) as usize;
+            assert!(
+                inked * 100 / total >= 5,
+                "{name}.svg 在 {size}px 下只有 {inked}/{total} 像素有墨——形状太细或落在画布外"
+            );
+        }
     }
 
     /// 缩放只改绝对值、不改结构：dp→设备像素由调用方（render 的 dim 闭包）算好再传入。

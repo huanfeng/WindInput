@@ -455,6 +455,10 @@ mod platform {
                 WM_LBUTTONDOWN
                     | WM_LBUTTONUP
                     | WM_RBUTTONDOWN
+                    // 中键：工具栏用它在中英格上一键切方案。⚠️ 这份名单是**必经的闸门**
+                    // ——处理器里写好分支也照样收不到消息，且编译与测试全绿，
+                    // 表现只是「点了没反应」。加新鼠标交互时先看这里。
+                    | crate::sys::WM_MBUTTONUP
                     | WM_MOUSEMOVE
                     | crate::sys::WM_MOUSELEAVE
                     | WM_MOUSEWHEEL

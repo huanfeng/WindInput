@@ -20,8 +20,11 @@ pub enum ToolbarItem {
     Punct,
     /// 全/半角。
     FullWidth,
-    /// 简/繁。⚠️ 与 [`ToolbarState::s2t_shown`] 是**合取**：本项只表示「用户允许它出现」，
-    /// 简繁转换当前关着时照样不画。
+    /// 简/繁（关着显「简」淡显，开着显「繁」高亮）。
+    ///
+    /// ⚠️ 曾与 [`ToolbarState::s2t_shown`] 合取（简繁关着就不画），已删——那让这一格
+    /// **自锁**：它是简繁的唯一鼠标入口，关着时不画就再也开不回来。显隐归
+    /// `ui.toolbar.items` 一处管，运行时不再插手。
     S2t,
     /// 软键盘（键盘图标，点击开关面板；开着时高亮）。
     SoftKeyboard,
@@ -39,16 +42,21 @@ pub enum ToolbarItem {
     },
 }
 
-/// 默认渲染顺序：`ui.toolbar.items` 留空 / 解析后为空时用它。
+/// 默认渲染顺序：`ui.toolbar.items` 留空 / 解析后为空时用它，语义是**全部显示**。
+///
+/// ⚠️ 与 `wind_config::DEFAULT_TOOLBAR_SHOWN`（出厂排布，其中 `s2t` 是关着的）**不同**，
+/// 两者回答的不是同一个问题：那份是「出厂长什么样」，这份是「留空该理解成什么」。
+/// 留空只可能出现在手写配置里，而手写空列表最合理的读法是「都给我」。
 ///
 /// 与 `wind_config::TOOLBAR_ITEM_KEYS` 逐项对应，但**刻意各存一份**：那份是配置层的键名
 /// （字符串），这份是协议层的项（枚举）。让 wind-ui-types 去依赖 wind-config 只为共享
-/// 五个常量，会把配置 crate 拖进 headless / Android 的依赖图里。
-pub const DEFAULT_TOOLBAR_ITEMS: [ToolbarItem; 5] = [
+/// 几个常量，会把配置 crate 拖进 headless / Android 的依赖图里。
+pub const DEFAULT_TOOLBAR_ITEMS: [ToolbarItem; 6] = [
     ToolbarItem::Mode,
     ToolbarItem::Punct,
     ToolbarItem::FullWidth,
     ToolbarItem::S2t,
+    ToolbarItem::SoftKeyboard,
     ToolbarItem::Settings,
 ];
 
@@ -68,7 +76,12 @@ pub struct ToolbarState {
     pub chinese_punct: bool,
     /// 简繁转换当前是否启用（格内显示 "繁" 并高亮）
     pub s2t_enabled: bool,
-    /// 是否显示简繁格（默认 false；用户开启简繁功能后显示）
+    /// 是否该给出简繁开关（取值 = 简繁转换当前开着）。
+    ///
+    /// ⚠️ **桌面工具栏已不读它**：那边的简繁格显隐归 `ui.toolbar.items`，本字段一度是
+    /// 第二个开关且方向与用户意图相反（见 [`ToolbarItem::S2t`]）。留着是给**没有
+    /// `items` 机制**的宿主用——macOS 状态菜单与移动端 `InputStatus` 靠它决定要不要
+    /// 摆出简繁开关。改这里前先确认那两端。
     pub s2t_shown: bool,
     /// 软键盘面板是否开着（格子据此高亮）。
     pub soft_keyboard_on: bool,

@@ -8,7 +8,11 @@
 pub enum ToolbarAction {
     /// 中/英切换（合并方案显示）
     ToggleMode,
-    /// 切换输入方案（保留供外部调用，工具栏不单独显示）
+    /// 切换到下一个输入方案（`cycle_schema`）。
+    ///
+    /// **没有自己的格子**——它由中英格的**中键**产出（0.120 起），以及外部调用。
+    /// 故它不会出现在任何 `ToolbarItem` 的展开结果里，但仍是一个合法的
+    /// `ToolbarAction`：`mouse_toolbar` 与 `build_toolbar_cell_menu` 都要认得它。
     SwitchEngine,
     /// 中/英标点切换
     TogglePunct,
