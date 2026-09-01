@@ -11,6 +11,19 @@ use wind_candidate::Candidate;
 use wind_ipc::protocol::MOD_SHIFT;
 use wind_keys::keymap;
 
+/// 特殊模式取候选的常规上限（本值是从 special 模式沿用的既有行为，未改）。
+///
+/// ⚠️ 它施加在**过滤之前**。对 special 模式无碍（快符表按码精确匹配，同码没几条），
+/// 但生僻字模式要在这批候选里再滤掉常用字 ⇒ 见 [`Coordinator::refill_rare_if_short`]，
+/// 那里会在不足一页时加大重取。⛔ 别为了省掉重取而直接调大本值：它会传进拼音引擎
+/// 里一个 O(n²) 的查重循环，单字母输入实测 3.5ms → 29ms，而那是每次按键都要付的。
+const SPECIAL_CONVERT_LIMIT: usize = 100;
+
+/// 生僻字模式过滤后不足一页时的重取上限。取值理由见
+/// [`Coordinator::refill_rare_if_short`]——与拼音引擎的 `MAX_COMPLETION_CANDIDATES`
+/// 对齐，再大会被那边 clamp 掉。
+const RARE_REFILL_LIMIT: usize = 1000;
+
 impl Coordinator {
     /// 找出 key_code 绑定的特殊模式下标。
     ///
@@ -190,6 +203,70 @@ impl Coordinator {
         self.retain_rare_admitted(&mut state.candidates);
     }
 
+    /// 生僻字模式：**过滤后不足一页**时加大取数上限重取一次。
+    ///
+    /// # 为什么必须有这一步：「截断 → 过滤」会砍掉几乎全部结果
+    ///
+    /// 取数上限施加在过滤**之前**，而引擎按常用度排序 ⇒ 生僻字全排在后面，恰好是被
+    /// 上限切掉的那一段。拼音方案下实测（`limit=100` → 全量）：
+    ///
+    /// | 音节 | 上限 100 | 全部 | 漏掉 |
+    /// |---|---|---|---|
+    /// | `yi` | **4** | 1183 | 99.7% |
+    /// | `ji` | **6** | 1047 | 99.4% |
+    /// | `shi` | 23 | 316 | 93% |
+    ///
+    /// ⚠️ **码表方案同样中招**，只是程度轻：五笔 `ii` 由 1 条变 15 条（沝渻濷尛渁…）。
+    /// 我起初以为码表不受影响、还照此写了一条「码表不变」的测试，被它当场证伪。
+    /// 真正的规律是**编码越短、同码候选越多，被切掉的越多**：四码全码 `sivg` 只有
+    /// 「桜」一个解，一点不受影响；一级简码与二级简码则会被切掉大半。
+    /// ⇒ 判据不是「哪种方案」，是「这个码有多少同码候选」。
+    ///
+    /// ⚠️ 与本文件浏览态那段注释是同一个教训的两面：那里写着「反过来（引擎取数时就截到
+    /// 1 条）的后果是……屏幕整个空白」，说的是 shadow；这里的过滤器叫 `rare_admits`。
+    ///
+    /// # 为什么不直接调大上限
+    ///
+    /// `max_candidates` 不是「最后 truncate」——它会传进拼音引擎的补全路径，那里的
+    /// `push_unique` 按 `iter().any()` 线性查重、整体 O(n²)（见 pinyin/mod.rs 的
+    /// `completion_limit` 注释）。本机实测单次 `convert_with`：
+    ///
+    /// | 输入 | 上限 100 | 上限 1000 |
+    /// |---|---|---|
+    /// | `b`（单字母，最坏） | 3.5ms | **29.2ms** |
+    /// | `yi` | 5.8ms | 18.4ms |
+    /// | `shi` | 7.3ms | 7.5ms（总数 416，够不着上限）|
+    ///
+    /// 那是**每次按键**都要付的。故只在真的不够时才付：候选少的码（绝大多数）一次到位，
+    /// 高频音节多付一次重取。⛔ 别改成无条件的大上限。
+    ///
+    /// 重取上限取 [`RARE_REFILL_LIMIT`]＝1000，与拼音引擎的 `MAX_COMPLETION_CANDIDATES`
+    /// 对齐：再大也被那里 clamp 掉，实测 2000 与 1000 的条数、耗时完全相同，写 2000 只会
+    /// 让读者以为真能取到 2000。
+    fn refill_rare_if_short(&self, state: &mut State, schema: &str) {
+        if !matches!(state.active, Some(ModeKind::RareChar)) {
+            return;
+        }
+        // 够一页就不重取：本模式的候选恒为词库原序、用户本就要翻页找字，多取的那些
+        // 他这一屏也看不到。判据用**实际生效的每页条数**而不是写死的数字。
+        let need = self.per_page(state.active);
+        if state.candidates.len() >= need {
+            return;
+        }
+        let result = self
+            .engine_mgr
+            .convert_with(schema, &state.special_buffer, RARE_REFILL_LIMIT);
+        // 重取的结果**必须走同一条加工链**（finalize → 过滤），否则两次取数的候选形态
+        // 不一致：`$CC` 那类词条在重取路径上就不会被展开。
+        let mut refilled = self.finalize_candidates(result.candidates, &state.special_buffer);
+        self.retain_rare_admitted(&mut refilled);
+        // 重取只可能是超集（同一个码、更大的上限），但仍以「谁更多」为准而不是无条件替换
+        // ——引擎若有任何不单调的行为，取多的那份至少不会比现在更差。
+        if refilled.len() > state.candidates.len() {
+            state.candidates = refilled;
+        }
+    }
+
     /// 按生僻字准入就地保留候选。
     ///
     /// ⚠️ 常用字表**未加载**时整条跳过，不做任何过滤。判据与 `apply_filter` 那道
@@ -253,9 +330,9 @@ impl Coordinator {
             return None;
         }
         let schema = self.overlay_engine_schema(state)?;
-        let result = self
-            .engine_mgr
-            .convert_with(&schema, &state.special_buffer, 100);
+        let result =
+            self.engine_mgr
+                .convert_with(&schema, &state.special_buffer, SPECIAL_CONVERT_LIMIT);
         // 统一展开汇聚点：快符表内 `$AA/$SS/$CC` 等特殊语法在此炸开/标命令（见 finalize_candidates）。
         state.candidates = self.finalize_candidates(result.candidates, &state.special_buffer);
         // 生僻字模式：候选只留生僻字。放在 finalize **之后**——判据要看候选的最终文本，
@@ -263,6 +340,7 @@ impl Coordinator {
         // 放在 shadow **之前**，与主路径 `apply_filter` → `apply_shadow` 同序：先决定
         // 哪些候选存在，再应用用户的置顶/隐藏。
         self.apply_rare_admission(state);
+        self.refill_rare_if_short(state, &schema);
         // 空码补全对齐主码表方案（`single_code_input` + `single_code_complete`）：精确匹配模式下
         // 当前编码无精确候选、但更长前缀有候选时，引擎「备货不 push」把首个更长编码候选放进
         // `completion_hint`（见 codetable/engine.rs），交由掌握最终列表的调用方判空后取一条。
@@ -924,6 +1002,82 @@ mod tests {
             cfg.schema.active = "wubi86".into();
             cfg.schema.available = vec!["wubi86".into()];
             Some(Coordinator::new_headless(cfg, Some(&d)))
+        }
+
+        /// 拼音方案下的生僻字模式。与 `wubi_coord` 分开是因为两者暴露的问题不同：
+        /// 码表方案的候选总数够不着取数上限，「截断 → 过滤」那个缺陷在五笔端到端测试里
+        /// **完全看不出来**。
+        fn pinyin_coord(tag: &str) -> Option<std::sync::Arc<Coordinator>> {
+            let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../build_dev/data");
+            if !d
+                .join("schemas/pinyin/rime_frost.dict.merged.wdat")
+                .exists()
+            {
+                eprintln!("跳过 {tag}：拼音词库不存在（build_dev/data 缺失）");
+                return None;
+            }
+            let mut cfg = Config::default();
+            cfg.schema.active = "pinyin".into();
+            cfg.schema.available = vec!["pinyin".into()];
+            Some(Coordinator::new_headless(cfg, Some(&d)))
+        }
+
+        /// ★★★ 高频音节在修复前只能出个位数候选。
+        ///
+        /// `yi` 这个音有 1183 个非常用字，而取数上限 100 施加在过滤**之前**、引擎又按
+        /// 常用度排序 ⇒ 修复前只漏出 4 个（漏掉 99.7%）。用户会认为功能坏了。
+        ///
+        /// 断言取「远多于修复前」而不是某个精确条数：条数随词库版本变，而 4 → 上百这个
+        /// 数量级差异不会因换词库而消失。
+        #[test]
+        fn pinyin_high_frequency_syllable_is_not_starved_by_the_limit() {
+            let Some(c) = pinyin_coord("yi") else { return };
+            let got = rare_cands(&c, "yi");
+            assert!(
+                got.len() > 50,
+                "高频音节 yi 应能出大量生僻字，实得 {} 条：{:?}",
+                got.len(),
+                got.iter().take(10).collect::<Vec<_>>()
+            );
+            assert!(got.iter().all(|t| t.chars().count() == 1), "仍须只出单字");
+        }
+
+        /// 候选总数**够不着**上限的码，不受重取影响（也不该白付一次重取）。
+        ///
+        /// `zhui` 全部候选 72 条 < 100，第一次就取全了；过滤后 57 条也够一页，
+        /// 于是 `refill_rare_if_short` 直接返回。这条钉住「常见情况不劣化」。
+        #[test]
+        fn pinyin_short_candidate_list_needs_no_refill() {
+            let Some(c) = pinyin_coord("zhui") else {
+                return;
+            };
+            let got = rare_cands(&c, "zhui");
+            assert!(got.len() >= 10, "zhui 应有足量生僻字，实得 {}", got.len());
+            assert!(
+                got.contains(&"沝".to_string()),
+                "沝 是 zhui 的生僻字，应在列"
+            );
+        }
+
+        /// ★ 码表方案**也**受益于重取——这条测试写下时我以为它会证明「码表不变」，
+        /// 结果反过来证伪了那个假设：`ii` 从 1 条变 15 条。
+        ///
+        /// 留着它是为了钉住这个认知：截断的影响取决于**同码候选有多少**，与方案类型
+        /// 无关。二级简码 `ii` 同码字多，切掉大半；四码全码 `sivg` 只有一个解，不受影响
+        /// （由 `real_dict_keeps_only_the_rare_homograph` 钉住那一侧）。
+        #[test]
+        fn codetable_short_code_also_gains_from_refill() {
+            let Some(c) = wubi_coord("ii-refill") else {
+                return;
+            };
+            let got = rare_cands(&c, "ii");
+            assert!(
+                got.len() > 5,
+                "二级简码 ii 的同码生僻字远不止一个，实得 {got:?}"
+            );
+            assert!(got.contains(&"沝".to_string()), "原有的沝仍须在列");
+            assert!(got.iter().all(|t| t.chars().count() == 1), "仍须只出单字");
         }
 
         /// 取某个码在生僻字模式下的候选文本。

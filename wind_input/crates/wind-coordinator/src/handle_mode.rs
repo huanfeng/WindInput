@@ -16,6 +16,12 @@ use wind_ui_types::UiCommand;
 use crate::coordinator::{numpad_char, printable_char, punct_char};
 use wind_bridge::handler::KeyEventData;
 
+/// 融合模式里生僻字成员的常规取数上限（与其余成员同量级）。
+const MIX_RARE_CONVERT_LIMIT: usize = 50;
+
+/// 同上，过滤后不足配额时的重取上限。与独立模式的 `RARE_REFILL_LIMIT` 同值同理由。
+const MIX_RARE_REFILL_LIMIT: usize = 1000;
+
 /// 兜底主题 id：`config.ui.theme.name` 未设置时的初值，也是 [`Coordinator::push_theme`]
 /// 加载失败时的降级目标。两处必须同名，故只此一处定义。
 pub(crate) const FALLBACK_THEME: &str = "default";
@@ -1704,12 +1710,33 @@ impl Coordinator {
                 if !self.engine_mgr.ensure_schema(&schema) {
                     continue;
                 }
-                let result = self.engine_mgr.convert_with(&schema, &state.mix_buffer, 50);
+                // ★ 配额：本成员最多出一页。融合模式里它与算式/日期/拼音**并列**，
+                // 而生僻字过滤后动辄上百条（拼音 `yi` 有一千多个非常用字）——不设上限
+                // 就会把其余成员整个挤到翻页之外。要成批找生僻字该进独立模式，
+                // 这里只需让用户看到「有」。⛔ 别把它调大到与拼音成员同量级。
+                let quota = self.per_page(state.active);
                 // ⚠️ 刻意**不在这里 finalize**：循环外还会对整份 `cands` 统一 finalize 一次，
                 // 在此提前展开会让 `$AA`/`$CC` 那类词条过两遍。生僻准入判的是候选文本，
                 // 未展开的源码形态必然不是单字、自然被滤掉——而生僻字模式本就不该出命令候选。
-                let mut rare = result.candidates;
-                self.retain_rare_admitted(&mut rare);
+                let take = |limit: usize| {
+                    let mut v = self
+                        .engine_mgr
+                        .convert_with(&schema, &state.mix_buffer, limit)
+                        .candidates;
+                    self.retain_rare_admitted(&mut v);
+                    v
+                };
+                let mut rare = take(MIX_RARE_CONVERT_LIMIT);
+                // 「截断 → 过滤」同款缺陷：取数上限施加在过滤之前，而生僻字恰好排在被切掉
+                // 的那一段。不足配额时加大重取一次，理由与耗时实测见
+                // `Coordinator::refill_rare_if_short`。
+                if rare.len() < quota {
+                    let more = take(MIX_RARE_REFILL_LIMIT);
+                    if more.len() > rare.len() {
+                        rare = more;
+                    }
+                }
+                rare.truncate(quota);
                 for c in rare {
                     if seen.insert(c.text.clone()) {
                         cands.push(c);
