@@ -364,7 +364,11 @@ pub fn boundary_by_char_count(
     if runes.iter().any(|&c| index.readings(c).is_none()) {
         return None;
     }
-    let graph = SegGraph::from_dag(&Dag::build(code, trie));
+    // **必须 `build_strict`**：这里推的是词条的**真值边界**（哪几个字节属于哪个字的读音），
+    // 下面还要拿每个音节去比对该字的 readings。带模糊拼写层会凭空多出「用户错音」那些边，
+    // 既可能撑爆 `MAX_BOUNDARY_PATHS` 把本来唯一的解判成 truncated，也让判据②
+    // 「切得出与字数相符的音节序列」被错音串满足。见 `fuzzy::fuzzy_spellings`。
+    let graph = SegGraph::from_dag(&Dag::build_strict(code, trie));
     let paths = graph.paths_with_edges(0, code.len(), runes.len(), MAX_BOUNDARY_PATHS);
     if paths.is_empty() {
         return None; // 判据②不满足：切不出与字数相符的音节序列

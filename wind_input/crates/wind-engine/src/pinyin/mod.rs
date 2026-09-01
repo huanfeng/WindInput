@@ -707,7 +707,13 @@ impl PinyinEngine {
     }
 
     /// 注入模糊音配置（取代 with_unigram 中的 FuzzyConfig::default()）。
+    ///
+    /// 同时把「错音串」注册进切分层：模糊变体是在切分**之后**逐音节展开的，`tin`
+    /// （想打 `ting`）这类本身不成音节的串若在图上没有边，`tinzhi` 最远只能切到 `ti`，
+    /// 整条模糊链路一次都不会被执行。见 [`fuzzy::fuzzy_spellings`]。
     pub fn with_fuzzy(mut self, fuzzy: FuzzyConfig) -> Self {
+        self.trie
+            .load_fuzzy_spellings(&fuzzy::fuzzy_spellings(&fuzzy));
         self.fuzzy_config = fuzzy;
         self
     }
@@ -4889,6 +4895,77 @@ mod tests {
         assert_eq!(
             r.candidates[0].text, "四",
             "同权重下模糊被折扣压住，精确胜出，实际: {texts:?}"
+        );
+    }
+
+    /// 回归守卫：**用户打出来的那一端本身不是合法音节**时，模糊音必须仍然生效。
+    ///
+    /// `tin` 不在标准音节表里（普通话只有 `ting`）。模糊变体是在切分**之后**逐音节展开的，
+    /// 于是修复前 `tinzhi` 的 DAG 最远只走到 `ti`、`nzhi` 全成残码，`expand_syllables`
+    /// 一次都轮不到执行 —— 候选里**压根没有**「停止」，不是排在后面。
+    ///
+    /// ⚠️ 此前的模糊音用例全部落在「打的那端也是合法音节」上（`si`→`shi`、`beijin`→`beijing`
+    /// 的 `jin`），恰好整片绕开了这个缺口。**测试输入的形态本身就是被测条件的一部分**
+    /// ——同一条教训在模糊音上已是第二次（上一次是「单测用迷你词典，真实词库前面堵着
+    /// 230 条前缀补全」）。
+    #[test]
+    fn fuzzy_hits_when_typed_spelling_is_not_a_valid_syllable() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("tingzhi".to_string(), "停止".to_string(), 9000, 0);
+        let fz = FuzzyConfig {
+            in_ing: true,
+            ..Default::default()
+        };
+        let eng = PinyinEngine::new(Config::default(), CachedDict::Memory(raw)).with_fuzzy(fz);
+
+        let r = eng.convert("tinzhi", 10).unwrap();
+        let texts: Vec<&String> = r.candidates.iter().map(|c| &c.text).collect();
+        let hit = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "停止")
+            .unwrap_or_else(|| panic!("开 in_ing 后 `tinzhi` 应出「停止」，实际: {texts:?}"));
+        assert!(hit.is_fuzzy, "应标记为模糊命中（据此施加 0.5^k 折扣）");
+        assert_eq!(
+            hit.consumed_length, 6,
+            "整串已被解释，上屏须消费全部 6 键（修复前只切得出 `ti`）"
+        );
+    }
+
+    /// 同一缺口的声母侧，且比韵母侧更常见：平翘舌不分的人打「装置」正是 `zuangzhi`
+    /// （`zuang` 不是合法音节，`zhuang` 才是）。
+    #[test]
+    fn fuzzy_hits_for_invalid_initial_spelling() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("zhuangzhi".to_string(), "装置".to_string(), 9000, 0);
+        let fz = FuzzyConfig {
+            zh_z: true,
+            ..Default::default()
+        };
+        let eng = PinyinEngine::new(Config::default(), CachedDict::Memory(raw)).with_fuzzy(fz);
+
+        let r = eng.convert("zuangzhi", 10).unwrap();
+        let texts: Vec<&String> = r.candidates.iter().map(|c| &c.text).collect();
+        assert!(
+            r.candidates.iter().any(|c| c.text == "装置"),
+            "开 zh_z 后 `zuangzhi` 应出「装置」，实际: {texts:?}"
+        );
+    }
+
+    /// 模糊音全关时，切分层不得有任何变化 —— 错音串照旧切不动。
+    ///
+    /// 少了这条，「无条件把模糊拼写塞进 trie」也能让上面两条通过。
+    #[test]
+    fn fuzzy_spelling_layer_is_gated_by_config() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("tingzhi".to_string(), "停止".to_string(), 9000, 0);
+        let eng = PinyinEngine::new(Config::default(), CachedDict::Memory(raw));
+
+        let r = eng.convert("tinzhi", 10).unwrap();
+        assert!(
+            !r.candidates.iter().any(|c| c.text == "停止"),
+            "没开 in_ing 就不该出「停止」，实际: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
         );
     }
 

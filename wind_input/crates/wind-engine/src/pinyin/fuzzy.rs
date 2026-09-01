@@ -3,7 +3,7 @@
 //! 与 Go 版本 `wind_input/internal/engine/pinyin/fuzzy.go` 对齐。
 //! 允许用户输入时忽略常见发音混淆（如 z/zh, c/ch, s/sh, n/l）。
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::LazyLock;
 
 /// 笛卡尔积展开的组合数上限（超出即降级，见 [`FuzzyMatcher::expand_syllables`]）。
@@ -201,6 +201,64 @@ fn combo_count(per_syllable: &[Vec<(String, usize)>], limit: usize) -> usize {
     dp.iter().fold(0usize, |acc, n| acc.saturating_add(*n))
 }
 
+/// 枚举「用户会打、但本身不是合法音节」的模糊拼写全集，供切分层注册。
+///
+/// ## 为什么需要它
+///
+/// 模糊音是在**切分之后**逐音节展开的（[`FuzzyMatcher::expand_syllables`] 的入参就是
+/// 已切好的音节数组）。而切分器 [`SyllableTrie`](super::syllable::SyllableTrie) 只认
+/// 标准音节表，于是 `tin`（想打 `ting`）这类**本身不成音节**的串在图上根本没有边：
+/// `tinzhi` 的 DAG 最远只走到 `ti`，`nzhi` 全成残码，模糊展开一次都轮不到执行。
+/// 现象是「明明开了 in-ing，`tinzhi` 却打不出「停止」」——不是排序靠后，是候选里压根没有。
+///
+/// 只在**打的那端不成音节**时失效，故 `jinzhi`→`jingzhi`（`jin` 合法）一直正常，
+/// `an_ang` 组更是一条都不缺（an/ang 系列两侧齐全）——这正是它长期没被发现的原因。
+/// 真实高频误打里受影响的有 `zuang`→zhuang、`suang`→shuang、`cuang`→chuang、
+/// `fui`→hui、`fuan`→huan、`tin`→ting、`din`→ding 等。
+///
+/// ## 做法
+///
+/// 把这些拼写注册进切分层（[`SyllableTrie::load_fuzzy_spellings`](
+/// super::syllable::SyllableTrie::load_fuzzy_spellings)），让错音串成为一条**可切的边**。
+/// 这是 librime `speller/algebra` 拼写代数的最小等价物：rime 把 `tin` 直接注册成 `ting`
+/// 的一种合法拼写，切分器天然认识它。我们只补「可切」这一步，其余（变体展开、`0.5^k`
+/// 惩罚、排序）沿用既有链路 —— 切出 `tin` 后 [`FuzzyMatcher::fuzzy_variants_scored`]
+/// 因 `check_valid` 为假而宽松放行，照常产出 `ting` 并计 1 处改动，下游无需任何改动。
+///
+/// ## 两个刻意的边界
+///
+/// - **只收非法拼写**：产物本身已是合法音节的（`jin`→`jing`、`si`→`shi`）不注册，
+///   它们本来就切得出来，重复注册只会让 `is_end` 多一份无谓开销。
+/// - **只进切分层，不进 `is_syllable`/`is_prefix`**：后两者是**真值判据**，被双拼真值
+///   校验（[`shuangpin`](super::shuangpin)）、造词边界推导（[`generate`](super::generate)）
+///   等复用，让 `tin` 变成「合法音节」会污染它们。
+///
+/// 集合**闭合可枚举**（标准音节表固定、模糊组固定），按开启的组过滤后至多数十条，
+/// 故在 `with_fuzzy` 时一次性构建即可，不进按键热路径。
+pub fn fuzzy_spellings(config: &FuzzyConfig) -> Vec<String> {
+    if !config.any_enabled() {
+        return Vec::new();
+    }
+    let mut out = BTreeSet::new();
+    for syllable in super::syllable::STANDARD_SYLLABLES {
+        let (initial, final_) = split_initial_final(syllable);
+        let initials = part_options(initial, INITIAL_GROUPS, config);
+        let finals = part_options(final_, FINAL_GROUPS, config);
+        for (i, init) in initials.iter().enumerate() {
+            for (j, fin) in finals.iter().enumerate() {
+                if i == 0 && j == 0 {
+                    continue; // 音节自身
+                }
+                let variant = format!("{init}{fin}");
+                if !VALID_SYLLABLES.contains(variant.as_str()) {
+                    out.insert(variant);
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// 模糊拼音匹配器
 pub struct FuzzyMatcher;
 
@@ -335,6 +393,54 @@ mod tests {
         assert!(!FuzzyConfig::default().any_enabled(), "默认全关");
         assert!(cfg(|c| c.zh_z = true).any_enabled());
         assert!(cfg(|c| c.uan_uang = true).any_enabled(), "末位组也须被算上");
+    }
+
+    // ---------------------------------------------------------------- fuzzy_spellings
+
+    #[test]
+    fn fuzzy_spellings_empty_when_all_disabled() {
+        assert!(fuzzy_spellings(&FuzzyConfig::default()).is_empty());
+    }
+
+    /// 只收**不是合法音节**的拼写：`jin`→`jing` 那侧本就切得出来，不必注册。
+    #[test]
+    fn fuzzy_spellings_only_collects_invalid_ones() {
+        let out = fuzzy_spellings(&cfg(|c| c.in_ing = true));
+        assert!(
+            out.contains(&"tin".to_string()),
+            "tin 须注册，实际: {out:?}"
+        );
+        assert!(
+            out.contains(&"din".to_string()),
+            "din 须注册，实际: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|s| VALID_SYLLABLES.contains(s.as_str())),
+            "合法音节不该出现在模糊拼写表里，实际: {out:?}"
+        );
+        // in_ing 组在标准音节表上的缺口恰好只有 t/d 两个声母。
+        assert_eq!(out, vec!["din".to_string(), "tin".to_string()]);
+    }
+
+    /// 声母组同样有缺口，且比韵母组更常见：平翘舌不分的人打「装置」正是 `zuangzhi`。
+    #[test]
+    fn fuzzy_spellings_covers_initial_groups() {
+        let out = fuzzy_spellings(&cfg(|c| c.zh_z = true));
+        assert_eq!(
+            out,
+            vec!["zua".to_string(), "zuai".to_string(), "zuang".to_string()],
+            "zh_z 组的缺口"
+        );
+    }
+
+    /// 只登记开启了的组 —— 关掉的组一条都不该混进来。
+    #[test]
+    fn fuzzy_spellings_respects_enabled_groups() {
+        let out = fuzzy_spellings(&cfg(|c| c.in_ing = true));
+        assert!(
+            !out.contains(&"zuang".to_string()),
+            "没开 zh_z 就不该有 zuang，实际: {out:?}"
+        );
     }
 
     // ---------------------------------------------------------------- expand_syllables
