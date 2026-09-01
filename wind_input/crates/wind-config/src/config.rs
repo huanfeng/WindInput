@@ -800,6 +800,14 @@ pub struct SchemaConfig {
     /// 快捷输入（日期/计算等内置类方案）配置。将随"英文/快捷做成方案"一并重构。
     #[serde(default)]
     pub quick_input: QuickInputConfig,
+    /// **跨引擎**的词频公共基线（[schema.frequency]）。
+    ///
+    /// ⚠️ 与 `schema.{codetable,pinyin,english}.frequency` **是不同的东西，别合并**：
+    /// 那三段是各引擎自己的调频参数（策略、保护位数、半衰期），值可以互不相同；本段装的是
+    /// 「三个引擎都该照办的同一条规则」。判据是**用户会不会想给不同引擎配不同的值**——
+    /// 「emoji 不参与词频」在码表里成立、在拼音里就不成立是说不通的，配三遍只会漂移。
+    #[serde(default)]
+    pub frequency: FrequencyGlobal,
     /// **已废弃**：特殊模式的实例集合改由「带 `[overlay]` 段的已安装方案」定义
     /// （`EngineManager::overlay_modes`），见 `docs/redesign/overlay-mode-config.md`。
     ///
@@ -829,10 +837,31 @@ impl Default for SchemaConfig {
             mix: MixGlobal::default(),
             english: EnglishGlobal::default(),
             quick_input: QuickInputConfig::default(),
+            frequency: FrequencyGlobal::default(),
             legacy_special_modes: Vec::new(),
             mix_modes: default_mix_modes(),
         }
     }
+}
+
+/// 跨引擎的词频公共基线（[schema.frequency]）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FrequencyGlobal {
+    /// 这些 Unicode 区块的候选**不参与词频**：既不记录选中（不学习），也不受已有记录影响
+    /// （不重排）。取值为区块名（`"表情符号"`）或预设组名（`"emoji"`），
+    /// 解析见 `wind_candidate::BlockMask::from_config`。
+    ///
+    /// 出厂**为空**（＝行为与改动前完全一致）。诉求来自「emoji 在正常输入时不要参与词频
+    /// 调整」：emoji 多是一次性的点缀，被它顶到前面会把常用字挤下去，而用户下次多半又想
+    /// 打回那个字。
+    ///
+    /// ★ **空列表即关闭，故不另设 `enabled` 开关**——「开着但一个区块都没选」是个无意义
+    /// 状态，两个键就要多解释一次它们的组合（配置设计规则 R3 的「枚举当开关」同款判据）。
+    ///
+    /// ⚠️ **写端与读端必须同时照办**：只跳过记录的话，用户库里既有的 emoji 词频记录仍在
+    /// 生效，开关看起来像没反应。两端共用 `FreqSettings::excluded_from_freq` 一个判据。
+    #[serde(default)]
+    pub exclude_blocks: Vec<String>,
 }
 
 /// 全局英文配置（[schema.english]）。
@@ -1205,6 +1234,7 @@ impl Default for PinyinGlobalConfig {
 /// - `""` / `"none"`：z 是普通编码字母（默认）
 /// - `"temp_pinyin"`：进临时拼音
 /// - `"temp_english"`：进临时英文
+/// - `"rare_char"`：进生僻字模式（当前方案的编码，候选只留生僻字）
 /// - `"mix:<id>"`：进指定融合模式（`mix:quick_mix` = 内置「快捷」）
 /// - `"special:<id>"`：进指定特殊模式
 /// - `"toggle_schema:<id>"`：切到指定方案，再按回来
@@ -1222,6 +1252,10 @@ pub enum BoundAction {
     TempEnglish,
     /// 进辅助码模式（拼音候选字形二次筛选；仅组码中有效）。
     AuxCode,
+    /// 进生僻字模式：用当前活跃方案的编码输入，候选只留生僻字。
+    ///
+    /// 无载荷——它是单例，不像 [`Self::Special`] 那样一个引导键对应一份码表方案。
+    RareChar,
     /// 进指定融合模式（携带实例 id）。
     Mix(String),
     /// 进指定特殊模式（携带实例 id）。
@@ -1354,6 +1388,7 @@ impl BoundAction {
             "temp_pinyin" => Self::TempPinyin,
             "temp_english" => Self::TempEnglish,
             "aux_code" => Self::AuxCode,
+            "rare_char" => Self::RareChar,
             "softkeyboard" => Self::SoftKeyboard(None),
             a if Self::DISPATCH_ACTIONS.contains(&a) => Self::Action(a.to_string()),
             _ => Self::None,
@@ -2497,6 +2532,16 @@ pub const QUICK_MIX_ID: &str = "quick_mix";
 /// 与字面 `"pinyin"` 严格区分——后者表示"就要全拼"，永不被替换。
 pub const MIX_MEMBER_PRIMARY_PINYIN: &str = "$primary_pinyin";
 
+/// mix 成员占位符：**生僻字候选**（用当前活跃方案的编码查询，只留生僻字）。
+///
+/// 与 [`MIX_MEMBER_PRIMARY_PINYIN`] 同样是 `$` 前缀的占位符而非字面方案 id——它指向的
+/// 不是某个固定方案，而是「此刻的活跃方案 + 一道过滤」。写成字面 id 是不可能的：
+/// 用户在五笔下和在拼音下要查的是同一个东西，而那是两个不同的方案。
+///
+/// ⚠️ 它不是真实方案，`ensure_schema` 对它必然失败，故 `mix_members`（真实方案列表）
+/// 要像排除 `quick_input.*` 那样把它排除，进入门卫则要单独认它。
+pub const MIX_MEMBER_RARE_CHAR: &str = "$rare_char";
+
 /// 主拼音方案缺省回退（`schema.primary_pinyin` 为空时的目标方案）。
 /// 固定全拼，不扫描 available——避免方案列表顺序静默改变拼音行为。
 pub const DEFAULT_PINYIN_SCHEMA: &str = "pinyin";
@@ -2824,6 +2869,9 @@ pub struct InputConfig {
     /// 临时拼音（码表方案下临时切到拼音反查）。
     #[serde(default)]
     pub temp_pinyin: TempPinyinConfig,
+    /// 生僻字模式（用当前方案的编码输入，候选只留生僻字）。
+    #[serde(default)]
+    pub rare_char: RareCharConfig,
     /// 网址输入模式。
     #[serde(default)]
     pub url: UrlConfig,
@@ -2863,6 +2911,7 @@ impl Default for InputConfig {
             temp_english: TempEnglishConfig::default(),
             capslock: CapslockConfig::default(),
             temp_pinyin: TempPinyinConfig::default(),
+            rare_char: RareCharConfig::default(),
             url: UrlConfig::default(),
             add_word: AddWordConfig::default(),
             s2t: S2TConfig::default(),
@@ -3174,6 +3223,31 @@ impl Default for TempEnglishConfig {
 pub struct CapslockConfig {
     #[serde(default)]
     pub cancel_on_mode_switch: bool,
+}
+
+/// 生僻字模式配置（[input.rare_char]）。
+///
+/// ⚠️ **没有 `enabled`、也没有 `trigger_keys`**：进入方式统一由 `keys.key_actions`
+/// （全局）与方案文件 `[key_actions]`（按源方案分流）两张现成的表承载，动词是
+/// `"rare_char"`。在这里再开一个入口字段就是第三个真相源，正是 overlay-mode-config
+/// 那一轮重构要消除的东西。不绑任何键 ＝ 这个模式进不去 ＝ 关闭。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RareCharConfig {
+    /// **额外**纳入本模式的 Unicode 区块（区块名或预设组名，如 `"emoji"`）。
+    ///
+    /// 生僻汉字本来就在（判据见 `wind_candidate::rare_admits`），本项管的是那些
+    /// **默认字表管不着**的字符：emoji、注音符号、假名、间架结构符。它们的
+    /// `is_string_common` 恒为 true（语义是「忽略」而非「常用」），不显式纳入就永远
+    /// 进不来——这正是本项存在的理由。
+    ///
+    /// 出厂为空 ＝ 只出生僻汉字。
+    ///
+    /// ★ **「其它」是一个可选的兜底档**：区块表是显示域的表，逐块列举一份仍在增长的
+    /// Unicode 区间，新版本的新块会落进「其它」。对本项而言漏一块的后果是「那批字在
+    /// 这个模式里打不出」——不安全的方向，故给出这个兜底档，让新块落进一个用户控制得
+    /// 到的开关里，而不是静默消失。判据表见 `wind_candidate::charblock` 模块头。
+    #[serde(default)]
+    pub include_blocks: Vec<String>,
 }
 
 /// 临时拼音配置（[input.temp_pinyin]）。码表方案下临时切到拼音反查。全局唯一。
@@ -9699,5 +9773,18 @@ smart_method = "delete_replace"
         let d = ToolbarConfig::default();
         assert!(!d.auto_hide);
         assert_eq!(d.auto_hide_delay, 5);
+    }
+
+    /// `rare_char` 必须解析成生僻字模式，且**未知动词仍回落 None**。
+    ///
+    /// 后半条不是凑数：`BoundAction::parse` 的契约是「未知值一律 None，不静默变成别的
+    /// 功能」。新增一个动词时最容易破坏的正是这条——比如顺手写成前缀匹配，
+    /// 于是 `rare_char_xxx` 也进了生僻字模式。
+    #[test]
+    fn rare_char_bound_action_parses() {
+        assert_eq!(BoundAction::parse("rare_char"), BoundAction::RareChar);
+        assert_eq!(BoundAction::parse("rare_charx"), BoundAction::None);
+        assert_eq!(BoundAction::parse("rare"), BoundAction::None);
+        assert_eq!(BoundAction::parse(""), BoundAction::None);
     }
 }

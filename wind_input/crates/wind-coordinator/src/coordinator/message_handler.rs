@@ -757,6 +757,18 @@ impl MessageHandler for Coordinator {
                     }
                     return KeyAction::Consumed;
                 }
+            } else if action == "enter_rare_char" {
+                // 生僻字模式直达热键。已在该模式则幂等（与 enter_special 同）；
+                // 非中文态吞键不放行，理由同上：策略位已带 CHINESE_ONLY，走到这里
+                // 说明是别的路径转发来的，放行会在英文态凭空插入一个字符。
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.chinese_mode {
+                    if state.active != Some(ModeKind::RareChar) {
+                        // key_code=0 哨兵：热键进入不写引导符（同 enter_special）。
+                        return self.commit_and_enter_rare_char_mode(&mut state, 0);
+                    }
+                    return KeyAction::Consumed;
+                }
             } else if let Some(id) = action.strip_prefix("toggle_schema:") {
                 // 方案往返热键（keys.key_actions）：切过去，再按一次回来源。
                 // 与 switch_schema 同样**不判 chinese_mode**——回程尤其要在英文态按得动。
@@ -889,7 +901,14 @@ impl MessageHandler for Coordinator {
             Some(ModeKind::TempPinyin) => return self.handle_temp_pinyin_key(&mut state, data),
             Some(ModeKind::TempEnglish) => return self.handle_temp_english_key(&mut state, data),
             Some(ModeKind::Url) => return self.handle_url_key(&mut state, data),
-            Some(ModeKind::Special(_)) => return self.handle_special_key(&mut state, data),
+            // ★ 生僻字模式复用 special 的整套按键处理（缓冲/光标/退格/选词/翻页）。
+            // 两者只差「引擎取哪个方案」与「候选过不过生僻准入」，那两处分别在
+            // `overlay_engine_schema` 与 `update_special_candidates` 里分流。
+            // 另写一份的代价不是多写 676 行，而是两份迟早分叉——分叉的表现是
+            // 「生僻字模式里退格/翻页跟别处不一样」，没人会想到去查这里。
+            Some(ModeKind::Special(_)) | Some(ModeKind::RareChar) => {
+                return self.handle_special_key(&mut state, data);
+            }
             Some(ModeKind::Mix(_)) => return self.handle_mix_key(&mut state, data),
             Some(ModeKind::AuxCode) => return self.handle_aux_code_key(&mut state, data),
             None => {}

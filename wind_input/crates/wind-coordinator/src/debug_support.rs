@@ -85,6 +85,7 @@ impl Coordinator {
             Some(ModeKind::TempEnglish) => Some("temp_english"),
             Some(ModeKind::Url) => Some("url"),
             Some(ModeKind::Special(_)) => Some("special"),
+            Some(ModeKind::RareChar) => Some("rare_char"),
             Some(ModeKind::Mix(_)) => Some("mix"),
             Some(ModeKind::AuxCode) => Some("aux_code"),
             None => None,

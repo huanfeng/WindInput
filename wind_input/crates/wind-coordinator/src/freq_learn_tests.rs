@@ -710,3 +710,100 @@ fn mixed_manual_addword_goes_to_primary() {
         "混输 primary 缺失应返回 Err"
     );
 }
+
+/// ── schema.frequency.exclude_blocks（emoji 免词频）─────────────────────────────
+///
+/// 夹具：拼音方案 + 开调频 + 指定要排除的区块组。
+fn exclude_coord(tag: &str, exclude: &[&str]) -> (Arc<Coordinator>, Arc<Store>) {
+    use std::io::Write;
+    let base_dir = std::env::temp_dir().join(format!("wind_freq_exclude_{tag}"));
+    let schemas = base_dir.join("schemas");
+    let _ = std::fs::remove_dir_all(&base_dir);
+    std::fs::create_dir_all(&schemas).unwrap();
+    {
+        let mut f = std::fs::File::create(schemas.join("py_test.schema.toml")).unwrap();
+        write!(
+            f,
+            "[schema]\nid = \"py_test\"\n[engine]\ntype = \"pinyin\"\n"
+        )
+        .unwrap();
+    }
+    let mut cfg = Config::default();
+    cfg.schema.active = "py_test".into();
+    cfg.schema.available = vec!["py_test".into()];
+    cfg.schema.pinyin.frequency.enabled = true;
+    cfg.schema.frequency.exclude_blocks = exclude.iter().map(|s| s.to_string()).collect();
+    let db_path = std::env::temp_dir().join(format!("wind_freq_exclude_{tag}.redb"));
+    let _ = std::fs::remove_file(&db_path);
+    let store = Arc::new(Store::open(&db_path).unwrap());
+    let c = Coordinator::new_headless_with_store(cfg, Some(base_dir.as_path()), Arc::clone(&store));
+    (c, store)
+}
+
+/// 写端：配了 emoji 排除后选中 emoji 不落库，而汉字照常落库。
+///
+/// 「汉字照常」这一半不能省——判据若误伤正文，症状是「这个字选多少次都不往前排」，
+/// 完全静默；只断言 emoji 那一半的话，把判据写成恒真也能通过。
+#[test]
+fn excluded_blocks_skip_freq_recording() {
+    let (c, store) = exclude_coord("record", &["emoji"]);
+    c.record_selection("weixiao", "😀", CandidateSource::None);
+    assert!(
+        store.get_freq("pinyin", "weixiao", "😀").unwrap().is_none(),
+        "emoji 候选不该落词频记录"
+    );
+    c.record_selection("nihao", "你好", CandidateSource::None);
+    assert!(
+        store.get_freq("pinyin", "nihao", "你好").unwrap().is_some(),
+        "汉字候选必须照常落库——判据误伤正文的后果是静默的"
+    );
+}
+
+/// 出厂（未配置）时行为与改动前完全一致：emoji 照常记词频。
+///
+/// 锁的是「新功能默认不动任何人」，即 `BlockMask` 空集恒假那条路径的端到端体现。
+#[test]
+fn empty_exclude_list_records_everything() {
+    let (c, store) = exclude_coord("default", &[]);
+    c.record_selection("weixiao", "😀", CandidateSource::None);
+    assert!(
+        store.get_freq("pinyin", "weixiao", "😀").unwrap().is_some(),
+        "未配置 exclude_blocks 时 emoji 应照常记账（出厂零回归）"
+    );
+}
+
+/// ★★ **两端同源**：读端与写端认的必须是同一批文本。
+///
+/// 词频有写（`record_selection_in`）、读（`apply_freq_rerank_in`）两个端点，只跳过一端的
+/// 两种失效**都完全静默**：
+///
+/// - 只跳写端 ⇒ 库里既有的 emoji 记录照旧参与重排，用户觉得开关没反应；
+/// - 只跳读端 ⇒ 记录继续累积，日后关掉开关那些 emoji 会突然全部浮上来。
+///
+/// 判据挂在两端都已经在读的 `FreqSettings` 上，故这里直接对着那个判据取样——一侧改了、
+/// 另一侧没跟上的情形在类型层面就不可能发生。样本覆盖 emoji 与正文两个方向。
+#[test]
+fn both_freq_ends_share_one_verdict() {
+    let (c, _store) = exclude_coord("same_verdict", &["emoji"]);
+    let settings = c.engine_mgr.freq_settings_for("py_test");
+    for s in ["😀", "⚽️", "🇨🇳"] {
+        assert!(settings.excluded_from_freq(s), "{s} 两端都应排除");
+    }
+    for s in ["你好", "abc", "，"] {
+        assert!(!settings.excluded_from_freq(s), "{s} 两端都不该排除");
+    }
+}
+
+/// 拼错的区块名不让整份列表失效，同批次的其余项照常生效。
+#[test]
+fn unknown_block_name_does_not_disable_the_rest() {
+    // 「表情符號」用的是繁体「號」——这种错法肉眼极难分辨，正是要 warn 的那类。
+    let (c, store) = exclude_coord("typo", &["表情符號", "emoji"]);
+    let settings = c.engine_mgr.freq_settings_for("py_test");
+    assert!(
+        settings.excluded_from_freq("😀"),
+        "同批次里的 emoji 预设组应照常生效"
+    );
+    c.record_selection("weixiao", "😀", CandidateSource::None);
+    assert!(store.get_freq("pinyin", "weixiao", "😀").unwrap().is_none());
+}

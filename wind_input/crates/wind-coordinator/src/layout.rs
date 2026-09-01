@@ -52,6 +52,8 @@ pub(crate) fn intent_for(
             .get(i as usize)
             .map(|m| m.candidate_layout),
         Some(ModeKind::Special(_)) => overlay.map(|o| o.candidate_layout),
+        // 生僻字模式没有 [overlay] 段可读，布局跟随全局（同辅助码：只筛选、不改呈现形态）。
+        Some(ModeKind::RareChar) => None,
         Some(ModeKind::TempPinyin) => Some(cfg.input.temp_pinyin.candidate_layout),
         Some(ModeKind::TempEnglish) => Some(cfg.input.temp_english.candidate_layout),
         Some(ModeKind::Url) => Some(cfg.input.url.candidate_layout),

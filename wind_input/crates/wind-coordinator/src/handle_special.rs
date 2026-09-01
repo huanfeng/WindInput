@@ -121,6 +121,94 @@ impl Coordinator {
         }
     }
 
+    /// 进入生僻字模式：用**当前活跃方案**的编码输入，候选只留生僻字。
+    ///
+    /// 与 [`Self::enter_special_mode`] 的差别只有「不设 `special_id` / `overlay_spec`」
+    /// ——本模式没有宿主方案，那两项恒为默认值，凡从它们取值的地方都会落到默认档
+    /// （`show_all_on_enter=false`、布局与注释模板跟随全局），这是刻意的。
+    ///
+    /// 缓冲复用 `special_buffer`：按键处理走的是同一个 `handle_special_key`。
+    pub(crate) fn enter_rare_char_mode(&self, state: &mut State, key_code: u32) -> KeyAction {
+        state.input_buffer.clear();
+        state.candidates.clear();
+        state.active = Some(ModeKind::RareChar);
+        state.special_id = 0;
+        state.overlay_spec = None;
+        state.special_buffer.clear();
+        state.special_cursor = 0;
+        state.special_prefix = keymap::vk_to_prefix_char_with_letters(key_code)
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        self.update_special_candidates(state);
+        self.notify_ui_update(state);
+        let display = state.preedit.clone();
+        debug!("Entered rare-char mode");
+        KeyAction::UpdateComposition {
+            text: display.clone(),
+            caret_pos: display.chars().count() as u32,
+        }
+    }
+
+    /// 顶掉当前半成品并进入生僻字模式（引导键 / 直达热键共用）。
+    ///
+    /// 「顶字重开」是用户 2026-08-31 选定的进入方式，与临拼 / 快符 / mix 一致。
+    /// ⚠️ 另一种形态（保留编码、原地把候选换成生僻字，同辅助码）当时也被认可，将来若要
+    /// 加，改的是**这里**：准入判据 `wind_candidate::rare_admits` 不依赖进入方式，
+    /// 原样复用即可，不必也不该去动过滤那一侧。
+    pub(crate) fn commit_and_enter_rare_char_mode(
+        &self,
+        state: &mut State,
+        key_code: u32,
+    ) -> KeyAction {
+        if let Some(act) = self.top_commit_command_guard(state) {
+            return act;
+        }
+        let committed = self.take_committed_with_highlight(state);
+        let enter = self.enter_rare_char_mode(state, key_code);
+        match committed {
+            Some(text) => {
+                let new_comp = match &enter {
+                    KeyAction::UpdateComposition { text, .. } => text.clone(),
+                    _ => state.preedit.clone(),
+                };
+                self.commit_then_new_composition(text, new_comp)
+            }
+            None => enter,
+        }
+    }
+
+    /// 生僻字模式额外纳入的区块（`input.rare_char.include_blocks` 的解析结果）。
+    fn rare_char_blocks(&self) -> wind_candidate::BlockMask {
+        self.rt().rare_char_blocks
+    }
+
+    /// 对当前候选施加生僻字准入（仅生僻字模式；其余模式为空操作）。
+    fn apply_rare_admission(&self, state: &mut State) {
+        if !matches!(state.active, Some(ModeKind::RareChar)) {
+            return;
+        }
+        self.retain_rare_admitted(&mut state.candidates);
+    }
+
+    /// 按生僻字准入就地保留候选。
+    ///
+    /// ⚠️ 常用字表**未加载**时整条跳过，不做任何过滤。判据与 `apply_filter` 那道
+    /// `common_chars.is_empty()` 同源：表没加载时全体候选都会被判成「非常用」，
+    /// 于是这里会**放行全部**候选——那不是「生僻字模式」，是「没有过滤的普通输入」，
+    /// 而用户完全看不出区别。宁可什么都不滤，也不要给出一个假装过滤过的列表。
+    ///
+    /// 「严格过滤，空了就空着」是用户拍板的取舍（2026-08-24）：滤空不回补、不降级。
+    pub(crate) fn retain_rare_admitted(&self, candidates: &mut Vec<wind_candidate::Candidate>) {
+        let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
+        if cc.is_empty() {
+            return;
+        }
+        // 额外纳入的区块（`input.rare_char.include_blocks`）。解析结果取自 `rt()` 的镜像，
+        // 与词频那份一样在装载期算好——本函数在每次按键的候选刷新路径上。
+        let extra = self.rare_char_blocks();
+        candidates.retain(|c| wind_candidate::rare_admits(&c.text, &cc, extra));
+    }
+
     /// 退出特殊模式并清空相关状态（码表缓存保留供复用）。
     pub(crate) fn exit_special_mode(&self, state: &mut State) {
         state.active = None;
@@ -170,6 +258,11 @@ impl Coordinator {
             .convert_with(&schema, &state.special_buffer, 100);
         // 统一展开汇聚点：快符表内 `$AA/$SS/$CC` 等特殊语法在此炸开/标命令（见 finalize_candidates）。
         state.candidates = self.finalize_candidates(result.candidates, &state.special_buffer);
+        // 生僻字模式：候选只留生僻字。放在 finalize **之后**——判据要看候选的最终文本，
+        // 而 `$AA`/`$CC` 那类词条是在 finalize 里才展开成真正文本的。
+        // 放在 shadow **之前**，与主路径 `apply_filter` → `apply_shadow` 同序：先决定
+        // 哪些候选存在，再应用用户的置顶/隐藏。
+        self.apply_rare_admission(state);
         // 空码补全对齐主码表方案（`single_code_input` + `single_code_complete`）：精确匹配模式下
         // 当前编码无精确候选、但更长前缀有候选时，引擎「备货不 push」把首个更长编码候选放进
         // `completion_hint`（见 codetable/engine.rs），交由掌握最终列表的调用方判空后取一条。
@@ -180,11 +273,16 @@ impl Coordinator {
         // 取自同一处（`effective_data_schema`）是硬要求——读写分别取自不同的地方，会得到
         // 「写进 qsym、读的是 wubi86」：记账看着成功，候选顺序永远不动。
         let owner = self.effective_data_schema(state);
-        self.apply_freq_rerank_in(
-            owner.as_deref(),
-            &mut state.candidates,
-            &state.special_buffer,
-        );
+        // 生僻字模式**完全不参与词频**（用户拍板）：不只是不记账，重排也跳过。
+        // 只跳写端的话，这里读到的仍是正常输入时积累的词频，模式内的顺序会被它牵着走，
+        // 而用户以为自己关掉了这件事。两端一起跳，语义才是「这个模式不碰词频」。
+        if !matches!(state.active, Some(ModeKind::RareChar)) {
+            self.apply_freq_rerank_in(
+                owner.as_deref(),
+                &mut state.candidates,
+                &state.special_buffer,
+            );
+        }
         self.apply_shadow_in(
             owner.as_deref(),
             &mut state.candidates,
@@ -199,6 +297,9 @@ impl Coordinator {
         // 它——不过滤的话隐藏完当场又被补回来。
         if state.candidates.is_empty() {
             let mut hint = self.finalize_candidates(result.completion_hints, &state.special_buffer);
+            // 补全候选**同样要过生僻准入**：这条旁路直接取自引擎、绕过了上面那次过滤，
+            // 不补这一句的表现是「本码没有生僻字时，补出来的却是个常用字」。
+            self.retain_rare_admitted(&mut hint);
             self.apply_shadow_in(owner.as_deref(), &mut hint, &state.special_buffer);
             // 仍只采纳一条（`$AA`/`$SS` 在前缀情形折叠为单个组名候选，正常也只有一条）。
             state.candidates.extend(hint.into_iter().next());
@@ -248,12 +349,17 @@ impl Coordinator {
         //
         // 此前这里只有 record_commit（统计），完全不记词频——特殊模式的候选顺序
         // 因此永远是词库原序，用户选过多少次都不会往前走。
-        self.record_selection_in(
-            self.effective_data_schema(state).as_deref(),
-            &code,
-            &cand.text,
-            cand.source,
-        );
+        // 生僻字模式不记词频（用户拍板）：模式是一次性的逃生口，用完不留痕，正常输入的
+        // 候选顺序纹丝不动。⚠️ `record_commit`（统计）与上屏历史不在此列，它们是另外
+        // 两条通路——一并跳过会让「重复上屏」取不到刚打出来的那个生僻字。
+        if !matches!(state.active, Some(ModeKind::RareChar)) {
+            self.record_selection_in(
+                self.effective_data_schema(state).as_deref(),
+                &code,
+                &cand.text,
+                cand.source,
+            );
+        }
         self.record_commit(
             &cand.text,
             state.special_buffer.len() as u32,
@@ -671,6 +777,298 @@ mod tests {
                 assert!(has_new_composition);
             }
             other => panic!("pre_confirm 应走 InsertText 聚合，实际 {other:?}"),
+        }
+    }
+
+    /// ── 生僻字模式 ────────────────────────────────────────────────────────────
+    ///
+    /// 这几条**刻意不依赖真实词库**：本 worktree 没有 `build_dev/data` 时，依赖词库的
+    /// 端到端用例会整族静默跳过而计数照绿（判据是耗时 0.00s）。模式的生命周期与准入
+    /// 判据是这轮的核心性质，不能挂在一个可能没跑的测试上。
+    mod rare_char {
+        use crate::coordinator::Coordinator;
+        use crate::pipeline::ModeKind;
+        use wind_config::Config;
+
+        fn coord() -> std::sync::Arc<Coordinator> {
+            Coordinator::new_headless(Config::default(), None)
+        }
+
+        /// 进入后模式标识为 rare_char，且缓冲被清空（顶字重开的语义）。
+        #[test]
+        fn enters_and_reports_its_own_mode() {
+            let c = coord();
+            let mut st = c.state.lock().unwrap();
+            c.enter_rare_char_mode(&mut st, 0);
+            assert_eq!(st.active, Some(ModeKind::RareChar));
+            assert!(st.special_buffer.is_empty(), "顶字重开：进入时缓冲为空");
+            assert!(st.input_buffer.is_empty(), "主输入缓冲一并清空");
+            // ⚠️ special 专属状态必须留在默认值：凡从 overlay_spec 取值的地方都会因此
+            // 落到默认档（布局/注释跟随全局、show_all_on_enter=false），这是刻意的。
+            assert!(st.overlay_spec.is_none(), "生僻字模式没有 [overlay] 段可读");
+        }
+
+        /// 退出复用 `exit_special_mode`，模式与缓冲一并清干净。
+        ///
+        /// 留下一个没清的 `active` 会让后续按键继续走 overlay 分派，表现为「Esc 之后
+        /// 打字没反应」——而 `exit_special_mode` 是两个模式共用的那一份，这里钉住它对
+        /// 生僻字模式同样有效。
+        #[test]
+        fn exits_cleanly() {
+            let c = coord();
+            let mut st = c.state.lock().unwrap();
+            c.enter_rare_char_mode(&mut st, 0);
+            c.exit_special_mode(&mut st);
+            assert_eq!(st.active, None);
+            assert!(st.special_buffer.is_empty());
+            assert!(st.preedit.is_empty());
+        }
+
+        /// ★ 配置真的走到了判据。
+        ///
+        /// 本仓的经典失效形态是「配置四层就位、消费点却在不可达的调用点上」——开关配了
+        /// 毫无反应，且没有任何报错。这条测试从**配置**出发一路走到**候选列表**，
+        /// 中间任何一环断掉都会红：
+        /// `input.rare_char.include_blocks` → ConfigBundle 预解析 → `rare_char_blocks()`
+        /// → `rare_admits` 的 extra 参数。
+        #[test]
+        fn include_blocks_config_reaches_the_verdict() {
+            let mut cfg = Config::default();
+            cfg.input.rare_char.include_blocks = vec!["emoji".to_string()];
+            let c = Coordinator::new_headless(cfg, None);
+            // 常用字表必须非空，否则 `retain_rare_admitted` 走「表未加载」那条早退。
+            set_common(&c, ['我', '你', '好']);
+
+            let mut cands = vec![
+                cand("我"),   // 常用汉字 → 滤掉
+                cand("龘"),   // 生僻汉字 → 留下
+                cand("😀"),   // 域外字符，靠 include_blocks 纳入 → 留下
+                cand("ㄅ"),   // 域外字符，没配它那一档 → 滤掉
+                cand("你好"), // 多字词 → 滤掉
+            ];
+            c.retain_rare_admitted(&mut cands);
+            let got: Vec<&str> = cands.iter().map(|c| c.text.as_str()).collect();
+            assert_eq!(got, vec!["龘", "😀"], "配置未生效或判据接错");
+        }
+
+        /// 不配 include_blocks 时 emoji 进不来（与上一条互为对照，锁住「是配置起的作用」）。
+        #[test]
+        fn without_include_blocks_emoji_stays_out() {
+            let c = coord();
+            set_common(&c, ['我']);
+            let mut cands = vec![cand("龘"), cand("😀")];
+            c.retain_rare_admitted(&mut cands);
+            let got: Vec<&str> = cands.iter().map(|c| c.text.as_str()).collect();
+            assert_eq!(got, vec!["龘"], "没配区块时域外字符不该进来");
+        }
+
+        /// `$rare_char` 必须被进入门卫认作有效成员。
+        ///
+        /// 它不是真实方案，`ensure_schema` 对它必然失败 ⇒ 会被 `mix_members`（真实方案
+        /// 列表）滤掉。若门卫只看那份列表，一个只配了 `$rare_char` 的 mix 就**进都进不去**
+        /// ——按引导键毫无反应，且没有任何报错。
+        #[test]
+        fn rare_char_member_is_recognized_by_the_entry_gate() {
+            let mut cfg = Config::default();
+            let m = cfg
+                .schema
+                .mix_modes
+                .get_mut(0)
+                .expect("出厂应有内置 quick_mix");
+            m.members = vec![wind_config::config::MIX_MEMBER_RARE_CHAR.to_string()];
+            let c = Coordinator::new_headless(cfg, None);
+
+            assert!(c.mix_has_rare_char(0), "门卫须认得生僻字成员");
+            assert!(
+                c.mix_members(0).is_empty(),
+                "它不是真实方案，不该出现在真实方案列表里"
+            );
+            // 两者合起来才是完整判据：真实方案列表为空，但门卫仍应放行。
+            assert!(
+                !c.mix_has_quick_input(0),
+                "本用例已把 members 换成只有生僻字，不应再含 quick 来源"
+            );
+        }
+
+        /// 生僻字成员**不该**触发强制竖排。
+        ///
+        /// 竖排是 `mix_has_quick_input` 的语义（内置来源的候选是长文本，横排放不下），
+        /// 而生僻字成员产出的是普通单字。两个谓词合并的话，只配生僻字的 mix 会平白变竖排。
+        #[test]
+        fn rare_char_member_does_not_force_vertical() {
+            let mut cfg = Config::default();
+            let m = cfg.schema.mix_modes.get_mut(0).unwrap();
+            m.members = vec![wind_config::config::MIX_MEMBER_RARE_CHAR.to_string()];
+            let c = Coordinator::new_headless(cfg, None);
+            assert!(c.mix_has_rare_char(0));
+            assert!(
+                !c.mix_has_quick_input(0),
+                "生僻字成员不属于 quick 来源族，不应带来竖排"
+            );
+        }
+
+        /// ── 真实词库端到端 ──────────────────────────────────────────────────
+        ///
+        /// ⚠️ 上面那些用例走的都是自造夹具，验的是判据与生命周期；**真实词库下这个模式
+        /// 到底还剩几个候选**是另一回事，只有这里能答。缺数据时整族静默跳过而计数照绿
+        /// （本仓的老坑），故守卫里带 eprintln，别只看绿灯。
+        /// 补数据：worktree 根建 `build_dev` 符号链接指向主仓，或跑 `dev.ps1 gd`。
+        fn wubi_coord(tag: &str) -> Option<std::sync::Arc<Coordinator>> {
+            let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../build_dev/data");
+            if !d.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
+                eprintln!("跳过 {tag}：五笔词库不存在（build_dev/data 缺失）");
+                return None;
+            }
+            let mut cfg = Config::default();
+            cfg.schema.active = "wubi86".into();
+            cfg.schema.available = vec!["wubi86".into()];
+            Some(Coordinator::new_headless(cfg, Some(&d)))
+        }
+
+        /// 取某个码在生僻字模式下的候选文本。
+        fn rare_cands(c: &Coordinator, code: &str) -> Vec<String> {
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            c.enter_rare_char_mode(&mut st, 0);
+            st.special_buffer = code.to_string();
+            st.special_cursor = code.len();
+            c.update_special_candidates(&mut st);
+            let out = st.candidates.iter().map(|x| x.text.clone()).collect();
+            c.exit_special_mode(&mut st);
+            out
+        }
+
+        /// 取某个码在**普通输入路**的候选文本（对照组）。
+        fn normal_cands(c: &Coordinator, code: &str) -> Vec<String> {
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            st.input_buffer = code.to_string();
+            c.update_candidates(&mut st);
+            let out = st.candidates.iter().map(|x| x.text.clone()).collect();
+            st.input_buffer.clear();
+            st.candidates.clear();
+            out
+        }
+
+        /// ★ 真实五笔词库下，同码位的常用字被滤掉、生僻字留下。
+        ///
+        /// `sivg` 是本仓反复出现的样本：常用「档」与生僻「桜」同码，检索范围放宽那一轮
+        /// 也用的它。这里精确断言而非只验性质——它稳定到足以当回归锁，词库升级真把它改了
+        /// 也该有人来看一眼。
+        #[test]
+        fn real_dict_keeps_only_the_rare_homograph() {
+            let Some(c) = wubi_coord("sivg") else { return };
+            assert_eq!(
+                normal_cands(&c, "sivg"),
+                vec!["档"],
+                "对照组：普通输入只出常用字"
+            );
+            assert_eq!(
+                rare_cands(&c, "sivg"),
+                vec!["桜"],
+                "生僻字模式应只留同码的生僻字"
+            );
+        }
+
+        /// ★ 真实词库下的性质断言：候选**非空**、**全是单字**、**全部判非常用**。
+        ///
+        /// 非空这一条最要紧——「严格过滤空了就空着」是设计取舍，但如果连 `a` 这种一级简码
+        /// 都滤空了，这个模式就是个摆设，而所有自造夹具的测试都不会红。
+        #[test]
+        fn real_dict_yields_single_uncommon_chars() {
+            let Some(c) = wubi_coord("a") else { return };
+            let got = rare_cands(&c, "a");
+            assert!(!got.is_empty(), "一级简码下不该一个候选都没有");
+
+            let cc = c.common_chars.read().unwrap();
+            for t in &got {
+                assert!(
+                    wind_candidate::single_markable_char(t).is_some(),
+                    "「{t}」不是单字——严格只出单字这条没生效"
+                );
+                assert!(
+                    !cc.is_string_common(t),
+                    "「{t}」是常用字，不该出现在生僻字模式"
+                );
+            }
+            // 普通输入路里那些常用字，一个都不该漏进来。
+            let normal = normal_cands(&c, "a");
+            assert!(normal.len() > got.len(), "普通候选应远多于生僻候选");
+            for t in ["工", "戈", "式"] {
+                assert!(normal.contains(&t.to_string()), "对照组应含常用字「{t}」");
+                assert!(
+                    !got.contains(&t.to_string()),
+                    "常用字「{t}」漏进了生僻字模式"
+                );
+            }
+        }
+
+        /// 多字词一个都不该进来（`ii` 的普通候选里有「洋洋洒洒」这类）。
+        #[test]
+        fn real_dict_drops_multi_char_words() {
+            let Some(c) = wubi_coord("ii") else { return };
+            let normal = normal_cands(&c, "ii");
+            assert!(
+                normal.iter().any(|t| t.chars().count() > 1),
+                "对照组里应当有多字词，否则这条测试什么都没验到"
+            );
+            for t in rare_cands(&c, "ii") {
+                assert_eq!(
+                    wind_candidate::semantic_units(&t),
+                    1,
+                    "「{t}」是多字词，不该进生僻字模式"
+                );
+            }
+        }
+
+        /// ★ 生僻字模式不污染普通输入路：进出一趟之后，同一个码的普通候选逐字节不变。
+        ///
+        /// 「完全不记词频」那条取舍的端到端体现——模式内选过什么都不该改变正常输入的顺序。
+        #[test]
+        fn real_dict_normal_path_unaffected_by_the_mode() {
+            let Some(c) = wubi_coord("roundtrip") else {
+                return;
+            };
+            let before = normal_cands(&c, "ii");
+            let _ = rare_cands(&c, "ii");
+            let after = normal_cands(&c, "ii");
+            assert_eq!(before, after, "进出生僻字模式不应改变普通输入的候选");
+        }
+
+        /// 装一份最小常用字表。`retain_rare_admitted` 对空表整条早退（见那条测试），
+        /// 故凡要验过滤结果的用例都得先装表。
+        fn set_common(c: &Coordinator, chars: impl IntoIterator<Item = char>) {
+            *c.common_chars.write().unwrap() = wind_candidate::CommonChars::from_base(chars);
+        }
+
+        fn cand(text: &str) -> wind_candidate::Candidate {
+            wind_candidate::Candidate {
+                text: text.to_string(),
+                ..Default::default()
+            }
+        }
+
+        /// ★ 常用字表未加载时**整条不过滤**，而不是放行全部。
+        ///
+        /// 判据与 `apply_filter` 那道 `common_chars.is_empty()` 同源：表没加载时全体候选
+        /// 都会被判「非常用」，准入于是放行**全部**候选——那不是生僻字模式，是一个没有
+        /// 过滤的普通列表，而用户完全看不出区别（他会以为这个码下所有字都是生僻字）。
+        #[test]
+        fn no_filtering_when_common_table_is_missing() {
+            let c = coord();
+            let mut cands = vec![
+                wind_candidate::Candidate {
+                    text: "我".to_string(),
+                    ..Default::default()
+                },
+                wind_candidate::Candidate {
+                    text: "你好".to_string(),
+                    ..Default::default()
+                },
+            ];
+            c.retain_rare_admitted(&mut cands);
+            assert_eq!(cands.len(), 2, "表未加载时不得过滤（宁可不滤，不给假列表）");
         }
     }
 }

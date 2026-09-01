@@ -251,7 +251,19 @@ impl Coordinator {
                 .map(str::to_string)
                 .unwrap_or_else(|| self.engine_mgr.active_schema_id());
             // 未开启「自动调频」则不记录（配置说关、代码却记的潜在 bug，对齐 apply_freq_rerank 的开关检查）。
-            if !self.engine_mgr.freq_settings_for(&owner).enabled {
+            let settings = self.engine_mgr.freq_settings_for(&owner);
+            if !settings.enabled {
+                return;
+            }
+            // 排除区块（`schema.frequency.exclude_blocks`，出厂为空）：emoji 这类候选不学词频。
+            //
+            // ⚠️ 位置必须在 `push_commit_history` **之后**——那是「重复上屏」功能的数据源，
+            // 与词频是两条独立通路。在它之前 return 会让刚上屏的 emoji 无法被 `;` 重复调出，
+            // 而用户只会觉得重复上屏偶尔失灵。同理 `record_commit`（统计）也不受本项影响。
+            //
+            // 读端 `apply_freq_rerank_in` 调**同一个** `excluded_from_freq`：只跳过这一端的话，
+            // 库里既有的 emoji 记录照旧参与重排，开关看起来毫无反应。
+            if settings.excluded_from_freq(text) {
                 return;
             }
             // 归属 id：非混输折叠自身/拼音；混输按候选来源分流，无法归因则跳过本次记频。
@@ -346,6 +358,12 @@ impl Coordinator {
             // weight/position 决定，且求值型短语的文本逐日变化，点查恒 miss——白花一次
             // redb 查询，还会让人误以为词频在这里生效。
             if c.is_phrase {
+                continue;
+            }
+            // 排除区块（写端 `record_selection_in` 调同一个判据）：跳过即不进 probe，
+            // 于是也不占 `get_freq_batch` 的一个条目——**这道判断在热路径上是净省**，
+            // 它省掉的是三次 String 分配加一次批量查条目，而自身只是一次移位加与运算。
+            if settings.excluded_from_freq(&c.text) {
                 continue;
             }
             let consumes_all = c.consumed_length == 0 || c.consumed_length >= input_len;
@@ -1667,7 +1685,9 @@ impl Coordinator {
                 self.commit_temp_pinyin_selected(state, &cand, offset as i32)
             }
             Some(ModeKind::TempEnglish) => self.commit_temp_english_selected(state, gi),
-            Some(ModeKind::Special(_)) => self.commit_special_candidate(state, gi),
+            Some(ModeKind::Special(_)) | Some(ModeKind::RareChar) => {
+                self.commit_special_candidate(state, gi)
+            }
             Some(ModeKind::Mix(_)) => self.mix_select(state, offset),
             // 网址模式无候选列表（不出候选窗），没有可选中的东西。
             Some(ModeKind::Url) => return None,
@@ -1905,7 +1925,10 @@ impl Coordinator {
                 &mut st.temp_english_cursor,
             ),
             ModeKind::Url => preedit_cursor::BufEdit::new(&mut st.url_buffer, &mut st.url_cursor),
-            ModeKind::Special(_) => {
+            // 生僻字模式与 special 共用 `special_buffer`：按键处理走的是同一个
+            // `handle_special_key`，缓冲另起一个字段的话，退格与光标会作用在一个没人读的
+            // 字段上——组合区不动、候选不变，且没有任何报错。
+            ModeKind::Special(_) | ModeKind::RareChar => {
                 preedit_cursor::BufEdit::new(&mut st.special_buffer, &mut st.special_cursor)
             }
             ModeKind::Mix(_) => {
@@ -1941,7 +1964,7 @@ impl Coordinator {
                 &state.temp_english_buffer,
                 state.temp_english_cursor,
             ),
-            ModeKind::Special(_) => (
+            ModeKind::Special(_) | ModeKind::RareChar => (
                 state.special_prefix.clone(),
                 &state.special_buffer,
                 &state.special_buffer,
@@ -2113,7 +2136,11 @@ impl Coordinator {
         data: &KeyEventData,
     ) -> Option<KeyAction> {
         let include_printable = match state.active {
-            Some(ModeKind::Special(_)) | Some(ModeKind::TempPinyin) => true,
+            // 生僻字模式与 special 取值必须一致：两者走的是同一个 `handle_special_key`，
+            // 这里给不同的值就会出现「同一套按键处理，翻页键在两个模式里表现不同」。
+            Some(ModeKind::Special(_)) | Some(ModeKind::RareChar) | Some(ModeKind::TempPinyin) => {
+                true
+            }
             // mix 目前**不经过本函数**（`handle_mix_key` 直接调 `apply_session_action`）。保留本
             // 分支只为「日后有人把 mix 接过来时规则仍然对」，取值统一问
             // `mix_nav_include_printable`——此前这里独立写了一份且与活代码取值相反。
@@ -2236,6 +2263,19 @@ impl Coordinator {
                 state.special_buffer.clone(),
                 state.special_buffer.clone(),
                 true,
+            ),
+            // 生僻字模式：编码在 special_buffer（与 special 共用），归属是**当前活跃方案**
+            // ——它就是用这个方案的编码在输入，`effective_data_schema` 对它返回 None 正是
+            // 「没有特殊归属、走 active」的意思，故这里直接取 active 而不是调那个函数。
+            //
+            // 落点必须补：用户在生僻字模式里找到字之后，最想做的一件事恰恰是右键「设为
+            // 常用字」——那正是常用字覆盖功能的主场景。不补落点就只剩一个复制。
+            // `special = false`：它没有 `show_all_on_enter` 浏览态，空码时本就没有候选。
+            Some(ModeKind::RareChar) => (
+                self.engine_mgr.active_schema_id(),
+                state.special_buffer.clone(),
+                state.special_buffer.clone(),
+                false,
             ),
             // 临时英文：归属恒是内置英文方案（与读写两端同源，见 effective_data_schema）。
             // 码取**小写化的缓冲**——临英缓冲带大写（Shift+H 进入即 `H`），而英文方案下
