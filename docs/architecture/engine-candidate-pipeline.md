@@ -184,6 +184,10 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
 ### 4.1 音节切分
 
 - `SyllableTrie`（syllable.rs）：~417 个标准音节的字节级 Trie，`match_at()` 返回某位置全部可能音节。
+  开了模糊音时还带**第二层**「模糊拼写」（`fuzzy::fuzzy_spellings`，全 11 组共 59 条）：
+  `tin`/`zuang`/`fui` 这类本身不成音节的错音串在此成为一条可切的边——模糊变体是在切分
+  **之后**才逐音节展开的，切不出来就等于整条模糊链路没执行。该层**只影响 `match_at`**，
+  `is_syllable`/`is_prefix` 与 `Dag::build_strict` 保持严格（真值判据、造词边界推导用）。
 - `Dag::maximum_match()`（dag.rs）：DP 求**覆盖最多字符**的音节切分（非贪心，如
   `henihejiele → he+ni+he+jie+le`）。
 - 分隔符 `'`：硬边界。`segment_with_separators()` 按 `'` 分段各段独立切分；

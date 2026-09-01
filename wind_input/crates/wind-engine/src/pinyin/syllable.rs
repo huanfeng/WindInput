@@ -56,10 +56,14 @@ impl SyllableTrie {
     /// 只影响 [`Self::match_at`]，即「切分时这段码算不算一条边」；
     /// `is_syllable`/`is_prefix` 保持严格，见 [`Self::fuzzy_root`] 的说明。
     /// 由 `PinyinEngine::with_fuzzy` 在构造期调用一次，不进按键热路径。
+    /// ⚠️ **整表替换，不是累加**：`with_fuzzy` 是链式 builder，可以被调第二次。若只累加，
+    /// 前一次配置里那些「后来被关掉的组」的拼写会残留在图上，表现为「模糊音某组关了却还
+    /// 生效」——而且只在链式调用两次时才复现，极难查。
     pub fn load_fuzzy_spellings(&mut self, spellings: &[String]) {
+        self.fuzzy_root = TrieNode::default();
+        self.has_fuzzy = !spellings.is_empty();
         for s in spellings {
             Self::insert(&mut self.fuzzy_root, s);
-            self.has_fuzzy = true;
         }
     }
 
@@ -216,6 +220,43 @@ mod tests {
             trie.match_at("tinzhi", 0),
             vec!["tin".to_string(), "ti".to_string()],
             "须最长优先，且两层结果合并后仍按长度降序"
+        );
+    }
+
+    /// 重复加载须**整表替换**：关掉某组后，它的拼写不得残留。
+    #[test]
+    fn reloading_fuzzy_spellings_replaces_instead_of_accumulating() {
+        let mut trie = fuzzy_trie(); // in_ing
+        assert_eq!(trie.match_at("tinzhi", 0).len(), 2, "先确认 tin 已注册");
+
+        trie.load_fuzzy_spellings(&fuzzy_spellings(&FuzzyConfig {
+            zh_z: true,
+            ..Default::default()
+        }));
+        assert_eq!(
+            trie.match_at("tinzhi", 0),
+            vec!["ti".to_string()],
+            "换成 zh_z 后 in_ing 的 tin 不得残留"
+        );
+        // `zuan`/`zu` 是标准音节，`zuang`/`zua` 来自 zh_z 模糊表（zhuang/zhua 的对端）。
+        assert_eq!(
+            trie.match_at("zuangzhi", 0),
+            vec![
+                "zuang".to_string(),
+                "zuan".to_string(),
+                "zua".to_string(),
+                "zu".to_string()
+            ],
+            "新组须生效"
+        );
+
+        // 全关 ⇒ 退回纯标准音节表。
+        trie.load_fuzzy_spellings(&fuzzy_spellings(&FuzzyConfig::default()));
+        assert_eq!(trie.match_at("tinzhi", 0), vec!["ti".to_string()]);
+        assert_eq!(
+            trie.match_at("zuangzhi", 0),
+            vec!["zuan".to_string(), "zu".to_string()],
+            "全关后模糊层须整体消失，只剩标准音节"
         );
     }
 
