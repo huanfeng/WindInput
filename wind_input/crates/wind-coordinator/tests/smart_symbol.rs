@@ -314,3 +314,107 @@ fn mode_trigger_after_timeout_enters_mode_again() {
         a3
     );
 }
+
+// ── HoldComposition（组合态预览）方案：held 符号的去向只由宿主端交代 ────────────────
+//
+// 本组用例守的是一条**跨进程**的不变量：press1 的符号此刻只活在宿主的组合态里
+// （TSF/macOS 的 `_pendingCommitPrefix`、薄宿主上则已 `EditOp::Commit` 真上屏），
+// 服务端后续任何一次上屏都**不得再把它拼进文本**——拼了就是双写，真机表现为
+// 「。」+「。%」＝「。。%」。此前这条通路一个测试都没有，双写活了下来。
+
+const VK_5: u32 = 0x35; // Shift+5 → '%'
+const MOD_SHIFT: u32 = 0x0001; // 与 wind_ipc::protocol::MOD_SHIFT 同值
+
+fn cfg_hold() -> Config {
+    let mut cfg = cfg_smart();
+    cfg.input.symbol.smart_method = wind_config::config::SmartMethod::HoldComposition;
+    cfg
+}
+
+fn press_mod(coord: &Coordinator, vk: u32, modifiers: u32, prev_char: u16) -> KeyAction {
+    coord.handle_key_event(&KeyEventData {
+        key_code: vk,
+        scan_code: 0,
+        modifiers,
+        event_type: EVENT_KEY_DOWN,
+        toggles: 0,
+        event_seq: 0,
+        prev_char,
+    })
+}
+
+fn held(a: &KeyAction) -> Option<&str> {
+    match a {
+        KeyAction::HoldComposition { text, .. } => Some(text),
+        _ => None,
+    }
+}
+
+/// 主用例：`。` 挂在组合态里，时限内打一个**不在 `smart_chars` 参与集合**里的标点
+/// （Shift+5 → `%`）。上屏文本必须只有 `%`。
+///
+/// 出厂 `smart_chars = "。，？！：；、～￥·……——"` 不含 Shift+数字那族符号，用户正是
+/// 从 `%` 上发现的；`=` `-` `/` `[` 同理，故下面另有一条同族断言。
+#[test]
+fn hold_then_non_member_punct_commits_symbol_only_once() {
+    let coord = Coordinator::new_headless(cfg_hold(), Some(&data_dir()));
+    let a1 = press(&coord, VK_OEM_PERIOD, 0);
+    assert_eq!(
+        held(&a1),
+        Some("。"),
+        "press1 应把中文句号挂进组合态（HoldComposition），实际: {:?}",
+        a1
+    );
+    let a2 = press_mod(&coord, VK_5, MOD_SHIFT, '。' as u16);
+    assert_eq!(
+        inserted(&a2),
+        Some("%"),
+        "held 的「。」由宿主端 absorb 收口，服务端不得再拼一份（拼了真机就是「。。%」），实际: {:?}",
+        a2
+    );
+}
+
+/// 同族第二条：不带 Shift 的非参与集合标点（`=`）走的是同一行代码，一并钉住。
+#[test]
+fn hold_then_equals_commits_symbol_only_once() {
+    const VK_EQUAL: u32 = 0xBB;
+    let coord = Coordinator::new_headless(cfg_hold(), Some(&data_dir()));
+    assert_eq!(held(&press(&coord, VK_OEM_PERIOD, 0)), Some("。"));
+    let a2 = press(&coord, VK_EQUAL, '。' as u16);
+    assert_eq!(
+        inserted(&a2),
+        Some("="),
+        "非参与集合标点不得把 held 符号再上屏一次，实际: {:?}",
+        a2
+    );
+}
+
+/// 反向守卫：**参与集合内**的另一个标点走的是另一条短路（新的 HoldComposition），
+/// 它同样只出自己那一份。少了这条，上面两条可能在「所有标点都不出 held」的错误实现上假绿。
+#[test]
+fn hold_then_member_punct_holds_new_symbol_only() {
+    let coord = Coordinator::new_headless(cfg_hold(), Some(&data_dir()));
+    assert_eq!(held(&press(&coord, VK_OEM_PERIOD, 0)), Some("。"));
+    let a2 = press(&coord, VK_OEM_COMMA, '。' as u16);
+    assert_eq!(
+        held(&a2),
+        Some("，"),
+        "参与集合内的标点应挂起自己那一份，旧符号交给宿主端 absorb，实际: {:?}",
+        a2
+    );
+}
+
+/// press2（同键连按）不受本次改动影响：仍走 `CommitReplacingHeld` 覆盖组合态。
+/// 这条是回归护栏——把「服务端不出 held」误推广到 press2 上，就会打出「。.」。
+#[test]
+fn hold_press2_still_replaces_held() {
+    let coord = Coordinator::new_headless(cfg_hold(), Some(&data_dir()));
+    assert_eq!(held(&press(&coord, VK_OEM_PERIOD, 0)), Some("。"));
+    let a2 = press(&coord, VK_OEM_PERIOD, '。' as u16);
+    match a2 {
+        KeyAction::CommitReplacingHeld { ref text, .. } => {
+            assert_eq!(text, ".", "press2 应以英文句点覆盖组合态里的中文句号");
+        }
+        other => panic!("press2 应返回 CommitReplacingHeld，实际: {:?}", other),
+    }
+}

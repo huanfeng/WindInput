@@ -1608,10 +1608,15 @@ impl MessageHandler for Coordinator {
                             self.notify_ui_hide();
                             // 上一个智能符号若还挂在组合态里（`pre_held_text`），它此刻**只存在于
                             // 组合态**——直接 ClearComposition 会连它一起收掉，表现为「按标点丢
-                            // 废码时，上一个符号跟着不见了」。用一次原子提交把它落实。
+                            // 废码时，上一个符号跟着不见了」。用一次提交把它落实。
+                            //
+                            // ★ 提交的文本必须是**空串**：符号那一份由宿主端交代（TSF/macOS 的
+                            // absorb 前缀会让 `full = prefix + ""` 正好是它，薄宿主上它早已
+                            // `EditOp::Commit` 真上屏）。服务端把它填进 text 就是双写，与上面
+                            // 普通标点出口删掉的那行同源。记账仍要记——文本产出与统计是两件事。
                             if let Some(held) = pre_held_text {
                                 self.record_commit(&held, 0, -1, CommitSource::Punctuation);
-                                return Self::commit_action(held, true);
+                                return Self::commit_action(String::new(), true);
                             }
                             return KeyAction::ClearComposition;
                         }
@@ -1711,12 +1716,22 @@ impl MessageHandler for Coordinator {
                     } else {
                         self.maybe_s2t(&state, &committed)
                     };
-                    // 若此前有 HoldComposition 残留（非参与集合标点令 arm 解除武装），
-                    // 将旧符号纳入 out 首部：CommitText 原子替换 TSF 组合态，timer 被 CancelHoldTimer
-                    // 取消，旧符号不会二次提交，也不会因组合态被覆盖而丢失。
-                    if let Some(ref held) = pre_held_text {
-                        out = format!("{}{}", held, out);
-                    }
+                    // ⛔ 此前有 HoldComposition 残留时（非参与集合的标点令 arm 解除武装），
+                    // 这里**曾把旧符号拼进 out 首部**——已删除，那是双写。
+                    //
+                    // 组合态里那个符号的去向由**宿主端**交代，服务端出的文本里不该再有它一份：
+                    //   · TSF   `CTextService::CommitText` 在 `replacingHeld=FALSE` 时调
+                    //           `AbsorbHeldIntoPrefix()`，`full = prefix + text`；
+                    //   · macOS `BridgeResponseRouter` 同款 `absorbHeldIntoPrefix()`；
+                    //   · 薄宿主 `edit_ops::to_outcome` 把 `HoldComposition` 降级为直接
+                    //           `EditOp::Commit(text)`，符号早已真上屏。
+                    // 三条路都已经把它落实过一次，服务端再拼一次就是「。」+「。%」＝「。。%」
+                    // （出厂 `smart_chars` 不含 Shift+数字那族符号，故从 `%`/`=` 这类键先暴露）。
+                    //
+                    // 那行拼接的原注释写的是「CommitText 原子替换 TSF 组合态」——那是聚合方案
+                    // （a8b63e0）之前的语义。聚合把 hold 活跃时 CommitText 的默认语义从「替换
+                    // held」翻成了「追加 held」，本侧没跟着改，就成了双写。`pre_held_text` 仍需
+                    // 保留：下面 `clear_no_input` 那条要靠它判断「组合里还挂着东西」。
                     // ★ 联想态**不顶屏**（见 `commit_highlight_then_char` 里的同款守卫）。
                     //
                     // 顶屏的语义前提是「用户打了码、还没选词，按标点意味着『就选高亮那条吧』」。
