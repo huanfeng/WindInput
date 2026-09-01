@@ -65,8 +65,42 @@ const PRESET_EMOJI: &[&str] = &[
     "区域指示符",
 ];
 
+/// 预设组「符号」：标点、数学、图形这一类**非 emoji** 的符号块。
+///
+/// ★ 与 [`PRESET_EMOJI`] **刻意不相交**：勾「符号」不该顺带把 emoji 也放进来，否则界面上
+/// 两个开关的关系说不清楚（勾了符号，emoji 那个还有什么用）。故「杂项符号」「装饰符号」
+/// 「杂项技术符号」归 emoji 组，本组不含——虽然它们名字里也有「符号」二字。
+/// 不相交由 `presets_are_disjoint` 钉住。
+///
+/// ★ 只收 `is_han ∪ is_pua` **域外**的块。部首、康熙部首、CJK 笔画、各扩展区都在
+/// `is_han` 里（见 `common::is_han`），本来就是生僻字模式的默认输出，列进来是多余的
+/// 开关——用户勾了没变化，只会以为坏了。
+const PRESET_SYMBOLS: &[&str] = &[
+    "通用标点",
+    "上标与下标",
+    "货币符号",
+    "字母式符号",
+    "数字形式",
+    "箭头",
+    "数学运算符",
+    "带圈字母数字",
+    "制表符",
+    "方块元素",
+    "几何图形",
+    "表意文字描述符",
+    "CJK 符号和标点",
+    "带圈 CJK 字母及月份",
+    "CJK 兼容符号",
+    "CJK 兼容形式",
+    "半角及全角形式",
+];
+
 /// 预设组名 → 成员块名。配置里这两种名字都收。
-const PRESETS: &[(&str, &[&str])] = &[("emoji", PRESET_EMOJI)];
+///
+/// ⚠️ 组名与块名同处一个命名空间（`from_config` 先查组、再查块），故**组名不得与任何块名
+/// 相同**——否则同一个名字有两种解释，而先查组的写法会让块名那一侧静默失效。
+/// 由 `preset_names_do_not_collide_with_block_names` 钉住。
+const PRESETS: &[(&str, &[&str])] = &[("emoji", PRESET_EMOJI), ("符号", PRESET_SYMBOLS)];
 
 impl BlockMask {
     /// 空集：所有判定恒假。
@@ -208,6 +242,74 @@ mod tests {
         let (m, unknown) = BlockMask::from_config(&["emoji"]);
         assert!(unknown.is_empty(), "预设组名必须被认得");
         m
+    }
+
+    /// 同 `emoji_preset_covers_real_world_samples`：用样本钉住，不核对区间表。
+    #[test]
+    fn symbols_preset_covers_real_world_samples() {
+        let (m, unknown) = BlockMask::from_config(&["符号"]);
+        assert!(unknown.is_empty(), "预设组名必须被认得");
+        for s in [
+            "—", // 通用标点：破折号
+            "∞", // 数学运算符。★ 别拿 ± 当样本：它是 U+00B1，在「拉丁文补充」块里
+            //（与 é ñ ü 同块），而那一块是字母、不归本组——第一版就这么写错过
+            "→",  // 箭头
+            "①",  // 带圈字母数字
+            "℃",  // 字母式符号
+            "￥", // 货币符号
+            "─",  // 制表符
+            "■",  // 几何图形
+            "、", // CJK 符号和标点
+            "㈠", // 带圈 CJK 字母及月份
+            "Ａ", // 半角及全角形式
+            "⿰", // 表意文字描述符（拆字的间架结构）
+        ] {
+            assert!(m.contains_text(s), "「符号」组应含 {s:?}");
+        }
+    }
+
+    /// ★ 两个预设组**不相交**：勾「符号」不该顺带放进 emoji。
+    ///
+    /// 名字最容易骗人的三块（杂项符号 / 装饰符号 / 杂项技术符号）字面上都带「符号」，
+    /// 归属却在 emoji 组。这条测试是那个归属的唯一书面凭据。
+    #[test]
+    fn presets_are_disjoint() {
+        for (a, ma) in PRESETS {
+            for (b, mb) in PRESETS {
+                if a == b {
+                    continue;
+                }
+                let shared: Vec<_> = ma.iter().filter(|x| mb.contains(x)).collect();
+                assert!(shared.is_empty(), "预设组 {a} 与 {b} 共有成员: {shared:?}");
+            }
+        }
+    }
+
+    /// ★ 组名不得与块名相同。
+    ///
+    /// `from_config` 是**先查组、再查块**：撞名时块名那一侧静默失效，而两者的成员集不同，
+    /// 表现为「配了这个名字，进来的字跟我想的不一样」——没有任何报错。
+    #[test]
+    fn preset_names_do_not_collide_with_block_names() {
+        for (name, _) in PRESETS {
+            assert!(
+                !crate::charblock::BLOCKS.iter().any(|b| b.name == *name),
+                "预设组名 {name:?} 与区块表里的块重名"
+            );
+        }
+    }
+
+    /// 预设组的成员必须都是真实块名——写错一个字，那一块就静默不进 mask。
+    #[test]
+    fn preset_members_are_real_block_names() {
+        for (group, members) in PRESETS {
+            for m in *members {
+                assert!(
+                    crate::charblock::BLOCKS.iter().any(|b| b.name == *m),
+                    "预设组 {group} 的成员 {m:?} 不在区块表里"
+                );
+            }
+        }
     }
 
     /// ★★ **预设组的覆盖用样本钉住，不核对区间表。**

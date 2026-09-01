@@ -218,6 +218,7 @@ fn materialize_into(
     for path in [
         ["input", "temp_pinyin", "trigger_keys"].as_slice(),
         ["input", "temp_english", "trigger_keys"].as_slice(),
+        ["input", "rare_char", "trigger_keys"].as_slice(),
     ] {
         if remove_nested(t, path) {
             dropped += 1;
@@ -3227,12 +3228,22 @@ pub struct CapslockConfig {
 
 /// 生僻字模式配置（[input.rare_char]）。
 ///
-/// ⚠️ **没有 `enabled`、也没有 `trigger_keys`**：进入方式统一由 `keys.key_actions`
-/// （全局）与方案文件 `[key_actions]`（按源方案分流）两张现成的表承载，动词是
-/// `"rare_char"`。在这里再开一个入口字段就是第三个真相源，正是 overlay-mode-config
-/// 那一轮重构要消除的东西。不绑任何键 ＝ 这个模式进不去 ＝ 关闭。
+/// ⚠️ **没有 `enabled`**：不绑任何键 ＝ 这个模式进不去 ＝ 关闭，无须第二个开关。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RareCharConfig {
+    /// 引导键（空码时按下即进入本模式）。
+    ///
+    /// ★ **不是写入路径**：与其余五处 `trigger_keys` 一样，`normalize()` 会把它折算进
+    /// `keys.key_actions`（动词 `"rare_char"`）随后清空，真正被读的只有那张表。本字段的
+    /// 职责只剩两个——**出厂声明处**，以及设置端 `dialog_button_key_action` 控件的
+    /// 标识符（那个控件按被标识字段的类型校验，只认 strlist）。
+    ///
+    /// ⚠️ 出厂值必须留在**被折算的这一侧**：直接写进 `key_actions` 的话，「用户清空」
+    /// 与「从没配过」就同形了，清空的意图会被静默丢掉（同 `default_mix_modes` 的注释）。
+    /// 本模式出厂**不绑任何键**，故这里是空数组——但空与「没有这个字段」不是一回事。
+    #[serde(default)]
+    pub trigger_keys: Vec<String>,
+
     /// **额外**纳入本模式的 Unicode 区块（区块名或预设组名，如 `"emoji"`）。
     ///
     /// 生僻汉字本来就在（判据见 `wind_candidate::rare_admits`），本项管的是那些
@@ -6180,6 +6191,11 @@ impl Config {
             "temp_pinyin".to_string(),
             "input.temp_pinyin",
         );
+        take(
+            &mut self.input.rare_char.trigger_keys,
+            "rare_char".to_string(),
+            "input.rare_char",
+        );
         // 特殊模式**不在此折算**：它的实例已不来自 `schema.special_modes`，引导键与直达
         // 热键直接写在 `keys.key_actions` 里（`special:<方案id>`）。残留旧配置由
         // `warn_legacy_special_modes` 告警，不做迁移（见设计文档 §5）。
@@ -6212,7 +6228,7 @@ impl Config {
         }
     }
 
-    /// 清空五处 `trigger_keys`（内存态）。
+    /// 清空六处 `trigger_keys`（内存态）。
     ///
     /// 维持 `normalize()` 的后置条件「折算之后 trigger_keys 恒为空」——已物化的用户走的是
     /// 屏蔽分支，不再有 `drain` 把它们取走，须在此显式清掉。**只动内存**：磁盘上 L2 的
@@ -6220,6 +6236,7 @@ impl Config {
     fn clear_all_trigger_keys(&mut self) {
         self.input.temp_english.trigger_keys.clear();
         self.input.temp_pinyin.trigger_keys.clear();
+        self.input.rare_char.trigger_keys.clear();
         for m in self.schema.mix_modes.iter_mut() {
             m.trigger_keys.clear();
         }
