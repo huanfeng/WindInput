@@ -670,12 +670,19 @@ impl Coordinator {
     ///      `update_active_compat` 会拿这张表重新解析，旧表会把本次设置悄悄回滚；
     ///   3. 刷新当前 `active_compat` 缓存，使本次设置对当前应用立即生效
     ///      （同 pid 时 `update_active_compat` 提前 return，不会自己刷）。
+    ///
+    /// `mode_id`：0=跟随全局（清除规则）1=快速 2=等待精确坐标 3=立即。
+    ///
+    /// ⚠ 编号按菜单显示顺序排，与 `InitialMode` / `AutoPairRule` 的「0=跟随全局」约定一致；
+    /// 认不出的编号一律当作 0（清除覆盖）——per-app 覆盖是「用户显式要求」，不该由一个
+    /// 对不上的 id 凭空造出来。
     pub(crate) fn set_first_show_mode(&self, mode_id: u8) {
         use wind_config::app_compat::FirstShowMode;
         let mode = match mode_id {
-            1 => FirstShowMode::Fast,
-            2 => FirstShowMode::Instant,
-            _ => FirstShowMode::Wait,
+            1 => Some(FirstShowMode::Fast),
+            2 => Some(FirstShowMode::Wait),
+            3 => Some(FirstShowMode::Instant),
+            _ => None,
         };
         let name = self.active_process_name();
         if name.is_empty() {
@@ -705,7 +712,10 @@ impl Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .first_show_mode = mode;
-        tracing::info!("候选窗首显策略 for process={name}: {}", mode.as_config());
+        tracing::info!(
+            "候选窗首显策略 for process={name}: {}",
+            mode.map(|m| m.as_config()).unwrap_or("(follow-global)")
+        );
         self.show_status();
     }
 
@@ -1145,11 +1155,7 @@ impl Coordinator {
             use wind_config::app_compat::{FirstShowMode as F, InitialMode as IM};
             let proc = self.active_process_name();
             let enabled = !proc.is_empty();
-            let cur_first_show = self
-                .active_compat
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .first_show_mode;
+            let cur_first_show = self.rule_first_show_mode(&proc);
             let cur_mode = self.rule_initial_mode(&proc);
             let cur_punct = self.rule_initial_punct(&proc);
             let cur_auto_pair = self
@@ -1181,26 +1187,37 @@ impl Coordinator {
                 // 「fast 配了却从未生效」——instant 抢先放行，fast 的判据根本没机会跑。
                 // 文案按「快 → 慢」以外的另一个维度排：用户真正在选的是**遇到慢宿主时
                 // 宁可等还是宁可先显示**，故括号里写代价而不写机制。
+                //
+                // 「跟随全局」同样必须是独立一档（理由见上面 `tri`）：全局默认档 2026-09-02
+                // 起由 `ui.candidate.first_show_mode` 配置，「本应用没配过」与「本应用显式
+                // 配了恰好等于当前全局值的那一档」是两件事——后者不会跟着全局设置一起变。
+                // 因此三档上的「（默认）」标记一并移到这一档，两处都写「默认」只会自相矛盾。
                 M::submenu(
                     "候选窗首显",
                     vec![
                         M::leaf(
-                            "快速显示（默认）",
+                            "跟随全局（默认）",
+                            cmd(MenuCmd::FirstShowMode(0)),
+                            enabled,
+                            cur_first_show.is_none(),
+                        ),
+                        M::leaf(
+                            "快速显示",
                             cmd(MenuCmd::FirstShowMode(1)),
                             enabled,
-                            cur_first_show == F::Fast,
+                            cur_first_show == Some(F::Fast),
                         ),
                         M::leaf(
                             "等待精确坐标（较慢）",
-                            cmd(MenuCmd::FirstShowMode(0)),
+                            cmd(MenuCmd::FirstShowMode(2)),
                             enabled,
-                            cur_first_show == F::Wait,
+                            cur_first_show == Some(F::Wait),
                         ),
                         M::leaf(
                             "立即显示（最快，可能抖动）",
-                            cmd(MenuCmd::FirstShowMode(2)),
+                            cmd(MenuCmd::FirstShowMode(3)),
                             enabled,
-                            cur_first_show == F::Instant,
+                            cur_first_show == Some(F::Instant),
                         ),
                     ],
                 ),

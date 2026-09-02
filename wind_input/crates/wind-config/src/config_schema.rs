@@ -394,6 +394,12 @@ static REGISTRY: &[ConfigField] = &[
         Enum(&["app_inline", "candidate_top", "candidate_inline"]),
     ),
     f("ui.candidate.hide_window", Bool),
+    // 候选窗首显策略的全局默认档。per-app 覆盖走 compat.toml（右键菜单管理），
+    // 那里的「跟随全局」一档就是回到本键。
+    f(
+        "ui.candidate.first_show_mode",
+        Enum(&["fast", "wait", "instant"]),
+    ),
     // 首显策略的三个内部选项（不进设置页，仅 config.toml / CLI 可调）。
     // 注册到此表是必须的：registry_covers_every_config_key 强制全键覆盖，
     // 漏注册的键会静默无法经 CLI/RPC 读写。

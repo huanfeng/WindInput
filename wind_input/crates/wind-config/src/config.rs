@@ -3818,6 +3818,14 @@ fn default_fast_first_show_fallback_ms() -> u64 {
     25
 }
 
+/// 候选窗首显策略的**全局默认档**。
+///
+/// ⚠ 与 `app_compat::FirstShowMode` 的 `#[default]` 是两处独立事实，必须一致——
+/// 由 `wind-config` 的 `global_first_show_mode_matches_enum_default` 钉住。
+fn default_first_show_mode() -> String {
+    "fast".to_string()
+}
+
 /// UI 配置（子表结构，对齐真实 config.toml：[ui.candidate] / [ui.font] / [ui.theme]）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UiConfig {
@@ -4487,6 +4495,17 @@ pub struct UiCandidateConfig {
     /// 默认 25。
     #[serde(default = "default_fast_first_show_fallback_ms")]
     pub fast_first_show_fallback_ms: u64,
+    /// 候选窗首显策略的**全局默认档**："fast"（默认）/ "wait" / "instant"。
+    ///
+    /// 语义是「快」与「准」之间的取舍，三档互斥：
+    /// - `fast`：等到坐标「可信」即放行（首帧信任门保底），实测常规连打首帧中位 7ms；
+    /// - `wait`：一律等宿主 reflow 后的权威坐标，最稳但首显恒定 85~95ms，连打时观感迟钝；
+    /// - `instant`：完全不等，沿用上一次坐标，最快但光标移动过就会先错位再跳。
+    ///
+    /// 右键菜单「应用独立配置 ▸ 候选窗首显」可为单个应用覆盖本值；那里的「跟随全局」
+    /// 一档＝清除覆盖、回到这里。认不出的值回落到默认档（等同没写）。
+    #[serde(default = "default_first_show_mode")]
+    pub first_show_mode: String,
     /// 候选文本最大显示字数，超出截断（0=不限）。
     #[serde(default)]
     pub max_chars: usize,
@@ -4685,6 +4704,7 @@ impl Default for UiCandidateConfig {
             first_show_settle_ratio: default_first_show_settle_ratio(),
             fast_typing_window_ms: default_fast_typing_window_ms(),
             fast_first_show_fallback_ms: default_fast_first_show_fallback_ms(),
+            first_show_mode: default_first_show_mode(),
             per_page_extended: 0,
             layout: "horizontal".to_string(),
             preedit_display: default_preedit_display(),

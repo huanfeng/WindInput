@@ -135,7 +135,7 @@ pub enum MenuCmd {
     /// 状态提示气泡：切换固定位置（position_mode fixed/follow_caret）
     StatusTogglePinned,
     /// 为当前焦点应用设置候选窗首显策略（compat.toml 的 first_show_mode）。
-    /// 参数：0=wait 1=fast 2=instant。三档互斥，UI 上呈现为子菜单单选。
+    /// 参数：0=跟随全局（清除规则）1=fast 2=wait 3=instant。三档互斥，UI 上呈现为子菜单单选。
     FirstShowMode(u8),
     /// 为当前焦点应用设置初始中英状态（compat.toml 的 initial_mode）。
     /// 参数：0=跟随全局（清除规则）1=英文 2=中文。

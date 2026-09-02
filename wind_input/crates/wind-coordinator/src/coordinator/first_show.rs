@@ -74,12 +74,31 @@ impl Coordinator {
         self.arm_pending_first_show_with_timeout(self.first_show_fallback_ms());
     }
 
-    pub(super) fn first_show_mode_is_fast(&self) -> bool {
-        self.active_compat
+    /// 当前焦点应用**实际生效**的首显档位：per-app 规则优先，未配则回落全局
+    /// `ui.candidate.first_show_mode`（认不出的值再回落到枚举默认档）。
+    ///
+    /// ★ 全局默认档可配之后，「档位是什么」就有了两个来源，必须收成一个函数：判据一旦
+    /// 分散在各消费点（本仓有 5 条首显通路），改一处漏一处的表现是「某条路仍按旧档位
+    /// 走」，而首显逻辑的错都只表现为位置或时机不对，没有任何报错。
+    ///
+    /// ⚠ 先取 `active_compat` 的值并**释放锁**再读配置：`rt()` 内部另有锁，两把锁在此
+    /// 嵌套会引入一个新的持有序。
+    pub(crate) fn effective_first_show_mode(&self) -> wind_config::app_compat::FirstShowMode {
+        let per_app = self
+            .active_compat
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .first_show_mode
-            == wind_config::app_compat::FirstShowMode::Fast
+            .first_show_mode;
+        per_app.unwrap_or_else(|| {
+            wind_config::app_compat::FirstShowMode::from_config(
+                &self.rt().config.ui.candidate.first_show_mode,
+            )
+            .unwrap_or_default()
+        })
+    }
+
+    pub(super) fn first_show_mode_is_fast(&self) -> bool {
+        self.effective_first_show_mode() == wind_config::app_compat::FirstShowMode::Fast
     }
 
     /// 首帧信任门是否命中：`fast` 档且坐标缓存未经当前插入点验证。

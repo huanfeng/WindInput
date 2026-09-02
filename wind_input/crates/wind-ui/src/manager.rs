@@ -1380,6 +1380,7 @@ mod menu_id_tests {
             MenuCmd::FirstShowMode(0),
             MenuCmd::FirstShowMode(1),
             MenuCmd::FirstShowMode(2),
+            MenuCmd::FirstShowMode(3),
             MenuCmd::InitialMode(0),
             MenuCmd::InitialMode(1),
             MenuCmd::InitialMode(2),

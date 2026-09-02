@@ -67,18 +67,20 @@ pub enum FirstShowMode {
 }
 
 impl FirstShowMode {
-    /// 配置串 → 枚举。无法识别时回落**默认档**——「写了个认不出的值」与「没写」
-    /// 得到同样的行为，最不意外。
+    /// 配置串 → 枚举。无法识别返回 `None`。
     ///
-    /// ⚠ 刻意写 `Self::default()` 而非硬编码某一档：这里曾硬编码 `Wait`，与
-    /// `#[default]` 是两处独立事实，2026-08-03 调默认档时若不是顺手查了一遍就会漏改，
-    /// 而漏改**不会有任何编译或测试信号**（生产走 serde，本函数只有测试在调）。
-    pub fn from_config(s: &str) -> Self {
+    /// ⚠ 2026-09-02 由「回落默认档」改为返回 `Option`：`first_show_mode` 现在有了
+    /// 「跟随全局」这一档（per-app 规则的 `None`），而全局默认值本身也变成了可配置的
+    /// `ui.candidate.first_show_mode`。回落动作因此只应发生在**全局层那一处**
+    /// （`Self::from_config(s).unwrap_or_default()`），per-app 层认不出的值退化为
+    /// 「没配」＝跟随全局——仍然满足「写错了和没写行为一致」，且不会把一个拼错的值
+    /// 悄悄固化成对该应用的显式覆盖。
+    pub fn from_config(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "wait" => Self::Wait,
-            "fast" => Self::Fast,
-            "instant" => Self::Instant,
-            _ => Self::default(),
+            "wait" => Some(Self::Wait),
+            "fast" => Some(Self::Fast),
+            "instant" => Some(Self::Instant),
+            _ => None,
         }
     }
     /// 枚举 → 配置串（写回 compat.toml 用）。
@@ -146,6 +148,18 @@ where
     Ok(raw.as_deref().and_then(InitialMode::from_config))
 }
 
+/// 容错反序列化 `Option<FirstShowMode>`：无法识别的值退化为 `None`（＝跟随全局）。
+///
+/// ⚠ 与 [`de_initial_mode`] 同理，不能直接让 serde 认字符串：`load_file` 解析失败会
+/// **整份 compat.toml 静默跳过**，一个字段拼错就让该文件里所有应用的所有规则一起失效。
+fn de_first_show_mode<'de, D>(d: D) -> Result<Option<FirstShowMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(raw.as_deref().and_then(FirstShowMode::from_config))
+}
+
 /// 单个应用的兼容性规则。
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AppCompatRule {
@@ -160,11 +174,21 @@ pub struct AppCompatRule {
     /// height 在 1↔20px 间跳变 → bottom 漂移 ~20px，但 top 始终稳定）。
     #[serde(default, skip_serializing_if = "is_false")]
     pub caret_use_top: bool,
-    /// 候选窗首显策略。三档互斥——做成枚举而不是几个 bool：布尔开关可以同时打开，
-    /// 实测就因此出过一次「fast 配了却从未生效」（instant 优先、抢先放行，fast 的判据
-    /// 根本没机会跑），日志里 630 条试探坐标一条没被消费。互斥语义要由类型保证。
-    #[serde(default)]
-    pub first_show_mode: FirstShowMode,
+    /// 候选窗首显策略；`None` = 不干预，跟随全局 `ui.candidate.first_show_mode`。
+    ///
+    /// 三档互斥——做成枚举而不是几个 bool：布尔开关可以同时打开，实测就因此出过一次
+    /// 「fast 配了却从未生效」（instant 优先、抢先放行，fast 的判据根本没机会跑），
+    /// 日志里 630 条试探坐标一条没被消费。互斥语义要由类型保证。
+    ///
+    /// **必须是 `Option`**（2026-09-02，同 `initial_mode` 的理由）：全局默认档一旦可配，
+    /// 「没配过这个应用」与「显式给这个应用配了 fast」就必须能区分，否则用户改了全局默认，
+    /// 所有从未配过的应用会照旧被当成显式 fast——per-app 覆盖凭空长出来，且无从撤销。
+    #[serde(
+        default,
+        deserialize_with = "de_first_show_mode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub first_show_mode: Option<FirstShowMode>,
     /// 进入本应用时的初始中英状态；`None` = 不干预，沿用全局逻辑。
     ///
     /// **必须是 `Option` 不能是 `bool`**：`#[serde(default)]` 下的 bool 会让所有未配置
@@ -271,8 +295,12 @@ pub fn upsert_rule(
     rules.push(fresh);
 }
 
-/// 在一组规则上设置指定进程的首显策略。语义见 [`upsert_rule`]。
-pub fn set_first_show_mode(rules: &mut Vec<AppCompatRule>, process: &str, mode: FirstShowMode) {
+/// 在一组规则上设置指定进程的首显策略（`None` = 清除规则，回到跟随全局）。语义见 [`upsert_rule`]。
+pub fn set_first_show_mode(
+    rules: &mut Vec<AppCompatRule>,
+    process: &str,
+    mode: Option<FirstShowMode>,
+) {
     upsert_rule(rules, process, |r| r.first_show_mode = mode);
 }
 
@@ -350,11 +378,12 @@ pub fn update_user_rule(
     Ok(())
 }
 
-/// 设置用户层 compat.toml 中指定进程的首显策略。语义见 [`update_user_rule`]。
+/// 设置用户层 compat.toml 中指定进程的首显策略（`None` = 清除规则，回到跟随全局）。
+/// 语义见 [`update_user_rule`]。
 pub fn set_user_first_show_mode(
     user_dir: &Path,
     process: &str,
-    mode: FirstShowMode,
+    mode: Option<FirstShowMode>,
 ) -> Result<(), std::io::Error> {
     update_user_rule(user_dir, process, |r| r.first_show_mode = mode)
 }
@@ -755,9 +784,9 @@ mod tests {
         let compat = AppCompat::from_rules(file.apps);
         let rule = compat.get_rule("foo.exe").unwrap();
         assert!(!rule.caret_use_top);
-        // 缺字段 = 取默认档。与 default() 比而非硬编码某一档：本条测的是「serde 有没有
-        // 走 #[serde(default)]」，不是「默认档是哪一个」——后者由 default_mode_is_fast 钉。
-        assert_eq!(rule.first_show_mode, FirstShowMode::default());
+        // 缺字段 = 不干预（跟随全局），与 initial_mode 同语义。若它退化成 Some(默认档)，
+        // 等于给所有未配置的应用都写死了一份 per-app 覆盖，用户改全局默认时全部失效。
+        assert_eq!(rule.first_show_mode, None);
         // 缺字段 = 不干预。若这两个退化成 Some(English)，等于给所有未配置的应用
         // 都配上了「初始英文」——这正是字段必须用 Option 而非 bool 的原因。
         assert_eq!(rule.initial_mode, None);
@@ -848,15 +877,19 @@ mod tests {
             caret_use_top: true,
             ..Default::default()
         }];
-        set_first_show_mode(&mut rules, "weixin.exe", FirstShowMode::Fast); // 大小写无关
+        set_first_show_mode(&mut rules, "weixin.exe", Some(FirstShowMode::Fast)); // 大小写无关
         assert_eq!(rules.len(), 1, "命中时不得追加新规则");
-        assert_eq!(rules[0].first_show_mode, FirstShowMode::Fast);
+        assert_eq!(rules[0].first_show_mode, Some(FirstShowMode::Fast));
         assert!(rules[0].caret_use_top, "其它字段不得被连带修改");
         assert_eq!(rules[0].comment, "微信");
         // 三档互斥：再设一次直接覆盖，不存在「两档同时生效」的中间态
         // ——正是布尔开关时代那个「fast 配了却从未生效」的成因。
-        set_first_show_mode(&mut rules, "Weixin.EXE", FirstShowMode::Instant);
-        assert_eq!(rules[0].first_show_mode, FirstShowMode::Instant);
+        set_first_show_mode(&mut rules, "Weixin.EXE", Some(FirstShowMode::Instant));
+        assert_eq!(rules[0].first_show_mode, Some(FirstShowMode::Instant));
+        // 第四档「跟随全局」＝清除该字段，用户才有撤销 per-app 覆盖的出路。
+        set_first_show_mode(&mut rules, "Weixin.EXE", None);
+        assert_eq!(rules[0].first_show_mode, None);
+        assert!(rules[0].caret_use_top, "清除首显档不得连带清掉其它字段");
     }
 
     #[test]
@@ -864,30 +897,45 @@ mod tests {
         // 未命中：追加**只带该字段**的最小规则，不做整表快照（否则会把系统层其它字段
         // 冻结进用户层，正是 project_dict_override_sparse_merge 记录过的坑）。
         let mut rules: Vec<AppCompatRule> = Vec::new();
-        set_first_show_mode(&mut rules, "EverEdit.exe", FirstShowMode::Fast);
+        set_first_show_mode(&mut rules, "EverEdit.exe", Some(FirstShowMode::Fast));
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].process, "EverEdit.exe", "应保留原始大小写");
-        assert_eq!(rules[0].first_show_mode, FirstShowMode::Fast);
+        assert_eq!(rules[0].first_show_mode, Some(FirstShowMode::Fast));
         assert!(!rules[0].caret_use_top);
     }
 
     #[test]
-    fn mode_parses_from_config_and_falls_back_to_default() {
-        assert_eq!(FirstShowMode::from_config("fast"), FirstShowMode::Fast);
+    fn mode_parses_from_config_and_rejects_unknown() {
+        assert_eq!(
+            FirstShowMode::from_config("fast"),
+            Some(FirstShowMode::Fast)
+        );
         assert_eq!(
             FirstShowMode::from_config(" INSTANT "),
-            FirstShowMode::Instant
+            Some(FirstShowMode::Instant)
         );
-        assert_eq!(FirstShowMode::from_config("wait"), FirstShowMode::Wait);
-        // 未知值回落**默认档**：写错了和没写得到同样的行为，最不意外。
-        // ⚠ 断言写成与 `default()` 比而非硬编码某一档——回落值与 `#[default]` 是两处
-        // 独立事实，各自硬编码就是漏改的温床（且漏改毫无编译信号，生产走 serde、本函数
-        // 只有测试在调）。这样写等于把「两处必须一致」本身钉成不变量。
         assert_eq!(
-            FirstShowMode::from_config("turbo"),
-            FirstShowMode::default()
+            FirstShowMode::from_config("wait"),
+            Some(FirstShowMode::Wait)
         );
+        // 未知值 = None。在 per-app 层它等于「没配」＝跟随全局；在全局层由调用点
+        // `.unwrap_or_default()` 回落到默认档——回落只发生在一处，不再有两处独立事实。
+        assert_eq!(FirstShowMode::from_config("turbo"), None);
         assert_eq!(FirstShowMode::Fast.as_config(), "fast");
+    }
+
+    /// 拼错的档位名不得让整份 compat.toml 失效，也不得固化成显式覆盖。
+    #[test]
+    fn unknown_mode_in_toml_degrades_to_follow_global() {
+        let toml = r#"
+            [[apps]]
+            process = "Foo.exe"
+            first_show_mode = "turbo"
+            caret_use_top = true
+        "#;
+        let file: AppCompatFile = toml::from_str(toml).expect("单字段拼错不得整份解析失败");
+        assert_eq!(file.apps[0].first_show_mode, None, "认不出 = 跟随全局");
+        assert!(file.apps[0].caret_use_top, "同一条规则的其它字段仍须生效");
     }
 
     /// 默认档位是产品决策，单独钉一条，改动时必须显式过这一关。
@@ -900,12 +948,26 @@ mod tests {
         assert_eq!(FirstShowMode::default(), FirstShowMode::Fast);
     }
 
+    /// 全局默认档现在有**两处**表达：枚举的 `#[default]`（认不出的值回落到它）与
+    /// `config.toml` 出厂值 `ui.candidate.first_show_mode`（用户实际读到的那一份）。
+    /// 两处分叉的表现是「配置文件写着 fast，某些路径却按另一档跑」，没有任何编译信号，
+    /// 故把「必须一致」钉成不变量。顺带也验出厂串本身是个合法档位名（拼错即 None）。
+    #[test]
+    fn global_default_config_value_matches_enum_default() {
+        let factory = crate::config::UiCandidateConfig::default().first_show_mode;
+        assert_eq!(
+            FirstShowMode::from_config(&factory),
+            Some(FirstShowMode::default()),
+            "config.toml 出厂档 {factory:?} 与枚举 #[default] 不一致"
+        );
+    }
+
     #[test]
     fn render_omits_false_flags_and_roundtrips() {
         // 渲染产物：false 开关与空 comment 全部省略（不铺 `= false`），且能被自己解析回来。
         let rules = vec![AppCompatRule {
             process: "EverEdit.exe".into(),
-            first_show_mode: FirstShowMode::Fast,
+            first_show_mode: Some(FirstShowMode::Fast),
             ..Default::default()
         }];
         let text = render_user_compat(&rules, &[]).expect("渲染失败");
@@ -919,7 +981,7 @@ mod tests {
 
         let parsed: AppCompatFile = toml::from_str(&text).expect("产物应可解析");
         assert_eq!(parsed.apps.len(), 1);
-        assert_eq!(parsed.apps[0].first_show_mode, FirstShowMode::Fast);
+        assert_eq!(parsed.apps[0].first_show_mode, Some(FirstShowMode::Fast));
         assert_eq!(parsed.apps[0].process, "EverEdit.exe");
     }
 

@@ -7,7 +7,8 @@
 #   comment:              说明（仅文档用途）
 #   caret_use_top:        使用 caret rect 的 top 而非 bottom 定位候选框
 #                         适用于 GetTextExt 返回的 height 不稳定的 WebView 应用
-#   first_show_mode:      候选框首显策略，三档互斥（默认 "fast"）：
+#   first_show_mode:      候选框首显策略，三档互斥；不写=跟随全局
+#                         config.toml 的 [ui.candidate] first_show_mode（出厂 "fast"）。
 #                         "fast"    默认。仍等坐标，但等到「可信」即放行。DLL 在首帧
 #                                   reflow 期间连发几条试探坐标，取第一条「与上一轮权威
 #                                   坐标不同」的采用——宿主未 reflow 时返回的正是上一轮
@@ -95,7 +96,7 @@ process = "startmenuexperiencehost.exe"
 comment = "Win10 开始菜单输入框"
 host_render = true
 
-# 示例：给「fast 判据失灵」的宿主退回 wait（fast 已是默认，无需再逐个开启）
+# 示例：给「fast 判据失灵」的宿主退回 wait（本字段不写即跟随全局默认，无需逐个开启）
 # [[apps]]
 # process = "SomeApp.exe"
 # comment = "首帧坐标始终不更新，fast 的试探判据在此宿主上不成立"

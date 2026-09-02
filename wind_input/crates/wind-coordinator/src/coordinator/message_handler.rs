@@ -2571,12 +2571,9 @@ impl MessageHandler for Coordinator {
     fn handle_caret_probe(&self, data: &CaretData) {
         // 首帧 reflow 期间 DLL 逐次采样上报（CMD_CARET_PROBE）。默认**完全忽略**——
         // 不开 fast_first_show 的宿主必须保持「等 reflow 权威坐标」的原行为，一字不差。
-        let compat = *self.active_compat.lock().unwrap_or_else(|e| e.into_inner());
-        if compat.first_show_mode != wind_config::app_compat::FirstShowMode::Fast {
-            debug!(
-                "caret_probe → 忽略: 当前档位={} 非 fast",
-                compat.first_show_mode.as_config()
-            );
+        let mode = self.effective_first_show_mode();
+        if mode != wind_config::app_compat::FirstShowMode::Fast {
+            debug!("caret_probe → 忽略: 当前档位={} 非 fast", mode.as_config());
             return;
         }
         // 只在正等首显时有意义：已显示 / 未 arm 的帧交给常规 caret_update 路径。

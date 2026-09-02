@@ -247,7 +247,7 @@ caret_use_top = true
     let b = compat.get_rule("b.exe").expect("b.exe 规则应在");
     assert_eq!(
         b.first_show_mode,
-        FirstShowMode::Instant,
+        Some(FirstShowMode::Instant),
         "定制层须覆盖 data 层的同名进程"
     );
     assert!(

@@ -723,8 +723,14 @@ pub(crate) struct ActiveCompat {
     /// 用 caret rect 的 top 而非 bottom 定位候选窗。微信等 WebView 宿主的 GetTextExt
     /// height 在 1↔20px 间跳变致 bottom 漂移，top 稳定。
     pub(crate) caret_use_top: bool,
-    /// 候选窗首显策略（见 `AppCompatRule::first_show_mode`）。三档互斥。
-    pub(crate) first_show_mode: wind_config::app_compat::FirstShowMode,
+    /// 候选窗首显策略（见 `AppCompatRule::first_show_mode`）。三档互斥；
+    /// `None` = 跟随全局 `ui.candidate.first_show_mode`。
+    ///
+    /// ⚠ **刻意保留 `Option` 而不在这里就地回落到全局值**：这是一份随焦点切换刷新的
+    /// 镜像态，若在写入时就把全局默认烘进来，用户在设置页改了全局档位后要等到下次切
+    /// 焦点才生效（本仓已有一类「设置页改了不生效、重启后生效」的缺陷都源于此）。
+    /// 回落统一放在读取侧的 [`Coordinator::effective_first_show_mode`]。
+    pub(crate) first_show_mode: Option<wind_config::app_compat::FirstShowMode>,
     /// 本进程是否配了初始状态规则（`initial_mode` / `initial_punct` 任一非空）。
     ///
     /// 用途是判定「本次焦点切换是否**进出**了规则应用」：规则的副作用必须严格限制在
@@ -2282,7 +2288,7 @@ impl Coordinator {
                 ActiveCompat {
                     pid,
                     caret_use_top: rule.map(|r| r.caret_use_top).unwrap_or(false),
-                    first_show_mode: rule.map(|r| r.first_show_mode).unwrap_or_default(),
+                    first_show_mode: rule.and_then(|r| r.first_show_mode),
                     has_initial_rule: initial_mode.is_some() || initial_punct.is_some(),
                     auto_pair: rule.and_then(|r| r.auto_pair),
                     smart_method: rule.and_then(|r| r.smart_method),
@@ -2301,7 +2307,9 @@ impl Coordinator {
             "Compat rule for process={name}: matched={} caret_use_top={} first_show_mode={} initial_mode={} initial_punct={} auto_pair={} smart_method={} caret_offset=({},{})",
             rule_matched,
             next.caret_use_top,
-            next.first_show_mode.as_config(),
+            next.first_show_mode
+                .map(|m| m.as_config())
+                .unwrap_or("(follow-global)"),
             rule_initial_mode
                 .map(|m| m.as_config())
                 .unwrap_or("(follow-global)"),
@@ -2433,7 +2441,7 @@ impl Coordinator {
             let rule = table.get_rule(&name);
             (
                 rule.map(|r| r.caret_use_top).unwrap_or(false),
-                rule.map(|r| r.first_show_mode).unwrap_or_default(),
+                rule.and_then(|r| r.first_show_mode),
                 rule.and_then(|r| r.auto_pair),
                 rule.and_then(|r| r.smart_method),
                 rule.map(|r| r.caret_offset_x).unwrap_or(0),
@@ -2443,7 +2451,9 @@ impl Coordinator {
         debug!(
             "Connected-pid compat refresh for process={name} (pid={pid}): caret_use_top={} first_show_mode={} auto_pair={} smart_method={} caret_offset=({},{})",
             caret_use_top,
-            first_show_mode.as_config(),
+            first_show_mode
+                .map(|m| m.as_config())
+                .unwrap_or("(follow-global)"),
             match auto_pair {
                 Some(true) => "on",
                 Some(false) => "off",
@@ -2686,6 +2696,21 @@ impl Coordinator {
     /// 查 `compat.toml` 中该进程的初始中英规则；`None` = 未配置（不干预）。
     ///
     /// 仅 HashMap 查询，无 OpenProcess，故可用于 DLL 同步阻塞路径（`get_current_mode`）。
+    /// 查 `compat.toml` 中该进程的候选窗首显规则；`None` = 未配置（跟随全局）。
+    pub(crate) fn rule_first_show_mode(
+        &self,
+        proc_name: &str,
+    ) -> Option<wind_config::app_compat::FirstShowMode> {
+        if proc_name.is_empty() {
+            return None;
+        }
+        self.app_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_rule(proc_name)
+            .and_then(|r| r.first_show_mode)
+    }
+
     pub(crate) fn rule_initial_mode(
         &self,
         proc_name: &str,
@@ -4591,12 +4616,8 @@ impl Coordinator {
         //      reset_first_show() 在每次上屏时复位（Go 的 clearState 同样如此）。
         //   ③ 坐标已就绪：已有过有效 caret 且本轮组合起点已锁定 ⇒ 没有漂移可等。
         //      对应 Go 的 `!caretValid || !compositionStartValid` 取反。
-        let skip_caret_pending = self
-            .active_compat
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .first_show_mode
-            == wind_config::app_compat::FirstShowMode::Instant;
+        let skip_caret_pending =
+            self.effective_first_show_mode() == wind_config::app_compat::FirstShowMode::Instant;
         let coords_ready = self
             .last_valid_caret
             .lock()
@@ -6903,9 +6924,58 @@ mod caret_compat_tests {
     fn set_mode(c: &Arc<Coordinator>, mode: wind_config::app_compat::FirstShowMode) {
         *c.active_compat.lock().unwrap() = ActiveCompat {
             pid: 1234,
-            first_show_mode: mode,
+            first_show_mode: Some(mode),
             ..Default::default()
         };
+    }
+
+    /// 只改全局默认档、不配任何 per-app 规则的协调器（`ActiveCompat::default()` 的
+    /// `first_show_mode` 恰是 `None`＝跟随全局，正是菜单第四档写盘后的状态）。
+    fn coord_with_global(mode: &str) -> Arc<Coordinator> {
+        let mut cfg = Config::default();
+        cfg.ui.candidate.first_show_mode = mode.to_string();
+        Coordinator::new_headless(cfg, None)
+    }
+
+    /// per-app 未配时，生效档位必须跟着 `ui.candidate.first_show_mode` 走。
+    ///
+    /// 这是「全局默认档可配」这件事**唯一**的接线点：漏接的表现是「设置改了完全没反应」，
+    /// 而首显逻辑的错只表现为位置或时机不对，不会有任何报错，靠人眼很难归因到配置没读。
+    #[test]
+    fn unset_per_app_rule_follows_global_config() {
+        use wind_config::app_compat::FirstShowMode;
+        for (cfg_val, want) in [
+            ("wait", FirstShowMode::Wait),
+            ("instant", FirstShowMode::Instant),
+            ("fast", FirstShowMode::Fast),
+        ] {
+            let c = coord_with_global(cfg_val);
+            assert_eq!(
+                c.effective_first_show_mode(),
+                want,
+                "全局配置 {cfg_val} 未被读取"
+            );
+        }
+        // 认不出的值回落枚举默认档——「写错了」与「没写」行为一致。
+        assert_eq!(
+            coord_with_global("turbo").effective_first_show_mode(),
+            FirstShowMode::default()
+        );
+    }
+
+    /// per-app 显式档压过全局。两者取不同值才测得出优先级——若断言里两边恰好同档，
+    /// 这条测试对「全局赢了 per-app」这种反转完全无感。
+    #[test]
+    fn per_app_rule_overrides_global_config() {
+        use wind_config::app_compat::FirstShowMode;
+        let c = coord_with_global("wait");
+        assert_eq!(c.effective_first_show_mode(), FirstShowMode::Wait);
+        set_mode(&c, FirstShowMode::Instant);
+        assert_eq!(
+            c.effective_first_show_mode(),
+            FirstShowMode::Instant,
+            "per-app 覆盖必须压过全局默认"
+        );
     }
 
     /// fast 档的兜底必须远短于 wait 档：Word 这类宿主不发 OnLayoutChange、组合坐标 60~190ms
@@ -7775,7 +7845,7 @@ mod caret_compat_tests {
         let c = coord();
         *c.active_compat.lock().unwrap() = ActiveCompat {
             pid: 1,
-            first_show_mode: wind_config::app_compat::FirstShowMode::Fast,
+            first_show_mode: Some(wind_config::app_compat::FirstShowMode::Fast),
             ..Default::default()
         };
         {
@@ -7808,7 +7878,7 @@ mod caret_compat_tests {
         let c = coord();
         *c.active_compat.lock().unwrap() = ActiveCompat {
             pid: 1,
-            first_show_mode: wind_config::app_compat::FirstShowMode::Fast,
+            first_show_mode: Some(wind_config::app_compat::FirstShowMode::Fast),
             ..Default::default()
         };
         assert!(
@@ -7827,7 +7897,7 @@ mod caret_compat_tests {
         let c = coord();
         *c.active_compat.lock().unwrap() = ActiveCompat {
             pid: 1,
-            first_show_mode: wind_config::app_compat::FirstShowMode::Fast,
+            first_show_mode: Some(wind_config::app_compat::FirstShowMode::Fast),
             ..Default::default()
         };
         // 慢速手打：相邻按键间隔 800ms，远超默认 100ms 窗口
@@ -7845,7 +7915,7 @@ mod caret_compat_tests {
         let c = coord();
         *c.active_compat.lock().unwrap() = ActiveCompat {
             pid: 1,
-            first_show_mode: wind_config::app_compat::FirstShowMode::Fast,
+            first_show_mode: Some(wind_config::app_compat::FirstShowMode::Fast),
             ..Default::default()
         };
         *c.last_key_interval_ms.lock().unwrap() = Some(60); // 与真机脚本同节奏
@@ -7862,7 +7932,7 @@ mod caret_compat_tests {
         let c = coord();
         *c.active_compat.lock().unwrap() = ActiveCompat {
             pid: 1,
-            first_show_mode: wind_config::app_compat::FirstShowMode::Fast,
+            first_show_mode: Some(wind_config::app_compat::FirstShowMode::Fast),
             ..Default::default()
         };
         assert!(
@@ -7877,7 +7947,7 @@ mod caret_compat_tests {
         let c = coord();
         *c.active_compat.lock().unwrap() = ActiveCompat {
             pid: 1,
-            first_show_mode: wind_config::app_compat::FirstShowMode::Fast,
+            first_show_mode: Some(wind_config::app_compat::FirstShowMode::Fast),
             ..Default::default()
         };
         assert!(
@@ -7903,7 +7973,7 @@ mod caret_compat_tests {
         let c = coord();
         *c.active_compat.lock().unwrap() = ActiveCompat {
             pid: 1234,
-            first_show_mode: wind_config::app_compat::FirstShowMode::Instant,
+            first_show_mode: Some(wind_config::app_compat::FirstShowMode::Instant),
             ..Default::default()
         };
         assert!(
@@ -8053,13 +8123,13 @@ mod caret_compat_tests {
         wind_config::app_compat::set_first_show_mode(
             &mut rules,
             "com.apple.textedit",
-            wind_config::app_compat::FirstShowMode::Fast,
+            Some(wind_config::app_compat::FirstShowMode::Fast),
         );
         *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
         c.update_active_compat(token);
         assert_eq!(
             c.active_compat.lock().unwrap().first_show_mode,
-            wind_config::app_compat::FirstShowMode::Fast,
+            Some(wind_config::app_compat::FirstShowMode::Fast),
             "缓存里的 bundle id 必须参与 compat 规则匹配"
         );
     }
