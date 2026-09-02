@@ -227,6 +227,23 @@ impl Coordinator {
         }))
     }
 
+    /// 生僻字模式下的取数选项。
+    ///
+    /// ★★★ **两条取数路径必须共用本函数**：首次取数（[`Self::update_special_candidates`]）
+    /// 与不足一页时的重取（[`Self::refill_rare_if_short`]）。此前重取走的是裸的
+    /// `convert_with`，于是 1000 条预算有相当一部分花在会被 `retain_rare_admitted` 当场
+    /// 丢弃的常用字上——「截断 → 过滤」这个本该由重取解决的缺陷，在更大的上限上又犯了
+    /// 一次；同时白付了 `push_unique` 的全量查重成本，而重取恰恰只在最高频的那些码上触发。
+    ///
+    /// 收成一个函数是为了让「两处同源」由构造保证：想让它们分叉，得先绕开本函数。
+    /// 其余模式不下推准入，`rare_admit_fn` 自己会返回 `None`，故本函数对它们是空选项。
+    fn rare_convert_opts(&self, state: &State) -> wind_engine::ConvertOptions {
+        wind_engine::ConvertOptions {
+            admit: self.rare_admit_fn(state),
+            ..Default::default()
+        }
+    }
+
     /// 对当前候选施加生僻字准入（仅生僻字模式；其余模式为空操作）。
     fn apply_rare_admission(&self, state: &mut State) {
         if !matches!(state.active, Some(ModeKind::RareChar)) {
@@ -290,9 +307,17 @@ impl Coordinator {
         if state.candidates.len() >= need {
             return;
         }
-        let result = self
-            .engine_mgr
-            .convert_with(schema, &state.special_buffer, RARE_REFILL_LIMIT);
+        // ★ 重取**同样要带准入下推**，与首次取数共用 `rare_convert_opts`（理由见那里）。
+        // 这条路的触发条件是「候选不够一页」，恰恰是单字母、单音节这些最高频输入，
+        // 也就是那笔 `push_unique` 全量查重成本（`y` 端到端 148.7ms → 50.0ms）最该省下
+        // 的地方——偏偏此前只有首次取数省到了。
+        let opts = self.rare_convert_opts(state);
+        let result = self.engine_mgr.convert_with_opts(
+            schema,
+            &state.special_buffer,
+            RARE_REFILL_LIMIT,
+            opts,
+        );
         // 重取的结果**必须走同一条加工链**（finalize → 过滤），否则两次取数的候选形态
         // 不一致：`$CC` 那类词条在重取路径上就不会被展开。
         let mut refilled = self.finalize_candidates(result.candidates, &state.special_buffer);
@@ -370,10 +395,7 @@ impl Coordinator {
         // 生僻字模式把准入**下推给引擎**：上限施加在过滤之前，事后 retain 只能在被截断过
         // 的那一段里筛（拼音 `yi` 事后过滤只剩 4 条，而该音实际有 1183 个非常用字）。
         // 详见 `ConvertOptions::admit`。其余模式传 None，行为与本改动前逐条一致。
-        let opts = wind_engine::ConvertOptions {
-            admit: self.rare_admit_fn(state),
-            ..Default::default()
-        };
+        let opts = self.rare_convert_opts(state);
         let result = self.engine_mgr.convert_with_opts(
             &schema,
             &state.special_buffer,
