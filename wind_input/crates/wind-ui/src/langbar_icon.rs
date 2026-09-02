@@ -33,99 +33,63 @@ pub enum PunctBadge {
     English,
 }
 
-/// 角标的编码方式。
+/// 角标总开关。
 ///
-/// 做成枚举而非写死，是因为 16×16 下哪种编码可辨只能真机看——而把渲染搬到服务端后，
-/// 换一种编码只需重启服务，不必重新分发 DLL。原型对比见
-/// `docs/design/langbar-icon-shared-render.md`。
+/// 只有「不画」与「角标」两档。早期版本这里是一组形状编码（最外圈边框、底部横条、
+/// 圆/方、环/点），在 16px 上逐个真机比选，最终只有角落三角立得住；而**位置成为
+/// 单条规则的属性**之后，非角落锚定的那几种在模型里也无处安放——留着它们等于留下
+/// 一组会静默忽略 `corner` 配置的取值，正是「配了没反应」那类最难自查的毛病。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BadgeShape {
-    /// 不画角标，图标退回「只有主字」的旧样子。
+pub enum BadgeStyle {
+    /// 不画任何角标，图标退回「只有主字」的旧样子。
     ///
-    /// 做成形状枚举的一员而非另开一个 `enabled` 布尔：两者并存时可以摆出
-    /// 「关着 + 选了三角」这种自相矛盾的状态，而单选组从类型上就排除了它，
-    /// 菜单上也天然是一组互斥项。
-    ///
-    /// 这一档同时是用户可见开关的落点——有人就是不想要角标。
+    /// 做成枚举的一员而非另开一个 `enabled` 布尔：两者并存时可以摆出「关着 + 配了
+    /// 三条规则」这种自相矛盾的状态，而单选组从类型上就排除了它。它同时是用户可见的
+    /// **总开关**——关掉即全部规则都不画，不必逐条去关。
     ///
     /// **它是默认值**：角标是加在一个所有 Windows 用户都会看到的系统图标上的新东西，
     /// 默认改变所有人的任务栏是过界的。想要的人去开，这样默认体验与装之前一致。
     #[default]
     None,
-    /// 右下角直角三角（中实心 / 英空心）。**开启角标时的推荐形状。**
+    /// 按规则表在四角画直角三角。
     ///
     /// 三角填满角落，同样面积下比圆形更"占地方"，因而在 16px 下比小圆点更醒目；
-    /// 且直角边贴着图标边界，与主字的接触面比居中的圆更小。配色见
-    /// [`IconRenderer::badge_colors`]——彩色时不必靠形状区分，两态可都用实心。
-    CornerTriangle,
-    /// 最外圈边框（中=整圈 / 英=四角断开）。
-    ///
-    /// 完全不占内部空间，主字一个像素都不用让——这是它相对所有角标方案的根本优势。
-    /// 代价是最外圈只有 1~2px，且任务栏图标周围留白很窄，边框容易与相邻图标混淆。
-    OuterRing,
-    /// 实心圆（中）/ 实心方（英）。
-    ///
-    /// ⚠ **真机实测否决**：两态都是实心、不依赖细节像素，纸面上 16px 最稳，
-    /// 但任务栏上的观感明显不如三角——圆点悬在角落里像个污点，与主字既不贴边也不成整体。
-    /// 保留仅供调试菜单对比，不要再选作默认。
-    CircleSquare,
-    /// 空心环（中）/ 实心点（英）。语义最贴近「。」与「.」。
-    ///
-    /// ⚠ **真机实测否决**，同 [`Self::CircleSquare`]；且 16px 下环的内腔只剩 1~2px，
-    /// 浅底尤其弱。
-    RingDot,
-    /// 底部横条（中）/ 两点（英）。真实尺寸下区分度最高且不占右下角，
-    /// 因此不与「五」「双」这类右下有笔画的字打架；弱点是与标点没有直觉关联。
-    BottomBar,
+    /// 且直角边贴着图标边界，斜边朝向中心，与主字的接触面比同样占地的方块更小。
+    Corner,
 }
 
-impl BadgeShape {
-    /// 全部编码方式，顺序即调试菜单里的顺序，也是 [`Self::index`] 的编号依据。
+impl BadgeStyle {
+    /// 全部档位，顺序即菜单里的顺序，也是 [`Self::index`] 的编号依据。
     ///
     /// 单一真相源：菜单项、勾选态还原、`MenuCmd` 的 u8 参数三处都从这里取，
-    /// 各写一份的话，加一种形状时漏改任意一处都表现为「点了另一个形状」。
-    pub const ALL: [BadgeShape; 6] = [
-        BadgeShape::None,
-        BadgeShape::CornerTriangle,
-        BadgeShape::OuterRing,
-        BadgeShape::CircleSquare,
-        BadgeShape::RingDot,
-        BadgeShape::BottomBar,
-    ];
+    /// 各写一份的话，加一档时漏改任意一处都表现为「点了另一档」。
+    pub const ALL: [BadgeStyle; 2] = [BadgeStyle::None, BadgeStyle::Corner];
 
-    /// 调试菜单文案。
+    /// 菜单文案。
     pub fn label(self) -> &'static str {
         match self {
-            BadgeShape::None => "不显示角标",
-            BadgeShape::CornerTriangle => "右下三角",
-            BadgeShape::OuterRing => "最外圈边框",
-            BadgeShape::CircleSquare => "圆 / 方（已否决）",
-            BadgeShape::RingDot => "环 / 点（已否决）",
-            BadgeShape::BottomBar => "底部横条",
+            BadgeStyle::None => "不显示",
+            BadgeStyle::Corner => "角标",
         }
     }
 
     /// 落盘用的**稳定 id**。
     ///
     /// ⚠ 刻意不存 [`Self::index`]：下标是「在 ALL 里排第几」这个位置身份，把它写进
-    /// state.toml 等于让文件格式绑死声明顺序——今天在头上插了一个 `None`，
-    /// 昨天存的 0（三角）明天就读成了「不显示」。凡是活得比进程久的标识都要用名字。
+    /// 配置文件等于让格式绑死声明顺序。凡是活得比进程久的标识都要用名字。
     pub fn as_id(self) -> &'static str {
         match self {
-            BadgeShape::None => "none",
-            BadgeShape::CornerTriangle => "corner_triangle",
-            BadgeShape::OuterRing => "outer_ring",
-            BadgeShape::CircleSquare => "circle_square",
-            BadgeShape::RingDot => "ring_dot",
-            BadgeShape::BottomBar => "bottom_bar",
+            BadgeStyle::None => "none",
+            BadgeStyle::Corner => "corner",
         }
     }
 
-    /// 由稳定 id 还原；未知（含空串）回落到默认形状。
+    /// 由稳定 id 还原；未知（含空串）回落到默认。
     ///
-    /// 「空串 = 用代码默认」这条让 wind-config 侧不必知道默认是哪种形状——
-    /// 那份知识只存在于本文件的 `#[default]`，两处各写一份迟早对不上。
-    pub fn from_id(id: &str) -> BadgeShape {
+    /// 上一版的形状 id（`corner_triangle` / `outer_ring` …）**刻意不做兼容别名**：
+    /// 那一版是标着实验性发出去的，让用户重新配一次即可，为此长期背一张别名表不值。
+    /// 未知值回落「不显示」＝与装之前一致，不会画出个莫名其妙的东西。
+    pub fn from_id(id: &str) -> BadgeStyle {
         Self::ALL
             .iter()
             .find(|s| s.as_id() == id)
@@ -138,9 +102,208 @@ impl BadgeShape {
         Self::ALL.iter().position(|&s| s == self).unwrap_or(0) as u8
     }
 
-    /// 由下标还原；越界回落到默认形状（菜单 id 来自另一个进程，不能假定合法）。
-    pub fn from_index(i: u8) -> BadgeShape {
+    /// 由下标还原；越界回落默认（菜单 id 来自另一个进程，不能假定合法）。
+    pub fn from_index(i: u8) -> BadgeStyle {
         Self::ALL.get(i as usize).copied().unwrap_or_default()
+    }
+}
+
+/// 一条角标规则所绑定的状态。
+///
+/// 只开放这三个：它们都已经在 [`IconSpec`] 里有对应数据，接线为零。半角与英文态
+/// 刻意不在其中——**没有信息量的状态不占像素**：半角是常态，给它画一个标记等于在
+/// 16×16 上常驻一个永远不变的点；英文态下主字本身已经是「英」，角标只是重复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadgeState {
+    /// 中文标点态。
+    PunctCn,
+    /// 英文标点态。
+    PunctEn,
+    /// 全角态。
+    FullWidth,
+}
+
+impl BadgeState {
+    /// 全部状态，顺序即设置页下拉里的顺序。
+    pub const ALL: [BadgeState; 3] = [
+        BadgeState::PunctCn,
+        BadgeState::PunctEn,
+        BadgeState::FullWidth,
+    ];
+
+    /// 面向用户的名称。
+    pub fn label(self) -> &'static str {
+        match self {
+            BadgeState::PunctCn => "中文标点",
+            BadgeState::PunctEn => "英文标点",
+            BadgeState::FullWidth => "全角",
+        }
+    }
+
+    /// 落盘用的稳定 id。
+    pub fn as_id(self) -> &'static str {
+        match self {
+            BadgeState::PunctCn => "punct_cn",
+            BadgeState::PunctEn => "punct_en",
+            BadgeState::FullWidth => "full_width",
+        }
+    }
+
+    /// 由稳定 id 还原；未知返回 `None`。
+    ///
+    /// ⚠ 与 [`BadgeStyle::from_id`] / [`Corner::from_id`] 的「回落默认」**刻意不同**：
+    /// 状态没有合理的默认值——一条不知道该在什么时候画的规则，回落到任何一个状态都是
+    /// 在替用户瞎猜，画出来的东西他对不上因果。故整条规则丢弃（调用方负责记警告）。
+    pub fn from_id(id: &str) -> Option<BadgeState> {
+        Self::ALL.iter().find(|s| s.as_id() == id).copied()
+    }
+
+    /// 当前状态是否命中本条规则。
+    fn matches(self, spec: &IconSpec) -> bool {
+        match self {
+            BadgeState::PunctCn => spec.punct == PunctBadge::Chinese,
+            BadgeState::PunctEn => spec.punct == PunctBadge::English,
+            BadgeState::FullWidth => spec.full_width,
+        }
+    }
+}
+
+/// 角标所在的角落。
+///
+/// 四个角落形状同构，只差坐标折叠——见 [`draw_corner_triangle`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Corner {
+    /// 左上角。
+    TopLeft,
+    /// 右上角（出厂全角规则的落点）。
+    TopRight,
+    /// 右下角（出厂两条标点规则的落点，也是未知值的回落目标）。
+    #[default]
+    BottomRight,
+    /// 左下角。
+    BottomLeft,
+}
+
+impl Corner {
+    /// 全部角落，顺序即设置页下拉里的顺序（顺时针从左上起）。
+    pub const ALL: [Corner; 4] = [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomRight,
+        Corner::BottomLeft,
+    ];
+
+    /// 面向用户的名称。
+    pub fn label(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "左上角",
+            Corner::TopRight => "右上角",
+            Corner::BottomRight => "右下角",
+            Corner::BottomLeft => "左下角",
+        }
+    }
+
+    /// 落盘用的稳定 id。
+    pub fn as_id(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "top_left",
+            Corner::TopRight => "top_right",
+            Corner::BottomRight => "bottom_right",
+            Corner::BottomLeft => "bottom_left",
+        }
+    }
+
+    /// 由稳定 id 还原；未知回落右下角。
+    ///
+    /// 位置有合理默认（右下是最不挡主字的角，也是出厂标点规则的落点），故与
+    /// [`BadgeState::from_id`] 不同，写错一个词不至于让整条规则消失。
+    pub fn from_id(id: &str) -> Corner {
+        Self::ALL
+            .iter()
+            .find(|c| c.as_id() == id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// 水平方向是否靠右。
+    fn is_right(self) -> bool {
+        matches!(self, Corner::TopRight | Corner::BottomRight)
+    }
+
+    /// 垂直方向是否靠下。
+    fn is_bottom(self) -> bool {
+        matches!(self, Corner::BottomLeft | Corner::BottomRight)
+    }
+}
+
+/// 一条规则在某个主题下的着色：色相 + 不透明度，两者都可以「不指定」。
+///
+/// 之所以是一个结构体而不是两个平行字段：它们来自**同一个配置值**（`#RRGGBBAA`），
+/// 拆开存就得各自定义一遍"没填"的含义，还得靠约定保证两者同进同出。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BadgeColor {
+    /// 色相（BGR）。`None` = 与主字同色并跟随明暗主题（配置里的 `auto`）。
+    pub rgb: Option<[u8; 3]>,
+    /// 本条自己的不透明度（0~1）。`None` = 用全局 [`IconRenderer::badge_alpha`]。
+    ///
+    /// 对应配置里色值写不写末两位：`#RRGGBB` 不指定、`#RRGGBBAA` 指定。判据是
+    /// **原字符串的长度**，不是解析结果——`parse_hex` 会把 6 位补成 `alpha = 255`，
+    /// 那一步就把"没写"和"写了 FF"抹平了，而这两者在这里含义完全不同
+    /// （后者会把这一条切到挖空档，见 [`IconRenderer::badge_alpha`]）。
+    pub alpha: Option<f32>,
+}
+
+impl BadgeColor {
+    /// 与主字同色、不透明度跟随全局。
+    pub const AUTO: BadgeColor = BadgeColor {
+        rgb: None,
+        alpha: None,
+    };
+
+    /// 指定色相、不透明度跟随全局。
+    pub fn rgb(c: [u8; 3]) -> Self {
+        Self {
+            rgb: Some(c),
+            alpha: None,
+        }
+    }
+}
+
+/// 一条角标规则：某状态成立时，在某角落用某色画一个角标。
+///
+/// 关掉的规则**不进这张表**（配置侧的 `enabled = false` 在转换时就被滤掉），
+/// 所以渲染器只需要回答"画哪些"，不必再处理"配了但不画"。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BadgeRule {
+    /// 什么时候画。
+    pub state: BadgeState,
+    /// 画在哪个角。
+    pub corner: Corner,
+    /// 浅色任务栏上的着色。
+    pub color_light: BadgeColor,
+    /// 深色任务栏上的着色。
+    ///
+    /// 亮暗两份而不是一份：渲染本来就按「尺寸档 × 明暗两档」出全部变体
+    /// （见 [`crate::langbar_icon::LangBarIconPublisher::publish`]），按主题取色是白拿的；
+    /// 而同一个色在浅色与深色任务栏上的可辨度可以差很远。
+    pub color_dark: BadgeColor,
+    /// 相对全局倍率的**额外**倍率。`<= 0` 视作这一条不画。
+    ///
+    /// 两级而不是一级：全局那一级答「角标整体要多大」，这一级答「这一条要不要比别人
+    /// 大或小」。出厂三条都取 1.0——都是同等重要的状态标记，没有理由分档。
+    pub scale: f32,
+}
+
+impl BadgeRule {
+    /// 亮暗同色、不透明度跟随全局的规则（出厂三条都是这个形态）。
+    pub fn solid(state: BadgeState, corner: Corner, color: [u8; 3], scale: f32) -> Self {
+        Self {
+            state,
+            corner,
+            color_light: BadgeColor::rgb(color),
+            color_dark: BadgeColor::rgb(color),
+            scale,
+        }
     }
 }
 
@@ -253,82 +416,42 @@ fn draw_disc(m: &mut Mask, cx: f32, cy: f32, r_out: f32, r_in: f32) {
     }
 }
 
-/// 4×4 超采样画轴对齐矩形（半宽 `hw`、半高 `hh`），兼作方点与横条。
-fn draw_rect(m: &mut Mask, cx: f32, cy: f32, hw: f32, hh: f32) {
-    const SS: i32 = 4;
-    let x0 = (cx - hw - 1.0).floor() as i32;
-    let x1 = (cx + hw + 1.0).ceil() as i32;
-    let y0 = (cy - hh - 1.0).floor() as i32;
-    let y1 = (cy + hh + 1.0).ceil() as i32;
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let mut hit = 0;
-            for sy in 0..SS {
-                for sx in 0..SS {
-                    let px = x as f32 + (sx as f32 + 0.5) / SS as f32;
-                    let py = y as f32 + (sy as f32 + 0.5) / SS as f32;
-                    if (px - cx).abs() <= hw && (py - cy).abs() <= hh {
-                        hit += 1;
-                    }
-                }
-            }
-            if hit > 0 {
-                m.blend(x, y, hit as f32 / (SS * SS) as f32);
-            }
-        }
-    }
-}
-
-/// 角三角所在的角落。两个标记各占一角，形状同构、只差一次 y 翻转。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Corner {
-    BottomRight,
-    TopRight,
-}
-
 /// 4×4 超采样画直角三角，直角顶点在 `corner` 指定的角上、直角边长 `leg`。
 ///
 /// 三角能把角落填满，同面积下比圆更醒目；而斜边朝向图标中心，与主字的接触面
-/// 又比同样占地的方块小——这也是它同时被选为标点角标与全角标记形状的原因。
-/// `hollow` 为真时只留 `th` 厚的边。
-fn draw_corner_triangle(m: &mut Mask, s: f32, leg: f32, hollow: bool, th: f32, corner: Corner) {
+/// 又比同样占地的方块小——这是它被选作角标唯一形状的原因。
+fn draw_corner_triangle(m: &mut Mask, s: f32, leg: f32, corner: Corner) {
     const SS: i32 = 4;
-    // 两个角落的判据同构：把 y 翻过来，右上角就变成右下角的问题。
-    // 与其写两份几乎相同的不等式（改一处忘另一处，且形状差异极难用眼睛发现），
+    // 四个角落的判据同构：把坐标折到右下角，其余三个角就都变成同一个问题。
+    // 与其写四份几乎相同的不等式（改一处忘另一处，且形状差异细到肉眼几乎看不出），
     // 不如只做一次坐标变换。
-    let fold_y = |py: f32| -> f32 {
-        match corner {
-            Corner::BottomRight => py,
-            Corner::TopRight => s - py,
-        }
-    };
-    // 判据一律在**折叠后**的坐标里做。空心那步要沿两条直角边各内缩一段，而内缩的
-    // y 方向在翻转过的角落里是反的——若在原坐标里加同一个正偏移，右上角的空心会朝
-    // 图标外面缩，画出来是个实心三角（形状差异细到肉眼几乎看不出）。
+    let fold_x = |px: f32| -> f32 { if corner.is_right() { px } else { s - px } };
+    let fold_y = |py: f32| -> f32 { if corner.is_bottom() { py } else { s - py } };
+    // 判据一律在**折叠后**的坐标里做。
     let inside = |px: f32, qy: f32, l: f32| -> bool {
         px >= s - l && qy >= s - l && (px + qy) >= (2.0 * s - l)
     };
-    let x0 = (s - leg - 1.0).floor() as i32;
-    let x1 = s.ceil() as i32;
-    let (y0, y1) = match corner {
-        Corner::BottomRight => ((s - leg - 1.0).floor() as i32, s.ceil() as i32),
-        Corner::TopRight => (0i32, (leg + 1.0).ceil() as i32),
+    // 扫描范围同样按角落取：折叠只作用于判据，循环边界仍在原坐标里。
+    let (x0, x1) = if corner.is_right() {
+        ((s - leg - 1.0).floor() as i32, s.ceil() as i32)
+    } else {
+        (0i32, (leg + 1.0).ceil() as i32)
+    };
+    let (y0, y1) = if corner.is_bottom() {
+        ((s - leg - 1.0).floor() as i32, s.ceil() as i32)
+    } else {
+        (0i32, (leg + 1.0).ceil() as i32)
     };
     for y in y0..=y1 {
         for x in x0..=x1 {
             let mut hit = 0;
             for sy in 0..SS {
                 for sx in 0..SS {
-                    let px = x as f32 + (sx as f32 + 0.5) / SS as f32;
+                    let px = fold_x(x as f32 + (sx as f32 + 0.5) / SS as f32);
                     let qy = fold_y(y as f32 + (sy as f32 + 0.5) / SS as f32);
-                    if !inside(px, qy, leg) {
-                        continue;
+                    if inside(px, qy, leg) {
+                        hit += 1;
                     }
-                    // 空心：再挖掉一个内缩的同心三角
-                    if hollow && inside(px + th * 1.4, qy + th * 1.4, leg - th * 1.4) {
-                        continue;
-                    }
-                    hit += 1;
                 }
             }
             if hit > 0 {
@@ -354,41 +477,6 @@ fn perimeter_t(px: f32, py: f32, s: f32) -> f32 {
         (2.0 * s + (s - px)) / per
     } else {
         (3.0 * s + (s - py)) / per
-    }
-}
-
-/// 画最外圈边框。`th` 为厚度；`dashed` 时在四角留缺口。
-///
-/// 完全不占内部空间是它的全部意义——主字一个像素都不用让。
-fn draw_outer_ring(m: &mut Mask, s: f32, th: f32, dashed: bool) {
-    const SS: i32 = 4;
-    let n = m.n as i32;
-    for y in 0..n {
-        for x in 0..n {
-            let mut hit = 0;
-            for sy in 0..SS {
-                for sx in 0..SS {
-                    let px = x as f32 + (sx as f32 + 0.5) / SS as f32;
-                    let py = y as f32 + (sy as f32 + 0.5) / SS as f32;
-                    let edge = px.min(py).min(s - px).min(s - py);
-                    if edge > th {
-                        continue;
-                    }
-                    if dashed {
-                        // 四角各留一段缺口：把周长四等分后，每段两端各空出 18%
-                        let t = perimeter_t(px, py, s) * 4.0;
-                        let f = t - t.floor();
-                        if !(0.18..=0.82).contains(&f) {
-                            continue;
-                        }
-                    }
-                    hit += 1;
-                }
-            }
-            if hit > 0 {
-                m.blend(x, y, hit as f32 / (SS * SS) as f32);
-            }
-        }
     }
 }
 
@@ -424,23 +512,53 @@ fn draw_ring_marquee(m: &mut Mask, s: f32, th: f32, phase: f32, len: f32) {
     }
 }
 
+/// 一层待合成的角标：形状、配套的挖空形状、以及这一层的颜色。
+///
+/// 把三者绑在一起而不是三个平行 `Vec`：层数由规则表决定，平行数组一旦长度对不齐
+/// 就是"某个角标用了另一个角标的颜色"，而这种错在 16px 上肉眼几乎发现不了。
+struct BadgeLayer {
+    /// 角标本身。
+    mask: Mask,
+    /// 同一形状外扩 [`IconRenderer::BADGE_GAP`] 后的版本，用来从主字里挖出间隙。
+    ///
+    /// 只在本层**不透明**（`alpha >= 1.0`）时才真的拿去挖——挖空与半遮是互斥的两种
+    /// 分离手段，见 [`IconRenderer::badge_alpha`]。
+    clear: Mask,
+    /// 本层颜色（BGR），已按当前明暗主题选定。
+    color: [u8; 3],
+    /// 本层不透明度（0~1），已把「条目覆盖」与全局默认合并完。
+    alpha: f32,
+}
+
 /// 图标渲染器。持有 [`TextRenderer`]（内含 DirectWrite 工厂与测量缓存），故应长期复用。
 pub struct IconRenderer {
     text: TextRenderer,
-    /// 角标编码方式。
-    pub shape: BadgeShape,
     /// 调试用：在左上角画 N 个点标出这是第几个尺寸档。
     ///
     /// `GetIcon` **没有尺寸参数**——图标多大由我们创建位图时决定，系统拿去后是否二次缩放
     /// 从接口上完全看不出来。开启本项部署一次，就能同时回答「系统挑了哪档」和
     /// 「有没有被缩放」两个问题，这是读代码推不出来的。
     pub size_marks: bool,
-    /// 角标配色 `(中文标点, 英文标点)`，BGR。`None` = 与主字同色、跟随任务栏主题。
+    /// 角标总开关，见 [`BadgeStyle`]。**默认关**。
+    pub style: BadgeStyle,
+    /// 角标规则表，**顺序即优先级**。
     ///
-    /// 16px 下颜色远比形状好认，用了配色就不必再靠形状区分两态。代价是**不再跟随
-    /// 明暗主题**，选色时要自己保证在浅色与深色任务栏上都有足够对比。
-    pub badge_colors: Option<([u8; 3], [u8; 3])>,
-    /// 角标不透明度（0~1）。**小于 1 时会同时关掉挖空**，得到"半遮"的效果。
+    /// 一条规则说的是「某状态成立时，在某角落用某色画一个角标」。位置进了规则之后，
+    /// 「中文标点」与「全角」可以被配到同一个角落——16px 上叠两个三角只会糊成一片，
+    /// 故**一个角落只画最靠前命中的那一条**。顺序即优先级是列表模型天然带的语义，
+    /// 与 `ui.toolbar.items` 同一条规矩，不必另发明一个 priority 字段。
+    ///
+    /// 「某个状态不想被打扰」的表达是**把那条规则关掉**（配置侧 `enabled = false`，
+    /// 转换时整条不进这张表），而不是给它一个透明色：透明与颜色是两件事，挤进一个
+    /// 字段还会与 [`Self::badge_alpha`] 那条档位逻辑打架。
+    pub rules: Vec<BadgeRule>,
+    /// 角标不透明度的**全局默认**（0~1）。单条可用色值末两位（`#RRGGBBAA`）覆盖，
+    /// 见 [`BadgeColor::alpha`]。
+    ///
+    /// **小于 1 时会同时关掉挖空**，得到"半遮"的效果。这条档位判据是**逐层**生效的
+    /// （用该层的有效不透明度判），因为挖空在几何上本就是 per-badge 的操作——挖的是
+    /// 这一个角标周围那圈主字。出厂让全部角标共用同一个值是审美上的统一
+    /// （一个半遮一个实心会让人以为二者层级不同），不是技术限制。
     ///
     /// 这两件事是互斥的，不是叠加的：
     /// - `= 1.0`：实心角标 + 挖空。靠周围那圈留白与主字分离，代价是底下的笔画被切掉，
@@ -452,30 +570,11 @@ pub struct IconRenderer {
     ///
     /// 不要调到很低：角标要在 16px 的任务栏上一眼可辨，太透就等于没画。
     pub badge_alpha: f32,
-    /// 全角标记总开关。**默认关**，理由同 [`BadgeShape::None`] 之为默认形状：
-    /// 这是加在系统图标上的新东西，默认改变所有人的任务栏是过界的。
+    /// 角标全局大小倍率。1.0 = [`Self::CORNER_LEG`] 那个基准。
     ///
-    /// 与 `spec.full_width` 的分工：这个是「要不要有这个功能」，那个是「此刻是不是全角」。
-    /// 合成一个的话，关掉功能就得靠"永远上报半角"来实现，那会让状态本身失真。
-    ///
-    /// ⚠️ **测试里要验标记的形状/位置，必须显式 `r.width_mark = true`**。
-    /// 默认关改上来那次，四个只设了 `spec.full_width` 的测试一起变红——它们本意是
-    /// 验「标记画得对不对」，却把「默认开着」当成了隐含前提。凡是验某功能表现的
-    /// 测试，都该自己把该功能打开，而不是依赖默认值。
-    pub width_mark: bool,
-    /// 全角标记的颜色（BGR）。`None` = 与主字同色、跟随明暗主题，同 [`Self::badge_colors`]。
-    ///
-    /// 单独一种颜色而不是复用标点角标的配色：全角与标点是两个不相干的状态，共用颜色会
-    /// 让人以为它们有关联（"蓝的那个又出现在右上角了？"）。选色要与标点那两色都拉开
-    /// 色相距离，同时在深浅两种任务栏上都立得住。
-    pub width_mark_color: Option<[u8; 3]>,
-    /// 角标大小倍率。1.0 = 各形状自己调好的基准尺寸。
-    ///
-    /// 单独抽出来是因为"多大合适"只能真机看，而它与形状是两个自由度：换形状不该
-    /// 连带把调好的大小丢掉。基准值写在各形状的绘制分支里，这里只做整体缩放。
+    /// 与 [`BadgeRule::scale`] 分两级：这一级答「角标整体要多大」，那一级答「这一条
+    /// 要不要比别人小」。改一条规则的位置或颜色不该连带把调好的整体大小丢掉。
     pub badge_scale: f32,
-    /// 全角标记（右上角小方点）的大小倍率，语义同 [`Self::badge_scale`]。
-    pub width_mark_scale: f32,
     /// 演示模式：外圈跑马灯。纯粹展示"服务端渲染 + 定时重发"能做到什么，不表达状态。
     ///
     /// 开启后需要有人按帧推进 [`IconSpec::frame`] 并重新发布，否则画面是静止的——
@@ -554,20 +653,28 @@ impl IconRenderer {
     /// 演示动画一圈多少帧。帧率由驱动方决定，这里只定义"转一圈需要几帧"。
     pub const DEMO_FRAMES_PER_CYCLE: u32 = 40;
 
-    /// 默认角标配色 `(中文标点, 英文标点)`，BGR。
+    /// 中文标点角标默认色 `#2288E0`（蓝，BGR 存储）。
     ///
-    /// 蓝 `#2288E0` / 橙 `#EE9922`：两者在浅色与深色任务栏上都够亮也够暗，
+    /// 与英文标点的橙 `#EE9922` 成对挑选：两者在浅色与深色任务栏上都够亮也够暗，
     /// 且色相相距足够远——16px 下角标只有几个像素，靠色相区分远比靠形状可靠。
-    /// 不跟随明暗主题是刻意的，见 [`Self::badge_colors`]。
-    pub const DEFAULT_BADGE_COLORS: ([u8; 3], [u8; 3]) = ([0xE0, 0x88, 0x22], [0x22, 0x99, 0xEE]);
+    ///
+    /// 这也是**形状不再兼任状态编码**的前提：早期版本靠「中实心 / 英空心」区分两态，
+    /// 而 16px 下空心三角只剩一条 1px 的细边，英文态几乎看不见。
+    pub const DEFAULT_PUNCT_CN_COLOR: [u8; 3] = [0xE0, 0x88, 0x22];
 
-    /// 全角标记默认色 `#E0447A`（玫红，BGR 存储），见 [`Self::width_mark_color`]。
+    /// 英文标点角标默认色 `#EE9922`（橙，BGR 存储），见 [`Self::DEFAULT_PUNCT_CN_COLOR`]。
+    pub const DEFAULT_PUNCT_EN_COLOR: [u8; 3] = [0x22, 0x99, 0xEE];
+
+    /// 全角标记默认色 `#E0447A`（玫红，BGR 存储）。
     ///
     /// 先试过绿 `#33BB55`，真机否决：**不够清晰**。原因是绿的感知亮度天生偏高，
     /// 在浅色任务栏上与白底拉不开，而 16px 上只有几个像素、没有面积去弥补对比。
     /// 玫红的感知亮度低得多，浅底上压得住；饱和度又足够，深底上也不会糊成一团。
     /// 与标点那两色（蓝 `#2288E0` / 橙 `#EE9922`）的色相距离同样够远，三者同屏不串。
-    pub const DEFAULT_WIDTH_MARK_COLOR: [u8; 3] = [0x7A, 0x44, 0xE0];
+    ///
+    /// ⚠ 不要图省事让它与英文标点共用橙：两个不相干的状态用同一色，在出厂那种
+    /// 一上一下的位置还能靠角落分辨，一旦用户把它们配到同一个角落就完全区分不出。
+    pub const DEFAULT_FULL_WIDTH_COLOR: [u8; 3] = [0x7A, 0x44, 0xE0];
 
     /// 角标默认不透明度，见 [`Self::badge_alpha`]。
     ///
@@ -577,14 +684,12 @@ impl IconRenderer {
     /// 削掉一角，而半遮的全部意义就是不削字。这个上限不是审美取舍，是档位边界。
     pub const DEFAULT_BADGE_ALPHA: f32 = 0.88;
 
-    /// 全角标记（右上角三角）的基准直角边长（按图标边长取比例）。
+    /// 角标三角的基准直角边长（按图标边长取比例），对应倍率 1.0。
     ///
-    /// 比标点角标的 0.34 小一档：全角是次要状态，出现频率低且不影响"现在打出来是
-    /// 什么"，不该与标点角标争同等的视觉重量。
-    ///
-    /// 形状取三角而非方点，理由与标点角标同一条：三角把角落填满、斜边朝中心，
-    /// 同等面积下与主字的接触面最小——真机比选后确认这是最不干扰主体的形状。
-    const WIDTH_MARK_LEG: f32 = 0.28;
+    /// 0.34 是真机调过的：0.42 时三角在 16px 上压得太重，抢了主字的视觉重心
+    /// （用户原话「需要改小一点」）。再往下到 0.28 就开始糊成一个色块，直角三角的
+    /// 形状特征消失、与圆点无异。
+    const CORNER_LEG: f32 = 0.34;
 
     /// 墨迹居中的收敛阈值（像素）。
     ///
@@ -605,21 +710,53 @@ impl IconRenderer {
     /// 全算进包围盒会让"边缘更虚的那一侧"显得更宽，反而把中心算偏。
     const INK_THRESHOLD: f32 = 0.10;
 
-    pub fn new(shape: BadgeShape) -> Result<Self, String> {
+    pub fn new(style: BadgeStyle) -> Result<Self, String> {
         // 基准字号仅用于构造，实际每次渲染都按图标尺寸显式指定。
         let text = TextRenderer::new(Self::FONT_FAMILY, 16.0)?;
         Ok(Self {
             text,
-            shape,
             size_marks: false,
-            badge_colors: Some(Self::DEFAULT_BADGE_COLORS),
-            width_mark: false,
-            width_mark_color: Some(Self::DEFAULT_WIDTH_MARK_COLOR),
+            style,
+            rules: Self::default_rules(),
             badge_alpha: Self::DEFAULT_BADGE_ALPHA,
             badge_scale: 1.0,
-            width_mark_scale: 1.0,
             demo_animation: false,
         })
+    }
+
+    /// 出厂规则表：中文标点右下蓝、英文标点右下橙、全角右上玫红，亮暗同色、大小相同。
+    ///
+    /// **三条的倍率都是 1.0**：旧版曾让全角标记小一档（0.28 对 0.34），那是实验期的
+    /// 试探值，不是定论——三个状态标记同等重要，出厂就不该替用户分主次。要它小的人
+    /// 自己改那一条的 `scale`。
+    ///
+    /// 亮暗两档写成同一个色是刻意的：这三色本就是按"深浅两种任务栏上都立得住"挑的
+    /// （见各自的常量文档），分开配只会让出厂多出三个必须同步维护的值。按主题分开
+    /// 配色是留给用户的自由度，不是出厂的负担。
+    ///
+    /// 两条标点规则同占右下角**不冲突**：它们的状态互斥（同一时刻只可能命中一条），
+    /// 优先级规则处理的是「同时命中」，不是「配在同一角」。
+    pub fn default_rules() -> Vec<BadgeRule> {
+        vec![
+            BadgeRule::solid(
+                BadgeState::PunctCn,
+                Corner::BottomRight,
+                Self::DEFAULT_PUNCT_CN_COLOR,
+                1.0,
+            ),
+            BadgeRule::solid(
+                BadgeState::PunctEn,
+                Corner::BottomRight,
+                Self::DEFAULT_PUNCT_EN_COLOR,
+                1.0,
+            ),
+            BadgeRule::solid(
+                BadgeState::FullWidth,
+                Corner::TopRight,
+                Self::DEFAULT_FULL_WIDTH_COLOR,
+                1.0,
+            ),
+        ]
     }
 
     /// 渲染一个变体，返回 `size_px × size_px` 的**非预乘** BGRA。
@@ -627,12 +764,15 @@ impl IconRenderer {
     /// `dark_theme` = 任务栏是暗色（图标应画成浅色）。
     pub fn render(&self, size_px: u16, dark_theme: bool, spec: &IconSpec) -> Vec<u8> {
         let n = size_px as usize;
-        // 关掉角标（shape=None）与「此刻没有标点态可显示」等价处理，走同一条无角标路径——
-        // 于是「关掉」在像素上必然与英文模式下的样子一字不差，不会留下什么残迹。
-        let has_badge = spec.punct != PunctBadge::None && self.shape != BadgeShape::None;
-
         let s = size_px as f32;
+        let fg: u8 = if dark_theme { 255 } else { 0 };
+        let fg3 = [fg, fg, fg];
+
         let glyph = self.render_glyph_mask(size_px, spec);
+        // 总开关关掉时 active_layers 直接返回空表，于是「关掉」在像素上必然与
+        // 「此刻没有任何状态可显示」一字不差，不会留下什么残迹。
+        let layers = self.active_layers(size_px, dark_theme, spec, fg3);
+
         // clear 是角标外扩一圈后的形状，用来在主字上"挖"出间隙。
         // 没有它，角标会与主字笔画糊成一团（第一轮原型的方案 C 就是这么废掉的）。
         // ★ **挖空与透明是互斥的两种分离手段，不能叠加。**
@@ -644,32 +784,17 @@ impl IconRenderer {
         // 同时用是最差的组合：主字先被挖掉一圈（没有笔画可透），角标又被调淡
         // （不够醒目）——于是调低不透明度"看起来完全没有效果"，因为角标底下
         // 本来就是空的，淡的只是它自己。这正是第一版的实际表现。
-        let (badge, mut clear) = if has_badge {
-            let (b, carved) = self.render_badge_masks(size_px, spec.punct);
-            // 不透明才挖空。半透明时保留主字，让它从角标里透出来。
-            let clear = if self.badge_alpha >= 1.0 {
-                carved
-            } else {
-                Mask::new(n)
-            };
-            (b, clear)
-        } else {
-            (Mask::new(n), Mask::new(n))
-        };
-
-        // 全角标记：右上角小方点，与标点角标各占一角、互不相干，但**分离手段与角标同一套**
-        // （见上）——不透明才挖空，半透明则保留主字让笔画透出来。两者若各走各的，
-        // 同一个图标上会同时出现"挖了一圈的方点"和"半遮的三角"，看起来像两套设计。
-        // 挖空并进 clear 而不是各挖各的：主字只该被挖一次，分两遍挖会让交叠处被削得更狠。
-        let width_mark = if spec.full_width && self.width_mark {
-            let (mark, mark_clear) = self.render_width_mark_masks(size_px);
-            if self.badge_alpha >= 1.0 {
-                clear.union(&mark_clear);
-            }
-            mark
-        } else {
-            Mask::new(n)
-        };
+        //
+        // 全部角标并进**同一张** clear：主字只该被挖一次，每条各挖各的会让交叠处
+        // 被削得更狠。
+        //
+        // 档位判据是**逐层**的：只有不透明的那些层参与挖空，半透明的层保留主字。
+        // 挖空在几何上本就是 per-badge 的（挖的是这一个角标周围那圈），条目能各自
+        // 指定不透明度之后，这条判据自然跟着降到层上。
+        let mut clear = Mask::new(n);
+        for l in layers.iter().filter(|l| l.alpha >= 1.0) {
+            clear.union(&l.clear);
+        }
 
         // 演示动画独立成层：它不表达状态，也不参与挖空，纯粹叠在最上面。
         let marquee = if self.demo_animation {
@@ -681,34 +806,36 @@ impl IconRenderer {
             Mask::new(n)
         };
 
-        let fg: u8 = if dark_theme { 255 } else { 0 };
-        let fg3 = [fg, fg, fg];
-        // 角标可单独配色；未配色时与主字同色，退化为旧的单色行为。
-        let badge_col = match (self.badge_colors, spec.punct) {
-            (Some((cn, _)), PunctBadge::Chinese) => cn,
-            (Some((_, en)), PunctBadge::English) => en,
-            _ => fg3,
-        };
-
-        // 两层共用同一个不透明度：它们是同一套视觉语言里的两个标记，一个半遮一个实心
-        // 会让人以为二者层级不同。要分别调时再拆成两个字段，现在拆只是徒增一个必须
-        // 记得同步的量。
-        let badge_alpha = self.badge_alpha.clamp(0.0, 1.0);
-        // 全角标记自己的颜色；未配色时退化为主字色（与 badge_colors 同一开关控制）。
-        let width_col = self.width_mark_color.unwrap_or(fg3);
-
         let mut out = vec![0u8; n * n * 4];
         for i in 0..n * n {
-            // 四层 source-over，自下而上：主字（已挖空）→ 角标 → 全角标记 → 演示动画。
+            // 自下而上 source-over：主字（已挖空）→ 各角标（按规则序）→ 演示动画。
             // 挖空必须发生在叠加之前，否则会把角标自己也挖掉。
+            //
+            // 色值按**预乘**累加，最后除以合成 alpha 还原成非预乘——输出给
+            // `CreateIconIndirect` 的 `hbmColor` 必须是非预乘的。
+            //
+            // 写成循环而不是把每层权重展开成一条乘法链：层数现在由规则表决定，
+            // 展开式每加一层就要给之前每一项补一个 `(1 - a)` 因子，漏一个不报错，
+            // 只让某一层的颜色偏一点——16px 上根本看不出来。
             let g_a = glyph.get(i) * (1.0 - clear.get(i));
-            let b_a = badge.get(i) * badge_alpha;
-            let w_a = width_mark.get(i) * badge_alpha;
+            let mut a = g_a;
+            let mut col = [
+                fg3[0] as f32 * g_a,
+                fg3[1] as f32 * g_a,
+                fg3[2] as f32 * g_a,
+            ];
+            for l in &layers {
+                let la = l.mask.get(i) * l.alpha;
+                for (c, v) in col.iter_mut().enumerate() {
+                    *v = l.color[c] as f32 * la + *v * (1.0 - la);
+                }
+                a = la + a * (1.0 - la);
+            }
             let m_a = marquee.get(i);
-
-            let ab = b_a + g_a * (1.0 - b_a);
-            let abw = w_a + ab * (1.0 - w_a);
-            let a = m_a + abw * (1.0 - m_a);
+            for (c, v) in col.iter_mut().enumerate() {
+                *v = fg3[c] as f32 * m_a + *v * (1.0 - m_a);
+            }
+            a = m_a + a * (1.0 - m_a);
 
             let mut alpha = (a * 255.0).round().clamp(0.0, 255.0) as u8;
             if spec.dimmed {
@@ -716,15 +843,8 @@ impl IconRenderer {
             }
 
             if a > 0.0 {
-                // 各层按覆盖度加权求色，再除以合成 alpha 还原成**非预乘**值——
-                // 输出给 CreateIconIndirect 的 hbmColor 必须是非预乘的。
-                // 每层的权重 = 自身 alpha × 其上各层的 (1 - alpha)。
                 for c in 0..3 {
-                    let v = fg3[c] as f32 * g_a * (1.0 - b_a) * (1.0 - w_a) * (1.0 - m_a)
-                        + badge_col[c] as f32 * b_a * (1.0 - w_a) * (1.0 - m_a)
-                        + width_col[c] as f32 * w_a * (1.0 - m_a)
-                        + fg3[c] as f32 * m_a;
-                    out[i * 4 + c] = (v / a).round().clamp(0.0, 255.0) as u8;
+                    out[i * 4 + c] = (col[c] / a).round().clamp(0.0, 255.0) as u8;
                 }
             }
             out[i * 4 + 3] = alpha; // A（非预乘）
@@ -955,123 +1075,69 @@ impl IconRenderer {
         Some((s * 0.5 - cx, s * 0.5 - cy))
     }
 
-    /// 角标蒙版与配套的「挖空」蒙版。
+    /// 当前状态下要画的全部角标层，按规则表顺序。
     ///
-    /// 返回 `(badge, clear)`：`badge` 是角标本身，`clear` 是同一形状外扩
-    /// [`Self::BADGE_GAP`] 后的版本。合成时先用 `clear` 从主字里挖掉一圈再叠 `badge`，
-    /// 两者之间因而始终留有间隙，主字不必为角标缩小。
-    fn render_badge_masks(&self, size_px: u16, punct: PunctBadge) -> (Mask, Mask) {
-        let gap = size_px as f32 * Self::BADGE_GAP;
-        (
-            self.draw_badge(size_px, punct, 0.0),
-            self.draw_badge(size_px, punct, gap),
-        )
-    }
-
-    /// 全角标记（右上角小方点）的 `(标记, 挖空)` 两张蒙版。
+    /// 三件事在这里一次做完，因为它们共享同一次遍历、也共享同一条优先级判据：
+    /// 按状态过滤 → 同角落去重（只留最靠前的）→ 按明暗主题取色。
     ///
-    /// 与角标同一套路：挖空版就是外扩一圈的自己，用来在主字上开出间隙。
-    fn render_width_mark_masks(&self, size_px: u16) -> (Mask, Mask) {
-        let gap = size_px as f32 * Self::BADGE_GAP;
-        (
-            self.draw_width_mark(size_px, 0.0),
-            self.draw_width_mark(size_px, gap),
-        )
-    }
-
-    /// 画右上角的全角三角；`expand > 0` 时整体外扩，用于生成挖空蒙版。
-    fn draw_width_mark(&self, size_px: u16, expand: f32) -> Mask {
-        let n = size_px as usize;
-        let s = size_px as f32;
-        let mut m = Mask::new(n);
-        // 倍率只作用于标记本身，不作用于外扩量：gap 是"主字与标记之间留多宽"，
-        // 由可读性决定，跟标记多大无关。
-        let leg = s * Self::WIDTH_MARK_LEG * self.width_mark_scale.max(0.0);
-        // 倍率为 0 视作关掉这个标记，**连挖空一起**短路。
-        // 只短路标记那一张是不够的：挖空版的边长是 leg + expand，leg 为 0 时它仍有
-        // expand 那么大，结果是主字右上角被挖掉一块、却没有任何东西补上去。
-        if leg <= 0.0 {
-            return m;
+    /// 总开关关掉时返回空表，调用方无需另加分支。
+    fn active_layers(
+        &self,
+        size_px: u16,
+        dark_theme: bool,
+        spec: &IconSpec,
+        fg3: [u8; 3],
+    ) -> Vec<BadgeLayer> {
+        if self.style == BadgeStyle::None {
+            return Vec::new();
         }
-        draw_corner_triangle(&mut m, s, leg + expand, false, 0.0, Corner::TopRight);
-        m
+        let gap = size_px as f32 * Self::BADGE_GAP;
+        let mut used: Vec<Corner> = Vec::new();
+        let mut layers = Vec::new();
+        for r in &self.rules {
+            if !r.state.matches(spec) {
+                continue;
+            }
+            // 一个角落只画最靠前命中的那一条：16px 上叠两个三角只会糊成一片，
+            // 而"哪个在上"若不定死，表现会随规则表的遍历顺序漂移。
+            if used.contains(&r.corner) {
+                continue;
+            }
+            let k = self.badge_scale.max(0.0) * r.scale;
+            // 倍率归零视作这一条不画，**连挖空一起**短路。只短路形状那一张是不够的：
+            // 挖空版的边长是 leg + gap，leg 为 0 时它仍有 gap 那么大，结果是主字被
+            // 挖掉一块、却没有任何东西补上去。
+            if k <= 0.0 {
+                continue;
+            }
+            used.push(r.corner);
+            let c = if dark_theme {
+                r.color_dark
+            } else {
+                r.color_light
+            };
+            layers.push(BadgeLayer {
+                mask: self.draw_corner_badge(size_px, r.corner, k, 0.0),
+                clear: self.draw_corner_badge(size_px, r.corner, k, gap),
+                color: c.rgb.unwrap_or(fg3),
+                // 条目没指定就用全局。在这里合并而不是留到合成循环里，是为了让
+                // 「挖不挖空」与「画多淡」读的是同一个值——两处各算一遍就会出现
+                // 「挖了空却又是半透明的」那种自相矛盾的组合。
+                alpha: c.alpha.unwrap_or(self.badge_alpha).clamp(0.0, 1.0),
+            });
+        }
+        layers
     }
 
-    /// 按当前形状画角标；`expand > 0` 时整体外扩，用于生成挖空蒙版。
-    fn draw_badge(&self, size_px: u16, punct: PunctBadge, expand: f32) -> Mask {
+    /// 画一个角标；`expand > 0` 时整体外扩，用于生成挖空蒙版。
+    fn draw_corner_badge(&self, size_px: u16, corner: Corner, k: f32, expand: f32) -> Mask {
         let n = size_px as usize;
         let s = size_px as f32;
         let mut m = Mask::new(n);
-        let cn = punct == PunctBadge::Chinese;
-        // 挖空蒙版里所有中空形状都要退化为实心：环心若露出主字笔画，
-        // 那一小截孤立的笔画比不挖还脏。
-        let solid = expand > 0.0;
         // 倍率只缩放形状本身，**不缩放 expand**：expand 是主字与角标之间的间隙，
         // 由"多宽才不糊在一起"决定，与角标多大无关。跟着一起缩会让角标调小时
         // 间隙也变窄，恰好在最需要间隙的时候把它收掉。
-        let k = self.badge_scale.max(0.0);
-
-        match self.shape {
-            // 走不到（render 已按 has_badge 短路），但仍显式列出：下面那句
-            // 「新增形状时编译器会在这里报不穷尽」的保证，要求这里不出现通配臂。
-            BadgeShape::None => {}
-            BadgeShape::OuterRing => {
-                // 外圈在最外围，与居中的主字几乎不重叠，故**不挖空**：
-                // 挖了反而会削掉主字外缘一整圈，让字凭空变小。
-                if expand > 0.0 {
-                    return m;
-                }
-                draw_outer_ring(&mut m, s, s * Self::RING_TH * k, !cn);
-            }
-            BadgeShape::CornerTriangle => {
-                // 直角边贴着图标边界，斜边朝向中心——同样占地下与主字的接触面比方块小。
-                //
-                // 0.34 是真机调过的：0.42 时三角在 16px 上压得太重，抢了主字的视觉重心
-                // （用户原话「需要改小一点」）。再往下到 0.28 就开始糊成一个色块，
-                // 直角三角的形状特征消失、与圆点无异。
-                let leg = s * 0.34 * k + expand;
-                let th = s * 0.09 * k;
-                // 空心只在**没有配色**时用来区分两态。配了色就一律实心：
-                // 预览实测 16px 下空心三角只剩一条 1px 的细边，英文态几乎看不见，
-                // 而颜色本身已经把两态分开了，形状不必再兼这份职责。
-                //
-                // 挖空蒙版恒实心，否则空心内腔会漏出主字笔画。
-                let hollow = !cn && self.badge_colors.is_none() && !solid;
-                draw_corner_triangle(&mut m, s, leg, hollow, th, Corner::BottomRight);
-            }
-            BadgeShape::BottomBar => {
-                // 底部标记不占右下角，与主字笔画不打架
-                let y = s - s * 0.11;
-                let th = s * 0.055 * k;
-                if cn {
-                    draw_rect(&mut m, s * 0.5, y, s * 0.32 * k + expand, th + expand);
-                } else {
-                    let r = th * 1.35;
-                    draw_disc(&mut m, s * 0.31, y, r + expand, 0.0);
-                    draw_disc(&mut m, s * 0.69, y, r + expand, 0.0);
-                }
-            }
-            // 显式列出而非用 `_ =>` 通配：新增形状时编译器会在这里报不穷尽，
-            // 强制你为它选一种画法，而不是默默掉进圆/环的分支画出个莫名其妙的东西。
-            BadgeShape::CircleSquare | BadgeShape::RingDot => {
-                // 右下角角标：基准半径取边长的 17%，16px 下直径约 5.4px
-                let r = s * 0.17 * k;
-                let cx = s - r - s * 0.04;
-                let cy = s - r - s * 0.04;
-                if self.shape == BadgeShape::CircleSquare {
-                    if cn {
-                        draw_disc(&mut m, cx, cy, r * 0.92 + expand, 0.0);
-                    } else {
-                        draw_rect(&mut m, cx, cy, r * 0.74 + expand, r * 0.74 + expand);
-                    }
-                } else if cn {
-                    let inner = if solid { 0.0 } else { r * 0.42 };
-                    draw_disc(&mut m, cx, cy, r + expand, inner);
-                } else {
-                    draw_disc(&mut m, cx, cy, r * 0.72 + expand, 0.0);
-                }
-            }
-        }
+        draw_corner_triangle(&mut m, s, s * Self::CORNER_LEG * k + expand, corner);
         m
     }
 
@@ -1111,8 +1177,8 @@ pub struct LangBarIconPublisher {
 #[cfg(windows)]
 impl LangBarIconPublisher {
     /// `suffix` 取 `wind_config::variant::pipe_suffix()`（`""` / `"_dev"`）。
-    pub fn new(suffix: &str, shape: BadgeShape) -> Result<Self, String> {
-        let renderer = IconRenderer::new(shape)?;
+    pub fn new(suffix: &str, style: BadgeStyle) -> Result<Self, String> {
+        let renderer = IconRenderer::new(style)?;
         let shm = wind_bridge::icon_shm_windows::IconShm::create(suffix)
             .map_err(|e| format!("创建图标共享内存失败: {e}"))?;
         Ok(Self {
@@ -1157,48 +1223,32 @@ impl LangBarIconPublisher {
     /// 需要记得——漏清的症状是「配置改了、日志说读到了、图标纹丝不动」。
     ///
     /// 返回是否**确实有改动**，调用方据此决定要不要重新发布。
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_appearance(
         &mut self,
-        shape: Option<BadgeShape>,
+        style: Option<BadgeStyle>,
         badge_scale: Option<f32>,
-        width_mark: Option<bool>,
-        width_mark_scale: Option<f32>,
         badge_alpha: Option<f32>,
-        badge_colors: Option<Option<([u8; 3], [u8; 3])>>,
-        width_mark_color: Option<Option<[u8; 3]>>,
+        rules: Option<Vec<BadgeRule>>,
     ) -> bool {
         let r = &mut self.renderer;
         let mut changed = false;
         let mut set = |cond: bool| changed |= cond;
 
-        if let Some(v) = shape {
-            set(r.shape != v);
-            r.shape = v;
+        if let Some(v) = style {
+            set(r.style != v);
+            r.style = v;
         }
         if let Some(v) = badge_scale {
             set(r.badge_scale != v);
             r.badge_scale = v;
         }
-        if let Some(v) = width_mark {
-            set(r.width_mark != v);
-            r.width_mark = v;
-        }
-        if let Some(v) = width_mark_scale {
-            set(r.width_mark_scale != v);
-            r.width_mark_scale = v;
-        }
         if let Some(v) = badge_alpha {
             set(r.badge_alpha != v);
             r.badge_alpha = v;
         }
-        if let Some(v) = badge_colors {
-            set(r.badge_colors != v);
-            r.badge_colors = v;
-        }
-        if let Some(v) = width_mark_color {
-            set(r.width_mark_color != v);
-            r.width_mark_color = v;
+        if let Some(v) = rules {
+            set(r.rules != v);
+            r.rules = v;
         }
 
         if changed {
@@ -1219,39 +1269,16 @@ impl LangBarIconPublisher {
         self.renderer.size_marks
     }
 
-    /// 换角标编码方式。改这个不需要重新分发 DLL——这正是把渲染搬到服务端的收益。
-    pub fn set_shape(&mut self, shape: BadgeShape) {
-        if self.renderer.shape != shape {
-            self.renderer.shape = shape;
+    /// 换角标总开关档位。改这个不需要重新分发 DLL——这正是把渲染搬到服务端的收益。
+    pub fn set_style(&mut self, style: BadgeStyle) {
+        if self.renderer.style != style {
+            self.renderer.style = style;
             self.last = None;
         }
     }
 
-    pub fn shape(&self) -> BadgeShape {
-        self.renderer.shape
-    }
-
-    /// 角标彩色 / 与主字同色。关掉即退化为跟随明暗主题的单色行为。
-    ///
-    /// **标点角标与全角标记一起切**：分开切会出现"关了彩色但右上角还是绿的"，
-    /// 而这个开关在用户看来只有一个意思——图标上还有没有非主字色的东西。
-    pub fn set_colored(&mut self, on: bool) {
-        let next = on.then_some(IconRenderer::DEFAULT_BADGE_COLORS);
-        let next_mark = on.then_some(IconRenderer::DEFAULT_WIDTH_MARK_COLOR);
-        if self.renderer.badge_colors != next || self.renderer.width_mark_color != next_mark {
-            self.renderer.badge_colors = next;
-            self.renderer.width_mark_color = next_mark;
-            self.last = None;
-        }
-    }
-
-    pub fn colored(&self) -> bool {
-        self.renderer.badge_colors.is_some()
-    }
-
-    /// 全角标记（右上角三角）是否开启。
-    pub fn width_mark(&self) -> bool {
-        self.renderer.width_mark
+    pub fn style(&self) -> BadgeStyle {
+        self.renderer.style
     }
 
     /// 渲染并发布。返回新的发布序号；`None` 表示状态未变、已跳过。
@@ -1309,7 +1336,7 @@ mod tests {
     /// 少一个字节就会让后续所有变体错位。
     #[test]
     fn output_length_matches_every_declared_size() {
-        let r = IconRenderer::new(BadgeShape::CircleSquare).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         for &size in &wind_ipc::protocol::ICON_SIZES {
             let buf = r.render(size, false, &spec(PunctBadge::Chinese));
             assert_eq!(
@@ -1329,7 +1356,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn glyph_size_does_not_change_with_badge() {
-        let r = IconRenderer::new(BadgeShape::CircleSquare).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         const N: usize = 32;
 
         // 主字的垂直跨度。只扫左侧 55% 的列，避开右下角的角标。
@@ -1362,7 +1389,7 @@ mod tests {
     /// 也参与了重绘判据，唯独没进绘制——图标每次都重画，画出来的东西却一模一样。
     #[test]
     fn chinese_and_english_badges_differ() {
-        let r = IconRenderer::new(BadgeShape::CircleSquare).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         for &size in &wind_ipc::protocol::ICON_SIZES {
             let cn = r.render(size, false, &spec(PunctBadge::Chinese));
             let en = r.render(size, false, &spec(PunctBadge::English));
@@ -1370,28 +1397,46 @@ mod tests {
         }
     }
 
-    /// 各编码方式两两不同——否则「换一种形状」的开关是空的。
+    /// 只装一条规则的渲染器，用于把某一条的表现单独拎出来验。
     ///
-    /// 遍历 `ALL` 而非手写列表：新增形状时自动纳入，不会出现「加了一种但没人测」。
+    /// 出厂表有三条，直接用它验单条行为会把"另外两条恰好没命中"当成隐含前提——
+    /// 出厂表一改，断言的前提就没了，而测试本身看不出哪里错。
+    fn with_rule(rule: BadgeRule) -> IconRenderer {
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
+        r.rules = vec![rule];
+        r
+    }
+
+    /// 同一个状态配到不同角落，画出来必须不同——否则「位置」这个自由度是空的。
     #[test]
-    fn badge_shapes_produce_distinct_pixels() {
-        let shapes = BadgeShape::ALL;
+    fn corners_produce_distinct_pixels() {
         let mut rendered = Vec::new();
-        for sh in shapes {
-            let r = IconRenderer::new(sh).expect("renderer");
+        for c in Corner::ALL {
+            let r = with_rule(BadgeRule::solid(
+                BadgeState::PunctCn,
+                c,
+                IconRenderer::DEFAULT_PUNCT_CN_COLOR,
+                1.0,
+            ));
             rendered.push(r.render(24, false, &spec(PunctBadge::Chinese)));
         }
         for i in 0..rendered.len() {
             for j in (i + 1)..rendered.len() {
-                assert_ne!(rendered[i], rendered[j], "形状 {i} 与 {j} 渲染结果相同");
+                assert_ne!(
+                    rendered[i],
+                    rendered[j],
+                    "角落 {:?} 与 {:?} 渲染结果相同",
+                    Corner::ALL[i],
+                    Corner::ALL[j]
+                );
             }
         }
     }
 
-    /// 角标画在右下角象限，不能跑到主字中心去。
+    /// 出厂配置下角标画在右下角象限，不能跑到主字中心去。
     #[test]
     fn corner_badge_lands_in_bottom_right_quadrant() {
-        let r = IconRenderer::new(BadgeShape::CircleSquare).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         let n = 32usize;
         let none = r.render(32, false, &spec(PunctBadge::None));
         let cn = r.render(32, false, &spec(PunctBadge::Chinese));
@@ -1411,17 +1456,52 @@ mod tests {
         );
     }
 
-    /// 全角标记画在**右上角**象限。
+    /// 四个角落各自落在自己的象限里，且不越界到对角。
     ///
-    /// 这条同时钉住「两个状态分处两角」这个设计：全角与标点是正交的两件事，挤在同一角
+    /// 四个角共用一套判据、靠坐标折叠区分（见 `draw_corner_triangle`），折错的产物
+    /// 仍是个三角、只是位置或朝向不同——这种差异在 16px 的任务栏上几乎看不出来。
+    #[test]
+    fn every_corner_lands_in_its_own_quadrant() {
+        let n = 32usize;
+        for c in Corner::ALL {
+            let r = with_rule(BadgeRule::solid(
+                BadgeState::PunctCn,
+                c,
+                IconRenderer::DEFAULT_PUNCT_CN_COLOR,
+                1.0,
+            ));
+            let none = r.render(32, false, &spec(PunctBadge::None));
+            let cn = r.render(32, false, &spec(PunctBadge::Chinese));
+
+            // 直角顶点所在的那个角像素必有墨。
+            let (vx, vy) = match c {
+                Corner::TopLeft => (0, 0),
+                Corner::TopRight => (n - 1, 0),
+                Corner::BottomRight => (n - 1, n - 1),
+                Corner::BottomLeft => (0, n - 1),
+            };
+            assert!(
+                alpha_at(&cn, n, vx, vy) > alpha_at(&none, n, vx, vy),
+                "{c:?}：直角顶点（{vx},{vy}）处没有墨"
+            );
+
+            // 对角那个角像素一点都不能动。
+            let (ox, oy) = (n - 1 - vx, n - 1 - vy);
+            assert_eq!(
+                alpha_at(&cn, n, ox, oy),
+                alpha_at(&none, n, ox, oy),
+                "{c:?}：对角（{ox},{oy}）被画上了墨"
+            );
+        }
+    }
+
+    /// 全角规则出厂画在**右上角**象限。
+    ///
+    /// 这条同时钉住出厂那份分工：全角与标点是正交的两件事，出厂分处两角，挤在同一角
     /// 就得为四种搭配各设计一种编码，而 16px 上放不下那么多可辨的差异。
     #[test]
     fn full_width_mark_lands_in_top_right_quadrant() {
-        let mut r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
-        // ★ 必须显式开启：`width_mark` 默认关（产品决策，见该字段注释）。
-        // 本测试要验的是「开启后标记画在哪」，**不该依赖默认值**——默认值一翻转，
-        // 断言的前提就没了，而测试本身看不出哪里错。
-        r.width_mark = true;
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         let n = 32usize;
         let half = r.render(32, false, &IconSpec::default());
         let full = r.render(
@@ -1450,11 +1530,15 @@ mod tests {
     /// 半角在右上角**一点痕迹都不能留**。
     ///
     /// 半角是常态：给它也画个标记，图标上就常驻一个永不变化的点——既没告诉用户任何事，
-    /// 又占掉 16×16 里本就稀缺的一角。这条防的是将来有人"顺手给半角也画个空心的"。
+    /// 又占掉 16×16 里本就稀缺的一角。这条防的是将来有人"顺手给半角也加一条规则"。
     #[test]
     fn half_width_leaves_no_top_right_mark() {
-        let mut r = IconRenderer::new(BadgeShape::None).expect("renderer");
-        r.width_mark = true; // 默认关；本测试验的是开启后半角仍不留痕
+        let r = with_rule(BadgeRule::solid(
+            BadgeState::FullWidth,
+            Corner::TopRight,
+            IconRenderer::DEFAULT_FULL_WIDTH_COLOR,
+            1.0,
+        ));
         let plain = r.render(32, false, &IconSpec::default());
         let with_mark = IconSpec {
             full_width: true,
@@ -1473,8 +1557,7 @@ mod tests {
     /// 若哪天有人把两者合进同一层（比如共用一张蒙版或同一个开关），本条会失败。
     #[test]
     fn width_mark_and_punct_badge_are_independent() {
-        let mut r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
-        r.width_mark = true; // 默认关；两者正交只在标记启用时才谈得上
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         let mk = |punct, full_width| {
             r.render(
                 32,
@@ -1499,13 +1582,58 @@ mod tests {
         }
     }
 
-    /// 角标不透明度只作用于**角标**，主字与全角标记不受影响。
+    /// 同一个角落同时命中多条时，**只画最靠前的那一条**。
+    ///
+    /// 位置成为规则属性之后这是可达状态（如把全角也挪到右下），而 16px 上叠两个三角
+    /// 只会糊成一片。判据取「两条并存的结果 == 只留第一条的结果」：若第二条也画了，
+    /// 或者顺序反过来赢，逐字节都对不上。
+    #[test]
+    fn only_the_first_rule_wins_in_a_shared_corner() {
+        let both = IconSpec {
+            punct: PunctBadge::Chinese,
+            full_width: true,
+            ..IconSpec::default()
+        };
+        let punct = BadgeRule::solid(
+            BadgeState::PunctCn,
+            Corner::BottomRight,
+            IconRenderer::DEFAULT_PUNCT_CN_COLOR,
+            1.0,
+        );
+        // 刻意给第二条一个不同的颜色与尺寸：它若被画出来，像素上一定看得见。
+        let full = BadgeRule::solid(
+            BadgeState::FullWidth,
+            Corner::BottomRight,
+            IconRenderer::DEFAULT_FULL_WIDTH_COLOR,
+            0.6,
+        );
+
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
+        r.rules = vec![punct.clone(), full.clone()];
+        let punct_first = r.render(32, false, &both);
+        r.rules = vec![full.clone(), punct.clone()];
+        let full_first = r.render(32, false, &both);
+
+        assert_eq!(
+            punct_first,
+            with_rule(punct).render(32, false, &both),
+            "同角落并存时画出了第二条（或两条叠加）"
+        );
+        assert_eq!(
+            full_first,
+            with_rule(full).render(32, false, &both),
+            "调换顺序后赢的不是排在前面的那条——优先级没按表序来"
+        );
+        assert_ne!(punct_first, full_first, "两条规则本就该画出不同的东西");
+    }
+
+    /// 角标不透明度只作用于**角标**，主字不受影响。
     ///
     /// 透明度的用途是"别把字吃掉"（右下有笔画的「五」「双」会被实心色块切掉一角），
     /// 一旦它漏到主字上，整个图标会随之发灰——那是 `dimmed` 的语义，两者必须分开。
     #[test]
     fn badge_alpha_only_affects_the_badge() {
-        let mut r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         let n = 32usize;
         let spec_cn = IconSpec {
             punct: PunctBadge::Chinese,
@@ -1551,7 +1679,7 @@ mod tests {
             ..IconSpec::default()
         };
 
-        let mut r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         r.badge_alpha = 1.0;
         let opaque = r.render(32, false, &spec_cn);
         r.badge_alpha = 0.5;
@@ -1574,18 +1702,21 @@ mod tests {
         );
     }
 
-    /// 右上三角的**直角确实在右上角**，斜边朝图标中心。
+    /// 右上角标的**直角确实在右上角**，斜边朝图标中心。
     ///
-    /// 上一条只验证"右上象限有新像素"，方块、圆点、甚至画反了的三角都能通过。这里沿
-    /// 顶行取两点：贴着右边界的那点在直角顶点上必有墨；沿同一行往左走出斜边之外的那点
-    /// 必须与半角时**逐字节相同**（即标记没画到那儿去）。
-    ///
-    /// 之所以值得单独钉：两个角落共用一套判据、靠一次 y 翻转区分，翻错的产物仍是个
-    /// 三角，只是朝向不同——这种差异在 16px 的任务栏上几乎看不出来。
+    /// 上面那条象限测试只验证"右上象限有新像素"，方块、圆点、甚至画反了的三角都能通过。
+    /// 这里沿顶行取两点：贴着右边界的那点在直角顶点上必有墨；沿同一行往左走出斜边之外
+    /// 的那点必须与半角时**逐字节相同**（即标记没画到那儿去）。
     #[test]
-    fn width_mark_triangle_has_its_right_angle_at_top_right() {
-        let mut r = IconRenderer::new(BadgeShape::None).expect("renderer");
-        r.width_mark = true; // 默认关；本测试验的是开启后三角的直角朝向
+    fn top_right_triangle_has_its_right_angle_at_top_right() {
+        // 显式给倍率 1.0 而不是借出厂那条：下面「斜边之外」的取样点按 leg 算，
+        // 跟着出厂倍率走会让这条测试在有人调整出厂倍率时莫名其妙地失败。
+        let r = with_rule(BadgeRule::solid(
+            BadgeState::FullWidth,
+            Corner::TopRight,
+            IconRenderer::DEFAULT_FULL_WIDTH_COLOR,
+            1.0,
+        ));
         let n = 32usize;
         let half = r.render(32, false, &IconSpec::default());
         let full = r.render(
@@ -1603,9 +1734,9 @@ mod tests {
             "右上角顶点处没有墨——三角没画在直角该在的地方"
         );
 
-        // 顶行往左第 11 列（leg ≈ 32×0.28 ≈ 9），已在斜边之外。
+        // 顶行往左第 13 列（leg ≈ 32×0.34 ≈ 11），已在斜边之外。
         // 若这里也有墨，画出来的就是方块或朝向错误的三角。
-        let outside_x = n - 11;
+        let outside_x = n - 13;
         assert_eq!(
             alpha_at(&full, n, outside_x, 0),
             alpha_at(&half, n, outside_x, 0),
@@ -1613,35 +1744,56 @@ mod tests {
         );
     }
 
-    /// 全角标记有自己的颜色，且与标点角标那两色都不同。
+    /// 出厂三条规则的颜色两两不同。
     ///
-    /// 同色会让人以为两者有关联——"蓝的那个怎么又跑到右上角去了"。它们表达的是
-    /// 两个不相干的状态，颜色是这里唯一能承载"不相干"的通道（位置已被占用来区分角落）。
+    /// 同色会让人以为两者有关联——"蓝的那个怎么又跑到右上角去了"。它们表达的是互不
+    /// 相干的状态，而位置是用户可改的，**颜色是唯一还能承载"不相干"的通道**。
     #[test]
-    fn width_mark_has_its_own_color() {
-        let r = IconRenderer::new(BadgeShape::None).expect("renderer");
-        let mark = r.width_mark_color.expect("默认应有配色");
-        let (cn, en) = r.badge_colors.expect("默认应有配色");
-        assert_ne!(mark, cn, "全角标记与中文标点角标同色");
-        assert_ne!(mark, en, "全角标记与英文标点角标同色");
+    fn default_rules_use_three_distinct_colors() {
+        let rules = IconRenderer::default_rules();
+        for i in 0..rules.len() {
+            for j in (i + 1)..rules.len() {
+                assert_ne!(
+                    rules[i].color_light, rules[j].color_light,
+                    "出厂规则 {i} 与 {j} 的浅色配色相同"
+                );
+                assert_ne!(
+                    rules[i].color_dark, rules[j].color_dark,
+                    "出厂规则 {i} 与 {j} 的深色配色相同"
+                );
+            }
+        }
     }
 
-    /// 关掉彩色时，标点角标与全角标记**一起**退化为主字色。
+    /// 颜色配成 `auto`（渲染侧的 `None`）时，角标退化为主字色。
     ///
-    /// 分开切的后果是"关了彩色但右上角还是绿的"——而这个开关在用户看来只有一个意思：
-    /// 图标上还有没有非主字色的东西。
+    /// 这是配置里 `color_light = "auto"` 的落点，也是色值解析失败的降级目标——
+    /// 降级后整张图只该有主字那一种色相。
     #[test]
-    fn disabling_colors_clears_both_badge_and_width_mark() {
-        let mut p_renderer = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
-        // 直接验证渲染器字段的联动语义（发布器需要真实 SHM，构造不起来）。
-        p_renderer.badge_colors = None;
-        p_renderer.width_mark_color = None;
+    fn auto_color_falls_back_to_the_glyph_color() {
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
+        r.rules = vec![
+            BadgeRule {
+                state: BadgeState::PunctCn,
+                corner: Corner::BottomRight,
+                color_light: BadgeColor::AUTO,
+                color_dark: BadgeColor::AUTO,
+                scale: 1.0,
+            },
+            BadgeRule {
+                state: BadgeState::FullWidth,
+                corner: Corner::TopRight,
+                color_light: BadgeColor::AUTO,
+                color_dark: BadgeColor::AUTO,
+                scale: 1.0,
+            },
+        ];
         let spec_both = IconSpec {
             punct: PunctBadge::Chinese,
             full_width: true,
             ..IconSpec::default()
         };
-        let mono = p_renderer.render(32, false, &spec_both);
+        let mono = r.render(32, false, &spec_both);
 
         // 单色档下整张图只该有主字那一种色相：浅色主题前景为黑，故 RGB 三通道相等。
         for i in 0..(32 * 32) {
@@ -1651,20 +1803,28 @@ mod tests {
             let (b, g, r) = (mono[i * 4], mono[i * 4 + 1], mono[i * 4 + 2]);
             assert!(
                 b == g && g == r,
-                "关掉彩色后仍有带色相的像素（{b},{g},{r}）"
+                "auto 配色下仍有带色相的像素（{b},{g},{r}）"
             );
         }
     }
 
-    /// 全角标记倍率归零 = 彻底关掉，右上角必须与半角逐字节相同。
+    /// 条目倍率归零 = 这一条彻底不画，必须与状态未命中时逐字节相同。
     ///
-    /// 防的是一种很容易漏的半截短路：标记本身按 hw=0 画不出来，可挖空版的尺寸是
-    /// `hw + expand`，仍有 expand 那么大——于是主字右上角被挖掉一块、却没有任何
-    /// 东西补上去，看起来像字缺了一角，而"关掉"本该什么都不发生。
+    /// 防的是一种很容易漏的半截短路：形状本身按 leg=0 画不出来，可挖空版的尺寸是
+    /// `leg + gap`，仍有 gap 那么大——于是主字被挖掉一块、却没有任何东西补上去，
+    /// 看起来像字缺了一角，而"不画"本该什么都不发生。
+    ///
+    /// `badge_alpha = 1.0` 是**必需的**：挖空只在不透明档发生（见 `badge_alpha`），
+    /// 用默认的 0.88 跑这条，clear 恒为空，短路漏没漏都测不出来。
     #[test]
-    fn width_mark_scale_zero_carves_nothing() {
-        let mut r = IconRenderer::new(BadgeShape::None).expect("renderer");
-        r.width_mark_scale = 0.0;
+    fn rule_scale_zero_carves_nothing() {
+        let mut r = with_rule(BadgeRule::solid(
+            BadgeState::FullWidth,
+            Corner::TopRight,
+            IconRenderer::DEFAULT_FULL_WIDTH_COLOR,
+            0.0,
+        ));
+        r.badge_alpha = 1.0;
         let full = r.render(
             32,
             false,
@@ -1677,10 +1837,112 @@ mod tests {
         assert_eq!(full, half, "倍率归零时仍在主字上挖了洞");
     }
 
-    /// 大小倍率确实改变角标尺寸，且与不透明度是两个独立的自由度。
+    /// 条目自带的不透明度覆盖全局值。
+    ///
+    /// 这是 `#RRGGBBAA` 那两位的落点：色相相同、只有末两位不同的两条规则，
+    /// 画出来必须不一样；而**不写**末两位的那条要与全局值画出的结果逐字节相同——
+    /// 后半条防的是「覆盖字段忘了回落，于是没写就当成 0（全透明）」。
+    #[test]
+    fn per_rule_alpha_overrides_the_global_default() {
+        let spec_cn = spec(PunctBadge::Chinese);
+        let mk = |global: f32, per_rule: Option<f32>| {
+            let color = BadgeColor {
+                rgb: Some(IconRenderer::DEFAULT_PUNCT_CN_COLOR),
+                alpha: per_rule,
+            };
+            let mut r = with_rule(BadgeRule {
+                state: BadgeState::PunctCn,
+                corner: Corner::BottomRight,
+                color_light: color,
+                color_dark: color,
+                scale: 1.0,
+            });
+            r.badge_alpha = global;
+            r.render(32, false, &spec_cn)
+        };
+        assert_ne!(mk(0.88, Some(0.4)), mk(0.88, None), "条目不透明度没有生效");
+        assert_eq!(
+            mk(0.88, None),
+            mk(0.88, Some(0.88)),
+            "不指定条目不透明度时应等同于全局值"
+        );
+        assert_eq!(
+            mk(0.5, Some(0.4)),
+            mk(0.88, Some(0.4)),
+            "条目指定了不透明度，全局值不该再有影响"
+        );
+    }
+
+    /// 挖空档位**逐层**生效：同一张图里可以一条实心挖空、另一条半遮不挖。
+    ///
+    /// 条目能各自指定不透明度之后，这条判据就必须从全局降到层上。若还照旧用全局值判，
+    /// 症状是「把某一条调到 FF，它周围的主字没被挖开」——而挖空正是它与主字分离的
+    /// 全部手段，看起来就是那一条糊在字上。
+    #[cfg(windows)]
+    #[test]
+    fn carving_is_decided_per_layer() {
+        let n = 32usize;
+        // 「五」右下有横笔，右上也有竖笔，两个角都压得住。
+        let both = IconSpec {
+            label: "五".to_string(),
+            punct: PunctBadge::Chinese,
+            full_width: true,
+            ..IconSpec::default()
+        };
+        let rule = |state, corner, alpha| {
+            let color = BadgeColor {
+                rgb: Some(IconRenderer::DEFAULT_PUNCT_CN_COLOR),
+                alpha: Some(alpha),
+            };
+            BadgeRule {
+                state,
+                corner,
+                color_light: color,
+                color_dark: color,
+                scale: 1.0,
+            }
+        };
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
+        // 右下实心（该挖空）、右上半遮（不该挖空）。
+        r.rules = vec![
+            rule(BadgeState::PunctCn, Corner::BottomRight, 1.0),
+            rule(BadgeState::FullWidth, Corner::TopRight, 0.5),
+        ];
+        let mixed = r.render(32, false, &both);
+        // 对照组：两条都半遮，谁都不挖。
+        r.rules = vec![
+            rule(BadgeState::PunctCn, Corner::BottomRight, 0.5),
+            rule(BadgeState::FullWidth, Corner::TopRight, 0.5),
+        ];
+        let none_carved = r.render(32, false, &both);
+
+        // 右下：实心那版在角标外围挖掉了一圈主字 ⇒ 存在 alpha 更低的像素。
+        let mut carved = 0;
+        for y in (n / 2)..n {
+            for x in (n / 2)..n {
+                if alpha_at(&mixed, n, x, y) < alpha_at(&none_carved, n, x, y) {
+                    carved += 1;
+                }
+            }
+        }
+        assert!(carved > 0, "不透明的那一层没有挖空——档位判据还停在全局值上");
+
+        // 右上：两版都是半遮，主字一个像素都不该被动。
+        for y in 0..(n / 2) {
+            for x in (n / 2)..n {
+                assert_eq!(
+                    alpha_at(&mixed, n, x, y),
+                    alpha_at(&none_carved, n, x, y),
+                    "半遮的那一层挖了主字（{x},{y}）"
+                );
+            }
+        }
+    }
+
+    /// 全局倍率确实改变角标尺寸。
     #[test]
     fn badge_scale_changes_badge_size() {
-        let mut r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         let spec_cn = IconSpec {
             punct: PunctBadge::Chinese,
             ..IconSpec::default()
@@ -1689,14 +1951,40 @@ mod tests {
         let base = r.render(32, false, &spec_cn);
         r.badge_scale = 0.6;
         let small = r.render(32, false, &spec_cn);
-        assert_ne!(base, small, "改了大小倍率但渲染结果相同");
+        assert_ne!(base, small, "改了全局大小倍率但渲染结果相同");
+    }
+
+    /// 条目倍率与全局倍率**相乘**，两级各自有效。
+    ///
+    /// 第三条断言钉住的是「相乘」本身：若哪天有人把条目倍率改成覆盖全局，
+    /// 同一乘积的两条路径就会画出不同的东西。
+    #[test]
+    fn rule_scale_multiplies_the_global_scale() {
+        let spec_cn = spec(PunctBadge::Chinese);
+        let mk = |global: f32, per_rule: f32| {
+            let mut r = with_rule(BadgeRule::solid(
+                BadgeState::PunctCn,
+                Corner::BottomRight,
+                IconRenderer::DEFAULT_PUNCT_CN_COLOR,
+                per_rule,
+            ));
+            r.badge_scale = global;
+            r.render(32, false, &spec_cn)
+        };
+        assert_ne!(mk(1.0, 1.0), mk(1.0, 0.6), "条目倍率没有生效");
+        assert_ne!(mk(1.0, 1.0), mk(0.5, 1.0), "全局倍率没有生效");
+        assert_eq!(
+            mk(1.0, 0.5),
+            mk(0.5, 1.0),
+            "两级倍率不是相乘关系（同一乘积画出了不同的东西）"
+        );
     }
 
     /// 变淡只压低 alpha，不改变颜色通道——旧实现里变淡与"显英文"是两种不同的表达，
     /// 混在一起会让「输入法被禁用」和「当前位置不可输入」看起来一样。
     #[test]
     fn dimmed_only_lowers_alpha() {
-        let r = IconRenderer::new(BadgeShape::CircleSquare).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         let normal = r.render(24, false, &spec(PunctBadge::Chinese));
         let dim = r.render(
             24,
@@ -1721,13 +2009,11 @@ mod tests {
     /// 这对 32bpp alpha 图标无影响（系统按 alpha 取舍，RGB 被忽略），
     /// 但断言若不加这道过滤就会把"透明处没填前景色"误报成主题失效。
     ///
-    /// **必须关掉配色**：彩色角标按设计就不跟随主题（见 `badge_colors`），
-    /// 开着配色时角标像素两个主题下相同，本断言测的是主字那条单色通路。
-    /// 角标不随主题变化本身另有 [`badge_colors_are_theme_independent`] 把关。
+    /// **必须清空规则表**：角标有自己的颜色，本断言测的是主字那条单色通路。
     #[test]
     fn theme_flips_foreground_channels() {
-        let mut r = IconRenderer::new(BadgeShape::CircleSquare).expect("renderer");
-        r.badge_colors = None;
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
+        r.rules = Vec::new();
         let light = r.render(24, false, &spec(PunctBadge::Chinese));
         let dark = r.render(24, true, &spec(PunctBadge::Chinese));
         let mut inked = 0;
@@ -1744,39 +2030,48 @@ mod tests {
         assert!(inked > 0, "整张图都是透明的，断言等于没跑");
     }
 
-    /// 外圈方案不得侵占主字：它的全部价值就在于"一个像素都不用主字让"。
+    /// 亮暗配了不同的色时，两个主题下角标像素确实不同。
     ///
-    /// 若哪天给它也加上挖空，主字外缘会被削掉一整圈、凭空变小，而这在小图标上
-    /// 很难一眼看出是"被挖了"还是"字本来就小"。
-    #[cfg(windows)]
+    /// 这是「亮暗独立配色」这个自由度的存在性证明：渲染本就按明暗两档各出一张位图，
+    /// 若取色时忘了看 `dark_theme`，两档会画出一模一样的角标而没有任何报错。
     #[test]
-    fn outer_ring_does_not_carve_into_glyph() {
-        let r = IconRenderer::new(BadgeShape::OuterRing).expect("renderer");
-        const N: usize = 32;
-        let plain = r.render(N as u16, false, &spec(PunctBadge::None));
-        let ringed = r.render(N as u16, false, &spec(PunctBadge::Chinese));
-
-        // 只看内部区域（去掉最外 3 圈，那是外圈自己的地盘），主字应逐像素不变
-        for y in 3..(N - 3) {
-            for x in 3..(N - 3) {
-                let i = (y * N + x) * 4 + 3;
-                assert_eq!(plain[i], ringed[i], "外圈把主字内部像素改了 @({x},{y})");
-            }
-        }
-    }
-
-    /// 配色开启时角标不随主题变化——这是配色方案的**已知代价**，不是缺陷。
-    ///
-    /// 写成测试而不只写注释：一旦哪天有人"顺手"把角标也接上主题前景色，
-    /// 选色时"在浅底与深底上都够醒目"这个前提就被悄悄换掉了，而画面上不易察觉。
-    #[test]
-    fn badge_colors_are_theme_independent() {
-        let r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
-        // 无角标那版只用来划出「角标独占像素」，覆盖度与主题无关，取一份即可
+    fn per_theme_colors_are_honored() {
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
+        r.rules = vec![BadgeRule {
+            state: BadgeState::PunctCn,
+            corner: Corner::BottomRight,
+            color_light: BadgeColor::rgb([0x00, 0x00, 0xFF]), // BGR：红
+            color_dark: BadgeColor::rgb([0x00, 0xFF, 0x00]),  // BGR：绿
+            scale: 1.0,
+        }];
         let none_l = r.render(24, false, &spec(PunctBadge::None));
         let cn_l = r.render(24, false, &spec(PunctBadge::Chinese));
         let cn_d = r.render(24, true, &spec(PunctBadge::Chinese));
-        // 只看「加了角标才出现覆盖」的像素，绕开主字（主字是跟随主题的单色）
+
+        // 只看「加了角标才出现覆盖」的像素，绕开主字（主字本就跟随主题）。
+        let mut differed = 0;
+        for i in (0..cn_l.len()).step_by(4) {
+            if cn_l[i + 3] == 0 || none_l[i + 3] > 0 {
+                continue;
+            }
+            if cn_l[i..i + 3] != cn_d[i..i + 3] {
+                differed += 1;
+            }
+        }
+        assert!(differed > 0, "亮暗配了不同的色，画出来却一样——取色没看主题");
+    }
+
+    /// 亮暗配成同一个色时，角标在两个主题下逐像素相同（出厂三条就是这个形态）。
+    ///
+    /// 与上一条互为反向：那条管「配了不同色要真的不同」，这条管「配了同色不许自己
+    /// 跟着主题漂」。少了这一侧，有人把角标顺手接上主字前景色也不会被发现，而选色时
+    /// "在浅底与深底上都够醒目"这个前提就被悄悄换掉了。
+    #[test]
+    fn same_color_in_both_themes_is_theme_independent() {
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
+        let none_l = r.render(24, false, &spec(PunctBadge::None));
+        let cn_l = r.render(24, false, &spec(PunctBadge::Chinese));
+        let cn_d = r.render(24, true, &spec(PunctBadge::Chinese));
         let mut checked = 0;
         for i in (0..cn_l.len()).step_by(4) {
             if cn_l[i + 3] == 0 || none_l[i + 3] > 0 {
@@ -1786,7 +2081,7 @@ mod tests {
             assert_eq!(
                 cn_l[i..i + 3],
                 cn_d[i..i + 3],
-                "角标颜色随主题变了——配色的前提是两个主题共用一组颜色"
+                "角标颜色随主题变了——出厂配色的前提是两个主题共用一组颜色"
             );
         }
         assert!(checked > 0, "没有找到角标独占像素，断言等于没跑");
@@ -1802,7 +2097,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn glyph_ink_is_centered() {
-        let r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         for label in ["中", "英", "拼", "五"] {
             for &size in &wind_ipc::protocol::ICON_SIZES {
                 let s = size as f32;
@@ -1882,7 +2177,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn labels_that_fit_are_not_shrunk() {
-        let r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         for label in ["A", "英", "五"] {
             for &size in &wind_ipc::protocol::ICON_SIZES {
                 let mask = r.render_glyph_mask(
@@ -1930,7 +2225,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn latin_label_is_not_shrunk_needlessly() {
-        let r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         let mask = r.render_glyph_mask(
             16,
             &IconSpec {
@@ -1963,7 +2258,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn two_char_label_fits_canvas() {
-        let r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         for label in ["En", "Ｅｎ", "符号"] {
             for &size in &wind_ipc::protocol::ICON_SIZES {
                 let mask = r.render_glyph_mask(
@@ -1986,65 +2281,94 @@ mod tests {
         }
     }
 
-    /// 关掉角标后必须与「本来就没有角标」逐字节相同。
+    /// 关掉总开关后必须与「本来就没有角标」逐字节相同。
     ///
-    /// 这是「关」这一档的全部承诺：不是画一个更小的角标，而是一点痕迹都不留。
+    /// 这是「不显示」这一档的全部承诺：不是画一个更小的角标，而是一点痕迹都不留。
     /// 若哪天挖空蒙版忘了跟着短路，主字上会留下一圈没人填的凹口——那种缺陷肉眼
     /// 只会觉得「字有点怪」，很难联想到是关掉的那条路径没走干净。
+    ///
+    /// ⚠ 关掉的是**总开关**而非清空规则表：规则表还在，这条才真的在验短路。
     #[test]
-    fn shape_none_leaves_no_trace() {
-        let off = IconRenderer::new(BadgeShape::None).expect("renderer");
-        let on = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
+    fn style_none_leaves_no_trace() {
+        let off = IconRenderer::new(BadgeStyle::None).expect("renderer");
+        let on = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         for &size in &wind_ipc::protocol::ICON_SIZES {
             let baseline = on.render(size, false, &spec(PunctBadge::None));
             for p in [PunctBadge::Chinese, PunctBadge::English] {
                 assert_eq!(
                     off.render(size, false, &spec(p)),
                     baseline,
-                    "{size}px / {p:?}：关掉角标后仍与无角标基线不同"
+                    "{size}px / {p:?}：关掉总开关后仍与无角标基线不同"
                 );
             }
         }
     }
 
-    /// 落盘 id 必须唯一且可往返——它写进 state.toml，活得比进程久。
+    /// 三个落盘 id 都必须唯一且可往返——它们写进 `config.toml`，活得比进程久。
     ///
-    /// 未知 id 回落默认这条同样重要：state.toml 是用户可编辑的文本文件，
-    /// 手写错一个字母不该让图标消失或让服务崩掉。
+    /// 未知 id 的处置**按类型不同**，这条同时钉住那个差别：总开关与角落有合理默认值，
+    /// 回落即可（配置是手写的，写错一个字母不该让图标消失）；而状态没有默认值，
+    /// 只能返回 `None` 让调用方丢掉整条规则——回落到任意一个状态都是替用户瞎猜。
     #[test]
-    fn badge_shape_id_roundtrips() {
+    fn badge_ids_roundtrip() {
         let mut seen = std::collections::HashSet::new();
-        for &sh in &BadgeShape::ALL {
-            assert!(seen.insert(sh.as_id()), "{sh:?} 的 id 与别的形状重复");
-            assert_eq!(BadgeShape::from_id(sh.as_id()), sh);
+        for &st in &BadgeStyle::ALL {
+            assert!(seen.insert(st.as_id()), "{st:?} 的 id 与别的档位重复");
+            assert_eq!(BadgeStyle::from_id(st.as_id()), st);
         }
-        for bogus in ["", "triangle", "CornerTriangle", "0"] {
+        for bogus in ["", "corner_triangle", "Corner", "0"] {
             assert_eq!(
-                BadgeShape::from_id(bogus),
-                BadgeShape::default(),
-                "未知 id {bogus:?} 未回落到默认"
+                BadgeStyle::from_id(bogus),
+                BadgeStyle::default(),
+                "未知总开关 id {bogus:?} 未回落到默认"
+            );
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for &c in &Corner::ALL {
+            assert!(seen.insert(c.as_id()), "{c:?} 的 id 与别的角落重复");
+            assert_eq!(Corner::from_id(c.as_id()), c);
+        }
+        for bogus in ["", "bottomright", "BottomRight", "center"] {
+            assert_eq!(
+                Corner::from_id(bogus),
+                Corner::BottomRight,
+                "未知角落 id {bogus:?} 未回落到右下角"
+            );
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for &st in &BadgeState::ALL {
+            assert!(seen.insert(st.as_id()), "{st:?} 的 id 与别的状态重复");
+            assert_eq!(BadgeState::from_id(st.as_id()), Some(st));
+        }
+        for bogus in ["", "punct", "PunctCn", "half_width"] {
+            assert_eq!(
+                BadgeState::from_id(bogus),
+                None,
+                "未知状态 id {bogus:?} 应返回 None（整条规则丢弃），而不是回落到某个状态"
             );
         }
     }
 
-    /// 形状下标往返必须自洽——菜单命令只传一个 u8，映射错位就是「点了另一个形状」。
+    /// 总开关下标往返必须自洽——菜单命令只传一个 u8，映射错位就是「点了另一档」。
     #[test]
-    fn badge_shape_index_roundtrips() {
-        for (i, sh) in BadgeShape::ALL.iter().enumerate() {
-            assert_eq!(sh.index() as usize, i, "{sh:?} 的下标与 ALL 中的位置不符");
-            assert_eq!(BadgeShape::from_index(i as u8), *sh);
+    fn badge_style_index_roundtrips() {
+        for (i, st) in BadgeStyle::ALL.iter().enumerate() {
+            assert_eq!(st.index() as usize, i, "{st:?} 的下标与 ALL 中的位置不符");
+            assert_eq!(BadgeStyle::from_index(i as u8), *st);
         }
         // 越界回落到默认，不 panic：id 由另一个进程回传，不能假定合法
         assert_eq!(
-            BadgeShape::from_index(BadgeShape::ALL.len() as u8),
-            BadgeShape::default()
+            BadgeStyle::from_index(BadgeStyle::ALL.len() as u8),
+            BadgeStyle::default()
         );
     }
 
     /// 演示动画：相位不同必须画出不同像素，否则"动画"是静止的。
     #[test]
     fn demo_animation_frames_differ() {
-        let mut r = IconRenderer::new(BadgeShape::CircleSquare).expect("renderer");
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         r.demo_animation = true;
         let at = |frame: u32| {
             r.render(
@@ -2070,7 +2394,7 @@ mod tests {
     /// 关闭演示动画时，相位不得影响画面——否则状态推送会被无谓的重发刷屏。
     #[test]
     fn frame_is_ignored_when_demo_off() {
-        let r = IconRenderer::new(BadgeShape::CircleSquare).expect("renderer");
+        let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         let a = r.render(24, false, &spec(PunctBadge::Chinese));
         let b = r.render(
             24,
@@ -2083,10 +2407,10 @@ mod tests {
         assert_eq!(a, b, "演示动画关闭时相位仍改变了画面");
     }
 
-    /// 手动预览工具：把各形状渲染成对比图，供肉眼比选后再决定部署哪种。
+    /// 手动预览工具：把四个角落渲染成对比图，供肉眼比选后再决定默认配到哪一角。
     ///
-    /// 部署一次要 UAC 提权并重启输入法，逐个形状试成本太高；而这些参数
-    /// （形状、配色、间隙、字重）恰恰只能靠看。默认 `#[ignore]`，不进常规测试。
+    /// 部署一次要 UAC 提权并重启输入法，逐个试成本太高；而这些参数（位置、配色、
+    /// 间隙、字重）恰恰只能靠看。默认 `#[ignore]`，不进常规测试。
     ///
     /// ```text
     /// cargo test -p wind-ui --lib dump_preview -- --ignored --nocapture
@@ -2106,16 +2430,13 @@ mod tests {
         const ZOOM: u32 = 9;
         const PAD: u32 = 10;
         let sizes: [u16; 2] = [16, 24];
-        let shapes = [
-            ("1_corner_triangle", BadgeShape::CornerTriangle),
-            ("2_outer_ring", BadgeShape::OuterRing),
-            ("3_circle_square", BadgeShape::CircleSquare),
-            ("4_ring_dot", BadgeShape::RingDot),
-            ("5_bottom_bar", BadgeShape::BottomBar),
-        ];
+        let corners = Corner::ALL;
         // 取实际出货的那组配色，别在预览里另写一份——预览与真机不同色时，
         // 肉眼比选出来的结论根本不适用于装机后的样子。
-        let colors = IconRenderer::DEFAULT_BADGE_COLORS;
+        let (cn_color, en_color) = (
+            IconRenderer::DEFAULT_PUNCT_CN_COLOR,
+            IconRenderer::DEFAULT_PUNCT_EN_COLOR,
+        );
 
         // 把一个变体贴到画布上（BGRA→RGBA，最近邻放大），底色模拟任务栏
         let blit = |img: &mut RgbaImage, px: &[u8], n: u32, ox: u32, oy: u32, dark: bool| {
@@ -2130,7 +2451,7 @@ mod tests {
             }
         };
 
-        // ── 图一：形状对比。每行一种形状；列 = {16,24}px × {中,英} × {浅,深} ──
+        // ── 图一：位置对比。每行一个角落；列 = {16,24}px × {中,英} × {浅,深} ──
         let row_h = 24 * ZOOM + PAD;
         let width = PAD
             + sizes
@@ -2139,12 +2460,16 @@ mod tests {
                 .sum::<u32>();
         let mut img = RgbaImage::from_pixel(
             width,
-            PAD + shapes.len() as u32 * row_h,
+            PAD + corners.len() as u32 * row_h,
             Rgba([255, 255, 255, 255]),
         );
-        for (ri, (name, shape)) in shapes.iter().enumerate() {
-            let mut r = IconRenderer::new(*shape).expect("renderer");
-            r.badge_colors = Some(colors);
+        for (ri, corner) in corners.iter().enumerate() {
+            let name = corner.as_id();
+            let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
+            r.rules = vec![
+                BadgeRule::solid(BadgeState::PunctCn, *corner, cn_color, 1.0),
+                BadgeRule::solid(BadgeState::PunctEn, *corner, en_color, 1.0),
+            ];
             let y = PAD + ri as u32 * row_h;
             let mut x = PAD;
             for &size in &sizes {
@@ -2164,14 +2489,13 @@ mod tests {
             }
             println!("row {ri}: {name}");
         }
-        let p = dir.join("icon_shapes.png");
-        img.save(&p).expect("保存 icon_shapes.png");
+        let p = dir.join("icon_corners.png");
+        img.save(&p).expect("保存 icon_corners.png");
         println!("wrote {}", p.display());
         println!("cols: [16px] 中/浅 英/浅 中/深 英/深 | [24px] 同上");
 
         // ── 图二：演示动画一圈的帧序列 ──
-        let mut r = IconRenderer::new(BadgeShape::CornerTriangle).expect("renderer");
-        r.badge_colors = Some(colors);
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         r.demo_animation = true;
         let frames = 8u32;
         let step = IconRenderer::DEMO_FRAMES_PER_CYCLE / frames;
@@ -2209,7 +2533,7 @@ mod tests {
     /// 尺寸档标记开启时，各档左上角画的点数不同——这是真机验证"系统用了哪档"的依据。
     #[test]
     fn size_marks_differ_per_size_tier() {
-        let mut r = IconRenderer::new(BadgeShape::CircleSquare).expect("renderer");
+        let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
         r.size_marks = true;
         let a = r.render(16, false, &spec(PunctBadge::None));
         let b = r.render(16, false, &spec(PunctBadge::None));

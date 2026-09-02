@@ -473,27 +473,14 @@ static REGISTRY: &[ConfigField] = &[
     // 却会把空数组冻结成 L2 值。已在豁免名单登记，理由同 ui.comment_dicts。
     f("ui.toolbar.buttons", StructList),
     // -- ui.langbar（Windows 任务栏输入指示器图标）--
-    // punct_badge 用 Enum 而非 Str：写错一个词只会静默回落默认形状，而"配了没反应"
+    // badge 用 Enum 而非 Str：写错一个词只会静默回落「不显示」，而"配了没反应"
     // 是最难自查的一类；登记成员后 `config set` 与设置页都能先一步挡下。
-    f(
-        "ui.langbar.punct_badge",
-        Enum(&[
-            "none",
-            "corner_triangle",
-            "outer_ring",
-            "bottom_bar",
-            "circle_square",
-            "ring_dot",
-        ]),
-    ),
-    f("ui.langbar.punct_badge_scale", Float),
-    f("ui.langbar.full_width_mark", Bool),
-    f("ui.langbar.full_width_mark_scale", Float),
+    f("ui.langbar.badge", Enum(&["none", "corner"])),
+    f("ui.langbar.badge_scale", Float),
     f("ui.langbar.badge_alpha", Float),
-    f("ui.langbar.colored", Bool),
-    f("ui.langbar.punct_color_cn", Str),
-    f("ui.langbar.punct_color_en", Str),
-    f("ui.langbar.full_width_color", Str),
+    // 角标规则表（顺序即优先级）。条目内的字段（state / corner / color_light …）
+    // 是 StructList 条目的属性，不在本注册表单独登记，同 schema.mix_modes。
+    f("ui.langbar.badges", StructList),
     // -- ui.labels（非中文态的图标主字；中文态在方案文件的 [schema] icon_label）--
     // 类型是 Str 而非 Enum：值域是"任意 ≤2 字符"，不是一组枚举值。上限由
     // `wind_config::schema::icon_label_trunc` 在读取侧统一截断，不在这里表达——

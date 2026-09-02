@@ -4143,6 +4143,17 @@ fn default_toolbar_auto_hide_delay() -> u32 {
 
 /// 语言栏图标（Windows 任务栏输入指示器）的呈现参数（`[ui.langbar]`）。
 ///
+/// # 模型：总开关 + 全局参数 + 有序规则表
+///
+/// 角标只有一种形状（角落三角），可配的是**什么状态、画在哪个角、什么颜色、多大**。
+/// 这几个自由度组合起来必须是一张表，不能摊成扁平键：三个状态 × 位置 × 亮暗两色 ×
+/// 尺寸，扁平化要铺十几个键，且状态集合一变就得整段重排；而表的形态下加一条规则
+/// 只是多一个数组元素，读写两侧都不用动。
+///
+/// **顺序即优先级**：位置进了规则之后，两条规则可以落在同一个角落（如把「全角」也
+/// 配到右下），而 16px 上叠两个三角只会糊成一片——故一个角落只画最靠前命中的那一条。
+/// 与 `ui.toolbar.items`「数组顺序即渲染顺序」同一条规矩。
+///
 /// # 默认值在这里也写了一份，靠测试防漂移
 ///
 /// 渲染侧（`wind_ui::langbar_icon::IconRenderer`）本来就有一套默认常量，理想情况下
@@ -4152,84 +4163,136 @@ fn default_toolbar_auto_hide_delay() -> u32 {
 ///
 /// 于是两处各存一份，用 `wind-coordinator` 的 `langbar_config_defaults_match_renderer`
 /// 把它们钉在一起——那个 crate 同时依赖两边，是唯一能做这件比对的地方。漂移的症状
-/// （「装设置页看到的默认值与实际渲染不一致」）不会自己暴露，必须靠测试拦。
+/// （「设置页看到的默认值与实际渲染不一致」）不会自己暴露，必须靠测试拦。
 ///
 /// 颜色只存字符串，解析与回退发生在协调器侧（同样是因为不能依赖渲染侧的类型）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LangBarConfig {
-    /// 标点角标形状。取值见 `wind_ui::langbar_icon::BadgeShape::as_id()`：
-    /// `none`（默认，不显示）/ `corner_triangle` / `outer_ring` / `bottom_bar` /
-    /// `circle_square` / `ring_dot`。
+    /// 角标总开关。取值见 `wind_ui::langbar_icon::BadgeStyle::as_id()`：
+    /// `none`（默认，不显示）/ `corner`（角标）。
     ///
-    /// 设置页只列前两项；其余靠改本文件——它们要么已被真机否决（圆方、环点），
-    /// 要么仍待评估（外圈、底部横条），放进设置页等于把已知的坏选择交给用户。
-    /// 无法识别的取值一律回落默认，不报错：配置文件是手写的，写错一个词不该让图标消失。
-    #[serde(default = "default_langbar_punct_badge")]
-    pub punct_badge: String,
-    /// 标点角标大小倍率（1.0 = 形状自带的基准尺寸）。
+    /// 关掉即**全部规则都不画**，不必逐条去关——这正是有了规则表之后总开关仍要存在的
+    /// 理由。无法识别的取值一律回落 `none`，不报错：配置文件是手写的，写错一个词该
+    /// 退回「与装之前一致」，而不是画出个莫名其妙的东西。
+    ///
+    /// ⚠ 上一版的形状 id（`corner_triangle` / `outer_ring` …）**不做兼容别名**：
+    /// 那一版是标着实验性发出去的，让用户重新配一次即可。
+    #[serde(default = "default_langbar_badge")]
+    pub badge: String,
+    /// 角标全局大小倍率（1.0 = 基准尺寸）。单条可用 `badges[].scale` 再乘一次。
     #[serde(default = "default_one")]
-    pub punct_badge_scale: f32,
-    /// 全角标记（右上角三角）总开关。默认关。
-    #[serde(default)]
-    pub full_width_mark: bool,
-    /// 全角标记大小倍率。
-    #[serde(default = "default_one")]
-    pub full_width_mark_scale: f32,
-    /// 两个标记**共用**的不透明度（0~1）。
+    pub badge_scale: f32,
+    /// 角标不透明度的**全局默认**（0~1）。单条可用色值末两位（`#RRGGBBAA`）覆盖。
     ///
     /// 它同时是档位开关：`= 1.0` 走「实心 + 挖空」（标记周围切掉一圈主字），
     /// `< 1.0` 走「半透明 + 保留主字」（笔画从标记里透出来）。两者是互斥的分离手段，
-    /// 详见 `wind_ui::langbar_icon::IconRenderer::badge_alpha`。
+    /// 详见 `wind_ui::langbar_icon::IconRenderer::badge_alpha`。该档位**逐条**判定，
+    /// 用的是这一条的有效不透明度。
+    ///
+    /// 出厂让全部角标共用一个值是审美上的统一（一个半遮一个实心会让人以为二者
+    /// 层级不同），不是技术限制。
     #[serde(default = "default_langbar_badge_alpha")]
     pub badge_alpha: f32,
-    /// 标记是否用配色。`false` = 一律与主字同色并跟随明暗主题。
+    /// 角标规则表，顺序即优先级（见本结构体的文档）。
+    #[serde(default = "default_langbar_badges")]
+    pub badges: Vec<LangBarBadge>,
+}
+
+/// 一条角标规则（`[[ui.langbar.badges]]`）：某状态成立时，在某角落用某色画一个角标。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LangBarBadge {
+    /// 这条规则生效与否。
     ///
-    /// 一个开关同时管两个标记：分开切会出现「关了彩色但右上角还是玫红」，
-    /// 而这个开关在用户看来只有一个意思。
+    /// **这是「某个状态不想被打扰」的落点**——例如中文标点是常态，很多人只想在切到
+    /// 英文标点时被提醒一下，把中文标点那条关掉即可。做成开关而不是让用户删掉整条：
+    /// 关掉保留颜色与位置，想回来时勾上就行，反复比选时差别很大。
     #[serde(default = "default_true")]
-    pub colored: bool,
-    /// 中文标点角标色，`#RRGGBB`。解析失败回落内置默认并记一条警告。
-    #[serde(default = "default_langbar_color_cn")]
-    pub punct_color_cn: String,
-    /// 英文标点角标色，`#RRGGBB`。
-    #[serde(default = "default_langbar_color_en")]
-    pub punct_color_en: String,
-    /// 全角标记色，`#RRGGBB`。
-    #[serde(default = "default_langbar_color_fw")]
-    pub full_width_color: String,
+    pub enabled: bool,
+    /// 什么时候画。取值见 `wind_ui::langbar_icon::BadgeState::as_id()`：
+    /// `punct_cn`（中文标点）/ `punct_en`（英文标点）/ `full_width`（全角）。
+    ///
+    /// ⚠ 与本段其余取值不同，**无法识别的状态会让整条规则被丢弃**（并记一条警告）。
+    /// 状态没有合理的默认值：回落到任意一个都是替用户瞎猜，画出来的东西他对不上因果。
+    #[serde(default)]
+    pub state: String,
+    /// 画在哪个角。取值见 `wind_ui::langbar_icon::Corner::as_id()`：
+    /// `top_left` / `top_right` / `bottom_right` / `bottom_left`。未知回落 `bottom_right`。
+    #[serde(default = "default_langbar_corner")]
+    pub corner: String,
+    /// 浅色任务栏上的颜色：`#RRGGBB`、`#RRGGBBAA`，或 `auto`（与主字同色）。
+    ///
+    /// **末两位 `AA` 是这一条自己的不透明度**（网页那套写法），不写就用全局
+    /// `badge_alpha`。于是「全局 + 条目覆盖」不必再开一个字段：色值本身就区分得开
+    /// 「没说」（6 位）与「这条自己说了算」（8 位）。
+    ///
+    /// ⚠ `AA` 填 `FF` 不是「最不透明」那么简单——它会把这一条切到**挖空档**
+    /// （角标实心 + 周围切掉一圈主字），与半遮是两种不同的画法，见
+    /// `wind_ui::langbar_icon::IconRenderer::badge_alpha`。
+    ///
+    /// 亮暗分两个字段而不是一个：渲染本来就按「尺寸档 × 明暗两档」出全部变体，
+    /// 按主题取色是白拿的；而同一个色在浅色与深色任务栏上的可辨度可以差很远。
+    /// 出厂三条都写成亮暗同色——那三色本就是按「深浅两种任务栏上都立得住」挑的。
+    ///
+    /// 解析失败回落 `auto` 并记警告，只回落**这一项**：改错一个色值若连带把位置、
+    /// 大小一起打回默认，用户根本对不上因果。
+    #[serde(default = "default_langbar_color_auto")]
+    pub color_light: String,
+    /// 深色任务栏上的颜色，语义同 [`Self::color_light`]。
+    #[serde(default = "default_langbar_color_auto")]
+    pub color_dark: String,
+    /// 本条相对全局倍率的**额外**倍率（1.0 = 与其他角标同大）。
+    ///
+    /// 两级而不是一级：全局那一级答「角标整体要多大」，这一级答「这一条要不要比别人
+    /// 大或小」。**出厂三条都是 1.0**——三个状态标记同等重要，出厂不替用户分主次。
+    ///
+    /// `0` 或负数 = 这一条不画（与 `enabled = false` 等效，但后者才是给人用的表达）。
+    #[serde(default = "default_one")]
+    pub scale: f32,
 }
 
 fn default_one() -> f32 {
     1.0
 }
-fn default_langbar_punct_badge() -> String {
+fn default_langbar_badge() -> String {
     "none".to_string()
 }
 fn default_langbar_badge_alpha() -> f32 {
     0.88
 }
-fn default_langbar_color_cn() -> String {
-    "#2288E0".to_string()
+fn default_langbar_corner() -> String {
+    "bottom_right".to_string()
 }
-fn default_langbar_color_en() -> String {
-    "#EE9922".to_string()
+fn default_langbar_color_auto() -> String {
+    "auto".to_string()
 }
-fn default_langbar_color_fw() -> String {
-    "#E0447A".to_string()
+
+/// 出厂规则表：中文标点右下蓝、英文标点右下橙、全角右上玫红，亮暗同色、大小相同。
+///
+/// 两条标点规则同占右下角**不冲突**：它们的状态互斥（同一时刻只可能命中一条），
+/// 优先级规则处理的是「同时命中」，不是「配在同一角」。
+fn default_langbar_badges() -> Vec<LangBarBadge> {
+    let rule = |state: &str, corner: &str, color: &str, scale: f32| LangBarBadge {
+        enabled: true,
+        state: state.to_string(),
+        corner: corner.to_string(),
+        color_light: color.to_string(),
+        color_dark: color.to_string(),
+        scale,
+    };
+    vec![
+        rule("punct_cn", "bottom_right", "#2288E0", 1.0),
+        rule("punct_en", "bottom_right", "#EE9922", 1.0),
+        rule("full_width", "top_right", "#E0447A", 1.0),
+    ]
 }
 
 impl Default for LangBarConfig {
     fn default() -> Self {
         Self {
-            punct_badge: default_langbar_punct_badge(),
-            punct_badge_scale: 1.0,
-            full_width_mark: false,
-            full_width_mark_scale: 1.0,
+            badge: default_langbar_badge(),
+            badge_scale: 1.0,
             badge_alpha: default_langbar_badge_alpha(),
-            colored: true,
-            punct_color_cn: default_langbar_color_cn(),
-            punct_color_en: default_langbar_color_en(),
-            full_width_color: default_langbar_color_fw(),
+            badges: default_langbar_badges(),
         }
     }
 }

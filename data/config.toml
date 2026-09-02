@@ -965,29 +965,58 @@ items = ["mode", "punct", "full_width", "-s2t", "soft_keyboard", "settings"]
 # 注意 action 要用单引号包起来（里面有双引号）。
 
 # 语言栏图标 = Windows 任务栏上那个「中/英/拼/五」的输入指示器（仅 Windows）。
-# 这里配的是叠在主字上的两个状态标记：右下角=标点中英，右上角=全角。
-# 两者默认都关——它们是加在系统图标上的新东西，默认改变所有人的任务栏是过界的。
+# 这里配的是叠在主字上的状态角标：什么状态下画、画在哪个角、什么颜色、多大。
+# 默认整体关着——它是加在系统图标上的新东西，默认改变所有人的任务栏是过界的。
 [ui.langbar]
-# 标点角标形状。none=不显示（默认）｜corner_triangle=右下三角（推荐）
-# 以下三种仅供尝试，设置页不列出：outer_ring=最外圈边框｜bottom_bar=底部横条
-# circle_square / ring_dot 已真机否决（任务栏上像个污点），留着只为兼容旧配置。
-punct_badge = "none"
-# 角标大小倍率（1.0 = 形状自带的基准尺寸）。
-punct_badge_scale = 1.0
-# 全角标记：全角时在右上角画一个三角（半角不画——常态无信息量，画了只是常驻一个点）。
-full_width_mark = false
-full_width_mark_scale = 1.0
-# 两个标记共用的不透明度，同时是档位开关：
-#   = 1.0  实心 + 在标记周围挖掉一圈主字（靠留白分离，字会被切掉一角）
-#   < 1.0  半透明 + 保留主字，笔画从标记里透出来（半遮，默认）
+# 总开关。none=不显示（默认）｜corner=角标（角落上的直角三角）
+# 关掉即下面全部规则都不画，不必逐条去关。
+badge = "none"
+# 角标整体大小倍率（1.0 = 基准尺寸）。单条还能用自己的 scale 再乘一次。
+badge_scale = 1.0
+# 角标不透明度的默认值；单条可以用色值末两位（见下面 color_*）自己覆盖。
+# 它同时是档位开关：
+#   = 1.0  实心 + 在角标周围挖掉一圈主字（靠留白分离，字会被切掉一角）
+#   < 1.0  半透明 + 保留主字，笔画从角标里透出来（半遮，默认）
 # 两者是互斥的分离手段，不要指望"挖空 + 调淡"叠加——那样调这个值会看起来毫无效果。
 badge_alpha = 0.88
-# 标记是否用配色。false = 一律与主字同色并跟随明暗主题（两个标记一起切）。
-colored = true
-# 配色（#RRGGBB）。三色的色相互相拉开，16px 下靠色相区分远比靠形状可靠。
-punct_color_cn = "#2288E0"
-punct_color_en = "#EE9922"
-full_width_color = "#E0447A"
+
+# 角标规则表：一条规则 = 「某状态成立时，在某个角落用某色画一个角标」。
+# 顺序即优先级——两条规则若配在同一个角落又同时成立（如把全角也挪到右下），
+# 只画最靠前的那一条；16px 上叠两个三角会糊成一片。
+#
+# enabled  这条画不画。想要「中文标点时不受打扰、只在英文标点时提醒」，
+#          把下面第一条改成 false 即可，颜色和位置都还留着。
+# state    punct_cn（中文标点）｜punct_en（英文标点）｜full_width（全角）
+#          只有这三个；写错会让整条规则被丢弃（日志里有警告）。
+# corner   top_left｜top_right｜bottom_right｜bottom_left
+# color_*  浅色 / 深色任务栏上各用什么色：#RRGGBB、#RRGGBBAA，或 auto = 与主字同色。
+#          三色的色相互相拉开，16px 下靠色相区分远比靠形状可靠。
+#          末两位 AA 是这一条自己的不透明度（跟网页一个写法），不写就用上面的
+#          badge_alpha。注意填 FF 不只是"最不透明"，它会把这一条切成实心挖空那一档。
+# scale    本条相对整体大小的额外倍率（1.0 = 与其他角标同大）。
+[[ui.langbar.badges]]
+enabled = true
+state = "punct_cn"
+corner = "bottom_right"
+color_light = "#2288E0"
+color_dark = "#2288E0"
+scale = 1.0
+
+[[ui.langbar.badges]]
+enabled = true
+state = "punct_en"
+corner = "bottom_right"
+color_light = "#EE9922"
+color_dark = "#EE9922"
+scale = 1.0
+
+[[ui.langbar.badges]]
+enabled = true
+state = "full_width"
+corner = "top_right"
+color_light = "#E0447A"
+color_dark = "#E0447A"
+scale = 1.0
 
 # 非中文态显示的主字，同时作用于语言栏图标、工具栏模式格、状态气泡。
 # 中文态的主字不在这里——那是方案的属性，配在方案文件的 [schema] icon_label。

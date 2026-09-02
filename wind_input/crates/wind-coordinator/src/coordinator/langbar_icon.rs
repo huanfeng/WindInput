@@ -70,10 +70,10 @@ impl Coordinator {
     #[cfg(all(feature = "desktop-ui", windows))]
     pub(crate) fn icon_publisher()
     -> &'static std::sync::Mutex<Option<wind_ui::langbar_icon::LangBarIconPublisher>> {
-        use wind_ui::langbar_icon::{BadgeShape, LangBarIconPublisher};
+        use wind_ui::langbar_icon::{BadgeStyle, LangBarIconPublisher};
         ICON_PUBLISHER.get_or_init(|| {
             let suffix = wind_config::variant::pipe_suffix();
-            match LangBarIconPublisher::new(suffix, BadgeShape::default()) {
+            match LangBarIconPublisher::new(suffix, BadgeStyle::default()) {
                 Ok(mut p) => {
                     tracing::info!(shm = p.shm_name(), "语言栏图标共享内存已就绪");
                     // 纯调试项（不进用户配置）从 state.toml 恢复；呈现参数走 config，
@@ -171,43 +171,66 @@ impl Coordinator {
     /// 构造后与**每次配置重载**都要调一次：配置改了却不重新发布，症状是「改了没反应、
     /// 重启才生效」——本仓已按这个形态栽过（见运行时镜像态回灌那条）。
     ///
-    /// 颜色解析失败只记警告并回落内置默认：配置文件是手写的，写错一个色值不该让图标
-    /// 消失或让服务起不来。回落的是**那一项**，不是整段——否则改错一个颜色会连带把
-    /// 形状、大小一起打回默认，用户根本对不上因果。
+    /// 单项解析失败只记警告并降级，**不整段回落**：改错一个色值若连带把位置、大小
+    /// 一起打回默认，用户根本对不上因果。降级的粒度按字段有没有合理默认值来定——
+    /// 颜色退到 `auto`、位置退到右下角，而**状态没有默认值**，不认识就丢掉整条规则。
+    ///
+    /// 色值里的不透明度（`#RRGGBBAA` 末两位）在这里与全局 `badge_alpha` 合流：
+    /// 配置侧只表达「这一条说了没有」，合并发生在渲染侧的 `active_layers`。
     #[cfg(all(feature = "desktop-ui", windows))]
     pub(crate) fn apply_langbar_config(&self) {
-        use wind_ui::langbar_icon::{BadgeShape, IconRenderer};
+        use wind_ui::langbar_icon::{BadgeColor, BadgeRule, BadgeState, BadgeStyle, Corner};
 
         let cfg = { self.rt().config.ui.langbar.clone() };
 
-        // "#RRGGBB" → BGR（渲染器的存储序）。失败记警告并回落内置默认。
-        // 回落的是**那一项**而不是整段：改错一个色值若连带把形状、大小一起打回默认，
-        // 用户根本对不上因果。
-        let parse = |raw: &str, fallback: [u8; 3], what: &str| -> [u8; 3] {
-            match wind_theme::palette::parse_hex(raw) {
-                Some([r, g, b, _]) => [b, g, r],
+        // 色值 → 渲染侧的着色。`auto`（含解析失败）= 与主字同色 + 全局不透明度。
+        //
+        // ⚠ 「有没有指定不透明度」只能看**原字符串的长度**：`parse_hex` 会把 6 位补成
+        // `alpha = 255`，那一步就把「没写」和「写了 FF」抹平了，而这两者含义完全不同
+        // ——后者会把这一条切到挖空档（角标实心 + 周围切掉一圈主字）。
+        let parse_color = |raw: &str, what: &str| -> BadgeColor {
+            let t = raw.trim();
+            if t.eq_ignore_ascii_case("auto") {
+                return BadgeColor::AUTO;
+            }
+            match wind_theme::palette::parse_hex(t) {
+                Some([r, g, b, a]) => BadgeColor {
+                    rgb: Some([b, g, r]),
+                    alpha: (t.trim_start_matches('#').len() == 8).then_some(a as f32 / 255.0),
+                },
                 None => {
-                    tracing::warn!(value = raw, item = what, "语言栏图标配色无法解析，沿用默认");
-                    fallback
+                    tracing::warn!(
+                        value = raw,
+                        item = what,
+                        "语言栏角标配色无法解析，按 auto（与主字同色）处理"
+                    );
+                    BadgeColor::AUTO
                 }
             }
         };
 
-        // 彩色开关与具体色值的关系：关掉时一律交 None（与主字同色）；开着时用配置色。
-        // 两个标记由同一个开关控制，见 set_colored。
-        let (badge_colors, width_mark_color) = if cfg.colored {
-            let (dcn, den) = IconRenderer::DEFAULT_BADGE_COLORS;
-            let cn = parse(&cfg.punct_color_cn, dcn, "punct_color_cn");
-            let en = parse(&cfg.punct_color_en, den, "punct_color_en");
-            let fw = parse(
-                &cfg.full_width_color,
-                IconRenderer::DEFAULT_WIDTH_MARK_COLOR,
-                "full_width_color",
-            );
-            (Some((cn, en)), Some(fw))
-        } else {
-            (None, None)
-        };
+        // 关掉的规则整条不进渲染器：那边只需回答"画哪些"，不必再处理"配了但不画"。
+        let rules: Vec<BadgeRule> = cfg
+            .badges
+            .iter()
+            .filter(|b| b.enabled)
+            .filter_map(|b| {
+                let Some(state) = BadgeState::from_id(&b.state) else {
+                    tracing::warn!(
+                        value = %b.state,
+                        "语言栏角标规则的状态无法识别，该条已忽略"
+                    );
+                    return None;
+                };
+                Some(BadgeRule {
+                    state,
+                    corner: Corner::from_id(&b.corner),
+                    color_light: parse_color(&b.color_light, "color_light"),
+                    color_dark: parse_color(&b.color_dark, "color_dark"),
+                    scale: b.scale,
+                })
+            })
+            .collect();
 
         let changed = {
             let Ok(mut guard) = Self::icon_publisher().lock() else {
@@ -217,13 +240,10 @@ impl Coordinator {
                 return;
             };
             p.apply_appearance(
-                Some(BadgeShape::from_id(&cfg.punct_badge)),
-                Some(cfg.punct_badge_scale),
-                Some(cfg.full_width_mark),
-                Some(cfg.full_width_mark_scale),
+                Some(BadgeStyle::from_id(&cfg.badge)),
+                Some(cfg.badge_scale),
                 Some(cfg.badge_alpha),
-                Some(badge_colors),
-                Some(width_mark_color),
+                Some(rules),
             )
         };
         // 锁已释放——发布内部还要取同一把锁。
@@ -414,7 +434,7 @@ impl Coordinator {
 #[cfg(all(test, feature = "desktop-ui", windows))]
 mod default_parity_tests {
     use wind_config::LangBarConfig;
-    use wind_ui::langbar_icon::{BadgeShape, IconRenderer};
+    use wind_ui::langbar_icon::{BadgeState, BadgeStyle, Corner, IconRenderer};
 
     /// `#RRGGBB` → BGR，与 `apply_langbar_config` 的换序保持一致。
     fn hex_to_bgr(s: &str) -> [u8; 3] {
@@ -427,9 +447,9 @@ mod default_parity_tests {
         let cfg = LangBarConfig::default();
 
         assert_eq!(
-            BadgeShape::from_id(&cfg.punct_badge),
-            BadgeShape::default(),
-            "配置默认形状与 BadgeShape::default() 不一致"
+            BadgeStyle::from_id(&cfg.badge),
+            BadgeStyle::default(),
+            "配置默认总开关与 BadgeStyle::default() 不一致"
         );
         assert_eq!(
             cfg.badge_alpha,
@@ -437,28 +457,60 @@ mod default_parity_tests {
             "配置默认不透明度与渲染器不一致"
         );
 
-        let (cn, en) = IconRenderer::DEFAULT_BADGE_COLORS;
-        assert_eq!(hex_to_bgr(&cfg.punct_color_cn), cn, "中文标点默认色不一致");
-        assert_eq!(hex_to_bgr(&cfg.punct_color_en), en, "英文标点默认色不一致");
+        // 规则表逐条比对。比"两边条数一样"更进一步是必要的：漂移最可能的形态是
+        // 某一条的颜色或角落被单独改掉，条数不变而表现变了。
+        let rendered = IconRenderer::default_rules();
         assert_eq!(
-            hex_to_bgr(&cfg.full_width_color),
-            IconRenderer::DEFAULT_WIDTH_MARK_COLOR,
-            "全角标记默认色不一致"
+            cfg.badges.len(),
+            rendered.len(),
+            "配置与渲染器的出厂规则条数不一致"
         );
+        for (i, (c, r)) in cfg.badges.iter().zip(&rendered).enumerate() {
+            assert!(c.enabled, "第 {i} 条出厂规则应是启用的");
+            assert_eq!(
+                BadgeState::from_id(&c.state),
+                Some(r.state),
+                "第 {i} 条规则的状态不一致"
+            );
+            assert_eq!(
+                Corner::from_id(&c.corner),
+                r.corner,
+                "第 {i} 条规则的角落不一致"
+            );
+            assert_eq!(
+                Some(hex_to_bgr(&c.color_light)),
+                r.color_light.rgb,
+                "第 {i} 条规则的浅色任务栏配色不一致"
+            );
+            assert_eq!(
+                Some(hex_to_bgr(&c.color_dark)),
+                r.color_dark.rgb,
+                "第 {i} 条规则的深色任务栏配色不一致"
+            );
+            // 出厂色值都是 6 位 ⇒ 不指定不透明度、跟随全局。写死这条是为了让
+            // 「有人给出厂色补了末两位」变成一次失败，而不是悄悄改变出厂画法。
+            assert_eq!(
+                r.color_light.alpha, None,
+                "第 {i} 条出厂规则不该自带不透明度"
+            );
+            assert_eq!(
+                r.color_dark.alpha, None,
+                "第 {i} 条出厂规则不该自带不透明度"
+            );
+            assert_eq!(c.scale, r.scale, "第 {i} 条规则的条目倍率不一致");
+        }
     }
 
-    /// 两个标记默认都关：它们是加在系统图标上的新东西，默认改变所有人的任务栏是过界的。
+    /// 角标默认关：它是加在系统图标上的新东西，默认改变所有人的任务栏是过界的。
     ///
     /// 单独钉一条而不是并进上面：上面那条防的是「两处默认值漂移」，这条防的是
     /// 「有人把默认改成开」——后者不是不一致，而是一个产品决定被悄悄推翻。
     #[test]
-    fn both_markers_are_off_by_default() {
-        let cfg = LangBarConfig::default();
+    fn badges_are_off_by_default() {
         assert_eq!(
-            BadgeShape::from_id(&cfg.punct_badge),
-            BadgeShape::None,
-            "标点角标默认必须是关"
+            BadgeStyle::from_id(&LangBarConfig::default().badge),
+            BadgeStyle::None,
+            "角标总开关默认必须是关"
         );
-        assert!(!cfg.full_width_mark, "全角标记默认必须是关");
     }
 }

@@ -149,25 +149,17 @@ pub enum MenuCmd {
     /// 「禁用」主要给表格类宿主用：Excel / WPS 表格在「输入态」下把方向键解释成
     /// 「确认单元格并移动」，配对后的光标回退无法实现（TSF 路线已实测失败）。
     AutoPairRule(u8),
-    /// 语言栏图标（**Dev 变体专属调试菜单**）：切换标点角标的编码方式。
-    /// 参数为 `wind_ui::langbar_icon::BadgeShape::ALL` 的下标。
+    /// 语言栏图标：角标总开关。参数为 `wind_ui::langbar_icon::BadgeStyle::ALL` 的下标。
     ///
-    /// 存在的意义：16×16 上哪种编码可辨只能真机看，而每换一种就部署一次要提权 + 重启
-    /// 输入法，成本高到根本比不动。渲染搬到服务端后形状本就是运行时参数，把它接到菜单上，
-    /// 比选就退化成点几下。**不持久化**——调试项，重启回到默认。
-    IconBadgeShape(u8),
-    /// 语言栏图标（Dev 调试）：角标彩色 / 与主字同色跟随主题。
-    IconToggleColors,
+    /// 只有「不显示 / 角标」两档——具体画哪些状态、什么颜色、在哪个角，是
+    /// `[ui.langbar.badges]` 那张规则表的事，由设置页编辑，菜单不重复一遍。
+    IconBadgeStyle(u8),
     /// 语言栏图标（Dev 调试）：在各尺寸档位图左上角烧尺寸标记，
     /// 用于真机确认系统实际取用了哪一档、有没有被二次缩放。
     IconToggleSizeMarks,
-    /// 语言栏图标：全角状态的右上角标记开关。
-    ///
-    /// 与标点角标形状是**两个正交的量**，故单列而非并进那个单选组——它不是"第七种形状"。
-    IconToggleWidthMark,
     /// 语言栏图标（Dev 调试）：外圈跑马灯演示动画。
     ///
-    /// 与上面三项不同，它**不持久化**——那三项是「图标长什么样」的偏好，它是一段持续
+    /// 与上面两项不同，它**不持久化**——那两项是「图标长什么样」的偏好，它是一段持续
     /// 占用 CPU 与 IPC 的演示，重启后自己关掉才是对的默认。
     IconToggleDemoAnim,
 }
@@ -240,13 +232,11 @@ impl MenuKind {
                 MenuCmd::InputDiagCopy => 124,
                 MenuCmd::InputDiagToggleFreeze => 125,
                 MenuCmd::InputDiagToggleTopmost => 126,
-                MenuCmd::IconToggleColors => 127,
                 MenuCmd::IconToggleSizeMarks => 128,
                 MenuCmd::IconToggleDemoAnim => 129,
-                MenuCmd::IconToggleWidthMark => 130,
                 MenuCmd::ToggleSoftKeyboard => 131,
                 MenuCmd::OpenMainMenu => 132,
-                MenuCmd::IconBadgeShape(i) => 10000 + i as i32,
+                MenuCmd::IconBadgeStyle(i) => 10000 + i as i32,
                 MenuCmd::SoftKeyboardPage(i) => 11000 + i as i32,
                 MenuCmd::InputDiagToggleSection(i) => 8000 + i as i32,
                 MenuCmd::FirstShowMode(m) => 5000 + m as i32,
@@ -299,13 +289,11 @@ impl MenuKind {
             124 => MenuCmd::InputDiagCopy,
             125 => MenuCmd::InputDiagToggleFreeze,
             126 => MenuCmd::InputDiagToggleTopmost,
-            127 => MenuCmd::IconToggleColors,
             128 => MenuCmd::IconToggleSizeMarks,
             129 => MenuCmd::IconToggleDemoAnim,
-            130 => MenuCmd::IconToggleWidthMark,
             131 => MenuCmd::ToggleSoftKeyboard,
             132 => MenuCmd::OpenMainMenu,
-            10000..=10099 => MenuCmd::IconBadgeShape((id - 10000) as u8),
+            10000..=10099 => MenuCmd::IconBadgeStyle((id - 10000) as u8),
             11000..=11999 => MenuCmd::SoftKeyboardPage((id - 11000) as usize),
             8000..=8999 => MenuCmd::InputDiagToggleSection((id - 8000) as u8),
             1000..=1999 => MenuCmd::SchemaSelect((id - 1000) as usize),
