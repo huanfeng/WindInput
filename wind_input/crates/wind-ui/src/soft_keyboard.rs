@@ -673,7 +673,15 @@ impl SoftKeyboard {
             }
             return;
         }
-        if tag >= SOFT_TAG_PAGE_BASE {
+        // 区域标记，不是控件：视口进命中表只为让滚轮知道「鼠标在标签行上」，命中到它
+        // 说明点的是标签行**留白**，真正的响应是拖动整块面板（`drags_panel`，在
+        // `WM_LBUTTONDOWN` 里就接走了，压根到不了这里）。留这一句是把「它不是控件」
+        // 写成代码，而不是指望它掉到最后一条键位分支里靠下标越界变成空操作。
+        if tag == SOFT_TAG_TAB_VIEWPORT {
+            return;
+        }
+        // ⛔ 判据用 `is_page_tag` 而不是 `tag >= SOFT_TAG_PAGE_BASE`：理由见那个函数。
+        if is_page_tag(tag) {
             let i = (tag - SOFT_TAG_PAGE_BASE) as usize;
             let _ = self.events.send(UiEvent::SoftKeyboardPage(i));
             return;
@@ -1496,6 +1504,34 @@ fn faded(c: [u8; 4], alpha: u8) -> [u8; 4] {
     [c[0], c[1], c[2], alpha]
 }
 
+/// 这个 tag 是不是标签行里的**某一个面**（`SOFT_TAG_PAGE_BASE + 下标`）。
+///
+/// ★★★ 判据必须是**闭区间**。tag 空间是一段一段分配的（键位 0.. / 翻页 200_000 /
+/// 关闭 300_000 / 标签行控件 330_000 / 功能键 400_000），写成开区间 `tag >=
+/// SOFT_TAG_PAGE_BASE` 就等于宣称「200_000 以上全是面」——后加的 330_000 段于是被
+/// 整段吞进来。`SOFT_TAG_TAB_VIEWPORT`（330_002）就这么掉进过翻页分支，算出
+/// `i = 130_002` 发了个 `SoftKeyboardPage(130002)`，被协调器的越界检查挡下，只留一条
+/// 「面下标越界」warn，用户看到的是点了标签行留白**什么都没发生**。
+///
+/// 收成一个函数是因为这个判据在本文件有四处用（`dispatch`、[`fires_on_release`]、
+/// 滚轮的 `on_tabs`、以及本函数自己），此前只有 `dispatch` 那处写成了开区间——
+/// 三对一，正是「同一判据抄了四份」的典型下场。⛔ 别再就地展开成 `>=`。
+fn is_page_tag(tag: i32) -> bool {
+    (SOFT_TAG_PAGE_BASE..SOFT_TAG_CLOSE).contains(&tag)
+}
+
+/// 按下这里是「抓住面板拖动」而不是「点了某个控件」。
+///
+/// 两种情形：`-1`（没命中任何命中区，即键位之间的缝）与 `SOFT_TAG_TAB_VIEWPORT`。
+/// 后者是**区域标记而非控件**——视口进命中表只为让滚轮知道「鼠标在标签行上」，标签
+/// 自己的命中区在它之后收集、盖在上面，所以命中到视口就说明点的是标签行的**留白**。
+/// 而 `WM_LBUTTONDOWN` 那条拖动分支的注释一直写着「空白处（标签行留白、键位之间的
+/// 缝）→ 拖动整块面板」，此前却只判 `h < 0`，留白根本走不到——注释与代码相矛盾。
+#[cfg_attr(not(windows), allow(dead_code))] // 唯一调用点是 `#[cfg(windows)] mod mouse_impl`
+fn drags_panel(tag: i32) -> bool {
+    tag < 0 || tag == SOFT_TAG_TAB_VIEWPORT
+}
+
 #[cfg_attr(not(windows), allow(dead_code))] // 唯一调用点是 `#[cfg(windows)] mod mouse_impl`
 fn fires_on_release(tag: i32) -> bool {
     // 关闭：不可撤销，按下即关像「还没点就没了」。
@@ -1505,9 +1541,7 @@ fn fires_on_release(tag: i32) -> bool {
     // ★ 切面类：按下即切面会**重建整块面板**，而重建顺手清掉了按下态（`show` 里的
     // `reset_mouse`）——用户看到的是按下态「闪一下就没了」。改成抬起触发，按住期间
     // 状态稳稳留着，松手才切。
-    tag == SOFT_TAG_PAGE_PREV
-        || tag == SOFT_TAG_PAGE_NEXT
-        || (SOFT_TAG_PAGE_BASE..SOFT_TAG_CLOSE).contains(&tag)
+    tag == SOFT_TAG_PAGE_PREV || tag == SOFT_TAG_PAGE_NEXT || is_page_tag(tag)
 }
 
 fn repeats(tag: i32) -> bool {
@@ -1581,17 +1615,14 @@ fn default_origin(w: u32, h: u32, s: f32) -> (i32, i32) {
 
 #[cfg(windows)]
 mod mouse_impl {
-    use super::{SoftMouse, fires_on_release, repeat_params, repeats};
+    use super::{SoftMouse, drags_panel, fires_on_release, is_page_tag, repeat_params, repeats};
     use crate::sys::{
         GetCursorPos, GetWindowRect, HWND_TOPMOST, POINT, RECT, ReleaseCapture, SWP_NOACTIVATE,
         SWP_NOSIZE, SWP_NOZORDER, SetCapture, SetWindowPos, WM_LBUTTONDOWN, WM_LBUTTONUP,
         WM_MOUSELEAVE, WM_MOUSEMOVE, WM_MOUSEWHEEL, clamp_to_work_area,
     };
     use crate::window::WindowMouse;
-    use wind_ui_types::{
-        SOFT_TAG_CLOSE, SOFT_TAG_PAGE_BASE, SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT,
-        SOFT_TAG_TAB_VIEWPORT,
-    };
+    use wind_ui_types::{SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT, SOFT_TAG_TAB_VIEWPORT};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::Graphics::Gdi::ScreenToClient;
 
@@ -1664,8 +1695,12 @@ mod mouse_impl {
                 WM_LBUTTONDOWN => {
                     let (x, y) = pos(lparam);
                     let h = self.hit_at(x, y);
-                    if h < 0 {
+                    if drags_panel(h) {
                         // 空白处（标签行留白、键位之间的缝）→ 拖动整块面板。
+                        //
+                        // 判据是 `drags_panel` 而不是 `h < 0`：标签行留白命中的是
+                        // `SOFT_TAG_TAB_VIEWPORT`（一个区域标记，>= 0），此前落到下面的
+                        // 按键分支去了，于是留白点了既不拖动也没反应。
                         //
                         // 这里用 SetCapture 是安全的：按下发生在本窗口内，捕获的是本线程的
                         // 鼠标。本仓记过「后台窗口 SetCapture 按线程失效」，那说的是拿它去
@@ -1752,7 +1787,7 @@ mod mouse_impl {
                     let on_tabs = hit == SOFT_TAG_TAB_VIEWPORT
                         || hit == SOFT_TAG_TAB_LEFT
                         || hit == SOFT_TAG_TAB_RIGHT
-                        || (SOFT_TAG_PAGE_BASE..SOFT_TAG_CLOSE).contains(&hit);
+                        || is_page_tag(hit);
                     if on_tabs {
                         let delta = ((_wparam.0 >> 16) & 0xFFFF) as i16;
                         // 向前滚（正 delta）= 向左看，与横向列表的通行方向一致。
@@ -1837,6 +1872,47 @@ mod tests {
         assert!(!repeats(SOFT_TAG_PAGE_BASE), "翻页不重复——按住会飞速乱切");
         assert!(!repeats(SOFT_TAG_CLOSE), "关闭不重复");
         assert!(!repeats(SOFT_TAG_CTRL), "粘滞 Ctrl 不重复");
+    }
+
+    /// tag 分段判据必须是**闭区间**——开区间会把后加的段整段吞掉。
+    ///
+    /// 钉的是 0.120 周期的真实缺陷：`dispatch` 里写的是 `tag >= SOFT_TAG_PAGE_BASE`，
+    /// 于是 `SOFT_TAG_TAB_VIEWPORT`（330_002，在 200_000 与 400_000 之间）掉进翻页分支，
+    /// 算出 `i = 130_002` 发出 `SoftKeyboardPage(130002)`，被协调器的越界检查挡下，
+    /// 只留一条 warn ⇒ 用户点标签行留白**什么都没发生**。
+    ///
+    /// ⚠️ 将来往 `SOFT_TAG_PAGE_BASE..SOFT_TAG_CLOSE` **之外**再加新的 tag 段时，
+    /// 照着补一条断言：编译器管不了整型常量的分段，只有这里能拦。
+    #[test]
+    fn tag_ranges_are_closed_so_later_segments_are_not_swallowed() {
+        assert!(is_page_tag(SOFT_TAG_PAGE_BASE), "第 0 个面");
+        assert!(
+            is_page_tag(SOFT_TAG_CLOSE - 1),
+            "面段的上界（闭区间右端前一个）"
+        );
+        assert!(!is_page_tag(SOFT_TAG_CLOSE), "关闭不是面");
+        assert!(
+            !is_page_tag(SOFT_TAG_TAB_VIEWPORT),
+            "标签行视口是区域标记，不是某一个面——它被误判成面就是那个 bug 本身"
+        );
+        assert!(!is_page_tag(SOFT_TAG_TAB_LEFT) && !is_page_tag(SOFT_TAG_TAB_RIGHT));
+        assert!(!is_page_tag(SOFT_TAG_FN_BASE), "功能键不是面");
+        assert!(!is_page_tag(0), "键位不是面");
+    }
+
+    /// 标签行留白按下 → 拖动整块面板，与那条分支自己的注释一致。
+    #[test]
+    fn tab_row_blank_drags_the_panel() {
+        assert!(drags_panel(-1), "没命中任何命中区（键位之间的缝）");
+        assert!(
+            drags_panel(SOFT_TAG_TAB_VIEWPORT),
+            "标签行留白——命中的是视口这个区域标记，它 >= 0，判 `h < 0` 会漏掉"
+        );
+        // 反向对照：真控件绝不能被当成拖动，否则点了就只会拖窗口。
+        assert!(!drags_panel(0), "键位");
+        assert!(!drags_panel(SOFT_TAG_PAGE_BASE), "标签");
+        assert!(!drags_panel(SOFT_TAG_TAB_LEFT), "左箭头");
+        assert!(!drags_panel(SOFT_TAG_CLOSE), "关闭");
     }
 
     #[test]
