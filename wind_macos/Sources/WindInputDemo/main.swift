@@ -14,6 +14,10 @@ import WindInputKit
 
 // MARK: - TextInputClient → NSTextView 适配
 
+/// ⚠️ 本 demo **测不出 marked text 的宿主侧缺陷**: 它直接调 NSTextView, 中间没有 IMKit。
+/// 真机上组合串要经 `IMKTextInput.setMarkedText` 转发, IMKit 会在那一层对 selectionRange
+/// 动手 (见 `MarkedTextAttributes` 的文件头注释) —— 本路径完全绕开。组合区光标 / 分句
+/// 相关的问题一律以真机 + 宿主侧诊断为准, 别拿 demo 正常当证据。
 final class TextViewClient: TextInputClient {
     weak var tv: NSTextView?
     init(_ tv: NSTextView) { self.tv = tv }

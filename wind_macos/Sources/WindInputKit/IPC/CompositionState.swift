@@ -10,41 +10,47 @@ import Foundation
 //
 // 这里的 state 主要用于:
 //   1. 重复推送同样内容时短路 (避免无谓的 setMarkedText 重画)
-//   2. 把 caretPos (Go 给的 rune 偏移) 映射成 NSRange (UTF-16 unit 偏移),
-//      因为 IMKit `client.setMarkedText(_, selectionRange:, replacementRange:)`
-//      的 selectionRange 是 NSRange (UTF-16 单位)
+//   2. 持有组合区光标, 供 setMarkedText 的 selectionRange 使用
 //   3. 给上层调试/快照
 public struct CompositionState: Equatable {
     /// 当前显示在文本框的 marked text. 空字符串表示无 preedit.
     public var text: String
 
-    /// 光标在 text 里的位置 — 按 rune (UTF-32 code point) 计, 与 Go 端协议一致.
-    public var caretRune: Int
+    /// 光标在 text 里的位置 — 按 **UTF-16 code unit** 计。
+    ///
+    /// # 单位由两端共同决定, 不是随便挑的
+    ///
+    /// - **上游**: 服务端 `UpdateComposition.caret_pos` 出自 `preedit_cursor::caret_utf16`,
+    ///   注释写明「TSF 要 UTF-16 偏移」——发过来的就是 UTF-16 单元数。
+    /// - **下游**: IMKit `setMarkedText(_:selectionRange:replacementRange:)` 的
+    ///   `NSRange` 亦以 UTF-16 单元计。
+    ///
+    /// 两端同为 UTF-16, 中间**不该有任何换算**。本字段一度叫 `caretRune` 并按 rune
+    /// (code point) 语义再折算一次, 对 BMP 内的汉字与 ASCII 恰好等值, 故**用中文怎么测
+    /// 都测不出来**; 只有组合区含扩展 B 区生僻字 (surrogate pair, 占 2 个单元) 且光标
+    /// 不在串尾时才偏移——例 `"𠮷zh"` 光标在「𠮷」后, 服务端给 2, 旧算法当成「前 2 个
+    /// 字符」得出 3。改名即为让这类误用在编译期就现形。
+    public var caretUTF16: Int
 
-    public init(text: String = "", caretRune: Int = 0) {
+    public init(text: String = "", caretUTF16: Int = 0) {
         self.text = text
-        self.caretRune = caretRune
+        self.caretUTF16 = caretUTF16
     }
 
     public var isEmpty: Bool { text.isEmpty }
 
     public mutating func clear() {
         text = ""
-        caretRune = 0
+        caretUTF16 = 0
     }
 
-    /// 把 caretRune (rune 偏移) 转换为 NSRange location (UTF-16 unit 偏移).
-    /// Swift String 用 UTF-8 存储但 IMKit API 用 UTF-16, NSRange 是 UTF-16 单位.
-    /// 例: text = "你好", caretRune=2 (在末尾), NSRange location = 2 (因为 "你好"
-    /// 共 2 个 UTF-16 unit; 但 emoji surrogate pair 占 2 个 unit, 一个 rune 占
-    /// 2 unit, 必须精确转换不能直接拿 caretRune).
+    /// 供 `setMarkedText` 用的 `NSRange.location`: 就是 `caretUTF16`, 只做区间钳位。
+    ///
+    /// 钳位不可省: 服务端与本端对组合串的认知有一拍延迟 (待定标点并入前缀、宿主拒收
+    /// 部分内容), caret 越界会让 IMKit 抛 range 异常。越界一律退到**串尾**而非 0 ——
+    /// 组合期的编辑点绝大多数时候就在末尾, 退到 0 会让光标停在刚打出的字母之前。
     public func caretInUTF16() -> Int {
-        guard caretRune > 0 else { return 0 }
-        // 限制 caretRune 不能越过 text 长度 (rune 计)
-        let chars = Array(text)
-        let bounded = max(0, min(caretRune, chars.count))
-        let prefix = String(chars.prefix(bounded))
-        return prefix.utf16.count
+        return max(0, min(caretUTF16, utf16Length))
     }
 
     /// 全文 UTF-16 长度 (IMKit setMarkedText 的 selectionRange 上界等)

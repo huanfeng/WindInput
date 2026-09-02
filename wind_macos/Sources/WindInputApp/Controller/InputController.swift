@@ -115,7 +115,7 @@ public class InputController: IMKInputController {
         // 必须在 super.deactivateServer 之前做: 此时 sender client 仍可接收 setMarkedText。
         if !composition.isEmpty {
             let imkClient = sender as? IMKTextInput
-            let adapter = imkClient.map { IMKClientAdapter(imkClient: $0) }
+            let adapter = imkClient.map { IMKClientAdapter(imkClient: $0, controller: self) }
             router.applyClearComposition(client: adapter)
         }
         sendEmpty(UpstreamCmd.focusLost)
@@ -553,7 +553,7 @@ public class InputController: IMKInputController {
     /// (在 WindInputKit 里, 不依赖 IMKit, 便于 swift test 用 mock 驱动).
     internal func applyResponse(_ frame: Frame, sender: Any?, hostShortcut: Bool = false) -> Bool {
         let imkClient = sender as? IMKTextInput
-        let adapter = imkClient.map { IMKClientAdapter(imkClient: $0) }
+        let adapter = imkClient.map { IMKClientAdapter(imkClient: $0, controller: self) }
         return router.apply(frame, to: adapter, hostShortcut: hostShortcut)
     }
 
@@ -564,7 +564,7 @@ public class InputController: IMKInputController {
             NSLog("WindInput[applyPushResponse] no current client, drop cmd=\(frame.cmd)")
             return
         }
-        _ = router.apply(frame, to: IMKClientAdapter(imkClient: client))
+        _ = router.apply(frame, to: IMKClientAdapter(imkClient: client, controller: self))
         if !composition.isEmpty {
             sendCaretUpdateIfAvailable(client: client)
         }
@@ -576,14 +576,59 @@ public class InputController: IMKInputController {
     /// WindInputKit 不依赖 IMKit 的子库里) 也能调到 IMKit 真客户端.
     private final class IMKClientAdapter: TextInputClient {
         let imkClient: IMKTextInput
-        init(imkClient: IMKTextInput) { self.imkClient = imkClient }
+        /// 弱持: adapter 是每次响应现造的短命对象, 强持会与 controller 成环。
+        /// 仅用于取 `markForStyle:atRange:`; 取不到时 `MarkedTextAttributes` 自行兜底。
+        private weak var controller: IMKInputController?
+
+        init(imkClient: IMKTextInput, controller: IMKInputController?) {
+            self.imkClient = imkClient
+            self.controller = controller
+        }
 
         func insertText(_ text: String, replacementRange: NSRange) {
             imkClient.insertText(text, replacementRange: replacementRange)
         }
+
+        /// # 必须传 NSAttributedString, 不能传裸 String
+        ///
+        /// 传裸 String 时 IMKit 会替我们合成默认分句 (整串) 并把转发给宿主的
+        /// `selectedRange` 覆写成 `{0, 全长}` —— 我们给的 `{caret, 0}` 就此丢失,
+        /// 宿主把组合内光标画在**最前面**。完整的现象、判据与影响面见
+        /// `MarkedTextAttributes` 的文件头注释。
+        ///
+        /// 真机判据 (改完必须复验): 用 `WINDUI_IME=1` 跑 wind-ui-rust 示例, 打 `sf`,
+        /// 日志应为 `selected={2,0} → caret=2 sel=None`; 若仍是 `selected={0,2}`,
+        /// 说明属性没被 IMKit 认可, 回头查 `markedClauseSegment` 是否真进了字典。
         func setMarkedText(_ text: String, selectionRange: NSRange, replacementRange: NSRange) {
-            imkClient.setMarkedText(text, selectionRange: selectionRange, replacementRange: replacementRange)
+            imkClient.setMarkedText(Self.markedText(text, controller: controller),
+                                    selectionRange: selectionRange,
+                                    replacementRange: replacementRange)
         }
+
+        /// 组合串 → 带分句属性的 NSAttributedString。
+        ///
+        /// 样式取 `kTSMHiliteRawText`(未转换文本: 细下划线、不反白) 而非
+        /// `kTSMHiliteSelectedRawText`(整段反白) —— 后者是鼠须管那种「整串高亮」的观感,
+        /// 我们要的是系统拼音那种「下划线 + 光标跟随」。
+        private static func markedText(_ text: String,
+                                       controller: IMKInputController?) -> NSAttributedString {
+            let full = NSRange(location: 0, length: (text as NSString).length)
+            // 空串 = 清除组合。此时无分句可言, 属性反而可能让宿主多走一遍无谓的重排。
+            guard full.length > 0 else { return NSAttributedString(string: text) }
+            // `markForStyle:` 返回 [AnyHashable: Any], **逐项**转 key 而不是整体 `as?`:
+            // 整体转换失败时会静默得到 nil, 于是丢掉系统按主题算好的样式、只剩兜底,
+            // 而这种退化在界面上看不出来。逐项转则至少保住能转的那些。
+            var base: [NSAttributedString.Key: Any] = [:]
+            if let raw = controller?.mark(forStyle: Int(kTSMHiliteRawText), at: full) {
+                for (key, value) in raw {
+                    guard let name = key as? String else { continue }
+                    base[NSAttributedString.Key(name)] = value
+                }
+            }
+            return NSAttributedString(string: text,
+                                      attributes: MarkedTextAttributes.ensureClauseSegment(base))
+        }
+
         func selectedRange() -> NSRange {
             imkClient.selectedRange()
         }

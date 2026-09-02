@@ -125,7 +125,7 @@ final class BridgeResponseRouterTests: XCTestCase {
         XCTAssertTrue(r.apply(frame, to: mock))
         XCTAssertEqual(mock.setMarkedCalls.count, 1)
         XCTAssertEqual(mock.setMarkedCalls[0].text, text)
-        // text 全 ASCII, rune index 2 → utf16 index 2
+        // caret_pos 已是 UTF-16 偏移, 原样落到 NSRange.location, 中间不换算。
         XCTAssertEqual(mock.setMarkedCalls[0].selectionRange.location, 2)
         XCTAssertEqual(r.composition.text, text)
     }
@@ -133,7 +133,7 @@ final class BridgeResponseRouterTests: XCTestCase {
     func testApply_UpdateComposition_CJK_CaretMapping() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
-        let text = "你好"   // 2 rune, 2 utf16 unit (BMP)
+        let text = "你好"   // 均在 BMP 内, 2 个 utf16 unit
         var payload = Data(count: 4)
         payload.writeUInt32LE(1, at: 0)
         payload.append(contentsOf: text.utf8)
@@ -141,6 +141,29 @@ final class BridgeResponseRouterTests: XCTestCase {
 
         _ = r.apply(frame, to: mock)
         XCTAssertEqual(mock.setMarkedCalls[0].selectionRange.location, 1)
+    }
+
+    /// `selectionRange.length` 必须恒为 0。
+    ///
+    /// IMKit 语境里这个 range 表达的是**「活动分句」**(日文分节转换要高亮正在转换的那一
+    /// 节), 而我们要表达的是**插入点**。宿主 (`NSTextInputClient`) 见 `length > 0` 会把
+    /// 整段当选中分句、把光标画到段首 —— 这正是 2026-09-02 那个「光标总在组合最前面」的
+    /// 形态 (当时是 IMKit 替我们写成了 `{0, 全长}`, 见 `MarkedTextAttributes`)。
+    /// 本仓自己更不能主动这么传。
+    func testApply_UpdateComposition_SelectionLengthIsAlwaysZero() {
+        let r = BridgeResponseRouter()
+        let mock = MockClient()
+        for (caret, text) in [(0, "s"), (2, "sf"), (3, "sfg"), (2, "你好")] {
+            var payload = Data(count: 4)
+            payload.writeUInt32LE(UInt32(caret), at: 0)
+            payload.append(contentsOf: text.utf8)
+            _ = r.apply(Frame(cmd: DownstreamCmd.updateComposition, isAsync: false,
+                              payload: payload), to: mock)
+        }
+        for call in mock.setMarkedCalls {
+            XCTAssertEqual(call.selectionRange.length, 0,
+                           "marked=\(call.text): length 非 0 会被宿主当成选中分句")
+        }
     }
 
     // MARK: - ClearComposition

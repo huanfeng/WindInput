@@ -253,9 +253,9 @@ public final class BridgeResponseRouter {
         if !p.newComposition.isEmpty {
             // 内联 preedit: commit 后立即开始新一轮 marked text
             composition.text = p.newComposition
-            composition.caretRune = countRunes(p.newComposition)
+            composition.caretUTF16 = utf16Len(p.newComposition)
             applyMarkedText(text: p.newComposition,
-                            caretRuneInText: composition.caretRune,
+                            caretUTF16InText: composition.caretUTF16,
                             client: client)
         } else {
             composition.clear()
@@ -283,18 +283,21 @@ public final class BridgeResponseRouter {
         // 否则光标会落在符号里面。
         absorbHeldIntoPrefix()
         let text = pendingCommitPrefix + p.text
-        let caret = pendingCommitPrefix.count + Int(p.caretPos)
+        // 前缀长度须与 `p.caretPos` 同单位 (UTF-16), 用 `.count` (字符数) 会在前缀含
+        // 非 BMP 字符时偏移——中文标点都在 BMP, 故只有直通 `ime.pair` 压入的生僻符号
+        // 才碰得到, 但错就是错。
+        let caret = pendingCommitPrefix.utf16.count + Int(p.caretPos)
         composition.text = text
-        composition.caretRune = caret
-        applyMarkedText(text: text, caretRuneInText: caret, client: client)
+        composition.caretUTF16 = caret
+        applyMarkedText(text: text, caretUTF16InText: caret, client: client)
     }
 
     /// 直接摆一段 marked text, **不叠加**待定前缀。供 HoldComposition 自己用:
     /// 那时符号本身就是组合内容, 走 `applyUpdateComposition` 会把它叠进前缀再显示一遍。
     private func setCompositionRaw(_ text: String, client: TextInputClient?) {
         composition.text = text
-        composition.caretRune = countRunes(text)
-        applyMarkedText(text: text, caretRuneInText: composition.caretRune, client: client)
+        composition.caretUTF16 = utf16Len(text)
+        applyMarkedText(text: text, caretUTF16InText: composition.caretUTF16, client: client)
     }
 
     /// 结束组合。**待定标点转为提交而非丢弃** —— 失焦/切窗口时符号应直接上屏, 与标准输入
@@ -349,15 +352,26 @@ public final class BridgeResponseRouter {
         }
     }
 
-    private func applyMarkedText(text: String, caretRuneInText: Int, client: TextInputClient?) {
+    /// 摆一段 marked text, 光标落在 `caretUTF16InText`。
+    ///
+    /// # `length` 恒为 0, 不要改成「整串选中」
+    ///
+    /// IMKit 语境里 `selectionRange` 表达的是**「活动分句」**(日文分节转换要高亮正在转换
+    /// 的那一节), 而我们要表达的是**插入点**, 故 `length` 必须是 0 —— 宿主
+    /// (`NSTextInputClient`) 见 `length > 0` 会把整段当选中分句、把光标画在段首。
+    /// 与之配套的另一半在 `IMKClientAdapter.setMarkedText`: 必须传带分句属性的
+    /// `NSAttributedString`, 否则本处传的值到不了宿主 (详见那边的注释)。
+    private func applyMarkedText(text: String, caretUTF16InText: Int, client: TextInputClient?) {
         guard let client = client else { return }
         let notFound = NSRange(location: NSNotFound, length: NSNotFound)
-        let utf16Caret = CompositionState(text: text, caretRune: caretRuneInText).caretInUTF16()
-        let selRange = NSRange(location: utf16Caret, length: 0)
+        let caret = CompositionState(text: text, caretUTF16: caretUTF16InText).caretInUTF16()
+        let selRange = NSRange(location: caret, length: 0)
         client.setMarkedText(text, selectionRange: selRange, replacementRange: notFound)
     }
 
-    private func countRunes(_ s: String) -> Int {
-        return s.count
+    /// 「光标在串尾」的取值。单位须与服务端 `caret_pos` 一致 (UTF-16 单元), 见
+    /// `CompositionState.caretUTF16`。
+    private func utf16Len(_ s: String) -> Int {
+        return s.utf16.count
     }
 }
