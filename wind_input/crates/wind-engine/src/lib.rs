@@ -14,7 +14,7 @@ pub mod pinyin;
 
 pub use codetable::CodeTableEngine;
 pub use engine::{
-    BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType, ExtendedEngine,
+    AdmitFn, BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType, ExtendedEngine,
 };
 pub use english::EnglishEngine;
 pub use manager::{EngineManager, FreqSettings, FreqStrategy};

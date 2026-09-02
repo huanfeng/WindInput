@@ -68,6 +68,11 @@ pub fn should_eat() -> bool {
 /// - down + 闸门关 → 放行，**不动**配对状态（此时没有欠账，也不该清掉别人的）；
 /// - up → 只看配对状态：欠着就吃并销账，没欠就放行。**刻意不问闸门**，因为绑定动作自己
 ///   就可能在 down 与 up 之间把闸门关掉（选词上屏 ⇒ 候选清空 ⇒ 无会话）。
+///
+/// ⚠️ 唯一的生产使用者在 `#[cfg(windows)] mod imp` 里，单测又只在 `cfg(test)` 下存在，
+/// 故非 Windows 目标编 **lib** target 时它确实无人调用（CI 的 darwin clippy 会拦）。
+/// ⛔ 别改成 `#[cfg(windows)]`：本函数抽成纯函数就是为了能脱离平台逐条断言。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn decide_eat(is_down: bool, should_eat: bool, eaten_down: bool) -> (bool, bool) {
     if is_down {
         if should_eat {

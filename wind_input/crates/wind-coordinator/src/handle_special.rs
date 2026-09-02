@@ -8,6 +8,7 @@ use crate::preedit_cursor;
 use tracing::debug;
 use wind_bridge::handler::{KeyAction, KeyEventData};
 use wind_candidate::Candidate;
+use wind_engine::AdmitFn;
 use wind_ipc::protocol::MOD_SHIFT;
 use wind_keys::keymap;
 
@@ -204,10 +205,7 @@ impl Coordinator {
     ///
     /// 常用字表**未加载**时返回 `None`（不筛），与 `retain_rare_admitted` 的同款保护
     /// 一致：那时全体候选都会被判成「非常用」，筛了等于没筛，还白付一次判定。
-    fn rare_admit_fn(
-        &self,
-        state: &State,
-    ) -> Option<std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>> {
+    fn rare_admit_fn(&self, state: &State) -> Option<AdmitFn> {
         if !matches!(state.active, Some(ModeKind::RareChar)) {
             return None;
         }

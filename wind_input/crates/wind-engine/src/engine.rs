@@ -111,6 +111,12 @@ pub struct ConvertResult {
     pub shadow_code: String,
 }
 
+/// [`ConvertOptions::admit`] 的候选准入判据。
+///
+/// 抽成别名是 `clippy::type_complexity` 的要求；`Arc` 而非 `Box` 是因为同一个判据要同时
+/// 交给引擎和调用方的兜底过滤（见 `Coordinator::rare_admit_fn`），两侧共享同一份闭包。
+pub type AdmitFn = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// 调用方按**路径**给拼音引擎的取舍覆写（[`Engine::convert_with_opts`]）。
 ///
 /// ## ⚠️ 为什么是参数而不是引擎配置
@@ -166,7 +172,7 @@ pub struct ConvertOptions {
     ///
     /// ⚠️ 判据函数在**每条候选**上调用，且在按键热路径内——实现必须便宜。
     /// 现有调用方（`rare_admits`）是两次表查询 + 一次位运算。
-    pub admit: Option<std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    pub admit: Option<AdmitFn>,
     /// 候选必须**消费整串输入**，否则在排序截断**之前**丢弃。
     ///
     /// ## ⚠️ 过滤必须发生在拼音引擎内部（截断之前）
