@@ -63,11 +63,23 @@ pub fn should_eat() -> bool {
 /// 而这段逻辑的两个方向后果**极不对称**——少吃只是「这次绑定没生效」，多吃是「用户在**别的
 /// 应用**里 CapsLock 按不动」。这种判据必须能脱离平台逐条断言。
 ///
-/// 规则只有三条：
+/// 规则四条。**配对状态优先于闸门**——闸门管「这一次按下要不要接管」，一旦接管了，
+/// 这次物理按下的余下事件（重复的 down、最后的 up）就都归我们，中途闸门关掉不改变归属：
 /// - down + 闸门开 → 吃，并记下「欠一个 up」；
-/// - down + 闸门关 → 放行，**不动**配对状态（此时没有欠账，也不该清掉别人的）；
-/// - up → 只看配对状态：欠着就吃并销账，没欠就放行。**刻意不问闸门**，因为绑定动作自己
-///   就可能在 down 与 up 之间把闸门关掉（选词上屏 ⇒ 候选清空 ⇒ 无会话）。
+/// - down + 闸门关 + **已欠 up** → 照吃。这是同一次物理按下的 auto-repeat：按住不放时
+///   系统会重复发 keydown，而绑定动作自己就可能在首个 down 与 up 之间把闸门关掉
+///   （选词上屏 ⇒ 候选清空 ⇒ 无会话）。放行这些重复 down 的后果是**每一次都翻转一下
+///   真正的大写锁定**，而最后那个 up 仍被吃掉 ⇒ 绑定动作照常生效，CapsLock 状态却悄悄
+///   变了，用户完全看不出是什么导致的；
+/// - down + 闸门关 + 没欠 → 放行，配对状态保持为空；
+/// - up → 只看配对状态：欠着就吃并销账，没欠就放行。**刻意不问闸门**，理由同上。
+///
+/// ⚠️ 这一条确实**扩大**了吃键范围，与「宁可少吃」的取向反向，所以要说清代价边界：
+/// `eaten_down` 只可能由我们自己吃下的那个 down 置位，所以扩大的范围**始终限于我们
+/// 已经拥有的那一次按下**，不会波及一次全新的按下——除非低级钩子丢过一个 up（系统
+/// `LowLevelHooksTimeout` 超时会摘掉钩子），那时下一次按下会被多吃掉。代价是有界且
+/// 自愈的：多吃的那次按下，它的 up 走第四条销账，此后恢复正常，最多一次。
+/// 相比之下漏放行是**每一次重复 down 都翻转一次锁定态**，无界。
 ///
 /// ⚠️ 唯一的生产使用者在 `#[cfg(windows)] mod imp` 里，单测又只在 `cfg(test)` 下存在，
 /// 故非 Windows 目标编 **lib** target 时它确实无人调用（CI 的 darwin clippy 会拦）。
@@ -75,11 +87,14 @@ pub fn should_eat() -> bool {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn decide_eat(is_down: bool, should_eat: bool, eaten_down: bool) -> (bool, bool) {
     if is_down {
-        if should_eat {
-            // 按住不放时系统重复发 keydown：重复置位是幂等的，最后那次 up 一并销账。
+        // ⛔ 不能只问 `should_eat`：按住不放时系统重复发 keydown，而闸门可能已被绑定
+        // 动作自己关掉，那些重复 down 就会漏给系统、每次翻转一下真正的大写锁定。
+        // `eaten_down` 在这里的含义是「这次物理按下已经归我们了」，它优先。
+        if should_eat || eaten_down {
+            // 重复置位是幂等的，最后那次 up 一并销账。
             (true, true)
         } else {
-            (false, eaten_down)
+            (false, false)
         }
     } else {
         (eaten_down, false)
@@ -281,11 +296,39 @@ mod tests {
         assert_eq!(decide_eat(false, true, false), (false, false));
     }
 
-    /// 闸门关时 down 放行，且**不动**配对状态：那时没有欠账，也不该清掉别人的。
+    /// 闸门关且**没有欠账**时 down 放行——这是本函数「宁可少吃」那一侧的主守卫：
+    /// 我们没接管过这次按下，就绝不能碰它。
     #[test]
-    fn down_with_gate_closed_passes_through_and_keeps_pairing_state() {
+    fn down_with_gate_closed_and_nothing_owed_passes_through() {
         assert_eq!(decide_eat(true, false, false), (false, false));
-        assert_eq!(decide_eat(true, false, true), (false, true));
+    }
+
+    /// ★ 回归：按住 CapsLock 不放、闸门中途关掉，重复的 keydown 必须**继续吃**。
+    ///
+    /// 这是 0.120 周期查出的静默缺陷。原判据只问 `should_eat`，于是
+    /// `decide_eat(true, false, true) == (false, true)`：绑定动作自己把闸门关掉后
+    /// （选词上屏 ⇒ 候选清空 ⇒ 无会话），用户只要按住超过系统的自动重复延迟，重复的
+    /// keydown 就漏给系统，**每一次都翻转一下真正的大写锁定**，而最后那个 up 仍被吃掉。
+    /// 表现是：绑定动作照常生效，CapsLock 状态却悄悄变了，且无任何日志。
+    ///
+    /// 判据改成「配对状态优先于闸门」：`eaten_down` 为真即表示这次物理按下已归我们，
+    /// 余下事件一律吃到底。它扩大的范围始终限于**已经拥有的那一次按下**，见函数文档
+    /// 里关于代价边界的那段。
+    #[test]
+    fn repeated_down_is_still_eaten_after_gate_closed_mid_press() {
+        let (eat, mut eaten) = decide_eat(true, true, false);
+        assert!(eat);
+        // 绑定动作在这里把闸门关了。用户还按着不放，系统开始重复发 down。
+        for i in 0..5 {
+            let (eat, next) = decide_eat(true, /* 闸门已关 */ false, eaten);
+            assert!(
+                eat,
+                "第 {i} 次重复 down 漏给了系统——每漏一次就翻转一次真正的大写锁定"
+            );
+            eaten = next;
+        }
+        // 最后的 up 照常销账，状态自愈。
+        assert_eq!(decide_eat(false, false, eaten), (true, false));
     }
 
     /// 按住不放：系统重复发 keydown，重复置位幂等，最后一次 up 一并销账。
