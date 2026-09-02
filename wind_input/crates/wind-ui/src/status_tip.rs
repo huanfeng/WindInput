@@ -7,7 +7,7 @@ use crate::manager::UiEvent;
 use crate::text::dwrite::TextRenderer;
 use crate::view::{Align, Edges, View, ViewImage, ViewLayer};
 use crate::window::LayeredWindow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
@@ -28,6 +28,9 @@ struct StatusTipMouse {
     drag_pin: Option<(i32, i32)>,
     /// 光标是否在气泡窗口内（`WM_MOUSEMOVE` 置 true / `WM_MOUSELEAVE` 置 false）。
     mouse_over: bool,
+    /// 上次**物理**光标屏幕坐标——过滤气泡自身出现/移动到光标下方引起的伪 `WM_MOUSEMOVE`。
+    /// 与候选窗 `CandidateMouse::last_cursor` 同构，见 [`StatusTipMouse::reset_hover`]。
+    last_cursor: (i32, i32),
     /// 是否已注册过 `WM_MOUSELEAVE` 追踪（一次性，收到 LEAVE 后需重新注册）。
     leave_armed: bool,
     /// 本气泡的右键菜单是否打开中。
@@ -60,6 +63,32 @@ impl StatusTipMouse {
             };
             let _ = TrackMouseEvent(&mut t);
         }
+    }
+
+    /// 物理移动门控：`cur` 与基线不同才算「用户真的动了鼠标」，此时更新基线并返回 true。
+    ///
+    /// 抽成独立方法是为了能脱离 Win32 消息与真实光标做守门测试，见本文件 `hover_gate_tests`。
+    fn accept_move(&mut self, cur: (i32, i32)) -> bool {
+        if cur == self.last_cursor {
+            return false;
+        }
+        self.last_cursor = cur;
+        true
+    }
+
+    /// 复位悬停状态，并**以当前物理光标位重建基线**。
+    ///
+    /// 两个调用点，职责不同，缺一不可（与候选窗 `CandidateMouse::reset_hover` 同构）：
+    /// - [`StatusTip::mark_visible`]（不可见 → 可见）：**基线在这里才有意义**。判据问的是
+    ///   「气泡出现之后鼠标动没动」，基准就必须取自气泡出现那一刻。
+    /// - [`StatusTip::hide`]：清掉悬停残留。隐藏时系统未必投出 `WM_MOUSELEAVE`，
+    ///   不清则 `mouse_over` 一直挂着 true，之后每次显示都被判成「交互中」而永不自动隐藏；
+    ///   `leave_armed` 同样残留会让 [`Self::arm_leave`] 一直早退，`WM_MOUSELEAVE` 再不会来。
+    ///   它顺带采的那次基线到下次显示时多半已过时，**不能当作基线的来源**。
+    fn reset_hover(&mut self) {
+        self.mouse_over = false;
+        self.leave_armed = false;
+        self.last_cursor = cursor_screen();
     }
 }
 
@@ -96,11 +125,20 @@ impl crate::window::WindowMouse for StatusTipMouse {
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE => {
+                // 物理移动门控：气泡自身出现在光标下方、或状态刷新时挪到光标下方，Windows
+                // 一样会投 WM_MOUSEMOVE（消息语义是「鼠标与本窗口的相对位置变了」，不是
+                // 「用户动了鼠标」），但此时物理光标屏幕坐标不变 → 忽略。
+                // 缺这一层，气泡只要弹在静止的鼠标指针上就被判成「悬停中」，
+                // `interacting()` 恒真、自动隐藏被无限顺延，气泡常显不消失。
+                if !self.accept_move(cursor_screen()) {
+                    return Some(LRESULT(0));
+                }
+                let cur = self.last_cursor;
                 // 悬停即视为交互中：光标停在气泡上时不该被自动隐藏抽走。
                 self.mouse_over = true;
                 self.arm_leave();
                 if self.dragging {
-                    let (mx, my) = cursor_screen();
+                    let (mx, my) = cur;
                     let nx = mx - self.grab_dx;
                     let ny = my - self.grab_dy;
                     let (w, h) = {
@@ -207,6 +245,9 @@ pub struct StatusTip {
     base_logical: f32,
     /// 拖动 + 右键菜单处理器（`show`/`show_fixed` 每次渲染后同步其 margin）。
     mouse: Rc<RefCell<StatusTipMouse>>,
+    /// 气泡当前是否可见。只为识别「不可见 → 可见」这一沿，好在那一刻重采悬停基线，
+    /// 见 [`StatusTip::mark_visible`]。用 `Cell` 是因为 [`StatusTip::hide`] 取 `&self`。
+    visible: Cell<bool>,
 }
 
 impl StatusTip {
@@ -225,6 +266,8 @@ impl StatusTip {
             margin: (0, 0),
             drag_pin: None,
             mouse_over: false,
+            // 构造初值只是占位：首次显示必经 `mark_visible` 重采基线（窗口此刻不可见）。
+            last_cursor: (i32::MIN, i32::MIN),
             leave_armed: false,
             menu_open: false,
         }));
@@ -244,7 +287,24 @@ impl StatusTip {
             theme: None,
             base_logical: Self::DEFAULT_FONT_PX,
             mouse,
+            visible: Cell::new(false),
         })
+    }
+
+    /// 标记气泡已显示；仅在**不可见 → 可见**这一沿重采悬停基线。
+    ///
+    /// 基线要回答的是「气泡出现之后鼠标动没动」，基准就只能取自气泡出现那一刻：
+    /// - 取自 `hide()`（上一次显示结束）必然过时——这期间用户多半移动过鼠标，气泡再弹出时
+    ///   系统投来的进入消息坐标与陈旧基线不同 → 被判成「用户真实移动了鼠标」；
+    /// - 取构造初值则进程内第一次显示必不相等，同样误判。
+    ///
+    /// 反过来，**已可见时不得重采**：连续切换状态时气泡只更新内容/位置，用户可能正悬停其上，
+    /// 此时重采基线会连同 `mouse_over` 一起清掉，把真实悬停也抹平。
+    fn mark_visible(&self) {
+        if !self.visible.get() {
+            self.mouse.borrow_mut().reset_hover();
+        }
+        self.visible.set(true);
     }
 
     /// DPI 动态化：按显示点所在显示器实时取缩放，变化则更新字号并按新缩放重解析主题几何。
@@ -403,6 +463,9 @@ impl StatusTip {
         let x = cx + off_x;
         let y = cy + gap + off_y;
         let (px, py) = clamp_below_or_above(x, y, cw, ch, cy, caret_h, gap);
+        // 基线采样刻意排在 `show` **之前**：窗口出现不会移动鼠标，两处取值物理上相同，
+        // 但排在前面就完全不依赖「`show` 内部不会泵到 WM_MOUSEMOVE」这个前提。
+        self.mark_visible();
         // 内容锚点 − 左/上 margin，阴影向四周溢出。
         self.window.show(px - ml as i32, py - mt as i32);
     }
@@ -421,6 +484,9 @@ impl StatusTip {
         }
         drop(m);
         let (ax, ay) = fixed_anchor(fx, fy, caret_x, caret_y, cw, ch);
+        // 同 `show`：基线采样排在 `window.show` 之前。固定位置模式尤其需要——气泡每次都弹在
+        // 同一坐标，鼠标停在那儿时若无门控，之后每一次提示都不会自动消失。
+        self.mark_visible();
         // 内容锚点 − 左/上 margin，阴影向四周溢出。
         self.window.show(ax - ml as i32, ay - mt as i32);
     }
@@ -474,6 +540,10 @@ impl StatusTip {
 
     pub fn hide(&self) {
         self.window.hide();
+        self.visible.set(false);
+        // 悬停残留必须在这里清：窗口隐藏时系统未必投出 WM_MOUSELEAVE，不清则 `mouse_over`
+        // 一直为 true，之后每次显示都被判成「交互中」而永不自动隐藏。
+        self.mouse.borrow_mut().reset_hover();
     }
 
     /// host-render：将状态气泡渲染到 BGRA buffer 并计算屏幕坐标（光标下方/上方）。
@@ -657,6 +727,79 @@ impl StatusTip {
         {
             1.0
         }
+    }
+}
+
+#[cfg(test)]
+mod hover_gate_tests {
+    //! 悬停防抖：**「收到 WM_MOUSEMOVE」不等于「用户动了鼠标」**。
+    //!
+    //! 该消息的语义是「鼠标与本窗口的相对位置变了」，气泡自己弹到静止的指针下方同样满足。
+    //! 少了物理坐标门控，气泡一弹在鼠标上就被判成悬停中，`interacting()` 恒真，
+    //! 主循环每轮把自动隐藏时刻顺延满一份 —— 表现为气泡常显不消失。
+
+    use super::StatusTipMouse;
+
+    fn mouse_at(baseline: (i32, i32)) -> StatusTipMouse {
+        // 接收端就地丢弃：本组测试只验状态迁移，不发任何 UiEvent。
+        let (tx, _) = std::sync::mpsc::channel();
+        StatusTipMouse {
+            hwnd: crate::sys::HWND::default(),
+            events: tx,
+            dragging: false,
+            grab_dx: 0,
+            grab_dy: 0,
+            margin: (0, 0),
+            drag_pin: None,
+            mouse_over: false,
+            last_cursor: baseline,
+            leave_armed: false,
+            menu_open: false,
+        }
+    }
+
+    /// 气泡出现/移动到静止指针下方：坐标与基线相同 → 不算移动。
+    #[test]
+    fn synthetic_move_at_same_cursor_is_rejected() {
+        let mut m = mouse_at((640, 480));
+        assert!(!m.accept_move((640, 480)));
+    }
+
+    /// 反向对照：真实移动必须放行，并把基线推进到新位置。
+    #[test]
+    fn real_move_is_accepted_and_advances_baseline() {
+        let mut m = mouse_at((640, 480));
+        assert!(m.accept_move((641, 480)));
+        assert_eq!(m.last_cursor, (641, 480));
+        // 放行后停在原地不动的后续消息又该被挡住。
+        assert!(!m.accept_move((641, 480)));
+    }
+
+    /// `reset_hover` 清悬停残留：隐藏时系统未必投 WM_MOUSELEAVE，不清则下次显示直接被判交互中。
+    #[test]
+    fn reset_hover_clears_over_and_leave_arm() {
+        let mut m = mouse_at((0, 0));
+        m.mouse_over = true;
+        m.leave_armed = true;
+        assert!(m.interacting(), "反向对照：悬停中确实算交互");
+        m.reset_hover();
+        assert!(!m.mouse_over);
+        assert!(
+            !m.leave_armed,
+            "不清则 arm_leave 永远早退，LEAVE 再也不会来"
+        );
+        assert!(!m.interacting());
+    }
+
+    /// 拖动与右键菜单不受门控影响，仍各自独立地维持「交互中」。
+    #[test]
+    fn drag_and_menu_still_hold_interacting() {
+        let mut m = mouse_at((0, 0));
+        m.dragging = true;
+        assert!(m.interacting());
+        m.dragging = false;
+        m.menu_open = true;
+        assert!(m.interacting());
     }
 }
 
