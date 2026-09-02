@@ -75,6 +75,23 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
   完整条款见 https://www.unicode.org/license.txt。若将来启用该功能，其产物可
   直接入库——本许可证无 copyleft 传染性
 
+#### rime-emoji（候选 emoji 扩展）
+
+- **用途**: 「打出词组后在候选里追加对应 emoji」的映射表（`词 → emoji…`），出厂关闭。
+  设计见 `docs/design/emoji-suggestion.md`
+- **仓库**: https://github.com/rime/rime-emoji
+- **许可证**: **LGPL-3.0**
+- **使用的文件**: `opencc/emoji_word.txt`（4668 行）、`opencc/emoji_category.txt`（165 行）、
+  `LICENSE`
+- **加工方式**: **不加工**。三个文件由 `scripts/dev.*` 的 gen-data 下载到 `.cache/rime-emoji/`，
+  再**原样**复制进发行版 `data/emoji/`，逐字节未改
+- **★ 与 rime-stroke 的处理刻意不同**: 笔画表在构建期转换（剥 YAML 头、裁剪字集），产物是
+  衍生作品；本表则原样分发，我们交付的是**逐字副本**，LGPL 关于修改版的义务（标注修改、
+  提供对应源）因此不触发。繁→简归一、同键合并与二进制化全部推迟到**用户本机**首次启用时
+  进行，其产物是本机缓存，从不离开用户机器 ⇒ 不构成 conveying
+- **⛔ 不得嵌入可执行文件**: 一旦 `include_bytes!` 进 exe 即构成 LGPL §4 的 Combined Work，
+  需另行提供让用户替换该部分的机制；保持独立数据文件则该节整节不适用
+
 #### rime-stroke（笔画辅助码）
 
 - **用途**: 辅助码功能的笔画码表（拼音候选的字形二次筛选，出厂关闭）
@@ -170,6 +187,18 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
 GPL-3.0 许可的词库数据（rime-frost）与 LGPL-3.0 许可的笔画码表（rime-stroke）
 不包含在本仓库中，而是在构建过程中作为外部数据依赖从原始仓库下载；发行版中包含
 由其生成的数据文件，该部分数据分别适用 GPL-3.0 / LGPL-3.0 条款。
+
+LGPL-3.0 许可的 emoji 映射表（rime-emoji）同样不入库，但发行版中包含的是其
+**未经修改的原始文件**（`data/emoji/`），适用 LGPL-3.0 条款，并随附上游 LICENSE 全文。
+
+发行版的 `licenses/` 目录含本文件与本项目自身的 LICENSE，`data/emoji/LICENSE` 为
+rime-emoji 的 LGPL-3.0 全文。该目录为履行「向每一位接收者提供许可证副本」
+（GPL-3.0 §4、LGPL-3.0、Apache-2.0 §4(a)）而设，打包时不得省略。
+
+⚠️ **尚未补全**：除 rime-emoji 外，其余 copyleft 上游（rime-frost 的 GPL-3.0、
+rime-stroke 的 LGPL-3.0）与 Apache-2.0 上游的许可证**全文**目前未随包分发——本文件
+的逐条声明不等于许可证副本。补齐方式是在 `scripts/dev.*` 的 gen-data 里逐个下载上游
+LICENSE 并复制进 `licenses/`。
 
 Apache-2.0（极点五笔码表）与 Unicode-3.0（Unicode CLDR，当前仅研究用）
 均为宽松许可证，允许修改后再分发，其加工产物可直接包含在本仓库中，

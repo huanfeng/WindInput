@@ -387,7 +387,9 @@ function Download-Dicts {
     $rimeWubi    = "$CacheDir\rime-wubi"
     $cldr        = "$CacheDir\cldr"
     $auxCode     = "$CacheDir\aux-code"
-    foreach ($d in @($rimeFrostCn, $rimeFrostEn, $opencc, $pinyinData, $rimeWubi, $cldr, $auxCode)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+    $rimeEmoji   = "$CacheDir\rime-emoji"
+    $rimeEmojiCc = "$rimeEmoji\opencc"
+    foreach ($d in @($rimeFrostCn, $rimeFrostEn, $opencc, $pinyinData, $rimeWubi, $cldr, $auxCode, $rimeEmojiCc)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 
     $frostBase = "https://raw.githubusercontent.com/gaboolic/rime-frost/master"
     Gray "rime-frost (拼音):"
@@ -465,6 +467,20 @@ function Download-Dicts {
     Get-Dict "$openccBase/TWVariants.txt"   "$opencc\TWVariants.txt"   "台湾字形"   | Out-Null
     Get-Dict "$openccBase/TWPhrases.txt"    "$opencc\TWPhrases.txt"    "台湾词汇"   | Out-Null
     Get-Dict "$openccBase/HKVariants.txt"   "$opencc\HKVariants.txt"   "香港字形"   | Out-Null
+
+    # Emoji 候选扩展 (设计见 docs\design\emoji-suggestion.md, 出厂关闭)。
+    # ⚠️ rime-emoji 是 LGPL-3.0, 与本仓 MIT 不同。政策与 rime-stroke 一致 —— 只下载不入库;
+    #    但**分发方式刻意不同**: 本表随发行版**原样**分发 (不做构建期转换), 我们分发的因此是
+    #    逐字副本而非衍生作品, LGPL 的修改版义务不触发。繁->简归一与二进制化都在**用户本机**
+    #    首次启用时进行, 产物是本机缓存, 从不离开用户机器 => 不构成 conveying。
+    #    详见 NOTICE.md 与设计文档 §3.5。⛔ 切勿 include_bytes! 嵌进 exe (会构成 LGPL §4
+    #    Combined Work, 须另行提供重新链接机制)。
+    $emojiBase = "https://raw.githubusercontent.com/rime/rime-emoji/master"
+    Gray "rime-emoji (候选扩展):"
+    Get-Dict "$emojiBase/opencc/emoji_word.txt"     "$rimeEmojiCc\emoji_word.txt"     "词->emoji"   | Out-Null
+    Get-Dict "$emojiBase/opencc/emoji_category.txt" "$rimeEmojiCc\emoji_category.txt" "分类->emoji" | Out-Null
+    # 许可证全文必须随数据一起分发 (GPL-3.0 §4: give all recipients a copy of this License)。
+    Get-Dict "$emojiBase/LICENSE"                   "$rimeEmoji\LICENSE"              "LGPL-3.0"    | Out-Null
     return $true
 }
 
@@ -555,6 +571,26 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
             if ($LASTEXITCODE -ne 0) { Warn "辅助码表生成失败 (辅助码功能不可用)" }
         } finally { Pop-Location }
     } else { Warn "缺 .cache\aux-code\, 辅助码不可用 (运行 gen-data 下载)" }
+
+    # 8. Emoji 候选扩展表: **原样复制**, 不做任何构建期转换 (与 5/6/7 的生成物刻意不同)。
+    #    繁->简归一、撞键合并与二进制化全部推迟到用户本机首次启用时 —— 这样我们分发的是
+    #    LGPL 原文的逐字副本, 而非衍生作品 (见 NOTICE.md 与 design\emoji-suggestion.md §3.5)。
+    #    LICENSE 必须一并复制: 缺了它这份分发就不合规。
+    #    功能出厂关闭, 故缺表只是「emoji 扩展用不了」, 用 Warn 不中断构建。
+    $emojiCache = "$CacheDir\rime-emoji"
+    if (Test-Path "$emojiCache\opencc\emoji_word.txt") {
+        Gray "复制 emoji 扩展表 (原样) ..."
+        $emojiOut = "$data\emoji"
+        New-Item -ItemType Directory -Path $emojiOut -Force | Out-Null
+        Copy-Item "$emojiCache\opencc\emoji_word.txt"     "$emojiOut\" -Force
+        # 分类表可缺 (出厂关), 缺了不影响主表。
+        if (Test-Path "$emojiCache\opencc\emoji_category.txt") {
+            Copy-Item "$emojiCache\opencc\emoji_category.txt" "$emojiOut\" -Force
+        }
+        if (Test-Path "$emojiCache\LICENSE") {
+            Copy-Item "$emojiCache\LICENSE" "$emojiOut\LICENSE" -Force
+        } else { Warn "缺 rime-emoji LICENSE, 该数据不得分发 (重跑 gen-data)" }
+    } else { Warn "缺 .cache\rime-emoji\, emoji 扩展不可用 (运行 gen-data 下载)" }
 
     $cnt = (Get-ChildItem $data -Recurse -File).Count
     Gray "data/ 组装完成 ($cnt 文件)"

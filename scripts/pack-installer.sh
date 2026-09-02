@@ -127,6 +127,20 @@ for f in "${companions[@]}"; do
 done
 cp -f  "$UNINSTALLER"                "$STAGE/uninstall.exe"
 
+# ---- 许可证副本 ----------------------------------------------------------
+# GPL-3.0 §4 / LGPL-3.0 / Apache-2.0 §4(a) 都要求向每一位接收者提供许可证副本。
+# 发行版带着 rime-frost(GPL-3.0)、rime-stroke(LGPL-3.0)、rime-emoji(LGPL-3.0) 等
+# 上游数据, 此前 staging 里却没有任何 LICENSE/NOTICE —— 这个目录补的就是那个缺口。
+# NOTICE.md 逐条说明了每个上游的用途、许可证与加工方式(含各自 LICENSE 的所在位置)。
+#
+# ⚠️ 尚未补全: 除 rime-emoji 外, 其余上游的许可证**全文**目前未随包分发(NOTICE 只是
+#    声明, 不等于副本)。补齐需在 gen-data 里逐个下载上游 LICENSE, 属独立的合规工作,
+#    不在本次改动范围内 —— 见 NOTICE.md 的「许可证兼容性说明」。
+mkdir -p "$STAGE/licenses"
+cp -f "$PRODUCT_ROOT/LICENSE"   "$STAGE/licenses/LICENSE"    # 本项目自身 (MIT)
+cp -f "$PRODUCT_ROOT/NOTICE.md" "$STAGE/licenses/NOTICE.md"
+# rime-emoji 的 LGPL-3.0 全文随数据一同分发, 紧贴 data/emoji/ (assemble_data 复制)。
+
 # ---- 打包:wind-packer build（pack + bundle 一步）----
 # config/app.toml 由 WindInput 持有；version/source-dir/compression 通过 CLI 注入，
 # 不修改任何文件。

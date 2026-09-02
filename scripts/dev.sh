@@ -412,6 +412,22 @@ download_dicts() {
         "$aux_code/charset/《通用规范汉字表》（2013年）.txt" "字集: 通用规范汉字表"
     download_file "$HANZI_BASE/data-unicode/Unicode-CJK%20%E3%80%87.txt" \
         "$aux_code/charset/Unicode-CJK 〇.txt" "字集: 〇"
+
+    # Emoji 候选扩展（设计见 docs/design/emoji-suggestion.md，出厂关闭）。
+    # ⚠️ rime-emoji 是 LGPL-3.0，与本仓 MIT 不同。政策与 rime-stroke 一致 —— 只下载不入库；
+    #    但**分发方式刻意不同**：本表随发行版**原样**分发（不做构建期转换），我们分发的因此是
+    #    逐字副本而非衍生作品，LGPL 的修改版义务不触发。繁→简归一与二进制化都在**用户本机**
+    #    首次启用时进行，产物是本机缓存，从不离开用户机器 ⇒ 不构成 conveying。
+    #    详见 NOTICE.md 与设计文档 §3.5。⛔ 切勿 include_bytes! 嵌进 exe（会构成 LGPL §4
+    #    Combined Work，须另行提供重新链接机制）。
+    local rime_emoji="$CACHE_DIR/rime-emoji"
+    mkdir -p "$rime_emoji/opencc"
+    local EMOJI_BASE="https://raw.githubusercontent.com/rime/rime-emoji/master"
+    gray "rime-emoji (候选扩展):"
+    download_file "$EMOJI_BASE/opencc/emoji_word.txt"     "$rime_emoji/opencc/emoji_word.txt"     "词→emoji"
+    download_file "$EMOJI_BASE/opencc/emoji_category.txt" "$rime_emoji/opencc/emoji_category.txt" "分类→emoji"
+    # 许可证全文必须随数据一起分发（GPL-3.0 §4: give all recipients a copy of this License）。
+    download_file "$EMOJI_BASE/LICENSE"                   "$rime_emoji/LICENSE"                   "LGPL-3.0"
 }
 
 # 从 data/（源）+ .cache/（下载/生成）组装完整运行时数据到 $outdir/data/
@@ -508,6 +524,28 @@ assemble_data() {
             || warn "辅助码表生成失败（辅助码功能不可用）"
     else
         warn "缺 .cache/aux-code/，辅助码不可用（运行 gen-data 下载）"
+    fi
+
+    # 8. Emoji 候选扩展表：**原样复制**，不做任何构建期转换（与 5/6/7 的生成物刻意不同）。
+    # 繁→简归一、撞键合并与二进制化全部推迟到用户本机首次启用时 —— 这样我们分发的是
+    # LGPL 原文的逐字副本，而非衍生作品（见 NOTICE.md 与 design/emoji-suggestion.md §3.5）。
+    # LICENSE 必须一并复制：缺了它这份分发就不合规。
+    # 功能出厂关闭，故缺表只是「emoji 扩展用不了」，用 warn 不中断构建。
+    local emoji_cache="$CACHE_DIR/rime-emoji"
+    if [ -f "$emoji_cache/opencc/emoji_word.txt" ]; then
+        gray "复制 emoji 扩展表 (原样) ..."
+        mkdir -p "$data/emoji"
+        cp -f "$emoji_cache/opencc/emoji_word.txt" "$data/emoji/"
+        # 分类表可缺（出厂关），缺了不影响主表。
+        [ -f "$emoji_cache/opencc/emoji_category.txt" ] \
+            && cp -f "$emoji_cache/opencc/emoji_category.txt" "$data/emoji/"
+        if [ -f "$emoji_cache/LICENSE" ]; then
+            cp -f "$emoji_cache/LICENSE" "$data/emoji/LICENSE"
+        else
+            warn "缺 rime-emoji LICENSE，该数据不得分发（重跑 gen-data）"
+        fi
+    else
+        warn "缺 .cache/rime-emoji/，emoji 扩展不可用（运行 gen-data 下载）"
     fi
 
     gray "data/ 组装完成 ($(find "$data" -type f | wc -l) 文件)"

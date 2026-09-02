@@ -36,6 +36,11 @@ data/schemas/wubi86/*.dict.yaml
 # ⚠️ 笔画表上游 rime-stroke 是 LGPL-3.0, 按 NOTICE.md 的政策不得入库
 data/schemas/aux_code/
 
+# emoji 扩展表由 gen-data 从 .cache/rime-emoji/ 原样复制, 不入库
+# ⚠️ 上游 rime-emoji 是 LGPL-3.0, 同上不得入库。与 aux_code 不同的是它**不做**构建期
+# 转换 —— 随发行版原样分发, 归一在用户本机进行 (见 docs/design/emoji-suggestion.md §3.5)
+data/emoji/
+
 # scripts/lm/ 的分析脚本跑一次就会留字节码缓存
 __pycache__/
 *.pyc
