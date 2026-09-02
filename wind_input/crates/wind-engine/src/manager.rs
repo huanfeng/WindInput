@@ -1374,6 +1374,7 @@ impl EngineManager {
     ///
     /// 返回与 `words` **同序等长**；取不到码的位置为空串——调用方靠下标把码配回词，
     /// 跳过失败项会让其后所有词错位配到别人的码上。
+    /// **单字**直取其全码（不走词组公式，见函数体注释）；多字按方案公式组装。
     pub fn encode_words(&self, schema_id: &str, words: &[&str]) -> Vec<String> {
         let spec = Self::read_schema(
             schema_id,
@@ -1386,15 +1387,29 @@ impl EngineManager {
         let mut failed = 0usize;
         let out: Vec<String> = words
             .iter()
-            .map(
-                |w| match encoder::calc_word_code(w, &spec, |c| codes.get(&c).cloned()) {
+            .map(|w| {
+                // 单字**不进词组公式**：`calc_word_code` 做的是「按方案 `[[encoder.rules]]`
+                // 从各字全码组装」，开头就 `if chars.len() < 2 { TooShort }`，而 rules 本身
+                // 也不会为 len=1 定公式——单字要的码就是它自己的全码，恰恰躺在上面这张
+                // `codes` 表里。
+                //
+                // 少了这一支，「给某个字补一条编码」这个加词界面上最常见的输入，在所有
+                // 码表方案（以及走码表分支的混输方案）下**恒定出不了码**，用户只能手填。
+                let mut cs = w.chars();
+                if let (Some(c), None) = (cs.next(), cs.next()) {
+                    return codes.get(&c).cloned().unwrap_or_else(|| {
+                        failed += 1;
+                        String::new()
+                    });
+                }
+                match encoder::calc_word_code(w, &spec, |c| codes.get(&c).cloned()) {
                     Ok(code) => code,
                     Err(_) => {
                         failed += 1;
                         String::new()
                     }
-                },
-            )
+                }
+            })
             .collect();
         // 逐条打日志在万级批量下反而淹没有用信息，只汇总一行。
         if failed > 0 {

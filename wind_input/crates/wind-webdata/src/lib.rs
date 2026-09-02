@@ -1735,7 +1735,8 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!({ "codes": self.encode_texts(schema, &texts) }))
     }
 
-    /// 出码统一入口：拼音类方案出拼音码，其余（码表）按方案 `[[encoder.rules]]` 出词组码。
+    /// 出码统一入口：拼音类方案出拼音码，其余（码表/混输）按方案 `[[encoder.rules]]` 出词组码，
+    /// **单字直取其全码**（词组公式不接受单字，见 `EngineManager::encode_words`）。
     /// 返回与 `texts` 同序等长，失败位置为空串。
     ///
     /// 一次性准备（读方案 / 取引擎句柄）都在这一层之下完成，故传一个词与传一万个词

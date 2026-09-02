@@ -155,3 +155,33 @@ fn encode_words_handles_empty_and_missing_texts() {
     // schemaId 缺失是调用方错误，应报错而非静默出空码。
     assert!(c.web_data_rpc("dict.encodeWords", &json!({})).is_err());
 }
+
+/// 单字出码：加词界面最常见的一类输入（给某个字补一条编码），两类引擎都必须出得来。
+///
+/// 码表这一侧曾整体失效：`dict.encode` 对非拼音方案走 `encode_words` → `calc_word_code`，
+/// 而后者是**词组**取码（按方案 `[[encoder.rules]]` 的公式从各字全码组装），开头就有
+/// `if chars.len() < 2 { return Err(TooShort) }`——单字压根不进公式。可单字全码本就在
+/// `single_char_full_codes` 里躺着，`encode_words` 上一行才刚取过。
+#[test]
+fn single_char_encodes_for_both_engine_kinds() {
+    // 逐条断言会在第一个引擎上就停住，看不到另一条的实况；先收全再一起报。
+    let mut empty = Vec::new();
+    let mut mismatch = Vec::new();
+    for (schema, ch) in [("wubi86", "工"), ("pinyin", "你")] {
+        if !has_schema(schema) {
+            continue;
+        }
+        let c = coord(schema);
+        let code = code_of(&c, schema, ch);
+        if code.is_empty() {
+            empty.push(format!("{schema}/{ch}"));
+        }
+        // 与批量通道同口径（同 `encode_texts`），两条路不得对同一个字给两种答案。
+        let batch = codes_of(&c, schema, &[ch]);
+        if batch != vec![code.clone()] {
+            mismatch.push(format!("{schema}/{ch}: 单条={code:?} 批量={batch:?}"));
+        }
+    }
+    assert!(empty.is_empty(), "这些单字出不了码: {empty:?}");
+    assert!(mismatch.is_empty(), "单条与批量出码不一致: {mismatch:?}");
+}
