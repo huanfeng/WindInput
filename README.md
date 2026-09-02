@@ -32,13 +32,18 @@
 - **图形设置** — 配套设置工具，配置可视化调整，修改即时生效
 - **亮暗主题** — 支持亮色和暗色主题，可随系统自动切换
 - **轻量运行** — Rust 实现，资源占用低，启动迅速
+- **跨平台** — 同一套核心引擎，支持 Windows 10/11 与 macOS 12+
 
 ## 安装
 
-前往 [windinput.com/download](https://windinput.com/download) 下载 Windows 安装包，
-双击安装后按 `Win + Space` 切换到清风输入法。
+前往 [windinput.com/download](https://windinput.com/download) 下载对应平台的安装包：
 
-macOS 目前仅支持从源码构建，暂未提供安装包。
+- **Windows 10/11（64 位）** — 安装版或便携版，安装后按 `Win + Space` 切换到清风输入法
+- **macOS 12+** — `.pkg` 通用安装包（Apple Silicon / Intel），安装后在
+  「系统设置 → 键盘 → 文本输入 → 编辑」中添加清风输入法，再从输入法菜单切换
+
+两个平台的安装包目前均未经过系统签名，首次运行时若被 SmartScreen 或 Gatekeeper 拦截，
+按系统提示放行即可。
 
 ## 文档
 
@@ -59,9 +64,12 @@ macOS 目前仅支持从源码构建，暂未提供安装包。
 | 仓库 | 技术 | 职责 | 开源状态 |
 |------|------|------|----------|
 | [wind-installer](https://github.com/huanfeng/wind-installer) | Rust | Windows 安装器与卸载器（清单驱动的通用打包器） | 已开源 |
-| [wind-portable](https://github.com/huanfeng/wind-portable) | Rust | 便携版（绿色版）启动器，免安装就地运行 | 已开源 |
+| [wind-portable](https://github.com/huanfeng/wind-portable) | Rust | Windows 便携版（绿色版）启动器，免安装就地运行 | 已开源 |
 | [wind-ui-rust](https://github.com/huanfeng/wind-ui-rust) | Rust | 跨平台轻量 GUI 库，安装器 / 便携版 / 设置程序的界面基础 | 已开源 |
 | wind-setting | Rust | 图形设置程序 | 暂未开源 |
+
+其中 wind-installer 与 wind-portable 只用于 Windows；macOS 的 `.pkg` 安装包由本仓库的
+`scripts/mac/dev.sh pkg` 直接打包，无需额外仓库。
 
 这些配套项目都是可选的：与本仓库放在同级目录时构建脚本会一并构建，缺失则自动跳过，
 核心输入法本身可独立构建和运行。完整成品请从[下载页](https://windinput.com/download)获取。
