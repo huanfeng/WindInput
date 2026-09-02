@@ -172,6 +172,36 @@ UNIVERSAL="${WIND_MAC_UNIVERSAL:-0}"
 # 才暴露。'universal' 不是合法 target triple, 与 cargo 自己的 target/<triple>/ 不会撞名。
 UNIVERSAL_SUBDIR="universal"
 
+# cargo 项目的 target 目录 (产物落点)。
+#
+# 不能拼 "$proj/target" —— 本机若在 ~/.cargo/config.toml 里设了 build.target-dir
+# (三个 Rust 项目共用一份依赖编译产物, 省下几十 G 磁盘), 或设了 CARGO_TARGET_DIR,
+# 产物就根本不在项目目录内, 硬拼出来的路径会指向一个空壳或上一次的旧二进制。
+# 向 cargo 自己要这个值是唯一可靠来源: 各设备的共享目录路径不同也无需改脚本,
+# 没设共享时它返回的就是 <项目>/target, 与旧行为完全一致。
+# cargo/jq 缺失时回落硬拼, 保证脚本在裸环境仍可用。
+#
+# 结果按项目缓存 (bash 3.2 无关联数组, 故用两个专用变量; macOS 自带的就是 3.2)。
+_TDIR_RUST=""
+_TDIR_SETTING=""
+cargo_target_dir() {
+    local proj="$1" d=""
+    case "$proj" in
+        "$RUST_DIR")    d="$_TDIR_RUST" ;;
+        "$SETTING_DIR") d="$_TDIR_SETTING" ;;
+    esac
+    if [[ -z "$d" ]]; then
+        d="$( cd "$proj" 2>/dev/null && cargo metadata --format-version 1 --no-deps 2>/dev/null \
+              | jq -r '.target_directory // empty' 2>/dev/null )" || d=""
+        [[ -n "$d" ]] || d="$proj/target"
+        case "$proj" in
+            "$RUST_DIR")    _TDIR_RUST="$d" ;;
+            "$SETTING_DIR") _TDIR_SETTING="$d" ;;
+        esac
+    fi
+    printf '%s\n' "$d"
+}
+
 # 仓库根 docs/VERSION (CI 由 tag 写入) 的规范化读取: 去 BOM 与空白, 读不到则输出空串。
 # 版本真源只此一处, IME 壳 / 设置壳 / pkg / wind-setting 的 build.rs 都从这里取同一个值。
 repo_version() {
@@ -185,7 +215,8 @@ repo_version() {
 # 失败一律返回非零 —— 见文件末 run_tokens 处说明, 本脚本的 errexit 不可依赖, 调用方须显式判。
 cargo_build_universal() {
     local proj="$1" sub="$2" bin="$3"; shift 3
-    local out="$proj/target/$UNIVERSAL_SUBDIR/$sub/$bin"
+    local tdir; tdir="$(cargo_target_dir "$proj")"
+    local out="$tdir/$UNIVERSAL_SUBDIR/$sub/$bin"
     local t parts=()
     for t in aarch64-apple-darwin x86_64-apple-darwin; do
         bold "==> cargo build --target $t ($bin)"
@@ -195,7 +226,7 @@ cargo_build_universal() {
             err "(本机若是 homebrew 装的 rust 则没有 rustup, 加不了 target —— 通用构建请走 CI)"
             return 1
         fi
-        parts+=("$proj/target/$t/$sub/$bin")
+        parts+=("$tdir/$t/$sub/$bin")
     done
     mkdir -p "$(dirname "$out")"
     if ! lipo -create -output "$out" "${parts[@]}"; then
@@ -220,10 +251,11 @@ build_service() {
 
 # 服务二进制的路径 (随 universal 开关变)。pkg 打包与安装都从这里取, 避免两处各拼一遍。
 service_bin_path() {
+    local tdir; tdir="$(cargo_target_dir "$RUST_DIR")"
     if [[ $UNIVERSAL -eq 1 ]]; then
-        echo "$RUST_DIR/target/$UNIVERSAL_SUBDIR/$PROFILE_SUBDIR/wind_input"
+        echo "$tdir/$UNIVERSAL_SUBDIR/$PROFILE_SUBDIR/wind_input"
     else
-        echo "$RUST_DIR/target/$PROFILE_SUBDIR/wind_input"
+        echo "$tdir/$PROFILE_SUBDIR/wind_input"
     fi
 }
 
@@ -505,13 +537,13 @@ build_setting() {
             ${cargo_flags[@]+"${cargo_flags[@]}"} || {
             err "wind_setting 通用构建失败 (见上; 非致命, 设置 app 将缺失)"; return 1
         }
-        BIN_PATH="$SETTING_DIR/target/$UNIVERSAL_SUBDIR/$cargo_sub/wind_setting"
+        BIN_PATH="$(cargo_target_dir "$SETTING_DIR")/$UNIVERSAL_SUBDIR/$cargo_sub/wind_setting"
     else
         bold "==> 编译 wind_setting ($VARIANT, native)"
         ( cd "$SETTING_DIR" && cargo build ${cargo_flags[@]+"${cargo_flags[@]}"} ) || {
             err "wind_setting 构建失败 (见上; 非致命, 设置 app 将缺失)"; return 1
         }
-        BIN_PATH="$SETTING_DIR/target/$cargo_sub/wind_setting"
+        BIN_PATH="$(cargo_target_dir "$SETTING_DIR")/$cargo_sub/wind_setting"
     fi
     [[ -x "$BIN_PATH" ]] || { err "未找到 wind_setting 二进制: $BIN_PATH"; return 1; }
     info "binary: $BIN_PATH ($(stat -f%z "$BIN_PATH") bytes)"
@@ -1247,7 +1279,7 @@ EOF
 # variant::is_dev() 无法从 exe 文件名判定 → 必须靠 plist 里 WIND_VARIANT=dev 声明,
 # Rust 才会用 WindInputDev 数据目录 + _dev 管道后缀, 与 dev .app (bundleID …Dev) 连通。
 service_install() {
-    local RUST_TARGET="$REPO_DIR/wind_input/target"
+    local RUST_TARGET; RUST_TARGET="$(cargo_target_dir "$RUST_DIR")"
     local LOG_DIR="$HOME/Library/Logs"
     local GUI_DOMAIN="gui/$(id -u)"
 
