@@ -124,6 +124,40 @@ cargo_xwin() {
 # 输出目录：release → BUILD_DIR；dev → BUILD_DEV_DIR。
 out_for() { [ "${1:-release}" = dev ] && echo "$BUILD_DEV_DIR" || echo "$BUILD_DIR"; }
 
+# cargo 项目的 target 目录 (产物落点)。
+#
+# 不能拼 "$proj/target" —— 本机若在 ~/.cargo/config.toml 里设了 build.target-dir
+# (几个 Rust 项目共用一份依赖编译产物, 省下几十 G 磁盘), 或设了 CARGO_TARGET_DIR,
+# 产物就根本不在项目目录内, 硬拼出来的路径会指向一个空壳, 或上一次的旧二进制 ——
+# 后者更坏: 构建报成功、推过去的却是旧的。
+# 向 cargo 自己要这个值是唯一可靠来源: 各设备的共享目录路径不同也无需改脚本,
+# 没设共享时它返回的就是 <项目>/target, 与旧行为完全一致。
+# cargo/jq 缺失时回落硬拼, 保证脚本在裸环境仍可用。
+#
+# 结果按项目缓存 (与 scripts/mac/dev.sh 的同名函数同法: 逐项目专用变量)。
+_TDIR_CORE=""
+_TDIR_SETTING=""
+_TDIR_PORTABLE=""
+cargo_target_dir() {
+    local proj="$1" d=""
+    case "$proj" in
+        "$PROJECT_ROOT")  d="$_TDIR_CORE" ;;
+        "$SETTING_DIR")   d="$_TDIR_SETTING" ;;
+        "$PORTABLE_DIR")  d="$_TDIR_PORTABLE" ;;
+    esac
+    if [ -z "$d" ]; then
+        d="$( cd "$proj" 2>/dev/null && cargo metadata --format-version 1 --no-deps 2>/dev/null \
+              | jq -r '.target_directory // empty' 2>/dev/null )" || d=""
+        [ -n "$d" ] || d="$proj/target"
+        case "$proj" in
+            "$PROJECT_ROOT")  _TDIR_CORE="$d" ;;
+            "$SETTING_DIR")   _TDIR_SETTING="$d" ;;
+            "$PORTABLE_DIR")  _TDIR_PORTABLE="$d" ;;
+        esac
+    fi
+    printf '%s\n' "$d"
+}
+
 # 模块一：wind_input 核心 exe。
 # dev 变体 = dev-variant profile（继承 dev 优化 + 关 debug_assertions）；源码与 release 完全一致：
 #   ① debug_assertions 关闭 → windows_subsystem="windows" 生效，无控制台窗口；
@@ -136,7 +170,7 @@ build_core() {
     say "\n[core] 交叉编译 wind_input ($prof, $TARGET)..."
     cargo_xwin build --profile "$prof" --target "$TARGET" -p wind_service \
         || { err "wind_input 构建失败!"; return 1; }
-    local src="$PROJECT_ROOT/target/$TARGET/$prof/wind_input.exe"
+    local src="$(cargo_target_dir "$PROJECT_ROOT")/$TARGET/$prof/wind_input.exe"
     [ -f "$src" ] || { err "未找到产物: $src"; return 1; }
     cp -f "$src" "$outdir/wind_input${suffix}.exe"
     gray "已构建: wind_input${suffix}.exe ($(du -h "$outdir/wind_input${suffix}.exe" | cut -f1))"
@@ -167,7 +201,7 @@ build_setting() {
     export WIND_APP_VERSION="$VERSION"   # 版本注入: docs/VERSION → wind-setting (与主仓统一)
     cargo_xwin "${cargo_args[@]}" || { err "wind_setting 构建失败!"; return 1; }
 
-    local src="$SETTING_DIR/target/$TARGET/$target_dir/wind_setting.exe"
+    local src="$(cargo_target_dir "$SETTING_DIR")/$TARGET/$target_dir/wind_setting.exe"
     [ -f "$src" ] || { err "未找到产物: $src"; return 1; }
     cp -f "$src" "$outdir/wind_setting${suffix}.exe"
     gray "已构建: wind_setting${suffix}.exe ($(du -h "$outdir/wind_setting${suffix}.exe" | cut -f1))"
@@ -187,7 +221,7 @@ build_portable() {
     export WIND_APP_VERSION="$VERSION"   # 版本注入: docs/VERSION → wind-portable (与主仓统一)
     cargo_xwin build --release --target "$TARGET" || { err "wind_portable 构建失败!"; return 1; }
 
-    local src="$PORTABLE_DIR/target/$TARGET/release/wind_portable.exe"
+    local src="$(cargo_target_dir "$PORTABLE_DIR")/$TARGET/release/wind_portable.exe"
     [ -f "$src" ] || { err "未找到产物: $src"; return 1; }
     cp -f "$src" "$outdir/wind_portable.exe"
     gray "已构建: wind_portable.exe ($(du -h "$outdir/wind_portable.exe" | cut -f1))"

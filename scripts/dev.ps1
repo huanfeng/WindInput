@@ -130,6 +130,36 @@ function Gray ([string]$m) { Write-Host $m -ForegroundColor DarkGray }
 # release → BUILD_DIR; dev → BUILD_DEV_DIR
 function Out-For ([string]$profile) { if ($profile -eq "dev") { $BuildDevDir } else { $BuildDir } }
 
+# cargo 项目的 target 目录 (产物落点)。
+#
+# 不能拼 "<项目>\target" —— 本机若在 ~/.cargo/config.toml 里设了 build.target-dir
+# (几个 Rust 项目共用一份依赖编译产物, 省下几十 G 磁盘), 或设了 CARGO_TARGET_DIR,
+# 产物就根本不在项目目录内, 硬拼出来的路径会指向一个空壳, 或上一次的旧二进制 ——
+# 后者更坏: 构建报成功、装上去的却是旧的。
+#
+# 向 cargo 自己要这个值是唯一可靠来源: 各设备的共享目录路径不同也无需改脚本; 没设
+# 共享时它返回的就是 <项目>\target, 与旧行为完全一致。cargo 不可用或项目不在时回落
+# 硬拼, 裸环境仍可用。PowerShell 自带 ConvertFrom-Json, 故不像 sh 版那样依赖 jq。
+#
+# 结果按项目缓存: cargo metadata 要解析整份 JSON, 同一项目问一次就够。
+$script:CargoTargetDirCache = @{}
+function Get-CargoTargetDir ([string]$projDir) {
+    if ($script:CargoTargetDirCache.ContainsKey($projDir)) { return $script:CargoTargetDirCache[$projDir] }
+    $d = $null
+    $manifest = Join-Path $projDir "Cargo.toml"
+    if (Test-Path $manifest) {
+        # 原生命令的失败不触发 try/catch, 只能看 $LASTEXITCODE。多行输出要先拼回单串,
+        # 否则 ConvertFrom-Json 会按行逐个解析而失败。
+        $json = (& cargo metadata --format-version 1 --no-deps --manifest-path $manifest 2>$null) -join "`n"
+        if ($LASTEXITCODE -eq 0 -and $json) {
+            try { $d = ($json | ConvertFrom-Json).target_directory } catch { $d = $null }
+        }
+    }
+    if (-not $d) { $d = Join-Path $projDir "target" }
+    $script:CargoTargetDirCache[$projDir] = $d
+    return $d
+}
+
 # ---------- 构建: 核心 exe ----------
 # dev 变体 = dev-variant profile（继承 dev + 关断言）:
 #   ① debug_assertions 关闭 → windows_subsystem="windows" 生效, 无控制台窗口;
@@ -145,7 +175,7 @@ function Build-Core ([string]$profile = "release", [string]$outdir = $null) {
         cargo build --profile $prof -p wind_service
         if ($LASTEXITCODE -ne 0) { ErrMsg "wind_input 构建失败!"; return $false }
     } finally { Pop-Location }
-    $src = "$ProjectRoot\target\$prof\wind_input.exe"
+    $src = Join-Path (Get-CargoTargetDir $ProjectRoot) "$prof\wind_input.exe"
     if (-not (Test-Path $src)) { ErrMsg "未找到产物: $src"; return $false }
     Copy-Item $src "$outdir\wind_input$suffix.exe" -Force
     $sz = [math]::Round((Get-Item "$outdir\wind_input$suffix.exe").Length / 1MB, 1)
@@ -248,7 +278,7 @@ function Build-Setting ([string]$profile = "release", [string]$outdir = $null) {
         if ($profile -eq "dev") { cargo build } else { cargo build --release }
         if ($LASTEXITCODE -ne 0) { ErrMsg "wind_setting 构建失败!"; return $false }
     } finally { Pop-Location }
-    $exe = "$SettingDir\target\$targetDir\wind_setting.exe"
+    $exe = Join-Path (Get-CargoTargetDir $SettingDir) "$targetDir\wind_setting.exe"
     if (-not (Test-Path $exe)) { ErrMsg "未找到产物: $exe"; return $false }
     Copy-Item $exe "$outdir\wind_setting$suffix.exe" -Force
     $sz = [math]::Round((Get-Item "$outdir\wind_setting$suffix.exe").Length / 1MB, 1)
@@ -269,7 +299,7 @@ function Build-Portable ([string]$profile = "release", [string]$outdir = $null) 
         cargo build --release
         if ($LASTEXITCODE -ne 0) { ErrMsg "wind_portable 构建失败!"; return $false }
     } finally { Pop-Location }
-    $exe = "$PortableDir\target\release\wind_portable.exe"
+    $exe = Join-Path (Get-CargoTargetDir $PortableDir) "release\wind_portable.exe"
     if (-not (Test-Path $exe)) { ErrMsg "未找到产物: $exe"; return $false }
     Copy-Item $exe "$outdir\wind_portable.exe" -Force
     $sz = [math]::Round((Get-Item "$outdir\wind_portable.exe").Length / 1MB, 1)
@@ -1617,9 +1647,10 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
 
     # 4. 调 pack.ps1 (编译 stub + 注入卸载器 + packer build)。
     #    skip 模式且 installer 二进制已在 → 透传 -SkipBuild 跳过 stub 重编 (加速反复打包)。
-    $stub   = Join-Path $instDir "target\release\wind-installer.exe"
-    $packer = Join-Path $instDir "target\release\wind-packer.exe"
-    $unins  = Join-Path $instDir "target\release\wind-uninstaller.exe"
+    $instTarget = Get-CargoTargetDir $instDir
+    $stub   = Join-Path $instTarget "release\wind-installer.exe"
+    $packer = Join-Path $instTarget "release\wind-packer.exe"
+    $unins  = Join-Path $instTarget "release\wind-uninstaller.exe"
     $instBuilt = (Test-Path $stub) -and (Test-Path $packer) -and (Test-Path $unins)
     # 哈希表 splat 才能按名绑定 (数组 splat 会把 -Config 当成位置参数的值)。
     $packArgs = @{ Config = $cfg }
