@@ -30,6 +30,7 @@
 
 use crate::commentdict::CommentReader;
 use crate::datformat::WdatReader;
+use crate::emojidict::EmojiReader;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -64,6 +65,7 @@ type Pool<T> = OnceLock<Mutex<HashMap<PathBuf, Entry<T>>>>;
 
 static WDAT_POOL: Pool<WdatReader> = OnceLock::new();
 static COMMENT_POOL: Pool<CommentReader> = OnceLock::new();
+static EMOJI_POOL: Pool<EmojiReader> = OnceLock::new();
 
 #[allow(clippy::type_complexity)]
 static BUILD_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
@@ -113,6 +115,17 @@ pub fn open_wdat(path: &Path) -> anyhow::Result<Arc<WdatReader>> {
 pub fn open_comment(path: &Path) -> anyhow::Result<Arc<CommentReader>> {
     get_or_open(COMMENT_POOL.get_or_init(Default::default), path, |p| {
         CommentReader::open(p)
+    })
+}
+
+/// 打开 emoji 扩展表 `.wemj`；同一路径已有存活 reader 时复用，不再新建映射。
+///
+/// 本表全局只有一份（不像注释库那样按方案挂载），走池的理由不是省内存而是**保住释放
+/// 语义**：功能开关一关一开会重新解析，届时要 rename 覆盖缓存文件，而 Windows 上被
+/// mmap 的文件 rename 会 Access Denied（见本模块开头「为什么池里存 Weak」）。
+pub fn open_emoji(path: &Path) -> anyhow::Result<Arc<EmojiReader>> {
+    get_or_open(EMOJI_POOL.get_or_init(Default::default), path, |p| {
+        EmojiReader::open(p)
     })
 }
 

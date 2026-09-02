@@ -25,6 +25,7 @@ pub mod codetable;
 pub mod commentdict;
 pub mod composite;
 pub mod datformat;
+pub mod emojidict;
 pub mod gramdb;
 pub mod hotcache;
 pub mod layer;

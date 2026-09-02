@@ -260,6 +260,17 @@ pub fn dict_tag(lowercase_code: bool) -> &'static str {
 /// （只取 text/comment/code 三列），与 `codetable` 的 rime 解析各自演进。
 pub const COMMENT_TAG: &str = "comment/v1";
 
+/// emoji 扩展表缓存的 tag（`.wemj`，见 [`crate::emojidict`]）。
+///
+/// ★ 必须与 [`COMMENT_TAG`] 分开，即便两者的骨架同源：本表的产出不只取决于源文件字节，
+/// 还取决于**繁→简归一表**——`TSCharactersDerived.octrie` 换一版，同样的
+/// `emoji_word.txt` 会解析出不同的键。归一表因此也要作为「源」参与指纹计算
+/// （调用方把它一并传进 `sources`），否则 OpenCC 数据升级后旧缓存会被永久复用。
+///
+/// 历史：
+/// - v1 = 初始（丢值首项 + 逐字繁→简归一 + 同键合并保序去重）
+pub const EMOJI_TAG: &str = "emoji/v1";
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -150,12 +150,39 @@ staging 时只放 exe/dll/`data/`/uninstall.exe，`build_dev/data/` 顶层与 `d
 均无任何 LICENSE/NOTICE。当前发行版已带着 GPL-3.0 的 rime-frost 产物与 LGPL-3.0 的 stroke
 码表，却未随附许可证副本。本阶段一并补上。
 
-### 3.6 撞键必须合并，不得覆盖
+### 3.6 同键必须合并，不得覆盖
 
-繁→简是多对一。实测：**4669 行 → 4657 个唯一简体键，12 组撞键**（台/臺、乾/幹、發/髮 一类）。
+同键有**两个来源，后果完全不同**，别当成一回事（这一条初稿写错过，实测后修正）：
 
-合并两侧的 emoji 列表并去重；后者覆盖前者是**静默丢数据**，且只在那 12 个词上表现出来。
-合并发生在**建缓存那一刻**，不在查询热路径。写测试钉住。
+| 来源 | 实测 | 覆盖的后果 |
+|---|---|---|
+| 繁→简归一撞键 | 4669 行 → 4657 键，**12 组** | **无害**——12 组全是异体字对（煙/菸、台/臺、機/昇）指向同一个 emoji，合并与覆盖结果相同 |
+| 两张上游表同键 | `emoji_word` × `emoji_category` 交集 **14 键，内容全不同** | **整组丢数据** |
+
+第 2 类的样子：
+
+```
+奖项:  word=🏅          category=🏅 🎖️ 🥇 🥈 🥉 🏆
+帽:    word=🧢          category=👒 🧢 🎩 🎓 ⛑️ 🪖
+寒冷:  word=🥶          category=❄️ 🌨️ ☃️ ⛄️ 🧊
+```
+
+⚠️ 第 1 类今天恰好无害，但那是上游数据的巧合而非保证——判据只能是「合并」，不能是
+「反正现在一样」。⚠️ 也**不要拿繁简撞键去验这条测试**：它对覆盖式的错误实现没有判断力。
+
+合并保序去重，发生在**建缓存那一刻**，不在查询热路径。
+
+### 3.7 两张表的量级差 8 倍，配置默认值据此定
+
+实测（归一后）：
+
+| 表 | 键数 | 平均 emoji/键 | 最多 |
+|---|---|---|---|
+| `emoji_word.txt` | 4657 | **1.09** | 4 |
+| `emoji_category.txt` | 166 | **9.0** | **90**（动物） |
+
+⇒ **word 表基本是一对一，干扰远小于预期**，`max_per_word` 对它几乎不触发；那个闸门实际
+是为 category 表设的。这也印证了「分类表单独开关、出厂关」的决定：干扰全部集中在那 166 条上。
 
 ---
 
@@ -251,6 +278,32 @@ learn_freq = false            # emoji 不参与调频
 5. 管线末端插入 + `is_emoji_suggestion` 标记位 + 四个消费点
 6. `phrase_auto_commit` 排除（3.3）
 7. 四种呈现形态 + 配置层 + 设置页（`../wind-setting`）
+
+### 7.1 阶段 A 的实现落点（已完成，供阶段 B 接手）
+
+| 落点 | 内容 |
+|---|---|
+| `scripts/dev.{ps1,sh}` | gen-data 下载 rime-emoji → `.cache/rime-emoji/`；assemble **原样复制**到 `data/emoji/`（含 LICENSE） |
+| `scripts/pack-installer.sh` | staging 新增 `licenses/`（本仓 LICENSE + NOTICE.md） |
+| `.gitignore` / `NOTICE.md` | `data/emoji/` 不入库；NOTICE 记明「不加工、逐字副本」与未补全项 |
+| `gen_opencc.rs` | `compile_t2s_octrie`：反转 `STCharacters` 得 `TSCharactersDerived.octrie`（繁→简，繁简同形不入表，首次出现胜出） |
+| `wind-dict/src/emojidict.rs` | `.wemj` 格式（`EmojiReader` / `write_emoji_wemj`）、`parse_upstream`、`load_or_build` |
+| `wind-dict/src/cache_fp.rs` | `EMOJI_TAG`（★ 归一表须一并进指纹） |
+| `wind-dict/src/reader_pool.rs` | `open_emoji` + `EMOJI_POOL` |
+
+阶段 B 的入口只有一个：
+
+```rust
+wind_dict::emojidict::load_or_build(
+    &[data/emoji/emoji_word.txt, data/emoji/emoji_category.txt],  // 后者按 categories 开关决定是否传
+    &[data/opencc/TSCharactersDerived.octrie],                     // 只进指纹，不解析
+    <cache>/emoji/emoji.wemj,
+    |s| /* 用上面那张 octrie 做繁→简 */,
+) -> Option<Arc<EmojiReader>>
+```
+
+★ `normalize` 用闭包注入而非直接依赖：`wind-dict` 不依赖 `wind-transform`，且测试可传恒等闭包。
+★ 失败返回 `None` = **功能不可用**，刻意不降级内存表（理由见 §3.4 与函数文档）。
 
 ★ 阶段划分的依据是**对工作树的诉求相反**：A 纯离线，隔离收益大、真机需求为零；B 高频部署
 验证，而本仓 worktree 的 `build_dev` 存在指向主仓的符号链接（`candidate-font` 即是），

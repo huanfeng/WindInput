@@ -42,6 +42,12 @@ fn main() -> anyhow::Result<()> {
             let vn = compile_variants_octrie(&path, &vdst)?;
             eprintln!("  STVariants ({} 条) → {}", vn, vdst.display());
             total += 1;
+            // 再反转出一张 繁→简 字表，供「上游词表是繁体、本仓候选恒简体」的场合归一
+            // （现有消费者：emoji 扩展表的键归一，见 docs/design/emoji-suggestion.md §3.1）。
+            let rdst = out.join("TSCharactersDerived.octrie");
+            let rn = compile_t2s_octrie(&path, &rdst)?;
+            eprintln!("  TSCharactersDerived ({} 条) → {}", rn, rdst.display());
+            total += 1;
         }
     }
     eprintln!("gen_opencc: 编译 {} 个词典完成", total);
@@ -77,6 +83,43 @@ fn compile_variants_octrie(src: &Path, dst: &Path) -> anyhow::Result<usize> {
         let vals: Vec<&str> = rest.split(' ').filter(|v| !v.is_empty()).collect();
         if vals.len() > 1 {
             pairs.push((key.as_bytes().to_vec(), vals.join(" ").into_bytes()));
+        }
+    }
+    write_octrie(pairs, dst)
+}
+
+/// 反转 `STCharacters.txt` 得 **繁→简** 字表：源行 `简<TAB>繁1 繁2 …` 拆成多条 `繁i → 简`。
+///
+/// # 为什么反转而不是下载 OpenCC 的 TSCharacters
+///
+/// 少一个外部依赖，且两者对本用途等价——我们只需要「把繁体键归一到本仓的简体域」，
+/// 不需要 OpenCC 那套完整的繁→简语义（异体字取舍、地区变体）。
+///
+/// # 一对多的方向在这里翻了个身
+///
+/// 源表是 1 简 → N 繁（`出 → 出 齣`），反转后**多个繁体映到同一简体**是常态，而
+/// **同一繁体来自多个简体**才是要处理的冲突（如 `幹`/`乾` 都可能反查到不同简体源）。
+/// [`write_octrie`] 按 key 排序后 `dedup_by` 保留首次出现者，而 `sort_by` 是稳定排序
+/// ⇒ 胜出的是**源文件里靠前**的那条。这与主表 `compile_octrie` 取多值首项的
+/// 「定义序即优先级」是同一条约定。
+///
+/// ⚠️ 产物名刻意**不叫** `TSCharacters`：OpenCC 上游确有同名文件，若哪天它被下载进
+/// `.cache/opencc/dictionaries/`，主循环会编译出同名 `.octrie` 而与本表互相覆盖
+/// （`STVariants` 已有这个隐患，不要再添一个）。
+fn compile_t2s_octrie(src: &Path, dst: &Path) -> anyhow::Result<usize> {
+    let content = std::fs::read_to_string(src)?;
+    let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+
+    for line in content.lines() {
+        let Some((simp, rest)) = parse_line(line) else {
+            continue;
+        };
+        for trad in rest.split(' ').filter(|v| !v.is_empty()) {
+            // 繁简同形（`人 → 人`）不入表：查不到即原样返回，留着只是白占空间。
+            if trad == simp {
+                continue;
+            }
+            pairs.push((trad.as_bytes().to_vec(), simp.as_bytes().to_vec()));
         }
     }
     write_octrie(pairs, dst)
