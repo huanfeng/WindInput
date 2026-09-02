@@ -1354,6 +1354,10 @@ impl EngineManager {
     /// 或加了扩展库就可能造出打不出的码。
     ///
     /// 任一字取不到码即整词失败，错误里带上是哪个字（见 [`encoder::EncodeError`]）。
+    ///
+    /// **单字**与 [`Self::encode_words`] 同口径——直取全码，不进词组公式。两个入口对同一个
+    /// 字必须给同一个答案：设置页出码走复数版、输入法内加词走本函数，口径一旦漂移，用户就会
+    /// 在一个界面拿到码、在另一个界面被告知「当前方案取不出编码」。
     pub fn encode_word(&self, schema_id: &str, word: &str) -> Result<String, encoder::EncodeError> {
         let spec = Self::read_schema(
             schema_id,
@@ -1363,6 +1367,16 @@ impl EngineManager {
         .and_then(|s| s.encoder)
         .unwrap_or_default();
         let codes = self.single_char_full_codes(schema_id);
+        // 单字不进词组公式，理由同 `encode_words` 里的长注释：`calc_word_code` 是「按 rules
+        // 从各字全码组装」，开头即 `chars.len() < 2 → TooShort`。取不到时仍报 `MissingCode`，
+        // 保住「是哪个字没码」这条线索——加词侧的 debug 日志正靠它排查。
+        let mut cs = word.chars();
+        if let (Some(c), None) = (cs.next(), cs.next()) {
+            return codes
+                .get(&c)
+                .cloned()
+                .ok_or(encoder::EncodeError::MissingCode { ch: c });
+        }
         encoder::calc_word_code(word, &spec, |c| codes.get(&c).cloned())
     }
 

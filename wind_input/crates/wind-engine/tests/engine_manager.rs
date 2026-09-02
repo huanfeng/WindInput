@@ -791,6 +791,41 @@ fn encode_words_matches_encode_word_one_by_one() {
     );
 }
 
+/// 单字必须**真的出得来码**，两个入口都是。
+///
+/// 上面那条等价性断言盖不住这个缺陷：词表里本就有单字「王」，而缺陷期两条路**都**返回
+/// 空串——「一样错」同样满足「逐位一致」，测试照绿。根因是两个入口都把单字丢给
+/// `calc_word_code`（词组公式，`chars.len() < 2` 即 `TooShort`），可单字要的码是它自己的
+/// 全码。缺陷面是「给某个字补一条编码」这个加词界面上最常见的输入在码表方案下恒定失败。
+///
+/// 故这里断言的是**非空**，而不只是两边相等。
+#[test]
+fn single_char_encodes_from_both_entries() {
+    let dir = data_dir();
+    if !schema_exists(&dir, "wubi86") {
+        eprintln!("跳过：wubi86 schema 不存在");
+        return;
+    }
+    let mgr = EngineManager::new(&make_config(&["wubi86"]), Some(&dir));
+    for ch in ["王", "工", "中"] {
+        let one = mgr.encode_word("wubi86", ch);
+        assert!(one.is_ok(), "单字「{ch}」应出得来码，实得 {one:?}");
+        let one = one.unwrap_or_default();
+        assert!(!one.is_empty(), "单字「{ch}」的码不该是空串");
+        assert_eq!(
+            mgr.encode_words("wubi86", &[ch]),
+            vec![one],
+            "单字「{ch}」在单条与批量两个入口下必须同码"
+        );
+    }
+    // 码表里查不到的字仍须失败，且带上是哪个字——加词侧的排查线索全靠它。
+    assert_eq!(
+        mgr.encode_word("wubi86", "a"),
+        Err(wind_engine::encoder::EncodeError::MissingCode { ch: 'a' }),
+        "单字取不到码时应报 MissingCode 而非退化成 TooShort/空串"
+    );
+}
+
 /// 出不了码的位置回**空串占位**，不是跳过——调用方靠下标把码配回词，
 /// 少一个元素会让其后所有词错位配到别人的码上，静默写进词库。
 #[test]
