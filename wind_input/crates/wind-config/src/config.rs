@@ -2024,8 +2024,15 @@ impl Default for AutoPhraseConfig {
 pub struct AutoLearnConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// 造词最小字数（默认 0=回退 2）。
-    #[serde(default)]
+    /// 造词最小字数。
+    ///
+    /// ⚠️ **默认值必须落在设置页数值控件的 `[min, max]` 区间内**（该控件 min = 2）。
+    /// 此前默认 `0`（哨兵，消费端 `if min_len == 0 { 2 }` 回退成 2）——生效值确实是 2，
+    /// 但设置页控件把 0 夹到 2 显示，于是用户什么都没动、点一次「应用设置」就把 2 写进
+    /// 了配置文件。守门测试 `untouched_settings_produce_no_diff` 为此长期红着。
+    ///
+    /// 消费端那行 `== 0` 回退**保留**：老用户配置里显式写着 0，删掉会让它变成「无下限」。
+    #[serde(default = "default_learn_min_len")]
     pub min_word_length: usize,
     /// 造词最大字数（`0` = 不限）。超出后先按「从尾部保留整段」裁剪，仍超则**整体放弃**
     /// ——在一串汉字中间切一刀，切出来的多半不是词（同 `AutoPhraseConfig::max_phrase_len`）。
@@ -2039,20 +2046,26 @@ pub struct AutoLearnConfig {
     pub promote_count: usize,
 }
 
+/// 拼音造词最小字数默认值。取 2 而非 0：0 是「回退 2」的哨兵，两者生效值相同，
+/// 但只有 2 落在设置页控件的取值区间内——见 [`AutoLearnConfig::min_word_length`]。
+fn default_learn_min_len() -> usize {
+    2
+}
+
 /// 拼音造词最大字数默认值。比码表侧的 5 宽松——码表造词的素材是**连续单字序列**
 /// （跨句拼接风险高），而拼音整句/分步转换的每一段都是用户明确选中的语义单元。
 fn default_learn_max_len() -> usize {
     10
 }
 
-/// ⚠️ 手写而非 `derive(Default)`：`max_word_length` 的默认值是 10 而非零值，
-/// derive 会让**代码默认**（`AutoLearnConfig::default()`）给 0=不限、而**配置默认**
-/// （serde 反序列化缺键）给 10，同一个语义在两条路上分叉。
+/// ⚠️ 手写而非 `derive(Default)`：`max_word_length`（10）与 `min_word_length`（2）的
+/// 默认值都不是零值，derive 会让**代码默认**（`AutoLearnConfig::default()`）给 0、而
+/// **配置默认**（serde 反序列化缺键）给那两个值，同一个语义在两条路上分叉。
 impl Default for AutoLearnConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            min_word_length: 0,
+            min_word_length: default_learn_min_len(),
             max_word_length: default_learn_max_len(),
             promote_count: 0,
         }
