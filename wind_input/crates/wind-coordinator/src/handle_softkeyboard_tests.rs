@@ -390,3 +390,38 @@ fn headless_never_touches_the_real_state_toml() {
         "前置：判据本身说该写，否则上面那条断言恒真"
     );
 }
+
+/// ⛔ 小键盘**不能**进软键盘键位表——这条钉的是跨语言的不变量。
+///
+/// # 它防的是什么
+///
+/// C++ 侧 `_IsSoftKeyboardEatenKey` 在符号面上吃 `HotkeyType::Number`，而
+/// `ClassifyInputKey` 把 VK_NUMPAD0-9 与 + - * / . 一并归成 `Number`。若这张表里也
+/// 没有小键盘，那就是「C++ 吃了、Rust 出不了字」——落回常规链路后英文半角态
+/// PassThrough，严格宿主（Chrome/Electron）不补合成 WM_CHAR ⇒ **数字凭空消失，
+/// 且两侧都没有日志**。0.120 周期真出过这个 bug。
+///
+/// 修法是让 C++ 放行小键盘（`_IsSoftKeyboardOutOfLayoutKey`），前提是这张表确实
+/// 不含它们。⇒ **哪天往布局里加了小键盘键位，本测试会红**：那时必须同步去掉 C++
+/// 侧那道放行，否则新加的键位敲下去没反应（这次是反方向的同一个坑）。
+///
+/// 判据写成「表里没有这些 vk」而不是「布局里没有这些键名」：真正决定吃不吃的是 vk。
+#[test]
+fn numpad_stays_out_of_the_slot_table_so_the_cpp_side_can_pass_it_through() {
+    // VK_NUMPAD0-9 = 0x60..=0x69；VK_MULTIPLY/ADD/SUBTRACT/DECIMAL/DIVIDE = 0x6A..=0x6F。
+    // 与 wind_tsf/include/KeyEventSink.h 的 _IsSoftKeyboardOutOfLayoutKey 同一组。
+    let map = vk_to_slot();
+    for vk in 0x60u32..=0x6F {
+        assert!(
+            !map.contains_key(&vk),
+            "vk 0x{vk:02X} 进了软键盘键位表（{:?}）——C++ 侧仍在放行小键盘，\
+             这个键位敲下去不会有反应。加小键盘布局时须同步改 _IsSoftKeyboardOutOfLayoutKey",
+            map.get(&vk)
+        );
+    }
+    // 反向前置：主键盘数字确实在表里，否则上面那圈断言可能只是因为表是空的。
+    assert!(
+        map.contains_key(&0x35),
+        "前置：主键盘 5（vk 0x35）应在键位表里"
+    );
+}

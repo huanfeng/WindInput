@@ -285,6 +285,11 @@ bool CKeyEventSink::_IsSoftKeyboardEatenKey(WPARAM vk, uint32_t modifiers) const
     if (modifiers & (KEYMOD_CTRL | KEYMOD_ALT))
         return false;
 
+    // ⛔ 布局之外的键（小键盘）一律不吃——判据与理由见 _IsSoftKeyboardOutOfLayoutKey。
+    // 必须排在 ClassifyInputKey 之前：那里把小键盘归成 Number，落到下面的 switch 就被吃了。
+    if (_IsSoftKeyboardOutOfLayoutKey(vk))
+        return false;
+
     HotkeyType t = CHotkeyManager::ClassifyInputKey(vk, modifiers);
     // 面板控制键：两种面都归面板。
     if (t == HotkeyType::Escape || t == HotkeyType::PageKey)

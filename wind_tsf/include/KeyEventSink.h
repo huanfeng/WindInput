@@ -191,6 +191,31 @@ private:
     ULONGLONG _pairStateTtlMs = 0;
     bool _IsJumpOutKey(UINT vk) const { return _jumpOutKeys.count(vk) > 0; }
 
+    // 软键盘布局**之外**的键：小键盘。
+    //
+    // ⛔ 软键盘态下不得吃它们。`ClassifyInputKey` 把 VK_NUMPAD0-9 与 + - * / . 一并归成
+    // `HotkeyType::Number`，而 Rust 侧的键位表 `vk_to_slot()` 是拿主键区 47 键
+    // （`wind_softkeyboard::all_slots()`）反查构建的，小键盘根本不在里面 ⇒ 吃了转发过去
+    // 也查不到键位，落回常规链路后英文半角态直接 PassThrough，正是本文件反复记的
+    // 「吃了再吐」：Chrome/Electron 这类不补合成 WM_CHAR 的严格宿主里，那个数字凭空
+    // 消失，且 core 侧一条日志都没有。不变量是 **C++ 吃键集 ⊆ Rust 出字集**。
+    //
+    // 设计上小键盘本就属于「布局之外 → 透传」（docs/design/soft-keyboard.md §4.1）。
+    //
+    // ⚠️ NumLock 关闭时小键盘发的是 VK_PRIOR/VK_NEXT/VK_END 等，vk 已不是这里列的这些，
+    // 天然不命中——那时它们本就该按翻页/编辑键的语义走，面板翻页也仰赖 VK_PRIOR/VK_NEXT。
+    //
+    // ⚠️ 连带影响：`numpad_behavior = "follow_main"` 下，此前小键盘会在入口被归一化成主
+    // 键盘键、于是能打出面板符号；放行之后它直接出数字。这样取是对的——**面板上根本没
+    // 画小键盘**，屏幕上没有任何东西暗示那些键会映射成符号，而「出数字」不丢键、
+    // 「被吃掉」丢键。真要让它跟随，得把 numpad_behavior 也推给 C++，不值当。
+    static BOOL _IsSoftKeyboardOutOfLayoutKey(WPARAM vk)
+    {
+        if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9)
+            return TRUE;
+        return vk == VK_MULTIPLY || vk == VK_ADD || vk == VK_SUBTRACT
+            || vk == VK_DECIMAL || vk == VK_DIVIDE;
+    }
     // 软键盘总闸的**唯一判据**。`OnTestKeyDown`（吃）与 `OnKeyDown`（转发）都调它。
     //
     // ★★★ 两处必须用同一个函数，不许各写一份 switch：那边吃了、这边不发，键就凭空
