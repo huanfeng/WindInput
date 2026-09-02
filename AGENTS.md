@@ -130,6 +130,23 @@ CI 承接）、CI 另有 `cargo tree` 断言 coordinator 无 wind-ui 依赖边�
   **全部**缺陷的唯一形态（`common_chars.txt`、`pinyin_map.txt`、`unigram_path` 均栽于此），
   且失败静默——找不到就退化，不报错。键级合并只有 `config.toml` 与 `compat.toml` 两处。
   完整矩阵与新增数据文件的约定见 `docs/architecture/user-override.md`。
+- **出厂预置的绑定/开关，落点必须是用户能清空的载体**：配置四层（默认 < data < data_custom
+  < user）与方案两层（`.schema.toml` < `schema_overrides`）用的都是**逐键深合并**
+  （`merge_value` / `merge_toml`）——这个算子只能新增/覆盖，**表达不了删除**。所以把出厂值
+  写进 map 类字段（`keys.key_actions`、`punct.custom_mappings` 那类）的某个子键，用户在设置页
+  删掉后每次 `load()` 都会被合并回来，**永远关不掉**：软键盘 `ctrl+shift+k` 写在 L2 的
+  `keys.key_actions` 里就是这么在 v0.120.0 报障的；更早一例是五处 `trigger_keys` 折算进
+  `key_actions`，靠一次性物化（`Config::materialize_key_actions`）才收场。三条出路，按优先级：
+  1. **出厂值放标量/数组字段**（`keys.softkeyboard`、`keys.toggle_toolbar` 那类）：清空即禁用，
+     上层整体覆盖，天然可关。**新增内置功能的开关键一律先考虑这条。**
+  2. 形态上进不了专用字段（「一键一功能」的 `key_actions` 就是）时，那张表的值域**必须**含一个
+     表示禁用的显式值（本仓是 `"none"`），且它的**每条通路**都要认——组合键、单键、修饰键三条
+     少认一条，那一档就还是关不掉。
+  3. 整表替换（`merge_toml` 对 `custom_mappings` 的特判）：只在「这张表是一整份、不与任何层
+     逐行混」时才成立。跨层叠加的表（`key_actions`）不能这么改，那会让方案升级后作者新增的
+     条目透不过来。
+  ⇒ 加任何出厂预置前先答这一句：**用户在 UI 上做的删除落到哪个键？那个键能否压制出厂值所在
+  的那个键？** 答不出「能」，就是上面这个 bug。
 
 ## 提交纪律（多会话共仓）
 

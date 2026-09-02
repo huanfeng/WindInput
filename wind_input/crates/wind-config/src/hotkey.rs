@@ -439,6 +439,30 @@ impl Compiler {
             }
         }
 
+        // ── KeyDown：软键盘开关（GLOBAL，**不带 CHINESE_ONLY**） ──
+        //
+        // 策略位与 `key_actions` 里 `softkeyboard` 动词那条**逐位相同**，理由见
+        // `hotkey_action_entry` 中那段注释：面板画的是「键位 → 符号」的映射，跟当前是
+        // 中文还是英文模式没关系（英文态想打个 ℃ 同样合理），C++ 侧为此专设了软键盘总闸
+        // `IsSoftKeyboard()`；带上 CHINESE_ONLY 的话英文态连开都开不出来。GLOBAL 位保留，
+        // 规避 Chromium 类宿主无视 `pfEaten` 造成的双处理。
+        //
+        // ★ action 用动词原文 `"softkeyboard"`（不像 `special:` 那样改写成 `enter_*`）：
+        // 协调器的 `softkeyboard_hotkey` 认的就是这个串，本分支与 `key_actions` 那条通路
+        // 落到**同一个**分派臂，分派端零改动。
+        //
+        // ⚠️ 两条通路可以同时命中同一个键（用户层 `key_actions` 里还留着 v0.120.0 物化
+        // 灌进去的 `ctrl+shift+k = "softkeyboard"`）。`match_key_down` 是 `.find()`
+        // 先注册者赢，本分支在前 ⇒ 行为一致、不重复分派；设置页只读组会把这种同键
+        // 重复标橙提示用户清理。
+        if let Some(raw) = parse_hotkey(&h.softkeyboard) {
+            result.key_down.push(HotkeyEntry {
+                tsf_hash: raw | HOTKEY_POLICY_GLOBAL,
+                match_hash: raw,
+                action: "softkeyboard".to_string(),
+            });
+        }
+
         // ── KeyDown：临拼直达热键（CHINESE_ONLY | GLOBAL，与加词键同策略） ──
         // 与引导键共存：热键路径进入时组合区不写引导符（分发点传 key_code=0）。
         // GLOBAL 位使 TSF 在「中文 + 文本框」时 RegisterHotKey 全局拦截，穿透 QQNT/Tabby 等
@@ -496,6 +520,20 @@ impl Compiler {
             };
             match route {
                 KeyActionRoute::Hotkey => {
+                    // 显式 `none` = 用户在本层表态「这个键别干活」，用来压制**更低层**
+                    // 写在同一张表里的绑定（L2 出厂 / L2.5 定制版）。`merge_value` 与
+                    // `merge_toml` 都只能新增/覆盖、表达不了删除，所以「禁用」只能靠
+                    // 显式值承载——语义与单键、修饰键两条通路的 `BoundAction::None`
+                    // 逐条对应，见 `Coordinator::bound_action_with_source_layered`。
+                    //
+                    // ★ 必须在白名单**之前**静默跳过。落到下面那句 warn 的话，会把
+                    // 「用户主动禁用」报成「配置写错了」——而这是一条预期内的配法。
+                    // （功能上此前就已经关得掉：`hotkey_action_entry` 不认 none ⇒ 不进表。
+                    // 本分支改的是日志与意图表达，不是新增能力。）
+                    if action.eq_ignore_ascii_case("none") {
+                        debug!("keys.key_actions: {key:?} 显式禁用（none），不进热键表");
+                        continue;
+                    }
                     let Some((dispatch_action, policy)) = hotkey_action_entry(action) else {
                         warn!("keys.key_actions: 组合键不支持动词 {action:?}（键 {key:?}），忽略");
                         continue;
@@ -1216,6 +1254,77 @@ mod tests {
                 .iter()
                 .any(|e| e.action == "select_candidate"),
             "可打印选词键不该跑到 key_up 去"
+        );
+    }
+
+    /// 软键盘开关键住在**专用字段**，策略位与它此前在 `key_actions` 里那条逐位相同：
+    /// 带 GLOBAL、**不带** CHINESE_ONLY——面板画的是键位→符号的映射，与中英文态无关，
+    /// 带上那个位英文态就连开都开不出来。
+    #[test]
+    fn softkeyboard_field_carries_global_but_not_chinese_only() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.keys.softkeyboard, "ctrl+shift+k",
+            "出厂默认应绑 Ctrl+Shift+K"
+        );
+        let compiled = Compiler::new(cfg).compile();
+        let e = compiled
+            .key_down
+            .iter()
+            .find(|e| e.action == "softkeyboard")
+            .expect("软键盘开关键应进 key_down 表");
+        assert!(e.tsf_hash & HOTKEY_POLICY_GLOBAL != 0, "应带 GLOBAL 位");
+        assert!(
+            e.tsf_hash & HOTKEY_POLICY_CHINESE_ONLY == 0,
+            "不得带 CHINESE_ONLY——带上英文态连开都开不出来"
+        );
+    }
+
+    /// ★★★ 本次修复的核心不变量：**出厂绑定关得掉**。
+    ///
+    /// 此前出厂值写在 `data/config.toml` 的 `keys.key_actions` 里，而那张表四层深合并、
+    /// 只能新增/覆盖 ⇒ 用户在设置页删掉后每次 `load()` 都被灌回来，永远关不掉
+    /// （v0.120.0 报障）。挪到标量字段之后，清空就是清空。
+    #[test]
+    fn softkeyboard_field_cleared_disables_the_hotkey() {
+        let mut cfg = Config::default();
+        cfg.keys.softkeyboard = String::new();
+        let compiled = Compiler::new(cfg).compile();
+        assert!(
+            !compiled.key_down.iter().any(|e| e.action == "softkeyboard"),
+            "清空后不得再注册软键盘热键"
+        );
+    }
+
+    /// `key_actions` 里的显式 `none`：压制**更低层**（L2 出厂 / L2.5 定制版）在同一张表
+    /// 里写的绑定。`merge_value` 表达不了删除，禁用只能靠显式值承载——语义与单键、
+    /// 修饰键两条通路的 `BoundAction::None` 逐条对应。
+    ///
+    /// ⚠️ 第二条断言不是凑数：少了它，「整个 key_actions 循环被跳过」也会让第一条绿。
+    #[test]
+    fn explicit_none_keeps_a_combo_binding_out_of_the_table() {
+        let mut cfg = Config::default();
+        // 专用字段清空，免得出厂那条 softkeyboard 占着同一个键干扰判定。
+        cfg.keys.softkeyboard = String::new();
+        cfg.keys.key_actions = [
+            ("ctrl+shift+k".to_string(), "none".to_string()),
+            ("ctrl+shift+u".to_string(), "special:fuhao".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let compiled = Compiler::new(cfg).compile();
+
+        let raw_k = parse_hotkey("ctrl+shift+k").expect("ctrl+shift+k 应解析得动");
+        assert!(
+            !compiled.key_down.iter().any(|e| e.match_hash == raw_k),
+            "显式 none 的条目不得进热键表"
+        );
+        assert!(
+            compiled
+                .key_down
+                .iter()
+                .any(|e| e.action == "enter_special:fuhao"),
+            "同表里其它条目不受影响"
         );
     }
 

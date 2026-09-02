@@ -3457,6 +3457,19 @@ pub struct KeysConfig {
     pub delete_candidate: String,
     #[serde(default = "default_take_screenshot")]
     pub take_screenshot: String,
+    /// 软键盘面板开关热键。
+    ///
+    /// ★ 出厂绑定住在**本字段**而不是 [`Self::key_actions`]。那张表是 `BTreeMap`，
+    /// 四层深合并（`merge_value`）只能新增/覆盖、表达不了删除 ⇒ 写在 L2 的出厂条目
+    /// 用户在设置页删掉后每次 `load()` 都被合并回来，**永远关不掉**（v0.120.0 报障）。
+    /// 标量字段清空即禁用，与其余功能热键一致。
+    ///
+    /// ⚠️ 这**不是**把 `key_actions` 那条挪个地方：想给某个**面**配直通车
+    /// （`softkeyboard:<面 id>`）仍写 `key_actions`。两张表方向相反、刻意并存——
+    /// 本字段是「一功能一键」，那张表是「一键一功能」（见
+    /// docs/design/key-resolver-unification.md §9 第一条否决过的合并提案）。
+    #[serde(default = "default_softkeyboard")]
+    pub softkeyboard: String,
     #[serde(default)]
     pub global_hotkeys: Vec<String>,
     /// **已废弃且不再生效**：方案直达热键已并入 [`Self::key_actions`]，动词
@@ -3567,6 +3580,9 @@ fn default_toggle_s2t() -> String {
 }
 fn default_take_screenshot() -> String {
     "ctrl+shift+f11".to_string()
+}
+fn default_softkeyboard() -> String {
+    "ctrl+shift+k".to_string()
 }
 fn default_activate_ime() -> String {
     "ctrl+shift+[".to_string()
@@ -3756,6 +3772,7 @@ impl Default for KeysConfig {
             pin_candidate: default_pin_candidate(),
             delete_candidate: default_delete_candidate(),
             take_screenshot: default_take_screenshot(),
+            softkeyboard: default_softkeyboard(),
             global_hotkeys: Vec::new(),
             legacy_schema_hotkeys: HashMap::new(),
             key_actions: BTreeMap::new(),

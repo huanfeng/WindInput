@@ -701,6 +701,11 @@ open_add_word_dialog = "ctrl+shift+equal"
 toggle_s2t = "ctrl+shift+j"
 activate_ime = "ctrl+shift+["
 take_screenshot = "ctrl+shift+f11"
+# 软键盘面板的开关键。清空 = 不绑（面板仍可从工具栏格与主菜单打开）。
+# ⚠ 出厂绑定刻意住在这里、不写进下面的 key_actions：那张表是逐键深合并的，写在本文件
+#   里的条目用户在设置页删掉后每次加载都会被合并回来、永远关不掉。本字段是普通标量，
+#   清空即禁用。给某个**面**配直通车（softkeyboard:<面id>）仍写 key_actions。
+softkeyboard = "ctrl+shift+k"
 # 改用系统级 RegisterHotKey 抢占的**动作名**列表（不是键串）：列进来的动作会绕开宿主
 # 自身的同名快捷键。仅支持无需按键上下文的 7 个动作：
 #   switch_engine / toggle_full_width / toggle_punct / toggle_toolbar /
@@ -721,10 +726,14 @@ global_hotkeys = []
 #   switch_schema:<方案id>  切到该方案，**单向**（原 schema_hotkeys 的语义）
 #   toggle_schema:<方案id>  切到该方案，**再按一次回到来源方案**
 #   special:<方案id>        进该方案的 overlay（打完一段自动退回）
-#   softkeyboard            开 / 关软键盘面板
+#   softkeyboard            开 / 关软键盘面板（出厂绑定在上面的 [keys] softkeyboard，
+#                           不在本表；理由见那里的注释）
 #   softkeyboard:<面id>     开软键盘并直接切到那一面（面 id 见 system.softkeyboard.toml，
 #                           如 punct / num / math / greek）。已开着时按它只切面、不关闭，
 #                           所以给几个面各配一个键不会互相打架。
+#   none                    禁用这个键。用来关掉**更低层**（本文件、或定制版的
+#                           data_custom/config.toml）预置的绑定：本表逐键深合并，
+#                           删掉一行压不住下层那行，写 none 才是「本层表态：别干活」。
 # 例：key_actions = { "ctrl+shift+r" = "switch_schema:wubi86" }
 # 单向与往返的差别只在回程：前者切过去就完了，后者再按一次回到你原来那个方案。
 # 切方案类动词两层都能写。写在方案文件的 [key_actions] 里只在该方案活跃时生效；
@@ -734,7 +743,7 @@ global_hotkeys = []
 # 键的形态决定它走哪条通路：组合键 → 热键表；纯修饰键（rshift）→ 轻敲；
 #   单个字符键 → 引导键链（切方案类动词不可用，那条链在英文模式下走不到）。
 # 无法识别的动词只进 warn 日志并被忽略。
-key_actions = { "ctrl+shift+k" = "softkeyboard" }
+key_actions = {}
 # 会话态按键功能表：key = 键名，value = 动词。管的是「**正在打字**（有编码或候选）时这个
 # 键干什么」；上面的 key_actions 管的是「给这个键指定一个功能」，不以正在打字为前提。
 # 两张表可以给同一个键各配一份，各自在各自的条件下生效（如 Tab 打字时翻页，没在打字时

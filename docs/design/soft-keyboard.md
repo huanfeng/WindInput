@@ -354,6 +354,39 @@ Esc 也能关。而抑制要动 `auto_hide` 的 `is_active` 守卫，那里踩�
 
 这个论证要留在代码注释里，否则下一个人只看到「两张表都行」而不知道边界在哪。
 
+### 7.2.1 ★★★ 出厂绑定的落点：`[keys] softkeyboard`，不是 `key_actions`
+
+**初版把出厂绑定写在 `data/config.toml` 的 `keys.key_actions` 里，那是错的**——
+v0.120.0 报障：用户在设置页取消这条快捷键，保存后仍然生效，重开对话框那行还在。
+
+根因与动词、白名单都无关，在**载体形态**上：`key_actions` 是 `BTreeMap`，而配置四层
+（默认 < data < data_custom < user）走的是逐键深合并 `merge_value`。这个算子只能
+新增/覆盖，**表达不了删除** ⇒ 用户层删掉那个子键之后，L2 的同名子键每次 `load()`
+都被合并回来。用户手里没有任何一个键能压制出厂值所在的那个键。
+
+⇒ 出厂绑定改住 **`keys.softkeyboard`**（标量字段，与 `toggle_toolbar` / `open_settings`
+那批同构），编译分支在 `Compiler::compile` 里紧挨着加词键那组。清空即禁用，上层整体
+覆盖，天然可关。`key_actions` 里的 `softkeyboard` / `softkeyboard:<面 id>` **保留**——
+给某个面配直通车仍走那张表。
+
+★ 两处并存不是「同一件事两处配」：本字段是**一功能一键**（软键盘该用哪个键开），
+`key_actions` 是**一键一功能**（这个键干什么）。方向相反，是
+`key-resolver-unification.md` §9 第一条明确否决过合并的那一对。
+
+★ 一般化的判据已写进仓根 `AGENTS.md` 的「跨组件硬约定」：**出厂预置的绑定/开关，落点
+必须是用户能清空的载体**。加任何出厂预置前先答一句「用户在 UI 上做的删除落到哪个键？
+那个键能否压制出厂值所在的那个键？」。
+
+配套地，`key_actions` 的组合键分支认了显式 `none`（静默跳过、不再 warn「不支持动词」）：
+定制版在 `data_custom/config.toml` 里往那张表加的绑定，用户只能靠写 `none` 关掉——
+深合并下这是唯一能压住低层的手段，语义与单键、修饰键两条通路的 `BoundAction::None` 一致。
+
+守门测试：`hotkey.rs` 的 `softkeyboard_field_carries_global_but_not_chinese_only`
+（策略位）、`softkeyboard_field_cleared_disables_the_hotkey`（★清空即禁用，本次修复的
+核心不变量）、`explicit_none_keeps_a_combo_binding_out_of_the_table`；
+`config_schema.rs` 的 `factory_keys_hotkeys_are_parsable`（出厂热键串必须解析得动——
+写错一个字是静默失效，与「没绑」同形）。
+
 ### 7.3 ★ 开启动作不进 `DISPATCH_ACTIONS`
 
 `BoundAction::DISPATCH_ACTIONS` 那份白名单的注释写着：
@@ -498,6 +531,11 @@ key_down 热键表。三处缺一不可：
 **守门已补**：`config_schema.rs` 的
 `factory_combo_key_actions_are_accepted_by_the_hotkey_compiler` 遍历出厂 `key_actions`，
 凡走组合键通路的动词都必须被白名单接受。
+
+⚠️ 上面这段是**历史叙述**：出厂绑定后来因为「关不掉」挪去了 `keys.softkeyboard`（见
+§7.2.1），出厂 `key_actions` 现在是空表，那条守门于是退化成空遍历——它守的不变量仍然
+成立（日后再往出厂表里放组合键条目时会重新生效），但**当前挡不住任何东西**。软键盘这条
+路径改由 `factory_keys_hotkeys_are_parsable` 与 `hotkey.rs` 里那三条测试看守。
 
 策略位按动词分。软键盘**不带 `CHINESE_ONLY`**——初稿按 `special:` 照抄了那一位，理由是
 「面板的按键接管建立在中文模式下 C++ 吃字母/标点之上」；真机上这条推理反了：正因为

@@ -396,6 +396,7 @@ static REGISTRY: &[ConfigField] = &[
     f("keys.pin_candidate", Str),
     f("keys.delete_candidate", Str),
     f("keys.take_screenshot", Str),
+    f("keys.softkeyboard", Str),
     f("keys.global_hotkeys", StrList),
     // `keys.schema_hotkeys` 已废弃并**从登记表移除**（与当年 `schema.special_modes` 同样
     // 的处置）：改写进下面的 key_actions（动词 `switch_schema:<id>`），**没有兼容折算**
@@ -966,6 +967,48 @@ mod tests {
                 "出厂 keys.key_actions 的 {key:?} = {action:?} 不被组合键白名单接受，                 按下去会静默无反应（见 hotkey_action_entry）"
             );
         }
+    }
+
+    /// 出厂 `[keys]` 段里的热键串必须真的解析得动。
+    ///
+    /// L2 覆盖 L1，写错一个字（`Ctrl-Shift-K`、`ctrl-shift-k`）的表现是**静默失效**：
+    /// `parse_hotkey` 返回 `None` ⇒ 那条不进热键表 ⇒ 与「这个键根本没绑」完全同形，
+    /// 日志里一个字都没有。软键盘的出厂绑定从 `key_actions` 挪进 `keys.softkeyboard`
+    /// 时补的这道闸——那次挪动的全部意义就是让这条绑定生效且可关，写错即两头落空。
+    ///
+    /// ★ 判据自动排除模板与非热键串，**不用手写清单**：L1 默认值解析得动的字段，L2 那份
+    /// 也必须解析得动。`pin_candidate = "ctrl+number"` 这类模板在 L1 就解析不动，自动跳过；
+    /// 将来往 `[keys]` 加新的热键字段也自动纳入。
+    #[test]
+    fn factory_keys_hotkeys_are_parsable() {
+        let l1 = toml::Value::try_from(Config::default()).expect("默认配置应可序列化");
+        let l2 = data_config_toml();
+        let (Some(l1k), Some(l2k)) = (
+            l1.get("keys").and_then(toml::Value::as_table),
+            l2.get("keys").and_then(toml::Value::as_table),
+        ) else {
+            panic!("L1 与 data/config.toml 都该有 [keys] 段");
+        };
+        let mut checked = 0usize;
+        for (name, l2v) in l2k {
+            let (Some(s2), Some(s1)) = (l2v.as_str(), l1k.get(name).and_then(toml::Value::as_str))
+            else {
+                continue;
+            };
+            if crate::hotkey::parse_hotkey(s1).is_none() {
+                continue; // L1 那份就不是可解析的热键串（模板 / 非热键字段）
+            }
+            checked += 1;
+            assert!(
+                crate::hotkey::parse_hotkey(s2).is_some(),
+                "data/config.toml 的 keys.{name} = {s2:?} 解析不动，出厂绑定会静默失效"
+            );
+        }
+        // 一条都没校验到 = 判据本身失效（字段改名 / 段结构变了），那时它会假绿。
+        assert!(
+            checked >= 5,
+            "只校验到 {checked} 个热键字段，判据可能已失效"
+        );
     }
 
     fn data_config_toml() -> toml::Value {
