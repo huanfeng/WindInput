@@ -210,7 +210,7 @@ UI 层（`wind-ui/src/candidate_window.rs`）**每帧据当前光标 + 内容尺
 |----|------|--------|
 | DLL | `wind_tsf/src/TextService.cpp` | `_compositionJustStarted`、`SendCaretPositionUpdate`、`OnLayoutChange`、`SendCaretUpdate` |
 | 协调器 | `wind-coordinator/src/coordinator.rs` | `pending_first_show`/`candidate_shown`/`show_authorized`/`composition_start`、`arm_pending_first_show*`/`first_show_fallback_ms`、`reset_first_show`、`notify_ui_update` 门控+坐标基准、`handle_caret_update`、`handle_caret_pending`、`handle_caret_probe`、`handle_commit_request`、`update_active_compat`/`active_compat`/`process_name`、`first_show_was_provisional`/`last_authoritative_caret`/`last_key_interval_ms` |
-| 兼容规则 | `wind-config/src/app_compat.rs`、`data/compat.toml` | `AppCompat::load`/`get_rule`（`[[apps]]`：`process`/`caret_use_top`/`first_show_mode`），系统层+用户层覆盖；`FirstShowMode` 枚举、`set_user_first_show_mode`（菜单写盘） |
+| 兼容规则 | `wind-config/src/app_compat.rs`、`data/compat.toml` | `AppCompat::load`/`get_rule`（`[[apps]]`：`process`/`caret_use_top`/`first_show_mode`，后者为 `Option`＝可跟随全局），系统层+用户层覆盖；`FirstShowMode` 枚举、`set_user_first_show_mode`（菜单写盘） |
 | 菜单 | `wind-coordinator/src/handle_menu.rs`、`wind-ui/src/manager.rs` | `set_first_show_mode`（写盘→重载→刷新 active_compat）、`MenuCmd::FirstShowMode(u8)`（id 段 `5000..=5999`） |
 | IPC | `wind-bridge/src/{handler,server}.rs` | `CaretData{ x,y,height,composition_start_x,composition_start_y }`、`CMD_CARET_PENDING → handle_caret_pending`、`CMD_CARET_PROBE → handle_caret_probe`、`client_token`（高 32 位 = PID） |
 | UI | `wind-ui/src/candidate_window.rs` | `place_window`（下方 `caret_y+gap`、上方 `caret_y-height-…`）、`last_content_pos` + 4px 阈值、`placed_above` 粘滞 |
@@ -279,14 +279,25 @@ DocMgr 层级的其它同类缺陷（地址栏首字母上屏、焦点气泡时�
 每次 burst 事件都重置它）。连打时组合本身只活几十毫秒，候选窗往往来不及出现就被下一次上屏
 `reset_first_show()` 掀掉，表现为「迟钝」。且延迟无法靠单纯调小超时解决——超时短了就退回错位。
 
-出路是承认**这是取舍而非 bug**，按宿主分档。`compat.toml` 的 `first_show_mode`（`wait`/`fast`/`instant`，
-`FirstShowMode` 枚举）逐进程选择：
+出路是承认**这是取舍而非 bug**，按宿主分档。档位由 `FirstShowMode` 枚举表达，**两层**决定：
+全局默认档 `config.toml` 的 `ui.candidate.first_show_mode`，per-app 覆盖 `compat.toml` 的
+`first_show_mode`（**`Option`，缺省＝跟随全局**）。
 
 | 档位 | 菜单名 | 首帧行为 | 适用 |
 |------|--------|----------|------|
-| `fast`（**默认**） | 快速显示（默认） | 采信试探坐标 / 连打直接放行 / 短兜底，三条判据见下；坐标不可信时自动退回长兜底 | 通用 |
+| `fast`（**出厂默认**） | 快速显示 | 采信试探坐标 / 连打直接放行 / 短兜底，三条判据见下；坐标不可信时自动退回长兜底 | 通用 |
 | `wait` | 等待精确坐标（较慢） | 第 1 层原样：等权威坐标或 150ms 兜底 | `fast` 判据失灵的宿主兜底 |
 | `instant` | 立即显示（最快，可能抖动） | 完全不等，用按键前的坐标（走 `notify_ui_update` 逃生口） | 组合期极短、或根本不上报组合坐标的宿主 |
+| —（per-app 第四档） | 跟随全局（默认） | 清掉 `compat.toml` 里该字段，用全局档 | 撤销 per-app 覆盖 |
+
+★ **`AppCompatRule.first_show_mode` 必须是 `Option`**：全局默认档可配之后，「这个应用没配过」
+与「显式配了恰好等于当前全局的那一档」是两件事——后者不会跟着全局设置一起变。若不区分，
+用户改全局默认时所有从未配过的应用都纹丝不动，且无从撤销。
+
+★ **档位的读取统一走 `Coordinator::effective_first_show_mode()`**（`coordinator/first_show.rs`）：
+per-app 有值用它，否则回落全局配置（认不出的值再回落枚举 `#[default]`）。
+⚠ `ActiveCompat.first_show_mode` **刻意保留 `Option`、不在写入时就地回落**——它是随焦点切换
+刷新的镜像态，写入时烘进全局值会得到「设置页改了要切一次焦点才生效」。回落只在读取侧发生。
 
 > **默认档 2026-08-03 由 `wait` 改为 `fast`。** `fast` 此前不敢作默认，是因为焦点切换 / 鼠标移动
 > 光标之后的首帧会拿一份属于别处的旧坐标去定位；**首帧信任门**（见下）补上该洞后，它在坐标
@@ -449,10 +460,15 @@ UI 线程响应延迟、`GetGUIThreadInfo` 的 Win32 caret、以及异步 edit s
 
 #### 入口
 
-- **右键菜单**：高级 → 「候选窗首显（<进程名>）」子菜单单选，写用户层 `compat.toml` 并热重载整表
-  （`handle_menu.rs::set_first_show_mode`，三步：写盘 → 重载 → 刷新 `active_compat`）。
-- **配置**：`compat.toml` 的 `first_show_mode`；三个内部选项在 `config.toml` 的 `[ui.candidate]` 下，
-  不进设置页（`first_show_settle_ratio` / `fast_typing_window_ms` / `fast_first_show_fallback_ms`）。
+- **右键菜单**：「应用独立配置（<进程名>）」→「候选窗首显」子菜单**四档**单选（跟随全局／快速／
+  等待精确坐标／立即），写用户层 `compat.toml` 并热重载整表（`handle_menu.rs::set_first_show_mode`，
+  三步：写盘 → 重载 → 刷新 `active_compat`）。
+  ★ 菜单项与 setter 的 id 解析**共用 `Coordinator::FIRST_SHOW_MENU` 一张表**：两处手写时
+  「把 id 2 与 3 写反」编译过、测试绿，只表现为点错档位。
+- **设置页**：外观 → 候选窗口 → 「首次显示时机」（全局默认档，wind-setting 仓的 manifest）。
+- **配置**：全局 `config.toml` `[ui.candidate] first_show_mode`；per-app `compat.toml` 的同名字段
+  （缺省＝跟随全局）；另有三个内部选项在 `[ui.candidate]` 下不进设置页
+  （`first_show_settle_ratio` / `fast_typing_window_ms` / `fast_first_show_fallback_ms`）。
 
 ## 7. 已知降级与未移植项
 

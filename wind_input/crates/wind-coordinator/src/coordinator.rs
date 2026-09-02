@@ -3318,23 +3318,6 @@ impl Coordinator {
                 // 诊断采集开关本身与配置文件无关（会话级），这里重推纯属幂等保险——
                 // 与 password_suppress 同样处理，让"重载一次"能修好任何 DLL 侧状态漂移。
                 self.push_diag_snapshot_config(0);
-                // ★★ 热键表重新下发。上面的 `ConfigBundle::build` 已经**重编**过一遍
-                // （`Compiler::compile` 读的就是这份新配置），但编出来的表要经 activation
-                // push 才到得了 DLL —— 而 TSF 侧的 `RegisterHotKey` 抢占（GLOBAL 位）与
-                // 吃键闸门都建立在那张表上。上面那几条 `push_*_config` 各自推的是自己那
-                // 一小段配置，没有一条捎带热键表。
-                //
-                // 不推的表现是「设置页把热键改了，按下去还是老的；切一次焦点或重启才
-                // 生效」—— 因为热键表此前**只随 focus_gained 下发**。
-                //
-                // ⚠️ 定向推给当前活跃客户端，**不广播**：`push_activation_status` 里的
-                // `hostRenderAvail` 位是按 token 的 pid 算出来的，广播会把一个进程的值
-                // 污染给其它客户端。没有活跃 token 就什么都不做 —— 那种情况下下一次
-                // focus_gained 自会带上新表。
-                let active_token = self.push_server.active_token();
-                if active_token != 0 {
-                    self.push_activation_status(active_token);
-                }
                 // 语法错误时**取代**「设置已更新」，而不是两条都弹：报成功再报失败会让
                 // 用户以为是两件事，而这里只有一件——他刚存的设置里有一部分没生效。
                 // 此时 `self.rt()` 已是上面换进去的新 bundle，读到的就是本次加载的降级记录。
@@ -4172,11 +4155,6 @@ impl Coordinator {
     /// 找回它的 VK，再逐个问那些判定函数「这个键归你吗」——判据因此永远与实际行为同源。
     ///
     /// 只查非字母：字母本就是默认码元，且字母触发键（z）有专门的裁决顺序，不构成冲突。
-    ///
-    /// ⚠️ **新增引导键类动词时必须同时往下面的 `owners` 链里加一臂**。这张清单是手写的，
-    /// 漏加不会有任何报错：撞车检测对那个新动词恒不报，方案作者把它的引导键配成码元时
-    /// 一声不吭，直到现场发现「那个模式再也进不去了」。失效的是**保护性功能**，
-    /// 没有人会来报这个 bug ——「本该警告却没警告」不构成用户可见的症状。
     pub fn code_char_conflicts(&self) -> Vec<(char, Vec<&'static str>)> {
         let charset = self.engine_mgr.active_input_chars();
         if charset.is_default_alpha() {

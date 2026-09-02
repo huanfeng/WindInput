@@ -243,21 +243,6 @@ fn fn_search(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
     let s = services("web.search", ctx)?;
     let engine = args[0].trim().to_lowercase();
     let query = &args[1];
-    // 空查询词直接报错，**不打开浏览器**。
-    //
-    // 这是「静默失败」最标准的形状：`web.search("baidu", sel())` 在取不到文本时照样开一个
-    // `baidu.com/s?wd=` 的空搜索页 —— 命令看上去执行了，结果什么也没搜到，用户能拿到的
-    // 唯一线索是「浏览器开了但搜索框是空的」，无从判断是取值没成、还是引擎名写错了、
-    // 还是命令压根没跑。报错会经 `show_command_error` 弹到屏幕上。
-    //
-    // ⚠️ `sel()` 在 Windows 上**恒为空串**（`front_ctx` 只有 macOS 的 `.app` 会写），
-    // 故 `web.search("baidu", sel())` 这一类写法在 Windows 上必然走进本分支。
-    if query.trim().is_empty() {
-        return Err(CmdbarError::runtime(
-            "web.search",
-            "没有可搜索的内容（取到的文本为空）",
-        ));
-    }
     // 宿主自定义搜索优先。
     if let Some(search) = &s.search {
         search
@@ -321,31 +306,6 @@ mod tests {
         let ctx = MemoryContext::new().with_services(svc);
         fn_search(&ctx, &["baidu".into(), "a b".into()]).unwrap();
         assert_eq!(rec.0.lock().unwrap()[0], "https://www.baidu.com/s?wd=a+b");
-    }
-
-    /// 空查询词**不开浏览器**，报错。
-    ///
-    /// 此前会开一个空搜索页 —— 命令看上去跑了、结果什么也没搜到，这正是最难归因的那种
-    /// 失败：用户分不清是取值没成、引擎名写错、还是命令压根没执行。
-    ///
-    /// 变异判据：去掉 `fn_search` 里的空查询守卫，两条断言同时转红。
-    #[test]
-    fn search_refuses_an_empty_query_instead_of_opening_a_blank_page() {
-        let rec = Arc::new(RecordOpener::default());
-        let mut svc = Services::new();
-        svc.open = Some(rec.clone());
-        let ctx = MemoryContext::new().with_services(svc);
-        // 纯空白同样算空：取值函数返回的常常是一个换行或若干空格。
-        for q in ["", "   ", "\n"] {
-            assert!(
-                fn_search(&ctx, &["baidu".into(), q.into()]).is_err(),
-                "空查询 {q:?} 应当报错"
-            );
-        }
-        assert!(
-            rec.0.lock().unwrap().is_empty(),
-            "报错的同时绝不能已经把浏览器开出去了"
-        );
     }
 
     /// 记录 `ProcessRunner` 收到的全部字段，供两个测试共用。

@@ -3701,16 +3701,6 @@ impl Coordinator {
     /// - `InsertText`（整串提交）→ `CMD_COMMIT_TEXT`。
     ///
     /// 两者均带副作用，故一律 `push_commit_to_active` 定向投递（非广播），避免多个 TSF 端重复。
-    ///
-    /// ⚠️ **其余 KeyAction 一律落 `other` 臂被静默丢弃，`ClearComposition` 也在其中。**
-    /// 键盘路径靠按键应答把它带回宿主，这条通路没有那个出口，漏掉的现象是「点了之后
-    /// 动作确实跑了，但宿主里的组合区一直挂着」。`select_candidate_at` 的 `$CC` 分支
-    /// 正是踩过这个坑之后、在**调用点**手工补了一行 `encode_clear_composition`
-    /// （那条路 `return None`，根本不经过本函数）。
-    ///
-    /// 也就是说这里的缺口仍在：`handle_addword.rs` 里有七处返回 `ClearComposition`，
-    /// 加词面板的鼠标点选哪天接进本函数就会再踩一次。届时应当**在此补一臂**，而不是
-    /// 在调用点做第三次特判 —— 修现象不修机制，每次修复都正确，每次都不减少下次的概率。
     pub(crate) fn push_no_key_ctx_action(&self, act: &KeyAction, chinese_mode: bool) {
         match act {
             KeyAction::UpdateComposition { text, caret_pos } => {

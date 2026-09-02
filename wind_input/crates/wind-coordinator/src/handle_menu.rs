@@ -662,6 +662,29 @@ impl Coordinator {
             .unwrap_or_default()
     }
 
+    /// 「候选窗首显」子菜单的四档：(菜单 id, 档位, 标签)。`None` = 跟随全局。
+    ///
+    /// ★★ **菜单项与 [`Self::set_first_show_mode`] 的解析共用这一张表**，因为它们之间的
+    /// 对应关系**没有任何编译或测试信号**：把 id 2 与 3 写反，编译过、全部测试绿，只表现
+    /// 为「点了『等待精确坐标』结果变成立即显示」。而 2026-09-02 加第四档时恰恰重排过这组
+    /// 编号——两处手写、改一处漏一处，正是本仓 `menu_id_tests` 那条注释警告的同一类缺陷。
+    /// ⇒ 收成一张表后，「写反」这件事在结构上不可能发生。
+    ///
+    /// 编号按菜单显示顺序排，与 `InitialMode` / `AutoPairRule` 的「0=跟随全局」约定一致。
+    const FIRST_SHOW_MENU: [(
+        u8,
+        Option<wind_config::app_compat::FirstShowMode>,
+        &'static str,
+    ); 4] = {
+        use wind_config::app_compat::FirstShowMode as F;
+        [
+            (0, None, "跟随全局（默认）"),
+            (1, Some(F::Fast), "快速显示"),
+            (2, Some(F::Wait), "等待精确坐标（较慢）"),
+            (3, Some(F::Instant), "立即显示（最快，可能抖动）"),
+        ]
+    };
+
     /// 为当前焦点应用设置候选窗首显策略，并写入用户层 compat.toml。
     ///
     /// 三步收口，缺一不可：
@@ -671,19 +694,15 @@ impl Coordinator {
     ///   3. 刷新当前 `active_compat` 缓存，使本次设置对当前应用立即生效
     ///      （同 pid 时 `update_active_compat` 提前 return，不会自己刷）。
     ///
-    /// `mode_id`：0=跟随全局（清除规则）1=快速 2=等待精确坐标 3=立即。
+    /// `mode_id` 的含义见 [`Self::FIRST_SHOW_MENU`]（菜单项由同一张表生成）。
     ///
-    /// ⚠ 编号按菜单显示顺序排，与 `InitialMode` / `AutoPairRule` 的「0=跟随全局」约定一致；
-    /// 认不出的编号一律当作 0（清除覆盖）——per-app 覆盖是「用户显式要求」，不该由一个
-    /// 对不上的 id 凭空造出来。
+    /// ⚠ 认不出的编号一律当作「跟随全局」——per-app 覆盖是「用户显式要求」，
+    /// 不该由一个对不上的 id 凭空造出来。
     pub(crate) fn set_first_show_mode(&self, mode_id: u8) {
-        use wind_config::app_compat::FirstShowMode;
-        let mode = match mode_id {
-            1 => Some(FirstShowMode::Fast),
-            2 => Some(FirstShowMode::Wait),
-            3 => Some(FirstShowMode::Instant),
-            _ => None,
-        };
+        let mode = Self::FIRST_SHOW_MENU
+            .iter()
+            .find(|(id, _, _)| *id == mode_id)
+            .and_then(|(_, mode, _)| *mode);
         let name = self.active_process_name();
         if name.is_empty() {
             // 焦点进程未解析（尚无焦点 / OpenProcess 失败）。菜单项此时应是禁用态，
@@ -1152,7 +1171,7 @@ impl Coordinator {
         // 进程未解析时**子项禁用而非隐藏**（父项 enabled 恒 true，见
         // `MenuItemSpec::submenu`），菜单项位置保持稳定。
         let per_app_children = {
-            use wind_config::app_compat::{FirstShowMode as F, InitialMode as IM};
+            use wind_config::app_compat::InitialMode as IM;
             let proc = self.active_process_name();
             let enabled = !proc.is_empty();
             let cur_first_show = self.rule_first_show_mode(&proc);
@@ -1194,32 +1213,17 @@ impl Coordinator {
                 // 因此三档上的「（默认）」标记一并移到这一档，两处都写「默认」只会自相矛盾。
                 M::submenu(
                     "候选窗首显",
-                    vec![
-                        M::leaf(
-                            "跟随全局（默认）",
-                            cmd(MenuCmd::FirstShowMode(0)),
-                            enabled,
-                            cur_first_show.is_none(),
-                        ),
-                        M::leaf(
-                            "快速显示",
-                            cmd(MenuCmd::FirstShowMode(1)),
-                            enabled,
-                            cur_first_show == Some(F::Fast),
-                        ),
-                        M::leaf(
-                            "等待精确坐标（较慢）",
-                            cmd(MenuCmd::FirstShowMode(2)),
-                            enabled,
-                            cur_first_show == Some(F::Wait),
-                        ),
-                        M::leaf(
-                            "立即显示（最快，可能抖动）",
-                            cmd(MenuCmd::FirstShowMode(3)),
-                            enabled,
-                            cur_first_show == Some(F::Instant),
-                        ),
-                    ],
+                    Self::FIRST_SHOW_MENU
+                        .iter()
+                        .map(|(id, mode, label)| {
+                            M::leaf(
+                                *label,
+                                cmd(MenuCmd::FirstShowMode(*id)),
+                                enabled,
+                                cur_first_show == *mode,
+                            )
+                        })
+                        .collect(),
                 ),
                 // 「跟随全局」同样必须是独立一档（理由见上面 `tri`）。禁用一档主要给表格类
                 // 宿主：Excel / WPS 表格「输入态」下方向键 = 确认单元格并移动，配对后的
@@ -2057,6 +2061,34 @@ fn avoid_unset_sentinel(x: i32, y: i32) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::avoid_unset_sentinel;
+
+    /// 「候选窗首显」四档表自身的自洽性：id 与档位都不得重复，且三个真实档位一个不少。
+    ///
+    /// ★ 这条钉的是**加档/改档时的漏改**。表本身已经消掉了「菜单项与 setter 写反」那类
+    /// 缺陷（两处手写变一处），但表里写重一个 id、或漏掉某一档，仍然没有编译信号——
+    /// 表现是「菜单里两项互相抢选中态」或「某一档在菜单里根本点不出来」。
+    #[test]
+    fn first_show_menu_table_is_self_consistent() {
+        use crate::coordinator::Coordinator;
+        use std::collections::BTreeSet;
+        use wind_config::app_compat::FirstShowMode as F;
+
+        let table = Coordinator::FIRST_SHOW_MENU;
+        let ids: BTreeSet<u8> = table.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(ids.len(), table.len(), "菜单 id 有重复：{ids:?}");
+
+        let modes: Vec<_> = table.iter().map(|(_, m, _)| *m).collect();
+        for want in [None, Some(F::Fast), Some(F::Wait), Some(F::Instant)] {
+            assert!(
+                modes.contains(&want),
+                "{want:?} 在菜单里点不出来（表漏了一档）"
+            );
+        }
+        assert_eq!(modes.len(), 4, "多出了表外的档位：{modes:?}");
+
+        // 标签非空：`M::leaf` 接受空串，空标签在菜单里是一条看不见但可点的项。
+        assert!(table.iter().all(|(_, _, label)| !label.is_empty()));
+    }
 
     /// 输入诊断 HUD 整套在 macOS 未实现（`ShowInputDiag` 落在 forwarder 的兜底臂），
     /// 菜单里不该留一个点了没反应的项。
