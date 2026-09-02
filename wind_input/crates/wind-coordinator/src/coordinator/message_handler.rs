@@ -2188,23 +2188,52 @@ impl MessageHandler for Coordinator {
                 let new_has_rule = self.rule_initial_mode(&proc).is_some()
                     || self.rule_initial_punct(&proc).is_some();
                 let per_app = self.rt().config.input.default.per_app_scope();
-                if crate::coordinator::should_reapply_initial(
+                let reapply = crate::coordinator::should_reapply_initial(
                     crossed,
                     per_app,
                     old_has_rule,
                     new_has_rule,
                     out_of_scope,
-                ) {
+                );
+                if reapply {
                     // reset_aux=false：与重型段的调用逐字一致。随后重型段会用同样的入参
                     // 再调一次，`apply_initial_mode` 是幂等的（每次都按当前表重算目标）。
                     self.apply_initial_mode(client_token, false);
                 }
-                let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                return (s.chinese_mode, s.full_width);
+                // 锁先释放再打日志：本方法在 DLL 的同步阻塞路径上，不在持锁期间做格式化。
+                let (chinese, full) = {
+                    let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    (s.chinese_mode, s.full_width)
+                };
+                tracing::debug!(
+                    "get_current_mode: proc={proc} class={window_class:?} old_pid={old_pid} \
+                     old_has_rule={old_has_rule} new_has_rule={new_has_rule} per_app={per_app} \
+                     reapply={reapply} → 回传 chinese={chinese} full={full}"
+                );
+                return (chinese, full);
+            } else {
+                // ★ 这条出路此前完全静默，而它会把 per-app 重算整个跳过、直接回传全局现状
+                // ——上一个应用若被 `initial_mode` 规则强制成英文，回传的就是那个英文，首键
+                // 随即按英文处理，而重型段几毫秒后才纠正。`cached_proc_name` 只查 `pid_names`
+                // （同步段禁止 OpenProcess），而 `pid_names` 仅在 DLL 建立 bridge 连接时写入，
+                // 服务重启或 PID 复用后可能查不到。排「切过来首字符是英文」必看本行。
+                tracing::debug!(
+                    "get_current_mode: pid={new_pid} 进程名未知（pid_names 未命中） \
+                     class={window_class:?} → 跳过 per-app 重算，回传全局现状"
+                );
             }
         }
-        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        (s.chinese_mode, s.full_width)
+        // crossed=false（同进程内换焦点）与上面两条 fall-through 共用本出口；
+        // 三者靠 crossed= 与各自那条前置日志区分。
+        let (chinese, full) = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (s.chinese_mode, s.full_width)
+        };
+        tracing::debug!(
+            "get_current_mode: pid={new_pid} old_pid={old_pid} crossed={crossed} \
+             → 回传现状 chinese={chinese} full={full}"
+        );
+        (chinese, full)
     }
 
     fn handle_ime_activated(&self, client_token: u64) -> Option<StatusUpdateData> {
