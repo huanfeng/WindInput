@@ -313,6 +313,23 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 查询走精确 + 前缀，候选标 `source = English`。独立方案可直接使用，更常见的是被混输懒加载
 （`schema.mix.enable_english`）。
 
+### 6.1 英文候选混入非混输方案（`schema.english_merge`）
+
+文件：`wind-engine/src/english_merge.rs`。让**纯拼音 / 纯码表**方案也能在候选里捎带英文词
+（全拼下打 `hello` 直接选到 hello），出厂关。
+
+**接线点是 `EngineManager` 而非各引擎内部**：`convert` / `recheck_auto_commit` /
+`handle_top_code` 三条通路在管理器上是同一个收口点（都经 `active_engine()`），一处接线即
+覆盖拼音、码表及以后任何新引擎，既不必逐引擎改造，也不必包一层要转发二十来个 trait 方法的
+装饰器（漏转发一个就是静默改行为）。
+
+| 关注点 | 与混输那套（§7）的差别 |
+|---|---|
+| 合并策略 | 只有一路基础候选，无三方 `truncation_tier` 仲裁；`merge()` 去重后直接腾座追加 |
+| 截断保底 | **英文有席位**（`seats_for`，`max/10` 封顶 5 条）。混输里英文无配额（见 §7 档位表下的说明），纯拼音下若照搬，拼音一次吐满 `max_candidates` 会把英文整片截掉 ⇒ 开关等于没做 |
+| 上屏否决 | `block_commit` **默认开**（混输的 `auto_commit_block_on_english` 默认关）。五笔 4 码即满码上屏，关着它打 `github` 到第 4 键就被顶出中文 |
+| 适用范围 | `english_merge_ctx` 显式排除 `Mixed` / `English` 引擎——混输有自带的英文混入，两套叠加会让档位与配额双重失真 |
+
 ---
 
 ## 7. 混输引擎（MixedEngine）—— 冲突处理与拼音否决

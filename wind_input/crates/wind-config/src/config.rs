@@ -727,6 +727,13 @@ pub struct SchemaConfig {
     /// 全局英文配置（英文方案自身的行为与调频；不再共用码表那套）。
     #[serde(default)]
     pub english: EnglishGlobal,
+    /// 全局「英文候选混入」配置（**引擎无关**：拼音/纯码表方案共用；混输不读本段）。
+    ///
+    /// ⚠️ 与上面的 `english` 段是两件事，别合并：那段管「英文方案**自己**作为一个方案时
+    /// 怎么表现」（`commit_space` / `raw_candidate` / 大小写变形），本段管「**别的**方案的
+    /// 候选列表里要不要混英文」。两个作用域各一份，不是两个真相源。
+    #[serde(default)]
+    pub english_merge: EnglishMergeGlobal,
     /// 快捷输入（日期/计算等内置类方案）配置。将随"英文/快捷做成方案"一并重构。
     #[serde(default)]
     pub quick_input: QuickInputConfig,
@@ -766,6 +773,7 @@ impl Default for SchemaConfig {
             pinyin: PinyinGlobalConfig::default(),
             mix: MixGlobal::default(),
             english: EnglishGlobal::default(),
+            english_merge: EnglishMergeGlobal::default(),
             quick_input: QuickInputConfig::default(),
             frequency: FrequencyGlobal::default(),
             legacy_special_modes: Vec::new(),
@@ -2087,6 +2095,51 @@ impl Default for MixGlobal {
             // 用户把两个否决开关都关掉也无济于事）。混输用户以码表为主，默认让顶码可用；
             // 需要简拼的用户显式打开即可。详见 `data/config.toml` 同名项注释。
             enable_pinyin_abbrev: false,
+        }
+    }
+}
+
+/// 全局「英文候选混入」配置（[schema.english_merge]）。**引擎无关**。
+///
+/// ## 为什么另立一段，而不是挂进 `[schema.mix]` 或 `[schema.pinyin]`
+///
+/// 「候选列表里混一条英文词」这件事与引擎类型无关：全拼方案要，纯码表方案（五笔）也可能要。
+/// 挂进任一引擎专属段，另一个引擎就得再配一遍，或者去读一个名字不对的键。
+///
+/// ⚠️ 与既有的 `[schema.mix]` 三个英文项（`enable_english` / `min_english_length` /
+/// `auto_commit_block_on_english`）**刻意并存、互不接管**：那三项只服务混输引擎自己的三方
+/// 档位仲裁（`MixedEngine::truncation_tier` 的档 0/2/3），语义已与 `convert_overflow` 的
+/// 截断归属耦合，硬改造成通用件的成本高于另写一份。**混输方案不读本段**（否则两套英文
+/// 各混一遍，档位与配额双重失真）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnglishMergeGlobal {
+    /// 在候选列表里混入英文词库候选。出厂关。
+    #[serde(default)]
+    pub enable: bool,
+    /// 最小触发长度（0=回退 3，即 2 字符以内不查英文）。口径同 `schema.mix.min_english_length`。
+    #[serde(default)]
+    pub min_length: usize,
+    /// 存在英文候选时否决**满码自动上屏 / 顶码上屏 / 满码空码清空**（保护正在输入英文词的用户）。
+    /// 默认开。
+    ///
+    /// ⚠️ 默认值与 `schema.mix.auto_commit_block_on_english`（默认**关**）刻意相反，不是漂移。
+    /// 那边默认关，是因为混输用户以码表为主、顶码要保持可用，英文只是捎带；而本段是用户
+    /// **显式打开**的能力，关着它等于白开——五笔 4 码即满码自动上屏，打 `github` 到第 4 键
+    /// `gith` 就被顶出中文，英文候选永远等不到露面。`wind-engine/AGENTS.md` 记着同款现场
+    /// 在混输里已经发生过一次（"github 打到第 5 键顶出「不算」"）。
+    ///
+    /// 拼音方案无满码上屏 / 顶码，本项对其是空操作。
+    #[serde(default = "default_true")]
+    pub block_commit: bool,
+}
+
+impl Default for EnglishMergeGlobal {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            min_length: 0,
+            // 见字段文档：这一项与 `schema.mix.auto_commit_block_on_english` 默认值相反是刻意的。
+            block_commit: true,
         }
     }
 }

@@ -82,6 +82,150 @@ fn test_english_schema_lazy_loads_and_converts() {
     assert!(!result.should_commit, "english 不应自动上屏");
 }
 
+/// 英文词库是否就位（几个测试共用的跳过判据）。
+fn english_dict_ready(dir: &std::path::Path) -> bool {
+    schema_exists(dir, "english") && dir.join("schemas/english/en.dict.yaml").exists()
+}
+
+fn has_english_text(r: &wind_engine::ConvertResult, want: &str) -> bool {
+    r.candidates.iter().any(|c| {
+        c.source == wind_candidate::CandidateSource::English && c.text.eq_ignore_ascii_case(want)
+    })
+}
+
+/// 英文候选混入（`[schema.english_merge]`）：**全拼**方案下打 `hello` 也该能选到 hello。
+///
+/// ★ 反向对照必须成对立：开关关着时英文**不在场**。缺了它，「在场」可能只是因为拼音词库
+/// 里恰好有个同形词条，或者来源标记串了，断言变成空转（同 `MixedEngine` 那条
+/// `english_has_no_quota_under_codetable_flood` 的教训）。
+#[test]
+fn english_merge_into_pinyin_candidates() {
+    let dir = data_dir();
+    if !schema_exists(&dir, "pinyin") || !english_dict_ready(&dir) {
+        eprintln!("跳过：pinyin schema 或英文词库不存在");
+        return;
+    }
+
+    // 反向对照：出厂默认（enable=false）不混英文。
+    let mgr_off = EngineManager::new(&make_config(&["pinyin"]), Some(&dir));
+    assert!(
+        !has_english_text(&mgr_off.convert("hello", 50), "hello"),
+        "出厂默认应不混英文——否则下面那条断言测不到开关"
+    );
+
+    // 开启后 hello 在场。
+    let mut on = make_config(&["pinyin"]);
+    on.schema.english_merge.enable = true;
+    let mgr_on = EngineManager::new(&on, Some(&dir));
+    let r = mgr_on.convert("hello", 50);
+    assert!(
+        has_english_text(&r, "hello"),
+        "全拼下开启 english_merge 后应能选到 hello，实际前 8 条: {:?}",
+        r.candidates
+            .iter()
+            .take(8)
+            .map(|c| (&c.text, c.source))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 拼音吐满配额时英文仍须在场——这是 `english_merge` 的保底席位在**真实词库**下的验证。
+///
+/// 单元测试用假引擎验过同一条（`english_merge::tests::english_survives_pinyin_flood`），
+/// 但那里的「洪水」是构造的；这里用真实拼音词库确认 `max_candidates` 确实会被装满。
+#[test]
+fn english_survives_real_pinyin_flood() {
+    let dir = data_dir();
+    if !schema_exists(&dir, "pinyin") || !english_dict_ready(&dir) {
+        eprintln!("跳过：pinyin schema 或英文词库不存在");
+        return;
+    }
+    let mut cfg = make_config(&["pinyin"]);
+    cfg.schema.english_merge.enable = true;
+    let mgr = EngineManager::new(&cfg, Some(&dir));
+
+    // `hen` 是完整音节，拼音候选足以装满小配额。
+    let max = 10;
+    let r = mgr.convert("hen", max);
+    assert!(
+        r.candidates.len() >= max,
+        "前提不成立：拼音没装满配额，测不到保底席位（实得 {} 条）",
+        r.candidates.len()
+    );
+    assert!(
+        r.candidates
+            .iter()
+            .any(|c| c.source == wind_candidate::CandidateSource::English),
+        "拼音装满配额时英文被整片截掉 = 开关等于没做"
+    );
+    assert!(
+        r.candidates.len() <= max,
+        "腾座后总数不得超出 max_candidates，实得 {}",
+        r.candidates.len()
+    );
+}
+
+/// 混输方案**不读**本段：它有自带的 `schema.mix.enable_english`（带三方档位仲裁），
+/// 两套各混一遍会让档位与配额双重失真。
+#[test]
+fn english_merge_skips_mixed_schema() {
+    let dir = data_dir();
+    if !schema_exists(&dir, "wubi86_pinyin") || !english_dict_ready(&dir) {
+        eprintln!("跳过：wubi86_pinyin schema 或英文词库不存在");
+        return;
+    }
+    let mut cfg = make_config(&["wubi86_pinyin"]);
+    cfg.schema.english_merge.enable = true;
+    // 混输自带的英文开关保持关闭：若混入错误地生效，英文候选会凭空出现。
+    cfg.schema.mix.enable_english = false;
+    let mgr = EngineManager::new(&cfg, Some(&dir));
+
+    let r = mgr.convert("hello", 50);
+    assert!(
+        !r.candidates
+            .iter()
+            .any(|c| c.source == wind_candidate::CandidateSource::English),
+        "混输方案不该读 english_merge，实际混进了英文候选"
+    );
+}
+
+/// 通路③（顶码）的英文守护：五笔下打英文词时，顶码不得把中文顶上屏。
+///
+/// ★ 先立「不否决时确实会顶码」的前提，否则 `is_none()` 可能只是因为这串本就不顶码，
+/// 断言变成空转。
+#[test]
+fn english_merge_vetoes_top_code_on_codetable() {
+    let dir = data_dir();
+    if !schema_exists(&dir, "wubi86") || !english_dict_ready(&dir) {
+        eprintln!("跳过：wubi86 schema 或英文词库不存在");
+        return;
+    }
+    let build = |block: bool| {
+        let mut cfg = make_config(&["wubi86"]);
+        // ⚠️ 顶码开关必须显式打开：出厂值 true 在 **L2**（data/config.toml），而
+        // `Config::default()` 是 L1，那里是 false。不设这行，`handle_top_code` 在第一行
+        // 就 return None，本用例连同它要守的否决逻辑一起变成空转。
+        cfg.schema.codetable.top_code_commit = true;
+        cfg.schema.english_merge.enable = true;
+        cfg.schema.english_merge.block_commit = block;
+        EngineManager::new(&cfg, Some(&dir))
+    };
+
+    // 前提：关掉守护时这串确实会顶码。
+    let unguarded = build(false);
+    let Some(topped) = unguarded.handle_top_code("github") else {
+        eprintln!("跳过：wubi86 对 github 本就不顶码，测不到否决");
+        return;
+    };
+
+    let guarded = build(true);
+    assert!(
+        guarded.handle_top_code("github").is_none(),
+        "存在英文候选时顶码须被否决，否则打 github 会被顶出中文 {:?}",
+        topped
+    );
+}
+
 #[test]
 fn test_wubi_engine_candidates() {
     let dir = data_dir();

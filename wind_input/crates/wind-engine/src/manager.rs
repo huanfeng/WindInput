@@ -324,6 +324,12 @@ impl RangeScan {
     }
 }
 
+/// 「英文候选混入」取用的英文词库方案 id。
+///
+/// 与混输懒加载的是**同一个方案**（`build_engine` 的 mixed 分支写死 `"english"`），
+/// 故两条路复用同一份引擎实例、同一份词库内存。
+const ENGLISH_MERGE_SCHEMA_ID: &str = "english";
+
 pub struct EngineManager {
     /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）
     engines: Mutex<HashMap<String, Arc<dyn Engine>>>,
@@ -355,6 +361,15 @@ pub struct EngineManager {
     mix: Mutex<wind_config::MixGlobal>,
     /// 全局英文配置（英文方案的行为与调频；全局唯一）。Mutex 以支持热重载。
     english: Mutex<wind_config::config::EnglishGlobal>,
+    /// 全局「英文候选混入」配置（引擎无关；**混输不读**，它有自带的
+    /// `schema.mix.enable_english`）。Mutex 以支持热重载。
+    english_merge: Mutex<wind_config::EnglishMergeGlobal>,
+    /// 「英文候选混入」用的英文引擎缓存。
+    ///
+    /// `None` = 尚未尝试；`Some(None)` = 试过且不可用（英文词库缺失），**不再重试**。
+    /// ⚠️ 少了这层「记住失败」，`convert` 每一次按键都会重走一遍 `ensure_loaded` 构建、
+    /// 失败、`warn!` ——热路径上刷日志且白做功。与其余镜像同批在 `reload_from_config` 重置。
+    english_merge_engine: Mutex<Option<Option<Arc<dyn Engine>>>>,
     /// 全局临时拼音配置（码表方案下临时切拼音反查；全局唯一）。Mutex 以支持热重载。
     temp_pinyin: Mutex<wind_config::config::TempPinyinConfig>,
     /// 不参与词频的字符区块（`schema.frequency.exclude_blocks` 的**解析结果**）。
@@ -625,6 +640,8 @@ impl EngineManager {
             codetable: Mutex::new(config.schema.codetable.clone()),
             mix: Mutex::new(config.schema.mix.clone()),
             english: Mutex::new(config.schema.english.clone()),
+            english_merge: Mutex::new(config.schema.english_merge.clone()),
+            english_merge_engine: Mutex::new(None),
             temp_pinyin: Mutex::new(config.input.temp_pinyin.clone()),
             // 用户层在 store 里（`wind_store::charsets`），装配前先 `as_deref` 借用，
             // 下一行才把 `store` 本体 move 进结构体。
@@ -2585,6 +2602,15 @@ impl EngineManager {
         *self.codetable.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.codetable.clone();
         *self.mix.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.mix.clone();
         *self.english.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.english.clone();
+        *self.english_merge.lock().unwrap_or_else(|e| e.into_inner()) =
+            config.schema.english_merge.clone();
+        // 连同**引擎缓存**一起重置：开关从关到开时，缓存里躺着的可能是上次「未尝试」之外的
+        // `Some(None)`（词库当时缺失）。不重置的话用户补上词库、重载配置后仍然不生效，
+        // 症状是「设置页改了不生效、重启后才生效」——与上面几份镜像同一类坑。
+        *self
+            .english_merge_engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         *self.temp_pinyin.lock().unwrap_or_else(|e| e.into_inner()) =
             config.input.temp_pinyin.clone();
         // 字符类：**重新装配**而不是照搬字符串——镜像存的是解析结果。漏掉这一行的
@@ -2682,15 +2708,109 @@ impl EngineManager {
         None
     }
 
-    /// 转换输入为候选（分发到当前引擎）
+    /// 转换输入为候选（分发到当前引擎），必要时混入英文候选。
+    ///
+    /// 英文混入接在**这一层**而不是各引擎内部：本管理器同时是 `convert` /
+    /// `recheck_auto_commit` / `handle_top_code` 三条通路的收口点，一处接线即覆盖拼音、
+    /// 码表及以后任何新引擎。详见 [`crate::english_merge`] 模块文档。
     pub fn convert(&self, input: &str, max_candidates: usize) -> ConvertResult {
-        match self.active_engine() {
-            Some(engine) => engine.convert(input, max_candidates).unwrap_or_else(|e| {
-                warn!("convert error: {}", e);
-                ConvertResult::default()
-            }),
-            None => ConvertResult::default(),
+        let Some(engine) = self.active_engine() else {
+            return ConvertResult::default();
+        };
+        let mut r = engine.convert(input, max_candidates).unwrap_or_else(|e| {
+            warn!("convert error: {}", e);
+            ConvertResult::default()
+        });
+        if let Some((eng, cfg)) = self.english_merge_ctx(&engine) {
+            let english = crate::english_merge::lookup(
+                eng.as_ref(),
+                input,
+                cfg.min_length,
+                crate::english_merge::seats_for(max_candidates),
+            );
+            if !english.is_empty() {
+                // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
+                // `AGENTS.md`：否决必须叠「对方确有候选」——本分支已在 `!english.is_empty()`
+                // 之内，判据与下面并入列表的是**同一批候选、同一个 input**，天然同源。
+                //
+                // `should_clear` 一并否决：满码无码表匹配时清空缓冲会把用户正在打的英文词
+                // 一起抹掉，与顶掉它是同一种伤害。
+                if cfg.block_commit {
+                    r.should_commit = false;
+                    r.commit_text.clear();
+                    r.should_clear = false;
+                }
+                crate::english_merge::merge(&mut r.candidates, english, max_candidates);
+                // 「有输入但无候选」的判据须随之更新：英文进来了就不再是空码，
+                // 漏掉这行会让协调器按空码处置（吃键 / 清空），候选却是有的。
+                r.is_empty = r.candidates.is_empty();
+            }
         }
+        r
+    }
+
+    /// 取「英文候选混入」的引擎与配置；关闭 / 不适用 / 词库缺失时 `None`。
+    ///
+    /// ⚠️ **混输与英文方案自身被排除**：混输有自带的英文混入
+    /// （`schema.mix.enable_english`，带三方档位仲裁），再叠一层会混两遍、档位与配额双重
+    /// 失真；英文方案本身就在出英文候选。
+    fn english_merge_ctx(
+        &self,
+        active: &Arc<dyn Engine>,
+    ) -> Option<(Arc<dyn Engine>, wind_config::EnglishMergeGlobal)> {
+        let cfg = self
+            .english_merge
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !cfg.enable {
+            return None;
+        }
+        if matches!(
+            active.engine_type(),
+            EngineType::Mixed | EngineType::English
+        ) {
+            return None;
+        }
+        Some((self.english_merge_engine()?, cfg))
+    }
+
+    /// 英文词库引擎（懒加载一次，失败也记住，见 [`Self::english_merge_engine`] 字段文档）。
+    fn english_merge_engine(&self) -> Option<Arc<dyn Engine>> {
+        {
+            let cached = self
+                .english_merge_engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(v) = cached.as_ref() {
+                return v.clone();
+            }
+        }
+        // **锁外**构建：`ensure_loaded` 自带 single-flight，且会去读盘建词库（秒级）。
+        // 持着本缓存锁做这件事会把并发的按键线路一并堵住。
+        let built = if self.ensure_loaded(ENGLISH_MERGE_SCHEMA_ID) {
+            self.engines
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(ENGLISH_MERGE_SCHEMA_ID)
+                .cloned()
+        } else {
+            None
+        };
+        *self
+            .english_merge_engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(built.clone());
+        built
+    }
+
+    /// 存在英文候选时是否否决上屏。**三条通路共用这一个判据**（`AGENTS.md`：任何否决开关
+    /// 必须三处都接，漏一处该开关对那条路径就等于完全失效，且日志与设置页均无痕迹）。
+    fn english_vetoes_commit(&self, active: &Arc<dyn Engine>, input: &str) -> bool {
+        let Some((eng, cfg)) = self.english_merge_ctx(active) else {
+            return false;
+        };
+        cfg.block_commit && crate::english_merge::has_any(eng.as_ref(), input, cfg.min_length)
     }
 
     /// 当前活跃引擎类型（必要时懒加载）
@@ -2719,7 +2839,14 @@ impl EngineManager {
     /// 顶码上屏：超过满码长时取前 N 码首选上屏，返回 (上屏文本, 剩余编码)。
     /// 仅码表/混输引擎按 top_code_commit 实现，其余返回 None。
     pub fn handle_top_code(&self, input: &str) -> Option<(String, String)> {
-        self.active_engine()?.handle_top_code(input)
+        let engine = self.active_engine()?;
+        let r = engine.handle_top_code(input)?;
+        // 通路③：顶码。协调器让顶码**先于候选刷新**执行，故这条漏接的话，
+        // `block_commit` 对超码长输入就等于完全失效——而它在满码路径上还工作正常。
+        if self.english_vetoes_commit(&engine, input) {
+            return None;
+        }
+        Some(r)
     }
 
     /// 满码自动上屏「显示态」复评（透传到活跃引擎）：据已过滤/重排/shadow 的显示候选复评，
@@ -2729,7 +2856,15 @@ impl EngineManager {
         input: &str,
         candidates: &[wind_candidate::Candidate],
     ) -> Option<String> {
-        self.active_engine()?.recheck_auto_commit(input, candidates)
+        let engine = self.active_engine()?;
+        let r = engine.recheck_auto_commit(input, candidates)?;
+        // 通路②：显示态复评。**刻意仍走词库判据**而不是看传入的 `candidates` 里有没有
+        // 英文候选——那批候选已经过过滤/重排/shadow，与通路①③ 的判据不同源，三条路
+        // 各判各的正是 `AGENTS.md` 反复记载的翻车方式。
+        if self.english_vetoes_commit(&engine, input) {
+            return None;
+        }
+        Some(r)
     }
 
     /// 活跃引擎是否存在比 `input` 更长的后继编码（码表前缀扫描；拼音等默认 false）。

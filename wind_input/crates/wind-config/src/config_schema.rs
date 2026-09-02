@@ -274,6 +274,11 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.mix.enable_pinyin_abbrev", Bool),
     f("schema.mix.pinyin_partial_candidates", Bool),
     f("schema.mix.pinyin_partial_candidates_overflow", Bool),
+    // 英文候选混入（引擎无关：拼音/纯码表共用；混输走上面 schema.mix 那三项，不读本段）。
+    // 与 schema.mix.* 的英文三项并存是刻意的，见 `EnglishMergeGlobal` 文档。
+    f("schema.english_merge.enable", Bool),
+    f("schema.english_merge.min_length", Int),
+    f("schema.english_merge.block_commit", Bool),
     // 快捷输入：各候选来源的开关与优先级在 schema.mix_modes 的 members 里（有无=开关，
     // 顺序=优先级）；总开关＝把 quick_mix 的 trigger_keys 清空。此处只有全局行为项。
     f("schema.quick_input.decimal_places", Int),
