@@ -148,10 +148,19 @@ struct SoftMouse {
     /// hover 变了，需要重画。
     dirty: bool,
     /// 窗口句柄（`isize` 存，避免让本结构在非 Windows 上依赖 HWND 类型）。0 = 未装配。
+    ///
+    /// ⚠️ 本字段连同下面的拖动三件套与 `leave_armed`，读者只有 `#[cfg(windows)]` 的
+    /// `mouse_impl` 和 `refresh_hover`。非 Windows 目标编 **lib** target 时它们确实无人
+    /// 读（CI 的 darwin clippy 会拦）。⛔ 别改成 `#[cfg(windows)]` 字段：本结构刻意保持
+    /// 在非 Windows 上也能构造，理由见 `hwnd_handle`。
+    #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: isize,
     /// 拖动中；`anchor` 是按下时的屏幕光标，`origin` 是按下时的窗口左上。
+    #[cfg_attr(not(windows), allow(dead_code))]
     dragging: bool,
+    #[cfg_attr(not(windows), allow(dead_code))]
     anchor: (i32, i32),
+    #[cfg_attr(not(windows), allow(dead_code))]
     origin: (i32, i32),
     /// 拖动落点，供窗口在 tick 里收回去记住位置。
     moved_to: Option<(i32, i32)>,
@@ -159,6 +168,7 @@ struct SoftMouse {
     /// 滚动要改 `tab_scroll` 并重绘，而窗口过程拿不到 `&mut SoftKeyboard`。
     wheel: f32,
     /// 是否已向系统订阅过 `WM_MOUSELEAVE`（一次性，收到后要重订）。
+    #[cfg_attr(not(windows), allow(dead_code))]
     leave_armed: bool,
 }
 
@@ -190,6 +200,8 @@ impl SoftMouse {
         }
     }
 
+    /// ⚠️ 两个调用点（`refresh_hover` 与 `mouse_impl`）都在 `#[cfg(windows)]` 之下。
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn hit_at(&self, x: f32, y: f32) -> i32 {
         // 逆序找：后画的（层级更高的）优先。键帽之间不重叠，这里只是稳妥。
         self.hits
@@ -1484,6 +1496,7 @@ fn faded(c: [u8; 4], alpha: u8) -> [u8; 4] {
     [c[0], c[1], c[2], alpha]
 }
 
+#[cfg_attr(not(windows), allow(dead_code))] // 唯一调用点是 `#[cfg(windows)] mod mouse_impl`
 fn fires_on_release(tag: i32) -> bool {
     // 关闭：不可撤销，按下即关像「还没点就没了」。
     if tag == SOFT_TAG_CLOSE || tag == SOFT_TAG_ESC {
