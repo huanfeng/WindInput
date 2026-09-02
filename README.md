@@ -21,6 +21,10 @@
   <a href="https://windinput.com/changelog"><b>更新日志</b></a>
 </p>
 
+<p align="center">
+  <a href="https://hellogithub.com/repository/huanfeng/WindInput" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=565ab2afe06642d3825156e0ec556428&claim_uid=3OseFoEribJzy5D&theme=neutral" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" /></a>
+</p>
+
 ## 特性
 
 - **专为五笔和码表输入方案设计** — 五笔 86、五笔拼音混输，同时提供全拼和双拼
