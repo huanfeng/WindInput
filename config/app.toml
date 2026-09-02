@@ -83,6 +83,26 @@ conf_file = "datadir.conf"
 # remove_dir_all + 拷到桌面。目录非空时必须命中其一，否则跳过删除（空目录一律放行）。
 markers = ["config.toml", "compat.toml", "userdata.redb", "wind_setting.toml", "schemas", "themes"]
 
+# ── 本机数据目录清理：%LOCALAPPDATA%\WindInput 下由主程序运行期创建的东西 ────
+#    不声明这一段，卸载后这些会原样留下（连同目录本身）——安装器只撤销自己写过的
+#    东西（回执），主程序写的它无从得知。实测残留：logs/ 约 4 MB、cache/ 上百 MB。
+#
+#    cache_dirs  →「清除本地词库缓存」勾选。两项都是可重建产物：
+#      cache  词库 .wdat/.wridx（wind-config 的 Paths::cache_dir）
+#      logs   主程序 / wind_setting / TSF DLL 三方的日志，含 tsf_log/ 与 tsf_log_config
+#             （wind_tsf 的 FileLogger 直接往这里写，它不经过主程序的日志栈）
+#    state_files →「删除用户词库和配置数据」勾选。删了就没了，故跟随那个危险勾选：
+#      state.toml        工具栏位置等本机状态
+#      user_config.seen  「用户配置曾存在」标记；留着会让重装后的漫游配置探测
+#                        以为用户定制过，从而白等一轮漫游挂载
+#      userdata.redb     **旧布局遗留**。现役位置在用户数据目录（见 [datadir].markers），
+#                        但 2026-06 之前的版本把它写在这里，老机器上仍有一份。
+#                        列在这里只为清掉那份历史残留，不影响现役路径。
+[localdata]
+cache_dirs  = ["cache", "logs"]
+state_files = ["state.toml", "user_config.seen", "userdata.redb"]
+remove_dir_when_empty = true
+
 # ── 界面文案：留空即用中性默认（不含「输入法」「词库」字样）──────────────────
 #    安装器内置默认是领域中性的，输入法专用措辞需在此显式声明
 [strings]
