@@ -283,7 +283,7 @@ public:
         _pContext->Release();
         if (_pComposition != nullptr)
         {
-            WIND_LOG_DEBUG(L"~CCommitTextEditSession: Releasing orphaned composition\n");
+            WIND_LOG_WARN(L"~CCommitTextEditSession: Releasing orphaned composition\n");
             _pComposition->Release();
             _pComposition = nullptr;
         }
@@ -475,6 +475,16 @@ public:
     }
 
     BOOL GetSuccess() const { return _success; }
+
+    // 组合是否仍在本对象手里 —— 等价于「DoEditSession 还没执行到组合处置那一步」。
+    //
+    // DoEditSession 一旦跑到组合分支，无论成败都会 EndComposition + Release + 置空
+    // （GetRange 失败那条 fallthrough 也已经 EndComposition 过了）。所以这个判据能精确
+    // 区分两种失败：
+    //   TRUE  = 会话根本没执行（宿主拒发锁），组合仍是活的，Release 掉它就会变成孤儿；
+    //   FALSE = 会话执行过了，组合已正常结束，此时补一次 SendInput 只会重复出字。
+    // 两者的善后完全相反，不能只看 GetSuccess() 就一律 SendInput。见 CommitText。
+    BOOL HasPendingComposition() const { return _pComposition != nullptr; }
 
 private:
     LONG _refCount;
@@ -6197,10 +6207,7 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
         {
             HRESULT hrSession;
             hr = pContext->RequestEditSession(_tfClientId, pEditSession, TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
-
             BOOL success = pEditSession->GetSuccess();
-            pEditSession->Release();
-            pContext->Release();
 
             QueryPerformanceCounter(&endTime);
             int durationMs = (int)((endTime.QuadPart - startTime.QuadPart) * 1000 / freq.QuadPart);
@@ -6212,12 +6219,56 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
             // 一遍。（Word 在非按键上下文"真拒绝同步"另见上面 nonKeyContext 分支。）
             if (success)
             {
+                pEditSession->Release();
+                pContext->Release();
                 WIND_LOG_DEBUG_FMT(L"CommitText: TSF atomic commit succeeded, duration=%dms\n", durationMs);
                 return TRUE;
             }
 
-            WIND_LOG_DEBUG_FMT(L"CommitText: TSF method failed (hr=0x%08X, hrSession=0x%08X), falling back to SendInput, duration=%dms\n",
-                         hr, hrSession, durationMs);
+            // ★ 同步会话失败且组合还活着 = 宿主拒发了锁，DoEditSession 一次都没跑。
+            //
+            // 此时**绝不能**沿用 SendInput 兜底：Release 会把组合变成孤儿，而宿主普遍
+            // 把孤儿组合区 finalize 成正文（Word 实测如此，其余宿主同样 —— 2026-09-02
+            // 临时改代码跳过同步请求，在 Word / 记事本 / EverEdit 上逐个验过）：
+            // 组合里此刻显示的正是**原始编码**，
+            // 于是编码落进文档，SendInput 再把正文追加在后面：打 fffb + 空格得到
+            // "fffb土地"。这正是 37d79d88 在非按键上下文修掉的那条腿，按键上下文这条
+            // 一直漏着：MSDN 对 TF_ES_SYNC 的措辞是"can be expected to succeed"，是期待
+            // 不是保证，宿主忙时照样拒 —— 故表现为偶发。
+            //
+            // 改为退到异步会话，交给 TSF 在能授予锁时原地 SetText + EndComposition 落定，
+            // 与 nonKeyContext 分支同构。pEditSession 由 TSF 保活至 DoEditSession 运行，
+            // 组合随之正确收尾。代价是用户可能多看到原码若干毫秒——比文档里多一串编码轻。
+            //
+            // 组合已不在（HasPendingComposition()==FALSE）时不走这里：那说明会话执行过、
+            // 组合已正常结束，再请求一次只会重复出字，仍按原样走 SendInput 兜底。
+            if (pEditSession->HasPendingComposition())
+            {
+                HRESULT hrAsyncSession = S_OK;
+                HRESULT hrAsyncReq = pContext->RequestEditSession(
+                    _tfClientId, pEditSession, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hrAsyncSession);
+                pEditSession->Release();
+                pContext->Release();
+
+                if (SUCCEEDED(hrAsyncReq))
+                {
+                    WIND_LOG_WARN_FMT(L"CommitText: sync rejected (hr=0x%08X, hrSession=0x%08X), retried async hrSession=0x%08X, duration=%dms\n",
+                                      hr, hrSession, hrAsyncSession, durationMs);
+                    return TRUE;
+                }
+
+                // 同步与异步都被拒：context 已不可用，组合只能孤儿释放，编码泄漏无从避免。
+                // 落 SendInput 至少保证文字不丢。这条真出现的话是宿主侧的硬故障，值得单独查。
+                WIND_LOG_ERROR_FMT(L"CommitText: sync AND async both rejected (sync hrSession=0x%08X, async hr=0x%08X) - composition will leak\n",
+                                   hrSession, hrAsyncReq);
+            }
+            else
+            {
+                pEditSession->Release();
+                pContext->Release();
+                WIND_LOG_WARN_FMT(L"CommitText: TSF method failed (hr=0x%08X, hrSession=0x%08X), composition already ended, falling back to SendInput, duration=%dms\n",
+                             hr, hrSession, durationMs);
+            }
         }
     }
 
@@ -6228,7 +6279,7 @@ fallback:
         return TRUE;
     }
 
-    WIND_LOG_DEBUG_FMT(L"CommitText: Using SendInput fallback for textLen=%zu\n", full.length());
+    WIND_LOG_WARN_FMT(L"CommitText: Using SendInput fallback for textLen=%zu\n", full.length());
 
     std::vector<INPUT> inputs;
     inputs.reserve(full.length() * 2);
