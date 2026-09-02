@@ -1776,13 +1776,17 @@ mod mouse_impl {
 
 #[cfg(not(windows))]
 impl crate::window::WindowMouse for SoftMouse {
+    // 句柄类型走 `crate::sys::`（真源，`sys.rs` 有 `pub use imp::*`）而非
+    // `crate::window::`——后者那行 `use crate::sys::{...}` 是**私有** import，隔着模块
+    // 引用它是 E0603。本 impl 是 `cfg(not(windows))` 专属，Windows 上根本不编译，故这个
+    // 错只在 macOS/Linux 现形，本机 Windows 怎么跑都测不出。
     fn on_message(
         &mut self,
-        _hwnd: crate::window::HWND,
+        _hwnd: crate::sys::HWND,
         _msg: u32,
-        _wparam: crate::window::WPARAM,
-        _lparam: crate::window::LPARAM,
-    ) -> Option<crate::window::LRESULT> {
+        _wparam: crate::sys::WPARAM,
+        _lparam: crate::sys::LPARAM,
+    ) -> Option<crate::sys::LRESULT> {
         None
     }
 }
