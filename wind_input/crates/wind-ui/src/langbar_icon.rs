@@ -2010,6 +2010,11 @@ mod tests {
     /// 但断言若不加这道过滤就会把"透明处没填前景色"误报成主题失效。
     ///
     /// **必须清空规则表**：角标有自己的颜色，本断言测的是主字那条单色通路。
+    ///
+    /// ⚠️ `#[cfg(windows)]` 与同 mod 其余渲染类断言同理：`render_glyph_mask` 走
+    /// DirectWrite，非 Windows 上是 stub，画出来整张透明——最后那道 `inked > 0`
+    /// 守卫会如实报「断言等于没跑」。CI 的 check job 在 Linux 上跑 test，会撞到。
+    #[cfg(windows)]
     #[test]
     fn theme_flips_foreground_channels() {
         let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
