@@ -38,6 +38,34 @@ pub enum FieldType {
     StructList,
 }
 
+impl FieldType {
+    /// 这个类型的值在写回时是不是**整体一份**——即「写它 ＝ 用新值把旧值整个换掉」。
+    ///
+    /// # 这个判据是给写盘闸用的
+    ///
+    /// [`crate::config::ConfigDegradation::blocks_write_back`] 的规矩是：凡是拿
+    /// `Config::load()` 的结果当**种子**、再整表写回用户层的路径，落盘前必须先问它。
+    /// 「能不能构成这种路径」取决于**值是不是整体一份**——标量的落盘值是调用方发来的
+    /// 显式单值，与种子无关，拦它只会让降级期间整个设置页存不了盘；而整体一份的值，
+    /// 调用方发来的那一份必然是「读回来的旧值 ⊕ 本次编辑」，读回来的若是降级后的出厂
+    /// 值，写回去就是把用户的真实数据抹掉。
+    ///
+    /// ⛔ **不要写成 `matches!(ty, FieldType::Map(_))`**。闸门第一版就是这么写的，于是
+    /// `ui.toolbar.items`、`ui.langbar.badges`、`ui.toolbar.buttons`、`schema.mix_modes`
+    /// 这些数组型键全部漏在门外——它们同样是整体一份（设置端的 `diff_config` 里数组不是
+    /// 对象、走叶子分支整份发送），失效形态与 Map 一模一样：`[ui.toolbar]` 段因类型错误
+    /// 降级 ⇒ 设置页显示出厂工具栏 ⇒ 用户改一格保存 ⇒ 自定义顺序与自建按钮永久消失。
+    ///
+    /// 加新的 `FieldType` 变体时先回答一句「写它是整体换掉还是只动一个值」，答前者就
+    /// 加进来。
+    pub fn is_whole_value_leaf(&self) -> bool {
+        match self {
+            Self::Map(_) | Self::StrList | Self::StructList => true,
+            Self::Bool | Self::Int | Self::Float | Self::Str | Self::Enum(_) => false,
+        }
+    }
+}
+
 /// 单个配置字段的声明。
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigField {
@@ -1340,6 +1368,56 @@ mod tests {
             assert!(
                 schema_override_of(k).is_none(),
                 "{k} 没有方案级形态（resolved 不折叠 auto_phrase），不该被标记"
+            );
+        }
+    }
+    /// 写盘闸的判据必须**按「整值覆盖」而不是按 Map** 分类。
+    ///
+    /// 这条钉的是 0.120 周期的一个真实缺陷：`config.setItems` 的降级闸写成了
+    /// `matches!(ty, FieldType::Map(_))`，于是 `ui.toolbar.items`、`ui.langbar.badges`
+    /// 这些数组型键全部漏在门外——设置端把数组也是整份发送的，失效形态与 Map 完全一样
+    /// （段降级 ⇒ base 是出厂值 ⇒ 用户改一格保存 ⇒ 原有内容永久消失）。
+    ///
+    /// 逐个变体断言而不是只测两三个键：加新变体时这里编译不过（`is_whole_value_leaf`
+    /// 的 match 是穷举的），作者被迫回答「写它是整体换掉还是只动一个值」。
+    #[test]
+    fn whole_value_leaf_covers_arrays_not_just_maps() {
+        for ty in [
+            FieldType::Map(&[]),
+            FieldType::StrList,
+            FieldType::StructList,
+        ] {
+            assert!(ty.is_whole_value_leaf(), "{ty:?} 是整值覆盖，必须过写盘闸");
+        }
+        for ty in [
+            FieldType::Bool,
+            FieldType::Int,
+            FieldType::Float,
+            FieldType::Str,
+            FieldType::Enum(&[]),
+        ] {
+            assert!(
+                !ty.is_whole_value_leaf(),
+                "{ty:?} 是标量，拦它只会让降级期间整个设置页存不了盘"
+            );
+        }
+    }
+
+    /// 那几个真实的数组型键确实登记着数组类型——否则上一条测试只是在自说自话。
+    #[test]
+    fn the_array_keys_that_bit_us_are_registered_as_whole_value() {
+        for key in [
+            "ui.toolbar.items",
+            "ui.toolbar.buttons",
+            "ui.langbar.badges",
+            "schema.mix_modes",
+            "input.punct.custom_mappings",
+        ] {
+            let f = field(key).unwrap_or_else(|| panic!("{key} 未登记"));
+            assert!(
+                f.ty.is_whole_value_leaf(),
+                "{key}（{:?}）应被写盘闸拦下",
+                f.ty
             );
         }
     }

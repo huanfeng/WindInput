@@ -251,24 +251,29 @@ fn set_items(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
             skipped.push(json!({ "key": key, "reason": e.to_string() }));
             continue;
         }
-        // ★ 降级闸（第四条同形状路径）。**只拦 Map 型键**：
+        // ★ 降级闸（第四条同形状路径）。**只拦「整值覆盖」型键**，判据在
+        // `FieldType::is_whole_value_leaf`：
         //
-        // 设置端发来的是「base ⊕ 本次编辑」的**整表**（wind-setting 的 `diff_config` 把
-        // map 型键作原子叶子整体发送），而 base 来自 `config.get` ⇒ 本次加载降级时 base
-        // 是出厂空表 ⇒ 用户改一条自定义标点，就把他原有的整张映射表抹掉，永久且无痕。
+        // 设置端发来的是「base ⊕ 本次编辑」的**整份值**（wind-setting 的 `diff_config`
+        // 把 map 作原子叶子整体发送；数组根本不是对象，走叶子分支同样整份发送），而
+        // base 来自 `config.get` ⇒ 本次加载降级时 base 是出厂值 ⇒ 用户改一条自定义标点、
+        // 或在工具栏里勾掉一格，就把他原有的整张表 / 整个数组抹掉，永久且无痕。
         // 这与 `applyPatch` 的 Map 合并种子是同一个失效模式，只是入口不同。
+        //
+        // ⚠️ 第一版这里只写了 `FieldType::Map(_)`，于是 `ui.toolbar.items`、
+        // `ui.langbar.badges`、`ui.toolbar.buttons`、`schema.mix_modes` 这些数组型键全部
+        // 漏在门外——它们与 Map 同为整值覆盖，失效形态一模一样。判据因此收进
+        // `is_whole_value_leaf`，加新类型时去那里回答一次，别在这里重新展开 matches。
         //
         // 标量键不拦：它的落盘值是设置端发来的**显式单值**，与降级后的 base 无关，
         // 拦掉只会让降级期间整个设置页无法保存，代价远大于收益。
-        if matches!(
-            wind_config::config_schema::field(key).map(|f| &f.ty),
-            Some(wind_config::config_schema::FieldType::Map(_))
-        ) && degradation_for_write_back(&mut degradation)?.taints(key)
+        if wind_config::config_schema::field(key).is_some_and(|f| f.ty.is_whole_value_leaf())
+            && degradation_for_write_back(&mut degradation)?.taints(key)
         {
             skipped.push(json!({
                 "key": key,
                 "reason": "本次配置加载中该键所在段解析失败并回落了出厂默认值，\
-                           整表写回会抹掉已有条目，故跳过；请先修好报错的配置键再保存。",
+                           整份写回会抹掉已有内容，故跳过；请先修好报错的配置键再保存。",
             }));
             continue;
         }

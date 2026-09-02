@@ -11,7 +11,7 @@
 //! | `Config::materialize_key_actions` | 拿出厂残表整表覆盖 `keys.key_actions` 并打死版本标记 |
 //! | `config_cli::cmd_export` | 导出一份「坏段已被出厂值替换」的 TOML，用户拿去备份/回写 |
 //! | `patch::writes`（`config.applyPatch`） | Map 键的合并种子是出厂空表 ⇒ 用户已有条目整表消失 |
-//! | `config.setItems` 的 Map 键 | 设置端发来的整表 = 出厂 base ⊕ 本次编辑 ⇒ 同上 |
+//! | `config.setItems` 的整值覆盖键（Map / StrList / StructList） | 设置端发来的整份值 = 出厂 base ⊕ 本次编辑 ⇒ 同上 |
 //!
 //! 找到第三条、第四条的过程说明一件事：**逐条打地鼠一定会漏下一条**。所以除了各自加闸，
 //! 还要有一道机制，让「新开一条这样的路径」不能悄无声息地发生。
