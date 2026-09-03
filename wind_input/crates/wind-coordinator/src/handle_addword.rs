@@ -152,6 +152,32 @@ impl Coordinator {
                 .store(n, std::sync::atomic::Ordering::Relaxed);
         }
 
+        // 打点无条件进行：它服务的是 SelectionChanged 的回声判别，与造词是否开启无关。
+        //
+        // ★ 判据必须与上面的 `committed` 同源——**凡是真落屏的文字，都会让宿主移动光标、
+        // 回送一条 SelectionChanged**，与它由哪个 KeyAction 变体送出去无关。此前这里只认
+        // `InsertText`/`InsertTextWithCursor` 两种，把 `ReplaceBackward` 和 `Commit*` 系
+        // 全漏了（两个 match 就挨着写，清单却不一致）。
+        //
+        // 漏掉的后果（2026-09-02 五笔长按 d 实测，记事本）：满码自动上屏走
+        // `CommitThenDeferComposition`（TSF 日志 `Processing CommitThenDefer: commit=大
+        // defer=d`）⇒ 不打点 ⇒ 紧随其后的 SelectionChanged 被判成「用户移动光标」
+        // （日志里 `since_self_commit=Some(162.9s)`）⇒ 清 `caret_cache_verified`
+        // ⇒ 下一键信任门命中、arm 600ms 长兜底 ⇒ 而五笔 4 码一组、typematic 32ms 一键，
+        // 组合寿命只有 ~128ms，600ms 的 timer **永远等不到到期**就被下次上屏
+        // `reset_first_show` 作废 ⇒ **候选窗一次都不显示**。
+        // 正是 [`Coordinator::arm_pending_first_show`] 记的那个「兜底超时长于组合寿命」
+        // 死结，这次由一个漏打的点触发。
+        if !committed.is_empty() {
+            *self
+                .last_self_commit
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        }
+
+        // 造词只喂「整段新插入的文本」，刻意仍限这两种变体：`ReplaceBackward` 是回改已上屏
+        // 的内容、`Commit*` 系的 commit_text 是上一段的收尾，都不是新起的一段输入。
+        // 与上面的打点判据不同源是**有意**的，别顺手合并。
         let text = match action {
             KeyAction::InsertText { text, .. } | KeyAction::InsertTextWithCursor { text, .. } => {
                 text.as_str()
@@ -161,11 +187,6 @@ impl Coordinator {
         if text.is_empty() {
             return;
         }
-        // 打点无条件进行：它服务的是 SelectionChanged 的回声判别，与造词是否开启无关。
-        *self
-            .last_self_commit
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         self.feed_auto_phrase(text);
     }
 
@@ -661,6 +682,63 @@ impl Coordinator {
         }
     }
 
+    /// 剪贴板字符池：读一次系统剪贴板并清洗，**不合规即当作空**（返回空 Vec）。
+    ///
+    /// 三条守卫与命令栏 `dict.add` 的 [`sanitize_dict_add_text`] 同源，不另立一套：trim
+    /// 后为空、含换行（那边的话是「请只复制一个词」）、超过 [`ADD_WORD_MAX_LEN`] 字。
+    /// 差别只在**出口形态**——那边是用户显式提交、报错弹提示；这边是顺手一按，静默降级成
+    /// 「剪贴板不可用」：面板里 Tab 按了没反应（且压根不提示 Tab），直开加词界面回退最近
+    /// 输入。剪贴板里本来就常驻着与加词无关的东西（整段文章、一个 URL），为它弹错是噪音。
+    ///
+    /// ⚠️ 必须用**阻塞版** `clipboard_get_text`：cached 版在剪贴板被别的进程占用时返回
+    /// **上一次**的内容（契约见 `wind_ui::popup_menu::get_clipboard_text_cached`），而加词
+    /// 是执行路径——拿陈旧内容等于往词库里写一条用户没复制过的词，且界面毫无异常。代价是
+    /// 最坏 sleep 重试 40ms，故本函数只在**进入加词模式 / 直开加词界面时调一次**，
+    /// Tab 切换复用定格结果，不把这 40ms 摊到每次按键上。
+    fn clipboard_add_word_chars(&self) -> Vec<char> {
+        let raw = self
+            .host_services()
+            .clipboard_get_text()
+            .unwrap_or_default();
+        let s = raw.trim();
+        if s.is_empty() || s.contains(['\r', '\n']) {
+            return Vec::new();
+        }
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() > ADD_WORD_MAX_LEN {
+            // 隐私红线（docs/logging-convention.md）：不打内容明文，只打字数。
+            debug!("addword: 剪贴板 {} 字超上限，不作为加词来源", chars.len());
+            return Vec::new();
+        }
+        chars
+    }
+
+    /// 当前生效的字符池（按 `add_word_from_clip` 选源）。
+    ///
+    /// 「池子有多少字」这个判据的**所有**读点都必须走这里——`add_word_chars` 只是两个池子
+    /// 之一，直接读它会让剪贴板来源下的长度上限、空池判据整体错位（表现为剪贴板里明明有
+    /// 词，面板却说「无最近输入」）。
+    fn add_word_pool<'a>(&self, state: &'a State) -> &'a [char] {
+        if state.add_word_from_clip {
+            &state.add_word_clip_chars
+        } else {
+            &state.add_word_chars
+        }
+    }
+
+    /// 某来源刚生效时的默认词长。
+    ///
+    /// 两个来源的默认值**刻意不同**：最近上屏是一条没有边界的字流，「最后两个字」是唯一
+    /// 有意义的起点；剪贴板则是用户主动划出来复制的一段，那段本身就是他要加的词，故默认
+    /// 全选，↑↓ 只是微调掉尾巴上多复制的标点。
+    fn default_add_word_len(from_clip: bool, pool_len: usize) -> usize {
+        if from_clip {
+            pool_len.min(ADD_WORD_MAX_LEN)
+        } else {
+            ADD_WORD_DEFAULT_LEN.min(pool_len)
+        }
+    }
+
     /// 当前加词编码的**展示形态**（带音节空格），候选窗预览与设置端预填共用。
     ///
     /// `add_word_code` 是扁平 key、`add_word_boundary` 是它的音节切分，二者必须**成对**读出
@@ -670,11 +748,19 @@ impl Coordinator {
         display_code(&state.add_word_code, state.add_word_boundary)
     }
 
-    /// 取当前选取的词（字符池末尾 `add_word_len` 个字符）。
+    /// 取当前选取的词。**裁剪方向随来源反向**：
+    /// - 最近上屏 → 取池子**末尾** N 字（新字在尾，缩短即丢掉更早的输入）；
+    /// - 剪贴板 → 取**开头** N 字（整段就是词，缩短是砍掉尾部多复制的标点）。
+    ///
+    /// 方向搞反不会报任何错，表现是「复制『量子纠缠态』按一下 ↓ 变成『子纠缠态』」。
     fn add_word_current_word(&self, state: &State) -> String {
-        let n = state.add_word_chars.len();
-        let len = state.add_word_len.min(n);
-        state.add_word_chars[n - len..].iter().collect()
+        let pool = self.add_word_pool(state);
+        let len = state.add_word_len.min(pool.len());
+        if state.add_word_from_clip {
+            pool[..len].iter().collect()
+        } else {
+            pool[pool.len() - len..].iter().collect()
+        }
     }
 
     /// 进入加词模式：取最近字符、默认词长 2、强制竖排、占位 composition。
@@ -685,19 +771,22 @@ impl Coordinator {
         self.notify_ui_hide();
 
         state.add_word_chars = self.add_word_recent_chars(ADD_WORD_MAX_LEN);
+        // 剪贴板池在进入时**定格**一次（为什么不每次 Tab 现取，见 clipboard_add_word_chars）。
+        state.add_word_clip_chars = self.clipboard_add_word_chars();
+        // 默认来源是最近输入：Ctrl+= 是带面板的连续加词，接着刚打的字最顺手（与
+        // Ctrl+Shift+= 刻意相反，见 open_add_word_from_history）。
+        //
+        // **例外：最近输入为空而剪贴板有内容时直接落在剪贴板一侧**——否则开面板第一眼是
+        // 「无最近输入」，而唯一有用的下一步就是 Tab，不如替用户按了。反向不做：最近输入
+        // 有内容就按它来，剪贴板可不可用都不改变默认。
+        state.add_word_from_clip = state.add_word_chars.len() < ADD_WORD_MIN_LEN
+            && state.add_word_clip_chars.len() >= ADD_WORD_MIN_LEN;
         state.add_word_active = true;
 
         // 候选布局（input.add_word.candidate_layout，出厂竖排）由 show_add_word_preview
         // 末尾的 notify_ui_update 统一重算，这里不再自己切布局（见 layout.rs）。
 
-        if state.add_word_chars.len() < ADD_WORD_MIN_LEN {
-            state.add_word_len = 0;
-            state.add_word_code.clear();
-            state.add_word_boundary = 0;
-        } else {
-            state.add_word_len = ADD_WORD_DEFAULT_LEN.min(state.add_word_chars.len());
-            self.update_add_word_code(state);
-        }
+        self.reset_add_word_len_for_source(state);
 
         self.show_add_word_preview(state);
 
@@ -713,6 +802,8 @@ impl Coordinator {
     pub(crate) fn exit_add_word_mode(&self, state: &mut State) {
         state.add_word_active = false;
         state.add_word_chars.clear();
+        state.add_word_clip_chars.clear();
+        state.add_word_from_clip = false;
         state.add_word_len = 0;
         state.add_word_code.clear();
         state.add_word_boundary = 0;
@@ -721,10 +812,11 @@ impl Coordinator {
 
     /// 调整加词长度（↑ +1 / ↓ -1），夹在 [1, min(字符数, 上限)]。
     pub(crate) fn adjust_add_word_length(&self, state: &mut State, delta: i32) -> KeyAction {
-        if state.add_word_chars.len() < ADD_WORD_MIN_LEN {
+        let pool_len = self.add_word_pool(state).len();
+        if pool_len < ADD_WORD_MIN_LEN {
             return KeyAction::Consumed;
         }
-        let max_len = ADD_WORD_MAX_LEN.min(state.add_word_chars.len());
+        let max_len = ADD_WORD_MAX_LEN.min(pool_len);
         let mut new_len = state.add_word_len as i32 + delta;
         new_len = new_len.clamp(ADD_WORD_MIN_LEN as i32, max_len as i32);
         let new_len = new_len as usize;
@@ -736,9 +828,43 @@ impl Coordinator {
         KeyAction::Consumed
     }
 
+    /// 按当前来源把词长重置为默认，并同步编码（空池则清零）。
+    /// 进入模式与 Tab 切换共用——两处对「池空怎么办」必须是同一套处置，分头写必然走偏。
+    fn reset_add_word_len_for_source(&self, state: &mut State) {
+        let pool_len = self.add_word_pool(state).len();
+        if pool_len < ADD_WORD_MIN_LEN {
+            state.add_word_len = 0;
+            state.add_word_code.clear();
+            state.add_word_boundary = 0;
+        } else {
+            state.add_word_len = Self::default_add_word_len(state.add_word_from_clip, pool_len);
+            self.update_add_word_code(state);
+        }
+    }
+
+    /// Tab：在「最近上屏」与「剪贴板」两个字符池之间切换。
+    ///
+    /// **两个来源恒对称**：哪一侧没内容都照样切得过去，切过去看到的是那一侧的空态
+    /// （「无最近输入」/「剪贴板无可用内容」）。
+    ///
+    /// ⛔ 曾给剪贴板侧加过「空则不许切、面板也不提示 Tab」的守卫，已推翻：最近输入为空时
+    /// 面板照常显示、照常能停在那儿，剪贴板凭什么不能——用户看到的是「Tab 有时在有时不在」，
+    /// 比一个诚实的空态更费解。两侧同构之后，「切不切得动」不再是一个需要判断的问题。
+    ///
+    /// 切过去后词长按目标来源的默认值**重置**而非沿用：两个池子的裁剪方向相反、长度上限
+    /// 也不同，沿用旧值只会得到一个用户没选过的词。
+    pub(crate) fn toggle_add_word_source(&self, state: &mut State) -> KeyAction {
+        state.add_word_from_clip = !state.add_word_from_clip;
+        self.reset_add_word_len_for_source(state);
+        self.show_add_word_preview(state);
+        KeyAction::Consumed
+    }
+
     /// 确认加词：写入用户词库（权重 1200）并广播 dict.changed；编码为空则中止。
     pub(crate) fn confirm_add_word(&self, state: &mut State) -> KeyAction {
-        if state.add_word_len < ADD_WORD_MIN_LEN || state.add_word_chars.len() < ADD_WORD_MIN_LEN {
+        if state.add_word_len < ADD_WORD_MIN_LEN
+            || self.add_word_pool(state).len() < ADD_WORD_MIN_LEN
+        {
             self.exit_add_word_mode(state);
             return KeyAction::ClearComposition;
         }
@@ -818,7 +944,7 @@ impl Coordinator {
     /// Ctrl+Enter：从加词模式转到设置端加词界面，预填当前 词/编码/方案。
     pub(crate) fn open_add_word_dialog(&self, state: &mut State) -> KeyAction {
         let (word, code) = if state.add_word_len >= ADD_WORD_MIN_LEN
-            && state.add_word_chars.len() >= ADD_WORD_MIN_LEN
+            && self.add_word_pool(state).len() >= ADD_WORD_MIN_LEN
         {
             (
                 self.add_word_current_word(state),
@@ -833,32 +959,54 @@ impl Coordinator {
         self.open_add_word_dialog_with(&word, &code, &schema)
     }
 
-    /// Ctrl+Shift+=：不进加词模式，直接取最近输入预填并拉起加词界面
+    /// Ctrl+Shift+=：不进加词模式，直接预填并拉起加词界面
     /// （对齐 Go openAddWordDialogFromHistory）。
+    ///
+    /// 来源优先级与 Ctrl+= 的默认**刻意相反**：剪贴板优先，不可用才回退最近输入。这条路
+    /// 一按就把词交给设置端、不给调长度的机会，用户按它多半是「我刚复制了一个词，收进
+    /// 词库」；而 Ctrl+= 是带面板的连续加词，接着刚打的字更顺。
     pub(crate) fn open_add_word_from_history(&self, state: &mut State) -> KeyAction {
         // 清理未上屏输入/候选/独占残留，避免残留 composition
         self.reset_exclusive_modes(state);
         self.reset_pinyin_composition(state);
         self.notify_ui_hide();
 
-        let chars = self.add_word_recent_chars(ADD_WORD_MAX_LEN);
-        let (word, code) = if chars.len() >= ADD_WORD_MIN_LEN {
-            let len = ADD_WORD_DEFAULT_LEN.min(chars.len());
-            let word: String = chars[chars.len() - len..].iter().collect();
-            let (code, boundary) = self.calc_add_word_code(&word);
-            // 预填给设置端的是**展示形态**（带音节空格）：与该窗「出码」按钮及词库列表同形，
-            // 回写时由 normalize_add_code 拆回扁平 key。见 [`display_code`]。
-            (word, display_code(&code, boundary))
-        } else {
-            (String::new(), String::new())
-        };
+        let (word, code) = self.add_word_prefill_from_history();
         let schema = self.add_word_target_schema();
         self.open_add_word_dialog_with(&word, &code, &schema)
     }
 
+    /// [`Self::open_add_word_from_history`] 的选词/取码部分，单独成函数只为**可测**：
+    /// 原函数末尾要拉起设置端进程，测试里跑不了，于是「按哪个来源预填」这条判据在
+    /// 改动前根本没有守门测试。返回 `(word, 展示形态的 code)`，两者皆空即无可预填内容。
+    fn add_word_prefill_from_history(&self) -> (String, String) {
+        // 剪贴板整段就是词（已受 ADD_WORD_MAX_LEN 约束，不合规的一律当空，见
+        // clipboard_add_word_chars）；回退到最近上屏时才按默认长度取末尾几字。
+        let clip = self.clipboard_add_word_chars();
+        let word: String = if clip.len() >= ADD_WORD_MIN_LEN {
+            clip.iter().collect()
+        } else {
+            let chars = self.add_word_recent_chars(ADD_WORD_MAX_LEN);
+            if chars.len() >= ADD_WORD_MIN_LEN {
+                let len = ADD_WORD_DEFAULT_LEN.min(chars.len());
+                chars[chars.len() - len..].iter().collect()
+            } else {
+                String::new()
+            }
+        };
+        if word.is_empty() {
+            return (String::new(), String::new());
+        }
+        let (code, boundary) = self.calc_add_word_code(&word);
+        // 预填给设置端的是**展示形态**（带音节空格）：与该窗「出码」按钮及词库列表同形，
+        // 回写时由 normalize_add_code 拆回扁平 key。见 [`display_code`]。
+        (word, display_code(&code, boundary))
+    }
+
     /// 更新当前加词的编码与音节边界（按方案：拼音生成 / 码表反查）。
     fn update_add_word_code(&self, state: &mut State) {
-        if state.add_word_len < ADD_WORD_MIN_LEN || state.add_word_chars.len() < state.add_word_len
+        if state.add_word_len < ADD_WORD_MIN_LEN
+            || self.add_word_pool(state).len() < state.add_word_len
         {
             state.add_word_code.clear();
             state.add_word_boundary = 0;
@@ -967,15 +1115,27 @@ impl Coordinator {
         (word.to_ascii_lowercase(), 0)
     }
 
-    /// 显示加词预览候选窗（两行：标题行提示 + 词行编码；均为提示行，no_index 不渲染序号）。
-    fn show_add_word_preview(&self, state: &State) {
-        // 加词面板**不走** notify_ui_update（下方直接发 UpdateCandidates），所以布局重算要在
-        // 这里单独接一次——`UpdateCandidates` 的发送点共两处，两处都得接，否则加词的
-        // candidate_layout 完全失效（见 layout.rs / docs/design/mode-candidate-layout.md）。
-        self.sync_candidate_layout(state);
-        // 字体同理：同一批发送点，漏一处的表现是加词面板里字体变回默认。
-        self.sync_candidate_font(state);
-        // 提示行构造：no_index=true 完全不显示序号（避免默认主题空圆圈）。
+    /// 加词面板的三行内容：标题（含来源）/ 词与编码 / 操作提示。
+    ///
+    /// **与发送分离只为可测**：headless 构造把 UI 接收端当场丢弃（`construct.rs` 里
+    /// `drop(_rx)`），测试收不到 `UpdateCandidates`，面板内容此前无从断言。
+    ///
+    /// # 为什么是三行
+    ///
+    /// 原本是两行、操作提示挂在标题右侧。`Tab` 那一项加进来后，「标题 + 五个动作」挤在
+    /// 同一行把面板撑到了半个屏幕宽（真机实测）。拆行后最宽的只剩提示本身，标题那 10 个
+    /// 全角字不再叠加上去。
+    ///
+    /// # ⚠️ 提示必须放 comment，不能放 text
+    ///
+    /// comment 走注释色（`candidate_window.rs` 默认 150 灰）与更小字号，提示天然退到次要
+    /// 层级；放 text 会用候选正文色，比标题还抢眼——面板上最不重要的一行反而最显眼。
+    /// 空 text 行在 `no_index` 下不留序号位，渲染出来就是一整行浅灰小字。
+    ///
+    /// 这条判据**只体现在颜色上，编译器与运行时都不会报错**，故留了守门测试盯着
+    /// （`panel_hint_is_a_dim_third_row`）。
+    fn add_word_panel_rows(&self, state: &State) -> Vec<CandidateItem> {
+        // no_index=true 完全不显示序号（三行都是提示行，避免默认主题的空圆圈）。
         let row = |text: String, comment: String| CandidateItem {
             text,
             code: String::new(),
@@ -984,13 +1144,28 @@ impl Coordinator {
             comment,
             no_index: true,
         };
-        let candidates = if state.add_word_chars.len() < ADD_WORD_MIN_LEN
-            || state.add_word_len < ADD_WORD_MIN_LEN
-        {
-            vec![
-                row("快捷加词".into(), "Esc关闭".into()),
-                row("无最近输入".into(), "请先输入文字后再使用".into()),
-            ]
+        // 来源后缀与 Tab 提示**恒显示**，不随哪一侧有没有内容变化：面板在两个来源下必须
+        // 长得一样，否则用户看到的是「Tab 有时在有时不在」（见 toggle_add_word_source 的
+        // 已推翻守卫）。空的那一侧照常切得过去，只是正文换成该侧的空态。
+        let title = if state.add_word_from_clip {
+            "快捷加词 · 剪贴板"
+        } else {
+            "快捷加词 · 最近输入"
+        };
+        let empty = self.add_word_pool(state).len() < ADD_WORD_MIN_LEN
+            || state.add_word_len < ADD_WORD_MIN_LEN;
+        let body = if empty {
+            // 空态文案分来源给：两侧「为什么空」和「怎么办」完全不同，共用一句就等于
+            // 两边都说不清。剪贴板侧顺带交代准入条件——不合规（多行/超长）与真的没内容
+            // 在这里是同一个可见状态，不说清用户会以为复制没生效。
+            if state.add_word_from_clip {
+                row(
+                    "剪贴板无可用内容".into(),
+                    format!("需单行、不超过 {ADD_WORD_MAX_LEN} 字"),
+                )
+            } else {
+                row("无最近输入".into(), "请先输入文字后再使用".into())
+            }
         } else {
             let word = self.add_word_current_word(state);
             let code_comment = if state.add_word_code.is_empty() {
@@ -1000,14 +1175,30 @@ impl Coordinator {
                 // 设置页、以及词库列表一致，否则同一个码在三个界面有两种样子。
                 self.add_word_display_code(state)
             };
-            vec![
-                row(
-                    "快捷加词".into(),
-                    "↑↓调整长度  Enter添加  Ctrl+Enter编辑  Esc取消".into(),
-                ),
-                row(word, code_comment),
-            ]
+            row(word, code_comment)
         };
+        // 空态下不提「↑↓调整长度 / Enter添加」——没有词可调、可加，列出来只是噪音。
+        let hint = if empty {
+            "Tab切换来源  Esc关闭"
+        } else {
+            "↑↓调整长度  Tab切换来源  Enter添加  Ctrl+Enter编辑  Esc取消"
+        };
+        vec![
+            row(title.into(), String::new()),
+            body,
+            row(String::new(), hint.into()),
+        ]
+    }
+
+    /// 显示加词预览候选窗（三行，内容见 [`Self::add_word_panel_rows`]）。
+    fn show_add_word_preview(&self, state: &State) {
+        // 加词面板**不走** notify_ui_update（下方直接发 UpdateCandidates），所以布局重算要在
+        // 这里单独接一次——`UpdateCandidates` 的发送点共两处，两处都得接，否则加词的
+        // candidate_layout 完全失效（见 layout.rs / docs/design/mode-candidate-layout.md）。
+        self.sync_candidate_layout(state);
+        // 字体同理：同一批发送点，漏一处的表现是加词面板里字体变回默认。
+        self.sync_candidate_font(state);
+        let candidates = self.add_word_panel_rows(state);
         // 加词面板复用候选窗实例，定位方式须与候选窗一致（见 candidate_fixed_pos）。
         let (fixed, fixed_x, fixed_y) = self.candidate_fixed_pos();
         let _ = self.ui_tx.send(UiCommand::UpdateCandidates {
@@ -1040,6 +1231,7 @@ impl Coordinator {
             }
             keymap::VK_UP => self.adjust_add_word_length(state, 1),
             keymap::VK_DOWN => self.adjust_add_word_length(state, -1),
+            keymap::VK_TAB => self.toggle_add_word_source(state),
             keymap::VK_RETURN if has_ctrl => self.open_add_word_dialog(state),
             keymap::VK_RETURN => self.confirm_add_word(state),
             // 加词模式下消费所有按键，避免误操作退出。
@@ -1053,11 +1245,79 @@ mod tests {
     //! 快捷加词状态机单元测试：无头 Coordinator + 临时 store，覆盖纯逻辑
     //! （字符还原/词长调整/确认写库）。编码计算依赖引擎，headless 下为空，
     //! 故写库测试手动注入 add_word_code。
-    use super::trim_segs_start;
+    use super::{ADD_WORD_MAX_LEN, trim_segs_start};
     use crate::coordinator::Coordinator;
     use std::sync::Arc;
     use wind_config::Config;
     use wind_store::Store;
+
+    /// ★★ 自提交打点必须覆盖**一切真落屏**的返回变体，不只 `InsertText` 那两种。
+    ///
+    /// 真机现场（2026-09-02，记事本 + 五笔，长按 d）：满码自动上屏走
+    /// `CommitThenDeferComposition`（TSF 日志 `Processing CommitThenDefer: commit=大
+    /// defer=d`）。此前打点只认 `InsertText`/`InsertTextWithCursor` ⇒ 这条路不打点
+    /// ⇒ 紧随其后的 `SelectionChanged` 被回声过滤判成「用户移动光标」（日志
+    /// `since_self_commit=Some(162.9s)`）⇒ 清 `caret_cache_verified` ⇒ 下一键信任门
+    /// 命中、arm 600ms 长兜底 ⇒ 而五笔 4 码一组、typematic 32ms 一键，组合寿命仅
+    /// ~128ms，600ms timer **永远等不到到期**就被下次上屏作废 ⇒ **候选窗一次都不显示**。
+    ///
+    /// 一个漏打的点，末端表现是「打字时候选窗根本不出来」，中间隔着四层，没有任何报错。
+    #[test]
+    fn self_commit_is_marked_for_every_landed_variant() {
+        use wind_bridge::handler::KeyAction;
+        let landed: Vec<KeyAction> = vec![
+            KeyAction::InsertText {
+                text: "大".into(),
+                new_composition: None,
+                mode_changed: false,
+                chinese_mode: true,
+                has_new_composition: false,
+            },
+            KeyAction::InsertTextWithCursor {
+                text: "大".into(),
+                cursor_offset: 0,
+            },
+            KeyAction::ReplaceBackward {
+                count: 1,
+                text: "大".into(),
+            },
+            KeyAction::CommitAndHoldComposition {
+                commit_text: "大".into(),
+                hold_text: "d".into(),
+                timeout_ms: 150,
+            },
+            KeyAction::CommitThenDeferComposition {
+                commit_text: "大".into(),
+                deferred_composition: "d".into(),
+                timeout_ms: 150,
+            },
+        ];
+        for action in landed {
+            let c = Coordinator::new_headless(Config::default(), None);
+            assert!(c.last_self_commit.lock().unwrap().is_none(), "初始应为空");
+            c.note_commit_action(&action);
+            assert!(
+                c.last_self_commit.lock().unwrap().is_some(),
+                "落屏变体必须打点，否则它引发的 SelectionChanged 会被误判成用户移动光标：{action:?}"
+            );
+        }
+    }
+
+    /// 反向对照：**尚未落屏**的组合更新不得打点——否则回声宽限期会被无谓刷新，
+    /// 用户真正移动光标时反而识别不出来（那正是 `caret_cache_verified` 要清位的时机）。
+    #[test]
+    fn self_commit_is_not_marked_before_text_lands() {
+        use wind_bridge::handler::KeyAction;
+        let c = Coordinator::new_headless(Config::default(), None);
+        c.note_commit_action(&KeyAction::UpdateComposition {
+            text: "d".into(),
+            caret_pos: 1,
+        });
+        assert!(
+            c.last_self_commit.lock().unwrap().is_none(),
+            "组合区更新还没落屏，不该算作自提交"
+        );
+    }
 
     /// 英文取码 = 单词本身的小写；三类非法输入取空码（让加词中止）。
     ///
@@ -1084,10 +1344,29 @@ mod tests {
     }
 
     fn coord(tag: &str) -> Arc<Coordinator> {
+        coord_with_clip(tag, "")
+    }
+
+    /// 假剪贴板：`clipboard_get_text` 恒返回构造时给的串。
+    ///
+    /// ⚠️ 每个测试协调器都必须注入它（`coord` 默认注入空串），否则桌面默认实现
+    /// （`desktop-ui` 是默认 feature）会去读**开发机真实剪贴板**——本机跑测试的结果随
+    /// 剪贴板内容漂移，而 CI 在 Linux 上恒读到空，于是这类失败只在本机出现、且看着像
+    /// 随机失败。
+    struct MockClip(String);
+    impl crate::host_services::HostServices for MockClip {
+        fn clipboard_get_text(&self) -> anyhow::Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn coord_with_clip(tag: &str, clip: &str) -> Arc<Coordinator> {
         let path = std::env::temp_dir().join(format!("wind_addword_{tag}.redb"));
         let _ = std::fs::remove_file(&path);
         let store = Arc::new(Store::open(&path).unwrap());
-        Coordinator::new_headless_with_store(Config::default(), None, store)
+        let c = Coordinator::new_headless_with_store(Config::default(), None, store);
+        c.set_host_services(Arc::new(MockClip(clip.to_string())));
+        c
     }
 
     /// 按时间序模拟上屏：最早先入，最新最后（push_front 保证最新在前，对齐运行时）。
@@ -1528,6 +1807,227 @@ mod tests {
             build_settings_args(&[("text", "你好"), ("code", &code), ("schema", "pinyin")]),
             "--text=你好 --code=\"ni hao\" --schema=pinyin"
         );
+    }
+
+    // ── 剪贴板加词来源（Ctrl+= 的 Tab 切换 / Ctrl+Shift+= 的默认来源） ──────────
+
+    /// Ctrl+= 默认仍是最近输入；Tab 切到剪贴板后**整段全选**（而非沿用默认 2 字）。
+    #[test]
+    fn tab_switches_to_clipboard_and_selects_whole() {
+        let c = coord_with_clip("tabclip", "量子纠缠态");
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        assert!(!st.add_word_from_clip, "有最近输入时默认来源必须是最近输入");
+        assert_eq!(c.add_word_current_word(&st), "你好");
+
+        c.toggle_add_word_source(&mut st);
+        assert!(st.add_word_from_clip);
+        assert_eq!(st.add_word_len, 5, "剪贴板来源默认全选");
+        assert_eq!(c.add_word_current_word(&st), "量子纠缠态");
+
+        // 再按一次切回，长度按最近输入的默认值重置
+        c.toggle_add_word_source(&mut st);
+        assert!(!st.add_word_from_clip);
+        assert_eq!(st.add_word_len, 2);
+        assert_eq!(c.add_word_current_word(&st), "你好");
+    }
+
+    /// 剪贴板来源下 ↓ 砍的是**尾部**——方向搞反会得到「子纠缠态」，且不报任何错。
+    #[test]
+    fn clipboard_source_trims_from_tail() {
+        let c = coord_with_clip("cliptrim", "量子纠缠态");
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        c.toggle_add_word_source(&mut st);
+        c.adjust_add_word_length(&mut st, -1);
+        assert_eq!(c.add_word_current_word(&st), "量子纠缠");
+        c.adjust_add_word_length(&mut st, -1);
+        assert_eq!(c.add_word_current_word(&st), "量子纠");
+    }
+
+    /// 最近输入为空、剪贴板有内容 ⇒ 进入时**自动落在剪贴板一侧**，但仍切得回来。
+    #[test]
+    fn enter_auto_lands_on_clipboard_when_no_recent() {
+        let c = coord_with_clip("autoclip", "量子纠缠");
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        assert!(st.add_word_from_clip, "没有最近输入时应直接落在剪贴板");
+        assert_eq!(c.add_word_current_word(&st), "量子纠缠");
+
+        // 自动落点不是锁死：Tab 仍能切回（那一侧是空的，面板给空态）
+        c.toggle_add_word_source(&mut st);
+        assert!(!st.add_word_from_clip);
+        assert_eq!(st.add_word_len, 0);
+    }
+
+    /// 反向不自动：最近输入有内容时，剪贴板可不可用都不改变默认来源。
+    #[test]
+    fn enter_keeps_recent_when_available() {
+        for (tag, clip) in [("keepempty", ""), ("keepfull", "剪贴内容")] {
+            let c = coord_with_clip(tag, clip);
+            push_commits(&c, &["你", "好"]);
+            let mut st = c.state.lock().unwrap();
+            c.enter_add_word_mode(&mut st);
+            assert!(!st.add_word_from_clip, "{tag}: 有最近输入就该停在最近输入");
+        }
+    }
+
+    /// 剪贴板不可用时 Tab **照样切得过去**，切过去是剪贴板侧的空态（不是原地不动）。
+    ///
+    /// ⛔ 此前的「空则不许切」守卫已推翻：两个来源必须对称，否则 Tab 时灵时不灵。
+    #[test]
+    fn tab_switches_even_when_clipboard_unusable() {
+        // 空 / 全空白 / 多行 / 超长：四种都归到「剪贴板无可用内容」这一个可见状态
+        for (tag, clip) in [
+            ("clipempty", "".to_string()),
+            ("clipblank", "   \t ".to_string()),
+            ("clipmulti", "第一行\n第二行".to_string()),
+            ("cliplong", "字".repeat(ADD_WORD_MAX_LEN + 1)),
+        ] {
+            let c = coord_with_clip(tag, &clip);
+            push_commits(&c, &["你", "好"]);
+            let mut st = c.state.lock().unwrap();
+            c.enter_add_word_mode(&mut st);
+            assert!(
+                st.add_word_clip_chars.is_empty(),
+                "{tag}: 不合规的剪贴板必须当作空池"
+            );
+
+            c.toggle_add_word_source(&mut st);
+            assert!(st.add_word_from_clip, "{tag}: 空的一侧也必须切得过去");
+            assert_eq!(st.add_word_len, 0, "{tag}: 空池无可选词");
+            let rows = c.add_word_panel_rows(&st);
+            assert_eq!(rows[0].text, "快捷加词 · 剪贴板");
+            assert_eq!(rows[1].text, "剪贴板无可用内容");
+
+            c.toggle_add_word_source(&mut st);
+            assert_eq!(c.add_word_current_word(&st), "你好", "{tag}: 切得回来");
+        }
+    }
+
+    /// 恰好等于上限的剪贴板仍可用（守卫是 `>` 不是 `>=`，差一即整条功能对长词失效）。
+    #[test]
+    fn clipboard_at_max_len_is_usable() {
+        let word = "字".repeat(ADD_WORD_MAX_LEN);
+        let c = coord_with_clip("clipmax", &word);
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        c.toggle_add_word_source(&mut st);
+        assert!(st.add_word_from_clip);
+        assert_eq!(c.add_word_current_word(&st), word);
+    }
+
+    /// 剪贴板池在**进入模式时定格**：Tab 用的是 State 里的池，不再现读剪贴板
+    /// （读一次最坏 40ms，见 clipboard_add_word_chars）。
+    #[test]
+    fn tab_uses_frozen_pool_not_a_fresh_read() {
+        let c = coord_with_clip("clipfrozen", "定格");
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        st.add_word_clip_chars = "改过".chars().collect();
+        c.toggle_add_word_source(&mut st);
+        assert_eq!(
+            c.add_word_current_word(&st),
+            "改过",
+            "Tab 必须用 State 里定格的池，而不是现读剪贴板"
+        );
+    }
+
+    /// 退出加词模式必须连剪贴板池与来源一起清——留着会让下一次进入时首屏直接显示
+    /// **上一次**的剪贴板内容（`enter` 虽会重读池，但 `from_clip` 残留为真即错位）。
+    #[test]
+    fn exit_clears_clipboard_source() {
+        let c = coord_with_clip("clipexit", "残留");
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        c.toggle_add_word_source(&mut st);
+        assert!(st.add_word_from_clip);
+        c.exit_add_word_mode(&mut st);
+        assert!(!st.add_word_from_clip, "退出必须复位来源");
+        assert!(st.add_word_clip_chars.is_empty(), "退出必须清剪贴板池");
+    }
+
+    /// 面板是**三行**，且操作提示落在 `comment` 而非 `text`。
+    ///
+    /// 后者是配色判据：放 text 会用候选正文色，面板上最不重要的一行反而最显眼。颜色不对
+    /// 不会报任何错，只能靠这条断言盯着。
+    #[test]
+    fn panel_hint_is_a_dim_third_row() {
+        let c = coord_with_clip("panelrows", "剪贴内容");
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        let rows = c.add_word_panel_rows(&st);
+        assert_eq!(rows.len(), 3, "标题 / 词与编码 / 提示");
+        assert_eq!(rows[0].text, "快捷加词 · 最近输入");
+        assert!(rows[0].comment.is_empty(), "标题行不再挂提示，否则又被撑宽");
+        assert_eq!(rows[1].text, "你好");
+        assert!(
+            rows[2].text.is_empty(),
+            "提示必须留在 comment 走注释色，放 text 会比标题还抢眼"
+        );
+        assert!(rows[2].comment.contains("Tab切换来源"));
+        assert!(rows.iter().all(|r| r.no_index), "三行都不显序号");
+    }
+
+    /// 面板在两个来源下**长得一样**：来源后缀与 Tab 提示恒显示，与哪一侧有没有内容无关。
+    #[test]
+    fn panel_looks_the_same_on_both_sources() {
+        // 两侧都空：仍带来源后缀、仍提示 Tab
+        let c = coord("panelbothempty");
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        let rows = c.add_word_panel_rows(&st);
+        assert_eq!(rows[0].text, "快捷加词 · 最近输入", "空也要标来源");
+        assert_eq!(rows[1].text, "无最近输入");
+        assert_eq!(rows[2].comment, "Tab切换来源  Esc关闭");
+
+        c.toggle_add_word_source(&mut st);
+        let rows = c.add_word_panel_rows(&st);
+        assert_eq!(rows[0].text, "快捷加词 · 剪贴板");
+        assert_eq!(rows[1].text, "剪贴板无可用内容");
+        assert!(
+            rows[1].comment.contains(&ADD_WORD_MAX_LEN.to_string()),
+            "空态须交代准入条件，否则用户以为复制没生效"
+        );
+        assert_eq!(rows[2].comment, "Tab切换来源  Esc关闭", "两侧提示同形");
+    }
+
+    /// Ctrl+Shift+= 的来源优先级与 Ctrl+= **相反**：剪贴板优先、整段作词。
+    #[test]
+    fn from_history_prefers_clipboard() {
+        let c = coord_with_clip("histclip", "量子纠缠");
+        push_commits(&c, &["你", "好"]);
+        let (word, _) = c.add_word_prefill_from_history();
+        assert_eq!(word, "量子纠缠", "剪贴板可用时必须优先于最近输入");
+    }
+
+    /// 剪贴板不可用则回退最近输入（默认 2 字）——「如果剪贴板为空，则以最新输入的数据」。
+    #[test]
+    fn from_history_falls_back_to_recent() {
+        for (tag, clip) in [
+            ("histempty", "".to_string()),
+            ("histmulti", "一行\n二行".to_string()),
+            ("histlong", "字".repeat(ADD_WORD_MAX_LEN + 1)),
+        ] {
+            let c = coord_with_clip(tag, &clip);
+            push_commits(&c, &["世", "界", "和", "平"]);
+            let (word, _) = c.add_word_prefill_from_history();
+            assert_eq!(word, "和平", "{tag}: 剪贴板不可用须回退最近输入末尾 2 字");
+        }
+    }
+
+    /// 两个来源都没内容时预填为空（设置端加词界面开着但不填）。
+    #[test]
+    fn from_history_empty_when_no_source() {
+        let c = coord_with_clip("histnone", "");
+        let (word, code) = c.add_word_prefill_from_history();
+        assert!(word.is_empty() && code.is_empty());
     }
 
     #[test]
