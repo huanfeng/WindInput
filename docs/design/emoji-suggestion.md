@@ -223,18 +223,30 @@ staging 时只放 exe/dll/`data/`/uninstall.exe，`build_dev/data/` 顶层与 `d
 
 ---
 
-## 5. 呈现形态（四档，`input.emoji.show_as`）
+## 5. 呈现形态（三档，`input.emoji.show_as`）
 
 | 档 | 行为 | 列表影响 |
 |---|---|---|
 | `after` | 紧随宿主候选（`max_hosts` 控制扩几个，默认 1） | 序号会漂 |
 | `tail` | 追加到列表末尾（复用 `is_scope_filtered` 的沉底约定） | 序号不漂，要翻页 |
-| `focus` | 只对**当前高亮**候选展开 | 序号不漂，任何候选都够得着 |
-| `comment` | 只在注释段灰字显示（走 `comment.rs` 模板，新增一个变量名即可） | 零影响，需另设上屏入口 |
+| `comment` | 只在注释段灰字显示（`comment.rs` 的 `${emoji}` 变量） | 零影响，需另设上屏入口 |
 
-**为什么必须有 `focus`**：只扩首选时，「动物」在拼音下未必排第一 ⇒ 那个词有 emoji 但用户
-永远够不着。`max_hosts` 放开会把列表撑开，绕回干扰问题；跟随高亮则列表长度恒定。仓里已有
-「由高亮候选定」的同型先例（编码栏三种切法，`preedit_split_forms`）。
+三档互斥，是「emoji 以什么形态出现」的**单一决策点**。`${emoji}` 变量因此只在 `comment`
+档求值——只看 `enabled` 的话，配了 `after` 又在模板里写 `${emoji}` 会两处都出，而两处都
+「按配置办事」，没人觉得自己错了。
+
+### 5.1 ⛔ `focus`（只扩当前高亮候选）已收回，不要再提
+
+设计初稿有第四档 `focus`，理由是「只扩首选时，想打的词不在首位（拼音下很常见）⇒ 那个词
+有 emoji 却永远够不着」。**问题是真的，这个解法不成立**：
+
+- 它要在每次导航后移除旧 emoji、按新高亮重插，而**列表长度随之变化会与 `selected_index`
+  的语义打架**——用户按下键时，「下一条」可能正是刚插进来的那个 emoji；
+- 这个交互得先在真机上定，不能凭空实现；
+- 而半实现（只在首次插入时按 index 0）的后果最坏：用户选了 `focus`，得到的却是 `after`
+  的行为，**且无从察觉**。
+
+「够不着」改由 `max_hosts` 放大到首页条数解决。将来若要重做，先在真机上把导航交互定下来。
 
 ★ **标记位模式**：emoji 候选带 `is_emoji_suggestion`，语义严格限定为「这条是扩展来的」这个
 客观事实，**不编码任何排序或显示决策**——四个消费者各自表态（自动上屏跳过 / 词频排除 /
@@ -273,11 +285,40 @@ learn_freq = false            # emoji 不参与调频
 3. 繁简归一（反转 `STCharacters`）
 4. `.wemj` 格式 + 建缓存 + 指纹 tag + **撞键合并**
 
-**阶段 B（每改一次都要真机看效果，回主仓做）**
+**阶段 B（已完成）**
 
 5. 管线末端插入 + `is_emoji_suggestion` 标记位 + 四个消费点
 6. `phrase_auto_commit` 排除（3.3）
-7. 四种呈现形态 + 配置层 + 设置页（`../wind-setting`）
+7. 三种呈现形态 + 配置层 + 设置页（`../wind-setting`）
+
+### 7.2 阶段 B 的实现落点
+
+| 落点 | 内容 |
+|---|---|
+| `wind-candidate/candidate.rs` | `is_emoji_suggestion` 标记位（语义只表达「这条是扩展来的」，不编码排序决策） |
+| `wind-config/config.rs` | `EmojiConfig`（serde 缺省与 `Default` 共用 `default_emoji_*` 函数） |
+| `wind-config/config_schema.rs` | 8 个键登记 + 两个 `Enum` 值域常量 |
+| `wind-coordinator/coordinator.rs` | `emoji_dict` / `emoji_spec` 字段、`sync_emoji_dict`、`load_emoji_dict`、值域告警 |
+| `wind-coordinator/handle_candidate.rs` | `plan_emoji_insertions`（纯函数）、`apply_emoji_suggestions`、`sole_non_emoji`、`record_selection_cand` |
+| `wind-coordinator/comment.rs` | `${emoji}` 变量（`emoji_comment_of`） |
+| `wind-transform/s2t.rs` | `Dict::convert_once`（单表替换，不走转换链） |
+| `../wind-setting` `settings_manifest.toml` | 8 项 UI 声明（label / hint / `enabled_when` 联动） |
+
+★ **设置页的类型、值域与默认值是自动的**：`wind-rpc/capabilities.rs` 从
+`config_schema::REGISTRY` + 系统预置配置动态生成 capability 清单，登记即下发。
+`settings_manifest.toml` 只补 core 不该管的东西——中文 label、hint、分区与联动。
+
+### 7.3 跨仓 worktree 的编译
+
+`wind-setting` 的 `Cargo.toml` 里 `wind-config = { path = "../WindInput/..." }` 指向的是
+WindInput **主工作区**，故在 worktree 里开发时设置页看不到新加的配置字段。用 Cargo 的
+`paths` 覆盖解决（`wind-setting-*/.cargo/config.toml`，加进该仓的 `info/exclude` 不入库）：
+
+```toml
+paths = ["D:/.../WindInput/.claude/worktrees/<名>/wind_input/crates/wind-config"]
+```
+
+`cargo metadata` 可验证是否生效（看 `wind-config` 解析到哪个 `manifest_path`）。
 
 ### 7.1 阶段 A 的实现落点（已完成，供阶段 B 接手）
 
