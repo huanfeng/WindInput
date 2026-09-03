@@ -3219,12 +3219,11 @@ pub struct EmojiConfig {
     /// 「猜」出来的，再挂一个 emoji 只会放大噪音。
     #[serde(default = "default_emoji_scope")]
     pub scope: String,
-    /// 呈现形态：`after` 紧随宿主候选 / `tail` 追加到列表末尾 / `focus` 只对当前高亮候选
-    /// 展开 / `comment` 只在注释段灰字显示。
+    /// 呈现形态：`after` 紧随宿主候选 / `tail` 追加到列表末尾 / `comment` 只在注释段灰字
+    /// 显示（走 `${emoji}` 模板变量，不进候选列表）。
     ///
-    /// ★ `focus` 存在的理由：只扩首选时，想要的词若不在首位（拼音下「动物」常常不是），
-    /// 那个词有 emoji 但用户**永远够不着**；而放开 `max_hosts` 又会把列表撑开。跟随高亮则
-    /// 列表长度恒定、任何候选都够得着。
+    /// 三档互斥，是「emoji 以什么形态出现」的**单一决策点**——`${emoji}` 变量因此也只在
+    /// `comment` 档求值，否则配了 `after` 又在模板里写 `${emoji}` 会两处都出。
     #[serde(default = "default_emoji_show_as")]
     pub show_as: String,
     /// 一个词最多产出几个 emoji。

@@ -121,6 +121,24 @@ impl Dict {
         })
     }
 
+    /// 用**本表单独**做一遍最长前缀替换，不走 [`Converter`] 的转换链。
+    ///
+    /// [`Converter`] 表达的是「一整条 OpenCC 转换链」（ST 组 + 地区变体步），字段私有、
+    /// 只能由 `load_variant*` 构造。但有些场合要的只是**拿一张表做一次替换**——
+    /// 现有调用方是 emoji 扩展表的繁→简键归一（`TSCharactersDerived.octrie`，见
+    /// `docs/design/emoji-suggestion.md` §3.1）：它不属于任何转换链，也不该被 s2t 的
+    /// variant 配置影响。
+    ///
+    /// 语义与链中的一步完全一致（同一个 `apply_step`）：起点最长 key 命中即替换，
+    /// 未命中则原样推进一个 UTF-8 字符。
+    pub fn convert_once(&self, s: &str) -> String {
+        if s.is_empty() {
+            return String::new();
+        }
+        let out = apply_step(std::slice::from_ref(self), s.as_bytes());
+        String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+    }
+
     fn val_of(&self, i: usize) -> &[u8] {
         let e = &self.entries[i];
         &self.strings[e.val_off as usize..e.val_off as usize + e.val_len as usize]

@@ -616,6 +616,32 @@ impl crate::coordinator::Coordinator {
     ///
     /// `arg` = `${name:arg}` 的冒号后部分（未 trim）。只有声明支持参数的变量会读它，
     /// 其余变量收到参数时**静默忽略**而非报未知——参数写错不该让整个变量退化成错误回显。
+    /// `${emoji}` 变量的取值：该词的 emoji（空格分隔，至多 `max_per_word` 个）。
+    ///
+    /// 只在 `show_as = "comment"` 档返回非空 —— 理由见调用点的注释（四档互斥，避免同一个
+    /// emoji 既进候选又进注释）。功能关、表没加载、没命中一律 `None`，模板据此整段消失。
+    fn emoji_comment_of(&self, text: &str) -> Option<String> {
+        let (max_per_word, min_chars) = {
+            let rt = self.rt();
+            let e = &rt.config.input.emoji;
+            if !e.enabled || e.show_as != "comment" || e.max_per_word == 0 {
+                return None;
+            }
+            (e.max_per_word, e.min_word_chars)
+        };
+        if text.chars().count() < min_chars {
+            return None;
+        }
+        let guard = self.emoji_dict.read().unwrap_or_else(|e| e.into_inner());
+        let list = guard.as_ref()?.lookup(text)?;
+        let picked: Vec<&str> = list.split_whitespace().take(max_per_word).collect();
+        if picked.is_empty() {
+            None
+        } else {
+            Some(picked.join(" "))
+        }
+    }
+
     fn eval_var(
         &self,
         name: &str,
@@ -629,6 +655,15 @@ impl crate::coordinator::Coordinator {
         let single = c.text.chars().count() == 1;
         Some(match name {
             "code_hint" => c.comment.clone(),
+            // `${emoji}` —— 该词对应的 emoji（`[input.emoji]`，空格分隔，取前 max_per_word 个）。
+            //
+            // ★ 门控是 `enabled && show_as == "comment"`，不是只看 `enabled`：`show_as` 是
+            // 「emoji 以什么形态出现」的**单一决策点**，四档互斥。只看 enabled 的话，用户
+            // 配了 `after` 又在模板里写了 `${emoji}`，同一个 emoji 会既进候选列表又出现在
+            // 注释里，而两处都「按配置办事」，没人觉得自己错了。
+            //
+            // 本变量为空时按模板的可选段规则整段消失，故绝大多数候选不会留下空括号。
+            "emoji" => self.emoji_comment_of(&c.text)?,
             "code" => {
                 if pinyin_hint && c.source == CandidateSource::Pinyin {
                     // `?`：索引未就绪 ⇒ 本变量未解析（与 eval_text_var 同一语义）。

@@ -142,7 +142,7 @@ const LAYOUT_INTENT_VALUES: &[&str] = &["follow", "vertical", "horizontal"];
 /// 无人会报——本仓已经踩过这个坑。登记后设置页从同一个数组取值，改一处即两处同步。
 const EMOJI_SCOPE_VALUES: &[&str] = &["off", "exact", "all"];
 /// emoji 扩展的呈现形态（`input.emoji.show_as`）。理由同 [`EMOJI_SCOPE_VALUES`]。
-const EMOJI_SHOW_AS_VALUES: &[&str] = &["after", "tail", "focus", "comment"];
+const EMOJI_SHOW_AS_VALUES: &[&str] = &["after", "tail", "comment"];
 
 /// 全部配置字段声明（单一真相源）。与 [`Config`] 经测试反向对照，保证零漂移。
 /// 域划分见 `docs/config-key-migration.md`（不做向后兼容，旧键已弃）。

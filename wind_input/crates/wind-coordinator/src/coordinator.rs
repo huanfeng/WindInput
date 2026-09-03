@@ -1175,6 +1175,18 @@ pub struct Coordinator {
     /// 辅助码表（懒加载，首次辅助码输入时经 `ensure_aux_code_table` 读取并 merge；路径由
     /// 调用方经覆盖解析函数定位，本处不做 `data_dir.join`）。`None` = 尚未加载。
     pub(crate) aux_code_table: std::sync::RwLock<Option<wind_aux_code::AuxCodeTable>>,
+    /// emoji 扩展表（`[input.emoji]`，mmap 只读）。`None` = 功能关闭 / 数据缺失 / 建缓存失败。
+    ///
+    /// ★ 功能关闭时恒为 `None` 且**数据文件根本不打开**——未启用的用户为本功能付出的
+    /// 常驻内存与启动开销都是零。这是 `.wemj` 走 mmap 的同一条理由的延伸：本表按需读页，
+    /// 常驻内存与库大小基本无关，但「不加载」比「加载得很省」还要省。
+    pub(crate) emoji_dict:
+        std::sync::RwLock<Option<std::sync::Arc<wind_dict::emojidict::EmojiReader>>>,
+    /// 上次生效的 emoji 加载参数 `(enabled, categories)`，`sync_emoji_dict` 的去重依据。
+    ///
+    /// 只记**影响加载结果**的两项：`show_as` / `max_per_word` 这些是查询期参数，改了不必
+    /// 重建 mmap。判据写宽了会让每次 reload 都重解析一遍 4600 行词表。
+    pub(crate) emoji_spec: Mutex<Option<(bool, bool)>>,
     /// 「辅助码触发键被音节分隔符占用」的告警是否已发过（每方案一次，随
     /// `invalidate_aux_code_table` 复位）。见 `handle_aux_code::warn_aux_code_key_taken`。
     pub(crate) aux_code_key_warned: std::sync::atomic::AtomicBool,
@@ -2252,6 +2264,10 @@ impl Coordinator {
             state_writer: state_writer::StateWriter::new(persists_state, Config::state_dir()),
             reverse: std::sync::RwLock::new(reverse),
             aux_code_table: std::sync::RwLock::new(None),
+            // 空初值 + 下面 new() 里的 sync_emoji_dict 首次加载：与注释库/拆字字体同一套
+            // 「声明式变更」写法，启动与后续 reload 走**同一条**代码路径。
+            emoji_dict: std::sync::RwLock::new(None),
+            emoji_spec: Mutex::new(None),
             aux_code_key_warned: std::sync::atomic::AtomicBool::new(false),
             quick_formats,
             softkeyboard,
@@ -3374,6 +3390,127 @@ impl Coordinator {
         *cur = paths;
     }
 
+    /// 同步 emoji 扩展表（`[input.emoji]`）。调用点=启动、`reload_user_config`，与
+    /// [`Self::sync_comment_dicts`] 同一套「声明式变更」写法：变了才重载。
+    ///
+    /// 变更判据只取 `(enabled, categories)` ——**只有这两项影响加载结果**。`show_as`
+    /// `max_per_word` 之类是查询期参数，把它们写进判据会让每次 reload 都重解析一遍
+    /// 4600 行词表并重建缓存。
+    ///
+    /// # 加载失败**不记录** spec
+    ///
+    /// 三种结局分开处置：功能关（记录，置 None）、加载成功（记录）、加载失败（**不记录**）。
+    /// 失败不记录 ⇒ 下次 sync 会重试，于是用户补跑 `gen-data` 后不必改配置就能生效；
+    /// 重试成本只是解析一次路径后发现文件不在，可以忽略。
+    pub(crate) fn sync_emoji_dict(&self) {
+        let (enabled, categories) = {
+            let rt = self.rt();
+            let e = &rt.config.input.emoji;
+            (e.enabled, e.categories)
+        };
+        // 值域校验放在去重之前：`scope`/`show_as` 不影响加载、不进变更判据，但配置变更
+        // 时正是唯一该告警的时机。放进热路径的话每次按键都会刷一条。
+        {
+            let rt = self.rt();
+            let e = &rt.config.input.emoji;
+            const SCOPES: &[&str] = &["off", "exact", "all"];
+            const SHOW_AS: &[&str] = &["after", "tail", "comment"];
+            if !SCOPES.contains(&e.scope.as_str()) {
+                warn!(
+                    "input.emoji.scope 值不认识: {:?}（应为 {:?}），本次按 exact 处理",
+                    e.scope, SCOPES
+                );
+            }
+            if !SHOW_AS.contains(&e.show_as.as_str()) {
+                warn!(
+                    "input.emoji.show_as 值不认识: {:?}（应为 {:?}），本次按 after 处理",
+                    e.show_as, SHOW_AS
+                );
+            }
+        }
+        let spec = (enabled, categories);
+        {
+            let cur = self.emoji_spec.lock().unwrap_or_else(|e| e.into_inner());
+            if *cur == Some(spec) {
+                return;
+            }
+        }
+        // 关闭：连数据文件都不打开。未启用的用户为本功能付出的开销就此归零。
+        if !enabled {
+            *self.emoji_dict.write().unwrap_or_else(|e| e.into_inner()) = None;
+            *self.emoji_spec.lock().unwrap_or_else(|e| e.into_inner()) = Some(spec);
+            info!("emoji 扩展已关闭");
+            return;
+        }
+        let loaded = Self::load_emoji_dict(categories);
+        let ok = loaded.is_some();
+        *self.emoji_dict.write().unwrap_or_else(|e| e.into_inner()) = loaded;
+        if ok {
+            *self.emoji_spec.lock().unwrap_or_else(|e| e.into_inner()) = Some(spec);
+        }
+    }
+
+    /// 实际加载 emoji 表：解析路径 → 繁简归一 → 建/复用 `.wemj` 缓存 → mmap。
+    ///
+    /// 失败一律返回 `None`（＝功能不可用），**不降级成内存表**——理由见
+    /// [`wind_dict::emojidict::load_or_build`]：本功能是纯锦上添花的可选项，而「常驻内存
+    /// 随功能数量累积」正是它要避开的东西。
+    fn load_emoji_dict(
+        categories: bool,
+    ) -> Option<std::sync::Arc<wind_dict::emojidict::EmojiReader>> {
+        let data_dir = Config::data_dir();
+        let dd = data_dir.as_deref();
+
+        let Some(word) = Config::resolve_data_file(dd, "emoji/emoji_word.txt") else {
+            warn!("emoji 词表缺失（data/emoji/emoji_word.txt），扩展不可用；运行 gen-data 下载");
+            return None;
+        };
+        let mut tables = vec![word];
+        if categories {
+            match Config::resolve_data_file(dd, "emoji/emoji_category.txt") {
+                Some(p) => tables.push(p),
+                // 分类表可缺：主表照常工作，只是打「动物」不再出一串。
+                None => warn!("emoji 分类表缺失，已按仅主表加载"),
+            }
+        }
+
+        // ★ 繁→简归一表是**必需**的，缺了不能降级成「不归一照样加载」。
+        // 上游 rime-emoji 的键全是繁体（实测 国0/國28、爱0/愛16），而本仓候选恒简体
+        // ⇒ 不归一的结果不是「差一点」，是**一条都命中不了**。那种状态下功能看着已启用、
+        // 实际完全不工作，比直接报不可用难查得多。
+        let Some(norm_path) = Config::resolve_data_file(dd, "opencc/TSCharactersDerived.octrie")
+        else {
+            warn!(
+                "emoji 繁简归一表缺失（opencc/TSCharactersDerived.octrie），扩展不可用；运行 gen-data 重建"
+            );
+            return None;
+        };
+        let norm_bytes = std::fs::read(&norm_path)
+            .map_err(|e| warn!("读 emoji 归一表失败 {}: {}", norm_path.display(), e))
+            .ok()?;
+        let norm = wind_transform::s2t::Dict::parse(&norm_bytes).or_else(|| {
+            warn!("emoji 归一表格式无效: {}", norm_path.display());
+            None
+        })?;
+
+        let Some(cache_dir) = Config::cache_dir() else {
+            warn!("无缓存目录，emoji 扩展不可用");
+            return None;
+        };
+        let cache_file = cache_dir.join("emoji").join("emoji.wemj");
+
+        // 归一表进 `fp_extra`：它不参与解析但决定解析结果，漏传会让 OpenCC 数据升级后
+        // 旧缓存被永久复用（见 `cache_fp::EMOJI_TAG`）。
+        let r = wind_dict::emojidict::load_or_build(&tables, &[norm_path], &cache_file, |s| {
+            norm.convert_once(s)
+        });
+        match &r {
+            Some(d) => info!("Loaded emoji dict: {} entries", d.entry_count()),
+            None => warn!("emoji 扩展表加载失败，功能不可用"),
+        }
+        r
+    }
+
     /// 辅助码表缓存失效：方案切换后置 `None`，下次进入辅助码时按新方案的
     /// `[engine.aux_code]` 重新懒加载（`ensure_aux_code_table` 只在 `None` 时加载）。
     ///
@@ -3459,6 +3596,10 @@ impl Coordinator {
                 // 改动本身不会把 schema 标脏，放进那个分支等于「改了挂载列表没反应，
                 // 直到下次切方案才生效」。自身按路径序列做变更检测，未变即空操作。
                 self.sync_comment_dicts();
+                // emoji 扩展表同理跟随全局配置（`[input.emoji]`），不属 schema——它按候选
+                // 文本查表、与编码域无关，本就不是某个方案的属性。自带变更检测（只看
+                // enabled/categories），未变即空操作。
+                self.sync_emoji_dict();
                 // 语言栏图标的呈现参数同理跟随全局配置（`[ui.langbar]`），也不属 schema。
                 // 少了这一步，改角标形状/配色要重启才生效——「改了没反应、重启就好」正是
                 // 本仓反复出现的那类缺陷（运行时镜像态没回灌）。自带变更检测，未变即空操作。
@@ -4578,7 +4719,7 @@ impl Coordinator {
             let cand = state.candidates[idx].clone();
             // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
             let freq_code = self.freq_code(&state.input_buffer, &cand);
-            self.record_selection(&freq_code, &cand.text, cand.source);
+            self.record_selection_cand(&freq_code, &cand);
             out.push_str(&self.cand_s2t_text(state, &cand));
         }
         state.input_buffer.clear();

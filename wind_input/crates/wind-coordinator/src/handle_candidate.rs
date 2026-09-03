@@ -195,6 +195,73 @@ fn clear_blocked_by_candidates(candidates: &[Candidate], input_len: usize) -> bo
 /// ⚠️ 只有「唯一性」类判据需要这样排除。候选窗显隐（`is_empty`）、翻页与选中索引
 /// （`len`）**照常把 emoji 计入**——用户要能翻到并选中它；而且没有宿主候选就不会有
 /// emoji，故 `is_empty` 的语义天然不受影响。
+/// 规划 emoji 插入：返回 `(宿主下标, 该宿主要插入的 emoji)`，**不修改**候选列表。
+///
+/// # 为什么抽成纯函数
+///
+/// [`Coordinator::apply_emoji_suggestions`] 的其余部分要真实的 `Coordinator`（配置 + mmap
+/// 表）才跑得起来，而「选哪些宿主、查表、去重、截断」这套判据是纯计算。分开之后这些判据
+/// 才测得了，而剩下那半只是读配置与按 `show_as` 落位。
+///
+/// 判据（顺序即优先级）：
+/// - 只看**列表前 `max_hosts` 条**——不是「找够 max_hosts 个合格宿主」。前者可预测
+///   （首选没 emoji 就是没有），后者会让 emoji 随候选内容飘忽出现在不同位置；
+/// - 跳过已有的 emoji 扩展候选（避免二次扩展）与短于 `min_chars` 的词；
+/// - `exact_only` 时跳过前缀补全与子短语：那些候选本身就是「猜」出来的，再挂 emoji 只会
+///   放大噪音；
+/// - 去重集合**起手装入全部既有候选文本**：词库里本来就收了那个 emoji 时不再重复给一条，
+///   多个宿主命中同一个 emoji 时也只给一条。
+fn plan_emoji_insertions(
+    candidates: &[Candidate],
+    exact_only: bool,
+    max_hosts: usize,
+    max_per_word: usize,
+    min_chars: usize,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<(usize, Vec<String>)> {
+    let mut seen: std::collections::HashSet<String> =
+        candidates.iter().map(|c| c.text.clone()).collect();
+    let mut picks: Vec<(usize, Vec<String>)> = Vec::new();
+    for (i, c) in candidates.iter().enumerate().take(max_hosts) {
+        if c.is_emoji_suggestion || c.text.chars().count() < min_chars {
+            continue;
+        }
+        if exact_only && (c.is_prefix || c.is_partial) {
+            continue;
+        }
+        let Some(list) = lookup(&c.text) else {
+            continue;
+        };
+        let mut picked = Vec::new();
+        for e in list.split_whitespace() {
+            if picked.len() >= max_per_word {
+                break;
+            }
+            if seen.insert(e.to_string()) {
+                picked.push(e.to_string());
+            }
+        }
+        if !picked.is_empty() {
+            picks.push((i, picked));
+        }
+    }
+    picks
+}
+
+/// 造一条 emoji 扩展候选。
+///
+/// `code` 恒空、`source` 恒 `None`（同短语、同英文头部候选）：它没有编码来源。这一点被
+/// 三处下游依赖——引擎侧 `decide_auto_commit` 按 `code == input` 筛码表子集判唯一，词频
+/// 读写两端要求码非空，`AutoCommit` 只认 `source == CodeTable` 的显示首选。给它编个码
+/// 会同时破坏这三处。
+fn make_emoji_candidate(text: String) -> Candidate {
+    Candidate {
+        text,
+        is_emoji_suggestion: true,
+        ..Default::default()
+    }
+}
+
 fn sole_non_emoji(candidates: &[Candidate]) -> Option<&Candidate> {
     let mut it = candidates.iter().filter(|c| !c.is_emoji_suggestion);
     let first = it.next()?;
@@ -244,6 +311,30 @@ impl Coordinator {
         self.record_selection_in(None, code, text, source);
     }
 
+    /// 同 [`Self::record_selection`]，但显式声明这是一条 **emoji 扩展候选**。
+    ///
+    /// 存在理由：emoji 是否参与词频由 `input.emoji.learn_freq` 决定，而这个事实只在候选
+    /// 身上（`is_emoji_suggestion`），`record_selection` 的三个参数都带不出来。
+    ///
+    /// ⚠️ **不能在调用点整条跳过记账**：`record_selection` 里还有 `push_commit_history`，
+    /// 那是「`;` 重复上屏」的数据源，与词频是两条独立通路。跳过整条的话，刚上屏的 emoji
+    /// 无法被重复调出，而用户只会觉得重复上屏偶尔失灵（这条教训在 `exclude_blocks` 的
+    /// 注释里已经记过一次）。
+    pub(crate) fn record_selection_cand(&self, code: &str, cand: &Candidate) {
+        if cand.is_emoji_suggestion {
+            let learn = {
+                let rt = self.rt();
+                rt.config.input.emoji.learn_freq
+            };
+            if !learn {
+                // 只跳词频，历史照记。
+                self.push_commit_history(&cand.text);
+                return;
+            }
+        }
+        self.record_selection_in(None, code, &cand.text, cand.source);
+    }
+
     /// 同 [`Self::record_selection`]，但可指定**生效方案**（特殊模式用，见
     /// [`Self::effective_data_schema`]）。`None` = 按 active 归属。
     ///
@@ -290,6 +381,77 @@ impl Coordinator {
             };
             if let Err(e) = store.record_freq(&schema, code, text) {
                 warn!("record_freq failed: {}", e);
+            }
+        }
+    }
+
+    /// 按候选**文本**查 emoji 表，把命中的 emoji 作为候选插入（`[input.emoji]`）。
+    ///
+    /// # 为什么钉在候选管线的最末端
+    ///
+    /// 前面每一步都会咬它一口（设计文档 §3.2）：去重会让它参与 `merged_codes` 累积、造出
+    /// 假的同码关系；`apply_filter` 因 emoji 的 `is_common` 恒 false 而在同码有常用字时把它
+    /// **整批静默滤掉**；`apply_freq_rerank` 会让选过一次的 emoji 被码表侧不衰减的
+    /// used-first 永久顶到汉字前面；`apply_shadow` 会打乱用户调好的顺序。
+    ///
+    /// ⚠️ 本函数**只增不改**：绝不动既有候选的顺序与内容。首选位置恒定是盲打的前提，
+    /// 而 `after` 档插入的位置恒在宿主**之后**，故首选永远不会被 emoji 顶替。
+    ///
+    /// # 想给非首选的候选也配 emoji，靠 `max_hosts` 而不是「跟随高亮」
+    ///
+    /// 「打出的词不在首位（拼音下很常见）⇒ 那个词有 emoji 却够不着」是真实问题，解法是把
+    /// `max_hosts` 放大到首页条数。**刻意没有做「只扩当前高亮候选」那一档**：它要在每次
+    /// 导航后移除旧 emoji、按新高亮重插，而列表长度随之变化会与 `selected_index` 的语义
+    /// 打架——用户按下键时，「下一条」可能正是刚插进来的那个 emoji。这个交互得先在真机
+    /// 上定下来，不能凭空实现。
+    pub(crate) fn apply_emoji_suggestions(&self, candidates: &mut Vec<Candidate>) {
+        let (scope, show_as, max_per_word, max_hosts, min_chars) = {
+            let rt = self.rt();
+            let e = &rt.config.input.emoji;
+            if !e.enabled {
+                return;
+            }
+            (
+                e.scope.clone(),
+                e.show_as.clone(),
+                e.max_per_word,
+                e.max_hosts,
+                e.min_word_chars,
+            )
+        };
+        // `comment` 档不进候选——它由注释模板的 `${emoji}` 变量呈现，是另一条通路。
+        if scope == "off" || show_as == "comment" || max_per_word == 0 {
+            return;
+        }
+        let guard = self.emoji_dict.read().unwrap_or_else(|e| e.into_inner());
+        let Some(dict) = guard.as_ref() else {
+            return;
+        };
+        // 未知值按最保守的一档处理（值域告警在 `sync_emoji_dict` 里发，热路径不重复告警）。
+        let picks = plan_emoji_insertions(
+            candidates,
+            scope != "all",
+            max_hosts,
+            max_per_word,
+            min_chars,
+            |t| dict.lookup(t).map(str::to_string),
+        );
+        if picks.is_empty() {
+            return;
+        }
+
+        if show_as == "tail" {
+            // 沉底：候选序号完全不动，盲打最安全（复用 `is_scope_filtered` 的既有约定）。
+            for (_, es) in picks {
+                candidates.extend(es.into_iter().map(make_emoji_candidate));
+            }
+        } else {
+            // `after`：紧随宿主。**从后往前**插入，否则前面插入会把后面记下的下标
+            // 全部顶偏一位。
+            for (i, es) in picks.into_iter().rev() {
+                for (k, e) in es.into_iter().enumerate() {
+                    candidates.insert(i + 1 + k, make_emoji_candidate(e));
+                }
             }
         }
     }
@@ -1084,6 +1246,10 @@ impl Coordinator {
                 candidates = merged;
             }
         }
+        // ── Emoji 扩展：钉在**所有加工之后** ────────────────────────────────
+        // 与上面英文头部候选同一条纪律（钉在最后），方向相反：英文头部钉在最前、emoji 钉在
+        // 最后。理由见 `apply_emoji_suggestions` —— 放进过滤链里它会被静默滤光。
+        self.apply_emoji_suggestions(&mut candidates);
         state.candidates = candidates;
         // 满码自动上屏「显示态」复评：引擎按未过滤候选判唯一（生僻同码字致不唯一被否决），
         // 但智能过滤后可能只剩唯一精确全码码表候选 → 据显示候选复评放行（逻辑与显示一致）。
@@ -3905,6 +4071,116 @@ mod sole_non_emoji_tests {
     #[test]
     fn empty_is_not_sole() {
         assert!(sole_non_emoji(&[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod plan_emoji_tests {
+    //! emoji 插入规划：选宿主、查表、去重、截断。
+    use super::plan_emoji_insertions;
+    use wind_candidate::Candidate;
+
+    fn c(text: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+    fn prefix(text: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            is_prefix: true,
+            ..Default::default()
+        }
+    }
+    /// 词表：只认「开心」「动物」两个词。
+    fn table(t: &str) -> Option<String> {
+        match t {
+            "开心" => Some("😄 😊 🙂 😁".into()),
+            "动物" => Some("🐶 🐱".into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn extends_first_host_only_by_default() {
+        let v = [c("开心"), c("动物")];
+        let got = plan_emoji_insertions(&v, true, 1, 3, 2, table);
+        assert_eq!(got.len(), 1, "max_hosts=1 只扩首选");
+        assert_eq!(got[0].0, 0);
+    }
+
+    /// ★ `max_hosts` 的语义是「只看列表前 N 条」，**不是**「找够 N 个合格宿主」。
+    ///
+    /// 差别在这里：首条查不到 emoji 时，前者什么都不产出，后者会往下找到第二条。
+    /// 前者可预测（首选没有就是没有），后者会让 emoji 飘忽地出现在不同位置。
+    #[test]
+    fn max_hosts_is_a_window_not_a_quota() {
+        let v = [c("无表词"), c("开心")];
+        let got = plan_emoji_insertions(&v, true, 1, 3, 2, table);
+        assert!(got.is_empty(), "窗口内首条没命中就不产出，不该顺延到第二条");
+        // 窗口放大到 2 才轮得到「开心」。
+        let got = plan_emoji_insertions(&v, true, 2, 3, 2, table);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 1);
+    }
+
+    #[test]
+    fn truncates_to_max_per_word() {
+        let v = [c("开心")];
+        let got = plan_emoji_insertions(&v, true, 1, 2, 2, table);
+        assert_eq!(got[0].1, vec!["😄".to_string(), "😊".to_string()]);
+    }
+
+    #[test]
+    fn skips_short_words() {
+        let v = [c("开心")];
+        assert!(
+            plan_emoji_insertions(&v, true, 1, 3, 3, table).is_empty(),
+            "min_chars=3 时两字词不触发"
+        );
+    }
+
+    /// `exact` 档跳过前缀补全；`all` 档放行。
+    #[test]
+    fn exact_scope_skips_prefix_candidates() {
+        let v = [prefix("开心")];
+        assert!(plan_emoji_insertions(&v, true, 1, 3, 2, table).is_empty());
+        assert_eq!(plan_emoji_insertions(&v, false, 1, 3, 2, table).len(), 1);
+    }
+
+    /// 词库里本来就有那个 emoji 时不再重复给一条。
+    #[test]
+    fn does_not_duplicate_existing_candidate() {
+        let v = [c("开心"), c("😄")];
+        let got = plan_emoji_insertions(&v, true, 1, 3, 2, table);
+        assert_eq!(
+            got[0].1,
+            vec!["😊".to_string(), "🙂".to_string(), "😁".to_string()],
+            "已在候选里的 😄 应被跳过"
+        );
+    }
+
+    /// 两个宿主命中同一个 emoji 时只给一条。
+    #[test]
+    fn dedups_across_hosts() {
+        let dup = |t: &str| match t {
+            "甲词" | "乙词" => Some("🌟".to_string()),
+            _ => None,
+        };
+        let v = [c("甲词"), c("乙词")];
+        let got = plan_emoji_insertions(&v, true, 2, 3, 2, dup);
+        assert_eq!(got.len(), 1, "第二个宿主的重复 emoji 被去掉后不产出空条目");
+        assert_eq!(got[0].0, 0);
+    }
+
+    /// 已经是 emoji 扩展的候选不再被当作宿主（防二次扩展）。
+    #[test]
+    fn skips_existing_emoji_candidates() {
+        let mut e = c("开心");
+        e.is_emoji_suggestion = true;
+        let v = [e];
+        assert!(plan_emoji_insertions(&v, true, 1, 3, 2, table).is_empty());
     }
 }
 

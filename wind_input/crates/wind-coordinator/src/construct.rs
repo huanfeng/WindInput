@@ -240,6 +240,8 @@ impl Coordinator {
         coordinator.sync_chaizi_assets();
         // 注释词库首次加载（`[[ui.comment_dicts]]`，出厂为空数组=不加载任何库）。
         coordinator.sync_comment_dicts();
+        // emoji 扩展表首次加载（`[input.emoji]`，出厂 enabled=false ⇒ 不打开任何文件）。
+        coordinator.sync_emoji_dict();
         // 统一应用外观项（幂等）：补齐上面手动块未含的候选字体族 / 翻页栏 / 页码 / 字号跟随主题，
         // 使首次启动即按 config 应用（与 reload_user_config 同一路径）。
         coordinator.apply_ui_config();

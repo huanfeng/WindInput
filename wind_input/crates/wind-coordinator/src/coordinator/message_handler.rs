@@ -1700,7 +1700,7 @@ impl MessageHandler for Coordinator {
                                 let cand = state.candidates[idx].clone();
                                 // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
                                 let freq_code = self.freq_code(&state.input_buffer, &cand);
-                                self.record_selection(&freq_code, &cand.text, cand.source);
+                                self.record_selection_cand(&freq_code, &cand);
                                 self.record_commit(
                                     &cand.text,
                                     state.input_buffer.len() as u32,
@@ -1789,7 +1789,7 @@ impl MessageHandler for Coordinator {
                         let cand = state.candidates[idx].clone();
                         // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
                         let freq_code = self.freq_code(&state.input_buffer, &cand);
-                        self.record_selection(&freq_code, &cand.text, cand.source);
+                        self.record_selection_cand(&freq_code, &cand);
                         // 标点上屏前先记被顶出的高亮候选（来源候选）。
                         self.record_commit(
                             &cand.text,
