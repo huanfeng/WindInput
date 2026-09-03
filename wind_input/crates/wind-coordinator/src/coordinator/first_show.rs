@@ -193,6 +193,24 @@ impl Coordinator {
     ///   也不是焦点事件随包携带的坐标）。
     /// - `caret_cache_verified`：这份缓存**够格直接拿来定位**（限 TSF 通道，且未被切窗口 /
     ///   点击移光标作废）。
+    /// 该宿主的组合期试探坐标（probe）不可信，整条不收（`stale_probe_guard`）。
+    ///
+    /// ★ 它同时是「能不能拿组合前的空闲上报抢跑首显」的判据，两件事是**对偶**的：
+    /// - probe **可信**的宿主：等那 25ms 让 probe 说话更准——它是宿主在本次组合里现测的，
+    ///   而空闲上报是按键之前的。EverEdit 实测空闲上报滞后一拍（点击移光标后既不发
+    ///   caret_update 也不发 selection_changed，缓存停在上一次），probe 却在 1ms 后就给出
+    ///   了正确位置；拿空闲上报抢跑 ⇒ 候选窗恒慢一拍。
+    /// - probe **不可信**的宿主：空闲上报是唯一可信来源，抢跑无损失（微信）。
+    ///
+    /// ⚠ 判据是**结构性**的（这个宿主的 probe 收不收），不是「这一帧准不准」那种位置启发式
+    /// ——后者已被真机连续推翻四次，见 `handle_caret_probe` 第三道判据的注释。
+    pub(super) fn probe_is_untrusted(&self) -> bool {
+        self.active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stale_probe_guard
+    }
+
     pub(super) fn caret_cache_is_fresh_idle_report(&self) -> bool {
         self.caret_cache_is_idle_report
             .load(std::sync::atomic::Ordering::Relaxed)

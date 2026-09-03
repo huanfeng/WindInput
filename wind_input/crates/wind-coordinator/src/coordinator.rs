@@ -4745,7 +4745,12 @@ impl Coordinator {
             self.effective_first_show_mode() == wind_config::app_compat::FirstShowMode::Instant;
         // ⚠ 焦点后的第一个组合不吃这条：那时的空闲上报最不可信（EverEdit 实测错 1200px）。
         // 它只被挡在「立即显示」之外，仍走 25ms 短兜底——足够 probe 把缓存刷成正确位置。
-        let idle_anchor = self.caret_cache_is_fresh_idle_report()
+        // ⚠ 只给 probe 不可信的宿主用：probe 可信时等那 25ms 让它说话更准——它是宿主在本次
+        // 组合里现测的，而空闲上报是按键**之前**的。EverEdit 实测空闲上报滞后一拍（点击移
+        // 光标后既不发 caret_update 也不发 selection_changed），拿它抢跑 ⇒ 候选窗恒慢一拍，
+        // 而 probe 1ms 后就给出了正确位置。见 `probe_is_untrusted`。
+        let idle_anchor = self.probe_is_untrusted()
+            && self.caret_cache_is_fresh_idle_report()
             && !self
                 .awaiting_first_authority_after_focus
                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -5007,7 +5012,10 @@ impl Coordinator {
         // ⚠ 只在坐标确实来自空闲上报时锁：兜底用的旧缓存、`instant` 用的上一轮遗留坐标本身
         // 就可能是错的，锁进组合起点会让 reshow 也救不回来（本组合内不再更新）——WPS 表格的
         // 「恒慢一步」正是宿主自己先报了旧单元格的 compStart 造成的，前车之鉴。
-        if !shown && self.caret_cache_is_fresh_idle_report() {
+        // ⚠ 同样限 probe 不可信的宿主：probe 可信时宿主自己报的 compStart 就够用，而空闲上报
+        // 可能滞后（EverEdit）——把一个陈旧坐标锁成组合起点，后续 reshow 就再也救不回来了
+        // （本组合内不再更新）。EverEdit 实测：reshow 正确判出 447px 偏移，位置却纹丝不动。
+        if !shown && self.probe_is_untrusted() && self.caret_cache_is_fresh_idle_report() {
             let mut cs_lock = self
                 .composition_start
                 .lock()
@@ -7846,6 +7854,9 @@ mod caret_compat_tests {
     #[test]
     fn fresh_idle_report_skips_the_wait() {
         let c = fast_coord(true);
+        // 本逃生口只给 probe 不可信的宿主（见 probe_is_untrusted）：probe 可信时等 25ms
+        // 让它说话更准，空闲上报可能滞后一拍。
+        c.active_compat.lock().unwrap().stale_probe_guard = true;
         c.caret_cache_is_idle_report
             .store(true, std::sync::atomic::Ordering::Relaxed);
         drive_first_frame(&c);
@@ -8113,6 +8124,7 @@ mod caret_compat_tests {
     #[test]
     fn idle_anchor_claims_the_composition_start() {
         let c = fast_coord(true);
+        c.active_compat.lock().unwrap().stale_probe_guard = true;
         c.caret_cache_is_idle_report
             .store(true, std::sync::atomic::Ordering::Relaxed);
         drive_first_frame(&c);
@@ -8201,12 +8213,39 @@ mod caret_compat_tests {
         );
     }
 
+    /// ★★★ probe **可信**的宿主不得走 idle_anchor 抢跑，也不得抢锁组合起点。
+    ///
+    /// 「组合前空闲上报可信」只在 probe 不可信的宿主上成立，不是普遍前提。EverEdit 与微信
+    /// 恰好相反：它点击移光标后既不发 caret_update 也不发 selection_changed，缓存与 verified
+    /// 都停在上一次 ⇒ 空闲上报**滞后一拍**；而它的 probe 在按键后 1ms 就给出了正确位置。
+    /// 拿空闲上报抢跑 ⇒ 候选窗恒慢一拍（实测差 447px），且抢锁的组合起点会让随后正确判出
+    /// 447px 的 reshow 也救不回来——位置纹丝不动。
+    ///
+    /// probe 可信时等那 25ms 让 probe 说话即可：它是宿主在**本次组合**里现测的，而空闲上报
+    /// 是按键**之前**的。
+    #[test]
+    fn trusted_probe_host_waits_instead_of_using_the_idle_report() {
+        let c = fast_coord(true); // 未配 stale_probe_guard ⇒ probe 可信
+        c.caret_cache_is_idle_report
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        drive_first_frame(&c);
+        assert!(
+            *c.pending_first_show.lock().unwrap(),
+            "probe 可信的宿主应照常等待，让 probe 在兜底到期前刷新缓存"
+        );
+        assert!(
+            !c.composition_start.lock().unwrap().2,
+            "更不得把可能滞后的空闲上报锁成组合起点——锁错了 reshow 就再也救不回来"
+        );
+    }
+
     /// ★★ 兜底 timer 到期这条路同样要抢锁。它先置 `show_authorized`，`is_first_frame` 已为
     /// false，判据若绑在 `is_first_frame` 上就整条漏掉——微信「焦点后第一个组合」走的正是
     /// 这条（idle_anchor 逃生口被焦点判据挡住），表现为第三个字好了、第二个字仍挪一格。
     #[test]
     fn fallback_first_show_also_claims_the_composition_start() {
         let c = fast_coord(true);
+        c.active_compat.lock().unwrap().stale_probe_guard = true;
         c.caret_cache_is_idle_report
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // 焦点后第一个组合：立即显示的逃生口被挡住，只能走短兜底
