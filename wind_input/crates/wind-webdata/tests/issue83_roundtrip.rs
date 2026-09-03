@@ -58,6 +58,19 @@ fn hide_symbols_then_carry_to_another_machine() {
     assert_eq!(row("⿰")["block"], json!("表意文字描述符"));
     assert!(row("ㄅ")["blockBulkEditable"].as_bool().unwrap());
 
+    // ★★★ emoji 归**一类**：⚽️ 在「杂项符号」块、👨‍👩‍👧 在「表情符号」块，类型列上却是
+    // 同一个「emoji」。用户点「整类设为生僻」时心里想的正是这个范围，而按块走只会处理掉
+    // 其中一个块，另一个原样留在候选里——界面却报告已经处理完了。
+    for e in [ball, family] {
+        assert_eq!(row(e)["block"], json!("emoji"), "{e} 的类型");
+        assert_eq!(
+            row(e)["blockRange"],
+            json!(""),
+            "emoji 跨二十个块，给不出连续码位段"
+        );
+        assert!(row(e)["blockBulkEditable"].as_bool().unwrap());
+    }
+
     // 导出：单字符走文本段，两条 emoji 序列走数组段。
     let text = rpc(&c, "commonChars.export", json!({}))["content"]
         .as_str()

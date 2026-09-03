@@ -273,7 +273,7 @@ pub struct AuxCodeSettings {
 }
 
 /// 引擎管理器（懒加载：仅在需要时构建对应方案引擎，降低启动内存）
-/// 某个码位区间在词库里的命中情况，[`EngineManager::scan_chars_in_range`] 的产出。
+/// 某个字符类在词库里的命中情况，[`EngineManager::scan_chars_in_class`] 的产出。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RangeScan {
     /// 命中的字符，按码位升序、去重。
@@ -293,10 +293,9 @@ pub struct RangeScan {
 
 impl RangeScan {
     /// 吃一条词条的文本。
-    fn tally(&mut self, text: &str, start: u32, end: u32) {
+    fn tally(&mut self, text: &str, class: &wind_candidate::CharClass) {
         let mut hit_this_entry = false;
         for ch in text.chars() {
-            let c = ch as u32;
             // ⛔ 空白与控制字符即便落在区间里也不收（`is_markable`）：`ASCII` 块整块可批量，
             // 而词库里含空格的词条成百上千，不挡就会给空格登记一条覆盖——含空格的候选
             // 从此全判非常用，设置页多出一行「看不出是什么也点不掉」的空白，导出还能写
@@ -304,7 +303,7 @@ impl RangeScan {
             //
             // 挡在**扫描**这一层而不是写入前：预览与执行读的是同一份 `chars`，在这里滤掉
             // 才能保证「预览说 N 个」与「实际写 N 个」始终一致。
-            if start <= c && c <= end && wind_candidate::is_markable(ch) {
+            if class.contains(ch) && wind_candidate::is_markable(ch) {
                 self.seen.insert(ch);
                 hit_this_entry = true;
             }
@@ -1135,11 +1134,14 @@ impl EngineManager {
     /// 指纹走「二级」通道（[`wind_dict::cache_fp::cache_digest`]）：源是各词库的 `.wdat`
     /// **摘要**而非 yaml 内容。照一级指纹读满 250 MB yaml 才能回答「缓存还能不能用」，
     /// 会把复用命中这条本该零成本的路径变成每次启动的固定开销。
-    /// 扫某方案的全部**启用**词库，收出落在 `[start, end]` 码位区间内的字符。
+    /// 扫全部**启用**词库，收出属于 `class` 的字符（判据是 [`wind_candidate::CharClass::contains`]）。
     ///
-    /// 供「按类型批量设常用/生僻」圈定范围。只收**词库里真实出现过**的字符，不按整个
-    /// Unicode 块展开——「带圈 CJK 字母及月份」有 256 个码位而虎码一个都没编，全展开就是
-    /// 一堆读端永远查不到的死记录，还会把设置页的列表撑长。
+    /// 供「按类型批量设常用/生僻」圈定范围。只收**词库里真实出现过**的字符，不按整个类
+    /// 展开——「带圈 CJK 字母及月份」有 256 个码位而虎码一个都没编，emoji 属性表更是有
+    /// 1438 个，全展开就是一堆读端永远查不到的死记录，还会把设置页的列表撑长。
+    ///
+    /// ⚠️ 入参是**类**而不是一对码位边界：emoji 是 151 段离散区间，用 `[start, end]`
+    /// 表达不了。改成按类之后，「emoji」与「某个块」在这里是同一种东西，调用方不必分叉。
     ///
     /// ★ 返回的条目数不是装饰，界面**必须**显示它：全角逗号 `，` 只是 1 个字符，却出现在
     /// 326 条词条里（词条内部的标点）。只显示「1 个字符」，谁都会毫不犹豫地一键设为生僻，
@@ -1151,10 +1153,15 @@ impl EngineManager {
     /// ⚠️ 扫的是**全部已启用方案**，不是当前活跃方案：常用字覆盖是全局作用域（键就是一个
     /// 字，不带方案），扫描若绑定活跃方案，用户在五笔下就设不了只出现在虎码里的注音符号
     /// ——而他看到的候选正是从那个方案来的。作用域一致比省这点扫描时间重要。
-    pub fn scan_chars_in_range(&self, start: u32, end: u32) -> RangeScan {
+    pub fn scan_chars_in_class(&self, class: &wind_candidate::CharClass) -> RangeScan {
         let mut scan = RangeScan::default();
-        if start > end {
-            return scan; // 空区间（如 charblock 的「其它」），不必开词库
+        // 空区间（charblock 的「其它」）扫不出任何字符，不必为它开一遍全部词库。
+        // ⚠️ 判据刻意不是 `allows_bulk_edit`：那是**能不能让用户点**的策略，属于调用方；
+        // 这里只想跳过一个注定为空的遍历。两者混用会让本函数替界面做主。
+        if let wind_candidate::CharClass::Block(b) = class
+            && b.start > b.end
+        {
+            return scan;
         }
         let Some(data_dir) = self.data_dir.as_deref() else {
             return scan;
@@ -1181,7 +1188,7 @@ impl EngineManager {
                     continue;
                 }
                 d.for_each_entry(&mut |_code, text, _weight| {
-                    scan.tally(text, start, end);
+                    scan.tally(text, class);
                 });
             }
         }
@@ -1189,9 +1196,13 @@ impl EngineManager {
         // 耗时留痕：这是全表遍历，是本功能唯一的重活。用户觉得「点了要等一下」时，
         // 这行日志能直接回答「等的是扫描还是别的」，不必再去猜。
         info!(
-            "扫描码位区间 U+{:04X}-{:04X}: {} 个字符 / {} 条词条，{} 份词库，耗时 {:?}",
-            start,
-            end,
+            "扫描字符类「{}」{}: {} 个字符 / {} 条词条，{} 份词库，耗时 {:?}",
+            class.name(),
+            // 范围文本对 emoji 是空串（151 段离散区间），此时只报类名。
+            match class.range_text().as_str() {
+                "" => String::new(),
+                r => format!(" [{r}]"),
+            },
             scan.chars.len(),
             scan.entries,
             seen_files.len(),
@@ -6732,13 +6743,13 @@ input_chars = \"a-z;\"
     /// 1 个字符却牵连 326 条词，这种失真用户是察觉不到的。
     #[test]
     fn range_scan_counts_entries_once_per_entry() {
-        let (start, end) = (0x3100, 0x312F); // 注音符号
+        let bopo = wind_candidate::class_of_cluster("\u{3105}"); // 注音符号块
         let mut s = super::RangeScan::default();
-        s.tally("\u{3105}", start, end); // ㄅ：命中
-        s.tally("\u{3105}\u{3106}", start, end); // ㄅㄆ：两个字符，仍只算一条词条
-        s.tally("\u{3105}\u{3105}", start, end); // 同字符两次，也只算一条
-        s.tally("\u{6211}", start, end); // 我：区间外，不计
-        s.tally("", start, end);
+        s.tally("\u{3105}", &bopo); // ㄅ：命中
+        s.tally("\u{3105}\u{3106}", &bopo); // ㄅㄆ：两个字符，仍只算一条词条
+        s.tally("\u{3105}\u{3105}", &bopo); // 同字符两次，也只算一条
+        s.tally("\u{6211}", &bopo); // 我：类外，不计
+        s.tally("", &bopo);
         s.finish();
 
         assert_eq!(
@@ -6756,10 +6767,10 @@ input_chars = \"a-z;\"
     /// 候选全判非常用，设置页多出一行看不出是什么的空白，导出写得进去、导入却被拒。
     #[test]
     fn range_scan_skips_unmarkable_chars() {
-        let (start, end) = (0x0020, 0x007F); // ASCII
+        let ascii = wind_candidate::class_of_cluster("a"); // ASCII 块
         let mut s = super::RangeScan::default();
-        s.tally("a b", start, end); // 命中 a、b，**不收**中间的空格
-        s.tally("\t", start, end); // 整条只有制表符 ⇒ 一个都不收
+        s.tally("a b", &ascii); // 命中 a、b，**不收**中间的空格
+        s.tally("\t", &ascii); // 整条只有制表符 ⇒ 一个都不收
         s.finish();
 
         assert_eq!(s.chars, vec!['a', 'b'], "空白不该进候选清单");
@@ -6769,9 +6780,44 @@ input_chars = \"a-z;\"
     /// 空区间（`charblock` 的「其它」用 `start > end` 表示）不该命中任何东西。
     #[test]
     fn range_scan_empty_range_matches_nothing() {
+        let other = wind_candidate::CharClass::Block(wind_candidate::block_of('\u{FFFF}'));
+        assert_eq!(other.name(), "其它", "样本须真的落在块表外");
         let mut s = super::RangeScan::default();
-        s.tally("\u{3105}\u{6211}", 1, 0);
+        s.tally("\u{3105}\u{6211}", &other);
         s.finish();
         assert!(s.chars.is_empty() && s.entries == 0);
+    }
+
+    /// ★★★ emoji 作为**一个类**扫描：跨块收齐，而键帽基字符一个都不收。
+    ///
+    /// 这是本轮改动要保住的那件事。按块扫时 `⭐ 🀄 🅰 ©` 分属四个互不相干的码位段
+    /// （其中三段还不在块表里），一次「整类」只处理得掉其中一小撮。
+    ///
+    /// 下半段同样重要：`Emoji=Yes` 收了 `0`–`9`、`#`、`*`（键帽 `1️⃣` 的基字符），扫描
+    /// 若用 `is_emoji` 而非 `is_emoji_standalone`，一次「把 emoji 全设为生僻」会顺手把
+    /// 十个数字也判掉，而预览里只表现为字符数多了十来个。
+    #[test]
+    fn range_scan_gathers_emoji_across_blocks_but_not_bare_digits() {
+        let emoji = wind_candidate::class_of_cluster("\u{1F34E}"); // 🍎
+        assert_eq!(emoji, wind_candidate::CharClass::Emoji);
+        let mut s = super::RangeScan::default();
+        // 一条词条里塞进分属五个不同码位段的 emoji。
+        s.tally("\u{1F34E}\u{2B50}\u{1F004}\u{1F170}\u{00A9}", &emoji);
+        // 数字与汉字：都不该收。
+        s.tally("0123456789#*\u{6211}", &emoji);
+        s.finish();
+
+        assert_eq!(
+            s.chars,
+            vec![
+                '\u{00A9}',  // ©   拉丁文补充
+                '\u{2B50}',  // ⭐  杂项符号和箭头（块表里没有这一段）
+                '\u{1F004}', // 🀄  麻将牌（同上）
+                '\u{1F170}', // 🅰  带圈字母数字补充（同上）
+                '\u{1F34E}', // 🍎  表情符号
+            ],
+            "五个块的 emoji 应当一次收齐"
+        );
+        assert_eq!(s.entries, 1, "只有第一条命中；纯数字那条一个字符都不该收");
     }
 }

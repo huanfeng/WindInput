@@ -31,15 +31,19 @@ pub struct CommonCharRow {
     pub base_common: bool,
     /// 这一行被用户改过。决定「恢复默认」能不能点——没改过的行点它没有意义。
     pub overridden: bool,
-    /// 所属 Unicode 块的中文名（[`wind_candidate::block_of`]），如「注音符号」。
+    /// 所属**字符类**的名字（[`wind_candidate::class_of_cluster`]），如「注音符号」、「emoji」。
     ///
     /// 光看字形分不清这些东西是什么——issue #83 的用户为此把整张码表喂给 AI 分类、再手工
     /// 逐个试，才弄明白哪些会显示哪些不会。类型列就是把那份工作内建进来。
     ///
-    /// ⚠️ 范围文本（`2FF0-2FFF`）**不存在这里**：消费方自己调 `block_of_cluster(t).range_text()`，
-    /// 免得把同一份格式化逻辑抄第二份。
+    /// ⚠️ 字段名仍叫 `block`（JSON 里也是 `block`/`blockRange`/`blockBulkEditable`）——
+    /// 那是**跨仓契约**，设置端按这几个名字取值。取值来源已从「块」改成「类」：emoji 不论
+    /// 落在哪个块都归 `"emoji"` 一类，其余仍是块名。改名要两仓同步，收益只是好看一点。
+    ///
+    /// ⚠️ 范围文本（`2FF0-2FFF`）**不存在这里**：消费方自己调 `class_of_cluster(t).range_text()`，
+    /// 免得把同一份格式化逻辑抄第二份。emoji 那一类给空串（151 段离散区间）。
     pub block: &'static str,
-    /// 这个块能不能整类批量操作（[`wind_candidate::block_allows_bulk_edit`]）。
+    /// 这一类能不能整类批量操作（[`wind_candidate::CharClass::allows_bulk_edit`]）。
     ///
     /// ⛔ 汉字块恒 `false`：对着一行「我」点「将『基本汉字』全部设为生僻」，一次误点就是
     /// 七千多条覆盖，整张常用字表当场作废。设置页据此**不显示**该菜单项。
@@ -170,24 +174,28 @@ impl crate::Coordinator {
             .filter(|(t, _, _)| q.is_empty() || q.contains(t.as_str()))
             .filter(|(t, _, _)| !only_modified || cc.override_of_cluster(t).is_some())
             .map(|(text, base_common, common)| {
-                let blk = wind_candidate::block_of_cluster(&text);
+                let class = wind_candidate::class_of_cluster(&text);
                 CommonCharRow {
                     overridden: cc.override_of_cluster(&text).is_some(),
                     text,
                     common,
                     base_common,
-                    block: blk.name,
-                    block_bulk_editable: wind_candidate::block_allows_bulk_edit(&blk),
+                    block: class.name(),
+                    block_bulk_editable: class.allows_bulk_edit(),
                 }
             })
             .collect()
     }
 
-    /// 按「某个字所属的 Unicode 块」批量设常用/生僻。`apply=false` 时只预览、不写库。
+    /// 按「某个字所属的**字符类**」批量设常用/生僻。`apply=false` 时只预览、不写库。
     ///
     /// 入口是**当前选中的那一行**而不是让用户填码位区间：他在候选里看见 `ㄅ` 觉得烦，
     /// 心里想的是「这类东西别出来」，而不是「3100 到 312F 别出来」。类型从行推导，
     /// 用户不必先知道它叫什么、码位在哪。
+    ///
+    /// ★★★ 「类」不等于「块」，正是为了让上一句对 emoji 也成立：他看见 `🍎` 想的是
+    /// 「emoji 别出来」，而按块走只会处理掉「表情符号」那一段，`⭐ 🀄 🅰 ©` 各归各块、
+    /// 原样留在候选里——界面却告诉他已经处理完了。见 [`wind_candidate::CharClass`]。
     ///
     /// ⛔ 汉字块一律拒绝（[`wind_candidate::block_allows_bulk_edit`]）：列表里 8104 个默认字
     /// 全是汉字，对着一行「我」点「将『基本汉字』全部设为生僻」，一次误点就是七千多条覆盖，
@@ -198,14 +206,14 @@ impl crate::Coordinator {
         common: bool,
         apply: bool,
     ) -> anyhow::Result<CommonCharBulkOutcome> {
-        let blk = wind_candidate::block_of_cluster(text);
-        if !wind_candidate::block_allows_bulk_edit(&blk) {
-            anyhow::bail!("「{}」由默认字表逐字管辖，不支持整类操作", blk.name);
+        let class = wind_candidate::class_of_cluster(text);
+        if !class.allows_bulk_edit() {
+            anyhow::bail!("「{}」由默认字表逐字管辖，不支持整类操作", class.name());
         }
-        let scan = self.engine_mgr.scan_chars_in_range(blk.start, blk.end);
+        let scan = self.engine_mgr.scan_chars_in_class(&class);
 
         let mut out = CommonCharBulkOutcome {
-            block: blk.name.to_string(),
+            block: class.name().to_string(),
             chars: scan.chars.len(),
             entries: scan.entries,
             written: 0,
@@ -240,8 +248,8 @@ impl crate::Coordinator {
         self.reload_common_chars();
         debug!(
             "常用字批量: {} [{}] {} 字 / {} 条词条 → {}，落库 {}",
-            blk.name,
-            blk.range_text(),
+            class.name(),
+            class.range_text(),
             out.chars,
             out.entries,
             if common { "常用" } else { "生僻" },

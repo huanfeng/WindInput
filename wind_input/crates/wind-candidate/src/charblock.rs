@@ -28,11 +28,20 @@
 //! | 用途 | 漏一块的后果 | 方向 | 需要的缓解 |
 //! |---|---|---|---|
 //! | 类型列显示 | 标签显示「其它」 | 安全 | 无 |
-//! | emoji 免词频 | 那批 emoji 照旧参与词频 | **安全**（= 改动前的行为） | 无 |
 //! | 生僻字模式准入 | 那批字在该模式里**打不出** | **不安全** | 必须有「其它」兜底档 |
 //! | `is_han`（对照） | 恒判常用、过滤静默失效 | 不安全 | 已改为按平面兜底 |
 //!
 //! ⇒ 新增消费者时先把自己填进这张表。填不出「安全」的那一栏，就不要用本表做判据。
+//!
+//! # ⛔ 「是不是 emoji」不要问这张表
+//!
+//! emoji 免词频曾经是上面那张表里的一行（判据＝五个块的并集）。它已经**整条搬走**，
+//! 现在问 [`crate::charemoji`] 的 Unicode `Emoji` 属性——块判据在漏与多两个方向上
+//! 同时不准，而且补块补不齐：emoji 散落在约二十个块里，其中多数块又大部分是非 emoji。
+//! 论证见 `charemoji` 与 `charclass::EMOJI_BIT` 的模块/常量头。
+//!
+//! ⇒ 这不推翻上面那条准入，反而是它的一个应用：填表时发现 emoji 那行**填不出**
+//! 一个稳定的「漏一块的后果」——漏的是哪一块取决于用户装了哪本词库。
 
 /// 一个 Unicode 块。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +222,85 @@ pub fn block_allows_bulk_edit(blk: &CharBlock) -> bool {
     ends_outside(blk.start) && ends_outside(blk.end)
 }
 
+/// 常用字列表里「这一行属于哪一类」——类型列显示什么、整类批量作用在哪个集合上。
+///
+/// # ★★★ 为什么类不等于块
+///
+/// 用户在常用字列表里看见一个 `🍎` 觉得烦，心里想的是「**这类东西**别出来」。而
+/// 「这类东西」在他脑子里是 emoji，不是「表情符号块」——后者按码位切，会把 `⭐`
+/// （杂项符号和箭头）、`🀄`（麻将牌）、`🅰`（带圈字母数字补充）留在外面，各归各的类。
+/// 于是他点完「整类设为生僻」，候选里照旧冒出 `⭐ 🀄 🅰`，而界面告诉他已经处理完了。
+///
+/// ⇒ emoji 必须是**一个类**，尽管它跨二十个块。这就是本枚举存在的全部理由：
+/// 类型列与整类批量这两处要的是「用户心里的类」，而 [`CharBlock`] 只能给出「码位段」。
+///
+/// 其余字符仍按块归类——对 `ㄅ`（注音符号）、`⺡`（部首）这些，块名恰好就是用户心里的类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharClass {
+    /// 具有 Unicode `Emoji` 属性（[`crate::is_emoji_standalone`]）。**跨块，不是一段
+    /// 连续码位**，故 [`range_text`](Self::range_text) 给空串。
+    Emoji,
+    /// 落在块表里的某一块，或表外的 [`OTHER`]。
+    Block(CharBlock),
+}
+
+impl CharClass {
+    /// 类名，直接显示给用户，也是配置里认的那个名字（emoji 那档）。
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Emoji => crate::EMOJI_CLASS_NAME,
+            Self::Block(b) => b.name,
+        }
+    }
+
+    /// `2FF0-2FFF` 这样的范围文本，供界面显示。
+    ///
+    /// ⚠️ emoji 给**空串**：它是 151 段离散区间，写成 `0023-1FAF8` 会谎称中间那十几万个
+    /// 汉字、假名也在类里。空串这个形态界面早就要处理（[`OTHER`] 一直是空串），
+    /// 而「能不能批量」另有 [`allows_bulk_edit`](Self::allows_bulk_edit) 回答，
+    /// 不靠范围文本是否为空去猜。
+    pub fn range_text(&self) -> String {
+        match self {
+            Self::Emoji => String::new(),
+            Self::Block(b) => b.range_text(),
+        }
+    }
+
+    /// 这一类能不能整类批量操作。
+    ///
+    /// emoji 恒可以：整张属性表都落在 `is_common_scope`（`is_han ∪ is_pua`）**之外**，
+    /// 不存在「默认字表逐字管着它」的那个禁忌——由 `emoji_class_is_outside_common_scope`
+    /// 钉住，而不是靠这里断言一句了事。
+    pub fn allows_bulk_edit(&self) -> bool {
+        match self {
+            Self::Emoji => true,
+            Self::Block(b) => block_allows_bulk_edit(b),
+        }
+    }
+
+    /// 这个字符属于本类吗——整类批量的扫描谓词。
+    ///
+    /// ⚠️ emoji 用的是 [`crate::is_emoji_standalone`] 而非 `is_emoji`：扫描是逐 `char`
+    /// 的，用后者会把 `0`–`9`、`#`、`*`（键帽基字符）一起扫进来，于是一次「把 emoji
+    /// 全设为生僻」把十个数字也判掉。
+    pub fn contains(&self, ch: char) -> bool {
+        match self {
+            Self::Emoji => crate::is_emoji_standalone(ch),
+            Self::Block(b) => (b.start..=b.end).contains(&(ch as u32)),
+        }
+    }
+}
+
+/// 一个字素簇属于哪一类。**emoji 优先**——`⭐` 既在「杂项符号和箭头」的码位段里
+/// （那一段还不在块表内、会落到「其它」），又具有 emoji 属性，答后者才是用户要的。
+pub fn class_of_cluster(cluster: &str) -> CharClass {
+    if crate::text_has_emoji(cluster) {
+        CharClass::Emoji
+    } else {
+        CharClass::Block(block_of_cluster(cluster))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +461,96 @@ mod tests {
         assert_eq!(block_of_cluster("🇨🇳").name, "区域指示符");
         // 邻接的「表情符号」块不受影响。
         assert_eq!(block_of('😀').name, "表情符号");
+    }
+
+    /// ★★★ emoji 归**一个类**，不论它落在哪个块里。
+    ///
+    /// 这条是本轮的核心：`🍎 ⭐ 🀄 🅰 ©` 分散在五个不同的码位段（其中三段还不在块表里、
+    /// 会落到「其它」），按块归类时它们互为异类，于是「整类设为生僻」只处理得掉一小撮。
+    #[test]
+    fn emoji_all_land_in_one_class_regardless_of_block() {
+        for s in [
+            "🍎",
+            "😀", // 表情符号块
+            "⚽",
+            "✅",
+            "⌚", // 杂项符号 / 装饰符号 / 杂项技术符号
+            "🇨🇳", // 区域指示符
+            "⭐",
+            "⬛",
+            "🀄",
+            "🃏",
+            "🅰",
+            "🈚", // 块表里根本没有这些段
+            "▶",
+            "↔",
+            "‼",
+            "©",
+            "㊗",        // 散落在以文本为主的块里
+            "1\u{20E3}", // 键帽：首 char 是 ASCII 数字，按块归类会落进「ASCII」
+        ] {
+            assert_eq!(
+                class_of_cluster(s),
+                CharClass::Emoji,
+                "{s} 应归 emoji 类（按块归类会落到 {:?}）",
+                block_of_cluster(s).name
+            );
+        }
+        assert_eq!(CharClass::Emoji.name(), crate::EMOJI_CLASS_NAME);
+        // 跨二十个块，给不出连续区间。
+        assert!(CharClass::Emoji.range_text().is_empty());
+    }
+
+    /// 非 emoji 仍按块归类——块名恰好就是这些字符「用户心里的类」。
+    #[test]
+    fn non_emoji_still_classified_by_block() {
+        for (s, name) in [
+            ("我", "基本汉字"),
+            ("ㄅ", "注音符号"),
+            ("⺡", "CJK 部首补充"),
+            ("、", "CJK 符号和标点"),
+            ("℃", "字母式符号"),
+            ("⿰", "表意文字描述符"),
+            // 裸数字不是 emoji，按块走。
+            ("1", "ASCII"),
+            // Emoji 属性为假的符号，虽与 emoji 同块。
+            ("☰", "杂项符号"),
+        ] {
+            assert_eq!(class_of_cluster(s).name(), name, "{s} 的类");
+        }
+    }
+
+    /// ★ emoji 整类可批量的前提：属性表**整个**落在 `is_common_scope` 之外。
+    ///
+    /// 逐码位验而不是断言一句「emoji 不是汉字」——`allows_bulk_edit` 对块是取两端判的，
+    /// 那个近似对连续区间成立，对 151 段离散区间不成立。这里直接把前提验完。
+    #[test]
+    fn emoji_class_is_outside_common_scope() {
+        assert!(CharClass::Emoji.allows_bulk_edit());
+        for (a, b) in crate::charemoji_data::EMOJI_RANGES {
+            for c in *a..=*b {
+                let Some(ch) = char::from_u32(c) else {
+                    continue;
+                };
+                assert!(
+                    !crate::is_common_scope(ch),
+                    "U+{c:04X} 同时在 emoji 属性表与默认字表管辖域里，整类批量的前提不成立"
+                );
+            }
+        }
+    }
+
+    /// 整类批量的扫描谓词**不能**把键帽基字符扫进来。
+    ///
+    /// 用 `is_emoji` 而不是 `is_emoji_standalone` 的后果：一次「把 emoji 全设为生僻」
+    /// 顺手把 `0`–`9`、`#`、`*` 一起判掉，而这在预览里只表现为字符数多了十来个。
+    #[test]
+    fn emoji_class_scan_predicate_excludes_bare_digits() {
+        let e = CharClass::Emoji;
+        assert!(e.contains('😀'));
+        assert!(e.contains('©'));
+        for ch in ['0', '5', '9', '#', '*'] {
+            assert!(!e.contains(ch), "{ch} 不该被整类批量扫进来");
+        }
     }
 }
