@@ -22,6 +22,13 @@ fi
 # ⚠️ edition 必须与 workspace 一致（wind_input/Cargo.toml 的 edition = "2024"）；
 # 漏传会按 2015 解析，把合规文件误报成不合规。改 workspace edition 时这里要跟着改。
 #
+# ⚠️ `skip_children=true` 同样不可省：rustfmt 默认**跟进 `mod` 子模块**，于是查一个
+# coordinator.rs 会连 coordinator/*.rs 一起查——上面那段想避开的「被别人写到一半的文件
+# 拦下」，就这么从子模块漏了回来。2026-09-02 实测：暂存的只是 coordinator.rs 里两行字段，
+# 却被别人正在编辑的 coordinator/message_handler.rs 拦下，而那个文件根本不在提交里。
+# 加上它，「只查这一个文件」才名副其实。走 --config 而非 --skip-children：后者是 unstable
+# 选项名，稳定版 rustfmt 不认，只能经 --config 传。
+#
 # 取舍：查的是**工作区里的那个文件**，不是暂存的内容快照。`git add` 之后又把格式改坏的
 # 情况会漏——换来的是不必为每个文件开一次 `git show :file` 临时文件。本仓是小团队自用，
 # 这个洞的代价远小于复杂度。
@@ -29,7 +36,7 @@ bad=""
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -f "$ROOT/$f" ] || continue
-    rustfmt --edition 2024 --check "$ROOT/$f" >/dev/null 2>&1 || bad="$bad  $f"$'\n'
+    rustfmt --edition 2024 --config skip_children=true --check "$ROOT/$f" >/dev/null 2>&1 || bad="$bad  $f"$'\n'
 done <<< "$files"
 
 if [ -n "$bad" ]; then
