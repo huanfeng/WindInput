@@ -738,8 +738,12 @@ impl Coordinator {
     /// **上一次**的内容（契约见 `wind_ui::popup_menu::get_clipboard_text_cached`），而加词
     /// 是执行路径——拿陈旧内容等于往词库里写一条用户没复制过的词，且界面毫无异常。
     ///
-    /// 代价是最坏 sleep 重试 40ms，**在按键线程上**。故调用点一律走惰性入口
+    /// 代价是最坏 sleep 重试 40ms，**在按键线程上**。故加词面板一侧的调用一律走惰性入口
     /// [`Self::add_word_clip_pool`]，别直接调本函数。
+    ///
+    /// 唯一的直接调用点是 [`Self::add_word_prefill_from_history`]（Ctrl+Shift+=），那是
+    /// **有意**的：它不进加词模式，`State::add_word_clip` 是面板那一轮的状态，不该被它写；
+    /// 而且它本来就只调一次，没有可惰性的余地。
     fn clipboard_add_word_chars(&self) -> Vec<char> {
         let raw = self
             .host_services()
@@ -2002,11 +2006,9 @@ mod tests {
             push_commits(&c, &["你", "好"]);
             let mut st = c.state.lock().unwrap();
             c.enter_add_word_mode(&mut st);
-            assert!(
-                c.add_word_pool(&st).is_empty() || !st.add_word_from_clip,
-                "{tag}: 不合规的剪贴板必须当作空池"
-            );
-
+            // 这里**不断言剪贴板池**：惰性读取后，有最近上屏时此刻根本还没读过剪贴板
+            // （那正是 `entering_with_recent_input_never_reads_clipboard` 守着的事）。
+            // 「不合规 ⇒ 空池」由下面切过去之后的 `add_word_len == 0` 验。
             c.toggle_add_word_source(&mut st);
             assert!(st.add_word_from_clip, "{tag}: 空的一侧也必须切得过去");
             assert_eq!(st.add_word_len, 0, "{tag}: 空池无可选词");
