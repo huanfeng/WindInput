@@ -86,8 +86,41 @@ $ScriptDir     = $PSScriptRoot
 $ProductRoot   = Split-Path $ScriptDir -Parent
 $ProjectRoot   = "$ProductRoot\wind_input"
 $TsfDir        = "$ProductRoot\wind_tsf"      # C++ TSF 核心层 (CMake/MSVC)
-$SettingDir    = [System.IO.Path]::GetFullPath("$ProductRoot\..\wind-setting")  # 设置程序 (独立仓库)
-$PortableDir   = [System.IO.Path]::GetFullPath("$ProductRoot\..\wind-portable") # 绿色版启动器 (独立仓库)
+# ---------- 相邻仓库定位 (worktree 安全) ----------
+# 相邻仓库 (wind-setting / wind-portable / wind-installer) 与产品仓平级放在 workspace 根下。
+# 主工作区里 `$ProductRoot\..` 就是那一层, 但在 **linked worktree** 里不是 —— worktree 可以
+# 建在任意深度, 于是 `..\wind-setting` 指向一个不存在的路径。
+#
+# ⚠️ 后果是**静默降级**而非报错: Build-Setting 只 Warn 一句"仓库不存在, 跳过"就返回 $true,
+#    构建照样报成功, 你会以为设置程序也构建了。d1/pbd1 全构建链里那一句极易被刷过去。
+#
+# ★ 判据不能写成"路径里有没有 .claude\worktrees" —— 那只是 Claude Code 的 EnterWorktree
+#   工具的默认位置, 手工 `git worktree add <任意路径>` 完全不受此约束 (本仓的
+#   wind-setting-emoji / wind-setting-search 就直接放在 workspace 根下平级)。
+# ★ 也不能从 git 元数据反推: 本仓是 repo 工具布局, git-common-dir 是
+#   `.repo\projects\WindInput.git`, 与 workspace 根差三层; 而 `git worktree list` 的首行
+#   是那个裸仓库路径, 主工作区压根不在列表里。
+#
+# 故改为**逐级向上探测**: 从产品仓开始往上找, 第一个含有已知相邻仓库的层即 workspace 根。
+# 主工作区里第一次迭代就命中 (= 旧行为, 零回归); worktree 里多走几级同样能找到。
+# 探测不到 (worktree 建在 workspace 树之外) 则回落旧行为, 由 deploy.local.ps1 显式指定。
+function Resolve-SiblingRoot ([string]$start) {
+    $probes = @("wind-setting", "wind-portable", "wind-installer")
+    $dir = $start
+    for ($i = 0; $i -lt 8; $i++) {
+        $parent = Split-Path $dir -Parent
+        if (-not $parent -or $parent -eq $dir) { break }
+        foreach ($p in $probes) {
+            if (Test-Path (Join-Path $parent $p)) { return $parent }
+        }
+        $dir = $parent
+    }
+    return $null
+}
+$SiblingRoot   = Resolve-SiblingRoot $ProductRoot
+if (-not $SiblingRoot) { $SiblingRoot = [System.IO.Path]::GetFullPath("$ProductRoot\..") }
+$SettingDir    = Join-Path $SiblingRoot "wind-setting"   # 设置程序 (独立仓库)
+$PortableDir   = Join-Path $SiblingRoot "wind-portable"  # 绿色版启动器 (独立仓库)
 $Version       = (Get-Content "$ProductRoot\docs\VERSION" -Raw).Trim()
 $BuildDir      = "$ProductRoot\build"
 $BuildDevDir = "$ProductRoot\build_dev"
@@ -111,7 +144,9 @@ $PortableMarkerName = "portable_mode"
 $PortableMarkerLegacy = "wind_portable_mode"
 $PortableDataDir    = "userdata"
 # wind-installer: 通用安装器生成器 (兄弟项目, app.toml 驱动); 8/d8 打包命令调用其 pack.ps1。
-$InstallerDir  = "$ProductRoot\..\wind-installer"
+# 与 SettingDir/PortableDir 同源 (见上面的 Resolve-SiblingRoot), 否则 worktree 里打包会
+# 找不到 pack.ps1。
+$InstallerDir  = Join-Path $SiblingRoot "wind-installer"
 # 在线升级元数据里的下载地址前缀 (不含结尾斜杠); 打包后生成的 latest*.json 据此拼 exeUrl。
 $CdnBase       = "https://dl.windinput.com"
 # 可在 scripts\deploy.local.ps1 覆盖上述变量 (PowerShell 赋值语法; 该文件 gitignore)。
