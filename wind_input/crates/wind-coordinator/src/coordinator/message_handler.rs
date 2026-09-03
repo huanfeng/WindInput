@@ -2466,6 +2466,12 @@ impl MessageHandler for Coordinator {
         state.caret_x = data.x;
         state.caret_y = data.y;
         state.caret_height = data.height;
+        // 行高估计只吃**非退化**的帧：微信等 WebView 的 height 在 1↔20px 跳变，1 是宿主的
+        // 退化值而不是真的行高变了。见 `last_sane_caret_height` 的字段注释。
+        if data.height > 1 {
+            self.last_sane_caret_height
+                .store(data.height, std::sync::atomic::Ordering::Relaxed);
+        }
         state.caret_source = data.source;
         let now_valid =
             !(data.x == 0 && data.y == 0) && data.x.abs() < 32000 && data.y.abs() < 32000;
@@ -2649,20 +2655,69 @@ impl MessageHandler for Coordinator {
                 .swap(false, std::sync::atomic::Ordering::Relaxed)
             {
                 let ratio = self.rt().config.ui.candidate.first_show_settle_ratio;
-                let h = data.height.max(state.caret_height).max(1) as f32;
+                // ⚠ 带上 `last_sane_caret_height`：微信等 WebView 的 height 在 1↔20px 跳变，
+                // 只取当前帧会让容差塌缩到下限 3px（`(1×0.8) as i32 == 0`），放宽多少倍都没用。
+                // 行高是宿主的属性、不是单帧的属性，见该字段的注释。
+                let h = data
+                    .height
+                    .max(state.caret_height)
+                    .max(
+                        self.last_sane_caret_height
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    )
+                    .max(1) as f32;
                 (h * ratio.max(0.0)) as i32
             } else {
                 0
             };
-            let tol = settle.max(3); // 常规微移过滤下限保持 3px 不变
-            if dx <= tol && dy <= tol {
+            // ★★ 水平与垂直分别定容差——两个方向要处理的偏差成因完全不同，共用一个值等于
+            // 让垂直方向的约束把水平方向也卡死。
+            //
+            // - **垂直**要能分辨换行：换行的偏差恰好是**一个行高**，所以 ratio 必须 < 1.0
+            //   （出厂 0.8）。放宽了就会把换行当微移吞掉，候选窗不跟着换行走。
+            // - **水平**要吸收的是「上屏文本宽度 ≠ 编码文本宽度」：五笔满码自动上屏后立刻开
+            //   新组合时，缓存是 4 个字母末尾的位置，而上屏的汉字比它们窄（微信实测 20px）。
+            //   这个偏差的量级恒等于**一个字符宽**，与行高同量级，被 0.8×行高 的容差恰好卡在
+            //   门外 ⇒ 每次自动上屏都要当着用户的面校正一次。
+            //
+            // 取 2 倍：足以覆盖一个字符宽（中文字符宽 ≈ 行高，终端等宽字体更窄），又远小于
+            // 真实错位的量级（Excel 换编辑上下文 1443px、WPS 换单元格 277px、EverEdit 447px）。
+            //
+            // ⚠ 这条只在本轮**第一帧**权威坐标上生效（`first_show_was_provisional` 被 swap
+            // 消费掉），之后两个方向都回到 3px。它放宽的是「首显用过非权威坐标那一次的校正」，
+            // 不是常规跟随。
+            let tol_y = settle.max(3); // 常规微移过滤下限保持 3px 不变
+            let tol_x = settle.saturating_mul(2).max(3);
+            if dx <= tol_x && dy <= tol_y {
+                // ★★ 组合起点也得跟着「不动」。它若锁成这一帧的新坐标，后续任何一次 reshow
+                // 都会把候选窗拉过去——reshow 时 `hold_anchor` 为假，位置取的正是 `cs`——于是
+                // settle 只是把那一跳**推迟到下一个字母**，而不是消除它。微信实测「第 6 个 d
+                // 回退 20px」正是如此：首显 537、组合起点锁 517、settle 吸收了 20px 让候选窗
+                // 留在 537，第 6 个字母一触发 reshow 就跳到 517。
+                //
+                // 判断「不值得校正」的地方和「记住位置」的地方是分开的，这个决定必须在两处
+                // 都表达出来，否则被抑制的那一跳只是换了个时刻发生。
+                {
+                    let anchor = *self.shown_anchor.lock().unwrap_or_else(|e| e.into_inner());
+                    if anchor.2 {
+                        let mut cs = self
+                            .composition_start
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if cs.2 {
+                            *cs = (anchor.0, anchor.1, true);
+                        }
+                    }
+                }
                 // ★ 候选窗不动，但这一帧的坐标**已被认可**——基准必须跟上，否则同样的偏差
                 // 下一帧会被重新算一遍，而 settle 的放宽容差已被 swap 消费掉，tol 掉回 3px。
                 *self
                     .caret_baseline
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = (data.x, data.y, true);
-                debug!("caret_update → 忽略: 微移 dx={dx} dy={dy}（≤{tol}px，不 reshow）");
+                debug!(
+                    "caret_update → 忽略: 微移 dx={dx} dy={dy}（≤{tol_x}/{tol_y}px，不 reshow）"
+                );
                 return;
             }
             // ★ 基准记的是「上一次被认可的**插入点**」，不是「候选窗画在哪」——这一帧已被
@@ -2675,6 +2730,45 @@ impl MessageHandler for Coordinator {
                 .caret_baseline
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = (data.x, data.y, true);
+            // ★★★ 大偏移逃生阀：组合起点「本组合内不再更新」这条规则需要一个出口。
+            //
+            // 那条规则在**首显位置本来就对**时是必要的——它挡住宿主那些随输入右移的 compStart
+            // （微信报的 compStart 恒等于当前光标 x）。但首显位置若整个是错的（陈旧的空闲上报、
+            // 上一个单元格的坐标），候选窗就再也回不来：reshow 判出 537px 也没用，下发位置仍
+            // 取那个锁死的组合起点。微信实测「删除几个字符后再输入，候选窗停在删除前的位置」、
+            // EverEdit 447px、WPS 277px、Excel 1443px，全是这一种。
+            //
+            // 判据是**量级**而不是方向：字宽差异恒在一个行高上下（一个中文字符宽 ≈ 行高），
+            // 而真实错位实测 277~1443px，差一个数量级。取 3 倍行高作界，两边都留足余量。
+            // ⚠ 这不是那种被推翻过四次的位置启发式——那些判的是「这一帧的方向对不对」，
+            // 依赖光标往哪走；这里判的是「差得离不离谱」，与方向无关。
+            //
+            // ⚠ **已知盲区**：偏差落在 `tol_x`（≈2 倍行高）与 `3 倍行高`之间时，reshow 会触发
+            // 但位置仍取被钉住的组合起点——校正白跑一次，错位持续存在。阈值再往下调会把组合
+            // 内「光标随每个字母前移」那些 reshow 也算进来（实测 dx=13/14 连续出现），组合起点
+            // 就会跟着输入右移，候选窗一格一格挪——那是更明显的缺陷。这段区间对应「缓存差了
+            // 两个字符宽」，实测未遇到；真出现的话要换判据，不是调这个数。
+            {
+                let line_h = self
+                    .last_sane_caret_height
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .max(state.caret_height)
+                    .max(1);
+                if dx > line_h * 3 || dy > line_h * 3 {
+                    let mut cs = self
+                        .composition_start
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if cs.2 {
+                        debug!(
+                            "组合起点重锁: ({},{}) → ({},{})（偏移 {}/{} 远超字宽量级，\
+                             首显位置整个是错的，不能再钉住）",
+                            cs.0, cs.1, data.x, data.y, dx, dy
+                        );
+                        *cs = (data.x, data.y, true);
+                    }
+                }
+            }
             debug!("caret_update → reshow: dx={dx} dy={dy}");
             self.show_authorized
                 .store(true, std::sync::atomic::Ordering::Relaxed);

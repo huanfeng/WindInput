@@ -291,6 +291,14 @@ pub(crate) const SELF_COMMIT_GRACE: std::time::Duration = std::time::Duration::f
 /// Excel 首次输入建单元格编辑上下文需 454ms、真坐标 558ms 到达，是已知最慢的一档。
 pub(crate) const FIRST_SHOW_LONG_FALLBACK_MS: u64 = 600;
 
+/// 尚未从宿主观测到可靠行高时的保守下限，单位 px。见 [`Coordinator::last_sane_caret_height`]。
+///
+/// 只用于两个**容差**计算（settle 的偏差吸收、组合起点重锁阈值），不参与任何定位。取值比
+/// 常见正文行高（20~55px）小，但足够让容差脱离 3px 那个下限——偏小会让容差偏紧（多校正
+/// 几次，观感上多跳一下），偏大只会多吸收几像素微移，两个方向都不致命；而塌到 1px 会让
+/// 两个消费点同时失效，那是已经踩过的故障。
+pub(crate) const FALLBACK_LINE_HEIGHT: i32 = 16;
+
 /// 当前 unix 秒（拼音衰减分以此对 last_used 计龄；与 store record_freq 同口径）。
 pub(crate) fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
@@ -1357,6 +1365,29 @@ pub struct Coordinator {
     /// - **更新**：`notify_ui_update` 下发新位置时；`handle_caret_update` 的 settle 吸收分支。
     /// - **清位**：`reset_first_show`。
     caret_baseline: Mutex<(i32, i32, bool)>,
+    /// 最近一次**非退化**的 caret 高度，用作行高估计。
+    ///
+    /// 行高是**宿主的属性**，不是单帧的属性——同一个输入框不会这一帧 20px、下一帧 1px。
+    /// 但微信等 WebView 的 `GetTextExt` 返回的 height 恰好在 1↔20px 之间跳变（`caret_use_top`
+    /// 这条 per-app 规则就是为它加的），而 settle 容差是「行高 × ratio」：
+    ///
+    /// ```text
+    /// h = 1  ⇒  settle = (1 × 0.8) as i32 = 0  ⇒  tol = max(0, 3) = 3px
+    /// ```
+    ///
+    /// 容差整个塌缩到下限，放宽多少倍都没用（2 × 0 还是 0），于是一个字符宽的偏差必然触发
+    /// 校正——微信实测「每次自动上屏后回退 20px」。故行高单独记住，不跟着单帧的退化值走。
+    ///
+    /// ⚠ 跨宿主**刻意不重置**：换到行高不同的宿主时它会偏大一阵，而偏大只意味着多吸收几个
+    /// 像素的微移（settle 本就只作用于本轮第一帧），比「刚切过去那一帧恰好 h=1、容差又塌成
+    /// 3px」这个已知故障安全得多。
+    ///
+    /// ⚠⚠ 初值是 [`FALLBACK_LINE_HEIGHT`] 这个**保守下限**而不是 0：本字段有两种「取不到可靠
+    /// 值」的方式——被单帧退化值污染（已由 `> 1` 的写入闸挡住）、以及**尚未观测到任何一帧**。
+    /// 后者同样会让两个消费点（settle 容差、组合起点重锁阈值）塌缩到下限 3px，后果分别是
+    /// 「每次自动上屏后回退一个字宽」和「任何微移都重锁组合起点」。它只参与容差计算，偏大
+    /// 远比塌成 1px 安全。
+    last_sane_caret_height: std::sync::atomic::AtomicI32,
     /// 本轮组合的首显是否已进入「长兜底等待」（首帧信任门命中）。
     ///
     /// 唯一用途是让后续按键**不重置**那段等待的计时——见
@@ -2205,6 +2236,7 @@ impl Coordinator {
             awaiting_first_authority_after_focus: std::sync::atomic::AtomicBool::new(false),
             shown_anchor: Mutex::new((0, 0, false)),
             caret_baseline: Mutex::new((0, 0, false)),
+            last_sane_caret_height: std::sync::atomic::AtomicI32::new(FALLBACK_LINE_HEIGHT),
             first_show_extended: std::sync::atomic::AtomicBool::new(false),
             pending_focus_tip: std::sync::atomic::AtomicBool::new(false),
             last_focus_tip_token: Mutex::new(0),
@@ -8136,39 +8168,263 @@ mod caret_compat_tests {
         );
     }
 
-    /// ★★ 上屏改变插入点，而缓存里那份是上屏前的。probe 恒陈旧的宿主没法在兜底到期前刷新
-    /// 它（整条不收），只能等权威 caret_update——微信实测 190ms，兜底早就拿旧值显示出去了。
-    /// 五笔满码自动上屏后立刻开新组合时最明显：缓存是 4 个字母末尾，汉字比它们窄 20px。
+    /// ★★ 首帧校正的容差在水平与垂直上不对称，两个方向要处理的偏差成因不同。
+    ///
+    /// 水平吸收的是「上屏文本宽度 ≠ 编码文本宽度」（五笔满码自动上屏后立刻开新组合，缓存是
+    /// 4 个字母末尾、而上屏的汉字比它们窄，微信实测 20px），量级恒等于一个字符宽；垂直必须
+    /// 分辨换行（偏差恰好一个行高），所以 ratio 必须 < 1.0。共用一个容差 ⇒ 垂直的约束把水平
+    /// 也卡死，那 20px 每次自动上屏都要当着用户的面校正一次。
     #[test]
-    fn commit_invalidates_the_cache_for_stale_probe_hosts() {
-        let c = coord_with_idle_report(); // 该 helper 已打开 stale_probe_guard
-        c.caret_cache_verified
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        c.reset_first_show();
-        assert!(
-            !c.caret_cache_verified
-                .load(std::sync::atomic::Ordering::Relaxed),
-            "probe 不可信的宿主，上屏后必须重新等权威坐标"
+    fn settle_tolerance_absorbs_one_char_width_but_still_follows_a_line_break() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (1684, 747, 20);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 1684;
+            st.caret_y = 747;
+            st.caret_height = 20;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(last_pos(&rx), Some((1684, 747)), "首显位置");
+
+        // 上屏后的真实插入点比缓存靠左 20px（汉字比 4 个字母窄），纯水平
+        c.handle_caret_update(&probe_at(1664, 747, 20));
+        assert_eq!(
+            last_pos(&rx),
+            None,
+            "一个字符宽的水平偏差应被吸收——否则每次自动上屏都要当着用户的面校正一次"
         );
-        assert!(
-            !c.caret_cache_is_idle_report
-                .load(std::sync::atomic::Ordering::Relaxed),
-            "缓存的「组合前空闲上报」身份同样作废——上屏之后它就不是了"
+
+        // 反向对照：同样量级的**垂直**偏差是换行，必须跟过去
+        let (c2, rx2) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c2, wind_config::app_compat::FirstShowMode::Instant);
+        *c2.last_valid_caret.lock().unwrap() = (1684, 747, 20);
+        {
+            let mut st = c2.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 1684;
+            st.caret_y = 747;
+            st.caret_height = 20;
+        }
+        {
+            let st = c2.state.lock().unwrap();
+            c2.notify_ui_update(&st);
+        }
+        let _ = last_pos(&rx2);
+        c2.handle_caret_update(&probe_at(1684, 767, 20));
+        assert_eq!(
+            last_pos(&rx2),
+            Some((1684, 767)),
+            "换行的偏差恰好是一个行高，垂直容差必须留在 1.0 行高以内、让它跟过去"
         );
     }
 
-    /// 反向：普通宿主不受影响。它们靠 probe 在兜底到期前刷新缓存，多等一程纯属白慢。
+    /// ★★★ 行高退化的宿主上，settle 容差不得跟着塌缩。
+    ///
+    /// 微信等 WebView 的 `GetTextExt` 返回的 height 在 1↔20px 之间跳变。settle 容差是
+    /// 「行高 × ratio」，只取当前帧 ⇒ `(1 × 0.8) as i32 == 0` ⇒ 容差落到下限 3px，**放宽
+    /// 多少倍都没用（2 × 0 还是 0）**，于是一个字符宽的偏差必然触发校正——微信实测「每次
+    /// 自动上屏后回退 20px」，日志里那一行写着 `≤3/3px`。
+    ///
+    /// 行高是**宿主的属性**，不是单帧的属性。
     #[test]
-    fn commit_keeps_the_cache_for_hosts_with_usable_probe() {
-        let c = fast_coord(true); // 未配 stale_probe_guard
-        c.caret_cache_is_idle_report
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        c.reset_first_show();
-        assert!(
-            c.caret_cache_verified
-                .load(std::sync::atomic::Ordering::Relaxed),
-            "普通宿主上屏后不该丢掉缓存可信标志"
+    fn settle_tolerance_survives_a_degenerate_caret_height() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (901, 988, 20);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 901;
+            st.caret_y = 988;
+            st.caret_height = 20;
+        }
+        // 宿主先报过一帧正常行高（真机上必然有：空闲上报那一帧 h=20）
+        c.last_sane_caret_height
+            .store(20, std::sync::atomic::Ordering::Relaxed);
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(last_pos(&rx), Some((901, 988)), "首显位置");
+
+        // 随后宿主开始报退化高度 h=1，且插入点回退了一个字符宽
+        {
+            let mut st = c.state.lock().unwrap();
+            st.caret_height = 1;
+        }
+        c.handle_caret_update(&probe_at(881, 988, 1));
+        assert_eq!(
+            last_pos(&rx),
+            None,
+            "行高退化不得让容差塌缩到 3px——一个字符宽的偏差仍应被吸收"
         );
+    }
+
+    /// ★★★ 被 settle 吸收的偏差不得从组合起点那条路复活。
+    ///
+    /// settle 判定「这点偏差不值得移动候选窗」时，候选窗确实没动——但组合起点若在同一帧锁成
+    /// 了新坐标，后续任何一次 reshow 都会把候选窗拉过去（reshow 时位置取 `cs`），那一跳只是
+    /// **推迟到了下一个字母**。微信实测：首显 537、组合起点锁 517、settle 吸收 20px 让候选窗
+    /// 留在 537，第 6 个 d 一触发 reshow 就跳到 517，用户看到的就是「第 6 个字回退」。
+    #[test]
+    fn absorbed_drift_does_not_come_back_through_the_composition_start() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (537, 988, 20);
+        c.last_sane_caret_height
+            .store(20, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 537;
+            st.caret_y = 988;
+            st.caret_height = 20;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(last_pos(&rx), Some((537, 988)), "首显于上屏前的缓存位置");
+
+        // 真实插入点比缓存靠左 20px，且宿主在这一帧报出组合起点——settle 应吸收，候选窗不动
+        c.handle_caret_update(&probe_at(517, 988, 20));
+        assert_eq!(last_pos(&rx), None, "20px 应被 settle 吸收");
+
+        // 下一个字母：插入点再前移，触发 reshow。位置必须留在候选窗当前处，
+        // 不得跳回被吸收掉的那 20px。
+        c.handle_caret_update(&probe_at(531, 988, 20));
+        let after = last_pos(&rx).expect("超出容差应当校正一次");
+        assert_eq!(
+            after.0, 537,
+            "被 settle 吸收的偏差不得从组合起点复活——否则那一跳只是推迟到下一个字母"
+        );
+    }
+
+    /// ★★★ 首显位置整个错掉时，组合起点必须能重锁——否则候选窗再也回不来。
+    ///
+    /// 「组合起点本组合内不再更新」在首显位置本来就对时是必要的（挡住宿主那些随输入右移的
+    /// compStart），但它是个**不可撤销的决定，建立在一个不保证正确的输入上**：陈旧的空闲上报
+    /// （微信删除字符后不重新上报，实测差 537px）、上一个单元格的坐标（WPS 277px）、点击移光标
+    /// 后滞后一拍的上报（EverEdit 447px）都会把它锁在错处，此后 reshow 判出多大的偏移都没用。
+    ///
+    /// 判据是**量级**不是方向：字宽差异恒在一个行高上下，真实错位差一个数量级。
+    #[test]
+    fn a_grossly_wrong_first_show_can_relock_the_composition_start() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (1030, 987, 20);
+        c.last_sane_caret_height
+            .store(20, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 1030;
+            st.caret_y = 987;
+            st.caret_height = 20;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(last_pos(&rx), Some((1030, 987)), "首显于陈旧坐标");
+        // 首显那一刻把它锁成了组合起点（idle_anchor 路径的行为）
+        *c.composition_start.lock().unwrap() = (1030, 987, true);
+
+        // 真实插入点在 537px 之外——远超字宽量级，说明首显位置整个是错的
+        c.handle_caret_update(&probe_at(493, 988, 20));
+        assert_eq!(
+            last_pos(&rx),
+            Some((493, 988)),
+            "偏移远超字宽量级时组合起点必须重锁，否则候选窗永远停在错处"
+        );
+    }
+
+    /// ★★ 行高「尚未观测到」与「被单帧退化值污染」是两种不同的失效方式，两者都不能让容差塌缩。
+    ///
+    /// 写入闸 `> 1` 只挡住了后者。若初值是 0，服务刚启动、还没收到任何非退化帧时，两个消费点
+    /// 会同时落到下限 3px：settle 那边表现为「每次自动上屏后回退一个字宽」，重锁阈值那边表现为
+    /// 「任何微移都重锁组合起点」——后者等于把组合起点的稳定性整个取消掉。
+    #[test]
+    fn line_height_has_a_conservative_floor_before_any_observation() {
+        let c = coord();
+        assert!(
+            c.last_sane_caret_height
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= FALLBACK_LINE_HEIGHT,
+            "尚未观测到行高时必须有保守下限，否则两个容差同时塌到 3px"
+        );
+
+        // 宿主一上来就报退化高度也不得把它拉下去
+        let c2 = coord();
+        set_mode(&c2, wind_config::app_compat::FirstShowMode::Fast);
+        {
+            let mut st = c2.state.lock().unwrap();
+            st.input_buffer = "a".into();
+        }
+        c2.handle_caret_update(&probe_at(300, 400, 1));
+        assert!(
+            c2.last_sane_caret_height
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= FALLBACK_LINE_HEIGHT,
+            "h=1 是宿主的退化值，不得写进行高估计"
+        );
+    }
+
+    /// ⛔ **方向性守门：上屏不得清 `caret_cache_verified`。**
+    ///
+    /// 动机看起来很对：上屏改变了插入点，缓存里那份是上屏前的（五笔满码自动上屏后立刻开新
+    /// 组合时，缓存是 4 个字母末尾，而汉字比它们窄 20px），清掉「缓存可信」让首显改等权威
+    /// 坐标正好治它。**试过，实测灾难。**
+    ///
+    /// 代价是那个死结的第四次复发：**兜底超时长于组合寿命 ⇒ 被 `reset_first_show` 作废而
+    /// 永不到期**。清了之后下一个组合走 600ms 长兜底，而长按 d 时每个组合只活 ~128ms ⇒
+    /// 微信实测长按十几秒打出几十个字，候选窗位置只变了 4 次、一直停在几百像素之外。
+    ///
+    /// ★ 该宿主上这个死结**无解**：权威坐标 190ms 才到，组合寿命 128ms——「等得到正确坐标」
+    /// 与「在组合内显示出来」互斥。所以这不是「换个超时值」能解决的，是方向本身要否掉。
+    #[test]
+    fn commit_must_not_invalidate_the_cache() {
+        for guard in [false, true] {
+            let c = coord();
+            set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+            c.active_compat.lock().unwrap().stale_probe_guard = guard;
+            c.caret_cache_verified
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            c.reset_first_show();
+            assert!(
+                c.caret_cache_verified
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "上屏不得清掉缓存可信标志（stale_probe_guard={guard}）：\
+                 清了之后下一个组合走 600ms 长兜底，而长按时组合只活 ~128ms，\
+                 兜底被 reset_first_show 作废而永不到期，候选窗整段停在原地"
+            );
+        }
     }
 
     /// ★★ 组合起点钉住位置后，同一个偏差不得反复触发校正。
@@ -8200,12 +8456,12 @@ mod caret_compat_tests {
         // 组合起点锁定 ⇒ 此后候选窗位置被钉住，不随光标走
         *c.composition_start.lock().unwrap() = (1643, 747, true);
 
-        // 宿主报的插入点已前移 30px（超出 settle 的 0.8×20=16），应校正一次
-        c.handle_caret_update(&probe_at(1673, 747, 20));
+        // 宿主报的插入点已前移 80px（超出水平 settle 容差 2×0.8×20=32），应校正一次
+        c.handle_caret_update(&probe_at(1723, 747, 20));
         assert!(last_pos(&rx).is_some(), "首次超出容差应当校正");
 
         // 同一坐标再报：它已被认可，不该再判一次
-        c.handle_caret_update(&probe_at(1673, 747, 20));
+        c.handle_caret_update(&probe_at(1723, 747, 20));
         assert_eq!(
             last_pos(&rx),
             None,

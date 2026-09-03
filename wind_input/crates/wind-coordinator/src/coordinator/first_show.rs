@@ -15,22 +15,18 @@ impl Coordinator {
         //
         // 多数宿主靠 probe 在兜底到期前把缓存刷新掉就补救了，但配了 `stale_probe_guard` 的
         // 宿主 probe 恒陈旧、整条不收，只能等权威 caret_update（微信实测 190ms），兜底早就
-        // 拿旧值把候选窗显示出去了 ⇒ 190ms 后再退回 20px。故对这类宿主把「缓存可信」清掉，
-        // 让首显等权威坐标。
+        // 拿旧值把候选窗显示出去了 ⇒ 190ms 后再退回 20px。看起来正好该在这里把「缓存可信」
+        // 清掉、让首显改等权威坐标——**试过，实测灾难，勿再来**。
         //
-        // 代价被限制在「上屏后立刻接着打」这一种节奏上：宿主随后会发一帧无组合的空闲上报，
-        // 把两个标志重新置起来；只要下一次按键晚于它，就照常走快路径。
-        if self
-            .active_compat
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .stale_probe_guard
-        {
-            self.caret_cache_verified
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            self.caret_cache_is_idle_report
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-        }
+        // 代价是那个死结的第四次复发：**兜底超时长于组合寿命 ⇒ 被本函数作废而永不到期**。
+        // 清 verified ⇒ 下一个组合走 600ms 长兜底，而长按 d 时每个组合只活 ~128ms（typematic
+        // 32ms/键 × 五笔 4 码自动上屏）⇒ 兜底永远等不到自己到期。微信实测：长按十几秒打出几十
+        // 个字，候选窗位置只变了 4 次、一直停在几百像素之外，同一份日志里 600ms 长兜底命中 249
+        // 次、「保持长兜底计时」183 次。
+        //
+        // ★ 而且这个死结在该宿主上**无解**：微信的权威坐标要 190ms 才到，长按的组合寿命是
+        // 128ms——「等得到正确坐标」与「在组合内显示出来」互斥，任何介于两者之间的超时都只是
+        // 换个地方卡住。20px 的一次性抖动 vs 候选窗停在几百像素外不动，取前者。
         self.first_show_was_provisional
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.first_show_extended
