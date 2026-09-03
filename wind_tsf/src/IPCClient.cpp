@@ -849,9 +849,10 @@ BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight, UINT64
     payload.inputScopeMask = inputScopeMask;
     payload.disabled = disabled ? 1 : 0;
     payload.reason = reason;
-    // CARET_SRC_* 值域 0~6，压进 1 字节。越界值（不该出现）钳到 UNKNOWN 而不是截断，
+    // CARET_SRC_* 值域 0~7，压进 1 字节。越界值（不该出现）钳到 UNKNOWN 而不是截断，
     // 免得高位被切掉后恰好落在某个**有效**来源上，把「未知」伪装成「可信」。
-    payload.caretSource = (caretSource >= 0 && caretSource <= CARET_SRC_LAST_KNOWN)
+    // ⚠ 上界跟着枚举走：写死成某个中间值，新增来源就会被这里静默钳成 UNKNOWN。
+    payload.caretSource = (caretSource >= 0 && caretSource <= CARET_SRC_PRE_REFLOW)
                               ? (uint8_t)caretSource
                               : (uint8_t)CARET_SRC_UNKNOWN;
 

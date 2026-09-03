@@ -174,6 +174,22 @@ pub struct AppCompatRule {
     /// height 在 1↔20px 间跳变 → bottom 漂移 ~20px，但 top 始终稳定）。
     #[serde(default, skip_serializing_if = "is_false")]
     pub caret_use_top: bool,
+    /// 拦截「组合期间上报的 caret rect 仍停在上一次组合位置」的宿主。
+    ///
+    /// 微信（Qt WebView）实测：用户上屏后移动光标（打空格 / 换行）再输入，它在 composition
+    /// 期间报的 rect 仍是**上一次组合**的位置，与真实插入点差 136~419px。而 probe 判据 1
+    /// （「≠ 上一轮权威坐标 ⇒ 已 reflow」）对此没有判断力——正确答案和陈旧值**都** ≠ 那个
+    /// 基准。开启后，probe 若与「组合前宿主主动上报的空闲坐标」矛盾即判为陈旧、不予采信，
+    /// 让兜底用那份空闲坐标首显（见 `Coordinator::handle_caret_probe`）。
+    ///
+    /// ⚠ **必须逐宿主开启，不能做成全局默认**。曾试过按位置关系写一条通用判据，被真机连
+    /// 推翻三次（字宽、换行、终端重排）。根因是两类宿主的正确答案**恰好相反**：
+    ///   - 微信：probe 陈旧、组合前缓存新   ⇒ 该信缓存
+    ///   - WindTerm：probe 是重排后的新位置、缓存已过时 ⇒ 该信 probe
+    /// 同一份位置关系推不出该信谁，任何位置判据都不可能同时答对两者。这是宿主缺陷，
+    /// 按宿主处理——与隔壁 `caret_use_top`（同样为微信而加）同一个理由。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stale_probe_guard: bool,
     /// 候选窗首显策略；`None` = 不干预，跟随全局 `ui.candidate.first_show_mode`。
     ///
     /// 三档互斥——做成枚举而不是几个 bool：布尔开关可以同时打开，实测就因此出过一次

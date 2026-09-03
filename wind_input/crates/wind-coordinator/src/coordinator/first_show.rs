@@ -97,6 +97,43 @@ impl Coordinator {
         })
     }
 
+    /// 把一帧**不用于显示决策**的试探坐标收进缓存，返回是否真的收下。
+    ///
+    /// 缓存（`state.caret_x/y`）是兜底首显的坐标来源：`reset_first_show` 每次上屏都会把
+    /// `composition_start` 清掉，于是下一轮的兜底走的正是这份缓存（见 `notify_ui_update`
+    /// 里 `in_app && cs.2` 那个三元）。它若陈旧，候选窗就钉在原地。
+    ///
+    /// 实测（2026-09-02 记事本 + 五笔长按 d）：连续快速上屏时宿主的 `OnLayoutChange` 被
+    /// 50ms debounce 压住，整段**一条权威 caret_update 都不来**，缓存停在 456px 之外，
+    /// 每轮兜底都用它首显。试探坐标虽是 reflow 前的（偏差 ~30px），但远好过那份旧值。
+    ///
+    /// 两类不收：
+    /// - 退化帧（`h<=0`）：宿主尚未 reflow 的空 rect，收了会污染缓存。
+    /// - 配了 `stale_probe_guard` 的宿主：它们组合期间上报的 rect 可能停在**上一次组合**
+    ///   的位置（微信实测差 136~419px），收进缓存等于把陈旧值扩散到兜底路径上。
+    pub(super) fn absorb_probe_coords(&self, data: &CaretData) -> bool {
+        if data.height <= 0 {
+            return false;
+        }
+        if self
+            .active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stale_probe_guard
+        {
+            return false;
+        }
+        // 与 handle_caret_update 同口径：state 里存的是变换后的值
+        let mut probe = *data;
+        self.apply_caret_compat(&mut probe);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.caret_x = probe.x;
+        state.caret_y = probe.y;
+        state.caret_height = probe.height;
+        state.caret_source = probe.source;
+        true
+    }
+
     pub(super) fn first_show_mode_is_fast(&self) -> bool {
         self.effective_first_show_mode() == wind_config::app_compat::FirstShowMode::Fast
     }

@@ -5143,8 +5143,26 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
     // 坐标的 16px 偏差又被 settle 容差吞掉，错位就此固定。Excel 上表现为候选窗持续错位。
     // **「某档位忽略它」不等于「所有档位都忽略它」**——多消费者通道上的新增生产者必须逐个
     // 消费者过一遍。
+    // 2026-09-02 修正：改为**发送，但打上 CARET_SRC_PRE_REFLOW 标记**。
+    //
+    // 上面那条否定结论的适用前提是「权威坐标终将及时到达」——在连续快速上屏时它不成立：
+    // 五笔 4 码自动上屏 + 长按（33ms 一键），宿主的 OnLayoutChange 被 50ms debounce 彻底
+    // 压住，实测整段**一条权威 caret_update 都不来**（松手后 82ms 才到）。此时服务端每轮
+    // 兜底首显都用缓存里几百毫秒前的旧坐标，候选窗钉在原地，实测偏差 **456px**；而这里
+    // 手上就有一份 reflow 前的坐标，偏差只有 ~30px。
+    //
+    // ★ 所以问题从来不在「这个来源准不准」，而在**拿它做什么**：
+    //     做首显决策 → 有害（就是上面记的 Excel 16px 错位被 settle 固定）
+    //     刷新坐标缓存 → 有益（这是那段时间里唯一的位置信息）
+    // 独立的 source 值把这个区分交给消费端，服务端见到 PRE_REFLOW 只更新缓存、
+    // 绝不参与任何首显判据。**不要把它改回普通 probe 通道**，那才是当初翻车的原因。
     if (result.kind == CaretProbeKind::FirstShowProbe)
     {
+        if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
+        {
+            _pIPCClient->SendCaretProbe(caretRect.left, caretRect.bottom, height, compStartX,
+                                        compStartY, CARET_SRC_PRE_REFLOW);
+        }
         return;
     }
 

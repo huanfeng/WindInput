@@ -2472,7 +2472,16 @@ impl MessageHandler for Coordinator {
             // 常态、非异常：上屏后到下一键之间宿主仍会上报 caret。注意坐标**已在上面写入
             // state.caret_x/y**，只是不做显示决策——这一条解释了「按键前明明收到过正确坐标，
             // 候选窗却还在等 reflow」，是排查首显延迟时最容易看漏的一环。
-            debug!("caret_update → 仅更新缓存: 无组合（无候选且缓冲空），不做显示决策");
+            // 这一帧是宿主对当前插入点的直接测量，且发生在本次组合开始之前。记下这个出身：
+            // 下一次组合的 probe 若与它显著不符，陈旧的是 probe 而不是它
+            // （见 `caret_cache_is_idle_report` 与 `handle_caret_probe` 的第三道判据）。
+            self.caret_cache_is_idle_report
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            debug!(
+                "caret_update → 仅更新缓存: 无组合（无候选且缓冲空），不做显示决策；\
+                 记为组合前空闲上报 ({},{})",
+                data.x, data.y
+            );
             return;
         }
         // 组合起点锚定：同一组合只接受首个有效 compStart，后续即便携带新值也不覆盖（防部分控件
@@ -2528,6 +2537,11 @@ impl MessageHandler for Coordinator {
         // 可以放心拿它首显（见 caret_cache_verified 的字段注释）。
         self.caret_cache_verified
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // 缓存自此装的是**本次组合**的位置，不再是「组合前的空闲上报」——那条判据的前提
+        // 到此为止。清位必须和上面的置位同处：两者都以「这一帧够格当基准」为条件，分开
+        // 写就会在某条 early return 上分叉（本函数上游有五处提前返回）。
+        self.caret_cache_is_idle_report
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         // 消费首显等待：本次为 reflow 后权威坐标。
         let was_pending = {
             let mut pfs = self
@@ -2598,6 +2612,29 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_caret_probe(&self, data: &CaretData) {
+        // ★★ reflow 前探测（组合刚启动时 C++ 的异步取值）：**只刷新缓存，绝不参与任何
+        // 首显判据**，因此**不受档位门控**——它不改变任何档位的首显时机，只让兜底手里的
+        // 坐标新鲜些。
+        //
+        // ⚠ 曾把它放在下面的 fast 门之后，结果 `wait` 档宿主完全收不到（EverEdit 实测
+        // 一条不落全被「当前档位=wait 非 fast」挡掉，长按时候选窗照旧钉在原地，而同为
+        // 记事本的 fast 档已经好了）。那条「wait 档必须保持原行为一字不差」的约束说的是
+        // **首显行为**，刷新缓存不属于它——把约束套用过宽，等于让一半宿主白拿不到修复。
+        if data.source == wind_ipc::protocol::caret_source::PRE_REFLOW {
+            let absorbed = self.absorb_probe_coords(data);
+            debug!(
+                "caret_probe(pre_reflow) → 仅刷新缓存: ({},{}) h={} {}",
+                data.x,
+                data.y,
+                data.height,
+                if absorbed {
+                    "已收入"
+                } else {
+                    "未收入（退化帧或该宿主 probe 不可信）"
+                }
+            );
+            return;
+        }
         // 首帧 reflow 期间 DLL 逐次采样上报（CMD_CARET_PROBE）。默认**完全忽略**——
         // 不开 fast_first_show 的宿主必须保持「等 reflow 权威坐标」的原行为，一字不差。
         let mode = self.effective_first_show_mode();
@@ -2611,7 +2648,35 @@ impl MessageHandler for Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
         {
-            debug!("caret_probe → 忽略: 未在等待首显（已首显过 / 未 arm）");
+            // ★ 不做显示决策，但**把坐标收进缓存**——在连续快速上屏的宿主上，probe 常常是
+            // 这段时间里唯一的位置来源。
+            //
+            // 实测（2026-09-02 记事本 + 五笔长按 d，typematic 32ms/键、4 码一组）：整段
+            // **没有一条权威 caret_update**（宿主的 OnLayoutChange 有 50ms debounce，被连续
+            // 输入不断重置），而 TSF 侧的 probe 一直带着 x=1700~1760 到达、全被这条分支
+            // 丢弃；于是每轮新组合的 25ms 兜底都拿缓存里那份几百毫秒前的 992 首显，候选窗
+            // 钉在原地、与真实光标差 834px，直到松手后 82ms 权威坐标才到、猛跳一次。
+            //
+            // 收进来只影响**下一轮**首显的起点（本轮已显示，`composition_start` 锁定语义不变，
+            // 同一组合内候选窗照旧不随输入移动），所以不会引入"候选窗跟着光标跑"。
+            //
+            // 两类不收：
+            //   - 退化帧（h<=0）：宿主尚未 reflow 的空 rect，收了会污染缓存。
+            //   - 配了 `stale_probe_guard` 的宿主：它们的 probe 本就可能停在上一次组合的
+            //     位置（微信实测差 136~419px），收进缓存等于把陈旧值扩散到兜底路径上。
+            let absorb = self.absorb_probe_coords(data);
+            debug!(
+                "caret_probe → 不做显示决策: 未在等待首显（已首显过 / 未 arm）；\
+                 坐标 ({},{}) h={} {}",
+                data.x,
+                data.y,
+                data.height,
+                if absorb {
+                    "已收入缓存"
+                } else {
+                    "未收入（退化帧或该宿主 probe 不可信）"
+                }
+            );
             return;
         }
         // 退化 rect（无高度）一律不采信：实测 WPS 首帧曾采到 top==bottom 的样本，
@@ -2634,6 +2699,65 @@ impl MessageHandler for Coordinator {
         if self.first_show_needs_long_wait() {
             debug!(
                 "caret_probe → 继续等待: 坐标缓存未经当前插入点验证，本轮判据无基准可比（x={} y={}）",
+                data.x, data.y
+            );
+            return;
+        }
+        // ★ 第三道判据：缓存来自「组合前的空闲上报」，而 probe 与它显著不符 ⇒ 陈旧的是 probe。
+        //
+        // 微信（Qt WebView）在 composition 期间报的 rect 仍是**上一次组合**的位置：实测用户
+        // 上屏后打了个空格移动光标，宿主在按键前 3ms 就上报了真实插入点 (745,1007)，而 probe
+        // 报的是 (609,989) —— 上一次组合上屏后的位置，差 136px。判据 1 对此无能为力，因为
+        // 正确答案和陈旧值**都** ≠ 那个基准。
+        //
+        // 拒绝之后并不会退化成「没有坐标可用」：25ms 短兜底到期时 `fire_pending_first_show`
+        // 用的就是 `state` 里那份正确的空闲上报值。所以代价只是 4ms → 25ms，位置反而对了。
+        //
+        // ⚠ 必须放在连打快路径**之前**：快路径不比对任何基准就采信，若排在它后面，只要
+        // 按键间隔落进 fast_typing_window_ms 就会整条绕过本判据——首显有多条通路，否决类
+        // 判据必须每条都接（2026-08-03 信任门只接了兜底 timer，被 probe 绕过一次的教训）。
+        // ⚠ 逐宿主开启（`compat.toml` 的 `stale_probe_guard`），**不做全局默认**。
+        // 曾按位置关系写过一条通用判据，被真机连推翻三次（字宽 → 换行 → 终端重排）。
+        // 根因是两类宿主的正确答案恰好相反：微信该信缓存、WindTerm 该信 probe，
+        // 而同一份位置关系推不出该信谁。详见 `AppCompatRule::stale_probe_guard`。
+        let guard_on = self
+            .active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stale_probe_guard;
+        if guard_on
+            && self
+                .caret_cache_is_idle_report
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let (sx, sy) = {
+                let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                (s.caret_x, s.caret_y)
+            };
+            // ★★★ 判据是布尔的：**手上有宿主刚报的空闲坐标，就用它、忽略所有 probe**。
+            // 不看方向、不看距离、不看行号。
+            //
+            // 这个宿主的 composition rect 在组合期间**恒定陈旧**（停在上一次组合的位置），
+            // 已由四个不同场景反复确认。既然整条来源都不可信，就没必要去判断「这一帧准不准」
+            // ——而组合前的空闲上报是宿主**自己刚测的当前插入点**，它才是可信的那个。
+            //
+            // ⚠⚠⚠ **不要再用位置关系来判**。曾按位置写过判据，被真机连推翻四次：
+            //   ① `.abs()` 比水平差    → 被字宽推翻（WindTerm 字宽 24px＞容差 21px，
+            //                            误拦掉 reflow 后的正确答案）
+            //   ② 只判水平方向        → 被换行推翻（换行后真实位置 x 回行首、陈旧值留在
+            //                            上一行末尾 ⇒ 陈旧值反而像「前进」）
+            //   ③ 「同行内只会前移」   → 被终端重排推翻（WindTerm 光标同行左移 312px）
+            //   ④ 「前进就算正常」     → 被退格推翻（微信删字后光标左移，陈旧值停在右边
+            //                            390px 处 ⇒ 又像「前进」）
+            // 每加一个物理约束，就有一个宿主违反它——因为宿主可以任意重排文本，那些约束
+            // 根本不存在。**「判断做不出来」和「判断做错了」是两回事，前者只能换依据。**
+            //
+            // 代价：该宿主放弃 probe 提前首显，改由短兜底用这份空闲坐标显示（4ms → 25ms），
+            // 换来位置正确。没有空闲上报时本判据不生效，probe 照常参与——那种情况下缓存
+            // 本身也是旧的，没有更好的选择。
+            debug!(
+                "caret_probe → 拒绝: 该宿主 composition rect 恒陈旧，改用组合前空闲上报 \
+                 ({sx},{sy})（probe 报的是 ({},{})）",
                 data.x, data.y
             );
             return;

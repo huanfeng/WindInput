@@ -552,6 +552,22 @@ pub mod caret_source {
     pub const GUI_CARET: i32 = 4;
     pub const CONSOLE: i32 = 5;
     pub const LAST_KNOWN: i32 = 6;
+    /// 组合刚启动时的异步探测值（`CaretProbeKind::FirstShowProbe`）——**reflow 前**的坐标。
+    ///
+    /// 出自 TSF `GetTextExt`，但绝大多数宿主对这次请求选择内联执行，等同同步取，
+    /// 拿到的是宿主尚未重排的旧值（Excel 实测与随后的权威值差 16px）。所以它
+    /// **不可作权威、不可参与任何首显决策**——2026-08-01 曾让它走普通 probe 通道，
+    /// 被 fast 档的判据采信提前首显，16px 偏差随后又被 settle 容差吞掉，错位就此固定。
+    ///
+    /// 它唯一的正当用途是**刷新坐标缓存**：连续快速上屏时（五笔 4 码自动上屏 + 长按，
+    /// 33ms 一键），宿主的 `OnLayoutChange` 有 50ms debounce、被输入彻底压住，整段
+    /// **一条权威 caret_update 都不来**（实测松手后 82ms 才到），此时它是唯一的位置来源。
+    /// 缓存里那份几百毫秒前的旧坐标会让每轮兜底首显都钉在原地，实测偏差 456px——
+    /// 相比之下 reflow 前的 ~30px 好得多。
+    ///
+    /// ★ 同一条数据源在两个场景里价值相反，区别不在来源而在**用途**：拿它做决策有害，
+    /// 拿它更新缓存有益。故独立成一个 source 值，由消费端按用途区分，而不是放开来源。
+    pub const PRE_REFLOW: i32 = 7;
 
     /// 是否属 TSF 语义域——即「这个坐标和组合起点出自同一个 context」。
     /// 只有这一类才可作权威坐标，也只有这一类才可与组合起点做距离比较。
@@ -567,6 +583,7 @@ pub mod caret_source {
             GUI_CARET => "gui_caret",
             CONSOLE => "console",
             LAST_KNOWN => "last_known",
+            PRE_REFLOW => "pre_reflow",
             _ => "unknown",
         }
     }

@@ -729,6 +729,9 @@ pub(crate) struct ActiveCompat {
     /// 用 caret rect 的 top 而非 bottom 定位候选窗。微信等 WebView 宿主的 GetTextExt
     /// height 在 1↔20px 间跳变致 bottom 漂移，top 稳定。
     pub(crate) caret_use_top: bool,
+    /// 见 [`wind_config::app_compat::AppCompatRule::stale_probe_guard`]：
+    /// 该宿主组合期间上报的 caret rect 会停在上一次组合的位置，需拦截。
+    pub(crate) stale_probe_guard: bool,
     /// 候选窗首显策略（见 `AppCompatRule::first_show_mode`）。三档互斥；
     /// `None` = 跟随全局 `ui.candidate.first_show_mode`。
     ///
@@ -1274,6 +1277,27 @@ pub struct Coordinator {
     /// （probe 判据用），本字段回答「手里的值可不可信」。当前取值恰好一致，但两者对边缘
     /// 输入的期望会分化，合用一个必有一方错。
     caret_cache_verified: std::sync::atomic::AtomicBool,
+    /// 坐标缓存当前这份值，是不是**本次组合开始之前**由宿主主动上报的「空闲光标位置」。
+    ///
+    /// 上屏后到下一次按键之间，宿主仍会上报 caret（`handle_caret_update` 的「无组合」
+    /// 分支）。那一帧是宿主对**当前插入点**的直接测量，比组合期间的 rect 更可信——
+    /// 尤其在用户上屏后又移动过光标（打空格/点一下）的时候，它是唯一说得出「光标现在
+    /// 到底在哪」的数据。
+    ///
+    /// 本标志存在的唯一理由，是让 [`Coordinator::handle_caret_probe`] 能识破一类陈旧
+    /// probe：微信（Qt WebView）在 composition 期间报的 rect 仍是**上一次组合**的位置，
+    /// 实测与真实插入点差 136px。而 probe 判据 1（「≠ 上一轮权威坐标 ⇒ 已 reflow」）
+    /// 对此完全没有判断力——正确答案和陈旧值**都** ≠ 那个基准，判据把两者一视同仁。
+    /// 换句话说这不是判据太松，是判据问错了问题；只能换依据，不能调松紧。
+    ///
+    /// - **置位**：`handle_caret_update` 的「无组合」分支（那一帧只更新缓存、不做显示决策）。
+    /// - **清位**：`handle_caret_update` 采纳一帧组合期间的权威坐标时——此后缓存里装的
+    ///   是本次组合的位置，不再是「组合前的空闲上报」，本标志的前提随之消失。
+    ///
+    /// ⚠ 不与 [`Self::caret_cache_verified`] 合并：那个答「手里的值可不可信」，本字段答
+    /// 「手里的值是不是组合前刚测的」。微信这个场景里前者为真、后者也为真，但正是靠后者
+    /// 才能判定 probe 陈旧——合成一个就再也分不出「缓存可信」与「probe 可信」了。
+    caret_cache_is_idle_report: std::sync::atomic::AtomicBool,
     /// 本轮组合的首显是否已进入「长兜底等待」（首帧信任门命中）。
     ///
     /// 唯一用途是让后续按键**不重置**那段等待的计时——见
@@ -2117,6 +2141,7 @@ impl Coordinator {
             last_key_interval_ms: Mutex::new(None),
             first_show_was_provisional: std::sync::atomic::AtomicBool::new(false),
             caret_cache_verified: std::sync::atomic::AtomicBool::new(false),
+            caret_cache_is_idle_report: std::sync::atomic::AtomicBool::new(false),
             first_show_extended: std::sync::atomic::AtomicBool::new(false),
             pending_focus_tip: std::sync::atomic::AtomicBool::new(false),
             last_focus_tip_token: Mutex::new(0),
@@ -2296,6 +2321,7 @@ impl Coordinator {
                 ActiveCompat {
                     pid,
                     caret_use_top: rule.map(|r| r.caret_use_top).unwrap_or(false),
+                    stale_probe_guard: rule.map(|r| r.stale_probe_guard).unwrap_or(false),
                     first_show_mode: rule.and_then(|r| r.first_show_mode),
                     has_initial_rule: initial_mode.is_some() || initial_punct.is_some(),
                     auto_pair: rule.and_then(|r| r.auto_pair),
@@ -2439,6 +2465,7 @@ impl Coordinator {
         }
         let (
             caret_use_top,
+            stale_probe_guard,
             first_show_mode,
             auto_pair,
             smart_method,
@@ -2449,6 +2476,7 @@ impl Coordinator {
             let rule = table.get_rule(&name);
             (
                 rule.map(|r| r.caret_use_top).unwrap_or(false),
+                rule.map(|r| r.stale_probe_guard).unwrap_or(false),
                 rule.and_then(|r| r.first_show_mode),
                 rule.and_then(|r| r.auto_pair),
                 rule.and_then(|r| r.smart_method),
@@ -2457,7 +2485,7 @@ impl Coordinator {
             )
         };
         debug!(
-            "Connected-pid compat refresh for process={name} (pid={pid}): caret_use_top={} first_show_mode={} auto_pair={} smart_method={} caret_offset=({},{})",
+            "Connected-pid compat refresh for process={name} (pid={pid}): caret_use_top={} stale_probe_guard={stale_probe_guard} first_show_mode={} auto_pair={} smart_method={} caret_offset=({},{})",
             caret_use_top,
             first_show_mode
                 .map(|m| m.as_config())
@@ -2478,6 +2506,7 @@ impl Coordinator {
         {
             let mut ac = self.active_compat.lock().unwrap_or_else(|e| e.into_inner());
             ac.caret_use_top = caret_use_top;
+            ac.stale_probe_guard = stale_probe_guard;
             ac.first_show_mode = first_show_mode;
             ac.auto_pair = auto_pair;
             ac.smart_method = smart_method;
@@ -7847,6 +7876,114 @@ mod caret_compat_tests {
         );
     }
 
+    /// ★★★ `PRE_REFLOW` 探测**绝不参与首显决策**，哪怕它满足全部原判据。
+    ///
+    /// 2026-08-01 的翻车现场：这条来源（组合刚启动时的异步取值，多数宿主内联执行 ⇒ 拿到
+    /// reflow **前**的坐标）一度走普通 probe 通道，被判据采信提前首显，随后真权威坐标的
+    /// 16px 偏差又被 settle 容差吞掉，**错位就此固定**——比不优化更稳定地错。
+    ///
+    /// 2026-09-02 重新放开它，是因为连续快速上屏时它是唯一的位置来源（宿主的
+    /// OnLayoutChange 被 debounce 压住，整段没有权威坐标，缓存差 456px）。但放开的是
+    /// **用途**不是来源：只刷新缓存，不做决策。本测试钉死这条边界。
+    ///
+    /// 下面的对照组用**同一份坐标**、只改 `source`，证明差别确实来自 source 而非别的条件。
+    #[test]
+    fn pre_reflow_probe_refreshes_cache_but_never_drives_first_show() {
+        let arm = |source: i32| {
+            let c = coord();
+            set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+            {
+                let mut st = c.state.lock().unwrap();
+                st.input_buffer = "a".to_string();
+                st.caret_x = 100;
+                st.caret_y = 200;
+                st.caret_height = 20;
+            }
+            // 基准与 probe 不同 ⇒ 判据 1 会认定「已 reflow」并采信
+            *c.last_authoritative_caret.lock().unwrap() = (500, 300, true);
+            c.caret_cache_verified
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            *c.pending_first_show.lock().unwrap() = true;
+            let mut probe = probe_at(800, 600, 24);
+            probe.source = source;
+            c.handle_caret_probe(&probe);
+            c
+        };
+
+        let c = arm(wind_ipc::protocol::caret_source::PRE_REFLOW);
+        assert!(
+            *c.pending_first_show.lock().unwrap(),
+            "PRE_REFLOW 是 reflow 前的坐标，绝不能拿它提前首显——那会把错位用 settle 容差固定下来"
+        );
+        assert_eq!(
+            c.state.lock().unwrap().caret_x,
+            800,
+            "但坐标必须收进缓存：连续快速上屏时它是唯一的位置来源"
+        );
+
+        // 对照组：同一份坐标，普通来源 ⇒ 判据 1 照常采信并首显
+        let c = arm(wind_ipc::protocol::caret_source::TSF_SELECTION);
+        assert!(
+            !*c.pending_first_show.lock().unwrap(),
+            "对照组：普通 probe 满足判据 1 时应当提前首显（否则本测试证明不了差别来自 source）"
+        );
+    }
+
+    /// ★★ 候选窗已显示时到达的 probe **不做显示决策，但坐标要收下**。
+    ///
+    /// 真机现场（2026-09-02 记事本 + 五笔长按 d，typematic 32ms/键、4 码一组自动上屏）：
+    /// 整段**没有一条权威 caret_update**（宿主 OnLayoutChange 的 50ms debounce 被连续输入
+    /// 不断重置），TSF 侧 probe 却一直带着 x=1700~1760 到达、全被"已首显过"分支丢弃；
+    /// 于是每轮新组合的 25ms 兜底都拿缓存里那份 992 首显 ⇒ 候选窗钉在原地、与真实光标
+    /// 差 **834px**，直到松手后 82ms 权威坐标才到、猛跳一次。
+    ///
+    /// 「不用于显示」不等于「可以扔掉」——它是那段时间里唯一的位置信息。
+    #[test]
+    fn idle_probe_coords_are_absorbed_but_two_kinds_are_not() {
+        let fresh = |caret_x: i32| {
+            let c = coord();
+            set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+            {
+                let mut st = c.state.lock().unwrap();
+                st.input_buffer = "d".to_string();
+                st.caret_x = caret_x; // 几百毫秒前的旧坐标
+                st.caret_y = 589;
+                st.caret_height = 55;
+            }
+            // 候选窗已显示、不在等首显——正是被丢弃的那条路
+            *c.pending_first_show.lock().unwrap() = false;
+            c
+        };
+
+        let c = fresh(992);
+        c.handle_caret_probe(&probe_at(1760, 589, 55));
+        assert_eq!(
+            c.state.lock().unwrap().caret_x,
+            1760,
+            "已首显期间的 probe 坐标必须收进缓存，否则下一轮组合的兜底还用几百毫秒前的旧值"
+        );
+
+        // 退化帧：宿主尚未 reflow 的空 rect，收了会污染缓存
+        let c = fresh(992);
+        c.handle_caret_probe(&probe_at(1760, 589, 0));
+        assert_eq!(
+            c.state.lock().unwrap().caret_x,
+            992,
+            "退化帧（h<=0）不得收入缓存"
+        );
+
+        // 配了 stale_probe_guard 的宿主：probe 本就可能停在上一次组合的位置（微信），
+        // 收进缓存等于把陈旧值扩散到兜底路径
+        let c = fresh(992);
+        c.active_compat.lock().unwrap().stale_probe_guard = true;
+        c.handle_caret_probe(&probe_at(1760, 589, 55));
+        assert_eq!(
+            c.state.lock().unwrap().caret_x,
+            992,
+            "该宿主的 probe 不可信，不得收入缓存"
+        );
+    }
+
     #[test]
     fn probe_ignored_unless_fast_mode() {
         // `wait` 档的底线：退回该档的宿主必须拿到「等 reflow 权威坐标」的原行为，
@@ -7899,6 +8036,134 @@ mod caret_compat_tests {
         assert!(
             *c.pending_first_show.lock().unwrap(),
             "连打快路径也必须过信任门——只堵判据 1 等于没堵"
+        );
+    }
+
+    /// 把「组合前的空闲上报」摆好：模拟用户上屏后打空格移动了光标，宿主在按键前上报了
+    /// 真实插入点 (745,1007)，而上一轮组合的权威坐标停在 (601,988)。
+    fn coord_with_idle_report() -> Arc<Coordinator> {
+        let c = coord();
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".to_string();
+            st.caret_x = 745; // 宿主主动上报的当前插入点，缓存里就是它
+            st.caret_y = 1007;
+            st.caret_height = 20;
+        }
+        *c.last_authoritative_caret.lock().unwrap() = (601, 988, true);
+        // 缓存本身是可信的（信任门不该命中）——本用例要测的正是「缓存可信、但 probe 陈旧」
+        c.caret_cache_verified
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        c.caret_cache_is_idle_report
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // 本判据逐宿主开启，测微信这类宿主时要显式打开（出厂只给 Weixin.exe 配）
+        c.active_compat.lock().unwrap().stale_probe_guard = true;
+        *c.pending_first_show.lock().unwrap() = true;
+        c
+    }
+
+    /// ★★ 守住 per-app 语义：没配 `stale_probe_guard` 的宿主必须走原有判据，一字不差。
+    ///
+    /// 这道判据只在「宿主组合期间上报陈旧 rect」时才对。WindTerm 恰恰相反——它的 probe
+    /// 是重排后的**新**位置、而缓存已过时，此时拦下 probe 反而制造错位（实测误拦 6 次、
+    /// 其中 2 次候选窗在错位置停 35ms 才跳回）。全局开启 = 拿这类宿主的回归换微信的修复。
+    #[test]
+    fn stale_probe_guard_is_per_app_and_off_by_default() {
+        let c = coord_with_idle_report();
+        c.active_compat.lock().unwrap().stale_probe_guard = false; // 未配规则的普通宿主
+        // 同一份「陈旧」输入：开着 guard 时会被拦（见 stale_probe_rejected_…），关着则不该拦
+        c.handle_caret_probe(&probe_at(609, 989, 1));
+        assert!(
+            !*c.pending_first_show.lock().unwrap(),
+            "未配 stale_probe_guard 的宿主必须走原有判据 1，不受本 guard 干预"
+        );
+    }
+
+    /// ★ 微信（Qt WebView）在 composition 期间报的 rect 仍是**上一次组合**的位置。实测
+    /// （2026-09-02）用户上屏后打空格移动光标，宿主在按键前 3ms 上报真实插入点
+    /// (745,1007)，而 probe 报 (609,989)——上一次组合上屏后的位置，差 136px。
+    ///
+    /// 判据 1 对此完全没有判断力：正确答案 (745,1007) 和陈旧值 (609,989) **都** ≠ 基准
+    /// (601,988)，它把两者一视同仁。所以这不是判据太松，是判据问错了问题。
+    #[test]
+    fn stale_probe_rejected_regardless_of_position_relation() {
+        // 四组都是真机现场的坐标，位置关系**互相矛盾**——正是它们逐个推翻了先前
+        // 四版位置判据。现在判据不看位置，四组必须一律被拒。
+        let cases: [(&str, CaretData); 4] = [
+            // ① 空格移光标：陈旧值在缓存左边 136px（同行左移）
+            ("空格移光标·左移", probe_at(609, 989, 1)),
+            // ② 换行：陈旧值留在上一行末尾，x 反而更大、y 更小（像"前进"）
+            ("换行·右上方", probe_at(915, 988, 1)),
+            // ③ 退格：光标左移，陈旧值停在右边 390px（同样像"前进"）
+            ("退格·右移", probe_at(2016, 1033, 1)),
+            // ④ 与缓存几乎重合：先前版本会放行，但对本宿主而言它同样不可信
+            ("几乎重合", probe_at(748, 1009, 20)),
+        ];
+        for (name, probe) in cases {
+            let c = coord_with_idle_report();
+            c.handle_caret_probe(&probe);
+            assert!(
+                *c.pending_first_show.lock().unwrap(),
+                "[{name}] 该宿主的 composition rect 恒陈旧，任何位置关系都不得采信——\
+                 判据一旦回到「看位置」，这四组里必有一组绕过去"
+            );
+        }
+    }
+
+    /// 判据的前提是**手上有宿主刚报的空闲坐标**。没有它时缓存本身也是旧的，
+    /// 没有更好的选择，probe 应照常参与——否则该宿主会退化成「永远等权威坐标」。
+    #[test]
+    fn stale_probe_guard_inactive_without_fresh_idle_report() {
+        let c = coord_with_idle_report();
+        c.caret_cache_is_idle_report
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        c.handle_caret_probe(&probe_at(609, 989, 1));
+        assert!(
+            !*c.pending_first_show.lock().unwrap(),
+            "没有组合前空闲上报时本判据不生效，probe 照常走判据 1"
+        );
+    }
+
+    /// ★★ 首显有多条通路，否决类判据必须每条都接。连打快路径不比对任何基准就采信，
+    /// 新判据若排在它之后，只要按键间隔落进 `fast_typing_window_ms` 就被整条绕过
+    /// ——2026-08-03 信任门只接了兜底 timer、被 probe 从旁边绕过去，就是同一个形态。
+    #[test]
+    fn stale_probe_rejected_even_on_fast_typing_path() {
+        let c = coord_with_idle_report();
+        *c.last_key_interval_ms.lock().unwrap() = Some(60); // 落进连打快路径窗口
+        c.handle_caret_probe(&probe_at(609, 989, 1));
+        assert!(
+            *c.pending_first_show.lock().unwrap(),
+            "连打快路径也必须过本判据——只堵判据 1 等于没堵"
+        );
+    }
+
+    /// 置位/清位的两条通路：无组合那一帧记账，组合期间的权威坐标注销。
+    /// 清位漏了会让标记一直挂着，把本次组合自己的权威坐标也当成「组合前的空闲上报」，
+    /// 后续 probe 全被误拒 ⇒ fast 档静默退化成兜底档。
+    #[test]
+    fn idle_report_flag_set_by_idle_caret_and_cleared_by_authoritative() {
+        let c = coord();
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+        // 无组合（缓冲空、无候选）⇒ 这一帧只更新缓存，并记下「组合前空闲上报」
+        c.handle_caret_update(&probe_at(745, 1007, 20));
+        assert!(
+            c.caret_cache_is_idle_report
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "无组合时到达的 caret 是宿主对当前插入点的直接测量，必须记账"
+        );
+
+        // 组合期间的权威坐标到达 ⇒ 缓存换成本次组合的位置，标记的前提消失
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".to_string();
+        }
+        c.handle_caret_update(&probe_at(760, 1007, 20));
+        assert!(
+            !c.caret_cache_is_idle_report
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "组合期间的权威坐标必须注销该标记，否则 probe 会被长期误拒"
         );
     }
 

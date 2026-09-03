@@ -78,8 +78,9 @@
 
 [[apps]]
 process = "Weixin.exe"
-comment = "微信 - Qt WebView 输入框 caret height 不稳定（h=1 或 h=20），使用 rect.top 定位"
+comment = "微信 - Qt WebView 输入框 caret height 不稳定（h=1 或 h=20），使用 rect.top 定位；组合期间上报的 rect 还会停在上一次组合的位置（差 136~419px），需拦截陈旧试探坐标"
 caret_use_top = true
+stale_probe_guard = true
 
 [[apps]]
 process = "SearchHost.exe"

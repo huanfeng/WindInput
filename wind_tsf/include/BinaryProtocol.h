@@ -240,6 +240,12 @@ constexpr int32_t CARET_SRC_TSF_CACHED     = 3; // UpdateComposition edit sessio
 constexpr int32_t CARET_SRC_GUI_CARET      = 4; // GetGUIThreadInfo/GetCaretPos 回退——**跨窗口，不可作权威**
 constexpr int32_t CARET_SRC_CONSOLE        = 5; // 控制台窗口的估算位置
 constexpr int32_t CARET_SRC_LAST_KNOWN     = 6; // 上次已知好值
+// 组合刚启动时的异步探测（FirstShowProbe）——reflow **前**的坐标。出自 GetTextExt，但多数
+// 宿主对这次请求内联执行、等同同步取，拿到的是宿主尚未重排的旧值（Excel 实测差 16px）。
+// **不可作权威、不可参与首显决策**，服务端只拿它刷新坐标缓存：连续快速上屏时宿主的
+// OnLayoutChange 被 debounce 压住、整段没有权威坐标，它是唯一的位置来源（详见 Rust 侧
+// `caret_source::PRE_REFLOW` 的注释）。
+constexpr int32_t CARET_SRC_PRE_REFLOW     = 7;
 
 // Caret position payload v2 (24 bytes) = CaretPayload + source
 //
