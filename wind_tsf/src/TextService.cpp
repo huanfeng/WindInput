@@ -1460,6 +1460,11 @@ static constexpr UINT     kFocusCheckIntervalMs = 500;
 // 不会被常规切换触发，又能抓住宿主 churn 焦点导致的堆积。
 static constexpr double kSlowFocusWarnMs = 20.0;
 
+// 焦点空窗超过多久才值得抬到 INFO。0~2ms 的 DocMgr 抖动实测一小时可达数十次、用户
+// 完全无从感知，全抬会把日志淹掉；而用户从「切过去」到「敲下第一个键」最快也要几十
+// 毫秒，50ms 以上才是「首字符直通」真正可能发生的区间。
+static constexpr ULONGLONG kFocusGapWarnMs = 50;
+
 // locked/transient DocMgr 判据：XamlIsland 之类的**容器**文档，RequestEditSession 对它
 // 返回 TF_E_NOLOCK，OnSetFocus 对这类 DocMgr 跳过 focus_gained（防 composition replay
 // 到不稳定文档）。**两位必须同时置**才算命中。
@@ -1576,6 +1581,11 @@ STDAPI CTextService::OnKillThreadFocus()
 {
     WIND_LOG_DEBUG_FMT(L"OnKillThreadFocus called tid=%lu inst=0x%p\n", GetCurrentThreadId(), this);
     _hasThreadFocus = FALSE;
+    // 空窗计时**丢弃而非结算**：整个应用失去前台后，用户是去别处干活了，这段时间
+    // 再长也不是「想输入却输不进」。不丢的话，切走十分钟再切回来就会记出一条
+    // duration=600000ms 的假空窗，把真正要找的那几十毫秒淹在噪声里。
+    _focusGapStartTick = 0;
+    _focusGapReason = nullptr;
     // 立即让出所有热键，让前台应用的 IME 实例能注册成功。
     if (_hotkeysActive)
     {
@@ -2473,6 +2483,7 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                 docMgrDynFlags, docMgrStatFlags, _focusSessionId);
             // Fall through — sinks and LangBar are already set up above.
             // Do not send focus_gained IPC.
+            _BeginFocusGap(L"locked_transient");
         }
         // No editable context (QQ Ctrl+1 切会话场景等)：新 DocMgr 没有任何可输入的
         // 文本控件 (_DocMgrHasEditableCtx -> 0)。发 focus_gained 会让 Go 把上一次
@@ -2498,6 +2509,7 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                 focusIpcMs += WindLog::PerfMsSince(lostT0);
             }
             _needsFocusRecovery = FALSE;
+            _BeginFocusGap(L"no_edit_ctx");
         }
         // ⚠ SendFocusGained 是**同步**的（send + ReceiveResponse，读超时 1500ms），
         // 不是 fire-and-forget——此处旧注释曾如此描述，与实现不符，已更正。
@@ -2546,6 +2558,7 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                 // _ReportEditContextLost 才会在翻转沿补一条 CTX_LOST。
                 _editCtxReported = TRUE;
                 _pIPCClient->ClearNeedsSyncFlag();
+                _EndFocusGap();
             }
             else
             {
@@ -2627,6 +2640,8 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         // DocMgr 会跳过 focus_gained，销毁后无法重建。靠 Go 的 WriteHide 隐藏即可。
 
         _needsFocusRecovery = FALSE;
+
+        _BeginFocusGap(L"null_docmgr");
 
         // 离开文本框：清门卫状态，下方 reeval 会注销加词热键，把 Ctrl+= 还给宿主。
         _hasTextInputContext = FALSE;
@@ -3691,6 +3706,41 @@ void CTextService::ApplyActivationStatusResponse(const ServiceResponse& response
     _EnsureHostRenderSetup(response, TRUE);
 }
 
+// 焦点空窗记账。见 TextService.h 的 _focusGapStartTick：空窗内按键根本不经过输入法，
+// 两侧日志都不留痕，只能在进出空窗的边界上主动记一笔，否则事后无从归因。
+void CTextService::_BeginFocusGap(const WCHAR* reason)
+{
+    // 已在空窗中就不重新计时：宿主一次焦点重建会连抖数次（微信实测 3~5 次），
+    // 每次都重置就把一段连续的「不能输入」切成若干段短的，正好抹掉要找的那个长空窗。
+    if (_focusGapStartTick != 0)
+        return;
+    _focusGapStartTick = GetTickCount64();
+    _focusGapReason = reason;
+    WIND_LOG_DEBUG_FMT(L"compat.focus.gap begin reason=%s focusSession=%llu", reason, _focusSessionId);
+}
+
+void CTextService::_EndFocusGap()
+{
+    if (_focusGapStartTick == 0)
+        return;
+    const ULONGLONG ms = GetTickCount64() - _focusGapStartTick;
+    const WCHAR* reason = (_focusGapReason != nullptr) ? _focusGapReason : L"unknown";
+    if (ms >= kFocusGapWarnMs)
+    {
+        WIND_LOG_INFO_FMT(
+            L"compat.focus.gap end reason=%s duration=%llums focusSession=%llu"
+            L" —— 该窗口内按键不经输入法，首字符可能已直落宿主",
+            reason, ms, _focusSessionId);
+    }
+    else
+    {
+        WIND_LOG_DEBUG_FMT(L"compat.focus.gap end reason=%s duration=%llums focusSession=%llu",
+                           reason, ms, _focusSessionId);
+    }
+    _focusGapStartTick = 0;
+    _focusGapReason = nullptr;
+}
+
 void CTextService::TryRecoverFocusState()
 {
     if (!_needsFocusRecovery || _pIPCClient == nullptr || !_pIPCClient->IsConnected())
@@ -3742,6 +3792,7 @@ void CTextService::TryRecoverFocusState()
     {
         _needsFocusRecovery = FALSE;
         _pIPCClient->ClearNeedsSyncFlag();
+        _EndFocusGap();
         SendCaretPositionUpdate();
         WIND_LOG_INFO(L"Deferred focus recovery sent (async), state will arrive via push\n");
     }

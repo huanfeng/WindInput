@@ -538,6 +538,15 @@ private:
     // 不去重会造成 IPC 洪泛。
     BOOL _editCtxReported;
 
+    // 焦点空窗诊断。宿主在焦点重建期间会留下一段「TSF 根本不把键交给输入法」的窗口：
+    // 微信(Qt) 把 DocMgr 置 NULL，Edge/QQ(Chromium) 给一个无可编辑上下文的 DocMgr。
+    // 这段时间里用户敲的键直落宿主变成英文字符，而 **两侧日志都不留痕**——键没到 DLL，
+    // 服务端也收不到，事后无法把「没记录」和「用户没打字」区分开。所以必须在这里主动
+    // 记账：只有把空窗的起止和成因写进日志，下次再遇到「首字符变英文」才判得出成因。
+    // 0 = 当前不在空窗中。连续抖动不重新计时（见 _BeginFocusGap）。
+    ULONGLONG _focusGapStartTick = 0;
+    const WCHAR* _focusGapReason = nullptr;
+
     // 「不可输入」的判定与呈现已收归 Rust 协调器单点负责（见 InputBlock）。
     // DLL 只上报原始信号，不再持有 _bNoEditContext / 迟滞计时这类第二份状态。
     // ⚠ 保留 IsPasswordSuppressActive()：那是**吃键闸门**，必须在 IPC 之前本地算出。
@@ -696,6 +705,11 @@ public:
     // Called after new/re-connection to ensure TSF and service state are consistent.
     void _DoFullStateSync();
     void TryRecoverFocusState();
+
+    // 焦点空窗记账，见 _focusGapStartTick。_Begin 可重复调用（只认第一次），
+    // _End 在 focus_gained 真正送达后结算。
+    void _BeginFocusGap(const WCHAR* reason);
+    void _EndFocusGap();
 
     // ApplyActivationStatusResponse 应用一份从 push pipe 接收到的 activation status,
     // 等价于原同步路径 (_DoFullStateSync / TryRecoverFocusState) 收到 ReceiveResponse 后
