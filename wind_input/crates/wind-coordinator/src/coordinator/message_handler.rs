@@ -1936,12 +1936,21 @@ impl MessageHandler for Coordinator {
             .composition_start
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
+        // ⚠ `shown_anchor` 在这里**刻意不清**：它答的是「候选窗此刻画在屏幕的哪里」，而焦点
+        // 切换并不会把候选窗从屏幕上抹掉——它还在旧位置画着。清掉反而让下面 reshow 的判据
+        // 失去基准（那个判据正是靠它发现「候选窗落在旧 docMgr 上」的）。锚点只在候选窗真正
+        // 消失时作废，即 `reset_first_show`。
         // 坐标缓存作废（同上一段的理由，只是作用在另一个消费者上）：刚写进 state 的那份
         // 是**焦点事件随包携带**的坐标，宿主此刻多半还没 reflow，甚至根本还没建好新文档的
         // 编辑上下文（Excel 实测 454ms）。它够格当"没有更好选择时的兜底显示位置"，但不够格
         // 让 fast 档判定"可以跳过等待了"。
         self.caret_cache_verified
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        // 同一件事的另一面：焦点后的空闲上报可以解除信任门（走 25ms 而非 600ms），但**不足以**
+        // 让候选窗立即显示——宿主此刻报的往往是上一处的位置。挡住 idle_anchor 逃生口，直到本次
+        // 焦点下拿到过一帧组合期权威坐标。见 `awaiting_first_authority_after_focus`。
+        self.awaiting_first_authority_after_focus
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             // 焦点进入文本框 = 本输入法激活（对齐 Go HandleFocusGained → SetIMEActivated(true)）。
@@ -2583,6 +2592,11 @@ impl MessageHandler for Coordinator {
         // 写就会在某条 early return 上分叉（本函数上游有五处提前返回）。
         self.caret_cache_is_idle_report
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        // 本次焦点下已经拿到过一帧组合期权威坐标 ⇒ 宿主已 reflow、坐标体系稳定，此后的空闲
+        // 上报可以放心当锚点用（idle_anchor 逃生口解禁）。同上两个标志一起放在这个「够格」
+        // 判据下面，三者共享同一个前提，分开写必然在某条 early return 上分叉。
+        self.awaiting_first_authority_after_focus
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         // 消费首显等待：本次为 reflow 后权威坐标。
         let was_pending = {
             let mut pfs = self
@@ -2606,8 +2620,26 @@ impl MessageHandler for Coordinator {
         {
             // 已显示后的坐标更新：≤3px 微移跳过 reshow（吞掉宿主 caret 微调，如 WPS 的 2px 偏移）；
             // 显著变化（换行 / reflow 修正）才 reshow，由 UI 层 4px 位置阈值再次过滤微移。
-            let dx = (data.x - prev_x).abs();
-            let dy = (data.y - prev_y).abs();
+            // ★★ 基准取「候选窗**实际画在哪**」而非坐标缓存。缓存会被 probe 的
+            // `absorb_probe_coords` 抢先刷成新值，此后拿它比较必然得出「没变化」，而候选窗
+            // 还在千里之外——缓存跑到了候选窗前面，错位就此再也无法自愈。
+            // Excel 进单元格实测：先在编辑栏建上下文并首显于 (326,314)，切到单元格后 probe
+            // 把缓存刷成 (1307,803)，60ms 后同值的权威坐标到达 ⇒ dx=0 判为微移 ⇒ 候选窗永远
+            // 留在编辑栏。改用锚点后 dx=981，正常校正。
+            // 缓存仅在基准未建立时兜底（本分支的前提是候选窗已显示，理论上走不到）。
+            //
+            // ⚠ 用 `caret_baseline` 而**不是** `shown_anchor`：两者只在 settle 吸收那一刻分叉，
+            // 而那一刻正是缺陷所在。拿 anchor 当基准会把被吸收的偏差永久留下，下一帧再比又是
+            // 同样的偏差、tol 却已掉回 3px ⇒ 候选窗自己挪一格（微信「打第二三个字」即此）。
+            let (base_x, base_y) = {
+                let b = self
+                    .caret_baseline
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if b.2 { (b.0, b.1) } else { (prev_x, prev_y) }
+            };
+            let dx = (data.x - base_x).abs();
+            let dy = (data.y - base_y).abs();
             // 首显用过非权威坐标时，本轮**第一次**权威坐标改用放宽的容差：偏差在
             // 「行高 × settle_ratio」以内就不校正。抖动的观感来自校正动作本身而非坐标偏差
             // ——十几像素的偏移用户根本不会注意，跳一下却很显眼（多数输入法也这么处理）。
@@ -2624,9 +2656,25 @@ impl MessageHandler for Coordinator {
             };
             let tol = settle.max(3); // 常规微移过滤下限保持 3px 不变
             if dx <= tol && dy <= tol {
+                // ★ 候选窗不动，但这一帧的坐标**已被认可**——基准必须跟上，否则同样的偏差
+                // 下一帧会被重新算一遍，而 settle 的放宽容差已被 swap 消费掉，tol 掉回 3px。
+                *self
+                    .caret_baseline
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = (data.x, data.y, true);
                 debug!("caret_update → 忽略: 微移 dx={dx} dy={dy}（≤{tol}px，不 reshow）");
                 return;
             }
+            // ★ 基准记的是「上一次被认可的**插入点**」，不是「候选窗画在哪」——这一帧已被
+            // 认可（要么就地校正、要么位置被组合起点钉住），无论如何都不该再拿它比一次。
+            //
+            // 漏掉这里的后果不是"少更新一次"而是**每帧都重判**：组合起点锁定后候选窗不随
+            // 光标走，若基准跟着显示位置走，它与宿主报的插入点之间的差值就恒定存在，于是
+            // 同一个 dx 反复触发 reshow。微信实测 dx=14 连判十几次，每次都走一遍下发。
+            *self
+                .caret_baseline
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = (data.x, data.y, true);
             debug!("caret_update → reshow: dx={dx} dy={dy}");
             self.show_authorized
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2738,9 +2786,22 @@ impl MessageHandler for Coordinator {
         // (1299,535) 抢先首显，而 200ms 后真坐标是 (1344,744) ⇒ 显示后跳一次。
         // **信任门只接在兜底 timer 上是不够的——首显有多条通路，否决判据必须每条都接。**
         if self.first_show_needs_long_wait() {
+            // ★ 否决它做**显示决策**，但不否决它当**坐标来源**——这两件事必须分开。信任门说的
+            // 是「这一帧不够格决定候选窗现在就出现」，不是「这一帧的坐标一文不值」。此前这里
+            // 直接 return，兜底到期时就只剩焦点切换前的旧缓存可用：Excel 实测 probe 连报三次
+            // 正确的 (475,579) 全被丢弃，兜底拿 (1918,831) 首显，错 1443px，53ms 后才跳回来。
+            // 收进缓存后兜底到期用的就是这份试探坐标——它是 reflow 前的、可能有几十像素偏差，
+            // 但远好过属于上一个单元格/文档的那份（`absorb_probe_coords` 的注释同此判断）。
+            let absorbed = self.absorb_probe_coords(data);
             debug!(
-                "caret_probe → 继续等待: 坐标缓存未经当前插入点验证，本轮判据无基准可比（x={} y={}）",
-                data.x, data.y
+                "caret_probe → 继续等待: 坐标缓存未经当前插入点验证，本轮判据无基准可比（x={} y={}，{}）",
+                data.x,
+                data.y,
+                if absorbed {
+                    "坐标已收入缓存供兜底用"
+                } else {
+                    "坐标未收入（退化帧或该宿主 probe 恒陈旧）"
+                }
             );
             return;
         }

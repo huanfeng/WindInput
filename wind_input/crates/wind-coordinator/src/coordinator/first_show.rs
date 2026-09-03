@@ -10,6 +10,27 @@ use super::*;
 impl Coordinator {
     /// 复位首显延迟状态（候选窗隐藏 / 组合结束）：下次新组合重新延迟首显，并作废未触发的兜底 timer。
     pub(crate) fn reset_first_show(&self) {
+        // ★ 上屏改变了插入点，缓存里那份是**上屏前**的——五笔满码自动上屏后立刻开新组合时
+        // 尤其明显：缓存是 4 个字母末尾的位置，而上屏的汉字比它们窄（微信实测 20px）。
+        //
+        // 多数宿主靠 probe 在兜底到期前把缓存刷新掉就补救了，但配了 `stale_probe_guard` 的
+        // 宿主 probe 恒陈旧、整条不收，只能等权威 caret_update（微信实测 190ms），兜底早就
+        // 拿旧值把候选窗显示出去了 ⇒ 190ms 后再退回 20px。故对这类宿主把「缓存可信」清掉，
+        // 让首显等权威坐标。
+        //
+        // 代价被限制在「上屏后立刻接着打」这一种节奏上：宿主随后会发一帧无组合的空闲上报，
+        // 把两个标志重新置起来；只要下一次按键晚于它，就照常走快路径。
+        if self
+            .active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stale_probe_guard
+        {
+            self.caret_cache_verified
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            self.caret_cache_is_idle_report
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         self.first_show_was_provisional
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.first_show_extended
@@ -31,6 +52,13 @@ impl Coordinator {
         // 组合结束：复位组合起点锚定，下一组合重新锁定首个有效 compStart。
         *self
             .composition_start
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
+        // 候选窗显示锚点同理：它描述的是「这一轮候选窗画在哪」，组合一结束就失效。
+        // 不清会让下一轮的非坐标重绘复用上一轮的位置。
+        *self.shown_anchor.lock().unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
+        *self
+            .caret_baseline
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
     }
@@ -131,6 +159,11 @@ impl Coordinator {
         state.caret_y = probe.y;
         state.caret_height = probe.height;
         state.caret_source = probe.source;
+        // ★ 缓存自此装的是试探坐标，不再是「组合前的空闲上报」——那个身份到此为止。
+        // 不清位会让 `caret_cache_is_fresh_idle_report` 继续为真，于是 idle_anchor 逃生口
+        // 拿一份已被 probe 改写的坐标当「按键前光标」用，还会把它锁成组合起点。
+        self.caret_cache_is_idle_report
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         true
     }
 

@@ -1311,6 +1311,52 @@ pub struct Coordinator {
     /// 「手里的值是不是组合前刚测的」。微信这个场景里前者为真、后者也为真，但正是靠后者
     /// 才能判定 probe 陈旧——合成一个就再也分不出「缓存可信」与「probe 可信」了。
     caret_cache_is_idle_report: std::sync::atomic::AtomicBool,
+    /// 本次焦点到达后，**还没有**经历过一次组合期间的权威坐标。
+    ///
+    /// 专门用来把 `idle_anchor` 逃生口挡在「焦点后的第一个组合」之外。空闲上报在**组合之间**
+    /// 是可信的（焦点没变、文档没变，宿主报的就是当前插入点），但在**焦点刚到达时**恰恰最
+    /// 不可信——宿主还没 reflow，报的往往是上一处的位置。EverEdit 实测：焦点坐标 (2599,703)、
+    /// 空闲上报 (1949,527)、真实位置 (749,529)，三个互不相同，拿空闲上报立即首显错 1200px。
+    ///
+    /// ★ 这正是 `caret_cache_verified` 在 `focus_gained` 处清位要防的那件事。让空闲上报也能
+    /// 置 `verified` 之后，焦点后的第一次空闲上报就把那道门重新顶开了——**修复不能把它本来
+    /// 要堵的洞重新打开**，故单独立一个字段挡住逃生口，而不是收窄 `verified` 的置位
+    /// （收窄了焦点后首字就退回 600ms 长兜底，那是真正要避免的）。
+    ///
+    /// 挡住之后焦点后首字走 25ms 短兜底：其间 probe 会把缓存刷成正确位置，EverEdit 实测
+    /// 9ms 后就到了，兜底到期时用的已是对的坐标（甚至更早由 probe 判据提前首显）。
+    ///
+    /// - **置位**：`handle_focus_gained` 清 `caret_cache_verified` 处（同一件事的两面）。
+    /// - **清位**：`handle_caret_update` 采纳一帧组合期间的权威坐标处。
+    awaiting_first_authority_after_focus: std::sync::atomic::AtomicBool,
+    /// 候选窗**当前实际显示**所用的位置基准（x, y, 有效）。
+    ///
+    /// 存在的理由：`state.caret_x/y` 是**缓存**，它会被 probe 的 `absorb_probe_coords` 和被
+    /// `settle` 吸收掉的那次权威坐标悄悄改写，而候选窗并不跟着动。于是缓存跑到候选窗前面，
+    /// 此后任何**非坐标原因**的重绘（悬停、翻页、候选变化）都会把这段差额一次性补上——
+    /// 表现为「鼠标一指候选窗，位置跳一个字符」（微信实测 483→496）。
+    ///
+    /// 组合起点 `composition_start` 锁定时不需要本字段（那时位置本就钉死），但它在连打时
+    /// 每次上屏都被 `reset_first_show` 清掉，`idle_anchor` 这条路首显时它还没锁上。
+    ///
+    /// - **更新**：`notify_ui_update` 每次**首显**或**坐标校正**（`show_authorized`）下发之后。
+    /// - **清位**：`reset_first_show`（组合结束，锚点随之失效）。
+    shown_anchor: Mutex<(i32, i32, bool)>,
+    /// 坐标校正判据的比较基准（x, y, 有效）——「上一次**被认可**的插入点位置」。
+    ///
+    /// ⚠ 与 [`Self::shown_anchor`] 只差一处，但那一处正是缺陷发生的地方，**不可合并**：
+    /// `settle` 吸收一帧权威坐标时（判定这点偏差不值得移动候选窗），候选窗不动、故
+    /// `shown_anchor` 不动，但那一帧的坐标**已被认可**，基准必须跟上。
+    ///
+    /// 合用一个字段的后果：被吸收的偏差永久留在基准里，下一帧权威坐标与它一比又是同样的
+    /// 偏差，而 `settle` 的放宽容差只在本轮第一帧有效（`swap` 消费掉），于是 tol 掉回 3px
+    /// ⇒ 必然 reshow。微信实测「打第二三个字时候选窗自己挪一格」（483→496，dx=13）即此。
+    ///
+    /// `settle` 说的是「这次偏差不值得校正」，它没说「以后也不值得」。
+    ///
+    /// - **更新**：`notify_ui_update` 下发新位置时；`handle_caret_update` 的 settle 吸收分支。
+    /// - **清位**：`reset_first_show`。
+    caret_baseline: Mutex<(i32, i32, bool)>,
     /// 本轮组合的首显是否已进入「长兜底等待」（首帧信任门命中）。
     ///
     /// 唯一用途是让后续按键**不重置**那段等待的计时——见
@@ -2156,6 +2202,9 @@ impl Coordinator {
             first_show_was_provisional: std::sync::atomic::AtomicBool::new(false),
             caret_cache_verified: std::sync::atomic::AtomicBool::new(false),
             caret_cache_is_idle_report: std::sync::atomic::AtomicBool::new(false),
+            awaiting_first_authority_after_focus: std::sync::atomic::AtomicBool::new(false),
+            shown_anchor: Mutex::new((0, 0, false)),
+            caret_baseline: Mutex::new((0, 0, false)),
             first_show_extended: std::sync::atomic::AtomicBool::new(false),
             pending_focus_tip: std::sync::atomic::AtomicBool::new(false),
             last_focus_tip_token: Mutex::new(0),
@@ -4694,7 +4743,12 @@ impl Coordinator {
         //      于是 fast 档连打时两个逃生口全部失效，只能走等待。
         let skip_caret_pending =
             self.effective_first_show_mode() == wind_config::app_compat::FirstShowMode::Instant;
-        let idle_anchor = self.caret_cache_is_fresh_idle_report();
+        // ⚠ 焦点后的第一个组合不吃这条：那时的空闲上报最不可信（EverEdit 实测错 1200px）。
+        // 它只被挡在「立即显示」之外，仍走 25ms 短兜底——足够 probe 把缓存刷成正确位置。
+        let idle_anchor = self.caret_cache_is_fresh_idle_report()
+            && !self
+                .awaiting_first_authority_after_focus
+                .load(std::sync::atomic::Ordering::Relaxed);
         let coords_ready = self
             .last_valid_caret
             .lock()
@@ -4738,6 +4792,17 @@ impl Coordinator {
                 self.first_show_was_provisional
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
+            // ★ 空闲上报坐标**就是**组合起点——它是按键前的光标位置。抢在宿主之前锁上。
+            //
+            // 部分宿主根本没实现组合起点：微信（Qt WebView）报的 compStart 恒等于当前光标 x
+            // （实测逐帧 `compStart=(2241,783)` 与 `x=2241` 相等），于是「组合起点」随每个字母
+            // 右移一格。首显用的是按键前坐标（对的），reshow 却改用宿主那份偏右一格的 compStart
+            // ⇒ 打第二个字母时候选窗自己挪 12px。「同一组合只锁首个 compStart」那条守卫防的是
+            // 起点持续漂移，但它锁到的已经是**第一个字母落下之后**的位置，差的就是这一格。
+            //
+            // ⚠ 只在 idle_anchor 这条路上锁：这份坐标是宿主对当前插入点的直接测量，够格当起点。
+            // 其余路径（兜底用的旧缓存、instant 用的上一轮遗留坐标）本身就可能是错的，锁进
+            // 组合起点会让 reshow 也救不回来——组合起点一旦锁定，本组合内不再更新。
             debug!(
                 "first_show 闸门 → 立即显示（逃生口）: instant={} coords_ready={} idle_anchor={}",
                 skip_caret_pending as u8, coords_ready as u8, idle_anchor as u8
@@ -4926,11 +4991,50 @@ impl Coordinator {
         // 坐标基准：嵌入模式且组合起点已锁定 → 用组合起点（钉在缓冲头部，不随输入移动）；否则当前光标。
         // 组合起点由 handle_caret_update 在本组合首个有效坐标处锁定。候选窗首显已由"延迟首显"门控
         // 保证发生在 reflow 后的权威坐标处。无效坐标回退最近有效坐标，避免跑到屏幕左上角。
+        // ★ 首次下发候选窗时，若首显坐标来自「组合前的空闲上报」，那它**就是**组合起点
+        // ——空闲上报是按键前的光标位置，组合正是从那里开始的。抢在宿主之前锁上。
+        //
+        // 部分宿主根本没实现组合起点：微信（Qt WebView）报的 compStart 恒等于当前光标 x
+        // （实测逐帧 `compStart=(2241,783)` 与 `x=2241` 相等），于是「组合起点」随每个字母
+        // 右移一格。首显用的是按键前坐标（对的），reshow 却改用宿主那份偏右一格的 compStart
+        // ⇒ 打第二个字母时候选窗自己挪 12px。「同一组合只锁首个 compStart」那条守卫防的是
+        // 起点持续漂移，但它锁到的已经是**第一个字母落下之后**的位置，差的就是这一格。
+        //
+        // ⚠ 判据用 `!shown`（本轮尚未下发过）而**不是** `is_first_frame`：兜底 timer 到期那条
+        // 路径先置了 `show_authorized`，`is_first_frame` 已为 false，绑在它上面会漏掉整条兜底
+        // 首显——微信「焦点后第一个组合」走的正是这条，表现为第三个字好了、第二个字仍挪一格。
+        //
+        // ⚠ 只在坐标确实来自空闲上报时锁：兜底用的旧缓存、`instant` 用的上一轮遗留坐标本身
+        // 就可能是错的，锁进组合起点会让 reshow 也救不回来（本组合内不再更新）——WPS 表格的
+        // 「恒慢一步」正是宿主自己先报了旧单元格的 compStart 造成的，前车之鉴。
+        if !shown && self.caret_cache_is_fresh_idle_report() {
+            let mut cs_lock = self
+                .composition_start
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !cs_lock.2 {
+                *cs_lock = (state.caret_x, state.caret_y, true);
+            }
+        }
         let cs = *self
             .composition_start
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (cx, cy, ch) = if in_app && cs.2 {
+        // ★ 非首显、非坐标校正的重绘（悬停 / 翻页 / 候选变化）复用候选窗**当前**的位置基准：
+        // `state.caret_x/y` 是缓存，会被 probe 的 `absorb_probe_coords`、以及被 settle 吸收掉的
+        // 那一帧权威坐标悄悄改写，而候选窗并不跟着动。此时直接读缓存 ⇒ 鼠标一指候选窗，位置
+        // 跳一个字符（微信实测 483→496）。`cs.2` 那条不需要本机制（组合起点本就钉死），但它在
+        // 连打时每次上屏都被 `reset_first_show` 清掉，`idle_anchor` 首显时更是还没锁上。
+        let anchor = *self.shown_anchor.lock().unwrap_or_else(|e| e.into_inner());
+        let hold_anchor = anchor.2 && !is_first_frame && !authorized;
+        // ⚠ 锚点必须**压过** `cs.2`，不能排在它后面：组合起点常常在首显**之后**才由宿主报来
+        // （微信实测首显 03.980 用 (483,987)，38ms 后才锁定 (496,989)），一旦锁上就接管位置，
+        // 把候选窗从首显处挪到组合起点——而上一行 `settle` 刚判定这 13px 不值得校正。排在
+        // `cs.2` 后面等于让组合起点从侧面绕过 settle，悬停一次就补上那 13px。
+        // 真正该动候选窗的两种情形（首显、坐标校正）都不满足 `hold_anchor`，照常走下面两条。
+        let (cx, cy, ch) = if hold_anchor {
+            (anchor.0, anchor.1, state.caret_height)
+        } else if in_app && cs.2 {
             (cs.0, cs.1, state.caret_height)
         } else {
             (state.caret_x, state.caret_y, state.caret_height)
@@ -4962,6 +5066,22 @@ impl Coordinator {
             fixed_x: cand_fixed_x,
             fixed_y: cand_fixed_y,
         });
+        // 记下候选窗**实际**用的位置基准，供后续非坐标重绘复用（见上面 `hold_anchor`）。
+        // 只在首显和坐标校正时更新：复用锚点的那些重绘按定义不改变位置，回写等于把
+        // 「谁有资格移动候选窗」这条判据又散成两处。
+        if !hold_anchor {
+            *self.shown_anchor.lock().unwrap_or_else(|e| e.into_inner()) = (cx, cy, true);
+            // 基准**只在首显时**用显示位置初始化：那一刻还没有「上一次被认可的插入点」。
+            // 之后它由 `handle_caret_update` 用宿主报的坐标维护（settle 吸收与 reshow 两处）。
+            // ⚠ 若在这里跟着每次下发一起覆盖，reshow 刚写进去的插入点会被显示位置盖回去 ⇒
+            // 组合起点钉住位置后，基准与宿主坐标的差值恒定存在，同一个 dx 反复触发 reshow。
+            if !shown {
+                *self
+                    .caret_baseline
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = (cx, cy, true);
+            }
+        }
         // 候选窗已下发显示：标记本组合已首显，后续刷新（翻页/选字/打字）即可立即下发不再延迟。
         *self
             .candidate_shown
@@ -7751,6 +7871,373 @@ mod caret_compat_tests {
         assert!(
             *c.pending_first_show.lock().unwrap(),
             "只有 verified、出身不是空闲上报时，必须维持既有的等待行为"
+        );
+    }
+
+    /// ★★★ 逃生口不得把信任门本来要堵的洞重新顶开。`focus_gained` 清 `caret_cache_verified`
+    /// 正是为了「焦点后第一个字必须等权威坐标」（Excel 进单元格首字漂移）。空闲上报在组合
+    /// **之间**可信，在焦点**刚到达**时最不可信——宿主还没 reflow，报的是上一处的位置。
+    /// EverEdit 实测：焦点坐标 (2599,703)、空闲上报 (1949,527)、真实 (749,529)，三个互不相同，
+    /// 拿空闲上报立即首显错 1200px；Excel 复现了档案里那个原始场景。
+    #[test]
+    fn idle_report_right_after_focus_does_not_skip_the_wait() {
+        let c = fast_coord(true);
+        c.caret_cache_is_idle_report
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        c.awaiting_first_authority_after_focus
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        drive_first_frame(&c);
+        assert!(
+            *c.pending_first_show.lock().unwrap(),
+            "焦点后的第一个组合必须照旧等待——那时的空闲上报最不可信"
+        );
+    }
+
+    /// 反向：本次焦点下拿到过一帧组合期权威坐标后，宿主已 reflow、坐标体系稳定，
+    /// 逃生口解禁。否则这道闸门就成了「焦点后永远不提速」，把收益全吃掉。
+    #[test]
+    fn first_authority_after_focus_unlocks_the_escape_hatch() {
+        let c = fast_coord(false);
+        c.awaiting_first_authority_after_focus
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // fast_coord 已把 input_buffer 设成 "a"，故这一帧走组合期的权威坐标分支
+        c.handle_caret_update(&caret(300, 25));
+        assert!(
+            !c.awaiting_first_authority_after_focus
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "组合期权威坐标到达后必须解禁，否则焦点后再也提不了速"
+        );
+    }
+
+    /// 取最近一条 `UpdateCandidates` 下发的位置。
+    fn last_pos(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Option<(i32, i32)> {
+        let mut found = None;
+        // 排空取**最后**一条：一次刷新会发多条 UI 命令
+        while let Ok(cmd) = rx.try_recv() {
+            if let UiCommand::UpdateCandidates {
+                caret_x, caret_y, ..
+            } = cmd
+            {
+                found = Some((caret_x, caret_y));
+            }
+        }
+        found
+    }
+
+    /// ★★ 非坐标原因的重绘不得移动候选窗。`state.caret_x/y` 是缓存，会被 probe 的
+    /// `absorb_probe_coords` 与被 settle 吸收掉的那帧权威坐标悄悄改写，而候选窗并不跟着动；
+    /// 此后悬停 / 翻页 / 候选变化触发的重绘若去读缓存，就会把这段差额一次性补上——
+    /// 表现为「鼠标一指候选窗，位置跳一个字符」（微信实测 483→496）。
+    #[test]
+    fn non_positional_redraw_keeps_the_candidate_where_it_is() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        // instant 档：让首帧直接下发，本用例专注测「首显之后的重绘」
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (483, 1017, 20);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 483;
+            st.caret_y = 1017;
+            st.caret_height = 20;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        let first = last_pos(&rx).expect("首显应当下发一条 UpdateCandidates");
+
+        // 缓存被悄悄改写（真机里由 probe 或被 settle 吸收的权威坐标造成），候选窗并未跟着动
+        c.state.lock().unwrap().caret_x = 496;
+        c.mouse_hover(0);
+        let after = last_pos(&rx).expect("悬停变化应当触发一次重绘");
+        assert_eq!(
+            first, after,
+            "悬停只改高亮项，不是坐标事件，候选窗必须留在原处"
+        );
+    }
+
+    /// ★★ 组合起点常常在**首显之后**才由宿主报来（微信实测首显 03.980、38ms 后才锁定），
+    /// 而 `notify_ui_update` 里 `cs.2` 那条分支一旦成立就接管位置。锚点若排在它后面，悬停
+    /// 就会把候选窗从首显处挪到组合起点——**而 settle 上一步刚判定这段偏差不值得校正**，
+    /// 等于让组合起点从侧面绕过 settle。上一条用例的 `cs.2` 全程为 false，覆盖不到这里。
+    #[test]
+    fn late_composition_start_does_not_move_the_shown_candidate() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (483, 987, 20);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 483;
+            st.caret_y = 987;
+            st.caret_height = 20;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        let first = last_pos(&rx).expect("首显应当下发一条 UpdateCandidates");
+        assert_eq!(first, (483, 987), "首显位置应取当时的坐标");
+
+        // 宿主迟到的组合起点（真机里由 handle_caret_update 的锚定逻辑写入）
+        *c.composition_start.lock().unwrap() = (496, 989, true);
+        c.mouse_hover(0);
+        let after = last_pos(&rx).expect("悬停变化应当触发一次重绘");
+        assert_eq!(
+            first, after,
+            "组合起点迟到不构成移动候选窗的理由——那 13px 已被 settle 判定不值得校正"
+        );
+    }
+
+    /// ★ 信任门否决 probe 做**显示决策**，但不否决它当**坐标来源**。此前这里直接 return，
+    /// 兜底到期时就只剩焦点切换前的旧缓存可用：Excel 实测 probe 连报三次正确的 (475,579)
+    /// 全被丢弃，兜底拿 (1918,831) 首显，错 1443px，53ms 后才由 reshow 跳回来。
+    #[test]
+    fn rejected_probe_still_refreshes_the_cache_for_fallback() {
+        let c = fast_coord(false); // 缓存未验证 ⇒ 信任门命中
+        *c.pending_first_show.lock().unwrap() = true;
+        c.handle_caret_probe(&probe_at(475, 579, 22));
+        assert!(
+            *c.pending_first_show.lock().unwrap(),
+            "信任门命中时不得让 probe 提前首显"
+        );
+        let st = c.state.lock().unwrap();
+        assert_eq!(
+            (st.caret_x, st.caret_y),
+            (475, 579),
+            "被否决的 probe 坐标仍须收进缓存——兜底到期时它是唯一比旧值更新的来源"
+        );
+    }
+
+    /// ★★★ 坐标校正的判据必须比「候选窗实际画在哪」，不能比坐标缓存——缓存会被 probe 抢先
+    /// 刷成新值，此后比较恒得「没变化」，而候选窗还在千里之外，错位再也无法自愈。
+    ///
+    /// Excel 进单元格实测：宿主先在**编辑栏**建编辑上下文，首显于 (326,314)；0.5s 后切到
+    /// 单元格，probe 把缓存刷成 (1307,803)，60ms 后同值的权威坐标到达 ⇒ dx=0 判为微移 ⇒
+    /// 候选窗永远留在编辑栏（用户截图即此）。
+    #[test]
+    fn stale_shown_position_is_corrected_even_when_cache_already_moved() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (326, 314, 31);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 326;
+            st.caret_y = 314;
+            st.caret_height = 31;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(
+            last_pos(&rx),
+            Some((326, 314)),
+            "首显应落在编辑栏那份坐标上"
+        );
+
+        // probe 抢先把缓存刷成单元格位置（真机里由 absorb_probe_coords 写入），候选窗未动
+        {
+            let mut st = c.state.lock().unwrap();
+            st.caret_x = 1307;
+            st.caret_y = 803;
+        }
+        // 随后同值的权威坐标到达：与缓存比 dx=0，与候选窗实际位置比 dx=981
+        c.handle_caret_update(&probe_at(1307, 803, 28));
+        assert_eq!(
+            last_pos(&rx),
+            Some((1307, 803)),
+            "候选窗必须跟到新 docMgr——判据比的是它自己画在哪，不是缓存"
+        );
+    }
+
+    /// ★★ `settle` 说的是「**这次**偏差不值得校正」，不是「以后也不值得」。被吸收的那一帧
+    /// 坐标必须写进基准，否则下一帧与旧基准一比又是同样的偏差，而放宽容差已被 `swap` 消费
+    /// 掉（tol 掉回 3px）⇒ 候选窗自己挪一格。微信实测「打第二三个字时移动」（483→496）。
+    ///
+    /// 这条同时钉住 `caret_baseline` 与 `shown_anchor` 不可合并：合并后必失败。
+    #[test]
+    fn absorbed_drift_does_not_accumulate_into_a_later_jump() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (483, 987, 20);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 483;
+            st.caret_y = 987;
+            st.caret_height = 20;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(last_pos(&rx), Some((483, 987)), "首显位置");
+
+        // 第一帧权威坐标偏 13px：settle 容差 0.8×20=16px，应被吸收
+        c.handle_caret_update(&probe_at(496, 988, 20));
+        assert_eq!(last_pos(&rx), None, "13px 在 settle 容差内，不得移动候选窗");
+
+        // 第二帧同值再来：与已更新的基准比 dx=0，仍不该动
+        c.handle_caret_update(&probe_at(496, 988, 20));
+        assert_eq!(
+            last_pos(&rx),
+            None,
+            "被吸收的偏差不得累积——同一位置重复上报不该把候选窗挪走"
+        );
+    }
+
+    /// ★★ 空闲上报坐标就是组合起点（按键前的光标位置），idle_anchor 首显时必须抢先锁上。
+    ///
+    /// 微信（Qt WebView）报的 compStart 恒等于**当前光标** x（实测逐帧 `compStart=(2241,783)`
+    /// 与 `x=2241` 相等），于是「组合起点」随每个字母右移一格。首显用按键前坐标（对的），
+    /// reshow 改用宿主那份偏右一格的 compStart ⇒ 打第二个字母时候选窗自己挪 12px。
+    #[test]
+    fn idle_anchor_claims_the_composition_start() {
+        let c = fast_coord(true);
+        c.caret_cache_is_idle_report
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        drive_first_frame(&c);
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            cs,
+            (100, 200, true),
+            "idle_anchor 首显后组合起点应锁在按键前的光标位置，不留给宿主那份偏右的值"
+        );
+    }
+
+    /// ★★ 上屏改变插入点，而缓存里那份是上屏前的。probe 恒陈旧的宿主没法在兜底到期前刷新
+    /// 它（整条不收），只能等权威 caret_update——微信实测 190ms，兜底早就拿旧值显示出去了。
+    /// 五笔满码自动上屏后立刻开新组合时最明显：缓存是 4 个字母末尾，汉字比它们窄 20px。
+    #[test]
+    fn commit_invalidates_the_cache_for_stale_probe_hosts() {
+        let c = coord_with_idle_report(); // 该 helper 已打开 stale_probe_guard
+        c.caret_cache_verified
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        c.reset_first_show();
+        assert!(
+            !c.caret_cache_verified
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "probe 不可信的宿主，上屏后必须重新等权威坐标"
+        );
+        assert!(
+            !c.caret_cache_is_idle_report
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "缓存的「组合前空闲上报」身份同样作废——上屏之后它就不是了"
+        );
+    }
+
+    /// 反向：普通宿主不受影响。它们靠 probe 在兜底到期前刷新缓存，多等一程纯属白慢。
+    #[test]
+    fn commit_keeps_the_cache_for_hosts_with_usable_probe() {
+        let c = fast_coord(true); // 未配 stale_probe_guard
+        c.caret_cache_is_idle_report
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        c.reset_first_show();
+        assert!(
+            c.caret_cache_verified
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "普通宿主上屏后不该丢掉缓存可信标志"
+        );
+    }
+
+    /// ★★ 组合起点钉住位置后，同一个偏差不得反复触发校正。
+    ///
+    /// 基准记的是「上一次被认可的**插入点**」，不是「候选窗画在哪」。若它跟着显示位置走，
+    /// 而显示位置被组合起点钉住不动，基准与宿主报的插入点之间就有个恒定差值，于是每来一帧
+    /// 都判定「要校正」——微信实测同一个 dx=14 连判十几次，每次都走一遍完整下发。
+    #[test]
+    fn same_coordinate_reported_twice_reshows_only_once() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (1643, 747, 20);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 1643;
+            st.caret_y = 747;
+            st.caret_height = 20;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(last_pos(&rx), Some((1643, 747)), "首显位置");
+        // 组合起点锁定 ⇒ 此后候选窗位置被钉住，不随光标走
+        *c.composition_start.lock().unwrap() = (1643, 747, true);
+
+        // 宿主报的插入点已前移 30px（超出 settle 的 0.8×20=16），应校正一次
+        c.handle_caret_update(&probe_at(1673, 747, 20));
+        assert!(last_pos(&rx).is_some(), "首次超出容差应当校正");
+
+        // 同一坐标再报：它已被认可，不该再判一次
+        c.handle_caret_update(&probe_at(1673, 747, 20));
+        assert_eq!(
+            last_pos(&rx),
+            None,
+            "同一个插入点重复上报不得反复触发校正——基准该记插入点，不是显示位置"
+        );
+    }
+
+    /// ★★ 兜底 timer 到期这条路同样要抢锁。它先置 `show_authorized`，`is_first_frame` 已为
+    /// false，判据若绑在 `is_first_frame` 上就整条漏掉——微信「焦点后第一个组合」走的正是
+    /// 这条（idle_anchor 逃生口被焦点判据挡住），表现为第三个字好了、第二个字仍挪一格。
+    #[test]
+    fn fallback_first_show_also_claims_the_composition_start() {
+        let c = fast_coord(true);
+        c.caret_cache_is_idle_report
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // 焦点后第一个组合：立即显示的逃生口被挡住，只能走短兜底
+        c.awaiting_first_authority_after_focus
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        drive_first_frame(&c);
+        assert!(
+            *c.pending_first_show.lock().unwrap(),
+            "焦点后第一个组合应进入等待，本用例才测得到兜底那条路"
+        );
+        // ⚠ token 先 let 绑定再传：写成 fire(*c...lock().unwrap()) 会让临时 MutexGuard
+        // 活到语句结束，而 fire 内部要再锁同一个 Mutex ⇒ 自死锁。
+        let token = *c.pending_first_show_token.lock().unwrap();
+        c.fire_pending_first_show(token);
+        assert_eq!(
+            *c.composition_start.lock().unwrap(),
+            (100, 200, true),
+            "兜底首显同样用的是组合前空闲上报，同样该把它锁成组合起点"
+        );
+    }
+
+    /// 反向：其余首显路径**不得**抢锁组合起点。兜底用的是旧缓存、instant 用的是上一轮遗留
+    /// 坐标，本身就可能是错的；锁进组合起点会让后续 reshow 也救不回来（本组合内不再更新）。
+    #[test]
+    fn other_first_show_paths_do_not_claim_the_composition_start() {
+        let c = fast_coord(true); // is_idle_report 保持 false ⇒ 非 idle_anchor
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        drive_first_frame(&c);
+        assert!(
+            !c.composition_start.lock().unwrap().2,
+            "instant 逃生口用的坐标不够格当组合起点"
         );
     }
 
