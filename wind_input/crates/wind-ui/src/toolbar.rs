@@ -471,11 +471,13 @@ fn expand_cells_raw(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
                 // 恰恰是它唯一的鼠标入口。显隐本来就有 `ui.toolbar.items` 这个开关，
                 // 运行时那层是第二个开关，方向还与用户意图相反。
                 //
-                // 与全半角 / 标点两格现在是同一套呈现逻辑：格子恒在，状态由字与高亮表达。
+                // 与全半角 / 标点两格现在是同一套呈现逻辑：格子恒在，状态只由字与高亮表达，
+                // 不淡显——`dim` 曾跟着 `!s2t_enabled` 走，是上一轮从「合取显隐」改成
+                // 「恒显示」时漏摘的半成品，导致简体态这一格比 Mode/Punct/FullWidth 三格更透。
                 ToolbarItem::S2t => cells.push(Cell {
                     text: if state.s2t_enabled { "繁" } else { "简" }.to_string(),
                     highlight: state.s2t_enabled,
-                    dim: !state.s2t_enabled,
+                    dim: false,
                     action: ToolbarAction::ToggleS2t,
                 }),
                 // 软键盘格：文本留空，渲染时画矢量键盘（同齿轮/月亮，不依赖字体字形）。
