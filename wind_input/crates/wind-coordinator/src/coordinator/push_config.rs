@@ -293,6 +293,29 @@ impl Coordinator {
         self.push_server.push_to_token(token, &encoded);
     }
 
+    /// 让宿主收掉当前挂着的那个组合。**无按键上下文**的收口出口。
+    ///
+    /// 唯一调用方是联想的自动隐藏超时（`handle_assoc::fire_assoc_hide`）：它跑在定时器
+    /// 线程上，没有待应答的按键可以搭载收口动作，占位组合会留在宿主里成为孤儿。
+    ///
+    /// ★ 走的是**既有的** `CMD_CLEAR_COMPOSITION`(0x0103)——它是**双用途**的：既是
+    /// `KeyAction::ClearComposition` 的按键应答，也能经 push 管道主动推给 DLL
+    /// （`IPCClient.cpp` 的 AsyncReader 有对应分支 → `PostClearComposition` →
+    /// TSF 线程上 `EndComposition` + `ResetComposingState`）。`push_switch_commit` 与
+    /// `restart_service` 早就在这么用。**别为此另造一条 `*_PUSH` 命令**：按命令号后缀
+    /// 找收口通道会找不到它，那正是本轮差点多写一条协议 + 六处 C++ 的由来。
+    ///
+    /// ⚠️ 这条**不保证成功**：宿主可能拒绝非按键上下文的 edit session
+    /// （`EndComposition` 用 `TF_ES_ASYNCDONTCARE`），push 管道也可能没连上。按键侧的
+    /// 改判（`adopt_orphaned_placeholder`）因此仍是必需的兜底，两者不是二选一——
+    /// 本条覆盖「用户一个键都不按、直接点鼠标或切窗」，那一半按键侧永远够不着。
+    pub(crate) fn push_end_composition(&self) {
+        let encoded = wind_ipc::codec::encode_clear_composition();
+        // `push_commit_to_active` 而非 `push_to_active`：后者名字有误导，实为**广播**。
+        // 组合只可能在前台那个宿主里，广播给别的进程要么是空操作、要么去收一个不该它收的组合。
+        self.push_server.push_commit_to_active(&encoded);
+    }
+
     /// 语言栏按钮的悬停提示文本。**文案与选择逻辑的唯一产地**（DLL 只负责原样返回）。
     ///
     /// 收归的理由与 `InputBlock` 同一条：DLL 本地只有中英态与 CapsLock 两个量，判不出

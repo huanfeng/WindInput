@@ -405,6 +405,19 @@ impl Coordinator {
         // 被宿主 finalize 后在文档里留下那个占位空格。
         self.assoc_placeholder_orphaned
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // 同时**主动**推一条收口命令过去（走既有的 `CMD_CLEAR_COMPOSITION` push 通道，
+        // 见 [`Self::push_end_composition`]）。两条路各管一半，不是二选一：
+        //
+        // - push（本行）：唯一能覆盖「用户一个键都不按、直接点鼠标或切窗」的那一半——
+        //   按键侧永远够不着，而那正是占位空格被宿主 finalize 进文档的场景。
+        //   但它不保证成功（宿主可能拒绝非按键上下文的 `TF_ES_ASYNCDONTCARE` edit session，
+        //   push 管道也可能没连上），故**不能**据此撤上面的标记。
+        // - 标记（上一行）：宿主拒绝时的兜底。
+        //
+        // ★ push 成功时也不会留下多余的收口：组合没了 ⇒ `_HasInputSession()` 为假 ⇒
+        //   后续透传键根本不会被 TSF 吃下发过来，标记只会被用户重新打字时的
+        //   `UpdateComposition`（`Fate::Absorbs`）顺手撤掉。
+        self.push_end_composition();
         self.notify_ui_hide();
     }
 
