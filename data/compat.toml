@@ -97,6 +97,16 @@ process = "startmenuexperiencehost.exe"
 comment = "Win10 开始菜单输入框"
 host_render = true
 
+[[apps]]
+process = "EXCEL.EXE"
+comment = "进单元格时先在编辑栏建临时编辑上下文、约 0.5s 后才切到单元格，fast 档的试探坐标会抢在切换前把候选窗显示在编辑栏，随后再大幅跳到单元格；wait 档整条忽略试探坐标、并由 caret_pending 握手把兜底延到 600ms，足以等过这次切换，实测一次到位"
+first_show_mode = "wait"
+
+[[apps]]
+process = "et.exe"
+comment = "WPS 表格，与 Excel 同类：每个字都换一次 docMgr，且切换前先报上一个单元格的坐标与组合起点。fast 档的试探坐标抢在切换前首显于旧单元格，组合起点也随之锁死在那里——此后即便校正判据判出 277px 偏移触发 reshow，下发位置仍取那个锁死的组合起点，表现为候选窗恒慢一步"
+first_show_mode = "wait"
+
 # 示例：给「fast 判据失灵」的宿主退回 wait（本字段不写即跟随全局默认，无需逐个开启）
 # [[apps]]
 # process = "SomeApp.exe"

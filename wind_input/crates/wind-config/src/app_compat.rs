@@ -357,6 +357,18 @@ pub fn set_caret_offset(rules: &mut Vec<AppCompatRule>, process: &str, dx: i32, 
     });
 }
 
+/// 一条规则是否「什么都没覆盖」——序列化后除 `process` 外不剩任何键。
+///
+/// ⚠ 判据走序列化而**不是**逐字段比较：本结构的可选字段全带 `skip_serializing_if`，
+/// 新增字段自动纳入判断；逐字段手写一遍就是第二份真相，加字段时必然漏一个，而漏掉的
+/// 后果是「这条规则被当成空壳删掉、用户配的那项静默消失」。
+fn is_empty_override(rule: &AppCompatRule) -> bool {
+    toml::Value::try_from(rule)
+        .ok()
+        .and_then(|v| v.as_table().map(|t| t.len() <= 1))
+        .unwrap_or(false)
+}
+
 /// 把规则集渲染成用户层 compat.toml 全文（含固定文件头）。纯函数，便于单测断言产物。
 ///
 /// ⚠ `initial_mode_scope` 必须原样带回：本函数是**整份重写**，漏掉哪一段哪一段就没了。
@@ -386,6 +398,16 @@ pub fn update_user_rule(
     let path = user_dir.join(COMPAT_FILE_NAME);
     let mut file = load_file(&path).unwrap_or_default();
     upsert_rule(&mut file.apps, process, edit);
+    // ★ 剔除空壳规则：菜单把某一项改回「跟随全局」后，这条规则可能一个字段都不剩。
+    //
+    // 留着它**不是无害的**——合并语义是「同名进程整条覆盖系统层」，一条空壳会把系统层
+    // 的出厂规则连同**以后新增的**一起整条屏蔽掉。实测：给 et.exe（WPS 表格）出厂配了
+    // first_show_mode="wait"，而用户层残留的空壳让它读出来仍是「跟随全局」，用户只能
+    // 手动再配一次才生效，且完全看不出为什么。
+    //
+    // 「跟随全局」必须真的等于「这条规则不存在」，否则它就是个静默的屏蔽器。同一个病
+    // 在 config.toml 那层记过一次：写回不剔除「等于默认」的键 ⇒ 默认值升级对老用户失效。
+    file.apps.retain(|r| !is_empty_override(r));
     // initial_mode_scope 原样透传：菜单只管 [[apps]]，另一段不属于它，不能顺手抹掉。
     let text = render_user_compat(&file.apps, &file.initial_mode_scope)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -701,6 +723,50 @@ fn merge_mode_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★★★「跟随全局」必须真的等于「这条规则不存在」。
+    ///
+    /// 菜单把某项改回跟随全局后若留下空壳条目（只剩 `process`），合并语义「同名进程整条
+    /// 覆盖系统层」会让它把系统层出厂规则**连同以后新增的**一起屏蔽掉。实测：出厂给
+    /// et.exe（WPS 表格）配了 `first_show_mode = "wait"`，用户层残留的空壳让它读出来仍是
+    /// 「跟随全局」，用户只能手动再配一次才生效，且完全看不出为什么。
+    #[test]
+    fn clearing_the_last_field_removes_the_rule_entirely() {
+        let dir = std::env::temp_dir().join(format!("wind_compat_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        set_user_first_show_mode(&dir, "et.exe", Some(FirstShowMode::Wait)).unwrap();
+        let text = std::fs::read_to_string(dir.join(COMPAT_FILE_NAME)).unwrap();
+        assert!(text.contains("et.exe"), "配上时应写入该规则");
+
+        set_user_first_show_mode(&dir, "et.exe", None).unwrap();
+        let text = std::fs::read_to_string(dir.join(COMPAT_FILE_NAME)).unwrap();
+        assert!(
+            !text.contains("et.exe"),
+            "改回跟随全局后整条规则必须消失——留下空壳会静默屏蔽系统层的出厂规则"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 反向：还在覆盖别的字段时，整条规则不得被当成空壳删掉——那会让用户配的另一项
+    /// 静默消失，现场与写回路径隔着一次重启，极难归因。
+    #[test]
+    fn clearing_one_field_keeps_a_rule_that_still_overrides_something() {
+        let dir = std::env::temp_dir().join(format!("wind_compat_keep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        set_user_auto_pair(&dir, "excel.exe", Some(false)).unwrap();
+        set_user_first_show_mode(&dir, "excel.exe", Some(FirstShowMode::Wait)).unwrap();
+        set_user_first_show_mode(&dir, "excel.exe", None).unwrap();
+        let text = std::fs::read_to_string(dir.join(COMPAT_FILE_NAME)).unwrap();
+        assert!(
+            text.contains("excel.exe") && text.contains("auto_pair"),
+            "auto_pair 仍在覆盖，整条规则不能删：\n{text}"
+        );
+        assert!(
+            !text.contains("first_show_mode"),
+            "被清掉的那一项本身要消失"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 三个新增 per-app 字段的解析。`auto_pair` / `smart_method` 是 `Option`，
     /// **未配置必须是 `None` 而不是 `Some(false)`/`Some(默认值)`**——那是「跟随全局」
