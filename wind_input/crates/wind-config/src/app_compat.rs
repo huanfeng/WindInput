@@ -186,6 +186,7 @@ pub struct AppCompatRule {
     /// 推翻三次（字宽、换行、终端重排）。根因是两类宿主的正确答案**恰好相反**：
     ///   - 微信：probe 陈旧、组合前缓存新   ⇒ 该信缓存
     ///   - WindTerm：probe 是重排后的新位置、缓存已过时 ⇒ 该信 probe
+    ///
     /// 同一份位置关系推不出该信谁，任何位置判据都不可能同时答对两者。这是宿主缺陷，
     /// 按宿主处理——与隔壁 `caret_use_top`（同样为微信而加）同一个理由。
     #[serde(default, skip_serializing_if = "is_false")]
