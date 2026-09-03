@@ -1226,6 +1226,15 @@ pub struct Coordinator {
     /// 联想窗自动隐藏 timer 的代际令牌（同上，见 `handle_assoc::arm_assoc_hide`）。
     /// **进入与退出联想态都要自增**——退出时不加，旧计时会在下一轮联想里提前把窗收掉。
     pub(crate) assoc_hide_token: Mutex<u64>,
+    /// 联想的占位组合在宿主里成了**孤儿**：服务端已退出联想态，宿主那边的组合还挂着。
+    ///
+    /// 只有自动隐藏超时会造出孤儿——其余退出联想的路径都发生在按键上下文里，收口动作
+    /// 搭着那次按键的应答就送到宿主了（见 `handle_assoc::assoc_dismiss_with`）；超时由
+    /// 定时器线程触发，**没有待应答的按键可搭**，而服务端→TSF 的 push 通道里没有任何
+    /// 一条能结束组合。见 [`Coordinator::fire_assoc_hide`]。
+    ///
+    /// 置位后由 [`Coordinator::adopt_orphaned_placeholder`] 在按键处理的唯一出口消费。
+    pub(crate) assoc_placeholder_orphaned: std::sync::atomic::AtomicBool,
     /// 本次组合候选窗是否已首次显示过（true=后续刷新可立即下发；false=首帧需延迟）。
     candidate_shown: Mutex<bool>,
     /// 显示授权：handle_caret_update / 兜底 timer 在调 notify_ui_update 前置位以放行首帧显示；
@@ -2131,6 +2140,7 @@ impl Coordinator {
             pending_first_show: Mutex::new(false),
             pending_first_show_token: Mutex::new(0),
             assoc_hide_token: Mutex::new(0),
+            assoc_placeholder_orphaned: std::sync::atomic::AtomicBool::new(false),
             candidate_shown: Mutex::new(false),
             show_authorized: std::sync::atomic::AtomicBool::new(false),
             candidate_flipped: std::sync::atomic::AtomicBool::new(false),

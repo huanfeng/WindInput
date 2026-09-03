@@ -452,6 +452,20 @@ impl MessageHandler for Coordinator {
         // 配对状态保活：须在 handle_key_event **之后**刷新，否则本次按键的陈旧判定
         // 会先被自己刷新掉，TTL 永不触发。栈空时是空操作。
         self.touch_pair_state();
+        // 联想自动隐藏留下的孤儿占位组合，搭这一次按键收掉（见 `adopt_orphaned_placeholder`）。
+        // 必须在占位后处理**之前**：那一步是显示层加工（把真实编码换成占位空格），
+        // 这一步是会话层判定（这一键要不要顺带收口），会话层先定。
+        //
+        // ⚠️ **只在 keydown 改判**。`ClearCompositionThenPassThrough` 的「交还按键」那一半
+        // 靠 C++ 的 `_pendingReplayToHost`，而它只在 `OnKeyDown` 里消费（`OnKeyUp` 不碰，
+        // 残留由下一次 keydown 开头清零）。在 keyup 上改判 ⇒ 标记被消费掉、键却没重放，
+        // 等于把「收口」这次机会浪费在一个做不成的时机上。keyup 保持原样，标记留给紧随
+        // 其后的 keydown——用户要继续操作，必然还有 keydown。
+        let action = if data.event_type == EVENT_KEY_DOWN {
+            self.adopt_orphaned_placeholder(action)
+        } else {
+            action
+        };
         if self.preedit_uses_placeholder() {
             action.with_composition_placeholder()
         } else {
@@ -2382,6 +2396,12 @@ impl MessageHandler for Coordinator {
         if self.host_render_active() {
             return;
         }
+        // 宿主亲口说组合没了 ⇒ 联想孤儿占位组合也随之不存在，撤标记。
+        //
+        // ★ 只在这一处撤，**不在 `handle_focus_lost` 撤**：那里的 CtxLost / DocChanged 是
+        // 宿主内部换 docMgr 的噪声，组合可能还挂着，误撤就等于 bug 原样复发（危险方向）；
+        // 不撤的代价只是下一次透传多发一次收口，`EndComposition` 空跑、键照常重放（安全方向）。
+        self.clear_orphaned_placeholder();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // 必须整体复位（含 active/temp_pinyin_*/mix_* 等 overlay 状态），不能只清 input_buffer：
         // 临时拼音/快捷输入的缓冲与前缀不在 input_buffer 里，只清后者会让模式残留——

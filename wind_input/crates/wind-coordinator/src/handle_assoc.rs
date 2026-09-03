@@ -394,7 +394,95 @@ impl Coordinator {
         tracing::debug!("联想窗自动隐藏计时到期");
         self.exit_assoc(&mut state, AssocExit::Timeout);
         drop(state);
+        // ★★★ 宿主那边的占位组合**没人收**——本函数跑在定时器线程上，没有待应答的按键
+        // 可以搭载收口动作，而服务端→TSF 的 push 通道里没有一条能结束组合。留下标记，
+        // 由下一次按键在 [`Self::adopt_orphaned_placeholder`] 里收口。
+        //
+        // 不留标记的后果（2026-09-03 真机日志实证，记事本 pid 70300）：超时 5.8 秒后
+        // 按回车，TSF 侧仍是 `composing=1 candidates=1 inputSession=1`，键被判「有会话」
+        // 吃下并转发；服务端此刻已不在联想态，回落到 `PassThrough` ⇒ `eaten=0` 的
+        // 「吃了再吐」翻转 ⇒ 不补发 `WM_KEYDOWN` 的宿主直接丢键，且组合继续悬着，
+        // 被宿主 finalize 后在文档里留下那个占位空格。
+        self.assoc_placeholder_orphaned
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.notify_ui_hide();
+    }
+
+    /// 宿主组合已由别的路径终止 ⇒ 孤儿不复存在，撤掉标记。
+    ///
+    /// 不撤的后果只是下一次 `PassThrough` 多发一次收口（`EndComposition` 此时是空操作，
+    /// 键照常重放），不致命；但那次多余的重放会让日志与真实意图对不上。
+    pub(crate) fn clear_orphaned_placeholder(&self) {
+        self.assoc_placeholder_orphaned
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 按键处理的唯一出口上，把孤儿占位组合**搭上这一次按键**收掉。
+    ///
+    /// # 为什么落在这个单点上
+    ///
+    /// 「谁来收组合」这件事只有按键应答一条通道，而上屏/取消路径有 40+ 个返回点。
+    /// `handle_key_event_policed` 是它们的共同出口（`record_input_stats`、
+    /// `note_commit_action`、`expire_scope_override` 都因同一理由收口在那里），
+    /// 在此改判，天然覆盖全部分支——不必去盘回车的五条独立路径。
+    ///
+    /// # 三种命运，穷尽 match 强制新变体表态
+    ///
+    /// 判据是**这个动作到了宿主那边，会不会碰组合**：
+    ///
+    /// - 会结束或替换 ⇒ 孤儿被顺带收掉，撤标记、动作原样发出。
+    /// - 把键交还宿主却不碰组合（`PassThrough` / `NotHandled`）⇒ **正是要拦的那一格**，
+    ///   改判成 [`KeyAction::ClearCompositionThenPassThrough`]：收组合 + 把这一键还给宿主。
+    /// - 完全不碰组合（状态更新、纯吃键、移光标）⇒ 孤儿还在，标记必须**留到下一次按键**。
+    ///   曾想过「任何按键都撤标记」，那会让超时后先按一个热键的用户永远收不掉组合。
+    pub(crate) fn adopt_orphaned_placeholder(&self, action: KeyAction) -> KeyAction {
+        use std::sync::atomic::Ordering;
+        if !self.assoc_placeholder_orphaned.load(Ordering::Relaxed) {
+            return action;
+        }
+        /// 一个动作对宿主组合的作用。只在本函数内用，命名从宿主视角出发。
+        enum Fate {
+            /// 会结束或替换宿主组合。
+            Absorbs,
+            /// 交还按键但不碰组合——孤儿会继续悬着。
+            LeavesOrphan,
+            /// 完全不碰宿主组合。
+            Untouched,
+        }
+        let fate = match &action {
+            KeyAction::InsertText { .. }
+            | KeyAction::InsertTextWithCursor { .. }
+            | KeyAction::UpdateComposition { .. }
+            | KeyAction::ClearComposition
+            | KeyAction::ClearCompositionThenPassThrough
+            | KeyAction::ReplaceBackward { .. }
+            | KeyAction::HoldComposition { .. }
+            | KeyAction::CommitReplacingHeld { .. }
+            | KeyAction::CommitAndHoldComposition { .. }
+            | KeyAction::CommitThenDeferComposition { .. } => Fate::Absorbs,
+            KeyAction::PassThrough | KeyAction::NotHandled => Fate::LeavesOrphan,
+            // ⚠️ `StatusUpdate` 明确**不结束组合**（那正是「切了方案编码还挂在应用里」的
+            // 根因，见 `schema_switch_key_action`）；`MoveCursorRight` / `DeletePair` 在
+            // C++ 侧也不碰组合、不清 `_hasCandidates`（`KeyEventSink.cpp` 对应分支）。
+            KeyAction::StatusUpdate(_)
+            | KeyAction::Consumed
+            | KeyAction::MoveCursorRight { .. }
+            | KeyAction::DeletePair => Fate::Untouched,
+        };
+        match fate {
+            Fate::Absorbs => {
+                self.assoc_placeholder_orphaned
+                    .store(false, Ordering::Relaxed);
+                action
+            }
+            Fate::LeavesOrphan => {
+                self.assoc_placeholder_orphaned
+                    .store(false, Ordering::Relaxed);
+                tracing::debug!("联想占位组合成孤儿：本次透传改判为「收组合 + 交还按键」");
+                KeyAction::ClearCompositionThenPassThrough
+            }
+            Fate::Untouched => action,
+        }
     }
 
     /// **收掉联想**：清候选、结束占位组合、吞掉这一键。
@@ -642,6 +730,137 @@ mod tests {
         let c = coord_with(|cfg| cfg.input.association.hide_after_ms = 0);
         assert!(enter(&c, "你好"));
         assert!(!texts(&c).is_empty());
+    }
+
+    /// ★★★ 超时收窗必须留下「宿主组合成了孤儿」的标记。
+    ///
+    /// 真机实证（2026-09-03，记事本 pid 70300）：超时 5.8 秒后按回车，TSF 侧仍是
+    /// `composing=1 candidates=1 inputSession=1`——键被判「有会话」吃下并转发，服务端
+    /// 此刻已不在联想态、回落到 `PassThrough`，于是 `eaten=0` 的「吃了再吐」翻转，
+    /// 不补发 `WM_KEYDOWN` 的宿主直接丢键。
+    #[test]
+    fn timeout_leaves_placeholder_orphaned() {
+        use std::sync::atomic::Ordering;
+        let c = coord_smart();
+        assert!(enter(&c, "你好"));
+        assert!(
+            !c.assoc_placeholder_orphaned.load(Ordering::Relaxed),
+            "刚进联想态时组合有主，不该有孤儿标记"
+        );
+        let t = *c.assoc_hide_token.lock().unwrap();
+        c.fire_assoc_hide(t);
+        assert!(
+            c.assoc_placeholder_orphaned.load(Ordering::Relaxed),
+            "超时收窗没有按键应答可搭载收口动作，必须留标记等下一次按键"
+        );
+    }
+
+    /// **反向对照**：按键路径退出联想不留标记——它自己就带着收口动作回宿主。
+    ///
+    /// 少了这条，上一条测试在「一进联想态就置位」这种接错线下照样绿。
+    #[test]
+    fn key_path_dismiss_leaves_no_orphan() {
+        use std::sync::atomic::Ordering;
+        let c = coord_smart();
+        assert!(enter(&c, "你好"));
+        let action = {
+            let mut st = c.state.lock().unwrap_or_else(|e| e.into_inner());
+            c.assoc_enter(&mut st)
+        };
+        assert!(
+            matches!(
+                action,
+                KeyAction::ClearComposition | KeyAction::ClearCompositionThenPassThrough
+            ),
+            "按键路径的收口动作搭着这次应答就送到宿主了"
+        );
+        assert!(!c.assoc_placeholder_orphaned.load(Ordering::Relaxed));
+    }
+
+    /// 孤儿在场时透传改判为「收组合 + 交还按键」——本修复的核心那一格。
+    #[test]
+    fn orphan_rewrites_passthrough_into_clear_then_pass() {
+        use std::sync::atomic::Ordering;
+        let c = coord_smart();
+        c.assoc_placeholder_orphaned.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            c.adopt_orphaned_placeholder(KeyAction::PassThrough),
+            KeyAction::ClearCompositionThenPassThrough
+        ));
+        assert!(
+            !c.assoc_placeholder_orphaned.load(Ordering::Relaxed),
+            "收口一次即撤标记"
+        );
+        assert!(
+            matches!(
+                c.adopt_orphaned_placeholder(KeyAction::PassThrough),
+                KeyAction::PassThrough
+            ),
+            "标记已撤，后续透传不得再被改判——否则每个透传键都白挨一次收口 + 重放"
+        );
+    }
+
+    /// 没有孤儿时不得改判。
+    #[test]
+    fn passthrough_untouched_without_orphan() {
+        let c = coord_smart();
+        assert!(matches!(
+            c.adopt_orphaned_placeholder(KeyAction::PassThrough),
+            KeyAction::PassThrough
+        ));
+    }
+
+    /// ★★ 不碰宿主组合的动作**必须把标记留着**。
+    ///
+    /// 「任何按键都撤标记」会让超时后先按一个热键的用户永远收不掉那个组合：
+    /// `StatusUpdate` 明确不结束组合——那正是「切了方案编码还挂在应用里」的根因
+    /// （见 `schema_switch_key_action`）；`MoveCursorRight` / `DeletePair` 在 C++ 侧
+    /// 同样不碰组合、连 `_hasCandidates` 都不清。
+    #[test]
+    fn non_composition_actions_keep_the_orphan() {
+        use std::sync::atomic::Ordering;
+        let c = coord_smart();
+        for action in [
+            KeyAction::StatusUpdate(c.build_status()),
+            KeyAction::Consumed,
+            KeyAction::MoveCursorRight { count: 1 },
+            KeyAction::DeletePair,
+        ] {
+            c.assoc_placeholder_orphaned.store(true, Ordering::Relaxed);
+            let out = c.adopt_orphaned_placeholder(action);
+            assert!(
+                c.assoc_placeholder_orphaned.load(Ordering::Relaxed),
+                "{out:?} 不碰宿主组合，孤儿还在，标记必须留到下一次按键"
+            );
+        }
+    }
+
+    /// 会结束或替换组合的动作顺带收掉孤儿：动作原样发出，标记撤掉。
+    #[test]
+    fn composition_absorbing_actions_clear_the_orphan() {
+        use std::sync::atomic::Ordering;
+        let c = coord_smart();
+        for action in [
+            KeyAction::ClearComposition,
+            KeyAction::UpdateComposition {
+                text: "a".to_string(),
+                caret_pos: 1,
+            },
+            KeyAction::InsertText {
+                text: "你".to_string(),
+                new_composition: None,
+                mode_changed: false,
+                chinese_mode: true,
+                has_new_composition: false,
+            },
+        ] {
+            c.assoc_placeholder_orphaned.store(true, Ordering::Relaxed);
+            let out = c.adopt_orphaned_placeholder(action);
+            assert!(
+                !c.assoc_placeholder_orphaned.load(Ordering::Relaxed),
+                "{out:?} 到了宿主那边会结束或替换组合，孤儿已被顺带收掉"
+            );
+        }
     }
 
     /// ★ 联想候选真的被推到了候选窗上——本功能可见的那一半。
