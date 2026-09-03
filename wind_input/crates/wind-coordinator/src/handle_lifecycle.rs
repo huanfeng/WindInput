@@ -890,7 +890,7 @@ impl Coordinator {
         if state.add_word_active {
             state.add_word_active = false;
             state.add_word_chars.clear();
-            state.add_word_clip_chars.clear();
+            state.add_word_clip = None;
             state.add_word_from_clip = false;
             state.add_word_len = 0;
             state.add_word_code.clear();

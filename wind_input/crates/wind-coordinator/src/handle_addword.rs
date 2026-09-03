@@ -142,6 +142,13 @@ pub struct AddWordContext {
     /// 取末尾两字往往只截到半个词。设置端的词条框是多行的，多给的部分删起来很便宜，
     /// 少给却要用户回到输入法重打一遍。
     pub recent_text: String,
+    /// 加词字数上限（[`ADD_WORD_MAX_LEN`]）。
+    ///
+    /// 一并交代出去，是因为设置端也会自己读剪贴板填词条，而**上限是它够不着的**——
+    /// wind-setting 不能依赖 core 的 crate（那边是 dev-dependency）。不给的话它只能猜一个
+    /// 数或者干脆不截断，于是填进去 15 字、点「生成编码」出不来、点「确定」被
+    /// `check_derivable_word` 拒掉，又是一个「填得进去、加不进来」。
+    pub max_len: usize,
 }
 
 /// toast 回显用的词截断（按字符，超出加省略号）。词本身最长受 [`ADD_WORD_MAX_LEN`] 约束，
@@ -715,19 +722,24 @@ impl Coordinator {
         }
     }
 
-    /// 剪贴板字符池：读一次系统剪贴板并清洗，**不合规即当作空**（返回空 Vec）。
+    /// 剪贴板字符池：读一次系统剪贴板并清洗，无可用内容时返回空 Vec。
     ///
-    /// 三条守卫与命令栏 `dict.add` 的 [`sanitize_dict_add_text`] 同源，不另立一套：trim
-    /// 后为空、含换行（那边的话是「请只复制一个词」）、超过 [`ADD_WORD_MAX_LEN`] 字。
-    /// 差别只在**出口形态**——那边是用户显式提交、报错弹提示；这边是顺手一按，静默降级成
-    /// 「剪贴板不可用」：面板里 Tab 按了没反应（且压根不提示 Tab），直开加词界面回退最近
-    /// 输入。剪贴板里本来就常驻着与加词无关的东西（整段文章、一个 URL），为它弹错是噪音。
+    /// 两条守卫与命令栏 `dict.add` 的 [`sanitize_dict_add_text`] 同源：trim 后为空、
+    /// 含换行（那边的话是「请只复制一个词」）。差别只在**出口形态**——那边是用户显式提交、
+    /// 报错弹提示；这边是顺手一按，静默降级成「剪贴板无可用内容」。剪贴板里本来就常驻着
+    /// 与加词无关的东西（整段文章、一个 URL），为它弹错是噪音。
+    ///
+    /// **超长不再算不合规，直接取前 [`ADD_WORD_MAX_LEN`] 字**（2026-09-03 用户实测提出）。
+    /// 原先整段作废，于是复制一句话按 Tab 切过去只看到「剪贴板无可用内容」——可用户想要的
+    /// 那个词往往就在开头。截断与剪贴板来源「取开头 N 字、↓ 砍尾」的裁剪方向也一致：
+    /// 给出的就是他按 ↓ 之前会看到的东西。
     ///
     /// ⚠️ 必须用**阻塞版** `clipboard_get_text`：cached 版在剪贴板被别的进程占用时返回
     /// **上一次**的内容（契约见 `wind_ui::popup_menu::get_clipboard_text_cached`），而加词
-    /// 是执行路径——拿陈旧内容等于往词库里写一条用户没复制过的词，且界面毫无异常。代价是
-    /// 最坏 sleep 重试 40ms，故本函数只在**进入加词模式 / 直开加词界面时调一次**，
-    /// Tab 切换复用定格结果，不把这 40ms 摊到每次按键上。
+    /// 是执行路径——拿陈旧内容等于往词库里写一条用户没复制过的词，且界面毫无异常。
+    ///
+    /// 代价是最坏 sleep 重试 40ms，**在按键线程上**。故调用点一律走惰性入口
+    /// [`Self::add_word_clip_pool`]，别直接调本函数。
     fn clipboard_add_word_chars(&self) -> Vec<char> {
         let raw = self
             .host_services()
@@ -737,13 +749,32 @@ impl Coordinator {
         if s.is_empty() || s.contains(['\r', '\n']) {
             return Vec::new();
         }
-        let chars: Vec<char> = s.chars().collect();
+        let mut chars: Vec<char> = s.chars().collect();
         if chars.len() > ADD_WORD_MAX_LEN {
             // 隐私红线（docs/logging-convention.md）：不打内容明文，只打字数。
-            debug!("addword: 剪贴板 {} 字超上限，不作为加词来源", chars.len());
-            return Vec::new();
+            debug!(
+                "addword: 剪贴板 {} 字，截取前 {}",
+                chars.len(),
+                ADD_WORD_MAX_LEN
+            );
+            chars.truncate(ADD_WORD_MAX_LEN);
         }
         chars
+    }
+
+    /// 剪贴板池的**惰性**取用：本轮没读过才真去读系统剪贴板，读完记进 `State`。
+    ///
+    /// ★ 进入加词模式时**不预读**，是 2026-09-03 那次「Ctrl+= 有时明显卡顿」的修法：
+    /// 读一次最坏 sleep 重试 40ms，而它发生在**按键线程**上、恰好又在 C++ 建立占位
+    /// composition 的同一拍里。多数人进来是要加刚打的字、根本不按 Tab，那 40ms 纯属白付。
+    ///
+    /// 现在只有两个地方会真读：用户按 Tab 切过来（他主动要剪贴板，等一下是应该的），
+    /// 以及最近上屏为空时的自动落点判断（那时本来也没别的可干）。
+    fn add_word_clip_pool<'a>(&self, state: &'a mut State) -> &'a [char] {
+        if state.add_word_clip.is_none() {
+            state.add_word_clip = Some(self.clipboard_add_word_chars());
+        }
+        state.add_word_clip.as_deref().unwrap_or(&[])
     }
 
     /// 当前生效的字符池（按 `add_word_from_clip` 选源）。
@@ -753,7 +784,9 @@ impl Coordinator {
     /// 词，面板却说「无最近输入」）。
     fn add_word_pool<'a>(&self, state: &'a State) -> &'a [char] {
         if state.add_word_from_clip {
-            &state.add_word_clip_chars
+            // 只读路径不触发惰性读取：走到这里时来源已是剪贴板，池子必已读过
+            // （`toggle_add_word_source` / `enter_add_word_mode` 两个切过来的入口都读了）。
+            state.add_word_clip.as_deref().unwrap_or(&[])
         } else {
             &state.add_word_chars
         }
@@ -804,16 +837,17 @@ impl Coordinator {
         self.notify_ui_hide();
 
         state.add_word_chars = self.add_word_recent_chars(ADD_WORD_MAX_LEN);
-        // 剪贴板池在进入时**定格**一次（为什么不每次 Tab 现取，见 clipboard_add_word_chars）。
-        state.add_word_clip_chars = self.clipboard_add_word_chars();
+        // 剪贴板池**不在这里预读**——那 40ms 会摊在每一次 Ctrl+= 上（见 add_word_clip_pool）。
+        state.add_word_clip = None;
         // 默认来源是最近输入：Ctrl+= 是带面板的连续加词，接着刚打的字最顺手（与
         // Ctrl+Shift+= 刻意相反，见 open_add_word_from_history）。
         //
         // **例外：最近输入为空而剪贴板有内容时直接落在剪贴板一侧**——否则开面板第一眼是
         // 「无最近输入」，而唯一有用的下一步就是 Tab，不如替用户按了。反向不做：最近输入
-        // 有内容就按它来，剪贴板可不可用都不改变默认。
+        // 有内容就按它来，剪贴板可不可用都不改变默认——**这也是惰性读取的前提**：短路求值
+        // 使得有最近输入时右边整个不求值，即不读剪贴板。
         state.add_word_from_clip = state.add_word_chars.len() < ADD_WORD_MIN_LEN
-            && state.add_word_clip_chars.len() >= ADD_WORD_MIN_LEN;
+            && self.add_word_clip_pool(state).len() >= ADD_WORD_MIN_LEN;
         state.add_word_active = true;
 
         // 候选布局（input.add_word.candidate_layout，出厂竖排）由 show_add_word_preview
@@ -835,7 +869,7 @@ impl Coordinator {
     pub(crate) fn exit_add_word_mode(&self, state: &mut State) {
         state.add_word_active = false;
         state.add_word_chars.clear();
-        state.add_word_clip_chars.clear();
+        state.add_word_clip = None;
         state.add_word_from_clip = false;
         state.add_word_len = 0;
         state.add_word_code.clear();
@@ -888,6 +922,11 @@ impl Coordinator {
     /// 也不同，沿用旧值只会得到一个用户没选过的词。
     pub(crate) fn toggle_add_word_source(&self, state: &mut State) -> KeyAction {
         state.add_word_from_clip = !state.add_word_from_clip;
+        // 切到剪贴板这一侧才真去读系统剪贴板（见 add_word_clip_pool）。用户主动按了 Tab，
+        // 这一次的等待是他要的；切回最近上屏则什么也不读。
+        if state.add_word_from_clip {
+            let _ = self.add_word_clip_pool(state);
+        }
         self.reset_add_word_len_for_source(state);
         self.show_add_word_preview(state);
         KeyAction::Consumed
@@ -967,6 +1006,7 @@ impl Coordinator {
                 .add_word_recent_chars(ADD_WORD_MAX_LEN)
                 .into_iter()
                 .collect(),
+            max_len: ADD_WORD_MAX_LEN,
         }
     }
 
@@ -1204,10 +1244,9 @@ impl Coordinator {
             // 两边都说不清。剪贴板侧顺带交代准入条件——不合规（多行/超长）与真的没内容
             // 在这里是同一个可见状态，不说清用户会以为复制没生效。
             if state.add_word_from_clip {
-                row(
-                    "剪贴板无可用内容".into(),
-                    format!("需单行、不超过 {ADD_WORD_MAX_LEN} 字"),
-                )
+                // 只剩「单行」这一个准入条件——超长已改为取前 ADD_WORD_MAX_LEN 字，
+                // 不再算不合规（见 clipboard_add_word_chars）。
+                row("剪贴板无可用内容".into(), "需要单行文本".into())
             } else {
                 row("无最近输入".into(), "请先输入文字后再使用".into())
             }
@@ -1294,6 +1333,7 @@ mod tests {
     use crate::coordinator::Coordinator;
     use std::sync::Arc;
     use wind_config::Config;
+    use wind_keys::keymap;
     use wind_store::Store;
 
     /// ★★ 自提交打点必须覆盖**一切真落屏**的返回变体，不只 `InsertText` 那两种。
@@ -1392,26 +1432,52 @@ mod tests {
         coord_with_clip(tag, "")
     }
 
-    /// 假剪贴板：`clipboard_get_text` 恒返回构造时给的串。
+    /// 假剪贴板：`clipboard_get_text` 恒返回构造时给的串，并**记下被读了几次**。
     ///
     /// ⚠️ 每个测试协调器都必须注入它（`coord` 默认注入空串），否则桌面默认实现
     /// （`desktop-ui` 是默认 feature）会去读**开发机真实剪贴板**——本机跑测试的结果随
     /// 剪贴板内容漂移，而 CI 在 Linux 上恒读到空，于是这类失败只在本机出现、且看着像
     /// 随机失败。
-    struct MockClip(String);
+    ///
+    /// 计数是惰性读取的唯一守门：读一次最坏 40ms 且发生在按键线程上，多读一次不会有任何
+    /// 报错，只会让用户按 Ctrl+= 时卡一下（2026-09-03 的真实反馈）。
+    struct MockClip(String, Arc<std::sync::atomic::AtomicUsize>);
     impl crate::host_services::HostServices for MockClip {
         fn clipboard_get_text(&self) -> anyhow::Result<String> {
+            self.1.fetch_add(1, Ordering::Relaxed);
             Ok(self.0.clone())
         }
     }
 
     fn coord_with_clip(tag: &str, clip: &str) -> Arc<Coordinator> {
+        coord_counting_clip(tag, clip).0
+    }
+
+    /// 同 [`coord_with_clip`]，另外交出剪贴板读取次数的计数器。
+    fn coord_counting_clip(
+        tag: &str,
+        clip: &str,
+    ) -> (Arc<Coordinator>, Arc<std::sync::atomic::AtomicUsize>) {
         let path = std::env::temp_dir().join(format!("wind_addword_{tag}.redb"));
         let _ = std::fs::remove_file(&path);
         let store = Arc::new(Store::open(&path).unwrap());
         let c = Coordinator::new_headless_with_store(Config::default(), None, store);
-        c.set_host_services(Arc::new(MockClip(clip.to_string())));
-        c
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        c.set_host_services(Arc::new(MockClip(clip.to_string(), reads.clone())));
+        (c, reads)
+    }
+
+    /// 构造一个 key_down 事件（加词模式的按键分派只看 key_code 与修饰位）。
+    fn key(vk: u32, mods: u32) -> wind_bridge::handler::KeyEventData {
+        wind_bridge::handler::KeyEventData {
+            key_code: vk,
+            scan_code: 0,
+            modifiers: mods,
+            event_type: wind_ipc::protocol::EVENT_KEY_DOWN,
+            toggles: 0,
+            event_seq: 0,
+            prev_char: 0,
+        }
     }
 
     /// 按时间序模拟上屏：最早先入，最新最后（push_front 保证最新在前，对齐运行时）。
@@ -1924,19 +1990,20 @@ mod tests {
     /// ⛔ 此前的「空则不许切」守卫已推翻：两个来源必须对称，否则 Tab 时灵时不灵。
     #[test]
     fn tab_switches_even_when_clipboard_unusable() {
-        // 空 / 全空白 / 多行 / 超长：四种都归到「剪贴板无可用内容」这一个可见状态
+        // 空 / 全空白 / 多行：三种都归到「剪贴板无可用内容」这一个可见状态。
+        // ⚠️ 超长**不在此列**——它已改为截取前 ADD_WORD_MAX_LEN 字，见
+        // `overlong_clipboard_is_truncated_not_rejected`。
         for (tag, clip) in [
             ("clipempty", "".to_string()),
             ("clipblank", "   \t ".to_string()),
             ("clipmulti", "第一行\n第二行".to_string()),
-            ("cliplong", "字".repeat(ADD_WORD_MAX_LEN + 1)),
         ] {
             let c = coord_with_clip(tag, &clip);
             push_commits(&c, &["你", "好"]);
             let mut st = c.state.lock().unwrap();
             c.enter_add_word_mode(&mut st);
             assert!(
-                st.add_word_clip_chars.is_empty(),
+                c.add_word_pool(&st).is_empty() || !st.add_word_from_clip,
                 "{tag}: 不合规的剪贴板必须当作空池"
             );
 
@@ -1973,7 +2040,7 @@ mod tests {
         push_commits(&c, &["你", "好"]);
         let mut st = c.state.lock().unwrap();
         c.enter_add_word_mode(&mut st);
-        st.add_word_clip_chars = "改过".chars().collect();
+        st.add_word_clip = Some("改过".chars().collect());
         c.toggle_add_word_source(&mut st);
         assert_eq!(
             c.add_word_current_word(&st),
@@ -1994,7 +2061,140 @@ mod tests {
         assert!(st.add_word_from_clip);
         c.exit_add_word_mode(&mut st);
         assert!(!st.add_word_from_clip, "退出必须复位来源");
-        assert!(st.add_word_clip_chars.is_empty(), "退出必须清剪贴板池");
+        assert!(
+            st.add_word_clip.is_none(),
+            "退出必须把剪贴板池复位成「没读过」"
+        );
+    }
+
+    /// 超长剪贴板**截断取前 N 字**，不再整段作废。
+    ///
+    /// 原先超过上限就当作「无可用内容」，于是复制一句话按 Tab 切过去只看到空态——可用户
+    /// 要的那个词往往就在开头。截断方向与剪贴板来源「取开头 N 字、↓ 砍尾」一致。
+    #[test]
+    fn overlong_clipboard_is_truncated_not_rejected() {
+        let long: String = "量子纠缠态的测量与坍缩过程很复杂".to_string();
+        assert!(long.chars().count() > ADD_WORD_MAX_LEN, "夹具本身要够长");
+        let head: String = long.chars().take(ADD_WORD_MAX_LEN).collect();
+
+        // Ctrl+= 面板：Tab 切过去拿到的是前 N 字
+        let c = coord_with_clip("cliptrunc", &long);
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        c.toggle_add_word_source(&mut st);
+        assert_eq!(c.add_word_current_word(&st), head);
+        assert_eq!(st.add_word_len, ADD_WORD_MAX_LEN, "截断后仍是全选");
+        drop(st);
+
+        // Ctrl+Shift+= 直开：同样截断，而不是回退最近上屏
+        let (word, _) = c.add_word_prefill_from_history();
+        assert_eq!(word, head, "超长剪贴板须截断取用，不得回退最近输入");
+    }
+
+    /// ★★★ 有最近上屏时进入加词模式**一次剪贴板都不读**。
+    ///
+    /// 这是「Ctrl+= 有时明显卡顿」的守门（2026-09-03 用户反馈）：读一次最坏 sleep 重试
+    /// 40ms，且发生在**按键线程**上、恰好与 C++ 建立占位 composition 同一拍。多数人进来
+    /// 是要加刚打的字、根本不按 Tab，那 40ms 纯属白付。
+    ///
+    /// 多读一次不会有任何报错，只会让用户觉得卡——只有这条计数断言拦得住回归。
+    #[test]
+    fn entering_with_recent_input_never_reads_clipboard() {
+        let (c, reads) = coord_counting_clip("lazyenter", "剪贴内容");
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            0,
+            "有最近上屏时进入加词模式不得读剪贴板"
+        );
+        // ↑↓ 调长度、确认前的重算同样不该读
+        c.adjust_add_word_length(&mut st, 1);
+        c.adjust_add_word_length(&mut st, -1);
+        assert_eq!(reads.load(Ordering::Relaxed), 0, "调词长不得读剪贴板");
+    }
+
+    /// 没有最近上屏时**才**读一次（那时要靠它决定自动落点），且此后不再重复读。
+    #[test]
+    fn clipboard_is_read_once_and_reused() {
+        let (c, reads) = coord_counting_clip("lazyonce", "量子纠缠");
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "自动落点判断读一次");
+        assert!(st.add_word_from_clip);
+
+        // Tab 来回切：池子已在 State 里，不得再读
+        c.toggle_add_word_source(&mut st);
+        c.toggle_add_word_source(&mut st);
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "Tab 复用定格池，不得重读");
+        assert_eq!(c.add_word_current_word(&st), "量子纠缠");
+    }
+
+    /// 用户按 Tab 主动切过去时才读——那一次的等待是他要的。
+    #[test]
+    fn tab_reads_clipboard_on_demand() {
+        let (c, reads) = coord_counting_clip("lazytab", "量子纠缠");
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+
+        c.toggle_add_word_source(&mut st);
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "切到剪贴板时读一次");
+        assert_eq!(c.add_word_current_word(&st), "量子纠缠");
+
+        // 切回最近上屏不读，再切回来也不读（池子已在 State 里）
+        c.toggle_add_word_source(&mut st);
+        c.toggle_add_word_source(&mut st);
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "只读那一次");
+    }
+
+    /// ★★ ESC 在**任何一种状态**下都必须退出加词模式。
+    ///
+    /// 2026-09-03 用户反馈「进入这个模式后按 ESC 不退出了」。协调器这一侧的分派本身没变，
+    /// 但它此前从没有测试——ESC 走的是 `handle_add_word_key` 的第一条臂，而那条臂只要被
+    /// 前面任何一个新增分支抢走（或 `add_word_active` 被别处清掉），表现就是「面板还在、
+    /// 按键没反应」，没有任何报错。
+    #[test]
+    fn escape_exits_from_every_state() {
+        // ① 最近上屏来源 ② 剪贴板来源 ③ 两侧都空的空态
+        let cases: [(&str, &str, &[&str], bool); 3] = [
+            ("esc_recent", "剪贴内容", &["你", "好"], false),
+            ("esc_clip", "量子纠缠", &["你", "好"], true),
+            ("esc_empty", "", &[], false),
+        ];
+        for (tag, clip, commits, switch) in cases {
+            let c = coord_with_clip(tag, clip);
+            push_commits(&c, commits);
+            let mut st = c.state.lock().unwrap();
+            c.enter_add_word_mode(&mut st);
+            if switch {
+                c.toggle_add_word_source(&mut st);
+            }
+            assert!(st.add_word_active, "{tag}: 前提——已进入加词模式");
+
+            let act = c.handle_add_word_key(&mut st, &key(keymap::VK_ESCAPE, 0));
+            assert!(
+                matches!(act, KeyAction::ClearComposition),
+                "{tag}: ESC 必须清掉占位组合，否则宿主那边的组合区留着不动"
+            );
+            assert!(!st.add_word_active, "{tag}: ESC 必须退出加词模式");
+            assert!(st.add_word_clip.is_none(), "{tag}: 退出须复位剪贴板池");
+            assert!(!st.add_word_from_clip, "{tag}: 退出须复位来源");
+        }
+    }
+
+    /// 退格与 ESC 同一条臂（历史约定：加词面板里退格也是「取消」）。
+    #[test]
+    fn backspace_exits_like_escape() {
+        let c = coord_with_clip("escback", "");
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        c.handle_add_word_key(&mut st, &key(keymap::VK_BACK, 0));
+        assert!(!st.add_word_active, "退格应与 ESC 同样退出");
     }
 
     /// 面板是**三行**，且操作提示落在 `comment` 而非 `text`。
@@ -2036,8 +2236,8 @@ mod tests {
         let rows = c.add_word_panel_rows(&st);
         assert_eq!(rows[0].text, "快捷加词 · 剪贴板");
         assert_eq!(rows[1].text, "剪贴板无可用内容");
-        assert!(
-            rows[1].comment.contains(&ADD_WORD_MAX_LEN.to_string()),
+        assert_eq!(
+            rows[1].comment, "需要单行文本",
             "空态须交代准入条件，否则用户以为复制没生效"
         );
         assert_eq!(rows[2].comment, "Tab切换来源  Esc关闭", "两侧提示同形");
@@ -2055,10 +2255,11 @@ mod tests {
     /// 剪贴板不可用则回退最近输入（默认 2 字）——「如果剪贴板为空，则以最新输入的数据」。
     #[test]
     fn from_history_falls_back_to_recent() {
+        // ⚠️ 超长**不在此列**：它已改为截断取用，不再回退（见
+        // `overlong_clipboard_is_truncated_not_rejected`）。
         for (tag, clip) in [
             ("histempty", "".to_string()),
             ("histmulti", "一行\n二行".to_string()),
-            ("histlong", "字".repeat(ADD_WORD_MAX_LEN + 1)),
         ] {
             let c = coord_with_clip(tag, &clip);
             push_commits(&c, &["世", "界", "和", "平"]);

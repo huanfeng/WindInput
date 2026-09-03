@@ -422,6 +422,7 @@ pub trait WebDataRpc: WebDataHost {
                 Ok(json!({
                     "schemaId": ctx.schema_id,
                     "recentText": ctx.recent_text,
+                    "maxLen": ctx.max_len,
                 }))
             }
             // 加词自动出码：按方案类型选拼音/五笔规则（reverse 反查表）。

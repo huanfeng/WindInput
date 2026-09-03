@@ -652,9 +652,13 @@ pub(crate) struct State {
     /// `add_word_code` 的音节边界（见 `wind_dict::binformat::DictEntry::boundary`）；
     /// 0 = 无信息（码表反查/逐字兜底）。与 code 同生同灭，入库时一并写入用户词。
     pub(crate) add_word_boundary: u64,
-    /// 加词的**剪贴板字符池**：进入加词模式时读一次即定格（读取契约见
-    /// `clipboard_add_word_chars`），空 = 剪贴板无可用内容 ⇒ Tab 切不过去。
-    pub(crate) add_word_clip_chars: Vec<char>,
+    /// 加词的**剪贴板字符池**，惰性读取：
+    /// `None` = 本轮还没读过，`Some(空)` = 读过、剪贴板没有可用内容。
+    ///
+    /// ⚠️ 「还没读」与「读了是空」必须分得开，否则每次问「剪贴板有没有东西」都会再去读
+    /// 一次系统剪贴板——那正是本字段改成 `Option` 要避免的（读一次最坏 40ms，见
+    /// `clipboard_add_word_chars`）。
+    pub(crate) add_word_clip: Option<Vec<char>>,
     /// 当前生效的字符池来源：false = 最近上屏（默认），true = 剪贴板。
     /// 两个池子的**裁剪方向相反**，读取一律走 `add_word_pool` / `add_word_current_word`。
     pub(crate) add_word_from_clip: bool,
@@ -2086,7 +2090,7 @@ impl Coordinator {
                 add_word_len: 0,
                 add_word_code: String::new(),
                 add_word_boundary: 0,
-                add_word_clip_chars: Vec::new(),
+                add_word_clip: None,
                 add_word_from_clip: false,
             }),
             push_server,
