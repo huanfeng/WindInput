@@ -158,9 +158,20 @@ impl CompositeDict {
                         // 头上——那比不显示更糟，排查时会照着错的库名去翻词库文件。
                         existing.meta.weight_layer = cand.meta.weight_layer.take();
                     }
+                    // 被丢弃这条的**来源归属**并入幸存者。
+                    //
+                    // 这两个标记不是装饰：右键删除按它们决定去 `user_words` 还是 `temp_words`
+                    // 删，而 `redb` 的 `remove` 对不存在的 key 静默成功——丢掉标记的代价不是
+                    // 报错，是「点多少次都无作用」。用户层与临时层都注册在同一个 DictManager 里
+                    //（`manager.rs` 的 store_layers），同文时后注册的临时层整条被丢弃，
+                    // `is_temp_dict` 随之蒸发，删除便只删得掉用户词那一半。
+                    // 2026-09-03 用户实测「再也不好」即毁于这条路径的上游。
+                    existing.meta.is_user_dict |= cand.meta.is_user_dict;
+                    existing.meta.is_temp_dict |= cand.meta.is_temp_dict;
                     // 被丢弃这条所占的码位并入幸存者：跨层同 text 常有不同码（用户层手输码 vs
                     // 系统层全码），丢掉即让「检索范围」过滤看不见该码位的常用性，见
-                    // `Candidate::merged_codes`。
+                    // `Candidate::merged_codes`。删除侧也读它——两层码不同时，幸存者的 `code`
+                    // 只对得上其中一张表。
                     existing.absorb_codes_from(&cand);
                     // 前缀：保留最短码及其更早出现位置。
                     // boundary 描述的是 code 的音节切分，**必须与 code 同进同出**——换了码却留着
@@ -248,6 +259,37 @@ mod tests {
             boundary,
             ..cand(text, code, weight, no)
         }
+    }
+
+    /// 同 text 去重**不得吞掉来源归属**：右键删除按 `is_user_dict`/`is_temp_dict` 决定去
+    /// 哪张表删，而 `redb` 的 `remove` 对不存在的 key 静默成功——丢掉标记的代价不是报错，
+    /// 是「点多少次都无作用」（2026-09-03 用户实测「再也不好」）。
+    ///
+    /// 用户层与临时层同注册在拼音引擎的 store DictManager 里，同文时后者整条被丢弃。
+    #[test]
+    fn dedup_same_text_merges_source_flags() {
+        let mut user = cand("再也不好", "zaiyebuhao", 800, 0);
+        user.meta.is_user_dict = true;
+        let mut temp = cand("再也不好", "zaiyebuhao", 800, 1);
+        temp.meta.is_temp_dict = true;
+        let c = CompositeDict::new();
+        c.register_layer(Box::new(MockLayer {
+            name: "user".into(),
+            ltype: LayerType::User,
+            items: vec![user],
+        }));
+        c.register_layer(Box::new(MockLayer {
+            name: "temp".into(),
+            ltype: LayerType::Temp,
+            items: vec![temp],
+        }));
+        let r = c.search("zaiyebuhao", 10);
+        assert_eq!(r.len(), 1, "同 text 应去重成一条");
+        assert!(r[0].meta.is_user_dict, "用户层归属应保留");
+        assert!(
+            r[0].meta.is_temp_dict,
+            "被丢弃那条的临时层归属必须并入，否则删除只删得掉一半"
+        );
     }
 
     /// 跨层「更长后继」判据**必须逐层原样问**，不能走 `merge_search`。

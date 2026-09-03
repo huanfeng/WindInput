@@ -5160,6 +5160,64 @@ fn test_candidate_op_move_top_and_delete() {
     }
 }
 
+/// 用户词与临时词**同文同码**时，右键删除必须把两张表都删掉。
+///
+/// 这是「删了等于没删」的一条真实来路：`add_user_word` 不清临时表，于是「先被自动学过、
+/// 后来又手动加词」的词在 `user_words` 和 `temp_words` 各留一条。删除若只处理其中一张，
+/// 剩下那张继续供出同一条候选，屏幕表现与没删一模一样。
+///
+/// 引擎侧合并分支会把两条并成一条候选（两个标记都置），删除据标记逐表处理。
+///
+/// ⚠️ 判据必须落在 **store 记录**上，不能用「候选消失」：真机词库下整句层会把同样的文本
+/// 重新合成出来，那样删对了候选照样在。真机根因（临时词被合并盖成用户词标记）的守门测试
+/// 在引擎侧 `merged_store_candidate_keeps_source_flags`——本仓精简词库的整句层拼不出那条
+/// 同文候选，合并分支在这里根本走不到。
+#[test]
+fn test_delete_word_candidate_removes_both_user_and_temp_records() {
+    if !has_schemas() {
+        return;
+    }
+    use wind_ui_types::CandidateOp;
+    let store_path = std::env::temp_dir().join("wind_delete_dual_record.redb");
+    let _ = std::fs::remove_file(&store_path);
+    let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
+    store
+        .add_user_word("pinyin", "zaiyebuhao", "再也不好", 800, 0)
+        .expect("预置用户词失败");
+    store
+        .learn_temp_word("pinyin", "zaiyebuhao", "再也不好", 800, 0)
+        .expect("预置临时词失败");
+    let coord = Coordinator::new_headless_with_store(
+        config_with("pinyin"),
+        Some(&data_dir()),
+        store.clone(),
+    );
+    for c in "zaiyebuhao".chars() {
+        press_letter(&coord, c);
+    }
+    let texts = coord.debug_page_texts();
+    let Some(pl) = texts.iter().position(|w| w == "再也不好") else {
+        panic!("造词「再也不好」应出现在候选中，实际={:?}", texts);
+    };
+    coord.debug_candidate_op(CandidateOp::Delete, pl);
+    let users = store
+        .get_user_words("pinyin", "zaiyebuhao")
+        .unwrap_or_default();
+    let temps = store
+        .get_temp_words("pinyin", "zaiyebuhao")
+        .unwrap_or_default();
+    assert!(
+        !users.iter().any(|r| r.text == "再也不好"),
+        "删除后用户词记录应消失，实际残留={:?}",
+        users
+    );
+    assert!(
+        !temps.iter().any(|r| r.text == "再也不好"),
+        "删除后临时词记录应消失（只删一张表 = 用户眼里的「点了没反应」），实际残留={:?}",
+        temps
+    );
+}
+
 #[test]
 fn test_candidate_op_delete_single_char_hides() {
     if !has_schemas() {

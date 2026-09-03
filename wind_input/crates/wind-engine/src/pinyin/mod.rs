@@ -2664,8 +2664,15 @@ impl Engine for PinyinEngine {
                 //   （`d4084b8` 已踩过此坑：composite 去重换 code 时 boundary 未跟随，配出
                 //   「A 层的 code + B 层的 boundary」）。用户手输码常无边界信息（boundary=0），
                 //   换过去等于把系统词典的真值边界抹成未知。
-                // - 置 `meta.is_user_dict = true` 使来源可追溯（该字段目前无比较器读取，
-                //   仅供诊断/UI）。
+                // - 来源标记**按 `c` 的实际归属置位**（用户层→`is_user_dict`，临时层→
+                //   `is_temp_dict`），并把 `c.code` 记进 `meta.store_code`。
+                //
+                //   ⚠️ 这两件事都不是「诊断/UI 用」的装饰：右键删除按标记选表、按码拼 key。
+                //   2026-09-03 实测——自动造词写进**临时**层的「再也不好」与整句层同文，
+                //   合并时被无条件盖成 `is_user_dict=true`，于是删除跑去 `user_words` 删一个
+                //   不存在的 key（`redb` 静默成功），临时词纹丝不动、点几次都无作用。
+                //   同理 `code` 保留已有那条的（见上一条），删除必须改读 `store_code`，
+                //   否则用户词码为 `nihaoa`、候选码为 `nihao` 时同样删了个空。
                 // - 其余层级标志（is_fuzzy/is_prefix/is_partial/is_exact_code）**一律不动**：
                 //   它们描述的是「这条候选相对本次输入处在哪一层」，由已有候选的来源路径决定，
                 //   与用户是否也收录了同一个词无关。
@@ -2694,7 +2701,16 @@ impl Engine for PinyinEngine {
                         let w = existing.weight.max(c.weight);
                         existing.weight = promotion_cap.map_or(w, |cap| w.min(cap));
                     }
-                    existing.meta.is_user_dict = true;
+                    // 标记按来源分流：`c` 来自 StoreTempLayer 就是临时词，不能盖成用户词。
+                    // 两层都有同文记录时两个标记都置，删除侧据此把两张表都删掉。
+                    if c.meta.is_temp_dict {
+                        existing.meta.is_temp_dict = true;
+                    } else {
+                        existing.meta.is_user_dict = true;
+                    }
+                    // 存储码随标记一起带走（`code` 字段仍归已有候选）。两层码不同的极端情形
+                    // 下这里只留得住后来那个，删除侧因此仍把 `code` 作为兜底一并尝试。
+                    existing.meta.store_code = Some(c.code.as_str().into());
                     continue;
                 }
                 c.source = CandidateSource::Pinyin;
@@ -3702,6 +3718,85 @@ mod tests {
             shou.unwrap().source,
             CandidateSource::Pinyin,
             "来源应标为拼音"
+        );
+    }
+
+    /// 同文合并**不得抹掉来源归属**。
+    ///
+    /// 右键删除按 `is_user_dict`/`is_temp_dict` 选表、按码拼 key，`redb` 的 `remove` 对不
+    /// 存在的 key 静默成功——标记盖错的代价不是报错而是「点多少次都无作用」。
+    /// 2026-09-03 用户实测：自动造词写进**临时**层的「再也不好」与整句层同文，合并时被
+    /// 无条件盖成 `is_user_dict=true`，删除跑去 `user_words` 删了个空。
+    ///（此处用同文的系统词条代替整句候选，对合并分支而言二者等价。）
+    #[test]
+    fn merged_store_candidate_keeps_source_flags() {
+        let store = tmp_store("merge_flags");
+        store
+            .learn_temp_word("pinyin", "zaiyebuhao", "再也不好", 800, 0)
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_dict::StoreUserLayer::new(
+            store.clone(),
+            "pinyin",
+        )));
+        dm.register_layer(Box::new(wind_dict::StoreTempLayer::new(
+            store.clone(),
+            "pinyin",
+        )));
+        let engine =
+            engine_with_words(&[("zaiyebuhao", "再也不好")]).with_store_layers(Arc::new(dm));
+        let r = engine.convert("zaiyebuhao", 20).unwrap();
+        let c = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "再也不好")
+            .expect("同文候选应存在");
+        assert!(
+            c.meta.is_temp_dict,
+            "临时词合并后必须仍标临时词——删除据此选 temp_words 表"
+        );
+        assert!(!c.meta.is_user_dict, "临时词不得被盖成用户词");
+        assert_eq!(
+            c.meta.store_code.as_deref(),
+            Some("zaiyebuhao"),
+            "存储码须随标记一起带出"
+        );
+    }
+
+    /// 存储码 ≠ 候选码时（用户词经前缀补全命中），`store_code` 必须给出**记录**的那个码。
+    /// `code` 字段仍归已有候选（边界语义，见合并分支注释），故删除只能靠本字段。
+    #[test]
+    fn merged_store_candidate_carries_real_store_code() {
+        let store = tmp_store("merge_store_code");
+        store
+            .add_user_word("pinyin", "nihaoa", "你好", 500, 0)
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_dict::StoreUserLayer::new(
+            store.clone(),
+            "pinyin",
+        )));
+        let engine = PinyinEngine::new(
+            relaxed_completion_config(),
+            CachedDict::Memory({
+                let mut raw = CodetableDict::empty();
+                raw.merge_single("nihao".into(), "你好".into(), 100, 0);
+                raw
+            }),
+        )
+        .with_store_layers(Arc::new(dm));
+        let r = engine.convert("nihao", 20).unwrap();
+        let c = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "你好")
+            .expect("同文候选应存在");
+        assert!(c.meta.is_user_dict, "用户词合并后应标用户词");
+        assert_eq!(c.code, "nihao", "候选码仍归已有候选（边界须同进同出）");
+        assert_eq!(
+            c.meta.store_code.as_deref(),
+            Some("nihaoa"),
+            "存储码须是用户词记录自身的码，否则删除拼出的 key 落空"
         );
     }
 

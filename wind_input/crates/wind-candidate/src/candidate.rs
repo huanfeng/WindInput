@@ -56,6 +56,18 @@ pub struct CandidateMeta {
     /// 仅供悬停调试提示区分来源（`wind_phrase::PhraseHit::is_system` 透传而来）。
     #[serde(default)]
     pub is_system_phrase: bool,
+    /// 用户词/临时词在 store 里的**真实存储码**（`user_words`/`temp_words` 的 key 中段）。
+    ///
+    /// 存在理由是同文合并会造出**嵌合候选**：`pinyin/mod.rs` 第 6 步把 store 层候选并入
+    /// 已有同文候选时，`code`/`boundary` 刻意保留已有那条的（换过去会把系统词典的真值
+    /// 边界抹成未知），只把来源标记盖上去。于是候选的 `code` 是系统词/整句的码，而
+    /// `is_user_dict`/`is_temp_dict` 指向 store —— 右键删除拿 `code` 拼 key 就删了个空。
+    /// `redb` 的 `remove` 对不存在的 key 静默成功，表现为**点多少次都无作用**。
+    ///
+    /// 排序/边界一律不读本字段，它只服务「按 key 回写 store」的反向操作（删除）。
+    /// `None` = 该候选不来自 store 层，或本就是新增分支（此时 `code` 即存储码）。
+    #[serde(skip)]
+    pub store_code: Option<std::sync::Arc<str>>,
 }
 
 /// 命令栏动作

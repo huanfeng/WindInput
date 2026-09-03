@@ -3359,6 +3359,8 @@ impl Coordinator {
     ///   可能是模板展开后文本，直接用会在 store 里 miss）。
     /// - 用户词/临时词 → store 真删；schema 取写归属 id（混输按来源分流、拼音族折叠共享），
     ///   code 优先取候选自带存储码（双拼下 input_buffer 是双拼串、存储码是全拼）。
+    ///   **两个标记各删各的表**：同文双记录（先自动学过、后来又手动加词——`add_user_word`
+    ///   不清临时表）时只删一张，剩下那张继续供出同一条候选，表现与没删一模一样。
     /// - 其它（系统码表/拼音）→ shadow 软隐藏；单字同样允许（旧版单字保护已取消：
     ///   shadow 按 code+word 键控，仅该编码下隐藏，设置页可恢复）。
     fn delete_candidate_by_source(
@@ -3394,57 +3396,101 @@ impl Coordinator {
                 debug!("delete_candidate: 无法归因存储方案，跳过 '{}'", cand.text);
                 return Ok(());
             };
-            let dcode = if cand.code.is_empty() {
-                code
-            } else {
-                cand.code.as_str()
-            };
-            let is_user = cand.meta.is_user_dict;
-            // 删前删后各查一次记录。**没有这两个值，三种结局在日志里长得一模一样**：
-            // `redb` 的 `remove` 对不存在的 key 静默成功，而 key 由 schema+code+text 三段
-            // 拼成，任一段错配的表现都是「点了删除、界面毫无变化、词还在词库里」。
-            let hit = |s: &str, c: &str| -> bool {
-                let recs = if is_user {
+            // 候选存储码，按可信度排序去重：
+            // ① `meta.store_code` —— 引擎层同文合并时从 store 记录原样带过来的真值；
+            // ② 候选自带 `code` —— 未经合并时它就是存储码（双拼下也已是全拼）；
+            // ③ `merged_codes` —— `CompositeDict::merge_search` 去重时被丢弃那条的码位；
+            // ④ 输入码 —— 候选无码时的最后兜底。
+            //
+            // 逐个试而非只认一个：**同文合并有两层**（composite 去重、引擎 store 层并入），
+            // 每层都只留得住一个 code，而记录可能挂在被丢弃的那个码上。
+            let mut codes: Vec<&str> = Vec::new();
+            for c in [
+                cand.meta.store_code.as_deref(),
+                (!cand.code.is_empty()).then_some(cand.code.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .chain(cand.merged_codes.iter().map(String::as_str))
+            .chain((!code.is_empty()).then_some(code))
+            {
+                if !codes.contains(&c) {
+                    codes.push(c);
+                }
+            }
+            // 删之前先查。**没有这一步，三种结局在日志里长得一模一样**：`redb` 的 `remove`
+            // 对不存在的 key 静默成功，而 key 由 schema+code+text 三段拼成，任一段错配的
+            // 表现都是「点了删除、界面毫无变化、词还在词库里」。
+            let hit = |user: bool, s: &str, c: &str| -> bool {
+                let recs = if user {
                     store.get_user_words(s, c)
                 } else {
                     store.get_temp_words(s, c)
                 };
                 recs.unwrap_or_default().iter().any(|r| r.text == cand.text)
             };
-            let before = hit(&sid, dcode);
-            let r = if is_user {
-                store.remove_user_word(&sid, dcode, &cand.text)
-            } else {
-                store.remove_temp_word(&sid, dcode, &cand.text)
-            };
+            // 两个标记**各删各的表**：同文双记录时只删一张，剩下那张照样供出同一条候选。
+            let mut removed: Vec<String> = Vec::new();
+            let mut err: Option<anyhow::Error> = None;
+            for (user, flagged) in [
+                (true, cand.meta.is_user_dict),
+                (false, cand.meta.is_temp_dict),
+            ] {
+                if !flagged {
+                    continue;
+                }
+                let Some(c) = codes.iter().copied().find(|c| hit(user, &sid, c)) else {
+                    continue;
+                };
+                let r = if user {
+                    store.remove_user_word(&sid, c, &cand.text)
+                } else {
+                    store.remove_temp_word(&sid, c, &cand.text)
+                };
+                match r {
+                    Ok(()) => {
+                        removed.push(format!("{}({c})", if user { "用户词" } else { "临时词" }))
+                    }
+                    Err(e) => err = Some(e),
+                }
+            }
             debug!(
-                "delete_candidate: 分支={} schema={} code={}（候选码={} 输入码={}）text={} 删前命中={} 结果={:?}",
-                if is_user { "用户词" } else { "临时词" },
+                "delete_candidate: 分支=store 真删 schema={} 标记=[user={} temp={}] 候选码={:?}（候选自带={} 输入码={}）text={} 已删={:?}",
                 sid,
-                dcode,
+                cand.meta.is_user_dict,
+                cand.meta.is_temp_dict,
+                codes,
                 cand.code,
                 code,
                 cand.text,
-                before,
-                r.is_ok()
+                removed
             );
-            // 没命中就把「记录到底在哪个桶」探出来，省掉下一轮复现。错配来源有二：
-            // schema 段（混输下 `write_data_schema_id` / `data_schema_id` / active 自身解析
-            // 各不相同）与 code 段（双拼、前缀补全、展示域带空格时候选码≠存储码）。
-            if !before {
+            // 一条都没删到 = 用户眼里的「点了没反应」。这是**唯一**该报警的结局，
+            // 降到 debug 就等于把它藏进只有开了调试才看得见的地方（本 bug 正是这么活了一个月）。
+            // 顺带把「记录到底在哪个桶」探出来，省掉下一轮复现：错配来源有二——schema 段
+            //（混输下 `write_data_schema_id` / `data_schema_id` / active 自身解析各不相同）
+            // 与 code 段（双拼、前缀补全、展示域带空格时候选码≠存储码）。
+            if removed.is_empty() && err.is_none() {
                 let dsid = self.engine_mgr.data_schema_id(schema);
-                for s in [sid.as_str(), dsid.as_str(), schema] {
-                    for c in [dcode, code] {
-                        if (s != sid || c != dcode) && hit(s, c) {
-                            debug!(
-                                "delete_candidate: ⚠ 键错配——记录实际在 schema={} code={}（本次删的是 schema={} code={}）",
-                                s, c, sid, dcode
-                            );
+                let mut found: Vec<String> = Vec::new();
+                for user in [true, false] {
+                    for s in [sid.as_str(), dsid.as_str(), schema] {
+                        for c in codes.iter().copied() {
+                            if hit(user, s, c) {
+                                found.push(format!(
+                                    "{}/schema={s}/code={c}",
+                                    if user { "用户词" } else { "临时词" }
+                                ));
+                            }
                         }
                     }
                 }
+                warn!(
+                    "delete_candidate: 一条记录都没删到 text={} 试过 schema={} 码={:?}；实际命中={:?}（空=该词根本不在 store，候选来自系统词典/整句合成）",
+                    cand.text, sid, codes, found
+                );
             }
-            return r;
+            return err.map_or(Ok(()), Err);
         }
         // 候选调整（系统词软隐藏）按 data_schema_id 归属（拼音族折叠）。
         let sh = self.engine_mgr.data_schema_id(schema);
