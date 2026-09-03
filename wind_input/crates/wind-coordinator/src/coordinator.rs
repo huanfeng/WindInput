@@ -4675,8 +4675,12 @@ impl Coordinator {
         //      reset_first_show() 在每次上屏时复位（Go 的 clearState 同样如此）。
         //   ③ 坐标已就绪：已有过有效 caret 且本轮组合起点已锁定 ⇒ 没有漂移可等。
         //      对应 Go 的 `!caretValid || !compositionStartValid` 取反。
+        //   ④ 组合前的空闲上报可作锚点：见 `caret_cache_is_fresh_idle_report`。补的是 ③ 在
+        //      连打时的死角——③ 的组合起点每次上屏被清、重锁又要等那个等不到的权威坐标，
+        //      于是 fast 档连打时两个逃生口全部失效，只能走等待。
         let skip_caret_pending =
             self.effective_first_show_mode() == wind_config::app_compat::FirstShowMode::Instant;
+        let idle_anchor = self.caret_cache_is_fresh_idle_report();
         let coords_ready = self
             .last_valid_caret
             .lock()
@@ -4698,11 +4702,11 @@ impl Coordinator {
         let caret_free = self
             .caret_independent
             .load(std::sync::atomic::Ordering::Relaxed);
-        if is_first_frame && !caret_free && !skip_caret_pending && !coords_ready {
+        if is_first_frame && !caret_free && !skip_caret_pending && !coords_ready && !idle_anchor {
             // 唯一的「等」出口。与下面的放行日志成对，两条合起来即可从服务端日志判定
             // 每一帧走了哪条路、以及是哪个逃生口生效——不必再对着 TSF 日志比时间戳。
             debug!(
-                "first_show 闸门 → 等待权威坐标（arm {}ms 兜底）: skip_caret_pending=0 coords_ready=0",
+                "first_show 闸门 → 等待权威坐标（arm {}ms 兜底）: skip_caret_pending=0 coords_ready=0 idle_anchor=0",
                 self.planned_first_show_timeout_ms()
             );
             self.arm_pending_first_show();
@@ -4711,13 +4715,18 @@ impl Coordinator {
         if is_first_frame {
             // instant 档用的是上一轮遗留的坐标，必然是「非权威」；coords_ready 那条是已锁定
             // 的本轮组合起点，属权威，不置位。
-            if skip_caret_pending {
+            //
+            // idle_anchor 跟 instant 同待遇而非跟 coords_ready：它是**按键前**的光标位置，
+            // 组合一开始首字母就落进编辑区，真实光标随即前移一个字符宽（记事本实测 15px）。
+            // 不置位则 tol 只有 3px，那一次权威坐标必然触发 reshow——首显是准的，却要当着
+            // 用户的面跳一格。置位后走 settle 放宽容差（0.8×行高 ≈ 44px）吸收掉。
+            if skip_caret_pending || idle_anchor {
                 self.first_show_was_provisional
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
             debug!(
-                "first_show 闸门 → 立即显示（逃生口）: instant={} coords_ready={}",
-                skip_caret_pending as u8, coords_ready as u8
+                "first_show 闸门 → 立即显示（逃生口）: instant={} coords_ready={} idle_anchor={}",
+                skip_caret_pending as u8, coords_ready as u8, idle_anchor as u8
             );
         }
         let t_nu = std::time::Instant::now();
@@ -7633,6 +7642,101 @@ mod caret_compat_tests {
             *c.pending_first_show_token.lock().unwrap(),
             token,
             "短兜底路径的既有行为是每次按键重新计时"
+        );
+    }
+
+    /// ★★★ 单向陷阱：`caret_cache_verified` 的清位有两个日常入口（切窗口、点击移光标），
+    /// 置位却只有「组合期间收到权威 caret_update」这一个。而 fast 档下组合往往等不到权威
+    /// 坐标（各宿主实测 53~73ms，fast 兜底 25ms），一旦被清就再也回不来，此后每个组合都
+    /// arm 600ms 长兜底。2026-09-03 记事本快速 `d空格` 实测：组合寿命 19ms、兜底 600ms，
+    /// 50 次输入 0 次首显；同日全量日志里长兜底占 65%——本该是逃生口，成了主路径。
+    ///
+    /// 组合前宿主主动上报的空闲光标是同样够格的第二个置位来源：它是对当前插入点的直接
+    /// 测量，且恰好就是本次组合的起点。
+    #[test]
+    fn idle_caret_report_clears_the_trust_gate() {
+        let c = fast_coord(false);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer.clear();
+            st.candidates.clear();
+        }
+        c.handle_caret_update(&caret(400, 20));
+        assert!(
+            c.caret_cache_verified
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "组合前的 TSF 空闲上报必须解除信任门，否则快速输入下 verified 永远回不来"
+        );
+    }
+
+    /// 反向：GUI 回退通道不够格解除信任门。实测拿到过任务栏残留的 Win32 光标 (0,1388)——
+    /// 它够当「没有更好选择时的兜底位置」，不够让 fast 档判定可以跳过等待。
+    #[test]
+    fn non_tsf_idle_report_keeps_the_trust_gate() {
+        let c = fast_coord(false);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer.clear();
+            st.candidates.clear();
+        }
+        c.handle_caret_update(&CaretData {
+            source: wind_ipc::protocol::caret_source::GUI_CARET,
+            ..caret(400, 20)
+        });
+        assert!(
+            !c.caret_cache_verified
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "GUI 回退通道的坐标不够格让 fast 档跳过等待"
+        );
+    }
+
+    /// 驱动一次首帧候选下发，走真实的 `notify_ui_update` 闸门——判据接在闸门上，
+    /// 只断言 `caret_cache_is_fresh_idle_report()` 的返回值等于没测接线。
+    fn drive_first_frame(c: &Arc<Coordinator>) {
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+        }
+        let st = c.state.lock().unwrap();
+        c.notify_ui_update(&st);
+    }
+
+    /// idle_anchor 逃生口：缓存是组合前的 TSF 空闲上报时不必等。兜底到期后用的就是这份
+    /// 缓存，而 25ms 内等不到更好的（各宿主权威坐标 53~73ms），等待只是把首显推迟 25ms。
+    /// 补的是 `coords_ready` 在连打时的死角——它依赖的组合起点每次上屏被 `reset_first_show`
+    /// 清掉，重锁又要等那个等不到的权威坐标，于是 fast 档连打时两个逃生口全部失效。
+    #[test]
+    fn fresh_idle_report_skips_the_wait() {
+        let c = fast_coord(true);
+        c.caret_cache_is_idle_report
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        drive_first_frame(&c);
+        assert!(
+            !*c.pending_first_show.lock().unwrap(),
+            "组合前空闲上报已够格当锚点，首帧不该再等"
+        );
+        assert!(
+            c.first_show_was_provisional
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "必须标 provisional：首显用的是按键前的位置，组合一起首字母就落进编辑区，\
+             真实光标随即前移一个字符宽（记事本实测 15px）。不标则 tol 只有 3px，那一次\
+             权威坐标必然 reshow——首显是准的，却要当着用户的面跳一格"
+        );
+    }
+
+    /// 反向对照：缓存虽可信、但出身不是组合前空闲上报（如组合期间收到的权威坐标）时，
+    /// 逃生口不成立，仍走既有等待路径。守住「两个标志缺一不可」。
+    #[test]
+    fn verified_cache_alone_does_not_open_the_escape_hatch() {
+        let c = fast_coord(true);
+        drive_first_frame(&c);
+        assert!(
+            *c.pending_first_show.lock().unwrap(),
+            "只有 verified、出身不是空闲上报时，必须维持既有的等待行为"
         );
     }
 

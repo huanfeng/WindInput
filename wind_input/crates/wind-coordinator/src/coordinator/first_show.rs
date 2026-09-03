@@ -146,6 +146,28 @@ impl Coordinator {
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// 缓存里装的是**本次组合开始前、宿主经 TSF 主动上报的空闲光标位置**，可直接当首显锚点。
+    ///
+    /// 这是首显闸门第三个「不必等」的逃生口，补的是 ③ `coords_ready` 在连打时的死角：③ 依赖
+    /// 的组合起点被 `reset_first_show` 每次上屏清掉，重新锁定又要等组合期间的权威 caret_update
+    /// ——正是 fast 档等不到的那个东西（实测各宿主 53~73ms，而 fast 兜底只有 25ms）。
+    ///
+    /// 「不必等」在这里是字面意义上的：兜底到期后用的就是 `state.caret_x/y` 这份缓存，和立即
+    /// 显示用的是同一个坐标。25ms 内既然等不到更好的，等待就只是把首显推迟 25ms。
+    ///
+    /// 两个标志必须同时成立，各自答不同的问题，缺一不可：
+    /// - `caret_cache_is_idle_report`：缓存的**出身**是组合前的空闲上报（不是组合期间的 probe，
+    ///   也不是焦点事件随包携带的坐标）。
+    /// - `caret_cache_verified`：这份缓存**够格直接拿来定位**（限 TSF 通道，且未被切窗口 /
+    ///   点击移光标作废）。
+    pub(super) fn caret_cache_is_fresh_idle_report(&self) -> bool {
+        self.caret_cache_is_idle_report
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && self
+                .caret_cache_verified
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// 本次 arm **实际**会用的超时值。
     ///
     /// 存在的唯一理由是给首显闸门的日志用：闸门原本直接打印 `first_show_fallback_ms()`，

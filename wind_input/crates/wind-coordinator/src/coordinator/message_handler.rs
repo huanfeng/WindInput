@@ -2477,10 +2477,31 @@ impl MessageHandler for Coordinator {
             // （见 `caret_cache_is_idle_report` 与 `handle_caret_probe` 的第三道判据）。
             self.caret_cache_is_idle_report
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+            // ★ 同一帧也够格解除首帧信任门。`caret_cache_verified` 问的是「手里的坐标是不是
+            // 当前插入点」，而这一帧正是宿主对当前插入点的直接测量，且发生在下一次按键之前
+            // ——比组合期间任何 probe 都新鲜，并且它恰好就是下一次组合的起点。
+            //
+            // 不置位会形成一个**单向陷阱**：清位有两个日常入口（切窗口、点击移光标），置位却
+            // 只有「组合期间收到权威 caret_update」这一个。而 fast 档下组合往往等不到权威坐标
+            // （宿主 reflow 慢、OnLayoutChange 被 debounce 压住），于是一旦被清就再也回不来，
+            // 每个组合都 arm 600ms 长兜底。实测 2026-09-03 记事本快速 `d空格`：组合寿命 19ms、
+            // 兜底 600ms，50 次输入 0 次首显；同日全量日志里长兜底占到 65%——本该是「焦点刚
+            // 到达」的逃生口，成了主路径。
+            //
+            // ⚠ 限 TSF 通道：GUI 回退给的可能是任务栏残留的 Win32 光标（实测 (0,1388)），够格
+            // 当「没有更好选择时的兜底位置」，不够格让 fast 档判定可以跳过等待。这与上面
+            // `caret_cache_is_idle_report` 的无条件置位刻意不同口径：那个问的是缓存的**出身**
+            // （用于和 probe 比谁更陈旧），与通道精度无关；本字段问的是**能否直接拿来定位**。
+            if wind_ipc::protocol::caret_source::is_tsf(data.source) {
+                self.caret_cache_verified
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             debug!(
                 "caret_update → 仅更新缓存: 无组合（无候选且缓冲空），不做显示决策；\
-                 记为组合前空闲上报 ({},{})",
-                data.x, data.y
+                 记为组合前空闲上报 ({},{}) tsf={}",
+                data.x,
+                data.y,
+                wind_ipc::protocol::caret_source::is_tsf(data.source)
             );
             return;
         }
