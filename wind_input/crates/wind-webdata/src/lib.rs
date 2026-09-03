@@ -414,6 +414,16 @@ pub trait WebDataRpc: WebDataHost {
             "dict.remove" => self.web_dict_remove(params),
             "dict.clear" => self.web_dict_clear(params),
             "dict.stats" => self.web_dict_stats(),
+            // 加词界面的默认上下文：设置端 `--add-word` 裸启动（不经输入法热键，故没有
+            // --schema / --text）时据此把窗口填成可用状态，以及窗内「最近输入」按钮的取值。
+            // 深链带了参数就不会调它——那时用户的意图已经明确。
+            "dict.addWordContext" => {
+                let ctx = self.add_word_context();
+                Ok(json!({
+                    "schemaId": ctx.schema_id,
+                    "recentText": ctx.recent_text,
+                }))
+            }
             // 加词自动出码：按方案类型选拼音/五笔规则（reverse 反查表）。
             "dict.encode" => self.web_dict_encode(params),
             // 批量出码：纯词列表导入按批调用（设置端每批约 1000 词）。

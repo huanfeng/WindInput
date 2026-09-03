@@ -46,6 +46,13 @@ pub trait WebDataHost {
     /// 窄面签名不携带宿主内部类型与锁形态。
     fn current_theme_is_dark(&self) -> bool;
 
+    /// 加词界面的默认上下文（目标方案 + 最近上屏文本），见
+    /// [`crate::handle_addword::AddWordContext`]。
+    ///
+    /// 走窄面而不是让 webdata 自己拼：目标方案要经混输解析（`add_word_target_schema`），
+    /// 最近上屏更是纯输入态——webdata 按设计不碰 `State`。
+    fn add_word_context(&self) -> crate::handle_addword::AddWordContext;
+
     /// 快捷输入格式表的设置页全貌（含被停用的条目）。
     fn quick_format_rows(&self) -> Vec<crate::handle_quick_format::QuickFormatRow>;
 
@@ -151,6 +158,9 @@ impl WebDataHost for Coordinator {
     }
     fn reverse_lookup(&self) -> &RwLock<ReverseLookup> {
         &self.reverse
+    }
+    fn add_word_context(&self) -> crate::handle_addword::AddWordContext {
+        Coordinator::add_word_context(self)
     }
     fn rebuild_phrases(&self) {
         Coordinator::rebuild_phrases(self);

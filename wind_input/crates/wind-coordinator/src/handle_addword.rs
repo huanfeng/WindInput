@@ -111,6 +111,23 @@ fn display_code(code: &str, boundary: u64) -> String {
     wind_store::wdict::join_code_by_boundary(code, boundary)
 }
 
+/// 加词界面的默认上下文：设置端在**没有预填参数**时据此把窗口填成可用状态。
+///
+/// 存在的理由是 `wind-setting --add-word` 这条裸入口：它不经输入法热键，拿不到方案，也
+/// 拿不到最近输入，此前开出来是一个方案为空的窗——`dict.encode` / `dict.add` 都会失败，
+/// 界面看着正常却什么也做不了。
+pub struct AddWordContext {
+    /// 加词目标方案 id（混输已解析到主码表方案，见 `add_word_target_schema`）。
+    pub schema_id: String,
+    /// 最近上屏文本，**取字符池上限那么多**（[`ADD_WORD_MAX_LEN`]），不是默认词长。
+    ///
+    /// ★ 判据来自「加词是为了打不出来的词」：一个词若能整段一次上屏，说明词库里已经有
+    /// 它，根本不需要加。真正要加的词恰恰是**逐字/分段上屏**的，散落在多条上屏记录里，
+    /// 取末尾两字往往只截到半个词。设置端的词条框是多行的，多给的部分删起来很便宜，
+    /// 少给却要用户回到输入法重打一遍。
+    pub recent_text: String,
+}
+
 /// toast 回显用的词截断（按字符，超出加省略号）。词本身最长受 [`ADD_WORD_MAX_LEN`] 约束，
 /// 但显式 code 路径不限长，故回显仍需兜底，避免 toast 被撑爆。
 fn toast_clamp(word: &str) -> String {
@@ -668,7 +685,7 @@ impl Coordinator {
 
     /// 还原最近上屏字符池：`recent_commits` 最新在前，反转为时间序（旧→新）后展开为字符，
     /// 取末尾 `max_len` 个（最近输入的字符）。
-    fn add_word_recent_chars(&self, max_len: usize) -> Vec<char> {
+    pub(crate) fn add_word_recent_chars(&self, max_len: usize) -> Vec<char> {
         let snap = self.recent_commits_snapshot(); // 最新在前
         let mut chars: Vec<char> = Vec::new();
         for s in snap.iter().rev() {
@@ -914,7 +931,7 @@ impl Coordinator {
     /// 方案的**真实 id**（供设置端 `dict.encode` 正确判引擎类型、`dict.add` 落到码表用户词库）；
     /// 非混输保持真实 active id（拼音族的存储折叠由 `web_dict_add` 内部 `data_schema_id` 处理，
     /// 此处不能提前折叠成 "pinyin"，否则出码会误判为码表）。
-    fn add_word_target_schema(&self) -> String {
+    pub(crate) fn add_word_target_schema(&self) -> String {
         let active = self.engine_mgr.active_schema_id();
         if self.engine_mgr.schema_engine_type(&active).as_deref() == Some("mixed") {
             self.engine_mgr
@@ -922,6 +939,18 @@ impl Coordinator {
                 .unwrap_or(active)
         } else {
             active
+        }
+    }
+
+    /// 加词界面的默认上下文（见 [`AddWordContext`]）。设置端经 `dict.addWordContext`
+    /// 取用，**只在它自己缺参数时**——带 `--schema` / `--text` 进来的深链不会走到这里。
+    pub(crate) fn add_word_context(&self) -> AddWordContext {
+        AddWordContext {
+            schema_id: self.add_word_target_schema(),
+            recent_text: self
+                .add_word_recent_chars(ADD_WORD_MAX_LEN)
+                .into_iter()
+                .collect(),
         }
     }
 
