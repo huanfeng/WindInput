@@ -1020,9 +1020,28 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
 
         if (pThis != nullptr && pThis->_pTextService != nullptr)
         {
-            WIND_LOG_DEBUG(L"MsgWndProc: Processing WM_CLEAR_COMPOSITION\n");
+            // 部署指纹（勿删）：本分支的改动是「把一个默认参数改成 TRUE」，二进制里不产生
+            // 任何新符号，光看时间戳无法区分「编进去了」与「增量跳过了」。这句话里的
+            // keep_pair_state 就是那个可 grep 的锚点 —— DLL 里搜得到 = 编进去了，
+            // 部署目录那份搜得到 = 换上了，真机日志出现本行 = 运行时确实加载了新 DLL。
+            WIND_LOG_DEBUG(L"MsgWndProc: Processing WM_CLEAR_COMPOSITION keep_pair_state\n");
             pThis->_pTextService->EndComposition();
-            pThis->_pTextService->ResetComposingState();
+            // keepPairState=TRUE：**保留**自动配对状态。本消息只服务于服务端经 push 主动推来的
+            // CMD_CLEAR_COMPOSITION，四个投递方（中英/方案切换的无按键路径、联想自动隐藏超时的
+            // 收口、服务重启、鼠标点命令候选）都不移动光标、也不消除已插入的右符号，配对的前提
+            // 「光标紧贴一个右符号」仍然成立 —— 与按键路径的中英切换取同一判据（见
+            // CTextService 里两处 ResetComposingState(TRUE) 的注释）。
+            //
+            // ⚠️ 曾用默认值（连配对栈一起清），症状：把 jump_out_keys 配成 tab 的用户，在 ()
+            // 里打字上屏后手停 5 秒，联想自动隐藏的收口把 _pairPendingDepth 清零，随后按 Tab
+            // 不再被吃 —— 那个 depth 正是「Tab 要不要转发给协调器裁决」的唯一闸门（本文件
+            // OnTestKeyDown 的 pair_jumpout_forward 分支），于是跳出退化成插入一个制表符。
+            // 按键路径的 ResponseType::ClearComposition 分支从不碰 depth，两条路因此行为分叉。
+            //
+            // 服务重启那一条会让 DLL 保留 depth 而服务端 pair_tracker 是新的（空）——
+            // 该 desync 由 OnKeyDown 的 pair_jumpout_desync_replay 分支自愈（以 core 为准把本地
+            // depth 归零并重放键），不需要在此提前清。
+            pThis->_pTextService->ResetComposingState(TRUE);
         }
         return 0;
     }
