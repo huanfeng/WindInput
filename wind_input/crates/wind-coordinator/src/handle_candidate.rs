@@ -183,6 +183,24 @@ fn clear_blocked_by_candidates(candidates: &[Candidate], input_len: usize) -> bo
 ///
 /// `max_code_length` 为 0（拼音等无「全码」概念的引擎，见 `Engine::max_code_length` 默认实现）
 /// 时结果为 0 → 调用方的 `len < 0` 恒假 → 不设闸，与引擎侧同构降级。
+/// 候选列表里**唯一的非 emoji 扩展候选**；不足一条或多于一条都返回 `None`。
+///
+/// # 为什么抽成纯函数
+///
+/// [`Coordinator::phrase_auto_commit`] 的其余判据要真实引擎与短语库才跑得起来（构造一个
+/// `Coordinator` 需临时目录 + schema 文件 + redb），而这一条是纯列表运算，**且正是最容易
+/// 被 emoji 扩展悄悄破坏的地方**：原判据写作 `let [c] = &state.candidates[..]`，插入任意
+/// 一条 emoji 候选后即恒假。抽出来才钉得住。
+///
+/// ⚠️ 只有「唯一性」类判据需要这样排除。候选窗显隐（`is_empty`）、翻页与选中索引
+/// （`len`）**照常把 emoji 计入**——用户要能翻到并选中它；而且没有宿主候选就不会有
+/// emoji，故 `is_empty` 的语义天然不受影响。
+fn sole_non_emoji(candidates: &[Candidate]) -> Option<&Candidate> {
+    let mut it = candidates.iter().filter(|c| !c.is_emoji_suggestion);
+    let first = it.next()?;
+    it.next().is_none().then_some(first)
+}
+
 fn resolve_auto_commit_min_len(configured: usize, max_code_length: usize) -> usize {
     if configured > 0 {
         configured
@@ -1163,9 +1181,15 @@ impl Coordinator {
             return None;
         }
         // 唯一候选。
-        let [c] = &state.candidates[..] else {
-            return None;
-        };
+        //
+        // ⚠️ emoji 扩展候选**不计入**（`is_emoji_suggestion`）：它们是按已成形候选的文本
+        // 追加进来的，不是这个码检索出的词条，对「这个码只有一条候选」这个判断没有发言权。
+        // 不排除的话，凡是短语文本恰好命中 emoji 表（如短语 `ocd → 好的`）就会让本判据
+        // 恒假 ⇒ 该短语打全码不再自动上屏、要多按一次空格，而用户完全无从联想到 emoji。
+        //
+        // 引擎侧的 `decide_auto_commit` 不需要这道闸：它按 `c.code == input` 筛码表候选子集，
+        // 而 emoji 候选 `code` 恒空（同短语、同英文头部候选）。两处判据不同源，别互相照抄。
+        let c = sole_non_emoji(&state.candidates)?;
         // 精确码短语（非前缀枚举 / 非组）。命令留待下方按纯文本/副作用分流。
         if !c.is_phrase || c.is_prefix || c.is_group {
             return None;
@@ -3814,6 +3838,73 @@ mod auto_commit_min_len_tests {
     fn no_max_code_length_disables_gate() {
         // 拼音等引擎 max_code_length()=0 → 门槛 0 → 调用方 `len < 0` 恒假 → 不设闸。
         assert_eq!(resolve_auto_commit_min_len(0, 0), 0);
+    }
+}
+
+#[cfg(test)]
+mod sole_non_emoji_tests {
+    //! 短语自动上屏的唯一性判据：emoji 扩展候选不得计入。
+    //!
+    //! 这条判据的失效是**静默**的：短语照常出现在候选窗里，只是打全码后不再自动上屏、
+    //! 要多按一次空格，且只在该短语的文本恰好命中 emoji 表时发生。用户根本无从把这个
+    //! 现象与 emoji 功能联系起来，故必须由测试钉住。
+    use super::sole_non_emoji;
+    use wind_candidate::Candidate;
+
+    fn cand(text: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            is_phrase: true,
+            ..Default::default()
+        }
+    }
+
+    fn emoji(text: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            is_emoji_suggestion: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn single_real_candidate_is_sole() {
+        let v = [cand("好的")];
+        assert_eq!(sole_non_emoji(&v).map(|c| c.text.as_str()), Some("好的"));
+    }
+
+    /// ★ 核心：短语 + 追加的 emoji ⇒ 仍算「唯一」，自动上屏不受影响。
+    ///
+    /// 原判据 `let [c] = &candidates[..]` 在这里恒假 —— 这正是本次要修的回归。
+    #[test]
+    fn appended_emoji_does_not_break_uniqueness() {
+        let v = [cand("好的"), emoji("👌")];
+        assert_eq!(sole_non_emoji(&v).map(|c| c.text.as_str()), Some("好的"));
+        // 多个 emoji 同样不影响（max_per_word 可配到 3）。
+        let v = [cand("好的"), emoji("👌"), emoji("🆗"), emoji("👍")];
+        assert_eq!(sole_non_emoji(&v).map(|c| c.text.as_str()), Some("好的"));
+    }
+
+    /// 两条真候选仍判非唯一 —— 排除 emoji 不等于放宽原判据。
+    #[test]
+    fn two_real_candidates_are_not_sole() {
+        let v = [cand("好的"), cand("好地"), emoji("👌")];
+        assert!(sole_non_emoji(&v).is_none());
+    }
+
+    /// 只有 emoji 没有宿主候选 ⇒ 无候选可上屏。
+    ///
+    /// 实际上这个状态构造不出来（emoji 是按宿主候选的文本追加的），但判据不该依赖
+    /// 那个前提——依赖了，将来 emoji 有了别的产出路径就会静默出错。
+    #[test]
+    fn emoji_only_is_not_sole() {
+        let v = [emoji("👌")];
+        assert!(sole_non_emoji(&v).is_none());
+    }
+
+    #[test]
+    fn empty_is_not_sole() {
+        assert!(sole_non_emoji(&[]).is_none());
     }
 }
 

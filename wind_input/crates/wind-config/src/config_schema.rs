@@ -136,6 +136,14 @@ pub const FONT_SCRIPT_KEYS: &[&str] = &[
 /// mix / special 的同名字段是 StructList 条目内的属性，不在本注册表单独登记。
 const LAYOUT_INTENT_VALUES: &[&str] = &["follow", "vertical", "horizontal"];
 
+/// emoji 扩展的触发范围（`input.emoji.scope`）。
+///
+/// ★ 值域登记在这里而不是只写进注释：core 与设置页 options 各写一份的话，两者脱节了
+/// 无人会报——本仓已经踩过这个坑。登记后设置页从同一个数组取值，改一处即两处同步。
+const EMOJI_SCOPE_VALUES: &[&str] = &["off", "exact", "all"];
+/// emoji 扩展的呈现形态（`input.emoji.show_as`）。理由同 [`EMOJI_SCOPE_VALUES`]。
+const EMOJI_SHOW_AS_VALUES: &[&str] = &["after", "tail", "focus", "comment"];
+
 /// 全部配置字段声明（单一真相源）。与 [`Config`] 经测试反向对照，保证零漂移。
 /// 域划分见 `docs/config-key-migration.md`（不做向后兼容，旧键已弃）。
 ///
@@ -351,6 +359,15 @@ static REGISTRY: &[ConfigField] = &[
     // 留在此处是**出厂声明处** + 设置端 key_action 控件的标识符。
     f("input.rare_char.trigger_keys", StrList),
     f("input.rare_char.include_blocks", StrList),
+    // Emoji 候选扩展（按候选文本查表追加，与编码域无关 ⇒ 全方案通用，故在 input 而非 schema）。
+    f("input.emoji.enabled", Bool),
+    f("input.emoji.scope", Enum(EMOJI_SCOPE_VALUES)),
+    f("input.emoji.show_as", Enum(EMOJI_SHOW_AS_VALUES)),
+    f("input.emoji.max_per_word", Int),
+    f("input.emoji.max_hosts", Int),
+    f("input.emoji.min_word_chars", Int),
+    f("input.emoji.categories", Bool),
+    f("input.emoji.learn_freq", Bool),
     f("input.url.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
     f(
         "input.add_word.candidate_layout",

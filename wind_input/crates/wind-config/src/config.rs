@@ -2830,6 +2830,9 @@ pub struct InputConfig {
     /// 生僻字模式（用当前方案的编码输入，候选只留生僻字）。
     #[serde(default)]
     pub rare_char: RareCharConfig,
+    /// Emoji 候选扩展（按候选文本查表追加，与编码域无关故所有方案通用）。
+    #[serde(default)]
+    pub emoji: EmojiConfig,
     /// 网址输入模式。
     #[serde(default)]
     pub url: UrlConfig,
@@ -2871,6 +2874,7 @@ impl Default for InputConfig {
             capslock: CapslockConfig::default(),
             temp_pinyin: TempPinyinConfig::default(),
             rare_char: RareCharConfig::default(),
+            emoji: EmojiConfig::default(),
             url: UrlConfig::default(),
             add_word: AddWordConfig::default(),
             s2t: S2TConfig::default(),
@@ -3186,6 +3190,103 @@ pub struct CapslockConfig {
 
 /// 生僻字模式配置（[input.rare_char]）。
 ///
+/// Emoji 候选扩展：打出词组后，按**候选文本**查表把对应 emoji 追加到候选里。
+///
+/// 与编码域无关（不查码、只查文本）⇒ 所有方案自动支持，不需要任何方案配置。设计与
+/// 六条硬约束见 `docs/design/emoji-suggestion.md`。
+///
+/// # 为什么每个非零默认值都有一个 `default_emoji_*` 函数
+///
+/// serde 的 `#[serde(default = "f")]` 管的是「配置文件里**缺这个键**」，而
+/// [`Default::default()`] 管的是「代码里造一个空配置」。两者若各写各的字面量，改默认值时
+/// 必然漏掉一边——于是「配置文件里没写」与「代码里 default()」给出不同结果，且只在
+/// 其中一条路径上表现出来。这里让两者共用同一组函数，从结构上消掉这种分叉。
+///
+/// ⚠️ `scope` / `show_as` 是**字符串枚举**（同 `input.filter_mode` 的既有风格），类型层
+/// 不做约束。值域见各字段注释；消费端遇到不认识的值必须**告警后回落默认**，不得静默
+/// ——设置页 options 与 core 值域脱节是本仓踩过的坑，静默降级会让它彻底无人发现。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmojiConfig {
+    /// 总开关。**出厂关**（同 aux_code / short_code_yield 等新增可选功能）。
+    ///
+    /// 关闭时连数据文件都不打开——`load_or_build` 根本不会被调用，故未启用的用户为本功能
+    /// 付出的常驻内存与启动开销均为零。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 触发范围：`off` 不扩展 / `exact` 仅对**精确整词命中**的候选扩展 / `all` 所有候选。
+    ///
+    /// 出厂 `exact`：`all` 会让前缀补全、子短语之类的候选也带出 emoji，而那些候选本身就是
+    /// 「猜」出来的，再挂一个 emoji 只会放大噪音。
+    #[serde(default = "default_emoji_scope")]
+    pub scope: String,
+    /// 呈现形态：`after` 紧随宿主候选 / `tail` 追加到列表末尾 / `focus` 只对当前高亮候选
+    /// 展开 / `comment` 只在注释段灰字显示。
+    ///
+    /// ★ `focus` 存在的理由：只扩首选时，想要的词若不在首位（拼音下「动物」常常不是），
+    /// 那个词有 emoji 但用户**永远够不着**；而放开 `max_hosts` 又会把列表撑开。跟随高亮则
+    /// 列表长度恒定、任何候选都够得着。
+    #[serde(default = "default_emoji_show_as")]
+    pub show_as: String,
+    /// 一个词最多产出几个 emoji。
+    ///
+    /// 实测上游 `emoji_word.txt` 平均 1.09 个/键、最多 4 个 —— 本闸门对它**几乎不触发**；
+    /// 真正要拦的是分类表（`emoji_category.txt` 平均 9 个、最多 90 个「动物」）。
+    #[serde(default = "default_emoji_max_per_word")]
+    pub max_per_word: usize,
+    /// 对候选列表的前几个候选做扩展（`show_as = "focus"` 时本项无意义）。
+    ///
+    /// 出厂 1（只扩首选）：这是把「候选序号漂移」控制住的主要手段——rime 那边的干扰感，
+    /// 根源正是它对每个候选都扩。
+    #[serde(default = "default_emoji_max_hosts")]
+    pub max_hosts: usize,
+    /// 宿主候选至少要有几个字才触发。出厂 2：单字词（「一」→ 1️⃣）噪音最大且最没用。
+    #[serde(default = "default_emoji_min_word_chars")]
+    pub min_word_chars: usize,
+    /// 是否加载分类表（`emoji_category.txt`：「动物」→ 90 个 emoji 那种）。
+    ///
+    /// 出厂关：干扰几乎全部集中在这 166 条上。但它也是「我想找个动物表情」时唯一好用的
+    /// 入口，故做成独立开关而不是不引入。
+    #[serde(default)]
+    pub categories: bool,
+    /// emoji 上屏是否参与词频学习。出厂关。
+    ///
+    /// ⚠️ 打开它需要读写两端同时放行，只放一端会得到两种半吊子形态之一（见
+    /// `EngineManager` 里 `exclude_blocks` 的同型论证）。
+    #[serde(default)]
+    pub learn_freq: bool,
+}
+
+fn default_emoji_scope() -> String {
+    "exact".to_string()
+}
+fn default_emoji_show_as() -> String {
+    "after".to_string()
+}
+fn default_emoji_max_per_word() -> usize {
+    3
+}
+fn default_emoji_max_hosts() -> usize {
+    1
+}
+fn default_emoji_min_word_chars() -> usize {
+    2
+}
+
+impl Default for EmojiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scope: default_emoji_scope(),
+            show_as: default_emoji_show_as(),
+            max_per_word: default_emoji_max_per_word(),
+            max_hosts: default_emoji_max_hosts(),
+            min_word_chars: default_emoji_min_word_chars(),
+            categories: false,
+            learn_freq: false,
+        }
+    }
+}
+
 /// ⚠️ **没有 `enabled`**：不绑任何键 ＝ 这个模式进不去 ＝ 关闭，无须第二个开关。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RareCharConfig {
@@ -7052,6 +7153,37 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ `EmojiConfig` 的两条默认值来源必须给出**同一个结果**。
+    ///
+    /// serde 的 `#[serde(default = "f")]` 管「配置文件里缺这个键」，`Default::default()`
+    /// 管「代码里造一个空配置」。两者若各写各的字面量，改默认值时必然漏掉一边，于是
+    /// 「用户没写这一段」与「代码里 default()」行为不同——而这种分叉只在其中一条路径上
+    /// 表现出来，是最难对上账的那种。本测试是那条不变量的守门人。
+    ///
+    /// ⚠️ 判据取**整个结构相等**而非逐字段列举：逐字段写的话，将来新增字段忘了加断言，
+    /// 测试照样绿。
+    #[test]
+    fn emoji_config_default_matches_empty_toml() {
+        let from_empty: EmojiConfig = toml::from_str("").expect("空表应能反序列化");
+        assert_eq!(
+            from_empty,
+            EmojiConfig::default(),
+            "缺键时的 serde 默认值与 Default::default() 分叉了"
+        );
+    }
+
+    /// 出厂必须是「什么都不发生」：功能关、分类表不加载、不学词频。
+    ///
+    /// 与上一条互补——上一条只保证两条路径一致，一致地错了它也发现不了。
+    #[test]
+    fn emoji_config_ships_disabled() {
+        let d = EmojiConfig::default();
+        assert!(!d.enabled, "出厂必须关闭");
+        assert!(!d.categories, "分类表干扰最大，出厂不加载");
+        assert!(!d.learn_freq, "emoji 出厂不参与词频");
+        assert_eq!(d.max_hosts, 1, "只扩首选是控制候选序号漂移的主要手段");
+    }
 
     /// ★ 语法模型的默认值必须是「什么都不发生」：`weight = 0` **且** `model` 为空。
     ///

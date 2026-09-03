@@ -154,6 +154,30 @@ pub struct Candidate {
     /// `is_fuzzy` 被简拼借作「沉底标记」都是同类前科——来源属性与排序决策必须分开。
     #[serde(default)]
     pub is_scope_filtered: bool,
+    /// 该候选是**按已成形候选的文本查表追加**进来的 emoji，不是词库里的条目
+    /// （设计见 `docs/design/emoji-suggestion.md`）。
+    ///
+    /// ## 语义严格限定为这一个客观事实，不编码任何排序或显示决策
+    ///
+    /// 与 [`Self::is_scope_filtered`] 同构，四个消费者各自决定行为：
+    /// - **自动上屏**：计数时跳过。`phrase_auto_commit` 判的是「整个候选列表长度为 1」
+    ///   （`let [c] = &state.candidates[..]`），插一条 emoji 进去那条恒假 ⇒ 短语打全码
+    ///   不再自动上屏、要按空格，且只在该短语文本恰好命中 emoji 表时发生；
+    /// - **排序**：位置由 `input.emoji.show_as` 决定（紧随宿主 / 沉底 / 跟随高亮），
+    ///   不由本字段决定；
+    /// - **词频**：恒不参与（同短语的「有文本无码位恒不记词频」）；
+    /// - **UI**：可加标注前缀。
+    ///
+    /// ⚠️ 引擎侧的 `decide_auto_commit` **天然免疫**：它按 `c.code == input` 筛码表候选
+    /// 子集判唯一，而本类候选 `code` 恒空（同短语、同英文头部候选）。**别据此以为
+    /// 自动上屏整体安全**——协调器侧的短语那条判据看的是列表长度，两者判据不同源。
+    ///
+    /// ★ 不复用 `is_scope_filtered`：那个表达的是「本应被检索范围滤掉、因翻页放宽才留下」，
+    /// 与「不是词库条目」是两件无关的事。一个字段承担两种含义，改一个必碰坏另一个——
+    /// 本文件里 `is_prefix` 被静态短语借作「非精确层」、`is_fuzzy` 被简拼借作「沉底标记」
+    /// 都是同类前科。
+    #[serde(default)]
+    pub is_emoji_suggestion: bool,
     pub is_phrase: bool,
     pub is_command: bool,
     /// 是否来自模糊音变体命中（非原拼音精确匹配）。
@@ -418,6 +442,7 @@ impl Default for Candidate {
             is_common: false,
             user_rare: false,
             is_scope_filtered: false,
+            is_emoji_suggestion: false,
             is_phrase: false,
             is_command: false,
             is_fuzzy: false,
