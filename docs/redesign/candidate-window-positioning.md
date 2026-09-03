@@ -4,6 +4,12 @@
 > Go 版本（`../WindInput/wind_input`）经长期实测稳定，Rust 版本据此移植。
 > 涉及 DLL（`wind_tsf`）、协调器（`wind-coordinator`）、UI（`wind-ui`）三层。
 
+> ⚠ **动手改本文档描述的任何判据之前，先读
+> [`docs/architecture/caret-position-host-compat-notes.md`](../architecture/caret-position-host-compat-notes.md)。**
+> 那里有各类宿主的实测画像、必测矩阵和已被推翻的方向——本设计的正确性高度依赖宿主行为，
+> 而不同类型的宿主（表格类 / Qt WebView / 纯文本编辑器 / 终端）会以完全不同的方式违反假设，
+> **单个宿主上验证通过完全不能说明问题**。
+
 ## 1. 问题现象
 
 候选窗应紧贴输入光标显示。但在某些应用（尤其终端类如 **tabby**、WebView、WPS、Excel）会出现：
