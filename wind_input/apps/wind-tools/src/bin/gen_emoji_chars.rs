@@ -140,32 +140,39 @@ fn collect(text: &str, want: &str) -> anyhow::Result<BTreeSet<u32>> {
     Ok(out)
 }
 
-/// 写字表：首行注释记录来源与版本，其后一行一个字符（与 `common_chars.txt` 同格式）。
+/// 写字符类文件：meta 头 + `...` + 列表体，与 `.dict.yaml` 同构。
+///
+/// # ★★ 出厂 meta 只声明身份，**一个判定字段都不写**
+///
+/// `default` / `no_freq` / `in_rare` 全部留空 = **不表态**，于是本类只提供「这些字符
+/// 属于 emoji」这个事实，不改变任何既有行为：出厂 `exclude_blocks` 本就为空（emoji
+/// 参与词频）、`include_blocks` 也为空（emoji 不进生僻字模式）、域外字符兜底判常用。
+///
+/// ⛔ 别在出厂文件里替用户表态。一旦写上 `default: rare`，升级到本版的用户会**突然
+/// 发现 emoji 从候选里消失了**，而他们什么都没改。变更出厂行为得单独决策。
 fn write_table(out: &Path, chars: &BTreeSet<char>, version: &str) -> anyhow::Result<()> {
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let mut f = std::io::BufWriter::new(std::fs::File::create(out)?);
-    writeln!(
-        f,
-        "# emoji 字表 —— 由 wind-tools/gen_emoji_chars 生成，请勿手改"
-    )?;
-    writeln!(
-        f,
-        "# 数据源: Unicode {version} emoji-data.txt 的 `Emoji` 属性"
-    )?;
-    writeln!(
-        f,
-        "# 已排除 keycap 基字符 0-9 # *（独立时不是 emoji），已补入 U+20E3"
-    )?;
-    writeln!(
-        f,
-        "# 要自定义：把本文件放进用户配置目录的 schemas/ 下整份覆盖，"
-    )?;
-    writeln!(
-        f,
-        "# 或在 charset.toml 的 [charset.emoji] 里用 add / remove 稀疏调整。"
-    )?;
+    // 逐行 writeln! 而不是一个多行字面量：续行 `\` 的空白吞噬规则在这种带缩进的
+    // 代码里极易出错（本文件就先错过一次，产物每行都带上了源码缩进）。
+    for line in [
+        "---".to_string(),
+        "# 由 wind-tools/gen_emoji_chars 生成，请勿手改。".to_string(),
+        format!("# 数据源: Unicode {version} emoji-data.txt 的 `Emoji` 属性。"),
+        "# 已排除 keycap 基字符 0-9 # *（独立时不是 emoji），已补入 U+20E3。".to_string(),
+        "#".to_string(),
+        "# 要调整本类：**不要改本文件**（下次重新生成会覆盖）。在用户配置目录的".to_string(),
+        "# charsets/ 下新建一个 .yaml，写 `key: emoji` 加你要改的字段即可，".to_string(),
+        "# 未写的字段与整份列表都会从这里继承；列表增删写 `★` / `-★`。".to_string(),
+        "key: emoji".to_string(),
+        "name: 表情符号".to_string(),
+        "order: 10".to_string(),
+        "...".to_string(),
+    ] {
+        writeln!(f, "{line}")?;
+    }
     for c in chars {
         writeln!(f, "{c}")?;
     }

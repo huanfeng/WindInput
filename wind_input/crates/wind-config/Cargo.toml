@@ -11,6 +11,8 @@ toml = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+# charset_def：字符类文件是 meta 头 + 列表体的 .yaml（与 .dict.yaml 同构）
+serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
 # 快捷输入内置来源的 member id 常量（default_mix_modes / 存量迁移共用其单一真相源）

@@ -1,8 +1,15 @@
-# emoji 字表 —— 由 wind-tools/gen_emoji_chars 生成，请勿手改
-# 数据源: Unicode 17.0 emoji-data.txt 的 `Emoji` 属性
-# 已排除 keycap 基字符 0-9 # *（独立时不是 emoji），已补入 U+20E3
-# 要自定义：把本文件放进用户配置目录的 schemas/ 下整份覆盖，
-# 或在 charset.toml 的 [charset.emoji] 里用 add / remove 稀疏调整。
+---
+# 由 wind-tools/gen_emoji_chars 生成，请勿手改。
+# 数据源: Unicode 17.0 emoji-data.txt 的 `Emoji` 属性。
+# 已排除 keycap 基字符 0-9 # *（独立时不是 emoji），已补入 U+20E3。
+#
+# 要调整本类：**不要改本文件**（下次重新生成会覆盖）。在用户配置目录的
+# charsets/ 下新建一个 .yaml，写 `key: emoji` 加你要改的字段即可，
+# 未写的字段与整份列表都会从这里继承；列表增删写 `★` / `-★`。
+key: emoji
+name: 表情符号
+order: 10
+...
 ©
 ®
 ‼
