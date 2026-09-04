@@ -18,7 +18,7 @@
 | `src/variant.rs` | 运行时 dev/release/portable 判断：从 exe 文件名尾缀 `_dev` 判定（不依赖编译 profile）；`pipe_suffix` / `app_dir_name` / `is_portable` 供全仓使用；`WIND_VARIANT` 环境变量仅供开发覆盖。另含 `custom_userdata_dir`：读安装器写的 `datadir.conf` |
 | `src/runtime_state.rs` | `RuntimeState`（state.toml）：上次中英模式、工具栏位置（按显示器 key）、候选框 pin 位置；原子写（tmp+rename） |
 | `src/schema.rs` | `Schema` 方案定义（对应 `data/schemas/*.schema.toml`）：`SchemaInfo`/`EngineSpec`/`DictSpec` 等；与 config.toml 无关 |
-| `src/app_compat.rs` | `AppCompat`：按进程名（不区分大小写）匹配兼容规则（compat.toml，系统层+用户层合并），`get_rule` 返回 `Option<&AppCompatRule>` |
+| `src/app_compat.rs` | `AppCompat`：按进程名（不区分大小写）匹配兼容规则（compat.toml，系统层+用户层合并），`get_rule` 返回 `Option<&AppCompatRule>`；caret 宿主能力含 `caret_use_top` / `stale_probe_guard` / `composition_start_pair_guard`，后者是未写继承、显式 false 关闭的协议修正 |
 
 ## For AI Agents
 

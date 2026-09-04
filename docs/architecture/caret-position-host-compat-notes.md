@@ -1,7 +1,7 @@
 # 候选窗定位：宿主兼容性与必测矩阵
 
 本文记录候选窗「画在哪」这一族问题的实测结论。2026-09 的一轮迭代里，同一批代码在微信、
-Excel、WPS 表格、EverEdit、记事本上暴露出**七种互不相同的错位形态**，每一种都只在特定宿主
+QQNT、Excel、WPS 表格、EverEdit、记事本上暴露出**八种互不相同的错位形态**，每一种都只在特定宿主
 的特定节奏下出现——**没有哪个宿主能代表其他宿主**。
 
 > 首显档位（`fast`/`wait`/`instant`）本身的设计见
@@ -19,7 +19,7 @@ Excel、WPS 表格、EverEdit、记事本上暴露出**七种互不相同的错�
 | `shown_anchor` | 候选窗**此刻画在屏幕的哪里** | `notify_ui_update` 的首显与坐标校正 | `reset_first_show`（组合结束）；**不**含焦点切换 |
 | `caret_baseline` | 上一次**被认可**的插入点 | `handle_caret_update` 的 settle 吸收与 reshow 两处 | `reset_first_show` |
 
-三条不变量，各自对应一种已实测的缺陷：
+四条不变量，各自对应一种已实测的缺陷：
 
 - **缓存 ≠ 显示位置。** `probe` 和被 `settle` 吸收的坐标都会悄悄改写缓存，而候选窗并不跟着动。
   - 拿缓存当**校正基准** ⇒ 缓存跑到候选窗前面，之后任何比较都得出「没变化」，错位**永远无法
@@ -34,6 +34,11 @@ Excel、WPS 表格、EverEdit、记事本上暴露出**七种互不相同的错�
 - **`shown_anchor` 在焦点切换时刻意不清。** 它答的是「候选窗此刻画在屏幕哪里」，而焦点切换并
   不会把候选窗从屏幕上抹掉——清掉反而让校正判据失去唯一基准，错位再也纠正不回来。它只在候选
   窗真正消失时（`reset_first_show`）作废。
+- **组合跨度 ≠ 起点错误。** 嵌入预编辑中，当前 caret 随组合增长而远离 `composition_start` 是正常
+  现象。大偏移逃生阀若以这段距离判断「起点锁错」，长组合跨过阈值后就会把组合末端误锁成起点。
+  但也不能因此全局信任非零 compStart——其它宿主有陈旧值和坐标系混用历史。QQNT 以 per-app
+  `composition_start_pair_guard` 声明其特征，再由来源顺序、前帧降级点、reported compStart 与当前锁
+  四重一致性识别帧对；未命中时仍走原 caret 大偏移自愈。
 
 ## 二、宿主分类与各自的坑
 
@@ -97,10 +102,25 @@ Excel、WPS 表格、EverEdit、记事本上暴露出**七种互不相同的错�
 字宽大（WindTerm 实测 24px）、行内重排幅度大（同行左移 312px 实测过）。它们是**位置类启发式
 判据的天然反例**——本轮四版「用位置判断这一帧准不准」的启发式，有两版就是被这类宿主推翻的。
 
+### E 类：QQNT——同一按键交替上报起点降级帧与 selection 帧
+
+代表：**QQNT（`QQ.exe`，窗口类 `Chrome_WidgetWin_1`）**。目前只在 QQ 复现，其他宿主未观察到
+相同闪烁。
+
+QQ 的 reported compStart 正常且稳定，但同一按键后会先后出现：
+
+1. `TSF_COMPOSITION`：selection 暂时无效，DLL 用 composition start 降级成 caret；
+2. `TSF_SELECTION`：selection 恢复，caret 回到组合末端，compStart 仍是原起点。
+
+长拼音令组合末端与起点的距离超过 `3 × line_height` 后，若重锁判据看 caret 偏移，两帧会把锚点
+反复改成 `start → selection → start`。`QQ.exe` 的出厂规则启用 `composition_start_pair_guard`；仅当
+前帧确为 `TSF_COMPOSITION`、其 caret 等于本帧 reported compStart、且该点仍等于已锁起点时，
+后续 `TSF_SELECTION` 才被判成正常组合跨度而禁止重锁。UI 的右边界钳制只放大了观感，不是根因。
+
 ## 三、必测矩阵
 
 **每次改动候选窗定位相关代码，以下组合都要跑一遍。** 单个宿主全绿完全不能说明问题——本轮
-七个缺陷里，没有任何一个能在两个以上宿主上同时观察到。
+八个缺陷里，没有任何一个能在两个以上宿主上同时观察到。
 
 | # | 场景 | 必测宿主 | 看什么 |
 |---|---|---|---|
@@ -112,6 +132,7 @@ Excel、WPS 表格、EverEdit、记事本上暴露出**七种互不相同的错�
 | 6 | 长按同一键不放 | 记事本、EverEdit | 候选窗跟着文字走，不钉在原地 |
 | 7 | 极快速输入（脚本模拟 `d空格` 重复） | 记事本 | 候选窗仍出现（组合寿命可低至 19ms） |
 | 8 | 进单元格第一个字 | Excel、WPS 表格 | 一次到位，不先落在编辑栏/旧单元格 |
+| 9 | 长拼音持续输入，直到组合宽度超过 3 个行高 | QQNT | 候选窗始终锚在组合起点；不得在起点与末端间闪烁 |
 
 场景 5 的三种操作**必须分别测**：本轮位置启发式被连续推翻四次，每次都是被一个新的操作方向
 打掉的（字宽 → 换行 → 同行重排 → 退格），最后放弃位置判据、改成布尔判据才收敛。
@@ -138,6 +159,9 @@ caret_probe → 提前首显: ...
    说明缓存被 probe 抢先刷新了，基准问错了对象（见第一节）。
 4. **反复校正？** 同一个 `dx` 连续出现多条 `caret_update → reshow`，而 `pos` 不变——基准跟着显示
    位置走了。
+5. **起点与末端对打？** 相邻日志在 `src=tsf_composition` 与 `src=tsf_selection` 间交替，reported
+   `compStart` 不变，却出现 `组合起点重锁` 且 `UpdateCandidates pos=` 来回切换——把组合跨度误当成
+   起点错误了。
 
 一个统计口径的提醒：**连打时每打一个字光标本就前移一个字宽，随之而来的 reshow 是正确的跟随，
 不是漂移。** 统计漂移率时必须只看「首显后、下一次按键前」的位置变化，否则会把正常跟随算成缺陷
@@ -160,10 +184,13 @@ caret_probe → 提前首显: ...
 | `wind-coordinator/src/coordinator/first_show.rs` | 首显闸门、兜底 timer、`absorb_probe_coords` |
 | `wind-coordinator/src/coordinator/message_handler.rs` | `handle_caret_update` / `handle_caret_probe` |
 | `wind-coordinator/src/coordinator.rs` | `notify_ui_update` 里的位置计算与逃生口 |
-| `wind-config/src/app_compat.rs` | per-app 规则（`first_show_mode`、`caret_use_top`、`stale_probe_guard`） |
+| `wind-config/src/app_compat.rs` | per-app 规则（`first_show_mode`、`caret_use_top`、`stale_probe_guard`、`composition_start_pair_guard`） |
 | `data/compat.toml` | 出厂 per-app 规则 |
-| `wind_tsf/src/TextService.cpp` | `OnAsyncCaretRectReady`、probe 发送 |
+| `wind_tsf/src/CaretEditSession.cpp` | selection 无效时用 composition start 作 caret 的降级 |
+| `wind_tsf/src/TextService.cpp` | `OnAsyncCaretRectReady`、probe 发送与 caret source 标记 |
 
-> ⚠ 用户层 `%APPDATA%\WindInputDev\compat.toml` 的合并语义是「同名进程**整条**覆盖系统层」。
+> ⚠ 用户层 `%APPDATA%\WindInputDev\compat.toml` 的合并语义通常是「同名进程**整条**覆盖系统层」。
 > 排查「出厂规则不生效」时先看用户层有没有该进程的条目——菜单改回「跟随全局」曾会留下只剩
 > `process` 的空壳条目，把出厂规则整条屏蔽掉（已修：写盘时剔除空壳）。
+> `composition_start_pair_guard` 是协议级安全例外：用户层未写时继承出厂值，显式
+> `false` 才关闭，因而已有的 QQ 稀疏自定义规则不会让本修复在升级后失效。

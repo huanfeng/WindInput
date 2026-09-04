@@ -2459,10 +2459,16 @@ impl MessageHandler for Coordinator {
         // 让上方显示正确避让正文（偏大只是多留空隙，偏小才会遮挡——宁大勿小）。
         // 组合起点 Y 同步上移以保持锚点一致。后续逻辑全部基于变换后的本地副本。
         let mut data = *data;
-        self.apply_caret_compat(&mut data);
+        let active_compat = self.apply_caret_compat(&mut data);
         let data = &data;
+        let composition_start_pair_guard = active_compat.composition_start_pair_guard;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let (prev_x, prev_y) = (state.caret_x, state.caret_y);
+        let (prev_x, prev_y, prev_height, prev_source) = (
+            state.caret_x,
+            state.caret_y,
+            state.caret_height,
+            state.caret_source,
+        );
         state.caret_x = data.x;
         state.caret_y = data.y;
         state.caret_height = data.height;
@@ -2473,10 +2479,9 @@ impl MessageHandler for Coordinator {
                 .store(data.height, std::sync::atomic::Ordering::Relaxed);
         }
         state.caret_source = data.source;
-        let now_valid =
-            !(data.x == 0 && data.y == 0) && data.x.abs() < 32000 && data.y.abs() < 32000;
+        let now_valid = Self::caret_is_valid(data.x, data.y, data.height);
         if !now_valid {
-            debug!("caret_update → 丢弃: 坐标无效（(0,0) 哨兵或越界）");
+            debug!("caret_update → 丢弃: caret 无效（(0,0) 哨兵、越界或高度非正）");
             return;
         }
         // 消费焦点气泡的挂起：DLL 在焦点路径拿不到同步锁时会异步补一条权威坐标，这就是它。
@@ -2548,8 +2553,10 @@ impl MessageHandler for Coordinator {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if !cs.2 && (data.composition_start_x != 0 || data.composition_start_y != 0) {
-                let dx = (data.composition_start_x - data.x).abs();
-                let dy = (data.composition_start_y - data.y).abs();
+                // 先扩到 i64 再减：宿主未初始化的 compStart 可能是 i32::MIN，
+                // 直接 i32 相减 / abs 会在 debug 构建中溢出 panic，连“丢弃脏数据”都走不到。
+                let dx = (i64::from(data.composition_start_x) - i64::from(data.x)).abs();
+                let dy = (i64::from(data.composition_start_y) - i64::from(data.y)).abs();
                 // ⚠ 500px 校验的前提是**两者同源**——它想抓的是「同一个 context 报出的两个坐标
                 // 却相差离谱」这种坐标系不一致。当 caret 本身来自 GUI 回退等非 TSF 通道时，
                 // 它和组合起点压根不是一个语义域，比较毫无意义。桌面输入实测：caret=(0,1388)
@@ -2738,16 +2745,23 @@ impl MessageHandler for Coordinator {
             // 取那个锁死的组合起点。微信实测「删除几个字符后再输入，候选窗停在删除前的位置」、
             // EverEdit 447px、WPS 277px、Excel 1443px，全是这一种。
             //
-            // 判据是**量级**而不是方向：字宽差异恒在一个行高上下（一个中文字符宽 ≈ 行高），
-            // 而真实错位实测 277~1443px，差一个数量级。取 3 倍行高作界，两边都留足余量。
+            // 默认判据仍是当前 caret 的**量级**，真实错位实测 277~1443px，取 3 倍行高作界。
+            // 不能全局改成“reported compStart 非零就信它”：微信/WPS 等已有 compStart 陈旧、
+            // logical/physical 坐标系混用的历史，那会关闭本逃生阀，甚至把锚点写到异常位置。
+            //
+            // QQNT 是按宿主开启的窄例外。实测同一按键先报 `TSF_COMPOSITION`（selection 暂时
+            // 无效，DLL 用稳定起点降级成 caret）、紧接着报当前 `TSF_SELECTION`；两帧 reported
+            // compStart 始终等于已锁起点。长拼音一旦超过 3 个行高，后半帧的 caret 只是正常
+            // 组合跨度，不是起点锁错。只有同时满足以下四项才抑制这次重锁：compat 明确开启、
+            // 来源顺序正确、前帧降级 caret 等于本帧 reported compStart、它也等于当前锁。
+            // 单独一个非零 compStart 没有任何特权。
             // ⚠ 这不是那种被推翻过四次的位置启发式——那些判的是「这一帧的方向对不对」，
             // 依赖光标往哪走；这里判的是「差得离不离谱」，与方向无关。
             //
             // ⚠ **已知盲区**：偏差落在 `tol_x`（≈2 倍行高）与 `3 倍行高`之间时，reshow 会触发
             // 但位置仍取被钉住的组合起点——校正白跑一次，错位持续存在。阈值再往下调会把组合
-            // 内「光标随每个字母前移」那些 reshow 也算进来（实测 dx=13/14 连续出现），组合起点
-            // 就会跟着输入右移，候选窗一格一格挪——那是更明显的缺陷。这段区间对应「缓存差了
-            // 两个字符宽」，实测未遇到；真出现的话要换判据，不是调这个数。
+            // 内普通逐字前移也算成错锚点（微信实测 dx=13/14），让起点逐格右移。真遇到该区间
+            // 要换证据，不是继续调数值。
             {
                 let line_h = self
                     .last_sane_caret_height
@@ -2760,12 +2774,40 @@ impl MessageHandler for Coordinator {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     if cs.2 {
-                        debug!(
-                            "组合起点重锁: ({},{}) → ({},{})（偏移 {}/{} 远超字宽量级，\
-                             首显位置整个是错的，不能再钉住）",
-                            cs.0, cs.1, data.x, data.y, dx, dy
-                        );
-                        *cs = (data.x, data.y, true);
+                        let guarded_pair = composition_start_pair_guard
+                            && prev_source == wind_ipc::protocol::caret_source::TSF_COMPOSITION
+                            && data.source == wind_ipc::protocol::caret_source::TSF_SELECTION
+                            && Self::caret_is_valid(prev_x, prev_y, prev_height)
+                            && Self::caret_is_valid(
+                                data.composition_start_x,
+                                data.composition_start_y,
+                                data.height,
+                            )
+                            && (prev_x, prev_y)
+                                == (data.composition_start_x, data.composition_start_y)
+                            && (cs.0, cs.1) == (data.composition_start_x, data.composition_start_y);
+                        if guarded_pair {
+                            debug!(
+                                "组合起点保持: ({},{})（命中 composition_start_pair_guard：\
+                                 prev=({prev_x},{prev_y}) h={prev_height} src={}，current=({},{}) src={}，\
+                                 compStart=({},{})；caret 跨度 {dx}/{dy} 不是起点错误）",
+                                cs.0,
+                                cs.1,
+                                wind_ipc::protocol::caret_source::name(prev_source),
+                                data.x,
+                                data.y,
+                                wind_ipc::protocol::caret_source::name(data.source),
+                                data.composition_start_x,
+                                data.composition_start_y
+                            );
+                        } else if (cs.0, cs.1) != (data.x, data.y) {
+                            debug!(
+                                "组合起点重锁: ({},{}) → ({},{})（caret 偏移 {dx}/{dy} \
+                                 远超字宽量级，首显位置整个是错的，不能再钉住）",
+                                cs.0, cs.1, data.x, data.y
+                            );
+                            *cs = (data.x, data.y, true);
+                        }
                     }
                 }
             }

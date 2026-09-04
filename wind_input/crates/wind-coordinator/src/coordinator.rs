@@ -732,8 +732,8 @@ pub(crate) struct SmartSymbolArm {
 /// focus_gained / ime_activated 时按 `client_token` 高 32 位的 PID 解析进程名并缓存
 /// （见 `update_active_compat`），避免每次 caret 更新重复 OpenProcess。
 ///
-/// 用命名结构体而非元组：两个 bool 语义完全不同，`(u32, bool, bool)` 的 `.1`/`.2`
-/// 在调用点无从分辨——本仓已有多次「下标/名字与实际语义脱节」的返工。
+/// 用命名结构体而非元组：多个 bool 语义完全不同，元组下标在调用点无从分辨——本仓已有
+/// 多次「下标/名字与实际语义脱节」的返工。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ActiveCompat {
     /// 已解析的焦点进程 PID（0 = 尚未解析，此时其余字段无意义）。
@@ -744,6 +744,9 @@ pub(crate) struct ActiveCompat {
     /// 见 [`wind_config::app_compat::AppCompatRule::stale_probe_guard`]：
     /// 该宿主组合期间上报的 caret rect 会停在上一次组合的位置，需拦截。
     pub(crate) stale_probe_guard: bool,
+    /// 见 [`wind_config::app_compat::AppCompatRule::composition_start_pair_guard`]：
+    /// 该宿主会把组合起点降级帧与当前 selection 成对上报，后者不得触发大偏移重锁。
+    pub(crate) composition_start_pair_guard: bool,
     /// 候选窗首显策略（见 `AppCompatRule::first_show_mode`）。三档互斥；
     /// `None` = 跟随全局 `ui.candidate.first_show_mode`。
     ///
@@ -2418,6 +2421,9 @@ impl Coordinator {
                     pid,
                     caret_use_top: rule.map(|r| r.caret_use_top).unwrap_or(false),
                     stale_probe_guard: rule.map(|r| r.stale_probe_guard).unwrap_or(false),
+                    composition_start_pair_guard: rule
+                        .and_then(|r| r.composition_start_pair_guard)
+                        .unwrap_or(false),
                     first_show_mode: rule.and_then(|r| r.first_show_mode),
                     has_initial_rule: initial_mode.is_some() || initial_punct.is_some(),
                     auto_pair: rule.and_then(|r| r.auto_pair),
@@ -2434,9 +2440,11 @@ impl Coordinator {
         // 规则未命中与「命中但全 false」在日志里无从区分，查「某应用兼容项没生效」时看不到
         // 究竟是没匹配上进程名还是字段没读到。
         debug!(
-            "Compat rule for process={name}: matched={} caret_use_top={} first_show_mode={} initial_mode={} initial_punct={} auto_pair={} smart_method={} caret_offset=({},{})",
+            "Compat rule for process={name}: matched={} caret_use_top={} stale_probe_guard={} composition_start_pair_guard={} first_show_mode={} initial_mode={} initial_punct={} auto_pair={} smart_method={} caret_offset=({},{})",
             rule_matched,
             next.caret_use_top,
+            next.stale_probe_guard,
+            next.composition_start_pair_guard,
             next.first_show_mode
                 .map(|m| m.as_config())
                 .unwrap_or("(follow-global)"),
@@ -2525,7 +2533,8 @@ impl Coordinator {
     }
 
     /// 只刷新 `active_compat` 里「当前生效设置」那一半字段（`caret_use_top` /
-    /// `first_show_mode` / `auto_pair` / `smart_method` / `caret_offset_*`），**刻意不碰
+    /// `stale_probe_guard` / `composition_start_pair_guard` / `first_show_mode` / `auto_pair` /
+    /// `smart_method` / `caret_offset_*`），**刻意不碰
     /// `.pid` 与 `.has_initial_rule`**。
     ///
     /// 这两个字段的另一重身份是「上一次真实 `FOCUS_GAINED` 落在哪个进程」——
@@ -2562,6 +2571,7 @@ impl Coordinator {
         let (
             caret_use_top,
             stale_probe_guard,
+            composition_start_pair_guard,
             first_show_mode,
             auto_pair,
             smart_method,
@@ -2573,6 +2583,8 @@ impl Coordinator {
             (
                 rule.map(|r| r.caret_use_top).unwrap_or(false),
                 rule.map(|r| r.stale_probe_guard).unwrap_or(false),
+                rule.and_then(|r| r.composition_start_pair_guard)
+                    .unwrap_or(false),
                 rule.and_then(|r| r.first_show_mode),
                 rule.and_then(|r| r.auto_pair),
                 rule.and_then(|r| r.smart_method),
@@ -2581,7 +2593,7 @@ impl Coordinator {
             )
         };
         debug!(
-            "Connected-pid compat refresh for process={name} (pid={pid}): caret_use_top={} stale_probe_guard={stale_probe_guard} first_show_mode={} auto_pair={} smart_method={} caret_offset=({},{})",
+            "Connected-pid compat refresh for process={name} (pid={pid}): caret_use_top={} stale_probe_guard={stale_probe_guard} composition_start_pair_guard={composition_start_pair_guard} first_show_mode={} auto_pair={} smart_method={} caret_offset=({},{})",
             caret_use_top,
             first_show_mode
                 .map(|m| m.as_config())
@@ -2603,6 +2615,7 @@ impl Coordinator {
             let mut ac = self.active_compat.lock().unwrap_or_else(|e| e.into_inner());
             ac.caret_use_top = caret_use_top;
             ac.stale_probe_guard = stale_probe_guard;
+            ac.composition_start_pair_guard = composition_start_pair_guard;
             ac.first_show_mode = first_show_mode;
             ac.auto_pair = auto_pair;
             ac.smart_method = smart_method;
@@ -5129,12 +5142,12 @@ impl Coordinator {
         // 把候选窗从首显处挪到组合起点——而上一行 `settle` 刚判定这 13px 不值得校正。排在
         // `cs.2` 后面等于让组合起点从侧面绕过 settle，悬停一次就补上那 13px。
         // 真正该动候选窗的两种情形（首显、坐标校正）都不满足 `hold_anchor`，照常走下面两条。
-        let (cx, cy, ch) = if hold_anchor {
-            (anchor.0, anchor.1, state.caret_height)
+        let (cx, cy, ch, anchor_source) = if hold_anchor {
+            (anchor.0, anchor.1, state.caret_height, "shown_anchor")
         } else if in_app && cs.2 {
-            (cs.0, cs.1, state.caret_height)
+            (cs.0, cs.1, state.caret_height, "composition_start")
         } else {
-            (state.caret_x, state.caret_y, state.caret_height)
+            (state.caret_x, state.caret_y, state.caret_height, "caret")
         };
         let (caret_x, caret_y, caret_height, caret_valid) = self.resolve_caret_for_ui(cx, cy, ch);
         let n_items = items.len();
@@ -5189,9 +5202,17 @@ impl Coordinator {
         #[cfg(target_os = "macos")]
         self.push_candidate_menu_flags(state, start, end);
         tracing::debug!(
-            "notify_ui_update: build+send {:?} (n={})",
+            "notify_ui_update: build+send {:?} (n={n_items}) pos=({caret_x},{caret_y}) h={caret_height} \
+             valid={caret_valid} anchor={anchor_source} raw=({cx},{cy}) hold={hold_anchor} \
+             first={is_first_frame} authorized={authorized} in_app={in_app} \
+             compStart=({},{},valid={}) shownAnchor=({},{},valid={}) fixed={cand_fixed}",
             t_nu.elapsed(),
-            n_items
+            cs.0,
+            cs.1,
+            cs.2,
+            anchor.0,
+            anchor.1,
+            anchor.2,
         );
     }
 
@@ -5563,11 +5584,18 @@ impl Coordinator {
     ///
     /// 组合起点坐标同步平移以保持锚点一致；为 0（未提供）时不动，避免把「没有值」
     /// 变成「一个偏移后的假值」。
-    fn apply_caret_compat(&self, data: &mut CaretData) {
-        let (use_top, dx, dy) = {
-            let ac = self.active_compat.lock().unwrap_or_else(|e| e.into_inner());
-            (ac.caret_use_top, ac.caret_offset_x, ac.caret_offset_y)
-        };
+    /// 对 caret 应用当前宿主兼容变换，并返回与本次变换**同一时刻**的规则快照。
+    ///
+    /// 高频 caret 路径后续还要判断宿主协议帧对；若变换后再锁一次 `active_compat`，焦点恰在
+    /// 两次取锁之间切换时就可能拿到两个宿主的规则拼盘。返回 Copy 快照既少一次锁，也让
+    /// 本帧所有兼容判据共享同一来源。
+    fn apply_caret_compat(&self, data: &mut CaretData) -> ActiveCompat {
+        let active = *self.active_compat.lock().unwrap_or_else(|e| e.into_inner());
+        let (use_top, dx, dy) = (
+            active.caret_use_top,
+            active.caret_offset_x,
+            active.caret_offset_y,
+        );
         if use_top && data.height > 0 {
             let raw_h = data.height;
             data.y -= raw_h;
@@ -5580,6 +5608,7 @@ impl Coordinator {
             let scale = dpi_scale_for_point(data.x, data.y);
             apply_dp_offset(data, dx, dy, scale);
         }
+        active
     }
 
     fn apply_focus_caret(&self, data: &CaretData, via: &str) {
@@ -5612,7 +5641,7 @@ impl Coordinator {
     /// 从而永远走回退分支——症状与本次要修的「气泡永远在主屏」一模一样。
     /// 上界 32000 只用于挡住 i32 溢出级的脏数据（宿主偶发上报的未初始化值）。
     fn caret_is_valid(x: i32, y: i32, height: i32) -> bool {
-        height > 0 && !(x == 0 && y == 0) && x.abs() < 32000 && y.abs() < 32000
+        height > 0 && !(x == 0 && y == 0) && x > -32000 && x < 32000 && y > -32000 && y < 32000
     }
 
     /// 解析「用于 UI 定位」的光标坐标：无效坐标回退到最近一次有效坐标。
@@ -7146,6 +7175,24 @@ mod caret_compat_tests {
     }
 
     #[test]
+    fn overflow_sentinel_composition_start_is_rejected_without_panicking() {
+        let c = coord();
+        c.state.lock().unwrap().input_buffer = "ab".to_string();
+        c.handle_caret_update(&CaretData {
+            x: 100,
+            y: 200,
+            height: 20,
+            composition_start_x: i32::MIN,
+            composition_start_y: 200,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+        });
+        assert!(
+            !c.composition_start.lock().unwrap().2,
+            "i32::MIN 级脏数据必须被距绝，不得在距离计算中溢出 panic"
+        );
+    }
+
+    #[test]
     fn caret_use_top_shifts_y_to_top_and_keeps_real_line_height() {
         let c = coord();
         // 模拟焦点进程命中 caret_use_top 规则。
@@ -8009,19 +8056,24 @@ mod caret_compat_tests {
         );
     }
 
-    /// 取最近一条 `UpdateCandidates` 下发的位置。
-    fn last_pos(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Option<(i32, i32)> {
-        let mut found = None;
-        // 排空取**最后**一条：一次刷新会发多条 UI 命令
+    /// 排空并取全部 `UpdateCandidates` 下发位置。
+    fn drain_positions(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Vec<(i32, i32)> {
+        let mut found = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
             if let UiCommand::UpdateCandidates {
                 caret_x, caret_y, ..
             } = cmd
             {
-                found = Some((caret_x, caret_y));
+                found.push((caret_x, caret_y));
             }
         }
         found
+    }
+
+    /// 取最近一条 `UpdateCandidates` 下发的位置。
+    fn last_pos(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Option<(i32, i32)> {
+        // 排空取**最后**一条：一次刷新会发多条 UI 命令
+        drain_positions(rx).last().copied()
     }
 
     /// ★★ 非坐标原因的重绘不得移动候选窗。`state.caret_x/y` 是缓存，会被 probe 的
@@ -8389,36 +8441,231 @@ mod caret_compat_tests {
     /// 判据是**量级**不是方向：字宽差异恒在一个行高上下，真实错位差一个数量级。
     #[test]
     fn a_grossly_wrong_first_show_can_relock_the_composition_start() {
+        // QQ 修复是显式 per-app 帧对保护，未开启时大偏移逃生阀必须保持原行为：无论宿主
+        // 报的是新 compStart、没有 compStart，还是继续回显陈旧 compStart，都以当前 caret
+        // 自愈。否则会让微信/WPS/EverEdit/Excel 的历史错锚点重新变成不可撤销。
+        for (case, reported_cs_x) in [
+            ("新 compStart", 493),
+            ("缺失 compStart", 0),
+            ("陈旧 compStart", 1030),
+        ] {
+            let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+            set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+            *c.last_valid_caret.lock().unwrap() = (1030, 987, 20);
+            c.last_sane_caret_height
+                .store(20, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut st = c.state.lock().unwrap();
+                st.input_buffer = "a".into();
+                st.candidates = vec![wind_candidate::Candidate {
+                    text: "测".into(),
+                    ..Default::default()
+                }];
+                st.caret_x = 1030;
+                st.caret_y = 987;
+                st.caret_height = 20;
+            }
+            {
+                let st = c.state.lock().unwrap();
+                c.notify_ui_update(&st);
+            }
+            assert_eq!(last_pos(&rx), Some((1030, 987)), "首显于陈旧坐标");
+            // 首显那一刻把它锁成了组合起点（idle_anchor 路径的行为）
+            *c.composition_start.lock().unwrap() = (1030, 987, true);
+
+            // 真实插入点在 537px 之外——远超字宽量级，说明首显位置整个是错的
+            let mut update = probe_at(493, 988, 20);
+            update.composition_start_x = reported_cs_x;
+            if reported_cs_x == 0 {
+                update.composition_start_y = 0;
+            }
+            c.handle_caret_update(&update);
+            assert_eq!(
+                last_pos(&rx),
+                Some((493, 988)),
+                "偏移远超字宽量级时组合起点必须重锁，否则候选窗永远停在错处；\
+                 case={case}"
+            );
+        }
+    }
+
+    /// ★★★ QQNT 的嵌入组合会在同一按键后依次上报两种 TSF 坐标：selection 暂时无效时，
+    /// DLL 用稳定的组合起点降级成 caret（`TSF_COMPOSITION`）；紧接着 selection 恢复，caret
+    /// 回到正在向右增长的当前插入点（`TSF_SELECTION`），而 reported compStart 始终没动。
+    ///
+    /// 长拼音令「当前插入点 - 组合起点」自然超过 3 个行高后，若大偏移逃生阀拿 caret 偏移
+    /// 判断“组合起点是否锁错”，两种帧就会把锚点反复重锁成 `start → selection → start`，
+    /// 候选窗随之左右闪烁。组合跨度不是起点错误；reported compStart 没动就必须继续钉住。
+    #[test]
+    fn long_qq_composition_does_not_oscillate_between_start_and_selection() {
+        const START_X: i32 = 598;
+        const Y: i32 = 585;
+        const LINE_H: i32 = 18;
+
         let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
         set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
-        *c.last_valid_caret.lock().unwrap() = (1030, 987, 20);
+        c.active_compat.lock().unwrap().composition_start_pair_guard = true;
+        *c.last_valid_caret.lock().unwrap() = (START_X, Y, LINE_H);
         c.last_sane_caret_height
-            .store(20, std::sync::atomic::Ordering::Relaxed);
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
         {
             let mut st = c.state.lock().unwrap();
-            st.input_buffer = "a".into();
+            st.input_buffer = "daduo".into();
             st.candidates = vec![wind_candidate::Candidate {
                 text: "测".into(),
                 ..Default::default()
             }];
-            st.caret_x = 1030;
-            st.caret_y = 987;
-            st.caret_height = 20;
+            st.caret_x = START_X;
+            st.caret_y = Y;
+            st.caret_height = LINE_H;
         }
         {
             let st = c.state.lock().unwrap();
             c.notify_ui_update(&st);
         }
-        assert_eq!(last_pos(&rx), Some((1030, 987)), "首显于陈旧坐标");
-        // 首显那一刻把它锁成了组合起点（idle_anchor 路径的行为）
-        *c.composition_start.lock().unwrap() = (1030, 987, true);
+        assert_eq!(last_pos(&rx), Some((START_X, Y)), "首显于组合起点");
+        *c.composition_start.lock().unwrap() = (START_X, Y, true);
+        // 真机跨过阈值前的上一帧 selection caret 是 644；第一对帧随后是 start=598、selection=653。
+        *c.caret_baseline.lock().unwrap() = (644, Y, true);
 
-        // 真实插入点在 537px 之外——远超字宽量级，说明首显位置整个是错的
-        c.handle_caret_update(&probe_at(493, 988, 20));
+        for selection_x in [653, 662, 670, 682] {
+            c.handle_caret_update(&CaretData {
+                x: START_X,
+                y: Y,
+                height: LINE_H,
+                composition_start_x: START_X,
+                composition_start_y: Y,
+                source: wind_ipc::protocol::caret_source::TSF_COMPOSITION,
+            });
+            assert!(
+                drain_positions(&rx)
+                    .into_iter()
+                    .all(|pos| pos == (START_X, Y)),
+                "组合起点降级帧即使触发重绘，下发位置也只能是原起点"
+            );
+
+            c.handle_caret_update(&CaretData {
+                x: selection_x,
+                y: Y,
+                height: LINE_H,
+                composition_start_x: START_X,
+                composition_start_y: Y,
+                source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            });
+            assert!(
+                drain_positions(&rx)
+                    .into_iter()
+                    .all(|pos| pos == (START_X, Y)),
+                "selection caret 只是组合末端；允许抑制重复重绘，但不得下发其它位置"
+            );
+            assert_eq!(
+                *c.composition_start.lock().unwrap(),
+                (START_X, Y, true),
+                "reported compStart 未变化时，同一组合的锚点必须保持不变"
+            );
+        }
+    }
+
+    /// `composition_start_pair_guard` 必须是按宿主开启的窄保护，默认行为一字不差。
+    ///
+    /// 同一组 QQ 坐标若没有 compat 证据，协调器无法知道“稳定 compStart”与“陈旧 compStart”
+    /// 哪个是真的；此时必须保留已有 caret 大偏移逃生阀，不能让单宿主修复改变全局语义。
+    #[test]
+    fn composition_start_pair_guard_is_per_app_and_off_by_default() {
+        const START_X: i32 = 598;
+        const Y: i32 = 585;
+        const LINE_H: i32 = 18;
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "daduo".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 644;
+            st.caret_y = Y;
+            st.caret_height = LINE_H;
+        }
+        *c.composition_start.lock().unwrap() = (START_X, Y, true);
+        *c.caret_baseline.lock().unwrap() = (644, Y, true);
+        *c.candidate_shown.lock().unwrap() = true;
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+
+        c.handle_caret_update(&CaretData {
+            x: START_X,
+            y: Y,
+            height: LINE_H,
+            composition_start_x: START_X,
+            composition_start_y: Y,
+            source: wind_ipc::protocol::caret_source::TSF_COMPOSITION,
+        });
+        let _ = drain_positions(&rx);
+        c.handle_caret_update(&CaretData {
+            x: 653,
+            y: Y,
+            height: LINE_H,
+            composition_start_x: START_X,
+            composition_start_y: Y,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+        });
+
         assert_eq!(
-            last_pos(&rx),
-            Some((493, 988)),
-            "偏移远超字宽量级时组合起点必须重锁，否则候选窗永远停在错处"
+            *c.composition_start.lock().unwrap(),
+            (653, Y, true),
+            "未命中 compat 时须保留原 caret 重锁语义，不能全局信任 reported compStart"
+        );
+    }
+
+    /// compat 保护只认完整、可信的帧对。异常 compStart 不得成为重锁目标；无法确认帧对时
+    /// 回到旧 caret 逃生阀，至少候选窗仍能落在已经通过 `now_valid` 的当前插入点。
+    #[test]
+    fn composition_start_pair_guard_never_relocks_to_invalid_reported_start() {
+        const START_X: i32 = 598;
+        const Y: i32 = 585;
+        const LINE_H: i32 = 18;
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        c.active_compat.lock().unwrap().composition_start_pair_guard = true;
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "daduo".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = START_X;
+            st.caret_y = Y;
+            st.caret_height = LINE_H;
+            st.caret_source = wind_ipc::protocol::caret_source::TSF_COMPOSITION;
+        }
+        *c.composition_start.lock().unwrap() = (START_X, Y, true);
+        *c.caret_baseline.lock().unwrap() = (START_X, Y, true);
+        *c.candidate_shown.lock().unwrap() = true;
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+
+        c.handle_caret_update(&CaretData {
+            x: 653,
+            y: Y,
+            height: LINE_H,
+            composition_start_x: i32::MIN,
+            composition_start_y: Y,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+        });
+
+        assert_eq!(
+            *c.composition_start.lock().unwrap(),
+            (653, Y, true),
+            "溢出级异常 reported compStart 不得成为锚点；帧对不可信时退回已校验的 caret"
+        );
+        assert!(
+            drain_positions(&rx).into_iter().all(|pos| pos == (653, Y)),
+            "任何下发都不得携带异常 reported compStart"
         );
     }
 
@@ -9281,6 +9528,7 @@ mod caret_compat_tests {
             .insert(pid, "alacritty.exe".to_string());
         let mut rules = Vec::new();
         wind_config::app_compat::set_caret_offset(&mut rules, "alacritty.exe", 0, 12);
+        rules[0].composition_start_pair_guard = Some(true);
         *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
 
         c.apply_connected_pid_compat(pid, pid);
@@ -9289,6 +9537,10 @@ mod caret_compat_tests {
             c.active_compat.lock().unwrap().caret_offset_y,
             12,
             "该 pid 确认在前台时，连接建立即应解析出它的 per-app 规则字段"
+        );
+        assert!(
+            c.active_compat.lock().unwrap().composition_start_pair_guard,
+            "连接恢复路径也必须刷新 composition_start_pair_guard"
         );
     }
 
@@ -9383,6 +9635,28 @@ mod caret_compat_tests {
             c.active_compat.lock().unwrap().first_show_mode,
             Some(wind_config::app_compat::FirstShowMode::Fast),
             "缓存里的 bundle id 必须参与 compat 规则匹配"
+        );
+    }
+
+    #[test]
+    fn update_active_compat_loads_composition_start_pair_guard() {
+        let c = coord();
+        let pid = 5151u32;
+        let token = (pid as u64) << 32 | 4;
+        c.pid_names.lock().unwrap().insert(pid, "qq.exe".into());
+        *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(vec![
+            wind_config::app_compat::AppCompatRule {
+                process: "QQ.exe".into(),
+                composition_start_pair_guard: Some(true),
+                ..Default::default()
+            },
+        ]);
+
+        c.update_active_compat(token);
+
+        assert!(
+            c.active_compat.lock().unwrap().composition_start_pair_guard,
+            "焦点路径必须把 QQ 的帧对保护从 compat 规则接入热路径"
         );
     }
 }
@@ -11375,6 +11649,10 @@ mod caret_for_ui_tests {
             "height=0 = 宿主尚未 reflow，整组坐标不可信"
         );
         assert!(!Coordinator::caret_is_valid(40000, 500, 20), "越界脏数据");
+        assert!(
+            !Coordinator::caret_is_valid(i32::MIN, 500, 20),
+            "未初始化极值必须安全判无效，不得在 abs() 溢出"
+        );
     }
 
     /// ★ 修复核心：无效坐标必须回退到最近一次有效坐标，且该坐标可以在副屏（负值）。

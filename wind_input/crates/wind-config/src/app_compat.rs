@@ -4,6 +4,8 @@
 //! 定位 / 光标获取等兼容修正。文件格式为 TOML 的 `[[apps]]` 数组表，加载顺序：
 //! 系统预置（`{data_dir}/compat.toml`）→ 定制版（`data_custom/compat.toml`）→
 //! 用户覆盖（`{user_config_dir}/compat.toml`），靠后层的同进程名规则整条覆盖靠前层。
+//! 唯一例外是宿主协议级的 `composition_start_pair_guard`：后层未写时继承，
+//! 显式 `false` 才关闭，避免菜单生成的稀疏规则无意抹掉已知宿主修复。
 
 use crate::config::SmartMethod;
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,7 @@ const USER_COMPAT_HEADER: &str = "\
 #   手写的注释与排版不会保留。需要长期留存的说明请写在系统层 compat.toml。
 #
 # 合并语义：同名进程（不区分大小写）整条覆盖系统层，系统层其余规则保留。
+# 例外：composition_start_pair_guard 未写时继承系统层，显式 false 才关闭。
 # 字段说明见系统层 data/compat.toml 顶部注释。
 
 ";
@@ -191,6 +194,24 @@ pub struct AppCompatRule {
     /// 按宿主处理——与隔壁 `caret_use_top`（同样为微信而加）同一个理由。
     #[serde(default, skip_serializing_if = "is_false")]
     pub stale_probe_guard: bool,
+    /// 把连续的 `TSF_COMPOSITION`（selection 无效、以组合起点降级）→ `TSF_SELECTION`
+    /// 识别为同一次布局采样的两阶段结果，禁止后半帧把当前 caret 误重锁成组合起点。
+    ///
+    /// QQNT 实测：长组合里 reported compStart 始终稳定，但同一按键后的两帧 caret 会在
+    /// 组合起点与当前插入点之间跳变。两点距离超过大偏移阈值后，通用重锁逃生阀会把
+    /// `composition_start` 改成组合末端，下一次降级帧又改回起点，形成左右闪烁。
+    ///
+    /// ⚠ **必须逐宿主开启，不能全局信任非零 compStart**：其它宿主已有 compStart 陈旧、
+    /// logical/physical 坐标系混用的实测历史；全局改成“有 compStart 就以它为准”会关闭
+    /// 原有 caret 大偏移自愈，甚至把候选窗重锁到异常坐标。协调器还会核对来源顺序、
+    /// 前帧降级点、reported compStart 与当前锁四者一致，单独一个非零值不构成放行理由。
+    ///
+    /// **必须是 `Option<bool>`**：这是宿主协议级修正，不是一般用户偏好。用户可能已经
+    /// 通过菜单给 `QQ.exe` 写了只含 `first_show_mode` 的稀疏规则；若用 bool 的缺省
+    /// `false` 做整条覆盖，升级后会静默屏蔽系统层新增的 QQ 修复。`None` 表示继承
+    /// 低层，`Some(false)` 仍保留显式关闭的逃生口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition_start_pair_guard: Option<bool>,
     /// 候选窗首显策略；`None` = 不干预，跟随全局 `ui.candidate.first_show_mode`。
     ///
     /// 三档互斥——做成枚举而不是几个 bool：布尔开关可以同时打开，实测就因此出过一次
@@ -690,9 +711,31 @@ fn load_file(path: &Path) -> Option<AppCompatFile> {
 
 /// 合并两组规则：user 中同名进程（不区分大小写）覆盖 base，其余 base 规则保留，
 /// 末尾追加全部 user 规则（与 Go `mergeCompatRules` 对齐）。
-fn merge_rules(base: Vec<AppCompatRule>, user: Vec<AppCompatRule>) -> Vec<AppCompatRule> {
+///
+/// 唯一字段级例外是 `composition_start_pair_guard`：它描述已确认的宿主 TSF 协议
+/// 形态，后层稀疏规则未写它时应继承低层；显式 `false` 仍可关闭。若照其它
+/// 字段用 `Default::default()` 的 `false` 整条覆盖，用户曾经从菜单写过的 QQ 规则会让
+/// 新版出厂修复永远无法生效。
+fn merge_rules(base: Vec<AppCompatRule>, mut user: Vec<AppCompatRule>) -> Vec<AppCompatRule> {
     if user.is_empty() {
         return base;
+    }
+    let inherited_pair_guards: HashMap<String, Option<bool>> = base
+        .iter()
+        .map(|r| {
+            (
+                r.process.to_ascii_lowercase(),
+                r.composition_start_pair_guard,
+            )
+        })
+        .collect();
+    for rule in &mut user {
+        if rule.composition_start_pair_guard.is_none() {
+            rule.composition_start_pair_guard = inherited_pair_guards
+                .get(&rule.process.to_ascii_lowercase())
+                .copied()
+                .flatten();
+        }
     }
     let user_keys: std::collections::HashSet<String> = user
         .iter()
@@ -797,6 +840,10 @@ mod tests {
             [[apps]]
             process = "plain.exe"
             caret_use_top = true
+
+            [[apps]]
+            process = "QQ.exe"
+            composition_start_pair_guard = true
         "#;
         let compat = AppCompat::from_rules(toml::from_str::<AppCompatFile>(toml).unwrap().apps);
 
@@ -814,6 +861,9 @@ mod tests {
         assert_eq!(plain.auto_pair, None);
         assert_eq!(plain.smart_method, None);
         assert_eq!((plain.caret_offset_x, plain.caret_offset_y), (0, 0));
+
+        let qq = compat.get_rule("qq.exe").unwrap();
+        assert_eq!(qq.composition_start_pair_guard, Some(true));
     }
 
     /// 写回只落被触碰的字段，且 `None`/0 不进 TOML（`skip_serializing_if`）——
@@ -876,6 +926,7 @@ mod tests {
         let compat = AppCompat::from_rules(file.apps);
         let rule = compat.get_rule("foo.exe").unwrap();
         assert!(!rule.caret_use_top);
+        assert_eq!(rule.composition_start_pair_guard, None);
         // 缺字段 = 不干预（跟随全局），与 initial_mode 同语义。若它退化成 Some(默认档)，
         // 等于给所有未配置的应用都写死了一份 per-app 覆盖，用户改全局默认时全部失效。
         assert_eq!(rule.first_show_mode, None);
@@ -946,6 +997,42 @@ mod tests {
         assert!(!merged.get_rule("Weixin.exe").unwrap().caret_use_top);
         // 合并后只剩一条（同进程去重）。
         assert_eq!(merged.apps.len(), 1);
+    }
+
+    /// `composition_start_pair_guard` 是已确认的宿主协议修正，不能因为用户
+    /// 曾经从菜单给同一应用写了另一个字段，就被稀疏规则的缺省值静默抹掉。
+    /// 同时保留显式 `false` 逃生口，新版宿主行为改变时不必改代码才能关闭。
+    #[test]
+    fn protocol_guard_inherits_through_sparse_override_but_false_can_disable_it() {
+        let base_rule = AppCompatRule {
+            process: "QQ.exe".into(),
+            composition_start_pair_guard: Some(true),
+            ..Default::default()
+        };
+        let sparse_user = AppCompatRule {
+            process: "qq.exe".into(),
+            first_show_mode: Some(FirstShowMode::Wait),
+            ..Default::default()
+        };
+        let merged = AppCompat::from_rules(merge_rules(vec![base_rule.clone()], vec![sparse_user]));
+        let inherited = merged.get_rule("QQ.exe").unwrap();
+        assert_eq!(inherited.composition_start_pair_guard, Some(true));
+        assert_eq!(inherited.first_show_mode, Some(FirstShowMode::Wait));
+
+        let explicit_off = AppCompatRule {
+            process: "qq.exe".into(),
+            composition_start_pair_guard: Some(false),
+            ..Default::default()
+        };
+        let merged = AppCompat::from_rules(merge_rules(vec![base_rule], vec![explicit_off]));
+        assert_eq!(
+            merged
+                .get_rule("QQ.exe")
+                .unwrap()
+                .composition_start_pair_guard,
+            Some(false),
+            "显式 false 必须压过系统层，作为宿主升级后的逃生口"
+        );
     }
 
     #[test]
@@ -1335,6 +1422,12 @@ mod tests {
         let file = load_file(&data_dir.join(COMPAT_FILE_NAME))
             .expect("随发布的 data/compat.toml 必须能解析（失败会静默吞掉全部规则）");
         let c = AppCompat::from_parts(file.apps, file.initial_mode_scope);
+
+        assert!(
+            c.get_rule("qq.exe")
+                .is_some_and(|r| r.composition_start_pair_guard == Some(true)),
+            "随发布的 QQ.exe 规则必须启用 composition_start_pair_guard"
+        );
 
         // 桌面：规则必须照常生效
         for class in ["Progman", "WorkerW"] {
