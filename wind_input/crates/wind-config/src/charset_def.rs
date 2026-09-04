@@ -85,22 +85,8 @@ impl Commonality {
 pub enum ScopeKind {
     /// 汉字 ∪ 私用区——即现有的 `is_common_scope`，默认字表的管辖域。
     Han,
-    /// Unicode `Emoji` 属性。
-    Emoji,
     /// 私用区。
     Pua,
-}
-
-/// 类的成员**判定来源**为内置属性时，是哪一个属性。
-///
-/// ★ 存在的理由见设计文档 §5：emoji **不能**降级成一组 `ranges`——keycap 基字符
-/// （`0-9 # *`）属性为真但独立时不算 emoji，而 `ranges` 只能表达「包含」；
-/// `text_has_emoji` 更是**序列级**判定（基字符 + `U+20E3`），字符级区间根本表达不了。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum PropertyKind {
-    /// Unicode `Emoji` 属性（UTS #51），含 keycap 与序列规则。
-    Emoji,
 }
 
 /// 一个字符类的定义。
@@ -121,12 +107,14 @@ pub struct CharsetDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ranges: Option<Vec<String>>,
 
-    /// 成员来自内置属性判定函数，而不是码位段。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub property: Option<PropertyKind>,
-
     /// 成员来自字表文件（相对 `schemas/`，走 `resolve_schema_resource` 的整体替换语义，
     /// 故用户把同名文件放进用户配置目录即可换掉整本字表）。
+    ///
+    /// ★★ **emoji 也走这一支**（`emoji_chars.txt`），不是内置判定函数。初稿曾因
+    /// 「keycap 基字符扣不掉、序列级判定表达不了」把它定成内置，但那两条只否得掉
+    /// **区间**——列表逐条列举，不列 `0-9 # *` 即可，键又是字素簇、装得下序列。
+    /// 而内置是唯一用户改不了的形态，与「让判据可自定义」这个改造目的直接冲突。
+    /// 论证见设计文档 §5.2。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 
@@ -200,8 +188,8 @@ impl CharsetDef {
             ($($f:ident),+ $(,)?) => { $( if overlay.$f.is_some() { self.$f = overlay.$f; } )+ };
         }
         take!(
-            name, ranges, property, file, scope, add, remove, default, outside, order, no_freq,
-            in_rare, enabled
+            name, ranges, file, scope, add, remove, default, outside, order, no_freq, in_rare,
+            enabled
         );
     }
 
@@ -435,7 +423,6 @@ mod tests {
         let full = CharsetDef {
             name: Some("n".into()),
             ranges: Some(vec!["U+1-U+2".into()]),
-            property: Some(PropertyKind::Emoji),
             file: Some("f.txt".into()),
             scope: Some(ScopeKind::Han),
             add: Some(vec!["a".into()]),
