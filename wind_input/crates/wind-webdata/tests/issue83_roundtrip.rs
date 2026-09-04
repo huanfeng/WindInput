@@ -9,12 +9,41 @@ use wind_coordinator::Coordinator;
 use wind_store::Store;
 use wind_webdata::WebDataRpc;
 
+/// 只带 `common_han` 类的临时数据目录。
+///
+/// ⚠️ 常用性判定已归 `CharsetRegistry`：没有这个类就没有人表态、一切兜底判常用，
+/// 而本文件的用例都建立在「域内汉字默认判生僻」之上（那样 `common: true` 才与默认
+/// 相反、真的落一条记录）。名单几个字够用。
+fn charsets_data_dir(tag: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("wind_issue83_data_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("charsets")).unwrap();
+    std::fs::write(
+        d.join("charsets").join("common_han.yaml"),
+        "---
+key: common_han
+name: 常用汉字
+order: 50
+scope: han
+default: common
+outside: rare
+...
+的
+一
+是
+",
+    )
+    .unwrap();
+    d
+}
+
 fn coord(tag: &str) -> Arc<Coordinator> {
     let p = std::env::temp_dir().join(format!("wind_issue83_{tag}_{}.redb", std::process::id()));
     let _ = std::fs::remove_file(&p);
+    let data = charsets_data_dir(tag);
     Coordinator::new_headless_with_store(
         Config::default(),
-        None,
+        Some(&data),
         Arc::new(Store::open(&p).unwrap()),
     )
 }

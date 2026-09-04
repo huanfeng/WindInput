@@ -363,6 +363,12 @@ pub struct EngineManager {
     /// 查块表，而本项的消费点在按键热路径上。跟 `codetable`/`english` 那几份镜像一样由
     /// `update_config` 刷新——**漏了那一步的症状是「设置页改了不生效、重启后才生效」**。
     charsets: Mutex<Arc<wind_candidate::CharsetRegistry>>,
+    /// 字符类**用户层**目录。`None` = 走 `Config::user_config_dir()`（生产默认）。
+    ///
+    /// ★ 把它显式化而不是让 `build_charsets` 直接调那个全局函数：装配的输入本就该是
+    /// 参数。副产品是测试能指向临时目录——否则每跑一次测试就在开发者自己的 `%APPDATA%`
+    /// 里留下文件，而那份文件还会反过来影响下一次测试。
+    charsets_user_dir: Mutex<Option<std::path::PathBuf>>,
     /// 词频排序设置缓存（schema_id -> FreqSettings；按需解析、避免每键读盘）
     freq_cache: Mutex<HashMap<String, FreqSettings>>,
     /// 方案引擎类型缓存（`schema_engine_type`）。**按 id 缓存，reload/invalidate 时清**，
@@ -612,7 +618,8 @@ impl EngineManager {
             mix: Mutex::new(config.schema.mix.clone()),
             english: Mutex::new(config.schema.english.clone()),
             temp_pinyin: Mutex::new(config.input.temp_pinyin.clone()),
-            charsets: Mutex::new(Arc::new(Self::build_charsets(config, data_dir))),
+            charsets: Mutex::new(Arc::new(Self::build_charsets(config, data_dir, None))),
+            charsets_user_dir: Mutex::new(None),
             freq_cache: Mutex::new(HashMap::new()),
             schema_type_cache: Mutex::new(HashMap::new()),
             key_actions_cache: Mutex::new(HashMap::new()),
@@ -2494,8 +2501,16 @@ impl EngineManager {
             config.input.temp_pinyin.clone();
         // 字符类：**重新装配**而不是照搬字符串——镜像存的是解析结果。漏掉这一行的
         // 症状是设置页改了不生效、重启后才生效（`freq_cache` 在下面被清，会拿着旧的重建）。
-        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) =
-            Arc::new(Self::build_charsets(config, self.data_dir.as_deref()));
+        let user = self
+            .charsets_user_dir
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Self::build_charsets(
+            config,
+            self.data_dir.as_deref(),
+            user.as_deref(),
+        ));
         *self
             .primary_pinyin
             .lock()
@@ -3355,13 +3370,17 @@ impl EngineManager {
     fn build_charsets(
         config: &wind_config::Config,
         data_dir: Option<&Path>,
+        user_dir: Option<&Path>,
     ) -> wind_candidate::CharsetRegistry {
         // 三层同名目录，层序与 `resolve_schema_resource` 一致（后者是 user > custom >
         // data，这里是靠后的覆盖靠前的）。
+        let fallback = user_dir
+            .is_none()
+            .then(wind_config::Config::user_config_dir);
         let defs = wind_config::charset_def::load_layered(
             data_dir,
             wind_config::Config::custom_data_dir().as_deref(),
-            wind_config::Config::user_config_dir().as_deref(),
+            user_dir.or_else(|| fallback.as_ref().and_then(|o| o.as_deref())),
         );
         crate::charset_assembly::assemble(
             &defs,
@@ -3385,8 +3404,39 @@ impl EngineManager {
     /// 这正是本仓反复出现的「运行时镜像态没回灌」那类缺陷：改动落进了配置，却没落进
     /// 由它派生的运行时结构。⇒ 每个无条件重建 `ConfigBundle` 的地方都要调本方法。
     pub fn rebuild_charsets(&self, config: &wind_config::Config) {
-        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) =
-            Arc::new(Self::build_charsets(config, self.data_dir.as_deref()));
+        let user = self
+            .charsets_user_dir
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Self::build_charsets(
+            config,
+            self.data_dir.as_deref(),
+            user.as_deref(),
+        ));
+    }
+
+    /// 指定字符类**用户层**目录（`None` = 恢复默认，走 `Config::user_config_dir()`）。
+    ///
+    /// 设置改动会在下一次 [`Self::rebuild_charsets`] 生效，故这里顺手不重装——调用方
+    /// 通常紧接着就要改配置再重装，重装两次纯属浪费。
+    pub fn set_charsets_user_dir(&self, dir: Option<std::path::PathBuf>) {
+        *self
+            .charsets_user_dir
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = dir;
+    }
+
+    /// 当前生效的字符类**用户层**目录（未指定时回落 `Config::user_config_dir()`）。
+    ///
+    /// ★ 读写两侧必须问同一个来源：设置页写进 A 目录、装配却扫 B 目录的话，
+    /// 表现就是「改了没反应」，而两边各自看都没错。
+    pub fn charsets_user_dir(&self) -> Option<std::path::PathBuf> {
+        self.charsets_user_dir
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .or_else(wind_config::Config::user_config_dir)
     }
 
     /// 直接换掉字符类 registry。

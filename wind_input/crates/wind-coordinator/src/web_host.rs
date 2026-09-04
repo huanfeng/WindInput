@@ -56,6 +56,25 @@ pub trait WebDataHost {
     /// 快捷输入格式表的设置页全貌（含被停用的条目）。
     fn quick_format_rows(&self) -> Vec<crate::handle_quick_format::QuickFormatRow>;
 
+    /// 字符类：设置页列表（全部类，按 `order` 升序＝仲裁顺序）。
+    fn charset_rows(&self) -> Vec<crate::handle_charset::CharsetClassRow>;
+
+    /// 改一个类的属性：写用户层 `charsets/<key>.yaml` **并立即热载**。
+    fn charset_edit(
+        &self,
+        key: &str,
+        edit: &crate::handle_charset::CharsetEdit,
+    ) -> anyhow::Result<()>;
+
+    /// 撤掉用户层对某个类的全部调整。
+    fn charset_reset(&self, key: &str) -> anyhow::Result<()>;
+
+    /// 清理压在某个类上的冗余逐条覆盖（方向与当前默认相同的那些）。
+    fn charset_clear_redundant(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<crate::handle_charset::CharsetCleanupOutcome>;
+
     /// 常用字表：设置页列表（**全表**，`query` 非空时只留出现在查询串里的字）。
     fn common_char_rows(
         &self,
@@ -203,6 +222,25 @@ impl WebDataHost for Coordinator {
     }
     fn quick_format_rows(&self) -> Vec<crate::handle_quick_format::QuickFormatRow> {
         Coordinator::quick_format_rows(self)
+    }
+    fn charset_rows(&self) -> Vec<crate::handle_charset::CharsetClassRow> {
+        Coordinator::charset_rows(self)
+    }
+    fn charset_edit(
+        &self,
+        key: &str,
+        edit: &crate::handle_charset::CharsetEdit,
+    ) -> anyhow::Result<()> {
+        Coordinator::charset_edit(self, key, edit)
+    }
+    fn charset_reset(&self, key: &str) -> anyhow::Result<()> {
+        Coordinator::charset_reset(self, key)
+    }
+    fn charset_clear_redundant(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<crate::handle_charset::CharsetCleanupOutcome> {
+        Coordinator::charset_clear_redundant(self, key)
     }
     fn common_char_rows(
         &self,

@@ -482,6 +482,10 @@ pub trait WebDataRpc: WebDataHost {
             // ── quick.*（快捷输入格式表的用户调整，全局，redb 持久化）──
             // 基表（模板与出厂顺序）在 system.quick.toml，**RPC 一律不写它**：
             // 那会抢走高级用户手写文件的所有权，见 handle_quick_format 模块文档。
+            "charset.list" => self.web_charset_list(),
+            "charset.set" => self.web_charset_set(params),
+            "charset.reset" => self.web_charset_reset(params),
+            "charset.clearRedundant" => self.web_charset_clear_redundant(params),
             "commonChars.list" => self.web_common_chars_list(params),
             "commonChars.query" => self.web_common_chars_query(params),
             "commonChars.set" => self.web_common_chars_set(params),
@@ -2696,6 +2700,81 @@ pub trait WebDataRpc: WebDataHost {
     /// ★ 预览与执行**走同一个方法、同一次扫描**，只差一个 `apply` 开关。分成两条实现的话，
     /// 预览说「43 个字」而执行写了别的数目，用户没法察觉——两条路各扫一遍词库，中间还隔着
     /// 用户的思考时间，方案切换、词库热插拔都能让它们对不上。
+    /// `charset.list` —— 字符类全表。
+    ///
+    /// ⚠️ `overrideCount` **界面必须显示**：用户曾整类点过生僻的话，库里躺着上千条逐条
+    /// 覆盖压着这个类，他改 `default` 会一点反应都没有（设计文档 §7.2）。
+    fn web_charset_list(&self) -> anyhow::Result<Value> {
+        let items: Vec<Value> = self
+            .charset_rows()
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "key": r.key,
+                    "name": r.name,
+                    "ranges": r.ranges,
+                    "memberCount": r.member_count,
+                    "order": r.order,
+                    // 三态：null = 本类不表态（跟随下层/兜底判常用）。
+                    "default": r.default_common,
+                    "noFreq": r.no_freq,
+                    "inRare": r.in_rare,
+                    "enabled": r.enabled,
+                    // 内置区块类的 ranges 只读——要改范围请新建自己的类（§4.3）。
+                    "builtin": r.builtin,
+                    "overridden": r.overridden,
+                    "overrideCount": r.override_count,
+                })
+            })
+            .collect();
+        Ok(json!({ "items": items }))
+    }
+
+    /// `charset.set` —— 改一个类的属性。缺席的字段不动。
+    fn web_charset_set(&self, params: &Value) -> anyhow::Result<Value> {
+        let key = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("缺少参数 key"))?;
+        let edit = wind_coordinator::handle_charset::CharsetEdit {
+            // "common" / "rare" / "inherit"——后者是「本层不表态」，与显式设成常用
+            // 不是一回事：它跟随出厂更新，显式值会钉死。
+            default_common: params
+                .get("default")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            no_freq: params.get("noFreq").and_then(|v| v.as_bool()),
+            in_rare: params.get("inRare").and_then(|v| v.as_bool()),
+            enabled: params.get("enabled").and_then(|v| v.as_bool()),
+            order: params
+                .get("order")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32),
+        };
+        self.charset_edit(key, &edit)?;
+        Ok(json!({ "ok": true }))
+    }
+
+    /// `charset.reset` —— 撤掉用户层对这个类的全部调整。
+    fn web_charset_reset(&self, params: &Value) -> anyhow::Result<Value> {
+        let key = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("缺少参数 key"))?;
+        self.charset_reset(key)?;
+        Ok(json!({ "ok": true }))
+    }
+
+    /// `charset.clearRedundant` —— 清理压在这个类上、方向与默认相同的逐条覆盖。
+    fn web_charset_clear_redundant(&self, params: &Value) -> anyhow::Result<Value> {
+        let key = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("缺少参数 key"))?;
+        let o = self.charset_clear_redundant(key)?;
+        Ok(json!({ "scanned": o.scanned, "removed": o.removed }))
+    }
+
     fn web_common_chars_bulk(&self, params: &Value) -> anyhow::Result<Value> {
         let ch = char_param(params, "char")?;
         let common = params
@@ -3870,11 +3949,46 @@ mod tests {
     }
 
     /// 构造一个带临时 store 的无头 Coordinator。
+    /// 造一个只带 `common_han` 类的临时数据目录。
+    ///
+    /// # ⚠️ 为什么测试装置必须有它
+    ///
+    /// 常用性判定已归 `CharsetRegistry`：没有 `common_han` 类就**没有人表态**，一切兜底
+    /// 判常用。而本文件多条用例的前提是「域内的汉字默认判生僻」（好让 `common: true`
+    /// 与默认相反、真的落一条记录）——那个前提正是 `common_han` 类的
+    /// `scope: han` + `outside: rare` 给出的。
+    ///
+    /// 名单只放几个字：够用来区分「在表内 ⇒ 常用」和「域内表外 ⇒ 生僻」即可，
+    /// 不必搬 8104 字进来。
+    fn charsets_data_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("wind_webdata_data_{tag}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("charsets")).unwrap();
+        std::fs::write(
+            d.join("charsets").join("common_han.yaml"),
+            "---
+key: common_han
+name: 常用汉字
+order: 50
+scope: han
+default: common
+outside: rare
+...
+的
+一
+是
+",
+        )
+        .unwrap();
+        d
+    }
+
     fn coord(tag: &str) -> Arc<Coordinator> {
         let path = std::env::temp_dir().join(format!("wind_webdata_{tag}.redb"));
         let _ = std::fs::remove_file(&path);
         let store = Arc::new(Store::open(&path).unwrap());
-        Coordinator::new_headless_with_store(Config::default(), None, store)
+        let data = charsets_data_dir(tag);
+        Coordinator::new_headless_with_store(Config::default(), Some(&data), store)
     }
 
     /// 在 `{sections:[{key,...}]}` 响应里按 key 取某段（无则 Null）。

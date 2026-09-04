@@ -49,7 +49,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// 字符类定义所在的目录名（三层同名）。
@@ -383,6 +383,133 @@ pub fn apply_doc(merged: &mut BTreeMap<String, MergedClass>, doc: CharsetDoc) {
 /// 一个码位段（闭区间）。
 pub type CodeRange = (u32, u32);
 
+/// 用户层文件的固定头注释。
+///
+/// 与 `compat.toml` 同一条纪律：GUI **整份重写**这个文件，手写的注释与排版都不保留。
+/// 把这句话写进文件本身，比写进文档有用得多——真正会踩的人正在看这个文件。
+const USER_FILE_HEADER: &str = "\
+# 本文件由设置页管理，会被**整份重写**——手写的注释与排版不会保留。
+# 想手写就换个文件名（同一层里 key 相同即可覆盖），本文件只是设置页的落点。
+#
+# 只写你要改的字段；没写的沿用下层（定制层 → 出厂层）。
+# 列表体在 `...` 之后：裸行 = 加进本类，`-` 开头 = 从本类移除。
+";
+
+/// key 能不能直接当文件名用。
+///
+/// # ⚠️ 为什么要校验而不是「安全化」
+///
+/// 安全化（把非法字符换成 `_`）会让两个不同的 key 落到同一个文件上，后写的**静默**覆盖
+/// 先写的——用户看到的是「改了 A 类，B 类的设置没了」。校验则在入口就拒绝，代价是用户
+/// 得换个名字，而那正是他能理解并处理的。
+///
+/// ⛔ 明确拒绝的：路径分隔符、`.`（含 `..`）、`:`（Windows 的 `C:name` 数据流语法，
+/// 见仓内防穿越守卫的同款约定）、控制字符、首尾空白。
+pub fn is_valid_key(key: &str) -> bool {
+    if key.is_empty() || key.len() > 64 || key.trim() != key {
+        return false;
+    }
+    !key.chars().any(|c| {
+        std::path::is_separator(c)
+            || c.is_control()
+            || matches!(c, '.' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+    })
+}
+
+/// 这份调整是不是**空壳**（除 `key` 外什么都没说）。
+///
+/// ★ 空壳必须删文件而不是留一份只有 key 的 yaml：留着的话，「恢复默认」之后目录里仍有
+/// 这个类的痕迹，下次读还会走一遍合并——`compat.toml` 的 `update_user_rule` 是同一条。
+pub fn is_empty_override(doc: &CharsetDoc) -> bool {
+    let d = &doc.def;
+    doc.added.is_empty()
+        && doc.removed.is_empty()
+        && d.name.is_none()
+        && d.ranges.is_none()
+        && d.file.is_none()
+        && d.scope.is_none()
+        && d.default.is_none()
+        && d.outside.is_none()
+        && d.order.is_none()
+        && d.no_freq.is_none()
+        && d.in_rare.is_none()
+        && d.enabled.is_none()
+        && d.replace.is_none()
+}
+
+/// 用户层里某个 key 的文件路径。
+pub fn user_file_path(user_dir: &Path, key: &str) -> Option<PathBuf> {
+    is_valid_key(key).then(|| {
+        user_dir
+            .join(CHARSETS_DIR_NAME)
+            .join(format!("{key}.{CHARSET_EXT}"))
+    })
+}
+
+/// 把一份调整写进用户层（整份重写）；空壳则删掉文件。
+///
+/// ⚠️ 只写 `Some` 的字段（`CharsetDef` 全字段 `skip_serializing_if`）。写全量会把当前
+/// 的出厂值**固化**进用户层——出厂改了 `order` 或补了 `ranges`，这个用户永远拿不到。
+/// 同一个坑见设计文档 §4.1。
+pub fn save_user_doc(user_dir: &Path, doc: &CharsetDoc) -> anyhow::Result<()> {
+    let path = user_file_path(user_dir, &doc.def.key)
+        .ok_or_else(|| anyhow::anyhow!("字符类的 key「{}」不能作文件名", doc.def.key))?;
+
+    if is_empty_override(doc) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => anyhow::bail!("删除 {} 失败：{e}", path.display()),
+        }
+        return Ok(());
+    }
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let head = serde_yaml::to_string(&doc.def)?;
+    let mut text = String::with_capacity(head.len() + 256);
+    text.push_str(USER_FILE_HEADER);
+    text.push_str("---\n");
+    text.push_str(&head);
+    text.push_str(HEAD_BODY_SEP);
+    text.push('\n');
+    for a in &doc.added {
+        text.push_str(a);
+        text.push('\n');
+    }
+    for r in &doc.removed {
+        text.push(REMOVE_PREFIX);
+        text.push_str(r);
+        text.push('\n');
+    }
+    std::fs::write(&path, text).map_err(|e| anyhow::anyhow!("写 {} 失败：{e}", path.display()))
+}
+
+/// 读回用户层里某个 key 的调整；没有就给一份只带 key 的空壳。
+///
+/// ★ 给空壳而不是 `None`：调用方拿到它就能直接改字段再存回去，不必在「有没有这份文件」
+/// 上分两条路——而那两条路一旦分开，新建类的那条几乎必然少写点什么。
+pub fn load_user_doc(user_dir: &Path, key: &str) -> CharsetDoc {
+    let empty = || CharsetDoc {
+        def: CharsetDef {
+            key: key.to_string(),
+            ..Default::default()
+        },
+        added: Vec::new(),
+        removed: Vec::new(),
+    };
+    // ⚠️ 按 **key** 找而不是只看 `<key>.yaml`：用户可能手写了一个别的文件名来覆盖同一个
+    // 类（§3.5 允许）。只认同名文件的话，设置页会把那份手写的调整视而不见，
+    // 保存时再用自己的文件把它盖掉——用户改一次就丢一次。
+    for doc in load_layer(&user_dir.join(CHARSETS_DIR_NAME)) {
+        if doc.def.key == key {
+            return doc;
+        }
+    }
+    empty()
+}
+
 /// 解析一条码位段：`U+4E00-U+9FFF`（闭区间）或 `U+4E00`（单点）。
 ///
 /// # 为什么用 `U+XXXX` 而不是字面字符或 `\u` 转义
@@ -638,5 +765,162 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].def.key, "ok");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 用户层写端 ─────────────────────────────────────────────────────────
+
+    fn tmp_user_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("wind_charset_save_{tag}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn doc_of(key: &str) -> CharsetDoc {
+        CharsetDoc {
+            def: CharsetDef {
+                key: key.to_string(),
+                ..Default::default()
+            },
+            added: Vec::new(),
+            removed: Vec::new(),
+        }
+    }
+
+    /// ★★ 写回**只写用户改过的字段**，不带出厂值。
+    ///
+    /// 写全量会把当前的 `ranges` / `order` 固化进用户层 ⇒ 出厂补了新 emoji 或调了顺序，
+    /// 这个用户永远拿不到。这是本仓踩过三次的坑（设计文档 §4.1）。
+    #[test]
+    fn saving_writes_only_what_the_user_changed() {
+        let d = tmp_user_dir("sparse");
+        let mut doc = doc_of("emoji");
+        doc.def.default = Some(Commonality::Rare);
+        save_user_doc(&d, &doc).unwrap();
+
+        let text = std::fs::read_to_string(d.join(CHARSETS_DIR_NAME).join("emoji.yaml")).unwrap();
+        assert!(text.contains("key: emoji"));
+        assert!(text.contains("default: rare"));
+        for absent in [
+            "ranges", "order", "file", "scope", "outside", "no_freq", "in_rare",
+        ] {
+            assert!(
+                !text.contains(&format!("\n{absent}:")),
+                "没改过的 {absent} 不该被写进用户层（会固化出厂值）"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 存下去的东西读得回来——写端与读端用的是同一套语法。
+    #[test]
+    fn a_saved_doc_round_trips() {
+        let d = tmp_user_dir("roundtrip");
+        let mut doc = doc_of("mine");
+        doc.def.name = Some("我的类".into());
+        doc.def.order = Some(7);
+        doc.def.no_freq = Some(true);
+        doc.added = vec!["★".into(), "☆".into()];
+        doc.removed = vec!["☀".into()];
+        save_user_doc(&d, &doc).unwrap();
+
+        let back = load_user_doc(&d, "mine");
+        assert_eq!(back.def, doc.def);
+        assert_eq!(back.added, doc.added);
+        assert_eq!(back.removed, doc.removed);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ★ 空壳删文件，不留一份只有 key 的 yaml。
+    ///
+    /// 留着的话「恢复默认」之后目录里仍有这个类的痕迹，下次读还会走一遍合并。
+    #[test]
+    fn an_empty_override_deletes_the_file() {
+        let d = tmp_user_dir("empty");
+        let mut doc = doc_of("emoji");
+        doc.def.default = Some(Commonality::Rare);
+        save_user_doc(&d, &doc).unwrap();
+        let path = d.join(CHARSETS_DIR_NAME).join("emoji.yaml");
+        assert!(path.is_file(), "先得真的写出来，否则下面测不出东西");
+
+        save_user_doc(&d, &doc_of("emoji")).unwrap();
+        assert!(!path.exists(), "恢复默认后不该留下空壳文件");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ★★ 读回按 **key** 找，而不是只认 `<key>.yaml`。
+    ///
+    /// 用户可以手写一个别的文件名来覆盖同一个类（§3.5）。只认同名文件的话，设置页会把
+    /// 那份手写调整视而不见，保存时再用自己的文件盖掉它——用户改一次丢一次。
+    #[test]
+    fn loading_finds_the_class_by_key_not_by_file_name() {
+        let d = tmp_user_dir("bykey");
+        let dir = d.join(CHARSETS_DIR_NAME);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("我自己起的名字.yaml"),
+            "---\nkey: emoji\norder: 3\n...\n★\n",
+        )
+        .unwrap();
+
+        let back = load_user_doc(&d, "emoji");
+        assert_eq!(back.def.order, Some(3), "手写文件里的调整该被读到");
+        assert_eq!(back.added, vec!["★".to_string()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 没有任何用户调整时给一份空壳，调用方直接改字段存回去即可。
+    #[test]
+    fn loading_a_missing_class_yields_an_empty_shell() {
+        let d = tmp_user_dir("missing");
+        let back = load_user_doc(&d, "emoji");
+        assert_eq!(back.def.key, "emoji");
+        assert!(is_empty_override(&back));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ⛔ 危险的 key 在**入口**就被拒，不做「安全化」。
+    ///
+    /// 安全化会让两个不同的 key 落到同一个文件上，后写的静默覆盖先写的——用户看到的是
+    /// 「改了 A 类，B 类的设置没了」。
+    #[test]
+    fn dangerous_keys_are_rejected_not_sanitized() {
+        for bad in [
+            "../escape",
+            "a/b",
+            "a\\b",
+            "C:stream",
+            ".",
+            "..",
+            "",
+            " lead",
+            "trail ",
+            "wi*ld",
+        ] {
+            assert!(!is_valid_key(bad), "「{bad}」不该被当作合法 key");
+        }
+        for good in ["emoji", "common_han", "表情符号", "my-set_1"] {
+            assert!(is_valid_key(good), "「{good}」该是合法 key");
+        }
+
+        let d = tmp_user_dir("badkey");
+        assert!(
+            save_user_doc(&d, &doc_of("../escape")).is_err(),
+            "非法 key 必须写失败，而不是落到别处"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 写出来的文件带固定头注释，声明「会被整份重写」。
+    #[test]
+    fn the_saved_file_says_it_will_be_rewritten() {
+        let d = tmp_user_dir("header");
+        let mut doc = doc_of("emoji");
+        doc.def.order = Some(1);
+        save_user_doc(&d, &doc).unwrap();
+        let text = std::fs::read_to_string(d.join(CHARSETS_DIR_NAME).join("emoji.yaml")).unwrap();
+        assert!(text.starts_with('#'), "开头得是注释");
+        assert!(text.contains("整份重写"), "得把这件事说出来");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
