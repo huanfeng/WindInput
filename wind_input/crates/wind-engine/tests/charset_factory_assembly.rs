@@ -40,27 +40,48 @@ fn factory_registry() -> wind_candidate::CharsetRegistry {
 /// 出厂**就是**表态的（`default: common` / `outside: rare`），它复现的正是现有
 /// `CommonChars` 的判定；不表态等于把常用字过滤整个关掉。
 ///
-/// ⇒ 逐码位与 `CommonChars` 对答案。这也是 P3 把常用性判定切到 registry 时的等价性凭据。
+/// ⇒ 逐码位与**朴素参照实现**对答案。这是把常用性判定切到 registry 的等价性凭据。
+///
+/// # ⛔ 参照物不能是 `CommonChars`
+///
+/// 接线之前它是独立实现（`!is_common_scope(ch) || base.contains(&ch)`），拿它当参照
+/// 天经地义。接线之后 `is_base_common` **本身就是问 registry**，再拿它比对就成了
+/// 自反断言——测试照常全绿，判别力却已经归零。
+///
+/// ⇒ 参照物必须是**不经过被测代码**的一份独立计算：直接读 `common_chars.txt` 建集合，
+/// 按 `is_common_scope` 判。它复刻的正是接线前那一行。
 #[test]
-fn common_han_reproduces_common_chars_codepoint_by_codepoint() {
+fn common_han_reproduces_the_pre_wiring_verdict_codepoint_by_codepoint() {
     let d = data_dir();
     let reg = factory_registry();
-    let cc = wind_candidate::CommonChars::load(
-        &wind_config::Config::resolve_schema_resource(Some(&d), "common_chars.txt")
-            .expect("找不到 common_chars.txt"),
+
+    // 朴素参照：接线前 `CommonChars` 里的那份实现，逐字复刻。
+    let path = wind_config::Config::resolve_schema_resource(Some(&d), "common_chars.txt")
+        .expect("找不到 common_chars.txt");
+    let text = std::fs::read_to_string(&path).expect("读不出常用字表");
+    let base: std::collections::HashSet<char> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .flat_map(|l| l.chars())
+        .filter(|c| wind_candidate::is_markable(*c))
+        .collect();
+    assert!(
+        base.len() > 6000,
+        "常用字表只读到 {} 条，比对会全绿而无意义",
+        base.len()
     );
-    assert!(!cc.is_empty(), "常用字表没装进来，比对会全绿而无意义");
 
     for c in 0u32..=0x10FFFF {
         let Some(ch) = char::from_u32(c) else {
             continue;
         };
-        let buf = ch.to_string();
-        // 无人表态时调用方兜底判「常用」——与 `is_base_common` 对域外字符的待遇同源。
+        // 无人表态时调用方兜底判「常用」——与接线前「域外一律放行」那一半同源。
+        let expected = !wind_candidate::is_common_scope(ch) || base.contains(&ch);
         assert_eq!(
-            reg.verdict_of(&buf).unwrap_or(true),
-            cc.is_base_common(ch),
-            "U+{c:04X} 的常用性判定与现状不一致"
+            reg.verdict_of_char(ch).unwrap_or(true),
+            expected,
+            "U+{c:04X} 的常用性判定与接线前不一致"
         );
     }
 }

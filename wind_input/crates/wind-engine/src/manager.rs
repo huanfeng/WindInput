@@ -3389,6 +3389,15 @@ impl EngineManager {
             Arc::new(Self::build_charsets(config, self.data_dir.as_deref()));
     }
 
+    /// 直接换掉字符类 registry。
+    ///
+    /// 生产上由 [`Self::rebuild_charsets`] 从配置装配；本方法留给**测试夹具**与将来
+    /// 「设置页改完 charsets/ 立即热载」那条路径——它们手里已经有现成的 registry，
+    /// 不必再走一遍目录扫描。
+    pub fn set_charsets(&self, reg: Arc<wind_candidate::CharsetRegistry>) {
+        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = reg;
+    }
+
     /// 当前的字符类 registry。coordinator 的生僻字准入与类型列都从这里取。
     pub fn charsets(&self) -> Arc<wind_candidate::CharsetRegistry> {
         Arc::clone(&self.charsets.lock().unwrap_or_else(|e| e.into_inner()))

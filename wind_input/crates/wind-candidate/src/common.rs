@@ -6,17 +6,33 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// 通用规范汉字表（出厂 8104 字：一级 3500 + 二级 3000 + 三级其余）+ **用户覆盖**。
+/// **用户覆盖**层，叠加在字符类 registry 的默认判定之上。
 ///
-/// 两层分开存是刻意的：
-/// - `base` 来自 `common_chars.txt`（含用户目录整份覆盖），跟随出厂更新；
-/// - `overrides` 是用户在候选右键 / 词库管理里一个个点出来的稀疏调整，落在 redb。
+/// # ★ 判定的两层分工
+///
+/// | 层 | 谁 | 来源 |
+/// |---|---|---|
+/// | 默认判定 | [`crate::CharsetRegistry`]（**按参数传入**） | `charsets/*.yaml` 三层合并 |
+/// | 用户覆盖 | 本结构的 `overrides` | 候选右键 / 词库管理，落在 redb |
 ///
 /// 合成只发生在查询那一刻（覆盖优先），**不预先 merge 成一个集合**——merge 之后就分不清
 /// 「这个字出厂就常用」还是「用户把它设成了常用」，而界面要显示的正是这个差别
 /// （「出厂：生僻 → 现在：常用」），「恢复出厂」也需要知道回退到哪一边。
+///
+/// # ⚠️ registry 为什么是参数而不是字段
+///
+/// registry 由配置派生，配置一变就要重装。持有一份拷贝就多出一处「记得同步」的地方，
+/// 而本仓已经因为这个吃过亏（`include_blocks` 漏在 schema_dirty 门控里，改完要切方案
+/// 才生效）。**按参数传入让编译器保证每个调用点拿到的都是当前那一份**。
+///
+/// 这也与既有的 [`crate::rare_admits`] 同形——那个函数一直是「cc + registry 两份判定
+/// 数据都作参数」。
 pub struct CommonChars {
-    /// 出厂基表（判定用，O(1) 查表）。
+    /// 出厂字表的成员集。
+    ///
+    /// ⚠️ **不再参与判定**（那归 registry）。只剩两个职责：
+    /// [`Self::is_empty`] 的「表没装进来」信号，以及 [`Self::list_all`] 里
+    /// 「这个覆盖键在不在出厂表内」的分类。
     base: HashSet<char>,
     /// 出厂基表的**原始顺序**（列举用）。
     ///
@@ -99,15 +115,15 @@ impl CommonChars {
     /// 而写端那边判的是「与默认相反、要留记录」，两处对同一条记录给出相反的说法。
     /// 返回的第一项是**字素簇文本**而不是 `char`：覆盖表里可以有 `👨‍👩‍👧` 这样的多码位条目，
     /// 用 `char` 表示不了。默认字表那 8104 条全是单字符，转成 `String` 只是形态统一。
-    pub fn list_all(&self) -> Vec<(String, bool, bool)> {
+    pub fn list_all(&self, cs: &crate::CharsetRegistry) -> Vec<(String, bool, bool)> {
         let mut out: Vec<(String, bool, bool)> = self
             .base_order
             .iter()
             .map(|&c| {
                 (
                     c.to_string(),
-                    self.is_base_common(c),
-                    self.is_char_common(c),
+                    self.is_base_common(c, cs),
+                    self.is_char_common(c, cs),
                 )
             })
             .collect();
@@ -130,8 +146,8 @@ impl CommonChars {
         out.extend(extra.into_iter().map(|k| {
             (
                 k.clone(),
-                self.is_cluster_common_by_default(k),
-                self.is_cluster_common(k),
+                self.is_cluster_common_by_default(k, cs),
+                self.is_cluster_common(k, cs),
             )
         }));
         out
@@ -159,6 +175,10 @@ impl CommonChars {
 
     /// 是否未加载到任何**出厂**字（数据缺失）。
     ///
+    /// ⚠️ 判定本身已交给 registry，本方法只剩「上层据此退化为不过滤」这一个用途。
+    /// registry 那边有一条同源的防线（`disarm_empty_scoped_classes`：名单为空的补集类
+    /// 撤销表态），两者失效方向一致——都是**退化为不过滤**，而不是拿空表去过滤。
+    ///
     /// ⚠️ 只看 `base`，不看覆盖：上层拿它决定「退化为不过滤」。若用户覆盖也算数，那么
     /// 出厂表缺失、而用户恰好设过一两个字时本函数返回 false，过滤照常进行——此刻几乎
     /// 所有字都查不到表、全被判成生僻，智能档会把候选滤得只剩那一两个字。
@@ -171,18 +191,18 @@ impl CommonChars {
     /// ★ 与 [`Self::is_string_common`] 对单字符串**必须给出同一个答案**
     /// （`char_and_string_judgements_agree` 钉着）。两者一处按字判、一处按串判，
     /// 判据分叉过就会出现「列表里显示常用、候选里却被滤掉」这种对不上账的现象。
-    pub fn is_char_common(&self, ch: char) -> bool {
-        self.is_cluster_common(ch.encode_utf8(&mut [0u8; 4]))
+    pub fn is_char_common(&self, ch: char, cs: &crate::CharsetRegistry) -> bool {
+        self.is_cluster_common(ch.encode_utf8(&mut [0u8; 4]), cs)
     }
 
     /// 一个**字素簇**是否常用：覆盖优先，其次落到 [`Self::is_base_common`]。
     ///
     /// 多码位簇（`⚽️` `👨‍👩‍👧` `🇨🇳`）没有覆盖时恒判常用——它们整体落在默认字表管辖域外，
     /// 与单个域外字符同一待遇。
-    pub fn is_cluster_common(&self, cluster: &str) -> bool {
+    pub fn is_cluster_common(&self, cluster: &str, cs: &crate::CharsetRegistry) -> bool {
         match self.overrides.get(cluster) {
             Some(&v) => v,
-            None => self.fallback_verdict_of(cluster),
+            None => self.fallback_verdict_of(cluster, cs),
         }
     }
 
@@ -196,25 +216,36 @@ impl CommonChars {
     ///   ——只查基表的话，那条覆盖在闸门开着时就查不到了。
     ///
     /// 症状都是「登记了一条 emoji 之后，某个字的判定忽然变了」，没人会把两件事联系起来。
-    fn fallback_verdict_of(&self, cluster: &str) -> bool {
-        cluster.chars().all(|ch| self.char_verdict(ch))
+    fn fallback_verdict_of(&self, cluster: &str, cs: &crate::CharsetRegistry) -> bool {
+        // ⛔ **不要在这里加「整簇先问一次 registry」**。那个写法从 `no_freq` / `in_rare`
+        // 搬过来看着很自然，实际会破坏上面第二条不变量：`鬱`+VS16 整簇不在名单里、却在
+        // Han 作用域内 ⇒ registry 直接判生僻并返回，**用户对 `鬱` 那条覆盖再也走不到**。
+        //
+        // ★ 根因是两种语义不能混：`no_freq` / `in_rare` 是**存在性**（任一命中即真），
+        // 整簇查询在那里是补充；本方法是**全称**（每个 char 都常用才算常用），整簇查询
+        // 在这里变成了短路。`gate_consistency` 抓住过一次。
+        cluster.chars().all(|ch| self.char_verdict(ch, cs))
     }
 
     /// 单个 `char` 的判定：覆盖优先，其次受管辖的查默认字表，域外一律放行。
     /// 这就是闸门关着时逐 `char` 走的那条路径，抽出来供簇路径回落，两边因此不会分叉。
-    fn char_verdict(&self, ch: char) -> bool {
+    fn char_verdict(&self, ch: char, cs: &crate::CharsetRegistry) -> bool {
         match self.overrides.get(ch.encode_utf8(&mut [0u8; 4])) {
             Some(&v) => v,
-            None => !is_common_scope(ch) || self.base.contains(&ch),
+            // 无人表态 ⇒ 兜底判「常用」。这与原先 `!is_common_scope(ch) || base.contains()`
+            // 里「域外一律放行」那一半是同一件事：出厂 `common_han` 类的 scope 就是
+            // `is_common_scope`，域外没有别的类表态。
+            None => cs.verdict_of_char(ch).unwrap_or(true),
         }
     }
 
     /// 簇的**默认**判定（忽略全部用户覆盖），供「与默认同向就删覆盖」那条判据用。
     /// 与 [`Self::fallback_verdict_of`] 的差别只在要不要看 `overrides`。
-    fn default_verdict_of(&self, cluster: &str) -> bool {
-        !cluster
+    fn default_verdict_of(&self, cluster: &str, cs: &crate::CharsetRegistry) -> bool {
+        // 同 `fallback_verdict_of`：全称语义，逐 char，⛔ 不加整簇短路。
+        cluster
             .chars()
-            .any(|ch| is_common_scope(ch) && !self.base.contains(&ch))
+            .all(|ch| cs.verdict_of_char(ch).unwrap_or(true))
     }
 
     /// 默认判定（忽略用户覆盖）。供界面显示「默认：常用 → 现在：生僻」这类对照，
@@ -224,18 +255,14 @@ impl CommonChars {
     /// 域外字符一律忽略、照常放行，那就是它们事实上的默认待遇。若照旧返回 `false`，
     /// 用户把 `、` 设成生僻会被 `apply_common_target` 判成「与默认同向」⇒ 删覆盖 ⇒
     /// **设了没有任何反应**，右键菜单还一直显示同一项，且全程无报错。
-    pub fn is_base_common(&self, ch: char) -> bool {
-        if is_common_scope(ch) {
-            self.base.contains(&ch)
-        } else {
-            true
-        }
+    pub fn is_base_common(&self, ch: char, cs: &crate::CharsetRegistry) -> bool {
+        cs.verdict_of_char(ch).unwrap_or(true)
     }
 
     /// 一个字素簇的默认判定（忽略用户覆盖）。多码位簇恒「常用」——它整体落在默认字表
     /// 管辖域外，与单个域外字符同一待遇。
-    pub fn is_cluster_common_by_default(&self, cluster: &str) -> bool {
-        self.default_verdict_of(cluster)
+    pub fn is_cluster_common_by_default(&self, cluster: &str, cs: &crate::CharsetRegistry) -> bool {
+        self.default_verdict_of(cluster, cs)
     }
 
     /// 某字的用户覆盖方向；`None` = 未覆盖。
@@ -305,7 +332,7 @@ impl CommonChars {
     /// 这条是「词库管理全范围放开」的读端一半，缺了它写端就不能放开：注音符号 `ㄅ`、
     /// 结构描述符 `⿰`、假名 `あ` 都在 [`is_common_scope`] 之外，若仍按作用域先筛一道，
     /// 用户把它们设成生僻会**存进库里却永不被查询**——设了、存了、毫无作用，且全程无报错。
-    pub fn is_string_common(&self, text: &str) -> bool {
+    pub fn is_string_common(&self, text: &str, cs: &crate::CharsetRegistry) -> bool {
         if text.is_empty() {
             return false;
         }
@@ -320,7 +347,7 @@ impl CommonChars {
                 // 未表态：汉字（含被本码表当汉字用的 PUA）查默认字表，其余辅助字符忽略。
                 // 多码位簇**逐 char 回落**，与闸门关着时的按 char 路径给出同一答案。
                 None => {
-                    if !self.fallback_verdict_of(unit) {
+                    if !self.fallback_verdict_of(unit, cs) {
                         return false;
                     }
                 }
@@ -530,15 +557,40 @@ mod semantic_units_tests {
 
 #[cfg(test)]
 mod tests {
+    /// 与 [`CommonChars::from_base`] 配套的 registry：出厂 `common_han` 类的形态
+    /// ——作用域 = 汉字域、名单 = 这些字、名单内常用、**域内名单外生僻**。
+    ///
+    /// 生产路径上这两者分别来自 `schemas/common_chars.txt` 与
+    /// `charsets/common_han.yaml`（后者的 `file:` 就指向前者），测试里一并造出来。
+    fn han_class(chars: impl IntoIterator<Item = char>) -> crate::CharsetRegistry {
+        let (reg, dropped) = crate::CharsetRegistry::compile(vec![crate::ClassSpec {
+            key: "common_han".into(),
+            members: chars.into_iter().map(|c| c.to_string()).collect(),
+            scope: Some(crate::Scope::Han),
+            default_common: Some(true),
+            outside_common: Some(false),
+            ..Default::default()
+        }]);
+        assert!(dropped.is_empty());
+        reg
+    }
+
+    /// 造「基表 + 与之配套的 registry」。判定要两份数据，测试里总是成对出现。
+    fn base(
+        chars: impl IntoIterator<Item = char> + Clone,
+    ) -> (CommonChars, crate::CharsetRegistry) {
+        (CommonChars::from_base(chars.clone()), han_class(chars))
+    }
+
     use super::*;
 
     #[test]
     fn test_string_common() {
-        let cc = CommonChars::from_base(['我', '们']);
-        assert!(cc.is_string_common("我们")); // 全部常用
-        assert!(!cc.is_string_common("我鬱")); // 含生僻
-        assert!(!cc.is_string_common("")); // 空串
-        assert!(cc.is_string_common("我!")); // 非汉字忽略
+        let (cc, cs) = base(['我', '们']);
+        assert!(cc.is_string_common("我们", &cs)); // 全部常用
+        assert!(!cc.is_string_common("我鬱", &cs)); // 含生僻
+        assert!(!cc.is_string_common("", &cs)); // 空串
+        assert!(cc.is_string_common("我!", &cs)); // 非汉字忽略
     }
 
     #[test]
@@ -546,51 +598,54 @@ mod tests {
         // 回归：用户词库里含中文顿号的词条在「常用字/智能」档被滤掉。
         // 根因＝判定域按 `0x2E80..=0x33FF` 整段圈定，把 CJK 符号和标点区当成必须查表的汉字，
         // 而字表里只有纯汉字。判据现按语义而非 Unicode 块邻接：符号一律忽略。
-        let cc = CommonChars::from_base(['我', '们']);
+        let (cc, cs) = base(['我', '们']);
 
-        assert!(cc.is_string_common("、")); // 顿号单条词条（本次上报的现象）
-        assert!(cc.is_string_common("我、们")); // 混排：标点不再拖累整词判定
+        assert!(cc.is_string_common("、", &cs)); // 顿号单条词条（本次上报的现象）
+        assert!(cc.is_string_common("我、们", &cs)); // 混排：标点不再拖累整词判定
         for s in ["。", "《", "》", "「", "」", "〇", "；", "："] {
-            assert!(cc.is_string_common(s), "CJK 标点应忽略: {s}");
+            assert!(cc.is_string_common(s, &cs), "CJK 标点应忽略: {s}");
         }
         // 判定自洽：同为中文标点，落不落进旧区间都该同一结果（旧实现下 、=false 而 ，=true）
-        assert_eq!(cc.is_string_common("、"), cc.is_string_common("，"));
+        assert_eq!(
+            cc.is_string_common("、", &cs),
+            cc.is_string_common("，", &cs)
+        );
         // 带圈/兼容符号与假名同属辅助字符，规范汉字表管不着
-        assert!(cc.is_string_common("①"));
-        assert!(cc.is_string_common("℃"));
-        assert!(cc.is_string_common("あ"));
+        assert!(cc.is_string_common("①", &cs));
+        assert!(cc.is_string_common("℃", &cs));
+        assert!(cc.is_string_common("あ", &cs));
         // 真汉字仍按表判定，未被本次放宽波及
-        assert!(!cc.is_string_common("我鬱"));
-        assert!(!cc.is_string_common("、鬱")); // 标点忽略，但同串里的生僻字照旧拦下
+        assert!(!cc.is_string_common("我鬱", &cs));
+        assert!(!cc.is_string_common("、鬱", &cs)); // 标点忽略，但同串里的生僻字照旧拦下
     }
 
     #[test]
     fn test_pua_not_common() {
         // 回归：五笔 dwi 下 U+E831（PUA）冒充生僻字混进常用字档。PUA 被本码表当汉字用，
         // 不在规范字表内即非常用；emoji/符号等真辅助字符仍忽略。
-        let cc = CommonChars::from_base(['仄']);
-        assert!(cc.is_string_common("仄")); // 真汉字在表内
-        assert!(!cc.is_string_common("\u{E831}")); // PUA 单字：非常用（正是 dwi 豆腐候选）
-        assert!(!cc.is_string_common("仄\u{E831}")); // 含 PUA 的混合串亦非常用
-        assert!(cc.is_string_common("仄😀")); // emoji（U+1F600）非汉字：忽略，不影响判定
+        let (cc, cs) = base(['仄']);
+        assert!(cc.is_string_common("仄", &cs)); // 真汉字在表内
+        assert!(!cc.is_string_common("\u{E831}", &cs)); // PUA 单字：非常用（正是 dwi 豆腐候选）
+        assert!(!cc.is_string_common("仄\u{E831}", &cs)); // 含 PUA 的混合串亦非常用
+        assert!(cc.is_string_common("仄😀", &cs)); // emoji（U+1F600）非汉字：忽略，不影响判定
     }
 
     /// 用户覆盖两个方向都要生效，且要能穿透到整串判定。
     #[test]
     fn overrides_win_over_base_in_both_directions() {
-        let mut cc = CommonChars::from_base(['我', '们']);
-        assert!(cc.is_char_common('我'));
-        assert!(!cc.is_char_common('鬱'));
+        let (mut cc, cs) = base(['我', '们']);
+        assert!(cc.is_char_common('我', &cs));
+        assert!(!cc.is_char_common('鬱', &cs));
 
         cc.set_overrides([("我".into(), false), ("鬱".into(), true)]);
-        assert!(!cc.is_char_common('我'), "常用字降级为生僻");
-        assert!(cc.is_char_common('鬱'), "生僻字升级为常用");
+        assert!(!cc.is_char_common('我', &cs), "常用字降级为生僻");
+        assert!(cc.is_char_common('鬱', &cs), "生僻字升级为常用");
         // 整串判定走同一条路：降级后的字会拖累整个词。
-        assert!(!cc.is_string_common("我们"));
-        assert!(cc.is_string_common("鬱"));
+        assert!(!cc.is_string_common("我们", &cs));
+        assert!(cc.is_string_common("鬱", &cs));
         // 出厂判定不受覆盖影响——界面要靠它显示「出厂 → 现在」的对照。
-        assert!(cc.is_base_common('我'));
-        assert!(!cc.is_base_common('鬱'));
+        assert!(cc.is_base_common('我', &cs));
+        assert!(!cc.is_base_common('鬱', &cs));
         assert_eq!(cc.override_of('我'), Some(false));
         assert_eq!(cc.override_of('们'), None);
     }
@@ -601,14 +656,14 @@ mod tests {
     /// 重启后才对，属于最难查的一类（[[project_runtime_mirror_state_config_sync]]）。
     #[test]
     fn set_overrides_replaces_rather_than_merges() {
-        let mut cc = CommonChars::from_base(['我']);
+        let (mut cc, cs) = base(['我']);
         cc.set_overrides([("我".into(), false), ("鬱".into(), true)]);
-        assert!(!cc.is_char_common('我'));
+        assert!(!cc.is_char_common('我', &cs));
 
         // 用户撤销了「我」那条，store 全量读出来只剩「鬱」。
         cc.set_overrides([("鬱".into(), true)]);
-        assert!(cc.is_char_common('我'), "撤销后回到出厂判定");
-        assert!(cc.is_char_common('鬱'));
+        assert!(cc.is_char_common('我', &cs), "撤销后回到出厂判定");
+        assert!(cc.is_char_common('鬱', &cs));
     }
 
     /// ⚠️ `is_empty` 只看出厂基表：它是上层「退化为不过滤」的判据。
@@ -617,7 +672,7 @@ mod tests {
     /// 进行——此刻几乎所有字都不在表里、全被判生僻，智能档会把候选滤到只剩那一个字。
     #[test]
     fn is_empty_ignores_overrides() {
-        let mut cc = CommonChars::from_base([]);
+        let (mut cc, _cs) = base([]);
         assert!(cc.is_empty());
         cc.set_overrides([("鬱".into(), true)]);
         assert!(cc.is_empty(), "有覆盖也仍算数据缺失");
@@ -629,16 +684,19 @@ mod tests {
     /// 根本不查的字符（`、`、emoji）存下覆盖，然后发现「设了完全没用」且毫无报错。
     #[test]
     fn common_scope_matches_string_judgement() {
-        let cc = CommonChars::from_base([]);
+        let (cc, cs) = base([]);
         for ch in ['我', '鬱', '\u{E831}', '\u{20000}', '氵'] {
             assert!(is_common_scope(ch), "{ch} 应在默认字表管辖域内");
             // 域内且不在表里 ⇒ 整串判非常用。
-            assert!(!cc.is_string_common(&ch.to_string()), "{ch} 应判非常用");
+            assert!(
+                !cc.is_string_common(&ch.to_string(), &cs),
+                "{ch} 应判非常用"
+            );
         }
         for ch in ['、', '，', '①', '℃', 'あ', '😀', 'A', '7'] {
             assert!(!is_common_scope(ch), "{ch} 应在默认字表管辖域外");
             // 域外**且用户没表过态** ⇒ 被忽略，不拖累判定。
-            assert!(cc.is_string_common(&ch.to_string()), "{ch} 应被忽略");
+            assert!(cc.is_string_common(&ch.to_string(), &cs), "{ch} 应被忽略");
         }
     }
 
@@ -649,7 +707,7 @@ mod tests {
     /// 冒出一批无字形的扩 J 生僻字（issue #83）。同一份列举还漏了扩展 I 与兼容汉字补充。
     #[test]
     fn supplementary_ideographic_planes_are_governed_wholesale() {
-        let cc = CommonChars::from_base([]);
+        let (cc, cs) = base([]);
         for (ch, what) in [
             ('\u{323B0}', "扩展 J 首字（Unicode 17 新增）"),
             ('\u{3347F}', "扩展 J 末字"),
@@ -658,7 +716,10 @@ mod tests {
             ('\u{3FFFF}', "平面 3 末尾（为将来的扩展 K/L 兜底）"),
         ] {
             assert!(is_common_scope(ch), "{what} 应在管辖域内");
-            assert!(!cc.is_string_common(&ch.to_string()), "{what} 应判非常用");
+            assert!(
+                !cc.is_string_common(&ch.to_string(), &cs),
+                "{what} 应判非常用"
+            );
         }
     }
 
@@ -675,17 +736,20 @@ mod tests {
             assert!(!is_common_scope(ch), "{ch} 本就在默认字表管辖域外");
             assert!(is_markable(ch), "{ch} 应可登记");
 
-            let mut cc = CommonChars::from_base([]);
+            let (mut cc, cs) = base([]);
             cc.set_overrides([(ch.to_string(), false)]);
             assert!(
-                !cc.is_string_common(&ch.to_string()),
+                !cc.is_string_common(&ch.to_string(), &cs),
                 "{ch} 设为生僻后必须判非常用，否则就是一条死记录"
             );
             assert!(cc.has_user_rare(&ch.to_string()), "{ch} 应认作用户显式降级");
 
             // 反向：设为常用同样被认，且不拖累整串。
             cc.set_overrides([(ch.to_string(), true)]);
-            assert!(cc.is_string_common(&ch.to_string()), "{ch} 设为常用应放行");
+            assert!(
+                cc.is_string_common(&ch.to_string(), &cs),
+                "{ch} 设为常用应放行"
+            );
         }
 
         // 空白与控制字符是唯一的例外，理由是数据卫生而非作用域。
@@ -739,18 +803,18 @@ mod tests {
     #[test]
     fn multi_code_point_cluster_override_takes_effect() {
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
-        let mut cc = CommonChars::from_base([]);
+        let (mut cc, cs) = base([]);
         cc.set_overrides([(family.to_string(), false)]);
-        assert!(!cc.is_string_common(family), "整个 ZWJ 序列应判非常用");
+        assert!(!cc.is_string_common(family, &cs), "整个 ZWJ 序列应判非常用");
         assert!(cc.has_user_rare(family));
         // 序列里的**单个成员**不受牵连：用户关的是这个组合，不是所有 👨。
         assert!(
-            cc.is_string_common("\u{1F468}"),
+            cc.is_string_common("\u{1F468}", &cs),
             "只登记了组合，单个成员不该跟着被判非常用"
         );
 
         // 混在句子里也认得出来。
-        assert!(!cc.is_string_common(&format!("一家{family}")));
+        assert!(!cc.is_string_common(&format!("一家{family}"), &cs));
     }
 
     /// 按字判与按串判**必须一致**，域外字符尤其。
@@ -761,7 +825,7 @@ mod tests {
     /// 写端的「与默认同向就删覆盖」也建立在这份一致上（见 `is_base_common`）。
     #[test]
     fn char_and_string_judgements_agree() {
-        let mut cc = CommonChars::from_base(['我']);
+        let (mut cc, cs) = base(['我']);
         cc.set_overrides([("、".into(), false), ("鬱".into(), true)]);
         // 覆盖过的、没覆盖的、域内的、域外的各来一遍。
         for ch in [
@@ -777,8 +841,8 @@ mod tests {
             '\u{323B0}',
         ] {
             assert_eq!(
-                cc.is_char_common(ch),
-                cc.is_string_common(&ch.to_string()),
+                cc.is_char_common(ch, &cs),
+                cc.is_string_common(&ch.to_string(), &cs),
                 "{ch} 的按字判与按串判不一致"
             );
         }
@@ -787,14 +851,20 @@ mod tests {
     /// 覆盖优先于默认字表——**两个方向都要**。
     #[test]
     fn override_wins_over_base_table() {
-        let mut cc = CommonChars::from_base(['我']);
-        assert!(cc.is_string_common("我"));
+        let (mut cc, cs) = base(['我']);
+        assert!(cc.is_string_common("我", &cs));
         cc.set_overrides([("我".into(), false)]);
-        assert!(!cc.is_string_common("我"), "默认常用的字被降级后须判非常用");
+        assert!(
+            !cc.is_string_common("我", &cs),
+            "默认常用的字被降级后须判非常用"
+        );
 
-        let mut cc = CommonChars::from_base([]);
+        let (mut cc, cs) = base([]);
         cc.set_overrides([("鬱".into(), true)]);
-        assert!(cc.is_string_common("鬱"), "默认生僻的字被提升后须判常用");
+        assert!(
+            cc.is_string_common("鬱", &cs),
+            "默认生僻的字被提升后须判常用"
+        );
     }
 
     /// 全表列举：**按字表原序**，用户加的字追加在后。
@@ -803,9 +873,9 @@ mod tests {
     /// 全靠它。若从 `HashSet` 迭代，每次启动的顺序都不一样，第 2 页的内容会随机变。
     #[test]
     fn list_all_keeps_table_order_and_appends_extras() {
-        let mut cc = CommonChars::from_base(['一', '乙', '二']);
+        let (mut cc, cs) = base(['一', '乙', '二']);
         assert_eq!(
-            cc.list_all(),
+            cc.list_all(&cs),
             vec![
                 ("一".to_string(), true, true),
                 ("乙".to_string(), true, true),
@@ -817,7 +887,7 @@ mod tests {
         // 一个降级（在表内）+ 一个新增（不在表内）。
         cc.set_overrides([("乙".into(), false), ("槮".into(), true)]);
         assert_eq!(
-            cc.list_all(),
+            cc.list_all(&cs),
             vec![
                 ("一".to_string(), true, true),
                 // 默认仍是常用，现在被改成生僻——两个值都要保留，界面靠差异显示对照。
@@ -832,14 +902,14 @@ mod tests {
     /// 表外字按码位排序追加：`HashMap` 迭代序随机，直接追加会让这批字每次刷新都换位置。
     #[test]
     fn list_all_orders_extras_deterministically() {
-        let mut cc = CommonChars::from_base(['一']);
+        let (mut cc, cs) = base(['一']);
         cc.set_overrides([
             ("鬱".into(), true),
             ("槮".into(), true),
             ("乂".into(), true),
         ]);
         let extras: Vec<String> = cc
-            .list_all()
+            .list_all(&cs)
             .into_iter()
             .skip(1)
             .map(|(c, _, _)| c)
@@ -852,8 +922,8 @@ mod tests {
     /// 字表里的重复字只列一次——历史数据里难免有重复，列两行一模一样的字很怪。
     #[test]
     fn list_all_dedupes_repeated_chars() {
-        let cc = CommonChars::from_base(['一', '乙', '一']);
-        assert_eq!(cc.list_all().len(), 2);
+        let (cc, cs) = base(['一', '乙', '一']);
+        assert_eq!(cc.list_all(&cs).len(), 2);
     }
 
     /// 域外字符的覆盖**现在生效**（issue #83 放开写端准入的读端前提）。
@@ -864,17 +934,17 @@ mod tests {
     /// 不是加一条新的。
     #[test]
     fn overrides_on_out_of_scope_chars_take_effect() {
-        let mut cc = CommonChars::from_base(['我']);
+        let (mut cc, cs) = base(['我']);
         cc.set_overrides([("、".into(), false), ("😀".into(), false)]);
         assert!(
-            !cc.is_string_common("、"),
+            !cc.is_string_common("、", &cs),
             "用户把顿号设成生僻，就该判非常用"
         );
         assert!(
-            !cc.is_string_common("我😀"),
+            !cc.is_string_common("我😀", &cs),
             "整串含一个被降级的字符即判非常用"
         );
         // 没被表过态的域外字符照旧忽略：零回归是放开的前提。
-        assert!(cc.is_string_common("我，"));
+        assert!(cc.is_string_common("我，", &cs));
     }
 }

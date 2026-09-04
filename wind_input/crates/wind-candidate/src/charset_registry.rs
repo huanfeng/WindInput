@@ -221,6 +221,16 @@ impl CharsetRegistry {
         None
     }
 
+    /// 单个 `char` 的常用性仲裁。
+    ///
+    /// ⚠️ 存在的理由是**避免分配**：调用方多半手里只有一个 `char`
+    /// （`CommonChars` 的逐 char 判定路径），而 `ch.to_string()` 在按键热路径上是每字
+    /// 一次堆分配。栈上 4 字节缓冲即可。
+    pub fn verdict_of_char(&self, ch: char) -> Option<bool> {
+        let mut buf = [0u8; 4];
+        self.verdict_of(ch.encode_utf8(&mut buf))
+    }
+
     /// 这个簇属于哪个类（类型列显示用）：优先给**仲裁赢家**，无人表态则给首个命中的类。
     ///
     /// ★ 给仲裁赢家而不是首个命中，是因为用户看这一列是想知道「谁决定了它的常用性」。

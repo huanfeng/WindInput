@@ -91,6 +91,20 @@ pub fn assemble(
             dropped.join(", ")
         );
     }
+    // ⚠️ 没有任何类表态常用性 ⇒ 常用/生僻判定整个不生效（一切兜底判常用）。
+    //
+    // 最常见的成因是**部署时 `data/charsets/` 没跟上**：旧的 data 目录配新的可执行文件。
+    // 失效方向是安全的（退化为不过滤，同 `CommonChars::is_empty()`），但用户看到的是
+    // 「生僻字模式什么都出不来」「检索范围过滤没反应」，而不会想到是少了个目录。
+    if reg
+        .classes()
+        .iter()
+        .all(|c| c.default_common.is_none() && c.outside_common.is_none())
+    {
+        warn!(
+            "没有任何字符类表态常用性，常用/生僻判定不生效——检查数据目录下的 charsets/ 是否随程序一起更新"
+        );
+    }
     let shadowed = reg.shadowed_keys();
     if !shadowed.is_empty() {
         warn!(
