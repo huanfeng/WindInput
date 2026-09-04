@@ -711,25 +711,6 @@ fn mixed_manual_addword_goes_to_primary() {
     );
 }
 
-/// 把 `data/charsets/` 原样复制到夹具的数据目录下。
-///
-/// ⚠️ 找不到就 **panic 而不是静默跳过**：跳过的话这些测试会在「开关没生效」这个形态上
-/// 失败，而真正的原因是夹具没准备好——两种失败长得一模一样，排查要多绕一大圈。
-fn copy_factory_charsets(base_dir: &std::path::Path) {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("定位不到仓库根");
-    let src = repo.join("data").join("charsets");
-    assert!(src.is_dir(), "找不到出厂字符类目录 {}", src.display());
-    let dst = base_dir.join("charsets");
-    std::fs::create_dir_all(&dst).unwrap();
-    for e in std::fs::read_dir(&src).unwrap() {
-        let e = e.unwrap();
-        std::fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-    }
-}
-
 /// ── schema.frequency.exclude_blocks（emoji 免词频）─────────────────────────────
 ///
 /// 夹具：拼音方案 + 开调频 + 指定要排除的区块组。
@@ -753,7 +734,7 @@ fn exclude_coord(tag: &str, exclude: &[&str]) -> (Arc<Coordinator>, Arc<Store>) 
     // data/charsets/emoji.yaml 那份精确字表给出（旧的「五个块并集」口径两个方向都不准，
     // 见设计文档 §5.5）。不复制的话这个名字解析不出来，配置被当成「未识别」跳过，
     // 测试会以「开关没生效」的形态失败，而根因是夹具缺文件。
-    copy_factory_charsets(&base_dir);
+    crate::charset_test_support::copy_factory_charsets(&base_dir);
 
     let mut cfg = Config::default();
     cfg.schema.active = "py_test".into();

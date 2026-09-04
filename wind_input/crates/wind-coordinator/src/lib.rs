@@ -5,6 +5,8 @@
 pub mod auto_phrase;
 pub(crate) mod candidate_nav;
 pub mod candidate_pull;
+#[cfg(test)]
+pub(crate) mod charset_test_support;
 pub(crate) mod comment;
 pub(crate) mod config_bundle;
 pub(crate) mod construct;

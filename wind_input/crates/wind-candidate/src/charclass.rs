@@ -226,7 +226,8 @@ impl BlockMask {
 /// | 用户手动设成生僻的**任何**字符 | false（覆盖优先） | ✅ |
 /// | emoji / 注音 / 假名（未表态） | true（被忽略） | 只有 `extra` 圈中才进 |
 ///
-/// `extra` 就是那道显式纳入：把域外区块按名字加进来（`input.rare_char.include_blocks`）。
+/// `extra` 就是那道显式纳入：`input.rare_char.include_blocks` 点名的类，以及任何
+/// 自己声明了 `in_rare` 的类（两个入口在装配期合并，见 `charset_assembly`）。
 ///
 /// # 只出单字
 ///
@@ -239,12 +240,12 @@ impl BlockMask {
 /// 入参只有候选文本与两份判定数据，没有 `State`、没有 `ModeKind`。当前入口是「顶字进入
 /// 独立模式」，而将来若要加「保留编码、原地把候选换成生僻字」那种入口，本函数原样复用
 /// ——过滤逻辑与进入方式是两件事，混在一起就会为了第二个入口把第一个也改一遍。
-pub fn rare_admits(text: &str, cc: &crate::CommonChars, extra: BlockMask) -> bool {
+pub fn rare_admits(text: &str, cc: &crate::CommonChars, extra: &crate::CharsetRegistry) -> bool {
     // 只出单字：多字词、空串、纯空白一律不进。
     let Some(unit) = crate::single_markable_char(text) else {
         return false;
     };
-    !cc.is_string_common(unit) || extra.contains_text(unit)
+    !cc.is_string_common(unit) || extra.in_rare(unit)
 }
 
 #[cfg(test)]
@@ -413,17 +414,40 @@ mod tests {
         }
     }
 
+    /// 造一个只含一个类、且该类被**点名纳入生僻模式**的 registry。
+    ///
+    /// 对应 `input.rare_char.include_blocks = [...]` 在 `charset_assembly` 装配之后的
+    /// 形态：被点名的类打上了 `in_rare`。测试直接构造判定结构，不经过配置解析——
+    /// 「配置能不能走到判据」由 coordinator 侧的
+    /// `include_blocks_config_reaches_the_verdict` 端到端钉住，这里只测判据本身。
+    fn admitting(members: &[&str]) -> crate::CharsetRegistry {
+        let (reg, dropped) = crate::CharsetRegistry::compile(vec![crate::ClassSpec {
+            key: "test".into(),
+            members: members.iter().map(|s| s.to_string()).collect(),
+            in_rare: true,
+            ..Default::default()
+        }]);
+        assert!(dropped.is_empty());
+        reg
+    }
+
+    /// 谁都没点名的 registry：`in_rare` 恒假，等同于原先的 `BlockMask::EMPTY`。
+    fn admitting_none() -> crate::CharsetRegistry {
+        crate::CharsetRegistry::default()
+    }
+
     /// 生僻字准入的基本盘：常用字出局、生僻字进来、多字词一律不进。
     #[test]
     fn rare_admits_only_single_uncommon_chars() {
         let cc = CommonChars::from_base(['我', '你', '好', '的']);
-        assert!(!rare_admits("我", &cc, BlockMask::EMPTY), "常用字不进");
-        assert!(rare_admits("龘", &cc, BlockMask::EMPTY), "生僻汉字要进");
+        let none = crate::CharsetRegistry::default();
+        assert!(!rare_admits("我", &cc, &none), "常用字不进");
+        assert!(rare_admits("龘", &cc, &none), "生僻汉字要进");
         // 「严格只出单字」（用户 2026-08-24 拍板）：多字词无论常不常用都不进。
-        assert!(!rare_admits("你好", &cc, BlockMask::EMPTY));
-        assert!(!rare_admits("龘龘", &cc, BlockMask::EMPTY));
-        assert!(!rare_admits("", &cc, BlockMask::EMPTY));
-        assert!(!rare_admits(" ", &cc, BlockMask::EMPTY), "空白不是字");
+        assert!(!rare_admits("你好", &cc, &none));
+        assert!(!rare_admits("龘龘", &cc, &none));
+        assert!(!rare_admits("", &cc, &none));
+        assert!(!rare_admits(" ", &cc, &none), "空白不是字");
     }
 
     /// ★★★ **取反陷阱**：域外字符（emoji/注音/假名）不会因为「不常用」就自动进来。
@@ -435,18 +459,21 @@ mod tests {
     #[test]
     fn out_of_scope_chars_need_explicit_admission() {
         let cc = CommonChars::from_base(['我']);
+        let none = admitting_none();
         for s in ["😀", "ㄅ", "あ", "⿰"] {
             assert!(
-                !rare_admits(s, &cc, BlockMask::EMPTY),
+                !rare_admits(s, &cc, &none),
                 "{s} 未显式纳入时不该进生僻字模式"
             );
         }
-        let (emoji, _) = BlockMask::from_config(&["emoji"]);
-        assert!(rare_admits("😀", &cc, emoji), "配了 emoji 组就该进");
-        assert!(rare_admits("⚽️", &cc, emoji), "带变体选择符的同样要进");
-        assert!(!rare_admits("ㄅ", &cc, emoji), "没配的区块仍然不进");
-        // 汉字不会因为配了 emoji 组就被带进来（常用字始终出局）。
-        assert!(!rare_admits("我", &cc, emoji));
+        // 字表里只列基字符 `⚽`——`⚽️`（带 U+FE0F）靠逐 char 回落命中，见
+        // `CharsetRegistry::cluster_hits`。
+        let emoji = admitting(&["😀", "⚽"]);
+        assert!(rare_admits("😀", &cc, &emoji), "点名纳入的就该进");
+        assert!(rare_admits("⚽️", &cc, &emoji), "带变体选择符的同样要进");
+        assert!(!rare_admits("ㄅ", &cc, &emoji), "没纳入的仍然不进");
+        // 汉字不会因为纳入了 emoji 就被带进来（常用字始终出局）。
+        assert!(!rare_admits("我", &cc, &emoji));
     }
 
     /// 用户手动设成生僻的字符**直接进**，与它是不是汉字无关。
@@ -458,18 +485,13 @@ mod tests {
     fn user_marked_rare_chars_are_admitted() {
         let mut cc = CommonChars::from_base(['我', '好']);
         cc.set_overrides([("好".to_string(), false), ("、".to_string(), false)]);
+        let none = admitting_none();
+        assert!(rare_admits("好", &cc, &none), "用户降级的汉字要进");
         assert!(
-            rare_admits("好", &cc, BlockMask::EMPTY),
-            "用户降级的汉字要进"
+            rare_admits("、", &cc, &none),
+            "用户降级的域外字符同样要进，无需纳入任何类"
         );
-        assert!(
-            rare_admits("、", &cc, BlockMask::EMPTY),
-            "用户降级的域外字符同样要进，无需配区块"
-        );
-        assert!(
-            !rare_admits("我", &cc, BlockMask::EMPTY),
-            "没表过态的常用字仍出局"
-        );
+        assert!(!rare_admits("我", &cc, &none), "没表过态的常用字仍出局");
     }
 
     /// 「一个字」按字素簇算，不按码位数——`⚽️` 是 2 个码位、`👨‍👩‍👧` 是 5 个，都算一个字。
@@ -479,11 +501,12 @@ mod tests {
     #[test]
     fn one_char_means_one_grapheme_cluster() {
         let cc = CommonChars::from_base(['我']);
-        let (emoji, _) = BlockMask::from_config(&["emoji"]);
+        // 只列基字符/首码位：肤色、ZWJ、区域指示符的第二半都靠逐 char 回落命中。
+        let emoji = admitting(&["⚽", "👍", "👨", "🇨", "😀"]);
         for s in ["⚽️", "👍🏻", "👨‍👩‍👧", "🇨🇳"] {
-            assert!(rare_admits(s, &cc, emoji), "{s} 是一个字素簇，应算单字");
+            assert!(rare_admits(s, &cc, &emoji), "{s} 是一个字素簇，应算单字");
         }
-        assert!(!rare_admits("😀😀", &cc, emoji), "两个字素簇不算单字");
+        assert!(!rare_admits("😀😀", &cc, &emoji), "两个字素簇不算单字");
     }
 
     /// ★ 「其它」兜底档：块表**之外**的字符只有显式配了这一档才命中。
