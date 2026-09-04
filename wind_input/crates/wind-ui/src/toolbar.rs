@@ -98,7 +98,7 @@ pub struct Toolbar {
     /// 不重排（不出图），于是首次渲染前 `window.size()` 既不是横条真值也不是纵条真值。
     ///
     /// **跨 `hide` 存活**：隐藏不该丢弃「下次该落到哪块屏」这个意图，重新显示时由
-    /// `render` 消费。清除它的只有 `render` 的 `take()` 与 `set_pos`（后到的显式位置覆盖）。
+    /// `render` 消费。清除它的只有 `render` 的 `take()` 与 `set_anchor`（后到的显式锚点覆盖）。
     /// 边界过时不必担心：这对数值正是协调器 `sync_toolbar_monitor` 的去重 key 本身，
     /// 边界一变 key 必变，下一次 sync 会重新下发覆盖。
     pending_corner: Option<(i32, i32)>,
@@ -203,6 +203,7 @@ impl Toolbar {
             events,
             hwnd,
             pos: None,
+            anchor_br: None,
             dragging: false,
             anchor: (0, 0),
             origin: (0, 0),
@@ -330,10 +331,10 @@ impl Toolbar {
     ///
     /// ⚠️ `repaint` 受 `visible` 门控：`render` 末尾无条件 `show`，对隐藏中的工具栏调用会把
     /// 它显形，绕过 `toolbar_gate` 的显示迟滞（同 `set_vertical` 的约束）。
-    pub fn set_pos(&mut self, x: i32, y: i32) {
+    pub fn set_anchor(&mut self, right: i32, bottom: i32) {
         // 显式位置优先于待落的角落请求，否则 render 会拿 pending 覆盖掉这次设定。
         self.pending_corner = None;
-        self.mouse.borrow_mut().pos = Some((x, y));
+        self.mouse.borrow_mut().anchor_br = Some((right, bottom));
         if self.visible {
             self.repaint();
         }
@@ -345,7 +346,7 @@ impl Toolbar {
     /// 工具栏自身的 w/h，而尺寸只有 UI 侧知道（随主题/朝向/DPI 变）。留边同 `corner_position`。
     ///
     /// **无论可见与否都只登记意图**，落点由 `render` 计算。隐藏期间是因为尺寸还是占位值
-    /// （见 `set_pos`）；可见期间则是因为目标屏 DPI 可能与当前屏不同——`render` 里
+    /// （见 `set_anchor`）；可见期间则是因为目标屏 DPI 可能与当前屏不同——`render` 里
     /// `ensure_scale` 先按目标屏定 scale、再排版出尺寸，只有那一刻两者才同时正确。
     /// 若在这里用当前 `window.size()` 算，跨 DPI 换屏首帧会按旧屏尺寸定位。
     ///
@@ -519,12 +520,23 @@ impl Toolbar {
     /// 有待落的换屏请求时按**目标屏**取：此刻 `mouse.pos` 还停在上一块屏上，用它会让
     /// 这一帧按旧屏 DPI 排版，而 `render` 末尾又拿这套尺寸去算目标屏的落点——两屏 DPI
     /// 不同则整条大小与位置都偏，要等下一帧才自愈（视觉上是一跳）。
-    /// `set_pos` 那条路径无需特判：它已把 `mouse.pos` 更新成目标屏坐标。
+    ///
+    /// ⚠️ **取点优先级必须与 `render` 算落点的优先级逐级对齐**
+    /// （`pending_corner` > `anchor_br` > `pos`）：这两处问的是同一个问题——"这一帧
+    /// 的工具栏在哪块屏上"。`set_anchor` 恢复记忆位置那条路径尤其要走 `anchor_br`：
+    /// 它**不**更新 `mouse.pos`（那是上一帧的落点），换屏恢复时用 `pos` 取到的是旧屏 DPI。
     fn ensure_scale(&mut self) {
         let pos = match self.pending_corner {
             // 工作区右/下边界是排他的，退 1px 取屏内点。
             Some((work_right, work_bottom)) => (work_right - 1, work_bottom - 1),
-            None => self.mouse.borrow().pos.unwrap_or((0, 0)),
+            None => {
+                let m = self.mouse.borrow();
+                match m.anchor_br {
+                    // 锚点是窗口右下角，同样排他，退 1px 取窗口内的点。
+                    Some((right, bottom)) => (right - 1, bottom - 1),
+                    None => m.pos.unwrap_or((0, 0)),
+                }
+            }
         };
         let sc = crate::dpi::scale_for_point(pos.0, pos.1);
         if (sc - self.scale).abs() > 0.01 {
@@ -750,19 +762,28 @@ impl Toolbar {
         // 钳制到当前显示器工作区内——避免切换显示器/远程后旧坐标落在屏外不可见。
         //
         // 一切依赖尺寸的落点计算都收口在这里：上面刚按当前朝向/主题/DPI 排完版并 resize，
-        // `w`/`h` 此刻才是真值。`set_pos`/`set_corner` 在隐藏期间只登记意图、不算坐标，
-        // 就是为了不在 `window.size()` 仍是占位值 160×40 时下判断（见 `set_pos` 文档）。
+        // `w`/`h` 此刻才是真值。`set_anchor`/`set_corner` 在隐藏期间只登记意图、不算坐标，
+        // 就是为了不在 `window.size()` 仍是占位值 160×40 时下判断（见 `set_anchor` 文档）。
         let (px, py) = {
             let mut m = self.mouse.borrow_mut();
             m.hits = hits; // 同步命中矩形给鼠标处理器
             // 菜单锚点要用的尺寸/朝向，与命中矩形同源同刻更新——分开更新迟早错位。
             m.size = (w, h);
             m.vertical = self.vertical;
+            // 优先级：待落的「某屏右下角」请求 > 记忆锚点 > 主屏右下角兜底。
+            //
+            // 记忆锚点每帧现算落点（`右下角 - 当前尺寸`）而不是存现成坐标，正是"锚右下角"
+            // 全部的意义所在：横纵切换、增删格子都只改 `w`/`h`，落点自动跟着变，
+            // 而条的右下角纹丝不动。存左上角时这些尺寸变化会朝右下顶出工作区，
+            // 再被 `clamp_to_work_area` 拉回来，于是每切一次挪一次。
             let raw = match self.pending_corner.take() {
                 Some((work_right, work_bottom)) => {
                     Self::corner_in_work_area(work_right, work_bottom, w, h)
                 }
-                None => m.pos.unwrap_or_else(|| Self::corner_position(w, h)),
+                None => match m.anchor_br {
+                    Some((right, bottom)) => Self::origin_from_anchor(right, bottom, w, h),
+                    None => m.pos.unwrap_or_else(|| Self::corner_position(w, h)),
+                },
             };
             let clamped = clamp_to_work_area(raw.0, raw.1, w, h);
             m.pos = Some(clamped);
@@ -862,12 +883,21 @@ impl Toolbar {
         self.auto_hide.on_hidden();
     }
 
+    /// 记忆锚点（窗口**右下角**）→ 本帧落点（左上角）。
+    ///
+    /// 纯几何，抽出来是为了可单测：`render` 的其余部分要测文字、要提交 Layered Window，
+    /// 在非 Windows 上是 mock/空实现。这个减法本身正是"锚右下角"的全部内容——
+    /// 它必须每帧用**当前**的 `w`/`h` 现算，而不是把结果存下来复用。
+    fn origin_from_anchor(right: i32, bottom: i32, w: u32, h: u32) -> (i32, i32) {
+        (right - w as i32, bottom - h as i32)
+    }
+
     /// 给定工作区右/下边界，算工具栏右下角落点（右/下各留 12px 边距）。
     ///
     /// 纯几何、无系统调用，故可被任意显示器复用——`corner_position` 喂主屏，
     /// `set_corner` 喂焦点所在屏。`max(0)` 的下限只在单屏（工作区从 0 起）时有意义，
     /// 副屏的工作区左/上边界可为负，钳到 0 会把工具栏推回主屏；真正的越界回收交给
-    /// `set_pos` 里的 `clamp_to_work_area`（它按落点解析显示器，不预设原点）。
+    /// `render` 里的 `clamp_to_work_area`（它按落点解析显示器，不预设原点）。
     fn corner_in_work_area(work_right: i32, work_bottom: i32, w: u32, h: u32) -> (i32, i32) {
         const MARGIN: i32 = 12;
         (
@@ -933,12 +963,22 @@ pub struct ToolbarMouse {
     hwnd: HWND,
     /// 当前位置（屏幕坐标）；None = 尚未定位。
     ///
-    /// ⚠️ **首次 `render` 之前可能是未钳制的原始值**：`Toolbar::set_pos` 在隐藏期间不钳制
+    /// ⚠️ **首次 `render` 之前可能是未钳制的原始值**：`Toolbar::set_anchor` 在隐藏期间不钳制
     /// （那时窗口尺寸还是占位值，钳了反而错——见其文档），要到 `render` 才按真实尺寸钳并
     /// 回写。今天安全，因为本结构体的其余读者（`rect`/`menu_anchor`/拖动 `origin`）全部
     /// 挂在鼠标消息上，而隐藏窗口收不到鼠标消息。**若日后新增不依赖鼠标消息的读路径，
     /// 先确认它是否可能在首帧之前触发。**（`size` 在首帧前同为 `(0,0)`，同一道门挡住。）
     pos: Option<(i32, i32)>,
+    /// 记忆锚点：窗口**右下角**屏幕坐标；None = 该屏没记录过（首帧落默认右下角）。
+    ///
+    /// 与 `pos` 的分工：`anchor_br` 是**意图**（用户把这条工具栏摆在哪），`pos` 是
+    /// **本帧的落点**（意图减去当前尺寸、再钳进工作区）。所以每帧由前者算出后者，
+    /// 而不是反过来——尺寸一变（横纵切换、增删格子）落点就该跟着变，意图不变。
+    ///
+    /// ⚠️ `render` 的钳制结果**只写回 `pos`，不回写这里**：钳制是对"当前这块屏放不下"的
+    /// 临时妥协（临时接了台小屏、远程桌面改了分辨率），把它写回意图就等于让一次妥协
+    /// 永久顶掉用户原本摆的位置——回到大屏也回不来了。让意图留在原处，每帧重算即可。
+    anchor_br: Option<(i32, i32)>,
     dragging: bool,
     /// 拖动起点：光标屏幕坐标
     anchor: (i32, i32),
@@ -1126,17 +1166,25 @@ impl WindowMouse for ToolbarMouse {
                     unsafe {
                         let _ = ReleaseCapture();
                     }
-                    // 取实际窗口位置回报，供持久化
+                    // 取实际窗口矩形回报，供持久化。
+                    //
+                    // 报**右下角**：持久化的是锚点，而工具栏尺寸会随朝向/格数变化
+                    // （见 `ToolbarMouse::anchor_br`）。`GetWindowRect` 本来就同时给出
+                    // 四条边，取 right/bottom 与取 left/top 一样直接，无需另算。
                     let mut r = RECT::default();
-                    let (x, y) = unsafe {
+                    let (l, t, right, bottom) = unsafe {
                         if GetWindowRect(self.hwnd, &mut r).is_ok() {
-                            (r.left, r.top)
+                            (r.left, r.top, r.right, r.bottom)
                         } else {
-                            self.pos.unwrap_or((0, 0))
+                            // 极罕见的失败兜底：用上一帧落点 + 渲染时同步过来的尺寸补出四边，
+                            // 免得把 (0,0) 当成用户摆放的位置存进去。
+                            let (x, y) = self.pos.unwrap_or((0, 0));
+                            (x, y, x + self.size.0 as i32, y + self.size.1 as i32)
                         }
                     };
-                    self.pos = Some((x, y));
-                    let _ = self.events.send(UiEvent::ToolbarMoved { x, y });
+                    self.pos = Some((l, t));
+                    self.anchor_br = Some((right, bottom));
+                    let _ = self.events.send(UiEvent::ToolbarMoved { right, bottom });
                 } else if let Some(action) = self.cell_at(cx, cy) {
                     if matches!(action, ToolbarAction::OpenSettings) {
                         // 设置键 = 弹出功能主菜单（贴着工具栏，避免遮挡它）。
@@ -1331,7 +1379,7 @@ mod tests {
     /// 副屏在主屏**左侧**时工作区坐标为负，落点必须跟着为负。
     ///
     /// 这正是不能在此处 `max(0)` 的理由：钳到 0 会把工具栏推回主屏，表现为「切到左边那块屏
-    /// 工具栏没跟过去」。越界回收由 `set_pos` 里的 `clamp_to_work_area` 负责——它按落点
+    /// 工具栏没跟过去」。越界回收由 `render` 里的 `clamp_to_work_area` 负责——它按落点
     /// 反查显示器，不预设桌面原点在 (0,0)。
     #[test]
     fn corner_allows_negative_coords_on_left_side_monitor() {
@@ -1346,7 +1394,7 @@ mod tests {
     /// 这条测试把「算落点时尺寸必须已是真值」钉死。窗口以 `create(160, 40)` 的占位尺寸
     /// 起步，`set_vertical` 在隐藏期间不重排，故首次 `render` 之前 `window.size()` 两种
     /// 朝向的真值都不是。启动序列恰好在那个窗口里恢复位置，用占位尺寸算/钳的结果就是
-    /// 重启后凭空左移——量级见末尾断言。修法是 `set_pos`/`set_corner` 隐藏期间只登记
+    /// 重启后凭空左移——量级见末尾断言。修法是 `set_anchor`/`set_corner` 隐藏期间只登记
     /// 意图，落点与钳制统一由 `render` 用刚 `resize` 出的尺寸计算。
     #[test]
     fn corner_depends_on_bar_orientation() {
@@ -1361,6 +1409,57 @@ mod tests {
         // 若哪天改了 create 的占位尺寸，这条会红，提醒回来确认推迟计算仍然成立。
         let placeholder = Toolbar::corner_in_work_area(1920, 1040, 160, 40);
         assert_eq!(vertical.0 - placeholder.0, 130);
+    }
+
+    /// ★ 横纵切换时**右下角纹丝不动**——这正是改锚点要解决的那个症状。
+    ///
+    /// 用户报的现象是「有横竖两种状态，现在切换时的位移就很不好」。根因是此前存的是
+    /// 左上角：`bar_layout` 让纵条与横条互为转置（132×30 ↔ 30×132），左上角固定意味着
+    /// 条向下长出 102px、向右缩回 102px；贴着屏幕右下角摆放（**出厂默认位置**）时那 102px
+    /// 直接顶出工作区，再被 `clamp_to_work_area` 拉回来，于是每切一次挪一次。
+    ///
+    /// 本条把不变量钉死：同一锚点下，两个朝向算出的落点 + 各自尺寸 = 同一个右下角。
+    #[test]
+    fn anchor_keeps_bottom_right_fixed_across_orientation() {
+        // 用户把工具栏摆在这里（窗口右下角）。
+        const RIGHT: i32 = 1908;
+        const BOTTOM: i32 = 1028;
+        // 默认几何：横条 132×30，转置后纵条 30×132。
+        let (hx, hy) = Toolbar::origin_from_anchor(RIGHT, BOTTOM, 132, 30);
+        let (vx, vy) = Toolbar::origin_from_anchor(RIGHT, BOTTOM, 30, 132);
+
+        assert_eq!(
+            (hx + 132, hy + 30),
+            (RIGHT, BOTTOM),
+            "横条右下角应落在锚点上"
+        );
+        assert_eq!(
+            (vx + 30, vy + 132),
+            (RIGHT, BOTTOM),
+            "纵条右下角应落在锚点上"
+        );
+
+        // 左上角**应该**动（尺寸变了），动的方向是朝屏幕内侧——这才是想要的。
+        assert_eq!(vx - hx, 102, "纵条更窄，左上角右移");
+        assert_eq!(vy - hy, -102, "纵条更高，左上角上移");
+    }
+
+    /// 增删工具栏格子（`ui.toolbar.items`）同样不得挪动位置。
+    ///
+    /// 与换向是同一个不变量的另一面：`bar_layout` 的条长 = `grip + cell * n`，
+    /// 格数一变条长就变。设置页里勾掉一格就让整条工具栏平移，是同一个 bug 的另一副面孔。
+    #[test]
+    fn anchor_keeps_bottom_right_fixed_across_cell_count() {
+        const RIGHT: i32 = 1908;
+        const BOTTOM: i32 = 1028;
+        for w in [80u32, 132, 210] {
+            let (x, y) = Toolbar::origin_from_anchor(RIGHT, BOTTOM, w, 30);
+            assert_eq!(
+                (x + w as i32, y + 30),
+                (RIGHT, BOTTOM),
+                "条宽 {w} 时右下角跑了"
+            );
+        }
     }
 
     /// 纵条：整条与横条互为转置——宽高对调、格沿 y 排开、各格占满条宽。
@@ -1597,6 +1696,7 @@ mod cell_anchor_tests {
             events: tx,
             hwnd: Default::default(),
             pos: Some((1000, 500)),
+            anchor_br: None,
             dragging: false,
             anchor: (0, 0),
             origin: (0, 0),

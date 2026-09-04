@@ -113,15 +113,12 @@ impl Coordinator {
             && let Some(p) = guard.as_mut()
         {
             f(p);
-            // load-modify-save，与 toolbar_positions / record_last_state 同一模式：
-            // state.toml 是多方共用的文件，整体覆盖会抹掉别人的字段。
-            if let Some(dir) = Config::state_dir() {
-                let mut rs = wind_config::RuntimeState::load(&dir);
-                rs.langbar_icon_size_marks = Some(p.size_marks());
-                if let Err(e) = rs.save(&dir) {
-                    tracing::warn!(error = %e, "语言栏图标偏好落盘失败");
-                }
-            }
+            // 经 `state_writer` 落盘：state.toml 是多方共用的文件，各写各的会互相
+            // 吞更新（读到的是别人改动前的快照），故全进程只此一条写入线路。
+            let marks = p.size_marks();
+            self.state_writer.schedule("langbar_icon", move |rs| {
+                rs.langbar_icon_size_marks = Some(marks);
+            });
         }
         // 锁已在上面的块尾释放——发布内部还要再取一次同一把锁，留在块内会自锁。
         self.publish_langbar_icon_now();

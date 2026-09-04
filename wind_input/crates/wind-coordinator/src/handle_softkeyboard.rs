@@ -178,38 +178,29 @@ impl Coordinator {
     }
 
     fn save_softkeyboard_page(&self) {
-        // ⚠️ **无 store 的实例不写本机状态**。`state_dir()` 是进程外的全局路径
-        // （`%LOCALAPPDATA%\WindInput[Dev]`），而单测构造的协调器同样走得到这里——
-        // 于是跑一次 `cargo test` 就改掉了开发者自己那台机器上的 `last_softkeyboard_page`，
-        // 还会与**正在运行的服务**抢同一个 `state.toml`：两边都是 load-modify-save，
-        // 一次丢更新就能吞掉刚存好的 `toolbar_positions`。
-        //
-        // 判据借 `store`：它的文档本来就写着「None = 无持久化（headless 测试）」，
-        // 这个语义不是这里新赋予的。Android 生产形态经 `new_headless_with_ui_at` 拿到
-        // 用户目录、是有 store 的，故这道门恰好只挡住测试夹具。
-        if self.store.is_none() {
-            return;
-        }
         let Some(id) = self.softkeyboard_page_to_persist() else {
             return;
         };
-        let Some(dir) = wind_config::Config::state_dir() else {
-            return;
-        };
-        let mut rs = wind_config::RuntimeState::load(&dir);
-        rs.last_softkeyboard_page = id.clone();
-        // ★ 镜像**写成功之后**才更新。写在前面的话，一次偶发失败（文件被同步/备份工具
-        // 锁住、磁盘满）就会让镜像谎称「已经存过了」，此后同一面的每次关闭都被去重挡掉
-        // ——本次会话再也存不进去，而线索只有一行 warn。
-        match rs.save(&dir) {
-            Ok(()) => {
-                *self
-                    .softkeyboard_page_saved
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = id;
-            }
-            Err(e) => warn!("软键盘: 保存当前面失败: {e}"),
-        }
+        // ⚠️ **无 store 的实例不写本机状态**——那道门现在收在 `state_writer` 的构造里
+        // （`StateWriter::new(store.is_some(), ..)`），语义不变：`state_dir()` 是进程外的
+        // 全局路径（`%LOCALAPPDATA%\WindInput[Dev]`），单测构造的协调器同样走得到，
+        // 于是跑一次 `cargo test` 就会改掉开发者本机的状态、还与正在运行的服务抢同一个
+        // 文件。判据借 `store`（其文档本就写着「None = 无持久化」），Android 生产形态经
+        // `new_headless_with_ui_at` 拿到用户目录、是有 store 的，故这道门只挡测试夹具。
+        //
+        // ★ 镜像在此处即时更新，**不再等"写成功"**。此前那套「写成功才更新去重镜像」是
+        // 为了防止一次偶发失败（文件被同步/备份工具锁住、磁盘满）让镜像谎称已存、
+        // 此后同一面永远被去重挡掉。异步化之后这里拿不到写入结果了，而那个自愈需求
+        // **原样上移到了写入器**：失败会把整批变更原样重放（`MAX_RETRIES`），
+        // 且对所有字段一视同仁，比原来只保护这一个字段更强。
+        let saved = id.clone();
+        self.state_writer.schedule("softkeyboard_page", move |rs| {
+            rs.last_softkeyboard_page = saved.clone();
+        });
+        *self
+            .softkeyboard_page_saved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = id;
     }
 
     /// 开关软键盘。
@@ -517,11 +508,17 @@ impl Coordinator {
                     .to_string(),
             })
             .collect();
+        // 位置随每次刷新重发：切面会改面板尺寸（各面键数不同），锚右下角正是为了让那次
+        // 尺寸变化朝屏幕内侧展开。协调器的内存镜像随拖动上报即时更新，故这里带的
+        // 恒是最新值，不会与用户刚拖到的位置打架。
+        let placement = self.softkeyboard_placement();
         let _ = self.ui_tx.send(UiCommand::ShowSoftKeyboard {
             pages,
             current: idx,
             keys,
             send_keys: page.is_some_and(|p| p.send_keys),
+            anchor: placement.anchor,
+            work_area: placement.work,
         });
     }
 

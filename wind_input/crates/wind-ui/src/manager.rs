@@ -898,10 +898,10 @@ impl UiManager {
                             }
                         }
                     }
-                    UiCommand::SetToolbarPos { x, y } => {
-                        debug!("UI: SetToolbarPos ({},{})", x, y);
+                    UiCommand::SetToolbarAnchor { right, bottom } => {
+                        debug!("UI: SetToolbarAnchor br=({},{})", right, bottom);
                         if let Some(t) = &mut toolbar {
-                            t.set_pos(x, y);
+                            t.set_anchor(right, bottom);
                         }
                     }
                     UiCommand::SetToolbarCorner {
@@ -1084,6 +1084,8 @@ impl UiManager {
                         current,
                         keys,
                         send_keys,
+                        anchor,
+                        work_area,
                     } => {
                         debug!("UI: ShowSoftKeyboard (page={current}, keys={})", keys.len());
                         if soft_keyboard.is_none() {
@@ -1098,6 +1100,7 @@ impl UiManager {
                             }
                         }
                         if let Some(k) = &mut soft_keyboard {
+                            k.set_placement(anchor, work_area);
                             k.show(pages, current, keys, send_keys);
                         }
                     }

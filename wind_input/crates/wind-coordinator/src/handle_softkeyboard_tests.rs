@@ -365,29 +365,40 @@ fn page_to_persist_uses_the_id_and_skips_redundant_writes() {
 /// `last_softkeyboard_page`；以及与正在运行的服务抢同一个文件，丢更新时连
 /// `toolbar_positions` 一起吞掉。
 ///
-/// 判据借 `store`（它的文档本来就写着「None = 无持久化（headless 测试）」）。
-/// 这条钉的是那道门还在——镜像没被改动即证明写盘整条路没走。
+/// 判据借 `store`（它的文档本来就写着「None = 无持久化（headless 测试）」），
+/// 那道门如今收在 `StateWriter::new(store.is_some(), ..)` 里，本条钉的是它还在。
+///
+/// ⚠️ **判据换过一次，别改回去**。原先问的是「`softkeyboard_page_saved` 镜像有没有变」，
+/// 拿副作用代理「写盘路径有没有走」。门下沉到写入器之后镜像会照常更新（进程内状态，
+/// 无害），那个代理就失效了——更糟的是它失效时报的错是「测试正在改开发者本机的
+/// state.toml」，把人引向一个根本不存在的问题。现在直接问写入器本身有没有落盘能力。
 #[test]
 fn headless_never_touches_the_real_state_toml() {
     let c = coord();
     assert!(c.store.is_none(), "前置：headless 夹具无 store");
-    *c.softkeyboard_page_saved
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = "<哨兵>".to_string();
+    assert!(
+        c.state_writer.is_noop(),
+        "headless 夹具的 state_writer 竟能落盘 ⇒ 跑一次 cargo test 就会改掉开发者本机的 \
+         state.toml，还会与正在运行的服务抢同一个文件"
+    );
     c.open_softkeyboard(None);
     c.after_softkeyboard_change();
     c.close_softkeyboard();
-    c.after_softkeyboard_change(); // 判据说「该写」，但 store 门该拦下
+    c.after_softkeyboard_change(); // 判据说「该写」，但写入器该是空实现
+    // 前置：确认这条路真的走到了落盘登记那一步（镜像已更新为当前面），
+    // 否则上面那条 `is_noop` 断言测的就只是构造形态，与软键盘无关。
+    let current = c
+        .softkeyboard
+        .pages()
+        .get(c.softkeyboard_page_idx())
+        .map(|p| p.id.clone())
+        .unwrap_or_default();
     assert_eq!(
         *c.softkeyboard_page_saved
             .lock()
             .unwrap_or_else(|e| e.into_inner()),
-        "<哨兵>",
-        "镜像变了 ⇒ 写盘那条路真的走了 ⇒ 测试正在改开发者本机的 state.toml"
-    );
-    assert!(
-        c.softkeyboard_page_to_persist().is_some(),
-        "前置：判据本身说该写，否则上面那条断言恒真"
+        current,
+        "前置：关闭软键盘应已登记当前面（登记走的是空实现写入器，不落盘）"
     );
 }
 

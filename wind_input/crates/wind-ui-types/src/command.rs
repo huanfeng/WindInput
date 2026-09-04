@@ -89,8 +89,13 @@ pub enum UiCommand {
     UpdateToolbar(ToolbarState),
     /// 隐藏工具栏
     HideToolbar,
-    /// 设置工具栏位置（启动恢复持久化位置 / 焦点换屏后落到该屏的记忆位置）
-    SetToolbarPos { x: i32, y: i32 },
+    /// 设置工具栏锚点（启动恢复持久化位置 / 焦点换屏后落到该屏的记忆位置）。
+    ///
+    /// 传的是窗口**右下角**的屏幕坐标，不是左上角：工具栏的尺寸会在位置不变的前提下
+    /// 变化（横纵切换是宽高对调、增删格子改条长），锚右下角才能让这些变化朝屏幕内侧
+    /// 展开而不是把条顶出工作区。落点 `(right - w, bottom - h)` 由 UI 侧在排版之后算——
+    /// 与 [`Self::SetToolbarCorner`] 同一个理由，`w`/`h` 只有那一刻才可信。
+    SetToolbarAnchor { right: i32, bottom: i32 },
     /// 把工具栏落到指定显示器工作区的右下角——焦点切到一块从未拖过工具栏的屏时下发。
     /// 传边界而非坐标：右下角要减工具栏自身尺寸，那只有 UI 侧知道。
     SetToolbarCorner { work_right: i32, work_bottom: i32 },
@@ -242,6 +247,19 @@ pub enum UiCommand {
         /// Caps 开着敲 `q` 出的是 `Q`，键帽就该显示 `Q`；符号面上 CapsLock 没有
         /// 「大写」这个语义，按键处理也只认 Shift，跟着变只会让显示与实际不符。
         send_keys: bool,
+        /// 该屏记忆的面板**右下角**屏幕坐标；`None` = 这块屏没记录过。
+        ///
+        /// 随每一条 `ShowSoftKeyboard` 重发（含切面刷新），而不是只在首次打开时发一次：
+        /// 各面键数不同 ⇒ 切面会改面板尺寸，锚右下角正是为了让那次尺寸变化朝屏幕内侧
+        /// 展开。协调器侧的内存镜像是这份锚点的真相源（拖动上报即更新），故这里每次
+        /// 都带上最新值不会与用户刚拖到的位置打架。
+        anchor: Option<(i32, i32)>,
+        /// 焦点显示器工作区 `(left, top, right, bottom)`；`None` = 协调器查不到
+        /// （非 Windows / 查询失败），UI 侧自行回退到主屏。
+        ///
+        /// ⚠️ 传边界而非现成坐标，与 [`Self::SetToolbarCorner`] 同一个理由：默认位置
+        /// （底部居中）要减去面板自身的 w/h，而尺寸只有 UI 侧知道，且要等排版之后才可信。
+        work_area: Option<(i32, i32, i32, i32)>,
     },
     /// 软键盘：隐藏面板。
     HideSoftKeyboard,

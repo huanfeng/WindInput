@@ -162,8 +162,17 @@ struct SoftMouse {
     anchor: (i32, i32),
     #[cfg_attr(not(windows), allow(dead_code))]
     origin: (i32, i32),
-    /// 拖动落点，供窗口在 tick 里收回去记住位置。
+    /// 拖动落点（左上角），供窗口在 tick 里收回去记住位置。拖动**途中**每次
+    /// `WM_MOUSEMOVE` 都更新——面板要实时跟着光标走。
     moved_to: Option<(i32, i32)>,
+    /// 拖动**结束**时的面板右下角，供窗口在 tick 里上报协调器持久化。
+    ///
+    /// ⚠️ 与 `moved_to` 分开是要害：持久化只能在抬起时发生。若照着 `moved_to` 的时机
+    /// 上报，一次拖动就是几十上百条 IPC + 同样多次 `state.toml` 读改写。
+    /// 同理它存的是**右下角**而非左上角——记的是锚点，而面板尺寸会随切面变
+    /// （各面键数不同）。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    dropped_at: Option<(i32, i32)>,
     /// 未消费的滚轮量（单位：一格）。窗口过程只累加，真正滚动在 `tick` 里做——
     /// 滚动要改 `tab_scroll` 并重绘，而窗口过程拿不到 `&mut SoftKeyboard`。
     wheel: f32,
@@ -296,8 +305,19 @@ pub struct SoftKeyboard {
     down_slot: Option<(String, std::time::Instant)>,
 
     visible: bool,
-    /// 用户拖动后的位置；None = 首次按屏幕默认锚点摆放。
+    /// 上一帧的实际落点（左上角）；None = 还没摆过。`ensure_scale` 也用它问所在屏的 DPI。
     origin: Option<(i32, i32)>,
+    /// 记忆锚点：面板**右下角**屏幕坐标；None = 这块屏没记录过，落默认位置。
+    ///
+    /// 与 `origin` 的分工同工具栏的 `anchor_br`/`pos`：这个是**意图**（用户把面板摆在哪），
+    /// `origin` 是**本帧落点**（意图减当前尺寸再钳进工作区）。切面会改面板尺寸，
+    /// 每帧现算才能让右下角纹丝不动。钳制结果只写回 `origin`，不回写这里。
+    anchor_br: Option<(i32, i32)>,
+    /// 焦点显示器工作区 `(left, top, right, bottom)`，随 `ShowSoftKeyboard` 下发。
+    ///
+    /// 默认位置（底部居中）据此算。`None` 时才回退 `SPI_GETWORKAREA`——那取的恒是
+    /// **主屏**，多显示器下会让面板开在用户没在打字的那块屏上。
+    work_area: Option<(i32, i32, i32, i32)>,
 }
 
 impl SoftKeyboard {
@@ -337,7 +357,51 @@ impl SoftKeyboard {
             down_slot: None,
             visible: false,
             origin: None,
+            anchor_br: None,
+            work_area: None,
         })
+    }
+
+    /// 协调器下发的摆放依据：焦点屏记过的锚点 + 该屏工作区。随每条 `ShowSoftKeyboard`
+    /// 到来——而那一条**打开面板和切面刷新都会发**，两者要区别对待。
+    ///
+    /// # ★ 只在「真正打开面板」时采纳下发的锚点
+    ///
+    /// 判据是面板当前**不可见**。理由是两个方向的错都真会发生：
+    ///
+    /// - **切面时采纳** ⇒ 面板会跳屏。面板开着的时候用户可以切到另一块屏上继续打字
+    ///   （面板是 topmost 工具窗，不抢焦点），此时按一下切面键，下发的就是**新焦点屏**的
+    ///   锚点，整块面板凭空飞到另一块屏上。软键盘刻意不跟随焦点（它由用户显式开关），
+    ///   切个面更不该顺带搬家。
+    /// - **打开时不采纳** ⇒ 面板会开在错的屏上。上一次在副屏拖过面板，`anchor_br` 就
+    ///   留着副屏坐标；之后在主屏打字打开面板，协调器给的是主屏的"没有记录"（`None`），
+    ///   若因此保留旧值，面板就开到用户没在用的那块屏去了。
+    ///
+    /// 所以打开时**连 `None` 一起采纳**（清空 ⇒ 落该屏默认位置），切面时则完全不看
+    /// 下发值——那期间 `anchor_br` 的真相源是 UI 侧自己（拖动结束时更新）。
+    pub fn set_placement(
+        &mut self,
+        anchor: Option<(i32, i32)>,
+        work_area: Option<(i32, i32, i32, i32)>,
+    ) {
+        if !self.visible {
+            self.anchor_br = anchor;
+            // ⚠️ 清 `anchor_br` 还不够：`render` 的落点顺序是 `anchor_br` > `origin` >
+            // 默认位置，而 `origin` 是**上一帧的落点**——上次在副屏摆过就还留着副屏坐标，
+            // 光清锚点的话它顶上来，面板照样开在那块屏上。这一屏没有记录 = 该按这一屏
+            // 重新落默认位置，两个"旧位置"都得让开。
+            //
+            // 同屏重开不受影响：那时重算出的默认位置与 `origin` 本来就是同一个点
+            // （除非中间切过面改了尺寸，而那种情况下重算才是对的）。
+            if anchor.is_none() {
+                self.origin = None;
+            }
+        }
+        // 工作区无条件跟新：它只在"没有锚点可用"时参与算默认位置，跟着焦点屏走是对的，
+        // 且不会造成上面那种跳屏（有 `origin` 时轮不到它）。
+        if let Some(w) = work_area {
+            self.work_area = Some(w);
+        }
     }
 
     /// 取主题色。
@@ -551,9 +615,18 @@ impl SoftKeyboard {
         for tag in fire {
             self.dispatch(tag);
         }
-        // 拖动落点：窗口自己记住，下次显示不再回到默认锚点。
+        // 拖动落点：窗口自己记住，本次会话内不再回到默认锚点。
         if let Some(pos) = self.mouse.borrow_mut().moved_to.take() {
             self.origin = Some(pos);
+        }
+        // 拖动**结束**：记下锚点并上报协调器落盘，位置由此跨重启存活。
+        // 只在抬起时发一次——`moved_to` 那条是拖动全程每帧更新的，照它发会把一次拖动
+        // 变成几十条 IPC + 同样多次 state.toml 读改写。
+        if let Some((right, bottom)) = self.mouse.borrow_mut().dropped_at.take() {
+            self.anchor_br = Some((right, bottom));
+            let _ = self
+                .events
+                .send(UiEvent::SoftKeyboardMoved { right, bottom });
         }
 
         // 滚轮：窗口过程只累加格数，这里换算成像素并重绘。
@@ -709,7 +782,15 @@ impl SoftKeyboard {
     }
 
     fn ensure_scale(&mut self) {
-        let (x, y) = self.origin.unwrap_or((0, 0));
+        // ⚠️ 取点优先级与 `render` 算落点的优先级对齐（`anchor_br` > `origin` > 兜底）：
+        // 两处问的是同一件事——"这一帧的面板在哪块屏上"。首次显示时 `origin` 还是 None，
+        // 只看它就会按 (0,0)（主屏）取缩放，然后拿主屏 DPI 排出的尺寸落到另一块屏的
+        // 记忆位置上，整块面板大小与位置都偏，要等下一帧才自愈。
+        let (x, y) = match self.anchor_br {
+            // 锚点是面板右下角（排他），退 1px 取面板内的点。
+            Some((right, bottom)) => (right - 1, bottom - 1),
+            None => self.origin.unwrap_or((0, 0)),
+        };
         let sc = crate::dpi::scale_for_point(x, y);
         if (sc - self.scale).abs() > 0.01 {
             self.scale = sc;
@@ -766,7 +847,18 @@ impl SoftKeyboard {
             tracing::warn!("软键盘: 窗口更新失败: {e}");
             return;
         }
-        let (x, y) = self.origin.unwrap_or_else(|| default_origin(w, h, s));
+        // 落点每帧现算：锚右下角减去**当前**尺寸。切面会改面板尺寸（各面键数不同），
+        // 存左上角的话切一次面就朝右下长一截，再被钳回来——「切个面板还跑位」。
+        let raw = match self.anchor_br {
+            Some((right, bottom)) => origin_from_anchor(right, bottom, w, h),
+            None => self
+                .origin
+                .unwrap_or_else(|| default_origin(w, h, s, self.work_area)),
+        };
+        // 恢复的锚点必须过一次钳制：记录跨重启存活，而这中间显示器可能换了、
+        // 缩放可能改了（缩放变会让 key 失配落回默认，但分辨率相同、缩放相同、
+        // 主题字号变大也会撑大面板）。钳制结果只落到 `origin`，不回写 `anchor_br`。
+        let (x, y) = crate::sys::clamp_to_work_area(raw.0, raw.1, w, h);
         self.origin = Some((x, y));
         self.window.show(x, y);
     }
@@ -1585,9 +1677,31 @@ fn slot_label(slot: &str) -> String {
     }
 }
 
+/// 记忆锚点（面板**右下角**）→ 本帧落点（左上角）。
+///
+/// 与 `Toolbar::origin_from_anchor` 同一个减法、同一个理由：面板尺寸会变（软键盘是
+/// 切面改键数，工具栏是换向/增删格），锚右下角让这些变化朝屏幕内侧展开。
+/// 必须每帧用**当前**的 `w`/`h` 现算，不能把结果存下来复用。
+fn origin_from_anchor(right: i32, bottom: i32, w: u32, h: u32) -> (i32, i32) {
+    (right - w as i32, bottom - h as i32)
+}
+
 /// 首次显示的位置：工作区底部居中，留一点边距。
-fn default_origin(w: u32, h: u32, s: f32) -> (i32, i32) {
+///
+/// `work` 是协调器按**焦点显示器**给的工作区 `(left, top, right, bottom)`。
+/// 只有在它缺席（协调器查不到显示器、非 Windows）时才回退 `SPI_GETWORKAREA`——
+/// ⚠️ 那个 API 取的恒是**主屏**，多显示器下拿它定位就是"在副屏打字、面板开在主屏"。
+/// 工具栏那边（`Toolbar::corner_position`）的文档写着同一条警告，是同一个坑。
+fn default_origin(w: u32, h: u32, s: f32, work: Option<(i32, i32, i32, i32)>) -> (i32, i32) {
     let margin = (16.0 * s).round() as i32;
+    let bottom_centered = |left: i32, top: i32, right: i32, bottom: i32| {
+        let x = left + ((right - left) - w as i32) / 2;
+        let y = bottom - h as i32 - margin;
+        (x.max(left), y.max(top))
+    };
+    if let Some((left, top, right, bottom)) = work {
+        return bottom_centered(left, top, right, bottom);
+    }
     #[cfg(windows)]
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -1602,9 +1716,7 @@ fn default_origin(w: u32, h: u32, s: f32) -> (i32, i32) {
         )
         .is_ok()
         {
-            let x = rc.left + ((rc.right - rc.left) - w as i32) / 2;
-            let y = rc.bottom - h as i32 - margin;
-            return (x.max(rc.left), y.max(rc.top));
+            return bottom_centered(rc.left, rc.top, rc.right, rc.bottom);
         }
     }
     let _ = (w, h);
@@ -1801,6 +1913,12 @@ mod mouse_impl {
                         unsafe {
                             let _ = ReleaseCapture();
                         }
+                        // 抬起才记锚点：取实际窗口矩形的右下角，交给 tick 上报持久化。
+                        let hwnd = self.hwnd_handle();
+                        let mut r = RECT::default();
+                        if unsafe { GetWindowRect(hwnd, &mut r) }.is_ok() {
+                            self.dropped_at = Some((r.right, r.bottom));
+                        }
                     }
                     if self.pressed >= 0 {
                         // 抬起才触发：必须仍停在按下的那个控件上——按下后挪开再松手
@@ -1842,6 +1960,53 @@ impl crate::window::WindowMouse for SoftMouse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 默认位置落在**协调器给的那块屏**上，而不是主屏。
+    ///
+    /// 此前 `default_origin` 只认 `SPI_GETWORKAREA`——那个 API 取的恒是主显示器工作区，
+    /// 于是"在副屏打字、软键盘开在主屏"。副屏在主屏左侧时工作区坐标为负，落点必须
+    /// 跟着为负；钳到 0 就会把面板推回主屏（工具栏那边 `corner_in_work_area` 踩过同一个坑）。
+    #[test]
+    fn default_origin_follows_given_work_area() {
+        // 左侧副屏：虚拟桌面 x ∈ [-1920, 0)，工作区 (−1920, 0, 0, 1040)。
+        let (x, y) = default_origin(700, 300, 1.0, Some((-1920, 0, 0, 1040)));
+        assert_eq!(x, -1920 + (1920 - 700) / 2, "应在该屏水平居中（负坐标）");
+        assert_eq!(y, 1040 - 300 - 16, "应贴该屏工作区底部，留 16px 边距");
+        assert!(x < 0, "落点必须留在左侧副屏上，不得被推回主屏");
+    }
+
+    /// 面板比工作区还高时，纵向落点被夹到工作区顶部而不是变成负的屏外坐标。
+    ///
+    /// 低分辨率屏 + 大字号缩放下真会发生（面板高度随 scale 线性增长）。
+    #[test]
+    fn default_origin_clamps_to_top_when_panel_is_taller_than_work_area() {
+        let (_, y) = default_origin(700, 900, 1.0, Some((0, 0, 1280, 720)));
+        assert_eq!(y, 0, "放不下时贴顶，而不是落到屏幕上方之外");
+    }
+
+    /// 锚点 → 落点：同一锚点下，尺寸不同（切面）算出的右下角恒等。
+    ///
+    /// 软键盘各面键数不同 ⇒ 面板宽高随切面变。存左上角的话切一次面就朝右下长一截，
+    /// 表现为"切个面板还跑位"。与工具栏 `anchor_keeps_bottom_right_fixed_across_orientation`
+    /// 是同一个不变量。
+    #[test]
+    fn anchor_keeps_bottom_right_fixed_across_pages() {
+        const RIGHT: i32 = 1600;
+        const BOTTOM: i32 = 1000;
+        for (w, h) in [(700u32, 300u32), (900, 300), (700, 360)] {
+            let (x, y) = origin_from_anchor(RIGHT, BOTTOM, w, h);
+            assert_eq!(
+                (x + w as i32, y + h as i32),
+                (RIGHT, BOTTOM),
+                "面板 {w}x{h} 的右下角跑了"
+            );
+        }
+        // 尺寸变了左上角就该跟着动（朝屏幕内侧），否则说明压根没按当前尺寸现算。
+        assert_ne!(
+            origin_from_anchor(RIGHT, BOTTOM, 700, 300),
+            origin_from_anchor(RIGHT, BOTTOM, 900, 300)
+        );
+    }
 
     #[test]
     fn row_slots_match_the_ansi_main_block() {

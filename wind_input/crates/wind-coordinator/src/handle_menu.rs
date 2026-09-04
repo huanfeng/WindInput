@@ -1591,11 +1591,11 @@ impl Coordinator {
     /// 且拖动中途（save 尚未落地）还会把工具栏拽回原处。
     ///
     /// 调用点必须在 `UpdateToolbar` **之前**——反过来会先在旧屏渲染一帧再跳过去，
-    /// 表现为切屏闪一下。`Toolbar::set_pos` 内部受 `visible` 门控（隐藏中只记坐标不显形），
+    /// 表现为切屏闪一下。`Toolbar::set_anchor` 内部受 `visible` 门控（隐藏中只记坐标不显形），
     /// 故本路径不会绕过 `toolbar_gate` 的显示迟滞。
     ///
     /// ⚠️ **已知且有意接受的后果：工具栏无法停在非焦点屏。**
-    /// 本函数的判据是前台窗口所在屏，而拖动落盘（`save_toolbar_pos`）记的是工具栏落点
+    /// 本函数的判据是前台窗口所在屏，而拖动落盘（`save_toolbar_anchor`）记的是工具栏落点
     /// 所在屏。用户把工具栏拖到副屏 B 而焦点仍在主屏 A 时，两者不等，下一次任意
     /// `notify_toolbar`（切中英、切方案、焦点事件……）就会把它拽回 A —— 跨屏拖动因此
     /// 是做不到的操作。这不是 bug：工具栏放在用户没在看的那块屏上本就违背它的用途
@@ -1604,15 +1604,17 @@ impl Coordinator {
     /// 注意跳回只发生在**拖动结束之后**：拖动期间前台窗口未变，key 与缓存相同，
     /// 本函数一律 early-return，不会出现「拖到一半被拽走」。
     fn sync_toolbar_monitor(&self) {
-        let Some((key, work_right, work_bottom)) = focus_monitor() else {
+        let Some(mon) = focus_monitor() else {
             return;
         };
+        let key = mon.key;
+        let (_, _, work_right, work_bottom) = mon.work;
         // 「判定换屏 + 记新屏 + 取该屏坐标」必须在同一临界区里完成，否则中间那道缝会让
         // 刚拖好的位置被顶掉：本线程认定换到 B 屏并释放锁后、尚未读表时，拖动线程
-        // （`save_toolbar_pos`）把 B 屏的新坐标写进表——本线程随后读到的是旧值，下发出去
+        // （`save_toolbar_anchor`）把 B 屏的新坐标写进表——本线程随后读到的是旧值，下发出去
         // 就把屏上刚拖好的工具栏拽回了旧处，且表里是新值、屏上是旧值，要到下次换屏才纠正。
         //
-        // 锁序 `current_toolbar_monitor` → `toolbar_positions`，与 `save_toolbar_pos`
+        // 锁序 `current_toolbar_monitor` → `toolbar_anchors`，与 `save_toolbar_anchor`
         // 的取用先后一致（那边不嵌套）；⚠️ 新增取这两把锁的代码请沿用同一顺序。
         let saved = {
             let mut cur = self
@@ -1623,7 +1625,7 @@ impl Coordinator {
                 return;
             }
             let saved = self
-                .toolbar_positions
+                .toolbar_anchors
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&key)
@@ -1632,7 +1634,7 @@ impl Coordinator {
             saved
         };
         let cmd = match saved {
-            Some((x, y)) => UiCommand::SetToolbarPos { x, y },
+            Some((right, bottom)) => UiCommand::SetToolbarAnchor { right, bottom },
             // 该屏从未拖过：交给 UI 侧按自己的尺寸算右下角（协调器不知道工具栏 w/h）。
             None => UiCommand::SetToolbarCorner {
                 work_right,
@@ -1647,7 +1649,7 @@ impl Coordinator {
     /// `current_toolbar_monitor`，使首个 notify_toolbar 不会重复下发。
     ///
     /// 非 Windows 上 `focus_monitor` 恒为 None，故本函数恒为 no-op——位置恢复整体不生效。
-    /// 无实际影响：`manager_macos.rs` 的 forwarder 本就把 `SetToolbarPos`/`SetToolbarCorner`
+    /// 无实际影响：`manager_macos.rs` 的 forwarder 本就把 `SetToolbarAnchor`/`SetToolbarCorner`
     /// 当留桩丢弃，工具栏在那边由 .app 原生承载。
     ///
     /// 桌面构造路径（`new`）专用；headless/Android 入口不经此，故仅在无 desktop-ui 时放行
@@ -1657,17 +1659,17 @@ impl Coordinator {
         self.sync_toolbar_monitor();
     }
 
-    /// 持久化工具栏位置（按显示器 key 独立存储，best-effort）。
+    /// 持久化工具栏锚点（窗口**右下角**屏幕坐标，按显示器 key 独立存储，best-effort）。
     ///
     /// key 取自**工具栏落点自身**而非光标：拖动结束时光标压在工具栏上，两者碰巧同屏，
     /// 但工具栏坐标才是「这条工具栏属于哪块屏」的直接事实。存取两侧由此共用同一个
     /// 键空间语义——取那侧问的是「焦点屏上记过什么位置」，存那侧答的是「这块屏上
     /// 工具栏在哪」，只有 key 同源才对得上。
-    pub(crate) fn save_toolbar_pos(&self, x: i32, y: i32) {
-        let Some(key) = monitor_key_from_point(x, y) else {
+    pub(crate) fn save_toolbar_anchor(&self, right: i32, bottom: i32) {
+        let Some(key) = monitor_key_from_point(right, bottom) else {
             // 查不到显示器就别存：这块表的读取侧（`focus_monitor`）在同样的失败下返回
             // None，存进任何兜底 key 都只会是永远读不出来的垃圾。
-            tracing::debug!("工具栏位置未保存：查不到 ({},{}) 所在显示器", x, y);
+            tracing::debug!("工具栏位置未保存：查不到 ({},{}) 所在显示器", right, bottom);
             return;
         };
         // 拖到别的屏 = 用户在那块屏上重新定了位；同步当前屏记录，否则下一次
@@ -1679,21 +1681,62 @@ impl Coordinator {
                 .unwrap_or_else(|e| e.into_inner());
             *cur = Some(key.clone());
         }
-        {
+        let snapshot = {
             let mut map = self
-                .toolbar_positions
+                .toolbar_anchors
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            map.insert(key, (x, y));
-        }
-        if let Some(state_dir) = Config::state_dir() {
-            let map = self
-                .toolbar_positions
+            map.insert(key, (right, bottom));
+            map.clone()
+        };
+        // 整份快照交给写入器（覆盖语义要求闭包自带完整目标值，不能做增量修改）。
+        // 合并 + 串行化 + 关机 flush 全在那一侧，见 `state_writer`。
+        self.state_writer.schedule("toolbar_anchors", move |rs| {
+            rs.toolbar_anchors = snapshot.clone();
+        });
+    }
+
+    /// 持久化软键盘锚点（面板**右下角**屏幕坐标）。与 `save_toolbar_anchor` 同构，
+    /// 但**不碰** `current_toolbar_monitor`——那是工具栏跟随焦点换屏的去重缓存，
+    /// 软键盘不参与那套跟随（它由用户显式开关，不跟着焦点跑）。
+    pub(crate) fn save_softkeyboard_anchor(&self, right: i32, bottom: i32) {
+        let Some(key) = monitor_key_from_point(right, bottom) else {
+            tracing::debug!("软键盘位置未保存：查不到 ({},{}) 所在显示器", right, bottom);
+            return;
+        };
+        let snapshot = {
+            let mut map = self
+                .softkeyboard_anchors
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let mut rs = wind_config::RuntimeState::load(&state_dir);
-            rs.toolbar_positions = map.clone();
-            let _ = rs.save(&state_dir);
+            map.insert(key, (right, bottom));
+            map.clone()
+        };
+        self.state_writer
+            .schedule("softkeyboard_anchors", move |rs| {
+                rs.softkeyboard_anchors = snapshot.clone();
+            });
+    }
+
+    /// 焦点屏上记过的软键盘锚点 + 该屏工作区，供 `ShowSoftKeyboard` 携带。
+    ///
+    /// 查不到显示器时两者都是 `None`：UI 侧据此回退到自己的默认锚点。
+    pub(crate) fn softkeyboard_placement(&self) -> SoftKeyboardPlacement {
+        let Some(mon) = focus_monitor() else {
+            return SoftKeyboardPlacement {
+                anchor: None,
+                work: None,
+            };
+        };
+        let anchor = self
+            .softkeyboard_anchors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&mon.key)
+            .copied();
+        SoftKeyboardPlacement {
+            anchor,
+            work: Some(mon.work),
         }
     }
 
@@ -2001,8 +2044,72 @@ fn cursor_pos() -> (i32, i32) {
     (pt.x, pt.y)
 }
 
-/// 根据屏幕坐标计算显示器 key（工作区右下角："workRight,workBottom"）。
-/// 查不到显示器时返回 None。
+/// 软键盘开面板时的摆放依据，随 `ShowSoftKeyboard` 下发。
+///
+/// 两项都是 `Option` 且语义不同：`anchor` 的 `None` 表示**这块屏没有记录**
+/// （UI 侧据此落该屏默认位置），`work` 的 `None` 表示**查不到显示器**（UI 侧只好回退
+/// 主屏）。合成一个"没有位置信息"的标志会丢掉这个区别——前者是正常的首次使用，
+/// 后者是降级路径。
+pub(crate) struct SoftKeyboardPlacement {
+    pub anchor: Option<(i32, i32)>,
+    pub work: Option<(i32, i32, i32, i32)>,
+}
+
+/// 一块显示器的「身份 + 几何」，位置记忆的取用单位。
+#[derive(Debug, Clone)]
+pub(crate) struct MonitorInfo {
+    /// 分桶 key：`"workRight,workBottom@scalePct"`。
+    pub key: String,
+    /// 工作区 `(left, top, right, bottom)`，物理像素。
+    pub work: (i32, i32, i32, i32),
+}
+
+/// 位置记忆的分桶 key。
+///
+/// # 三个维度各自挡什么
+///
+/// - `workRight` / `workBottom`：**显示器身份 + 分辨率**。换屏或改分辨率 ⇒ key 变 ⇒
+///   记录失配 ⇒ 落回默认位置。这比"按比例换算旧坐标"安全：面板是整块的，屏幕变窄时
+///   换算出来的落点可能整块出界，而"记不住"永远好过"记到屏幕外"。
+/// - `scalePct`：**DPI 缩放**。同一块屏改缩放而不改分辨率时，工作区的物理像素边界
+///   **不变**，只用前两维的话记录仍然命中，可窗口尺寸已按新 scale 变了，锚点算出的落点
+///   不再是用户当初摆的地方。带上缩放即失配、落回默认——于是坐标本体可以一路保持物理
+///   像素，不必为这一格另引一套 dp 单位（那会让这一族窗口里只有它一个不同口径）。
+///
+/// ⚠️ 存侧（`monitor_key_from_point`）与取侧（`focus_monitor`）**共用这一个函数**。
+/// 两侧格式一旦分叉，存进去的 key 就永远问不出来，症状是"位置压根没被记住"，
+/// 而两边的代码单独看都对。
+#[cfg(target_os = "windows")]
+fn monitor_info(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<MonitorInfo> {
+    use std::mem::{size_of, zeroed};
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    unsafe {
+        let mut mi: MONITORINFO = zeroed();
+        mi.cbSize = size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return None;
+        }
+        let wa = mi.rcWork;
+        // 取不到 DPI 时按 100% 记：这一维只用来分桶，回落到"不区分缩放"退化成改动前的
+        // 行为（位置仍记得住，只是改缩放后可能偏），比整条记录作废好。
+        let mut dpi_x: u32 = 0;
+        let mut dpi_y: u32 = 0;
+        let scale_pct = if GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok()
+            && dpi_y > 0
+        {
+            dpi_y * 100 / 96
+        } else {
+            100
+        };
+        Some(MonitorInfo {
+            key: format!("{},{}@{}", wa.right, wa.bottom, scale_pct),
+            work: (wa.left, wa.top, wa.right, wa.bottom),
+        })
+    }
+}
+
+/// 根据屏幕坐标定位显示器。查不到时返回 None。
 ///
 /// 失败语义要与 `focus_monitor` 对称——它同样在查不到时返回 None。此前这里回落到
 /// `"0,0"`，于是保存侧会把坐标写进一个**读取侧永远问不出来的 key**（`focus_monitor`
@@ -2011,21 +2118,12 @@ fn cursor_pos() -> (i32, i32) {
 fn monitor_key_from_point(x: i32, y: i32) -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        use std::mem::{size_of, zeroed};
         use windows::Win32::Foundation::POINT;
-        use windows::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-        };
+        use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
         unsafe {
-            let pt = POINT { x, y };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi: MONITORINFO = zeroed();
-            mi.cbSize = size_of::<MONITORINFO>() as u32;
-            if GetMonitorInfoW(hmon, &mut mi).as_bool() {
-                return Some(format!("{},{}", mi.rcWork.right, mi.rcWork.bottom));
-            }
+            let hmon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+            monitor_info(hmon).map(|m| m.key)
         }
-        None
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -2033,7 +2131,7 @@ fn monitor_key_from_point(x: i32, y: i32) -> Option<String> {
     }
 }
 
-/// 输入焦点所在显示器：`(key, 工作区右边界, 工作区下边界)`；查不到返回 None（不动工具栏）。
+/// 输入焦点所在显示器；查不到返回 None（不动工具栏）。
 ///
 /// 判据取**前台窗口**而非光标：键盘切窗（Alt+Tab、窗口热键）时光标根本不动，用光标
 /// 问不出「用户在哪块屏上打字」。前台窗口恒有值、查询不阻塞，`foreground_fullscreen_kind`
@@ -2044,14 +2142,12 @@ fn monitor_key_from_point(x: i32, y: i32) -> Option<String> {
 ///
 /// 前台窗口是桌面/Shell（无应用在前台）时回退到光标所在屏：仍是同一层的「屏幕上某点」，
 /// 只是换了个更弱的信号源，不引入跨层耦合。
-fn focus_monitor() -> Option<(String, i32, i32)> {
+pub(crate) fn focus_monitor() -> Option<MonitorInfo> {
     #[cfg(target_os = "windows")]
     {
-        use std::mem::{size_of, zeroed};
         use windows::Win32::Foundation::{HWND, POINT};
         use windows::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-            MonitorFromWindow,
+            HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromPoint, MonitorFromWindow,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
             GetDesktopWindow, GetForegroundWindow, GetShellWindow,
@@ -2067,15 +2163,8 @@ fn focus_monitor() -> Option<(String, i32, i32)> {
             } else {
                 MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
             };
-            let mut mi: MONITORINFO = zeroed();
-            mi.cbSize = size_of::<MONITORINFO>() as u32;
-            if GetMonitorInfoW(hmon, &mut mi).as_bool() {
-                let wa = mi.rcWork;
-                // key 与 monitor_key_from_point 同格式，两者必须一致——存/取共用一张表。
-                return Some((format!("{},{}", wa.right, wa.bottom), wa.right, wa.bottom));
-            }
+            monitor_info(hmon)
         }
-        None
     }
     #[cfg(not(target_os = "windows"))]
     {

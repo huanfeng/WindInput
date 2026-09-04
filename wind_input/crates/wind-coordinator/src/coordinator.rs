@@ -18,6 +18,7 @@ mod first_show;
 mod langbar_icon;
 mod message_handler;
 mod push_config;
+mod state_writer;
 
 // 平移到子模块的项以原路径保真（handle_* 均经 `crate::coordinator::` 引用，勿改回直连）。
 pub(crate) use crate::config_bundle::{ConfigBundle, schema_key_union};
@@ -1153,13 +1154,21 @@ pub struct Coordinator {
     /// `Send + Sync + 'static` 的闭包，捕获裸字段做不到）；除此之外用法与普通 `RwLock` 相同。
     pub(crate) common_chars: std::sync::Arc<std::sync::RwLock<wind_candidate::CommonChars>>,
     // Shadow 规则已迁至 redb（self.store 的 SHADOW 表）。
-    /// 工具栏位置，按显示器 key（"workRight,workBottom"）独立记录。
-    pub(crate) toolbar_positions: Mutex<std::collections::HashMap<String, (i32, i32)>>,
+    /// 工具栏锚点（窗口**右下角**屏幕坐标），按显示器 key（`monitor_key` 的
+    /// `"workRight,workBottom@scalePct"`）独立记录。语义与落盘形态见
+    /// [`wind_config::RuntimeState::toolbar_anchors`]。
+    pub(crate) toolbar_anchors: Mutex<std::collections::HashMap<String, (i32, i32)>>,
+    /// 软键盘锚点（面板**右下角**屏幕坐标），按显示器 key 独立记录。与
+    /// [`Self::toolbar_anchors`] 同构。
+    pub(crate) softkeyboard_anchors: Mutex<std::collections::HashMap<String, (i32, i32)>>,
     /// 工具栏当前所在显示器的 key（None=尚未定位）。`sync_toolbar_monitor` 的去重依据：
     /// notify_toolbar 在每次模式切换/焦点事件上都跑，无此缓存就会把用户拖动过的位置
-    /// 反复重置回记忆值。拖动落盘时（`save_toolbar_pos`）同步更新，否则拖到别的屏之后
+    /// 反复重置回记忆值。拖动落盘时（`save_toolbar_anchor`）同步更新，否则拖到别的屏之后
     /// 这里仍记着旧 key，下一次校正会被误判为「屏没变」而跳过。
     pub(crate) current_toolbar_monitor: Mutex<Option<String>>,
+    /// `state.toml` 的单点延迟写入器：合并连续微调、进程内串行化 load-modify-save。
+    /// 无 `store`（headless 测试夹具）时是不写盘的空实现，见 [`state_writer::StateWriter`]。
+    pub(crate) state_writer: state_writer::StateWriter,
     /// 候选反查（编码/拆字/拼音）供悬停提示与加词出码；拆字段随主码表方案
     /// 热重载（见 `sync_chaizi_assets`），拼音段启动加载后不变。
     pub(crate) reverse: std::sync::RwLock<wind_reverse::ReverseLookup>,
@@ -2085,7 +2094,11 @@ impl Coordinator {
         let runtime_state = Config::state_dir()
             .map(|d| wind_config::RuntimeState::load(&d))
             .unwrap_or_default();
-        let toolbar_positions_init = runtime_state.toolbar_positions.clone();
+        let toolbar_anchors_init = runtime_state.toolbar_anchors.clone();
+        let softkeyboard_anchors_init = runtime_state.softkeyboard_anchors.clone();
+        // 在 `store` 被 move 进结构体之前取：字段字面量按书写顺序求值，`state_writer`
+        // 排在 `store` 之后，那时已经借不到了。
+        let persists_state = store.is_some();
         // 软键盘上次停在哪一面：按**面 id** 还原（面表来自配置，两次运行之间可能增删面，
         // 存下标必然指到别处）。id 找不到就当没记录过、开在第一面——那比默默开到一个
         // 陌生的面好。
@@ -2231,8 +2244,12 @@ impl Coordinator {
             // 只含出厂基表：用户覆盖住在 store 里，而 store 在本结构体构造之后才可用，
             // 故由 new() 里的 `reload_common_chars` 补灌（与 `quick_adjust` 同一套路）。
             common_chars: std::sync::Arc::new(std::sync::RwLock::new(common_chars)),
-            toolbar_positions: Mutex::new(toolbar_positions_init),
+            toolbar_anchors: Mutex::new(toolbar_anchors_init),
+            softkeyboard_anchors: Mutex::new(softkeyboard_anchors_init),
             current_toolbar_monitor: Mutex::new(None),
+            // 判据借 `store`：它的文档本来就写着「None = 无持久化（headless 测试）」。
+            // 只看 `state_dir()` 挡不住测试夹具——那是进程外的全局路径，夹具同样取得到。
+            state_writer: state_writer::StateWriter::new(persists_state, Config::state_dir()),
             reverse: std::sync::RwLock::new(reverse),
             aux_code_table: std::sync::RwLock::new(None),
             aux_code_key_warned: std::sync::atomic::AtomicBool::new(false),
@@ -2976,22 +2993,23 @@ impl Coordinator {
     }
 
     /// 用户主动切换中英/全半角/标点后记录"最后状态"镜像；
-    /// remember_last_state=true 时同步落盘 state.toml（复用 toolbar_positions 的 load-modify-save 模式）。
+    /// remember_last_state=true 时经 `state_writer` 落盘 state.toml。
     /// 必须在释放 state 锁后调用。
+    ///
+    /// 这里是 state.toml 写得**最频繁**的一处：每次切中英/全半角/标点都来一趟，
+    /// 而那正是用户连打时最爱按的几个键。走延迟写入器后，一串连续切换只落一次盘。
     pub(crate) fn record_last_state(&self) {
         let (c, f, p) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (s.chinese_mode, s.full_width, s.chinese_punct)
         };
         *self.runtime_last.lock().unwrap_or_else(|e| e.into_inner()) = (c, f, p);
-        if self.rt().config.input.default.remember_last_state
-            && let Some(dir) = Config::state_dir()
-        {
-            let mut rs = wind_config::RuntimeState::load(&dir);
-            rs.last_chinese_mode = c;
-            rs.last_full_width = f;
-            rs.last_chinese_punct = p;
-            let _ = rs.save(&dir);
+        if self.rt().config.input.default.remember_last_state {
+            self.state_writer.schedule("last_state", move |rs| {
+                rs.last_chinese_mode = c;
+                rs.last_full_width = f;
+                rs.last_chinese_punct = p;
+            });
         }
     }
 
@@ -5448,7 +5466,10 @@ impl Coordinator {
             UiEvent::Page(dir) => self.mouse_page(dir),
             UiEvent::Hover(i) => self.mouse_hover(i),
             UiEvent::Toolbar(a) => self.mouse_toolbar(a),
-            UiEvent::ToolbarMoved { x, y } => self.save_toolbar_pos(x, y),
+            UiEvent::ToolbarMoved { right, bottom } => self.save_toolbar_anchor(right, bottom),
+            UiEvent::SoftKeyboardMoved { right, bottom } => {
+                self.save_softkeyboard_anchor(right, bottom)
+            }
             UiEvent::CandidateOp { op, page_local } => self.candidate_op(op, page_local),
             UiEvent::RequestCandidateMenu { page_local, x, y } => {
                 self.show_candidate_menu(page_local, x, y)

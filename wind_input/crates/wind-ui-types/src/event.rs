@@ -13,8 +13,19 @@ pub enum UiEvent {
     Hover(i32),
     /// 工具栏单元格点击
     Toolbar(ToolbarAction),
-    /// 工具栏被拖动到新位置（屏幕坐标），供协调器持久化
-    ToolbarMoved { x: i32, y: i32 },
+    /// 工具栏被拖动到新位置，供协调器持久化。
+    ///
+    /// 报的是窗口**右下角**屏幕坐标（`GetWindowRect` 的 `right`/`bottom`），不是左上角：
+    /// 持久化的是锚点，而工具栏尺寸会随朝向/格数变（见 `UiCommand::SetToolbarAnchor`）。
+    /// 只在 `WM_LBUTTONUP` 拖动结束时发一次，拖动途中不发——落盘频次由此天然收敛到
+    /// 「一次拖动一次」，协调器侧的合并写只用来吸收连续微调。
+    ToolbarMoved { right: i32, bottom: i32 },
+    /// 软键盘面板被拖动到新位置，供协调器持久化（**右下角**屏幕坐标）。
+    ///
+    /// 与 [`Self::ToolbarMoved`] 完全同构，包括「抬起才发一次」这条：软键盘的拖动实现
+    /// 是在 `WM_MOUSEMOVE` 里持续更新落点的，若照着那里发事件会变成拖动全程每帧一次
+    /// IPC + 一次 state.toml 读改写。
+    SoftKeyboardMoved { right: i32, bottom: i32 },
     /// 候选词条操作（页内下标 + 动作）
     CandidateOp { op: CandidateOp, page_local: usize },
     /// 右键候选请求弹出菜单（页内下标 + 屏幕坐标）；协调器据此构建菜单项回送
