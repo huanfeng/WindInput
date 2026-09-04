@@ -136,6 +136,44 @@ fn every_configurable_name_resolves() {
     }
 }
 
+/// ★★ 出厂 `blocks.yaml` 与代码里的区块表**逐码位一致**。
+///
+/// 区块类已经搬进配置（`gen_block_charsets` 从 `charblock::BLOCKS` 生成），于是多了一份
+/// 会漂移的数据：有人改了代码里的块表却没重新生成，或反过来手改了 yaml。
+///
+/// ⚠️ 漂移的表现全都很轻：类型列的标签与 `exclude_blocks` 认的名字对不上、某一段码位
+/// 归错类。没有一处会报错。
+///
+/// ⇒ 逐码位比对「registry 里命中的区块类」与 `block_of(ch).name`。这同时钉住了三件事：
+/// 块的区间对、「其它」确实是补集、以及区块类的 `order` 让具体的块排在「符号」之前
+/// （否则半个 BMP 会显示成「符号」）。
+#[test]
+fn factory_blocks_match_the_block_table_codepoint_by_codepoint() {
+    let reg = factory_registry();
+    // 只看区块类：emoji / common_han 也会命中，但它们不是「这个字属于哪个区块」的答案。
+    // 判据是「有 ranges、且不表态」——那正是区块类的形状。
+    for c in 0u32..=0x10FFFF {
+        let Some(ch) = char::from_u32(c) else {
+            continue;
+        };
+        let buf = ch.to_string();
+        let got = reg
+            .classes()
+            .iter()
+            .find(|k| {
+                k.default_common.is_none()
+                    && !k.ranges.is_empty()
+                    && k.ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi)
+            })
+            .map(|k| k.key.as_str());
+        assert_eq!(
+            got,
+            Some(wind_candidate::block_of(ch).name),
+            "U+{c:04X} 的区块归属与代码里的块表不一致——blocks.yaml 该重新生成了"
+        );
+    }
+}
+
 /// `common_han` 的 `file:` 真的把 `schemas/common_chars.txt` 读进来了。
 ///
 /// ⚠️ 读不到时 `load_member_file` 只 warn 并返回空表——那样这个类会**只剩 scope**，

@@ -282,9 +282,56 @@ fn split_members(line: &str) -> impl Iterator<Item = (bool, String)> + '_ {
     })
 }
 
-pub fn parse_doc(text: &str) -> anyhow::Result<CharsetDoc> {
-    let mut head = String::new();
-    let mut body: Vec<&str> = Vec::new();
+/// 解析一份文件，可能含**多个**类。
+///
+/// # 两种形态，按 meta 头的第一个非空字符分辨
+///
+/// | 形态 | meta 头 | 列表体 | 用途 |
+/// |---|---|---|---|
+/// | 单类 | 一个映射（`key: xxx`） | ✅ 支持 | 带成员名单的类（emoji、常用汉字） |
+/// | 多类 | 一个**数组**（`- key: xxx`） | ⛔ 不支持 | 一批纯区间类（50 个 Unicode 区块） |
+///
+/// ⚠️ 多类文件不带列表体：一份列表归哪个类说不清。要给其中某个类加成员，另起一个同
+/// `key` 的单类文件即可（覆盖按 key 匹配，见设计文档 §3.5）。
+///
+/// ★ 存在的理由：50 个内置区块若一类一文件，`charsets/` 目录会被淹掉、用户看不见真正
+/// 该配的那两三个；而全塞进代码里又等于「这套东西唯独这部分不可配置」——那正是本次
+/// 改造要消灭的形态。
+pub fn parse_docs(text: &str) -> anyhow::Result<Vec<CharsetDoc>> {
+    let (head, body) = split_head_body(text);
+    // ⚠️ 判据要**跳过注释与空行**：出厂的多类文件开头是一段说明注释，按「第一个字符」
+    // 判会把它当成单类文件，于是整份解析失败、52 个类一个都不进 registry——而日志里
+    // 只有一行「解析失败，已跳过」，看不出是判错了形态。
+    let first = head
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'));
+    if first.is_some_and(|l| l.starts_with('-')) {
+        anyhow::ensure!(
+            body.trim().is_empty(),
+            "多类文件（meta 头是数组）不支持列表体——一份列表归哪个类说不清；\
+             要给其中某个类加成员，另起一个同 key 的单类文件"
+        );
+        let defs: Vec<CharsetDef> =
+            serde_yaml::from_str(&head).map_err(|e| anyhow::anyhow!("meta 头解析失败：{e}"))?;
+        return defs
+            .into_iter()
+            .map(|def| {
+                anyhow::ensure!(!def.key.trim().is_empty(), "数组里有一项缺 key");
+                Ok(CharsetDoc {
+                    def,
+                    added: Vec::new(),
+                    removed: Vec::new(),
+                })
+            })
+            .collect();
+    }
+    Ok(vec![parse_doc(text)?])
+}
+
+/// 按 `...` 把文件切成 meta 头与列表体（`---` 行跳过）。
+fn split_head_body(text: &str) -> (String, String) {
+    let (mut head, mut body) = (String::new(), String::new());
     let mut in_head = true;
     for line in text.lines() {
         if in_head {
@@ -298,9 +345,16 @@ pub fn parse_doc(text: &str) -> anyhow::Result<CharsetDoc> {
             head.push_str(line);
             head.push('\n');
         } else {
-            body.push(line);
+            body.push_str(line);
+            body.push('\n');
         }
     }
+    (head, body)
+}
+
+pub fn parse_doc(text: &str) -> anyhow::Result<CharsetDoc> {
+    let (head, body_text) = split_head_body(text);
+    let body: Vec<&str> = body_text.lines().collect();
 
     let def: CharsetDef =
         serde_yaml::from_str(&head).map_err(|e| anyhow::anyhow!("meta 头解析失败：{e}"))?;
@@ -354,21 +408,24 @@ pub fn load_layer(dir: &Path) -> Vec<CharsetDoc> {
             warn!("读取字符类文件失败：{}", p.display());
             continue;
         };
-        match parse_doc(&text) {
-            Ok(doc) => {
-                // ⚠️ 同层内 key 撞车必须报出来：静默取其一会让用户改了一个文件却
-                // 看不到效果，而两个文件看上去都是对的。
-                if let Some(prev) = seen.get(&doc.def.key) {
-                    warn!(
-                        "字符类 key「{}」在同一层重复：{} 与 {}，两者将按文件名序叠加",
-                        doc.def.key,
-                        prev.display(),
-                        p.display()
-                    );
-                } else {
-                    seen.insert(doc.def.key.clone(), p.clone());
+        // 一份文件可能出多个类（meta 头是数组时），见 `parse_docs`。
+        match parse_docs(&text) {
+            Ok(docs) => {
+                for doc in docs {
+                    // ⚠️ 同层内 key 撞车必须报出来：静默取其一会让用户改了一个文件却
+                    // 看不到效果，而两个文件看上去都是对的。
+                    if let Some(prev) = seen.get(&doc.def.key) {
+                        warn!(
+                            "字符类 key「{}」在同一层重复：{} 与 {}，两者将按文件名序叠加",
+                            doc.def.key,
+                            prev.display(),
+                            p.display()
+                        );
+                    } else {
+                        seen.insert(doc.def.key.clone(), p.clone());
+                    }
+                    out.push(doc);
                 }
-                out.push(doc);
             }
             Err(e) => warn!("解析 {} 失败，已跳过：{e}", p.display()),
         }

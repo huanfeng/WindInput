@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use tracing::warn;
-use wind_candidate::{CharsetRegistry, ClassSpec, Scope, builtin_block_specs};
+use wind_candidate::{CharsetRegistry, ClassSpec, Scope};
 use wind_config::charset_def::{Commonality, DEFAULT_ORDER, MergedClass, ScopeKind, parse_ranges};
 
 /// 外部引用：配置里**按名字**指向字符类的那两个键。
@@ -48,10 +48,13 @@ pub fn assemble(
     data_dir: Option<&Path>,
     refs: ExternalRefs<'_>,
 ) -> CharsetRegistry {
-    let mut specs: BTreeMap<String, ClassSpec> = builtin_block_specs()
-        .into_iter()
-        .map(|s| (s.key.clone(), s))
-        .collect();
+    // 全部类都来自配置——**代码里没有一份内置清单**。50 个 Unicode 区块在
+    // `data/charsets/blocks.yaml`（生成物），emoji 与常用汉字各有自己的文件。
+    //
+    // ⛔ 别在这里塞「配置缺失时的兜底类」：那就是第二个数据源，用户改了配置却发现
+    // 某些类改不动，而两处各自看都对。缺文件的表现是 `exclude_blocks` 里的名字解析
+    // 不出来 —— `apply_ref` 会把它 warn 出来。
+    let mut specs: BTreeMap<String, ClassSpec> = BTreeMap::new();
 
     for (key, mc) in defs {
         // `enabled: false` 是**删除**的表达（字段级合并里 `merge_value` 表达不了删除，
@@ -261,8 +264,30 @@ mod tests {
     use super::*;
     use wind_config::charset_def::{CharsetDef, parse_doc};
 
+    /// 造合并结果：先垫两个**模拟出厂的区块类**，再叠加测试自己那份。
+    ///
+    /// ⚠️ 区块类已经全部搬进 `data/charsets/blocks.yaml`，代码里不再有内置清单
+    /// （那正是本轮改造要消灭的形态）。单元测试不读那个文件——要它就得依赖仓库布局，
+    /// 而这些用例测的是「叠加」这件事本身，不是块表的内容。真实出厂文件由
+    /// `tests/charset_factory_assembly.rs` 验。
     fn merged(text: &str) -> BTreeMap<String, MergedClass> {
         let mut m = BTreeMap::new();
+        for stub in [
+            "---
+key: 表情符号
+ranges:
+  - U+1F300-U+1FAFF
+order: 900
+",
+            "---
+key: 基本汉字
+ranges:
+  - U+4E00-U+9FFF
+order: 900
+",
+        ] {
+            wind_config::charset_def::apply_doc(&mut m, parse_doc(stub).expect("垫片解析失败"));
+        }
         wind_config::charset_def::apply_doc(&mut m, parse_doc(text).expect("解析失败"));
         m
     }

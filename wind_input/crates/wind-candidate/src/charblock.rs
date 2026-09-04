@@ -183,6 +183,61 @@ pub(crate) fn block_index_of(ch: char) -> Option<usize> {
     (c <= BLOCKS[idx].end).then_some(idx)
 }
 
+/// 区块表：`(名, 起, 止)`，按 `start` 升序且互不重叠。
+///
+/// ⚠️ 只给 `gen_block_charsets` 用——它把这份表生成 `data/charsets/blocks.yaml`。
+/// **判定不要走这里**：那归 [`crate::CharsetRegistry`]，数据来自那份 yaml。两处各判
+/// 一遍就是两个数据源，而 `factory_blocks_match_the_block_table_codepoint_by_codepoint`
+/// 正是为了钉住它们不漂移。
+pub fn block_table() -> &'static [(&'static str, u32, u32)] {
+    // BLOCKS 是 `CharBlock` 结构体数组，这里投影成元组：让生成器不必依赖那个类型，
+    // 也就不会有人顺手从生成器那边给它加字段。
+    static TABLE: std::sync::OnceLock<Vec<(&'static str, u32, u32)>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| BLOCKS.iter().map(|b| (b.name, b.start, b.end)).collect())
+}
+
+/// 「其它」兜底档的名字（区块表之外的一切）。
+pub fn other_block_name() -> &'static str {
+    OTHER.name
+}
+
+/// 预设组「符号」的成员块名 —— 标点、数学、图形这一类**非 emoji** 的符号块。
+///
+/// ★ 与 emoji **刻意不相交**：勾「符号」不该顺带把 emoji 也放进来，否则界面上两个开关
+/// 的关系说不清楚（勾了符号，emoji 那个还有什么用）。「杂项符号」「装饰符号」
+/// 「杂项技术符号」因此不在这里——虽然它们名字里也有「符号」二字。
+///
+/// ★ 只收 `is_han ∪ is_pua` **域外**的块。部首、康熙部首、CJK 笔画、各扩展区都在
+/// `common::is_han` 里，本来就是生僻字模式的默认输出，列进来是多余的开关——用户勾了
+/// 没变化，只会以为坏了。
+///
+/// ⚠️ 它与 [`block_table`] 同住一处，因为两者是同一份数据的两面：这里列的是块**名**，
+/// 而名字对不上的后果是那一块静默消失。`gen_block_charsets` 在生成时核对数量。
+const PRESET_SYMBOL_BLOCKS: &[&str] = &[
+    "通用标点",
+    "上标与下标",
+    "货币符号",
+    "字母式符号",
+    "数字形式",
+    "箭头",
+    "数学运算符",
+    "带圈字母数字",
+    "制表符",
+    "方块元素",
+    "几何图形",
+    "表意文字描述符",
+    "CJK 符号和标点",
+    "带圈 CJK 字母及月份",
+    "CJK 兼容符号",
+    "CJK 兼容形式",
+    "半角及全角形式",
+];
+
+/// 预设组「符号」的成员块名。只给 `gen_block_charsets` 用（同 [`block_table`]）。
+pub fn preset_symbol_block_names() -> &'static [&'static str] {
+    PRESET_SYMBOL_BLOCKS
+}
+
 /// 这个字符属于哪个块；表外一律 [`OTHER`]。
 pub fn block_of(ch: char) -> CharBlock {
     block_index_of(ch).map_or(OTHER, |i| BLOCKS[i])
