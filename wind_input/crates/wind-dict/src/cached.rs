@@ -39,7 +39,12 @@ pub struct DictHit {
 /// `boundary == 0`（无边界信息）**一律放行** —— 词库层无从判断，交调用方按需用 DAG
 /// 现切兜底（见 `wind-engine` 的 `effective_boundary`）。职责分工：词库层只提前丢弃
 /// **确定不合格**的条目以免它们白占 top-N 配额，最终判定仍在引擎层。
-pub fn prefix_syllable_keep(boundary: u64, max_syllables: u32) -> bool {
+///
+/// ⚠️ **`pub(crate)`，外部一律用 [`prefix_entry_keep`]** —— 本函数只是那道合成判据的
+/// 「音节数」半边，单独拿它当保留判据正是 2026-09-04 那次报障的成因：`sheng` 与 `shen`
+/// 的音节数完全同形（都是 1），它分不开，于是关掉模糊音也照样出 `sheng` 的字。
+/// 收窄可见性是为了让编译器把关，而不是靠注释提醒下一个人别漏了对齐那半边。
+pub(crate) fn prefix_syllable_keep(boundary: u64, max_syllables: u32) -> bool {
     boundary == 0 || boundary.count_ones() <= max_syllables
 }
 

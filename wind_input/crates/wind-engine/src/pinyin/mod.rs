@@ -1245,7 +1245,7 @@ impl PinyinEngine {
             stroke,
             MAX_FULL_PINYIN_RECALL,
             cap,
-            completed.len(),
+            completed_bytes,
         ) {
             push(
                 cands,
@@ -1277,6 +1277,26 @@ impl PinyinEngine {
                 );
             }
             for c in store_dm.search_prefix(stroke, MAX_FULL_PINYIN_RECALL) {
+                // ★ 音节边界对齐必须**在本支路自己判一次**：`recall_full_pinyin` 被刻意放在
+                // step 6.3 那道 retain **之后**（6.3 的尺子 `syllable_cap` 由双拼域音节数算出，
+                // 拿来裁全拼候选是判据跨域复用），所以本支路的候选一条都过不了那道闸门。
+                // 漏掉这里，用户词就会在这条路上跨越已打完的音节（`shaixu` 照旧出「筛选」），
+                // 而系统词（③）却已经在词库层被挡住 —— 同一输入下两类词行为不一致。
+                //
+                // 判据函数与 ③ 同源，另加 `effective_boundary` 的 DAG 兜底：用户手输码常常
+                // 没有边界真值（`boundary == 0`），词库层判不了、只能放行，这里补上。
+                //
+                // ⚠️ 只补**对齐**这一道，没有跟着加 `completion_syllable_cap` —— 本路径的
+                // 用户词一直不受音节数上限约束（`store_dm.search_prefix` 无 cap 入参），那是
+                // 既有取舍（用户自己加的长词理应比系统词更容易召回），与本次无关；要动它得
+                // 单独立项并配回归，顺手加会静默改掉用户词的可达范围。
+                if !wind_dict::cached::prefix_syllable_aligned(
+                    effective_boundary(&c.code, c.boundary, &self.trie),
+                    c.code.len(),
+                    completed_bytes,
+                ) {
+                    continue;
+                }
                 // 记下文本，供末尾施加**用户词专属**的上浮判据。
                 //
                 // 为什么用文本名单而不是索引区间：`push` 带同文去重，本批词若与 ③ 的系统
