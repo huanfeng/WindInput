@@ -110,9 +110,18 @@ fn common_han_reproduces_the_existing_verdict_shape() {
         "★ 缺了 outside,「是汉字却不在名单里 ⇒ 生僻」就没有落点"
     );
     assert_eq!(
-        han.def.file.as_deref(),
-        Some("common_chars.txt"),
-        "⚠️ 必须仍指向 schemas/ 下那个既有文件——搬家会让已整份覆盖过的用户静默失效"
+        han.def.file, None,
+        "常用字表已搬进本文件的列表体——留着 file: 就成了两个数据源"
     );
-    assert!(han.added.is_empty(), "它的成员来自 file，不内嵌");
+    assert!(
+        han.added.len() > 6000,
+        "名单该在列表体里，实得 {} 条",
+        han.added.len()
+    );
+    // ★ 一行连写多字：8104 个字挤在两百来行里，而不是 8104 行。
+    // 顺序按《通用规范汉字表》的级别排（一级 → 二级 → 三级），设置页照它分页。
+    for ch in ["一", "乙", "二"] {
+        assert!(han.added.contains(&ch.to_string()), "名单里该有「{ch}」");
+    }
+    assert!(!han.added.contains(&"龘".to_string()), "生僻字不该在名单里");
 }

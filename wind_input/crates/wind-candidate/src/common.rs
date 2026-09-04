@@ -56,7 +56,26 @@ pub struct CommonChars {
 }
 
 impl CommonChars {
+    /// 从字符类 registry 建：全表 = 那些**表态**类的成员，顺序取自配置。
+    ///
+    /// ★ 取代原先的 [`Self::load`]：常用字表已搬进 `charsets/common_han.yaml`，判定与
+    /// 列表因此同源。两处各读一份文件的话，用户换了字表却只有一半生效——而那半是哪半，
+    /// 取决于他改的是哪个文件。
+    ///
+    /// 多码位簇会被跳过：本结构的 `base` 是 `char` 集合（判定已归 registry，它只剩
+    /// 「列表顺序 + 表空不空」两个职责），而表态类的成员本就全是单字符。
+    pub fn from_registry(cs: &crate::CharsetRegistry) -> Self {
+        Self::from_base(cs.ordered_members().filter_map(|m| {
+            let mut it = m.chars();
+            let c = it.next()?;
+            it.next().is_none().then_some(c)
+        }))
+    }
+
     /// 从文件加载（一字一行，`#` 注释行跳过；空白与控制字符外全收，见 [`is_markable`]）。
+    ///
+    /// ⚠️ **出厂已不走这条路**（常用字表在 `charsets/common_han.yaml`）。保留它是给
+    /// 「用户自己的类引用了一个外部字表」那种情形，以及本模块的测试。
     /// 失败（文件缺失）返回空集；上层应在空集时退化为"不过滤"。
     pub fn load(path: &Path) -> Self {
         let mut base = HashSet::new();

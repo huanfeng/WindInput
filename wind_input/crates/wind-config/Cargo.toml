@@ -13,6 +13,9 @@ anyhow = { workspace = true }
 serde_json = { workspace = true }
 # charset_def：字符类文件是 meta 头 + 列表体的 .yaml（与 .dict.yaml 同构）
 serde_yaml = { workspace = true }
+# charset_def：列表体按「空白分词 → 字素簇」两级切分，口径须与判定层的
+# `wind_candidate::split_markable_clusters` 一致（那边也是 `graphemes(true)`）。
+unicode-segmentation = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
 # 快捷输入内置来源的 member id 常量（default_mix_modes / 存量迁移共用其单一真相源）

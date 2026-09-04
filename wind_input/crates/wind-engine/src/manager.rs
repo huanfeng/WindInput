@@ -3377,6 +3377,7 @@ impl EngineManager {
         let fallback = user_dir
             .is_none()
             .then(wind_config::Config::user_config_dir);
+        Self::warn_stale_common_chars(user_dir, fallback.as_ref().and_then(|o| o.as_deref()));
         let defs = wind_config::charset_def::load_layered(
             data_dir,
             wind_config::Config::custom_data_dir().as_deref(),
@@ -3446,6 +3447,24 @@ impl EngineManager {
     /// 不必再走一遍目录扫描。
     pub fn set_charsets(&self, reg: Arc<wind_candidate::CharsetRegistry>) {
         *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = reg;
+    }
+
+    /// 用户目录里还留着旧的 `schemas/common_chars.txt` 时提醒一句。
+    ///
+    /// ⚠️ 常用字表 2026-09-04 搬进了 `charsets/common_han.yaml`，那个旧文件**已经不再
+    /// 被读取**。曾经整份覆盖过它的用户，如果不提醒，看到的是「我明明换了字表，
+    /// 常用字判定却还是自带那套」——而两边都不报错。
+    fn warn_stale_common_chars(user_dir: Option<&Path>, fallback: Option<&Path>) {
+        let Some(dir) = user_dir.or(fallback) else {
+            return;
+        };
+        let stale = dir.join("schemas").join("common_chars.txt");
+        if stale.is_file() {
+            warn!(
+                "{} 已不再生效——常用字表现在在 charsets/common_han.yaml 里。要沿用你的                 名单，请把内容放进用户配置目录 charsets/ 下一个写着 `key: common_han`                  与 `replace: true` 的 .yaml",
+                stale.display()
+            );
+        }
     }
 
     /// 当前的字符类 registry。coordinator 的生僻字准入与类型列都从这里取。

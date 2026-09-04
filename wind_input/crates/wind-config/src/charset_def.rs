@@ -126,9 +126,11 @@ pub struct CharsetDef {
     /// 成员来自**外部字表文件**（相对 `schemas/`，走 `resolve_schema_resource` 的整体
     /// 替换语义）。与内嵌列表并存，两者取并集。
     ///
-    /// ★ 存在的理由是**兼容既有文件**：`common_chars.txt` 早就在 `schemas/` 下，且已有
-    /// 用户在自己的配置目录放了替换版。把它搬进 `charsets/` 会让那些覆盖静默失效，
-    /// 故它留在原地、由本字段引用。新加的类直接用内嵌列表即可。
+    /// ⚠️ **出厂不再用它**：常用字表已搬进 `charsets/common_han.yaml` 的列表体
+    /// （2026-09-04，用户拍板）。留着本字段是给「自己的类要引用一个大字表」那种用法。
+    ///
+    /// ⛔ 别拿它做出厂数据的落点：两个文件就是两个数据源，用户改了其中一个，
+    /// 另一个还在生效——而他看不出哪一半是哪一半。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 
@@ -233,6 +235,12 @@ pub struct MergedClass {
     pub def: CharsetDef,
     /// 合并后的成员（内嵌列表部分；`file` 指向的外部字表由消费方另行加载）。
     pub members: BTreeSet<String>,
+    /// 成员的**配置顺序**（首次出现的先后），与 [`Self::members`] 同集合。
+    ///
+    /// ⚠️ 顺序有意义：设置页按它列全表并分页。`BTreeSet` 给的是**码位序**——拿它去列
+    /// 常用字表，「一级 3500 → 二级 3000 → 三级」的分级顺序就没了，用户翻到第 2 页
+    /// 看到的东西也会随字表内容变动而整体漂移。
+    pub member_order: Vec<String>,
     /// 被移除的字素簇。
     ///
     /// ★ 合并时不能直接从 `members` 里扣掉就算完：`file` 指向的外部字表是在更后面
@@ -244,6 +252,36 @@ pub struct MergedClass {
 ///
 /// 头体以 `...` 分隔；没有分隔符则**整份都是 meta 头**（只调字段、不动列表的覆盖文件
 /// 就长这样，是用户层最常见的形态）。`---` 起始行可有可无，与 `.dict.yaml` 惯例一致。
+/// 把列表体的一行拆成 `(要不要删, 成员)` 序列。
+///
+/// # 两级切分：先按空白分词，每个词再按字素簇切开
+///
+/// | 写法 | 得到 |
+/// |---|---|
+/// | `的一是` | **三个**成员——连写，常用字表就是这个形态 |
+/// | `⚽️` `👨‍👩‍👧` `1️⃣` | 各**一个**成员（多码位簇整体，不会被拆散） |
+/// | `🇨 🇳` | 两个成员 |
+///
+/// ⚠️ 最后一行是**空白分隔存在的唯一理由**：相邻的区域指示符会合成国旗，`🇨🇳` 连写
+/// 是一个成员（那面旗）而不是两个字母。字素簇切分解决不了「两个成员恰好能拼成第三个」，
+/// 只能靠显式分隔——`common_chars.jsonl` 的导出当年为同一件事分过段。
+///
+/// ★ 切分口径与判定层的 [`wind_candidate::split_markable_clusters`] 一致（都是
+/// `graphemes(true)`）。不一致的后果是配置里写的成员**匹配不上**候选里的簇，
+/// 而两边各自看都对。
+///
+/// `-` 前缀作用于**整个词**：`-的一是` 删三个。
+fn split_members(line: &str) -> impl Iterator<Item = (bool, String)> + '_ {
+    use unicode_segmentation::UnicodeSegmentation;
+    line.split_whitespace().flat_map(|word| {
+        let (remove, body) = match word.strip_prefix(REMOVE_PREFIX) {
+            Some(rest) if !rest.is_empty() => (true, rest),
+            _ => (false, word),
+        };
+        body.graphemes(true).map(move |g| (remove, g.to_string()))
+    })
+}
+
 pub fn parse_doc(text: &str) -> anyhow::Result<CharsetDoc> {
     let mut head = String::new();
     let mut body: Vec<&str> = Vec::new();
@@ -274,9 +312,12 @@ pub fn parse_doc(text: &str) -> anyhow::Result<CharsetDoc> {
         if t.is_empty() || t.starts_with('#') {
             continue;
         }
-        match t.strip_prefix(REMOVE_PREFIX) {
-            Some(rest) if !rest.is_empty() => removed.push(rest.to_string()),
-            _ => added.push(t.to_string()),
+        for (remove, m) in split_members(t) {
+            if remove {
+                removed.push(m);
+            } else {
+                added.push(m);
+            }
         }
     }
     Ok(CharsetDoc {
@@ -366,16 +407,21 @@ pub fn apply_doc(merged: &mut BTreeMap<String, MergedClass>, doc: CharsetDoc) {
     // `replace` 只影响列表，不影响 meta：接管字表与接管字段是两件事。
     if doc.def.replace == Some(true) {
         entry.members.clear();
+        entry.member_order.clear();
         entry.removed.clear();
     }
     entry.def.merge_from(doc.def);
 
     for m in doc.added {
         entry.removed.remove(&m);
-        entry.members.insert(m);
+        // 只在**首次**出现时记顺序：重复的成员不该在列表里出现两次。
+        if entry.members.insert(m.clone()) {
+            entry.member_order.push(m);
+        }
     }
     for r in doc.removed {
         entry.members.remove(&r);
+        entry.member_order.retain(|x| x != &r);
         entry.removed.insert(r);
     }
 }
@@ -765,6 +811,52 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].def.key, "ok");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 列表体的两级切分 ───────────────────────────────────────────────────
+
+    fn members_of(body: &str) -> Vec<String> {
+        let doc = parse_doc(&format!("---\nkey: t\n...\n{body}")).unwrap();
+        doc.added
+    }
+
+    /// ★ 一行连写多个字 = 多个成员。常用字表就是这个形态（8104 字挤在两百来行里）。
+    #[test]
+    fn a_line_of_run_together_chars_becomes_one_member_each() {
+        assert_eq!(members_of("的一是"), vec!["的", "一", "是"]);
+        // 空白也能分隔，两种写法可以混用。
+        assert_eq!(members_of("的 一是\n不"), vec!["的", "一", "是", "不"]);
+    }
+
+    /// ★★ 多码位簇**整体**算一个成员，不会被拆散。
+    ///
+    /// 拆散的后果是配置里写 `⚽️` 却匹配不上候选里那个簇——两边各自看都对。
+    #[test]
+    fn a_multi_code_point_cluster_stays_whole() {
+        assert_eq!(members_of("⚽\u{FE0F}"), vec!["⚽\u{FE0F}"]);
+        assert_eq!(
+            members_of("👨\u{200D}👩\u{200D}👧"),
+            vec!["👨\u{200D}👩\u{200D}👧"]
+        );
+        assert_eq!(members_of("1\u{FE0F}\u{20E3}"), vec!["1\u{FE0F}\u{20E3}"]);
+    }
+
+    /// ⚠️ **空白分隔存在的唯一理由**：相邻的区域指示符会合成国旗。
+    ///
+    /// `🇨🇳` 连写是一面旗（一个成员），要表达「两个区域指示符字母」只能用空格分开。
+    /// 字素簇切分解决不了「两个成员恰好能拼成第三个」。
+    #[test]
+    fn adjacent_regional_indicators_need_a_space_to_stay_apart() {
+        assert_eq!(members_of("🇨🇳").len(), 1, "连写合成国旗，是一个成员");
+        assert_eq!(members_of("🇨 🇳").len(), 2, "要分开就得用空格");
+    }
+
+    /// `-` 前缀作用于**整个词**。
+    #[test]
+    fn the_remove_prefix_covers_the_whole_word() {
+        let doc = parse_doc("---\nkey: t\n...\n-的一是 好\n").unwrap();
+        assert_eq!(doc.removed, vec!["的", "一", "是"]);
+        assert_eq!(doc.added, vec!["好"]);
     }
 
     // ── 用户层写端 ─────────────────────────────────────────────────────────

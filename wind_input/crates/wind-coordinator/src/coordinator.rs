@@ -1940,9 +1940,10 @@ impl Coordinator {
 
         // 通用规范汉字表（检索范围"常用字"判定）。用户目录同名文件整体替代（见
         // docs/architecture/user-override.md）——自定义"常用字"范围是这张表的主要用途。
-        let common_chars = wind_candidate::CommonChars::load(
-            &Config::resolve_schema_resource(data_dir, "common_chars.txt").unwrap_or_default(),
-        );
+        // 全表与判定同源：都来自装配好的字符类 registry（常用字表在
+        // `charsets/common_han.yaml`）。两处各读一份文件的话，用户换了字表却只有一半
+        // 生效——而那半是哪半，取决于他改的是哪个文件。
+        let common_chars = wind_candidate::CommonChars::from_registry(&engine_mgr.charsets());
         if common_chars.is_empty() {
             warn!("common_chars.txt 缺失，检索范围过滤将退化为不过滤");
         } else {

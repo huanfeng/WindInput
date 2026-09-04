@@ -54,8 +54,13 @@ pub struct ClassSpec {
     pub name: String,
     /// 码位段（闭区间），可空。
     pub ranges: Vec<(u32, u32)>,
-    /// 离散成员（字表文件 + `add`），键是**字素簇**。
+    /// 离散成员（字表文件 + 内嵌列表），键是**字素簇**。判定查它，O(1)。
     pub members: HashSet<String>,
+    /// 成员的**配置顺序**，与 [`Self::members`] 同集合。设置页列全表按它排。
+    ///
+    /// ⚠️ 单独留一份 Vec 而不是从 `members` 迭代：`HashSet` 的迭代序是随机的，
+    /// 拿它列表会得到一份每次启动都不一样的清单，分页更是直接失效。
+    pub member_order: Vec<String>,
     /// 排除的字素簇（`remove`），**优先于 `ranges` 与 `members`**。
     pub excluded: HashSet<String>,
     /// 作用域。配了它 `outside_common` 才有意义。
@@ -343,6 +348,17 @@ impl CharsetRegistry {
     /// 全部类，按 `order` 升序。设置页列表用。
     pub fn classes(&self) -> &[ClassSpec] {
         &self.classes
+    }
+
+    /// **表态类**的成员，按类的 `order`、类内按配置顺序。
+    ///
+    /// 「列全表」在新模型下就是「列出那些有人给出判定的字」——不表态的类（50 个内置
+    /// 区块、出厂的 emoji）只是给字符一个归属，它们的成员没有「常用还是生僻」可显示。
+    pub fn ordered_members(&self) -> impl Iterator<Item = &str> {
+        self.classes
+            .iter()
+            .filter(|c| c.default_common.is_some())
+            .flat_map(|c| c.member_order.iter().map(String::as_str))
     }
 
     /// 完全被更靠前的类遮住、永远轮不到的类——「配了没反应」的经典来源，装载期告警。

@@ -56,10 +56,21 @@ fn common_han_reproduces_the_pre_wiring_verdict_codepoint_by_codepoint() {
     let reg = factory_registry();
 
     // 朴素参照：接线前 `CommonChars` 里的那份实现，逐字复刻。
-    let path = wind_config::Config::resolve_schema_resource(Some(&d), "common_chars.txt")
-        .expect("找不到 common_chars.txt");
-    let text = std::fs::read_to_string(&path).expect("读不出常用字表");
-    let base: std::collections::HashSet<char> = text
+    //
+    // ⚠️ 名单直接从 `charsets/common_han.yaml` 的**列表体**读，不经过 `charset_def`
+    // 的解析——参照物一旦走被测代码，比对就退化成自反断言（本文件下面那条注释记着
+    // 这个坑的另一面）。列表体在 `...` 之后，一行连写多字。
+    let text = std::fs::read_to_string(d.join("charsets").join("common_han.yaml"))
+        .expect("读不出 common_han.yaml");
+    let body = text
+        .split_once(
+            "
+...
+",
+        )
+        .expect("common_han.yaml 该有 `...` 分隔的列表体")
+        .1;
+    let base: std::collections::HashSet<char> = body
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))

@@ -211,11 +211,19 @@ fn apply_onto(spec: &mut ClassSpec, mc: &MergedClass, data_dir: Option<&Path>) {
         spec.in_rare = v;
     }
 
-    // 内嵌列表体（每行一个**字素簇**）。
-    spec.members.extend(mc.members.iter().cloned());
+    // 内嵌列表体（一行连写多字，按字素簇切分；见 `charset_def::split_members`）。
+    for m in &mc.member_order {
+        if spec.members.insert(m.clone()) {
+            spec.member_order.push(m.clone());
+        }
+    }
     // 外部字表（逐 `char`）——两种形态的差别见 `load_member_file`。
     if let Some(f) = &def.file {
-        spec.members.extend(load_member_file(&def.key, f, data_dir));
+        for m in load_member_file(&def.key, f, data_dir) {
+            if spec.members.insert(m.clone()) {
+                spec.member_order.push(m);
+            }
+        }
     }
     spec.excluded.extend(mc.removed.iter().cloned());
 }

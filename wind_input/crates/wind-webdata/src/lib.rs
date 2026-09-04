@@ -3971,6 +3971,9 @@ mod tests {
     ///
     /// 名单只放几个字：够用来区分「在表内 ⇒ 常用」和「域内表外 ⇒ 生僻」即可，
     /// 不必搬 8104 字进来。
+    /// ⚠️ 用 `ranges` 而不是列名单：本文件多条用例假定「初始是空表」，而全表列的正是
+    /// **表态类的成员**——列了名单，那几个字就会出现在列表里。给一段用不到的 PUA 码位，
+    /// 既让这个类有内容（不触发「名单为空就撤销表态」那道安全阀），又不往全表里塞东西。
     fn charsets_data_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("wind_webdata_data_{tag}"));
         let _ = std::fs::remove_dir_all(&d);
@@ -3982,12 +3985,10 @@ key: common_han
 name: 常用汉字
 order: 50
 scope: han
+ranges:
+  - U+E000-U+E001
 default: common
 outside: rare
-...
-的
-一
-是
 ",
         )
         .unwrap();
