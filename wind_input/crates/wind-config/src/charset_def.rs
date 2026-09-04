@@ -254,21 +254,26 @@ pub struct MergedClass {
 /// 就长这样，是用户层最常见的形态）。`---` 起始行可有可无，与 `.dict.yaml` 惯例一致。
 /// 把列表体的一行拆成 `(要不要删, 成员)` 序列。
 ///
-/// # 两级切分：先按空白分词，每个词再按字素簇切开
+/// # 一行一个成员，是**推荐也是自带文件的**写法
 ///
 /// | 写法 | 得到 |
 /// |---|---|
-/// | `的一是` | **三个**成员——连写，常用字表就是这个形态 |
+/// | `我` | 一个成员 |
 /// | `⚽️` `👨‍👩‍👧` `1️⃣` | 各**一个**成员（多码位簇整体，不会被拆散） |
-/// | `🇨 🇳` | 两个成员 |
 ///
-/// ⚠️ 最后一行是**空白分隔存在的唯一理由**：相邻的区域指示符会合成国旗，`🇨🇳` 连写
-/// 是一个成员（那面旗）而不是两个字母。字素簇切分解决不了「两个成员恰好能拼成第三个」，
-/// 只能靠显式分隔——`common_chars.jsonl` 的导出当年为同一件事分过段。
+/// # 一行写了多个字怎么办：切开，并 warn
 ///
-/// ★ 切分口径与判定层的 [`wind_candidate::split_markable_clusters`] 一致（都是
-/// `graphemes(true)`）。不一致的后果是配置里写的成员**匹配不上**候选里的簇，
-/// 而两边各自看都对。
+/// ⚠️ **不能静默当成一个成员**——那样它永远匹配不上任何候选，用户看到的是「我明明加了
+/// 这些字，一个都没生效」，而文件、日志、界面三处都不报错。旧的 `common_chars.txt`
+/// 读端就是逐 `char` 收的，用户照那个习惯写完全可能。
+///
+/// ⇒ 按**空白分词 → 字素簇**两级切开，并由调用方 warn 一句。切分口径与判定层的
+/// [`wind_candidate::split_markable_clusters`] 一致（都是 `graphemes(true)`），
+/// 不一致的后果是配置里写的成员匹配不上候选里的簇，而两边各自看都对。
+///
+/// ⚠️ 空白分隔在这里还有一个不可替代的用途：相邻的区域指示符**会合成国旗**，`🇨🇳`
+/// 连写是一个成员（那面旗）而不是两个字母。要表达两个字母只能写 `🇨 🇳`——字素簇切分
+/// 解决不了「两个成员恰好能拼成第三个」。
 ///
 /// `-` 前缀作用于**整个词**：`-的一是` 删三个。
 fn split_members(line: &str) -> impl Iterator<Item = (bool, String)> + '_ {
@@ -361,12 +366,26 @@ pub fn parse_doc(text: &str) -> anyhow::Result<CharsetDoc> {
     anyhow::ensure!(!def.key.trim().is_empty(), "meta 头缺少 key");
 
     let (mut added, mut removed) = (Vec::new(), Vec::new());
-    for line in body {
+    for (i, line) in body.iter().enumerate() {
+        let line_no = i + 1;
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
             continue;
         }
-        for (remove, m) in split_members(t) {
+        let items: Vec<(bool, String)> = split_members(t).collect();
+        // ⚠️ 一行多个成员：解析得了，但提醒一句。自带文件一行一个，用户照旧
+        // `common_chars.txt` 的习惯连写完全可能——而静默当成一个成员的话，
+        // 那一行永远匹配不上任何候选，三处都不报错。
+        if items.len() > 1 {
+            warn!(
+                "字符类「{}」列表体第 {} 行有 {} 个成员：{}。一行写一个更好读，                 也与其余字表一致；本行已按字素簇切开",
+                def.key,
+                line_no,
+                items.len(),
+                t
+            );
+        }
+        for (remove, m) in items {
             if remove {
                 removed.push(m);
             } else {
@@ -877,9 +896,12 @@ mod tests {
         doc.added
     }
 
-    /// ★ 一行连写多个字 = 多个成员。常用字表就是这个形态（8104 字挤在两百来行里）。
+    /// ★ 一行写了多个字：**切开**，而不是当成一个永远匹配不上的成员。
+    ///
+    /// 自带文件一行一个，但用户照旧 `common_chars.txt` 的习惯连写完全可能——静默当成
+    /// 一个成员的话，那一行一个字都不生效，而文件、日志、界面三处都不报错。
     #[test]
-    fn a_line_of_run_together_chars_becomes_one_member_each() {
+    fn a_line_with_several_chars_is_split_rather_than_taken_whole() {
         assert_eq!(members_of("的一是"), vec!["的", "一", "是"]);
         // 空白也能分隔，两种写法可以混用。
         assert_eq!(members_of("的 一是\n不"), vec!["的", "一", "是", "不"]);

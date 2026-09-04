@@ -168,7 +168,8 @@ fn write_table(out: &Path, chars: &BTreeSet<char>, version: &str) -> anyhow::Res
         "# 未写的字段与整份列表都会从这里继承；列表增删写 `★` / `-★`。".to_string(),
         "key: emoji".to_string(),
         "name: 表情符号".to_string(),
-        "order: 10".to_string(),
+        // 排在常用汉字(10)之后：那才是这套东西的主角，列表里该第一个看到。
+        "order: 20".to_string(),
         "...".to_string(),
     ] {
         writeln!(f, "{line}")?;
