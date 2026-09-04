@@ -2655,12 +2655,11 @@ pub trait WebDataRpc: WebDataHost {
                     "baseCommon": r.base_common,
                     // 这一行改过没有。设置页据此决定「恢复默认」灰不灰。
                     "adjusted": r.overridden,
-                    // 类型：所属字符类。光看字形分不清 ⺡(部首) 与 氵(基本汉字)、
+                    // 类型：所属 Unicode 块。光看字形分不清 ⺡(部首) 与 氵(基本汉字)、
                     // ℃(字母式符号) 与 ㎡(CJK 兼容符号)，而它们的处置方式完全不同。
-                    // emoji 归一类（跨二十个块），此时 blockRange 是空串。
                     "block": r.block,
-                    "blockRange": wind_candidate::class_of_cluster(&r.text).range_text(),
-                    // 整类批量能不能点。汉字块恒 false——见 `CharClass::allows_bulk_edit`。
+                    "blockRange": wind_candidate::block_of_cluster(&r.text).range_text(),
+                    // 整类批量能不能点。汉字块恒 false——见 `block_allows_bulk_edit`。
                     "blockBulkEditable": r.block_bulk_editable,
                 })
             })
@@ -5648,14 +5647,14 @@ mod tests {
     fn common_chars_sorting_is_stable_and_accepts_both_char_keys() {
         use wind_coordinator::handle_common_chars::CommonCharRow;
         let row = |ch: char, base: bool, now: bool| {
-            let class = wind_candidate::class_of_cluster(&ch.to_string());
+            let blk = wind_candidate::block_of(ch);
             CommonCharRow {
                 text: ch.to_string(),
                 common: now,
                 base_common: base,
                 overridden: base != now,
-                block: class.name(),
-                block_bulk_editable: class.allows_bulk_edit(),
+                block: blk.name,
+                block_bulk_editable: wind_candidate::block_allows_bulk_edit(&blk),
             }
         };
         // 入参顺序 = 字表原序，刻意不按码位排。

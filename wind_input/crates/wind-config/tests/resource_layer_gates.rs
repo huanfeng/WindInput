@@ -63,7 +63,7 @@ const SCHEMAS_SITES: &[(&str, usize, &str)] = &[
     (
         "crates/wind-engine/src/manager.rs",
         10,
-        "4 处（scan_chars_in_class / 两个索引构建 / build_engine）把 data 层根交给\
+        "4 处（scan_chars_in_range / 两个索引构建 / build_engine）把 data 层根交给\
          resolve_dict_file，层序在它内部展开；1 处 installed_schemas 的 scan_dirs 已按层序；\
          2 处 is_user_schema / delete_user_schema **刻意只查用户目录**——它们问的是\
          「这个方案文件是不是用户自己装的」，故 data / data_custom 的方案本来就已经是\

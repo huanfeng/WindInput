@@ -5,9 +5,6 @@
 pub mod candidate;
 pub mod charblock;
 pub mod charclass;
-pub mod charemoji;
-/// 生成物，只有数据；判定逻辑与取舍论证在 `charemoji`。
-pub(crate) mod charemoji_data;
 pub mod common;
 pub mod filter;
 pub mod shadow;
@@ -16,7 +13,6 @@ pub mod store;
 pub use candidate::*;
 pub use charblock::*;
 pub use charclass::*;
-pub use charemoji::*;
 pub use common::*;
 pub use filter::*;
 pub use shadow::*;

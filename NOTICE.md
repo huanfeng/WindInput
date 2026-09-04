@@ -61,19 +61,7 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
 - **仓库**: https://github.com/BYVoid/OpenCC
 - **许可证**: Apache-2.0
 
-#### Unicode emoji 属性数据（UTS #51）
-
-- **用途**: 判定「这个字符是不是 emoji」。emoji 免词频、生僻字模式准入、常用字
-  列表的类型与整类批量三处都以它为判据——emoji 散落在约二十个 Unicode 块里，
-  按块近似在漏与多两个方向上同时不准
-- **来源**: https://www.unicode.org/Public/UCD/latest/ucd/emoji/emoji-data.txt
-- **使用的属性**: `Emoji`（1438 个码位）。同文件里的 `Emoji_Presentation` 只用来
-  做一次子集断言，不参与判定
-- **加工方式**: 由 `wind-tools/gen_emoji_props` 压成升序闭区间，生成
-  `wind-candidate/src/charemoji_data.rs` **入库并进发行版**。区间边界不作任何
-  改动；原始 `emoji-data.txt` 不入库，只在重新生成时下载到 `.cache/unicode/`
-
-#### Unicode CLDR / emoji-test.txt（研究用，未纳入发行版）
+#### Unicode CLDR / Unicode emoji 数据（研究用，未纳入发行版）
 
 - **用途**: emoji 中文名称，供 `wind-tools/gen_emoji_names` 研究「按语义用五笔
   编码检索 emoji」（输入 `khgf` 出 ⚽）。**当前功能未启用**，其产物既不入库
@@ -82,10 +70,10 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
   - https://github.com/unicode-org/cldr — `common/annotations/zh.xml`、
     `common/annotationsDerived/zh.xml`
   - https://unicode.org/Public/emoji/latest/emoji-test.txt
-- **许可证**（本节与上一节同）: **Unicode-3.0**（Unicode License V3）。允许自由
-  使用、修改、再分发与商业使用，仅要求保留版权与许可声明。
-  `Copyright © 1991-2025 Unicode, Inc.`，完整条款见
-  https://www.unicode.org/license.txt。无 copyleft 传染性，故派生数据可直接入库
+- **许可证**: **Unicode-3.0**（Unicode License V3）。允许自由使用、修改、再分发
+  与商业使用，仅要求保留版权与许可声明。`Copyright © 1991-2025 Unicode, Inc.`，
+  完整条款见 https://www.unicode.org/license.txt。若将来启用该功能，其产物可
+  直接入库——本许可证无 copyleft 传染性
 
 #### rime-stroke（笔画辅助码）
 

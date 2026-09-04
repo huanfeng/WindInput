@@ -4,7 +4,7 @@
 //! 本模块回答「这个候选**属不属于这一组块**」（成组，用于判定），并保证判定足够便宜到
 //! 可以放上按键热路径。
 //!
-//! 两个消费者：
+//! 规划中的两个消费者（本模块先落地，接线在后续提交）：
 //!
 //! | 消费者 | 用途 | 漏一块的方向 |
 //! |---|---|---|
@@ -12,15 +12,6 @@
 //! | 生僻字模式准入 | 哪些区块的字符算「要在该模式里看到的」 | 不安全，须配「其它」兜底档 |
 //!
 //! 准入判据见 [`crate::charblock`] 模块头那张表——**新增消费者先把自己填进去**。
-//!
-//! # ★ 组名 `"emoji"` 不是一组块，走的是字符属性
-//!
-//! 它曾经展开成五个块名，而 emoji 散落在约二十个块里、其中多数块又大部分是非 emoji
-//! ——两个方向同时不准，且补块补不齐（论证见 [`crate::charemoji`] 模块头）。现在它
-//! 占一个专用位，判定转交 [`crate::is_emoji_standalone`]。
-//!
-//! ⇒ 配置写法与出厂值**一个字都没变**（`exclude_blocks = ["emoji"]` 照旧），变的只是
-//! 那个名字底下问的是什么。块名（`"表情符号"`）仍然可以单独配，仍然按块判。
 //!
 //! # 为什么是位集而不是 `Vec<CharBlock>`
 //!
@@ -43,55 +34,43 @@ pub struct BlockMask(u64);
 /// 溢出时的两条出路：把 [`BlockMask`] 换成 `u128`（表示层改一处，判定成本几乎不变），
 /// 或合并相邻的细碎块（会改变类型列的显示粒度，须一并确认界面）。
 const _: () = assert!(
-    BLOCKS.len() <= 62,
-    "块表超出 BlockMask 的位宽：改用 u128，或合并相邻块（最高两位留给「其它」兜底档与 emoji 属性档）"
+    BLOCKS.len() < 64,
+    "块表超出 BlockMask 的位宽：改用 u128，或合并相邻块（最高位留给「其它」兜底档）"
 );
 
 /// 「其它」兜底档占用的位——[`OTHER`] 不在 [`BLOCKS`] 里（它是块表**之外**的一切），
-/// 没有下标可用，故单独占最高位。位宽断言因此留出这一位（与 [`EMOJI_BIT`] 各占一位）。
+/// 没有下标可用，故单独占最高位。位宽断言因此是 `< 64` 而不是 `<= 64`。
 ///
 /// ★ 这一档存在的理由：块表逐块列举一份仍在增长的 Unicode 区间，新版本的新块必然落进
 /// 「其它」。对**准入**类消费者（生僻字模式）而言，漏一块 = 那批字打不出——不安全的
 /// 方向。给出这一档，新块就落进一个用户控制得到的开关，而不是静默消失。
 const OTHER_BIT: u64 = 1 << 63;
 
-/// emoji 属性档占用的位。置位后判定转交 [`crate::is_emoji_standalone`]，**与块位集无关**。
+/// 预设组：**跨块**的命名集合。
 ///
-/// # ★★★ 为什么它不再是一组块
+/// ★ emoji 不是一个块，是五个——只勾「表情符号」会漏掉 `⚽`(杂项符号)、`✅`(装饰符号)、
+/// `⌚`(杂项技术符号)、`🇨🇳`(区域指示符)。用户配置里写 `"emoji"` 指的是整组，而不是
+/// 让他自己去拼这五个块名。
 ///
-/// 上一版把 `"emoji"` 展开成五个块名（表情符号 / 杂项符号 / 装饰符号 / 杂项技术符号 /
-/// 区域指示符）。实测一份五笔 emoji 码表（4132 条），那个口径**两个方向同时不准**：
-///
-/// - **漏 182 条**：`⬅ ⬛ ⭐ ⭕ 🀄 🃏 🅰 🆚 🈚 🉐 ⤴ ⤵` 所在的块根本不在块表里；
-///   `▶ ◀ ↔ ↩ ‼ ™ ℹ ㊗ Ⓜ 〰 © ®` 所在的块大部分是非 emoji，整块搬进来会连
-///   `← → ▲ ◆` 一起搬；
-/// - **多收**：「杂项符号」块内的 `♠ ☯ ☰`、「杂项技术符号」块内的 `⌘ ⌥` 一并算 emoji。
-///
-/// 补块补不齐，因为**块是显示域的划分、emoji 是字符属性，两者正交**。换成属性表后
-/// 判定成本仍是一次二分（151 段），与块判据同量级——当初用块不是性能取舍。
-///
-/// ⚠️ 换判据后 emoji 属性与「符号」预设组**刻意相交**（`▶ ↔ ▪ 〰` 两边都命中）。这不再
-/// 是设计缺陷：`presets_are_disjoint` 当年要求不相交，是因为两个组同在「块」这一个轴上，
-/// 重叠会让「勾了符号，emoji 那个还有什么用」说不清楚。现在两者不同轴，重叠是必然且无害的
-/// ——同一个字符既属于「箭头」这个块，又具有 emoji 属性。
-const EMOJI_BIT: u64 = 1 << 62;
-
-/// emoji 属性档在配置里的名字。取自 [`crate::EMOJI_CLASS_NAME`]，**不另写一份字面量**
-/// ——常用字列表的类型列显示的是同一个名字，两处各写一份就会静默失配。
-///
-/// ⚠️ 它与块名同处一个命名空间（[`BlockMask::from_config`] 先认它、再查组、最后查块），
-/// 故不得与任何块名相同——由 `group_names_do_not_collide_with_block_names` 钉住。
-const EMOJI_GROUP: &str = crate::EMOJI_CLASS_NAME;
+/// ⚠️ **组里混着非 emoji 的成员**：「杂项符号」块内有 `♠♣☰☯`，「杂项技术符号」块内有
+/// `⌘⌥`。这是**刻意接受**的取舍——它们同样是不该参与词频学习的装饰性符号，而要把它们
+/// 摘出去就得开始逐字符列举 emoji，正是 `single_markable_char` 那轮已经走死过的路
+/// （最终改用 UAX #29 字素簇才收场）。真收到反馈时，把那两块从本组去掉即可，
+/// 组的成员是数据、不是判据。
+const PRESET_EMOJI: &[&str] = &[
+    "表情符号",
+    "杂项符号",
+    "装饰符号",
+    "杂项技术符号",
+    "区域指示符",
+];
 
 /// 预设组「符号」：标点、数学、图形这一类**非 emoji** 的符号块。
 ///
-/// ⚠️ 本组与 [`EMOJI_BIT`] 那一档**相交**，且这是对的：`▶ ↔ ▪ 〰 ‼` 既落在本组的块里，
-/// 又具有 emoji 属性。两者不同轴——本组问「这个字符属于哪个 Unicode 块」，emoji 档问
-/// 「这个字符的 `Emoji` 属性为不为真」。早先要求两组不相交，前提是它们同在块这一个轴上。
-///
-/// ★ 仍**不含**「杂项符号」「装饰符号」「杂项技术符号」（虽然名字里也带「符号」）：那三块
-/// 里绝大多数是 `⚽ ✅ ☀ ♠` 这类图画符号，划进「符号」组会让勾了它的人意外地把 emoji
-/// 一起关掉。`symbols_preset_excludes_the_pictographic_blocks` 钉住这个归属。
+/// ★ 与 [`PRESET_EMOJI`] **刻意不相交**：勾「符号」不该顺带把 emoji 也放进来，否则界面上
+/// 两个开关的关系说不清楚（勾了符号，emoji 那个还有什么用）。故「杂项符号」「装饰符号」
+/// 「杂项技术符号」归 emoji 组，本组不含——虽然它们名字里也有「符号」二字。
+/// 不相交由 `presets_are_disjoint` 钉住。
 ///
 /// ★ 只收 `is_han ∪ is_pua` **域外**的块。部首、康熙部首、CJK 笔画、各扩展区都在
 /// `is_han` 里（见 `common::is_han`），本来就是生僻字模式的默认输出，列进来是多余的
@@ -118,12 +97,10 @@ const PRESET_SYMBOLS: &[&str] = &[
 
 /// 预设组名 → 成员块名。配置里这两种名字都收。
 ///
-/// ⚠️ 组名与块名同处一个命名空间（`from_config` 先认 [`EMOJI_GROUP`]、再查组、最后查块），
-/// 故**组名不得与任何块名相同**——否则同一个名字有两种解释，而先查组的写法会让块名那一侧
-/// 静默失效。由 `group_names_do_not_collide_with_block_names` 钉住。
-///
-/// ⚠️ `"emoji"` **不在这张表里**：它不展开成块名，而是置 [`EMOJI_BIT`] 走字符属性。
-const PRESETS: &[(&str, &[&str])] = &[("符号", PRESET_SYMBOLS)];
+/// ⚠️ 组名与块名同处一个命名空间（`from_config` 先查组、再查块），故**组名不得与任何块名
+/// 相同**——否则同一个名字有两种解释，而先查组的写法会让块名那一侧静默失效。
+/// 由 `preset_names_do_not_collide_with_block_names` 钉住。
+const PRESETS: &[(&str, &[&str])] = &[("emoji", PRESET_EMOJI), ("符号", PRESET_SYMBOLS)];
 
 impl BlockMask {
     /// 空集：所有判定恒假。
@@ -151,11 +128,6 @@ impl BlockMask {
         for raw in names {
             let name = raw.as_ref().trim();
             if name.is_empty() {
-                continue;
-            }
-            // `"emoji"` 走字符属性而不是块位集，故认在最前面，也不进 PRESETS 那张表。
-            if name == EMOJI_GROUP {
-                mask.0 |= EMOJI_BIT;
                 continue;
             }
             if let Some((_, members)) = PRESETS.iter().find(|(id, _)| *id == name) {
@@ -189,17 +161,8 @@ impl BlockMask {
         }
     }
 
-    /// 这个字符落在本组内吗。表外字符（[`crate::charblock`] 的「其它」）只有显式配了
-    /// 「其它」兜底档才算命中。
-    ///
-    /// ⚠️ emoji 档问的是 [`crate::is_emoji_standalone`] 而不是 `is_emoji`：`0`–`9`、`#`、`*`
-    /// 的 `Emoji` 属性为真（它们是键帽 `1️⃣` 的基字符），但**单独出现时是数字不是 emoji**。
-    /// 逐字符这一侧没有上下文可判，只能按「单独出现」定性；成串的键帽由
-    /// [`contains_text`](Self::contains_text) 认。
+    /// 这个字符落在本组内吗。表外字符（[`crate::charblock`] 的「其它」）恒为 false。
     pub fn contains_char(&self, ch: char) -> bool {
-        if self.0 & EMOJI_BIT != 0 && crate::is_emoji_standalone(ch) {
-            return true;
-        }
         match block_index_of(ch) {
             Some(i) => self.0 & (1u64 << i) != 0,
             // 块表之外的字符 ⇒ 归「其它」，只有显式配了这一档才算命中。
@@ -223,25 +186,11 @@ impl BlockMask {
     /// ⚠️ 这条推理**只对存在性语义成立**。若将来有消费者要问「整串**都**属于本组吗」
     /// （全称语义），逐 char 的宽松方向会反过来变成「多判为真」，那时必须重新论证，
     /// 不能顺手复用本函数。
-    ///
-    /// ⚠️ 早先这段注释举的例子是「`1️⃣` 的 `U+20E3` 只有逐 char 命中」——**那是错的**：
-    /// `U+20E3` 在组合用记号补充块里，压根不在块表内，逐 char 也只会落到「其它」兜底档。
-    /// 键帽真正被认出来是靠下面这句 [`crate::text_has_emoji`]，它显式判「基字符 + `U+20E3`
-    /// 同时出现」。举错的例子比没有例子更糟：它让人以为这个洞已经被堵上了。
     pub fn contains_text(&self, text: &str) -> bool {
         if self.is_empty() {
             return false;
         }
-        if self.0 & EMOJI_BIT != 0 && crate::text_has_emoji(text) {
-            return true;
-        }
-        // emoji 档已经问过了，剩下的只按块查——否则循环里每个 char 都要再问一遍属性表，
-        // 而上面那句为假就意味着串里没有任何 char 能在属性侧命中。
-        let blocks_only = Self(self.0 & !EMOJI_BIT);
-        if blocks_only.is_empty() {
-            return false;
-        }
-        text.chars().any(|c| blocks_only.contains_char(c))
+        text.chars().any(|c| self.contains_char(c))
     }
 }
 
@@ -319,59 +268,29 @@ mod tests {
         }
     }
 
-    /// ★ 「符号」组不含那三块图画符号块。
+    /// ★ 两个预设组**不相交**：勾「符号」不该顺带放进 emoji。
     ///
     /// 名字最容易骗人的三块（杂项符号 / 装饰符号 / 杂项技术符号）字面上都带「符号」，
-    /// 内容却是 `⚽ ✅ ☀ ♠ ⌚` 这类图画。划进「符号」组会让勾了它的人意外地连 emoji
-    /// 一起关掉。这条测试是那个归属的唯一书面凭据。
-    ///
-    /// ⚠️ 取代了原先的 `presets_are_disjoint`。那条要求「符号」与 emoji 两组**不相交**，
-    /// 前提是两者同在「块」这一个轴上；emoji 换成字符属性判之后两者不同轴，`▶ ↔ ▪`
-    /// 必然同时命中，再要求不相交就是要求判据回退。
+    /// 归属却在 emoji 组。这条测试是那个归属的唯一书面凭据。
     #[test]
-    fn symbols_preset_excludes_the_pictographic_blocks() {
-        let (_, symbols) = PRESETS
-            .iter()
-            .find(|(id, _)| *id == "符号")
-            .expect("「符号」组必须在表里");
-        for blk in ["杂项符号", "装饰符号", "杂项技术符号"] {
-            assert!(
-                !symbols.contains(&blk),
-                "「符号」组不该含图画符号块 {blk}——勾它的人不会想连 emoji 一起关掉"
-            );
-        }
-    }
-
-    /// ★ 「符号」组与 emoji 属性档**相交，而且这是对的**。
-    ///
-    /// 单独钉一条，是因为「两组重叠」在上一版是要修的缺陷、这一版是刻意的结果。
-    /// 没有这条，下一个人看到重叠会以为是回归，然后把判据改回块。
-    #[test]
-    fn symbols_preset_and_emoji_property_deliberately_overlap() {
-        let (symbols, _) = BlockMask::from_config(&["符号"]);
-        let emoji = emoji_mask();
-        // 这几个字符既落在「符号」组的块里，又具有 Unicode 的 Emoji 属性。
-        for s in ["▶", "↔", "▪", "〰", "‼"] {
-            assert!(symbols.contains_text(s), "{s} 应在「符号」组的块里");
-            assert!(emoji.contains_text(s), "{s} 的 Emoji 属性也为真");
+    fn presets_are_disjoint() {
+        for (a, ma) in PRESETS {
+            for (b, mb) in PRESETS {
+                if a == b {
+                    continue;
+                }
+                let shared: Vec<_> = ma.iter().filter(|x| mb.contains(x)).collect();
+                assert!(shared.is_empty(), "预设组 {a} 与 {b} 共有成员: {shared:?}");
+            }
         }
     }
 
     /// ★ 组名不得与块名相同。
     ///
-    /// `from_config` 是**先认 emoji、再查组、最后查块**：撞名时块名那一侧静默失效，
-    /// 而两者的成员集不同，表现为「配了这个名字，进来的字跟我想的不一样」——没有任何报错。
-    ///
-    /// ⚠️ `EMOJI_GROUP` 也必须查：它不在 `PRESETS` 里，只遍历 `PRESETS` 会漏掉它，
-    /// 而它恰恰是优先级最高、撞名后果最严重的那个名字。
+    /// `from_config` 是**先查组、再查块**：撞名时块名那一侧静默失效，而两者的成员集不同，
+    /// 表现为「配了这个名字，进来的字跟我想的不一样」——没有任何报错。
     #[test]
-    fn group_names_do_not_collide_with_block_names() {
-        assert!(
-            !crate::charblock::BLOCKS
-                .iter()
-                .any(|b| b.name == EMOJI_GROUP),
-            "emoji 属性档的名字 {EMOJI_GROUP:?} 与区块表里的块重名"
-        );
+    fn preset_names_do_not_collide_with_block_names() {
         for (name, _) in PRESETS {
             assert!(
                 !crate::charblock::BLOCKS.iter().any(|b| b.name == *name),
@@ -406,41 +325,11 @@ mod tests {
             "⚽️", // U+26BD + FE0F：杂项符号 + 变体选择符
             "👍🏻", // 带肤色修饰符
             "👨‍👩‍👧", // ZWJ 组合家庭
-            "🇨🇳", // 区域指示符对
+            "🇨🇳", // 区域指示符对（本轮补的块）
             "✅", // 装饰符号
             "⌚", // 杂项技术符号
-            // ↓ 以下全是**块判据漏掉**的，换属性判后必须进来。取自用户实际使用的
-            //   五笔 emoji 码表，都是词库里真存在的裸码位形态。
-            "🀄",
-            "🃏", // 麻将牌 / 扑克牌：整块不在块表里
-            "🅰",
-            "🆚", // 带圈字母数字补充：旧表只补了尾巴上的区域指示符
-            "🈚",
-            "🉐", // 带圈表意文字补充
-            "⬅",
-            "⬛",
-            "⭐",
-            "⭕", // 杂项符号和箭头
-            "⤴",
-            "⤵", // 补充箭头 B
-            "▶",
-            "◽", // 几何图形：整块搬不动，只能按属性判
-            "↔",
-            "↩",
-            "‼",
-            "™",
-            "ℹ",
-            "㊗",
-            "Ⓜ",
-            "〰",
-            "©",
-            "®", // 散落在文本块里的
-            "❤",
-            "☀",
-            "✈",
-            "🕵", // Emoji=Yes 但默认文本表现，取宽档才留得住
         ] {
-            assert!(m.contains_text(s), "{s} 应命中 emoji 组");
+            assert!(m.contains_text(s), "{s} 应命中 emoji 预设组");
         }
     }
 
@@ -449,58 +338,23 @@ mod tests {
     #[test]
     fn emoji_preset_does_not_catch_text() {
         let m = emoji_mask();
-        for s in [
-            "我",
-            "你好",
-            "abc",
-            "、",
-            "，",
-            "１２３",
-            "ㄅ",
-            "あ",
-            "⿰",
-            "℃",
-            "±",
-            "→",
-            "■",
-            "①",
-            "─",
-            "∞",
-            "龘",
-            // ★ 裸数字：`Emoji=Yes` 收了 `0-9#*`（键帽基字符），不额外排除就会让所有
-            //   数字候选免词频、还挤进生僻字候选。
-            "0",
-            "9",
-            "#",
-            "*",
-            "123",
-        ] {
-            assert!(!m.contains_text(s), "{s} 不应命中 emoji 组");
+        for s in ["我", "你好", "abc", "、", "，", "１２３", "ㄅ", "あ", "⿰"] {
+            assert!(!m.contains_text(s), "{s} 不应命中 emoji 预设组");
         }
     }
 
-    /// 键帽序列与 `♠ ☯` 这两处，换判据后各自变成了什么。
+    /// keycap `1️⃣` 与「杂项符号」块内的非 emoji：两个已知的不精确处，**方向都安全**。
     ///
-    /// 上一版这条测试叫 `known_imprecisions_are_deliberate`，钉的是两个**不精确**处；
-    /// 换成属性判之后一个被修好、一个变成了有据可依的正确结果，故一并改写——留着旧断言
-    /// 会让人以为洞还在。
+    /// 钉住它们是为了让下一个人知道这是已经想过的取舍，而不是没测到的洞。
     #[test]
-    fn keycap_and_card_suits_after_the_criterion_change() {
+    fn known_imprecisions_are_deliberate() {
         let m = emoji_mask();
-        // 键帽：上一版**漏掉**（三个码位没一个在那五块里），现在认得出来。
-        // 两种形态都要认——词库里存的往往是省掉 VS16 的那种。
-        assert!(m.contains_text("1\u{FE0F}\u{20E3}"), "1️⃣ 完整形态");
-        assert!(
-            m.contains_text("1\u{20E3}"),
-            "1⃣ 省略 VS16，词库里就是这么存的"
-        );
-        // `♠ ☯`：上一版是「落在杂项符号块里被顺带收进来」的将就，现在是 Unicode 说了算
-        // ——它们的 `Emoji` 属性确实为真（`♠` 在 RGI 全表里属 Activities 组）。
+        // `1️⃣` = '1' + FE0F + U+20E3。三个码位分属 ASCII、变体选择符、组合用记号补充，
+        // 没有一个在 emoji 组里 ⇒ 漏掉。方向安全：它照旧参与词频，即改动前的行为。
+        assert!(!m.contains_text("1\u{FE0F}\u{20E3}"));
+        // 扑克与八卦落在「杂项符号」块内 ⇒ 一并被算作 emoji。见 PRESET_EMOJI 的取舍说明。
         assert!(m.contains_text("♠"));
         assert!(m.contains_text("☯"));
-        // 而同块里 `Emoji=No` 的那些，上一版会误收，现在不会。
-        assert!(!m.contains_text("☰"), "八卦符号的 Emoji 属性为假");
-        assert!(!m.contains_text("⌘"), "命令键符号同理");
     }
 
     /// 空集必须恒假——这是「没配过的用户零成本」那条路径的正确性前提。

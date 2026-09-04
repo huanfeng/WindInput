@@ -405,15 +405,6 @@ function Download-Dicts {
     Get-Dict "$wubiBase/wubi86_jidian_extra.dict.yaml"          "$rimeWubi\wubi86_jidian_extra.dict.yaml"          "扩展词库"   | Out-Null
     Get-Dict "$wubiBase/wubi86_jidian_extra_district.dict.yaml" "$rimeWubi\wubi86_jidian_extra_district.dict.yaml" "行政区域"   | Out-Null
 
-    # Unicode emoji 属性表。不参与常规构建 —— 区间表 (charemoji_data.rs) 已入库,
-    # 原始档只在跟进新版 Unicode 时用到:
-    #   curl -o .cache\unicode\emoji-data.txt `
-    #     https://www.unicode.org/Public/UCD/latest/ucd/emoji/emoji-data.txt
-    #   cargo run -p wind-tools --bin gen_emoji_props -- `
-    #     --emoji-data ..\.cache\unicode\emoji-data.txt `
-    #     --out crates\wind-candidate\src\charemoji_data.rs
-    # 许可证 Unicode-3.0, 见 NOTICE.md
-
     # Unicode CLDR emoji 中文注解 + emoji 白名单。不参与常规构建 —— emoji 命名表
     # (custom_emoji_named.txt) 已入库, 这些原始档只在需要重新生成它时用到:
     #   cargo run -p wind-tools --bin gen_emoji_names -- --cldr .cache\cldr `
