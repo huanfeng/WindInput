@@ -118,6 +118,12 @@ fn high_weight_user_word_does_not_take_top_on_single_letter() {
 /// 是 4，输入要长到 5 字节才把它圈进来（used 才从 1 变 2）。`sh`(2)、`shai`(4) 仍是
 /// 「只起了 1 个音节的头」，此时不出 2 音节词是**正确**行为 —— 与 `dian` 要打到
 /// `dianh` 才出「电话」完全同构。
+///
+/// ⚠️ **2026-09-04：`shaixu` 从这个列表里移除**（音节边界对齐上线）。它的 DAG 切分是
+/// `shai|xu`，而 `xu` 本身是合法音节 —— 放「筛选」(`shai|xuan`) 出来就等于允许把已打完
+/// 的音节继续拉长，那正是「打 `shen` 出 `sheng` 的字」的同一条通道。两者在音节结构上
+/// 完全同形（`shaixuan` 到 `xuan` 结束、`sheng` 到 `sheng` 结束），不可能只挡一个；
+/// 主流拼音输入法取的也都是严格档。判据见 `wind_dict::cached::prefix_syllable_aligned`。
 #[test]
 fn user_word_returns_when_input_grows() {
     let Some(dir) = data_dir() else {
@@ -126,7 +132,7 @@ fn user_word_returns_when_input_grows() {
     };
     let mgr = manager(&dir, "grow", &[("shaixuan", "筛选", 2_000_000_000)]);
 
-    for input in ["shaix", "shaixu", "shaixuan"] {
+    for input in ["shaix", "shaixuan"] {
         let t = texts(&mgr, input, 300);
         assert!(
             t.iter().any(|x| x == "筛选"),
@@ -134,6 +140,30 @@ fn user_word_returns_when_input_grows() {
             &t[..10.min(t.len())]
         );
     }
+}
+
+/// 上一条的**边界侧**：`shaixu` 下「筛选」不可达，是音节边界对齐的**预期结果**，不是
+/// 「用户词失效」。
+///
+/// 两条合起来才说得清拦的是什么：拦的是「跨越用户已打完的音节 `xu`」，不是「用户词」。
+/// 同一个词在残码位（`shaix`）与打完整（`shaixuan`）时都照常可达 —— 上一条钉的正是这个。
+/// 少了本条，日后有人把 `shaixu` 加回去、或把对齐判据整个回退，都不会有任何测试变红。
+#[test]
+fn user_word_does_not_cross_a_completed_syllable() {
+    let Some(dir) = data_dir() else {
+        eprintln!("跳过：拼音词库不存在");
+        return;
+    };
+    let mgr = manager(&dir, "cross", &[("shaixuan", "筛选", 2_000_000_000)]);
+
+    let t = texts(&mgr, "shaixu", 300);
+    assert!(
+        !t.iter().any(|x| x == "筛选"),
+        "`shaixu` 切分为 shai|xu，`xu` 已是完整音节，不该被拉长成 xuan；实际前 10={:?}",
+        &t[..10.min(t.len())]
+    );
+    // 反向：同一输入下**本音节**的候选必须还在，否则「筛选不可达」可能只是召回整个塌了。
+    assert!(!t.is_empty(), "`shaixu` 仍应有候选（xu 的字等）");
 }
 
 /// **反向对照**：精确输入下用户提权必须仍然全效。

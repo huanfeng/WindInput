@@ -1238,9 +1238,15 @@ impl PinyinEngine {
             self.config.completion_min_syllables,
             self.config.completion_max_extra_syllables,
         );
-        for h in
-            dict.search_prefix_with_boundary_syllable_capped(stroke, MAX_FULL_PINYIN_RECALL, cap)
-        {
+        // 边界对齐判据同主路径 step 4（`completed` 是本支路已完成音节段，见 ①）：混输降级
+        // 到全拼这条流一样不该把 `shen` 补成 `sheng`。⚠️ 这里前缀用的是**整串击键**
+        // `stroke`（含残码），而对齐位取 `completed.len()`（不含残码），两者刻意不同。
+        for h in dict.search_prefix_with_boundary_syllable_capped(
+            stroke,
+            MAX_FULL_PINYIN_RECALL,
+            cap,
+            completed.len(),
+        ) {
             push(
                 cands,
                 h.text,
@@ -2423,9 +2429,22 @@ impl Engine for PinyinEngine {
             self.config.completion_min_syllables,
             self.config.completion_max_extra_syllables,
         );
-        for h in
-            dict.search_prefix_with_boundary_syllable_capped(query, completion_limit, syllable_cap)
-        {
+        // **音节边界对齐同样下推到词库层**（`completed_len` 那个入参）：补全只能从下一个
+        // 音节开始，不能把用户已经打完的那个音节继续拉长。缺了它，扁平码的字符前缀匹配会
+        // 让 `shen` 召回 `sheng` 的字（前 20 条里 8 条）、`fen` 召回 `feng`、`ni` 召回
+        // nin/ning/niu/nie/nian/niang/niao —— 而 `syllable_cap` 一条都拦不住，那些字的
+        // 音节数完全合格。判据与两处放行见 `wind_dict::cached::prefix_syllable_aligned`。
+        //
+        // ⚠️ 传 `completed_len` 而非 `query.len()`：残码位（`shenm`）要的正是「把当前音节
+        // 补完」，判据位落在残码**之前**才对。裸声母（`zh`）下 `completed_len == 0`，位 0
+        // 恒置位 ⇒ 整条判据自动让开，退化为纯字符前缀匹配 —— 这也是主流全拼输入法的行为：
+        // `fe` 不成音节故前缀匹配，`fen` 是合法音节故按音节匹配、不含 `feng`。
+        for h in dict.search_prefix_with_boundary_syllable_capped(
+            query,
+            completion_limit,
+            syllable_cap,
+            completed_len,
+        ) {
             // 候选比已完成音节多出的音节数（`boundary == 0` → 0）。同时供「是否降级」判据
             // 与 `completion_penalized` 的折扣指数使用。
             let distance = h.boundary.count_ones().saturating_sub(completed_syls);
@@ -2904,8 +2923,12 @@ impl Engine for PinyinEngine {
             // 判据与词库层下推的那道**共用同一个函数**（`wind_dict::cached`），避免两处
             // 各写一份日后漂移。差别只在入参：这里先用 `effective_boundary` 把无真值的
             // boundary 用 DAG 补出来，词库层做不到这一步（拿不到 trie），只能放行。
+            //
+            // ★ 边界对齐一并在此复查，为的是词库层够不着的两批候选：step 6 并入的
+            // 用户/临时词（走 `store_dm.search_prefix`，那条 API 没有 cap 入参），
+            // 以及 `boundary == 0` 被词库层放行、在这里才由 DAG 补出真值的条目。
             let b = effective_boundary(&c.code, c.boundary, trie);
-            wind_dict::cached::prefix_syllable_keep(b, syllable_cap)
+            wind_dict::cached::prefix_entry_keep(b, c.code.len(), syllable_cap, completed_len)
         });
 
         // 裸声母（无完整音节，如 "m"/"zh"）单字优先：候选全为前缀补全词（is_prefix=true），
