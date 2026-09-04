@@ -37,6 +37,11 @@ fn fp_sidecar(cache: &Path) -> PathBuf {
 ///   （`$CC(..., open("D:\\notes"))` 不再被本层与 cmdbar lexer 各吃一个反斜杠）
 const PARSE_SEMANTICS_VERSION: u32 = 4;
 
+/// 流式读取时的喂料缓冲区大小：足够大以摊薄 syscall 次数，又不至于把峰值分配
+/// 重新做回「文件大小」量级——这正是 [`fingerprint`] 从 `std::fs::read` 整读
+/// 改为流式的目的（真机实测：拼音方案单次校验峰值 11.6 MB → 1.5 MB）。
+const HASH_CHUNK_SIZE: usize = 64 * 1024;
+
 /// 计算源文件集合的内容指纹：混入解析语义版本 + 调用方 tag + 每个源的 文件名/存在性/长度/内容。
 ///
 /// `tag` 用于区分「同一份源文件、但解析方式不同」的缓存。**没有它就会出现这种静默错误**：
@@ -64,6 +69,8 @@ const PARSE_SEMANTICS_VERSION: u32 = 4;
 /// `None`**：那是「读不出来」而非「不存在」，把一次瞬时故障固化进指纹，会让故障恢复后
 /// 继续复用错误缓存。
 fn fingerprint(sources: &[&Path], tag: &str) -> Option<String> {
+    use std::io::Read;
+
     let mut h = std::collections::hash_map::DefaultHasher::new();
     h.write_u32(PARSE_SEMANTICS_VERSION);
     h.write(tag.as_bytes());
@@ -72,11 +79,39 @@ fn fingerprint(sources: &[&Path], tag: &str) -> Option<String> {
         if let Some(name) = p.file_name() {
             h.write(name.to_string_lossy().as_bytes());
         }
-        match std::fs::read(p) {
-            Ok(data) => {
+        match std::fs::File::open(p) {
+            Ok(mut f) => {
+                // 长度字段必须排在内容之前写入（见上方 framing 说明），但流式读取
+                // 只能边读边喂、读完才知道真实字节数——于是长度只能先从 metadata 拿。
+                // 这就打开了一道窄窗口：文件在 open 之后、读完之前被并发改写
+                // （部署脚本 scp 覆盖之类），metadata 报的长度可能与实际读到的字节数
+                // 对不上。宁可在这种情况下强制重建，也不能把错位的长度悄悄哈希进去
+                // ——那会制造出「同一份 fingerprint 对应两种不同内容」的静默错误，
+                // 比多花一次重建代价更难排查。
+                let declared_len = match f.metadata() {
+                    Ok(m) => m.len(),
+                    Err(_) => return None,
+                };
                 h.write_u8(1); // 存在
-                h.write_u64(data.len() as u64);
-                h.write(&data);
+                h.write_u64(declared_len);
+
+                // 缓冲区放堆上：本函数会在任意线程（含默认 2 MB 栈的工作线程）上跑，
+                // 64 KB 栈数组虽通常无碍，但这点分配相对于省下的整份文件不值一提。
+                let mut buf = vec![0u8; HASH_CHUNK_SIZE];
+                let mut actual_len: u64 = 0;
+                loop {
+                    match f.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            h.write(&buf[..n]);
+                            actual_len += n as u64;
+                        }
+                        Err(_) => return None, // 读取中途故障：无法判定，强制重建
+                    }
+                }
+                if actual_len != declared_len {
+                    return None; // 读到的字节数与声明长度不一致：并发改写，强制重建
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 h.write_u8(0); // 稳定地不存在——参与哈希，不再毒化整份指纹
@@ -288,6 +323,47 @@ mod tests {
             !cache_is_fresh(&cache, &[&src], dict_tag(true)),
             "tag 不一致时必须判定为不新鲜"
         );
+    }
+
+    /// ⚠️ 回归：**跨读缓冲区边界的大文件，流式哈希必须与整读等价**。
+    ///
+    /// `fingerprint` 从 `std::fs::read` 整读改为 64 KB 分块流式（峰值 11.6 MB → 1.5 MB），
+    /// 而本模块其余用例的源文件都只有几十字节，**只走得到单块路径**——分块拼接一旦写错
+    /// （少喂尾块、多喂一次、长度字段错位），小文件全都照常通过，真实词库（base.dict.yaml
+    /// 近 10 MB）却会静默换指纹，表现为**全部存量缓存一次性失效、每次启动重建几十秒**。
+    ///
+    /// 三个尺寸分别压住：恰好一块、块边界 ±1、多块且尾块不满。
+    #[test]
+    fn streaming_hash_matches_whole_read_across_chunk_boundaries() {
+        for (label, size) in [
+            ("恰好一块", HASH_CHUNK_SIZE),
+            ("一块少一字节", HASH_CHUNK_SIZE - 1),
+            ("一块多一字节", HASH_CHUNK_SIZE + 1),
+            ("多块且尾块不满", HASH_CHUNK_SIZE * 3 + 12345),
+        ] {
+            // 内容刻意非均质：全同字节会让「块顺序颠倒」之类的错误照样通过。
+            let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let src = tmp(&format!("chunk_{size}.bin"), &content);
+
+            // 参考值：按改动前的整读方式逐字节复算，与 fingerprint() 严格同构。
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            h.write_u32(PARSE_SEMANTICS_VERSION);
+            h.write(b"t");
+            h.write_u8(0xfe);
+            h.write(src.file_name().unwrap().to_string_lossy().as_bytes());
+            h.write_u8(1);
+            h.write_u64(content.len() as u64);
+            h.write(&content);
+            h.write_u8(0xff);
+            let whole_read = format!("{:016x}", h.finish());
+
+            assert_eq!(
+                fingerprint(&[&src], "t").unwrap(),
+                whole_read,
+                "{label}（{size} 字节）：流式哈希与整读结果必须一致，否则存量缓存全体失效"
+            );
+            let _ = std::fs::remove_file(&src);
+        }
     }
 
     #[test]
