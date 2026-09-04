@@ -3373,6 +3373,22 @@ impl EngineManager {
         )
     }
 
+    /// **只**重装字符类 registry，不动引擎缓存。
+    ///
+    /// # ⚠️ 为什么必须独立于 `reload_from_config`
+    ///
+    /// 那个方法只在 **schema_dirty** 时被调用（改了才热重建引擎，避免每次保存都丢词典
+    /// 缓存）。而 `input.rare_char.include_blocks` 在 **input 段**，改它根本不会把
+    /// schema 标脏——registry 只在那里更新的话，用户改完生僻字模式的纳入区块**毫无
+    /// 反应，要切一次方案或重启才生效**。
+    ///
+    /// 这正是本仓反复出现的「运行时镜像态没回灌」那类缺陷：改动落进了配置，却没落进
+    /// 由它派生的运行时结构。⇒ 每个无条件重建 `ConfigBundle` 的地方都要调本方法。
+    pub fn rebuild_charsets(&self, config: &wind_config::Config) {
+        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) =
+            Arc::new(Self::build_charsets(config, self.data_dir.as_deref()));
+    }
+
     /// 当前的字符类 registry。coordinator 的生僻字准入与类型列都从这里取。
     pub fn charsets(&self) -> Arc<wind_candidate::CharsetRegistry> {
         Arc::clone(&self.charsets.lock().unwrap_or_else(|e| e.into_inner()))

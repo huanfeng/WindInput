@@ -3329,6 +3329,10 @@ impl Coordinator {
         mutate(&mut cfg);
         let keys = schema_key_union(&self.engine_mgr);
         let bundle = std::sync::Arc::new(ConfigBundle::build(cfg, &keys));
+        // 字符类 registry 由配置派生，**不在 schema_dirty 分支内**：
+        // `input.rare_char.include_blocks` 在 input 段，改它不会把 schema 标脏，
+        // 放进那个分支等于「改了没反应，切一次方案才生效」。见 `rebuild_charsets`。
+        self.engine_mgr.rebuild_charsets(&bundle.config);
         *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
         // 状态气泡去重缓存只在"内容配置不变"的前提下有效：改了 ui.status.items 之类后，
         // 同一状态该合成出不同文本，留着旧缓存会把改动后的第一次显示误判成"内容没变"而吞掉。
@@ -3355,6 +3359,8 @@ impl Coordinator {
                 let keys = schema_key_union(&self.engine_mgr);
                 let bundle = std::sync::Arc::new(ConfigBundle::build(cfg, &keys));
                 let new_cfg = bundle.config.clone();
+                // 同 `refresh_config_in_memory`：字符类 registry 不受 schema_dirty 门控。
+                self.engine_mgr.rebuild_charsets(&new_cfg);
                 *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
                 info!("User config hot-reloaded (schema_dirty={})", schema_dirty);
                 // 同 refresh_config_in_memory：设置页改了 ui.status.items 后，旧的去重缓存

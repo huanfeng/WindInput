@@ -1002,6 +1002,41 @@ mod tests {
             assert_eq!(got, vec!["龘", "😀"], "配置未生效或判据接错");
         }
 
+        /// ★★ 改 `input.rare_char.include_blocks` **不必切方案**就生效。
+        ///
+        /// 它在 input 段，改它不会把 `schema_dirty` 标脏。registry 若只在
+        /// `reload_from_config`（受 schema_dirty 门控）里重装，用户改完毫无反应、要切一次
+        /// 方案或重启才生效——本仓反复出现的「运行时镜像态没回灌」那类缺陷，且全程无报错。
+        ///
+        /// 本条从「改配置」出发直接看候选列表，中间那一步（`rebuild_charsets` 挂在无条件
+        /// 重建 ConfigBundle 的路径上）断掉就会红。
+        #[test]
+        fn include_blocks_takes_effect_without_a_schema_change() {
+            let dir = crate::charset_test_support::charsets_only_data_dir("rare_hot");
+            let c = Coordinator::new_headless(Config::default(), Some(&dir));
+            set_common(&c, ['我']);
+
+            let mut before = vec![cand("😀")];
+            c.retain_rare_admitted(&mut before);
+            assert!(
+                before.is_empty(),
+                "没配之前 emoji 不该进（否则本条测不出东西）"
+            );
+
+            // 只动 input 段——schema 不脏。
+            c.refresh_config_in_memory(|cfg| {
+                cfg.input.rare_char.include_blocks = vec!["emoji".to_string()];
+            });
+
+            let mut after = vec![cand("😀")];
+            c.retain_rare_admitted(&mut after);
+            assert_eq!(
+                after.len(),
+                1,
+                "改完 include_blocks 应当立即生效，不必切方案"
+            );
+        }
+
         /// 不配 include_blocks 时 emoji 进不来（与上一条互为对照，锁住「是配置起的作用」）。
         #[test]
         fn without_include_blocks_emoji_stays_out() {
