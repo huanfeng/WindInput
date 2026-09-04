@@ -5,6 +5,7 @@
 
 pub mod app_compat;
 pub mod change_hook;
+pub mod charset_def;
 pub mod code_charset;
 pub mod config;
 pub mod config_schema;
