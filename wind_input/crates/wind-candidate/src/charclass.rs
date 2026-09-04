@@ -1,4 +1,17 @@
-//! **成组的**字符区块判定：把若干 Unicode 块打成一个集合，供配置驱动的准入/排除使用。
+//! **成组的**字符区块判定，以及生僻字模式的候选准入 [`rare_admits`]。
+//!
+//! # ⚠️ `BlockMask` 已被 [`crate::CharsetRegistry`] 取代
+//!
+//! 免词频（`exclude_blocks`）与生僻准入（`include_blocks`）两个消费者都已切到 registry
+//! ——它按 UTS #51 的精确字表判 emoji，而块并集那个口径**两个方向都不准**（实测一本
+//! 五笔 emoji 码表：漏 182 条目、多收 `⌫ ⎵ ⏎ ✓`）。
+//!
+//! 本类型因此降为 `#[cfg(test)]`，只剩一个用途：给 registry 的
+//! `symbols_class_agrees_with_block_mask` 当**逐码位等价性对照**，证明「符号」这个预设
+//! 组在切换前后判定一个码位都没变。⇒ 加 `#[cfg(test)]` 而不是直接删，是因为删了就没有
+//! 参照物了；而 `#[cfg(test)]` 让编译器保证生产代码不可能再调到它。
+//!
+//! 以下关于位集的设计说明保留原样，它解释的是那个对照实现本身。
 //!
 //! [`crate::charblock`] 回答「这一个字符属于哪个块」（单个，用于显示与批量操作）；
 //! 本模块回答「这个候选**属不属于这一组块**」（成组，用于判定），并保证判定足够便宜到
@@ -16,23 +29,27 @@
 //! # 为什么是位集而不是 `Vec<CharBlock>`
 //!
 //! 判定发生在每次按键 × 每个候选上（五笔单字母下 78+ 个候选）。位集把「属于这一组吗」
-//! 压成一次移位加一次与运算，且 [`BlockMask`] 是 `Copy` 的，取用时不必克隆、不必借用
+//! 压成一次移位加一次与运算，且 `BlockMask` 是 `Copy` 的，取用时不必克隆、不必借用
 //! 配置。配置解析只在装载期做一次。
 
+// 这三项只被 `BlockMask`（已降为 `#[cfg(test)]` 的等价性对照）用到。
+#[cfg(test)]
 use crate::charblock::{BLOCKS, OTHER, block_index_of};
 
 /// 一组 Unicode 块的位集，按 [`BLOCKS`] 的下标建位。
 ///
 /// **默认为空集**，而空集的所有判定恒假——这正是「没配过这个功能的用户零成本」那条
-/// 路径：调用方先问 [`is_empty`](Self::is_empty) 再决定要不要进循环。
+/// 路径：调用方先问 `is_empty` 再决定要不要进循环。
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlockMask(u64);
 
 /// 位宽守门：块表长到 64 项以上时，`1u64 << idx` 会静默丢掉高位的块——那些块从此
 /// **永远无法被选中**，配置里写了也不报错。让它在编译期就失败。
 ///
-/// 溢出时的两条出路：把 [`BlockMask`] 换成 `u128`（表示层改一处，判定成本几乎不变），
+/// 溢出时的两条出路：把 `BlockMask` 换成 `u128`（表示层改一处，判定成本几乎不变），
 /// 或合并相邻的细碎块（会改变类型列的显示粒度，须一并确认界面）。
+#[cfg(test)]
 const _: () = assert!(
     BLOCKS.len() < 64,
     "块表超出 BlockMask 的位宽：改用 u128，或合并相邻块（最高位留给「其它」兜底档）"
@@ -44,6 +61,7 @@ const _: () = assert!(
 /// ★ 这一档存在的理由：块表逐块列举一份仍在增长的 Unicode 区间，新版本的新块必然落进
 /// 「其它」。对**准入**类消费者（生僻字模式）而言，漏一块 = 那批字打不出——不安全的
 /// 方向。给出这一档，新块就落进一个用户控制得到的开关，而不是静默消失。
+#[cfg(test)]
 const OTHER_BIT: u64 = 1 << 63;
 
 /// 预设组：**跨块**的命名集合。
@@ -57,6 +75,7 @@ const OTHER_BIT: u64 = 1 << 63;
 /// 摘出去就得开始逐字符列举 emoji，正是 `single_markable_char` 那轮已经走死过的路
 /// （最终改用 UAX #29 字素簇才收场）。真收到反馈时，把那两块从本组去掉即可，
 /// 组的成员是数据、不是判据。
+#[cfg(test)]
 const PRESET_EMOJI: &[&str] = &[
     "表情符号",
     "杂项符号",
@@ -100,6 +119,7 @@ pub(crate) const PRESET_SYMBOLS: &[&str] = &[
 /// ⚠️ 组名与块名同处一个命名空间（`from_config` 先查组、再查块），故**组名不得与任何块名
 /// 相同**——否则同一个名字有两种解释，而先查组的写法会让块名那一侧静默失效。
 /// 由 `preset_names_do_not_collide_with_block_names` 钉住。
+#[cfg(test)]
 const PRESETS: &[(&str, &[&str])] = &[
     (PRESET_EMOJI_NAME, PRESET_EMOJI),
     (PRESET_SYMBOLS_NAME, PRESET_SYMBOLS),
@@ -111,11 +131,13 @@ const PRESETS: &[(&str, &[&str])] = &[
 /// （emoji 的成员由 `data/charsets/emoji.yaml` 那份精确字表给出，见
 /// `builtin_block_specs` 的文档），而「刻意不造」这件事需要一条测试钉住，
 /// 测试得引用同一个字面量才防得住这里改名、那边失配。
+#[cfg(test)]
 pub(crate) const PRESET_EMOJI_NAME: &str = "emoji";
 
 /// 预设组「符号」的组名。[`crate::charset_registry`] 按它建同名内置类。
 pub(crate) const PRESET_SYMBOLS_NAME: &str = "符号";
 
+#[cfg(test)]
 impl BlockMask {
     /// 空集：所有判定恒假。
     pub const EMPTY: Self = Self(0);

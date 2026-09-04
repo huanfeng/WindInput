@@ -777,7 +777,8 @@ impl Default for SchemaConfig {
 pub struct FrequencyGlobal {
     /// 这些 Unicode 区块的候选**不参与词频**：既不记录选中（不学习），也不受已有记录影响
     /// （不重排）。取值为区块名（`"表情符号"`）或预设组名（`"emoji"`），
-    /// 解析见 `wind_candidate::BlockMask::from_config`。
+    /// 取值是**字符类的 key**：区块名、`"其它"`、`"符号"` 或 `"emoji"`。
+    /// 解析与告警见 `wind_engine::charset_assembly`（装配期打 `no_freq` 标记）。
     ///
     /// 出厂**为空**（＝行为与改动前完全一致）。诉求来自「emoji 在正常输入时不要参与词频
     /// 调整」：emoji 多是一次性的点缀，被它顶到前面会把常用字挤下去，而用户下次多半又想

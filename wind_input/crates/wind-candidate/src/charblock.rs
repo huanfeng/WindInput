@@ -156,7 +156,8 @@ const _: () = assert!(
 
 /// 这个字符落在 [`BLOCKS`] 的哪一项；表外为 `None`。
 ///
-/// [`crate::charclass::BlockMask`] 按下标建位集，故这里给的是下标而不是 [`CharBlock`]。
+/// `charclass::BlockMask`（已降为测试对照）按下标建位集，故这里给的是下标而不是
+/// [`CharBlock`]；[`crate::CharsetRegistry`] 的区间分段表同样按下标。
 ///
 /// # 为什么从线性扫描换成二分
 ///
