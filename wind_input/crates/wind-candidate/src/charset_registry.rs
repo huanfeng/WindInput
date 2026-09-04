@@ -98,6 +98,15 @@ pub struct CharsetRegistry {
     classes: Vec<ClassSpec>,
     /// 区间型的不相交段，按 `start` 升序。
     segments: Vec<Segment>,
+    /// 开了 `no_freq` 的类的位集，**编译期算好**。
+    ///
+    /// ★ 存成掩码而不是查询时现算，是因为这两个查询在按键热路径上（每次按键 × 每个
+    /// 候选）。现算意味着每次调用都要遍历类列表并**分配一个 `Vec`**——那正是
+    /// `BlockMask` 用 `is_empty()` 短路刻意避开的成本。掩码为 0 时判定直接恒假，
+    /// 与「没配过这个功能的用户零成本」那条路径对齐。
+    no_freq_mask: u128,
+    /// 开了 `in_rare` 的类的位集，同上。
+    in_rare_mask: u128,
 }
 
 impl CharsetRegistry {
@@ -114,10 +123,21 @@ impl CharsetRegistry {
             .collect();
 
         let segments = Self::build_segments(&specs);
+        let bits_of = |want: fn(&ClassSpec) -> bool| {
+            specs
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| want(c))
+                .fold(0u128, |m, (i, _)| m | (1u128 << i))
+        };
+        let no_freq_mask = bits_of(|c| c.no_freq);
+        let in_rare_mask = bits_of(|c| c.in_rare);
         (
             Self {
                 classes: specs,
                 segments,
+                no_freq_mask,
+                in_rare_mask,
             },
             dropped,
         )
@@ -221,23 +241,36 @@ impl CharsetRegistry {
 
     /// 免词频（**并集**，存在性：文本里任一字符命中任一 `no_freq` 类）。
     pub fn no_freq(&self, text: &str) -> bool {
-        self.any_char_in(text, |c| c.no_freq)
+        self.any_char_in(text, self.no_freq_mask)
     }
 
     /// 纳入生僻字模式（**并集**，存在性）。
     pub fn in_rare(&self, text: &str) -> bool {
-        self.any_char_in(text, |c| c.in_rare)
+        self.any_char_in(text, self.in_rare_mask)
     }
 
-    /// 并集类查询的共同实现：逐字素簇看有没有命中某个满足 `want` 的类。
+    /// 没有任何类开 `no_freq` ⇒ 免词频判定恒假，调用方可整条绕开。
+    ///
+    /// 与 `BlockMask::is_empty` 同一用途：绝大多数用户没配过这个功能，此刻的成本应当是
+    /// **零**而不是「很小」。
+    pub fn no_freq_is_empty(&self) -> bool {
+        self.no_freq_mask == 0
+    }
+
+    /// 没有任何类开 `in_rare` ⇒ 生僻准入判定恒假。
+    pub fn in_rare_is_empty(&self) -> bool {
+        self.in_rare_mask == 0
+    }
+
+    /// 并集类查询的共同实现：逐字素簇看有没有命中 `wanted` 位集里的某个类。
     ///
     /// 按**簇**而不是按 char 遍历，簇本身也要查一次：多码位的 emoji 序列
     /// （`👨‍👩‍👧`、`1️⃣`）在字表里是一整条，按 char 拆开就查不到了。
-    fn any_char_in(&self, text: &str, want: impl Fn(&ClassSpec) -> bool) -> bool {
-        let wanted: Vec<usize> = (0..self.classes.len())
-            .filter(|&i| want(&self.classes[i]))
-            .collect();
-        if wanted.is_empty() {
+    ///
+    /// ⚠️ `wanted` 由调用方传编译期算好的掩码，**不在这里现算**——现算要遍历类列表并
+    /// 分配一个 `Vec`，而本函数在按键热路径上。
+    fn any_char_in(&self, text: &str, wanted: u128) -> bool {
+        if wanted == 0 {
             return false;
         }
         crate::split_markable_clusters(text).any(|cluster| {
@@ -245,7 +278,16 @@ impl CharsetRegistry {
                 return false;
             };
             let hits = self.range_hits(ch);
-            wanted.iter().any(|&i| self.hits_class(cluster, i, hits))
+            // 只遍历 `wanted` 里真正置位的那几个类（通常一两个），而不是全部类。
+            let mut w = wanted;
+            while w != 0 {
+                let i = w.trailing_zeros() as usize;
+                w &= w - 1;
+                if self.hits_class(cluster, i, hits) {
+                    return true;
+                }
+            }
+            false
         })
     }
 
@@ -628,6 +670,41 @@ mod tests {
         assert_eq!(reg.verdict_of("我"), None);
         assert!(!reg.no_freq("我"));
         assert!(reg.class_of("我").is_none());
+    }
+
+    /// ★ `no_freq` / `in_rare` 的掩码必须在**排序之后**算——位是按 `classes` 的下标建的，
+    /// 而排序会改变下标。算早了就位错人，表现为「开了免词频的是 A，实际免的是 B」。
+    ///
+    /// 构造：`late` 开着 no_freq 但 order 靠后，`early` 没开却排在前面。排序前 `late`
+    /// 在下标 0，排序后在下标 1；掩码算早了会置位 0，于是 `early` 的字符被误判免词频。
+    #[test]
+    fn union_masks_are_computed_after_sorting() {
+        let late = ClassSpec {
+            key: "late".into(),
+            ranges: vec![(0x41, 0x41)], // 'A'
+            order: 100,
+            no_freq: true,
+            ..Default::default()
+        };
+        let early = ClassSpec {
+            key: "early".into(),
+            ranges: vec![(0x42, 0x42)], // 'B'
+            order: 1,
+            ..Default::default()
+        };
+        let (reg, _) = CharsetRegistry::compile(vec![late, early]);
+        assert!(reg.no_freq("A"), "开了 no_freq 的那个类没生效");
+        assert!(!reg.no_freq("B"), "没开 no_freq 的类被误判——掩码位错人了");
+    }
+
+    /// 没有任何类开并集属性时，两个查询恒假且可被调用方整条绕开。
+    #[test]
+    fn empty_union_masks_report_themselves() {
+        let (reg, _) = CharsetRegistry::compile(builtin_block_specs());
+        assert!(reg.no_freq_is_empty());
+        assert!(reg.in_rare_is_empty());
+        assert!(!reg.no_freq("A"));
+        assert!(!reg.in_rare("A"));
     }
 
     // ── 内置区块类（`builtin_block_specs`）──────────────────────────────────
