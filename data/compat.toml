@@ -7,6 +7,13 @@
 #   comment:              说明（仅文档用途）
 #   caret_use_top:        使用 caret rect 的 top 而非 bottom 定位候选框
 #                         适用于 GetTextExt 返回的 height 不稳定的 WebView 应用
+#   composition_start_pair_guard:
+#                         将 TSF_COMPOSITION（selection 无效、以组合起点降级）紧接
+#                         TSF_SELECTION 且 compStart 不变的两帧识别为同一次采样，禁止
+#                         把正常的“组合起点→当前插入点”跨度当成锚点整体错误。
+#                         只给已实测存在该交替序列的宿主开启；普通宿主保持原有大偏移
+#                         自愈，不能仅凭非零 compStart 全局开启。用户层同名规则若
+#                         未写本字段会继承出厂值；显式 false 才关闭。
 #   first_show_mode:      候选框首显策略，三档互斥；不写=跟随全局
 #                         config.toml 的 [ui.candidate] first_show_mode（出厂 "fast"）。
 #                         "fast"    默认。仍等坐标，但等到「可信」即放行。DLL 在首帧
@@ -81,6 +88,11 @@ process = "Weixin.exe"
 comment = "微信 - Qt WebView 输入框 caret height 不稳定（h=1 或 h=20），使用 rect.top 定位；组合期间上报的 rect 还会停在上一次组合的位置（差 136~419px），需拦截陈旧试探坐标"
 caret_use_top = true
 stale_probe_guard = true
+
+[[apps]]
+process = "QQ.exe"
+comment = "QQNT 聊天框长组合时交替上报组合起点降级帧与当前 selection；compStart 稳定，caret 跨度不是锚点错误"
+composition_start_pair_guard = true
 
 [[apps]]
 process = "SearchHost.exe"
