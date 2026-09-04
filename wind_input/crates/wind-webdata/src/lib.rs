@@ -2735,7 +2735,10 @@ pub trait WebDataRpc: WebDataHost {
                 })
             })
             .collect();
-        Ok(json!({ "items": items }))
+        // ⚠️ **裸数组**，不是 `{items,total}`。设置页的 `parse_list` 按「分页与否」分流：
+        // 分页类收 `{items,total}`，其余收裸数组。字符类只有几十个、spec 里 `paged: false`
+        // ——包成对象的话客户端解析出 0 行，表现是「暂无数据」，没有报错也没有日志。
+        Ok(Value::Array(items))
     }
 
     /// `charset.set` —— 改一个类的属性。缺席的字段不动。
