@@ -3491,6 +3491,56 @@ impl Coordinator {
         }
     }
 
+    /// 方案文件/方案覆盖里某些段解析失败、已回落出厂默认值 ⇒ 提示用户。返回是否弹了。
+    ///
+    /// # 为什么这条提示必须存在
+    ///
+    /// 段级降级（`EngineManager::salvage_schema`）救回了方案的其余部分，代价是**被降级的
+    /// 那一段悄悄变回出厂值**。没有这条提示，用户的处境是「我明明在 `schema_overrides` 里
+    /// 写了，重启后没反应，也没有任何报错」——这正是本轮要消灭的失败形态，
+    /// 与 [`Self::notify_config_syntax_error`] 同一条纪律。
+    ///
+    /// ⚠️ 列表限长：项数通常只有一两个，但一份被批量改坏的方案能攒出十几条，全列进 toast
+    /// 会撑爆版面，而那时具体是哪几项本就没意义。同 `UnparsableLayer::lines_phrase`。
+    /// ★ 数量只由外层的 `{total}` 说一次，括号里超长时只补「等」不再报数——两处都带数字会
+    /// 拼出「有 5 项设置无法识别（… 等 5 项）」。同一个语病 `lines_phrase` 已经踩过一次。
+    ///
+    /// # ⛔ 不要挂到配置热重载上
+    ///
+    /// 落点刻意只有两个：**服务启动**与**切到该方案**——都是「用户正要用这个方案」的时刻。
+    /// 顺手加到 `reload_config` 的 toast 优先级链里看着很自然，但那条链每次保存设置都会走，
+    /// 而方案降级与「刚保存了什么设置」没有因果关系，且 `behavior_cache` 未失效时读到的还是
+    /// 上一次的记录 ⇒ 用户每点一次保存都被同一条提示打断，把「设置已更新」也挤掉了。
+    /// 提示的价值在于出现在困惑的那一刻，不在于出现得多。
+    pub fn notify_schema_degradation(&self, schema_id: &str) -> bool {
+        let behavior = self.engine_mgr.behavior_for(schema_id);
+        if behavior.degraded_items.is_empty() {
+            return false;
+        }
+        let name = self.engine_mgr.schema_name(schema_id);
+        let label = if name.is_empty() { schema_id } else { &name };
+        const MAX_LISTED: usize = 3;
+        let total = behavior.degraded_items.len();
+        let listed = behavior
+            .degraded_items
+            .iter()
+            .take(MAX_LISTED)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、");
+        let items = if total > MAX_LISTED {
+            format!("{listed} 等")
+        } else {
+            listed
+        };
+        self.show_toast(
+            &format!("方案「{label}」有 {total} 项设置无法识别（{items}），已按出厂默认处理"),
+            ToastPosition::BottomCenter,
+            ToastKind::Error,
+        );
+        true
+    }
+
     /// 显示一次性通知 toast（约 2.5 秒后自动隐藏）。供配置热重载、词库就绪、错误等一次性事件。
     pub(crate) fn show_toast(&self, text: &str, position: ToastPosition, kind: ToastKind) {
         let _ = self.ui_tx.send(UiCommand::ShowToast {

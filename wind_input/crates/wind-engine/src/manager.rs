@@ -3686,10 +3686,80 @@ impl EngineManager {
         if let Some(ov) = override_dir.and_then(|d| Self::read_override_value(schema_id, d)) {
             merge_toml(&mut base, ov);
         }
-        match base.try_into() {
-            Ok(s) => Some(s),
+        // 字段级容错（`tolerant_de`）的回落是**静默**的：它只让那一个字段回落，不再触发
+        // 下面的段级降级。清空→反序列化→取走，把这些回落也收进 `degraded_items`，
+        // 否则用户的处境仍是「我写的这项没反应，也没人告诉我」。
+        wind_config::tolerant_de::clear_fallbacks();
+        match base.clone().try_into::<Schema>() {
+            Ok(mut s) => {
+                let fallbacks = wind_config::tolerant_de::take_fallbacks();
+                if !fallbacks.is_empty() {
+                    warn!(
+                        "方案 {schema_id} 有 {} 项设置的值无法识别，已按默认处理：{}",
+                        fallbacks.len(),
+                        fallbacks.join("、")
+                    );
+                    s.degraded_items = fallbacks
+                        .into_iter()
+                        .map(|v| format!("值 \"{v}\""))
+                        .collect();
+                }
+                Some(s)
+            }
+            // ⚠️ 这里**不能**直接 `None`。整份 `try_into` 是一次性的：`[candidate]` 里一个
+            // `text_orientation = ""` 就让整个方案读不出来，而 `read_schema` 的 `None` 会
+            // 让方案名/类型/引擎构建等约 30 个调用点一起归零——用户看到的是「这个方案完全
+            // 没反应，也不报错」。2026-09-04 实际发生过。改走段级降级：有毒的段回落出厂
+            // 默认值，方案的其余部分照常工作，降级清单挂在 `Schema::degraded_items`
+            // 上交给协调器 toast。
+            Err(root_err) => Self::salvage_schema(schema_id, base, &root_err),
+        }
+    }
+
+    /// `read_schema` 的段级降级分支：把有毒的段回落出厂默认值，救回方案的其余部分。
+    ///
+    /// 救不回来（探不出毒、或回落后仍失败）才返回 `None`——那时方案确实无法使用，
+    /// 与降级前的行为一致。
+    fn salvage_schema(
+        schema_id: &str,
+        merged: toml::Value,
+        root_err: &toml::de::Error,
+    ) -> Option<Schema> {
+        let default_v = match toml::Value::try_from(Schema::default()) {
+            Ok(v) => v,
+            // 默认方案自己序列化不了属于代码 bug，此处无从补救。
             Err(e) => {
-                warn!("Schema {} override 合并后解析失败: {}", schema_id, e);
+                warn!("Schema default 不可序列化（{e}）；方案 {schema_id} 无法降级救回");
+                return None;
+            }
+        };
+        let wind_config::section_fallback::Patched { value, bad } =
+            wind_config::section_fallback::probe_and_patch::<Schema>(&merged, &default_v);
+        if bad.is_empty() {
+            warn!("Schema {schema_id} override 合并后解析失败且无法定位到具体段: {root_err}");
+            return None;
+        }
+        match value.try_into::<Schema>() {
+            Ok(mut s) => {
+                for (path, err) in &bad {
+                    // WARN 而非 INFO：这是**异常**不是正常降级，压成 INFO 会掩盖真实的
+                    // 值域收缩（改了枚举取值却没写迁移，会在这里悄悄「自愈」成出厂值）。
+                    warn!(
+                        "方案 {schema_id} 的 [{path}] 解析失败，已回落出厂默认值\
+                         （该项在本方案里本次不生效）；原始错误：{err}"
+                    );
+                }
+                s.degraded_items = bad
+                    .into_iter()
+                    .map(|(path, _)| format!("[{path}]"))
+                    .collect();
+                Some(s)
+            }
+            Err(e) => {
+                warn!(
+                    "Schema {schema_id} 段级降级后仍解析失败，方案不可用；\
+                     原始错误：{root_err}；回落后仍失败：{e}"
+                );
                 None
             }
         }
@@ -5933,6 +6003,71 @@ mod tests {
             merged.get("grave").map(String::as_str),
             Some("none"),
             "override 新增的禁用项加入"
+        );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let _ = std::fs::remove_dir_all(&ov_dir);
+    }
+
+    /// 用户 override 里写了值域外的值，**不许**让整个方案读不出来。
+    ///
+    /// 复现的是 2026-09-04 的真实事故：`schema_overrides/toli.toml` 里一行
+    /// `text_orientation = ""` 让 `read_schema` 返回 `None`，而它有约 30 个调用点
+    /// （方案名 / 类型 / 引擎构建 / behavior 全走它）⇒ 这个方案在系统里等于不存在，
+    /// 用户看到的是「完全没反应，也不报错」。
+    ///
+    /// 三条断言分别钉住修复的三个层次，**缺一条都会让回归悄悄溜过去**：
+    /// ① 方案还在；② 同段的其它设置没被连累；③ 降级被记下来了（toast 的数据源，
+    /// 没有它就退回「静默不生效」——只是比原来安静，同样查不出）。
+    #[test]
+    fn bad_enum_value_in_override_degrades_instead_of_killing_the_schema() {
+        use std::io::Write;
+        let base_dir = std::env::temp_dir().join("wind_eng_bad_enum_data");
+        let ov_dir = std::env::temp_dir().join("wind_eng_bad_enum_ov");
+        let schemas = base_dir.join("schemas");
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let _ = std::fs::remove_dir_all(&ov_dir);
+        std::fs::create_dir_all(&schemas).unwrap();
+        std::fs::create_dir_all(&ov_dir).unwrap();
+        let mut f = std::fs::File::create(schemas.join("toli.schema.toml")).unwrap();
+        write!(
+            f,
+            "[schema]
+id = \"toli\"
+name = \"托利\"
+[engine]
+type = \"codetable\"
+"
+        )
+        .unwrap();
+        drop(f);
+        // 用户的 override，逐字取自事故现场。
+        std::fs::write(
+            ov_dir.join("toli.toml"),
+            "[candidate]\nfont_family = \"Noto Sans Mongolian\"\ntext_orientation = \"\"\n",
+        )
+        .unwrap();
+
+        let schema = EngineManager::read_schema("toli", Some(&base_dir), Some(&ov_dir))
+            .expect("① 一个字段写错不许让整个方案读不出来");
+
+        assert_eq!(
+            schema.candidate.text_orientation,
+            wind_config::config::TextOrientation::Normal,
+            "写错的那一项回落出厂默认"
+        );
+        assert_eq!(
+            schema.candidate.font_family, "Noto Sans Mongolian",
+            "② 同段的其它设置不许被连累——这正是字段级容错优于段级降级的地方"
+        );
+        assert!(
+            !schema.degraded_items.is_empty(),
+            "③ 降级必须被记下来，否则 toast 无从弹起，用户仍然是「写了没反应」"
+        );
+        assert!(
+            schema.degraded_items.iter().any(|s| s.contains("\"\"")),
+            "记录里要带上用户写的原值，他才搜得到自己文件里的哪一行：{:?}",
+            schema.degraded_items
         );
 
         let _ = std::fs::remove_dir_all(&base_dir);

@@ -257,7 +257,11 @@ pub struct AppCompatRule {
     /// `DeleteReplace`（全局默认）依赖对宿主做删改，在 Tabby 一类终端上会出严重错误；
     /// `HoldComposition` 全程不做删改、兼容性更好。两者本就是现成的全局枚举，这里只是
     /// 让它可以按宿主覆盖。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::tolerant_de::tolerant_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub smart_method: Option<SmartMethod>,
     /// 光标坐标水平校正（dp，96dpi 基准逻辑像素，正=右）。
     ///
@@ -534,14 +538,19 @@ pub struct AppCompat {
 }
 
 /// 序列化中间体：承载 TOML 的两个顶层数组表，避免把 `lookup` 暴露给 TOML。
+///
+/// `pub(crate)` 而非模块私有，只为让 `value_domain_guard` 那条守门元测试够得着——
+/// 它要遍历本结构体的每个字符串字段逐个投毒，而集成测试只看得见 pub API。
+/// ⛔ 不要因此把它当成对外类型：`compat.toml` 的读写入口仍只有 `load_file` /
+/// `render_user_compat`。
 #[derive(Debug, Deserialize, Serialize, Default)]
-struct AppCompatFile {
+pub(crate) struct AppCompatFile {
     #[serde(default)]
-    apps: Vec<AppCompatRule>,
+    pub(crate) apps: Vec<AppCompatRule>,
     /// ⚠ 用户层 compat.toml 由右键菜单**整份重写**（`render_user_compat`），本字段
     /// 必须一并渲染回去，否则用户写的覆盖会在下一次菜单开关时被静默删掉。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    initial_mode_scope: Vec<InitialModeScopeRule>,
+    pub(crate) initial_mode_scope: Vec<InitialModeScopeRule>,
 }
 
 impl AppCompat {
