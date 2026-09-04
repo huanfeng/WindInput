@@ -156,7 +156,6 @@ fn factory_blocks_match_the_block_table_codepoint_by_codepoint() {
         let Some(ch) = char::from_u32(c) else {
             continue;
         };
-        let buf = ch.to_string();
         let got = reg
             .classes()
             .iter()
