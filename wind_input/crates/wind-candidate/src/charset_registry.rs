@@ -300,6 +300,112 @@ impl CharsetRegistry {
     }
 }
 
+/// 内置区块类的 `order`。
+///
+/// ★ 区块类**一个判定字段都不表态**（`default_common` / `outside_common` / `no_freq` /
+/// `in_rare` 全空），所以本值对仲裁毫无影响。它唯一的作用是让
+/// [`CharsetRegistry::class_of`] 在无人表态时返回的「首个命中」是**区块**而不是
+/// 「符号」那种粗粒度组名——类型列要显示的是块名，与现状 [`crate::block_of_cluster`]
+/// 一致。故本值必须**小于** [`PRESET_ORDER`]。
+const BLOCK_ORDER: i32 = 900;
+
+/// 预设组「符号」的 `order`。必须**大于** [`BLOCK_ORDER`]，理由见那里。
+const PRESET_ORDER: i32 = 1000;
+
+/// Unicode 码位上界（含）。「其它」档的补集算到这里为止。
+const MAX_CODEPOINT: u32 = 0x10FFFF;
+
+/// 内置类：50 个 Unicode 区块 + 「其它」兜底档 + 预设组「符号」。
+///
+/// 这些类**不落配置文件**，由代码提供。三条理由：
+///
+/// 1. 区块表是**显示域**的划分（[`crate::charblock`]），用户改它只改标签，却会让类型列
+///    与 Unicode 官方块名对不上——收益为零、代价是困惑；
+/// 2. 出厂 50 个 `.yaml` 会淹掉 `charsets/` 目录，用户看不见真正该配的那两个；
+/// 3. 块表随 Unicode 升版增长，是代码维护物。用户要自定义范围，路径是**新建自己的类**
+///    （设计文档 §4.3），而不是改内置块。
+///
+/// # ⛔ 刻意不造 `emoji` 内置类
+///
+/// [`crate::charclass::PRESET_EMOJI`] 把 `emoji` 展开成五个块，那个口径**两个方向同时
+/// 不准**：漏掉 `⬅ ⭐ 🀄 🅰 🈚 ▶ ↔ ™ ©` 等 182 条（它们的块根本不在块表里，或整块搬进来
+/// 会连 `← → ▲ ◆` 一起搬），又多收「杂项符号」块里的 `☰` 与「杂项技术符号」块里的
+/// `⌘ ⌥`。
+///
+/// ⇒ `emoji` 这个 key 由 `data/charsets/emoji.yaml` 那份按 UTS #51 `Emoji` 属性生成的
+/// 精确字表提供，本函数**不得**再造一个同名类顶掉它。`emoji_is_not_a_builtin_class`
+/// 钉住这条。
+///
+/// ⚠️ 这意味着 `exclude_blocks = ["emoji"]` 切到本 registry 后**判据会变准**——这是
+/// 预期的修正，不是回归。出厂 `exclude_blocks` 为空，没配过的用户零影响。
+pub fn builtin_block_specs() -> Vec<ClassSpec> {
+    let mut out: Vec<ClassSpec> = crate::charblock::BLOCKS
+        .iter()
+        .map(|b| ClassSpec {
+            key: b.name.to_string(),
+            name: b.name.to_string(),
+            ranges: vec![(b.start, b.end)],
+            order: BLOCK_ORDER,
+            ..Default::default()
+        })
+        .collect();
+
+    // 「其它」= 块表**之外**的一切。它在 `BlockMask` 里是单独一位（没有下标可用），
+    // 这里则化成**补集区间**——纯数据变换，不必给 `Scope` 加一个「全域」变体去承载
+    // 「补集」这个概念（`scope` 的值域是闭集，见设计文档 §2.4）。
+    out.push(ClassSpec {
+        key: crate::charblock::OTHER.name.to_string(),
+        name: crate::charblock::OTHER.name.to_string(),
+        ranges: blocks_complement(),
+        order: BLOCK_ORDER,
+        ..Default::default()
+    });
+
+    out.push(ClassSpec {
+        key: crate::charclass::PRESET_SYMBOLS_NAME.to_string(),
+        name: crate::charclass::PRESET_SYMBOLS_NAME.to_string(),
+        ranges: ranges_of_named_blocks(crate::charclass::PRESET_SYMBOLS),
+        order: PRESET_ORDER,
+        ..Default::default()
+    });
+
+    out
+}
+
+/// 块表的补集（「其它」档的区间形态）。
+///
+/// 依赖块表**按 `start` 升序且互不重叠**——`blocks_are_sorted_and_disjoint` 钉着这条，
+/// 它同时也是 [`crate::block_index_of`] 二分查找的正确性前提。
+fn blocks_complement() -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut next = 0u32;
+    for b in crate::charblock::BLOCKS {
+        if b.start > next {
+            out.push((next, b.start - 1));
+        }
+        // 块表最后一段的 `end` 可能贴近 `MAX_CODEPOINT`，`+1` 用 saturating 防溢出。
+        next = b.end.saturating_add(1);
+    }
+    if next <= MAX_CODEPOINT {
+        out.push((next, MAX_CODEPOINT));
+    }
+    out
+}
+
+/// 按块名取区间。名字不存在就跳过——预设组的成员是代码里的常量，拼错会被
+/// `preset_members_all_resolve` 当场抓住，运行期不必再有别的表现。
+fn ranges_of_named_blocks(names: &[&str]) -> Vec<(u32, u32)> {
+    names
+        .iter()
+        .filter_map(|n| {
+            crate::charblock::BLOCKS
+                .iter()
+                .find(|b| b.name == *n)
+                .map(|b| (b.start, b.end))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,5 +628,147 @@ mod tests {
         assert_eq!(reg.verdict_of("我"), None);
         assert!(!reg.no_freq("我"));
         assert!(reg.class_of("我").is_none());
+    }
+
+    // ── 内置区块类（`builtin_block_specs`）──────────────────────────────────
+
+    /// 把某个内置类单独挑出来、给它 `no_freq`，用 `no_freq()` 当「这个码位命中本类吗」
+    /// 的探针——`hits_class` 是私有的，而这是唯一一条不为测试开后门的问法。
+    fn probe_of(key: &str) -> CharsetRegistry {
+        let spec = builtin_block_specs()
+            .into_iter()
+            .find(|c| c.key == key)
+            .unwrap_or_else(|| panic!("内置类里没有 {key}"));
+        let (reg, dropped) = CharsetRegistry::compile(vec![ClassSpec {
+            no_freq: true,
+            ..spec
+        }]);
+        assert!(dropped.is_empty());
+        reg
+    }
+
+    /// 逐码位扫描（跳过代理区——它构不成 `char`）。
+    fn for_each_codepoint(mut f: impl FnMut(char)) {
+        for c in 0u32..=0x10FFFF {
+            if let Some(ch) = char::from_u32(c) {
+                f(ch);
+            }
+        }
+    }
+
+    /// ★ `exclude_blocks` / `include_blocks` 里能写的每个名字，registry 都得认——
+    /// **除了 `emoji`**，那个 key 由 `data/charsets/emoji.yaml` 提供（见
+    /// `builtin_block_specs` 的文档）。
+    ///
+    /// 少一个名字的后果是静默的：用户配的那一行变成「未识别」被跳过，功能不生效而无报错。
+    #[test]
+    fn builtin_keys_cover_every_name_block_mask_accepts() {
+        let (reg, dropped) = CharsetRegistry::compile(builtin_block_specs());
+        assert!(dropped.is_empty(), "内置类不该撞上 MAX_CLASSES");
+
+        for b in crate::charblock::BLOCKS {
+            assert!(reg.class_by_key(b.name).is_some(), "缺区块类 {}", b.name);
+        }
+        assert!(
+            reg.class_by_key(crate::charblock::OTHER.name).is_some(),
+            "缺「其它」兜底档"
+        );
+        assert!(
+            reg.class_by_key(crate::charclass::PRESET_SYMBOLS_NAME)
+                .is_some(),
+            "缺预设组「符号」"
+        );
+    }
+
+    /// ⛔ `emoji` **不**是内置类。它由出厂字表提供，内置一个同名类会按 key 顶掉它，
+    /// 而那正是本次改造要修掉的粗判据。
+    #[test]
+    fn emoji_is_not_a_builtin_class() {
+        assert!(
+            !builtin_block_specs()
+                .iter()
+                .any(|c| c.key == crate::charclass::PRESET_EMOJI_NAME),
+            "emoji 的成员必须来自 charsets/emoji.yaml，不得由内置块类顶掉"
+        );
+    }
+
+    /// ★★ 内置类**一个判定字段都不表态**。
+    ///
+    /// 它们存在的理由只是给 `exclude_blocks` 那套名字一个落点、给类型列一个标签。
+    /// 任何一个表了态，都会在用户什么都没配的情况下改变候选的常用性判定。
+    #[test]
+    fn every_builtin_class_stays_silent() {
+        for c in builtin_block_specs() {
+            assert!(c.default_common.is_none(), "{} 表了 default", c.key);
+            assert!(c.outside_common.is_none(), "{} 表了 outside", c.key);
+            assert!(c.scope.is_none(), "{} 配了 scope", c.key);
+            assert!(!c.no_freq, "{} 配了 no_freq", c.key);
+            assert!(!c.in_rare, "{} 配了 in_rare", c.key);
+        }
+    }
+
+    /// 「其它」恰好是块表的补集：逐码位与 `block_index_of` 对答案。
+    #[test]
+    fn other_class_is_exactly_the_complement_of_the_block_table() {
+        let reg = probe_of(crate::charblock::OTHER.name);
+        for_each_codepoint(|ch| {
+            let in_other = reg.no_freq(&ch.to_string());
+            let in_table = crate::block_index_of(ch).is_some();
+            assert_eq!(
+                in_other, !in_table,
+                "U+{:04X} 归属对不上：其它={in_other} 块表内={in_table}",
+                ch as u32
+            );
+        });
+    }
+
+    /// 预设组「符号」与 `BlockMask` 的展开逐码位一致。
+    ///
+    /// 这条是 P3 接线的等价性凭据：切到 registry 之后，配了 `"符号"` 的用户
+    /// **判定一个码位都不许变**。
+    #[test]
+    fn symbols_class_agrees_with_block_mask() {
+        let reg = probe_of(crate::charclass::PRESET_SYMBOLS_NAME);
+        let (mask, unknown) =
+            crate::BlockMask::from_config(&[crate::charclass::PRESET_SYMBOLS_NAME]);
+        assert!(unknown.is_empty());
+        for_each_codepoint(|ch| {
+            assert_eq!(
+                reg.no_freq(&ch.to_string()),
+                mask.contains_char(ch),
+                "U+{:04X} 在「符号」组里的判定变了",
+                ch as u32
+            );
+        });
+    }
+
+    /// 只装内置类时，`class_of` 给出的就是**块名**——与现状 `block_of_cluster` 一致。
+    ///
+    /// ★ 这条钉的是 `BLOCK_ORDER < PRESET_ORDER`：反过来的话，「符号」组会抢在具体块
+    /// 前面命中，类型列上半个 BMP 都显示成「符号」，而没有任何报错。
+    #[test]
+    fn class_of_agrees_with_block_of() {
+        let (reg, _) = CharsetRegistry::compile(builtin_block_specs());
+        for_each_codepoint(|ch| {
+            let got = reg.class_of(&ch.to_string()).map(|c| c.key.as_str());
+            assert_eq!(
+                got,
+                Some(crate::block_of(ch).name),
+                "U+{:04X} 的类型列标签变了",
+                ch as u32
+            );
+        });
+    }
+
+    /// 预设组的成员块名全都能在块表里解析出来。拼错一个的后果是那一块**静默消失**：
+    /// 用户勾了「符号」，某一片字符不生效，而配置校验一声不吭。
+    #[test]
+    fn preset_members_all_resolve() {
+        let n = ranges_of_named_blocks(crate::charclass::PRESET_SYMBOLS).len();
+        assert_eq!(
+            n,
+            crate::charclass::PRESET_SYMBOLS.len(),
+            "「符号」组有块名在块表里找不到"
+        );
     }
 }

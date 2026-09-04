@@ -75,7 +75,7 @@ const PRESET_EMOJI: &[&str] = &[
 /// ★ 只收 `is_han ∪ is_pua` **域外**的块。部首、康熙部首、CJK 笔画、各扩展区都在
 /// `is_han` 里（见 `common::is_han`），本来就是生僻字模式的默认输出，列进来是多余的
 /// 开关——用户勾了没变化，只会以为坏了。
-const PRESET_SYMBOLS: &[&str] = &[
+pub(crate) const PRESET_SYMBOLS: &[&str] = &[
     "通用标点",
     "上标与下标",
     "货币符号",
@@ -100,7 +100,21 @@ const PRESET_SYMBOLS: &[&str] = &[
 /// ⚠️ 组名与块名同处一个命名空间（`from_config` 先查组、再查块），故**组名不得与任何块名
 /// 相同**——否则同一个名字有两种解释，而先查组的写法会让块名那一侧静默失效。
 /// 由 `preset_names_do_not_collide_with_block_names` 钉住。
-const PRESETS: &[(&str, &[&str])] = &[("emoji", PRESET_EMOJI), ("符号", PRESET_SYMBOLS)];
+const PRESETS: &[(&str, &[&str])] = &[
+    (PRESET_EMOJI_NAME, PRESET_EMOJI),
+    (PRESET_SYMBOLS_NAME, PRESET_SYMBOLS),
+];
+
+/// 预设组「emoji」的组名。
+///
+/// ⚠️ 抽成常量是给 [`crate::charset_registry`] 用的：那边**刻意不造**同名内置类
+/// （emoji 的成员由 `data/charsets/emoji.yaml` 那份精确字表给出，见
+/// `builtin_block_specs` 的文档），而「刻意不造」这件事需要一条测试钉住，
+/// 测试得引用同一个字面量才防得住这里改名、那边失配。
+pub(crate) const PRESET_EMOJI_NAME: &str = "emoji";
+
+/// 预设组「符号」的组名。[`crate::charset_registry`] 按它建同名内置类。
+pub(crate) const PRESET_SYMBOLS_NAME: &str = "符号";
 
 impl BlockMask {
     /// 空集：所有判定恒假。
