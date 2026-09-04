@@ -484,7 +484,10 @@ pub fn semantic_units(text: &str) -> usize {
 
 /// 是否 Unicode 私用区（PUA）。本码表把 PUA 码位当汉字使用（占汉字编码、冒充生僻字），
 /// 故常用性判定须把 PUA 视作「必须查表的汉字」，不在规范字表内即判非常用。
-fn is_pua(ch: char) -> bool {
+///
+/// 公开是因为 [`crate::charset_registry::Scope`] 要拿它当作用域判据；那里的作用域值域是
+/// **闭集**（判定域漏一段 = 过滤静默失效），只能引用代码里这份权威定义，不能各写一份。
+pub fn is_pua(ch: char) -> bool {
     let c = ch as u32;
     (0xE000..=0xF8FF).contains(&c)          // BMP 私用区
         || (0xF0000..=0xFFFFD).contains(&c) // 补充私用区 A
