@@ -62,16 +62,18 @@ fn common_han_reproduces_the_pre_wiring_verdict_codepoint_by_codepoint() {
     // 这个坑的另一面）。列表体在 `...` 之后，一行连写多字。
     let text = std::fs::read_to_string(d.join("charsets").join("common_han.yaml"))
         .expect("读不出 common_han.yaml");
-    let body = text
-        .split_once(
-            "
-...
-",
-        )
-        .expect("common_han.yaml 该有 `...` 分隔的列表体")
-        .1;
-    let base: std::collections::HashSet<char> = body
+    // ⚠️ 按**行**找分隔符，不要拿跨行的字节串去 split：这个仓的工作区行尾由 git 的
+    // autocrlf 决定，同一个文件可能是 CRLF，而带换行的字节匹配会静默失配——表现是
+    // 「该有 ... 分隔的列表体」，看着像文件坏了。`lines()` 两种行尾都吃。
+    let body: Vec<&str> = text
         .lines()
+        .skip_while(|l| l.trim() != "...")
+        .skip(1)
+        .collect();
+    assert!(!body.is_empty(), "common_han.yaml 该有 `...` 分隔的列表体");
+    let base: std::collections::HashSet<char> = body
+        .iter()
+        .copied()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .flat_map(|l| l.chars())
