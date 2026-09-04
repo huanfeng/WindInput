@@ -272,6 +272,66 @@ mod imp {
         /// 加载拆字字根字体（TTF）建自定义字体集，后续渲染中 PUA 码位字符回退到它。
         /// `family` 为方案配置的 DWrite 家族名（空则回退默认 `CHAIZI_FAMILY`）。
         /// 失败返回 Err（不影响普通文本渲染）。
+        /// 把「配置里声明的家族名」解析成**这个自定义字体集里真实存在**的家族名。
+        ///
+        /// # ★★ 为什么必须解析，不能直接用声明值
+        ///
+        /// `create_layout` 里给 PUA 段做的是 `SetFontCollection(自定义集)` +
+        /// `SetFontFamilyName(声明名)`。后者在集里匹配不上时**不报错**——DirectWrite 静默
+        /// 回落，于是「词库自带字体」整个没生效。这个失败有两副完全不像的面孔：
+        ///
+        /// - 机器上**装了**同一款字体：系统回退把字形兜住，画面上「有字」，但字形来自另一个
+        ///   字体，与上屏后宿主挑的不一致 ⇒ 用户报「候选和实际有差异」；
+        /// - 机器上**没装**：PUA 码位无处可取 ⇒ 那一段直接是**空白**。
+        ///
+        /// 实测（Toli 蒙古文方案，声明 `"Menk字体"`、字体自报 `"Menk Qagan StdEx Tig"`）：
+        /// 声明名与「压根不设词库字体」的测量宽度和着墨像素**逐位相同**（110.03×22.86 / 424），
+        /// 而真实家族名是 110.67×22.86 / 413 ⇒ 声明名一路没生效。
+        ///
+        /// ⚠️ 找不到时退回集里的**第一个**家族：字体文件是方案自带的、通常只含一个家族，
+        /// 「作者把名字写成了别名或文件名」远比「集里真有好几个家族而他指了个不存在的」常见。
+        /// 退回的同时 warn，否则修好了显示、却把「配置写错了」这件事一并藏起来。
+        fn resolve_family_in(collection: &IDWriteFontCollection1, declared: &str) -> String {
+            unsafe {
+                let w: Vec<u16> = declared.encode_utf16().chain(std::iter::once(0)).collect();
+                let mut index = 0u32;
+                let mut exists = BOOL(0);
+                if collection
+                    .FindFamilyName(PCWSTR(w.as_ptr()), &mut index, &mut exists)
+                    .is_ok()
+                    && exists.as_bool()
+                {
+                    return declared.to_string();
+                }
+                let fallback = |what: &str| {
+                    tracing::warn!(
+                        "词库字体的家族名「{declared}」在该字体文件里不存在，且{what}，\
+                         字体将不生效——请把方案 [[dictionaries]] 的 font_family 改成字体自报的家族名"
+                    );
+                    declared.to_string()
+                };
+                let Ok(first) = collection.GetFontFamily(0) else {
+                    return fallback("取不到集里的第一个字族");
+                };
+                let Ok(names) = first.GetFamilyNames() else {
+                    return fallback("取不到该字族的名字表");
+                };
+                let Ok(len) = names.GetStringLength(0) else {
+                    return fallback("取不到该字族的名字长度");
+                };
+                let mut buf = vec![0u16; len as usize + 1];
+                if names.GetString(0, &mut buf).is_err() {
+                    return fallback("读不出该字族的名字");
+                }
+                let real = String::from_utf16_lossy(&buf[..len as usize]);
+                tracing::warn!(
+                    "词库字体的家族名「{declared}」在该字体文件里不存在，已改用它自报的「{real}」——\
+                     请把方案 [[dictionaries]] 的 font_family 改成后者"
+                );
+                real
+            }
+        }
+
         pub fn set_chaizi_font(&mut self, path: &str, family: &str) -> Result<(), String> {
             unsafe {
                 let f3: IDWriteFactory3 = self
@@ -296,11 +356,12 @@ mod imp {
                 let collection = f3
                     .CreateFontCollectionFromFontSet(&set)
                     .map_err(|e| format!("CreateFontCollectionFromFontSet: {e}"))?;
-                let family_name = if family.is_empty() {
+                let declared = if family.is_empty() {
                     CHAIZI_FAMILY
                 } else {
                     family
                 };
+                let family_name = Self::resolve_family_in(&collection, declared);
                 let family: Vec<u16> = family_name
                     .encode_utf16()
                     .chain(std::iter::once(0))
@@ -366,6 +427,40 @@ mod imp {
         /// 当前字体方案。
         pub fn font_plan(&self) -> &FontPlan {
             &self.plan
+        }
+
+        /// 系统字体集里有没有这个字族名。`None` = 查不了（拿不到字体集），
+        /// `Some(false)` = 系统里确实没有。
+        ///
+        /// # ★ 它补的是一处**没有任何信号**的失败
+        ///
+        /// [`Self::create_layout`] 里的 `SetFontFamilyName` 对不存在的字族**不报错**——
+        /// DirectWrite 静默回落到默认字体，调用点连返回值都无从判断（那里本就写作
+        /// `let _ = …`，因为有返回值也不知道该不该当失败）。用户把字体名写错、或填成了
+        /// 字体的**全名/文件名**而不是家族名时，画面上只表现为「字体不对、字看着小了一圈」，
+        /// 日志里一片安静。
+        ///
+        /// ⚠️ 只在**设置字体时**查（每次配置变更一次），不在热路径：`create_layout` 是
+        /// 每帧每个文本叶子各走一遍的，那里加一次 COM 查询是按帧计费的。
+        pub fn family_exists(&self, family: &str) -> Option<bool> {
+            let name = family.trim();
+            if name.is_empty() {
+                return None;
+            }
+            unsafe {
+                let mut collection: Option<IDWriteFontCollection> = None;
+                self.factory
+                    .GetSystemFontCollection(&mut collection, false)
+                    .ok()?;
+                let collection = collection?;
+                let w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+                let mut index = 0u32;
+                let mut exists = BOOL(0);
+                collection
+                    .FindFamilyName(PCWSTR(w.as_ptr()), &mut index, &mut exists)
+                    .ok()?;
+                Some(exists.as_bool())
+            }
         }
 
         /// 取（或构建）本方案的自定义字体回退对象。方案不需要回退时返回 `None`——
@@ -1083,6 +1178,61 @@ mod imp {
             Ok(())
         }
     }
+    /// [`TextRenderer::resolve_family_in`] 的两条语义。用 Windows 自带字体建集，
+    /// 不依赖任何外部资源，故是常规用例而非 `#[ignore]` 探针。
+    ///
+    /// # ⚠️ 判据必须落在**返回值**上，不能落在测量宽度上
+    ///
+    /// 系统里往往也装着同一款字体：解析一旦失效，系统回退会挑中它、量出与解析成功时
+    /// 相同的宽度 ⇒ 按宽度断言必然假绿。真机上正是这条掩盖了 Toli 方案的家族名错误——
+    /// 装了 Menk 字体的机器画面「看着是好的」。
+    ///
+    /// # ⚠️ CI 跑不到它
+    ///
+    /// 它住在 `#[cfg(windows)] mod imp` 里，而 CI 的 test job 跑 Linux、clippy job 只做
+    /// 交叉编译不运行用例 ⇒ **本用例只在本地 Windows `cargo test` 时执行**。改这块前
+    /// 请在 Windows 上跑一遍，别指望 CI 拦下回归。
+    #[cfg(test)]
+    mod family_resolve_tests {
+        use super::*;
+
+        /// 从单个字体文件建一个只含它的自定义字体集（与 `set_chaizi_font` 同一套调用）。
+        fn collection_of(path: &str) -> Option<IDWriteFontCollection1> {
+            unsafe {
+                let factory: IDWriteFactory =
+                    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+                let f3: IDWriteFactory3 = factory.cast().ok()?;
+                let w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+                let file = f3.CreateFontFileReference(PCWSTR(w.as_ptr()), None).ok()?;
+                let builder: IDWriteFontSetBuilder1 =
+                    f3.CreateFontSetBuilder().ok()?.cast().ok()?;
+                builder.AddFontFile(&file).ok()?;
+                let set = builder.CreateFontSet().ok()?;
+                f3.CreateFontCollectionFromFontSet(&set).ok()
+            }
+        }
+
+        #[test]
+        fn wrong_declared_family_resolves_to_what_the_font_reports() {
+            const PATH: &str = r"C:\Windows\Fonts\consola.ttf";
+            if !std::path::Path::new(PATH).exists() {
+                return; // 精简版 Windows 可能没有这个文件；缺文件不该判失败
+            }
+            let Some(col) = collection_of(PATH) else {
+                return;
+            };
+            assert_eq!(
+                TextRenderer::resolve_family_in(&col, "这个家族名并不存在"),
+                "Consolas",
+                "写错的家族名必须解析成字体自报的家族名，否则 SetFontFamilyName 会静默不生效"
+            );
+            assert_eq!(
+                TextRenderer::resolve_family_in(&col, "Consolas"),
+                "Consolas",
+                "写对的家族名应原样返回"
+            );
+        }
+    }
 } // mod imp (windows)
 
 // macOS：真字形渲染走 CoreText（text/coretext.rs），re-export 为本模块的 TextRenderer。
@@ -1131,6 +1281,11 @@ mod imp {
 
         pub fn font_plan(&self) -> &FontPlan {
             &self.plan
+        }
+
+        /// mock：没有系统字体集可问，一律「不知道」——调用方据此不发 warn。
+        pub fn family_exists(&self, _family: &str) -> Option<bool> {
+            None
         }
 
         pub fn set_chaizi_font(&mut self, _path: &str, _family: &str) -> Result<(), String> {
@@ -1898,5 +2053,141 @@ mod tests {
             tr.draw_text(&mut buf, 8, 8, 0.0, 0.0, "x", [0, 0, 0, 255])
                 .is_ok()
         );
+    }
+}
+
+/// 词库级字体（`[[dictionaries]]` 的 `font_path` / `font_family`）的家族名探针。
+///
+/// # 为什么需要它
+///
+/// 词库级字体走的是 [`TextRenderer::set_chaizi_font`] 那条**自定义字体集**通路：
+/// PUA 段先 `SetFontCollection(自定义集)`，再 `SetFontFamilyName(方案里写的家族名)`。
+/// 后者在集里找不到该家族名时**不报错**——`create_layout` 里连返回值都没接。方案作者把
+/// `font_family` 写成了字体文件名、或写成自己起的别名（而不是 TTF `name` 表里的家族名）时，
+/// 画面上只表现为「这一段字没画出来 / 尺寸不对」，日志里一片安静。
+///
+/// 本用例把「家族名写对」与「写错」两种情形的**测量宽度**和**实际着墨像素数**并排量出来，
+/// 一次就能判断某个方案的字体到底有没有真的生效。
+///
+/// ⚠️ 需要真实字体文件，故 `#[ignore]`；用环境变量喂参数，不把任何用户路径写进仓库。
+/// ```text
+/// $env:WIND_TEST_FONT        = "…\toli\Menk Qagan StdEx Tig.ttf"
+/// $env:WIND_TEST_FAMILY      = "Menk字体"                  # 方案里声明的
+/// $env:WIND_TEST_FAMILY_REAL = "Menk Qagan StdEx Tig"      # 字体自报的
+/// $env:WIND_TEST_TEXT        = "…"                          # 默认单个 U+E264
+/// cargo test -p wind-ui --lib -j 2 dictionary_font_family -- --ignored --nocapture
+/// ```
+#[cfg(all(test, windows))]
+mod dict_font_probe {
+    use super::{TextRenderer, TextStyle};
+
+    /// 缓冲区里「着了墨」的像素数（背景全白，取蓝通道判暗）。
+    ///
+    /// ★ 判据用**着墨像素**而不是测量宽度：字族名没匹配上时，测量仍可能回落到某个字体
+    /// 而返回一个像模像样的宽度——只有真去画一遍，才分得开「量出来有」与「画出来有」。
+    fn inked(buf: &[u8], w: u32, h: u32) -> usize {
+        (0..(w * h) as usize)
+            .filter(|i| buf[i * 4 + 2] < 200)
+            .count()
+    }
+
+    /// 最右侧着墨列的 x（无墨返回 `None`）。
+    ///
+    /// ★★ 它是「测量说多宽」与「实际画到哪」的**对照量**：两者接近 = 画全了；
+    /// 实际远小于测量 = 字形在中途丢了（缺字、字体没生效、或上游把串截短了）。
+    /// 只看着墨总数分不开这两种——字形密的短串与字形疏的长串可以数出同一个总数。
+    fn rightmost_ink(buf: &[u8], w: u32, h: u32) -> Option<u32> {
+        (0..w)
+            .rev()
+            .find(|&x| (0..h).any(|y| buf[((y * w + x) * 4 + 2) as usize] < 200))
+    }
+
+    #[test]
+    #[ignore = "需要真实词库字体文件；路径由 WIND_TEST_FONT 给出"]
+    fn dictionary_font_family_name_mismatch_probe() {
+        let Ok(path) = std::env::var("WIND_TEST_FONT") else {
+            eprintln!("跳过：未设 WIND_TEST_FONT");
+            return;
+        };
+        let declared = std::env::var("WIND_TEST_FAMILY").unwrap_or_default();
+        let real = std::env::var("WIND_TEST_FAMILY_REAL").unwrap_or_default();
+        let text = std::env::var("WIND_TEST_TEXT").unwrap_or_else(|_| "\u{E264}".to_string());
+        eprintln!(
+            "探针文本：{}",
+            text.chars()
+                .map(|c| format!("U+{:04X}", c as u32))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        // 「不设词库字体」是基线：PUA 段走主字体，本就画不出蒙文字形。
+        // 没有它就分不清「家族名写对了」与「两种写法都没生效」。
+        for family in ["<不设词库字体>", declared.as_str(), real.as_str()] {
+            let mut r = TextRenderer::new("Microsoft YaHei UI", 18.0).expect("建 TextRenderer");
+            if family != "<不设词库字体>" {
+                if family.is_empty() {
+                    continue;
+                }
+                if let Err(e) = r.set_chaizi_font(&path, family) {
+                    eprintln!("family={family:?}: set_chaizi_font 失败：{e}");
+                    continue;
+                }
+            }
+            // ★ 字重是独立一维：词库自带字体通常**只含 Regular 一个字重**，而候选窗的选中态
+            // 常被主题配成加粗（`[text.selected] font_weight`）。自定义字体集里找不到 Bold 时
+            // 会发生什么，只有量一次才知道——「首候选空白、其余正常」正是这个形状。
+            let weight: i32 = std::env::var("WIND_TEST_WEIGHT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let ts = TextStyle::new(18.0).with_weight(weight);
+            let m = r.measure(&text, &ts);
+            // 缓冲区按测量宽度开，比它宽出一截——太窄会让 `draw` 的裁剪矩形自己把右边裁掉，
+            // 那正是本用例要测的那个量，不能由缓冲区尺寸制造出来。
+            let bw = (m.width.ceil() as u32 + 60).max(240);
+            let bh = (m.height.ceil() as u32 + 24).max(64);
+            let mut buf = vec![255u8; (bw * bh * 4) as usize];
+            r.draw(&mut buf, bw, bh, 2.0, 2.0, &text, &ts, [0, 0, 0, 255])
+                .expect("draw");
+            let right = rightmost_ink(&buf, bw, bh);
+            eprintln!(
+                "family={family:?} weight={weight}: measure={:.2}×{:.2}  着墨像素={}  最右着墨列={:?}（画满应≈{:.0}）",
+                m.width,
+                m.height,
+                inked(&buf, bw, bh),
+                right,
+                m.width + 2.0
+            );
+            // 逐前缀宽度：`truncate_text_for_width` 的二分正是按这些量走的，
+            // 非单调或跳变会让它裁在意料之外的位置。
+            let chars: Vec<char> = text.chars().collect();
+            let widths: Vec<String> = (1..=chars.len())
+                .map(|n| {
+                    let s: String = chars[..n].iter().collect();
+                    format!("{:.0}", r.measure(&s, &ts).width)
+                })
+                .collect();
+            eprintln!("  逐前缀宽度({} 字)：{}", chars.len(), widths.join(" "));
+            // 存一张图：字形对不对、有没有躺着、每个字形多大，这些只有看画面才判得了，
+            // 任何标量（宽度、着墨数）都答不上来。`WIND_TEST_OUT` 给目录，不设则不存。
+            if let Ok(dir) = std::env::var("WIND_TEST_OUT") {
+                let safe: String = family
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                let path = format!("{dir}/probe_{safe}.png");
+                // draw 出来的是 BGRA，image 要 RGBA——交换红蓝两通道。
+                let rgba: Vec<u8> = buf
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|p| [p[2], p[1], p[0], 255])
+                    .collect();
+                match image::save_buffer(&path, &rgba, bw, bh, image::ColorType::Rgba8) {
+                    Ok(()) => eprintln!("  已存图：{path}"),
+                    Err(e) => eprintln!("  存图失败：{e}"),
+                }
+            }
+        }
     }
 }

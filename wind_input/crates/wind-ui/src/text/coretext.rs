@@ -123,6 +123,12 @@ impl TextRenderer {
         &self.plan
     }
 
+    /// CoreText 侧尚未接查询（`CTFontCollectionCreateFromAvailableFonts` 可做），
+    /// 先一律「不知道」——调用方据此不发 warn，宁可少一条提示也不误报。
+    pub fn family_exists(&self, _family: &str) -> Option<bool> {
+        None
+    }
+
     /// 加载拆字字根字体（TTF）作级联回退；失败返回 Err（不影响普通文本渲染）。
     /// `_family` 为 DWrite 家族名（Windows 侧用），CoreText 直接从字体文件字节建描述符，故忽略。
     pub fn set_chaizi_font(&mut self, path: &str, _family: &str) -> Result<(), String> {

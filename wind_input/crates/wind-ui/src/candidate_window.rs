@@ -391,8 +391,24 @@ impl CandidateWindow {
 
     /// 设置候选文字的字族覆盖（方案级 `[candidate] font_family`）；空串 = 取消覆盖。
     /// 语义与优先级见 [`Self::text_family_override`]。
+    ///
+    /// # ⚠️ 它是「替换」不是「补充」
+    ///
+    /// 声明了它，候选文字就**不再用** `ui.font.family`——升级前候选文字一律走全局主字体，
+    /// 升级后凡声明本键的方案都改用它。两个字体在同一 `font_size` 下视觉大小本就不同
+    /// （字形在 em 框内的占比各家不一），故「换了个字体」在用户眼里等同于「字被缩放了」。
+    /// 这一行日志是那件事的唯一线索：换字族不经任何会失败的调用，画面之外无迹可寻。
     pub fn set_text_family_override(&mut self, family: &str) {
-        self.text_family_override = family.trim().to_string();
+        let want = family.trim().to_string();
+        if want != self.text_family_override {
+            tracing::info!(
+                "候选文字字族：「{}」→「{}」（方案级 [candidate] font_family；空 = 回落主题节点或 ui.font.family）",
+                self.text_family_override,
+                want
+            );
+            self.warn_if_family_missing(&want, "方案级 [candidate] font_family");
+        }
+        self.text_family_override = want;
     }
 
     /// 设置候选布局方向。三位的语义见 [`Self::rotated`] / [`Self::upright`] 与
@@ -403,6 +419,12 @@ impl CandidateWindow {
     pub fn set_orientation(&mut self, vertical: bool, rotated: bool, upright: bool) {
         debug_assert!(!(vertical && rotated), "vertical 与 rotated 不能同时为真");
         debug_assert!(!(upright && !rotated), "upright 蕴含 rotated");
+        if (vertical, rotated, upright) != (self.vertical, self.rotated, self.upright) {
+            // ⚠️ upright 会把整串按格切开逐格排版，这会**切断连写脚本**（蒙古文、阿拉伯文）
+            // 的字形连接，每格退回孤立形——孤立形比连写形窄小，画面上就是「字变小变散」。
+            // 那类脚本要的是 rotated。日志里带上这一位，才分得开「字体不对」与「排列不对」。
+            tracing::info!("候选排列：vertical={vertical} rotated={rotated} upright={upright}");
+        }
         self.vertical = vertical;
         self.rotated = rotated;
         self.upright = upright;
@@ -665,22 +687,57 @@ impl CandidateWindow {
         out
     }
 
+    /// 配置里写的字族名系统里没有时记一条 warn。
+    ///
+    /// # ★ 判据是 `Some(false)`，不是 `!= Some(true)`
+    ///
+    /// [`TextRenderer::family_exists`] 三态：`None` 表示**查不了**（mock 后端、CoreText、
+    /// 或拿不到系统字体集）。把 `None` 也当成缺失会让非 Windows 平台每次设字体都刷一条
+    /// 假 warn——「查不到」与「确实没有」是两件事，只有后者才是用户要看的那条。
+    ///
+    /// `source` 写配置键的**全名**：用户看到 warn 后要能直接去改那一项，
+    /// 而三个来源（全局主字体 / 回退链 / 方案级）改的是三个不同的地方。
+    fn warn_if_family_missing(&self, family: &str, source: &str) {
+        let name = family.trim();
+        if name.is_empty() {
+            return;
+        }
+        if self.text_renderer.family_exists(name) == Some(false) {
+            tracing::warn!(
+                "{source} 指定的字体「{name}」不在系统字体集里，已被静默回落到默认字体——\
+                 请确认填的是字体的**家族名**（如 Mongolian Baiti），DirectWrite 不认字体全名与文件名"
+            );
+        }
+    }
+
     /// 设置候选字体族（来自 ui.font.family；空=默认 [`DEFAULT_FONT_FAMILY`]）。
     pub fn set_font_family(&mut self, family: &str) {
-        self.text_renderer
-            .set_font_family(resolve_font_family(family));
+        let resolved = resolve_font_family(family);
+        self.warn_if_family_missing(resolved, "ui.font.family");
+        self.text_renderer.set_font_family(resolved);
     }
 
     /// 设置候选字体的回退链与按脚本的字体指派（来自 `ui.font.fallback` / `ui.font.scripts`）。
     ///
     /// `family` 必须与最近一次 [`Self::set_font_family`] 同源——它是默认链的链首。
     /// 二者由同一条 `UiCommand::SetCandidateFont` 携带，故不存在到达顺序问题。
+    ///
+    /// ⚠️ 链首不在这里查存在性：它就是 `family`，已由 [`Self::set_font_family`] 查过，
+    /// 同一条命令里查两遍就是同一条 warn 刷两次。
     pub fn set_font_plan(
         &mut self,
         family: &str,
         fallback: &[String],
         scripts: &[(String, Vec<String>)],
     ) {
+        for f in fallback {
+            self.warn_if_family_missing(f, "ui.font.fallback");
+        }
+        for (key, chain) in scripts {
+            for f in chain {
+                self.warn_if_family_missing(f, &format!("ui.font.scripts.{key}"));
+            }
+        }
         self.text_renderer
             .set_font_plan(build_font_plan(family, fallback, scripts));
     }
@@ -2837,6 +2894,28 @@ impl CandidateWindow {
                 cand_text_budgets.get(k).copied().unwrap_or(min_text_w),
             );
             let text_weight = eff_weight(&v.text, &v.item, is_sel, is_hover);
+            // 候选文字从「引擎给的原文」到「真正画上去的串」之间要过两道加工——按预算截断、
+            // 选字族——**两道都不会失败，也都不留痕迹**。PUA 词库（蒙古文 Menksoft 等）出问题时，
+            // 「少了几个字」与「用错了字体」在画面上长得一模一样，只有把两端的码位并排打出来
+            // 才分得开。⚠️ 打码位而不是打字符：PUA 字符在日志文件里同样是不可见的空白。
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let cps = |s: &str| {
+                    s.chars()
+                        .map(|c| format!("{:04X}", c as u32))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                tracing::debug!(
+                    "候选[{i}]{} 原文={} 显示={} 预算={:.1} 字族={} 字号={:.1} 字重={}",
+                    if is_sel { "(选中)" } else { "" },
+                    cps(&cand.text),
+                    cps(&display_text),
+                    cand_text_budgets.get(k).copied().unwrap_or(min_text_w),
+                    text_family.as_deref().unwrap_or("<全局>"),
+                    text_fs,
+                    text_weight,
+                );
+            }
             // 直立态逐格扶正（见 `upright_text`）。装饰（底色/边框/内外边距）留在**外层
             // 容器**上，整段文字仍是一个整体，不会每个字各画一个药丸。
             let mut tleaf = self
