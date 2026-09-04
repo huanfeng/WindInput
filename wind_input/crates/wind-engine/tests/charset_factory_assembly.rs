@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wind_engine::charset_assembly::assemble;
+use wind_engine::charset_assembly::{ExternalRefs, assemble};
 
 /// 仓库根下的 `data/`。
 ///
@@ -31,7 +31,7 @@ fn data_dir() -> PathBuf {
 fn factory_registry() -> wind_candidate::CharsetRegistry {
     let d = data_dir();
     let defs = wind_config::charset_def::load_layered(Some(&d), None, None);
-    assemble(&defs, Some(&d))
+    assemble(&defs, Some(&d), ExternalRefs::default())
 }
 
 /// ★★ 出厂零回归的**正确判据**：不是「没人表态」，而是「表的态与现状一模一样」。

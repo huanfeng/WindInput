@@ -273,22 +273,56 @@ impl CharsetRegistry {
         if wanted == 0 {
             return false;
         }
-        crate::split_markable_clusters(text).any(|cluster| {
-            let Some(ch) = cluster.chars().next() else {
-                return false;
-            };
-            let hits = self.range_hits(ch);
-            // 只遍历 `wanted` 里真正置位的那几个类（通常一两个），而不是全部类。
-            let mut w = wanted;
-            while w != 0 {
-                let i = w.trailing_zeros() as usize;
-                w &= w - 1;
-                if self.hits_class(cluster, i, hits) {
-                    return true;
-                }
-            }
-            false
+        crate::split_markable_clusters(text).any(|cluster| self.cluster_hits(cluster, wanted))
+    }
+
+    /// ★★ 一个字素簇命中 `wanted` 里的某个类吗：**先查整簇，不中再逐 `char` 回落**。
+    ///
+    /// # 两步都不能省
+    ///
+    /// 字表**不列**变体序列与 ZWJ 组合（生成 `emoji.yaml` 时的决定，设计文档 §5.3），
+    /// 理由是「逐 `char` 查表时首码位已命中」——那条推理的前提是逐 `char`。
+    ///
+    /// | 输入 | 只查整簇 | 只逐 `char` |
+    /// |---|---|---|
+    /// | `👨‍👩‍👧`（字表里是一整条） | ✅ | ✅ 首码位也在表里 |
+    /// | `⚽️` = `⚽` + `U+FE0F` | ⛔ **漏**，整簇不在表里 | ✅ 基字符在表里 |
+    /// | `1️⃣` = `1` + `FE0F` + `20E3` | ⛔ 漏 | ✅ `U+20E3` 在表里 |
+    ///
+    /// ⇒ 省掉逐 `char` 那一步，`⚽️` 这类**裸基字符 + 变体选择符**的写法全都漏判，而
+    /// 上游词库存的恰恰多是这种形态。这是接口两侧各自合理的假设失配出来的洞：
+    /// 生成器按「消费方逐 char」省略了组合序列，判定按簇遍历。
+    ///
+    /// `excluded` 仍然优先：用户删掉 `⚽` 之后 `⚽️` 也不再命中（两步都会被它挡住）。
+    fn cluster_hits(&self, cluster: &str, wanted: u128) -> bool {
+        let Some(first) = cluster.chars().next() else {
+            return false;
+        };
+        if self.probe(cluster, first, wanted) {
+            return true;
+        }
+        // 单 `char` 的簇：逐 char 与整簇是同一次查询，不必再走一遍。
+        if cluster.chars().nth(1).is_none() {
+            return false;
+        }
+        cluster.chars().any(|ch| {
+            let mut buf = [0u8; 4];
+            self.probe(ch.encode_utf8(&mut buf), ch, wanted)
         })
+    }
+
+    /// 只遍历 `wanted` 里真正置位的那几个类（通常一两个），而不是全部类。
+    fn probe(&self, cluster: &str, first: char, wanted: u128) -> bool {
+        let hits = self.range_hits(first);
+        let mut w = wanted;
+        while w != 0 {
+            let i = w.trailing_zeros() as usize;
+            w &= w - 1;
+            if self.hits_class(cluster, i, hits) {
+                return true;
+            }
+        }
+        false
     }
 
     /// 按 key 取类（外部引用 `exclude_blocks = ["emoji"]` 的解析用）。
@@ -705,6 +739,54 @@ mod tests {
         assert!(reg.in_rare_is_empty());
         assert!(!reg.no_freq("A"));
         assert!(!reg.in_rare("A"));
+    }
+
+    /// ★★ 裸基字符 + 变体选择符（`⚽️` = `⚽` + `U+FE0F`）必须命中。
+    ///
+    /// 字表里只有基字符——生成 `emoji.yaml` 时刻意不列变体序列与 ZWJ 组合（否则文件
+    /// 大 6 倍），前提是消费方会逐 `char` 回落。上游词库存的恰恰多是这种裸码位 +
+    /// 变体符的形态，漏了就是「配了免词频，可有些 emoji 还在记词频」。
+    #[test]
+    fn a_variation_sequence_falls_back_to_its_base_character() {
+        let (reg, _) = CharsetRegistry::compile(vec![ClassSpec {
+            key: "e".into(),
+            members: ["⚽".to_string()].into_iter().collect(),
+            no_freq: true,
+            ..Default::default()
+        }]);
+        assert!(reg.no_freq("⚽"), "基字符本身该命中");
+        assert!(
+            reg.no_freq("⚽\u{FE0F}"),
+            "基字符 + 变体选择符——字表不列这种组合，靠逐 char 回落"
+        );
+    }
+
+    /// 整簇优先于回落：字表里有整条 ZWJ 序列时按整簇命中，不必拆。
+    #[test]
+    fn a_whole_cluster_in_the_table_matches_as_one() {
+        let (reg, _) = CharsetRegistry::compile(vec![ClassSpec {
+            key: "e".into(),
+            members: ["👨\u{200D}👩\u{200D}👧".to_string()].into_iter().collect(),
+            no_freq: true,
+            ..Default::default()
+        }]);
+        assert!(reg.no_freq("👨\u{200D}👩\u{200D}👧"));
+        // 首码位单独出现时不在表里 ⇒ 不命中（这一条同时证明上一条不是靠回落蒙对的）。
+        assert!(!reg.no_freq("👨"));
+    }
+
+    /// `excluded` 对回落路径同样优先：删掉基字符后，变体序列也不再命中。
+    #[test]
+    fn removing_the_base_also_kills_the_variation_sequence() {
+        let (reg, _) = CharsetRegistry::compile(vec![ClassSpec {
+            key: "e".into(),
+            members: ["⚽".to_string()].into_iter().collect(),
+            excluded: ["⚽".to_string()].into_iter().collect(),
+            no_freq: true,
+            ..Default::default()
+        }]);
+        assert!(!reg.no_freq("⚽"));
+        assert!(!reg.no_freq("⚽\u{FE0F}"), "删除必须挡住回落那一步");
     }
 
     // ── 内置区块类（`builtin_block_specs`）──────────────────────────────────

@@ -62,7 +62,9 @@ fn emoji_class_carries_the_generated_list() {
         .find(|d| d.def.key == "emoji")
         .expect("emoji 类");
 
-    assert_eq!(emoji.def.display_name(), "表情符号");
+    // ⚠️ 刻意**不叫**「表情符号」——区块表里已有一个同名的块（`charblock::BLOCKS`），
+    // 两者在设置页会并排列出，同名的话用户分不清哪个是精确字表、哪个是那一个区块。
+    assert_eq!(emoji.def.display_name(), "Emoji 表情");
     assert_eq!(emoji.added.len(), 1427, "字表条数");
     assert!(emoji.removed.is_empty(), "出厂不该有移除项");
 

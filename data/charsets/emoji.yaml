@@ -7,7 +7,7 @@
 # charsets/ 下新建一个 .yaml，写 `key: emoji` 加你要改的字段即可，
 # 未写的字段与整份列表都会从这里继承；列表增删写 `★` / `-★`。
 key: emoji
-name: 表情符号
+name: Emoji 表情
 order: 10
 ...
 ©

@@ -99,7 +99,10 @@ impl PromotePrefix {
 
 /// 活跃方案的词频排序设置（apply_freq_rerank 用）。
 /// 按方案解析后缓存，避免每键读盘（frequency.md §8）。
-#[derive(Debug, Clone, Copy)]
+///
+/// ⚠️ **不再是 `Copy`**：免词频判据从一个 `BlockMask`（8 字节位集）换成了整个字符类
+/// registry，只能按 `Arc` 共享。克隆成本仍是一次引用计数，与原先的按位拷贝同量级。
+#[derive(Debug, Clone)]
 pub struct FreqSettings {
     /// 词频维度主开关（全局 schema.{codetable,pinyin}.frequency.enabled）；关则完全不重排。
     pub enabled: bool,
@@ -117,11 +120,11 @@ pub struct FreqSettings {
     /// ⚠️ 本项**按候选来源生效、不按当前方案**，故 `freq_settings` 的三个分支取的是
     /// 同一个值——混输方案里混进来的英文候选同样要按英文的口径记账。
     pub english_code_by_input: bool,
-    /// 不参与词频的字符区块（`schema.frequency.exclude_blocks`）。空集 = 全都参与。
+    /// 字符类判定结构。免词频取其中开了 `no_freq` 的那些类（并集语义）。
     ///
-    /// ⚠️ 与 [`Self::english_code_by_input`] 同样**跨引擎共用一个值**，三个分支取自
-    /// 分支之外算好的那一份——「emoji 不参与词频」在码表里成立、在拼音里不成立说不通。
-    pub exclude: wind_candidate::BlockMask,
+    /// ⚠️ 与 [`Self::english_code_by_input`] 同样**跨引擎共用一份**，三个分支取自
+    /// 分支之外算好的那一个——「emoji 不参与词频」在码表里成立、在拼音里不成立说不通。
+    pub charsets: Arc<wind_candidate::CharsetRegistry>,
 }
 
 impl Default for FreqSettings {
@@ -132,7 +135,8 @@ impl Default for FreqSettings {
             protect: ProtectPolicy::NONE,
             promote_prefix: PromotePrefix::Single,
             english_code_by_input: false,
-            exclude: wind_candidate::BlockMask::EMPTY,
+            // 空 registry 的 `no_freq` 恒假，与原先的 `BlockMask::EMPTY` 同义。
+            charsets: Arc::default(),
         }
     }
 }
@@ -152,7 +156,7 @@ impl FreqSettings {
     /// 两处各写一遍 `if`、再靠注释提醒别人保持一致。同款教训见 `shadow_code_of`
     /// （读端、写端、菜单灰显三处取码必须走同一个口）。
     pub fn excluded_from_freq(&self, text: &str) -> bool {
-        self.exclude.contains_text(text)
+        self.charsets.no_freq(text)
     }
 }
 
@@ -358,7 +362,7 @@ pub struct EngineManager {
     /// 存解析后的 [`wind_candidate::BlockMask`] 而不是原始 `Vec<String>`：解析要按名字线性
     /// 查块表，而本项的消费点在按键热路径上。跟 `codetable`/`english` 那几份镜像一样由
     /// `update_config` 刷新——**漏了那一步的症状是「设置页改了不生效、重启后才生效」**。
-    freq_exclude: Mutex<wind_candidate::BlockMask>,
+    charsets: Mutex<Arc<wind_candidate::CharsetRegistry>>,
     /// 词频排序设置缓存（schema_id -> FreqSettings；按需解析、避免每键读盘）
     freq_cache: Mutex<HashMap<String, FreqSettings>>,
     /// 方案引擎类型缓存（`schema_engine_type`）。**按 id 缓存，reload/invalidate 时清**，
@@ -608,7 +612,7 @@ impl EngineManager {
             mix: Mutex::new(config.schema.mix.clone()),
             english: Mutex::new(config.schema.english.clone()),
             temp_pinyin: Mutex::new(config.input.temp_pinyin.clone()),
-            freq_exclude: Mutex::new(Self::parse_freq_exclude(config)),
+            charsets: Mutex::new(Arc::new(Self::build_charsets(config, data_dir))),
             freq_cache: Mutex::new(HashMap::new()),
             schema_type_cache: Mutex::new(HashMap::new()),
             key_actions_cache: Mutex::new(HashMap::new()),
@@ -2488,10 +2492,10 @@ impl EngineManager {
         *self.english.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.english.clone();
         *self.temp_pinyin.lock().unwrap_or_else(|e| e.into_inner()) =
             config.input.temp_pinyin.clone();
-        // 词频排除区块：**重新解析**而不是照搬字符串——镜像存的是解析结果。漏掉这一行的
-        // 症状是设置页改了不生效、重启后才生效（`freq_cache` 在下面被清，会拿着旧 mask 重建）。
-        *self.freq_exclude.lock().unwrap_or_else(|e| e.into_inner()) =
-            Self::parse_freq_exclude(config);
+        // 字符类：**重新装配**而不是照搬字符串——镜像存的是解析结果。漏掉这一行的
+        // 症状是设置页改了不生效、重启后才生效（`freq_cache` 在下面被清，会拿着旧的重建）。
+        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) =
+            Arc::new(Self::build_charsets(config, self.data_dir.as_deref()));
         *self
             .primary_pinyin
             .lock()
@@ -3258,7 +3262,7 @@ impl EngineManager {
         {
             let cache = self.freq_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(s) = cache.get(&id) {
-                return *s;
+                return s.clone();
             }
         }
         // 英文记账口径**按候选来源生效、不按当前方案**——混输方案里混进来的英文候选
@@ -3270,7 +3274,7 @@ impl EngineManager {
         };
         // 同上：跨引擎共用一个值，故在分支之外取一次。只在某个分支里读的话，别的引擎下
         // 这条规则会静默失效——而那正是 `english_code_by_input` 当初踩过的坑。
-        let exclude = *self.freq_exclude.lock().unwrap_or_else(|e| e.into_inner());
+        let charsets = Arc::clone(&self.charsets.lock().unwrap_or_else(|e| e.into_inner()));
         let engine_type = self.schema_engine_type(&id);
         let settings = match engine_type.as_deref() {
             Some("english") => {
@@ -3283,7 +3287,7 @@ impl EngineManager {
                     protect: ProtectPolicy::NONE,
                     promote_prefix: PromotePrefix::parse(&en.frequency.promote_prefix),
                     english_code_by_input,
-                    exclude,
+                    charsets: Arc::clone(&charsets),
                 }
             }
             Some("pinyin") => {
@@ -3295,7 +3299,7 @@ impl EngineManager {
                     protect: ProtectPolicy::NONE,
                     promote_prefix: PromotePrefix::parse(&pf.frequency.promote_prefix),
                     english_code_by_input,
-                    exclude,
+                    charsets: Arc::clone(&charsets),
                 }
             }
             _ => {
@@ -3319,7 +3323,7 @@ impl EngineManager {
                     // 对前缀补全从无限制），避免升级后存量用户的调频突然变窄。
                     promote_prefix: PromotePrefix::parse(&ct.frequency.promote_prefix),
                     english_code_by_input,
-                    exclude,
+                    charsets: Arc::clone(&charsets),
                     enabled: ct.frequency.enabled,
                     strategy: Self::parse_freq_strategy(&ct.frequency.strategy),
                     protect: ProtectPolicy {
@@ -3336,28 +3340,42 @@ impl EngineManager {
         self.freq_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id, settings);
+            .insert(id, settings.clone());
         settings
     }
 
-    /// 解析 `schema.frequency.exclude_blocks`，并把拼错的名字 warn 出来。
+    /// 装配字符类 registry：`charsets/*.yaml` 三层 + 内置区块类 + 两个外部引用。
     ///
-    /// `BlockMask::from_config` 刻意只返回未识别项、不自己报警告（wind-candidate 无
-    /// `tracing` 依赖，且「怎么报」属调用方）——这里就是承接那一半的地方。
+    /// # ★ 全进程只装配这一份
     ///
-    /// ⚠️ 必须报：块名是中文串，`表情符號`（繁体"號"）这种错法肉眼极难分辨，而静默跳过的
-    /// 表现就是「配了没反应」，用户无从判断是名字写错还是功能没生效。
-    fn parse_freq_exclude(config: &wind_config::Config) -> wind_candidate::BlockMask {
-        let (mask, unknown) =
-            wind_candidate::BlockMask::from_config(&config.schema.frequency.exclude_blocks);
-        if !unknown.is_empty() {
-            warn!(
-                "schema.frequency.exclude_blocks 有 {} 个名字不认识、已跳过: {}（应为区块名或预设组名 emoji）",
-                unknown.len(),
-                unknown.join("、")
-            );
-        }
-        mask
+    /// `input.rare_char.include_blocks`（生僻字模式准入）在这里就一并吃进去，尽管它的
+    /// 消费点在 coordinator——那边通过 [`Self::charsets`] 取同一份。两处各装配一份的
+    /// 话，同一个 key 可能在免词频和生僻准入下解析出不同的类（用户层新增/删除一个类的
+    /// 瞬间尤其如此），而这种不一致没有任何报错。
+    fn build_charsets(
+        config: &wind_config::Config,
+        data_dir: Option<&Path>,
+    ) -> wind_candidate::CharsetRegistry {
+        // 三层同名目录，层序与 `resolve_schema_resource` 一致（后者是 user > custom >
+        // data，这里是靠后的覆盖靠前的）。
+        let defs = wind_config::charset_def::load_layered(
+            data_dir,
+            wind_config::Config::custom_data_dir().as_deref(),
+            wind_config::Config::user_config_dir().as_deref(),
+        );
+        crate::charset_assembly::assemble(
+            &defs,
+            data_dir,
+            crate::charset_assembly::ExternalRefs {
+                no_freq: &config.schema.frequency.exclude_blocks,
+                in_rare: &config.input.rare_char.include_blocks,
+            },
+        )
+    }
+
+    /// 当前的字符类 registry。coordinator 的生僻字准入与类型列都从这里取。
+    pub fn charsets(&self) -> Arc<wind_candidate::CharsetRegistry> {
+        Arc::clone(&self.charsets.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// 词频策略字符串 → 枚举（纯映射，便于单测）。
