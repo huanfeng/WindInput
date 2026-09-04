@@ -19,6 +19,13 @@ pub struct BackupSources<'a> {
     /// 与 `user_schemas_dir`（方案文件本体）是不同目录，须分别打包。
     pub user_schema_overrides_dir: Option<&'a Path>,
     pub user_themes_dir: Option<&'a Path>,
+    /// 用户层字符类定义目录（`{user_config_dir}/charsets/*.yaml`，设置页「字符集分类」
+    /// 管理）。
+    ///
+    /// ⚠️ 与 `compat.toml` / `schema_overrides/` 同类：都是用户层配置、都在设置页里改。
+    /// 漏掉它的表现是**静默的**——备份成功、还原成功，只是换了机器之后「我调过的那些
+    /// 字符类」没了，而用户想不到去怀疑备份。
+    pub user_charsets_dir: Option<&'a Path>,
     pub state_file: Option<&'a Path>,
 }
 
@@ -218,6 +225,14 @@ pub fn create_backup(
             add(&mut w, name, &data, "theme_file", serde_json::Value::Null)?;
         }
     }
+    if let Some(dir) = src.user_charsets_dir
+        && dir.is_dir()
+    {
+        for (name, path) in walk_dir(dir, "charsets/")? {
+            let data = std::fs::read(&path)?;
+            add(&mut w, name, &data, "charset_file", serde_json::Value::Null)?;
+        }
+    }
 
     w.finish()?;
     Ok(BackupResult {
@@ -232,6 +247,13 @@ pub struct RestoreTargets<'a> {
     pub user_schemas_dir: Option<&'a Path>,
     pub user_schema_overrides_dir: Option<&'a Path>,
     pub user_themes_dir: Option<&'a Path>,
+    /// 用户层字符类定义目录（`{user_config_dir}/charsets/*.yaml`，设置页「字符集分类」
+    /// 管理）。
+    ///
+    /// ⚠️ 与 `compat.toml` / `schema_overrides/` 同类：都是用户层配置、都在设置页里改。
+    /// 漏掉它的表现是**静默的**——备份成功、还原成功，只是换了机器之后「我调过的那些
+    /// 字符类」没了，而用户想不到去怀疑备份。
+    pub user_charsets_dir: Option<&'a Path>,
     pub state_file: Option<&'a Path>,
 }
 
@@ -414,6 +436,16 @@ pub fn restore_backup(
                     }
                 }
             }
+            "charset_file" => {
+                if let Some(dir) = targets.user_charsets_dir {
+                    let rel = crate::bundle::validate_entry_rel(&e.path, "charsets/")?;
+                    if write_file(&dir.join(rel), &bytes, strategy)? {
+                        restored.push(e.path.clone());
+                    } else {
+                        conflicts.push(e.path.clone());
+                    }
+                }
+            }
             "theme_file" => {
                 if let Some(dir) = targets.user_themes_dir {
                     let rel = crate::bundle::validate_entry_rel(&e.path, "themes/")?;
@@ -471,6 +503,17 @@ mod tests {
         let themes = t.path().join("themes");
         fs::create_dir_all(themes.join("dark")).unwrap();
         fs::write(themes.join("dark/theme.toml"), "[meta]\nname=\"dark\"\n").unwrap();
+        // 字符类：用户在设置页调过的那些，与 compat.toml 同属用户层配置。
+        let charsets = t.path().join("charsets");
+        fs::create_dir_all(&charsets).unwrap();
+        fs::write(
+            charsets.join("emoji.yaml"),
+            "---
+key: emoji
+default: rare
+",
+        )
+        .unwrap();
         let state = t.path().join("state.toml");
         fs::write(&state, "[toolbar]\n").unwrap();
 
@@ -481,6 +524,7 @@ mod tests {
             user_schemas_dir: Some(&schemas),
             user_schema_overrides_dir: Some(&overrides),
             user_themes_dir: Some(&themes),
+            user_charsets_dir: Some(&charsets),
             state_file: Some(&state),
         };
         let r = create_backup(
@@ -556,6 +600,7 @@ mod tests {
             user_schemas_dir: None,
             user_schema_overrides_dir: Some(&overrides),
             user_themes_dir: None,
+            user_charsets_dir: None,
             state_file: None,
         };
         create_backup(
@@ -584,6 +629,7 @@ mod tests {
             user_schemas_dir: None,
             user_schema_overrides_dir: Some(&overrides2),
             user_themes_dir: None,
+            user_charsets_dir: None,
             state_file: None,
         };
         let r = restore_backup(&out, &s2, &targets, crate::merge::Strategy::Merge, None).unwrap();
@@ -622,6 +668,7 @@ mod tests {
             user_schemas_dir: None,
             user_schema_overrides_dir: None,
             user_themes_dir: None,
+            user_charsets_dir: None,
             state_file: None,
         };
         create_backup(
@@ -648,6 +695,7 @@ mod tests {
             user_schemas_dir: None,
             user_schema_overrides_dir: None,
             user_themes_dir: None,
+            user_charsets_dir: None,
             state_file: None,
         };
         // 只还原 config；Merge 下本地已存在 → conflict，内容不变
@@ -690,6 +738,7 @@ mod tests {
             user_schemas_dir: None,
             user_schema_overrides_dir: None,
             user_themes_dir: None,
+            user_charsets_dir: None,
             state_file: None,
         };
         create_backup(
@@ -715,6 +764,7 @@ mod tests {
             user_schemas_dir: None,
             user_schema_overrides_dir: None,
             user_themes_dir: None,
+            user_charsets_dir: None,
             state_file: None,
         };
         let sections = vec!["dict".to_string()];
@@ -742,6 +792,7 @@ mod tests {
             user_schemas_dir: None,
             user_schema_overrides_dir: None,
             user_themes_dir: None,
+            user_charsets_dir: None,
             state_file: None,
         };
         create_backup(
@@ -772,5 +823,78 @@ mod tests {
         // 「配置」「用户方案」段——否则设置页勾了「配置」却漏还原 compat.toml。
         assert_eq!(section_of("compat"), "config");
         assert_eq!(section_of("schema_override_file"), "schemas");
+    }
+
+    /// ★ 用户层的字符类定义要进备份包，还原时落回去。
+    ///
+    /// ⚠️ 漏掉它的表现是**静默的**：备份成功、还原成功，只是换了机器之后「我调过的
+    /// 那些字符类」没了——而用户想不到去怀疑备份。同类的 compat.toml /
+    /// schema_overrides/ 早就在包里，charsets/ 是后加的一档，最容易漏。
+    #[test]
+    fn charsets_are_backed_up_and_restored() {
+        let t = tempfile::tempdir().unwrap();
+        let src_dir = t.path().join("src");
+        let charsets = src_dir.join("charsets");
+        std::fs::create_dir_all(&charsets).unwrap();
+        std::fs::write(
+            charsets.join("emoji.yaml"),
+            "---
+key: emoji
+default: rare
+",
+        )
+        .unwrap();
+
+        let out = t.path().join("b.zip");
+        let store = Store::open(t.path().join("s.redb")).unwrap();
+        let src = BackupSources {
+            user_config_file: None,
+            compat_file: None,
+            user_schemas_dir: None,
+            user_schema_overrides_dir: None,
+            user_themes_dir: None,
+            user_charsets_dir: Some(&charsets),
+            state_file: None,
+        };
+        let r = create_backup(
+            &store,
+            &src,
+            &out,
+            "0",
+            "test",
+            "2026-09-05T00:00:00Z",
+            &BackupOptions {
+                include_stats: false,
+                include_state: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            r.entries.iter().any(|e| e.contains("charsets/emoji.yaml")),
+            "字符类定义没进备份包：{:?}",
+            r.entries
+        );
+
+        let dst = t.path().join("dst").join("charsets");
+        let store2 = Store::open(t.path().join("s2.redb")).unwrap();
+        let targets = RestoreTargets {
+            user_config_file: None,
+            compat_file: None,
+            user_schemas_dir: None,
+            user_schema_overrides_dir: None,
+            user_themes_dir: None,
+            user_charsets_dir: Some(&dst),
+            state_file: None,
+        };
+        restore_backup(
+            &out,
+            &store2,
+            &targets,
+            crate::merge::Strategy::Replace,
+            None,
+        )
+        .unwrap();
+        let back = std::fs::read_to_string(dst.join("emoji.yaml")).expect("还原后该有这份文件");
+        assert!(back.contains("key: emoji"), "内容对不上：{back}");
     }
 }

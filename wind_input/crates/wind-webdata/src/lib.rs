@@ -1603,6 +1603,10 @@ pub trait WebDataRpc: WebDataHost {
         let schemas_dir = user_dir.as_ref().map(|d| d.join("schemas"));
         let schema_overrides_dir = user_dir.as_ref().map(|d| d.join("schema_overrides"));
         let themes_dir = user_dir.as_ref().map(|d| d.join("themes"));
+        // 字符类定义：与 compat.toml / schema_overrides 同类的用户层配置。
+        let charsets_dir = user_dir
+            .as_ref()
+            .map(|d| d.join(wind_config::charset_def::CHARSETS_DIR_NAME));
         let state_file = wind_config::Config::local_dir().map(|d| d.join("state.toml"));
         let src = BackupSources {
             user_config_file: cfg_file.as_deref(),
@@ -1610,6 +1614,7 @@ pub trait WebDataRpc: WebDataHost {
             user_schemas_dir: schemas_dir.as_deref(),
             user_schema_overrides_dir: schema_overrides_dir.as_deref(),
             user_themes_dir: themes_dir.as_deref(),
+            user_charsets_dir: charsets_dir.as_deref(),
             state_file: state_file.as_deref(),
         };
         let r = create_backup(
@@ -1663,6 +1668,10 @@ pub trait WebDataRpc: WebDataHost {
         let schemas_dir = user_dir.as_ref().map(|d| d.join("schemas"));
         let schema_overrides_dir = user_dir.as_ref().map(|d| d.join("schema_overrides"));
         let themes_dir = user_dir.as_ref().map(|d| d.join("themes"));
+        // 字符类定义：与 compat.toml / schema_overrides 同类的用户层配置。
+        let charsets_dir = user_dir
+            .as_ref()
+            .map(|d| d.join(wind_config::charset_def::CHARSETS_DIR_NAME));
         let state_file = wind_config::Config::local_dir().map(|d| d.join("state.toml"));
         let targets = RestoreTargets {
             user_config_file: cfg_file.as_deref(),
@@ -1670,6 +1679,7 @@ pub trait WebDataRpc: WebDataHost {
             user_schemas_dir: schemas_dir.as_deref(),
             user_schema_overrides_dir: schema_overrides_dir.as_deref(),
             user_themes_dir: themes_dir.as_deref(),
+            user_charsets_dir: charsets_dir.as_deref(),
             state_file: state_file.as_deref(),
         };
         let r = restore_backup(
