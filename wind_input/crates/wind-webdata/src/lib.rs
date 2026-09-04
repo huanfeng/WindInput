@@ -2665,6 +2665,14 @@ pub trait WebDataRpc: WebDataHost {
                     "blockRange": wind_candidate::block_of_cluster(&r.text).range_text(),
                     // 整类批量能不能点。汉字块恒 false——见 `block_allows_bulk_edit`。
                     "blockBulkEditable": r.block_bulk_editable,
+                    // **决定这个字常用性的那个字符类**（null = 没有类命中它）。
+                    //
+                    // ⚠️ 与 `block` 是两个不同的问题，各自绑着一个不同的操作：
+                    // `block` 决定「整类批量」扫哪个码位区间（写上千条 redb 覆盖），
+                    // `class` 决定「改类的 default」影响谁（写一行 yaml，作用于整个类）。
+                    // 拿后者顶掉前者，用户就会看着「emoji」去点一个按「表情符号」块
+                    // 工作的按钮。
+                    "class": r.class,
                 })
             })
             .collect();
@@ -5768,6 +5776,8 @@ outside: rare
                 base_common: base,
                 overridden: base != now,
                 block: blk.name,
+                // 本条测的是排序稳定性，与字符类无关。
+                class: None,
                 block_bulk_editable: wind_candidate::block_allows_bulk_edit(&blk),
             }
         };

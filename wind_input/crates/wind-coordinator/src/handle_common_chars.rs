@@ -39,6 +39,18 @@ pub struct CommonCharRow {
     /// ⚠️ 范围文本（`2FF0-2FFF`）**不存在这里**：消费方自己调 `block_of_cluster(t).range_text()`，
     /// 免得把同一份格式化逻辑抄第二份。
     pub block: &'static str,
+    /// **决定这个字常用性的那个字符类**的 key（`None` = 没有类命中它）。
+    ///
+    /// ★ 与 `block` 是两个不同的问题，各自绑着一个不同的操作：
+    ///
+    /// | | 回答什么 | 绑着哪个操作 |
+    /// |---|---|---|
+    /// | `block` | 它在哪个 Unicode 区块 | **整类批量**：扫那个码位区间 → 写上千条 redb 覆盖 |
+    /// | `class` | 谁决定了它的常用性 | **改类的 default**：写一行 yaml，作用于整个类 |
+    ///
+    /// ⇒ 不能拿 class 顶掉 block：用户会看着「emoji」去点一个按「表情符号」块工作的
+    /// 按钮。两个都给，各自标清楚。
+    pub class: Option<String>,
     /// 这个块能不能整类批量操作（[`wind_candidate::block_allows_bulk_edit`]）。
     ///
     /// ⛔ 汉字块恒 `false`：对着一行「我」点「将『基本汉字』全部设为生僻」，一次误点就是
@@ -162,8 +174,10 @@ impl crate::Coordinator {
     /// `only_modified` 为真时只留改过的行：全表 8104 条里自己动过的那几个，翻页是找不到的。
     pub(crate) fn common_char_rows(&self, query: &str, only_modified: bool) -> Vec<CommonCharRow> {
         let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
+        // 列表最多 8000+ 行，registry 在循环外取一次。
+        let cs = self.engine_mgr.charsets();
         let q = query.trim();
-        cc.list_all(&self.engine_mgr.charsets())
+        cc.list_all(&cs)
             .into_iter()
             // 搜索按**子串包含**：查询串里出现过这个簇即命中。多码位簇用 `chars().contains`
             // 判不出来（那是按单码位比的），`⚽️` 会永远搜不到。
@@ -171,12 +185,20 @@ impl crate::Coordinator {
             .filter(|(t, _, _)| !only_modified || cc.override_of_cluster(t).is_some())
             .map(|(text, base_common, common)| {
                 let blk = wind_candidate::block_of_cluster(&text);
+                let class = cs.class_of(&text).map(|c| {
+                    if c.name.is_empty() {
+                        c.key.clone()
+                    } else {
+                        c.name.clone()
+                    }
+                });
                 CommonCharRow {
                     overridden: cc.override_of_cluster(&text).is_some(),
                     text,
                     common,
                     base_common,
                     block: blk.name,
+                    class,
                     block_bulk_editable: wind_candidate::block_allows_bulk_edit(&blk),
                 }
             })
