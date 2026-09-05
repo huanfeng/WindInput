@@ -763,16 +763,22 @@ pub fn diff_against_factory(
 /// 先写的——用户看到的是「改了 A 类，B 类的设置没了」。校验则在入口就拒绝，代价是用户
 /// 得换个名字，而那正是他能理解并处理的。
 ///
-/// ⛔ 明确拒绝的：路径分隔符、`.`（含 `..`）、`:`（Windows 的 `C:name` 数据流语法，
-/// 见仓内防穿越守卫的同款约定）、控制字符、首尾空白。
+/// ⛔ 明确拒绝的：路径分隔符（`/` 与 `\` **都**拦）、`.`（含 `..`）、`:`（Windows 的
+/// `C:name` 数据流语法，见仓内防穿越守卫的同款约定）、控制字符、首尾空白。
+///
+/// ⛔ 不要用 `std::path::is_separator`：它问的是「**当前运行平台**怎么切路径」，Linux 下
+/// 只认 `/`，于是同一个 `a\b` 在 Windows 上被拒、在 Linux 上放行——守卫按宿主平台弱一档。
+/// 这里要问的是「这个 key 将来会被写成**哪些平台**的文件名」：备份包跨平台流转、协调器
+/// 还要上 Linux/Android，判据必须与运行平台无关，两个分隔符一律拦。
 pub fn is_valid_key(key: &str) -> bool {
     if key.is_empty() || key.len() > 64 || key.trim() != key {
         return false;
     }
     !key.chars().any(|c| {
-        std::path::is_separator(c)
-            || c.is_control()
-            || matches!(c, '.' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        matches!(
+            c,
+            '/' | '\\' | '.' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+        ) || c.is_control()
     })
 }
 
@@ -1175,6 +1181,10 @@ mod tests {
     ///
     /// 安全化会让两个不同的 key 落到同一个文件上，后写的静默覆盖先写的——用户看到的是
     /// 「改了 A 类，B 类的设置没了」。
+    ///
+    /// ⚠️ `a/b` 与 `a\b` 两条**在所有平台上都必须被拒**。这里曾因 `is_valid_key` 用了
+    /// `std::path::is_separator` 而在 Linux 上挂掉（本机 Windows 全绿、CI 才发现）——
+    /// 再挂时要改的是守卫，不是把这两条从表里删掉。
     #[test]
     fn dangerous_keys_are_rejected_not_sanitized() {
         for bad in [
