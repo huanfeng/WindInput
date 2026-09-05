@@ -153,8 +153,12 @@ public:
     // Send caret position update to Go Service
     // source: CARET_SRC_*，标明这组坐标来自哪个通道。消费端据此决定能否当权威坐标、
     //         能否与组合起点做距离比较（GUI 回退值与组合起点本就不同源，比较无意义）。
+    // compRect*：整个组合 range 的包围矩形，四值全 0 = 本帧未取到（服务端据此忽略）。
+    // 见 BinaryProtocol.h 的 CaretPayloadV3。
     BOOL SendCaretUpdate(int x, int y, int height, int compositionStartX = 0, int compositionStartY = 0,
-                         int source = CARET_SRC_UNKNOWN);
+                         int source = CARET_SRC_UNKNOWN,
+                         int compRectLeft = 0, int compRectTop = 0,
+                         int compRectRight = 0, int compRectBottom = 0);
 
     // Send caret-pending handshake: composition just started, real caret coming after app reflow.
     // Tells Go to extend its first-show fallback timeout so it doesn't fall back to pre-key cursor.

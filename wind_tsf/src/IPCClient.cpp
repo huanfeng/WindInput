@@ -697,7 +697,8 @@ BOOL CIPCClient::SendCommitRequest(const uint8_t* payload, uint32_t payloadSize)
 }
 
 BOOL CIPCClient::SendCaretUpdate(int x, int y, int height, int compositionStartX, int compositionStartY,
-                                 int source)
+                                 int source,
+                                 int compRectLeft, int compRectTop, int compRectRight, int compRectBottom)
 {
     if (!_ShouldAttemptOperation())
     {
@@ -709,13 +710,25 @@ BOOL CIPCClient::SendCaretUpdate(int x, int y, int height, int compositionStartX
         return FALSE;
     }
 
-    CaretPayloadV2 payload;
+    CaretPayloadV3 payload;
     payload.caret.x = x;
     payload.caret.y = y;
     payload.caret.height = height;
     payload.caret.compositionStartX = compositionStartX;
     payload.caret.compositionStartY = compositionStartY;
     payload.source = source;
+    payload.compRectLeft = compRectLeft;
+    payload.compRectTop = compRectTop;
+    payload.compRectRight = compRectRight;
+    payload.compRectBottom = compRectBottom;
+
+    // 组合矩形单独打一行：它是探针阶段的观察对象，与 caret 混在一行会被 caret 的高频刷屏淹没。
+    // 四值全 0 时不打——那只表示本帧没有组合（或没取到），不是异常。
+    if (compRectLeft != 0 || compRectTop != 0 || compRectRight != 0 || compRectBottom != 0)
+    {
+        _LogDebug(L"  compRect=(%d,%d,%d,%d) w=%d h=%d", compRectLeft, compRectTop, compRectRight,
+                  compRectBottom, compRectRight - compRectLeft, compRectBottom - compRectTop);
+    }
 
     _LogDebug(L"Sending caret update (async): x=%d, y=%d, h=%d, compStart=(%d,%d) src=%d", x, y, height,
               compositionStartX, compositionStartY, source);

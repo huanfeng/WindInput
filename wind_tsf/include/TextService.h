@@ -242,7 +242,8 @@ public:
     // Get and send caret position to Go Service
     // pSource: 非空时输出命中的是回退链的哪一级（CARET_SRC_*）。**这条链的每一级语义都不同**，
     //          TSF 坐标与 GUI 光标分属两个域，混为一谈正是候选窗错位的历史根因。
-    BOOL GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSource = nullptr);
+    BOOL GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSource = nullptr,
+                          RECT* pCompRect = nullptr, BOOL* pHasCompRect = nullptr);
     void SendCaretPositionUpdate();
 
     // 非按键上下文（WM_TIMER 等）专用：用异步 edit session 取坐标，结果经
@@ -268,7 +269,9 @@ public:
 
     // Get caret position using TSF APIs (more accurate for browsers)
     // pUsedCompStart: 非空时输出「caret 是否由组合起点降级顶替」，用于区分两种 TSF 来源
-    BOOL GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BOOL* pUsedCompStart = nullptr);
+    // pCompRect/pHasCompRect：整个组合 range 的包围矩形，见 BinaryProtocol.h 的 CaretPayloadV3
+    BOOL GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BOOL* pUsedCompStart = nullptr,
+                                 RECT* pCompRect = nullptr, BOOL* pHasCompRect = nullptr);
     BOOL GetCompositionStartPosition(LONG* px, LONG* py);
 
     // Input mode control
@@ -404,7 +407,10 @@ public:
 
 private:
     // 坐标出口：DPI 归一 + 更新 last known + 发 IPC。同步/异步两条取坐标路径共用。
-    void _EmitCaretUpdate(LONG x, LONG y, LONG height, LONG compStartX, LONG compStartY, int source);
+    // pCompRect：整个组合 range 的包围矩形，nullptr / 四值全 0 表示本帧没取到。
+    // 探针阶段只上报不决策，见 BinaryProtocol.h 的 CaretPayloadV3。
+    void _EmitCaretUpdate(LONG x, LONG y, LONG height, LONG compStartX, LONG compStartY, int source,
+                          const RECT* pCompRect = nullptr);
 
     LONG _refCount;
     ITfThreadMgr* _pThreadMgr;
@@ -568,6 +574,10 @@ private:
     RECT _cachedCompStartRect;
     BOOL _hasCachedCaretPos;
     BOOL _hasCachedCompStartPos;
+    // 整个组合 range 的包围矩形（与 _cachedCompStartRect 同源同 cookie）。
+    // 见 BinaryProtocol.h 的 CaretPayloadV3。
+    RECT _cachedCompRect;
+    BOOL _hasCachedCompRect;
     // Weasel 模式：StartComposition 后第一次 SendCaretPositionUpdate 不立即发 IPC，
     // 改为等 OnLayoutChange（reflow 完成的权威信号）或 50ms timer 兜底。
     BOOL _compositionJustStarted;
