@@ -189,6 +189,7 @@ When implementing features or fixes in wind_tsf:
 5. **Named pipes:** Connection is lazy (on-demand), with circuit breaker fallback
 6. **Edit sessions:** For TSF API calls (composition, caret position), must be called within RequestEditSession
 7. **HostWindow:** 只在 compat.toml 中 `host_render = true` 的进程中激活（由 Rust 服务通过 IPC 指令触发 Initialize）
+8. **UI-less（宿主自绘候选）:** `ITfCandidateListUIElement` 在宿主 `pbShow=FALSE` 时答真实快照（`CMD_UIELEMENT_QUERY` 拉取），否则答占位；`_uiElementShown` 记的是宿主意愿，EndUIElement 不得清它。见 `docs/design/game-compat-tsf-uielement.md`
 
 ### Common Patterns
 

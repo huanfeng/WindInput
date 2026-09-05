@@ -50,6 +50,13 @@ C++ implementation files for the TSF DLL。所有文件编译链接进唯一目�
 - `CTextService::SendCaretPositionUpdate()` - Send caret update to Go service
 - `CTextService::ToggleInputMode()` - Toggle Chinese/English mode
 - `CTextService::_DoFullStateSync()` - Sync state with Go service after reconnection
+- `CTextService::NotifyCandidatesVisibilityChanged()` / UIElement 段 - TSF **UI-less** 支持：宿主
+  （全屏游戏、SDL/Unreal、搜索框）在 `BeginUIElement` 回 `pbShow=FALSE` 或以
+  `TF_TMAE_UIELEMENTENABLEDONLY` 激活时接管候选绘制。DLL 经 `CMD_UIELEMENT_STATE` 报「谁画」、
+  每次候选变化经 `CMD_UIELEMENT_QUERY` 同步拉快照答 `ITfCandidateListUIElement`，宿主的
+  `SetSelection/Finalize/Abort` 经 `CMD_UIELEMENT_ACTION` 回流；服务端按 pid 不弹本地候选窗。
+  宿主不接管时 getter 仍是占位数据（`GetCount=1`），不拉快照。见
+  `docs/design/game-compat-tsf-uielement.md`
 - Edit session helper classes: CUpdateCompositionEditSession, CEndCompositionEditSession, etc.
 
 ### KeyEventSink.cpp

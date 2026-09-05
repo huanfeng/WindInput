@@ -203,6 +203,23 @@ impl MessageHandler for DeferredHandler {
     fn handle_diag_snapshot(&self, snap: &DiagSnapshotPayload) {
         self.with_handler((), |h| h.handle_diag_snapshot(snap))
     }
+
+    /// UIElement 三件套。同上：不转发则宿主自绘的游戏永远拿不到候选、我们的窗也照弹。
+    fn handle_uielement_state(&self, pid: u32, host_draws: bool) {
+        self.with_handler((), |h| h.handle_uielement_state(pid, host_draws))
+    }
+
+    fn note_key_source_pid(&self, pid: u32) {
+        self.with_handler((), |h| h.note_key_source_pid(pid))
+    }
+
+    fn uielement_page(&self) -> UiElementPage {
+        self.with_handler(UiElementPage::default(), |h| h.uielement_page())
+    }
+
+    fn handle_uielement_action(&self, action: u32, arg: u32) {
+        self.with_handler((), |h| h.handle_uielement_action(action, arg))
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +252,22 @@ mod tests {
         }
         fn handle_client_connected(&self, _pid: u32) {
             self.calls.lock().unwrap().push("client_connected");
+        }
+        fn handle_uielement_state(&self, _pid: u32, _host_draws: bool) {
+            self.calls.lock().unwrap().push("uielement_state");
+        }
+        fn note_key_source_pid(&self, _pid: u32) {
+            self.calls.lock().unwrap().push("key_source_pid");
+        }
+        fn uielement_page(&self) -> UiElementPage {
+            self.calls.lock().unwrap().push("uielement_page");
+            UiElementPage {
+                items: vec!["x".into()],
+                ..Default::default()
+            }
+        }
+        fn handle_uielement_action(&self, _a: u32, _arg: u32) {
+            self.calls.lock().unwrap().push("uielement_action");
         }
 
         // ── 以下仅为满足 trait 的必需项，本测试不关心 ──
@@ -287,6 +320,12 @@ mod tests {
         deferred.handle_input_state_report(1, true, 2, 3);
         deferred.handle_diag_snapshot(&DiagSnapshotPayload::default());
         deferred.handle_client_connected(1234);
+        deferred.handle_uielement_state(1, true);
+        deferred.handle_uielement_action(1, 0);
+        assert!(
+            deferred.uielement_page().items.is_empty(),
+            "未就绪时应回空快照"
+        );
         assert!(rec.calls.lock().unwrap().is_empty(), "未就绪时不应触达内层");
 
         deferred.set_ready(rec.clone());
@@ -310,6 +349,18 @@ mod tests {
         assert!(
             rec.got("client_connected"),
             "连接建立未转发 → 服务重启时已聚焦宿主的 per-app 规则预热整段失效"
+        );
+        deferred.handle_uielement_state(7, true);
+        deferred.handle_uielement_action(2, 0);
+        deferred.note_key_source_pid(7);
+        assert_eq!(deferred.uielement_page().items, vec!["x".to_string()]);
+        assert!(
+            rec.got("uielement_state") && rec.got("uielement_action") && rec.got("uielement_page"),
+            "UIElement 三件套未转发 → 自绘候选的游戏拿不到候选、我们的候选窗也照弹"
+        );
+        assert!(
+            rec.got("key_source_pid"),
+            "按键来源 pid 未转发 → 没有 focus_gained 的游戏宿主永远对不上「谁接管了候选」"
         );
     }
 }

@@ -2216,8 +2216,14 @@ BOOL CKeyEventSink::_HandleServiceResponse()
             _pTextService->AbsorbHeldIntoPrefix();
             _isComposing = TRUE;
             _hasCandidates = TRUE;
-            _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
+            // ★ 先开/更新组合，再注册候选 UI 元素——顺序不能反。IMM32 桥（Dota 2 等经
+            // ImmGetCandidateList 取候选的宿主）把 BeginUIElement 映射成 IMN_OPENCANDIDATE，
+            // 但只在**组合已存在**时才发；元素先于组合注册，桥就只发 IMN_CHANGECANDIDATE、
+            // 永远不发 OPENCANDIDATE，靠 OPENCANDIDATE 才打开候选盒的宿主什么都不显示
+            // （本机 IMM32 测试宿主实测：改序前 0 次 OPENCANDIDATE，改序后首帧即有）。
+            // 其余开组合的路径（InsertTextAndStartComposition / 延迟组合）本就是组合在前。
             _pTextService->UpdateComposition(response.composition, response.caretPos);
+            _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
 
             // Re-send caret position after composition update so Go can
             // reposition the candidate window with the up-to-date coordinates.
@@ -2268,8 +2274,15 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         return TRUE;
 
     case ResponseType::Consumed:
-        // Key was consumed by a hotkey
+        // Key was consumed by a hotkey — 或者候选导航（翻页 / 上下移高亮）：组合串没变，
+        // 服务端只回 Consumed。候选列表却变了，宿主自绘（UI-less）时必须让它重读——
+        // 本机用 UI-less 测试宿主实测：不补这一句，`=`/`↓` 之后宿主停在旧页，
+        // 空格上屏的却是新页的词。宿主不自绘时这只是多一次无害的 UpdateUIElement。
         WIND_LOG_DEBUG(L"Key consumed by hotkey\n");
+        if (_hasCandidates)
+        {
+            _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
+        }
         return TRUE;
 
     case ResponseType::InsertTextWithCursor:

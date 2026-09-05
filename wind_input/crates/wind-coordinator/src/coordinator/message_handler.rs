@@ -119,6 +119,9 @@ impl MessageHandler for Coordinator {
             self.revalidate_pid_name(pid, &crate::coordinator::process_name(pid));
             self.apply_connected_pid_compat(pid, crate::foreground_pid());
         }
+        // 新连接 = 新的 DLL 实例，它会在首次 BeginUIElement 时重报接管状态；
+        // 先把 pid 复用可能残留的旧账清掉。
+        self.clear_uielement_host_pid(pid);
         #[cfg(not(windows))]
         let _ = pid;
     }
@@ -2040,7 +2043,7 @@ impl MessageHandler for Coordinator {
         }
         let status = self.build_status();
         self.push_activation_status(data.client_token);
-        self.notify_toolbar_async(); // 激活态 → 工具栏显示（异步，避免 is_foreground_fullscreen 阻塞 bridge 线程）
+        self.notify_toolbar_async(); // 激活态 → 工具栏显示（异步，避免 foreground_fullscreen_kind 阻塞 bridge 线程）
         self.show_persistent_status_if_always(); // 常驻模式:获焦即显示状态
         // ui.status.show_on_focus：切到新宿主时提示一次。按 client_token 去重——同一宿主内换
         // docMgr（Excel 单元格 ↔ 公式栏）不重复弹，见 last_focus_tip_token。
@@ -2282,7 +2285,7 @@ impl MessageHandler for Coordinator {
         }
         let status = self.build_status();
         self.push_activation_status(client_token);
-        self.notify_toolbar_async(); // 激活态 → 工具栏显示（异步，避免 is_foreground_fullscreen 阻塞 bridge 线程）
+        self.notify_toolbar_async(); // 激活态 → 工具栏显示（异步，避免 foreground_fullscreen_kind 阻塞 bridge 线程）
         self.show_persistent_status_if_always(); // 常驻模式:激活即显示状态
         Some(status)
     }
@@ -2300,6 +2303,8 @@ impl MessageHandler for Coordinator {
         }
         // 切走本输入法（换到别的 IME / 非输入法应用）：清激活态、清输入、隐藏全部 UI。
         // 对齐 Go SetIMEActivated(false)（隐藏工具栏 + hideUI），根治“切走仍残留显示”。
+        // 宿主接管候选绘制的记账随之清掉（DLL 重新激活时会再报，见 ActivateEx）。
+        self.clear_uielement_host_pid((client_token >> 32) as u32);
         {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             s.ime_active = false;
@@ -3417,6 +3422,26 @@ impl MessageHandler for Coordinator {
 
     fn handle_diag_snapshot(&self, snap: &wind_ipc::protocol::DiagSnapshotPayload) {
         self.apply_diag_snapshot(snap);
+    }
+
+    // ── TSF UI-less（宿主自绘候选）三件套，实现见 handle_uielement.rs ──
+    fn handle_uielement_state(&self, pid: u32, host_draws: bool) {
+        self.set_uielement_host_draws(pid, host_draws);
+    }
+
+    fn uielement_page(&self) -> wind_ipc::protocol::UiElementPage {
+        self.uielement_page_snapshot()
+    }
+
+    fn handle_uielement_action(&self, action: u32, arg: u32) {
+        self.apply_uielement_action(action, arg);
+    }
+
+    fn note_key_source_pid(&self, pid: u32) {
+        if pid != 0 {
+            self.focus_pid
+                .store(pid, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 

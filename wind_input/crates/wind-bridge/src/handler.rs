@@ -11,6 +11,7 @@ pub use wind_ipc::protocol::FocusLostReason;
 // 同上：诊断快照载荷直接作签名类型，不再在此复刻一份等价结构——它有 14 个字段，
 // 复刻等于给「两处独立事实」再开一个入口，而这类结构改动时最容易漏的就是中间层。
 pub use wind_ipc::protocol::DiagSnapshotPayload;
+pub use wind_ipc::protocol::UiElementPage;
 
 /// 按键事件数据
 #[derive(Debug, Clone)]
@@ -460,6 +461,25 @@ pub trait MessageHandler: Send + Sync {
     /// 纯观测数据，**不得**参与任何输入决策——它的采集时机与吃键路径无关，拿它做判据
     /// 会引入「诊断开着才正常」这类最难查的形态。默认空实现。
     fn handle_diag_snapshot(&self, _snap: &DiagSnapshotPayload) {}
+
+    // ── TSF UI-less（宿主自绘候选）三件套，见 wind-ipc `CMD_UIELEMENT_*` 注释 ──
+
+    /// DLL 报告某进程的 UIElement 状态：`host_draws` = 宿主接管候选绘制（含 UI-less 线程）。
+    /// 消费方按 pid 记账，该进程聚焦期间不弹自己的候选窗。默认空实现。
+    fn handle_uielement_state(&self, _pid: u32, _host_draws: bool) {}
+
+    /// 每个按键事件的**发送进程** pid（管道对端）。按键是「谁在输入」的最强证据：
+    /// 游戏这类宿主常常没有可编辑 TSF 上下文，`focus_gained` 一次都不会来，光靠焦点事件
+    /// 记的 pid 会停在上一个进程上。默认空实现；实现方只做一次原子写，不得在此做重活。
+    fn note_key_source_pid(&self, _pid: u32) {}
+
+    /// DLL 拉取候选快照（同步）。默认空快照：宿主看到「0 条候选」而不是解析失败。
+    fn uielement_page(&self) -> UiElementPage {
+        UiElementPage::default()
+    }
+
+    /// 宿主经 `ITfCandidateListUIElementBehavior` 发来的候选操作（`UIELEMENT_ACTION_*`）。默认空实现。
+    fn handle_uielement_action(&self, _action: u32, _arg: u32) {}
 }
 
 #[cfg(test)]

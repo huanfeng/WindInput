@@ -153,6 +153,89 @@ pub fn decode_input_state_report(payload: &[u8]) -> Result<InputStateReportPaylo
     })
 }
 
+/// 解码 `CMD_UIELEMENT_STATE`（0x0217）载荷。
+pub fn decode_uielement_state(payload: &[u8]) -> Result<UiElementStatePayload, CodecError> {
+    UiElementStatePayload::from_bytes(payload).ok_or(CodecError::BufferTooShort {
+        need: UiElementStatePayload::SIZE,
+        got: payload.len(),
+    })
+}
+
+/// 解码 `CMD_UIELEMENT_ACTION`（0x021A）载荷。
+pub fn decode_uielement_action(payload: &[u8]) -> Result<UiElementActionPayload, CodecError> {
+    UiElementActionPayload::from_bytes(payload).ok_or(CodecError::BufferTooShort {
+        need: UiElementActionPayload::SIZE,
+        got: payload.len(),
+    })
+}
+
+/// 编码 `CMD_UIELEMENT_PAGE`（0x0219）响应：候选快照给 DLL 的 `ITfCandidateListUIElement`。
+///
+/// 线上格式（全部 LE）：
+/// `selected u32 + pageSize u32 + currentPage u32 + count u32 + count × { len u16 + UTF-8 }`。
+/// 单条超过 u16 的候选文本按字节截断到字符边界——那已经不是候选而是事故，宁可截也不要
+/// 让 DLL 解析错位。
+pub fn encode_uielement_page(page: &UiElementPage) -> Vec<u8> {
+    let items: Vec<&str> = page
+        .items
+        .iter()
+        .take(UIELEMENT_MAX_ITEMS)
+        .map(|s| {
+            let mut end = s.len().min(u16::MAX as usize);
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            &s[..end]
+        })
+        .collect();
+    let body_len = 16 + items.iter().map(|s| 2 + s.len()).sum::<usize>();
+    let mut buf = Vec::with_capacity(IpcHeader::SIZE + body_len);
+    buf.extend_from_slice(&IpcHeader::new(CMD_UIELEMENT_PAGE, body_len as u32).to_bytes());
+    buf.extend_from_slice(&page.selected.to_le_bytes());
+    buf.extend_from_slice(&page.page_size.max(1).to_le_bytes());
+    buf.extend_from_slice(&page.current_page.to_le_bytes());
+    buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
+    for s in items {
+        buf.extend_from_slice(&(s.len() as u16).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+    buf
+}
+
+/// 解码 `CMD_UIELEMENT_PAGE` 载荷（不含 8 字节 IPC 头）。与 [`encode_uielement_page`] 互逆；
+/// 服务端不消费它，放在这里是为了让往返测试与 DLL 侧解析器对着同一份定义。
+pub fn decode_uielement_page(payload: &[u8]) -> Result<UiElementPage, CodecError> {
+    let short = |need: usize| CodecError::BufferTooShort {
+        need,
+        got: payload.len(),
+    };
+    if payload.len() < 16 {
+        return Err(short(16));
+    }
+    let u32_at = |i: usize| u32::from_le_bytes(payload[i..i + 4].try_into().unwrap());
+    let (selected, page_size, current_page, count) = (u32_at(0), u32_at(4), u32_at(8), u32_at(12));
+    let mut items = Vec::with_capacity(count.min(UIELEMENT_MAX_ITEMS as u32) as usize);
+    let mut off = 16;
+    for _ in 0..count {
+        if payload.len() < off + 2 {
+            return Err(short(off + 2));
+        }
+        let len = u16::from_le_bytes([payload[off], payload[off + 1]]) as usize;
+        off += 2;
+        if payload.len() < off + len {
+            return Err(short(off + len));
+        }
+        items.push(String::from_utf8_lossy(&payload[off..off + len]).into_owned());
+        off += len;
+    }
+    Ok(UiElementPage {
+        items,
+        selected,
+        page_size,
+        current_page,
+    })
+}
+
 /// 从载荷字节解码 DiagSnapshotPayload（CMD_DIAG_SNAPSHOT 0x0214）。
 /// 变长类名区残缺不算失败（见 `DiagSnapshotPayload::from_bytes`），只有定长头不足才报错。
 pub fn decode_diag_snapshot(payload: &[u8]) -> Result<DiagSnapshotPayload, CodecError> {
@@ -900,6 +983,83 @@ mod tests {
         p.extend_from_slice(&(id.len() as u32).to_le_bytes());
         p.extend_from_slice(id.as_bytes());
         p
+    }
+
+    #[test]
+    fn uielement_state_and_action_roundtrip() {
+        let st = UiElementStatePayload {
+            pid: 4242,
+            flags: UIELEMENT_FLAG_HOST_DRAWS,
+        };
+        assert_eq!(decode_uielement_state(&st.to_bytes()).unwrap(), st);
+        assert!(st.host_draws());
+        // UI-less 线程位单独置位也算接管（从激活起就不弹窗，见常量注释）。
+        assert!(
+            UiElementStatePayload {
+                pid: 1,
+                flags: UIELEMENT_FLAG_UI_LESS_THREAD
+            }
+            .host_draws()
+        );
+        assert!(!UiElementStatePayload { pid: 1, flags: 0 }.host_draws());
+        assert!(decode_uielement_state(&[0u8; 7]).is_err());
+
+        let act = UiElementActionPayload {
+            action: UIELEMENT_ACTION_SET_SELECTION,
+            arg: 17,
+        };
+        assert_eq!(decode_uielement_action(&act.to_bytes()).unwrap(), act);
+        assert!(decode_uielement_action(&[0u8; 3]).is_err());
+    }
+
+    #[test]
+    fn uielement_page_roundtrip() {
+        let page = UiElementPage {
+            items: vec!["你好".into(), "拟好".into(), "".into(), "abc".into()],
+            selected: 1,
+            page_size: 9,
+            current_page: 0,
+        };
+        let frame = encode_uielement_page(&page);
+        assert_eq!(u16::from_le_bytes([frame[2], frame[3]]), CMD_UIELEMENT_PAGE);
+        let body_len = u32::from_le_bytes(frame[4..8].try_into().unwrap()) as usize;
+        assert_eq!(body_len, frame.len() - 8);
+        assert_eq!(decode_uielement_page(&frame[8..]).unwrap(), page);
+        // 空列表也要能往返（宿主 Abort 后 DLL 可能在 EndUIElement 前再拉一次）。
+        let empty = UiElementPage {
+            page_size: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            decode_uielement_page(&encode_uielement_page(&empty)[8..]).unwrap(),
+            empty
+        );
+        // page_size=0 会让 DLL 侧除零：编码器钉到 ≥1。
+        let zero = UiElementPage {
+            items: vec!["a".into()],
+            page_size: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            decode_uielement_page(&encode_uielement_page(&zero)[8..])
+                .unwrap()
+                .page_size,
+            1
+        );
+        // 条数超上限按 UIELEMENT_MAX_ITEMS 截断，count 与实际条数一致。
+        let long = UiElementPage {
+            items: (0..UIELEMENT_MAX_ITEMS + 50)
+                .map(|i| i.to_string())
+                .collect(),
+            page_size: 9,
+            ..Default::default()
+        };
+        let decoded = decode_uielement_page(&encode_uielement_page(&long)[8..]).unwrap();
+        assert_eq!(decoded.items.len(), UIELEMENT_MAX_ITEMS);
+        // 截断的载荷必须报错而不是静默给半截列表。
+        let mut truncated = encode_uielement_page(&page)[8..].to_vec();
+        truncated.truncate(truncated.len() - 2);
+        assert!(decode_uielement_page(&truncated).is_err());
     }
 
     #[test]

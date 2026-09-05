@@ -16,6 +16,10 @@ wind-bridge = { path = "../wind-bridge" }
 # 其单元测试要能在 CI 的 Linux test job 上跑到。经 wind-bridge 本就传递依赖它，
 # 提为直接依赖不增加任何编译成本。
 wind-ipc = { path = "../wind-ipc" }
+# 显示浮窗前的最后一道闸（`wind_keys::foreground::exclusive_fullscreen_recent`）：独占全屏的
+# 游戏被别的进程的窗口盖一下就会被踢出独占态，协调器那份事件驱动的缓存过期时由这里兜住。
+# 曾只在 macOS 下依赖（全局热键的 VK 表），现在两个平台都要。
+wind-keys = { path = "../wind-keys" }
 # 仅用于 startup_trace：UI 线程若在窗口创建阶段退出，主线程与主日志都可能毫无察觉
 wind-config = { path = "../wind-config" }
 tiny-skia = { workspace = true }
@@ -41,8 +45,7 @@ core-foundation = "0.10"
 core-foundation-sys = "0.8"
 core-graphics = "0.25"
 core-text = "22.0.0"
-# 全局热键（global_hotkey_macos）复用 key_inject 的 VK → CGKeyCode 表，禁止另起一份。
-wind-keys = { path = "../wind-keys" }
+# 全局热键（global_hotkey_macos）复用 key_inject 的 VK → CGKeyCode 表（wind-keys 已是通用依赖）。
 # 扩展信封的 JSON body（`shot.panel` 等）。手拼字符串在这里不安全：路径里可能有
 # 引号或反斜杠，转义漏一处就是对端解不出的坏包。
 serde_json = { workspace = true }

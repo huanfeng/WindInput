@@ -73,14 +73,17 @@ public:
 
     // ITfUIElement — 候选 UI 元素基础接口。
     // 与 ITfCandidateListUIElement 一起使 IME 在 TSF 中表现为"现代 IME"，让
-    // Chromium 类宿主走完整 IME-first 调度。当前用 stub 数据验证 Begin/EndUIElement
-    // 注册本身是否影响调度。
+    // Chromium 类宿主走完整 IME-first 调度；更重要的是 **UI-less 模式**：宿主
+    // （全屏游戏 / 搜索框 / SDL、Unreal 等引擎）在 BeginUIElement 里回 pbShow=FALSE
+    // 即接管候选绘制，此后候选数据由本类经 ITfCandidateListUIElement 交给宿主，
+    // 服务端不再弹自己的候选窗。数据来源与状态机见 TextService.cpp 对应段落。
     STDMETHODIMP GetDescription(BSTR* pbstrDescription);
     STDMETHODIMP GetGUID(GUID* pguid);
     STDMETHODIMP Show(BOOL bShow);
     STDMETHODIMP IsShown(BOOL* pbShow);
 
-    // ITfCandidateListUIElement — 候选列表元数据（stub）。
+    // ITfCandidateListUIElement — 候选列表数据。宿主接管时答 _uiSnapshot（从服务端拉取
+    // 的快照）；宿主不接管时沿用占位数据（count=1 / "…"），那是 Chromium 热键调度所需。
     STDMETHODIMP GetUpdatedFlags(DWORD* pdwFlags);
     STDMETHODIMP GetDocumentMgr(ITfDocumentMgr** ppdim);
     STDMETHODIMP GetCount(UINT* puCount);
@@ -90,7 +93,7 @@ public:
     STDMETHODIMP SetPageIndex(UINT* pIndex, UINT uPageCnt);
     STDMETHODIMP GetCurrentPage(UINT* puPage);
 
-    // ITfCandidateListUIElementBehavior — 接收 TSF 对候选的操作（stub no-op）。
+    // ITfCandidateListUIElementBehavior — 宿主对候选的操作，经 CMD_UIELEMENT_ACTION 回流服务端。
     STDMETHODIMP SetSelection(UINT nIndex);
     STDMETHODIMP Finalize(void);
     STDMETHODIMP Abort(void);
@@ -418,8 +421,42 @@ private:
     DWORD _dwThreadMgrEventSinkCookie;
     DWORD _dwThreadFocusSinkCookie;
     DWORD _uiElementId;     // ITfUIElementMgr::BeginUIElement 返回的 ID；TF_INVALID_UIELEMENTID 表示未注册
-    BOOL  _uiElementShown;  // 当前 IsShown 返回值
+    BOOL  _uiElementShown;  // 当前 IsShown 返回值（元素存续期间的可见态；EndUIElement 后 FALSE）
     ITfUIElementMgr* _pUIElementMgr;  // 缓存的 UI element 管理器引用，避免每次候选变化都 QI
+    // ── UI-less（宿主自绘候选）状态 ──
+    // 宿主是否接管候选绘制：BeginUIElement 回 pbShow=FALSE / 之后 Show(FALSE) 置 TRUE，
+    // Show(TRUE) 置 FALSE。⚠ 与 _uiElementShown 分开存：那个在 EndUIElement 后归 FALSE、
+    // 构造时也是 FALSE，拿它当「宿主接管」会让普通宿主在激活时被误报成接管。
+    BOOL  _uiHostDraws;
+    BOOL  _uiLessThread;    // ActivateEx 带 TF_TMAE_UIELEMENTENABLEDONLY：宿主声明不要 TIP 的 UI
+    // 上一次经 CMD_UIELEMENT_STATE 报给服务端的 flags；-1 = 尚未报过（激活后必报一次）。
+    // 只在变化时发，服务端按 pid 记账决定弹不弹候选窗。
+    int32_t _uiElementStateSent;
+    // 宿主接管时从服务端拉取的候选快照（CMD_UIELEMENT_QUERY）。宿主眼里列表就这么长。
+    struct UiElementSnapshot
+    {
+        std::vector<std::wstring> items;
+        UINT selected = 0;
+        UINT pageSize = 1;
+        UINT currentPage = 0;
+    };
+    UiElementSnapshot _uiSnapshot;
+    DWORD _uiUpdatedFlags;  // 上次 UpdateUIElement 相对前一快照的变化位（TF_CLUIE_*），GetUpdatedFlags 回答
+    BOOL  _UiElementHostDraws() const { return _uiHostDraws; }
+    // 取光标坐标是否该整条短路。UI-less / 宿主接管绘制（SDL2 游戏等）时我们不弹自己的
+    // 候选 / 组合窗，就**不需要**光标坐标；而向这类宿主反复发 GetTextExt（同步 edit
+    // session）在 D3D 独占全屏下会把游戏渲染线程逐次拖死——Dota 2 实测：组合起后进入
+    // caret 探测重试循环（OnLayoutChange burst + 50ms timer + 异步 edit session），
+    // 间隔 5→187→298ms 后线程冻死。ui_less 从 ActivateEx 起已知、host_draws 从首个
+    // BeginUIElement 起已知，取或覆盖首键到组合全程。
+    BOOL  _CaretQuerySuppressed() const { return _uiLessThread || _UiElementHostDraws(); }
+    // getter 答快照还是占位：有快照就答快照（Begin 之前已预取，宿主在 Begin 回调里读到的就是真数据），
+    // 没有快照且宿主不接管才答占位（Chromium 调度所需的「至少 1 条」）。
+    BOOL  _UiElementUseSnapshot() const { return _uiHostDraws || !_uiSnapshot.items.empty(); }
+    void  _ReportUiElementState();        // flags 变化时发 CMD_UIELEMENT_STATE
+    BOOL  _RefreshUiElementSnapshot();    // 同步拉取快照并计算 _uiUpdatedFlags；失败清空快照
+    void  _UpdateUiElementForHost();      // 宿主接管时：拉快照 + UpdateUIElement
+    void  _SendUiElementAction(uint32_t action, uint32_t arg);
     ITfSourceSingle* _pSourceSingle;  // 缓存的 ITfSourceSingle 引用（Function Provider 注册用）
     BOOL  _funcProviderRegistered;    // 是否已通过 AdviseSingleSink 注册
 

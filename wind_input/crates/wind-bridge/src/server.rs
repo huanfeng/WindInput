@@ -455,6 +455,9 @@ pub(crate) fn dispatch_command(
             if let Some(mgr) = host_render {
                 mgr.note_focus(ctx.conn_id, ctx.pid);
             }
+            // 同一条理由的另一份消费者：协调器要靠它对上「谁接管了候选绘制」（UI-less 宿主
+            // 常常没有 focus_gained）。一次原子写，不进日志。
+            handler.note_key_source_pid(ctx.pid);
             let key_payload = match decode_key_payload(payload) {
                 Ok(p) => p,
                 Err(e) => {
@@ -898,6 +901,25 @@ pub(crate) fn dispatch_command(
             if is_async { None } else { Some(encode_ack()) }
         }
 
+        // ── TSF UI-less（宿主自绘候选）三件套，见 wind-ipc `CMD_UIELEMENT_*` ──
+        // 状态上报：异步、无响应。pid 取载荷而非 ctx.pid——两者同源，但载荷是 DLL 自报、
+        // 与 focus/activation 那些事件用的 client_token 高 32 位同一口径，消费端按它记账。
+        CMD_UIELEMENT_STATE => {
+            if let Ok(st) = decode_uielement_state(payload) {
+                handler.handle_uielement_state(st.pid, st.host_draws());
+            }
+            if is_async { None } else { Some(encode_ack()) }
+        }
+        // 快照拉取：同步，恒回 CMD_UIELEMENT_PAGE（空列表也回，DLL 据 count 判断）。
+        CMD_UIELEMENT_QUERY => Some(encode_uielement_page(&handler.uielement_page())),
+        // 宿主操作回流：异步、无响应。结果（上屏/清组合）经 push 管道回到 DLL。
+        CMD_UIELEMENT_ACTION => {
+            if let Ok(act) = decode_uielement_action(payload) {
+                handler.handle_uielement_action(act.action, act.arg);
+            }
+            if is_async { None } else { Some(encode_ack()) }
+        }
+
         // ── 鼠标 hover 候选（页内下标 i32 LE，-1=无，上行）──
         // Windows host DLL 载荷另带 anchorX/belowY/aboveY（tooltip 锚点），当前仅取 index。
         CMD_CANDIDATE_HOVER => {
@@ -1132,7 +1154,13 @@ fn encode_status_update_from_data(status: &StatusUpdateData) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use wind_ipc::protocol::{CMD_ACK, CMD_CANDIDATE_SELECT, CMD_HOST_RENDER_FAILED, IpcHeader};
+    use wind_ipc::codec::decode_uielement_page;
+    use wind_ipc::protocol::{
+        CMD_ACK, CMD_CANDIDATE_SELECT, CMD_HOST_RENDER_FAILED, CMD_UIELEMENT_ACTION,
+        CMD_UIELEMENT_PAGE, CMD_UIELEMENT_QUERY, CMD_UIELEMENT_STATE, IpcHeader,
+        UIELEMENT_ACTION_SET_SELECTION, UIELEMENT_FLAG_UI_LESS_THREAD, UiElementActionPayload,
+        UiElementStatePayload,
+    };
     // host-render 与按键投递是 Windows 专属通路，相应用例也只在 Windows 编译。
     #[cfg(windows)]
     use wind_ipc::protocol::{
@@ -1146,6 +1174,7 @@ mod tests {
         last_failed_reason: AtomicU32,
         last_select: std::sync::atomic::AtomicI32,
         last_scroll: std::sync::atomic::AtomicI32,
+        last_uielement: std::sync::Mutex<Vec<String>>,
     }
 
     impl MessageHandler for RecordingHandler {
@@ -1191,6 +1220,73 @@ mod tests {
         fn handle_candidate_scroll(&self, delta: i32) {
             self.last_scroll.store(delta, Ordering::SeqCst);
         }
+        fn handle_uielement_state(&self, pid: u32, host_draws: bool) {
+            self.last_uielement
+                .lock()
+                .unwrap()
+                .push(format!("state:{pid}:{host_draws}"));
+        }
+        fn uielement_page(&self) -> UiElementPage {
+            UiElementPage {
+                items: vec!["你好".into(), "拟好".into()],
+                selected: 1,
+                page_size: 9,
+                current_page: 0,
+            }
+        }
+        fn handle_uielement_action(&self, action: u32, arg: u32) {
+            self.last_uielement
+                .lock()
+                .unwrap()
+                .push(format!("action:{action}:{arg}"));
+        }
+    }
+
+    /// UIElement 三件套的分发：状态/操作异步不回响应（防管道污染），查询同步回快照帧。
+    #[test]
+    fn uielement_commands_dispatch() {
+        let handler = Arc::new(RecordingHandler::default());
+        let dyn_handler: Arc<dyn MessageHandler> = handler.clone();
+        let ctx = ClientCtx { conn_id: 0, pid: 0 };
+
+        let st = UiElementStatePayload {
+            pid: 99,
+            flags: UIELEMENT_FLAG_UI_LESS_THREAD,
+        };
+        assert!(
+            dispatch_for_test(&dyn_handler, CMD_UIELEMENT_STATE, true, &st.to_bytes(), ctx)
+                .is_none()
+        );
+        let act = UiElementActionPayload {
+            action: UIELEMENT_ACTION_SET_SELECTION,
+            arg: 3,
+        };
+        assert!(
+            dispatch_for_test(
+                &dyn_handler,
+                CMD_UIELEMENT_ACTION,
+                true,
+                &act.to_bytes(),
+                ctx
+            )
+            .is_none()
+        );
+        // 截断载荷：静默丢弃、不 panic、不触达 handler。
+        assert!(dispatch_for_test(&dyn_handler, CMD_UIELEMENT_STATE, true, &[1, 2], ctx).is_none());
+        assert_eq!(
+            *handler.last_uielement.lock().unwrap(),
+            vec!["state:99:true".to_string(), "action:1:3".to_string()]
+        );
+
+        let frame = dispatch_for_test(&dyn_handler, CMD_UIELEMENT_QUERY, false, &[], ctx)
+            .expect("同步查询必须回响应");
+        assert_eq!(u16::from_le_bytes([frame[2], frame[3]]), CMD_UIELEMENT_PAGE);
+        let page = decode_uielement_page(&frame[8..]).unwrap();
+        assert_eq!(page.items, vec!["你好".to_string(), "拟好".to_string()]);
+        assert_eq!(
+            (page.selected, page.page_size, page.current_page),
+            (1, 9, 0)
+        );
     }
 
     /// dispatch_command 的跨平台调用包装（Windows 多一个 host_render 参数）。

@@ -1608,6 +1608,18 @@ pub struct Coordinator {
     /// 全屏探测的单飞闸：已有探测在途时跳过新的。焦点变化是成串来的，而探的是同一个
     /// 全局前台状态，此前每次都 spawn 一个线程。见 `notify_toolbar_async`。
     pub(crate) fullscreen_probing: std::sync::atomic::AtomicBool,
+    /// 前台是否 **D3D 独占**全屏（`FullscreenKind::D3dExclusive`），与 `fullscreen_cached`
+    /// 同一探测线程刷新。独立成位是因为后果不同：它压的是候选窗（弹了会把游戏踢出独占态），
+    /// 而 `fullscreen_cached` 只管工具栏。见 `handle_uielement.rs`。
+    pub(crate) fullscreen_exclusive_cached: std::sync::atomic::AtomicBool,
+    /// 接管了候选绘制的宿主进程（TSF UI-less / `pbShow=FALSE`），按 pid 记账。
+    /// 焦点落在其中任一进程时不弹本地候选窗。写入见 `handle_uielement.rs`。
+    pub(crate) uielement_host_pids: Mutex<std::collections::HashSet<u32>>,
+    /// 「当前在输入的进程」：焦点/激活事件与**每个按键**都会写它（bridge 按管道对端 pid）。
+    /// 与 `active_compat.pid` 的区别：那份只由焦点/激活事件维护，而游戏这类宿主常常没有
+    /// 可编辑 TSF 上下文、`focus_gained` 一次都不来——按键才是「谁在输入」的最强证据
+    /// （host-render 的 `note_focus` 是同一条理由的先例）。0 = 未知。
+    pub(crate) focus_pid: std::sync::atomic::AtomicU32,
     /// host-render 管理器（Windows）：与 `BridgeServer` 共享同一 `Arc` 实例。
     /// 服务入口经 `set_host_render` 注入一次；Task 6/7 据此写候选/工具提示/状态帧并隐藏。
     /// 采用 `OnceLock`（与 `self_weak`/`cmdbar_services` 同一构造后注入惯例），
@@ -2294,6 +2306,9 @@ impl Coordinator {
             stat_recorded: std::sync::atomic::AtomicBool::new(false),
             fullscreen_cached: std::sync::atomic::AtomicBool::new(false),
             fullscreen_probing: std::sync::atomic::AtomicBool::new(false),
+            fullscreen_exclusive_cached: std::sync::atomic::AtomicBool::new(false),
+            uielement_host_pids: Mutex::new(std::collections::HashSet::new()),
+            focus_pid: std::sync::atomic::AtomicU32::new(0),
             #[cfg(windows)]
             host_render: std::sync::OnceLock::new(),
             last_input_diag: Mutex::new(Default::default()),
@@ -2411,6 +2426,8 @@ impl Coordinator {
         if pid == 0 {
             return;
         }
+        self.focus_pid
+            .store(pid, std::sync::atomic::Ordering::Relaxed);
         // 缓存优先于反查：macOS 的 `.app` 随焦点事件把宿主 bundle id 送进 `pid_names`
         // （服务进程那边 `process_name` 恒返回空串），此处必须先读缓存才能拿到宿主名。
         // Windows 上首次见到该 pid 时缓存为空 → 照常 OpenProcess 反查，行为不变。
@@ -2650,7 +2667,7 @@ impl Coordinator {
 
     /// 按 client_token 高 32 位的 PID 查已缓存的进程名（小写）。未缓存返回空串。
     /// 仅 HashMap 查询，可用于 DLL 同步阻塞路径。
-    fn cached_proc_name(&self, client_token: u64) -> String {
+    pub(crate) fn cached_proc_name(&self, client_token: u64) -> String {
         let pid = (client_token >> 32) as u32;
         if pid == 0 {
             return String::new();
@@ -4830,6 +4847,15 @@ impl Coordinator {
             self.reset_first_show();
             return;
         }
+        // 宿主侧压住：宿主接管了候选绘制（TSF UI-less），或前台是 D3D 独占全屏。
+        // 候选状态照常演进（宿主画的正是这份状态、盲打照样上屏），只是本地不弹窗。
+        if let Some(reason) = self.ui_suppressed_by_host() {
+            debug!("候选窗被压住: {reason}");
+            self.clear_hover();
+            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.reset_first_show();
+            return;
+        }
         // 模式级候选布局：按当前模式意图叠加全局基线重算方向，与上次下发不同才下发。
         // 必须在下方 UpdateCandidates **之前**——同 channel 按序处理，UI 先改方向再填候选。
         // 这是「强制竖排/横排」的唯一执行点，模式进入/退出各处都不再自己动布局（见 layout.rs）。
@@ -5697,6 +5723,13 @@ impl Coordinator {
         let si = &bundle.config.ui.status;
         // 禁用则完全不显示状态提示气泡。
         if !si.enabled {
+            return;
+        }
+        // 宿主接管了 UI（TSF UI-less）或前台是 D3D 独占全屏：气泡也是本进程的一个窗口，
+        // 盖到独占全屏的游戏上同样会把它踢出独占态。规范原话是 TIP 的**任何** UI 都得经
+        // UIElementMgr 征得宿主同意——气泡没有对应的 UIElement，只能不弹。
+        if let Some(reason) = self.ui_suppressed_by_host() {
+            debug!("status_tip 被压住: {reason}");
             return;
         }
         // 空文本不弹窗：ui.status.items 全部取消勾选时合成文本为空，此前会渲染出一个

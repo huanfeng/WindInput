@@ -1255,6 +1255,49 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
         _LogDebug(L"Response: ClearCompositionThenPassThrough");
         break;
 
+    case CMD_UIELEMENT_PAGE:
+        {
+            response.type = ResponseType::UiElementPage;
+            // 线上格式见 BinaryProtocol.h UIELEMENT_PAGE_HEADER_SIZE 处注释。
+            if (payload.size() < UIELEMENT_PAGE_HEADER_SIZE)
+            {
+                _LogError(L"UiElementPage payload too short (%zu)", payload.size());
+                return FALSE;
+            }
+            uint32_t count = 0;
+            memcpy(&response.uiSelected, payload.data() + 0, 4);
+            memcpy(&response.uiPageSize, payload.data() + 4, 4);
+            memcpy(&response.uiCurrentPage, payload.data() + 8, 4);
+            memcpy(&count, payload.data() + 12, 4);
+            if (response.uiPageSize == 0) response.uiPageSize = 1;
+            size_t offset = UIELEMENT_PAGE_HEADER_SIZE;
+            response.uiCandidates.reserve(count < 1024 ? count : 1024);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                if (payload.size() - offset < 2)
+                {
+                    _LogError(L"UiElementPage entry %u truncated", i);
+                    return FALSE;
+                }
+                uint16_t len = 0;
+                memcpy(&len, payload.data() + offset, 2);
+                offset += 2;
+                // 减法形式防 32 位加法回绕（同 CMD_COMMIT_TEXT 注释）。
+                if (len > payload.size() - offset)
+                {
+                    _LogError(L"UiElementPage entry %u text truncated", i);
+                    return FALSE;
+                }
+                response.uiCandidates.push_back(
+                    len > 0 ? _Utf8ToWide(reinterpret_cast<const char*>(payload.data() + offset), len)
+                            : std::wstring());
+                offset += len;
+            }
+            _LogDebug(L"Response: UiElementPage count=%u selected=%u pageSize=%u page=%u",
+                      count, response.uiSelected, response.uiPageSize, response.uiCurrentPage);
+        }
+        break;
+
     case CMD_COMMIT_TEXT:
         {
             response.type = ResponseType::CommitText;

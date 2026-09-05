@@ -100,6 +100,13 @@ struct ServiceResponse
     // For HoldComposition
     uint32_t holdTimeoutMs = 0;
 
+    // For UiElementPage（CMD_UIELEMENT_QUERY 的响应）：候选文本为当页候选，
+    // uiSelected 为页内下标，uiPageSize ≥ 1，uiCurrentPage 恒 0（快照只带当页）。
+    std::vector<std::wstring> uiCandidates;
+    uint32_t uiSelected = 0;
+    uint32_t uiPageSize = 1;
+    uint32_t uiCurrentPage = 0;
+
     // Error
     std::wstring error;
 

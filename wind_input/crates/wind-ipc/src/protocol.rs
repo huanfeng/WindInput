@@ -114,6 +114,53 @@ pub const CMD_CANDIDATE_SCROLL: u16 = 0x0211; // 上行：host 候选框滚轮 (
 /// 一处**同方向**的语义复用，代价是「macOS 永远做不了滚轮翻页」。macOS 尚未发布，故直接
 /// 迁到空闲码位消除该约束，两平台此后码位含义完全一致。
 pub const CMD_FRONT_CONTEXT: u16 = 0x0215;
+
+// ── TSF UI-less（UIElement）三件套：宿主自绘候选时的数据通道 ──
+//
+// 背景：TSF 允许宿主（游戏 / 全屏应用 / 搜索框）经 `ITfUIElementSink::BeginUIElement`
+// 回 `pbShow=FALSE` 接管候选绘制，输入法须改由 `ITfCandidateListUIElement` 把候选
+// 数据**交给宿主**、并且**不再弹自己的候选窗**。候选列表住在服务进程，DLL 手里没有，
+// 于是需要这三条命令：DLL 报告「谁画」、DLL 拉取当页数据、宿主的操作回流。
+// 设计见 `docs/design/game-compat-tsf-uielement.md`。
+//
+/// 上行（异步）：DLL 报告本进程的 UIElement 状态。payload = [`UiElementStatePayload`]。
+/// 服务端据此**按 pid** 决定要不要弹自己的候选窗——宿主接管绘制时弹了也是遮挡/闪烁。
+pub const CMD_UIELEMENT_STATE: u16 = 0x0217;
+/// 上行（同步）：DLL 拉取当前候选快照，供 `ITfCandidateListUIElement` 各 getter 回答宿主。
+/// 无 payload；响应为 [`CMD_UIELEMENT_PAGE`]。**只在宿主接管绘制时**才发（拉取模型：
+/// 不接管的宿主零成本，键路径不多一次往返）。
+pub const CMD_UIELEMENT_QUERY: u16 = 0x0218;
+/// 下行（`CMD_UIELEMENT_QUERY` 的响应）：候选快照。编码见 [`crate::codec::encode_uielement_page`]。
+pub const CMD_UIELEMENT_PAGE: u16 = 0x0219;
+/// 上行（异步）：宿主经 `ITfCandidateListUIElementBehavior` 对候选的操作
+/// （选高亮 / 定稿 / 放弃 / 翻页）。payload = [`UiElementActionPayload`]。
+pub const CMD_UIELEMENT_ACTION: u16 = 0x021A;
+
+/// [`UiElementStatePayload::flags`] bit0：宿主接管绘制（`BeginUIElement` 回了 `pbShow=FALSE`，
+/// 或此后 `ITfUIElement::Show(FALSE)`）。置位 ⇒ 服务端对该 pid 不弹自己的候选窗。
+pub const UIELEMENT_FLAG_HOST_DRAWS: u32 = 0x0001;
+/// [`UiElementStatePayload::flags`] bit1：线程以 `TF_TMAE_UIELEMENTENABLEDONLY` 激活
+/// （宿主声明自己是 UI-less 线程）。规范原话：TIP 此时「已经知道」该线程不要它的 UI，
+/// 可以直接省掉——故服务端把它当作与 bit0 同义，**从激活起**就不弹窗，省掉首次组合
+/// 时「先弹再收」的一帧闪烁。
+pub const UIELEMENT_FLAG_UI_LESS_THREAD: u32 = 0x0002;
+
+/// [`UiElementActionPayload::action`]：把高亮移到**页内**下标 `arg`（`SetSelection`；
+/// 快照只带当页，宿主眼里的下标就是页内下标）。
+pub const UIELEMENT_ACTION_SET_SELECTION: u32 = 1;
+/// 定稿当前高亮候选（`Finalize`）。`arg` 忽略。
+pub const UIELEMENT_ACTION_FINALIZE: u32 = 2;
+/// 放弃整个会话（`Abort`，等价 Esc）。`arg` 忽略。
+pub const UIELEMENT_ACTION_ABORT: u32 = 3;
+/// 翻到第 `arg` 页（`SetPageIndex` 之后宿主改 current page 的常见用法）。
+pub const UIELEMENT_ACTION_SET_PAGE: u32 = 4;
+
+/// 拉取快照里最多携带的候选条数（护栏，正常远小于此：快照**只带当页**）。
+///
+/// 曾带「从 0 起、至少盖住当页」的前缀让宿主自己切页，被 Dota 2 这类自绘候选的宿主
+/// 整条画出来（微软五笔在 Dota 2 里「所有页一次显示、翻页崩游戏」正是这个形状，只带当页的
+/// 微软拼音则正常），故收敛为当页，与 Weasel 同一形状。
+pub const UIELEMENT_MAX_ITEMS: usize = 200;
 /// Host render: DLL 侧 Band 窗口创建失败（异步上行，payload = reason u32）。
 /// 服务端收到后记日志并让 UI 回退本地窗口。与 C++ BinaryProtocol.h:36 对齐。
 pub const CMD_HOST_RENDER_FAILED: u16 = 0x0212;
@@ -759,6 +806,88 @@ impl InputStateReportPayload {
             input_scope_mask: u64::from_le_bytes(buf[6..14].try_into().ok()?),
         })
     }
+}
+
+// ──────────────────────────────────────────────
+// UIElement State / Action Payload (8 bytes each)
+// ──────────────────────────────────────────────
+
+/// `CMD_UIELEMENT_STATE` 载荷（8 字节）：DLL 所在进程 + 状态位（`UIELEMENT_FLAG_*`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiElementStatePayload {
+    pub pid: u32,
+    pub flags: u32,
+}
+
+impl UiElementStatePayload {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut b = [0u8; Self::SIZE];
+        b[0..4].copy_from_slice(&self.pid.to_le_bytes());
+        b[4..8].copy_from_slice(&self.flags.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            pid: u32::from_le_bytes(buf[0..4].try_into().ok()?),
+            flags: u32::from_le_bytes(buf[4..8].try_into().ok()?),
+        })
+    }
+
+    /// 宿主是否接管候选绘制（两位任一置位即视为接管，见各位注释）。
+    pub fn host_draws(&self) -> bool {
+        self.flags & (UIELEMENT_FLAG_HOST_DRAWS | UIELEMENT_FLAG_UI_LESS_THREAD) != 0
+    }
+}
+
+/// `CMD_UIELEMENT_ACTION` 载荷（8 字节）：动作码（`UIELEMENT_ACTION_*`）+ 参数。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiElementActionPayload {
+    pub action: u32,
+    pub arg: u32,
+}
+
+impl UiElementActionPayload {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut b = [0u8; Self::SIZE];
+        b[0..4].copy_from_slice(&self.action.to_le_bytes());
+        b[4..8].copy_from_slice(&self.arg.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            action: u32::from_le_bytes(buf[0..4].try_into().ok()?),
+            arg: u32::from_le_bytes(buf[4..8].try_into().ok()?),
+        })
+    }
+}
+
+/// `CMD_UIELEMENT_PAGE` 的内容：给宿主自绘用的候选快照。
+///
+/// `items` 只是**当页**候选（上限 [`UIELEMENT_MAX_ITEMS`]），
+/// `ITfCandidateListUIElement::GetCount` 报的就是 `items.len()`——**对宿主而言列表就这么长**，
+/// 页数恒 1、`selected` 为页内下标。翻页/移高亮后 DLL 重拉，宿主看到的就是新的一页。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UiElementPage {
+    /// 候选文本（下标即绝对下标）。
+    pub items: Vec<String>,
+    /// 当前高亮的**页内**下标；无候选时为 0（`GetSelection` 据 `items` 空与否回 S_FALSE）。
+    pub selected: u32,
+    /// 每页条数（≥1）。快照只带当页时它 ≥ `items.len()`，宿主据此算出页数恒 1。
+    pub page_size: u32,
+    /// 当前页号。快照只带当页时恒 0。
+    pub current_page: u32,
 }
 
 // ──────────────────────────────────────────────

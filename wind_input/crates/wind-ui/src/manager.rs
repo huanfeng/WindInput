@@ -17,6 +17,20 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 #[cfg(windows)]
 pub use wind_ui_types::HostRenderArc;
+
+/// 显示任何浮窗前的最后一道闸：前台此刻是 D3D 独占全屏就不显示（改为 hide）。
+///
+/// 协调器那份判据是事件驱动的缓存（焦点/激活时探一次），游戏**在激活之后**才切进独占
+/// 全屏时它就过期了，显示命令照发；而独占全屏的游戏被别的进程的窗口盖一下就会被踢出
+/// 独占态，处理不好的直接卡死（Dota 2 实测）。故谁显示窗口谁再判一次。
+/// 带 300ms TTL（见 `wind_keys::foreground`），连打时不会每键跨进程问一次。
+fn blocked_by_exclusive_fullscreen(what: &str) -> bool {
+    let blocked = wind_keys::foreground::exclusive_fullscreen_recent();
+    if blocked {
+        debug!("UI: {what} 不显示——前台是 D3D 独占全屏");
+    }
+    blocked
+}
 /// 类型定义已下沉至 wind-ui-types（表现层协议 crate）；此处再导出以保持
 /// `wind_ui::manager::*` 原路径成立（协调器与本 crate 内部均经此引用）。
 /// 注意 DiagSections 三件套走上方 input_diag_hud 的链式转发，勿在此重复列出。
@@ -243,7 +257,11 @@ impl UiManager {
                         // 闪烁时最需要的恰恰是这个时刻。
                         debug!("UI: 工具栏显示（迟滞到期）");
                         if let (Some(t), Some(st)) = (&mut toolbar, &toolbar_pending_state) {
-                            t.update(st);
+                            if blocked_by_exclusive_fullscreen("toolbar") {
+                                t.hide();
+                            } else {
+                                t.update(st);
+                            }
                         }
                         toolbar_pending_state = None;
                     }
@@ -338,7 +356,9 @@ impl UiManager {
                     }
                 }
                 if !host_ok {
-                    if fixed {
+                    if blocked_by_exclusive_fullscreen("status_tip") {
+                        t.hide();
+                    } else if fixed {
                         t.show_fixed(&text, fx, fy, x, y);
                     } else {
                         t.show(&text, x, y, ch, ox, oy);
@@ -432,7 +452,11 @@ impl UiManager {
                         {
                             continue; // 跳过本地 show()，分流完成
                         }
-                        candidate_window.show();
+                        if blocked_by_exclusive_fullscreen("candidate") {
+                            candidate_window.hide();
+                        } else {
+                            candidate_window.show();
+                        }
                     }
                     UiCommand::HideCandidates => {
                         debug!("UI: HideCandidates");
@@ -817,7 +841,11 @@ impl UiManager {
                         match toolbar_gate.on_update(std::time::Instant::now(), visible) {
                             crate::toolbar_gate::UpdateAction::RenderNow => {
                                 if let Some(t) = &mut toolbar {
-                                    t.update(&tb_state);
+                                    if blocked_by_exclusive_fullscreen("toolbar") {
+                                        t.hide();
+                                    } else {
+                                        t.update(&tb_state);
+                                    }
                                 }
                                 toolbar_pending_state = None;
                             }
@@ -919,7 +947,11 @@ impl UiManager {
                             #[cfg(not(windows))]
                             let host_handled = false;
                             if !host_handled {
-                                candidate_window.show();
+                                if blocked_by_exclusive_fullscreen("candidate") {
+                                    candidate_window.hide();
+                                } else {
+                                    candidate_window.show();
+                                }
                             }
                         }
                     }

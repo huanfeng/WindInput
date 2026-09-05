@@ -1755,17 +1755,15 @@ impl Coordinator {
     pub(crate) fn notify_toolbar_async(&self) {
         // 立即用缓存值通知，bridge 线程无阻塞
         self.notify_toolbar();
-        // hide_in_fullscreen 关闭时缓存永远为 false，无需后台刷新
-        if !self.rt().config.ui.toolbar.hide_in_fullscreen {
-            return;
-        }
+        // 探测**不再**受 `hide_in_fullscreen` 门控：同一次探测还要给候选窗的
+        // 「D3D 独占全屏不弹窗」判据（`fullscreen_exclusive_cached`）刷值，那条没有开关。
         let Some(weak) = self.self_weak.get().cloned() else {
             return;
         };
         // 单飞：已有探测在途就跳过。探的是**同一个**全局前台状态，重复查没有意义，
         // 而焦点变化是成串来的（一次应用切换会连着触发多次），此前每次都 spawn 一个线程。
         //
-        // 这里不并入 first-show 那个共享定时器：is_foreground_fullscreen 会阻塞
+        // 这里不并入 first-show 那个共享定时器：foreground_fullscreen_kind 会阻塞
         // （异步化它正是 1abab9f 的目的），塞进定时器线程会拖垮兜底时限。
         if self
             .fullscreen_probing
@@ -1776,16 +1774,34 @@ impl Coordinator {
         let spawned = std::thread::Builder::new()
             .name("fullscreen-probe".into())
             .spawn(move || {
-                let is_fs = crate::is_foreground_fullscreen();
+                let kind = crate::foreground_fullscreen_kind();
+                let is_fs = kind != crate::FullscreenKind::None;
+                let is_excl = kind == crate::FullscreenKind::D3dExclusive;
                 if let Some(c) = weak.upgrade() {
                     let prev = c
                         .fullscreen_cached
                         .swap(is_fs, std::sync::atomic::Ordering::Relaxed);
+                    let prev_excl = c
+                        .fullscreen_exclusive_cached
+                        .swap(is_excl, std::sync::atomic::Ordering::Relaxed);
                     c.fullscreen_probing
                         .store(false, std::sync::atomic::Ordering::Release);
                     if prev != is_fs {
                         // 全屏态发生变化，用新值重新通知
                         c.notify_toolbar();
+                    }
+                    if prev_excl != is_excl {
+                        // 独占全屏态翻转：候选窗该收的收、该弹的弹（见 handle_uielement.rs）。
+                        tracing::info!(
+                            "前台 D3D 独占全屏={is_excl}，候选窗{}",
+                            if is_excl {
+                                "改为不弹出"
+                            } else {
+                                "恢复显示"
+                            }
+                        );
+                        let st = c.state.lock().unwrap_or_else(|e| e.into_inner());
+                        c.notify_ui_update(&st);
                     }
                 }
             });
@@ -1803,10 +1819,14 @@ impl Coordinator {
     /// 不再各自直接显示，根治”工具栏总是显示、切走输入法不隐藏”。
     pub(crate) fn notify_toolbar(&self) {
         // 前台应用全屏时隐藏工具栏（读缓存，由 notify_toolbar_async 后台刷新，无阻塞）。
-        let hide_fullscreen = self.rt().config.ui.toolbar.hide_in_fullscreen
+        // 「宿主接管 UI / D3D 独占全屏」一律压住，不受 hide_in_fullscreen 开关管：
+        // 那个开关管的是「无边框全屏要不要收工具栏」这种偏好；独占全屏下工具栏弹出去
+        // 会把游戏踢出独占态，不是偏好。见 handle_uielement.rs。
+        let hide_fullscreen = (self.rt().config.ui.toolbar.hide_in_fullscreen
             && self
                 .fullscreen_cached
-                .load(std::sync::atomic::Ordering::Relaxed);
+                .load(std::sync::atomic::Ordering::Relaxed))
+            || self.ui_suppressed_by_host().is_some();
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // 四项合取：本输入法在服务某宿主（ime_active）、焦点在可编辑控件里
         // （has_edit_context）、用户开着工具栏（toolbar_visible）、且未处于全屏。
@@ -1994,7 +2014,7 @@ fn monitor_key_from_point(x: i32, y: i32) -> Option<String> {
 /// 输入焦点所在显示器：`(key, 工作区右边界, 工作区下边界)`；查不到返回 None（不动工具栏）。
 ///
 /// 判据取**前台窗口**而非光标：键盘切窗（Alt+Tab、窗口热键）时光标根本不动，用光标
-/// 问不出「用户在哪块屏上打字」。前台窗口恒有值、查询不阻塞，`is_foreground_fullscreen`
+/// 问不出「用户在哪块屏上打字」。前台窗口恒有值、查询不阻塞，`foreground_fullscreen_kind`
 /// 已用同一套 `GetForegroundWindow` + `MonitorFromWindow`。
 ///
 /// ⚠ 这里刻意**不用** caret 坐标：caret 属于 TSF 层、常处于未就绪态（coords_ready /

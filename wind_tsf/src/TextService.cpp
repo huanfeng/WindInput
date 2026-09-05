@@ -956,6 +956,10 @@ CTextService::CTextService()
     , _uiElementId((DWORD)-1)
     , _uiElementShown(FALSE)
     , _pUIElementMgr(nullptr)
+    , _uiHostDraws(FALSE)
+    , _uiLessThread(FALSE)
+    , _uiElementStateSent(-1)
+    , _uiUpdatedFlags(0)
     , _pSourceSingle(nullptr)
     , _funcProviderRegistered(FALSE)
     , _hHotkeyWnd(nullptr)
@@ -1134,6 +1138,15 @@ STDAPI CTextService::ActivateEx(ITfThreadMgr* pThreadMgr, TfClientId tfClientId,
     _lastActivateTick = GetTickCount64();
 
     _activateFlags = dwFlags;
+    // UI-less 线程：宿主（游戏 / 全屏应用）声明只接受能交出 UI 控制权的 TIP。规范原话是
+    // TIP 此时「已经知道」该线程不要它的 UI——故一激活就报给服务端，让候选窗从第一个
+    // 组合起就不弹（否则要等首次 BeginUIElement 回 FALSE 才收，先弹再收闪一帧）。
+    _uiLessThread = (dwFlags & TF_TMAE_UIELEMENTENABLEDONLY) ? TRUE : FALSE;
+    _uiElementStateSent = -1;
+    if (_uiLessThread)
+    {
+        WIND_LOG_INFO(L"ActivateEx: TF_TMAE_UIELEMENTENABLEDONLY set — host is a UI-less thread, candidate UI will be host-drawn\n");
+    }
 
     WindHostProcessInfo currentHost;
     if (WindQueryCurrentProcessInfo(&currentHost))
@@ -1246,7 +1259,7 @@ STDAPI CTextService::ActivateEx(ITfThreadMgr* pThreadMgr, TfClientId tfClientId,
     // Notify Go service that IME is activated and sync full state.
     // Uses _DoFullStateSync which also handles lazy connect (service may
     // still be starting after first install).
-    _DoFullStateSync();
+    _DoFullStateSync(); // 内含 UIElement 状态上报（UI-less 线程从激活起就不弹窗）
 
     // NOTE: Using synchronous IPC mode (no reader thread)
     // Reference: Weasel uses sync IPC with librime and it works well
@@ -1277,6 +1290,10 @@ STDAPI CTextService::Deactivate()
 
     // 清理候选 UI 元素（必须在 ThreadMgr 释放之前）
     NotifyCandidatesVisibilityChanged(FALSE);
+    // UI-less 记账归零：下次 ActivateEx 重新问宿主、重新报服务端。
+    _uiHostDraws = FALSE;
+    _uiSnapshot = UiElementSnapshot();
+    _uiElementStateSent = -1;
 
     // Unregister layout sink and edit sink
     _UnadviseTextLayoutSink();
@@ -2100,13 +2117,36 @@ STDAPI CTextService::GetFunction(REFGUID rguid, REFIID riid, IUnknown** ppunk)
 
 // ============================================================================
 // ITfUIElement / ITfCandidateListUIElement / ITfCandidateListUIElementBehavior
-// 当前阶段：用 stub 数据验证 ITfUIElementMgr::BeginUIElement 注册本身能否让
-// Chromium / QQNT 走完整 IME-first 调度路径，规避 Ctrl+数字 被宿主同时处理。
-// 候选数据由 Go-side UI 渲染，C++ 这里返回占位数据即可。
+//
+// 两种宿主、两套数据：
+//  - 宿主**不接管**（BeginUIElement 回 pbShow=TRUE，绝大多数桌面程序）：候选由服务进程
+//    自己的窗口绘制。这里只维持「注册存在」——Chromium / QQNT 据此走完整 IME-first
+//    调度、不再和我们抢 Ctrl+数字；getter 返回占位数据（count=1 / "…"），键路径不多
+//    一次 IPC 往返。
+//  - 宿主**接管**（pbShow=FALSE，或线程以 TF_TMAE_UIELEMENTENABLEDONLY 激活；全屏游戏、
+//    搜索框、SDL / Unreal 等引擎）：候选窗由宿主画。本类每次候选变化经 CMD_UIELEMENT_QUERY
+//    从服务端同步拉一份快照（_uiSnapshot），再 UpdateUIElement 通知宿主来读；宿主的
+//    SetSelection / Finalize / Abort 经 CMD_UIELEMENT_ACTION 回流。服务端按 pid 记账
+//    （CMD_UIELEMENT_STATE），该进程聚焦期间不弹自己的候选窗。
+//
+// 规范要点（learn.microsoft.com/windows/win32/tsf/uiless-mode-overview）：
+//  - BeginUIElement 回 FALSE 后 TIP **必须**调 UpdateUIElement，宿主到那时才读内容
+//    （首次 GetUpdatedFlags 应全位置位）；回 TRUE 时可不调，但 EndUIElement 必须调。
+//  - 候选列表须按「页」而非「滚动」推进，页索引在列表存续期间不该变。
+//  - GetSelection 无选中时回 S_FALSE。
+// 设计与状态机见 docs/design/game-compat-tsf-uielement.md。
 // ============================================================================
 
+// 候选列表 UI 元素的 GUID。按规范这是给宿主 QI/去重用的标识，CUAS 桥不据它决定是否开
+// 候选盒（本机 IMM32 测试宿主实测：换成微软拼音的 GUID 也不改变 OPENCANDIDATE 行为）。
+// 故保留自有稳定 GUID，不impersonate 其它输入法。
 static const GUID kWindCandidateUIElementGuid =
     { 0xb3e54a91, 0x7c20, 0x4b6a, { 0xa1, 0x5e, 0x82, 0x09, 0x77, 0x55, 0x44, 0x33 } };
+
+// 不含 TF_CLUIE_DOCUMENTMGR：与微软 SampleIME / 微软拼音一致（后者实测首次 Update 报 0x3E）。
+static constexpr DWORD kUiElementAllFlags =
+    TF_CLUIE_COUNT | TF_CLUIE_SELECTION
+    | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE;
 
 STDAPI CTextService::GetDescription(BSTR* pbstrDescription)
 {
@@ -2125,7 +2165,16 @@ STDAPI CTextService::GetGUID(GUID* pguid)
 STDAPI CTextService::Show(BOOL bShow)
 {
     WIND_LOG_DEBUG_FMT(L"ITfUIElement::Show(%d)\n", (int)bShow);
+    BOOL prevHostDraws = _uiHostDraws;
     _uiElementShown = bShow;
+    _uiHostDraws = !bShow;
+    // 宿主中途改主意（先允许我们画、后来 Show(FALSE) 自己画，或反过来）：立刻报服务端
+    // 收/弹候选窗；转为宿主画时还得把数据备好并通知它来读。
+    _ReportUiElementState();
+    if (!prevHostDraws && _uiHostDraws && _uiElementId != (DWORD)-1)
+    {
+        _UpdateUiElementForHost();
+    }
     return S_OK;
 }
 
@@ -2139,83 +2188,199 @@ STDAPI CTextService::IsShown(BOOL* pbShow)
 STDAPI CTextService::GetUpdatedFlags(DWORD* pdwFlags)
 {
     if (pdwFlags == nullptr) return E_INVALIDARG;
-    *pdwFlags = TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION
-              | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE;
+    *pdwFlags = _UiElementUseSnapshot() ? _uiUpdatedFlags : kUiElementAllFlags;
+    WIND_LOG_DEBUG_FMT(L"UIElement host read: GetUpdatedFlags=0x%X snapshot=%d count=%u\n",
+                       *pdwFlags, (int)_UiElementUseSnapshot(),
+                       (UINT)_uiSnapshot.items.size());
     return S_OK;
 }
 
 STDAPI CTextService::GetDocumentMgr(ITfDocumentMgr** ppdim)
 {
+    // 与微软 SampleIME 一致：不声明归属文档（E_NOTIMPL）。
     if (ppdim == nullptr) return E_INVALIDARG;
     *ppdim = nullptr;
-    if (_pThreadMgr)
-    {
-        _pThreadMgr->GetFocus(ppdim); // may set null when no focus; that's OK
-    }
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 STDAPI CTextService::GetCount(UINT* puCount)
 {
     if (puCount == nullptr) return E_INVALIDARG;
-    *puCount = 1; // stub: 至少 1 个候选才能让 TSF 认为候选 UI "有意义"
+    // 无快照且宿主不接管时给占位 1：至少 1 个候选才能让 TSF 认为候选 UI "有意义"（Chromium 调度所需）。
+    *puCount = _UiElementUseSnapshot() ? (UINT)_uiSnapshot.items.size() : 1;
     return S_OK;
 }
 
 STDAPI CTextService::GetSelection(UINT* puIndex)
 {
     if (puIndex == nullptr) return E_INVALIDARG;
-    *puIndex = 0;
+    if (!_UiElementUseSnapshot())
+    {
+        *puIndex = 0;
+        return S_OK;
+    }
+    if (_uiSnapshot.items.empty())
+    {
+        *puIndex = 0;
+        return S_FALSE; // 规范：无选中回 S_FALSE，首参无效
+    }
+    *puIndex = _uiSnapshot.selected;
     return S_OK;
 }
 
 STDAPI CTextService::GetString(UINT uIndex, BSTR* pstr)
 {
     if (pstr == nullptr) return E_INVALIDARG;
-    *pstr = SysAllocString(L"…"); // 占位
+    if (!_UiElementUseSnapshot())
+    {
+        *pstr = SysAllocString(L"…"); // 占位
+        return *pstr ? S_OK : E_OUTOFMEMORY;
+    }
+    if (uIndex >= _uiSnapshot.items.size())
+    {
+        *pstr = nullptr;
+        return E_INVALIDARG;
+    }
+    const std::wstring& text = _uiSnapshot.items[uIndex];
+    *pstr = SysAllocStringLen(text.c_str(), (UINT)text.size());
+    WIND_LOG_DEBUG_FMT(L"UIElement host read: GetString(%u)=\"%s\"\n", uIndex, text.c_str());
     return *pstr ? S_OK : E_OUTOFMEMORY;
 }
 
 STDAPI CTextService::GetPageIndex(UINT* pIndex, UINT uSize, UINT* puPageCnt)
 {
     if (puPageCnt == nullptr) return E_INVALIDARG;
-    *puPageCnt = 1;
-    if (pIndex && uSize >= 1)
+    if (!_UiElementUseSnapshot())
     {
-        pIndex[0] = 0;
+        *puPageCnt = 1;
+        if (pIndex && uSize >= 1) pIndex[0] = 0;
+        return S_OK;
+    }
+    // 页起点表：每页 pageSize 条，count 为 0 时 0 页（SampleIME 同款）。宿主惯常先传
+    // pIndex=NULL 取页数再分配数组二次调用；uSize 不足时只填得下的部分，不报错。
+    const UINT count = (UINT)_uiSnapshot.items.size();
+    const UINT pageSize = _uiSnapshot.pageSize ? _uiSnapshot.pageSize : 1;
+    const UINT pages = count ? (count + pageSize - 1) / pageSize : 0;
+    *puPageCnt = pages;
+    WIND_LOG_DEBUG_FMT(L"UIElement host read: GetPageIndex pages=%u pageSize=%u count=%u wantArray=%d\n",
+                       pages, pageSize, count, (int)(pIndex != nullptr));
+    if (pIndex)
+    {
+        for (UINT i = 0; i < pages && i < uSize; ++i)
+        {
+            pIndex[i] = i * pageSize;
+        }
     }
     return S_OK;
 }
 
 STDAPI CTextService::SetPageIndex(UINT* pIndex, UINT uPageCnt)
 {
-    // no-op (read-only stub)
+    // 宿主想改页的切法（每页几条）。分页由服务端配置（ui.candidate.per_page）决定，
+    // 且规范建议列表存续期间不改页索引——这里接受调用但不改切法（Weasel 同款）。
+    (void)pIndex; (void)uPageCnt;
     return S_OK;
 }
 
 STDAPI CTextService::GetCurrentPage(UINT* puPage)
 {
     if (puPage == nullptr) return E_INVALIDARG;
-    *puPage = 0;
+    *puPage = _UiElementUseSnapshot() ? _uiSnapshot.currentPage : 0;
     return S_OK;
 }
 
 STDAPI CTextService::SetSelection(UINT nIndex)
 {
     WIND_LOG_DEBUG_FMT(L"ITfCandidateListUIElementBehavior::SetSelection(%u)\n", nIndex);
-    return S_OK; // no-op: TSF 不参与候选选择，Go 端处理
+    if (!_UiElementHostDraws()) return S_OK; // 宿主不画时它也不该操作；忽略
+    if (nIndex >= _uiSnapshot.items.size()) return E_INVALIDARG;
+    _SendUiElementAction(UIELEMENT_ACTION_SET_SELECTION, nIndex);
+    // 同一条管道按序处理：上面的 action 先于下面的 query 到达，拉回来的就是新高亮。
+    _UpdateUiElementForHost();
+    return S_OK;
 }
 
 STDAPI CTextService::Finalize(void)
 {
     WIND_LOG_DEBUG(L"ITfCandidateListUIElementBehavior::Finalize\n");
+    if (!_UiElementHostDraws()) return S_OK;
+    // 上屏结果经 push 管道回来（CommitText → 收组合 → NotifyCandidatesVisibilityChanged(FALSE)
+    // → EndUIElement），与鼠标点选候选同一条路，这里不等应答。
+    _SendUiElementAction(UIELEMENT_ACTION_FINALIZE, 0);
     return S_OK;
 }
 
 STDAPI CTextService::Abort(void)
 {
     WIND_LOG_DEBUG(L"ITfCandidateListUIElementBehavior::Abort\n");
+    if (!_UiElementHostDraws()) return S_OK;
+    _SendUiElementAction(UIELEMENT_ACTION_ABORT, 0); // 服务端推 ClearComposition 回来收口
     return S_OK;
+}
+
+void CTextService::_ReportUiElementState()
+{
+    uint32_t flags = 0;
+    if (_UiElementHostDraws()) flags |= UIELEMENT_FLAG_HOST_DRAWS;
+    if (_uiLessThread) flags |= UIELEMENT_FLAG_UI_LESS_THREAD;
+    if ((int32_t)flags == _uiElementStateSent) return;
+    if (_pIPCClient == nullptr || !_pIPCClient->IsConnected()) return; // 未连上：留着 -1，下次再报
+    UiElementStatePayload payload = {};
+    payload.pid = GetCurrentProcessId();
+    payload.flags = flags;
+    if (_pIPCClient->SendAsync(CMD_UIELEMENT_STATE, &payload, sizeof(payload)))
+    {
+        _uiElementStateSent = (int32_t)flags;
+        WIND_LOG_INFO_FMT(L"uielement state reported: flags=0x%X (host_draws=%d ui_less=%d)\n",
+                          flags, (int)_UiElementHostDraws(), (int)_uiLessThread);
+    }
+}
+
+BOOL CTextService::_RefreshUiElementSnapshot()
+{
+    if (_pIPCClient == nullptr) return FALSE;
+    ServiceResponse resp;
+    if (!_pIPCClient->SendSync(CMD_UIELEMENT_QUERY, nullptr, 0, resp)
+        || resp.type != ResponseType::UiElementPage)
+    {
+        WIND_LOG_WARN(L"uielement: snapshot query failed, clearing snapshot\n");
+        BOOL hadItems = !_uiSnapshot.items.empty();
+        _uiSnapshot = UiElementSnapshot();
+        _uiUpdatedFlags = hadItems ? kUiElementAllFlags : 0;
+        return FALSE;
+    }
+    UiElementSnapshot next;
+    next.items = std::move(resp.uiCandidates);
+    next.selected = resp.uiSelected;
+    next.pageSize = resp.uiPageSize ? resp.uiPageSize : 1;
+    next.currentPage = resp.uiCurrentPage;
+
+    // 变化位：宿主据 GetUpdatedFlags 决定重读哪些部分（SDL 只在 STRING/COUNT 变时重排版）。
+    DWORD flags = 0;
+    if (next.items.size() != _uiSnapshot.items.size()) flags |= TF_CLUIE_COUNT | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX;
+    else if (next.items != _uiSnapshot.items) flags |= TF_CLUIE_STRING;
+    if (next.pageSize != _uiSnapshot.pageSize) flags |= TF_CLUIE_PAGEINDEX;
+    if (next.selected != _uiSnapshot.selected) flags |= TF_CLUIE_SELECTION;
+    if (next.currentPage != _uiSnapshot.currentPage) flags |= TF_CLUIE_CURRENTPAGE;
+    _uiUpdatedFlags = flags;
+    _uiSnapshot = std::move(next);
+    return TRUE;
+}
+
+void CTextService::_UpdateUiElementForHost()
+{
+    if (_pUIElementMgr == nullptr || _uiElementId == (DWORD)-1) return;
+    _RefreshUiElementSnapshot();
+    _pUIElementMgr->UpdateUIElement(_uiElementId);
+}
+
+void CTextService::_SendUiElementAction(uint32_t action, uint32_t arg)
+{
+    if (_pIPCClient == nullptr) return;
+    UiElementActionPayload payload = {};
+    payload.action = action;
+    payload.arg = arg;
+    _pIPCClient->SendAsync(CMD_UIELEMENT_ACTION, &payload, sizeof(payload));
 }
 
 void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
@@ -2238,6 +2403,13 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
     if (hasCandidates && _uiElementId == (DWORD)-1)
     {
         BOOL bShow = TRUE;
+        // ★ 先取快照再 BeginUIElement：宿主（以及 IMM32 桥）在 Begin 回调里就会读
+        // GetCount/GetString。微软拼音在 Begin 时就带着全量数据，IMM32 桥据此发
+        // IMN_OPENCANDIDATE；我们此前 Begin 时只有占位「…」、真数据要等随后的 Update，
+        // 桥就只发 CHANGECANDIDATE 而不发 OPENCANDIDATE，靠 OPENCANDIDATE 才开候选盒的
+        // 宿主（Dota 2）什么都不显示。代价：每个组合起手多一次同步拉取（亚毫秒）。
+        _RefreshUiElementSnapshot();
+        _uiUpdatedFlags = kUiElementAllFlags;
         // 通过 Behavior 路径解决菱形继承
         HRESULT hr = _pUIElementMgr->BeginUIElement(
             static_cast<ITfUIElement*>(static_cast<ITfCandidateListUIElementBehavior*>(this)),
@@ -2245,7 +2417,15 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
         if (SUCCEEDED(hr))
         {
             _uiElementShown = bShow;
+            _uiHostDraws = !bShow;
             WIND_LOG_DEBUG_FMT(L"BeginUIElement ok id=%u show=%d\n", _uiElementId, (int)bShow);
+            _ReportUiElementState();
+            if (_UiElementHostDraws())
+            {
+                // 规范：回 FALSE 后必须 UpdateUIElement（快照已在 Begin 前取好，首次全位置位）。
+                _uiUpdatedFlags = kUiElementAllFlags;
+                _pUIElementMgr->UpdateUIElement(_uiElementId);
+            }
         }
         else
         {
@@ -2259,11 +2439,22 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
         WIND_LOG_DEBUG_FMT(L"EndUIElement id=%u hr=0x%08X\n", _uiElementId, (uint32_t)hr);
         _uiElementId = (DWORD)-1;
         _uiElementShown = FALSE;
+        // 只清快照，**不动** _uiHostDraws：它记录的是宿主的意愿（谁画），下一次
+        // BeginUIElement 会重新问；服务端那边的记账也照旧，避免每次组合结束都收/弹一次。
+        _uiSnapshot = UiElementSnapshot();
+        _uiUpdatedFlags = 0;
     }
     else if (hasCandidates && _uiElementId != (DWORD)-1)
     {
-        // 已注册，仅触发 update
-        _pUIElementMgr->UpdateUIElement(_uiElementId);
+        if (_UiElementHostDraws())
+        {
+            _UpdateUiElementForHost(); // 拉快照 + 通知宿主重读
+        }
+        else
+        {
+            // 已注册，仅触发 update
+            _pUIElementMgr->UpdateUIElement(_uiElementId);
+        }
     }
 }
 
@@ -3707,6 +3898,12 @@ void CTextService::_DoFullStateSync()
     // 不再触发重复 state sync。即便 push 暂时未到，下一次焦点切换会重新拉起 activation 流程。
     _pIPCClient->ClearNeedsSyncFlag();
     _needsFocusRecovery = FALSE;
+
+    // UIElement「谁画候选」的记账住在服务端，服务重启就没了；本函数正是每次（重）连后
+    // 的全量同步点，故无条件重报一次：UI-less 线程从激活起就不弹窗，普通线程报 0 把
+    // 本 pid 上次留下的记账（pid 复用 / 上次会话宿主接管过）清掉。
+    _uiElementStateSent = -1;
+    _ReportUiElementState();
 }
 
 // ApplyActivationStatusResponse 在 TSF 线程上把 push pipe 接收到的 activation status 落地。
@@ -5159,6 +5356,11 @@ BOOL CTextService::RequestFocusCaretAsync(ITfDocumentMgr* pDocMgrFocus)
     {
         return FALSE;
     }
+    // UI-less / 宿主接管绘制：焦点期这次取坐标也省了（不弹窗，独占全屏下一次 GetTextExt 都不发）。
+    if (_CaretQuerySuppressed())
+    {
+        return FALSE;
+    }
 
     // 同一焦点会话只探一次：OnSetFocus 在 DocMgr 抖动时会被反复调用（Excel 单元格切换、
     // 浏览器 SPA 导航），不去重就是给宿主刷 edit session 请求。
@@ -5317,6 +5519,12 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
 
 void CTextService::SendCaretPositionUpdate()
 {
+    // UI-less / 宿主接管绘制：不弹自己的窗 ⇒ 不需要光标；反复取坐标会在独占全屏拖死
+    // 游戏（见 _CaretQuerySuppressed 注释）。timer 兜底也只在本函数里设，提前返回即不设。
+    if (_CaretQuerySuppressed())
+    {
+        return;
+    }
     // Weasel 模式：composition 刚创建后第一次调用，不立即发 IPC。
     // 应用尚未完成 layout reflow，GetTextExt 此时返回的可能是旧坐标
     // （WPS 中 h>0 但坐标陈旧），先发会导致候选窗显示在错误位置然后跳到正确位置。
@@ -5778,6 +5986,13 @@ STDAPI CTextService::OnLayoutChange(ITfContext* pContext, TfLayoutCode lCode, IT
 {
     if (lCode == TF_LC_CHANGE && _pComposition != nullptr)
     {
+        // UI-less / 宿主接管绘制：跳过整条 caret 重探（探测采样 + debounce timer + flush）。
+        // 这是 Dota 2 独占全屏冻死的直接来源——SDL 回无效光标(-1000,-1000)，OnLayoutChange
+        // 反复触发同步 GetTextExt 把渲染线程拖死。我们不弹自己的窗，本就不需要这些坐标。
+        if (_CaretQuerySuppressed())
+        {
+            return S_OK;
+        }
         // 首次 reflow 阶段（_compositionJustStarted）：WPS 等宿主会在 reflow 完成前
         // 连续触发多次 OnLayoutChange，前几次 GetTextExt 仍返回旧坐标。这里改用
         // debounce：每次 OnLayoutChange 都重置 timer，等事件 burst 结束后再 flush，

@@ -51,6 +51,20 @@ constexpr uint16_t CMD_INPUT_STATE_REPORT    = 0x0213;
 // 查询 + band 查询，塞进去等于给每次焦点切换加固定开销。故独立成命令、异步发送，且由
 // CONFIG_KEY_DIAG_SNAPSHOT 门控——HUD 关闭时一次都不采集。
 constexpr uint16_t CMD_DIAG_SNAPSHOT         = 0x0214;
+// ── TSF UI-less（UIElement）三件套：宿主自绘候选时的数据通道 ──
+// 宿主在 ITfUIElementSink::BeginUIElement 回 pbShow=FALSE（或线程以
+// TF_TMAE_UIELEMENTENABLEDONLY 激活）即接管候选绘制：本 DLL 须经 ITfCandidateListUIElement
+// 把候选数据交给宿主，服务端则不再弹自己的候选窗。候选列表住在服务进程，故：
+//   STATE  (C++ -> core, async)：报告本进程「谁画」（UiElementStatePayload）。
+//   QUERY  (C++ -> core, sync) ：拉取候选快照；响应 PAGE。只在宿主接管时才发（拉取模型，
+//                                不接管的宿主键路径不多一次往返）。
+//   ACTION (C++ -> core, async)：宿主经 ITfCandidateListUIElementBehavior 的操作回流。
+// 与 wind-ipc protocol.rs 的 CMD_UIELEMENT_* 逐字节对齐。设计见
+// docs/design/game-compat-tsf-uielement.md。
+constexpr uint16_t CMD_UIELEMENT_STATE       = 0x0217;
+constexpr uint16_t CMD_UIELEMENT_QUERY       = 0x0218;
+constexpr uint16_t CMD_UIELEMENT_PAGE        = 0x0219; // core -> C++ (QUERY 的响应)
+constexpr uint16_t CMD_UIELEMENT_ACTION      = 0x021A;
 constexpr uint16_t CMD_COMPOSITION_TERMINATED = 0x0209; // Composition unexpectedly terminated (e.g., user clicked in input field)
 constexpr uint16_t CMD_CARET_UPDATE     = 0x0301; // Caret position update
 constexpr uint16_t CMD_SELECTION_CHANGED = 0x0302; // Selection/caret changed without composition (from ITfTextEditSink)
@@ -710,6 +724,34 @@ struct InputStateReportPayload
 };
 static_assert(sizeof(InputStateReportPayload) == 14, "InputStateReportPayload must be 14 bytes");
 
+// UIElement state (C++ -> core, async). flags 位定义同 Rust UIELEMENT_FLAG_*。
+constexpr uint32_t UIELEMENT_FLAG_HOST_DRAWS     = 0x0001; // 宿主接管绘制（pbShow=FALSE / Show(FALSE)）
+constexpr uint32_t UIELEMENT_FLAG_UI_LESS_THREAD = 0x0002; // 线程以 TF_TMAE_UIELEMENTENABLEDONLY 激活
+struct UiElementStatePayload
+{
+    uint32_t pid;   // GetCurrentProcessId()
+    uint32_t flags; // UIELEMENT_FLAG_*
+};
+static_assert(sizeof(UiElementStatePayload) == 8, "UiElementStatePayload must be 8 bytes");
+
+// UIElement action (C++ -> core, async). action 取值同 Rust UIELEMENT_ACTION_*。
+constexpr uint32_t UIELEMENT_ACTION_SET_SELECTION = 1; // arg = 页内下标（快照只带当页）
+constexpr uint32_t UIELEMENT_ACTION_FINALIZE      = 2; // 定稿当前高亮
+constexpr uint32_t UIELEMENT_ACTION_ABORT         = 3; // 放弃会话（Esc）
+constexpr uint32_t UIELEMENT_ACTION_SET_PAGE      = 4; // arg = 页号（0 起）
+struct UiElementActionPayload
+{
+    uint32_t action;
+    uint32_t arg;
+};
+static_assert(sizeof(UiElementActionPayload) == 8, "UiElementActionPayload must be 8 bytes");
+
+// UIElement page (core -> C++, CMD_UIELEMENT_PAGE)。线上格式（全部 LE）：
+//   selected u32 + pageSize u32 + currentPage u32 + count u32 + count × { len u16 + UTF-8 }
+// 定长头 16 字节；候选文本为**当页**候选，count 即宿主眼中的列表长度（GetCount），
+// 页数恒 1、selected 为页内下标（Weasel / 微软拼音同一形状，Dota 2 会把整条列表画出来）。
+constexpr size_t UIELEMENT_PAGE_HEADER_SIZE = 16;
+
 // ── 焦点窗口句柄的来源域（DiagSnapshotHeader::focusHwndSource）────────────────
 // ⚠ 三条通路给出的**不是同一件东西**，压进一个字段而不标来源，下游就再也分不开了
 // ——与 CARET_SRC_* 给 caret 坐标分域是同一个教训。这里尤其要命：FOREGROUND 域的窗口
@@ -848,6 +890,7 @@ enum class ResponseType
     CommitAndHold,        // Commit text then open composition with hold text + start timer
     CommitThenDefer,      // Commit text now, defer new composition (余码) to trigger-key keyup
     HostRenderSetup, // Host render setup (shared memory info)
+    UiElementPage,   // 候选快照（CMD_UIELEMENT_QUERY 的响应）
     Error
 };
 
