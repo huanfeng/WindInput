@@ -203,6 +203,16 @@ first_show_mode = "wait"
 #
 # ⚠ 未在本段出现的进程**完全不受限制**（绝大多数应用），行为与本机制引入前一致。
 
+[[apps]]
+process = "wps.exe"
+comment = "WPS 文字：组合起点每帧与插入点同步右移（矩形恒 w=2，起点即插入点），大偏移逃生阀被这份漂移数据一路骗着重锁，实测把锚点从真实起点 1830 推到 2591；而删除是逐字的、每步 15~30px 够不到 3 倍行高阈值，锚点就永久卡住，候选窗离组合区 868px。钉在首帧起点即可——首帧 compStart 是对的。⚠ 不可改成全局：Excel / et.exe 矩形形态完全相同，但它们每字换一次 docMgr、候选窗本就该跟着单元格走，靠的正是逃生阀"
+pin_anchor_when_start_drifts = true
+
+[[apps]]
+process = "WINWORD.EXE"
+comment = "Microsoft Word：与 WPS 文字同类，长组合内组合起点跟着插入点走。其 cached 帧另有 w=0 的退化矩形（坐标是另一处的陈旧值），那条由全局的「退化帧整帧不可信」判据挡掉，与本开关无关"
+pin_anchor_when_start_drifts = true
+
 [[initial_mode_scope]]
 process = "explorer.exe"
 comment = "Windows 资源管理器：initial_mode 只作用于桌面本身，任务栏/切换器/文件管理器窗口保持现状"
