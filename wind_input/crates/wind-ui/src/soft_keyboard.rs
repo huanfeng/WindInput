@@ -100,6 +100,20 @@ const KEY_FLASH_MS: u64 = 140;
 /// 物理 Shift / 大写锁定的跟随节奏（毫秒）。**仅面板可见期间生效**。
 const MODIFIER_POLL_MS: u64 = 40;
 
+/// 面板上的 Caps 键点了能不能翻转系统大写锁定。
+///
+/// ⛔ **macOS 上恒为 false，且不是我们漏改了什么**：大写锁定的状态由 HID 层持有，
+/// 而合成按键是从它**上面**的 CGEvent tap 层注进去的，够不着——这一层差别只影响这一个键，
+/// 别的键全都照常。三条路都实测过（见 `docs/design/soft-keyboard.md` §11.9）：
+/// CGEvent 敲 `kVK_CapsLock` 无效（由**有**辅助功能授权的 `.app` 实测，不是假阴性）；
+/// `IOHIDSetModifierLockState` 受理了然后忽略——返回 `KERN_SUCCESS` 而状态纹丝不动；
+/// `kIOHIDServerConnectType` 要 root，服务不以 root 跑。真要做到只剩装虚拟 HID 驱动
+/// （Karabiner 那条路：DriverKit 系统扩展 + 用户批准），为一个键帽不值当。
+///
+/// ⚠️ 禁掉的**只是「点它去翻转」这一半**：读是好的，物理 CapsLock 的状态照常轮询回来
+/// 并高亮，所以禁用态下它仍是个如实的指示灯——见 [`SoftKeyboard::caps_key`]。
+const CAPS_CLICKABLE: bool = !cfg!(target_os = "macos");
+
 /// 面板配色（全部走主题键，未配则回落到与候选窗同族的中性色）。
 #[derive(Clone)]
 struct Colors {
@@ -1443,19 +1457,31 @@ impl SoftKeyboard {
         self.flat_key(tag, text, units, u, gap, s, hover, pressed == tag)
     }
 
-    /// Caps 键：显示并切换系统大写锁定。
+    /// Caps 键：显示系统大写锁定，并在够得着的平台上切换它。
     ///
     /// ⛔ 这不违反「不拦截 CapsLock」那条禁令。禁的是**拦截物理键**——toggle 键的
     /// keydown/keyup 处理有坑，「翻转再回敲复原」已被删除且不得重来。这里是用户点面板时
     /// 我们**主动敲一次** `vk:0x14`，与用户自己按下没有区别；物理 CapsLock 仍然完全
     /// 不接管，它的状态由下面的轮询如实读回来。
+    ///
+    /// [`CAPS_CLICKABLE`] 为假时（macOS）画成禁用态：
+    /// - **键位留着，尺寸不变**——少画一个键会让两个平台的底行布局分家，而这一行是
+    ///   固定单位排的，抽掉一个就得两套排布；
+    /// - **不进命中表**，与面板上的空键位同一个做法：不 hover、不按下、更不合成，
+    ///   免得点了没反应还以为是卡了；
+    /// - **`caps_on` 的高亮照旧**——读那一半是好的，禁用不该把指示灯一起关掉。
     fn caps_key(&self, units: f32, u: f32, gap: f32, s: f32, hover: i32, pressed: i32) -> View {
         let tag = SOFT_TAG_FN_BASE + SOFT_FN_CAPS_INDEX as i32;
         let c = &self.colors;
         // 大写锁定是**持续态**，要一眼看见但不该盖过正在打的那个键：与标签行的
         // 「当前面」同一套（柔和底 + 主色字 + 主色描边），而不是整块实心主色。
+        //
+        // ★ `caps_on` 排在禁用之前：亮着的锁定态比「这个键点不了」更要紧，也更该被看见。
         let (bg, fg) = if self.caps_on {
             (c.accent_soft, c.accent)
+        } else if !CAPS_CLICKABLE {
+            // 借空键位那套灰——本面板既有的「这个位置点了没用」的视觉词汇，不另发明一种。
+            (c.keycap_dead, c.hint)
         } else if pressed == tag {
             (c.accent_soft, c.ink)
         } else if hover == tag {
@@ -1463,7 +1489,7 @@ impl SoftKeyboard {
         } else {
             (c.keycap_fn, c.hint)
         };
-        View::container(Layout::Row)
+        let cell = View::container(Layout::Row)
             .fixed_w(units * u + (units - 1.0) * gap)
             .fixed_h(u)
             .bg(bg)
@@ -1473,14 +1499,14 @@ impl SoftKeyboard {
                 (1.0 * s).max(1.0),
             )
             .cross(Align::Center)
-            .tag(tag)
             .child(
                 View::leaf("Caps", fg)
                     .font_size(11.5 * s)
                     .text_align(Align::Center)
                     .fill_cross()
                     .grow(),
-            )
+            );
+        if CAPS_CLICKABLE { cell.tag(tag) } else { cell }
     }
 
     /// Shift 键：**可点**（锁定/解锁第二层），同时反映物理按住状态。
