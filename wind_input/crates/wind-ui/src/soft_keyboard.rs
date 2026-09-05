@@ -20,9 +20,19 @@
 //!
 //! # 不抢焦点是承重墙
 //!
-//! 窗口沿用浮层那组样式（`WS_EX_NOACTIVATE` 等，见 [`LayeredWindow`]）。
-//! 「切换焦点自动关闭」这条行为完全依赖它：面板一旦可激活，用户点它上面任何一个键
-//! 都是在改变焦点，它会把自己关掉。
+//! 窗口沿用浮层那组样式（Windows 的 `WS_EX_NOACTIVATE`，macOS 的
+//! `NSWindowStyleMask::NonactivatingPanel`）。「切换焦点自动关闭」这条行为完全依赖它：
+//! 面板一旦可激活，用户点它上面任何一个键都是在改变焦点，它会把自己关掉。
+//!
+//! # 三个平台共用这一份
+//!
+//! 布局、绘制、命中、交互状态机全部在本文件里且不带 `cfg`——它们建立在 tiny-skia 与
+//! [`View`] 之上，本就与平台无关。分叉只有两处，都收在文件末尾：
+//!
+//! - **窗口壳**：`PanelWindow` 别名。Windows 是 `LayeredWindow`（`UpdateLayeredWindow`），
+//!   macOS 是 [`crate::mac_panel::MacPanel`]（服务进程自己的 NSPanel），Linux 是 mock。
+//! - **鼠标来源**：Windows 走 `mouse_impl`（Win32 消息），macOS 走 `mouse_macos`
+//!   （AppKit 事件）。两者写的是同一个 [`SoftMouse`] 状态机，只是喂法不同。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -30,7 +40,16 @@ use std::sync::mpsc::Sender;
 
 use crate::text::dwrite::TextRenderer;
 use crate::view::{Align, Edges, Layout, Rect, View};
-use crate::window::LayeredWindow;
+
+/// 面板的窗口壳。三个平台的方法集**逐位同形**，故本文件其余部分无需分叉。
+///
+/// ⚠️ macOS 上刻意**不**复用 `window::LayeredWindow`：那个类型在 macOS 上是纯像素
+/// 缓冲（`candidate_window.rs` 正靠它光栅化后写 SHM），把它改成真窗口会给候选窗凭空
+/// 开出一个 NSPanel，砸掉现有的 host-render 管线。
+#[cfg(target_os = "macos")]
+use crate::mac_panel::MacPanel as PanelWindow;
+#[cfg(not(target_os = "macos"))]
+use crate::window::LayeredWindow as PanelWindow;
 use wind_ui_types::{
     SOFT_FN_CAPS_INDEX, SOFT_FN_KEYS, SOFT_TAG_CLOSE, SOFT_TAG_CTRL, SOFT_TAG_ESC,
     SOFT_TAG_FN_BASE, SOFT_TAG_PAGE_BASE, SOFT_TAG_PAGE_NEXT, SOFT_TAG_PAGE_PREV, SOFT_TAG_SHIFT,
@@ -156,11 +175,12 @@ struct SoftMouse {
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: isize,
     /// 拖动中；`anchor` 是按下时的屏幕光标，`origin` 是按下时的窗口左上。
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// 两平台同义：Windows 由 `mouse_impl` 写，macOS 由 `mouse_macos` 写。
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     dragging: bool,
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     anchor: (i32, i32),
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     origin: (i32, i32),
     /// 拖动落点（左上角），供窗口在 tick 里收回去记住位置。拖动**途中**每次
     /// `WM_MOUSEMOVE` 都更新——面板要实时跟着光标走。
@@ -209,8 +229,9 @@ impl SoftMouse {
         }
     }
 
-    /// ⚠️ 两个调用点（`refresh_hover` 与 `mouse_impl`）都在 `#[cfg(windows)]` 之下。
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// ⚠️ 调用点都在平台分支里（Windows 的 `mouse_impl`、macOS 的 `mouse_macos`，
+    /// 以及两者各自的 `refresh_hover`），Linux 上确实无人读。
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     fn hit_at(&self, x: f32, y: f32) -> i32 {
         // 逆序找：后画的（层级更高的）优先。键帽之间不重叠，这里只是稳妥。
         self.hits
@@ -255,12 +276,16 @@ fn repeat_params() -> (u64, u64) {
             return (d, r.max(15));
         }
     }
+    #[cfg(target_os = "macos")]
+    if let Some(p) = crate::mac_panel::key_repeat_params() {
+        return p;
+    }
     (REPEAT_DELAY_MS, REPEAT_RATE_MS)
 }
 
 /// 软键盘面板窗口。
 pub struct SoftKeyboard {
-    window: LayeredWindow,
+    window: PanelWindow,
     renderer: TextRenderer,
     scale: f32,
     colors: Colors,
@@ -325,7 +350,7 @@ impl SoftKeyboard {
 
     pub fn new(events: Sender<UiEvent>) -> Result<Self, String> {
         let scale = crate::dpi::scale_for_point(0, 0);
-        let window = LayeredWindow::create(None, 700, 300, "WindInputSoftKeyboard")?;
+        let window = PanelWindow::create(None, 700, 300, "WindInputSoftKeyboard")?;
         let renderer = TextRenderer::new("Microsoft YaHei UI", Self::DEFAULT_FONT_PX * scale)?;
         let mouse = Rc::new(RefCell::new(SoftMouse {
             hover: -1,
@@ -1090,7 +1115,24 @@ impl SoftKeyboard {
         true
     }
 
-    #[cfg(not(windows))]
+    /// macOS 版：光标与面板左上角都问得到，换算成客户区坐标即可。
+    ///
+    /// 与 Windows 分支同一职责（内容在鼠标底下动了要重算高亮），只是 macOS 没有
+    /// `ScreenToClient`，减一次面板原点就是。
+    #[cfg(target_os = "macos")]
+    fn refresh_hover(&self) -> bool {
+        let (ox, oy) = self.window.origin_px();
+        let (cx, cy) = crate::mac_panel::global_cursor_px(f64::from(self.scale));
+        let mut m = self.mouse.borrow_mut();
+        let h = m.hit_at((cx - ox) as f32, (cy - oy) as f32);
+        if h == m.hover {
+            return false;
+        }
+        m.hover = h;
+        true
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     fn refresh_hover(&self) -> bool {
         false
     }
@@ -1540,8 +1582,8 @@ impl SoftKeyboard {
     }
 }
 
-/// 读物理 Shift 是否按住、大写锁定是否开着。非 Windows 返回 `None`（面板本就只有
-/// Windows 实现）。
+/// 读物理 Shift 是否按住、大写锁定是否开着。无实现的平台返回 `None`，
+/// [`SoftKeyboard::tick`] 见 `None` 即整段跳过（面板停在当前层，不会出错档）。
 fn read_shift_caps() -> Option<(bool, bool)> {
     #[cfg(windows)]
     unsafe {
@@ -1551,7 +1593,11 @@ fn read_shift_caps() -> Option<(bool, bool)> {
         let caps = (GetKeyState(VK_CAPITAL.0 as i32) as u16 & 0x0001) != 0;
         Some((shift, caps))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::mac_panel::shift_caps_state()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
@@ -1618,12 +1664,12 @@ fn is_page_tag(tag: i32) -> bool {
 /// 自己的命中区在它之后收集、盖在上面，所以命中到视口就说明点的是标签行的**留白**。
 /// 而 `WM_LBUTTONDOWN` 那条拖动分支的注释一直写着「空白处（标签行留白、键位之间的
 /// 缝）→ 拖动整块面板」，此前却只判 `h < 0`，留白根本走不到——注释与代码相矛盾。
-#[cfg_attr(not(windows), allow(dead_code))] // 唯一调用点是 `#[cfg(windows)] mod mouse_impl`
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))] // 调用点在 mouse_impl / mouse_macos
 fn drags_panel(tag: i32) -> bool {
     tag < 0 || tag == SOFT_TAG_TAB_VIEWPORT
 }
 
-#[cfg_attr(not(windows), allow(dead_code))] // 唯一调用点是 `#[cfg(windows)] mod mouse_impl`
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))] // 调用点在 mouse_impl / mouse_macos
 fn fires_on_release(tag: i32) -> bool {
     // 关闭：不可撤销，按下即关像「还没点就没了」。
     if tag == SOFT_TAG_CLOSE || tag == SOFT_TAG_ESC {
@@ -1780,6 +1826,13 @@ fn default_origin(w: u32, h: u32, s: f32, work: Option<(i32, i32, i32, i32)>) ->
         {
             return bottom_centered(rc.left, rc.top, rc.right, rc.bottom);
         }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some((ax, ay, aw, ah)) = crate::mac_panel::work_area_px(f64::from(s)) {
+        // 与 Windows 分支同一落点：工作区**底部居中**，留一点边距。
+        let x = ax + ((aw as i32) - w as i32) / 2;
+        let y = ay + ah as i32 - h as i32 - margin;
+        return (x.max(ax), y.max(ay));
     }
     let _ = (w, h);
     (margin, margin)
@@ -1998,6 +2051,351 @@ mod mouse_impl {
                 }
                 _ => None,
             }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mouse_macos {
+    use super::{SoftMouse, drags_panel, fires_on_release, is_page_tag, repeat_params, repeats};
+    use crate::mac_panel::{MouseEvent, MouseKind, PanelGeom, PanelMouse};
+    use wind_ui_types::{SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT, SOFT_TAG_TAB_VIEWPORT};
+
+    /// AppKit 事件 → 同一个 [`SoftMouse`] 状态机。
+    ///
+    /// # 与 Windows 版（`mouse_impl`）的对应关系
+    ///
+    /// 状态机本身**一模一样**，逐条对位；差别只在事件从哪来、以及三件 Win32 特有的事
+    /// 在这里不需要做：
+    ///
+    /// | Win32 | macOS | 说明 |
+    /// |---|---|---|
+    /// | `WM_MOUSEMOVE` | `Move` / 未拖动时的 `Drag` | AppKit 在按住时发的是 `mouseDragged` |
+    /// | `WM_LBUTTONDOWN` / `UP` | `Down` / `Up` | — |
+    /// | `WM_MOUSELEAVE` + `TrackMouseEvent` 重订 | `Leave` | 跟踪区是常驻的，**不需要每次重订** |
+    /// | `SetCapture` / `ReleaseCapture` | 无 | AppKit 按下后隐式把后续事件送回同一视图 |
+    /// | `ScreenToClient`（滚轮用） | 无 | 滚轮事件的坐标本来就是客户区的 |
+    /// | `SetWindowPos` + `clamp_to_work_area` | 返回落点，由 `mac_panel` 挪窗并钳制 | 可见区只有主线程问得到 |
+    impl PanelMouse for SoftMouse {
+        fn on_mouse(&mut self, ev: MouseEvent, geom: PanelGeom) -> Option<(i32, i32)> {
+            match ev.kind {
+                // 拖动中：跟着光标走。落点由 `mac_panel` 钳进可见区，真实位置经
+                // `on_moved` 回来——面板比候选窗大得多，拖出屏幕就再也抓不回来了。
+                MouseKind::Drag if self.dragging => {
+                    let nx = self.origin.0 + (ev.sx - self.anchor.0);
+                    let ny = self.origin.1 + (ev.sy - self.anchor.1);
+                    Some((nx, ny))
+                }
+                // 未拖动的移动（含按住时的 Drag）：更新悬停，并处理「按住后挪开」。
+                MouseKind::Move | MouseKind::Drag => {
+                    let h = self.hit_at(ev.x, ev.y);
+                    if h != self.hover {
+                        self.hover = h;
+                        self.dirty = true;
+                    }
+                    // 按住后移出该键：停止长按重复（抬起时也不再触发，见 `Up` 的同址判据）。
+                    if self.pressed >= 0 && h != self.pressed {
+                        self.pressed = -1;
+                        self.repeat_at = None;
+                        self.repeating = false;
+                        self.dirty = true;
+                    }
+                    None
+                }
+                MouseKind::Down => {
+                    let h = self.hit_at(ev.x, ev.y);
+                    if drags_panel(h) {
+                        // 空白处（标签行留白、键位之间的缝）→ 拖动整块面板。
+                        // 判据是 `drags_panel` 而不是 `h < 0`，理由见那个函数。
+                        self.anchor = (ev.sx, ev.sy);
+                        self.origin = (geom.x, geom.y);
+                        self.dragging = true;
+                        if self.hover != -1 {
+                            self.hover = -1;
+                            self.dirty = true;
+                        }
+                        return None;
+                    }
+                    if h >= 0 {
+                        self.pressed = h;
+                        // 抬起才触发的控件在这里只记按下态（键帽会亮），动作留到 Up。
+                        if !fires_on_release(h) {
+                            self.clicked.push(h);
+                        }
+                        self.dirty = true;
+                        if repeats(h) {
+                            let (delay, _) = repeat_params();
+                            self.repeat_at = Some(
+                                std::time::Instant::now() + std::time::Duration::from_millis(delay),
+                            );
+                        }
+                    }
+                    None
+                }
+                MouseKind::Up => {
+                    self.dragging = false;
+                    if self.pressed >= 0 {
+                        // 抬起才触发：必须仍停在按下的那个控件上——按下后挪开再松手
+                        // 是「反悔」，不该执行。
+                        let h = self.hit_at(ev.x, ev.y);
+                        if fires_on_release(self.pressed) && h == self.pressed {
+                            self.clicked.push(self.pressed);
+                        }
+                        self.pressed = -1;
+                        self.dirty = true;
+                    }
+                    self.repeat_at = None;
+                    self.repeating = false;
+                    None
+                }
+                // 光标离开面板：清掉悬停高亮。
+                //
+                // ★ 没有这一条，鼠标快速划出面板时最后那一格会一直亮着——移动事件只在
+                // 光标还在视图内时到达，出界那一下没有任何事件。
+                MouseKind::Leave => {
+                    if self.hover != -1 {
+                        self.hover = -1;
+                        self.dirty = true;
+                    }
+                    // 按住后划出去再松手，我们收不到 Up，按下态也要一并收掉。
+                    if self.pressed >= 0 && !self.dragging {
+                        self.pressed = -1;
+                        self.repeat_at = None;
+                        self.repeating = false;
+                        self.dirty = true;
+                    }
+                    None
+                }
+                // 滚轮只在标签行上有意义（横向滚动标签）。这里只累加格数，真正的滚动
+                // 在 `tick` 里做——滚动要改 `tab_scroll` 并重绘，而本函数拿不到面板。
+                MouseKind::Wheel => {
+                    let h = self.hit_at(ev.x, ev.y);
+                    let on_tabs = h == SOFT_TAG_TAB_VIEWPORT
+                        || h == SOFT_TAG_TAB_LEFT
+                        || h == SOFT_TAG_TAB_RIGHT
+                        || is_page_tag(h);
+                    if on_tabs {
+                        // 向前滚 = 向左看，与横向列表的通行方向一致（同 Windows 分支）。
+                        self.wheel += -ev.wheel;
+                    }
+                    None
+                }
+            }
+        }
+
+        fn on_moved(&mut self, x: i32, y: i32) {
+            self.moved_to = Some((x, y));
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::view::Rect;
+        use wind_ui_types::{SOFT_TAG_CLOSE, SOFT_TAG_PAGE_BASE};
+
+        /// 造一个装好命中区的 `SoftMouse`：tag 0（键位）占 (0,0,10,10)，
+        /// tag 1（键位）占 (20,0,10,10)，关闭按钮占 (40,0,10,10)，
+        /// 标签行视口占 (0,20,100,10)。其余位置命中 -1（留白）。
+        fn mk() -> SoftMouse {
+            SoftMouse {
+                hits: vec![
+                    (
+                        0,
+                        Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            w: 10.0,
+                            h: 10.0,
+                        },
+                    ),
+                    (
+                        1,
+                        Rect {
+                            x: 20.0,
+                            y: 0.0,
+                            w: 10.0,
+                            h: 10.0,
+                        },
+                    ),
+                    (
+                        SOFT_TAG_CLOSE,
+                        Rect {
+                            x: 40.0,
+                            y: 0.0,
+                            w: 10.0,
+                            h: 10.0,
+                        },
+                    ),
+                    (
+                        SOFT_TAG_TAB_VIEWPORT,
+                        Rect {
+                            x: 0.0,
+                            y: 20.0,
+                            w: 100.0,
+                            h: 10.0,
+                        },
+                    ),
+                ],
+                hover: -1,
+                pressed: -1,
+                ..Default::default()
+            }
+        }
+
+        fn geom() -> PanelGeom {
+            PanelGeom {
+                x: 100,
+                y: 200,
+                w: 300,
+                h: 150,
+            }
+        }
+
+        fn ev(kind: MouseKind, x: f32, y: f32) -> MouseEvent {
+            MouseEvent {
+                kind,
+                x,
+                y,
+                sx: 0,
+                sy: 0,
+                wheel: 0.0,
+            }
+        }
+
+        fn ev_screen(kind: MouseKind, sx: i32, sy: i32) -> MouseEvent {
+            MouseEvent {
+                kind,
+                x: 0.0,
+                y: 0.0,
+                sx,
+                sy,
+                wheel: 0.0,
+            }
+        }
+
+        /// 键位按下即触发（`fires_on_release` 为假），与 Windows 侧 `WM_LBUTTONDOWN` 同步。
+        #[test]
+        fn key_fires_on_press() {
+            let mut m = mk();
+            assert_eq!(m.on_mouse(ev(MouseKind::Down, 5.0, 5.0), geom()), None);
+            assert_eq!(m.pressed, 0);
+            assert_eq!(m.clicked, vec![0], "键位按下即入队");
+        }
+
+        /// 关闭按钮抬起才触发，且必须仍停在它上面——按下后挪开再松手是「反悔」。
+        #[test]
+        fn close_fires_on_release_only_when_still_on_it() {
+            let mut m = mk();
+            m.on_mouse(ev(MouseKind::Down, 45.0, 5.0), geom());
+            assert_eq!(m.pressed, SOFT_TAG_CLOSE);
+            assert!(m.clicked.is_empty(), "按下不该立刻触发关闭");
+            m.on_mouse(ev(MouseKind::Up, 45.0, 5.0), geom());
+            assert_eq!(m.clicked, vec![SOFT_TAG_CLOSE]);
+
+            // 反悔：按下后移到别处再松手。
+            let mut m = mk();
+            m.on_mouse(ev(MouseKind::Down, 45.0, 5.0), geom());
+            m.on_mouse(ev(MouseKind::Up, 5.0, 5.0), geom());
+            assert!(m.clicked.is_empty(), "挪开再松手不该触发");
+        }
+
+        /// 留白与标签行留白都拖整块面板；真控件不拖。判据同 `drags_panel`。
+        #[test]
+        fn blank_and_tab_viewport_start_a_drag() {
+            for (x, y, what) in [(70.0, 5.0, "键位之间的缝"), (50.0, 25.0, "标签行留白")]
+            {
+                let mut m = mk();
+                assert_eq!(m.on_mouse(ev(MouseKind::Down, x, y), geom()), None);
+                assert!(m.dragging, "{what} 应当开始拖动");
+                assert_eq!(m.origin, (100, 200), "记的是按下时的窗口左上");
+            }
+            let mut m = mk();
+            m.on_mouse(ev(MouseKind::Down, 5.0, 5.0), geom());
+            assert!(!m.dragging, "键位不该被当成拖动，否则点了就只会拖窗口");
+        }
+
+        /// 拖动落点 = 按下时窗口左上 + 光标位移。
+        #[test]
+        fn drag_offsets_by_cursor_delta() {
+            let mut m = mk();
+            let mut down = ev(MouseKind::Down, 70.0, 5.0);
+            down.sx = 500;
+            down.sy = 600;
+            m.on_mouse(down, geom());
+            let want = m.on_mouse(ev_screen(MouseKind::Drag, 530, 580), geom());
+            assert_eq!(want, Some((130, 180)), "100+30, 200-20");
+        }
+
+        /// ★ `moved_to` 记的必须是**钳制后**的真实落点，不是想去的那个。
+        /// 记错的症状是「往屏幕边上一拖，松手后面板自己跳走」——下一帧 `render`
+        /// 拿它调 `show`，就把面板送回了屏外。
+        #[test]
+        fn on_moved_records_the_clamped_position() {
+            let mut m = mk();
+            m.on_mouse(ev(MouseKind::Down, 70.0, 5.0), geom());
+            m.on_mouse(ev_screen(MouseKind::Drag, 9999, 9999), geom());
+            assert_eq!(m.moved_to, None, "拖动本身不写落点");
+            m.on_moved(42, 43);
+            assert_eq!(m.moved_to, Some((42, 43)));
+        }
+
+        /// 按住后移出该键：停掉按下态与长按重复。
+        #[test]
+        fn moving_off_a_pressed_key_cancels_it() {
+            let mut m = mk();
+            m.on_mouse(ev(MouseKind::Down, 5.0, 5.0), geom());
+            assert!(m.repeat_at.is_some(), "键位可重复，应已排上首次延迟");
+            m.on_mouse(ev(MouseKind::Drag, 25.0, 5.0), geom());
+            assert_eq!(m.pressed, -1);
+            assert!(m.repeat_at.is_none());
+        }
+
+        /// 离开面板：清悬停，并收掉按下态（划出去再松手收不到 Up）。
+        #[test]
+        fn leave_clears_hover_and_press() {
+            let mut m = mk();
+            m.on_mouse(ev(MouseKind::Move, 5.0, 5.0), geom());
+            assert_eq!(m.hover, 0);
+            m.on_mouse(ev(MouseKind::Down, 5.0, 5.0), geom());
+            m.on_mouse(ev(MouseKind::Leave, 0.0, 0.0), geom());
+            assert_eq!(m.hover, -1, "残留高亮正是这条分支要消灭的");
+            assert_eq!(m.pressed, -1);
+        }
+
+        /// 滚轮只在标签行上累加；落在键位上不动。方向与横向列表一致（向前滚 = 向左看）。
+        #[test]
+        fn wheel_only_counts_over_the_tab_row() {
+            let mut m = mk();
+            let mut w = ev(MouseKind::Wheel, 50.0, 25.0);
+            w.wheel = 2.0;
+            m.on_mouse(w, geom());
+            assert_eq!(m.wheel, -2.0);
+
+            let mut m = mk();
+            let mut w = ev(MouseKind::Wheel, 5.0, 5.0);
+            w.wheel = 2.0;
+            m.on_mouse(w, geom());
+            assert_eq!(m.wheel, 0.0, "键位上滚轮不该滚标签行");
+        }
+
+        /// 标签（面）也算标签行，滚轮在它上面同样有效。
+        #[test]
+        fn wheel_counts_over_a_page_tab() {
+            let mut m = mk();
+            m.hits.push((
+                SOFT_TAG_PAGE_BASE,
+                Rect {
+                    x: 0.0,
+                    y: 20.0,
+                    w: 30.0,
+                    h: 10.0,
+                },
+            ));
+            let mut w = ev(MouseKind::Wheel, 10.0, 25.0);
+            w.wheel = 1.0;
+            m.on_mouse(w, geom());
+            assert_eq!(m.wheel, -1.0);
         }
     }
 }

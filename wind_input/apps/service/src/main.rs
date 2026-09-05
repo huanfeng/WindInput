@@ -463,6 +463,11 @@ fn main() {
             })
             .expect("spawn restart waiter");
 
+        // 软键盘面板的主线程宿主。**必须在进事件循环之前**装一次：面板是服务进程自己
+        // 开的 NSPanel，而 AppKit 只能在主线程碰，下发命令的 forwarder 却是工作线程。
+        // 装配前 forwarder 已经发过的命令留在队列里，由这一步顺带 drain。
+        wind_ui::softkeyboard_host_macos::install_on_main();
+
         wind_ui::global_hotkey_macos::run_main_loop();
 
         if RESTART.load(Ordering::SeqCst) {

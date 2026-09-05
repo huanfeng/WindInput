@@ -35,6 +35,9 @@ pub mod input_source_macos;
 /// 渲染逻辑本身平台无关（几何绘制 + 蒙版合成），故不整模块 cfg——非 Windows 上
 /// 文本后端是 mock，字形部分为空，但角标与合成逻辑仍可被 CI 的 Linux test job 覆盖。
 pub mod langbar_icon;
+/// macOS 原生浮动面板（NSPanel）：服务进程自己的窗口。软键盘用，见模块头。
+#[cfg(target_os = "macos")]
+pub mod mac_panel;
 pub mod manager;
 /// macOS host-render forwarder：把 UiCommand 光栅化进 POSIX SHM + push 推帧给 .app。
 #[cfg(target_os = "macos")]
@@ -42,6 +45,9 @@ pub mod manager_macos;
 pub mod popup_menu;
 pub mod screenshot;
 pub mod soft_keyboard;
+/// macOS 软键盘面板的主线程宿主（AppKit 只能在主线程碰，forwarder 是工作线程）。
+#[cfg(target_os = "macos")]
+pub mod softkeyboard_host_macos;
 pub mod status_tip;
 pub mod sys;
 /// macOS 系统明暗变更监听。对位 Windows 消息泵里的 `WM_SETTINGCHANGE`。

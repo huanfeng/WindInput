@@ -20,9 +20,17 @@
 //!    收不到经窗口服务器投递的事件。故 [`run_main_loop`] 开头先
 //!    `TransformProcessType(kProcessTransformToUIElementApplication)`。
 //!    判据：不调时进程不出现在 `lsappinfo list` 里。
-//! 2. **要跑 Carbon 事件循环**。事件先落进 Carbon 主事件队列，需有人 `ReceiveNextEvent`
-//!    取出再派发。`RunApplicationEventLoop`（或 AppKit 的 `[NSApp run]`）做这件事，
-//!    裸 `CFRunLoopRun` **不做**。
+//! 2. **要跑会派发主事件队列的循环**。事件先落进 Carbon 主事件队列，需有人
+//!    `ReceiveNextEvent` 取出再派发。`[NSApp run]`（以及已弃用的
+//!    `RunApplicationEventLoop`）做这件事，裸 `CFRunLoopRun` **不做**。
+//!
+//!    本函数跑的是 **`[NSApp run]`**。2026-09-05 从 `RunApplicationEventLoop` 换过来，
+//!    换的理由不在热键这边而在软键盘：Carbon 那个循环**从不让 NSApplication 跑起来**
+//!    （实测 `NSApp.isRunning == false`），于是没有人调 `NSApp.sendEvent:`，服务进程
+//!    自绘的 NSPanel 一个鼠标事件都收不到——窗口画得出来、CFRunLoop 的 source 与 timer
+//!    也照常转，唯独点不动。两条循环对**热键**是等价的，判据见
+//!    `cargo run -p wind-ui --example mac_panel_smoke`：它往 Carbon 主事件队列投一个
+//!    `kEventHotKeyPressed`，确认 handler 在新循环下仍被派发。
 //! 3. **注册要在主线程**。热键事件只投递到主线程的 Carbon 事件队列。故
 //!    **forwarder 线程**调 [`apply`] 时只把热键表塞进 `PENDING` 并唤醒主线程，真正的
 //!    `RegisterEventHotKey` / `UnregisterEventHotKey` 一律在主线程的 perform 回调里执行。
@@ -108,11 +116,29 @@ unsafe extern "C" {
         data: *mut c_void,
     ) -> OSStatus;
     fn TransformProcessType(psn: *const ProcessSerialNumber, form: u32) -> OSStatus;
-    /// Carbon 应用事件循环：内部驱动 CFRunLoop，并把主事件队列里的事件派发给 handler。
-    fn RunApplicationEventLoop();
-    /// 结束 [`RunApplicationEventLoop`]。**须在主线程调用**。
-    fn QuitApplicationEventLoop();
+    fn GetMainEventQueue() -> EventQueueRef;
+    fn CreateEvent(
+        allocator: *const c_void,
+        class_id: u32,
+        kind: u32,
+        when: f64,
+        attributes: u32,
+        out_event: *mut EventRef,
+    ) -> OSStatus;
+    fn SetEventParameter(
+        event: EventRef,
+        name: u32,
+        type_: u32,
+        size: usize,
+        data: *const c_void,
+    ) -> OSStatus;
+    fn PostEventToQueue(queue: EventQueueRef, event: EventRef, priority: u16) -> OSStatus;
+    fn ReleaseEvent(event: EventRef);
 }
+
+type EventQueueRef = *mut c_void;
+const K_EVENT_ATTRIBUTE_NONE: u32 = 0;
+const K_EVENT_PRIORITY_STANDARD: u16 = 1;
 
 #[repr(C)]
 struct ProcessSerialNumber {
@@ -229,6 +255,7 @@ pub fn stop_main_loop() {
         }
     } else {
         // 唤醒源还没建起来（主循环尚未进入）：退回直接停 run loop。
+        // 这条路上 `[NSApp run]` 还没开始，停底层 CFRunLoop 即可。
         unsafe { CFRunLoopStop(CFRunLoopGetMain()) };
     }
 }
@@ -322,22 +349,95 @@ pub fn run_main_loop() {
             tracing::info!("全局热键: 进主循环前已收到退出请求，直接返回");
             return;
         }
-        tracing::info!("全局热键: 主线程 Carbon 事件循环启动");
-        RunApplicationEventLoop();
-        tracing::info!("全局热键: 主线程 Carbon 事件循环退出");
+        tracing::info!("全局热键: 主线程 AppKit 事件循环启动");
+    }
+    // ⚠️ 在 `unsafe` 块**之外**跑：`NSApp.run()` 一去不回（直到 stop），把它留在上面那个
+    // 大 unsafe 块里会让「哪些语句是 unsafe 的」失去意义。
+    crate::mac_panel::ensure_app().run();
+    tracing::info!("全局热键: 主线程 AppKit 事件循环退出");
+}
+
+/// 往 Carbon 主事件队列投一个 `kEventHotKeyPressed`，用于**验证事件循环仍在派发**。
+///
+/// ⚠️ 它不模拟按键，只把事件塞进队列——这正是要测的那一环：有没有人
+/// `ReceiveNextEvent` + `SendEventToEventTarget`。用它而不是合成真实按键，是因为
+/// 后者要「辅助功能」授权，非交互会话拿不到，实测**任何**循环下都得到「没反应」，
+/// 是个假阴性（`CGEventPost` 那条路已经踩过）。
+///
+/// 仅供 `examples/mac_panel_smoke` 调用。
+#[doc(hidden)]
+pub fn post_test_hotkey(id: u32) -> bool {
+    unsafe {
+        let mut ev: EventRef = std::ptr::null_mut();
+        if CreateEvent(
+            std::ptr::null(),
+            K_EVENT_CLASS_KEYBOARD,
+            K_EVENT_HOT_KEY_PRESSED,
+            0.0,
+            K_EVENT_ATTRIBUTE_NONE,
+            &mut ev,
+        ) != 0
+            || ev.is_null()
+        {
+            return false;
+        }
+        let hkid = EventHotKeyID {
+            signature: HOTKEY_SIGNATURE,
+            id,
+        };
+        let ok = SetEventParameter(
+            ev,
+            K_EVENT_PARAM_DIRECT_OBJECT,
+            TYPE_EVENT_HOT_KEY_ID,
+            std::mem::size_of::<EventHotKeyID>(),
+            &hkid as *const _ as *const c_void,
+        ) == 0
+            && PostEventToQueue(GetMainEventQueue(), ev, K_EVENT_PRIORITY_STANDARD) == 0;
+        ReleaseEvent(ev);
+        ok
     }
 }
 
 /// 唤醒源回调（主线程）：应用待处理的热键表；收到退出请求则结束事件循环。
 ///
-/// `QuitApplicationEventLoop` 必须在主线程调用，而 [`stop_main_loop`] 来自辅助线程，
-/// 故经本回调转手。
+/// [`stop_app`] 必须在主线程调用，而 [`stop_main_loop`] 来自辅助线程，故经本回调转手。
 extern "C" fn wake_perform(_info: *const c_void) {
     if SHOULD_EXIT.load(Ordering::SeqCst) {
-        unsafe { QuitApplicationEventLoop() };
+        stop_app();
         return;
     }
     unsafe { drain_pending() };
+}
+
+/// 结束 `[NSApp run]`。**须在主线程调用**（本文件的两个调用点都在 perform 回调里）。
+///
+/// ⚠️ 只调 `stop:` 是不够的：它设的是一个标志，**要等下一个事件处理完**才真正退出循环。
+/// 服务空闲时可能很久没有事件，于是「重启服务」会挂在这里——与换循环之前
+/// `QuitApplicationEventLoop` 的即时语义不同。补投一个 ApplicationDefined 事件把循环
+/// 推进一轮，标志才被读到。
+fn stop_app() {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+    use objc2_foundation::NSPoint;
+
+    let app = crate::mac_panel::ensure_app();
+    app.stop(None);
+    let ev = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+        NSEventType::ApplicationDefined,
+        NSPoint::new(0.0, 0.0),
+        NSEventModifierFlags::empty(),
+        0.0,
+        0,
+        None,
+        0,
+        0,
+        0,
+    );
+    match ev {
+        Some(e) => app.postEvent_atStart(&e, true),
+        // 构造不出唤醒事件：循环会停在下一个自然到来的事件上（鼠标移动、定时器…），
+        // 不是死锁，只是晚一点。记一条 warn 好让「重启慢了半拍」有据可查。
+        None => tracing::warn!("全局热键: 唤醒事件构造失败，事件循环将延后退出"),
+    }
 }
 
 /// 应用 `PENDING` 里的热键表：先撤全部旧的，再注册新的。**只在主线程调用**。

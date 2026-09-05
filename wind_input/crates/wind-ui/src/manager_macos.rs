@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use crate::candidate_window::{CandidateWindow, CandidateWindowConfig};
 use crate::manager::{UiCommand, UiEvent};
+use crate::softkeyboard_host_macos as sk;
 use crate::toast::{ToastKind, ToastPosition};
 use wind_bridge::HostRenderSink;
 use wind_bridge::shared_memory_posix::PosixSharedMemory;
@@ -344,6 +345,8 @@ impl Forwarder {
                     toast_bg,
                     toast_fg,
                 };
+                // 面板是惰性建窗的，主题得在本模块之外留一份底，理由见 `SkCmd::Theme`。
+                self.push_softkeyboard(sk::SkCmd::Theme(t.clone()));
                 self.win.set_theme(*t);
             }
             UiCommand::SetCandidateTextFamily(f) => self.win.set_text_family_override(&f),
@@ -513,6 +516,29 @@ impl Forwarder {
                 self.sink
                     .push_frame(&encode_ext(ext_kind::POS_STATUS_TIP_QUERY, b""));
             }
+            // ── 软键盘面板 ──
+            //
+            // 与其余浮窗相反，它**不走 SHM + `.app` 那条路**：面板由服务进程自己开窗
+            // （macOS 上唯一一处），理由见 `crate::mac_panel` 模块头。这里只负责把命令
+            // 从本工作线程转运到主线程——AppKit 碰不得工作线程。
+            UiCommand::ShowSoftKeyboard {
+                pages,
+                current,
+                keys,
+                send_keys,
+            } => self.push_softkeyboard(sk::SkCmd::Show {
+                pages,
+                current,
+                keys,
+                send_keys,
+            }),
+            UiCommand::HideSoftKeyboard => self.push_softkeyboard(sk::SkCmd::Hide),
+            UiCommand::SoftKeyboardKeyState { slot, down } => {
+                self.push_softkeyboard(sk::SkCmd::KeyState { slot, down })
+            }
+            UiCommand::SoftKeyboardLayer { shift } => {
+                self.push_softkeyboard(sk::SkCmd::Layer { shift })
+            }
             UiCommand::OpenPath(path) => crate::manager::open_path(&path),
             UiCommand::OpenApp { path, args } => crate::manager::open_app(&path, &args),
             UiCommand::Shutdown => {}
@@ -524,6 +550,11 @@ impl Forwarder {
                 tracing::debug!("forwarder: 暂未处理 {:?}", std::mem::discriminant(&other));
             }
         }
+    }
+
+    /// 把一条软键盘命令转运给主线程宿主。
+    fn push_softkeyboard(&self, cmd: sk::SkCmd) {
+        sk::apply(cmd, &self.ev_tx);
     }
 
     /// 推一条 toast 给 `.app`（原生渲染）。

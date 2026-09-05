@@ -49,6 +49,50 @@ core-text = "22.0.0"
 # 扩展信封的 JSON body（`shot.panel` 等）。手拼字符串在这里不安全：路径里可能有
 # 引号或反斜杠，转义漏一处就是对端解不出的坏包。
 serde_json = { workspace = true }
+# AppKit 绑定：软键盘面板（mac_panel.rs）是本仓 macOS 上**唯一**由服务进程自己开的窗口，
+# 其余浮窗都在 `.app` 侧，理由见该模块头。
+#
+# ⚠️ 两个 objc2-* 都关掉 default-features 再按需开：objc2-app-kit 默认会打开 300 余个
+# feature（每个 AppKit 类一个），全开会把这个 crate 的冷编译时间拖长好几倍，而我们只
+# 用得上一个 NSPanel、一个 NSView 和它们周边那几个类型。新用到别的类时在这里补一行，
+# 别图省事改回 default。
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSGeometry",
+    "NSString",
+    "NSArray",
+    "NSValue",
+    "NSObjCRuntime",
+    "NSEnumerator",
+    "NSThread",
+    # 读系统键盘重复设置（NSGlobalDomain 的 InitialKeyRepeat / KeyRepeat），
+    # 对位 Windows 的 SPI_GETKEYBOARDDELAY / SPI_GETKEYBOARDSPEED。
+    "NSUserDefaults",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSWindow",
+    "NSPanel",
+    "NSView",
+    "NSResponder",
+    "NSEvent",
+    "NSScreen",
+    "NSColor",
+    "NSTrackingArea",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "objc2-core-foundation",
+    # NSApplicationActivationPolicy 定义在这里（setActivationPolicy 归它门控）。
+    "NSRunningApplication",
+] }
+# CGImage 的裸指针（`ForeignType::as_ptr`）——贴到 CALayer.contents 上需要它。
+# core-graphics 0.25 的 foreign_type! 就出自本 crate，版本必须与它一致。
+foreign-types = "0.5"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+dispatch2 = "0.3"
 
 [lints]
 workspace = true
