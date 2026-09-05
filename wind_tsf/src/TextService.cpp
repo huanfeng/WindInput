@@ -1093,6 +1093,11 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
     {
         *ppvObj = (ITfCandidateListUIElementBehavior*)this;
     }
+    else if (IsEqualIID(riid, __uuidof(ITfIntegratableCandidateListUIElement)))
+    {
+        // 独立基类（不经 ITfUIElement），直接转型。见类声明处对 Dota 2 自绘的说明。
+        *ppvObj = (ITfIntegratableCandidateListUIElement*)this;
+    }
     else if (IsEqualIID(riid, IID_ITfFunctionProvider))
     {
         *ppvObj = (ITfFunctionProvider*)this;
@@ -2143,9 +2148,10 @@ STDAPI CTextService::GetFunction(REFGUID rguid, REFIID riid, IUnknown** ppunk)
 static const GUID kWindCandidateUIElementGuid =
     { 0xb3e54a91, 0x7c20, 0x4b6a, { 0xa1, 0x5e, 0x82, 0x09, 0x77, 0x55, 0x44, 0x33 } };
 
-// 不含 TF_CLUIE_DOCUMENTMGR：与微软 SampleIME / 微软拼音一致（后者实测首次 Update 报 0x3E）。
+// 含 TF_CLUIE_DOCUMENTMGR：GetDocumentMgr 现返回真实焦点文档（Weasel 同款），首次 Update 通知
+// 宿主取一次 docmgr——能自绘候选的游戏宿主（Dota 2）据此把候选关联到文本并绘制。
 static constexpr DWORD kUiElementAllFlags =
-    TF_CLUIE_COUNT | TF_CLUIE_SELECTION
+    TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION
     | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE;
 
 STDAPI CTextService::GetDescription(BSTR* pbstrDescription)
@@ -2197,10 +2203,14 @@ STDAPI CTextService::GetUpdatedFlags(DWORD* pdwFlags)
 
 STDAPI CTextService::GetDocumentMgr(ITfDocumentMgr** ppdim)
 {
-    // 与微软 SampleIME 一致：不声明归属文档（E_NOTIMPL）。
+    // 返回当前焦点文档：宿主（尤其能自绘候选的游戏，如 Dota 2/SDL 经 VALVEIME001）靠它把候选
+    // 列表关联到文本、据以定位与绘制。曾按 SampleIME 返 E_NOTIMPL——实测 Dota 2 因此读了候选却
+    // 不画（GetString 全读、无候选框）。对照 Weasel：取 GetFocus 的真实 docmgr。
     if (ppdim == nullptr) return E_INVALIDARG;
     *ppdim = nullptr;
-    return E_NOTIMPL;
+    if (_pThreadMgr == nullptr) return E_FAIL;
+    if (FAILED(_pThreadMgr->GetFocus(ppdim)) || *ppdim == nullptr) return E_FAIL;
+    return S_OK; // GetFocus 已 AddRef，调用方负责 Release
 }
 
 STDAPI CTextService::GetCount(UINT* puCount)
@@ -2316,6 +2326,43 @@ STDAPI CTextService::Abort(void)
     if (!_UiElementHostDraws()) return S_OK;
     _SendUiElementAction(UIELEMENT_ACTION_ABORT, 0); // 服务端推 ClearComposition 回来收口
     return S_OK;
+}
+
+// ==== ITfIntegratableCandidateListUIElement ====
+// 让能自绘候选的宿主（Dota 2/SDL 经 VALVEIME001）把候选画出来。对照 Weasel CandidateList.cpp。
+STDAPI CTextService::SetIntegrationStyle(GUID guidIntegrationStyle)
+{
+    (void)guidIntegrationStyle;
+    return S_OK;
+}
+
+STDAPI CTextService::GetSelectionStyle(TfIntegratableCandidateListSelectionStyle* ptfSelectionStyle)
+{
+    if (ptfSelectionStyle == nullptr) return E_INVALIDARG;
+    *ptfSelectionStyle = STYLE_ACTIVE_SELECTION; // 高亮项即待上屏项，与桌面候选窗一致
+    return S_OK;
+}
+
+STDAPI CTextService::OnKeyDown(WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
+{
+    (void)wParam; (void)lParam;
+    if (pfEaten == nullptr) return E_INVALIDARG;
+    // ⛔ 不在这里吃键：按键的权威处理在 ITfKeyEventSink，本方法不真正处理键，谎报吃键会把
+    // 本该走那条路的键吞掉。返回 FALSE 让键落回正常处理链（Dota 走的是组合/键路径，通常不调本方法）。
+    *pfEaten = FALSE;
+    return S_OK;
+}
+
+STDAPI CTextService::ShowCandidateNumbers(BOOL* pfShow)
+{
+    if (pfShow == nullptr) return E_INVALIDARG;
+    *pfShow = TRUE; // 让宿主画候选序号（1/2/3…）
+    return S_OK;
+}
+
+STDAPI CTextService::FinalizeExactCompositionString(void)
+{
+    return E_NOTIMPL;
 }
 
 void CTextService::_ReportUiElementState()

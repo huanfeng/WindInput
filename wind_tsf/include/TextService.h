@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Globals.h"
+#include <ctffunc.h> // ITfIntegratableCandidateListUIElement（Dota 2 等自绘候选宿主的必需接口）
 #include "BinaryProtocol.h" // HostWindowKind / HOST_WINDOW_KIND_COUNT for the host window array
 // AsyncCaretResult / CaretProbeKind 按值出现在 OnAsyncCaretRectReady 签名里，需要完整定义。
 // 反向不成立（CaretEditSession.h 只前置声明 CTextService），故无循环包含。
@@ -31,6 +32,11 @@ class CTextService : public ITfTextInputProcessorEx,
                      // ITfCandidateListUIElementBehavior 已继承 ITfCandidateListUIElement (已继承 ITfUIElement)，
                      // 只列一个最派生的即可。
                      public ITfCandidateListUIElementBehavior,
+                     // ITfIntegratableCandidateListUIElement — 让"能自绘候选的宿主"（Dota 2 等
+                     // SDL / 游戏引擎，经 VALVEIME001 自绘）把我们的候选画出来。缺它时宿主 QI 拿不到、
+                     // 读了候选数据也不画（实测 Dota 2 GetString 全读却无候选框）。对照 Weasel/搜狗/
+                     // 微软五笔：均实现本接口 + GetDocumentMgr 返真实文档，候选由游戏自绘（同一风格）。
+                     public ITfIntegratableCandidateListUIElement,
                      // ITfFunctionProvider — 通过 ITfSourceSingle::AdviseSingleSink 注册自己为
                      // 该 IME 实例的 Function Provider。这是其它成熟 TSF IME 都做的事，
                      // 让 Chromium / QQNT 等宿主将我们识别为"完整 IME"，走 IME-first 调度。
@@ -97,6 +103,13 @@ public:
     STDMETHODIMP SetSelection(UINT nIndex);
     STDMETHODIMP Finalize(void);
     STDMETHODIMP Abort(void);
+
+    // ITfIntegratableCandidateListUIElement — 见继承处说明（Dota 2 等自绘候选宿主的必需接口）。
+    STDMETHODIMP SetIntegrationStyle(GUID guidIntegrationStyle);
+    STDMETHODIMP GetSelectionStyle(TfIntegratableCandidateListSelectionStyle* ptfSelectionStyle);
+    STDMETHODIMP OnKeyDown(WPARAM wParam, LPARAM lParam, BOOL* pfEaten);
+    STDMETHODIMP ShowCandidateNumbers(BOOL* pfShow);
+    STDMETHODIMP FinalizeExactCompositionString(void);
 
     // 候选可见状态变化时调用，控制 BeginUIElement / EndUIElement / UpdateUIElement.
     // hasCandidates: 新的候选可见状态。线程：与 KeyEventSink 状态变更同一线程。
