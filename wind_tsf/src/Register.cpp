@@ -8,6 +8,11 @@
 #pragma comment(lib, "shlwapi.lib")
 
 // --- GUID 定义区 ---
+// 类别 GUID 真值唯一来源：Windows SDK msctf.h。历史上手抄数值（MinGW 交叉编译期头文件
+// 缺失），曾把手抄错误值注册到系统不识别的假 GUID 上——msctf 对此类类别静默忽略，且
+// GIP 路径（游戏聊天框等）下整个输入法在 COM 激活前被筛除。修改此处数值必须对照
+// msctf.h 逐字核对，勿凭记忆手写。另注：MSVC 构建下 DEFINE_GUID 实为声明，实际取值
+// 由 uuid.lib 提供（即 SDK 真值）；手写数值仅在 MinGW 声明路径下生效。
 
 // Windows 8+ 沉浸式支持
 DEFINE_GUID(GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
@@ -18,13 +23,24 @@ DEFINE_GUID(GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
     0x25504FB4, 0x7BAB, 0x4BC1, 0x9C, 0x69, 0xCF, 0x81, 0x89, 0x0F, 0x0E, 0xF5);
 
 // UI 元素支持 (候选窗口等现代 UI 渲染必备)
+// {49D2F9CF-1F5E-11D7-A6D3-00065B84435C}
 DEFINE_GUID(GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
-    0x6D60FCCF, 0x58D7, 0x4B67, 0xB1, 0x3E, 0x96, 0xBE, 0x70, 0x6C, 0x3B, 0x6A);
+    0x49D2F9CF, 0x1F5E, 0x11D7, 0xA6, 0xD3, 0x00, 0x06, 0x5B, 0x84, 0x43, 0x5C);
 
 // 安全模式支持 (开始菜单搜索框/锁屏等高权限宿主可能会筛选此能力)
-// {3527B835-7383-4978-83C8-FD20C6F5A0E0}
+// {49D2F9CE-1F5E-11D7-A6D3-00065B84435C}（与 UIELEMENTENABLED 为相邻的同族 GUID 对）
 DEFINE_GUID(GUID_TFCAT_TIPCAP_SECUREMODE,
-    0x3527B835, 0x7383, 0x4978, 0x83, 0xC8, 0xFD, 0x20, 0xC6, 0xF5, 0xA0, 0xE0);
+    0x49D2F9CE, 0x1F5E, 0x11D7, 0xA6, 0xD3, 0x00, 0x06, 0x5B, 0x84, 0x43, 0x5C);
+
+// 迁移期手抄错误值，仅用于升级自愈清理（UnregisterCategory 历史脏项），勿用于注册。
+// 旧版本曾以这两个假 GUID 注册类别，系统不识别但注册表残留，需在注册时清除。
+// {6D60FCCF-58D7-4B67-B13E-96BE706C3B6A}（UIELEMENTENABLED 的手抄错值）
+static const GUID GUID_TFCAT_TIPCAP_UIELEMENTENABLED_TYPO =
+    { 0x6D60FCCF, 0x58D7, 0x4B67, { 0xB1, 0x3E, 0x96, 0xBE, 0x70, 0x6C, 0x3B, 0x6A } };
+
+// {3527B835-7383-4978-83C8-FD20C6F5A0E0}（SECUREMODE 的手抄错值）
+static const GUID GUID_TFCAT_TIPCAP_SECUREMODE_TYPO =
+    { 0x3527B835, 0x7383, 0x4978, { 0x83, 0xC8, 0xFD, 0x20, 0xC6, 0xF5, 0xA0, 0xE0 } };
 
 // --- 1. COM 服务器注册与卸载 ---
 static HRESULT RegisterCOMServer()
@@ -62,9 +78,11 @@ static HRESULT RegisterCOMServer()
             RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)szModule,
                            (lstrlenW(szModule) + 1) * sizeof(WCHAR));
 
-            // 【关键修复】：将 ThreadingModel 修改为 Both 以增强 Win11 现代应用兼容性
-            RegSetValueExW(hKey, L"ThreadingModel", 0, REG_SZ, (BYTE*)L"Both",
-                           (lstrlenW(L"Both") + 1) * sizeof(WCHAR));
+            // TSF 标准线程模型：Apartment（weasel 同为 Apartment）。
+            // Both 曾为"Win11 现代应用兼容"引入，实测恰是 GIP 上下文（游戏聊天框等）
+            // 激活失败的元凶之一：msctf 会在 COM 激活前静默筛除非 Apartment 的 in-proc IME。
+            RegSetValueExW(hKey, L"ThreadingModel", 0, REG_SZ, (BYTE*)L"Apartment",
+                           (lstrlenW(L"Apartment") + 1) * sizeof(WCHAR));
             RegCloseKey(hKey);
             hr = S_OK;
         }
@@ -226,6 +244,19 @@ HRESULT RegisterCategories()
                                         c_guidDisplayAttributeInput);
     if (FAILED(hr)) {
         WIND_LOG_WARN_FMT(L"Failed to register display attribute to provider hr=0x%08X\n", hr);
+    }
+
+    // 升级自愈：清除迁移期手抄错误 GUID 注册的历史脏项（失败仅告警，不中断注册）
+    const GUID* legacyTypoCategories[] = {
+        &GUID_TFCAT_TIPCAP_UIELEMENTENABLED_TYPO,
+        &GUID_TFCAT_TIPCAP_SECUREMODE_TYPO
+    };
+    for (const GUID* pGuid : legacyTypoCategories)
+    {
+        hr = pCategoryMgr->UnregisterCategory(c_clsidTextService, *pGuid, c_clsidTextService);
+        if (FAILED(hr)) {
+            WIND_LOG_WARN_FMT(L"Failed to unregister legacy typo category, hr=0x%08X\n", hr);
+        }
     }
 
     pCategoryMgr->Release();
