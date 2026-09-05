@@ -2585,18 +2585,82 @@ impl MessageHandler for Coordinator {
         // `caret.y` 恒**等于** `rect.bottom`。若某宿主只返回首行，caret 走到下一行时
         // `y` 就会大于 `bottom`，此时判定不可信、回退既有逻辑——那条路今天怎么走、
         // 明天还怎么走，不会更糟。回退会打日志，据此可以点名是哪个宿主。
-        let rect_anchor = data.composition_rect.and_then(|(l, t, _r, b)| {
-            if b > t && data.y <= b {
-                Some((l, b))
-            } else {
-                if data.composition_rect.is_some() {
-                    debug!(
-                        "组合矩形不可信，回退既有锚点逻辑: rect=({l},{t},{_r},{b})                          caret=({},{})——caret 落在矩形之下，疑该宿主只返回首行",
-                        data.x, data.y
-                    );
-                }
-                None
+        // ★★★ 本帧的布局查询是否**整个**退化。
+        //
+        // `left == right`（或 `top == bottom`）意味着宿主连一个有宽度的矩形都给不出——
+        // 那次 GetTextExt 根本没算出布局，而同一帧里的 caret 与 compStart 出自**同一次**
+        // 查询，一并不可信。
+        //
+        // Word 实测（2026-09-05 14:56）cached 帧 rect=(1758,653,1758,697) w=0，其 caret 与
+        // compStart 都是 (1758,697)，与同期 selection 帧的 (1952,841) 差 144px；两帧交替
+        // 到达，逃生阀拿它们互相比较、反复重锁，候选窗来回抖。
+        //
+        // ⚠ 与「插入点形态」严格区分：WPS 文字 w=2、WPS 表格 w=1，矩形虽只有光标那么窄
+        // 但**是有效的**，caret 也可信——那些宿主必须照常走既有逻辑（表格类的候选窗本就
+        // 该跟着单元格走）。只有宽或高为 0 才是「这一帧什么都没算出来」。
+        let frame_layout_degenerate = data
+            .composition_rect
+            .is_some_and(|(l, t, r, b)| r <= l || b <= t);
+        // ★★★ 矩形是「插入点形态」——宿主给不出组合范围，它报的起点跟着插入点走。
+        //
+        // 这类宿主必须**同时抑制大偏移逃生阀**，否则逃生阀会被那份漂移数据一路骗着走：
+        // WPS 实测（2026-09-05 14:56）compStart 每帧与 caret 同步递增（2174 → 2204），
+        // 打字时 caret 持续偏离已锁锚点，逃生阀于是反复重锁——
+        //   14:56:31  (1830,861) → (1615,903)
+        //   14:56:34  (1615,903) → (2591,861)
+        // 把锚点从真实起点 1830 一路推到 2591。等到删除时**逐字回退每步只有 15~30px**，
+        // 永远够不到 3 倍行高的重锁阈值，锚点就永久卡在 2591，候选窗离组合区 868px。
+        //
+        // ★ 这与 QQ 退格问题同构：逃生阀只认单帧大跳，而删除是小步累积的——推过去容易，
+        // 回来不可能。对「起点跟着 caret 走」的宿主，它不是保护，是错位的制造者。
+        //
+        // 抑制之后走既有的「组合起点本组合内不再更新」：锚点锁在首帧的真实起点
+        // （WPS 实测首帧 compStart=1830 是对的），此后打字与删除都不再动它。
+        //
+        // ⚠⚠ **必须按宿主开启，不能全局**：Excel / WPS 表格的矩形形态与 WPS 文字**一模
+        // 一样**（w=1~2、起点等于插入点），但期望行为相反——它们每输入一个字就换一次
+        // docMgr、候选窗本就该跟着单元格走，靠的正是逃生阀把锚点推过去。2026-09-05 曾
+        // 把这条做成全局，实测当场弄坏 Excel 的跟随。数据分不出两者，只能按宿主声明。
+        let rect_is_insertion_point = active_compat.pin_anchor_when_start_drifts
+            && data
+                .composition_rect
+                .is_some_and(|(l, t, r, b)| r > l && b > t && l >= data.x);
+        let rect_anchor = data.composition_rect.and_then(|(l, t, r, b)| {
+            // 判据一：**矩形要真的是个范围**，不是一个点。
+            //
+            // 组合起点必须落在插入点**左边**——组合已经有内容，起点与插入点之间就隔着
+            // 这些内容的宽度。若 `left == caret.x`，说明宿主返回的是插入点本身而不是
+            // 组合范围，它提供不了任何新信息。
+            //
+            // 2026-09-05 实测三种「插入点形态」，一条判据全挡住：
+            //   WPS 文字 rect=(1603,617,1605,651) w=2 caret.x=1603  left 跟着输入右移
+            //   WPS 表格 rect=(1809,961,1810,997) w=1 caret.x=1809  2677 帧 w 恒为 1
+            //   Word cached rect=(1758,653,1758,697) w=0 caret.x=1758  与同期 selection
+            //                帧的 (1699,701,2710,792) 分处两地，采信它锚点就在两处间跳
+            // 对照：真包围盒的 left 恒在 caret 左侧，且组合最短时也隔着一个字符宽
+            //   （QQ / 记事本首帧 w=16、Word 首帧 w=17）。
+            //
+            // ⚠ 挡住之后走的是**既有锚点逻辑**，那条路对这些宿主本就是调好的：WPS 文字
+            // 靠「组合起点本组合内不再更新」钉住候选窗，表格类每字换一次 docMgr、候选窗
+            // 随之跟到新单元格。矩形每帧更新反而把前者的保护拆了——WPS 出现的正是这个回归。
+            if b <= t || l >= data.x {
+                debug!(
+                    "组合矩形不可信（是插入点不是范围）: rect=({l},{t},{r},{b}) w={} caret.x={}——回退既有锚点逻辑",
+                    r - l,
+                    data.x
+                );
+                return None;
             }
+            // 判据二：**覆盖当前插入行**。若某宿主只返回首行，caret 走到下一行时 y 会
+            // 大于 bottom，此时该矩形答的不是当前行的位置。
+            if data.y > b {
+                debug!(
+                    "组合矩形不可信（不覆盖插入行）: rect=({l},{t},{r},{b}) caret=({},{})——疑该宿主只返回首行",
+                    data.x, data.y
+                );
+                return None;
+            }
+            Some((l, b))
         });
         if let Some((ax, ay)) = rect_anchor {
             let mut cs = self
@@ -2605,7 +2669,7 @@ impl MessageHandler for Coordinator {
                 .unwrap_or_else(|e| e.into_inner());
             if (cs.0, cs.1) != (ax, ay) {
                 debug!(
-                    "组合起点取自组合矩形: ({},{}) → ({ax},{ay})（宿主对整个组合范围的测量，                     跨行时自动落到最后一行行首）",
+                    "组合起点取自组合矩形: ({},{}) → ({ax},{ay})（宿主对整个组合范围的测量，跨行时自动落到最后一行行首）",
                     cs.0, cs.1
                 );
             }
@@ -2836,7 +2900,7 @@ impl MessageHandler for Coordinator {
             // 别的信息来源」，矩形恰恰就是那个信息来源。它每帧如实给出锚点，锁不错也就无需
             // 逃生。继续留着它反而有害——`3 倍行高` 这个尺度本身随宿主行高在 126/222 之间
             // 跳（记事本首行 74、次行 42），换行能否被跟上全看偏移落在阈值哪一侧。
-            if rect_anchor.is_none() {
+            if rect_anchor.is_none() && !frame_layout_degenerate && !rect_is_insertion_point {
                 let line_h = self
                     .last_sane_caret_height
                     .load(std::sync::atomic::Ordering::Relaxed)
