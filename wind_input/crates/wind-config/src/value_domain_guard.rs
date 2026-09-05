@@ -204,6 +204,7 @@ fn app_compat_seed() -> toml::Value {
         initial_punct: Some(InitialMode::Chinese),
         smart_method: Some(SmartMethod::default()),
         auto_pair: Some(true),
+        composition_start_pair_guard: Some(true),
         ..Default::default()
     };
     let file = AppCompatFile {
