@@ -947,109 +947,6 @@ private:
 
 static const LONG DEFAULT_CARET_HEIGHT = 20;
 
-// 读音信息 UI 元素（ITfReadingInformationUIElement）：向 UI-less/沉浸式宿主（Dota 2 等，经
-// VALVEIME001 自绘）提供当前"读音/编码"串。★ 2026-09-05 定案：Dota 反复 QI 本接口
-// （{ea1ea139-19df-11d7-a6d2-00065b84435c}），缺它则宿主无法在输入框处定位并绘制候选——把编码
-// 丢进默认浮窗（左上角）、候选一律不画；搜狗/微软拼音均提供本元素，候选才画在输入框。与候选
-// 元素并行注册（见 NotifyCandidatesVisibilityChanged）。读音串取 CTextService::_lastCompositionText。
-static const GUID kWindReadingUIElementGuid =
-    { 0xb3e54a92, 0x7c20, 0x4b6a, { 0xa1, 0x5e, 0x82, 0x09, 0x77, 0x55, 0x44, 0x34 } };
-
-class CReadingInformationUIElement final : public ITfReadingInformationUIElement
-{
-public:
-    explicit CReadingInformationUIElement(CTextService* pTsf)
-        : _cRef(1), _pTsf(pTsf), _shown(FALSE) {}
-
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
-    {
-        if (ppv == nullptr) return E_INVALIDARG;
-        *ppv = nullptr;
-        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfUIElement) ||
-            IsEqualIID(riid, __uuidof(ITfReadingInformationUIElement)))
-        {
-            *ppv = static_cast<ITfReadingInformationUIElement*>(this);
-        }
-        if (*ppv) { AddRef(); return S_OK; }
-        return E_NOINTERFACE;
-    }
-    STDMETHODIMP_(ULONG) AddRef() override { return (ULONG)InterlockedIncrement(&_cRef); }
-    STDMETHODIMP_(ULONG) Release() override
-    {
-        LONG c = InterlockedDecrement(&_cRef);
-        if (c == 0) delete this;
-        return (ULONG)c;
-    }
-
-    // ITfUIElement
-    STDMETHODIMP GetDescription(BSTR* pbstr) override
-    {
-        if (pbstr) *pbstr = SysAllocString(L"Reading Information");
-        return S_OK;
-    }
-    STDMETHODIMP GetGUID(GUID* pguid) override
-    {
-        if (pguid == nullptr) return E_INVALIDARG;
-        *pguid = kWindReadingUIElementGuid;
-        return S_OK;
-    }
-    STDMETHODIMP Show(BOOL bShow) override { _shown = bShow; return S_OK; }
-    STDMETHODIMP IsShown(BOOL* pbShow) override
-    {
-        if (pbShow == nullptr) return E_INVALIDARG;
-        *pbShow = _shown;
-        return S_OK;
-    }
-
-    // ITfReadingInformationUIElement
-    STDMETHODIMP GetUpdatedFlags(DWORD* pdwFlags) override
-    {
-        if (pdwFlags == nullptr) return E_INVALIDARG;
-        *pdwFlags = TF_RIUIE_STRING;
-        return S_OK;
-    }
-    STDMETHODIMP GetContext(ITfContext** ppc) override
-    {
-        if (ppc == nullptr) return E_INVALIDARG;
-        *ppc = nullptr;
-        if (_pTsf == nullptr || _pTsf->_pThreadMgr == nullptr) return E_FAIL;
-        ITfDocumentMgr* pDim = nullptr;
-        if (FAILED(_pTsf->_pThreadMgr->GetFocus(&pDim)) || pDim == nullptr) return E_FAIL;
-        HRESULT hr = pDim->GetTop(ppc);
-        pDim->Release();
-        return (SUCCEEDED(hr) && *ppc != nullptr) ? S_OK : E_FAIL;
-    }
-    STDMETHODIMP GetString(BSTR* pstr) override
-    {
-        if (pstr == nullptr) return E_INVALIDARG;
-        std::wstring s;
-        if (_pTsf != nullptr) s = _pTsf->_lastCompositionText;
-        *pstr = SysAllocStringLen(s.c_str(), (UINT)s.size());
-        WIND_LOG_DEBUG_FMT(L"ReadingUIElement GetString len=%u\n", (unsigned)s.size());
-        return *pstr ? S_OK : E_OUTOFMEMORY;
-    }
-    STDMETHODIMP GetMaxReadingStringLength(UINT* pcchMax) override
-    {
-        if (pcchMax) *pcchMax = 0; // 0 = 不限
-        return S_OK;
-    }
-    STDMETHODIMP GetErrorIndex(UINT* pErrorIndex) override
-    {
-        if (pErrorIndex) *pErrorIndex = (UINT)-1; // 无错误位置
-        return S_OK;
-    }
-    STDMETHODIMP IsVerticalOrderPreferred(BOOL* pfVertical) override
-    {
-        if (pfVertical) *pfVertical = FALSE; // 横排
-        return S_OK;
-    }
-
-private:
-    LONG _cRef;
-    CTextService* _pTsf;
-    BOOL _shown;
-};
-
 CTextService::CTextService()
     : _refCount(1)
     , _pThreadMgr(nullptr)
@@ -1059,8 +956,6 @@ CTextService::CTextService()
     , _uiElementId((DWORD)-1)
     , _uiElementShown(FALSE)
     , _pUIElementMgr(nullptr)
-    , _pReadingElement(nullptr)
-    , _readingElementId((DWORD)-1)
     , _uiHostDraws(FALSE)
     , _uiLessThread(FALSE)
     , _uiElementStateSent(-1)
@@ -1202,7 +1097,6 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
     {
         // 独立基类（不经 ITfUIElement），直接转型。见类声明处对 Dota 2 自绘的说明。
         *ppvObj = (ITfIntegratableCandidateListUIElement*)this;
-        WIND_LOG_DEBUG(L"host QI: ITfIntegratableCandidateListUIElement\n");
     }
     else if (IsEqualIID(riid, IID_ITfFunctionProvider))
     {
@@ -1215,15 +1109,6 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
         return S_OK;
     }
 
-    // 诊断：宿主问了、我们不提供的接口。只在宿主接管态记（组合开始后、Dota 决定画候选的窗口），
-    // 避开激活期海量基础设施 QI 的噪声。用来找「Dota 想要而我们缺」的接口。
-    if (_uiHostDraws)
-    {
-        WIND_LOG_DEBUG_FMT(L"host QI miss: {%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}\n",
-            riid.Data1, riid.Data2, riid.Data3,
-            riid.Data4[0], riid.Data4[1], riid.Data4[2], riid.Data4[3],
-            riid.Data4[4], riid.Data4[5], riid.Data4[6], riid.Data4[7]);
-    }
     return E_NOINTERFACE;
 }
 
@@ -1560,17 +1445,6 @@ void CTextService::_UninitThreadMgrEventSink()
         }
         _dwThreadMgrEventSinkCookie = TF_INVALID_COOKIE;
         _dwThreadFocusSinkCookie = TF_INVALID_COOKIE;
-    }
-
-    if (_pReadingElement != nullptr)
-    {
-        if (_pUIElementMgr != nullptr && _readingElementId != (DWORD)-1)
-        {
-            _pUIElementMgr->EndUIElement(_readingElementId);
-        }
-        _readingElementId = (DWORD)-1;
-        _pReadingElement->Release();
-        _pReadingElement = nullptr;
     }
 
     if (_pUIElementMgr != nullptr)
@@ -2334,10 +2208,8 @@ STDAPI CTextService::GetDocumentMgr(ITfDocumentMgr** ppdim)
     // 不画（GetString 全读、无候选框）。对照 Weasel：取 GetFocus 的真实 docmgr。
     if (ppdim == nullptr) return E_INVALIDARG;
     *ppdim = nullptr;
-    if (_pThreadMgr == nullptr) { WIND_LOG_DEBUG(L"host call: GetDocumentMgr -> no threadmgr\n"); return E_FAIL; }
-    HRESULT hrDm = _pThreadMgr->GetFocus(ppdim);
-    WIND_LOG_DEBUG_FMT(L"host call: GetDocumentMgr hr=0x%08X mgr=%p\n", (uint32_t)hrDm, (void*)*ppdim);
-    if (FAILED(hrDm) || *ppdim == nullptr) return E_FAIL;
+    if (_pThreadMgr == nullptr) return E_FAIL;
+    if (FAILED(_pThreadMgr->GetFocus(ppdim)) || *ppdim == nullptr) return E_FAIL;
     return S_OK; // GetFocus 已 AddRef，调用方负责 Release
 }
 
@@ -2461,7 +2333,6 @@ STDAPI CTextService::Abort(void)
 STDAPI CTextService::SetIntegrationStyle(GUID guidIntegrationStyle)
 {
     (void)guidIntegrationStyle;
-    WIND_LOG_DEBUG(L"host call: SetIntegrationStyle（宿主启用候选集成，会走自绘）\n");
     return S_OK;
 }
 
@@ -2469,7 +2340,6 @@ STDAPI CTextService::GetSelectionStyle(TfIntegratableCandidateListSelectionStyle
 {
     if (ptfSelectionStyle == nullptr) return E_INVALIDARG;
     *ptfSelectionStyle = STYLE_ACTIVE_SELECTION; // 高亮项即待上屏项，与桌面候选窗一致
-    WIND_LOG_DEBUG(L"host call: GetSelectionStyle\n");
     return S_OK;
 }
 
@@ -2480,7 +2350,6 @@ STDAPI CTextService::OnKeyDown(WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
     // ⛔ 不在这里吃键：按键的权威处理在 ITfKeyEventSink，本方法不真正处理键，谎报吃键会把
     // 本该走那条路的键吞掉。返回 FALSE 让键落回正常处理链（Dota 走的是组合/键路径，通常不调本方法）。
     *pfEaten = FALSE;
-    WIND_LOG_DEBUG_FMT(L"host call: OnKeyDown wParam=0x%IX\n", (SIZE_T)wParam);
     return S_OK;
 }
 
@@ -2488,7 +2357,6 @@ STDAPI CTextService::ShowCandidateNumbers(BOOL* pfShow)
 {
     if (pfShow == nullptr) return E_INVALIDARG;
     *pfShow = TRUE; // 让宿主画候选序号（1/2/3…）
-    WIND_LOG_DEBUG(L"host call: ShowCandidateNumbers\n");
     return S_OK;
 }
 
@@ -2578,43 +2446,6 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
     }
 
     if (_pUIElementMgr == nullptr) return;
-
-    // 读音信息元素：与候选元素并行注册/更新/结束（先于候选，宿主靠它在输入框处定位整套 IME UI）。
-    if (hasCandidates)
-    {
-        if (_readingElementId == (DWORD)-1)
-        {
-            if (_pReadingElement == nullptr)
-            {
-                _pReadingElement = new CReadingInformationUIElement(this);
-            }
-            if (_pReadingElement != nullptr)
-            {
-                BOOL bShowR = TRUE;
-                HRESULT hrR = _pUIElementMgr->BeginUIElement(_pReadingElement, &bShowR, &_readingElementId);
-                if (SUCCEEDED(hrR))
-                {
-                    WIND_LOG_DEBUG_FMT(L"BeginUIElement(reading) ok id=%u show=%d\n", _readingElementId, (int)bShowR);
-                    _pUIElementMgr->UpdateUIElement(_readingElementId);
-                }
-                else
-                {
-                    WIND_LOG_WARN_FMT(L"BeginUIElement(reading) failed hr=0x%08X\n", (uint32_t)hrR);
-                    _readingElementId = (DWORD)-1;
-                }
-            }
-        }
-        else
-        {
-            _pUIElementMgr->UpdateUIElement(_readingElementId);
-        }
-    }
-    else if (_readingElementId != (DWORD)-1)
-    {
-        _pUIElementMgr->EndUIElement(_readingElementId);
-        WIND_LOG_DEBUG_FMT(L"EndUIElement(reading) id=%u\n", _readingElementId);
-        _readingElementId = (DWORD)-1;
-    }
 
     if (hasCandidates && _uiElementId == (DWORD)-1)
     {
