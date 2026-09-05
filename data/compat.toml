@@ -95,6 +95,16 @@ comment = "QQNT 聊天框长组合时交替上报组合起点降级帧与当前 
 composition_start_pair_guard = true
 
 [[apps]]
+process = "Code.exe"
+comment = "VS Code - CEF 嵌入组合，帧形态同 QQNT（降级帧 + 换行后的陈旧 cached 帧）；实测越阈 175 次，最大跨度 2402px"
+composition_start_pair_guard = true
+
+[[apps]]
+process = "Feishu.exe"
+comment = "飞书 - 同上；实测越阈 170 次，最大跨度 1112px。另有连发两个 TSF_COMPOSITION 帧的变体"
+composition_start_pair_guard = true
+
+[[apps]]
 process = "SearchHost.exe"
 comment = "Win11 开始菜单 / 任务栏搜索，候选窗无法盖过其 Band 层级，走 HostRender 代理渲染"
 host_render = true
