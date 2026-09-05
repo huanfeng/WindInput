@@ -1093,6 +1093,12 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
     {
         *ppvObj = (ITfCandidateListUIElementBehavior*)this;
     }
+    else if (IsEqualIID(riid, __uuidof(ITfReadingInformationUIElement)))
+    {
+        // 候选元素兼读音元素：Dota 2 在候选元素上 QI 本接口，命中才在输入框处画候选+读音。
+        *ppvObj = (ITfReadingInformationUIElement*)this;
+        WIND_LOG_DEBUG(L"host QI: ITfReadingInformationUIElement（候选元素兼读音）\n");
+    }
     else if (IsEqualIID(riid, __uuidof(ITfIntegratableCandidateListUIElement)))
     {
         // 独立基类（不经 ITfUIElement），直接转型。见类声明处对 Dota 2 自绘的说明。
@@ -2363,6 +2369,48 @@ STDAPI CTextService::ShowCandidateNumbers(BOOL* pfShow)
 STDAPI CTextService::FinalizeExactCompositionString(void)
 {
     return E_NOTIMPL;
+}
+
+// ==== ITfReadingInformationUIElement（候选元素兼读音元素）====
+// Dota 2 等 UI-less 宿主在候选元素上 QI 本接口取读音串，据此在输入框处绘制候选+读音。
+// GetUpdatedFlags/GetDescription/GetGUID/Show/IsShown 与候选共用（同一实现）。
+STDAPI CTextService::GetContext(ITfContext** ppc)
+{
+    if (ppc == nullptr) return E_INVALIDARG;
+    *ppc = nullptr;
+    if (_pThreadMgr == nullptr) return E_FAIL;
+    ITfDocumentMgr* pDim = nullptr;
+    if (FAILED(_pThreadMgr->GetFocus(&pDim)) || pDim == nullptr) return E_FAIL;
+    HRESULT hr = pDim->GetTop(ppc);
+    pDim->Release();
+    return (SUCCEEDED(hr) && *ppc != nullptr) ? S_OK : E_FAIL;
+}
+
+STDAPI CTextService::GetString(BSTR* pstr)
+{
+    // 读音/编码串 = 当前组合文本（用户看到的"编码"）。
+    if (pstr == nullptr) return E_INVALIDARG;
+    *pstr = SysAllocStringLen(_lastCompositionText.c_str(), (UINT)_lastCompositionText.size());
+    WIND_LOG_DEBUG_FMT(L"ReadingUIElement GetString len=%u\n", (unsigned)_lastCompositionText.size());
+    return *pstr ? S_OK : E_OUTOFMEMORY;
+}
+
+STDAPI CTextService::GetMaxReadingStringLength(UINT* pcchMax)
+{
+    if (pcchMax) *pcchMax = 0; // 0 = 不限
+    return S_OK;
+}
+
+STDAPI CTextService::GetErrorIndex(UINT* pErrorIndex)
+{
+    if (pErrorIndex) *pErrorIndex = (UINT)-1; // 无错误位置
+    return S_OK;
+}
+
+STDAPI CTextService::IsVerticalOrderPreferred(BOOL* pfVertical)
+{
+    if (pfVertical) *pfVertical = FALSE; // 横排
+    return S_OK;
 }
 
 void CTextService::_ReportUiElementState()

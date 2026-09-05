@@ -32,6 +32,11 @@ class CTextService : public ITfTextInputProcessorEx,
                      // ITfCandidateListUIElementBehavior 已继承 ITfCandidateListUIElement (已继承 ITfUIElement)，
                      // 只列一个最派生的即可。
                      public ITfCandidateListUIElementBehavior,
+                     // ITfReadingInformationUIElement — ★ 关键：Dota 2 等 UI-less 宿主在**候选元素本身**上
+                     // QI 本接口取"读音/编码"串，据此在输入框处定位并绘制整套 IME UI（候选+读音）。
+                     // 必须与候选同一对象——分开注册独立读音元素宿主根本不读（实测 Dota 空注册、GetString 0 次）。
+                     // 与 ITfCandidateListUIElement 共享 ITfUIElement 基类（菱形），QI 时用显式路径转型。
+                     public ITfReadingInformationUIElement,
                      // ITfIntegratableCandidateListUIElement — 让"能自绘候选的宿主"（Dota 2 等
                      // SDL / 游戏引擎，经 VALVEIME001 自绘）把我们的候选画出来。缺它时宿主 QI 拿不到、
                      // 读了候选数据也不画（实测 Dota 2 GetString 全读却无候选框）。对照 Weasel/搜狗/
@@ -98,6 +103,14 @@ public:
     STDMETHODIMP GetPageIndex(UINT* pIndex, UINT uSize, UINT* puPageCnt);
     STDMETHODIMP SetPageIndex(UINT* pIndex, UINT uPageCnt);
     STDMETHODIMP GetCurrentPage(UINT* puPage);
+
+    // ITfReadingInformationUIElement 读音特有方法（候选元素兼任读音元素）。GetString(BSTR*) 是候选
+    // GetString(UINT,BSTR*) 的重载，返回读音/编码串（_lastCompositionText）。
+    STDMETHODIMP GetContext(ITfContext** ppc);
+    STDMETHODIMP GetString(BSTR* pstr);
+    STDMETHODIMP GetMaxReadingStringLength(UINT* pcchMax);
+    STDMETHODIMP GetErrorIndex(UINT* pErrorIndex);
+    STDMETHODIMP IsVerticalOrderPreferred(BOOL* pfVertical);
 
     // ITfCandidateListUIElementBehavior — 宿主对候选的操作，经 CMD_UIELEMENT_ACTION 回流服务端。
     STDMETHODIMP SetSelection(UINT nIndex);
