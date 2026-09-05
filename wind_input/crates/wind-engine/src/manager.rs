@@ -99,7 +99,10 @@ impl PromotePrefix {
 
 /// 活跃方案的词频排序设置（apply_freq_rerank 用）。
 /// 按方案解析后缓存，避免每键读盘（frequency.md §8）。
-#[derive(Debug, Clone, Copy)]
+///
+/// ⚠️ **不再是 `Copy`**：免词频判据从一个 `BlockMask`（8 字节位集）换成了整个字符类
+/// registry，只能按 `Arc` 共享。克隆成本仍是一次引用计数，与原先的按位拷贝同量级。
+#[derive(Debug, Clone)]
 pub struct FreqSettings {
     /// 词频维度主开关（全局 schema.{codetable,pinyin}.frequency.enabled）；关则完全不重排。
     pub enabled: bool,
@@ -117,11 +120,11 @@ pub struct FreqSettings {
     /// ⚠️ 本项**按候选来源生效、不按当前方案**，故 `freq_settings` 的三个分支取的是
     /// 同一个值——混输方案里混进来的英文候选同样要按英文的口径记账。
     pub english_code_by_input: bool,
-    /// 不参与词频的字符区块（`schema.frequency.exclude_blocks`）。空集 = 全都参与。
+    /// 字符类判定结构。免词频取其中开了 `no_freq` 的那些类（并集语义）。
     ///
-    /// ⚠️ 与 [`Self::english_code_by_input`] 同样**跨引擎共用一个值**，三个分支取自
-    /// 分支之外算好的那一份——「emoji 不参与词频」在码表里成立、在拼音里不成立说不通。
-    pub exclude: wind_candidate::BlockMask,
+    /// ⚠️ 与 [`Self::english_code_by_input`] 同样**跨引擎共用一份**，三个分支取自
+    /// 分支之外算好的那一个——「emoji 不参与词频」在码表里成立、在拼音里不成立说不通。
+    pub charsets: Arc<wind_candidate::CharsetRegistry>,
 }
 
 impl Default for FreqSettings {
@@ -132,7 +135,8 @@ impl Default for FreqSettings {
             protect: ProtectPolicy::NONE,
             promote_prefix: PromotePrefix::Single,
             english_code_by_input: false,
-            exclude: wind_candidate::BlockMask::EMPTY,
+            // 空 registry 的 `no_freq` 恒假，与原先的 `BlockMask::EMPTY` 同义。
+            charsets: Arc::default(),
         }
     }
 }
@@ -152,7 +156,7 @@ impl FreqSettings {
     /// 两处各写一遍 `if`、再靠注释提醒别人保持一致。同款教训见 `shadow_code_of`
     /// （读端、写端、菜单灰显三处取码必须走同一个口）。
     pub fn excluded_from_freq(&self, text: &str) -> bool {
-        self.exclude.contains_text(text)
+        self.charsets.no_freq(text)
     }
 }
 
@@ -358,7 +362,7 @@ pub struct EngineManager {
     /// 存解析后的 [`wind_candidate::BlockMask`] 而不是原始 `Vec<String>`：解析要按名字线性
     /// 查块表，而本项的消费点在按键热路径上。跟 `codetable`/`english` 那几份镜像一样由
     /// `update_config` 刷新——**漏了那一步的症状是「设置页改了不生效、重启后才生效」**。
-    freq_exclude: Mutex<wind_candidate::BlockMask>,
+    charsets: Mutex<Arc<wind_candidate::CharsetRegistry>>,
     /// 词频排序设置缓存（schema_id -> FreqSettings；按需解析、避免每键读盘）
     freq_cache: Mutex<HashMap<String, FreqSettings>>,
     /// 方案引擎类型缓存（`schema_engine_type`）。**按 id 缓存，reload/invalidate 时清**，
@@ -603,12 +607,18 @@ impl EngineManager {
             schema_generation: std::sync::atomic::AtomicU64::new(0),
             available: Mutex::new(available),
             data_dir: data_dir.map(|d| d.to_path_buf()),
-            store,
             codetable: Mutex::new(config.schema.codetable.clone()),
             mix: Mutex::new(config.schema.mix.clone()),
             english: Mutex::new(config.schema.english.clone()),
             temp_pinyin: Mutex::new(config.input.temp_pinyin.clone()),
-            freq_exclude: Mutex::new(Self::parse_freq_exclude(config)),
+            // 用户层在 store 里（`wind_store::charsets`），装配前先 `as_deref` 借用，
+            // 下一行才把 `store` 本体 move 进结构体。
+            charsets: Mutex::new(Arc::new(Self::build_charsets(
+                config,
+                data_dir,
+                store.as_deref(),
+            ))),
+            store,
             freq_cache: Mutex::new(HashMap::new()),
             schema_type_cache: Mutex::new(HashMap::new()),
             key_actions_cache: Mutex::new(HashMap::new()),
@@ -2488,10 +2498,13 @@ impl EngineManager {
         *self.english.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.english.clone();
         *self.temp_pinyin.lock().unwrap_or_else(|e| e.into_inner()) =
             config.input.temp_pinyin.clone();
-        // 词频排除区块：**重新解析**而不是照搬字符串——镜像存的是解析结果。漏掉这一行的
-        // 症状是设置页改了不生效、重启后才生效（`freq_cache` 在下面被清，会拿着旧 mask 重建）。
-        *self.freq_exclude.lock().unwrap_or_else(|e| e.into_inner()) =
-            Self::parse_freq_exclude(config);
+        // 字符类：**重新装配**而不是照搬字符串——镜像存的是解析结果。漏掉这一行的
+        // 症状是设置页改了不生效、重启后才生效（`freq_cache` 在下面被清，会拿着旧的重建）。
+        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Self::build_charsets(
+            config,
+            self.data_dir.as_deref(),
+            self.store.as_deref(),
+        ));
         *self
             .primary_pinyin
             .lock()
@@ -3258,7 +3271,7 @@ impl EngineManager {
         {
             let cache = self.freq_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(s) = cache.get(&id) {
-                return *s;
+                return s.clone();
             }
         }
         // 英文记账口径**按候选来源生效、不按当前方案**——混输方案里混进来的英文候选
@@ -3270,7 +3283,7 @@ impl EngineManager {
         };
         // 同上：跨引擎共用一个值，故在分支之外取一次。只在某个分支里读的话，别的引擎下
         // 这条规则会静默失效——而那正是 `english_code_by_input` 当初踩过的坑。
-        let exclude = *self.freq_exclude.lock().unwrap_or_else(|e| e.into_inner());
+        let charsets = Arc::clone(&self.charsets.lock().unwrap_or_else(|e| e.into_inner()));
         let engine_type = self.schema_engine_type(&id);
         let settings = match engine_type.as_deref() {
             Some("english") => {
@@ -3283,7 +3296,7 @@ impl EngineManager {
                     protect: ProtectPolicy::NONE,
                     promote_prefix: PromotePrefix::parse(&en.frequency.promote_prefix),
                     english_code_by_input,
-                    exclude,
+                    charsets: Arc::clone(&charsets),
                 }
             }
             Some("pinyin") => {
@@ -3295,7 +3308,7 @@ impl EngineManager {
                     protect: ProtectPolicy::NONE,
                     promote_prefix: PromotePrefix::parse(&pf.frequency.promote_prefix),
                     english_code_by_input,
-                    exclude,
+                    charsets: Arc::clone(&charsets),
                 }
             }
             _ => {
@@ -3319,7 +3332,7 @@ impl EngineManager {
                     // 对前缀补全从无限制），避免升级后存量用户的调频突然变窄。
                     promote_prefix: PromotePrefix::parse(&ct.frequency.promote_prefix),
                     english_code_by_input,
-                    exclude,
+                    charsets: Arc::clone(&charsets),
                     enabled: ct.frequency.enabled,
                     strategy: Self::parse_freq_strategy(&ct.frequency.strategy),
                     protect: ProtectPolicy {
@@ -3336,28 +3349,119 @@ impl EngineManager {
         self.freq_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id, settings);
+            .insert(id, settings.clone());
         settings
     }
 
-    /// 解析 `schema.frequency.exclude_blocks`，并把拼错的名字 warn 出来。
+    /// 装配字符类 registry：出厂两层目录 + store 里的用户层 + 两个外部引用。
     ///
-    /// `BlockMask::from_config` 刻意只返回未识别项、不自己报警告（wind-candidate 无
-    /// `tracing` 依赖，且「怎么报」属调用方）——这里就是承接那一半的地方。
+    /// # ★ 全进程只装配这一份
     ///
-    /// ⚠️ 必须报：块名是中文串，`表情符號`（繁体"號"）这种错法肉眼极难分辨，而静默跳过的
-    /// 表现就是「配了没反应」，用户无从判断是名字写错还是功能没生效。
-    fn parse_freq_exclude(config: &wind_config::Config) -> wind_candidate::BlockMask {
-        let (mask, unknown) =
-            wind_candidate::BlockMask::from_config(&config.schema.frequency.exclude_blocks);
-        if !unknown.is_empty() {
+    /// `input.rare_char.include_blocks`（生僻字模式准入）在这里就一并吃进去，尽管它的
+    /// 消费点在 coordinator——那边通过 [`Self::charsets`] 取同一份。两处各装配一份的
+    /// 话，同一个 key 可能在免词频和生僻准入下解析出不同的类（用户层新增/删除一个类的
+    /// 瞬间尤其如此），而这种不一致没有任何报错。
+    ///
+    /// `store` 为 `None`（无持久化的 headless）时用户层为空——与其它用户数据一致：
+    /// 没有 store 就没有用户层，不另找目录兜底。
+    fn build_charsets(
+        config: &wind_config::Config,
+        data_dir: Option<&Path>,
+        store: Option<&wind_store::Store>,
+    ) -> wind_candidate::CharsetRegistry {
+        Self::warn_stale_charset_files();
+        // 层序与 `resolve_schema_resource` 一致（后者是 user > custom > data，
+        // 这里是靠后的覆盖靠前的）。
+        let defs = wind_config::charset_def::load_layered(
+            data_dir,
+            wind_config::Config::custom_data_dir().as_deref(),
+            store
+                .map(crate::charset_assembly::user_docs_from_store)
+                .unwrap_or_default(),
+        );
+        crate::charset_assembly::assemble(
+            &defs,
+            data_dir,
+            crate::charset_assembly::ExternalRefs {
+                no_freq: &config.schema.frequency.exclude_blocks,
+                in_rare: &config.input.rare_char.include_blocks,
+            },
+        )
+    }
+
+    /// **只**重装字符类 registry，不动引擎缓存。
+    ///
+    /// # ⚠️ 为什么必须独立于 `reload_from_config`
+    ///
+    /// 那个方法只在 **schema_dirty** 时被调用（改了才热重建引擎，避免每次保存都丢词典
+    /// 缓存）。而 `input.rare_char.include_blocks` 在 **input 段**，改它根本不会把
+    /// schema 标脏——registry 只在那里更新的话，用户改完生僻字模式的纳入区块**毫无
+    /// 反应，要切一次方案或重启才生效**。
+    ///
+    /// 这正是本仓反复出现的「运行时镜像态没回灌」那类缺陷：改动落进了配置，却没落进
+    /// 由它派生的运行时结构。⇒ 每个无条件重建 `ConfigBundle` 的地方都要调本方法。
+    pub fn rebuild_charsets(&self, config: &wind_config::Config) {
+        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Self::build_charsets(
+            config,
+            self.data_dir.as_deref(),
+            self.store.as_deref(),
+        ));
+    }
+
+    /// 出厂两层（data + custom）的字符类合并结果——编辑视图与 diff 的基准。
+    ///
+    /// ★ 与装配用的是同一个 `load_factory`：基准若另算一份，diff 出来的「用户新增」
+    /// 可能是定制层本来就有的，用户「恢复默认」就把定制层一并丢了。
+    pub fn charset_factory(
+        &self,
+    ) -> std::collections::BTreeMap<String, wind_config::charset_def::MergedClass> {
+        wind_config::charset_def::load_factory(
+            self.data_dir.as_deref(),
+            wind_config::Config::custom_data_dir().as_deref(),
+        )
+    }
+
+    /// 直接换掉字符类 registry。
+    ///
+    /// 生产上由 [`Self::rebuild_charsets`] 从配置装配；本方法留给**测试夹具**与将来
+    /// 「设置页改完 charsets/ 立即热载」那条路径——它们手里已经有现成的 registry，
+    /// 不必再走一遍目录扫描。
+    pub fn set_charsets(&self, reg: Arc<wind_candidate::CharsetRegistry>) {
+        *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = reg;
+    }
+
+    /// 用户配置目录里还留着**已不再被读取**的旧落点时提醒一句。
+    ///
+    /// | 旧落点 | 何时失效 | 现在在哪 |
+    /// |---|---|---|
+    /// | `schemas/common_chars.txt` | 2026-09-04 | `charsets/common_han.yaml` 的列表体 |
+    /// | `charsets/*.yaml` | 2026-09-05 | redb（设置页「从文件加载」导入） |
+    ///
+    /// ⚠️ 两者都是**静默失效**：文件还在、程序不读、也不报错。用户看到的是「我明明改了
+    /// 字表，判定却还是自带那套」。提醒不能省。第二条没写迁移：那个落点从未发布。
+    fn warn_stale_charset_files() {
+        let Some(dir) = wind_config::Config::user_config_dir() else {
+            return;
+        };
+        let stale = dir.join("schemas").join("common_chars.txt");
+        if stale.is_file() {
             warn!(
-                "schema.frequency.exclude_blocks 有 {} 个名字不认识、已跳过: {}（应为区块名或预设组名 emoji）",
-                unknown.len(),
-                unknown.join("、")
+                "{} 已不再生效——常用字表现在在 charsets/common_han.yaml 里。要沿用你的                 名单，请在设置页「字符集分类」对 common_han 用「从文件加载」",
+                stale.display()
             );
         }
-        mask
+        let stale_dir = dir.join(wind_config::charset_def::CHARSETS_DIR_NAME);
+        if stale_dir.is_dir() {
+            warn!(
+                "{} 已不再被读取——字符类的用户层现在在数据库里。里面的文件可在设置页                 「字符集分类」用「从文件加载」逐个导入",
+                stale_dir.display()
+            );
+        }
+    }
+
+    /// 当前的字符类 registry。coordinator 的生僻字准入与类型列都从这里取。
+    pub fn charsets(&self) -> Arc<wind_candidate::CharsetRegistry> {
+        Arc::clone(&self.charsets.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// 词频策略字符串 → 枚举（纯映射，便于单测）。
@@ -3686,10 +3790,80 @@ impl EngineManager {
         if let Some(ov) = override_dir.and_then(|d| Self::read_override_value(schema_id, d)) {
             merge_toml(&mut base, ov);
         }
-        match base.try_into() {
-            Ok(s) => Some(s),
+        // 字段级容错（`tolerant_de`）的回落是**静默**的：它只让那一个字段回落，不再触发
+        // 下面的段级降级。清空→反序列化→取走，把这些回落也收进 `degraded_items`，
+        // 否则用户的处境仍是「我写的这项没反应，也没人告诉我」。
+        wind_config::tolerant_de::clear_fallbacks();
+        match base.clone().try_into::<Schema>() {
+            Ok(mut s) => {
+                let fallbacks = wind_config::tolerant_de::take_fallbacks();
+                if !fallbacks.is_empty() {
+                    warn!(
+                        "方案 {schema_id} 有 {} 项设置的值无法识别，已按默认处理：{}",
+                        fallbacks.len(),
+                        fallbacks.join("、")
+                    );
+                    s.degraded_items = fallbacks
+                        .into_iter()
+                        .map(|v| format!("值 \"{v}\""))
+                        .collect();
+                }
+                Some(s)
+            }
+            // ⚠️ 这里**不能**直接 `None`。整份 `try_into` 是一次性的：`[candidate]` 里一个
+            // `text_orientation = ""` 就让整个方案读不出来，而 `read_schema` 的 `None` 会
+            // 让方案名/类型/引擎构建等约 30 个调用点一起归零——用户看到的是「这个方案完全
+            // 没反应，也不报错」。2026-09-04 实际发生过。改走段级降级：有毒的段回落出厂
+            // 默认值，方案的其余部分照常工作，降级清单挂在 `Schema::degraded_items`
+            // 上交给协调器 toast。
+            Err(root_err) => Self::salvage_schema(schema_id, base, &root_err),
+        }
+    }
+
+    /// `read_schema` 的段级降级分支：把有毒的段回落出厂默认值，救回方案的其余部分。
+    ///
+    /// 救不回来（探不出毒、或回落后仍失败）才返回 `None`——那时方案确实无法使用，
+    /// 与降级前的行为一致。
+    fn salvage_schema(
+        schema_id: &str,
+        merged: toml::Value,
+        root_err: &toml::de::Error,
+    ) -> Option<Schema> {
+        let default_v = match toml::Value::try_from(Schema::default()) {
+            Ok(v) => v,
+            // 默认方案自己序列化不了属于代码 bug，此处无从补救。
             Err(e) => {
-                warn!("Schema {} override 合并后解析失败: {}", schema_id, e);
+                warn!("Schema default 不可序列化（{e}）；方案 {schema_id} 无法降级救回");
+                return None;
+            }
+        };
+        let wind_config::section_fallback::Patched { value, bad } =
+            wind_config::section_fallback::probe_and_patch::<Schema>(&merged, &default_v);
+        if bad.is_empty() {
+            warn!("Schema {schema_id} override 合并后解析失败且无法定位到具体段: {root_err}");
+            return None;
+        }
+        match value.try_into::<Schema>() {
+            Ok(mut s) => {
+                for (path, err) in &bad {
+                    // WARN 而非 INFO：这是**异常**不是正常降级，压成 INFO 会掩盖真实的
+                    // 值域收缩（改了枚举取值却没写迁移，会在这里悄悄「自愈」成出厂值）。
+                    warn!(
+                        "方案 {schema_id} 的 [{path}] 解析失败，已回落出厂默认值\
+                         （该项在本方案里本次不生效）；原始错误：{err}"
+                    );
+                }
+                s.degraded_items = bad
+                    .into_iter()
+                    .map(|(path, _)| format!("[{path}]"))
+                    .collect();
+                Some(s)
+            }
+            Err(e) => {
+                warn!(
+                    "Schema {schema_id} 段级降级后仍解析失败，方案不可用；\
+                     原始错误：{root_err}；回落后仍失败：{e}"
+                );
                 None
             }
         }
@@ -5933,6 +6107,71 @@ mod tests {
             merged.get("grave").map(String::as_str),
             Some("none"),
             "override 新增的禁用项加入"
+        );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let _ = std::fs::remove_dir_all(&ov_dir);
+    }
+
+    /// 用户 override 里写了值域外的值，**不许**让整个方案读不出来。
+    ///
+    /// 复现的是 2026-09-04 的真实事故：`schema_overrides/toli.toml` 里一行
+    /// `text_orientation = ""` 让 `read_schema` 返回 `None`，而它有约 30 个调用点
+    /// （方案名 / 类型 / 引擎构建 / behavior 全走它）⇒ 这个方案在系统里等于不存在，
+    /// 用户看到的是「完全没反应，也不报错」。
+    ///
+    /// 三条断言分别钉住修复的三个层次，**缺一条都会让回归悄悄溜过去**：
+    /// ① 方案还在；② 同段的其它设置没被连累；③ 降级被记下来了（toast 的数据源，
+    /// 没有它就退回「静默不生效」——只是比原来安静，同样查不出）。
+    #[test]
+    fn bad_enum_value_in_override_degrades_instead_of_killing_the_schema() {
+        use std::io::Write;
+        let base_dir = std::env::temp_dir().join("wind_eng_bad_enum_data");
+        let ov_dir = std::env::temp_dir().join("wind_eng_bad_enum_ov");
+        let schemas = base_dir.join("schemas");
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let _ = std::fs::remove_dir_all(&ov_dir);
+        std::fs::create_dir_all(&schemas).unwrap();
+        std::fs::create_dir_all(&ov_dir).unwrap();
+        let mut f = std::fs::File::create(schemas.join("toli.schema.toml")).unwrap();
+        write!(
+            f,
+            "[schema]
+id = \"toli\"
+name = \"托利\"
+[engine]
+type = \"codetable\"
+"
+        )
+        .unwrap();
+        drop(f);
+        // 用户的 override，逐字取自事故现场。
+        std::fs::write(
+            ov_dir.join("toli.toml"),
+            "[candidate]\nfont_family = \"Noto Sans Mongolian\"\ntext_orientation = \"\"\n",
+        )
+        .unwrap();
+
+        let schema = EngineManager::read_schema("toli", Some(&base_dir), Some(&ov_dir))
+            .expect("① 一个字段写错不许让整个方案读不出来");
+
+        assert_eq!(
+            schema.candidate.text_orientation,
+            wind_config::config::TextOrientation::Normal,
+            "写错的那一项回落出厂默认"
+        );
+        assert_eq!(
+            schema.candidate.font_family, "Noto Sans Mongolian",
+            "② 同段的其它设置不许被连累——这正是字段级容错优于段级降级的地方"
+        );
+        assert!(
+            !schema.degraded_items.is_empty(),
+            "③ 降级必须被记下来，否则 toast 无从弹起，用户仍然是「写了没反应」"
+        );
+        assert!(
+            schema.degraded_items.iter().any(|s| s.contains("\"\"")),
+            "记录里要带上用户写的原值，他才搜得到自己文件里的哪一行：{:?}",
+            schema.degraded_items
         );
 
         let _ = std::fs::remove_dir_all(&base_dir);

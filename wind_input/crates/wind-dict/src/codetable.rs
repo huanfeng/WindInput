@@ -686,7 +686,8 @@ impl CodetableDict {
         results
     }
 
-    /// 前缀查找，只保留音节数不超过 `max_syllables` 的条目（内存路径对应
+    /// 前缀查找，只保留音节数不超过 `max_syllables` **且在 `completed_len` 处音节边界对齐**
+    /// 的条目（内存路径对应
     /// [`crate::datformat::WdatReader::search_prefix_syllable_capped`]，理由见那里）。
     ///
     /// ⚠️ **过滤必须在 `limit * 2` 提前中断之前施加**，否则那道中断会被不合格条目填满、
@@ -697,6 +698,7 @@ impl CodetableDict {
         prefix: &str,
         limit: usize,
         max_syllables: u32,
+        completed_len: usize,
     ) -> Vec<crate::cached::DictHit> {
         let mut results: Vec<crate::cached::DictHit> = Vec::new();
         for (code, entries) in self.entries.range(prefix.to_string()..) {
@@ -704,7 +706,12 @@ impl CodetableDict {
                 break;
             }
             for e in entries {
-                if !crate::cached::prefix_syllable_keep(e.boundary, max_syllables) {
+                if !crate::cached::prefix_entry_keep(
+                    e.boundary,
+                    code.len(),
+                    max_syllables,
+                    completed_len,
+                ) {
                     continue;
                 }
                 results.push(crate::cached::DictHit {

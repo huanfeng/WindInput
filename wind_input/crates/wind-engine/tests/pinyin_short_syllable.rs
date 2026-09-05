@@ -176,10 +176,22 @@ fn syllable_count_comes_from_input_not_candidate_segmentation() {
     }
     // 反向对照：同样这些词，在**输入真的够 2 个音节**时必须回来。
     //
-    // ⚠️ 取数放大到 2000：`yingu` 下「因果」是前缀补全（`is_prefix=true`），按层级排在
-    // 全部精确匹配之后，而 `yin` 的同音字有 272 条挡在前面 —— 实测它在第 311 位。
-    // 取 300 会误判成「没产出」，那是**名次问题不是产出问题**，本条只钉产出。
-    for (input, want) in [("xian", "西安"), ("yingu", "因果"), ("xiah", "下滑")] {
+    // ⚠️ 取数放大到 2000：这类候选按层级排在全部精确匹配之后，而 `yin` 的同音字有 272 条
+    // 挡在前面。取 300 会误判成「没产出」，那是**名次问题不是产出问题**，本条只钉产出。
+    //
+    // ⚠️ **2026-09-04：`yingu` 换成 `yinguo`**（音节边界对齐上线）。`yingu` 的 DAG 切分是
+    // `yin|gu`，而 `gu` 本身是合法音节 —— 放「因果」(`yin|guo`) 出来就等于允许把已打完的
+    // 音节继续拉长，那正是「打 `shen` 出 `sheng` 的字」的同一条通道，两者在音节结构上完全
+    // 同形、不可能只挡一个（主流拼音输入法取的也都是严格档）。见
+    // `wind_dict::cached::prefix_syllable_aligned` 与
+    // `wind-coordinator/tests/pinyin_syllable_alignment.rs`。
+    //
+    // ★ 由此还有一条推论，解释了这里为什么剩下的两个样本一个是精确、一个是残码：
+    //   出厂 `min_syllables = 4` 下，**整音节**输入（started < 4）不再存在跨音节的前缀补全
+    //   —— cap 把候选音节数压到 ≤ started，对齐判据又要求候选在 `completed_len` 处开新音节，
+    //   两者合起来只剩「候选码 == 输入」即精确匹配。「补全仍可达」这一半由 `xiah`（残码位
+    //   补全，判据位落在残码之前）承载。
+    for (input, want) in [("xian", "西安"), ("yinguo", "因果"), ("xiah", "下滑")] {
         let t = texts(&mgr, input, 2000);
         assert!(
             t.iter().any(|x| x == want),

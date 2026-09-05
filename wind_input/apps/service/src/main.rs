@@ -429,6 +429,14 @@ fn main() {
     // 不提示的话他的设置照样失效，只是这次文件还在盘上。
     coord_for_restart_toast.notify_config_syntax_error();
 
+    // 当前方案有段被降级（方案文件 / schema_overrides 里某项写错了值）⇒ 同样提示一次。
+    // 与上面那条是两类故障：那条是**语法**读不完，这条是语法合法但**值不在取值范围内**，
+    // 后者会静默回落出厂值——不说的话用户只会看到「我写的设置没生效」。
+    {
+        let active = coord_for_restart_toast.active_schema_id();
+        coord_for_restart_toast.notify_schema_degradation(&active);
+    }
+
     // 10. 阻塞主线程，直到菜单触发"重启服务"
     //
     // macOS 例外：主线程改跑 CFRunLoop。Carbon 全局热键的事件只投递到**主线程**的

@@ -1307,10 +1307,12 @@ impl Coordinator {
         if cc.is_empty() {
             return;
         }
+        // 字符类 registry 同理，循环外取一次。
+        let cs = self.engine_mgr.charsets();
         for c in candidates.iter_mut() {
             // 短语保留（is_phrase 已置位）；其余按常用字表判定
             if !c.is_phrase {
-                c.is_common = cc.is_string_common(&c.text);
+                c.is_common = cc.is_string_common(&c.text, &cs);
                 // 用户亲手降级的字要与「出厂就没收录」分开记：智能档的孤儿码位保底
                 // 对前者不适用（见 `Candidate::user_rare`）。
                 c.user_rare = cc.has_user_rare(&c.text);

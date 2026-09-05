@@ -191,11 +191,6 @@ impl Coordinator {
         }
     }
 
-    /// 生僻字模式额外纳入的区块（`input.rare_char.include_blocks` 的解析结果）。
-    fn rare_char_blocks(&self) -> wind_candidate::BlockMask {
-        self.rt().rare_char_blocks
-    }
-
     /// 交给引擎的生僻字准入闭包（仅生僻字模式；其余模式返回 `None` = 不筛）。
     ///
     /// 与 [`Self::retain_rare_admitted`] **同一个判据**（都走 `wind_candidate::rare_admits`），
@@ -220,10 +215,12 @@ impl Coordinator {
         // Arc 克隆而非借用：`ConvertOptions::admit` 要求 `'static`（它可能被引擎存进
         // 局部闭包里传递）。克隆的是 Arc 本身，表数据不复制。
         let cc = self.common_chars.clone();
-        let extra = self.rare_char_blocks();
+        // registry 同样按 Arc 克隆进闭包。这是**进入模式那一刻的快照**——与原先从
+        // `rt()` 取 `BlockMask` 的语义一致（本函数每次进入生僻模式调一次）。
+        let extra = self.engine_mgr.charsets();
         Some(std::sync::Arc::new(move |text: &str| {
             let g = cc.read().unwrap_or_else(|e| e.into_inner());
-            wind_candidate::rare_admits(text, &g, extra)
+            wind_candidate::rare_admits(text, &g, &extra)
         }))
     }
 
@@ -342,10 +339,13 @@ impl Coordinator {
         if cc.is_empty() {
             return;
         }
-        // 额外纳入的区块（`input.rare_char.include_blocks`）。解析结果取自 `rt()` 的镜像，
-        // 与词频那份一样在装载期算好——本函数在每次按键的候选刷新路径上。
-        let extra = self.rare_char_blocks();
-        candidates.retain(|c| wind_candidate::rare_admits(&c.text, &cc, extra));
+        // 字符类 registry：`input.rare_char.include_blocks` 点名的类在装配期就打好了
+        // `in_rare` 标记（`charset_assembly::ExternalRefs`），这里只是取那一份。
+        //
+        // ★ 在 `retain` **之外**取一次：本函数在每次按键的候选刷新路径上，逐候选去拿
+        // 就是逐候选一次加锁。同 `freq_settings` 里 `english_code_by_input` 那条。
+        let extra = self.engine_mgr.charsets();
+        candidates.retain(|c| wind_candidate::rare_admits(&c.text, &cc, &extra));
     }
 
     /// 退出特殊模式并清空相关状态（码表缓存保留供复用）。
@@ -976,13 +976,17 @@ mod tests {
         /// 本仓的经典失效形态是「配置四层就位、消费点却在不可达的调用点上」——开关配了
         /// 毫无反应，且没有任何报错。这条测试从**配置**出发一路走到**候选列表**，
         /// 中间任何一环断掉都会红：
-        /// `input.rare_char.include_blocks` → ConfigBundle 预解析 → `rare_char_blocks()`
-        /// → `rare_admits` 的 extra 参数。
+        /// `input.rare_char.include_blocks` → `charset_assembly` 装配期打 `in_rare` 标记
+        /// → `EngineManager::charsets()` → `rare_admits` 的 extra 参数。
         #[test]
         fn include_blocks_config_reaches_the_verdict() {
             let mut cfg = Config::default();
             cfg.input.rare_char.include_blocks = vec!["emoji".to_string()];
-            let c = Coordinator::new_headless(cfg, None);
+            // ★ `emoji` 不是内置区块组，它的成员来自出厂 charsets/emoji.yaml。
+            // 不给 data_dir 的话这个名字解析不出来，测试会以「配置没生效」的形态失败
+            // ——与真实故障同形，看不出根因是夹具缺文件。
+            let dir = crate::charset_test_support::charsets_only_data_dir("rare_include");
+            let c = Coordinator::new_headless(cfg, Some(&dir));
             // 常用字表必须非空，否则 `retain_rare_admitted` 走「表未加载」那条早退。
             set_common(&c, ['我', '你', '好']);
 
@@ -996,6 +1000,41 @@ mod tests {
             c.retain_rare_admitted(&mut cands);
             let got: Vec<&str> = cands.iter().map(|c| c.text.as_str()).collect();
             assert_eq!(got, vec!["龘", "😀"], "配置未生效或判据接错");
+        }
+
+        /// ★★ 改 `input.rare_char.include_blocks` **不必切方案**就生效。
+        ///
+        /// 它在 input 段，改它不会把 `schema_dirty` 标脏。registry 若只在
+        /// `reload_from_config`（受 schema_dirty 门控）里重装，用户改完毫无反应、要切一次
+        /// 方案或重启才生效——本仓反复出现的「运行时镜像态没回灌」那类缺陷，且全程无报错。
+        ///
+        /// 本条从「改配置」出发直接看候选列表，中间那一步（`rebuild_charsets` 挂在无条件
+        /// 重建 ConfigBundle 的路径上）断掉就会红。
+        #[test]
+        fn include_blocks_takes_effect_without_a_schema_change() {
+            let dir = crate::charset_test_support::charsets_only_data_dir("rare_hot");
+            let c = Coordinator::new_headless(Config::default(), Some(&dir));
+            set_common(&c, ['我']);
+
+            let mut before = vec![cand("😀")];
+            c.retain_rare_admitted(&mut before);
+            assert!(
+                before.is_empty(),
+                "没配之前 emoji 不该进（否则本条测不出东西）"
+            );
+
+            // 只动 input 段——schema 不脏。
+            c.refresh_config_in_memory(|cfg| {
+                cfg.input.rare_char.include_blocks = vec!["emoji".to_string()];
+            });
+
+            let mut after = vec![cand("😀")];
+            c.retain_rare_admitted(&mut after);
+            assert_eq!(
+                after.len(),
+                1,
+                "改完 include_blocks 应当立即生效，不必切方案"
+            );
         }
 
         /// 不配 include_blocks 时 emoji 进不来（与上一条互为对照，锁住「是配置起的作用」）。
@@ -1067,6 +1106,13 @@ mod tests {
                 eprintln!("跳过 {tag}：五笔词库不存在（build_dev/data 缺失）");
                 return None;
             }
+            // ⚠️ charsets/ 缺失时**常用性判定整个不生效**（无人表态 ⇒ 一切兜底判常用）
+            // ⇒ 生僻字模式一条候选都留不下，测试会以「过滤写错了」的形态失败。
+            // 它是构建产物的一部分（`Copy-Item data -Recurse`），过时的 build_dev 才会缺。
+            assert!(
+                d.join("charsets").is_dir(),
+                "build_dev/data/charsets 缺失（构建产物过时），重跑一次数据组装"
+            );
             let mut cfg = Config::default();
             cfg.schema.active = "wubi86".into();
             cfg.schema.available = vec!["wubi86".into()];
@@ -1135,6 +1181,13 @@ mod tests {
                 eprintln!("跳过 {tag}：拼音词库不存在（build_dev/data 缺失）");
                 return None;
             }
+            // ⚠️ charsets/ 缺失时**常用性判定整个不生效**（无人表态 ⇒ 一切兜底判常用）
+            // ⇒ 生僻字模式一条候选都留不下，测试会以「过滤写错了」的形态失败。
+            // 它是构建产物的一部分（`Copy-Item data -Recurse`），过时的 build_dev 才会缺。
+            assert!(
+                d.join("charsets").is_dir(),
+                "build_dev/data/charsets 缺失（构建产物过时），重跑一次数据组装"
+            );
             let mut cfg = Config::default();
             cfg.schema.active = "pinyin".into();
             cfg.schema.available = vec!["pinyin".into()];
@@ -1254,13 +1307,14 @@ mod tests {
             assert!(!got.is_empty(), "一级简码下不该一个候选都没有");
 
             let cc = c.common_chars.read().unwrap();
+            let cs = c.engine_mgr.charsets();
             for t in &got {
                 assert!(
                     wind_candidate::single_markable_char(t).is_some(),
                     "「{t}」不是单字——严格只出单字这条没生效"
                 );
                 assert!(
-                    !cc.is_string_common(t),
+                    !cc.is_string_common(t, &cs),
                     "「{t}」是常用字，不该出现在生僻字模式"
                 );
             }
@@ -1310,8 +1364,45 @@ mod tests {
 
         /// 装一份最小常用字表。`retain_rare_admitted` 对空表整条早退（见那条测试），
         /// 故凡要验过滤结果的用例都得先装表。
-        fn set_common(c: &Coordinator, chars: impl IntoIterator<Item = char>) {
-            *c.common_chars.write().unwrap() = wind_candidate::CommonChars::from_base(chars);
+        /// 灌出厂字表。
+        ///
+        /// ⚠️ **必须同时装配配套的 registry**：判定已经归 `CharsetRegistry`（`common_han`
+        /// 类给出「是汉字却不在名单里 ⇒ 生僻」），只灌 `CommonChars` 的话没有人表态，
+        /// 所有字兜底判常用——生僻字模式会一条候选都留不下，而看起来像是过滤写错了。
+        ///
+        /// 生产路径上两者同源：`CommonChars::load` 读 `schemas/common_chars.txt`，
+        /// registry 里 `common_han` 的 `file:` 指的也是那一个文件。
+        fn set_common(c: &Coordinator, chars: impl IntoIterator<Item = char> + Clone) {
+            *c.common_chars.write().unwrap() =
+                wind_candidate::CommonChars::from_base(chars.clone());
+            // ⚠️ **合并而不是整份替换**：registry 里还有装配好的 emoji 类、50 个内置区块，
+            // 以及 `include_blocks` 打上的 `in_rare` 标记。整份换掉会把它们一并抹了
+            // ——表现为「配了 include_blocks 却不生效」，而根因在夹具。
+            let mut specs: Vec<wind_candidate::ClassSpec> = c
+                .engine_mgr
+                .charsets()
+                .classes()
+                .iter()
+                .filter(|s| s.key != "common_han")
+                .cloned()
+                .collect();
+            specs.push(common_han_spec(chars));
+            let (reg, dropped) = wind_candidate::CharsetRegistry::compile(specs);
+            assert!(dropped.is_empty());
+            c.engine_mgr.set_charsets(std::sync::Arc::new(reg));
+        }
+
+        /// 出厂 `common_han` 类的形态：作用域 = 汉字域、名单 = 这些字、名单外生僻。
+        fn common_han_spec(chars: impl IntoIterator<Item = char>) -> wind_candidate::ClassSpec {
+            wind_candidate::ClassSpec {
+                key: "common_han".into(),
+                members: chars.into_iter().map(|c| c.to_string()).collect(),
+                scope: Some(wind_candidate::Scope::Han),
+                default_common: Some(true),
+                outside_common: Some(false),
+                order: 50,
+                ..Default::default()
+            }
         }
 
         fn cand(text: &str) -> wind_candidate::Candidate {

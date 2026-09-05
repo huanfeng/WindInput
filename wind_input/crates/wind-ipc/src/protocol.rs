@@ -604,6 +604,30 @@ impl CaretPayload {
         }
     }
 
+    /// 整个组合 range 的包围矩形 `(left, top, right, bottom)`，v3（40 字节）载荷才有。
+    ///
+    /// ★ 它与 `composition_start_*` 的区别只有「折不折叠」，答的却是两个不同的问题：
+    /// 后者答「组合从哪开始」，本字段答「组合占了多大一块」。组合一旦换行，两者分处
+    /// 不同行——**只有本字段能看出跨行发生了**。没有它时协调器只能拿两个孤立点的像素
+    /// 距离跟「3 倍行高」比大小来猜，而行高本身在宿主间、甚至同一宿主的首行与次行之间
+    /// 都会变（记事本实测 74/42），阈值随之在 126/222 之间跳，换行能否被跟上全看运气。
+    ///
+    /// 返回 `None` 表示本帧没有组合矩形：旧 DLL / macOS 短包，或宿主 `GetTextExt` 取不到
+    /// （含 `TS_E_NOLAYOUT`——那是「布局还没算完」，不是「不支持」）。四值全 0 同样按
+    /// `None` 处理，它是 DLL 侧「未取到」的编码。
+    pub fn comp_rect_from_bytes(buf: &[u8]) -> Option<(i32, i32, i32, i32)> {
+        if buf.len() < 40 {
+            return None;
+        }
+        let v = |o: usize| i32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
+        let rect = (v(24), v(28), v(32), v(36));
+        if rect == (0, 0, 0, 0) {
+            None
+        } else {
+            Some(rect)
+        }
+    }
+
     pub fn from_bytes(buf: &[u8]) -> Option<Self> {
         if buf.len() < Self::SIZE {
             return None;

@@ -5,6 +5,24 @@
 use wind_candidate::CommonChars;
 
 /// 逐字符逐串对照：加入一条多码位覆盖（打开闸门）后，**其余字符的判定一个都不能变**。
+/// 与 `CommonChars::from_base` 配套的 registry：出厂 `common_han` 类的形态。
+///
+/// 集成测试看不见 crate 内部的测试 helper，故这里另写一份——两处必须同形，
+/// 否则同一批字在单测与集成测试里会得到不同的默认判定。
+fn han_class(chars: impl IntoIterator<Item = char>) -> wind_candidate::CharsetRegistry {
+    let (reg, dropped) =
+        wind_candidate::CharsetRegistry::compile(vec![wind_candidate::ClassSpec {
+            key: "common_han".into(),
+            members: chars.into_iter().map(|c| c.to_string()).collect(),
+            scope: Some(wind_candidate::Scope::Han),
+            default_common: Some(true),
+            outside_common: Some(false),
+            ..Default::default()
+        }]);
+    assert!(dropped.is_empty());
+    reg
+}
+
 #[test]
 fn opening_the_gate_does_not_change_any_other_verdict() {
     let base: Vec<char> = "我的东西输入法一二三".chars().collect();
@@ -45,6 +63,9 @@ fn opening_the_gate_does_not_change_any_other_verdict() {
         "球赛\u{26BD}\u{FE0F}开始",
     ];
 
+    // 两份 CommonChars 只在「闸门开没开」上不同，判定用的 registry 是同一份
+    // ——本测试要证的正是「开闸不改变任何别的判定」，registry 若也跟着变就测不出东西。
+    let cs = han_class(base.iter().copied());
     let mut closed = CommonChars::from_base(base.clone());
     closed.set_overrides([
         ("鬱".to_string(), true),
@@ -66,8 +87,8 @@ fn opening_the_gate_does_not_change_any_other_verdict() {
 
     for p in probes {
         assert_eq!(
-            closed.is_string_common(p),
-            open.is_string_common(p),
+            closed.is_string_common(p, &cs),
+            open.is_string_common(p, &cs),
             "{p:?} 的判定不该因为「别处登记了一条 emoji」而改变"
         );
         assert_eq!(
@@ -79,29 +100,30 @@ fn opening_the_gate_does_not_change_any_other_verdict() {
 
     // 而只在 open 里登记的那条 ZWJ 序列，本就该只在 open 生效。
     let family = "\u{1F468}\u{200D}\u{1F469}";
-    assert!(closed.is_string_common(family), "没登记时照旧放行");
-    assert!(!open.is_string_common(family), "登记后必须判非常用");
+    assert!(closed.is_string_common(family, &cs), "没登记时照旧放行");
+    assert!(!open.is_string_common(family, &cs), "登记后必须判非常用");
 }
 
 /// 闸门开着时，**单码位字符**的判定仍与逐 char 路径一致——包括混在长句里的。
 #[test]
 fn gate_open_still_matches_char_path_on_plain_text() {
     let base: Vec<char> = "常用字表".chars().collect();
+    let cs = han_class(base.iter().copied());
     let mut cc = CommonChars::from_base(base);
     cc.set_overrides([
         ("字".to_string(), false),
         ("\u{1F468}\u{200D}\u{1F469}".to_string(), false),
     ]);
     // 「字」被降级 ⇒ 含它的串一律非常用；不含它的照旧。
-    assert!(!cc.is_string_common("字"));
-    assert!(!cc.is_string_common("常用字表"));
-    assert!(cc.is_string_common("常用"));
-    assert!(cc.is_string_common("表"));
+    assert!(!cc.is_string_common("字", &cs));
+    assert!(!cc.is_string_common("常用字表", &cs));
+    assert!(cc.is_string_common("常用", &cs));
+    assert!(cc.is_string_common("表", &cs));
     // 单字判与串判一致（闸门开着也不能分叉）。
     for ch in "常用字表".chars() {
         assert_eq!(
-            cc.is_char_common(ch),
-            cc.is_string_common(&ch.to_string()),
+            cc.is_char_common(ch, &cs),
+            cc.is_string_common(&ch.to_string(), &cs),
             "{ch} 按字判与按串判分叉了"
         );
     }

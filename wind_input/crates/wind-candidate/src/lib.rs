@@ -5,6 +5,7 @@
 pub mod candidate;
 pub mod charblock;
 pub mod charclass;
+pub mod charset_registry;
 pub mod common;
 pub mod filter;
 pub mod shadow;
@@ -13,6 +14,7 @@ pub mod store;
 pub use candidate::*;
 pub use charblock::*;
 pub use charclass::*;
+pub use charset_registry::*;
 pub use common::*;
 pub use filter::*;
 pub use shadow::*;

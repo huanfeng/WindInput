@@ -265,79 +265,6 @@ fn collect_leaf_paths(v: &toml::Value, prefix: &mut Vec<String>, out: &mut Vec<V
     }
 }
 
-/// 段级降级的**单次探针**：把 `value` 贴到全默认骨架 `default_v` 的 `path` 处再整体
-/// 反序列化。失败即说明毒在这条路径底下，返回该路径**自己的**错误文本。
-///
-/// 骨架用默认值而不是用户值，是这套机制正确性的来源：其余部分恒定合法，于是失败只可能
-/// 来自贴上去的那一段，判定互不干扰。
-fn probe_section(default_v: &toml::Value, path: &[&str], value: &toml::Value) -> Option<String> {
-    let mut probe = default_v.clone();
-    let (last, parents) = path.split_last()?;
-    let mut cur = &mut probe;
-    for seg in parents {
-        // 骨架里没有这条路径 = 未登记键。serde 会忽略它，探不出毒，也不该降级任何东西。
-        cur = cur.get_mut(*seg)?;
-    }
-    cur.as_table_mut()?
-        .insert((*last).to_string(), value.clone());
-    probe.try_into::<Config>().err().map(|e| e.to_string())
-}
-
-/// 对**已判定为坏**的顶层段再探一层：逐个直接子键做探针，返回 `(段.子键, 该子键的错误)`。
-///
-/// 返回空表示无法细化（该段在用户值或默认值里不是表、或毒不在任何单个子键上），调用方
-/// 退回整段降级。**只探这一层**，不再往下递归。
-fn narrow_bad_section(
-    default_v: &toml::Value,
-    section: &str,
-    section_value: &toml::Value,
-) -> Vec<(String, String)> {
-    let (Some(sub), Some(_)) = (
-        section_value.as_table(),
-        default_v.get(section).and_then(|v| v.as_table()),
-    ) else {
-        return Vec::new();
-    };
-    sub.iter()
-        .filter_map(|(key, value)| {
-            probe_section(default_v, &[section, key], value)
-                .map(|err| (format!("{section}.{key}"), err))
-        })
-        .collect()
-}
-
-/// 把 `root` 里 `path`（点分）处的值换成 `default_v` 同路径的默认值；默认值里没有则删除。
-///
-/// 删除而非保留：路径在默认值里不存在意味着它不是配置键，而它又被探针判成了毒——
-/// 带进最终值只会让 `try_into` 再失败一次。
-fn reset_path_to_default(root: &mut toml::Value, default_v: &toml::Value, path: &str) {
-    let segs: Vec<&str> = path.split('.').collect();
-    let Some((last, parents)) = segs.split_last() else {
-        return;
-    };
-    let mut cur = root;
-    for seg in parents {
-        let Some(next) = cur.get_mut(*seg) else {
-            return;
-        };
-        cur = next;
-    }
-    let Some(table) = cur.as_table_mut() else {
-        return;
-    };
-    let mut def = default_v;
-    for seg in &segs {
-        match def.get(*seg) {
-            Some(v) => def = v,
-            None => {
-                table.remove(*last);
-                return;
-            }
-        }
-    }
-    table.insert((*last).to_string(), def.clone());
-}
-
 /// 某一层配置文件**没能按 TOML 语法读完**的记录（见 [`parse_toml_lenient`]）。
 ///
 /// 与 [`ConfigDegradation::sections`] 是**两类不同的故障**，不要混为一谈：
@@ -850,7 +777,8 @@ impl Default for SchemaConfig {
 pub struct FrequencyGlobal {
     /// 这些 Unicode 区块的候选**不参与词频**：既不记录选中（不学习），也不受已有记录影响
     /// （不重排）。取值为区块名（`"表情符号"`）或预设组名（`"emoji"`），
-    /// 解析见 `wind_candidate::BlockMask::from_config`。
+    /// 取值是**字符类的 key**：区块名、`"其它"`、`"符号"` 或 `"emoji"`。
+    /// 解析与告警见 `wind_engine::charset_assembly`（装配期打 `no_freq` 标记）。
     ///
     /// 出厂**为空**（＝行为与改动前完全一致）。诉求来自「emoji 在正常输入时不要参与词频
     /// 调整」：emoji 多是一次性的点缀，被它顶到前面会把常用字挤下去，而用户下次多半又想
@@ -2480,7 +2408,7 @@ pub struct MixModeConfig {
     /// 进入本 mix 期间的候选布局（默认跟随全局）。每实例独立——两个融合模式可以
     /// 一个竖排一个横排。旧的 `schema.quick_input.force_vertical` 已迁移到这里
     /// （它本就是 quick_mix 这个实例的属性，却被存在了与实例无关的全局段里）。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
     /// 本 mix 期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2492,7 +2420,7 @@ pub struct MixModeConfig {
     ///
     /// 每实例独立：一个只做日期/计算的 mix 可以关掉它，保住「打完拼音按逗号顶屏出
     /// 中文标点」；专做字面输入的实例则设 `Always`。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub free_input: FreeInputMode,
     /// 自由输入是否**夺取二三候选键**（`keys.select_key_groups` 的键，默认 `;` `'`）
     /// 作字面输入。默认开；`free_input = "off"` 时本项无意义。
@@ -2916,7 +2844,7 @@ pub struct InputConfig {
     #[serde(default)]
     pub phrase: PhraseConfig,
     /// 顶码上屏策略（内部/实验，默认 direct_commit 真提交时序，躲开 diff 合并与整段下划线）。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub top_commit_mode: TopCommitMode,
     /// 联想（上屏后按上文推荐下一个词/标点）。默认关。
     #[serde(default)]
@@ -3040,7 +2968,7 @@ pub struct SymbolConfig {
     pub smart_chars: String,
     /// 替换方案：`delete_replace`（删改，默认）或 `hold_composition`（保持组合态，兼容性更好）。
     /// 三种上下文共用。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub smart_method: SmartMethod,
     /// 英文标点状态（中文输入模式 + 工具栏标点切英文）下的智能符号（默认 false）。
     #[serde(default)]
@@ -3199,7 +3127,7 @@ pub struct TempEnglishConfig {
     pub space_as_input: bool,
     /// 进入临时英文期间的候选布局（默认跟随全局）。
     /// 典型用法是设 `horizontal`——英文候选一行放得下，全局竖排时反而占屏。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
     /// 临英期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
     /// 典型用法 `"${dict}"`——只在打英文时显示挂载的英汉释义，中文输入不受影响。
@@ -3304,7 +3232,7 @@ pub struct TempPinyinConfig {
     #[serde(default)]
     pub hotkey: String,
     /// 进入临时拼音期间的候选布局（默认跟随全局）。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
     /// 临拼期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
     /// 反查场景的典型用法是设 `"${code}"` 只留编码，或设 `""` 什么都不显示。
@@ -3342,7 +3270,7 @@ pub struct UrlConfig {
     #[serde(default = "default_url_prefixes")]
     pub prefixes: Vec<String>,
     /// 进入网址模式期间的候选布局（默认跟随全局）。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
     /// 网址模式期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3381,7 +3309,10 @@ pub struct AddWordConfig {
     /// 加词面板期间的候选布局。默认竖排——逐字确认的面板竖排更易读。
     /// 此前是**无条件硬编码**强制竖排、连开关都没有；本项只是给它一个出口，
     /// 默认值保持原行为不变。
-    #[serde(default = "default_add_word_layout")]
+    #[serde(
+        default = "default_add_word_layout",
+        deserialize_with = "crate::tolerant_de::tolerant"
+    )]
     pub candidate_layout: LayoutIntent,
 }
 
@@ -5586,33 +5517,12 @@ impl Config {
             }
         };
 
-        // (点分路径, **该路径自己的**反序列化错误)。
-        // ⚠️ 每条都必须带自己的错误：多段同时有毒时，整份 `try_into` 的 `root_err` 只讲得清
-        // 其中一个段，拿它给每一行 WARN 用会把排查的人直接带到无关的段上。
-        let mut bad: Vec<(String, String)> = Vec::new();
-        if let Some(sections) = merged.as_table() {
-            for (section, value) in sections {
-                let Some(section_err) = probe_section(&default_v, &[section], value) else {
-                    continue;
-                };
-                let narrowed = narrow_bad_section(&default_v, section, value);
-                if narrowed.is_empty() {
-                    bad.push((section.clone(), section_err));
-                } else {
-                    bad.extend(narrowed);
-                }
-            }
-        }
-        // 顶层不是表时上面一条都收不到，直接落到下面的整体回落分支。
-        //
-        // 显式排序而不是依赖 `toml::Table` 的遍历序：后者是否有序取决于 `preserve_order`
-        // 特性，而特性可能被任何一个传递依赖打开——那种翻车只在别人的依赖树里复现。
-        bad.sort();
-
-        let mut patched = merged;
-        for (path, _) in &bad {
-            reset_path_to_default(&mut patched, &default_v, path);
-        }
+        // 探毒与回落的实现共用 `section_fallback`（`schema_overrides/<id>.toml` 走同一套，
+        // 见该模块头部）。这里只保留 `Config` 特有的处置：WARN 文案与 `degradation` 落点。
+        let crate::section_fallback::Patched {
+            value: patched,
+            bad,
+        } = crate::section_fallback::probe_and_patch::<Config>(&merged, &default_v);
 
         match patched.try_into::<Config>() {
             Ok(mut config) if !bad.is_empty() => {
@@ -8936,7 +8846,8 @@ log_level = \"trace\"
     ///   left: "" / right: "section_fallback_probe"
     /// ```
     ///
-    /// **二、只摘掉子表细化、保留段级降级**——让 [`narrow_bad_section`] 恒返回空表。
+    /// **二、只摘掉子表细化、保留段级降级**——让
+    /// [`crate::section_fallback::narrow_bad_section`] 恒返回空表。
     /// 9 个用例红 5 个，红的正是粒度那几条：
     ///
     /// ```text
@@ -9319,8 +9230,10 @@ scripts = { latin = 42 }
         let default_v = toml::Value::try_from(Config::default()).unwrap();
         let sections = merged.as_table().unwrap();
 
-        let ui_err = narrow_bad_section(&default_v, "ui", sections.get("ui").unwrap());
-        let keys_err = narrow_bad_section(&default_v, "keys", sections.get("keys").unwrap());
+        use crate::section_fallback::narrow_bad_section;
+        let ui_err = narrow_bad_section::<Config>(&default_v, "ui", sections.get("ui").unwrap());
+        let keys_err =
+            narrow_bad_section::<Config>(&default_v, "keys", sections.get("keys").unwrap());
 
         assert_eq!(ui_err.len(), 1);
         assert_eq!(keys_err.len(), 1);

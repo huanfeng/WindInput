@@ -31,6 +31,8 @@ name = "gen_aux_code"
 path = "src/bin/gen_aux_code.rs"
 
 [dependencies]
+# gen_block_charsets 直接读区块表生成 charsets/blocks.yaml——两份数据因此同源。
+wind-candidate = { path = "../../crates/wind-candidate" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }

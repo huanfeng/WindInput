@@ -4,6 +4,8 @@
 //! 定位 / 光标获取等兼容修正。文件格式为 TOML 的 `[[apps]]` 数组表，加载顺序：
 //! 系统预置（`{data_dir}/compat.toml`）→ 定制版（`data_custom/compat.toml`）→
 //! 用户覆盖（`{user_config_dir}/compat.toml`），靠后层的同进程名规则整条覆盖靠前层。
+//! 唯一例外是宿主协议级的 `composition_start_pair_guard`：后层未写时继承，
+//! 显式 `false` 才关闭，避免菜单生成的稀疏规则无意抹掉已知宿主修复。
 
 use crate::config::SmartMethod;
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,7 @@ const USER_COMPAT_HEADER: &str = "\
 #   手写的注释与排版不会保留。需要长期留存的说明请写在系统层 compat.toml。
 #
 # 合并语义：同名进程（不区分大小写）整条覆盖系统层，系统层其余规则保留。
+# 例外：composition_start_pair_guard 未写时继承系统层，显式 false 才关闭。
 # 字段说明见系统层 data/compat.toml 顶部注释。
 
 ";
@@ -191,6 +194,43 @@ pub struct AppCompatRule {
     /// 按宿主处理——与隔壁 `caret_use_top`（同样为微信而加）同一个理由。
     #[serde(default, skip_serializing_if = "is_false")]
     pub stale_probe_guard: bool,
+    /// 把连续的 `TSF_COMPOSITION`（selection 无效、以组合起点降级）→ `TSF_SELECTION`
+    /// 识别为同一次布局采样的两阶段结果，禁止后半帧把当前 caret 误重锁成组合起点。
+    ///
+    /// QQNT 实测：长组合里 reported compStart 始终稳定，但同一按键后的两帧 caret 会在
+    /// 组合起点与当前插入点之间跳变。两点距离超过大偏移阈值后，通用重锁逃生阀会把
+    /// `composition_start` 改成组合末端，下一次降级帧又改回起点，形成左右闪烁。
+    ///
+    /// ⚠ **必须逐宿主开启，不能全局信任非零 compStart**：其它宿主已有 compStart 陈旧、
+    /// logical/physical 坐标系混用的实测历史；全局改成“有 compStart 就以它为准”会关闭
+    /// 原有 caret 大偏移自愈，甚至把候选窗重锁到异常坐标。协调器还会核对来源顺序、
+    /// 前帧降级点、reported compStart 与当前锁四者一致，单独一个非零值不构成放行理由。
+    ///
+    /// **必须是 `Option<bool>`**：这是宿主协议级修正，不是一般用户偏好。用户可能已经
+    /// 通过菜单给 `QQ.exe` 写了只含 `first_show_mode` 的稀疏规则；若用 bool 的缺省
+    /// `false` 做整条覆盖，升级后会静默屏蔽系统层新增的 QQ 修复。`None` 表示继承
+    /// 低层，`Some(false)` 仍保留显式关闭的逃生口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition_start_pair_guard: Option<bool>,
+    /// 宿主报的组合起点跟着插入点漂移时，把候选窗锚点**钉在首帧起点**而不是让大偏移
+    /// 逃生阀跟着走；`None` / `Some(false)` = 不干预，逃生阀照常。
+    ///
+    /// 判据在协调器侧：宿主给出的组合矩形若退化成插入点（`left >= caret.x`，宽度只有
+    /// 光标那么宽），说明它给不出组合范围、报的起点就是插入点本身。
+    ///
+    /// ⚠ **必须逐宿主开启——这一条上不同宿主的期望行为是相反的，而数据完全相同**：
+    /// - WPS 文字（`wps.exe`）实测 compStart 每帧与 caret 同步递增，打字时 caret 持续
+    ///   偏离已锁锚点，逃生阀被这份漂移数据一路骗着重锁：
+    ///   `(1830,861) → (1615,903) → (2591,861)`，把锚点从真实起点 1830 推到 2591。
+    ///   而删除是**逐字**的、每步 15~30px，永远够不到 3 倍行高的阈值——锚点永久卡住，
+    ///   候选窗离组合区 868px。这类宿主需要钉住。
+    /// - Excel / WPS 表格（`et.exe`）矩形形态**一模一样**（w=1~2、起点等于插入点），
+    ///   但它们每输入一个字就换一次 docMgr、候选窗本就该跟着单元格走，靠的正是逃生阀
+    ///   把锚点推过去。给它们钉住反而是回归（2026-09-05 实测确认）。
+    ///
+    /// ⇒ 数据分不出两者，只能按宿主声明。**不要试图改成全局判据**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_anchor_when_start_drifts: Option<bool>,
     /// 候选窗首显策略；`None` = 不干预，跟随全局 `ui.candidate.first_show_mode`。
     ///
     /// 三档互斥——做成枚举而不是几个 bool：布尔开关可以同时打开，实测就因此出过一次
@@ -257,7 +297,11 @@ pub struct AppCompatRule {
     /// `DeleteReplace`（全局默认）依赖对宿主做删改，在 Tabby 一类终端上会出严重错误；
     /// `HoldComposition` 全程不做删改、兼容性更好。两者本就是现成的全局枚举，这里只是
     /// 让它可以按宿主覆盖。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::tolerant_de::tolerant_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub smart_method: Option<SmartMethod>,
     /// 光标坐标水平校正（dp，96dpi 基准逻辑像素，正=右）。
     ///
@@ -534,14 +578,19 @@ pub struct AppCompat {
 }
 
 /// 序列化中间体：承载 TOML 的两个顶层数组表，避免把 `lookup` 暴露给 TOML。
+///
+/// `pub(crate)` 而非模块私有，只为让 `value_domain_guard` 那条守门元测试够得着——
+/// 它要遍历本结构体的每个字符串字段逐个投毒，而集成测试只看得见 pub API。
+/// ⛔ 不要因此把它当成对外类型：`compat.toml` 的读写入口仍只有 `load_file` /
+/// `render_user_compat`。
 #[derive(Debug, Deserialize, Serialize, Default)]
-struct AppCompatFile {
+pub(crate) struct AppCompatFile {
     #[serde(default)]
-    apps: Vec<AppCompatRule>,
+    pub(crate) apps: Vec<AppCompatRule>,
     /// ⚠ 用户层 compat.toml 由右键菜单**整份重写**（`render_user_compat`），本字段
     /// 必须一并渲染回去，否则用户写的覆盖会在下一次菜单开关时被静默删掉。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    initial_mode_scope: Vec<InitialModeScopeRule>,
+    pub(crate) initial_mode_scope: Vec<InitialModeScopeRule>,
 }
 
 impl AppCompat {
@@ -681,9 +730,60 @@ fn load_file(path: &Path) -> Option<AppCompatFile> {
 
 /// 合并两组规则：user 中同名进程（不区分大小写）覆盖 base，其余 base 规则保留，
 /// 末尾追加全部 user 规则（与 Go `mergeCompatRules` 对齐）。
-fn merge_rules(base: Vec<AppCompatRule>, user: Vec<AppCompatRule>) -> Vec<AppCompatRule> {
+///
+/// 「宿主协议级」字段组：描述已确认的宿主 TSF 行为形态，与用户偏好无关。
+///
+/// 这些字段在 [`merge_rules`] 里享有**字段级继承**：后层同名进程的稀疏规则未写它们时，
+/// 从低层继承而不是被 `None` 整条覆盖。理由见 `merge_rules` 的文档。
+///
+/// ⚠ 新增此类字段时**必须同时在这里登记**，否则用户层已有的同名规则会把它整条吞掉——
+/// 表现是「日志里 matched=true 但开关恒为 false」，修复看似部署了实际从未生效。
+struct ProtocolFields {
+    composition_start_pair_guard: Option<bool>,
+    pin_anchor_when_start_drifts: Option<bool>,
+}
+
+impl ProtocolFields {
+    fn of(rule: &AppCompatRule) -> Self {
+        Self {
+            composition_start_pair_guard: rule.composition_start_pair_guard,
+            pin_anchor_when_start_drifts: rule.pin_anchor_when_start_drifts,
+        }
+    }
+
+    /// 把本组字段填进 `rule` 中仍为 `None` 的位置（显式 `Some(false)` 不被覆盖）。
+    fn inherit_into(&self, rule: &mut AppCompatRule) {
+        if rule.composition_start_pair_guard.is_none() {
+            rule.composition_start_pair_guard = self.composition_start_pair_guard;
+        }
+        if rule.pin_anchor_when_start_drifts.is_none() {
+            rule.pin_anchor_when_start_drifts = self.pin_anchor_when_start_drifts;
+        }
+    }
+}
+
+/// 字段级例外是一**组**「宿主协议级」字段（见 [`ProtocolFields`]）：它们描述已确认的
+/// 宿主 TSF 行为形态，不是用户偏好，后层稀疏规则未写时应继承低层；显式 `false` 仍可关闭。
+/// 若照其它字段用 `Default::default()` 的 `false` 整条覆盖，用户曾经从菜单写过的稀疏
+/// 规则会让新版出厂修复**永远无法生效**。
+///
+/// ⚠ 2026-09-05 实证：新增 `pin_anchor_when_start_drifts` 时只加了字段没加进本组，
+/// 用户层已有的 `wps.exe` / `winword.exe` 规则整条覆盖，日志里读到的恒是 `false`，
+/// 修复看起来部署了、实际从未生效，白测了一轮。
+/// ⇒ **新增任何「宿主协议级」字段，必须同时加进 [`ProtocolFields`]**，
+/// 元测试 `protocol_fields_cover_every_host_protocol_option` 会守住这条。
+fn merge_rules(base: Vec<AppCompatRule>, mut user: Vec<AppCompatRule>) -> Vec<AppCompatRule> {
     if user.is_empty() {
         return base;
+    }
+    let inherited: HashMap<String, ProtocolFields> = base
+        .iter()
+        .map(|r| (r.process.to_ascii_lowercase(), ProtocolFields::of(r)))
+        .collect();
+    for rule in &mut user {
+        if let Some(base_fields) = inherited.get(&rule.process.to_ascii_lowercase()) {
+            base_fields.inherit_into(rule);
+        }
     }
     let user_keys: std::collections::HashSet<String> = user
         .iter()
@@ -788,6 +888,10 @@ mod tests {
             [[apps]]
             process = "plain.exe"
             caret_use_top = true
+
+            [[apps]]
+            process = "QQ.exe"
+            composition_start_pair_guard = true
         "#;
         let compat = AppCompat::from_rules(toml::from_str::<AppCompatFile>(toml).unwrap().apps);
 
@@ -805,6 +909,9 @@ mod tests {
         assert_eq!(plain.auto_pair, None);
         assert_eq!(plain.smart_method, None);
         assert_eq!((plain.caret_offset_x, plain.caret_offset_y), (0, 0));
+
+        let qq = compat.get_rule("qq.exe").unwrap();
+        assert_eq!(qq.composition_start_pair_guard, Some(true));
     }
 
     /// 写回只落被触碰的字段，且 `None`/0 不进 TOML（`skip_serializing_if`）——
@@ -867,6 +974,7 @@ mod tests {
         let compat = AppCompat::from_rules(file.apps);
         let rule = compat.get_rule("foo.exe").unwrap();
         assert!(!rule.caret_use_top);
+        assert_eq!(rule.composition_start_pair_guard, None);
         // 缺字段 = 不干预（跟随全局），与 initial_mode 同语义。若它退化成 Some(默认档)，
         // 等于给所有未配置的应用都写死了一份 per-app 覆盖，用户改全局默认时全部失效。
         assert_eq!(rule.first_show_mode, None);
@@ -937,6 +1045,168 @@ mod tests {
         assert!(!merged.get_rule("Weixin.exe").unwrap().caret_use_top);
         // 合并后只剩一条（同进程去重）。
         assert_eq!(merged.apps.len(), 1);
+    }
+
+    /// ★★★ 守 [`ProtocolFields`] 的覆盖率：新增「宿主协议级」字段忘了登记，用户层已有的
+    /// 同名规则会把它整条吞掉——表现是「日志里 matched=true 但开关恒为 false」，修复看似
+    /// 部署了实际从未生效。
+    ///
+    /// 2026-09-05 真踩过一次：`pin_anchor_when_start_drifts` 只加了字段没进本组，用户层
+    /// 已有 `wps.exe` / `winword.exe` 规则，白测了一轮才从日志发现开关恒为 false。
+    ///
+    /// 判据取自源码而非类型系统：Rust 没有字段反射，而这类「漏一个」正是本测试要防的。
+    #[test]
+    fn protocol_fields_cover_every_host_protocol_option() {
+        let src = include_str!("app_compat.rs");
+
+        // `ProtocolFields` 结构体里登记了哪些字段
+        let start = src
+            .find("struct ProtocolFields {")
+            .expect("找不到 ProtocolFields 定义");
+        let body = &src[start..];
+        let end = body
+            .find(
+                "
+}",
+            )
+            .expect("找不到 ProtocolFields 结尾");
+        let registered: Vec<&str> = body[..end]
+            .lines()
+            .filter_map(|l| l.trim().split_once(": Option<bool>,").map(|(n, _)| n))
+            .collect();
+
+        // 每个登记字段都必须在 inherit_into 里真正被继承——只登记不继承等于没登记
+        let inherit = {
+            let s = src.find("fn inherit_into(").expect("找不到 inherit_into");
+            let rest = &src[s..];
+            let e = rest
+                .find(
+                    "
+    }",
+                )
+                .expect("找不到 inherit_into 结尾");
+            &rest[..e]
+        };
+        for f in &registered {
+            assert!(
+                inherit.contains(&format!("rule.{f}.is_none()")),
+                "字段 {f} 登记进了 ProtocolFields 却没在 inherit_into 里继承"
+            );
+        }
+
+        // 本组当前应覆盖的字段。新增宿主协议级字段时**两处一起改**：
+        // 加进 ProtocolFields，并在此列出。纯用户偏好字段（first_show_mode / auto_pair 等）
+        // 不属于本组——它们本就该被用户层整条覆盖。
+        const HOST_PROTOCOL_FIELDS: &[&str] = &[
+            "composition_start_pair_guard",
+            "pin_anchor_when_start_drifts",
+        ];
+        for f in HOST_PROTOCOL_FIELDS {
+            assert!(
+                registered.contains(f),
+                "宿主协议级字段 {f} 没有登记进 ProtocolFields——用户层同名规则会把它整条吞掉，修复将永远无法生效"
+            );
+        }
+    }
+
+    /// 用户层的稀疏规则不得吞掉系统层新增的宿主协议修正。
+    ///
+    /// 复现 2026-09-05 的实际形态：用户层通过菜单写过 `wps.exe` 的 first_show_mode，
+    /// 系统层随后新增 `pin_anchor_when_start_drifts = true`。
+    #[test]
+    fn a_sparse_user_rule_inherits_newly_shipped_protocol_fixes() {
+        let base = vec![AppCompatRule {
+            process: "wps.exe".into(),
+            pin_anchor_when_start_drifts: Some(true),
+            composition_start_pair_guard: Some(true),
+            ..Default::default()
+        }];
+        // 用户层只写了偏好字段，两个协议字段都没提
+        let user = vec![AppCompatRule {
+            process: "wps.exe".into(),
+            first_show_mode: Some(FirstShowMode::Wait),
+            ..Default::default()
+        }];
+
+        let merged = merge_rules(base, user);
+        let rule = merged
+            .iter()
+            .find(|r| r.process.eq_ignore_ascii_case("wps.exe"))
+            .expect("合并后应保留 wps.exe 规则");
+
+        assert_eq!(
+            rule.pin_anchor_when_start_drifts,
+            Some(true),
+            "用户层稀疏规则未写该字段时必须继承系统层——否则新版修复对老用户永远不生效"
+        );
+        assert_eq!(rule.composition_start_pair_guard, Some(true));
+        assert_eq!(
+            rule.first_show_mode,
+            Some(FirstShowMode::Wait),
+            "用户偏好照常生效"
+        );
+    }
+
+    /// 显式 `false` 仍然是逃生口——继承只填 `None`，不覆盖用户的明确关闭。
+    #[test]
+    fn an_explicit_false_still_disables_an_inherited_protocol_fix() {
+        let base = vec![AppCompatRule {
+            process: "wps.exe".into(),
+            pin_anchor_when_start_drifts: Some(true),
+            ..Default::default()
+        }];
+        let user = vec![AppCompatRule {
+            process: "wps.exe".into(),
+            pin_anchor_when_start_drifts: Some(false),
+            ..Default::default()
+        }];
+
+        let merged = merge_rules(base, user);
+        let rule = merged
+            .iter()
+            .find(|r| r.process.eq_ignore_ascii_case("wps.exe"))
+            .expect("合并后应保留 wps.exe 规则");
+        assert_eq!(
+            rule.pin_anchor_when_start_drifts,
+            Some(false),
+            "显式关闭必须被尊重，否则用户无法撤销一条不适合自己的宿主修正"
+        );
+    }
+
+    /// `composition_start_pair_guard` 是已确认的宿主协议修正，不能因为用户
+    /// 曾经从菜单给同一应用写了另一个字段，就被稀疏规则的缺省值静默抹掉。
+    /// 同时保留显式 `false` 逃生口，新版宿主行为改变时不必改代码才能关闭。
+    #[test]
+    fn protocol_guard_inherits_through_sparse_override_but_false_can_disable_it() {
+        let base_rule = AppCompatRule {
+            process: "QQ.exe".into(),
+            composition_start_pair_guard: Some(true),
+            ..Default::default()
+        };
+        let sparse_user = AppCompatRule {
+            process: "qq.exe".into(),
+            first_show_mode: Some(FirstShowMode::Wait),
+            ..Default::default()
+        };
+        let merged = AppCompat::from_rules(merge_rules(vec![base_rule.clone()], vec![sparse_user]));
+        let inherited = merged.get_rule("QQ.exe").unwrap();
+        assert_eq!(inherited.composition_start_pair_guard, Some(true));
+        assert_eq!(inherited.first_show_mode, Some(FirstShowMode::Wait));
+
+        let explicit_off = AppCompatRule {
+            process: "qq.exe".into(),
+            composition_start_pair_guard: Some(false),
+            ..Default::default()
+        };
+        let merged = AppCompat::from_rules(merge_rules(vec![base_rule], vec![explicit_off]));
+        assert_eq!(
+            merged
+                .get_rule("QQ.exe")
+                .unwrap()
+                .composition_start_pair_guard,
+            Some(false),
+            "显式 false 必须压过系统层，作为宿主升级后的逃生口"
+        );
     }
 
     #[test]
@@ -1326,6 +1596,12 @@ mod tests {
         let file = load_file(&data_dir.join(COMPAT_FILE_NAME))
             .expect("随发布的 data/compat.toml 必须能解析（失败会静默吞掉全部规则）");
         let c = AppCompat::from_parts(file.apps, file.initial_mode_scope);
+
+        assert!(
+            c.get_rule("qq.exe")
+                .is_some_and(|r| r.composition_start_pair_guard == Some(true)),
+            "随发布的 QQ.exe 规则必须启用 composition_start_pair_guard"
+        );
 
         // 桌面：规则必须照常生效
         for class in ["Progman", "WorkerW"] {

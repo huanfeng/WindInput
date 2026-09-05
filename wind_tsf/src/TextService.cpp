@@ -850,6 +850,18 @@ private:
                     }
                     pStartRange->Release();
                 }
+
+                // 整个组合 range 的包围矩形——与上面折叠版取自同一次 edit session、同一 cookie。
+                // 这条缓存路径（src=TSF_CACHED）是**上报的主力**：记事本实测 482 条 caret_update
+                // 里绝大多数走它，只接异步路径会让矩形几乎永远发不出去。
+                RECT compRect = {};
+                BOOL clippedRect = FALSE;
+                if (SUCCEEDED(pContextView->GetTextExt(ec, pCompRange, &compRect, &clippedRect)) &&
+                    compRect.bottom > compRect.top)
+                {
+                    _pTextService->_cachedCompRect = compRect;
+                    _pTextService->_hasCachedCompRect = TRUE;
+                }
                 pCompRange->Release();
             }
         }
@@ -978,6 +990,7 @@ CTextService::CTextService()
     , _pComposition(nullptr)
     , _hasCachedCaretPos(FALSE)
     , _hasCachedCompStartPos(FALSE)
+    , _hasCachedCompRect(FALSE)
     , _compositionJustStarted(FALSE)
     , _needsFocusRecovery(FALSE)
     , _lastFocusCaretX(0)
@@ -1002,6 +1015,7 @@ CTextService::CTextService()
 {
     ZeroMemory(&_cachedCaretRect, sizeof(_cachedCaretRect));
     ZeroMemory(&_cachedCompStartRect, sizeof(_cachedCompStartRect));
+    ZeroMemory(&_cachedCompRect, sizeof(_cachedCompRect));
     DllAddRef();
 }
 
@@ -4272,7 +4286,8 @@ static BOOL s_hasLastCaretPos = FALSE;
 static thread_local CTextService* g_holdTimerInstance = nullptr;
 
 // Get caret position using TSF APIs (for browsers and modern apps)
-BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BOOL* pUsedCompStart)
+BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BOOL* pUsedCompStart,
+                                           RECT* pCompRect, BOOL* pHasCompRect)
 {
     if (pUsedCompStart)
     {
@@ -4312,7 +4327,7 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BO
     BOOL usedCompStart = FALSE;
     BOOL result = CCaretEditSession::GetCaretAndCompositionStartRect(
         pContext, _tfClientId, _pComposition, &rc, &rcCompStart, &hasCompStart,
-        (LONG)GetPendingCommitPrefixLength(), &usedCompStart);
+        (LONG)GetPendingCommitPrefixLength(), &usedCompStart, pCompRect, pHasCompRect);
     pContext->Release();
 
     if (pUsedCompStart)
@@ -4777,7 +4792,8 @@ static BOOL GetConsoleCaretPosition(HWND hwndConsole, LONG* px, LONG* py, LONG* 
     return TRUE;
 }
 
-BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSource)
+BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSource,
+                                    RECT* pCompRect, BOOL* pHasCompRect)
 {
     if (pSource)
     {
@@ -4796,7 +4812,7 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
     // Method 1: Try TSF APIs first - this is the most reliable for browsers and modern apps
     // ITfContextView::GetTextExt provides accurate caret position in Chrome, Edge, etc.
     BOOL usedCompStart = FALSE;
-    if (GetCaretPositionFromTSF(px, py, pHeight, &usedCompStart))
+    if (GetCaretPositionFromTSF(px, py, pHeight, &usedCompStart, pCompRect, pHasCompRect))
     {
         if (pSource)
         {
@@ -5029,11 +5045,62 @@ static void ConvertToPhysicalCoordinates(LONG& x, LONG& y, LONG& height,
                        x, y, height, compStartX, compStartY);
 }
 
+// 与 ConvertToPhysicalCoordinates 同源的单点转换：组合矩形的两个角点各走一次。
+//
+// ⚠ 组合矩形**必须与 caret / compStart 走同一套转换**，否则同一帧里会混进两个坐标系——
+// 服务端拿它们互相比较时得到的差值毫无意义。高 DPI 下 TSF DLL 与候选窗进程 DPI 感知级别
+// 不同导致的偏移是这类问题的经典形态。
+static void ConvertPointToPhysical(LONG& x, LONG& y)
+{
+    static auto pGetProcessDpiAwareness =
+        reinterpret_cast<decltype(&GetProcessDpiAwareness)>(
+            GetProcAddress(GetModuleHandleW(L"shcore.dll"), "GetProcessDpiAwareness"));
+    static auto pLogicalToPhysicalPointForPerMonitorDPI =
+        reinterpret_cast<BOOL(WINAPI*)(HWND, LPPOINT)>(
+            GetProcAddress(GetModuleHandleW(L"user32.dll"), "LogicalToPhysicalPointForPerMonitorDPI"));
+
+    if (!pGetProcessDpiAwareness || !pLogicalToPhysicalPointForPerMonitorDPI)
+        return;
+
+    PROCESS_DPI_AWARENESS awareness = PROCESS_PER_MONITOR_DPI_AWARE;
+    if (FAILED(pGetProcessDpiAwareness(nullptr, &awareness)))
+        return;
+
+    if (awareness == PROCESS_PER_MONITOR_DPI_AWARE)
+        return; // 已是物理坐标
+
+    HWND hwnd = GetForegroundWindow();
+    if (!hwnd)
+        return;
+
+    POINT pt = { x, y };
+    if (pLogicalToPhysicalPointForPerMonitorDPI(hwnd, &pt))
+    {
+        x = pt.x;
+        y = pt.y;
+    }
+}
+
 // 坐标出口：DPI 归一 → 记为 last known → 发 IPC。同步与异步两条取坐标路径共用，
 // 保证「记住的坐标」和「发出去的坐标」永远是同一份（曾经只有同步路径更新 last known）。
-void CTextService::_EmitCaretUpdate(LONG x, LONG y, LONG height, LONG compStartX, LONG compStartY, int source)
+void CTextService::_EmitCaretUpdate(LONG x, LONG y, LONG height, LONG compStartX, LONG compStartY, int source,
+                                   const RECT* pCompRect)
 {
     ConvertToPhysicalCoordinates(x, y, height, compStartX, compStartY);
+
+    // 组合矩形与上面同批转换。四值全 0 = 本帧没取到，此时**不转换**——
+    // 转换会把 (0,0) 映射成某个真实坐标，让「没取到」看起来像「取到了个奇怪的值」。
+    LONG rectL = 0, rectT = 0, rectR = 0, rectB = 0;
+    if (pCompRect != nullptr &&
+        (pCompRect->left != 0 || pCompRect->top != 0 || pCompRect->right != 0 || pCompRect->bottom != 0))
+    {
+        rectL = pCompRect->left;
+        rectT = pCompRect->top;
+        rectR = pCompRect->right;
+        rectB = pCompRect->bottom;
+        ConvertPointToPhysical(rectL, rectT);
+        ConvertPointToPhysical(rectR, rectB);
+    }
 
     _hasLastKnownCaretPos = TRUE;
     _lastKnownCaretX = x;
@@ -5042,7 +5109,8 @@ void CTextService::_EmitCaretUpdate(LONG x, LONG y, LONG height, LONG compStartX
 
     if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
     {
-        _pIPCClient->SendCaretUpdate((int)x, (int)y, (int)height, (int)compStartX, (int)compStartY, source);
+        _pIPCClient->SendCaretUpdate((int)x, (int)y, (int)height, (int)compStartX, (int)compStartY, source,
+                                     (int)rectL, (int)rectT, (int)rectR, (int)rectB);
     }
 }
 
@@ -5125,6 +5193,8 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
 {
     const RECT& caretRect     = result.caretRect;
     const RECT& compStartRect = result.compStartRect;
+    // 组合矩形只在真取到时下传；没取到传 nullptr，让 _EmitCaretUpdate 上报四值全 0。
+    const RECT* pCompRect     = result.hasCompRect ? &result.compRect : nullptr;
     const BOOL  isFocusProbe  = (result.kind == CaretProbeKind::Focus);
 
     // 归属校验。**两种用途的判据不同，不能合并**：
@@ -5232,7 +5302,8 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
         // 白白多一次 IPC。判据：焦点包是否已经发出去。
         if (_focusGainedSentForSession == _focusSessionId)
         {
-            _EmitCaretUpdate(caretRect.left, caretRect.bottom, height, compStartX, compStartY, source);
+            _EmitCaretUpdate(caretRect.left, caretRect.bottom, height, compStartX, compStartY, source,
+                             pCompRect);
         }
         else
         {
@@ -5241,7 +5312,7 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
         return;
     }
 
-    _EmitCaretUpdate(caretRect.left, caretRect.bottom, height, compStartX, compStartY, source);
+    _EmitCaretUpdate(caretRect.left, caretRect.bottom, height, compStartX, compStartY, source, pCompRect);
 }
 
 void CTextService::SendCaretPositionUpdate()
@@ -5282,6 +5353,10 @@ void CTextService::SendCaretPositionUpdate()
     // The cache is set inside CUpdateCompositionEditSession::DoEditSession, which
     // guarantees that caret and composition-start come from the SAME edit session
     // and thus the same coordinate space.
+    // 整个组合 range 的包围矩形：两条分支各自填充，最后一并上报（四值全 0 = 本帧没有）。
+    RECT compRect = {};
+    BOOL hasCompRect = FALSE;
+
     if (_hasCachedCaretPos)
     {
         x = _cachedCaretRect.left;
@@ -5297,15 +5372,22 @@ void CTextService::SendCaretPositionUpdate()
             compStartY = _cachedCompStartRect.bottom;
         }
 
+        if (_hasCachedCompRect)
+        {
+            compRect = _cachedCompRect;
+            hasCompRect = TRUE;
+        }
+
         // Clear cache (one-shot: next call falls back to normal methods)
         _hasCachedCaretPos = FALSE;
         _hasCachedCompStartPos = FALSE;
+        _hasCachedCompRect = FALSE;
     }
 
     // Priority 2: Normal method (separate edit session + fallbacks)
     if (!hasPosition)
     {
-        if (!GetCaretPosition(&x, &y, &height, &source))
+        if (!GetCaretPosition(&x, &y, &height, &source, &compRect, &hasCompRect))
         {
             if (_hasLastKnownCaretPos)
             {
@@ -5335,7 +5417,8 @@ void CTextService::SendCaretPositionUpdate()
     if (hasPosition)
     {
         // DPI 归一 + 记 last known + 发 IPC（fire-and-forget，无响应）
-        _EmitCaretUpdate(x, y, height, compStartX, compStartY, source);
+        _EmitCaretUpdate(x, y, height, compStartX, compStartY, source,
+                         hasCompRect ? &compRect : nullptr);
     }
 }
 

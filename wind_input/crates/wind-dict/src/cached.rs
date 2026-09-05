@@ -39,8 +39,103 @@ pub struct DictHit {
 /// `boundary == 0`（无边界信息）**一律放行** —— 词库层无从判断，交调用方按需用 DAG
 /// 现切兜底（见 `wind-engine` 的 `effective_boundary`）。职责分工：词库层只提前丢弃
 /// **确定不合格**的条目以免它们白占 top-N 配额，最终判定仍在引擎层。
-pub fn prefix_syllable_keep(boundary: u64, max_syllables: u32) -> bool {
+///
+/// ⚠️ **`pub(crate)`，外部一律用 [`prefix_entry_keep`]** —— 本函数只是那道合成判据的
+/// 「音节数」半边，单独拿它当保留判据正是 2026-09-04 那次报障的成因：`sheng` 与 `shen`
+/// 的音节数完全同形（都是 1），它分不开，于是关掉模糊音也照样出 `sheng` 的字。
+/// 收窄可见性是为了让编译器把关，而不是靠注释提醒下一个人别漏了对齐那半边。
+pub(crate) fn prefix_syllable_keep(boundary: u64, max_syllables: u32) -> bool {
     boundary == 0 || boundary.count_ones() <= max_syllables
+}
+
+/// 前缀查询中该条目是否**音节边界对齐**：输入已完成的音节部分必须正好停在该条目的
+/// 某个音节起点上，即补全只能从下一个音节开始，不能把当前音节继续拉长。
+///
+/// ## 这道判据补的是什么洞
+///
+/// wdat 的 key 是**扁平码**（`nihao` 而非 `ni hao`），这是硬性设计——带空格的 key 会让
+/// `niha` 无法前缀匹配，而逐键前缀匹配是「边打边出候选」的命脉。代价是前缀匹配发生在
+/// **字符**域：`shen` 是 `sheng` 的字符前缀，于是打 `shen` 会召回「生/省/声/升/胜」。
+/// [`prefix_syllable_keep`] 拦不住它们——那些字都只有 1 个音节，音节数完全合格。
+///
+/// 真实报障（2026-09-04）：`[schema.pinyin.fuzzy] en_eng = false` 时打 `shen` 仍出
+/// `sheng` 的字。实测前缀召回前 20 条里 8 条是 `sheng`，且「生」(w=8631) 权重高过
+/// 「深」(w=5042)——不只是多出不该有的，还按 top-k 挤掉了本音节的低频字。
+/// 波及面远超 en/eng 一组：`an/ang`、`in/ing`、`ian/iang`、`uan/uang`、`a→ai/an/ao`、
+/// `e→ei/en/er`、`o→ou/ong`、`ni→nin/ning/niu/nie/nian/niang/niao` 全部同病。
+///
+/// 更要害的是它**旁路了模糊音开关**：`en→eng` 的等价本该只由模糊音层在用户显式开启时
+/// 提供（带 `fuzzy_penalized` 惩罚、单独的匹配层级），这里却无条件、单向地白送了一份。
+///
+/// ## 判据取 `completed_len` 而不是击键长度
+///
+/// `completed_len` = 输入中**已构成完整音节**的那一段的字节长度（DAG 切分的性质）。
+/// 这样残码场景天然正确，不需要额外分支：
+///
+/// | 输入 | `completed_len` | 判据位 | `shenme`(什么) | `sheng`(生) |
+/// |---|---|---|---|---|
+/// | `shen` | 4 | 4 | `0b10001` ✅ | `0b1` ❌ |
+/// | `shenm` | 4 | 4 | ✅ 残码补全照常 | — |
+/// | `fe`（不成音节）| 0 | 0 | 位 0 恒置位 ⇒ **全放行** | 放行 |
+///
+/// ★ 第二行的「—」是结构性的，不是省略：**残码位上跨音节的候选根本进不了前缀集合**。
+/// `shengming` 的第 4 个字符是 `g`、`shenm` 的是 `m`，它压根不是前缀；推而广之，能延长
+/// 当前音节的字符（`n`/`g`/韵母）一旦跟在后面，`Dag::maximum_match` 就会把它并进来切成
+/// 更长的完整音节（`fen` + `g` 直接切成 `feng`），于是它不再是残码。「残码」与「跨越已
+/// 完成音节」两个条件互斥 —— 所以本判据在残码位恒放行是自动成立的，不是特意开的口子。
+/// （初版为此写的守门测试在**修改前的基线上同样是绿的**，那是条抓不住回归的假测试。）
+///
+/// 最后一行正是主流全拼输入法的行为、也是用户描述的规则：`fe` 不是合法拼音 ⇒ 走字符
+/// 前缀匹配；`fen` 是合法音节 ⇒ 转为音节匹配，不含 `feng`。同一个判据覆盖两种形态。
+///
+/// ## ★★ 代价，以及为什么它可以接受（2026-09-04 用户拍板，改动前必读）
+///
+/// 这道判据挡住的不只是单字。`yingu` 切分为 `yin|gu`、`shaixu` 切分为 `shai|xu`，而
+/// `gu`/`xu` **本身都是合法音节** —— 于是「因果」(`yin|guo`)、「筛选」(`shai|xuan`)
+/// 同样被挡下，用户得打完 `yinguo` / `shaixuan`。
+///
+/// **不要再找「只挡单字、放行词」的更聪明判据**：`fen→feng` 与 `yingu→因果` 在音节结构
+/// 上完全同形（候选码都是「把最后一个已完成音节拉长后即结束」），试过的几条路——只保护
+/// 非末尾音节、要求候选多出音节、按 `distance` 分档——全都同时命中或同时放过两者。唯一
+/// 存在的区分轴是「输入的音节数」或「候选是字还是词」，那是取舍不是算法。
+///
+/// 取严格档的理由（用户原话）：**用户要打别的词时会继续往下打，而不是翻候选去找**；
+/// 顺带把「打到 `gu` 那一刻」的候选量压下来，整体更精准。实测候选数：`fen` 56 → 29、
+/// `shen` 68 → 48、`ni` 92 → 34，被砍掉的全部是跨音节条目。
+///
+/// ★ 由此还有一条推论：出厂 `min_syllables = 4` 下，**整音节**输入（`started < 4`）不再
+/// 存在跨音节的前缀补全 —— cap 把候选音节数压到 ≤ `started`，本判据又要求候选在
+/// `completed_len` 处开新音节，两者合起来只剩「候选码 == 输入」即精确匹配。此时前缀补全
+/// 只在**残码位**发挥作用，那正是它该在的地方。
+///
+/// ## 两处放行
+///
+/// - `boundary == 0`：无边界信息（旧词典、用户手输码、超 64 字节的长码），与
+///   [`prefix_syllable_keep`] 同款降级——词库层判不了的交给引擎层的 `effective_boundary`。
+/// - `code_len <= completed_len`：不是补全（精确匹配或更短的子短语），它没有预测任何
+///   未输入的内容，本判据不适用。
+pub fn prefix_syllable_aligned(boundary: u64, code_len: usize, completed_len: usize) -> bool {
+    if boundary == 0 || code_len <= completed_len {
+        return true;
+    }
+    // `completed_len >= 64` 时 bitmask 表达不了该位置，与 boundary 的 64 字节天花板同款
+    // 降级：放行，交给引擎层。`checked_shr` 在移位量越界时返回 None，正好是这个语义。
+    u32::try_from(completed_len)
+        .ok()
+        .and_then(|bit| boundary.checked_shr(bit))
+        .is_none_or(|v| v & 1 == 1)
+}
+
+/// 前缀查询条目的完整保留判据：音节数不超限（[`prefix_syllable_keep`]）**且**音节边界
+/// 对齐（[`prefix_syllable_aligned`]）。两个后端与引擎层的事后闸门共用这一份。
+pub fn prefix_entry_keep(
+    boundary: u64,
+    code_len: usize,
+    max_syllables: u32,
+    completed_len: usize,
+) -> bool {
+    prefix_syllable_keep(boundary, max_syllables)
+        && prefix_syllable_aligned(boundary, code_len, completed_len)
 }
 
 /// `foo/bar.dict.yaml` → `foo/bar.wdat`（剥掉整个 `.dict.yaml` 后缀）。
@@ -290,20 +385,26 @@ impl CachedDict {
         }
     }
 
-    /// 前缀查找（带边界），**只取音节数不超过 `max_syllables` 的条目**。
+    /// 前缀查找（带边界），只取**音节数不超过 `max_syllables`** 且**在 `completed_len`
+    /// 处音节边界对齐**的条目。
     ///
-    /// 拼音短输入严格档专用：过滤下推到词库层，使 top-N 直接是 N 条合格条目，而不是
-    /// 让注定被丢弃的词组吃光配额（实测 `d` 取 1000 条只剩 68 条单字）。
-    /// 判据见 [`prefix_syllable_keep`]，两个后端共用同一份。
+    /// 拼音短输入严格档专用：两道过滤都下推到词库层，使 top-N 直接是 N 条合格条目，而不是
+    /// 让注定被丢弃的条目吃光配额（实测 `d` 取 1000 条只剩 68 条单字；`ni` 取 20 条有 14 条
+    /// 是 nin/ning/niu/nie/nian/niang/niao 的字）。判据见 [`prefix_entry_keep`]，
+    /// 两个后端共用同一份。
+    ///
+    /// `completed_len` = 输入中已构成完整音节的那一段的**字节长度**，传 0 即退化为纯字符
+    /// 前缀匹配（残码/裸声母场景本就该如此，见 [`prefix_syllable_aligned`]）。
     pub fn search_prefix_with_boundary_syllable_capped(
         &self,
         prefix: &str,
         limit: usize,
         max_syllables: u32,
+        completed_len: usize,
     ) -> Vec<DictHit> {
         match self {
             Self::Mmap(reader) => reader
-                .search_prefix_syllable_capped(prefix, limit, max_syllables)
+                .search_prefix_syllable_capped(prefix, limit, max_syllables, completed_len)
                 .into_iter()
                 .map(|e| DictHit {
                     code: e.code,
@@ -313,9 +414,12 @@ impl CachedDict {
                     boundary: e.boundary,
                 })
                 .collect(),
-            Self::Memory(dict) => {
-                dict.search_prefix_with_boundary_syllable_capped(prefix, limit, max_syllables)
-            }
+            Self::Memory(dict) => dict.search_prefix_with_boundary_syllable_capped(
+                prefix,
+                limit,
+                max_syllables,
+                completed_len,
+            ),
         }
     }
 
@@ -501,6 +605,81 @@ pub fn build_single_char_full_codes_from(
 mod tests {
     use super::*;
     use crate::codetable::CodetableDict;
+
+    /// 单音节 code 的 boundary（只有起点位）。
+    fn b1() -> u64 {
+        0b1
+    }
+
+    /// `shen|me` 这类两音节 code 的 boundary（起点 + 第二音节起始字节位）。
+    fn b2(second: usize) -> u64 {
+        0b1 | (1 << second)
+    }
+
+    /// 合法音节输入：更长音节的条目必须被拒，下一个音节的补全必须放行。
+    ///
+    /// 这是真实报障（打 `shen` 出 `sheng` 的字）的判据级复现。`sheng` 与 `shen` 在
+    /// **音节数**上完全同形（都是 1），[`prefix_syllable_keep`] 分不开它们 —— 分开
+    /// 两者的只有「输入末尾是不是候选的音节起点」。
+    #[test]
+    fn aligned_rejects_longer_syllable_but_keeps_next_syllable() {
+        // 输入 shen（completed_len = 4）
+        // sheng（生）：单音节，第 4 字节不是音节起点 ⇒ 拒
+        assert!(!prefix_syllable_aligned(b1(), "sheng".len(), 4));
+        // shenme（什么）：shen|me，第 4 字节正是「me」的起点 ⇒ 放行
+        assert!(prefix_syllable_aligned(b2(4), "shenme".len(), 4));
+        // shenmei（审美）：shen|mei，同样对齐 ⇒ 放行（它确实是 shen 的合法补全）
+        assert!(prefix_syllable_aligned(b2(4), "shenmei".len(), 4));
+        // 输入 fen（completed_len = 3）对 feng：拒
+        assert!(!prefix_syllable_aligned(b1(), "feng".len(), 3));
+        // 输入 ni（completed_len = 2）对 ning/niu/nian：全拒
+        for code in ["ning", "niu", "nian", "niang", "niao", "nin", "nie"] {
+            assert!(
+                !prefix_syllable_aligned(b1(), code.len(), 2),
+                "打 ni 不该召回单音节的 {code}"
+            );
+        }
+        // 而 nihao（ni|hao）对齐 ⇒ 放行
+        assert!(prefix_syllable_aligned(b2(2), "nihao".len(), 2));
+    }
+
+    /// `completed_len == 0`（输入不成音节：`fe`/`zh`/`m`）⇒ 判据整条让开。
+    ///
+    /// 位 0 恒为音节起点，故这不是特例分支而是同一个判据的自然退化。主流全拼输入法
+    /// 正是这个行为：`fe` 不是合法拼音故走字符前缀匹配，`fen` 是合法音节故按音节匹配。
+    #[test]
+    fn illegal_syllable_falls_back_to_plain_prefix_match() {
+        for code in ["fen", "feng", "fei", "fa"] {
+            assert!(
+                prefix_syllable_aligned(b1(), code.len(), 0),
+                "输入不成音节时 {code} 必须放行，否则前缀匹配整条失效"
+            );
+        }
+    }
+
+    /// 两处放行：无边界信息、以及「不是补全」。
+    #[test]
+    fn aligned_passes_unknown_boundary_and_non_completions() {
+        // boundary == 0：旧词典 / 用户手输码 / 超 64 字节长码 ⇒ 词库层判不了，放行
+        assert!(prefix_syllable_aligned(0, "sheng".len(), 4));
+        // code 不比已完成音节长 ⇒ 精确匹配或子短语，没有预测任何未输入内容
+        assert!(prefix_syllable_aligned(b1(), 4, 4));
+        assert!(prefix_syllable_aligned(b1(), 2, 4));
+        // completed_len >= 64：bitmask 表达不了，与 boundary 的 64 字节天花板同款降级
+        assert!(prefix_syllable_aligned(b1(), 100, 64));
+        assert!(prefix_syllable_aligned(b1(), 100, 999));
+    }
+
+    /// 合成判据 = 音节数上限 **且** 边界对齐；两道各自独立，缺一不可。
+    #[test]
+    fn entry_keep_requires_both_predicates() {
+        // 音节数合格但不对齐（sheng 对 shen）⇒ 拒
+        assert!(!prefix_entry_keep(b1(), "sheng".len(), 1, 4));
+        // 对齐但音节数超限（shenme 2 音节、上限 1）⇒ 拒
+        assert!(!prefix_entry_keep(b2(4), "shenme".len(), 1, 4));
+        // 两道都过 ⇒ 留
+        assert!(prefix_entry_keep(b2(4), "shenme".len(), 2, 4));
+    }
 
     #[test]
     fn wdat_sibling_strips_the_whole_dict_yaml_suffix() {

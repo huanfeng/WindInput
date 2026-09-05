@@ -218,6 +218,20 @@ pub fn create_backup(
             add(&mut w, name, &data, "theme_file", serde_json::Value::Null)?;
         }
     }
+    // 字符类的用户层：与 common_chars 一样是全局段（键不带方案）。value 就是 yaml 文本，
+    // 原样进包——用户解开包就能读，也能直接拿去设置页「从文件加载」。
+    //
+    // ⚠️ 进包的是**稀疏 diff**（只含用户改过的），不是完整视图：还原到升过版的出厂表上，
+    // 完整视图会把出厂新加的字全记成「用户移除」。
+    for (key, text) in store.list_charset_docs()? {
+        add(
+            &mut w,
+            format!("charsets/{key}.yaml"),
+            text.as_bytes(),
+            "charset",
+            serde_json::Value::Null,
+        )?;
+    }
 
     w.finish()?;
     Ok(BackupResult {
@@ -414,6 +428,23 @@ pub fn restore_backup(
                     }
                 }
             }
+            "charset" => {
+                if replace && cleared.insert("charset".into()) {
+                    store.clear_charset_docs()?;
+                }
+                // 键取文本里的 `key`，不取文件名：文件名只是投影，文本才是真相。
+                // 解析失败不让整次还原失败（与 common_chars 坏行同一条纪律），但也不
+                // 静默——记进 conflicts，用户在结果里看得到「哪条没还原」。本 crate
+                // 零日志依赖（见 scheme.rs），warn 不是选项。
+                let t = text();
+                match wind_config::charset_def::parse_doc(&t) {
+                    Ok(doc) => {
+                        store.set_charset_doc(&doc.def.key, &t)?;
+                        restored.push(e.path.clone());
+                    }
+                    Err(_) => conflicts.push(e.path.clone()),
+                }
+            }
             "theme_file" => {
                 if let Some(dir) = targets.user_themes_dir {
                     let rel = crate::bundle::validate_entry_rel(&e.path, "themes/")?;
@@ -449,6 +480,9 @@ mod tests {
         // 常用字覆盖：全局段（键不带方案），两个方向各一条。
         s.set_common_char_override("槮", true).unwrap();
         s.set_common_char_override("的", false).unwrap();
+        // 字符类用户层：全局段，value 是 yaml 文本。
+        s.set_charset_doc("emoji", "key: emoji\ndefault: rare\n")
+            .unwrap();
         s
     }
 
@@ -508,6 +542,7 @@ mod tests {
             "freq",
             "shadow",
             "common_chars",
+            "charset",
             "stats",
             "stats_meta",
             "schema_file",
@@ -772,5 +807,81 @@ mod tests {
         // 「配置」「用户方案」段——否则设置页勾了「配置」却漏还原 compat.toml。
         assert_eq!(section_of("compat"), "config");
         assert_eq!(section_of("schema_override_file"), "schemas");
+    }
+
+    /// ★ 字符类的用户层进备份包、还原回库——**换机器之后用户调过的类不能静默丢失**。
+    ///
+    /// 与 `compat.toml` / `schema_overrides/` 同类；不同的是它在库里而不是目录里，
+    /// 故不走 `user_*_dir`，走 store 的 list / set。文本原样进出，一个字节都不能动。
+    #[test]
+    fn charsets_are_backed_up_and_restored() {
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("b.zip");
+        let store = Store::open(t.path().join("s.redb")).unwrap();
+        let text =
+            "# 头注释\n---\nkey: 我的符号\nname: 我的符号\nranges: [U+2600-U+26FF]\n...\n★\n-☯\n";
+        store.set_charset_doc("我的符号", text).unwrap();
+        store
+            .set_charset_doc("emoji", "key: emoji\ndefault: rare\n")
+            .unwrap();
+        let src = BackupSources {
+            user_config_file: None,
+            compat_file: None,
+            user_schemas_dir: None,
+            user_schema_overrides_dir: None,
+            user_themes_dir: None,
+            state_file: None,
+        };
+        let r = create_backup(
+            &store,
+            &src,
+            &out,
+            "0",
+            "test",
+            "2026-09-05T00:00:00Z",
+            &BackupOptions {
+                include_stats: false,
+                include_state: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            r.entries.iter().any(|e| e == "charsets/我的符号.yaml"),
+            "字符类没进备份包：{:?}",
+            r.entries
+        );
+
+        let store2 = Store::open(t.path().join("s2.redb")).unwrap();
+        // 目标库里先放一条「本机的」调整：Replace 模式该把它清掉。
+        store2
+            .set_charset_doc("local_only", "key: local_only\n")
+            .unwrap();
+        let targets = RestoreTargets {
+            user_config_file: None,
+            compat_file: None,
+            user_schemas_dir: None,
+            user_schema_overrides_dir: None,
+            user_themes_dir: None,
+            state_file: None,
+        };
+        restore_backup(
+            &out,
+            &store2,
+            &targets,
+            crate::merge::Strategy::Replace,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            store2.get_charset_doc("我的符号").unwrap().as_deref(),
+            Some(text),
+            "文本必须原样还原"
+        );
+        assert!(store2.get_charset_doc("emoji").unwrap().is_some());
+        assert_eq!(
+            store2.get_charset_doc("local_only").unwrap(),
+            None,
+            "Replace 模式先清空再还原"
+        );
     }
 }
