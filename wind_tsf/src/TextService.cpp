@@ -1100,6 +1100,14 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
         return S_OK;
     }
 
+    // 诊断：被查询但不支持的 riid——msctf/宿主探测接口失败的序列据此可见。
+    // 只在未匹配分支打，命中路径不刷屏。
+    {
+        WCHAR szIid[64] = {};
+        StringFromGUID2(riid, szIid, ARRAYSIZE(szIid));
+        WIND_LOG_DEBUG_FMT(L"TextService::QueryInterface E_NOINTERFACE riid=%ls", szIid);
+    }
+
     return E_NOINTERFACE;
 }
 
@@ -1128,6 +1136,29 @@ STDAPI CTextService::Activate(ITfThreadMgr* pThreadMgr, TfClientId tfClientId)
 STDAPI CTextService::ActivateEx(ITfThreadMgr* pThreadMgr, TfClientId tfClientId, DWORD dwFlags)
 {
     WIND_LOG_INFO_FMT(L"TextService::ActivateEx called tfClientId=0x%08X dwFlags=0x%08X", tfClientId, dwFlags);
+
+    // 诊断：读线程管理器的激活标志（TF_TMF_*：ACTIVATED/SECUREMODE/IMMERSIVE/CONSOLE 等），
+    // 定位游戏宿主里激活被拒发生在哪一层。纯只读探测，失败只记日志，不影响主流程。
+    {
+        ITfThreadMgrEx* pThreadMgrEx = nullptr;
+        HRESULT hrQI = pThreadMgr
+            ? pThreadMgr->QueryInterface(IID_ITfThreadMgrEx, (void**)&pThreadMgrEx)
+            : E_POINTER;
+        if (SUCCEEDED(hrQI) && pThreadMgrEx)
+        {
+            DWORD dwActiveFlags = 0;
+            HRESULT hrFlags = pThreadMgrEx->GetActiveFlags(&dwActiveFlags);
+            if (SUCCEEDED(hrFlags))
+                WIND_LOG_DEBUG_FMT(L"ActivateEx activeFlags=0x%08X", dwActiveFlags);
+            else
+                WIND_LOG_DEBUG_FMT(L"ActivateEx GetActiveFlags failed hr=0x%08X", hrFlags);
+            pThreadMgrEx->Release();
+        }
+        else
+        {
+            WIND_LOG_DEBUG_FMT(L"ActivateEx QueryInterface(ITfThreadMgrEx) failed hr=0x%08X", hrQI);
+        }
+    }
 
     // 起表：激活后的 compartment 变化是系统初始化同步，不是用户操作。
     // 见 _lastActivateTick 注释与下方两处 OnChange 守卫。
