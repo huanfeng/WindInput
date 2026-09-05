@@ -1921,6 +1921,7 @@ impl MessageHandler for Coordinator {
                 composition_start_x: data.composition_start_x,
                 composition_start_y: data.composition_start_y,
                 source: data.caret_source,
+                composition_rect: None,
             },
             "handle_focus_gained",
         );
@@ -2545,6 +2546,71 @@ impl MessageHandler for Coordinator {
             );
             return;
         }
+        // 先记下「宿主上一帧如实上报的组合起点」，供后面的大偏移逃生阀判据使用。
+        //
+        // ★ 必须在下面那个锚定块**之前**取，且取的是旧值：判据要问的是「宿主这一帧报的起点
+        // 与它上一帧报的是否一致」——问的是宿主自己前后是否改口，与我方锁了什么无关。
+        // 零值不更新：compStart=(0,0) 表示「宿主这帧没报」，不是「起点移到了原点」，
+        // 拿它覆盖会让组合开始前的空闲帧把记录清掉，判据在真正需要时恰好失效。
+        let prev_reported_comp_start = {
+            let mut r = self
+                .last_reported_comp_start
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let prev = *r;
+            if data.composition_start_x != 0 || data.composition_start_y != 0 {
+                *r = (data.composition_start_x, data.composition_start_y, true);
+            }
+            prev
+        };
+        // ★★★ 组合矩形优先：它是宿主对**整个组合范围**的如实测量，锚点直接取左下角。
+        //
+        // 单行时 `left` 就是组合起点、`bottom` 就是行底；跨行时 `left` 落在行首、`bottom`
+        // 落在最后一行底——**一个公式同时覆盖两种情形**，不需要分支，也不需要拿像素距离
+        // 去猜「跨行了没有」。
+        //
+        // 与 `composition_start_*` 的关键区别：后者把组合 range 折叠到起点，跨行后仍指
+        // **第一行**。2026-09-05 三宿主实测（跨两行时）：
+        //   QQ     rect=(1876,1072,1892,1146) caret=(1892,1146) compStart=(1876,1106)
+        //   飞书   rect=(2678,1602,2692,1678) caret=(2692,1678) compStart=(2678,1634)
+        //   记事本 rect=(1578, 886,1898,1002) caret=(1898,1002) compStart=(1578, 960)
+        // compStart 的 y 全部停在上一行，只有矩形跟到了当前行——候选窗「换行后回不去」
+        // 的根就在这里。
+        //
+        // ★ 每帧更新，不受「本组合内不再更新」约束：那条规则防的是宿主 `GetRange` 让起点
+        // 随输入右移，而矩形的 `left` 实测恒定（QQ 526 帧全部 1876、记事本 482 帧全部
+        // 1578），只有换行时 `bottom` 会跳一行。它不是会漂移的量，不需要被钉住。
+        //
+        // ⚠ 可信判据 `data.y <= b`：矩形必须覆盖当前插入点所在行。实测三宿主的
+        // `caret.y` 恒**等于** `rect.bottom`。若某宿主只返回首行，caret 走到下一行时
+        // `y` 就会大于 `bottom`，此时判定不可信、回退既有逻辑——那条路今天怎么走、
+        // 明天还怎么走，不会更糟。回退会打日志，据此可以点名是哪个宿主。
+        let rect_anchor = data.composition_rect.and_then(|(l, t, _r, b)| {
+            if b > t && data.y <= b {
+                Some((l, b))
+            } else {
+                if data.composition_rect.is_some() {
+                    debug!(
+                        "组合矩形不可信，回退既有锚点逻辑: rect=({l},{t},{_r},{b})                          caret=({},{})——caret 落在矩形之下，疑该宿主只返回首行",
+                        data.x, data.y
+                    );
+                }
+                None
+            }
+        });
+        if let Some((ax, ay)) = rect_anchor {
+            let mut cs = self
+                .composition_start
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if (cs.0, cs.1) != (ax, ay) {
+                debug!(
+                    "组合起点取自组合矩形: ({},{}) → ({ax},{ay})（宿主对整个组合范围的测量，                     跨行时自动落到最后一行行首）",
+                    cs.0, cs.1
+                );
+            }
+            *cs = (ax, ay, true);
+        }
         // 组合起点锚定：同一组合只接受首个有效 compStart，后续即便携带新值也不覆盖（防部分控件
         // GetRange 让起点随输入漂移，致候选窗随输入右移）。500px 校验排除 logical/physical 坐标系不一致。
         {
@@ -2704,7 +2770,11 @@ impl MessageHandler for Coordinator {
                 //
                 // 判断「不值得校正」的地方和「记住位置」的地方是分开的，这个决定必须在两处
                 // 都表达出来，否则被抑制的那一跳只是换了个时刻发生。
-                {
+                // ⚠ 有权威组合矩形时**不做这次回灌**：`shown_anchor` 是「候选窗此刻画在哪」，
+                // 把它写回 `composition_start` 会让后者从「宿主说的起点」变成「显示位置」。
+                // 那正是 2026-09-05 那串缺陷的根：判据一旦拿被污染的 `cs` 与宿主上报值比较，
+                // 2px 的度量差就能让整条保护失效。矩形每帧如实到达，不需要靠回灌记住位置。
+                if rect_anchor.is_none() {
                     let anchor = *self.shown_anchor.lock().unwrap_or_else(|e| e.into_inner());
                     if anchor.2 {
                         let mut cs = self
@@ -2762,7 +2832,11 @@ impl MessageHandler for Coordinator {
             // 但位置仍取被钉住的组合起点——校正白跑一次，错位持续存在。阈值再往下调会把组合
             // 内普通逐字前移也算成错锚点（微信实测 dx=13/14），让起点逐格右移。真遇到该区间
             // 要换证据，不是继续调数值。
-            {
+            // ★ 有权威组合矩形时整段跳过：逃生阀存在的理由是「组合起点可能锁错、而我们没有
+            // 别的信息来源」，矩形恰恰就是那个信息来源。它每帧如实给出锚点，锁不错也就无需
+            // 逃生。继续留着它反而有害——`3 倍行高` 这个尺度本身随宿主行高在 126/222 之间
+            // 跳（记事本首行 74、次行 42），换行能否被跟上全看偏移落在阈值哪一侧。
+            if rect_anchor.is_none() {
                 let line_h = self
                     .last_sane_caret_height
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -2774,23 +2848,43 @@ impl MessageHandler for Coordinator {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     if cs.2 {
+                        // 判据只有一条：**宿主自己前后两帧报的组合起点没有改口**。
+                        // 宿主亲口说起点没动，caret 离它多远就都只是组合宽度，不构成
+                        // 「起点锁错了」的证据——无论这一帧是 selection、composition 降级帧
+                        // 还是 cached。
+                        //
+                        // ⛔ 不要拿 `cs` 与 reported compStart 比：`composition_start` 有三个
+                        // 写入者，只有一个写的是宿主上报值，另两个（空闲缓存首显、微移路径的
+                        // `shown_anchor` 回灌）写的是「候选窗画在哪」。QQ 实测（2026-09-05
+                        // 09:51:14）宿主报的 compStart 全程恒为 (2268,1070)，`cs` 却被首显
+                        // 缓存写成 (2266,1072)——差 2px，相等判据整条失效，逃生阀把 110px 的
+                        // 正常组合跨度当成锚点错误，候选窗在 2268↔2378 之间来回跳，正是用户
+                        // 报的「打到最后一个字符时窗口蹦到末尾」。问宿主，别问自己。
+                        //
+                        // ⚠ 不要退回「只认某种 source 帧对序列」的写法：QQ 实测（2026-09-04
+                        // 23:51:35）组合区换行后会补发一个 `TSF_CACHED` 帧，携带的是换行前
+                        // **第一行行尾**的陈旧坐标，偏移 1038/40 双双越阈。只认
+                        // `TSF_COMPOSITION -> TSF_SELECTION` 帧对的判据管不到它；锚点被劫持到
+                        // 行尾后，退格单步只有 18px，再也够不着重锁阈值，候选窗永久卡死在那里。
+                        //
+                        // 逃生阀没有被关掉：宿主换了插入上下文（WPS 换单元格、EverEdit 点击移
+                        // 光标）时它报的起点必然与上一帧不同，本条不成立，照常按 caret 大偏移
+                        // 重锁；组合的第一帧无前值（`seen=false`）同样不成立。见
+                        // `a_grossly_wrong_first_show_can_relock_the_composition_start`。
                         let guarded_pair = composition_start_pair_guard
-                            && prev_source == wind_ipc::protocol::caret_source::TSF_COMPOSITION
-                            && data.source == wind_ipc::protocol::caret_source::TSF_SELECTION
-                            && Self::caret_is_valid(prev_x, prev_y, prev_height)
                             && Self::caret_is_valid(
                                 data.composition_start_x,
                                 data.composition_start_y,
                                 data.height,
                             )
-                            && (prev_x, prev_y)
-                                == (data.composition_start_x, data.composition_start_y)
-                            && (cs.0, cs.1) == (data.composition_start_x, data.composition_start_y);
+                            && prev_reported_comp_start.2
+                            && (prev_reported_comp_start.0, prev_reported_comp_start.1)
+                                == (data.composition_start_x, data.composition_start_y);
                         if guarded_pair {
                             debug!(
                                 "组合起点保持: ({},{})（命中 composition_start_pair_guard：\
                                  prev=({prev_x},{prev_y}) h={prev_height} src={}，current=({},{}) src={}，\
-                                 compStart=({},{})；caret 跨度 {dx}/{dy} 不是起点错误）",
+                                 compStart=({},{})（上一帧同值）；caret 跨度 {dx}/{dy} 不是起点错误）",
                                 cs.0,
                                 cs.1,
                                 wind_ipc::protocol::caret_source::name(prev_source),
@@ -2800,13 +2894,50 @@ impl MessageHandler for Coordinator {
                                 data.composition_start_x,
                                 data.composition_start_y
                             );
-                        } else if (cs.0, cs.1) != (data.x, data.y) {
-                            debug!(
-                                "组合起点重锁: ({},{}) → ({},{})（caret 偏移 {dx}/{dy} \
-                                 远超字宽量级，首显位置整个是错的，不能再钉住）",
-                                cs.0, cs.1, data.x, data.y
-                            );
-                            *cs = (data.x, data.y, true);
+                        } else {
+                            // ★★★ 重锁到**哪里**，取决于这个宿主报的 compStart 可不可信。
+                            //
+                            // 默认目标是当前 caret：微信/WPS/EverEdit 报的 compStart 陈旧或
+                            // 与 caret 坐标系混用，宁可信 caret（见上面那段逃生阀注释）。
+                            //
+                            // 但对**已确认会如实上报**的宿主（即为它开了
+                            // `composition_start_pair_guard` 的那些），这个默认恰好是反的：
+                            // 宿主手里有正确答案，我们却扔掉它去拿 caret 猜。QQ 实测
+                            // （2026-09-05 10:35:38）输入框因内容变长而整体上移 68px，宿主
+                            // 如实把起点从 (1832,1674) 改报成 (1832,1606)——**x 一点没动**，
+                            // 只是行位置变了。上面的 guard 判据「前后两帧同值」因这次 y 变化
+                            // 不成立，落到这里就把锚点重锁成了当时的 caret (2446,1606)，与真
+                            // 起点差 614px；此后宿主一直如实报 (1832,1606)，guard 反过来把这
+                            // 个错锚点稳稳钉住，退格再也回不去。
+                            //
+                            // ⚠ 这不等于「compStart 非零就信它」——那条被否过，会关掉整个
+                            // 逃生阀。这里的前提是 per-app 的显式声明：只有已用真机日志确认
+                            // 过如实上报的宿主才走这一支，其余宿主一字未改。
+                            let reported_is_trustworthy = composition_start_pair_guard
+                                && Self::caret_is_valid(
+                                    data.composition_start_x,
+                                    data.composition_start_y,
+                                    data.height,
+                                );
+                            let (to_x, to_y) = if reported_is_trustworthy {
+                                (data.composition_start_x, data.composition_start_y)
+                            } else {
+                                (data.x, data.y)
+                            };
+                            if (cs.0, cs.1) != (to_x, to_y) {
+                                debug!(
+                                    "组合起点重锁: ({},{}) → ({to_x},{to_y})（caret 偏移 {dx}/{dy} \
+                                     远超字宽量级，首显位置整个是错的，不能再钉住；目标取自{}）",
+                                    cs.0,
+                                    cs.1,
+                                    if reported_is_trustworthy {
+                                        "宿主本帧上报的 compStart"
+                                    } else {
+                                        "当前 caret"
+                                    }
+                                );
+                                *cs = (to_x, to_y, true);
+                            }
                         }
                     }
                 }

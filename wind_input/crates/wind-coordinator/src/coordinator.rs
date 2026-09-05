@@ -1431,6 +1431,18 @@ pub struct Coordinator {
     /// 组合起点屏幕坐标 (x, y, valid)：嵌入预编辑模式（编码插入宿主、光标随输入右移）下候选窗锚此处
     /// （缓冲头部），不随输入移动。同一组合只锁定首个有效值（handle_caret_update），组合结束复位。
     composition_start: Mutex<(i32, i32, bool)>,
+    /// 宿主**上一帧如实上报**的组合起点 (x, y, seen)。只由 `handle_caret_update` 按帧写入，
+    /// 且只在本帧 compStart 非零时更新——零值表示「宿主这帧没报」，不是「起点变成了 0」。
+    ///
+    /// ★ 它与 `composition_start` 是**两个语义**，不可互相替代：`composition_start` 有三个
+    /// 写入者（宿主上报、空闲缓存首显、微移路径的 `shown_anchor` 回灌），后两者写进去的是
+    /// 「候选窗该画在哪」而非「宿主说的起点在哪」。QQ 实测（2026-09-05 09:51）宿主报的
+    /// compStart 全程恒为 (2268,1070)，而 `composition_start` 被首显缓存写成 (2266,1072)
+    /// ——差 2px，足以让任何拿 `composition_start` 与 reported compStart 做相等比较的判据
+    /// 整条失效。要问「宿主是否说起点没动」，只能问本字段。
+    ///
+    /// 无需跨组合显式复位：换了组合，宿主报的起点自然与上一帧不同，判据随之不成立。
+    last_reported_comp_start: Mutex<(i32, i32, bool)>,
     /// 应用兼容规则表（compat.toml，系统层 + 用户层覆盖）。按焦点进程名查规则。
     ///
     /// 用 Mutex 而非不可变字段：右键菜单切换 per-app 开关后要写用户层并**立即重载**。
@@ -2231,6 +2243,7 @@ impl Coordinator {
             candidate_flipped: std::sync::atomic::AtomicBool::new(false),
             hover_index: std::sync::atomic::AtomicI32::new(-1),
             composition_start: Mutex::new((0, 0, false)),
+            last_reported_comp_start: Mutex::new((0, 0, false)),
             last_authoritative_caret: Mutex::new((0, 0, false)),
             last_key_at: Mutex::new(None),
             last_key_interval_ms: Mutex::new(None),
@@ -7126,6 +7139,7 @@ mod caret_compat_tests {
             composition_start_x: 100,
             composition_start_y: y,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         }
     }
 
@@ -7140,6 +7154,7 @@ mod caret_compat_tests {
             composition_start_x: 473,
             composition_start_y: 217,
             source,
+            composition_rect: None,
         }
     }
 
@@ -7185,6 +7200,7 @@ mod caret_compat_tests {
             composition_start_x: i32::MIN,
             composition_start_y: 200,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         });
         assert!(
             !c.composition_start.lock().unwrap().2,
@@ -7264,6 +7280,7 @@ mod caret_compat_tests {
             composition_start_x: x,
             composition_start_y: y,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         }
     }
 
@@ -7524,6 +7541,7 @@ mod caret_compat_tests {
             composition_start_x: 0,
             composition_start_y: 0,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         });
         assert!(got_status_tip(&rx), "等到 TSF 权威坐标后应补显示气泡");
         assert!(
@@ -7549,6 +7567,7 @@ mod caret_compat_tests {
             composition_start_x: 0,
             composition_start_y: 0,
             source: wind_ipc::protocol::caret_source::GUI_CARET,
+            composition_rect: None,
         });
         assert!(!got_status_tip(&rx), "又一个 GUI 回退坐标，仍不该显示");
         assert!(
@@ -7658,6 +7677,7 @@ mod caret_compat_tests {
             composition_start_x: 0,
             composition_start_y: 0,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         });
         assert!(
             !got_status_tip(&rx),
@@ -7687,6 +7707,7 @@ mod caret_compat_tests {
                 composition_start_x: 0,
                 composition_start_y: 0,
                 source: wind_ipc::protocol::caret_source::GUI_CARET,
+                composition_rect: None,
             },
             "test",
         );
@@ -7959,6 +7980,7 @@ mod caret_compat_tests {
         }
         c.handle_caret_update(&CaretData {
             source: wind_ipc::protocol::caret_source::GUI_CARET,
+            composition_rect: None,
             ..caret(400, 20)
         });
         assert!(
@@ -8536,6 +8558,7 @@ mod caret_compat_tests {
                 composition_start_x: START_X,
                 composition_start_y: Y,
                 source: wind_ipc::protocol::caret_source::TSF_COMPOSITION,
+                composition_rect: None,
             });
             assert!(
                 drain_positions(&rx)
@@ -8551,6 +8574,7 @@ mod caret_compat_tests {
                 composition_start_x: START_X,
                 composition_start_y: Y,
                 source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                composition_rect: None,
             });
             assert!(
                 drain_positions(&rx)
@@ -8564,6 +8588,433 @@ mod caret_compat_tests {
                 "reported compStart 未变化时，同一组合的锚点必须保持不变"
             );
         }
+    }
+
+    /// ★★★ `composition_start` 与「宿主报的组合起点」是两个量，判据只能问后者。
+    ///
+    /// QQ 实测（2026-09-05 09:51:12~15，输入 `yibanqing`）：组合开始**前**宿主报的是空输入框
+    /// 的裸 caret `x=2268 y=1072 h=38`，组合一开始度量就变成 `y=1070 h=34`（基线上移 2px）。
+    /// 首显走空闲缓存路径，把 `composition_start` 锁成了 (2266,1072)；而宿主此后每一帧如实
+    /// 上报的 compStart 全程恒为 (2268,1070)，一次都没动过。
+    ///
+    /// 两者差 (2,2)。若判据写成「`cs` 等于 reported compStart」，这 2px 就让整条保护失效：
+    /// 打到第 9 个字母时 caret 走到 2378，相对锚点 110px 越过 `3 * 34 = 102` 的逃生阀阈值，
+    /// 锚点被重锁到 2378（候选窗蹦到组合末尾），下一帧降级 caret 回到 2268 又反向重锁——
+    /// 用户看到的就是「输入到最后一个字符时候选窗跳到末尾」。
+    ///
+    /// 正确的判据是问宿主自己前后是否改口，与我方锁了什么无关。
+    #[test]
+    fn qq_reported_start_wins_even_when_locked_anchor_differs_by_metrics() {
+        // 真机数值，不要改成整数——这个 case 的全部内容就是那 2px 的分歧。
+        const REPORTED_X: i32 = 2268;
+        const REPORTED_Y: i32 = 1070;
+        const ANCHOR_X: i32 = 2266; // 首显自空闲缓存锁下的起点，与宿主报的差 (2,2)
+        const ANCHOR_Y: i32 = 1072;
+        const LINE_H: i32 = 34;
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        c.active_compat.lock().unwrap().composition_start_pair_guard = true;
+        *c.last_valid_caret.lock().unwrap() = (ANCHOR_X, ANCHOR_Y, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "yibanqing".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "一半".into(),
+                ..Default::default()
+            }];
+            st.caret_x = ANCHOR_X;
+            st.caret_y = ANCHOR_Y;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(
+            last_pos(&rx),
+            Some((ANCHOR_X, ANCHOR_Y)),
+            "首显于空闲缓存坐标（与宿主随后报出的 compStart 差 2px）"
+        );
+        *c.composition_start.lock().unwrap() = (ANCHOR_X, ANCHOR_Y, true);
+
+        let frame = |x: i32, src: i32| CaretData {
+            x,
+            y: REPORTED_Y,
+            height: LINE_H,
+            composition_start_x: REPORTED_X,
+            composition_start_y: REPORTED_Y,
+            source: src,
+            composition_rect: None,
+        };
+
+        // 09:51:14.463 —— 组合中段的 selection 帧，喂进「宿主上一帧报的起点」。
+        *c.caret_baseline.lock().unwrap() = (2346, REPORTED_Y, true);
+        c.handle_caret_update(&frame(
+            2346,
+            wind_ipc::protocol::caret_source::TSF_SELECTION,
+        ));
+        drain_positions(&rx);
+
+        // 09:51:14.736 降级帧 + 09:51:14.739 selection 帧：后者相对前者偏移 110px，
+        // 越过 3 倍行高（102）。宿主报的起点两帧都没动，不得重锁。
+        c.handle_caret_update(&frame(
+            REPORTED_X,
+            wind_ipc::protocol::caret_source::TSF_COMPOSITION,
+        ));
+        c.handle_caret_update(&frame(
+            2378,
+            wind_ipc::protocol::caret_source::TSF_SELECTION,
+        ));
+
+        let positions = drain_positions(&rx);
+        let cs = *c.composition_start.lock().unwrap();
+        assert!(
+            positions.iter().all(|pos| *pos == (ANCHOR_X, ANCHOR_Y)),
+            "宿主报的起点没改口，候选窗不得挪到组合末尾；实际下发={positions:?} cs={cs:?}"
+        );
+        assert_ne!(
+            (cs.0, cs.1),
+            (2378, REPORTED_Y),
+            "锚点被重锁到组合末尾——判据又去问 `composition_start` 而不是宿主了"
+        );
+    }
+
+    /// ★★★ 宿主**改口**时，重锁目标必须是它新报的起点，不是当前 caret。
+    ///
+    /// QQ 实测（2026-09-05 10:35:38，长拼音打到输入框变高）：内容变长使整个输入区上移 68px，
+    /// 宿主如实把组合起点从 (1832,1674) 改报成 (1832,1606)——**x 一点没动**，只是行位置变了。
+    /// `composition_start_pair_guard` 的判据是「宿主前后两帧报同一个起点」，这次 y 变化让它
+    /// 不成立，于是落进大偏移逃生阀的重锁分支；而该分支的默认目标是**当前 caret**（组合末端
+    /// 2446），锚点因此被重锁到离真起点 614px 的地方。此后宿主一直如实报 (1832,1606)，guard
+    /// 反过来把这个错锚点稳稳钉住——用户看到的是「打到很长时窗口挤到一边，删除也回不来」。
+    ///
+    /// 对已声明如实上报的宿主，宿主手里就有正确答案，不该扔掉它去拿 caret 猜。
+    #[test]
+    fn a_trusted_host_changing_its_reported_start_relocks_to_that_start_not_the_caret() {
+        const START_X: i32 = 1832;
+        const OLD_Y: i32 = 1674;
+        const NEW_Y: i32 = 1606; // 输入框变高，整体上移 68px
+        const LINE_H: i32 = 32;
+        const CARET_AT_TAIL: i32 = 2446; // 组合末端，距真起点 614px
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        c.active_compat.lock().unwrap().composition_start_pair_guard = true;
+        *c.last_valid_caret.lock().unwrap() = (START_X, OLD_Y, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "daduoshuqingkuang".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "大多数".into(),
+                ..Default::default()
+            }];
+            st.caret_x = START_X;
+            st.caret_y = OLD_Y;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(last_pos(&rx), Some((START_X, OLD_Y)), "首显于组合起点");
+        *c.composition_start.lock().unwrap() = (START_X, OLD_Y, true);
+
+        // 上移前的一帧：QQ 的组合降级帧，caret 退化成组合起点本身（真机形态）。
+        // 它同时把「上一帧宿主报的起点」喂进去，并把基准落在起点上——真机里正是这个基准
+        // 让下一帧的 caret 跨度达到 614px。
+        *c.caret_baseline.lock().unwrap() = (START_X, OLD_Y, true);
+        c.handle_caret_update(&CaretData {
+            x: START_X,
+            y: OLD_Y,
+            height: LINE_H,
+            composition_start_x: START_X,
+            composition_start_y: OLD_Y,
+            source: wind_ipc::protocol::caret_source::TSF_COMPOSITION,
+            composition_rect: None,
+        });
+        drain_positions(&rx);
+
+        // 输入框变高：宿主改报新起点（x 不变、y 上移），caret 在组合末端。
+        // 偏移 614/68 越过 3 倍行高，逃生阀介入——目标必须取宿主新报的起点。
+        c.handle_caret_update(&CaretData {
+            x: CARET_AT_TAIL,
+            y: NEW_Y,
+            height: LINE_H,
+            composition_start_x: START_X,
+            composition_start_y: NEW_Y,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
+        });
+
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (cs.0, cs.1),
+            (START_X, NEW_Y),
+            "宿主改口时应重锁到它新报的起点；锁成 caret 会让锚点偏出 614px 且被 guard 钉死"
+        );
+        assert!(
+            drain_positions(&rx)
+                .into_iter()
+                .all(|pos| pos == (START_X, NEW_Y)),
+            "候选窗应落在宿主新报的起点上"
+        );
+    }
+
+    /// 同一条逃生阀，**没有** per-app 声明的宿主必须保持原行为：重锁到当前 caret。
+    ///
+    /// 微信/WPS/EverEdit 报的 compStart 有陈旧、有坐标系混用的历史，信它等于关掉逃生阀。
+    #[test]
+    fn an_untrusted_host_still_relocks_to_the_caret() {
+        const LINE_H: i32 = 20;
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        // 刻意不开 composition_start_pair_guard
+        *c.last_valid_caret.lock().unwrap() = (1030, 987, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "测".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 1030;
+            st.caret_y = 987;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert_eq!(last_pos(&rx), Some((1030, 987)), "首显于陈旧坐标");
+        *c.composition_start.lock().unwrap() = (1030, 987, true);
+
+        // 宿主报了一个「新」起点，但它不可信——仍以 caret 自愈。
+        c.handle_caret_update(&CaretData {
+            x: 493,
+            y: 988,
+            height: LINE_H,
+            composition_start_x: 700,
+            composition_start_y: 988,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
+        });
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (cs.0, cs.1),
+            (493, 988),
+            "未声明如实上报的宿主，逃生阀仍须重锁到 caret"
+        );
+    }
+
+    /// ★★★ 有组合矩形时，锚点取它的左下角——跨行自动落到**最后一行行首**。
+    ///
+    /// 2026-09-05 三宿主真机（各自打到组合跨两行）：
+    /// | 宿主 | compRect | caret | compStart |
+    /// |---|---|---|---|
+    /// | QQ | (1876,1072,1892,1146) | (1892,1146) | (1876,1106) |
+    /// | 飞书 | (2678,1602,2692,1678) | (2692,1678) | (2678,1634) |
+    /// | 记事本 | (1578,886,1898,1002) | (1898,1002) | (1578,960) |
+    ///
+    /// 三家的 `compStart.y` 全部停在**上一行**（组合 range 折叠到起点的必然结果），
+    /// 只有矩形的 `bottom` 跟到了当前行。候选窗「换行后回不去、删除也回不来」的根就在这里。
+    #[test]
+    fn composition_rect_anchors_to_the_last_line_start_across_hosts() {
+        // (宿主, rect, caret, 旧 compStart)
+        let cases = [
+            (
+                "QQ",
+                (1876, 1072, 1892, 1146),
+                (1892, 1146),
+                (1876, 1106),
+                34,
+            ),
+            (
+                "飞书",
+                (2678, 1602, 2692, 1678),
+                (2692, 1678),
+                (2678, 1634),
+                32,
+            ),
+            (
+                "记事本",
+                (1578, 886, 1898, 1002),
+                (1898, 1002),
+                (1578, 960),
+                42,
+            ),
+        ];
+        for (host, rect, caret, comp_start, line_h) in cases {
+            let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+            set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+            *c.last_valid_caret.lock().unwrap() = (rect.0, rect.1, line_h);
+            c.last_sane_caret_height
+                .store(line_h, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut st = c.state.lock().unwrap();
+                st.input_buffer = "dabufengxingkuang".into();
+                st.candidates = vec![wind_candidate::Candidate {
+                    text: "大部".into(),
+                    ..Default::default()
+                }];
+                st.caret_x = rect.0;
+                st.caret_y = rect.1;
+                st.caret_height = line_h;
+            }
+            {
+                let st = c.state.lock().unwrap();
+                c.notify_ui_update(&st);
+            }
+            drain_positions(&rx);
+            // 首显把锚点锁在了第一行（idle_anchor 路径的行为）
+            *c.composition_start.lock().unwrap() = (comp_start.0, comp_start.1, true);
+
+            c.handle_caret_update(&CaretData {
+                x: caret.0,
+                y: caret.1,
+                height: line_h,
+                composition_start_x: comp_start.0,
+                composition_start_y: comp_start.1,
+                source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                composition_rect: Some(rect),
+            });
+
+            let cs = *c.composition_start.lock().unwrap();
+            assert_eq!(
+                (cs.0, cs.1),
+                (rect.0, rect.3),
+                "{host}：锚点必须取组合矩形的左下角（最后一行行首），而不是折叠到首行的 compStart"
+            );
+            assert!(
+                drain_positions(&rx)
+                    .into_iter()
+                    .all(|pos| pos == (rect.0, rect.3)),
+                "{host}：候选窗必须落在最后一行行首"
+            );
+        }
+    }
+
+    /// 单行组合：矩形的左下角与组合起点等价，锚点不因逐字输入右移。
+    ///
+    /// 这条守的是「矩形每帧更新」不会退化成「跟着 caret 跑」——矩形的 `left` 恒定
+    /// （QQ 实测 526 帧全部 1876、记事本 482 帧全部 1578），只有 `right` 随输入增长。
+    #[test]
+    fn composition_rect_left_stays_put_while_typing_on_one_line() {
+        const LEFT: i32 = 1876;
+        const TOP: i32 = 1072;
+        const BOTTOM: i32 = 1106;
+        const LINE_H: i32 = 34;
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (LEFT, BOTTOM, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "da".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "大".into(),
+                ..Default::default()
+            }];
+            st.caret_x = LEFT;
+            st.caret_y = BOTTOM;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        drain_positions(&rx);
+        *c.composition_start.lock().unwrap() = (LEFT, BOTTOM, true);
+
+        // 逐字输入：right 增长、left 不动
+        for right in [1892, 1910, 1932, 1954, 1972, 1988] {
+            c.handle_caret_update(&CaretData {
+                x: right,
+                y: BOTTOM,
+                height: LINE_H,
+                composition_start_x: LEFT,
+                composition_start_y: BOTTOM,
+                source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                composition_rect: Some((LEFT, TOP, right, BOTTOM)),
+            });
+            let cs = *c.composition_start.lock().unwrap();
+            assert_eq!(
+                (cs.0, cs.1),
+                (LEFT, BOTTOM),
+                "单行输入时锚点必须钉在行首，right={right}"
+            );
+        }
+        assert!(
+            drain_positions(&rx)
+                .into_iter()
+                .all(|pos| pos == (LEFT, BOTTOM)),
+            "候选窗不得随组合增长右移"
+        );
+    }
+
+    /// 只返回首行的宿主：`caret.y` 会大于 `rect.bottom` ⇒ 判定不可信 ⇒ 回退既有逻辑。
+    ///
+    /// 目前实测三家宿主都返回真包围盒（`caret.y` 恒等于 `bottom`），但规范不保证，
+    /// 实现也可能变。这条守的是「遇到那种宿主不会更糟」，而不是某个已知宿主的行为。
+    #[test]
+    fn a_first_line_only_rect_is_distrusted_and_falls_back() {
+        const LINE_H: i32 = 34;
+        // 矩形只覆盖第一行，caret 已经在第二行
+        let rect = (1876, 1072, 2400, 1106);
+        let caret = (1892, 1146);
+
+        // ★ 起始锚点**刻意不等于**矩形左下角：否则「采信矩形」与「回退既有逻辑」
+        // 会产生同一个结果，测试区分不出两者，等于什么都没测。
+        const START: (i32, i32) = (1500, 1106);
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (START.0, START.1, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "dabu".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "大部".into(),
+                ..Default::default()
+            }];
+            st.caret_x = START.0;
+            st.caret_y = START.1;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        drain_positions(&rx);
+        *c.composition_start.lock().unwrap() = (START.0, START.1, true);
+
+        c.handle_caret_update(&CaretData {
+            x: caret.0,
+            y: caret.1,
+            height: LINE_H,
+            composition_start_x: rect.0,
+            composition_start_y: rect.3,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: Some(rect),
+        });
+
+        let cs = *c.composition_start.lock().unwrap();
+        assert_ne!(
+            (cs.0, cs.1),
+            (rect.0, rect.3),
+            "caret 落在矩形之下时不得采信该矩形——那是「只返回首行」的形态，采信它会把锚点钉死在上一行"
+        );
     }
 
     /// `composition_start_pair_guard` 必须是按宿主开启的窄保护，默认行为一字不差。
@@ -8602,6 +9053,7 @@ mod caret_compat_tests {
             composition_start_x: START_X,
             composition_start_y: Y,
             source: wind_ipc::protocol::caret_source::TSF_COMPOSITION,
+            composition_rect: None,
         });
         let _ = drain_positions(&rx);
         c.handle_caret_update(&CaretData {
@@ -8611,6 +9063,7 @@ mod caret_compat_tests {
             composition_start_x: START_X,
             composition_start_y: Y,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         });
 
         assert_eq!(
@@ -8656,6 +9109,7 @@ mod caret_compat_tests {
             composition_start_x: i32::MIN,
             composition_start_y: Y,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         });
 
         assert_eq!(
@@ -9013,6 +9467,7 @@ mod caret_compat_tests {
             composition_start_x: 115,
             composition_start_y: 200,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         });
         assert_eq!(
             c.last_valid_caret.lock().unwrap().0,
@@ -9043,6 +9498,7 @@ mod caret_compat_tests {
             composition_start_x: 726,
             composition_start_y: 250,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         });
         assert_eq!(
             c.last_valid_caret.lock().unwrap().0,
@@ -9072,6 +9528,7 @@ mod caret_compat_tests {
             composition_start_x: 115,
             composition_start_y: 200,
             source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
         });
         assert_eq!(
             c.last_valid_caret.lock().unwrap().0,
@@ -11111,6 +11568,7 @@ mod per_app_compat_tests {
             composition_start_x: cs_x,
             composition_start_y: cs_y,
             source: 0,
+            composition_rect: None,
         }
     }
 

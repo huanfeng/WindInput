@@ -266,6 +266,16 @@ pub struct CaretData {
     /// **不同来源不是同一件东西**：TSF 域的坐标出自当前 context，GUI 域的是跨窗口的 Win32 光标。
     /// 旧 DLL 与 macOS 短包给不出该值，落 `UNKNOWN`，此时按既有行为处理即可。
     pub source: i32,
+    /// 整个组合 range 的包围矩形 `(left, top, right, bottom)`，屏幕物理坐标。
+    ///
+    /// ★ 它答的是「组合占了多大一块」，`composition_start_*` 答的是「组合从哪开始」。
+    /// 组合换行后两者分处不同行——**只有本字段能看出跨行发生了**。记事本实测跨两行时
+    /// `compRect=(1578,886,1898,1002)`、`compStart=(1578,960)`：前者的 `(left, bottom)`
+    /// 是第二行行首，后者仍指第一行。
+    ///
+    /// `None` = 本帧没有：旧 DLL / macOS 短包，或宿主 `GetTextExt` 取不到
+    /// （含 `TS_E_NOLAYOUT`——那是「布局还没算完」，不是「不支持」）。
+    pub composition_rect: Option<(i32, i32, i32, i32)>,
 }
 
 /// MessageHandler trait：协调器实现此接口处理各种事件
