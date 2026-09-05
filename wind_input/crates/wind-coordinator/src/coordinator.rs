@@ -747,6 +747,9 @@ pub(crate) struct ActiveCompat {
     /// 见 [`wind_config::app_compat::AppCompatRule::composition_start_pair_guard`]：
     /// 该宿主会把组合起点降级帧与当前 selection 成对上报，后者不得触发大偏移重锁。
     pub(crate) composition_start_pair_guard: bool,
+    /// 见 [`wind_config::app_compat::AppCompatRule::pin_anchor_when_start_drifts`]：
+    /// 该宿主报的组合起点跟着插入点漂移，锚点须钉在首帧、不得由逃生阀跟着推。
+    pub(crate) pin_anchor_when_start_drifts: bool,
     /// 候选窗首显策略（见 `AppCompatRule::first_show_mode`）。三档互斥；
     /// `None` = 跟随全局 `ui.candidate.first_show_mode`。
     ///
@@ -2437,6 +2440,9 @@ impl Coordinator {
                     composition_start_pair_guard: rule
                         .and_then(|r| r.composition_start_pair_guard)
                         .unwrap_or(false),
+                    pin_anchor_when_start_drifts: rule
+                        .and_then(|r| r.pin_anchor_when_start_drifts)
+                        .unwrap_or(false),
                     first_show_mode: rule.and_then(|r| r.first_show_mode),
                     has_initial_rule: initial_mode.is_some() || initial_punct.is_some(),
                     auto_pair: rule.and_then(|r| r.auto_pair),
@@ -2453,11 +2459,12 @@ impl Coordinator {
         // 规则未命中与「命中但全 false」在日志里无从区分，查「某应用兼容项没生效」时看不到
         // 究竟是没匹配上进程名还是字段没读到。
         debug!(
-            "Compat rule for process={name}: matched={} caret_use_top={} stale_probe_guard={} composition_start_pair_guard={} first_show_mode={} initial_mode={} initial_punct={} auto_pair={} smart_method={} caret_offset=({},{})",
+            "Compat rule for process={name}: matched={} caret_use_top={} stale_probe_guard={} composition_start_pair_guard={} pin_anchor_when_start_drifts={} first_show_mode={} initial_mode={} initial_punct={} auto_pair={} smart_method={} caret_offset=({},{})",
             rule_matched,
             next.caret_use_top,
             next.stale_probe_guard,
             next.composition_start_pair_guard,
+            next.pin_anchor_when_start_drifts,
             next.first_show_mode
                 .map(|m| m.as_config())
                 .unwrap_or("(follow-global)"),
@@ -9014,6 +9021,309 @@ mod caret_compat_tests {
             (cs.0, cs.1),
             (rect.0, rect.3),
             "caret 落在矩形之下时不得采信该矩形——那是「只返回首行」的形态，采信它会把锚点钉死在上一行"
+        );
+    }
+
+    /// ★★★ 「插入点形态」的宿主必须整条回退——它们的矩形不是范围，是一个点。
+    ///
+    /// 2026-09-05 实测三家，形态一致：矩形宽度只有光标那么宽，`left` 恒等于 caret.x，
+    /// 并跟着插入点走。
+    ///
+    /// | 宿主 | rect | w | caret.x |
+    /// |---|---|---|---|
+    /// | WPS 文字 | (1603,617,1605,651) | 2 | 1603 |
+    /// | WPS 表格 et | (1809,961,1810,997) | 1 | 1809（2677 帧 w 恒为 1）|
+    /// | Word cached 帧 | (1758,653,1758,697) | 0 | 1758 |
+    ///
+    /// 判据取「组合起点必须在插入点**左边**」：组合已经有内容，起点与插入点之间就隔着
+    /// 这些内容的宽度。对照真包围盒——组合最短时也隔着一个字符（QQ / 记事本首帧 w=16、
+    /// Word 首帧 w=17）。
+    ///
+    /// ⚠ 回退之后走既有锚点逻辑，那条路对这些宿主本就是调好的：WPS 文字靠「组合起点本
+    /// 组合内不再更新」钉住候选窗，表格类每字换一次 docMgr、候选窗随之跟到新单元格。
+    /// 矩形若每帧更新反而拆了前者的保护——WPS 出现的正是这个回归。
+    #[test]
+    fn an_insertion_point_shaped_rect_is_distrusted_for_every_host() {
+        // (宿主, 矩形宽度, 起始 x, 行顶, 行底, 行高)
+        let cases = [
+            ("WPS 文字", 2, 1603, 617, 651, 34),
+            ("WPS 表格 et", 1, 1809, 961, 997, 36),
+            ("Word cached", 0, 1758, 653, 697, 44),
+        ];
+        for (host, w, x0, top, bottom, line_h) in cases {
+            let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+            set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+            *c.last_valid_caret.lock().unwrap() = (x0, bottom, line_h);
+            c.last_sane_caret_height
+                .store(line_h, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut st = c.state.lock().unwrap();
+                st.input_buffer = "wo".into();
+                st.candidates = vec![wind_candidate::Candidate {
+                    text: "我".into(),
+                    ..Default::default()
+                }];
+                st.caret_x = x0;
+                st.caret_y = bottom;
+                st.caret_height = line_h;
+            }
+            {
+                let st = c.state.lock().unwrap();
+                c.notify_ui_update(&st);
+            }
+            drain_positions(&rx);
+            // 既有逻辑把锚点锁在起始位置
+            *c.composition_start.lock().unwrap() = (x0, bottom, true);
+
+            // 矩形整体右移（宽度不增长）——插入点形态的真实表现
+            for step in [0, 14, 28] {
+                let x = x0 + step;
+                c.handle_caret_update(&CaretData {
+                    x,
+                    y: bottom,
+                    height: line_h,
+                    composition_start_x: x,
+                    composition_start_y: bottom,
+                    source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                    composition_rect: Some((x, top, x + w, bottom)),
+                });
+                let cs = *c.composition_start.lock().unwrap();
+                assert_eq!(
+                    (cs.0, cs.1),
+                    (x0, bottom),
+                    "{host}：矩形是插入点不是范围，不得据此移动锚点（step={step}）"
+                );
+            }
+            assert!(
+                drain_positions(&rx)
+                    .into_iter()
+                    .all(|pos| pos == (x0, bottom)),
+                "{host}：候选窗不得随插入点右移"
+            );
+        }
+    }
+
+    /// Word 的真包围盒仍照常采信——上一条挡掉的只是它那些退化的 cached 帧。
+    ///
+    /// Word 实测 selection 帧 rect=(1699,701,2710,792) w=1011 h=91（跨两行），
+    /// caret=(2710,792)、compStart=(1699,745)：compStart 停在第一行，只有矩形的左下角
+    /// (1699,792) 是第二行行首。
+    #[test]
+    fn word_real_bounding_box_is_still_trusted() {
+        const LINE_H: i32 = 43;
+        let rect = (1699, 701, 2710, 792);
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (rect.0, 745, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "dabufengxing".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "大部".into(),
+                ..Default::default()
+            }];
+            st.caret_x = rect.0;
+            st.caret_y = 745;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        drain_positions(&rx);
+        *c.composition_start.lock().unwrap() = (rect.0, 745, true);
+
+        c.handle_caret_update(&CaretData {
+            x: 2710,
+            y: rect.3,
+            height: LINE_H,
+            composition_start_x: 1699,
+            composition_start_y: 745,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: Some(rect),
+        });
+
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (cs.0, cs.1),
+            (rect.0, rect.3),
+            "真包围盒的左下角应成为锚点（第二行行首），而不是停在首行的 compStart"
+        );
+    }
+
+    /// ★★★ 布局退化的整帧不可信——不只是它的矩形，连 caret 也不能拿去重锁。
+    ///
+    /// Word 实测（2026-09-05 14:56，长组合跨行后继续输入）两种帧交替到达：
+    ///   src=1 selection rect=(1952,701,1985,841) w=33 caret=(1985,841) compStart=(1952,745)
+    ///   src=3 cached    rect=(1758,653,1758,697) w=0  caret=(1758,697) compStart=(1758,697)
+    /// cached 帧的三个坐标全是另一处的陈旧值，与 selection 帧差 144px。矩形判据已经挡掉
+    /// 了它的矩形，但**逃生阀仍会拿它的 caret 重锁**——两帧交替，锚点就在两处之间来回跳，
+    /// 表现为候选窗抖动。
+    ///
+    /// `left == right` 是「这一帧什么都没算出来」的标志：同一次 GetTextExt 没算出布局，
+    /// 那么同帧的 caret / compStart 出自同一次查询，一并不可信。
+    #[test]
+    fn a_degenerate_layout_frame_cannot_relock_via_the_escape_valve() {
+        const LINE_H: i32 = 43;
+        let good = (1952, 701, 1985, 841); // 真包围盒，左下角 (1952,841)
+        let degenerate = (1758, 653, 1758, 697); // w=0，坐标是另一处的陈旧值
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (good.0, good.3, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "dabufengxingkuang".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "大部".into(),
+                ..Default::default()
+            }];
+            st.caret_x = good.0;
+            st.caret_y = good.3;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        drain_positions(&rx);
+
+        // selection 帧建立锚点
+        c.handle_caret_update(&CaretData {
+            x: 1985,
+            y: good.3,
+            height: LINE_H,
+            composition_start_x: 1952,
+            composition_start_y: 745,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: Some(good),
+        });
+        assert_eq!(
+            {
+                let cs = *c.composition_start.lock().unwrap();
+                (cs.0, cs.1)
+            },
+            (good.0, good.3),
+            "真包围盒的左下角应成为锚点"
+        );
+
+        // 退化 cached 帧反复到达：锚点必须纹丝不动
+        for _ in 0..4 {
+            c.handle_caret_update(&CaretData {
+                x: 1758,
+                y: 697,
+                height: 44,
+                composition_start_x: 1758,
+                composition_start_y: 697,
+                source: wind_ipc::protocol::caret_source::TSF_CACHED,
+                composition_rect: Some(degenerate),
+            });
+            let cs = *c.composition_start.lock().unwrap();
+            assert_eq!(
+                (cs.0, cs.1),
+                (good.0, good.3),
+                "布局退化的帧不得重锁锚点——它的 caret 与矩形出自同一次失败的布局查询"
+            );
+        }
+        assert!(
+            drain_positions(&rx)
+                .into_iter()
+                .all(|pos| pos == (good.0, good.3)),
+            "候选窗不得在两处之间抖动"
+        );
+    }
+
+    /// ★★★ 「起点跟着 caret 走」的宿主必须抑制逃生阀，否则锚点被一路推走且回不来。
+    ///
+    /// WPS 实测（2026-09-05 14:56）compStart 每帧与 caret 同步递增，打字时 caret 持续
+    /// 偏离已锁锚点，逃生阀反复重锁：
+    ///   14:56:31 (1830,861) → (1615,903)
+    ///   14:56:34 (1615,903) → (2591,861)
+    /// 锚点从真实起点 1830 被推到 2591。等到删除时**逐字回退每步只有 15~30px**，永远够
+    /// 不到 3 倍行高的阈值，锚点永久卡在 2591 —— 候选窗离组合区 868px（用户截图）。
+    ///
+    /// ★ 与 QQ 退格问题同构：逃生阀只认单帧大跳，删除却是小步累积的。推过去容易，回来
+    /// 不可能。对这类宿主它不是保护，是错位的制造者。
+    #[test]
+    fn an_insertion_point_host_keeps_its_first_anchor_through_typing_and_deleting() {
+        const TOP: i32 = 827;
+        const BOTTOM: i32 = 861;
+        const LINE_H: i32 = 34;
+        const REAL_START: i32 = 1830;
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (REAL_START, BOTTOM, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "fafasdfdddd".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "啊方案".into(),
+                ..Default::default()
+            }];
+            st.caret_x = REAL_START;
+            st.caret_y = BOTTOM;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        drain_positions(&rx);
+        *c.composition_start.lock().unwrap() = (REAL_START, BOTTOM, true);
+
+        // 打字：caret 与 compStart 同步右移，一路走到 2591（远超 3 倍行高）
+        let mut x = REAL_START;
+        while x < 2591 {
+            x += 30;
+            c.handle_caret_update(&CaretData {
+                x,
+                y: BOTTOM,
+                height: LINE_H,
+                composition_start_x: x,
+                composition_start_y: BOTTOM,
+                source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                composition_rect: Some((x, TOP, x + 2, BOTTOM)),
+            });
+        }
+        let after_typing = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (after_typing.0, after_typing.1),
+            (REAL_START, BOTTOM),
+            "打字期间锚点必须钉在首帧真实起点；被逃生阀推走后删除就再也回不来"
+        );
+
+        // 逐字删除回退：每步 30px，够不到阈值——锚点仍须不动
+        while x > REAL_START {
+            x -= 30;
+            c.handle_caret_update(&CaretData {
+                x,
+                y: BOTTOM,
+                height: LINE_H,
+                composition_start_x: x,
+                composition_start_y: BOTTOM,
+                source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                composition_rect: Some((x, TOP, x + 2, BOTTOM)),
+            });
+        }
+        let after_delete = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (after_delete.0, after_delete.1),
+            (REAL_START, BOTTOM),
+            "删除结束后锚点仍应在真实起点"
+        );
+        assert!(
+            drain_positions(&rx)
+                .into_iter()
+                .all(|pos| pos == (REAL_START, BOTTOM)),
+            "候选窗全程不得离开组合起点"
         );
     }
 
