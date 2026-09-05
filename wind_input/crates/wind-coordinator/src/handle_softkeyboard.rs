@@ -616,7 +616,26 @@ impl Coordinator {
                 warn!("软键盘: 合成按键 {combo:?} 失败: {e}");
             }
         }
-        #[cfg(not(windows))]
+        // ⛔ macOS **不能**在本进程 post CGEvent。
+        //
+        // 服务是 LaunchAgent 拉起的进程，没有辅助功能授权，而向别的进程注入键盘事件
+        // 恰恰需要它——`CGEventPost` 会**返回成功、事件被静默丢弃**。拿着授权的是 `.app`，
+        // 所以按键合成一律推下行帧交给它的 `KeySynthesizer`，与命令直通车 `key.tap`
+        // 走同一条路（见 `handle_cmdbar_macos` 模块头）。
+        //
+        // 这不是理论顾虑：0.121 那版就是照搬 Windows 分支直接调 `SysKeys`，
+        // 表现为「软键盘上 Tab / 退格 / 回车 / Del 一个都不管用」。
+        #[cfg(target_os = "macos")]
+        {
+            let (key, mods) = crate::handle_cmdbar_macos::split_combo(combo);
+            if key.is_empty() {
+                warn!("软键盘: 合成按键 {combo:?} 解析不出键名，已忽略");
+                return;
+            }
+            debug!("软键盘: 合成按键 {combo:?} -> .app (key={key:?} mods={mods:?})");
+            self.push_cmdbar_key_frame(&wind_ipc::codec::encode_key_tap(&key, &mods));
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = combo;
         }

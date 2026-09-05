@@ -96,7 +96,10 @@ impl wind_cmdbar::KeyInjector for CoordKeys {
 
 /// 拆 combo 串为 `.app` KeySynthesizer 规范 (key, mods)：key 为小写 canonical 名，
 /// mods ⊆ {"ctrl","shift","alt","win"}（cmd/command→win、control→ctrl、menu/option→alt）。
-fn split_combo(combo: &str) -> (String, Vec<String>) {
+///
+/// `pub(crate)`：软键盘的功能键点击（`handle_softkeyboard::softkeyboard_tap`）与命令
+/// 直通车共用同一条下行帧，键名归一自然也只能有一份。
+pub(crate) fn split_combo(combo: &str) -> (String, Vec<String>) {
     let parts: Vec<&str> = combo
         .split('+')
         .map(|s| s.trim())
@@ -115,5 +118,93 @@ fn split_combo(combo: &str) -> (String, Vec<String>) {
             other => other.to_string(),
         })
         .collect();
-    (key.to_lowercase(), mods)
+    (normalize_key(&key.to_lowercase()), mods)
+}
+
+/// 键名归一到 `.app` `KeySynthesizer.keyCodeMap` 认得的那一份。
+///
+/// ⚠️ 两侧的键名表**不是同一份**，这里是它们唯一的接缝，别指望「大小写一致就通了」：
+///
+/// - `del`：Rust 侧 `key_inject::parse_key` 收 `"delete" | "del"` 两种写法，Swift 侧只有
+///   `delete`。软键盘的功能键表用的正好是 `del` ⇒ 不归一就解析不出键码，**静默丢弃**。
+/// - `vk:0xNN`：那是 **Windows** 虚拟键码。Swift 侧的 `resolveKeyCode` 会把 `vk:` 后面的
+///   数字当成 **mac CGKeyCode** 原样透传 ⇒ 软键盘的 Caps（`vk:0x14`）会变成 CGKeyCode 20，
+///   也就是数字键 `2`——点一下 Caps 往文档里打个 2，比没反应更糟。这里按名字接住它。
+///
+/// 加新条目前先确认 Swift 那张表里有没有对应键名，没有就得两边一起加。
+fn normalize_key(key: &str) -> String {
+    match key {
+        "del" => "delete".to_string(),
+        // VK_CAPITAL。⚠️ 归一之后 `.app` 能解析出 kVK_CapsLock(57) 了，但**大写锁定
+        // 本身仍改不动**——它的状态由 HID 层维护，CGEvent 碰不到；实测
+        // `IOHIDSetModifierLockState` 也是「返回成功、状态不变」。见
+        // `docs/design/soft-keyboard.md` §11.9。归一仍然要做：至少别再打出个 2。
+        "vk:0x14" | "vk:20" => "capslock".to_string(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_combo;
+
+    /// 软键盘功能键表（`SOFT_FN_KEYS`）里的每个键名，拆完都必须落在 `.app`
+    /// `KeySynthesizer.keyCodeMap` 认得的那一份上。
+    ///
+    /// ★ 这条钉的是 0.121 的真实缺陷：功能键点击整条路都通了（帧发得出去、`.app` 收得到），
+    /// 却因为**键名对不上**在最后一步 `resolveKeyCode` 返回 nil 而静默丢弃。
+    /// 期望值取自 `KeySynthesizer.swift` 的 `keyCodeMap`——改那张表时这里要跟着改。
+    #[test]
+    fn soft_keyboard_fn_keys_land_on_names_the_app_knows() {
+        // 与 `wind_ui_types::SOFT_FN_KEYS` 的键名逐条对应。
+        let cases = [
+            ("backspace", "backspace"),
+            ("tab", "tab"),
+            ("enter", "enter"),
+            ("space", "space"),
+            // `.app` 侧只有 `delete`，没有 `del`。
+            ("del", "delete"),
+            // Windows VK 不能原样透传：`vk:0x14` 会被当成 mac CGKeyCode 20（数字键 2）。
+            ("vk:0x14", "capslock"),
+        ];
+        for (input, want) in cases {
+            let (key, mods) = split_combo(input);
+            assert_eq!(key, want, "功能键 {input:?} 归一后应是 {want:?}");
+            assert!(mods.is_empty(), "功能键不带修饰键");
+        }
+    }
+
+    /// 键名表与 `wind_ui_types::SOFT_FN_KEYS` **不能漂移**：那边加了新功能键，
+    /// 这里的用例集必须跟上，否则新键会重演「静默丢弃」。
+    #[test]
+    fn fn_key_case_list_covers_every_soft_key() {
+        let covered = ["backspace", "tab", "enter", "space", "del", "vk:0x14"];
+        for (name, _) in wind_ui_types::SOFT_FN_KEYS {
+            assert!(
+                covered.contains(name),
+                "SOFT_FN_KEYS 新增了 {name:?}，请在上面那条测试里补一行期望值\
+                 （并确认 KeySynthesizer.swift 的 keyCodeMap 认得它）"
+            );
+        }
+    }
+
+    /// 组合键的修饰键归一：cmd/command → win，control → ctrl，option → alt。
+    #[test]
+    fn modifiers_normalize_to_the_app_vocabulary() {
+        assert_eq!(
+            split_combo("Cmd+Shift+v"),
+            ("v".into(), vec!["win".to_string(), "shift".to_string()])
+        );
+        assert_eq!(
+            split_combo("Control+Option+Left"),
+            ("left".into(), vec!["ctrl".to_string(), "alt".to_string()])
+        );
+    }
+
+    /// 空串不该产出一个「按下空键名」的帧。
+    #[test]
+    fn empty_combo_yields_empty_key() {
+        assert_eq!(split_combo(""), (String::new(), Vec::new()));
+        assert_eq!(split_combo("+"), (String::new(), Vec::new()));
+    }
 }
