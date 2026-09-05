@@ -8,6 +8,7 @@ CCaretEditSession::CCaretEditSession(ITfContext* pContext)
     , _pComposition(nullptr)
     , _compStartOffset(0)
     , _hasCompositionStart(FALSE)
+    , _hasCompositionRect(FALSE)
     , _succeeded(FALSE)
     , _usedCompStartAsCaret(FALSE)
     , _pAsyncOwner(nullptr)
@@ -156,6 +157,42 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
                     }
                     pStartRange->Release();
                 }
+
+                // ★ 整个组合 range 的包围矩形——与上面那次的区别只有「折不折叠」，
+                // 但答的是完全不同的问题：折叠后答「组合从哪开始」，不折叠答「组合占了
+                // 多大一块」。组合换行后这两者分处不同行，只有后者能看出「跨行了」。
+                //
+                // ⚠ 这里**不做任何判断、不参与决策**（2026-09-05 探针阶段）：各宿主对跨行
+                // range 的 GetTextExt 行为尚未逐一验证，规范说返回包围矩形，实现可能只返回
+                // 首行、也可能失败。先如实上报 + 打日志，看清真实返回值再定锚点公式。
+                //
+                // ⚠ TS_E_NOLAYOUT 不是「这个宿主不支持」，而是「此刻布局还没算完」——
+                // 宿主随后会经 OnLayoutChange 通知，届时重查即可。日志必须把它与真失败分开，
+                // 否则会把一个暂时状态误读成宿主能力缺失。
+                BOOL clippedComp = FALSE;
+                HRESULT hrCompRect = pContextView->GetTextExt(ec, pCompRange, &_compositionRect,
+                                                              &clippedComp);
+                if (SUCCEEDED(hrCompRect))
+                {
+                    _hasCompositionRect = TRUE;
+                    WIND_LOG_DEBUG_FMT(L"CaretEditSession: Composition rect (%ld, %ld, %ld, %ld) "
+                                       L"w=%ld h=%ld clipped=%d\n",
+                                       _compositionRect.left, _compositionRect.top,
+                                       _compositionRect.right, _compositionRect.bottom,
+                                       _compositionRect.right - _compositionRect.left,
+                                       _compositionRect.bottom - _compositionRect.top, clippedComp);
+                }
+                else if (hrCompRect == TS_E_NOLAYOUT)
+                {
+                    WIND_LOG_DEBUG(L"CaretEditSession: Composition rect 暂无布局 (TS_E_NOLAYOUT)，"
+                                   L"等宿主 OnLayoutChange 后重查\n");
+                }
+                else
+                {
+                    WIND_LOG_DEBUG_FMT(L"CaretEditSession: Composition rect GetTextExt failed hr=0x%08X\n",
+                                       hrCompRect);
+                }
+
                 pCompRange->Release();
             }
         }
@@ -178,6 +215,24 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
             _caretRect = _compositionStartRect;
             _succeeded = TRUE;
             _usedCompStartAsCaret = TRUE;
+
+            // ★★★ 降级帧的组合矩形同样作废。
+            //
+            // 走到这里意味着 selection 的 GetTextExt 失败或退化——那是「宿主此刻还没算完
+            // 布局」（TS_E_NOLAYOUT 语义），而**同一次 edit session 里的其它布局查询同样
+            // 不可信**，不只是 selection。QQ 实测（2026-09-05 12:28:36）：降级帧的
+            // compRect=(2158,1498,2174,1532) w=16 h=34，是组合刚开始时那一个字符的旧矩形；
+            // 紧随其后的正常帧是 (2158,1498,2410,1572) w=252 h=74。两者交替上报，锚点就在
+            // 1532/1572 之间每秒抖十几次。
+            //
+            // ⚠ 服务端那条「caret 落在矩形内」的可信判据挡不住它：降级帧的 caret 与 rect
+            // 是**一致地陈旧**——自洽，但都是旧值。只有在这里、在知道「本次降级过」的地方
+            // 才判得了。
+            //
+            // 作废后服务端本帧取不到矩形，回退既有锚点逻辑；下一帧正常帧带着真矩形到达，
+            // 锚点随即回到正确值。实测这一去一回不产生位移：降级帧的 caret 恰是组合起点，
+            // 与已锁锚点的距离远不到逃生阀阈值。
+            _hasCompositionRect = FALSE;
 
             // 顺带探测本 context 自己的显示区域。GetScreenExt 是 TSF 语义内的参照系，不依赖
             // 窗口层级与前台状态；若实测可靠，将来可取代「所有显示器」做越界校验——「前台窗口」
@@ -239,6 +294,8 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
             result.caretRect            = _caretRect;
             result.compStartRect        = _compositionStartRect;
             result.hasCompStart         = _hasCompositionStart;
+            result.compRect             = _compositionRect;
+            result.hasCompRect          = _hasCompositionRect;
             result.usedCompStartAsCaret = _usedCompStartAsCaret;
             result.kind                 = _probeKind;
             result.sessionTag           = _sessionTag;
@@ -283,16 +340,31 @@ BOOL CCaretEditSession::GetCompositionStartResult(RECT* prc)
     return FALSE;
 }
 
+BOOL CCaretEditSession::GetCompositionRectResult(RECT* prc)
+{
+    if (_hasCompositionRect && prc)
+    {
+        *prc = _compositionRect;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 // Static method to get both caret rect and composition start rect
 BOOL CCaretEditSession::GetCaretAndCompositionStartRect(ITfContext* pContext, TfClientId tfClientId,
                                                          ITfComposition* pComposition,
                                                          RECT* pCaretRect, RECT* pCompStartRect, BOOL* pHasCompStart,
                                                          LONG compStartOffset,
-                                                         BOOL* pUsedCompStartAsCaret)
+                                                         BOOL* pUsedCompStartAsCaret,
+                                                         RECT* pCompRect, BOOL* pHasCompRect)
 {
     if (pUsedCompStartAsCaret)
     {
         *pUsedCompStartAsCaret = FALSE;
+    }
+    if (pHasCompRect)
+    {
+        *pHasCompRect = FALSE;
     }
     if (pContext == nullptr || pCaretRect == nullptr)
     {
@@ -327,6 +399,10 @@ BOOL CCaretEditSession::GetCaretAndCompositionStartRect(ITfContext* pContext, Tf
         if (pUsedCompStartAsCaret)
         {
             *pUsedCompStartAsCaret = pEditSession->UsedCompStartAsCaret();
+        }
+        if (pCompRect && pHasCompRect)
+        {
+            *pHasCompRect = pEditSession->GetCompositionRectResult(pCompRect);
         }
     }
     else

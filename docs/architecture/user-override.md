@@ -47,7 +47,12 @@
 | 文件 | 层次 | 实现 |
 |---|---|---|
 | `config.toml` | 代码默认 → `data/config.toml` → 用户 `config.toml` | `Config::load` |
-| `compat.toml` | `data/compat.toml` → 用户 `compat.toml`，按进程名整条覆盖 | `app_compat.rs::load` |
+| `compat.toml` | `data/compat.toml` → 用户 `compat.toml`，按进程名整条覆盖；协议修正 `composition_start_pair_guard` 未写时继承 | `app_compat.rs::load` |
+
+`composition_start_pair_guard` 的例外是为了升级安全：菜单会为某应用写只含被修改字段的
+稀疏用户规则，这不应该静默抹掉后续版本给该宿主新增的协议级正确性修正。该字段是
+`Option<bool>`：未写继承低层，显式 `false` 可覆盖关闭；其余 `compat.toml` 字段仍保持整条
+覆盖语义。
 
 附带一个只存在于用户侧、无安装目录对应物的合并层：`schema_overrides/{id}.toml`
 （设置页对方案参数的调整，深合并到方案文件之上）。它是**程序写、程序读**的，不是给用户

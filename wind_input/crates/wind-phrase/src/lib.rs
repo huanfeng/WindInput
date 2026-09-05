@@ -6,7 +6,8 @@
 //! **双路径**（对齐 Go design §7.2）：
 //! - 短语 text 使用命令栏语法（含 `$CC(`/`$SS(`/`$AA(` marker 或顶层 `{expr}` 插值）→ 经
 //!   `wind-cmdbar` 解析求值（`{date()}`/`{calc(code)}`/`{upper(code)}`/`$SS` 字符串组/`$AA` 字符组等）。
-//! - 否则 → 旧的简单模板变量展开（$Y/$M/$MM/$D/$DD/$HH/$mm/$ss/$WC/$YC/$MC/$DC/$ts/$tsms）。
+//! - 否则 → 旧的简单模板变量展开
+//!   （$Y/$YYYY/$YY/$M/$MM/$D/$DD/$HH/$mm/$ss/$WC/$YC/$MC/$DC/$ts/$tsms）。
 //!
 //! 命令栏 display 侧只用纯函数（无需宿主服务）；`$CC` 的副作用动作需平台服务（按键/剪贴板/
 //! 进程注入），Rust 端平台层尚缺，故当前仅显现 display 候选，动作执行待平台服务补齐。
@@ -884,6 +885,13 @@ const WEEKDAY_CN: [&str; 7] = ["日", "一", "二", "三", "四", "五", "六"];
 fn expand_var(name: &str, now: &DateTime<Local>) -> Option<String> {
     Some(match name {
         "Y" => now.year().to_string(),
+        // `$YYYY`（补零四位）/ `$YY`（后两位）与快捷输入格式表的 `year_var` **同名同义**。
+        // 短语层绑系统当前时间，年份恒是四位，故 `$YYYY` 与 `$Y` 实际同值——但仍必须有：
+        // 少一个名字，用户把格式表里的 `$YYYY-$MM-$DD` 抄进短语就会命中「未知变量」，
+        // 整条短语静默作废（`expand_template` 的 `?`），症状是「这条短语打不出来」且日志干净。
+        "YYYY" => format!("{:04}", now.year()),
+        // `rem_euclid` 而非 `%`：与格式表同一份口径，公元前年份（负数）不会得到 `-6` 这种结果。
+        "YY" => format!("{:02}", now.year().rem_euclid(100)),
         "M" => now.month().to_string(),
         "MM" => format!("{:02}", now.month()),
         "D" => now.day().to_string(),
@@ -1065,6 +1073,34 @@ mod tests {
             "2026年6月14日"
         );
         assert_eq!(expand_template("$Y-$MM-$DD", &now).unwrap(), "2026-06-14");
+    }
+
+    /// ★ 年份四态（`$Y` `$YYYY` `$YY` `$YC`）与快捷输入格式表**同名同义**。
+    ///
+    /// 直接拿 `QuickValues` 做对照，而不是各写各的期望值：这两处是用户眼里的同一套写法
+    /// （文档也是这么承诺的），任一侧少一个名字或取值不同，症状都是「同样的模板抄到短语里
+    /// 一条候选都不出」且日志干净——`expand_template` 遇未知变量整条作废。
+    #[test]
+    fn test_expand_year_forms_agree_with_quick_format_table() {
+        let now = fixed(); // 2026-06-14
+        assert_eq!(expand_template("$YY-$MM-$DD", &now).unwrap(), "26-06-14");
+        assert_eq!(expand_template("${YY}年", &now).unwrap(), "26年");
+        assert_eq!(
+            expand_template("$YYYY-$MM-$DD", &now).unwrap(),
+            "2026-06-14"
+        );
+        let quick = wind_quick_input::QuickValues::Date {
+            y: 2026,
+            m: 6,
+            d: 14,
+        };
+        for name in ["Y", "YYYY", "YY", "YC", "M", "MM", "MC", "D", "DD", "DC"] {
+            assert_eq!(
+                expand_var(name, &now),
+                quick.get(name),
+                "${name} 在短语与格式表两处取值不一致"
+            );
+        }
     }
 
     #[test]

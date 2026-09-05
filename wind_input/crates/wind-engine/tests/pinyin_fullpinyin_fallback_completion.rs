@@ -214,3 +214,79 @@ fn fallback_extra_without_trailing_partial() {
         );
     }
 }
+
+/// 任意 `(音节序列, 词)` 的用户词夹具（`manager_with_user_word` 的通用版）。
+///
+/// ⚠️ 目录名带 **pid**：本仓常态是多 worktree / 多会话并行跑测试，只按 `tag` 区分的话，
+/// 同一个用例在两个进程里会共用一份 store 并互相 `remove_dir_all`。上面那个夹具是先前
+/// 写的、没带 pid（`real_dict.rs` 早就踩过这个坑并加了 pid），新写的不该再沿用。
+fn manager_with_word(dir: &std::path::Path, tag: &str, syls: &[&str], word: &str) -> EngineManager {
+    let root = std::env::temp_dir().join(format!("wind_fpfb_w_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let store = Arc::new(Store::open(root.join("user_data.db")).expect("打开 store"));
+    let mut code = String::new();
+    let mut boundary: u64 = 0;
+    for s in syls {
+        boundary |= 1u64 << code.len();
+        code.push_str(s);
+    }
+    store
+        .add_user_word("pinyin", &code, word, 1000, boundary)
+        .expect("写入用户词");
+
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["shuangpin".to_string()];
+    cfg.schema.active = "shuangpin".to_string();
+    cfg.schema.pinyin.shuangpin.allow_full_pinyin = true;
+    EngineManager::with_store_override(&cfg, Some(dir), Some(store), Some(root.join("ov")))
+}
+
+/// ★ 降级支路的用户词也必须守音节边界对齐 —— 这条路**走不到** step 6.3 那道 retain。
+///
+/// `recall_full_pinyin` 被刻意放在 6.3 之后（6.3 的尺子由双拼域音节数算出，裁全拼候选
+/// 属判据跨域复用），所以支路产出的候选一条都过不了那道闸门。修复音节对齐时若只改了
+/// 词库层与主路径，这里的用户词会照旧跨音节：`shaixu` 切分为 `shai|xu`，`xu` 已是完整
+/// 音节，不该被拉长成 `xuan`。
+///
+/// 缺了这条测试，同一输入下会出现「系统词已挡住、用户词还漏着」的不一致，而且只在
+/// 双拼 + 允许全拼输入这个组合下才复现 —— 主路径的用例一个都抓不到。
+#[test]
+fn fallback_user_word_respects_syllable_alignment() {
+    let Some(dir) = data_dir() else {
+        eprintln!("跳过：拼音词库不存在");
+        return;
+    };
+    let mgr = manager_with_word(&dir, "align", &["shai", "xuan"], "筛选");
+
+    // shaix：`shai` + 残码 `x` ⇒ 对齐位落在残码之前 ⇒ 必须可达。
+    let r = mgr.convert_with("shuangpin", "shaix", COORD_LIMIT);
+    assert!(
+        r.candidates.iter().any(|c| c.text == "筛选"),
+        "残码位（shai|x）上用户词应可达；实际前 10={:?}",
+        r.candidates
+            .iter()
+            .take(10)
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // shaixu：`shai|xu` 两个完整音节 ⇒ 不得把 `xu` 拉长成 `xuan`。
+    let r = mgr.convert_with("shuangpin", "shaixu", COORD_LIMIT);
+    assert!(
+        !r.candidates.iter().any(|c| c.text == "筛选"),
+        "shaixu 的 xu 已是完整音节，降级支路不该把它拉长成 xuan；实际前 10={:?}",
+        r.candidates
+            .iter()
+            .take(10)
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // 打完整必须回来，否则上一条可能只是「用户词整个失效」。
+    let r = mgr.convert_with("shuangpin", "shaixuan", COORD_LIMIT);
+    assert!(
+        r.candidates.iter().any(|c| c.text == "筛选"),
+        "打完整音节后用户词必须可达"
+    );
+}

@@ -116,6 +116,23 @@ pub struct Schema {
     /// **方案级短语加载**（`[phrases]` 段）。默认全开。
     #[serde(default)]
     pub phrases: PhrasesSpec,
+    /// 本次读取中**没能按用户所写生效的项**，人类可读，直接进 toast。
+    ///
+    /// 两个来源合流，故存的是描述而不是路径：段级降级给出 `[candidate.layout]`
+    /// （整段回落，见 `EngineManager::salvage_schema`），字段级容错给出 `值 "uprigth"`
+    /// （只有那一个字段回落，拿不到字段名——`deserialize_with` 不知道自己在哪，
+    /// 见 [`crate::tolerant_de`]）。原值对用户其实更好用：他在自己的文件里搜得到。
+    ///
+    /// 非配置字段，`#[serde(skip)]`：它是「这份方案是怎么读出来的」这一事实，不是方案内容。
+    /// 由 `EngineManager::read_schema` 填入，供协调器 toast 与日志使用。
+    ///
+    /// # 为什么挂在 `Schema` 上而不是收进全局表
+    ///
+    /// `read_schema` 是关联函数、有约 30 个调用点，且方案会随缓存失效反复重读——用全局
+    /// 收集器就要额外解决去重与清空时机。挂在返回值上则天然跟着 `Schema` 的生命周期走：
+    /// 谁拿到方案谁就看得见它的降级，缓存一起缓存，失效一起失效，没有第二个真相源。
+    #[serde(skip)]
+    pub degraded_items: Vec<String>,
 }
 
 /// overlay 激活面配置（`[overlay]`）。
@@ -615,7 +632,7 @@ impl DictSpec {
 /// 重跑那条已真机修过一轮的链（`Follow` ≠「什么都不做」，见 `sync_schema_scope`）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PunctSpec {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub mode: PunctIntent,
     /// **方案级自定义标点映射表**（`[punct.custom_mappings]`）。语义是**整表替换**：
     ///
@@ -683,7 +700,7 @@ impl PunctIntent {
 /// 取值互不干扰。见 `docs/design/candidate-comment-layering.md` §1.2。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CandidateSpec {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub layout: crate::config::LayoutIntent,
     /// 本方案的注释模板覆盖（竖排）。三态见 [`crate::config::CommentTemplateOverride`]：
     /// 键缺失 = 跟随全局、非空 = 覆盖、空串 = 本方案不显示注释。
@@ -734,7 +751,7 @@ pub struct CandidateSpec {
     /// 而不是继续按蒙古文方案转 90°。
     /// ⚠️ 与同段的 [`Self::layout`]（呈现、跟活跃方案）刻意不同，取值时不要复用同一个
     /// `behavior_for` 结果——`[punct]` 段的 `mode` 与 `custom_mappings` 已经是同一个形状。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub text_orientation: crate::config::TextOrientation,
 }
 
@@ -804,6 +821,13 @@ pub struct SchemaBehavior {
     /// `candidate_font_family` 同源（数据方案），与 `candidate_layout` 不同。
     pub candidate_text_orientation: crate::config::TextOrientation,
     pub phrases: PhrasesSpec,
+    /// 这次读取里**没能按用户所写生效的项**（见 [`Schema::degraded_items`]）。
+    ///
+    /// 搭这趟车而不是另开一个缓存：它与三段行为同源（同一次 `read_schema`）、同批失效，
+    /// 而 `behavior_cache` 已经是协调器唯一稳定拿得到方案信息的入口。另开一份就要再解决
+    /// 一次「谁来失效它」——`key_actions` / `session_actions` 那两个缓存已经因为
+    /// 「同批失效要接两处」在注释里互相提醒过一次，不要再添第三处。
+    pub degraded_items: Vec<String>,
 }
 
 impl Schema {
@@ -818,6 +842,7 @@ impl Schema {
             candidate_font_family: self.candidate.font_family.clone(),
             candidate_text_orientation: self.candidate.text_orientation,
             phrases: self.phrases.clone(),
+            degraded_items: self.degraded_items.clone(),
         }
     }
 }

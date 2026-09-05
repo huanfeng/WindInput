@@ -66,6 +66,7 @@ fn feed_keys_yields_candidates_on_ui_receiver() {
         composition_start_x: 100,
         composition_start_y: 200,
         source: caret_source::TSF_SELECTION,
+        composition_rect: None,
     });
 
     // 只锁「含候选」这一条：preedit 依 ui.candidate.preedit_display 配置可为空

@@ -263,6 +263,36 @@ struct CaretPayloadV2
 };
 static_assert(sizeof(CaretPayloadV2) == 24, "CaretPayloadV2 must be 24 bytes");
 
+// Caret position payload v3 (40 bytes) = CaretPayloadV2 + 组合范围矩形
+//
+// ★ 为什么需要它：v2 只给出两个**孤立的点**（selection 插入点、组合起点），服务端无从知道
+// 「这段组合占了屏幕上多大一块」。组合一旦换行，两个点就开始互相矛盾——插入点跑到了第二行，
+// 组合起点还在第一行——而服务端唯一能做的判断是拿它们的像素距离跟「3 倍行高」比大小，
+// 超了就把锚点挪过去。记事本实测：行高在 74/42 之间变（首行与次行不同），阈值随之在
+// 126/222 之间跳，于是换行能不能被跟上取决于那一刻的偏移恰好落在阈值哪一侧。
+// 用像素阈值去判一件结构性的事（跨行了没有），必然时对时错。
+//
+// 组合范围矩形把这件事从「猜」变成「读」：它是宿主对**整个组合 range** 的 GetTextExt 结果。
+// 单行时 left 就是组合起点 x、bottom 就是行底；跨行时 left 落在行首、bottom 落在最后一行底。
+// 于是「锚点 = (left, bottom)」一个公式同时覆盖两种情形，无需分支、无需阈值。
+// 另有 (bottom - top) / 单行行高 = 跨了几行。
+//
+// ⚠ 各宿主对**跨行 range** 的 GetTextExt 行为尚未逐一验证（规范说返回包围矩形，但实现可能
+// 只返回首行、可能失败）。故本字段当前**只上报、不参与任何决策**，先用真机日志看清各宿主
+// 的真实返回值。取不到时四值全 0，服务端据此判定「本帧没有组合矩形」。
+//
+// 兼容：服务端按 payload 长度分支——40 字节读矩形，24/20/12 字节走各自旧路径。
+struct CaretPayloadV3
+{
+    CaretPayload caret;
+    int32_t      source;
+    int32_t      compRectLeft;   // 整个组合 range 的包围矩形；四值全 0 = 未取到
+    int32_t      compRectTop;
+    int32_t      compRectRight;
+    int32_t      compRectBottom;
+};
+static_assert(sizeof(CaretPayloadV3) == 40, "CaretPayloadV3 must be 40 bytes");
+
 // Selection changed payload (4 bytes) - sent from ITfTextEditSink::OnEndEdit
 // Notifies Go that the caret moved outside of composition (e.g., mouse click)
 struct SelectionChangedPayload

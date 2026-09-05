@@ -5,6 +5,7 @@
 
 pub mod app_compat;
 pub mod change_hook;
+pub mod charset_def;
 pub mod code_charset;
 pub mod config;
 pub mod config_schema;
@@ -13,7 +14,13 @@ pub mod hotkey;
 pub mod patch;
 pub mod runtime_state;
 pub mod schema;
+pub mod section_fallback;
 pub mod startup_trace;
+pub mod tolerant_de;
+/// 值域守门元测试（见模块头部）。放在 `src/` 而非 `tests/`：它要遍历
+/// `AppCompatFile` 等 crate 私有类型，集成测试只看得见 pub API。
+#[cfg(test)]
+mod value_domain_guard;
 pub mod variant;
 
 pub use code_charset::{CodeCharSet, CodeCharSetError};

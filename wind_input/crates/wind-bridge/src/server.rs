@@ -525,6 +525,7 @@ pub(crate) fn dispatch_command(
                     // 「这一帧只落缓存、没有来源信息的消费者」已不再成立——`ui.status.show_on_focus`
                     // 让状态气泡直接锚在这组坐标上，来源是它唯一能据以判断可信度的东西。
                     source: fg.caret_source,
+                    composition_rect: None,
                 });
             }
             // 新 DLL 同步发送（is_async=false）：回传权威模式解除其阻塞并消除首键竞态。
@@ -732,6 +733,25 @@ pub(crate) fn dispatch_command(
                     }
                 })
             {
+                // ⚠ 2026-09-05 探针阶段：组合矩形**只观察、不参与决策**，故不进 `CaretData`。
+                // 目的是先用真机日志看清各宿主对**跨行** range 的 `GetTextExt` 究竟返回什么
+                // （规范说返回包围矩形，实现可能只返回首行、可能 TS_E_NOLAYOUT）。看清之后
+                // 再决定锚点公式，并连同消费代码一起把字段加进 `CaretData`。
+                //
+                // 判读要点：`h ≈ 单行行高` ⇒ 组合在一行内，`left` 就是组合起点；
+                // `h ≈ n 倍行高` ⇒ 跨了 n 行，此时 `(left, bottom)` 才是最后一行的行首。
+                let comp_rect = wind_ipc::protocol::CaretPayload::comp_rect_from_bytes(payload);
+                if let Some((l, t, r, b)) = comp_rect {
+                    // `CaretPayload` 是 packed 布局，格式化宏会对字段取引用 ⇒ 未对齐引用是 UB。
+                    // 先按值拷进局部变量再格式化。
+                    let (cx, cy, ch) = (caret.x, caret.y, caret.height);
+                    let (csx, csy) = (caret.composition_start_x, caret.composition_start_y);
+                    debug!(
+                        "caret_update 组合矩形: ({l},{t},{r},{b}) w={} h={}（对照 caret=({cx},{cy}) h={ch} compStart=({csx},{csy})）",
+                        r - l,
+                        b - t
+                    );
+                }
                 handler.handle_caret_update(&CaretData {
                     x: caret.x,
                     y: caret.y,
@@ -740,6 +760,8 @@ pub(crate) fn dispatch_command(
                     composition_start_y: caret.composition_start_y,
                     // v2 载荷（24 字节）才有；旧 DLL 20 字节、macOS 12 字节均落 UNKNOWN
                     source: wind_ipc::protocol::CaretPayload::source_from_bytes(payload),
+                    // v3 载荷（40 字节）才有
+                    composition_rect: comp_rect,
                 });
             }
             // macOS IMKit sendCaretUpdateIfAvailable 同步 send+readFrame（注释「服务端一律返
@@ -779,6 +801,7 @@ pub(crate) fn dispatch_command(
                     composition_start_x: p.composition_start_x,
                     composition_start_y: p.composition_start_y,
                     source: wind_ipc::protocol::CaretPayload::source_from_bytes(payload),
+                    composition_rect: None,
                 });
             } else {
                 warn!(

@@ -30,6 +30,11 @@ struct AsyncCaretResult
     RECT caretRect;
     RECT compStartRect;
     BOOL hasCompStart;
+    // 整个组合 range 的包围矩形（GetTextExt(compRange)，未折叠）。
+    // 与 compStartRect 的区别：后者把 range 折叠到起点，只答「组合从哪开始」；
+    // 本字段答「组合占了多大一块」，换行后两者分处不同行。见 BinaryProtocol.h 的 CaretPayloadV3。
+    RECT compRect;
+    BOOL hasCompRect;
     // caret 无效时降级用了组合起点顶替。仍属 TSF 语义域（CARET_SRC_TSF_COMPOSITION）。
     BOOL usedCompStartAsCaret;
     CaretProbeKind kind;
@@ -62,7 +67,9 @@ public:
                                                  ITfComposition* pComposition,
                                                  RECT* pCaretRect, RECT* pCompStartRect, BOOL* pHasCompStart,
                                                  LONG compStartOffset = 0,
-                                                 BOOL* pUsedCompStartAsCaret = nullptr);
+                                                 BOOL* pUsedCompStartAsCaret = nullptr,
+                                                 RECT* pCompRect = nullptr,
+                                                 BOOL* pHasCompRect = nullptr);
 
     // 异步取坐标：用 TF_ES_ASYNCDONTCARE 请求锁，结果经 pOwner->OnAsyncCaretRectReady 回调返回。
     //
@@ -94,6 +101,8 @@ public:
     // 应指向余码段起点（候选窗锚点跟随余码，而非已顶出的文字）。
     void SetCompositionStartOffset(LONG offset) { _compStartOffset = offset; }
     BOOL GetCompositionStartResult(RECT* prc);
+    // 整个组合 range 的包围矩形；返回 FALSE 表示本次没取到（调用方应上报四值全 0）
+    BOOL GetCompositionRectResult(RECT* prc);
     // 本次是否走了「用组合起点顶替 caret」的降级
     BOOL UsedCompStartAsCaret() const { return _usedCompStartAsCaret; }
     // 设为异步模式并持有 owner 强引用；见 RequestCaretRectAsync
@@ -109,6 +118,9 @@ private:
     RECT _caretRect;
     RECT _compositionStartRect;
     BOOL _hasCompositionStart;
+    // 整个组合 range 的包围矩形，见 AsyncCaretResult::compRect
+    RECT _compositionRect;
+    BOOL _hasCompositionRect;
     BOOL _succeeded;
     // 本次是否走了「caret 无效 → 用组合起点顶替」的降级路径。用于给上报坐标标注来源：
     // 降级值仍属 TSF 语义域（CARET_SRC_TSF_COMPOSITION），与 GUI 回退有本质区别。

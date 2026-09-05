@@ -4,6 +4,7 @@
 //! 使用 redb 替代 bbolt，保持相同的 bucket 语义。
 
 pub mod abbrev_index;
+pub mod charsets;
 pub mod common_chars;
 pub mod dict_export;
 pub mod freq;

@@ -1164,8 +1164,8 @@ impl WdatReader {
         self.search_prefix_stats(prefix, limit).0
     }
 
-    /// 前缀查找，**只取音节数不超过 `max_syllables` 的条目**（拼音短输入严格档，判据见
-    /// [`crate::cached::prefix_syllable_keep`]）。
+    /// 前缀查找，只取**音节数不超过 `max_syllables`** 且**在 `completed_len` 处音节边界
+    /// 对齐**的条目（拼音短输入严格档，判据见 [`crate::cached::prefix_entry_keep`]）。
     ///
     /// ## 为什么必须下推到这一层，而不是查完再过滤
     ///
@@ -1185,8 +1185,9 @@ impl WdatReader {
         prefix: &str,
         limit: usize,
         max_syllables: u32,
+        completed_len: usize,
     ) -> Vec<DictEntry> {
-        self.search_prefix_inner(prefix, limit, Some(max_syllables))
+        self.search_prefix_inner(prefix, limit, Some((max_syllables, completed_len)))
             .0
     }
 
@@ -1199,14 +1200,14 @@ impl WdatReader {
         self.search_prefix_inner(prefix, limit, None)
     }
 
-    /// `search_prefix` 系列的公共实现。`max_syllables = Some(n)` 时按
-    /// [`crate::cached::prefix_syllable_keep`] 过滤条目（不影响剪枝判据，见
+    /// `search_prefix` 系列的公共实现。`filter = Some((max_syllables, completed_len))` 时按
+    /// [`crate::cached::prefix_entry_keep`] 过滤条目（不影响剪枝判据，见
     /// [`search_prefix_syllable_capped`](Self::search_prefix_syllable_capped) 的论证）。
     fn search_prefix_inner(
         &self,
         prefix: &str,
         limit: usize,
-        max_syllables: Option<u32>,
+        filter: Option<(u32, usize)>,
     ) -> (Vec<DictEntry>, PrefixSearchStats) {
         let mut stats = PrefixSearchStats::default();
         let v = &self.main;
@@ -1255,10 +1256,10 @@ impl WdatReader {
                     };
                     slot += 1;
                     *entries_read += 1;
-                    // 音节数过滤（严格档）：`slot` 已自增、`entries_read` 已计数，
+                    // 音节数 + 边界对齐过滤（严格档）：`slot` 已自增、`entries_read` 已计数，
                     // 二者描述的是「读到了第几条」，与是否入选无关，故在此之后才丢弃。
-                    if let Some(m) = max_syllables
-                        && !crate::cached::prefix_syllable_keep(boundary, m)
+                    if let Some((m, completed_len)) = filter
+                        && !crate::cached::prefix_entry_keep(boundary, code.len(), m, completed_len)
                     {
                         return;
                     }

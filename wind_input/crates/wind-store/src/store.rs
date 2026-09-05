@@ -75,6 +75,12 @@ pub(crate) const QUICK_FORMAT: TableDefinition<&str, &[u8]> = TableDefinition::n
 /// 进库见 [`crate::common_chars`] 的模块文档。
 /// 新表无需迁移：`init_tables` 在写事务里 `open_table` 即创建。
 pub(crate) const COMMON_CHARS: TableDefinition<&str, &[u8]> = TableDefinition::new("common_chars");
+/// 字符类的**用户层**：key = 类的 key，value = 那个类的 yaml 文本（UTF-8 字节）。
+///
+/// value 是文本而不是结构化记录：格式只在 `wind_config::charset_def` 一份，本 crate
+/// 不解析。为什么用户层进库而不是目录见 [`crate::charsets`] 的模块文档。
+/// 新表无需迁移：`init_tables` 在写事务里 `open_table` 即创建。
+pub(crate) const CHARSET_USER: TableDefinition<&str, &[u8]> = TableDefinition::new("charset_user");
 /// 全局短语：key = "{code}\0{text}"
 pub(crate) const PHRASES: TableDefinition<&str, &[u8]> = TableDefinition::new("phrases");
 /// 每日统计：key = "YYYY-MM-DD"
@@ -167,6 +173,7 @@ impl Store {
             w.open_table(SHADOW)?;
             w.open_table(QUICK_FORMAT)?;
             w.open_table(COMMON_CHARS)?;
+            w.open_table(CHARSET_USER)?;
             w.open_table(PHRASES)?;
             w.open_table(STATS_DAILY)?;
             w.open_table(META)?;

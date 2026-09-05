@@ -5,6 +5,8 @@
 pub mod auto_phrase;
 pub(crate) mod candidate_nav;
 pub mod candidate_pull;
+#[cfg(test)]
+pub(crate) mod charset_test_support;
 pub(crate) mod comment;
 pub(crate) mod config_bundle;
 pub(crate) mod construct;
@@ -20,6 +22,7 @@ pub mod handle_addword;
 pub mod handle_assoc;
 pub mod handle_aux_code;
 pub mod handle_candidate;
+pub mod handle_charset;
 pub mod handle_cmdbar;
 #[cfg(target_os = "macos")]
 pub mod handle_cmdbar_macos;

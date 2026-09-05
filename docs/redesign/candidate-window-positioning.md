@@ -227,6 +227,10 @@ UI 层（`wind-ui/src/candidate_window.rs`）**每帧据当前光标 + 内容尺
 
 - `coordinator.rs` 新增 `composition_start: Mutex<(x, y, valid)>`。
 - `handle_caret_update`：组合内首个有效 `compStart` 锁定（`!valid` 时才写），后续即便携带新值也不覆盖——防部分控件 `GetRange` 让起点随输入漂移；`<500px` 校验排除 logical/physical 坐标系不一致。
+- 首显锚点整体错误时允许按 caret 大偏移重锁。不能全局改成“reported compStart 非零就信它”：
+  其它宿主已有陈旧值和坐标系混用历史，会关闭原有自愈。对确认存在稳定帧对的宿主，以 per-app
+  `composition_start_pair_guard` 开启窄保护；只有来源顺序、前帧降级点、reported compStart 与当前锁
+  四者一致时，才把后续 selection 的大跨度判为正常组合宽度并保持起点。
 - `notify_ui_update` 坐标块：`in_app && compStart.valid` → 用 `compStart` 替代当前光标。
 - `reset_first_show`（组合结束/隐藏）复位 `valid=false`，下一组合重新锁定。
 - **`handle_focus_gained` 也复位**（2026-08-02）：焦点事件意味着换了 DocMgr，见下。
@@ -244,6 +248,13 @@ Excel 打破了它——输入时会在「单元格」与「公式编辑栏」�
 `state.caret_*` 判、下发却用锁死的组合起点，两者读的不是同一个值。
 
 故 `handle_focus_gained` 时作废锚定，由下一帧 `caret_update` 就地重锁。
+
+QQNT 提供了另一种反例：reported compStart 始终稳定，但同一按键后先报 selection 无效时的
+`TSF_COMPOSITION` 起点降级帧，再报真实的 `TSF_SELECTION` 组合末端。长拼音使末端离起点超过
+`3 × line_height` 后，若大偏移重锁以 caret 距离作证据，就会把两帧轮流写进
+`composition_start`，候选窗在起点与末端之间闪烁。出厂 `QQ.exe` 规则因此开启
+`composition_start_pair_guard`；协调器仅保护完整匹配的帧对，组合宽度增长不构成重锁理由，
+其它宿主仍保持原 caret 逃生阀。
 
 > **这个缺陷是被另一个修复"激活"的**：此前 Excel 的 `compStart` 取不到或被距离校验丢弃，
 > 锚定**从未真正生效**，候选窗一直跟着 caret 走，只表现为"跳一下"。修好 selection 退化降级与

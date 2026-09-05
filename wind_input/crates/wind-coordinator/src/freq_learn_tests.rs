@@ -728,6 +728,14 @@ fn exclude_coord(tag: &str, exclude: &[&str]) -> (Arc<Coordinator>, Arc<Store>) 
         )
         .unwrap();
     }
+    // ★ 把仓里真实的出厂字符类目录复制进夹具。
+    //
+    // `exclude_blocks = ["emoji"]` 里的 `emoji` **不是**内置区块组——它的成员由
+    // data/charsets/emoji.yaml 那份精确字表给出（旧的「五个块并集」口径两个方向都不准，
+    // 见设计文档 §5.5）。不复制的话这个名字解析不出来，配置被当成「未识别」跳过，
+    // 测试会以「开关没生效」的形态失败，而根因是夹具缺文件。
+    crate::charset_test_support::copy_factory_charsets(&base_dir);
+
     let mut cfg = Config::default();
     cfg.schema.active = "py_test".into();
     cfg.schema.available = vec!["py_test".into()];

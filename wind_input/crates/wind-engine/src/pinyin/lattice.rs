@@ -543,9 +543,15 @@ impl LatticeBuilder {
         if !partial.bytes().all(|b| b.is_ascii_lowercase()) {
             return;
         }
-        for hit in
-            dict.search_prefix_with_boundary_syllable_capped(partial, PARTIAL_FINAL_NODE_LIMIT, 1)
-        {
+        // 对齐位传 0：`partial` 本身就是「还没打完的那个音节」，它相对自己没有任何已完成
+        // 音节，位 0 恒置位 ⇒ 边界判据整条让开，保持纯字符前缀匹配（`m` → 吗/么/没）。
+        // 这正是 `prefix_syllable_aligned` 为残码场景留的退化通道，不是遗漏。
+        for hit in dict.search_prefix_with_boundary_syllable_capped(
+            partial,
+            PARTIAL_FINAL_NODE_LIMIT,
+            1,
+            0,
+        ) {
             // 只收单字：残码补的是「正在打的那一个字」。单音节多字词（儿化/连绵词）落到
             // 这里会让一个待定音节兑出两个字，与用户已敲的音节数对不上。
             if hit.text.chars().count() != 1 {

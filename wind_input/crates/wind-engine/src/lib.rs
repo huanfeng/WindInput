@@ -3,6 +3,7 @@
 //! 与 Go 版本 `wind_input/internal/engine/` 对齐。
 
 pub mod active_hook;
+pub mod charset_assembly;
 pub mod codetable;
 pub mod encoder;
 pub mod engine;
