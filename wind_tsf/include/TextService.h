@@ -47,6 +47,7 @@ class CTextService : public ITfTextInputProcessorEx,
     friend class CCommitTextEditSession;
     friend class CReplaceBackwardEditSession;
     friend class CInsertTextEditSession;
+    friend class CReadingInformationUIElement;
 public:
     CTextService();
     ~CTextService();
@@ -436,6 +437,12 @@ private:
     DWORD _uiElementId;     // ITfUIElementMgr::BeginUIElement 返回的 ID；TF_INVALID_UIELEMENTID 表示未注册
     BOOL  _uiElementShown;  // 当前 IsShown 返回值（元素存续期间的可见态；EndUIElement 后 FALSE）
     ITfUIElementMgr* _pUIElementMgr;  // 缓存的 UI element 管理器引用，避免每次候选变化都 QI
+    // 读音信息 UI 元素：与候选元素并行注册，向 UI-less 宿主（Dota 2 等）提供"读音/编码"串。
+    // ★ Dota 反复 QI ITfReadingInformationUIElement（{ea1ea139-…}），缺它宿主无法在输入框处
+    // 定位并绘制候选（编码丢进默认浮窗、候选不画）；搜狗/微软拼音均提供本元素。独立对象，
+    // 见 .cpp 的 CReadingInformationUIElement。
+    ITfReadingInformationUIElement* _pReadingElement;
+    DWORD _readingElementId;
     // ── UI-less（宿主自绘候选）状态 ──
     // 宿主是否接管候选绘制：BeginUIElement 回 pbShow=FALSE / 之后 Show(FALSE) 置 TRUE，
     // Show(TRUE) 置 FALSE。⚠ 与 _uiElementShown 分开存：那个在 EndUIElement 后归 FALSE、
