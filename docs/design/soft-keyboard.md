@@ -869,3 +869,212 @@ Windows 那个关闭按钮贴的是标题栏的物理边框，而这块面板是
 `rise = 亮框高 − 行高` 向上溢出到面板的顶部内边距里补足；这样 margin_box 的高度
 正好落回行高，`cross(Center)` 不会再叠一次偏移，框就稳稳居中在顶栏那条空白里。
 圆角取 `close_h * 0.5` ⇒ 胶囊形。
+
+---
+
+## 11. macOS：面板由服务进程自己开窗
+
+### 11.1 判据是「要不要跟随 caret」，不是「Windows 怎么做的」
+
+macOS 侧的通例是**服务进程只光栅化，窗口一律归 `.app`**：候选窗的像素在服务进程画好，
+经 POSIX SHM 推给 `.app` 的 NSPanel 呈现。软键盘**不走这条路**，它的窗口就开在服务
+进程里（`wind-ui/src/mac_panel.rs` 的 `MacPanel`）。
+
+理由不是「Windows 那边是自绘的所以照抄」，而是那条管线的前提在这里不成立：
+
+| | 要跟随 caret？ | 窗口归谁 |
+|---|---|---|
+| 候选窗 / 状态气泡 / 悬停提示 | 要 —— 而 caret 只有 `.app` 从 IMKit 拿得到 | `.app` |
+| **软键盘** | **不要** —— 用户自己拖到某处的常驻浮层，与 IMKit 无关 | **服务进程** |
+
+判据这么定的收益是具体的：本文件描述的全部布局、绘制、命中、交互状态机
+（`soft_keyboard.rs`，约 1900 行）建立在 tiny-skia 与 `View` 之上，本就与平台无关。
+服务端开窗 ⇒ 两平台**共用同一份实现**；走 `.app` ⇒ 要在 Swift 里把 §5–§10 全部再写
+一遍，且此后每改一处都要两边同步。
+
+### 11.2 ★★★ 主线程必须跑 `[NSApp run]`，Carbon 的事件循环不行
+
+服务的主线程原本跑的是 Carbon 的 `RunApplicationEventLoop()`（为全局热键而设）。
+**面板在它下面点不动**——而且是最难查的那种点不动：
+
+- 窗口画得出来（窗口服务器确认在屏）；
+- 命令下发正常（换面、键帽高亮跟着物理键走）；
+- `tick` 也在跑（长按重复、Shift 跟随都活着）；
+- **唯独鼠标一次都不来。**
+
+前三条走的是 CFRunLoop 的 source 与 timer，Carbon 循环照常驱动它们；而鼠标要
+`NSApp.sendEvent:` 把 NSEvent 路由给窗口和视图，那件事**只有 `NSApplication` 自己的
+事件循环会做**。`RunApplicationEventLoop()` 从不让 NSApp 跑起来 —— 实测
+`NSApp.isRunning == false`。
+
+⇒ `global_hotkey_macos::run_main_loop` 已改为跑 `[NSApp run]`。两条循环对**热键**是
+等价的（都从主事件队列取 Carbon 事件再 `SendEventToEventTarget`），但只有前者派发 NSEvent。
+
+连带改动一处，**别把它当样板代码删掉**：`stop_main_loop` 原先调
+`QuitApplicationEventLoop()`（即时生效），现在调 `NSApp.stop:` —— 它只设一个标志，
+**要等下一个事件处理完**才真正退出。服务空闲时可能很久没有事件，于是必须再补投一个
+`ApplicationDefined` 事件把循环推进一轮，否则「重启服务」会挂死。判定四钉的就是它。
+
+### 11.3 前提早就具备，只是此前没人用
+
+服务是 LaunchAgent 拉起的**非 bundle 的裸可执行文件**，直觉上「后台进程开不了窗」。
+实际上它早就是个有窗口服务器连接的 GUI 进程：
+
+- `global_hotkey_macos::run_main_loop` 开头的
+  `TransformProcessType(kProcessTransformToUIElementApplication)` 已把它提升为
+  UIElement 应用；
+- 主线程跑的是 `RunApplicationEventLoop()`（Carbon 的**应用**事件循环，内部驱动 CFRunLoop），
+  不是裸 `CFRunLoopRun`。
+
+这两条本来是为 Carbon 全局热键做的，软键盘顺带受益。
+
+⚠️ **验证不能取「调用没报错」**。这条路上的坑清一色是*返回码正常但功能不生效*
+（`global_hotkey_macos` 模块头列了三个同型的）。判据要取**窗口服务器自己的说法**：
+
+```
+cargo run -p wind-ui --example mac_panel_smoke
+```
+
+它走**与服务 `main.rs` 完全同构**的那条路，跑四项判定：窗口在不在屏、鼠标事件到不到得了
+视图、Carbon 全局热键有没有被换循环带坏、「重启服务」还退不退得出来。
+
+⚠️ 后三项一律用「**往队列里投事件**」（`NSApp.postEvent:atStart:` / `PostEventToQueue`）
+而不是合成真实输入。`CGEventPost` 在现代 macOS 要「辅助功能」授权，非交互会话拿不到
+——实测光标纹丝不动，于是**任何**事件循环下都得到「没反应」，是个假阴性。这个坑踩过
+一次，别再踩回去。同理第一项用窗口**元数据**而不是截图：`CGWindowListCreateImage` 自
+macOS 14 起要「屏幕录制」，而本输入法申请的是「辅助功能」。
+
+### 11.4 ★★★ 三条约定，改这块之前必须知道
+
+**1. `window::LayeredWindow` 在 macOS 上仍是纯像素缓冲，别把它改成真窗口。**
+`candidate_window.rs` 正靠它光栅化后写 SHM。一改，候选窗就会凭空多出一个 NSPanel，
+砸掉整条 host-render 管线。软键盘用的是**独立的** `MacPanel`——方法集与 `LayeredWindow`
+逐位同形（这正是 `soft_keyboard.rs` 只换一个类型别名就跑起来的原因），但用途不同。
+
+**2. AppKit 只能在主线程碰，而下发命令的 forwarder 是工作线程。**
+转运由 `softkeyboard_host_macos` 负责，形制照抄 `global_hotkey_macos`：工作线程只
+「入队 + 戳 CFRunLoopSource」，建窗与绘制一律在主线程的 perform 回调里。面板可见期间
+另挂一个 `CFRunLoopTimer` 驱动 `tick()`（长按重复、Shift/CapsLock 跟随、高亮熄灭都靠它），
+**面板一关立刻撤掉**——边界与 §5 那条「只在面板可见时轮询」完全一致。
+
+**3. 主线程上的 `RefCell` 一律 `try_borrow`，借不到就跳过。**
+命令 drain 与 tick 定时器同在主线程，而某些 AppKit 调用会重入 run loop，于是事件有
+可能落在面板已借出的窗口里。用 `borrow_mut` 的话那一下就是 panic —— **输入法服务整个
+进程没了**，代价与「少响应一次鼠标移动、少画一帧」完全不成比例。
+
+### 11.5 坐标系换算只在窗口壳里发生
+
+`SoftKeyboard` 全程用 **Win32 式坐标**：设备像素、原点在主屏**左上**。AppKit 用的是
+**点**、原点在主屏**左下**。换算全部收在 `mac_panel.rs`，一旦漏进面板逻辑就会变成
+「拖一下跳到别处」或「多显示器上点不准」这类极难反推的错位。
+
+两个具体的坑：
+
+- 翻转要用 `NSScreen.screens[0]` 而**不是** `NSScreen.main`。AppKit 全局坐标的原点恒在
+  第 0 号屏左下角，而 `main` 指「当前有 key window 的那块屏」，会随用户换屏而变。
+- 拖动的落点要**钳进可见区**（`visibleFrame`，已扣菜单栏与 Dock），且 `SoftMouse.moved_to`
+  记的必须是**钳制后**的值。记成「想去的那个」，下一帧 `render` 拿它调 `show` 就把面板
+  送回屏外——表现为「往边上一拖，松手后自己跳走」。守门测试：
+  `on_moved_records_the_clamped_position`。
+
+### 11.6 不抢焦点：`NonactivatingPanel` 对位 `WS_EX_NOACTIVATE`
+
+§9 那条「切换焦点自动关闭」完全依赖面板不抢焦点，macOS 侧靠三件事共同保证：
+
+- `NSWindowStyleMask::NonactivatingPanel`（面板不成为 key window）；
+- `orderFront:` 而**不是** `makeKeyAndOrderFront:`；
+- 视图 `acceptsFirstMouse:` 返回 `true` —— 少了它，**第一次点击会被系统吃掉**用于激活
+  窗口，用户看到的是「第一下没反应，第二下才出字」。
+
+### 11.7 ★★★ 按键合成必须交给 `.app`，服务进程自己 post 是无效的
+
+`softkeyboard_tap` 是三条路的共同出口：功能键点击（Tab/退格/回车/空格/Del）、
+**键盘面上任何键帽的点击**、以及 Ctrl 粘滞合成的组合键。
+
+Windows 上它直接 `SysKeys.tap`（`SendInput`）。**macOS 上不能这么做**：服务是 LaunchAgent
+拉起的进程，没有「辅助功能」授权，而向别的进程注入键盘事件恰恰需要它——`CGEventPost`
+会**返回成功、事件被静默丢弃**。拿着授权的是 `.app`，所以要推下行帧
+（`encode_key_tap`）交给它的 `KeySynthesizer`，与命令直通车 `key.tap` 同一条路。
+`handle_cmdbar_macos` 的模块头早就写明了这条约定。
+
+⚠️ 这里踩过两次，方向相反，值得都记下来：
+
+1. 起初 `#[cfg(windows)]` 一刀切，非 Windows 分支是 `let _ = combo;` ⇒ macOS 上**静默
+   丢弃**，功能键与键盘面全哑。
+2. 修第一遍时看到「`wind-keys` 有现成的 macOS CGEvent 后端」就把 cfg 放行到 macOS ⇒
+   **看起来**能跑（有后端、不报错），实际仍然全哑，只是这次哑在授权上。
+   *「有这个 API」不等于「本进程调得动这个 API」。*
+
+症状值得记一笔，因为它很容易被误读成别的问题：面板画得出来、点得动、符号面出得了字，
+唯独 Tab / 退格 / 回车 / Del 没反应，**以及键盘面上打字完全没反应**（那一面每个键帽都
+走本函数）。「点了 Shift 再点字母没反应」也是同一个根因，不是 Shift 坏了——符号面上的
+Shift 只切显示档，根本不经过合成。
+
+### 11.8 两侧的键名表不是同一份，接缝在 `split_combo`
+
+Rust 侧 `key_inject::parse_key` 与 `.app` 侧 `KeySynthesizer.keyCodeMap` 各有一张键名表，
+两者**不完全重合**。归一收口在 `handle_cmdbar_macos::normalize_key`，守门测试
+`soft_keyboard_fn_keys_land_on_names_the_app_knows` 逐条钉住 `SOFT_FN_KEYS` 的每个键名。
+
+已知两处必须归一：
+
+| 软键盘发出的 | `.app` 认得的 | 不归一的后果 |
+|---|---|---|
+| `del` | `delete` | `resolveKeyCode` 返回 nil ⇒ **静默丢弃** |
+| `vk:0x14`（VK_CAPITAL） | `capslock` | Swift 把 `vk:` 后的数字当 **mac CGKeyCode** 原样透传 ⇒ 20 = 数字键 `2`，**点 Caps 打出个 2**，比没反应更糟 |
+
+⚠️ 往 `SOFT_FN_KEYS` 加新键时，先确认 Swift 那张表认不认得那个名字；不认得就得两边一起加。
+`fn_key_case_list_covers_every_soft_key` 会在漏改时挂掉。
+
+### 11.9 大写锁定在 macOS 上改不动——三条路都实测过，键位改画禁用态
+
+面板上的 Caps 键在 macOS 上**不能**翻转系统大写锁定。这不是没接线，是平台限制。
+
+根子在于「大写锁定态存在哪一层」。Windows 上它是**输入状态**，住在窗口站那一层，
+`keybd_event` 改的就是它——所以同一条合成路径既能打字母也能翻锁。macOS 上它是**设备状态**，
+由 `IOHIDSystem` 持有；而我们的合成事件是从它**上面**的 CGEvent tap 层注进去的：
+
+```
+        Windows                          macOS
+  ┌──────────────────┐            ┌──────────────────┐
+  │ 应用             │            │ 应用             │
+  ├──────────────────┤            ├──────────────────┤
+  │ 窗口站输入状态   │◄─ keybd_   │ CGEvent tap 层   │◄─ CGEventPost
+  │ (CapsLock 住这)  │   event    │ (我们注在这)     │   注入点
+  └──────────────────┘   够得着   ├──────────────────┤
+                                  │ IOHIDSystem      │  ← CapsLock 态住这，在下游
+                                  ├──────────────────┤
+                                  │ 真实 HID 设备    │
+                                  └──────────────────┘
+```
+
+注入点在锁的**上游**，所以够不着。这一层差别只影响这一个键，别的键全都照常。
+
+| 路径 | 结果 |
+|---|---|
+| `CGEvent` 敲 `kVK_CapsLock`(57) | 无效。★ 这条由**持有辅助功能授权的 `.app`** 实测（其余功能键同一条路全部生效），**不是假阴性** |
+| `IOHIDSetModifierLockState`（`kIOHIDParamConnectType`） | **连接开得出、返回 `KERN_SUCCESS`、状态纹丝不动**。用 `IOHIDGetModifierLockState` 与 `NSEvent.modifierFlags` 双向读回都确认没变（Darwin 25.5 实测）。注意它不是被拒，是**受理了然后忽略**——与 TCC 授权无关 |
+| 同上，`kIOHIDServerConnectType` / type 2 | `IOServiceOpen` 返回 `0xe00002bd`（权限不足），需 root。服务不以 root 跑，对产品无意义 |
+
+⚠️ 两个不同的「看着能用其实不能」，别混为一谈：
+- `IOHIDSetModifierLockState` 是**返回码正常但功能不生效**。判据必须是**写完读回来变了**，
+  不能是「调用没报错」——按后者判，这条路会被误判成可用。
+- `CGEventPost` 反过来，是**没授权时静默丢弃**。从一个没有辅助功能授权的进程里测它，
+  拿到的否定结论一文不值（§11.7 已经栽过一次）。上表第一行之所以可信，
+  唯一的理由是它跑在**有授权的** `.app` 里。
+
+唯一真做得到的路是**装虚拟 HID 驱动**，让按键从 HID 层*底下*进来（Karabiner-Elements 的
+`Karabiner-VirtualHIDDevice` 就是这么干的：DriverKit 系统扩展 + 向 Apple 申请 HID 设备
+entitlement + Developer ID + 用户在系统设置里批准 + 常驻守护进程）。为一个键帽不值当。
+
+**产品决定：键位画成禁用态**（`soft_keyboard.rs` 的 `CAPS_CLICKABLE`）。
+
+- 键位**留着、尺寸不变**：底行是按固定单位排的，抽掉一个就得维护两套排布，而且键盘
+  少一个键比多一个灰键更让人找不着北；
+- **不进命中表**，与面板上的空键位同一个做法：不 hover、不按下、更不合成——
+  照仓库那条「留一个点了没反应的项比没有更糟」；
+- **读那一半照旧**：`read_shift_caps` 走 `NSEvent.modifierFlags`，物理 CapsLock 的状态
+  仍如实反映在键帽高亮上。禁用不该把指示灯一起关掉，所以 `caps_on` 的高亮排在灰色之前。
+
+`split_combo` 里 `vk:0x14 → capslock` 的归一**仍然要留着**（§11.8）：命令直通车也可能
+配到这个键，归一至少保证它是个无害的空操作，而不是往文档里打个 `2`。

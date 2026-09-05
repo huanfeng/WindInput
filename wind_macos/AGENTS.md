@@ -22,7 +22,7 @@ Win 的 `m2`=核心 exe ↔ mac 的 `m2`=Rust 服务）。
 ### 与 Windows 的功能差距（待补）
 
 Rust 核心跨平台，引擎/词库/候选/词频类改动 macOS 自动受益；差距集中在**宿主层**。
-`wind-ui` 的 `UiCommand` 有 46 个变体，`manager_macos.rs` 的 Forwarder 目前接了 32 个
+`wind-ui` 的 `UiCommand` 有 51 个变体，`manager_macos.rs` 的 Forwarder 目前接了 37 个
 （数字随 core 加变体而变，改动时顺手核一下：
 `awk '/^pub enum UiCommand/,/^}/' wind-ui-types/src/command.rs | grep -cE '^    [A-Z]'`）。
 未接的：
@@ -33,6 +33,42 @@ Rust 核心跨平台，引擎/词库/候选/词频类改动 macOS 自动受益�
 | `ShowCandidateMenu` / `HideMenu` / `MenuKey` | N/A（**不是缺失**） | macOS 弹的是原生 NSMenu，方向键/回车/Esc 由 AppKit 自己消费。协调器**刻意不转发**菜单键（见 `handle_key_event` 里那段 `cfg(not(target_os = "macos"))`）：一旦吞键而 `menu_open` 没复位就会永久卡死输入 |
 | `SetToolbarPos` / `SetToolbarAutoHide` / `SetToolbarVertical` / `SetToolbarLayout` | N/A（mac 用菜单栏指示器，无浮动工具栏） | 对应配置项已在设置清单里按平台隐藏（`platform = "windows"`），不再是"无处落地"。`SetToolbarLayout`（`ui.toolbar.items`，格的显隐与顺序）同理——菜单栏指示器只有一个主字，没有"哪几格" |
 | `SetHostRender` | Windows 专有（宿主进程内 Band 窗口） | mac 无对应概念 |
+
+### 软键盘：唯一一个由**服务进程自己开窗**的浮层
+
+macOS 侧的通例是「服务进程只光栅化，窗口一律归 `.app`」——候选窗的像素在服务进程画好，
+经 SHM 推给 `.app` 的 NSPanel 呈现。**软键盘是唯一的例外**，它的窗口
+（`wind-ui/src/mac_panel.rs` 的 `MacPanel`，一个 `NSPanel`）就开在服务进程里。
+
+判据是「这个浮层要不要跟随 caret」：
+
+- 候选窗/状态气泡要跟随 caret，而 caret 只有 `.app` 从 IMKit 拿得到 ⇒ 窗口归 `.app`；
+- 软键盘**不跟随任何东西**，是用户自己拖到某处的常驻浮层，与 IMKit 无关 ⇒ 没有理由
+  为它再实现一份 Swift 面板。`soft_keyboard.rs` 那 1900 行布局/绘制/命中/交互本就是
+  跨平台的 tiny-skia + View 树，服务端开窗即可原样复用，两平台共一份实现。
+
+**前提早就具备**，只是此前没人用：服务虽是 LaunchAgent 拉起的裸可执行文件，
+`global_hotkey_macos::run_main_loop` 里的 `TransformProcessType(TRANSFORM_TO_UI_ELEMENT)`
+已经把它提升为 UIElement 应用（有窗口服务器连接）。冒烟验证见
+`cargo run -p wind-ui --example mac_panel_smoke`，它跑四项判定，判据一律取**系统自己的
+说法**而不是「调用没报错」——这条路上的坑清一色是*返回码正常但功能不生效*。
+
+三条约定，改这块前先读：
+
+1. **AppKit 只能在主线程碰**，而下发命令的 forwarder 是工作线程。转运由
+   `softkeyboard_host_macos` 负责（「入队 + CFRunLoopSource 唤醒」，形制照抄
+   `global_hotkey_macos`）。面板可见期间另挂一个 `CFRunLoopTimer` 驱动 `tick()`，
+   **面板一关就撤掉**。
+2. **`window::LayeredWindow` 在 macOS 上仍是纯像素缓冲，别把它改成真窗口**——
+   `candidate_window.rs` 正靠它光栅化后写 SHM，一改就会给候选窗凭空开出一个 NSPanel。
+   软键盘用的是独立的 `MacPanel`，两者方法集同形但用途不同。
+3. **主线程必须跑 `[NSApp run]`，不能是 Carbon 的 `RunApplicationEventLoop()`**。后者
+   从不让 NSApplication 跑起来（实测 `NSApp.isRunning == false`），于是没有人调
+   `NSApp.sendEvent:`，面板一个鼠标事件都收不到——窗口画得出来、CFRunLoop 的 source
+   与 timer 也照常转，唯独点不动。连带地 `stop_main_loop` 也从
+   `QuitApplicationEventLoop()` 换成了 `NSApp.stop:` + 补投一个唤醒事件（`stop:` 只设
+   标志，要等下一个事件才生效，不补投的话「重启服务」会挂死）。见
+   `docs/design/soft-keyboard.md` §11.2。
 
 非 `UiCommand` 的一项差距，同样待补：
 
@@ -48,7 +84,7 @@ Rust 核心跨平台，引擎/词库/候选/词频类改动 macOS 自动受益�
 | 配置项 | macOS 上为何无落点 |
 |---|---|
 | `ui.toolbar.hide_in_fullscreen` / `auto_hide` / `auto_hide_delay` / `vertical` | 菜单栏指示器不是浮动窗口，无从隐藏 / 排列 / 自动淡出。`ui.toolbar.visible` **不在此列**——它在 mac 上控制指示器显隐，是有落点的 |
-| `input.capslock.cancel_on_mode_switch` | 实现手段是合成一次 CapsLock 敲击（`key_inject::tap_caps_lock`），而 macOS 的大写锁定态由 HID 层维护，CGEvent 改不动它（要走 `IOHIDSetModifierLockState` 那条完全不同的路）。补 VK→CGKeyCode 映射也没用 |
+| `input.capslock.cancel_on_mode_switch` | 实现手段是合成一次 CapsLock 敲击（`key_inject::tap_caps_lock`），而 macOS 的大写锁定态由 HID 层维护，CGEvent 改不动它。补 VK→CGKeyCode 映射也没用。**`IOHIDSetModifierLockState` 那条路后来也实测过：连接开得出、返回 `KERN_SUCCESS`、状态纹丝不动（Darwin 25.5）；`kIOHIDServerConnectType` 则 `IOServiceOpen` 直接失败，需特权。** 详见 `docs/design/soft-keyboard.md` §11.9 —— 软键盘面板上的 Caps 键同样受这条限制，已按此**在 macOS 上画成禁用态**（`soft_keyboard.rs` 的 `CAPS_CLICKABLE`）：键位留着、不进命中表，但 `caps_on` 的高亮照旧——改不动不等于读不到 |
 | `stats.track_english` | 英文模式下的输入由 Windows 侧 TSF DLL 经 `CMD_INPUT_STATS` 上报，`.app` 没有对应采集点 |
 
 `keys.session_actions` 里的 **CapsLock** 同理无落点（`capslock_hook` 在非 Windows 是
