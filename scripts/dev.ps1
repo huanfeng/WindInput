@@ -837,16 +837,27 @@ function Unregister-Tsf ([string]$dir, [string]$suffix) {
 }
 
 # 注册 TSF COM (x64 必须成功; x86 失败仅告警, 不阻断 64 位使用)。
+# 模式: 先复制 DLL 到系统目录, 对系统副本 regsvr32 (对齐 weasel 安装模式与 wind-installer):
+# Win11 输入栈的 GIP 路径 (游戏聊天框等上下文) 只激活位于系统目录的 in-proc TSF IME DLL,
+# 安装目录副本会被 msctf 在 COM 激活前静默筛除。注册系统副本时 DllRegisterServer 内
+# GetModuleFileName 取到的即系统目录路径, InprocServer32 自然指向系统副本, 无需后处理。
 function Register-Tsf ([string]$dir, [string]$suffix) {
-    $x64 = Join-Path $dir "wind_tsf$suffix.dll"
-    $x86 = Join-Path $dir "wind_tsf_x86${suffix}.dll"
-    & regsvr32 /s $x64
-    if ($LASTEXITCODE -ne 0) { ErrMsg "  - x64 COM 注册失败: $x64"; return $false }
-    Gray "  - x64 COM 已注册"
-    if (Test-Path $x86) {
-        & (Get-Regsvr32X86) /s $x86
+    $sid = "*S-1-15-2-1"  # ALL APPLICATION PACKAGES (AppContainer 宿主读取需要)
+    $x64Src = Join-Path $dir "wind_tsf$suffix.dll"
+    $x64Dst = Join-Path $env:WINDIR "System32\wind_tsf$suffix.dll"
+    Copy-Item $x64Src $x64Dst -Force
+    & icacls $x64Dst /grant "${sid}:(RX)" /c | Out-Null
+    & regsvr32 /s $x64Dst
+    if ($LASTEXITCODE -ne 0) { ErrMsg "  - x64 COM 注册失败: $x64Dst"; return $false }
+    Gray "  - x64 COM 已注册 (系统目录: $x64Dst)"
+    $x86Src = Join-Path $dir "wind_tsf_x86${suffix}.dll"
+    if (Test-Path $x86Src) {
+        $x86Dst = Join-Path $env:WINDIR "SysWOW64\wind_tsf_x86${suffix}.dll"
+        Copy-Item $x86Src $x86Dst -Force
+        & icacls $x86Dst /grant "${sid}:(RX)" /c | Out-Null
+        & (Get-Regsvr32X86) /s $x86Dst
         if ($LASTEXITCODE -ne 0) { Warn "  - x86 COM 注册失败 (32 位应用可能无法使用输入法)" }
-        else { Gray "  - x86 COM 已注册" }
+        else { Gray "  - x86 COM 已注册 (系统目录: $x86Dst)" }
     }
     return $true
 }
