@@ -24,8 +24,14 @@
 //! -☯                       # `-` 前缀 = 从本类移除
 //! ```
 //!
-//! 三层目录 `data/charsets/` → `data_custom/charsets/` → `{user_config}/charsets/`，
-//! 靠后者覆盖靠前者。**文件名任意**，一个类一个文件，新增类只需丢一个文件进去。
+//! 三层：`data/charsets/`（出厂）→ `data_custom/charsets/`（定制）→ **用户层在 redb**
+//! （`wind_store::charsets`，一个类一条、value 就是本格式的文本）。靠后者覆盖靠前者。
+//! 前两层是目录，**文件名任意**，一个类一个文件，新增类只需丢一个文件进去。
+//!
+//! 用户层不是目录，是因为**程序和人不能写同一个文件**：设置页改一个开关要重写文件，
+//! 用户此时在编辑器里开着它，谁后保存谁赢。于是程序只写库；人要改就「外部编辑」——
+//! [`render_edit_view`] 导出一份**完整视图**到临时文件，改完用 [`diff_against_factory`]
+//! 折回稀疏 diff 存库。备份包里的 `charsets/<key>.yaml` 是库文本原样，同一格式。
 //!
 //! # ★★★ 覆盖是「字段级 + 列表增量」，不是整文件替换
 //!
@@ -49,7 +55,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::warn;
 
 /// 字符类定义所在的目录名（三层同名）。
@@ -452,20 +458,56 @@ pub fn load_layer(dir: &Path) -> Vec<CharsetDoc> {
     out
 }
 
-/// 三层加载：`data/charsets` → `data_custom/charsets` → `{user_config}/charsets`。
-/// 各层目录名相同，靠后者按字段/增量覆盖靠前者。
-pub fn load_layered(
+/// 出厂两层（`data/charsets` → `data_custom/charsets`）的合并结果。
+///
+/// ★ 本模块里「出厂」恒指**这两层之和**：定制层是发行方替用户做的决定，对用户而言
+/// 与出厂无异。编辑视图与 diff 都以它为基准——把定制层算进「用户层」的话，diff 会把
+/// 定制方加的成员全记成用户新增，用户「恢复默认」就把定制层一并丢了。
+pub fn load_factory(
     data_dir: Option<&Path>,
     custom_dir: Option<&Path>,
-    user_dir: Option<&Path>,
 ) -> BTreeMap<String, MergedClass> {
     let mut merged: BTreeMap<String, MergedClass> = BTreeMap::new();
-    for dir in [data_dir, custom_dir, user_dir].into_iter().flatten() {
+    for dir in [data_dir, custom_dir].into_iter().flatten() {
         for doc in load_layer(&dir.join(CHARSETS_DIR_NAME)) {
             apply_doc(&mut merged, doc);
         }
     }
     merged
+}
+
+/// 三层加载：出厂两层目录 + 用户层 docs（来自库，见 [`parse_stored_docs`]）。
+pub fn load_layered(
+    data_dir: Option<&Path>,
+    custom_dir: Option<&Path>,
+    user_docs: Vec<CharsetDoc>,
+) -> BTreeMap<String, MergedClass> {
+    let mut merged = load_factory(data_dir, custom_dir);
+    for doc in user_docs {
+        apply_doc(&mut merged, doc);
+    }
+    merged
+}
+
+/// 把库里的 `(key, 文本)` 解析成 docs。坏的一条 warn 并跳过，不影响其余。
+///
+/// ⚠️ 库键与文本里的 `key` 必须一致，否则跳过：不一致只可能是手工改库或程序 bug，
+/// 按哪一个算都是猜——而猜错的表现是「改了 A 类，B 类变了」。
+pub fn parse_stored_docs<'a>(
+    rows: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<CharsetDoc> {
+    let mut out = Vec::new();
+    for (key, text) in rows {
+        match parse_doc(text) {
+            Ok(doc) if doc.def.key == key => out.push(doc),
+            Ok(doc) => warn!(
+                "字符类用户层：库键「{key}」与文本里的 key「{}」不一致，已跳过",
+                doc.def.key
+            ),
+            Err(e) => warn!("字符类用户层「{key}」解析失败，已跳过：{e}"),
+        }
+    }
+    out
 }
 
 /// 把一份文档叠加到合并结果上。
@@ -505,19 +547,215 @@ pub fn apply_doc(merged: &mut BTreeMap<String, MergedClass>, doc: CharsetDoc) {
 /// 一个码位段（闭区间）。
 pub type CodeRange = (u32, u32);
 
-/// 用户层文件的固定头注释。
+/// 存进库 / 进备份包的文本头注释。
 ///
-/// 与 `compat.toml` 同一条纪律：GUI **整份重写**这个文件，手写的注释与排版都不保留。
-/// 把这句话写进文件本身，比写进文档有用得多——真正会踩的人正在看这个文件。
-const USER_FILE_HEADER: &str = "\
-# 本文件由设置页管理，会被**整份重写**——手写的注释与排版不会保留。
-# 想手写就换个文件名（同一层里 key 相同即可覆盖），本文件只是设置页的落点。
-#
-# 只写你要改的字段；没写的沿用下层（定制层 → 出厂层）。
+/// 备份包里用户会直接看到这份文本，所以要把「只含改过的字段」这件事说出来——否则他
+/// 会奇怪为什么 emoji 类的备份里一个 emoji 都没有。
+const STORED_DOC_HEADER: &str = "\
+# WindInput 字符类的用户层调整（设置页维护）。
+# 只含你改过的字段与增删的成员；没写的沿用下层（定制层 → 出厂层）。
 # 列表体在 `...` 之后：裸行 = 加进本类，`-` 开头 = 从本类移除。
 ";
 
-/// key 能不能直接当文件名用。
+/// 把一份用户层调整渲染成 yaml 文本（存库 / 进备份包）。
+///
+/// ⚠️ 只写 `Some` 的字段（`CharsetDef` 全字段 `skip_serializing_if`）。写全量会把当前
+/// 的出厂值**固化**进用户层——出厂改了 `order` 或补了 `ranges`，这个用户永远拿不到。
+/// 同一个坑见设计文档 §4.1。
+pub fn render_doc(doc: &CharsetDoc) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        is_valid_key(&doc.def.key),
+        "字符类的 key「{}」不合法",
+        doc.def.key
+    );
+    let head = serde_yaml::to_string(&doc.def)?;
+    let mut text = String::with_capacity(head.len() + 256);
+    text.push_str(STORED_DOC_HEADER);
+    text.push_str("---\n");
+    text.push_str(&head);
+    if !doc.added.is_empty() || !doc.removed.is_empty() {
+        text.push_str(HEAD_BODY_SEP);
+        text.push('\n');
+        for a in &doc.added {
+            text.push_str(a);
+            text.push('\n');
+        }
+        for r in &doc.removed {
+            text.push(REMOVE_PREFIX);
+            text.push_str(r);
+            text.push('\n');
+        }
+    }
+    Ok(text)
+}
+
+/// 外部编辑文件的头注释。`{name}` / `{key}` 由 [`render_edit_view`] 填。
+///
+/// ★ 首行「此文件不会被自动读取」是用户拍板的措辞：这份文件是**导出的副本**，改完
+/// 必须回设置页导入。不说这句，用户会改完等着生效，然后判定功能坏了。
+const EDIT_VIEW_HEADER: &str = "\
+# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集分类」用「从文件加载」导入。
+#
+# 这是「{name}」（key: {key}）当前生效的完整定义 = 出厂 + 你的调整。
+# 直接增删 `...` 之后的字符行即可；导入时只记下与出厂的差异，出厂更新仍会跟随。
+# 字段：name、default（common / rare，删掉这行 = 沿用出厂）、no_freq、in_rare、
+#       order（小的优先）、enabled。
+";
+
+/// 出厂类的 `ranges` 在编辑视图里写成注释时，跟在后面的说明。
+const RANGES_READONLY_NOTE: &str = "  # 出厂类的范围只读；要改范围请新建自己的类";
+
+/// 渲染**完整视图**供外部编辑：生效字段 + 生效成员（出厂 ∪ 新增 − 移除）。
+///
+/// # 为什么导出完整视图而不是用户层 diff
+///
+/// diff 只有 `-龘` 几行，用户看不到出厂有什么，写不出正确的 `-字`。完整视图所见即所得，
+/// 直接增删；回读时 [`diff_against_factory`] 与**当前**出厂比较，改一个字库里就只多一条
+/// ——稀疏性不丢，且与导出时刻无关，出厂升版也不会错乱。
+///
+/// ⚠️ `file:` 指向的外部字表**不展开**（本层读不到它，也不该读）：那些成员既不在视图
+/// 里也不在 diff 的基准里，回读不会把它们误记成「移除」。代价是用户在视图里看不到、
+/// 也删不掉它们——出厂没有带 `file:` 的类，可接受。
+///
+/// `factory` 为 `None` 即自建类，视图就是用户层本身。
+pub fn render_edit_view(
+    factory: Option<&MergedClass>,
+    user: &CharsetDoc,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        is_valid_key(&user.def.key),
+        "字符类的 key「{}」不合法",
+        user.def.key
+    );
+    // 生效字段 = 出厂字段被用户层逐字段覆盖。
+    let mut def = factory.map(|f| f.def.clone()).unwrap_or_default();
+    def.key = user.def.key.clone();
+    def.merge_from(user.def.clone());
+    // `replace` 是「本层接管字表」的开关，完整视图导入本来就等价于给出全部，导出它只会
+    // 让用户以为要写这个字段。
+    def.replace = None;
+
+    let mut text = String::new();
+    text.push_str(
+        &EDIT_VIEW_HEADER
+            .replace("{name}", def.display_name())
+            .replace("{key}", &def.key),
+    );
+    text.push_str("---\n");
+
+    // 出厂类的 ranges 只读：写成注释让用户看得见，但改了也导不进去（diff 时拒绝）。
+    let readonly_ranges = factory.is_some_and(|f| f.def.ranges.is_some());
+    let ranges_note = if readonly_ranges {
+        def.ranges.take()
+    } else {
+        None
+    };
+    text.push_str(&serde_yaml::to_string(&def)?);
+    if let Some(r) = ranges_note {
+        text.push_str("# ranges: [");
+        text.push_str(&r.join(", "));
+        text.push(']');
+        text.push_str(RANGES_READONLY_NOTE);
+        text.push('\n');
+    }
+
+    // 生效成员，保出厂顺序（设置页按它分页），用户新增的排在后面。
+    let removed: std::collections::HashSet<&str> =
+        user.removed.iter().map(String::as_str).collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut members: Vec<&str> = Vec::new();
+    let base = factory.map(|f| f.member_order.as_slice()).unwrap_or(&[]);
+    for m in base.iter().chain(user.added.iter()) {
+        if !removed.contains(m.as_str()) && seen.insert(m.as_str()) {
+            members.push(m.as_str());
+        }
+    }
+    text.push_str(HEAD_BODY_SEP);
+    text.push('\n');
+    for m in members {
+        text.push_str(m);
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+/// 把外部编辑回来的**完整视图**折成用户层的稀疏 diff。
+///
+/// - 字段：与出厂相同的置 `None`（不固化）；不同的保留；**删掉的行 = 沿用出厂**
+///   （字段级合并表达不了「把出厂的 Some 变 None」，这是已知限制，头注释里有说）。
+/// - 成员：`added = 视图 − 出厂`，`removed = 出厂 − 视图`（按出厂顺序）。视图里手写的
+///   `-字` 也并入 removed。
+/// - 出厂类的 `ranges` 改了 ⇒ **报错**，不静默丢弃：用户花时间改了范围，静默丢掉会让
+///   他以为导入坏了。
+///
+/// `factory` 为 `None` 即自建类：原样存，只清掉无意义的 `replace`。
+pub fn diff_against_factory(
+    mut parsed: CharsetDoc,
+    factory: Option<&MergedClass>,
+) -> anyhow::Result<CharsetDoc> {
+    anyhow::ensure!(
+        is_valid_key(&parsed.def.key),
+        "字符类的 key「{}」不合法",
+        parsed.def.key
+    );
+    let Some(f) = factory else {
+        parsed.def.replace = None;
+        return Ok(parsed);
+    };
+
+    if let Some(r) = &parsed.def.ranges
+        && f.def.ranges.is_some()
+        && Some(r) != f.def.ranges.as_ref()
+    {
+        anyhow::bail!(
+            "「{}」是出厂类，范围只读；要用别的范围请新建自己的类",
+            f.def.display_name()
+        );
+    }
+
+    let mut def = CharsetDef {
+        key: f.def.key.clone(),
+        ..Default::default()
+    };
+    // 逐字段：与出厂相同 ⇒ None。与 `merge_from` 同款宏，漏一个字段一眼能看出。
+    macro_rules! keep_if_differs {
+        ($($fld:ident),+ $(,)?) => { $(
+            if parsed.def.$fld.is_some() && parsed.def.$fld != f.def.$fld {
+                def.$fld = parsed.def.$fld.take();
+            }
+        )+ };
+    }
+    keep_if_differs!(
+        name, file, scope, default, outside, order, no_freq, in_rare, enabled
+    );
+    // ranges 到这里只可能等于出厂或为 None，两者都不该进用户层。replace 同理。
+
+    let view: BTreeSet<&str> = parsed.added.iter().map(String::as_str).collect();
+    let added: Vec<String> = parsed
+        .added
+        .iter()
+        .filter(|m| !f.members.contains(m.as_str()))
+        .cloned()
+        .collect();
+    let mut removed: Vec<String> = f
+        .member_order
+        .iter()
+        .filter(|m| !view.contains(m.as_str()))
+        .cloned()
+        .collect();
+    for r in parsed.removed {
+        if !removed.contains(&r) {
+            removed.push(r);
+        }
+    }
+    Ok(CharsetDoc {
+        def,
+        added,
+        removed,
+    })
+}
+
+/// key 能不能当标识用（也是备份包里的文件名）。
 ///
 /// # ⚠️ 为什么要校验而不是「安全化」
 ///
@@ -540,8 +778,8 @@ pub fn is_valid_key(key: &str) -> bool {
 
 /// 这份调整是不是**空壳**（除 `key` 外什么都没说）。
 ///
-/// ★ 空壳必须删文件而不是留一份只有 key 的 yaml：留着的话，「恢复默认」之后目录里仍有
-/// 这个类的痕迹，下次读还会走一遍合并——`compat.toml` 的 `update_user_rule` 是同一条。
+/// ★ 空壳必须从库里删掉而不是留一条只有 key 的记录：留着的话，「恢复默认」之后列表里
+/// 仍标着「已调整」，下次读还会走一遍合并——`compat.toml` 的 `update_user_rule` 是同一条。
 pub fn is_empty_override(doc: &CharsetDoc) -> bool {
     let d = &doc.def;
     doc.added.is_empty()
@@ -557,79 +795,6 @@ pub fn is_empty_override(doc: &CharsetDoc) -> bool {
         && d.in_rare.is_none()
         && d.enabled.is_none()
         && d.replace.is_none()
-}
-
-/// 用户层里某个 key 的文件路径。
-pub fn user_file_path(user_dir: &Path, key: &str) -> Option<PathBuf> {
-    is_valid_key(key).then(|| {
-        user_dir
-            .join(CHARSETS_DIR_NAME)
-            .join(format!("{key}.{CHARSET_EXT}"))
-    })
-}
-
-/// 把一份调整写进用户层（整份重写）；空壳则删掉文件。
-///
-/// ⚠️ 只写 `Some` 的字段（`CharsetDef` 全字段 `skip_serializing_if`）。写全量会把当前
-/// 的出厂值**固化**进用户层——出厂改了 `order` 或补了 `ranges`，这个用户永远拿不到。
-/// 同一个坑见设计文档 §4.1。
-pub fn save_user_doc(user_dir: &Path, doc: &CharsetDoc) -> anyhow::Result<()> {
-    let path = user_file_path(user_dir, &doc.def.key)
-        .ok_or_else(|| anyhow::anyhow!("字符类的 key「{}」不能作文件名", doc.def.key))?;
-
-    if is_empty_override(doc) {
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => anyhow::bail!("删除 {} 失败：{e}", path.display()),
-        }
-        return Ok(());
-    }
-
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let head = serde_yaml::to_string(&doc.def)?;
-    let mut text = String::with_capacity(head.len() + 256);
-    text.push_str(USER_FILE_HEADER);
-    text.push_str("---\n");
-    text.push_str(&head);
-    text.push_str(HEAD_BODY_SEP);
-    text.push('\n');
-    for a in &doc.added {
-        text.push_str(a);
-        text.push('\n');
-    }
-    for r in &doc.removed {
-        text.push(REMOVE_PREFIX);
-        text.push_str(r);
-        text.push('\n');
-    }
-    std::fs::write(&path, text).map_err(|e| anyhow::anyhow!("写 {} 失败：{e}", path.display()))
-}
-
-/// 读回用户层里某个 key 的调整；没有就给一份只带 key 的空壳。
-///
-/// ★ 给空壳而不是 `None`：调用方拿到它就能直接改字段再存回去，不必在「有没有这份文件」
-/// 上分两条路——而那两条路一旦分开，新建类的那条几乎必然少写点什么。
-pub fn load_user_doc(user_dir: &Path, key: &str) -> CharsetDoc {
-    let empty = || CharsetDoc {
-        def: CharsetDef {
-            key: key.to_string(),
-            ..Default::default()
-        },
-        added: Vec::new(),
-        removed: Vec::new(),
-    };
-    // ⚠️ 按 **key** 找而不是只看 `<key>.yaml`：用户可能手写了一个别的文件名来覆盖同一个
-    // 类（§3.5 允许）。只认同名文件的话，设置页会把那份手写的调整视而不见，
-    // 保存时再用自己的文件把它盖掉——用户改一次就丢一次。
-    for doc in load_layer(&user_dir.join(CHARSETS_DIR_NAME)) {
-        if doc.def.key == key {
-            return doc;
-        }
-    }
-    empty()
 }
 
 /// 解析一条码位段：`U+4E00-U+9FFF`（闭区间）或 `U+4E00`（单点）。
@@ -938,14 +1103,7 @@ mod tests {
         assert_eq!(doc.added, vec!["好"]);
     }
 
-    // ── 用户层写端 ─────────────────────────────────────────────────────────
-
-    fn tmp_user_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("wind_charset_save_{tag}"));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    // ── 用户层：渲染 / 编辑视图 / diff ─────────────────────────────────────
 
     fn doc_of(key: &str) -> CharsetDoc {
         CharsetDoc {
@@ -958,18 +1116,25 @@ mod tests {
         }
     }
 
-    /// ★★ 写回**只写用户改过的字段**，不带出厂值。
+    /// 一个像出厂 emoji 那样的类：带 ranges、带成员、不表态。
+    fn factory_emoji() -> MergedClass {
+        let mut m = BTreeMap::new();
+        apply_doc(
+            &mut m,
+            parse_doc("key: emoji\nname: Emoji 表情\nranges: [U+1F600-U+1F64F]\norder: 20\n...\n😀\n😃\n😄\n").unwrap(),
+        );
+        m.remove("emoji").unwrap()
+    }
+
+    /// ★★ 渲染**只写用户改过的字段**，不带出厂值。
     ///
     /// 写全量会把当前的 `ranges` / `order` 固化进用户层 ⇒ 出厂补了新 emoji 或调了顺序，
     /// 这个用户永远拿不到。这是本仓踩过三次的坑（设计文档 §4.1）。
     #[test]
-    fn saving_writes_only_what_the_user_changed() {
-        let d = tmp_user_dir("sparse");
+    fn rendering_writes_only_what_the_user_changed() {
         let mut doc = doc_of("emoji");
         doc.def.default = Some(Commonality::Rare);
-        save_user_doc(&d, &doc).unwrap();
-
-        let text = std::fs::read_to_string(d.join(CHARSETS_DIR_NAME).join("emoji.yaml")).unwrap();
+        let text = render_doc(&doc).unwrap();
         assert!(text.contains("key: emoji"));
         assert!(text.contains("default: rare"));
         for absent in [
@@ -980,74 +1145,30 @@ mod tests {
                 "没改过的 {absent} 不该被写进用户层（会固化出厂值）"
             );
         }
-        let _ = std::fs::remove_dir_all(&d);
+        assert!(!text.contains("\n...\n"), "没有成员增删就不该有列表体");
     }
 
-    /// 存下去的东西读得回来——写端与读端用的是同一套语法。
+    /// 渲染出来的东西读得回来——写端与读端用的是同一套语法。
     #[test]
-    fn a_saved_doc_round_trips() {
-        let d = tmp_user_dir("roundtrip");
+    fn a_rendered_doc_round_trips() {
         let mut doc = doc_of("mine");
         doc.def.name = Some("我的类".into());
         doc.def.order = Some(7);
         doc.def.no_freq = Some(true);
         doc.added = vec!["★".into(), "☆".into()];
         doc.removed = vec!["☀".into()];
-        save_user_doc(&d, &doc).unwrap();
-
-        let back = load_user_doc(&d, "mine");
-        assert_eq!(back.def, doc.def);
-        assert_eq!(back.added, doc.added);
-        assert_eq!(back.removed, doc.removed);
-        let _ = std::fs::remove_dir_all(&d);
+        let back = parse_doc(&render_doc(&doc).unwrap()).unwrap();
+        assert_eq!(back, doc);
     }
 
-    /// ★ 空壳删文件，不留一份只有 key 的 yaml。
-    ///
-    /// 留着的话「恢复默认」之后目录里仍有这个类的痕迹，下次读还会走一遍合并。
+    /// 渲染出来的文本带头注释，说明「只含改过的字段」——备份包里用户会直接看到它。
     #[test]
-    fn an_empty_override_deletes_the_file() {
-        let d = tmp_user_dir("empty");
+    fn the_rendered_text_explains_it_is_sparse() {
         let mut doc = doc_of("emoji");
-        doc.def.default = Some(Commonality::Rare);
-        save_user_doc(&d, &doc).unwrap();
-        let path = d.join(CHARSETS_DIR_NAME).join("emoji.yaml");
-        assert!(path.is_file(), "先得真的写出来，否则下面测不出东西");
-
-        save_user_doc(&d, &doc_of("emoji")).unwrap();
-        assert!(!path.exists(), "恢复默认后不该留下空壳文件");
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// ★★ 读回按 **key** 找，而不是只认 `<key>.yaml`。
-    ///
-    /// 用户可以手写一个别的文件名来覆盖同一个类（§3.5）。只认同名文件的话，设置页会把
-    /// 那份手写调整视而不见，保存时再用自己的文件盖掉它——用户改一次丢一次。
-    #[test]
-    fn loading_finds_the_class_by_key_not_by_file_name() {
-        let d = tmp_user_dir("bykey");
-        let dir = d.join(CHARSETS_DIR_NAME);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("我自己起的名字.yaml"),
-            "---\nkey: emoji\norder: 3\n...\n★\n",
-        )
-        .unwrap();
-
-        let back = load_user_doc(&d, "emoji");
-        assert_eq!(back.def.order, Some(3), "手写文件里的调整该被读到");
-        assert_eq!(back.added, vec!["★".to_string()]);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// 没有任何用户调整时给一份空壳，调用方直接改字段存回去即可。
-    #[test]
-    fn loading_a_missing_class_yields_an_empty_shell() {
-        let d = tmp_user_dir("missing");
-        let back = load_user_doc(&d, "emoji");
-        assert_eq!(back.def.key, "emoji");
-        assert!(is_empty_override(&back));
-        let _ = std::fs::remove_dir_all(&d);
+        doc.def.order = Some(1);
+        let text = render_doc(&doc).unwrap();
+        assert!(text.starts_with('#'), "开头得是注释");
+        assert!(text.contains("只含你改过的字段"));
     }
 
     /// ⛔ 危险的 key 在**入口**就被拒，不做「安全化」。
@@ -1073,25 +1194,176 @@ mod tests {
         for good in ["emoji", "common_han", "表情符号", "my-set_1"] {
             assert!(is_valid_key(good), "「{good}」该是合法 key");
         }
-
-        let d = tmp_user_dir("badkey");
         assert!(
-            save_user_doc(&d, &doc_of("../escape")).is_err(),
-            "非法 key 必须写失败，而不是落到别处"
+            render_doc(&doc_of("../escape")).is_err(),
+            "非法 key 必须渲染失败"
         );
-        let _ = std::fs::remove_dir_all(&d);
+        assert!(
+            diff_against_factory(doc_of("a/b"), None).is_err(),
+            "导入一份 key 非法的文件也必须拒绝"
+        );
     }
 
-    /// 写出来的文件带固定头注释，声明「会被整份重写」。
+    /// 库里的文本按条解析：坏的一条跳过、库键与文本 key 不一致的跳过，其余照常。
     #[test]
-    fn the_saved_file_says_it_will_be_rewritten() {
-        let d = tmp_user_dir("header");
-        let mut doc = doc_of("emoji");
-        doc.def.order = Some(1);
-        save_user_doc(&d, &doc).unwrap();
-        let text = std::fs::read_to_string(d.join(CHARSETS_DIR_NAME).join("emoji.yaml")).unwrap();
-        assert!(text.starts_with('#'), "开头得是注释");
-        assert!(text.contains("整份重写"), "得把这件事说出来");
-        let _ = std::fs::remove_dir_all(&d);
+    fn stored_docs_skip_the_broken_and_the_mismatched() {
+        let docs = parse_stored_docs([
+            ("emoji", "key: emoji\ndefault: rare\n"),
+            ("broken", "key: [\n"),
+            ("mismatch", "key: something_else\n"),
+            ("mine", "key: mine\n...\n★\n"),
+        ]);
+        let keys: Vec<&str> = docs.iter().map(|d| d.def.key.as_str()).collect();
+        assert_eq!(keys, ["emoji", "mine"]);
+        assert_eq!(docs[1].added, vec!["★".to_string()]);
+    }
+
+    // ── 编辑视图 ───────────────────────────────────────────────────────────
+
+    /// ★ 首行必须说「此文件不会被自动读取」——用户拍板的措辞，也是这份文件最容易被
+    /// 误解的地方。
+    #[test]
+    fn the_edit_view_says_it_is_not_read_automatically() {
+        let text = render_edit_view(Some(&factory_emoji()), &doc_of("emoji")).unwrap();
+        let first = text.lines().next().unwrap();
+        assert!(first.contains("不会被自动读取"), "首行：{first}");
+        assert!(text.contains("从文件加载"), "得告诉用户回哪里导入");
+        assert!(
+            text.contains("「Emoji 表情」（key: emoji）"),
+            "得写明是哪个类"
+        );
+    }
+
+    /// 视图 = 出厂 + 用户调整的**生效**形态：字段合并、成员并集减移除、出厂顺序在前。
+    #[test]
+    fn the_edit_view_shows_the_effective_definition() {
+        let mut user = doc_of("emoji");
+        user.def.default = Some(Commonality::Rare);
+        user.added = vec!["🫠".into()];
+        user.removed = vec!["😃".into()];
+        let text = render_edit_view(Some(&factory_emoji()), &user).unwrap();
+
+        assert!(text.contains("\nname: Emoji 表情\n"), "出厂字段要在");
+        assert!(text.contains("\norder: 20\n"));
+        assert!(text.contains("\ndefault: rare\n"), "用户覆盖的字段要生效");
+        let body: Vec<&str> = text.split("\n...\n").nth(1).unwrap().lines().collect();
+        assert_eq!(
+            body,
+            ["😀", "😄", "🫠"],
+            "移除的不在、新增的在末尾、出厂顺序保留"
+        );
+    }
+
+    /// 出厂类的 ranges 写成**注释**：看得见、改不动（改了 diff 时拒绝）。
+    #[test]
+    fn factory_ranges_are_shown_as_a_comment() {
+        let text = render_edit_view(Some(&factory_emoji()), &doc_of("emoji")).unwrap();
+        assert!(
+            !text.contains("\nranges:"),
+            "不能作为字段出现，否则用户改了会以为能导入"
+        );
+        assert!(text.contains("# ranges: [U+1F600-U+1F64F]"), "但要能看见");
+        assert!(text.contains("范围只读"));
+    }
+
+    /// 自建类（没有出厂对应）的视图就是它自己，ranges 是正常字段。
+    #[test]
+    fn a_custom_class_edit_view_is_itself() {
+        let mut user = doc_of("mine");
+        user.def.name = Some("我的符号".into());
+        user.def.ranges = Some(vec!["U+2600-U+26FF".into()]);
+        user.added = vec!["★".into()];
+        let text = render_edit_view(None, &user).unwrap();
+        assert!(
+            text.contains("\nranges:\n- U+2600-U+26FF\n")
+                || text.contains("ranges: [U+2600-U+26FF]")
+        );
+        assert!(text.ends_with("...\n★\n"));
+    }
+
+    // ── diff ───────────────────────────────────────────────────────────────
+
+    /// ★★ 导出 → 原样导入 ⇒ 用户层**不变**。这是「完整视图不固化出厂值」的凭据。
+    #[test]
+    fn export_then_import_unchanged_is_a_no_op() {
+        let f = factory_emoji();
+        let mut user = doc_of("emoji");
+        user.def.default = Some(Commonality::Rare);
+        user.added = vec!["🫠".into()];
+        user.removed = vec!["😃".into()];
+
+        let text = render_edit_view(Some(&f), &user).unwrap();
+        let back = diff_against_factory(parse_doc(&text).unwrap(), Some(&f)).unwrap();
+        assert_eq!(back, user);
+    }
+
+    /// 一个没调整过的类，导出再导入，用户层仍是空壳——不能因为导出过就多出一条记录。
+    #[test]
+    fn export_then_import_a_pristine_class_yields_an_empty_override() {
+        let f = factory_emoji();
+        let text = render_edit_view(Some(&f), &doc_of("emoji")).unwrap();
+        let back = diff_against_factory(parse_doc(&text).unwrap(), Some(&f)).unwrap();
+        assert!(is_empty_override(&back), "实得 {back:?}");
+    }
+
+    /// 视图里改一个字段、删一个字、加一个字 ⇒ diff 里恰好三条。
+    #[test]
+    fn diff_records_exactly_what_changed() {
+        let f = factory_emoji();
+        let mut text = render_edit_view(Some(&f), &doc_of("emoji")).unwrap();
+        text = text.replace("\norder: 20\n", "\norder: 5\n");
+        text = text.replace("\n😃\n", "\n");
+        text.push_str("🫠\n");
+
+        let back = diff_against_factory(parse_doc(&text).unwrap(), Some(&f)).unwrap();
+        assert_eq!(back.def.order, Some(5));
+        assert_eq!(back.def.name, None, "没改的字段不能被固化");
+        assert_eq!(back.added, vec!["🫠".to_string()]);
+        assert_eq!(back.removed, vec!["😃".to_string()]);
+    }
+
+    /// 删掉字段那一行 = 沿用出厂，不是「不表态」——字段级合并表达不了后者。
+    #[test]
+    fn deleting_a_field_line_means_follow_factory() {
+        let f = factory_emoji();
+        let mut user = doc_of("emoji");
+        user.def.order = Some(5);
+        let text = render_edit_view(Some(&f), &user)
+            .unwrap()
+            .replace("\norder: 5\n", "\n");
+        let back = diff_against_factory(parse_doc(&text).unwrap(), Some(&f)).unwrap();
+        assert_eq!(
+            back.def.order, None,
+            "用户层不再覆盖 order ⇒ 生效值回到出厂 20"
+        );
+    }
+
+    /// ⛔ 出厂类的 ranges 改了要**报错**，不静默丢弃。
+    #[test]
+    fn changing_factory_ranges_is_rejected_loudly() {
+        let f = factory_emoji();
+        let mut parsed = doc_of("emoji");
+        parsed.def.ranges = Some(vec!["U+0000-U+FFFF".into()]);
+        let e = diff_against_factory(parsed, Some(&f)).unwrap_err();
+        assert!(e.to_string().contains("范围只读"), "{e}");
+
+        // 写回与出厂相同的 ranges 则无事：用户可能把注释解开又没改。
+        let mut same = doc_of("emoji");
+        same.def.ranges = f.def.ranges.clone();
+        let back = diff_against_factory(same, Some(&f)).unwrap();
+        assert_eq!(back.def.ranges, None, "等于出厂就不该进用户层");
+    }
+
+    /// 自建类原样存；`replace` 对它无意义，清掉。
+    #[test]
+    fn a_custom_class_is_stored_as_is() {
+        let mut parsed = doc_of("mine");
+        parsed.def.ranges = Some(vec!["U+2600-U+26FF".into()]);
+        parsed.def.replace = Some(true);
+        parsed.added = vec!["★".into()];
+        let back = diff_against_factory(parsed.clone(), None).unwrap();
+        assert_eq!(back.def.ranges, parsed.def.ranges);
+        assert_eq!(back.added, parsed.added);
+        assert_eq!(back.def.replace, None);
     }
 }

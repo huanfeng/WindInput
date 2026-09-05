@@ -30,7 +30,7 @@ fn data_dir() -> PathBuf {
 
 fn factory_registry() -> wind_candidate::CharsetRegistry {
     let d = data_dir();
-    let defs = wind_config::charset_def::load_layered(Some(&d), None, None);
+    let defs = wind_config::charset_def::load_layered(Some(&d), None, Vec::new());
     assemble(&defs, Some(&d), ExternalRefs::default())
 }
 

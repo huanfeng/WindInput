@@ -2385,9 +2385,11 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror",
  "toml 0.8.23",
  "tracing",
+ "unicode-segmentation",
  "wind-quick-input",
 ]
 
@@ -2605,6 +2607,7 @@ dependencies = [
  "anyhow",
  "serde",
  "toml 0.8.23",
+ "wind-candidate",
 ]
 
 [[package]]

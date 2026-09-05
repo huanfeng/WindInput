@@ -39,6 +39,25 @@ pub struct ExternalRefs<'a> {
     pub in_rare: &'a [String],
 }
 
+/// 从 store 读用户层，解析成 docs（坏的一条跳过，见 `parse_stored_docs`）。
+///
+/// 放在这里而不是 `wind-config`：那个 crate 不依赖 `wind-store`，而本 crate 两边都看得见
+/// ——与 `assemble` 落在这里是同一个理由。读失败只 warn 并当作空：store 打不开时其它
+/// 用户数据也都是空的，字符类没理由例外。
+pub fn user_docs_from_store(
+    store: &wind_store::Store,
+) -> Vec<wind_config::charset_def::CharsetDoc> {
+    match store.list_charset_docs() {
+        Ok(rows) => wind_config::charset_def::parse_stored_docs(
+            rows.iter().map(|(k, t)| (k.as_str(), t.as_str())),
+        ),
+        Err(e) => {
+            warn!("读字符类用户层失败，本次按无调整装配：{e}");
+            Vec::new()
+        }
+    }
+}
+
 /// 装配出判定用的 registry。
 ///
 /// `data_dir` 供 `file:` 字段走 `resolve_schema_resource` 做三层解析；`None` 时

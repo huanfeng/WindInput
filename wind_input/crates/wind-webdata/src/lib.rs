@@ -486,6 +486,10 @@ pub trait WebDataRpc: WebDataHost {
             "charset.set" => self.web_charset_set(params),
             "charset.reset" => self.web_charset_reset(params),
             "charset.clearRedundant" => self.web_charset_clear_redundant(params),
+            "charset.delete" => self.web_charset_delete(params),
+            "charset.exportEdit" => self.web_charset_export_edit(params),
+            "charset.exportTemplate" => self.web_charset_export_template(),
+            "charset.importFile" => self.web_charset_import_file(params),
             "commonChars.list" => self.web_common_chars_list(params),
             "commonChars.query" => self.web_common_chars_query(params),
             "commonChars.set" => self.web_common_chars_set(params),
@@ -1603,10 +1607,6 @@ pub trait WebDataRpc: WebDataHost {
         let schemas_dir = user_dir.as_ref().map(|d| d.join("schemas"));
         let schema_overrides_dir = user_dir.as_ref().map(|d| d.join("schema_overrides"));
         let themes_dir = user_dir.as_ref().map(|d| d.join("themes"));
-        // 字符类定义：与 compat.toml / schema_overrides 同类的用户层配置。
-        let charsets_dir = user_dir
-            .as_ref()
-            .map(|d| d.join(wind_config::charset_def::CHARSETS_DIR_NAME));
         let state_file = wind_config::Config::local_dir().map(|d| d.join("state.toml"));
         let src = BackupSources {
             user_config_file: cfg_file.as_deref(),
@@ -1614,7 +1614,6 @@ pub trait WebDataRpc: WebDataHost {
             user_schemas_dir: schemas_dir.as_deref(),
             user_schema_overrides_dir: schema_overrides_dir.as_deref(),
             user_themes_dir: themes_dir.as_deref(),
-            user_charsets_dir: charsets_dir.as_deref(),
             state_file: state_file.as_deref(),
         };
         let r = create_backup(
@@ -1668,10 +1667,6 @@ pub trait WebDataRpc: WebDataHost {
         let schemas_dir = user_dir.as_ref().map(|d| d.join("schemas"));
         let schema_overrides_dir = user_dir.as_ref().map(|d| d.join("schema_overrides"));
         let themes_dir = user_dir.as_ref().map(|d| d.join("themes"));
-        // 字符类定义：与 compat.toml / schema_overrides 同类的用户层配置。
-        let charsets_dir = user_dir
-            .as_ref()
-            .map(|d| d.join(wind_config::charset_def::CHARSETS_DIR_NAME));
         let state_file = wind_config::Config::local_dir().map(|d| d.join("state.toml"));
         let targets = RestoreTargets {
             user_config_file: cfg_file.as_deref(),
@@ -1679,7 +1674,6 @@ pub trait WebDataRpc: WebDataHost {
             user_schemas_dir: schemas_dir.as_deref(),
             user_schema_overrides_dir: schema_overrides_dir.as_deref(),
             user_themes_dir: themes_dir.as_deref(),
-            user_charsets_dir: charsets_dir.as_deref(),
             state_file: state_file.as_deref(),
         };
         let r = restore_backup(
@@ -1692,6 +1686,8 @@ pub trait WebDataRpc: WebDataHost {
         // 刷新:config 域生效、短语重建、涉及方案失效缓存(未加载时安全 no-op)。
         let touched_config = r.restored.iter().any(|p| p.starts_with("config/"));
         let touched_phrase = r.restored.iter().any(|p| p == "userdata/phrases.wdict");
+        // 字符类用户层进了库，运行时 registry 还是旧的——不重装就是「还原成功、判定没变」。
+        let touched_charsets = r.restored.iter().any(|p| p.starts_with("charsets/"));
         for id in &r.schemas_touched {
             self.engine_mgr().invalidate_schema(id);
         }
@@ -1720,6 +1716,9 @@ pub trait WebDataRpc: WebDataHost {
         }
         if touched_config {
             self.reload_user_config();
+        }
+        if touched_charsets {
+            self.reload_charsets();
         }
         Ok(json!({
             "restored": r.restored,
@@ -2794,6 +2793,49 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("缺少参数 key"))?;
         let o = self.charset_clear_redundant(key)?;
         Ok(json!({ "scanned": o.scanned, "removed": o.removed }))
+    }
+
+    /// `charset.delete` —— 删一个自建类。出厂类会被拒绝。
+    fn web_charset_delete(&self, params: &Value) -> anyhow::Result<Value> {
+        let key = str_param(params, "key")?;
+        self.charset_delete(key)?;
+        Ok(json!({ "ok": true }))
+    }
+
+    /// `charset.exportEdit` —— 外部编辑：导出完整视图到临时文件，返回路径。
+    ///
+    /// 打开编辑器是**设置页**的事（它在用户会话里，也知道平台）；core 只负责把文件
+    /// 写出来。文件首行写明「不会被自动读取」。
+    fn web_charset_export_edit(&self, params: &Value) -> anyhow::Result<Value> {
+        let key = str_param(params, "key")?;
+        let path = self.charset_export_edit(key)?;
+        Ok(json!({ "path": path.to_string_lossy() }))
+    }
+
+    /// `charset.exportTemplate` —— 新建类：导出模板到临时文件，返回路径。
+    fn web_charset_export_template(&self) -> anyhow::Result<Value> {
+        let path = self.charset_export_template()?;
+        Ok(json!({ "path": path.to_string_lossy() }))
+    }
+
+    /// `charset.importFile` —— 从文件加载（回读外部编辑 / 导入手写 yaml）。
+    fn web_charset_import_file(&self, params: &Value) -> anyhow::Result<Value> {
+        let path = str_param(params, "path")?;
+        let out = self.charset_import_file(std::path::Path::new(path))?;
+        let items: Vec<Value> = out
+            .iter()
+            .map(|c| {
+                json!({
+                    "key": c.key,
+                    "name": c.name,
+                    "builtin": c.builtin,
+                    "added": c.added,
+                    "removed": c.removed,
+                    "fields": c.fields,
+                })
+            })
+            .collect();
+        Ok(json!({ "classes": items }))
     }
 
     fn web_common_chars_bulk(&self, params: &Value) -> anyhow::Result<Value> {

@@ -59,7 +59,7 @@ pub trait WebDataHost {
     /// 字符类：设置页列表（全部类，按 `order` 升序＝仲裁顺序）。
     fn charset_rows(&self) -> Vec<crate::handle_charset::CharsetClassRow>;
 
-    /// 改一个类的属性：写用户层 `charsets/<key>.yaml` **并立即热载**。
+    /// 改一个类的属性：写库 **并立即热载**。
     fn charset_edit(
         &self,
         key: &str,
@@ -68,6 +68,24 @@ pub trait WebDataHost {
 
     /// 撤掉用户层对某个类的全部调整。
     fn charset_reset(&self, key: &str) -> anyhow::Result<()>;
+
+    /// 删一个**自建**类；出厂类会被拒绝（它们只能停用或恢复默认）。
+    fn charset_delete(&self, key: &str) -> anyhow::Result<()>;
+
+    /// 「外部编辑」：把一个类的完整视图写到临时文件，返回路径给设置页去打开。
+    fn charset_export_edit(&self, key: &str) -> anyhow::Result<std::path::PathBuf>;
+
+    /// 「新建类」：写一份模板到临时文件，返回路径。
+    fn charset_export_template(&self) -> anyhow::Result<std::path::PathBuf>;
+
+    /// 「从文件加载」：出厂有的 key 当覆盖（diff 后存），没有的当自建类。立即热载。
+    fn charset_import_file(
+        &self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<Vec<crate::handle_charset::CharsetImported>>;
+
+    /// 重新装配字符类 registry。备份还原写了库之后必须调，否则运行时还是旧的。
+    fn reload_charsets(&self);
 
     /// 清理压在某个类上的冗余逐条覆盖（方向与当前默认相同的那些）。
     fn charset_clear_redundant(
@@ -235,6 +253,24 @@ impl WebDataHost for Coordinator {
     }
     fn charset_reset(&self, key: &str) -> anyhow::Result<()> {
         Coordinator::charset_reset(self, key)
+    }
+    fn charset_delete(&self, key: &str) -> anyhow::Result<()> {
+        Coordinator::charset_delete(self, key)
+    }
+    fn charset_export_edit(&self, key: &str) -> anyhow::Result<std::path::PathBuf> {
+        Coordinator::charset_export_edit(self, key)
+    }
+    fn charset_export_template(&self) -> anyhow::Result<std::path::PathBuf> {
+        Coordinator::charset_export_template(self)
+    }
+    fn charset_import_file(
+        &self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<Vec<crate::handle_charset::CharsetImported>> {
+        Coordinator::charset_import_file(self, path)
+    }
+    fn reload_charsets(&self) {
+        Coordinator::reload_charsets(self)
     }
     fn charset_clear_redundant(
         &self,
