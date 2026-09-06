@@ -1095,7 +1095,7 @@ STDAPI CTextService::QueryInterface(REFIID riid, void** ppvObj)
     }
     else if (IsEqualIID(riid, __uuidof(ITfIntegratableCandidateListUIElement)))
     {
-        // 独立基类（不经 ITfUIElement），直接转型。见类声明处对 Dota 2 自绘的说明。
+        // 独立基类（不经 ITfUIElement），直接转型。见下方该接口段的说明。
         *ppvObj = (ITfIntegratableCandidateListUIElement*)this;
     }
     else if (IsEqualIID(riid, IID_ITfFunctionProvider))
@@ -2157,8 +2157,11 @@ STDAPI CTextService::GetFunction(REFGUID rguid, REFIID riid, IUnknown** ppunk)
 static const GUID kWindCandidateUIElementGuid =
     { 0xb3e54a91, 0x7c20, 0x4b6a, { 0xa1, 0x5e, 0x82, 0x09, 0x77, 0x55, 0x44, 0x33 } };
 
-// 含 TF_CLUIE_DOCUMENTMGR：GetDocumentMgr 现返回真实焦点文档（Weasel 同款），首次 Update 通知
-// 宿主取一次 docmgr——能自绘候选的游戏宿主（Dota 2）据此把候选关联到文本并绘制。
+// 含 TF_CLUIE_DOCUMENTMGR：GetDocumentMgr 返回真实焦点文档（Weasel 同款），首次 Update 通知
+// 宿主取一次 docmgr，宿主据此把候选关联到文本。
+// ⛔ 原注释称「能自绘候选的游戏宿主（Dota 2）据此绘制」——已证伪，Dota 2 根本不读
+// 我们的 TSF 候选（见本段开头的 ⛔ 说明与设计文档 §1.1）。保留本位是因为它符合规范，
+// 不是因为哪个游戏需要它。
 static constexpr DWORD kUiElementAllFlags =
     TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION
     | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE;
@@ -2212,9 +2215,13 @@ STDAPI CTextService::GetUpdatedFlags(DWORD* pdwFlags)
 
 STDAPI CTextService::GetDocumentMgr(ITfDocumentMgr** ppdim)
 {
-    // 返回当前焦点文档：宿主（尤其能自绘候选的游戏，如 Dota 2/SDL 经 VALVEIME001）靠它把候选
-    // 列表关联到文本、据以定位与绘制。曾按 SampleIME 返 E_NOTIMPL——实测 Dota 2 因此读了候选却
-    // 不画（GetString 全读、无候选框）。对照 Weasel：取 GetFocus 的真实 docmgr。
+    // 返回当前焦点文档：宿主靠它把候选列表关联到文本。对照 Weasel：取 GetFocus 的真实 docmgr。
+    // 这是规范里该有的答法，先于任何宿主的具体需要。
+    //
+    // ⛔ 原注释称「曾返 E_NOTIMPL 导致 Dota 2 读了候选却不画」——已证伪。同一份 Dota 2
+    // 日志里能被游戏绘制的两家，这个方法的答法**彼此就不一致**（QQ五笔回 S_OK+NULL、
+    // 微软拼音回真实文档）⇒ 它不可能是判据。真正的判据是输入法名字（设计文档 §1.1）。
+    // ⛔ 别再为了某个游戏来回改这里的返回值，三种答法都试过、都无效。
     if (ppdim == nullptr) return E_INVALIDARG;
     *ppdim = nullptr;
     if (_pThreadMgr == nullptr) return E_FAIL;
@@ -2338,7 +2345,9 @@ STDAPI CTextService::Abort(void)
 }
 
 // ==== ITfIntegratableCandidateListUIElement ====
-// 让能自绘候选的宿主（Dota 2/SDL 经 VALVEIME001）把候选画出来。对照 Weasel CandidateList.cpp。
+// Win8+ 搜索框一类宿主的候选集成（键路由、候选编号显示）。对照 Weasel CandidateList.cpp。
+// ⛔ 原注释称它是「让游戏宿主画出候选」的关键——已证伪：微软五笔在 Dota 2 里画得出来，
+// 而它**根本不实现这个接口**。挂与不挂都试过，对游戏毫无影响（设计文档 §1.1）。
 STDAPI CTextService::SetIntegrationStyle(GUID guidIntegrationStyle)
 {
     (void)guidIntegrationStyle;
@@ -2460,10 +2469,12 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
     {
         BOOL bShow = TRUE;
         // ★ 先取快照再 BeginUIElement：宿主（以及 IMM32 桥）在 Begin 回调里就会读
-        // GetCount/GetString。微软拼音在 Begin 时就带着全量数据，IMM32 桥据此发
-        // IMN_OPENCANDIDATE；我们此前 Begin 时只有占位「…」、真数据要等随后的 Update，
-        // 桥就只发 CHANGECANDIDATE 而不发 OPENCANDIDATE，靠 OPENCANDIDATE 才开候选盒的
-        // 宿主（Dota 2）什么都不显示。代价：每个组合起手多一次同步拉取（亚毫秒）。
+        // GetCount/GetString，那一刻只有占位「…」的话，宿主拿到的就是占位。
+        // 代价：每个组合起手多一次同步拉取（亚毫秒）。
+        // ⛔ 原注释把它挂在「Dota 2 靠 IMN_OPENCANDIDATE 开候选盒」上——已证伪：
+        // Dota 2 那边 OPENCANDIDATE 从未出现过，两家能被它绘制的输入法一个在 Begin 交全表、
+        // 一个交空列表，交不交数据不是判据（设计文档 §1.1）。本位保留是为了「宿主读到的
+        // 是真数据而非占位」这个本身就对的理由。
         _RefreshUiElementSnapshot();
         _uiUpdatedFlags = kUiElementAllFlags;
         // 通过 Behavior 路径解决菱形继承
