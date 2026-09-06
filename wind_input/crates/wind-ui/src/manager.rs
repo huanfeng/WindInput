@@ -120,6 +120,9 @@ impl UiManager {
 
         // 输入诊断 HUD（惰性创建：首次 ShowInputDiag 时构造，best-effort）
         let mut input_diag_hud: Option<crate::input_diag_hud::InputDiagHud> = None;
+        // 定位调试浮窗（惰性创建，同上）。仅 Windows：组合矩形出自 TSF。
+        #[cfg(windows)]
+        let mut caret_overlay: Option<crate::caret_overlay::CaretOverlay> = None;
 
         // 一次性通知 toast（best-effort）
         let mut toast = match crate::toast::Toast::new() {
@@ -781,6 +784,27 @@ impl UiManager {
                         }
                         if let Some(h) = input_diag_hud.as_mut() {
                             h.show_or_update(&v);
+                        }
+                    }
+                    UiCommand::ShowCaretOverlay(_v) => {
+                        #[cfg(windows)]
+                        {
+                            if caret_overlay.is_none() {
+                                match crate::caret_overlay::CaretOverlay::new() {
+                                    Ok(o) => caret_overlay = Some(o),
+                                    Err(e) => error!("Failed to create caret overlay: {}", e),
+                                }
+                            }
+                            if let Some(o) = caret_overlay.as_mut() {
+                                o.show_or_update(&_v);
+                            }
+                        }
+                    }
+                    UiCommand::HideCaretOverlay =>
+                    {
+                        #[cfg(windows)]
+                        if let Some(o) = caret_overlay.as_mut() {
+                            o.hide();
                         }
                     }
                     UiCommand::HideInputDiag => {

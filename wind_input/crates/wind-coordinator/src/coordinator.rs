@@ -1356,6 +1356,17 @@ pub struct Coordinator {
     /// - **更新**：`notify_ui_update` 每次**首显**或**坐标校正**（`show_authorized`）下发之后。
     /// - **清位**：`reset_first_show`（组合结束，锚点随之失效）。
     shown_anchor: Mutex<(i32, i32, bool)>,
+    /// 定位调试浮窗开关（仅 Dev 变体的菜单可切；默认关）。
+    ///
+    /// ★ 它存在的理由见 `wind_ui::caret_overlay` 的模块文档：定位缺陷是**空间**问题，
+    /// 日志只能给出离散数值。开关放运行时而非配置——它是排查动作，不该被记住。
+    pub(crate) caret_overlay_enabled: std::sync::atomic::AtomicBool,
+    /// 最近一帧 caret_update 的几何与判据结果，供浮窗渲染。
+    ///
+    /// 分两处填：`handle_caret_update` 知道宿主上报了什么、判据走了哪条；
+    /// `notify_ui_update` 知道候选窗**实际**用了哪个锚点。两者合起来才回答得了
+    /// 「算出来的位置对不对」，所以先暂存，下发时补齐锚点再推给 UI。
+    caret_overlay_frame: Mutex<Option<wind_ui_types::diag::CaretOverlayView>>,
     /// 坐标校正判据的比较基准（x, y, 有效）——「上一次**被认可**的插入点位置」。
     ///
     /// ⚠ 与 [`Self::shown_anchor`] 只差一处，但那一处正是缺陷发生的地方，**不可合并**：
@@ -2243,6 +2254,9 @@ impl Coordinator {
             assoc_placeholder_orphaned: std::sync::atomic::AtomicBool::new(false),
             candidate_shown: Mutex::new(false),
             show_authorized: std::sync::atomic::AtomicBool::new(false),
+            // 定位调试浮窗：仅 Dev 菜单可开，默认关。
+            caret_overlay_enabled: std::sync::atomic::AtomicBool::new(false),
+            caret_overlay_frame: Mutex::new(None),
             candidate_flipped: std::sync::atomic::AtomicBool::new(false),
             hover_index: std::sync::atomic::AtomicI32::new(-1),
             composition_start: Mutex::new((0, 0, false)),
@@ -4588,6 +4602,89 @@ impl Coordinator {
             .unwrap_or_else(|e| e.into_inner()) = (100, 200, true);
     }
 
+    /// 切换定位调试浮窗。关闭时立即让 UI 撤掉窗口——否则最后一帧会留在屏幕上。
+    pub(crate) fn toggle_caret_overlay(&self) {
+        let on = !self
+            .caret_overlay_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.caret_overlay_enabled
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+        if !on {
+            *self
+                .caret_overlay_frame
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            let _ = self.ui_tx.send(wind_ui_types::UiCommand::HideCaretOverlay);
+        }
+    }
+
+    /// 记录本帧组合矩形判据走了哪条分支（浮窗关闭时是无操作）。
+    pub(crate) fn note_overlay_verdict(&self, v: wind_ui_types::diag::RectVerdict) {
+        if !self
+            .caret_overlay_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let mut f = self
+            .caret_overlay_frame
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        f.get_or_insert_with(Default::default).rect_verdict = v;
+    }
+
+    /// 暂存本帧宿主上报的几何。锚点此时还不知道——它由 `notify_ui_update` 算出，
+    /// 故在那里补齐后才推给浮窗。
+    pub(crate) fn stash_overlay_frame(&self, data: &wind_bridge::handler::CaretData) {
+        if !self
+            .caret_overlay_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let mut f = self
+            .caret_overlay_frame
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let view = f.get_or_insert_with(Default::default);
+        view.caret = (data.x, data.y, data.height);
+        view.comp_start = if data.composition_start_x != 0 || data.composition_start_y != 0 {
+            Some((data.composition_start_x, data.composition_start_y))
+        } else {
+            None
+        };
+        view.comp_rect = data.composition_rect;
+        view.caret_source = wind_ipc::protocol::caret_source::name(data.source);
+        if data.composition_rect.is_none() {
+            view.rect_verdict = wind_ui_types::diag::RectVerdict::Absent;
+        }
+        view.process = self.active_process_name();
+    }
+
+    /// 候选窗下发时补上「实际用了哪个锚点」并推给浮窗——这一项才让整幅图能回答
+    /// 「判据算出来的位置对不对」。
+    pub(crate) fn push_overlay_frame(&self, anchor: (i32, i32), source: &'static str) {
+        if !self
+            .caret_overlay_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let view = {
+            let mut f = self
+                .caret_overlay_frame
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let v = f.get_or_insert_with(Default::default);
+            v.anchor = anchor;
+            v.anchor_source = source;
+            v.clone()
+        };
+        let _ = self
+            .ui_tx
+            .send(wind_ui_types::UiCommand::ShowCaretOverlay(Box::new(view)));
+    }
+
     pub(crate) fn reset_pinyin_composition(&self, state: &mut State) {
         state.committed_text.clear();
         state.committed_segs.clear();
@@ -5196,6 +5293,7 @@ impl Coordinator {
             fixed_x: cand_fixed_x,
             fixed_y: cand_fixed_y,
         });
+        self.push_overlay_frame((caret_x, caret_y), anchor_source);
         // 记下候选窗**实际**用的位置基准，供后续非坐标重绘复用（见上面 `hold_anchor`）。
         // 只在首显和坐标校正时更新：复用锚点的那些重绘按定义不改变位置，回写等于把
         // 「谁有资格移动候选窗」这条判据又散成两处。
@@ -9325,6 +9423,262 @@ mod caret_compat_tests {
                 .all(|pos| pos == (REAL_START, BOTTOM)),
             "候选窗全程不得离开组合起点"
         );
+    }
+
+    /// ★★★ 钉住的是**列**不是行：跨行时锚点的 y 要跟到 caret 所在行。
+    ///
+    /// WPS 实测（2026-09-05 21:11，调试浮窗截图）：组合跨两行时
+    ///   anchor=(1647,1140) 停在第一行、caret=(2472,1182) 已在第二行（差 42 = 一行高），
+    /// 候选窗因此画在第一行下方、正好压住第二行。
+    ///
+    /// 这类宿主给不出组合范围矩形，无从知道「最后一行的行首在哪」；但 caret.y 已经
+    /// 说明了当前插入点在哪一行——沿用钉住的 x、只换 y，候选窗就落到正确的行上。
+    #[test]
+    fn a_pinned_anchor_follows_the_caret_row_across_a_wrap() {
+        const PINNED_X: i32 = 1647;
+        const ROW1: i32 = 1140;
+        const ROW2: i32 = 1182; // 下一行，差一个行高
+        const LINE_H: i32 = 34;
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        c.active_compat.lock().unwrap().pin_anchor_when_start_drifts = true;
+        *c.last_valid_caret.lock().unwrap() = (PINNED_X, ROW1, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "sfgefe".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "是否".into(),
+                ..Default::default()
+            }];
+            st.caret_x = PINNED_X;
+            st.caret_y = ROW1;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        drain_positions(&rx);
+        *c.composition_start.lock().unwrap() = (PINNED_X, ROW1, true);
+
+        // 同一行内继续打字：插入点形态的矩形整体右移，锚点必须纹丝不动
+        for x in [2000, 2200, 2400] {
+            c.handle_caret_update(&CaretData {
+                x,
+                y: ROW1,
+                height: LINE_H,
+                composition_start_x: x,
+                composition_start_y: ROW1,
+                source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                composition_rect: Some((x, ROW1 - LINE_H, x + 2, ROW1)),
+            });
+            let cs = *c.composition_start.lock().unwrap();
+            assert_eq!(
+                (cs.0, cs.1),
+                (PINNED_X, ROW1),
+                "同一行内锚点必须钉住（x 与 y 都不动），x={x}"
+            );
+        }
+
+        // 换行：caret 落到下一行，锚点的 y 要跟过去，x 保持钉住
+        c.handle_caret_update(&CaretData {
+            x: 2472,
+            y: ROW2,
+            height: LINE_H,
+            composition_start_x: 2472,
+            composition_start_y: ROW2,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: Some((2472, ROW2 - LINE_H, 2474, ROW2)),
+        });
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (cs.0, cs.1),
+            (PINNED_X, ROW2),
+            "跨行后锚点应保持钉住的列、跟到 caret 所在行——否则候选窗压住新行"
+        );
+
+        // 删回上一行：y 也要跟回去
+        c.handle_caret_update(&CaretData {
+            x: 2400,
+            y: ROW1,
+            height: LINE_H,
+            composition_start_x: 2400,
+            composition_start_y: ROW1,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: Some((2400, ROW1 - LINE_H, 2402, ROW1)),
+        });
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (cs.0, cs.1),
+            (PINNED_X, ROW1),
+            "删回上一行时 y 应跟回——它跟的是当前行，不是累计位移"
+        );
+    }
+
+    /// 未开该开关的宿主（Excel / 表格类）不受「跟行」影响，行为一字不变。
+    #[test]
+    fn row_following_is_per_app_too() {
+        const LINE_H: i32 = 36;
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        // 刻意不开 pin_anchor_when_start_drifts
+        *c.last_valid_caret.lock().unwrap() = (1809, 997, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "wo".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "我".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 1809;
+            st.caret_y = 997;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        drain_positions(&rx);
+        *c.composition_start.lock().unwrap() = (1809, 997, true);
+
+        c.handle_caret_update(&CaretData {
+            x: 1839,
+            y: 1033,
+            height: LINE_H,
+            composition_start_x: 1839,
+            composition_start_y: 1033,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: Some((1839, 997, 1840, 1033)),
+        });
+        let cs = *c.composition_start.lock().unwrap();
+        assert_ne!(
+            (cs.0, cs.1),
+            (1809, 1033),
+            "未声明的宿主不得走「x 钉住 y 跟行」这条——它们的跟随由既有逻辑负责"
+        );
+    }
+
+    /// ★★★ 换行后 caret 落在 `rect.left` 上，不得据此把真范围误判成插入点。
+    ///
+    /// Excel 实测（2026-09-05 21:50，调试浮窗截图，先换行再删除）：
+    ///   rect=(2524,797,2926,834) **w=402 的真包围盒**
+    ///   caret=(2524,834) 落在它的**左下角**——换行后插入点回到行首，恰好等于 rect.left
+    ///   anchor=(2915,834) ← 陈旧的 composition_start，候选窗停在右端、删除回不来
+    ///
+    /// ⛔ 判据的前一版写成 `left >= caret.x`（想表达「组合起点必须在插入点左边」），
+    /// 那个前提**只在单行成立**：一旦换行，caret 回到行首就恰好等于 left，判据自己把
+    /// 自己否掉。改成看**宽度**——光标宽 0~2px、真包围盒最窄一个字符 16~17px，
+    /// 中间隔着一个数量级。
+    #[test]
+    fn a_wrapped_caret_at_rect_left_is_still_a_real_bounding_box() {
+        const LINE_H: i32 = 37;
+        let rect = (2524, 797, 2926, 834); // w=402，真范围
+        let caret = (2524, 834); // 换行后回到行首，x 恰好等于 rect.left
+        let stale_start = (2915, 834); // 删除前遗留的组合起点
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (stale_start.0, stale_start.1, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "dddddd".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "等等".into(),
+                ..Default::default()
+            }];
+            st.caret_x = stale_start.0;
+            st.caret_y = stale_start.1;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        drain_positions(&rx);
+        *c.composition_start.lock().unwrap() = (stale_start.0, stale_start.1, true);
+
+        c.handle_caret_update(&CaretData {
+            x: caret.0,
+            y: caret.1,
+            height: LINE_H,
+            composition_start_x: stale_start.0,
+            composition_start_y: stale_start.1,
+            source: wind_ipc::protocol::caret_source::TSF_CACHED,
+            composition_rect: Some(rect),
+        });
+
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (cs.0, cs.1),
+            (rect.0, rect.3),
+            "w=402 是真包围盒，锚点应取其左下角（换行后那一行的行首），而不是停在陈旧的组合起点"
+        );
+    }
+
+    /// 宽度判据的两侧边界：光标宽度级别判为插入点，一个字符宽判为真范围。
+    ///
+    /// 阈值取自实测的数量级差——光标 0~2px（Word cached 0 / WPS 表格 1 / WPS 文字 2），
+    /// 真包围盒最窄 16~17px（QQ / 记事本 / Word 首帧）。两侧都留了 4 倍以上余量。
+    #[test]
+    fn insertion_point_width_threshold_separates_the_two_populations() {
+        const LINE_H: i32 = 34;
+        const TOP: i32 = 1072;
+        const BOTTOM: i32 = 1106;
+        // (宽度, 是否应被采信为真范围)
+        let cases = [(0, false), (1, false), (2, false), (16, true), (402, true)];
+        for (w, should_trust) in cases {
+            let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+            set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+            // ⚠ 首显位置也要设在 9999：它同时决定 shown_anchor 与 caret_baseline。
+            // 若首显在 1876，下面那帧的 dx 就是 0，会走**微移路径**并把 shown_anchor
+            // 回灌进 cs——那样无论宽度判据怎么判，cs 都会变成 1876，测试测的就不是
+            // 宽度判据了（首版正是这么假绿的）。
+            *c.last_valid_caret.lock().unwrap() = (9999, BOTTOM, LINE_H);
+            c.last_sane_caret_height
+                .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut st = c.state.lock().unwrap();
+                st.input_buffer = "a".into();
+                st.candidates = vec![wind_candidate::Candidate {
+                    text: "啊".into(),
+                    ..Default::default()
+                }];
+                st.caret_x = 9999;
+                st.caret_y = BOTTOM;
+                st.caret_height = LINE_H;
+            }
+            {
+                let st = c.state.lock().unwrap();
+                c.notify_ui_update(&st);
+            }
+            drain_positions(&rx);
+            // 起点刻意与矩形左下角不同，才分得出「采信了矩形」和「没采信」
+            *c.composition_start.lock().unwrap() = (9999, BOTTOM, true);
+
+            c.handle_caret_update(&CaretData {
+                x: 1876 + w,
+                y: BOTTOM,
+                height: LINE_H,
+                composition_start_x: 1876,
+                composition_start_y: BOTTOM,
+                source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                composition_rect: Some((1876, TOP, 1876 + w, BOTTOM)),
+            });
+
+            let cs = *c.composition_start.lock().unwrap();
+            let trusted = (cs.0, cs.1) == (1876, BOTTOM);
+            assert_eq!(
+                trusted, should_trust,
+                "w={w} 的矩形判断错了（trusted={trusted}，应为 {should_trust}）"
+            );
+        }
     }
 
     /// `composition_start_pair_guard` 必须是按宿主开启的窄保护，默认行为一字不差。
