@@ -7,6 +7,9 @@
 > 相关：`wind_tsf/src/TextService.cpp` UIElement 段、`wind-coordinator/src/handle_uielement.rs`、
 > `wind-ipc/src/protocol.rs` 的 `CMD_UIELEMENT_*`；工具栏的全屏隐藏见 `is_foreground_fullscreen`。
 >
+> ⛔ **Dota 2（起源2引擎）不在本方案的可达范围内，别再为它调 UIElement 的数据形状。**
+> 它按输入法**身份**白名单决定要不要画候选，与我们交什么数据无关。见 §1.1。
+
 > 状态：P1（UI-less 数据通道 + 服务端按 pid 不弹窗）与 P2（D3D 独占全屏不弹窗）已实施，
 > **未真机**（需要一个走 UI-less 的宿主，见 §7）。P3 为设计备选。
 
@@ -18,6 +21,71 @@
 |---|---|---|
 | **走 TSF UI-less** 的游戏/引擎（SDL2、Unreal、ImeSharp/MonoGame、Win8+ 搜索框） | DLL 已注册 `ITfCandidateListUIElement`，但 getter 全是占位（count=1、"…"），且 `pbShow=FALSE` 后服务端候选窗照弹 | 宿主画出来一条"…"；我们的窗仍盖在游戏上 |
 | **不走 UI-less** 的游戏（IMM32 桥接 / 只读组合串） | 服务端候选窗照弹 | 独占全屏下窗口盖不上去，反而把游戏踢出独占态；无边框全屏下正常 |
+
+### 1.1 ⛔ Dota 2 / 起源2引擎：按身份白名单，做不到
+
+**结论：不改名就画不出来，且改名不可接受。** 这一条已耗掉十余轮真机对照，务必先读完再动手。
+
+Dota 2 的 IME 支持在 Valve 自己的 `imemanager.dll`（`game/bin/win64/`）里，它**不读 TSF UI
+元素**——走的是 IMM32 老路：`ImmGetContext` → `ImmGetCandidateListW` → `ImmGetCompositionStringW`。
+进入这条路之前有一道身份闸门：DLL 里硬编码了一张已知输入法表，按注册表中该输入法的
+**TSF Profile Description** 做**全等**比对（`V_stricmp_fast` / `V_wcsicmp`，不是子串匹配）。
+
+```
+HKLM\SOFTWARE\Microsoft\CTF\TIP\{CLSID}\LanguageProfile\0x00000804\{profile}
+    Description = REG_SZ        ← 比对的就是这个值
+```
+
+表里的简体中文条目（2026-09-06 从二进制原样提取）：
+
+```
+中文(简体) - 微软拼音输入法      中文 (简体) - 搜狗拼音输入法
+中文 - QQ拼音输入法              中文 - QQ五笔输入法
+中文 (简体) - 谷歌拼音输入法     微软王码五笔86版 / 98版
+中文 (简体) - 加加输入法5.0      中文 (简体) - 念青繁體五筆 2.03
+中文 (简体) - 手心… ✗（不在表里）
+```
+
+命中 → 专用处理对象，在 `WM_IME_NOTIFY(IMN_CHANGECANDIDATE)` 里**同步**取候选、游戏自己画。
+未命中 → 兜底对象在第一道闸门就返回，消息落到 `DefWindowProc`，而
+`DefWindowProc(WM_IME_NOTIFY)` 正是把候选转交给**默认 IME 窗口**的那条路。
+**「左上角那个小窗」与「游戏里没有候选」是同一处的两个后果**，不是两个 bug。
+
+**证据**（`wind_tsf.dota2.42156.log`，同一进程内旁观 sink 同时记录两家）：
+
+| | 我们 | QQ五笔 |
+|---|---|---|
+| `[SDL_app]` 收到 `IMN_CHANGECANDIDATE` | 6 send + 9 post | 7 send + 5 post |
+| 宿主 `ImmGetCandidateListW` | **0 次** | 20 次 |
+| 处理后的动作 | 嵌套发给 `[IME]`（= `DefWindowProc`） | 当场取候选、返回 0 |
+
+七个输入法、三种表现，与白名单**零例外**对上：QQ五笔 / 微软拼音 / 微软五笔 / 搜狗在表内且正常；
+冰凌（`冰凌输入法`）、小狼毫（`小狼毫`）、我们（`清风输入法`）全不在表内且全都是小窗 + 无候选。
+
+**⛔ 已实测证伪、别再试的方向**（每条都真机跑过）：
+
+- 改 `ITfCandidateListUIElement` 的任何数据形状——`GetCount` 大小、`flags`（0xF / 0x3E / 0x3F）、
+  `GetPageIndex`、`GetSelection` 绝对 vs 页内、`GetCurrentPage`。**宿主对我们的
+  `ImmGetCandidateListW` 是零次调用,它从来没看过这份数据。**
+- `IsShown` 回 TRUE。QQ五笔（能画）报的是 `IsShown=0`。
+- `GetDocumentMgr` 回 `E_NOTIMPL` / `S_OK+NULL` / 真实焦点文档。能画的两家里
+  QQ五笔回 NULL、微软拼音回非空——**能画的样本彼此就不一致，不可能是判据**。
+- 摘掉 / 挂上 `ITfIntegratableCandidateListUIElement`。微软五笔根本不实现它。
+- `BeginUIElement` 时交空列表 vs 交数据。五笔交全表、搜狗只交当页，两家都能画。
+- 换候选元素的 GUID 去冒充别家。
+- **在同一 CLSID 下多注册一个隐藏（`Enable=0`）的白名单 profile**，主 profile 保持真名。
+  2026-09-06 实测不成立：Valve 只认**当前激活**那个 profile 的描述，不遍历同一 TIP 的其它 profile。
+
+**唯一有效的办法**是把注册表里的 Profile Description 改成表中某个串（已实测：改完候选立刻
+以游戏风格正常显示）。但那等于在语言栏/Windows 设置里冒用别家产品名，**不作为出厂行为**。
+可能的出路只有：向 Valve 提交加入白名单，或做成默认关闭、用户知情的显式开关。
+
+**方法论教训**：当「能工作的样本」在某个维度上彼此都不一致时（此处 `count`、`flags`、
+`GetDocumentMgr` 三项，能画的几家各不相同），这个维度必然不是判据——应当立刻转向
+「判据不在数据里」，而不是继续在该维度上试值。前九轮就是没做这个转向。
+另：判据类排查中，日志分段必须以**状态切换的因果事件**（`Deactivate` / `ActivateEx` 日志行）
+为锚点，不能按时间戳估算——切错段会让两段互相借到对方的证据，凭空造出不存在的差异。
+
 
 ## 2. 外部规范要点（已核对）
 

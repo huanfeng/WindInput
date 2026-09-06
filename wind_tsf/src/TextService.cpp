@@ -2140,6 +2140,15 @@ STDAPI CTextService::GetFunction(REFGUID rguid, REFIID riid, IUnknown** ppunk)
 //  - 候选列表须按「页」而非「滚动」推进，页索引在列表存续期间不该变。
 //  - GetSelection 无选中时回 S_FALSE。
 // 设计与状态机见 docs/design/game-compat-tsf-uielement.md。
+//
+// ⛔ **Dota 2（起源2引擎）画不出候选，不是这段代码的问题，别在这里试。**
+// 2026-09-06 在 Dota 2 进程内实测定案：它的 imemanager.dll 不读 TSF UI 元素（走 IMM32），
+// 且进 IMM32 取候选那条路之前有一道**身份闸门**——按注册表里的 TSF Profile Description
+// 与硬编码白名单全等比对。我们不在表里 ⇒ 消息落到 DefWindowProc ⇒ 默认 IME 窗口接管
+// （就是左上角那个小窗），宿主对我们的 ImmGetCandidateListW 是**零次调用**。
+// 已逐条实测证伪：GetCount 大小 / flags / GetPageIndex / GetSelection 绝对vs页内 /
+// IsShown / GetDocumentMgr 三种回法 / Integratable 接口挂不挂 / Begin 交不交数据 /
+// 换元素 GUID / 多注册隐藏 profile。清单与证据见设计文档 §1.1。
 // ============================================================================
 
 // 候选列表 UI 元素的 GUID。按规范这是给宿主 QI/去重用的标识，CUAS 桥不据它决定是否开
