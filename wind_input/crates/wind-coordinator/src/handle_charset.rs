@@ -220,6 +220,13 @@ impl crate::Coordinator {
     /// 导出后、加载前，设置页又改了同一个类的属性，加载会整条替换掉。单人本地工具，
     /// 不做版本号合并；头注释说了这是导出的副本。
     pub(crate) fn charset_export_edit(&self, key: &str) -> anyhow::Result<PathBuf> {
+        self.charset_export_edit_to(key, &default_edit_dir())
+    }
+
+    /// [`Self::charset_export_edit`] 的落点可指定版。产品路径永远用 [`default_edit_dir`]；
+    /// 分出来是给测试用的——测试若也写系统临时目录，就会**覆盖用户正在编辑的同名文件**
+    /// （2026-09-06 真的发生过：三份「导出文件」其实是 `cargo test` 写的）。
+    pub(crate) fn charset_export_edit_to(&self, key: &str, dir: &Path) -> anyhow::Result<PathBuf> {
         let factory = self.engine_mgr.charset_factory();
         let user = self.user_doc(key)?;
         anyhow::ensure!(
@@ -227,12 +234,7 @@ impl crate::Coordinator {
             "没有名为「{key}」的字符类"
         );
         let text = charset_def::render_edit_view(factory.get(key), &user)?;
-        let path = edit_file_path(key);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, text)
-            .map_err(|e| anyhow::anyhow!("写 {} 失败：{e}", path.display()))?;
+        let path = write_edit_file(dir, key, &text)?;
         debug!("字符类「{key}」已导出到 {}", path.display());
         Ok(path)
     }
@@ -243,6 +245,11 @@ impl crate::Coordinator {
     /// 两项的对话框反而让用户以为建完了。key 由用户在文件里改——模板给的名字不会与出厂
     /// 撞车，加载时若撞了出厂的 key 会当作对那个类的覆盖，头注释里有说。
     pub(crate) fn charset_export_template(&self) -> anyhow::Result<PathBuf> {
+        self.charset_export_template_to(&default_edit_dir())
+    }
+
+    /// [`Self::charset_export_template`] 的落点可指定版，理由同 [`Self::charset_export_edit_to`]。
+    pub(crate) fn charset_export_template_to(&self, dir: &Path) -> anyhow::Result<PathBuf> {
         let factory = self.engine_mgr.charset_factory();
         let user = self.user_docs();
         // 找一个既不在出厂也不在用户层的 key。
@@ -261,13 +268,7 @@ impl crate::Coordinator {
             removed: Vec::new(),
         };
         let text = charset_def::render_edit_view(None, &doc)?;
-        let path = edit_file_path(&key);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, text)
-            .map_err(|e| anyhow::anyhow!("写 {} 失败：{e}", path.display()))?;
-        Ok(path)
+        write_edit_file(dir, &key, &text)
     }
 
     /// 「从文件加载」：解析文件里的每个类，出厂有的当覆盖（diff 后存）、没有的当自建。
@@ -465,15 +466,23 @@ impl crate::Coordinator {
     }
 }
 
-/// 外部编辑文件的落点：系统临时目录下 `WindInput/charsets/<key>.yaml`。
+/// 外部编辑文件的默认落点：系统临时目录下 `WindInput/charsets/`。
 ///
 /// 放临时目录而不是用户配置目录：它**不是配置**，是导出的副本，留在配置目录里用户
-/// 会以为改它就生效（那正是改成库存储要消灭的误解）。`key` 已由渲染函数校验过可作文件名。
-fn edit_file_path(key: &str) -> PathBuf {
+/// 会以为改它就生效（那正是改成库存储要消灭的误解）。
+fn default_edit_dir() -> PathBuf {
     std::env::temp_dir()
         .join("WindInput")
         .join(charset_def::CHARSETS_DIR_NAME)
-        .join(format!("{key}.yaml"))
+}
+
+/// 把编辑视图写到 `dir/<key>.yaml`。`key` 已由渲染函数校验过可作文件名。
+fn write_edit_file(dir: &Path, key: &str, text: &str) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| anyhow::anyhow!("建目录 {} 失败：{e}", dir.display()))?;
+    let path = dir.join(format!("{key}.yaml"));
+    std::fs::write(&path, text).map_err(|e| anyhow::anyhow!("写 {} 失败：{e}", path.display()))?;
+    Ok(path)
 }
 
 /// 把一次编辑叠加到用户层的那份 doc 上。
@@ -549,6 +558,9 @@ mod tests {
     }
 
     /// 带出厂字符类 + 临时 store 的 headless coordinator。
+    ///
+    /// 返回的目录同时当导出落点（`charset_export_*_to`）：⛔ 测试不许调用不带 `_to`
+    /// 的版本，那会写进真实的 `%TEMP%/WindInput/charsets/`，覆盖用户正在改的文件。
     fn coord(tag: &str) -> (Arc<Coordinator>, PathBuf) {
         let user = tmp_user_dir(tag);
         let (c, _rx) =
@@ -852,7 +864,8 @@ mod tests {
     #[test]
     fn export_edit_import_changes_the_verdict() {
         let (c, user) = coord("edit_chain");
-        let path = c.charset_export_edit("emoji").unwrap();
+        let path = c.charset_export_edit_to("emoji", &user).unwrap();
+        assert!(path.starts_with(&user), "测试导出不得离开夹具目录");
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.lines().next().unwrap().contains("不会被自动读取"),
@@ -890,7 +903,7 @@ mod tests {
     #[test]
     fn importing_an_untouched_export_leaves_no_trace() {
         let (c, user) = coord("untouched");
-        let path = c.charset_export_edit("common_han").unwrap();
+        let path = c.charset_export_edit_to("common_han", &user).unwrap();
         let out = c.charset_import_file(&path).unwrap();
         assert_eq!((out[0].added, out[0].removed, out[0].fields), (0, 0, 0));
         assert_eq!(stored(&c, "common_han"), None);
@@ -958,10 +971,16 @@ mod tests {
     #[test]
     fn the_new_class_template_has_a_fresh_key() {
         let (c, user) = coord("template");
-        let path = c.charset_export_template().unwrap();
+        let path = c.charset_export_template_to(&user).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.lines().next().unwrap().contains("不会被自动读取"));
         assert!(text.contains("key: my_class_1"));
+        // 模板是自建类：说明要教 ranges 的写法，而不是讲「出厂 + 你的调整」。
+        assert!(
+            text.contains("ranges: [U+"),
+            "自建类头部要给 ranges 写法示例"
+        );
+        assert!(!text.contains("出厂 + 你的调整"));
         // 直接加载模板也合法——得到一个空的自建类。
         let out = c.charset_import_file(&path).unwrap();
         assert!(!out[0].builtin);

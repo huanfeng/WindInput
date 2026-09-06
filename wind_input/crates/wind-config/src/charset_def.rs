@@ -602,6 +602,17 @@ const EDIT_VIEW_HEADER: &str = "\
 #       order（小的优先）、enabled。
 ";
 
+/// 自建类（含「新建类」模板）的编辑视图头部。与 [`EDIT_VIEW_HEADER`] 分开：自建类没有
+/// 「出厂」可跟随，导入是整份替换；而且 ranges 归用户写，得给写法。
+const CUSTOM_VIEW_HEADER: &str = "\
+# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集分类」用「从文件加载」导入。
+#
+# 这是自建字符类「{name}」（key: {key}）的完整定义，导入时整份替换库里的那份。
+# 成员写在 `...` 之后，一行一个；范围写在 ranges 里，如 `ranges: [U+2600-U+26FF, U+3299]`。
+# 改 key 等于另建一个类，原来的仍在（要删去设置页右键「删除此类」）。
+# 字段：name、ranges、default（common / rare）、no_freq、in_rare、order（小的优先）、enabled。
+";
+
 /// 出厂类的 `ranges` 在编辑视图里写成注释时，跟在后面的说明。
 const RANGES_READONLY_NOTE: &str = "  # 出厂类的范围只读；要改范围请新建自己的类";
 
@@ -636,8 +647,13 @@ pub fn render_edit_view(
     def.replace = None;
 
     let mut text = String::new();
+    let header = if factory.is_some() {
+        EDIT_VIEW_HEADER
+    } else {
+        CUSTOM_VIEW_HEADER
+    };
     text.push_str(
-        &EDIT_VIEW_HEADER
+        &header
             .replace("{name}", def.display_name())
             .replace("{key}", &def.key),
     );

@@ -549,6 +549,21 @@ fn purge_cache_files(dir: &Path, removed: &mut usize, failed: &mut usize) {
     }
 }
 
+/// `dir` 里有没有 `.yaml` / `.yml`。目录不存在、读不了都算「没有」——这是给提示用的判据，
+/// 不是给功能用的。
+fn dir_has_yaml(dir: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    rd.flatten().any(|e| {
+        let p = e.path();
+        p.is_file()
+            && p.extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case("yaml") || x.eq_ignore_ascii_case("yml"))
+    })
+}
+
 impl EngineManager {
     /// 从配置创建；仅构建活跃方案引擎，其余按需懒加载。
     pub fn new(config: &Config, data_dir: Option<&Path>) -> Self {
@@ -3446,14 +3461,17 @@ impl EngineManager {
         let stale = dir.join("schemas").join("common_chars.txt");
         if stale.is_file() {
             warn!(
-                "{} 已不再生效——常用字表现在在 charsets/common_han.yaml 里。要沿用你的                 名单，请在设置页「字符集分类」对 common_han 用「从文件加载」",
+                "{} 已不再生效——常用字表现在在 charsets/common_han.yaml 里。要沿用你的名单，\
+                 请在设置页「字符集分类」对 common_han 用「从文件加载」",
                 stale.display()
             );
         }
+        // 目录还在但里面没有字表 ⇒ 没有可导入的东西，提示只会年年响。
         let stale_dir = dir.join(wind_config::charset_def::CHARSETS_DIR_NAME);
-        if stale_dir.is_dir() {
+        if dir_has_yaml(&stale_dir) {
             warn!(
-                "{} 已不再被读取——字符类的用户层现在在数据库里。里面的文件可在设置页                 「字符集分类」用「从文件加载」逐个导入",
+                "{} 已不再被读取——字符类的用户层现在在数据库里。里面的文件可在设置页\
+                 「字符集分类」用「从文件加载」逐个导入",
                 stale_dir.display()
             );
         }
@@ -3919,7 +3937,8 @@ impl EngineManager {
             // 门槛正是超码长。明说一句，别让人对着一个没反应的配置项干瞪眼。
             if schema.engine.codetable.sentence_input && !m.secondary_schema.is_empty() {
                 warn!(
-                    "混输方案 {} 声明了 [engine.codetable] sentence_input，但它配有拼音子引擎                      {}：超码长输入由拼音接管，码表整句不会触发。混输下的整句尚未接线。",
+                    "混输方案 {} 声明了 [engine.codetable] sentence_input，但它配有拼音子引擎 \
+                     {}：超码长输入由拼音接管，码表整句不会触发。混输下的整句尚未接线。",
                     schema_id, m.secondary_schema
                 );
             }
