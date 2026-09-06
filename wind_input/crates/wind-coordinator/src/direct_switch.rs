@@ -50,7 +50,7 @@ const MOD_BASE: u32 = 0xC000;
 ///
 /// PreservedKeyId 取本变体 GUID 系列的 `x5`——`x0..x4` 已被 Globals.cpp 占用
 /// （CLSID / Profile / LangBarItemButton / DisplayAttributeInput / DisplayAttributeConverted）。
-fn tip_guid_strings() -> (&'static str, &'static str, &'static str) {
+pub(crate) fn tip_guid_strings() -> (&'static str, &'static str, &'static str) {
     if wind_config::variant::is_dev() {
         (
             "{99C2DEB0-5C57-45A2-9C63-FB54B34FD90A}",

@@ -30,6 +30,7 @@ mod log_rotate;
 mod phrase_cli;
 mod restart_cli;
 mod schema_cli;
+mod system_cli;
 
 /// 顶层 CLI 总览（`wind_input help`）。主动请求的帮助走 stdout（可管道/重定向），
 /// 与 `--version` 一致；各子命令的详细用法见 `wind_input <子命令> help`。
@@ -46,6 +47,7 @@ fn print_root_usage() {
          phrase    用户短语导入导出 / 系统短语恢复（需 core 在线）\n  \
          backup    整机备份创建/查看/还原（需 core 在线）\n  \
          restart   重启输入法服务（未运行则直接启动）\n  \
+         system    系统集成：Dota 2 兼容等（写 HKLM，需管理员权限）\n  \
          help      显示本帮助；--version 显示版本\n\
          \n\
          各子命令详细用法: wind_input <子命令> help",
@@ -122,6 +124,7 @@ fn main() {
                 | "phrase"
                 | "backup"
                 | "restart"
+                | "system"
                 | "help"
                 | "--help"
                 | "-h"
@@ -139,6 +142,7 @@ fn main() {
             Some("phrase") => phrase_cli::run(&cli_args[2..]),
             Some("backup") => backup_cli::run(&cli_args[2..]),
             Some("restart") => restart_cli::run(&cli_args[2..]),
+            Some("system") => system_cli::run(&cli_args[2..]),
             Some("help" | "--help" | "-h") => {
                 print_root_usage();
                 0

@@ -55,6 +55,8 @@ pub(crate) mod short_code_yield;
 pub mod stats;
 pub mod theme_query;
 pub mod theme_style;
+#[cfg(windows)]
+pub mod tsf_profile_name;
 /// UI 命令发送端：把「投递 + 唤醒 UI 线程」绑成一次操作，见模块文档。
 pub mod ui_sender;
 pub mod watchdog;

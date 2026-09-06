@@ -533,6 +533,8 @@ static REGISTRY: &[ConfigField] = &[
     ),
     f("debug.log_max_size_mb", Int),
     f("debug.log_max_files", Int),
+    // -- system（与操作系统集成的方式：注册名等，需管理员权限才能落地）--
+    f("system.dota2_compat", Bool),
     // -- mobile（移动端对上面各域的覆盖；桌面构建完全无视）--
     // 只登记**当前真有平台差异**的键，别提前铺一排永远等于基线的键——每个都要在这里、
     // 预置文件、capability 快照、设置页豁免名单各占一行。详见 MobileConfig 的文档。

@@ -655,6 +655,8 @@ pub struct Config {
     pub stats: StatsConfig,
     #[serde(default)]
     pub debug: DebugConfig,
+    #[serde(default)]
+    pub system: SystemConfig,
     /// 移动端对上面各域的覆盖；桌面构建完全无视。见 [`MobileConfig`]。
     #[serde(default)]
     pub mobile: MobileConfig,
@@ -4968,6 +4970,41 @@ fn default_log_max_size_mb() -> u64 {
 
 fn default_log_max_files() -> usize {
     10
+}
+
+// ──────────────── system（与操作系统集成的方式，非输入行为）────────────────
+
+/// 系统集成配置（`[system]`）。
+///
+/// 这个域装的是「我们**怎样向 Windows 登记自己**」，而不是输入行为——改这里的键会
+/// 改变系统层面的注册结果（注册名、关联等），因此每一项都需要管理员权限才能落地，
+/// 且对已启动的宿主进程不生效（宿主是在启动时读的）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemConfig {
+    /// Dota 2 兼容：把本输入法在系统里登记的名称改为 `中文 (简体) - 郑码`。
+    ///
+    /// ★ 这不是玄学，是 Dota 2 那侧写死的判据。起源2引擎的 `imemanager.dll` 里有一张
+    /// **硬编码的输入法白名单**，按注册表中该输入法的 TSF Profile Description 做**全等**
+    /// 比对（`V_stricmp_fast`/`V_wcsicmp`）：命中的走「取候选 → 游戏自己画」，未命中的
+    /// 在 `WM_IME_NOTIFY` 第一道闸门就被打发到 `DefWindowProc`，于是候选永远取不到、
+    /// 还会多出一个系统默认 IME 小窗。判据与完整证据见
+    /// `docs/design/game-compat-tsf-uielement.md` §1.1。
+    ///
+    /// 代价是**语言栏和 Windows 设置里显示的名字会跟着变**。取 `郑码` 是因为它是码表
+    /// 方案名而非任何在世产品的品牌名（表里其余可选项要么是竞品，要么是已停更的产品名）。
+    ///
+    /// 出厂关闭：这是拿「系统里的显示名」换「一个游戏里的候选」，取舍不对称，
+    /// 只能由知情的用户自己决定。
+    #[serde(default)]
+    pub dota2_compat: bool,
+}
+
+impl Default for SystemConfig {
+    fn default() -> Self {
+        Self {
+            dota2_compat: false,
+        }
+    }
 }
 
 // ───────────────────────── 共享 default 助手 ─────────────────────────
