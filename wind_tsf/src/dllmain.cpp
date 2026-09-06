@@ -46,6 +46,18 @@ STDAPI DllCanUnloadNow()
 
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
 {
+    // COM 激活第一入口：游戏等宿主里 Win+Space 选中无效时，靠这条日志区分
+    // 「msctf 根本没来问」与「问了但 CLSID/RIID 不被接受被拒」。
+    {
+        WCHAR szClsid[64] = {};
+        WCHAR szIid[64] = {};
+        StringFromGUID2(rclsid, szClsid, ARRAYSIZE(szClsid));
+        StringFromGUID2(riid, szIid, ARRAYSIZE(szIid));
+        WIND_LOG_DEBUG_FMT(
+            L"DllGetClassObject rclsid=%ls riid=%ls clsidMatch=%d",
+            szClsid, szIid, IsEqualCLSID(rclsid, c_clsidTextService) ? 1 : 0);
+    }
+
     if (ppv == nullptr)
         return E_INVALIDARG;
 

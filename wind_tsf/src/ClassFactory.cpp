@@ -51,6 +51,16 @@ STDAPI_(ULONG) CClassFactory::Release()
 
 STDAPI CClassFactory::CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppvObj)
 {
+    // 诊断：类厂实例化入口。拒绝发生在 DllGetClassObject 之后、这里之前，
+    // 说明是 msctf 对类厂本身 QueryInterface/激活策略层面的拒绝。
+    {
+        WCHAR szIid[64] = {};
+        StringFromGUID2(riid, szIid, ARRAYSIZE(szIid));
+        WIND_LOG_DEBUG_FMT(
+            L"ClassFactory::CreateInstance riid=%ls pUnkOuter=%ls",
+            szIid, pUnkOuter == nullptr ? L"null" : L"non-null");
+    }
+
     if (ppvObj == nullptr)
         return E_INVALIDARG;
 
