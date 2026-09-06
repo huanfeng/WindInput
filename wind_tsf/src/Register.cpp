@@ -88,6 +88,51 @@ static HRESULT UnregisterCOMServer()
 }
 
 // --- 2. 语言配置文件 (Profile) 注册与卸载 ---
+// Dota 2 兼容别名。⛔ 必须与 wind-coordinator 的 `tsf_profile_name::DOTA2_ALIAS`
+// **逐字一致**（那边有一条测试把从游戏二进制里提取的字节钉死，以那份为准）。
+static const wchar_t* const kDota2CompatAlias = L"中文 (简体) - 郑码";
+
+// 注册时应当写入的显示名。
+//
+// ★ 用户可能开着「Dota 2 兼容」——那个开关把本输入法在系统里登记的名称改成了上面
+// 那个别名（Dota 2 按名称查一张硬编码白名单，决定要不要由游戏自己绘制候选，见
+// docs/design/game-compat-tsf-uielement.md §1.1）。而 RegisterProfile 是**无条件覆盖**
+// Description 的：安装/升级重跑一次就把用户的设置冲掉了，没有任何提示，用户只会在
+// 某次更新之后发现游戏里又打不出字，而设置页仍显示「已开启」。
+//
+// 故：已登记的名称若正是那个别名，就原样保留；其余情况（首次安装、名称是真名、
+// 或被别的东西改成了第三种值）一律写回 TEXTSERVICE_NAME。
+// ⛔ 别放宽成「保留任何非真名的值」——那会把误写与脏值也一并固化下来。
+static const wchar_t* _ProfileNameToRegister()
+{
+    wchar_t clsid[64] = {};
+    wchar_t profile[64] = {};
+    if (StringFromGUID2(c_clsidTextService, clsid, ARRAYSIZE(clsid)) == 0) return TEXTSERVICE_NAME;
+    if (StringFromGUID2(c_guidProfile, profile, ARRAYSIZE(profile)) == 0) return TEXTSERVICE_NAME;
+
+    wchar_t path[512] = {};
+    swprintf_s(path, L"SOFTWARE\\Microsoft\\CTF\\TIP\\%s\\LanguageProfile\\0x%08X\\%s",
+               clsid, (unsigned)TEXTSERVICE_LANGID, profile);
+
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return TEXTSERVICE_NAME;
+
+    wchar_t cur[256] = {};
+    DWORD cb = sizeof(cur);
+    DWORD type = 0;
+    LSTATUS st = RegQueryValueExW(hKey, L"Description", nullptr, &type, (LPBYTE)cur, &cb);
+    RegCloseKey(hKey);
+    if (st != ERROR_SUCCESS || type != REG_SZ) return TEXTSERVICE_NAME;
+
+    if (wcscmp(cur, kDota2CompatAlias) == 0)
+    {
+        WIND_LOG_INFO(L"RegisterProfile: 保留用户已开启的 Dota 2 兼容别名\n");
+        return kDota2CompatAlias;
+    }
+    return TEXTSERVICE_NAME;
+}
+
 HRESULT RegisterProfile()
 {
     HRESULT hr = E_FAIL;
@@ -95,6 +140,9 @@ HRESULT RegisterProfile()
 
     if (GetModuleFileNameW(g_hInstance, szModule, ARRAYSIZE(szModule)) == 0)
         return E_FAIL;
+
+    // 已开启 Dota 2 兼容时保留别名，别把用户设置冲掉（见 _ProfileNameToRegister）。
+    const wchar_t* profileName = _ProfileNameToRegister();
 
     // 首先尝试使用 Windows 8+ 的 ITfInputProcessorProfileMgr 接口
     ITfInputProcessorProfileMgr* pProfileMgr = nullptr;
@@ -108,8 +156,8 @@ HRESULT RegisterProfile()
             c_clsidTextService,
             TEXTSERVICE_LANGID,
             c_guidProfile,
-            TEXTSERVICE_NAME,
-            (ULONG)wcslen(TEXTSERVICE_NAME),
+            profileName,
+            (ULONG)wcslen(profileName),
             szModule,
             (ULONG)wcslen(szModule),
             TEXTSERVICE_ICON_INDEX,
@@ -142,8 +190,8 @@ HRESULT RegisterProfile()
                 hr = pProfiles->AddLanguageProfile(c_clsidTextService,
                                                    TEXTSERVICE_LANGID,
                                                    c_guidProfile,
-                                                   TEXTSERVICE_NAME,
-                                                   (ULONG)wcslen(TEXTSERVICE_NAME),
+                                                   profileName,
+                                                   (ULONG)wcslen(profileName),
                                                    szModule,
                                                    (ULONG)wcslen(szModule),
                                                    TEXTSERVICE_ICON_INDEX);
