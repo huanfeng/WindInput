@@ -258,6 +258,7 @@ impl Coordinator {
             }
             #[cfg(all(feature = "desktop-ui", windows))]
             MenuCmd::IconToggleDemoAnim => self.toggle_icon_demo_animation(),
+            MenuCmd::ToggleCaretOverlay => self.toggle_caret_overlay(),
             #[cfg(not(all(feature = "desktop-ui", windows)))]
             MenuCmd::IconBadgeStyle(_)
             | MenuCmd::IconToggleSizeMarks
@@ -1128,6 +1129,21 @@ impl Coordinator {
             M::leaf("打开用户数据目录", cmd(MenuCmd::OpenConfigDir), true, false),
             M::leaf("打开日志目录", cmd(MenuCmd::OpenLogDir), true, false),
             M::separator(),
+            // ── 输入行为组 ──
+            // 放在诊断类**之前**：它改的是真正的输入行为（密码框里强制走英文），
+            // 是会被日常用到的开关；诊断类只是「把内部状态显示出来」，排在后面。
+            // 两者独立成组——混在一起会让人以为密码框那项也只是个显示开关。
+            M::leaf(
+                "密码框强制英文",
+                cmd(MenuCmd::TogglePasswordSuppress),
+                true,
+                self.password_suppress_enabled
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            M::separator(),
+            // ── 诊断组 ──
+            // 「把内部状态显示出来」的工具，彼此同类：HUD 出文字、定位浮窗出几何。
+            //
             // 输入诊断 HUD 在 macOS 上整套未实现（`ShowInputDiag` 落在 forwarder 的兜底臂），
             // 点了没有任何反应。留一个死菜单项比没有更糟，故按平台摘掉。
             // 要在 macOS 做它得把整个浮层 UI 建在 `.app` 侧，见 wind_macos/AGENTS.md 差距表。
@@ -1139,14 +1155,20 @@ impl Coordinator {
                 self.input_diag_hud_visible
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
-            M::leaf(
-                "密码框强制英文",
-                cmd(MenuCmd::TogglePasswordSuppress),
-                true,
-                self.password_suppress_enabled
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
         ];
+
+        // 候选窗定位浮窗：与 HUD 同组（都是诊断显示），但**只在 Dev 变体出现**——
+        // 它画的是还在排查中的内部几何，正式用户看到只会困惑。
+        #[cfg(all(feature = "desktop-ui", windows))]
+        if wind_config::variant::is_dev() {
+            advanced_children.push(M::leaf(
+                "候选窗定位浮窗",
+                cmd(MenuCmd::ToggleCaretOverlay),
+                true,
+                self.caret_overlay_enabled
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ));
+        }
 
         // 图标调试项**只在 Dev 变体出现**：它暴露的是"还没定下来的呈现参数"，
         // 正式用户看到只会困惑（何况其中两种形状已被否决）。

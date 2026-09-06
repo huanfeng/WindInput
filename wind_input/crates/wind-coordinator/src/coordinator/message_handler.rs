@@ -2590,6 +2590,13 @@ impl MessageHandler for Coordinator {
         // `caret.y` 恒**等于** `rect.bottom`。若某宿主只返回首行，caret 走到下一行时
         // `y` 就会大于 `bottom`，此时判定不可信、回退既有逻辑——那条路今天怎么走、
         // 明天还怎么走，不会更糟。回退会打日志，据此可以点名是哪个宿主。
+        // 「矩形只是一个插入点」的宽度上界。
+        //
+        // 依据取自实测的**数量级差**而非拍脑袋：光标宽 0~2px（Word cached 0、WPS 表格 1、
+        // WPS 文字 2），真包围盒最窄是一个字符宽 16~17px（QQ / 记事本 / Word 首帧）。
+        // 取 4 落在两者之间的空带里，任一侧都有 4 倍以上余量。
+        const INSERTION_POINT_MAX_WIDTH: i32 = 4;
+
         // ★★★ 本帧的布局查询是否**整个**退化。
         //
         // `left == right`（或 `top == bottom`）意味着宿主连一个有宽度的矩形都给不出——
@@ -2629,26 +2636,35 @@ impl MessageHandler for Coordinator {
         let rect_is_insertion_point = active_compat.pin_anchor_when_start_drifts
             && data
                 .composition_rect
-                .is_some_and(|(l, t, r, b)| r > l && b > t && l >= data.x);
+                .is_some_and(|(l, t, r, b)| r > l && b > t && r - l <= INSERTION_POINT_MAX_WIDTH);
         let rect_anchor = data.composition_rect.and_then(|(l, t, r, b)| {
             // 判据一：**矩形要真的是个范围**，不是一个点。
             //
-            // 组合起点必须落在插入点**左边**——组合已经有内容，起点与插入点之间就隔着
-            // 这些内容的宽度。若 `left == caret.x`，说明宿主返回的是插入点本身而不是
-            // 组合范围，它提供不了任何新信息。
+            // 判据取**宽度**：光标宽实测 0~2px，而真包围盒最窄也有一个字符宽
+            // （QQ / 记事本首帧 w=16、Word 首帧 w=17），两者差一个数量级、中间是空的。
             //
             // 2026-09-05 实测三种「插入点形态」，一条判据全挡住：
-            //   WPS 文字 rect=(1603,617,1605,651) w=2 caret.x=1603  left 跟着输入右移
-            //   WPS 表格 rect=(1809,961,1810,997) w=1 caret.x=1809  2677 帧 w 恒为 1
-            //   Word cached rect=(1758,653,1758,697) w=0 caret.x=1758  与同期 selection
-            //                帧的 (1699,701,2710,792) 分处两地，采信它锚点就在两处间跳
-            // 对照：真包围盒的 left 恒在 caret 左侧，且组合最短时也隔着一个字符宽
-            //   （QQ / 记事本首帧 w=16、Word 首帧 w=17）。
+            //   WPS 文字 rect=(1603,617,1605,651) w=2   起点跟着输入右移
+            //   WPS 表格 rect=(1809,961,1810,997) w=1   2677 帧 w 恒为 1
+            //   Word cached rect=(1758,653,1758,697) w=0  与同期 selection 帧的
+            //     (1699,701,2710,792) 分处两地，采信它锚点就在两处之间跳
+            //
+            // ⛔ **不要改回「left >= caret.x」那种写法**（本判据的前一版，2026-09-05 当天
+            // 就被推翻）：它想表达「组合起点必须在插入点左边」，可那个前提**只在单行成立**
+            // ——一旦换行，caret 回到行首就恰好等于 `rect.left`，判据自己把自己否掉。
+            // Excel 实测 rect=(2524,797,2926,834) **w=402 的真范围**、caret=(2524,834)
+            // 落在左下角，被误判成插入点后回退到陈旧的 composition_start=2915，
+            // 候选窗停在右端、删除也回不来。
             //
             // ⚠ 挡住之后走的是**既有锚点逻辑**，那条路对这些宿主本就是调好的：WPS 文字
             // 靠「组合起点本组合内不再更新」钉住候选窗，表格类每字换一次 docMgr、候选窗
             // 随之跟到新单元格。矩形每帧更新反而把前者的保护拆了——WPS 出现的正是这个回归。
-            if b <= t || l >= data.x {
+            if b <= t || r - l <= INSERTION_POINT_MAX_WIDTH {
+                self.note_overlay_verdict(if b <= t || r <= l {
+                    wind_ui_types::diag::RectVerdict::Degenerate
+                } else {
+                    wind_ui_types::diag::RectVerdict::InsertionPoint
+                });
                 debug!(
                     "组合矩形不可信（是插入点不是范围）: rect=({l},{t},{r},{b}) w={} caret.x={}——回退既有锚点逻辑",
                     r - l,
@@ -2659,14 +2675,20 @@ impl MessageHandler for Coordinator {
             // 判据二：**覆盖当前插入行**。若某宿主只返回首行，caret 走到下一行时 y 会
             // 大于 bottom，此时该矩形答的不是当前行的位置。
             if data.y > b {
+                self.note_overlay_verdict(
+                    wind_ui_types::diag::RectVerdict::NotCoveringCaretLine,
+                );
                 debug!(
                     "组合矩形不可信（不覆盖插入行）: rect=({l},{t},{r},{b}) caret=({},{})——疑该宿主只返回首行",
                     data.x, data.y
                 );
                 return None;
             }
+            self.note_overlay_verdict(wind_ui_types::diag::RectVerdict::Trusted);
             Some((l, b))
         });
+        // 暂存本帧几何，锚点在 notify_ui_update 里补齐后一并推给浮窗。
+        self.stash_overlay_frame(data);
         if let Some((ax, ay)) = rect_anchor {
             let mut cs = self
                 .composition_start
@@ -2679,6 +2701,40 @@ impl MessageHandler for Coordinator {
                 );
             }
             *cs = (ax, ay, true);
+        }
+        // ★★★ 钉住的是**列**，不是行。
+        //
+        // `pin_anchor_when_start_drifts` 的宿主给不出组合范围矩形，我们无从知道「最后
+        // 一行的行首在哪」——那正是记事本 / QQ / Word 靠矩形拿到的东西。但 `caret.y`
+        // 已经告诉了我们**当前插入点在哪一行**：跨行时沿用钉住的 x、只把 y 换成 caret
+        // 的行，候选窗就落到正确的行上，不需要知道行首的 x。
+        //
+        // WPS 实测（2026-09-05 21:11，调试浮窗截图）：组合跨两行时
+        //   anchor=(1647,1140) ← 停在第一行
+        //   caret =(2472,1182) ← 已在第二行（差 42 = 一个行高）
+        // 候选窗因此画在第一行下方、正好压住第二行。
+        //
+        // ★ 单行时 `caret.y` 恒等于锚点 y，本条自动无效——不改变已经正常的行为；
+        // 删回上一行时 `caret.y` 也会跟着回去，与「推出去容易回来难」那类缺陷无关，
+        // 因为它跟的是**当前行**而不是累计位移。
+        //
+        // ⚠ 只在没有矩形时生效：有矩形的宿主由 `rect_anchor` 直接给出最后一行行首，
+        // 那条路更准（连行首的 x 都是真的）。
+        if active_compat.pin_anchor_when_start_drifts
+            && rect_anchor.is_none()
+            && Self::caret_is_valid(data.x, data.y, data.height)
+        {
+            let mut cs = self
+                .composition_start
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if cs.2 && cs.1 != data.y {
+                debug!(
+                    "组合起点跟行: ({},{}) → ({},{})（x 钉住、y 跟随 caret 所在行；该宿主无组合矩形）",
+                    cs.0, cs.1, cs.0, data.y
+                );
+                cs.1 = data.y;
+            }
         }
         // 组合起点锚定：同一组合只接受首个有效 compStart，后续即便携带新值也不覆盖（防部分控件
         // GetRange 让起点随输入漂移，致候选窗随输入右移）。500px 校验排除 logical/physical 坐标系不一致。

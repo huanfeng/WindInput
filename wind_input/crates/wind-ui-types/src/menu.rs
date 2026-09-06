@@ -162,6 +162,8 @@ pub enum MenuCmd {
     /// 与上面两项不同，它**不持久化**——那两项是「图标长什么样」的偏好，它是一段持续
     /// 占用 CPU 与 IPC 的演示，重启后自己关掉才是对的默认。
     IconToggleDemoAnim,
+    /// 切换候选窗定位调试浮窗（仅 Dev 变体的菜单里出现）。
+    ToggleCaretOverlay,
 }
 
 /// 菜单项的动作类型（右键候选菜单 + 功能主菜单共用）
@@ -234,6 +236,7 @@ impl MenuKind {
                 MenuCmd::InputDiagToggleTopmost => 126,
                 MenuCmd::IconToggleSizeMarks => 128,
                 MenuCmd::IconToggleDemoAnim => 129,
+                MenuCmd::ToggleCaretOverlay => 130,
                 MenuCmd::ToggleSoftKeyboard => 131,
                 MenuCmd::OpenMainMenu => 132,
                 MenuCmd::IconBadgeStyle(i) => 10000 + i as i32,
@@ -291,6 +294,7 @@ impl MenuKind {
             126 => MenuCmd::InputDiagToggleTopmost,
             128 => MenuCmd::IconToggleSizeMarks,
             129 => MenuCmd::IconToggleDemoAnim,
+            130 => MenuCmd::ToggleCaretOverlay,
             131 => MenuCmd::ToggleSoftKeyboard,
             132 => MenuCmd::OpenMainMenu,
             10000..=10099 => MenuCmd::IconBadgeStyle((id - 10000) as u8),

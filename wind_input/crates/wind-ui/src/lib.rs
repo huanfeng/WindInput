@@ -19,9 +19,10 @@
 
 pub mod auto_hide;
 pub mod candidate_window;
+/// macOS 全局热键（Carbon RegisterEventHotKey）。对位 Windows 的 RegisterHotKey 分支。
+pub mod caret_overlay;
 pub mod debounce;
 pub mod dpi;
-/// macOS 全局热键（Carbon RegisterEventHotKey）。对位 Windows 的 RegisterHotKey 分支。
 #[cfg(target_os = "macos")]
 pub mod global_hotkey_macos;
 pub mod image_cache;

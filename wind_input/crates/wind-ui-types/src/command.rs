@@ -1,7 +1,7 @@
 //! 正向协议：协调器 → 渲染端的 [`UiCommand`]，及全局热键条目、翻页器 tag 常量。
 
 use crate::candidate::CandidateItem;
-use crate::diag::InputDiagView;
+use crate::diag::{CaretOverlayView, InputDiagView};
 use crate::menu::{MenuAnchor, MenuItemSpec};
 use crate::softkeyboard::SoftKeyCap;
 use crate::toast::{ToastKind, ToastPosition};
@@ -74,6 +74,11 @@ pub enum UiCommand {
     HideStatusTip,
     /// 显示/更新输入诊断 HUD（右键「高级」开）。惰性创建，可拖动，双击复制。
     ShowInputDiag(InputDiagView),
+    /// 候选窗定位调试浮窗：把宿主上报的几何与算出的锚点叠在屏幕上画出来。
+    /// 仅 Dev 变体的菜单可开，默认关闭。
+    ShowCaretOverlay(Box<CaretOverlayView>),
+    /// 隐藏定位调试浮窗。
+    HideCaretOverlay,
     /// 隐藏输入诊断 HUD。
     HideInputDiag,
     /// 复制输入诊断 HUD 当前显示的文本到剪贴板（右键菜单）。
