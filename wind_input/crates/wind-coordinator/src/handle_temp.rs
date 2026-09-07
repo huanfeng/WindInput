@@ -380,23 +380,48 @@ impl Coordinator {
         // 多出数百个生僻字候选（实测 `ying`：临拼 299 条 vs 主路径 76 条）。
         self.mark_common(&mut candidates);
         self.apply_filter(state, &mut candidates);
-        // 候选调整（置顶 / 隐藏）：位置与主路径同序，在 `apply_filter` 之后、简繁展开之前。
+        // ── 用户数据（词频 / 候选调整）：归属一律取**临拼目标方案** ────────────────
         //
-        // ★ 归属取**临拼目标方案**，经 `data_schema_id` 折叠到 `"pinyin"` 桶——那正是全拼 /
-        // 双拼方案下 `candidate_op_scope` 写入的同一个桶。「全拼里置顶过的候选，临拼里照样
-        // 排在前面」这条一致性由此兑现，也是用户报障的那件事。
+        // ★★ 临拼操作的是**拼音/双拼**那一份用户数据，不是主方案（五笔）的：两者的编码域
+        // 与码位结构根本不同——拼音键是全拼扁平码（`ni` / `dongxi`，跨码位共享），码表键是
+        // 输入码（`d`/`de`/`def` 三个码位彼此独立，还带按码长分级的简码保护）。混进一个桶
+        // 既读不出来，也让码表的保护策略去管拼音码位，语义完全错位。
+        //
+        // 归属经 `data_schema_id` 折叠到 `"pinyin"`，与全拼 / 双拼方案自己写入的是同一个桶，
+        // 「在拼音方案里学到的、临拼里照样受益」由此兑现（反之亦然）。
+        //
+        // ⚠️ 归属**不能取 active**（`apply_freq_rerank` / `apply_shadow` 那两个薄包装即是）：
+        // 主方案通常是五笔，按 active 会去查 `wubi86` 桶，一条都命中不了。写端同理，
+        // 见 `commit_temp_pinyin_selected` 与空格顶屏处的 `record_selection_in`。
+        //
+        // ⚠️ 用 `overlay_engine_schema` 取值对临拼是安全的——它对 `TempPinyin` 的判据只是
+        // 「目标方案非空」。**临英不可照抄**：那边的判据含 `show_candidates`，关掉候选显示
+        // 时返回 `None`，拿它当落点会让词频静默换桶（见 `effective_data_schema` 的文档）。
+        let temp_pinyin_owner = Some(schema);
+        // 词频重排（used-first，独立于 weight）。
+        //
+        // ⚠️ 自动补充的候选（`is_scope_filtered`，恒在末尾）**排除在重排之外**，与主路径
+        // 同一条纪律：末页翻页放宽补进来的生僻字若参与 used-first，用户误选一次就会被顶到
+        // 常用字前面，与「自动补充不影响原有排序」的承诺相悖。临拼**有**放宽通路
+        // （`try_relax_scope_on_page_end` 已按模式分流），故这条排除在这里同样必要。
+        let rerank_len = candidates
+            .iter()
+            .take_while(|c| !c.is_scope_filtered)
+            .count();
+        self.apply_freq_rerank_in(
+            temp_pinyin_owner.as_deref(),
+            &mut candidates[..rerank_len],
+            &state.temp_pinyin_buffer,
+        );
+        // 候选调整（置顶 / 隐藏）：位置与主路径同序，在词频重排之后、简繁展开之前。
         //
         // ⚠️ 此前这一步**整段缺席**（不是归属取错）：规则写得进去、临拼永远读不出来，
         // 而候选照出、顺序照排，失效完全静默。临拼是主输入路的平行实现，主路径每加一道
         // 加工都得两边各接一次——同形漏接史见 `update_temp_english_candidates` 的词频段。
         //
-        // ⚠️ 归属**不能取 active**：主方案通常是五笔（临拼只在码表/混输方案下可用），
-        // 按 active 归属会去查 `wubi86` 桶，全拼里置顶的规则一条都命中不了。
-        //
         // 返回值（本码是否有置顶规则就位）在此丢弃：它只服务于出简让全，那是码表方案的
         // 特性，临拼是纯拼音 overlay，没有让位环节。
-        let shadow_owner = Some(schema);
-        self.apply_shadow_in(shadow_owner.as_deref(), &mut candidates, &shadow_code);
+        self.apply_shadow_in(temp_pinyin_owner.as_deref(), &mut candidates, &shadow_code);
         state.candidates = candidates;
         // 简繁 1对多变体展开（约束见 expand_s2t_variants 文档）。
         self.expand_s2t_variants(state);
@@ -436,7 +461,14 @@ impl Coordinator {
         let partial =
             consumed > 0 && consumed < total && state.temp_pinyin_buffer.is_char_boundary(consumed);
         // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
-        self.record_selection(
+        //
+        // 归属取**临拼目标方案**，与读端 `update_temp_pinyin_candidates` 同源：临拼学到的
+        // 词频属于拼音那一份数据，不属于主方案（五笔）。按 active 归属会写进 `wubi86` 桶，
+        // 而且开关也跟着取码表那档（出厂 `enabled = false`）⇒ 出厂配置下一个字都不学，
+        // 用户在拼音方案里开的调频开关对临拼毫无作用。
+        let temp_pinyin_owner = self.overlay_engine_schema(state);
+        self.record_selection_in(
+            temp_pinyin_owner.as_deref(),
             &self.freq_code(&state.temp_pinyin_buffer, cand),
             &cand.text,
             cand.source,
@@ -756,7 +788,14 @@ impl Coordinator {
                     }
                     // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
                     // 临拼缓冲是击键域（双拼下 `siyr`），与候选码 `siyuan` 不同域。
-                    self.record_selection(&self.freq_code(&code, &cand), &cand.text, cand.source);
+                    // 归属同上，取临拼目标方案而非 active。
+                    let temp_pinyin_owner = self.overlay_engine_schema(state);
+                    self.record_selection_in(
+                        temp_pinyin_owner.as_deref(),
+                        &self.freq_code(&code, &cand),
+                        &cand.text,
+                        cand.source,
+                    );
                     self.record_commit(
                         &cand.text,
                         code.len() as u32,

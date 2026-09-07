@@ -1,4 +1,9 @@
-//! 临时拼音的候选调整（置顶 / 隐藏）—— 与拼音方案本身共享同一份规则。
+//! 临时拼音的**用户数据**（候选调整 + 词频）—— 与拼音 / 双拼方案共享同一份。
+//!
+//! ★★ 贯穿本文件的一条纪律：**临拼操作的是拼音那一份数据，不是主方案（五笔）的**。
+//! 两者编码域与码位结构都不同——拼音键是全拼扁平码、跨码位共享；码表键是输入码、码位
+//! 独立且带按码长分级的简码保护。混进一个桶既读不出来，也让码表的保护策略去管拼音码位。
+//! 读写四处（freq 读 / shadow 读 / 两个上屏出口的写）一律取 `overlay_engine_schema`。
 //!
 //! 用户报障：在全拼方案下把某个候选置顶，切回五笔用 `` ` `` 引导临拼打同样的音，
 //! 置顶毫无效果。
@@ -12,7 +17,7 @@
 //! `"pinyin"`，全拼 / 双拼 / 临拼目标方案落的是同一个桶。所以修法只是把读端接上，
 //! 归属取**临拼目标方案**（不是 active——那是五笔）。
 //!
-//! ## ⚠️ 五条用例必须合看，缺一即可能假绿
+//! ## ⚠️ 候选调整这五条必须合看，缺一即可能假绿（词频四条见文件后半）
 //!
 //! 前四条锁**归属轴**（规则算哪个方案的），第五条锁**码域轴**（规则的键长什么样）。
 //! 两轴正交：任一轴的变异都不会让另一轴的用例变红，所以两边各要有自己的防线。
@@ -310,6 +315,157 @@ fn shuangpin_target_reads_rule_under_normalized_full_pinyin_code() {
         Some(target.as_str()),
         "双拼临拼须按全拼归一码读规则（丢掉 result.shadow_code 时此处必红）。\n\
          临拼实际前 6 条: {:?}",
+        &temp[..6.min(temp.len())]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 词频（`apply_freq_rerank_in` / `record_selection_in`）—— 与候选调整同一条归属纪律。
+//
+// 2026-09-07 实测的三重失效（三个缺陷互相掩盖，任一个单独修都看不出效果）：
+//   ① 开关取错方案：`record_selection` 走 active ⇒ `freq_settings_for("wubi86")` 取的是
+//      码表那档，出厂 `enabled = false` ⇒ **出厂配置下临拼一个字都不学**，而用户在拼音
+//      方案里开的调频开关对它毫无作用；
+//   ② 归属取错方案：开关一旦手动打开，键写进 `"wubi86"` 桶（码是拼音候选码，桶是码表的）；
+//   ③ 读端整段缺席：`update_temp_pinyin_candidates` 没有 `apply_freq_rerank_in`。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 进入临拼、打码、按空格选走首候选（触发记账）。返回被选中的文本。
+fn temp_pinyin_commit_first(cfg: Config, store: Arc<wind_store::Store>, input: &str) -> String {
+    let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store);
+    coord.handle_key_event(&key_event(0xC0));
+    for c in input.chars() {
+        press_letter(&coord, c);
+    }
+    let first = coord
+        .debug_all_candidate_texts()
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    coord.handle_key_event(&key_event(0x20)); // 空格上屏首候选
+    first
+}
+
+/// ★ 写端归属：临拼选词的词频落 `"pinyin"` 桶，不落主方案（`wubi86`）桶。
+///
+/// 归属若退回 active（`record_selection`），本用例两条断言会同时反向——桶查反了，
+/// 两个方向各锁一次。
+#[test]
+fn temp_pinyin_freq_lands_in_pinyin_bucket_not_active_schema() {
+    if !has_schemas() {
+        eprintln!("跳过：词库不存在");
+        return;
+    }
+    // ⚠️ 必须显式打开：`Config::default()` 是结构体默认值、**不读 `data/config.toml`**，
+    // 那里 `schema.pinyin.frequency.enabled` 是 false ⇒ 不设的话测的是一个关着的功能
+    // （本仓既有的假绿源，见 temp_english_freq.rs 的同名论证）。开关本身另有两条用例。
+    let mut cfg = wubi_config();
+    cfg.schema.pinyin.frequency.enabled = true;
+    let (store, path) = fresh_store("wind_tps_freq_bucket.redb");
+    let picked = temp_pinyin_commit_first(cfg, Arc::clone(&store), "ni");
+    assert!(!picked.is_empty(), "前提：临拼 `ni` 应有候选可选");
+
+    // 记账码按候选来源分流：拼音取候选码（全拼扁平码），对 `ni` 的单字即 `ni`。
+    let in_pinyin = store.get_freq("pinyin", "ni", &picked).unwrap();
+    let in_wubi = store.get_freq("wubi86", "ni", &picked).unwrap();
+    assert!(
+        in_pinyin.is_some(),
+        "临拼选词的词频应落 pinyin 桶（选中 {picked:?}）"
+    );
+    assert!(
+        in_wubi.is_none(),
+        "不得落主方案桶——拼音码与五笔码位的编码域和结构都不同（选中 {picked:?}）"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// ★★ 开关也跟着归属走：出厂配置下（码表调频关、拼音调频开）临拼**必须**记词频。
+///
+/// 这条锁的是三重失效里的 ①。`freq_settings_for` 按 engine_type 分流，归属取 active 时
+/// 拿到的是码表那档（出厂 `enabled = false`）⇒ 一个字都不学，且完全静默：用户在拼音方案
+/// 里把调频开着，怎么用都不见效。反向对照 [`temp_pinyin_freq_respects_pinyin_switch_off`]
+/// 证明这里读的确实是拼音那档，而不是「无条件记」。
+///
+/// ⚠️ `Config::default()` 是结构体默认值、**不读 `data/config.toml`**，两者的调频默认值
+/// 并不一致，故两个开关一律显式设（本仓既有的假绿源）。
+#[test]
+fn temp_pinyin_freq_follows_pinyin_switch_not_codetable() {
+    if !has_schemas() {
+        eprintln!("跳过：词库不存在");
+        return;
+    }
+    let mut cfg = wubi_config();
+    cfg.schema.codetable.frequency.enabled = false; // 出厂：码表关
+    cfg.schema.pinyin.frequency.enabled = true; // 出厂：拼音开
+    let (store, path) = fresh_store("wind_tps_freq_switch_on.redb");
+    let picked = temp_pinyin_commit_first(cfg, Arc::clone(&store), "ni");
+    assert!(
+        store.get_freq("pinyin", "ni", &picked).unwrap().is_some(),
+        "出厂组合（码表关/拼音开）下临拼应照常记词频；\
+         开关若取 active 的码表档，这里一个字都不会记（选中 {picked:?}）"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **反向对照**：关掉拼音调频 ⇒ 临拼不记。
+///
+/// 缺了它，一个「无条件记账、根本不查开关」的实现会让上一条假绿。
+#[test]
+fn temp_pinyin_freq_respects_pinyin_switch_off() {
+    if !has_schemas() {
+        eprintln!("跳过：词库不存在");
+        return;
+    }
+    let mut cfg = wubi_config();
+    cfg.schema.codetable.frequency.enabled = true; // 故意与拼音档相反
+    cfg.schema.pinyin.frequency.enabled = false;
+    let (store, path) = fresh_store("wind_tps_freq_switch_off.redb");
+    let picked = temp_pinyin_commit_first(cfg, Arc::clone(&store), "ni");
+    assert!(
+        store.get_freq("pinyin", "ni", &picked).unwrap().is_none(),
+        "拼音调频关闭时临拼不得记账（选中 {picked:?}）"
+    );
+    assert!(
+        store.get_freq("wubi86", "ni", &picked).unwrap().is_none(),
+        "更不得因为码表档开着就落进码表桶（选中 {picked:?}）"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// ★ 读端：全拼方案里学到的词频，临拼里照样生效（两条路径共享 `"pinyin"` 桶）。
+///
+/// 这条锁的是三重失效里的 ③。构造上直接往 pinyin 桶写一条足够重的记录，再看临拼是否
+/// 据此把它提到首位——不依赖「先在全拼里点几次」那种间接路径，失败时指向更清楚。
+#[test]
+fn freq_learned_in_pinyin_schema_reranks_temp_pinyin() {
+    let Some(base) = baseline("freq_read", "ni") else {
+        return;
+    };
+    assert!(base.len() >= 3, "前提：`ni` 应有足够候选");
+    let target = base[2].clone();
+    assert_ne!(base[0], target, "前提：目标须原本不在首位");
+
+    let (store, path) = fresh_store("wind_tps_freq_read.redb");
+    // 记几次，确保 used-first 足以把它顶上来。
+    for _ in 0..5 {
+        store
+            .record_freq("pinyin", "ni", &target)
+            .expect("record_freq 失败");
+    }
+
+    let mut cfg = wubi_config();
+    cfg.schema.pinyin.frequency.enabled = true;
+    let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), Arc::clone(&store));
+    coord.handle_key_event(&key_event(0xC0));
+    for c in "ni".chars() {
+        press_letter(&coord, c);
+    }
+    let temp = coord.debug_all_candidate_texts();
+    assert_eq!(
+        temp.first().map(|s| s.as_str()),
+        Some(target.as_str()),
+        "pinyin 桶里的词频应在临拼生效（读端缺席时此处必红）。\n临拼实际前 6 条: {:?}",
         &temp[..6.min(temp.len())]
     );
     let _ = std::fs::remove_file(&path);

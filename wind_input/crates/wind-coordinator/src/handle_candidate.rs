@@ -2437,20 +2437,28 @@ impl Coordinator {
     /// `show_candidates = false` 时返回 `None`（它回答的是「要不要出候选」），拿它当落点，
     /// 用户一关候选显示，词频就静默换到主方案的桶里去。
     ///
-    /// ⚠️ **临拼 / 快捷输入刻意不在此分流**（2026-08-04 用户拍板）：它们走
-    /// `write_data_schema_id` 的按候选来源分流，改动风险大于收益。往这里加模式前先确认
-    /// 那条路径不够用。
+    /// ⚠️ **临拼 / 快捷输入不在此分流**：它们在各自的读写点上取 `overlay_engine_schema`
+    /// （临拼见 `update_temp_pinyin_candidates` 与两个上屏出口），不经过本函数。往这里加
+    /// 模式前先确认那条路径不够用。
     ///
-    /// ⚠️ 上一句原写作「实测行为正确（临拼记进 `"pinyin"`、全拼双拼共享一份）」——
-    /// **那只在主方案是混输时成立**。`write_data_schema_id` 的按来源分流只有 mixed 那一臂，
-    /// 非混输直接返回 `data_schema_id(owner)`；而临拼的记账走 `record_selection`
-    /// （`schema_override = None` ⇒ owner = active），主方案是纯码表（五笔）时算出来的是
-    /// `"wubi86"`。即临拼选词的**词频**眼下记在主方案桶里，与全拼不互通。
+    /// ⚠️ 这里原写着「临拼走 `write_data_schema_id` 的按候选来源分流，实测记进 `"pinyin"`」
+    /// ——**那只在主方案是混输时成立**，是一句被「实测」背书过的错话。
+    /// `write_data_schema_id` 的按来源分流只有 mixed 那一臂，非混输直接返回
+    /// `data_schema_id(owner)`；临拼原先的记账走 `record_selection`（owner = active），
+    /// 五笔主方案下算出来的是 `"wubi86"`。2026-09-07 实测三态：
     ///
-    /// 候选调整（置顶 / 隐藏）不受此影响，它在 `update_temp_pinyin_candidates` 里按
-    /// **临拼目标方案**读（折叠后即 `"pinyin"`，与全拼写入的是同一个桶），且临拼本身
-    /// 没有写端——`candidate_op_scope` 对 `TempPinyin` 返回 `None`，规则只可能是在拼音
-    /// 方案下写的。词频要对齐则须读写两端同动，那会改变既有用户数据的落点。
+    /// | 码表调频 | 拼音调频 | 临拼选词落点 |
+    /// |---|---|---|
+    /// | false（出厂） | true | **哪个桶都不写**——开关取的是码表那档 |
+    /// | true | true | 写进 `"wubi86"` 桶（归属错） |
+    ///
+    /// 即三重失效叠加、互相掩盖：开关取错方案（出厂下压根不记）、归属取错方案、读端
+    /// 整段缺席。现已一并修好：临拼的词频与候选调整读写四处一律取**临拼目标方案**，
+    /// 折叠后落 `"pinyin"`，与全拼 / 双拼方案共享同一份数据。
+    ///
+    /// ★ 判据是「临拼打的是拼音，编码域与码位结构都与码表不同」——拼音键是全拼扁平码、
+    /// 跨码位共享；码表键是输入码、码位独立且带按码长分级的简码保护。混在一个桶里既读
+    /// 不出来，也让码表的保护策略去管拼音码位。
     ///
     /// 返回 `None` = 没有特殊归属，调用方走原有的 active 路径。
     pub(crate) fn effective_data_schema(&self, state: &State) -> Option<String> {
@@ -4403,10 +4411,22 @@ mod finalize_candidates_tests {
         // ——名字即声明，读代码时不必回溯赋值处就知道它已分流过。
         //
         // 白名单：确有理由不走 freq_code 的调用点，键为其首个实参的源码文本。
-        const ALLOWED: &[(&str, &str)] = &[(
-            "prefix",
-            "commit_top_text：顶码机制归属码表，prefix 即被顶出的输入码，本就是码表口径",
-        )];
+        const ALLOWED: &[(&str, &str)] = &[
+            (
+                "prefix",
+                "commit_top_text：顶码机制归属码表，prefix 即被顶出的输入码，本就是码表口径",
+            ),
+            // 纳入 `record_selection_in` 扫描后暴露的三处既有调用点，都属下面两类之一。
+            // ⚠️ 新增以 `code` 为名的调用点时，必须回到这里确认自己确实属于其中一类，
+            // 而不是顺手借用这条例外——本条按实参**文本**匹配，无法区分文件。
+            (
+                "code",
+                "两类：① 转发层——`record_selection` / `record_selection_cand` 把自己的形参 \
+                 原样传给 `_in`，分流发生在它们的调用方（那些调用点本测试都扫得到）；\
+                 ② handle_special 的特殊模式记账——特殊方案是码表语义，`a`/`ab`/`abc` \
+                 是三个独立码位，用输入码正是 `freq_code` 对 CodeTable 来源的口径",
+            ),
+        ];
         let sources: &[(&str, &str)] = &[
             ("coordinator.rs", include_str!("coordinator.rs")),
             ("handle_candidate.rs", include_str!("handle_candidate.rs")),
@@ -4419,33 +4439,51 @@ mod finalize_candidates_tests {
         for (name, src) in sources {
             // 只看 `#[cfg(test)]` 之前的部分：测试自己用字面量直接构造键是合法的。
             let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
-            // 两个名字都扫：`record_selection_cand` 是从候选本身分流 emoji 的薄包装，
-            // 记账码的口径约束对它同样成立，漏扫它就等于给新调用点开了后门。
-            let calls = [".record_selection(", ".record_selection_cand("];
+            // 三个名字都扫：
+            // - `record_selection_cand` 是从候选本身分流 emoji 的薄包装，记账码的口径约束
+            //   对它同样成立，漏扫它就等于给新调用点开了后门；
+            // - `record_selection_in` 此前**整个漏在守卫之外**（临英那处一直没被检查）。
+            //   它多一个前置的 schema 实参，故记账码是第 2 个而不是第 1 个——不按位置分流
+            //   的话，扫到的会是归属方案而非码，判据当场失效且全绿。
+            let calls = [
+                ".record_selection(",
+                ".record_selection_cand(",
+                ".record_selection_in(",
+            ];
             let sites = calls
                 .iter()
                 .flat_map(|pat| prod.match_indices(*pat).map(move |(off, _)| (off, *pat)));
             for (off, pat) in sites {
                 let args = &prod[off + pat.len()..];
-                // 切出第一个实参：按括号深度找顶层逗号（实参可能是 `self.freq_code(a, b)`）。
+                let code_pos = if pat == ".record_selection_in(" { 1 } else { 0 };
+                // 按括号深度切顶层逗号，取第 `code_pos` 个实参（实参可能是 `self.freq_code(a, b)`）。
                 let mut depth = 0i32;
-                let mut end = args.len();
+                let mut cur = 0usize;
+                let mut start = 0usize;
+                let mut found: Option<&str> = None;
                 for (i, ch) in args.char_indices() {
                     match ch {
                         '(' => depth += 1,
                         ')' if depth == 0 => {
-                            end = i;
+                            if cur == code_pos {
+                                found = Some(&args[start..i]);
+                            }
                             break;
                         }
                         ')' => depth -= 1,
                         ',' if depth == 0 => {
-                            end = i;
-                            break;
+                            if cur == code_pos {
+                                found = Some(&args[start..i]);
+                                break;
+                            }
+                            cur += 1;
+                            start = i + 1;
                         }
                         _ => {}
                     }
                 }
-                let arg = args[..end].trim().trim_start_matches('&').trim();
+                let Some(arg) = found else { continue };
+                let arg = arg.trim().trim_start_matches('&').trim();
                 checked += 1;
                 if arg.contains("freq_code") {
                     continue;
@@ -4470,8 +4508,9 @@ mod finalize_candidates_tests {
         // 一份逐字相同的记账 + 拼接代码，合并进 `take_committed_with_highlight` 后四处并作一处，
         // 12 → 9。下调前务必确认是合并而非漏调——这条断言的用途正是逼人回来说明减少的原因。
         // `record_selection_cand` 的调用点计入同一总数（把某处改成它不会让计数下降）。
+        // ⚠️ 纳入 `record_selection_in` 后实扫 13 个（原 9，且原下限恰好等于实值、零余量）。
         assert!(
-            checked >= 9,
+            checked >= 13,
             "只扫到 {checked} 个 record_selection 调用点，远少于预期——\
              调用点被改名或本测试的扫描方式失效了，先修测试再说"
         );
@@ -4499,19 +4538,19 @@ mod finalize_candidates_tests {
             // 返回值是同一个常量（那边写成 `Some(ENGLISH_SCHEMA.to_string())`）。三处读写
             // 端直接用常量而不绕 state，取值同源，故等同于走了那个函数。
             "Some(ENGLISH_SCHEMA)",
-            // ★ 登记的**例外**：临拼候选调整的读端归属（`update_temp_pinyin_candidates`），
-            // 取自 `overlay_engine_schema` 而**不是** `effective_data_schema`——后者对
-            // `TempPinyin` 恰恰返回 `None`（2026-08-04 用户拍板不给它分流）。
+            // ★ 登记的**例外**：临拼的用户数据归属（词频读写 + 候选调整读端），取自
+            // `overlay_engine_schema` 而**不是** `effective_data_schema`——后者对
+            // `TempPinyin` 返回 `None`（2026-08-04 用户拍板不在那里分流）。
             //
-            // 为什么这条例外站得住：临拼的候选调整**没有写端**（`candidate_op_scope` 对
-            // `TempPinyin` 返回 `None`，临拼里发不起置顶），规则只可能是在拼音方案下写的，
-            // 读端按临拼目标方案折叠后落同一个 `"pinyin"` 桶，不存在「写进 A、读的是 B」。
+            // 这条例外站得住的理由不是「没有写端」，而是**读写四处一律取同一个值**：
+            // `update_temp_pinyin_candidates`（freq + shadow 两处读）与两个上屏出口的
+            // `record_selection_in`（写）全走本变量，折叠后同落 `"pinyin"` 桶，
+            // 与全拼/双拼方案自己读写的是同一份数据。不存在「写进 A、读的是 B」。
             //
-            // ⚠️ 但**词频那一侧确实是不对称的**：临拼的记账走 `record_selection`
-            // （owner = active），五笔主方案下落 `"wubi86"` 桶，与本行读的桶不是同一个。
-            // 这是已知待办（理由见 `effective_data_schema` 的文档）——动词频前先读那段，
-            // 别看到本行就照抄成「读端也这么取就行」。
-            "shadow_owner.as_deref()",
+            // 为什么必须分流而不能落 active：临拼打的是拼音，**编码域与码位结构都与码表
+            // 不同**（拼音键是全拼扁平码、跨码位共享；码表键是输入码、码位独立且带按码长
+            // 分级的简码保护）。归到主方案桶等于把拼音码混进五笔码位。
+            "temp_pinyin_owner.as_deref()",
         ];
         const CALLS: &[&str] = &[
             ".record_selection_in(",
@@ -4569,10 +4608,11 @@ mod finalize_candidates_tests {
         // 反向保证：调用点被改名或扫描失效时，本测试不得退化成空跑而静默变绿。
         //
         // ⚠️ 下限须**随 sources 扩容一起上调**，否则余量翻倍等于容忍悄悄丢掉调用点：
-        // 把 `handle_temp.rs` 加进 sources 后实扫 13 个（原 9 个，下限却还留在 6）。
+        // 把 `handle_temp.rs` 加进 sources 后实扫 13 个（原 9 个，下限却还留在 6）；
+        // 临拼词频改走 `record_selection_in` 后又 +2 = 15。
         // 与下调时同一条纪律——变动前先确认是「合并/删除」还是「漏调」。
         assert!(
-            checked >= 13,
+            checked >= 15,
             "只扫到 {checked} 个方案归属调用点，少于预期——扫描方式失效了，先修测试"
         );
     }
