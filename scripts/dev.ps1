@@ -32,6 +32,21 @@
 #   9  / d9      生成便携包 (release / dev): 全构建 + 打 zip → dist\*-Portable-<版本>.zip
 #                (免安装; 不依赖 wind-installer; 内含便携标记, 不含 userdata\)
 #   9s / d9s     生成便携包 (跳过重建, 直接打包现有 build[_dev]/)
+#   sign         代码签名【开关】, 位置无关, 与构建/打包命令连用:
+#                  dev.ps1 sign 1  ≡  dev.ps1 1 sign     全构建并签名 (5 个 PE)
+#                  dev.ps1 sign 8  ≡  dev.ps1 8 sign     出安装包并签名 (5 个 PE + 安装包)
+#                ⚠️【默认不签】: 签名次数按月计费且有限, 不写 sign 就一次也不消耗。
+#                   连着跑 sign 8 再 sign 9s 时, 便携包里的 PE 已签过会自动跳过,
+#                   不会重复扣次数。
+#                【编译在远程、签名在本机】是支持的 —— 转发出去的命令不含 sign, 编译机
+#                   只编译; 产物回传后在本机补签:
+#                     dev.ps1 sign 1 8s     远程全构建 → 本机签 PE → 本机打包 + 签外壳
+#                   只有打包类 (8/9) 在签名时强制本机: 远程打包会把未签名的 PE 封进
+#                   压缩块, 且 dist\ 本就不回传。
+#   sign-status  代码签名体检 (证书在不在 / 会话开没开 / 几时到期)
+#   verify-sign  验签 dist\ 下的产物 (发版门禁; 未配置签名时【也会失败】, 这是刻意的)
+#                签名会话有时限(2 小时), 过期时只警告不中断 —— 故发版前跑一次 verify-sign。
+#                模板 scripts\sign.local.ps1.example; 原理与取舍见 docs\design\code-signing.md。
 #   k=check  l=clippy  t=test  f=fmt  fmt-check  ci(=fmt+clippy+test)  hooks(=激活pre-commit)  clean
 #   gd=gen-data  r=repl
 #   av           配置 Defender 编译排除项 (自动 UAC 提权; 详见 scripts\defender-exclusions.ps1)
@@ -728,6 +743,49 @@ function Invoke-BuildStagesParallel ([string]$profile, [string]$outdir) {
     return $ok
 }
 
+# ---------- 代码签名 (默认关闭; 需在命令里显式写 sign) ----------
+# 实现在 scripts\sign.ps1, 配置在 scripts\sign.local.ps1 (gitignore, 模板见 .example)。
+#
+# 【默认不签】—— 签名次数按月计费且有限, 一次全构建 5 个 PE、加打包 6 次。
+# 开关是位置无关的命令关键字 sign (定义见文件末尾"入口"段):
+#     dev.ps1 1        只构建, 不签         dev.ps1 sign 1   构建并签名
+#     dev.ps1 8        出包, 不签           dev.ps1 sign 8   出包并签名
+#
+# 三个接线点的顺序不是随意的, 每一条都由一个会静默出坏包的约束定死:
+#
+#   1. build[_dev]\ 下的 PE  → 必须在【打包/压缩之前】签。
+#      晚一步它们就被封进 Setup 的压缩块 / zip 里, 再也签不到了。
+#
+#   2. Setup.exe            → 必须在【pack.ps1 之后、New-UpdateManifest 之前】签。
+#      签名会改变文件长度与哈希; 排在 manifest 之后, latest.json 里的 sha256/size
+#      就与实际文件对不上, 在线升级会在校验环节整体失败 —— 而且是发出去才发现。
+#
+#   3. 便携 zip             → zip 本身签不了 (Authenticode 只认 PE)。靠的是压缩前
+#      build\ 里每个 PE 都已签好, 故 Do-PortableZip 在 Compress-Archive 前再签一次
+#      (幂等: 已签的会被跳过, skip 模式下没走 Do-Full 时这一次就是唯一的机会)。
+#
+# 签名不可用时【只警告不中断】—— 本机日常开发不该被一个过期的签名会话挡住。
+# 正式发版用 `dev.ps1 8 verify-sign` 或 `sign.ps1 -Verify dist` 硬校验。
+function Invoke-SignArtifacts ([string[]]$targets, [string]$what) {
+    # 没写 sign 就整段不走 —— 签名次数按月计费, 默认必须是不签。
+    if (-not $script:SignRequested) { return $true }
+    $ps1 = Join-Path $ScriptDir "sign.ps1"
+    if (-not (Test-Path $ps1)) { return $true }   # 脚本被删也不该拖垮构建
+    $existing = @($targets | Where-Object { Test-Path $_ })
+    if ($existing.Count -eq 0) { return $true }
+
+    $global:LASTEXITCODE = 0
+    try {
+        & $ps1 @existing
+    } catch {
+        ErrMsg "签名 $what 失败: $($_.Exception.Message)"
+        return $false
+    }
+    # sign.ps1 未配置/会话不可用时退 0 (警告后跳过); 只有真正签失败才非 0。
+    if ($LASTEXITCODE -ne 0) { ErrMsg "签名 $what 失败 (见上方 signtool 输出)"; return $false }
+    return $true
+}
+
 function Do-Full ([string]$profile = "release") {
     $outdir = Out-For $profile
     Sync-VersionStamp   # 版本号变化则强制重建关键产物 (确定性保险)
@@ -746,6 +804,9 @@ function Do-Full ([string]$profile = "release") {
     }
     if (-not (Do-GenData     $outdir))          { return $false }   # data/
     if (-not (Verify-DistData $outdir))         { return $false }   # 硬门禁
+    # 签 outdir 根层的 exe/dll。放在这里而不是各 Build-* 里: 并行构建时四路各签各的会
+    # 同时去抢同一张虚拟智能卡, 而 signtool 对卡的访问不是并发安全的。收口到一处串行签。
+    if (-not (Invoke-SignArtifacts @($outdir) "$profile 产物")) { return $false }
     Say "`n========== 全构建完成 ($profile) → $outdir =========="
     Gray "内容即部署到目标目录的内容 (无中间产物)"
     return $true
@@ -828,25 +889,91 @@ function Require-Admin {
 # 32 位 regsvr32 (注册 x86 TSF DLL, 写 WOW6432Node 供 32 位应用加载)。
 function Get-Regsvr32X86 { Join-Path $env:SystemRoot "SysWOW64\regsvr32.exe" }
 
-# 反注册安装目录中的旧 TSF COM (x64 + x86)。
+# TSF DLL 的系统目录落点: <System32|SysWOW64>\IME\<AppName>\。
+#
+# 为什么必须进系统目录: CS2 等开启 Trusted Mode 的游戏按【加载路径】放行 in-proc DLL,
+# 装在 Program Files 的副本连加载都被拒 (游戏日志 "Unknown foreign dll")。判据由三方
+# 对照实测锁定 —— QQ五笔(System32+签名)可用 / 冰凌(Program Files+签名)被拒 / 小狼毫
+# (System32+未签名)被拒, 即「系统目录 AND 有签名」两个条件缺一不可。
+# 详见 docs/design/game-compat-tsf-uielement.md。布局对齐 inbox IME 与 QQ五笔。
+#
+# ⚠️ 32 位差异: 本函数假定调用方是 64 位进程 (dev.ps1 走 pwsh)。32 位进程访问
+# System32 会被 WOW64 文件系统重定向静默改写到 SysWOW64 —— x64 DLL 装错地方且不报错。
+# 故显式断言, 不做「自动纠正」: 静默纠正会掩盖调用方本身跑错了架构这一事实。
+function Get-TsfSystemDir ([string]$suffix, [bool]$wow64) {
+    if (-not [Environment]::Is64BitProcess) {
+        throw "Get-TsfSystemDir 需在 64 位 PowerShell 中运行 (32 位进程访问 System32 会被 WOW64 重定向)"
+    }
+    $app  = if ($suffix) { "WindInputDev" } else { "WindInput" }
+    $root = if ($wow64)  { "SysWOW64" }     else { "System32" }
+    return (Join-Path $env:SystemRoot "$root\IME\$app")
+}
+
+# 应用注册表键 HKLM\Software\<AppName>。与安装器清单 [app] id、Rust 侧
+# wind-config::variant::app_dir_name()、C++ 侧 WIND_APP_NAME 同名 (四处无编译期约束)。
+function Get-AppRegKey ([string]$suffix) {
+    $app = if ($suffix) { "WindInputDev" } else { "WindInput" }
+    return "HKLM:\Software\$app"
+}
+
+# 反注册旧 TSF COM (x64 + x86) 并清掉系统副本。
 function Unregister-Tsf ([string]$dir, [string]$suffix) {
-    $x64 = Join-Path $dir "wind_tsf$suffix.dll"
-    $x86 = Join-Path $dir "wind_tsf_x86${suffix}.dll"
-    if (Test-Path $x64) { & regsvr32 /u /s $x64 2>$null }
-    if (Test-Path $x86) { & (Get-Regsvr32X86) /u /s $x86 2>$null }
+    # 系统副本优先: regsvr32 注册的是哪个副本, InprocServer32 就指向哪个 —— 现行部署
+    # 注册的是系统副本。安装目录副本仍反注册一次, 兜住「从就地注册的存量版本升级」。
+    $sysX64 = Join-Path (Get-TsfSystemDir $suffix $false) "wind_tsf$suffix.dll"
+    $sysX86 = Join-Path (Get-TsfSystemDir $suffix $true)  "wind_tsf_x86${suffix}.dll"
+    foreach ($p in @($sysX64, (Join-Path $dir "wind_tsf$suffix.dll"))) {
+        if (Test-Path $p) { & regsvr32 /u /s $p 2>$null }
+    }
+    foreach ($p in @($sysX86, (Join-Path $dir "wind_tsf_x86${suffix}.dll"))) {
+        if (Test-Path $p) { & (Get-Regsvr32X86) /u /s $p 2>$null }
+    }
+    # 删掉系统副本, 免得下次注册撞上被宿主锁住的旧映像。删不掉只告警: 随后的
+    # Copy-Item 会覆盖它, 覆盖不成才是真失败 —— 那时由 Register-Tsf 报错, 不在此处抢报。
+    foreach ($p in @($sysX64, $sysX86)) {
+        if (Test-Path $p) {
+            try { Remove-Item $p -Force -ErrorAction Stop }
+            catch { Warn "  - 系统副本删除失败 (仍被加载, 将尝试覆盖): $p" }
+        }
+    }
 }
 
 # 注册 TSF COM (x64 必须成功; x86 失败仅告警, 不阻断 64 位使用)。
+# 模式: 复制到系统目录 → 授 AppContainer 读权限 → 对【系统副本】regsvr32。
+# DllRegisterServer 内的 GetModuleFileName 取到系统副本路径, InprocServer32 自然指向它。
 function Register-Tsf ([string]$dir, [string]$suffix) {
-    $x64 = Join-Path $dir "wind_tsf$suffix.dll"
-    $x86 = Join-Path $dir "wind_tsf_x86${suffix}.dll"
-    & regsvr32 /s $x64
-    if ($LASTEXITCODE -ne 0) { ErrMsg "  - x64 COM 注册失败: $x64"; return $false }
-    Gray "  - x64 COM 已注册"
-    if (Test-Path $x86) {
-        & (Get-Regsvr32X86) /s $x86
+    $sid = "*S-1-15-2-1"   # ALL APPLICATION PACKAGES: AppContainer 宿主读取 DLL 所需
+
+    # 安装目录回指。DLL 搬进系统目录后 GetModuleFileName 只能取到系统副本路径, 推不出
+    # 安装目录 —— 服务拉起与便携标记检测都改读这个键 (读端 wind_tsf/src/IPCClient.cpp
+    # 的 _ResolveAppBaseDir)。必须写在 regsvr32 之前: 注册后宿主可能立刻加载 DLL,
+    # 那一刻键还不存在就会白拉一次服务。
+    $regKey = Get-AppRegKey $suffix
+    if (-not (Test-Path $regKey)) { New-Item -Path $regKey -Force | Out-Null }
+    Set-ItemProperty -Path $regKey -Name "InstallDir" -Value $dir
+
+    $x64Src = Join-Path $dir "wind_tsf$suffix.dll"
+    $x64Dir = Get-TsfSystemDir $suffix $false
+    New-Item -ItemType Directory -Force -Path $x64Dir | Out-Null
+    $x64Dst = Join-Path $x64Dir "wind_tsf$suffix.dll"
+    Copy-Item $x64Src $x64Dst -Force
+    & icacls $x64Dst /grant "${sid}:(RX)" /c | Out-Null
+    & regsvr32 /s $x64Dst
+    if ($LASTEXITCODE -ne 0) { ErrMsg "  - x64 COM 注册失败: $x64Dst"; return $false }
+    Gray "  - x64 COM 已注册 ($x64Dst)"
+
+    # x86 走 SysWOW64: 32 位宿主只能加载 32 位 in-proc DLL, 且必须用 SysWOW64 下的
+    # regsvr32 注册, 注册项才会落进 WOW6432Node 视图。
+    $x86Src = Join-Path $dir "wind_tsf_x86${suffix}.dll"
+    if (Test-Path $x86Src) {
+        $x86Dir = Get-TsfSystemDir $suffix $true
+        New-Item -ItemType Directory -Force -Path $x86Dir | Out-Null
+        $x86Dst = Join-Path $x86Dir "wind_tsf_x86${suffix}.dll"
+        Copy-Item $x86Src $x86Dst -Force
+        & icacls $x86Dst /grant "${sid}:(RX)" /c | Out-Null
+        & (Get-Regsvr32X86) /s $x86Dst
         if ($LASTEXITCODE -ne 0) { Warn "  - x86 COM 注册失败 (32 位应用可能无法使用输入法)" }
-        else { Gray "  - x86 COM 已注册" }
+        else { Gray "  - x86 COM 已注册 ($x86Dst)" }
     }
     return $true
 }
@@ -1414,6 +1541,42 @@ function Uninstall-Full ([string]$profile = "release") {
     return $true
 }
 
+# 在 TOML 的指定段内设置若干键: 已存在则就地替换, 不存在则追加到段末。
+# 段外同名键不受影响 (只在目标段的边界内改写)。
+#
+# 存在的意义是【不丢未知键】: 清单里同一个段既有随变体而异的键 (clsid/dll_x64…),
+# 又有该从 config\app.toml 原样继承的键 (lang_id/sweep_residue…)。整段替换会把后者
+# 静默抹掉 —— 判据是「至多一个覆盖式写入者」, 而 config 与本脚本都在写 [ime]。
+function Set-TomlKeysInSection ([string]$text, [string]$section, [hashtable]$kv) {
+    $lines = $text -split "`r?`n"
+    $out   = New-Object System.Collections.Generic.List[string]
+    $inSec = $false
+    $seen  = @{}
+    # 补齐缺键时先摘掉段尾空行, 追加完再放回 —— 否则新键会插在空行之后、紧贴下一个段头。
+    $flush = {
+        $tail = New-Object System.Collections.Generic.List[string]
+        while ($out.Count -gt 0 -and $out[$out.Count - 1] -match '^\s*$') {
+            $tail.Insert(0, $out[$out.Count - 1]); $out.RemoveAt($out.Count - 1)
+        }
+        foreach ($k in $kv.Keys) { if (-not $seen[$k]) { $out.Add(("{0} = {1}" -f $k, $kv[$k])) } }
+        foreach ($t in $tail) { $out.Add($t) }
+    }
+    foreach ($line in $lines) {
+        if ($line -match '^\s*\[') {                       # 段头: 离开旧段前补齐缺键
+            if ($inSec) { & $flush; $inSec = $false }
+            if ($line -match "^\s*\[$([regex]::Escape($section))\]\s*$") { $inSec = $true; $seen = @{} }
+            $out.Add($line); continue
+        }
+        if ($inSec -and $line -match '^\s*([A-Za-z0-9_]+)\s*=') {
+            $k = $Matches[1]
+            if ($kv.ContainsKey($k)) { $out.Add(("{0} = {1}" -f $k, $kv[$k])); $seen[$k] = $true; continue }
+        }
+        $out.Add($line)
+    }
+    if ($inSec) { & $flush }                                # 段落收在文本末尾的情形
+    return ($out -join "`r`n")
+}
+
 # ---------- 安装包打包 (调用兄弟项目 wind-installer, app.toml 驱动) ----------
 # wind-installer 是「通用安装器生成器」: 同一预编译 stub 配不同 app.toml 即生成不同安装包。
 # 安装目录由 app.toml 的 [app] id 派生 (ProgramFiles\<id>), 故 dev=WindInputDev、release=WindInput
@@ -1476,14 +1639,17 @@ portable_marker   = "portable_mode"
 process_names     = $procs
 acl_dlls          = $acl
 "@
-    $imeSec = @"
-[ime]
-clsid        = "$clsid"
-profile_guid = "$prof"
-lang_id      = "0804"
-dll_x64      = "$dllX64"
-dll_x86      = "$dllX86"
-"@
+    # [ime] 随变体而异的键。⛔ 别改回整段替换 (@"[ime] …"@ + regex 覆盖整段):
+    # 那样 config\app.toml 里本脚本没列出的键会被静默丢掉 —— sweep_residue = true
+    # 就这么丢过, 打出的清单里根本没有它, 安装器一路按缺省 false 走, 悬空注册清扫
+    # 从未生效。稀疏替换后新增键只需改 config\app.toml 一处。
+    $imeKeys = @{
+        clsid         = "`"$clsid`""
+        profile_guid  = "`"$prof`""
+        dll_x64       = "`"$dllX64`""
+        dll_x86       = "`"$dllX86`""
+        system_subdir = "`"IME/$id`""
+    }
     $pkgSec = @"
 [package]
 compression = "zstd"
@@ -1497,7 +1663,7 @@ icon        = "$iconFwd"
     # 用 MatchEvaluator 回调返回字面串, 避免 -replace 把替换文本里的 $ 当分组引用。
     $head = ($base -split '(?m)^\[package\]', 2)[0]
     $head = [regex]::Replace($head, '(?ms)^\[app\]\r?\n.*?(?=^\[)', { param($x) $appSec + "`r`n`r`n" })
-    $head = [regex]::Replace($head, '(?ms)^\[ime\]\r?\n.*?(?=^\[)',  { param($x) $imeSec + "`r`n`r`n" })
+    $head = Set-TomlKeysInSection $head "ime" $imeKeys
     $ai = $head.IndexOf("[app]"); if ($ai -gt 0) { $head = $head.Substring($ai) }
     $gen = "# 本文件由 dev.ps1 自动生成 —— $profile 变体; [app]/[ime]/[package] 为变体/机器值, 其余段继承 config\app.toml。请勿手工编辑。`r`n"
     $toml = $gen + $head.TrimEnd() + "`r`n`r`n" + $pkgSec + "`r`n"
@@ -1587,6 +1753,13 @@ function Do-PortableZip ([string]$profile = "release", [bool]$skipBuild = $false
     Write-PortableMarker "$stage\$name"
 
     $hasLauncher = Test-Path "$stage\$name\wind_portable.exe"
+
+    # 压缩前签暂存区里的 PE。zip 本身签不了 (Authenticode 只认 PE), 便携版的可信度
+    # 全靠包内每个 exe/dll 各自带签名。
+    # 签暂存区而非 $outdir: skip 模式 (9s/d9s) 不走 Do-Full, $outdir 里的 PE 可能还没签;
+    # 而暂存区是 zip 内容的权威快照, 签它才能保证「进了 zip 的都签过」。已签的会跳过。
+    if (-not (Invoke-SignArtifacts @("$stage\$name") "便携版内容")) { return $false }
+
     if (Test-Path $zip) { Remove-Item $zip -Force }
     Compress-Archive -Path "$stage\$name" -DestinationPath $zip -CompressionLevel Optimal
 
@@ -1598,6 +1771,7 @@ function Do-PortableZip ([string]$profile = "release", [bool]$skipBuild = $false
     Remove-Item $stage -Recurse -Force
     $sz = [math]::Round((Get-Item $zip).Length / 1MB, 1)
     Say "`n便携版打包完成: $zip (${sz}MB)"
+    if (-not $script:SignRequested) { Warn "本次【未签名】(要签名: dev.ps1 sign $(if($profile -eq 'dev'){'d9'}else{'9'}))" }
     if ($hasLauncher) {
         Gray "使用: 解压后运行 wind_portable.exe (注册组件并拉起服务)"
     } else {
@@ -1633,6 +1807,14 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
         ErrMsg "无 $outdir 产物; 去掉 skip 先全构建, 或运行 '$(if($profile -eq 'dev'){'d1'}else{'1'})'。"; return $false
     }
 
+    # 2.5 签 build\ 下的 PE —— 必须在 pack 之前, 因为 pack 就是把它们封进压缩块。
+    #
+    # ⚠️ 这一步【不能】只依赖 Do-Full 里那次: skip 模式 (8s/d8s) 根本不走 Do-Full,
+    #    于是会打出一个「外壳签了、里面 5 个 PE 全裸」的安装包 —— 而且从外面完全看不
+    #    出来 (验签 Setup.exe 是通过的)。实测踩过。
+    #    非 skip 模式下 Do-Full 已经签过, 这里按签名者指纹识别后整体跳过, 不重复消耗配额。
+    if (-not (Invoke-SignArtifacts @($outdir) "$profile 产物")) { return $false }
+
     # 3. 生成变体 app.toml → dist\ (在 source 之外)
     New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
     $cfgName = if ($profile -eq "dev") { "WindInputDev.app.toml" } else { "WindInput.app.toml" }
@@ -1662,7 +1844,11 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
     if (Test-Path $setup) {
         $sz = [math]::Round((Get-Item $setup).Length / 1MB, 1)
         Say "`n安装包已生成: $setup (${sz}MB)"
-        # 5. 生成在线升级元数据 + sha256 sidecar (供 wind-setting 检查更新)
+        if (-not $script:SignRequested) { Warn "本次【未签名】(要签名: dev.ps1 sign $(if($profile -eq 'dev'){'d8'}else{'8'}))" }
+        # 5. 签 Setup.exe —— 必须夹在这里: pack 之后 (否则签的是还没塞进 payload 的空壳),
+        #    New-UpdateManifest 之前 (否则 latest.json 的 sha256/size 全是签名前的旧值)。
+        if (-not (Invoke-SignArtifacts @($setup) "安装包")) { return $false }
+        # 6. 生成在线升级元数据 + sha256 sidecar (供 wind-setting 检查更新)
         New-UpdateManifest $profile $setup
     } else {
         Warn "打包脚本已结束, 但未找到预期输出: $setup"
@@ -1815,6 +2001,11 @@ function Show-Menu {
     Write-Host "    9    生成便携包 (release)       d9    生成便携包 (dev)"
     Write-Host "    9s   跳过重建直接打包 (release)  d9s   跳过重建直接打包 (dev)"
     Write-Host "      输出 → $DistDir\WindInput[Dev]-Portable-$Version.zip" -ForegroundColor DarkGray
+    Write-Host "`n  代码签名 (默认不签; 签名次数按月计费且有限):" -ForegroundColor Yellow
+    Write-Host "    sign  开关(位置无关), 与构建/打包连用:  sign 1 / sign 8 / sign 9s"
+    Write-Host "    sign-status  会话体检 (证书在不在 / 几时到期)   verify-sign  验签 dist\"
+    Write-Host "      不写 sign 则一次配额也不消耗; 已签过的文件会跳过, 不重复扣次数" -ForegroundColor DarkGray
+    Write-Host "      配置模板 scripts\sign.local.ps1.example; 取舍见 docs\design\code-signing.md" -ForegroundColor DarkGray
     Write-Host "`n  代码质量:" -ForegroundColor Yellow
     Write-Host "    k=check  l=clippy  t=test  f=fmt  ci=fmt+clippy+test"
     Write-Host "`n  数据 / 实测:" -ForegroundColor Yellow
@@ -1855,7 +2046,32 @@ function Test-RemoteCommand ([string]$cmd) {
     if ($env:WIND_NO_REMOTE) { return $false }
     if (-not $WIND_REMOTE_HOST) { return $false }   # 未配置 → 一律本机, 行为与从前一致
     $list = if ($null -ne $WIND_REMOTE_COMMANDS) { $WIND_REMOTE_COMMANDS } else { $RemoteCommands }
-    return ($list -contains $cmd)
+    if ($list -notcontains $cmd) { return $false }
+
+    # 打包类命令 (8/9 系列) 在配了代码签名时【强制本机】——
+    # 签名靠的是本机已建立的签名会话(证书在本机的 Cert:\CurrentUser\My 里), 编译机上
+    # 没有, 也不该有 —— 证书会话不该散到第二台机器上。若照常转发, 远程会跳过签名并把
+    # 【未签名的 PE 封进 Setup 的
+    # 压缩块 / zip 里】, 产物回传后本机再补签也够不着包内的文件 —— 拿到手的是一个签名
+    # 完好、内容全裸的安装包, 而且没有任何提示。
+    # 编译本身 (1/d1/m*) 不受影响, 照旧走远程。
+    # 签名时只有【打包类】必须留在本机, 编译类照旧走远程 —— 编译在远程、签名在本机
+    # 是支持的, 见 Dispatch 里的转发后补签。
+    #
+    # 为什么打包类(8/9)不能远程: 远程会把【未签名的 PE 封进压缩块】, 而回传后本机再补签
+    # 也够不着包内文件 —— 拿到的是签名完好、内容全裸的安装包。更何况 remote-build.ps1
+    # 的回传只取 build[_dev]\, dist\ 根本不回传, 远程打的包留在编译机上。
+    #
+    # 判据是「本次是否真要签名」而不是「有没有配过签名」: 没写 sign 的那些日常打包
+    # 照样该享受远程编译。
+    if ($script:SignRequested -and $cmd -match '^d?[89]s?$') {
+        Warn "[sign] 本次要签名 → $cmd 改在本机执行 (远程打包会把未签名的 PE 封进压缩块)"
+        # ⚠️ 这里不能用反引号引用命令名 —— 双引号串里的反引号是 PowerShell 的转义字符,
+        #    "`dev.ps1`" 会被解析成转义序列而不是引号, 整个脚本报「missing the terminator」。
+        Gray "       想让编译也走远程: 先 dev.ps1 sign 1 (远程编译 + 本机补签), 再 dev.ps1 sign 8s"
+        return $false
+    }
+    return $true
 }
 
 function Dispatch ([string]$cmd, [string]$arg) {
@@ -1863,7 +2079,24 @@ function Dispatch ([string]$cmd, [string]$arg) {
     # 不入库, 新 worktree 里没有它时同样自动降级为本机构建, 不报错。
     if ((Test-RemoteCommand $cmd) -and (Test-Path "$ScriptDir\remote-build.ps1")) {
         & "$ScriptDir\remote-build.ps1" -Command $cmd | Out-Host
-        return $LASTEXITCODE
+        $rc = $LASTEXITCODE
+
+        # 编译在远程、签名在本机。
+        #
+        # 转发出去的命令里【不含 sign】—— sign 在入口就被摘成开关了, 编译机收到的是
+        # 光秃秃的 1/d1/m*, 于是它只编译、不签名。这正是想要的: 证书会话不该散到第二台
+        # 机器上, 编译机也建立不了会话。
+        #
+        # 产物回传到本机 build[_dev]\ 之后, 在这里补签 —— 时机等价于本机 Do-Full 末尾
+        # 那一次(都是"产物齐全、尚未打包"), 后续 8s/9s 打包时按指纹识别为已签, 不重复
+        # 消耗配额。
+        #
+        # 只对【产 PE】的命令补签: k/t/ci/fmt-check 不产任何东西, gd 只产 data\。
+        if ($rc -eq 0 -and $script:SignRequested -and $cmd -match '^(d?(1|m[1-4])|release|dev)$') {
+            $p = if ($cmd -eq 'dev' -or $cmd -like 'd*') { 'dev' } else { 'release' }
+            if (-not (Invoke-SignArtifacts @((Out-For $p)) "$p 产物 (远程编译 → 本机签名)")) { return 1 }
+        }
+        return $rc
     }
     switch ($cmd) {
         { $_ -in @("1", "release") }        { if (Do-Full release) { 0 } else { 1 }; break }
@@ -1927,6 +2160,11 @@ function Dispatch ([string]$cmd, [string]$arg) {
         { $_ -in @("av", "defender") }  { if (Do-Defender apply)  { 0 } else { 1 }; break }
         "avc"                           { if (Do-Defender check)  { 0 } else { 1 }; break }
         "avr"                           { if (Do-Defender remove) { 0 } else { 1 }; break }
+        # 代码签名 (配置见 scripts\sign.local.ps1.example)
+        { $_ -in @("sign-status", "signst") } { & "$ScriptDir\sign.ps1" -Status; $LASTEXITCODE; break }
+        # 发版门禁: 对 dist\ 下的产物硬校验签名。签名未配置时【也会失败】—— 这正是它的
+        # 用途, 别把它当成"顺手跑跑"的检查; 日常构建不需要它。
+        { $_ -in @("verify-sign", "vsign") } { & "$ScriptDir\sign.ps1" -Verify $DistDir; $LASTEXITCODE; break }
         { $_ -in @("wtinit", "worktree-init") } { if (Do-WorktreeInit) { 0 } else { 1 }; break }
         # 强制释放编译机互斥锁 (Ctrl+C 中断构建后卡死时用)。这条命令本身刻意不进 $RemoteCommands
         # 白名单转发表 —— 它不是"要转发去远程跑的构建", 而是直接操作远程锁, 走 remote-build.ps1
@@ -1982,6 +2220,35 @@ function Menu-Loop {
 
 # ---------- 入口 ----------
 $allCmds = @($Commands | Where-Object { $_ -ne "" })
+
+# ---------- 签名开关: sign ----------
+# 签名【默认关闭】, 必须显式写 sign 才签。理由是签名次数按月计费且有限 ——
+# 一次全构建就是 5 个 PE, 加打包是 6 次; 若"配了证书就自动签", 日常 d1 几天就能把
+# 一个月的额度烧光。宁可发版时多打一个词, 也不要每次构建都在扣费。
+#
+# ⚠️ 为什么是命令关键字而不是 -Sign 参数: 本脚本的 $Commands 用了
+#    ValueFromRemainingArguments, 它会把 -Sign 一并吃进命令列表, 而 switch 恒为 $false
+#    ——【不报错、静默失效】。实测:
+#        .\dev.ps1 1 -Sign  →  Commands = [1, -Sign]   Sign = False
+#    故 named parameter 这条路在当前 param 结构下走不通。
+#
+# sign 是【位置无关】的开关, 扫描后从命令列表里摘掉, 不参与按序执行:
+#     dev.ps1 sign 1   ≡   dev.ps1 1 sign     全构建并签名
+#     dev.ps1 sign 8   ≡   dev.ps1 8 sign     出安装包并签名
+#
+# 位置无关是刻意的。若把 sign 当成"按序执行的一条命令", `dev.ps1 8 sign` 就会变成
+# 「先出未签名的包(manifest 已按未签名的 hash 算好), 再去签 build\」—— 签了个寂寞,
+# 而 latest.json 里的 sha256 与实际发布的文件对不上。摘成开关就不存在这种顺序陷阱。
+$script:SignRequested = $false
+if ($allCmds | Where-Object { $_.Trim().ToLower() -eq 'sign' }) {
+    $script:SignRequested = $true
+    $allCmds = @($allCmds | Where-Object { $_.Trim().ToLower() -ne 'sign' })
+    if ($allCmds.Count -eq 0) {
+        Warn "sign 是开关, 需与构建/打包命令连用, 例如: .\scripts\dev.ps1 sign 8"
+        Gray "只想签已有产物则直接调用: .\scripts\sign.ps1 build   (或 build_dev)"
+        exit 1
+    }
+}
 
 # 无参数 → 交互菜单
 if ($allCmds.Count -eq 0) { Menu-Loop; return }

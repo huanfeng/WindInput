@@ -277,10 +277,15 @@ if (Test-Path -LiteralPath '$LockFile') {
 #   .git\        编译机只要工作树, 不要历史
 #   .cache\      词库下载缓存, 编译机首次全构建时自行下载即可
 #   .claude\ 等  AI 工具的会话历史与运行时状态 —— 与编译无关, 却占 5481 文件 / 40 MB
-#   *.local.ps1  两机配置不同, 传过去会让编译机拿本机的部署目标办事
+#   *.local.ps1  两机配置不同, 传过去会让编译机拿本机的部署目标办事;
+#                sign.local.ps1 更是不该出编译机的门 —— 签名是本机的事, 编译机既没有
+#                签名会话也不该有。
+#                ⚠️ 这里【必须】用通配而不是逐个列举: 原先写死 deploy/build 两个名字,
+#                   新增 sign.local.ps1 时就漏了, 它被同步到了编译机 (实测发现)。
+#                   注释一直写的是 *.local.ps1, 是实现没跟上。
 $ExcludeDirs  = @("target", "build", "build_dev", "build_mac", "build_debug", "dist", ".git",
                   "node_modules", ".cache", ".claude", ".remember", ".omc", ".omx", ".vscode", ".idea")
-$ExcludeFiles = @("*.log", "*.pdb", "deploy.local.ps1", "build.local.ps1")
+$ExcludeFiles = @("*.log", "*.pdb", "*.local.ps1")
 
 # scp 带退避重试。
 # 为什么需要: Windows OpenSSH 不支持 ControlMaster 连接复用, 一次远程构建要连开 4~6 条

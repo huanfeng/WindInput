@@ -325,10 +325,50 @@ jobs:
             ls dist/$pat >/dev/null 2>&1 || { echo "缺产物: $pat" >&2; exit 1; }
           done
 
+      # Windows 产物在 CI 上【必然未签名】—— 云签名的会话要做二次验证、只活 2 小时、
+      # 还需要一个本地客户端进程,托管 runner 上做不到。详见 docs/design/code-signing.md。
+      #
+      # 这一步不做拦截,只如实把结论写进 Release 正文:草稿 Release 本就要人工过目,
+      # 与其在这里硬失败让整条发布链断掉(macOS 那半是好的),不如把「这批 Windows 包
+      # 未签名、发布前需用本机 dev.ps1 8/9 产的签名版替换」直接顶在正文里。
+      #
+      # 判据是 PE 的 Security 目录项非零,不是「签名有效」—— 后者要验证书链,ubuntu 上
+      # 做不到,而前者足以区分「签过」与「根本没签」,这正是要防的。
+      - name: 标注 Windows 产物签名状态
+        id: signcheck
+        run: |
+          if python3 scripts/check-signed.py dist/WindInput-Setup-*.exe; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Windows 安装包未签名(CI 无法签名,属预期)。发布前请用本机 dev.ps1 sign 8 / sign 9s 产的签名版替换。"
+          fi
+
       # 本仓绝大多数改动直接提交、不走 PR,GitHub 的 generate_release_notes 只会产出空的
       # "What's Changed",故改为自行按 conventional commits 汇总。
       - name: 生成 Release Notes
         run: ./scripts/gen-release-notes.sh --tag "$GITHUB_REF_NAME" -o release_notes.md
+
+      # 未签名的横幅顶在正文最前面。草稿 Release 要人工审核后才发布,横幅在那一刻必须
+      # 一眼可见 —— 塞在文末等于没有。产物换成签名版后,把这段删掉再发布。
+      - name: 未签名产物横幅
+        if: steps.signcheck.outputs.signed != 'true'
+        run: |
+          {
+            echo "> [!WARNING]"
+            echo "> **本 Release 的 Windows 产物由 CI 构建,未经代码签名** —— 用户安装时会看到"
+            echo "> SmartScreen 的「未知发布者」警告。"
+            echo ">"
+            echo "> 发布前请在开发机上执行(需先建立签名会话):"
+            echo "> \`.\\scripts\\dev.ps1 sign 8\` + \`.\\scripts\\dev.ps1 sign 9s\` + \`.\\scripts\\dev.ps1 verify-sign\`,"
+            echo "> (sign 是开关, 漏写就还是一套未签名的包)"
+            echo "> 用 \`dist\\\` 下的签名产物替换本页的 Setup.exe 与 Portable.zip(连同各自的 .sha256),"
+            echo "> 然后删掉这段提示再点发布。"
+            echo ">"
+            echo "> 为什么 CI 签不了:docs/design/code-signing.md 第 3 节。"
+            echo ""
+            cat release_notes.md
+          } > release_notes.tmp && mv release_notes.tmp release_notes.md
 
       - name: 创建草稿 Release
         uses: softprops/action-gh-release@v2
