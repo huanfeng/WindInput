@@ -455,7 +455,22 @@ impl MessageHandler for Coordinator {
         // 配对状态保活：须在 handle_key_event **之后**刷新，否则本次按键的陈旧判定
         // 会先被自己刷新掉，TTL 永不触发。栈空时是空操作。
         self.touch_pair_state();
-        // 联想自动隐藏留下的孤儿占位组合，搭这一次按键收掉（见 `adopt_orphaned_placeholder`）。
+        // 联想占位组合的两道收口，都挂在这个唯一出口上（透传这一格是它们共同的病灶）：
+        //
+        // ① `assoc_release_on_passthrough` —— 联想**还活着**，而这一键在既有分支里落到了
+        //    透传（Del / Home / End / 左右 / Insert…）。收组合 + 交还按键，顺带收窗。
+        // ② `adopt_orphaned_placeholder`   —— 联想已因自动隐藏退出，组合成了孤儿。
+        //
+        // 排这个顺序的理由：①命中时返回 `ClearCompositionThenPassThrough`，②看到它属
+        // `Fate::Absorbs`，会顺手把可能残留的孤儿标记撤掉；反过来则②先把这一格改判掉，
+        // ①再也看不到透传。
+        //
+        // ⚠️ 但**别把它当成一条有守门测试的不变式**：两者今天是互斥的（孤儿标记只由
+        // `fire_assoc_hide` 置位，而它置位前刚 `exit_assoc` 过 ⇒ 那一刻联想已不活跃；
+        // 再次进入联想必经上屏，上屏动作本身就是 `Fate::Absorbs`，会先把标记清掉），
+        // 所以「两个都成立」的那一帧构造不出来，对调这两行测试也不会红。
+        // 顺序按上面的理由定死，是为了万一将来有第三条路径把标记置在联想活跃期间。
+        //
         // 必须在占位后处理**之前**：那一步是显示层加工（把真实编码换成占位空格），
         // 这一步是会话层判定（这一键要不要顺带收口），会话层先定。
         //
@@ -465,6 +480,7 @@ impl MessageHandler for Coordinator {
         // 等于把「收口」这次机会浪费在一个做不成的时机上。keyup 保持原样，标记留给紧随
         // 其后的 keydown——用户要继续操作，必然还有 keydown。
         let action = if data.event_type == EVENT_KEY_DOWN {
+            let action = self.assoc_release_on_passthrough(data, action);
             self.adopt_orphaned_placeholder(action)
         } else {
             action

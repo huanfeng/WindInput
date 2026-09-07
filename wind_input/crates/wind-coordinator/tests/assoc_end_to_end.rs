@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
 use wind_config::Config;
 use wind_coordinator::Coordinator;
-use wind_ipc::protocol::EVENT_KEY_DOWN;
+use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 
 fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
@@ -745,4 +745,191 @@ fn assoc_backspace_passes_through_when_configured() {
         other => panic!("关 backspace_cancels_only 后退格应交还宿主，实得 {other:?}"),
     }
     assert!(assoc_texts(&c).is_empty(), "退格后联想窗该收起");
+}
+
+// ── 联想态下的「其它按键」 ────────────────────────────────────────────────────
+//
+// 退格与回车各有专门分支（上面四条），本节管的是**剩下那一大类**：在既有分支里落到
+// `PassThrough` 的键。用户报的是「Del / Home / End 按了没反应」，但名单数不清——
+// 左右/Home/End 一条臂、Del 一条臂、Insert 与 Tab 落兜底臂——故收口是按**动作**判的，
+// 见 `handle_assoc::assoc_release_on_passthrough`。
+//
+// ⚠️⚠️ 这一族**必须走 `handle_key_event_policed`**（bridge 的真入口，server.rs 调的就是
+// 它）。收口挂在那个唯一出口上，改走内层 `handle_key_event` 会如实拿到 `PassThrough`
+// ——那正是修复前的症状，拿它写断言等于把 bug 钉成规范。
+
+/// 联想态下会落到透传的键。刻意**不含** ↑↓/PageUp/PageDown：那四个在联想态是翻页与
+/// 移高亮（`apply_session_action` 早就接住了），本就不该收窗。
+/// ⛔ **Tab 刻意不在列**——审查时按 C++ 的吃键表（`session_select_or_page` 同样「有
+/// session 就吃」）把它加进来过，实测拿到的是 `Consumed` 而非 `PassThrough`：Tab 是
+/// **辅助码触发键**（`enter_aux_code`），在协调器里有自己的归属。
+/// 用户看到的表象同样是「按了没反应」，但机制不同（键被干净吃掉，没有「吃了再吐」、
+/// 不丢键），该不该让它在联想态做点别的是另一个问题，不归本收口管。
+/// ★ 这正是「判据取动作、不取键名」的又一次兑现：按键名列表会把它错收进来。
+const ASSOC_PASSTHROUGH_KEYS: &[(u32, &str)] = &[
+    (0x2E, "Delete"),
+    (0x24, "Home"),
+    (0x23, "End"),
+    (0x25, "Left"),
+    (0x27, "Right"),
+    (0x2D, "Insert"),
+];
+
+/// 带指定修饰键的按键事件。
+fn key_event_mods(key_code: u32, modifiers: u32) -> KeyEventData {
+    KeyEventData {
+        modifiers,
+        ..key_event(key_code)
+    }
+}
+
+/// 带 Shift 的按键事件（Shift+字母进临时英文用）。
+fn key_event_shift(key_code: u32) -> KeyEventData {
+    key_event_mods(key_code, MOD_SHIFT)
+}
+
+/// ★★★ **用户报障**：联想窗弹出时「退格能删，Del / Home / End 却按了没反应」。
+///
+/// 根因不在这些键各自的分支里，而在联想态挂着的占位组合：它让 TSF 的
+/// `_HasInputSession()` 为真 ⇒ `OnTestKeyDown` 把这批键（C++ 归 `HotkeyType::CursorKey`）
+/// 全吃下转发；而协调器这边缓冲与已转换段皆空，一路落到 `PassThrough` ⇒ 「吃了再吐」
+/// 翻转，不补发 `WM_KEYDOWN` 的宿主直接丢键。
+///
+/// 正解是收组合 + 重放按键，顺带收窗——这些键要么移动宿主光标、要么改动光标后的文档，
+/// 联想赖以成立的上文已经断了，那批候选此刻就是错的。
+#[test]
+fn assoc_cursor_and_edit_keys_close_window_and_reach_host() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = coord("word", "wubi86_pinyin");
+    for (vk, name) in ASSOC_PASSTHROUGH_KEYS {
+        enter_assoc(&c);
+        match c.handle_key_event_policed(&key_event(*vk)) {
+            KeyAction::ClearCompositionThenPassThrough => {}
+            other => panic!("联想态 {name} 应收组合 + 交还宿主，实得 {other:?}"),
+        }
+        assert!(assoc_texts(&c).is_empty(), "{name} 之后联想窗该收起");
+    }
+}
+
+/// ★ 反向守卫：**光按下修饰键不该收窗**。
+///
+/// Shift+字母的物理形态是「先 Shift keydown、再字母 keydown」。若收口不排除纯修饰键，
+/// 第一下就把联想窗干掉了，第二下看到的已经是空闲态——修好的临英入口会被自己撞掉。
+/// Windows 侧这类 keydown 压根不转发，故这条钉的是薄宿主与未来的接线。
+#[test]
+fn assoc_survives_bare_modifier_keydown() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = coord("word", "wubi86_pinyin");
+    let hits = enter_assoc(&c);
+    // 值域必须写全（`handle_assoc::is_modifier_like_vk`）：0xA0-0xA3 四个纯修饰键与
+    // CapsLock(0x14) 之外，还有左右 Alt(0xA4/0xA5) 与未拆左右的笼统
+    // VK_SHIFT/VK_CONTROL/VK_MENU(0x10/0x11/0x12)。后五个在桌面 TSF 上到不了服务端
+    // （C++ `isModifierKeyItself` 不转发），本条钉的是**薄宿主**——而薄宿主恰恰是最
+    // 可能上报它们的那一类，守卫要是只覆盖桌面值域，就会在它唯一要保的场景下失效。
+    // 修饰键自己按下时，那一位修饰位就是按着的——真机上 Shift keydown 必带 MOD_SHIFT。
+    // 守卫按 vk 判，带不带位结论都一样；带上只是为了让用例复现的确实是它写的那个场景。
+    for (vk, mods) in [
+        (0xA0u32, MOD_SHIFT),
+        (0xA1, MOD_SHIFT),
+        (0xA2, MOD_CTRL),
+        (0xA3, MOD_CTRL),
+        (0x14, 0),
+        (0xA4, MOD_ALT),
+        (0xA5, MOD_ALT),
+        (0x10, MOD_SHIFT),
+        (0x11, MOD_CTRL),
+        (0x12, MOD_ALT),
+    ] {
+        c.handle_key_event_policed(&key_event_mods(vk, mods));
+        assert_eq!(
+            assoc_texts(&c),
+            hits,
+            "修饰键 keydown (vk=0x{vk:02X}) 不该动联想窗"
+        );
+    }
+}
+
+/// ★ Ctrl/Alt 组合**刻意也走改判**（`assoc_release_on_passthrough` 里那段星标）：
+/// 它们在联想态同样落 `PassThrough`（`MOD_SHORTCUT` 那条臂，缓冲与已转换段皆空），
+/// 同样被 TSF 的 `ctrl_alt_cleanup` 分支吃下转发 ⇒ 同一个「吃了再吐」。
+///
+/// 这是本次触及面最大的一格，故单独钉住：改判后 C++ 走 `_ReplayKeyToHost`，重放时物理
+/// 修饰键仍按着，宿主 `GetKeyState` 能还原 Ctrl+A 语义。
+#[test]
+fn assoc_ctrl_combo_closes_window_and_reaches_host() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = coord("word", "wubi86_pinyin");
+    enter_assoc(&c);
+    match c.handle_key_event_policed(&key_event_mods(0x41, MOD_CTRL)) {
+        KeyAction::ClearCompositionThenPassThrough => {}
+        other => panic!("联想态 Ctrl+A 应收组合 + 交还宿主，实得 {other:?}"),
+    }
+    assert!(assoc_texts(&c).is_empty(), "Ctrl+A 之后联想窗该收起");
+}
+
+/// ★★★ **用户报障**：联想窗弹出时按 Shift+字母想打英文，字母却落进了中文码表缓冲。
+///
+/// 根因是 `try_activate_mode` 开头那句联想让位**让过头了**：它本意只为保住 `;`/`'` 的
+/// 二三候选键（见 `select_keys_work_in_assoc`），却把同一函数里的临英 Shift+字母分支
+/// 一起挡掉；即使不挡，那个分支的「无候选」门也会被联想候选拦住。
+#[test]
+fn assoc_shift_letter_enters_temp_english() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = coord("word", "wubi86_pinyin");
+    enter_assoc(&c);
+    // 走 policed（生产入口）而非内层：验的虽是 `try_activate_mode`，但顺带钉住
+    // `assoc_release_on_passthrough` 不会误伤这条入口——它返回的不是透传，①本就不该触发。
+    match c.handle_key_event_policed(&key_event_shift(0x48)) {
+        KeyAction::UpdateComposition { .. } => {}
+        other => panic!("联想态 Shift+H 应进临时英文，实得 {other:?}"),
+    }
+    assert_eq!(
+        c.debug_active_mode(),
+        Some("temp_english"),
+        "Shift+H 该落在临时英文，而不是把 h 塞进中文码表缓冲"
+    );
+    assert!(assoc_texts(&c).is_empty(), "进临英后联想窗该收起");
+}
+
+/// ★ 同一入口的另一档：`shift_behavior = "direct_commit"` 时直接上屏大写字母。
+///
+/// 两档都测，是因为它们在同一个 `if` 里分叉：只测一档时，另一档漏了收联想窗
+/// （候选与临英候选住同一个 `state.candidates`）也照绿。
+#[test]
+fn assoc_shift_letter_direct_commits_when_configured() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = coord_tweak("word", "wubi86_pinyin", |cfg| {
+        cfg.input.temp_english.shift_behavior = "direct_commit".to_string();
+    });
+    enter_assoc(&c);
+    let text = match c.handle_key_event_policed(&key_event_shift(0x48)) {
+        KeyAction::InsertText { text, .. }
+        | KeyAction::CommitThenDeferComposition {
+            commit_text: text, ..
+        } => text,
+        other => panic!("direct_commit 档下 Shift+H 应直接上屏，实得 {other:?}"),
+    };
+    assert_eq!(text, "H", "direct_commit 档该上屏大写 H");
+    assert_eq!(c.debug_active_mode(), None, "direct_commit 档不进临英");
+    assert!(assoc_texts(&c).is_empty(), "上屏后联想窗该收起");
 }

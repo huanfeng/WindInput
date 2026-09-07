@@ -73,15 +73,25 @@ pub(crate) fn assoc_active(&self) -> bool {
 `ModeKind::Special/TempPinyin/Mix` 那套各有独立缓冲与专属处理器，联想没有缓冲、
 也不需要专属语义，套进去同样是多一层。
 
-## 3. 只剩两处需要主动接
+## 3. 只剩几处需要主动接
 
 | # | 位置 | 为什么非接不可 |
 |---|---|---|
 | 1 | 上屏路径末尾（`commit_selected` 整串分支） | 生成候选 + 开占位组合 |
-| 2 | 退格（`assoc_backspace`） | 既有分支在「缓冲空 + 无已转换段」时给 `PassThrough`，会把占位组合悬在宿主里 |
+| 2 | 退格 / 回车（`assoc_backspace` / `assoc_enter`） | 既有分支在「缓冲空 + 无已转换段」时给 `PassThrough`，会把占位组合悬在宿主里 |
 | 3 | `try_activate_mode` 让位 | 见 §3.3 |
+| 4 | 按键唯一出口的透传改判（`assoc_release_on_passthrough`） | 第 2 行那个病灶的**其余全部**键（Del / Home / End / ← → / Insert…），见 §3.3.1 |
+| 5 | `try_activate_mode` 的临英 Shift+字母门 | 联想候选会把「无候选」那道门挡死，见 §3.3.2 |
 
 （其余「接线」都随候选自然生效：候选被清空/重填时联想就结束了，无需显式退出。）
+
+⚠️ **这张表不等于「占位组合已被全部收口」**，已知缺口一处（2026-09-07 审查发现，
+尚未修）：语言栏中/英按钮（`CMD_TOGGLE_MODE`）与系统 Ctrl+Space
+（`CMD_SYSTEM_MODE_SWITCH`）在联想态下 `take_input_on_mode_switch` 拿不到文本 ⇒
+bridge 回 `StatusUpdate`，而 C++ 的 StatusUpdate 分支**明确不结束组合**，占位空格
+悬着。对照组是 Shift 单击那条 keyup 路径——它的 `had_pending` 把
+`!candidates.is_empty()` 算进去了，于是回空文本 `InsertText` 顺带 `EndComposition`。
+修法与超时孤儿同源（`push_end_composition`，零协议改动）。
 
 ### 3.1 触发点为什么选在那里
 
@@ -119,16 +129,25 @@ pub(crate) fn assoc_active(&self) -> bool {
 桌面走的是 C++ 那份独立实现，它有自己的镜像 `hasComposition || _hasCandidates`，
 而普通上屏把两个标志都清零——这对普通上屏是对的，联想是唯一的例外。
 
-修法是 `CommitText` 响应加 **flags bit4**（`COMMIT_FLAG_KEEP_CANDIDATES`）：
+第一版修法是 `CommitText` 响应加 **flags bit4**（`COMMIT_FLAG_KEEP_CANDIDATES`）：
 composition 照常结束，只让 `_hasCandidates` 保持为真。
 
-> ⚠️ 刻意**不复用 bit1**（`HAS_NEW_COMPOSITION`）。那个是「重开一个组合」，会让宿主
-> 进入 composing 并改变整套时序，还会把「真提交 + 同位置重开被 diff 式宿主误读成替换」
-> 那套风险一并带回来（见 `project_tsf_desync_analysis`）。**联想不需要组合，
-> 只需要键还能送进来。**
+⛔ **这一版已废弃**（`BinaryProtocol.h` 里那一位标了「勿复用」）。它**仍然失败**：
+`_hasCandidates` 由服务端应答**异步**回填，赢不了下一次 `OnTestKeyDown` 的竞速。
+真机日志同一行里 `composing=0 candidates=1 inputSession=0`——判定取的是 0，日志打
+出来已经是 1。
 
-因为没有组合，落回原有链路的键仍是干净的 `PassThrough`：退格照样删宿主的字、
-空格照样出空格、回车照样发消息，只是这一次输入法先看到了它，得以关掉联想窗。
+#### 第三步（现行）：挂占位组合
+
+`HasActiveComposition()` 是 TSF 组合对象的**同步**状态，没有那个竞速窗口；特殊模式 /
+临拼 / 临英一直可靠，正是因为它们都挂着组合。于是联想态也挂一个占位组合
+（`handle_assoc::ASSOC_COMPOSITION` = 空格 + 光标落在它前面）。
+
+★★★ **代价必须连着记**：一旦挂了组合，`_HasInputSession()` 就恒为真，
+**落回原有链路的键不再是「干净的 `PassThrough`」**——TSF 已经把它吃下并转发了，
+服务端再回 `PassThrough` 就是「吃了再吐」翻转。这正是 §3.3.1 那一整类缺陷的来源，
+也是本文档一度写反的地方（旧版基于 bit4 方案写着「因为没有组合，退格照样删宿主的
+字」，据此推理会得到完全错误的结论）。
 
 **这两层的形状完全一样**：一份判据、两处实现、注释声称已覆盖、漏了不报错。
 往「缓冲空但候选在」这类新稳定态上加任何按键行为，都要把两层一起查。
@@ -144,18 +163,76 @@ composition 照常结束，只让 `_hasCandidates` 保持为真。
 | `;` / `'` 二三候选 | select-key 消费点 | 选第 2/3 条 |
 | ↑↓ / PgUp PgDn / `-` `=` | `apply_session_action` | 移高亮 / 翻页 |
 | Esc | `cancel_session` | 收窗 + 结束组合 |
-| 字母 | `update_candidates` | 换成新一轮正常候选 |
+| 字母 | `update_candidates` | 换成新一轮正常候选（**Shift+字母除外**，见 §3.3.2） |
 | 标点 | 标点流水线 | 出标点、结束组合 |
 | 鼠标点选 | `select_candidate_at` | 与键盘同一条 `commit_selected` |
 
-**只有两处例外**：
+**例外有四类**（与 §3 表格的第 2~5 行一一对应）：
 
-- **退格**（§3 表格第 2 行）。代价是要按两次——第一次关联想窗、第二次才删字。这与本仓
-  组合态的既有行为一致（正常打字时按 Esc/Ctrl+A 同样先清组合、键被吃掉）。
+- **退格 / 回车**（§3 表格第 2 行）。各有一个开关（`backspace_cancels_only` 默认吃键、
+  `enter_cancels_only` 默认透传），默认相反是刻意的：回车透传是「把正事办了」，
+  退格透传却是**删掉刚上屏的字**，不可逆。
+- **落到透传的其余键**（Del / Home / End / ← → / Insert…）。
+  收口在 `handle_assoc::assoc_release_on_passthrough`，见下方 §3.3.1。
 - **`try_activate_mode` 让位**。它刻意「不要求候选为空」（为空码补全定的裁决），于是
   `;` 在联想态会去激活快捷输入而不是选第 2 条——联想窗被顶掉换成模式引导符，
   二三候选键**永远按不出来**。加一句 `if state.assoc_active() { return None }`。
   判据用 `assoc_active()` 而非「候选非空」，正是为了不动空码补全那条既有行为。
+  ⚠️ **这一句的位置在函数中段，不在开头**：放开头会把同一函数里的「临英 Shift+字母」
+  分支一起挡掉（见下一条）。
+- **临英 Shift+字母的那道门**。它原先要求「无候选」，联想候选同样会把它挡死，
+  于是联想窗一弹出来 Shift+字母就进不了英文。见 §3.3.2。
+
+#### 3.3.1 落到透传的键：收组合 + 重放，顺带收窗
+
+上面那张表覆盖的是「有人接住」的键。剩下一大类**没人接**：它们各自分支的门槛都是
+「缓冲或已转换段非空」，而联想两者皆空 ⇒ 一路落到 `PassThrough`。
+
+而联想态在宿主里挂着占位组合（§3.2 第三步），TSF 的 `_HasInputSession()` 因此为真 ⇒
+`OnTestKeyDown` 把 Del / Home / End / ← →（C++ 归 `HotkeyType::CursorKey`）全吃下转发。
+回一个 `PassThrough` 就是「吃了再吐」翻转：**不补发 `WM_KEYDOWN` 的宿主直接丢键**
+（用户报的「退格能删，Del/Home/End 按了没反应」），补发的宿主则把占位空格 finalize
+进文档。分界线全在宿主侧，我们这边是同一条路径。
+
+修法与超时孤儿那条同形（`handle_assoc::adopt_orphaned_placeholder`，本文未展开）：
+在按键处理的**唯一出口** `handle_key_event_policed` 上，
+按「这个动作是不是把键交还宿主却不碰组合」改判成
+`ClearCompositionThenPassThrough`，并退出联想态。
+
+★ **判据取动作，不取键名**。「哪些键会落到透传」数不清——← →/Home/End 一条臂、
+Del 一条臂、Insert 落兜底臂、Ctrl 组合另有一条；本仓已多次栽在「N 条通路只接了
+N-1 条」上。而 `PassThrough` / `NotHandled` 这一格，问一次就够。
+
+★ **顺带收窗不是副作用，是正解**：这批键要么移动宿主光标、要么改动光标后的文档，
+联想赖以成立的上文已经断了，那批候选此刻就是错的。
+
+⛔ **不给它配开关**。退格/回车有开关，是因为那两个键「只收窗、吃掉这一键」也说得通；
+而「按 Home 只收窗、光标不动」对不上任何一种用户期待——那不是取舍，是坏掉。
+
+⚠️ **修饰键本身必须排除**（判据 `handle_assoc::is_modifier_like_vk`）：Shift+字母的
+物理形态是「先 Shift keydown、再字母 keydown」，不排除的话第一下就把联想窗收掉了，
+§3.3.2 修好的临英入口会被自己撞掉。
+★ 判据**就地写全**（含左右 Alt 与未拆左右的笼统 VK），不复用 `is_key_up_only_vk`：
+那个答的是「这键只有 keyup 到得了服务端」，是另一根轴。两轴今天在桌面上答案重合，
+但这道守卫自称是「给薄宿主的保险」，而薄宿主正是最可能上报 Alt keydown 的那一类。
+
+★ **Tab 不在此列**。它在 C++ 侧同样「有 session 就吃」，但在协调器里归辅助码触发键
+（`enter_aux_code`），给的是 `Consumed` 而非透传——用户看到的同样是「按了没反应」，
+但机制不同（键被干净吃掉、不丢键）。要不要让它在联想态做点别的是另一个问题。
+
+#### 3.3.2 Shift+字母进临时英文
+
+`try_activate_mode` 里的临英分支原先要求 `candidates.is_empty()`，加上函数开头那句
+联想让位，两道门各自都足以把联想态挡在外面 ⇒ 联想窗一弹出来，Shift+字母就进不了临英，
+字母径直落进中文码表缓冲：**用户想打英文，得到的是中文输入**。
+
+两处一起改：让位挪到临英分支之后（让位保的是 `;`/`'` 这类**选词键**，与 Shift+字母的
+值域不相交），门放宽成 `candidates.is_empty() || assoc_active()`。
+
+⚠️ 判据仍**不是**「候选非空」——空码补全那类候选是用户真在看的，行为一字不动。
+★ 进模式前先 `exit_assoc`：联想候选与临英候选住的是同一个 `state.candidates`，
+不先清就会出现「临英只有一条候选、下面还挂着上一轮的联想词」；顺带作废未触发的自动
+隐藏计时，否则它会在用户已经打着英文时到期、把占位组合标成孤儿。
 
 ### 3.4 自动隐藏与编码栏标识
 

@@ -18,10 +18,20 @@
 //! （词频记账、自动造词、码表调序——联想没有码）。那用 [`CandidateSource::Assoc`]
 //! 一个来源标记就够了，与短语「有文本无码位、恒不记词频」是同一个先例。
 //!
-//! 于是**只剩三处**需要主动接：退格与回车（见 [`Coordinator::assoc_enter`] 与
-//! [`Coordinator::assoc_backspace`]）、
-//! 空缓冲模式激活的让位（见 `try_activate_mode`）、以及标点不顶屏（见
+//! 于是**只剩这么几处**需要主动接：退格与回车（见 [`Coordinator::assoc_enter`] 与
+//! [`Coordinator::assoc_backspace`]）、**其余落到透传的键**（Del / Home / End / 左右 /
+//! Insert…，见 [`Coordinator::assoc_release_on_passthrough`]——它们与退格回车是同一个
+//! 病灶，只是名单数不清，故按动作而非按键名收口）、空缓冲模式激活的让位与临英
+//! Shift+字母那道门（都在 `try_activate_mode`）、以及标点不顶屏（见
 //! `commit_highlight_then_char` 与标点臂里的同款守卫）。
+//!
+//! ⚠️ **这份清单不等于「占位组合已被全部收口」**（2026-09-07 审查发现的既有缺口，
+//! 本次未修）：语言栏中/英按钮（`CMD_TOGGLE_MODE`）与系统 Ctrl+Space
+//! （`CMD_SYSTEM_MODE_SWITCH`）在联想态下 `take_input_on_mode_switch` 拿不到文本 ⇒
+//! bridge 回 `StatusUpdate`，而 C++ 的 StatusUpdate 分支**明确不结束组合** ⇒ 占位空格
+//! 悬着，可能被宿主 finalize 进文档。对照组是 Shift 单击那条 keyup 路径：它的
+//! `had_pending` 把 `!candidates.is_empty()` 算进去了，于是回空文本 `InsertText`
+//! 顺带 `EndComposition`。修法与超时孤儿同源（`push_end_composition`，零协议改动）。
 //!
 //! ## ★★★ 联想态必须挂一个占位组合
 //!
@@ -55,8 +65,9 @@ use crate::coordinator::{Coordinator, State};
 use wind_assoc::{
     AssocConfig, AssocContext, AssocHit, AssocKind, AssocMode, AssocProvider, AssocSource,
 };
-use wind_bridge::handler::{COMPOSITION_PLACEHOLDER, KeyAction};
+use wind_bridge::handler::{COMPOSITION_PLACEHOLDER, KeyAction, KeyEventData};
 use wind_candidate::{Candidate, CandidateSource};
+use wind_keys::keymap;
 
 /// 联想态**显式退出**的原因。只用于日志，不参与控制流。
 ///
@@ -71,8 +82,13 @@ pub(crate) enum AssocExit {
     Dismiss,
     /// 空格且 `space_commits = false`：不选联想，出空格。
     NonSelectKey,
+    /// 这一键在既有分支里落到了透传（Del / Home / End / 左右 / Insert…）。
+    /// 收口见 [`Coordinator::assoc_release_on_passthrough`]。
+    PassThroughKey,
     /// 模式切换（中英 / CapsLock / 系统切换）。
     ModeSwitch,
+    /// 按键激活了独占模式（目前只有临时英文的 Shift+字母走到这里）。
+    ModeActivate,
     /// 自动隐藏计时到期（`hide_after_ms`）。
     Timeout,
 }
@@ -193,6 +209,36 @@ impl State {
 /// **不流进宿主**——而且只在非嵌入模式给：嵌入模式下候选窗本就没有编码栏，
 /// 凭空多一栏会让窗口高度一跳。
 pub(crate) const ASSOC_COMPOSITION: &str = COMPOSITION_PLACEHOLDER;
+
+/// 这个 VK 是不是**修饰键本身**（按下它不构成「用户做了别的事」）。
+///
+/// # ⚠️ 为什么不复用 `keymap::is_key_up_only_vk` / `is_pure_modifier_vk`
+///
+/// 那两个回答的是**另一根轴**上的问题：
+///
+/// - `is_key_up_only_vk`（`0xA0..=0xA3 | VK_CAPITAL`）问的是「这个键**只有 keyup
+///   到得了服务端**」——它是为「修饰键绑功能只能挂 keyup」定的，值域刚好等于桌面
+///   TSF 会转发的那几个。
+/// - `is_pure_modifier_vk` 更窄，连 CapsLock 都不含（其单元测试还专门钉了
+///   `is_pure_modifier_vk(0xA4) == false`）。
+///
+/// 而这里要问的是「按下的是不是修饰键本身」。两根轴今天在桌面上答案恰好重合
+/// （C++ `isModifierKeyItself` 不转发、`ClassifyInputKey` 对 Ctrl/Alt 按下回 `None`，
+/// Alt 与笼统的 `VK_SHIFT/VK_CONTROL/VK_MENU` 根本到不了服务端），但
+/// [`Coordinator::assoc_release_on_passthrough`] 这道守卫的自我定位是**给薄宿主的
+/// 保险**——而薄宿主正是最可能上报 Alt keydown 或未拆左右的笼统 VK 的那一类。
+/// 借来的判据恰好会在它要保的场景下失效。同
+/// `project_tsf_docmgr_judgement_layers`：判据分层，跨层复用即漂移。
+///
+/// ⇒ 就地写全。左右 Alt（`0xA4`/`0xA5`）与笼统的 `VK_SHIFT`/`VK_CONTROL`/`VK_MENU`
+/// （`0x10`/`0x11`/`0x12`）在 `keymap` 里没有常量——它们在既有通路上确实用不到，
+/// 为本函数单独加一组公开常量反而会诱使别处误用。
+fn is_modifier_like_vk(vk: u32) -> bool {
+    // 0x10/0x11/0x12 = VK_SHIFT / VK_CONTROL / VK_MENU（笼统，未拆左右）
+    // 0xA4/0xA5      = VK_LMENU / VK_RMENU
+    // is_key_up_only_vk = 0xA0..=0xA3 四个纯修饰键 + VK_CAPITAL
+    matches!(vk, 0x10 | 0x11 | 0x12 | 0xA4 | 0xA5) || keymap::is_key_up_only_vk(vk)
+}
 
 /// 本平台是否取用 `[mobile.*]` 覆盖段。
 ///
@@ -496,6 +542,120 @@ impl Coordinator {
             }
             Fate::Untouched => action,
         }
+    }
+
+    /// 联想态下**落到透传的那一键**：收掉占位组合，并把这一键原样交还宿主。
+    ///
+    /// # 病灶
+    ///
+    /// 联想态在宿主里挂着占位组合（见 [`ASSOC_COMPOSITION`]），TSF 的 `_HasInputSession()`
+    /// 因此为真 ⇒ `OnTestKeyDown` 把 Del / Home / End / 左右（C++ 归 `HotkeyType::CursorKey`）
+    /// 一律吃下转发。而协调器这边，这些键的既有分支门槛都是「缓冲或已转换段非空」，
+    /// 联想两者皆空 ⇒ 一路落到 `PassThrough`。
+    ///
+    /// 「吃了再吐」的后果与超时孤儿那条完全同形（见 [`Self::adopt_orphaned_placeholder`]）：
+    /// 不补发 `WM_KEYDOWN` 的宿主直接丢键——用户报的正是「Del / Home / End 按了没反应，
+    /// 只有退格能用」（退格早有专门分支，见 [`Self::assoc_backspace`]）；而补发的宿主
+    /// 则把占位空格 finalize 进文档。分界线全在宿主侧，我们这边是同一条路径。
+    ///
+    /// # 为什么收口在按键处理的唯一出口，而不是逐个键加分支
+    ///
+    /// 「哪些键会落到透传」不是一份数得清的名单：左右/Home/End 一条臂、Del 一条臂、
+    /// Insert 落兜底臂、Ctrl 组合另有一条。本仓已多次栽在「N 条通路只接了 N-1 条」上。
+    /// ★ 反证也有：Tab 在 C++ 侧同样「有 session 就吃」，按键名列表会把它一起收进来，
+    /// 而它在协调器里其实归**辅助码触发键**（`enter_aux_code`）、给的是 `Consumed`
+    /// 而非透传——按动作判就自动认得出这个差别。
+    /// 判据其实只有一句——**这个动作是不是把键交还宿主却不碰组合**，那正是
+    /// [`KeyAction::PassThrough`] / [`KeyAction::NotHandled`] 这一格。在
+    /// `handle_key_event_policed` 上问一次即可，与 [`Self::adopt_orphaned_placeholder`]
+    /// 同址同理（那边治的是超时孤儿，这边治的是联想仍在活着时的同一格）。
+    ///
+    /// ⚠️ 「唯一出口」只对**桌面与 macOS** 成立（`wind-bridge/src/server.rs` → 协调器这份
+    /// 重写）。移动端 `wind-mobile/src/lib.rs` 的 `key_down` 直调**内层**
+    /// `handle_key_event`，本函数与 [`Self::adopt_orphaned_placeholder`] 两道收口在那里
+    /// 都不生效；即便走到，`edit_ops.rs` 也会把 `ClearCompositionThenPassThrough` 降级
+    /// 成吃键（`KeyOutcome` 表达不了「清理后不消费」，见该文件）。移动端没有 TSF 的
+    /// 「吃了再吐」问题，故这不是活缺陷，但别把这句话当成全平台承诺。
+    ///
+    /// # 顺带把窗收掉，不是附带效果而是正解
+    ///
+    /// 这批键要么移动了宿主光标（Home/End/左右）、要么改了光标后的文档（Del）——
+    /// 联想的上文**已经断了**，那批候选此刻就是错的。留着它比收掉更糟。
+    ///
+    /// # ⚠️ 邻居状态同病，本函数刻意不管
+    ///
+    /// `_HasInputSession()` 只要 `_hasCandidates` 为真即成立，于是**空码补全**那类
+    /// 「缓冲空 + 候选非空 + 非联想」的状态按 Del/Home/End 会走到**逐字节同形**的
+    /// 「吃了再吐」。本函数一进门就按 `assoc_active()` 把它挡在外面——这是取舍不是遗漏：
+    /// 空码补全时用户确实在看那批候选，「顺带收窗」在那里未必是对的语义。
+    /// ⇒ 日后若收到「空码时 Home 没反应」的报障，根因与本函数治的是同一个，但该单独定
+    /// 它的收窗语义，**别顺手把判据放宽成「候选非空」**。
+    ///
+    /// # ⚠️ 这条路的曝光面变大了
+    ///
+    /// C++ `_ReplayKeyToHost` 会往 skip 表压一条，而 `_TryConsumeSkipKey` **只比对队首、
+    /// 且没有超时**。本改动之前走这条路的只有联想回车/退格与 hold 的 500ms 窗口；现在
+    /// 联想窗生命周期（`hide_after_ms` 默认 5 秒）内每个 Del / Home / End / ←→ / Insert /
+    /// Tab 与每个 Ctrl/Alt 组合都走它。注入若没能回到我们的 sink（前台窗口已换、宿主此刻
+    /// 不走 TSF、SendInput 被 UIPI 拦），队首那条会残留并挡住后续全部 skip（含自动配对
+    /// 合成的右符号），直到用户碰巧再按一次同一个键。
+    /// **既有隐患，本改动只是提高了触发频次**；根治该让 `_TryConsumeSkipKey` 按值扫描整张
+    /// 表（表很小）或加 TTL——那是 C++ 侧的独立改动，要真机验证，不在本次范围。
+    ///
+    /// # 三道守卫
+    ///
+    /// - **只在 keydown**（守在调用点）：`ClearCompositionThenPassThrough` 的「交还按键」
+    ///   靠 C++ `_pendingReplayToHost`，而它只在 `OnKeyDown` 消费。理由同
+    ///   [`Self::adopt_orphaned_placeholder`]。
+    /// - **纯修饰键与 CapsLock 除外**：按住 Shift 准备打 Shift+字母时，光按下修饰键不该
+    ///   把联想窗收掉。Windows 侧这类 keydown 压根不转发（`OnTestKeyDown` 的
+    ///   `isModifierKeyItself` 分支），此处是给薄宿主的保险。
+    /// - **不在联想态时原样返回**。⚠️ 代价**不是一次布尔判断**：判据 `assoc_active()` 读的是
+    ///   `state.candidates`，得先取 state 锁。透传是英文模式每个字母的常态返回值，于是那条
+    ///   路上每次按键多一次 state 锁往返（`matches!` 与修饰键两道廉价筛已排在锁之前，
+    ///   非透传动作根本走不到取锁那步）。
+    ///   ⛔ **不加 `AtomicBool` 镜像**来省这把锁（`adopt_orphaned_placeholder` 有一个，那是
+    ///   因为它的真相源本来就是个原子标志）。联想的真相源是候选自己——本模块开头那段
+    ///   「没有第二份状态」讲的正是这件事，加镜像就是把它请回来，而镜像与候选失步的
+    ///   表现会是「联想窗关不掉」这类最难查的缺陷。同一把锁在本函数之前的
+    ///   `expire_scope_override` / `touch_pair_state` 已经取过，边际成本远小于那个风险。
+    ///
+    /// ⛔ **不给它配开关**。回车/退格各有一个 `*_cancels_only`，是因为那两个键「只收窗、
+    /// 吃掉这一键」也说得通（退格透传会删掉刚上屏的字，不可逆）；而「按 Home 只收窗、
+    /// 光标不动」对不上任何一种用户期待——那不是取舍，是坏掉。
+    ///
+    /// # ★ 刻意**不排除** Ctrl/Alt 组合
+    ///
+    /// 联想态下按 Ctrl+S / Ctrl+C 走的是 `MOD_SHORTCUT` 那条臂，缓冲为空 ⇒ 同样落
+    /// `PassThrough` ⇒ 同一个病灶（TSF 的 `ctrl_alt_cleanup` 分支已把它吃下转发了）。
+    /// 改判后 C++ 走 `_ReplayKeyToHost`，重放时**物理修饰键仍按着**，宿主 `GetKeyState`
+    /// 能还原 Ctrl+S 语义——这正是 `KeyEventSink.h` 里记着「修法同构、暂未实施」的那条。
+    ///
+    /// ⚠️ 那条臂的注释叮嘱「改动本分支的返回值前先读 macOS 侧」，已读。**对照基线是
+    /// `passThrough` 那一臂，不是 `clearComposition` 那一臂**——联想态下缓冲与已转换段
+    /// 皆空，那条臂给的本来就是 `PassThrough`。`BridgeResponseRouter` 两臂都
+    /// `return false`（消费与否不变），区别只在收尾：`passThrough` 走
+    /// `flushPendingPrefix`、`clearThenPassThrough` 走 `applyClearComposition`，两者都
+    /// 「取出待定前缀 → 清 marked text → 把前缀真上屏」，只是后者在前缀为空时也清
+    /// marked text——而联想态的 marked text 正是那个占位符，清掉恰是所求。
+    /// ⇒ macOS 无文本丢失、无消费差异，无需同步改动。
+    pub(crate) fn assoc_release_on_passthrough(
+        &self,
+        data: &KeyEventData,
+        action: KeyAction,
+    ) -> KeyAction {
+        if !matches!(action, KeyAction::PassThrough | KeyAction::NotHandled)
+            || is_modifier_like_vk(data.key_code)
+        {
+            return action;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.exit_assoc(&mut state, AssocExit::PassThroughKey) {
+            return action;
+        }
+        drop(state);
+        self.notify_ui_hide();
+        KeyAction::ClearCompositionThenPassThrough
     }
 
     /// **收掉联想**：清候选、结束占位组合、吞掉这一键。

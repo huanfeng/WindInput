@@ -134,17 +134,6 @@ impl Coordinator {
         state: &mut State,
         data: &KeyEventData,
     ) -> Option<KeyAction> {
-        // ★ 联想态让位：此刻缓冲虽空，但屏幕上摆着一批候选，用户按 `;`/`'` 的意图是
-        // **选第 2/3 条**，不是进快捷输入。
-        //
-        // 上面那条「统一取不要求候选空」的裁决是针对空码补全那类候选定的——那时用户
-        // 确实没在选词。联想是另一回事：不让位的话，`;` 会把刚出来的联想窗顶掉换成
-        // 模式引导符，而二三候选键在联想态**永远按不出来**。
-        //
-        // 判据用 `assoc_active()` 而非「候选非空」，正是为了不动空码补全那条既有行为。
-        if state.assoc_active() {
-            return None;
-        }
         // 智能符号 press2 **优先于模式激活**：模式内二次按进入键时已上屏中文标点并武装
         // （见 `arm_smart_symbol_after_commit`），时限内再按同键必须替换成英文形，而不是又进
         // 一次模式——否则被模式占用的符号键（`;` / `` ` `` / `\`）永远打不出英文形，武装白武装。
@@ -164,14 +153,28 @@ impl Coordinator {
         }
 
         // 临时英文：Shift+字母（空缓冲 + 无候选 + 已启用）
+        //
+        // ★ **联想态例外**（`assoc_active()`）：那里缓冲同样是空的，但 `candidates` 里摆着
+        // 一批输入法自己猜的联想词。原先「无候选」这道门把联想一起挡在外面，于是联想窗
+        // 一弹出来，Shift+字母就进不了临英、字母径直落进中文码表缓冲——用户想打英文，
+        // 得到的是中文输入。这正是下方那条让位**不该管**的情形：`;`/`'` 是二三候选键，
+        // 让位保的是「选第 2/3 条」；而 Shift+字母**不在任何选词键的值域里**，它在联想态
+        // 下没有第二种解释。
+        //
+        // ⚠️ 判据仍不是「候选非空」：空码补全那类候选是用户真在看的，行为一字不动。
         if state.input_buffer.is_empty()
-            && state.candidates.is_empty()
+            && (state.candidates.is_empty() || state.assoc_active())
             && self.rt().config.input.temp_english.enabled
             && data.modifiers & MOD_SHIFT != 0
             && data.modifiers & MOD_SHORTCUT == 0
             && (keymap::VK_A..=keymap::VK_Z).contains(&data.key_code)
         {
             let ch = (b'A' + (data.key_code - 0x41) as u8) as char; // 首字母大写
+            // 先收掉联想再谈进模式：联想候选与临英候选住的是同一个 `state.candidates`，
+            // 不先清就会出现「临英只有一条候选、下面还挂着上一轮的联想词」。
+            // 同时作废未触发的自动隐藏计时（`exit_assoc` 内），否则它会在用户已经打着
+            // 英文的时候到期，把占位组合标成孤儿、下一次透传平白多收一次口。
+            let was_assoc = self.exit_assoc(state, crate::handle_assoc::AssocExit::ModeActivate);
             // shift_behavior == "direct_commit"：不进临时英文，直接上屏大写字母（对齐 Go）。
             if self.rt().config.input.temp_english.shift_behavior == "direct_commit" {
                 let out = if state.full_width {
@@ -179,6 +182,12 @@ impl Coordinator {
                 } else {
                     ch.to_string()
                 };
+                // 联想窗要自己收：本分支不经 `notify_ui_update`，而上屏动作只结束宿主组合，
+                // 不会替我们把候选窗关掉。非联想态下候选本就是空的，此调用不必要也无害，
+                // 故按 `was_assoc` 收窄，免得每个 Shift+字母都多发一条 UI 消息。
+                if was_assoc {
+                    self.notify_ui_hide();
+                }
                 return Some(Self::commit_action(out, true));
             }
             state.active = Some(ModeKind::TempEnglish);
@@ -198,6 +207,24 @@ impl Coordinator {
 
         // 快捷输入已退役为内置类方案 mix 成员（quick_input），不再独立激活：
         // 想要纯快捷输入，配一个 members=["quick_input"] 的 mix 即可。; 默认走「快捷」融合 mix。
+
+        // ★ 联想态让位：此刻缓冲虽空，但屏幕上摆着一批候选，用户按 `;`/`'` 的意图是
+        // **选第 2/3 条**，不是进快捷输入。
+        //
+        // 上面那条「统一取不要求候选空」的裁决是针对空码补全那类候选定的——那时用户
+        // 确实没在选词。联想是另一回事：不让位的话，`;` 会把刚出来的联想窗顶掉换成
+        // 模式引导符，而二三候选键在联想态**永远按不出来**。
+        //
+        // 判据用 `assoc_active()` 而非「候选非空」，正是为了不动空码补全那条既有行为。
+        //
+        // ⚠️ **位置刻意在临英 Shift+字母之后**。它原先是本函数的第一句，于是把同一函数里
+        // 的临英分支一起挡掉了——症状是「联想窗弹出时按 Shift+字母进不了英文」。让位保的
+        // 是**选词键**（`;`/`'`，恒不带 Shift，走下面的 `bound_key_decision`），
+        // 与 Shift+字母的值域不相交；上面那两段各自的门（press2 要求候选空、临英要求
+        // 空缓冲 + Shift + 字母）本就把它们与选词区分开了。
+        if state.assoc_active() {
+            return None;
+        }
 
         // 方案级按键功能表（方案文件 / schema_overrides 的 `[key_actions]`）。
         //

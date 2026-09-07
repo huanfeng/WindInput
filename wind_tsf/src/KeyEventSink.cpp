@@ -1389,10 +1389,17 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     _pendingReplayToHost = FALSE;
     *pfEaten = _HandleServiceResponse();
 
-    // ── 联想态回车/退格透传：组合已收口，把这一键还给宿主 ──────────────────────
+    // ── 联想态透传：组合已收口，把这一键还给宿主 ────────────────────────────────
+    // 覆盖联想态下**全部**落到透传的键（回车/退格各有开关，Del/Home/End/←→/Insert 等
+    // 由服务端在按键唯一出口按动作统一改判，见 handle_assoc::assoc_release_on_passthrough）。
     // 置位来自 ResponseType::ClearCompositionThenPassThrough（那里解释了为何必须重放而
     // 不是吐 FALSE）。放在 hold 重放之前：本条是服务端**显式声明**的意图，而 hold 那条
     // 是本地按「PassThrough + hold 活跃」推断出来的；两者实际互斥（联想态没有 hold）。
+    //
+    // ⚠️ 本分支同时排在下面配对跳出 desync 兜底（`isPairJumpOut && !(*pfEaten)`）之前，
+    // 且那条的门是 `!(*pfEaten)`。于是「联想态 + _pairPendingDepth>0 时按 Tab/Enter」会
+    // 从这里 return，depth 不归零 ⇒ 下一次同键仍被吃下转发、再走一轮才自愈。
+    // **不丢键**（键照样重放给宿主），只是多一次 IPC 往返，且 TTL 兜底仍在，故不特殊处理。
     if (_pendingReplayToHost)
     {
         _pendingReplayToHost = FALSE;
@@ -2244,7 +2251,9 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         return TRUE;
 
     case ResponseType::ClearCompositionThenPassThrough:
-        // 与上一分支同样收组合，区别只在**这一键要还给宿主**（联想态回车/退格透传）。
+        // 与上一分支同样收组合，区别只在**这一键要还给宿主**（联想态透传：回车/退格，
+        // 以及 Del/Home/End/←→/Insert 等其余落到透传的键）。本分支与键码无关，服务端
+        // 判定改了也不必动这里。
         //
         // 这里仍返回 TRUE（吃掉原键）：OnTestKeyDown 已按「有会话」吃了它，此处吐 FALSE
         // 就是「吃了再吐」翻转，EverEdit 这类不补发 WM_KEYDOWN 的宿主会直接丢键（实测
