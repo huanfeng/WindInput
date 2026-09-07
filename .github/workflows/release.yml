@@ -152,6 +152,20 @@ jobs:
         working-directory: WindInput
         run: .\scripts\dev.ps1 9s
 
+      # 中转产物 = 打包【之前】的散件(build\ 全构建产物 + wind-installer 三件套)。
+      #
+      # 为什么不能让本机只对上面那两个成品补签:签名夹在打包中间 —— PE 要在封进压缩块
+      # 之前签,Setup.exe 要在 pack 之后、New-UpdateManifest 之前签。对成品补签只签得到
+      # 外壳,包内 5 个 PE 仍是全裸的,而 signtool verify 验 Setup.exe 照样通过 ——
+      # 从外面完全看不出来(实测踩过,见 dev.ps1 Do-Installer 第 2.5 步)。
+      #
+      # 带上安装器三件套是为了本机【一行代码都不编译】:Do-Installer 见它们已在就给
+      # pack.ps1 透传 -SkipBuild。整条流程由本机 release.ps1 sign-draft 驱动。
+      - name: 打包发布中转产物
+        shell: pwsh
+        working-directory: WindInput
+        run: .\scripts\dev.ps1 stage
+
       - name: 上传 Windows 产物
         uses: actions/upload-artifact@v4
         with:
@@ -161,6 +175,16 @@ jobs:
             WindInput/dist/WindInput-Setup-*.exe.sha256
             WindInput/dist/WindInput-Portable-*.zip
             WindInput/dist/WindInput-Portable-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      # 单列一个 artifact,不并进 dist-*:publish job 按 `pattern: dist-*` 汇总并把结果
+      # 原样上传到 Release 页面,中转产物混进去就会出现在用户看到的下载列表里。
+      - name: 上传中转产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-windows
+          path: WindInput/dist/WindInput-Stage-*.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -360,10 +384,10 @@ jobs:
             echo "> SmartScreen 的「未知发布者」警告。"
             echo ">"
             echo "> 发布前请在开发机上执行(需先建立签名会话):"
-            echo "> \`.\\scripts\\dev.ps1 sign 8\` + \`.\\scripts\\dev.ps1 sign 9s\` + \`.\\scripts\\dev.ps1 verify-sign\`,"
-            echo "> (sign 是开关, 漏写就还是一套未签名的包)"
-            echo "> 用 \`dist\\\` 下的签名产物替换本页的 Setup.exe 与 Portable.zip(连同各自的 .sha256),"
-            echo "> 然后删掉这段提示再点发布。"
+            echo "> \`.\\scripts\\release.ps1 sign-draft\`"
+            echo "> 它会拉本次 CI 的中转产物, 在本机签名并【重新打包】(签名夹在打包中间,"
+            echo "> 对成品补签只签得到外壳, 包内 5 个 PE 仍是全裸的), 覆盖本页 4 个资产,"
+            echo "> 最后自动删掉这段提示。"
             echo ">"
             echo "> 为什么 CI 签不了:docs/design/code-signing.md 第 3 节。"
             echo ""

@@ -80,8 +80,9 @@ Card Crypto Provider 访问远端密钥 —— 是软件模拟，不是硬件）
 「签名」挪到「续会话」，还多一台机器要维护 —— 而 2 小时的窗口让这个手动步骤比签名本身
 还频繁。
 
-**结论**：签名只在开发机上发生。CI 继续构建、继续产未签名 artifact（那是给测试用的），
-正式发版的 Windows 产物由本地 `dev.ps1 8` / `9` 产出。第 6 节是配套的防误发门禁。
+**结论**：签名只在开发机上发生，但**编译不在**。发布产物由 CI 构建（构建环境只有一套，
+本机与 CI 的工具链差异不会漏进发布包），开发机只做「签名 + 打包」这一段。第 6 节是完整
+流程与配套的防误发门禁。
 
 ## 4. 签名默认关闭：`sign` 开关与配额
 
@@ -205,15 +206,52 @@ dev.ps1 sign 8s    本机打包 + 签外壳（PE 已签，跳过）
 正式发版流程因此是：
 
 ```
-1. 本机建立签名会话（服务商客户端登录 + 二次验证）
-2. .\scripts\sign.ps1 -Status         确认会话可用
-3. .\scripts\dev.ps1 sign 8           出签名安装包（含 latest.json）   消耗 6 次
-4. .\scripts\dev.ps1 sign 9s          出签名便携包（PE 已签，跳过）    消耗 0 次
-5. .\scripts\dev.ps1 verify-sign      硬校验 dist\ 下产物全部带有效签名
-6. 把 dist\ 的产物传到 GitHub Release（替换 CI 产的未签名版本）
-
-第 3、4 步的 `sign` 不能省 —— 省了就是一套未签名的包，且只有第 5 步会拦住你。
+1. .\scripts\release.ps1 patch        五仓同步打 tag，CI 开始构建
+2. 等 CI 跑完 —— 草稿 Release 就绪，Windows 产物未签名，正文顶着未签名横幅
+3. 本机建立签名会话（客户端登录 + 二次验证）
+4. .\scripts\release.ps1 sign-draft   拉 CI 产物 → 本机签名打包 → 覆盖草稿资产
+5. 人工过目 Release Notes，点 Publish
 ```
+
+第 4 步内部就是从前手工做的那几件事，区别只在于**编译不再发生于本机**：
+
+```
+拉 stage-windows artifact（build\ 散件 + 安装器三件套）
+  → dev.ps1 unstage        还原；硬校验中转产物版本 == docs\VERSION
+  → dev.ps1 sign 8s        签 5 个 PE → 打包 → 签外壳 → 出 manifest   消耗 6 次
+  → dev.ps1 sign 9s        打便携包（包内 PE 已签，按指纹跳过）        消耗 0 次
+  → dev.ps1 verify-sign    硬校验通过才上传
+  → gh release upload --clobber，再摘掉正文的未签名横幅
+```
+
+### 6.1 中转的为什么是「散件」而不是成品
+
+CI 已经产出了 Setup.exe 和 Portable.zip，看起来本机只要对它们补签就行 —— **不行**。
+
+签名夹在打包**中间**（第 4.1 节的三个接线点）：PE 必须在被封进压缩块之前签。对成品补签
+只签得到外壳，包内 5 个 PE 仍是全裸的，而 `signtool verify` 验 Setup.exe **照样通过** ——
+从外面完全看不出来。这正是第 5 节记的那个实测缺陷。
+
+所以 CI 额外产出一个**中转产物** `WindInput-Stage-<版本>.zip`（`dev.ps1 stage`），装的是
+打包之前的散件：
+
+| 内容 | 用途 |
+|---|---|
+| `build\` | 全构建产物；内容 == 安装内容，是安装包与便携包的共同上游 |
+| `installer\` | wind-installer 的 stub / packer / uninstaller |
+| `stage.json` | 版本号等清单，`unstage` 时硬校验 |
+
+带上 `installer\` 是为了让本机**一行代码都不编译** —— `Do-Installer` 检测到三件套已在，
+就给 `pack.ps1` 透传 `-SkipBuild`。
+
+它单列一个 artifact 而不并进 `dist-*`：`publish` job 按 `pattern: dist-*` 汇总并原样上传到
+Release 页面，中转产物混进去就会出现在用户看到的下载列表里。
+
+⚠️ **版本号是这条流程唯一会静默出坏包的地方**。打包函数用 `$Version`（读 `docs\VERSION`）
+拼产物文件名，而中转产物里的二进制版本号是 CI 按 tag 编进去的 —— 两者不一致就会打出
+「文件名写 A、里面是 B」的包，全程无任何报错。故 `unstage` 在还原前硬校验，不一致即中断；
+`sign-draft` 则先按 tag 对齐 `docs\VERSION` 再调它（对齐后那道校验依然有效：拉错 run 时
+中转产物版本仍会与 tag 不符而被拦下）。
 
 ## 7. 已知取舍与未做的部分
 

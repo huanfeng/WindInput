@@ -32,6 +32,13 @@
 #   9  / d9      生成便携包 (release / dev): 全构建 + 打 zip → dist\*-Portable-<版本>.zip
 #                (免安装; 不依赖 wind-installer; 内含便携标记, 不含 userdata\)
 #   9s / d9s     生成便携包 (跳过重建, 直接打包现有 build[_dev]/)
+#   stage        打包发布中转产物: build/ + 安装器三件套 → dist\*-Stage-<版本>.zip
+#                【在 CI 上跑】。CI 建不了签名会话 (docs\design\code-signing.md 第 3 节),
+#                但签名夹在打包中间, 本机只补签成品外壳会漏掉包内 5 个 PE, 故中转的是
+#                打包【之前】的散件。
+#   unstage <zip>  还原中转产物到 build/ 与安装器 target/, 供本机 sign 8s / sign 9s。
+#                【在本机跑】。会硬校验版本号与 docs\VERSION 一致, 并整体替换 build/。
+#                典型: release.ps1 sign-draft 会自动完成「拉取 → 还原 → 签名 → 回传」。
 #   sign         代码签名【开关】, 位置无关, 与构建/打包命令连用:
 #                  dev.ps1 sign 1  ≡  dev.ps1 1 sign     全构建并签名 (5 个 PE)
 #                  dev.ps1 sign 8  ≡  dev.ps1 8 sign     出安装包并签名 (5 个 PE + 安装包)
@@ -1925,11 +1932,10 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
 
     # 4. 调 pack.ps1 (编译 stub + 注入卸载器 + packer build)。
     #    skip 模式且 installer 二进制已在 → 透传 -SkipBuild 跳过 stub 重编 (加速反复打包)。
-    $instTarget = Get-CargoTargetDir $instDir
-    $stub   = Join-Path $instTarget "release\wind-installer.exe"
-    $packer = Join-Path $instTarget "release\wind-packer.exe"
-    $unins  = Join-Path $instTarget "release\wind-uninstaller.exe"
-    $instBuilt = (Test-Path $stub) -and (Test-Path $packer) -and (Test-Path $unins)
+    # 三件套齐全即透传 -SkipBuild。unstage 还原的中转产物正是落在这三个路径上, 所以
+    # 「CI 编译 → 本机打包」时这里天然命中, 本机一行代码都不编译。
+    $bins = Get-InstallerBinaries $instDir
+    $instBuilt = @($bins.Keys | Where-Object { -not (Test-Path $bins[$_]) }).Count -eq 0
     # 哈希表 splat 才能按名绑定 (数组 splat 会把 -Config 当成位置参数的值)。
     $packArgs = @{ Config = $cfg }
     if ($skipBuild -and $instBuilt) { $packArgs['SkipBuild'] = $true }
@@ -1950,6 +1956,141 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
         Warn "打包脚本已结束, 但未找到预期输出: $setup"
         Warn "请检查上方 wind-packer 实际输出名 (dist\ 下)。"
     }
+    return $true
+}
+
+# ---------- 发布中转产物 (stage / unstage) ----------
+# 「CI 编译 → 本机签名打包」的载体, 与远程编译机那条路同构 (见 Dispatch 的「打包留本机」
+# 段): 编译在别处, 签名和打包必须在本机同一次里做完。
+#
+# ⚠️ 为什么不能让 CI 直接出包、本机只补签外壳:
+#    签名【夹在打包中间】—— PE 签在封进压缩块之前, Setup.exe 签在 pack 之后、
+#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 5 个 PE 仍是全裸的, 而
+#    signtool verify 验 Setup.exe 照样通过 —— 从外面完全看不出来 (实测踩过, 见
+#    Do-Installer 第 2.5 步)。所以中转的必须是打包【之前】的散件。
+#
+# 包内结构:
+#   build\      全构建产物; 内容 == 安装内容, 是安装包与便携包的共同上游
+#   installer\  wind-installer 的 stub / packer / uninstaller
+#   stage.json  版本号等清单, unstage 时硬校验
+# 带上 installer\ 是为了让本机【一行代码都不编译】—— Do-Installer 见三件套已在, 会给
+# pack.ps1 透传 -SkipBuild; 少了它们本机仍会 cargo build 一遍安装器。
+$StageManifestName = "stage.json"
+
+# 安装器三件套的路径 (单一真相源: Do-Installer 的 -SkipBuild 判据与 stage 打包共用)。
+function Get-InstallerBinaries ([string]$dir = $InstallerDir) {
+    $t = Get-CargoTargetDir $dir
+    return [ordered]@{
+        "wind-installer.exe"   = Join-Path $t "release\wind-installer.exe"
+        "wind-packer.exe"      = Join-Path $t "release\wind-packer.exe"
+        "wind-uninstaller.exe" = Join-Path $t "release\wind-uninstaller.exe"
+    }
+}
+
+function Do-Stage ([string]$profile = "release") {
+    $outdir = Out-For $profile
+    $suffix = if ($profile -eq "dev") { "_dev" } else { "" }
+    if (-not (Test-Path "$outdir\wind_input$suffix.exe")) {
+        ErrMsg "无 $outdir 产物; 先跑全构建 ('$(if($profile -eq 'dev'){'d1'}else{'1'})')。"
+        return $false
+    }
+
+    $base  = if ($profile -eq "dev") { "WindInputDev" } else { "WindInput" }
+    $zip   = Join-Path $DistDir "$base-Stage-$Version.zip"
+    $stage = Join-Path $DistDir ".stage-pack"
+
+    Say "`n========== 打包中转产物 ($profile) → $zip =========="
+    if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+    New-Item -ItemType Directory -Path "$stage\build" -Force | Out-Null
+    Copy-Item "$outdir\*" -Destination "$stage\build" -Recurse -Force
+
+    # 安装器三件套缺失不算硬错误 —— 本机 unstage 后 pack.ps1 会自行编译, 只是「本机零
+    # 编译」这个目标达不成。故明确警告而不是静默放过。
+    $bins    = Get-InstallerBinaries
+    $missing = @($bins.Keys | Where-Object { -not (Test-Path $bins[$_]) })
+    if ($missing.Count -eq 0) {
+        New-Item -ItemType Directory -Path "$stage\installer" -Force | Out-Null
+        foreach ($n in $bins.Keys) { Copy-Item $bins[$n] "$stage\installer\$n" -Force }
+        Gray "  安装器: $($bins.Count) 个二进制"
+    } else {
+        Warn "wind-installer 二进制不全 (缺: $($missing -join ', ')), 中转包不含安装器"
+        Warn "  → 本机还原后 pack.ps1 会自行编译安装器, 不再是零编译"
+    }
+
+    $manifest = [ordered]@{
+        version   = $Version
+        profile   = $profile
+        createdAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        installer = ($missing.Count -eq 0)
+    }
+    [System.IO.File]::WriteAllText((Join-Path $stage $StageManifestName),
+        ($manifest | ConvertTo-Json -Depth 3), (New-Object System.Text.UTF8Encoding($false)))
+
+    New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
+    if (Test-Path $zip) { Remove-Item $zip -Force }
+    Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
+    Remove-Item $stage -Recurse -Force
+
+    $sz = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+    Say "`n中转产物打包完成: $zip (${sz}MB)"
+    Gray "  本机还原: dev.ps1 unstage <zip>, 再 dev.ps1 sign 8s / sign 9s"
+    return $true
+}
+
+function Do-Unstage ([string]$zipPath) {
+    if (-not $zipPath)            { ErrMsg "用法: dev.ps1 unstage <中转产物.zip>"; return $false }
+    if (-not (Test-Path $zipPath)) { ErrMsg "找不到中转产物: $zipPath"; return $false }
+    $zipPath = (Resolve-Path $zipPath).Path
+
+    $tmp = Join-Path $DistDir ".stage-unpack"
+    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
+
+    $mf = Join-Path $tmp $StageManifestName
+    if (-not (Test-Path $mf)) {
+        ErrMsg "中转产物缺 $StageManifestName, 不是 dev.ps1 stage 产出的包"
+        Remove-Item $tmp -Recurse -Force; return $false
+    }
+    $m = Get-Content $mf -Raw | ConvertFrom-Json
+
+    # ⚠️ 版本号硬校验。打包函数用 $Version (读 docs\VERSION) 拼产物文件名, 而中转产物里
+    #    的二进制版本号是 CI 按 tag 编进去的 —— 两者不一致就会打出「文件名写 A、里面是
+    #    B」的包, 全程无任何报错。这是这条流程唯一会静默出坏包的地方, 故在此拦死。
+    if ($m.version -ne $Version) {
+        ErrMsg "版本不一致: 中转产物 $($m.version), 本机 docs\VERSION $Version"
+        Gray "  发布版本以 tag 为准; 修正: 把 docs\VERSION 改成 $($m.version) 后重试"
+        Remove-Item $tmp -Recurse -Force; return $false
+    }
+
+    $profile = if ($m.profile) { $m.profile } else { "release" }
+    $outdir  = Out-For $profile
+
+    Say "`n========== 还原中转产物 (v$($m.version), $profile) =========="
+    # 整体替换而非合并: 本机残留的旧产物会被一起打进包, 且不会有任何提示。
+    if (Test-Path $outdir) { Remove-Item $outdir -Recurse -Force }
+    New-Item -ItemType Directory -Path $outdir -Force | Out-Null
+    Copy-Item "$tmp\build\*" -Destination $outdir -Recurse -Force
+    Gray "  → $outdir"
+
+    if (Test-Path "$tmp\installer") {
+        $bins = Get-InstallerBinaries
+        $dst  = Split-Path $bins["wind-packer.exe"] -Parent
+        New-Item -ItemType Directory -Path $dst -Force | Out-Null
+        foreach ($n in $bins.Keys) {
+            $src = Join-Path "$tmp\installer" $n
+            if (Test-Path $src) { Copy-Item $src $bins[$n] -Force }
+        }
+        Gray "  → $dst (安装器三件套)"
+    } else {
+        Warn "中转产物不含安装器二进制; 打包时 pack.ps1 会自行编译一遍"
+    }
+
+    Remove-Item $tmp -Recurse -Force
+    Say "`n还原完成。下一步 (需先建立签名会话):"
+    Gray "  .\scripts\dev.ps1 sign 8s      出签名安装包 (5 个 PE + 外壳, 6 次配额)"
+    Gray "  .\scripts\dev.ps1 sign 9s      出签名便携包 (PE 已签, 0 次配额)"
+    Gray "  .\scripts\dev.ps1 verify-sign  验签 dist\"
     return $true
 }
 
@@ -2097,6 +2238,10 @@ function Show-Menu {
     Write-Host "    9    生成便携包 (release)       d9    生成便携包 (dev)"
     Write-Host "    9s   跳过重建直接打包 (release)  d9s   跳过重建直接打包 (dev)"
     Write-Host "      输出 → $DistDir\WindInput[Dev]-Portable-$Version.zip" -ForegroundColor DarkGray
+    Write-Host "`n  发布中转 (CI 编译 → 本机签名打包):" -ForegroundColor Yellow
+    Write-Host "    stage          打包中转产物 (build\ + 安装器三件套), CI 上跑"
+    Write-Host "    unstage <zip>  还原中转产物, 本机跑; 之后 sign 8s / sign 9s"
+    Write-Host "      整条流程由 release.ps1 sign-draft 自动完成 (拉取→还原→签名→回传)" -ForegroundColor DarkGray
     Write-Host "`n  代码签名 (默认不签; 签名次数按月计费且有限):" -ForegroundColor Yellow
     Write-Host "    sign  开关(位置无关), 与构建/打包连用:  sign 1 / sign 8 / sign 9s"
     Write-Host "    sign-status  会话体检 (证书在不在 / 几时到期)   verify-sign  验签 dist\"
@@ -2251,6 +2396,10 @@ function Dispatch ([string]$cmd, [string]$arg) {
         "9s"                                 { if (Do-PortableZip release $true)  { 0 } else { 1 }; break }
         { $_ -in @("d9", "portable-zip-dev") } { if (Do-PortableZip dev $false) { 0 } else { 1 }; break }
         "d9s"                                { if (Do-PortableZip dev $true)   { 0 } else { 1 }; break }
+        # 发布中转产物。stage 在 CI 上跑 (打包散件), unstage 在本机跑 (还原后签名打包)。
+        "stage"   { if (Do-Stage release) { 0 } else { 1 }; break }
+        "dstage"  { if (Do-Stage dev)     { 0 } else { 1 }; break }
+        "unstage" { if (Do-Unstage $arg)  { 0 } else { 1 }; break }
         { $_ -in @("k", "check") }   { Do-Check;  $LASTEXITCODE; break }
         { $_ -in @("l", "clippy") }  { Do-Clippy; $LASTEXITCODE; break }
         { $_ -in @("t", "test") }    { Do-Test;   $LASTEXITCODE; break }
@@ -2300,8 +2449,8 @@ function Menu-Loop {
         while ($i -lt $tokens.Count -and -not $anyFailed) {
             $choice = $tokens[$i]
             $choiceArg = ""
-            # repl 命令后一个 token 为数据路径 (非命令)
-            if ($choice -eq "r" -or $choice -eq "repl") {
+            # repl / unstage 后一个 token 是路径参数, 不是命令
+            if ($choice -in @("r", "repl", "unstage")) {
                 $i++
                 if ($i -lt $tokens.Count) { $choiceArg = $tokens[$i] }
             }
@@ -2374,7 +2523,7 @@ $i = 0
 while ($i -lt $allCmds.Count) {
     $cmd = $allCmds[$i].Trim().ToLower()
     $arg = ""
-    if ($cmd -eq "r" -or $cmd -eq "repl") {
+    if ($cmd -in @("r", "repl", "unstage")) {
         $i++
         if ($i -lt $allCmds.Count) { $arg = $allCmds[$i] }
     }

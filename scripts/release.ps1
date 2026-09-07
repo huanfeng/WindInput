@@ -24,6 +24,8 @@
 #   .\scripts\release.ps1 current          # 用最新 tag 版本号重发布 (需 -Force 覆盖)
 #   .\scripts\release.ps1 status           # 只看本地状态, 不联网
 #   .\scripts\release.ps1 push             # 五仓同步推送, 不打 tag
+#   .\scripts\release.ps1 sign-draft       # 拉 CI 产物 → 本机签名 → 回传草稿 Release
+#   .\scripts\release.ps1 sign-draft -Version 0.120.2   # 指定草稿 (缺省取最新的)
 #   .\scripts\release.ps1 -Version 0.111.0-beta1   # 指定任意版本号发布
 #
 # 开关: -DryRun 只演练 / -Force 覆盖同名 tag / -Yes 非交互 / -Branch 指定分支
@@ -36,7 +38,7 @@
 param(
     # 子命令; 留空进交互菜单
     [Parameter(Position = 0)]
-    [ValidateSet("", "menu", "check", "patch", "minor", "current", "status", "push")]
+    [ValidateSet("", "menu", "check", "patch", "minor", "current", "status", "push", "sign-draft")]
     [string]$Command = "",
     # 指定发布版本号 (不含 v 前缀), 给定时忽略子命令的 bump 规则
     [string]$Version,
@@ -519,6 +521,211 @@ function Sync-LocalVersionFile ([string]$newVersion) {
 }
 
 # ============================================================
+# sign-draft: 拉 CI 产物 → 本机签名 → 回传草稿 Release
+# ============================================================
+# 发布链路的收尾。CI 建立不了云签名会话(要二次验证、会话只活 2 小时、需要本地客户端
+# 进程,托管 runner 上做不到 —— 见 docs\design\code-signing.md 第 3 节),所以
+# release.yml 产出的 Windows 包必然未签名,草稿 Release 正文顶着一条未签名横幅。
+#
+# 本命令补上那一步,且【本机一行代码都不编译】—— 构建环境只有 CI 一套,避免本机与
+# CI 的工具链差异产出不同的二进制:
+#   1. 拉 CI 的中转产物(build\ 散件 + 安装器三件套)
+#   2. dev.ps1 unstage 还原(内含版本号硬校验)
+#   3. dev.ps1 sign 8s / sign 9s —— 签名并【重新打包】
+#   4. verify-sign 硬校验后才上传
+#   5. gh release upload --clobber 覆盖草稿里的 4 个资产
+#   6. 删掉正文的未签名横幅
+#
+# ⚠️ 第 3 步为什么必须重新打包、不能对 CI 的成品补签外壳:签名夹在打包中间 ——
+#    PE 要在封进压缩块之前签。补签只签得到外壳,包内 5 个 PE 仍是全裸的,而
+#    signtool verify 验 Setup.exe 照样通过(见 dev.ps1 Do-Installer 第 2.5 步)。
+#
+# latest.json 不在上传之列 —— 它由 release-published.yml 在 Release 发布后按实际
+# 资产重新生成,且带 sha256 与产物比对的硬校验(资产被动过就发布失败)。
+
+# 从 Release 正文里摘掉未签名横幅。返回 $null 表示没找到(已删过, 或本就是签名产物)。
+function Remove-UnsignedBanner ([string]$body) {
+    $lines = $body -split "`r?`n"
+    $start = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^>\s*\[!WARNING\]') { $start = $i; break }
+    }
+    if ($start -lt 0) { return $null }
+    $end = $start
+    while ($end + 1 -lt $lines.Count -and $lines[$end + 1] -match '^>') { $end++ }
+    # 认特征串而不是"第一个 WARNING 块", 免得误删将来别的告示
+    if ((($lines[$start..$end]) -join "`n") -notmatch '未经代码签名') { return $null }
+    while ($end + 1 -lt $lines.Count -and $lines[$end + 1].Trim() -eq "") { $end++ }
+    $kept = @()
+    if ($start -gt 0)             { $kept += $lines[0..($start - 1)] }
+    if ($end + 1 -lt $lines.Count) { $kept += $lines[($end + 1)..($lines.Count - 1)] }
+    return ($kept -join "`n")
+}
+
+function Invoke-SignDraft ([string]$tagName) {
+    $mainPath = Join-Path $WorkRoot $MainRepo
+    $devPs1   = Join-Path $ScriptDir "dev.ps1"
+    $distDir  = Join-Path $ProductRoot "dist"
+
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        ErrMsg "未找到 gh (GitHub CLI) —— 本命令靠它拉 CI 产物、改 Release。"
+        Gray "  winget install GitHub.cli   然后  gh auth login"
+        return 1
+    }
+
+    Push-Location $mainPath
+    try {
+        # ---------- 1. 目标 tag ----------
+        if (-not $tagName) {
+            Gray "正在查询草稿 Release ..."
+            $raw = (& gh release list --limit 20 --json tagName,isDraft 2>&1) -join "`n"
+            if ($LASTEXITCODE -ne 0) { ErrMsg "gh release list 失败:`n$raw"; return 1 }
+            $drafts = @(($raw | ConvertFrom-Json) | Where-Object { $_.isDraft })
+            if ($drafts.Count -eq 0) {
+                ErrMsg "没有草稿 Release。先 release.ps1 patch/minor 打 tag, 等 CI 跑完再来。"
+                return 1
+            }
+            $tagName = $drafts[0].tagName
+            if ($drafts.Count -gt 1) {
+                Warn "有 $($drafts.Count) 个草稿 Release, 取最新的 $tagName"
+                Gray "  指定其它: release.ps1 sign-draft -Version <x.y.z>"
+            }
+        }
+        if ($tagName -notmatch '^v') { $tagName = "v$tagName" }
+        $version = $tagName -replace '^v', ''
+
+        # -Version 指定的 tag 未必是草稿。覆盖【已发布】Release 的资产会让已下载用户的
+        # sha256 对不上, 且 R2 同步(release-published.yml)早按旧文件跑过 —— 那边的
+        # latest.json 也已指向旧 hash。故默认拒绝, 要覆盖必须显式 -Force。
+        $relRaw = (& gh release view $tagName --json isDraft 2>&1) -join "`n"
+        if ($LASTEXITCODE -ne 0) { ErrMsg "找不到 Release ${tagName}:`n$relRaw"; return 1 }
+        if (-not ($relRaw | ConvertFrom-Json).isDraft) {
+            ErrMsg "$tagName 已经发布, 不是草稿。"
+            Gray "  覆盖已发布 Release 的资产会让已下载用户的 sha256 对不上,"
+            Gray "  且 R2 上的 latest.json 早已指向旧文件的 hash。"
+            if (-not $Force) { Gray "  确要覆盖请加 -Force。"; return 1 }
+            Warn "  -Force: 继续覆盖已发布的 $tagName"
+        }
+
+        Write-Host ""
+        Cyan "============== 签名并回传 $tagName =============="
+
+        # ---------- 2. 签名会话预检 ----------
+        # 放在下载之前: 拉完 26MB 才发现会话没开, 是最没必要的等待。
+        Write-Host ""
+        & $devPs1 sign-status | Out-Host
+        Write-Host ""
+        if (-not (Confirm-Step "签名会话已就绪, 继续?" $true)) { Gray "已取消。"; return 0 }
+
+        # ---------- 3. 拉中转产物 ----------
+        # tag 触发的 run, 其 headBranch 即 tag 名。
+        Gray "`n正在定位 CI 构建 ..."
+        $raw = (& gh run list --workflow release.yml --branch $tagName --limit 10 `
+                    --json databaseId,conclusion,createdAt 2>&1) -join "`n"
+        if ($LASTEXITCODE -ne 0) { ErrMsg "gh run list 失败:`n$raw"; return 1 }
+        $runs = @(($raw | ConvertFrom-Json) | Where-Object { $_.conclusion -eq "success" })
+        if ($runs.Count -eq 0) {
+            ErrMsg "$tagName 没有成功的 release.yml 构建。"
+            Gray "  查看: gh run list --workflow release.yml --branch $tagName"
+            return 1
+        }
+        $runId = $runs[0].databaseId
+
+        $tmp = Join-Path $distDir ".stage-download"
+        if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        Say "拉取中转产物 (run $runId) ..."
+        & gh run download $runId --name stage-windows --dir $tmp | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            ErrMsg "下载 stage-windows 失败。artifact 保留期 14 天, 过期需重跑 CI。"
+            return 1
+        }
+        $stageZip = Get-ChildItem (Join-Path $tmp "WindInput-Stage-*.zip") -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+        if (-not $stageZip) { ErrMsg "下载结果里没有中转产物包: $tmp"; return 1 }
+
+        # ---------- 4. 对齐版本号并还原 ----------
+        # tag 是版本真源。先对齐 docs\VERSION, 免得被 unstage 自己的守门员拦下 ——
+        # 那道校验防的是「中转产物与打包用的版本对不上」, 对齐后它依然有效
+        # (拉错 run 时中转产物版本仍会与 tag 不符而被拦)。
+        Sync-LocalVersionFile $version
+
+        & $devPs1 unstage $stageZip.FullName | Out-Host
+        if ($LASTEXITCODE -ne 0) { ErrMsg "还原中转产物失败"; return 1 }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+
+        # ---------- 5. 签名 + 重新打包 ----------
+        Write-Host ""
+        Say "==> dev.ps1 sign 8s   (签 5 个 PE → 打包 → 签外壳 → 出 manifest)"
+        & $devPs1 sign 8s | Out-Host
+        if ($LASTEXITCODE -ne 0) { ErrMsg "出安装包失败"; return 1 }
+
+        Write-Host ""
+        Say "==> dev.ps1 sign 9s   (打便携包; 包内 PE 已签, 按指纹跳过, 不再扣配额)"
+        & $devPs1 sign 9s | Out-Host
+        if ($LASTEXITCODE -ne 0) { ErrMsg "出便携包失败"; return 1 }
+
+        # ---------- 6. 硬校验 ----------
+        Write-Host ""
+        Say "==> dev.ps1 verify-sign"
+        & $devPs1 verify-sign | Out-Host
+        if ($LASTEXITCODE -ne 0) { ErrMsg "验签未通过, 不上传。"; return 1 }
+
+        # ---------- 7. 覆盖草稿资产 ----------
+        $assets = @(
+            "WindInput-Setup-$version.exe"
+            "WindInput-Setup-$version.exe.sha256"
+            "WindInput-Portable-$version.zip"
+            "WindInput-Portable-$version.zip.sha256"
+        ) | ForEach-Object { Join-Path $distDir $_ }
+        $absent = @($assets | Where-Object { -not (Test-Path $_) })
+        if ($absent.Count -gt 0) {
+            ErrMsg "以下产物不存在, 无法上传:"
+            $absent | ForEach-Object { ErrMsg "  $_" }
+            return 1
+        }
+
+        Write-Host ""
+        Gray "将覆盖 $tagName 的 4 个资产:"
+        foreach ($a in $assets) {
+            Gray ("  {0}  ({1}MB)" -f (Split-Path $a -Leaf), [math]::Round((Get-Item $a).Length / 1MB, 1))
+        }
+        if (-not (Confirm-Step "上传?" $true)) { Gray "已取消 (签名产物留在 dist\)。"; return 0 }
+
+        & gh release upload $tagName $assets --clobber | Out-Host
+        if ($LASTEXITCODE -ne 0) { ErrMsg "上传失败"; return 1 }
+        Say "已上传 4 个签名产物。"
+
+        # ---------- 8. 摘掉未签名横幅 ----------
+        $body = (& gh release view $tagName --json body -q .body 2>&1) -join "`n"
+        if ($LASTEXITCODE -ne 0) {
+            Warn "读取 Release 正文失败, 请手动删掉未签名横幅后再发布。"
+            return 0
+        }
+        $cleaned = Remove-UnsignedBanner $body
+        if ($null -eq $cleaned) {
+            Gray "正文里没有未签名横幅 (已删过, 或本次 CI 判定为已签名)。"
+        } else {
+            $nf = Join-Path ([System.IO.Path]::GetTempPath()) "windinput-notes-$version.md"
+            [System.IO.File]::WriteAllText($nf, $cleaned, (New-Object System.Text.UTF8Encoding($false)))
+            & gh release edit $tagName --notes-file $nf | Out-Host
+            if ($LASTEXITCODE -ne 0) { Warn "更新正文失败, 请手动删掉未签名横幅。" }
+            else { Say "已删除未签名横幅。" }
+            Remove-Item $nf -Force -ErrorAction SilentlyContinue
+        }
+
+        Write-Host ""
+        Cyan "============== 完成 =============="
+        $url = (& gh release view $tagName --json url -q .url 2>$null)
+        if ($url) { Gray "  $url" }
+        Gray "  人工过目 Release Notes 后点 Publish —— 发布会触发 R2 同步与文档仓更新。"
+        return 0
+    } finally {
+        Pop-Location
+    }
+}
+
+# ============================================================
 # status: 只看本地状态, 不联网
 # ============================================================
 function Show-Status ([string]$branch) {
@@ -590,6 +797,8 @@ function Show-Menu ([string]$branch) {
     Gray "各仓库分支 / HEAD / 脏文件, 不联网"
     Write-Host "  [6] 只推送      " -NoNewline -ForegroundColor White
     Gray "五仓同步 push, 不打 tag (日常同步用)"
+    Write-Host "  [7] 签名回传    " -NoNewline -ForegroundColor White
+    Gray "拉 CI 产物 → 本机签名打包 → 覆盖草稿 Release (需签名会话)"
     Write-Host "  [q] 退出" -ForegroundColor White
     Write-Host ""
 
@@ -618,6 +827,7 @@ function Show-Menu ([string]$branch) {
         }
         "5" { Show-Status $branch; return 0 }
         "6" { return Invoke-Release "" $branch "" $true $false }
+        "7" { return Invoke-SignDraft "" }
         "q" { Gray "已退出。"; return 0 }
         default { ErrMsg "无效选择: $choice"; return 1 }
     }
@@ -627,6 +837,11 @@ function Show-Menu ([string]$branch) {
 # 入口分发
 # ============================================================
 if (-not $Branch) { $Branch = Get-ManifestBranch }
+
+# sign-draft 不打 tag、不推送, 与发布流程正交; 且 -Version 在这里的语义是「签哪个草稿」
+# 而不是「发布哪个版本」—— 故必须排在下面的 -Version 分支之前, 否则
+# `release.ps1 sign-draft -Version 0.120.2` 会被当成"发布 0.120.2"直接打 tag。
+if ($Command -eq "sign-draft") { exit (Invoke-SignDraft $Version) }
 
 # -Version 优先于子命令的 bump 规则
 if ($Version) {
