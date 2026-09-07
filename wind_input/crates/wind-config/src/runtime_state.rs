@@ -86,10 +86,6 @@ pub struct RuntimeState {
     /// 界面便利，与 [`Self::toolbar_anchors`] 同类：没有人会想要「每次都跳回第一面」。
     #[serde(default)]
     pub last_softkeyboard_page: String,
-    /// 候选框固定位置（pin_candidate_position 启用时）。
-    /// 外层 key = 进程名（小写），内层 key = 显示器 key。
-    #[serde(default)]
-    pub candidate_pin_positions: HashMap<String, HashMap<String, (i32, i32)>>,
 }
 
 impl Default for RuntimeState {
@@ -102,7 +98,6 @@ impl Default for RuntimeState {
             toolbar_anchors: HashMap::new(),
             softkeyboard_anchors: HashMap::new(),
             last_softkeyboard_page: String::new(),
-            candidate_pin_positions: HashMap::new(),
         }
     }
 }
@@ -229,6 +224,44 @@ last_chinese_mode = true
         assert!(
             !out.contains("toolbar_positions"),
             "已改名的键又被写回 state.toml:\n{out}"
+        );
+    }
+
+    /// 删掉字段后，**老 state.toml 里残留的那张表不得让整份文件读不出来**。
+    ///
+    /// `candidate_pin_positions` 是随 `pin_candidate_position` 开关一起加的存储位，那个
+    /// 开关早已删除（见 `docs/redesign/config-schema.md`：「长期无消费点；该能力由
+    /// `ui.candidate.position_mode = "fixed"` 一套实现」），存储位被漏下，全仓零读写点。
+    ///
+    /// ★★ 本条钉的不是"删对了"，是**删除之所以安全的那个前提**：`RuntimeState` 没有
+    /// `deny_unknown_fields`，未知键被静默忽略。哪天有人给它加上，老用户 state.toml 里
+    /// 的这张残表会让**整份文件解析失败** ⇒ 工具栏/软键盘位置、上次输入态、面板页码
+    /// 全部一次性丢光，而症状只是"设置怎么都不记了"，没人会联想到是加了个 serde 属性。
+    #[test]
+    fn removed_candidate_pin_positions_does_not_break_old_files() {
+        let legacy = r#"
+last_chinese_mode = false
+last_softkeyboard_page = "symbols"
+
+[toolbar_anchors]
+"1920,1040@100" = [1908, 1028]
+
+[candidate_pin_positions.notepad]
+"1920,1040@100" = [800, 600]
+"#;
+        let back: RuntimeState = toml::from_str(legacy).expect("含已删字段的旧文件必须仍能解析");
+        assert!(!back.last_chinese_mode, "残表不得影响同文件其余字段");
+        assert_eq!(back.last_softkeyboard_page, "symbols");
+        assert_eq!(
+            back.toolbar_anchors.get("1920,1040@100").copied(),
+            Some((1908, 1028)),
+            "位置记忆必须照常读回"
+        );
+        // 写回时不得把残表带出来——否则删了字段，文件里那张表却永远留着。
+        let out = toml::to_string_pretty(&back).unwrap();
+        assert!(
+            !out.contains("candidate_pin_positions"),
+            "已删除的键又被写回 state.toml:\n{out}"
         );
     }
 

@@ -95,7 +95,9 @@ Rust 目标：`SchemaManager`（扫描/合并/激活）+ `build_engine` 消费�
   - 已实现：`caret_use_top`、`first_show_mode`、`initial_mode`、`initial_punct`（后两项即「应用独立的初始中英/标点」，语义为初始值而非锁定，字段文档见 `data/compat.toml`）、`host_render`（原 `config.toml` 的 `compat.host_render_processes` 进程名列表已并入本表；白名单现算于 `AppCompat::host_render_processes()`，消费点按事件源 PID 直查 `HostRenderManager::is_process_whitelisted`，**不经** `ActiveCompat` 全局焦点槽缓存，理由见 `host-render-windows-port.md` §11.2/§11.7）。
   - 待接线：`skip_caret_pending`。
   - 已删除：`pin_candidate_position`（长期无消费点；该能力由 `ui.candidate.position_mode = "fixed"` 一套实现）。
-- **RuntimeState**：last 中英文/全半角/标点、引擎类型、工具栏位置、候选固定位；与 `remember_last_state` 的关系（位置类始终持久化）。
+    ⚠️ 其配套存储位 `RuntimeState::candidate_pin_positions` 当时被漏下，2026-09-07 一并删除——
+    开关删了而存储位留着，会让人误以为「候选窗有按显示器分屏的位置记忆」（实际没有）。
+- **RuntimeState**：last 中英文/全半角/标点、引擎类型、工具栏/软键盘锚点（按显示器 key 分桶）；与 `remember_last_state` 的关系（位置类始终持久化）。候选窗固定位**不在此**，走配置 `ui.candidate.custom_x/custom_y`（全局单坐标，不分显示器）。
 - **schema_overrides**：每方案覆盖全局配置项——Rust 用**类型化**覆盖（修 Go 的 `map[string]any` 无校验 + 合并散落调用方）。
 
 ---
