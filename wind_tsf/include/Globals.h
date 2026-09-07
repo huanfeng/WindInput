@@ -171,6 +171,24 @@ extern const GUID c_guidDisplayAttributeConverted;
 #endif
 #define TEXTSERVICE_ICON_INDEX  0
 
+// 应用标识与安装信息落点。
+//
+// WIND_APP_NAME 须与 Rust 侧 wind-config::variant::app_dir_name() 及安装器清单
+// [app] id 逐字一致（三处同名，无编译期约束）。
+//
+// ⚠️ WIND_APP_REGKEY 下的 InstallDir 是**本 DLL 唯一可靠的安装目录来源**：
+// 本 DLL 被部署到系统目录（System32\IME\<app>\，见 docs 与安装器 system_subdir）后，
+// GetModuleFileName 取到的是系统副本路径，**推不出安装目录**。三个部署方
+// （wind-installer / scripts\dev.ps1 / wind-portable）在注册 COM 前都必须写该值。
+#ifdef WIND_DEV_VARIANT
+#define WIND_APP_NAME           L"WindInputDev"
+#define WIND_SERVICE_EXE        L"wind_input_dev.exe"
+#else
+#define WIND_APP_NAME           L"WindInput"
+#define WIND_SERVICE_EXE        L"wind_input.exe"
+#endif
+#define WIND_APP_REGKEY         L"Software\\" WIND_APP_NAME
+
 // 语言 ID (简体中文)
 #define TEXTSERVICE_LANGID      0x0804
 

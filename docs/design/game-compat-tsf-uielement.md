@@ -87,10 +87,13 @@ HKLM\SOFTWARE\Microsoft\CTF\TIP\{CLSID}\LanguageProfile\0x00000804\{profile}
 为锚点，不能按时间戳估算——切错段会让两段互相借到对方的证据，凭空造出不存在的差异。
 
 
-### 1.2 ⛔ CS2：两道闸门，卡在更前面的那道（Trusted Mode）
+### 1.2 ✅ CS2：两道闸门，前一道是 Trusted Mode（已解决）
 
-**结论：CS2 上无解，且原因不是 §1.1 的白名单。** 表现是「输入法完全不被加载」，
-和 Dota 2 的「加载了但不给画候选」是**不同层**的两件事，别拿 §1.1 的结论套。
+**结论：把 TSF DLL 部署进系统目录并保持代码签名即可，原因不是 §1.1 的白名单。**
+表现是「输入法完全不被加载」，和 Dota 2 的「加载了但不给画候选」是**不同层**的两件事，
+别拿 §1.1 的结论套。两道闸门**串联**，都要过；Dota 2 只有第二道，CS2 两道都有。
+
+下面 §1.2 记录闸门机制的定案过程，**§1.2.1 是最终判据与解法**（含一次被推翻的错误结论）。
 
 2026-09-07 静态对照 + 游戏自身日志定案。CS2 的 IME 支持同样在 `imemanager.dll` 里，
 两边 DLL **字节数完全相同**（242840），哈希不同（同源不同构建）。白名单逐字比对：
@@ -131,28 +134,51 @@ DLL load denials: 1, last '\??\C:\Program Files\WindInputDev\wind_tsf_dev.dll'
 **没有 `foreign.signatures`**。`tier0.dll` 是共享引擎库，那句拒绝文案两边都在，
 但只有 CS2 真的启用了这套 —— `foreign.signatures` 存不存在就是这个开关的指纹。
 
-**⛔ 别再试的方向：**
+#### 1.2.1 ✅ 判据是「系统目录 **AND** 代码签名」，两个条件缺一不可
 
-- **给 DLL 做代码签名不管用。** 名单认的是**具体证书指纹**，不是「有没有有效签名」；
-  `system.signatures` 只有 5 个允许的签名者。我们当前正式版与 Dev 版都是 `NotSigned`，
-  但即使签了名也进不了这 5 条或那 12 条。
-- **改 Profile Description（§1.1 的办法）在 CS2 上完全无效**，因为 DLL 压根没进程内。
-- 把 DLL 放进系统目录以蹭路径豁免 —— 不做，这是往系统目录塞未签名二进制。
+**⛔ 本节曾记「CS2 无解、只能等 Valve」，那个结论是错的，已于 2026-09-07 当日推翻。**
+错因是当时手上**只有失败样本**：三个被拒的输入法怎么比都比不出判据。拿到 QQ五笔这个
+**能工作的正例**后，单变量立刻显形。
 
-**仅剩的两条出路**，都不在我们手里：
+真正的对照证据在 `Steam\userdata\<id>\730\local\cfg\trustedlaunch.cfg`——
+游戏每次启动就写，记录每个被拒 DLL 的完整路径，**不需要游戏崩溃**（比翻崩溃转储好找得多，
+应该先看这个文件）。四方对照：
 
-1. 用户自行在 CS2 启动项加 `-allow_third_party_software`（`cs2.exe` 里确有此参数，
-   与 `-trusted` 成对）。代价是游戏进入不受信任状态，会影响 VAC 保护的服务器 ——
-   **不作为我们的建议**，更不该写进设置页引导用户去做。
-2. 由 Valve 把我们的签名加进 `foreign.signatures`。这需要先有代码签名证书，
-   且与 §1.1 的「进 IME 白名单」是两件独立的申请。
+| 输入法 | 位置 | 代码签名 | 在 `AUTH` 名单内 | CS2 |
+|---|---|---|---|---|
+| QQ五笔 | `System32\IME\QQWubiTSF\` | Tencent，有效 | ❌ | ✅ **可用** |
+| 小狼毫 weasel | `System32\` | ❌ 未签名 | ❌ | ❌ 被拒 |
+| 冰凌 | `Program Files\Iime\` | Keroro，有效 | ❌ | ❌ 被拒 |
+| 清风（改造前） | `Program Files\WindInputDev\` | Certum，有效 | ❌ | ❌ 被拒 |
 
-**这也意味着：即便将来 Valve 收了我们进 IME 白名单，CS2 上依然打不出字** ——
-两道闸门是串联的，必须都过。反过来，Dota 2 只有第二道，所以兼容开关在 Dota 2 上有效。
+**⇒ 判据是「位于系统目录」AND「有代码签名」，与那 5 条 `AUTH` 无关。**
+佐证：微软自家 inbox IME（`CN=Microsoft Windows`，指纹 `DC91E564…`）也不在那 5 条里，
+却显然能在 CS2 里打字——若 `AUTH` 名单是 IME 的通行证，全体中日韩玩家都没法在游戏里聊天，
+Valve 不可能这么设计。**别再拿那 5 条当判据。**
 
-**方法论**：「完全不被加载」这类症状要先问「是谁拒绝的、有没有留下话」，
-再去猜机制。本次全部结论来自游戏自己写在崩溃转储里的日志与它自带的名单文件，
-没有动用任何逆向。顺带：那份转储的崩溃原因是 `pak01.vpk is corrupt`（游戏文件损坏），
+改造后（DLL 部署到 `System32\IME\WindInput[Dev]\` + Certum 签名）实测：CS2 内输入正常，
+候选窗正常，且 §1.1 的 Dota 2 兼容别名在 CS2 上一并生效（两道闸门都过）。
+
+**⛔ 仍然无效、别再试的方向：**
+
+- **改 Profile Description（§1.1 的办法）单独用在 CS2 上无效**，因为在改造前 DLL 压根
+  没进程内。必须先过 Trusted Mode 这道。
+- **往 `.signatures` 里自己加行**：两份名单末尾的 `DIGEST:` 是 Valve 私钥对整份名单的
+  签名，改了必然校验失败。
+- **指望进那 5 条 `AUTH`**：见上，它根本不是 IME 的通行证。
+
+**用户自行加 `-allow_third_party_software`** 仍然是一条路（`cs2.exe` 里确有此参数，与
+`-trusted` 成对），但代价是游戏进入不受信任状态、影响 VAC 保护的服务器 ——
+既然系统目录方案已经解决问题，**不作为我们的建议，也不写进设置页**。
+
+**方法论（两条）**：
+
+1. 「完全不被加载」这类症状要先问「**是谁拒绝的、有没有留下话**」，再去猜机制。
+   本节全部结论来自游戏自带的日志与名单文件，没有动用任何逆向。
+2. ★ **只有失败样本时无法定位判据，必须去找一个能工作的正例。**「找不到出路」
+   不等于「无解」——第一版结论就是在缺正例的情况下过早收敛的。
+
+顺带：那份崩溃转储的崩溃原因是 `pak01.vpk is corrupt`（游戏文件损坏），
 与本输入法无关，别把两件事并成一件。
 
 
@@ -287,6 +313,56 @@ Dota 2 实测第一版（只有事件缓存）一输入就弹窗把游戏卡死�
 按 config-design-rules R1「可由程序判定的走自动判定」。误判排查看 info 日志
 `前台 D3D 独占全屏=…`。
 
+### 4.6 系统目录部署（Trusted Mode 的解，见 §1.2.1）
+
+TSF DLL 部署到 `%WINDIR%\System32\IME\WindInput[Dev]\`，x86 到
+`%WINDIR%\SysWOW64\IME\WindInput[Dev]\`，**对系统副本** `regsvr32`。
+`DllRegisterServer` 内的 `GetModuleFileName` 取到的就是系统副本路径，
+`InprocServer32` 与 profile 图标路径**自然指向系统副本**，无需后处理。
+
+**三条部署路径都要改**，否则出现「装的方式不同、游戏里能不能用也不同」：
+
+| 路径 | 落点 | 开关 | 默认 |
+|---|---|---|---|
+| 安装器 | `wind-installer` `src/installer/ime.rs` | 清单 `[ime] system_subdir` | 本产品清单已置 `IME/WindInput`；字段空=就地注册 |
+| 开发部署 | `scripts/dev.ps1` `Register-Tsf` | 无 | 固定走系统目录 |
+| 便携模式 | `wind-portable` `src/registration.rs` | 便携根目录的 `system_deploy` 标记文件 | **就地注册** |
+
+**★ 便携模式默认就地，与安装器相反。** 因为 `System32\IME\<AppName>\` 与
+`HKLM\Software\<AppName>\InstallDir` 是**安装版与便携版共用的落点**——路径完全相同，
+同机共存时后注册的一方会覆盖前者。安装版是机器上的唯一实例，占用它天经地义；
+便携版可以有多份、还可能与安装版并存，默认不碰即零冲突。要在游戏里用便携版时，
+用户显式建 `system_deploy` 标记开启，并接受与安装版争用同一份系统副本。
+
+**⚠️ 由此派生一条删除守则**：便携版反注册时**只能动自己部署的那份系统副本**
+（`owns_system_deployment`：`InstallDir` 指回本便携目录才算），无条件删会把安装版的
+副本一并删掉、废掉那边的输入法。判据用「实际所有权」而非「当前开关值」——
+用户可能注册后才关掉开关，那时标记没了副本还在，照开关判就会漏清。
+
+**★ 安装目录回指 `HKLM\Software\<AppName>\InstallDir`。** DLL 搬进系统目录后，
+`GetModuleFileName` 只能取到系统副本路径，**推不出安装目录**——而服务拉起
+（`IPCClient::_StartService`）与便携标记检测都需要安装目录。三个部署方在 `regsvr32`
+**之前**写该键（注册一完成宿主就可能加载 DLL，那时键还不在就会白走一次）；
+读端 `wind_tsf/src/IPCClient.cpp` 的 `_ResolveAppBaseDir`，键缺失时回退到 DLL 自身目录，
+兼容就地注册的存量部署。
+
+**★ 便携模式的归属判据必须换。** 系统副本对同一变体的**所有实例路径完全相同**，
+`is_registered` 再比 DLL 路径等于恒真。改由 `InstallDir` 判定所有权：谁最后注册，
+它就指向谁的目录。`installed_conflict` 判断「注册来源是不是便携实例」同理——
+系统副本旁边不可能有便携标记文件，得回到 `InstallDir` 指向的目录去找。
+
+**⚠️ 32 位差异**：x64→`System32`、x86→`SysWOW64`，两个子目录都要建，且 x86 必须用
+`SysWOW64\regsvr32.exe` 注册（注册项才落进 `WOW6432Node` 视图）。以上都**假定调用方是
+64 位进程**（安装器只发 x64，dev.ps1 走 pwsh）——32 位进程访问 `System32` 会被 WOW64
+文件系统重定向**静默**改写到 `SysWOW64`，x64 DLL 就装错了地方还不报错。
+`dev.ps1` 的 `Get-TsfSystemDir` 为此显式断言而**不做自动纠正**：静默纠正会掩盖
+「调用方本身跑错了架构」这个真问题。
+
+**⚠️ 卸载/升级要收掉系统副本**：它不在安装目录里，安装器的 `DeleteInstallFiles` 够不着，
+不显式删就永久滞留。删完文件顺带 `remove_dir` 收掉自建子目录（只删空目录，
+另一架构副本还在时自然失败，正是需要的语义）；被宿主锁住删不掉的走「改名让路 + 排重启删」
+并记进 reboot 账本，否则「需要重启」会漏判。
+
 ## 5. 非目标 / 备选（未做）
 
 - **P3 组合串内联候选**（不走 UI-less 的独占全屏游戏）：独占全屏下用户看不到候选，只能盲打。
@@ -308,6 +384,20 @@ Dota 2 实测第一版（只有事件缓存）一输入就弹窗把游戏卡死�
   `lib.rs`（`FullscreenKind`）。
 - `wind_tsf/include/BinaryProtocol.h`、`IPCClient.h`、`src/IPCClient.cpp`（PAGE 解析）、
   `include/TextService.h`、`src/TextService.cpp`（UIElement 段重写、ActivateEx/Deactivate 接线）。
+
+系统目录部署（§4.6），跨三仓：
+
+- `wind_tsf/include/Globals.h`：`WIND_APP_NAME` / `WIND_APP_REGKEY` / `WIND_SERVICE_EXE`
+  三个变体宏；`src/IPCClient.cpp` 的 `_ResolveAppBaseDir` + `_StartService` 改读注册表
+  （顺带修掉「Dev 版读 release 的 `Software\WindInput` 键」这个既有变体缺陷）。
+- `scripts/dev.ps1`：`Get-TsfSystemDir` / `Get-AppRegKey` / `Register-Tsf` / `Unregister-Tsf`；
+  `Set-TomlKeysInSection`（清单 `[ime]` 段改稀疏替换，顺带修掉 `sweep_residue` 被整段
+  替换静默丢弃的既有缺陷）。
+- `config/app.toml`：`[ime] system_subdir`。
+- `wind-installer`：`src/manifest.rs`（字段）、`src/installer/ime.rs`（部署/反注册/收目录、
+  `system_subdir` 的路径穿越守卫）、`src/installer/registry.rs`（`set_install_dir`）、`app.toml`。
+- `wind-portable`：`src/registration.rs`（系统副本部署、`InstallDir` 所有权凭据、
+  `is_registered` 与 `installed_conflict` 的归属判据换轨）。
 
 ## 7. 验证
 

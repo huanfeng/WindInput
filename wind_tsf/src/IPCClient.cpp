@@ -327,6 +327,45 @@ BOOL CIPCClient::_ReadWithTimeout(void* buffer, DWORD size, DWORD* bytesRead, DW
 // Service management
 // ============================================================================
 
+// 解析应用安装目录（返回值末尾不带反斜杠）。
+//
+// ★ 优先取 HKLM\<WIND_APP_REGKEY>\InstallDir，**不能**由模块路径推导：本 DLL 被部署到
+// 系统目录（System32\IME\<app>\）后 GetModuleFileName 取到的是系统副本路径，其同级目录
+// 既没有服务 exe 也没有便携标记。三个部署方在注册 COM 前都会写该值。
+//
+// 键缺失时回退到 DLL 自身目录——兼容「就地注册」的存量部署与未走部署脚本的开发构建。
+// 回退不是可有可无的兜底：漏掉它会让所有旧安装在升级前起不了服务。
+static BOOL _ResolveAppBaseDir(WCHAR* outDir, DWORD cchOutDir)
+{
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WIND_APP_REGKEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        DWORD type = REG_SZ;
+        DWORD cb = cchOutDir * sizeof(WCHAR);
+        LONG r = RegQueryValueExW(hKey, L"InstallDir", nullptr, &type,
+                                  reinterpret_cast<LPBYTE>(outDir), &cb);
+        RegCloseKey(hKey);
+
+        if (r == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && cb >= sizeof(WCHAR))
+        {
+            // REG_SZ 不保证以 NUL 收尾（写入方可能未把结尾计入长度），显式收口。
+            DWORD cch = cb / sizeof(WCHAR);
+            if (cch >= cchOutDir) { cch = cchOutDir - 1; }
+            outDir[cch] = L'\0';
+
+            size_t len = wcslen(outDir);
+            while (len > 0 && outDir[len - 1] == L'\\') { outDir[--len] = L'\0'; }
+            if (len > 0) { return TRUE; }
+        }
+    }
+
+    if (GetModuleFileNameW(g_hInstance, outDir, cchOutDir) == 0) { return FALSE; }
+    WCHAR* lastSlash = wcsrchr(outDir, L'\\');
+    if (lastSlash == nullptr) { return FALSE; }
+    *lastSlash = L'\0';
+    return TRUE;
+}
+
 BOOL CIPCClient::_StartService()
 {
     _LogInfo(L"Attempting to start service...");
@@ -335,7 +374,7 @@ BOOL CIPCClient::_StartService()
     // cleared after installation completes. Prevents respawn during install/uninstall.
     {
         HKEY hKey = NULL;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\WindInput", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WIND_APP_REGKEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
         {
             WCHAR value[8] = {};
             DWORD size = sizeof(value);
@@ -351,73 +390,67 @@ BOOL CIPCClient::_StartService()
         }
     }
 
-    WCHAR dllPath[MAX_PATH];
+    WCHAR baseDir[MAX_PATH];
 
-    if (GetModuleFileNameW(g_hInstance, dllPath, MAX_PATH) == 0)
+    if (!_ResolveAppBaseDir(baseDir, ARRAYSIZE(baseDir)))
     {
-        _LogError(L"Failed to get module path");
+        _LogError(L"Failed to resolve app base dir");
         return FALSE;
     }
-
-    WCHAR* lastSlash = wcsrchr(dllPath, L'\\');
 
     // Guard: check portable mode marker file for stopped flag.
     // 标记名以 portable_mode 为准（与安装器清单 config/app.toml 的 [app] portable_marker
     // 及 wind-config variant.rs 的 PORTABLE_MARKER_NAME 一致）；wind_portable_mode 是旧名，
     // 仅为存量便携包保留读取兼容，新写入不再使用。三处必须同步。
+    //
+    // ⚠️ 标记在**安装/便携目录**下，不在 DLL 所在目录——系统目录部署后两者已不是同一处。
     {
-        if (lastSlash)
+        static const WCHAR* const kMarkerNames[] = { L"portable_mode", L"wind_portable_mode" };
+
+        for (size_t i = 0; i < ARRAYSIZE(kMarkerNames); ++i)
         {
-            static const WCHAR* const kMarkerNames[] = { L"portable_mode", L"wind_portable_mode" };
+            WCHAR markerPath[MAX_PATH];
+            wcscpy_s(markerPath, MAX_PATH, baseDir);
+            wcscat_s(markerPath, MAX_PATH, L"\\");
+            wcscat_s(markerPath, MAX_PATH, kMarkerNames[i]);
 
-            for (size_t i = 0; i < ARRAYSIZE(kMarkerNames); ++i)
+            HANDLE hFile = CreateFileW(
+                markerPath,
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr);
+
+            if (hFile == INVALID_HANDLE_VALUE)
             {
-                WCHAR markerPath[MAX_PATH];
-                wcsncpy_s(markerPath, dllPath, (lastSlash - dllPath + 1));
-                wcscat_s(markerPath, MAX_PATH, kMarkerNames[i]);
-
-                HANDLE hFile = CreateFileW(
-                    markerPath,
-                    GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
-                    nullptr);
-
-                if (hFile == INVALID_HANDLE_VALUE)
-                {
-                    continue;
-                }
-
-                char buf[256] = {};
-                DWORD bytesRead = 0;
-                ReadFile(hFile, buf, sizeof(buf) - 1, &bytesRead, nullptr);
-                CloseHandle(hFile);
-                buf[bytesRead] = '\0';
-
-                if (strstr(buf, "stopped=1") != nullptr)
-                {
-                    _LogInfo(L"Portable mode stopped flag detected, not starting service");
-                    return FALSE;
-                }
-                // 标记文件已找到并读完：新名存在时不再回看旧名，否则一个陈旧的
-                // wind_portable_mode 会盖过新名里刚被清掉的 stopped 标志。
-                break;
+                continue;
             }
+
+            char buf[256] = {};
+            DWORD bytesRead = 0;
+            ReadFile(hFile, buf, sizeof(buf) - 1, &bytesRead, nullptr);
+            CloseHandle(hFile);
+            buf[bytesRead] = '\0';
+
+            if (strstr(buf, "stopped=1") != nullptr)
+            {
+                _LogInfo(L"Portable mode stopped flag detected, not starting service");
+                return FALSE;
+            }
+            // 标记文件已找到并读完：新名存在时不再回看旧名，否则一个陈旧的
+            // wind_portable_mode 会盖过新名里刚被清掉的 stopped 标志。
+            break;
         }
     }
 
-    if (lastSlash)
-    {
-#ifdef WIND_DEV_VARIANT
-        wcscpy_s(lastSlash + 1, MAX_PATH - (lastSlash - dllPath + 1), L"wind_input_dev.exe");
-#else
-        wcscpy_s(lastSlash + 1, MAX_PATH - (lastSlash - dllPath + 1), L"wind_input.exe");
-#endif
-    }
+    WCHAR exePath[MAX_PATH];
+    wcscpy_s(exePath, MAX_PATH, baseDir);
+    wcscat_s(exePath, MAX_PATH, L"\\");
+    wcscat_s(exePath, MAX_PATH, WIND_SERVICE_EXE);
 
-    _LogDebug(L"Starting service: %s", dllPath);
+    _LogDebug(L"Starting service: %s", exePath);
 
     STARTUPINFOW si = { sizeof(STARTUPINFOW) };
     si.dwFlags = STARTF_USESHOWWINDOW;
@@ -431,11 +464,11 @@ BOOL CIPCClient::_StartService()
     DWORD flags = CREATE_NEW_CONSOLE | CREATE_DEFAULT_ERROR_MODE;
 
     // 尝试脱离 Job 对象（某些宿主进程可能不允许，失败后回退）
-    if (!CreateProcessW(dllPath, nullptr, nullptr, nullptr, FALSE,
+    if (!CreateProcessW(exePath, nullptr, nullptr, nullptr, FALSE,
         flags | CREATE_BREAKAWAY_FROM_JOB, nullptr, nullptr, &si, &pi))
     {
         // 回退：不使用 BREAKAWAY（部分进程可能限制此标志）
-        if (!CreateProcessW(dllPath, nullptr, nullptr, nullptr, FALSE,
+        if (!CreateProcessW(exePath, nullptr, nullptr, nullptr, FALSE,
             flags, nullptr, nullptr, &si, &pi))
         {
             _LogError(L"Failed to start service: error=%d", GetLastError());

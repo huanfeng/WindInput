@@ -44,6 +44,16 @@ dll_x86      = "wind_tsf_x86.dll"
 # 缺省 false（通用安装器不擅自改注册表）；只删悬空项，按本段 clsid/profile 变体隔离，
 # 故 dev（DEB 系列）与 release（EE 系列）各自只清自己那套键、互不影响。
 sweep_residue = true
+# TSF DLL 的系统目录子路径：置空则就地注册（DLL 留在安装目录）；非空则把 DLL 复制到
+# %WINDIR%\System32\<此路径>\（x86 到 SysWOW64\<此路径>\）并对系统副本 regsvr32。
+# 开启 Trusted Mode 的游戏（CS2 等）只放行系统目录下的 in-proc DLL，故输入法须置此项；
+# 判据与实测对照见 docs/design/game-compat-tsf-uielement.md。取值对齐 inbox IME 的
+# IME\<产品名>\ 布局。
+#
+# ⚠️ 置此项还要求 DLL 已代码签名，两个条件缺一不可——游戏侧同时校验路径与签名。
+# ⚠️ 置此项后安装器会一并写 HKLM\Software\<[app] id>\InstallDir：DLL 搬离安装目录后
+#    只能靠它回指（读端 wind_tsf/src/IPCClient.cpp 的 _ResolveAppBaseDir），缺了拉不起服务。
+system_subdir = "IME/WindInput"
 
 [[font]]
 file         = "HeiTiZiGen.ttf"

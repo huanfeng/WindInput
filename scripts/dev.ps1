@@ -933,7 +933,15 @@ function Unregister-Tsf ([string]$dir, [string]$suffix) {
     foreach ($p in @($sysX64, $sysX86)) {
         if (Test-Path $p) {
             try { Remove-Item $p -Force -ErrorAction Stop }
-            catch { Warn "  - 系统副本删除失败 (仍被加载, 将尝试覆盖): $p" }
+            catch { Warn "  - 系统副本删除失败 (仍被加载, 将改名让路)" }
+        }
+    }
+    # 清掉历次让路留下的 .old_*。系统目录不在安装目录那套 *.old* 清理的范围内,
+    # 不在这里收就会一直累积 —— 每次部署撞上被锁的旧映像都会多留一个。
+    foreach ($d in @((Get-TsfSystemDir $suffix $false), (Get-TsfSystemDir $suffix $true))) {
+        if (Test-Path $d) {
+            Get-ChildItem -Path $d -Filter "*.old_*" -File -ErrorAction SilentlyContinue |
+                ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
         }
     }
 }
@@ -956,7 +964,9 @@ function Register-Tsf ([string]$dir, [string]$suffix) {
     $x64Dir = Get-TsfSystemDir $suffix $false
     New-Item -ItemType Directory -Force -Path $x64Dir | Out-Null
     $x64Dst = Join-Path $x64Dir "wind_tsf$suffix.dll"
-    Copy-Item $x64Src $x64Dst -Force
+    # 走 Copy-Replace 而不是 Copy-Item: 系统副本是 in-proc 常驻的, 宿主不重启就一直锁着
+    # 旧映像, 直接覆盖会抛错中断部署。让路逻辑与安装目录副本共用同一套。
+    Copy-Replace $x64Dir "wind_tsf$suffix.dll" $x64Src
     & icacls $x64Dst /grant "${sid}:(RX)" /c | Out-Null
     & regsvr32 /s $x64Dst
     if ($LASTEXITCODE -ne 0) { ErrMsg "  - x64 COM 注册失败: $x64Dst"; return $false }
@@ -969,11 +979,19 @@ function Register-Tsf ([string]$dir, [string]$suffix) {
         $x86Dir = Get-TsfSystemDir $suffix $true
         New-Item -ItemType Directory -Force -Path $x86Dir | Out-Null
         $x86Dst = Join-Path $x86Dir "wind_tsf_x86${suffix}.dll"
-        Copy-Item $x86Src $x86Dst -Force
+        Copy-Replace $x86Dir "wind_tsf_x86${suffix}.dll" $x86Src
         & icacls $x86Dst /grant "${sid}:(RX)" /c | Out-Null
         & (Get-Regsvr32X86) /s $x86Dst
         if ($LASTEXITCODE -ne 0) { Warn "  - x86 COM 注册失败 (32 位应用可能无法使用输入法)" }
         else { Gray "  - x86 COM 已注册 ($x86Dst)" }
+    }
+
+    # 游戏场景 (CS2 等 Trusted Mode) 的判据是「系统目录 AND 有代码签名」, 缺一不可。
+    # 而日常 dev 构建默认不签名 (签名按次计费), 部署照样报成功 —— 不提示的话表现就是
+    # 「装好了、普通程序能打字、一进游戏就没有输入法」, 且没有任何线索可查。
+    if ((Get-AuthenticodeSignature $x64Dst).Status -ne "Valid") {
+        Warn "  - x64 DLL 未签名: 普通程序可用, 但 Trusted Mode 游戏 (CS2 等) 会拒绝加载它"
+        Gray '    需要游戏内可用时: dev.ps1 sign dm1 (重新构建并签名) 后再部署'
     }
     return $true
 }
@@ -1513,8 +1531,15 @@ function Uninstall-Full ([string]$profile = "release") {
     Say "[1/5] 停止进程..."; Stop-WindService $suffix
     Say "[2/5] 移出用户输入法列表..."; Disable-TsfForUser $profile
     Say "[3/5] 反注册 TSF COM..."
-    if (Test-Path $targetDir) { Unregister-Tsf $targetDir $suffix; Gray "  - 已反注册 (x64 + x86)" }
-    else { Warn "  - 安装目录不存在, 跳过反注册 (可能已卸载)" }
+    # ⚠️ 不能因「安装目录不存在」跳过: 系统副本在 <System32|SysWOW64>\IME\ 下【独立存在】,
+    # 跳过就会永久滞留 (安装目录删除够不着它)。Unregister-Tsf 内部逐个 Test-Path, 空跑安全。
+    Unregister-Tsf $targetDir $suffix
+    Gray "  - 已反注册 (x64 + x86, 含系统目录副本)"
+    # 安装目录回指键随之清掉, 免得指向一个已删除的目录。
+    $regKey = Get-AppRegKey $suffix
+    if (Test-Path $regKey) {
+        Remove-ItemProperty -Path $regKey -Name "InstallDir" -ErrorAction SilentlyContinue
+    }
     Say "[4/5] 移除开机自启..."; Remove-AutoStart $suffix
     Say "[5/5] 删除安装文件 (锁定的 DLL 改名让路)..."
     if (Test-Path $targetDir) {
