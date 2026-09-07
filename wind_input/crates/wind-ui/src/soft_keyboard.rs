@@ -781,16 +781,13 @@ impl SoftKeyboard {
         }
     }
 
-    fn ensure_scale(&mut self) {
-        // ⚠️ 取点优先级与 `render` 算落点的优先级对齐（`anchor_br` > `origin` > 兜底）：
-        // 两处问的是同一件事——"这一帧的面板在哪块屏上"。首次显示时 `origin` 还是 None，
-        // 只看它就会按 (0,0)（主屏）取缩放，然后拿主屏 DPI 排出的尺寸落到另一块屏的
-        // 记忆位置上，整块面板大小与位置都偏，要等下一帧才自愈。
-        let (x, y) = match self.anchor_br {
-            // 锚点是面板右下角（排他），退 1px 取面板内的点。
-            Some((right, bottom)) => (right - 1, bottom - 1),
-            None => self.origin.unwrap_or((0, 0)),
-        };
+    /// 这一帧面板该落在哪。**三级优先级的唯一定义处**，见 [`Placement`]。
+    fn placement(&self) -> Placement {
+        Placement::pick(self.anchor_br, self.origin, self.work_area)
+    }
+
+    fn ensure_scale(&mut self, at: Placement) {
+        let (x, y) = at.probe_point();
         let sc = crate::dpi::scale_for_point(x, y);
         if (sc - self.scale).abs() > 0.01 {
             self.scale = sc;
@@ -810,7 +807,10 @@ impl SoftKeyboard {
         if !self.visible || self.keys.is_empty() {
             return;
         }
-        self.ensure_scale();
+        // 缩放与落点取自**同一个** `Placement`：先定"这一帧落在哪块屏"，再按那块屏的
+        // DPI 排版，最后用同一判据算落点。分两次各问一遍就会像修复前那样跑偏。
+        let at = self.placement();
+        self.ensure_scale(at);
         let s = self.scale;
         // ★ 只在**换面**时把当前面拉进视野。每帧无条件拉的后果是用户滚不动标签行——
         // 手一松就被拽回当前面。滚动是用户的意图，换面才是我们的。
@@ -849,11 +849,10 @@ impl SoftKeyboard {
         }
         // 落点每帧现算：锚右下角减去**当前**尺寸。切面会改面板尺寸（各面键数不同），
         // 存左上角的话切一次面就朝右下长一截，再被钳回来——「切个面板还跑位」。
-        let raw = match self.anchor_br {
-            Some((right, bottom)) => origin_from_anchor(right, bottom, w, h),
-            None => self
-                .origin
-                .unwrap_or_else(|| default_origin(w, h, s, self.work_area)),
+        let raw = match at {
+            Placement::Anchor { right, bottom } => origin_from_anchor(right, bottom, w, h),
+            Placement::LastOrigin { x, y } => (x, y),
+            Placement::DefaultIn { work } => default_origin(w, h, s, work),
         };
         // 恢复的锚点必须过一次钳制：记录跨重启存活，而这中间显示器可能换了、
         // 缩放可能改了（缩放变会让 key 失配落回默认，但分辨率相同、缩放相同、
@@ -1686,6 +1685,69 @@ fn origin_from_anchor(right: i32, bottom: i32, w: u32, h: u32) -> (i32, i32) {
     (right - w as i32, bottom - h as i32)
 }
 
+/// 这一帧面板落在哪——**三级优先级只此一处**。
+///
+/// 有两个消费者问的是同一个问题："这一帧的面板在哪块屏上"：
+/// - [`SoftKeyboard::ensure_scale`] 要一个屏内的点去查 DPI；
+/// - [`SoftKeyboard::render`] 要算左上角落点。
+///
+/// ⚠️ 两者**不能共用一个函数**：算落点要先知道面板尺寸，而尺寸取决于缩放，缩放又
+/// 取决于在哪块屏——是个鸡生蛋。所以只能各自分派，但**优先级本身只写一次**（就是本
+/// 枚举的构造函数 [`SoftKeyboard::placement`]）。
+///
+/// 各写一遍的下场已经发生过一次：`ensure_scale` 当时只判 `anchor_br`/`origin` 两级，
+/// 漏掉的第三级恰好是"副屏首次打开、还没有位置记忆"——两个 `None` 一路落到 `(0, 0)`
+/// 即主屏，于是按主屏 DPI 排出的尺寸落到副屏上。症状很迷惑：鼠标一碰就好了（hover
+/// 重绘时 `origin` 已是上一帧落在副屏的落点，够到了第二级），拖动过一次也永久好了
+/// （有了 `anchor_br`，够到第一级）——**唯独第一次打开是错的**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    /// 用户摆过的位置，锚面板右下角（跨重启记忆）。
+    Anchor { right: i32, bottom: i32 },
+    /// 上一帧的落点（左上角）。同屏重开、hover 重绘走这里。
+    LastOrigin { x: i32, y: i32 },
+    /// 这块屏还没有记录：按协调器给的焦点屏工作区落默认位置。
+    DefaultIn { work: Option<(i32, i32, i32, i32)> },
+}
+
+impl Placement {
+    /// 三级优先级的**唯一实现**。`SoftKeyboard::placement` 只是把三个字段喂进来——
+    /// 拆成自由函数是为了让守门测试打到真身：`SoftKeyboard` 要真窗口才能构造，测试里
+    /// 造不出来，而把 `match` 在测试里抄一遍就成了"判据问自己"，改错了也照样绿。
+    fn pick(
+        anchor_br: Option<(i32, i32)>,
+        origin: Option<(i32, i32)>,
+        work_area: Option<(i32, i32, i32, i32)>,
+    ) -> Self {
+        match (anchor_br, origin) {
+            // 锚点是用户的**意图**，压过 `origin`（那只是上一帧的结果）。
+            (Some((right, bottom)), _) => Placement::Anchor { right, bottom },
+            (None, Some((x, y))) => Placement::LastOrigin { x, y },
+            (None, None) => Placement::DefaultIn { work: work_area },
+        }
+    }
+
+    /// 取一个**落在目标屏内**的点，供 DPI 查询。
+    ///
+    /// ⚠️ `right`/`bottom` 无论来自锚点还是工作区都是**排他**边界（等同 Win32 `RECT`
+    /// 语义），必须退 1px 才在屏内。不退的后果是屏幕右/下边缘的面板查到**相邻那块屏**
+    /// 的 DPI——多屏横排时尤其容易踩到，且只在贴边时复现。
+    fn probe_point(self) -> (i32, i32) {
+        match self {
+            Placement::Anchor { right, bottom } => (right - 1, bottom - 1),
+            // 左上角是包含边界，本身就在面板内，不必退。
+            Placement::LastOrigin { x, y } => (x, y),
+            Placement::DefaultIn {
+                work: Some((_, _, right, bottom)),
+            } => (right - 1, bottom - 1),
+            // 协调器都没查到显示器（非 Windows／查询失败），没有比主屏更好的猜测。
+            // `default_origin` 在同样的缺席下退回 `SPI_GETWORKAREA`，那个 API 取的也是主屏——
+            // 两处兜底落在同一块屏上，是一致的。
+            Placement::DefaultIn { work: None } => (0, 0),
+        }
+    }
+}
+
 /// 首次显示的位置：工作区底部居中，留一点边距。
 ///
 /// `work` 是协调器按**焦点显示器**给的工作区 `(left, top, right, bottom)`。
@@ -1973,6 +2035,79 @@ mod tests {
         assert_eq!(x, -1920 + (1920 - 700) / 2, "应在该屏水平居中（负坐标）");
         assert_eq!(y, 1040 - 300 - 16, "应贴该屏工作区底部，留 16px 边距");
         assert!(x < 0, "落点必须留在左侧副屏上，不得被推回主屏");
+    }
+
+    /// 副屏首次打开（还没有任何位置记忆）时，DPI 探针点必须落在**那块副屏**上。
+    ///
+    /// 用户实测：主副屏缩放不同，第一次在副屏点开软键盘尺寸就是错的（按主屏缩放排的），
+    /// 鼠标一碰又好了，拖动过一次之后永久好了。根因是 `ensure_scale` 当时只判两级，
+    /// `anchor_br`/`origin` 双 `None` 时落到 `(0, 0)`——那是主屏。后两个"又好了"分别是
+    /// 够到了 `LastOrigin` 和 `Anchor` 两级，把缺失的第三级掩盖成了"偶发"。
+    #[test]
+    fn probe_point_follows_work_area_when_nothing_is_remembered() {
+        // 左侧副屏：工作区 (−1920, 0, 0, 1040)，坐标为负。
+        // 从**入口条件**（还没摆过 = 无锚点，没画过 = 无上一帧落点）走完整条链，
+        // 而不是直接构造 `DefaultIn`——后者会跳过 `pick`，正好漏掉出问题的那一步。
+        let at = Placement::pick(None, None, Some((-1920, 0, 0, 1040)));
+        let (x, y) = at.probe_point();
+        assert!(
+            x < 0,
+            "探针点必须落在左侧副屏上，取到 {x} 说明又按主屏查 DPI 了"
+        );
+        assert_eq!(
+            (x, y),
+            (-1, 1039),
+            "工作区 right/bottom 是排他边界，须退 1px"
+        );
+    }
+
+    /// 三级优先级：`Anchor` > `LastOrigin` > `DefaultIn`。
+    ///
+    /// 这条钉的是 [`SoftKeyboard::placement`] 的分派本身。`render` 算落点与
+    /// `ensure_scale` 查 DPI 都基于它，改动优先级会同时影响两处。
+    #[test]
+    fn placement_priority_is_anchor_then_last_origin_then_default() {
+        let work = Some((-1920, 0, 0, 1040));
+        // 有锚点时压过上一帧落点——锚点是用户的**意图**，落点只是上一帧的结果。
+        assert_eq!(
+            Placement::pick(Some((800, 600)), Some((10, 20)), work),
+            Placement::Anchor {
+                right: 800,
+                bottom: 600
+            }
+        );
+        assert_eq!(
+            Placement::pick(None, Some((10, 20)), work),
+            Placement::LastOrigin { x: 10, y: 20 }
+        );
+        assert_eq!(
+            Placement::pick(None, None, work),
+            Placement::DefaultIn { work }
+        );
+    }
+
+    /// 锚点/上一帧落点两级的探针取点：右下角退 1px、左上角不退。
+    #[test]
+    fn probe_point_respects_inclusive_and_exclusive_edges() {
+        assert_eq!(
+            Placement::Anchor {
+                right: 1600,
+                bottom: 1000
+            }
+            .probe_point(),
+            (1599, 999),
+            "锚点是面板右下角（排他），不退 1px 会查到相邻那块屏"
+        );
+        assert_eq!(
+            Placement::LastOrigin { x: 100, y: 200 }.probe_point(),
+            (100, 200),
+            "左上角是包含边界，本身就在面板内"
+        );
+        assert_eq!(
+            Placement::DefaultIn { work: None }.probe_point(),
+            (0, 0),
+            "查不到显示器时兜底主屏，与 default_origin 的 SPI_GETWORKAREA 兜底同屏"
+        );
     }
 
     /// 面板比工作区还高时，纵向落点被夹到工作区顶部而不是变成负的屏外坐标。
