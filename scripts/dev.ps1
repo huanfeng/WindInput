@@ -2061,7 +2061,10 @@ function Show-Menu {
 $RemoteCommands = @(
     "1", "release", "d1", "dev",
     "m1", "m2", "m3", "m4", "dm1", "dm2", "dm3", "dm4",
-    "8", "8s", "d8", "d8s", "9", "9s", "d9", "d9s",
+    # 打包类只列不带 s 的: 8/9 会被 Dispatch 改写成全构建转发出去, 回传后在本机打包
+    # (见 Dispatch 的「打包留本机」段)。⛔ 别把 8s/9s 加回来 —— 它们【不编译任何东西】,
+    # 转发过去只是在编译机上打个包然后留在那儿, 本机 dist\ 一无所获。
+    "8", "d8", "9", "d9",
     "k", "check", "l", "clippy", "t", "test", "ci", "fmt-check",
     "gd", "gen-data"
 )
@@ -2073,29 +2076,15 @@ function Test-RemoteCommand ([string]$cmd) {
     $list = if ($null -ne $WIND_REMOTE_COMMANDS) { $WIND_REMOTE_COMMANDS } else { $RemoteCommands }
     if ($list -notcontains $cmd) { return $false }
 
-    # 打包类命令 (8/9 系列) 在配了代码签名时【强制本机】——
-    # 签名靠的是本机已建立的签名会话(证书在本机的 Cert:\CurrentUser\My 里), 编译机上
-    # 没有, 也不该有 —— 证书会话不该散到第二台机器上。若照常转发, 远程会跳过签名并把
-    # 【未签名的 PE 封进 Setup 的
-    # 压缩块 / zip 里】, 产物回传后本机再补签也够不着包内的文件 —— 拿到手的是一个签名
-    # 完好、内容全裸的安装包, 而且没有任何提示。
-    # 编译本身 (1/d1/m*) 不受影响, 照旧走远程。
-    # 签名时只有【打包类】必须留在本机, 编译类照旧走远程 —— 编译在远程、签名在本机
-    # 是支持的, 见 Dispatch 里的转发后补签。
+    # 打包类 (8/9) 不再因签名而整体留在本机: Dispatch 已把它们改写成
+    # 【全构建转发 → 回传 → 本机补签 → 本机打包】, 三件事各归其位 ——
+    #   · 编译在远程 (它擅长的部分, 也是耗时的大头)
+    #   · 签名在本机 (证书会话只在本机, 不该散到第二台机器上)
+    #   · 打包在本机 (发生在补签之后, 故封进包的 PE 必定已签; 且产物直接落到本机 dist\)
     #
-    # 为什么打包类(8/9)不能远程: 远程会把【未签名的 PE 封进压缩块】, 而回传后本机再补签
-    # 也够不着包内文件 —— 拿到的是签名完好、内容全裸的安装包。更何况 remote-build.ps1
-    # 的回传只取 build[_dev]\, dist\ 根本不回传, 远程打的包留在编译机上。
-    #
-    # 判据是「本次是否真要签名」而不是「有没有配过签名」: 没写 sign 的那些日常打包
-    # 照样该享受远程编译。
-    if ($script:SignRequested -and $cmd -match '^d?[89]s?$') {
-        Warn "[sign] 本次要签名 → $cmd 改在本机执行 (远程打包会把未签名的 PE 封进压缩块)"
-        # ⚠️ 这里不能用反引号引用命令名 —— 双引号串里的反引号是 PowerShell 的转义字符,
-        #    "`dev.ps1`" 会被解析成转义序列而不是引号, 整个脚本报「missing the terminator」。
-        Gray "       想让编译也走远程: 先 dev.ps1 sign 1 (远程编译 + 本机补签), 再 dev.ps1 sign 8s"
-        return $false
-    }
+    # 这同时修掉了「远程打的包留在编译机上」—— remote-build.ps1 的回传只取
+    # build[_dev]\, dist\ 从不回传, 从前转发 8/9 出去等于产物白丢。
+    # 8s/9s 不在 $RemoteCommands 里, 天然走本机。
     return $true
 }
 
@@ -2103,7 +2092,21 @@ function Dispatch ([string]$cmd, [string]$arg) {
     # 远程转发闸门。未配置时 Test-RemoteCommand 恒 false, 直落下方本机分支; remote-build.ps1
     # 不入库, 新 worktree 里没有它时同样自动降级为本机构建, 不报错。
     if ((Test-RemoteCommand $cmd) -and (Test-Path "$ScriptDir\remote-build.ps1")) {
-        & "$ScriptDir\remote-build.ps1" -Command $cmd | Out-Host
+        # ---- 打包留本机 ----
+        # 8/9 (安装包 / 便携包) 转发出去的是【全构建】, 不是打包命令本身: 打包产物落在
+        # dist\, 而 remote-build.ps1 的回传只取 build[_dev]\ —— 直接转发 8/9 的话, zip /
+        # Setup.exe 会静默留在编译机上, 本机 dist\ 空手而归 (一度如此)。
+        # 改为「远程全构建 → 回传 build[_dev]\ → 本机补签 → 本机跑 8s/9s 打包」,
+        # 打包读的就是刚回传的产物, 与纯本机构建的结果一致。
+        $fwd  = $cmd      # 真正转发给编译机的命令
+        $pack = $null     # 回传后要在本机补跑的打包命令
+        if ($cmd -match '^(d?)([89])$') {
+            $fwd  = "$($Matches[1])1"          # 8→1 / d9→d1
+            $pack = "$($Matches[1])$($Matches[2])s"   # 8→8s / d9→d9s
+            Gray "[remote] $cmd → 远程执行 $fwd (编译), 回传后本机执行 $pack (打包)"
+        }
+
+        & "$ScriptDir\remote-build.ps1" -Command $fwd | Out-Host
         $rc = $LASTEXITCODE
 
         # 编译在远程、签名在本机。
@@ -2117,10 +2120,16 @@ function Dispatch ([string]$cmd, [string]$arg) {
         # 消耗配额。
         #
         # 只对【产 PE】的命令补签: k/t/ci/fmt-check 不产任何东西, gd 只产 data\。
-        if ($rc -eq 0 -and $script:SignRequested -and $cmd -match '^(d?(1|m[1-4])|release|dev)$') {
-            $p = if ($cmd -eq 'dev' -or $cmd -like 'd*') { 'dev' } else { 'release' }
+        # 判据用 $fwd 而不是 $cmd —— 8/9 已被改写成全构建转发, 按原命令判会漏掉补签,
+        # 于是本机打包时封进包的还是未签名的 PE (且没有任何提示)。
+        if ($rc -eq 0 -and $script:SignRequested -and $fwd -match '^(d?(1|m[1-4])|release|dev)$') {
+            $p = if ($fwd -eq 'dev' -or $fwd -like 'd*') { 'dev' } else { 'release' }
             if (-not (Invoke-SignArtifacts @((Out-For $p)) "$p 产物 (远程编译 → 本机签名)")) { return 1 }
         }
+
+        # 补签之后再打包, 顺序不可颠倒: 反过来会把未签名的 PE 封进压缩块, 事后补签
+        # 够不着包内文件 —— 拿到的是「签名完好、内容全裸」的包, 而且不会报错。
+        if ($rc -eq 0 -and $pack) { return (Dispatch $pack $arg) }
         return $rc
     }
     switch ($cmd) {
