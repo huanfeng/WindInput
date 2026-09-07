@@ -62,7 +62,104 @@ pub struct FilterOutcome {
 /// 对外公开的理由：emoji 扩展的「列表末尾」档要落在**常用候选之后、生僻候选之前**，
 /// 判据必须与过滤器的「什么算常用」逐字一致，否则两边对同一条候选的归类会分叉。
 pub fn is_common_like(c: &Candidate) -> bool {
-    c.is_common || c.is_phrase || c.is_command || c.is_group
+    c.is_common || is_user_authored(c)
+}
+
+/// 用户**自己配出来的**候选：短语、命令、短语分组。
+///
+/// 抽成独立函数是因为它有两个语义不同的消费者，而两者只在这三项上重合：
+///
+/// - [`is_common_like`]（检索范围过滤）在此之上还要或上 `is_common`；
+/// - [`word_scope_admits`]（字词范围）**恰恰不能或上** `is_common`——常用**词**
+///   （「中国」「时候」）同样 `is_common = true`，带上它单字模式就整个失效了。
+///
+/// ⇒ ★ 直接把 `is_common_like` 当豁免判据用是错的。两个过滤器问的是不同的问题
+/// （「这条算不算常用」 vs 「这条是不是用户自己配的」），只是答案在这三项上碰巧一致。
+pub fn is_user_authored(c: &Candidate) -> bool {
+    c.is_phrase || c.is_command || c.is_group
+}
+
+/// 字词范围（`word_scope`）：候选里出单字、出词组，还是两者都出。
+///
+/// 五笔系输入法的传统功能（极点 / 万能 / QQ 五笔的「字词 / 单字 / 词组」三态）。
+/// [`Char`](Self::Char) 的用途不止「练习拆字」：五笔单字恒 ≤ 全码长，只出单字时
+/// 「满码唯一即上屏」的成立率大幅提高，用户可以不看候选窗连续敲——这是它对码表方案的
+/// 主要价值，也是拼音（没有定长）默认不开的原因。
+///
+/// `Default` 取 [`All`](Self::All)，**与 [`from_config`](Self::from_config) 的未知值
+/// 回退同源**——理由同 [`FilterMode`]：两处若给出不同的「默认」，会出现「没配」与
+/// 「配错了」表现不一致，而这种差异极难被想到。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WordScope {
+    /// 字与词都出（出厂）。
+    #[default]
+    All,
+    /// 只出单字。
+    Char,
+    /// 只出词组。
+    Phrase,
+}
+
+impl WordScope {
+    /// 从配置值（`word_scope`）解析。未知值一律回退 [`All`](Self::All)——配置是用户
+    /// 可手改的文本，拼错不该让候选列表凭空少掉一半。故不实现 `FromStr`（那要求返回
+    /// `Result`），命名与 [`as_config`](Self::as_config) 对称，同 [`FilterMode`]。
+    pub fn from_config(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "char" => Self::Char,
+            "phrase" => Self::Phrase,
+            _ => Self::All,
+        }
+    }
+
+    /// 配置值。与 [`from_config`](Self::from_config) 成对：运行时切换要能反向取到字符串
+    /// （设置页回显、日志、状态泡文案）。
+    pub fn as_config(&self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Char => "char",
+            Self::Phrase => "phrase",
+        }
+    }
+
+    /// 是否「不施加任何限制」。热路径上用它短路，省掉逐候选的字素簇切分。
+    pub fn is_all(&self) -> bool {
+        matches!(self, Self::All)
+    }
+}
+
+/// 单条候选在给定字词范围下是否放行。
+///
+/// # 豁免：短语 / 命令 / 分组照常显示
+///
+/// 2026-09-07 用户拍板。字词范围管的是**词库**出什么，而这三类是用户自己配出来的
+/// 快捷方式（`fj` → 一整段文本）——不该因为开了单字模式就整个消失。判据走
+/// [`is_user_authored`]，⛔ **不是** [`is_common_like`]（那个会连常用词一起豁免，
+/// 单字模式当场失效）。
+///
+/// # 「一个字」按字素簇算
+///
+/// 走 [`crate::single_markable_char`]（UAX #29），故 `⚽️`(2 码位)、`👨‍👩‍👧`(5 码位)
+/// 都算一个字。⛔ 别退回 `chars().count() == 1` 去数码位——issue #83 的教训是逐条
+/// 列举 Unicode 规则必随版本静默漏一类。
+///
+/// # 两态互补是刻意的
+///
+/// 豁免项之外，[`Char`](WordScope::Char) 放行的与 [`Phrase`](WordScope::Phrase) 放行的
+/// **恰好互补**（判据是同一个 `is_some()` 的正反两面）。于是用户在两态间来回切换时，
+/// 不会有候选两边都不出现——那种「切过去没有、切回来也没有」的洞最难被报告。
+/// 空串与纯空白候选是唯一的例外：它们在 `Char` 下被 `is_markable` 拒绝、在 `Phrase`
+/// 下作为「非单字」放行。正常列表里不存在这种候选，故不为它专门开一条判据。
+pub fn word_scope_admits(c: &Candidate, scope: WordScope) -> bool {
+    if scope.is_all() || is_user_authored(c) {
+        return true;
+    }
+    let single = crate::single_markable_char(&c.text).is_some();
+    match scope {
+        WordScope::All => true,
+        WordScope::Char => single,
+        WordScope::Phrase => !single,
+    }
 }
 
 /// 按模式过滤候选词
@@ -409,5 +506,131 @@ mod tests {
             FilterMode::Smart,
         );
         assert!(out.iter().any(|c| c.text == "佢"));
+    }
+
+    // ── 字词范围（word_scope）─────────────────────────────────────────────
+    mod word_scope {
+        use super::*;
+
+        fn admits(text: &str, scope: WordScope) -> bool {
+            word_scope_admits(&cand(text, "x", CandidateSource::CodeTable, false), scope)
+        }
+
+        #[test]
+        fn all_admits_everything() {
+            for t in ["大", "大家", "", "⚽️"] {
+                assert!(admits(t, WordScope::All), "All 档不该滤掉任何东西：{t:?}");
+            }
+        }
+
+        #[test]
+        fn char_keeps_single_and_drops_words() {
+            assert!(admits("大", WordScope::Char));
+            assert!(!admits("大家", WordScope::Char));
+            assert!(!admits("大家好", WordScope::Char));
+        }
+
+        #[test]
+        fn phrase_keeps_words_and_drops_single() {
+            assert!(!admits("大", WordScope::Phrase));
+            assert!(admits("大家", WordScope::Phrase));
+        }
+
+        /// 「一个字」按**字素簇**算，不按码位数。
+        ///
+        /// ⛔ 判据退回 `chars().count() == 1` 的话这一条会红：`⚽️` 是 2 码位、
+        /// `👨‍👩‍👧` 是 5 码位，屏幕上却都是一个图形。同 `single_markable_char` 的文档。
+        #[test]
+        fn char_counts_grapheme_clusters_not_code_points() {
+            for t in ["⚽️", "👍🏻", "👨‍👩‍👧", "🇨🇳", "1️⃣"] {
+                assert!(
+                    admits(t, WordScope::Char),
+                    "{t:?} 在屏幕上是一个字，单字档应放行"
+                );
+            }
+        }
+
+        /// 短语 / 命令 / 分组豁免：用户自己配的快捷方式不受字词范围管辖。
+        #[test]
+        fn user_authored_candidates_are_exempt_in_both_scopes() {
+            let mut phrase = cand("今天天气不错", "fj", CandidateSource::Phrase, false);
+            phrase.is_phrase = true;
+            let mut command = cand("重启服务", "cc", CandidateSource::None, false);
+            command.is_command = true;
+            let mut group = cand("符号", "fh", CandidateSource::Phrase, false);
+            group.is_group = true;
+
+            for scope in [WordScope::Char, WordScope::Phrase] {
+                for c in [&phrase, &command, &group] {
+                    assert!(
+                        word_scope_admits(c, scope),
+                        "{:?} 档不该滤掉用户自己配的 {:?}",
+                        scope,
+                        c.text
+                    );
+                }
+            }
+        }
+
+        /// ★★★ 本轮最容易写错的一条：**常用词不豁免**。
+        ///
+        /// 豁免判据若图省事写成既有的 `is_common_like`（= `is_common ||` 那三项），
+        /// 常用**词**（「中国」「时候」——`mark_common` 对逐字皆常用的词同样置
+        /// `is_common = true`）会一并豁免，单字档就只剩生僻词被滤掉，**整个功能失效**
+        /// 而候选窗看着还挺正常。
+        ///
+        /// 变异验证：把 `word_scope_admits` 的豁免换成 `is_common_like`，本条精确红，
+        /// 上面那条 `user_authored_candidates_are_exempt_in_both_scopes` 照样绿。
+        #[test]
+        fn common_words_are_not_exempt() {
+            let common_word = cand("中国", "x", CandidateSource::CodeTable, true);
+            assert!(
+                !word_scope_admits(&common_word, WordScope::Char),
+                "常用词也是词，单字档必须滤掉——豁免判据不能带上 is_common"
+            );
+
+            let common_char = cand("大", "x", CandidateSource::CodeTable, true);
+            assert!(
+                word_scope_admits(&common_char, WordScope::Char),
+                "常用字照留（反向对照，防止把上一条写成「凡 is_common 皆滤」）"
+            );
+        }
+
+        /// 豁免项之外，两档**互补**：切过去没有、切回来也没有的候选不存在。
+        #[test]
+        fn char_and_phrase_partition_the_list() {
+            for t in ["大", "大家", "⚽️", "a", "abc"] {
+                let c = cand(t, "x", CandidateSource::CodeTable, false);
+                assert_ne!(
+                    word_scope_admits(&c, WordScope::Char),
+                    word_scope_admits(&c, WordScope::Phrase),
+                    "{t:?} 在两档里的归属应恰好互补"
+                );
+            }
+        }
+
+        /// 未知值回退 `All`，且与 `Default` 同源——两处给出不同的默认会让「没配」
+        /// 与「配错了」表现不一致。同 `FilterMode::from_config`。
+        #[test]
+        fn from_config_falls_back_to_all() {
+            assert_eq!(WordScope::from_config("char"), WordScope::Char);
+            assert_eq!(WordScope::from_config(" PHRASE "), WordScope::Phrase);
+            assert_eq!(WordScope::from_config("all"), WordScope::All);
+            assert_eq!(WordScope::from_config("single"), WordScope::All);
+            assert_eq!(WordScope::from_config(""), WordScope::All);
+            assert_eq!(
+                WordScope::default(),
+                WordScope::from_config("no-such-value")
+            );
+        }
+
+        /// `as_config` 与 `from_config` 成对：设置页回显与状态泡文案都要反向取字符串，
+        /// 断链会让「切换了但界面没变」。
+        #[test]
+        fn as_config_round_trips() {
+            for scope in [WordScope::All, WordScope::Char, WordScope::Phrase] {
+                assert_eq!(WordScope::from_config(scope.as_config()), scope);
+            }
+        }
     }
 }

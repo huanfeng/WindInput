@@ -570,6 +570,18 @@ impl Coordinator {
             // 软键盘不是「模式」，没有编码缓冲也不进 ModeKind——直接开关面板即可。
             // 状态推送由按键路径顶层的 SoftKeyboardPushOnDrop 兜底。
             BoundAction::SoftKeyboard(page) => Some(self.toggle_softkeyboard(page.as_deref())),
+            // 字词范围：与软键盘同类，切的是一个状态，不进 ModeKind、没有编码缓冲。
+            //
+            // **恒吞键**——本动作没有门卫（任何方案、任何时候都切得动），不存在
+            // 「配了个不可用的目标」那种要把键还回去的情形。
+            //
+            // 空缓冲态下状态泡是**唯一**的反馈（没有候选窗可看），故必须弹。
+            BoundAction::WordScope(a) => {
+                if let Some(label) = self.apply_word_scope_action(state, *a) {
+                    self.show_tip_locked(state, label);
+                }
+                Some(KeyAction::Consumed)
+            }
             BoundAction::TempPinyin => {
                 let target = self.engine_mgr.temp_pinyin_target()?;
                 state.active = Some(ModeKind::TempPinyin);

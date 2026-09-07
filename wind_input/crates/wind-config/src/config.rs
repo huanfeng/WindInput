@@ -1197,6 +1197,12 @@ pub enum BoundAction {
     Mix(String),
     /// 进指定特殊模式（携带实例 id）。
     Special(String),
+    /// 切换字词范围（只出单字 / 只出词组 / 都出 / 循环 / 回落配置）。载荷见
+    /// [`WordScopeAction`]。
+    ///
+    /// 它切的是**内存临时态**，不写配置——与同族的 `toggle_schema` 一样是「此刻的动作」，
+    /// 而不是「改一项设置」。切方案即失效（见 `Coordinator::sync_schema_scope`）。
+    WordScope(WordScopeAction),
     /// 切到指定方案，**再按回到来源**（携带目标方案 id）。
     ///
     /// 往返语义由**运行时来源**兜底，不要求目标方案配对称的绑定。
@@ -1320,6 +1326,15 @@ impl BoundAction {
                 Self::SoftKeyboard(Some(id.to_string()))
             };
         }
+        // 字词范围 `word_scope:<档位|cycle>`。⚠️ 载荷写错落 `None` 而不是回落某个档位：
+        // 静默降级会让 `word_scope:single` 这种拼错表现成「切了但档位不对」，
+        // 那比「这个键没绑上」更难倒推。
+        if let Some(rest) = s.strip_prefix("word_scope:") {
+            return match WordScopeAction::parse_payload(rest) {
+                Some(a) => Self::WordScope(a),
+                None => Self::None,
+            };
+        }
         let lower = s.to_lowercase();
         match lower.as_str() {
             "temp_pinyin" => Self::TempPinyin,
@@ -1397,6 +1412,16 @@ pub enum SessionAction {
     /// 载荷用「第几个」而非内部的 0-based 偏移：配置是给人读的，`select_candidate:2`
     /// 一眼就是「次选键」。转换成偏移在消费点做一次即可。
     SelectCandidate(u8),
+    /// 切换字词范围。**动词与载荷都与 [`BoundAction::WordScope`] 逐字一致**。
+    ///
+    /// 两张表都有它，是因为用户两种态下都想按：`key_actions` 那张表只解析得出符号键、
+    /// 字母 z 与修饰键，Tab / 翻页键那一批要靠本表才表达得出来（同 `aux_code` 的处境，
+    /// 见 [`Self::AuxCode`] 的说明）。
+    ///
+    /// ⚠️ 只在一张表里加是**错的**：另一张表里写同一个动词会落 `None`，表现成「这个键
+    /// 没绑上」——而用户只是把配置从一张表挪到了另一张。这条纪律见
+    /// [`Self::parse`] 里 `aux_code` 那一行的注释。
+    WordScope(WordScopeAction),
     /// 以词定字：取当前高亮候选词的第 N 个字（**N 从 1 起**）。收编自 `keys.select_char_keys`。
     SelectChar(u8),
     /// 进辅助码筛选：对已出的候选按字形码二次过滤。
@@ -1491,6 +1516,14 @@ impl SessionAction {
                 _ => Self::None,
             };
         }
+        // 字词范围。动词与载荷须与 `BoundAction::parse` 里那一段**逐字一致**，
+        // 否则用户把配置从一张表挪到另一张就静默失效。
+        if let Some(rest) = t.strip_prefix("word_scope:") {
+            return match WordScopeAction::parse_payload(rest) {
+                Some(a) => Self::WordScope(a),
+                None => Self::None,
+            };
+        }
         match t.as_str() {
             "page_prev" => Self::PagePrev,
             "page_next" => Self::PageNext,
@@ -1515,7 +1548,10 @@ impl SessionAction {
     /// ★ 判据挂在**动作**上而不是写在消费点：消费点有三个（主输入 / mix / 候选导航），
     /// 写在那里就要维护三份一致的守卫，而这类「三处必须一致」的约束本仓已栽过四次。
     pub fn requires_candidates(&self) -> bool {
-        !matches!(self, Self::None | Self::Cancel)
+        // `WordScope` 与 `Cancel` 同侧：切档位在「打了码还没出候选」时**恰恰最该生效**
+        // ——单字档下某个码本来就可能一条候选都不剩，那时按键若被判成「无事可做」而放行，
+        // 用户就再也切不回去了。
+        !matches!(self, Self::None | Self::Cancel | Self::WordScope(_))
     }
 
     /// 选中第几个候选（1 起）——非选词动词返回 `None`。
@@ -1576,6 +1612,7 @@ impl std::fmt::Display for SessionAction {
             Self::SelectChar(n) => write!(f, "select_char:{n}"),
             Self::AuxCode(AuxCodeShare::Solo) => f.write_str("aux_code"),
             Self::AuxCode(AuxCodeShare::PageNext) => f.write_str("aux_code:page_next"),
+            Self::WordScope(a) => write!(f, "word_scope:{}", a.as_payload()),
         }
     }
 }
@@ -2861,10 +2898,129 @@ fn default_assoc_hint() -> String {
     "联想输入".to_string()
 }
 
+/// **方案级**字词范围意图（`[candidate] word_scope`）。
+///
+/// - `Follow`（出厂）：跟随全局 `input.word_scope`——用户改全局，本方案跟着改。
+/// - `All` / `Char` / `Phrase`：本方案覆盖全局。取值词汇与全局**逐字一致**，让
+///   「全局 / 方案」在用户眼里是同一件事的两个层级，而不是两套发明出来的键名
+///   （同 [`LayoutIntent`] 与 `ui.candidate.layout` 的关系）。
+///
+/// # ⛔ 内置方案一项都不要声明
+///
+/// 「五笔常开、拼音不开」是**文档与设置页引导**该解决的事，不是靠出厂值。方案级
+/// `Some(_)` 恒覆盖全局 ⇒ 给 wubi86 预置 `char` 的话，五笔用户在**全局页**把这一项调成
+/// 任何值都纹丝不动，而「方案自带」那个标记藏在方案设置里，他不会去找——从他的角度这就
+/// 是「设置项坏了」。`short_code_yield_level` 在 0.119 恰好这么栽过一次并于当天撤回，
+/// 判据已成文：**用户在全局页做的事，必须能作用到出厂方案上。**
+///
+/// ⚠️ 这条只约束**内置**方案。第三方方案作者写这一项完全正当（用户装那张码表时就接受了
+/// 作者的安排），别推广成「方案文件不许写这一项」。
+///
+/// # 为什么是枚举而不是 `Option<String>`
+///
+/// 强类型 + `tolerant_de` 才能让写错的值进 `degraded_items` ⇒ toast 告诉用户「这项没生效」。
+/// 写成字符串就只能在读端静默回退，用户的处境是「我写的这项没反应，也没人告诉我」。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WordScopeIntent {
+    /// 跟随全局 `input.word_scope`（出厂）。
+    #[default]
+    Follow,
+    /// 字与词都出。
+    All,
+    /// 只出单字。
+    Char,
+    /// 只出词组。
+    Phrase,
+}
+
+impl WordScopeIntent {
+    /// 本意图对应的配置值；`Follow` 返回 `None`（＝不表态，由调用方回落全局）。
+    ///
+    /// 返回 `&str` 而不是 `wind_candidate::WordScope`：wind-config **不依赖**
+    /// wind-candidate（`filter_mode` 是 `String` 也正是这个原因）。消费端写
+    /// `intent.as_config().map(WordScope::from_config).unwrap_or(global)`，
+    /// 值域的单一真相源仍在 `WordScope::from_config` 那一处。
+    pub fn as_config(&self) -> Option<&'static str> {
+        match self {
+            Self::Follow => None,
+            Self::All => Some("all"),
+            Self::Char => Some("char"),
+            Self::Phrase => Some("phrase"),
+        }
+    }
+
+    /// 从配置值解析；**未知值返回 `None`**（而不是回落 `Follow`）。
+    ///
+    /// ⚠️ 与 `WordScope::from_config` 的「未知回退 all」刻意不同，因为调用语境不同：
+    /// 那个解释的是**已在配置文件里**的值，回落才能保住输入法可用；本函数服务的是
+    /// 按键动词（`word_scope:<档位>`）的解析，未知载荷必须落 `BoundAction::None`
+    /// 才符合「写错的动词不静默变成别的功能」这条全表通用的策略。
+    pub fn from_config(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "follow" => Some(Self::Follow),
+            "all" => Some(Self::All),
+            "char" => Some(Self::Char),
+            "phrase" => Some(Self::Phrase),
+            _ => None,
+        }
+    }
+}
+
+/// `word_scope:<载荷>` 按键动词的载荷（[`BoundAction::WordScope`] /
+/// [`SessionAction::WordScope`] 共用）。
+///
+/// 载荷复用 [`WordScopeIntent`] 而不是另起一套字符串：方案配置里的 `follow`（不表态、
+/// 跟随下一层）与热键里的 `follow`（清掉临时态、回落配置层）是**同构**的语义，
+/// 用户在两处看到同一个词表达同一件事。多出来的只有 `cycle`，它在配置层没有对应物
+/// （配置是一个状态，不是一个动作）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordScopeAction {
+    /// 直达指定档位；[`WordScopeIntent::Follow`] = 清掉临时态，回到配置层的档位。
+    Set(WordScopeIntent),
+    /// 按 `WORD_SCOPES` 表序切到下一档。
+    ///
+    /// ★ 它是**唯一**只能用一个键表达全部档位的写法，也是唯一无法由 `Set` 组合出来的
+    /// 动作——反过来 `Set(Follow)` 也无法由 `cycle` 转出来（循环只在三个具体档位间走，
+    /// 永远回不到「没有临时态」）。两者都不冗余。
+    Cycle,
+}
+
+impl WordScopeAction {
+    /// 解析 `word_scope:` 之后的那一段；未知载荷返回 `None`。
+    pub fn parse_payload(rest: &str) -> Option<Self> {
+        let t = rest.trim().to_ascii_lowercase();
+        if t == "cycle" {
+            return Some(Self::Cycle);
+        }
+        WordScopeIntent::from_config(&t).map(Self::Set)
+    }
+
+    /// 配置值（不含 `word_scope:` 前缀）。与 [`Self::parse_payload`] 成对——设置页要能
+    /// 把用户选的动作写回配置文本。
+    pub fn as_payload(&self) -> &'static str {
+        match self {
+            Self::Cycle => "cycle",
+            Self::Set(i) => i.as_config().unwrap_or("follow"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
     #[serde(default = "default_filter_mode")]
     pub filter_mode: String,
+    /// **字词范围**：候选里出单字、出词组，还是两者都出（`all` / `char` / `phrase`）。
+    ///
+    /// 五笔系输入法的传统功能。与相邻的 [`Self::filter_mode`]（检索范围，管「哪些字算
+    /// 常用」）是两根**正交**的轴：那个按字符常用度裁剪，这个按候选长度裁剪，同时施加
+    /// 时依次生效。值域解释器是 `wind_candidate::WordScope::from_config`（未知值回退
+    /// `all`），方案级覆盖见 [`WordScopeIntent`]。
+    ///
+    /// ⚠️ 运行时热键切换**不写回本项**：那是内存里的临时态，切方案或重启即回到本值
+    /// （2026-09-07 用户拍板）。故本项恒是「用户配的初值」，读它得不到「此刻在哪一档」。
+    #[serde(default = "default_word_scope")]
+    pub word_scope: String,
     /// 检索范围放宽（智能档增强）。
     #[serde(default)]
     pub scope_relax: ScopeRelaxConfig,
@@ -2959,6 +3115,7 @@ impl Default for InputConfig {
     fn default() -> Self {
         Self {
             filter_mode: "smart".to_string(),
+            word_scope: default_word_scope(),
             scope_relax: ScopeRelaxConfig::default(),
             enter_behavior: "commit".to_string(),
             space_on_empty_behavior: "commit".to_string(),
@@ -5236,6 +5393,15 @@ fn default_english_smart_chars() -> String {
 
 fn default_filter_mode() -> String {
     "smart".to_string()
+}
+
+/// 字词范围的**全局**出厂值是「字词都出」。
+///
+/// 与 `default_short_code_yield_level` 同一条论证：全局段是所有方案共用的基线，而
+/// 「只出单字」是五笔这类定长码表才成立的手感（单字恒 ≤ 全码长 ⇒ 满码唯一即上屏的
+/// 成立率大幅提高）。拼音没有定长，默认开会让人以为词库坏了。
+fn default_word_scope() -> String {
+    "all".to_string()
 }
 
 fn default_smart_punct_list() -> String {
@@ -9981,6 +10147,95 @@ smart_method = "delete_replace"
              理由见 docs/design/codetable-short-code-yields-full.md §6.3",
             schema.engine.codetable.short_code_yield_level
         );
+    }
+
+    /// 取值守门：字词范围的**全局**出厂值是「字词都出」。
+    ///
+    /// 翻这个值不会有任何别的测试变红——它是产品决策，本条是它唯一的钉子。
+    #[test]
+    fn word_scope_defaults_to_all_globally() {
+        assert_eq!(
+            InputConfig::default().word_scope,
+            "all",
+            "字词范围的全局出厂应为 all；要改先读 default_word_scope 的注释"
+        );
+    }
+
+    /// 同源守门：L1（`InputConfig::default()`）与 L2（`data/config.toml`）必须一致。
+    /// 漂移的后果同上面那条：单测跑在现实中不存在的配置下，且 `preset_for_pruning`
+    /// 会把用户显式设的值误判成默认而删掉。缺 `data/` 时静默跳过（全仓惯例）。
+    #[test]
+    fn word_scope_l1_and_l2_agree() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../data")
+            .join("config.toml");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("跳过 word_scope_l1_and_l2_agree：{} 不存在", path.display());
+            return;
+        };
+        let v: toml::Value = toml::from_str(&text).expect("data/config.toml 应能解析");
+        let l2 = v
+            .get("input")
+            .and_then(|s| s.get("word_scope"))
+            .and_then(toml::Value::as_str)
+            .expect("data/config.toml 应显式写出 input.word_scope");
+        assert_eq!(
+            l2,
+            InputConfig::default().word_scope,
+            "字词范围的 L1 与 L2 默认值漂移了"
+        );
+    }
+
+    /// 出厂方案守门：**所有内置方案**都不声明字词范围，一律跟随全局。
+    ///
+    /// 与 `wubi86_schema_does_not_declare_short_code_yield` 同一条判据：方案级
+    /// `Follow` 之外的任何取值恒压过全局 ⇒ 内置方案给自己配特例，等于把全局页那一项
+    /// 对它变成摆设，而用户并不知道「方案自带」这回事。
+    ///
+    /// ⚠️ 「五笔常开、拼音不开」是**文档与设置页引导**的事，不是出厂值的事。看到本条红了
+    /// 而想给 wubi86 补一个 `char` 之前，先读 `WordScopeIntent` 的文档——0.119 的
+    /// `short_code_yield_level` 正是这么栽的，当天撤回。
+    ///
+    /// 遍历全部方案而非只查 wubi86：本字段与引擎类型无关，拼音方案同样配得了。
+    /// 断言走真实反序列化，故「删掉 / 注释掉 / 键名写错」三者等价，都是 `Follow`；
+    /// 判 `== Follow` 而不是比对某个具体值，是为了让补上**任何**档位都变红。
+    #[test]
+    fn factory_schemas_do_not_declare_word_scope() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data/schemas");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!(
+                "跳过 factory_schemas_do_not_declare_word_scope：{} 不存在",
+                dir.display()
+            );
+            return;
+        };
+        let mut checked = 0usize;
+        for e in entries.flatten() {
+            let path = e.path();
+            if !path.to_string_lossy().ends_with(".schema.toml") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let schema: crate::schema::Schema = match toml::from_str(&text) {
+                Ok(s) => s,
+                // 解析不了是别的测试的地盘（`read_schema` 有段级降级），本条只管字段取值。
+                Err(_) => continue,
+            };
+            assert_eq!(
+                schema.candidate.word_scope,
+                WordScopeIntent::Follow,
+                "出厂方案 {} 不该自带字词范围（实际 {:?}）——它会让全局页那一项对该方案失效。\
+                 理由见 WordScopeIntent 的文档",
+                path.display(),
+                schema.candidate.word_scope
+            );
+            checked += 1;
+        }
+        // 反向保证：目录改名或后缀判据失效时，本测试不得退化成空跑而静默变绿。
+        assert!(checked >= 3, "只扫到 {checked} 个方案文件，判据多半失效了");
     }
 
     /// 出厂守门：内置拼音方案**不得**自带 `[engine.pinyin].separator`。

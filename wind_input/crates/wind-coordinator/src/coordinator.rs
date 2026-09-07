@@ -319,6 +319,18 @@ pub(crate) const FILTER_MODES: [(wind_candidate::FilterMode, &str); 3] = [
     (wind_candidate::FilterMode::Gb18030, "全部字符"),
 ];
 
+/// 字词范围三档：(档位, 菜单/状态泡显示名)。**顺序即循环切换的顺序**
+/// （`word_scope:cycle` 按本表下一项走），故 `All` 排在中间没有意义——用户从「都出」
+/// 出发，最常去的是「只出单字」。
+///
+/// ⚠️ 与 [`FILTER_MODES`] 是两张表：那三档是检索范围（按字符常用度），本表是字词范围
+/// （按候选长度），两根轴正交、可同时生效。合成一张菜单会让用户以为它们互斥。
+pub(crate) const WORD_SCOPES: [(wind_candidate::WordScope, &str); 3] = [
+    (wind_candidate::WordScope::All, "字词都出"),
+    (wind_candidate::WordScope::Char, "只出单字"),
+    (wind_candidate::WordScope::Phrase, "只出词组"),
+];
+
 /// 重启信号通道（对齐 Go restartRequestCh）：菜单"重启服务"→ main 重拉进程。
 static RESTART_TX: std::sync::OnceLock<std::sync::mpsc::Sender<()>> = std::sync::OnceLock::new();
 
@@ -426,6 +438,32 @@ pub(crate) struct State {
     /// 排到第 1 页第 2 位），视口要么跳回页首、要么原地不动，两种都突兀。菜单切换是全局持久
     /// 的换档，末页翻页是临时的渐进探索——语义不同，不必对齐呈现。
     pub(crate) scope_relaxed: bool,
+    /// 字词范围的**运行时临时态**（热键 / 工具栏 / 托盘切换的结果）。
+    ///
+    /// `None` = 用户本次没切过，走配置层（方案级 `[candidate] word_scope` → 全局
+    /// `input.word_scope`）。取值收口在 [`Coordinator::effective_word_scope`]。
+    ///
+    /// # 只在内存，绝不写配置（2026-09-07 用户拍板）
+    ///
+    /// 与 `scope_relaxed` 同族、与 `set_filter_mode` 相反：后者切一次就写回
+    /// `input.filter_mode`。这里不写盘的直接好处是**不必碰 `schema_overrides/{id}.toml`
+    /// 那条写盘链**（本项是方案级配置，持久化就得往那儿写，还要登记 `SideCommitter`
+    /// 并处理「设置页正开着时被后台改写」）。
+    ///
+    /// # ★ 它压过配置的**一切**层级，包括临时拼音
+    ///
+    /// 配置层跟数据归属方案（见 [`wind_config::schema::CandidateSpec::word_scope`]），
+    /// 于是五笔方案开了单字档，临拼里照常出词。而本字段是「用户此刻的意图」——他刚按下
+    /// 热键，就该立刻生效，不该再问一遍「你现在打的算哪个方案的数据」。
+    /// 两者判据不同是刻意的，同 `[punct]` 段 `mode` 与 `custom_mappings` 的先例。
+    ///
+    /// # 失效点：切方案时清空
+    ///
+    /// 收口在 `sync_schema_scope`（代际驱动，与 `punct_before_schema` 同批）——它是本仓
+    /// 唯一能覆盖全部五条切方案路径的地方，命令式地在切方案处逐个清必然漏接。
+    /// ⚠️ 与 `scope_relaxed` 的失效点**刻意不同**：那个按「缓冲清空」失效（一次组合内
+    /// 的探索），本项要跨组合保持到用户切走方案为止。
+    pub(crate) word_scope_override: Option<wind_candidate::WordScope>,
     /// 用户是否开启常驻工具栏（菜单开关；与“当前是否激活”正交）。
     pub(crate) toolbar_visible: bool,
     /// 本输入法当前是否处于激活态：IME_ACTIVATED/FocusGained 置真；
@@ -2177,6 +2215,8 @@ impl Coordinator {
                 s2t_enabled: config.input.s2t.enabled,
                 filter_mode: wind_candidate::FilterMode::from_config(&config.input.filter_mode),
                 scope_relaxed: false,
+                // 启动时没有临时态：字词范围走配置层（方案级 → 全局）。热键切过才置 Some。
+                word_scope_override: None,
                 toolbar_visible: config.ui.toolbar.visible, // 启动初值来自配置(运行时可菜单切换)
                 ime_active: false, // 启动未激活：工具栏待 IME_ACTIVATED/FocusGained 才显示
                 has_edit_context: false, // 同上：焦点尚未落到任何可编辑控件
@@ -4304,6 +4344,20 @@ impl Coordinator {
                     wind_config::AuxCodeShare::PageNext => keymap::NavAction::PageNext,
                 }
             }
+            // 字词范围：原地换档并重建候选，**不顶字、不退模式**——用户切的是「这一码
+            // 出什么」，正在打的这串码要留着。恒吞键（走到这里说明用户明确绑了它）。
+            //
+            // 状态泡走 `show_tip_locked`：本函数持着 state 锁，`show_tip` 会重入取锁。
+            // ⚠️ 换档后候选可能整个变空（单字档下这个码一个单字都没有），那时**只剩**
+            // 状态泡这一个反馈——不能因为「候选窗自己会变，用户看得见」就省掉它。
+            wind_config::SessionAction::WordScope(a) => {
+                if let Some(label) = self.apply_word_scope_action(state, a) {
+                    self.show_tip_locked(state, label);
+                }
+                // `Consumed` = 吞键、组合区不变（同翻页与移高亮的结局）：切档位只换候选
+                // 内容，用户正在打的那串码要原样留着。
+                return Some(KeyAction::Consumed);
+            }
             // 表里只存启用项（`ConfigBundle::build` 过滤过），None 到不了这里。
             wind_config::SessionAction::None => return None,
         };
@@ -5771,6 +5825,109 @@ impl Coordinator {
         self.show_tip(label);
     }
 
+    /// 切换字词范围（只出单字 / 只出词组 / 都出），以新范围重过滤并刷新候选。
+    ///
+    /// # ⚠️ 与 [`Self::set_filter_mode`] 的关键区别：**不写配置**
+    ///
+    /// 那个切一次就写回 `input.filter_mode`；本项只改内存里的
+    /// [`State::word_scope_override`]，重启或切方案即回到配置值（2026-09-07 用户拍板）。
+    /// 照抄那边加一行 `set_user_string` 是错的——本项是**方案级**配置，写盘要落到
+    /// `schema_overrides/{id}.toml`，那是另一条链（须登记 `SideCommitter`）。
+    ///
+    /// 目标档位与当前**生效**档位相同时直接返回，故「方案配的就是 char，用户又按了一次
+    /// 切到 char」不会平白留下一个临时态——那会让随后的切方案清空变成用户可感知的跳变。
+    pub fn set_word_scope(&self, scope: wind_candidate::WordScope) {
+        let tip = {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.set_word_scope_in(&mut s, Some(scope))
+        };
+        if let Some(label) = tip {
+            self.show_tip(label);
+        }
+    }
+
+    /// 持 state 锁的调用点用的本体。返回**要显示的状态泡文案**，`None` = 无变化。
+    ///
+    /// ⚠️ 状态泡刻意由调用方在**锁外**弹（`show_tip` 会走 UI 通道）。这与
+    /// `set_filter_mode` 里那句 `drop(s); self.show_tip(label);` 是同一条约束。
+    ///
+    /// `scope` 为 `None` = 清掉临时态、回落配置层（`word_scope:follow` 动词）。
+    pub(crate) fn set_word_scope_in(
+        &self,
+        state: &mut State,
+        scope: Option<wind_candidate::WordScope>,
+    ) -> Option<&'static str> {
+        let before = self.effective_word_scope(state);
+        match scope {
+            Some(s) if before == s => return None, // 已在这一档，不留临时态
+            Some(s) => state.word_scope_override = Some(s),
+            // `take` 一步做两件事：清掉临时态，并在本来就没有时提前返回（无变化、不弹泡）。
+            None => {
+                state.word_scope_override.take()?;
+            }
+        }
+        let after = self.effective_word_scope(state);
+        if after == before {
+            return None; // 清临时态后恰好回到同一档：什么都没变，不弹泡
+        }
+        // 组合中：以新范围重建候选并刷新（与 `set_filter_mode` 同）。
+        if !state.input_buffer.is_empty() {
+            self.update_candidates(state);
+            self.notify_ui_update(state);
+        }
+        Some(
+            WORD_SCOPES
+                .iter()
+                .find(|(s, _)| *s == after)
+                .map(|(_, l)| *l)
+                .unwrap_or("字词都出"),
+        )
+    }
+
+    /// 按 [`WORD_SCOPES`] 的表序切到下一档（`word_scope:cycle` 的实现）。
+    ///
+    /// 从**当前生效**档位算起，而不是从临时态算起：临时态为 `None` 时用户看到的是配置
+    /// 档位，循环必须从他看见的那一档往下走，否则第一次按热键会跳到不相干的档。
+    pub fn cycle_word_scope(&self) {
+        let tip = {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.cycle_word_scope_in(&mut s)
+        };
+        if let Some(label) = tip {
+            self.show_tip(label);
+        }
+    }
+
+    /// 持 state 锁的循环切换本体。返回值语义同 [`Self::set_word_scope_in`]。
+    pub(crate) fn cycle_word_scope_in(&self, state: &mut State) -> Option<&'static str> {
+        let cur = self.effective_word_scope(state);
+        let idx = WORD_SCOPES.iter().position(|(s, _)| *s == cur).unwrap_or(0);
+        let next = WORD_SCOPES[(idx + 1) % WORD_SCOPES.len()].0;
+        self.set_word_scope_in(state, Some(next))
+    }
+
+    /// 执行一个字词范围按键动词（[`wind_config::WordScopeAction`]）。
+    ///
+    /// 三个消费点（`key_actions` 空缓冲 / `key_actions` 缓冲非空 / `session_actions`）
+    /// 共用这一处，免得三份 `match` 各自漂移——本仓「三处必须一致」的约束已栽过四次。
+    pub(crate) fn apply_word_scope_action(
+        &self,
+        state: &mut State,
+        action: wind_config::WordScopeAction,
+    ) -> Option<&'static str> {
+        match action {
+            wind_config::WordScopeAction::Cycle => self.cycle_word_scope_in(state),
+            // `Follow` 载荷 → `None` = 清临时态、回落配置层。值域的对应关系由
+            // `WordScopeIntent::as_config()` 给出（`Follow => None`），不在此另写一份。
+            wind_config::WordScopeAction::Set(intent) => self.set_word_scope_in(
+                state,
+                intent
+                    .as_config()
+                    .map(wind_candidate::WordScope::from_config),
+            ),
+        }
+    }
+
     /// 持久化简繁开关到 `config.input.s2t.enabled`（单一源：与设置页统一，reload 不会覆盖
     /// 菜单/热键选择）。菜单与热键两条切换路径共用，避免只改一处留下不对称。
     pub(crate) fn persist_s2t_enabled(&self, on: bool) {
@@ -6103,6 +6260,35 @@ impl Coordinator {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (s.caret_x, s.caret_y, s.caret_height)
         };
+        self.show_tip_at(text, raw_x, raw_y, raw_h);
+    }
+
+    /// **持 state 锁时**弹状态泡。
+    ///
+    /// 与 [`Self::show_tip`] 的唯一区别是 caret 从调用方已有的 `state` 里读，而不是自己
+    /// 再取一次 state 锁（本仓 state 锁**不可重入**，重入即死锁）。
+    ///
+    /// ⚠️ 锁序仍是 `state → last_valid_caret`（后者在 `resolve_caret_for_ui` 内取），
+    /// 与候选窗路径同向，不构成反序。`show_tip` 那句「先放锁再解析」说的是它自己没必要
+    /// 持着锁，不是「持锁调用会反序」。
+    pub(crate) fn show_tip_locked(&self, state: &State, text: &str) {
+        self.show_tip_at(text, state.caret_x, state.caret_y, state.caret_height);
+    }
+
+    /// 状态泡的发送本体（caret 由调用方给出）。**不取 state 锁**。
+    fn show_tip_at(&self, text: &str, raw_x: i32, raw_y: i32, raw_h: i32) {
+        let bundle = self.rt();
+        let si = &bundle.config.ui.status;
+        if !si.enabled {
+            return;
+        }
+        if let Some(reason) = self.ui_suppressed_by_host() {
+            debug!("status_tip 被压住: {reason}");
+            return;
+        }
+        if text.trim().is_empty() {
+            return;
+        }
         let (x, y, caret_height, _valid) = self.resolve_caret_for_ui(raw_x, raw_y, raw_h);
         // 常驻(always)→ duration_ms=0(UI 不自动隐藏);否则按 duration 自动隐藏。对齐 Go display_mode。
         let duration_ms = if si.display_mode.eq_ignore_ascii_case("always") {

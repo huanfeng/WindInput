@@ -407,6 +407,16 @@ exclude_blocks = []
 
 [input]
 filter_mode = "smart"
+# 字词范围：候选里出单字、出词组，还是都出。
+#   all     字与词都出（默认）
+#   char    只出单字。五笔常用——单字恒是定长码，满码唯一即上屏的机会大幅增多，
+#           可以不看候选窗连续敲；也用于练习拆字、录入人名与古文
+#   phrase  只出词组
+# 与上面的 filter_mode 是两回事：那个按字的常用度筛，这个按候选长短筛，可同时生效。
+# 短语、命令、快捷输入的候选不受本项管辖，任何档位下都照常显示。
+# 可在方案文件的 [candidate] 段单独配（多一个 follow = 跟随此处），也可绑热键随时切换
+# ——热键切的是临时态，重启或切方案后回到这里配的值。
+word_scope = "all"
 # 空码（打了码但一个候选都没有，多半是打错了）时，终结键怎么处置这串废码。
 #   enter_behavior           回车          commit | clear
 #   space_on_empty_behavior  空格          commit | clear
@@ -788,6 +798,10 @@ global_hotkeys = []
 #   softkeyboard:<面id>     开软键盘并直接切到那一面（面 id 见 system.softkeyboard.toml，
 #                           如 punct / num / math / greek）。已开着时按它只切面、不关闭，
 #                           所以给几个面各配一个键不会互相打架。
+#   word_scope:char         只出单字（五笔常用）。同族还有 :phrase 只出词组、:all 都出、
+#                           :cycle 三档循环、:follow 取消临时切换回到配置的档位。
+#                           切的是临时状态，不写配置——重启或切方案后回到 input.word_scope
+#                           （或方案 [candidate] word_scope）配的那一档。
 #   none                    禁用这个键。用来关掉**更低层**（本文件、或定制版的
 #                           data_custom/config.toml）预置的绑定：本表逐键深合并，
 #                           删掉一行压不住下层那行，写 none 才是「本层表态：别干活」。
@@ -816,6 +830,8 @@ key_actions = {}
 #           [schema.pinyin.aux_code].enabled、方案配了码表、且当前有候选，否则不吞键)
 #       aux_code:page_next(同上，但与下翻页共用一个键：能进辅助码就进、进不去就翻下一页。
 #           已经在辅助码里 / 辅助码没开 / 方案没配码表时，这个键就是个纯翻页键)
+#       word_scope:char / :phrase / :all / :cycle / :follow(切字词范围，动词与上面的
+#           key_actions 完全一样。按下即换档并就地重出候选，不会把正在打的码上屏)
 # 例（Tab 向下翻页、CapsLock 向上翻页）：
 #   session_actions = { tab = "page_next", "shift+tab" = "page_prev", capslock = "page_prev" }
 # 例（Tab 一键两用：第一次按进辅助码筛选，之后按继续翻页）：

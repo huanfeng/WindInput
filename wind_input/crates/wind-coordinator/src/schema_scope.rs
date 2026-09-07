@@ -54,6 +54,13 @@ impl Coordinator {
         state.schema_scope_gen = generation;
         // 布局手动值随代际失效。标点态不需要对应动作，理由见模块文档最后一节。
         state.layout_manual = None;
+        // 字词范围的临时态随代际失效：切走方案就回到新方案配的档位。
+        //
+        // ★ 这里**不需要** `punct_before_schema` 那种「保存原值」的配套：临时态本身就是
+        // `Option`，清成 `None` 即回落配置层，没有「被覆盖的原值存在哪」这个问题。
+        // 那条真机教训（`Follow` 退化成「保持上一个方案强加的值」）在此天然不成立——
+        // 它的成因是 `state.chinese_punct` 既是当前值又是唯一存储，本项两者是分开的。
+        state.word_scope_override = None;
         // 引号交替态随代际归位。`PunctuationConverter` 是 Coordinator 单例、跨方案共享，而
         // 左右形是**按方案取的**（方案 A 把 `"` 配成 `「」`、方案 B 用默认 `“”`）。不归位的话
         // 切过去第一次按引号可能直接拿到右形。
@@ -125,6 +132,31 @@ impl Coordinator {
         self.candidate_font_of(&state)
     }
 
+    /// 当前**生效**的字词范围（测试/诊断用）。三层折叠后的结果，见
+    /// [`Coordinator::effective_word_scope`]。
+    pub fn debug_effective_word_scope(&self) -> String {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.effective_word_scope(&state).as_config().to_string()
+    }
+
+    /// 配置层（**不含**临时态）里的全局字词范围（测试/诊断用）。
+    ///
+    /// 与 [`Self::debug_effective_word_scope`] 分开暴露是刻意的：「热键切换不写配置」
+    /// 这条契约，只有同时问得到「生效值」与「配置值」才断言得了。合成一个的话，
+    /// 一个把临时态写回配置的错误实现照样全绿。
+    pub fn debug_config_word_scope(&self) -> String {
+        self.rt().config.input.word_scope.clone()
+    }
+
+    /// 此刻有没有字词范围的临时态（测试/诊断用）。
+    pub fn debug_has_word_scope_override(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .word_scope_override
+            .is_some()
+    }
+
     /// 当前输入语境的候选**文字字族**覆盖（`[candidate] font_family`）；空 = 不覆盖。
     ///
     /// # ⚠️ 与同段的 `layout` 归属判据**刻意不同**
@@ -171,6 +203,42 @@ impl Coordinator {
             .effective_data_schema(state)
             .unwrap_or_else(|| self.engine_mgr.active_schema_id());
         self.engine_mgr.behavior_for(&id).candidate_text_orientation
+    }
+
+    /// 当前输入语境的**字词范围**（只出单字 / 只出词组 / 都出）。取值的唯一入口。
+    ///
+    /// 三层，**顺序不可换**：
+    ///
+    /// | 层 | 来源 | 归属判据 |
+    /// |---|---|---|
+    /// | ① 临时态 | `State::word_scope_override`（热键切的） | 无——压过一切 |
+    /// | ② 方案级 | `[candidate] word_scope` | [`Coordinator::effective_data_schema`] |
+    /// | ③ 全局 | `input.word_scope` | — |
+    ///
+    /// ★ **① 与 ② 的判据刻意不同**，这是本函数唯一需要小心的地方：②「这个码位出字还是
+    /// 出词」是数据属性，与同段的 `font_family` / `text_orientation` 同源，于是五笔方案
+    /// 配的单字档**管不到临时拼音**（临拼归 `pinyin` 桶）——那正是想要的，临拼本就是为了
+    /// 打主方案打不出的东西。而 ① 是用户此刻按下热键的意图，无条件生效，包括临拼里。
+    ///
+    /// ⚠️ 与 `candidate_font_of` 一样**逐次按键重算**，不能挂到 `sync_schema_scope` 那条
+    /// 代际驱动的路上：临英/临拼进出根本不改代际，挂上去 ② 那一层会整个失效。
+    pub(crate) fn effective_word_scope(&self, state: &State) -> wind_candidate::WordScope {
+        if let Some(scope) = state.word_scope_override {
+            return scope;
+        }
+        let id = self
+            .effective_data_schema(state)
+            .unwrap_or_else(|| self.engine_mgr.active_schema_id());
+        // 方案没表态（`Follow`）才回落全局。值域的单一真相源是 `WordScope::from_config`
+        // ——`WordScopeIntent::as_config` 交出的正是同一套字符串，故两层不可能各解释各的。
+        self.engine_mgr
+            .behavior_for(&id)
+            .word_scope
+            .as_config()
+            .map(wind_candidate::WordScope::from_config)
+            .unwrap_or_else(|| {
+                wind_candidate::WordScope::from_config(&self.rt().config.input.word_scope)
+            })
     }
 }
 

@@ -114,6 +114,14 @@ const EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear"];
 /// 是唯一解释器，未知值一律落到 `commit`。
 const PUNCT_EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear", "clear_no_input"];
 
+/// 字词范围（`input.word_scope`）。
+///
+/// ⚠️ 方案级同名键（`[candidate] word_scope`）的值域**多一个 `follow`**（＝跟随全局），
+/// 由 [`crate::config::WordScopeIntent`] 表达，不与本常量共用——同
+/// [`PUNCT_EMPTY_CODE_BEHAVIOR_VALUES`] 与 [`EMPTY_CODE_BEHAVIOR_VALUES`] 的关系。
+/// 全局层没有 `follow` 可跟，加进来只会造出一个指向自己的态。
+const WORD_SCOPE_VALUES: &[&str] = &["all", "char", "phrase"];
+
 /// 码表词频应用策略。
 const FREQ_STRATEGY_VALUES: &[&str] = &["top", "step", "position"];
 
@@ -296,6 +304,10 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.frequency.exclude_blocks", StrList),
     // -- input（输入行为）--
     f("input.filter_mode", Str),
+    // 字词范围。与 `filter_mode` 是两根正交的轴：那个按字符常用度裁剪，这个按候选长度裁剪。
+    // 方案级同名覆盖多一个 "follow" 态，故不与本处共用值域常量（同
+    // `PUNCT_EMPTY_CODE_BEHAVIOR_VALUES` 与 `EMPTY_CODE_BEHAVIOR_VALUES` 的关系）。
+    f("input.word_scope", Enum(WORD_SCOPE_VALUES)),
     // 检索范围放宽（智能档增强，见 docs/design/smart-filter-scope-relax.md）
     f("input.scope_relax.page_end_key", Bool),
     f("input.scope_relax.prefix", Str),

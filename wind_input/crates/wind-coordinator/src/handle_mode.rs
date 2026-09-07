@@ -515,6 +515,17 @@ impl Coordinator {
             }
             // 辅助码刻意**不顶字**：候选列表保持原状仅筛选，进入后原地过滤。见 `enter_aux_code`。
             BoundAction::AuxCode => self.enter_aux_code(state, key_code),
+            // 字词范围与辅助码**同族**：切的是「这一码出什么」，正在打的那串码要原样留着。
+            // ⛔ 别按临拼/mix 那样顶字重开——顶字会把用户想换个档位再看的那串码上屏，
+            // 而他要的恰恰是**换个档位重看这一码**。
+            //
+            // 换档后候选可能整个变空（单字档下该码无单字），那时只剩状态泡这一个反馈。
+            BoundAction::WordScope(a) => {
+                if let Some(label) = self.apply_word_scope_action(state, *a) {
+                    self.show_tip_locked(state, label);
+                }
+                Some(KeyAction::Consumed)
+            }
             BoundAction::Special(id) => {
                 let idx = self.special_mode_idx(id)?;
                 let schema = self.special_schema(idx)?;
