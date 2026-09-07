@@ -226,10 +226,14 @@ mod imp {
         /// 回退对象构建失败过。失败是持久性的（工厂拿不到 `IDWriteFactory2` 等），
         /// 不记就会每次绘制重建一遍 builder 与全部映射。换方案时随 `fallback` 一起复位。
         fallback_failed: std::cell::Cell<bool>,
-        /// 基准字族在各字号下的自然行高，供 [`Self::line_height_for`] 钉 UNIFORM 行距用。
-        /// 键 = (字号取整, base family)；与 `measure_cache` 同步清空（回退链换了度量口径就变）。
-        line_heights: RefCell<HashMap<(u32, String), f32>>,
+        /// 基准字族在各字号/字重下的自然 (行高, 基线)，供 [`Self::line_height_for`] 钉 UNIFORM
+        /// 行距用。键 = (字号取整, 字重, base family)；与 `measure_cache` 同步清空
+        /// （回退链换了度量口径就变）。
+        line_heights: RefCell<HashMap<LineProbeKey, (f32, f32)>>,
     }
+
+    /// [`TextRenderer::line_heights`] 的键：(字号取整, 字重, base family)。
+    type LineProbeKey = (u32, i32, String);
 
     impl TextRenderer {
         /// 创建文本渲染器
@@ -629,7 +633,7 @@ mod imp {
             }
         }
 
-        /// 基准字族在该字号下的**自然行高**（按 (字号, 字族) 缓存）。
+        /// 基准字族在该字号/字重下的**自然 (行高, 基线)**（按 (字号, 字重, 字族) 缓存）。
         ///
         /// 供 [`Self::create_layout`] 把每个 layout 的行距钉成 UNIFORM：不钉的话 DirectWrite 取
         /// 该行所有字体里最大的 line metrics，含 emoji 的候选行（回退到 Segoe UI Emoji）比
@@ -642,29 +646,40 @@ mod imp {
         ///
         /// 缓存键里的字族是 layout 层实际设的 base（叶子字族 / 方案链首），与 `ensure_format`
         /// 只按字号缓存的 TextFormat 不同——同一字号下换字族行高就不同，所以钉在 layout 上。
+        /// 字重同理：探针与正式 layout 一样 `SetFontWeight`，粗体字面纵向指标不同的字族
+        /// 才不会被钉上常规字面的行框（键与 [`measure_key`] 覆盖同一组影响高度的输入）。
+        ///
+        /// 基线**必须**从探针的 line metrics 里读，不能写成行高的固定比例：各字族的
+        /// ascent/(ascent+descent+lineGap) 从等线 0.78、雅黑 0.80、Segoe UI 0.81 到宋体
+        /// （lineGap 非零，取决于 DirectWrite 把 lineGap 放在基线上方还是均分）不等。
+        /// 写死一个比例，换基准字族后行高不变、字却整体上下漂，行底/行顶多出一条空白。
         fn line_height_for(
             &self,
             fmt: &IDWriteTextFormat,
             family: Option<&str>,
+            weight: i32,
             size_key: u32,
-        ) -> Option<f32> {
-            let key = (size_key, family.unwrap_or("").to_string());
-            if let Some(h) = self.line_heights.borrow().get(&key) {
-                return Some(*h);
+        ) -> Option<(f32, f32)> {
+            let key = (size_key, weight, family.unwrap_or("").to_string());
+            if let Some(v) = self.line_heights.borrow().get(&key) {
+                return Some(*v);
             }
             let probe: Vec<u16> = "中a".encode_utf16().collect();
-            let h = unsafe {
+            let (h, baseline) = unsafe {
                 let layout = self
                     .factory
                     .CreateTextLayout(&probe, fmt, f32::MAX / 2.0, f32::MAX / 2.0)
                     .ok()?;
                 let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                let full = DWRITE_TEXT_RANGE {
+                    startPosition: 0,
+                    length: probe.len() as u32,
+                };
+                if weight > 0 && weight != 400 {
+                    let _ = layout.SetFontWeight(DWRITE_FONT_WEIGHT(weight), full);
+                }
                 if let Some(fam) = family {
                     let famw: Vec<u16> = fam.encode_utf16().chain(std::iter::once(0)).collect();
-                    let full = DWRITE_TEXT_RANGE {
-                        startPosition: 0,
-                        length: probe.len() as u32,
-                    };
                     let _ = layout.SetFontFamilyName(PCWSTR(famw.as_ptr()), full);
                 }
                 if let Some(fb) = self.ensure_fallback() {
@@ -672,15 +687,17 @@ mod imp {
                         .cast::<IDWriteTextLayout2>()
                         .and_then(|l2| l2.SetFontFallback(&fb));
                 }
-                let mut m = DWRITE_TEXT_METRICS::default();
-                layout.GetMetrics(&mut m).ok()?;
-                m.height
+                // 探针是单行（NO_WRAP、无 `\n`），一条 line metrics 就是整个行框。
+                let mut lm = [DWRITE_LINE_METRICS::default()];
+                let mut n = 0u32;
+                layout.GetLineMetrics(Some(&mut lm), &mut n).ok()?;
+                (lm[0].height, lm[0].baseline)
             };
-            if h <= 0.0 {
+            if h <= 0.0 || baseline <= 0.0 || baseline > h {
                 return None;
             }
-            self.line_heights.borrow_mut().insert(key, h);
-            Some(h)
+            self.line_heights.borrow_mut().insert(key, (h, baseline));
+            Some((h, baseline))
         }
 
         /// 为给定文本/样式创建布局对象。
@@ -754,9 +771,12 @@ mod imp {
                 }
                 // 按脚本指派：只有被显式声明了字体的类才会切出独立段（见 `font_runs`）。
                 //
-                // ⚠️ 外层的 `is_empty` 判定不能省：`font_runs` 在无声明时也会**分配**一个
-                // 单段 Vec，而本函数是每次绘制每个文本叶子各走一遍的热路径——没配脚本指派的
-                // 用户（绝大多数）会白付一次每叶子每帧的分配。零配置必须是零成本。
+                // 外层的 `is_empty` 判定挡的是「没有任何声明」的方案：`font_runs` 在无声明时
+                // 也会**分配**一个单段 Vec，而本函数是每次绘制每个文本叶子各走一遍的热路径。
+                // Windows 出厂会注入 emoji 类的指派（`candidate_window::build_font_plan`），
+                // 这条短路在 Windows 上通常走不到——每叶子每帧跑一遍 `font_runs`（几个字、
+                // 微秒级）是为了 1️⃣ 与 Emoji 16.0 新码位付的账；用户写 `emoji = []` 关掉
+                // 指派、以及 macOS，仍从这里短路。
                 if !self.plan.declared().is_empty() {
                     for run in font_runs(&wide, self.plan.declared()) {
                         let Some(fam) =
@@ -781,16 +801,19 @@ mod imp {
                         .cast::<IDWriteTextLayout2>()
                         .and_then(|l2| l2.SetFontFallback(&fb));
                 }
-                // 行距钉成 UNIFORM：行高取基准字族的自然行高，不随行内回退字体起伏
-                // （理由与数据见 `line_height_for`）。基线放在 0.8 处——DirectWrite 要求显式
-                // 给基线、没有按比例自动分配的模式；0.8 是雅黑自然基线 20.31/25.40 的实测值，
-                // 与 wind-ui-rust 的 `SetLineSpacing` 同一常数。只影响高度：宽度、连字、彩色层
-                // 都不经过这里；`\n` 硬换行仍按行数翻倍（candidate_window 的多行候选依赖）。
-                // 比基准字族高的字形（emoji、字根字体）按 overhang 画出行框，不裁切。
+                // 行距钉成 UNIFORM：行高与基线都取基准字族自己的自然值，不随行内回退字体
+                // 起伏（理由与数据见 `line_height_for`）。DirectWrite 的 UNIFORM 模式要求显式
+                // 给基线，没有按比例自动分配的选项，所以基线也由探针实测而非写死比例。
+                // 只影响高度：宽度、连字、彩色层都不经过这里；`\n` 硬换行仍按行数翻倍
+                // （candidate_window 的多行候选依赖）。比基准字族高的字形（emoji、字根字体）
+                // 按 overhang 画出行框，不裁切。
                 let size_key = size.max(1.0).round() as u32;
-                if uniform_spacing && let Some(line) = self.line_height_for(&fmt, base, size_key) {
+                if uniform_spacing
+                    && let Some((line, baseline)) =
+                        self.line_height_for(&fmt, base, weight, size_key)
+                {
                     let _ =
-                        layout.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line, line * 0.8);
+                        layout.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line, baseline);
                 }
                 // 拆字字根：把私用区（BMP PUA + 补充私用区 A/B）的连续段切到字根字体集，
                 // 级联回退渲染字根字符。段划分见 `super::pua_runs`——测量与绘制共用本函数，
@@ -1862,6 +1885,21 @@ mod font_plan_tests {
         let s_cjk = s.measure("开心", &ts).height;
         assert_eq!(s_cjk, s.measure("开心\u{1F604}", &ts).height);
         assert!(s_cjk < cjk, "宋体行高 {s_cjk} 应低于雅黑 {cjk}");
+        // 粗体走自己的探针：钉出来的行高等于粗体字面的自然行高，而不是常规字面的。
+        let bold = TextStyle {
+            weight: 700,
+            ..TextStyle::new(20.0)
+        };
+        let r = tr();
+        assert_eq!(
+            r.measure("开心", &bold).height,
+            r.measure_natural("开心", &bold).height,
+            "粗体行高应与其自然行高一致"
+        );
+        assert_eq!(
+            r.measure("开心", &bold).height,
+            r.measure("开心\u{1F604}", &bold).height
+        );
     }
 
     /// ★ 键帽序列在 emoji 指派下连成一个字形：宽度是 emoji 的整宽，而非「一个 1 + 零宽框」。

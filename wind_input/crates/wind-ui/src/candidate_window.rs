@@ -759,8 +759,17 @@ impl CandidateWindow {
                 self.warn_if_family_missing(f, &format!("ui.font.scripts.{key}"));
             }
         }
-        self.text_renderer
-            .set_font_plan(build_font_plan(family, fallback, scripts));
+        let plan = build_font_plan(family, fallback, scripts);
+        // 出厂注入的 emoji 指派（见 `build_font_plan`）不在用户的 `scripts` 里，上面的循环
+        // 查不到它；精简过的 Windows 镜像缺 Segoe UI Emoji 时，用户得知道是哪一项在回落。
+        if !scripts
+            .iter()
+            .any(|(k, _)| ScriptClass::from_key(k) == Some(ScriptClass::Emoji))
+            && plan.chain_for(Some(ScriptClass::Emoji)) == [DEFAULT_EMOJI_FAMILY]
+        {
+            self.warn_if_family_missing(DEFAULT_EMOJI_FAMILY, "ui.font.scripts.emoji（出厂默认）");
+        }
+        self.text_renderer.set_font_plan(plan);
     }
 
     /// 设置"上方时反转候选顺序"。来自 ui.candidate.flip_when_above。
@@ -4828,13 +4837,17 @@ mod font_plan_build_tests {
     /// 零配置（出厂）必须折成平凡方案——调用方据此完全走旧路径，一次 COM 调用都不多做。
     ///
     /// Windows 除外：出厂会注入 emoji 类的指派（见 `build_font_plan`），零配置不再平凡，
-    /// 由下一条测试守。
+    /// 由 `factory_config_assigns_emoji_on_windows` 守。
     #[cfg(not(windows))]
     #[test]
     fn factory_config_folds_to_a_trivial_plan() {
         assert!(build_font_plan("", &[], &[]).is_trivial());
         assert!(build_font_plan("宋体", &[], &[]).is_trivial());
-        // 反向对照：只要有一项非零配置就不再平凡（否则「平凡」判据形同虚设）。
+    }
+
+    /// 反向对照（各平台）：只要有一项非零配置就不再平凡（否则「平凡」判据形同虚设）。
+    #[test]
+    fn any_non_factory_item_makes_the_plan_non_trivial() {
         assert!(!build_font_plan("宋体", &v(&["Arial"]), &[]).is_trivial());
         assert!(
             !build_font_plan("宋体", &[], &[("latin".to_string(), v(&["Arial"]))]).is_trivial()

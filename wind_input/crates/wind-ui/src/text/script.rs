@@ -437,12 +437,9 @@ pub fn font_runs(wide: &[u16], declared: &[ScriptClass]) -> Vec<FontRun> {
     // 只改归属字段、不动起点与长度，切段的无缝覆盖与代理对完整性自动保持。竖排的
     // `upright_cells` 早已靠 `is_trailing_mark` 把这些序列并成一格，这里是横排的同一件事。
     if declared.contains(&ScriptClass::Emoji) {
-        let promotable = |cp: u32| {
-            matches!(
-                raw_of(cp),
-                Raw::Neutral(_) | Raw::Class(ScriptClass::Emoji) | Raw::Class(ScriptClass::Digits)
-            )
-        };
+        // 数字在 `TABLE` 里是 `Neutral(Some(Digits))`，已被第一支覆盖。
+        let promotable =
+            |cp: u32| matches!(raw_of(cp), Raw::Neutral(_) | Raw::Class(ScriptClass::Emoji));
         for k in 1..cells.len() {
             let base = match cps[k] {
                 0xFE0F => k - 1,

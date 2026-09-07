@@ -2281,7 +2281,7 @@ impl EngineManager {
                 if self.schema_engine_type(id).as_deref() != Some("mixed") {
                     return false;
                 }
-                if schema_id == "english" {
+                if schema_id == ENGLISH_SCHEMA {
                     return true;
                 }
                 Self::read_schema(id, self.data_dir.as_deref(), self.override_dir.as_deref())
@@ -2295,10 +2295,11 @@ impl EngineManager {
     }
 
     /// 运行时启停某方案的扩展词库：对**已加载引擎**即时翻对应系统层的 enabled 标志
-    /// （无需重建/重熔大词库）；未加载的方案此处不做事（下次构建按已持久化的 override 生效）。
+    /// （无需重建/重熔大词库）；翻不动的已加载引擎（拼音族不支持热翻、或该层未进 composite）
+    /// 直接失效，下次使用按已落盘的 override 重建；未加载的方案此处不做事（下次构建生效）。
     /// 启用集变化会影响反查索引/编码提示（基于启用词库合并），故一并失效之使下次重算。
-    /// 返回是否对已加载引擎即时生效。**注意**：调用方须先 [`persist_schema_override`] 持久化，
-    /// 否则重启/重建后状态丢失。
+    /// 返回是否对已加载引擎生效（热翻或已失效待重建，二者都无需重启）。
+    /// **注意**：调用方须先 [`persist_schema_override`] 持久化，否则重启/重建后状态丢失。
     ///
     /// # 必须扇出到把它当成员的混输方案
     ///
@@ -2314,17 +2315,33 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner())
             .get(schema_id)
             .cloned();
-        let mut hit = engine.is_some_and(|e| e.set_dict_enabled(dict_id, enabled));
+        // 独立方案与把它当成员的混输方案同一条规则：翻得动就翻，翻不动就失效待重建。
+        // 只失效混输不失效独立方案的话，同一个拼音扩展库在混输里下次输入就生效、
+        // 在独立拼音方案里却要重启，两个方案表现不一致。
+        let mut hit = false;
+        if let Some(e) = engine {
+            if e.set_dict_enabled(dict_id, enabled) {
+                hit = true;
+            } else {
+                info!(
+                    "方案 {} 不支持即时翻转词库 {}，已失效待重建",
+                    schema_id, dict_id
+                );
+                self.invalidate_schema(schema_id);
+                hit = true;
+            }
+        }
         for (mixed_id, e) in self.loaded_mixed_dependents(schema_id) {
             if e.set_dict_enabled(dict_id, enabled) {
                 hit = true;
-            } else if schema_id != "english" {
+            } else if schema_id != ENGLISH_SCHEMA {
                 // english 子引擎可能根本没建（enable_english 关着），转发不到是常态，不失效。
-                warn!(
-                    "混输方案 {} 内的成员 {} 未能即时翻转词库 {}，已失效待重建",
+                info!(
+                    "混输方案 {} 内的成员 {} 不支持即时翻转词库 {}，已失效待重建",
                     mixed_id, schema_id, dict_id
                 );
                 self.invalidate_schema(&mixed_id);
+                hit = true;
             }
         }
         // 反查索引依赖「启用词库合并」，启用集变了须失效（懒重建）。
