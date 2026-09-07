@@ -1633,6 +1633,29 @@ impl Coordinator {
             *cur = Some(key.clone());
             saved
         };
+        // ★ 记录必须真的落在这块屏上，否则当作"该屏没记过"。
+        //
+        // 两个来路都会产出错屏记录：①升级前存下的（`monitor_key_from_anchor` 加退 1px
+        // 之前，贴右/下边缘的锚点被记到邻屏 key 下）——盘上的旧数据不会自己消失，光修
+        // 落盘侧的话用户升级后症状照旧；②显示器拓扑变了（拔屏、改排列），旧坐标不再
+        // 属于这块屏。两种情况下若照发 `SetToolbarAnchor`，工具栏会落到**另一块屏**，
+        // 正是"不跟焦点窗口的显示器"的现场。
+        //
+        // ⚠️ 不在这里删表项：那块屏当前可能没接，`DEFAULTTONEAREST` 会答成某块现有的屏，
+        // 据此删就会误删用户在别的显示器上的合法记录。只忽略、不删除——用户在本屏拖一次
+        // 就自然覆盖成正确的 key。
+        let saved = saved.filter(|&(right, bottom)| {
+            let ok = monitor_key_from_anchor(right, bottom).as_deref() == Some(key.as_str());
+            if !ok {
+                tracing::info!(
+                    "工具栏记录 ({},{}) 不在 key={} 这块屏上，按未记录处理",
+                    right,
+                    bottom,
+                    key
+                );
+            }
+            ok
+        });
         let cmd = match saved {
             Some((right, bottom)) => UiCommand::SetToolbarAnchor { right, bottom },
             // 该屏从未拖过：交给 UI 侧按自己的尺寸算右下角（协调器不知道工具栏 w/h）。
@@ -1666,7 +1689,7 @@ impl Coordinator {
     /// 键空间语义——取那侧问的是「焦点屏上记过什么位置」，存那侧答的是「这块屏上
     /// 工具栏在哪」，只有 key 同源才对得上。
     pub(crate) fn save_toolbar_anchor(&self, right: i32, bottom: i32) {
-        let Some(key) = monitor_key_from_point(right, bottom) else {
+        let Some(key) = monitor_key_from_anchor(right, bottom) else {
             // 查不到显示器就别存：这块表的读取侧（`focus_monitor`）在同样的失败下返回
             // None，存进任何兜底 key 都只会是永远读不出来的垃圾。
             tracing::debug!("工具栏位置未保存：查不到 ({},{}) 所在显示器", right, bottom);
@@ -1700,7 +1723,7 @@ impl Coordinator {
     /// 但**不碰** `current_toolbar_monitor`——那是工具栏跟随焦点换屏的去重缓存，
     /// 软键盘不参与那套跟随（它由用户显式开关，不跟着焦点跑）。
     pub(crate) fn save_softkeyboard_anchor(&self, right: i32, bottom: i32) {
-        let Some(key) = monitor_key_from_point(right, bottom) else {
+        let Some(key) = monitor_key_from_anchor(right, bottom) else {
             tracing::debug!("软键盘位置未保存：查不到 ({},{}) 所在显示器", right, bottom);
             return;
         };
@@ -1733,7 +1756,12 @@ impl Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&mon.key)
-            .copied();
+            .copied()
+            // 与 `sync_toolbar_monitor` 同一道闸门（理由见那里）：记录不在这块屏上就当
+            // 没记过，落回该屏默认位置。软键盘的症状是"在副屏点开却开到主屏去"。
+            .filter(|&(right, bottom)| {
+                monitor_key_from_anchor(right, bottom).as_deref() == Some(mon.key.as_str())
+            });
         SoftKeyboardPlacement {
             anchor,
             work: Some(mon.work),
@@ -2109,11 +2137,39 @@ fn monitor_info(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<Monitor
     }
 }
 
-/// 根据屏幕坐标定位显示器。查不到时返回 None。
+/// 窗口**右下角锚点**所在显示器的 key。查不到时返回 None。
 ///
 /// 失败语义要与 `focus_monitor` 对称——它同样在查不到时返回 None。此前这里回落到
 /// `"0,0"`，于是保存侧会把坐标写进一个**读取侧永远问不出来的 key**（`focus_monitor`
 /// 不可能产出 `"0,0"`），位置静默丢失。存取共用一张表，两侧的失败也得共用一套语义。
+///
+/// ★★★ 参数是**排他**边界，函数内部退 1px 才拿去查屏，见 [`anchor_probe_point`]。
+/// 这一步封在函数里而不是交给调用方，是因为漏掉它的后果**极隐蔽**：位置被存到
+/// 右邻/下邻那块屏的 key 下 ⇒ 回到本屏读不到记录（像"没记住"）、切到邻屏却读到本屏
+/// 的坐标 ⇒ **工具栏跑到另一块屏上去，看起来像"不跟焦点窗口的显示器"**。
+/// ⚠️ 新增调用点一律传窗口右下角，不要在调用侧自己减 1（两处各减一次就减多了）。
+fn monitor_key_from_anchor(right: i32, bottom: i32) -> Option<String> {
+    let (x, y) = anchor_probe_point(right, bottom);
+    monitor_key_from_point(x, y)
+}
+
+/// 排他的右下角锚点 → **落在窗口内**的探针点。
+///
+/// 窗口占据 `[left, right) × [top, bottom)`（Win32 `RECT` 语义），故 `(right, bottom)`
+/// 本身在窗口**之外**。工具栏被 `clamp_to_work_area` 贴到工作区右边缘时
+/// （`nx = br - w` ⇒ 窗口 right 恰好 == 工作区 right），这个点正好落在**右邻显示器**的
+/// 第一列像素上，而 `MonitorFromPoint` 用的是 `DEFAULTTONEAREST`——不报错，只是答错。
+///
+/// 抽成纯函数是为了可单测：`MonitorFromPoint` 本身在测试环境里问不出多屏拓扑，
+/// 而出错的从来是"该退这 1px 没退"，不是那次系统调用。
+fn anchor_probe_point(right: i32, bottom: i32) -> (i32, i32) {
+    (right - 1, bottom - 1)
+}
+
+/// 根据屏幕坐标定位显示器。查不到时返回 None。
+///
+/// ⚠️ 传进来的必须是**落在目标窗口/屏幕内**的点。要用窗口右下角定位请走
+/// [`monitor_key_from_anchor`]，它负责把排他边界退成屏内点。
 #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] // 显示器查询仅 Windows 有
 fn monitor_key_from_point(x: i32, y: i32) -> Option<String> {
     #[cfg(target_os = "windows")]
@@ -2191,7 +2247,32 @@ fn avoid_unset_sentinel(x: i32, y: i32) -> (i32, i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::avoid_unset_sentinel;
+    use super::{anchor_probe_point, avoid_unset_sentinel};
+
+    /// ★★★ 锚点落盘查屏必须退 1px，否则贴右/下边缘时存到**邻屏**的 key 下。
+    ///
+    /// 用户实测症状：「工具栏不跟焦点窗口的显示器」。因果链是——
+    /// `clamp_to_work_area` 把工具栏贴到 A 屏右边缘（`nx = br - w` ⇒ 窗口 right 恰好
+    /// == A 屏工作区 right），落盘时拿这个**排他**边界去 `MonitorFromPoint`，该点落在
+    /// B 屏第一列像素上（`DEFAULTTONEAREST` 不报错、只是答错）⇒ A 屏的坐标被存进 B 屏
+    /// 的 key。于是回到 A 屏读不到记录（像"没记住"），切到 B 屏却读到 A 屏坐标 ⇒
+    /// **工具栏跑回 A 屏**。
+    ///
+    /// 与 `wind-ui` 两个窗口的 `Placement::probe_point` 是同一个不变量，只是那边管
+    /// 「按哪块屏排版」、这边管「存进哪块屏的 key」——两边都错就会互相掩盖。
+    #[test]
+    fn anchor_probe_point_steps_inside_the_exclusive_edge() {
+        // A 屏工作区 (0, 0, 1920, 1040)，工具栏被钳到右下角 ⇒ 窗口 right/bottom 恰好贴界。
+        assert_eq!(
+            anchor_probe_point(1920, 1040),
+            (1919, 1039),
+            "退 1px 才在 A 屏内；不退则落到右邻屏 x=1920 那一列"
+        );
+        // 负坐标副屏（在主屏左侧）同样成立：退 1 后仍在该屏内、仍是负的。
+        let (x, y) = anchor_probe_point(0, 1040);
+        assert_eq!((x, y), (-1, 1039));
+        assert!(x < 0, "左侧副屏的探针点必须仍为负，否则落到主屏");
+    }
 
     /// 「候选窗首显」四档表自身的自洽性：id 与档位都不得重复，且三个真实档位一个不少。
     ///
