@@ -1751,17 +1751,20 @@ impl Coordinator {
                 work: None,
             };
         };
-        let anchor = self
+        // ⚠️ 取值与校验分两步：`.lock()` 的临时 guard 活到整条 `let` 语句结束，把校验
+        // 链在后面会让 `monitor_key_from_anchor` 那次系统调用**在持锁状态下**执行，
+        // 而 `save_softkeyboard_anchor` 要写同一把锁（拖动落盘）。
+        let saved = self
             .softkeyboard_anchors
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&mon.key)
-            .copied()
-            // 与 `sync_toolbar_monitor` 同一道闸门（理由见那里）：记录不在这块屏上就当
-            // 没记过，落回该屏默认位置。软键盘的症状是"在副屏点开却开到主屏去"。
-            .filter(|&(right, bottom)| {
-                monitor_key_from_anchor(right, bottom).as_deref() == Some(mon.key.as_str())
-            });
+            .copied();
+        // 与 `sync_toolbar_monitor` 同一道闸门（理由见那里）：记录不在这块屏上就当
+        // 没记过，落回该屏默认位置。软键盘的症状是"在副屏点开却开到主屏去"。
+        let anchor = saved.filter(|&(right, bottom)| {
+            monitor_key_from_anchor(right, bottom).as_deref() == Some(mon.key.as_str())
+        });
         SoftKeyboardPlacement {
             anchor,
             work: Some(mon.work),
