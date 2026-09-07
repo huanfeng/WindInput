@@ -1,4 +1,4 @@
-//! 字符类的设置页读写：列类、改类属性、恢复默认、外部编辑（导出 / 从文件加载）、
+//! 字符类的设置页读写：列类、改类属性、恢复默认、外部编辑（探测 / 导出 / 试算 / 加载）、
 //! 删自建类、清理被它压住的逐条覆盖。
 //!
 //! 设计见 `docs/design/charset-classification.md`。用户层落在 **redb**
@@ -11,7 +11,7 @@
 //! charset_import_file(path) →  parse → diff 出厂 → 稀疏 diff 存库 → 热载
 //! ```
 //!
-//! 「从文件加载」是**唯一**的回读入口，也是手写 yaml 的入口：文件里的 key 出厂有就当
+//! 「加载外部文件」是**唯一**的回读入口，也是手写 yaml 的入口：文件里的 key 出厂有就当
 //! 覆盖，没有就当自建类。一条路，不分「回读」与「导入」。
 //!
 //! # ★ 两种操作的差别必须让用户看见（§7.3）
@@ -83,6 +83,23 @@ pub struct CharsetCleanupOutcome {
     pub scanned: usize,
     /// 删掉的条数（与当前默认判定同向 ⇒ 留着没有意义）。
     pub removed: usize,
+}
+
+/// 「外部编辑」对话框打开时对编辑文件的**探测**：不写任何东西，只报告落点与现状。
+///
+/// 对话框据此决定给用户哪几个动作：文件不存在 ⇒「导出并打开」；已存在 ⇒「打开已有
+/// 文件」/「重新导出」——上次导出改到一半关了窗，回来应该能接着改，而不是被静默覆盖。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharsetEditFile {
+    /// 探测的类；`None` 传入时是模板（新建类）分配到的 key。
+    pub key: String,
+    pub name: String,
+    /// 出厂有这个 key。模板恒为 false。
+    pub builtin: bool,
+    pub path: PathBuf,
+    pub exists: bool,
+    /// 文件最后修改时间（本地时区，`YYYY-MM-DD HH:MM`）；不存在或读不到为 `None`。
+    pub modified: Option<String>,
 }
 
 /// 「从文件加载」导入的一个类。
@@ -216,7 +233,7 @@ impl crate::Coordinator {
 
     /// 「外部编辑」：把一个类的**完整视图**写到临时文件，返回路径给设置页去打开。
     ///
-    /// 文件首行写明「不会被自动读取」——改完要回设置页「从文件加载」。冲突只剩一处：
+    /// 文件首行写明「不会被自动读取」——改完要回设置页「加载外部文件」。冲突只剩一处：
     /// 导出后、加载前，设置页又改了同一个类的属性，加载会整条替换掉。单人本地工具，
     /// 不做版本号合并；头注释说了这是导出的副本。
     pub(crate) fn charset_export_edit(&self, key: &str) -> anyhow::Result<PathBuf> {
@@ -239,7 +256,66 @@ impl crate::Coordinator {
         Ok(path)
     }
 
-    /// 「新建类」：导出一份**模板**到临时文件，用户填完再「从文件加载」。
+    /// 「外部编辑」对话框打开/换类时的探测：编辑文件在哪、有没有、什么时候改的。
+    /// **不写文件**。`key` 为 `None` 即「新建类」，报告模板将落到的 key 与路径。
+    pub(crate) fn charset_edit_file(&self, key: Option<&str>) -> anyhow::Result<CharsetEditFile> {
+        self.charset_edit_file_in(key, &default_edit_dir())
+    }
+
+    /// [`Self::charset_edit_file`] 的落点可指定版，理由同 [`Self::charset_export_edit_to`]。
+    pub(crate) fn charset_edit_file_in(
+        &self,
+        key: Option<&str>,
+        dir: &Path,
+    ) -> anyhow::Result<CharsetEditFile> {
+        let factory = self.engine_mgr.charset_factory();
+        let (key, name, builtin) = match key {
+            Some(k) => {
+                let user = self.user_doc(k)?;
+                anyhow::ensure!(
+                    factory.contains_key(k) || !charset_def::is_empty_override(&user),
+                    "没有名为「{k}」的字符类"
+                );
+                let name = factory
+                    .get(k)
+                    .map(|f| f.def.display_name().to_string())
+                    .unwrap_or_else(|| user.def.display_name().to_string());
+                (k.to_string(), name, factory.contains_key(k))
+            }
+            None => (self.template_key(), TEMPLATE_NAME.to_string(), false),
+        };
+        anyhow::ensure!(
+            charset_def::is_valid_key(&key),
+            "字符类的 key「{key}」不合法"
+        );
+        let path = dir.join(format!("{key}.yaml"));
+        let meta = std::fs::metadata(&path).ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok()).map(|t| {
+            chrono::DateTime::<chrono::Local>::from(t)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        });
+        Ok(CharsetEditFile {
+            key,
+            name,
+            builtin,
+            path,
+            exists: meta.is_some_and(|m| m.is_file()),
+            modified,
+        })
+    }
+
+    /// 模板分配到的 key：既不在出厂也不在用户层的第一个 `my_class_N`。
+    fn template_key(&self) -> String {
+        let factory = self.engine_mgr.charset_factory();
+        let user = self.user_docs();
+        (1..)
+            .map(|n| format!("my_class_{n}"))
+            .find(|k| !factory.contains_key(k) && !user.contains_key(k))
+            .expect("总能找到一个没用过的名字")
+    }
+
+    /// 「新建类」：导出一份**模板**到临时文件，用户填完再「加载外部文件」。
     ///
     /// 不做对话框：新建的全部内容（key、名称、范围、成员）本来就都在文件里，多一个只填
     /// 两项的对话框反而让用户以为建完了。key 由用户在文件里改——模板给的名字不会与出厂
@@ -250,17 +326,11 @@ impl crate::Coordinator {
 
     /// [`Self::charset_export_template`] 的落点可指定版，理由同 [`Self::charset_export_edit_to`]。
     pub(crate) fn charset_export_template_to(&self, dir: &Path) -> anyhow::Result<PathBuf> {
-        let factory = self.engine_mgr.charset_factory();
-        let user = self.user_docs();
-        // 找一个既不在出厂也不在用户层的 key。
-        let key = (1..)
-            .map(|n| format!("my_class_{n}"))
-            .find(|k| !factory.contains_key(k) && !user.contains_key(k))
-            .expect("总能找到一个没用过的名字");
+        let key = self.template_key();
         let doc = CharsetDoc {
             def: charset_def::CharsetDef {
                 key: key.clone(),
-                name: Some("我的字符类".into()),
+                name: Some(TEMPLATE_NAME.into()),
                 ranges: Some(Vec::new()),
                 ..Default::default()
             },
@@ -276,6 +346,34 @@ impl crate::Coordinator {
     /// 一个文件可以带多个类（meta 头是数组，与出厂 `blocks.yaml` 同款），逐个导入；
     /// 任一个失败整次失败、库不动——半导入的状态用户理不清。
     pub(crate) fn charset_import_file(&self, path: &Path) -> anyhow::Result<Vec<CharsetImported>> {
+        let pending = self.plan_import(path)?;
+        // 全部 diff 通过之后才落库。
+        for (diff, _) in &pending {
+            self.save_user_doc(diff)?;
+        }
+        self.reload_charsets();
+        let out: Vec<CharsetImported> = pending.into_iter().map(|(_, s)| s).collect();
+        debug!("从 {} 导入字符类：{out:?}", path.display());
+        Ok(out)
+    }
+
+    /// 「加载」前的**试算**：与 [`Self::charset_import_file`] 走同一条解析与 diff，只是不落库。
+    ///
+    /// 对话框先把「将更新「常用汉字」：+3 字 −2 字」摆出来再要确认——加载是整份替换
+    /// 该类的用户层，而用户看不见库里现在是什么；试算就是那个「覆盖提示」。
+    pub(crate) fn charset_import_preview(
+        &self,
+        path: &Path,
+    ) -> anyhow::Result<Vec<CharsetImported>> {
+        Ok(self
+            .plan_import(path)?
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect())
+    }
+
+    /// 读文件、逐类 diff 出厂，产出待落库的 doc 与给界面的摘要。任一类失败即整体失败。
+    fn plan_import(&self, path: &Path) -> anyhow::Result<Vec<(CharsetDoc, CharsetImported)>> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败：{e}", path.display()))?;
         let docs = charset_def::parse_docs(&text)?;
@@ -316,15 +414,7 @@ impl crate::Coordinator {
             };
             pending.push((diff, summary));
         }
-
-        // 全部 diff 通过之后才落库。
-        for (diff, _) in &pending {
-            self.save_user_doc(diff)?;
-        }
-        self.reload_charsets();
-        let out: Vec<CharsetImported> = pending.into_iter().map(|(_, s)| s).collect();
-        debug!("从 {} 导入字符类：{out:?}", path.display());
-        Ok(out)
+        Ok(pending)
     }
 
     /// 清理压在某个类上的**冗余**逐条覆盖：方向与当前默认判定相同的那些。
@@ -465,6 +555,9 @@ impl crate::Coordinator {
         Ok(())
     }
 }
+
+/// 「新建类」模板的显示名。用户在文件里改成自己的。
+const TEMPLATE_NAME: &str = "我的字符类";
 
 /// 外部编辑文件的默认落点：系统临时目录下 `WindInput/charsets/`。
 ///
@@ -963,6 +1056,69 @@ mod tests {
         let e = c.charset_import_file(&f).unwrap_err();
         assert!(e.to_string().contains("范围只读"), "{e}");
         assert_eq!(stored(&c, "符号"), None);
+        drop(c);
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// 探测不写文件；导出后再探测能看到「已存在 + 修改时间」；模板探测报的 key 与随后
+    /// 真正导出的模板一致（对话框靠这一点在导出前就把路径显示给用户）。
+    #[test]
+    fn edit_file_probe_reports_existence_without_writing() {
+        let (c, user) = coord("probe");
+        let p = c.charset_edit_file_in(Some("emoji"), &user).unwrap();
+        assert_eq!(
+            (p.key.as_str(), p.builtin, p.exists),
+            ("emoji", true, false)
+        );
+        assert_eq!(p.name, "Emoji 表情");
+        assert!(!p.path.exists(), "探测不许写文件");
+        assert_eq!(p.modified, None);
+
+        let exported = c.charset_export_edit_to("emoji", &user).unwrap();
+        let p = c.charset_edit_file_in(Some("emoji"), &user).unwrap();
+        assert_eq!(p.path, exported);
+        assert!(p.exists);
+        assert!(p.modified.is_some(), "存在的文件要报修改时间");
+
+        let t = c.charset_edit_file_in(None, &user).unwrap();
+        assert_eq!(
+            (t.key.as_str(), t.builtin, t.exists),
+            ("my_class_1", false, false)
+        );
+        assert_eq!(c.charset_export_template_to(&user).unwrap(), t.path);
+
+        assert!(
+            c.charset_edit_file_in(Some("no_such_class"), &user)
+                .is_err(),
+            "不存在的类要报错，而不是给一个永远导不出的路径"
+        );
+        drop(c);
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// 试算给出与真正导入**相同**的摘要，但库与判定都不动。
+    #[test]
+    fn import_preview_reports_the_same_summary_but_changes_nothing() {
+        let (c, user) = coord("preview");
+        let path = c.charset_export_edit_to("emoji", &user).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let edited = text
+            .replace("\n😀\n", "\n")
+            .replace("\n---\n", "\n---\ndefault: rare\n");
+        std::fs::write(&path, edited).unwrap();
+
+        let preview = c.charset_import_preview(&path).unwrap();
+        assert_eq!(stored(&c, "emoji"), None, "试算不落库");
+        assert!(is_common(&c, "😃"), "试算不改判定");
+
+        let applied = c.charset_import_file(&path).unwrap();
+        assert_eq!(preview, applied, "试算与实际导入的摘要必须一致");
+        assert!(!is_common(&c, "😃"));
+
+        // 坏文件：试算与导入报同一个错。
+        std::fs::write(&path, "key: [broken").unwrap();
+        assert!(c.charset_import_preview(&path).is_err());
+        assert!(c.charset_import_file(&path).is_err());
         drop(c);
         let _ = std::fs::remove_dir_all(&user);
     }

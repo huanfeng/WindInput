@@ -3450,7 +3450,7 @@ impl EngineManager {
     /// | 旧落点 | 何时失效 | 现在在哪 |
     /// |---|---|---|
     /// | `schemas/common_chars.txt` | 2026-09-04 | `charsets/common_han.yaml` 的列表体 |
-    /// | `charsets/*.yaml` | 2026-09-05 | redb（设置页「从文件加载」导入） |
+    /// | `charsets/*.yaml` | 2026-09-05 | redb（设置页「外部编辑」对话框里加载） |
     ///
     /// ⚠️ 两者都是**静默失效**：文件还在、程序不读、也不报错。用户看到的是「我明明改了
     /// 字表，判定却还是自带那套」。提醒不能省。第二条没写迁移：那个落点从未发布。
@@ -3462,7 +3462,7 @@ impl EngineManager {
         if stale.is_file() {
             warn!(
                 "{} 已不再生效——常用字表现在在 charsets/common_han.yaml 里。要沿用你的名单，\
-                 请在设置页「字符集分类」对 common_han 用「从文件加载」",
+                 请在设置页「字符集分类」→「外部编辑」里对常用汉字「选择其它文件…」加载它",
                 stale.display()
             );
         }
@@ -3471,7 +3471,7 @@ impl EngineManager {
         if dir_has_yaml(&stale_dir) {
             warn!(
                 "{} 已不再被读取——字符类的用户层现在在数据库里。里面的文件可在设置页\
-                 「字符集分类」用「从文件加载」逐个导入",
+                 「字符集分类」→「外部编辑」里用「选择其它文件…」逐个加载",
                 stale_dir.display()
             );
         }

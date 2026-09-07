@@ -594,7 +594,7 @@ pub fn render_doc(doc: &CharsetDoc) -> anyhow::Result<String> {
 /// ★ 首行「此文件不会被自动读取」是用户拍板的措辞：这份文件是**导出的副本**，改完
 /// 必须回设置页导入。不说这句，用户会改完等着生效，然后判定功能坏了。
 const EDIT_VIEW_HEADER: &str = "\
-# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集分类」用「从文件加载」导入。
+# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集分类」→「外部编辑」，点「加载外部文件」。
 #
 # 这是「{name}」（key: {key}）当前生效的完整定义 = 出厂 + 你的调整。
 # 直接增删 `...` 之后的字符行即可；导入时只记下与出厂的差异，出厂更新仍会跟随。
@@ -605,7 +605,7 @@ const EDIT_VIEW_HEADER: &str = "\
 /// 自建类（含「新建类」模板）的编辑视图头部。与 [`EDIT_VIEW_HEADER`] 分开：自建类没有
 /// 「出厂」可跟随，导入是整份替换；而且 ranges 归用户写，得给写法。
 const CUSTOM_VIEW_HEADER: &str = "\
-# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集分类」用「从文件加载」导入。
+# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集分类」→「外部编辑」，点「加载外部文件」。
 #
 # 这是自建字符类「{name}」（key: {key}）的完整定义，导入时整份替换库里的那份。
 # 成员写在 `...` 之后，一行一个；范围写在 ranges 里，如 `ranges: [U+2600-U+26FF, U+3299]`。
@@ -1253,7 +1253,7 @@ mod tests {
         let text = render_edit_view(Some(&factory_emoji()), &doc_of("emoji")).unwrap();
         let first = text.lines().next().unwrap();
         assert!(first.contains("不会被自动读取"), "首行：{first}");
-        assert!(text.contains("从文件加载"), "得告诉用户回哪里导入");
+        assert!(text.contains("加载外部文件"), "得告诉用户回哪里导入");
         assert!(
             text.contains("「Emoji 表情」（key: emoji）"),
             "得写明是哪个类"
