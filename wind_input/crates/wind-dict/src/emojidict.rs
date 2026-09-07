@@ -548,7 +548,13 @@ mod tests {
         std::fs::write(&norm_tbl, b"v1").unwrap();
 
         // 第一次：归一为恒等 ⇒ 键是「個」。
-        let r = load_or_build(&[w.clone()], &[norm_tbl.clone()], &cache, str::to_string).unwrap();
+        let r = load_or_build(
+            std::slice::from_ref(&w),
+            std::slice::from_ref(&norm_tbl),
+            &cache,
+            str::to_string,
+        )
+        .unwrap();
         assert_eq!(r.lookup("個"), Some("👤"));
         drop(r); // 释放 mmap，Windows 上 rename 覆盖才不会 Access Denied
 
@@ -571,7 +577,7 @@ mod tests {
         let w = g.path().join("word.txt");
         let cache = g.path().join("e.wemj");
         std::fs::write(&w, "好\t好 🙂\n").unwrap();
-        let r = load_or_build(&[w.clone()], &[], &cache, str::to_string).unwrap();
+        let r = load_or_build(std::slice::from_ref(&w), &[], &cache, str::to_string).unwrap();
         assert_eq!(r.lookup("好"), Some("🙂"));
         drop(r); // 释放 mmap，Windows 上才能覆盖
 
