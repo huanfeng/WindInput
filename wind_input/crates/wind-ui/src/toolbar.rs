@@ -521,24 +521,12 @@ impl Toolbar {
     /// 这一帧按旧屏 DPI 排版，而 `render` 末尾又拿这套尺寸去算目标屏的落点——两屏 DPI
     /// 不同则整条大小与位置都偏，要等下一帧才自愈（视觉上是一跳）。
     ///
-    /// ⚠️ **取点优先级必须与 `render` 算落点的优先级逐级对齐**
-    /// （`pending_corner` > `anchor_br` > `pos`）：这两处问的是同一个问题——"这一帧
-    /// 的工具栏在哪块屏上"。`set_anchor` 恢复记忆位置那条路径尤其要走 `anchor_br`：
-    /// 它**不**更新 `mouse.pos`（那是上一帧的落点），换屏恢复时用 `pos` 取到的是旧屏 DPI。
-    fn ensure_scale(&mut self) {
-        let pos = match self.pending_corner {
-            // 工作区右/下边界是排他的，退 1px 取屏内点。
-            Some((work_right, work_bottom)) => (work_right - 1, work_bottom - 1),
-            None => {
-                let m = self.mouse.borrow();
-                match m.anchor_br {
-                    // 锚点是窗口右下角，同样排他，退 1px 取窗口内的点。
-                    Some((right, bottom)) => (right - 1, bottom - 1),
-                    None => m.pos.unwrap_or((0, 0)),
-                }
-            }
-        };
-        let sc = crate::dpi::scale_for_point(pos.0, pos.1);
+    /// 取点与 `render` 算落点同出一个 [`Placement`]（见其文档），`set_anchor` 恢复记忆
+    /// 位置那条路径尤其要走 `Anchor`：它**不**更新 `mouse.pos`（那是上一帧的落点），
+    /// 换屏恢复时用 `pos` 取到的是旧屏 DPI。
+    fn ensure_scale(&mut self, at: Placement) {
+        let (x, y) = at.probe_point();
+        let sc = crate::dpi::scale_for_point(x, y);
         if (sc - self.scale).abs() > 0.01 {
             self.scale = sc;
             self.renderer.set_base_size(Self::FONT_PX * sc);
@@ -562,7 +550,11 @@ impl Toolbar {
 
     /// 实际渲染（hover_idx=当前悬停格下标，-1 无）。update 与 tick 均经此单点渲染。
     fn render(&mut self, state: &ToolbarState, hover_idx: i32) {
-        self.ensure_scale();
+        // 缩放与落点取自**同一个** `Placement`：先定"这一帧落在哪块屏"，再按那块屏的
+        // DPI 排版，最后用同一判据算落点。⚠️ 这里只取快照、**不消费** `pending_corner`：
+        // 它在末尾真正用掉时才清（见落点计算处），中途若提前返回，换屏请求要留到下一帧。
+        let at = self.placement();
+        self.ensure_scale(at);
         let s = self.scale;
         // Dim→设备像素（dp×scale）；None→def_logical×scale（同候选窗 dim 闭包）。
         let dim = |o: Option<Dim>, def_logical: f32| {
@@ -776,15 +768,22 @@ impl Toolbar {
             // 全部的意义所在：横纵切换、增删格子都只改 `w`/`h`，落点自动跟着变，
             // 而条的右下角纹丝不动。存左上角时这些尺寸变化会朝右下顶出工作区，
             // 再被 `clamp_to_work_area` 拉回来，于是每切一次挪一次。
-            let raw = match self.pending_corner.take() {
-                Some((work_right, work_bottom)) => {
-                    Self::corner_in_work_area(work_right, work_bottom, w, h)
+            let raw = match at {
+                Placement::PendingCorner {
+                    work_right,
+                    work_bottom,
+                } => Self::corner_in_work_area(work_right, work_bottom, w, h),
+                Placement::Anchor { right, bottom } => {
+                    Self::origin_from_anchor(right, bottom, w, h)
                 }
-                None => match m.anchor_br {
-                    Some((right, bottom)) => Self::origin_from_anchor(right, bottom, w, h),
-                    None => m.pos.unwrap_or_else(|| Self::corner_position(w, h)),
-                },
+                Placement::LastPos { x, y } => (x, y),
+                Placement::PrimaryCorner => Self::corner_position(w, h),
             };
+            // 换屏请求在这里消费掉（原先是取值处 `.take()`）。`at` 是本帧开头的快照，
+            // 而 `PendingCorner` 是第一优先级 ⇒ `at` 不是它就说明字段本来就是 `None`，
+            // 故无条件清空与 `.take()` 等价。放到用掉之后清，是为了让"中途提前返回则
+            // 请求留到下一帧"这件事不依赖 render 当前恰好没有提前返回。
+            self.pending_corner = None;
             let clamped = clamp_to_work_area(raw.0, raw.1, w, h);
             m.pos = Some(clamped);
             clamped
@@ -881,6 +880,14 @@ impl Toolbar {
         self.visible = false;
         self.rendered_hover = -1; // 重新显示时按光标位置重算悬停
         self.auto_hide.on_hidden();
+    }
+
+    /// 这一帧工具栏该落在哪。**四级优先级的唯一定义处**，见 [`Placement`]。
+    ///
+    /// ⚠️ 纯读，**不消费** `pending_corner`——它在 `render` 末尾真正用掉时才清。
+    fn placement(&self) -> Placement {
+        let m = self.mouse.borrow();
+        Placement::pick(self.pending_corner, m.anchor_br, m.pos)
     }
 
     /// 记忆锚点（窗口**右下角**）→ 本帧落点（左上角）。
@@ -996,6 +1003,78 @@ pub struct ToolbarMouse {
     /// 且无系统调用。`render` 必先于任何鼠标事件发生，故不存在 (0,0) 被用到的时机。
     size: (u32, u32),
     vertical: bool,
+}
+
+/// 这一帧工具栏落在哪——**四级优先级只此一处**。
+///
+/// 与 `soft_keyboard::Placement` 是同一个模式的两个实例（同名、不同级），两处都有两个
+/// 消费者问同一个问题："这一帧的窗口在哪块屏上"：
+/// - [`Toolbar::ensure_scale`] 要一个屏内的点去查 DPI；
+/// - [`Toolbar::render`] 要算左上角落点。
+///
+/// ⚠️ 两者**不能共用一个函数**：算落点要先知道窗口尺寸，而尺寸取决于缩放，缩放又取决
+/// 于在哪块屏——鸡生蛋。所以只能各自分派，但**优先级本身只写一次**（[`Placement::pick`]）。
+///
+/// ★ 各写一遍的下场在软键盘上真发生过：它的 `ensure_scale` 曾只写到第二级，漏掉的第三级
+/// 恰好是"副屏首次打开、还没有位置记忆"，于是按主屏 DPI 排版。工具栏当时侥幸没中，是
+/// 因为它把工作区做成了**第一级** `PendingCorner`（软键盘却把工作区藏在默认位置的兜底
+/// 参数里，在优先级链**之外**）——同一个信息在链里还是链外，决定了会不会漏。
+/// ⇒ 收成枚举后，漏掉一级从"忘写一行"变成"match 不穷尽"，编译器直接拦。
+///
+/// ⚠️ 比软键盘多出来的是**第一级**：协调器换屏时下发"去这块屏的右下角"，它必须压过记忆
+/// 锚点（`Anchor`），否则跟随焦点换屏会被上一块屏的记忆位置顶回去。软键盘刻意不跟随焦点
+/// （由用户显式开关），所以没有这一级。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    /// 待落的换屏请求：协调器给的**目标屏**工作区右下角。压过一切记忆位置。
+    PendingCorner { work_right: i32, work_bottom: i32 },
+    /// 用户摆过的位置，锚窗口右下角（跨重启记忆）。
+    Anchor { right: i32, bottom: i32 },
+    /// 上一帧的落点（左上角）。
+    LastPos { x: i32, y: i32 },
+    /// 什么记录都没有（首次启动）：主屏右下角。
+    PrimaryCorner,
+}
+
+impl Placement {
+    /// 四级优先级的**唯一实现**。[`Toolbar::placement`] 只是把三个来源喂进来——
+    /// 拆成自由函数是为了让守门测试打到真身：`Toolbar` 要真窗口才能构造，测试里造不
+    /// 出来，而把 `match` 在测试里抄一遍就成了"判据问自己"，改错了也照样绿。
+    fn pick(
+        pending_corner: Option<(i32, i32)>,
+        anchor_br: Option<(i32, i32)>,
+        pos: Option<(i32, i32)>,
+    ) -> Self {
+        match (pending_corner, anchor_br, pos) {
+            (Some((work_right, work_bottom)), _, _) => Placement::PendingCorner {
+                work_right,
+                work_bottom,
+            },
+            (None, Some((right, bottom)), _) => Placement::Anchor { right, bottom },
+            (None, None, Some((x, y))) => Placement::LastPos { x, y },
+            (None, None, None) => Placement::PrimaryCorner,
+        }
+    }
+
+    /// 取一个**落在目标屏内**的点，供 DPI 查询。
+    ///
+    /// ⚠️ `right`/`bottom` 无论来自工作区还是锚点都是**排他**边界（Win32 `RECT` 语义），
+    /// 必须退 1px 才在屏内。不退的后果是贴屏幕右/下边缘时查到**相邻那块屏**的 DPI——
+    /// `MonitorFromPoint` 用的是 `DEFAULTTONEAREST`，错法不报错，只在多屏横排贴边时复现。
+    fn probe_point(self) -> (i32, i32) {
+        match self {
+            Placement::PendingCorner {
+                work_right,
+                work_bottom,
+            } => (work_right - 1, work_bottom - 1),
+            Placement::Anchor { right, bottom } => (right - 1, bottom - 1),
+            // 左上角是包含边界，本身就在窗口内，不必退。
+            Placement::LastPos { x, y } => (x, y),
+            // 兜底主屏：`render` 那一级走 `corner_position`，它用的 `SPI_GETWORKAREA`
+            // 取的也恒是主屏——两处兜底落在同一块屏上，是一致的。
+            Placement::PrimaryCorner => (0, 0),
+        }
+    }
 }
 
 impl ToolbarMouse {
@@ -1409,6 +1488,67 @@ mod tests {
         // 若哪天改了 create 的占位尺寸，这条会红，提醒回来确认推迟计算仍然成立。
         let placeholder = Toolbar::corner_in_work_area(1920, 1040, 160, 40);
         assert_eq!(vertical.0 - placeholder.0, 130);
+    }
+
+    /// 四级优先级：`PendingCorner` > `Anchor` > `LastPos` > `PrimaryCorner`。
+    ///
+    /// ★ 第一级压过记忆锚点是**有意的**：协调器跟随焦点换屏时下发目标屏工作区，
+    /// 若让 `Anchor` 赢，工具栏会被上一块屏的记忆位置顶回去 = 跟不动屏。
+    #[test]
+    fn placement_priority_puts_pending_corner_above_remembered_anchor() {
+        assert_eq!(
+            Placement::pick(Some((2560, 1392)), Some((800, 600)), Some((10, 20))),
+            Placement::PendingCorner {
+                work_right: 2560,
+                work_bottom: 1392
+            },
+            "换屏请求必须压过记忆锚点，否则跟随焦点换屏会被旧屏位置顶回去"
+        );
+        assert_eq!(
+            Placement::pick(None, Some((800, 600)), Some((10, 20))),
+            Placement::Anchor {
+                right: 800,
+                bottom: 600
+            },
+            "锚点是用户的意图，压过上一帧落点"
+        );
+        assert_eq!(
+            Placement::pick(None, None, Some((10, 20))),
+            Placement::LastPos { x: 10, y: 20 }
+        );
+        assert_eq!(Placement::pick(None, None, None), Placement::PrimaryCorner);
+    }
+
+    /// DPI 探针点逐级都落在**目标屏**内。
+    ///
+    /// 与软键盘 `probe_point_follows_work_area_when_nothing_is_remembered` 同一个不变量：
+    /// `ensure_scale` 与 `render` 必须认定同一块屏，否则按 A 屏 DPI 排出的尺寸落到 B 屏。
+    /// 工具栏这边靠第一级 `PendingCorner` 覆盖了"该屏无记忆位置"，所以没像软键盘那样
+    /// 真的漏掉一级——但这条测试是防它长回来的。
+    #[test]
+    fn probe_point_stays_on_the_target_screen_at_every_level() {
+        // 左侧副屏：工作区 (−1920, 0, 0, 1040)，坐标为负。
+        let at = Placement::pick(Some((0, 1040)), None, None);
+        assert_eq!(
+            at.probe_point(),
+            (-1, 1039),
+            "工作区 right/bottom 排他，须退 1px；不退会查到右邻那块屏"
+        );
+        assert_eq!(
+            Placement::pick(None, Some((0, 1040)), None).probe_point(),
+            (-1, 1039),
+            "锚点是窗口右下角，同样排他"
+        );
+        assert_eq!(
+            Placement::pick(None, None, Some((-800, 300))).probe_point(),
+            (-800, 300),
+            "上一帧落点是左上角，包含边界，不退"
+        );
+        assert_eq!(
+            Placement::pick(None, None, None).probe_point(),
+            (0, 0),
+            "无任何记录时兜底主屏，与 corner_position 的 SPI_GETWORKAREA 同屏"
+        );
     }
 
     /// ★ 横纵切换时**右下角纹丝不动**——这正是改锚点要解决的那个症状。
