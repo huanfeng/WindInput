@@ -2438,8 +2438,19 @@ impl Coordinator {
     /// 用户一关候选显示，词频就静默换到主方案的桶里去。
     ///
     /// ⚠️ **临拼 / 快捷输入刻意不在此分流**（2026-08-04 用户拍板）：它们走
-    /// `write_data_schema_id` 的按候选来源分流，实测行为正确（临拼记进 `"pinyin"`、全拼
-    /// 双拼共享一份），改动风险大于收益。往这里加模式前先确认那条路径不够用。
+    /// `write_data_schema_id` 的按候选来源分流，改动风险大于收益。往这里加模式前先确认
+    /// 那条路径不够用。
+    ///
+    /// ⚠️ 上一句原写作「实测行为正确（临拼记进 `"pinyin"`、全拼双拼共享一份）」——
+    /// **那只在主方案是混输时成立**。`write_data_schema_id` 的按来源分流只有 mixed 那一臂，
+    /// 非混输直接返回 `data_schema_id(owner)`；而临拼的记账走 `record_selection`
+    /// （`schema_override = None` ⇒ owner = active），主方案是纯码表（五笔）时算出来的是
+    /// `"wubi86"`。即临拼选词的**词频**眼下记在主方案桶里，与全拼不互通。
+    ///
+    /// 候选调整（置顶 / 隐藏）不受此影响，它在 `update_temp_pinyin_candidates` 里按
+    /// **临拼目标方案**读（折叠后即 `"pinyin"`，与全拼写入的是同一个桶），且临拼本身
+    /// 没有写端——`candidate_op_scope` 对 `TempPinyin` 返回 `None`，规则只可能是在拼音
+    /// 方案下写的。词频要对齐则须读写两端同动，那会改变既有用户数据的落点。
     ///
     /// 返回 `None` = 没有特殊归属，调用方走原有的 active 路径。
     pub(crate) fn effective_data_schema(&self, state: &State) -> Option<String> {
@@ -4484,6 +4495,23 @@ mod finalize_candidates_tests {
             // 转发层：`record_selection` / `apply_freq_rerank` / `apply_shadow` 三个薄包装
             // 把自己的参数原样传下去。
             "schema_override",
+            // 临英：归属恒是内置英文方案，与 `effective_data_schema` 对 `TempEnglish` 的
+            // 返回值是同一个常量（那边写成 `Some(ENGLISH_SCHEMA.to_string())`）。三处读写
+            // 端直接用常量而不绕 state，取值同源，故等同于走了那个函数。
+            "Some(ENGLISH_SCHEMA)",
+            // ★ 登记的**例外**：临拼候选调整的读端归属（`update_temp_pinyin_candidates`），
+            // 取自 `overlay_engine_schema` 而**不是** `effective_data_schema`——后者对
+            // `TempPinyin` 恰恰返回 `None`（2026-08-04 用户拍板不给它分流）。
+            //
+            // 为什么这条例外站得住：临拼的候选调整**没有写端**（`candidate_op_scope` 对
+            // `TempPinyin` 返回 `None`，临拼里发不起置顶），规则只可能是在拼音方案下写的，
+            // 读端按临拼目标方案折叠后落同一个 `"pinyin"` 桶，不存在「写进 A、读的是 B」。
+            //
+            // ⚠️ 但**词频那一侧确实是不对称的**：临拼的记账走 `record_selection`
+            // （owner = active），五笔主方案下落 `"wubi86"` 桶，与本行读的桶不是同一个。
+            // 这是已知待办（理由见 `effective_data_schema` 的文档）——动词频前先读那段，
+            // 别看到本行就照抄成「读端也这么取就行」。
+            "shadow_owner.as_deref()",
         ];
         const CALLS: &[&str] = &[
             ".record_selection_in(",
@@ -4495,6 +4523,8 @@ mod finalize_candidates_tests {
             ("coordinator.rs", include_str!("coordinator.rs")),
             ("handle_candidate.rs", include_str!("handle_candidate.rs")),
             ("handle_special.rs", include_str!("handle_special.rs")),
+            // 临英 / 临拼的候选装配与记账都在这里，此前整个文件不受本守卫覆盖。
+            ("handle_temp.rs", include_str!("handle_temp.rs")),
         ];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
@@ -4537,8 +4567,12 @@ mod finalize_candidates_tests {
             bad.join("\n  ")
         );
         // 反向保证：调用点被改名或扫描失效时，本测试不得退化成空跑而静默变绿。
+        //
+        // ⚠️ 下限须**随 sources 扩容一起上调**，否则余量翻倍等于容忍悄悄丢掉调用点：
+        // 把 `handle_temp.rs` 加进 sources 后实扫 13 个（原 9 个，下限却还留在 6）。
+        // 与下调时同一条纪律——变动前先确认是「合并/删除」还是「漏调」。
         assert!(
-            checked >= 6,
+            checked >= 13,
             "只扫到 {checked} 个方案归属调用点，少于预期——扫描方式失效了，先修测试"
         );
     }
@@ -4576,6 +4610,10 @@ mod finalize_candidates_tests {
             ("handle_candidate.rs", include_str!("handle_candidate.rs")),
             ("handle_special.rs", include_str!("handle_special.rs")),
             ("handle_menu.rs", include_str!("handle_menu.rs")),
+            // overlay 的候选装配是主输入路的**平行实现**，各自持一份 shadow 读取点
+            // （临英取小写化缓冲、临拼取引擎归一码）。此前本表漏了这个文件，那两处
+            // 一直不受守卫——正是「N 个调用点做同一件事」最容易走散的地方。
+            ("handle_temp.rs", include_str!("handle_temp.rs")),
         ];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
@@ -4630,8 +4668,9 @@ mod finalize_candidates_tests {
              确有理由不走的请加进本测试的 ALLOWED 并写明理由。",
             bad.join("\n  ")
         );
+        // ⚠️ 同上：`handle_temp.rs` 进 sources 后实扫 9 个（原 7 个，下限却还留在 5）。
         assert!(
-            checked >= 5,
+            checked >= 9,
             "只扫到 {checked} 个 shadow 读取点，少于预期——调用点被改名或扫描失效了，先修测试"
         );
     }

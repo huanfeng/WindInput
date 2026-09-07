@@ -329,6 +329,18 @@ impl Coordinator {
         let result = self
             .engine_mgr
             .convert_with(&schema, &state.temp_pinyin_buffer, limit);
+        // 候选调整（shadow）的归一编码，口径与主路径 `shadow_code_of` 完全相同：临拼目标
+        // 方案是双拼时引擎给出全拼码（`hc` → `hao`），使双拼与全拼共享同一条规则；全拼
+        // 恒空串 ⇒ 落回击键缓冲。
+        //
+        // ⚠️ 刻意**不落 `state.shadow_code`**（主路径存那里）：那个字段属于主输入路的
+        // 生命周期（每次 `update_candidates` 覆写、`clear_input` 清空），临拼与它的缓冲
+        // 各自独立。共用一个字段的话，退出临拼后主路径会读到一个别的码域里的残值。
+        let shadow_code = if result.shadow_code.is_empty() {
+            state.temp_pinyin_buffer.clone()
+        } else {
+            result.shadow_code.clone()
+        };
         let display = if result.preedit_display.is_empty() {
             state.temp_pinyin_buffer.clone()
         } else {
@@ -368,6 +380,23 @@ impl Coordinator {
         // 多出数百个生僻字候选（实测 `ying`：临拼 299 条 vs 主路径 76 条）。
         self.mark_common(&mut candidates);
         self.apply_filter(state, &mut candidates);
+        // 候选调整（置顶 / 隐藏）：位置与主路径同序，在 `apply_filter` 之后、简繁展开之前。
+        //
+        // ★ 归属取**临拼目标方案**，经 `data_schema_id` 折叠到 `"pinyin"` 桶——那正是全拼 /
+        // 双拼方案下 `candidate_op_scope` 写入的同一个桶。「全拼里置顶过的候选，临拼里照样
+        // 排在前面」这条一致性由此兑现，也是用户报障的那件事。
+        //
+        // ⚠️ 此前这一步**整段缺席**（不是归属取错）：规则写得进去、临拼永远读不出来，
+        // 而候选照出、顺序照排，失效完全静默。临拼是主输入路的平行实现，主路径每加一道
+        // 加工都得两边各接一次——同形漏接史见 `update_temp_english_candidates` 的词频段。
+        //
+        // ⚠️ 归属**不能取 active**：主方案通常是五笔（临拼只在码表/混输方案下可用），
+        // 按 active 归属会去查 `wubi86` 桶，全拼里置顶的规则一条都命中不了。
+        //
+        // 返回值（本码是否有置顶规则就位）在此丢弃：它只服务于出简让全，那是码表方案的
+        // 特性，临拼是纯拼音 overlay，没有让位环节。
+        let shadow_owner = Some(schema);
+        self.apply_shadow_in(shadow_owner.as_deref(), &mut candidates, &shadow_code);
         state.candidates = candidates;
         // 简繁 1对多变体展开（约束见 expand_s2t_variants 文档）。
         self.expand_s2t_variants(state);
