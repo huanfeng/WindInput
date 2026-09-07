@@ -367,7 +367,6 @@ static REGISTRY: &[ConfigField] = &[
     f("input.emoji.max_hosts", Int),
     f("input.emoji.min_word_chars", Int),
     f("input.emoji.categories", Bool),
-    f("input.emoji.learn_freq", Bool),
     f("input.url.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
     f(
         "input.add_word.candidate_layout",

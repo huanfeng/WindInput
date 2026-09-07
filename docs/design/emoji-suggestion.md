@@ -260,13 +260,18 @@ staging 时只放 exe/dll/`data/`/uninstall.exe，`build_dev/data/` 顶层与 `d
 [input.emoji]                 # 全局基线；方案文件可用同名 [emoji] 段逐字段覆盖
 enabled = false               # 出厂关（同 aux_code / short_code_yield）
 scope = "exact"               # off | exact（只扩精确整词命中）| all
-show_as = "after"             # after | tail | focus | comment
+show_as = "after"             # after | tail | comment
 max_per_word = 3              # 一个词最多产出几个 emoji（挡住「動物 → 90 个」）
 max_hosts = 1                 # 只对前 N 个候选扩展（show_as = focus 时忽略）
 min_word_chars = 2            # 单字不触发（「一 → 1️⃣」噪音最大）
 categories = false            # emoji_category.txt 单独开关，出厂关
-learn_freq = false            # emoji 不参与调频
 ```
+
+⛔ 初稿还有 `learn_freq = false`（emoji 是否参与调频），**已撤掉**：emoji 在
+`apply_freq_rerank` 之后才插进列表，词频读端永远看不到它，记下来没有任何排序效果，只会
+逐条往库里堆垃圾行。一个「打开也不起作用」的开关比没有更糟，而设置页 hint 还许诺了
+「参与调频会把常用字挤下去」这种做不到的效果。现在 emoji 候选**恒不记词频**
+（`record_selection_cand`），上屏历史照记。
 
 方案级覆盖走 `read_schema` 的 `merge_toml`，与 `[punct]`/`[candidate]` 同路
 （`schema-scoped-behavior.md`）。
@@ -297,12 +302,12 @@ learn_freq = false            # emoji 不参与调频
 |---|---|
 | `wind-candidate/candidate.rs` | `is_emoji_suggestion` 标记位（语义只表达「这条是扩展来的」，不编码排序决策） |
 | `wind-config/config.rs` | `EmojiConfig`（serde 缺省与 `Default` 共用 `default_emoji_*` 函数） |
-| `wind-config/config_schema.rs` | 8 个键登记 + 两个 `Enum` 值域常量 |
+| `wind-config/config_schema.rs` | 7 个键登记 + 两个 `Enum` 值域常量 |
 | `wind-coordinator/coordinator.rs` | `emoji_dict` / `emoji_spec` 字段、`sync_emoji_dict`、`load_emoji_dict`、值域告警 |
 | `wind-coordinator/handle_candidate.rs` | `plan_emoji_insertions`（纯函数）、`apply_emoji_suggestions`、`sole_non_emoji`、`record_selection_cand` |
 | `wind-coordinator/comment.rs` | `${emoji}` 变量（`emoji_comment_of`） |
 | `wind-transform/s2t.rs` | `Dict::convert_once`（单表替换，不走转换链） |
-| `../wind-setting` `settings_manifest.toml` | 8 项 UI 声明（label / hint / `enabled_when` 联动） |
+| `../wind-setting` `settings_manifest.toml` | 7 项 UI 声明（label / hint / `enabled_when` 联动） |
 
 ★ **设置页的类型、值域与默认值是自动的**：`wind-rpc/capabilities.rs` 从
 `config_schema::REGISTRY` + 系统预置配置动态生成 capability 清单，登记即下发。
@@ -359,5 +364,14 @@ wind_dict::emojidict::load_or_build(
 - **worktree 的 `.cache`/`build_dev` junction**：删 worktree 前须先解 junction，否则删穿词库。
   本分支刻意不建这两个链接，测试自带 fixture。
 - **`emoji_category.txt` 的干扰量级**：单条最多 90 余个 emoji。默认关，且受 `max_per_word` 约束。
+- **重建缓存前必须先放掉旧 mmap**：`sync_emoji_dict` 在 `categories` 翻转时会重建 `.wemj`
+  并 rename 覆盖，而 Windows 上覆盖被映射的文件返回拒绝访问（实测 WinError 5）。故它先把
+  `emoji_dict` 置 `None` 再加载。初版顺序反了，表现为「打开分类词后 emoji 整个消失，再改
+  任一配置又回来」——spec 未记录使下次 sync 重试成功，把缺陷藏成了偶发。
+- **`comment` 档尚无上屏入口**：该档只在注释段灰字显示，用户看得见选不了。§5 已标注
+  「需另设上屏入口」，本分支未做，属待办而非取舍。
+- **只覆盖普通输入**：`apply_emoji_suggestions` 只接在 `build_candidates` 末端。临拼、
+  混输模式（mix）、特殊模式、联想各自直接赋值 `state.candidates`，不追加 emoji。这些
+  路径要不要覆盖，等真机上普通输入的形态定下来再议。
 - **与 `wubi86_emoji` 词库的关系**：两者不互斥也不合并。旧库是「打 `emoj` 直接检索」的入口型
   能力，新机制是「打出词之后追加」，替代不了。旧库保留原样，不再往里加东西。

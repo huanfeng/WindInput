@@ -701,10 +701,6 @@ min_word_chars = 2
 # 默认关，因为这类词一个能带出几十个 emoji（「动物」有 90 个），开了要靠 max_per_word 收着。
 categories = false
 
-# 选过的 emoji 要不要参与调频（选得多就往前排）。默认关：emoji 多是一次性点缀，
-# 让它参与调频会把常用字挤下去。
-learn_freq = false
-
 # URL 临时输入模式：正常输入下打出完整前缀（如 http / www.）即进入网址输入模式，
 # 模式内自由输入网址字符（不触发上屏），空格或回车上屏。默认关闭。
 [input.url]

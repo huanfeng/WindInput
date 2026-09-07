@@ -3442,6 +3442,16 @@ impl Coordinator {
             info!("emoji 扩展已关闭");
             return;
         }
+        // ★ 先放掉旧表，再重建。`categories` 翻转会改变指纹源 ⇒ `load_or_build` 要写新的
+        // `.wemj` 并 rename 覆盖旧文件，而旧表此刻还被本字段的 Arc 持着 mmap——Windows 上
+        // 覆盖被映射的文件返回拒绝访问（本机以 mmap + `os.replace` 探针实测 WinError 5，
+        // `emojidict.rs` 的测试也为此显式 `drop(r)`）。不先放掉，表现为「打开分类词后
+        // emoji 整个消失，随便再改一项配置又回来」——spec 未记录使下次 sync 重试成功，
+        // 恰好把这个缺陷藏成了偶发。
+        //
+        // 池里只存 Weak（`reader_pool` 模块文档），本字段是唯一的强引用；写锁会等正在
+        // `apply_emoji_suggestions` 里的读者退出，之后旧映射即释放。
+        *self.emoji_dict.write().unwrap_or_else(|e| e.into_inner()) = None;
         let loaded = Self::load_emoji_dict(categories);
         let ok = loaded.is_some();
         *self.emoji_dict.write().unwrap_or_else(|e| e.into_inner()) = loaded;

@@ -3232,7 +3232,7 @@ pub struct EmojiConfig {
     /// 真正要拦的是分类表（`emoji_category.txt` 平均 9 个、最多 90 个「动物」）。
     #[serde(default = "default_emoji_max_per_word")]
     pub max_per_word: usize,
-    /// 对候选列表的前几个候选做扩展（`show_as = "focus"` 时本项无意义）。
+    /// 对候选列表的前几个候选做扩展。
     ///
     /// 出厂 1（只扩首选）：这是把「候选序号漂移」控制住的主要手段——rime 那边的干扰感，
     /// 根源正是它对每个候选都扩。
@@ -3247,12 +3247,6 @@ pub struct EmojiConfig {
     /// 入口，故做成独立开关而不是不引入。
     #[serde(default)]
     pub categories: bool,
-    /// emoji 上屏是否参与词频学习。出厂关。
-    ///
-    /// ⚠️ 打开它需要读写两端同时放行，只放一端会得到两种半吊子形态之一（见
-    /// `EngineManager` 里 `exclude_blocks` 的同型论证）。
-    #[serde(default)]
-    pub learn_freq: bool,
 }
 
 fn default_emoji_scope() -> String {
@@ -3281,7 +3275,6 @@ impl Default for EmojiConfig {
             max_hosts: default_emoji_max_hosts(),
             min_word_chars: default_emoji_min_word_chars(),
             categories: false,
-            learn_freq: false,
         }
     }
 }
@@ -7180,7 +7173,6 @@ mod tests {
         let d = EmojiConfig::default();
         assert!(!d.enabled, "出厂必须关闭");
         assert!(!d.categories, "分类表干扰最大，出厂不加载");
-        assert!(!d.learn_freq, "emoji 出厂不参与词频");
         assert_eq!(d.max_hosts, 1, "只扩首选是控制候选序号漂移的主要手段");
     }
 

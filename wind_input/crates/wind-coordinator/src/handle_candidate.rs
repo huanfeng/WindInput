@@ -183,6 +183,14 @@ fn clear_blocked_by_candidates(candidates: &[Candidate], input_len: usize) -> bo
 ///
 /// `max_code_length` 为 0（拼音等无「全码」概念的引擎，见 `Engine::max_code_length` 默认实现）
 /// 时结果为 0 → 调用方的 `len < 0` 恒假 → 不设闸，与引擎侧同构降级。
+fn resolve_auto_commit_min_len(configured: usize, max_code_length: usize) -> usize {
+    if configured > 0 {
+        configured
+    } else {
+        max_code_length
+    }
+}
+
 /// 候选列表里**唯一的非 emoji 扩展候选**；不足一条或多于一条都返回 `None`。
 ///
 /// # 为什么抽成纯函数
@@ -195,6 +203,12 @@ fn clear_blocked_by_candidates(candidates: &[Candidate], input_len: usize) -> bo
 /// ⚠️ 只有「唯一性」类判据需要这样排除。候选窗显隐（`is_empty`）、翻页与选中索引
 /// （`len`）**照常把 emoji 计入**——用户要能翻到并选中它；而且没有宿主候选就不会有
 /// emoji，故 `is_empty` 的语义天然不受影响。
+fn sole_non_emoji(candidates: &[Candidate]) -> Option<&Candidate> {
+    let mut it = candidates.iter().filter(|c| !c.is_emoji_suggestion);
+    let first = it.next()?;
+    it.next().is_none().then_some(first)
+}
+
 /// 规划 emoji 插入：返回 `(宿主下标, 该宿主要插入的 emoji)`，**不修改**候选列表。
 ///
 /// # 为什么抽成纯函数
@@ -262,20 +276,6 @@ fn make_emoji_candidate(text: String) -> Candidate {
     }
 }
 
-fn sole_non_emoji(candidates: &[Candidate]) -> Option<&Candidate> {
-    let mut it = candidates.iter().filter(|c| !c.is_emoji_suggestion);
-    let first = it.next()?;
-    it.next().is_none().then_some(first)
-}
-
-fn resolve_auto_commit_min_len(configured: usize, max_code_length: usize) -> usize {
-    if configured > 0 {
-        configured
-    } else {
-        max_code_length
-    }
-}
-
 impl Coordinator {
     /// 记录一次选词到 redb FREQ（词频维度：count+1、last_used=now，按 schema+code+text）。
     /// 词频是与权重解耦的独立维度（frequency.md），仅记真实使用数据；redb 事务即时持久。
@@ -311,26 +311,36 @@ impl Coordinator {
         self.record_selection_in(None, code, text, source);
     }
 
-    /// 同 [`Self::record_selection`]，但显式声明这是一条 **emoji 扩展候选**。
+    /// 同 [`Self::record_selection`]，但从候选本身判来源：**emoji 扩展候选恒不记词频**。
     ///
-    /// 存在理由：emoji 是否参与词频由 `input.emoji.learn_freq` 决定，而这个事实只在候选
-    /// 身上（`is_emoji_suggestion`），`record_selection` 的三个参数都带不出来。
+    /// 存在理由：「这条是 emoji 扩展」这个事实只在候选身上（`is_emoji_suggestion`），
+    /// `record_selection` 的三个参数都带不出来——它 `source` 为 `None`、`code` 为空，
+    /// 走普通路径会按输入码写进词频库。
+    ///
+    /// # 为什么恒不记、而不是做成开关
+    ///
+    /// emoji 在 `apply_freq_rerank` **之后**才插进列表（见 [`Self::apply_emoji_suggestions`]），
+    /// 词频读端永远看不到它 ⇒ 记下来的词频没有任何排序效果，只会逐条往库里堆垃圾行。
+    /// 一个「打开也不起作用」的开关比没有更糟——曾有 `input.emoji.learn_freq` 一项，
+    /// 设置页 hint 还许诺了「参与调频会把常用字挤下去」这种做不到的效果，因此撤掉。
     ///
     /// ⚠️ **不能在调用点整条跳过记账**：`record_selection` 里还有 `push_commit_history`，
     /// 那是「`;` 重复上屏」的数据源，与词频是两条独立通路。跳过整条的话，刚上屏的 emoji
     /// 无法被重复调出，而用户只会觉得重复上屏偶尔失灵（这条教训在 `exclude_blocks` 的
     /// 注释里已经记过一次）。
+    ///
+    /// ★ 凡是从 `state.candidates` 取候选上屏的路径都该走本函数而非 `record_selection`。
+    /// emoji 只在 `build_candidates` 末端插入，故会消费到它的只有普通输入的选词 / 顶屏
+    /// 路径：`commit_selected`、`take_committed_with_highlight`、`commit_highlight_then_char`
+    /// 与标点顶屏两处。初版只接了后三处，主选词路径漏掉——按数字键选 emoji 照样记词频，
+    /// 正是「消费点接在走不到的调用点上」那种静默失效。
+    /// `every_record_selection_call_goes_through_freq_code` 同时扫描两个名字，记账码的
+    /// 口径约束对本函数同样成立。
     pub(crate) fn record_selection_cand(&self, code: &str, cand: &Candidate) {
         if cand.is_emoji_suggestion {
-            let learn = {
-                let rt = self.rt();
-                rt.config.input.emoji.learn_freq
-            };
-            if !learn {
-                // 只跳词频，历史照记。
-                self.push_commit_history(&cand.text);
-                return;
-            }
+            // 只跳词频，历史照记。
+            self.push_commit_history(&cand.text);
+            return;
         }
         self.record_selection_in(None, code, &cand.text, cand.source);
     }
@@ -2683,11 +2693,7 @@ impl Coordinator {
         // 拼音/英文按候选码（分段时为前缀码，如「ni」而非整串「nihao」）。
         // 上面的 `code` 仍供 `record_commit` 统计码长使用，那是另一套语义。
         if !from_assoc {
-            self.record_selection(
-                &self.freq_code(&state.input_buffer, cand),
-                &cand.text,
-                cand.source,
-            );
+            self.record_selection_cand(&self.freq_code(&state.input_buffer, cand), cand);
         }
         // 输入统计：每次选词记一段（分段逐字选各段各记一次，不重复整串）；
         // 在 partial 分支之前，两分支都经此处一次。
@@ -3316,7 +3322,7 @@ impl Coordinator {
         let cand = state.candidates[idx].clone();
         // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
         let freq_code = self.freq_code(&state.input_buffer, &cand);
-        self.record_selection(&freq_code, &cand.text, cand.source);
+        self.record_selection_cand(&freq_code, &cand);
         // 顶屏上屏的是一条来源候选（prefix 段已在选词时记过）。
         // `saturating_sub`：`page_range` 保证 start < len，钳制后 idx < start 不可达，
         // 但页内位置这种纯展示用的量不值得为它留一个下溢 panic。
@@ -4297,8 +4303,14 @@ mod finalize_candidates_tests {
         for (name, src) in sources {
             // 只看 `#[cfg(test)]` 之前的部分：测试自己用字面量直接构造键是合法的。
             let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
-            for (off, _) in prod.match_indices(".record_selection(") {
-                let args = &prod[off + ".record_selection(".len()..];
+            // 两个名字都扫：`record_selection_cand` 是从候选本身分流 emoji 的薄包装，
+            // 记账码的口径约束对它同样成立，漏扫它就等于给新调用点开了后门。
+            let calls = [".record_selection(", ".record_selection_cand("];
+            let sites = calls
+                .iter()
+                .flat_map(|pat| prod.match_indices(*pat).map(move |(off, _)| (off, *pat)));
+            for (off, pat) in sites {
+                let args = &prod[off + pat.len()..];
                 // 切出第一个实参：按括号深度找顶层逗号（实参可能是 `self.freq_code(a, b)`）。
                 let mut depth = 0i32;
                 let mut end = args.len();
@@ -4341,6 +4353,7 @@ mod finalize_candidates_tests {
         // 下限随**有意的**收口下调过一次：进模式顶屏（临英 / mix / 特殊模式 / 临拼）原本各持
         // 一份逐字相同的记账 + 拼接代码，合并进 `take_committed_with_highlight` 后四处并作一处，
         // 12 → 9。下调前务必确认是合并而非漏调——这条断言的用途正是逼人回来说明减少的原因。
+        // `record_selection_cand` 的调用点计入同一总数（把某处改成它不会让计数下降）。
         assert!(
             checked >= 9,
             "只扫到 {checked} 个 record_selection 调用点，远少于预期——\
