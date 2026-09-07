@@ -399,6 +399,7 @@ pub fn font_runs(wide: &[u16], declared: &[ScriptClass]) -> Vec<FontRun> {
     #[allow(clippy::type_complexity)]
     let mut cells: Vec<(usize, usize, Option<Option<ScriptClass>>)> =
         Vec::with_capacity(wide.len());
+    let mut cps: Vec<u32> = Vec::with_capacity(wide.len());
     let mut i = 0usize;
     while i < wide.len() {
         let (cp, step) = next_cp(wide, i);
@@ -412,7 +413,50 @@ pub fn font_runs(wide: &[u16], declared: &[ScriptClass]) -> Vec<FontRun> {
             Raw::Neutral(_) | Raw::Sticky => None,
         };
         cells.push((i, step, owner));
+        cps.push(cp);
         i += step;
+    }
+
+    // 第一遍半：emoji 呈现序列的**回溯改写**。
+    //
+    // 键帽（基字 + 可选 U+FE0F + U+20E3，如 1️⃣ #️⃣）与「文本码位 + U+FE0F 表情呈现选择符」
+    // （©️ ™️ ☑️ ▶️）只有整串落在**同一个字体段**里，emoji 字体的连字 / 呈现替换才会触发。
+    // 而基字多半是 ASCII 数字或中性符号：第一遍把它判成待继承（声明了 digits 则是 Digits），
+    // 键帽符与 FE0F 又是粘连——三格各归各家，回退从不触发（基准字体自带「1」），连字永远
+    // 不成，画面上是一个普通的「1」加一个空框。这是纯代码缺陷，换任何系统版本都修不好。
+    //
+    // 三条判据缺一不可：
+    // - 只在 Emoji 已声明时改写。未声明时一切照旧——这意味着本段单独上线什么都不会变，
+    //   它依赖出厂对 emoji 类的指派（`candidate_window::build_font_plan`）才生效；
+    // - 只认 U+FE0F。U+FE0E 是**文本**呈现选择符，语义正好相反，提升到 emoji 字体等于把
+    //   用户「我要文字形态」的显式意图反着执行；
+    // - 改写赢过基字已有的强归属（同时声明了 digits 时基字是 Digits）：连字是比「这是个
+    //   数字」更具体的事实。但基字若是强脚本字符（汉字、拉丁字母后面跟了个孤零零的 FE0F）
+    //   则不动——那不是任何 emoji 序列，搬过去只会让它换一款字体。
+    //
+    // 只改归属字段、不动起点与长度，切段的无缝覆盖与代理对完整性自动保持。竖排的
+    // `upright_cells` 早已靠 `is_trailing_mark` 把这些序列并成一格，这里是横排的同一件事。
+    if declared.contains(&ScriptClass::Emoji) {
+        let promotable = |cp: u32| {
+            matches!(
+                raw_of(cp),
+                Raw::Neutral(_) | Raw::Class(ScriptClass::Emoji) | Raw::Class(ScriptClass::Digits)
+            )
+        };
+        for k in 1..cells.len() {
+            let base = match cps[k] {
+                0xFE0F => k - 1,
+                0x20E3 if cps[k - 1] == 0xFE0F && k >= 2 => k - 2,
+                0x20E3 => k - 1,
+                _ => continue,
+            };
+            if !promotable(cps[base]) {
+                continue;
+            }
+            for cell in &mut cells[base..=k] {
+                cell.2 = Some(Some(ScriptClass::Emoji));
+            }
+        }
     }
 
     // 第二遍：待继承的格子并入相邻强归属——**前向优先**（读序上「跟着前面走」更符合直觉，
@@ -551,6 +595,64 @@ impl FontPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn w(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    /// ★ 键帽与 FE0F 序列必须整串落在 emoji 段里，连字才成得了。
+    ///
+    /// 不改写时：基字「1」待继承（或 Digits）、FE0F 与 20E3 粘连，三格各归各家，回退永远
+    /// 不触发（基准字体自己有「1」），画面上是普通的「1」加一个空框。
+    #[test]
+    fn keycap_and_fe0f_sequences_form_one_emoji_run() {
+        let emoji = [ScriptClass::Emoji];
+        let all_emoji = |runs: &[FontRun], len: usize| {
+            runs.len() == 1 && runs[0].len == len && runs[0].class == Some(ScriptClass::Emoji)
+        };
+        // 1️⃣ = 0031 FE0F 20E3；不带 FE0F 的 1⃣ 同样成立。
+        assert!(all_emoji(&font_runs(&w("1\u{FE0F}\u{20E3}"), &emoji), 3));
+        assert!(all_emoji(&font_runs(&w("1\u{20E3}"), &emoji), 2));
+        assert!(all_emoji(&font_runs(&w("#\u{FE0F}\u{20E3}"), &emoji), 3));
+        // ▶️：文本码位（中性）+ FE0F 表情呈现选择符。
+        assert!(all_emoji(&font_runs(&w("\u{25B6}\u{FE0F}"), &emoji), 2));
+        // 夹在文字中间：只有序列本身切出来，前后段不受影响、不吞字。
+        let runs = font_runs(&w("第1\u{FE0F}\u{20E3}名"), &emoji);
+        let classes: Vec<_> = runs.iter().map(|r| r.class).collect();
+        assert_eq!(classes, [None, Some(ScriptClass::Emoji), None]);
+        assert_eq!(runs[1].start, 1);
+        assert_eq!(runs[1].len, 3);
+        // 同时声明了 digits：键帽仍赢——连字是比「这是个数字」更具体的事实。
+        let runs = font_runs(
+            &w("1\u{FE0F}\u{20E3}"),
+            &[ScriptClass::Emoji, ScriptClass::Digits],
+        );
+        assert!(all_emoji(&runs, 3), "{runs:?}");
+        // 裸数字不受影响：声明了 digits 就归 digits。
+        let runs = font_runs(&w("12"), &[ScriptClass::Emoji, ScriptClass::Digits]);
+        assert_eq!(runs[0].class, Some(ScriptClass::Digits));
+    }
+
+    /// 三条不该被改写的情形：FE0E 文本选择符、未声明 emoji、强脚本基字。
+    #[test]
+    fn emoji_rewrite_leaves_text_selector_and_strong_bases_alone() {
+        let emoji = [ScriptClass::Emoji];
+        // U+FE0E 是**文本**呈现选择符，语义与 FE0F 相反，不得提升。
+        assert!(
+            font_runs(&w("#\u{FE0E}"), &emoji)
+                .iter()
+                .all(|r| r.class.is_none())
+        );
+        // 未声明 emoji：一切照旧（键帽仍是三格各归各家，不切 emoji 段）。
+        assert!(
+            font_runs(&w("1\u{FE0F}\u{20E3}"), &[ScriptClass::Latin])
+                .iter()
+                .all(|r| r.class != Some(ScriptClass::Emoji))
+        );
+        // 汉字后面跟了个孤零零的 FE0F：不是任何 emoji 序列，汉字不许被搬走。
+        let runs = font_runs(&w("文\u{FE0F}"), &[ScriptClass::Emoji, ScriptClass::Cjk]);
+        assert_eq!(runs[0].class, Some(ScriptClass::Cjk), "{runs:?}");
+    }
 
     /// 直立竖排切格：一个基字 + 粘着它的记号。
     ///

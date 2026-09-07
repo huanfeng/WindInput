@@ -238,6 +238,63 @@ fn test_codetable_extra_hot_toggle() {
     assert!(has_extra(&mgr), "热开启扩展后 '甘蓝菜' 应回来");
 }
 
+/// ★ 热插拔必须打到**混输方案内部**那份子引擎，不只是同名的独立方案。
+///
+/// 混输的成员子引擎在 `build_engine` 里内联构造、不入 `engines` 表；用户 `available` 同时含
+/// `wubi86` 与 `wubi86_pinyin` 时，预热会把两份 wubi86 词库都建出来。上面那条测试全程只用
+/// 纯 wubi86，恰好绕过了这个洞——真机上五笔拼音混输下关扩展库「要重启才生效」就是它。
+#[test]
+fn test_codetable_extra_hot_toggle_reaches_mixed_member() {
+    let dir = data_dir();
+    if !schema_exists(&dir, "wubi86_pinyin") || !schema_exists(&dir, "wubi86") {
+        eprintln!("跳过：需要 wubi86_pinyin + wubi86 schema");
+        return;
+    }
+    let cfg = make_config(&["wubi86_pinyin", "wubi86"]);
+    let mgr = EngineManager::new(&cfg, Some(&dir));
+    let Some(merged) = mgr.schema_merged("wubi86") else {
+        eprintln!("跳过：无法读取 wubi86");
+        return;
+    };
+    let extra_ids: Vec<String> = merged
+        .dictionaries
+        .iter()
+        .filter(|d| !d.default && !d.path.is_empty())
+        .map(|d| d.id.clone())
+        .collect();
+    if extra_ids.is_empty() {
+        eprintln!("跳过：wubi86 无扩展词库");
+        return;
+    }
+    let has_extra_in = |m: &EngineManager, schema: &str| {
+        m.convert_with(schema, "aaae", 20)
+            .candidates
+            .iter()
+            .any(|c| c.text == "甘蓝菜")
+    };
+    if !has_extra_in(&mgr, "wubi86_pinyin") {
+        eprintln!("跳过：扩展库词 '甘蓝菜' 不在该数据集");
+        return;
+    }
+    // 把独立的 wubi86 也建起来：真机里正是这份「没人在用的副本」吃掉了热插拔。
+    assert!(mgr.prewarm_schema("wubi86"));
+    assert!(has_extra_in(&mgr, "wubi86"));
+
+    for id in &extra_ids {
+        assert!(mgr.set_dict_enabled_live("wubi86", id, false));
+    }
+    assert!(
+        !has_extra_in(&mgr, "wubi86_pinyin"),
+        "混输方案内部的 wubi86 子引擎没被翻到：'甘蓝菜' 仍在"
+    );
+    assert!(!has_extra_in(&mgr, "wubi86"), "独立 wubi86 同样应关掉");
+
+    for id in &extra_ids {
+        assert!(mgr.set_dict_enabled_live("wubi86", id, true));
+    }
+    assert!(has_extra_in(&mgr, "wubi86_pinyin"), "热开启后混输下应回来");
+}
+
 #[test]
 fn test_pinyin_engine_candidates() {
     let dir = data_dir();

@@ -2257,11 +2257,56 @@ impl EngineManager {
         Ok(())
     }
 
+    /// 已加载的**混输**方案里，以 `schema_id` 为成员（primary / secondary / english）的那些。
+    ///
+    /// 成员子引擎在 `build_engine` 里内联构造、从不入 `engines` 表，所以同一份词库在进程里
+    /// 可能有两个副本：独立方案一份、混输方案内部一份（用户 `available` 同时含 `wubi86` 与
+    /// `wubi86_pinyin` 时预热会把两份都建出来）。凡是「对已加载引擎做点什么」的运行时操作
+    /// 都得把后者也算上，否则命中的是没人在用的那份、还报告成功。
+    ///
+    /// english 特殊：它不写在方案文件里，由全局 `schema.mix.enable_english` 决定要不要建，
+    /// 这里对所有混输方案一律返回、由调用方按转发结果处置。
+    fn loaded_mixed_dependents(&self, schema_id: &str) -> Vec<(String, Arc<dyn Engine>)> {
+        let loaded: Vec<(String, Arc<dyn Engine>)> = self
+            .engines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(id, _)| id.as_str() != schema_id)
+            .map(|(id, e)| (id.clone(), Arc::clone(e)))
+            .collect();
+        loaded
+            .into_iter()
+            .filter(|(id, _)| {
+                if self.schema_engine_type(id).as_deref() != Some("mixed") {
+                    return false;
+                }
+                if schema_id == "english" {
+                    return true;
+                }
+                Self::read_schema(id, self.data_dir.as_deref(), self.override_dir.as_deref())
+                    .map(|s| {
+                        s.engine.mixed.primary_schema == schema_id
+                            || s.engine.mixed.secondary_schema == schema_id
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
     /// 运行时启停某方案的扩展词库：对**已加载引擎**即时翻对应系统层的 enabled 标志
     /// （无需重建/重熔大词库）；未加载的方案此处不做事（下次构建按已持久化的 override 生效）。
     /// 启用集变化会影响反查索引/编码提示（基于启用词库合并），故一并失效之使下次重算。
     /// 返回是否对已加载引擎即时生效。**注意**：调用方须先 [`persist_schema_override`] 持久化，
     /// 否则重启/重建后状态丢失。
+    ///
+    /// # 必须扇出到把它当成员的混输方案
+    ///
+    /// 只翻 `engines[schema_id]` 那一个实例的话，五笔拼音混输下切 wubi86 的扩展库：命中的是
+    /// 独立的 wubi86 引擎（返回 true、CLI 还打印「已即时生效」），真正在服务的 `MixedEngine`
+    /// 里那份 primary 一直是老标志位；切走再切回也不重建（缓存命中），只有重启或任何触发
+    /// `reload_from_config` 的动作才生效——真机表现为「关了没反应，顺手改别的设置又好了」。
+    /// 转发不到的依赖方案（成员子引擎不认这个 dict）直接失效，下次使用按已落盘的 override 重建。
     pub fn set_dict_enabled_live(&self, schema_id: &str, dict_id: &str, enabled: bool) -> bool {
         let engine = self
             .engines
@@ -2269,7 +2314,19 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner())
             .get(schema_id)
             .cloned();
-        let hit = engine.is_some_and(|e| e.set_dict_enabled(dict_id, enabled));
+        let mut hit = engine.is_some_and(|e| e.set_dict_enabled(dict_id, enabled));
+        for (mixed_id, e) in self.loaded_mixed_dependents(schema_id) {
+            if e.set_dict_enabled(dict_id, enabled) {
+                hit = true;
+            } else if schema_id != "english" {
+                // english 子引擎可能根本没建（enable_english 关着），转发不到是常态，不失效。
+                warn!(
+                    "混输方案 {} 内的成员 {} 未能即时翻转词库 {}，已失效待重建",
+                    mixed_id, schema_id, dict_id
+                );
+                self.invalidate_schema(&mixed_id);
+            }
+        }
         // 反查索引依赖「启用词库合并」，启用集变了须失效（懒重建）。
         // 注：编码提示开关已改读全局 config.pinyin.show_code_hint，无方案级缓存需失效。
         self.reverse_index

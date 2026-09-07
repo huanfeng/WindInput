@@ -939,7 +939,8 @@ path = ""
 render_mode = "directwrite"
 # family 缺字时按序接续的字体；最终链 = [family] + fallback
 fallback = []
-# 按脚本单独指派字体：键取 latin/greek/cyrillic/cjk/emoji/digits/punct，值是该类自己的字体链
+# 按脚本单独指派字体：键取 latin/greek/cyrillic/cjk/emoji/digits/punct，值是该类自己的字体链。
+# Windows 上 emoji 类未指派时默认用 Segoe UI Emoji；写 emoji = [] 可取消这条默认指派
 scripts = {}
 
 [ui.theme]

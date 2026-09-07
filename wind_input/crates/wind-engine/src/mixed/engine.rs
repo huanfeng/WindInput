@@ -760,14 +760,20 @@ impl Engine for MixedEngine {
         self.primary.input_chars()
     }
 
-    /// 热插拔扩展词库：转发到主/次子引擎（码表子引擎承载 codetable-extra 层）。
+    /// 热插拔扩展词库：转发到主/次/英文子引擎（码表子引擎承载 codetable-extra 层，
+    /// 英文子引擎承载 `en_ext` 一类扩展层）。三个都要转：漏掉哪个，那个方案的扩展库开关
+    /// 在混输下就只会翻到独立引擎那份、看着生效实际没有。
     fn set_dict_enabled(&self, dict_id: &str, enabled: bool) -> bool {
         let a = self.primary.set_dict_enabled(dict_id, enabled);
         let b = self
             .secondary
             .as_ref()
             .is_some_and(|s| s.set_dict_enabled(dict_id, enabled));
-        a || b
+        let c = self
+            .english
+            .as_ref()
+            .is_some_and(|s| s.set_dict_enabled(dict_id, enabled));
+        a || b || c
     }
 
     fn convert(&self, input: &str, max_candidates: usize) -> anyhow::Result<ConvertResult> {

@@ -63,8 +63,29 @@ pub(crate) fn build_font_plan(
             None => tracing::warn!("ui.font.scripts 里的未知脚本类名「{key}」已忽略"),
         }
     }
+    // emoji 类的出厂指派（仅 Windows；macOS 的脚本指派尚未实现，见 `coretext.rs`）。
+    //
+    // 不靠 data/config.toml 的默认值而在这里注入，是因为配置层写回不剔除「等于默认」的键：
+    // 老用户的 config.toml 里已经躺着一句 `scripts = {}`，改出厂值对他们永远不生效。
+    // 用户显式写了 `emoji = [...]`（含空表）即按用户的来，空表就是「关掉这条指派」。
+    //
+    // 为什么必须指派而不是只靠系统回退（`DEFAULT_EMOJI_FAMILY` 的文档有全文）：
+    // - 新码位（Emoji 16.0 的 🫜 一类）本机 Segoe UI Emoji 明明有字形，DirectWrite 内置的
+    //   回退区间表却没把它映射过去，量出来是缺字宽度；
+    // - 键帽序列（1️⃣）的基字「1」基准字体自己就有，回退根本不会触发，只有把整串切进
+    //   emoji 段才能连字（见 `script::font_runs` 的回溯改写）。
+    //
+    // 已知代价：`U+2600..27BF` 里 ★ ☆ ✓ 这些中性符号会跟着搬到 Segoe UI Emoji（分类表
+    // `script.rs` 对这段的取舍写明了「声明后一并跟着走」）；`declared()` 非空后 `font_runs`
+    // 在每次绘制每个文本叶子上都会跑一遍，实测每叶子几个字、微秒级。
+    if cfg!(windows) && !assigned.iter().any(|(c, _)| *c == ScriptClass::Emoji) {
+        assigned.push((ScriptClass::Emoji, vec![DEFAULT_EMOJI_FAMILY.to_string()]));
+    }
     FontPlan::new(default_chain, assigned)
 }
+
+/// Windows 出厂的 emoji 字族。只在 [`build_font_plan`] 未见用户声明 emoji 类时注入。
+pub const DEFAULT_EMOJI_FAMILY: &str = "Segoe UI Emoji";
 
 /// 换行可见符 U+21B5（`↵`）。取编辑器通用约定（VS Code 等显示换行即此符），
 /// 而非 Control Pictures 区的 `␊`/`␤`——后者字形是小方框里塞 `LF` 字母，
@@ -4738,7 +4759,7 @@ mod water_fill_tests {
 /// `[ui.font]` → [`FontPlan`] 的折叠规则。平台无关（不碰窗口/COM），故随 Linux CI 跑。
 #[cfg(test)]
 mod font_plan_build_tests {
-    use super::{DEFAULT_FONT_FAMILY, build_font_plan};
+    use super::{DEFAULT_EMOJI_FAMILY, DEFAULT_FONT_FAMILY, build_font_plan};
     use crate::text::script::ScriptClass;
 
     fn v(items: &[&str]) -> Vec<String> {
@@ -4792,12 +4813,23 @@ mod font_plan_build_tests {
             ],
         );
         // 顺序是 `ScriptClass` 的**声明序**（`FontPlan::new` 按 `Ord` 排），不是字母序。
-        assert_eq!(p.declared(), &[ScriptClass::Latin, ScriptClass::Cjk]);
+        // Windows 上出厂会再注入 emoji 一项，这里只看用户声明的那两条。
+        let user_declared: Vec<ScriptClass> = p
+            .declared()
+            .iter()
+            .copied()
+            .filter(|c| *c != ScriptClass::Emoji)
+            .collect();
+        assert_eq!(user_declared, [ScriptClass::Latin, ScriptClass::Cjk]);
         assert_eq!(p.chain_for(Some(ScriptClass::Latin)), ["Segoe UI"]);
         assert_eq!(p.chain_for(Some(ScriptClass::Cjk)), ["宋体"]);
     }
 
     /// 零配置（出厂）必须折成平凡方案——调用方据此完全走旧路径，一次 COM 调用都不多做。
+    ///
+    /// Windows 除外：出厂会注入 emoji 类的指派（见 `build_font_plan`），零配置不再平凡，
+    /// 由下一条测试守。
+    #[cfg(not(windows))]
     #[test]
     fn factory_config_folds_to_a_trivial_plan() {
         assert!(build_font_plan("", &[], &[]).is_trivial());
@@ -4806,6 +4838,33 @@ mod font_plan_build_tests {
         assert!(!build_font_plan("宋体", &v(&["Arial"]), &[]).is_trivial());
         assert!(
             !build_font_plan("宋体", &[], &[("latin".to_string(), v(&["Arial"]))]).is_trivial()
+        );
+    }
+
+    /// ★ Windows 出厂：emoji 类恒有指派（Segoe UI Emoji），否则 1️⃣ 与 Emoji 16.0 的新码位
+    /// 渲染不出来；用户显式声明 emoji（含空表）时按用户的来，空表即关掉这条指派。
+    #[cfg(windows)]
+    #[test]
+    fn factory_config_assigns_emoji_on_windows() {
+        let p = build_font_plan("", &[], &[]);
+        assert_eq!(p.declared(), &[ScriptClass::Emoji]);
+        assert_eq!(
+            p.chain_for(Some(ScriptClass::Emoji)),
+            [DEFAULT_EMOJI_FAMILY]
+        );
+        // 其余零配置语义不变：默认链仍只有一项。
+        assert_eq!(p.chain_for(None), [DEFAULT_FONT_FAMILY]);
+
+        // 用户自己指派 emoji：不覆盖。
+        let p = build_font_plan("", &[], &[("emoji".to_string(), v(&["Twemoji"]))]);
+        assert_eq!(p.chain_for(Some(ScriptClass::Emoji)), ["Twemoji"]);
+
+        // 逃生口：`emoji = []` 关掉出厂指派，回到纯系统回退。
+        let p = build_font_plan("", &[], &[("emoji".to_string(), vec![])]);
+        assert!(
+            p.is_trivial(),
+            "emoji = [] 应关掉出厂指派：{:?}",
+            p.declared()
         );
     }
 }

@@ -234,6 +234,16 @@ impl TextRenderer {
         }
     }
 
+    /// 基准字体的自然行高：ascent + descent + leading。
+    ///
+    /// 行高与基线都只看**基准字体**，不看 `CTLine` 的 typographic bounds——后者取行内所有
+    /// 回退字体（Apple Color Emoji 等）里最大的那个，含 emoji 的候选行会比纯汉字行高一截、
+    /// 候选窗高度随之抖动。与 dwrite 后端钉 UNIFORM 行距是同一条约定，两端必须一致，
+    /// 否则同一份配置两平台行高不同。比基准字体高的字形按溢出画，不裁切。
+    fn line_height(font: &CTFont) -> f64 {
+        font.ascent() + font.descent() + font.leading()
+    }
+
     /// 测量文本。镜像 dwrite 的 `TextRenderer::measure`。
     pub fn measure(&self, text: &str, ts: &TextStyle) -> TextMetrics {
         if text.is_empty() {
@@ -245,7 +255,10 @@ impl TextRenderer {
         let font = self.font_styled(ts.size, ts.weight, ts.family);
         let line = make_line(text, &font, None);
         let b = line.get_typographic_bounds();
-        let height = (b.ascent + b.descent + b.leading) as f32;
+        // 行高取**基准字体**自身的度量，不取这一行的 typographic bounds：后者是行内所有
+        // 回退字体里最大的那个，含 emoji 的候选会比纯汉字行高出一截，候选窗高度随之抖动。
+        // 与 dwrite 后端的 UNIFORM 行距同一条约定（见 `dwrite.rs` 的 `line_height_for`）。
+        let height = Self::line_height(&font) as f32;
         TextMetrics {
             width: b.width as f32,
             height: if height > 0.0 { height } else { ts.size * 1.2 },
@@ -282,7 +295,9 @@ impl TextRenderer {
             color[3] as f64 / 255.0,
         );
         let line = make_line(text, &font, Some(&cg_color));
-        let ascent = line.get_typographic_bounds().ascent;
+        // 基线按**基准字体**的 ascent 放，与 `measure` 取的行高同一口径：行高不再跟着
+        // 行内最高的回退字体走，基线也不能跟着走，否则 emoji 行里的汉字会整体下沉。
+        let ascent = font.ascent();
         let space = CGColorSpace::create_device_rgb();
         let bitmap_info = kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little;
         {
@@ -322,7 +337,7 @@ impl TextRenderer {
         let font = self.font_for(size);
         let line = make_line(text, &font, None);
         let b = line.get_typographic_bounds();
-        let height = (b.ascent + b.descent + b.leading) as f32;
+        let height = Self::line_height(&font) as f32;
         TextMetrics {
             width: b.width as f32,
             height: if height > 0.0 { height } else { size * 1.2 },
@@ -390,7 +405,8 @@ impl TextRenderer {
         );
         let line = make_line(text, &font, Some(&cg_color));
 
-        let ascent = line.get_typographic_bounds().ascent;
+        // 基线按基准字体的 ascent 放，理由见 `draw`。
+        let ascent = font.ascent();
 
         // CGBitmapContext 直接绑定调用方 buf（不拷贝）。
         // kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little ⇒ 内存序 BGRA、预乘。

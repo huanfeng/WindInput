@@ -421,5 +421,29 @@ wind_dict::emojidict::load_or_build(
 
 前置条件：真机上先把 `after` / `tail` 两档的观感定下来，再谈调整——调整需求的大小取决于
 默认列表有多准，`max_per_word=3` 与只扩首选已经把大部分噪音挡在外面。
+
+---
+
+## 10. 真机暴露的三个相邻问题（2026-09-07，已修）
+
+都不在 emoji 功能本身，但只有 emoji 进了候选才看得见。细节在各自的代码注释里，这里只记
+结论与判据。
+
+| 症状 | 根因 | 修法 | 落点 |
+|---|---|---|---|
+| 含 emoji 的候选行比汉字行高，候选窗随之抖动 | 行高取 DirectWrite 自然度量＝行内所有回退字体里最大的 line metrics；雅黑 +5%、宋体 +17% | 每个 layout 钉 UNIFORM 行距，行高取基准字族自身的自然行高（探针「中a」，按 (字号, 字族) 缓存） | `wind-ui/text/dwrite.rs` `line_height_for`；macOS `coretext.rs` 同步改为只看基准字体度量 |
+| 1️⃣ 显示成「1」+ 空框 | 键帽序列三个码位被切进不同字体段，基准字体自带「1」，回退永不触发，连字不成 | `font_runs` 对 U+20E3 / U+FE0F 回溯改写，把基字连同选择符整体归入 emoji 段 | `wind-ui/text/script.rs`，仅 emoji 已声明时生效 |
+| 🫜（Emoji 16.0）显示成缺字 | DirectWrite 内置回退区间表落后于 Segoe UI Emoji 字体文件 | Windows 出厂给 emoji 类注入 `Segoe UI Emoji` 指派 | `candidate_window::build_font_plan`；`emoji = []` 可关 |
+| 混输下关扩展词库要重启才生效 | `set_dict_enabled_live` 只翻 `engines[方案id]` 那一个实例，混输的成员子引擎内联构造、不入表 | 扇出到把它当成员的已加载混输方案，转发不到的失效待重建；`MixedEngine` 补 english 转发 | `wind-engine/manager.rs`、`mixed/engine.rs` |
+
+★ **出厂 emoji 指派为什么写在代码里而不是 `data/config.toml`**：配置层写回不剔除「等于
+默认」的键，老用户的 config.toml 里已经躺着 `scripts = {}`，改出厂值对他们永远不生效。
+
+★ **指派的已知副作用**（本机探针实测）：`U+2600..27BF` 里雅黑与 Segoe UI Emoji 都有的
+字形会换成后者的——✓ 从 20px 宽变 15px；★ ☆ ① 后者没有、仍回到雅黑，不变；✂ ☑ ☎ ✅ ⭐
+本来就回退到 Segoe UI Emoji，不变。`font_runs` 从此对所有用户在每次绘制每个叶子上跑一遍，
+每叶子几个字、微秒级。
+
+⚠️ 上面第 2、3 条**必须同批发布**：回溯改写只在 emoji 已声明时生效，单独上线什么都不变。
 - **与 `wubi86_emoji` 词库的关系**：两者不互斥也不合并。旧库是「打 `emoj` 直接检索」的入口型
   能力，新机制是「打出词之后追加」，替代不了。旧库保留原样，不再往里加东西。
