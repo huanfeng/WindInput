@@ -322,8 +322,9 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         return S_OK;
     }
 
-    // Auto-pair: bypass IME for self-generated SendInput keys (VK_LEFT/RIGHT/DELETE/BACK)
-    if (_TryConsumeSkipKey(wParam))
+    // 自生成键放行：auto-pair 的合成键与 _ReplayKeyToHost 的重放键都压在 skip 表里。
+    // 传 FALSE = 只认「给 keydown 的」条目，见 _PushSkipKey 处的通道说明。
+    if (_TryConsumeSkipKey(wParam, FALSE))
     {
         *pfEaten = FALSE; // Let it pass directly to the app
         return S_OK;
@@ -1518,8 +1519,12 @@ STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lP
         return S_OK;
     }
 
-    // Auto-pair: bypass IME for self-generated SendInput key releases
-    if (_TryConsumeSkipKey(wParam))
+    // 自生成键放行的 keyup 半程。传 TRUE = **只认「给 keyup 的」条目**，即
+    // `MarkSyntheticKey` 那类「键是我们凭空造的」压入者压的第二条。
+    // 此前它不带通道、与 keydown 共用一张表 ⇒ 命中的可能是给下一个 keydown 的条目
+    // （连按同一个键即可触发），那个 keydown 于是漏进 IME 逻辑。见 KeyEventSink.h
+    // 里 skip 表的三种故障形态。
+    if (_TryConsumeSkipKey(wParam, TRUE))
     {
         *pfEaten = FALSE;
         return S_OK;
@@ -1606,7 +1611,7 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
             (WORD)_pendingPairAction.vk, _pendingPairAction.count);
         for (int i = 0; i < _pendingPairAction.count; i++)
         {
-            _PushSkipKey(_pendingPairAction.vk);
+            _PushSkipKey(_pendingPairAction.vk, FALSE);
             INPUT inputs[2] = {};
             inputs[0].type = INPUT_KEYBOARD;
             inputs[0].ki.wVk = _pendingPairAction.vk;
@@ -2898,7 +2903,7 @@ void CKeyEventSink::_SimulatePairKey(WORD vk)
     }
 
     // No modifiers: execute immediately via skip list
-    _PushSkipKey(vk);
+    _PushSkipKey(vk, FALSE);
 
     INPUT inputs[2] = {};
     inputs[0].type = INPUT_KEYBOARD;
@@ -2919,7 +2924,9 @@ void CKeyEventSink::_ReplayKeyToHost(WORD vk)
     // 正常路径。看似该压两个（down/up 都是合成的），但那样更危险——若宿主不调
     // OnTestKeyUp（本仓已知 mintty 类宿主有此怪癖），多出的条目会残留，把用户**下一次
     // 真实按下的同一个键**静默吃掉。重放的都不是 toggle 键，keyup 走正常路径无副作用。
-    _PushSkipKey(vk);
+    // （那份残留顾虑现已另有 TTL 兜底，但结论不变：keyup 该走正常路径，`OnTestKeyUp`
+    //   顶部的 direct_commit 顶码分支指望它经过。）
+    _PushSkipKey(vk, FALSE);
 
     INPUT inputs[2] = {};
     inputs[0].type = INPUT_KEYBOARD;
@@ -2946,26 +2953,45 @@ bool CKeyEventSink::_AreModifiersHeld()
            (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
 }
 
-void CKeyEventSink::_PushSkipKey(WORD vk)
+// ── SkipKeyTable 的三个薄包装 ────────────────────────────────────────────────
+// 判定逻辑全在 SkipKeyTable（有单元测试），这里只负责传时钟、打日志、BOOL/bool 转换。
+
+void CKeyEventSink::_LogExpiredSkipKeys()
 {
-    if (_skipKeyCount < MAX_SKIP_KEYS)
+    SkipKeyTable::Entry expired[SkipKeyTable::kExpiredLogCap];
+    const int n = _skipKeys.DrainExpired(expired, SkipKeyTable::kExpiredLogCap);
+    for (int i = 0; i < n; i++)
     {
-        _skipKeys[_skipKeyCount++] = vk;
+        // 注入的键没能回到本 sink：前台窗口已换、宿主此刻不走 TSF、SendInput 被 UIPI 拦。
+        WIND_LOG_WARN_FMT(L"SkipKey: expired unconsumed vk=0x%02X forKeyUp=%d (total=%d)\n",
+                          (uint32_t)expired[i].vk, (int)expired[i].forKeyUp,
+                          _skipKeys.ExpiredTotal());
     }
 }
 
-BOOL CKeyEventSink::_TryConsumeSkipKey(WPARAM wParam)
+void CKeyEventSink::_PushSkipKey(WORD vk, BOOL forKeyUp)
 {
-    if (_skipKeyCount > 0 && _skipKeys[0] == (WORD)wParam)
+    const int droppedBefore = _skipKeys.DroppedTotal();
+    _skipKeys.Push(vk, forKeyUp != FALSE, GetTickCount64());
+    if (_skipKeys.DroppedTotal() != droppedBefore)
     {
-        // Shift remaining entries left
-        for (int i = 1; i < _skipKeyCount; i++)
-            _skipKeys[i - 1] = _skipKeys[i];
-        _skipKeyCount--;
-        WIND_LOG_DEBUG_FMT(L"Auto-pair: skip key 0x%02X bypassed IME, remaining=%d\n", (WORD)wParam, _skipKeyCount);
-        return TRUE;
+        // 满表**不能静默丢弃**：这个注入键会被当成用户真按的键走完整 IME 流程。
+        WIND_LOG_WARN_FMT(L"SkipKey: table full (%d), dropped vk=0x%02X (total=%d)\n",
+                          SkipKeyTable::kMaxKeys, (uint32_t)vk, _skipKeys.DroppedTotal());
     }
-    return FALSE;
+    _LogExpiredSkipKeys();
+}
+
+BOOL CKeyEventSink::_TryConsumeSkipKey(WPARAM wParam, BOOL forKeyUp)
+{
+    const bool hit = _skipKeys.TryConsume((uint16_t)wParam, forKeyUp != FALSE, GetTickCount64());
+    _LogExpiredSkipKeys();
+    if (hit)
+    {
+        WIND_LOG_DEBUG_FMT(L"SkipKey: vk=0x%02X forKeyUp=%d bypassed IME, remaining=%d\n",
+                           (uint32_t)wParam, (int)forKeyUp, _skipKeys.Count());
+    }
+    return hit ? TRUE : FALSE;
 }
 
 BOOL CKeyEventSink::_SendAsyncCommitTriggerKey()

@@ -118,3 +118,25 @@ configure_file(
     @ONLY
 )
 target_sources(${TSF_TARGET_NAME} PRIVATE ${CMAKE_BINARY_DIR}/${TSF_TARGET_NAME}.def)
+
+# ── 单元测试（默认 OFF，不影响 DLL 构建）───────────────────────────────────
+#
+# 目前只有 SkipKeyTable。本目录绝大多数代码与 TSF/COM 纠缠、测不动；SkipKeyTable 是
+# 被刻意剥出来的纯逻辑（不含任何 Win32 头，时钟由调用方以 GetTickCount64 传入），
+# 所以能测。PairEngine、ClassifyInputKey 这类纯判据日后可照同一条路补进来。
+#
+# 本机跑（不需要 MSVC，msys2 的 g++ 即可，这是主要跑法）：
+#   g++ -std=c++17 -Iwind_tsf/include -o skip_test wind_tsf/tests/skip_key_table_test.cpp && ./skip_test
+# 经 CMake 跑（需 MSVC，本机无，未实跑；但 configure 阶段每次构建都会走到，语法错
+# 误跑 dev.ps1 dm1 就会暴露）：
+#   cmake -S wind_tsf -B build/tsf-tests -DWIND_TSF_TESTS=ON && cmake --build build/tsf-tests && ctest --test-dir build/tsf-tests
+option(WIND_TSF_TESTS "Build wind_tsf unit tests" OFF)
+if(WIND_TSF_TESTS)
+    enable_testing()
+    add_executable(skip_key_table_test tests/skip_key_table_test.cpp)
+    target_include_directories(skip_key_table_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    if(MSVC)
+        target_compile_options(skip_key_table_test PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME skip_key_table COMMAND skip_key_table_test)
+endif()
