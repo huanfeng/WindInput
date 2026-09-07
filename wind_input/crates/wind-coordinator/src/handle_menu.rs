@@ -1550,10 +1550,17 @@ impl Coordinator {
             // 都是**完全静默**的错配——用户点得动却毫无反应，或明明能用却是灰的。
             let is_pinyin = matches!(scope.engine_type, Some(wind_engine::EngineType::Pinyin));
             let group_member = candidate_is_group_member(&cand);
+            // emoji 扩展候选：五项词条操作**全部灰显**（不是隐藏——用户要看得出「这条不能调」，
+            // 而不是以为菜单坏了）。它不是词库条目，shadow 规则按 (schema, code, text) 落键，
+            // 而它的 code 恒空、text 是按宿主候选查表来的，写进去既不会被读端命中，还会在
+            // 宿主词换了 emoji 后变成孤儿规则。可调整性的规划见 design/emoji-suggestion.md §9，
+            // 落地时**两端一起放开**（这里与写端 `candidate_op` 的同名守卫）。
+            let emoji = cand.is_emoji_suggestion;
             let pinyin_locked = is_pinyin && !cand.is_command;
-            let can_pin = !group_member;
-            let movable = !pinyin_locked && !group_member;
+            let can_pin = !group_member && !emoji;
+            let movable = !pinyin_locked && !group_member && !emoji;
             let (delete_label, delete_enabled) = candidate_delete_menu(&cand);
+            let has_rule = has_rule && !emoji;
 
             vec![
                 M::leaf("置顶", op(CandidateOp::MoveTop), can_pin && idx > 0, false),
@@ -2024,6 +2031,9 @@ pub(crate) fn candidate_is_group_member(cand: &wind_candidate::Candidate) -> boo
 pub(crate) fn candidate_delete_menu(cand: &wind_candidate::Candidate) -> (&'static str, bool) {
     if candidate_is_group_member(cand) {
         ("删除词条", false)
+    } else if cand.is_emoji_suggestion {
+        // emoji 扩展候选没有词库落点，删无可删；灰显而非隐藏，理由见菜单装配处。
+        ("隐藏候选", false)
     } else if cand.is_phrase {
         // 静态短语前缀命中（is_prefix 且无完整码）定位不到 store 记录 → 暂禁。
         ("禁用短语", !cand.is_prefix || !cand.group_code.is_empty())
@@ -2251,6 +2261,20 @@ fn avoid_unset_sentinel(x: i32, y: i32) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::{anchor_probe_point, avoid_unset_sentinel};
+
+    /// emoji 扩展候选的「删除」项恒灰显：它没有词库落点，写端 `candidate_op` 同样拒绝。
+    /// 两端必须同时成立——只灰一端就是「点得动却没反应」或「明明不能用却亮着」。
+    #[test]
+    fn emoji_candidate_delete_menu_is_disabled() {
+        let cand = wind_candidate::Candidate {
+            text: "😄".into(),
+            is_emoji_suggestion: true,
+            ..Default::default()
+        };
+        let (label, enabled) = super::candidate_delete_menu(&cand);
+        assert_eq!(label, "隐藏候选");
+        assert!(!enabled, "emoji 扩展候选不可删除 / 隐藏");
+    }
 
     /// ★★★ 锚点落盘查屏必须退 1px，否则贴右/下边缘时存到**邻屏**的 key 下。
     ///

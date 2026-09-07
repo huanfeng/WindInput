@@ -58,7 +58,10 @@ pub struct FilterOutcome {
 
 /// 「常用词类」判据：常用字 / 短语 / 命令 / 分组一律豁免过滤。
 /// 两个模式共用同一判据，抽出以免两处分叉。
-fn is_common_like(c: &Candidate) -> bool {
+///
+/// 对外公开的理由：emoji 扩展的「列表末尾」档要落在**常用候选之后、生僻候选之前**，
+/// 判据必须与过滤器的「什么算常用」逐字一致，否则两边对同一条候选的归类会分叉。
+pub fn is_common_like(c: &Candidate) -> bool {
     c.is_common || c.is_phrase || c.is_command || c.is_group
 }
 

@@ -262,6 +262,29 @@ fn plan_emoji_insertions(
     picks
 }
 
+/// `show_as = "tail"` 的插入点：**最后一条常用候选之后**，且不越过任何放宽补充的候选。
+///
+/// 「列表末尾」的本意是「不动原有序号、又能看得见」。初版直接 `extend` 到物理末尾，真机
+/// 上在智能档下被排到生僻字之后——智能档只滤掉「同码位有常用字」的生僻字，孤儿码位的
+/// 生僻字照常留在列表尾部；`extend` 落在它们后面，等于要翻好几页才看得到，形同没有。
+///
+/// 判据与过滤器共用 [`wind_candidate::is_common_like`]（常用字 / 短语 / 命令 / 分组），
+/// 两边对「什么算常用」不可分叉。三条边界：
+/// - 没有任何常用候选（全是生僻字）⇒ 落到放宽补充段之前的物理末尾，**不抢首位**；
+/// - 放宽补充的候选（`is_scope_filtered`，恒在末尾）永远排在 emoji 之后；
+/// - 全部字符档不沉底、生僻字与常用字按权重交错，此时「最后一条常用候选之后」可能落在
+///   列表中段——这是同一判据在该档的自然结果，emoji 仍不会挤到任何常用候选前面。
+fn emoji_tail_insert_at(candidates: &[Candidate]) -> usize {
+    let before_relaxed = candidates
+        .iter()
+        .position(|c| c.is_scope_filtered)
+        .unwrap_or(candidates.len());
+    candidates[..before_relaxed]
+        .iter()
+        .rposition(wind_candidate::is_common_like)
+        .map_or(before_relaxed, |i| i + 1)
+}
+
 /// 造一条 emoji 扩展候选。
 ///
 /// `code` 恒空、`source` 恒 `None`（同短语、同英文头部候选）：它没有编码来源。这一点被
@@ -451,9 +474,15 @@ impl Coordinator {
         }
 
         if show_as == "tail" {
-            // 沉底：候选序号完全不动，盲打最安全（复用 `is_scope_filtered` 的既有约定）。
+            // 「列表末尾」＝常用候选之后（不是物理末尾）：原有序号完全不动。
+            // 落点判据见 `emoji_tail_insert_at`。
+            let at = emoji_tail_insert_at(candidates);
+            let mut k = 0;
             for (_, es) in picks {
-                candidates.extend(es.into_iter().map(make_emoji_candidate));
+                for e in es {
+                    candidates.insert(at + k, make_emoji_candidate(e));
+                    k += 1;
+                }
             }
         } else {
             // `after`：紧随宿主。**从后往前**插入，否则前面插入会把后面记下的下标
@@ -3476,6 +3505,12 @@ impl Coordinator {
         if crate::handle_menu::candidate_is_group_member(&cand) {
             return;
         }
+        // emoji 扩展候选：一切词条操作拒绝（菜单侧五项灰显，此处是热键路径的同名守卫）。
+        // 它没有词库落点，shadow 按 (schema, code, text) 落键而它 code 恒空，写进去读端
+        // 永远命中不了。可调整性的规划见 design/emoji-suggestion.md §9。
+        if cand.is_emoji_suggestion {
+            return;
+        }
         // 拼音普通候选**只放行置顶**，前移/后移仍禁；命令候选不受限。
         // 引擎类型取自 scope（特殊模式问的是它引用的方案，不是主方案）。
         //
@@ -4187,6 +4222,76 @@ mod plan_emoji_tests {
         e.is_emoji_suggestion = true;
         let v = [e];
         assert!(plan_emoji_insertions(&v, true, 1, 3, 2, table).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod emoji_tail_tests {
+    //! `show_as = "tail"` 的落点：常用候选之后、生僻与放宽补充之前。
+    use super::emoji_tail_insert_at;
+    use wind_candidate::Candidate;
+
+    fn common(text: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            is_common: true,
+            ..Default::default()
+        }
+    }
+    fn rare(text: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+    fn relaxed(text: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            is_scope_filtered: true,
+            ..Default::default()
+        }
+    }
+
+    /// ★ 真机回归：智能档下孤儿码位的生僻字留在尾部，emoji 必须插在它们**前面**。
+    #[test]
+    fn lands_after_last_common_before_rare() {
+        let v = [common("开心"), common("开新"), rare("闓"), rare("鐦")];
+        assert_eq!(emoji_tail_insert_at(&v), 2);
+    }
+
+    /// 放宽补充段永远在 emoji 之后。
+    #[test]
+    fn never_crosses_relaxed_block() {
+        let v = [common("开心"), relaxed("闓")];
+        assert_eq!(emoji_tail_insert_at(&v), 1);
+        // 补充段里即便混着常用字（放宽时整批并回），也不算数。
+        let mut c = relaxed("开新");
+        c.is_common = true;
+        let v = [common("开心"), rare("闓"), c];
+        assert_eq!(emoji_tail_insert_at(&v), 1);
+    }
+
+    /// 没有任何常用候选：落到末尾，**不抢首位**。
+    #[test]
+    fn all_rare_appends_at_end_not_front() {
+        let v = [rare("闓"), rare("鐦")];
+        assert_eq!(emoji_tail_insert_at(&v), 2);
+        let v = [rare("闓"), relaxed("鐦")];
+        assert_eq!(emoji_tail_insert_at(&v), 1);
+    }
+
+    /// 短语 / 命令与常用字同级（与过滤器的「常用词类」判据一致）。
+    #[test]
+    fn phrase_counts_as_common() {
+        let mut p = rare("今天");
+        p.is_phrase = true;
+        let v = [common("开心"), p, rare("闓")];
+        assert_eq!(emoji_tail_insert_at(&v), 2);
+    }
+
+    #[test]
+    fn empty_list() {
+        assert_eq!(emoji_tail_insert_at(&[]), 0);
     }
 }
 
