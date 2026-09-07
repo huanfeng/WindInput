@@ -4979,7 +4979,9 @@ fn default_log_max_files() -> usize {
 /// 这个域装的是「我们**怎样向 Windows 登记自己**」，而不是输入行为——改这里的键会
 /// 改变系统层面的注册结果（注册名、关联等），因此每一项都需要管理员权限才能落地，
 /// 且对已启动的宿主进程不生效（宿主是在启动时读的）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// 出厂值恰好全等于各字段类型的 Default（bool → false），故直接 derive。
+// ⚠️ 将来加入「出厂值不等于类型 Default」的键时，须改回手写 impl Default。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SystemConfig {
     /// Dota 2 兼容：把本输入法在系统里登记的名称改为 `中文 (简体) - 郑码`。
     ///
@@ -4997,14 +4999,6 @@ pub struct SystemConfig {
     /// 只能由知情的用户自己决定。
     #[serde(default)]
     pub dota2_compat: bool,
-}
-
-impl Default for SystemConfig {
-    fn default() -> Self {
-        Self {
-            dota2_compat: false,
-        }
-    }
 }
 
 // ───────────────────────── 共享 default 助手 ─────────────────────────
