@@ -87,6 +87,75 @@ HKLM\SOFTWARE\Microsoft\CTF\TIP\{CLSID}\LanguageProfile\0x00000804\{profile}
 为锚点，不能按时间戳估算——切错段会让两段互相借到对方的证据，凭空造出不存在的差异。
 
 
+### 1.2 ⛔ CS2：两道闸门，卡在更前面的那道（Trusted Mode）
+
+**结论：CS2 上无解，且原因不是 §1.1 的白名单。** 表现是「输入法完全不被加载」，
+和 Dota 2 的「加载了但不给画候选」是**不同层**的两件事，别拿 §1.1 的结论套。
+
+2026-09-07 静态对照 + 游戏自身日志定案。CS2 的 IME 支持同样在 `imemanager.dll` 里，
+两边 DLL **字节数完全相同**（242840），哈希不同（同源不同构建）。白名单逐字比对：
+
+```
+CS2  : 54 条含中文的 UTF-8 串
+DOTA2: 54 条含中文的 UTF-8 串
+差集 : 仅 CS2 有 —— 无；仅 DOTA2 有 —— 无
+```
+
+**⇒ 两款游戏共用同一张 IME 白名单，零差异。** 我们选用的兼容别名
+`中文 (简体) - 郑码`（CS2 侧偏移 `0x0002b578`）在 CS2 里同样在表内。
+注意白名单是 **UTF-8 窄串**，不是 UTF-16 —— 按宽串扫会扫出一堆 ASCII 被两两误读成
+CJK 的假货（`浩浥湡条牥搮汬` 其实是 `imemanager.dll`），别被这种噪声带偏。
+
+但 CS2 在 DLL 加载那一层多了一道 **Trusted Mode**，我们**走不到白名单那一步**。
+证据是游戏自己写进崩溃转储的日志：
+
+```
+20(8.076828):  WARNING: File verification failure. Unknown foreign dll.
+               Denied a request to load '\??\C:\Program Files\WindInputDev\wind_tsf_dev.dll'
+DLL load denials: 1, last '\??\C:\Program Files\WindInputDev\wind_tsf_dev.dll'
+```
+
+判定依据是 `game/bin/win64/` 下三份签名名单（文案 `WARNING: %s Denied a request to load '%s'`
+出自共享的 `tier0.dll`）：
+
+| 名单 | 条数 | 形式 | 管什么 |
+|---|---|---|---|
+| `csgo.signatures` | 116 | `路径~SHA1:…;CRC:…` | 游戏自身文件的完整性 |
+| `system.signatures` | 5 条 `AUTH` | `AUTH:证书指纹,颁发者指纹` | 允许的签名者 |
+| `foreign.signatures` | 12 条 | `文件名~SIGN:指纹;ISS:颁发者` | **特批的第三方 DLL** |
+
+`foreign.signatures` 全表只有 `MpOav.dll`（Windows Defender 反病毒扫描接口）与
+`NvCameraWhitelisting64.dll`（NVIDIA），且整份文件末尾带 `DIGEST:` 自签名，改不了。
+
+**Dota 2 为什么没拦？** 它的 `bin/win64/` 只有 `dota.signatures` + `system.signatures`，
+**没有 `foreign.signatures`**。`tier0.dll` 是共享引擎库，那句拒绝文案两边都在，
+但只有 CS2 真的启用了这套 —— `foreign.signatures` 存不存在就是这个开关的指纹。
+
+**⛔ 别再试的方向：**
+
+- **给 DLL 做代码签名不管用。** 名单认的是**具体证书指纹**，不是「有没有有效签名」；
+  `system.signatures` 只有 5 个允许的签名者。我们当前正式版与 Dev 版都是 `NotSigned`，
+  但即使签了名也进不了这 5 条或那 12 条。
+- **改 Profile Description（§1.1 的办法）在 CS2 上完全无效**，因为 DLL 压根没进程内。
+- 把 DLL 放进系统目录以蹭路径豁免 —— 不做，这是往系统目录塞未签名二进制。
+
+**仅剩的两条出路**，都不在我们手里：
+
+1. 用户自行在 CS2 启动项加 `-allow_third_party_software`（`cs2.exe` 里确有此参数，
+   与 `-trusted` 成对）。代价是游戏进入不受信任状态，会影响 VAC 保护的服务器 ——
+   **不作为我们的建议**，更不该写进设置页引导用户去做。
+2. 由 Valve 把我们的签名加进 `foreign.signatures`。这需要先有代码签名证书，
+   且与 §1.1 的「进 IME 白名单」是两件独立的申请。
+
+**这也意味着：即便将来 Valve 收了我们进 IME 白名单，CS2 上依然打不出字** ——
+两道闸门是串联的，必须都过。反过来，Dota 2 只有第二道，所以兼容开关在 Dota 2 上有效。
+
+**方法论**：「完全不被加载」这类症状要先问「是谁拒绝的、有没有留下话」，
+再去猜机制。本次全部结论来自游戏自己写在崩溃转储里的日志与它自带的名单文件，
+没有动用任何逆向。顺带：那份转储的崩溃原因是 `pak01.vpk is corrupt`（游戏文件损坏），
+与本输入法无关，别把两件事并成一件。
+
+
 ## 2. 外部规范要点（已核对）
 
 来源：Microsoft Learn「UILess Mode Overview」、`ITfUIElementSink::BeginUIElement`、
