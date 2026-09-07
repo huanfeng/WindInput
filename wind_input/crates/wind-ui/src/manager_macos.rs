@@ -526,6 +526,17 @@ impl Forwarder {
                 current,
                 keys,
                 send_keys,
+                // 多屏摆放依据,macOS 上用不到:协调器的 `focus_monitor()` 在
+                // `#[cfg(not(target_os = "windows"))]` 下恒返回 `None`,于是
+                // `softkeyboard_placement()` 走早返回分支,这两个字段恒是 `None`。
+                // 面板位置由 `mac_panel` 自己定,不经这条路。
+                //
+                // ⚠️ 刻意逐个写出而不用 `..`:用 `..` 的话,将来 `ShowSoftKeyboard`
+                //    再加 macOS 也该处理的字段会被**静默忽略**——而本行当初漏掉这
+                //    两个字段正是同一类事故(编译期报错才把它暴露出来)。显式列出,
+                //    下次加字段时这里会再次编译失败,强制过一遍 review。
+                anchor: _,
+                work_area: _,
             } => self.push_softkeyboard(sk::SkCmd::Show {
                 pages,
                 current,

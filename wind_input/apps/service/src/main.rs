@@ -30,6 +30,9 @@ mod log_rotate;
 mod phrase_cli;
 mod restart_cli;
 mod schema_cli;
+// 仅 Windows：它的动作全是写 HKLM 的 TSF 登记项（`wind_coordinator::tsf_profile_name`
+// 本身也在 `#[cfg(windows)]` 之下）。少了这道门控，darwin 构建会在 use 处就 E0432。
+#[cfg(windows)]
 mod system_cli;
 
 /// 顶层 CLI 总览（`wind_input help`）。主动请求的帮助走 stdout（可管道/重定向），
@@ -115,6 +118,9 @@ fn main() {
     // 开机首启/CLI 离线启动——service-ready 后据此决定是否弹「服务已重启」提示。
     let restarted = cli_args.iter().any(|a| a == "--restarted");
     let sub = cli_args.get(1).map(String::as_str);
+    // `system` 单拎出来用 `cfg!` 判断而不是并进 `matches!` 里：宏参数里的模式加不了
+    // `#[cfg]`，而下面的 match 又必须把该分支 cfg 掉（模块本身仅 Windows 存在）。
+    // 两处判据必须同真同假，否则非 Windows 上 `wind_input system` 会穿到 `unreachable!()`。
     if matches!(
         sub,
         Some(
@@ -124,14 +130,14 @@ fn main() {
                 | "phrase"
                 | "backup"
                 | "restart"
-                | "system"
                 | "help"
                 | "--help"
                 | "-h"
                 | "--version"
                 | "-V"
         )
-    ) {
+    ) || (cfg!(windows) && sub == Some("system"))
+    {
         // GUI 子系统下附着父控制台，让输出回到调用的终端（详见 attach_parent_console）。
         #[cfg(windows)]
         attach_parent_console();
@@ -142,6 +148,7 @@ fn main() {
             Some("phrase") => phrase_cli::run(&cli_args[2..]),
             Some("backup") => backup_cli::run(&cli_args[2..]),
             Some("restart") => restart_cli::run(&cli_args[2..]),
+            #[cfg(windows)]
             Some("system") => system_cli::run(&cli_args[2..]),
             Some("help" | "--help" | "-h") => {
                 print_root_usage();

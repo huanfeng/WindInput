@@ -76,10 +76,10 @@ pub fn set_dota2_compat(enabled: bool) -> io::Result<bool> {
     // 只开已存在的键，**不创建**：键不在说明 TSF 组件根本没注册，此时凭空造一个
     // 半截的 LanguageProfile 只会让系统多出一个点不开的输入法条目。
     let key = hklm.open_subkey_with_flags(&path, KEY_READ | KEY_SET_VALUE)?;
-    if let Ok(cur) = key.get_value::<String, _>("Description") {
-        if cur == target {
-            return Ok(false);
-        }
+    if let Ok(cur) = key.get_value::<String, _>("Description")
+        && cur == target
+    {
+        return Ok(false);
     }
     key.set_value("Description", &target)?;
     Ok(true)
