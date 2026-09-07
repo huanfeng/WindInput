@@ -30,8 +30,9 @@ pub use parser::parse;
 pub use phrase::{PhraseEval, evaluate_phrase, is_cmdbar_grammar, run_actions};
 pub use registry::{Category, FuncSpec, Registry, default_registry};
 pub use services::{
-    ClipboardService, ConfigService, DictService, ImeController, KeyInjector, ProcSpawn,
-    ProcessRunner, SearchEngine, Services, UrlOpener,
+    CliSpawn, ClipboardService, ConfigService, DEFAULT_CLI_WAIT_MS, DictService, ImeController,
+    KeyInjector, NotifyService, ProcSpawn, ProcessRunner, SearchEngine, Services, ToastSpec,
+    UrlOpener,
 };
 
 #[cfg(test)]

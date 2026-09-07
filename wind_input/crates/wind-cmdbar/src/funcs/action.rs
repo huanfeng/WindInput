@@ -28,7 +28,17 @@ pub fn specs() -> Vec<FuncSpec> {
         "clip.copy"  : Clip   (1, 1)  effect => fn_clip_copy,   "把文本写入系统剪贴板", "clip.copy(last())";
         "clip.paste" : Clip   (0, 0)  effect => fn_clip_paste,  "模拟 Ctrl+V 粘贴剪贴板内容", "clip.paste()";
         "web.search" : Web    (2, 2)  effect => fn_search,      "用搜索引擎搜索 (engine ∈ baidu/bing/google/zdic)", "web.search(\"baidu\", last())";
-        "wind.cli"   : Proc   (1, -1) effect => fn_wind_cli,    "以主程序 CLI 执行子命令 (单参按空白拆分; 多参逐个原样传递)", "wind.cli(\"schema dict disable wubi86 fl\")";
+        "wind.cli"   : Proc   (1, -1) effect => fn_wind_cli,    "以主程序 CLI 执行子命令 (单参按空白拆分; 多参逐个原样传递)", "wind.cli(\"schema dict disable wubi86 fl\")"
+            named(fn_wind_cli_named,
+                  "toast" = "执行结果提示: on(默认)/off/error(仅失败); 服务侧已有提示的子命令(restart/config set)请设 off",
+                  "ok"    = "成功文案; 省略时用命令自身输出的最后一行",
+                  "wait"  = "等待命令结束的毫秒上限(默认 10000); 0=不等待, 此时无结果可报");
+        "ui.toast"   : Action (1, 1)  effect => fn_ui_toast,    "弹一条桌面提示", "ui.toast(\"导入完成\", kind=\"success\")"
+            named(fn_ui_toast_named,
+                  "kind"  = "类型: info(默认)/success/error, 决定强调条颜色",
+                  "color" = "自定义强调色 #RRGGBB 或 #RRGGBBAA; 给了则压过 kind",
+                  "pos"   = "位置: bottom_center(默认)/center/top_center/top_left/top_right/bottom_left/bottom_right",
+                  "ms"    = "显示毫秒数; 省略用默认 2500");
         "ask"        : Action (1, 1)  effect => fn_unimpl,      "弹小输入框, 阻塞返回用户输入 (未实现)", "ask(\"提示\")";
         "pick"       : Action (1, -1) effect => fn_unimpl,      "弹下拉列表选择 (未实现)", "pick(\"a\", \"b\")";
     }
@@ -112,10 +122,66 @@ fn fn_run_named(
     Ok(String::new())
 }
 
+/// `wind.cli` 的 `toast` 取值白名单。
+const CLI_TOAST_MODES: &[&str] = &["on", "off", "error"];
+
+/// `ui.toast` 的 `kind` 取值白名单。
+const TOAST_KINDS: &[&str] = &["info", "success", "error"];
+
+/// `ui.toast` 的 `pos` 取值白名单。与 `wind_ui_types::ToastPosition::parse` 认的值域一致——
+/// 那边未知值降级成 bottom_center 是**渲染端对脏数据的兜底**，不能替代这里的校验：
+/// 词条里把 `top_right` 写成 `right` 必须当场报错，否则用户只会看到「位置参数没生效」。
+const TOAST_POSITIONS: &[&str] = &[
+    "center",
+    "top_center",
+    "top",
+    "bottom_center",
+    "top_left",
+    "top_right",
+    "bottom_left",
+    "bottom_right",
+];
+
+/// 解析毫秒型具名参数。空串 = 用默认；非数字报错而不是静默取默认——
+/// `ms="5秒"` 静默降级的话，用户只会以为时长参数根本没实现。
+fn parse_ms(func: &str, key: &str, val: &str, default: u64) -> Result<u64> {
+    if val.trim().is_empty() {
+        return Ok(default);
+    }
+    val.trim()
+        .parse::<u64>()
+        .map_err(|_| runtime_err(func, anyhow::anyhow!("{key} 需要毫秒数, 收到 {val:?}")))
+}
+
+/// 校验 `#RRGGBB` / `#RRGGBBAA` 形态。空串 = 未指定。
+fn check_color(func: &str, val: &str) -> Result<()> {
+    if val.is_empty() {
+        return Ok(());
+    }
+    let hex = val.strip_prefix('#').unwrap_or("");
+    if matches!(hex.len(), 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    Err(runtime_err(
+        func,
+        anyhow::anyhow!("color 需要 #RRGGBB 或 #RRGGBBAA, 收到 {val:?}"),
+    ))
+}
+
+fn fn_wind_cli(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
+    fn_wind_cli_named(ctx, args, &[])
+}
+
 /// `wind.cli`：以主程序自身 exe 跑 CLI 子命令。单参形式按空白拆分
 /// （`wind.cli("config set ui.theme.name dark")`）；多参形式逐个原样传递，
 /// 供含空格的参数（如文件路径）精确传参（`wind.cli("backup", "create", path)`）。
-fn fn_wind_cli(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
+///
+/// 具名参数 `toast` / `ok` / `wait` 只决定**执行完怎么反馈**，不影响命令本身。
+fn fn_wind_cli_named(
+    ctx: &dyn EvalContext,
+    args: &[String],
+    named: &[(String, String)],
+) -> Result<String> {
     let s = services("wind.cli", ctx)?;
     let proc = s
         .proc
@@ -129,8 +195,69 @@ fn fn_wind_cli(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
     if argv.is_empty() {
         return Err(runtime_err("wind.cli", anyhow::anyhow!("子命令为空")));
     }
-    proc.run_self(&argv)
+    let toast = named_val(named, "toast");
+    check_enum("wind.cli", "toast", toast, CLI_TOAST_MODES)?;
+    let wait_ms = parse_ms(
+        "wind.cli",
+        "wait",
+        named_val(named, "wait"),
+        crate::services::DEFAULT_CLI_WAIT_MS,
+    )?;
+    let spec = crate::services::CliSpawn {
+        args: &argv,
+        toast,
+        ok_text: named_val(named, "ok"),
+        wait_ms,
+    };
+    proc.run_self(&spec)
         .map_err(|e| runtime_err("wind.cli", e))?;
+    Ok(String::new())
+}
+
+fn fn_ui_toast(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
+    fn_ui_toast_named(ctx, args, &[])
+}
+
+/// `ui.toast(文案, kind=…, color=…, pos=…, ms=…)`：弹一条桌面提示。
+///
+/// 只有文案是位置参数，其余全具名、与顺序无关。底色/文字色/字号**刻意不开放**——
+/// 那些跟随主题（`toast_bg` / `toast_text` / `theme.views.toast`），在词条里硬写会与
+/// 用户主题打架；短语能定的只有「这条提示是什么性质」（kind/color）与何时何地出现。
+fn fn_ui_toast_named(
+    ctx: &dyn EvalContext,
+    args: &[String],
+    named: &[(String, String)],
+) -> Result<String> {
+    let s = services("ui.toast", ctx)?;
+    let notify = s
+        .notify
+        .as_ref()
+        .ok_or_else(|| CmdbarError::service("ui.toast"))?;
+    let kind = named_val(named, "kind");
+    let color = named_val(named, "color");
+    let position = named_val(named, "pos");
+    check_enum("ui.toast", "kind", kind, TOAST_KINDS)?;
+    check_enum("ui.toast", "pos", position, TOAST_POSITIONS)?;
+    check_color("ui.toast", color)?;
+    // kind 与 color 同时给：不猜哪个赢。两者都是「强调色」的写法，同时出现只能是
+    // 词条写错了，静默取一个会让另一个看起来"没生效"。
+    if !kind.is_empty() && !color.is_empty() {
+        return Err(runtime_err(
+            "ui.toast",
+            anyhow::anyhow!("kind 与 color 只能给一个"),
+        ));
+    }
+    let duration_ms = parse_ms("ui.toast", "ms", named_val(named, "ms"), 0)?;
+    let spec = crate::services::ToastSpec {
+        text: &args[0],
+        kind,
+        color,
+        position,
+        duration_ms,
+    };
+    notify
+        .toast(&spec)
+        .map_err(|e| runtime_err("ui.toast", e))?;
     Ok(String::new())
 }
 
@@ -303,6 +430,43 @@ mod tests {
         }
     }
 
+    /// 记录 `wind.cli` 收到的 argv 与反馈策略。
+    #[derive(Default)]
+    struct RecSelf(Mutex<Vec<(Vec<String>, String, String, u64)>>);
+    impl crate::services::ProcessRunner for RecSelf {
+        fn run(&self, _spec: &crate::services::ProcSpawn<'_>) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn shell(&self, _cmdline: &str, _flags: &[String], _cwd: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn run_self(&self, spec: &crate::services::CliSpawn<'_>) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push((
+                spec.args.to_vec(),
+                spec.toast.to_string(),
+                spec.ok_text.to_string(),
+                spec.wait_ms,
+            ));
+            Ok(())
+        }
+    }
+
+    /// 记录 `ui.toast` 收到的完整 spec。
+    #[derive(Default)]
+    struct RecToast(Mutex<Vec<(String, String, String, String, u64)>>);
+    impl crate::services::NotifyService for RecToast {
+        fn toast(&self, spec: &crate::services::ToastSpec<'_>) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push((
+                spec.text.to_string(),
+                spec.kind.to_string(),
+                spec.color.to_string(),
+                spec.position.to_string(),
+                spec.duration_ms,
+            ));
+            Ok(())
+        }
+    }
+
     #[test]
     fn open_dispatches_to_service() {
         let rec = Arc::new(RecordOpener::default());
@@ -444,23 +608,6 @@ mod tests {
 
     #[test]
     fn wind_cli_splits_single_arg_and_passes_multi_verbatim() {
-        use crate::services::ProcessRunner;
-
-        #[derive(Default)]
-        struct RecSelf(Mutex<Vec<Vec<String>>>);
-        impl ProcessRunner for RecSelf {
-            fn run(&self, _spec: &crate::services::ProcSpawn<'_>) -> anyhow::Result<()> {
-                unreachable!()
-            }
-            fn shell(&self, _cmdline: &str, _flags: &[String], _cwd: &str) -> anyhow::Result<()> {
-                unreachable!()
-            }
-            fn run_self(&self, args: &[String]) -> anyhow::Result<()> {
-                self.0.lock().unwrap().push(args.to_vec());
-                Ok(())
-            }
-        }
-
         let rec = Arc::new(RecSelf::default());
         let mut svc = Services::new();
         svc.proc = Some(rec.clone());
@@ -480,8 +627,109 @@ mod tests {
         // 空白单参：报错
         assert!(fn_wind_cli(&ctx, &["   ".into()]).is_err());
         let log = rec.0.lock().unwrap();
-        assert_eq!(log[0], vec!["schema", "dict", "disable", "wubi86", "fl"]);
-        assert_eq!(log[1], vec!["backup", "create", "D:/我的 备份/a.zip"]);
+        assert_eq!(log[0].0, vec!["schema", "dict", "disable", "wubi86", "fl"]);
+        assert_eq!(log[1].0, vec!["backup", "create", "D:/我的 备份/a.zip"]);
+        // 不给具名参数时的默认：提示开着（空串=on）、无自定义文案、等待上限走默认。
+        // 默认必须是「开」——这个功能存在的理由就是直通命令此前没有任何反馈。
+        assert_eq!(log[0].1, "");
+        assert_eq!(log[0].3, crate::services::DEFAULT_CLI_WAIT_MS);
+    }
+
+    /// `wind.cli` 的三个具名参数**原样落到 spec**，且非法值在调用服务前挡下。
+    ///
+    /// 变异判据：把 `check_enum("wind.cli", "toast", …)` 删掉，第二段断言转红——
+    /// 那正是「toast 写错一个字母就静默变成不提示」的形态。
+    #[test]
+    fn wind_cli_named_feedback_params_reach_host_and_validate() {
+        let rec = Arc::new(RecSelf::default());
+        let mut svc = Services::new();
+        svc.proc = Some(rec.clone());
+        let ctx = MemoryContext::new().with_services(svc);
+
+        fn_wind_cli_named(
+            &ctx,
+            &["dict import flypy x.yaml".into()],
+            &[
+                ("toast".into(), "error".into()),
+                ("ok".into(), "词库已更新".into()),
+                ("wait".into(), "30000".into()),
+            ],
+        )
+        .unwrap();
+
+        let err = fn_wind_cli_named(&ctx, &["restart".into()], &[("toast".into(), "no".into())])
+            .expect_err("未知 toast 模式应报错");
+        assert!(err.to_string().contains("off"), "{err}");
+        let err = fn_wind_cli_named(&ctx, &["restart".into()], &[("wait".into(), "5秒".into())])
+            .expect_err("非数字的 wait 应报错");
+        assert!(err.to_string().contains("毫秒"), "{err}");
+
+        let log = rec.0.lock().unwrap();
+        assert_eq!(log.len(), 1, "两次非法调用都不该真的启动子进程");
+        assert_eq!(log[0].1, "error");
+        assert_eq!(log[0].2, "词库已更新");
+        assert_eq!(log[0].3, 30_000);
+    }
+
+    /// `ui.toast` 的具名参数与顺序无关，且四类非法写法都当场报错。
+    #[test]
+    fn ui_toast_named_params_are_order_free_and_validated() {
+        let rec = Arc::new(RecToast::default());
+        let mut svc = Services::new();
+        svc.notify = Some(rec.clone());
+        let ctx = MemoryContext::new().with_services(svc);
+
+        // 顺序颠倒不影响落位
+        fn_ui_toast_named(
+            &ctx,
+            &["导入完成".into()],
+            &[
+                ("ms".into(), "5000".into()),
+                ("pos".into(), "top_right".into()),
+                ("kind".into(), "success".into()),
+            ],
+        )
+        .unwrap();
+        // 自定义色（与 kind 互斥，此处单给）
+        fn_ui_toast_named(
+            &ctx,
+            &["完成".into()],
+            &[("color".into(), "#52C41A".into())],
+        )
+        .unwrap();
+
+        for bad in [
+            vec![("kind".into(), "warn".into())],
+            vec![("pos".into(), "right".into())],
+            vec![("color".into(), "52C41A".into())],
+            vec![("ms".into(), "一会儿".into())],
+            // kind 与 color 都给：不猜哪个赢
+            vec![
+                ("kind".into(), "success".into()),
+                ("color".into(), "#52C41A".into()),
+            ],
+        ] {
+            assert!(
+                fn_ui_toast_named(&ctx, &["x".into()], &bad).is_err(),
+                "{bad:?} 应报错"
+            );
+        }
+
+        let log = rec.0.lock().unwrap();
+        assert_eq!(log.len(), 2, "非法写法一条都不该弹出去");
+        assert_eq!(
+            log[0],
+            (
+                "导入完成".into(),
+                "success".into(),
+                String::new(),
+                "top_right".into(),
+                5000
+            )
+        );
+        assert_eq!(log[1].2, "#52C41A");
+        // ms 省略 = 0 = 交给宿主取默认，而不是在这里硬写一个 2500。
+        assert_eq!(log[1].4, 0);
     }
 
     #[test]

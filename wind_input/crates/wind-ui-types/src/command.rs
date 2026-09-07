@@ -53,6 +53,10 @@ pub enum UiCommand {
         position: ToastPosition,
         kind: ToastKind,
         duration_ms: u64,
+        /// 自定义强调色（`ui.toast(color=…)`）。None = 按 `kind` 取内置色。
+        /// 给了值就**压过主题配的 toast 边框色**：写这个参数的人是在为这一条提示
+        /// 指定含义（如"危险操作已执行"），主题不该把它抹平。
+        accent: Option<[u8; 4]>,
     },
     /// 显示状态提示气泡（中英/标点/全半角/方案切换），约 1 秒后自动隐藏。
     /// (x,y)=光标点(y 为底端)，caret_height 上翻定位用，offset_x/y 用户位置微调。

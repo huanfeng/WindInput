@@ -112,8 +112,15 @@ impl Toast {
         }
     }
 
-    /// 显示 toast：`pos` 决定屏幕位置，`kind` 决定强调色。
-    pub fn show(&mut self, text: &str, pos: ToastPosition, kind: ToastKind) {
+    /// 显示 toast：`pos` 决定屏幕位置，`kind` 决定强调色，`accent_override`
+    /// （`ui.toast(color=…)`）给了则压过 kind 与主题边框色。
+    pub fn show(
+        &mut self,
+        text: &str,
+        pos: ToastPosition,
+        kind: ToastKind,
+        accent_override: Option<[u8; 4]>,
+    ) {
         if text.is_empty() {
             self.hide();
             return;
@@ -122,10 +129,12 @@ impl Toast {
         let s = self.scale;
         // 深色圆角底 + 居中文本；类型用边框色区分（稳健、跨主题可见）。
         let label = View::leaf(text, self.fg).text_align(Align::Center);
-        // 边框：主题 toast.border 优先；未配沿用「按提示等级取色 + 2dp」的内置默认。
-        let (border_color, border_width) = match self.border {
-            Some((c, w)) => (c, w.unwrap_or(2.0 * s).max(1.0)),
-            None => (accent(kind), (2.0 * s).max(1.0)),
+        // 边框取色三级：显式 color > 主题 toast.border > 按提示等级取色（+2dp 宽）。
+        // 显式色排在主题之前——它是这一条提示的语义，不是外观偏好。
+        let (border_color, border_width) = match (accent_override, self.border) {
+            (Some(c), b) => (c, b.and_then(|(_, w)| w).unwrap_or(2.0 * s).max(1.0)),
+            (None, Some((c, w))) => (c, w.unwrap_or(2.0 * s).max(1.0)),
+            (None, None) => (accent(kind), (2.0 * s).max(1.0)),
         };
         let mut card = View::container(Layout::Row)
             .cross(Align::Center)

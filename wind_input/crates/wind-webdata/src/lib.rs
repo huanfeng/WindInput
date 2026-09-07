@@ -391,6 +391,28 @@ pub trait WebDataRpc: WebDataHost {
                 });
                 Ok(json!({ "ok": true }))
             }
+            // 桌面提示（CLI `wind_input ui toast`、外部脚本）：toast 只能由 core 进程
+            // 自己的 UI 线程渲染，别的进程除了转交没有第二条路。
+            //
+            // ⚠️ 刻意**不**在 dict.import / config.set 这类干活的方法里弹提示：那会连
+            // 设置页的按钮一起弹（设置页自己已有 UI 反馈），把"要不要提示"的决定权
+            // 从调用方手里夺走。要提示的调用方显式打这一条。
+            "ui.toast" => {
+                let text = str_param(params, "text")?;
+                let s = |k: &str| {
+                    params
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let ms = params.get("ms").and_then(Value::as_u64).unwrap_or(0);
+                if self.ui_toast(text, &s("kind"), &s("color"), &s("pos"), ms) {
+                    Ok(json!({ "ok": true }))
+                } else {
+                    Err(anyhow::anyhow!("文案为空"))
+                }
+            }
             "schema.delete" => self.web_schema_delete(params),
             "schema.references" => Ok(json!({})), // 引用关系（删除安全检查）：暂返空，前端宽松消费
             "scheme.exportPackage" => self.web_scheme_export_package(params),

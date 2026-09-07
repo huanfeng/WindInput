@@ -30,6 +30,7 @@ mod log_rotate;
 mod phrase_cli;
 mod restart_cli;
 mod schema_cli;
+mod ui_cli;
 // 仅 Windows：它的动作全是写 HKLM 的 TSF 登记项（`wind_coordinator::tsf_profile_name`
 // 本身也在 `#[cfg(windows)]` 之下）。少了这道门控，darwin 构建会在 use 处就 E0432。
 #[cfg(windows)]
@@ -50,6 +51,7 @@ fn print_root_usage() {
          phrase    用户短语导入导出 / 系统短语恢复（需 core 在线）\n  \
          backup    整机备份创建/查看/还原（需 core 在线）\n  \
          restart   重启输入法服务（未运行则直接启动）\n  \
+         ui        桌面提示：ui toast <文案>（需 core 在线）\n  \
          system    系统集成：Dota 2 兼容等（写 HKLM，需管理员权限）\n  \
          help      显示本帮助；--version 显示版本\n\
          \n\
@@ -130,6 +132,7 @@ fn main() {
                 | "phrase"
                 | "backup"
                 | "restart"
+                | "ui"
                 | "help"
                 | "--help"
                 | "-h"
@@ -139,8 +142,14 @@ fn main() {
     ) || (cfg!(windows) && sub == Some("system"))
     {
         // GUI 子系统下附着父控制台，让输出回到调用的终端（详见 attach_parent_console）。
+        //
+        // 被 `wind.cli` 拉起时**必须跳过**：那条路上父进程是服务自己，输出该走它接好的
+        // 管道（服务要读回来变成 toast）。开发期从终端启动服务时不跳过的话，子进程会
+        // attach 到那个终端，管道永远读空——「开发机没提示、装机版有」的那种幽灵。
         #[cfg(windows)]
-        attach_parent_console();
+        if std::env::var_os(wind_coordinator::handle_cmdbar::WIND_CLI_PIPED_ENV).is_none() {
+            attach_parent_console();
+        }
         let code = match sub {
             Some("config") => config_cli::run(&cli_args[2..]),
             Some("schema") => schema_cli::run(&cli_args[2..]),
@@ -148,6 +157,7 @@ fn main() {
             Some("phrase") => phrase_cli::run(&cli_args[2..]),
             Some("backup") => backup_cli::run(&cli_args[2..]),
             Some("restart") => restart_cli::run(&cli_args[2..]),
+            Some("ui") => ui_cli::run(&cli_args[2..]),
             #[cfg(windows)]
             Some("system") => system_cli::run(&cli_args[2..]),
             Some("help" | "--help" | "-h") => {

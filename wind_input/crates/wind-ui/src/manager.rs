@@ -611,7 +611,7 @@ impl UiManager {
                             } else {
                                 ToastKind::Info
                             };
-                            t.show(&msg, ToastPosition::BottomRight, kind);
+                            t.show(&msg, ToastPosition::BottomRight, kind, None);
                             toast_hide_at = Some(
                                 std::time::Instant::now() + std::time::Duration::from_millis(4000),
                             );
@@ -633,7 +633,7 @@ impl UiManager {
                             ("候选窗口未显示，无法截图".to_string(), ToastKind::Info)
                         };
                         if let Some(t) = &mut toast {
-                            t.show(&msg, ToastPosition::BottomRight, kind);
+                            t.show(&msg, ToastPosition::BottomRight, kind, None);
                             toast_hide_at = Some(
                                 std::time::Instant::now() + std::time::Duration::from_millis(3000),
                             );
@@ -678,7 +678,7 @@ impl UiManager {
                             _ => ("状态提示气泡未显示，无法截图".to_string(), ToastKind::Info),
                         };
                         if let Some(t) = &mut toast {
-                            t.show(&msg, ToastPosition::BottomRight, kind);
+                            t.show(&msg, ToastPosition::BottomRight, kind, None);
                             toast_hide_at = Some(
                                 std::time::Instant::now() + std::time::Duration::from_millis(3000),
                             );
@@ -693,7 +693,7 @@ impl UiManager {
                             ("提示内容为空，无法复制".to_string(), ToastKind::Info)
                         };
                         if let Some(t) = &mut toast {
-                            t.show(&msg, ToastPosition::BottomRight, kind);
+                            t.show(&msg, ToastPosition::BottomRight, kind, None);
                             toast_hide_at = Some(
                                 std::time::Instant::now() + std::time::Duration::from_millis(3000),
                             );
@@ -730,7 +730,7 @@ impl UiManager {
                             ("提示气泡未显示，无法截图".to_string(), ToastKind::Info)
                         };
                         if let Some(t) = &mut toast {
-                            t.show(&msg, ToastPosition::BottomRight, kind);
+                            t.show(&msg, ToastPosition::BottomRight, kind, None);
                             toast_hide_at = Some(
                                 std::time::Instant::now() + std::time::Duration::from_millis(3000),
                             );
@@ -846,10 +846,11 @@ impl UiManager {
                         position,
                         kind,
                         duration_ms,
+                        accent,
                     } => {
                         debug!("UI: ShowToast '{}' ({:?},{:?})", text, position, kind);
                         if let Some(t) = &mut toast {
-                            t.show(&text, position, kind);
+                            t.show(&text, position, kind, accent);
                             toast_hide_at = Some(
                                 std::time::Instant::now()
                                     + std::time::Duration::from_millis(duration_ms.max(1)),

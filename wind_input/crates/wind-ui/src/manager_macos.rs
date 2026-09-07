@@ -79,6 +79,7 @@ fn toast_frame(
     position: ToastPosition,
     kind: ToastKind,
     duration_ms: i32,
+    accent_override: Option<[u8; 4]>,
 ) -> Vec<u8> {
     let pos = match position {
         ToastPosition::Center => "center",
@@ -89,11 +90,16 @@ fn toast_frame(
         ToastPosition::BottomLeft => "bottom_left",
         ToastPosition::BottomRight => "bottom_right",
     };
-    // accent 取 ToastKind 对应强调色（与 toast.rs ToastKind::accent 一致）。
-    let accent = match kind {
-        ToastKind::Info => "#409EFF",
-        ToastKind::Success => "#52C46E",
-        ToastKind::Error => "#F56C6C",
+    // accent 取 ToastKind 对应强调色（与 toast.rs ToastKind::accent 一致）；
+    // `ui.toast(color=…)` 给了自定义色则压过它。帧里 accent 本就是 hex 串，
+    // 故本平台与 Windows 一样支持自定义色，**不必降级**。
+    // alpha 段丢弃：.app 侧按 6 位 hex 解析，多出的两位会被整串判为非法而落回内置色。
+    let custom = accent_override.map(|c| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
+    let accent = match (&custom, kind) {
+        (Some(c), _) => c.as_str(),
+        (None, ToastKind::Info) => "#409EFF",
+        (None, ToastKind::Success) => "#52C46E",
+        (None, ToastKind::Error) => "#F56C6C",
     };
     encode_toast_show("", text, bg, fg, accent, pos, duration_ms, 0)
 }
@@ -312,7 +318,8 @@ impl Forwarder {
                 position,
                 kind,
                 duration_ms,
-            } => self.push_toast(&text, position, kind, duration_ms as i32),
+                accent,
+            } => self.push_toast(&text, position, kind, duration_ms as i32, accent),
             UiCommand::SetTheme(t) => {
                 // 提示类窗口在 .app 侧原生渲染，配色须在此求值成 hex 随帧下发；
                 // 兜底值与各自 Windows 实现的编译期默认逐字一致，避免两端观感分叉。
@@ -483,6 +490,7 @@ impl Forwarder {
                         ToastPosition::BottomRight,
                         kind,
                         3000,
+                        None,
                     ));
                 });
             }
@@ -569,7 +577,14 @@ impl Forwarder {
     }
 
     /// 推一条 toast 给 `.app`（原生渲染）。
-    fn push_toast(&self, text: &str, position: ToastPosition, kind: ToastKind, duration_ms: i32) {
+    fn push_toast(
+        &self,
+        text: &str,
+        position: ToastPosition,
+        kind: ToastKind,
+        duration_ms: i32,
+        accent: Option<[u8; 4]>,
+    ) {
         self.sink.push_frame(&toast_frame(
             &self.tips.toast_bg,
             &self.tips.toast_fg,
@@ -577,12 +592,13 @@ impl Forwarder {
             position,
             kind,
             duration_ms,
+            accent,
         ));
     }
 
     /// 截图/复制类操作的结果反馈：右下角 toast，3 秒（与 Windows 侧同一形态）。
     fn push_result_toast(&self, text: &str, kind: ToastKind) {
-        self.push_toast(text, ToastPosition::BottomRight, kind, 3000);
+        self.push_toast(text, ToastPosition::BottomRight, kind, 3000, None);
     }
 
     /// 取候选窗当前帧的像素（BGRA + 尺寸）。窗口未显示时返回 `None`。
@@ -1210,6 +1226,7 @@ mod tests {
             position: crate::toast::ToastPosition::Center,
             kind: crate::toast::ToastKind::Success,
             duration_ms: 2000,
+            accent: None,
         });
         f.handle(UiCommand::HideToolbar);
         let v = cap.lock().unwrap();

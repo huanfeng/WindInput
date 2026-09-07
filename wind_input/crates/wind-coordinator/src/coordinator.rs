@@ -79,6 +79,9 @@ pub(crate) const DEFERRED_COMPOSITION_FALLBACK_MS: u32 = 150;
 /// 的门槛附近。
 const INDEX_TOAST_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// toast 默认显示时长。`ui.toast(ms=…)` 与配置语法错误那条（8s）各自覆盖。
+pub(crate) const DEFAULT_TOAST_MS: u64 = 2500;
+
 /// 把 `caret_offset_*` 的 dp 值按显示器缩放换算成物理像素偏移。纯函数，与 DPI 查询解耦，
 /// 可脱离真实系统单测——`dpi_scale_for_point` 那部分才是不可控的平台调用，两者故意分开。
 fn dp_offset_to_pixels(dx_dp: i32, dy_dp: i32, scale: f32) -> (i32, i32) {
@@ -3783,11 +3786,30 @@ impl Coordinator {
 
     /// 显示一次性通知 toast（约 2.5 秒后自动隐藏）。供配置热重载、词库就绪、错误等一次性事件。
     pub(crate) fn show_toast(&self, text: &str, position: ToastPosition, kind: ToastKind) {
+        self.show_toast_ex(text, position, kind, DEFAULT_TOAST_MS, None);
+    }
+
+    /// 完整形态的 toast：另给时长与自定义强调色，供 `ui.toast` 的具名参数落地。
+    /// `duration_ms` 为 0 时取默认时长——0 在 UI 侧会被 `max(1)` 变成"闪一下就消失"，
+    /// 而调用方传 0 的意思一律是"没指定"。
+    pub(crate) fn show_toast_ex(
+        &self,
+        text: &str,
+        position: ToastPosition,
+        kind: ToastKind,
+        duration_ms: u64,
+        accent: Option<[u8; 4]>,
+    ) {
         let _ = self.ui_tx.send(UiCommand::ShowToast {
             text: text.to_string(),
             position,
             kind,
-            duration_ms: 2500,
+            duration_ms: if duration_ms == 0 {
+                DEFAULT_TOAST_MS
+            } else {
+                duration_ms
+            },
+            accent,
         });
     }
 
@@ -3989,6 +4011,7 @@ impl Coordinator {
             position: ToastPosition::BottomCenter,
             kind: ToastKind::Error,
             duration_ms: 8000,
+            accent: None,
         });
         true
     }

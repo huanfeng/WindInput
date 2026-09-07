@@ -65,6 +65,40 @@ impl<'a> ProcSpawn<'a> {
     }
 }
 
+/// 一次 `wind.cli` 执行请求：子命令 argv + 执行完的用户反馈策略。
+///
+/// **反馈策略必须随请求一起下去，不能由宿主自己拍板**：同一个 `wind.cli` 既用来跑
+/// `dict import`（服务侧不会有任何提示，必须由这里报），也用来跑 `config set` /
+/// `restart`（服务侧本就会弹「设置已更新」/「服务已重启」，再报一次就是双提示）。
+/// 撞不撞车只有写词条的人当场知道，宿主无从判断，也不该去维护一张子命令名单。
+#[derive(Debug, Clone, Copy)]
+pub struct CliSpawn<'a> {
+    /// 子命令 argv（不含 exe 自身）。
+    pub args: &'a [String],
+    /// 反馈模式：`on`(默认，成功与失败都报) / `off`(都不报) / `error`(仅失败报)。
+    pub toast: &'a str,
+    /// 成功文案；空 = 用 CLI 自己打印的最后一行（如「✓ 用户词库: 新增 12 · 更新 3」）。
+    pub ok_text: &'a str,
+    /// 等待子进程退出的上限毫秒。0 = 不等（发射后不管，此时无结果可报）。
+    pub wait_ms: u64,
+}
+
+impl<'a> CliSpawn<'a> {
+    /// 只给 argv 的最简形式（其余走默认），供测试与内部调用。
+    pub fn new(args: &'a [String]) -> Self {
+        CliSpawn {
+            args,
+            toast: "",
+            ok_text: "",
+            wait_ms: DEFAULT_CLI_WAIT_MS,
+        }
+    }
+}
+
+/// `wind.cli` 等待子进程的默认上限。取 10s：`dict import` 十万条量级实测在秒级，
+/// 而超时并不代表失败（只是不再等），放宽的代价仅是命令线程多占一会儿。
+pub const DEFAULT_CLI_WAIT_MS: u64 = 10_000;
+
 /// 进程启动 / shell 执行：`proc.run` / `proc.shell` / `wind.cli`。
 ///
 /// `cwd` 不是可选形参：「忘了接工作目录」的宿主会静默把 CWD 继承给子进程
@@ -77,9 +111,37 @@ pub trait ProcessRunner: Send + Sync {
     fn shell(&self, cmdline: &str, flags: &[String], cwd: &str) -> anyhow::Result<()>;
     /// 以主程序自身 exe 执行 CLI 子命令（`wind.cli`）：宿主自取 exe 路径，
     /// 词条无需硬编码安装位置。默认未支持（测试/精简宿主）。
-    fn run_self(&self, _args: &[String]) -> anyhow::Result<()> {
+    ///
+    /// 返回 `Err` 仅表示**没能跑起来或跑失败了**；子进程自己的成功/失败提示由宿主
+    /// 按 `spec.toast` 决定，不经返回值（cmdbar 层没有 UI 能力）。
+    fn run_self(&self, _spec: &CliSpawn<'_>) -> anyhow::Result<()> {
         anyhow::bail!("run_self: 宿主未支持")
     }
+}
+
+/// 一次 `ui.toast` 请求。字段与 `wind-ui-types` 的 `ToastPosition` / `ToastKind` 对应，
+/// 但**刻意用字符串**：cmdbar 是纯逻辑 crate，不依赖 UI 类型；解析（含未知值降级）
+/// 是渲染端既有的 `parse` 函数的职责，这里只做白名单校验后原样透传。
+#[derive(Debug, Clone, Copy)]
+pub struct ToastSpec<'a> {
+    /// 文案。宿主负责压成单行并截断，防刷屏。
+    pub text: &'a str,
+    /// 类型：`info`(默认) / `success` / `error`，决定左侧强调条颜色。
+    pub kind: &'a str,
+    /// 自定义强调条颜色 `#RRGGBB` / `#RRGGBBAA`；非空时压过 `kind`。
+    pub color: &'a str,
+    /// 屏幕位置：`bottom_center`(默认) / `center` / `top_center` / 四角。
+    pub position: &'a str,
+    /// 显示时长毫秒；0 = 用默认。
+    pub duration_ms: u64,
+}
+
+/// 用户可见通知：`ui.toast`。
+///
+/// 与 `ime.toggle` 的状态泡刻意分开：状态泡表达「输入法当前是什么状态」、跟随光标、
+/// 会被独占全屏抑制；toast 表达「刚才那件事的结果」，是一次性的，不该被抑制掉。
+pub trait NotifyService: Send + Sync {
+    fn toast(&self, spec: &ToastSpec<'_>) -> anyhow::Result<()>;
 }
 
 /// 词库：`dict.add`。`code` 为空时由实现按当前方案规则推导。
@@ -148,6 +210,7 @@ pub struct Services {
     pub ime: Option<Arc<dyn ImeController>>,
     pub config: Option<Arc<dyn ConfigService>>,
     pub search: Option<Arc<dyn SearchEngine>>,
+    pub notify: Option<Arc<dyn NotifyService>>,
 }
 
 impl Services {

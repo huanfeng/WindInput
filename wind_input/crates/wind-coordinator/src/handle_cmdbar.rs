@@ -20,10 +20,20 @@ use std::process::Command;
 use std::sync::{Arc, Weak};
 use tracing::warn;
 use wind_cmdbar::{
-    ClipboardService, ConfigService, DictService, EvalContext, ImeController, ProcSpawn,
-    ProcessRunner, Services, UrlOpener,
+    CliSpawn, ClipboardService, ConfigService, DictService, EvalContext, ImeController,
+    NotifyService, ProcSpawn, ProcessRunner, Services, ToastSpec, UrlOpener,
 };
 use wind_ui_types::{ToastKind, ToastPosition};
+
+/// 告诉被 `wind.cli` 拉起的 CLI 子进程：输出走管道，别去附着父控制台。
+///
+/// 服务多数时候没有控制台（`AttachConsole` 失败即放弃，继承来的管道句柄得以保留），
+/// 但**开发期从终端启动服务**时子进程会 attach 到那个终端，`println!` 就不进管道了——
+/// 表现为「开发机上直通命令永远拿不到结果、装机版却正常」。用一个显式开关杜绝。
+pub const WIND_CLI_PIPED_ENV: &str = "WIND_INPUT_CLI_PIPED";
+
+/// toast 文案上限（字符）。CLI 输出可能是多行报告或一长串错误，原样弹出会糊住半个屏幕。
+const TOAST_MAX_CHARS: usize = 200;
 
 impl Coordinator {
     /// 构造后装配 cmdbar：自身 Weak 引用 + Services。一次性，幂等。
@@ -49,6 +59,8 @@ impl Coordinator {
         }
         // 配置读写：config.get/set/toggle 接通用户配置（注册表校验 + 热重载）。
         svc.config = Some(Arc::new(CoordConfig(weak.clone())));
+        // 桌面提示：ui.toast。
+        svc.notify = Some(Arc::new(CoordNotify(weak.clone())));
         // search：经 open 默认可用，留 None。
         let _ = self.cmdbar_services.set(svc);
     }
@@ -127,6 +139,33 @@ impl Coordinator {
         if let Some(msg) = first_err {
             self.show_command_error(&msg);
         }
+    }
+
+    /// 弹一条桌面提示。`ui.toast` 短语函数与 RPC `ui.toast`（CLI / 外部脚本）的共同落点。
+    ///
+    /// 两个调用方共用这一个入口，是为了让"压单行 + 截断 + 空文案不弹 + 颜色解析"只有
+    /// 一份：这类边界处理一旦各写各的，必然从某一侧开始漂移。
+    pub fn ui_toast(
+        &self,
+        text: &str,
+        kind: &str,
+        color: &str,
+        pos: &str,
+        duration_ms: u64,
+    ) -> bool {
+        let text = clip_single_line(text, TOAST_MAX_CHARS);
+        // 空文案在 UI 侧等价于 hide()，弹一条看不见的提示只会让人以为函数没生效。
+        if text.is_empty() {
+            return false;
+        }
+        self.show_toast_ex(
+            &text,
+            ToastPosition::parse(pos),
+            ToastKind::parse(kind),
+            duration_ms,
+            parse_hex_rgba(color),
+        );
+        true
     }
 
     /// 测试入口：按**用户同层**的路径执行一条命令源（如 `ime.schema("pinyin")`）。
@@ -357,13 +396,176 @@ impl ProcessRunner for CoordProc {
         // 命令行是整串交给 shell 的，认不出目标程序，故默认只能落中性目录。
         shell_spawn(cmdline, &resolve_workdir("proc.shell", "", cwd))
     }
-    fn run_self(&self, args: &[String]) -> anyhow::Result<()> {
+    fn run_self(&self, spec: &CliSpawn<'_>) -> anyhow::Result<()> {
         // wind.cli：以服务自身 exe 跑 CLI 子命令。CLI 进程经控制管道回连本服务
-        // 执行（热重载/重建等），fire-and-forget；GUI 子系统下 spawn 无控制台闪窗。
+        // 执行（热重载/重建等）；GUI 子系统下 spawn 无控制台闪窗。
+        //
+        // 反馈：CLI 早就把结果写在自己的 stdout 上了（「✓ 用户词库: 新增 12 · 更新 3」），
+        // 但它是 GUI 子系统的短命子进程、没有控制台，那行字过去一直掉进黑洞。
+        // 这里把它接回来变成 toast——**不新造一套结果描述**，避免与 CLI 的说法漂移。
         let exe = std::env::current_exe()?;
-        std::process::Command::new(exe).args(args).spawn()?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(spec.args);
+        if spec.wait_ms == 0 {
+            // 显式 wait="0"：退回发射后不管。此时无结果可报，toast 参数自然失效。
+            cmd.spawn()?;
+            return Ok(());
+        }
+        cmd.env(WIND_CLI_PIPED_ENV, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = cmd.spawn()?;
+        let coord = self.0.clone();
+        let mode = spec.toast.to_string();
+        let ok_text = spec.ok_text.to_string();
+        let wait = std::time::Duration::from_millis(spec.wait_ms);
+        // 等待放后台线程：动作链虽已在独立线程，但一条 $CC 可能串多个动作，
+        // 卡在这里会让后面的 type()/key.tap() 迟迟不执行。
+        std::thread::Builder::new()
+            .name("wind-cli-wait".into())
+            .spawn(move || {
+                let began = std::time::Instant::now();
+                let out = match child.wait_with_output() {
+                    Ok(o) => o,
+                    Err(e) => {
+                        warn!("wind.cli: 等待子进程失败: {e}");
+                        return;
+                    }
+                };
+                // 超时不是失败，只是**结果来晚了**：几秒后突然弹一条与当下无关的提示
+                // 比不弹更扰人，故过期即丢弃（命令本身照常跑完）。
+                let timed_out = began.elapsed() > wait;
+                let code = out.status.code();
+                // ⚠️ 隐私：子进程输出可能带词条/路径，只允许进 toast（UI 通道），
+                // 日志里只记退出码（见 handle_addword 的同款约定）。
+                if timed_out {
+                    warn!("wind.cli: 结果超时丢弃（退出码 {code:?}）");
+                    return;
+                }
+                let Some(msg) = cli_toast_message(
+                    &mode,
+                    &ok_text,
+                    code,
+                    &String::from_utf8_lossy(&out.stdout),
+                    &String::from_utf8_lossy(&out.stderr),
+                ) else {
+                    return;
+                };
+                if code != Some(0) {
+                    warn!("wind.cli: 子命令失败（退出码 {code:?}）");
+                }
+                if let Some(c) = coord.upgrade() {
+                    c.show_toast(&msg.0, ToastPosition::BottomCenter, msg.1);
+                }
+            })?;
         Ok(())
     }
+}
+
+/// 由 CLI 子进程的结果决定要弹什么 toast。`None` = 不弹。
+///
+/// 抽成纯函数是为了可测：真跑一个子进程的测试在 CI 上既慢又依赖 exe 存在，
+/// 而这里的分支（三种 toast 模式 × 成功/失败 × 有无输出）恰恰是最容易写反的部分。
+pub(crate) fn cli_toast_message(
+    mode: &str,
+    ok_text: &str,
+    code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> Option<(String, ToastKind)> {
+    if mode == "off" {
+        return None;
+    }
+    let ok = code == Some(0);
+    if ok && mode == "error" {
+        return None;
+    }
+    if ok {
+        // 成功文案三级：显式 ok= > CLI 自己打印的最后一行 > 兜底。
+        // 取**最后**一行而不是第一行：多段导入时最后一行是总结性的那条。
+        let text = if !ok_text.trim().is_empty() {
+            ok_text.to_string()
+        } else if let Some(l) = last_nonempty_line(stdout) {
+            l
+        } else {
+            "命令已完成".to_string()
+        };
+        return Some((clip_single_line(&text, TOAST_MAX_CHARS), ToastKind::Success));
+    }
+    // 失败文案三级：stderr 首行（CLI 的报错都写在这）> stdout 末行 > 退出码兜底。
+    // 兜底必须带退出码：没有它，"命令失败"这四个字对排查毫无价值。
+    let text = first_nonempty_line(stderr)
+        .or_else(|| last_nonempty_line(stdout))
+        .unwrap_or_else(|| match code {
+            Some(c) => format!("命令失败（退出码 {c}）"),
+            None => "命令被中止".to_string(),
+        });
+    Some((clip_single_line(&text, TOAST_MAX_CHARS), ToastKind::Error))
+}
+
+fn first_nonempty_line(s: &str) -> Option<String> {
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(String::from)
+}
+
+fn last_nonempty_line(s: &str) -> Option<String> {
+    s.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .next_back()
+        .map(String::from)
+}
+
+/// 压成单行并按**字符**截断（不是字节——中文报告按字节切会切出半个字）。
+pub(crate) fn clip_single_line(s: &str, max: usize) -> String {
+    let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clipped: String = joined.chars().take(max).collect();
+    // 判据取「压平后的长度」而不是原串的非空白字符数：后者在
+    // "ab cd ef" 截到 7 这类含空格的边界上会漏判，省略号该出而不出。
+    if clipped.chars().count() < joined.chars().count() {
+        format!("{clipped}…")
+    } else {
+        clipped
+    }
+}
+
+/// 桌面提示：`ui.toast`。
+struct CoordNotify(Weak<Coordinator>);
+
+impl NotifyService for CoordNotify {
+    fn toast(&self, spec: &ToastSpec<'_>) -> anyhow::Result<()> {
+        let Some(c) = self.0.upgrade() else {
+            return Ok(());
+        };
+        if !c.ui_toast(
+            spec.text,
+            spec.kind,
+            spec.color,
+            spec.position,
+            spec.duration_ms,
+        ) {
+            anyhow::bail!("文案为空");
+        }
+        Ok(())
+    }
+}
+
+/// `#RRGGBB` / `#RRGGBBAA` → RGBA。格式已在 cmdbar 层校验，这里对非法值返回 None
+/// （落回按 kind 取色）而不是 panic。
+pub(crate) fn parse_hex_rgba(s: &str) -> Option<[u8; 4]> {
+    let hex = s.strip_prefix('#')?;
+    if !matches!(hex.len(), 6 | 8) {
+        return None;
+    }
+    let b = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([
+        b(0)?,
+        b(2)?,
+        b(4)?,
+        if hex.len() == 8 { b(6)? } else { 255 },
+    ])
 }
 
 /// 配置服务：cmdbar `config.get` / `config.set` / `config.toggle`。
@@ -728,5 +930,112 @@ mod workdir_tests {
         let (dir, fb) = resolve_workdir_with("D:/Dict/d.exe", "   ", dirs(&["D:/Dict"]), home);
         assert_eq!(dir, "D:/Dict");
         assert_eq!(fb, None);
+    }
+}
+
+/// `wind.cli` 执行结果 → toast 的判定表。
+///
+/// 这些分支是整个功能最容易写反的部分（三种模式 × 成败 × 有无输出），而端到端跑一个
+/// 真子进程既慢又依赖 exe 存在，故判定单独抽成纯函数在这里钉死。
+#[cfg(test)]
+mod cli_toast_tests {
+    use super::{cli_toast_message, clip_single_line, parse_hex_rgba};
+    use wind_ui_types::ToastKind;
+
+    /// 成功时用 CLI 自己打印的**最后一行**——那是 `dict import` 的总结行。
+    /// 不自造文案：core 再写一遍"导入成功"就会与 CLI 的说法漂移。
+    #[test]
+    fn success_uses_cli_last_line() {
+        let (msg, kind) = cli_toast_message(
+            "",
+            "",
+            Some(0),
+            "✓ 用户词库: 新增 12 · 更新 3\n✓ 词频: 导入 40\n",
+            "",
+        )
+        .expect("默认模式成功要弹");
+        assert_eq!(msg, "✓ 词频: 导入 40");
+        assert_eq!(kind, ToastKind::Success);
+    }
+
+    /// 显式 `ok=` 压过 CLI 输出。
+    #[test]
+    fn explicit_ok_text_wins() {
+        let (msg, _) = cli_toast_message("on", "词库已更新", Some(0), "✓ 新增 12", "").unwrap();
+        assert_eq!(msg, "词库已更新");
+    }
+
+    /// 成功但**没有任何输出**时仍要有话说——否则用户看到的还是"什么都没发生"。
+    #[test]
+    fn success_without_output_still_reports() {
+        let (msg, _) = cli_toast_message("on", "", Some(0), "  \n", "").unwrap();
+        assert_eq!(msg, "命令已完成");
+    }
+
+    /// 失败取 stderr 首行；没有 stderr 时退到 stdout；都没有才用退出码兜底。
+    /// 兜底带退出码是刻意的：光说"命令失败"对排查毫无价值。
+    #[test]
+    fn failure_prefers_stderr_then_stdout_then_code() {
+        let (msg, kind) = cli_toast_message(
+            "",
+            "",
+            Some(1),
+            "",
+            "读取 x.yaml 失败: 系统找不到指定的文件。",
+        )
+        .unwrap();
+        assert_eq!(msg, "读取 x.yaml 失败: 系统找不到指定的文件。");
+        assert_eq!(kind, ToastKind::Error);
+
+        let (msg, _) = cli_toast_message("", "", Some(2), "用法: wind_input dict import …", "")
+            .expect("退出码 2（用法错）也要报");
+        assert!(msg.starts_with("用法"), "{msg}");
+
+        let (msg, _) = cli_toast_message("", "", Some(3), "", "").unwrap();
+        assert_eq!(msg, "命令失败（退出码 3）");
+        // 被信号/强杀：没有退出码，也不能假装成功
+        let (msg, kind) = cli_toast_message("", "", None, "", "").unwrap();
+        assert_eq!(msg, "命令被中止");
+        assert_eq!(kind, ToastKind::Error);
+    }
+
+    /// 三种模式的取舍：`off` 一律不弹；`error` 只在失败时弹（供 restart / config set
+    /// 这类服务侧已有提示的子命令，避免双提示）；默认两头都弹。
+    #[test]
+    fn toast_modes_gate_what_is_shown() {
+        assert!(cli_toast_message("off", "", Some(0), "✓ ok", "").is_none());
+        assert!(cli_toast_message("off", "", Some(1), "", "炸了").is_none());
+        assert!(cli_toast_message("error", "", Some(0), "✓ ok", "").is_none());
+        assert!(
+            cli_toast_message("error", "", Some(1), "", "炸了").is_some(),
+            "error 模式下失败仍必须弹——否则这个模式就等于 off"
+        );
+        // 显式 ok= 也压不过 off：模式是总闸。
+        assert!(cli_toast_message("off", "词库已更新", Some(0), "", "").is_none());
+    }
+
+    /// 多行/超长输出压成单行并按**字符**截断（按字节切中文会切出半个字）。
+    #[test]
+    fn message_is_single_line_and_clipped_by_chars() {
+        let long = "汉".repeat(300);
+        let (msg, _) = cli_toast_message("on", &long, Some(0), "", "").unwrap();
+        assert_eq!(msg.chars().count(), 201, "200 字 + 省略号");
+        assert!(msg.ends_with('…'));
+
+        assert_eq!(clip_single_line("a\r\nb\tc  d", 100), "a b c d");
+        // 恰好等于上限不加省略号
+        assert_eq!(clip_single_line("abcde", 5), "abcde");
+        // 截断点落在空格之后：判据若按"原串非空白字符数"算会漏掉省略号。
+        assert_eq!(clip_single_line("ab cd ef", 7), "ab cd e…");
+    }
+
+    #[test]
+    fn hex_color_parsing() {
+        assert_eq!(parse_hex_rgba("#52C41A"), Some([0x52, 0xC4, 0x1A, 255]));
+        assert_eq!(parse_hex_rgba("#52C41A80"), Some([0x52, 0xC4, 0x1A, 0x80]));
+        // 非法一律 None → 落回按 kind 取色，而不是 panic 或黑色
+        for bad in ["", "52C41A", "#52C", "#GGGGGG", "#52C41A8"] {
+            assert_eq!(parse_hex_rgba(bad), None, "{bad}");
+        }
     }
 }
