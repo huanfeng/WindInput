@@ -36,7 +36,7 @@
 
 | 类 | 动词 | 生命周期 | 方案级绑定的价值 |
 |---|---|---|---|
-| **A 状态切换** | `toggle_mode` `toggle_punct` `toggle_full_width` `toggle_s2t` `toggle_toolbar` `open_settings` `take_screenshot` `add_word` `open_add_word_dialog` | 瞬时 | **低——仅作功能补全**（已拍板）。切标点在哪个方案里都一样；真实用途只有「在本方案禁用某键的全局绑定」，而那是 D 类。排在最后一期，见 §7 |
+| **A 状态切换** | `toggle_mode` `toggle_punct` `toggle_full_width` `toggle_s2t` `toggle_t2s` `toggle_toolbar` `open_settings` `take_screenshot` `add_word` `open_add_word_dialog` | 瞬时 | **低——仅作功能补全**（已拍板）。切标点在哪个方案里都一样；真实用途只有「在本方案禁用某键的全局绑定」，而那是 D 类。排在最后一期，见 §7 |
 | **B 模式进入** | `temp_pinyin` `temp_english` `mix:<id>` `special:<id>` | overlay，打完退回 | **最高**——快符按方案分流即此类 |
 | **C 方案切换** | `toggle_schema:<id>` | 持久，带回程 | 高，但**有锁死风险**，见 §5 |
 | **D 禁用** | `none` | — | 屏蔽全局绑定的第三态 |
@@ -566,7 +566,7 @@ A 类反过来排到最后——它是功能完整性，不是任何人的诉求
 | 动作 | 限修饰键 | why |
 |---|---|---|
 | `toggle_mode` / `switch_engine` | **是** | 正是用来离开/返回英文态的。绑有字符键 ⇒ 单程票（keydown 链在分水岭之后），与 `toggle_schema` 完全同型 |
-| `toggle_punct` / `toggle_s2t` / `toggle_toolbar` / `take_screenshot` … | 否 | 本就只在中文态有意义——全局那份也带 `CHINESE_ONLY` |
+| `toggle_punct` / `toggle_s2t` / `toggle_t2s` / `toggle_toolbar` / `take_screenshot` … | 否 | 本就只在中文态有意义——全局那份也带 `CHINESE_ONLY` |
 
 ★ 这与 §4.1 的「键有没有字符」是**正交的两问**，合起来才定得了插入点。只看 §4.1
 会把 `toggle_mode` 放到 keydown 路径上，配完能用、切到英文就废。

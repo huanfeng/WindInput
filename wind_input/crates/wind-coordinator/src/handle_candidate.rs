@@ -1808,7 +1808,7 @@ impl Coordinator {
 
     /// 简繁 1对多变体展开：s2t 开启时，对最终候选列表中的**单字**候选，紧跟其后插入
     /// 变体候选（如「出」→ 追加「齣」，STCharacters 多值行，全表 276 字）。变体候选
-    /// text 保持简体原字、输出走 `s2t_override`（见 `cand_s2t_text`）。
+    /// text 保持简体原字、输出走 `s2t_override`（见 `cand_convert_text`）。
     ///
     /// 调用时机有两条硬约束：
     /// - 必须在候选装配**全部完成后**（排序/去重/词频重排/shadow 之后）：去重按 text
@@ -1841,7 +1841,7 @@ impl Coordinator {
                 i += 1;
                 continue;
             }
-            // 默认转换结果已由原字候选呈现（显示层 maybe_s2t），变体里滤掉它防止重复。
+            // 默认转换结果已由原字候选呈现（显示层 maybe_convert），变体里滤掉它防止重复。
             let default_out = conv.convert(&c.text);
             let base = state.candidates[i].clone();
             let mut at = i + 1;
@@ -2560,7 +2560,7 @@ impl Coordinator {
         self.record_selection(freq_code, text, source);
         let mut out = match s2t_override {
             Some(t) => t.to_string(),
-            None => self.maybe_s2t(state, text),
+            None => self.maybe_convert(state, text),
         };
         if self.english_appends_space(source, text, &state.input_buffer) {
             out.push(' ');
@@ -2997,8 +2997,8 @@ impl Coordinator {
             // 普通候选保持**整体**转换——STPhrases 词级最长匹配可跨 committed/候选边界
             // 消歧（「一」+「出」→「一齣」），拆开会丢掉跨段词级命中。
             let mut out = match &cand.s2t_override {
-                Some(t) => format!("{}{}", self.maybe_s2t(state, &state.committed_text), t),
-                None => self.maybe_s2t(state, &final_simplified),
+                Some(t) => format!("{}{}", self.maybe_convert(state, &state.committed_text), t),
+                None => self.maybe_convert(state, &final_simplified),
             };
             // 英文补空格（`schema.english.commit_space`）：本分支是英文方案下选词的**唯一**
             // 出口——空格 / 数字键 / 次三选键 / 修饰键选词 / 鼠标点选 / 数字键越界 overflow
@@ -3190,7 +3190,7 @@ impl Coordinator {
         }
         // 拼接已确认段前缀 + 选中单字，整体按简繁模式转换（与 commit_selected 一致）。
         let combined = format!("{}{}", state.committed_text, runes[char_index]);
-        let out = self.maybe_s2t(state, &combined);
+        let out = self.maybe_convert(state, &combined);
         let chinese = state.chinese_mode;
         self.reset_pinyin_composition(state);
         self.notify_ui_hide();
@@ -3419,11 +3419,11 @@ impl Coordinator {
     /// # 简繁转换在本函数内收口
     ///
     /// `top_text` 一律传**简体原文**（内部唯一事实），出屏文本由本函数转换——三条来路各自
-    /// `maybe_s2t` 曾经全部漏掉，顶码上屏简体而空格上屏繁体（2026-08-20 反馈）。压进来之后
+    /// `maybe_convert` 曾经全部漏掉，顶码上屏简体而空格上屏繁体（2026-08-20 反馈）。压进来之后
     /// 新增来路想漏也漏不掉。顺序不可对调：`record_selection` / `record_commit` 必须吃简体
     /// 原文，否则词频表会长出一套繁体键，而读端 `apply_freq_rerank` 查的是简体，永远查不到。
     ///
-    /// `s2t_override` 由调用方按被顶出的候选**如实传入**（语义同 [`Self::cand_s2t_text`]）。
+    /// `s2t_override` 由调用方按被顶出的候选**如实传入**（语义同 [`Self::cand_convert_text`]）。
     /// 现实中三条来路都取不到 1对多变体候选——顶码取 `candidates.first()`，而变体恒插在原字
     /// **之后**（见 [`Self::expand_s2t_variants`]）——但判据写在候选身上而非「反正取不到」的
     /// 推断上：顶码哪天改取高亮候选，这里不必跟着想起来改。
@@ -3449,7 +3449,7 @@ impl Coordinator {
         // 出屏文本（记账之后取，见上）：变体候选用其覆盖文本，其余按需简繁转换。
         let out_text = match s2t_override {
             Some(t) => t.to_string(),
-            None => self.maybe_s2t(state, &top_text),
+            None => self.maybe_convert(state, &top_text),
         };
         state.input_buffer = remainder.to_string();
         // 余码是缓冲的后缀 → 影子串同步掐头，否则大写会在这里静默丢掉。
@@ -3490,9 +3490,9 @@ impl Coordinator {
     /// 出繁体，2026-08-20 反馈），其中三份还漏掉了 `record_commit`（输入统计少记一条上屏）。
     /// 复制出去的加工步骤不会被一起想起来——出屏文本只能有一个落点。
     ///
-    /// # 两半的转换方式不同，不可合并成整串 `maybe_s2t`
+    /// # 两半的转换方式不同，不可合并成整串 `maybe_convert`
     ///
-    /// 已转换前缀走 `maybe_s2t`，高亮候选走 [`Self::cand_s2t_text`]。整串一起转会把 1对多
+    /// 已转换前缀走 `maybe_convert`，高亮候选走 [`Self::cand_convert_text`]。整串一起转会把 1对多
     /// 变体候选打回默认转换结果（用户高亮的是「齣」，上屏却成「出」）。此处高亮**可以**停在
     /// 变体候选上——与顶码取 `candidates.first()` 恒取不到变体的情形不同，见
     /// [`Self::commit_top_text`]。
@@ -3509,7 +3509,7 @@ impl Coordinator {
     /// 清空候选，联想随之隐式退出（见 `handle_assoc` 模块文档）。
     pub(crate) fn take_committed_with_highlight(&self, state: &mut State) -> Option<String> {
         let prefix = self.take_committed(state);
-        let mut out = self.maybe_s2t(state, &prefix);
+        let mut out = self.maybe_convert(state, &prefix);
         if state.candidates.is_empty() || state.assoc_active() {
             return (!out.is_empty()).then_some(out);
         }
@@ -3530,7 +3530,7 @@ impl Coordinator {
             idx.saturating_sub(start) as i32,
             wind_store::stats::CommitSource::Candidate,
         );
-        out.push_str(&self.cand_s2t_text(state, &cand));
+        out.push_str(&self.cand_convert_text(state, &cand));
         Some(out)
     }
 

@@ -506,6 +506,10 @@ function Download-Dicts {
     Gray "OpenCC 简繁词典:"
     Get-Dict "$openccBase/STCharacters.txt" "$opencc\STCharacters.txt" "简->繁 字级" | Out-Null
     Get-Dict "$openccBase/STPhrases.txt"    "$opencc\STPhrases.txt"    "简->繁 词级" | Out-Null
+    # 繁->简 两张表供「繁入简出」(input.t2s)。用官方表而不是反转 ST*: 繁->简的取舍
+    # (异体字归并、一简对多繁的收敛方向) 官方表是直接给出的, 反转出来的要自己定夺。
+    Get-Dict "$openccBase/TSCharacters.txt" "$opencc\TSCharacters.txt" "繁->简 字级" | Out-Null
+    Get-Dict "$openccBase/TSPhrases.txt"    "$opencc\TSPhrases.txt"    "繁->简 词级" | Out-Null
     Get-Dict "$openccBase/TWVariants.txt"   "$opencc\TWVariants.txt"   "台湾字形"   | Out-Null
     Get-Dict "$openccBase/TWPhrases.txt"    "$opencc\TWPhrases.txt"    "台湾词汇"   | Out-Null
     Get-Dict "$openccBase/HKVariants.txt"   "$opencc\HKVariants.txt"   "香港字形"   | Out-Null

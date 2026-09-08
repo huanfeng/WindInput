@@ -270,7 +270,7 @@ SDL2 `SDL_windowskeyboard.c`（`UILess_GetCandidateList`）。
 第一版曾带「从 0 起至少 64 条」的前缀让宿主自己切页——Dota 2 这类自绘候选的宿主会把
 `GetCount` 条**全部**画出来（微软五笔在 Dota 2 里「所有页一次显示、翻页崩游戏」正是这个
 形状，微软拼音则正常，见 Microsoft Q&A #5631957），故收敛为当页。翻页/上下移高亮后 DLL
-重拉，宿主看到的就是新的一页。文本走 `cand_s2t_text`（简繁显示与本地候选窗一致）。
+重拉，宿主看到的就是新的一页。文本走 `cand_convert_text`（简繁显示与本地候选窗一致）。
 
 ### 4.4 服务端：按 pid 记账不弹窗（`handle_uielement.rs`）
 

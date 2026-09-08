@@ -26,6 +26,13 @@ pub enum ToolbarItem {
     /// **自锁**：它是简繁的唯一鼠标入口，关着时不画就再也开不回来。显隐归
     /// `ui.toolbar.items` 一处管，运行时不再插手。
     S2t,
+    /// 繁入简出（恒显「简」，开着时高亮）。
+    ///
+    /// ⚠️ 与 [`Self::S2t`] 的「关显简 / 开显繁」轮换**刻意不同构**：本格出厂不显示
+    /// （`ui.toolbar.items` 里是 `-t2s`），只有主动打开的人才看得到，而那正是要用
+    /// 繁入简出的人。若也做轮换，两格都关时会一起显「简」，谁是谁分不出。
+    /// 恒显一个字、开合由格底表达，是软键盘格已经在用的那套。
+    T2s,
     /// 软键盘（键盘图标，点击开关面板；开着时高亮）。
     SoftKeyboard,
     /// 设置（齿轮图标，点击弹主菜单）。
@@ -51,11 +58,12 @@ pub enum ToolbarItem {
 /// 与 `wind_config::TOOLBAR_ITEM_KEYS` 逐项对应，但**刻意各存一份**：那份是配置层的键名
 /// （字符串），这份是协议层的项（枚举）。让 wind-ui-types 去依赖 wind-config 只为共享
 /// 几个常量，会把配置 crate 拖进 headless / Android 的依赖图里。
-pub const DEFAULT_TOOLBAR_ITEMS: [ToolbarItem; 6] = [
+pub const DEFAULT_TOOLBAR_ITEMS: [ToolbarItem; 7] = [
     ToolbarItem::Mode,
     ToolbarItem::Punct,
     ToolbarItem::FullWidth,
     ToolbarItem::S2t,
+    ToolbarItem::T2s,
     ToolbarItem::SoftKeyboard,
     ToolbarItem::Settings,
 ];
@@ -74,8 +82,13 @@ pub struct ToolbarState {
     pub caps_lock: bool,
     pub full_width: bool,
     pub chinese_punct: bool,
-    /// 简繁转换当前是否启用（格内显示 "繁" 并高亮）
+    /// 简入繁出当前是否启用（格内显示 "繁" 并高亮）
     pub s2t_enabled: bool,
+    /// 繁入简出当前是否启用（格内恒显 "简"，据此高亮）。
+    ///
+    /// 没有对应的 `t2s_shown`：`s2t_shown` 那个字段是给**没有 `items` 机制**的宿主
+    /// （macOS 状态菜单 / 移动端）用的，而繁入简出按设计不进那两端的开关面板。
+    pub t2s_enabled: bool,
     /// 是否该给出简繁开关（取值 = 简繁转换当前开着）。
     ///
     /// ⚠️ **桌面工具栏已不读它**：那边的简繁格显隐归 `ui.toolbar.items`，本字段一度是
@@ -104,6 +117,7 @@ impl Default for ToolbarState {
             full_width: false,
             chinese_punct: true,
             s2t_enabled: false,
+            t2s_enabled: false,
             s2t_shown: false,
             soft_keyboard_on: false,
             input_blocked: false,

@@ -151,7 +151,9 @@ pub trait DictService: Send + Sync {
 
 /// IME 状态控制：`ime.toggle` / `ime.schema` / `ime.theme_cycle` / `setting.open` / `setting.web`。
 pub trait ImeController: Send + Sync {
-    /// 切换 IME 状态（cn-en / fullshape / layout / candwin / s2t / preedit / toolbar）。
+    /// 切换 IME 状态（cn-en / fullshape / layout / candwin / s2t / t2s / preedit / toolbar）。
+    ///
+    /// `s2t` = 简入繁出，`t2s` = 繁入简出；两者互斥，开一个自动关另一个。
     fn toggle(&self, target: &str) -> anyhow::Result<()>;
     /// 打开设置窗口的指定页面。`page` 为规范页 id（schema/input/keys/ui/dict/
     /// advanced/about），空串打开默认页。未知 id 由设置端忽略并落到默认页。

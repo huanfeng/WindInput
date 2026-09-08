@@ -136,7 +136,7 @@ impl Coordinator {
         let (start, end) = self.page_range(&s);
         s.candidates[start..end]
             .iter()
-            .map(|c| self.cand_s2t_text(&s, c))
+            .map(|c| self.cand_convert_text(&s, c))
             .collect()
     }
 

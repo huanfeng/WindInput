@@ -9861,3 +9861,154 @@ fn test_punct_on_empty_clear_does_not_affect_nonempty_candidates() {
         other => panic!("有候选按句号应顶屏首选+标点，实际: {:?}", other),
     }
 }
+
+// ───────────────── 繁入简出（input.t2s）─────────────────
+
+/// 繁入简出用例专用的配置：检索范围放到「全部字符」。
+///
+/// 探针字「漢」在出厂的 `smart` / `general` 档下会被检索范围过滤掉——繁体字不在通用
+/// 规范汉字表里。这不是被测能力的一部分，但不改这一项，用例会以「候选里找不到漢」
+/// 的形式失败，看起来像转换器没工作。真实场景里繁体词库用户本就得把范围放开。
+fn config_t2s(active: &str) -> Config {
+    let mut cfg = config_with(active);
+    cfg.input.filter_mode = "gb18030".into();
+    cfg
+}
+
+/// 逐页找第一个满足 `pred` 的候选，返回 (内部文本, 显示文本)。
+///
+/// 繁入简出的探针字（如「漢」）是低频单字，**不一定在首页**——现有 s2t 用例那种
+/// 「首页找不到就 eprintln 跳过」在这里会退化成恒绿：跳过分支不留断言，词库调整让
+/// 探针字掉出首页时测试照样通过，而被测能力已经没人验证了。
+fn find_candidate_across_pages(
+    coord: &Coordinator,
+    pred: impl Fn(&str) -> bool,
+) -> Option<(String, String)> {
+    // 上限只为防死循环（翻页键在末页是空操作，没有它就是无限循环）。
+    for _ in 0..60 {
+        let internal = coord.debug_page_texts();
+        if let Some(i) = internal.iter().position(|t| pred(t)) {
+            return Some((
+                internal[i].clone(),
+                coord.debug_page_display_texts()[i].clone(),
+            ));
+        }
+        let (page, _, total) = coord.debug_page_info();
+        if page + 1 >= total && !coord.debug_has_more() {
+            return None;
+        }
+        coord.handle_key_event(&key_event(0x22, EVENT_KEY_DOWN)); // PageDown
+    }
+    None
+}
+
+/// 打 `han` 找到内部为繁体「漢」的候选（拼音词库 cn_dicts 收了繁体单字），
+/// 开启繁入简出后它的**显示**应是简体「汉」。
+///
+/// ★ 用例自带反向对照（关掉时显示 == 内部）：没有它，「转换器压根没加载」
+/// 与「转换生效了」在断言上无从分辨。
+#[test]
+fn test_t2s_converts_candidate_display() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(config_t2s("pinyin"), Some(&data_dir()));
+    if !coord.debug_set_t2s(true) {
+        eprintln!("跳过：缺少 opencc 数据");
+        return;
+    }
+    for c in "han".chars() {
+        press_letter(&coord, c);
+    }
+    let Some((internal, display)) = find_candidate_across_pages(&coord, |t| t == "漢") else {
+        panic!("拼音 han 的候选里应能找到繁体「漢」（cn_dicts 收了它）");
+    };
+    assert_eq!(internal, "漢");
+    assert_eq!(display, "汉", "开启繁入简出后「漢」应显示为「汉」");
+
+    // 反向对照：关掉后显示回到内部原文。
+    let off = Coordinator::new_headless(config_t2s("pinyin"), Some(&data_dir()));
+    for c in "han".chars() {
+        press_letter(&off, c);
+    }
+    let Some((i2, d2)) = find_candidate_across_pages(&off, |t| t == "漢") else {
+        panic!("反向对照：同样应找得到「漢」");
+    };
+    assert_eq!((i2.as_str(), d2.as_str()), ("漢", "漢"), "未开启时不该转换");
+}
+
+/// 上屏走的是同一个出口（`maybe_convert`），但**必须单独测**：2026-08-20 那次
+/// 「顶屏出简体、空格出繁体」正是显示与上屏各走各的路造成的。
+#[test]
+fn test_t2s_converts_committed_candidate() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(config_t2s("pinyin"), Some(&data_dir()));
+    if !coord.debug_set_t2s(true) {
+        eprintln!("跳过：缺少 opencc 数据");
+        return;
+    }
+    for c in "han".chars() {
+        press_letter(&coord, c);
+    }
+    if find_candidate_across_pages(&coord, |t| t == "漢").is_none() {
+        panic!("拼音 han 的候选里应能找到繁体「漢」");
+    }
+    // find_… 停在「漢」所在那一页，取它的页内位置按数字键选。
+    let pos = coord
+        .debug_page_texts()
+        .iter()
+        .position(|t| t == "漢")
+        .expect("上一步已确认在本页");
+    match coord.handle_key_event(&key_event(0x31 + pos as u32, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => {
+            assert_eq!(text, "汉", "开启繁入简出后「漢」应上屏为「汉」");
+        }
+        other => panic!("应上屏 InsertText，实际: {:?}", other),
+    }
+}
+
+/// 两个方向互斥：后开的赢，先开的必须被关掉。
+///
+/// 同时开着的出口行为是「转过去再转回来」，产物是绕了一圈的近似原文——既不是繁体
+/// 也不是简体，且用户看不出是哪一步造成的。
+#[test]
+fn test_s2t_and_t2s_are_mutually_exclusive() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(config_with("pinyin"), Some(&data_dir()));
+    if !coord.debug_set_s2t(true) || !coord.debug_set_t2s(true) {
+        eprintln!("跳过：缺少 opencc 数据");
+        return;
+    }
+    // 先开 s2t 再开 t2s ⇒ 只有 t2s 生效：简体候选不该被转成繁体。
+    for c in "hanzi".chars() {
+        press_letter(&coord, c);
+    }
+    let internal = coord.debug_page_texts();
+    let display = coord.debug_page_display_texts();
+    let Some(p) = internal.iter().position(|t| t == "汉字") else {
+        panic!("拼音 hanzi 应出「汉字」候选");
+    };
+    assert_eq!(
+        display[p], "汉字",
+        "t2s 后开，s2t 应已被关掉：简体候选不该显示成繁体（实际 {:?}）",
+        display[p]
+    );
+
+    // 反向：先开 t2s 再开 s2t ⇒ 只有 s2t 生效。
+    let coord2 = Coordinator::new_headless(config_with("pinyin"), Some(&data_dir()));
+    assert!(coord2.debug_set_t2s(true) && coord2.debug_set_s2t(true));
+    for c in "hanzi".chars() {
+        press_letter(&coord2, c);
+    }
+    let internal2 = coord2.debug_page_texts();
+    let display2 = coord2.debug_page_display_texts();
+    let p2 = internal2
+        .iter()
+        .position(|t| t == "汉字")
+        .expect("拼音 hanzi 应出「汉字」候选");
+    assert_eq!(display2[p2], "漢字", "s2t 后开，应转繁体");
+}

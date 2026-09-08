@@ -158,7 +158,7 @@ impl Coordinator {
         let items: Vec<String> = if start < end {
             state.candidates[start..end]
                 .iter()
-                .map(|c| self.cand_s2t_text(&state, c))
+                .map(|c| self.cand_convert_text(&state, c))
                 .collect()
         } else {
             Vec::new()

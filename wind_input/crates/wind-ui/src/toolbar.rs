@@ -481,6 +481,16 @@ fn expand_cells_raw(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
                     dim: false,
                     action: ToolbarAction::ToggleS2t,
                 }),
+                // 繁简格：恒显「简」，开合只由高亮表达（见 `ToolbarItem::T2s` 的说明——
+                // 与上面那格的轮换不同构是刻意的，否则两格都关时一起显「简」）。
+                // 显隐同样只由 layout 决定：这一格是繁入简出的唯一鼠标入口，跟着运行时
+                // 状态走就会自锁（S2t 格真机栽过一次）。
+                ToolbarItem::T2s => cells.push(Cell {
+                    text: "简".to_string(),
+                    highlight: state.t2s_enabled,
+                    dim: false,
+                    action: ToolbarAction::ToggleT2s,
+                }),
                 // 软键盘格：文本留空，渲染时画矢量键盘（同齿轮/月亮，不依赖字体字形）。
                 // 开着时高亮——图标只有一张，开合由格底表达。
                 ToolbarItem::SoftKeyboard => cells.push(Cell {
@@ -1708,11 +1718,20 @@ mod tests {
         }
     }
 
+    /// 同 [`tb_state`]，但开的是繁入简出那一档。两个方向互斥，故不做「两个都开」的组合。
+    fn tb_state_t2s(t2s_on: bool) -> ToolbarState {
+        ToolbarState {
+            icon_label: "拼".to_string(),
+            t2s_enabled: t2s_on,
+            ..Default::default()
+        }
+    }
+
     fn actions(cells: &[Cell]) -> Vec<ToolbarAction> {
         cells.iter().map(|c| c.action).collect()
     }
 
-    /// 默认项序列展开出全部六格，且**与任何运行时状态无关**。
+    /// 默认项序列展开出全部七格，且**与任何运行时状态无关**。
     #[test]
     fn default_layout_expands_to_every_item() {
         let expected = vec![
@@ -1720,17 +1739,26 @@ mod tests {
             ToolbarAction::TogglePunct,
             ToolbarAction::ToggleWidth,
             ToolbarAction::ToggleS2t,
+            ToolbarAction::ToggleT2s,
             ToolbarAction::ToggleSoftKeyboard,
             ToolbarAction::OpenSettings,
         ];
-        for s2t_on in [true, false] {
+        for on in [true, false] {
             assert_eq!(
                 actions(&expand_cells(
                     &wind_ui_types::DEFAULT_TOOLBAR_ITEMS,
-                    &tb_state(s2t_on)
+                    &tb_state(on)
                 )),
                 expected,
-                "格的有无不该随运行时状态变（s2t_on={s2t_on}）"
+                "格的有无不该随运行时状态变（s2t_on={on}）"
+            );
+            assert_eq!(
+                actions(&expand_cells(
+                    &wind_ui_types::DEFAULT_TOOLBAR_ITEMS,
+                    &tb_state_t2s(on)
+                )),
+                expected,
+                "格的有无不该随运行时状态变（t2s_on={on}）"
             );
         }
     }
@@ -1747,6 +1775,22 @@ mod tests {
             let cells = expand_cells(&layout, &tb_state(s2t_on));
             assert_eq!(actions(&cells), vec![ToolbarAction::ToggleS2t]);
             assert_eq!(cells[0].text, text);
+            assert_eq!(cells[0].highlight, hl);
+        }
+    }
+
+    /// ★ 同 [`s2t_cell_stays_when_conversion_is_off`]，钉住繁简格的同一条不变量。
+    ///
+    /// 另外钉住**格里画什么**：本格恒显「简」、开合只由高亮表达，与上面那格的
+    /// 「关简 / 开繁」轮换**不同构**。若哪天有人图对称把它改成轮换，两格都关时会
+    /// 一起显「简」，用户分不出哪格是哪格——那正是当初选恒显的理由。
+    #[test]
+    fn t2s_cell_stays_and_never_swaps_its_glyph() {
+        let layout = [ToolbarItem::T2s];
+        for (t2s_on, hl) in [(true, true), (false, false)] {
+            let cells = expand_cells(&layout, &tb_state_t2s(t2s_on));
+            assert_eq!(actions(&cells), vec![ToolbarAction::ToggleT2s]);
+            assert_eq!(cells[0].text, "简", "本格的字不随开关变");
             assert_eq!(cells[0].highlight, hl);
         }
     }

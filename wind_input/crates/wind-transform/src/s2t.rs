@@ -232,7 +232,11 @@ impl Converter {
         if steps.is_empty() {
             None
         } else {
-            let variants = load("STVariants");
+            // 变体表是**方向性资产**：`STVariants` 记的是「一个简体字对应哪几个繁体字」，
+            // 繁→简方向是多对一，压根没有对应物。按名去 load 在 t2s 下会成功（文件就在
+            // 同一个目录里），于是 `variants_of` 拿简体键去查、对繁体输入恒不命中——
+            // 一个静默恒空的能力比明确的 None 更难查。由链的方向决定加不加载。
+            let variants = variants_table_for(variant).and_then(load);
             Some(Converter {
                 steps,
                 post_st_start,
@@ -296,8 +300,24 @@ fn chain_for(variant: &str) -> Vec<Vec<&'static str>> {
         "s2hk" | "hk" | "hongkong" => {
             vec![vec!["STPhrases", "STCharacters"], vec!["HKVariants"]]
         }
+        // 繁 → 简（「繁入繁出」的反向：词库/内部候选是繁体，出口转简体）。
+        // 链形与 s2t 标准镜像对称，词典由 OpenCC 官方同名文件提供。
+        // 刻意**只有标准一档**：台/港变体归一（tw2s/hk2s）要 TWVariantsRev 一类反转表，
+        // OpenCC 官方 data/dictionary 里没有、得自造，而繁入简出本就是小众场景，
+        // 先不为它引入一套自产数据。要加时在这里补一个分支即可。
+        "t2s" => vec![vec!["TSPhrases", "TSCharacters"]],
         // s2t 标准
         _ => vec![vec!["STPhrases", "STCharacters"]],
+    }
+}
+
+/// 该转换链配套的 1对多变体表文件名（无则 `None`）。
+///
+/// 见 [`Converter::load_variant_resolved`] 里的说明：这张表只在**简→繁**方向存在。
+fn variants_table_for(variant: &str) -> Option<&'static str> {
+    match variant.to_lowercase().as_str() {
+        "t2s" => None,
+        _ => Some("STVariants"),
     }
 }
 
@@ -384,6 +404,47 @@ mod tests {
         // 词级最长匹配（软件 → 軟件，标准 s2t 不转台湾习惯词）
         let r = conv.convert("计算机");
         assert!(r.chars().count() == 3, "长度应保持，实际: {}", r);
+    }
+
+    /// 繁 → 简（`input.t2s`「繁入简出」用的链）。
+    ///
+    /// 判据刻意选**繁简不同形**的字：`人`/`工`/`一` 这类同形字在两个方向都恒等，
+    /// 拿它们断言会让「链根本没加载成功」也照样绿（同 s2t 收口那次踩过的假绿）。
+    #[test]
+    fn t2s_converts_traditional_to_simplified() {
+        let dir = opencc_dir();
+        if !dir.join("TSCharacters.octrie").exists() {
+            eprintln!("跳过：缺少 opencc 数据");
+            return;
+        }
+        let conv = Converter::load_variant(&dir, "t2s").expect("应加载 t2s 链");
+        assert_eq!(conv.convert("漢字"), "汉字");
+        assert_eq!(conv.convert("簡體轉換"), "简体转换");
+        // 与 s2t 互为往返：简 → 繁 → 简 应回到原文（对这批无歧义字而言）。
+        let s2t = Converter::load_variant(&dir, "s2t").expect("应加载 s2t 链");
+        for word in ["汉字", "简体转换", "计算机"] {
+            assert_eq!(conv.convert(&s2t.convert(word)), word, "往返不闭合: {word}");
+        }
+    }
+
+    /// 1对多变体表是**简→繁方向独有**的资产：`STVariants.octrie` 就躺在同一个目录里，
+    /// 按名 load 在 t2s 下也会成功，于是 `variants_of` 会拿简体键去查繁体输入、恒不命中。
+    /// 一个静默恒空的能力比明确的 `None` 难查得多，故由链的方向挡住它。
+    #[test]
+    fn t2s_chain_has_no_variant_table() {
+        let dir = opencc_dir();
+        if !dir.join("TSCharacters.octrie").exists() {
+            eprintln!("跳过：缺少 opencc 数据");
+            return;
+        }
+        let s2t = Converter::load_variant(&dir, "s2t").expect("应加载 s2t 链");
+        assert!(
+            !s2t.variants_of("出").is_empty(),
+            "探针失效：s2t 方向本该查得到「出」的变体，否则下一条断言恒绿"
+        );
+        let t2s = Converter::load_variant(&dir, "t2s").expect("应加载 t2s 链");
+        assert!(t2s.variants.is_none(), "t2s 链不该带变体表");
+        assert!(t2s.variants_of("出").is_empty());
     }
 
     /// `load` 改成分段读之后，必须与「整文件读入再 parse」逐字段等价。

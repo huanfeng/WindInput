@@ -468,11 +468,11 @@ impl Coordinator {
 
     /// 把一个符号交给上屏出口。
     ///
-    /// ⚠️ **必须过 `maybe_s2t`**，不能把字面量直接塞进 `InsertText`：简繁转换出口曾经
+    /// ⚠️ **必须过 `maybe_convert`**，不能把字面量直接塞进 `InsertText`：简繁转换出口曾经
     /// 七处全漏、事后才收口，新增上屏路径正是那类缺陷的典型来源。
     fn softkeyboard_commit(&self, state: &State, text: &str) -> KeyAction {
         KeyAction::InsertText {
-            text: self.maybe_s2t(state, text),
+            text: self.maybe_convert(state, text),
             new_composition: None,
             mode_changed: false,
             chinese_mode: state.chinese_mode,
@@ -525,7 +525,7 @@ impl Coordinator {
     /// 面板上点了一个符号键帽。
     ///
     /// ⚠️ 走 `push_commit_text` 而不是返回 `KeyAction`：UI 事件不在按键路径上，没有那条
-    /// 回程通道（同点击候选那条路）。文本仍要过 `maybe_s2t`——上屏出口只有一个。
+    /// 回程通道（同点击候选那条路）。文本仍要过 `maybe_convert`——上屏出口只有一个。
     pub(crate) fn ui_softkeyboard_key(&self, slot: &str, shift: bool, ctrl: bool) {
         let Some(page) = self.softkeyboard.pages().get(self.softkeyboard_page_idx()) else {
             return;
@@ -567,7 +567,7 @@ impl Coordinator {
         }
         let out = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            self.maybe_s2t(&st, text)
+            self.maybe_convert(&st, text)
         };
         debug!(
             "softkeyboard: 点击 {slot}{} -> {out:?}",

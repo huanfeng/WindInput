@@ -103,9 +103,12 @@ fn compile_variants_octrie(src: &Path, dst: &Path) -> anyhow::Result<usize> {
 /// ⇒ 胜出的是**源文件里靠前**的那条。这与主表 `compile_octrie` 取多值首项的
 /// 「定义序即优先级」是同一条约定。
 ///
-/// ⚠️ 产物名刻意**不叫** `TSCharacters`：OpenCC 上游确有同名文件，若哪天它被下载进
-/// `.cache/opencc/dictionaries/`，主循环会编译出同名 `.octrie` 而与本表互相覆盖
-/// （`STVariants` 已有这个隐患，不要再添一个）。
+/// ⚠️ 产物名刻意**不叫** `TSCharacters`：OpenCC 上游确有同名文件。那一天已经到了——
+/// 「繁入简出」（`input.t2s`）要的正是官方那张表，`gen-data` 现在会把它下载进
+/// `.cache/opencc/dictionaries/`，主循环据此编译出 `TSCharacters.octrie`。两张表因名字
+/// 不同而并存：官方那张进 t2s 转换链，本表只做键归一。当初若图省事同名，此刻就是
+/// 一方静默覆盖另一方，且 emoji 键归一与简繁转换会一起出错、互相掩盖。
+/// （`STVariants` 仍有这个隐患，不要再添一个。）
 fn compile_t2s_octrie(src: &Path, dst: &Path) -> anyhow::Result<usize> {
     let content = std::fs::read_to_string(src)?;
     let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();

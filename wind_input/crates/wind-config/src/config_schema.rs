@@ -395,6 +395,7 @@ static REGISTRY: &[ConfigField] = &[
     ),
     f("input.s2t.enabled", Bool),
     f("input.s2t.variant", Str),
+    f("input.t2s.enabled", Bool),
     f("input.cmdbar.enabled", Bool),
     f("input.cmdbar.candidate_prefix", Str),
     // 短语前缀列举（原 dict.phrase）
@@ -429,6 +430,7 @@ static REGISTRY: &[ConfigField] = &[
     f("keys.add_word", Str),
     f("keys.open_add_word_dialog", Str),
     f("keys.toggle_s2t", Str),
+    f("keys.toggle_t2s", Str),
     f("keys.activate_ime", Str),
     f("keys.pin_candidate", Str),
     f("keys.delete_candidate", Str),

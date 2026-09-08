@@ -88,15 +88,29 @@ impl Coordinator {
         )
     }
 
-    /// 设置简繁开关（测试/诊断用）。返回是否生效（数据缺失则 false）。
+    /// 设置简入繁出开关（测试/诊断用）。返回是否生效（数据缺失则 false）。
     pub fn debug_set_s2t(&self, on: bool) -> bool {
         if self.s2t.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
             return false;
         }
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .s2t_enabled = on;
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.s2t_enabled = on;
+        if on {
+            s.t2s_enabled = false; // 互斥，同 toggle_conversion_direction
+        }
+        true
+    }
+
+    /// 设置繁入简出开关（测试/诊断用）。返回是否生效（数据缺失则 false）。
+    pub fn debug_set_t2s(&self, on: bool) -> bool {
+        if self.t2s.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            return false;
+        }
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.t2s_enabled = on;
+        if on {
+            s.s2t_enabled = false;
+        }
         true
     }
 
@@ -613,18 +627,36 @@ impl Coordinator {
 
     /// 候选的**出口文本**（显示与上屏同源）：1对多变体候选（`s2t_override`）直接用覆盖
     /// 文本，其余按需简繁转换。凡「拿某条候选去显示/上屏」一律走本函数，勿直接
-    /// `maybe_s2t(&c.text)`——否则变体候选会退化回默认转换结果（选「齣」出的却是「出」）。
-    pub(crate) fn cand_s2t_text(&self, state: &State, c: &Candidate) -> String {
+    /// `maybe_convert(&c.text)`——否则变体候选会退化回默认转换结果（选「齣」出的却是「出」）。
+    ///
+    /// ★ `s2t_override` 只属于**简→繁**方向（1对多变体是那个方向独有的，见
+    /// `wind_transform::s2t::variants_table_for`）。繁→简开着时它恒为 `None`：变体展开
+    /// 本身受 `state.s2t_enabled` 门控，两个方向互斥 ⇒ 不会有既带 override 又要转简体的
+    /// 候选。这里因此不必再判方向。
+    pub(crate) fn cand_convert_text(&self, state: &State, c: &Candidate) -> String {
         match &c.s2t_override {
             Some(t) => t.clone(),
-            None => self.maybe_s2t(state, &c.text),
+            None => self.maybe_convert(state, &c.text),
         }
     }
 
-    /// 若开启简繁转换，把简体文本转为繁体（数据缺失则原样返回）。
-    pub(crate) fn maybe_s2t(&self, state: &State, text: &str) -> String {
-        if state.s2t_enabled
-            && let Some(conv) = self.s2t.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+    /// **上屏与显示的唯一文本变换出口**：按当前开着的方向做简繁转换，都没开（或数据
+    /// 缺失）则原样返回。
+    ///
+    /// 两个方向：`s2t_enabled` = 简入繁出（内部简体、出繁体），`t2s_enabled` = 繁入简出
+    /// （词库与内部候选是繁体、出简体）。二者由 `toggle_conversion_direction` 保证互斥，
+    /// 故这里是 if / else if 而非两次串联——串联等于「转过去再转回来」。
+    ///
+    /// ⚠️ 函数名不带方向是**刻意**的：~20 个上屏点全部收口到本函数（2026-08-20 那次
+    /// 「顶屏出简体、空格出繁体」的根因就是出口散着），名字若绑死一个方向，下一个方向
+    /// 又会另开一个出口。方向只写在函数体里。
+    pub(crate) fn maybe_convert(&self, state: &State, text: &str) -> String {
+        if state.s2t_enabled {
+            if let Some(conv) = self.s2t.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                return conv.convert(text);
+            }
+        } else if state.t2s_enabled
+            && let Some(conv) = self.t2s.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
         {
             return conv.convert(text);
         }
@@ -1680,8 +1712,8 @@ impl Coordinator {
             );
             // 变体候选末段用覆盖文本；普通候选整体转换（保留 STPhrases 跨段词级消歧）。
             let out = match &cand.s2t_override {
-                Some(t) => format!("{}{}", self.maybe_s2t(state, &state.committed_text), t),
-                None => self.maybe_s2t(state, &out),
+                Some(t) => format!("{}{}", self.maybe_convert(state, &state.committed_text), t),
+                None => self.maybe_convert(state, &out),
             };
             self.exit_mix_mode(state);
             self.notify_ui_hide();
@@ -2118,7 +2150,7 @@ impl Coordinator {
                     self.record_commit_ks(&text, 0, 1, 0, wind_store::stats::CommitSource::Mix);
                     // 重复上屏本身也入历史：连按两次仍重复同一内容（而非取到更早的一条）。
                     self.push_commit_history(&text);
-                    let out = self.maybe_s2t(state, &text);
+                    let out = self.maybe_convert(state, &text);
                     return commit_text(self, state, out);
                 }
                 // 空格：选当前高亮候选（文本透镜逐步转换）
@@ -2130,7 +2162,7 @@ impl Coordinator {
                         -1,
                         wind_store::stats::CommitSource::Mix,
                     );
-                    let out = self.maybe_s2t(
+                    let out = self.maybe_convert(
                         state,
                         &format!("{}{}", state.committed_text, state.mix_buffer),
                     );
@@ -2176,7 +2208,7 @@ impl Coordinator {
                     -1,
                     wind_store::stats::CommitSource::Mix,
                 );
-                let out = self.maybe_s2t(
+                let out = self.maybe_convert(
                     state,
                     &format!("{}{}{}", guide, state.committed_text, state.mix_buffer),
                 );
@@ -2334,15 +2366,15 @@ impl Coordinator {
                             .min(state.candidates.len() - 1);
                         match &state.candidates[idx].s2t_override {
                             Some(t) => {
-                                format!("{}{}", self.maybe_s2t(state, &state.committed_text), t)
+                                format!("{}{}", self.maybe_convert(state, &state.committed_text), t)
                             }
-                            None => self.maybe_s2t(
+                            None => self.maybe_convert(
                                 state,
                                 &format!("{}{}", state.committed_text, state.candidates[idx].text),
                             ),
                         }
                     } else {
-                        self.maybe_s2t(state, &state.committed_text.clone())
+                        self.maybe_convert(state, &state.committed_text.clone())
                     };
                     let punct = self.convert_punct_char(state, ch);
                     self.exit_mix_mode(state);

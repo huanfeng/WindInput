@@ -170,13 +170,10 @@ impl MessageHandler for Coordinator {
                 self.push_switch_commit(&commit);
                 Some(self.build_status())
             }
-            "toggle_s2t" => {
-                let on = {
-                    let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    s.s2t_enabled = !s.s2t_enabled;
-                    s.s2t_enabled
-                };
-                self.persist_s2t_enabled(on);
+            // 两个方向共用一条路：互斥保证住在 `toggle_conversion_direction` 里，
+            // 各写一份必然漂移（其中一份忘了关掉对面就是两个方向同时开）。
+            "toggle_s2t" | "toggle_t2s" => {
+                self.toggle_conversion_direction(command == "toggle_s2t");
                 self.show_status();
                 Some(self.build_status())
             }
@@ -1219,7 +1216,7 @@ impl MessageHandler for Coordinator {
                         -1,
                         CommitSource::RawInput,
                     );
-                    let mut text = self.maybe_s2t(&state, &format!("{}{}", prefix, raw_code));
+                    let mut text = self.maybe_convert(&state, &format!("{}{}", prefix, raw_code));
                     // 英文补空格（`schema.english.commit_space`）：本分支上屏的是**输入缓冲
                     // 原码**（词库里没有的自造词），无候选可依，故用方案口径
                     // `english_space_enabled` 而非候选口径。与选中候选补空格一致——两者都是
@@ -1289,7 +1286,7 @@ impl MessageHandler for Coordinator {
                     // ⚠️ 本块与上方 VK_SPACE 空码分支逐行同形，唯一差别是**不补英文空格**
                     // （`schema.english.commit_space`）：回车是终结性动作，多伴随换行/提交
                     // 意图，与空格「接着打下一个词」的语义相反。这是刻意的不对称，不是漏接。
-                    let text = self.maybe_s2t(&state, &format!("{}{}", prefix, raw_code));
+                    let text = self.maybe_convert(&state, &format!("{}{}", prefix, raw_code));
                     state.input_buffer.clear();
                     state.input_buffer_cased.clear();
                     state.candidates.clear();
@@ -1691,7 +1688,7 @@ impl MessageHandler for Coordinator {
                             let mut commit_text = if discard_empty_code {
                                 String::new()
                             } else {
-                                self.maybe_s2t(&state, &committed)
+                                self.maybe_convert(&state, &committed)
                             };
                             if !state.candidates.is_empty() {
                                 let (start, _) = self.page_range(&state);
@@ -1707,7 +1704,7 @@ impl MessageHandler for Coordinator {
                                     (idx - start) as i32,
                                     CommitSource::Candidate,
                                 );
-                                commit_text.push_str(&self.cand_s2t_text(&state, &cand));
+                                commit_text.push_str(&self.cand_convert_text(&state, &cand));
                             } else if !state.input_buffer.is_empty() && !discard_empty_code {
                                 // 无候选顶屏的是原码 → 同回车，用用户所打的大小写形态。
                                 commit_text.push_str(preedit_cursor::cased_or_buffer(
@@ -1755,7 +1752,7 @@ impl MessageHandler for Coordinator {
                     let mut out = if discard_empty_code {
                         String::new()
                     } else {
-                        self.maybe_s2t(&state, &committed)
+                        self.maybe_convert(&state, &committed)
                     };
                     // ⛔ 此前有 HoldComposition 残留时（非参与集合的标点令 arm 解除武装），
                     // 这里**曾把旧符号拼进 out 首部**——已删除，那是双写。
@@ -1797,7 +1794,7 @@ impl MessageHandler for Coordinator {
                             (idx - start) as i32,
                             CommitSource::Candidate,
                         );
-                        out.push_str(&self.cand_s2t_text(&state, &cand));
+                        out.push_str(&self.cand_convert_text(&state, &cand));
                     } else if !state.input_buffer.is_empty() && !discard_empty_code {
                         // 无候选顶屏的是原码 → 同回车，用用户所打的大小写形态。
                         out.push_str(preedit_cursor::cased_or_buffer(

@@ -520,8 +520,8 @@ impl Coordinator {
             self.learn_phrase_on_commit(state, cand.is_synthesized);
             // 变体候选末段用覆盖文本；普通候选整体转换（保留 STPhrases 跨段词级消歧）。
             let out = match &cand.s2t_override {
-                Some(t) => format!("{}{}", self.maybe_s2t(state, &state.committed_text), t),
-                None => self.maybe_s2t(state, &final_simplified),
+                Some(t) => format!("{}{}", self.maybe_convert(state, &state.committed_text), t),
+                None => self.maybe_convert(state, &final_simplified),
             };
             self.exit_temp_pinyin(state);
             self.notify_ui_hide();
@@ -751,7 +751,7 @@ impl Coordinator {
                     -1,
                     wind_store::stats::CommitSource::TempPinyin,
                 );
-                let out = self.maybe_s2t(
+                let out = self.maybe_convert(
                     state,
                     &format!(
                         "{}{}{}",
@@ -811,7 +811,7 @@ impl Coordinator {
                     );
                     state.committed_text.push_str(&cand.text);
                 }
-                let head = self.maybe_s2t(state, &state.committed_text.clone());
+                let head = self.maybe_convert(state, &state.committed_text.clone());
                 // 小键盘恒半角：不转全角（临拼 direct 档的落点）。
                 let tail = if state.full_width && !self.numpad_raw_output(state) {
                     to_full_width(&ch.to_string())

@@ -1979,8 +1979,14 @@ impl Coordinator {
                 self.open_settings(None);
                 return;
             }
+            // 两个转换方向各一格。互斥让一次点击改动两格，故都要 notify_toolbar。
             ToolbarAction::ToggleS2t => {
                 self.handle_menu_command("toggle_s2t");
+                self.notify_toolbar();
+                return;
+            }
+            ToolbarAction::ToggleT2s => {
+                self.handle_menu_command("toggle_t2s");
                 self.notify_toolbar();
                 return;
             }
@@ -2005,6 +2011,7 @@ impl Coordinator {
             // 上面那个 match 已 return 掉的三支。**加 ToolbarAction 变体时必须一并处理
             // 上面那个 match**——漏了就落到这里当场 panic，而不是静默不响应。
             ToolbarAction::ToggleS2t
+            | ToolbarAction::ToggleT2s
             | ToolbarAction::OpenSettings
             | ToolbarAction::Custom(_)
             | ToolbarAction::ToggleSoftKeyboard => {
@@ -2180,6 +2187,7 @@ impl Coordinator {
             full_width: s.full_width,
             chinese_punct: s.chinese_punct,
             s2t_enabled: s.s2t_enabled,
+            t2s_enabled: s.t2s_enabled,
             // 简繁格：已启用时才在工具栏显示（默认 false 不显示）
             s2t_shown: s.s2t_enabled,
             soft_keyboard_on: self.softkeyboard_is_open(),
@@ -2854,6 +2862,7 @@ mod toolbar_push_dedup_tests {
             full_width: false,
             chinese_punct: true,
             s2t_enabled: false,
+            t2s_enabled: false,
             s2t_shown: false,
             soft_keyboard_on: false,
             input_blocked: false,
@@ -3052,7 +3061,12 @@ impl Coordinator {
                     M::leaf("简入繁出", cmd(MenuCmd::ToggleS2t), true, s2t),
                 ])
             }
-            ToolbarAction::OpenSettings | ToolbarAction::Custom(_) => None,
+            // ⚠️ 繁入简出**刻意不给分格菜单**，也不进上面那张三项表：它是小众功能，
+            // 塞进「全角 / 中文标点 / 简入繁出」那组会让所有人每次都多读一行。
+            // 返回 None 走下面的回落——右键这一格仍弹主菜单，不会把用户锁在外面。
+            ToolbarAction::ToggleT2s | ToolbarAction::OpenSettings | ToolbarAction::Custom(_) => {
+                None
+            }
         }
         .map(|mut items| {
             // 每份分格菜单末尾都挂一条回主菜单的路。

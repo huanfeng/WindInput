@@ -1255,6 +1255,7 @@ impl BoundAction {
         "toggle_full_width",
         "toggle_punct",
         "toggle_s2t",
+        "toggle_t2s",
         "toggle_toolbar",
         "open_settings",
         "take_screenshot",
@@ -1269,7 +1270,7 @@ impl BoundAction {
     /// | 动作 | 限修饰键 | why |
     /// |---|---|---|
     /// | `toggle_mode` / `switch_engine` / `toggle_schema:*` / `switch_schema:*` | 是 | 正是用来离开/返回英文态的 |
-    /// | `toggle_punct` / `toggle_s2t` / `take_screenshot` … | 否 | 本就只在中文态有意义（全局那份也带 `CHINESE_ONLY`） |
+    /// | `toggle_punct` / `toggle_s2t` / `toggle_t2s` / `take_screenshot` … | 否 | 本就只在中文态有意义（全局那份也带 `CHINESE_ONLY`） |
     ///
     /// 这与「键有没有字符」是**正交的两问**，合起来才定得了插入点，见
     /// docs/design/schema-key-actions.md §4.1。
@@ -3097,6 +3098,13 @@ pub struct InputConfig {
     /// 简繁转换（上屏文字变换）。原 features.s2t。
     #[serde(default)]
     pub s2t: S2TConfig,
+    /// 繁简转换（上屏文字变换，与 [`Self::s2t`] 反向）：词库与内部候选是繁体、要出简体。
+    ///
+    /// 与 `s2t` **互斥**（由 `Coordinator::persist_s2t_enabled` / `persist_t2s_enabled`
+    /// 两侧共同保证）：内部域只有一个，两个方向同时开会先转过去再转回来，产物是绕了
+    /// 一圈的近似原文，用户无从理解自己看到了什么。
+    #[serde(default)]
+    pub t2s: T2SConfig,
     /// 命令栏（$CC/$SS/$AA 等命令候选）。原 features.cmdbar。
     #[serde(default)]
     pub cmdbar: CmdbarConfig,
@@ -3134,6 +3142,7 @@ impl Default for InputConfig {
             url: UrlConfig::default(),
             add_word: AddWordConfig::default(),
             s2t: S2TConfig::default(),
+            t2s: T2SConfig::default(),
             cmdbar: CmdbarConfig::default(),
             phrase: PhraseConfig::default(),
             top_commit_mode: TopCommitMode::default(),
@@ -3696,6 +3705,17 @@ impl Default for S2TConfig {
     }
 }
 
+/// 繁入简出（[input.t2s]）：出口把繁体转成简体。
+///
+/// ⚠️ 刻意**没有** `variant`：繁→简只做标准一档。台/港变体归一（tw2s/hk2s）要
+/// `TWVariantsRev` 一类反转表，OpenCC 官方 `data/dictionary` 里没有、得自造，
+/// 而这本就是小众场景。要加时同时补 `wind_transform::s2t::chain_for` 的分支。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct T2SConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CmdbarConfig {
     #[serde(default)]
@@ -3744,6 +3764,15 @@ pub struct KeysConfig {
     pub open_add_word_dialog: String,
     #[serde(default = "default_toggle_s2t")]
     pub toggle_s2t: String,
+    /// 繁入简出开关键。**出厂不绑**——功能小众，而任何默认值都在抢用户键位；
+    /// `ctrl+shift+j` 旁边好记的组合（`k`）已经是软键盘的。设置页可配。
+    ///
+    /// ★ 「不绑」写 `"none"` 而**不是空串**。core 侧两者等价（`parse_hotkey` 都返回
+    /// `None`），但设置页的 hotkey 控件只认 `"none"` 这一种：它的 writer 在禁用态恒写
+    /// `"none"`，出厂值若是空串，用户**什么都没动**打开一次设置页就会被判「有未保存的
+    /// 更改」，每次关窗都被拦一次（`untouched_settings_produce_no_diff` 钉的正是这条）。
+    #[serde(default = "default_toggle_t2s")]
+    pub toggle_t2s: String,
     #[serde(default = "default_activate_ime")]
     pub activate_ime: String,
     #[serde(default = "default_pin_candidate")]
@@ -3872,6 +3901,10 @@ fn default_open_add_word_dialog() -> String {
 }
 fn default_toggle_s2t() -> String {
     "ctrl+shift+j".to_string()
+}
+/// 见 [`KeysConfig::toggle_t2s`]：「不绑」的规范表示是 `"none"`，不是空串。
+fn default_toggle_t2s() -> String {
+    "none".to_string()
 }
 fn default_take_screenshot() -> String {
     "ctrl+shift+f11".to_string()
@@ -4063,6 +4096,7 @@ impl Default for KeysConfig {
             add_word: default_add_word(),
             open_add_word_dialog: default_open_add_word_dialog(),
             toggle_s2t: default_toggle_s2t(),
+            toggle_t2s: default_toggle_t2s(),
             activate_ime: default_activate_ime(),
             pin_candidate: default_pin_candidate(),
             delete_candidate: default_delete_candidate(),
@@ -4407,11 +4441,12 @@ fn is_wide_char(c: char) -> bool {
 ///
 /// 与 [`STATUS_ITEM_KEYS`] 的差别：那份的顺序无语义（状态气泡的渲染顺序固定在代码里），
 /// 这份的顺序**就是**渲染顺序。
-pub const TOOLBAR_ITEM_KEYS: [&str; 6] = [
+pub const TOOLBAR_ITEM_KEYS: [&str; 7] = [
     "mode",
     "punct",
     "full_width",
     "s2t",
+    "t2s",
     "soft_keyboard",
     "settings",
 ];
@@ -4427,11 +4462,15 @@ pub const TOOLBAR_ITEM_KEYS: [&str; 6] = [
 ///
 /// **为什么 `soft_keyboard` 开着**：软键盘面板没有别的显眼入口（热键要记、主菜单要两层），
 /// 而它恰恰是那种「偶尔要、要的时候得马上找到」的东西。
-const DEFAULT_TOOLBAR_SHOWN: [&str; 6] = [
+///
+/// **为什么 `t2s` 也关着**：同 `s2t` 的理由，且更甚——繁入简出是给「词库是繁体、要出
+/// 简体」那一小撮人的，它连右键菜单都不做。这一格是它唯一的鼠标入口，勾上即可用。
+const DEFAULT_TOOLBAR_SHOWN: [&str; 7] = [
     "mode",
     "punct",
     "full_width",
     "-s2t",
+    "-t2s",
     "soft_keyboard",
     "settings",
 ];

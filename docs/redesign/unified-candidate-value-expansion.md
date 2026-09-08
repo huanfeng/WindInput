@@ -78,7 +78,7 @@ pub(crate) fn select_candidate(
 2. `is_command` → `commit_command`（执行动作）。**全量 $CC：所有模式都经此。**
 3. 文本提交：`record_selection` + `record_commit(source)`；
    - `supports_partial` 且 `consumed<total` → push seg、推进对应缓冲、按 `ModeKind` 重查、`UpdateComposition`；
-   - full → `learn_phrase` →（`promote_temp_word` 时晋升临时词）→ `maybe_s2t` → 按 `ModeKind` 退出
+   - full → `learn_phrase` →（`promote_temp_word` 时晋升临时词）→ `maybe_convert` → 按 `ModeKind` 退出
      （`reset_pinyin_composition`/`exit_special_mode`/`exit_mix`/`exit_temp_pinyin`/`exit_temp_english`）→ `commit_action`。
 
 **退出/重查按 `ModeKind` 在函数内 `match` 分派，不放闭包进描述符**——闭包借 `self` 会与 `&mut state`

@@ -421,6 +421,7 @@ impl Compiler {
             ("add_word", &h.add_word),
             ("open_add_word_dialog", &h.open_add_word_dialog),
             ("toggle_s2t", &h.toggle_s2t),
+            ("toggle_t2s", &h.toggle_t2s),
         ] {
             if let Some(raw) = parse_hotkey(value) {
                 // 加词类热键额外叠加 GLOBAL 位：TSF 侧在中文+文本框时 RegisterHotKey 全局拦截，

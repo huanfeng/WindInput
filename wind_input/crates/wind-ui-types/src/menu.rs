@@ -18,8 +18,10 @@ pub enum ToolbarAction {
     TogglePunct,
     /// 全/半角切换
     ToggleWidth,
-    /// 简/繁转换切换
+    /// 简/繁转换切换（简入繁出）
     ToggleS2t,
+    /// 繁/简转换切换（繁入简出）。与 [`Self::ToggleS2t`] 互斥，由协调器保证。
+    ToggleT2s,
     /// 开关软键盘面板
     ToggleSoftKeyboard,
     /// 打开设置

@@ -364,6 +364,10 @@ download_dicts() {
     gray "OpenCC 简繁词典:"
     download_file "$OPENCC_BASE/STCharacters.txt" "$opencc/STCharacters.txt" "简->繁 字级"
     download_file "$OPENCC_BASE/STPhrases.txt"    "$opencc/STPhrases.txt"    "简->繁 词级"
+    # 繁->简 两张表供「繁入简出」（input.t2s）。用官方表而不是反转 ST*：繁→简的取舍
+    # （异体字归并、一简对多繁的收敛方向）官方表直接给出，反转出来的要自己定夺。
+    download_file "$OPENCC_BASE/TSCharacters.txt" "$opencc/TSCharacters.txt" "繁->简 字级"
+    download_file "$OPENCC_BASE/TSPhrases.txt"    "$opencc/TSPhrases.txt"    "繁->简 词级"
     download_file "$OPENCC_BASE/TWVariants.txt"   "$opencc/TWVariants.txt"   "台湾字形"
     download_file "$OPENCC_BASE/TWPhrases.txt"    "$opencc/TWPhrases.txt"    "台湾词汇"
     download_file "$OPENCC_BASE/HKVariants.txt"   "$opencc/HKVariants.txt"   "香港字形"

@@ -421,6 +421,10 @@ pub(crate) struct State {
     pub(crate) layout_manual: Option<bool>,
     /// 简繁转换开关（运行时切换；commit 时把简体输出转繁体）
     pub(crate) s2t_enabled: bool,
+    /// 繁简转换开关（运行时切换；commit 时把繁体输出转简体）。给「词库是繁体、
+    /// 想打繁体出简体」的用户。与 [`Self::s2t_enabled`] **互斥**，见
+    /// `Coordinator::toggle_conversion_direction`。
+    pub(crate) t2s_enabled: bool,
     /// 检索范围过滤模式（smart/general/gb18030；运行时切换）
     pub(crate) filter_mode: wind_candidate::FilterMode,
     /// 检索范围的**临时**放宽（手动触发：末页再按翻页键 / 专用热键）。
@@ -1001,6 +1005,7 @@ pub(crate) fn parse_toolbar_items(
             "punct" => sink.push(ToolbarItem::Punct),
             "full_width" => sink.push(ToolbarItem::FullWidth),
             "s2t" => sink.push(ToolbarItem::S2t),
+            "t2s" => sink.push(ToolbarItem::T2s),
             "soft_keyboard" => sink.push(ToolbarItem::SoftKeyboard),
             "settings" => sink.push(ToolbarItem::Settings),
             "" => {}
@@ -1186,6 +1191,9 @@ pub struct Coordinator {
     /// 简繁转换器（OpenCC；None=数据缺失不可用）。变体由配置 features.s2t.variant 决定，
     /// 启动时加载；菜单仅提供开/关。置于 Mutex 兼容 reload 时整体替换。
     pub(crate) s2t: Mutex<Option<wind_transform::s2t::Converter>>,
+    /// 繁 → 简转换链（`input.t2s`）。与 `s2t` 各自独立加载：两条链的词典完全不同
+    /// （TS* vs ST*），共用一个 `Option` 就得在每次切方向时重新读盘。
+    pub(crate) t2s: Mutex<Option<wind_transform::s2t::Converter>>,
     /// 通用规范汉字表（检索范围"常用字"判定；空集时退化为不过滤）。
     ///
     /// 置于 `RwLock`：出厂基表在构造期一次性加载，而**用户覆盖**（候选右键「设为生僻字 /
@@ -2036,6 +2044,14 @@ impl Coordinator {
         if s2t.is_some() {
             info!("Loaded S2T converter (variant={})", s2t_variant);
         }
+        // 繁 → 简（「繁入简出」）。**恒加载**，不看 `input.t2s.enabled`——与 s2t 同策略：
+        // 运行时热键随时可开，届时再读盘就得在按键线程上做文件 I/O。
+        let t2s = wind_transform::s2t::Converter::load_variant_resolved("t2s", |file| {
+            Config::resolve_data_file(data_dir, &format!("opencc/{file}"))
+        });
+        if t2s.is_some() {
+            info!("Loaded T2S converter");
+        }
 
         // 词频已迁 redb（self.store 的 FREQ 表，选词时 record_freq）。
 
@@ -2213,6 +2229,9 @@ impl Coordinator {
                 punct_before_schema: None,
                 layout_manual: None,
                 s2t_enabled: config.input.s2t.enabled,
+                // 互斥兜底：配置文件被手工改成两个方向都开时，以 s2t 为准。二者都开
+                // 等于「转过去再转回来」，产物是绕了一圈的近似原文，没有可解释的语义。
+                t2s_enabled: config.input.t2s.enabled && !config.input.s2t.enabled,
                 filter_mode: wind_candidate::FilterMode::from_config(&config.input.filter_mode),
                 scope_relaxed: false,
                 // 启动时没有临时态：字词范围走配置层（方案级 → 全局）。热键切过才置 Some。
@@ -2296,6 +2315,7 @@ impl Coordinator {
             system_phrase_entries: std::sync::RwLock::new(system_phrase_entries),
             system_phrase_path,
             s2t: Mutex::new(s2t),
+            t2s: Mutex::new(t2s),
             // 只含出厂基表：用户覆盖住在 store 里，而 store 在本结构体构造之后才可用，
             // 故由 new() 里的 `reload_common_chars` 补灌（与 `quick_adjust` 同一套路）。
             common_chars: std::sync::Arc::new(std::sync::RwLock::new(common_chars)),
@@ -3762,6 +3782,7 @@ impl Coordinator {
                     let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     s.toolbar_visible = new_cfg.ui.toolbar.visible;
                     s.s2t_enabled = new_cfg.input.s2t.enabled;
+                    s.t2s_enabled = new_cfg.input.t2s.enabled && !new_cfg.input.s2t.enabled;
                     let new_mode =
                         wind_candidate::FilterMode::from_config(&new_cfg.input.filter_mode);
                     let changed = s.filter_mode != new_mode;
@@ -4615,7 +4636,7 @@ impl Coordinator {
                         return match self.eval_command_text_only(&cand.phrase_template, &input) {
                             // 求值文本与 `cand.text`（display 标签）无关，变体覆盖对它没有语义
                             // → None，走 `commit_top_text` 内的默认转换（对齐 `AutoCommit` 的
-                            // 命令文本同样只过 `maybe_s2t`）。
+                            // 命令文本同样只过 `maybe_convert`）。
                             Some(text) => self.commit_top_text(
                                 state,
                                 &prefix,
@@ -4855,7 +4876,7 @@ impl Coordinator {
         has_comp: bool,
     ) -> KeyAction {
         let committed = self.take_committed(state);
-        let mut out = self.maybe_s2t(state, &committed);
+        let mut out = self.maybe_convert(state, &committed);
         // ★ 联想态**不顶屏**。
         //
         // 顶屏的语义前提是「用户打了码、还没选词，按这个字符意味着『就选高亮那条吧』」。
@@ -4873,7 +4894,7 @@ impl Coordinator {
             // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
             let freq_code = self.freq_code(&state.input_buffer, &cand);
             self.record_selection_cand(&freq_code, &cand);
-            out.push_str(&self.cand_s2t_text(state, &cand));
+            out.push_str(&self.cand_convert_text(state, &cand));
         }
         state.input_buffer.clear();
         state.candidates.clear();
@@ -5073,8 +5094,14 @@ impl Coordinator {
                 // 补 notify_toolbar，命令栏路径同样需要补，否则工具栏全/半角状态不更新。
                 self.notify_toolbar();
             }
+            // 两个转换方向各一个 target。互斥由 `toggle_conversion_direction` 统一保证，
+            // 这里只管把动词转过去。
             "s2t" => {
                 self.handle_menu_command("toggle_s2t");
+                self.notify_toolbar();
+            }
+            "t2s" => {
+                self.handle_menu_command("toggle_t2s");
                 self.notify_toolbar();
             }
             "toolbar" => self.toggle_toolbar(),
@@ -5466,13 +5493,19 @@ impl Coordinator {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let full = self.cand_s2t_text(state, c);
+                let full = self.cand_convert_text(state, c);
                 // 显示截断（超长加 …）：短语与普通候选统一按用户可配的 ui.candidate.max_chars。
                 // 短语 text 在生成层已存完整原文（仅一行化），此处仅裁显示——上屏仍用完整原文。
                 let disp = cand_cfg.truncate_display(&full);
                 // 反查提示按截断后文本生成：超长候选（如长短语）逐字反查会撑爆气泡且显示不全，
                 // 只提示实际显示出的字（… 为非 CJK，tooltip_for 自动滤除，不影响反查内容）。
                 // [编码] 段按候选**完整原文**查词库（截断/繁化文本词库里没有；查不到=None 不显示）。
+                //
+                // ⚠️ 曾改成按显示文本（`full`）查，动机是「气泡三段应同属一个域」——已回退。
+                // 拼音段/拆字段吃显示文本是**它们**的事（拆字库覆盖繁体字，查得到），而编码段
+                // 回答的是「这个候选怎么打出来」，用户实际敲的就是内部文本那个码；改成查繁化
+                // 文本只会让它查不到而整段消失，是拿一个**已经正确**的段去换取形式上的一致。
+                // 想再动它之前，先拿出一个真实的错例（2026-09-08 复核，没有找到）。
                 // `word_codes_in` 返回 None＝**反查索引尚未就绪**（区别于「查不到」的
                 // Some("")）。此时本段不显示，并已在循环外触发后台构建，建好后自动补上。
                 let word_code = code_schema
@@ -5935,6 +5968,59 @@ impl Coordinator {
             warn!("toggle_s2t: 持久化 input.s2t.enabled 失败: {}", e);
         }
         self.refresh_config_in_memory(|c| c.input.s2t.enabled = on);
+    }
+
+    /// 持久化繁简开关到 `config.input.t2s.enabled`（同 [`Self::persist_s2t_enabled`]）。
+    pub(crate) fn persist_t2s_enabled(&self, on: bool) {
+        if let Err(e) = Config::set_user_bool(&["input", "t2s", "enabled"], on) {
+            warn!("toggle_t2s: 持久化 input.t2s.enabled 失败: {}", e);
+        }
+        self.refresh_config_in_memory(|c| c.input.t2s.enabled = on);
+    }
+
+    /// 切换简繁转换的**一个方向**，返回切换后该方向是否开着。
+    ///
+    /// `to_traditional=true` 即简入繁出（`s2t`），`false` 即繁入简出（`t2s`）。
+    ///
+    /// # 为什么两个方向必须互斥
+    ///
+    /// 内部候选域只有一个。两个方向同时开，出口就是「先按一个方向转、再按另一个转
+    /// 回来」——产物是绕了一圈的**近似**原文（一对多的字回不来），用户既得不到繁体也
+    /// 得不到简体，还看不出是哪一步造成的。所以开一个即关另一个。
+    ///
+    /// ★ 被顺手关掉的那个**也要落盘**：只改内存的话，下次配置重载（设置页保存任意一项
+    /// 都会触发）就把它从配置文件里读回来，两个方向重新同时开着，且用户什么都没做。
+    pub(crate) fn toggle_conversion_direction(&self, to_traditional: bool) -> bool {
+        let (on, other_off) = {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if to_traditional {
+                s.s2t_enabled = !s.s2t_enabled;
+                let other_off = s.s2t_enabled && s.t2s_enabled;
+                if s.s2t_enabled {
+                    s.t2s_enabled = false;
+                }
+                (s.s2t_enabled, other_off)
+            } else {
+                s.t2s_enabled = !s.t2s_enabled;
+                let other_off = s.t2s_enabled && s.s2t_enabled;
+                if s.t2s_enabled {
+                    s.s2t_enabled = false;
+                }
+                (s.t2s_enabled, other_off)
+            }
+        };
+        if to_traditional {
+            self.persist_s2t_enabled(on);
+            if other_off {
+                self.persist_t2s_enabled(false);
+            }
+        } else {
+            self.persist_t2s_enabled(on);
+            if other_off {
+                self.persist_s2t_enabled(false);
+            }
+        }
+        on
     }
 
     /// 影子规则：当前 code 是否对该候选有规则（置顶/删除），决定菜单"恢复默认"可用性。
@@ -6410,13 +6496,14 @@ impl Coordinator {
     /// 合成当前 IME 核心状态文本：方案/中英(+大写) · 标点 · [全角] · [繁]。
     /// 默认态省略（半角/简体不显示），减少干扰；标点总显示（。/.）。
     pub(crate) fn status_indicator_text(&self) -> String {
-        let (chinese, punct_cn, full, s2t, caps) = {
+        let (chinese, punct_cn, full, s2t, t2s, caps) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (
                 s.chinese_mode,
                 s.chinese_punct,
                 s.full_width,
                 s.s2t_enabled,
+                s.t2s_enabled,
                 s.caps_lock,
             )
         };
@@ -6470,9 +6557,24 @@ impl Coordinator {
         if full && show("full_width") {
             parts.push("全".into());
         }
-        // 繁（仅繁体时）
-        if s2t && show("s2t") {
-            parts.push("繁".into());
+        // 转换方向：简入繁出显示「繁」，繁入简出显示「简」。默认态两个都关，此段整体省略
+        // ——于是「简」出现本身就意味着「有转换、出的是简体」。
+        //
+        // ★ 两个方向共用 `s2t` 这一个内容段（`ui.status.items`），不新开一个：它回答的是
+        //   「上屏出什么体」，而两个方向互斥，一个槽位就够。
+        // ★ 这一段是繁入简出**唯一**的视觉反馈：它按设计不进右键菜单也不进工具栏，
+        //   而 `show_status` 在文本与上次相同时整个跳过 ⇒ 不加这里，按下热键会是彻底的
+        //   「按了没反应」。
+        if show("s2t") {
+            if s2t {
+                parts.push("繁".into());
+            } else if t2s {
+                // ★ 这里带方向而 s2t 那档不带，是**刻意的不对称**：简入繁出是多数人用的
+                // 那档，「繁」这一个字已经沿用很久，加成「简→繁」是拿所有人的习惯去换
+                // 一个对称性。繁入简出没有历史包袱，而它单显「简」会与默认态（不转换、
+                // 本段整体省略）说的是同一件事——只有写出方向才看得出「转过」。
+                parts.push("繁→简".into());
+            }
         }
         parts.join(" ")
     }
@@ -6573,8 +6675,14 @@ impl Coordinator {
                 }
                 true
             }
-            "toggle_s2t" => {
-                if self.s2t.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            "toggle_s2t" | "toggle_t2s" => {
+                let to_traditional = action == "toggle_s2t";
+                let loaded = if to_traditional {
+                    self.s2t.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+                } else {
+                    self.t2s.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+                };
+                if !loaded {
                     self.show_toast(
                         "简繁数据缺失",
                         ToastPosition::BottomCenter,
@@ -6582,15 +6690,11 @@ impl Coordinator {
                     );
                     return true;
                 }
-                let on = {
-                    let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    s.s2t_enabled = !s.s2t_enabled;
-                    s.s2t_enabled
-                };
-                self.persist_s2t_enabled(on);
+                self.toggle_conversion_direction(to_traditional);
                 self.show_status();
                 // 工具栏「繁」格随切即刷（对齐 toggle_full_width 与菜单路径）。缺这步时
                 // 只有一闪而过的状态气泡，工具栏状态滞后到下次刷新事件，被误感知为“切换卡”。
+                // 关掉 s2t 的那一半同样要刷——互斥让一次按键改动两个方向。
                 self.notify_toolbar();
                 true
             }
@@ -6635,7 +6739,7 @@ impl Coordinator {
     fn build_global_hotkey_entries(&self) -> Vec<GlobalHotkeyEntry> {
         let rt = self.rt();
         let k = &rt.config.keys;
-        let supported: [(&str, &str); 7] = [
+        let supported: [(&str, &str); 8] = [
             ("switch_engine", k.switch_engine.as_str()),
             ("toggle_full_width", k.toggle_full_width.as_str()),
             ("toggle_punct", k.toggle_punct.as_str()),
@@ -6643,6 +6747,7 @@ impl Coordinator {
             ("open_settings", k.open_settings.as_str()),
             ("take_screenshot", k.take_screenshot.as_str()),
             ("toggle_s2t", k.toggle_s2t.as_str()),
+            ("toggle_t2s", k.toggle_t2s.as_str()),
         ];
         let mut entries: Vec<GlobalHotkeyEntry> = Vec::new();
         for name in &k.global_hotkeys {
@@ -7042,7 +7147,7 @@ impl Coordinator {
                         let code = format!("{}{}", guide, buf);
                         self.record_commit(&code, code.len() as u32, -1, CommitSource::ModeSwitch);
                         let raw = format!("{}{}{}", guide, state.committed_text, buf);
-                        self.maybe_s2t(state, &raw)
+                        self.maybe_convert(state, &raw)
                     } else if !prefix.is_empty() && !self.enter_clears_composition() {
                         // 只按了模式进入符（缓冲空）：原样上屏该前缀符号本身，与回车空缓冲上屏一致
                         // （enter_behavior=clear 时回车也不上屏，故一并放弃）。
@@ -7077,7 +7182,7 @@ impl Coordinator {
                 -1,
                 CommitSource::ModeSwitch,
             );
-            self.maybe_s2t(state, &format!("{}{}", prefix, raw_code))
+            self.maybe_convert(state, &format!("{}{}", prefix, raw_code))
         } else {
             String::new()
         };
@@ -13493,6 +13598,7 @@ mod toolbar_items_tests {
                 ToolbarItem::Punct,
                 ToolbarItem::FullWidth,
                 ToolbarItem::S2t,
+                ToolbarItem::T2s,
                 ToolbarItem::SoftKeyboard,
                 ToolbarItem::Settings,
             ]
