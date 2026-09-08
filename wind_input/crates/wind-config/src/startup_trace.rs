@@ -16,6 +16,7 @@
 //! 自己挂掉时，主线程与主日志都可能毫无察觉。
 
 use std::io::Write;
+use std::sync::OnceLock;
 
 /// 日志时间戳格式。与 `wind_tsf` 的 `FileLogger`(`_FormatTimestamp`) 逐字符一致，
 /// 三份日志可直接归并排序。主日志的 timer 也应复用它，避免两处各写一份而漂移。
@@ -34,8 +35,44 @@ fn trace_path() -> Option<std::path::PathBuf> {
     crate::config::Config::log_dir().map(|d| d.join("startup_stage.log"))
 }
 
+/// 最终生效的日志级别：`RUST_LOG` > `debug.log_level` > `"info"`。
+///
+/// ★ 抽成公开函数是因为它有**两个**消费者：服务主日志的 `EnvFilter`，与本模块的
+/// 关闭门控。两边各算一遍优先级链，迟早会漂移成「主日志写着、启动轨迹停了」这种
+/// 自相矛盾的状态——而这两份日志正是用来互相印证的。
+///
+/// 空串视为未设置（配置项的默认值就是空串，表示"没选过"）。
+pub fn effective_log_level() -> String {
+    std::env::var("RUST_LOG")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            let cfg =
+                crate::config::Config::load(crate::config::Config::data_dir().as_deref()).ok()?;
+            let l = cfg.debug.log_level.trim().to_string();
+            if l.is_empty() { None } else { Some(l) }
+        })
+        .unwrap_or_else(|| "info".to_string())
+}
+
+/// 日志是否被用户整个关掉（级别为 `off`）。关掉时连启动轨迹也不写。
+///
+/// ★ 「关闭」必须是**真的一个文件都不产生**，否则这个选项对用户没有意义：他要的是
+/// 「这台机器上别留输入法的痕迹」，而 `startup_stage.log` 同样带时间戳与 pid。
+///
+/// ⚠️ 判据读不到时**照写**。诊断设施的默认方向是留痕；而「关掉日志」是用户的显式
+/// 选择，在读不到那个选择的时候不该替他做主。配置只读一次（`OnceLock`）：本模块
+/// 在启动路径上只被调用寥寥数次，但它明确禁止进入按键热路径。
+fn disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| effective_log_level().eq_ignore_ascii_case("off"))
+}
+
 /// 记录一个启动/故障阶段。失败一律静默——诊断设施绝不能反过来影响启动。
 pub fn stage(name: &str) {
+    if disabled() {
+        return;
+    }
     let Some(path) = trace_path() else { return };
 
     if std::fs::metadata(&path)

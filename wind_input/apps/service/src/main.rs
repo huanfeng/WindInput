@@ -630,14 +630,28 @@ fn init_logger() {
 
     // RUST_LOG 最优先，其次 debug.log_level，默认 info。
     // info 级别日志不得包含用户输入内容、词库词条等隐私数据。
-    let level = std::env::var("RUST_LOG")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            let l = &cfg_debug.log_level;
-            if l.is_empty() { None } else { Some(l.clone()) }
-        })
-        .unwrap_or_else(|| "info".to_string());
+    //
+    // ★ 优先级链由 `startup_trace::effective_log_level` 独家实现：启动轨迹的关闭门控
+    // 读的是同一个函数。两边各算一遍必然漂移成「主日志写着、轨迹停了」，而这两份日志
+    // 恰恰是用来互相印证的（轨迹存在的全部意义就是主日志失效时仍留痕）。
+    let level = startup_trace::effective_log_level();
+
+    // ★ 关闭档（level = off）：一个文件都不建，直接返回。
+    //
+    // 光靠 `EnvFilter("off")` 不够——下面的 `FileRotate::new` + `rotate_on_startup`
+    // 会创建并轮转 `wind_input.log`，于是用户选了"关闭"却仍在磁盘上看到日志文件
+    // （空的，但带着时间戳与文件名）。用户要的是"这台机器上别留输入法的痕迹",
+    // 空文件同样是痕迹。`startup_stage.log` 由 `startup_trace` 自己的门控挡住。
+    //
+    // 仍然装一个 no-op subscriber：不装的话每条 `tracing` 宏都要走一遍
+    // 「有没有全局 subscriber」的查找，且别处若再 `init()` 一次会 panic。
+    if level.eq_ignore_ascii_case("off") {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .with_env_filter(EnvFilter::new("off"))
+            .try_init();
+        return;
+    }
 
     // 便携模式：<exe>/userdata/logs；正常模式：%LOCALAPPDATA%\WindInput[Dev]\logs。
     let log_dir = wind_config::Config::log_dir()
