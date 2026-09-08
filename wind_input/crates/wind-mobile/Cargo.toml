@@ -16,6 +16,9 @@ wind-config = { path = "../wind-config" }
 wind-ipc = { path = "../wind-ipc" }
 wind-ui-types = { path = "../wind-ui-types" }
 tracing = { workspace = true }
+# 配置快照的序列化与写入值的构造（见 config_api）。配置文件本身就是 TOML，
+# 宿主侧也已有解析器，用同一种表示就不需要第二套映射。
+toml = { workspace = true }
 
 [lints]
 workspace = true

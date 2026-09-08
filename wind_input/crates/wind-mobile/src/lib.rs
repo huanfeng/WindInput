@@ -50,6 +50,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub mod config_api;
+
 use wind_bridge::handler::KeyAction as BridgeKeyAction;
 use wind_bridge::handler::{FocusData, KeyEventData, MessageHandler};
 use wind_config::Config;
@@ -194,6 +196,10 @@ pub struct MobileCore {
     coord: Arc<Coordinator>,
     /// 预热进行中：泵线程据此丢弃预热产生的候选帧，不让它们闪到用户界面上
     warming: Arc<AtomicBool>,
+    /// 出厂数据目录。留着是为了配置快照能走**与构造期同一条**四层加载路径
+    /// （见 [`MobileCore::config_snapshot`]）——少了它只能读代码默认值，
+    /// 设置页会把出厂 config.toml 里的取值显示成默认值。
+    data_dir: std::path::PathBuf,
 }
 
 impl MobileCore {
@@ -248,11 +254,10 @@ impl MobileCore {
         cfg.schema.available = available;
         cfg.schema.active = active;
 
-        // 编码区归候选区自绘（移动端必须如此，非偏好）：默认的 `app_inline` 是把编码
-        // 塞进宿主组合区、协调器**不下发 preedit** 给候选窗。移动端没有桌面那种浮在光标
-        // 旁的候选窗，编码要显示在键盘上方的编码栏里，就必须让协调器把 preedit 发出来。
-        // 「配置格式三端统一、取值分端」的典型一例——项本身是共用的。
-        cfg.ui.candidate.preedit_display = "candidate_top".to_string();
+        // 移动端强制改写项（编码显示位置等）。**与设置页快照共用同一个函数**：
+        // 两处若各写一份，构造时改了、快照没改，设置页就会显示一个引擎没在用的值，
+        // 用户还能去「改」它、改完毫无反应。
+        config_api::apply_mobile_overrides(&mut cfg);
 
         // 用户数据根：redb 落在这里。**不能传 None**——那样系统短语层会整段为空
         // （详见 `new_headless_with_ui_at` 的说明），词频与自造词也不落盘。
@@ -277,7 +282,11 @@ impl MobileCore {
         // 宿主不再自己猜「喂哪几个键能触发惰性构建」。
         coord.prepare();
 
-        Arc::new(Self { coord, warming })
+        Arc::new(Self {
+            coord,
+            warming,
+            data_dir: data_dir.to_path_buf(),
+        })
     }
 
     /// 按下键（`vk` = wind-keys VK 码，`modifiers` 见 [`wind_host::Modifiers`]）。
@@ -426,6 +435,36 @@ impl MobileCore {
     /// 本次该用暗色吗（宿主要据此决定状态栏图标明暗等自身事务时用）。
     pub fn is_dark(&self, system_dark: bool) -> bool {
         self.coord.theme_dark_with(system_dark)
+    }
+
+    // ── 配置读写（设置页）────────────────────────────────────────────
+    //
+    // 这三个口一起构成设置页的数据面：注册表说「有哪些键、什么类型」，快照说
+    // 「现在各是什么值」，写入把用户的选择落到用户层。落盘的所有讲究都在
+    // `Config::set_user_value` 里，本层不自己写一行——理由见 `config_api` 模块文档。
+
+    /// 当前生效配置的全量快照（TOML 文本），含移动端强制改写项。
+    pub fn config_snapshot(&self) -> String {
+        config_api::snapshot(&self.data_dir)
+    }
+
+    /// 出厂默认配置的全量快照（TOML 文本）。设置页据此标注默认值、实现「恢复默认」。
+    pub fn config_defaults(&self) -> String {
+        config_api::defaults(&self.data_dir)
+    }
+
+    /// core 的配置字段注册表：键 → 类型（+ 枚举值域）。
+    ///
+    /// 宿主用它校验自己的设置清单。清单里写错一个键的后果是「这个开关点了没反应」
+    /// 且不报错，把注册表交出去就能在加载清单时当场比对出来。
+    pub fn config_registry(&self) -> Vec<config_api::ConfigFieldInfo> {
+        config_api::registry()
+    }
+
+    /// 写一个配置键到用户层。**只写盘**，生效要另发
+    /// [`MobileCommand::ReloadConfig`]——分开是为了让宿主把连改若干项合成一次重载。
+    pub fn config_set(&self, key: &str, value: config_api::ConfigValue) -> Result<(), String> {
+        config_api::set(key, value)
     }
 
     /// 可选双拼布局。清单由核心扫描目录得出，**宿主不要硬编码**——

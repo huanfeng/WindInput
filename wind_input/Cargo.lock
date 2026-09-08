@@ -2561,6 +2561,7 @@ dependencies = [
 name = "wind-mobile"
 version = "0.1.0"
 dependencies = [
+ "toml 0.8.23",
  "tracing",
  "wind-bridge",
  "wind-config",
