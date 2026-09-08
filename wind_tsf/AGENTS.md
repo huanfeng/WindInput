@@ -140,8 +140,15 @@ cmake --build . --config Release      # → build/Release/wind_tsf.dll
 - 日志文件：`%LOCALAPPDATA%\WindInput\logs\tsf_log\wind_tsf.<宿主名>.<pid>.log`——
   **每进程一个**，且单独放在 `tsf_log\` 子目录里（文件数是「用过的宿主 × pid」量级，
   与 core 的 `wind_input.log` 平铺会把主日志淹掉）
-- 配置文件：`%LOCALAPPDATA%\WindInput\logs\tsf_log_config`（mode/level 两个键）——
+- 配置文件：`%LOCALAPPDATA%\WindInput\logs\tsf_log_config`（mode / level / dump_hotkey 三个键）——
   **留在 `logs\` 这一层不跟着进子目录**：它是用户手工创建的日志总开关，搬走会让存量失效
+- `dump_hotkey=1` 才启用**环形缓冲 + Ctrl+Shift+F12 导出**，**出厂关**。这个热键的拦截排在
+  `OnTestKeyDown` / `OnKeyDown` 的所有闸门之前（早于 `IsKeyboardDisabled`、密码框抑制、
+  只读上下文），开着就意味着「只要本输入法激活，Ctrl+Shift+F12 永远到不了宿主」——
+  而它在 VS / JetBrains 里是有主的快捷键，我们的处理还会往焦点处插一行提示文本。
+  判据收在 `CKeyEventSink::_IsLogDumpHotkey`（吃与导出两处共用，不许各写一份）
+- ⚠ 改完 `tsf_log_config` 要**重启宿主进程**才生效：唯一的重读入口 `ReloadConfig` 就挂在
+  上面那个热键上，而它默认关着。建文件时把 mode / level / dump_hotkey 一次写齐
 - dev 变体只换目录（`WindInputDev\logs\`），**文件名与配置名同正式版**——目录已隔离，
   文件名不再重复带 `_dev`
 - 多进程安全：**每进程独占自己那个文件，无需任何跨进程同步**。此前是一把
@@ -276,6 +283,8 @@ When implementing features or fixes in wind_tsf:
 
 ### Debugging IPC Issues
 1. Enable file logging: create `%LOCALAPPDATA%\WindInput\logs\tsf_log_config` with `mode=file` and `level=debug`
+   （要用 Ctrl+Shift+F12 导出环形缓冲的话再加一行 `dump_hotkey=1`，见 File Logging 一节；
+   这些键只在**宿主进程启动时**读一次）
 2. View log at `%LOCALAPPDATA%\WindInput\logs\tsf_log\wind_tsf.<host>.<pid>.log`（每个宿主进程一个文件；
    按时间戳合并多个宿主：`sort -m -k1,2 tsf_log/wind_tsf.*.log`，格式与 `wind_input.log` 逐字对齐）
 3. For real-time output: set `mode=debugstring` and use DebugView.exe

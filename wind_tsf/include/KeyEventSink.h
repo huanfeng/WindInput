@@ -230,6 +230,15 @@ private:
     // 键盘面（send_keys）只接管 Esc 与翻页：字母/数字/标点落回常规判定链，
     // 与没开面板时完全一致，于是这一面上能正常组码打中文。
     bool _IsSoftKeyboardEatenKey(WPARAM vk, uint32_t modifiers) const;
+    // Ctrl+Shift+F12（环形日志导出）的**唯一判据**。`OnTestKeyDown`（吃）与
+    // `OnKeyDown`（导出）都调它，纪律同上：两处各写一份条件，就会在开关切换的瞬间
+    // 出现「这边吃了、那边不认」而把键吞掉。
+    //
+    // ⛔ **默认关**（配置项 `dump_hotkey`，见 FileLogger.h）。两个调用点都排在各自入口的
+    // 所有闸门**之前**——早于 IsKeyboardDisabled、密码框抑制、只读上下文——即开着时
+    // 只要本输入法激活，这个组合键就永远到不了宿主，而它在 VS / JetBrains 等宿主里
+    // 都是有主的快捷键。故除取证外的任何时刻都不该抢它。
+    static bool _IsLogDumpHotkey(WPARAM vk);
     // 输入右符号本身是否跳出（配置 jump_out_keys 里的 `right_symbol` 特殊值）。
     // **本 DLL 已不再消费它**——右符号跳出统一由协调器裁决（配对栈在那边，需要比对具体是
     // 哪一对）。但仍须解析：它占 payload 首字节，不读就会算错后面 VK 列表的偏移。

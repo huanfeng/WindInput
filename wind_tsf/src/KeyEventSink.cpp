@@ -309,6 +309,21 @@ bool CKeyEventSink::_IsSoftKeyboardEatenKey(WPARAM vk, uint32_t modifiers) const
     }
 }
 
+// Ctrl+Shift+F12 日志导出热键的唯一判据（声明处有完整理由）。
+//
+// ★ 顺序有意：先比 vk，命中不了就一次 GetKeyState 都不做——本函数在每个按键的最前面
+// 被调两次（Test + Down），它必须比一次布尔取反贵不了多少。
+// 开关（dump_hotkey）排在修饰键之前同理：常态下这里就是一次原子读。
+bool CKeyEventSink::_IsLogDumpHotkey(WPARAM vk)
+{
+    if (vk != VK_F12)
+        return false;
+    if (!CFileLogger::Instance().IsDumpHotkeyEnabled())
+        return false;
+    return (GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000)
+        && !(GetKeyState(VK_MENU) & 0x8000);
+}
+
 STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
@@ -331,8 +346,8 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     }
 
     // Ctrl+Shift+F12: Dump TSF ring buffer logs to clipboard (works in AppContainer)
-    if (wParam == VK_F12 && (GetKeyState(VK_CONTROL) & 0x8000)
-        && (GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000))
+    // 默认关，且判据与 OnKeyDown 共用同一个函数——见 _IsLogDumpHotkey。
+    if (_IsLogDumpHotkey(wParam))
     {
         *pfEaten = TRUE;
         return S_OK;
@@ -884,8 +899,8 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     }
 
     // Ctrl+Shift+F12: Dump TSF ring buffer logs to clipboard (debug aid for AppContainer)
-    if (wParam == VK_F12 && (GetKeyState(VK_CONTROL) & 0x8000)
-        && (GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000))
+    // 默认关，判据与 OnTestKeyDown 共用——见 _IsLogDumpHotkey。
+    if (_IsLogDumpHotkey(wParam))
     {
         *pfEaten = TRUE;
         CFileLogger& lg = CFileLogger::Instance();

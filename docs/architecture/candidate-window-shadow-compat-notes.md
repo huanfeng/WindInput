@@ -66,7 +66,10 @@ diag_no_composition     diag_no_send_key        diag_no_eat_keys
 diag_no_ui_element
 ```
 
-改完存盘后按 **Ctrl+Shift+F12** 立即重读（该热键原本只导出环形缓冲日志，现顺带重读配置），
+改完存盘后按 **Ctrl+Shift+F12** 立即重读（该热键原本只导出环形缓冲日志，现顺带重读配置）。
+⚠ 该热键**出厂关闭**，同一个配置文件里要先写一行 `dump_hotkey=1` 才有它——而这一行本身
+只在宿主进程启动时读，所以第一次得重启宿主。默认关的理由见 `wind_tsf/AGENTS.md` 的
+File Logging 一节：它排在所有吃键闸门之前，开着就等于对所有用户抢走这个组合键。
 当前档位会当场以 `[WindInput diag: ...]` 打到焦点处，同时写进日志的 `compat.diag` 行。
 `CTextService::ActivateEx` 也会重读一次，所以切走输入法再切回同样生效。
 

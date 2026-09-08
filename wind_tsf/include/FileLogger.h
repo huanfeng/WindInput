@@ -47,8 +47,19 @@
 //   删除文件或整个 tsf_log 目录 → 一秒内自动重建，不必重启宿主
 //   清空文件（截断到 0）        → 直接从头续写，不留空洞；排查时可随时截断
 //
-// Ring Buffer: Always captures last RING_BUFFER_LINES log entries in memory,
-//   regardless of mode. Press Ctrl+Shift+F12 to dump via text insertion.
+// Ring Buffer + Ctrl+Shift+F12 导出：**默认整体关闭**，由配置项 dump_hotkey 打开。
+//
+//   dump_hotkey=1        # 环形缓冲开始记录，且 Ctrl+Shift+F12 被 TSF 吃下用于导出
+//
+// ⛔ 默认关是硬要求，不是省开销的优化。这个热键的拦截位于 OnTestKeyDown / OnKeyDown
+//    的**所有闸门之前**（早于 IsKeyboardDisabled、密码框抑制、只读上下文），所以只要
+//    本输入法处于激活态，Ctrl+Shift+F12 就永远到不了宿主——而它是 VS / JetBrains 等
+//    宿主的常用快捷键，且我们的处理还会往焦点处插入一行提示文本。默认开等于向所有用户
+//    收取一个他们既不知道也用不上的按键。取证时让用户临时写一行配置即可。
+//
+// ⚠ 关掉后 CFileLogger::ReloadConfig 也就失去了唯一调用点（那也挂在这个热键上）。这不是
+//    遗漏：配置文件本就是取证时手工创建的，建它的那次把 mode / level / dump_hotkey 一起
+//    写好，之后再改才需要重读。
 // ============================================================================
 
 class CFileLogger
@@ -91,9 +102,12 @@ public:
         return _mode != LogMode::None && level != LogLevel::Off && level <= _level;
     }
 
-    // Ring buffer: always enabled (captures even when mode=none)
-    // Returns true if ring buffer has captured entries
-    bool IsRingBufferEnabled() const { return true; }
+    // 环形缓冲与 Ctrl+Shift+F12 导出的**同一个**总开关（配置项 dump_hotkey，默认关）。
+    //
+    // ★ 缓冲与导出必须共用一个开关：缓冲是导出的唯一数据源，导出是缓冲的唯一出口。
+    // 只关一半，剩下的那半要么白记（每条 INFO 日志都进临界区拷 256 字符，且发生在
+    // TSF 输入线程上），要么按下去永远是空的。
+    bool IsDumpHotkeyEnabled() const { return _dumpHotkey; }
 
     // Write directly to ring buffer (bypasses mode/level checks)
     void WriteToRingBuffer(LogLevel level, const wchar_t* message);
@@ -150,6 +164,8 @@ private:
     LogMode _mode;
     LogLevel _level;
     bool    _initialized;
+    // 环形缓冲 + Ctrl+Shift+F12 导出总开关。见 IsDumpHotkeyEnabled。
+    bool    _dumpHotkey;
     // 常开的追加句柄。此前是「每行 CreateFile/WriteFile/CloseHandle 各一次 + 抢一把
     // 跨进程互斥锁」，而这一切都发生在 **TSF 输入线程**上，实测 230μs/行（现在 3.6μs，
     // 成分表见 FileLogger.cpp 的 _WriteToFile）。大头是每行开关文件被 Defender 逐次扫描，
@@ -182,7 +198,7 @@ private:
     wchar_t _oldPath[MAX_PATH];
     wchar_t _configPath[MAX_PATH];
 
-    // Ring buffer for in-memory log capture (always active)
+    // Ring buffer for in-memory log capture（受 _dumpHotkey 门控，默认不记录）
     static constexpr int RING_BUFFER_LINES = 200;
     static constexpr int RING_LINE_MAX = 256;
     wchar_t _ringBuffer[RING_BUFFER_LINES][RING_LINE_MAX];

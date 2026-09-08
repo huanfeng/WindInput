@@ -58,7 +58,11 @@ namespace WindLog {
         auto fileLevel = _ToFileLevel(level);
 
         // Quick exit: skip TRACE/DEBUG for ring buffer to avoid per-keystroke overhead
-        bool ringWorthy = (fileLevel <= CFileLogger::LogLevel::Info);
+        //
+        // 环形缓冲默认**不记录**（dump_hotkey 开关，见 FileLogger.h）：它唯一的出口
+        // Ctrl+Shift+F12 默认关着，不问开关就等于给每条 INFO 日志白付一次
+        // 512 字符拷贝 + 临界区，而这发生在 TSF 输入线程上。
+        bool ringWorthy = logger.IsDumpHotkeyEnabled() && (fileLevel <= CFileLogger::LogLevel::Info);
         if (!ringWorthy && !logger.IsEnabled(fileLevel))
             return;
 
@@ -69,7 +73,7 @@ namespace WindLog {
         while (len > 0 && (cleanMsg[len - 1] == L'\n' || cleanMsg[len - 1] == L'\r'))
             cleanMsg[--len] = L'\0';
 
-        // Write to ring buffer for INFO and above (Ctrl+Shift+F12 dump)
+        // Write to ring buffer for INFO and above (Ctrl+Shift+F12 dump; 默认关)
         if (ringWorthy)
             logger.WriteToRingBuffer(fileLevel, cleanMsg);
 
@@ -82,7 +86,7 @@ namespace WindLog {
         auto& logger = CFileLogger::Instance();
         auto fileLevel = _ToFileLevel(level);
 
-        bool ringWorthy = (fileLevel <= CFileLogger::LogLevel::Info);
+        bool ringWorthy = logger.IsDumpHotkeyEnabled() && (fileLevel <= CFileLogger::LogLevel::Info);
         if (!ringWorthy && !logger.IsEnabled(fileLevel))
             return;
 

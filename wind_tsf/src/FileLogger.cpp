@@ -11,6 +11,7 @@ CFileLogger::CFileLogger()
     : _mode(LogMode::None)
     , _level(LogLevel::Info)
     , _initialized(false)
+    , _dumpHotkey(false)
     , _hFile(nullptr)
     , _written(0)
     , _lastCheckTick(0)
@@ -385,9 +386,13 @@ void CFileLogger::_BuildPaths()
 
 void CFileLogger::_ReadConfig()
 {
-    // Default: mode=none, level=info
+    // Default: mode=none, level=info, dump_hotkey=off
+    //
+    // ⛔ _dumpHotkey 必须在这里也归零：本函数同时是 ReloadConfig 的实现，
+    // 用户删掉配置行后重读，开关要跟着落回关——「打开容易关不掉」的开关等于没有开关。
     _mode = LogMode::None;
     _level = LogLevel::Info;
+    _dumpHotkey = false;
 
     HANDLE hFile = CreateFileW(
         _configPath,
@@ -450,6 +455,13 @@ void CFileLogger::_ReadConfig()
                 else if (_stricmp(val, "all") == 0)
                     _mode = LogMode::All;
             }
+            else if (_stricmp(key, "dump_hotkey") == 0)
+            {
+                // 环形缓冲 + Ctrl+Shift+F12 导出总开关。只认显式的真值，
+                // 其余（含拼错的值）一律留在关的一侧——这个开关抢的是全局按键。
+                _dumpHotkey = (_stricmp(val, "1") == 0 || _stricmp(val, "true") == 0
+                               || _stricmp(val, "on") == 0 || _stricmp(val, "yes") == 0);
+            }
             else if (_stricmp(key, "level") == 0)
             {
                 if (_stricmp(val, "off") == 0) _level = LogLevel::Off;
@@ -494,7 +506,8 @@ const wchar_t* CFileLogger::_LevelStr(LogLevel level)
 
 void CFileLogger::WriteToRingBuffer(LogLevel level, const wchar_t* message)
 {
-    if (message == nullptr)
+    // 开关关着就一个字都不记：没有出口的缓冲只是在 TSF 输入线程上白付临界区 + 拷贝。
+    if (!_dumpHotkey || message == nullptr)
         return;
 
     EnterCriticalSection(&_ringLock);
