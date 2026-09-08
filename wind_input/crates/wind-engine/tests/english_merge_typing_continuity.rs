@@ -97,6 +97,51 @@ fn english_merge_adds_no_new_gaps() {
     }
 }
 
+/// ★ 两道闸门叠出来的空码：拼音不成音节 + 2 码不查英文。
+///
+/// 真机报障：拼音下 `wi` / `vi` / `hi` 全是空码。`min_length` 与「丢弃前缀扩展」是同一个
+/// 理由的两种表达（打中文时别添乱），中文侧一条候选都没有时两者都该松开；只放宽了前缀
+/// 而仍卡长度，就留下了这批空窗。
+///
+/// ⚠️ 反面同样要锁：中文侧**有**候选时，`min_length` 照旧生效——`he` 是合法音节、
+/// 中文候选一大把，此时不该因为「英文里 he 开头的词很多」就冒出一堆。
+#[test]
+fn two_letter_input_falls_back_when_pinyin_has_nothing() {
+    let dir = data_dir();
+    if !ready(&dir) {
+        eprintln!("跳过：pinyin 方案或英文库不存在");
+        return;
+    }
+    let on = pinyin_mgr(&dir, true);
+
+    for p in ["wi", "vi", "hi"] {
+        let r = on.convert(p, 20);
+        let en = r
+            .candidates
+            .iter()
+            .filter(|c| c.source == wind_candidate::CandidateSource::English)
+            .count();
+        eprintln!("  {p:<4} 候选 {:<3} 英文 {en}", r.candidates.len());
+        assert!(
+            !r.candidates.is_empty(),
+            "`{p}` 仍是空码：拼音解释不了、英文又被最小长度挡住"
+        );
+    }
+
+    // 反面：`he` 是合法音节，中文候选一大把 ⇒ 走精确路，不放宽。
+    let r = on.convert("he", 20);
+    assert!(
+        r.candidates.len() > 5,
+        "前提不成立：`he` 该有一堆中文候选，否则下面测不到差别"
+    );
+    let en = r
+        .candidates
+        .iter()
+        .filter(|c| c.source == wind_candidate::CandidateSource::English)
+        .count();
+    assert_eq!(en, 0, "中文侧有候选时 2 码不该冒出英文，实得 {en} 条");
+}
+
 /// ★ 打完整个词的那一键，候选数不得**塌缩**。
 ///
 /// 曾经的写法用了两个判据（「无精确命中」**且**「中文侧空」才放宽），于是在

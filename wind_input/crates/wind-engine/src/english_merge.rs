@@ -63,6 +63,19 @@ const EXACT_SCAN: usize = 8;
 /// 无精确命中、且基础候选为空时，前缀回退至多给几条。见 [`lookup_prefix_fallback`]。
 const PREFIX_FALLBACK_MAX: usize = 5;
 
+/// **英文输入态**下的最小长度下限：中文侧无候选时，`min_length` 最低压到这个值。
+///
+/// `min_length` 的存在理由与「丢弃前缀扩展」**是同一个**——打中文时别冒出一堆英文噪音。
+/// 中文侧一条候选都没有时那个理由不成立，故两者该一起放宽；只放宽前缀而仍卡长度，
+/// 会留下 `wi` / `vi` / `hi` 这类**两道闸门叠出来的空码**（拼音不成音节 + 2 码不查英文）。
+///
+/// ## 为什么下限是 2 而不是 1
+///
+/// 单字母的补全没有信息量（`w` 能补出几百个词），且 1 码时用户往往才刚开始打字、意图
+/// 未定。另外 1 码在拼音下通常并不空——`w` 有几十条简拼候选，真正空的只有 `v` 这类
+/// 非声母字母，为它放开一个字母不划算。
+const EMPTY_BASE_MIN_LENGTH: usize = 2;
+
 /// 精确命中至多保留几条。
 ///
 /// 同一个码可能对应多条词条（大小写形态、`she` / `she'd` 那种撇号变体在**本表里不同码**
@@ -173,12 +186,21 @@ pub fn lookup(english: &dyn Engine, input: &str, min_length: usize) -> Vec<Candi
 /// `window` 又有——候选窗一闪一闪。拼音对这类串一条中文候选也给不出（`wi` 不成音节），
 /// 于是英文一断档整个窗就空掉；五笔下码表仍在出候选，闪烁被掩盖，
 /// 所以只有拼音方案报得出来。
+///
+/// ## 长度门槛一并放宽到 [`EMPTY_BASE_MIN_LENGTH`]
+///
+/// `min_length` 与「丢弃前缀」是同一个理由的两种表达，故在同一个前提下一起松开。
+/// 否则 `wi` / `vi` / `hi` 仍是空码——拼音不成音节、2 码又不查英文，两道闸门叠出来的
+/// 空窗，而用户此刻显然在打英文。
 pub fn lookup_prefix_fallback(
     english: &dyn Engine,
     input: &str,
     min_length: usize,
 ) -> Vec<Candidate> {
-    if input.chars().count() < min_length_or_default(min_length) {
+    // 取「配置值」与「英文输入态下限」的较小者：用户把 min_length 调大是为了**打中文时**
+    // 少受打扰，不该连带把「中文侧本来就没候选」时的补全也卡掉。
+    let gate = min_length_or_default(min_length).min(EMPTY_BASE_MIN_LENGTH);
+    if input.chars().count() < gate {
         return Vec::new();
     }
     let lower = input.to_lowercase();
