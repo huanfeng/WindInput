@@ -153,6 +153,27 @@ fn parse_ms(func: &str, key: &str, val: &str, default: u64) -> Result<u64> {
         .map_err(|_| runtime_err(func, anyhow::anyhow!("{key} 需要毫秒数, 收到 {val:?}")))
 }
 
+/// 校验 `ui.toast` 的 kind / color / pos 三个值（空串 = 未指定）。
+///
+/// **公开**：toast 有两个入口——短语里的 `ui.toast(…)` 与 RPC `ui.toast`（CLI /
+/// 外部脚本）。若各校验各的，必然出现「短语里写错报错、命令行里写错静默降级」
+/// 这种按入口分裂的行为；渲染端的 `ToastKind::parse` / `ToastPosition::parse`
+/// 未知值降级成默认，是**对脏数据的兜底**，替代不了入口处的校验。
+pub fn validate_toast_args(kind: &str, color: &str, position: &str) -> Result<()> {
+    check_enum("ui.toast", "kind", kind, TOAST_KINDS)?;
+    check_enum("ui.toast", "pos", position, TOAST_POSITIONS)?;
+    check_color("ui.toast", color)?;
+    // kind 与 color 同时给：不猜哪个赢。两者都是「强调色」的写法，同时出现只能是
+    // 写错了，静默取一个会让另一个看起来"没生效"。
+    if !kind.is_empty() && !color.is_empty() {
+        return Err(runtime_err(
+            "ui.toast",
+            anyhow::anyhow!("kind 与 color 只能给一个"),
+        ));
+    }
+    Ok(())
+}
+
 /// 校验 `#RRGGBB` / `#RRGGBBAA` 形态。空串 = 未指定。
 fn check_color(func: &str, val: &str) -> Result<()> {
     if val.is_empty() {
@@ -237,16 +258,7 @@ fn fn_ui_toast_named(
     let color = named_val(named, "color");
     let position = named_val(named, "pos");
     check_enum("ui.toast", "kind", kind, TOAST_KINDS)?;
-    check_enum("ui.toast", "pos", position, TOAST_POSITIONS)?;
-    check_color("ui.toast", color)?;
-    // kind 与 color 同时给：不猜哪个赢。两者都是「强调色」的写法，同时出现只能是
-    // 词条写错了，静默取一个会让另一个看起来"没生效"。
-    if !kind.is_empty() && !color.is_empty() {
-        return Err(runtime_err(
-            "ui.toast",
-            anyhow::anyhow!("kind 与 color 只能给一个"),
-        ));
-    }
+    validate_toast_args(kind, color, position)?;
     let duration_ms = parse_ms("ui.toast", "ms", named_val(named, "ms"), 0)?;
     let spec = crate::services::ToastSpec {
         text: &args[0],
@@ -430,9 +442,14 @@ mod tests {
         }
     }
 
+    /// 一次 `wind.cli` 调用：argv / toast 模式 / 成功文案 / 等待上限。
+    type CliCall = (Vec<String>, String, String, u64);
+    /// 一次 `ui.toast` 调用：文案 / kind / color / 位置 / 时长。
+    type ToastCall = (String, String, String, String, u64);
+
     /// 记录 `wind.cli` 收到的 argv 与反馈策略。
     #[derive(Default)]
-    struct RecSelf(Mutex<Vec<(Vec<String>, String, String, u64)>>);
+    struct RecSelf(Mutex<Vec<CliCall>>);
     impl crate::services::ProcessRunner for RecSelf {
         fn run(&self, _spec: &crate::services::ProcSpawn<'_>) -> anyhow::Result<()> {
             unreachable!()
@@ -453,7 +470,7 @@ mod tests {
 
     /// 记录 `ui.toast` 收到的完整 spec。
     #[derive(Default)]
-    struct RecToast(Mutex<Vec<(String, String, String, String, u64)>>);
+    struct RecToast(Mutex<Vec<ToastCall>>);
     impl crate::services::NotifyService for RecToast {
         fn toast(&self, spec: &crate::services::ToastSpec<'_>) -> anyhow::Result<()> {
             self.0.lock().unwrap().push((

@@ -143,8 +143,9 @@ impl Coordinator {
 
     /// 弹一条桌面提示。`ui.toast` 短语函数与 RPC `ui.toast`（CLI / 外部脚本）的共同落点。
     ///
-    /// 两个调用方共用这一个入口，是为了让"压单行 + 截断 + 空文案不弹 + 颜色解析"只有
-    /// 一份：这类边界处理一旦各写各的，必然从某一侧开始漂移。
+    /// 两个调用方共用这一个入口，是为了让"校验 + 压单行 + 截断 + 空文案不弹 + 颜色解析"
+    /// 只有一份：这类边界处理一旦各写各的，必然从某一侧开始漂移——短语里写错报错、
+    /// 命令行里写错静默降级，就是最典型的那种按入口分裂。
     pub fn ui_toast(
         &self,
         text: &str,
@@ -152,11 +153,12 @@ impl Coordinator {
         color: &str,
         pos: &str,
         duration_ms: u64,
-    ) -> bool {
+    ) -> Result<(), String> {
+        wind_cmdbar::validate_toast_args(kind, color, pos).map_err(|e| e.to_string())?;
         let text = clip_single_line(text, TOAST_MAX_CHARS);
         // 空文案在 UI 侧等价于 hide()，弹一条看不见的提示只会让人以为函数没生效。
         if text.is_empty() {
-            return false;
+            return Err("文案为空".to_string());
         }
         self.show_toast_ex(
             &text,
@@ -165,7 +167,7 @@ impl Coordinator {
             duration_ms,
             parse_hex_rgba(color),
         );
-        true
+        Ok(())
     }
 
     /// 测试入口：按**用户同层**的路径执行一条命令源（如 `ime.schema("pinyin")`）。
@@ -513,8 +515,7 @@ fn first_nonempty_line(s: &str) -> Option<String> {
 fn last_nonempty_line(s: &str) -> Option<String> {
     s.lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .next_back()
+        .rfind(|l| !l.is_empty())
         .map(String::from)
 }
 
@@ -539,16 +540,14 @@ impl NotifyService for CoordNotify {
         let Some(c) = self.0.upgrade() else {
             return Ok(());
         };
-        if !c.ui_toast(
+        c.ui_toast(
             spec.text,
             spec.kind,
             spec.color,
             spec.position,
             spec.duration_ms,
-        ) {
-            anyhow::bail!("文案为空");
-        }
-        Ok(())
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
     }
 }
 

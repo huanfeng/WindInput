@@ -59,8 +59,16 @@ pub trait WebDataHost {
     /// 弹一条桌面提示（RPC `ui.toast`）。参数一律用字符串：窄面不携带 UI 类型，
     /// 解析（含未知值降级）由宿主侧的 `ToastPosition::parse` / `ToastKind::parse` 负责。
     /// `color` 为 `#RRGGBB` / `#RRGGBBAA`，空串 = 按 kind 取色；`duration_ms` 0 = 默认时长。
-    /// 返回是否真的弹了（文案压成单行后为空则不弹，调用方据此报错而不是假装成功）。
-    fn ui_toast(&self, text: &str, kind: &str, color: &str, pos: &str, duration_ms: u64) -> bool;
+    /// 值域校验与短语里的 `ui.toast(…)` 共用同一份（`wind_cmdbar::validate_toast_args`），
+    /// 错误原样回给调用方——命令行里写错 `--kind warn` 必须报错，不能静默降级成 info。
+    fn ui_toast(
+        &self,
+        text: &str,
+        kind: &str,
+        color: &str,
+        pos: &str,
+        duration_ms: u64,
+    ) -> Result<(), String>;
 
     /// 字符类：设置页列表（全部类，按 `order` 升序＝仲裁顺序）。
     fn charset_rows(&self) -> Vec<crate::handle_charset::CharsetClassRow>;
@@ -396,7 +404,14 @@ impl WebDataHost for Coordinator {
     ) -> anyhow::Result<crate::handle_quick_format::QuickImportOutcome> {
         Coordinator::import_quick_format(self, content, replace)
     }
-    fn ui_toast(&self, text: &str, kind: &str, color: &str, pos: &str, duration_ms: u64) -> bool {
+    fn ui_toast(
+        &self,
+        text: &str,
+        kind: &str,
+        color: &str,
+        pos: &str,
+        duration_ms: u64,
+    ) -> Result<(), String> {
         Coordinator::ui_toast(self, text, kind, color, pos, duration_ms)
     }
 }

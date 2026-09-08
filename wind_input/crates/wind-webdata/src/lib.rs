@@ -407,11 +407,9 @@ pub trait WebDataRpc: WebDataHost {
                         .to_string()
                 };
                 let ms = params.get("ms").and_then(Value::as_u64).unwrap_or(0);
-                if self.ui_toast(text, &s("kind"), &s("color"), &s("pos"), ms) {
-                    Ok(json!({ "ok": true }))
-                } else {
-                    Err(anyhow::anyhow!("文案为空"))
-                }
+                self.ui_toast(text, &s("kind"), &s("color"), &s("pos"), ms)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(json!({ "ok": true }))
             }
             "schema.delete" => self.web_schema_delete(params),
             "schema.references" => Ok(json!({})), // 引用关系（删除安全检查）：暂返空，前端宽松消费

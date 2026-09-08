@@ -24,6 +24,7 @@ pub use ast::{ArrayPhrase, CommandPhrase, Expr, ModValue, Modifiers, Phrase};
 pub use context::{EvalContext, History, MemoryContext};
 pub use error::{CmdbarError, Result};
 pub use eval::{ArrayElement, ArrayExpansion, Evaluated, evaluate, expand_array};
+pub use funcs::action::validate_toast_args;
 pub use funcs::value::generate_uuid;
 pub use lint::{Hint, lint_parsed, lint_phrase};
 pub use parser::parse;
