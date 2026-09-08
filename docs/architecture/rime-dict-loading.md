@@ -80,6 +80,7 @@
 | 重复条目 | 不去重 | 不去重 | 行为对齐，但无重复计数诊断 |
 | 空 text / 空 code | 跳过 | 跳过并计数 | 对齐 |
 | 行首空白 | `trim_right`，保留前导 | 同（`trim_line_end`） | 对齐 |
+| 行尾空白 | `trim_right` 整行后再切列 | **只用于判定，不参与取值**：text 原样，code/weight 各自 `trim_end` | **有意偏离**，见 §3.4 |
 
 ---
 
@@ -142,13 +143,16 @@ text 可以是任何东西（汉字、`@`、`$CC("[End]", key.seq("End"))`、英
 
 ```rust
 parse_rime_line(line, comments_on, lowercase_code, spec, &mut stats)
-  trim_line_end(line)         只剥行尾，前导保留（词条本身可能是 U+3000）
+  trim_line_end(line)         **只用于判定**（空行？注释？），取值时不剥，见下方「空白语义」
   空行                        → 跳过
   '#' 开头且 comments_on      → 跳过（comments_on=false 时 # 是数据，见 §3.5）
   parts.len() < required_cols → 跳过 + stats.short
       required_cols = max(text_col, code_col) + 1
       ⚠️ 权重不计入——否则两列词库（如 12_kf 全 26 行皆两列）会被整体丢弃
   text 或 code 为空           → 跳过 + stats.empty_field
+  raw_code = parts[code_col].trim_end()   编码列尾随空白无语义（TextFirst 下它是末列）
+  text     = parts[text_col]              **原样**，尾随空白按内容保留 + stats.trailing_ws_text
+  weight   = parts[weight_col].trim()     末列权重的尾随空白得在这里剥，否则 "5 " 解析失败
   spec.has_syllables          → 按空格切音节取首字母做简拼（≥2 音节）、
                                  syllable_boundary_mask 算边界、code 去空格拼平
   否则                        → boundary=0、无简拼
@@ -157,6 +161,35 @@ parse_rime_line(line, comments_on, lowercase_code, spec, &mut stats)
 
 `ParseStats` 在收尾时**仅在非零时**输出一条汇总 WARN（干净词库不刷屏）；
 并行路径各块独立累加后合并，不引入跨线程共享。
+
+#### 空白语义：为什么整行 trim 被拆成逐列
+
+整行 `trim_end` 后再切列，等于宣布「行尾那段空白一定是排版噪声」。**这个前提只在末列
+不是 text 时成立**：CodeFirst 布局（`columns: [code, text, weight]`）下 text 就在末列，
+于是「行尾空白」与「词条的尾随空格」是同一段字节，词条内容被当排版噪声剥掉。
+
+蒙古文 toli 词库（`schemas/toli/toli.dict.yaml`）整库中招：37.6 万条词条里 99.9995%
+以空格收尾——空格在蒙文里是词间分隔，不是排版。剥掉后连续上屏的词会粘成一坨。
+
+这与前导空白早已修过的那条（R2，`　` 全角空格词条）是**同一条原则的两半**：词条内容
+不该被当成排版空白。前导那次只修了一半，因为当时的反例（`　\tcokg`）恰好是 TextFirst
+布局，text 在首列，尾随这一半没有反例暴露出来。
+
+现在的分工：
+
+- `trim_line_end` 退回**纯判定**用途——空行？`# no comment` 指令？哪一列像码？
+- 取值**逐列**处理：`text` 原样；`code`、`weight` 各自剥尾（那两列的尾随空白无语义，
+  且音节库靠**列内**空格分音节，剥尾不动边界）。
+
+回归面实测为零：除 toli 外，`build_dev/data/schemas` 与用户 `schemas` 目录下全部
+词库中，**没有一行的末列 text 带尾随空白**（`en.dict.yaml` 的 635 行尾随空白是行末
+多一个 `\t`——第 4 列 `comment` 为空，text 在首列，不受影响）。
+
+`ParseStats.trailing_ws_text` 记下保留了多少条，收尾时出一条 `info!`（不是 `warn!`：
+对以空格作词间分隔的文字，整库带尾随空格是正常写法，报警等于把常态当异常喊）。
+
+⚠️ 改了「同样的源文件解析出什么结果」，故 `PARSE_SEMANTICS_VERSION` 已 `4 → 5`
+（见 `cache_fp.rs`）——不 bump 则存量 `.wdat` 指纹仍匹配，修复对老用户静默失效。
 
 ### 3.5 `# no comment` 指令
 

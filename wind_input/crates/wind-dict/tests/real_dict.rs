@@ -113,3 +113,51 @@ fn test_real_pinyin_candidates() {
     drop(dict); // 同上：解除 mmap 再删临时目录
     let _ = std::fs::remove_dir_all(path.parent().expect("临时目录"));
 }
+
+/// **蒙古文词条的尾随空格必须活着走完 yaml → wdat → mmap 全路径**。
+///
+/// 蒙文以空格作词间分隔，toli 词库（`schemas/toli/toli.dict.yaml`）37.6 万条里
+/// 99.9995% 以空格收尾。它声明 `columns: [code, text, weight]` 而正文只有两列，
+/// text 正好落在**末列**——从前 `parse_rime_line` 先整行 `trim_end` 再切列，
+/// 那段空格被当排版噪声剥掉，连续上屏的词会粘成一坨。
+///
+/// 这里不引真词库（16 MB，且不在仓内），而是照它的形态自造：同样的 `columns:` 声明、
+/// 同样的两列、同样的 PUA 码位 + 内部空格 + 尾随空格。**走 CachedDict 是关键**——
+/// 解析层修对了而缓存层再吃掉，症状只在第二次启动（命中缓存）时复现，最难排查。
+#[test]
+fn test_mongolian_trailing_space_survives_cache_pipeline() {
+    let dir = std::env::temp_dir().join(format!("wind-toli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    let path = dir.join("toli.dict.yaml");
+    std::fs::write(
+        &path,
+        "---\nname: toli\ncolumns:\n  - code\n  - text\n  - weight\n...\n\
+         a\t\u{e249} \n\
+         aabn\t\u{e226}\u{e2f4} \u{e341}\u{e2ca} \n",
+    )
+    .expect("写词库");
+
+    let dict = CachedDict::load(&path).expect("加载蒙古文词典");
+    assert!(
+        path.with_extension("wdat").is_file(),
+        "应新建 wdat 缓存，本用例要的就是过缓存这一遭"
+    );
+
+    let a = dict.search("a");
+    assert_eq!(
+        a.iter().map(|(t, _, _)| t.as_str()).collect::<Vec<_>>(),
+        vec!["\u{e249} "],
+        "单字词条的尾随空格须原样穿过整条管道"
+    );
+
+    let aabn = dict.search("aabn");
+    assert_eq!(
+        aabn.iter().map(|(t, _, _)| t.as_str()).collect::<Vec<_>>(),
+        vec!["\u{e226}\u{e2f4} \u{e341}\u{e2ca} "],
+        "词组的内部空格与尾随空格都是词间分隔，须整串保留"
+    );
+
+    drop(dict); // 解除 mmap 再删临时目录（Windows 上映射未解除时删不掉）
+    let _ = std::fs::remove_dir_all(&dir);
+}

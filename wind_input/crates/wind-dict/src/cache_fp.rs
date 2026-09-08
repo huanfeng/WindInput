@@ -35,7 +35,9 @@ fn fp_sidecar(cache: &Path) -> PathBuf {
 ///   `columns:` 支持流式写法且残缺声明改为整库跳过
 /// - 4 = 词条文本的反转义对**命令栏语法条目**只还原换行/制表，反斜杠原样穿过
 ///   （`$CC(..., open("D:\\notes"))` 不再被本层与 cmdbar lexer 各吃一个反斜杠）
-const PARSE_SEMANTICS_VERSION: u32 = 4;
+/// - 5 = 行尾空白只参与判定、不参与取值：text 列原样保留尾随空白，code/weight 各自
+///   `trim_end`（CodeFirst 布局下末列 text 的尾随空格不再被剥——蒙古文以空格作词间分隔）
+const PARSE_SEMANTICS_VERSION: u32 = 5;
 
 /// 流式读取时的喂料缓冲区大小：足够大以摊薄 syscall 次数，又不至于把峰值分配
 /// 重新做回「文件大小」量级——这正是 [`fingerprint`] 从 `std::fs::read` 整读

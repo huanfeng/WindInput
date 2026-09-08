@@ -87,12 +87,21 @@ fn is_code_shape(s: &str) -> bool {
         })
 }
 
-/// 剥行尾空白，**保留前导**。对齐 librime 的 `boost::algorithm::trim_right`。
+/// 剥行尾空白，**只用于判定**（空行？`# no comment` 指令？哪一列像码？），
+/// **不用于取字段值**。保留前导。
 ///
-/// 曾经这里是 `trim()`：Rust 的 `str::trim` 按 Unicode White_Space 判定，而 **U+3000 全角空格
+/// 曾经整行 `trim()`：Rust 的 `str::trim` 按 Unicode White_Space 判定，而 **U+3000 全角空格
 /// 属于该集合**，于是「全角空格」这个词条本身会被当成缩进削掉，整行字段左移一格
 /// （`　\tcokg\t\t全角空格` → `cokg\t\t全角空格`，text 变成编码、code 变成空串），
 /// 两字段的行则直接掉到列数门槛之下被丢弃。**词条内容不该被当成排版空白。**
+///
+/// 后来发现这条原则只兑现了一半：前导不再削、**尾随仍在削**，而 CodeFirst 布局下 text
+/// 恰好落在末列——「行尾空白」与「词条的尾随空格」是同一段字节。蒙古文 toli 词库
+/// （`schemas/toli/toli.dict.yaml`）就整库中招：37.6 万条里 99.9995% 以空格收尾，
+/// 那是蒙文的词间分隔，被剥掉后连续上屏的词全粘在一起。
+///
+/// 故取值改为**逐字段**处理（见 [`parse_rime_line`]）：text 原样，code/weight 各自
+/// `trim_end`（那两列的尾随空白无语义）。本函数退回纯判定用途。
 fn trim_line_end(line: &str) -> &str {
     line.trim_end()
 }
@@ -478,6 +487,12 @@ pub(crate) struct ParseStats {
     pub over_range: usize,
     /// 实测最大权重（诊断用；变换用的是方案声明值，见 `dict-weight-normalization.md` §4.3）。
     pub max_weight: i32,
+    /// text 列**带尾随空白**的条目数。这些空白从前被整行 trim 吃掉，现在原样进词库。
+    ///
+    /// 纯诊断、不改值：无从判断某条尾随空格是蒙文的词间分隔（toli 整库如此）还是排版噪声。
+    /// 记一笔是为了让「上屏后莫名多个空格」这类反馈有据可查——那时日志里能直接看到
+    /// 是这个词库自己带的。
+    pub trailing_ws_text: usize,
 }
 
 impl ParseStats {
@@ -488,6 +503,7 @@ impl ParseStats {
         self.weighted += o.weighted;
         self.over_range += o.over_range;
         self.max_weight = self.max_weight.max(o.max_weight);
+        self.trailing_ws_text += o.trailing_ws_text;
     }
 
     fn is_clean(&self) -> bool {
@@ -497,6 +513,7 @@ impl ParseStats {
     /// 有异常才出日志——干净的词库不该刷屏。
     fn log_if_dirty(&self, path: &Path) {
         self.log_weight_range(path);
+        self.log_trailing_ws(path);
         if self.is_clean() {
             return;
         }
@@ -506,6 +523,22 @@ impl ParseStats {
             self.short,
             self.empty_field,
             self.bad_weight
+        );
+    }
+
+    /// **text 尾随空白诊断**：只报数、不改值。见 [`ParseStats::trailing_ws_text`]。
+    ///
+    /// 用 `info!` 而非 `warn!`——对蒙古文这类以空格作词间分隔的文字，整库带尾随空格是
+    /// **正常写法**（toli 词库 37.6 万条几乎条条如此），报 warn 等于把常态当异常喊。
+    fn log_trailing_ws(&self, path: &Path) {
+        if self.trailing_ws_text == 0 {
+            return;
+        }
+        info!(
+            "词库 {} 有 {} 条词条以空白收尾，已按内容保留（不再剥除）。\
+             若这是排版噪声而非有意的词间空格，请清理词库文件。",
+            path.display(),
+            self.trailing_ws_text
         );
     }
 
@@ -864,11 +897,11 @@ fn parse_rime_line(
     spec: ColumnSpec,
     stats: &mut ParseStats,
 ) -> Option<RimeLine> {
-    // 只剥行尾：词条内容可能以空白开头（「全角空格」这个词条本身就是 U+3000），
-    // 前导 trim 会把它当缩进削掉、导致整行字段左移。见 [`trim_line_end`]。
-    let line = trim_line_end(line);
+    // **行尾空白只参与判定，不参与取值**：末列若是 text（CodeFirst 布局），行尾那段空白
+    // 就是词条内容本身——蒙古文 toli 词库整库以空格收尾。前导同理不剥（「全角空格」词条）。
+    // 见 [`trim_line_end`]。
     // `comments_on == false` = 本行位于 `# no comment` 之后，`#` 此时是**数据**而非注释。
-    if line.is_empty() || (comments_on && line.starts_with('#')) {
+    if trim_line_end(line).is_empty() || (comments_on && line.starts_with('#')) {
         return None;
     }
     let parts: Vec<&str> = line.split('\t').collect();
@@ -877,8 +910,15 @@ fn parse_rime_line(
         return None;
     }
     // 列位置由文件级判定给定（头部 `columns:` 声明，或整文件探测），不再逐行猜。
-    let raw_code = parts[spec.code_col];
+    //
+    // **code 剥尾随空白、text 不剥**：编码列末尾的空白只可能是排版噪声（码的字符集里没有
+    // 它的位置；音节库靠**列内**空格分音节，剥尾不动边界），而 text 列末尾的空白可能是词条
+    // 内容。TextFirst 布局下 code 在末列，这一步接住了从前由整行 trim 承担的活。
+    let raw_code = parts[spec.code_col].trim_end();
     let text = parts[spec.text_col];
+    if text.len() != text.trim_end().len() {
+        stats.trailing_ws_text += 1;
+    }
     if text.is_empty() || raw_code.is_empty() {
         // 空 code 会让整批条目挤进 entries[""]；空 text 是无意义候选。librime 亦跳过。
         stats.empty_field += 1;
@@ -915,9 +955,10 @@ fn parse_rime_line(
     }
     // weight_col 为 None = 该词库声明了 columns: 但其中不含 weight（对齐 librime：声明后
     // 未列出的字段不读）。未声明 columns: 的词库走 librime 默认，weight_col = Some(2)。
-    let weight: i32 = match spec.weight_col.and_then(|i| parts.get(i)) {
+    // 逐列 `trim`：整行 trim 撤掉后，末列权重的尾随空白得在这里剥，否则 `"5 "` 解析失败。
+    let weight: i32 = match spec.weight_col.and_then(|i| parts.get(i)).map(|s| s.trim()) {
         // 空权重列是常态（Rime 语义：留给预设词库补），不计入异常统计。
-        None | Some(&"") => 0,
+        None | Some("") => 0,
         Some(s) => match s.parse() {
             Ok(w) => w,
             Err(_) => {
@@ -1739,20 +1780,53 @@ columns:
         );
     }
 
-    /// **转义序列免疫行尾 trim**：`\n` 在 trim 阶段是两个可见字符，剥不掉；而裸空格会被
-    /// `trim_line_end` 剥除——这正是本设计的用意（有意空白用转义表达、排版噪声交给 trim）。
+    /// **末列 text 的尾随空白是词条内容，不是排版噪声**。
     ///
-    /// 顺带锁住 CodeFirst 布局的既有行为：text 落在**末列**时，其尾随裸空格会被行尾 trim
-    /// 吃掉（TextFirst 布局下 text 在首列则不受影响）。这个列序不对称是 librime `trim_right`
-    /// 语义的自然结果，此处**明确记录而非修复**——要保留尾部空白请用转义序列。
+    /// 从前 `parse_rime_line` 先对整行 `trim_end` 再切列，于是 CodeFirst 布局下（text 落
+    /// 末列）词条的尾随空格被连带剥掉，而 TextFirst 布局下不受影响——同一份词条，换个列序
+    /// 语义就变了。蒙古文 toli 词库整库以空格收尾（空格是蒙文的词间分隔），中招后连续上屏
+    /// 的词会粘成一坨。现在取值逐字段处理：text 原样，code/weight 各自 `trim_end`。
+    ///
+    /// 同时锁住转义序列仍然存活（它在 trim 阶段本就是可见字符，剥不掉）。
     #[test]
-    fn trailing_whitespace_trimmed_but_escapes_survive() {
+    fn trailing_whitespace_in_last_text_column_is_preserved() {
         let path = std::env::temp_dir().join("wind_trail_ws.dict.yaml");
         {
             let mut f = std::fs::File::create(&path).unwrap();
             writeln!(f, "---\nname: t\ncolumns:\n  - code\n  - text\n...").unwrap();
-            writeln!(f, "ka\t甲   ").unwrap(); // 末列尾随裸空格 → 被行尾 trim 剥掉
+            writeln!(f, "ka\t甲   ").unwrap(); // 末列尾随裸空格 → 属词条内容，须保留
             writeln!(f, "yi\t乙\\t").unwrap(); // 转义制表在末列 → 存活
+        }
+        let (e, _) = parse_rime_entries_parallel(&path, false).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            collect(&e, "甲   "),
+            vec![("ka".to_string(), 0)],
+            "末列 text 的尾随空格是词条内容，必须原样保留"
+        );
+        assert!(
+            collect(&e, "甲").is_empty(),
+            "不得再产出被剥过空白的形态（那会与真·无空格词条撞成同一条）"
+        );
+        assert_eq!(
+            collect(&e, "乙\t"),
+            vec![("yi".to_string(), 0)],
+            "转义序列在 trim 阶段是可见字符，必须活到反转义那一步"
+        );
+    }
+
+    /// **TextFirst 布局下末列是 code/weight，它们的尾随空白仍须剥掉**——那两列的行尾空白
+    /// 只可能是排版噪声。整行 trim 撤掉后，这活由逐列 `trim_end`/`trim` 接手；不接就会
+    /// 出现 `"abc "` 这样打不出来的编码、和 `"5 ".parse()` 失败退化成 0 的权重。
+    #[test]
+    fn trailing_whitespace_in_code_and_weight_still_trimmed() {
+        let path = std::env::temp_dir().join("wind_trail_ws_code.dict.yaml");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "---\nname: t2\n...").unwrap(); // 无声明 → 默认 text/code/weight
+            writeln!(f, "甲\tka  ").unwrap(); // code 落末列，带尾随空格
+            writeln!(f, "乙\tyi\t5 ").unwrap(); // weight 落末列，带尾随空格
         }
         let (e, _) = parse_rime_entries_parallel(&path, false).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -1760,13 +1834,42 @@ columns:
         assert_eq!(
             collect(&e, "甲"),
             vec![("ka".to_string(), 0)],
-            "末列 text 的尾随裸空格被行尾 trim 剥除（librime trim_right 语义）"
+            "末列 code 的尾随空格须剥除，否则这条编码永远打不出来"
         );
-        assert!(collect(&e, "甲   ").is_empty(), "带尾随空格的形态不应存在");
         assert_eq!(
-            collect(&e, "乙\t"),
-            vec![("yi".to_string(), 0)],
-            "转义序列在 trim 阶段是可见字符，必须活到反转义那一步"
+            collect(&e, "乙"),
+            vec![("yi".to_string(), 5)],
+            "末列 weight 的尾随空格须剥除，否则 parse 失败静默退化成 0"
+        );
+    }
+
+    /// **蒙古文 toli 的真实形态**：CodeFirst 两列、词条内部与末尾都有空格。
+    /// 内部空格是词间分隔（必须原样），末尾空格同理——两者是同一套约定的两处体现。
+    #[test]
+    fn mongolian_two_column_dict_keeps_inner_and_trailing_spaces() {
+        let path = std::env::temp_dir().join("wind_toli_shape.dict.yaml");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(
+                f,
+                "---\nname: toli\ncolumns:\n  - code\n  - text\n  - weight\n..."
+            )
+            .unwrap();
+            writeln!(f, "a\t\u{e249} ").unwrap(); // 单字 + 尾随空格
+            writeln!(f, "aabn\t\u{e226}\u{e2f4} \u{e341}\u{e2ca} ").unwrap(); // 词组：内部 + 尾随
+        }
+        let (e, _) = parse_rime_entries_parallel(&path, false).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            collect(&e, "\u{e249} "),
+            vec![("a".to_string(), 0)],
+            "单字词条的尾随空格须保留"
+        );
+        assert_eq!(
+            collect(&e, "\u{e226}\u{e2f4} \u{e341}\u{e2ca} "),
+            vec![("aabn".to_string(), 0)],
+            "词组的内部空格与尾随空格都是词间分隔，须整串原样保留"
         );
     }
 

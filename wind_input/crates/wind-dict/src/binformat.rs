@@ -545,6 +545,46 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
+    /// **词条文本的尾随空白必须原样穿过缓存**。
+    ///
+    /// 解析层已改为保留末列 text 的尾随空格（蒙古文以空格作词间分隔，toli 词库整库如此，
+    /// 见 `codetable::trim_line_end`）；但源文件解析对了、缓存这一段再吃掉，用户看到的
+    /// 依然是丢空格——而且只在第二次启动（命中缓存）时复现，最难排查。
+    ///
+    /// 本格式用长度前缀存串（非 NUL 结尾、非按空白切分），故理应无损；此处把它钉死。
+    #[test]
+    fn test_roundtrip_preserves_trailing_whitespace_in_text() {
+        let tmp = std::env::temp_dir().join("wind_dict_trailing_ws.wdb");
+
+        let mut writer = DictWriter::new();
+        // 蒙古文形态：PUA 码位 + 内部空格（词间分隔）+ 尾随空格
+        writer.add(
+            "aabn".to_string(),
+            vec![("\u{e226}\u{e2f4} \u{e341}\u{e2ca} ".to_string(), 0)],
+        );
+        // 同一 code 下「有尾随空格」与「无尾随空格」是两条不同词条，不得被并成一条
+        writer.add(
+            "ka".to_string(),
+            vec![("甲 ".to_string(), 10), ("甲".to_string(), 5)],
+        );
+        writer.write(&tmp).expect("write wdb");
+
+        let reader = DictReader::open(&tmp).expect("open wdb");
+        let m = reader.search("aabn");
+        assert_eq!(m.len(), 1);
+        assert_eq!(
+            m[0].text, "\u{e226}\u{e2f4} \u{e341}\u{e2ca} ",
+            "内部空格与尾随空格都须原样穿过缓存"
+        );
+
+        let ka = reader.search("ka");
+        assert_eq!(ka.len(), 2, "差一个尾随空格的两条词条须各自独立");
+        assert!(ka.iter().any(|e| e.text == "甲 " && e.weight == 10));
+        assert!(ka.iter().any(|e| e.text == "甲" && e.weight == 5));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     /// for_each_entry 应枚举全部 (code,text,weight),供反查索引构建(mmap 路径)。
     #[test]
     fn test_for_each_entry_enumerates_all() {
