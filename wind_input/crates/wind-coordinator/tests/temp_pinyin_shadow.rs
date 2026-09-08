@@ -470,3 +470,66 @@ fn freq_learned_in_pinyin_schema_reranks_temp_pinyin() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// ★★★ 词频重排必须用**归属方案**的算法，不是活跃引擎的。
+///
+/// `apply_freq_rerank_in` 内部曾以 `is_pinyin()`（活跃引擎）选算法，而它的其余取值早已按
+/// `schema_override` 走。五笔主方案下，临拼的拼音候选因此走进**码表 used-first** 分支：
+///
+/// | 模型 | 记一次词频后 |
+/// |---|---|
+/// | 拼音（位置提升，本该走的）| 位次**减半**式渐进前移 |
+/// | 码表（used-first，错走的）| 用过即跳到档内**最前**，且不衰减 |
+///
+/// 而拼音分支所用的 `FreqSettings.strategy/protect` 在 `freq_settings_for` 里是**占位值**
+/// （注释明写「仅码表排序用，取默认」），其前提正是拼音走不到 else 分支 —— 一旦走到，
+/// 用的就是一套没人为拼音校准过的参数。表现为「同一个 pinyin 桶、同一份数据，全拼用户与
+/// 五笔用户的临拼排序不同」，而切换开关是「主方案是什么」。
+///
+/// 判据取**渐进性**：记一次之后应当前移、但**不到首位**。这精确区分两个模型 —— 码表分支
+/// 会一步跳到最前。与 [`freq_learned_in_pinyin_schema_reranks_temp_pinyin`]（记 5 次后到
+/// 首位）合看：少量记录渐进、累积之后到顶，正是位置提升模型的形状。
+#[test]
+fn temp_pinyin_freq_uses_pinyin_model_not_codetable_used_first() {
+    let Some(base) = baseline("model", "ni") else {
+        return;
+    };
+    // 取一个足够靠后的候选：位次减半后仍不该到首位。
+    let idx = 8;
+    if base.len() <= idx {
+        eprintln!("跳过：`ni` 候选不足 {} 条", idx + 1);
+        return;
+    }
+    let target = base[idx].clone();
+
+    let (store, path) = fresh_store("wind_tps_freq_model.redb");
+    store
+        .record_freq("pinyin", "ni", &target)
+        .expect("record_freq 失败");
+
+    let mut cfg = wubi_config();
+    cfg.schema.pinyin.frequency.enabled = true;
+    let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), Arc::clone(&store));
+    coord.handle_key_event(&key_event(0xC0));
+    for c in "ni".chars() {
+        press_letter(&coord, c);
+    }
+    let after = coord.debug_all_candidate_texts();
+    let pos = after.iter().position(|t| *t == target).unwrap_or_else(|| {
+        panic!(
+            "目标 {target:?} 不该消失，实际: {:?}",
+            &after[..8.min(after.len())]
+        )
+    });
+
+    assert!(
+        pos < idx,
+        "记过一次词频应当前移：{target:?} 原第 {idx} 位、现第 {pos} 位"
+    );
+    assert!(
+        pos > 0,
+        "记**一次**不该直接跳到首位——那是码表 used-first 的形状，说明算法分支问的是活跃引擎\
+         而非归属方案（{target:?} 原第 {idx} 位）"
+    );
+    let _ = std::fs::remove_file(&path);
+}

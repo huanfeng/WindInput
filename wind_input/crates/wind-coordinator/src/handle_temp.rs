@@ -472,12 +472,13 @@ impl Coordinator {
         // 词频属于拼音那一份数据，不属于主方案（五笔）。按 active 归属会写进 `wubi86` 桶，
         // 而且开关也跟着取码表那档（出厂 `enabled = false`）⇒ 出厂配置下一个字都不学，
         // 用户在拼音方案里开的调频开关对临拼毫无作用。
+        // 走 `_cand_in` 而非 `record_selection_in`：临拼列表里现在有 emoji 候选，
+        // 那道 `is_emoji_suggestion` 守卫必须一起带上（见 `record_selection_cand_in`）。
         let temp_pinyin_owner = self.overlay_engine_schema(state);
-        self.record_selection_in(
+        self.record_selection_cand_in(
             temp_pinyin_owner.as_deref(),
             &self.freq_code(&state.temp_pinyin_buffer, cand),
-            &cand.text,
-            cand.source,
+            cand,
         );
         // 输入统计：每次临拼选词记一段（来源临时拼音）。
         self.record_commit(
@@ -795,12 +796,12 @@ impl Coordinator {
                     // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
                     // 临拼缓冲是击键域（双拼下 `siyr`），与候选码 `siyuan` 不同域。
                     // 归属同上，取临拼目标方案而非 active。
+                    // 同上走 `_cand_in`，带 emoji 守卫。
                     let temp_pinyin_owner = self.overlay_engine_schema(state);
-                    self.record_selection_in(
+                    self.record_selection_cand_in(
                         temp_pinyin_owner.as_deref(),
                         &self.freq_code(&code, &cand),
-                        &cand.text,
-                        cand.source,
+                        &cand,
                     );
                     self.record_commit(
                         &cand.text,

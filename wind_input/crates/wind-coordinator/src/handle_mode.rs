@@ -149,9 +149,28 @@ impl Coordinator {
     /// 于是按 `source` 反查第一个引擎类型匹配的成员——读写两端必须落同一个桶，否则就是
     /// 「写进 A、读的是 B」，记账看着成功而顺序永不动（本仓已栽过数次的形态）。
     ///
-    /// ⚠️ 同类型成员多于一个时取**靠前**的那个，与「成员顺序即候选优先级」同向。典型配置
-    /// （拼音 + 英文）下每类只有一个，不存在歧义；真配了两个拼音方案时它们本就折叠到同一个
-    /// `"pinyin"` 桶（`data_schema_id`），取谁都一样。
+    /// ⚠️ 同类型成员多于一个时取**靠前**的那个，与「成员顺序即候选优先级」同向。出厂配置
+    /// （`quick_input.*` + `$primary_pinyin` + `english`）下每类只有一个，不存在歧义。
+    ///
+    /// ⚠️ **以下三类成员配置会让读写落进不同的桶**。都是同一个根：候选合并后不带成员身份，
+    /// 写端只能猜。**已知局限，不是没想到**：
+    ///
+    /// 1. **两个码表型成员**（如 `[wubi86, kf]`）。码表不折叠（`data_schema_id` 返回自身
+    ///    id），读端按各自成员分桶，写端一律归靠前那个 ⇒ 在 `kf` 里选走的词写进 `wubi86` 桶。
+    /// 2. **成员本身是混输方案**（`wubi86_pinyin` 这类，出厂 `available` 里就有）。下面的
+    ///    `match` 只认 `Pinyin`/`CodeTable`/`English`，`EngineType::Mixed` 永远匹配不上
+    ///    ⇒ 返回 `None` ⇒ 落 active；而读端用的是该成员 id（`apply_freq_rerank_in` 里
+    ///    `is_mixed` 为真、走 `write_data_schema_id` 分流子桶）。active ≠ 该成员时两端分家。
+    /// 3. **`rare_char` 成员与真实码表成员并存**。生僻字成员用**活跃方案**查询、产出的候选
+    ///    `source` 是 CodeTable，下面的反查会把它配给那个真实码表成员。
+    ///
+    /// 权衡后留着：① 出厂 members（`quick_input.*` + `$primary_pinyin` + `english`）三类
+    /// 都不出现，每类引擎唯一、反查必然与读端同源；② 错配的后果与改动前（一律记进 active
+    /// 桶）同级，没有变糟。**要消除得给候选带上成员身份**（跨 crate 的侵入式改动），
+    /// 而不是在这里加启发式猜测——猜错的方向比现在更难查。
+    ///
+    /// **两个拼音成员是安全的**（`data_schema_id` 把 pinyin 型一律折叠到 `"pinyin"`，
+    /// 取谁都落同一个桶），这是上述三类之外唯一被论证过的多成员情形。
     ///
     /// ★ 无匹配时返回 `None` 而不是硬塞一个成员：生僻字成员（`rare_char`）的候选是用
     /// **活跃方案**查出来的，它本就该归 active；`quick_input.*` 那几个内置来源根本不是方案
@@ -1571,12 +1590,13 @@ impl Coordinator {
             let code = Self::cand_code(&state.mix_buffer, &cand);
             // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
             // 归属按候选来源反查成员方案，与读端逐段应用的归属同源（见 `mix_candidate_owner`）。
+            // 走 `_cand_in`：mix 列表里现在有 emoji 候选，那道 `is_emoji_suggestion`
+            // 守卫必须一起带上（见 `record_selection_cand_in`）。
             let mix_member_owner = self.mix_candidate_owner(state, &cand);
-            self.record_selection_in(
+            self.record_selection_cand_in(
                 mix_member_owner.as_deref(),
                 &self.freq_code(&state.mix_buffer, &cand),
-                &cand.text,
-                cand.source,
+                &cand,
             );
             self.record_commit(
                 &cand.text,
@@ -1612,23 +1632,29 @@ impl Coordinator {
             if !numeric {
                 // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
                 // 归属同上，与读端同源（见 `mix_candidate_owner`）。
+                // 同上走 `_cand_in`，带 emoji 守卫。
                 let freq_code = self.freq_code(&state.mix_buffer, &cand);
                 let mix_member_owner = self.mix_candidate_owner(state, &cand);
-                self.record_selection_in(
-                    mix_member_owner.as_deref(),
-                    &freq_code,
-                    &cand.text,
-                    cand.source,
-                );
-                state.committed_segs.push((
-                    state.mix_buffer.clone(), // 消费整串：回退码即整个缓冲
-                    code,
-                    cand.text.clone(),
-                    cand.source,
-                    cand.boundary,
-                ));
-                // 单段整句同样要造词（混输下拼音子引擎的整句一次上屏亦只 push 一段）。
-                self.learn_phrase_on_commit(state, cand.is_synthesized);
+                self.record_selection_cand_in(mix_member_owner.as_deref(), &freq_code, &cand);
+                // ⚠️ emoji 候选**不进分段、不参与造词**：它是按候选文本查表追加上去的，
+                // 与 `mix_buffer` 没有编码对应关系（`code` 恒空、`consumed_length` 恒 0）。
+                // 放进 `committed_segs` 会让 `learn_phrase_on_commit` 把它当成一段正常文本
+                // 参与造词，产出「你🙂」这类词条 —— 与「emoji 不记词频」是同一条理由
+                // （见 `record_selection_cand_in`），只是这条通向用户词库、后果更持久。
+                //
+                // ★ 主路径不受此影响是因为它的 emoji 候选走整体上屏那一支、本就不 push 段；
+                // mix 这一支是**无条件** push 的，故须显式排除。
+                if !cand.is_emoji_suggestion {
+                    state.committed_segs.push((
+                        state.mix_buffer.clone(), // 消费整串：回退码即整个缓冲
+                        code,
+                        cand.text.clone(),
+                        cand.source,
+                        cand.boundary,
+                    ));
+                    // 单段整句同样要造词（混输下拼音子引擎的整句一次上屏亦只 push 一段）。
+                    self.learn_phrase_on_commit(state, cand.is_synthesized);
+                }
             } else {
                 // 数字透镜（计算/日期/金额）无编码可记词频，但同样是一次上屏：
                 // 单独记历史，使「算完再按 ; 空格」能重复刚上屏的结果。

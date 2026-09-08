@@ -360,12 +360,34 @@ impl Coordinator {
     /// `every_record_selection_call_goes_through_freq_code` 同时扫描两个名字，记账码的
     /// 口径约束对本函数同样成立。
     pub(crate) fn record_selection_cand(&self, code: &str, cand: &Candidate) {
+        self.record_selection_cand_in(None, code, cand)
+    }
+
+    /// 同 [`Self::record_selection_cand`]，但可指定**归属方案**（overlay 用）。
+    ///
+    /// # 为什么 overlay 也需要这道 emoji 守卫
+    ///
+    /// 临拼与 mix 的候选列表里现在同样会插入 emoji（见各自装配函数末尾的
+    /// `apply_emoji_suggestions`），于是它们的上屏出口也成了「从 `state.candidates` 取候选」
+    /// 的路径——`record_selection_cand` 文档里那句「★ 凡是从 `state.candidates` 取候选上屏的
+    /// 路径都该走本函数」对它们同样成立。
+    ///
+    /// 不走的话：emoji 候选 `code` 恒空、`source` 恒 `None`，`freq_code` 落回缓冲串，写出
+    /// `("pinyin", "ni", "🙂")` 这样的行；而读端 `apply_freq_rerank_in` 跑在 emoji 插入
+    /// **之前**，这些行永远命中不了——正是当初撤掉 `input.emoji.learn_freq` 的那个理由
+    /// （「一个打开也不起作用的开关比没有更糟」），等于从后门把它放回来。
+    pub(crate) fn record_selection_cand_in(
+        &self,
+        schema_override: Option<&str>,
+        code: &str,
+        cand: &Candidate,
+    ) {
         if cand.is_emoji_suggestion {
             // 只跳词频，历史照记。
             self.push_commit_history(&cand.text);
             return;
         }
-        self.record_selection_in(None, code, &cand.text, cand.source);
+        self.record_selection_in(schema_override, code, &cand.text, cand.source);
     }
 
     /// 同 [`Self::record_selection`]，但可指定**生效方案**（特殊模式用，见
@@ -629,7 +651,22 @@ impl Coordinator {
         // 词频重排归属 engine 排序层（frequency.md §5/§7）：本协调器只负责取词频记录、按引擎
         // 类型分流到纯函数。码表/混输永久 used-first（§3），纯拼音走等效权重
         // （docs/design/freq-rerank-model.md）。
-        if self.engine_mgr.is_pinyin() {
+        //
+        // ★★★ 判据必须问**归属方案**（`is_pinyin_of(&active)`），不是活跃引擎。本函数的
+        // 其余取值（`active` / `freq_settings_for` / `freq_profile_for`）早已按
+        // `schema_override` 取，唯独选哪套算法这一处曾漏在 `is_pinyin()` 上。
+        //
+        // ⚠️ 漏的后果不是「差一点」，是**换了个模型**：`freq_settings_for` 的拼音分支返回的
+        // `strategy: Step` / `protect: NONE` 是**占位值**（注释明写「仅码表 used-first 排序用，
+        // 取默认」），其前提正是拼音永远走不到 else 分支。一旦临拼/mix 的拼音段在五笔主方案
+        // 下走进码表分支，拿到的是布尔 used-first（用过一次即跳到档内最前、**不衰减**），而
+        // 拼音方案自己是位次减半 + 半衰期；`promote_prefix` 那道「残码补全选一次就抢首位」的
+        // 防线（见 `POSITION_HALVING_BASE` 注释里的真机报障）随之整个失效。
+        //
+        // 表现为：同一个 `"pinyin"` 桶、同一份词频数据，全拼用户与五笔用户的临拼排序不同，
+        // 切换开关却是「主方案是什么」。特殊模式时期本函数只被码表语义的方案用，故此前无害；
+        // 临拼（`14f2a068`）与 mix（`b17c9a53`）开始复用它之后才成为缺陷。
+        if self.engine_mgr.is_pinyin_of(&active) {
             let profile = self.engine_mgr.pinyin_freq_profile();
             // （此处曾给「未消费整串的整句」标 `is_sentence_unanchored` 以摘掉顶部锚定：
             //  锚定是硬闸门而本次调用是最后一道整体排序，`buzhidaok` 下只消费 8/9 键的
@@ -4449,13 +4486,17 @@ mod finalize_candidates_tests {
                 ".record_selection(",
                 ".record_selection_cand(",
                 ".record_selection_in(",
+                ".record_selection_cand_in(",
             ];
             let sites = calls
                 .iter()
                 .flat_map(|pat| prod.match_indices(*pat).map(move |(off, _)| (off, *pat)));
             for (off, pat) in sites {
                 let args = &prod[off + pat.len()..];
-                let code_pos = if pat == ".record_selection_in(" { 1 } else { 0 };
+                // 带 `_in` 的两个多一个前置 schema 实参，记账码在第 2 位。
+                let code_pos = usize::from(
+                    pat == ".record_selection_in(" || pat == ".record_selection_cand_in(",
+                );
                 // 按括号深度切顶层逗号，取第 `code_pos` 个实参（实参可能是 `self.freq_code(a, b)`）。
                 let mut depth = 0i32;
                 let mut cur = 0usize;
@@ -4508,9 +4549,9 @@ mod finalize_candidates_tests {
         // 一份逐字相同的记账 + 拼接代码，合并进 `take_committed_with_highlight` 后四处并作一处，
         // 12 → 9。下调前务必确认是合并而非漏调——这条断言的用途正是逼人回来说明减少的原因。
         // `record_selection_cand` 的调用点计入同一总数（把某处改成它不会让计数下降）。
-        // ⚠️ 纳入 `record_selection_in` 后实扫 13 个（原 9，且原下限恰好等于实值、零余量）。
+        // ⚠️ 纳入 `record_selection_in` 后实扫 13（原 9、下限恰等实值零余量）；再加 `_cand_in` = 14。
         assert!(
-            checked >= 13,
+            checked >= 14,
             "只扫到 {checked} 个 record_selection 调用点，远少于预期——\
              调用点被改名或本测试的扫描方式失效了，先修测试再说"
         );
@@ -4562,6 +4603,8 @@ mod finalize_candidates_tests {
         ];
         const CALLS: &[&str] = &[
             ".record_selection_in(",
+            // emoji 守卫版：同样以 schema 为首个实参，归属约束一字不差地适用。
+            ".record_selection_cand_in(",
             ".apply_freq_rerank_in(",
             ".apply_shadow_in(",
             ".build_debug_schema_ctx(",
@@ -4619,10 +4662,10 @@ mod finalize_candidates_tests {
         //
         // ⚠️ 下限须**随 sources 扩容一起上调**，否则余量翻倍等于容忍悄悄丢掉调用点：
         // 把 `handle_temp.rs` 加进 sources 后实扫 13 个（原 9 个，下限却还留在 6）；
-        // 临拼词频改走 `record_selection_in` 后 +2 = 15；mix 读写接入 + handle_mode.rs 进表 = 20。
+        // 临拼词频改走 `record_selection_in` 后 +2 = 15；mix 读写接入 + handle_mode.rs 进表 = 20；`_cand_in` 进 CALLS = 21。
         // 与下调时同一条纪律——变动前先确认是「合并/删除」还是「漏调」。
         assert!(
-            checked >= 20,
+            checked >= 21,
             "只扫到 {checked} 个方案归属调用点，少于预期——扫描方式失效了，先修测试"
         );
     }
