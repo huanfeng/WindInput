@@ -581,6 +581,38 @@ impl MixedEngine {
         r.candidates
     }
 
+    /// 进候选列表的英文：**只取精确命中**（`code == 小写化输入`），并清掉码表域的
+    /// `is_exact_code`。
+    ///
+    /// ## 与 [`Self::english_candidates`] 的分工——**不要合并**
+    ///
+    /// 本函数管「显示哪些」，`english_candidates` 管「有没有」，后者服务于
+    /// `auto_commit_block_on_english` 的上屏否决，必须仍按**前缀**判：用户打到 `gith` 时
+    /// 精确命中还不存在，否决判据若也收窄成精确，满码就会在第 4 键把中文顶上屏，
+    /// `github` 永远敲不完。
+    ///
+    /// ## 为什么显示侧要收窄
+    ///
+    /// 实测混输打 `github` 混进 8 条（GitHub + GitHub Pages / Copilot / Copilot X /
+    /// Copilot CLI / Copilot chat / Flavored Markdown / Actions），把候选面整个占满；
+    /// 打 `hen` 时 Henderson、Hendrix 之流同样进列表。前缀扩展在中英混合输入里没有使用
+    /// 场景——想打某个英文词就继续敲完它。
+    ///
+    /// 清 `is_exact_code` 的理由同 [`crate::english_merge::lookup`]：那是码表域标志
+    /// （语义为「码 == 输入的完全匹配」，服务码表精确档），跨来源带进列表会让英文在协调器
+    /// 的 `cmp_exact_first`（位置在 `by_weight` 之前）无条件压过全部中文候选。
+    fn english_display_candidates(&self, input: &str, max_candidates: usize) -> Vec<Candidate> {
+        let lower = input.to_lowercase();
+        self.english_candidates(input, max_candidates)
+            .into_iter()
+            .filter(|c| c.code == lower)
+            .map(|mut c| {
+                c.is_exact_code = false;
+                c
+            })
+            .collect()
+    }
+
     /// 超长输入（input_len > max_code_len）分支：按 pinyin_only_overflow 分流。
     /// - true（默认）：仅查拼音；长码特例下（完整 input 有精确/更长后继）追加码表候选。
     /// - false：码表取前 N 码（+ 长码特例追加完整 input）+ 拼音完整输入，混合竞争。
@@ -607,7 +639,7 @@ impl MixedEngine {
             let pinyin_split = Self::pinyin_split_of(&py, input);
             let pinyin = py.candidates;
             // 英文候选（enable_english 开时）：与拼音/码表统一混入（对齐 Go 各路径处理英文）。
-            let english = self.english_candidates(input, max_candidates);
+            let english = self.english_display_candidates(input, max_candidates);
             // 码表回捞（两条互补的口子，任一成立即把码表候选并回来；档位隔离由
             // `truncation_tier` 负责，不再靠给拼音 ÷100 来避免档位重叠）：
             // - 长码特例 `has_full_or_longer`：**整串**在码表有精确匹配/更长后继。只有码长可变
@@ -708,7 +740,7 @@ impl MixedEngine {
                 c.is_exact_code = c.code == input;
             }
             // 英文候选（enable_english 开时）：并入码表位，与拼音一同竞争。
-            codetable.extend(self.english_candidates(input, max_candidates));
+            codetable.extend(self.english_display_candidates(input, max_candidates));
             // 超码长走**另一个**开关（默认保留部分候选：这里已是纯拼音语境，长拼音的分步
             // 上屏要留着）。上方三处判据函数（`is_ambiguous_pinyin_word` /
             // `pinyin_claims_overflow` / `pinyin_has_any`）**刻意仍走 `convert`**：它们问的是
@@ -835,7 +867,7 @@ impl Engine for MixedEngine {
         let has_pinyin = !pinyin.is_empty();
         let mut merged = codetable;
         merged.extend(pinyin);
-        merged.extend(self.english_candidates(input, max_candidates));
+        merged.extend(self.english_display_candidates(input, max_candidates));
         // 排序 → 去重 → 带拼音保底配额截断（与 overflow 路径共用，见 `sort_dedup_truncate`）。
         // 判据串与上面那段内联加成逐字同源：码表看 `code == input`，英文看 `code == 小写 input`。
         let ctx = TruncationCtx {
@@ -2188,9 +2220,14 @@ mod tests {
 
     #[test]
     fn mixed_mixes_english_when_enabled() {
-        // enable_english（english=Some）：混输主路径应混入英文词库候选（前缀匹配）。
+        // enable_english（english=Some）：混输主路径应混入英文词库候选。
+        // ⚠️ 判据是**精确命中**——显示侧走 `english_display_candidates`，前缀扩展不入列
+        // （见该函数文档）。此前本用例打 `hel` 期望出 `hello`，那是收窄前的行为。
+        // ⚠️ 词必须 ≤ 4 字符：`ct_engine` 的 max_code_length=4，更长的输入走
+        // `convert_overflow`，而该分支在 `secondary=None`（本用例无拼音子引擎）时直接
+        // 早退只查码表，英文根本不参与——那样测的就不是本用例要测的东西了。
         let primary = ct_engine(&[("hao", "好", 100)], false);
-        let english = english_engine(&[("hello", "hello", 50), ("help", "help", 40)]);
+        let english = english_engine(&[("help", "help", 50), ("helpful", "helpful", 40)]);
         let e = MixedEngine::new(
             primary,
             None,
@@ -2200,18 +2237,37 @@ mod tests {
                 ..Default::default()
             },
         );
-        let r = e.convert("hel", 50).unwrap();
+        let r = e.convert("help", 50).unwrap();
         assert!(
-            r.candidates.iter().any(|c| c.text == "hello"),
-            "开启英文时混输应含英文候选 hello，实际: {:?}",
+            r.candidates.iter().any(|c| c.text == "help"),
+            "开启英文时混输应含英文候选 help，实际: {:?}",
             r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
         );
         assert!(
             r.candidates
                 .iter()
-                .filter(|c| c.text == "hello" || c.text == "help")
-                .all(|c| c.source == CandidateSource::English),
-            "英文候选来源应标记 English"
+                .filter(|c| c.text == "help")
+                .all(|c| c.source == CandidateSource::English && !c.is_exact_code),
+            "英文候选须标记 English，且不得带着码表域的 is_exact_code"
+        );
+        assert!(
+            !r.candidates.iter().any(|c| c.text == "helpful"),
+            "同一次查询里的前缀扩展 helpful 不得入列"
+        );
+
+        // ★ 前缀扩展不入列：打 `hel` 一条英文都不该有。
+        let r_prefix = e.convert("hel", 50).unwrap();
+        assert!(
+            !r_prefix
+                .candidates
+                .iter()
+                .any(|c| c.source == CandidateSource::English),
+            "前缀扩展进了列表：{:?}",
+            r_prefix
+                .candidates
+                .iter()
+                .map(|c| &c.text)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2238,8 +2294,12 @@ mod tests {
     #[test]
     fn mixed_english_respects_min_length() {
         // min_english_length=3：2 字符以内不查英文，3 字符起才混入。
+        //
+        // ★ 短词 `he` 在词库里是**精确命中**，却仍须被长度闸门挡掉——这样测的才是长度闸门
+        // 本身。收窄前用的是「`he` 无精确命中、`hel` 前缀命中 hello」，长度闸门与精确性
+        // 两个判据混在一起，闸门失效也测不出来。
         let primary = ct_engine(&[("x", "叉", 100)], false);
-        let english = english_engine(&[("hello", "hello", 50)]);
+        let english = english_engine(&[("he", "he", 60), ("hel", "hel", 50)]);
         let e = MixedEngine::new(
             primary,
             None,
@@ -2252,13 +2312,14 @@ mod tests {
         );
         let r2 = e.convert("he", 50).unwrap();
         assert!(
-            !r2.candidates.iter().any(|c| c.text == "hello"),
-            "2 字符（< min 3）不应出英文候选"
+            !r2.candidates.iter().any(|c| c.text == "he"),
+            "2 字符（< min 3）不应出英文候选，哪怕它是精确命中"
         );
         let r3 = e.convert("hel", 50).unwrap();
         assert!(
-            r3.candidates.iter().any(|c| c.text == "hello"),
-            "3 字符（>= min 3）应出英文候选"
+            r3.candidates.iter().any(|c| c.text == "hel"),
+            "3 字符（>= min 3）应出英文候选，实际: {:?}",
+            r3.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
         );
     }
 

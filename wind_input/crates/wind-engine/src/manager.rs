@@ -2722,12 +2722,7 @@ impl EngineManager {
             ConvertResult::default()
         });
         if let Some((eng, cfg)) = self.english_merge_ctx(&engine) {
-            let english = crate::english_merge::lookup(
-                eng.as_ref(),
-                input,
-                cfg.min_length,
-                crate::english_merge::seats_for(max_candidates),
-            );
+            let english = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
             if !english.is_empty() {
                 // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
                 // `AGENTS.md`：否决必须叠「对方确有候选」——本分支已在 `!english.is_empty()`

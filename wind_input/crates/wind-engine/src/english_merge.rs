@@ -26,33 +26,38 @@
 //! `max_candidates`（`ConvertOptions::admit` 的实测表里 `ni` 装满 100 条），英文若追加在
 //! 尾部再截断，会被**全部**丢掉——用户打开开关后什么也看不到，且日志、设置页均无痕迹。
 //!
-//! 故本模块反过来做：**取数时就按席位数取**（[`seats_for`]），取回来的每一条都保证活到
-//! 最后（[`merge`] 先腾座后追加）。代价是英文条数有上限，而这正是想要的——用户要的是
-//! 「打 hello 能看见 hello」，不是「hello 的二十个前缀词把候选页占满」。
+//! 故本模块反过来做：**取回来的每一条都保证活到最后**（[`merge`] 先腾座后追加）。
+//!
+//! 「英文条数」本身由 [`lookup`] 的**精确命中收窄**限住（至多 [`EXACT_MAX`] 条），
+//! 不再需要按 `max_candidates` 比例分席——用户要的是「打 hello 能看见 hello」，
+//! 不是「hello 的二十个前缀词把候选页占满」。
+//!
+//! ## 位次不在本模块决定
+//!
+//! 本模块只管「查哪些、谁活下来」。英文候选**排第几**由协调器
+//! `place_english_after_common_exact` 在所有排序（含自动调频）跑完之后统一定位：
+//! 排在「中文常用精确解」之后、其余候选之前。放在这里做不到——引擎看不见协调器随后并入的
+//! 短语候选，也看不见调频的位置提升。
 
 use crate::engine::Engine;
 use wind_candidate::Candidate;
 
-/// 英文候选至多占 `max_candidates / ENGLISH_QUOTA_DIVISOR` 席。
+/// 扫描窗口：向英文引擎取多少条原始命中，用来从中挑出精确匹配。
 ///
-/// 比混输给拼音的保底（`PINYIN_QUOTA_DIVISOR = 5`，即 20%）小一半：拼音保底是为了让**整类
-/// 来源**在码表洪水下不至于全军覆没，可能需要几十条；英文要的只是「用户正在打的那个词
-/// 及其少数几个补全」，多给的席位全是噪音。
-const ENGLISH_QUOTA_DIVISOR: usize = 10;
+/// 英文引擎是前缀匹配（`hen` → hen / hence / Henderson…），且**精确整串恒居首**
+/// （`CodeTableEngine` 的 `整串精确匹配应居首` 守门断言）。取 8 条是给「同码多形态」
+/// （`she` / `She`）留余量，不是给前缀留的——前缀在下面被整片丢弃。
+const EXACT_SCAN: usize = 8;
 
-/// 英文席位硬上限。`max_candidates` 在协调器侧可放到数百（生僻字模式会加大重取），
-/// 光靠比例分母会让英文席位跟着膨胀，而英文的有效候选数并不随之增长。
-const ENGLISH_MAX_SEATS: usize = 5;
+/// 精确命中至多保留几条。
+///
+/// 同一个码可能对应多条词条（大小写形态、`she` / `she'd` 那种撇号变体在**本表里不同码**
+/// 故不在此列）。2 条足够，且候选面上英文再多也没有意义。
+const EXACT_MAX: usize = 2;
 
 /// 最小触发长度的回退值（配置为 0 时）。与 `manager::build_engine` 给
 /// `schema.mix.min_english_length` 的回退**同值**，两处口径一致。
 const DEFAULT_MIN_LENGTH: usize = 3;
-
-/// 本次转换分给英文的席位数。恒 ≥ 1：`max_candidates` 很小时（协调器某些探针只要几条）
-/// 比例算下来会是 0，那等于开关静默失效。
-pub fn seats_for(max_candidates: usize) -> usize {
-    (max_candidates / ENGLISH_QUOTA_DIVISOR).clamp(1, ENGLISH_MAX_SEATS)
-}
 
 /// 配置值 0 视作「用回退值」，口径同 `schema.mix.min_english_length`。
 pub fn min_length_or_default(configured: usize) -> usize {
@@ -63,32 +68,69 @@ pub fn min_length_or_default(configured: usize) -> usize {
     }
 }
 
-/// 查英文词库。短输入不查（避免两三个字母就刷一屏前缀词）。
+/// 查英文词库，**只取精确命中**（`code == 小写化输入`）。短输入不查。
+///
+/// ## ★ 为什么丢弃前缀扩展
+///
+/// 英文引擎是前缀匹配，`hen` 会带出 hence / henceforth / Henderson / Hendrix，
+/// `github` 会带出 GitHub Pages / GitHub Copilot CLI 等 7 条长词组（实测）。这些条目在
+/// 本功能里**没有任何使用场景**：用户在打中文时它们是纯噪音；用户真想打某个英文词时，
+/// 正确操作是继续敲完（`githu` → `github`），而不是从一屏 GitHub 开头的词组里挑。
+///
+/// 丢掉前缀后英文候选天然只剩 1~2 条，**配额机制随之取消**（原先按
+/// `max_candidates/10` 封顶 5 席的 `seats_for` 已删）——不是放宽，是那个问题不存在了：
+/// 当初要配额正是因为前缀扩展会成片涌入。
+///
+/// ## ⚠️ 与 [`has_any`] 的判据**刻意不同**
+///
+/// 本函数管「显示哪些」，`has_any` 管「要不要否决上屏」。后者必须仍看**前缀**：
+/// 用户打到 `gith` 时精确命中还不存在，若否决判据也收窄成精确，五笔满码就会在第 4 键
+/// 把中文顶上屏，`github` 永远敲不完——那正是 `block_commit` 存在的理由。
+/// 两者收窄一处、保留一处，是这次改动里最容易被后人「顺手统一」掉的地方。
+///
+/// ## 清 `is_exact_code`
+///
+/// 该标志是**码表域**的（语义为「码 == 输入的完全匹配」，服务于码表精确档），而拼音引擎
+/// 从不设它。把它跨来源带进拼音候选列表，会让英文在协调器的 `cmp_exact_first`
+/// （位置在 `by_weight` **之前**）无条件压过全部中文——真机现象即「打 hen，权重 500 的
+/// 英文排在权重 86016 的『很』之前」。英文不是赢了权重，是赢在一个拼音压根没参赛的键上。
 ///
 /// 输入小写化以匹配英文词库（`EnglishEngine` 的 code 列已小写化）。查询失败静默退化为空
 /// ——英文只是捎带的增强，不该让它的故障影响主候选（同 `Engine::convert` 永不 panic 的约定）。
-pub fn lookup(
-    english: &dyn Engine,
-    input: &str,
-    min_length: usize,
-    seats: usize,
-) -> Vec<Candidate> {
+pub fn lookup(english: &dyn Engine, input: &str, min_length: usize) -> Vec<Candidate> {
     if input.chars().count() < min_length_or_default(min_length) {
         return Vec::new();
     }
     let lower = input.to_lowercase();
-    match english.convert(&lower, seats) {
-        Ok(r) => r.candidates,
-        Err(_) => Vec::new(),
-    }
+    let Ok(r) = english.convert(&lower, EXACT_SCAN) else {
+        return Vec::new();
+    };
+    r.candidates
+        .into_iter()
+        .filter(|c| c.code == lower)
+        .map(|mut c| {
+            // 见函数文档「清 is_exact_code」。
+            c.is_exact_code = false;
+            c
+        })
+        .take(EXACT_MAX)
+        .collect()
 }
 
 /// 是否存在英文候选。供**上屏否决**判据用（`wind-engine/AGENTS.md`：否决必须叠
 /// 「对方确有候选」，只看开关就禁上屏会把「英文被顶掉」修成「谁都上不了屏」）。
 ///
-/// 只问有无，故只取 1 条。
+/// ⚠️ **仍按前缀判**，不复用 [`lookup`] 的精确收窄——理由见该函数文档「与 has_any 的判据
+/// 刻意不同」。只问有无，故只取 1 条。
 pub fn has_any(english: &dyn Engine, input: &str, min_length: usize) -> bool {
-    !lookup(english, input, min_length, 1).is_empty()
+    if input.chars().count() < min_length_or_default(min_length) {
+        return false;
+    }
+    let lower = input.to_lowercase();
+    match english.convert(&lower, 1) {
+        Ok(r) => !r.candidates.is_empty(),
+        Err(_) => false,
+    }
 }
 
 /// 把英文候选混入 `base`，保证它们活过截断。
@@ -184,7 +226,7 @@ mod tests {
 
         // 正向对照：无洪水时英文在场。
         let mut calm = pinyin_flood(2);
-        merge(&mut calm, lookup(&eng, "hel", 0, seats_for(max)), max);
+        merge(&mut calm, lookup(&eng, "hello", 0), max);
         assert!(
             !english_texts(&calm).is_empty(),
             "无洪水时英文应在场——否则下面那条断言测不到东西"
@@ -192,13 +234,71 @@ mod tests {
 
         // 洪水：拼音已装满 max，英文仍须活下来，且总数不超 max。
         let mut flooded = pinyin_flood(max);
-        merge(&mut flooded, lookup(&eng, "hel", 0, seats_for(max)), max);
+        merge(&mut flooded, lookup(&eng, "hello", 0), max);
         assert_eq!(
             english_texts(&flooded),
-            vec!["hello", "help"],
+            vec!["hello"],
             "拼音装满配额时英文被整片截掉 = 开关等于没做"
         );
         assert_eq!(flooded.len(), max, "腾座后总数不得超出 max_candidates");
+    }
+
+    /// ★ 只收精确命中：前缀扩展一条都不进列表。
+    ///
+    /// 真机现象：全拼打 `hen` 混进 hen / hence / henceforth / Henderson / Hendrix 五条，
+    /// 后四条纯噪音；混输打 `github` 混进 8 条 GitHub 开头的长词组。
+    #[test]
+    fn prefix_expansions_are_dropped() {
+        let eng = FakeEnglish(vec![
+            ("hen", "hen"),
+            ("hence", "hence"),
+            ("henderson", "Henderson"),
+            ("hendrix", "Hendrix"),
+        ]);
+        let got = lookup(&eng, "hen", 0);
+        assert_eq!(
+            got.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["hen"],
+            "前缀扩展必须整片丢弃，只留精确命中"
+        );
+
+        // 没有精确命中时一条都不出——用户该继续敲完，而不是从前缀词里挑。
+        assert!(
+            lookup(&eng, "hend", 0).is_empty(),
+            "`hend` 无精确命中，不得拿 Henderson/Hendrix 顶上"
+        );
+    }
+
+    /// ★ 上屏否决仍按**前缀**判，不随 `lookup` 一起收窄成精确。
+    ///
+    /// 收窄了的话，五笔打到第 4 键 `gith` 时精确命中还不存在 ⇒ 否决不生效 ⇒ 满码把中文
+    /// 顶上屏 ⇒ `github` 永远敲不完。这正是 `block_commit` 要防的事。
+    #[test]
+    fn veto_still_matches_prefix() {
+        let eng = FakeEnglish(vec![("github", "GitHub")]);
+        assert!(
+            lookup(&eng, "gith", 0).is_empty(),
+            "前提：`gith` 无精确命中（否则下面测不到差别）"
+        );
+        assert!(
+            has_any(&eng, "gith", 0),
+            "否决判据必须仍按前缀命中，否则打到一半就被顶上屏"
+        );
+        // 短输入门槛对否决同样生效。
+        assert!(!has_any(&eng, "gi", 0), "两字母不该触发否决");
+    }
+
+    /// 精确命中清掉 `is_exact_code`：那是码表域标志，跨来源带进拼音列表会让英文
+    /// 在协调器 `cmp_exact_first`（位置在 `by_weight` 之前）无条件压过全部中文。
+    #[test]
+    fn exact_hit_clears_codetable_flag() {
+        let eng = FakeEnglish(vec![("hen", "hen")]);
+        let got = lookup(&eng, "hen", 0);
+        assert_eq!(got.len(), 1);
+        assert!(
+            !got[0].is_exact_code,
+            "英文候选不得带着码表域的 is_exact_code 进跨来源列表"
+        );
     }
 
     /// 短输入不查英文：两个字母就刷前缀词会淹掉正常中文输入。
@@ -206,22 +306,12 @@ mod tests {
     fn short_input_skips_lookup() {
         let eng = FakeEnglish(vec![("he", "he"), ("hello", "hello")]);
         assert!(
-            lookup(&eng, "he", 0, 5).is_empty(),
+            lookup(&eng, "he", 0).is_empty(),
             "默认回退长度 3，两字母不该查"
         );
-        assert!(!lookup(&eng, "hel", 0, 5).is_empty());
+        assert!(!lookup(&eng, "hello", 0).is_empty());
         // 显式配置覆盖回退值。
-        assert!(!lookup(&eng, "he", 2, 5).is_empty());
-    }
-
-    /// 席位恒 ≥1：`max_candidates` 很小时比例算下来是 0，那等于开关静默失效。
-    #[test]
-    fn seats_never_zero() {
-        assert_eq!(seats_for(0), 1);
-        assert_eq!(seats_for(5), 1);
-        assert_eq!(seats_for(20), 2);
-        assert_eq!(seats_for(100), 5, "硬上限 5，不随 max 膨胀");
-        assert_eq!(seats_for(1000), 5);
+        assert!(!lookup(&eng, "he", 2).is_empty());
     }
 
     /// 同文本不重复入列，且被丢弃那条的码位并进幸存者。
@@ -234,7 +324,7 @@ mod tests {
             source: CandidateSource::English,
             ..Default::default()
         }];
-        merge(&mut base, lookup(&eng, "ok", 1, 5), 10);
+        merge(&mut base, lookup(&eng, "ok", 1), 10);
         assert_eq!(base.len(), 1, "同文本不该重复入列");
     }
 }

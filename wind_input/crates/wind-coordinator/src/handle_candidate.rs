@@ -148,6 +148,62 @@ pub(crate) fn candidate_display_order(
         .then(a.natural_order.cmp(&b.natural_order))
 }
 
+/// 把英文候选统一定位到「中文常用精确解之后、其余候选之前」。
+///
+/// ## 为什么是后置定位，而不是往 [`candidate_display_order`] 加一个比较键
+///
+/// 比较器对**每一对**候选生效，加键必然改变非英文候选之间的既有次序——这正是
+/// `by_source_tier` 被 `mixed` 参数挡住的原因（其注释记着：纯拼音下它会退化成
+/// 「`is_common` 优先」，把含生僻字的多字词硬降到全部常用单字之后，是明显回归）。
+/// 想只对「英文 vs 中文」表态、对「中文 vs 中文」返回 `Equal` 的比较器**不是全序**，
+/// `sort_by` 在偏序下给出的次序是未指定的。
+///
+/// 后置定位没有这个问题：它只搬动英文那几条，**可证明不改变任何两条非英文候选的相对
+/// 次序**（其余候选按原序原样收进 `rest`）。
+///
+/// ## 判据：插在「开头那段连续的常用精确解」之后
+///
+/// `source_tier <= 1` 即「码表精确 / 精确码短语 / 拼音精确档」——`is_pinyin_exact_tier`
+/// 要求消费整串、非前缀/子短语/简拼/模糊、且 `is_common`。三个真实场景：
+///
+/// | 输入 | 中文侧 | 结果 |
+/// |---|---|---|
+/// | `hen` | 很/恨/狠/痕 都是常用精确解 | 很 恨 狠 痕 **hen** 佷 𬣳… |
+/// | `hello` | 只有「和理论哦」（Viterbi 整句，消费整串） | 和理论哦 **hello** 和 喝… |
+/// | `github` | 无中文候选 | **GitHub** |
+///
+/// 于是「中文侧解得好就让位、解不出就上前」是自动的，不需要权重阈值——而阈值在这里根本
+/// 无从标定：英文词库权重（`hen 800` / `shi 500`）与拼音词库权重（`很 86016`）是两套
+/// 互不相干的量纲。
+///
+/// ⚠️ **取开头的连续段，不是 `rposition`**。用「最后一条常用精确解」作锚会让英文被推到
+/// 列表深处——词频重排可能把某条常用词提到很靠后的位置之后，那条就成了锚。连续段是
+/// 有界的，且与「用户第一屏看到什么」这个真实关切对齐。
+pub(crate) fn place_english_after_common_exact(candidates: &mut Vec<Candidate>, input: &str) {
+    if input.is_empty()
+        || !candidates
+            .iter()
+            .any(|c| c.source == CandidateSource::English)
+    {
+        return;
+    }
+    let mut english: Vec<Candidate> = Vec::new();
+    let mut rest: Vec<Candidate> = Vec::with_capacity(candidates.len());
+    for c in std::mem::take(candidates) {
+        if c.source == CandidateSource::English {
+            english.push(c);
+        } else {
+            rest.push(c);
+        }
+    }
+    let pos = rest
+        .iter()
+        .take_while(|c| wind_candidate::source_tier(c, input) <= 1)
+        .count();
+    rest.splice(pos..pos, english);
+    *candidates = rest;
+}
+
 /// 满码空码清空的**最终复核**：候选列表里是否存在「拦得住清空」的候选。
 ///
 /// 清空要穿过三道门，缺一不可：
@@ -1219,6 +1275,11 @@ impl Coordinator {
             .take_while(|c| !c.is_scope_filtered)
             .count();
         self.apply_freq_rerank(&mut candidates[..rerank_len], &state.input_buffer);
+        // 英文候选定位：排在「中文常用精确解」之后、其余候选之前。
+        // **必须在词频重排之后**——那是最后一道整体排序，放它之前会被位置提升搅乱
+        // （真机现象：打 `hen` 英文第一、打 `shi` 英文不在第一，差别只是用户对哪个音节
+        // 选得多）。放在 shadow 之前——shadow 是用户显式置顶，保留最终话语权。
+        place_english_after_common_exact(&mut candidates, &state.input_buffer);
         // Shadow 的取码口与写端 `candidate_op_scope` 同源（见 `shadow_code_of`）——双拼下
         // 是归一后的全拼码，其余恒为击键。⚠️ 与上一行的词频记账**刻意不同域**：那条链有
         // 自己的 `freq_code`（码表按输入码、拼音按候选码），两者别互相照抄。
@@ -5504,5 +5565,127 @@ mod dynamic_candidate_shadow_tests {
             Some("2026-07-29"),
             "不记词频不等于不记上屏历史"
         );
+    }
+}
+
+#[cfg(test)]
+mod english_placement_tests {
+    use super::*;
+
+    /// `consumed`：0 = 未标注（按整串算），与 `is_pinyin_exact_tier` 同约定。
+    fn zh(text: &str, code: &str, common: bool, consumed: usize) -> Candidate {
+        Candidate {
+            text: text.into(),
+            code: code.into(),
+            source: CandidateSource::Pinyin,
+            is_common: common,
+            consumed_length: consumed,
+            ..Default::default()
+        }
+    }
+
+    fn en(text: &str, code: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            code: code.into(),
+            source: CandidateSource::English,
+            ..Default::default()
+        }
+    }
+
+    fn texts(c: &[Candidate]) -> Vec<&str> {
+        c.iter().map(|x| x.text.as_str()).collect()
+    }
+
+    /// 真机场景一：`hen`。很/恨/狠/痕 是常用精确解，佷/𬣳 是生僻字。
+    /// 英文插在常用段之后、生僻字之前。
+    ///
+    /// 修复前：英文靠 `is_exact_code`（码表域标志）在 `cmp_exact_first` 压过全部中文，
+    /// 权重 500 的 hen 排在权重 86016 的「很」之前。
+    #[test]
+    fn english_lands_after_common_exact_run() {
+        let mut v = vec![
+            zh("很", "hen", true, 3),
+            zh("恨", "hen", true, 3),
+            zh("狠", "hen", true, 3),
+            zh("痕", "hen", true, 3),
+            zh("佷", "hen", false, 3),
+            zh("𬣳", "hen", false, 3),
+            en("hen", "hen"),
+        ];
+        place_english_after_common_exact(&mut v, "hen");
+        assert_eq!(
+            texts(&v),
+            vec!["很", "恨", "狠", "痕", "hen", "佷", "𬣳"],
+            "英文应紧跟在开头那段常用精确解之后"
+        );
+    }
+
+    /// 真机场景二：`hello`。中文侧只有 Viterbi 整句「和理论哦」消费了整串，
+    /// 其余单字只消费 2 字节 ⇒ 不在精确档。英文因此排到第 2 位。
+    ///
+    /// ★ 这条锁的是「中文解得差时英文自动上前」——不需要任何权重阈值。
+    #[test]
+    fn english_second_when_chinese_side_is_thin() {
+        let mut v = vec![
+            zh("和理论哦", "hello", true, 5),
+            zh("和", "he", true, 2),
+            zh("喝", "he", true, 2),
+            en("hello", "hello"),
+        ];
+        place_english_after_common_exact(&mut v, "hello");
+        assert_eq!(texts(&v), vec!["和理论哦", "hello", "和", "喝"]);
+    }
+
+    /// 真机场景三：`github`。中文侧无候选 ⇒ 英文自然居首。
+    #[test]
+    fn english_first_when_no_chinese() {
+        let mut v = vec![en("GitHub", "github")];
+        place_english_after_common_exact(&mut v, "github");
+        assert_eq!(texts(&v), vec!["GitHub"]);
+    }
+
+    /// ★★ 不得改变任何两条**非英文**候选的相对次序。
+    ///
+    /// 这是选择「后置定位」而不是「往 `candidate_display_order` 加比较键」的全部理由：
+    /// 比较键对每一对候选生效，必然扰动中文之间的既有次序（`by_source_tier` 被 `mixed`
+    /// 挡住正是同一个原因）。
+    #[test]
+    fn non_english_order_untouched() {
+        // 刻意乱序：常用/生僻交替，且不按 tier 排好——后置定位不该「顺手」整理它们。
+        let base = vec![
+            zh("很", "hen", true, 3),
+            zh("𬣳", "hen", false, 3),
+            zh("恨", "hen", true, 3),
+            zh("哏", "hen", false, 3),
+        ];
+        let mut v = base.clone();
+        v.push(en("hen", "hen"));
+        place_english_after_common_exact(&mut v, "hen");
+
+        let non_en: Vec<&str> = v
+            .iter()
+            .filter(|c| c.source != CandidateSource::English)
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(non_en, texts(&base), "非英文候选的相对次序必须原样保持");
+        // 开头连续常用段只有「很」一条（第 2 条即生僻字断开），故英文插在第 2 位。
+        assert_eq!(texts(&v)[1], "hen");
+    }
+
+    /// 无英文候选 / 空输入时是空操作。
+    #[test]
+    fn noop_without_english_or_input() {
+        let base = vec![zh("很", "hen", true, 3), zh("恨", "hen", true, 3)];
+
+        let mut v = base.clone();
+        place_english_after_common_exact(&mut v, "hen");
+        assert_eq!(texts(&v), texts(&base), "无英文候选时不得改动列表");
+
+        let mut v2 = base.clone();
+        v2.push(en("hen", "hen"));
+        let before = texts(&v2).iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        place_english_after_common_exact(&mut v2, "");
+        assert_eq!(texts(&v2), before, "空输入时早退，不得改动列表");
     }
 }

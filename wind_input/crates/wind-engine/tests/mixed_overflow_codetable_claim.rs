@@ -567,9 +567,14 @@ fn english_prefix_alone_does_not_take_overflow() {
         Some("就是"),
         "英文仅前缀命中 ⇒ 归属仍归码表，「就是」应排第一，实际 {c:?}"
     );
+    // ★ 前缀扩展**不再入列**（此前这里断言的是「仍应混入供选择」）。
+    // 显示侧已收窄为只收精确命中（`MixedEngine::english_display_candidates`）：
+    // `yijga` 在英文库无精确整串，故 `Yijgatron` 这条前缀候选不该出现在候选面上。
+    // 归属判据（上面那条 assert_eq）不受影响——它问的是「谁主张这一串」，
+    // 走的是 `english_claims_overflow` 的精确整串判据，与显示侧本就是两回事。
     assert!(
-        c.iter().any(|t| t == "Yijgatron"),
-        "英文前缀候选仍应混入供选择：{c:?}"
+        !c.iter().any(|t| t == "Yijgatron"),
+        "前缀扩展不得入列（只收精确命中）：{c:?}"
     );
 }
 
