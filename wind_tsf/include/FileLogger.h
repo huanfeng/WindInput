@@ -30,13 +30,20 @@
 //
 // Output modes (controlled by config file):
 //   none        - No output (default, near-zero overhead)
-//   file        - Write to %LOCALAPPDATA%\<WIND_LOG_DIR_NAME>\logs\tsf_log\<前缀>.<宿主名>.<pid>.log
+//   file        - Write to <日志根>\tsf_log\<前缀>.<宿主名>.<pid>.log
 //   debugstring - OutputDebugStringW only (viewable in DebugView)
 //   all         - Both file and OutputDebugStringW
 //
-// Config file: %LOCALAPPDATA%\<WIND_LOG_DIR_NAME>\logs\<WIND_LOG_CONFIG_NAME>
+// Config file: <日志根>\<WIND_LOG_CONFIG_NAME>
 //   mode=none
 //   level=debug
+//   dump_hotkey=0
+//
+// ★ <日志根> 有两种，判据见 _BuildPaths：
+//   便携部署（安装根下有 portable_mode 标记）→ <安装根>\userdata\logs
+//   其余                                    → %LOCALAPPDATA%\<WIND_LOG_DIR_NAME>\logs
+// 两条与 Rust 侧 `Config::log_dir()` 逐字对齐。便携版**绝不可**写 %LOCALAPPDATA%——
+// 那会让「拔盘走人不留痕」落空，而日志里带着宿主进程名。
 //
 // Multi-process safety: 每进程一个日志文件，本进程独占 → 无需任何跨进程同步
 // Thread safety:  进程**内**仍需同步（_fileLock）——至少两个线程会写日志：TSF 输入线程

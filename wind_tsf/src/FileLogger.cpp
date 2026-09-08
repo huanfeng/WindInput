@@ -1,4 +1,5 @@
 #include "FileLogger.h"
+#include "InstallPaths.h"  // WindResolveInstallRoot / WindIsPortableRoot
 #include <shlobj.h>  // SHGetFolderPathW
 #include <cstdio>
 #include <cstring>
@@ -6,6 +7,35 @@
 // ============================================================================
 // CFileLogger implementation
 // ============================================================================
+
+// 逐级创建目录（`a\b\c` 里缺哪层建哪层）。
+//
+// 便携形态下日志目录是 `<安装根>\userdata\logs`，而 `userdata\` 这一层未必已经存在——
+// TSF DLL 由宿主加载、再由它去拉服务，本函数跑的时候服务可能还没建过任何目录。
+// `CreateDirectoryW` 只建最后一层，父目录缺失时直接失败，表现是便携版**一行日志都没有**。
+//
+// ⚠️ 跑在 loader lock 之下（`Init` ← `DllMain`），故只用 kernel32 的目录 API。
+static void _EnsureDirRecursive(const wchar_t* path)
+{
+    wchar_t buf[MAX_PATH];
+    if (path == nullptr || wcslen(path) >= _countof(buf))
+        return;
+    wcscpy_s(buf, path);
+    // 从第 4 个字符起逐段建：跳过盘符那个分隔符（`D:\`），对它调 CreateDirectory
+    // 只会平白失败一次。短于此的本就不是合法的绝对路径。
+    if (wcslen(buf) < 4)
+        return;
+    for (wchar_t* p = buf + 3; *p != L'\0'; ++p)
+    {
+        if (*p == L'\\')
+        {
+            *p = L'\0';
+            CreateDirectoryW(buf, nullptr);
+            *p = L'\\';
+        }
+    }
+    CreateDirectoryW(buf, nullptr);
+}
 
 CFileLogger::CFileLogger()
     : _mode(LogMode::None)
@@ -58,7 +88,9 @@ void CFileLogger::Init()
 
     // Ensure log directory exists（配置文件就在这一层；日志文件的子目录留到真要写时再建，
     // 见 _OpenLogFile —— mode=none 时不该给每个宿主进程都平白造一个空目录）
-    CreateDirectoryW(_logDir, nullptr);
+    //
+    // 逐级建：便携形态下 `<安装根>\userdata\` 这一层可能还不存在，见 _EnsureDirRecursive。
+    _EnsureDirRecursive(_logDir);
 
     // Read config (mode + level)
     _ReadConfig();
@@ -330,12 +362,27 @@ void CFileLogger::_RotateNow()
 
 void CFileLogger::_BuildPaths()
 {
-    wchar_t appData[MAX_PATH];
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, appData)))
-        return;
+    // ★ 便携部署的日志必须留在便携目录内（`<安装根>\userdata\logs`，与 Rust 侧
+    // `Config::log_dir()` 逐字对齐）。写 `%LOCALAPPDATA%` 会让便携版「拔盘走人不留痕」
+    // 这条承诺落空——用户以为带走了全部痕迹，机器上却留着一份带宿主名的输入法日志，
+    // 而这是全仓**唯一**漏掉便携分支的日志落点（core 与设置程序都走各自的 log_dir）。
+    //
+    // 判据顺序有意：便携在前，`SHGetFolderPathW` 只在非便携分支才调——那是 shell32 的
+    // 函数，而本函数跑在 loader lock 之下，能不调就不调。
+    wchar_t root[MAX_PATH];
+    if (WindResolveInstallRoot(root, _countof(root)) && WindIsPortableRoot(root))
+    {
+        _snwprintf_s(_logDir, _countof(_logDir), _TRUNCATE, L"%ls\\userdata\\logs", root);
+    }
+    else
+    {
+        wchar_t appData[MAX_PATH];
+        if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, appData)))
+            return;
 
-    _snwprintf_s(_logDir, _countof(_logDir), _TRUNCATE,
-        L"%ls\\" WIND_LOG_DIR_NAME L"\\logs", appData);
+        _snwprintf_s(_logDir, _countof(_logDir), _TRUNCATE,
+            L"%ls\\" WIND_LOG_DIR_NAME L"\\logs", appData);
+    }
 
     // 日志文件再下沉一层到 `logs\tsf_log\`：按进程拆开后文件数是「用过的宿主 × pid」
     // 量级，跟 core 的 wind_input.log 平铺在一起会把主日志淹掉。
@@ -407,7 +454,12 @@ void CFileLogger::_ReadConfig()
     if (hFile == INVALID_HANDLE_VALUE)
         return; // No config file → mode=none
 
-    char buf[256] = {};
+    // ⚠️ 缓冲要足够大：本文件同时是**手工排查用的开关面板**，用户会往里写注释；设置页
+    // 写回时也逐行保留自己不认识的内容（不那样做会把用户的排查开关抹掉）。缓冲太小的
+    // 后果是「文件里写着 mode=file，日志却一行都没有」——被挤出缓冲的那几行**静默**
+    // 失效，没有任何报错，而这个文件本身就是用来排查故障的。
+    // 4KB 对一份几行 key=value 的配置绰绰有余，仍在栈上，DllMain 里用没有负担。
+    char buf[4096] = {};
     DWORD bytesRead = 0;
     ReadFile(hFile, buf, sizeof(buf) - 1, &bytesRead, nullptr);
     CloseHandle(hFile);

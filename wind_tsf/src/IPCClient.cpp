@@ -1,5 +1,6 @@
 #include "IPCClient.h"
 #include "FileLogger.h"
+#include "InstallPaths.h"
 #include <sstream>
 #include <cstdarg>
 #include <cstring>
@@ -329,41 +330,12 @@ BOOL CIPCClient::_ReadWithTimeout(void* buffer, DWORD size, DWORD* bytesRead, DW
 
 // 解析应用安装目录（返回值末尾不带反斜杠）。
 //
-// ★ 优先取 HKLM\<WIND_APP_REGKEY>\InstallDir，**不能**由模块路径推导：本 DLL 被部署到
-// 系统目录（System32\IME\<app>\）后 GetModuleFileName 取到的是系统副本路径，其同级目录
-// 既没有服务 exe 也没有便携标记。三个部署方在注册 COM 前都会写该值。
-//
-// 键缺失时回退到 DLL 自身目录——兼容「就地注册」的存量部署与未走部署脚本的开发构建。
-// 回退不是可有可无的兜底：漏掉它会让所有旧安装在升级前起不了服务。
-static BOOL _ResolveAppBaseDir(WCHAR* outDir, DWORD cchOutDir)
+// 实现已下沉到 `InstallPaths.cpp`：`CFileLogger::_BuildPaths` 也要判同一件事
+// （便携部署的日志得落在便携目录内），两处各写一份就会漂移出「服务从便携目录拉起、
+// 日志却写进 %LOCALAPPDATA%」这种半便携形态。理由与约束见 InstallPaths.h。
+static inline BOOL _ResolveAppBaseDir(WCHAR* outDir, DWORD cchOutDir)
 {
-    HKEY hKey = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WIND_APP_REGKEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        DWORD type = REG_SZ;
-        DWORD cb = cchOutDir * sizeof(WCHAR);
-        LONG r = RegQueryValueExW(hKey, L"InstallDir", nullptr, &type,
-                                  reinterpret_cast<LPBYTE>(outDir), &cb);
-        RegCloseKey(hKey);
-
-        if (r == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && cb >= sizeof(WCHAR))
-        {
-            // REG_SZ 不保证以 NUL 收尾（写入方可能未把结尾计入长度），显式收口。
-            DWORD cch = cb / sizeof(WCHAR);
-            if (cch >= cchOutDir) { cch = cchOutDir - 1; }
-            outDir[cch] = L'\0';
-
-            size_t len = wcslen(outDir);
-            while (len > 0 && outDir[len - 1] == L'\\') { outDir[--len] = L'\0'; }
-            if (len > 0) { return TRUE; }
-        }
-    }
-
-    if (GetModuleFileNameW(g_hInstance, outDir, cchOutDir) == 0) { return FALSE; }
-    WCHAR* lastSlash = wcsrchr(outDir, L'\\');
-    if (lastSlash == nullptr) { return FALSE; }
-    *lastSlash = L'\0';
-    return TRUE;
+    return WindResolveInstallRoot(outDir, cchOutDir);
 }
 
 BOOL CIPCClient::_StartService()
@@ -1101,7 +1073,7 @@ BOOL CIPCClient::SendModeNotify(bool chineseMode, bool clearInput)
     return _SendBinaryMessage(CMD_MODE_NOTIFY, &flags, sizeof(flags), true /* async */);
 }
 
-BOOL CIPCClient::SendSystemModeSwitch(bool chineseMode, ServiceResponse& response)
+BOOL CIPCClient::SendSystemModeSwitch(bool chineseMode, ModeSwitchSource source, ServiceResponse& response)
 {
     if (!_ShouldAttemptOperation())
     {

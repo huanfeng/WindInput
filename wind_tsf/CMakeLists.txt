@@ -79,6 +79,7 @@ set(SOURCES
     src/HotkeyManager.cpp
     src/HostWindow.cpp
     src/FileLogger.cpp
+    src/InstallPaths.cpp
 )
 
 # Resource files (icon + version info)

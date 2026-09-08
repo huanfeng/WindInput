@@ -58,7 +58,7 @@ QQ 那个弹出搜索框会检测自己是否被其它窗口遮挡，**判据看
 ## 诊断脚手架
 
 `wind_tsf` 侧留有一组二分开关，出厂全关、零行为影响，配置落点与 TSF 日志同一个文件
-`%LOCALAPPDATA%\<变体>\logs\tsf_log_config`：
+`<日志根>\tsf_log_config`（`<日志根>` 便携部署为 `<安装根>\userdata\logs`，否则 `%LOCALAPPDATA%\<变体>\logs`）：
 
 ```
 diag_no_layout_probe    diag_no_display_attr    diag_no_cand_hotkeys
