@@ -205,8 +205,11 @@ log_level = "debug"   # 或 "trace"
 
 - 滚动策略：**每次服务启动滚动一次**（`log_rotate::rotate_on_startup`，上次运行整体搬入
   历史文件），另按大小兜底（默认 10 MB/文件）；历史文件默认保留 10 个（`debug.log_max_files`）
-- 文件命名：`wind_input.log`（本次运行）、`wind_input.1.log`（上次）… `wind_input.10.log`。
-  **序号在扩展名之前**，滚动后仍是 `.log`（编辑器可双击、按 `*.log` 可搜）；勿改回 `.log.N` 旧式
+- 文件命名：`wind_input.1.log`（本次运行）、`wind_input.2.log`（上次）… `wind_input.11.log`。
+  **每份都带序号、数字越小越新**，与设置程序的 `wind_setting.N.log` 同一规则——早先当前那份
+  叫 `wind_input.log`（无序号），用户打包发日志时认不出它才是最新的，发来的常常只有 `.1.log`。
+  **序号在扩展名之前**，滚动后仍是 `.log`（编辑器可双击、按 `*.log` 可搜）；勿改回 `.log.N` 旧式，
+  也别把当前那份改回无序号
 - 时间戳为**本地时区**，格式与 `wind_tsf` 的 FileLogger 完全一致，两份日志按时间直接对齐排查；
   勿退回 tracing 默认的 UTC SystemTime timer
 - 路径（变体感知）：

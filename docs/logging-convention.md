@@ -27,11 +27,12 @@ WindInput 是高频事件系统：每次按键、每条 IPC 命令、每次坐�
 - 临时调高：环境变量 `RUST_LOG=debug`（最优先）。
 - 持久配置：配置文件 `[debug] log_level = "debug"`（见 `DebugConfig`）。
 - 可按模块过滤：`RUST_LOG=wind_bridge=debug,info`（只让 bridge 输出 debug，其余 info）。
-- 日志落盘：`%LOCALAPPDATA%\WindInput[Dev]\logs\wind_input.log`，按 `log_max_size_mb` / `log_max_files` 滚动。
-- **分段规则**：服务每次启动强制滚动一次，`wind_input.log` 恒为「当前这次运行」，上一次运行在 `wind_input.1.log`，依次类推（默认保留 10 份）。故排查时不必在混着多次重启的大文件里找分界点。
-  序号在扩展名**之前**，滚动后仍是 `.log`，编辑器认得、按 `*.log` 也搜得到（实现见 `apps/service/src/log_rotate.rs`）。老命名 `wind_input.log.N` 会在启动时自动迁移。
-  注意序号不严格等于「一次启动」：本次运行写满 `log_max_size_mb` 也会滚动，此时 `.1` 是本次运行的前半段。
-  另：`wind_input.log` 被服务的滚动器常驻句柄持有，**不要在服务运行时从外部删除**——句柄仍指向已摘名的文件，后续日志会写进看不见的地方。需要干净的日志重启服务即可。
+- 日志落盘：`%LOCALAPPDATA%\WindInput[Dev]\logs\wind_input.1.log`，按 `log_max_size_mb` / `log_max_files` 滚动。
+- **分段规则**：服务每次启动强制滚动一次，`wind_input.1.log` 恒为「当前这次运行」，上一次运行在 `wind_input.2.log`，依次类推（默认保留 10 份历史）。故排查时不必在混着多次重启的大文件里找分界点。
+  **规则只有一句：数字越小越新，`.1` 是最新**，与设置程序的 `wind_setting.N.log` 一致。早先当前那份叫 `wind_input.log`（无序号），收日志时用户认不出它才是最新的——按名字排序它还排在 `.1` 后面，发来的包里常常只有 `.1.log`。
+  序号在扩展名**之前**，滚动后仍是 `.log`，编辑器认得、按 `*.log` 也搜得到（实现见 `apps/service/src/log_rotate.rs`）。两代老命名（`wind_input.log.N` 与无序号的 `wind_input.log`）都会在启动时自动迁移。
+  注意序号不严格等于「一次启动」：本次运行写满 `log_max_size_mb` 也会滚动，此时 `.2` 是本次运行的前半段。
+  另：`wind_input.1.log` 被服务的滚动器常驻句柄持有，**不要在服务运行时从外部删除**——句柄仍指向已摘名的文件，后续日志会写进看不见的地方。需要干净的日志重启服务即可。
 
 ## 已知合规说明
 

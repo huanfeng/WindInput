@@ -639,7 +639,7 @@ fn init_logger() {
     // ★ 关闭档（level = off）：一个文件都不建，直接返回。
     //
     // 光靠 `EnvFilter("off")` 不够——下面的 `FileRotate::new` + `rotate_on_startup`
-    // 会创建并轮转 `wind_input.log`，于是用户选了"关闭"却仍在磁盘上看到日志文件
+    // 会创建并轮转 `wind_input.1.log`，于是用户选了"关闭"却仍在磁盘上看到日志文件
     // （空的，但带着时间戳与文件名）。用户要的是"这台机器上别留输入法的痕迹",
     // 空文件同样是痕迹。`startup_stage.log` 由 `startup_trace` 自己的门控挡住。
     //
@@ -663,12 +663,17 @@ fn init_logger() {
         .unwrap_or_else(|| std::path::PathBuf::from("logs"));
     let _ = std::fs::create_dir_all(&log_dir);
 
-    // 滚动命名：wind_input.log → wind_input.1.log → … → wind_input.N.log
-    // （序号在扩展名之前，滚动后仍是 .log，编辑器认得、按 *.log 也搜得到）
-    let log_path = log_dir.join("wind_input.log");
+    // 滚动命名：wind_input.1.log（本次运行）→ .2.log → … → .N.log
+    //
+    // ★ 当前这份**也带序号**，规则就一句话「数字越小越新，1 是最新」。此前当前那份
+    // 叫 wind_input.log（无序号），收日志时用户认不出它才是最新的——发来的包里常常
+    // 只有 .1.log。与设置程序的 wind_setting.1.log 同一规则，见 log_rotate 模块文档。
+    // 序号在扩展名之前，滚动后仍是 .log，编辑器认得、按 *.log 也搜得到。
+    let log_path = log_dir.join(format!("wind_input.{}.log", log_rotate::CURRENT_INDEX));
 
-    // 升级路径：把老方案写下的 wind_input.log.N 迁成新命名，否则新的扫描认不出它们，
-    // 会永久滞留在目录里。须在 FileRotate::new 之前——构造时就会扫描既存序号。
+    // 升级路径：把前两代命名迁成现在这套，否则新的扫描认不出它们，会永久滞留在目录里
+    // （更要紧的是二代那份"最新"会被当成历史）。须在 FileRotate::new 之前——构造时
+    // 就会扫描既存序号。
     log_rotate::migrate_legacy_suffix(&log_path);
 
     let mut rotate = FileRotate::new(
@@ -691,7 +696,7 @@ fn init_logger() {
 
     let (writer, _guard) = tracing_appender::non_blocking(rotate);
     // 丢弃计数器：worker 线程一旦出事，channel 断开后 lossy 模式会静默丢掉此后每一条
-    // 日志，`wind_input.log` 就永久停在某一行而进程照常运行。守护线程据此留痕。
+    // 日志，`wind_input.1.log` 就永久停在某一行而进程照常运行。守护线程据此留痕。
     let dropped = writer.error_counter();
 
     // 时间戳用本地时区，且格式与 wind_tsf 的 FileLogger 完全一致
