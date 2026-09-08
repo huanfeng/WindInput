@@ -129,9 +129,14 @@ impl MessageHandler for DeferredHandler {
         self.with_handler((None, String::new()), |h| h.handle_toggle_mode())
     }
 
-    fn handle_system_mode_switch(&self, chinese_mode: bool) -> (Option<StatusUpdateData>, String) {
+    fn handle_system_mode_switch(
+        &self,
+        chinese_mode: bool,
+        source: wind_ipc::protocol::ModeSwitchSource,
+        ctrl_held: bool,
+    ) -> (Option<StatusUpdateData>, String) {
         self.with_handler((None, String::new()), |h| {
-            h.handle_system_mode_switch(chinese_mode)
+            h.handle_system_mode_switch(chinese_mode, source, ctrl_held)
         })
     }
 
@@ -286,7 +291,12 @@ mod tests {
         fn handle_toggle_mode(&self) -> (Option<StatusUpdateData>, String) {
             (None, String::new())
         }
-        fn handle_system_mode_switch(&self, _c: bool) -> (Option<StatusUpdateData>, String) {
+        fn handle_system_mode_switch(
+            &self,
+            _c: bool,
+            _s: wind_ipc::protocol::ModeSwitchSource,
+            _ctrl: bool,
+        ) -> (Option<StatusUpdateData>, String) {
             (None, String::new())
         }
         fn handle_menu_command(&self, _c: &str) -> Option<StatusUpdateData> {

@@ -3362,6 +3362,17 @@ BOOL CTextService::_SetOpenCloseCompartment(BOOL bOpen)
     return SUCCEEDED(hr);
 }
 
+// Ctrl 当前是否按住。**两条 compartment 路径都要在写 IPC 的那一刻取**，它是服务端
+// per-app「忽略宿主关闭输入法」放行系统热键的唯一判据（Ctrl+Space 与宿主关 IME 走同一
+// 条通路、载荷相同，不交代就分不出）。
+// 两个 API 都问一遍：`GetAsyncKeyState` 读硬件当下状态，`GetKeyState` 读本线程消息
+// 队列的同步状态，而 compartment 回调不保证排在按键消息之后。同款判据已在本文件的
+// CapsLock 联动抑制窗用过并经真机验证。
+static bool _CtrlHeldNow()
+{
+    return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 || (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+}
+
 STDAPI CTextService::OnChange(REFGUID rguid)
 {
     if (_pThreadMgr == nullptr)
@@ -3520,7 +3531,9 @@ STDAPI CTextService::OnChange(REFGUID rguid)
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
         {
             ServiceResponse response;
-            if (_pIPCClient->SendSystemModeSwitch(newChineseMode != FALSE, response))
+            if (_pIPCClient->SendSystemModeSwitch(newChineseMode != FALSE,
+                                                 ModeSwitchSource::CompartmentConversion,
+                                                 _CtrlHeldNow(), response))
             {
                 if (response.type == ResponseType::CommitText && !response.text.empty())
                     CommitText(response.text);
@@ -3648,7 +3661,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
     //   （_SetOpenCloseCompartment(_bChineseMode)）。漏一处就会让 compartment 与实际模式
     //   脱节，而它现在是对宿主的唯一真话——脱节比当年钉死更难查。
     // compartment 的值就是目标模式；它已由系统/宿主写好，故 compartmentAlreadySet=TRUE。
-    return _ApplyModeSwitch(bOpen, TRUE, L"compartment");
+    return _ApplyModeSwitch(bOpen, TRUE, ModeSwitchSource::CompartmentOpenClose);
 }
 
 // 应用一次中英模式切换：刷统计、结束组合、通知服务端、落 _bChineseMode 与两个 compartment。
@@ -3659,9 +3672,27 @@ STDAPI CTextService::OnChange(REFGUID rguid)
 //                                  必须无条件写，否则违反「改 _bChineseMode 必同步写
 //                                  compartment」的不变量，对宿主说的就是假话。
 // source 只进日志，用于把两条路径在排查时分开。
-HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlreadySet, const WCHAR* source)
+// 日志用的来源名。**排查锚点，勿改字面**：`Mode switch via compartment|ctrl_space_key`
+// 这两个串写在 project_tsf_openclose_compartment_semantics 的排查步骤里。
+static const WCHAR* _ModeSwitchSourceName(ModeSwitchSource source)
+{
+    switch (source)
+    {
+    case ModeSwitchSource::CompartmentOpenClose:  return L"compartment";
+    case ModeSwitchSource::CompartmentConversion: return L"conversion";
+    case ModeSwitchSource::CtrlSpaceKey:          return L"ctrl_space_key";
+    default:                                      return L"unknown";
+    }
+}
+
+HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlreadySet, ModeSwitchSource source)
 {
     BOOL newChineseMode = requestedMode;
+    const WCHAR* sourceName = _ModeSwitchSourceName(source);
+    // 服务端的 per-app「忽略宿主关闭输入法」靠这一位放行系统热键，必须在**这一刻**取：
+    // 系统热键（Ctrl+Space）翻 compartment 时 Ctrl 尚未释放，宿主自己写则没有伴随按键。
+    // 同款判据已在本文件 CapsLock 联动抑制窗用过。
+    const bool ctrlHeld = _CtrlHeldNow();
 
     // 值与当前模式一致：宿主重复下发同一状态（gvim 每次 ESC 都写 0）或系统联动噪声。
     // 早退，不做任何副作用——否则每次都会白跑一轮 EndComposition + 同步 IPC +
@@ -3670,14 +3701,27 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
     if (newChineseMode == _bChineseMode)
     {
         WIND_LOG_INFO_FMT(L"Mode request via %s (%d) matches current mode (%s), no-op\n",
-            source, requestedMode, _bChineseMode ? L"Chinese" : L"English");
+            sourceName, requestedMode, _bChineseMode ? L"Chinese" : L"English");
         return S_OK;
     }
 
     WIND_LOG_INFO_FMT(L"Mode switch via %s: %s -> %s\n",
-        source,
+        sourceName,
         _bChineseMode ? L"Chinese" : L"English",
         newChineseMode ? L"Chinese" : L"English");
+
+    // ⚠ 已知限制（2026-09-08 code review #5，未修）：下面三行在**同步 IPC 之前**执行，
+    // 而「服务端要不要采纳这次切换」的答案在 IPC 之后才知道。于是被 per-app
+    // `ignore_host_ime_close` 拒绝的那次，用户正在打的组合照样已经被终止、英文统计段也
+    // 已经被切开——「我们忽略了这个请求」与「你的组合被扔了」自相矛盾。
+    //
+    // 没有立刻修，是因为触发场景里组合基本已经没了：宿主关 IME 几乎总发生在焦点离开
+    // 输入框时（WinForms 的 `ImeMode.Disable` 挂在按钮获得焦点上），TSF 本来就会终止组合。
+    // 而修法要把 IPC 提到销毁之前，那是上屏路径的顺序调整，会让已通过的真机验证作废。
+    //
+    // 真要修的形状：先 `SendSystemModeSwitch` 拿到仲裁结果 → 若等于当前模式则只修
+    // compartment 后早退（不动组合）→ 否则再 Flush/End/Reset 并按回包 CommitText。
+    // 届时须重测「切换时上屏待定文本」那条路径（`take_input_on_mode_switch` 的回包）。
 
     // Flush English stats before any mode switch
     if (_pKeyEventSink != nullptr)
@@ -3691,7 +3735,7 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
     if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
     {
         ServiceResponse response;
-        if (_pIPCClient->SendSystemModeSwitch(newChineseMode != FALSE, response))
+        if (_pIPCClient->SendSystemModeSwitch(newChineseMode != FALSE, source, ctrlHeld, response))
         {
             if (response.type == ResponseType::CommitText && !response.text.empty())
             {
@@ -3735,7 +3779,7 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
     _SetConversionMode(_bChineseMode);
 
     WIND_LOG_INFO_FMT(L"Mode set via %s -> %s\n",
-        source, _bChineseMode ? L"Chinese" : L"English");
+        sourceName, _bChineseMode ? L"Chinese" : L"English");
 
     return S_OK;
 }
@@ -3755,7 +3799,7 @@ BOOL CTextService::ToggleModeFromKey()
 {
     // 不加 _hasThreadFocus 守卫：那是 OnChange 用来过滤 compartment 广播噪声的，
     // 按键只会送到有焦点的实例，不存在噪声；而多进程宿主下该标志本身就不可靠。
-    return SUCCEEDED(_ApplyModeSwitch(!_bChineseMode, FALSE, L"ctrl_space_key"));
+    return SUCCEEDED(_ApplyModeSwitch(!_bChineseMode, FALSE, ModeSwitchSource::CtrlSpaceKey));
 }
 
 BOOL CTextService::_InitKeyboardDisabledCompartment()

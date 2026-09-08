@@ -149,6 +149,18 @@ pub enum MenuCmd {
     /// 「禁用」主要给表格类宿主用：Excel / WPS 表格在「输入态」下把方向键解释成
     /// 「确认单元格并移动」，配对后的光标回退无法实现（TSF 路线已实测失败）。
     AutoPairRule(u8),
+    /// 为当前焦点应用设置候选窗定位方式（compat.toml 的 candidate_position_mode）。
+    /// 参数：0=跟随全局（清除规则）1=跟随光标 2=固定位置。
+    ///
+    /// 「固定位置」给那些 caret 坐标本就报不准的宿主（自绘控件、坐标系错、多进程窗口
+    /// 偏移）：位置由用户拖一次定下，存在该应用**自己**的规则里，不与别的应用共用。
+    CandidatePositionRule(u8),
+    /// 为当前焦点应用设置「忽略宿主关闭输入法」（compat.toml 的 ignore_host_ime_close）。
+    /// 参数：0=跟随默认（清除规则）1=忽略 2=不忽略。
+    ///
+    /// 给 WinForms `ImeMode.Disable` / WPF `IsInputMethodEnabled=False` 这类宿主：它们在
+    /// 焦点落到按钮等控件时关掉的是**全局**中英状态，于是「点一下按钮就变成英文」。
+    IgnoreHostImeCloseRule(u8),
     /// 语言栏图标：角标总开关。参数为 `wind_ui::langbar_icon::BadgeStyle::ALL` 的下标。
     ///
     /// 只有「不显示 / 角标」两档——具体画哪些状态、什么颜色、在哪个角，是
@@ -193,7 +205,8 @@ impl MenuKind {
     /// 二者必须一致。`Submenu`/`Separator`/`Label` 不回传，恒为 0。
     /// id 区间：1 复制｜10-19 词条操作｜100-199 固定命令｜1000+ 方案｜2000+ 主题｜3000+ 过滤｜
     /// 4000+ 明暗｜5000+ 候选窗首显｜6000+ 初始中英｜7000+ 初始标点｜8000+ 诊断 HUD 分区｜
-    /// 9000+ 自动配对｜10000+ 语言栏图标角标形状。
+    /// 9000+ 自动配对｜10000+ 语言栏图标角标形状｜11000+ 软键盘面｜12000+ 候选窗定位｜
+    /// 13000+ 忽略宿主关闭输入法。
     pub fn to_menu_id(self) -> i32 {
         match self {
             MenuKind::Separator | MenuKind::Submenu | MenuKind::Label => 0,
@@ -246,6 +259,8 @@ impl MenuKind {
                 MenuCmd::InitialMode(m) => 6000 + m as i32,
                 MenuCmd::InitialPunct(m) => 7000 + m as i32,
                 MenuCmd::AutoPairRule(m) => 9000 + m as i32,
+                MenuCmd::CandidatePositionRule(m) => 12000 + m as i32,
+                MenuCmd::IgnoreHostImeCloseRule(m) => 13000 + m as i32,
                 MenuCmd::SchemaSelect(i) => 1000 + i as i32,
                 MenuCmd::ThemeSelect(i) => 2000 + i as i32,
                 MenuCmd::FilterMode(i) => 3000 + i as i32,
@@ -308,6 +323,8 @@ impl MenuKind {
             6000..=6999 => MenuCmd::InitialMode((id - 6000) as u8),
             7000..=7999 => MenuCmd::InitialPunct((id - 7000) as u8),
             9000..=9999 => MenuCmd::AutoPairRule((id - 9000) as u8),
+            12000..=12999 => MenuCmd::CandidatePositionRule((id - 12000) as u8),
+            13000..=13999 => MenuCmd::IgnoreHostImeCloseRule((id - 13000) as u8),
             _ => return None,
         };
         Some(MenuKind::Command(cmd))

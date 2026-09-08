@@ -141,6 +141,8 @@ mod tests {
         fn handle_system_mode_switch(
             &self,
             _chinese_mode: bool,
+            _source: wind_ipc::protocol::ModeSwitchSource,
+            _ctrl_held: bool,
         ) -> (Option<StatusUpdateData>, String) {
             (None, String::new())
         }

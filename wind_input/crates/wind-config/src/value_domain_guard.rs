@@ -196,7 +196,7 @@ fn schema_seed() -> toml::Value {
 /// 故这里逐个把 `Option` 字段填成 `Some`。**新增 `Option` 字段时必须在这里补一笔**——
 /// 忘了补会被 [`app_compat_seed_covers_every_optional_field`] 拦下，不靠人记得。
 fn app_compat_seed() -> toml::Value {
-    use crate::app_compat::{AppCompatRule, FirstShowMode, InitialMode};
+    use crate::app_compat::{AppCompatRule, CandidatePositionMode, FirstShowMode, InitialMode};
     use crate::config::SmartMethod;
     let rule = AppCompatRule {
         first_show_mode: Some(FirstShowMode::default()),
@@ -206,6 +206,8 @@ fn app_compat_seed() -> toml::Value {
         auto_pair: Some(true),
         composition_start_pair_guard: Some(true),
         pin_anchor_when_start_drifts: Some(true),
+        candidate_position_mode: Some(CandidatePositionMode::Fixed),
+        ignore_host_ime_close: Some(true),
         ..Default::default()
     };
     let file = AppCompatFile {

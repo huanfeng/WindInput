@@ -1073,7 +1073,8 @@ BOOL CIPCClient::SendModeNotify(bool chineseMode, bool clearInput)
     return _SendBinaryMessage(CMD_MODE_NOTIFY, &flags, sizeof(flags), true /* async */);
 }
 
-BOOL CIPCClient::SendSystemModeSwitch(bool chineseMode, ModeSwitchSource source, ServiceResponse& response)
+BOOL CIPCClient::SendSystemModeSwitch(bool chineseMode, ModeSwitchSource source, bool ctrlHeld,
+                                      ServiceResponse& response)
 {
     if (!_ShouldAttemptOperation())
     {
@@ -1085,11 +1086,14 @@ BOOL CIPCClient::SendSystemModeSwitch(bool chineseMode, ModeSwitchSource source,
         return FALSE;
     }
 
-    // Build status flags (same format as ModeNotify)
+    // Build status flags (same format as ModeNotify)，高 4 位带来源，仅供服务端日志。
     uint32_t flags = 0;
     if (chineseMode) flags |= STATUS_CHINESE_MODE;
+    flags |= static_cast<uint32_t>(source) << MODE_SWITCH_SOURCE_SHIFT;
+    if (ctrlHeld) flags |= MODE_SWITCH_CTRL_HELD;
 
-    _LogInfo(L"Sending system_mode_switch (sync): chineseMode=%d", chineseMode);
+    _LogInfo(L"Sending system_mode_switch (sync): chineseMode=%d, source=%u, ctrlHeld=%d",
+             chineseMode, static_cast<uint32_t>(source), ctrlHeld ? 1 : 0);
 
     // Send sync - wait for response (CommitText or StatusUpdate)
     if (!_SendBinaryMessage(CMD_SYSTEM_MODE_SWITCH, &flags, sizeof(flags)))

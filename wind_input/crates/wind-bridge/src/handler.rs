@@ -7,6 +7,7 @@ use wind_ipc::protocol::KeyPayload;
 // re-export：FocusLostReason 是 MessageHandler 签名的一部分，实现方（含各处测试桩）
 // 都经 `use crate::handler::*` 引入，不 re-export 会让它们各自去写 wind_ipc 路径。
 pub use wind_ipc::protocol::FocusLostReason;
+pub use wind_ipc::protocol::ModeSwitchSource;
 
 // 同上：诊断快照载荷直接作签名类型，不再在此复刻一份等价结构——它有 14 个字段，
 // 复刻等于给「两处独立事实」再开一个入口，而这类结构改动时最容易漏的就是中间层。
@@ -335,7 +336,20 @@ pub trait MessageHandler: Send + Sync {
     fn handle_toggle_mode(&self) -> (Option<StatusUpdateData>, String);
 
     /// 处理系统模式切换（返回状态和可选的待提交文本）
-    fn handle_system_mode_switch(&self, chinese_mode: bool) -> (Option<StatusUpdateData>, String);
+    ///
+    /// `source` 是发起方（宿主写 compartment / 按键兜底 / 功能菜单）；`ctrl_held` 是这次
+    /// compartment 变化发生时 Ctrl 是否被按住，由 DLL 现场采样。
+    ///
+    /// 两者一起构成 per-app `ignore_host_ime_close` 的判据：只有「compartment 来源 + 关
+    /// + Ctrl 未按住」才是宿主自作主张，其余（Ctrl+Space、按键兜底、菜单）一律照办。
+    ///
+    /// ⚠ 除这一条规则外不要按 source 分支——语义上各来源一视同仁。
+    fn handle_system_mode_switch(
+        &self,
+        chinese_mode: bool,
+        source: ModeSwitchSource,
+        ctrl_held: bool,
+    ) -> (Option<StatusUpdateData>, String);
 
     /// 处理菜单命令（返回状态更新）
     fn handle_menu_command(&self, command: &str) -> Option<StatusUpdateData>;

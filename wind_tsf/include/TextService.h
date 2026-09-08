@@ -540,8 +540,9 @@ private:
     void _SetChineseMode(BOOL v);
     // 应用一次中英模式切换（刷统计 / 结束组合 / 通知服务端 / 落模式与两个 compartment）。
     // compartmentAlreadySet=TRUE：OPENCLOSE 已由系统或宿主写成 requestedMode，仅在服务端
-    // 仲裁出不同值时回写；FALSE：我们是发起方，必须无条件写。source 只进日志。
-    HRESULT _ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlreadySet, const WCHAR* source);
+    // 仲裁出不同值时回写；FALSE：我们是发起方，必须无条件写。source 只进日志（本地日志
+    // 与服务端日志同源——它随 CMD_SYSTEM_MODE_SWITCH 一起送出，见 BinaryProtocol.h）。
+    HRESULT _ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlreadySet, ModeSwitchSource source);
     static LRESULT CALLBACK _HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     DWORD _activateFlags;  // ActivateEx flags (TF_TMAE_SECUREMODE, etc.)
 

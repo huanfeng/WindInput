@@ -138,6 +138,53 @@ impl InitialMode {
     }
 }
 
+/// 应用独立的候选窗定位方式。
+///
+/// 与全局 `ui.candidate.position_mode` 同语义，但**按应用覆盖**：少数宿主报的 caret
+/// 坐标就是不准（坐标系错、多进程窗口偏移、自绘控件根本不报），全局改成固定又会连累
+/// 其余一切正常的应用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidatePositionMode {
+    /// 跟随光标（与全局默认同义）。显式写它 = 「这个应用**不要**跟随全局的 fixed」。
+    FollowCaret,
+    /// 固定在 `candidate_x/candidate_y`（该应用**自己的**一份坐标）。
+    Fixed,
+}
+
+impl CandidatePositionMode {
+    /// 配置串 → 枚举。无法识别返回 `None`（＝跟随全局），理由同
+    /// [`FirstShowMode::from_config`]：拼错不该固化成显式覆盖。
+    pub fn from_config(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "follow_caret" => Some(Self::FollowCaret),
+            "fixed" => Some(Self::Fixed),
+            _ => None,
+        }
+    }
+    /// 枚举 → 配置串（写回 compat.toml 用）。
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::FollowCaret => "follow_caret",
+            Self::Fixed => "fixed",
+        }
+    }
+    /// 是否固定位置。
+    pub fn is_fixed(self) -> bool {
+        matches!(self, Self::Fixed)
+    }
+}
+
+/// 容错反序列化 `Option<CandidatePositionMode>`：无法识别的值退化为 `None`（＝跟随全局）。
+/// ⚠ 不可改用 derive，理由见 [`de_initial_mode`]（一个字段拼错会整份 compat.toml 失效）。
+fn de_candidate_position_mode<'de, D>(d: D) -> Result<Option<CandidatePositionMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(raw.as_deref().and_then(CandidatePositionMode::from_config))
+}
+
 /// 容错反序列化 `Option<InitialMode>`：无法识别的值退化为 `None`（＝不干预）。
 ///
 /// ⚠ 不能直接 `#[derive(Deserialize)]` 让 serde 自己认字符串：`load_file` 解析失败时
@@ -323,6 +370,53 @@ pub struct AppCompatRule {
     /// 光标坐标垂直校正（dp，96dpi 基准逻辑像素，正=下）。语义见 [`Self::caret_offset_x`]。
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub caret_offset_y: i32,
+    /// 该应用的候选窗定位方式；`None` = 不干预，沿用全局 `ui.candidate.position_mode`。
+    ///
+    /// **必须是 `Option`**（同 `first_show_mode`）：全局那一档本身可配，「没配过这个应用」
+    /// 与「显式给它配了 follow_caret」必须能区分，否则用户把全局改成 fixed 时，所有
+    /// 从未配过的应用都会被当成显式 follow_caret，全局设置凭空失效。
+    #[serde(
+        default,
+        deserialize_with = "de_candidate_position_mode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub candidate_position_mode: Option<CandidatePositionMode>,
+    /// 固定模式下该应用**自己**的候选窗落点（内容左上屏幕坐标，物理像素）。
+    ///
+    /// 为什么每个应用各存一份而不是共用全局那个坐标：合适的落点取决于该应用窗口在屏幕上
+    /// 的位置，共用一份等于只有第一个配的应用是对的。
+    ///
+    /// `(0,0)` = 「已开固定但还没拖过」，由 UI 落到屏幕默认锚点——与全局
+    /// `ui.candidate.custom_x/custom_y` 同一套哨兵约定（含 `avoid_unset_sentinel` 的
+    /// 1px 规避），两处**必须**同款，否则「拖到主屏左上角后位置记不住」会只在其中一边复发。
+    ///
+    /// ⚠ 不分显示器：与全局那份保持同一口径。换屏后落点由 `clamp_to_work_area` 兜住，
+    /// 不会飞到不可见区域（工具栏/软键盘那套按屏分桶的模型**不适用**——它们是常驻窗口，
+    /// 候选窗是临时浮层且随时可以拖）。
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub candidate_x: i32,
+    /// 固定模式下该应用自己的候选窗落点 Y。语义见 [`Self::candidate_x`]。
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub candidate_y: i32,
+    /// 忽略该宿主「关闭输入法」的请求（写 OPENCLOSE / CONVERSION compartment 关 IME）。
+    ///
+    /// 背景：WinForms 的 `ImeMode.Disable`、WPF 的 `InputMethod.IsInputMethodEnabled=False`
+    /// 内部都是 `ImmSetOpenStatus(false)`，经 IMM→TSF 兼容层落到 OPENCLOSE=0。它关的是
+    /// **全局中英状态**而非「本控件不接受输入」，于是用户点一次按钮就被切成英文，回到
+    /// 文本框还未必能恢复（宿主的恢复链只在相邻控件都由它托管时才闭合）。实测宿主：
+    /// X60_Toolbox（WinForms）、beanfun（WPF）。
+    ///
+    /// ⚠ **不能做成全局默认**：OPENCLOSE 的值语义是我们对宿主说的唯一真话，gvim 一类
+    /// 宿主正确依赖它保存/恢复状态（见 project_tsf_openclose_compartment_semantics 的
+    /// 四个衍生缺陷）。全局忽略等于回到「钉死为 1」那个已被推翻的年代。
+    ///
+    /// ⚠ **只拦「关」，且 Ctrl 按住时放行**：系统热键 Ctrl+Space 与宿主关 IME 走的是
+    /// **同一条** compartment 通路，无来源可分。唯一可用的区分是伴随按键——系统热键触发
+    /// 时 Ctrl 正被按住，宿主自己写则没有任何按键（同款判据已在 C++ 的 CapsLock 联动
+    /// 抑制窗用过并实测过）。判据由 DLL 在发消息时一并交代（`MODE_SWITCH_CTRL_HELD`），
+    /// 服务端不去猜。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_host_ime_close: Option<bool>,
 }
 
 fn is_zero_i32(v: &i32) -> bool {
@@ -373,6 +467,47 @@ pub fn set_initial_mode(rules: &mut Vec<AppCompatRule>, process: &str, mode: Opt
 /// 在一组规则上设置指定进程的初始中英标点（`None` = 清除规则，回到跟随全局）。
 pub fn set_initial_punct(rules: &mut Vec<AppCompatRule>, process: &str, mode: Option<InitialMode>) {
     upsert_rule(rules, process, |r| r.initial_punct = mode);
+}
+
+/// 在一组规则上设置指定进程的候选窗定位方式（`None` = 清除，回到跟随全局）。
+///
+/// ⚠ 清除定位方式时**一并清坐标**：留着一份孤儿坐标，下次用户重新开固定就会跳到
+/// 上一次的老位置，而他刚刚才关掉它——「关了又开，位置从哪来的」无从解释。
+pub fn set_candidate_position_mode(
+    rules: &mut Vec<AppCompatRule>,
+    process: &str,
+    mode: Option<CandidatePositionMode>,
+) {
+    upsert_rule(rules, process, |r| {
+        r.candidate_position_mode = mode;
+        if mode.is_none() {
+            r.candidate_x = 0;
+            r.candidate_y = 0;
+        }
+    });
+}
+
+/// 在一组规则上设置指定进程的候选窗固定落点（内容左上，物理像素）。
+///
+/// 只改坐标、不碰定位方式。落盘路径请用 [`set_user_candidate_fixed_pos`]——它把两者一起
+/// 写，理由见那里（只写坐标会让用户层规则整条盖掉出厂的 `candidate_position_mode`）。
+///
+/// 调用方须自行做 `(0,0)` 哨兵规避（`avoid_unset_sentinel`）——与全局那条落盘路径同源。
+pub fn set_candidate_pos(rules: &mut Vec<AppCompatRule>, process: &str, x: i32, y: i32) {
+    upsert_rule(rules, process, |r| {
+        r.candidate_x = x;
+        r.candidate_y = y;
+    });
+}
+
+/// 在一组规则上设置「忽略该宿主关闭输入法的请求」（`None` = 清除，回到默认采纳）。
+/// 语义与代价见 [`AppCompatRule::ignore_host_ime_close`]。
+pub fn set_ignore_host_ime_close(
+    rules: &mut Vec<AppCompatRule>,
+    process: &str,
+    enabled: Option<bool>,
+) {
+    upsert_rule(rules, process, |r| r.ignore_host_ime_close = enabled);
 }
 
 /// 在一组规则上设置指定进程是否加入 HostRender 白名单。语义见 [`upsert_rule`]。
@@ -505,6 +640,56 @@ pub fn set_user_auto_pair(
     enabled: Option<bool>,
 ) -> Result<(), std::io::Error> {
     update_user_rule(user_dir, process, |r| r.auto_pair = enabled)
+}
+
+/// 设置用户层 compat.toml 中指定进程的候选窗定位方式（`None` = 清除规则，含坐标）。
+/// 清除时一并清坐标，理由见 [`set_candidate_position_mode`]。
+pub fn set_user_candidate_position_mode(
+    user_dir: &Path,
+    process: &str,
+    mode: Option<CandidatePositionMode>,
+) -> Result<(), std::io::Error> {
+    update_user_rule(user_dir, process, |r| {
+        r.candidate_position_mode = mode;
+        if mode.is_none() {
+            r.candidate_x = 0;
+            r.candidate_y = 0;
+        }
+    })
+}
+
+/// 记住指定进程的候选窗固定落点：**定位方式与坐标一起写**（内容左上，物理像素）。
+///
+/// ★ 为什么必须连 `candidate_position_mode` 一起写：本字段**不在** [`ProtocolFields`] 里
+/// （它是用户偏好不是宿主协议事实），用户层同名规则整条覆盖系统层。只写坐标的话，出厂
+/// 若给某个宿主配了 `candidate_position_mode = "fixed"`，用户拖一次窗口，用户层规则就只剩
+/// `process` + 坐标 ⇒ 出厂那档 fixed 被整条盖掉，候选窗当场变回跟随光标，只留下一对
+/// 谁也用不上的孤儿坐标。
+///
+/// 语义上这也更直白：拖动本身就是「这个应用就固定在这儿」的确认，两件事本是一件。
+///
+/// ⚠ 调用方须先做 `(0,0)` 哨兵规避，与全局那条落盘路径同源；这里不代劳，
+/// 因为规避函数在协调器侧（与状态气泡共用），下沉到配置层会变成第二份实现。
+pub fn set_user_candidate_fixed_pos(
+    user_dir: &Path,
+    process: &str,
+    x: i32,
+    y: i32,
+) -> Result<(), std::io::Error> {
+    update_user_rule(user_dir, process, |r| {
+        r.candidate_position_mode = Some(CandidatePositionMode::Fixed);
+        r.candidate_x = x;
+        r.candidate_y = y;
+    })
+}
+
+/// 设置用户层 compat.toml 中指定进程的「忽略宿主关闭输入法」（`None` = 清除规则）。
+pub fn set_user_ignore_host_ime_close(
+    user_dir: &Path,
+    process: &str,
+    enabled: Option<bool>,
+) -> Result<(), std::io::Error> {
+    update_user_rule(user_dir, process, |r| r.ignore_host_ime_close = enabled)
 }
 
 /// 设置用户层 compat.toml 中指定进程的智能符号替换方案（`None` = 清除规则）。
@@ -741,6 +926,11 @@ fn load_file(path: &Path) -> Option<AppCompatFile> {
 struct ProtocolFields {
     composition_start_pair_guard: Option<bool>,
     pin_anchor_when_start_drifts: Option<bool>,
+    /// 「这个宿主会自作主张关 IME」是已确认的宿主行为形态（WinForms `ImeMode.Disable` /
+    /// WPF `IsInputMethodEnabled=False`），不是用户偏好 ⇒ 属于本组。出厂给某个已知宿主
+    /// 配上之后，用户层若已有该进程的稀疏规则（比如只配过 `initial_mode`），不登记就会
+    /// 把出厂值整条吞掉——`pin_anchor_when_start_drifts` 2026-09-05 正是这么白测一轮的。
+    ignore_host_ime_close: Option<bool>,
 }
 
 impl ProtocolFields {
@@ -748,6 +938,7 @@ impl ProtocolFields {
         Self {
             composition_start_pair_guard: rule.composition_start_pair_guard,
             pin_anchor_when_start_drifts: rule.pin_anchor_when_start_drifts,
+            ignore_host_ime_close: rule.ignore_host_ime_close,
         }
     }
 
@@ -758,6 +949,9 @@ impl ProtocolFields {
         }
         if rule.pin_anchor_when_start_drifts.is_none() {
             rule.pin_anchor_when_start_drifts = self.pin_anchor_when_start_drifts;
+        }
+        if rule.ignore_host_ime_close.is_none() {
+            rule.ignore_host_ime_close = self.ignore_host_ime_close;
         }
     }
 }
@@ -845,6 +1039,40 @@ mod tests {
             !text.contains("et.exe"),
             "改回跟随全局后整条规则必须消失——留下空壳会静默屏蔽系统层的出厂规则"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 拖动落盘必须把定位方式一起写，否则用户层规则会整条盖掉出厂的
+    /// `candidate_position_mode`——候选窗当场变回跟随光标，只留下一对孤儿坐标。
+    ///
+    /// ★ 与 `ignore_host_ime_close` 的修法**刻意不同**：那个登记进 `ProtocolFields` 走字段级
+    /// 继承（它是宿主协议事实），这个是用户偏好，让继承接管会使菜单的「跟随全局」档失效
+    /// （点了之后仍被出厂值顶回来）。同一个症状、两个字段、两种正确修法。
+    #[test]
+    fn dragging_persists_position_mode_together_with_coords() {
+        let dir = std::env::temp_dir().join(format!("wind_compat_drag_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        set_user_candidate_fixed_pos(&dir, "X60_Toolbox.exe", 320, 480).unwrap();
+        let text = std::fs::read_to_string(dir.join(COMPAT_FILE_NAME)).unwrap();
+        assert!(
+            text.contains(r#"candidate_position_mode = "fixed""#),
+            "只写坐标会让出厂的 fixed 被整条覆盖掉：\n{text}"
+        );
+
+        // 系统层出厂 fixed + 用户层拖动结果 ⇒ 合并后仍是 fixed，且用的是用户拖的坐标。
+        let sys = vec![AppCompatRule {
+            process: "X60_Toolbox.exe".into(),
+            candidate_position_mode: Some(CandidatePositionMode::Fixed),
+            ..Default::default()
+        }];
+        let user: AppCompatFile = toml::from_str(&text).unwrap();
+        let merged = AppCompat::from_rules(merge_rules(sys, user.apps));
+        let rule = merged.get_rule("x60_toolbox.exe").unwrap();
+        assert_eq!(
+            rule.candidate_position_mode,
+            Some(CandidatePositionMode::Fixed)
+        );
+        assert_eq!((rule.candidate_x, rule.candidate_y), (320, 480));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1100,6 +1328,7 @@ mod tests {
         const HOST_PROTOCOL_FIELDS: &[&str] = &[
             "composition_start_pair_guard",
             "pin_anchor_when_start_drifts",
+            "ignore_host_ime_close",
         ];
         for f in HOST_PROTOCOL_FIELDS {
             assert!(
@@ -1373,6 +1602,149 @@ mod tests {
         assert_eq!(rules[1].process, "cmd.exe", "应保留原始大小写");
         assert_eq!(rules[1].initial_mode, Some(InitialMode::English));
         assert!(!rules[1].caret_use_top);
+    }
+
+    /// 清掉定位方式必须**连坐标一起清**：留下孤儿坐标的话，用户关掉固定再打开，
+    /// 候选窗会跳到他上一次摆的位置——而那次摆放已经被他自己撤销了。
+    #[test]
+    fn clearing_candidate_position_mode_also_clears_coords() {
+        let mut rules = vec![AppCompatRule {
+            process: "X60_Toolbox.exe".into(),
+            caret_use_top: true,
+            ..Default::default()
+        }];
+        set_candidate_position_mode(
+            &mut rules,
+            "x60_toolbox.exe",
+            Some(CandidatePositionMode::Fixed),
+        );
+        set_candidate_pos(&mut rules, "X60_TOOLBOX.EXE", 900, 640);
+        assert_eq!(rules.len(), 1, "同名进程不得追加第二条规则");
+        assert_eq!((rules[0].candidate_x, rules[0].candidate_y), (900, 640));
+        assert!(rules[0].caret_use_top, "其它字段不得被连带修改");
+
+        set_candidate_position_mode(&mut rules, "x60_toolbox.exe", None);
+        assert_eq!(rules[0].candidate_position_mode, None);
+        assert_eq!(
+            (rules[0].candidate_x, rules[0].candidate_y),
+            (0, 0),
+            "清定位方式必须一并清坐标"
+        );
+        assert!(rules[0].caret_use_top, "清除只针对这一项");
+    }
+
+    /// per-app 坐标是**每个应用一份**：给 A 设置不得影响 B。
+    /// 共用一份坐标的话只有第一个配的应用是对的，这条断言锁住这个决策。
+    #[test]
+    fn candidate_pos_is_per_app() {
+        let mut rules = Vec::new();
+        set_candidate_position_mode(&mut rules, "a.exe", Some(CandidatePositionMode::Fixed));
+        set_candidate_pos(&mut rules, "a.exe", 100, 200);
+        set_candidate_position_mode(&mut rules, "b.exe", Some(CandidatePositionMode::Fixed));
+        set_candidate_pos(&mut rules, "b.exe", 300, 400);
+
+        let compat = AppCompat::from_rules(rules);
+        let a = compat.get_rule("a.exe").unwrap();
+        let b = compat.get_rule("b.exe").unwrap();
+        assert_eq!((a.candidate_x, a.candidate_y), (100, 200));
+        assert_eq!((b.candidate_x, b.candidate_y), (300, 400));
+    }
+
+    /// 缺字段 = 不干预。若退化成 `Some(默认档)`，等于给所有未配置的应用都写死了一份
+    /// per-app 覆盖，用户改全局 `ui.candidate.position_mode` 时会全部失效。
+    #[test]
+    fn new_per_app_fields_default_to_follow_global() {
+        let toml = r#"
+            [[apps]]
+            process = "Foo.exe"
+        "#;
+        let file: AppCompatFile = toml::from_str(toml).unwrap();
+        let compat = AppCompat::from_rules(file.apps);
+        let rule = compat.get_rule("foo.exe").unwrap();
+        assert_eq!(rule.candidate_position_mode, None);
+        assert_eq!(rule.ignore_host_ime_close, None);
+        assert_eq!((rule.candidate_x, rule.candidate_y), (0, 0));
+    }
+
+    /// 认不出的定位方式退化为 `None`（跟随全局），且**不拖垮同文件其它规则**——
+    /// 整份 compat.toml 因一个拼错的值静默失效是本仓反复记过的形态。
+    #[test]
+    fn bad_candidate_position_mode_degrades_to_none() {
+        let toml = r#"
+            [[apps]]
+            process = "Foo.exe"
+            candidate_position_mode = "fixedd"
+
+            [[apps]]
+            process = "Bar.exe"
+            candidate_position_mode = "fixed"
+        "#;
+        let file: AppCompatFile = toml::from_str(toml).expect("单字段拼错不得让整份失效");
+        let compat = AppCompat::from_rules(file.apps);
+        assert_eq!(
+            compat.get_rule("foo.exe").unwrap().candidate_position_mode,
+            None
+        );
+        assert_eq!(
+            compat.get_rule("bar.exe").unwrap().candidate_position_mode,
+            Some(CandidatePositionMode::Fixed)
+        );
+    }
+
+    /// `ignore_host_ime_close` 的三态在**两层之间**才分得出来，这条锁住它。
+    ///
+    /// ★ 没有字段级继承的话，`None`（跟随内置）与 `Some(false)`（采纳）行为完全一致，
+    /// 菜单第三档就是个多余选项；有了继承，三档各有唯一语义：
+    ///   跟随内置 = 听出厂的｜忽略 = 不管出厂说什么都忽略｜采纳 = 不管出厂说什么都采纳。
+    #[test]
+    fn ignore_host_ime_close_inherits_from_lower_layer() {
+        let sys = vec![AppCompatRule {
+            process: "X60_Toolbox.exe".into(),
+            ignore_host_ime_close: Some(true),
+            ..Default::default()
+        }];
+
+        // 用户层稀疏规则（只配过初始模式）**不得**吞掉出厂的宿主协议级字段。
+        let mut user = Vec::new();
+        set_initial_mode(&mut user, "x60_toolbox.exe", Some(InitialMode::Chinese));
+        let merged = AppCompat::from_rules(merge_rules(sys.clone(), user));
+        let rule = merged.get_rule("x60_toolbox.exe").unwrap();
+        assert_eq!(
+            rule.ignore_host_ime_close,
+            Some(true),
+            "用户层没写这一项 ⇒ 继承出厂值，否则出厂修复对老用户永远不生效"
+        );
+        assert_eq!(rule.initial_mode, Some(InitialMode::Chinese));
+
+        // 显式 `Some(false)`（菜单的「采纳」档）必须盖住出厂的 true——这正是它存在的理由。
+        let mut user = Vec::new();
+        set_ignore_host_ime_close(&mut user, "x60_toolbox.exe", Some(false));
+        let merged = AppCompat::from_rules(merge_rules(sys, user));
+        assert_eq!(
+            merged
+                .get_rule("x60_toolbox.exe")
+                .unwrap()
+                .ignore_host_ime_close,
+            Some(false),
+            "显式采纳必须能覆盖出厂的忽略，否则用户无从撤销"
+        );
+    }
+
+    /// 只配了 `ignore_host_ime_close` 的规则不是空壳，不能被 `is_empty_override` 剔掉
+    /// ——那会让用户刚在菜单里点的开关下一次写盘时静默消失。
+    #[test]
+    fn ignore_host_ime_close_only_rule_survives_render() {
+        let mut rules = Vec::new();
+        set_ignore_host_ime_close(&mut rules, "X60_Toolbox.exe", Some(true));
+        assert!(!is_empty_override(&rules[0]), "配了这一项就不是空壳");
+
+        let text = render_user_compat(&rules, &[]).expect("渲染失败");
+        assert!(
+            text.contains("ignore_host_ime_close = true"),
+            "产物: {text}"
+        );
+        let parsed: AppCompatFile = toml::from_str(&text).expect("产物应可解析");
+        assert_eq!(parsed.apps[0].ignore_host_ime_close, Some(true));
     }
 
     #[test]

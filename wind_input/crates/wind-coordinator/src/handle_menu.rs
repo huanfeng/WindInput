@@ -142,7 +142,13 @@ impl Coordinator {
     pub(crate) fn run_menu_cmd(&self, cmd: MenuCmd) {
         match cmd {
             MenuCmd::SchemaEnglish => {
-                self.handle_system_mode_switch(false);
+                // ctrl_held=false：菜单点的，与按键无关。它只被 `ignore_host_ime_close`
+                // 消费，而那条规则只拦 compartment 来源，菜单永远照办。
+                self.handle_system_mode_switch(
+                    false,
+                    wind_ipc::protocol::ModeSwitchSource::Menu,
+                    false,
+                );
                 self.notify_toolbar();
                 self.notify_ui_hide();
             }
@@ -214,6 +220,8 @@ impl Coordinator {
             MenuCmd::TogglePasswordSuppress => self.toggle_password_suppress(),
             MenuCmd::FirstShowMode(m) => self.set_first_show_mode(m),
             MenuCmd::AutoPairRule(m) => self.set_auto_pair_rule(m),
+            MenuCmd::CandidatePositionRule(m) => self.set_candidate_position_rule(m),
+            MenuCmd::IgnoreHostImeCloseRule(m) => self.set_ignore_host_ime_close_rule(m),
             MenuCmd::InitialMode(m) => self.set_initial_state_rule(false, m),
             MenuCmd::InitialPunct(m) => self.set_initial_state_rule(true, m),
             MenuCmd::StatusToggleAlways => self.status_toggle_always(),
@@ -416,7 +424,19 @@ impl Coordinator {
     ///
     /// 与 `save_status_tip_pos` 同构：两种模式各自语义自洽，跟随模式的拖动是临时的，
     /// 固定模式的拖动才是"重新摆放"。
+    /// per-app 规则命中时**落到该应用自己的那份坐标**，不碰全局——否则在 A 应用里拖一下，
+    /// 所有跟随全局的应用位置全被改掉。判据与读取侧 `candidate_fixed_pos` 同源：规则里
+    /// 配了定位方式就以规则为准，没配才看全局。
     pub(crate) fn save_candidate_pos(&self, x: i32, y: i32) {
+        let name = self.active_process_name();
+        if let Some((rule_fixed, _, _)) = self.rule_candidate_fixed_pos(&name) {
+            if rule_fixed {
+                let (x, y) = avoid_unset_sentinel(x, y);
+                self.save_candidate_pos_for_app(&name, x, y);
+            }
+            // 规则显式配了 follow_caret：与全局跟随模式同义，拖动是临时的，不落盘。
+            return;
+        }
         if !self.rt().config.ui.candidate.is_fixed_position() {
             return;
         }
@@ -433,6 +453,113 @@ impl Coordinator {
             c.ui.candidate.custom_x = x;
             c.ui.candidate.custom_y = y;
         });
+    }
+
+    /// 把候选窗落点写进该应用自己的 compat 规则（用户层），并让当前应用立即生效。
+    ///
+    /// 与 [`Self::set_first_show_mode`] 的写盘三步同构，但**不弹 toast**：拖动是高频手势，
+    /// 每拖一次弹一个「设置已更新」明显不合适（与全局那条走 `refresh_config_in_memory`
+    /// 而非 `reload_user_config` 是同一个理由）。
+    fn save_candidate_pos_for_app(&self, name: &str, x: i32, y: i32) {
+        let Some(user_dir) = self.compat_dirs.1.clone() else {
+            tracing::warn!("save_candidate_pos: 无用户配置目录，无法持久化 process={name}");
+            return;
+        };
+        if let Err(e) = wind_config::app_compat::set_user_candidate_fixed_pos(&user_dir, name, x, y)
+        {
+            tracing::error!("save_candidate_pos: 写用户 compat.toml 失败: {e}");
+            return;
+        }
+        let reloaded = wind_config::app_compat::AppCompat::load(
+            self.compat_dirs.0.as_deref(),
+            Some(user_dir.as_path()),
+        );
+        *self.app_compat.lock().unwrap_or_else(|e| e.into_inner()) = reloaded;
+        tracing::debug!("候选窗固定位置 for process={name}: ({x},{y})");
+    }
+
+    /// 为当前焦点应用设置候选窗定位方式，并写入用户层 compat.toml。
+    /// `mode_id`：0=跟随全局（清除规则）1=跟随光标 2=固定位置。
+    ///
+    /// 三步与 [`Self::set_first_show_mode`] 同构，缺一不可，理由见那里。
+    /// 切到「固定位置」时**不预设坐标**：`(0,0)` 由 UI 落到屏幕默认锚点，用户拖一次即定。
+    /// 这与状态气泡「打开固定时以当前实际位置落盘」刻意不同——那个窗口常驻可见，
+    /// 而候选窗此刻多半没显示，拿不到「当前实际位置」。
+    pub(crate) fn set_candidate_position_rule(&self, mode_id: u8) {
+        use wind_config::app_compat::CandidatePositionMode as M;
+        let mode = match mode_id {
+            1 => Some(M::FollowCaret),
+            2 => Some(M::Fixed),
+            _ => None,
+        };
+        let name = self.active_process_name();
+        if name.is_empty() {
+            tracing::warn!("set_candidate_position_rule: 当前焦点进程未知，忽略本次设置");
+            return;
+        }
+        let Some(user_dir) = self.compat_dirs.1.clone() else {
+            tracing::warn!("set_candidate_position_rule: 无用户配置目录，无法持久化");
+            return;
+        };
+        if let Err(e) =
+            wind_config::app_compat::set_user_candidate_position_mode(&user_dir, &name, mode)
+        {
+            tracing::error!("set_candidate_position_rule: 写用户 compat.toml 失败: {e}");
+            return;
+        }
+        let reloaded = wind_config::app_compat::AppCompat::load(
+            self.compat_dirs.0.as_deref(),
+            Some(user_dir.as_path()),
+        );
+        *self.app_compat.lock().unwrap_or_else(|e| e.into_inner()) = reloaded;
+        tracing::info!(
+            "候选窗定位方式 for process={name}: {}",
+            mode.map(|m| m.as_config()).unwrap_or("(follow-global)")
+        );
+        self.show_status();
+    }
+
+    /// 为当前焦点应用设置「忽略宿主关闭输入法」，并写入用户层 compat.toml。
+    /// `mode_id`：0=跟随默认（清除规则，照常采纳）1=忽略 2=显式不忽略。
+    ///
+    /// 三步与 [`Self::set_first_show_mode`] 同构。**没有第四步**：判定发生在服务端的
+    /// `handle_system_mode_switch`，DLL 侧不需要知道这条规则（它照发不误，被拒后由既有的
+    /// 仲裁回路把 compartment 拉回），所以不必给 DLL 推任何东西。
+    pub(crate) fn set_ignore_host_ime_close_rule(&self, mode_id: u8) {
+        let enabled = match mode_id {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        };
+        let name = self.active_process_name();
+        if name.is_empty() {
+            tracing::warn!("set_ignore_host_ime_close_rule: 当前焦点进程未知，忽略本次设置");
+            return;
+        }
+        let Some(user_dir) = self.compat_dirs.1.clone() else {
+            tracing::warn!("set_ignore_host_ime_close_rule: 无用户配置目录，无法持久化");
+            return;
+        };
+        if let Err(e) =
+            wind_config::app_compat::set_user_ignore_host_ime_close(&user_dir, &name, enabled)
+        {
+            tracing::error!("set_ignore_host_ime_close_rule: 写用户 compat.toml 失败: {e}");
+            return;
+        }
+        let reloaded = wind_config::app_compat::AppCompat::load(
+            self.compat_dirs.0.as_deref(),
+            Some(user_dir.as_path()),
+        );
+        *self.app_compat.lock().unwrap_or_else(|e| e.into_inner()) = reloaded;
+        tracing::info!(
+            "忽略宿主关闭输入法 for process={name}: {}",
+            match enabled {
+                Some(true) => "忽略",
+                Some(false) => "不忽略",
+                None => "(follow-default)",
+            }
+        );
+        self.show_status();
     }
 
     /// 状态提示气泡右键菜单「固定位置」：在 fixed / follow_caret 间翻转。
@@ -1193,9 +1320,18 @@ impl Coordinator {
         // 进程未解析时**子项禁用而非隐藏**（父项 enabled 恒 true，见
         // `MenuItemSpec::submenu`），菜单项位置保持稳定。
         let per_app_children = {
+            use wind_config::app_compat::CandidatePositionMode as CP;
             use wind_config::app_compat::InitialMode as IM;
             let proc = self.active_process_name();
             let enabled = !proc.is_empty();
+            let (cur_cand_pos, cur_ignore_close) = {
+                let table = self.app_compat.lock().unwrap_or_else(|e| e.into_inner());
+                let rule = table.get_rule(&proc);
+                (
+                    rule.and_then(|r| r.candidate_position_mode),
+                    rule.and_then(|r| r.ignore_host_ime_close),
+                )
+            };
             let cur_first_show = self.rule_first_show_mode(&proc);
             let cur_mode = self.rule_initial_mode(&proc);
             let cur_punct = self.rule_initial_punct(&proc);
@@ -1270,6 +1406,64 @@ impl Coordinator {
                             cmd(MenuCmd::AutoPairRule(2)),
                             enabled,
                             cur_auto_pair == Some(false),
+                        ),
+                    ],
+                ),
+                // 「固定位置」给 caret 坐标本就报不准的宿主。位置**不在这里选**——切到固定
+                // 档只是打开它，落点由用户拖一次候选窗定下（存进该应用自己的规则）。
+                // 与全局那个开关同一决策：业界（搜狗、Google 拼音）也只给开关不给坐标框。
+                M::submenu(
+                    "候选窗定位",
+                    vec![
+                        M::leaf(
+                            "跟随全局",
+                            cmd(MenuCmd::CandidatePositionRule(0)),
+                            enabled,
+                            cur_cand_pos.is_none(),
+                        ),
+                        M::leaf(
+                            "跟随光标",
+                            cmd(MenuCmd::CandidatePositionRule(1)),
+                            enabled,
+                            cur_cand_pos == Some(CP::FollowCaret),
+                        ),
+                        M::leaf(
+                            "固定位置",
+                            cmd(MenuCmd::CandidatePositionRule(2)),
+                            enabled,
+                            cur_cand_pos == Some(CP::Fixed),
+                        ),
+                    ],
+                ),
+                // 给 WinForms/WPF 那类「焦点落到按钮就关掉全局 IME」的宿主。
+                //
+                // 第一档写「跟随内置规则」而不是「跟随全局」：这一项**没有**全局设置项，
+                // 它的低层是出厂 compat.toml（本字段享有字段级继承，见 `ProtocolFields`）。
+                // 写「跟随全局」会让用户去设置页找一个并不存在的开关。
+                //
+                // 第三档「采纳」与第一档在**当前**行为上可能相同，但语义不同：第一档是
+                // 「听内置的」，第三档是「不管内置说什么，这个应用就是要采纳」。出厂给某个
+                // 宿主开了忽略、而用户不认同时，只有第三档能盖住它。
+                M::submenu(
+                    "宿主关闭输入法",
+                    vec![
+                        M::leaf(
+                            "跟随内置规则",
+                            cmd(MenuCmd::IgnoreHostImeCloseRule(0)),
+                            enabled,
+                            cur_ignore_close.is_none(),
+                        ),
+                        M::leaf(
+                            "忽略",
+                            cmd(MenuCmd::IgnoreHostImeCloseRule(1)),
+                            enabled,
+                            cur_ignore_close == Some(true),
+                        ),
+                        M::leaf(
+                            "采纳",
+                            cmd(MenuCmd::IgnoreHostImeCloseRule(2)),
+                            enabled,
+                            cur_ignore_close == Some(false),
                         ),
                     ],
                 ),

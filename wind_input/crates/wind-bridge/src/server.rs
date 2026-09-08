@@ -626,7 +626,12 @@ pub(crate) fn dispatch_command(
                 0
             };
             let chinese_mode = (flags & STATUS_CHINESE_MODE) != 0;
-            let (status, commit_text) = handler.handle_system_mode_switch(chinese_mode);
+            // 来源在 flags 高 4 位（旧 DLL 不带 ⇒ Unknown），只进日志，不参与判定。
+            let source = wind_ipc::protocol::ModeSwitchSource::from_flags(flags);
+            // Ctrl 是否按住由 DLL 现场采样（见 MODE_SWITCH_CTRL_HELD），服务端不去猜。
+            let ctrl_held = (flags & wind_ipc::protocol::MODE_SWITCH_CTRL_HELD) != 0;
+            let (status, commit_text) =
+                handler.handle_system_mode_switch(chinese_mode, source, ctrl_held);
             if !commit_text.is_empty() {
                 Some(encode_commit_text(
                     &commit_text,
@@ -1196,6 +1201,8 @@ mod tests {
         fn handle_system_mode_switch(
             &self,
             _chinese_mode: bool,
+            _source: wind_ipc::protocol::ModeSwitchSource,
+            _ctrl_held: bool,
         ) -> (Option<StatusUpdateData>, String) {
             (None, String::new())
         }

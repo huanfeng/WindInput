@@ -1417,6 +1417,71 @@ pub const STATUS_SOFT_KEYBOARD: u32 = 0x0080;
 pub const STATUS_SOFT_KEYBOARD_KEYS: u32 = 0x0100;
 
 // ──────────────────────────────────────────────
+// 模式切换来源（CMD_SYSTEM_MODE_SWITCH 的 flags 高 4 位）
+// ──────────────────────────────────────────────
+
+/// 来源标签占 `flags` 的高 4 位，与 `STATUS_*`（低位）不重叠。
+///
+/// 为什么要带来源：服务端的模式变更入口有三个（本地按键 toggle、菜单、DLL 送来的
+/// SystemModeSwitch），而 DLL 那条又混着「宿主/系统写 compartment」与「Ctrl+Space
+/// 按键兜底」两种完全不同的成因。只看服务端日志时它们长得一模一样，用户反馈
+/// 「某些应用里会自动变英文」时无法分辨是宿主关了 IME 还是我们自己切的——
+/// 2026-09-08 排查一份真机日志时正是卡在这里（21 次模式变化只有 2 次能溯源）。
+/// 位值必须与 `BinaryProtocol.h` 的同名常量一致。
+pub const MODE_SWITCH_SOURCE_SHIFT: u32 = 28;
+pub const MODE_SWITCH_SOURCE_MASK: u32 = 0xF000_0000;
+
+/// 这次 compartment 变化发生时 **Ctrl 正被按住**（由 DLL 现场取 `GetAsyncKeyState`）。
+///
+/// 用途只有一个：区分「用户按 Ctrl+Space」与「宿主自己写 compartment 关 IME」。两者走
+/// 的是同一条通路、载荷完全相同，服务端无从分辨；而 `ignore_host_ime_close` 必须放过
+/// 前者（否则该应用里系统热键彻底失灵）。判据由**发起方交代**，服务端不去猜——同款
+/// 判据已在 C++ 的 CapsLock 联动抑制窗用过并经真机验证。
+pub const MODE_SWITCH_CTRL_HELD: u32 = 0x0800_0000;
+
+/// 一次系统模式切换的发起方。
+///
+/// `Unknown` 兼容不带来源位的旧 DLL（高 4 位全 0）——它只表示「这个 DLL 比服务端旧」，
+/// 不代表来源真的不明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeSwitchSource {
+    /// 旧版 DLL 未带来源位
+    Unknown,
+    /// 宿主/系统写了 `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`
+    CompartmentOpenClose,
+    /// 宿主/系统写了 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION`
+    CompartmentConversion,
+    /// 系统热键失效时的按键侧兜底（Ctrl+Space）
+    CtrlSpaceKey,
+    /// 服务端自己发起（功能菜单里的「英文」）
+    Menu,
+}
+
+impl ModeSwitchSource {
+    /// 从 `CMD_SYSTEM_MODE_SWITCH` 的 flags 取来源；未知编码一律归 `Unknown`。
+    pub fn from_flags(flags: u32) -> Self {
+        match (flags & MODE_SWITCH_SOURCE_MASK) >> MODE_SWITCH_SOURCE_SHIFT {
+            1 => Self::CompartmentOpenClose,
+            2 => Self::CompartmentConversion,
+            3 => Self::CtrlSpaceKey,
+            4 => Self::Menu,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// 日志用的短标签
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown(旧版DLL)",
+            Self::CompartmentOpenClose => "compartment_openclose(宿主写)",
+            Self::CompartmentConversion => "compartment_conversion(宿主写)",
+            Self::CtrlSpaceKey => "ctrl_space_key(按键兜底)",
+            Self::Menu => "menu(功能菜单)",
+        }
+    }
+}
+
+// ──────────────────────────────────────────────
 // Commit result flags
 // ──────────────────────────────────────────────
 
@@ -1560,6 +1625,38 @@ mod input_diag_wire_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 来源位不得与任何 `STATUS_*` 状态位重叠——两者共用 `CMD_SYSTEM_MODE_SWITCH`
+    /// 的同一个 u32。重叠的后果是静默的：来源编码会被读成「中文模式」等状态位。
+    #[test]
+    fn mode_switch_source_bits_do_not_collide_with_status_bits() {
+        let status_bits = STATUS_CHINESE_MODE
+            | STATUS_FULL_WIDTH
+            | STATUS_CHINESE_PUNCT
+            | STATUS_TOOLBAR_VISIBLE
+            | STATUS_MODE_CHANGED
+            | STATUS_CAPS_LOCK
+            | STATUS_HOST_RENDER_AVAIL
+            | STATUS_SOFT_KEYBOARD
+            | STATUS_SOFT_KEYBOARD_KEYS;
+        assert_eq!(status_bits & MODE_SWITCH_SOURCE_MASK, 0);
+        assert_eq!(MODE_SWITCH_SOURCE_MASK >> MODE_SWITCH_SOURCE_SHIFT, 0xF);
+    }
+
+    /// 编码必须与 `BinaryProtocol.h` 的 `ModeSwitchSource` 逐值对齐；
+    /// 旧 DLL 不带来源位（高 4 位为 0）时必须落到 `Unknown` 而不是某个真来源。
+    #[test]
+    fn mode_switch_source_decodes_wire_values() {
+        let wire = |v: u32| ModeSwitchSource::from_flags(STATUS_CHINESE_MODE | (v << 28));
+        assert_eq!(wire(0), ModeSwitchSource::Unknown);
+        assert_eq!(wire(1), ModeSwitchSource::CompartmentOpenClose);
+        assert_eq!(wire(2), ModeSwitchSource::CompartmentConversion);
+        assert_eq!(wire(3), ModeSwitchSource::CtrlSpaceKey);
+        assert_eq!(wire(4), ModeSwitchSource::Menu);
+        assert_eq!(wire(0xF), ModeSwitchSource::Unknown); // 未知编码不 panic
+        // 状态位本身不受来源位影响
+        assert_ne!((STATUS_CHINESE_MODE | (3 << 28)) & STATUS_CHINESE_MODE, 0);
+    }
 
     /// 头部与表项的实际内存布局必须等于两端约定的常量。
     ///

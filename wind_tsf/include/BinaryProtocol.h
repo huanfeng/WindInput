@@ -198,6 +198,26 @@ constexpr uint32_t STATUS_SOFT_KEYBOARD    = 0x0080; // Soft keyboard panel is o
 constexpr uint32_t STATUS_SOFT_KEYBOARD_KEYS = 0x0100; // Current page sends keys, not symbols
 
 // ============================================================================
+// 模式切换来源（仅 CMD_SYSTEM_MODE_SWITCH 的 flags 使用高 4 位，与 STATUS_* 不重叠）
+//
+// 服务端只拿它写日志、不参与判定。带上它是因为服务端日志里「宿主/系统写 compartment
+// 把 IME 关掉」与「我们自己按键切换」原本长得一模一样——用户反馈「某些应用里会自动
+// 变成英文」时无从分辨（2026-09-08 真机日志：21 次模式变化只有 2 次能溯源）。
+// 编码必须与 wind-ipc protocol.rs 的 ModeSwitchSource 一致。
+// ============================================================================
+constexpr uint32_t MODE_SWITCH_SOURCE_SHIFT = 28;
+// 这次 compartment 变化发生时 Ctrl 正被按住。服务端据此把「用户按 Ctrl+Space」与
+// 「宿主自己写 compartment 关 IME」分开——两者走同一条通路、载荷相同，不交代就分不出。
+// 位值必须与 wind-ipc protocol.rs 的 MODE_SWITCH_CTRL_HELD 一致。
+constexpr uint32_t MODE_SWITCH_CTRL_HELD = 0x08000000;
+enum class ModeSwitchSource : uint32_t
+{
+    CompartmentOpenClose  = 1, // 宿主/系统写了 OPENCLOSE
+    CompartmentConversion = 2, // 宿主/系统写了 INPUTMODE_CONVERSION
+    CtrlSpaceKey          = 3, // 系统热键失效时的按键侧兜底
+};
+
+// ============================================================================
 // Protocol structures (must match Go side exactly)
 // ============================================================================
 #pragma pack(push, 1)

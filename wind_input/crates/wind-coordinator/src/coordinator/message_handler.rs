@@ -2342,6 +2342,15 @@ impl MessageHandler for Coordinator {
     fn handle_mode_notify(&self, flags: u32) {
         let chinese_mode = (flags & wind_ipc::protocol::STATUS_CHINESE_MODE) != 0;
         let clear_input = (flags & wind_ipc::protocol::STATUS_MODE_CHANGED) != 0;
+        // 模式变更的四个入口都打一条同形日志（见 handle_system_mode_switch 的说明）。
+        // 本入口当前在 C++ 侧无调用点（SendModeNotify 无人调用），日志出现即说明
+        // 有新调用方接了进来——那本身就是要知道的事。
+        tracing::debug!(
+            "mode_notify: {} -> {} clear_input={}",
+            if self.is_chinese_mode() { "中" } else { "英" },
+            if chinese_mode { "中" } else { "英" },
+            clear_input
+        );
         {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.chinese_mode = chinese_mode;
@@ -2356,6 +2365,13 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_toggle_mode(&self) -> (Option<StatusUpdateData>, String) {
+        // 模式变更的四个入口都打一条同形日志（见 handle_system_mode_switch 的说明）。
+        // 本入口 = 本地切换键（Shift 等），按键侧另有 `toggle_mode key_up` 记录键码，
+        // 但那条只在 policed 路径上，菜单/热键触发的 toggle 走不到，故这里仍要打。
+        tracing::debug!(
+            "toggle_mode: {} -> 翻转",
+            if self.is_chinese_mode() { "中" } else { "英" }
+        );
         // 「切换模式时取消大小写锁定」：CapsLock 开时按切换键，语义是"回到可输入中文
         // 的状态"（对齐搜狗）——取消锁定并归位中文，而非翻转 chinese_mode；否则
         // chinese_mode 原本为 true（被 CapsLock 压制）时翻转反而落到英文，切换仍然无效。
@@ -2392,7 +2408,51 @@ impl MessageHandler for Coordinator {
         (Some(self.build_status()), commit_text)
     }
 
-    fn handle_system_mode_switch(&self, chinese_mode: bool) -> (Option<StatusUpdateData>, String) {
+    fn handle_system_mode_switch(
+        &self,
+        chinese_mode: bool,
+        source: wind_ipc::protocol::ModeSwitchSource,
+        ctrl_held: bool,
+    ) -> (Option<StatusUpdateData>, String) {
+        // per-app「忽略宿主关闭输入法」：拒绝后**不改模式**，回包仍是当前模式。DLL 侧
+        // `_ApplyModeSwitch` 见到 `newChineseMode != requestedMode` 会把 compartment 拉回
+        // 真实模式——这条仲裁回路早就存在（密码框强制英文用的就是它），不必新开通道。
+        if self.host_ime_close_ignored(chinese_mode, source, ctrl_held) {
+            let cur = self.is_chinese_mode();
+            tracing::debug!(
+                "system_mode_switch: source={} 请求 英，已按 ignore_host_ime_close 拒绝（保持{}）",
+                source.as_str(),
+                if cur { "中" } else { "英" }
+            );
+            // ★★★ 必须再异步推一次状态，**不能只靠同步回包**。
+            //
+            // 宿主刚把 OPENCLOSE 写成 0，而我们保持中文 ⇒ compartment 与真实模式脱节。
+            // DLL 收到同步回包后确实会 `_SetOpenCloseCompartment`，但那一次发生在 `OnChange`
+            // 调用栈里——内部「值相同就不写」的守卫会读到尚未落定的旧值而跳过（实测回读
+            // 8/8 为 0，见 project_tsf_openclose_compartment_semantics）。
+            //
+            // 脱节的后果不是「图标不同步」这种小事，而是**Ctrl+Space 变哑**：compartment
+            // 停在 0、模式是中文，用户按 Ctrl+Space 把它翻成 1，`_ApplyModeSwitch` 一看
+            // 「1 == 当前中文」直接 no-op 早退，按了没反应；要按第二次（此时 0 又等于关，
+            // 且 Ctrl 按住会放行）才切得动——正是当年「按三次才切一次」那个病的形状。
+            //
+            // 状态推送走 `UpdateFullStatus`，那里的 `_SetOpenCloseCompartment` 是无条件的，
+            // 且在 WM_UPDATE_STATUS 消息上下文里执行（已脱离 OnChange），守卫读到的是落定值。
+            self.push_state_update();
+            return (Some(self.build_status()), String::new());
+        }
+        // ★ 模式变更的四个入口（本入口 / handle_toggle_mode / handle_mode_notify /
+        //   per-app initial_mode 重算）都必须留一条同形日志。理由是一份真机日志
+        //   （2026-09-08「某些应用里自动变成英文」）：21 次模式变化里只有 2 次能溯源，
+        //   其余全从这里进来却一声不响，只能靠「所有其它入口都没记录」反推。
+        //   source 把宿主写 compartment（WPF/游戏主动关 IME）与我们自己的按键兜底
+        //   分开——服务端日志据此就能定性，不必再让用户去开 TSF 日志。
+        tracing::debug!(
+            "system_mode_switch: source={} {} -> {}",
+            source.as_str(),
+            if self.is_chinese_mode() { "中" } else { "英" },
+            if chinese_mode { "中" } else { "英" }
+        );
         // 「切换模式时取消大小写锁定」：目标模式由外部指定（Ctrl+Space/KBLSwitch），
         // 仅取消 CapsLock 让目标模式真正生效，不改写目标。
         let _ = self.cancel_caps_on_switch();

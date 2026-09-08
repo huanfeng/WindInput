@@ -2958,6 +2958,42 @@ impl Coordinator {
             .and_then(|r| r.initial_mode)
     }
 
+    /// 这次系统模式切换是不是「宿主自作主张关 IME」，且当前应用配了忽略。
+    ///
+    /// 四个条件缺一不可（顺序即成本，先便宜的）：
+    /// 1. **是关不是开**——开 IME 从不拦，宿主想给中文是好事；
+    /// 2. **Ctrl 未按住**——按住＝用户在按 Ctrl+Space，系统热键必须放行，
+    ///    否则该应用里中英切换彻底失灵（判据由 DLL 现场采样，见 `MODE_SWITCH_CTRL_HELD`）；
+    /// 3. **来源是 compartment**——按键兜底与功能菜单是我们自己发起的，永远照办；
+    /// 4. 该应用显式配了 `ignore_host_ime_close = true`。
+    pub(crate) fn host_ime_close_ignored(
+        &self,
+        chinese_mode: bool,
+        source: wind_ipc::protocol::ModeSwitchSource,
+        ctrl_held: bool,
+    ) -> bool {
+        use wind_ipc::protocol::ModeSwitchSource as Src;
+        if chinese_mode || ctrl_held {
+            return false;
+        }
+        if !matches!(
+            source,
+            Src::CompartmentOpenClose | Src::CompartmentConversion
+        ) {
+            return false;
+        }
+        let proc = self.active_process_name();
+        if proc.is_empty() {
+            return false;
+        }
+        self.app_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_rule(&proc)
+            .and_then(|r| r.ignore_host_ime_close)
+            .unwrap_or(false)
+    }
+
     /// 查 `compat.toml` 中该进程的初始中英标点规则；`None` = 未配置（不干预）。
     pub(crate) fn rule_initial_punct(
         &self,
@@ -3164,6 +3200,15 @@ impl Coordinator {
             s.chinese_punct = d.chinese_punct;
         }
         if s.chinese_mode != chinese {
+            // 模式变更的四个入口都打一条同形日志（见 `handle_system_mode_switch`）。
+            // 只在真改变时打：本函数每次焦点切换都会走到，无条件打会淹掉日志。
+            // 注意此处已持 state 锁，取旧值只能读 `s`，不可调 `is_chinese_mode()`（会死锁）。
+            tracing::debug!(
+                "initial_mode: proc={} {} -> {}",
+                proc,
+                if s.chinese_mode { "中" } else { "英" },
+                if chinese { "中" } else { "英" }
+            );
             s.chinese_mode = chinese;
             // 标点随中英文切换（对齐 handle_toggle_mode/handle_system_mode_switch）。
             if follow {
@@ -3551,10 +3596,31 @@ impl Coordinator {
     /// fixed 时 UI 侧忽略光标坐标，改用 `custom_x/custom_y`；`(0,0)` 表示"已开启固定
     /// 但用户还没拖过"，由 UI 落到屏幕默认锚点。快捷加词面板复用同一个候选窗实例，
     /// 因此也走这里——否则同一个窗口会在"加词时跟随、打字时固定"之间来回跳。
+    /// per-app 规则**整条压过**全局：命中的应用用它自己的定位方式与自己的那份坐标，
+    /// 未命中（或规则里没配这一项）才读全局。
+    ///
+    /// ⚠ 坐标必须与定位方式**同层取**，不能「模式取 per-app、坐标回落全局」：那样
+    /// 「这个应用固定、但还没拖过」会去用全局那份为别的应用摆的坐标，候选窗一上来就
+    /// 落在莫名其妙的位置，而用户根本没为这个应用设过位置。`(0,0)` 交给 UI 落默认锚点
+    /// 才是这一档的正确答案。
     pub(crate) fn candidate_fixed_pos(&self) -> (bool, i32, i32) {
+        if let Some((fixed, x, y)) = self.rule_candidate_fixed_pos(&self.active_process_name()) {
+            return (fixed, x, y);
+        }
         let rt = self.rt();
         let c = &rt.config.ui.candidate;
         (c.is_fixed_position(), c.custom_x, c.custom_y)
+    }
+
+    /// 查 `compat.toml` 中该进程的候选窗定位规则；`None` = 未配置（跟随全局）。
+    pub(crate) fn rule_candidate_fixed_pos(&self, proc_name: &str) -> Option<(bool, i32, i32)> {
+        if proc_name.is_empty() {
+            return None;
+        }
+        let table = self.app_compat.lock().unwrap_or_else(|e| e.into_inner());
+        let rule = table.get_rule(proc_name)?;
+        let mode = rule.candidate_position_mode?;
+        Some((mode.is_fixed(), rule.candidate_x, rule.candidate_y))
     }
 
     pub(crate) fn refresh_config_in_memory(&self, mutate: impl FnOnce(&mut Config)) {
@@ -10891,6 +10957,101 @@ mod caret_compat_tests {
             c.active_compat.lock().unwrap().composition_start_pair_guard,
             "连接恢复路径也必须刷新 composition_start_pair_guard"
         );
+    }
+
+    /// `ignore_host_ime_close` 的四条判据逐一钉死。
+    ///
+    /// ★ 第二条（Ctrl 按住放行）是本功能唯一的逃生口：系统热键 Ctrl+Space 与宿主关 IME
+    /// 走**同一条** compartment 通路、载荷完全相同，若不放行，开了这条规则的应用里
+    /// Ctrl+Space 会彻底失灵，而用户只会觉得「输入法坏了」，根本联想不到这个开关。
+    #[test]
+    fn ignore_host_ime_close_gates() {
+        use wind_ipc::protocol::ModeSwitchSource as Src;
+        let c = coord();
+        let pid = 96032u32;
+        c.pid_names
+            .lock()
+            .unwrap()
+            .insert(pid, "x60_toolbox.exe".to_string());
+        c.active_compat.lock().unwrap().pid = pid;
+        let mut rules = Vec::new();
+        wind_config::app_compat::set_ignore_host_ime_close(
+            &mut rules,
+            "x60_toolbox.exe",
+            Some(true),
+        );
+        *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
+
+        // 宿主写 compartment 关 IME、无伴随按键 ⇒ 拦。这就是「点一下按钮就变英文」那条。
+        assert!(c.host_ime_close_ignored(false, Src::CompartmentOpenClose, false));
+        assert!(c.host_ime_close_ignored(false, Src::CompartmentConversion, false));
+        // Ctrl 按住 ⇒ 用户在按 Ctrl+Space，必须放行。
+        assert!(!c.host_ime_close_ignored(false, Src::CompartmentOpenClose, true));
+        // 开 IME 从不拦——宿主想给中文是好事。
+        assert!(!c.host_ime_close_ignored(true, Src::CompartmentOpenClose, false));
+        // 我们自己发起的两条路径永远照办，否则按键兜底与菜单会失灵。
+        assert!(!c.host_ime_close_ignored(false, Src::CtrlSpaceKey, false));
+        assert!(!c.host_ime_close_ignored(false, Src::Menu, false));
+
+        // 换成没配规则的应用 ⇒ 一律照办（这条规则必须是显式声明才生效）。
+        c.pid_names
+            .lock()
+            .unwrap()
+            .insert(pid, "notepad.exe".to_string());
+        assert!(!c.host_ime_close_ignored(false, Src::CompartmentOpenClose, false));
+    }
+
+    /// per-app 定位规则**整条**压过全局，坐标必须与定位方式同层取。
+    ///
+    /// ★ 「模式取 per-app、坐标回落全局」是个看起来更宽容、实际更坏的实现：用户刚给这个
+    /// 应用打开固定、还没拖过，候选窗会跳到全局那份为**别的**应用摆的坐标上，而他从未
+    /// 为这个应用设过位置。`(0,0)` 让 UI 落默认锚点才是这一档的正确答案。
+    #[test]
+    fn per_app_candidate_position_overrides_global_wholesale() {
+        let c = coord();
+        let pid = 96032u32;
+        c.pid_names
+            .lock()
+            .unwrap()
+            .insert(pid, "x60_toolbox.exe".to_string());
+        c.active_compat.lock().unwrap().pid = pid;
+        // 全局：固定在 (1000, 1000)
+        c.refresh_config_in_memory(|cfg| {
+            cfg.ui.candidate.position_mode = "fixed".into();
+            cfg.ui.candidate.custom_x = 1000;
+            cfg.ui.candidate.custom_y = 1000;
+        });
+        assert_eq!(
+            c.candidate_fixed_pos(),
+            (true, 1000, 1000),
+            "未配规则时跟随全局"
+        );
+
+        // per-app：固定但还没拖过 ⇒ (0,0) 交给 UI 落默认锚点，**不得**借用全局坐标。
+        let mut rules = Vec::new();
+        wind_config::app_compat::set_candidate_position_mode(
+            &mut rules,
+            "x60_toolbox.exe",
+            Some(wind_config::app_compat::CandidatePositionMode::Fixed),
+        );
+        *c.app_compat.lock().unwrap() =
+            wind_config::app_compat::AppCompat::from_rules(rules.clone());
+        assert_eq!(c.candidate_fixed_pos(), (true, 0, 0));
+
+        // 拖过之后用它自己那份。
+        wind_config::app_compat::set_candidate_pos(&mut rules, "x60_toolbox.exe", 320, 480);
+        *c.app_compat.lock().unwrap() =
+            wind_config::app_compat::AppCompat::from_rules(rules.clone());
+        assert_eq!(c.candidate_fixed_pos(), (true, 320, 480));
+
+        // 规则显式写 follow_caret ⇒ 压过全局的 fixed（这正是「独立一档」的意义）。
+        wind_config::app_compat::set_candidate_position_mode(
+            &mut rules,
+            "x60_toolbox.exe",
+            Some(wind_config::app_compat::CandidatePositionMode::FollowCaret),
+        );
+        *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
+        assert!(!c.candidate_fixed_pos().0);
     }
 
     /// code review 发现（2026-08-17，未真机复现，逻辑推导）：连接建立不是真实的

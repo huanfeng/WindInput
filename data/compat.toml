@@ -50,6 +50,23 @@
 #                         delete_replace（全局默认）体感更好，但依赖对宿主做删改，在
 #                         Tabby 一类终端上会出严重错误；hold_composition 全程不做删改，
 #                         用 TSF 组合态承载待定符号，兼容性更好。
+#   candidate_position_mode:
+#                         本应用的候选框定位方式："follow_caret" | "fixed"｜不写=跟随全局
+#                         config.toml 的 [ui.candidate] position_mode。
+#                         给光标坐标本就报不准的宿主（自绘控件、坐标系不对、多进程窗口
+#                         偏移）：设为 fixed 后候选框不再跟随光标，位置由拖动候选框设定。
+#   candidate_x:          fixed 时本应用的候选框位置（屏幕坐标，物理像素，默认 0）。
+#   candidate_y:          同上。每个应用各记一份，互不影响；(0,0) = 尚未设定，首次显示
+#                         落在屏幕默认位置，拖动一次即记住。
+#   ignore_host_ime_close:
+#                         忽略本应用「关闭输入法」的请求：true | false｜不写=按出厂规则
+#                         （出厂未配即采纳）。
+#                         部分 .NET 应用（WinForms 的 ImeMode.Disable、WPF 的
+#                         IsInputMethodEnabled=False）在焦点落到按钮等控件时会关掉**全局**
+#                         中英状态，表现为「点一下按钮就变成英文，回到输入框也不恢复」。
+#                         开启后这类请求不再采纳，中文状态保持不变。
+#                         Ctrl+Space 不受影响（按住 Ctrl 时一律放行），仍可正常切中英。
+#                         用户层同名规则若未写本字段会继承出厂值；显式 false 才关闭。
 #   caret_offset_x:       光标坐标水平校正（dp，96dpi 基准逻辑像素，正=右，默认 0）。
 #   caret_offset_y:       光标坐标垂直校正（dp，96dpi 基准逻辑像素，正=下，默认 0）。
 #                         用于宿主报告的光标坐标**系统性偏移**的场景（如 Windows Terminal，
@@ -60,10 +77,11 @@
 #                         物理像素后再叠加，故同一份数值在 100%/150%/200% 缩放的屏幕上
 #                         观感一致，多屏不同缩放也不必分别配置。
 #
-# first_show_mode / initial_mode / initial_punct / auto_pair 对应右键菜单：
-# 「应用独立配置（<进程名>）」子菜单，各自单选。
+# first_show_mode / initial_mode / initial_punct / auto_pair / candidate_position_mode /
+# ignore_host_ime_close 对应右键菜单：「应用独立配置（<进程名>）」子菜单，各自单选。
 # （菜单切换会写入用户层 compat.toml，不改本文件）
-# smart_method 与 caret_offset_* 不进菜单，按需手工编辑用户层 compat.toml。
+# smart_method、caret_offset_* 与 candidate_x/y 不进菜单：前两者按需手工编辑用户层
+# compat.toml，候选框位置由拖动候选框设定。
 #
 # ⚠ initial_mode / initial_punct 的语义是「初始值」而不是「锁定」：
 #   - 每次焦点**从别的应用**切进来时套用一次；停留在本应用期间用户可自由手动切换，
