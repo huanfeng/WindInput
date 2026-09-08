@@ -313,10 +313,21 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 查询走精确 + 前缀，候选标 `source = English`。独立方案可直接使用，更常见的是被混输懒加载
 （`schema.mix.enable_english`）。
 
-### 6.1 英文候选混入非混输方案（`schema.english_merge`）
+### 6.1 英文候选混入非混输方案（`schema.codetable.english_merge` / `schema.pinyin.english_merge`）
 
 文件：`wind-engine/src/english_merge.rs`。让**纯拼音 / 纯码表**方案也能在候选里捎带英文词
 （全拼下打 `hello` 直接选到 hello），出厂关。
+
+**配置按引擎分两份，取值互不共享**：`schema.codetable.english_merge`（`enable` /
+`min_length` / `block_commit`，可经方案级 `[engine.codetable.english_merge]` 逐项覆盖）与
+`schema.pinyin.english_merge`（`enable` / `min_length`）。拆开的理由是「码表方案要不要捎带
+英文」与「拼音方案要不要」本就是两件事——五笔常打命令行、变量名，开着有用；全拼的英文词与
+拼音串大面积重叠（`hen`/`men`/`she` 既是音节又是英文词），可能宁可不开。一个总开关只会逼
+用户在「两个都开」和「两个都关」之间二选一。
+
+拼音那份**刻意没有 `block_commit`**：它否决的是满码上屏 / 顶码，拼音方案两者都没有；
+给一个恒不生效的开关等于告诉用户一件不成立的事。管理器 `english_merge_cfg` 按引擎类型
+分流并折叠成 `Effective`，下游三条通路只认折叠后的形态。
 
 **接线点是 `EngineManager` 而非各引擎内部**：`convert` / `recheck_auto_commit` /
 `handle_top_code` 三条通路在管理器上是同一个收口点（都经 `active_engine()`），一处接线即

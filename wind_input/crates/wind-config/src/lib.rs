@@ -26,12 +26,12 @@ pub mod variant;
 pub use code_charset::{CodeCharSet, CodeCharSetError};
 pub use config::{
     AssociationConfig, AuxCodeShare, BoundAction, CUSTOM_DATA_DIR_NAME, CUSTOM_MANIFEST_NAME,
-    CodetableGlobal, Config, CustomHideList, CustomIdentity, CustomManifest, DEFAULT_LABEL_CAPS,
-    DEFAULT_LABEL_ENGLISH, EnglishMergeGlobal, KeyOrigin, LabelsConfig, LangBarConfig, LayerOrigin,
+    CodetableEnglishMerge, CodetableGlobal, Config, CustomHideList, CustomIdentity, CustomManifest,
+    DEFAULT_LABEL_CAPS, DEFAULT_LABEL_ENGLISH, KeyOrigin, LabelsConfig, LangBarConfig, LayerOrigin,
     LayoutIntent, MixGlobal, MobileAssociationConfig, MobileConfig, ModeIndicatorStyle,
-    Orientation, PinyinFuzzy, PinyinGlobalConfig, PreeditDisplay, ResourceLayer, SessionAction,
-    TOOLBAR_ITEM_KEYS, TOOLBAR_LABEL_MAX_WIDTH, TextOrientation, ToolbarButtonSpec, TopCommitMode,
-    toolbar_label_trunc,
+    Orientation, PinyinEnglishMerge, PinyinFuzzy, PinyinGlobalConfig, PreeditDisplay,
+    ResourceLayer, SessionAction, TOOLBAR_ITEM_KEYS, TOOLBAR_LABEL_MAX_WIDTH, TextOrientation,
+    ToolbarButtonSpec, TopCommitMode, toolbar_label_trunc,
 };
 pub use dir_var::{dir_var, dir_var_help, dir_var_names, dir_var_str, is_dir_var};
 pub use runtime_state::RuntimeState;

@@ -361,9 +361,6 @@ pub struct EngineManager {
     mix: Mutex<wind_config::MixGlobal>,
     /// 全局英文配置（英文方案的行为与调频；全局唯一）。Mutex 以支持热重载。
     english: Mutex<wind_config::config::EnglishGlobal>,
-    /// 全局「英文候选混入」配置（引擎无关；**混输不读**，它有自带的
-    /// `schema.mix.enable_english`）。Mutex 以支持热重载。
-    english_merge: Mutex<wind_config::EnglishMergeGlobal>,
     /// 「英文候选混入」用的英文引擎缓存。
     ///
     /// `None` = 尚未尝试；`Some(None)` = 试过且不可用（英文词库缺失），**不再重试**。
@@ -642,7 +639,6 @@ impl EngineManager {
             codetable: Mutex::new(config.schema.codetable.clone()),
             mix: Mutex::new(config.schema.mix.clone()),
             english: Mutex::new(config.schema.english.clone()),
-            english_merge: Mutex::new(config.schema.english_merge.clone()),
             english_merge_engine: Mutex::new(None),
             temp_pinyin: Mutex::new(config.input.temp_pinyin.clone()),
             // 用户层在 store 里（`wind_store::charsets`），装配前先 `as_deref` 借用，
@@ -2604,8 +2600,6 @@ impl EngineManager {
         *self.codetable.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.codetable.clone();
         *self.mix.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.mix.clone();
         *self.english.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.english.clone();
-        *self.english_merge.lock().unwrap_or_else(|e| e.into_inner()) =
-            config.schema.english_merge.clone();
         // 连同**引擎缓存**一起重置：开关从关到开时，缓存里躺着的可能是上次「未尝试」之外的
         // `Some(None)`（词库当时缺失）。不重置的话用户补上词库、重载配置后仍然不生效，
         // 症状是「设置页改了不生效、重启后才生效」——与上面几份镜像同一类坑。
@@ -2754,22 +2748,64 @@ impl EngineManager {
     fn english_merge_ctx(
         &self,
         active: &Arc<dyn Engine>,
-    ) -> Option<(Arc<dyn Engine>, wind_config::EnglishMergeGlobal)> {
-        let cfg = self
-            .english_merge
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+    ) -> Option<(Arc<dyn Engine>, crate::english_merge::Effective)> {
+        let cfg = self.english_merge_cfg(active)?;
         if !cfg.enable {
             return None;
         }
-        if matches!(
-            active.engine_type(),
-            EngineType::Mixed | EngineType::English
-        ) {
-            return None;
-        }
         Some((self.english_merge_engine()?, cfg))
+    }
+
+    /// 取本次转换该用哪份英文混入配置——**按引擎类型分流，两份互不共享取值**。
+    ///
+    /// 「码表方案要不要捎带英文」与「拼音方案要不要」是两件独立的事（见
+    /// `wind_config::CodetableEnglishMerge` 的文档）：五笔常打命令行、变量名，开着有用；
+    /// 全拼的英文词与拼音串大面积重叠（`hen`/`men`/`she` 都既是音节又是英文词），
+    /// 用户可能宁可不开。一个总开关只会逼人在「两个都开」和「两个都关」之间二选一。
+    ///
+    /// ⚠️ 码表侧走 [`Self::codetable_settings`] 而**不是**读全局镜像：那个函数按**活跃方案**
+    /// 折叠了方案级 `[engine.codetable.english_merge]`。直接读镜像的话，用户在方案里写的
+    /// 覆盖没人读——`CodetableGlobal::resolved` 的注释里记着同款教训（「光在这里折叠、
+    /// freq_settings 仍读全局镜像的话，方案文件里写了也没人读」）。
+    ///
+    /// ⚠️ 拼音侧**暂无方案级覆盖**：`PinyinGlobalConfig` 没有 `resolved()`、`PinyinSpec` 也
+    /// 没有对应字段，整套机制在拼音侧尚不存在。故这里直读全局镜像；将来补上方案级时，
+    /// 这一行要跟着换成 resolved 版本，否则表现就是「方案里写了不生效」。
+    fn english_merge_cfg(
+        &self,
+        active: &Arc<dyn Engine>,
+    ) -> Option<crate::english_merge::Effective> {
+        match active.engine_type() {
+            EngineType::CodeTable => {
+                let c = self.codetable_settings().english_merge;
+                Some(crate::english_merge::Effective {
+                    enable: c.enable,
+                    min_length: c.min_length,
+                    block_commit: c.block_commit,
+                })
+            }
+            EngineType::Pinyin => {
+                let p = self
+                    .pinyin
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .english_merge
+                    .clone();
+                Some(crate::english_merge::Effective {
+                    enable: p.enable,
+                    min_length: p.min_length,
+                    // 见 `Effective::block_commit`：拼音没有满码上屏 / 顶码可否决。
+                    block_commit: false,
+                })
+            }
+            // 混输有自带的英文混入（`schema.mix.enable_english`，带三方档位仲裁），
+            // 再叠一层会混两遍、档位与配额双重失真；英文方案本身就在出英文候选。
+            EngineType::Mixed | EngineType::English => None,
+        }
+        // ★ 刻意**不写** `_ => None` 通配分支：配置拆成按引擎两份之后，「新增一个引擎类型」
+        // 就必须在这里明确它用哪一份（或不参与）。留通配的话新引擎会静默不支持英文混入，
+        // 而这正是本模块最初"一处接线覆盖以后任何新引擎"那句承诺失效的地方——拆分之后
+        // 它已经不成立，改由编译器来提醒。
     }
 
     /// 英文词库引擎（懒加载一次，失败也记住，见 [`Self::english_merge_engine`] 字段文档）。

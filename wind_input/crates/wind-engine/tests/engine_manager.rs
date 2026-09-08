@@ -93,7 +93,7 @@ fn has_english_text(r: &wind_engine::ConvertResult, want: &str) -> bool {
     })
 }
 
-/// 英文候选混入（`[schema.english_merge]`）：**全拼**方案下打 `hello` 也该能选到 hello。
+/// 英文候选混入（`[schema.pinyin.english_merge]`）：**全拼**方案下打 `hello` 也该能选到 hello。
 ///
 /// ★ 反向对照必须成对立：开关关着时英文**不在场**。缺了它，「在场」可能只是因为拼音词库
 /// 里恰好有个同形词条，或者来源标记串了，断言变成空转（同 `MixedEngine` 那条
@@ -115,7 +115,7 @@ fn english_merge_into_pinyin_candidates() {
 
     // 开启后 hello 在场。
     let mut on = make_config(&["pinyin"]);
-    on.schema.english_merge.enable = true;
+    on.schema.pinyin.english_merge.enable = true;
     let mgr_on = EngineManager::new(&on, Some(&dir));
     let r = mgr_on.convert("hello", 50);
     assert!(
@@ -141,7 +141,7 @@ fn english_survives_real_pinyin_flood() {
         return;
     }
     let mut cfg = make_config(&["pinyin"]);
-    cfg.schema.english_merge.enable = true;
+    cfg.schema.pinyin.english_merge.enable = true;
     let mgr = EngineManager::new(&cfg, Some(&dir));
 
     // `hen` 是完整音节，拼音候选足以装满小配额。
@@ -175,7 +175,10 @@ fn english_merge_skips_mixed_schema() {
         return;
     }
     let mut cfg = make_config(&["wubi86_pinyin"]);
-    cfg.schema.english_merge.enable = true;
+    // ★ 两份**都**开：混输既不读码表那份也不读拼音那份，只认自己的
+    // schema.mix.enable_english。只开一份的话，另一份没生效可能只是碰巧。
+    cfg.schema.codetable.english_merge.enable = true;
+    cfg.schema.pinyin.english_merge.enable = true;
     // 混输自带的英文开关保持关闭：若混入错误地生效，英文候选会凭空出现。
     cfg.schema.mix.enable_english = false;
     let mgr = EngineManager::new(&cfg, Some(&dir));
@@ -206,8 +209,8 @@ fn english_merge_vetoes_top_code_on_codetable() {
         // `Config::default()` 是 L1，那里是 false。不设这行，`handle_top_code` 在第一行
         // 就 return None，本用例连同它要守的否决逻辑一起变成空转。
         cfg.schema.codetable.top_code_commit = true;
-        cfg.schema.english_merge.enable = true;
-        cfg.schema.english_merge.block_commit = block;
+        cfg.schema.codetable.english_merge.enable = true;
+        cfg.schema.codetable.english_merge.block_commit = block;
         EngineManager::new(&cfg, Some(&dir))
     };
 

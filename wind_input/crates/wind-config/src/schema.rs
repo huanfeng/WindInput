@@ -410,6 +410,26 @@ pub struct CodeTableSpec {
     /// 见 `EngineManager::codetable_baseline`），普通方案的基线是全局段。
     #[serde(default)]
     pub frequency: Option<CodeTableFrequencySpec>,
+    /// 方案级英文混入覆盖（`[engine.codetable.english_merge]`）。
+    ///
+    /// 缺省 = 整段跟随基线。存在的理由与调频同源：同一台机器上不同码表的诉求不同——
+    /// 五笔常打命令行、变量名，开着有用；某张专用符号表或纯汉字表开了只是噪音。
+    #[serde(default)]
+    pub english_merge: Option<CodeTableEnglishMergeSpec>,
+}
+
+/// 方案级英文混入覆盖（`[engine.codetable.english_merge]`），**逐字段稀疏**。
+///
+/// 每个字段都是 `Option`：给了就覆盖基线，没给就跟随。整段缺省 = 全部跟随。
+/// 字段语义见 [`crate::config::CodetableEnglishMerge`]。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeTableEnglishMergeSpec {
+    #[serde(default)]
+    pub enable: Option<bool>,
+    #[serde(default)]
+    pub min_length: Option<usize>,
+    #[serde(default)]
+    pub block_commit: Option<bool>,
 }
 
 /// 方案级调频覆盖（`[engine.codetable.frequency]`），**逐字段稀疏**。

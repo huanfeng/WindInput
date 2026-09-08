@@ -13,8 +13,15 @@
 //! 其余）耦合，而那套档位的语义又与 `convert_overflow` 的截断归属绑在一起。本模块服务的
 //! 场景只有**一路**基础候选，三方仲裁无从谈起——故另写一份简单的，而不是把混输那套拆通用。
 //!
-//! ⇒ 混输方案**不读** `[schema.english_merge]`（见 `wind_config::EnglishMergeGlobal`），
+//! ⇒ 混输方案**两份都不读**（见 `manager::EngineManager::english_merge_cfg` 的分流），
 //! 否则两套英文各混一遍，档位与配额双重失真。
+//!
+//! ## 配置按引擎分两份，本模块只认折叠后的形态
+//!
+//! `[schema.codetable.english_merge]`（三项，且经方案级 `[engine.codetable.english_merge]`
+//! 折叠）与 `[schema.pinyin.english_merge]`（两项，无 `block_commit`）是**两件独立的事**
+//! ——理由见 `wind_config::CodetableEnglishMerge` 的文档。管理器把它们折叠成
+//! [`Effective`] 再交给本模块，故这里的函数不关心取值来自哪一份。
 //!
 //! ## ★ 英文必须有保底席位，否则开关等于没做
 //!
@@ -58,6 +65,21 @@ const EXACT_MAX: usize = 2;
 /// 最小触发长度的回退值（配置为 0 时）。与 `manager::build_engine` 给
 /// `schema.mix.min_english_length` 的回退**同值**，两处口径一致。
 const DEFAULT_MIN_LENGTH: usize = 3;
+
+/// 本次转换**生效**的英文混入参数。
+///
+/// 来源有两个且字段不同——码表侧是 `schema.codetable.english_merge`（三项，且经方案级
+/// `[engine.codetable.english_merge]` 折叠），拼音侧是 `schema.pinyin.english_merge`
+/// （两项，无 `block_commit`）。本结构是它们折叠后的**共同形态**，让下游三条通路只认一种。
+///
+/// ⚠️ 拼音侧构造时 `block_commit` 恒为 `false`：那一项否决的是满码自动上屏 / 顶码上屏，
+/// 拼音方案两者都没有。写成 `false` 不是"默认关"，是"这条路上没有可否决的动作"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Effective {
+    pub enable: bool,
+    pub min_length: usize,
+    pub block_commit: bool,
+}
 
 /// 配置值 0 视作「用回退值」，口径同 `schema.mix.min_english_length`。
 pub fn min_length_or_default(configured: usize) -> usize {

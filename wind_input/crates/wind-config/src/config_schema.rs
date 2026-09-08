@@ -173,6 +173,11 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.single_code_complete", Bool),
     f("schema.codetable.short_code_yield_level", Int),
     f("schema.codetable.z_key_repeat", Bool),
+    // 英文候选混入（码表方案）。混输走 schema.mix 那三项、拼音走 schema.pinyin
+    // 同名段，三者互不接管，见 `CodetableEnglishMerge` 文档。
+    f("schema.codetable.english_merge.enable", Bool),
+    f("schema.codetable.english_merge.min_length", Int),
+    f("schema.codetable.english_merge.block_commit", Bool),
     // 带参数的值域（`mix:<id>` / `special:<id>`）故用 Str 而非 Enum；解析与校验见 `BoundAction`。
     f("schema.codetable.z_key_action", Str),
     // 码元字符集：范围+字面的自由文本（如 `a-x/`、`a-z0-9`），值域无法枚举故用 Str；
@@ -221,6 +226,10 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.pinyin.show_code_hint", Bool),
     f("schema.pinyin.use_smart_compose", Bool),
     f("schema.pinyin.separator", Str),
+    // 英文候选混入（拼音方案）。**没有 block_commit**：那一项否决的是满码自动上屏/顶码，
+    // 拼音方案两者都没有，登记它等于教用户去配一件不成立的事。见 `PinyinEnglishMerge`。
+    f("schema.pinyin.english_merge.enable", Bool),
+    f("schema.pinyin.english_merge.min_length", Int),
     f("schema.pinyin.fuzzy.enabled", Bool),
     f("schema.pinyin.fuzzy.zh_z", Bool),
     f("schema.pinyin.fuzzy.ch_c", Bool),
@@ -274,11 +283,6 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.mix.enable_pinyin_abbrev", Bool),
     f("schema.mix.pinyin_partial_candidates", Bool),
     f("schema.mix.pinyin_partial_candidates_overflow", Bool),
-    // 英文候选混入（引擎无关：拼音/纯码表共用；混输走上面 schema.mix 那三项，不读本段）。
-    // 与 schema.mix.* 的英文三项并存是刻意的，见 `EnglishMergeGlobal` 文档。
-    f("schema.english_merge.enable", Bool),
-    f("schema.english_merge.min_length", Int),
-    f("schema.english_merge.block_commit", Bool),
     // 快捷输入：各候选来源的开关与优先级在 schema.mix_modes 的 members 里（有无=开关，
     // 顺序=优先级）；总开关＝把 quick_mix 的 trigger_keys 清空。此处只有全局行为项。
     f("schema.quick_input.decimal_places", Int),
@@ -548,9 +552,11 @@ static REGISTRY: &[ConfigField] = &[
     f("stats.track_english", Bool),
     f("stats.speed_factor", Float),
     // -- debug（调试）--
+    // `off` = 整个日志功能关闭：主日志文件不创建，连 `startup_stage.log` 也不写
+    // （见 startup_trace::disabled）。它排在最前是因为值域按"由关到详"排。
     f(
         "debug.log_level",
-        Enum(&["trace", "debug", "info", "warn", "error"]),
+        Enum(&["off", "error", "warn", "info", "debug", "trace"]),
     ),
     f("debug.log_max_size_mb", Int),
     f("debug.log_max_files", Int),
@@ -635,6 +641,12 @@ pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
         key: "schema.codetable.frequency.",
         section: "[codetable.frequency]",
         note: "码表方案可逐项覆盖这里的调频设置；方案没写的项仍然用这里的值。",
+    },
+    // 同上：段前缀不递归，英文混入子段要自己登记一条。
+    SchemaOverride {
+        key: "schema.codetable.english_merge.",
+        section: "[codetable.english_merge]",
+        note: "码表方案可逐项覆盖这里的英文混入设置；方案没写的项仍然用这里的值。",
     },
     SchemaOverride {
         key: "schema.pinyin.aux_code.enabled",

@@ -38,7 +38,7 @@ fn english_texts(r: &wind_engine::ConvertResult) -> Vec<String> {
         .collect()
 }
 
-/// 全拼（`schema.english_merge`）：`hen` 只混入精确的 `hen`，前缀扩展一条不留。
+/// 全拼（`schema.pinyin.english_merge`）：`hen` 只混入精确的 `hen`，前缀扩展一条不留。
 #[test]
 fn pinyin_merge_keeps_only_exact() {
     let dir = data_dir();
@@ -55,7 +55,7 @@ fn pinyin_merge_keeps_only_exact() {
     );
 
     let mut cfg = make_config(&["pinyin"]);
-    cfg.schema.english_merge.enable = true;
+    cfg.schema.pinyin.english_merge.enable = true;
     let mgr = EngineManager::new(&cfg, Some(&dir));
 
     let r = mgr.convert("hen", 50);
@@ -91,7 +91,7 @@ fn pinyin_merge_silent_without_exact_hit() {
         return;
     }
     let mut cfg = make_config(&["pinyin"]);
-    cfg.schema.english_merge.enable = true;
+    cfg.schema.pinyin.english_merge.enable = true;
     let mgr = EngineManager::new(&cfg, Some(&dir));
 
     // `githu` 是 github 的前缀，词库里没有这个词本身。

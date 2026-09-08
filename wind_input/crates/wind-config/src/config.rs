@@ -727,13 +727,6 @@ pub struct SchemaConfig {
     /// 全局英文配置（英文方案自身的行为与调频；不再共用码表那套）。
     #[serde(default)]
     pub english: EnglishGlobal,
-    /// 全局「英文候选混入」配置（**引擎无关**：拼音/纯码表方案共用；混输不读本段）。
-    ///
-    /// ⚠️ 与上面的 `english` 段是两件事，别合并：那段管「英文方案**自己**作为一个方案时
-    /// 怎么表现」（`commit_space` / `raw_candidate` / 大小写变形），本段管「**别的**方案的
-    /// 候选列表里要不要混英文」。两个作用域各一份，不是两个真相源。
-    #[serde(default)]
-    pub english_merge: EnglishMergeGlobal,
     /// 快捷输入（日期/计算等内置类方案）配置。将随"英文/快捷做成方案"一并重构。
     #[serde(default)]
     pub quick_input: QuickInputConfig,
@@ -773,7 +766,6 @@ impl Default for SchemaConfig {
             pinyin: PinyinGlobalConfig::default(),
             mix: MixGlobal::default(),
             english: EnglishGlobal::default(),
-            english_merge: EnglishMergeGlobal::default(),
             quick_input: QuickInputConfig::default(),
             frequency: FrequencyGlobal::default(),
             legacy_special_modes: Vec::new(),
@@ -930,6 +922,11 @@ pub struct PinyinGlobalConfig {
     pub separator: String,
     #[serde(default)]
     pub fuzzy: PinyinFuzzy,
+    /// 英文候选混入（[schema.pinyin.english_merge]）。见 [`PinyinEnglishMerge`]。
+    ///
+    /// 与码表那份（[`CodetableEnglishMerge`]）是两件独立的事，**不共享取值**。
+    #[serde(default)]
+    pub english_merge: PinyinEnglishMerge,
     /// 拼音调频（衰减参数；全局唯一，按引擎分——见 docs/redesign/schema-config-layering.md §3.4）。
     #[serde(default)]
     pub frequency: PinyinFrequency,
@@ -1140,6 +1137,7 @@ impl Default for PinyinGlobalConfig {
         Self {
             show_code_hint: true,
             use_smart_compose: true,
+            english_merge: PinyinEnglishMerge::default(),
             separator: default_pinyin_separator(),
             fuzzy: PinyinFuzzy::default(),
             frequency: PinyinFrequency::default(),
@@ -1584,6 +1582,12 @@ impl std::fmt::Display for SessionAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CodetableGlobal {
+    /// 英文候选混入（[schema.codetable.english_merge]）。见 [`CodetableEnglishMerge`]。
+    ///
+    /// ⚠️ 方案级覆盖须**单独登记**进 `SCHEMA_OVERRIDES`：`schema.codetable.` 那条段前缀
+    /// 刻意不递归到子段（见 `SchemaOverride::key` 的文档），与 `frequency.` 同理。
+    #[serde(default)]
+    pub english_merge: CodetableEnglishMerge,
     /// 顶码上屏（超满码长取前 N 码首选上屏）。
     #[serde(default)]
     pub top_code_commit: bool,
@@ -1663,6 +1667,7 @@ fn default_short_code_yield_level() -> usize {
 impl Default for CodetableGlobal {
     fn default() -> Self {
         Self {
+            english_merge: CodetableEnglishMerge::default(),
             // ⚠️ 这是**结构体零值**，不是「出厂默认」——出厂值在 `data/config.toml`（L2 层，
             // 恒覆盖本处）。大量集成测试以 `Config::default()` 构造，把这些拨成 true 会连带
             // 改变它们的输入行为（顶码/标点上屏都会生效）。
@@ -1771,6 +1776,21 @@ impl CodetableGlobal {
             }
             if let Some(v) = f.protect_top_n_len3 {
                 out.frequency.protect_top_n_len3 = v;
+            }
+        }
+        // 英文混入子段：同 `frequency` 的逐字段稀疏折叠。
+        //
+        // ⚠️ 同样的「两条路径」提醒：本段的消费方是 `EngineManager::english_merge_ctx`
+        // （它按活跃方案取 resolved 值），不是 `build_engine` 的 CommitOptions。
+        if let Some(e) = &o.english_merge {
+            if let Some(v) = e.enable {
+                out.english_merge.enable = v;
+            }
+            if let Some(v) = e.min_length {
+                out.english_merge.min_length = v;
+            }
+            if let Some(v) = e.block_commit {
+                out.english_merge.block_commit = v;
             }
         }
         out
@@ -2099,21 +2119,30 @@ impl Default for MixGlobal {
     }
 }
 
-/// 全局「英文候选混入」配置（[schema.english_merge]）。**引擎无关**。
+/// 码表方案的「英文候选混入」配置（[schema.codetable.english_merge]）。
 ///
-/// ## 为什么另立一段，而不是挂进 `[schema.mix]` 或 `[schema.pinyin]`
+/// ## 为什么按引擎各配一份，而不是一个全局总开关
 ///
-/// 「候选列表里混一条英文词」这件事与引擎类型无关：全拼方案要，纯码表方案（五笔）也可能要。
-/// 挂进任一引擎专属段，另一个引擎就得再配一遍，或者去读一个名字不对的键。
+/// 「码表方案要不要捎带英文」与「拼音方案要不要捎带英文」是**两件独立的事**：五笔用户
+/// 常打命令行、变量名，开着有用；全拼用户的英文词与拼音串大面积重叠（`hen`/`men`/`she`
+/// 都既是音节又是英文词），可能宁可不开。一个总开关表达不了这种取舍，只会逼用户在
+/// 「两个都开」和「两个都关」之间二选一。
 ///
-/// ⚠️ 与既有的 `[schema.mix]` 三个英文项（`enable_english` / `min_english_length` /
-/// `auto_commit_block_on_english`）**刻意并存、互不接管**：那三项只服务混输引擎自己的三方
-/// 档位仲裁（`MixedEngine::truncation_tier` 的档 0/2/3），语义已与 `convert_overflow` 的
-/// 截断归属耦合，硬改造成通用件的成本高于另写一份。**混输方案不读本段**（否则两套英文
-/// 各混一遍，档位与配额双重失真）。
+/// 拆开还顺带解决了两个具体问题：
+///
+/// 1. [`Self::block_commit`] 只对定长码表有意义（拼音没有满码上屏 / 顶码），合在一起时
+///    它对拼音用户是一个恒不生效的开关——照本仓判据（见 `SchemaOverride::key` 的文档），
+///    「标出一个不会被读的配置」等于告诉用户一件不成立的事。拆开后拼音那份就不带它。
+/// 2. 设置页的清单按配置键唯一（`HashMap<String, MItem>`），一个键进不了两个分区；
+///    拆成两个键后，码表那份落「上屏行为」、拼音那份落「候选行为」，各自归位。
+///
+/// ⚠️ 混输（`[schema.mix]` 的 `enable_english` / `min_english_length` /
+/// `auto_commit_block_on_english`）**是第三份，互不接管**：那三项与
+/// `MixedEngine::truncation_tier` 的三方档位仲裁耦合，语义已和 `convert_overflow` 的截断
+/// 归属绑在一起。混输方案不读本段，否则两套英文各混一遍、档位与配额双重失真。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EnglishMergeGlobal {
-    /// 在候选列表里混入英文词库候选。出厂关。
+pub struct CodetableEnglishMerge {
+    /// 在候选列表里混入英文词库候选（只收**精确命中**，前缀扩展不入列）。出厂关。
     #[serde(default)]
     pub enable: bool,
     /// 最小触发长度（0=回退 3，即 2 字符以内不查英文）。口径同 `schema.mix.min_english_length`。
@@ -2128,12 +2157,13 @@ pub struct EnglishMergeGlobal {
     /// `gith` 就被顶出中文，英文候选永远等不到露面。`wind-engine/AGENTS.md` 记着同款现场
     /// 在混输里已经发生过一次（"github 打到第 5 键顶出「不算」"）。
     ///
-    /// 拼音方案无满码上屏 / 顶码，本项对其是空操作。
+    /// ⚠️ 本项的判据看的是**前缀命中**而非精确命中（`english_merge::has_any`）：用户打到
+    /// `gith` 时精确命中还不存在，若否决也要求精确，满码就会在第 4 键把中文顶上屏。
     #[serde(default = "default_true")]
     pub block_commit: bool,
 }
 
-impl Default for EnglishMergeGlobal {
+impl Default for CodetableEnglishMerge {
     fn default() -> Self {
         Self {
             enable: false,
@@ -2142,6 +2172,22 @@ impl Default for EnglishMergeGlobal {
             block_commit: true,
         }
     }
+}
+
+/// 拼音方案的「英文候选混入」配置（[schema.pinyin.english_merge]）。
+///
+/// 与 [`CodetableEnglishMerge`] 是**两件独立的事**，理由见该结构文档。
+///
+/// ⚠️ **刻意没有 `block_commit`**：那一项否决的是满码自动上屏 / 顶码上屏，而拼音方案
+/// 两者都没有。给它一个恒不生效的开关，等于教用户去配一件不成立的事。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PinyinEnglishMerge {
+    /// 在候选列表里混入英文词库候选（只收**精确命中**，前缀扩展不入列）。出厂关。
+    #[serde(default)]
+    pub enable: bool,
+    /// 最小触发长度（0=回退 3，即 2 字符以内不查英文）。
+    #[serde(default)]
+    pub min_length: usize,
 }
 
 /// 全局模糊音（[schema.pinyin.fuzzy]）。字段对齐引擎 FuzzyConfig。
@@ -5088,6 +5134,11 @@ impl Default for StatsConfig {
 pub struct DebugConfig {
     /// 日志级别。空字符串等同 `info`（生产默认）。
     /// 注意：`info` 级别日志不得包含用户输入内容、词库词条等隐私数据。
+    ///
+    /// `off` = **整个日志功能关闭**：主日志文件不创建（不是"创建了但为空"），
+    /// `startup_stage.log` 也不写。用户选它是为了"这台机器上别留输入法的痕迹"，
+    /// 空文件同样是痕迹。判据的唯一实现在 `startup_trace::effective_log_level`——
+    /// 它同时被主日志的 EnvFilter 与启动轨迹的门控读取，不要在别处重算优先级链。
     #[serde(default)]
     pub log_level: String,
     /// 单个日志文件的大小上限（MB），超出后滚动。默认 10。

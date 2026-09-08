@@ -18,7 +18,7 @@
 | `src/codetable/engine.rs` | `CodeTableEngine`：经 `DictManager`(CompositeDict) 精确 + 前缀查询；全码自动上屏、顶码、`clear_on_empty_max` 等上屏策略（`CommitOptions`） |
 | `src/mixed/engine.rs` | `MixedEngine`：持码表主 + 拼音次 + 可选英文子引擎，分档加权合并（码表精确 +boost、短语 +1M、英文精确 +500K、前缀 +500K，拼音 ÷100 降档）；**拼音否决统一入口 `pinyin_vetoes_commit`**（否决①粗粒度默认关 / ②词强度默认开，满码/顶码/显示态复评三通路共用）；超码长走 `convert_overflow`（`pinyin_only_overflow` 分流），归属由 `codetable_owns_overflow` 四条判据裁决 |
 | `src/english.rs` | `EnglishEngine`：码表引擎薄包装（词库 code 列小写化，大小写不敏感前缀匹配），独立方案或被混输懒加载（`schema.mix.enable_english`） |
-| `src/english_merge.rs` | **引擎无关**的英文候选混入（`schema.english_merge`）：查英文词库 + 按席位合并，供纯拼音/纯码表方案复用。接线在 `manager.rs` 的三条通路，**不是**混输那套（后者与 `truncation_tier` 三方仲裁耦合，见该模块文档） |
+| `src/english_merge.rs` | 英文候选混入（**只收精确命中**）：配置按引擎分两份——`schema.codetable.english_merge`（三项，可经方案级 `[engine.codetable.english_merge]` 覆盖）与 `schema.pinyin.english_merge`（两项，无 `block_commit`），由 `manager::english_merge_cfg` 分流折叠成 `Effective`。接线在 `manager.rs` 的三条通路，**不是**混输那套（后者与 `truncation_tier` 三方仲裁耦合，见该模块文档） |
 
 ## For AI Agents
 
@@ -36,7 +36,7 @@
 - **★ 混输上屏有三条通路，任何否决开关必须三处都接**：① `convert` 的满码上屏（`should_commit`）、② `recheck_auto_commit` 的显示态复评、③ `handle_top_code` 的顶码。**协调器让顶码先于候选刷新执行**（`coordinator.rs` 字母键臂），所以第三条漏读一个开关，该开关对超码长输入就等于完全失效——而它在满码路径上工作正常，日志与设置页均无痕迹。已因此栽过两次：`pinyin_only_overflow` 只被 `convert` 读（youyoud→顶出「变凉」，补否决⓪）、`auto_commit_block_on_english` 只有前两个使用点（github 打到第 5 键顶出「不算」，补否决③）。`coordinator.rs` 那道「显示首选是拼音/英文就放弃顶码」的保护指望不上：码表精确 +1e7 vs 英文精确 +500K，非码表候选永远排不到第一。
 - **★ 超码长归属 `codetable_owns_overflow` 有四条判据，前三条问「谁解释得了整串」（前 N 码是精确全码 / 拼音主张不了 / 英文无精确整串词条），第四条问「这串还算不算中文」（拼音至少交得出候选）**。第 2 与第 4 条方向相反，两头夹出「还在中文语境里、但拼音接管不了整串」的窄带（`yijga` 出得来「以」却只解释 2/5，落在带内；`github` 什么都出不来，落在带外 ⇒ 候选留空让用户上屏原码）。判据 3、4 是 `github` 回归的修复：前者管开着英文词库的场景（码表精确 +1e7 压掉英文 +500K），后者管关着的场景。**该函数被顶码 ⓪ 与候选装配共用，加判据时两边都要重估**：判据 4 对顶码无影响（⓪ 需 `has_pinyin`，为 false 时整条不成立），判据 3 与顶码侧的 ③ 是不同维度（③ 是上屏否决开关、出厂 false；判据 3 管候选归属、不读任何开关）。
 - **★ 回捞的前缀候选是「码表候选带 `consumed_length` 的唯一出口」**：它只解释得了前 N 码，不标的话协调器 `commit_selected` 的 `partial = consumed > 0 && consumed < total` 恒为 false ⇒ 按「消费整串」上屏，选中即把尾码吃掉（`yijga` 选「就是」→ `a` 消失）。协调器侧两处原本依赖「码表恒 0 ⇒ 永不部分匹配」的判据已随之对齐：`build_candidates` 的分段续转改看**最后一段来源**、`learn_phrase_on_commit` 对全段码表显式跳过。改这条务必回头核那两处。
-- **★ 上屏三通路的「英文守护」在 `EngineManager` 上有第二份实现，改一处要想到另一处**：`schema.english_merge`（纯拼音/纯码表方案的英文混入）把同一套否决接在 `manager.rs` 的 `convert` / `recheck_auto_commit` / `handle_top_code` 三个方法上——那里是三条通路的**共同收口点**，一处接线覆盖全部引擎类型。混输的那份（`schema.mix.*`，接在 `MixedEngine` 内部）与它**互不接管**、按引擎类型分流（`english_merge_ctx` 显式排除 Mixed/English），故两份不会叠加生效。判据同源要求不变：三处都必须叠「英文确有候选」。
+- **★ 上屏三通路的「英文守护」在 `EngineManager` 上有第二份实现，改一处要想到另一处**：英文混入（`schema.codetable.english_merge` / `schema.pinyin.english_merge`）把同一套否决接在 `manager.rs` 的 `convert` / `recheck_auto_commit` / `handle_top_code` 三个方法上——那里是三条通路的**共同收口点**。⚠️ 否决只对码表侧有意义（拼音无满码上屏/顶码），故 `Effective::block_commit` 在拼音侧恒 `false`。混输的那份（`schema.mix.*`，接在 `MixedEngine` 内部）与它**互不接管**、按引擎类型分流（`english_merge_ctx` 显式排除 Mixed/English），故两份不会叠加生效。判据同源要求不变：三处都必须叠「英文确有候选」。
 - **顶码否决必须叠「对方确有候选」**：⓪ 叠 `has_pinyin`、③ 叠 `!english_candidates(input,1).is_empty()`。只看开关就禁顶码会把「顶码抢了别人的活」修成「谁的活都没人干」——纯五笔溢出串（`aaaab`）在 `pinyin_only_overflow=true` 下 overflow 侧只查拼音、同样交不出候选，用户卡在既不上屏又无候选的长串上。③ 天然满足（判据与 `convert_overflow` 调同一个 `english_candidates`、同一个 input）。③ 还须放在 `if let Some(sec)` 块**外**：英文守护与拼音子引擎无关，纯码表+英文混输也要生效。
 
 ### Testing Requirements
