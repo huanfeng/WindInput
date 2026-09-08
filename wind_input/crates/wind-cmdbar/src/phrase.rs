@@ -6,6 +6,7 @@
 //! 线程/求值：display 侧只用纯函数（[`Registry::with_builtins`]）即可；命令动作需要
 //! 宿主注入 [`Services`](crate::services::Services) 后用 [`Registry::full`]。
 
+use crate::ast::OnError;
 use crate::context::EvalContext;
 use crate::error::Result;
 use crate::eval::{ArrayExpansion, evaluate, expand_array};
@@ -22,6 +23,8 @@ pub enum PhraseEval {
     Single {
         display: String,
         actions: Vec<ResolvedAction>,
+        /// 动作链失败后的策略（`{on_error: …}`）；非 command 短语恒为默认值。
+        on_error: OnError,
     },
     /// `$SS` 数组：组名 + 多元素。
     Array(ArrayExpansion),
@@ -46,6 +49,7 @@ pub fn evaluate_phrase(text: &str, ctx: &dyn EvalContext, reg: &Registry) -> Res
             Ok(PhraseEval::Single {
                 display: ev.display,
                 actions: ev.actions,
+                on_error: ev.on_error,
             })
         }
     }
@@ -54,11 +58,17 @@ pub fn evaluate_phrase(text: &str, ctx: &dyn EvalContext, reg: &Registry) -> Res
 /// 执行一条已求值短语的动作链（command 选中时调用）：拼接所有 [`ActionKind::Text`]
 /// 的上屏文本，并按序触发 [`ActionKind::Effect`] 副作用。返回待上屏文本。
 ///
-/// 动作在此延迟求值（按当前 `ctx`）；Effect 错误不中断后续动作，只随结果返回首个错误。
+/// 动作在此延迟求值（按当前 `ctx`）。`on_error` 决定失败后是否继续跑余下动作；
+/// 无论哪种，返回的都是**首个**错误。
+///
+/// ⚠️ 与宿主的 `run_command_candidate` 是两条执行路径（这里先跑完全部 Effect 再跑
+/// Text，那边按源顺序逐个跑）。**新增的链语义必须两边都实现**，否则同一条词条在
+/// 测试里与真机上表现不同——本仓「平行实现漂移」的经典入口。
 pub fn run_actions(
     actions: &[ResolvedAction],
     ctx: &dyn EvalContext,
     reg: &Registry,
+    on_error: OnError,
 ) -> (String, Option<crate::CmdbarError>) {
     let mut insert = String::new();
     let mut first_err = None;
@@ -69,6 +79,9 @@ pub fn run_actions(
         {
             first_err = Some(e);
         }
+        if first_err.is_some() && on_error == OnError::Stop {
+            return (insert, first_err);
+        }
     }
     for act in actions.iter().filter(|a| a.kind == ActionKind::Text) {
         match act.run(ctx, reg) {
@@ -78,6 +91,9 @@ pub fn run_actions(
                     first_err = Some(e);
                 }
             }
+        }
+        if first_err.is_some() && on_error == OnError::Stop {
+            return (insert, first_err);
         }
     }
     (insert, first_err)
@@ -104,7 +120,9 @@ mod tests {
         let ctx = MemoryContext::new().with_input("abc");
         let r = evaluate_phrase("len={len(code)}", &ctx, &reg).unwrap();
         match r {
-            PhraseEval::Single { display, actions } => {
+            PhraseEval::Single {
+                display, actions, ..
+            } => {
                 assert_eq!(display, "len=3");
                 assert!(actions.is_empty());
             }
@@ -165,7 +183,7 @@ mod tests {
             PhraseEval::Single { actions, .. } => actions,
             _ => panic!(),
         };
-        let (insert, err) = run_actions(&actions, &ctx, &reg);
+        let (insert, err) = run_actions(&actions, &ctx, &reg, OnError::Continue);
         assert!(err.is_none());
         assert_eq!(insert, "《》");
         assert_eq!(log.0.lock().unwrap().as_slice(), &["Left".to_string()]);
@@ -207,7 +225,9 @@ mod tests {
 
         let r = evaluate_phrase(r#"$CC("切简繁", ime.toggle("s2t"))"#, &ctx, &reg).unwrap();
         let (insert, err) = match r {
-            PhraseEval::Single { actions, .. } => run_actions(&actions, &ctx, &reg),
+            PhraseEval::Single { actions, .. } => {
+                run_actions(&actions, &ctx, &reg, OnError::Continue)
+            }
             _ => panic!(),
         };
         assert!(err.is_none());
@@ -260,7 +280,9 @@ mod tests {
         // 系统短语 cojk 的原文
         let r = evaluate_phrase(r#"$CC("「」", ime.pair("「", "」"))"#, &ctx, &reg).unwrap();
         let (insert, err) = match r {
-            PhraseEval::Single { actions, .. } => run_actions(&actions, &ctx, &reg),
+            PhraseEval::Single { actions, .. } => {
+                run_actions(&actions, &ctx, &reg, OnError::Continue)
+            }
             _ => panic!(),
         };
         assert!(err.is_none(), "{err:?}");
@@ -276,7 +298,9 @@ mod tests {
         )
         .unwrap();
         let (_, err) = match r {
-            PhraseEval::Single { actions, .. } => run_actions(&actions, &ctx, &reg),
+            PhraseEval::Single { actions, .. } => {
+                run_actions(&actions, &ctx, &reg, OnError::Continue)
+            }
             _ => panic!(),
         };
         assert!(err.is_none(), "{err:?}");
@@ -290,7 +314,9 @@ mod tests {
         let reg = Registry::full();
         let r = evaluate_phrase(r#"$CC("x", open("https://y"))"#, &ctx, &reg).unwrap();
         let (insert, err) = match r {
-            PhraseEval::Single { actions, .. } => run_actions(&actions, &ctx, &reg),
+            PhraseEval::Single { actions, .. } => {
+                run_actions(&actions, &ctx, &reg, OnError::Continue)
+            }
             _ => panic!(),
         };
         assert_eq!(insert, "");
@@ -298,5 +324,88 @@ mod tests {
             err,
             Some(crate::CmdbarError::ServiceUnavailable { .. })
         ));
+    }
+
+    /// `{on_error: "stop"}` 解析出来，且默认（不写）是 Continue。
+    ///
+    /// 默认值这条断言是**防回归**用的：把默认改成 Stop 会让「前一步失败、后一步照跑」
+    /// 的既有词条（如剪贴板占用时仍要移回光标）静默少做一步。
+    #[test]
+    fn on_error_modifier_parses_and_defaults_to_continue() {
+        let reg = Registry::full();
+        let ctx = MemoryContext::new().with_services(crate::services::Services::new());
+
+        let got = |src: &str| match evaluate_phrase(src, &ctx, &reg).unwrap() {
+            PhraseEval::Single { on_error, .. } => on_error,
+            _ => panic!(),
+        };
+        assert_eq!(got(r#"$CC("x", open("u"))"#), OnError::Continue);
+        assert_eq!(
+            got(r#"$CC("x", open("u"), {on_error: "continue"})"#),
+            OnError::Continue
+        );
+        assert_eq!(
+            got(r#"$CC("x", open("u"), {on_error: "stop"})"#),
+            OnError::Stop
+        );
+        // 值写错必须报错：静默落回默认，表现恰好就是这个修饰符要防的"假成功"。
+        let err = evaluate_phrase(r#"$CC("x", open("u"), {on_error: "halt"})"#, &ctx, &reg)
+            .expect_err("未知值应报错");
+        assert!(err.to_string().contains("stop"), "{err}");
+    }
+
+    /// Stop 时首个失败即停，后续动作**不执行**；Continue 时照跑完。
+    ///
+    /// 判据落在"后续动作有没有留下痕迹"上，而不是返回的错误——两种模式返回的都是
+    /// 首个错误，只看 err 分不出它们。
+    #[test]
+    fn on_error_stop_halts_remaining_actions() {
+        use crate::services::{ImeController, Services};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Ime(Mutex<Vec<String>>);
+        impl ImeController for Ime {
+            fn toggle(&self, target: &str) -> anyhow::Result<()> {
+                self.0.lock().unwrap().push(target.into());
+                Ok(())
+            }
+            fn open_setting(&self, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn open_setting_web(&self, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn set_schema(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn theme_cycle(&self, _: &str) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+        }
+
+        // open 无服务 ⇒ 第一个动作必失败；ime.toggle 有服务 ⇒ 跑到就会留痕。
+        let run = |on_error: OnError| {
+            let ime = Arc::new(Ime::default());
+            let mut svc = Services::new();
+            svc.ime = Some(ime.clone());
+            let ctx = MemoryContext::new().with_services(svc);
+            let reg = Registry::full();
+            let src = r#"$CC("x", open("https://y"), ime.toggle("s2t"))"#;
+            let actions = match evaluate_phrase(src, &ctx, &reg).unwrap() {
+                PhraseEval::Single { actions, .. } => actions,
+                _ => panic!(),
+            };
+            let (_, err) = run_actions(&actions, &ctx, &reg, on_error);
+            (ime.0.lock().unwrap().clone(), err.is_some())
+        };
+
+        let (done, failed) = run(OnError::Continue);
+        assert!(failed);
+        assert_eq!(done, vec!["s2t".to_string()], "Continue 应跑完后续动作");
+
+        let (done, failed) = run(OnError::Stop);
+        assert!(failed);
+        assert!(done.is_empty(), "Stop 应在首个错误处停住，后续动作不得执行");
     }
 }

@@ -5,7 +5,9 @@
 //! （宿主走 InsertText 上屏），其余为 [`crate::action::ActionKind::Effect`]。
 
 use crate::action::ResolvedAction;
-use crate::ast::{ArrayPhrase, CommandPhrase, Expr, Modifiers, Phrase, StringPart, fmt_number};
+use crate::ast::{
+    ArrayPhrase, CommandPhrase, Expr, ModValue, Modifiers, OnError, Phrase, StringPart, fmt_number,
+};
 use crate::context::EvalContext;
 use crate::error::{CmdbarError, Result};
 use crate::registry::Registry;
@@ -15,6 +17,8 @@ use crate::registry::Registry;
 pub struct Evaluated {
     pub display: String,
     pub actions: Vec<ResolvedAction>,
+    /// 动作链失败后的策略（`{on_error: …}`）。非 command 短语没有动作，恒为默认值。
+    pub on_error: OnError,
 }
 
 /// `$SS` 展开后的一个元素候选。
@@ -40,10 +44,12 @@ pub fn evaluate(phrase: &Phrase, ctx: &dyn EvalContext, reg: &Registry) -> Resul
         Phrase::Literal(t) => Ok(Evaluated {
             display: t.clone(),
             actions: Vec::new(),
+            on_error: OnError::default(),
         }),
         Phrase::Template(expr) => Ok(Evaluated {
             display: eval_expr(expr, ctx, reg)?,
             actions: Vec::new(),
+            on_error: OnError::default(),
         }),
         Phrase::Array(_) => Err(CmdbarError::runtime(
             "eval",
@@ -79,7 +85,28 @@ fn eval_command(cp: &CommandPhrase, ctx: &dyn EvalContext, reg: &Registry) -> Re
         }
         actions.push(ResolvedAction::effect(act.clone()));
     }
-    Ok(Evaluated { display, actions })
+    Ok(Evaluated {
+        display,
+        actions,
+        on_error: on_error_of(&cp.modifiers)?,
+    })
+}
+
+/// 读 `{on_error: …}`。
+///
+/// **值写错必须报错**：静默落回默认，用户会看到「on_error 配了没反应」——而这个
+/// 修饰符恰恰是用来防"假成功"的，失灵时的表现就是它要防的那件事。
+/// ⚠️ 键名写错（`on_errro`）仍是静默忽略：修饰符袋一贯如此（`prefix`/`async`/`nav`
+/// 都没有键名白名单），此处不单独收紧，否则同一个袋里两套规矩更难解释。
+fn on_error_of(m: &Modifiers) -> Result<OnError> {
+    match m.get("on_error").map(ModValue::as_str_value).as_deref() {
+        None | Some("continue") => Ok(OnError::Continue),
+        Some("stop") => Ok(OnError::Stop),
+        Some(other) => Err(CmdbarError::runtime(
+            "$CC",
+            format!("on_error 不支持 {other:?}（支持: continue / stop）"),
+        )),
+    }
 }
 
 /// 展开 `$SS`：字面元素→上屏文本候选，嵌入 `$CC`→动作候选。

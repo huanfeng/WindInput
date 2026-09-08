@@ -51,6 +51,21 @@ impl ModValue {
     }
 }
 
+/// 动作链中途失败后的策略（`$CC(…, {on_error: "stop"})`）。
+///
+/// 默认 `Continue` 是**历史行为**，不能改：既有词条里 `type()` + `key.tap()` 这类组合
+/// 依赖"前一步失败后一步照跑"（如剪贴板被占用时仍要把光标移回去）。
+/// 需要"前一步成功才做下一步"的场景（`wind.cli(…)` 后接 `ui.toast("成功")`）显式写
+/// `{on_error: "stop"}`——否则那句"成功"在失败时照弹，制造假成功。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnError {
+    /// 记下第一个错误，余下动作继续跑（默认）。
+    #[default]
+    Continue,
+    /// 首个错误即停，后续动作一概不执行。
+    Stop,
+}
+
 /// 有序修饰符表（保留源顺序；重复键 last-write-wins 经 [`Modifiers::get`] 反向查找实现）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Modifiers(pub Vec<(String, ModValue)>);

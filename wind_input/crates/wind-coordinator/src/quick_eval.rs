@@ -74,7 +74,9 @@ pub(crate) fn eval_expr(text: &str, values: &QuickValues) -> Option<String> {
         now: Local::now(),
     };
     match evaluate_phrase(text, &ctx, quick_registry()) {
-        Ok(PhraseEval::Single { display, actions }) if actions.is_empty() => Some(display),
+        Ok(PhraseEval::Single {
+            display, actions, ..
+        }) if actions.is_empty() => Some(display),
         // `$CC` 命令短语：格式表不接受带副作用的条目
         Ok(PhraseEval::Single { .. }) => {
             debug!("快捷输入格式表: 表达式含动作，已忽略: {}", text);

@@ -91,8 +91,10 @@ impl Coordinator {
             coord: self,
         };
         let reg = wind_cmdbar::default_registry();
-        let actions = match wind_cmdbar::evaluate_phrase(src, &ctx, reg) {
-            Ok(wind_cmdbar::PhraseEval::Single { actions, .. }) => actions,
+        let (actions, on_error) = match wind_cmdbar::evaluate_phrase(src, &ctx, reg) {
+            Ok(wind_cmdbar::PhraseEval::Single {
+                actions, on_error, ..
+            }) => (actions, on_error),
             // $SS 数组的动作在各元素自身选中时执行，整组选中不跑动作。
             Ok(wind_cmdbar::PhraseEval::Array(_)) => return,
             Err(e) => {
@@ -134,6 +136,11 @@ impl Coordinator {
                         first_err.get_or_insert_with(|| e.to_string());
                     }
                 }
+            }
+            // `{on_error: "stop"}`：首个错误即停。默认仍是继续跑——见 OnError 的文档，
+            // 既有词条依赖"前一步失败后一步照跑"。
+            if first_err.is_some() && on_error == wind_cmdbar::OnError::Stop {
+                break;
             }
         }
         if let Some(msg) = first_err {

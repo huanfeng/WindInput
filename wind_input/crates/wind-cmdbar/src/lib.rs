@@ -20,7 +20,7 @@ pub mod registry;
 pub mod services;
 
 pub use action::{ActionKind, ResolvedAction};
-pub use ast::{ArrayPhrase, CommandPhrase, Expr, ModValue, Modifiers, Phrase};
+pub use ast::{ArrayPhrase, CommandPhrase, Expr, ModValue, Modifiers, OnError, Phrase};
 pub use context::{EvalContext, History, MemoryContext};
 pub use error::{CmdbarError, Result};
 pub use eval::{ArrayElement, ArrayExpansion, Evaluated, evaluate, expand_array};

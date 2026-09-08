@@ -361,9 +361,9 @@ impl PhraseLayer {
                     // 空展开不出空候选：与下方 `expand_template` 分支、以及 `lookup_prefix_at`
                     // 同处置。求值型 display 落空是**常态**而非异常——`{dict.rev(clip(),2)}`
                     // 在剪贴板只有 1 个字时就该什么都不出，而不是给一条点了没反应的空白候选。
-                    Ok(PhraseEval::Single { display, actions })
-                        if actions.is_empty() && !display.is_empty() =>
-                    {
+                    Ok(PhraseEval::Single {
+                        display, actions, ..
+                    }) if actions.is_empty() && !display.is_empty() => {
                         out.push(PhraseHit::plain(display, e.weight).with_source(&e.text))
                     }
                     // 无动作且 display 为空：整条丢弃（不落候选）。
@@ -678,17 +678,15 @@ pub fn expand_dict_value(
         match evaluate_phrase(text, &ctx, default_registry()) {
             // 纯 literal/template（如 {date()}）：display 即上屏文本。
             // 空展开 → Drop（整条丢弃），**不是** None —— 见 `DictExpansion::Drop`。
-            Ok(PhraseEval::Single { display, actions })
-                if actions.is_empty() && display.is_empty() =>
-            {
-                DictExpansion::Drop
-            }
-            Ok(PhraseEval::Single { display, actions }) if actions.is_empty() => {
-                DictExpansion::Single {
-                    display,
-                    command_src: None,
-                }
-            }
+            Ok(PhraseEval::Single {
+                display, actions, ..
+            }) if actions.is_empty() && display.is_empty() => DictExpansion::Drop,
+            Ok(PhraseEval::Single {
+                display, actions, ..
+            }) if actions.is_empty() => DictExpansion::Single {
+                display,
+                command_src: None,
+            },
             // $CC 命令（有动作）：携命令源，选中 / 顶屏执行动作。
             Ok(PhraseEval::Single { display, .. }) => DictExpansion::Single {
                 display,
