@@ -3381,7 +3381,7 @@ impl Coordinator {
         if *cur == paths {
             return;
         }
-        // 注释库缓存与词库 .wdat **同根**：`comment_cache_path` 自己按源文件父目录名分
+        // 注释库缓存与词库 .wdat **同根**：`comment_cache_path` 自己按 schemas 下的目录链分
         // 命名空间（`schemas/comments/x.dict.yaml` → `<cache>/comments/x.wcmt`），与
         // `EngineManager::cache_path` 同构，不再另立一层专用目录。
         // 无缓存目录（便携/测试）时传 None，注释库退化为内存加载，功能不受影响。

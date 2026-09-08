@@ -498,32 +498,34 @@ type SingleCharCodeCache = (String, Arc<HashMap<char, String>>);
 // 已上移至 wind_config::schema::merge_toml —— 方案包导出（wind-transfer）折叠 override 时
 // 必须与这里的引擎加载视图同源，故合并实现只允许存在一份。
 
-/// 源文件 → 缓存路径：`<cache>/<方案>/<文件名干>.<ext>`。
+/// 源文件 → 缓存路径：`<cache>/<相对 schemas 的目录链>/<文件名干>.<ext>`。
 ///
-/// 用**每方案子目录**(父目录名=schemas/<方案>/ 即方案名)做命名空间，避免跨方案同名冲突，
-/// 并把一个方案的全部缓存(主库/扩展/unigram/merged)归拢一处，便于整方案失效=删一目录。
+/// 用**源文件在 schemas 下的目录链**做命名空间，避免跨方案同名冲突，并把一个方案的全部
+/// 缓存(主库/扩展/merged)归拢一处，便于整方案失效=删一目录。命名空间推导见
+/// [`wind_dict::cache_ns`]——那里也说明了为什么它必须保持「源路径的纯函数」。
+///
+/// ⚠️ **不是父目录名**。词库 `rel` 由方案声明、多深都收，`schemas/<方案>/word/x.dict.yaml`
+/// 这种二级目录下父目录名是 `word`，方案那一段会整个丢失(论坛 #115)。扁平结构下两种
+/// 推导结果逐字节相同，故存量缓存不受影响。
+///
 /// 文件名干剥掉 `.dict.yaml` 的 `.dict` 冗余中缀(`rime_frost.dict` → `rime_frost`)。
 /// 未设置缓存根时回退到源旁(保持旧行为，便于测试/无 LOCALAPPDATA 场景)。
+///
+/// # ⛔ 旧布局留下的孤儿**不清**（已决，勿再提）
+///
+/// 升级后，用了二级子目录的用户会在 `<cache>/<末级目录名>/` 下留一批再无人引用的产物。
+/// 试过在本函数里顺手删「按旧算法算出的那条路径」，**行不通**：方案目录本身就叫 `word`
+/// 时（`schemas/word/x.dict.yaml`），那条路径正是它的合法新路径，两个方案会开始互删
+/// 对方的缓存——一个比「多占点磁盘」严重得多的永久重建循环。局部信息不足以区分谁是孤儿，
+/// 而换成「缓存布局版本标记 + 全量重建」又要让**所有**用户白重建一次。
+///
+/// 结论是不值得为它写代码：受影响的只有用了子目录的少数用户，量也小，卸载时缓存目录整个
+/// 清掉；真要立刻回收还有既有的全量入口 [`EngineManager::rebuild_all_caches`]
+/// （CLI `schema rebuild`）。
 fn cache_path(source: &Path, ext: &str) -> std::path::PathBuf {
     if let Some(Some(dir)) = CACHE_DIR.get() {
-        let scheme = source
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let mut stem = source
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if let Some(s) = stem.strip_suffix(".dict") {
-            stem = s.to_string();
-        }
-        let base = if scheme.is_empty() {
-            dir.clone()
-        } else {
-            dir.join(&scheme)
-        };
-        return base.join(format!("{stem}.{ext}"));
+        let stem = wind_dict::cache_ns::cache_stem(source);
+        return wind_dict::cache_ns::cache_path_in(dir, source, &format!("{stem}.{ext}"));
     }
     source.with_extension(ext)
 }
@@ -5080,7 +5082,7 @@ impl EngineManager {
         // 与 combined 层共用 rime_source_paths——两处各写一份正是 R6 那条陈旧路径的成因。
         // 按缓存文件 single-flight。这里是该缺陷最典型的现场：pinyin / shuangpin /
         // 混输的 secondary 子引擎三者的 schema 都指向 pinyin/rime_frost.dict.yaml，
-        // cache_path 又按源文件父目录名做命名空间，最终是同一个 merged.wdat。
+        // cache_path 又按源文件在 schemas 下的目录链做命名空间，最终是同一个 merged.wdat。
         let build_lock = wind_dict::reader_pool::file_lock(&merged_wdat);
         let _build_guard = build_lock.lock().unwrap_or_else(|e| e.into_inner());
 

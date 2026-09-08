@@ -635,35 +635,25 @@ fn case_fallbacks(text: &str) -> Vec<String> {
     out
 }
 
-/// 源文件 → 缓存路径：`<cache>/<父目录名>/<文件干>.wcmt`。
+/// 源文件 → 缓存路径：`<cache>/<相对 schemas 的目录链>/<文件干>.wcmt`。
 ///
-/// 与 `wind_engine::manager::cache_path` **同构**：用父目录名做命名空间避免同名冲突，
-/// 文件干剥掉 `.dict.yaml` 的 `.dict` 冗余中缀。挂在 `schemas/comments/` 下的库因此
-/// 落到 `<cache>/comments/`。
+/// 与 `wind_engine::manager::cache_path` **同源**：命名空间与文件干都取自
+/// [`wind_dict::cache_ns`]，不再是「各写一份、注释里声明同构」——那正是两套命名法
+/// 分叉的起点(词库那边已因二级子目录丢掉方案段，见论坛 #115)。挂在 `schemas/comments/`
+/// 下的库仍落到 `<cache>/comments/`。
 ///
 /// # 为什么不用路径哈希
 ///
 /// 初版是 `<文件干>.<路径哈希>.wcmt`，为的是让「用户目录版」与「安装目录版」同名文件
-/// 各持一份缓存。但那是自造的第二套命名法，而词库那边早用父目录名解决了同一问题。
+/// 各持一份缓存。但那是自造的第二套命名法，而词库那边早用 schemas 下的目录链解决了同一问题。
 /// 更关键的是，同一时刻 `resolve_data_file` 只会解析出其中**一个**路径，两份缓存里
 /// 必有一份是孤儿——共用一份、靠内容指纹判定重建，反而连孤儿都不会产生。
 fn comment_cache_path(cache_root: &Path, src: &Path) -> std::path::PathBuf {
-    let ns = src
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let stem = src
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "comment".to_string());
-    let stem = stem.strip_suffix(".dict").unwrap_or(&stem);
-    let base = if ns.is_empty() {
-        cache_root.to_path_buf()
-    } else {
-        cache_root.join(ns)
-    };
-    base.join(format!("{stem}.wcmt"))
+    let mut stem = wind_dict::cache_ns::cache_stem(src);
+    if stem.is_empty() {
+        stem = "comment".to_string(); // 取不出文件干（路径以 `..` 结尾之类）时的兜底名
+    }
+    wind_dict::cache_ns::cache_path_in(cache_root, src, &format!("{stem}.wcmt"))
 }
 
 /// 加载一个注释库：优先 mmap `.wcmt` 缓存，缓存不新鲜则重建，重建失败降级内存表。
@@ -728,7 +718,7 @@ fn parse_or_warn(src: &Path) -> Option<Vec<(String, String, String)>> {
 
 /// 清掉挂载列表里已不存在的库留下的 `.wcmt`（含指纹 sidecar 与残留 tmp）。
 ///
-/// 缓存按父目录名分了命名空间（见 [`comment_cache_path`]），故要**逐层下探**——但只认
+/// 缓存按 schemas 下的目录链分了命名空间（见 [`comment_cache_path`]），故要**逐层下探**——但只认
 /// 这三种后缀，绝不删目录本身：缓存根同时住着词库的 `.wdat`/`.wdb`，扫到它们必须原样放过。
 /// 「只删自己认识的文件」比「这个目录归我管所以可以递归删」安全一个量级。
 ///
@@ -1637,7 +1627,7 @@ mod tests {
     /// ★ prune 递归下探时**不得碰词库缓存**：缓存根同住着 `.wdat`/`.wdb`。
     ///
     /// 「这个目录归我管所以可以递归清理」是这类清理最容易写错的地方——注释库缓存与词库
-    /// 缓存共用一个根（`comment_cache_path` 按父目录名分命名空间），扫到别人的文件必须原样放过。
+    /// 缓存共用一个根（`comment_cache_path` 按 schemas 下的目录链分命名空间），扫到别人的文件必须原样放过。
     #[test]
     fn prune_never_touches_other_cache_files() {
         let (dir, paths) = write_libs("prune-foreign", &[&[("甲", "一号库", "")]]);
@@ -1661,7 +1651,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 递归找出缓存根下所有 `.wcmt`（缓存按父目录名分了命名空间，不再是一层）。
+    /// 递归找出缓存根下所有 `.wcmt`（缓存按 schemas 下的目录链分了命名空间，不止一层）。
     fn find_wcmt(root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let mut stack = vec![root.to_path_buf()];

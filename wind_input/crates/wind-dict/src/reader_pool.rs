@@ -2,10 +2,10 @@
 //!
 //! 同一个缓存文件常被多个方案引用：`pinyin.schema.toml` 与 `shuangpin.schema.toml` 都指向
 //! `pinyin/rime_frost.dict.yaml`，混输方案（`wubi86_pinyin`）还会再递归建一套子引擎。而
-//! `EngineManager::cache_path` 用**源文件父目录名**做命名空间，三者最终都解析到同一个
-//! `<cache>/pinyin/rime_frost.merged.wdat` —— 实测该 62MB 文件被 mmap 三份、`wubi86_jidian
-//! .wdat` 两份（当时还有 `unigram.wdb` 三份，该产物已随语言模型移除）。本池按缓存文件
-//! 路径复用同一个 reader。
+//! `EngineManager::cache_path` 的命名空间取**源文件在 schemas 下的目录链**（见
+//! [`crate::cache_ns`]），三者最终都解析到同一个 `<cache>/pinyin/rime_frost.merged.wdat`
+//! —— 实测该 62MB 文件被 mmap 三份、`wubi86_jidian.wdat` 两份（当时还有 `unigram.wdb`
+//! 三份，该产物已随语言模型移除）。本池按缓存文件路径复用同一个 reader。
 //!
 //! # 为什么池里存 `Weak` 而不是 `Arc`
 //!

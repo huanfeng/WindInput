@@ -20,6 +20,7 @@ pub const WEIGHT_RANGE_MAX: i32 = 10_000;
 
 pub mod binformat;
 pub mod cache_fp;
+pub mod cache_ns;
 pub mod cached;
 pub mod codetable;
 pub mod commentdict;

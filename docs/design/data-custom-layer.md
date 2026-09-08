@@ -859,14 +859,15 @@ ANSI/GBK ⇒ 不是合法 UTF-8 ⇒ 定制层的配置差异**一条都不生效
 
 - 词库缓存指纹（`cache_fp.rs` 的 `fingerprint`）按**文件内容**哈希，不是路径/mtime，
   custom 层替换词库后缓存自然失效。**缓存撞名已于 P1d 核实：安全**，三条各自成立——
-  ① 缓存名 = `<父目录名>/<文件干>.<ext>`（`manager::cache_path`、
-  `wind-reverse::comment_cache_path` 同构），**层前缀不进名字**，故三层共用同一个缓存名；
+  ① 缓存名 = `<相对 schemas 的目录链>/<文件干>.<ext>`（`manager::cache_path` 与
+  `wind-reverse::comment_cache_path` 同源于 `wind_dict::cache_ns`），**层前缀不进名字**，故三层共用同一个缓存名；
   而同一时刻 `resolve_dict_file` 只解析出**一个**路径，共用者至多一个，撞不上；
   ② 新鲜度判据是内容指纹（+ 解析语义版本 + tag），换层即内容变即重建；`.wridx` 的
   `derived_cache_is_fresh` 更把**源文件全路径**编进摘要，字节完全相同的换层也会失效；
   ③ wdat-only 的层（定制者最可能的分发形态）直接 mmap 层内的 sidecar，根本不经过缓存根。
-  唯一残留的撞名是**与分层无关的老问题**：两个不同 rel 若父目录名与文件干都相同
-  （`a/wubi/x.dict.yaml` 与 `b/wubi/x.dict.yaml`），缓存名相同——`data_custom` 不新增此类组合。
+  这里曾有一条残留的撞名（两个不同 rel 父目录名与文件干都相同，如
+  `a/wubi/x.dict.yaml` 与 `b/wubi/x.dict.yaml`），**已随命名空间改为完整目录链一并消解**
+  （论坛 #115）。
 - 单层 TOML 语法错误已隔离（`read_toml_value` 返回 None，只跳过那一层）。
 
 ## 5. 明确不做的
