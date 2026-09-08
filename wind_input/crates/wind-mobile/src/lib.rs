@@ -208,7 +208,7 @@ impl MobileCore {
         fallback_schema: &str,
         sink: Arc<dyn MobileEventSink>,
     ) -> Arc<Self> {
-        mount_user_dirs(user_root);
+        mount_dirs(data_dir, user_root);
 
         // 四层配置加载（代码默认 ⊕ data/config.toml ⊕ data_custom/config.toml ⊕ 用户层），
         // 与桌面同一条路径——移动端没有定制版包时 L2.5 自然缺席，不需要分支——
@@ -444,17 +444,59 @@ impl MobileCore {
     }
 }
 
-/// 把三类用户目录钉进 App 私有路径。
+/// 把用户目录与**安装根**钉进 App 私有路径。
 ///
 /// TODO(上游): wind-config 支持显式目录注入后移除环境变量挂载。
 /// `dirs` crate 在 unix 系按 XDG 变量解析，移动端进程私有目录不在默认位置上。
-fn mount_user_dirs(user_root: &Path) {
+///
+/// # 为什么安装根也必须钉
+///
+/// `Config::data_dir()` = `install_root()/data`，而 `install_root()` 在没有
+/// `WIND_INSTALL_ROOT` 时取 `current_exe().parent()`——安卓上那是
+/// `/system/bin`，于是核心**找不到出厂 config.toml**。
+///
+/// 后果不是报错，是一个功能整体静默失效：`set_user_value` 的「等于出厂默认就不落盘」
+/// 那道收口靠 `preset_for_pruning()` 拿出厂默认做比对，取不到时安全降级为「照常写入」。
+/// 桌面上那是偶发降级，安卓上是**永久**的——每一次保存都会把当前默认钉死进用户层，
+/// 将来核心改默认值，这些用户一个也收不到（`schema.mix.auto_commit_block_on_pinyin`
+/// 就是这么引爆的，真机一份配置 105 键里 62 键是这样来的）。
+///
+/// 它同时让「恢复默认」看起来没生效：写回默认值本该把该键从用户层删掉，降级后变成
+/// 老老实实写一遍，用户层里那个键一直在。
+///
+/// ⚠ 传入的 `data_dir` 必须就是 `<安装根>/data`——这是核心那边的固定关系，
+/// 不是本函数能选择的。目录名不对时只警告不猜：猜错会让核心去另一个目录读出厂配置，
+/// 比找不到更难查。
+///
+/// # 关于 `WIND_INSTALL_ROOT` 标着"生产严禁设置"
+///
+/// 那条告诫针对的是桌面：那里 `current_exe().parent()` 本就是正确答案，设它只会把
+/// 安装根指到别处。移动端没有这个前提——`current_exe()` 是 `/system/bin/app_process64`，
+/// 与 App 私有目录毫无关系，不设它就没有任何正确答案。
+///
+/// 这与上面那三个 XDG 变量属于同一件事，共用同一个上游 TODO：**wind-config 支持显式
+/// 目录注入后，这四行一起删掉**。在那之前，移动端进程只有本函数一个写入方，
+/// 也只有一个核心实例，不存在两处争抢的问题。
+///
+/// 顺带确认过的一个连带风险：`is_portable()` 也读这个根，判据是根目录下有
+/// `portable_mode` 标记文件。App 私有的 `filesDir` 下只有 `data`/`user`/`rust`
+/// 三个目录，不会有这个文件；真有的话用户配置会改落 `filesDir/userdata`。
+fn mount_dirs(data_dir: &Path, user_root: &Path) {
     let root = user_root.display();
     unsafe {
         std::env::set_var("HOME", user_root);
         std::env::set_var("XDG_CONFIG_HOME", format!("{root}/config"));
         std::env::set_var("XDG_DATA_HOME", format!("{root}/data"));
         std::env::set_var("XDG_CACHE_HOME", format!("{root}/cache"));
+    }
+    match (data_dir.file_name(), data_dir.parent()) {
+        (Some(name), Some(install_root)) if name == "data" => unsafe {
+            std::env::set_var("WIND_INSTALL_ROOT", install_root);
+        },
+        _ => tracing::warn!(
+            "数据目录 {} 不是 `<安装根>/data` 的形状，出厂默认取不到：             配置剪枝与「恢复默认」会退化为照常写入",
+            data_dir.display()
+        ),
     }
 }
 
