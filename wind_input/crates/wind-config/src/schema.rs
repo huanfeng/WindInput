@@ -395,6 +395,18 @@ pub struct CodeTableSpec {
     /// 五笔这类前缀式简码成立，别的码表可以在方案里关掉。
     #[serde(default)]
     pub short_code_yield_level: Option<usize>,
+    /// 本方案的**字词范围**覆盖（只出单字 / 只出词组 / 都出）。三态见
+    /// [`crate::config::WordScopeIntent`]：`follow`（出厂）= 跟随全局
+    /// `schema.codetable.word_scope`。
+    ///
+    /// 与同段的 [`Self::short_code_yield_level`] 同一条论证：不同码表的简码体系深浅不同，
+    /// 「只出单字」这件事该由装了这张码表的人自己定。**拼音侧刻意没有对应的覆盖层**
+    /// （拼音方案通常只有一张，全局 `schema.pinyin.word_scope` 那一份就够了）。
+    ///
+    /// ⚠️ 混输方案不写这一项：`EngineManager::codetable_settings` 会把它解析到
+    /// `primary_schema`（主码表方案）——混输继承主方案的档位，不单独配。
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
+    pub word_scope: crate::config::WordScopeIntent,
     /// z 键重复输入。
     #[serde(default)]
     pub z_key_repeat: Option<bool>,
@@ -773,29 +785,6 @@ pub struct CandidateSpec {
     /// `behavior_for` 结果——`[punct]` 段的 `mode` 与 `custom_mappings` 已经是同一个形状。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub text_orientation: crate::config::TextOrientation,
-    /// 本方案的**字词范围**覆盖（只出单字 / 只出词组 / 都出）。三态见
-    /// [`crate::config::WordScopeIntent`]：`follow`（出厂）= 跟随全局 `input.word_scope`。
-    ///
-    /// # 为什么住在 `[candidate]` 段而不是 `[engine.codetable]`
-    ///
-    /// 与 [`crate::Schema::key_actions`] 同一条论证：**它与引擎类型无关**。虽然主要用户
-    /// 是五笔，但拼音方案同样要能配（用户 2026-09-07 明确要求）。放进 `[engine.codetable]`
-    /// 就得在 `[engine.pinyin]` 再写一份，两处必然分叉。
-    ///
-    /// # 归属取 `effective_data_schema`，与同段的 [`Self::font_family`] 同源
-    ///
-    /// 「这个码位出字还是出词」问的是**词库**该交出什么 ＝ 数据属性，与 `[phrases]`、
-    /// `[punct] custom_mappings` 同源。可见后果：**临时拼音不受主方案这一项管辖**
-    /// ——五笔方案开了单字档，按反引号进临拼照样出词。这是刻意的：临拼正是为了打主方案
-    /// 打不出的东西，在那里再砍掉一半候选只会让人无路可走。
-    ///
-    /// ⚠️ 与同段的 [`Self::layout`]（呈现、跟活跃方案）刻意不同，取值时不要复用同一个
-    /// `behavior_for` 结果——`[punct]` 段的 `mode` 与 `custom_mappings` 已经是同一个形状。
-    ///
-    /// ⚠️ **运行时热键切换不走本字段**（它是内存临时态，压过配置的一切层级，包括临拼）。
-    /// 两者判据刻意不同：配置是方案的属性、临时态是用户此刻的意图。
-    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
-    pub word_scope: crate::config::WordScopeIntent,
 }
 
 /// 方案级短语加载（`[phrases]` 段）。
@@ -863,9 +852,6 @@ pub struct SchemaBehavior {
     /// 方案级「横排时文字排列」。见 [`CandidateSpec::text_orientation`]——归属判据与
     /// `candidate_font_family` 同源（数据方案），与 `candidate_layout` 不同。
     pub candidate_text_orientation: crate::config::TextOrientation,
-    /// 方案级字词范围。见 [`CandidateSpec::word_scope`]——归属判据同 `candidate_font_family`
-    /// （数据方案），⚠️ 与同住 `[candidate]` 段的 `candidate_layout` 不同。
-    pub word_scope: crate::config::WordScopeIntent,
     pub phrases: PhrasesSpec,
     /// 这次读取里**没能按用户所写生效的项**（见 [`Schema::degraded_items`]）。
     ///
@@ -887,7 +873,6 @@ impl Schema {
             comment_template_horizontal: self.candidate.comment_template_horizontal.clone(),
             candidate_font_family: self.candidate.font_family.clone(),
             candidate_text_orientation: self.candidate.text_orientation,
-            word_scope: self.candidate.word_scope,
             phrases: self.phrases.clone(),
             degraded_items: self.degraded_items.clone(),
         }

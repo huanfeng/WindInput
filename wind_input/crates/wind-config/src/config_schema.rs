@@ -114,9 +114,9 @@ const EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear"];
 /// 是唯一解释器，未知值一律落到 `commit`。
 const PUNCT_EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear", "clear_no_input"];
 
-/// 字词范围（`input.word_scope`）。
+/// 字词范围（`schema.codetable.word_scope` / `schema.pinyin.word_scope` 共用本值域）。
 ///
-/// ⚠️ 方案级同名键（`[candidate] word_scope`）的值域**多一个 `follow`**（＝跟随全局），
+/// ⚠️ 方案级同名键（`[engine.codetable] word_scope`）的值域**多一个 `follow`**（＝跟随全局），
 /// 由 [`crate::config::WordScopeIntent`] 表达，不与本常量共用——同
 /// [`PUNCT_EMPTY_CODE_BEHAVIOR_VALUES`] 与 [`EMPTY_CODE_BEHAVIOR_VALUES`] 的关系。
 /// 全局层没有 `follow` 可跟，加进来只会造出一个指向自己的态。
@@ -180,6 +180,11 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.single_code_input", Bool),
     f("schema.codetable.single_code_complete", Bool),
     f("schema.codetable.short_code_yield_level", Int),
+    // 字词范围（码表侧）。与 `input.filter_mode` 是两根正交的轴：那个按字符常用度裁剪，
+    // 这个按候选长度裁剪。⚠️ 拼音另有一份（`schema.pinyin.word_scope`），刻意不共享取值。
+    // 方案级同名覆盖多一个 "follow" 态，故不与本处共用值域常量（同
+    // `PUNCT_EMPTY_CODE_BEHAVIOR_VALUES` 与 `EMPTY_CODE_BEHAVIOR_VALUES` 的关系）。
+    f("schema.codetable.word_scope", Enum(WORD_SCOPE_VALUES)),
     f("schema.codetable.z_key_repeat", Bool),
     // 英文候选混入（码表方案）。混输走 schema.mix 那三项、拼音走 schema.pinyin
     // 同名段，三者互不接管，见 `CodetableEnglishMerge` 文档。
@@ -234,6 +239,9 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.pinyin.show_code_hint", Bool),
     f("schema.pinyin.use_smart_compose", Bool),
     f("schema.pinyin.separator", Str),
+    // 字词范围（拼音侧）。与码表那份是两件独立的事、不共享取值——两种引擎对「只出单字」
+    // 的诉求本就不同（码表是定长盲打，拼音只是不出词）。拼音**没有**方案级覆盖。
+    f("schema.pinyin.word_scope", Enum(WORD_SCOPE_VALUES)),
     // 英文候选混入（拼音方案）。**没有 block_commit**：那一项否决的是满码自动上屏/顶码，
     // 拼音方案两者都没有，登记它等于教用户去配一件不成立的事。见 `PinyinEnglishMerge`。
     f("schema.pinyin.english_merge.enable", Bool),
@@ -304,10 +312,6 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.frequency.exclude_blocks", StrList),
     // -- input（输入行为）--
     f("input.filter_mode", Str),
-    // 字词范围。与 `filter_mode` 是两根正交的轴：那个按字符常用度裁剪，这个按候选长度裁剪。
-    // 方案级同名覆盖多一个 "follow" 态，故不与本处共用值域常量（同
-    // `PUNCT_EMPTY_CODE_BEHAVIOR_VALUES` 与 `EMPTY_CODE_BEHAVIOR_VALUES` 的关系）。
-    f("input.word_scope", Enum(WORD_SCOPE_VALUES)),
     // 检索范围放宽（智能档增强，见 docs/design/smart-filter-scope-relax.md）
     f("input.scope_relax.page_end_key", Bool),
     f("input.scope_relax.prefix", Str),

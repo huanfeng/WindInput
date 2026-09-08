@@ -1,8 +1,9 @@
 //! **字词范围**（`word_scope`）：候选里出单字、出词组，还是两者都出。
 //!
 //! 五笔系输入法的传统功能（极点 / 万能 / QQ 五笔的「字词 / 单字 / 词组」三态）。
-//! 三层取值，顺序不可换——临时态（热键）> 方案级 `[candidate] word_scope` > 全局
-//! `input.word_scope`，收口在 `Coordinator::effective_word_scope`。
+//! 取值收口在 `Coordinator::effective_word_scope`：临时态（热键）压过一切，否则**按引擎
+//! 分流**——码表/混输取 `schema.codetable.word_scope`（⊕ 方案级 `[engine.codetable]`
+//! 覆盖），拼音取 `schema.pinyin.word_scope`（无方案级覆盖），英文恒 `all`。
 //!
 //! 判据本身（哪条候选算「单字」、谁豁免）在 `wind_candidate::word_scope_admits` 有单元
 //! 测试；本文件只管**接线**：过滤有没有真的作用到主候选链上、临时态与配置层的优先级、
@@ -44,7 +45,7 @@ fn wubi_config(word_scope: &str) -> Config {
     cfg.schema.available = vec!["wubi86".into()];
     cfg.schema.active = "wubi86".into();
     cfg.input.default.chinese_mode = true;
-    cfg.input.word_scope = word_scope.into();
+    cfg.schema.codetable.word_scope = word_scope.into();
     cfg
 }
 
@@ -176,7 +177,7 @@ fn runtime_switch_takes_effect_without_touching_config() {
     assert_eq!(
         coord.debug_config_word_scope(),
         "all",
-        "临时态绝不能写回 input.word_scope——它是方案级配置，持久化要落 schema_overrides"
+        "临时态绝不能写回 schema.codetable.word_scope——持久化要落 schema_overrides"
     );
 }
 
@@ -308,7 +309,7 @@ fn schema_level_scope_beats_global() {
     let ov = make_override(
         "schema_char",
         "wubi86",
-        "[candidate]\nword_scope = \"char\"\n",
+        "[engine.codetable]\nword_scope = \"char\"\n",
     );
     // 全局是 all，方案说 char ⇒ 生效的是 char。
     let coord = Coordinator::new_headless_with_override(
@@ -342,7 +343,7 @@ fn schema_level_follow_falls_back_to_global() {
     let ov = make_override(
         "schema_follow",
         "wubi86",
-        "[candidate]\nword_scope = \"follow\"\n",
+        "[engine.codetable]\nword_scope = \"follow\"\n",
     );
     let coord = Coordinator::new_headless_with_override(
         wubi_config("phrase"),
@@ -449,4 +450,59 @@ fn completion_pool_goes_through_the_same_filter() {
         .find("self.apply_word_scope(state, &mut completion_pool);")
         .expect("补全池也必须走字词范围过滤，否则单字档下会从补全池冒出词");
     assert!(filter < scope, "两道过滤的相对次序应与主链一致");
+}
+
+// ─────────────────────── 两侧独立 ───────────────────────
+
+/// ★★ 码表侧与拼音侧是**两个字段**，互不影响。
+///
+/// 这是 2026-09-08 定下的配置形状的核心性质：分成两份，「五笔只出单字、拼音照常出词」
+/// 在全局层就表达得了，不必逐方案配。合成一个字段的实现会让本条红。
+///
+/// ⚠️ 两个方向都要测。只测「拼音不受码表侧管辖」的话，一个把拼音分支写成恒 `All` 的
+/// 实现（或者引擎类型没判出来、落到 `_ => All` 兜底）照样通过——第二段就是为了排除
+/// 那种假绿：它证明拼音分支**确实走到了**，取的确实是 `schema.pinyin.word_scope`。
+#[test]
+fn codetable_and_pinyin_scopes_are_independent() {
+    let d = data_dir();
+    if !d.join("schemas/pinyin.schema.toml").exists() {
+        eprintln!("跳过：缺少 pinyin 方案");
+        return;
+    }
+    let pinyin_cfg = |ct: &str, py: &str| {
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["pinyin".into()];
+        cfg.schema.active = "pinyin".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.schema.codetable.word_scope = ct.into();
+        cfg.schema.pinyin.word_scope = py.into();
+        cfg
+    };
+
+    // ① 码表侧 char、拼音侧 all ⇒ 拼音方案下生效的是 all。
+    let c1 = Coordinator::new_headless(pinyin_cfg("char", "all"), Some(&d));
+    assert_eq!(
+        c1.debug_effective_word_scope(),
+        "all",
+        "拼音方案不该受 schema.codetable.word_scope 管辖"
+    );
+
+    // ② 反过来配 ⇒ 生效的是 char。这一段同时证明拼音分支真的走到了。
+    let c2 = Coordinator::new_headless(pinyin_cfg("all", "char"), Some(&d));
+    assert_eq!(
+        c2.debug_effective_word_scope(),
+        "char",
+        "拼音方案应取 schema.pinyin.word_scope；若这里是 all，多半是引擎类型没判出来、\
+         落到了 `_ => All` 兜底分支"
+    );
+
+    // ③ 码表方案侧的反向对照：拼音侧配 char 不该影响五笔。
+    let mut cfg3 = wubi_config("all");
+    cfg3.schema.pinyin.word_scope = "char".into();
+    let c3 = Coordinator::new_headless(cfg3, Some(&d));
+    assert_eq!(
+        c3.debug_effective_word_scope(),
+        "all",
+        "码表方案不该受 schema.pinyin.word_scope 管辖"
+    );
 }

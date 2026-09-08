@@ -927,6 +927,21 @@ pub struct PinyinGlobalConfig {
     /// 与码表那份（[`CodetableEnglishMerge`]）是两件独立的事，**不共享取值**。
     #[serde(default)]
     pub english_merge: PinyinEnglishMerge,
+    /// **字词范围**：候选里出单字、出词组，还是两者都出（`all` / `char` / `phrase`）。
+    ///
+    /// ★ 与码表那份（[`CodetableGlobal::word_scope`]）是两件独立的事，**不共享取值**
+    /// ——同 `english_merge` 在两侧各有一份的先例。分开的理由是诉求本就不同：码表用户开
+    /// 单字档是为了**定长盲打**（单字恒 ≤ 全码长 ⇒ 满码唯一即上屏），拼音没有定长，开了
+    /// 只是「不出词」。分成两份之后，「五笔只出单字、拼音照常出词」在全局层就表达得了，
+    /// 不必逐方案配。
+    ///
+    /// ⚠️ **拼音没有方案级覆盖**（码表才有 `[engine.codetable] word_scope`）：一台机器上
+    /// 常有多张码表、简码体系深浅不同，而拼音方案通常只有一张，全局这一份就够了。
+    /// 要加的话先读 [`WordScopeIntent`] 的文档，那里写着为什么当初只给了码表。
+    ///
+    /// 出厂 `all`。运行时热键切换不写回本项（临时态，见 `State::word_scope_override`）。
+    #[serde(default = "default_word_scope")]
+    pub word_scope: String,
     /// 拼音调频（衰减参数；全局唯一，按引擎分——见 docs/redesign/schema-config-layering.md §3.4）。
     #[serde(default)]
     pub frequency: PinyinFrequency,
@@ -1140,6 +1155,7 @@ impl Default for PinyinGlobalConfig {
             english_merge: PinyinEnglishMerge::default(),
             separator: default_pinyin_separator(),
             fuzzy: PinyinFuzzy::default(),
+            word_scope: default_word_scope(),
             frequency: PinyinFrequency::default(),
             auto_learn: AutoLearnConfig::default(),
             completion: PinyinCompletion::default(),
@@ -1680,6 +1696,23 @@ pub struct CodetableGlobal {
     /// 用户关不掉，且触发条件是有条件降权而非标准的出简让全语义。
     #[serde(default = "default_short_code_yield_level")]
     pub short_code_yield_level: usize,
+    /// **字词范围**：候选里出单字、出词组，还是两者都出（`all` / `char` / `phrase`）。
+    ///
+    /// 五笔系输入法的传统功能（字词 / 单字 / 词组三态）。单字档的主要价值是**定长盲打**：
+    /// 五笔单字恒 ≤ 全码长，同码的词被滤掉后「满码唯一即上屏」的成立率大幅提高。
+    ///
+    /// ⚠️ 与 `input.filter_mode`（检索范围）是两根**正交**的轴：那个按字符常用度裁剪，
+    /// 这个按候选长度裁剪，同时施加时依次生效。值域解释器是
+    /// `wind_candidate::WordScope::from_config`（未知值回退 `all`）。
+    ///
+    /// ★ **拼音另有一份**（[`PinyinGlobalConfig::word_scope`]），刻意不共享取值——两种引擎
+    /// 对这件事的诉求本就不同（见 [`WordScopeIntent`] 的文档）。同 `english_merge` 在两侧
+    /// 各有一份的先例。
+    ///
+    /// ⚠️ 运行时热键切换**不写回本项**：那是内存里的临时态，切方案或重启即回到本值。
+    /// 故本项恒是「用户配的初值」，读它得不到「此刻在哪一档」。
+    #[serde(default = "default_word_scope")]
+    pub word_scope: String,
     /// 码表调频（统一开关，取代旧 user_frequency）。
     #[serde(default)]
     pub frequency: CodetableFrequency,
@@ -1721,6 +1754,7 @@ impl Default for CodetableGlobal {
             single_code_input: false,
             single_code_complete: false,
             short_code_yield_level: default_short_code_yield_level(),
+            word_scope: default_word_scope(),
             z_key_repeat: false,
             z_key_action: String::new(),
             // 空串 = 未设置 → `CodeCharSet::new` 回落内置默认 `a-z`，与历史硬编码
@@ -1769,6 +1803,11 @@ impl CodetableGlobal {
         }
         if let Some(v) = o.short_code_yield_level {
             out.short_code_yield_level = v;
+        }
+        // 字词范围：方案表了态才覆盖。`Follow`（含「没写这一项」）交出 `None`，回落全局
+        // ——值域的单一真相源仍是 `WordScope::from_config`，此处只搬字符串。
+        if let Some(v) = o.word_scope.as_config() {
+            out.word_scope = v.to_string();
         }
         if let Some(v) = o.z_key_repeat {
             out.z_key_repeat = v;
@@ -2899,12 +2938,24 @@ fn default_assoc_hint() -> String {
     "联想输入".to_string()
 }
 
-/// **方案级**字词范围意图（`[candidate] word_scope`）。
+/// **方案级**字词范围意图（`[engine.codetable] word_scope`，**仅码表方案**）。
 ///
-/// - `Follow`（出厂）：跟随全局 `input.word_scope`——用户改全局，本方案跟着改。
+/// - `Follow`（出厂）：跟随全局 `schema.codetable.word_scope`——用户改全局，本方案跟着改。
 /// - `All` / `Char` / `Phrase`：本方案覆盖全局。取值词汇与全局**逐字一致**，让
 ///   「全局 / 方案」在用户眼里是同一件事的两个层级，而不是两套发明出来的键名
 ///   （同 [`LayoutIntent`] 与 `ui.candidate.layout` 的关系）。
+///
+/// # 为什么只有码表方案有覆盖层
+///
+/// 全局那一层**按引擎分成两份**（`schema.codetable.word_scope` /
+/// `schema.pinyin.word_scope`），因为两种引擎对这件事的诉求本就不同：码表用户开单字档是
+/// 为了定长盲打，拼音没有定长、开了只是「不出词」。分成两份之后，「五笔只出单字、拼音照常
+/// 出词」在**全局层**就表达得了，不必逐方案配。
+///
+/// 方案级覆盖只给码表（用户 2026-09-08 拍板）：一台机器上常有多张码表（五笔 / 虎码 / 快符），
+/// 简码体系深浅不同，逐方案配是真实需求；而拼音方案通常只有一张，全局那一份就够了。
+/// 混输方案不单独配——`EngineManager::codetable_settings` 会把它解析到 `primary_schema`
+/// （主码表方案），它继承主方案的档位。
 ///
 /// # ⛔ 内置方案一项都不要声明
 ///
@@ -2924,7 +2975,7 @@ fn default_assoc_hint() -> String {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WordScopeIntent {
-    /// 跟随全局 `input.word_scope`（出厂）。
+    /// 跟随全局 `schema.codetable.word_scope`（出厂）。
     #[default]
     Follow,
     /// 字与词都出。
@@ -3011,17 +3062,6 @@ impl WordScopeAction {
 pub struct InputConfig {
     #[serde(default = "default_filter_mode")]
     pub filter_mode: String,
-    /// **字词范围**：候选里出单字、出词组，还是两者都出（`all` / `char` / `phrase`）。
-    ///
-    /// 五笔系输入法的传统功能。与相邻的 [`Self::filter_mode`]（检索范围，管「哪些字算
-    /// 常用」）是两根**正交**的轴：那个按字符常用度裁剪，这个按候选长度裁剪，同时施加
-    /// 时依次生效。值域解释器是 `wind_candidate::WordScope::from_config`（未知值回退
-    /// `all`），方案级覆盖见 [`WordScopeIntent`]。
-    ///
-    /// ⚠️ 运行时热键切换**不写回本项**：那是内存里的临时态，切方案或重启即回到本值
-    /// （2026-09-07 用户拍板）。故本项恒是「用户配的初值」，读它得不到「此刻在哪一档」。
-    #[serde(default = "default_word_scope")]
-    pub word_scope: String,
     /// 检索范围放宽（智能档增强）。
     #[serde(default)]
     pub scope_relax: ScopeRelaxConfig,
@@ -3123,7 +3163,6 @@ impl Default for InputConfig {
     fn default() -> Self {
         Self {
             filter_mode: "smart".to_string(),
-            word_scope: default_word_scope(),
             scope_relax: ScopeRelaxConfig::default(),
             enter_behavior: "commit".to_string(),
             space_on_empty_behavior: "commit".to_string(),
@@ -5434,11 +5473,12 @@ fn default_filter_mode() -> String {
     "smart".to_string()
 }
 
-/// 字词范围的**全局**出厂值是「字词都出」。
+/// 字词范围的**全局**出厂值是「字词都出」，`schema.codetable` 与 `schema.pinyin` 两侧
+/// 共用这一个出厂值（两段各有一个字段，但「出厂都出」是同一条产品决策）。
 ///
-/// 与 `default_short_code_yield_level` 同一条论证：全局段是所有方案共用的基线，而
-/// 「只出单字」是五笔这类定长码表才成立的手感（单字恒 ≤ 全码长 ⇒ 满码唯一即上屏的
-/// 成立率大幅提高）。拼音没有定长，默认开会让人以为词库坏了。
+/// 与 `default_short_code_yield_level` 同一条论证：全局段是该引擎下所有方案共用的基线，
+/// 而「只出单字」是五笔这类定长码表才成立的手感（单字恒 ≤ 全码长 ⇒ 满码唯一即上屏的
+/// 成立率大幅提高）。默认开会让人以为词库坏了。
 fn default_word_scope() -> String {
     "all".to_string()
 }
@@ -10194,9 +10234,14 @@ smart_method = "delete_replace"
     #[test]
     fn word_scope_defaults_to_all_globally() {
         assert_eq!(
-            InputConfig::default().word_scope,
+            CodetableGlobal::default().word_scope,
             "all",
-            "字词范围的全局出厂应为 all；要改先读 default_word_scope 的注释"
+            "码表侧字词范围的全局出厂应为 all；要改先读 default_word_scope 的注释"
+        );
+        assert_eq!(
+            PinyinGlobalConfig::default().word_scope,
+            "all",
+            "拼音侧同上。★ 两侧刻意是两个字段，但出厂值是同一条产品决策"
         );
     }
 
@@ -10213,15 +10258,27 @@ smart_method = "delete_replace"
             return;
         };
         let v: toml::Value = toml::from_str(&text).expect("data/config.toml 应能解析");
-        let l2 = v
-            .get("input")
-            .and_then(|s| s.get("word_scope"))
+        let ct = v
+            .get("schema")
+            .and_then(|s| s.get("codetable"))
+            .and_then(|c| c.get("word_scope"))
             .and_then(toml::Value::as_str)
-            .expect("data/config.toml 应显式写出 input.word_scope");
+            .expect("data/config.toml 应显式写出 schema.codetable.word_scope");
         assert_eq!(
-            l2,
-            InputConfig::default().word_scope,
-            "字词范围的 L1 与 L2 默认值漂移了"
+            ct,
+            CodetableGlobal::default().word_scope,
+            "码表侧字词范围的 L1 与 L2 默认值漂移了"
+        );
+        let py = v
+            .get("schema")
+            .and_then(|s| s.get("pinyin"))
+            .and_then(|c| c.get("word_scope"))
+            .and_then(toml::Value::as_str)
+            .expect("data/config.toml 应显式写出 schema.pinyin.word_scope");
+        assert_eq!(
+            py,
+            PinyinGlobalConfig::default().word_scope,
+            "拼音侧字词范围的 L1 与 L2 默认值漂移了"
         );
     }
 
@@ -10264,12 +10321,12 @@ smart_method = "delete_replace"
                 Err(_) => continue,
             };
             assert_eq!(
-                schema.candidate.word_scope,
+                schema.engine.codetable.word_scope,
                 WordScopeIntent::Follow,
                 "出厂方案 {} 不该自带字词范围（实际 {:?}）——它会让全局页那一项对该方案失效。\
                  理由见 WordScopeIntent 的文档",
                 path.display(),
-                schema.candidate.word_scope
+                schema.engine.codetable.word_scope
             );
             checked += 1;
         }
