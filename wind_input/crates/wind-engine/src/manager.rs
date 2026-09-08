@@ -2718,7 +2718,18 @@ impl EngineManager {
             ConvertResult::default()
         });
         if let Some((eng, cfg)) = self.english_merge_ctx(&engine) {
-            let english = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
+            let mut english = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
+            // 前缀回退：无精确命中**且**基础候选为空时才放宽，否则逐键打英文词会闪烁
+            // （`windows` 的 `windo`、`github` 的 `gith` 都不成词 ⇒ 候选窗中途空一下）。
+            // 判据挂在「基础候选空」而不是「有没有精确命中」上，理由见
+            // [`crate::english_merge::lookup_prefix_fallback`]。
+            if english.is_empty() && r.candidates.is_empty() {
+                english = crate::english_merge::lookup_prefix_fallback(
+                    eng.as_ref(),
+                    input,
+                    cfg.min_length,
+                );
+            }
             if !english.is_empty() {
                 // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
                 // `AGENTS.md`：否决必须叠「对方确有候选」——本分支已在 `!english.is_empty()`

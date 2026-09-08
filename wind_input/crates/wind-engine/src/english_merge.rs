@@ -1,10 +1,14 @@
-//! 英文候选混入（**引擎无关**）
+//! 英文候选混入（供**单一来源引擎**复用的查询与合并）
 //!
-//! 把「查一次英文词库，把结果混进另一个引擎的候选列表」独立出来，供**单一来源引擎**
-//! （纯拼音方案、纯码表方案如五笔）复用。接线点在 [`crate::manager::EngineManager`]——
-//! 那里是 `convert` / `recheck_auto_commit` / `handle_top_code` **三条通路的共同收口**，
-//! 一处接线即覆盖全部引擎类型，无需逐引擎改造，也无需包一层转发全部 trait 方法的装饰器
-//! （`Engine` 有二十来个带默认实现的方法，漏转发一个就是静默改行为）。
+//! 把「查一次英文词库，把结果混进另一个引擎的候选列表」独立出来，供纯拼音方案与纯码表
+//! 方案（五笔等）复用。接线点在 [`crate::manager::EngineManager`]——那里是
+//! `convert` / `recheck_auto_commit` / `handle_top_code` **三条通路的共同收口**，
+//! 无需逐引擎改造，也无需包一层转发全部 trait 方法的装饰器（`Engine` 有二十来个带默认
+//! 实现的方法，漏转发一个就是静默改行为）。
+//!
+//! ⚠️ 本模块**不是引擎无关的**（曾经是）：配置已按引擎拆成两份，见下面「配置按引擎分
+//! 两份」。收口的是三条通路，不是引擎类型——新增引擎类型时
+//! `manager::english_merge_cfg` 的穷尽匹配会强制在那里做决定。
 //!
 //! ## 与 `MixedEngine` 那套的分工——不是重复实现
 //!
@@ -55,6 +59,9 @@ use wind_candidate::Candidate;
 /// （`CodeTableEngine` 的 `整串精确匹配应居首` 守门断言）。取 8 条是给「同码多形态」
 /// （`she` / `She`）留余量，不是给前缀留的——前缀在下面被整片丢弃。
 const EXACT_SCAN: usize = 8;
+
+/// 无精确命中、且基础候选为空时，前缀回退至多给几条。见 [`lookup_prefix_fallback`]。
+const PREFIX_FALLBACK_MAX: usize = 5;
 
 /// 精确命中至多保留几条。
 ///
@@ -136,6 +143,46 @@ pub fn lookup(english: &dyn Engine, input: &str, min_length: usize) -> Vec<Candi
             c
         })
         .take(EXACT_MAX)
+        .collect()
+}
+
+/// **前缀回退**：无精确命中、且基础候选为空时才用。
+///
+/// ## 为什么要有这条回退
+///
+/// 真机报障：拼音下逐键打 `windows`，`win` / `wind` 有候选（是英文词），`windo` 没有
+/// （不是词），`window` 又有——候选窗一闪一闪。`github` 的 `gith` / `githu` 同理。
+/// 拼音对这类串一条中文候选也给不出（`wi` 不成音节），于是英文一断档整个窗就空掉；
+/// 五笔下码表仍在出候选，闪烁被掩盖，所以只有拼音方案报得出来。
+///
+/// ## ★ 判据是「否则就是空窗」，不是「有没有精确命中」
+///
+/// [`lookup`] 丢弃前缀扩展的理由是**打中文时它们是噪音**（`hen` 会带出 hence /
+/// henceforth / Henderson / Hendrix）。基础候选为空时那个理由不成立——用户显然正在打
+/// 英文，此时给他前缀补全正是他要的。所以放宽的闸门挂在「基础候选空」上，
+/// 而不是放宽成「一律收前缀」。
+///
+/// 有精确命中时**不走本函数**：`github` 仍只出 GitHub 一条，不会连带 GitHub Pages /
+/// Copilot / Actions 那七条。
+pub fn lookup_prefix_fallback(
+    english: &dyn Engine,
+    input: &str,
+    min_length: usize,
+) -> Vec<Candidate> {
+    if input.chars().count() < min_length_or_default(min_length) {
+        return Vec::new();
+    }
+    let lower = input.to_lowercase();
+    let Ok(r) = english.convert(&lower, PREFIX_FALLBACK_MAX) else {
+        return Vec::new();
+    };
+    r.candidates
+        .into_iter()
+        .map(|mut c| {
+            // 同 `lookup`：码表域标志不跨来源带，理由见该函数文档。
+            c.is_exact_code = false;
+            c
+        })
         .collect()
 }
 

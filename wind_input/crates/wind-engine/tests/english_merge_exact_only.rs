@@ -82,9 +82,14 @@ fn pinyin_merge_keeps_only_exact() {
     );
 }
 
-/// 全拼：无精确命中时一条都不出（用户该继续敲完，而不是从前缀词里挑）。
+/// 全拼：**中文侧有候选**且无精确命中时，一条英文都不出。
+///
+/// ⚠️ 判据必须叠「中文侧有候选」这个前提，不能只写「无精确命中就不出」——
+/// 后者已被 `english_merge::lookup_prefix_fallback` 推翻：中文侧一条候选都没有时
+/// （`githu` 那种串），丢掉前缀等于让候选窗空着，逐键输入会闪烁。
+/// 那条通路由 `english_merge_typing_continuity` 守，两条测试合起来才是完整判据。
 #[test]
-fn pinyin_merge_silent_without_exact_hit() {
+fn pinyin_merge_silent_when_chinese_side_has_candidates() {
     let dir = data_dir();
     if !ready(&dir, "pinyin") {
         eprintln!("跳过：pinyin 方案或英文词库不存在");
@@ -94,12 +99,20 @@ fn pinyin_merge_silent_without_exact_hit() {
     cfg.schema.pinyin.english_merge.enable = true;
     let mgr = EngineManager::new(&cfg, Some(&dir));
 
-    // `githu` 是 github 的前缀，词库里没有这个词本身。
+    // `hend`：拼音解释得了开头的 `hen`（很/恨/狠…），英文库里没有 `hend` 这个词，
+    // 但有 Henderson / Hendrix 这些前缀扩展。
+    let r = mgr.convert("hend", 50);
     assert!(
-        english_texts(&mgr.convert("githu", 50)).is_empty(),
-        "无精确命中时不得拿前缀词顶上"
+        !r.candidates.is_empty(),
+        "前提不成立：中文侧得有候选，否则测的是前缀回退那条路"
     );
-    // 对照：敲完就有。
+    assert!(
+        english_texts(&r).is_empty(),
+        "中文侧有候选时不得拿前缀词顶上，实际混进了 {:?}",
+        english_texts(&r)
+    );
+
+    // 对照：敲完整词就有精确命中。
     assert!(
         !english_texts(&mgr.convert("github", 50)).is_empty(),
         "敲完整词后应有精确命中——否则上面那条断言是空转"
