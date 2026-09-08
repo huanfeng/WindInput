@@ -439,7 +439,10 @@ impl CandidateWindow {
     /// 非法组合，把「谁手写了字段」挡在开发期。
     pub fn set_orientation(&mut self, vertical: bool, rotated: bool, upright: bool) {
         debug_assert!(!(vertical && rotated), "vertical 与 rotated 不能同时为真");
-        debug_assert!(!(upright && !rotated), "upright 蕴含 rotated");
+        // 写成蕴含式（`!upright || rotated`）而不是 `!(upright && !rotated)`：
+        // 后者在 clippy 1.96 上会报 nonminimal_bool（1.97 放宽），而 macOS 验证机的
+        // Homebrew 工具链就停在 1.96。两种写法等价，取两个版本都干净的那个。
+        debug_assert!(!upright || rotated, "upright 蕴含 rotated");
         if (vertical, rotated, upright) != (self.vertical, self.rotated, self.upright) {
             // ⚠️ upright 会把整串按格切开逐格排版，这会**切断连写脚本**（蒙古文、阿拉伯文）
             // 的字形连接，每格退回孤立形——孤立形比连写形窄小，画面上就是「字变小变散」。
@@ -4768,7 +4771,11 @@ mod water_fill_tests {
 /// `[ui.font]` → [`FontPlan`] 的折叠规则。平台无关（不碰窗口/COM），故随 Linux CI 跑。
 #[cfg(test)]
 mod font_plan_build_tests {
-    use super::{DEFAULT_EMOJI_FAMILY, DEFAULT_FONT_FAMILY, build_font_plan};
+    // DEFAULT_EMOJI_FAMILY 只被下面 `#[cfg(windows)]` 的出厂指派用例引用，
+    // 导入不带 cfg 的话 macOS/Linux 上就是 unused_imports（CI 的 -D warnings 会红）。
+    #[cfg(windows)]
+    use super::DEFAULT_EMOJI_FAMILY;
+    use super::{DEFAULT_FONT_FAMILY, build_font_plan};
     use crate::text::script::ScriptClass;
 
     fn v(items: &[&str]) -> Vec<String> {
