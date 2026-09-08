@@ -96,3 +96,34 @@ fn english_merge_adds_no_new_gaps() {
         );
     }
 }
+
+/// ★ 打完整个词的那一键，候选数不得**塌缩**。
+///
+/// 曾经的写法用了两个判据（「无精确命中」**且**「中文侧空」才放宽），于是在
+/// 「无精确 → 有精确」的那一键上切换模式：真机打 `gith` / `githu` 各 5 条，
+/// 打完 `github` 反而只剩 1 条。用户看到的是候选数在打完词的瞬间跳变。
+///
+/// 判据收成一个（只看中文侧有没有候选）之后，全程同一种模式，不再有这个突变。
+#[test]
+fn finishing_the_word_does_not_collapse_the_list() {
+    let dir = data_dir();
+    if !ready(&dir) {
+        eprintln!("跳过：pinyin 方案或英文库不存在");
+        return;
+    }
+    let on = pinyin_mgr(&dir, true);
+
+    // `github` 在词库里既有精确词条、又有一串 GitHub 开头的长词组（Pages / Copilot /
+    // Actions…），是「打完最后一键」最容易暴露模式切换的形状。
+    let steps = walk(&on, "github");
+    eprintln!("\n── github 逐键 ──");
+    for (p, total, en) in &steps {
+        eprintln!("  {p:<8} 候选 {total:<3} 英文 {en}");
+    }
+    let (last_p, _, last_en) = steps.last().expect("至少一步");
+    let (prev_p, _, prev_en) = &steps[steps.len() - 2];
+    assert!(
+        *last_en > 1,
+        "打完 `{last_p}` 只剩 {last_en} 条英文——模式在最后一键切换了（前一步 `{prev_p}` 有 {prev_en} 条）"
+    );
+}

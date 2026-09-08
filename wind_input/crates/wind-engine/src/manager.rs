@@ -2718,18 +2718,19 @@ impl EngineManager {
             ConvertResult::default()
         });
         if let Some((eng, cfg)) = self.english_merge_ctx(&engine) {
-            let mut english = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
-            // 前缀回退：无精确命中**且**基础候选为空时才放宽，否则逐键打英文词会闪烁
-            // （`windows` 的 `windo`、`github` 的 `gith` 都不成词 ⇒ 候选窗中途空一下）。
-            // 判据挂在「基础候选空」而不是「有没有精确命中」上，理由见
-            // [`crate::english_merge::lookup_prefix_fallback`]。
-            if english.is_empty() && r.candidates.is_empty() {
-                english = crate::english_merge::lookup_prefix_fallback(
-                    eng.as_ref(),
-                    input,
-                    cfg.min_length,
-                );
-            }
+            // ★ 判据**只有一个**：中文侧有没有候选。它本身就完整表达了「用户在打中文
+            // 还是在打英文」，不必再叠「有没有精确命中」——叠了会在「无精确→有精确」
+            // 的那一键上切换模式、候选数骤变（真机现场：`gith`/`githu` 各 5 条，
+            // 打完 `github` 反而塌缩成 1 条）。
+            //
+            // 有中文候选 ⇒ 只收精确（前缀词是噪音，`hen` 不该带出 Henderson/Hendrix）；
+            // 无中文候选 ⇒ 给前缀补全（此时用户显然在打英文，补全正是他要的），
+            // 精确那条由英文引擎自己排在最前。
+            let english = if r.candidates.is_empty() {
+                crate::english_merge::lookup_prefix_fallback(eng.as_ref(), input, cfg.min_length)
+            } else {
+                crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length)
+            };
             if !english.is_empty() {
                 // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
                 // `AGENTS.md`：否决必须叠「对方确有候选」——本分支已在 `!english.is_empty()`
