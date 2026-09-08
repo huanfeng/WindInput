@@ -196,9 +196,29 @@ pub(crate) fn place_english_after_common_exact(candidates: &mut Vec<Candidate>, 
             rest.push(c);
         }
     }
+    // ★ 整串恰好是一个英文词时，**引擎新合成的整句**不得排在它前面。
+    //
+    // 开了简拼之后，几乎任何字母串都能被拼音解释：打 `hello` 出「和理论哦」、`book` 出
+    // 「波哦看」、`work` 出「我人口」——全是 Viterbi 把几个常用单字凑起来的解读，词库里
+    // 并没有这个词。用户打的显然是那个英文词，让这类拼凑结果占着首选没有道理。
+    //
+    // 判据用 `is_synthesized`（引擎新合成，词库无此词条）而**不是权重阈值**：实测
+    // 「波哦看」w=66、「我人口」w=54282，同样是杂词却差了三个数量级，而真正合理的
+    // 「打他」（词库真实词条）只有 687——权重衡量的是 Viterbi 路径分，不是「这个解读
+    // 靠不靠谱」，在这里没有区分力。
+    //
+    // 有词库背书的候选**不受影响**：`hen` 的「很」、`men` 的「们」、`data` 的「打他」
+    // 都是 `is_synthesized == false`，照旧排在英文之前。于是「中文解得好就让位、
+    // 解不出或只能靠拼凑就上前」这条线在这里继续成立。
+    let english_exact = {
+        let lower = input.to_lowercase();
+        english.iter().any(|c| c.code == lower)
+    };
     let pos = rest
         .iter()
-        .take_while(|c| wind_candidate::source_tier(c, input) <= 1)
+        .take_while(|c| {
+            wind_candidate::source_tier(c, input) <= 1 && !(english_exact && c.is_synthesized)
+        })
         .count();
     rest.splice(pos..pos, english);
     *candidates = rest;
@@ -5671,6 +5691,81 @@ mod english_placement_tests {
         assert_eq!(non_en, texts(&base), "非英文候选的相对次序必须原样保持");
         // 开头连续常用段只有「很」一条（第 2 条即生僻字断开），故英文插在第 2 位。
         assert_eq!(texts(&v)[1], "hen");
+    }
+
+    /// 引擎新合成的整句（`is_synthesized`）。
+    fn synth(text: &str, code: &str, consumed: usize) -> Candidate {
+        Candidate {
+            is_sentence: true,
+            is_synthesized: true,
+            ..zh(text, code, true, consumed)
+        }
+    }
+
+    /// ★ 整串是英文词时，引擎拼凑出来的整句让位给英文。
+    ///
+    /// 真机现场：开简拼后打 `hello` 出「和理论哦」、`book` 出「波哦看」、`work` 出
+    /// 「我人口」——都是 Viterbi 把常用单字凑起来的解读，词库里没有这个词。
+    #[test]
+    fn synthesized_sentence_yields_to_an_exact_english_word() {
+        let mut v = vec![
+            synth("和理论哦", "hello", 5),
+            zh("和", "he", true, 2),
+            zh("喝", "he", true, 2),
+            en("hello", "hello"),
+        ];
+        place_english_after_common_exact(&mut v, "hello");
+        assert_eq!(
+            texts(&v),
+            vec!["hello", "和理论哦", "和", "喝"],
+            "整串是英文词时，拼凑出来的整句不该占着首选"
+        );
+    }
+
+    /// ★★ 反面：**词库真实词条**不让位——它有词库背书，不是拼凑。
+    ///
+    /// `data` 的「打他」是词典整词（`is_synthesized == false`，实测 sent=true/syn=false）。
+    /// 这条与上一条合起来才是完整判据：降的是「引擎自己编的」，不是「所有整句」。
+    #[test]
+    fn dictionary_word_keeps_its_place_against_english() {
+        let mut v = vec![
+            // 词库整词恰好被 Viterbi 选中：is_sentence 为真但 is_synthesized 为假。
+            Candidate {
+                is_sentence: true,
+                ..zh("打他", "data", true, 4)
+            },
+            zh("大", "da", true, 2),
+            en("data", "data"),
+        ];
+        place_english_after_common_exact(&mut v, "data");
+        assert_eq!(
+            texts(&v),
+            vec!["打他", "data", "大"],
+            "词库真实词条有背书，不该被英文顶掉"
+        );
+    }
+
+    /// ★ 英文只是**前缀命中**（整串还不是英文词）时，合成整句照旧不让位。
+    ///
+    /// 判据挂在「整串恰好是英文词」上：打到 `hell` 时用户可能正打 `hello`，也可能在打
+    /// 拼音，没有理由此刻就认定他要英文。让位要等整串成词那一刻。
+    ///
+    /// ⚠️ 整句必须**消费整串**（`consumed == input.len()`），否则它进不了 `source_tier<=1`、
+    /// `take_while` 在第 0 位就停了——那样测到的是「整句本来就排不到前面」，
+    /// 与本用例要验的让位判据无关。首版即栽于此。
+    #[test]
+    fn synthesized_sentence_keeps_its_place_when_english_is_only_a_prefix_hit() {
+        let mut v = vec![
+            synth("哈额乐乐", "hell", 4),
+            // 英文候选的 code 比输入长 ⇒ 前缀命中，不是整串精确。
+            en("hello", "hello"),
+        ];
+        place_english_after_common_exact(&mut v, "hell");
+        assert_eq!(
+            texts(&v),
+            vec!["哈额乐乐", "hello"],
+            "英文非整串精确命中时不触发让位"
+        );
     }
 
     /// 无英文候选 / 空输入时是空操作。
