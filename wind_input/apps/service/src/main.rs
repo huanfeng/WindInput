@@ -631,10 +631,13 @@ fn init_logger() {
     // RUST_LOG 最优先，其次 debug.log_level，默认 info。
     // info 级别日志不得包含用户输入内容、词库词条等隐私数据。
     //
-    // ★ 优先级链由 `startup_trace::effective_log_level` 独家实现：启动轨迹的关闭门控
-    // 读的是同一个函数。两边各算一遍必然漂移成「主日志写着、轨迹停了」，而这两份日志
-    // 恰恰是用来互相印证的（轨迹存在的全部意义就是主日志失效时仍留痕）。
-    let level = startup_trace::effective_log_level();
+    // ★ 优先级链由 `startup_trace::effective_log_level_from` 独家实现：启动轨迹的关闭
+    // 门控读的是同一个函数。两边各算一遍必然漂移成「主日志写着、轨迹停了」，而这两份
+    // 日志恰恰是用来互相印证的（轨迹存在的全部意义就是主日志失效时仍留痕）。
+    //
+    // 用 `_from` 变体而不是自己加载的那个：配置上面刚 load 过，`Config::load` 是一次
+    // 多层合并 + 多个文件读取，为一个字段再走一遍白占启动时间。
+    let level = startup_trace::effective_log_level_from(&cfg_debug.log_level);
 
     // ★ 关闭档（level = off）：一个文件都不建，直接返回。
     //

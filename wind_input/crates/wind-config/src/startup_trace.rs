@@ -41,18 +41,38 @@ fn trace_path() -> Option<std::path::PathBuf> {
 /// 关闭门控。两边各算一遍优先级链，迟早会漂移成「主日志写着、启动轨迹停了」这种
 /// 自相矛盾的状态——而这两份日志正是用来互相印证的。
 ///
-/// 空串视为未设置（配置项的默认值就是空串，表示"没选过"）。
+/// 本函数自己加载配置。调用方**手上已经有配置**时改用
+/// [`effective_log_level_from`]：`Config::load` 是一次多层合并 + 多个文件读取，
+/// 为了一个字段再走一遍不划算，而它正好落在启动路径上。
 pub fn effective_log_level() -> String {
-    std::env::var("RUST_LOG")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            let cfg =
-                crate::config::Config::load(crate::config::Config::data_dir().as_deref()).ok()?;
-            let l = cfg.debug.log_level.trim().to_string();
-            if l.is_empty() { None } else { Some(l) }
-        })
-        .unwrap_or_else(|| "info".to_string())
+    let configured = crate::config::Config::load(crate::config::Config::data_dir().as_deref())
+        .map(|c| c.debug.log_level)
+        .unwrap_or_default();
+    effective_log_level_from(&configured)
+}
+
+/// [`effective_log_level`] 的「配置已在手上」版本。**优先级链的唯一实现**。
+pub fn effective_log_level_from(configured: &str) -> String {
+    match std::env::var("RUST_LOG") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => level_or_default(configured),
+    }
+}
+
+/// 配置值 → 生效级别。**空串 = 没选过 ⇒ `info`**，不是「选了空」。
+///
+/// 这条区分在加了 `off` 档之后才要紧：`off` 是用户显式选的"别记日志"，空串是
+/// 出厂状态。两者混为一谈的话，全新安装会一条日志都不写。
+///
+/// 单独抽出来是为了可测：`RUST_LOG` 那一层要动进程环境变量，测试并行时会互相污染，
+/// 而真正需要守住的判据在这三行里。
+fn level_or_default(configured: &str) -> String {
+    let l = configured.trim();
+    if l.is_empty() {
+        "info".to_string()
+    } else {
+        l.to_string()
+    }
 }
 
 /// 日志是否被用户整个关掉（级别为 `off`）。关掉时连启动轨迹也不写。
@@ -103,4 +123,19 @@ pub fn stage(name: &str) {
     );
     let _ = f.write_all(line.as_bytes());
     let _ = f.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_config_means_never_chosen_not_off() {
+        assert_eq!(level_or_default(""), "info");
+        assert_eq!(level_or_default("   "), "info", "空白等同未设置");
+        // `off` 是用户显式选的，必须原样传下去——落回 info 会让「关闭日志」这个
+        // 选项完全失效，而且用户看不出任何异常。
+        assert_eq!(level_or_default("off"), "off");
+        assert_eq!(level_or_default(" debug "), "debug", "两侧空白要修掉");
+    }
 }
