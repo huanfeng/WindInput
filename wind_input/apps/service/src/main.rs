@@ -182,6 +182,29 @@ fn main() {
         std::process::exit(code);
     }
 
+    // 拼错的子命令必须当场说"不认识"，不能穿到下面的服务启动路径。
+    //
+    // 穿过去的后果比"没反应"更坏：它会**以第二个服务实例的身份启动**，被单例检查
+    // 挡掉后打一句「另一个实例已在运行中」。经 `wind.cli("log tail")` 这类词条调用时，
+    // 用户看到的 toast 就是这句——把一个拼写错误报成了实例冲突。
+    //
+    // 判据只认"不以 `-` 开头的首个参数"：真正的启动路径要么无参，要么只带
+    // `--restarted`（`spawn_detached_self`），位置参数一个都没有。
+    if let Some(first) = sub
+        && !first.starts_with('-')
+    {
+        #[cfg(windows)]
+        if std::env::var_os(wind_coordinator::handle_cmdbar::WIND_CLI_PIPED_ENV).is_none() {
+            attach_parent_console();
+        }
+        eprintln!("未知子命令: {first}");
+        print_root_usage();
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        std::process::exit(2);
+    }
+
     // 0. 设置 DPI 感知（与 Go 版 setDPIAwareness 对齐）
     // 必须在任何窗口创建之前调用，否则坐标会被 Windows DPI 虚拟化
     set_dpi_awareness();

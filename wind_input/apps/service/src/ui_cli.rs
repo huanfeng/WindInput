@@ -63,11 +63,22 @@ fn cmd_toast(rest: &[String]) -> anyhow::Result<i32> {
             "--kind" => params["kind"] = json!(val()?),
             "--color" => params["color"] = json!(val()?),
             "--pos" => params["pos"] = json!(val()?),
-            "--ms" => params["ms"] = json!(val()?.parse::<u64>()?),
+            // 不让 ParseIntError 直接冒泡：那句 "invalid digit found in string" 既不说
+            // 是哪个参数、也不是中文，与短语层 `ms="5秒"` 的报错口径对不上。
+            "--ms" => {
+                let v = val()?;
+                params["ms"] = json!(
+                    v.parse::<u64>()
+                        .map_err(|_| anyhow::anyhow!("--ms 需要毫秒数, 收到 {v:?}"))?
+                );
+            }
             other => anyhow::bail!("未知参数: {other}"),
         }
     }
     rpc_online("ui.toast", params)?;
-    println!("✓ 已发送提示");
+    // **刻意不打确认行**：本命令最主要的用法就是词条里的
+    // `wind.cli("ui toast …")`，而 `wind.cli` 默认取 stdout 末行弹 toast——
+    // 打一句「✓ 已发送提示」就会在几毫秒后把用户自己那条提示覆盖掉。
+    // 提示已经弹在屏幕上了，成功与否看退出码即可，再打一行纯属冗余。
     Ok(0)
 }

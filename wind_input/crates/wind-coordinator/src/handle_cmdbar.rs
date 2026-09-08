@@ -408,8 +408,9 @@ impl ProcessRunner for CoordProc {
         let exe = std::env::current_exe()?;
         let mut cmd = std::process::Command::new(exe);
         cmd.args(spec.args);
-        if spec.wait_ms == 0 {
-            // 显式 wait="0"：退回发射后不管。此时无结果可报，toast 参数自然失效。
+        // 不等待的两种情形：显式 `wait="0"`，以及 `toast="off"`（要它闭嘴，就没有
+        // 任何理由再接管道、再挂一个等待线程去把输出读回来扔掉）。
+        if spec.wait_ms == 0 || spec.toast == "off" {
             cmd.spawn()?;
             return Ok(());
         }
@@ -421,29 +422,47 @@ impl ProcessRunner for CoordProc {
         let mode = spec.toast.to_string();
         let ok_text = spec.ok_text.to_string();
         let wait = std::time::Duration::from_millis(spec.wait_ms);
-        // 等待放后台线程：动作链虽已在独立线程，但一条 $CC 可能串多个动作，
+        // 收集与计时分成两层线程：
+        // 内层只管阻塞读到子进程结束（`wait_with_output` 无法中途放弃）；外层
+        // `recv_timeout` 到点就走人。**不 kill 子进程**——它可能正在写词库。
+        // 只有子进程真的永不退出时才会留下内层这一个线程，这是刻意的取舍。
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("wind-cli-collect".into())
+            .spawn(move || {
+                let _ = tx.send(child.wait_with_output());
+            })?;
+        // 计时放后台：动作链虽已在独立线程，但一条 $CC 可能串多个动作，
         // 卡在这里会让后面的 type()/key.tap() 迟迟不执行。
         std::thread::Builder::new()
             .name("wind-cli-wait".into())
             .spawn(move || {
-                let began = std::time::Instant::now();
-                let out = match child.wait_with_output() {
-                    Ok(o) => o,
-                    Err(e) => {
+                // ⚠️ 隐私：子进程输出可能带词条/路径，只允许进 toast（UI 通道），
+                // 日志里只记退出码（见 handle_addword 的同款约定）。
+                let out = match rx.recv_timeout(wait) {
+                    Ok(Ok(o)) => o,
+                    Ok(Err(e)) => {
                         warn!("wind.cli: 等待子进程失败: {e}");
                         return;
                     }
+                    // 超时**不能静默**：那正是这个功能要消灭的症状（命令跑了、
+                    // 用户什么也没看到）。给一条中性提示，说清"还在跑、结果未知"，
+                    // 迟到的真结果不再补弹——几十秒后冒出来的提示比没有更扰人。
+                    Err(_) => {
+                        warn!("wind.cli: 等待超时（命令仍在执行）");
+                        if mode != "error"
+                            && let Some(c) = coord.upgrade()
+                        {
+                            c.show_toast(
+                                "命令仍在执行，未能确认结果",
+                                ToastPosition::BottomCenter,
+                                ToastKind::Info,
+                            );
+                        }
+                        return;
+                    }
                 };
-                // 超时不是失败，只是**结果来晚了**：几秒后突然弹一条与当下无关的提示
-                // 比不弹更扰人，故过期即丢弃（命令本身照常跑完）。
-                let timed_out = began.elapsed() > wait;
                 let code = out.status.code();
-                // ⚠️ 隐私：子进程输出可能带词条/路径，只允许进 toast（UI 通道），
-                // 日志里只记退出码（见 handle_addword 的同款约定）。
-                if timed_out {
-                    warn!("wind.cli: 结果超时丢弃（退出码 {code:?}）");
-                    return;
-                }
                 let Some(msg) = cli_toast_message(
                     &mode,
                     &ok_text,
@@ -555,7 +574,10 @@ impl NotifyService for CoordNotify {
 /// （落回按 kind 取色）而不是 panic。
 pub(crate) fn parse_hex_rgba(s: &str) -> Option<[u8; 4]> {
     let hex = s.strip_prefix('#')?;
-    if !matches!(hex.len(), 6 | 8) {
+    // `is_ascii` 不是多余的：下面按**字节**下标切片，而 `len()` 也是字节数——
+    // `#中中` 恰好 6 字节，能穿过长度闸门，再切 `hex[0..2]` 就在字符中间 panic。
+    // 现有调用方都先过 `validate_toast_args`，但本函数的契约是"非法返回 None"。
+    if !matches!(hex.len(), 6 | 8) || !hex.is_ascii() {
         return None;
     }
     let b = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
@@ -1036,5 +1058,9 @@ mod cli_toast_tests {
         for bad in ["", "52C41A", "#52C", "#GGGGGG", "#52C41A8"] {
             assert_eq!(parse_hex_rgba(bad), None, "{bad}");
         }
+        // ★ 多字节：`#中中` 恰好 6 **字节**，会穿过长度闸门，再按字节切片就在
+        // 字符中间 panic。契约是"非法返回 None"，故这里必须也是 None。
+        assert_eq!(parse_hex_rgba("#中中"), None);
+        assert_eq!(parse_hex_rgba("#αβγδ"), None);
     }
 }

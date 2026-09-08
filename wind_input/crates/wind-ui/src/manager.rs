@@ -848,7 +848,15 @@ impl UiManager {
                         duration_ms,
                         accent,
                     } => {
-                        debug!("UI: ShowToast '{}' ({:?},{:?})", text, position, kind);
+                        // ⚠️ 只记形状不记内容：toast 文案现在可能来自 `wind.cli` 转述的
+                        // CLI 输出（词库路径、条目计数, 个别子命令还会带词），而 debug
+                        // 日志是落盘的。见 handle_cmdbar::run_self 立的那条隐私不变量。
+                        debug!(
+                            "UI: ShowToast {} 字 ({:?},{:?})",
+                            text.chars().count(),
+                            position,
+                            kind
+                        );
                         if let Some(t) = &mut toast {
                             t.show(&text, position, kind, accent);
                             toast_hide_at = Some(
