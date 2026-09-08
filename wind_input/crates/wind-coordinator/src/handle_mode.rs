@@ -140,6 +140,37 @@ impl Coordinator {
         }
     }
 
+    /// mix 候选的**用户数据归属方案**：按候选来源反查成员方案。`None` = 落 active。
+    ///
+    /// # 为什么写端只能反查
+    ///
+    /// 读端（`update_mix_candidates`）是在**成员段内**逐段应用的，那时 `member` 就在手边；
+    /// 而写端只拿得到一个已经合并、去重、finalize 过的候选，`Candidate` 又不带成员身份。
+    /// 于是按 `source` 反查第一个引擎类型匹配的成员——读写两端必须落同一个桶，否则就是
+    /// 「写进 A、读的是 B」，记账看着成功而顺序永不动（本仓已栽过数次的形态）。
+    ///
+    /// ⚠️ 同类型成员多于一个时取**靠前**的那个，与「成员顺序即候选优先级」同向。典型配置
+    /// （拼音 + 英文）下每类只有一个，不存在歧义；真配了两个拼音方案时它们本就折叠到同一个
+    /// `"pinyin"` 桶（`data_schema_id`），取谁都一样。
+    ///
+    /// ★ 无匹配时返回 `None` 而不是硬塞一个成员：生僻字成员（`rare_char`）的候选是用
+    /// **活跃方案**查出来的，它本就该归 active；`quick_input.*` 那几个内置来源根本不是方案
+    /// （`loaded_engine_type` 恒 `None`），永远匹配不上，其候选也没有词库归属可言。
+    pub(crate) fn mix_candidate_owner(&self, state: &State, cand: &Candidate) -> Option<String> {
+        use wind_candidate::CandidateSource;
+        let want = match cand.source {
+            CandidateSource::Pinyin => wind_engine::EngineType::Pinyin,
+            CandidateSource::CodeTable => wind_engine::EngineType::CodeTable,
+            CandidateSource::English => wind_engine::EngineType::English,
+            // 短语 / 联想 / 无来源：本就不记词频（`record_selection_in` 首段即跳过），
+            // 归属问谁都没有意义。
+            _ => return None,
+        };
+        self.mix_members_resolved(state.mix_id)
+            .into_iter()
+            .find(|m| self.engine_mgr.loaded_engine_type(m) == Some(want))
+    }
+
     /// mix 模式的成员方案 id 列表（占位符已解析，未过滤）。
     fn mix_members_resolved(&self, idx: u8) -> Vec<String> {
         let rt = self.rt();
@@ -1539,7 +1570,10 @@ impl Coordinator {
         if partial {
             let code = Self::cand_code(&state.mix_buffer, &cand);
             // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
-            self.record_selection(
+            // 归属按候选来源反查成员方案，与读端逐段应用的归属同源（见 `mix_candidate_owner`）。
+            let mix_member_owner = self.mix_candidate_owner(state, &cand);
+            self.record_selection_in(
+                mix_member_owner.as_deref(),
                 &self.freq_code(&state.mix_buffer, &cand),
                 &cand.text,
                 cand.source,
@@ -1577,8 +1611,15 @@ impl Coordinator {
             };
             if !numeric {
                 // 记账码：码表按输入码（码位独立），拼音/英文按候选码。见 `freq_code`。
+                // 归属同上，与读端同源（见 `mix_candidate_owner`）。
                 let freq_code = self.freq_code(&state.mix_buffer, &cand);
-                self.record_selection(&freq_code, &cand.text, cand.source);
+                let mix_member_owner = self.mix_candidate_owner(state, &cand);
+                self.record_selection_in(
+                    mix_member_owner.as_deref(),
+                    &freq_code,
+                    &cand.text,
+                    cand.source,
+                );
                 state.committed_segs.push((
                     state.mix_buffer.clone(), // 消费整串：回退码即整个缓冲
                     code,
@@ -1773,7 +1814,45 @@ impl Coordinator {
                 {
                     text_display = Some(result.preedit_display.clone());
                 }
-                for c in result.candidates {
+                // ── 用户数据（词频 / 候选调整）：按**成员方案**归属，就地作用在本成员段内 ──
+                //
+                // ★★ **段内而非全表**，正是「顺序调整在一个类型内成立、混合之后不成立」的
+                // 落法：用户在拼音方案里把某词调到第 3 位，说的是「拼音候选里的第 3」；而
+                // mix 的第 3 位可能是算式或日期，跨类型套用那个位置没有意义。段内应用既兑现
+                // 了用户的调整，又完全不动成员之间的次序——「成员顺序即候选优先级」是本函数
+                // 的设计（见函数文档），词频若作用在全表上就会把它冲掉。
+                //
+                // 隐藏（`deleted`）不受此限：它说的是「这条别出现」，与谁排第几无关，
+                // 因此在任何粒度上都成立。置顶（`pinned`）才是需要段内语义的那一半。
+                //
+                // 归属取**成员方案自身**：mix 的成员可以是任意方案（含第三方），各自的
+                // 用户数据本就该记在各自桶里。拼音族成员经 `data_schema_id` 折叠到
+                // `"pinyin"`，于是「在拼音方案里学到 / 调过的」在快捷输入里照样生效。
+                //
+                // ⚠️ 本段在 `finalize_candidates` **之前**（那个在循环外统一做，刻意不提前
+                // 以免 `$AA`/`$CC` 过两遍）。故对含特殊语法的词条，这里匹配到的是**未展开的
+                // 源码形态**，用户对展开后候选做的调整在 mix 里命中不了。真实方案成员通常是
+                // 拼音/英文词库（无此语法），故暂留此局限；要消除得把 finalize 拆到成员粒度，
+                // 那会连带改变 quick / rare 两类成员的展开次序。
+                //
+                // ⚠️ 检索范围过滤（`mark_common` / `apply_filter`）**刻意不在此接**：mix 是
+                // 融合方案，成员可以是第三方方案，还有专门的生僻字成员（上面 rare_char 那一
+                // 支自带 `retain_rare_admitted` 准入）。用主路径那套统一的常用度判据去裁剪，
+                // 会与生僻字成员的存在意义直接冲突。
+                let shadow_code = if result.shadow_code.is_empty() {
+                    state.mix_buffer.clone()
+                } else {
+                    result.shadow_code.clone()
+                };
+                let mut member_cands = result.candidates;
+                let mix_member_owner = Some(member.clone());
+                self.apply_freq_rerank_in(
+                    mix_member_owner.as_deref(),
+                    &mut member_cands,
+                    &state.mix_buffer,
+                );
+                self.apply_shadow_in(mix_member_owner.as_deref(), &mut member_cands, &shadow_code);
+                for c in member_cands {
                     if seen.insert(c.text.clone()) {
                         cands.push(c);
                     }
@@ -1787,6 +1866,13 @@ impl Coordinator {
         }
         // 统一展开汇聚点：混输成员词库候选内 `$` 特殊语法在此展开（见 finalize_candidates）。
         state.candidates = self.finalize_candidates(cands, &state.mix_buffer);
+        // Emoji 扩展：与主路径同一位置（所有加工之后、简繁展开之前）。快捷输入没有自己的
+        // emoji 开关，用的就是全局 `[input.emoji]`——与临拼同一条理由：没有独立开关时，
+        // 临时模式应与正式方案表现一致。
+        //
+        // 放在 finalize **之后**：宿主判据看的是候选最终文本，`$AA`/`$CC` 展开前的源码形态
+        // 不该被拿去查 emoji 表。
+        self.apply_emoji_suggestions(&mut state.candidates);
         // 简繁 1对多变体展开（约束见 expand_s2t_variants 文档）。
         self.expand_s2t_variants(state);
     }

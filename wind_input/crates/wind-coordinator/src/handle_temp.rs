@@ -422,6 +422,12 @@ impl Coordinator {
         // 返回值（本码是否有置顶规则就位）在此丢弃：它只服务于出简让全，那是码表方案的
         // 特性，临拼是纯拼音 overlay，没有让位环节。
         self.apply_shadow_in(temp_pinyin_owner.as_deref(), &mut candidates, &shadow_code);
+        // Emoji 扩展：与主路径同一位置——**钉在所有加工之后**（理由见
+        // `apply_emoji_suggestions`：放进过滤链里它会被静默滤光）。
+        //
+        // 临拼没有自己的 emoji 开关，用的就是全局 `[input.emoji]`。「临时想用一下拼音」
+        // 理应与正式拼音方案表现一致，故这里不加任何额外判据。
+        self.apply_emoji_suggestions(&mut candidates);
         state.candidates = candidates;
         // 简繁 1对多变体展开（约束见 expand_s2t_variants 文档）。
         self.expand_s2t_variants(state);

@@ -4551,6 +4551,14 @@ mod finalize_candidates_tests {
             // 不同**（拼音键是全拼扁平码、跨码位共享；码表键是输入码、码位独立且带按码长
             // 分级的简码保护）。归到主方案桶等于把拼音码混进五笔码位。
             "temp_pinyin_owner.as_deref()",
+            // ★ 同类例外：mix（快捷输入）的用户数据归属取**成员方案**。读端在
+            // `update_mix_candidates` 里逐成员段应用（那时 `member` 在手边），写端只拿得到
+            // 一个已合并的候选，故按来源反查（`mix_candidate_owner`）——两端落同一个桶。
+            //
+            // 为什么必须按成员而不是 active：mix 是融合方案，成员可以是任意方案（含第三方），
+            // 各自的词频/候选调整本就该记在各自桶里；按 active 归属会把拼音成员学到的东西
+            // 记进主方案（常是五笔）的桶。
+            "mix_member_owner.as_deref()",
         ];
         const CALLS: &[&str] = &[
             ".record_selection_in(",
@@ -4564,6 +4572,8 @@ mod finalize_candidates_tests {
             ("handle_special.rs", include_str!("handle_special.rs")),
             // 临英 / 临拼的候选装配与记账都在这里，此前整个文件不受本守卫覆盖。
             ("handle_temp.rs", include_str!("handle_temp.rs")),
+            // mix（快捷输入）同理。
+            ("handle_mode.rs", include_str!("handle_mode.rs")),
         ];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
@@ -4609,11 +4619,67 @@ mod finalize_candidates_tests {
         //
         // ⚠️ 下限须**随 sources 扩容一起上调**，否则余量翻倍等于容忍悄悄丢掉调用点：
         // 把 `handle_temp.rs` 加进 sources 后实扫 13 个（原 9 个，下限却还留在 6）；
-        // 临拼词频改走 `record_selection_in` 后又 +2 = 15。
+        // 临拼词频改走 `record_selection_in` 后 +2 = 15；mix 读写接入 + handle_mode.rs 进表 = 20。
         // 与下调时同一条纪律——变动前先确认是「合并/删除」还是「漏调」。
         assert!(
-            checked >= 15,
+            checked >= 20,
             "只扫到 {checked} 个方案归属调用点，少于预期——扫描方式失效了，先修测试"
+        );
+    }
+
+    /// **候选装配的平行实现必须一起接 emoji 扩展**。
+    ///
+    /// `[input.emoji]` 是**全局**开关，临时模式没有自己的那一份 —— 用户开了它，就该在临拼、
+    /// 快捷输入里同样生效（2026-09-08 用户拍板：「临时想用一下，就应该和正式的表现一致」）。
+    /// emoji 是「按候选文本查表追加」的加工，与哪个引擎出的候选无关，三条路一视同仁。
+    ///
+    /// ⚠️ **本条只锁「调用点存在」，锁不住行为**：`load_emoji_dict` 取 `Config::data_dir()`
+    /// （安装根目录）而非 `new_headless(cfg, Some(data_dir), ..)` 注入的那个，故集成测试里
+    /// emoji 表恒不加载 —— **主路径同样测不出来**，不是 overlay 独有的问题。要做行为测试，
+    /// 得先让那个加载点接受注入路径。在此之前，这条机械扫描是唯一守得住的东西。
+    #[test]
+    fn overlay_candidate_paths_apply_emoji_suggestions() {
+        const TARGETS: &[(&str, &str, &str)] = &[
+            ("handle_candidate.rs", "fn build_candidates", "主输入路"),
+            (
+                "handle_temp.rs",
+                "fn update_temp_pinyin_candidates",
+                "临时拼音",
+            ),
+            ("handle_mode.rs", "fn update_mix_candidates", "快捷输入/mix"),
+        ];
+        // 临英刻意不在表内：英文候选查 emoji 表恒不命中（表键是中文词），接了等于每键白跑
+        // 一趟查询。这与 `mark_common`/`apply_filter` 对临英无作用是同一条理由。
+        let src = |n: &str| -> &'static str {
+            match n {
+                "handle_candidate.rs" => include_str!("handle_candidate.rs"),
+                "handle_temp.rs" => include_str!("handle_temp.rs"),
+                _ => include_str!("handle_mode.rs"),
+            }
+        };
+        let mut bad: Vec<String> = Vec::new();
+        for (file, sig, label) in TARGETS {
+            let full = src(file);
+            let prod = full.split("#[cfg(test)]").next().unwrap_or(full);
+            let Some(off) = prod.find(sig) else {
+                panic!("{label}: 找不到 `{sig}` —— 函数被改名了，先修测试再说");
+            };
+            let rest = &prod[off + sig.len()..];
+            // 函数体 = 到下一个同级 fn 为止。
+            let end = rest
+                .find("\n    pub(crate) fn ")
+                .unwrap_or(rest.len())
+                .min(rest.find("\n    fn ").unwrap_or(rest.len()));
+            if !rest[..end].contains("self.apply_emoji_suggestions(") {
+                bad.push(format!("{label}（{file} 的 `{sig}`）"));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "以下候选装配路径没有接 emoji 扩展：\n  {}\n\
+             `[input.emoji]` 是全局开关，用户开了它就该处处生效；临时模式没有独立开关，\n\
+             不接的表现是「正式方案里打「你好」有 🙂️、临时模式里没有」，且完全静默。",
+            bad.join("\n  ")
         );
     }
 
@@ -4654,6 +4720,8 @@ mod finalize_candidates_tests {
             // （临英取小写化缓冲、临拼取引擎归一码）。此前本表漏了这个文件，那两处
             // 一直不受守卫——正是「N 个调用点做同一件事」最容易走散的地方。
             ("handle_temp.rs", include_str!("handle_temp.rs")),
+            // mix 的读取点在成员段内，码同样取引擎归一码。
+            ("handle_mode.rs", include_str!("handle_mode.rs")),
         ];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
@@ -4708,9 +4776,9 @@ mod finalize_candidates_tests {
              确有理由不走的请加进本测试的 ALLOWED 并写明理由。",
             bad.join("\n  ")
         );
-        // ⚠️ 同上：`handle_temp.rs` 进 sources 后实扫 9 个（原 7 个，下限却还留在 5）。
+        // ⚠️ 同上：`handle_temp.rs` 进 sources 后实扫 9（原 7、下限留在 5）；mix 接入后 10。
         assert!(
-            checked >= 9,
+            checked >= 10,
             "只扫到 {checked} 个 shadow 读取点，少于预期——调用点被改名或扫描失效了，先修测试"
         );
     }
