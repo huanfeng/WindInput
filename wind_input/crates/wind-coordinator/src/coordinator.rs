@@ -444,8 +444,9 @@ pub(crate) struct State {
     pub(crate) scope_relaxed: bool,
     /// 字词范围的**运行时临时态**（热键 / 工具栏 / 托盘切换的结果）。
     ///
-    /// `None` = 用户本次没切过，走配置层（方案级 `[candidate] word_scope` → 全局
-    /// `input.word_scope`）。取值收口在 [`Coordinator::effective_word_scope`]。
+    /// `None` = 用户本次没切过，走配置层（码表：方案级 `[engine.codetable] word_scope`
+    /// → 全局 `schema.codetable.word_scope`；拼音：全局 `schema.pinyin.word_scope` 一份）。
+    /// 取值收口在 [`Coordinator::effective_word_scope`]。
     ///
     /// # 只在内存，绝不写配置（2026-09-07 用户拍板）
     ///
@@ -454,12 +455,14 @@ pub(crate) struct State {
     /// 那条写盘链**（本项是方案级配置，持久化就得往那儿写，还要登记 `SideCommitter`
     /// 并处理「设置页正开着时被后台改写」）。
     ///
-    /// # ★ 它压过配置的**一切**层级，包括临时拼音
+    /// # ★ 它压过**配置**的一切层级，但压不过引擎不变量
     ///
-    /// 配置层跟数据归属方案（见 [`wind_config::schema::CandidateSpec::word_scope`]），
-    /// 于是五笔方案开了单字档，临拼里照常出词。而本字段是「用户此刻的意图」——他刚按下
-    /// 热键，就该立刻生效，不该再问一遍「你现在打的算哪个方案的数据」。
-    /// 两者判据不同是刻意的，同 `[punct]` 段 `mode` 与 `custom_mappings` 的先例。
+    /// 配置层按当前引擎分流（码表/混输一份、拼音一份，见
+    /// [`wind_config::schema::CodeTableSpec::word_scope`]）；本字段是「用户此刻的意图」
+    /// ——他刚按下热键，就该立刻生效，不该再问一遍这个码归哪个方案的数据管。
+    ///
+    /// **唯一压得过它的是「英文引擎恒 `All`」**：那是不变量不是默认值（`Char` 档会把
+    /// 英文候选全滤光），故那道判据问在本字段之前。见 `effective_word_scope`。
     ///
     /// # 失效点：切方案时清空
     ///
@@ -4366,12 +4369,28 @@ impl Coordinator {
                 }
             }
             // 字词范围：原地换档并重建候选，**不顶字、不退模式**——用户切的是「这一码
-            // 出什么」，正在打的这串码要留着。恒吞键（走到这里说明用户明确绑了它）。
+            // 出什么」，正在打的这串码要留着。
+            //
+            // ⚠️ **无会话时放行**，判据与 `Cancel` 同侧（有会话即可，不要求有候选）。
+            // 本表收的是 Tab / 翻页键那一批**宿主另有原义**的键：空闲时按下必须还给宿主，
+            // 否则用户照 `data/config.toml` 里的示例写了 `tab = "word_scope:cycle"`，Tab
+            // 在所有程序里当场失效。「走到这里说明用户明确绑了它，故恒吞键」是错的——
+            // `Cancel` 臂那句同款守卫正是本函数在无会话时也会被走到的证据。
+            //
+            // 判据取「有会话」而非「有候选」：单字档下某个码本来就可能一条候选都不剩，
+            // 那时若按「无候选」放行，用户就再也切不回去了（`requires_candidates` 把
+            // `WordScope` 与 `Cancel` 并列，为的就是这个）。
+            //
+            // 想空闲时也能切档 → 绑到 `keys.key_actions`（`BoundAction::WordScope`）：
+            // 那张表收的是符号键 / z / 组合键，没有宿主原义要让，故那边恒吞键。
             //
             // 状态泡走 `show_tip_locked`：本函数持着 state 锁，`show_tip` 会重入取锁。
             // ⚠️ 换档后候选可能整个变空（单字档下这个码一个单字都没有），那时**只剩**
             // 状态泡这一个反馈——不能因为「候选窗自己会变，用户看得见」就省掉它。
             wind_config::SessionAction::WordScope(a) => {
+                if !Self::has_input_session(state) {
+                    return None;
+                }
                 if let Some(label) = self.apply_word_scope_action(state, a) {
                     self.show_tip_locked(state, label);
                 }

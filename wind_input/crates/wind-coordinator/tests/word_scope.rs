@@ -1,7 +1,8 @@
 //! **字词范围**（`word_scope`）：候选里出单字、出词组，还是两者都出。
 //!
 //! 五笔系输入法的传统功能（极点 / 万能 / QQ 五笔的「字词 / 单字 / 词组」三态）。
-//! 取值收口在 `Coordinator::effective_word_scope`：临时态（热键）压过一切，否则**按引擎
+//! 取值收口在 `Coordinator::effective_word_scope`：英文引擎恒 `all`（不变量，压过临时态），
+//! 其余引擎临时态（热键）压过配置层，否则**按引擎
 //! 分流**——码表/混输取 `schema.codetable.word_scope`（⊕ 方案级 `[engine.codetable]`
 //! 覆盖），拼音取 `schema.pinyin.word_scope`（无方案级覆盖），英文恒 `all`。
 //!
@@ -299,7 +300,7 @@ fn make_override(tag: &str, schema_id: &str, body: &str) -> PathBuf {
     dir
 }
 
-/// 方案级 `[candidate] word_scope` 压过全局。
+/// 方案级 `[engine.codetable] word_scope` 压过全局。
 #[test]
 fn schema_level_scope_beats_global() {
     if !dict_ready(&data_dir()) {
@@ -504,5 +505,91 @@ fn codetable_and_pinyin_scopes_are_independent() {
         c3.debug_effective_word_scope(),
         "all",
         "码表方案不该受 schema.pinyin.word_scope 管辖"
+    );
+}
+
+// ─────────────────────── 按键接线：吞键边界与引擎不变量 ───────────────────────
+
+const VK_TAB: u32 = 0x09;
+
+/// `[keys.session_actions]` 绑 `word_scope` 时，**空闲按该键必须放行**。
+///
+/// 这张表收的是 Tab / 翻页键那一批**宿主另有原义**的键（`data/config.toml` 的示例键正是
+/// Tab）。执行臂若无条件 `Consumed`，用户照示例写下 `tab = "word_scope:cycle"` 之后，
+/// Tab 在所有程序里当场失效——不只是「无候选时」，是完全空闲时也吞。
+///
+/// 判据取「有会话」而非「有候选」：单字档下某个码本来就可能一条候选都不剩，那时若按
+/// 「无候选」放行，用户就再也切不回去了。`SessionAction::requires_candidates` 把
+/// `WordScope` 与 `Cancel` 并列，为的就是这个；本测试钉的是**执行臂**的对应守卫。
+#[test]
+fn session_bound_word_scope_releases_the_key_when_idle() {
+    if !dict_ready(&data_dir()) {
+        eprintln!("跳过：五笔词库不存在");
+        return;
+    }
+    let mut cfg = wubi_config("all");
+    cfg.keys
+        .session_actions
+        .insert("tab".into(), "word_scope:cycle".into());
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+
+    // ① 完全空闲：必须把键还给宿主。
+    let idle = coord.handle_key_event_policed(&key_event(VK_TAB));
+    assert!(
+        !matches!(idle, KeyAction::Consumed),
+        "空闲时 Tab 必须还给宿主（实际 {idle:?}）——否则绑了这个动词就等于废掉 Tab 键"
+    );
+    assert!(
+        !coord.debug_has_word_scope_override(),
+        "空闲按键不该置上临时态"
+    );
+
+    // ② 打了码之后：同一个键要生效（这半边证明上面那条不是「绑定压根没接上」的假绿）。
+    press(&coord, "a");
+    let active = coord.handle_key_event_policed(&key_event(VK_TAB));
+    assert!(
+        matches!(active, KeyAction::Consumed),
+        "有会话时 Tab 应吞键并换档（实际 {active:?}）"
+    );
+    assert!(
+        coord.debug_has_word_scope_override(),
+        "有会话时按键应置上临时态"
+    );
+}
+
+/// 英文引擎恒 `All` 是**不变量**，压得过临时态。
+///
+/// 这道判据必须问在 `word_scope_override` **之前**：写在后面就被绕过去了——英文方案下
+/// 按一次 `word_scope:char`（或 `cycle` 路过 `Char` 档），词库英文候选走主链被整批滤光，
+/// 只剩 `english_head_candidates` 追加的输入原文（那批插在过滤之后）。
+#[test]
+fn english_engine_ignores_the_runtime_override() {
+    let d = data_dir();
+    if !d.join("schemas/english.schema.toml").exists() || !d.join("schemas/english").is_dir() {
+        eprintln!("跳过：英文方案不存在");
+        return;
+    }
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["wubi86".into(), "english".into()];
+    cfg.schema.active = "english".into();
+    cfg.input.default.chinese_mode = true;
+    let coord = Coordinator::new_headless(cfg, Some(&d));
+
+    coord.set_word_scope(WordScope::Char);
+    assert!(
+        coord.debug_has_word_scope_override(),
+        "前置：临时态应已置上（否则下一条断言恒真，测不出东西）"
+    );
+    assert_eq!(
+        coord.debug_effective_word_scope(),
+        "all",
+        "英文引擎下临时态必须被忽略"
+    );
+
+    // 候选层面复核：英文词是多字符，Char 档一旦生效就会把它们全滤光。
+    press(&coord, "the");
+    assert!(
+        has_multi_char(&coord.debug_all_candidate_texts()),
+        "英文候选不该被 Char 档滤光"
     );
 }

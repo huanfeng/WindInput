@@ -212,7 +212,8 @@ impl Coordinator {
     ///
     /// | 层 | 来源 |
     /// |---|---|
-    /// | ① 临时态 | `State::word_scope_override`（热键切的），压过一切 |
+    /// | ⓪ 引擎不变量 | 英文/未知引擎恒 `All`，**压过临时态**（见下方 ★） |
+    /// | ① 临时态 | `State::word_scope_override`（热键切的），压过配置层 |
     /// | ② 全局 + 方案级 | **按当前引擎分流**，见下表 |
     ///
     /// # ★ 全局那一层按引擎分成两份
@@ -231,6 +232,11 @@ impl Coordinator {
     /// ⚠️ **英文引擎恒 `All` 不是遗漏**：英文候选是单词，`Char` 档会把它们全滤光，
     /// 而英文方案下用户要的从来不是「只出单字母」。
     ///
+    /// ★ 正因为它是**不变量**而非默认值，这道判据必须问在**临时态之前**——写在后面
+    /// 就被 ① 绕过去了：英文方案下按一次 `word_scope:char`，词库候选整批消失，只剩
+    /// `english_head_candidates` 追加的输入原文（那批插在过滤之后）。用户按 `cycle`
+    /// 路过 `Char` 档就撞得上，而他要的只是在中文档位间循环。
+    ///
     /// # ⚠️ 只有主输入路问得到这个函数
     ///
     /// 过滤只接在 `update_candidates`（主输入路）上。临拼 / 临英 / mix / 特殊模式各有各的
@@ -240,18 +246,26 @@ impl Coordinator {
     /// ⚠️ **逐次按键重算**，不能挂到 `sync_schema_scope` 那条代际驱动的路上：临英/临拼
     /// 进出根本不改代际。同 `candidate_font_of`。
     pub(crate) fn effective_word_scope(&self, state: &State) -> wind_candidate::WordScope {
+        use wind_engine::engine::EngineType;
+        // 英文/未知引擎恒 `All`，**先于临时态**判——理由见上方 ★。
+        let engine = self.engine_mgr.current_engine_type();
+        if !matches!(
+            engine,
+            Some(EngineType::CodeTable) | Some(EngineType::Mixed) | Some(EngineType::Pinyin)
+        ) {
+            return wind_candidate::WordScope::All;
+        }
         if let Some(scope) = state.word_scope_override {
             return scope;
         }
-        use wind_engine::engine::EngineType;
-        let raw = match self.engine_mgr.current_engine_type() {
+        let raw = match engine {
             // 码表与混输共用码表那一份。`codetable_settings()` 已经把「全局 ⊕ 方案级」
             // 折叠好，也已经替混输解析到 `primary_schema` ——两件事都不必在此重做。
             Some(EngineType::CodeTable) | Some(EngineType::Mixed) => {
                 self.engine_mgr.codetable_settings().word_scope
             }
             Some(EngineType::Pinyin) => self.rt().config.schema.pinyin.word_scope.clone(),
-            // 英文引擎与未知类型：不施加限制。
+            // 上面那道 `matches!` 已把其余引擎挡掉，这里只是穷尽性所需。
             _ => return wind_candidate::WordScope::All,
         };
         wind_candidate::WordScope::from_config(&raw)
