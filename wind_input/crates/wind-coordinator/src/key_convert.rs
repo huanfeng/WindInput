@@ -60,6 +60,54 @@ pub(crate) fn punct_char(key_code: u32, shift: bool) -> Option<char> {
     Some(if shift { shifted } else { base })
 }
 
+/// **键面字符 → 按法**：`(字符, VK, 是否按住 Shift)`。软键盘宿主启动时取一次。
+///
+/// # 谁要它
+///
+/// 软键盘手里只有「用户点了键面上的哪个字符」，而引擎的入口是键事件。两者之间必须有
+/// 一张字符 → 键的表。
+///
+/// 表含两部分，合成一张给出去（宿主只需要一次查询，不必先判断字符是不是中文标点）：
+/// 1. 可打印 ASCII —— 反向枚举 [`printable_char`]；
+/// 2. 中文标点 —— 键面上写着 `，`、`、`、`……`，但引擎那边**不存在直接产出中文标点的键**：
+///    它们是 ASCII 键经标点层转换来的，转成什么由中英标点态、自定义映射、智能符号共同
+///    决定。故这些字符登记的是**其 ASCII 源键**的按法（源自
+///    [`wind_transform::punctuation::chinese_punct_sources`]）。
+///
+/// # 为什么由核心给，而不是宿主自己写一张
+///
+/// 宿主写一张就是第二份真相源，且没有任何编译期约束把两份钉在一起。漂移的表现极难归因：
+/// 宿主漏了某个字符 ⇒ 那个键**绕过引擎直接上屏** ⇒ 智能符号、标点配对、自定义标点映射、
+/// 中英标点切换对它统统失效，而设置页里那些开关还好端端地摆着，点了没反应也不报错。
+/// 安卓端一度就是这样：宿主只认 `a-z 0-9 , .`，其余标点全走宿主默认行为。
+///
+/// 同一字符有多种按法时保留先遇到的（无 Shift 优先）；ASCII 优先于中文标点（`~` 这类
+/// 两边都有的，按它自己那个键送）。
+pub fn char_strokes() -> Vec<(char, u32, bool)> {
+    let mut out: Vec<(char, u32, bool)> = Vec::new();
+    let mut push = |ch: char, vk: u32, shift: bool, out: &mut Vec<(char, u32, bool)>| {
+        if !out.iter().any(|(c, _, _)| *c == ch) {
+            out.push((ch, vk, shift));
+        }
+    };
+    for vk in 0x20u32..=0xFF {
+        for shift in [false, true] {
+            if let Some(ch) = printable_char(vk, shift) {
+                push(ch, vk, shift, &mut out);
+            }
+        }
+    }
+    // 中文标点折算成源键。源键必然是可打印 ASCII，故一定能在上面那轮里找到按法；
+    // 找不到就说明正向表引入了一个不可打印的源键，那是核心侧的错，直接跳过并留痕。
+    for (cn, ascii) in wind_transform::punctuation::chinese_punct_sources() {
+        match out.iter().find(|(c, _, _)| *c == ascii) {
+            Some(&(_, vk, shift)) => push(cn, vk, shift, &mut out),
+            None => tracing::warn!("中文标点 {cn:?} 的源键 {ascii:?} 不是可打印键，已跳过"),
+        }
+    }
+    out
+}
+
 /// 小键盘键 → 主键盘等价键 `(vk, 是否需 Shift)`。非小键盘键返回 None。
 ///
 /// `numpad_behavior = follow_main` 的**唯一实现手段**：在分派前把小键盘键重写成主键盘等价键，

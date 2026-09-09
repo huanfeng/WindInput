@@ -2568,6 +2568,7 @@ dependencies = [
  "wind-coordinator",
  "wind-host",
  "wind-ipc",
+ "wind-keys",
  "wind-ui-types",
 ]
 

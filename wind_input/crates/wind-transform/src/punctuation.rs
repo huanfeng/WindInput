@@ -184,6 +184,46 @@ impl PunctuationConverter {
     }
 }
 
+/// 中文标点 → 产生它的 **ASCII 源键**。[`PunctuationConverter::static_chinese`] 的反向枚举。
+///
+/// # 谁要它
+///
+/// 软键盘的键面上直接写着 `，`、`、`、`……`，但引擎那边**不存在「直接产出中文标点的键」**：
+/// 中文标点是 ASCII 键经标点层转换来的，转成什么由中英标点态、自定义映射、智能符号共同
+/// 决定。宿主若把键面上那个 `，` 原样上屏，这三样对它全部失效——而设置页里的开关照样
+/// 摆着，点了没反应也不报错。
+///
+/// 所以宿主按下键面上的中文标点时，要送的是它的 ASCII 源键。这张表由正向表反向枚举，
+/// 不另写一份：宿主自己抄一张，正向表加了新映射它不会跟着改，新键就会绕过标点层。
+///
+/// 两处细节：
+/// - 多字符产物（`^`→`……`、`_`→`——`）按其**组成字符**登记，因为键面上写的是单个 `…`；
+/// - 引号有左右状态、不在 `static_chinese` 里，故单列；左右两形回到同一个 ASCII 键。
+pub fn chinese_punct_sources() -> Vec<(char, char)> {
+    let mut out: Vec<(char, char)> = Vec::new();
+    let mut push = |cn: char, ascii: char| {
+        if !out.iter().any(|(c, _)| *c == cn) {
+            out.push((cn, ascii));
+        }
+    };
+    for ascii in ' '..='~' {
+        if let Some(s) = PunctuationConverter::static_chinese(ascii) {
+            for cn in s.chars() {
+                push(cn, ascii);
+            }
+        }
+    }
+    for (cn, ascii) in [
+        ('\u{2018}', '\''),
+        ('\u{2019}', '\''),
+        ('\u{201C}', '"'),
+        ('\u{201D}', '"'),
+    ] {
+        push(cn, ascii);
+    }
+    out
+}
+
 /// 引号键在自定义映射里的两行键名 **(左形行, 右形行)**；非引号键返回 None。
 ///
 /// **存储键格式的唯一定义处**（跨仓的第二个知情者是设置端 `PUNCT_DEFAULTS` 的 token 列）。

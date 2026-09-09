@@ -43,7 +43,7 @@ pub mod handle_url;
 pub mod host_services;
 pub mod hotkey_match;
 pub mod input_diag;
-pub(crate) mod key_convert;
+pub mod key_convert;
 pub mod key_gate;
 pub(crate) mod key_resolver;
 pub mod layout;
