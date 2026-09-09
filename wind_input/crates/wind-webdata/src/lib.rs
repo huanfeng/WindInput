@@ -687,7 +687,13 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         // 编码前缀须用扁平码（key 是扁平的），用户可能照着列表显示的 `ni hao` 来搜。
         // 下面的**词条内容**搜索仍用原串——那是拿汉字去匹配 text，与音节空格无关。
+        //
+        // ★ 再过一道 ü 归一：写入侧（`normalize_add_code`）已把 `xv` 落成 `xu`，而
+        // `search_user_words_prefix` 是**裸字节前缀匹配**——不归一则用户手打 `xv` 搜
+        // 自己刚加的词一条也出不来。写入归一了、查询入口没跟上，正是本仓踩过多次的
+        // 那个形态（见 `docs/design/pinyin-code-domains.md`）。
         let (code_prefix, _) = wind_store::wdict::split_spaced_code(prefix);
+        let code_prefix = self.normalize_pinyin_code(&schema, code_prefix);
         let mut all = store.search_user_words_prefix(&schema, &code_prefix, 0)?;
         // 并入两类补充命中（与上面的编码前缀取并集，去重）：
         //   ① 词条内容包含搜索词（拿汉字匹配 text，用原串）
@@ -740,7 +746,9 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         // 列表显示的是带空格的音节码（见 word_item），用户很可能照着搜。key 是扁平的，
         // 不拆则 `ni ha` 一条也匹配不到。拆完仍是前缀语义（`ni ha` → `niha`）。
+        // 末尾再过一道 ü 归一，理由同 `web_dict_list_paged` 里的 ★。
         let (query, _) = wind_store::wdict::split_spaced_code(query);
+        let query = self.normalize_pinyin_code(&schema, query);
         let items: Vec<Value> = store
             .search_user_words_prefix(&schema, &query, limit)?
             .into_iter()
@@ -781,6 +789,14 @@ pub trait WebDataRpc: WebDataHost {
     /// 可以如实告知）。此处非法码照旧落 `boundary = 0`，与改动前等价。
     fn normalize_add_code(&self, schema: &str, code: &str, text: &str) -> (String, u64) {
         let (flat, explicit) = wind_store::wdict::split_spaced_code(code);
+        // ü 拼写归一（`xv` → `xu`、`nue` → `nve`）。**落库 key 与查询侧必须同域**：
+        // 查询侧 `PinyinEngine::convert` 已把击键归一成正字法形态，key 若停在 `xv`
+        // 就成了「加得进、打不出」——用户看得见这条词，永远召不回。
+        //
+        // ⚠️ 必须先于 `explicit` 那条早退：带空格的码（`nue yao`）走的是另一条 return，
+        // 漏了它就只有「手打空格声明切分」的用户中招，而那恰恰是最难复现的一档。
+        // 归一化是等长替换，故 `explicit` 这个按位置算的 bitmask 不受影响。
+        let flat = self.normalize_pinyin_code(schema, flat);
         if explicit != 0 {
             return (flat, explicit);
         }
@@ -894,6 +910,24 @@ pub trait WebDataRpc: WebDataHost {
             .unwrap_or(false)
     }
 
+    /// 拼音方案的 ü 拼写归一（`xv` → `xu`、`nue` → `nve`）；非拼音方案原样返回。
+    ///
+    /// 落点在这一层而非 [`wind_store::import_formats::CodePolicy`]（那是导入解析期的
+    /// 编码归一策略，概念上更贴），是因为 `wind-store` 在依赖图里位于 `wind-engine`
+    /// **下游**，拿不到 `normalize_u_umlaut`；复制一份规则则必然随时间漂移。
+    ///
+    /// ⚠️ 判据必须是「目标方案是不是拼音」而不是「码里有没有 v」：码表/五笔/快符的
+    /// 码里 `v` 是正经码元（五笔 `v` = 女字旁），动它会把用户的词改成打不出的码。
+    fn normalize_pinyin_code(&self, schema_id: &str, code: String) -> String {
+        if !self.target_is_pinyin(schema_id) {
+            return code;
+        }
+        match wind_engine::pinyin::spelling::normalize_u_umlaut(&code) {
+            std::borrow::Cow::Borrowed(_) => code,
+            std::borrow::Cow::Owned(s) => s,
+        }
+    }
+
     /// 按目标引擎挑编码归一化策略（`wind-store` 拿不到 `engine_mgr`，故由这一层决定）。
     fn code_policy_for(&self, schema_id: &str) -> wind_store::import_formats::CodePolicy {
         if self.target_is_pinyin(schema_id) {
@@ -926,6 +960,20 @@ pub trait WebDataRpc: WebDataHost {
     ) -> (Vec<wind_store::wdict::WordIo>, EntryContractStats) {
         if !self.target_is_pinyin(schema_id) {
             return (rows, EntryContractStats::default());
+        }
+        // ü 拼写归一（`xv` → `xu`、`nue` → `nve`），与 `normalize_add_code` 同款。
+        //
+        // ★ 必须改在 `rows` 上、不能只归一下面那份 `flats`：`flats` 只喂
+        // `resolve_boundaries`，**从不回写**，落库 key 自始至终取自 `r.code`。
+        // 只动 flats 的结果是「boundary 求解对了、词还是打不出」——比不修更难查，
+        // 因为导入统计会把它记进 `filled`，一切看起来都成功了。
+        //
+        // 归一化是等长替换且判据只看紧邻字节，故对层 1 那些带空格的码同样安全：
+        // `nu e` 的 `u` 后继是空格（不触发）、`n ue` 的 `u` 前驱是空格（不触发），
+        // 作者写下的切分不会被改写。
+        let mut rows = rows;
+        for r in rows.iter_mut() {
+            r.code = self.normalize_pinyin_code(schema_id, std::mem::take(&mut r.code));
         }
         // 层 1：文件自带空格的行，切分是词库作者写下的真值 —— 直接采信，不进求解。
         let mut flats: Vec<String> = Vec::with_capacity(rows.len());

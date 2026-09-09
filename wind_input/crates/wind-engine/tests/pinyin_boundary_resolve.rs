@@ -71,6 +71,15 @@ fn fixture(tag: &str) -> CachedDict {
     w.add_with_boundary("chong".into(), vec![("重".into(), 3000, 0, 0b1)]);
     // `xian` 一码两切分：单字「先」(xian) 与词「西安」共用；此处只放单字。
     w.add_with_boundary("xian".into(), vec![("先".into(), 900_000, 0, 0b1)]);
+    // ── ü 拼写归一的素材（`xv`→`xu`、`nue`→`nve`）──
+    // 词典侧**只有正字法形态**，这正是要点：手输的 `xv` 若不归一，层 2 点查与层 4
+    // 建图都落空 ⇒ 判 Unresolvable，用户加了词却打不出。
+    w.add_with_boundary("xu".into(), vec![("需".into(), 5000, 0, 0b1)]);
+    w.add_with_boundary("yao".into(), vec![("要".into(), 6000, 0, 0b1)]);
+    w.add_with_boundary("nve".into(), vec![("虐".into(), 5000, 0, 0b1)]);
+    // 「女」**只挂在 `nv` 下**（刻意不给 `nu` 一份）：这让层 2 点查成为
+    // 「`nv` 有没有被误归一成 `nu`」的判据——见 `umlaut_normalization_leaves_nl_v_alone`。
+    w.add_with_boundary("nv".into(), vec![("女".into(), 5000, 0, 0b1)]);
     // ── 带真值边界的词条（层 2 的靶子；「喜」「爱」刻意无单字读音）──
     w.add_with_boundary("xiai".into(), vec![("喜爱".into(), 7800, 0, 0b101)]);
 
@@ -317,4 +326,42 @@ fn single_syllable_symbol_entry_survives_reimport() {
     let r = e.resolve_boundary("zuo", "←");
     assert_eq!(r, BoundaryResolution::NoReading(0b1), "单音节边界是确定的");
     assert!(r.accepted(), "★ #97：导出得出来，就必须导得回去");
+}
+
+/// ü 拼写归一（`xv` → `xu`、`nue` → `nve`）：手输的两种写法必须给出**同一个**结果。
+///
+/// ★ 断言写成「两种写法互等」而不是「`xv` 得到某个具体 boundary」：这样归一化若被
+/// 改坏成别的映射，用例照样红——而写死具体值只锁住了一个点。
+///
+/// ⚠️ 这条守的是**入库侧**。查询侧（`convert` 把击键归一）在 `pinyin::tests` 里另有
+/// 用例，两侧缺一不可：只归一查询侧，词以 `xv` 落库、查询查 `xu`，加得进打不出。
+#[test]
+fn umlaut_spellings_resolve_same_as_orthographic_form() {
+    let e = engine("umlaut");
+    for (typed, orthographic, text) in [
+        ("xv", "xu", "需"),
+        ("nue", "nve", "虐"),
+        ("xvyao", "xuyao", "需要"),
+    ] {
+        let a = e.resolve_boundary(typed, text);
+        let b = e.resolve_boundary(orthographic, text);
+        assert_eq!(a, b, "`{typed}` 与 `{orthographic}`（{text}）须同解");
+        assert!(a.accepted(), "`{typed}`（{text}）须可入库，实际 {a:?}");
+    }
+}
+
+/// 反向守卫：`nv`/`lv` 已是正字法形态，归一化不得动它们。
+/// 若误加「n/l 后 v→u」那一臂，`nv` 会被改写成 `nu`、「女」直接入不了库。
+///
+/// ★ 判据取**层 2 点查**（夹具里「女」只挂在 `nv` 下）。先前写成
+/// 「`nv` 与 `nu` 不同解」是个没有区分力的断言：两者都是合法音节，对单字词
+/// 层 4 一律给 `Derived(0b1)`，归不归一化都相等——那条用例无论代码对错都会红。
+#[test]
+fn umlaut_normalization_leaves_nl_v_alone() {
+    let e = engine("umlaut_nl");
+    assert_eq!(
+        e.resolve_boundary("nv", "女"),
+        BoundaryResolution::Exact(0b1),
+        "`nv` 不得被归一成 `nu`——那会让层 2 点查落空"
+    );
 }

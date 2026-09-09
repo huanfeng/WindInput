@@ -22,6 +22,7 @@ pub mod octagram;
 pub mod parser;
 pub mod scorer;
 pub mod shuangpin;
+pub mod spelling;
 pub mod syllable;
 pub mod viterbi;
 
@@ -746,6 +747,23 @@ impl PinyinEngine {
     /// 总条目数
     pub fn entry_count(&self) -> usize {
         self.dict.len()
+    }
+
+    /// 混输闸门四件套（`is_possible_pinyin_sequence` / `is_whole_syllable_pinyin` /
+    /// `has_non_initial_single_letter_syllable` / `completed_syllable_count`）的公共入口归一。
+    ///
+    /// 这四个方法回答的都是「这串击键像不像拼音」，判据直接落在音节 Trie 上。用户打 `xv`
+    /// 时 Trie 走不通 ⇒ 闸门判假 ⇒ 混输方案下这串键**根本进不到拼音引擎**，
+    /// [`convert_with_opts`](Engine::convert) 里的那次归一化再对也没用。
+    ///
+    /// ⚠️ 与 `full_pinyin_gate` **有意不同**：那是双拼下的全拼降级支路，入参是双拼击键，
+    /// 其中的 `v` 是布局键（小鹤 `v` = zh），归一化会毁掉它。故此处按 `shuangpin` 短路，
+    /// 而不是把归一化下沉进 `contiguous_completed_from_start`（那会同时污染两条路）。
+    fn normalize_gate_input<'a>(&self, prefix: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.shuangpin.is_some() {
+            return std::borrow::Cow::Borrowed(prefix);
+        }
+        spelling::normalize_u_umlaut(prefix)
     }
 
     /// 从起始位置贪心切出连续完整音节（每步取最长匹配），返回 (音节序列, 结束字节位置)。
@@ -1772,6 +1790,22 @@ impl Engine for PinyinEngine {
         if input.is_empty() {
             return Ok(ConvertResult::default());
         }
+
+        // ü 拼写归一化（`xv` → `xu`、`nue` → `nve`，两条规则与安全性论证见 [`spelling`]）。
+        //
+        // 落在 `raw_input` **之前**，让归一化形态成为本次转换的唯一真相：全拼下
+        // 「`raw_input == query`」是下游多处判据的前提（整句 preedit 的 `top.code == raw_input`、
+        // 简拼基准串 `abbr_query`），只归一 query 会让它们对含 `v` 的串静默失效。
+        // 两条规则都是**等长**替换，故 preedit 逐字节重建与 consumed_length 全不受影响；
+        // 用户看到的编码栏是归一化形态（打 `xv` 显示 `xu`），与主流输入法一致。
+        //
+        // ⚠️ 仅全拼：双拼的 `v` 是布局键（小鹤 `v` = zh 声母），拿到这里会被换成 `u`、
+        // 毁掉整个双拼输入；双拼路径的对端实现在 `shuangpin::normalize_pinyin`。
+        let normalized = self
+            .shuangpin
+            .is_none()
+            .then(|| spelling::normalize_u_umlaut(input));
+        let input: &str = normalized.as_deref().unwrap_or(input);
 
         // 手动音节分隔符 `'` 在双拼下同样生效：由 `ShuangpinConverter::convert` 当作配对的
         // 硬边界消化（见那里的文档），到这里之后 `input` 已是纯全拼域、不含 `'`，
@@ -3501,6 +3535,22 @@ impl Engine for PinyinEngine {
     /// ⚠️ 层 4 无解即判非法、不再试层 3。这是可证的而非偷懒：若推导码 flat 后等于
     /// `code`，其音节序列本身就是一条「音节数 == 字数」的合法路径，与层 4 无解矛盾。
     fn resolve_boundary(&self, code: &str, text: &str) -> BoundaryResolution {
+        // ü 拼写归一：用户手打 `xv` 当编码时应等价于 `xu`（规则见 [`spelling`]）。
+        //
+        // ⚠️ 须用**归一化后的码**做层 2 点查——词典存的是正字法形态 `xu`，拿 `xv` 查
+        // `search_with_boundary` 必落空、掉进层 4，而层 4 建图用的 Trie 同样走不通
+        // `xv` ⇒ 判 Unresolvable。
+        //
+        // ★ 这一层归一只保证**求解正确**，**不足以**让词条可用：本方法只返回 boundary，
+        // 落库的 key 由调用侧那个 code 决定。key 若仍是 `xv`，而查询侧
+        // （`convert_with_opts`）已把击键归一成 `xu`，就成了「加得进、打不出」。
+        // 落库前的码归一因此必须由调用侧另做一次——见 `webdata::normalize_add_code`。
+        //
+        // ⚠️ 此处**有意不按 `shuangpin` 短路**（与 `normalize_gate_input` 相反）：
+        // 入参 `code` 是**词典码域**（恒为全拼），不是击键域。双拼方案的词典码同样是
+        // `xu`，故双拼引擎在这条路上也要归一。
+        let code = spelling::normalize_u_umlaut(code);
+        let code = code.as_ref();
         // 层 2：词典真值点查——最便宜也最权威。
         let exact = self.syllable_boundary_of(code, text);
         if exact != 0 {
@@ -3546,6 +3596,7 @@ impl Engine for PinyinEngine {
     }
 
     fn is_possible_pinyin_sequence(&self, prefix: &str) -> bool {
+        let prefix = &self.normalize_gate_input(prefix);
         // 条件1：整个前缀本身是某合法音节的前缀（如 zhon→zhong），长度 >=2 过滤单字母简拼。
         if prefix.len() >= 2 && self.trie.is_prefix(prefix) {
             return true;
@@ -3562,6 +3613,7 @@ impl Engine for PinyinEngine {
     }
 
     fn is_whole_syllable_pinyin(&self, prefix: &str) -> bool {
+        let prefix = &self.normalize_gate_input(prefix);
         // 整体即单个完整音节（wang/shen 等填满码长的场景）。
         if self.trie.is_syllable(prefix) {
             return true;
@@ -3575,12 +3627,15 @@ impl Engine for PinyinEngine {
     }
 
     fn has_non_initial_single_letter_syllable(&self, prefix: &str) -> bool {
-        let (completed, _) = self.contiguous_completed_from_start(prefix);
+        let (completed, _) =
+            self.contiguous_completed_from_start(&self.normalize_gate_input(prefix));
         completed.iter().skip(1).any(|s| s.len() == 1)
     }
 
     fn completed_syllable_count(&self, prefix: &str) -> usize {
-        self.contiguous_completed_from_start(prefix).0.len()
+        self.contiguous_completed_from_start(&self.normalize_gate_input(prefix))
+            .0
+            .len()
     }
 }
 
@@ -3658,6 +3713,124 @@ mod tests {
             raw.merge_single(code.to_string(), text.to_string(), 100, i as i32);
         }
         PinyinEngine::new(Config::default(), CachedDict::Memory(raw))
+    }
+
+    // ── ü 拼写归一化（`xv` → `xu`、`nue` → `nve`）。规则与安全性论证见 `spelling` 模块。──
+
+    /// jqxy 后的 `v` 打通到词典查询：这是本特性的主诉求（`xv` 原本空码）。
+    ///
+    /// ⚠️ 断言必须落在**召回结果**上而不是 `normalize_u_umlaut` 的返回值——后者在
+    /// `spelling` 的单测里已经验过，这里要证的是归一化确实接在了 `convert` 的链路上。
+    #[test]
+    fn umlaut_v_after_jqxy_recalls_u_words() {
+        let e = engine_with_words(&[("xu", "需"), ("ju", "居"), ("qun", "群"), ("yuan", "元")]);
+        for (stroke, want) in [("xv", "需"), ("jv", "居"), ("qvn", "群"), ("yvan", "元")] {
+            let r = e.convert(stroke, 10).unwrap();
+            assert!(
+                r.candidates.iter().any(|c| c.text == want),
+                "`{stroke}` 应召回「{want}」，实际: {:?}",
+                r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// n/l 后的 `ue` 是 üe 的另一种常见写法，同样打通。
+    #[test]
+    fn umlaut_ue_after_nl_recalls_ve_words() {
+        let e = engine_with_words(&[("nve", "虐"), ("lve", "略")]);
+        for (stroke, want) in [("nue", "虐"), ("lue", "略")] {
+            let r = e.convert(stroke, 10).unwrap();
+            assert!(
+                r.candidates.iter().any(|c| c.text == want),
+                "`{stroke}` 应召回「{want}」，实际: {:?}",
+                r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// `nv`/`lv` 已经是音节表形态，归一化不得动它们（回归防线：若误加
+    /// 「n/l 后 v→u」那一臂，`nv` 会变成 `nu`、「女」直接打不出）。
+    #[test]
+    fn umlaut_keeps_nl_v_spelling_intact() {
+        let e = engine_with_words(&[("nv", "女"), ("lv", "绿"), ("nu", "怒"), ("lu", "路")]);
+        let r = e.convert("nv", 10).unwrap();
+        assert!(
+            r.candidates.iter().any(|c| c.text == "女"),
+            "`nv` 须仍出「女」，实际: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
+        let r = e.convert("nu", 10).unwrap();
+        assert!(
+            r.candidates.iter().any(|c| c.text == "怒"),
+            "`nu` 不该被归一化（后面没有 e），须仍出「怒」，实际: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// 归一化是**等长**替换 ⇒ 编码栏与 `consumed_length` 不得错位。
+    /// 用户打 `xv` 看到的是归一化形态 `xu`（与主流输入法一致）。
+    #[test]
+    fn umlaut_normalization_preserves_preedit_length() {
+        let e = engine_with_words(&[("xu", "需"), ("xuyao", "需要")]);
+        let r = e.convert("xvyao", 10).unwrap();
+        let top = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "需要")
+            .expect("应召回「需要」");
+        assert_eq!(
+            top.consumed_length,
+            "xvyao".len(),
+            "等长替换 ⇒ 消费整串，长度须按击键串算"
+        );
+        assert_eq!(
+            r.preedit_display, "xu'yao",
+            "编码栏显示归一化形态，音节边界照常"
+        );
+    }
+
+    /// ⚠️ 双拼下 `v` 是**布局键**（小鹤 `v` = zh 声母），归一化绝不能触及。
+    /// 这条守的是 `convert_with_opts` 与 `normalize_gate_input` 两处的 `shuangpin` 短路。
+    #[test]
+    fn umlaut_normalization_never_touches_shuangpin() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("zhu".to_string(), "主".to_string(), 100, 0);
+        let schema_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../data/schemas/shuangpin");
+        let layout = Layout::from_toml(&schema_dir.join("xiaohe.toml")).expect("加载小鹤布局失败");
+        let eng = PinyinEngine::new(Config::default(), CachedDict::Memory(raw))
+            .with_shuangpin(ShuangpinConverter::new(layout));
+        // 小鹤 `vu` = zh + u → zhu。若 `v` 被误当成 ü 换成 `u`，这里会变成 `uu` 而全盘落空。
+        let r = eng.convert("vu", 10).unwrap();
+        assert!(
+            r.candidates.iter().any(|c| c.text == "主"),
+            "双拼 `vu` 须仍解析为 zhu，实际: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
+        // 混输闸门那一路同样不得归一化。
+        assert!(
+            matches!(
+                eng.normalize_gate_input("xv"),
+                std::borrow::Cow::Borrowed(_)
+            ),
+            "双拼下闸门入参须原样借用"
+        );
+    }
+
+    /// 手动分隔符是用户对切分的显式声明，归一化的相邻判据不得跨越它。
+    /// `nu'e` 明确要「nu + e」，不该被改写成 `nve`。
+    #[test]
+    fn umlaut_manual_separator_blocks_ue_rewrite() {
+        let e = empty_engine();
+        assert!(
+            matches!(
+                spelling::normalize_u_umlaut("nu'e"),
+                std::borrow::Cow::Borrowed(_)
+            ),
+            "`'` 隔断相邻关系，`ue` 规则不触发"
+        );
+        // 闸门侧同样成立（走的是同一个函数）。
+        let _ = e;
     }
 
     /// Task 8 Step 2：手动分隔符强制音节硬边界。
