@@ -102,7 +102,7 @@ impl Coordinator {
     /// 3. Ctrl/Alt/Cmd 组合 → 归宿主快捷键
     /// 4. 配对跳出：配对栈非空时吃跳出键（跨中英模式统一闸门）
     /// 5. 英文模式 → 字母/数字/标点全放行（配对由上一条兜住）
-    /// 6. 中文模式 → 字母、标点吃；会话键有会话才吃
+    /// 6. 中文模式 → 字母、标点（含 Shift+数字的上挡标点）吃；会话键有会话才吃
     pub fn should_handle_key(&self, probe: &KeyProbe) -> bool {
         if probe.host_readonly {
             return false;
@@ -149,6 +149,16 @@ impl Coordinator {
         }
 
         // ── 6. 中文模式 ──
+        // Shift+数字是**上挡标点**（`!@#$%^&*()`），不是数字键：它要走标点转换，
+        // 空缓冲时也得吃。必须排在下面那条之前——[`is_session_only_key`] 只看 VK、
+        // 不看修饰位，会把 Shift+1 一并判成「数字，空缓冲交还宿主」。
+        //
+        // 漏掉这一条的表现：中文标点态下上挡整排标点**绕过标点层直出半角**
+        // （`!` 而不是 `！`），而且只在空缓冲时如此——有编码时它们又是全角，
+        // 于是看起来像「有时候转有时候不转」。安卓端实测就是这个形状。
+        if mods & MOD_SHIFT != 0 && is_digit(probe.vk) {
+            return true;
+        }
         if is_session_only_key(probe.vk) {
             return session;
         }

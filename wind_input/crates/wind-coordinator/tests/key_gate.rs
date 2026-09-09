@@ -44,6 +44,30 @@ fn probe(vk: u32) -> KeyProbe {
     KeyProbe::new(vk)
 }
 
+/// Shift+数字是上挡标点，**空缓冲时也要吃**。
+///
+/// 现象（已修）：中文标点态下 `!@#$%^&*()` 整排绕过标点层直出半角，而且只在空缓冲时如此
+/// ——有编码时又是全角，看起来像「有时候转有时候不转」。根因是 `is_session_only_key`
+/// 只看 VK 不看修饰位，把 Shift+1 也当成了「数字键，空缓冲交还宿主」。
+#[test]
+fn shifted_digits_are_punct_even_on_empty_buffer() {
+    let Some(c) = coordinator() else { return };
+    for vk in 0x30u32..=0x39 {
+        let mut p = KeyProbe::new(vk);
+        p.modifiers = Modifiers(0x0001); // MOD_SHIFT
+        assert!(
+            c.should_handle_key(&p),
+            "Shift+{:#x} 是上挡标点，空缓冲也应被吃",
+            vk
+        );
+        // 不带 Shift 的数字仍旧交还宿主（原有契约不能被这条改坏）
+        assert!(
+            !c.should_handle_key(&probe(vk)),
+            "{vk:#x} 无 Shift 时空缓冲应交还宿主"
+        );
+    }
+}
+
 /// 空缓冲下的功能键/数字必须交还宿主。
 ///
 /// 设备现象（已修）：空格打不出空格、回车不换行、退格删不掉字、数字打不出来。
