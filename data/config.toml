@@ -61,18 +61,15 @@ single_code_complete = true
 # 基线——按频次排序的码表若跟着让位，沉底的正是作者排在前面的常用字。要用请自己开。
 # 单个方案也可在自己的 .schema.toml 的 [engine.codetable] 里声明，覆盖此处。
 short_code_yield_level = 0
-# 字词范围：候选里出单字、出词组，还是都出。
-#   all     字与词都出（默认）
-#   char    只出单字。五笔常用——单字恒是定长码，满码唯一即上屏的机会大幅增多，
-#           可以不看候选窗连续敲；也用于练习拆字、录入人名与古文
-#   phrase  只出词组
+# 单字输入：开启后候选只出单字，不出词。五笔常用——单字恒是定长码，满码唯一即上屏的
+# 机会大幅增多，可以不看候选窗连续敲；也用于练习拆字、录入人名与古文。
 # 与 [input] 的 filter_mode 是两回事：那个按字的常用度筛，这个按候选长短筛，可同时生效。
-# 短语、命令、快捷输入的候选不受本项管辖，任何档位下都照常显示。
-# 本项只管码表方案；拼音另有一份 [schema.pinyin] word_scope，互不影响。
-# 单个码表方案可在自己的 .schema.toml 的 [engine.codetable] 里写 word_scope 覆盖此处
-# （多一个 follow = 跟随此处）。混输方案不必写，它跟随自己的主码表方案。
-# 也可绑热键随时切换——热键切的是临时态，重启或切方案后回到这里配的值。
-word_scope = "all"
+# 短语、命令、快捷输入的候选不受本项管辖，开着也照常显示。
+# 本项只管码表方案；拼音另有一份 [schema.pinyin] single_char，互不影响。
+# 单个码表方案可在自己的 .schema.toml 的 [engine.codetable] 里写 single_char 覆盖此处
+# （不写 = 跟随此处）。混输方案不必写，它跟随自己的主码表方案。
+# 也可绑热键随时开关——热键切的是临时态，重启或切方案后回到这里配的值。
+single_char = false
 z_key_repeat = true
 # z 键功能：空缓冲按 z、且 z 在本方案是死码（无以 z 开头的编码）时，进哪个模式。
 # 值域：""/none（作正常编码字母）/ temp_pinyin / temp_english / mix:<id> / special:<id>。
@@ -157,10 +154,10 @@ temp_max_entries = 5000
 [schema.pinyin]
 show_code_hint = true
 use_smart_compose = true
-# 字词范围（拼音侧）：all 字词都出（默认）/ char 只出单字 / phrase 只出词组。
-# 与 [schema.codetable] 那份是两件独立的事：拼音没有定长码，开 char 只是「不出词」，
+# 单字输入（拼音侧）：开启后候选只出单字。
+# 与 [schema.codetable] 那份是两件独立的事：拼音没有定长码，开了只是「不出词」，
 # 找单个字时才用得上。写在这里就够了，拼音方案不再单独配。
-word_scope = "all"
+single_char = false
 # 手动音节分隔符策略。auto = 动态避让选词键（' 被占作选词键时改用反引号，反之用 '）；
 # 也可显式写 quote / backtick / none。
 #
@@ -812,11 +809,11 @@ global_hotkeys = []
 #   softkeyboard:<面id>     开软键盘并直接切到那一面（面 id 见 system.softkeyboard.toml，
 #                           如 punct / num / math / greek）。已开着时按它只切面、不关闭，
 #                           所以给几个面各配一个键不会互相打架。
-#   word_scope:char         只出单字（五笔常用）。同族还有 :phrase 只出词组、:all 都出、
-#                           :cycle 三档循环、:follow 取消临时切换回到配置的档位。
+#   single_char             开关单字输入（五笔常用，只出单字不出词）。裸写 = 切换；
+#                           也可写 single_char:on / :off 直达，:follow 取消临时切换。
 #                           切的是临时状态，不写配置——重启或切方案后回到
-#                           [schema.codetable] / [schema.pinyin] 的 word_scope
-#                           （或码表方案 [engine.codetable] word_scope）配的那一档。
+#                           [schema.codetable] / [schema.pinyin] 的 single_char
+#                           （或码表方案 [engine.codetable] single_char）配的值。
 #   none                    禁用这个键。用来关掉**更低层**（本文件、或定制版的
 #                           data_custom/config.toml）预置的绑定：本表逐键深合并，
 #                           删掉一行压不住下层那行，写 none 才是「本层表态：别干活」。
@@ -845,8 +842,9 @@ key_actions = {}
 #           [schema.pinyin.aux_code].enabled、方案配了码表、且当前有候选，否则不吞键)
 #       aux_code:page_next(同上，但与下翻页共用一个键：能进辅助码就进、进不去就翻下一页。
 #           已经在辅助码里 / 辅助码没开 / 方案没配码表时，这个键就是个纯翻页键)
-#       word_scope:char / :phrase / :all / :cycle / :follow(切字词范围，动词与上面的
-#           key_actions 完全一样。按下即换档并就地重出候选，不会把正在打的码上屏)
+#       single_char / single_char:on / :off / :toggle / :follow(开关单字输入，动词与上面的
+#           key_actions 完全一样。按下即开关并就地重出候选，不会把正在打的码上屏。
+#           ⚠️ 空闲时不吞键：绑在 Tab 上，没打字时 Tab 仍是宿主的制表符)
 # 例（Tab 向下翻页、CapsLock 向上翻页）：
 #   session_actions = { tab = "page_next", "shift+tab" = "page_prev", capslock = "page_prev" }
 # 例（Tab 一键两用：第一次按进辅助码筛选，之后按继续翻页）：

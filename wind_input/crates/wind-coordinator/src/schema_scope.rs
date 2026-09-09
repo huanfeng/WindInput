@@ -54,13 +54,13 @@ impl Coordinator {
         state.schema_scope_gen = generation;
         // 布局手动值随代际失效。标点态不需要对应动作，理由见模块文档最后一节。
         state.layout_manual = None;
-        // 字词范围的临时态随代际失效：切走方案就回到新方案配的档位。
+        // 单字输入的临时态随代际失效：切走方案就回到新方案配的取值。
         //
         // ★ 这里**不需要** `punct_before_schema` 那种「保存原值」的配套：临时态本身就是
         // `Option`，清成 `None` 即回落配置层，没有「被覆盖的原值存在哪」这个问题。
         // 那条真机教训（`Follow` 退化成「保持上一个方案强加的值」）在此天然不成立——
         // 它的成因是 `state.chinese_punct` 既是当前值又是唯一存储，本项两者是分开的。
-        state.word_scope_override = None;
+        state.single_char_override = None;
         // 引号交替态随代际归位。`PunctuationConverter` 是 Coordinator 单例、跨方案共享，而
         // 左右形是**按方案取的**（方案 A 把 `"` 配成 `「」`、方案 B 用默认 `“”`）。不归位的话
         // 切过去第一次按引号可能直接拿到右形。
@@ -132,31 +132,31 @@ impl Coordinator {
         self.candidate_font_of(&state)
     }
 
-    /// 当前**生效**的字词范围（测试/诊断用）。三层折叠后的结果，见
-    /// [`Coordinator::effective_word_scope`]。
-    pub fn debug_effective_word_scope(&self) -> String {
+    /// 当前**生效**的单字输入状态（测试/诊断用）。三层折叠后的结果，见
+    /// [`Coordinator::effective_single_char`]。
+    pub fn debug_effective_single_char(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        self.effective_word_scope(&state).as_config().to_string()
+        self.effective_single_char(&state)
     }
 
-    /// 配置层（**不含**临时态）里的字词范围（测试/诊断用）。
+    /// 配置层（**不含**临时态）里的单字输入（测试/诊断用）。
     ///
-    /// 取的是**码表那一份**（`schema.codetable.word_scope` ⊕ 方案级覆盖）——本函数只服务
+    /// 取的是**码表那一份**（`schema.codetable.single_char` ⊕ 方案级覆盖）——本函数只服务
     /// 「热键切换有没有写回配置」那条断言，而那些用例都跑在码表方案下。
     ///
-    /// 与 [`Self::debug_effective_word_scope`] 分开暴露是刻意的：「热键切换不写配置」
+    /// 与 [`Self::debug_effective_single_char`] 分开暴露是刻意的：「热键切换不写配置」
     /// 这条契约，只有同时问得到「生效值」与「配置值」才断言得了。合成一个的话，
     /// 一个把临时态写回配置的错误实现照样全绿。
-    pub fn debug_config_word_scope(&self) -> String {
-        self.engine_mgr.codetable_settings().word_scope
+    pub fn debug_config_single_char(&self) -> bool {
+        self.engine_mgr.codetable_settings().single_char
     }
 
-    /// 此刻有没有字词范围的临时态（测试/诊断用）。
-    pub fn debug_has_word_scope_override(&self) -> bool {
+    /// 此刻有没有单字输入的临时态（测试/诊断用）。
+    pub fn debug_has_single_char_override(&self) -> bool {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .word_scope_override
+            .single_char_override
             .is_some()
     }
 
@@ -208,67 +208,66 @@ impl Coordinator {
         self.engine_mgr.behavior_for(&id).candidate_text_orientation
     }
 
-    /// 当前输入语境的**字词范围**（只出单字 / 只出词组 / 都出）。取值的唯一入口。
+    /// 当前输入语境是否**只出单字**。取值的唯一入口。
     ///
     /// | 层 | 来源 |
     /// |---|---|
-    /// | ⓪ 引擎不变量 | 英文/未知引擎恒 `All`，**压过临时态**（见下方 ★） |
-    /// | ① 临时态 | `State::word_scope_override`（热键切的），压过配置层 |
+    /// | ⓪ 引擎不变量 | 英文/未知引擎恒关，**压过临时态**（见下方 ★） |
+    /// | ① 临时态 | `State::single_char_override`（热键切的），压过配置层 |
     /// | ② 全局 + 方案级 | **按当前引擎分流**，见下表 |
     ///
     /// # ★ 全局那一层按引擎分成两份
     ///
     /// | 引擎 | 取值 | 方案级覆盖 |
     /// |---|---|---|
-    /// | 码表 | `schema.codetable.word_scope` | `[engine.codetable] word_scope` |
+    /// | 码表 | `schema.codetable.single_char` | `[engine.codetable] single_char` |
     /// | 混输 | 同上（`codetable_settings` 自己解析到 `primary_schema`） | 继承主码表方案 |
-    /// | 拼音 | `schema.pinyin.word_scope` | 无（刻意） |
-    /// | 英文等 | 恒 `All` | — |
+    /// | 拼音 | `schema.pinyin.single_char` | 无（刻意） |
+    /// | 英文等 | 恒关 | — |
     ///
-    /// 两种引擎对这件事的诉求本就不同：码表用户开单字档是为了**定长盲打**（单字恒 ≤ 全码长
+    /// 两种引擎对这件事的诉求本就不同：码表用户开单字是为了**定长盲打**（单字恒 ≤ 全码长
     /// ⇒ 满码唯一即上屏），拼音没有定长、开了只是「不出词」。分成两份之后，「五笔只出单字、
     /// 拼音照常出词」在全局层就表达得了，不必逐方案配（用户 2026-09-08 拍板）。
     ///
-    /// ⚠️ **英文引擎恒 `All` 不是遗漏**：英文候选是单词，`Char` 档会把它们全滤光，
+    /// ⚠️ **英文引擎恒关不是遗漏**：英文候选是单词，开了会把它们全滤光，
     /// 而英文方案下用户要的从来不是「只出单字母」。
     ///
     /// ★ 正因为它是**不变量**而非默认值，这道判据必须问在**临时态之前**——写在后面
-    /// 就被 ① 绕过去了：英文方案下按一次 `word_scope:char`，词库候选整批消失，只剩
-    /// `english_head_candidates` 追加的输入原文（那批插在过滤之后）。用户按 `cycle`
-    /// 路过 `Char` 档就撞得上，而他要的只是在中文档位间循环。
+    /// 就被 ① 绕过去了：英文方案下按一次 `single_char:on`，词库候选整批消失，只剩
+    /// `english_head_candidates` 追加的输入原文（那批插在过滤之后）。用户按 `toggle`
+    /// 就撞得上，而他要的只是在中文方案里开关它。
     ///
     /// # ⚠️ 只有主输入路问得到这个函数
     ///
     /// 过滤只接在 `update_candidates`（主输入路）上。临拼 / 临英 / mix / 特殊模式各有各的
     /// 候选装配函数，都不受本项管辖——这是当前的实际作用域，别照着上面那张表推断临拼会
-    /// 跟着拼音那一档走（它压根不经过这里）。
+    /// 跟着拼音那一份走（它压根不经过这里）。
     ///
     /// ⚠️ **逐次按键重算**，不能挂到 `sync_schema_scope` 那条代际驱动的路上：临英/临拼
     /// 进出根本不改代际。同 `candidate_font_of`。
-    pub(crate) fn effective_word_scope(&self, state: &State) -> wind_candidate::WordScope {
+    pub(crate) fn effective_single_char(&self, state: &State) -> bool {
         use wind_engine::engine::EngineType;
-        // 英文/未知引擎恒 `All`，**先于临时态**判——理由见上方 ★。
+        // 英文/未知引擎恒关，**先于临时态**判——理由见上方 ★。
         let engine = self.engine_mgr.current_engine_type();
         if !matches!(
             engine,
             Some(EngineType::CodeTable) | Some(EngineType::Mixed) | Some(EngineType::Pinyin)
         ) {
-            return wind_candidate::WordScope::All;
+            return false;
         }
-        if let Some(scope) = state.word_scope_override {
-            return scope;
+        if let Some(on) = state.single_char_override {
+            return on;
         }
-        let raw = match engine {
+        match engine {
             // 码表与混输共用码表那一份。`codetable_settings()` 已经把「全局 ⊕ 方案级」
             // 折叠好，也已经替混输解析到 `primary_schema` ——两件事都不必在此重做。
             Some(EngineType::CodeTable) | Some(EngineType::Mixed) => {
-                self.engine_mgr.codetable_settings().word_scope
+                self.engine_mgr.codetable_settings().single_char
             }
-            Some(EngineType::Pinyin) => self.rt().config.schema.pinyin.word_scope.clone(),
+            Some(EngineType::Pinyin) => self.rt().config.schema.pinyin.single_char,
             // 上面那道 `matches!` 已把其余引擎挡掉，这里只是穷尽性所需。
-            _ => return wind_candidate::WordScope::All,
-        };
-        wind_candidate::WordScope::from_config(&raw)
+            _ => false,
+        }
     }
 }
 

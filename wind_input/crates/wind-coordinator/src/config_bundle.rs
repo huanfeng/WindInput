@@ -118,8 +118,8 @@ fn warn_unknown_session_actions(config: &Config) {
                 "keys.session_actions[\"{name}\"] = \"{verb}\"：动词无法识别，该绑定被忽略。\
                  可选 page_prev / page_next / highlight_up / highlight_down / cancel / \
                  select_candidate:N / select_char:N / aux_code / aux_code:page_next / \
-                 word_scope:char / word_scope:phrase / word_scope:all / word_scope:cycle / \
-                 word_scope:follow / none",
+                 single_char / single_char:on / single_char:off / single_char:toggle / \
+                 single_char:follow / none",
             );
             continue;
         }

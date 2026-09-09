@@ -534,8 +534,8 @@ impl Coordinator {
             // 而他要的恰恰是**换个档位重看这一码**。
             //
             // 换档后候选可能整个变空（单字档下该码无单字），那时只剩状态泡这一个反馈。
-            BoundAction::WordScope(a) => {
-                if let Some(label) = self.apply_word_scope_action(state, *a) {
+            BoundAction::SingleChar(a) => {
+                if let Some(label) = self.apply_single_char_action(state, *a) {
                     self.show_tip_locked(state, label);
                 }
                 Some(KeyAction::Consumed)

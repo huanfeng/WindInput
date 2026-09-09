@@ -395,18 +395,36 @@ pub struct CodeTableSpec {
     /// 五笔这类前缀式简码成立，别的码表可以在方案里关掉。
     #[serde(default)]
     pub short_code_yield_level: Option<usize>,
-    /// 本方案的**字词范围**覆盖（只出单字 / 只出词组 / 都出）。三态见
-    /// [`crate::config::WordScopeIntent`]：`follow`（出厂）= 跟随全局
-    /// `schema.codetable.word_scope`。
+    /// 本方案的**单字输入**覆盖。`None`（不写这一项，出厂）= 跟随全局
+    /// `schema.codetable.single_char`；`Some(_)` 恒压过全局。
     ///
     /// 与同段的 [`Self::short_code_yield_level`] 同一条论证：不同码表的简码体系深浅不同，
     /// 「只出单字」这件事该由装了这张码表的人自己定。**拼音侧刻意没有对应的覆盖层**
-    /// （拼音方案通常只有一张，全局 `schema.pinyin.word_scope` 那一份就够了）。
+    /// （拼音方案通常只有一张，全局 `schema.pinyin.single_char` 那一份就够了）。
     ///
     /// ⚠️ 混输方案不写这一项：`EngineManager::codetable_settings` 会把它解析到
-    /// `primary_schema`（主码表方案）——混输继承主方案的档位，不单独配。
-    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
-    pub word_scope: crate::config::WordScopeIntent,
+    /// `primary_schema`（主码表方案）——混输继承主方案的取值，不单独配。
+    ///
+    /// # ⛔ 内置方案一项都不要声明
+    ///
+    /// 「五笔常开、拼音不开」是**文档与设置页引导**该解决的事，不是靠出厂值。方案级
+    /// `Some(_)` 恒覆盖全局 ⇒ 给 wubi86 预置 `true` 的话，五笔用户在**全局页**把这一项
+    /// 关掉纹丝不动，而「方案自带」那个标记藏在方案设置里，他不会去找——从他的角度这就
+    /// 是「设置项坏了」。`short_code_yield_level` 在 0.119 恰好这么栽过一次并于当天撤回，
+    /// 判据已成文：**用户在全局页做的事，必须能作用到出厂方案上。**
+    /// 守门测试 `factory_schemas_do_not_declare_single_char`。
+    ///
+    /// ⚠️ 这条只约束**内置**方案。第三方方案作者写这一项完全正当（用户装那张码表时就
+    /// 接受了作者的安排），别推广成「方案文件不许写这一项」。
+    ///
+    /// ⛔ **别挂 `tolerant_de::tolerant`**（本字段一度挂过，测试当场红）。那个适配器
+    /// 第一行就是 `String::deserialize`，只治「字符串枚举写错了值」；布尔字段挂上去，
+    /// 连**正确**的 `single_char = true` 都会解析失败，表现成「方案级配了完全没反应」。
+    /// 见 `tolerant_de` 模块文档的「只治字符串写错，不治类型写错」一节。
+    ///
+    /// ⇒ 写错类型（`single_char = "yes"`）走**段级降级**，与同段其它 `Option` 同一条路。
+    #[serde(default)]
+    pub single_char: Option<bool>,
     /// z 键重复输入。
     #[serde(default)]
     pub z_key_repeat: Option<bool>,

@@ -1283,9 +1283,9 @@ impl Coordinator {
         candidates = deduped;
         // 检索范围过滤（按模式裁剪；is_common 已由上面的 mark_common 填好）
         self.apply_filter(state, &mut candidates);
-        // 字词范围过滤（只出单字 / 只出词组）。与上一行正交，见 `apply_word_scope`。
+        // 单字输入过滤（只出单字）。与上一行正交，见 `apply_single_char`。
         // ⚠️ 位置钉在 `apply_shadow` **之前**：shadow 的位次记的是用户所见的列表。
-        self.apply_word_scope(state, &mut candidates);
+        self.apply_single_char(state, &mut candidates);
         // 用户词频重排（独立维度，used-first，绝不改 weight；frequency.md §3）
         //
         // ⚠️ 自动补充的候选（`is_scope_filtered`，恒在末尾）**排除在重排之外**：沉底是硬约束。
@@ -1339,9 +1339,9 @@ impl Coordinator {
                 // 上面「本会显示在最前的那一条」这句承诺就不成立了）。
                 self.mark_common(&mut completion_pool);
                 self.apply_filter(state, &mut completion_pool);
-                // 补全池走**同一条**过滤链：单字档下若不滤，主列表被滤空之后会从补全池
+                // 补全池走**同一条**过滤链：开了单字若不滤，主列表被滤空之后会从补全池
                 // 补一条词回来——用户看到的是「开了单字模式还是冒出词」。
-                self.apply_word_scope(state, &mut completion_pool);
+                self.apply_single_char(state, &mut completion_pool);
                 // 补全池必须走同一条过滤链、**同一个码**：主列表隐藏掉的词若在这里被原码
                 // 补回来，用户看到的就是「删了又冒出来」。
                 // 返回值并进 `user_pinned`：补全收口只在主列表为空时走，那时上面那次
@@ -1673,7 +1673,7 @@ impl Coordinator {
         }
     }
 
-    /// 按当前**字词范围**过滤候选（只出单字 / 只出词组 / 都出）。
+    /// **单字输入**开启时，把词从候选里滤掉。
     ///
     /// 与 [`Self::apply_filter`]（检索范围）是两根**正交**的轴，故是两个函数而不是给那个
     /// 加参数：那个按字符常用度裁剪、有「孤儿码位保底」和「临时放宽」两套配套机制，
@@ -1682,21 +1682,20 @@ impl Coordinator {
     /// # 位置：`apply_filter` 之后、`apply_shadow` 之前
     ///
     /// **必须早于 shadow**。`ShadowPin.position` 是绝对下标，记的是用户右键当时**所见的
-    /// 那个列表**——单字档下所见列表就是滤过的，滤在 shadow 之后位次就对不上了。
+    /// 那个列表**——开了单字所见列表就是滤过的，滤在 shadow 之后位次就对不上了。
     /// 出简让全踩过同一个坑（「置顶写得进去、下次打同一个码毫无变化」），见
     /// `short_code_yield::apply` 的 `user_pinned`。
     ///
     /// # 被滤集直接丢弃，不留 `FilterOutcome`
     ///
-    /// 检索范围要留被滤集是因为有「末页翻页放宽」这个出路。字词范围没有对应的出路，
-    /// 也刻意不给一个：用户开单字档就是不想看见词，「翻到底还能翻出词来」与这个意图相反。
-    /// 要看词就切档位（热键一下的事）。
-    pub(crate) fn apply_word_scope(&self, state: &State, candidates: &mut Vec<Candidate>) {
-        let scope = self.effective_word_scope(state);
-        if scope.is_all() {
-            return; // 热路径短路：绝大多数用户在此档，省掉逐候选的字素簇切分
+    /// 检索范围要留被滤集是因为有「末页翻页放宽」这个出路。本项没有对应的出路，
+    /// 也刻意不给一个：用户开单字输入就是不想看见词，「翻到底还能翻出词来」与这个意图相反。
+    /// 要看词就关掉它（热键一下的事）。
+    pub(crate) fn apply_single_char(&self, state: &State, candidates: &mut Vec<Candidate>) {
+        if !self.effective_single_char(state) {
+            return; // 热路径短路：绝大多数用户不开它，省掉逐候选的字素簇切分
         }
-        candidates.retain(|c| wind_candidate::word_scope_admits(c, scope));
+        candidates.retain(wind_candidate::single_char_admits);
     }
 
     /// 按当前检索范围过滤候选（`is_common` 由 `mark_common` 提前填好）。

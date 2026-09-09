@@ -170,9 +170,9 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
 唯一精确全码 → 据显示候选复评放行（§8 第⑧步）。上屏判定与用户所见保持一致。
 
 ★ 判据落在「用户看见的是哪些候选」上、**与过滤的成因无关**，故它不止服务智能过滤：
-字词范围（§8 第⑤'步）单字档下同码的词被滤掉后，满码自动上屏同样靠这条复评放行——那正是
-「定长盲打」成立的原因，也是单字档对五笔的主要价值。⇒ 给本函数加成因判据（如「仅当
-`filter_mode == Smart`」）会静默废掉第二个消费者，`char_scope_enables_auto_commit_at_full_code`
+单字输入（§8 第⑤'步）开启后同码的词被滤掉，满码自动上屏同样靠这条复评放行——那正是
+「定长盲打」成立的原因，也是它对五笔的主要价值。⇒ 给本函数加成因判据（如「仅当
+`filter_mode == Smart`」）会静默废掉第二个消费者，`single_char_enables_auto_commit_at_full_code`
 守着这一点。
 
 ---
@@ -623,9 +623,9 @@ step 2c（尾部残码参与整句解码）此前在混输下**整体关闭**（
      平(w=58 part=true)＞平摊(w=4 part=false)，前者插到词组前）
 ④ 按 text 去重（保留首个）+ **把被弃条目所占码位并入幸存者**（merged_codes，见 §8.1.2）
 ⑤ apply_filter：填充 is_common（常用字表；短语豁免，判定作用域见 §8.1.1）→ wind_candidate::filter_candidates
-⑤' apply_word_scope：字词范围（只出单字 / 只出词组），与⑤**正交**——那个按字符常用度裁剪，
+⑤' apply_single_char：单字输入（只出单字），与⑤**正交**——那个按字符常用度裁剪，
      这个按候选长度裁剪。豁免判据是 `is_user_authored`（短语/命令/分组），⛔ **不是**
-     `is_common_like`（那个连常用词一起豁免 ⇒ 功能失效）。见 design/word-scope.md
+     `is_common_like`（那个连常用词一起豁免 ⇒ 功能失效）。见 design/single-char-mode.md
 ⑥ apply_freq_rerank：用户词频重排（独立维度，绝不改 weight）
 ⑦ apply_shadow：shadow 规则删除过滤 + 置顶/移动重排（优先级最高，排序后应用）
 ⑧ 自动上屏复评与守护：
