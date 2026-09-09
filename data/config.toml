@@ -312,6 +312,10 @@ raw_candidate = true
 #   临英是「中文里插一个英文词」，人名与专有名词要首字母大写是刚需；英文方案是长时打英文，
 #   每条变形吃一个候选位，每页 5 条时吃掉一半。两个作用域各配各的。
 case_variants = false
+# case_follow_input：词库候选跟随输入的大小写。打 Hi 出 Hill，打 WoW 出 WoWed。
+#   只投影大写：输入的小写位不动词库原文，故 China / iPhone 这类词的自带大写不会被压掉。
+#   候选与输入逐位对不上的（短语/命令类）整条保持原样。
+case_follow_input = true
 
 # 英文调频。**没有 protect_top_n***：那组是「简码位首选保护」，判据是本次输入的码长，
 # 而英文没有简码位——一个 a 后面跟的是几万个词而不是钦定首选，照搬只会锁死前几位。
@@ -598,6 +602,10 @@ raw_candidate = true
 #   且变形项没有词库带来的注释/词频，与词库候选交错时列表参差。
 #   只想要英文词库补全、不需要大小写变换的人可以关掉。
 case_variants = true
+# case_follow_input：词库候选跟随输入的大小写，语义同 [schema.english] 那份。
+#   ⚠️ 临英由 Shift+字母进入，缓冲首字母恒大写 ⇒ 开着它，临英候选恒为首字母大写形态。
+#   不想要这个观感就把它关掉（词库候选保持词库原文，大小写仍可由变形候选取到）。
+case_follow_input = true
 shift_behavior = "temp_english"
 trigger_keys = []
 # allow_symbols：符号与数字直接入缓冲（C++ / hello2 / x64）而非上屏退出或选词。总开关，
@@ -639,6 +647,12 @@ candidate_layout = "follow"
 # 切方案（直达热键 / 循环键 / 托盘）一律无条件取消大写并归位中文，不看本项：
 # 那两件事是「用新方案打字」的前提，不是可选副作用。
 cancel_on_mode_switch = false
+# english_case_cycle：英文方案 / 临时英文输入期间，CapsLock 改为切换候选的大小写档位
+#   （默认 → 全大写 → 全小写 → 默认），一次组合结束复位。出厂关。
+#   只在「开着 + 处于英文输入态 + 有候选」三者同时成立时夺取该键，其余时候 CapsLock 照旧
+#   （用户绑定的会话动作，或系统原生大小写锁定）。
+#   ⚠️ 开启后若把 CapsLock 绑了别的会话动作，那个绑定在英文输入期间按不出来（启动会告警）。
+english_case_cycle = false
 
 [input.temp_pinyin]
 enabled = true

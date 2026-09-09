@@ -838,6 +838,15 @@ pub struct EnglishGlobal {
     /// 一半。⛔ 合并成一个键必然改掉其中一侧的既有行为。
     #[serde(default)]
     pub case_variants: bool,
+    /// 词库候选跟随输入的大小写形态（逐位投影）。**默认开**。
+    ///
+    /// 打 `Hi` ⇒ 候选 `hill` 显示为 `Hill`；打 `WoW` ⇒ `wowed` 显示为 `WoWed`。
+    /// **单向**：只投影大写，输入的小写位不会把词库自带的大写压掉（`China` / `iPhone`）。
+    ///
+    /// 与 [`Self::case_variants`] 不重叠：变形候选给的是**整串**三形态、各占一个候选位；
+    /// 本项改的是词库候选**自身**的形态，不新增条目。
+    #[serde(default = "default_true")]
+    pub case_follow_input: bool,
 }
 
 impl Default for EnglishGlobal {
@@ -847,6 +856,7 @@ impl Default for EnglishGlobal {
             commit_space: false,
             raw_candidate: true,
             case_variants: false,
+            case_follow_input: true,
         }
     }
 }
@@ -3435,6 +3445,16 @@ pub struct TempEnglishConfig {
     /// 需要大小写变换的人默认开着，只想要词库补全的人可以关掉。
     #[serde(default = "default_true")]
     pub case_variants: bool,
+    /// 词库候选跟随输入的大小写形态（逐位投影）。**默认开**，语义同
+    /// [`EnglishGlobal::case_follow_input`]（两个作用域各一份，与本段其余项同形制）。
+    ///
+    /// ⚠️ 临英由 Shift+字母进入 ⇒ 缓冲首字母**恒大写** ⇒ 本项开着时候选恒为首字母大写形态。
+    /// 这是明知 2026 年那次 `adapt_en_case` 因「把整列候选强制套成 Title case」被删除，
+    /// 仍重新裁定的行为（用户 2026-09-09 拍板）。两者的区别不在观感而在规则：
+    /// 旧实现是**整串套形**（不管词库原文长什么样），本项是**逐位投影且单向**
+    /// （只覆盖用户按了 Shift 的那几位，词库自带的大写一律保留）。
+    #[serde(default = "default_true")]
+    pub case_follow_input: bool,
 }
 
 impl Default for TempEnglishConfig {
@@ -3450,6 +3470,7 @@ impl Default for TempEnglishConfig {
             candidate_layout: LayoutIntent::default(),
             raw_candidate: true,
             case_variants: true,
+            case_follow_input: true,
             comment_template_vertical: None,
             comment_template_horizontal: None,
         }
@@ -3460,6 +3481,20 @@ impl Default for TempEnglishConfig {
 pub struct CapslockConfig {
     #[serde(default)]
     pub cancel_on_mode_switch: bool,
+    /// 英文输入态（英文方案 / 临时英文）下，CapsLock 临时切换候选的大小写档位：
+    /// 默认 → 全大写 → 全小写 → 默认，一次组合结束即复位。**出厂关**。
+    ///
+    /// # 为什么本项就是唯一闸门（不在 `keys.session_actions` 里另立一个动词）
+    ///
+    /// 它夺取的是 CapsLock 在**特定态**下的语义，不是「把某个动作绑到某个键」：开关关着
+    /// 时 CapsLock 一切照旧（用户绑的 session action，或系统原生大小写），开着时也只在
+    /// 「英文输入态 + 有候选」这三个条件同时成立时才归本功能。再加一层键位绑定就是两道
+    /// 闸串联——用户把键配好却没反应，而两处显示都正常。
+    ///
+    /// ⚠️ 开启后，用户若把 CapsLock 绑成别的会话动作，那个绑定在英文输入期间按不出来。
+    /// 启动体检会为此告警（见 `warn_capslock_case_cycle_conflict`）。
+    #[serde(default)]
+    pub english_case_cycle: bool,
 }
 
 /// 生僻字模式配置（[input.rare_char]）。

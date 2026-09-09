@@ -162,9 +162,20 @@ impl Coordinator {
         // 下没有第二种解释。
         //
         // ⚠️ 判据仍不是「候选非空」：空码补全那类候选是用户真在看的，行为一字不动。
+        //
+        // ★ **英文方案下不进临英**：用户已经在英文方案里，Shift+字母的意思是「打一个
+        // 大写字母」，不是「切到另一个模式」。此前这道门没问过当前方案，于是英文方案下按
+        // Shift+H 会被换进临英——另一套配置、另一个上屏出口、另一份候选开关，只因两者
+        // 词库桶恰好共用 `english` 才不太看得出来。排除后按键落主路字母臂，那里本就把
+        // 大写存进影子串 `input_buffer_cased`（缓冲仍为小写），正是「英文方案 + 首字母
+        // 大写的输入态」。判据用引擎类型而非方案 id，自定义的英文类方案一并覆盖。
+        //
+        // 判据加在 `if` 上而非分支里：`shift_behavior = "direct_commit"` 那条同样不该在
+        // 英文方案下生效（直接上屏一个 `H` 而不进缓冲，等于打不了以大写开头的词）。
         if state.input_buffer.is_empty()
             && (state.candidates.is_empty() || state.assoc_active())
             && self.rt().config.input.temp_english.enabled
+            && !self.engine_mgr.active_is_english()
             && data.modifiers & MOD_SHIFT != 0
             && data.modifiers & MOD_SHORTCUT == 0
             && (keymap::VK_A..=keymap::VK_Z).contains(&data.key_code)
@@ -916,6 +927,7 @@ impl Coordinator {
         // 清理可能残留的组合显示（临时拼音/快捷输入会产生候选与 preedit）
         state.input_buffer.clear();
         state.input_buffer_cased.clear();
+        state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.input_cursor_pos = 0;
         state.candidates.clear();
         state.preedit.clear();

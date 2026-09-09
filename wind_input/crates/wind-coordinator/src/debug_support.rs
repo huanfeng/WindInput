@@ -93,6 +93,18 @@ impl Coordinator {
         }
     }
 
+    /// 走一次 CapsLock 的「英文候选大小写档位循环」，返回是否真的夺取了本键。
+    ///
+    /// **存在理由是那条路测不到**：真实触发点是全局低级键盘钩子（`CapsLockHook`），
+    /// 它在 CI 的 Linux 上装不起来，在 headless 测试里也没有键盘事件可拦。业务逻辑
+    /// （三道守卫 + 档位推进 + 候选重建）却必须有守门断言——否则「开关开了没反应」
+    /// 这类缺陷只能靠真机发现。
+    ///
+    /// 钩子回调本身只做非阻塞投递，真正的动作与本函数是同一个：`try_english_case_cycle`。
+    pub fn debug_cycle_english_case(&self) -> bool {
+        self.try_english_case_cycle().is_some()
+    }
+
     pub fn debug_has_more(&self) -> bool {
         self.state
             .lock()

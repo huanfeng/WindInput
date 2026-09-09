@@ -65,6 +65,12 @@ fn temp_english_config(freq_enabled: bool, strategy: &str) -> Config {
     // 关掉大小写变形：它们每条占一个候选位，会把词库候选挤到下标不定的位置，
     // 断言「第 2 条是词库首条」就不再成立。变形本身另有测试覆盖。
     cfg.input.temp_english.case_variants = false;
+    // 同理关掉大小写投影：本文件测的是**词频归属**，而投影会把候选面文本改写成用户所打
+    // 的形态（临英首字母恒大写 ⇒ `hello` 显示成 `Hello`）。这些断言拿候选面文本当词频键
+    // 用，开着投影就成了「拿投影后的键去查按原文存的记录」——测试自己制造的失配，与被测
+    // 的词频通路无关。投影开启时词频仍记原文这一条，另由 `english_case_follow.rs` 覆盖。
+    cfg.input.temp_english.case_follow_input = false;
+    cfg.schema.english.case_follow_input = false;
     cfg.schema.english.frequency.enabled = freq_enabled;
     cfg.schema.english.frequency.strategy = strategy.to_string();
     cfg

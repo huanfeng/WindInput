@@ -521,6 +521,12 @@ pub(crate) struct State {
     /// 匹配零影响。本字段只出现在两个出口：组合区显示，以及「上屏原码」（回车/空格空码/
     /// 标点顶屏）。读写走 `preedit_cursor::BufEdit::new_cased`，勿裸改。
     pub(crate) input_buffer_cased: String,
+    /// 英文候选的大小写档位（CapsLock 在英文输入态循环切换，见
+    /// `input.capslock.english_case_cycle`）。**一次组合结束即复位**。
+    ///
+    /// ⚠️ 复位点与 `input_buffer_cased` 的清空点是同一批（组合结束的四条路）——
+    /// 新增任何一个清空点都要同步复位它，否则「上一个词按出来的全大写档」会串到下一个词。
+    pub(crate) english_case_variant: crate::english_candidates::CaseVariant,
     /// 编码区光标：`input_buffer` 内的字节偏移，定义域 `[0, input_buffer.len()]`。
     /// 恒指向剩余编码内部——已转换前缀（`committed_text`）是只读前缀，光标进不去（Home 只到
     /// 剩余编码开头）。光标**不参与引擎查询**：`update_candidates` 恒查整串，移动光标不重算
@@ -2250,6 +2256,7 @@ impl Coordinator {
                 numpad_origin: false, // 每次按键入口无条件重写，此处只是占位初值
                 input_buffer: String::new(),
                 input_buffer_cased: String::new(),
+                english_case_variant: crate::english_candidates::CaseVariant::default(),
                 input_cursor_pos: 0,
                 preedit: String::new(),
                 preedit_split_body: String::new(),
@@ -2468,6 +2475,8 @@ impl Coordinator {
         coordinator.notify_toolbar();
         // 码元集与按键功能的冲突体检（只告警）。默认字符集下直接返回，无开销。
         coordinator.warn_code_char_conflicts();
+        // CapsLock 的两种用途撞车体检（只告警）。出厂关 ⇒ 默认直接返回。
+        coordinator.warn_capslock_case_cycle_conflict();
         coordinator
     }
 
@@ -5113,6 +5122,7 @@ impl Coordinator {
         state.committed_segs.clear();
         state.input_buffer.clear();
         state.input_buffer_cased.clear();
+        state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.input_cursor_pos = 0;
         state.preedit.clear();
         state.preedit_split_body.clear();
@@ -6896,9 +6906,15 @@ impl Coordinator {
     /// （资源进程级 + 切换不幂等），只是它落在 Rust 侧。
     pub fn capslock_bound(&self) -> bool {
         let rt = self.rt();
-        rt.session_keys
-            .classify(keymap::VK_CAPITAL, false, true)
-            .is_some()
+        // ★ 大小写档位循环同样要求装钩子：它夺取的就是 CapsLock 本身，而 CapsLock 的
+        // keydown 压根不转发给服务端、锁定态又由系统在 TSF 之前维护 —— 没有钩子，功能
+        // 永不触发且毫无报错。判据写成析取而不是只问 `session_actions`，正是因为本功能
+        // **不占用**那张表里的动词（开关即唯一闸门，见 `CapslockConfig::english_case_cycle`）。
+        rt.config.input.capslock.english_case_cycle
+            || rt
+                .session_keys
+                .classify(keymap::VK_CAPITAL, false, true)
+                .is_some()
             || rt.schema_session_vks.contains(&keymap::VK_CAPITAL)
     }
 
@@ -6988,6 +7004,67 @@ impl Coordinator {
     ///
     /// 走的是与键盘 keyup 路径**同一对函数、同一顺序**，故动词值域、守卫、各模式的选中/
     /// 翻页出口都不会分叉。钩子只负责「这个键被按了」，「按了该干什么」仍归那两张表。
+    /// CapsLock 在**英文输入态**临时夺取为「候选大小写档位循环」：
+    /// 默认 → 全大写 → 全小写 → 默认。返回 `None` = 本次不夺取，按键归原有语义。
+    ///
+    /// # 三道守卫，缺一不可
+    ///
+    /// - `input.capslock.english_case_cycle`：功能开关，**出厂关**；
+    /// - [`Self::in_english_input_context`]：英文方案常驻 或 临英 overlay；
+    /// - 有候选：空闲时按 CapsLock 仍是系统原生的大写锁定，不能吞掉。
+    ///
+    /// 这三条与 `apply_session_action` 的「有会话归绑定、无会话归原语义」是同一条纪律，
+    /// 只是判据多了「语境是英文」这一维。
+    ///
+    /// # 为什么重建候选而不是就地改写
+    ///
+    /// 就地重套档位要先把每条候选还原成词库原文（`case_source`），漏一条就会得到
+    /// 「档位切了一半」的列表；更要命的是它与「用户继续打下一个字母」那条路的产出可能
+    /// 不同——同一个档位、同一串输入，两条路给出两份候选，这种不一致最难查。重建则天然
+    /// 与逐键路径同源：候选表本就是每次按键从零装配的。
+    pub(crate) fn try_english_case_cycle(&self) -> Option<KeyAction> {
+        if !self.rt().config.input.capslock.english_case_cycle {
+            return None;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.candidates.is_empty() || !self.in_english_input_context(&state) {
+            return None;
+        }
+        state.english_case_variant = state.english_case_variant.next();
+        if state.active == Some(ModeKind::TempEnglish) {
+            self.update_temp_english_candidates(&mut state);
+        } else {
+            // 英文引擎恒 `should_commit = false`（见 `EnglishEngine::convert`），故这里
+            // 不会有自动上屏意向要处置；返回值刻意丢弃。
+            let _ = self.update_candidates(&mut state);
+        }
+        self.notify_ui_update(&state);
+        Some(KeyAction::Consumed)
+    }
+
+    /// 启动体检：开了大小写档位循环、又把 CapsLock 绑了别的会话动作 → 告警。
+    ///
+    /// 两者不是配置冲突（各自都合法），而是**运行期的优先级夺取**：英文输入期间那个绑定
+    /// 按不出来。现场表现是「CapsLock 翻页在中文里好用，一打英文就失灵」——不告警的话
+    /// 无从知道是谁夺走的。文案照 [`Self::warn_code_char_conflicts`] 的形制，直接给出
+    /// 化解办法而不是只陈述状态。
+    pub(crate) fn warn_capslock_case_cycle_conflict(&self) {
+        let rt = self.rt();
+        if !rt.config.input.capslock.english_case_cycle {
+            return;
+        }
+        let bound = rt
+            .session_keys
+            .classify(keymap::VK_CAPITAL, false, true)
+            .is_some()
+            || rt.schema_session_vks.contains(&keymap::VK_CAPITAL);
+        if bound {
+            warn!(
+                "CapsLock 同时配了会话动作与英文大小写档位循环（input.capslock.english_case_cycle）；                 英文方案 / 临时英文输入期间本键归档位循环，那个会话动作在此期间按不出来。                 要保留会话动作：关掉 english_case_cycle；要保留档位循环：把该动作改绑到别的键"
+            );
+        }
+    }
+
     fn handle_capslock_hook_press(&self) {
         // 合成一个 keyup 事件：CapsLock 在键盘路径上本来就只有 keyup 到得了服务端
         // （见 `handle_session_action_key_up`），保持同形以免两条路径的守卫产生差异。
@@ -7000,6 +7077,14 @@ impl Coordinator {
             event_seq: 0,
             prev_char: 0,
         };
+        // ★ **最先**试大小写档位循环：它是「英文输入态下临时夺取本键」，优先级按定义高于
+        // 用户给 CapsLock 配的任何会话动作。守卫（开关 / 英文语境 / 有候选）都在函数内部，
+        // 三者有一个不成立就返回 None，键原样落回下面的既有两条路。
+        if let Some(act) = self.try_english_case_cycle() {
+            debug!("CapsLock 钩子：英文候选大小写档位循环");
+            let _ = act;
+            return;
+        }
         // ★ 必须先试选词出口，顺序与 `message_handler` 的 keyup 分支逐字一致。
         //   `apply_session_action` 对 `select_candidate:N` / `select_char:N` 一律
         //   `return None`（它们带 overflow 语义，要落到各自的既有消费点执行），而键盘路径
@@ -7283,6 +7368,7 @@ impl Coordinator {
         state.committed_segs.clear();
         state.input_buffer.clear();
         state.input_buffer_cased.clear();
+        state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.candidates.clear();
         state.preedit.clear();
         text

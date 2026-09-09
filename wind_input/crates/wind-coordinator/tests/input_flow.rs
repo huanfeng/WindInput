@@ -4127,11 +4127,19 @@ fn test_temp_english_digits_and_punct() {
     }
 }
 
-/// 临英候选排布：`原文 → 大小写变形 → 词库原文`，且词库候选**不再被套上输入的大小写形态**。
-/// 回归点：临英由 Shift+字母进入，缓冲首字母恒大写，旧实现据此把整列词库候选适配成
-/// `Help`/`Held`/`Hell`，于是「候选全是大写首字母」。
+/// 临英候选排布：`原文 → 大小写变形 → 词库候选（跟随输入大小写）`。
+///
+/// ⚠️ **本测试的结论在 2026-09-09 被有意推翻了一半**。它原名
+/// `..._and_dict_keeps_original_case`，钉的是 `ed4eb88b` 删掉 `adapt_en_case` 后的行为
+/// ——词库候选不套输入形态。用户重新裁定要跟随（`input.temp_english.case_follow_input`，
+/// 默认开），故词库段现在是 `Help` 而不再是 `help`。
+///
+/// 新旧规则的差别是本次能重做的理由，别把它读成回归：旧实现**整串套形**（不管词库原文
+/// 长什么样），新实现是**逐位投影且单向**——只覆盖用户按了 Shift 的那几位，词库自带的
+/// 大写一律保留（本测试的 `Helen` 就是这条的证据）。详见
+/// `docs/design/schema-scoped-behavior.md` §5.7 与 `tests/english_case_follow.rs`。
 #[test]
-fn test_temp_english_case_variants_and_dict_keeps_original_case() {
+fn test_temp_english_case_variants_and_dict_follows_input_case() {
     if !has_schemas() {
         return;
     }
@@ -4148,18 +4156,18 @@ fn test_temp_english_case_variants_and_dict_keeps_original_case() {
         texts
     );
     assert!(
-        texts.iter().any(|t| t == "help"),
-        "词库候选应保持原文小写，实际: {:?}",
+        texts.iter().any(|t| t == "Help"),
+        "词库候选应跟随输入的首字母大写，实际: {:?}",
         texts
     );
     assert!(
-        !texts.iter().any(|t| t == "Help"),
-        "词库候选不应被适配成输入的首字母大写形态，实际: {:?}",
+        !texts.iter().any(|t| t == "help"),
+        "投影后不该还留着词库原形态（那会与 Help 并排出现两条），实际: {:?}",
         texts
     );
     assert!(
         texts.iter().any(|t| t == "Helen"),
-        "词库中本就大写的专有名词应原样保留，实际: {:?}",
+        "★ 单向规则：输入 `Hel` 只覆盖前三位，专有名词的其余大小写原样保留，实际: {:?}",
         texts
     );
 }
@@ -4215,8 +4223,8 @@ fn test_temp_english_case_variants_disabled() {
         texts
     );
     assert!(
-        texts.iter().any(|t| t == "help"),
-        "词库候选不受影响（本开关只管变形项），实际: {:?}",
+        texts.iter().any(|t| t == "Help"),
+        "词库候选不受本开关影响（它只管变形项；跟随大小写是另一个开关 case_follow_input），         实际: {:?}",
         texts
     );
 }

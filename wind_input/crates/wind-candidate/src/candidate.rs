@@ -424,6 +424,17 @@ pub struct Candidate {
     /// **为什么必须存在**：`date`/`time` 这类求值型短语的显示文本每天/每秒都变，shadow 规则
     /// 若以文本为键，写入次日即失配——用户看到的是「候选调整昨天设了，今天被还原」，
     /// 且失效的旧规则会逐日在 redb 里堆积。匹配契约见 [[ShadowPinRule]]。
+    /// 英文候选大小写投影**之前**的词库原文（`None` = 未经投影）。
+    ///
+    /// 投影（`english_candidates::project_to_input_case`）把候选改写成用户所打的大小写形态，
+    /// 于是 `text` 不再等于词库里的那条记录。而词频的存储键是 `(schema, code, text)`——
+    /// 写端 `record_selection_in` 存的正是 `text`，读端 `apply_freq_rerank_in` 又排在投影
+    /// **之前**（那时 text 还是词库原文）。若让投影后的文本进词频，写 `Hill`、读 `hill`，
+    /// 两端永远对不上，**英文词频整体静默失效**。
+    ///
+    /// 故记账一律走 [`Candidate::freq_text`]，取本字段而非 `text`。
+    #[serde(skip)]
+    pub case_source: Option<String>,
     pub id: String,
     pub display_text: String,
     pub actions: Vec<Action>,
@@ -472,6 +483,7 @@ impl Default for Candidate {
             has_shadow: false,
             index_label: String::new(),
             meta: CandidateMeta::default(),
+            case_source: None,
             id: String::new(),
             display_text: String::new(),
             actions: Vec::new(),
@@ -480,6 +492,13 @@ impl Default for Candidate {
 }
 
 impl Candidate {
+    /// 词频 / 候选调整记账用的文本：大小写投影前的词库原文（未投影时即 `text`）。
+    ///
+    /// 存在理由见 [`Candidate::case_source`]——两端不同源就是英文词频静默失效。
+    pub fn freq_text(&self) -> &str {
+        self.case_source.as_deref().unwrap_or(&self.text)
+    }
+
     /// 按 text 去重时调用：把**被丢弃那条**所占的码位并入本候选（保留者吸收被弃者）。
     ///
     /// 语义见 [`Candidate::merged_codes`]。**必须传整个被弃候选而非它的 `code`**：被弃者自身

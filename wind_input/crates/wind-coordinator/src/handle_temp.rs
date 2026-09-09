@@ -945,6 +945,8 @@ impl Coordinator {
         state.temp_english_buffer.clear();
         state.temp_english_cursor = 0;
         state.temp_english_prefix.clear();
+        // 档位属于**这一次**组合：退出临英即复位，否则上一个词按出来的全大写会串到下一个。
+        state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.preedit.clear();
         state.candidates.clear();
     }
@@ -989,6 +991,7 @@ impl Coordinator {
         };
         let mut cands =
             crate::english_candidates::english_head_candidates(&buf, want_raw, want_variants);
+        let mut cased = false;
         let mut seen: std::collections::HashSet<String> =
             cands.iter().map(|c| c.text.clone()).collect();
         for (i, c) in cands.iter_mut().enumerate() {
@@ -1047,7 +1050,35 @@ impl Coordinator {
             let mut dict_part: Vec<Candidate> = cands.split_off(dict_start);
             self.apply_freq_rerank_in(Some(ENGLISH_SCHEMA), &mut dict_part, &code);
             self.apply_shadow_in(Some(ENGLISH_SCHEMA), &mut dict_part, &code);
+            // ★ 大小写投影排在重排与置顶**之后**：那两者都以候选 `text` 为键，先改写文本
+            // 会让读端（按词库原文查）与写端（存投影后文本）用上不同的键，英文词频与
+            // 候选调整**静默失效**。被改写的候选把原文留在 `case_source` 里，记账走
+            // `freq_text()`（见 `record_temp_english_selection`）。
+            //
+            // ★ 只投影**词库段**：头部候选里的大小写变形（`hel` / `HEL`）正是靠形态不同
+            // 才有存在意义，投影会把它们通通改回输入形态，三条塌成一条。
+            if self.rt().config.input.temp_english.case_follow_input {
+                cased = crate::english_candidates::apply_english_case(
+                    &mut dict_part,
+                    &buf,
+                    crate::english_candidates::CaseVariant::Default,
+                );
+            }
             cands.extend(dict_part);
+        }
+        // 档位（CapsLock 循环）作用于**整列**，含头部候选：用户按出「全大写」时，列表里
+        // 不该还留着小写的变形候选。档位非默认时不再跑投影——用户已显式指定形态。
+        if state.english_case_variant != crate::english_candidates::CaseVariant::Default {
+            cased |= crate::english_candidates::apply_english_case(
+                &mut cands,
+                &buf,
+                state.english_case_variant,
+            );
+        }
+        // 去重必须在改写**之后**再跑一次：投影把词库的 `hi` 变成 `Hi`，与头部原文候选撞车；
+        // 全大写档更会把三条变形塌成同一条。上面 `push_cand` 那次去重看的是改写前的文本。
+        if cased {
+            crate::english_candidates::dedup_by_text(&mut cands);
         }
         // 统一展开汇聚点：临时英文词库候选内 `$` 特殊语法在此展开（见 finalize_candidates）。
         state.candidates = self.finalize_candidates(cands, &buf);
@@ -1123,10 +1154,13 @@ impl Coordinator {
             return;
         }
         let code = state.temp_english_buffer.to_lowercase();
+        // ★ `freq_text()` 而非 `text`：候选可能已被大小写投影改写过，而读端
+        // `apply_freq_rerank_in` 排在投影之前、看到的是词库原文。存投影后的形态 ⇒
+        // 写 `Hill`、读 `hill`，两端永不相交，英文词频整体静默失效。
         self.record_selection_in(
             Some(ENGLISH_SCHEMA),
             &self.freq_code(&code, cand),
-            &cand.text,
+            cand.freq_text(),
             cand.source,
         );
     }

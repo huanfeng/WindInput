@@ -463,7 +463,14 @@ impl Coordinator {
             self.push_commit_history(&cand.text);
             return;
         }
-        self.record_selection_in(schema_override, code, &cand.text, cand.source);
+        // 词频记投影前的词库原文、历史记实际上屏的形态，理由见 `record_selection_cased_in`。
+        self.record_selection_cased_in(
+            schema_override,
+            code,
+            cand.freq_text(),
+            &cand.text,
+            cand.source,
+        );
     }
 
     /// 同 [`Self::record_selection`]，但可指定**生效方案**（特殊模式用，见
@@ -479,10 +486,34 @@ impl Coordinator {
         text: &str,
         source: CandidateSource,
     ) {
+        self.record_selection_cased_in(schema_override, code, text, text, source)
+    }
+
+    /// 同 [`Self::record_selection_in`]，但**词频文本与历史文本分开给**。
+    ///
+    /// 两者只在英文候选被大小写投影改写过时才不同（见 `english_candidates::project_case`）：
+    ///
+    /// - **词频**要词库原文。存储键是 `(schema, code, text)`，而读端 `apply_freq_rerank_in`
+    ///   排在投影之前、看到的恒是词库原文；存投影后的形态就是写 `Hill`、读 `hill`，
+    ///   两端永不相交，英文词频整体静默失效。
+    /// - **历史**（「重复上屏」的数据源）要用户**实际上屏**的形态。他上屏的是 `Hill`，
+    ///   `;` 调回来却给 `hill`，那是所见非所得。
+    ///
+    /// 这条分歧与 emoji 那道守卫（只跳词频、历史照记）同型：两条通路本就独立，
+    /// 只是此前没有哪个调用点需要把它们分开。
+    pub(crate) fn record_selection_cased_in(
+        &self,
+        schema_override: Option<&str>,
+        code: &str,
+        freq_text: &str,
+        history_text: &str,
+        source: CandidateSource,
+    ) {
+        let text = freq_text;
         if text.is_empty() {
             return;
         }
-        self.push_commit_history(text);
+        self.push_commit_history(history_text);
         if source == CandidateSource::Phrase {
             return;
         }
@@ -1389,15 +1420,30 @@ impl Coordinator {
         // 配置与临英各自独立（`schema.english.*` vs `input.temp_english.*`，默认值还刻意
         // 相反），但产出共用同一个函数——见 crate::english_candidates 模块文档。
         if self.engine_mgr.active_is_english() {
-            let (want_raw, want_variants) = {
+            let (want_raw, want_variants, follow_case) = {
                 let en = &self.rt().config.schema.english;
-                (en.raw_candidate, en.case_variants)
+                (en.raw_candidate, en.case_variants, en.case_follow_input)
             };
-            let head = crate::english_candidates::english_head_candidates(
+            // ★ 取**影子串**而不是 `input_buffer`：后者恒为全小写（见 `State::input_buffer`），
+            // 用它的话大小写在英文方案下根本传不进来——头部「原文候选」会把用户打的 `WoW`
+            // 显示成 `wow`，投影更是一条也不会发生，且毫无报错。
+            let raw = crate::preedit_cursor::cased_or_buffer(
                 &state.input_buffer,
-                want_raw,
-                want_variants,
+                &state.input_buffer_cased,
             );
+            // 词库候选跟随输入大小写。位置在**所有加工之后**（同下方头部候选的理由），
+            // 尤其必须在词频重排与 shadow 之后：那两者以候选 `text` 为键，先改写文本会让
+            // 读写两端对不上，英文词频与置顶静默失效。原文留在 `case_source` 里供记账。
+            let mut cased = false;
+            if follow_case {
+                cased = crate::english_candidates::apply_english_case(
+                    &mut candidates,
+                    raw,
+                    crate::english_candidates::CaseVariant::Default,
+                );
+            }
+            let head =
+                crate::english_candidates::english_head_candidates(raw, want_raw, want_variants);
             if !head.is_empty() {
                 // 精确去重：词库里字面相同的那条被头部候选吃掉（同临英）。**不是**小写去重
                 // ——`hello` 不该把词库里的 `Hello` 一起抹掉。
@@ -1407,6 +1453,20 @@ impl Coordinator {
                 let mut merged = head;
                 merged.append(&mut candidates);
                 candidates = merged;
+            }
+            // 档位（CapsLock 循环）作用于整列，含头部候选——用户按出「全大写」时列表里
+            // 不该还留着小写的变形候选。档位非默认时投影不再参与（用户已显式指定形态）。
+            if state.english_case_variant != crate::english_candidates::CaseVariant::Default {
+                cased |= crate::english_candidates::apply_english_case(
+                    &mut candidates,
+                    raw,
+                    state.english_case_variant,
+                );
+            }
+            // 改写过才去重：投影会让词库的 `hi` 撞上头部原文候选，全大写档更会把三条变形
+            // 塌成一条。全小写击键占绝大多数、一条也改不到，那时连 HashSet 都不必分配。
+            if cased {
+                crate::english_candidates::dedup_by_text(&mut candidates);
             }
         }
         // ── Emoji 扩展：钉在**所有加工之后** ────────────────────────────────
@@ -2755,7 +2815,19 @@ impl Coordinator {
     /// **拿不到模式上下文**的路径。两者共用下面的单一真相源，免得日后漂移成
     /// 「键盘上屏补了、排水路径没补」。
     pub(crate) fn english_space_enabled_in(&self, state: &State) -> bool {
-        self.english_space_for(state.active == Some(ModeKind::TempEnglish))
+        self.english_space_for(self.in_english_input_context(state))
+    }
+
+    /// 「用户此刻正在打英文」——英文方案常驻，或临英 overlay。**单一真相源**。
+    ///
+    /// 问的是**当前整个输入语境**，不是某一条候选的来源：混输 / 快捷输入里同样会出现
+    /// `CandidateSource::English` 的候选，但那时用户正在写中文句子。
+    ///
+    /// 消费方：补空格（[`Self::english_space_enabled_in`]）与 CapsLock 大小写档位循环
+    /// （`try_english_case_cycle`）。两者行为无关，但「什么叫正在打英文」必须是同一句话
+    /// ——各写一份判据必然漂移，届时「补了空格却切不了档位」这种半生效状态最难查。
+    pub(crate) fn in_english_input_context(&self, state: &State) -> bool {
+        self.engine_mgr.active_is_english() || state.active == Some(ModeKind::TempEnglish)
     }
 
     /// 补空格判据的单一真相源：开关 + 「英文语境」（英文方案常驻 或 临英 overlay）。
@@ -4614,6 +4686,10 @@ mod finalize_candidates_tests {
                 ".record_selection_cand(",
                 ".record_selection_in(",
                 ".record_selection_cand_in(",
+                // 词频文本与历史文本分开给的完整版（英文大小写投影用）。名字不登记进来
+                // 就等于给记账码开了一扇后门——本守卫是按**调用点**扫的，扫不到的名字
+                // 可以随便传一个没过 `freq_code` 的串。
+                ".record_selection_cased_in(",
             ];
             let sites = calls
                 .iter()
@@ -4622,7 +4698,9 @@ mod finalize_candidates_tests {
                 let args = &prod[off + pat.len()..];
                 // 带 `_in` 的两个多一个前置 schema 实参，记账码在第 2 位。
                 let code_pos = usize::from(
-                    pat == ".record_selection_in(" || pat == ".record_selection_cand_in(",
+                    pat == ".record_selection_in("
+                        || pat == ".record_selection_cand_in("
+                        || pat == ".record_selection_cased_in(",
                 );
                 // 按括号深度切顶层逗号，取第 `code_pos` 个实参（实参可能是 `self.freq_code(a, b)`）。
                 let mut depth = 0i32;
@@ -4676,9 +4754,12 @@ mod finalize_candidates_tests {
         // 一份逐字相同的记账 + 拼接代码，合并进 `take_committed_with_highlight` 后四处并作一处，
         // 12 → 9。下调前务必确认是合并而非漏调——这条断言的用途正是逼人回来说明减少的原因。
         // `record_selection_cand` 的调用点计入同一总数（把某处改成它不会让计数下降）。
-        // ⚠️ 纳入 `record_selection_in` 后实扫 13（原 9、下限恰等实值零余量）；再加 `_cand_in` = 14。
+        // ⚠️ 纳入 `record_selection_in` 后实扫 13（原 9、下限恰等实值零余量）；再加 `_cand_in` = 14；
+        // 大小写投影拆出 `record_selection_cased_in` 后 = 15：`record_selection_in` 内部新增一处
+        // 转调（净增 1），而 `record_selection_cand_in` 是把原有的 `_in` 调用**改成** `_cased_in`
+        // （改调不是新增）。⚠️ 一开始按「两处各加一个」写成 16，被本断言当场逮住。
         assert!(
-            checked >= 14,
+            checked >= 15,
             "只扫到 {checked} 个 record_selection 调用点，远少于预期——\
              调用点被改名或本测试的扫描方式失效了，先修测试再说"
         );
@@ -4732,6 +4813,8 @@ mod finalize_candidates_tests {
             ".record_selection_in(",
             // emoji 守卫版：同样以 schema 为首个实参，归属约束一字不差地适用。
             ".record_selection_cand_in(",
+            // 大小写投影版：首个实参同样是归属方案。
+            ".record_selection_cased_in(",
             ".apply_freq_rerank_in(",
             ".apply_shadow_in(",
             ".build_debug_schema_ctx(",
