@@ -3103,6 +3103,31 @@ pub struct InputConfig {
     pub association: AssociationConfig,
 }
 
+impl InputConfig {
+    /// 简繁两个方向的**生效**状态：`(简入繁出, 繁入简出)`。
+    ///
+    /// 两者互斥（内部候选域只有一个，同时开等于转过去再转回来）。配置里若两个都 true，
+    /// 这里以 **s2t 优先**——配置是一份快照、不带顺序，无从知道用户后开的是哪个，于是取
+    /// 一个可解释的固定优先级：简入繁出是既有功能、用户基数大，反过来会让一批老用户在
+    /// 某次升级后莫名不出繁体。
+    ///
+    /// ★ 「后开的赢」那条语义住在协调器的 `toggle_conversion_direction` 与设置页的互斥
+    /// 联动里——那两处**知道**用户此刻按的是哪一个。本函数只回答「拿到一份配置，该按哪个
+    /// 方向转」。
+    ///
+    /// 收成一处是因为这个判据原本抄在三个地方（构造、reload、归一）：同一条语义散着写，
+    /// 迟早有一处漏改，而症状是「某条路径下简繁方向不对」，从现象反查不到是哪一处。
+    pub fn conversion_directions(&self) -> (bool, bool) {
+        (self.s2t.enabled, self.t2s.enabled && !self.s2t.enabled)
+    }
+
+    /// 配置里是不是「两个方向都开」这个非法组合（该被归一掉，见协调器
+    /// `normalize_conversion_exclusivity`）。
+    pub fn has_conversion_conflict(&self) -> bool {
+        self.s2t.enabled && self.t2s.enabled
+    }
+}
+
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
@@ -9018,6 +9043,34 @@ active = "x"
         // per_page=0 视为无效，normalize 回退默认，避免每页只显示 1 个
         let cfg = merged_with("[ui.candidate]\nper_page = 0\n");
         assert_eq!(cfg.ui.candidate.per_page, 7, "per_page=0 应保留默认 7");
+    }
+
+    /// 简繁两方向的生效口径：四种组合各一条。
+    ///
+    /// 「两个都开 ⇒ s2t 赢」这一条是本函数存在的全部理由——另外三种组合任何写法都对，
+    /// 只有冲突那格能分辨实现是否真的做了取舍。
+    #[test]
+    fn conversion_directions_resolve_conflict_toward_s2t() {
+        let mut c = InputConfig::default();
+        for (s2t, t2s, want) in [
+            (false, false, (false, false)),
+            (true, false, (true, false)),
+            (false, true, (false, true)),
+            (true, true, (true, false)), // ★ 冲突：s2t 赢，t2s 被压掉
+        ] {
+            c.s2t.enabled = s2t;
+            c.t2s.enabled = t2s;
+            assert_eq!(
+                c.conversion_directions(),
+                want,
+                "s2t={s2t} t2s={t2s} 的生效方向不对"
+            );
+            assert_eq!(
+                c.has_conversion_conflict(),
+                s2t && t2s,
+                "s2t={s2t} t2s={t2s} 的冲突判定不对"
+            );
+        }
     }
 
     #[test]

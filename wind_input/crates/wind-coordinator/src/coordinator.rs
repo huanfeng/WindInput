@@ -2224,6 +2224,9 @@ impl Coordinator {
             (d.chinese_mode, d.full_width, d.chinese_punct)
         };
         let (capslock_press_tx, capslock_press_rx) = std::sync::mpsc::channel::<()>();
+        // 简繁两方向的生效口径（互斥，冲突时 s2t 赢）收在 config 层的单一函数里，
+        // 与 reload 那处同源——散着写迟早漏改一处。
+        let (conv_s2t, conv_t2s) = config.input.conversion_directions();
         let coordinator = Arc::new(Self {
             state: Mutex::new(State {
                 chinese_mode: init_chinese,
@@ -2233,10 +2236,8 @@ impl Coordinator {
                 schema_scope_gen: u64::MAX,
                 punct_before_schema: None,
                 layout_manual: None,
-                s2t_enabled: config.input.s2t.enabled,
-                // 互斥兜底：配置文件被手工改成两个方向都开时，以 s2t 为准。二者都开
-                // 等于「转过去再转回来」，产物是绕了一圈的近似原文，没有可解释的语义。
-                t2s_enabled: config.input.t2s.enabled && !config.input.s2t.enabled,
+                s2t_enabled: conv_s2t,
+                t2s_enabled: conv_t2s,
                 filter_mode: wind_candidate::FilterMode::from_config(&config.input.filter_mode),
                 scope_relaxed: false,
                 // 启动时没有临时态：字词范围走配置层（方案级 → 全局）。热键切过才置 Some。
@@ -3785,11 +3786,18 @@ impl Coordinator {
                 // 运行时镜像态回灌：这些开关运行时读 state（菜单/热键直改），config 是持久化
                 // 真相源，两者只在启动时拷贝一次是不够的——设置页改了必须在此跟随，否则要重启
                 // 服务才生效（症状：设置页改「检索范围」无效、而右键菜单正常）。
+                // 简繁两个方向互斥。写入侧的归一在这里**落盘**（见
+                // `normalize_conversion_exclusivity`），不能只在下面读时压掉——UI 不是唯一
+                // 入口，命令行改 config.toml、导入配置包、别的客户端都能造出两个都开的组合，
+                // 只压不写的话配置文件里那个非法组合会一直留着，用户在设置页看到两个都亮、
+                // 实际只有一个在工作，而且怎么改都改不掉。
+                let (s2t_on, t2s_on) = new_cfg.input.conversion_directions();
+                self.normalize_conversion_exclusivity(&new_cfg);
                 let filter_changed = {
                     let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     s.toolbar_visible = new_cfg.ui.toolbar.visible;
-                    s.s2t_enabled = new_cfg.input.s2t.enabled;
-                    s.t2s_enabled = new_cfg.input.t2s.enabled && !new_cfg.input.s2t.enabled;
+                    s.s2t_enabled = s2t_on;
+                    s.t2s_enabled = t2s_on;
                     let new_mode =
                         wind_candidate::FilterMode::from_config(&new_cfg.input.filter_mode);
                     let changed = s.filter_mode != new_mode;
@@ -5991,6 +5999,35 @@ impl Coordinator {
             warn!("toggle_t2s: 持久化 input.t2s.enabled 失败: {}", e);
         }
         self.refresh_config_in_memory(|c| c.input.t2s.enabled = on);
+    }
+
+    /// 两个转换方向都开着时把 `t2s` 关掉并**落盘**，让配置文件回到合法状态。
+    ///
+    /// # 为什么关的是 t2s 而不是 s2t
+    ///
+    /// 走到这里说明配置里已经是「两个都 true」，**无从知道用户后开的是哪一个**——
+    /// 配置是一份快照，不带顺序。于是取一个可解释的固定优先级：保简入繁出。理由是
+    /// 它是既有功能、用户基数大，而繁入简出是后加的小众档；反过来会让一批老用户在
+    /// 某次升级后莫名其妙地不出繁体了。
+    ///
+    /// 真正「后开的赢」那条语义住在 [`Self::toggle_conversion_direction`]（热键/工具栏/
+    /// 菜单/命令栏）与设置页的互斥联动里——那两处**知道**用户此刻按的是哪一个。本函数
+    /// 是最后一道防线，接的是那两处都够不着的入口。
+    /// 启动期归一（见 [`Self::normalize_conversion_exclusivity`]）：读自己的运行时配置，
+    /// 不像 reload 那样有一份现成的 `new_cfg`。
+    pub(crate) fn normalize_conversion_exclusivity_on_start(&self) {
+        if self.rt().config.input.has_conversion_conflict() {
+            warn!("启动时 input.s2t 与 input.t2s 同时开启，已关闭 input.t2s（两个方向互斥）");
+            self.persist_t2s_enabled(false);
+        }
+    }
+
+    fn normalize_conversion_exclusivity(&self, cfg: &Config) {
+        if !cfg.input.has_conversion_conflict() {
+            return;
+        }
+        warn!("input.s2t 与 input.t2s 同时开启，已关闭 input.t2s（两个方向互斥）");
+        self.persist_t2s_enabled(false);
     }
 
     /// 切换简繁转换的**一个方向**，返回切换后该方向是否开着。

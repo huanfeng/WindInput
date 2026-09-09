@@ -103,6 +103,13 @@ impl Coordinator {
             });
         }
 
+        // 简繁两方向互斥：启动时若配置里两个都开着，关掉 t2s 并落盘。
+        //
+        // 内部构造那一步只是**读时**压掉（state 里 t2s 恒 false），配置文件仍留着那个
+        // 非法组合。不在这里归一的话，一个从没打开过设置页的用户会一直带着它——每次
+        // 启动都被静默压一次，而他从界面上看到的是两个都开着。
+        coordinator.normalize_conversion_exclusivity_on_start();
+
         // 注册 keys.global_hotkeys 全局热键（RegisterHotKey）：启动即注册，
         // 不依赖 IME 激活——全局热键的语义就是在本输入法未激活时也生效。
         coordinator.sync_global_hotkeys();
