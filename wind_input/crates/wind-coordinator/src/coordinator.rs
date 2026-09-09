@@ -634,6 +634,14 @@ pub(crate) struct State {
     pub(crate) url_buffer: String,
     /// 网址模式编码区光标（`url_buffer` 内字节偏移）
     pub(crate) url_cursor: usize,
+    /// Unicode 模式输入缓冲（**含触发前缀**，如 `u+4e00`）。
+    ///
+    /// 连前缀一起存是刻意的：编码区要把用户打的整串原样显示出来（`U+` 起手时显示的
+    /// 就该是 `U+`），且退格退到只剩前缀时才是「夺取边界」，`Rewind::host_text`
+    /// 拿它直接比对。码点解析时再把前缀剥掉（`unicode_hex_part`）。
+    pub(crate) unicode_buffer: String,
+    /// Unicode 模式编码区光标（`unicode_buffer` 内字节偏移）
+    pub(crate) unicode_cursor: usize,
     /// 统一夺取回退登记（仅在夺取式模式激活时为 Some，见 pipeline::Rewind）
     pub(crate) rewind: Option<Rewind>,
     /// 特殊模式编码缓冲（自带码表的查询码）
@@ -2268,6 +2276,8 @@ impl Coordinator {
                 temp_english_prefix: String::new(),
                 url_buffer: String::new(),
                 url_cursor: 0,
+                unicode_buffer: String::new(),
+                unicode_cursor: 0,
                 rewind: None,
                 special_buffer: String::new(),
                 special_cursor: 0,
@@ -4479,6 +4489,7 @@ impl Coordinator {
             Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
             Some(ModeKind::TempEnglish) => self.exit_temp_english(state),
             Some(ModeKind::Url) => self.exit_url_mode(state),
+            Some(ModeKind::Unicode) => self.exit_unicode_mode(state),
             Some(ModeKind::Special(_)) | Some(ModeKind::RareChar) => self.exit_special_mode(state),
             Some(ModeKind::Mix(_)) => self.exit_mix_mode(state),
             // ★ 辅助码要**两步**：`exit_aux_code` 是本仓唯一一个「退出后主组合仍存活」的

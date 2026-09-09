@@ -39,6 +39,7 @@ pub mod handle_special;
 pub mod handle_temp;
 pub mod handle_tooltip;
 pub mod handle_uielement;
+pub mod handle_unicode;
 pub mod handle_url;
 pub mod host_services;
 pub mod hotkey_match;

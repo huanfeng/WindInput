@@ -1133,6 +1133,9 @@ impl Coordinator {
             }
             ModeKind::TempEnglish => Some(("临时英文".to_string(), "英".to_string())),
             ModeKind::Url => Some(("网址输入".to_string(), "网址".to_string())),
+            // 短名用 `U+` 而不是「码」之类的意译：用户是照着 `U+4E00` 这个写法来的，
+            // 徽标与他刚打进去的前缀一致，比任何中文缩写都直接。
+            ModeKind::Unicode => Some(("Unicode 输入".to_string(), "U+".to_string())),
             // 生僻字模式：名字写死而不像 special 那样从方案取——它没有宿主方案可取名，
             // 是单例。指示必须有：这个模式下候选被大幅收窄，用户不知道自己在里面的话，
             // 「怎么一个字都打不出来」无从解释（模式本身就允许候选为空）。

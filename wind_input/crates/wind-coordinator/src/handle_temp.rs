@@ -7,7 +7,7 @@ use crate::coordinator::{
     Coordinator, ENGINE_MAX_CANDIDATES, State, TEMP_PINYIN_MAX_CANDIDATES, numpad_char, punct_char,
 };
 use crate::key_convert::printable_char;
-use crate::pipeline::{ModeKind, Rewind};
+use crate::pipeline::{ModeKind, Rewind, RewindOrigin};
 use crate::preedit_cursor;
 use tracing::debug;
 use wind_bridge::handler::{KeyAction, KeyEventData};
@@ -232,6 +232,7 @@ impl Coordinator {
         state.rewind = Some(Rewind {
             snapshot,
             host_text: residual,
+            origin: RewindOrigin::Normal, // z 夺取抢的是正常码表输入流
         });
         state.input_buffer.clear();
         state.candidates.clear();
@@ -1344,6 +1345,26 @@ impl Coordinator {
             }
             _ => {
                 let shift = data.modifiers & MOD_SHIFT != 0;
+                // ── Unicode 模式转交（大写 `U+` 那个入口）──
+                //
+                // 大写 U 起手时 `input_buffer` 是空的（Shift+字母在 `try_activate_mode` 就被
+                // 截进了本模式），`try_prefix_hijack` 那道闸门根本看不见那个 U ⇒ 只靠它的话
+                // `U+` 永远走不通、用户只能打小写 `u+`。这条分支把临英缓冲接上同一张前缀表。
+                //
+                // ★ **必须早于**下方的选词键判定与 `temp_english_char_allowed`：`+` 虽在
+                // `symbol_chars` 出厂列表里，但 `allow_symbols` 出厂是 `false` ⇒ 那两道会把
+                // 这一键判成「上屏高亮候选 + 标点、退出临英」，屏幕上出现的是 `U＋`。
+                //
+                // 判据是整串比较（`缓冲 + 本键 == 某前缀`）而不是「首字符是不是 U」：前缀由
+                // 用户配置，写死字母就与配置脱了节。
+                if self.rt().config.input.unicode.enabled
+                    && let Some(ch) = printable_char(data.key_code, shift)
+                {
+                    let probe = format!("{}{}", state.temp_english_buffer, ch);
+                    if self.is_unicode_prefix(&probe) {
+                        return self.enter_unicode_mode(state, probe, RewindOrigin::TempEnglish);
+                    }
+                }
                 // 二三候选键（默认 `;` `'`）→ 选候选。临英此前是**唯一**没接
                 // `select_key_offset` 的模式处理器（主流程 / 临拼 / 特殊 / mix 都接了），
                 // 于是次选键一路落到下方标点臂，被判成「上屏高亮候选 + 标点」——用户按 `;`

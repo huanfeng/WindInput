@@ -10012,3 +10012,225 @@ fn test_s2t_and_t2s_are_mutually_exclusive() {
         .expect("拼音 hanzi 应出「汉字」候选");
     assert_eq!(display2[p2], "漢字", "s2t 后开，应转繁体");
 }
+
+// ─────────────────── Unicode 码点输入（前缀夺取式） ───────────────────
+//
+// ⚠️ 这一族**必须从 VK 出发**，不能只测 `unicode_decode`：本功能的每一条路都要先经过
+// 按键分派（夺取闸门 / 临英转交 / 回退闸门），而那三处正是最容易接错的地方。
+// 曾有一整族「反向枚举 411 音节」的测试全绿而用户一个字打不出，根因就是入口不同层。
+//
+// `+` 是 **Shift + VK_OEM_PLUS(0xBB)**，不是 ASCII 0x2B。符号键一律用 VK 常量：
+// 按字符传 VK 会敲到一个不存在的键上，而测试照样「通过」（没人接管那个键码）。
+// 十六进制里的 `0-9`/`a-f` 可以继续用 `press_letter`——大写字母与数字的 VK 恰好等于
+// 它们的 ASCII 码，这是符号键**没有**的巧合，别据此推广。
+
+/// `+` 键：Shift + VK_OEM_PLUS。
+const VK_OEM_PLUS: u32 = 0xBB;
+
+fn press_plus(coord: &Coordinator) -> KeyAction {
+    coord.handle_key_event(&key_event_mods(
+        VK_OEM_PLUS,
+        EVENT_KEY_DOWN,
+        wind_ipc::protocol::MOD_SHIFT,
+    ))
+}
+
+// Shift+字母复用本文件上方既有的 `press_shift_letter`（4067 行），不另写一份。
+
+fn unicode_config(schema: &str) -> wind_config::config::Config {
+    let mut cfg = config_with(schema);
+    cfg.input.unicode.enabled = true;
+    cfg
+}
+
+#[test]
+fn unicode_lowercase_entry_and_commit() {
+    if !has_schemas() {
+        return;
+    }
+    // u + 4 e 0 0 → 空格上屏「一」。走的是码表缓冲那条入口。
+    let coord = Coordinator::new_headless(unicode_config("wubi86"), Some(&data_dir()));
+
+    press_letter(&coord, 'u'); // 此刻还是普通五笔编码
+    let enter = press_plus(&coord);
+    match &enter {
+        KeyAction::UpdateComposition { text, .. } => {
+            assert_eq!(
+                text, "u+",
+                "补满前缀应夺取进入，组合区含前缀，实际: {}",
+                text
+            )
+        }
+        other => panic!("u+ 应夺取进入 Unicode 模式，实际: {:?}", other),
+    }
+    assert_eq!(coord.debug_active_mode(), Some("unicode"));
+
+    for c in "4e00".chars() {
+        press_letter(&coord, c);
+    }
+    assert_eq!(
+        coord.debug_page_texts().first().map(String::as_str),
+        Some("一"),
+        "u+4e00 应出候选「一」"
+    );
+
+    match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "一", "空格应上屏解析出的字符"),
+        other => panic!("空格应上屏，实际: {:?}", other),
+    }
+    assert_eq!(coord.debug_active_mode(), None, "上屏后应退出模式");
+}
+
+/// 大写 `U+` 那条入口：Shift+U 会先进临时英文，靠 `handle_temp.rs` 的转交分支接上。
+///
+/// 这条**不能**由夺取闸门覆盖——那时 `input_buffer` 是空的，闸门看不见那个 U。
+#[test]
+fn unicode_uppercase_entry_via_temp_english() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(unicode_config("wubi86"), Some(&data_dir()));
+
+    press_shift_letter(&coord, 'U');
+    assert_eq!(
+        coord.debug_active_mode(),
+        Some("temp_english"),
+        "Shift+字母先进临英，这是转交分支存在的理由"
+    );
+    let enter = press_plus(&coord);
+    match &enter {
+        KeyAction::UpdateComposition { text, .. } => assert_eq!(text, "U+"),
+        other => panic!("临英缓冲 U 上按 + 应转交 Unicode 模式，实际: {:?}", other),
+    }
+    assert_eq!(coord.debug_active_mode(), Some("unicode"));
+
+    for c in "41".chars() {
+        press_letter(&coord, c);
+    }
+    match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "A", "U+41 应上屏 A"),
+        other => panic!("空格应上屏，实际: {:?}", other),
+    }
+}
+
+/// 在夺取边界按退格 → 回退到**码表**输入流（`RewindOrigin::Normal`）。
+///
+/// ⚠️ 边界判据是「模式缓冲 == `Rewind::host_text`」，而进入时缓冲**恰好就是**那条前缀
+/// ⇒ 刚进模式就已经在边界上，**第一次**退格即回退。别照「先删一个字符再退」的直觉写，
+/// 那样第二次退格作用的已经是恢复后的码表缓冲了（症状：拿到 `ClearComposition`）。
+#[test]
+fn unicode_rewind_returns_to_codetable() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(unicode_config("wubi86"), Some(&data_dir()));
+    press_letter(&coord, 'u');
+    press_plus(&coord);
+    assert_eq!(coord.debug_active_mode(), Some("unicode"));
+
+    let back = coord.handle_key_event(&key_event(0x08, EVENT_KEY_DOWN));
+    assert_eq!(
+        coord.debug_active_mode(),
+        None,
+        "在夺取边界按退格应撤销夺取（active_hijack_buffer 与 rewind_hijack 都要认得 Unicode）"
+    );
+    match &back {
+        KeyAction::UpdateComposition { text, .. } => assert!(
+            text.starts_with('u'),
+            "快照应回放到码表输入流，组合区实际: {}",
+            text
+        ),
+        other => panic!("回退应重建组合区，实际: {:?}", other),
+    }
+}
+
+/// 同上，但来源是临英 → 必须回到**临英**，而不是把大写 U 塞进码表缓冲。
+///
+/// 这正是 `RewindOrigin` 存在的理由：两个入口共用一个模式，回退目标却不同。
+#[test]
+fn unicode_rewind_returns_to_temp_english() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(unicode_config("wubi86"), Some(&data_dir()));
+    press_shift_letter(&coord, 'U');
+    press_plus(&coord);
+    assert_eq!(coord.debug_active_mode(), Some("unicode"));
+
+    let back = coord.handle_key_event(&key_event(0x08, EVENT_KEY_DOWN)); // 进入即在边界
+    assert_eq!(
+        coord.debug_active_mode(),
+        Some("temp_english"),
+        "来源是临英就该退回临英；退成码表输入的话，码表会拿一个它不认的大写 U 去查词"
+    );
+    match &back {
+        KeyAction::UpdateComposition { text, .. } => {
+            assert_eq!(text, "U", "临英缓冲应恢复成夺取前的 U")
+        }
+        other => panic!("回退应重建临英组合区，实际: {:?}", other),
+    }
+}
+
+/// 无效码点：不出候选，空格上屏缓冲原文（而不是吞掉、也不是上屏一行提示文字）。
+#[test]
+fn unicode_invalid_code_point_commits_raw_text() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(unicode_config("wubi86"), Some(&data_dir()));
+    press_letter(&coord, 'u');
+    press_plus(&coord);
+    for c in "zz".chars() {
+        press_letter(&coord, c);
+    }
+    assert!(
+        coord.debug_page_texts().is_empty(),
+        "非十六进制串不该出候选——提示行会被空格上屏成正文"
+    );
+    match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => {
+            assert_eq!(
+                text, "u+zz",
+                "无候选时空格上屏原文，用户至少看得见自己打了什么"
+            )
+        }
+        other => panic!("空格应上屏原文，实际: {:?}", other),
+    }
+}
+
+/// 关着的时候 `u+` 必须仍是普通编码 —— 出厂态零回归。
+#[test]
+fn unicode_disabled_leaves_input_untouched() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir())); // 未开启
+    press_letter(&coord, 'u');
+    press_plus(&coord);
+    assert_eq!(
+        coord.debug_active_mode(),
+        None,
+        "总开关关着时不该进任何模式（try_prefix_hijack 应在读完开关后立即返回）"
+    );
+}
+
+/// 十六进制里的数字键必须进缓冲，不能被当成序号选词。
+///
+/// `commit_by_offset` 对本模式返回 `None` 就是为了这条：候选恒只有一条，而 `0-9` 全是
+/// 码位。放行选词的话 `u+1...` 里的每个数字都会被吃掉。
+#[test]
+fn unicode_digits_are_code_not_selection() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(unicode_config("wubi86"), Some(&data_dir()));
+    press_letter(&coord, 'u');
+    press_plus(&coord);
+    let acc = press_letter(&coord, '1');
+    match &acc {
+        KeyAction::UpdateComposition { text, .. } => {
+            assert_eq!(text, "u+1", "数字应进缓冲，实际: {}", text)
+        }
+        other => panic!("数字键不该触发选词，实际: {:?}", other),
+    }
+}

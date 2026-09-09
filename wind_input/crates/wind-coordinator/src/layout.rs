@@ -57,6 +57,7 @@ pub(crate) fn intent_for(
         Some(ModeKind::TempPinyin) => Some(cfg.input.temp_pinyin.candidate_layout),
         Some(ModeKind::TempEnglish) => Some(cfg.input.temp_english.candidate_layout),
         Some(ModeKind::Url) => Some(cfg.input.url.candidate_layout),
+        Some(ModeKind::Unicode) => Some(cfg.input.unicode.candidate_layout),
         // 辅助码：候选布局沿用主路径（筛选不改呈现形态）。
         Some(ModeKind::AuxCode) => None,
         None => None,
@@ -230,6 +231,7 @@ mod tests {
         c.input.temp_pinyin.candidate_layout = intent;
         c.input.temp_english.candidate_layout = intent;
         c.input.url.candidate_layout = intent;
+        c.input.unicode.candidate_layout = intent;
         c.input.add_word.candidate_layout = intent;
         c.schema.mix_modes = vec![MixModeConfig {
             candidate_layout: intent,
@@ -269,6 +271,7 @@ mod tests {
         ModeKind::TempPinyin,
         ModeKind::TempEnglish,
         ModeKind::Url,
+        ModeKind::Unicode,
     ];
 
     /// 全矩阵：每种模式 × 三种意图 × 两种基线。

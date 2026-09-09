@@ -902,6 +902,8 @@ impl Coordinator {
         state.temp_pinyin_prefix.clear();
         state.url_buffer.clear();
         state.url_cursor = 0;
+        state.unicode_buffer.clear();
+        state.unicode_cursor = 0;
         state.rewind = None;
         state.special_buffer.clear();
         state.special_cursor = 0;

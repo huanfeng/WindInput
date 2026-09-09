@@ -3073,6 +3073,9 @@ pub struct InputConfig {
     /// 网址输入模式。
     #[serde(default)]
     pub url: UrlConfig,
+    /// Unicode 码点输入模式（`u+4e00` → 一）。与 [`Self::url`] 同为前缀夺取式。
+    #[serde(default)]
+    pub unicode: UnicodeConfig,
     /// 快捷加词面板（目前只有候选布局一项；进入方式是 keys.add_word 热键）。
     #[serde(default)]
     pub add_word: AddWordConfig,
@@ -3120,6 +3123,7 @@ impl Default for InputConfig {
             rare_char: RareCharConfig::default(),
             emoji: EmojiConfig::default(),
             url: UrlConfig::default(),
+            unicode: UnicodeConfig::default(),
             add_word: AddWordConfig::default(),
             s2t: S2TConfig::default(),
             t2s: T2SConfig::default(),
@@ -3635,6 +3639,58 @@ impl Default for UrlConfig {
         Self {
             enabled: false,
             prefixes: default_url_prefixes(),
+            candidate_layout: LayoutIntent::default(),
+            comment_template_vertical: None,
+            comment_template_horizontal: None,
+        }
+    }
+}
+
+/// Unicode 码点输入配置（[input.unicode]）。
+///
+/// 与 [`UrlConfig`] 同为**前缀夺取式**模式（正常输入累积到某前缀即夺取），共用
+/// `Coordinator::try_prefix_hijack` 那道闸门与 `Rewind` 回退骨架。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnicodeConfig {
+    /// 总开关（默认关闭，与 [`UrlConfig`] 同口径）。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 触发前缀（恰好匹配）。
+    ///
+    /// ⚠️ **按字面匹配，不做大小写归一** —— 这是与 [`UrlConfig::prefixes`] 的刻意差异。
+    /// `U+` 是 Unicode 的标准书写形式，大小写在这里携带真实信息；若照 url 那样把探针
+    /// `to_ascii_lowercase()` 之后再比，配置里就再也表达不出「只认大写」这个意图。
+    ///
+    /// 出厂两条各对应一个入口，两者共用本表（配置是单一真相源）：
+    /// - `u+` —— 小写 u 进码表 `input_buffer`，`+` 在 `try_prefix_hijack` 触发夺取；
+    /// - `U+` —— Shift+U 先被 `try_activate_mode` 截进临时英文（缓冲为 `U`），
+    ///   由 `handle_temp.rs` 的转交分支交给本模式。
+    ///
+    /// ⛔ 不要配单字符前缀：小写 `"u"` 会夺取一切 u 起手，废掉码表的 `u` 码元与拼音的
+    /// `u`；大写 `"U"` 则在空缓冲时被临英先截走，根本够不着夺取点（临英若被用户关掉，
+    /// 大写字母落普通输入、`input_buffer` 里是小写 `u`，仍由 `u+` 那条命中）。
+    #[serde(default = "default_unicode_prefixes")]
+    pub prefixes: Vec<String>,
+    /// 进入 Unicode 模式期间的候选布局（默认跟随全局）。
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
+    pub candidate_layout: LayoutIntent,
+    /// Unicode 模式期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_template_vertical: CommentTemplateOverride,
+    /// Unicode 模式期间的注释模板覆盖（横排），见 [`CommentTemplateOverride`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_template_horizontal: CommentTemplateOverride,
+}
+
+fn default_unicode_prefixes() -> Vec<String> {
+    vec!["u+".to_string(), "U+".to_string()]
+}
+
+impl Default for UnicodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prefixes: default_unicode_prefixes(),
             candidate_layout: LayoutIntent::default(),
             comment_template_vertical: None,
             comment_template_horizontal: None,
@@ -9991,6 +10047,12 @@ scripts = { latin = 42 }
         assert_eq!(c.input.symbol.smart_timeout_ms, 500);
         assert!(c.input.temp_english.enabled && c.input.temp_english.show_candidates);
         assert_eq!(c.input.url.prefixes.len(), 5);
+        assert!(!c.input.unicode.enabled, "Unicode 码点输入出厂关闭");
+        assert_eq!(
+            c.input.unicode.prefixes,
+            vec!["u+".to_string(), "U+".to_string()],
+            "两条前缀各对应一个入口（码表缓冲 / 临英转交），少一条就有一个入口进不去"
+        );
         // input.phrase / stats
         assert_eq!(c.input.phrase.min_prefix, 2);
         assert!(c.stats.enabled && c.stats.track_english);

@@ -370,6 +370,9 @@ static REGISTRY: &[ConfigField] = &[
     ),
     f("input.url.enabled", Bool),
     f("input.url.prefixes", StrList),
+    // Unicode 码点输入（`u+4e00` → 一）。与 url 同为前缀夺取式模式，故字段形态一致。
+    f("input.unicode.enabled", Bool),
+    f("input.unicode.prefixes", StrList),
     // 生僻字模式。刻意没有 enabled——不绑键即进不去，见 `RareCharConfig`。
     // trigger_keys 与其余五处同：normalize 折算进 keys.key_actions 后清空，
     // 留在此处是**出厂声明处** + 设置端 key_action 控件的标识符。
@@ -384,6 +387,7 @@ static REGISTRY: &[ConfigField] = &[
     f("input.emoji.min_word_chars", Int),
     f("input.emoji.categories", Bool),
     f("input.url.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
+    f("input.unicode.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
     f(
         "input.add_word.candidate_layout",
         Enum(LAYOUT_INTENT_VALUES),

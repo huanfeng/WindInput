@@ -398,6 +398,10 @@ pub(crate) fn template_for<'a>(
             &cfg.input.url.comment_template_vertical,
             &cfg.input.url.comment_template_horizontal,
         ),
+        Some(ModeKind::Unicode) => pick(
+            &cfg.input.unicode.comment_template_vertical,
+            &cfg.input.unicode.comment_template_horizontal,
+        ),
         // 辅助码沿用主路径注释模板（辅助码只是筛选，注释来源仍是拼音主流程）。
         Some(ModeKind::AuxCode) => None,
         None => None,

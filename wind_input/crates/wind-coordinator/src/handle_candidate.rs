@@ -2071,6 +2071,10 @@ impl Coordinator {
             Some(ModeKind::Mix(_)) => self.mix_select(state, offset),
             // 网址模式无候选列表（不出候选窗），没有可选中的东西。
             Some(ModeKind::Url) => return None,
+            // Unicode 模式**有**一条候选，但**不能**按序号选中：候选恒只有一条，而数字键
+            // `0-9` 全是十六进制位。放行选词等于把 `u+1` 的 `1` 吃成「选第 1 条」，用户
+            // 再也打不出任何含数字的码点。上屏走空格/回车（`handle_unicode_key`）。
+            Some(ModeKind::Unicode) => return None,
             // 走 `aux_code_committed` 而**不是** `commit_selected` + 无条件收尾：
             // 部分消费（候选只吃掉缓冲前缀）时辅助码要留在模式内重建会话继续筛，
             // 否则「没时间」这类分步组句在按 `2` 时能继续、轻敲 Shift 选同一个候选
@@ -2305,6 +2309,9 @@ impl Coordinator {
                 &mut st.temp_english_cursor,
             ),
             ModeKind::Url => preedit_cursor::BufEdit::new(&mut st.url_buffer, &mut st.url_cursor),
+            ModeKind::Unicode => {
+                preedit_cursor::BufEdit::new(&mut st.unicode_buffer, &mut st.unicode_cursor)
+            }
             // 生僻字模式与 special 共用 `special_buffer`：按键处理走的是同一个
             // `handle_special_key`，缓冲另起一个字段的话，退格与光标会作用在一个没人读的
             // 字段上——组合区不动、候选不变，且没有任何报错。
@@ -2355,6 +2362,14 @@ impl Coordinator {
                 &state.url_buffer,
                 &state.url_buffer,
                 state.url_cursor,
+            ),
+            // Unicode：缓冲里**已经含触发前缀**（`u+4e00` 整串），故只读前缀留空——
+            // 前缀那一段是可编辑缓冲的一部分（退格能删到它），不是外挂的装饰。
+            ModeKind::Unicode => (
+                String::new(),
+                &state.unicode_buffer,
+                &state.unicode_buffer,
+                state.unicode_cursor,
             ),
             // 辅助码：主体 = 辅助码缓冲，前缀 = overlay 里进入时拼好的显示前缀（基线 + 分隔符，
             // 只写一遍）。光标恒在串尾。

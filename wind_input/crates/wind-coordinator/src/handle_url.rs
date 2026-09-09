@@ -1,9 +1,17 @@
-//! 网址输入模式（劫持缓冲 + 回退）
+//! 网址输入模式（劫持缓冲 + 回退），**兼所有前缀夺取式模式的共享骨架**。
 //!
 //! 从 coordinator.rs 拆出（同 crate 内 `impl Coordinator` 块，组织性重构，无逻辑变更）。
+//!
+//! # 本文件里哪些是共享的
+//!
+//! [`Coordinator::try_prefix_hijack`]（入口闸门）、[`Coordinator::active_hijack_buffer`]、
+//! [`Coordinator::can_rewind`]、[`Coordinator::rewind_hijack`] 四个不属于 url，是
+//! url / unicode / z 夺取共用的骨架。新增一个前缀夺取式模式要碰哪些地方，见
+//! `docs/design/prefix-hijack-modes.md` 的清单——那份清单是照着本文件与
+//! `handle_unicode.rs` 的实际接线点列的。
 
 use crate::coordinator::{Coordinator, State, numpad_char, printable_char};
-use crate::pipeline::{ModeKind, Rewind};
+use crate::pipeline::{ModeKind, Rewind, RewindOrigin};
 use crate::preedit_cursor;
 use tracing::debug;
 use wind_bridge::handler::{KeyAction, KeyEventData};
@@ -11,6 +19,53 @@ use wind_ipc::protocol::MOD_SHIFT;
 use wind_keys::keymap;
 
 impl Coordinator {
+    /// 前缀夺取闸门：正常输入累积到某个已注册前缀时，夺取进入对应模式。
+    ///
+    /// # ★ 未开启时的代价必须是常数
+    ///
+    /// 本函数在**逐键热路径**上，而出厂态两个模式都关着——绝大多数用户永远不该为它们
+    /// 付出任何代价。故先一次性读完所有总开关，全关就立刻返回：不做 `printable_char`
+    /// 键码转换、不构造探针 `String`、不遍历前缀表。
+    ///
+    /// 两个开关刻意在**同一次** `rt()` 借用里读完，而不是每个模式各借一次——那样加一个
+    /// 模式就多一次运行时借用，正是「未开启也变慢」的来源。
+    ///
+    /// # 扩展
+    ///
+    /// 新增一个前缀夺取式模式 = 开关元组加一位 + 下方链里加一条分支。刻意保留**显式
+    /// 分支**而不做注册表：优先级由代码顺序表达，一眼可读可调。这与 `try_activate_mode`
+    /// 的既有取舍一致（见 `handle_mode.rs` 「不强塞统一表，避免死抽象」）。
+    pub(crate) fn try_prefix_hijack(
+        &self,
+        state: &mut State,
+        data: &KeyEventData,
+    ) -> Option<KeyAction> {
+        let (url_on, unicode_on) = {
+            let rt = self.rt();
+            (rt.config.input.url.enabled, rt.config.input.unicode.enabled)
+        };
+        if !url_on && !unicode_on {
+            return None;
+        }
+        let shift = data.modifiers & MOD_SHIFT != 0;
+        let ch = printable_char(data.key_code, shift)?;
+        // 网址：前缀表按惯例小写，故探针把字母归一到小写再比。
+        if url_on {
+            let probe = format!("{}{}", state.input_buffer, ch.to_ascii_lowercase());
+            if self.is_url_prefix(&probe) {
+                return Some(self.enter_url_mode(state, probe));
+            }
+        }
+        // Unicode：**字面**比较，不归一大小写（理由见 `UnicodeConfig::prefixes`）。
+        if unicode_on {
+            let probe = format!("{}{}", state.input_buffer, ch);
+            if self.is_unicode_prefix(&probe) {
+                return Some(self.enter_unicode_mode(state, probe, RewindOrigin::Normal));
+            }
+        }
+        None
+    }
+
     /// 探针是否恰好等于某个网址前缀（精确匹配，对齐 Go urlActivationResidual 的全匹配语义）。
     pub(crate) fn is_url_prefix(&self, probe: &str) -> bool {
         self.rt()
@@ -37,6 +92,7 @@ impl Coordinator {
         state.rewind = Some(Rewind {
             snapshot,
             host_text: buffer,
+            origin: RewindOrigin::Normal, // 前缀夺取抢的是正常码表输入流
         });
         // 显示候选窗（空候选 + 模式徽标）而非隐藏，给出「正在输入网址」提示。
         self.notify_ui_update(state);
@@ -61,6 +117,7 @@ impl Coordinator {
     pub(crate) fn active_hijack_buffer<'a>(&self, state: &'a State) -> Option<&'a str> {
         match state.active {
             Some(ModeKind::Url) => Some(&state.url_buffer),
+            Some(ModeKind::Unicode) => Some(&state.unicode_buffer),
             // z 夺取：仅 try_z_fallback 会同时武装 state.rewind，故 can_rewind 只对夺取式进入
             // 成立（符号/字母首键进入的这些模式 rewind=None，不会误回退）。
             Some(ModeKind::TempPinyin) => Some(&state.temp_pinyin_buffer),
@@ -80,30 +137,58 @@ impl Coordinator {
 
     /// 执行夺取回退：撤销夺取，把快照回放到正常码表输入流并重算候选。
     pub(crate) fn rewind_hijack(&self, state: &mut State) -> KeyAction {
-        let snapshot = state.rewind.take().map(|r| r.snapshot).unwrap_or_default();
+        let rw = state.rewind.take();
+        let origin = rw.as_ref().map(|r| r.origin).unwrap_or_default();
+        let snapshot = rw.map(|r| r.snapshot).unwrap_or_default();
         // 退出当前夺取式模式：URL / z-fallback 的临拼、临英、mix。
         // ⚠️ 必须与 `active_hijack_buffer` 枚举的模式**一一对应**：那边认得、这边漏了，
         // 就会走 `reset_exclusive_modes` 兜底——状态清得掉，但各模式自己的收尾
         // （committed_segs、cursor、mix 的透镜态）不会跑，回退后留下半清理的残局。
         match state.active {
             Some(ModeKind::Url) => self.exit_url_mode(state),
+            Some(ModeKind::Unicode) => self.exit_unicode_mode(state),
             Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
             Some(ModeKind::TempEnglish) => self.exit_temp_english(state),
             Some(ModeKind::Mix(_)) => self.exit_mix_mode(state),
             _ => self.reset_exclusive_modes(state),
         }
-        state.input_buffer = snapshot;
-        state.input_cursor_pos = state.input_buffer.len(); // 夺取回退：光标落到恢复码末尾
-        self.update_candidates(state);
-        self.notify_ui_update(state);
-        let display = state.preedit.clone();
-        debug!(
-            "rewind_hijack: restored normal input '{}'",
-            state.input_buffer
-        );
-        KeyAction::UpdateComposition {
-            text: display,
-            caret_pos: state.input_buffer.chars().count() as u32,
+        // 回放目标由**来源**决定，不是恒定的 `input_buffer`（见 `RewindOrigin`）。
+        match origin {
+            RewindOrigin::Normal => {
+                state.input_buffer = snapshot;
+                state.input_cursor_pos = state.input_buffer.len(); // 光标落到恢复码末尾
+                self.update_candidates(state);
+                self.notify_ui_update(state);
+                let display = state.preedit.clone();
+                debug!(
+                    "rewind_hijack: restored normal input '{}'",
+                    state.input_buffer
+                );
+                KeyAction::UpdateComposition {
+                    text: display,
+                    caret_pos: state.input_buffer.chars().count() as u32,
+                }
+            }
+            RewindOrigin::TempEnglish => {
+                // 重进临英而不是把快照塞进码表缓冲：来源是 Shift+U 那条路，用户的上下文
+                // 是「我在打英文」，退格该退回英文缓冲。`temp_english_prefix` 清空——
+                // Shift+字母进入的临英本就没有前缀字符（触发键进入的才有）。
+                state.active = Some(ModeKind::TempEnglish);
+                state.temp_english_buffer = snapshot;
+                state.temp_english_cursor = state.temp_english_buffer.len();
+                state.temp_english_prefix = String::new();
+                self.update_temp_english_candidates(state);
+                self.notify_ui_update(state);
+                let display = state.preedit.clone();
+                debug!(
+                    "rewind_hijack: restored temp English '{}'",
+                    state.temp_english_buffer
+                );
+                KeyAction::UpdateComposition {
+                    text: display.clone(),
+                    caret_pos: display.chars().count() as u32,
+                }
+            }
         }
     }
 

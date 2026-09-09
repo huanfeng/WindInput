@@ -739,6 +739,18 @@ enabled = false
 prefixes = ["www.", "http", "https", "ftp."]
 candidate_layout = "follow"
 
+# Unicode 输入：正常输入下打出 u+ 即进入，续打十六进制得到该码点的字符
+# （u+4e00 → 一）。空格或回车上屏。默认关闭。
+#
+# prefixes 按**字面**匹配，不像 [input.url] 那样把探针转小写——U+ 是 Unicode 的标准
+# 写法，大小写在这里是有意义的。出厂两条各走一个入口：小写 u+ 由码表缓冲触发，
+# 大写 U+ 由临时英文转交（Shift+U 会先进临英）。
+# 不要配单字符前缀：小写 "u" 会把 u 起手的编码全夺走，大写 "U" 够不着（临英先接管）。
+[input.unicode]
+enabled = false
+prefixes = ["u+", "U+"]
+candidate_layout = "follow"
+
 # 快捷加词面板（Ctrl+= 进入，见 [keys] add_word）。
 # 默认竖排：逐字确认的面板竖排更易读。此前是硬编码强制竖排、没有开关。
 [input.add_word]

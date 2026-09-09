@@ -939,6 +939,7 @@ impl MessageHandler for Coordinator {
             Some(ModeKind::TempPinyin) => return self.handle_temp_pinyin_key(&mut state, data),
             Some(ModeKind::TempEnglish) => return self.handle_temp_english_key(&mut state, data),
             Some(ModeKind::Url) => return self.handle_url_key(&mut state, data),
+            Some(ModeKind::Unicode) => return self.handle_unicode_key(&mut state, data),
             // ★ 生僻字模式复用 special 的整套按键处理（缓冲/光标/退格/选词/翻页）。
             // 两者只差「引擎取哪个方案」与「候选过不过生僻准入」，那两处分别在
             // `overlay_engine_schema` 与 `update_special_candidates` 里分流。
@@ -991,18 +992,11 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
-        // ── 网址模式激活（夺取式）──
-        // 普通输入累积时，若 input_buffer + 当前键字符 恰好等于某前缀（如 "www."/"http"），
-        // 则夺取进入网址模式。置于主分派前，确保「补全前缀的那一键」（字母或 '.'）先被截获，
-        // 不落入普通码表/标点处理。前缀按惯例小写，故探针用小写字母对齐 input_buffer。
-        if self.rt().config.input.url.enabled {
-            let shift = data.modifiers & MOD_SHIFT != 0;
-            if let Some(ch) = printable_char(data.key_code, shift) {
-                let probe = format!("{}{}", state.input_buffer, ch.to_ascii_lowercase());
-                if self.is_url_prefix(&probe) {
-                    return self.enter_url_mode(&mut state, probe);
-                }
-            }
+        // ── 前缀夺取式模式激活 ──
+        // 普通输入累积时，若 input_buffer + 当前键字符 恰好等于某前缀，则夺取进入对应模式。
+        // 置于主分派前，确保「补全前缀的那一键」先被截获，不落入普通码表/标点处理。
+        if let Some(act) = self.try_prefix_hijack(&mut state, data) {
+            return act;
         }
 
         debug!(
