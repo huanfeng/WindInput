@@ -83,6 +83,13 @@ pub fn cache_stem(source: &Path) -> String {
     stem.strip_suffix(".dict").unwrap_or(&stem).to_string()
 }
 
+/// ⚠️ 用例里的路径字面量一律写成 `/` 分隔的**相对**路径。
+///
+/// 反斜杠只在 Windows 上是分隔符：`r"C:\d\schemas\p\x.yaml"` 到了 Linux / macOS 是
+/// **一整个** `Component::Normal`，`schemas` 那一段根本切不出来，于是断言的左边恒是空串
+/// ——本仓的 CI（Linux、macOS 都真跑 test）为此红过一整轮，而本机 Windows 全绿。
+/// 正斜杠两个平台都认，故只用它；Windows 独有的分隔语义由 `windows_backslash_layout`
+/// 单独兜住。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,9 +98,7 @@ mod tests {
     fn flat_layout_keeps_legacy_path() {
         // 出厂扁平结构：与旧的「父目录名」实现逐字节一致，存量缓存不失效。
         assert_eq!(
-            schema_namespace(Path::new(
-                r"C:\d\data\schemas\wubi86\wubi86_jidian.dict.yaml"
-            )),
+            schema_namespace(Path::new("d/data/schemas/wubi86/wubi86_jidian.dict.yaml")),
             PathBuf::from("wubi86")
         );
     }
@@ -102,7 +107,7 @@ mod tests {
     fn nested_layout_keeps_schema_segment() {
         // 论坛 #115：二级子目录下，方案那一段必须留在命名空间里。
         let ns = schema_namespace(Path::new(
-            r"C:\d\data\schemas\ime_wubi86\word\changyong.dict.yaml",
+            "d/data/schemas/ime_wubi86/word/changyong.dict.yaml",
         ));
         assert_eq!(ns, PathBuf::from("ime_wubi86").join("word"));
     }
@@ -111,13 +116,13 @@ mod tests {
     fn same_leaf_dir_across_schemas_does_not_collide() {
         // 用户真正担心的那个冲突：两个方案各有 word/ 且文件同名。
         let a = cache_path_in(
-            Path::new(r"C:\c"),
-            Path::new(r"C:\d\data\schemas\ime_wubi86\word\x.dict.yaml"),
+            Path::new("c"),
+            Path::new("d/data/schemas/ime_wubi86/word/x.dict.yaml"),
             "x.wdat",
         );
         let b = cache_path_in(
-            Path::new(r"C:\c"),
-            Path::new(r"C:\d\data\schemas\ime_wubi98\word\x.dict.yaml"),
+            Path::new("c"),
+            Path::new("d/data/schemas/ime_wubi98/word/x.dict.yaml"),
             "x.wdat",
         );
         assert_ne!(a, b);
@@ -126,10 +131,8 @@ mod tests {
     #[test]
     fn user_layer_and_data_layer_share_one_cache() {
         // 同一 rel 在不同层里只会有一个胜出者，共用一份缓存是有意设计（内容指纹判新鲜）。
-        let user = schema_namespace(Path::new(
-            r"C:\Users\u\AppData\Roaming\W\schemas\p\a.dict.yaml",
-        ));
-        let data = schema_namespace(Path::new(r"C:\Program Files\W\data\schemas\p\a.dict.yaml"));
+        let user = schema_namespace(Path::new("Users/u/AppData/Roaming/W/schemas/p/a.dict.yaml"));
+        let data = schema_namespace(Path::new("Program Files/W/data/schemas/p/a.dict.yaml"));
         assert_eq!(user, data);
     }
 
@@ -137,7 +140,7 @@ mod tests {
     fn last_schemas_segment_wins() {
         // 数据根自己也叫 schemas 时，靠后的那个才是词库根。
         assert_eq!(
-            schema_namespace(Path::new(r"C:\schemas\data\schemas\pinyin\rime.dict.yaml")),
+            schema_namespace(Path::new("schemas/data/schemas/pinyin/rime.dict.yaml")),
             PathBuf::from("pinyin")
         );
     }
@@ -145,7 +148,7 @@ mod tests {
     #[test]
     fn dict_at_schemas_root_falls_to_cache_root() {
         assert_eq!(
-            schema_namespace(Path::new(r"C:\d\data\schemas\x.dict.yaml")),
+            schema_namespace(Path::new("d/data/schemas/x.dict.yaml")),
             PathBuf::new()
         );
     }
@@ -154,7 +157,7 @@ mod tests {
     fn without_schemas_segment_falls_back_to_parent_name() {
         // 测试夹具/便携版：没有 schemas 段时保持旧行为，仍按父目录名分组。
         assert_eq!(
-            schema_namespace(Path::new(r"C:\tmp\fixture\wubi86\x.dict.yaml")),
+            schema_namespace(Path::new("tmp/fixture/wubi86/x.dict.yaml")),
             PathBuf::from("wubi86")
         );
     }
@@ -162,9 +165,20 @@ mod tests {
     #[test]
     fn parent_traversal_segments_are_dropped() {
         // `..` 不进命名空间：缓存写不出缓存根。
-        let ns = schema_namespace(Path::new(r"C:\d\data\schemas\p\..\q\x.dict.yaml"));
+        let ns = schema_namespace(Path::new("d/data/schemas/p/../q/x.dict.yaml"));
         assert_eq!(ns, PathBuf::from("p").join("q"));
         assert!(!ns.to_string_lossy().contains(".."));
+    }
+
+    /// Windows 上反斜杠也是分隔符：盘符段被 `Component::Prefix` / `RootDir` 挡在外面，
+    /// 命名空间与正斜杠写法逐字节一致。
+    #[test]
+    #[cfg(windows)]
+    fn windows_backslash_layout() {
+        assert_eq!(
+            schema_namespace(Path::new(r"C:\d\data\schemas\ime_wubi86\word\x.dict.yaml")),
+            PathBuf::from("ime_wubi86").join("word")
+        );
     }
 
     #[test]

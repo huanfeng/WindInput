@@ -151,6 +151,13 @@ fn runtime_switch_takes_effect_without_touching_config() {
 /// 切换从**当前生效**状态取反，一开一关回到原点。
 #[test]
 fn toggle_flips_and_flips_back() {
+    // 判据前置：`effective_single_char` 先看**活动引擎类型**，无词库时引擎压根加载不出来
+    // （`current_engine_type()` 为 None），临时态还没轮到就被判成关——那是环境缺数据，
+    // 不是接线坏了。CI 无 `build_dev/data`，为此红过一轮。
+    if !dict_ready(&data_dir()) {
+        eprintln!("跳过：五笔词库不存在");
+        return;
+    }
     let coord = coord_with(false);
     assert!(!coord.debug_effective_single_char());
     coord.toggle_single_char();
@@ -165,6 +172,13 @@ fn toggle_flips_and_flips_back() {
 /// 随后的切方案清空就变成了用户可感知的跳变（他明明什么都没改）。
 #[test]
 fn switching_to_the_current_state_leaves_no_override() {
+    // 判据前置：`effective_single_char` 先看**活动引擎类型**，无词库时引擎压根加载不出来
+    // （`current_engine_type()` 为 None），临时态还没轮到就被判成关——那是环境缺数据，
+    // 不是接线坏了。CI 无 `build_dev/data`，为此红过一轮。
+    if !dict_ready(&data_dir()) {
+        eprintln!("跳过：五笔词库不存在");
+        return;
+    }
     let coord = coord_with(true);
     assert!(coord.debug_effective_single_char());
     coord.set_single_char(true);
