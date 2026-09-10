@@ -1861,7 +1861,13 @@ pkg_build() {
         build_service || { err "服务构建失败, 中止打包"; exit 1; }
         do_gendata                             # 组装 data/ → build_mac/data
         app_build ${APP_VARIANT_FLAG[@]+"${APP_VARIANT_FLAG[@]}"}   # IME .app
-        build_setting || warn "wind_setting 构建跳过/失败 (非致命, .pkg 将不含设置 app)"   # 设置 .app (可选)
+        # 构建失败即中止打包 —— **不再降级成 warn**。build_setting 已经把两种情形分开了:
+        # 设置仓不在场返回 0(fork/精简检出的正当跳过), 真正的编译失败返回 1。此前调用点
+        # 把两者一起 warn 掉, 于是 wind_setting 编译报错也只是日志里一行黄字, .pkg 照出、
+        # workflow 照报 success, 发布出去的包里没有设置 app —— v0.121.0 就是这么发的
+        # (issue #125: 装完打不开设置, 因为压根没装上)。同本函数下方 universal 硬校验的
+        # 立场: 宁可在这里出不了包, 也不能把它发出去。
+        build_setting || { err "wind_setting 构建失败, 中止打包 (见上)"; exit 1; }
     fi
 
     # -------- 校验必备产物 (设置 app 可选) --------
@@ -1871,7 +1877,19 @@ pkg_build() {
     done
     [[ $miss -eq 0 ]] || { err "请先跑 scripts/mac/dev.sh $([[ "$PROFILE" == dev ]] && echo d8 || echo 8) (或手动构建各组件)"; exit 1; }
     local HAVE_SETTING=0
-    [[ -e "$SETTING_APP" ]] && HAVE_SETTING=1 || info "(无 wind_setting.app, 跳过设置组件)"
+    if [[ -e "$SETTING_APP" ]]; then
+        HAVE_SETTING=1
+    elif [[ -d "$SETTING_DIR" ]]; then
+        # ★ 不变量: **设置仓在场 = 打算带上设置 app, 那它缺席就是缺陷、不是选项。**
+        # 判据落在「仓库在不在」而不是「app 在不在」: 后者自己就是待判定的结果, 拿它当
+        # 判据等于永远判不出问题(缺了就说"那是可选的")。仓库不在场才是真正的可选场景
+        # (fork 无 PAT / 精简检出), 那一支照旧静默跳过。
+        err "设置仓 $SETTING_DIR 在场, 却没有 $SETTING_APP —— 打出的 .pkg 会缺设置 app"
+        err "请先构建设置程序 (dev.sh $([[ "$PROFILE" == dev ]] && echo d8 || echo 8) 会一并构建), 或移开设置仓以明确表示本次不带它"
+        exit 1
+    else
+        info "(无设置仓 $SETTING_DIR, 跳过设置组件)"
+    fi
 
     local VERSION
     VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "0.0.0")
