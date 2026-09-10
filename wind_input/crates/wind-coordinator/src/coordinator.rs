@@ -3428,8 +3428,20 @@ impl Coordinator {
             .as_ref()
             .filter(|c| !c.font_path.is_empty())
             .and_then(|c| {
-                Config::resolve_schema_resource(data_dir.as_deref(), &c.font_path)
-                    .map(|p| (p.to_string_lossy().into_owned(), c.font_family.clone()))
+                // 缺失必须告警：与上面 `db_path` 对称。此前只有拆字库缺失会 warn，字根字体
+                // 缺失则一路静默——而这两者的现象天差地别：库缺失是「悬停里根本没有拆字段」，
+                // 字体缺失是「拆字段有内容、但每个字根都是方框」。后者用户看得见、日志里
+                // 却一个字都没有，只能凭空猜「字体没装上」还是「家族名不对」还是「渲染没生效」
+                // （issue #126 正是这一形态：方案 TOML、字体文件、家族名、字根码位四项全对）。
+                let p = Config::resolve_schema_resource(data_dir.as_deref(), &c.font_path);
+                if p.is_none() {
+                    warn!(
+                        "字根字体不存在（用户/系统 schemas 目录均未找到）: {}——\
+                         悬停提示里的字根将显示为方框。请确认该文件已随方案一起安装到 schemas 目录下",
+                        c.font_path
+                    );
+                }
+                p.map(|p| (p.to_string_lossy().into_owned(), c.font_family.clone()))
             });
         let mut assets = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
         if assets.db != new_db {
@@ -3442,6 +3454,11 @@ impl Coordinator {
         if new_font != assets.font {
             // 变为 None 时仅不再重发（字体集无撤销接口；旧字体仅影响 PUA 段渲染，无害）。
             if let Some((path, family)) = &new_font {
+                // 打成 info 而不是 debug：「字根字体到底下发过没有」是这条链路上唯一能把
+                // 「没解析到」「解析到但渲染端加载失败」「一切正常」三态分开的观测点，
+                // 而渲染端的失败告警在另一个日志域里（wind-ui）。缺了这一行，日志上
+                // 「没有任何字根字体相关记录」既可能是没配、也可能是没走到这里。
+                info!("下发字根字体: {path}（家族名 {family}）");
                 let _ = self.ui_tx.send(UiCommand::SetTooltipChaiziFont {
                     path: path.clone(),
                     family: family.clone(),
