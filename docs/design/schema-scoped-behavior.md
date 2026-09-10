@@ -592,21 +592,45 @@ serde 的 `#[serde(default = "default_true")]` **只在反序列化缺键时生�
 判据加在 `if` 条件上而非分支里：`shift_behavior = "direct_commit"` 同样不该在英文方案下
 生效（直接上屏 `H` 而不进缓冲 ⇒ 打不了以大写开头的词）。
 
-#### 5.7.2 CapsLock 档位循环：为什么开关就是唯一闸门
+#### 5.7.2 档位循环：键即开关，且必须能换键（macOS）
 
-`input.capslock.english_case_cycle`（出厂关）开启后，英文输入态下 CapsLock 改为循环
-「默认 → 全大写 → 全小写」，一次组合结束即复位。
+`input.english_case_cycle_key`（出厂空＝关）指定**夺取哪个键**在英文输入态循环
+「跟随输入 → 全大写 → 全小写」，一次组合结束即复位。值域 `capslock` / `tab` / `enter` /
+`space` / `escape`。
 
-★ **刻意不在 `keys.session_actions` 里另立一个动词**。它夺取的是 CapsLock 在**特定态**下
-的语义，不是「把某个动作绑到某个键」。再加一层键位绑定就是两道闸串联——用户把键配好却
-没反应，而两处显示都正常（同 `key_actions` 物化那条教训）。
+★ **键即开关，不要再加 `enabled` bool**。第一版是 `input.capslock.english_case_cycle`
+（bool，键固定 CapsLock），当时的论证是「不在 `session_actions` 里另立动词，免得开关与
+绑定两道闸串联」——那条论证依然成立，本次只是把唯一的那道闸从 bool 换成键名，仍是单一
+真相源。
+
+**为什么必须能换键**：macOS 上 CapsLock 这条路三层都不通——
+
+- IMKit 侧 `toWindowsVK`（`wind_macos/.../KeyHandler.swift`）**没有 CapsLock 的映射**，
+  而编码前有 `guard vk != 0 else { return nil }` ⇒ 按键根本不会发到服务端；系统只把
+  **锁定态**经 `toggles` 位传过来，那是状态不是按键。
+- `wind-keys/src/capslock_hook.rs` 整个 `imp` 是 `#[cfg(windows)]`，macOS 上没有钩子这个
+  概念；要拦得上 CGEventTap（需辅助功能授权），而锁定态由 HID 层维护——`cancel_on_mode_switch`
+  当初就是因此在 macOS 标了无落点。
+- Mac 用户普遍把 CapsLock 用作系统级中英切换，夺取它比 Windows 上更冒犯。
+
+⇒ Windows 填 `capslock`，macOS 填 `tab`。设置页那一项**不标 platform**：功能本身两个平台
+都在，只是 `capslock` 这个**取值**在 macOS 无效（选项标签里直说）。
+
+**两个消费点，一套判据**：CapsLock 是 keyup-only 键，只能靠全局钩子拦
+（`handle_capslock_hook_press`）；`tab` 一类是普通键，走 keydown 主链路
+（`try_english_case_cycle_key`，落点在 `handle_candidate_action_hotkey` 旁边——那是
+「候选窗显示期间生效的快捷键」的既定位置，五个模式一次接通）。两条路共用
+`try_english_case_cycle`，分开的只是「谁把按键送进来」；CapsLock 在 keydown 那条被显式
+排除，让「同一个键被两条路各处理一次」从结构上不可能发生。
 
 连带两处**必须**同步，否则功能永不触发或反噬：
 
-- `capslock_bound()`（钩子安装判据）要加上本开关的析取。CapsLock 的 keydown 压根不转发给
-  服务端、锁定态又由系统在 TSF 之前维护，没有全局钩子就拦不住它。
-- 开关开着 + 用户又给 CapsLock 绑了会话动作 ⇒ 启动 `warn!`（`warn_capslock_case_cycle_conflict`）。
-  现场表现是「CapsLock 翻页在中文里好用、一打英文就失灵」，不告警无从知道是谁夺走的。
+- `capslock_bound()`（钩子安装判据）改问「配置的触发键**恰好是** CapsLock」。选了 tab 的
+  用户不该为此白装一个全局钩子。
+- 触发键被别的功能占着 ⇒ 启动 `warn_english_case_cycle_conflict`，**逐类点名**占用方
+  （会话动作 / 配对跳出键 / 系统大写锁定）。现场表现是「CapsLock 翻页在中文里好用、一打
+  英文就失灵」「Tab 在英文里调不出辅助码」，不点名的话用户仍得挨个试。
+- 键名写错（`no_such_key`）⇒ `ConfigBundle` 构造时告警并按关闭处理，不静默。
 
 档位复位点与 `input_buffer_cased` 的清空点是同一批（组合结束的四条路）——**新增任何一个
 清空点都要同步复位它**，否则上一个词按出来的全大写会串到下一个词。

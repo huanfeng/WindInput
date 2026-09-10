@@ -3013,6 +3013,27 @@ impl SingleCharAction {
 pub struct InputConfig {
     #[serde(default = "default_filter_mode")]
     pub filter_mode: String,
+    /// 英文输入态（英文方案 / 临时英文）下，**临时夺取哪个键**来切换候选的大小写档位：
+    /// 默认 → 全大写 → 全小写 → 默认，一次组合结束即复位。空串 = 关闭（出厂）。
+    ///
+    /// 值域见 `Coordinator::parse_case_cycle_key`：`capslock` / `tab` / `enter` / `space` /
+    /// `escape`。不认识的键名**告警后按关闭处理**，不静默。
+    ///
+    /// # 为什么是「键名」而不是一个 bool
+    ///
+    /// 本项最初是 `input.capslock.english_case_cycle`（bool，键固定 CapsLock）。macOS 上
+    /// 那条路走不通：CapsLock 的按键事件在 IMKit 里走 `.flagsChanged`，`toWindowsVK` 没有
+    /// 它的映射（只有锁定态经 `toggles` 位传过来），而拦截手段 `SetWindowsHookExW` 本身
+    /// 就是 Windows-only。⇒ 让用户自己指定键，Windows 填 `capslock`、macOS 填 `tab`。
+    ///
+    /// ★ **键即开关，仍是单一真相源**：不要在此之外再加一个 `enabled` bool，那就成了两道
+    /// 闸串联——用户把键配好却没反应，而两处显示都正常（同 `key_actions` 物化那条教训）。
+    ///
+    /// ⚠️ 被夺取的键在英文输入期间用不出它原本的语义（`capslock` 的系统大写锁定、`tab` 的
+    /// 辅助码 / 配对跳出 / 会话动作）。启动体检会为此告警，见
+    /// `Coordinator::warn_english_case_cycle_conflict`。
+    #[serde(default)]
+    pub english_case_cycle_key: String,
     /// 检索范围放宽（智能档增强）。
     #[serde(default)]
     pub scope_relax: ScopeRelaxConfig,
@@ -3142,6 +3163,7 @@ impl Default for InputConfig {
     fn default() -> Self {
         Self {
             filter_mode: "smart".to_string(),
+            english_case_cycle_key: String::new(),
             scope_relax: ScopeRelaxConfig::default(),
             enter_behavior: "commit".to_string(),
             space_on_empty_behavior: "commit".to_string(),
@@ -3481,20 +3503,6 @@ impl Default for TempEnglishConfig {
 pub struct CapslockConfig {
     #[serde(default)]
     pub cancel_on_mode_switch: bool,
-    /// 英文输入态（英文方案 / 临时英文）下，CapsLock 临时切换候选的大小写档位：
-    /// 默认 → 全大写 → 全小写 → 默认，一次组合结束即复位。**出厂关**。
-    ///
-    /// # 为什么本项就是唯一闸门（不在 `keys.session_actions` 里另立一个动词）
-    ///
-    /// 它夺取的是 CapsLock 在**特定态**下的语义，不是「把某个动作绑到某个键」：开关关着
-    /// 时 CapsLock 一切照旧（用户绑的 session action，或系统原生大小写），开着时也只在
-    /// 「英文输入态 + 有候选」这三个条件同时成立时才归本功能。再加一层键位绑定就是两道
-    /// 闸串联——用户把键配好却没反应，而两处显示都正常。
-    ///
-    /// ⚠️ 开启后，用户若把 CapsLock 绑成别的会话动作，那个绑定在英文输入期间按不出来。
-    /// 启动体检会为此告警（见 `warn_capslock_case_cycle_conflict`）。
-    #[serde(default)]
-    pub english_case_cycle: bool,
 }
 
 /// 生僻字模式配置（[input.rare_char]）。

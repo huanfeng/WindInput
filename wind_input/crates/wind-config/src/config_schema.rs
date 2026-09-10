@@ -304,6 +304,7 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.frequency.exclude_blocks", StrList),
     // -- input（输入行为）--
     f("input.filter_mode", Str),
+    f("input.english_case_cycle_key", Str),
     // 检索范围放宽（智能档增强，见 docs/design/smart-filter-scope-relax.md）
     f("input.scope_relax.page_end_key", Bool),
     f("input.scope_relax.prefix", Str),
@@ -363,7 +364,6 @@ static REGISTRY: &[ConfigField] = &[
         Enum(LAYOUT_INTENT_VALUES),
     ),
     f("input.capslock.cancel_on_mode_switch", Bool),
-    f("input.capslock.english_case_cycle", Bool),
     f("input.temp_pinyin.enabled", Bool),
     f("input.temp_pinyin.trigger_keys", StrList),
     f("input.temp_pinyin.hotkey", Str),

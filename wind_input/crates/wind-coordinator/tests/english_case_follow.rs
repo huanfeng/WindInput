@@ -347,7 +347,7 @@ fn capslock_cycles_three_variants() {
         return;
     }
     let mut cfg = english_config();
-    cfg.input.capslock.english_case_cycle = true;
+    cfg.input.english_case_cycle_key = "capslock".into();
     let coord = coord_with(cfg, "cycle");
     type_word_cased(&coord, "Hi");
     assert!(
@@ -403,7 +403,7 @@ fn capslock_not_hijacked_outside_english() {
         return;
     }
     let mut cfg = temp_english_config(); // active = wubi86
-    cfg.input.capslock.english_case_cycle = true;
+    cfg.input.english_case_cycle_key = "capslock".into();
     let coord = coord_with(cfg, "cycle_cn");
     // 打五笔码，出的是中文候选。
     for c in "wq".chars() {
@@ -427,7 +427,7 @@ fn capslock_not_hijacked_without_candidates() {
         return;
     }
     let mut cfg = english_config();
-    cfg.input.capslock.english_case_cycle = true;
+    cfg.input.english_case_cycle_key = "capslock".into();
     let coord = coord_with(cfg, "cycle_idle");
     assert!(
         !coord.debug_cycle_english_case(),
@@ -443,7 +443,7 @@ fn capslock_cycle_works_in_temp_english() {
         return;
     }
     let mut cfg = temp_english_config();
-    cfg.input.capslock.english_case_cycle = true;
+    cfg.input.english_case_cycle_key = "capslock".into();
     let coord = coord_with(cfg, "cycle_te");
     type_word_cased(&coord, "Hi");
     assert!(coord.debug_cycle_english_case(), "临英也是英文语境");
@@ -462,7 +462,7 @@ fn variant_resets_after_commit() {
         return;
     }
     let mut cfg = english_config();
-    cfg.input.capslock.english_case_cycle = true;
+    cfg.input.english_case_cycle_key = "capslock".into();
     let coord = coord_with(cfg, "cycle_reset");
     type_word_cased(&coord, "Hi");
     assert!(coord.debug_cycle_english_case());
@@ -475,4 +475,86 @@ fn variant_resets_after_commit() {
         "下一次组合应回到默认档，实际: {:?}",
         coord.debug_page_texts()
     );
+}
+
+/// ★ macOS 落点：CapsLock 在那边到不了输入法(只有锁定态经 toggles 传过来, 按键本身走
+/// flagsChanged 且 toWindowsVK 无映射), 故触发键可换成 Tab —— 它走正常 keydown 主链路。
+///
+/// 这条同时钉住「两个消费点共用同一套判据」：Tab 不经全局钩子, 走的是
+/// `try_english_case_cycle_key`, 产出必须与 CapsLock 那条逐格相同。
+#[test]
+fn tab_can_be_the_cycle_key() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let mut cfg = english_config();
+    cfg.input.english_case_cycle_key = "tab".into();
+    let coord = coord_with(cfg, "cycle_tab");
+    type_word_cased(&coord, "Hi");
+    assert!(coord.debug_page_texts().iter().any(|t| t == "Hibernate"));
+
+    coord.handle_key_event(&key(0x09, 0)); // VK_TAB
+    assert!(
+        coord.debug_page_texts().iter().any(|t| t == "HIBERNATE"),
+        "Tab 应切到全大写档，实际: {:?}",
+        coord.debug_page_texts()
+    );
+    coord.handle_key_event(&key(0x09, 0));
+    assert!(
+        coord.debug_page_texts().iter().any(|t| t == "hibernate"),
+        "再按一次到全小写档，实际: {:?}",
+        coord.debug_page_texts()
+    );
+}
+
+/// 配了 Tab 时 CapsLock **不**生效, 反之亦然——键即开关, 不是「开了就两个键都能用」。
+#[test]
+fn only_the_configured_key_cycles() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let mut cfg = english_config();
+    cfg.input.english_case_cycle_key = "tab".into();
+    let coord = coord_with(cfg, "cycle_only_tab");
+    type_word_cased(&coord, "Hi");
+    // 钩子那条路(debug 入口)在配了 tab 时也不该改档：它的调用方 handle_capslock_hook_press
+    // 有 VK_CAPITAL 判据, 而钩子本身此时压根不会安装。
+    let before = coord.debug_page_texts();
+    coord.handle_key_event(&key(0x20, 0)); // 空格上屏, 结束这一次组合
+    let _ = before;
+
+    let mut cfg2 = english_config();
+    cfg2.input.english_case_cycle_key = "capslock".into();
+    let coord2 = coord_with(cfg2, "cycle_only_caps");
+    type_word_cased(&coord2, "Hi");
+    coord2.handle_key_event(&key(0x09, 0)); // 配的是 capslock, Tab 不该切档
+    assert!(
+        coord2.debug_page_texts().iter().any(|t| t == "Hibernate"),
+        "配 capslock 时 Tab 不得切档(它该落回自己原本的语义)，实际: {:?}",
+        coord2.debug_page_texts()
+    );
+}
+
+/// 留空 = 关闭；不认识的键名同样按关闭处理(且启动会告警, 不静默)。
+#[test]
+fn unknown_or_empty_key_disables_the_feature() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    for (tag, val) in [("cycle_empty", ""), ("cycle_bogus", "no_such_key")] {
+        let mut cfg = english_config();
+        cfg.input.english_case_cycle_key = val.into();
+        let coord = coord_with(cfg, tag);
+        type_word_cased(&coord, "Hi");
+        coord.handle_key_event(&key(0x09, 0));
+        assert!(!coord.debug_cycle_english_case(), "{val:?} 应按关闭处理");
+        assert!(
+            coord.debug_page_texts().iter().any(|t| t == "Hibernate"),
+            "{val:?} 下档位不该变，实际: {:?}",
+            coord.debug_page_texts()
+        );
+    }
 }

@@ -839,6 +839,14 @@ impl MessageHandler for Coordinator {
             return act;
         }
 
+        // ── 英文候选大小写档位循环（`input.english_case_cycle_key`）──
+        // 与上一段同处「候选窗显示期间生效的快捷键」这一层，理由也相同：五个模式一次接通。
+        // 守卫（配了键 / 按的就是那个键 / 英文语境 / 有候选）都在函数内部，任一不成立即返回
+        // None，按键原样落回它本来的语义。CapsLock 那份走全局钩子，不经此处。
+        if let Some(act) = self.try_english_case_cycle_key(data) {
+            return act;
+        }
+
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // **无条件**写入（含 false）：只在为真时置位会把上一次按键的来源留给这一次，
         // 表现为「先按一下小键盘、再按主键盘同一个键也出半角」。见 `State::numpad_origin`。

@@ -39,6 +39,26 @@ pub(crate) fn parse_jump_out_keys(list: &[String]) -> std::collections::HashSet<
         .collect()
 }
 
+/// 解析英文大小写档位循环的触发键名 → VK。空串 / 未知名 → `None`（＝功能关闭）。
+///
+/// 值域刻意与 [`parse_jump_out_keys`] 同族（都是非可打印功能键，不在 keymap 的 OEM 符号
+/// 键表里），另加 `capslock`——它是 Windows 上的推荐值，也是唯一走全局钩子那条独立路径的键。
+///
+/// ⚠️ **未知键名要告警**：本函数只负责解析，告警在 `ConfigBundle::from_config` 的调用点，
+/// 那里才知道用户原本写的是什么。静默回落成「功能关闭」正是本仓反复栽过的
+/// 「拧了没反应的旋钮」。
+pub(crate) fn parse_case_cycle_key(name: &str) -> Option<u32> {
+    match name.trim().to_lowercase().as_str() {
+        "" => None,
+        "capslock" | "caps_lock" => Some(keymap::VK_CAPITAL),
+        "tab" => Some(keymap::VK_TAB),
+        "enter" | "return" => Some(keymap::VK_RETURN),
+        "space" => Some(keymap::VK_SPACE),
+        "escape" | "esc" => Some(keymap::VK_ESCAPE),
+        _ => None,
+    }
+}
+
 /// `jump_out_keys` 是否含「右符号键本身」这一特殊值 → 打 `）` 跳出已插入的 `（）`。
 /// 与 VK 集合分开表示：右符号不是固定按键，取决于当前生效的配对表。
 pub(crate) fn parse_jump_out_on_right_symbol(list: &[String]) -> bool {
@@ -59,6 +79,9 @@ pub(crate) struct ConfigBundle {
     pub(crate) en_pairs: Vec<(char, char)>,
     /// 配对跳出键的 VK 码集合（预解析自 `auto_pair.jump_out_keys`，空=不启用）。
     pub(crate) jump_out_keys: std::collections::HashSet<u32>,
+    /// 英文大小写档位循环的触发键 VK（预解析自 `input.english_case_cycle_key`）。
+    /// `None` = 功能关闭——**键即开关**，此外没有第二个闸门。
+    pub(crate) english_case_cycle_vk: Option<u32>,
     /// 输入右符号本身是否跳出（`jump_out_keys` 含 `right_symbol`）。对称配对不受此项影响。
     pub(crate) jump_out_on_right_symbol: bool,
     /// 「英半列有自定义标点映射」的源字符集合（预解析自 `punct.custom_mappings`，空=英文模式
@@ -286,6 +309,15 @@ impl ConfigBundle {
         let cn_pairs = parse_pairs(&config.input.auto_pair.chinese_pairs);
         let en_pairs = parse_pairs(&config.input.auto_pair.english_pairs);
         let jump_out_keys = parse_jump_out_keys(&config.input.auto_pair.jump_out_keys);
+        let english_case_cycle_vk = parse_case_cycle_key(&config.input.english_case_cycle_key);
+        if english_case_cycle_vk.is_none() && !config.input.english_case_cycle_key.trim().is_empty()
+        {
+            // 写了值却解析不出来 ⇒ 用户以为开了、实际是关的。不告警就是静默失效。
+            warn!(
+                "input.english_case_cycle_key = {:?} 不是可识别的键名，英文大小写档位循环按关闭处理；                 可用值：capslock / tab / enter / space / escape（Windows 建议 capslock，macOS 建议 tab）",
+                config.input.english_case_cycle_key
+            );
+        }
         let jump_out_on_right_symbol =
             parse_jump_out_on_right_symbol(&config.input.auto_pair.jump_out_keys);
         // 英文模式下需要 DLL 吃下转发的标点键 = 「全局配了英半列自定义」∪「英文智能符号参与集」
@@ -316,6 +348,7 @@ impl ConfigBundle {
             cn_pairs,
             en_pairs,
             jump_out_keys,
+            english_case_cycle_vk,
             jump_out_on_right_symbol,
             custom_en_punct_chars,
             key_resolver,

@@ -424,6 +424,13 @@ exclude_blocks = []
 
 [input]
 filter_mode = "smart"
+# english_case_cycle_key：打英文时(英文方案/临时英文)，临时夺取哪个键来切换候选的大小写档位
+#   ——「跟随输入 → 全大写 → 全小写 → 跟随输入」，一次组合结束即复位。留空 = 关闭(出厂)。
+#   可用值：capslock / tab / enter / space / escape。**键即开关**，没有第二个开关。
+#   Windows 建议 capslock；macOS 上 CapsLock 到不了输入法(系统只传锁定态、不传按键)，建议 tab。
+#   ⚠️ 被夺取的键在英文输入期间用不出原本的语义(capslock 的大写锁定、tab 的辅助码/配对跳出/
+#      会话动作)，其余时候一律照旧。撞车时启动会告警。
+english_case_cycle_key = ""
 # 空码（打了码但一个候选都没有，多半是打错了）时，终结键怎么处置这串废码。
 #   enter_behavior           回车          commit | clear
 #   space_on_empty_behavior  空格          commit | clear
@@ -647,13 +654,6 @@ candidate_layout = "follow"
 # 切方案（直达热键 / 循环键 / 托盘）一律无条件取消大写并归位中文，不看本项：
 # 那两件事是「用新方案打字」的前提，不是可选副作用。
 cancel_on_mode_switch = false
-# english_case_cycle：英文方案 / 临时英文输入期间，CapsLock 改为切换候选的大小写档位
-#   （默认 → 全大写 → 全小写 → 默认），一次组合结束复位。出厂关。
-#   只在「开着 + 处于英文输入态 + 有候选」三者同时成立时夺取该键，其余时候 CapsLock 照旧
-#   （用户绑定的会话动作，或系统原生大小写锁定）。
-#   ⚠️ 开启后若把 CapsLock 绑了别的会话动作，那个绑定在英文输入期间按不出来（启动会告警）。
-english_case_cycle = false
-
 [input.temp_pinyin]
 enabled = true
 trigger_keys = ["backtick"]

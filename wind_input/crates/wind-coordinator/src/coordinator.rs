@@ -2475,8 +2475,8 @@ impl Coordinator {
         coordinator.notify_toolbar();
         // 码元集与按键功能的冲突体检（只告警）。默认字符集下直接返回，无开销。
         coordinator.warn_code_char_conflicts();
-        // CapsLock 的两种用途撞车体检（只告警）。出厂关 ⇒ 默认直接返回。
-        coordinator.warn_capslock_case_cycle_conflict();
+        // 档位循环触发键的撞车体检（只告警）。出厂不配 ⇒ 默认直接返回。
+        coordinator.warn_english_case_cycle_conflict();
         coordinator
     }
 
@@ -6906,11 +6906,11 @@ impl Coordinator {
     /// （资源进程级 + 切换不幂等），只是它落在 Rust 侧。
     pub fn capslock_bound(&self) -> bool {
         let rt = self.rt();
-        // ★ 大小写档位循环同样要求装钩子：它夺取的就是 CapsLock 本身，而 CapsLock 的
-        // keydown 压根不转发给服务端、锁定态又由系统在 TSF 之前维护 —— 没有钩子，功能
-        // 永不触发且毫无报错。判据写成析取而不是只问 `session_actions`，正是因为本功能
-        // **不占用**那张表里的动词（开关即唯一闸门，见 `CapslockConfig::english_case_cycle`）。
-        rt.config.input.capslock.english_case_cycle
+        // ★ 大小写档位循环**选了 CapsLock 时**同样要求装钩子：CapsLock 的 keydown 压根不
+        // 转发给服务端、锁定态又由系统在 TSF 之前维护 —— 没有钩子，功能永不触发且毫无报错。
+        // 判据是「配置的触发键恰好是 CapsLock」而不是「功能开着」：选了 tab 的用户（macOS
+        // 的推荐值）走的是 keydown 主链路，不该为此白装一个全局钩子。
+        rt.english_case_cycle_vk == Some(keymap::VK_CAPITAL)
             || rt
                 .session_keys
                 .classify(keymap::VK_CAPITAL, false, true)
@@ -7023,7 +7023,7 @@ impl Coordinator {
     /// 不同——同一个档位、同一串输入，两条路给出两份候选，这种不一致最难查。重建则天然
     /// 与逐键路径同源：候选表本就是每次按键从零装配的。
     pub(crate) fn try_english_case_cycle(&self) -> Option<KeyAction> {
-        if !self.rt().config.input.capslock.english_case_cycle {
+        if self.rt().english_case_cycle_vk.is_none() {
             return None;
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -7042,27 +7042,69 @@ impl Coordinator {
         Some(KeyAction::Consumed)
     }
 
-    /// 启动体检：开了大小写档位循环、又把 CapsLock 绑了别的会话动作 → 告警。
+    /// keydown 主链路上的档位循环闸门：配置的触发键**不是** CapsLock 时走这条。
     ///
-    /// 两者不是配置冲突（各自都合法），而是**运行期的优先级夺取**：英文输入期间那个绑定
-    /// 按不出来。现场表现是「CapsLock 翻页在中文里好用，一打英文就失灵」——不告警的话
-    /// 无从知道是谁夺走的。文案照 [`Self::warn_code_char_conflicts`] 的形制，直接给出
-    /// 化解办法而不是只陈述状态。
-    pub(crate) fn warn_capslock_case_cycle_conflict(&self) {
+    /// # 为什么与钩子那条分成两个消费点
+    ///
+    /// CapsLock 是 keyup-only 键（C++ 压根不转发它的 keydown，锁定态由系统在 TSF 之前
+    /// 维护），只能靠全局钩子拦；而 tab / enter 这些是普通键，走的是正常的 keydown 链路。
+    /// 两条路的**判据**共用 [`Self::try_english_case_cycle`]，分开的只是「谁把按键送进来」。
+    ///
+    /// ★ 落点在**单点分派之前**（`handle_candidate_action_hotkey` 旁边）：那里是「候选窗
+    /// 显示期间生效的快捷键」的既定位置，五个模式一次接通。挂进各模式处理器要写五遍还会漏
+    /// ——`overlay_ctrl_alt_guard` 的文档里点名了这条纪律。
+    ///
+    /// ⚠️ 只认 keydown：keyup 也放行的话，一次按键会切两档。
+    pub(crate) fn try_english_case_cycle_key(&self, data: &KeyEventData) -> Option<KeyAction> {
+        if data.event_type != EVENT_KEY_DOWN {
+            return None;
+        }
+        // 带 Ctrl/Alt/Cmd 的组合归宿主快捷键，不是本功能。
+        if data.modifiers & MOD_SHORTCUT != 0 {
+            return None;
+        }
+        let vk = self.rt().english_case_cycle_vk?;
+        // CapsLock 那份归钩子路径，走不到这里（它的 keydown 不会到达服务端）；显式排除是
+        // 为了「同一个键被两条路各处理一次」这种最难查的重复触发从结构上不可能发生。
+        if vk == keymap::VK_CAPITAL || data.key_code != vk {
+            return None;
+        }
+        self.try_english_case_cycle()
+    }
+
+    /// 启动体检：档位循环的触发键被别的功能占着 → 告警。
+    ///
+    /// 这不是配置冲突（各自都合法），而是**运行期的优先级夺取**：英文输入期间那些绑定
+    /// 按不出来。现场表现是「CapsLock 翻页在中文里好用，一打英文就失灵」「Tab 在英文里
+    /// 调不出辅助码」——不告警的话无从知道是谁夺走的。文案照
+    /// [`Self::warn_code_char_conflicts`] 的形制，直接给出化解办法而不是只陈述状态。
+    ///
+    /// ⚠️ 占用方要**逐类点名**：只报「被占用」而不说被谁，用户仍得挨个试。
+    pub(crate) fn warn_english_case_cycle_conflict(&self) {
         let rt = self.rt();
-        if !rt.config.input.capslock.english_case_cycle {
+        let Some(vk) = rt.english_case_cycle_vk else {
+            return;
+        };
+        let mut owners: Vec<&str> = Vec::new();
+        if rt.session_keys.classify(vk, false, true).is_some()
+            || rt.schema_session_vks.contains(&vk)
+        {
+            owners.push("会话动作（keys.session_actions）");
+        }
+        if rt.jump_out_keys.contains(&vk) {
+            owners.push("配对跳出键（input.auto_pair.jump_out_keys）");
+        }
+        if vk == keymap::VK_CAPITAL {
+            owners.push("系统大写锁定");
+        }
+        if owners.is_empty() {
             return;
         }
-        let bound = rt
-            .session_keys
-            .classify(keymap::VK_CAPITAL, false, true)
-            .is_some()
-            || rt.schema_session_vks.contains(&keymap::VK_CAPITAL);
-        if bound {
-            warn!(
-                "CapsLock 同时配了会话动作与英文大小写档位循环（input.capslock.english_case_cycle）；                 英文方案 / 临时英文输入期间本键归档位循环，那个会话动作在此期间按不出来。                 要保留会话动作：关掉 english_case_cycle；要保留档位循环：把该动作改绑到别的键"
-            );
-        }
+        warn!(
+            "英文大小写档位循环占用的键（input.english_case_cycle_key = {:?}）同时配作 {}；             英文方案 / 临时英文**输入期间**本键归档位循环，那些功能在此期间按不出来。             要保留它们：把 english_case_cycle_key 换成别的键或留空；要保留档位循环：把那些功能改绑到别的键",
+            rt.config.input.english_case_cycle_key,
+            owners.join(" / ")
+        );
     }
 
     fn handle_capslock_hook_press(&self) {
@@ -7080,7 +7122,9 @@ impl Coordinator {
         // ★ **最先**试大小写档位循环：它是「英文输入态下临时夺取本键」，优先级按定义高于
         // 用户给 CapsLock 配的任何会话动作。守卫（开关 / 英文语境 / 有候选）都在函数内部，
         // 三者有一个不成立就返回 None，键原样落回下面的既有两条路。
-        if let Some(act) = self.try_english_case_cycle() {
+        if self.rt().english_case_cycle_vk == Some(keymap::VK_CAPITAL)
+            && let Some(act) = self.try_english_case_cycle()
+        {
             debug!("CapsLock 钩子：英文候选大小写档位循环");
             let _ = act;
             return;
