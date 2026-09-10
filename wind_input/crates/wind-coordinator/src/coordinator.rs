@@ -7023,9 +7023,8 @@ impl Coordinator {
     /// 不同——同一个档位、同一串输入，两条路给出两份候选，这种不一致最难查。重建则天然
     /// 与逐键路径同源：候选表本就是每次按键从零装配的。
     pub(crate) fn try_english_case_cycle(&self) -> Option<KeyAction> {
-        if self.rt().english_case_cycle_vk.is_none() {
-            return None;
-        }
+        // 未配置触发键就没有这条路：`?` 在此只作「无配置即返回 None」的守卫，值本身不用。
+        self.rt().english_case_cycle_vk?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.candidates.is_empty() || !self.in_english_input_context(&state) {
             return None;
