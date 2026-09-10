@@ -11,7 +11,6 @@
 //! 按进程名的兼容性规则（HostRender 白名单、caret 定位等）不在这里，见
 //! `app_compat.rs`（独立的 `compat.toml` 文件，字段级合并，键名不受本文件四层合并约束）。
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -6989,6 +6988,30 @@ impl Config {
         dirs::config_dir().map(|d| d.join(Self::app_dir_name()))
     }
 
+    /// 「用户配置目录取不到」时的错误文本——**把进程自己已经知道的事实写进去**。
+    ///
+    /// 原文只有一句 `no user config dir`，它一路透传到设置页的「保存失败」气泡上。
+    /// 用户看不懂，维护者也无从判断，只能回头问「你是怎么装的、用户目录在哪」
+    /// （issue #120 的真实过程）——而这些事实全都在本进程手边。
+    ///
+    /// [`Self::user_config_dir`] 只有两条出口能返回 `None`，本函数按同样的分支给话术：
+    /// 便携模式下取不到安装根，或非便携下漫游 AppData 已知文件夹解析失败。
+    /// **`datadir.conf` 非法 / 目录建不出来一律回落默认、不会走到这里**，
+    /// 所以不能把它写成「你的自定义数据目录有问题」——那会把排查引向错误方向。
+    fn no_user_config_dir_error() -> anyhow::Error {
+        if crate::variant::is_portable() {
+            return anyhow::anyhow!(
+                "取不到便携模式的用户数据目录（定位不到程序所在目录）。\
+                 请确认程序未被移动或删除后重试"
+            );
+        }
+        anyhow::anyhow!(
+            "取不到用户配置目录：系统未能提供漫游数据目录（%APPDATA%）。\
+             常见于漫游配置文件尚未挂载或账户环境异常，通常重启输入法服务\
+             （或重新登录）即可恢复；若持续出现请附带本条消息反馈"
+        )
+    }
+
     /// 探测用户配置目录当前是否可用。纯查询，无副作用、不重试。
     ///
     /// 判据刻意建在**漫游根目录**而非 `config.toml` 上：漫游根一旦可用，
@@ -7334,7 +7357,7 @@ impl Config {
         if path.is_empty() {
             anyhow::bail!("set_user_value: empty path");
         }
-        let dir = Self::user_config_dir().context("no user config dir")?;
+        let dir = Self::user_config_dir().ok_or_else(Self::no_user_config_dir_error)?;
         std::fs::create_dir_all(&dir)?;
         let file = dir.join("config.toml");
 
