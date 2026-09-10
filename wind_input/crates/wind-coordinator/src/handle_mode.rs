@@ -204,6 +204,35 @@ impl Coordinator {
             .find(|m| self.engine_mgr.loaded_engine_type(m) == Some(want))
     }
 
+    /// 单条候选查注释**库**时的白名单作用域（`[[ui.comment_dicts]].schemas`）。
+    ///
+    /// 非 mix 时恒是 `fallback`（调用方按 `effective_data_schema` 解析一次的那份）。
+    /// mix 下必须逐候选再问一次：快捷输入把多个成员方案的候选合进同一张列表，而
+    /// `effective_data_schema` 对 `Mix(_)` 返回 `None` ⇒ 整列表按主方案求白名单，英文
+    /// 成员的候选查不到白名单写着 `english` 的注释库——同一个单词在英文方案/临英下有
+    /// 释义、在快捷输入里没有（论坛 #153）。
+    ///
+    /// ★ 归属走 [`Self::mix_candidate_owner`]，与词频/加词**同一个**函数：注释库是数据类
+    /// 资源，归属与词频/短语同源。另写一份「哪个候选算哪个成员」的判据就是第二个真相源。
+    /// 该函数的已知局限（多个同类型成员时取靠前的那个）在此原样继承——注释查错库的
+    /// 后果比词频记错桶轻，且两者错在一起总比各错各的容易查。
+    ///
+    /// 无匹配（内置来源、短语、生僻字成员等）时回落 `fallback`，与改动前一致。
+    pub(crate) fn comment_dict_scope<'a>(
+        &self,
+        state: &State,
+        cand: &Candidate,
+        is_mix: bool,
+        fallback: &'a str,
+    ) -> std::borrow::Cow<'a, str> {
+        if !is_mix {
+            return std::borrow::Cow::Borrowed(fallback);
+        }
+        self.mix_candidate_owner(state, cand)
+            .map(std::borrow::Cow::Owned)
+            .unwrap_or(std::borrow::Cow::Borrowed(fallback))
+    }
+
     /// mix 模式的成员方案 id 列表（占位符已解析，未过滤）。
     fn mix_members_resolved(&self, idx: u8) -> Vec<String> {
         let rt = self.rt();
@@ -2690,5 +2719,49 @@ mod schema_switch_finish_guard {
                 "finish_user_schema_switch 不得手写 {pat}：编码处置归 take_input_on_schema_switch"
             );
         }
+    }
+}
+
+/// 注释库白名单作用域的分派（[`Coordinator::comment_dict_scope`]）。
+///
+/// ⚠️ 这里只守分派本身。「mix 里英文成员的候选真的查到 english 那份注释库」需要**真实
+/// 加载的方案引擎**（`mix_candidate_owner` 按 `loaded_engine_type` 反查），而无头夹具
+/// 加载不了方案 ⇒ 这一层留给真机验证，别把它当成已被测试覆盖。
+#[cfg(test)]
+mod comment_dict_scope_tests {
+    use crate::coordinator::{Coordinator, State};
+    use wind_candidate::{Candidate, CandidateSource};
+    use wind_config::Config;
+
+    fn cand(source: CandidateSource) -> Candidate {
+        Candidate {
+            text: "word".to_string(),
+            source,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn non_mix_always_uses_the_precomputed_scope() {
+        let c = Coordinator::new_headless(Config::default(), None);
+        let state = State::default();
+        assert_eq!(
+            c.comment_dict_scope(&state, &cand(CandidateSource::English), false, "wubi86"),
+            "wubi86",
+            "非 mix 时不该逐候选另算，那是白花的开销"
+        );
+    }
+
+    #[test]
+    fn mix_without_a_matching_member_falls_back() {
+        let c = Coordinator::new_headless(Config::default(), None);
+        let mut state = State::default();
+        state.active = Some(crate::pipeline::ModeKind::Mix(0));
+        // 短语等来源在 `mix_candidate_owner` 里本就返回 None（无词库归属可言），
+        // 此时必须回落到调用方算好的那份 —— 否则快捷输入里的短语候选会连注释一起丢。
+        assert_eq!(
+            c.comment_dict_scope(&state, &cand(CandidateSource::Phrase), true, "wubi86"),
+            "wubi86"
+        );
     }
 }

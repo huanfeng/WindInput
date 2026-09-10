@@ -5564,6 +5564,16 @@ impl Coordinator {
         let comment_dict_schema = self
             .effective_data_schema(state)
             .unwrap_or_else(|| self.engine_mgr.active_schema_id());
+        // ⚠️ 快捷输入（mix）下这一份**不够**：它把多个成员方案的候选合进同一张列表，
+        // 而 `effective_data_schema` 对 `Mix(_)` 返回 `None` ⇒ 整列表都按主方案（五笔等）
+        // 求白名单，于是英文成员的候选查不到白名单写着 `english` 的注释库——同一个单词，
+        // 英文方案/临英下有释义，快捷输入里没有（论坛 #153）。
+        //
+        // 归属逐候选取 `mix_candidate_owner`，与词频/加词**同一个**函数：注释库是数据类
+        // 资源，归属与词频/短语同源（见 `comment.rs` 里 `dict` 变量那段）。另写一份
+        // 「哪个候选算哪个成员」的判据就是第二个真相源，漂移后的表现是「词频记进 A 桶、
+        // 注释查的是 B 桶」这类只在多成员配置下才现形的错配。
+        let mix_comment_scope = matches!(state.active, Some(ModeKind::Mix(_)));
         // [编码] 段来源方案（循环外解析一次）：码表方案=自身全部编码（码长升序 a/ab/abc）、
         // 混输=其主码表成员、拼音=全局主码表。编码按词查方案词库反查索引（word_codes_in），
         // 不按取码规则生成。候选并非用该编码方案直接输入时（来源方案≠活跃方案，或处于
@@ -5621,13 +5631,15 @@ impl Coordinator {
                 // 注释段（候选右侧灰字）：渲染当前排布对应的模板。
                 // 与悬停提示无耦合——注释放不下的内容不往气泡里塞，气泡有自己的
                 // `ui.tooltip.*` 三段（编码/拼音/拆字），塞了会与之重复。
+                let dict_schema =
+                    self.comment_dict_scope(state, c, mix_comment_scope, &comment_dict_schema);
                 let comment = self.comment_for(
                     c,
                     comment_tpl,
                     comment_max,
                     &reverse,
                     pinyin_hint,
-                    &comment_dict_schema,
+                    &dict_schema,
                 );
                 // 调试段：独立一行 [调试] + 来源/方案/编码/权重/序/词频。全关时不再兜底回填编码
                 // （tooltip 各 provider 全关即真正为空，不显示气泡）。
