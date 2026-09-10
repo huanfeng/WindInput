@@ -85,7 +85,7 @@ pub(crate) fn punct_char(key_code: u32, shift: bool) -> Option<char> {
 /// 两边都有的，按它自己那个键送）。
 pub fn char_strokes() -> Vec<(char, u32, bool)> {
     let mut out: Vec<(char, u32, bool)> = Vec::new();
-    let mut push = |ch: char, vk: u32, shift: bool, out: &mut Vec<(char, u32, bool)>| {
+    let push = |ch: char, vk: u32, shift: bool, out: &mut Vec<(char, u32, bool)>| {
         if !out.iter().any(|(c, _, _)| *c == ch) {
             out.push((ch, vk, shift));
         }
