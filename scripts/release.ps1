@@ -26,9 +26,20 @@
 #   .\scripts\release.ps1 push             # 五仓同步推送, 不打 tag
 #   .\scripts\release.ps1 sign-draft       # 拉 CI 产物 → 本机签名 → 回传草稿 Release
 #   .\scripts\release.ps1 sign-draft -Version 0.120.2   # 指定草稿 (缺省取最新的)
+#   .\scripts\release.ps1 auto-sign        # 等 CI 跑完 → 自动接 sign-draft (可指定 -Version)
+#   .\scripts\release.ps1 patch -AutoSign  # 打完 tag 直接进入等待, 全程无人值守
 #   .\scripts\release.ps1 -Version 0.111.0-beta1   # 指定任意版本号发布
 #
 # 开关: -DryRun 只演练 / -Force 覆盖同名 tag / -Yes 非交互 / -Branch 指定分支
+#       -AutoSign 打完 tag 自动等 CI 并签名 / -TimeoutMinutes 等待上限 / -PollMinutes 轮询间隔
+#
+# 无人值守发布 (打 tag → 等 CI → 签名回传, 约 25 分钟):
+#   打完 tag 后脚本会问「是否自动签名」, 答 y 即进入轮询等待; 也可用 -AutoSign 免问。
+#   等待期间只有一行状态在原地刷新, 阶段变化时才留一行记录; 按任意键立即查询一次,
+#   Ctrl+C 随时中止 —— 中止不会丢任何东西, 事后 `release.ps1 sign-draft` 接着跑即可。
+#   ⚠️ 签名会话有效期 2 小时, 而 CI 约 20 分钟: 选自动签名时【现在就把会话开好】,
+#      等到 CI 结束时它仍在有效期内。脚本在进入等待前会先体检一次并提示;
+#      CI 跑完时若会话仍不可用, 无人值守模式下最多再宽限 10 分钟, 之后停下来等你手动接。
 #
 # 注意:
 #   - 所有仓库必须【处于目标分支上】。repo sync 后会停在游离 HEAD, 此时脚本中断
@@ -38,7 +49,7 @@
 param(
     # 子命令; 留空进交互菜单
     [Parameter(Position = 0)]
-    [ValidateSet("", "menu", "check", "patch", "minor", "current", "status", "push", "sign-draft")]
+    [ValidateSet("", "menu", "check", "patch", "minor", "current", "status", "push", "sign-draft", "auto-sign")]
     [string]$Command = "",
     # 指定发布版本号 (不含 v 前缀), 给定时忽略子命令的 bump 规则
     [string]$Version,
@@ -51,7 +62,16 @@ param(
     # 覆盖已存在的同名 tag (本地 -f + 远端 --force)
     [switch]$Force,
     # 非交互: 所有确认自动通过 (预检硬失败仍中止)
-    [switch]$Yes
+    [switch]$Yes,
+    # 打完 tag 后不再询问, 直接进入「等 CI → 自动签名回传」
+    [switch]$AutoSign,
+    # 等 CI 的总时长上限 (分钟); 构建约 20 分钟, 留足重跑余量
+    [ValidateRange(1, 1440)]
+    [int]$TimeoutMinutes = 60,
+    # 构建中的轮询间隔 (分钟); 临近完成时脚本会自动收紧到 1 分钟。
+    # 下限必须是 1: 给 0 会变成不带 sleep 的死循环, 满速轮询 GitHub API 直到撞限流。
+    [ValidateRange(1, 60)]
+    [int]$PollMinutes = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -90,6 +110,91 @@ function ErrMsg ([string]$m) { Write-Host $m -ForegroundColor Red }
 function Gray   ([string]$m) { Write-Host $m -ForegroundColor DarkGray }
 function Cyan   ([string]$m) { Write-Host $m -ForegroundColor Cyan }
 
+# ---------- 进度显示辅助 ----------
+function Format-Size ([double]$bytes) {
+    if ($bytes -ge 1GB) { return ("{0:N2} GB" -f ($bytes / 1GB)) }
+    if ($bytes -ge 1MB) { return ("{0:N1} MB" -f ($bytes / 1MB)) }
+    if ($bytes -ge 1KB) { return ("{0:N0} KB" -f ($bytes / 1KB)) }
+    return ("{0:N0} B" -f $bytes)
+}
+# 秒 → mm:ss / h:mm:ss; 无法估算时给 --:--, 不要编一个假数字出来
+function Format-Span ([double]$seconds) {
+    if ($seconds -lt 0 -or [double]::IsNaN($seconds) -or [double]::IsInfinity($seconds) -or $seconds -gt 359999) {
+        return "--:--"
+    }
+    $t = [TimeSpan]::FromSeconds([math]::Round($seconds))
+    if ($t.TotalHours -ge 1) { return ("{0}:{1:d2}:{2:d2}" -f [int]$t.TotalHours, $t.Minutes, $t.Seconds) }
+    return ("{0:d2}:{1:d2}" -f $t.Minutes, $t.Seconds)
+}
+
+# 原地刷新的单行进度。输出被重定向时(管道 / 日志文件)整个退化为静默 ——
+# `\r` 在日志里不会回退光标, 只会攒出几千行垃圾; 那种场合由调用方按里程碑打整行。
+$script:ProgressInline = $true
+try { $script:ProgressInline = -not [Console]::IsOutputRedirected } catch { $script:ProgressInline = $false }
+
+# 终端显示列数, 不是字符数。
+# ⚠️ 这两个数在中文行上差很多 ("剩余 00:09" 的 .Length 是 9, 占 11 列)。用 .Length 去
+#    截断/补齐, 补出来的行会超出窗口宽度而【自动换行】—— 之后 `\r` 只能退到新行行首,
+#    上一帧就永久留在屏幕上了。5 分钟的倒计时能就此攒出几百行, 表现为"刷屏"。
+function Get-DisplayWidth ([string]$text) {
+    $w = 0
+    foreach ($c in $text.ToCharArray()) {
+        $u = [int]$c
+        if (($u -ge 0x1100 -and $u -le 0x115F) -or   # 韩文字母
+            ($u -ge 0x2E80 -and $u -le 0xA4CF) -or   # 部首扩展 ~ 彝文 (含 CJK 统一汉字)
+            ($u -ge 0xAC00 -and $u -le 0xD7A3) -or   # 韩文音节
+            ($u -ge 0xF900 -and $u -le 0xFAFF) -or   # CJK 兼容汉字
+            ($u -ge 0xFE30 -and $u -le 0xFE4F) -or   # CJK 兼容形式
+            ($u -ge 0xFF00 -and $u -le 0xFF60) -or   # 全角 ASCII
+            ($u -ge 0xFFE0 -and $u -le 0xFFE6)) {    # 全角符号
+            $w += 2
+        } else {
+            $w += 1
+        }
+    }
+    return $w
+}
+
+# 按显示列数截断到 $limit 列。
+# ⚠️ 按文本单元(grapheme)推进, 不是按 UTF-16 码元 —— BMP 外的字符(emoji 等)由两个码元
+#    组成, 按码元截会在中间断开, 留下一个孤立代理字符, 终端显示成乱码方块。
+function Limit-DisplayWidth ([string]$text, [int]$limit) {
+    if (-not $text) { return "" }
+    $w = 0
+    $sb = New-Object System.Text.StringBuilder
+    $e = [System.Globalization.StringInfo]::GetTextElementEnumerator($text)
+    while ($e.MoveNext()) {
+        $el = [string]$e.Current
+        $cw = Get-DisplayWidth $el
+        if ($w + $cw -gt $limit) { break }
+        [void]$sb.Append($el); $w += $cw
+    }
+    return $sb.ToString()
+}
+
+function Write-ProgressLine ([string]$text) {
+    if (-not $script:ProgressInline) { return }
+    $w = 100
+    try { $w = [Console]::WindowWidth - 1 } catch { }
+    if ($w -lt 20) { $w = 20 }
+    $text = Limit-DisplayWidth $text $w
+    # 补齐用的是"还差几列", 不是"还差几个字符"
+    $pad = $w - (Get-DisplayWidth $text)
+    if ($pad -gt 0) { $text = $text + (" " * $pad) }
+    Write-Host ("`r" + $text) -NoNewline
+    $script:ProgressActive = $true
+}
+# 结束一段原地进度: 把最后一帧留在屏幕上并换行。
+# 没有正在刷新的进度行时什么都不做 —— 否则每次调用都平白多吐一个空行。
+$script:ProgressActive = $false
+function Close-ProgressLine ([string]$finalText) {
+    if (-not $script:ProgressInline) { if ($finalText) { Gray $finalText }; return }
+    if ($finalText) { Write-ProgressLine $finalText }
+    elseif (-not $script:ProgressActive) { return }
+    Write-Host ""
+    $script:ProgressActive = $false
+}
+
 # ---------- git 封装 ----------
 # 统一走 git -C <repo>, 避免 Set-Location 造成状态泄漏。
 function Invoke-GitRaw ([string]$repo, [string[]]$gitArgs) {
@@ -113,8 +218,14 @@ function Invoke-GitOrDie ([string]$repo, [string[]]$gitArgs, [string]$what) {
 }
 
 # ---------- 交互 ----------
-function Confirm-Step ([string]$prompt, [bool]$defaultYes = $false) {
-    if ($Yes) { Gray "$prompt  → (-Yes) 自动确认"; return $true }
+# 无人值守签名期间置位: 让 Invoke-SignDraft 里那些「继续?」「上传?」不再拦人。
+# ⚠️ 它【不能】用来跳过签名会话体检 —— 那道闸门问的是「客观上能不能签」,
+#    不是「要不要征求同意」。故 Confirm-Step 提供 $ignoreAuto 让它退出自动模式。
+$script:AutoYes = $false
+
+function Confirm-Step ([string]$prompt, [bool]$defaultYes = $false, [bool]$ignoreAuto = $false) {
+    if ($script:AutoYes -and -not $ignoreAuto) { Gray "$prompt  → (自动签名) 自动确认"; return $true }
+    if ($Yes -and -not $ignoreAuto) { Gray "$prompt  → (-Yes) 自动确认"; return $true }
     $hint = if ($defaultYes) { "[Y/n]" } else { "[y/N]" }
     while ($true) {
         try {
@@ -414,6 +525,9 @@ function Invoke-Release {
     # ---------- [3/3] 执行 ----------
     Write-Host ""
     Cyan "[3/3] 执行"
+    # 主仓 tag 是最后推的, 所以本次 CI run 的 createdAt 必然晚于这一刻。留 2 分钟宽限
+    # 抵消本地与 GitHub 的时钟差。用它挡掉「-Force 重发时误认上一轮旧 run」。
+    $execStart = (Get-Date).AddMinutes(-2)
     $done = @()
     $createdTags = @()      # 本次新建但尚未推送成功的本地 tag, 失败时回滚
     $failedRepo = $null; $failedMsg = $null
@@ -503,6 +617,22 @@ function Invoke-Release {
         Gray "CI: 推送 $tag 已触发 release.yml, 去 GitHub Actions 查看构建与草稿 Release。"
     }
     Cyan "=============================================================="
+
+    # ---- 收尾: 等 CI + 自动签名回传 ----
+    # 只在「真打了 tag」时提供 —— push/演练都没有可等的构建。
+    # -Yes 是「别拿确认打断我」, 不是「替我决定要不要多等 20 分钟」, 故它不隐含自动签名;
+    # 要无人值守请显式 -AutoSign。
+    if ($needTag -and -not $dryRun) {
+        $auto = $false
+        if ($AutoSign) { $auto = $true }
+        elseif (-not $Yes) {
+            Write-Host ""
+            Gray "下一步是等 CI 跑完 (约 20 分钟), 再把签名产物回传到草稿 Release。"
+            $auto = Confirm-Step "现在就守着 CI, 跑完自动签名回传?" $true
+        }
+        if ($auto) { return (Invoke-AutoSign $tag $TimeoutMinutes $PollMinutes $execStart) }
+        Gray "稍后手动收尾:  .\scripts\release.ps1 sign-draft   (或 auto-sign 让它自己等)"
+    }
     return 0
 }
 
@@ -533,7 +663,7 @@ function Sync-LocalVersionFile ([string]$newVersion) {
 #   2. dev.ps1 unstage 还原(内含版本号硬校验)
 #   3. dev.ps1 sign 8s / sign 9s —— 签名并【重新打包】
 #   4. verify-sign 硬校验后才上传
-#   5. gh release upload --clobber 覆盖草稿里的 4 个资产
+#   5. 带进度地覆盖草稿里的 4 个资产 (见下面 Send-ReleaseAssets)
 #   6. 删掉正文的未签名横幅
 #
 # ⚠️ 第 3 步为什么必须重新打包、不能对 CI 的成品补签外壳:签名夹在打包中间 ——
@@ -560,6 +690,368 @@ function Remove-UnsignedBanner ([string]$body) {
     if ($start -gt 0)             { $kept += $lines[0..($start - 1)] }
     if ($end + 1 -lt $lines.Count) { $kept += $lines[($end + 1)..($lines.Count - 1)] }
     return ($kept -join "`n")
+}
+
+# ============================================================
+# 带进度的资产上传
+# ============================================================
+# 为什么不用 `gh release upload`: 它把整个 HTTP 过程包在里面, 只在结束时打一行,
+# 4 个 20+MB 的包传下来是好几分钟的纯黑屏 —— 分不清是在传、卡住了, 还是网断了。
+# 这里直接打 GitHub 的 uploads 端点, 自己按块喂请求流, 从而拿到真实字节进度。
+#
+# ⚠️ AllowWriteStreamBuffering 必须关: 默认 .NET 会把整个文件先缓冲进内存再发,
+#    那样进度条会在几百毫秒内冲到 100%, 然后对着已完成的进度条干等好几分钟 ——
+#    比没有进度更误导人。关掉之后 Write() 才是真的往 socket 上写。
+#
+# 失败退路: 拿不到 token / uploadUrl 时原样退回 `gh release upload --clobber`,
+# 只是没有进度。发布流程的正确性不依赖这段代码。
+
+function Send-FileToUrl {
+    param(
+        [string]$Url,
+        [string]$Token,
+        [string]$Path,
+        [string]$Prefix        # 进度行前缀, 形如 "  [2/4] WindInput-Portable-0.120.3.zip"
+    )
+    $total = [long](Get-Item -LiteralPath $Path).Length
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.Method                    = "POST"
+    $req.ContentType               = "application/octet-stream"
+    $req.Accept                    = "application/vnd.github+json"
+    $req.UserAgent                 = "WindInput-release.ps1"
+    $req.AllowWriteStreamBuffering = $false
+    $req.ContentLength             = $total
+    # ⚠️ PowerShell 7 的 HttpWebRequest 是 HttpClient 的兼容壳: Timeout 覆盖【整个请求,
+    #    含请求体】, 而 ReadWriteTimeout 在这条路径上根本不起作用。实测 Timeout=4s 传
+    #    64MB, 写到 4016ms 就被 IOException 掐断。
+    #    所以这里【不能】按"建连超时"给 60 秒 —— 那等于要求 26MB 必须跑满 440KB/s,
+    #    慢网下 4 个包会全部失败。按体积折算成总上限, 20KB/s 的下限足够宽松,
+    #    真卡死时仍会在有限时间内退出去走重试/退路。
+    $req.Timeout                   = [int][math]::Min([int]::MaxValue, [math]::Max(600000, ($total / 20KB) * 1000))
+    $req.ReadWriteTimeout          = 600000
+    $req.Headers.Add("Authorization", "Bearer $Token")
+    $req.Headers.Add("X-GitHub-Api-Version", "2022-11-28")
+
+    # HttpWebRequest 只认 IE/系统代理设置, 不认 HTTPS_PROXY 环境变量 —— 而 gh、curl 认它。
+    # 不补这一段, 会出现「gh 能传、这里传不出去」的割裂。
+    $proxyUrl = if ($env:HTTPS_PROXY) { $env:HTTPS_PROXY } else { $env:https_proxy }
+    if ($proxyUrl) {
+        try { $req.Proxy = New-Object System.Net.WebProxy($proxyUrl, $true) } catch { }
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $sent = [long]0
+    $fs = $null; $rs = $null
+    try {
+        $rs  = $req.GetRequestStream()
+        $fs  = [System.IO.File]::OpenRead($Path)
+        $buf = New-Object byte[] 262144
+        $lastDrawMs = -1000
+        $lastMilestone = -1
+        while ($true) {
+            $n = $fs.Read($buf, 0, $buf.Length)
+            if ($n -le 0) { break }
+            $rs.Write($buf, 0, $n)
+            $sent += $n
+            $pct = if ($total -gt 0) { [int](100 * $sent / $total) } else { 100 }
+            if ($script:ProgressInline) {
+                # 200ms 一帧: 再密就是在刷终端而不是在传文件
+                if ($sw.ElapsedMilliseconds - $lastDrawMs -ge 200) {
+                    $lastDrawMs = $sw.ElapsedMilliseconds
+                    Write-ProgressLine (Format-UploadLine $Prefix $sent $total $sw.Elapsed.TotalSeconds)
+                }
+            } elseif ([int]($pct / 20) -gt $lastMilestone) {
+                # 非交互: 每 20% 打一整行, 日志里看得出进度又不刷屏
+                $lastMilestone = [int]($pct / 20)
+                Gray (Format-UploadLine $Prefix $sent $total $sw.Elapsed.TotalSeconds)
+            }
+        }
+        $rs.Close(); $rs = $null
+        $fs.Close(); $fs = $null
+
+        # 服务端还要落盘校验, GetResponse() 这一步可能再等几秒
+        Write-ProgressLine "$Prefix  等待 GitHub 确认 ..."
+        $resp = $req.GetResponse()
+        $code = [int]$resp.StatusCode
+        $resp.Close()
+        Close-ProgressLine (Format-UploadLine $Prefix $total $total $sw.Elapsed.TotalSeconds)
+        if ($code -ge 200 -and $code -lt 300) {
+            return [pscustomobject]@{ Ok = $true;  Error = "" }
+        }
+        return [pscustomobject]@{ Ok = $false; Error = "HTTP $code" }
+    } catch {
+        Close-ProgressLine ""
+        # 主动断掉这条请求: 否则 AllowWriteStreamBuffering=$false 且字节没写满时,
+        # 连接会半开着等 GC —— 重试 3 次就留 3 条。
+        try { $req.Abort() } catch { }
+        # ⚠️ PowerShell 把 .NET 方法抛出的异常包一层 MethodInvocationException, 所以
+        #    $_.Exception.Response 恒为空 —— 必须顺着 InnerException 找到 WebException,
+        #    否则拿不到 GitHub 的错误正文(422 的 already_exists 全在正文里)。
+        $ex = $_.Exception
+        $web = $null
+        while ($ex) {
+            if ($ex -is [System.Net.WebException]) { $web = $ex; break }
+            $ex = $ex.InnerException
+        }
+        $msg = if ($web) { $web.Message } else { $_.Exception.Message }
+        if ($web -and $web.Response) {
+            try {
+                $sr = New-Object System.IO.StreamReader($web.Response.GetResponseStream())
+                $body = $sr.ReadToEnd(); $sr.Close()
+                if ($body) { $msg = "$msg`n      $($body.Trim())" }
+            } catch { }   # 连接被对端掐断时读不到正文, 有状态码就够定位了
+            finally { try { $web.Response.Dispose() } catch { } }
+        }
+        return [pscustomobject]@{ Ok = $false; Error = $msg }
+    } finally {
+        if ($rs) { try { $rs.Dispose() } catch { } }
+        if ($fs) { try { $fs.Dispose() } catch { } }
+    }
+}
+
+function Format-UploadLine ([string]$prefix, [long]$sent, [long]$total, [double]$elapsed) {
+    $pct  = if ($total -gt 0) { [int](100 * $sent / $total) } else { 100 }
+    $barW = 22
+    $fill = if ($total -gt 0) { [int]($barW * $sent / $total) } else { $barW }
+    $bar  = ("=" * $fill).PadRight($barW, '.')
+    $spd  = if ($elapsed -gt 0.001) { $sent / $elapsed } else { 0 }
+    $eta  = if ($spd -gt 1) { ($total - $sent) / $spd } else { -1 }
+    return ("{0} [{1}] {2,3}%  {3}/{4}  {5}/s  剩余 {6}" -f `
+        $prefix, $bar, $pct, (Format-Size $sent), (Format-Size $total), (Format-Size $spd), (Format-Span $eta))
+}
+
+# 退路: gh 自己传。没有进度, 但它有自己的重试与分块逻辑, 且认 HTTPS_PROXY。
+function Invoke-GhUpload ([string]$tagName, [string[]]$paths) {
+    & gh release upload $tagName $paths --clobber | Out-Host
+    return ($LASTEXITCODE -eq 0)
+}
+
+# 覆盖式上传一组资产。返回 $true 表示全部成功。
+function Send-ReleaseAssets ([string]$tagName, [string[]]$paths) {
+    $grand = ($paths | ForEach-Object { (Get-Item -LiteralPath $_).Length } | Measure-Object -Sum).Sum
+
+    $uploadUrl = ((& gh release view $tagName --json uploadUrl -q .uploadUrl 2>$null) -join "").Trim()
+    $token     = ((& gh auth token 2>$null) -join "").Trim()
+    if (-not $uploadUrl -or -not $token) {
+        Warn "拿不到上传地址或 gh token, 退回 gh release upload (无进度显示, 请耐心等)。"
+        return (Invoke-GhUpload $tagName $paths)
+    }
+    # uploadUrl 形如 https://uploads.github.com/repos/O/R/releases/123/assets{?name,label}
+    $uploadUrl = ($uploadUrl -split '\{')[0]
+
+    $existing = @((& gh release view $tagName --json assets -q '.assets[].name' 2>$null) |
+                  ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+    Gray ("  共 {0} 个文件 / {1}" -f $paths.Count, (Format-Size $grand))
+    $swAll = [System.Diagnostics.Stopwatch]::StartNew()
+    $idx = 0
+    foreach ($p in $paths) {
+        $idx++
+        $name   = Split-Path $p -Leaf
+        $prefix = "  [{0}/{1}] {2}" -f $idx, $paths.Count, $name
+        $url    = $uploadUrl + "?name=" + [uri]::EscapeDataString($name)
+
+        $ok = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            # 同名资产存在就先删 —— GitHub 的上传端点没有 --clobber, 同名会直接 422。
+            # 重试时也要删: 上一次失败可能已在服务端留下一个 state=starter 的半成品。
+            if ($existing -contains $name -or $attempt -gt 1) {
+                $delOut = (& gh release delete-asset $tagName $name -y 2>&1) -join "`n"
+                # 删不掉(权限/已发布 Release)时后面 3 次会撞同一个 422, 重试等于空转 ——
+                # 说出来, 别让它静默成"网络不好"。
+                if ($LASTEXITCODE -ne 0 -and $delOut -notmatch 'not found|no such asset') {
+                    Warn "  删除同名旧资产失败: $delOut"
+                }
+                $existing = @($existing | Where-Object { $_ -ne $name })
+            }
+            $r = Send-FileToUrl $url $token $p $prefix
+            if ($r.Ok) { $ok = $true; break }
+            Warn "  上传失败 (第 $attempt/3 次): $($r.Error)"
+            if ($attempt -lt 3) { Gray "  10 秒后重试 ..."; Start-Sleep -Seconds 10 }
+        }
+        if (-not $ok) {
+            # ⚠️ 此刻草稿上的同名旧资产【已被删掉】, 直接 return 会留下缺件的 Release。
+            #    退回 gh 把整组重传一遍 —— 它的网络栈与这里不同(认 HTTPS_PROXY、自带
+            #    重试), 这条新路径失败不代表 gh 也传不上去。
+            Write-Host ""
+            Warn "自建上传通道失败, 退回 gh release upload 重传全部资产 (无进度, 请耐心等)。"
+            return (Invoke-GhUpload $tagName $paths)
+        }
+    }
+    Gray ("  合计用时 {0}, 平均 {1}/s" -f (Format-Span $swAll.Elapsed.TotalSeconds),
+                                        (Format-Size ($grand / [math]::Max($swAll.Elapsed.TotalSeconds, 0.001))))
+    return $true
+}
+
+# ============================================================
+# 等 CI: 轮询 release.yml 的 run 直到成功 / 失败 / 超时
+# ============================================================
+# tag 触发的 run, 其 headBranch 即 tag 名 —— 与 sign-draft 定位构建用的是同一条判据。
+function Get-LatestReleaseRun ([string]$tagName) {
+    $raw = (& gh run list --workflow release.yml --branch $tagName --limit 20 `
+                --json databaseId,status,conclusion,createdAt,url 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ QueryError = $raw } }
+    try { $runs = @($raw | ConvertFrom-Json) } catch { return [pscustomobject]@{ QueryError = $raw } }
+    if ($runs.Count -eq 0) { return $null }
+    return ($runs | Sort-Object { [datetime]$_.createdAt } -Descending)[0]
+}
+
+# 可中断的倒计时等待。按任意键立即结束等待 (提前查一次), Ctrl+C 照常中止整个脚本。
+# $statusText 是当前 CI 状态, 与倒计时【画在同一行】—— 等待期间屏幕上只有这一行在动。
+function Start-CountdownSleep ([int]$seconds, [string]$statusText) {
+    if (-not $script:ProgressInline) { Start-Sleep -Seconds $seconds; return }
+    $end = (Get-Date).AddSeconds($seconds)
+    $canPeek = $true
+    try { $canPeek = -not [Console]::IsInputRedirected } catch { $canPeek = $false }
+    $lastShown = -1
+    while ($true) {
+        $left = [int][math]::Ceiling(($end - (Get-Date)).TotalSeconds)
+        if ($left -le 0) { break }
+        # 按键要跟手, 所以循环跑得密; 但只有秒数真的变了才重画 —— 一秒一帧就够看,
+        # 再密只是在刷终端。
+        if ($left -ne $lastShown) {
+            $lastShown = $left
+            Write-ProgressLine ("{0} · 下次查询 {1} [任意键]" -f $statusText, (Format-Span $left))
+        }
+        if ($canPeek) {
+            try {
+                if ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null; break }
+            } catch { $canPeek = $false }
+        }
+        Start-Sleep -Milliseconds 150
+    }
+}
+
+# 返回 @{ Ok = $bool; Reason = ""; Run = <run 对象或 $null> }
+#
+# 输出策略: 等待期间屏幕上只有一行在原地刷新; 只有【阶段真的变了】(没排队→排队中→
+# 构建中→结束) 才把当前状态定格成一行永久记录。20 分钟下来屏幕上就三四行, 而不是
+# 每轮一行地往下堆。输出被重定向时(日志)反过来 —— 无处原地刷新, 每轮打一行才对。
+#
+# $notBefore: 只认这个时刻之后创建的 run。
+#   ⚠️ 没有它就有一个静默的错误路径: `-Force` 重发同一个 tag 时, 推 tag 到新 run 出现
+#      有几十秒窗口, 这期间 `gh run list --branch <tag>` 返回的是【上一轮那个已成功的
+#      旧 run】。脚本会立刻判定"构建成功"直奔 sign-draft, 拉到上次构建的中转产物 ——
+#      而版本号没变, dev.ps1 unstage 的版本号硬校验也拦不住, 于是把上一次的二进制签名
+#      后覆盖上去, 全程无报错。
+#   刚推完 tag 的调用方必须传它; 独立的 `auto-sign` 子命令传 $null (那里"最新的 run"
+#   正是用户想等的那个)。
+function Wait-ForCiBuild ([string]$tagName, [int]$timeoutMinutes, [int]$pollMinutes, $notBefore = $null) {
+    $start     = Get-Date
+    $deadline  = $start.AddMinutes($timeoutMinutes)
+    $lastPhase = ""
+    $warnedNoRun = $false
+
+    while ($true) {
+        $now = Get-Date
+        $ts  = $now.ToString("HH:mm:ss")
+        $run = Get-LatestReleaseRun $tagName
+
+        # 早于基准时刻的 run 一律当作"还没排上队"继续等
+        if ($notBefore -and $run -and -not $run.PSObject.Properties['QueryError'] -and
+            [datetime]$run.createdAt -lt $notBefore) {
+            $run = $null
+        }
+
+        if ($run -and $run.PSObject.Properties['QueryError']) {
+            # 查询失败要留痕: 它可能是网络在断断续续, 事后需要看得见
+            Close-ProgressLine ""
+            Warn ("  [{0}] 查询 CI 失败, 稍后重试:" -f $ts)
+            Gray "      $($run.QueryError)"
+            $phase = "error"; $lastPhase = "error"   # 已经打过行了, 别再定格一遍
+            $status = "  查询失败, 稍后重试"
+            $wait   = 60
+        } elseif (-not $run) {
+            $phase  = "pending"
+            $status = "  [{0}] CI 还没排上队 · 已等 {1}" -f $ts, (Format-Span ($now - $start).TotalSeconds)
+            # 推 tag 到 run 出现通常几十秒; 超过 5 分钟还没有多半是 workflow 压根没被触发
+            if (-not $warnedNoRun -and ($now - $start).TotalMinutes -ge 5) {
+                $warnedNoRun = $true
+                Close-ProgressLine ""
+                Warn "  [!] 推 tag 已 5 分钟仍无 run, 确认一下 release.yml 是否被 tag 触发。"
+                $lastPhase = ""      # 强制下面重新定格一行
+            }
+            $wait = 30
+        } elseif ($run.status -ne "completed") {
+            $phase = $run.status
+            $age   = ((Get-Date) - [datetime]$run.createdAt).TotalMinutes
+            $st    = switch ($run.status) {
+                "queued"      { "排队中" }
+                "in_progress" { "构建中" }
+                "waiting"     { "等待审批" }
+                default       { $run.status }
+            }
+            $status = "  [{0}] {1} run {2} · 已跑 {3} / 约 20 分钟" -f $ts, $st, $run.databaseId, (Format-Span ($age * 60))
+            # 临近完成时收紧间隔: 5 分钟的粒度会白等最多 5 分钟墙钟
+            $wait = if ($age -ge 15) { 60 } else { $pollMinutes * 60 }
+        } elseif ($run.conclusion -eq "success") {
+            Close-ProgressLine ""
+            Say ("  [{0}] CI 构建成功  run {1}" -f $ts, $run.databaseId)
+            return @{ Ok = $true; Reason = ""; Run = $run }
+        } else {
+            Close-ProgressLine ""
+            return @{ Ok = $false; Reason = "CI 构建 $($run.conclusion)"; Run = $run }
+        }
+
+        # 阶段变了才定格一行; 同阶段内只让那一行原地跳数字
+        if ($script:ProgressInline) {
+            if ($phase -and $phase -ne $lastPhase) {
+                Close-ProgressLine $status
+                if ($run -and $run.url) { Gray "      $($run.url)" }
+                $lastPhase = $phase
+            }
+        } else {
+            Gray $status
+        }
+
+        # ⚠️ 判据是「现在越没越线」, 不是「睡完会不会越线」。用后者的话:
+        #    默认值下实际只等 55 分钟却报"超时 (>60 分钟)"; 而 -PollMinutes 大于等于
+        #    -TimeoutMinutes 时第一轮就直接返回超时, 一秒都没等。
+        if ((Get-Date) -ge $deadline) {
+            Close-ProgressLine ""
+            return @{ Ok = $false; Reason = "等待超时 (>$timeoutMinutes 分钟)"; Run = $run }
+        }
+        # 最后一觉不要睡过 deadline
+        $wait = [int][math]::Max(1, [math]::Min($wait, ($deadline - (Get-Date)).TotalSeconds))
+        Start-CountdownSleep $wait $status
+    }
+}
+
+# 等 CI → 自动接 sign-draft。中止/失败都不会留下半成品, 事后 sign-draft 可原样重跑。
+function Invoke-AutoSign ([string]$tagName, [int]$timeoutMinutes, [int]$pollMinutes, $notBefore = $null) {
+    if ($tagName -notmatch '^v') { $tagName = "v$tagName" }
+    $version = $tagName -replace '^v', ''
+    $devPs1  = Join-Path $ScriptDir "dev.ps1"
+
+    Write-Host ""
+    Cyan "============== 等待 CI 构建 $tagName =============="
+    Gray "  中止后随时可手动接上:  .\scripts\release.ps1 sign-draft -Version $version"
+
+    # 会话体检前置: 签名会话有效期 2 小时, CI 约 20 分钟 —— 现在开好, 到时候一定还在。
+    # 这里【只提示不拦截】: 会话没开也照样等 CI, 反正还有 20 分钟可以去开。
+    Write-Host ""
+    & $devPs1 sign-status | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Warn "[!] 签名会话当前不可用 —— 请在 CI 跑完前 (约 20 分钟内) 建立会话。"
+        Gray "    会话有效期 2 小时, 现在建立即可覆盖整个等待窗口。"
+        Gray "    CI 跑完后脚本会再体检一次; 那时仍不可用才会停下来。"
+    }
+
+    $r = Wait-ForCiBuild $tagName $timeoutMinutes $pollMinutes $notBefore
+    if (-not $r.Ok) {
+        Write-Host ""
+        ErrMsg "自动签名中止: $($r.Reason)"
+        if ($r.Run) { Gray "  run: $($r.Run.url)" }
+        Gray "  tag 已推送, 发布本身没有受影响。修好 CI 后:"
+        Gray "    gh run rerun <run-id>            # 重跑构建"
+        Gray "    .\scripts\release.ps1 sign-draft -Version $version"
+        return 1
+    }
+
+    $script:AutoYes = $true
+    try { return (Invoke-SignDraft $tagName) }
+    finally { $script:AutoYes = $false }
 }
 
 function Invoke-SignDraft ([string]$tagName) {
@@ -614,6 +1106,45 @@ function Invoke-SignDraft ([string]$tagName) {
         # 放在下载之前: 拉完 26MB 才发现会话没开, 是最没必要的等待。
         Write-Host ""
         & $devPs1 sign-status | Out-Host
+        $signReady = ($LASTEXITCODE -eq 0)
+        # ⚠️ 这道闸门问的是「客观上能不能签」, 不是「要不要征求同意」——
+        #    自动签名模式下也【不能】跳过, 否则等 20 分钟只为撞上一个必然失败的 sign。
+        #    会话没开时给人补开的机会 (ignoreAuto: 强制真人回答, 免得自动确认转成死循环)。
+        if (-not $signReady -and $script:AutoYes) {
+            # 无人值守: 人不在场, 问了也没人答 —— `Read-Host` 会把脚本无限期挂住,
+            # 正好背叛 -AutoSign 承诺的"全程无人值守"。改成有界轮询, 到点认输。
+            $graceMin = 10
+            Write-Host ""
+            Warn "[!] 签名会话不可用。CI 已跑完, 最多再等 $graceMin 分钟让你建立会话。"
+            Gray "    建立后无需操作, 脚本会自己发现。"
+            $graceEnd = (Get-Date).AddMinutes($graceMin)
+            while (-not $signReady -and (Get-Date) -lt $graceEnd) {
+                Start-CountdownSleep 30 ("  等待签名会话 · 剩余 " + (Format-Span ($graceEnd - (Get-Date)).TotalSeconds))
+                & $devPs1 sign-status | Out-Null
+                $signReady = ($LASTEXITCODE -eq 0)
+            }
+            Close-ProgressLine ""
+            if (-not $signReady) {
+                ErrMsg "$graceMin 分钟内签名会话仍不可用, 停在这里。"
+                Gray "  tag 与草稿 Release 都还在, 建立会话后接着跑:"
+                Gray "    .\scripts\release.ps1 sign-draft -Version $version"
+                return 1
+            }
+            Say "签名会话已就绪。"
+        }
+        $retry = 0
+        while (-not $signReady) {
+            Write-Host ""
+            Warn "[!] 签名会话不可用 —— 打开 SimplySign 建立会话后再继续 (有效期 2 小时)。"
+            $retry++
+            if ($retry -gt 5) { ErrMsg "会话仍不可用, 已放弃。"; return 1 }
+            if (-not (Confirm-Step "    已建立会话, 重新体检?" $true $true)) {
+                Gray "已取消 —— tag 与草稿 Release 都还在, 事后 sign-draft 可重跑。"
+                return 1
+            }
+            & $devPs1 sign-status | Out-Host
+            $signReady = ($LASTEXITCODE -eq 0)
+        }
         Write-Host ""
         if (-not (Confirm-Step "签名会话已就绪, 继续?" $true)) { Gray "已取消。"; return 0 }
 
@@ -692,9 +1223,17 @@ function Invoke-SignDraft ([string]$tagName) {
         }
         if (-not (Confirm-Step "上传?" $true)) { Gray "已取消 (签名产物留在 dist\)。"; return 0 }
 
-        & gh release upload $tagName $assets --clobber | Out-Host
-        if ($LASTEXITCODE -ne 0) { ErrMsg "上传失败"; return 1 }
-        Say "已上传 4 个签名产物。"
+        Write-Host ""
+        if (-not (Send-ReleaseAssets $tagName $assets)) {
+            # 已签名的产物就在 dist\, 补传不需要重签 —— 重跑 sign-draft 会重新拉产物、
+            # 重新签一遍(白扣云签名配额), 这里给出直接补传的命令。
+            ErrMsg "上传失败。签名产物已在 dist\, 修好网络后直接补传即可:"
+            Gray   "  gh release upload $tagName ``"
+            foreach ($a in $assets) { Gray ("      `"{0}`" ``" -f $a) }
+            Gray   "      --clobber"
+            return 1
+        }
+        Say "已上传 $($assets.Count) 个签名产物。"
 
         # ---------- 8. 摘掉未签名横幅 ----------
         $body = (& gh release view $tagName --json body -q .body 2>&1) -join "`n"
@@ -798,7 +1337,9 @@ function Show-Menu ([string]$branch) {
     Write-Host "  [6] 只推送      " -NoNewline -ForegroundColor White
     Gray "五仓同步 push, 不打 tag (日常同步用)"
     Write-Host "  [7] 签名回传    " -NoNewline -ForegroundColor White
-    Gray "拉 CI 产物 → 本机签名打包 → 覆盖草稿 Release (需签名会话)"
+    Gray "CI 已跑完: 拉产物 → 本机签名打包 → 覆盖草稿 Release (需签名会话)"
+    Write-Host "  [8] 等CI+签名   " -NoNewline -ForegroundColor White
+    Gray "tag 已推出: 守着 CI 跑完 (约 20 分钟), 再自动执行 [7]"
     Write-Host "  [q] 退出" -ForegroundColor White
     Write-Host ""
 
@@ -808,7 +1349,7 @@ function Show-Menu ([string]$branch) {
     } catch {
         Write-Host ""
         ErrMsg "当前不是交互式终端, 无法显示菜单。"
-        Gray "  请改用子命令: release.ps1 check|patch|minor|current|status|push  (可加 -Yes)"
+        Gray "  请改用子命令: release.ps1 check|patch|minor|current|status|push|sign-draft|auto-sign  (可加 -Yes)"
         return 1
     }
     switch ($choice) {
@@ -828,6 +1369,11 @@ function Show-Menu ([string]$branch) {
         "5" { Show-Status $branch; return 0 }
         "6" { return Invoke-Release "" $branch "" $true $false }
         "7" { return Invoke-SignDraft "" }
+        # [8] 守的是【最新已发布 tag】—— 菜单场景下它就是刚推出去的那个
+        "8" {
+            if (-not $latest) { ErrMsg "远端没有 v* tag, 没有可等的构建。"; return 1 }
+            return Invoke-AutoSign ("v" + $latest.Raw) $TimeoutMinutes $PollMinutes
+        }
         "q" { Gray "已退出。"; return 0 }
         default { ErrMsg "无效选择: $choice"; return 1 }
     }
@@ -842,6 +1388,20 @@ if (-not $Branch) { $Branch = Get-ManifestBranch }
 # 而不是「发布哪个版本」—— 故必须排在下面的 -Version 分支之前, 否则
 # `release.ps1 sign-draft -Version 0.120.2` 会被当成"发布 0.120.2"直接打 tag。
 if ($Command -eq "sign-draft") { exit (Invoke-SignDraft $Version) }
+
+# auto-sign 同理: -Version 在这里是「守哪个 tag」, 不是「发布哪个版本」。
+# 缺省守远端最新 tag —— 刚 release.ps1 patch 推出去的那个。
+if ($Command -eq "auto-sign") {
+    $t = $Version
+    if (-not $t) {
+        Gray "正在查询远端最新 tag ..."
+        $lt = Get-LatestTag (Join-Path $WorkRoot $MainRepo)
+        if (-not $lt) { ErrMsg "远端没有 v* tag, 没有可等的构建。"; exit 1 }
+        $t = $lt.Raw
+        Gray "  守: v$t  (指定其它: release.ps1 auto-sign -Version <x.y.z>)"
+    }
+    exit (Invoke-AutoSign $t $TimeoutMinutes $PollMinutes)
+}
 
 # -Version 优先于子命令的 bump 规则
 if ($Version) {
