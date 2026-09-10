@@ -346,7 +346,10 @@ BOOL CIPCClient::_StartService()
     // cleared after installation completes. Prevents respawn during install/uninstall.
     {
         HKEY hKey = NULL;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WIND_APP_REGKEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+        // KEY_WOW64_64KEY 理由同 InstallPaths.cpp：安装器是 64 位、只写得进 64 位视图，
+        // 32 位这侧不加标志就读不到这个标记，安装/卸载期间会把服务重新拉起来。
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WIND_APP_REGKEY, 0, KEY_READ | KEY_WOW64_64KEY,
+                          &hKey) == ERROR_SUCCESS)
         {
             WCHAR value[8] = {};
             DWORD size = sizeof(value);

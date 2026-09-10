@@ -8,7 +8,15 @@ BOOL WindResolveInstallRoot(WCHAR* outDir, DWORD cchOutDir)
     outDir[0] = L'\0';
 
     HKEY hKey = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WIND_APP_REGKEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    // ★ KEY_WOW64_64KEY 不可省：WIND_APP_REGKEY 是 HKLM\Software 下的普通键，32 位进程
+    // 读它会被 WOW64 重定向到 Software\Wow6432Node\。三个部署方（wind-installer /
+    // scripts\dev.ps1 / wind-portable）都是 64 位程序，只写得进 64 位视图，SysWOW64 里的
+    // x86 DLL 不加这个标志就**永远读不到 InstallDir**，静默回退到下面那条 GetModuleFileName
+    // 分支 —— 而 DLL 进了系统目录之后，那条回退给出的是 SysWOW64\IME\<app>\，不是安装目录。
+    // 后果是 32 位宿主里服务拉不起来、便携判据恒 FALSE。DLL 还在安装目录时回退恰好等价，
+    // 所以这个缺陷是随「TSF 组件搬进系统目录」一起进来的，且无任何报错。
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WIND_APP_REGKEY, 0, KEY_READ | KEY_WOW64_64KEY,
+                      &hKey) == ERROR_SUCCESS)
     {
         DWORD type = REG_SZ;
         DWORD cb = cchOutDir * sizeof(WCHAR);
