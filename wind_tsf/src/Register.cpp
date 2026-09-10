@@ -1,6 +1,7 @@
 #include "Register.h"
 #include "DisplayAttributeInfo.h"
 #include "Globals.h"
+#include "InstallPaths.h"   // WindResolveInstallRoot: 图标源要落在安装目录, 见 _ResolveIconFile
 #include <shlwapi.h>
 #include <strsafe.h>
 #include <inputscope.h>
@@ -140,13 +141,58 @@ static const wchar_t* _ProfileNameToRegister()
     return TEXTSERVICE_NAME;
 }
 
+// 输入法列表里显示的图标从哪个文件取。
+//
+// ★ 不能用 szModule（系统副本）——CTF 的 TIP 键连同 IconFile 是 WOW64 两个视角**共享的
+// 同一份字符串**: 64 位读者按字面解析 System32\...，32 位读者则被重定向到 SysWOW64\...。
+// 这套机制隐含一个前提: 两个目录里的文件必须同名。系统里的输入法都满足它
+// （weasel.dll、PalmInputTSF.dll 在 System32 与 SysWOW64 下各一份、同名），而本项目的
+// x64/x86 刻意不同名（wind_tsf.dll / wind_tsf_x86.dll，为的是能并排放在同一个安装目录里）。
+// 于是 x86 那次注册写下的 System32\IME\<app>\wind_tsf_x86.dll 在 64 位侧根本不存在,
+// 输入法列表取不到图标, 只剩「简体」两个字。x86 是后注册的, 它覆盖 x64 写下的有效值。
+//
+// 安装目录不在 System32 之下, 不触发 WOW64 文件重定向: 两种位数拿到同一个真实文件,
+// 且 x64/x86 各写各的副本都成立 —— 顺序依赖一并消失, 不必再去调 regsvr32 的先后。
+// 便携形态同理: InstallDir 指向便携目录, 那儿两个 DLL 都在。
+//
+// ⛔ 别改成「让两边同名」: 便携版与安装版的产物命名要保持可并存, 见上。
+// 取不到安装目录副本时回退 szModule: 维持原行为, 不往注册表写一个不存在的路径。
+static void _ResolveIconFile(const WCHAR* szModule, WCHAR* outPath, DWORD cchOut)
+{
+    WCHAR baseDir[MAX_PATH];
+    if (!WindResolveInstallRoot(baseDir, ARRAYSIZE(baseDir)))
+    {
+        StringCchCopyW(outPath, cchOut, szModule);
+        return;
+    }
+
+    const WCHAR* name = wcsrchr(szModule, L'\\');
+    name = (name != nullptr) ? name + 1 : szModule;
+
+    if (FAILED(StringCchPrintfW(outPath, cchOut, L"%s\\%s", baseDir, name)))
+    {
+        StringCchCopyW(outPath, cchOut, szModule);
+        return;
+    }
+
+    // 安装目录里没有这个副本(部署形态不同/文件被删)时不要写进去 —— 那等于换一个坏路径。
+    DWORD attr = GetFileAttributesW(outPath);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+        StringCchCopyW(outPath, cchOut, szModule);
+}
+
 HRESULT RegisterProfile()
 {
     HRESULT hr = E_FAIL;
     WCHAR szModule[MAX_PATH];
+    WCHAR szIcon[MAX_PATH];
 
     if (GetModuleFileNameW(g_hInstance, szModule, ARRAYSIZE(szModule)) == 0)
         return E_FAIL;
+
+    // 图标源与 COM 注册用的 szModule 是两件事: InprocServer32 必须指系统副本(位数要匹配),
+    // 图标则必须指一个两种位数都解析得到的路径。
+    _ResolveIconFile(szModule, szIcon, ARRAYSIZE(szIcon));
 
     // 已开启 Dota 2 兼容时保留别名，别把用户设置冲掉（见 _ProfileNameToRegister）。
     const wchar_t* profileName = _ProfileNameToRegister();
@@ -165,8 +211,8 @@ HRESULT RegisterProfile()
             c_guidProfile,
             profileName,
             (ULONG)wcslen(profileName),
-            szModule,
-            (ULONG)wcslen(szModule),
+            szIcon,
+            (ULONG)wcslen(szIcon),
             TEXTSERVICE_ICON_INDEX,
             NULL,                   // hklSubstitute
             0,                      // dwPreferredLayout
@@ -199,8 +245,8 @@ HRESULT RegisterProfile()
                                                    c_guidProfile,
                                                    profileName,
                                                    (ULONG)wcslen(profileName),
-                                                   szModule,
-                                                   (ULONG)wcslen(szModule),
+                                                   szIcon,
+                                                   (ULONG)wcslen(szIcon),
                                                    TEXTSERVICE_ICON_INDEX);
             }
 
