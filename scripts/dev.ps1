@@ -1824,7 +1824,9 @@ function New-UpdateManifest ([string]$profile, [string]$setupPath) {
 }
 
 # 生成安装包: (除非 skip) 全构建当前变体 → 生成 app.toml → 调 wind-installer\scripts\pack.ps1。
-#   pack.ps1 负责: 原生编译 stub/uninstaller/packer → 注入 uninstall.exe 到 source → wind-packer build。
+#   pack.ps1 负责: 原生编译 stub/uninstaller/packer → 注入并加工 uninstall.exe → wind-packer build。
+#   分两次调用 (-PrepOnly / -SkipPrep), 中间夹一次签名 —— 卸载器加工完即为终态, 只有
+#   这个窗口能签它; 详见 Do-Installer 第 4a 步。
 # 打包是纯文件 IO + cargo 构建, 不需管理员 (故未纳入 UAC 提权命令)。
 # 便携版压缩包: build[_dev]\ → dist\WindInput[Dev]-Portable-<版本>.zip (+ .sha256)
 # 与 dev.sh 的 9/portable-zip 同口径 (同名、同结构), 两边产物可互换。
@@ -1943,8 +1945,44 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
     # 哈希表 splat 才能按名绑定 (数组 splat 会把 -Config 当成位置参数的值)。
     $packArgs = @{ Config = $cfg }
     if ($skipBuild -and $instBuilt) { $packArgs['SkipBuild'] = $true }
-    & $packPs1 @packArgs
-    if ($LASTEXITCODE -ne 0) { ErrMsg "打包失败 (见上方 wind-packer 输出)"; return $false }
+
+    # 4a. 加工卸载器 → 签它。拆成两段调用【只为给这次签名腾位置】:
+    #     uninstall.exe 的清单 overlay 早先是【安装期在用户机器上】追加的, 于是它永远
+    #     签不了 —— Authenticode 要求证书表是文件最后一段, 尾部多一个字节即"无签名"。
+    #     overlay 的内容全部来自 app.toml, 没有一个字节依赖安装期, 故前移到这里:
+    #       prep (写版本信息+图标+overlay) → 签名 → pack (封进压缩块) → 装机端只解压。
+    #     ⚠️ 顺序两头都是死的: 早于 prep 签的是裸 stub (随后被 prep 改掉),
+    #        晚于 pack 签则它已在压缩块里, 补签只能签到外壳。
+    $prepArgs = $packArgs.Clone()
+    $prepArgs['PrepOnly'] = $true
+    $uninstExe = Join-Path $outdir "uninstall.exe"
+    # 加工过(可能已签名)的卸载器绝不能留在 build\ 里: Do-PortableZip 是 Copy-Item "$outdir\*",
+    # 会把它带进便携版 zip (便携版没有卸载入口, 不该有这个文件); 下一轮 2.5 步的整目录
+    # 签名也会扫到它。正常路径由 pack.ps1 的 finally 删, 但中途失败时轮不到那里。
+    try {
+        & $packPs1 @prepArgs
+        if ($LASTEXITCODE -ne 0) { ErrMsg "卸载器加工失败 (见上方 wind-packer 输出)"; return $false }
+        # 显式断言而非交给签名脚本: Invoke-SignArtifacts 对不存在的目标是【静默返回成功】的
+        # (见其 $existing.Count -eq 0 那一支)。这里的路径与 pack.ps1 从 app.toml 的 source_dir
+        # 解析出的路径是两处独立推导, 一旦失配, 签名整段被跳过而打包照常成功 —— 又一个
+        # 「外壳签了、里面裸的」形态, 从外面看不出来。
+        if (-not (Test-Path $uninstExe)) {
+            ErrMsg "卸载器加工后未在预期路径出现: $uninstExe"
+            ErrMsg "请核对 $cfg 里的 package.source_dir 是否指向 $outdir。"
+            return $false
+        }
+        if (-not (Invoke-SignArtifacts @($uninstExe) "卸载器")) { return $false }
+
+        # 4b. 打包。-SkipPrep: 卸载器已就绪且已签名, 再走一次 prep 会覆盖掉签名。
+        #     -SkipBuild: 4a 那次已经编译过 stub 三件套了。
+        $buildArgs = $packArgs.Clone()
+        $buildArgs['SkipBuild'] = $true
+        $buildArgs['SkipPrep']  = $true
+        & $packPs1 @buildArgs
+        if ($LASTEXITCODE -ne 0) { ErrMsg "打包失败 (见上方 wind-packer 输出)"; return $false }
+    } finally {
+        Remove-Item $uninstExe -Force -ErrorAction SilentlyContinue
+    }
 
     $setup = Join-Path $DistDir "$(if($profile -eq 'dev'){'WindInputDev-Setup'}else{'WindInput-Setup'})-$Version.exe"
     if (Test-Path $setup) {

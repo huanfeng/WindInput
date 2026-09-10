@@ -6,7 +6,7 @@
 > 签名后的安装包可正确解包（85 个条目）；`latest-dev.json` 的 sha256/size 与实际文件逐位一致。
 > **`signtool` 未要求交互输入 PIN**，非交互会话下直接签成，无需在客户端勾「记住 PIN」。
 > 关联：`scripts/sign.ps1`、`scripts/sign.local.ps1.example`、`scripts/check-signed.py`、
-> `scripts/dev.ps1`（四个接线点）、跨仓 `wind-installer/src/archive/reader.rs`、
+> `scripts/dev.ps1`（五个接线点）、跨仓 `wind-installer/src/archive/reader.rs`、
 > `.github/workflows/release.yml`。
 
 > ⚠️ **本文与仓库中的所有脚本刻意不提任何签名服务商的名字。** 签名平台是可替换的外部
@@ -118,15 +118,16 @@ hash 算好），再去签 `build\`」—— 签了个寂寞，而 manifest 里�
 **省配额靠幂等**：已签过的文件按**签名者指纹**识别并跳过（不是按「有没有签名」，理由见
 第 4.1 节末）。所以 `sign 8` 之后再 `sign 9s`，便携包里的 PE 一次也不会重签。
 
-## 4.1 三个接线点，与它们各自的顺序约束
+## 4.1 五个接线点，与它们各自的顺序约束
 
-`scripts/sign.ps1` 是实现，`dev.ps1` 在四处调用它（`Invoke-SignArtifacts`；没写 `sign`
-时这四处整段不走）。每一处的位置都不是随意的，都由一个「会静默出坏包」的约束定死：
+`scripts/sign.ps1` 是实现，`dev.ps1` 在五处调用它（`Invoke-SignArtifacts`；没写 `sign`
+时这五处整段不走）。每一处的位置都不是随意的，都由一个「会静默出坏包」的约束定死：
 
 | 接线点 | 位置 | 早了 / 晚了会怎样 |
 |---|---|---|
 | `build[_dev]\` 下的 PE | `Do-Full` 末尾，`Verify-DistData` 之后 | **晚了**就被封进 Setup 的压缩块 / zip，再也签不到 |
 | 同上（skip 模式补签） | `Do-Installer` 里，`pack.ps1` **之前** | 漏了则 `8s`/`d8s` 会打出「外壳签了、里面 5 个 PE 全裸」的包，且验签 Setup.exe 照样通过 —— 从外面完全看不出来。**实测踩过** |
+| `uninstall.exe` | `Do-Installer` 里，`pack.ps1 -PrepOnly` 之后、`pack.ps1 -SkipPrep` **之前** | **早了**签的是随后会被 prep 改写的裸 stub；**晚了**它已在压缩块里。窗口只有这一格，见 4.2 |
 | `Setup.exe` | `Do-Installer` 里，`pack.ps1` 之后、`New-UpdateManifest` **之前** | **晚了**则 `latest.json` 的 `sha256`/`size` 是签名前的旧值，在线升级校验全体失败 |
 | 便携 zip 内容 | `Do-PortableZip` 里，`Compress-Archive` 之前 | zip 本身签不了，包内 PE 必须先签好 |
 
@@ -164,6 +165,47 @@ dev.ps1 sign 8s    本机打包 + 签外壳（PE 已签，跳过）
 取决于证书链、CRL 能否联网、根是否受信任 —— 全是与「签没签过」无关的外部条件，离线一次
 就会让所有文件被判成未签名而全部重签（在按次计费下这是直接的损失）。按指纹比对还顺带
 管了换证书的情况：旧证书签的文件会被正确地重签，而不是被当成「已签好」留在包里。
+
+## 4.2 卸载器：把 overlay 前移到打包期才签得了
+
+`uninstall.exe` 一度是**签不了**的，原因不在签名，在它自己的数据流：品牌清单（manifest
++ logo）此前由**安装期在用户机器上**追加到卸载器尾部（`append_manifest_overlay`）。
+Authenticode 要求证书表必须是文件的最后一段（`offset + size == 文件长度`），尾部多一个
+字节这个等式就破了 —— 实测追加后 `signtool verify` 直接报 "No signature found"。只要装机
+端还会改这个文件，构建机上签什么都白搭。
+
+**解法是让那次修改不再发生在装机端**：overlay 的内容全部来自 `app.toml`，没有一个字节
+依赖安装期（安装期真正产生的信息 —— 装了什么、装到哪 —— 早就落在注册表的 `Receipt` 与
+ARP 的 `InstallLocation`，与 overlay 无关）。既然是静态数据，就该在构建机上烤进二进制：
+
+```
+prep-uninstaller           写版本信息 + 图标 + 追加 overlay  → 卸载器成为终态
+  ↓  签名                  ← 窗口只有这一格
+pack                       封进压缩块
+  ↓
+装机端                     只解压，逐字节还原签名后的文件
+```
+
+这正是 NSIS「两遍构建」和 Inno Setup `SignedUninstaller` 的同一条路子：**签名的 PE 离开
+构建机之后就是只读的**。（另一派是 Inno 的 `unins000.dat` —— 把数据外置成独立文件。这里
+用不上：外置的价值在于容纳会变的数据，而这里没有会变的数据，白白引入「文件丢了就卸不了」
+的新失败模式。）
+
+落地在三处，每处都带一个不能省的判据：
+
+| 位置 | 做什么 |
+|---|---|
+| `wind-packer prep-uninstaller` | 新子命令。**幂等**：已带 overlay 就整段跳过 —— 判据必须挡在「写版本信息」和「追加 overlay」**两件事之前**，因为 `set_pe_version_info` 用 editpe 重写资源节，同样会毁签名 |
+| `pack.ps1 -PrepOnly` / `-SkipPrep` | 拆成两次调用，只为给中间那次签名腾位置。`-PrepOnly` 有意把 `uninstall.exe` 留在源目录不清理 |
+| `installer/steps.rs` 的 `AppendUninstallerOverlay` | 改为「自身已含 overlay 则跳过」。正常情况下这一步现在什么都不做，只为**老版打包器产出的旧包**保底（那里的卸载器仍是裸 stub，不补就读不到清单、启动即失败） |
+
+⚠️ `pack.ps1` 每轮都从 `target\` 重新复制**未加工的** stub 覆盖上一轮的产物。加工不可逆
+（写完版本信息又追加了 overlay），拿加工过的再加工一次会撞上幂等判据而静默沿用旧版本号。
+
+判据实现是 `archive::has_manifest_overlay()`，走 `ArchiveReader::open` —— 它自带证书表
+偏移解析（第 5 节），对已签名的文件同样判得准。回归测试 `signed_uninstaller_overlay_stays_readable`
+遍历 8 种对齐余数，同时断言「读得回清单」与「判据仍为真」：前者失守则卸载器启动即失败，
+后者失守则安装期会重复追加、把刚签的名毁掉，两条都是从外面看不出来的。
 
 ## 5. wind-installer：签名会打废自解压包（已修）
 
@@ -228,7 +270,7 @@ dev.ps1 sign 8s    本机打包 + 签外壳（PE 已签，跳过）
 
 CI 已经产出了 Setup.exe 和 Portable.zip，看起来本机只要对它们补签就行 —— **不行**。
 
-签名夹在打包**中间**（第 4.1 节的三个接线点）：PE 必须在被封进压缩块之前签。对成品补签
+签名夹在打包**中间**（第 4.1 节的五个接线点）：PE 必须在被封进压缩块之前签。对成品补签
 只签得到外壳，包内 5 个 PE 仍是全裸的，而 `signtool verify` 验 Setup.exe **照样通过** ——
 从外面完全看不出来。这正是第 5 节记的那个实测缺陷。
 
@@ -254,16 +296,6 @@ Release 页面，中转产物混进去就会出现在用户看到的下载列表
 中转产物版本仍会与 tag 不符而被拦下）。
 
 ## 7. 已知取舍与未做的部分
-
-**卸载器 `uninstall.exe` 不签**。它的品牌清单是**安装时在用户机器上**追加到自身尾部的
-（`append_manifest_overlay`），而任何尾部追加都会让先前的签名失效 —— 实测追加后
-`signtool verify` 直接报 "No signature found"（Authenticode 要求证书表必须是文件的
-最后一段，`offset+size == 文件长度`，多一个字节这个等式就破了）。
-
-这个矛盾无解，因为「追加」发生的时刻已经不可能再签名。要签它只能改 overlay 机制 ——
-把 manifest/logo 落成安装目录下的独立文件，让 `uninstall.exe` 从旁边读而不是从自身读。
-代价是违背 wind-installer「安装目录无需任何额外散落文件」的原设计意图。收益（卸载时
-UAC 弹窗不显示「未知发布者」）与代价不成比例，故本轮不做，登记在此。
 
 **真证书已全链路验过**（见文首状态）。当初担心的 PIN 交互没有发生：非交互会话下
 `signtool` 直接签成，不需要在客户端里勾「记住 PIN」。
