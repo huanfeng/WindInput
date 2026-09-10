@@ -7,59 +7,98 @@ use crate::pinyin::dag::{MaskCheck, SegGraph};
 use crate::pinyin::fuzzy::{FuzzyConfig, FuzzyMatcher};
 use wind_dict::cached::CachedDict;
 
-/// 虚词集合（单字时轻微惩罚，对齐 Go functionWords）
-fn is_function_word(w: &str) -> bool {
-    matches!(
-        w,
-        "了" | "的"
-            | "地"
-            | "得"
-            | "着"
-            | "过"
-            | "我"
-            | "你"
-            | "他"
-            | "她"
-            | "它"
-            | "们"
-            | "这"
-            | "那"
-            | "和"
-            | "与"
-            | "在"
-            | "把"
-            | "被"
-            | "让"
-            | "从"
-            | "到"
-            | "对"
-            | "向"
-            | "跟"
-            | "不"
-            | "没"
-            | "也"
-            | "都"
-            | "就"
-            | "才"
-            | "还"
-            | "又"
-            | "再"
-            | "很"
-            | "太"
-            | "最"
-            | "是"
-            | "有"
-            | "会"
-            | "能"
-            | "要"
-            | "可"
-            | "去"
-            | "来"
-            | "做"
-            | "说"
-            | "看"
-            | "想"
-    )
+/// 虚词表：**字形 → 该字作虚词时的读音**（无调全拼）。
+///
+/// ## ★★★ 判据必须同时问「哪个字」和「哪个读音」
+///
+/// 虚词优待合计 **8.0** 的量级差（`FUNCTION_WORD_BONUS` +2.0、实词
+/// `SINGLE_CHAR_PENALTY` −3.0、再豁免 `WORD_PENALTY` 3.0），相当于 e^8 ≈ **2981 倍词频**。
+/// 只按字形发放时，多音字的**冷僻读音**会白拿这份优待，把该音位上真正的高频字整片压掉：
+///
+/// ```text
+/// kuai:  会(w=334)   +2.0 = −11.49   >   快(w=29689)  −6.0 = −15.01   ⇒ 「快吃饭」出成「会吃饭」
+/// zhao:  着(w=263)          −11.72   >   找(w=54117)        −14.40
+/// huan:  还(w=12366)         −7.88   >   换(w=18772)        −15.47
+/// liao:  了(w=51)           −13.37   >   聊(w=8535)         −16.26
+/// ```
+///
+/// 这与 `score_node_inner` 长注释里批评 `gen_unigram`「按词去重取 max、多音字冷僻读音被按
+/// 常见读音计价」是**同型缺陷**，只是发生在加成层而非基础分层，故那次修复没覆盖到。
+///
+/// ## 取值口径
+///
+/// 只登记该字**作虚词/代词/助动词时**的读音；同字的实词读音一律不登记（会 kuai 会计、
+/// 都 du 首都、还 huan 归还、着 zhao/zhuo、和 huo/hu、没 mo 沉没、了 liao 了解、
+/// 地 di 土地、说 shui 游说）。码是**无调全拼**，故同码不同调无法区分——`得` 的 `de`
+/// （结构助词）与 `dé`（得到）共码，只能一并放行，这是无调码的固有上界，不是疏漏。
+///
+/// 单读音的字（我/你/是/不…）登记其唯一读音即可，判据对它们等价于旧的「只问字形」。
+fn function_word_readings(w: &str) -> Option<&'static [&'static str]> {
+    Some(match w {
+        // —— 助词 ——
+        "了" => &["le"],
+        "的" => &["de"],
+        "地" => &["de"],
+        "得" => &["de", "dei"],
+        "着" => &["zhe"],
+        "过" => &["guo"],
+        // —— 代词 ——
+        "我" => &["wo"],
+        "你" => &["ni"],
+        "他" => &["ta"],
+        "她" => &["ta"],
+        "它" => &["ta"],
+        "们" => &["men"],
+        "这" => &["zhe", "zhei"],
+        "那" => &["na", "nei"],
+        // —— 连词 / 介词 ——
+        "和" => &["he"],
+        "与" => &["yu"],
+        "在" => &["zai"],
+        "把" => &["ba"],
+        "被" => &["bei"],
+        "让" => &["rang"],
+        "从" => &["cong"],
+        "到" => &["dao"],
+        "对" => &["dui"],
+        "向" => &["xiang"],
+        "跟" => &["gen"],
+        // —— 副词 ——
+        "不" => &["bu"],
+        "没" => &["mei"],
+        "也" => &["ye"],
+        "都" => &["dou"],
+        "就" => &["jiu"],
+        "才" => &["cai"],
+        "还" => &["hai"],
+        "又" => &["you"],
+        "再" => &["zai"],
+        "很" => &["hen"],
+        "太" => &["tai"],
+        "最" => &["zui"],
+        // —— 高频动词 / 助动词 ——
+        "是" => &["shi"],
+        "有" => &["you"],
+        "会" => &["hui"],
+        "能" => &["neng"],
+        "要" => &["yao"],
+        "可" => &["ke"],
+        "去" => &["qu"],
+        "来" => &["lai"],
+        "做" => &["zuo"],
+        "说" => &["shuo"],
+        "看" => &["kan"],
+        "想" => &["xiang"],
+        _ => return None,
+    })
+}
+
+/// 该单字节点是否够格拿虚词优待：字形在表内，**且**本节点的码正是它作虚词时的读音。
+///
+/// `code` 是取到这个词条所用的**词典码**（模糊命中传变体码、简拼节点传回查出的全码），
+/// 不是用户原始击键——虚词性是「这个字这次读什么」的属性，跟着码走才对得上。
+fn is_function_word(w: &str, code: &str) -> bool {
+    function_word_readings(w).is_some_and(|readings| readings.contains(&code))
 }
 
 /// V+助词尾字（多字词以此结尾时降权，对齐 Go particleSuffixes）
@@ -158,8 +197,8 @@ pub(crate) const DICT_TOTAL: f64 = 242_154_693.0;
 /// 基础分由词条自身的**词典权重**算出（见 [`score_node_inner`] 的长注释：为何不再查
 /// unigram）。对 crate 内可见：`PinyinEngine::convert` 用它给「覆盖全部输入的词典精确整词」
 /// 算单节点等价分，使其与 Viterbi 整句在同一量纲比较（见 mod.rs step 1.5）。
-pub(crate) fn score_node(word: &str, weight: i32) -> f64 {
-    score_node_inner(word, weight, true)
+pub(crate) fn score_node(word: &str, code: &str, weight: i32) -> f64 {
+    score_node_inner(word, code, weight, true)
 }
 
 /// **尾部残码待定音节**专用打分：与 [`score_node`] 相同，但**不给单字虚词优待**。
@@ -178,11 +217,12 @@ pub(crate) fn score_node(word: &str, weight: i32) -> f64 {
 /// 搭配。残码位是「用户打到一半的那个音节」——它是虚词的先验并不比实词高，语法黏着
 /// 无从谈起。**同一条加成，在两个位置的前提不同**，故按位置区分而非按词性区分。
 pub(crate) fn score_node_partial_final(word: &str, weight: i32) -> f64 {
-    score_node_inner(word, weight, false)
+    // 不给虚词优待 ⇒ 读音无从参与判据，码传空串即可（`is_function_word` 恒 false）。
+    score_node_inner(word, "", weight, false)
 }
 
 /// `function_word_credit`：是否给单字虚词优待，见 [`score_node_partial_final`]。
-fn score_node_inner(word: &str, weight: i32, function_word_credit: bool) -> f64 {
+fn score_node_inner(word: &str, code: &str, weight: i32, function_word_credit: bool) -> f64 {
     const SINGLE_CHAR_PENALTY: f64 = -3.0;
     const FUNCTION_WORD_BONUS: f64 = 2.0; // 虚词加成（Go 原名 functionWordPenalty，值为正）
     const VERB_PARTICLE_PENALTY: f64 = -1.0;
@@ -228,7 +268,7 @@ fn score_node_inner(word: &str, weight: i32, function_word_credit: bool) -> f64 
     };
 
     if char_count == 1 {
-        if function_word_credit && is_function_word(word) {
+        if function_word_credit && is_function_word(word, code) {
             log_prob += FUNCTION_WORD_BONUS;
         } else {
             log_prob += SINGLE_CHAR_PENALTY;
@@ -257,7 +297,7 @@ fn score_node_inner(word: &str, weight: i32, function_word_credit: bool) -> f64 
     // （填鸭式 w=152）便能压过「天涯+是」这种 2 词正解——这正是 bigram P(是|天涯)
     // 该解决而 unigram 解决不了的（缺磁盘语料，尚无 bigram）。豁免虚词
     // 的每词罚是对该缺陷的近似补偿：不让「虚词自成一词」这件语法必然的事付投机拆分的代价。
-    if !(function_word_credit && char_count == 1 && is_function_word(word)) {
+    if !(function_word_credit && char_count == 1 && is_function_word(word, code)) {
         log_prob -= WORD_PENALTY;
     }
     log_prob
@@ -366,7 +406,7 @@ impl LatticeBuilder {
                         },
                         MaskCheck::Reject => continue,
                     };
-                    let log_prob = score_node(&hit.text, hit.weight)
+                    let log_prob = score_node(&hit.text, code, hit.weight)
                         - AMBIGUOUS_PENALTY * graph.ambiguous_count(p, q, &offsets) as f64;
                     nodes[q].push(LatticeNode {
                         start: p,
@@ -410,7 +450,7 @@ impl LatticeBuilder {
                             }
                             // 模糊命中同样按图上那条标注路径计歧义罚：惩罚是**切分**的
                             // 属性（该路径是否踩在歧义接缝上），与词条来源无关。
-                            let log_prob = score_node(text, *weight)
+                            let log_prob = score_node(text, &variant, *weight)
                                 - FUZZY_SYLLABLE_LOG_PENALTY * fuzzy_edits as f64
                                 - AMBIGUOUS_PENALTY * graph.ambiguous_count(p, q, &offsets) as f64;
                             nodes[q].push(LatticeNode {
@@ -481,8 +521,8 @@ impl LatticeBuilder {
                         if nodes[q].iter().any(|n| n.word == hit.text && n.start == p) {
                             continue;
                         }
-                        let log_prob =
-                            score_node(&hit.text, hit.weight) - ABBREV_NODE_PENALTY * span as f64;
+                        let log_prob = score_node(&hit.text, &abbr_code, hit.weight)
+                            - ABBREV_NODE_PENALTY * span as f64;
                         nodes[q].push(LatticeNode {
                             start: p,
                             end: q,
