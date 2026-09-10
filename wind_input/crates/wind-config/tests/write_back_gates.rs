@@ -68,6 +68,11 @@ const CONFIG_LOAD_SITES: &[(&str, usize, &str)] = &[
          正是这张闸门表想要的方向",
     ),
     (
+        "crates/wind-config/src/startup_trace.rs",
+        1,
+        "只读：`effective_log_level` 只取 `debug.log_level` 一个字段拼日志级别，Config 随即         丢弃 —— 与已登记的 `apps/service/src/main.rs` 同型。★ 它天然不可能成为写回种子：         整个模块的产物是一份**日志**，没有任何一条路把它交还给配置层",
+    ),
+    (
         "crates/wind-coordinator/src/construct.rs",
         1,
         "只读：构造运行时配置，内存消费",
@@ -81,6 +86,11 @@ const CONFIG_LOAD_SITES: &[(&str, usize, &str)] = &[
         "crates/wind-coordinator/src/handle_cmdbar.rs",
         1,
         "load_value：get 只读放行；toggle 传 require_trustworthy=true ⇒ 已闸",
+    ),
+    (
+        "crates/wind-mobile/src/config_api.rs",
+        1,
+        "只读：`snapshot` 只把生效配置转成 TOML 文本给移动端设置页**显示**。★ 判据不是         「它没写盘」而是「设置页不拿这份快照当写回基线」——移动端的写回走逐键的         `config_set` → `Config::set_user_value`（见 `wind-mobile/src/lib.rs` 那三个口的         分工注释：注册表说有哪些键、快照说现在是什么值、写入逐键落到用户层）。         ⚠️ 哪天改成「把整份快照回写用户层」，这一条就得重判",
     ),
     (
         "crates/wind-mobile/src/lib.rs",
