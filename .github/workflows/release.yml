@@ -47,7 +47,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # tag 为发布版本的唯一真值源;两个 build job 都把它写进 docs/VERSION,让下游
       # (build.rs 资源版本 / dev.ps1 / CMake -DAPP_VERSION_STR / mac app_build 的 PlistBuddy)
       # 统一取到同一个值。
@@ -80,16 +80,16 @@ jobs:
       # wind-setting 另需 ../wind-ui-rust 与 ../WindInput。均 checkout 到 $GITHUB_WORKSPACE 下平级。
       # 下面三个仓已开源,checkout 走默认 GITHUB_TOKEN,无需额外 PAT。
       - name: 检出 WindInput
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: WindInput
       - name: 检出 wind-installer
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: huanfeng/wind-installer
           path: wind-installer
       - name: 检出 wind-portable
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: huanfeng/wind-portable
           path: wind-portable
@@ -102,13 +102,13 @@ jobs:
       # crates.io 上发布的 windui,不看本地仓 —— 故不检出 wind-setting 时拉它纯属白拉。
       - name: 检出 wind-ui-rust (wind-setting 的 path 依赖)
         if: env.HAS_SETTING_TOKEN == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: huanfeng/wind-ui-rust
           path: wind-ui-rust
       - name: 检出 wind-setting (私有仓,需 WIND_REPOS_TOKEN)
         if: env.HAS_SETTING_TOKEN == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: huanfeng/wind-setting
           path: wind-setting
@@ -167,7 +167,7 @@ jobs:
         run: .\scripts\dev.ps1 stage
 
       - name: 上传 Windows 产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-windows
           path: |
@@ -181,7 +181,7 @@ jobs:
       # 单列一个 artifact,不并进 dist-*:publish job 按 `pattern: dist-*` 汇总并把结果
       # 原样上传到 Release 页面,中转产物混进去就会出现在用户看到的下载列表里。
       - name: 上传中转产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stage-windows
           path: WindInput/dist/WindInput-Stage-*.zip
@@ -206,20 +206,20 @@ jobs:
       # 目录布局同 Windows:wind-setting 以 path 依赖引用 ../wind-ui-rust,并需要 ../WindInput。
       # macOS 侧不需要 wind-installer / wind-portable(打包由 scripts/mac/dev.sh 的 pkgbuild 完成)。
       - name: 检出 WindInput
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: WindInput
       # 同 Windows 侧:私有仓,有 PAT 才检出;没有则 build_setting 自行跳过,.pkg 不含设置 app。
       # wind-ui-rust 是 wind-setting 的 path 依赖,同组门控 —— macOS 侧它没有别的消费者。
       - name: 检出 wind-ui-rust (wind-setting 的 path 依赖)
         if: env.HAS_SETTING_TOKEN == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: huanfeng/wind-ui-rust
           path: wind-ui-rust
       - name: 检出 wind-setting (私有仓,需 WIND_REPOS_TOKEN)
         if: env.HAS_SETTING_TOKEN == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: huanfeng/wind-setting
           path: wind-setting
@@ -308,7 +308,7 @@ jobs:
           done
 
       - name: 上传 macOS 产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-macos
           path: |
@@ -328,12 +328,12 @@ jobs:
     env:
       BUILD_VERSION: ${{ needs.prep.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0       # gen-release-notes.sh 要按历史拓扑找上一个 tag
 
       - name: 下载两平台产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true

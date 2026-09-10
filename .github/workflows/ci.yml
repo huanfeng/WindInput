@@ -16,7 +16,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 统一 MSVC 工具链:clang-19(C++ TSF 需 clang≥19)+ lld-19 + llvm-19;
       # cargo-xwin 交叉编 Rust、clang 交叉编 C++ TSF,均经 MSVC SDK(无需 mingw)。
@@ -35,7 +35,7 @@ jobs:
 
       # 缓存 MSVC CRT/Windows SDK(xwin 首次下载约数百 MB)
       - name: 缓存 xwin SDK
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/cargo-xwin
           key: xwin-${{ runner.os }}-v1
@@ -86,8 +86,8 @@ jobs:
     outputs:
       macos: ${{ steps.filter.outputs.macos }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -108,7 +108,7 @@ jobs:
     if: needs.changes.outputs.macos == 'true'
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
