@@ -427,6 +427,7 @@ pub trait WebDataRpc: WebDataHost {
             "backup.restore" => self.web_backup_restore(params),
 
             // ── dict.*（用户词库，redb 持久化）────────────────────
+            "comment.sources" => self.web_comment_sources(),
             "dict.listPaged" => self.web_dict_list_paged(params),
             "dict.search" => self.web_dict_search(params),
             "dict.add" => self.web_dict_add(params),
@@ -670,6 +671,45 @@ pub trait WebDataRpc: WebDataHost {
             .map(|(id, name)| json!({ "id": id, "name": name }))
             .collect();
         Ok(json!(items))
+    }
+
+    /// 注释词库的**可选来源**：自动派生项 + `schemas/comments/` 下扫到的文件。
+    ///
+    /// 设置页据此把「填路径」换成「挑一个」——路径要相对 `schemas/`、分隔符怎么写、文件到底
+    /// 放没放对，这三件事以前全靠用户自己对，错了的表现是「配了没反应」（core 只 warn 一行）。
+    ///
+    /// `files` 里带 `hasComment`：**扫到但没有 comment 列**的文件仍然列出而不是滤掉。
+    /// 滤掉的话，用户放了个格式不对的文件进去，界面上看到的是「我的文件不见了」，
+    /// 那比「列出来并标一句缺 comment 列」难查得多。
+    fn web_comment_sources(&self) -> anyhow::Result<Value> {
+        let data_dir = wind_config::Config::data_dir();
+        let auto: Vec<Value> = self
+            .auto_comment_sources()
+            .iter()
+            .map(|a| {
+                json!({
+                    "id": a.id,
+                    "label": a.label,
+                    "rel": a.rel,
+                    "schemas": a.schemas,
+                })
+            })
+            .collect();
+        let files: Vec<Value> = wind_config::Config::list_schema_resource_dir(
+            data_dir.as_deref(),
+            "comments",
+            ".dict.yaml",
+        )
+        .into_iter()
+        .map(|(rel, abs)| {
+            json!({
+                "path": rel,
+                "label": dict_yaml_name(&abs),
+                "hasComment": wind_reverse::declares_comment_column(&abs),
+            })
+        })
+        .collect();
+        Ok(json!({ "auto": auto, "files": files }))
     }
 
     fn web_dict_list_paged(&self, params: &Value) -> anyhow::Result<Value> {
@@ -8365,4 +8405,28 @@ mod phrase_shadowing_tests {
         assert_eq!(user_phrase_count(&c), 1, "改键后的用户短语仍在");
         let _ = std::fs::remove_dir_all(&base);
     }
+}
+
+/// 从 `.dict.yaml` 的 YAML 头读 `name:`，读不到返回空串（调用方回落文件名）。
+///
+/// 只读到头部结束（独占一行的 `...`）：正文可能有几百 MB，而这里只是给设置页的下拉
+/// 取个显示名。
+fn dict_yaml_name(path: &std::path::Path) -> String {
+    use std::io::BufRead;
+    let Ok(f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    for line in std::io::BufReader::new(f).lines().take(200) {
+        let Ok(line) = line else { return String::new() };
+        if line.trim_end() == "..." {
+            break;
+        }
+        // 顶格的 `name:` 才是词库名（缩进的同名键属于别的映射）。
+        if line.starts_with("name:")
+            && let Some(v) = line["name:".len()..].split('#').next()
+        {
+            return v.trim().trim_matches('"').trim_matches('\'').to_string();
+        }
+    }
+    String::new()
 }

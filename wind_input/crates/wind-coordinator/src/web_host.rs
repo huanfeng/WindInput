@@ -35,6 +35,8 @@ pub trait WebDataHost {
     fn restore_missing_system_phrases(&self, reason: &str);
     fn restore_system_phrases(&self) -> usize;
     fn sync_comment_dicts(&self);
+    /// 词库自带 `comment` 列自动派生出的注释源（设置页据此列出只读条目）。
+    fn auto_comment_sources(&self) -> Vec<crate::coordinator::AutoCommentSource>;
     fn sync_chaizi_assets(&self);
     fn reload_user_config(&self) -> bool;
     fn push_theme(&self, name: &str, is_dark: bool);
@@ -236,6 +238,9 @@ impl WebDataHost for Coordinator {
     }
     fn sync_comment_dicts(&self) {
         Coordinator::sync_comment_dicts(self);
+    }
+    fn auto_comment_sources(&self) -> Vec<crate::coordinator::AutoCommentSource> {
+        Coordinator::auto_comment_sources(self)
     }
     fn sync_chaizi_assets(&self) {
         Coordinator::sync_chaizi_assets(self);

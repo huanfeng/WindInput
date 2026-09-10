@@ -19,5 +19,5 @@ pub use engine::{
     AdmitFn, BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType, ExtendedEngine,
 };
 pub use english::EnglishEngine;
-pub use manager::{EngineManager, FreqSettings, FreqStrategy};
+pub use manager::{EngineManager, FreqSettings, FreqStrategy, SchemaDictFile};
 pub use pinyin::PinyinEngine;

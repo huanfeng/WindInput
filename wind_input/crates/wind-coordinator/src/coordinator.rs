@@ -3463,15 +3463,55 @@ impl Coordinator {
     /// 目录），与拆字库、字根字体这些方案附属资源同一规则 —— 注释库本就是同类东西：
     /// 放在 `schemas/` 下、随整机备份走（`user_schemas_dir` 递归打包）、不参与召回。
     /// 配置里因此写 `comments/xxx.dict.yaml` 而非 `schemas/comments/xxx.dict.yaml`。
+    /// 词库自带 `comment` 列时自动派生出的注释源（`[ui.candidate].auto_comment_dicts`）。
+    ///
+    /// 每次调用都重新检测：方案启用/停用、词库换层（用户目录覆盖安装目录）都会改变结果，
+    /// 而检测本身只读每个词库的 YAML 头，代价与词库大小无关。
+    ///
+    /// 总开关关闭时返回空表 —— 于是配置里的引用空壳一条都认领不到，自动派生整体消失，
+    /// 不需要在合并那侧再判一次开关。
+    pub fn auto_comment_sources(&self) -> Vec<AutoCommentSource> {
+        if !self.rt().config.ui.candidate.auto_comment_dicts {
+            return Vec::new();
+        }
+        self.engine_mgr
+            .declared_dict_files()
+            .into_iter()
+            .filter(|f| wind_reverse::declares_comment_column(&f.path))
+            .map(|f| AutoCommentSource {
+                id: auto_comment_id(&f.rel),
+                label: if f.label.is_empty() {
+                    f.rel.clone()
+                } else {
+                    f.label.clone()
+                },
+                rel: f.rel,
+                path: f.path,
+                schemas: f.schemas,
+            })
+            .collect()
+    }
+
     pub(crate) fn sync_comment_dicts(&self) {
         let data_dir = Config::data_dir();
+        let auto = self.auto_comment_sources();
         let specs = {
             let rt = self.rt();
-            rt.config.ui.comment_dicts.clone()
+            merge_comment_dicts(&rt.config.ui.comment_dicts, &auto)
         };
         let mut paths: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
-        for s in specs.iter().filter(|s| s.enabled && !s.path.is_empty()) {
-            match Config::resolve_schema_resource(data_dir.as_deref(), &s.path) {
+        for eff in specs.iter().filter(|e| e.enabled) {
+            // 自动项的路径已经是解析好的绝对路径（检测时就得打开文件），手工项才需要按
+            // `schemas/` 逐层解析。两者到这里汇成同一条流水线。
+            let resolved = match &eff.kind {
+                EffectiveCommentKind::Auto { path } => Some(path.clone()),
+                EffectiveCommentKind::Manual { path } if path.is_empty() => continue,
+                EffectiveCommentKind::Manual { path } => {
+                    Config::resolve_schema_resource(data_dir.as_deref(), path)
+                }
+            };
+            let s = eff;
+            match resolved {
                 // 按**解析后路径**去重：两条 spec 写不同的相对路径却指向同一个文件时
                 // （`a.dict.yaml` 与 `./a.dict.yaml`，或用户目录与安装目录同名文件都被
                 // 解析到同一处），只加载一次。重复加载除了浪费解析时间，还会让优先级
@@ -3483,7 +3523,8 @@ impl Coordinator {
                 // 只 warn 不中断：一个库路径写错不该让其余库一起不加载。
                 None => warn!(
                     "注释词库不存在（用户/安装目录均未找到）: {} (id={})",
-                    s.path, s.id
+                    s.display_path(),
+                    s.id
                 ),
             }
         }
@@ -13346,6 +13387,260 @@ mod input_diag_tests {
         assert!(
             !c.password_suppress.load(Relaxed),
             "数字密码位同样受开关约束"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 注释词库：配置里的挂载表 × 词库自带 comment 列的自动派生项
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一个自动派生出的注释源：某个方案声明的词库自己带了 `comment` 列。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoCommentSource {
+    /// 稳定 id（`auto:<rel>`）。配置里的引用空壳靠它认领本条。
+    pub id: String,
+    /// 词库在方案里的相对路径，供设置页显示与排错。
+    pub rel: String,
+    /// 显示名（方案里的 `label`，空则回落 `rel`）。
+    pub label: String,
+    /// 解析后的绝对路径。
+    pub path: std::path::PathBuf,
+    /// 声明了这份词库的方案 id —— 直接就是它的适用方案白名单。
+    ///
+    /// 自动项的白名单**不可编辑**，因为它不是一个偏好而是一个事实：这份注释随词库分发，
+    /// 拿到别的方案下去查纯属浪费（还查不到）。用户想跨方案共用，正确做法是把它当独立
+    /// 注释库手工挂一条。
+    pub schemas: Vec<String>,
+}
+
+/// 自动项的稳定 id。带 `auto:` 前缀是为了与用户手写的 id 分处两个命名空间 ——
+/// 手工项与自动项同 id 时，认领逻辑靠 `auto` 标志位区分而不靠 id，但日志里两条同名
+/// 记录足够让人查半天。
+pub(crate) fn auto_comment_id(rel: &str) -> String {
+    format!("auto:{}", rel.replace('\\', "/"))
+}
+
+/// 合并后的一条挂载项。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EffectiveCommentDict {
+    pub id: String,
+    pub enabled: bool,
+    pub schemas: Vec<String>,
+    pub kind: EffectiveCommentKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EffectiveCommentKind {
+    /// 用户手工挂的库，`path` 相对 `schemas/`，尚待解析。
+    Manual { path: String },
+    /// 自动派生项，`path` 已是绝对路径。
+    Auto { path: std::path::PathBuf },
+}
+
+impl EffectiveCommentDict {
+    /// 供日志用的路径串（两种形态各自的原样）。
+    pub fn display_path(&self) -> String {
+        match &self.kind {
+            EffectiveCommentKind::Manual { path } => path.clone(),
+            EffectiveCommentKind::Auto { path } => path.display().to_string(),
+        }
+    }
+}
+
+/// 把配置里的挂载表与自动检测结果合成**最终挂载序列**（顺序即优先级）。
+///
+/// - 配置里 `auto = true` 的条目是**引用空壳**：按 id 去 `auto` 里认领，认领到就用检测出
+///   的 `path`/`schemas`，只保留用户的 `enabled` 与位置；认领不到则**静默丢弃**（词库被删、
+///   被停用、或总开关关了——都是常态，不是配置错误）。
+/// - 其余条目原样保留为手工项。
+/// - `auto` 里没被任何空壳认领的，追加到**末尾**并默认启用。
+///
+/// # 为什么新自动项默认排末尾
+///
+/// 用户显式挂的库表达的是明确意图，自动项是「顺手给的」。装了个新方案就把用户排好的第一
+/// 优先级挤到后面去，是这类「自动」功能最招人烦的地方。想让它靠前，拖一下即可 —— 拖过
+/// 之后它就有了空壳，位置从此归用户所有。
+pub(crate) fn merge_comment_dicts(
+    configured: &[wind_config::CommentDictSpec],
+    auto: &[AutoCommentSource],
+) -> Vec<EffectiveCommentDict> {
+    let mut out: Vec<EffectiveCommentDict> = Vec::new();
+    let mut claimed: Vec<&str> = Vec::new();
+    for spec in configured {
+        if spec.auto {
+            let Some(a) = auto.iter().find(|a| a.id == spec.id) else {
+                continue;
+            };
+            claimed.push(a.id.as_str());
+            out.push(EffectiveCommentDict {
+                id: a.id.clone(),
+                enabled: spec.enabled,
+                schemas: a.schemas.clone(),
+                kind: EffectiveCommentKind::Auto {
+                    path: a.path.clone(),
+                },
+            });
+            continue;
+        }
+        out.push(EffectiveCommentDict {
+            id: spec.id.clone(),
+            enabled: spec.enabled,
+            schemas: spec.schemas.clone(),
+            kind: EffectiveCommentKind::Manual {
+                path: spec.path.clone(),
+            },
+        });
+    }
+    for a in auto.iter().filter(|a| !claimed.contains(&a.id.as_str())) {
+        out.push(EffectiveCommentDict {
+            id: a.id.clone(),
+            enabled: true,
+            schemas: a.schemas.clone(),
+            kind: EffectiveCommentKind::Auto {
+                path: a.path.clone(),
+            },
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod comment_dict_merge_tests {
+    //! 注释词库挂载表 × 自动派生项的合并（[`merge_comment_dicts`]）。
+
+    use super::*;
+    use wind_config::CommentDictSpec;
+
+    fn manual(id: &str, path: &str, enabled: bool) -> CommentDictSpec {
+        CommentDictSpec {
+            id: id.to_string(),
+            path: path.to_string(),
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    fn shell(id: &str, enabled: bool) -> CommentDictSpec {
+        CommentDictSpec {
+            id: id.to_string(),
+            auto: true,
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    fn auto(rel: &str, schemas: &[&str]) -> AutoCommentSource {
+        AutoCommentSource {
+            id: auto_comment_id(rel),
+            rel: rel.to_string(),
+            label: String::new(),
+            path: std::path::PathBuf::from("/abs").join(rel),
+            schemas: schemas.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn ids(v: &[EffectiveCommentDict]) -> Vec<&str> {
+        v.iter().map(|e| e.id.as_str()).collect()
+    }
+
+    #[test]
+    fn new_auto_sources_append_after_manual_entries() {
+        //! 没被引用过的自动项排在**末尾** —— 装个新方案不该把用户排好的第一优先级挤下去。
+        let cfg = [manual("en", "comments/en.dict.yaml", true)];
+        let a = [auto("pinyin/frost.dict.yaml", &["pinyin"])];
+        let out = merge_comment_dicts(&cfg, &a);
+        assert_eq!(ids(&out), ["en", "auto:pinyin/frost.dict.yaml"]);
+        assert!(out[1].enabled, "新自动项默认启用");
+        assert_eq!(out[1].schemas, ["pinyin"], "白名单取声明它的方案");
+    }
+
+    #[test]
+    fn shell_keeps_user_position_and_switch() {
+        //! 引用空壳把自动项的**位置与开关**交回用户 —— 这正是它存在的理由：
+        //! 顺序即优先级，而顺序只能存在这张表的数组位置里。
+        let cfg = [
+            shell("auto:pinyin/frost.dict.yaml", false),
+            manual("en", "comments/en.dict.yaml", true),
+        ];
+        let a = [auto("pinyin/frost.dict.yaml", &["pinyin"])];
+        let out = merge_comment_dicts(&cfg, &a);
+        assert_eq!(
+            ids(&out),
+            ["auto:pinyin/frost.dict.yaml", "en"],
+            "空壳在前 ⇒ 自动项优先级高于手工项"
+        );
+        assert!(!out[0].enabled, "用户关掉的自动项不能被重新打开");
+        assert_eq!(out.len(), 2, "已被空壳认领的自动项不得在末尾再出现一次");
+    }
+
+    #[test]
+    fn shell_path_and_schemas_come_from_detection_not_config() {
+        //! 空壳里只有 id / enabled / 位置是用户的。词库换了层、方案改了声明，
+        //! 用户不需要回来同步——所以这两项每次都从检测结果取。
+        let cfg = [CommentDictSpec {
+            id: auto_comment_id("pinyin/frost.dict.yaml"),
+            auto: true,
+            enabled: true,
+            path: "早就过时的路径.dict.yaml".into(),
+            schemas: vec!["wubi86".into()],
+            ..Default::default()
+        }];
+        let a = [auto("pinyin/frost.dict.yaml", &["pinyin", "wubi_pinyin"])];
+        let out = merge_comment_dicts(&cfg, &a);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].kind,
+            EffectiveCommentKind::Auto {
+                path: std::path::PathBuf::from("/abs").join("pinyin/frost.dict.yaml")
+            },
+            "路径取检测结果，不取空壳里那个"
+        );
+        assert_eq!(
+            out[0].schemas,
+            ["pinyin", "wubi_pinyin"],
+            "白名单同理，且是并集（同一词库被两个方案共用）"
+        );
+    }
+
+    #[test]
+    fn unclaimed_shell_is_dropped_silently() {
+        //! 认领不到的空壳（词库删了/停用了/总开关关了）**丢弃**而非退化成手工项 ——
+        //! 它没有 path，留下来只会得到一条「注释词库不存在」的告警，而那不是错误。
+        let cfg = [
+            shell("auto:gone.dict.yaml", true),
+            manual("en", "comments/en.dict.yaml", true),
+        ];
+        let out = merge_comment_dicts(&cfg, &[]);
+        assert_eq!(ids(&out), ["en"]);
+    }
+
+    #[test]
+    fn no_auto_sources_reproduces_plain_config_order() {
+        //! 总开关关掉（`auto` 为空表）时，结果必须与本功能引入前逐字一致：
+        //! 手工项按配置顺序、各自带自己的 path 与白名单。
+        let cfg = [
+            manual("a", "comments/a.dict.yaml", true),
+            manual("b", "comments/b.dict.yaml", false),
+        ];
+        let out = merge_comment_dicts(&cfg, &[]);
+        assert_eq!(ids(&out), ["a", "b"]);
+        assert!(out[0].enabled && !out[1].enabled);
+        assert_eq!(
+            out[1].kind,
+            EffectiveCommentKind::Manual {
+                path: "comments/b.dict.yaml".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn auto_id_normalizes_separator() {
+        //! id 要跨平台稳定：方案文件里写 `\` 还是 `/`，认领结果必须一样，
+        //! 否则同一个词库在两台机器上得到两个 id，用户排好的顺序换台机器就失效。
+        assert_eq!(
+            auto_comment_id("pinyin\\frost.dict.yaml"),
+            auto_comment_id("pinyin/frost.dict.yaml")
         );
     }
 }

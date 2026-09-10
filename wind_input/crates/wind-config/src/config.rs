@@ -4259,6 +4259,9 @@ pub struct UiConfig {
     /// 注释词库挂载列表（`[[ui.comment_dicts]]`），供候选注释模板的 `${dict}` 变量查询。
     ///
     /// **数组顺序即优先级**：同一个词在多个库里都有注释时，取靠前那个库的。
+    ///
+    /// 表里除了用户手工挂的库，还可以出现**自动派生项的引用条目**（`auto = true`），
+    /// 见 [`CommentDictSpec::auto`]。
     #[serde(default)]
     pub comment_dicts: Vec<CommentDictSpec>,
 }
@@ -4346,6 +4349,20 @@ pub struct CommentDictSpec {
     /// 「配了没反应」比「多加载一份」难查得多。
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// **自动派生项的引用条目**：`true` 时本条不带自己的 `path`，而是按 `id` 去认领一个
+    /// 运行时检测出来的自动注释源（词库自带 `comment` 列，见 [`UiConfig::auto_comment_dicts`]）。
+    ///
+    /// # 为什么自动项要在这张表里留一条「空壳」
+    ///
+    /// 自动项的 **启用态与优先级** 得能被用户改，而优先级就是本表的数组位置 —— 不落进
+    /// 同一张表，顺序就只能另立一个 `comment_dict_order` 之类的键，那是第二个真相源，
+    /// 两边失同步的表现是「拖了顺序没变化」。
+    ///
+    /// 空壳里**只有 `id` / `enabled` / 位置是用户的**，`path` 与 `schemas` 每次启动都从
+    /// 检测结果重新取 —— 词库换了路径、方案改了名，用户不需要来这里同步。认领不到（词库
+    /// 被删/停用/关掉了总开关）的空壳静默跳过，不告警：那是常态而非配置错误。
+    #[serde(default)]
+    pub auto: bool,
     /// 限定生效的方案 id；**留空 = 全部方案**。
     ///
     /// 注释库常常是方案专属的：一份大英汉词典只在英文方案下有意义，挂在五笔方案上
@@ -4984,6 +5001,19 @@ pub struct UiCandidateConfig {
     /// **横排**候选的注释段模板。见 [`Self::comment_template_vertical`]。
     #[serde(default = "default_comment_template")]
     pub comment_template_horizontal: String,
+    /// 自动把**词库自带的 `comment` 列**当注释源用（默认开）。
+    ///
+    /// 方案声明的词库里若显式写了 `columns: [text, code, comment]`，那份注释本就是随词库
+    /// 分发的、作者想让人看到的东西，要用户再去注释词库列表里手工挂一遍纯属多余一步。关掉
+    /// 本开关则一条都不派生（已在 `[[ui.comment_dicts]]` 里留下的引用空壳一并失效，不报错）。
+    ///
+    /// 判据是**显式声明**：无 `columns:` 的词库一律不算（绝大多数码表是 `text\tcode\tweight`，
+    /// 按注释库的默认列序读会把编码整列当成注释）。见 `wind_reverse::declares_comment_column`。
+    ///
+    /// 落在 `[ui.candidate]` 而非 `[ui]`：与 `comment_template_*` 同段，说的是同一件事的
+    /// 两半（模板决定显示什么，本键决定去哪儿查）。
+    #[serde(default = "default_true")]
+    pub auto_comment_dicts: bool,
     /// **竖排**注释段的最大字数（0=不限），超出截断并加 `…`。
     ///
     /// 默认 0：本项引入前注释段从无长度限制，非 0 的默认值会让存量用户的注释突然变短。
@@ -5134,6 +5164,7 @@ impl Default for UiCandidateConfig {
             min_rows: 0,
             comment_template_vertical: default_comment_template(),
             comment_template_horizontal: default_comment_template(),
+            auto_comment_dicts: true,
             comment_max_chars_vertical: 0,
             comment_max_chars_horizontal: 0,
             index_labels: Vec::new(),
@@ -7163,6 +7194,43 @@ impl Config {
     /// ——只拼 data_dir 会永远找不到。各层均不存在返回 None（调用方自行告警）。
     pub fn resolve_schema_resource(data_dir: Option<&Path>, rel: &str) -> Option<PathBuf> {
         Self::resolve_overridable(data_dir, Some("schemas"), rel, "resource")
+    }
+
+    /// 列出 `schemas/<sub>/` 下所有以 `suffix` 结尾的文件，**各层合并、靠前的层遮蔽同名者**。
+    ///
+    /// 返回 `(相对 schemas/ 的路径, 绝对路径)`，按文件名字典序。相对路径用 `/` 分隔 ——
+    /// 它要写进配置（`[[ui.comment_dicts]].path`）并跨平台读回，反斜杠会在 TOML 里再撞一次
+    /// 转义。解析回来时 `Path::join` 两种分隔符都认，写出去只用一种。
+    ///
+    /// 与 [`Self::resolve_schema_resource`] 是同一层序的两面：那个回答「这个名字是哪一层
+    /// 的」，这个回答「一共有哪些名字」。设置页要列出可选项，必须用后者 —— 用前者只能
+    /// 验证用户已经手打对了的路径，那正是本函数要消掉的那步。
+    pub fn list_schema_resource_dir(
+        data_dir: Option<&Path>,
+        sub: &str,
+        suffix: &str,
+    ) -> Vec<(String, PathBuf)> {
+        let mut out: Vec<(String, PathBuf)> = Vec::new();
+        for layer in Self::resource_layers_named_with(data_dir) {
+            let dir = layer.path.join("schemas").join(sub);
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.ends_with(suffix) || !entry.path().is_file() {
+                    continue;
+                }
+                let rel = format!("{sub}/{name}");
+                // 先到先得 = 靠前的层遮蔽后面的层，与 `resolve_overridable` 同语义。
+                if out.iter().any(|(r, _)| *r == rel) {
+                    continue;
+                }
+                out.push((rel, entry.path()));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// 解析**数据根**下的程序自带文件（`system.phrases.toml` / `pinyin_map.txt` 等）：

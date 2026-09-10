@@ -62,13 +62,18 @@ const SCHEMAS_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/wind-engine/src/manager.rs",
-        11,
+        12,
         "4 处（scan_chars_in_range / 两个索引构建 / build_engine）把 data 层根交给\
          resolve_dict_file，层序在它内部展开；1 处 installed_schemas 的 scan_dirs 已按层序；\
          2 处 is_user_schema / delete_user_schema **刻意只查用户目录**——它们问的是\
          「这个方案文件是不是用户自己装的」，故 data / data_custom 的方案本来就已经是\
          `is_user_schema()==false`、`delete_user_schema()` 直接 bail，无需加层；\
-         3 处是 resolve_schema_file 的层内拼接与兜底；         1 处 warn_stale_common_chars **刻意只查用户目录**——它问的是「用户自己那份         已经失效的 common_chars.txt 还在不在」，data / data_custom 层的同名文件是我们         自己发的（且已随常用字表搬进 charsets/ 而删除），不该提醒用户去迁移它",
+         3 处是 resolve_schema_file 的层内拼接与兜底；         1 处 warn_stale_common_chars **刻意只查用户目录**——它问的是「用户自己那份         已经失效的 common_chars.txt 还在不在」，data / data_custom 层的同名文件是我们         自己发的（且已随常用字表搬进 charsets/ 而删除），不该提醒用户去迁移它；         1 处 declared_dict_files 同前 4 处——只是把 data 层根交给 resolve_dict_file，         层序在它内部展开",
+    ),
+    (
+        "crates/wind-config/src/config.rs",
+        1,
+        "list_schema_resource_dir 已按层序展开（在 resource_layers_named_with 的循环体内         拼 schemas/<sub>）——它是 resolve_schema_resource 的「有哪些名字」那一面，         设置页据此列出可选的注释词库文件，故与解析侧看见的层必须是同一批",
     ),
     (
         "crates/wind-mobile/src/lib.rs",

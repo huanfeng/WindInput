@@ -578,6 +578,34 @@ fn dir_has_yaml(dir: &Path) -> bool {
     })
 }
 
+/// [`EngineManager::read_dict_head`] 只读这么多字节的头 —— 超出即认定正文早已开始。
+const DICT_HEAD_SCAN_LIMIT: usize = 64 * 1024;
+
+/// 把 `sibling` 接到 `rel` 所在目录下：`pinyin/rime_frost.dict.yaml` +
+/// `cn_dicts/corrections.dict.yaml` → `pinyin/cn_dicts/corrections.dict.yaml`。
+///
+/// 统一用 `/` 拼：结果要当**稳定 id** 用（见 `Coordinator::auto_comment_id`），
+/// 两种分隔符混着写会让同一张表在不同写法下得到两个 id。
+fn join_rel_dir(rel: &str, sibling: &str) -> String {
+    match rel.rsplit_once(['/', '\\']) {
+        Some((dir, _)) => format!("{dir}/{sibling}"),
+        None => sibling.to_string(),
+    }
+}
+
+/// 一个被方案声明的词库文件。见 [`EngineManager::declared_dict_files`]。
+#[derive(Debug, Clone)]
+pub struct SchemaDictFile {
+    /// 方案文件里写的相对路径（如 `pinyin/rime_frost.dict.yaml`）。**稳定 id 的来源**。
+    pub rel: String,
+    /// 按层序解析后的绝对路径（用户 > custom > 安装）。
+    pub path: std::path::PathBuf,
+    /// 词库显示名；可能为空（方案没写 `label`）。
+    pub label: String,
+    /// 声明了这份词库的全部方案 id。
+    pub schemas: Vec<String>,
+}
+
 impl EngineManager {
     /// 从配置创建；仅构建活跃方案引擎，其余按需懒加载。
     pub fn new(config: &Config, data_dir: Option<&Path>) -> Self {
@@ -4768,6 +4796,134 @@ impl EngineManager {
             .collect()
     }
 
+    /// 全部**已启用方案**声明的**已启用词库**文件，按 `rel` 去重。
+    ///
+    /// 上层（协调器）拿它去判断「哪些词库自带 `comment` 列」，进而自动派生注释源。本方法
+    /// 刻意**不做那个判断** —— 「一个文件算不算注释源」是 `wind-reverse` 的语义域，放在这里
+    /// 就得让 wind-engine 依赖 wind-reverse，为一个它自己用不上的判据。
+    ///
+    /// # 为什么按 `rel` 分组、`schemas` 取并集
+    ///
+    /// 一份词库常被多个方案共用（五笔与五笔拼音同指一个 `.dict.yaml`）。注释源的挂载是按
+    /// **解析后路径**去重的（见 `Coordinator::sync_comment_dicts`），同一文件只会挂一次；
+    /// 若这里按 (方案, 词库) 各出一条，那第二条注定被丢弃，而它带的方案 id 会一起丢 ——
+    /// 表现是「五笔下有注释，五笔拼音下没有」。并集在源头就避免了这件事。
+    ///
+    /// 分组键取 `rel` 而非绝对路径：`rel` 是方案文件里写的那个串，用户目录/安装目录换来
+    /// 换去它都不变，适合给上层当稳定 id；而同一个 `rel` 解析出的绝对路径本就唯一。
+    ///
+    /// # ★ `import_tables` 的子表要各自成条
+    ///
+    /// rime 的主表常常只是一张**清单**：朗月拼音的 `rime_frost.dict.yaml` 通篇只有
+    /// `import_tables:`，一行正文都没有，而带 `comment` 列的 `cn_dicts/corrections`
+    /// （错音错字提示）就藏在那份清单里。只看方案声明的那一层，等于把这个生态里**最常见**
+    /// 的带注释形态整个漏掉。故按 `import_tables` 逐层展开，子表与主表平级各成一条。
+    ///
+    /// 子表路径相对**主表所在目录**且不带 `.dict.yaml`（rime 的约定），`seen` 防环。
+    ///
+    /// ⚠️ 扫的是**全部已启用方案**而非活跃方案：注释源的挂载集合刻意不随方案抖动
+    /// （切方案只影响查询期的白名单求值），与 `scan_chars_in_range` 同一取舍。
+    pub fn declared_dict_files(&self) -> Vec<SchemaDictFile> {
+        let Some(data_dir) = self.data_dir.as_deref() else {
+            return Vec::new();
+        };
+        let schemas_dir = data_dir.join("schemas");
+        let mut out: Vec<SchemaDictFile> = Vec::new();
+        for schema_id in self.available_schemas() {
+            let Some(schema) =
+                Self::read_schema(&schema_id, Some(data_dir), self.override_dir.as_deref())
+            else {
+                continue;
+            };
+            for e in Self::enabled_dict_specs(&schema) {
+                // 待展开队列：`(rel, label)`。主表先入队，`import_tables` 的子表随后追加。
+                let mut queue: Vec<(String, String)> = vec![(e.path.clone(), e.label.clone())];
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                while let Some((rel, label)) = queue.pop() {
+                    if !seen.insert(rel.clone()) {
+                        continue; // 防环：两张表互相 import，或多张表 import 同一张
+                    }
+                    let full = Self::resolve_dict_file(&rel, &schemas_dir);
+                    let (name, imports) = Self::read_dict_head(&full);
+                    for imp in imports {
+                        // rime 的 `import_tables` 相对**主表所在目录**，且不带 `.dict.yaml`。
+                        queue.push((
+                            join_rel_dir(&rel, &format!("{imp}.dict.yaml")),
+                            String::new(),
+                        ));
+                    }
+                    let label = if label.is_empty() { name } else { label };
+                    if let Some(hit) = out.iter_mut().find(|f| f.rel == rel) {
+                        if !hit.schemas.contains(&schema_id) {
+                            hit.schemas.push(schema_id.clone());
+                        }
+                        // 首个非空 label 胜出：先声明它的方案通常就是它的主人。
+                        if hit.label.is_empty() {
+                            hit.label = label;
+                        }
+                        continue;
+                    }
+                    out.push(SchemaDictFile {
+                        rel,
+                        path: full,
+                        label,
+                        schemas: vec![schema_id.clone()],
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// 读一个 `.dict.yaml` 的 YAML 头 → `(name, import_tables)`。
+    ///
+    /// 只读到独占一行的 `...`（正文起点）或 [`DICT_HEAD_SCAN_LIMIT`] 为止 —— 主词库正文
+    /// 动辄几百 MB，而本函数是**每次启动对每张表都要跑一遍**的。
+    ///
+    /// 两个字段一起取是因为**它们来自同一次读**：分成两个函数就要把同一个文件头读两遍。
+    fn read_dict_head(path: &Path) -> (String, Vec<String>) {
+        use std::io::BufRead;
+        let Ok(f) = std::fs::File::open(path) else {
+            return (String::new(), Vec::new());
+        };
+        let mut name = String::new();
+        let mut imports: Vec<String> = Vec::new();
+        let mut in_imports = false;
+        let mut read = 0usize;
+        for line in std::io::BufReader::new(f).lines() {
+            let Ok(line) = line else {
+                break; // 非 UTF-8 ⇒ 不是我们认的格式
+            };
+            read += line.len();
+            if line.trim_end() == "..." || read > DICT_HEAD_SCAN_LIMIT {
+                break;
+            }
+            // 剥行内注释（`  - cn_dicts/corrections # 错音错字提示`）
+            let body = line.split('#').next().unwrap_or("");
+            if in_imports {
+                match body.trim().strip_prefix('-') {
+                    Some(item) if !item.trim().is_empty() => {
+                        imports.push(item.trim().to_string());
+                        continue;
+                    }
+                    // 空行照旧留在块内（YAML 允许），回到非缩进键才算块结束
+                    _ if body.trim().is_empty() => continue,
+                    _ => in_imports = false,
+                }
+            }
+            // 顶格的键才算数（缩进的同名键属于别的映射）
+            if body.starts_with([' ', '\t']) {
+                continue;
+            }
+            if let Some(v) = body.trim().strip_prefix("name:") {
+                name = v.trim().trim_matches('"').trim_matches('\'').to_string();
+            } else if body.trim() == "import_tables:" {
+                in_imports = true;
+            }
+        }
+        (name, imports)
+    }
+
     /// 清理本方案遗留的 `combined.wdat` —— 改用逐库构建之前那个中间产物
     /// （feihuzj2 方案上是 **230MB**，且此后再不会有人读它）。
     ///
@@ -5652,6 +5808,80 @@ mod tests {
         cfg.schema.english.frequency.code_scope = "candidate".to_string();
         let mgr2 = EngineManager::new(&cfg, None);
         assert!(!mgr2.freq_settings().english_code_by_input);
+    }
+
+    #[test]
+    fn join_rel_dir_keeps_one_separator() {
+        //! 子表路径要当**稳定 id** 用，两种分隔符混着写会让同一张表得到两个 id。
+        assert_eq!(
+            join_rel_dir(
+                "pinyin/rime_frost.dict.yaml",
+                "cn_dicts/corrections.dict.yaml"
+            ),
+            "pinyin/cn_dicts/corrections.dict.yaml"
+        );
+        assert_eq!(
+            join_rel_dir(
+                "pinyin\\rime_frost.dict.yaml",
+                "cn_dicts/corrections.dict.yaml"
+            ),
+            "pinyin/cn_dicts/corrections.dict.yaml",
+            "方案文件里写反斜杠时结果必须与写斜杠时一致"
+        );
+        assert_eq!(
+            join_rel_dir("top.dict.yaml", "sub.dict.yaml"),
+            "sub.dict.yaml",
+            "主表就在 schemas 根下时没有目录段可拼"
+        );
+    }
+
+    #[test]
+    fn read_dict_head_parses_name_and_imports() {
+        //! 取自朗月拼音 `rime_frost.dict.yaml` 的真实形态：`import_tables` 块里混着
+        //! 行内注释与整行注释，而带 `comment` 列的 `cn_dicts/corrections` 就在其中。
+        let dir = std::env::temp_dir().join(format!("wind-dicthead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("rime_frost.dict.yaml");
+        std::fs::write(
+            &p,
+            "# Rime dictionary\n\
+             ---\n\
+             name: rime_frost\n\
+             version: \"2023-11-13\"\n\
+             import_tables:\n\
+             \x20 - cn_dicts/base     # 基础词库\n\
+             \x20 # - cn_dicts/tencent  # 大词库，默认不启用\n\
+             \n\
+             \x20 - cn_dicts/corrections # 错音错字提示\n\
+             columns:\n\
+             \x20 - text\n\
+             ...\n\
+             import_tables:\n\
+             \x20 - 正文里的这行不算\n",
+        )
+        .unwrap();
+
+        let (name, imports) = EngineManager::read_dict_head(&p);
+        assert_eq!(name, "rime_frost", "引号要剥掉，且只认顶格的 name:");
+        assert_eq!(
+            imports,
+            ["cn_dicts/base", "cn_dicts/corrections"],
+            "行内注释要剥、整行注释要跳、块内空行不算结束；`...` 之后是正文，不再解析"
+        );
+
+        // 顶格的 `columns:` 结束了 import 块——若把它也当成条目，会多出一个叫 `text` 的表。
+        assert!(
+            !imports.iter().any(|x| x == "text"),
+            "回到另一个顶格键就该结束 import 块"
+        );
+
+        assert_eq!(
+            EngineManager::read_dict_head(&dir.join("没有这个文件.dict.yaml")),
+            (String::new(), Vec::new()),
+            "文件不存在返回空，不 panic（子表可能只发了 wdat 没发 yaml）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 词库路径解析的四级优先级。第三级（用户目录的 wdat 优先于安装目录）是关键：

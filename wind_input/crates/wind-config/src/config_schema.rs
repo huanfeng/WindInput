@@ -493,6 +493,7 @@ static REGISTRY: &[ConfigField] = &[
     f("ui.candidate.comment_template_horizontal", Str),
     f("ui.candidate.comment_max_chars_vertical", Int),
     f("ui.candidate.comment_max_chars_horizontal", Int),
+    f("ui.candidate.auto_comment_dicts", Bool),
     f("ui.comment_dicts", StructList),
     f("ui.candidate.index_labels", StrList),
     f("ui.candidate.flip_when_above", Bool),
@@ -655,11 +656,11 @@ pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
         section: "[codetable.frequency]",
         note: "码表方案可逐项覆盖这里的调频设置；方案没写的项仍然用这里的值。",
     },
-    // 同上：段前缀不递归，英文混入子段要自己登记一条。
+    // 同上：段前缀不递归，英文候选子段要自己登记一条。
     SchemaOverride {
         key: "schema.codetable.english_merge.",
         section: "[codetable.english_merge]",
-        note: "码表方案可逐项覆盖这里的英文混入设置；方案没写的项仍然用这里的值。",
+        note: "码表方案可逐项覆盖这里的英文候选设置；方案没写的项仍然用这里的值。",
     },
     SchemaOverride {
         key: "schema.pinyin.aux_code.enabled",

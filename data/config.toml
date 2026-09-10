@@ -963,6 +963,10 @@ comment_template_horizontal = "${code_hint|code}"
 # 竖排每行独占，能放多少本就不是同一个答案。
 comment_max_chars_vertical = 0
 comment_max_chars_horizontal = 0
+# 词库自带 comment 列时自动当注释源用（供 ${dict} 查询），无需手工挂载。
+# 只认显式写了 columns 且含 comment 的词库；派生出的条目在设置页「注释词库」列表里可
+# 单独开关和排序。
+auto_comment_dicts = true
 # 注释词库（供 ${dict} 变量查询）不随附任何内容——词典多有版权，由用户自行放置。
 # 需要时在**用户配置**里按下面的形态增补（出厂为空，故此处不预置）：
 #

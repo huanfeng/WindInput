@@ -758,9 +758,14 @@ fn prune_comment_cache(cache_root: &Path, specs: &[(std::path::PathBuf, Vec<Stri
     }
 }
 
-/// 从 YAML 头解析注释库的列位置 → `(text, comment, code)`。
-/// 无 `columns:` 声明时取默认 `[text, comment]`；声明里缺 text 或 comment 返回 `None`。
-fn comment_columns(header: &str) -> Option<(usize, usize, Option<usize>)> {
+/// 扫 YAML 头里的 `columns:` 声明 → 列名序列；**`None` = 整个声明不存在**。
+///
+/// 「无声明」与「声明了但没有某列」必须分开：注释库无声明时按默认 `[text, comment]` 读，
+/// 而主词库无声明时绝不能被当成带注释的库（见 [`declares_comment_column`]）。把两态压成
+/// 一个 `Vec` 就再也分不出来了。
+///
+/// 两种 YAML 写法都认：块序列（`columns:` 换行后 `  - text`）与流式（`columns: [text, comment]`）。
+fn columns_names(header: &str) -> Option<Vec<String>> {
     let mut in_columns = false;
     let mut names: Vec<String> = Vec::new();
     for raw in header.lines() {
@@ -800,11 +805,53 @@ fn comment_columns(header: &str) -> Option<(usize, usize, Option<usize>)> {
         };
         names.push(item.trim().to_string());
     }
-    if !in_columns {
+    in_columns.then_some(names)
+}
+
+/// 从 YAML 头解析注释库的列位置 → `(text, comment, code)`。
+/// 无 `columns:` 声明时取默认 `[text, comment]`；声明里缺 text 或 comment 返回 `None`。
+fn comment_columns(header: &str) -> Option<(usize, usize, Option<usize>)> {
+    let Some(names) = columns_names(header) else {
         return Some((0, 1, None)); // 默认列序
-    }
+    };
     let find = |k: &str| names.iter().position(|n| n == k);
     Some((find("text")?, find("comment")?, find("code")))
+}
+
+/// 只读 YAML 头能有多大 —— 超出即认定这不是个 rime 词库头（正文早该开始了）。
+///
+/// 主词库正文动辄几百 MB，检测「有没有 comment 列」绝不能把整份读进来：本函数是
+/// **每次启动对每个已启用词库都要跑一遍**的，代价必须与文件大小无关。
+const HEADER_SCAN_LIMIT: usize = 64 * 1024;
+
+/// 一个 `.dict.yaml` 是否**显式声明**了可用的 `comment` 列（同时得有 `text`）。
+///
+/// 这是「词库自带注释 → 自动派生一个注释源」的准入判据，故意比 [`comment_columns`] 严格：
+/// 后者在**无 `columns:` 声明**时回落默认 `[text, comment]`，那对注释库是合理默认，对主
+/// 词库则是彻头彻尾的误判 —— 绝大多数码表是 `text\tcode\tweight`，按默认列序读会把整列
+/// 编码当成注释，且没有任何一处会报错。**「无声明」在这里必须等于「没有注释」。**
+///
+/// 只读到 YAML 头结束（独占一行的 `...`）或 [`HEADER_SCAN_LIMIT`] 为止。
+pub fn declares_comment_column(path: &Path) -> bool {
+    use std::io::BufRead;
+    let Ok(f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut header = String::new();
+    for line in std::io::BufReader::new(f).lines() {
+        let Ok(line) = line else { return false }; // 非 UTF-8 → 不是我们认的格式
+        if line.trim_end() == "..." {
+            break;
+        }
+        if header.len() + line.len() > HEADER_SCAN_LIMIT {
+            break;
+        }
+        header.push_str(&line);
+        header.push('\n');
+    }
+    columns_names(&header).is_some_and(|names| {
+        names.iter().any(|n| n == "comment") && names.iter().any(|n| n == "text")
+    })
 }
 
 impl ReverseLookup {
@@ -1439,6 +1486,79 @@ mod tests {
                 .all(|s| matches!(s.body, CommentBody::Memory(_)))
         );
         (dir, vec![("内存", mem), ("mmap", mm)])
+    }
+
+    #[test]
+    fn declares_comment_column_needs_explicit_declaration() {
+        //! 「自动把词库自带 comment 列当注释源」的准入判据。
+        //!
+        //! ★ 与 `comment_columns` 的差别正是本测试的全部意义：那个在**无 `columns:` 声明**
+        //! 时回落默认 `[text, comment]`，若准入也照抄，绝大多数码表（`text\tcode\tweight`）
+        //! 都会被判成「自带注释」，然后把整列编码当注释显示出来——而没有任何一处会报错。
+        let dir = std::env::temp_dir().join(format!("wind-decl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, head: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("{head}...\n你好\tnihao\t100\n")).unwrap();
+            p
+        };
+
+        let no_decl = write("plain.dict.yaml", "name: x\n");
+        assert!(
+            !declares_comment_column(&no_decl),
+            "无 columns 声明 = 没有注释，绝不能回落默认列序"
+        );
+
+        let codetable = write(
+            "code.dict.yaml",
+            "name: x\ncolumns:\n  - text\n  - code\n  - weight\n",
+        );
+        assert!(!declares_comment_column(&codetable), "声明里没有 comment");
+
+        let with_comment = write(
+            "cmt.dict.yaml",
+            "name: x\ncolumns:\n  - text\n  - code\n  - comment\n",
+        );
+        assert!(declares_comment_column(&with_comment), "块序列写法");
+
+        let flow = write(
+            "flow.dict.yaml",
+            "name: x\ncolumns: [text, code, comment]\n",
+        );
+        assert!(declares_comment_column(&flow), "流式写法同样要认");
+
+        let no_text = write("notext.dict.yaml", "name: x\ncolumns: [code, comment]\n");
+        assert!(
+            !declares_comment_column(&no_text),
+            "缺 text 列时读不出词条，同样不合格"
+        );
+
+        assert!(
+            !declares_comment_column(&dir.join("nope.dict.yaml")),
+            "文件不存在不该 panic"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn declares_comment_column_stops_at_header() {
+        //! 判据只看 YAML 头：正文里出现 `columns:` 或 `comment` 字样不算数。
+        //! 这条同时钉住「不读整份文件」——正文里那行若被读进来，判定就会翻成 true。
+        let dir = std::env::temp_dir().join(format!("wind-declh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("body.dict.yaml");
+        std::fs::write(
+            &p,
+            "name: x\ncolumns: [text, code]\n...\ncolumns: [text, comment]\n",
+        )
+        .unwrap();
+        assert!(
+            !declares_comment_column(&p),
+            "`...` 之后是正文，里面写什么都不影响列声明"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 基本点查：命中返回注释，未命中返回 None。
