@@ -195,8 +195,13 @@ pub(crate) const DICT_TOTAL: f64 = 242_154_693.0;
 /// 节点对数概率打分（对齐 Go lattice calcLogProb + 惩罚/加成）。
 ///
 /// 基础分由词条自身的**词典权重**算出（见 [`score_node_inner`] 的长注释：为何不再查
-/// unigram）。对 crate 内可见：`PinyinEngine::convert` 用它给「覆盖全部输入的词典精确整词」
-/// 算单节点等价分，使其与 Viterbi 整句在同一量纲比较（见 mod.rs step 1.5）。
+/// unigram）。`code` 是**取到这条词条所用的词典码**，供单字虚词判据核对读音——不是用户
+/// 原始击键，两者在模糊/简拼路径上并不相同，见 [`is_function_word`]。
+///
+/// ⚠️ 因此本函数要求 `code` 落在**无调全拼**域。当前三个 `LatticeBuilder::build` 调用点
+/// 传的都是全拼（双拼在进 lattice 前已转换），`add_abbrev_nodes` 传的是回查出的全码。
+/// 哪天放开闸门让**双拼击键**直接进词图，`code` 会变成 `ui` 这类击键串，全表虚词一次性
+/// 掉权 8.0 nat —— 那是静默的整体劣化，不会有任何编译错误。
 pub(crate) fn score_node(word: &str, code: &str, weight: i32) -> f64 {
     score_node_inner(word, code, weight, true)
 }
@@ -267,8 +272,12 @@ fn score_node_inner(word: &str, code: &str, weight: i32, function_word_credit: b
         (0.5 / DICT_TOTAL).ln()
     };
 
+    // 虚词优待是**一件事的两半**（加成 + 豁免每词罚），此前分两处各算一次判据，
+    // 改判据时漏改一处就会退化成「加了成还照罚」这类半开状态。绑一次，两处共用。
+    let function_word = function_word_credit && char_count == 1 && is_function_word(word, code);
+
     if char_count == 1 {
-        if function_word_credit && is_function_word(word, code) {
+        if function_word {
             log_prob += FUNCTION_WORD_BONUS;
         } else {
             log_prob += SINGLE_CHAR_PENALTY;
@@ -289,7 +298,6 @@ fn score_node_inner(word: &str, code: &str, weight: i32, function_word_credit: b
     }
     // Phase 4：每词固定罚。Viterbi 的路径分是各节点 log_prob 之和，故「每节点减 W」
     // 等价于「按路径词数罚 k·W」——把低频词打碎成两个高频片段不再免费。
-    // 也施加于 mod.rs step 1.5 的「单节点等价整句分」（那是一句一词，罚一次，量纲一致）。
     //
     // **虚词（是/的/了…）豁免每词罚**：WORD_PENALTY 意在阻止「把低频词打碎成高频
     // 片段」的投机拆分，而单字虚词随内容词出现是语法黏着、不是碎片。unigram 的独立性
@@ -297,7 +305,7 @@ fn score_node_inner(word: &str, code: &str, weight: i32, function_word_credit: b
     // （填鸭式 w=152）便能压过「天涯+是」这种 2 词正解——这正是 bigram P(是|天涯)
     // 该解决而 unigram 解决不了的（缺磁盘语料，尚无 bigram）。豁免虚词
     // 的每词罚是对该缺陷的近似补偿：不让「虚词自成一词」这件语法必然的事付投机拆分的代价。
-    if !(function_word_credit && char_count == 1 && is_function_word(word, code)) {
+    if !function_word {
         log_prob -= WORD_PENALTY;
     }
     log_prob
