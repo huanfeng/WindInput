@@ -184,8 +184,8 @@ impl Forwarder {
                 | UiCommand::SetCandidateFlipWhenAbove(_)
                 | UiCommand::SetCandidateSwapWhenAbove(_)
                 | UiCommand::SetPagerInPreedit(_)
-                | UiCommand::SetPagerDisplay(_)
-                | UiCommand::SetPageNumberDisplay(_)
+                | UiCommand::SetPagerDisplay { .. }
+                | UiCommand::SetPageNumberDisplay { .. }
         )
     }
 
