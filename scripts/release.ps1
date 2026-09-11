@@ -947,6 +947,36 @@ function Send-ReleaseAssets ([string]$tagName, [string[]]$paths) {
 # ============================================================
 # 等 CI: 轮询 release.yml 的 run 直到成功 / 失败 / 超时
 # ============================================================
+# 把时间值统一成 UTC 再比较。
+#
+# ⚠️⚠️ 这不是洁癖, 是修一个真实的 8 小时错判: gh 的 createdAt 是 "…Z", 而
+# ConvertFrom-Json 会把它解析成 【DateTime(Kind=Utc)】而非字符串。于是
+# `[datetime]$run.createdAt` 变成【恒等转换】—— 不做任何时区换算, 拿到的还是
+# UTC 的 12:45。而 `(Get-Date)` 是本地时间 20:45。PowerShell 比较 DateTime 时
+# 【直接比 Ticks, 不按 Kind 归一化】, 于是 UTC+8 下:
+#   · notBefore 过滤把刚生成的 run 判成"早于基准", 一直判 8 小时 ⇒ 屏幕上
+#     永远停在「CI 还没排上队」, 而 GitHub 后台其实早就在跑;
+#   · $age 多算 8 小时 ⇒ 显示"已跑 08:0x / 约 20 分钟", 且 `$age -ge 15` 恒真,
+#     把 -PollMinutes 架空成固定 60 秒。
+#
+# ⛔ 别"简化"成 [datetime]$x -lt $y: 只有当 $x 是【字符串】时 [datetime] 才会转
+#    本地时间; 对 DateTime 对象它什么都不做。两种来源长得一样、行为不同, 这正是
+#    当初写错、且照着表达式复刻实验还测不出来的原因(要复刻数据来源才复现得了)。
+function ConvertTo-UtcTime ($value) {
+    if ($value -is [datetime]) {
+        switch ($value.Kind) {
+            "Utc"   { return $value }
+            "Local" { return $value.ToUniversalTime() }
+            # Kind 丢失时按 UTC 解释: 本函数的输入只有 gh 的时间戳和本脚本自己
+            # 造的 Local 时间, 前者就是 UTC。
+            default { return [datetime]::SpecifyKind($value, "Utc") }
+        }
+    }
+    return [datetime]::Parse([string]$value, [cultureinfo]::InvariantCulture,
+        ([System.Globalization.DateTimeStyles]::AdjustToUniversal -bor
+         [System.Globalization.DateTimeStyles]::AssumeUniversal))
+}
+
 # tag 触发的 run, 其 headBranch 即 tag 名 —— 与 sign-draft 定位构建用的是同一条判据。
 function Get-LatestReleaseRun ([string]$tagName) {
     $raw = (& gh run list --workflow release.yml --branch $tagName --limit 20 `
@@ -1006,11 +1036,14 @@ function Wait-ForCiBuild ([string]$tagName, [int]$timeoutMinutes, [int]$pollMinu
     while ($true) {
         $now = Get-Date
         $ts  = $now.ToString("HH:mm:ss")
+        # gh 一次查询要一两秒, 期间进度行会僵在原文不动 —— 按任意键提前查询时尤其像
+        # 卡死(用户刚敲了键, 却什么都没变)。先把行换成"查询中", 让等待看得见。
+        Write-ProgressLine ("  [{0}] 查询 CI 状态中 ..." -f $ts)
         $run = Get-LatestReleaseRun $tagName
 
         # 早于基准时刻的 run 一律当作"还没排上队"继续等
         if ($notBefore -and $run -and -not $run.PSObject.Properties['QueryError'] -and
-            [datetime]$run.createdAt -lt $notBefore) {
+            (ConvertTo-UtcTime $run.createdAt) -lt (ConvertTo-UtcTime $notBefore)) {
             $run = $null
         }
 
@@ -1035,7 +1068,7 @@ function Wait-ForCiBuild ([string]$tagName, [int]$timeoutMinutes, [int]$pollMinu
             $wait = 30
         } elseif ($run.status -ne "completed") {
             $phase = $run.status
-            $age   = ((Get-Date) - [datetime]$run.createdAt).TotalMinutes
+            $age   = ((Get-Date).ToUniversalTime() - (ConvertTo-UtcTime $run.createdAt)).TotalMinutes
             $st    = switch ($run.status) {
                 "queued"      { "排队中" }
                 "in_progress" { "构建中" }
