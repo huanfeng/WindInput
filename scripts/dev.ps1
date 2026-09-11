@@ -368,13 +368,20 @@ function Build-Portable ([string]$profile = "release", [string]$outdir = $null) 
 function Do-Check  { Say "`n正在运行 cargo check (全工作区)...";  Push-Location $ProjectRoot; try { cargo check --workspace }  finally { Pop-Location } }
 # -Deny 把警告升为错误(CI 走这条)。本地 `dev.ps1 l` 不带, 迭代中途的 warning 不该中断。
 # --all-targets 不可省: 不带它连测试代码都不检查, 而测试里同样会长出警告。
+# --keep-going 同样不可省, 且必须与 scripts/dev.sh 的 do_clippy 保持一致:
+# cargo 默认在首个 crate 失败后就不再调度新任务, 一轮只报得出一个错误。实测同一份代码
+# 不带它报 1 条, 带上报 22 条(分五层, 层与层之间是 crate 依赖关系, 前一层不修后一层
+# 根本不被检查)。
+# ⚠ 2026-09-11: 本函数曾漏掉 --keep-going 而 dev.sh 有 —— 两侧对同一件事的实现漂移,
+# 使得在 Windows 上跑本地 CI 只看得到第一个错, 修完推上去 CI 又报下一个, 退化成
+# "推一次修一个"。改这里时请同步查 dev.sh。
 function Do-Clippy {
     param([switch]$Deny)
     Say "`n正在运行 cargo clippy (全工作区含测试)..."
     Push-Location $ProjectRoot
     try {
-        if ($Deny) { cargo clippy --workspace --all-targets -- -D warnings }
-        else { cargo clippy --workspace --all-targets }
+        if ($Deny) { cargo clippy --keep-going --workspace --all-targets -- -D warnings }
+        else { cargo clippy --keep-going --workspace --all-targets }
     } finally { Pop-Location }
 }
 function Do-Test   { Say "`n正在运行 cargo test (全工作区)...";   Push-Location $ProjectRoot; try { cargo test --workspace }   finally { Pop-Location } }
