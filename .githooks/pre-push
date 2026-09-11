@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# 激活方式（一次性，每个 worktree 各一次）: git config core.hooksPath .githooks
+#
+# 目的：拦下 CI 里最常红的那一类 —— clippy。
+# 2026-09-11 之前连续几次 CI 红都是 clippy（`-D warnings` 把测试代码里的
+# field_reassign_with_default 之类也算错），而这类**本地完全可复现**，不该靠 CI 发现。
+#
+# ★ 故意只跑 fmt + clippy，不跑 test。
+#   test --workspace 耗时是 clippy 的数倍，而 CI 红灯的主要来源是 clippy。
+#   门禁卡太久的唯一结局是 `--no-verify` 变成肌肉记忆，那样一道闸都不剩。
+#
+# ★ 本钩子拦不住的（别指望它等价于 CI）：
+#   - macOS job：`#[cfg(target_os = "macos")]` 下的定位/截图/主题/热键都是大段独有实现，
+#     在 Windows/Linux 上根本不参与编译。只能靠 CI 或 macOS 验证机。
+#   - `cargo check -p wind-mobile --target aarch64-linux-android`
+#   - cargo tree 依赖边断言（android 闭包无 wind-ui / 无 C 依赖）
+#   - TSF DLL 交叉编译（需 clang-19 + MSVC SDK）
+#
+# ⚠ 已知取舍：clippy 查的是**工作区当前状态**，不是你正在推的那些提交。
+#   工作区里别人（或你自己另一个会话）写到一半的 WIP 会把这次 push 一并拦下。
+#   本可以切个临时 worktree 到被推的 SHA 上查，但那是冷编译 —— 实测本仓冷跑
+#   clippy 要 14 分钟以上，代价远超收益。被误拦时走 `git push --no-verify`。
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+WS="$ROOT/wind_input"      # cargo workspace 根（== dev.sh 的 PROJECT_ROOT）
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "[pre-push] 未找到 cargo，无法做本地 CI 校验。" >&2
+    echo "           确认无需校验时用: git push --no-verify" >&2
+    exit 1
+fi
+
+# ---- 1. 算出这次 push 实际带过去的文件 ----
+#
+# stdin 每行: <local_ref> <local_oid> <remote_ref> <remote_oid>
+# 删除分支时 local_oid 全 0；新建分支时 remote_oid 全 0（此时以 origin/main 为基准算差集）。
+ZERO="0000000000000000000000000000000000000000"
+files=""
+had_ref=0
+
+while read -r _local_ref local_oid _remote_ref remote_oid; do
+    [ -n "$local_oid" ] || continue
+    [ "$local_oid" = "$ZERO" ] && continue          # 删除分支，无内容可查
+    had_ref=1
+    base="$remote_oid"
+    if [ "$remote_oid" = "$ZERO" ]; then
+        base="$(git merge-base "$local_oid" origin/main 2>/dev/null || true)"
+    fi
+    if [ -z "$base" ]; then
+        # 基准算不出来（全新仓/无 origin/main）：保守起见当作「有改动」，照查不误。
+        files="$files"$'\n'"__unknown__"
+        continue
+    fi
+    files="$files"$'\n'"$(git diff --name-only "$base" "$local_oid" 2>/dev/null || echo __unknown__)"
+done
+
+if [ "$had_ref" = 0 ]; then
+    echo "[pre-push] 无可校验的引用，跳过"
+    exit 0
+fi
+
+# ---- 2. 镜像 CI 的 paths-ignore ----
+#
+# .github/workflows/ci.yml: paths-ignore: ['**.md', 'docs/**']
+# 改动全是文档时 CI 本就不跑，本地也没必要花这几分钟。
+# 这两处的规则必须同步改。
+changed="$(printf '%s\n' "$files" | grep -v '^$' || true)"
+if [ -z "$changed" ]; then
+    echo "[pre-push] 本次无文件改动，跳过"
+    exit 0
+fi
+relevant="$(printf '%s\n' "$changed" | grep -vE '\.md$|^docs/' || true)"
+if [ -z "$relevant" ]; then
+    echo "[pre-push] 本次只含文档改动（CI 同样 paths-ignore），跳过"
+    exit 0
+fi
+
+# ---- 3. fmt：只查这次推的 .rs ----
+#
+# 与 .githooks/pre-commit 同款做法和同款参数，理由见那边的长注释：
+# --edition 必须与 workspace 一致（wind_input/Cargo.toml 的 edition = "2024"），
+# skip_children=true 防止顺着 `mod` 把别人写到一半的子模块一起拦下。
+rs="$(printf '%s\n' "$relevant" | grep -E '\.rs$' || true)"
+bad=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -f "$ROOT/$f" ] || continue                   # 本次删掉的文件，跳过
+    rustfmt --edition 2024 --config skip_children=true --check "$ROOT/$f" >/dev/null 2>&1 \
+        || bad="$bad  $f"$'\n'
+done <<< "$rs"
+
+if [ -n "$bad" ]; then
+    echo ""
+    echo "[pre-push] 以下待推文件格式不符："
+    printf '%s' "$bad"
+    echo "  修复: cd wind_input && cargo fmt"
+    echo "  跳过: git push --no-verify"
+    echo ""
+    exit 1
+fi
+
+# ---- 4. clippy：与 CI 同参数 ----
+#
+# ⚠ 这三个参数必须与 scripts/dev.sh 的 do_clippy、scripts/dev.ps1 的 Do-Clippy 保持一致：
+#   --all-targets  不带它连测试代码都不检查，而 CI 红的恰恰常是测试里的 lint
+#   --keep-going   cargo 默认首个 crate 失败就不再调度，一轮只报得出一个错。
+#                  实测同一份代码不带它报 1 条、带上报 22 条（分五层，层与层是依赖关系）。
+#                  缺了它就是"推一次修一个"。
+#   -D warnings    CI 的门禁强度
+# 刻意不指定 --target：本机原生即可。在 Windows 上原生就是 x86_64-pc-windows-msvc，
+# 与 CI check job 的 xwin target 一致；在 macOS 上则正好覆盖 macOS job 的那一侧。
+echo "[pre-push] cargo clippy (全工作区含测试, -D warnings)..."
+if ! (cd "$WS" && cargo clippy --keep-going --workspace --all-targets -- -D warnings); then
+    echo ""
+    echo "[pre-push] clippy 未通过，CI 会以同样的规则拒绝这次 push。"
+    echo "  修复后重推；确认是无关 WIP 造成的误拦时: git push --no-verify"
+    echo ""
+    exit 1
+fi
+
+echo "[pre-push] fmt + clippy OK"

@@ -54,7 +54,7 @@
 #   verify-sign  验签 dist\ 下的产物 (发版门禁; 未配置签名时【也会失败】, 这是刻意的)
 #                签名会话有时限(2 小时), 过期时只警告不中断 —— 故发版前跑一次 verify-sign。
 #                模板 scripts\sign.local.ps1.example; 原理与取舍见 docs\design\code-signing.md。
-#   k=check  l=clippy  t=test  f=fmt  fmt-check  ci(=fmt+clippy+test)  hooks(=激活pre-commit)  clean
+#   k=check  l=clippy  t=test  f=fmt  fmt-check  ci(=fmt+clippy+test)  hooks(=激活 git hooks)  clean
 #   gd=gen-data  r=repl
 #   av           配置 Defender 编译排除项 (自动 UAC 提权; 详见 scripts\defender-exclusions.ps1)
 #   avc          仅预览排除项改动 (免管理员)      avr  移除本脚本添加的排除项
@@ -389,9 +389,12 @@ function Do-Fmt    { Say "`n正在运行 cargo fmt...";                Push-Loca
 function Do-FmtCheck { Say "`n正在运行 cargo fmt --check...";      Push-Location $ProjectRoot; try { cargo fmt --all -- --check } finally { Pop-Location } }
 function Do-Clean  { Say "`n正在运行 cargo clean...";              Push-Location $ProjectRoot; try { cargo clean }              finally { Pop-Location } }
 function Do-HooksInstall {
-    Say "`n激活 .githooks/pre-commit (git config core.hooksPath .githooks)..."
+    Say "`n激活 .githooks (git config core.hooksPath .githooks)..."
     Push-Location $ProductRoot; try { git config core.hooksPath .githooks } finally { Pop-Location }
-    Say "已激活：提交前将自动跑 cargo fmt --check"
+    Say "已激活："
+    Gray "  pre-commit  暂存的 .rs 跑 rustfmt --check"
+    Gray "  pre-push    待推内容跑 fmt + clippy(-D warnings)，拦下 CI 会红的 lint"
+    Gray "  逃生口：git commit/push --no-verify"
 }
 
 function Do-Ci {

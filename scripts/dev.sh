@@ -265,9 +265,12 @@ do_fmt_check() {
 }
 
 do_hooks_install() {
-    say "\n激活 .githooks/pre-commit (git config core.hooksPath .githooks)..."
+    say "\n激活 .githooks (git config core.hooksPath .githooks)..."
     cd "$PRODUCT_ROOT" && git config core.hooksPath .githooks
-    say "已激活：提交前将自动跑 cargo fmt --check"
+    say "已激活："
+    gray "  pre-commit  暂存的 .rs 跑 rustfmt --check"
+    gray "  pre-push    待推内容跑 fmt + clippy(-D warnings)，拦下 CI 会红的 lint"
+    gray "  逃生口：git commit/push --no-verify"
 }
 
 do_clean() {
