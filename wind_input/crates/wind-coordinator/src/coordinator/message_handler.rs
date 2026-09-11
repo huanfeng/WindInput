@@ -1008,12 +1008,16 @@ impl MessageHandler for Coordinator {
         }
 
         debug!(
-            "key_event: code=0x{:02X} mods=0x{:04X} chinese={} full={} caps={} buf='{}'",
+            // prev_char 必须在这里露出来：它是「数字后智能标点」与智能符号 press2 判定的
+            // 唯一文档侧输入，客户端不填（macOS 长期恒 0）时两处都静默走另一条分支，
+            // 日志里看不出任何异常——查过一次就该记住这个缺口。
+            "key_event: code=0x{:02X} mods=0x{:04X} chinese={} full={} caps={} prev_char=0x{:04X} buf='{}'",
             data.key_code,
             data.modifiers,
             state.chinese_mode,
             state.full_width,
             state.caps_lock,
+            data.prev_char,
             state.input_buffer
         );
 

@@ -82,6 +82,35 @@ fn after_digit_press1_english_then_press2_back_to_chinese() {
     );
 }
 
+/// 回归锁：`1.1.` 快打时中间那个 `1` 不许被 press2 吃掉。
+///
+/// 现场（macOS，`prev_char` 恒 0 的旧客户端）：两个 `.` 落在 500ms 内、同键、模式没变，
+/// `smart_symbol_press2` 的 `prev_char != 0 &&` 短路让「光标前须等于武装串末位」这道守卫
+/// 形同虚设 → 判成 press2 → `ReplaceBackward{count:1}` 把中间的 `1` 删掉换成 `.`。
+///
+/// 客户端如实上报 prev_char 后，第二个 `.` 的光标前是 `1` 而武装串末位是 `.`，守卫生效。
+/// 这条锁的是**服务端**这一侧：只要 prev_char 送到了，误删就不该发生。
+#[test]
+fn digit_between_two_periods_is_not_eaten_by_press2() {
+    let coord = Coordinator::new_headless(cfg_smart(), Some(&data_dir()));
+    // "1." → 数字后智能：出英文句点，并反向武装。
+    let a1 = press(&coord, VK_OEM_PERIOD, b'1' as u16);
+    assert_eq!(inserted(&a1), Some("."), "实际: {:?}", a1);
+    // "1" 透传（不经服务端出字），再按 "."：光标前是 `1`，不是武装串末位 `.`。
+    let a2 = press(&coord, VK_OEM_PERIOD, b'1' as u16);
+    assert!(
+        replaced(&a2).is_none(),
+        "光标前是数字而非武装串末位，不该判 press2（会删掉那个数字），实际: {:?}",
+        a2
+    );
+    assert_eq!(
+        inserted(&a2),
+        Some("."),
+        "应回落正常流程：数字后智能仍命中，出英文句点，实际: {:?}",
+        a2
+    );
+}
+
 /// 正向回归锁：非数字后照旧「press1 中文 → press2 英文」，方向维度不得污染既有语义。
 #[test]
 fn normal_press1_chinese_then_press2_english() {
